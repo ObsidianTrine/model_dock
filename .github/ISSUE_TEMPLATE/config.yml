@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞上报（私密）
+    url: https://github.com/ObsidianTrine/model_dock/security/advisories/new
+    about: 涉及密钥泄漏、认证绕过等安全问题请走私密渠道，不要开公开 issue。
+  - name: 使用指南
+    url: https://github.com/ObsidianTrine/model_dock/blob/main/docs/usage.md
+    about: 使用问题先看使用指南（配置、日常操作、常见场景）。

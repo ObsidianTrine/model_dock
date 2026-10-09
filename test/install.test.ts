@@ -1,0 +1,366 @@
+import { describe, expect, it } from 'vitest'
+import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
+import type { AddressInfo } from 'node:net'
+import { fakeHome } from './helpers.js'
+import type { HarnessAdapter } from '../src/adapters/types.js'
+import { emptyConfig } from '../src/config/types.js'
+import { saveConfig } from '../src/config/store.js'
+import { buildRuntime } from '../src/gateway/state.js'
+import { createGatewayServer, runClientInstall } from '../src/gateway/server.js'
+import { dshAdapter } from '../src/adapters/dsh.js'
+import { getLang, setLang } from '../src/util/i18n.js'
+
+function listenEphemeral(server: http.Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
+  })
+}
+
+async function setup() {
+  const h = fakeHome()
+  const cfg = emptyConfig()
+  cfg.security = { store: 'file' }
+  await saveConfig(cfg)
+  const rt = buildRuntime(cfg, 'admin-token-x')
+  const server = createGatewayServer(rt, { port: 0 })
+  const gwPort = await listenEphemeral(server)
+  return {
+    gwPort,
+    closeAll: () => {
+      server.close()
+      h.restore()
+    },
+  }
+}
+
+function postInstall(port: number, harness: string) {
+  return fetch(`http://127.0.0.1:${port}/_modeldock/install`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-token-x' },
+    body: JSON.stringify({ harness }),
+  }).then((r) => r.json())
+}
+
+describe('客户端安装并接入', () => {
+  it('status clients[] 携带 install 元数据：npm 类 auto=true，手动类 auto=false', async () => {
+    const t = await setup()
+    try {
+      const j: any = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, {
+        headers: { 'x-modeldock-admin': 'admin-token-x' },
+      }).then((r) => r.json())
+      expect(j.ok).toBe(true)
+      const cc = j.clients.find((c: any) => c.id === 'claude-code')
+      expect(cc.install.auto).toBe(true)
+      expect(cc.install.command).toContain('npm i -g')
+      expect(typeof cc.install.guide).toBe('string')
+      const mimo = j.clients.find((c: any) => c.id === 'mimo-code')
+      expect(mimo.install.auto).toBe(true)
+      // 平台映射命令解析后是小米官方安装脚本（零依赖、大陆 CDN），npm 路径退居手动兜底指引
+      expect(mimo.install.command).toContain('mimo.xiaomi.com/install')
+      expect(mimo.install.homepage).toContain('mimo.xiaomi.com')
+      const dsh = j.clients.find((c: any) => c.id === 'dsh')
+      expect(dsh.install.auto).toBe(true)
+      expect(dsh.install.command).toContain('@deepseek-ai/dsh')
+      // 桌面端官网页；download.deepseek.com 根域是聊天 App 下载页（Harness 桌面端不在那里），别指回去
+      expect(dsh.install.homepage).toBe('https://www.deepseek.com/harness')
+      expect(dsh.install.guide).not.toContain('download.deepseek.com')
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('手动类客户端：/install 不执行命令、不写文件，仅返回指引', async () => {
+    const t = await setup()
+    try {
+      const r: any = await postInstall(t.gwPort, 'workbuddy')
+      expect(r.ok).toBe(true)
+      expect(r.auto).toBe(false)
+      // 手动安装类客户端不应产生任何配置文件
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      expect(fs.existsSync(path.join(home, '.workbuddy-ai'))).toBe(false)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('自动安装：命令成功后补写 bootstrap 空配置，re-detect 为已安装', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const boot = path.join(home, '.claude', 'settings.json')
+      const fake: HarnessAdapter = {
+        id: 'fake',
+        label: 'Fake',
+        install: {
+          command: 'node -e ""', // 无副作用：立即成功
+          guide: 'x',
+          bootstrap: { path: boot, content: '{}\n' },
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: fs.existsSync(boot), attached: false }),
+      }
+      const cfg = emptyConfig()
+      const r = await runClientInstall(fake, cfg, 8687)
+      expect(r.ok).toBe(true)
+      expect(r.auto).toBe(true)
+      expect(r.installed).toBe(true)
+      expect(fs.readFileSync(boot, 'utf8')).toBe('{}\n')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('自动安装：命令失败返回 {ok:false} 且不写配置文件', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const boot = path.join(home, '.claude', 'settings.json')
+      const fake: HarnessAdapter = {
+        id: 'fake-fail',
+        label: 'FakeFail',
+        install: {
+          command: 'node -e "process.exit(3)"',
+          guide: 'x',
+          bootstrap: { path: boot, content: '{}\n' },
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: fs.existsSync(boot), attached: false }),
+      }
+      const cfg = emptyConfig()
+      const r = await runClientInstall(fake, cfg, 8687)
+      expect(r.ok).toBe(false)
+      expect(r.auto).toBe(true)
+      expect(fs.existsSync(boot)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('probe 命中（命令已在 PATH）：跳过安装命令，不重跑 npm 全局安装', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const boot = path.join(home, '.claude', 'settings.json')
+      // 命令故意写成必然失败：真被执行的话 ok 会是 false，测试即失败
+      const fake: HarnessAdapter = {
+        id: 'fake-probe',
+        label: 'FakeProbe',
+        install: {
+          command: 'node -e "process.exit(3)"',
+          probe: 'claude',
+          guide: 'x',
+          bootstrap: { path: boot, content: '{}\n' },
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: fs.existsSync(boot), attached: false }),
+      }
+      const binDir = path.join(h.home, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      fs.writeFileSync(path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude'), '')
+
+      const savedPath = process.env.PATH
+      const savedAppData = process.env.APPDATA
+      process.env.PATH = binDir
+      delete process.env.APPDATA // commandOnPath 在 Windows 还会兜底扫 %APPDATA%\npm
+      try {
+        const r = await runClientInstall(fake, emptyConfig(), 8687)
+        expect(r.ok).toBe(true)
+        expect(r.skipped).toBe(true)
+        expect(r.output).toContain('跳过安装')
+        // 跳过安装也要补写 bootstrap，否则 detect 仍是未安装
+        expect(fs.readFileSync(boot, 'utf8')).toBe('{}\n')
+      } finally {
+        if (savedPath === undefined) delete process.env.PATH
+        else process.env.PATH = savedPath
+        if (savedAppData === undefined) delete process.env.APPDATA
+        else process.env.APPDATA = savedAppData
+      }
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('bootstrap 文件已存在时原样保留，不覆盖用户已有配置', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const boot = path.join(home, '.claude', 'settings.json')
+      fs.mkdirSync(path.dirname(boot), { recursive: true })
+      fs.writeFileSync(boot, '{"env":{"KEEP":"me"}}\n')
+      const fake: HarnessAdapter = {
+        id: 'fake-keep',
+        label: 'FakeKeep',
+        install: {
+          command: 'node -e ""',
+          guide: 'x',
+          bootstrap: { path: boot, content: '{}\n' },
+        },
+        detect: async () => ({ installed: true, configFiles: [boot] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: true, attached: false }),
+      }
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.ok).toBe(true)
+      expect(r.skipped).toBe(false)
+      expect(r.output).toContain('保留不动')
+      expect(fs.readFileSync(boot, 'utf8')).toBe('{"env":{"KEEP":"me"}}\n')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('语言即地区策略：zh 注入镜像 registry，en 不注入（保留官方源与用户自有配置）', async () => {
+    const h = fakeHome()
+    const savedLang = getLang()
+    const savedReg = process.env.MODELRDOCK_NPM_REGISTRY
+    delete process.env.MODELRDOCK_NPM_REGISTRY
+    try {
+      const fake: HarnessAdapter = {
+        id: 'fake-reg',
+        label: 'FakeReg',
+        install: {
+          command: 'node -e "process.stdout.write(process.env.npm_config_registry||\'\')"',
+          guide: 'x',
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      setLang('zh')
+      const r1 = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r1.ok).toBe(true)
+      expect(r1.output).toContain('registry.npmmirror.com')
+      setLang('en')
+      const r2 = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r2.ok).toBe(true)
+      expect(r2.output).not.toContain('npmmirror')
+    } finally {
+      setLang(savedLang)
+      if (savedReg === undefined) delete process.env.MODELRDOCK_NPM_REGISTRY
+      else process.env.MODELRDOCK_NPM_REGISTRY = savedReg
+      h.restore()
+    }
+  })
+
+  it('安装子进程剥离 npm_* 环境泄漏（npx 拉起的网关会把宿主 prefix 带进来）', async () => {
+    const h = fakeHome()
+    const keys = ['npm_config_prefix', 'npm_config_globalconfig', 'npm_execpath', 'npm_config_registry']
+    const saved: Record<string, string | undefined> = {}
+    for (const k of keys) {
+      saved[k] = process.env[k]
+      process.env[k] = k === 'npm_config_registry' ? 'http://leaked-registry.example' : '/leaked/nvm-prefix'
+    }
+    const savedLang = getLang()
+    try {
+      const fake: HarnessAdapter = {
+        id: 'fake-leak',
+        label: 'FakeLeak',
+        install: {
+          command: 'node -e "process.stdout.write([process.env.npm_config_prefix||\'STRIPPED\',process.env.npm_config_globalconfig||\'STRIPPED\',process.env.npm_execpath||\'NOEXEC\',process.env.npm_config_registry||\'NOREG\'].join(\'|\'))"',
+          guide: 'x',
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      setLang('zh')
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.ok).toBe(true)
+      // 宿主泄漏全部剥离；registry 由地区策略重新注入（zh=镜像），而非继承泄漏值
+      expect(r.output).toContain('STRIPPED|STRIPPED|NOEXEC|https://registry.npmmirror.com')
+    } finally {
+      setLang(savedLang)
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]!
+      }
+      h.restore()
+    }
+  })
+
+  it('needsNode：托管运行时 bin 目录前置到子进程 PATH（FORCE_DOWNLOAD 注入点，不触发下载）', async () => {
+    const h = fakeHome()
+    const envs = ['MODELRDOCK_NODE_FORCE_DOWNLOAD', 'MODELRDOCK_NODE_VERSION']
+    const saved = envs.map((k) => process.env[k])
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const binDir = process.platform === 'win32'
+        ? path.join(home, '.modeldock', 'runtime', 'node', 'v0.0.0-test')
+        : path.join(home, '.modeldock', 'runtime', 'node', 'v0.0.0-test', 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      // Windows 无 shebang 回落：cmd 命中 PATH 里的 node.exe 即执行，文本桩会报
+      // 「不是有效的 Win32 程序」且不继续搜后续目录——桩必须是真实可执行体（拷当前 node）
+      if (process.platform === 'win32') {
+        fs.copyFileSync(process.execPath, path.join(binDir, 'node.exe'))
+      } else {
+        // unix：无执行位的桩会被 shell 跳过，回落 PATH 后续的真实 node
+        fs.writeFileSync(path.join(binDir, 'node'), '#!/bin/sh\n')
+      }
+      process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD = '1'
+      process.env.MODELRDOCK_NODE_VERSION = '0.0.0-test'
+      const fake: HarnessAdapter = {
+        id: 'fake-nrt',
+        label: 'FakeNrt',
+        install: {
+          command: 'node -e "process.stdout.write(process.env.PATH||\'\')"',
+          needsNode: true,
+          guide: 'x',
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.ok).toBe(true)
+      expect(r.output).toContain(binDir)
+    } finally {
+      envs.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]!
+      })
+      h.restore()
+    }
+  })
+
+  it('dsh probe 命中：跳过 npm 安装，仍预写 ~/.dsh/settings.yaml 骨架（boot 后 detect 即 installed）', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const binDir = path.join(home, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      fs.writeFileSync(path.join(binDir, process.platform === 'win32' ? 'dsh.cmd' : 'dsh'), '')
+      const savedPath = process.env.PATH
+      const savedAppData = process.env.APPDATA
+      process.env.PATH = binDir
+      delete process.env.APPDATA
+      try {
+        const r = await runClientInstall(dshAdapter, emptyConfig(), 8687)
+        expect(r.ok).toBe(true)
+        expect(r.skipped).toBe(true)
+        expect(r.installed).toBe(true)
+        const settings = path.join(home, '.dsh', 'settings.yaml')
+        expect(fs.readFileSync(settings, 'utf8')).toContain('llm-pi-ai')
+      } finally {
+        if (savedPath === undefined) delete process.env.PATH
+        else process.env.PATH = savedPath
+        if (savedAppData === undefined) delete process.env.APPDATA
+        else process.env.APPDATA = savedAppData
+      }
+    } finally {
+      h.restore()
+    }
+  })
+})

@@ -1,0 +1,53 @@
+# Changelog
+
+本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+
+### 网关与路由
+
+- **本地 API 网关**：所有 AI harness 只需把 base_url 指向 `http://127.0.0.1:8687` 一次——此后切换 provider、调整模型映射全部在 ModelDock 侧完成、即时生效，客户端配置零改动，配置文件里不再出现真实上游 key。
+- **多协议转发**：按服务识别上游协议（Anthropic / OpenAI 兼容等），流式（SSE）透传与 token 用量统计（含多字节字符跨数据块边界的准确统计），上游长连接复用、HTTP 代理（含认证代理）支持。
+- **自动故障切换**：主服务连不上、限流（429）、额度耗尽（402）时自动切到备用服务——手动配置的备用链最优先，未配置时按定时时段、优先级与实测耗时自动生成候选（自动备用链）；耗尽 / 故障服务短时熔断，不反复冲撞。
+- **定时切换**：按时段自动换服务，工作日 / 周末 / 法定节假日分别生效（内置中国节假日历，补班日按工作日算，跨午夜按起始日计算）；控制台与手机端同口径显示「当前 / 下一时段」走向。
+- **客户端钉定与直连**：单个 harness 可钉定专属服务或模型；也可把客户端切「直连」，不经网关直接访问上游。
+
+### harness 接入
+
+- **内置适配器**：Claude Code、ZCode、dsh、Codex、OpenCode、MiMo Code、WorkBuddy、通用 env——`modeldock attach <harness>` 先展示 diff、确认后写入；`detach` / `restore` 一键还原接入前配置。
+- **接入前零写入**：未 attach 前对现有客户端配置只读；每次写入前自动快照，随时回滚。
+- **声明式 adapter pack**：`config.toml` 的 `[adapter_packs.*]` 零代码接入新客户端。
+- **一键装客户端**：本机没有 Node.js 也能装——自动下载托管 Node 运行时并接入 PATH（按地区走镜像或官方源）；dsh、MiMoCode 支持自动安装引导。
+
+### 密钥与安全
+
+- **密钥集中托管**：上游 key 存入平台安全后端（macOS Keychain / Windows DPAPI / Linux Secret Service），无钥匙环时回退机器绑定加密，存量明文自动迁移；管理面不回传 key 明文。
+- **控制台访问安全**：管理操作需登录，令牌可随时轮换（`modeldock gateway rotate-token`），登录状态跨重启保持、支持设备记忆。
+- **本机边界**：网关仅监听 `127.0.0.1`，不对局域网 / 远程开放；请求日志只记元数据、不落 prompt。
+- **写盘安全**：配置统一原子写（临时文件 + rename，0600），写前自动快照。
+
+### 配置迁移与多机同步
+
+- **加密配置包**：`modeldock config export / import`——口令加密整包迁移服务、路由、自定义预设、定时规则，连同 Key；文件名带时间戳，浏览器 / 手机 / 命令行三入口统一。
+- **局域网直传**：一次性分享链接（口令藏链接片段、10 分钟有效、被拉取一次即作废）与「附近电脑」搜索点选导入。
+- **多机自动同步**：`modeldock sync setup` 对接 WebDAV 网盘或本地同步盘（Google Drive / iCloud / OneDrive / 坚果云…），本机改动 3 秒内推送、远端分钟级跟上，冲突自动快照、不丢数据。
+- **云端中枢（可选）**：自建 VPS 控制面聚合各机服务目录，手机单页管理所有设备、远程切换服务。
+- **存量迁移**：自动发现并导入 cc-switch / Claude Code / dsh / ZCode 的现有配置（Key 一并搬入）。
+
+### 运维与升级
+
+- **开机自启**：`modeldock gateway install` 注册常驻（macOS LaunchAgent / Linux systemd / Windows 启动文件夹），登录自动拉起、崩溃自动重启。
+- **一键升级**：`modeldock update` 下载 → SHA256 校验 → 替换 → 自动重启网关一条命令完成（`--check` 只看不安）；菜单栏 / 托盘 / Web 控制台同步提示新版本并给出更新摘要。
+- **托盘常驻**：macOS 菜单栏 / Windows 系统托盘入口——打开控制台、开关自启、看日志、一键清理数据（对应 `modeldock reset --deep`）。
+- **诊断与导入命令**：`modeldock status` 总览、`test` 端到端连通性自测、`doctor` 逐 harness 体检附修复建议、`logs -f` 实时日志、`import` 存量导入。
+
+### Web 控制台
+
+- **桌面控制台**（`modeldock ui` 或网关首页）：总览仪表盘、一键切换路由、定时规则编辑、新建 Profile、换 key、服务商预设库（内置预设 + `~/.modeldock/presets.json` 自定义扩展）、端点按协议自动预填（Anthropic / OpenAI / Responses）、上游模型目录在线拉取与限额自动补全（内置 220+ 服务商、8000+ 模型库，每 7 天自动更新）、实时日志、自动路由区、暗色 / 亮色主题切换。
+- **手机简版控制台**：同一局域网扫码打开（可添加到主屏幕当 App 常驻），查看状态、切换服务、调整自动路由、导出 / 导入配置包当跨网搬运工。
+
+### 国际化
+
+- CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
+
+---
+[未发布]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ObsidianTrine/model_dock/releases/tag/v1.0.0

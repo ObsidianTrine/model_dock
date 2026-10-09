@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "PreToolUse": [
+        {
+          "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+          "hooks": [
+            { "type": "command", "command": "node .agents/hooks/guard-develop.mjs" }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# 构建产物/发布包不进仓库（放 release/ 目录或挂到 GitHub Releases）
+*.tgz
+release/
+.cache/
+
+# 本机 ZCode 会话状态（config.json 例外：workspace hook 注册随仓库共享）
+.zcode/*
+!.zcode/config.json
+
+.agents/worktrees/
+NOTES.md
+.claude/settings.local.json
+
+page*
+.playwright-mcp/
+.workbuddy/
+.tz_backup/
+.mcp.json
+# orchestrator 运行态不入库（任务队列与事件日志）
+.agents/orchestrator/queue/
+.agents/orchestrator/logs/
+
+# 策略拦截审计（运行态）
+.agents/policy/audit.jsonl
+
+# planner 草稿（确认路径产物，不进队列不入库）
+.agents/orchestrator/drafts/

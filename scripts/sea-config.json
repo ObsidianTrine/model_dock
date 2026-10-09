@@ -1,0 +1,5 @@
+{
+  "main": "dist/modeldock.bundle.cjs",
+  "output": "dist/modeldock.blob",
+  "disableExperimentalSEAWarning": true
+}

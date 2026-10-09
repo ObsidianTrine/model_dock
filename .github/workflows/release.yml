@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+# 全局串行化：多个 tag（如误推 --tags）排队依次发布，不并发交错写 Release
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ─── 发布前预检：CHANGELOG 必须已有该版本段，缺失时秒级失败，不烧五平台构建 ──
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: CHANGELOG 版本段预检
+        run: node scripts/extract-release-notes.mjs --check "$GITHUB_REF_NAME"
+
+  # ─── 每个平台一个构建 job ─────────────────────────────────
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-latest
+          # macos-13 runner 已退役（actions/runner-images#13046）；build-sea 交叉编译
+          # 自行下载目标平台 Node 二进制，x64 产物在 arm64 runner 上构建即可
+          - target: darwin-x64
+            os: macos-latest
+          - target: darwin-arm64
+            os: macos-latest
+          - target: win32-x64
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+    name: build (${{ matrix.target }})
+    # npm ci + 全量测试 + SEA 打包，最慢的 mac 腿留足余量；防卡死挂满默认 6 小时
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build SEA
+        run: node scripts/build-sea.mjs --target ${{ matrix.target }}
+
+      # setup.exe 由 Inno Setup 编译（windows-latest 预装 ISCC 6；缺失时 choco 兜底）
+      - name: Build Windows installer
+        if: matrix.target == 'win32-x64'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $ver = $env:GITHUB_REF_NAME -replace '^v',''
+          & $iscc "/DAppVersion=$ver" "scripts/installer.iss"
+
+      # 只上传对外发布物（压缩包 / DMG / setup / 校验名单）；裸二进制不外发
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: modeldock-${{ matrix.target }}
+          path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.dmg
+            release/*-setup.exe
+            release/SHA256SUMS-*
+
+  # ─── 收集所有平台产物，创建 GitHub Release ─────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # 只有建 Release + 传产物这一步需要写权限
+    permissions:
+      contents: write
+
+    steps:
+      # 读 CHANGELOG.md 生成 Release 正文（generate_release_notes 只汇总 PR，直 push 仓库为空）
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge per-target SHA256SUMS
+        run: |
+          cd artifacts
+          cat SHA256SUMS-* > SHA256SUMS
+          rm SHA256SUMS-*
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Extract release notes from CHANGELOG
+        run: node scripts/extract-release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: release-notes.md
+          generate_release_notes: true
+          files: artifacts/**/*

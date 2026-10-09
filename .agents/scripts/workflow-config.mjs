@@ -1,0 +1,105 @@
+// workflow-config.mjs — .agents 工具链的唯一项目配置入口（.agents/workflow.json）。
+// 可移植性设计（2026-10-07）：所有项目专属红线数据（受保护端口/核心路径/发布流水线/
+// 审查红线文本/包管理器）都住在这个 JSON 里；代码只认配置，缺省即关闭对应红线，
+// 不再假设 npm/SEA/8687。字段：
+//   baseBranch      feature 分支的合并目标（feature-branch.mjs / guard 的基准分支集合）
+//   baseBranches    guard 保护的分支显式清单（可选；缺省 = main + baseBranch）。
+//                   多基准分支仓库用：如 develop+master 双分支保护 ["develop","master"]
+//   testCmd         finish/门禁的验证命令（字符串 | 数组 | {win32,unix} 平台映射）
+//   buildCmd        构建门禁命令（缺省 = 跳过 build 门禁）
+//   packageManager  npm | pnpm | yarn | bun | 其他任意串；npm 系才启用 native addon 扫描
+//   protectedPorts  受保护端口（空 = 不做端口红线）；如 ["8687","8890"]
+//   corePaths       核心路径（改动即 L2 人工 / 人工闸门标红）
+//   releasePaths    发布流水线路径前缀（触及即 L3 永远人工）
+//   reviewNotes     注入独立审查提示词的项目红线文本（自由文本）
+//   envPrefix       escape hatch 环境变量前缀（默认 "AGENTS" → AGENTS_ALLOW_RELEASE 等；
+//                   旧项目名 MODELRDOCK_* 永远兼容识别）
+//
+// 锚定策略（两个调用场景，务必区分）：
+//   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
+//     必须**脚本锚定**（本模块所在 .agents/scripts 的上一级）——hook 文件与
+//     workflow.json 随仓库同进退，脚本相对定位永远正确。
+//   - orchestrator / 门禁：操作对象是 repoRoot（可能是集成测试的临时仓库），
+//     必须显式传 repoRoot 锚定，读 <repoRoot>/.agents/workflow.json。
+// 零第三方依赖（.agents/ 工具链红线）。
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SCRIPT_ANCHOR_CONFIG = path.resolve(HERE, '..', 'workflow.json');
+
+/** workflow.json 的路径。repoRoot 显式给出时锚定该仓库，否则锚定脚本自身所在仓库。 */
+export function workflowConfigPath(repoRoot) {
+  return repoRoot ? path.join(repoRoot, '.agents', 'workflow.json') : SCRIPT_ANCHOR_CONFIG;
+}
+
+/**
+ * 读取并规整 workflow.json。文件缺失/字段缺省 → 全部回落「关闭」缺省值，
+ * 只有 baseBranch/testCmd 沿用 feature-branch.mjs 的既有回落（develop→当前分支 / 无验证）。
+ * JSON 损坏抛错（阻断启动，错误可操作）。
+ */
+export function loadWorkflowConfig(repoRoot) {
+  const cfgPath = workflowConfigPath(repoRoot);
+  let raw = {};
+  if (fs.existsSync(cfgPath)) {
+    let text;
+    try {
+      text = fs.readFileSync(cfgPath, 'utf8');
+    } catch (e) {
+      throw new Error(`无法读取 ${cfgPath}：${e.message}`);
+    }
+    try {
+      raw = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`${cfgPath} 不是合法 JSON：${e.message}`);
+    }
+  }
+  const strArr = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
+  return {
+    baseBranch: typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null,
+    baseBranches: strArr(raw.baseBranches),
+    testCmd: resolveTestCmd(raw.testCmd),
+    buildCmd: typeof raw.buildCmd === 'string' && raw.buildCmd.trim() ? raw.buildCmd.trim() : null,
+    packageManager: typeof raw.packageManager === 'string' && raw.packageManager.trim() ? raw.packageManager.trim().toLowerCase() : null,
+    protectedPorts: strArr(raw.protectedPorts),
+    corePaths: strArr(raw.corePaths),
+    releasePaths: strArr(raw.releasePaths),
+    reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
+    envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
+  };
+}
+
+/** testCmd 三形态（字符串 / 数组 / 平台映射）→ 当前平台的命令数组或 null。与 feature-branch.mjs 同语义。 */
+export function resolveTestCmd(raw) {
+  const toList = (v) => {
+    if (typeof v === 'string') return v.trim() ? [v.trim()] : null;
+    if (Array.isArray(v)) {
+      const arr = v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
+      return arr.length ? arr : null;
+    }
+    return null;
+  };
+  if (raw == null) return null;
+  if (typeof raw === 'string' || Array.isArray(raw)) return toList(raw);
+  if (typeof raw === 'object') {
+    const key = process.platform === 'win32' ? 'win32' : 'unix';
+    return toList(raw[key] ?? raw.unix ?? null);
+  }
+  return null;
+}
+
+/** npm 系包管理器才做 native addon / node_modules 相关检查。 */
+export function isNpmFamily(pm) {
+  return ['npm', 'pnpm', 'yarn', 'bun'].includes(String(pm ?? '').toLowerCase());
+}
+
+/**
+ * escape hatch 环境变量名集合：`${envPrefix}_ALLOW_RELEASE=1` + 旧项目名兼容。
+ * 返回完整 "NAME=1" 形态列表，供命令前缀匹配。
+ */
+export function releaseHatches(envPrefix) {
+  const names = new Set([`${envPrefix || 'AGENTS'}_ALLOW_RELEASE`, 'MODELRDOCK_ALLOW_RELEASE']);
+  return [...names].map((n) => `${n}=1`);
+}

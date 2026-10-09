@@ -1,0 +1,496 @@
+import { request } from 'undici'
+import { getSecret } from '../config/secrets.js'
+import { matchAlias } from '../util/glob.js'
+import { t } from '../util/i18n.js'
+import type { Protocol, ProviderConfig } from '../config/types.js'
+import { dispatcherFor, recordOutcome, pickTarget, type GatewayRuntime, type ResolvedTarget } from './state.js'
+
+/** 需要模型名改写的业务端点（其余路径纯透传） */
+const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions|completions|responses|embeddings)$/
+
+/** 从客户端入站 path 推断其协议（出站据此选 Provider 对应协议端点，同协议直连）。
+ *  embeddings 归 openai（OpenAI SDK 生态）；未知路径（/v1/models、/v1/files 等非对话端点）
+ *  回退 provider 自身协议原样转发，而不是硬编码 anthropic 造成误导性的协议不匹配报错。 */
+export function clientProtocolFromPath(path: string, fallback: Protocol = 'anthropic'): Protocol {
+  const p = path.split('?')[0]
+  if (/\/chat\/completions$/.test(p) || /\/completions$/.test(p) || /\/embeddings$/.test(p)) return 'openai'
+  if (/\/responses$/.test(p)) return 'responses'
+  return fallback
+}
+
+/** 按协议取 Provider 的出站端点；默认协议(base_url 本来就是该协议)可回退，其余协议缺失则报可操作错误 */
+export function upstreamEndpoint(provider: ProviderConfig, proto: Protocol): string {
+  const ep = provider.endpoints?.[proto] ?? (provider.protocol === proto ? provider.base_url : undefined)
+  if (!ep) {
+    const e = new UpstreamError(
+      400,
+      t('服务商「{name}」未配置 {proto} 协议端点（客户端走的是 {proto} 协议）', 'Provider "{name}" has no {proto} endpoint configured (the client speaks the {proto} protocol)', { name: provider.name ?? '', proto }),
+      t('在「编辑服务」里填入该协议的接口地址，或改用该服务商支持的协议', 'Fill in the endpoint URL for this protocol in "Edit Service", or use a protocol the provider supports')
+    )
+    e.candidateSkip = true // 该候选不支持客户端协议：跳过它继续试链上其余候选，而不是中止整条链
+    throw e
+  }
+  return ep
+}
+
+/** 出站 URL 拼接：默认把客户端路径（/v1/...）整段接到端点后。
+ *  openai/responses 协议下，若端点路径以版本段（/v1、/v3、/v4…）结尾——厂商文档的
+ *  base_url 常带版本，如方舟 /api/coding/v3、智谱 /api/paas/v4、Kimi /v1——则客户端
+ *  路径的 /v1 前缀并入端点版本（拼 /responses 而非 /v1/responses），避免 /v1/v1 双版本。
+ *  anthropic 各厂商路径约定不统一（.../anthropic + /v1/messages 是真实路由），维持整段拼接。 */
+export function joinUpstreamUrl(endpoint: string, clientPath: string, proto: Protocol): string {
+  const base = endpoint.replace(/\/+$/, '')
+  if (proto !== 'anthropic') {
+    try {
+      if (/\/v\d+$/.test(new URL(base).pathname)) {
+        return base + clientPath.replace(/^\/v1(?=\/|$)/, '')
+      }
+    } catch {
+      // 端点不是合法 URL：按原样拼接，让后续请求自然报错
+    }
+  }
+  return base + clientPath
+}
+
+function isLoopbackHost(host: string): boolean {
+  if (host === 'localhost' || host === '[::1]' || host === '::1') return true
+  const m = host.match(/^(\d+)\.\d+\.\d+\.\d+$/)
+  return !!m && +m[1] === 127
+}
+
+function isPrivateHost(host: string): boolean {
+  const m = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/)
+  if (m) {
+    const a = +m[1]
+    const b = +m[2]
+    if (a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) return true
+  }
+  return host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.lan') || host.endsWith('.corp')
+}
+
+/** 上游端点风险提示：公网明文 http（key 会裸奔）、本机/内网地址（确认是否有意）。
+ *  只提示不拦截——内网穿透、自建网关、本机推理（ollama 等）都是合法场景，但配错地址会把真实 API key 发给错误的主机。 */
+export function endpointRisks(endpoint: string): string[] {
+  let u: URL
+  try {
+    u = new URL(endpoint)
+  } catch {
+    return [] // 非法 URL 由格式校验兜底（CLI requireValidBaseUrl / Web 端点 400）
+  }
+  const host = u.hostname.toLowerCase()
+  const risks: string[] = []
+  if (u.protocol === 'http:' && !isLoopbackHost(host)) {
+    risks.push(t('使用明文 http：API key 会在网络上明文传输，确认该地址可信（建议 https）', 'Plaintext http: the API key is transmitted unencrypted over the network; confirm this address is trusted (https recommended)'))
+  }
+  if (isLoopbackHost(host) || isPrivateHost(host)) {
+    risks.push(t('指向本机/内网地址：确认这是有意的（自建网关/本地推理），填错会把 API key 发给非预期主机', 'Points to a localhost/intranet address: confirm this is intended (self-hosted gateway/local inference); a wrong address would send the API key to an unexpected host'))
+  }
+  return risks
+}
+
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+])
+
+export class UpstreamError extends Error {
+  status: number
+  hint?: string
+  /** true = 传输层失败（请求未送达上游，可安全改发重试）；false/undefined = 已送达的应用层错误（禁止重放）。
+   *  边界：ECONNRESET 若发生在响应读取阶段，上游可能已处理（甚至已计费）该请求——此处不据此判定重放安全性。 */
+  transport?: boolean
+  /** true = 候选本身不可用（key 缺失 / 协议端点缺失等配置级问题，请求未发出）：跳到下一候选而不是中止整条链 */
+  candidateSkip?: boolean
+  /** 自动路由结果标记（down_all / failover 等），用于日志 reason */
+  routeReason?: string
+  constructor(status: number, message: string, hint?: string) {
+    super(message)
+    this.name = 'UpstreamError'
+    this.status = status
+    this.hint = hint
+  }
+}
+
+export interface ForwardOptions {
+  method: string
+  path: string
+  headers: Record<string, string>
+  body: Buffer
+  idleTimeoutMs: number
+  retries: number
+}
+
+export interface UpstreamBody {
+  text(): Promise<string>
+}
+
+export interface UpstreamResult {
+  status: number
+  headers: Record<string, string>
+  body: UpstreamBody
+  modelAfter?: string
+  ms: number
+}
+
+function isConnectError(e: unknown): boolean {
+  const err = e as { code?: string; cause?: { code?: string } }
+  const code = err?.code ?? err?.cause?.code
+  return (
+    code === 'ECONNREFUSED' ||
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EPIPE' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT'
+  )
+}
+
+/** 组装上游请求头：剥离 hop-by-hop 与客户端凭据，按 provider 协议注入真实 key。
+ *  cookie 与 x-modeldock-* 一并剥离：admin token / 会话 cookie 绝不能转发给第三方上游。 */
+async function buildUpstreamHeaders(
+  target: ResolvedTarget,
+  incoming: Record<string, string>,
+  key: string,
+  proto: Protocol
+): Promise<Record<string, string>> {
+  const h: Record<string, string> = {}
+  for (const [k, v] of Object.entries(incoming)) {
+    const lk = k.toLowerCase()
+    if (
+      HOP_BY_HOP.has(lk) ||
+      lk === 'host' ||
+      lk === 'content-length' ||
+      lk === 'authorization' ||
+      lk === 'x-api-key' ||
+      lk === 'cookie' ||
+      lk.startsWith('x-modeldock-')
+    ) {
+      continue
+    }
+    h[k] = v
+  }
+  const { provider } = target
+  if (proto === 'anthropic') {
+    if (provider.auth_style === 'x-api-key') h['x-api-key'] = key
+    else h.authorization = `Bearer ${key}`
+    h['anthropic-version'] ??= '2023-06-01'
+  } else {
+    h.authorization = `Bearer ${key}`
+  }
+  return h
+}
+
+/** 从 JSON 请求体顶层对象浅扫描 "model" 字段值（不解码整个文档、零大对象分配）。
+ *  仅用于纯透传场景读取日志用的 modelAfter，不参与改写决策。返回值：
+ *  - string / undefined：顶层 model 的字符串值（与 JSON.parse 语义一致，重复键取最后一个）
+ *  - null：无法安全判定（非顶层对象 / 扫描器遇到不支持的结构），调用方退回完整 JSON.parse
+ *  安全性：UTF-8 多字节序列不会与 ASCII 结构字节混淆（自身同步编码），按键名逐一比较，
+ *  任何含转义的键直接放弃（退回完整解析），值经 JSON.parse 单独解码保证与全量解析等价。 */
+export function topLevelModel(body: Buffer): string | undefined | null {
+  const n = body.length
+  let i = 0
+  const isWs = (c: number) => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d
+  while (i < n && isWs(body[i])) i++
+  if (body[i] !== 0x7b /* { */) return null
+  i++
+  let last: string | undefined
+  let sawModel = false
+  for (;;) {
+    while (i < n && isWs(body[i])) i++
+    if (i >= n) return null
+    if (body[i] === 0x7d /* } */) return sawModel ? last : undefined
+    if (body[i] !== 0x22 /* " */) return null
+    // 读键名：含转义一律放弃（解码键名对比不值得为它保留扫描器复杂度）
+    const keyStart = ++i
+    while (i < n && body[i] !== 0x22) {
+      if (body[i] === 0x5c /* \ */) return null
+      i++
+    }
+    if (i >= n) return null
+    const isModelKey = i - keyStart === 5 && body.toString('latin1', keyStart, i) === 'model'
+    i++ // 跳过键名闭引号
+    while (i < n && isWs(body[i])) i++
+    if (body[i] !== 0x3a /* : */) return null
+    i++
+    while (i < n && isWs(body[i])) i++
+    if (i >= n) return null
+    const c = body[i]
+    if (c === 0x22 /* 值是字符串 */) {
+      const vStart = ++i
+      while (i < n && body[i] !== 0x22) {
+        if (body[i] === 0x5c) { i += 2; continue } // 转义对跳过
+        i++
+      }
+      if (i >= n) return null
+      if (isModelKey) {
+        sawModel = true
+        try {
+          last = JSON.parse(body.toString('utf8', vStart - 1, i + 1)) as string // 含引号整体解码
+        } catch {
+          return null
+        }
+      }
+      i++ // 跳过值闭引号
+    } else {
+      // 非字符串值（数字/字面量/嵌套结构）：按深度与字符串感知跳过；顶层 model 为非字符串
+      // 时与 JSON.parse 后 typeof 检查同义 → requested = undefined
+      if (isModelKey) {
+        sawModel = true
+        last = undefined
+      }
+      if (c === 0x7b || c === 0x5b /* { [ */) {
+        let depth = 0
+        while (i < n) {
+          const b = body[i]
+          if (b === 0x22) {
+            i++
+            while (i < n && body[i] !== 0x22) {
+              if (body[i] === 0x5c) i++
+              i++
+            }
+            if (i >= n) return null
+          } else if (b === 0x7b || b === 0x5b) depth++
+          else if (b === 0x7d || b === 0x5d) {
+            depth--
+            if (depth === 0) { i++; break }
+          }
+          i++
+        }
+        if (depth !== 0) return null
+      } else {
+        while (i < n && !isWs(body[i]) && body[i] !== 0x2c && body[i] !== 0x7d) i++ // , }
+      }
+    }
+    while (i < n && isWs(body[i])) i++
+    if (body[i] === 0x2c /* , */) { i++; continue }
+    if (body[i] === 0x7d /* } */) return sawModel ? last : undefined
+    return null
+  }
+}
+
+/** 请求体中的模型重写：aliases 精确/通配 → default_model 兜底；未命中透传。
+ *  纯透传快路径：无候选级映射、无别名、无 default_model 时不可能改写（final 恒等于 requested
+ *  或 undefined），跳过全量 JSON.parse——大上下文请求体（数百 KB）下这是热路径最大的一块纯
+ *  CPU 开销；modelAfter 经顶层浅扫描取得，扫描器拿不准时退回完整解析，行为与原路径逐字节等价。 */
+export function rewriteModel(
+  target: ResolvedTarget,
+  body: Buffer,
+  path: string
+): { body: Buffer; modelAfter?: string } {
+  if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
+  const aliases = target.profile.aliases
+  const passthrough = !target.modelOverride && !target.profile.default_model && !(aliases && Object.keys(aliases).length > 0)
+  if (passthrough) {
+    const requested = topLevelModel(body)
+    if (requested !== null) return { body, modelAfter: requested }
+  }
+  let json: any
+  try {
+    json = JSON.parse(body.toString('utf8'))
+  } catch {
+    return { body }
+  }
+  if (!json || typeof json !== 'object') return { body }
+  const requested = typeof json.model === 'string' ? json.model : undefined
+  const alias = requested ? matchAlias(target.profile.aliases, requested) : undefined
+  // 候选级映射（"<provider>:<model>" 条目）优先于别名：它是为跨服务商切换显式配置的意图
+  const final = target.modelOverride ?? alias ?? requested ?? target.profile.default_model
+  let modelAfter = requested
+  if (final !== undefined && final !== requested) {
+    json.model = final
+    modelAfter = final
+    return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter }
+  }
+  if (final !== undefined) modelAfter = final
+  return { body, modelAfter }
+}
+
+export async function forwardToUpstream(
+  rt: GatewayRuntime,
+  target: ResolvedTarget,
+  opts: ForwardOptions
+): Promise<UpstreamResult> {
+  const { provider } = target
+  const key = await getSecret(provider.key_ref)
+  if (!key) {
+    const e = new UpstreamError(
+      503,
+      t('provider「{profile}→{name}」的 key 不可用（key_ref={ref}）', 'API key unavailable for provider "{profile}→{name}" (key_ref={ref})', { profile: target.profileName, name: provider.name ?? target.profile.provider, ref: provider.key_ref }),
+      t('modeldock provider set-key {id} 更新 key', 'Run modeldock provider set-key {id} to update the key', { id: target.profile.provider })
+    )
+    e.candidateSkip = true // key 未设置的候选跳过，把机会让给链上其余候选（自动备用链的健壮性前提）
+    throw e
+  }
+
+  const rewritten = rewriteModel(target, opts.body, opts.path)
+  const proto = clientProtocolFromPath(opts.path, provider.protocol)
+  const headers = await buildUpstreamHeaders(target, opts.headers, key, proto)
+  const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
+  const dispatcher = dispatcherFor(rt, provider)
+
+  for (let attempt = 0; ; attempt++) {
+    const t0 = Date.now()
+    try {
+      const up = await request(url, {
+        method: opts.method as any,
+        headers,
+        body: rewritten.body.length > 0 ? rewritten.body : undefined,
+        dispatcher,
+        // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
+        headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
+        bodyTimeout: opts.idleTimeoutMs,
+      })
+      return {
+        status: up.statusCode,
+        headers: Object.fromEntries(Object.entries(up.headers).map(([k, v]) => [k, String(v)])),
+        body: up.body as unknown as UpstreamBody,
+        modelAfter: rewritten.modelAfter,
+        ms: Date.now() - t0,
+      }
+    } catch (e) {
+      if (attempt < opts.retries && isConnectError(e)) continue
+      const errNew = new UpstreamError(
+        502,
+        t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
+        t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
+      )
+      errNew.transport = true
+      throw errNew
+    }
+  }
+}
+
+/** 上游 4xx/5xx → 附带可执行修复建议 */
+export function translateUpstreamError(
+  status: number,
+  bodyText: string,
+  ctx: { providerId: string; model?: string }
+): string {
+  let parsed: any = null
+  try {
+    parsed = JSON.parse(bodyText)
+  } catch {
+    /* 非 JSON 错误体 */
+  }
+  let hint: string
+  if (status === 401 || status === 403) {
+    hint = t('上游认证失败（HTTP {status}）：key 可能失效或无权限。执行 modeldock provider set-key {id} 更新', 'Upstream authentication failed (HTTP {status}): the key may be invalid or lack permission. Run modeldock provider set-key {id} to update it', { status, id: ctx.providerId })
+  } else if (status === 404 && /model/i.test(bodyText)) {
+    hint = t('模型不存在：{model}。执行 modeldock model refresh {id} 拉取可用模型，或 modeldock profile use 切换 profile', 'Model not found: {model}. Run modeldock model refresh {id} to fetch available models, or switch profile with modeldock profile use', { model: ctx.model ?? '?', id: ctx.providerId })
+  } else if (status === 400 && /(context|max.?imum|too long|length limit)/i.test(bodyText)) {
+    hint = t('疑似超出模型上下文限制（model={model}）。查看限额：modeldock model list {id}', 'Likely over the model context limit (model={model}). Check limits: modeldock model list {id}', { model: ctx.model ?? '?', id: ctx.providerId })
+  } else if (status === 402) {
+    hint = t('上游额度不足（HTTP 402）：余额/套餐额度已耗尽。等待额度重置、更换 key，或在服务上手动挂起；有备用服务时网关会自动切换', 'Upstream out of quota (HTTP 402): balance/plan quota exhausted. Wait for reset, replace the key, or suspend the service; the gateway fails over automatically when a fallback exists')
+  } else if (status === 429) {
+    hint = t('上游限流或额度不足：稍后重试，或切换 profile（modeldock profile use）', 'Upstream rate-limited or out of quota: retry later, or switch profile (modeldock profile use)')
+  } else {
+    hint = t('上游返回 HTTP {status}；网络/凭据问题可执行 modeldock test 排查', 'Upstream returned HTTP {status}; for network/credential issues run modeldock test to diagnose', { status })
+  }
+  const modeldock = { hint, provider: ctx.providerId, model: ctx.model }
+  if (parsed && typeof parsed === 'object') {
+    return JSON.stringify({ ...parsed, modeldock })
+  }
+  return JSON.stringify({
+    error: { type: 'upstream_error', message: bodyText.slice(0, 500) },
+    modeldock,
+  })
+}
+
+/** 响应头过滤：hop-by-hop 与 content-length 交给 node 重新计算 */
+export function filterResponseHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    if (HOP_BY_HOP.has(k.toLowerCase()) || k.toLowerCase() === 'content-length') continue
+    out[k] = v
+  }
+  return out
+}
+
+export interface FailoverResult extends UpstreamResult {
+  usedProviderId: string
+  /** 改发/重放事件标记（failover_to:<id>、replayed_from:<id>）；主选直连成功不设——日志过滤与 Web 展示依赖「非空即事件」约定 */
+  reason?: string
+}
+
+function isTransportFailure(e: unknown): boolean {
+  return e instanceof UpstreamError && e.transport === true
+}
+
+/** 额度耗尽类错误：HTTP 402，或 429 且错误体带 quota/insufficient 特征
+ *  （火山 AccountQuotaExceeded、DeepSeek Insufficient Balance、OpenAI insufficient_quota）。
+ *  此类请求上游未产出内容，恒可安全切换（不依赖 failover_status_codes 白名单）；熔断归 'quota' 类，冷却比普通限流久。 */
+const QUOTA_BODY_RE = /quota|insufficient/i
+function isQuotaError(status: number, bodyText: string): boolean {
+  return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
+}
+
+/**
+ * 请求级故障切换：按 pickTarget 排出的候选依次转发（手动链优先，自动备用链补尾）。
+ * 安全边界：仅「传输层失败」（transport=true，请求未送达）与「额度耗尽类错误」（未产出内容）才改发下一个候选；
+ * 任何其他已送达的真实 status（含 5xx）就地返回、不重放，避免重复计费。
+ * 例外：gateway.failover_status_codes 显式列出的状态码（如 429/503，上游未产出内容）在还有剩余候选时切换，切换前排空响应体释放连接。
+ * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
+ */
+export async function forwardWithFailover(
+  rt: GatewayRuntime,
+  target: ResolvedTarget,
+  opts: ForwardOptions & { fallbackIds?: string[] }
+): Promise<FailoverResult> {
+  const picked = pickTarget(rt, target, opts.fallbackIds)
+  if (!picked.ok) {
+    const e = new UpstreamError(503, t('自动路由：候选服务全部不可达（已熔断或下线）', 'Auto route: every candidate service is unreachable (in meltdown or down)'), t('检查各服务 enabled/priority，或 modeldock provider list 查看健康', 'Check enabled/priority of each service, or run modeldock provider list for health'))
+    e.routeReason = 'down_all'
+    throw e
+  }
+  const codes = rt.config.gateway?.failover_status_codes
+  const switchable = Array.isArray(codes) && codes.length ? new Set(codes) : null
+  let lastErr: unknown
+  let replayedFrom: string | undefined // 记录因重放而跳过的候选（传输层失败/限流切换/候选不可用），便于日志对账
+  for (let i = 0; i < picked.ordered.length; i++) {
+    const c = picked.ordered[i]
+    const t0 = Date.now()
+    try {
+      const up = await forwardToUpstream(rt, c.target, opts)
+      const ms = Date.now() - t0
+      // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
+      let bodyText: string | undefined
+      if (up.status === 429 || up.status === 402) bodyText = await up.body.text().catch(() => '')
+      const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
+      if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
+      else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
+      else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
+      else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性：不计熔断
+      else recordOutcome(rt, c.providerId, { ok: true, ms })
+      const canSwitch = (switchable?.has(up.status) ?? false) || quota
+      if (canSwitch && i < picked.ordered.length - 1) {
+        if (bodyText === undefined) await up.body.text().catch(() => {}) // 排空响应释放连接后再改发
+        replayedFrom = c.providerId
+        continue
+      }
+      // reason 只在偏离「主选直连成功」时设置：改发/重放才标记，普通成功缺席（缺席=无事件）
+      const marks: string[] = []
+      if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
+      if (replayedFrom) marks.push(`replayed_from:${replayedFrom}`)
+      // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留
+      const drained = bodyText
+      const out: UpstreamResult = drained !== undefined ? { ...up, body: { text: async () => drained } } : up
+      return { ...out, usedProviderId: c.providerId, reason: marks.length ? marks.join(',') : undefined }
+    } catch (e) {
+      lastErr = e
+      const ms = Date.now() - t0
+      const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
+      recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
+      if (skip) replayedFrom = c.providerId
+      else throw e // 非传输层错误：不重放，原样上抛
+    }
+  }
+  const e = new UpstreamError(502, t('自动路由：所有候选服务连接失败（{msg}）', 'Auto route: all candidate services failed to connect ({msg})', { msg: (lastErr as Error)?.message }))
+  e.routeReason = 'down_all'
+  throw e
+}

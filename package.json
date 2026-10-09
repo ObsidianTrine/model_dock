@@ -1,0 +1,59 @@
+{
+  "name": "modeldock",
+  "version": "1.0.0",
+  "description": "ModelDock — 本地模型配置托管中心 + API 网关：一份配置管住所有 AI harness",
+  "type": "module",
+  "license": "MIT",
+  "author": "ObsidianTrine",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ObsidianTrine/model_dock.git"
+  },
+  "homepage": "https://github.com/ObsidianTrine/model_dock#readme",
+  "bugs": {
+    "url": "https://github.com/ObsidianTrine/model_dock/issues"
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "gateway",
+    "proxy",
+    "claude-code",
+    "codex",
+    "api-gateway"
+  ],
+  "bin": {
+    "modeldock": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:sea": "node scripts/build-sea.mjs",
+    "dev": "tsx src/cli.ts",
+    "dev:watch": "tsx watch src/cli.ts",
+    "test": "vitest run",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.0",
+    "commander": "^14.0.0",
+    "qrcode-generator": "^1.5.2",
+    "smol-toml": "^1.3.1",
+    "undici": "^7.10.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "^3.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.11"
+  },
+  "files": [
+    "dist"
+  ]
+}

@@ -1,0 +1,59 @@
+name: test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+# 同分支新推送自动取消旧运行，省排队时间
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # 只测 node 24（SEA 捆绑的运行时大版本）；engines 声明 >=22，22 不在 CI 覆盖内
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [24]
+    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }}, node${{ matrix.node }})
+    # 正常全程 1~5 分钟；卡死（曾出现 Linux 上 vitest 收尾悬挂）20 分钟内强制失败，
+    # 而不是悬死 6 小时。配合下方 always() 诊断步骤留下进程现场。
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
+      # 悬死排查调试模式：正常不需要。再出现测试悬死时，把上一行临时改为
+      #   VITEST_WATCHDOG=1 npm test
+      # 日志会出现 [FILE-START/DONE]（卡点文件）+ 每 10s [WATCHDOG]（worker 的
+      # state/wchan/CPU 时钟 + 心跳），判读指南见 test/vitest-watchdog.mjs 顶部。
+      # 测试被杀/失败时留下进程与端口现场：卡死排查不用再猜。注意 job 超时的结论是
+      # canceled 而非 failure——条件必须带 cancelled()，否则超时被杀时本步骤不会执行。
+      - name: 诊断现场（测试失败或超时后）
+        if: (failure() || cancelled()) && runner.os == 'Linux'
+        run: |
+          echo "=== 心跳日志尾部（worker 活性） ==="
+          tail -40 /tmp/vitest-heartbeat.log 2>/dev/null || echo "（无心跳文件）"
+          echo "=== 残留进程（node/vitest/git） ==="
+          ps -ef | grep -E "node|vitest|git" | grep -v grep || true
+          echo "=== 各 node 进程内核等待通道与 CPU 时钟 ==="
+          for p in $(pgrep node 2>/dev/null); do
+            echo "pid=$p state=$(awk '{print $3}' /proc/$p/stat 2>/dev/null) wchan=$(cat /proc/$p/wchan 2>/dev/null) cmd=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-90)"
+          done
+          echo "=== 监听端口 ==="
+          ss -ltnp || true
+          echo "=== /tmp 测试目录残留 ==="
+          ls -d /tmp/modeldock-test-* /tmp/orch-test-* 2>/dev/null | head -20 || true

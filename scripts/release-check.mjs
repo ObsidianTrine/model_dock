@@ -1,0 +1,185 @@
+#!/usr/bin/env node
+/**
+ * 发布前机器门禁一键检查——docs/RELEASE_CHECKLIST.md §1 的执行器。
+ *
+ * 用法：node scripts/release-check.mjs <版本> [--skip-test]
+ *   版本：1.2.0 或 v1.2.0（对应 CHANGELOG 的 ## [1.2.0] 段与 tag v1.2.0）；
+ *   必须大于最近已发布 tag（semver 只增不减，与最近 tag 相等=重复发布同样阻断）
+ *   --skip-test：跳过 npm test（测试刚在别处全绿时；build/audit 照常跑）
+ *
+ * 退出码：存在 ✗（阻断项）→ 1，否则 0。⚠（警告项）不改退出码，但必须逐条过目。
+ *
+ * 约束：零第三方依赖（纯 node:std）；Windows 兼容——npm 走 shell:true（.cmd 包装），
+ * git 直接 spawn（git.exe 无需 shell），路径以脚本位置为锚，不写死分隔符。
+ */
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+import fs from 'node:fs'
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const args = process.argv.slice(2)
+const skipTest = args.includes('--skip-test')
+const ver = String(args.find((a) => a !== '--skip-test') || '').replace(/^v/, '')
+if (!/^\d+\.\d+\.\d+$/.test(ver)) {
+  console.error('用法：node scripts/release-check.mjs <版本> [--skip-test]    // 版本形如 1.2.0')
+  process.exit(1)
+}
+const tag = `v${ver}`
+
+const results = []
+const add = (status, name, detail = '') => results.push({ status, name, detail })
+const MAXBUF = 32 * 1024 * 1024
+const git = (gitArgs, opts = {}) => {
+  const r = spawnSync('git', gitArgs, { encoding: 'utf8', maxBuffer: MAXBUF, cwd: ROOT, ...opts })
+  return { code: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() }
+}
+const npm = (npmArgs) =>
+  spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', npmArgs, {
+    encoding: 'utf8',
+    maxBuffer: MAXBUF,
+    cwd: ROOT,
+    shell: process.platform === 'win32',
+  })
+
+// ─── git 状态 ──────────────────────────────────────────────
+const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).out
+if (branch === 'develop') add('pass', '当前在 develop 分支')
+else add('warn', `当前在 ${branch} 分支`, '脚本设计为在主仓库 develop 上跑；其他分支/worktree 的结果仅供参考')
+
+const dirty = git(['status', '--porcelain']).out
+if (dirty) add('fail', '工作区不干净', '先提交或还原：\n' + dirty.split('\n').slice(0, 10).join('\n'))
+else add('pass', '工作区干净')
+
+const ahead = git(['log', '--oneline', 'origin/develop..develop'])
+if (ahead.code !== 0) add('warn', '无法比对 origin/develop（未 fetch？）', 'git fetch 后重跑，或人工确认 develop 已推送')
+else if (ahead.out) add('warn', `develop 领先 origin/develop ${ahead.out.split('\n').length} 个提交`, '推送备份：git push origin develop')
+else add('pass', 'develop 不领先 origin/develop')
+
+const feats = git(['branch', '--list', 'feature/*']).out
+if (feats) add('warn', '存在 feature 分支残留', '确认其中没有本版该发的内容：\n' + feats)
+else add('pass', '无 feature 分支残留')
+
+// ─── main 分叉（防 hotfix 只合 main 不回 develop，下轮被冲掉）───
+const mainOnly = git(['log', '--no-merges', '--oneline', 'develop..main'])
+if (mainOnly.code !== 0) add('warn', '无法比对 main 分叉', mainOnly.err)
+else if (mainOnly.out) add('fail', 'main 存在 develop 缺失的内容提交', 'hotfix 必须回合 develop：\n' + mainOnly.out)
+else add('pass', 'main 无 develop 缺失的内容提交')
+
+// ─── CHANGELOG ─────────────────────────────────────────────
+const changelog = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
+const sec = spawnSync(process.execPath, ['scripts/extract-release-notes.mjs', '--check', tag], {
+  encoding: 'utf8',
+  maxBuffer: MAXBUF,
+  cwd: ROOT,
+})
+if (sec.status === 0) add('pass', `CHANGELOG 已有 [${ver}] 版本段`)
+else add('fail', `CHANGELOG 缺 [${ver}] 版本段`, ((sec.stdout || '') + (sec.stderr || '')).trim())
+
+if (/^##\s*\[?未发布\]?/m.test(changelog)) add('fail', 'CHANGELOG 仍有「未发布」段', '按 release.md 步骤 1 归并进版本段')
+else add('pass', 'CHANGELOG 无「未发布」残留')
+
+if (new RegExp(`^\\[${ver}\\]:`, 'm').test(changelog)) add('pass', '版本链接表有对应行')
+else add('fail', `版本链接表缺 [${ver}]: 行`, `文末补一行：[${ver}]: https://github.com/ObsidianTrine/model_dock/releases/tag/${tag}`)
+
+// ─── tag 占用 ──────────────────────────────────────────────
+if (git(['tag', '-l', tag]).out) add('fail', `tag ${tag} 本地已存在`, '撤回过的版本号永不复用；确认后换号')
+else add('pass', `tag ${tag} 本地未占用`)
+
+const remote = git(['ls-remote', '--tags', 'origin', tag], { timeout: 30000 })
+if (remote.code !== 0) add('warn', '远端 tag 查询失败（离线？）', `联网后人工复核：git ls-remote --tags origin ${tag}`)
+else if (remote.out) add('fail', `tag ${tag} 远端已存在`, '公开发布过的版本号永不复用（v1.1.0 先例）')
+else add('pass', `tag ${tag} 远端未占用`)
+
+// ─── 版本递增（semver 只增不减；与已发布 tag 相等=重复发布，同样阻断）───
+const latest = git(['describe', '--tags', '--abbrev=0'])
+if (latest.code !== 0 || !/^v\d+\.\d+\.\d+$/.test(latest.out)) {
+  add('warn', '无法确定最近已发布 tag', `${latest.err || 'git describe --tags --abbrev=0 无结果'}；develop 对齐 main 后可解（release.md 步骤 6）`)
+} else {
+  const oldV = latest.out.slice(1).split('.').map(Number)
+  const newV = ver.split('.').map(Number)
+  const newer = newV[0] > oldV[0] || (newV[0] === oldV[0] && (newV[1] > oldV[1] || (newV[1] === oldV[1] && newV[2] > oldV[2])))
+  if (newer) add('pass', `版本号 ${ver} 大于最近已发布 ${oldV.join('.')}`)
+  else add('fail', `版本号 ${ver} 不大于最近已发布 ${oldV.join('.')}`, 'semver 只增不减：新功能递增 minor、修复递增 patch；已发布/撤回的版本号永不复用（release.md「版本号怎么定」）')
+}
+
+// ─── src 静态红线 ──────────────────────────────────────────
+const imp = git(['grep', '-n', 'import\\.meta', '--', 'src'])
+if (imp.out) add('fail', 'src 出现 import.meta', 'SEA/esbuild 下不可用（AGENTS 硬约定）：\n' + imp.out.split('\n').slice(0, 5).join('\n'))
+else add('pass', 'src 无 import.meta')
+
+const portHit = git(['grep', '-nE', 'listen\\([\'" ]*(8687|8890)', '--', 'src'])
+if (portHit.out) add('fail', 'src 监听受保护端口', '8687=生产 / 8890=dev，红线（AGENTS 端口约定）：\n' + portHit.out)
+else add('pass', 'src 无受保护端口 listen')
+
+const FAKE = /sk-abc|xxxx|example|placeholder/i
+const secretProd = git(['grep', '-inE', 'sk-[A-Za-z0-9]{16,}|Bearer [A-Za-z0-9_\\-]{20,}', '--', 'src', 'scripts'])
+const secretProdHits = secretProd.out.split('\n').filter((l) => l && !FAKE.test(l))
+if (secretProdHits.length) add('fail', '疑似真实密钥入库（src/scripts）', '先轮换密钥再发布：\n' + secretProdHits.slice(0, 5).join('\n'))
+else add('pass', '密钥扫描（src/scripts）无真实密钥')
+
+const secretTest = git(['grep', '-inE', 'sk-[A-Za-z0-9]{16,}|Bearer [A-Za-z0-9_\\-]{20,}', '--', 'test'])
+const secretTestHits = secretTest.out.split('\n').filter((l) => l && !FAKE.test(l))
+if (secretTestHits.length) add('warn', `测试代码有 ${secretTestHits.length} 处疑似密钥`, '确认全部是假值：\n' + secretTestHits.slice(0, 5).join('\n'))
+else add('pass', '密钥扫描（test）无真实密钥')
+
+const todo = git(['grep', '-nE', '\\b(TODO|FIXME|XXX|HACK)\\b', '--', 'src'])
+if (todo.out) add('warn', `src 有 ${todo.out.split('\n').length} 处 TODO/FIXME 残留`, '逐条裁决是否带病发布：\n' + todo.out.split('\n').slice(0, 8).join('\n'))
+else add('pass', 'src 无 TODO/FIXME 残留')
+
+// ─── 慢门禁（已有阻断项时跳过，省 3 分钟）───────────────────
+const hardFails = () => results.filter((r) => r.status === 'fail').length
+let testStats = null
+if (skipTest) {
+  add('warn', 'npm test 已跳过（--skip-test）', '确认测试刚在别处全绿')
+} else if (hardFails() === 0) {
+  console.error('…… npm test（约 2-3 分钟）')
+  const t = npm(['test'])
+  const out = (t.stdout || '') + (t.stderr || '')
+  const files = out.match(/Test Files\s+(\d+) passed/)
+  const tests = out.match(/Tests\s+(\d+) passed(?:\s*\|\s*(\d+) skipped)?/)
+  if (t.status === 0 && tests) {
+    testStats = { files: files ? +files[1] : 0, passed: +tests[1], skipped: tests[2] ? +tests[2] : 0 }
+    add('pass', `npm test 全绿：${testStats.passed} 例${testStats.skipped ? `（另 ${testStats.skipped} 跳过）` : ''} / ${testStats.files} 文件`)
+  } else {
+    add('fail', 'npm test 未全绿', '修复后重跑；缺依赖先 npm ci。输出尾部：\n' + out.split('\n').slice(-15).join('\n'))
+  }
+}
+if (hardFails() === 0) {
+  const b = npm(['run', 'build'])
+  if (b.status === 0) add('pass', 'npm run build（tsc）零错误')
+  else add('fail', 'tsc 编译失败', ((b.stdout || '') + (b.stderr || '')).trim().split('\n').slice(-10).join('\n'))
+
+  const a = npm(['audit', '--omit=dev'])
+  const aOut = ((a.stdout || '') + (a.stderr || '')).trim()
+  const aTail = aOut.split('\n').slice(-6).join('\n')
+  if (a.status === 0) add('pass', 'npm audit --omit=dev 无漏洞')
+  else if (/vulnerabilities/i.test(aOut)) add('fail', '依赖存在漏洞', aTail)
+  else add('warn', 'audit 未得出结论（网络/证书问题），人工补跑', 'npm audit --omit=dev\n' + aTail)
+}
+
+// ─── 基线漂移（usage §10 的用例数 vs 实测）──────────────────
+if (testStats) {
+  const usage = fs.readFileSync(path.join(ROOT, 'docs', 'usage.md'), 'utf8')
+  const m = usage.match(/测试 (\d+) 例全绿（(\d+) 个文件/)
+  if (!m) add('warn', 'usage.md §10 未找到基线句式', '按实测补写：测试 X 例全绿（Y 个文件：…）')
+  else if (+m[1] !== testStats.passed || +m[2] !== testStats.files)
+    add('warn', 'usage §10 基线漂移', `写的是 ${m[1]} 例 / ${m[2]} 文件，实测 ${testStats.passed} 例 / ${testStats.files} 文件——发布前更新 usage.md`)
+  else add('pass', 'usage §10 基线数字与实测一致')
+}
+
+// ─── 汇总 ──────────────────────────────────────────────────
+const icon = { pass: '✓', warn: '⚠', fail: '✗' }
+console.log(`\n═══ 发布门禁 ${tag} ═══`)
+for (const r of results) {
+  console.log(`${icon[r.status]} ${r.name}`)
+  if (r.detail) console.log(`   ${r.detail.split('\n').join('\n   ')}`)
+}
+const fails = results.filter((r) => r.status === 'fail')
+const warns = results.filter((r) => r.status === 'warn')
+console.log(`\n${results.length - fails.length - warns.length} 过 / ${warns.length} 警告 / ${fails.length} 阻断`)
+if (fails.length) {
+  console.error('✗ 存在阻断项——先修复上面全部 ✗ 再进入发布流程')
+  process.exit(1)
+}
+console.log(warns.length ? '⚠ 有警告项，逐条过目后可继续发布流程' : '✓ 全过，可继续发布流程')

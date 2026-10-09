@@ -1,0 +1,147 @@
+import fs from 'node:fs'
+import type { ProviderConfig } from '../config/types.js'
+import { loadConfig, mutateConfig } from '../config/store.js'
+import { defaultStore, getSecret, parseKeyRef, setSecretsBatch, type SecretBackend } from '../config/secrets.js'
+import { readUserPresets, reloadPresets } from '../presets/data.js'
+import { snapshot } from '../backup/snapshot.js'
+import { atomicWrite } from '../util/fsx.js'
+import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
+import { t } from '../util/i18n.js'
+import { SCHEMA_VERSION, SYNCDOC_FMT, type Syncdoc, type SyncProviderEntry } from './types.js'
+
+/** 收集/应用摘要：providers/profiles 为 id 清单；envKeyRefs=走环境变量引用不随包的服务；
+ *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数 */
+export interface SyncdocReport {
+  providers: string[]
+  profiles: string[]
+  presetCount: number
+  scheduleRules: number
+  envKeyRefs: string[]
+  missingKeys: string[]
+  keysRestored?: number
+}
+
+/** 读取 presets.json 原始 JSON（保真不归一化，应用时原样写回）；缺失视为无自定义，格式错误抛可操作报错 */
+function readRawUserPresets(): unknown[] | { presets: unknown[] } {
+  const fp = presetsJsonPath()
+  let text: string | null
+  try {
+    text = fs.readFileSync(fp, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return []
+    throw new Error(t('读取自定义预设 {file} 失败：{err}', 'Failed to read the custom presets file {file}: {err}', { file: fp, err: (e as Error).message }))
+  }
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch (e) {
+    throw new Error(t('自定义预设 {file} 格式错误：{err}（修复后重试导出）', 'Invalid format in the custom presets file {file}: {err} (fix it and retry the export)', { file: fp, err: (e as Error).message }))
+  }
+  if (Array.isArray(doc)) return doc
+  if (typeof doc === 'object' && doc !== null && Array.isArray((doc as Record<string, unknown>).presets)) {
+    return doc as { presets: unknown[] }
+  }
+  throw new Error(t('自定义预设 {file} 顶层应为数组，或 { "presets": [...] }', 'The custom presets file {file} must be an array at top level, or { "presets": [...] }', { file: fp }))
+}
+
+/** 收集可同步态 → syncdoc（docs/design-cloud-sync.md §4.1 清单）。
+ *  key 处理：file/keychain/secret-service/plain 引用解析为明文随包；env: 引用不解析（机器态）原样保留；
+ *  解析不到的引用原样保留并记入 missingKeys。 */
+export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocReport }> {
+  const cfg = await loadConfig()
+  const providers: Record<string, SyncProviderEntry> = {}
+  const envKeyRefs: string[] = []
+  const missingKeys: string[] = []
+  for (const [id, p] of Object.entries(cfg.providers)) {
+    const { scheme } = parseKeyRef(p.key_ref)
+    if (scheme === 'env') {
+      providers[id] = { ...p }
+      envKeyRefs.push(id)
+      continue
+    }
+    const plain = scheme === 'plain' ? p.key_ref : await getSecret(p.key_ref)
+    if (plain === null || plain === '') {
+      providers[id] = { ...p }
+      missingKeys.push(id)
+      continue
+    }
+    const { key_ref: _dropped, ...rest } = p
+    providers[id] = { ...rest, key: plain }
+  }
+  // readUserPresets 逐条校验（缺 id 等问题在导出侧就给出可操作报错），原始 JSON 保真随包
+  readUserPresets()
+  const userPresets = readRawUserPresets()
+  const scheduleRules = cfg.gateway?.schedule?.windows ? [...cfg.gateway.schedule.windows] : []
+  const profileIds = Object.keys(cfg.profiles)
+  const providerIds = Object.keys(providers)
+  return {
+    doc: {
+      fmt: SYNCDOC_FMT,
+      v: SCHEMA_VERSION,
+      ts: new Date().toISOString(),
+      data: { providers, profiles: { ...cfg.profiles }, userPresets, scheduleRules },
+    },
+    report: { providers: providerIds, profiles: profileIds, presetCount: countPresets(userPresets), scheduleRules: scheduleRules.length, envKeyRefs, missingKeys },
+  }
+}
+
+function countPresets(up: unknown[] | { presets: unknown[] }): number {
+  return Array.isArray(up) ? up.length : up.presets.length
+}
+
+/** 应用 syncdoc：替换全部可同步态，机器态一律不动（docs/design-cloud-sync.md §5.2）。
+ *  顺序：快照（config.toml/secrets.json/presets.json）→ key 按本机后端重存 → 整包替换 → 写预设。
+ *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。 */
+export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend }): Promise<SyncdocReport> {
+  await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath()])
+  const cfg = await loadConfig()
+  const backend = opts?.backend ?? (cfg.security?.store as SecretBackend | undefined) ?? (await defaultStore())
+
+  // 1) 有明文 key 的条目先重存进本机凭据存储，拿到本机 key_ref
+  const keyEntries: Record<string, string> = {}
+  for (const [id, p] of Object.entries(doc.data.providers)) {
+    if (typeof p.key === 'string' && p.key !== '') keyEntries[id] = p.key
+  }
+  const refs = await setSecretsBatch(keyEntries, backend)
+
+  // 2) 整包替换 providers/profiles；定时规则替换 windows、「启用」开关（机器态）保留
+  // 校验已保证：无 key 的条目必带 key_ref（env 引用或导出机解析失败的残留）
+  const providers: Record<string, ProviderConfig> = {}
+  for (const [id, p] of Object.entries(doc.data.providers)) {
+    if (typeof p.key === 'string' && p.key !== '') {
+      const { key: _k, ...rest } = p
+      providers[id] = { ...rest, key_ref: refs[id]! }
+    } else {
+      providers[id] = { ...p, key_ref: p.key_ref! }
+    }
+  }
+  const rules = doc.data.scheduleRules ?? []
+  const profiles = { ...doc.data.profiles }
+  await mutateConfig((c) => {
+    c.providers = providers
+    c.profiles = profiles
+    // 新机导入后没有任何路由在供：客户端无可用 profile、手机控制台「实际生效」显示不可用。
+    // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由是机器态，不随包覆盖。
+    const first = Object.keys(profiles)[0]
+    if (!c.active_profile && first) c.active_profile = first
+    if (rules.length > 0 || c.gateway?.schedule) {
+      c.gateway = { ...c.gateway, schedule: { ...(c.gateway?.schedule?.enabled === undefined ? {} : { enabled: c.gateway.schedule.enabled }), windows: [...rules] } }
+    }
+  })
+
+  // 3) 自定义预设整体替换（原始 JSON 保真写回）并重载本进程视图
+  await atomicWrite(presetsJsonPath(), JSON.stringify(doc.data.userPresets ?? [], null, 2) + '\n', 0o600)
+  reloadPresets()
+
+  return {
+    providers: Object.keys(providers),
+    profiles: Object.keys(doc.data.profiles),
+    presetCount: doc.data.userPresets === undefined || doc.data.userPresets === null ? 0 : countPresets(doc.data.userPresets),
+    scheduleRules: rules.length,
+    envKeyRefs: Object.entries(doc.data.providers).filter(([, p]) => parseKeyRef(p.key_ref ?? '').scheme === 'env').map(([id]) => id),
+    missingKeys: Object.entries(doc.data.providers)
+      .filter(([, p]) => !(typeof p.key === 'string' && p.key !== '') && ['file', 'keychain', 'secret-service'].includes(parseKeyRef(p.key_ref ?? '').scheme))
+      .map(([id]) => id),
+    keysRestored: Object.keys(keyEntries).length,
+  }
+}
