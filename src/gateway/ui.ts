@@ -3412,12 +3412,14 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         if (!mid) return
         // 上下文/输出保留输入框原文（可为空字符串），回显原样、保存时才统一解析校验
         // 显示名随行携带：拉取填入等重绘路径把 arr 回传 rowHtml 时副行不丢
+        // row 一并带出：拉取面板比差异时要读同行的视觉勾选态
         var sub = row.querySelector('.msub')
         arr.push({
           id: mid,
           context_window: row.querySelector('[data-f="context_window"]').value.trim(),
           max_output: row.querySelector('[data-f="max_output"]').value.trim(),
           display_name: sub ? sub.textContent.trim() : '',
+          row: row,
         })
       })
       return arr
@@ -3488,55 +3490,85 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       document.getElementById(gid('FetchCount')).textContent = q ? visible + ' / ' + total : ''
       syncFetchAll()
     }
+    // 拉取行与列表已有行的差异判定（口径）：上下文 / 最大输出按值比（都空算相同），
+    // 视觉只在「拉取侧有、列表侧没勾」时算差异——上游多数不报能力，不能反推要清空用户已勾的。
+    function diffRow(ex, m, vision) {
+      var cw = m.context_window == null ? '' : String(m.context_window)
+      var mo = m.max_output == null ? '' : String(m.max_output)
+      if (String(ex.context_window || '') !== cw || String(ex.max_output || '') !== mo) return true
+      var vp = ex.row.querySelector('[data-f="vision"]')
+      return !!vision && !(vp && vp.checked)
+    }
     function renderFetch(models) {
       var have = {}
-      rowsArray().forEach(function (m) { have[m.id] = true })
+      rowsArray().forEach(function (m) { have[m.id] = m })
+      var pickable = 0
       var rows = (models || []).map(function (m) {
-        var dup = !!have[m.id]
+        var ex = have[m.id]
+        // 三态：新条目=默认勾选；已有且参数一致=「已有」禁用；已有但参数不同=「可更新」默认勾选
+        var diff = ex ? diffRow(ex, m) : false
+        var same = !!ex && !diff
+        if (!same) pickable++
         var vision = (m.capabilities || []).indexOf('vision') >= 0
         // 去重规则同 rowHtml；名字存 data-display，「填入所选」随行带上
         var dn = m.display && String(m.display).trim().toLowerCase() !== String(m.id).trim().toLowerCase() ? String(m.display).trim() : ''
-        return '<div class="mrow frow' + (dup ? ' dis' : '') + '" data-id="' + esc(m.id) + '"' + (dn ? ' data-display="' + esc(dn) + '"' : '') + '>' +
-          '<input type="checkbox" class="fpick"' + (dup ? ' disabled title="' + t('已在下方模型列表，不重复填入', 'Already in the model list below') + '"' : ' checked') + '>' +
+        var dis = same ? ' disabled' : ''
+        return '<div class="mrow frow' + (same ? ' dis' : '') + '" data-id="' + esc(m.id) + '"' + (dn ? ' data-display="' + esc(dn) + '"' : '') + '>' +
+          '<input type="checkbox" class="fpick"' + (same ? ' disabled title="' + t('已在下方模型列表且参数一致，不重复填入', 'Already in the model list with the same numbers') : ' checked' + (diff ? ' title="' + t('点「填入所选」把拉取到的参数更新到下方该模型', 'Click "Fill selected" to update this model with the fetched numbers') + '"' : '')) + '>' +
           '<div class="midwrap"><span class="mid" title="' + esc(m.id) + '">' + esc(m.id) + '</span>' + (dn ? '<span class="msub" title="' + esc(dn) + '">' + esc(dn) + '</span>' : '') + '</div>' +
-          '<input type="text" inputmode="numeric" data-f="context_window" value="' + (m.context_window == null ? '' : esc(m.context_window)) + '" placeholder="' + t('未知', 'unknown') + '"' + (dup ? ' disabled' : '') + '>' +
-          '<input type="text" inputmode="numeric" data-f="max_output" value="' + (m.max_output == null ? '' : esc(m.max_output)) + '" placeholder="' + t('未知', 'unknown') + '"' + (dup ? ' disabled' : '') + '>' +
-          '<input type="checkbox" class="vpick" data-f="vision"' + (vision ? ' checked' : '') + (dup ? ' disabled' : '') + '>' +
-          '<span class="ftag">' + (dup ? t('已有', 'exists') : '') + '</span></div>'
+          '<input type="text" inputmode="numeric" data-f="context_window" value="' + (m.context_window == null ? '' : esc(m.context_window)) + '" placeholder="' + t('未知', 'unknown') + '"' + dis + '>' +
+          '<input type="text" inputmode="numeric" data-f="max_output" value="' + (m.max_output == null ? '' : esc(m.max_output)) + '" placeholder="' + t('未知', 'unknown') + '"' + dis + '>' +
+          '<input type="checkbox" class="vpick" data-f="vision"' + (vision ? ' checked' : '') + dis + '>' +
+          '<span class="ftag">' + (same ? t('已有', 'exists') : diff ? t('可更新', 'update') : '') + '</span></div>'
       }).join('')
       document.getElementById(gid('FetchRows')).innerHTML = rows || '<div class="mempty">' + t('未拉取到模型', 'No models fetched') + '</div>'
-      var pickable = (models || []).filter(function (m) { return !have[m.id] })
-      document.getElementById(gid('FetchAll')).checked = pickable.length > 0 && pickable.length === (models || []).length
+      document.getElementById(gid('FetchAll')).checked = pickable > 0 && pickable === (models || []).length
     }
+    // 填入语义：列表里没有的模型追加；已有的按拉取到的参数就地更新（勾选行即权威值，
+    // 视觉列在行内可改；留空表示不覆盖，避免上游没给值时清掉用户手填的数字）
     function fillSelected() {
       var arr = rowsArray()
-      var have = {}
-      arr.forEach(function (m) { have[m.id] = true })
-      var added = 0
+      var at = {}
+      arr.forEach(function (m) { at[m.id] = m })
+      var added = 0, updated = 0
       Array.prototype.forEach.call(root.querySelectorAll('#' + gid('FetchRows') + ' .frow'), function (row) {
         var cb = row.querySelector('.fpick')
         if (!cb || !cb.checked || cb.disabled) return
         var mid = row.getAttribute('data-id')
-        if (!mid || have[mid]) return
-        have[mid] = true
-        added++
+        if (!mid) return
         var cw = parseTokens(row.querySelector('[data-f="context_window"]').value)
         var mo = parseTokens(row.querySelector('[data-f="max_output"]').value)
         var vp = row.querySelector('[data-f="vision"]')
+        var dn = row.getAttribute('data-display')
+        var ex = at[mid]
+        if (ex) {
+          // 已有条目：拉取到的非空值覆盖，留空 = 保留既有值（不清空）；只有真的改了才计入「更新 N」
+          var changed = false
+          if (cw != null && !isNaN(cw) && String(cw) !== ex.context_window) { ex.context_window = cw; changed = true }
+          if (mo != null && !isNaN(mo) && String(mo) !== ex.max_output) { ex.max_output = mo; changed = true }
+          if (vp && vp.checked && (ex.capabilities || []).indexOf('vision') < 0) { ex.capabilities = ['vision']; changed = true }
+          if (!ex.display_name && dn) ex.display_name = dn
+          if (changed) updated++
+          return
+        }
         var rec = {
           id: mid,
           context_window: cw != null && !isNaN(cw) ? cw : null,
           max_output: mo != null && !isNaN(mo) ? mo : null,
           capabilities: vp && vp.checked ? ['vision'] : [],
         }
-        var dn = row.getAttribute('data-display')
         if (dn) rec.display_name = dn
         arr.push(rec)
+        at[mid] = rec
+        added++
       })
       renderRows(arr)
       document.getElementById(gid('FetchPanel')).hidden = true
       st.dirty = true
-      if (added) toast(t('已填入 ', 'Added ') + added + t(' 个模型；点「保存」后生效', ' models; click "Save" to apply'), true)
+      var parts = []
+      if (added) parts.push(t('新增 ', 'Added ') + added + t(' 个', ''))
+      if (updated) parts.push(t('更新 ', 'Updated ') + updated + t(' 个', ''))
+      if (parts.length) toast(t('已 ', '') + parts.join(t('、', ', ')) + t('；点「保存」后生效', '; click "Save" to apply'), true)
     }
     function doFetch(btn) {
       var ctx = opts.fetchCtx ? opts.fetchCtx() : null
@@ -3554,7 +3586,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           panel.hidden = false
           $('#' + gid('FetchMsg')).textContent = r.from === 'known'
             ? t('在线拉取未成功，以下为该厂商已知模型；勾选需要的后点「填入所选」', 'Online fetch failed; these are known models for this vendor. Tick the ones you want, then click "Fill selected"')
-            : t('共 ', 'Fetched ') + (r.models || []).length + t(' 个模型，勾选需要的后点「填入所选」（已在列表中的自动跳过）', ' models. Tick the ones you want, then click "Fill selected" (existing entries are skipped automatically)')
+            : t('共 ', 'Fetched ') + (r.models || []).length + t(' 个模型，勾选需要的后点「填入所选」（参数一致的自动跳过）', ' models. Tick the ones you want, then click "Fill selected" (entries with identical numbers are skipped)')
           panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
         })
         .catch(function (e) { toast(t('拉取失败：', 'Fetch failed: ') + e.message, false) })
