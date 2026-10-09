@@ -88,6 +88,8 @@ select.chip{padding-right:24px}
 #chips{flex-wrap:nowrap}
 #chips .chip{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #addCard .desc{margin:0 0 8px}
+/* 卡片搬进弹层后页面标题与弹层标题重复：弹层里不画卡片自己的 h2（内联首用仍保留步骤标题） */
+#addOverlay:has(#addCard) #addCard > h2{display:none}
 .fab{position:fixed;right:22px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(37,99,235,.45);z-index:var(--z-fab);display:flex;align-items:center;justify-content:center;padding:0}
 .fab[hidden]{display:none}
 .fab:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(37,99,235,.55)}
@@ -886,6 +888,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     align: 'top',
     title: '添加模型服务||Add a model service',
     bodyId: 'addModalBody',
+    bodyClass: 'addmodal',
     footId: 'addFoot',
     footHidden: true,
     foot: [],
@@ -3276,12 +3279,14 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
   }
   bindKeyToggle('efKey', 'efKeyToggle', function (done) {
+    // 编辑壳的提示槽就在左下角：可见 Key 失败别用 toast（会被弹层磨砂遮罩糊住）
+    var msg = testlineWriter('efMsg')
     api('/service/reveal-key', { method: 'POST', body: JSON.stringify({ id: editing }) })
       .then(function (r) {
         if (r && r.key) { $('#efKey').value = r.key; done(true) }
-        else { toast(t('未能读取已保存的 Key（可能未设置，或系统安全后端拒绝访问）', 'Could not read the saved key (not set, or the OS secure backend refused)'), false); done(false) }
+        else { msg(t('未能读取已保存的 Key（可能未设置，或系统安全后端拒绝访问）', 'Could not read the saved key (not set, or the OS secure backend refused)'), 'err'); done(false) }
       })
-      .catch(function (e) { toast(t('读取 Key 失败：', 'Failed to read key: ') + e.message, false); done(false) })
+      .catch(function (e) { msg(t('读取 Key 失败：', 'Failed to read key: ') + e.message, 'err'); done(false) })
   })
   bindKeyToggle('afKey', 'afKeyToggle')
   bindKeyToggle('pkgPw', 'pkgPwToggle')
@@ -3573,7 +3578,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
     function doFetch(btn) {
       var ctx = opts.fetchCtx ? opts.fetchCtx() : null
-      if (!ctx || !ctx.baseUrl || !/^https?:\\/\\//i.test(ctx.baseUrl)) { toast(t('请先填写接口地址（http/https）再拉取模型', 'Fill in the base URL (http/https) before fetching models'), false); return }
+      // 拉取面板/表单在弹层里：失败写左下角提示槽（弹层磨砂遮罩会糊掉右下角 toast）
+      var fail = function (text) {
+        if (!document.getElementById(gid('FetchPanel')).hidden) opts.msg(text, 'err')
+        else toast(text, false)
+      }
+      if (!ctx || !ctx.baseUrl || !/^https?:\\/\\//i.test(ctx.baseUrl)) { fail(t('请先填写接口地址（http/https）再拉取模型', 'Fill in the base URL (http/https) before fetching models')); return }
       btn.disabled = true; btn.textContent = t('拉取中…', 'Fetching…')
       var body = { base_url: ctx.baseUrl, protocol: ctx.protocol || 'anthropic' }
       if (ctx.serviceId) body.id = ctx.serviceId
@@ -3585,12 +3595,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           renderFetch(r.models || [])
           var panel = document.getElementById(gid('FetchPanel'))
           panel.hidden = false
+          opts.msg('') // 面板自带结果提示，清掉底栏上一次的报错
           $('#' + gid('FetchMsg')).textContent = r.from === 'known'
             ? t('在线拉取未成功，以下为该厂商已知模型；勾选需要的后点「填入所选」', 'Online fetch failed; these are known models for this vendor. Tick the ones you want, then click "Fill selected"')
             : t('共 ', 'Fetched ') + (r.models || []).length + t(' 个模型，勾选需要的后点「填入所选」（参数一致的自动跳过）', ' models. Tick the ones you want, then click "Fill selected" (entries with identical numbers are skipped)')
           panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
         })
-        .catch(function (e) { toast(t('拉取失败：', 'Fetch failed: ') + e.message, false) })
+        .catch(function (e) { fail(t('拉取失败：', 'Fetch failed: ') + e.message) })
         .then(function () { btn.disabled = false; btn.textContent = t('拉取模型', 'Fetch models') })
     }
     function html() {
@@ -3849,11 +3860,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
 
   // —— 两壳的块实例：编辑（ef*）在此创建；添加（af*）在添加表单区创建 ——
+  // msg(text, cls)：写弹层左下角提示槽；cls 走 .testline.err / .testline.ok 语义色
   function testlineWriter(elId) {
     return function (text, cls) {
       var el = document.getElementById(elId)
       el.textContent = text
-      el.className = cls ? 'testline ' + cls : 'testline'
+      el.className = cls === 'ok' || cls === 'err' ? 'testline ' + cls : 'testline'
     }
   }
   var efEp = createEndpointBlock('efEpHost', 'ef')
