@@ -132,9 +132,9 @@ select.chip{padding-right:24px}
 .mrow:last-child{border-bottom:none}
 .mrow .mid{flex:1;min-width:0;font-family:var(--mono);font-size:var(--fs-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 显示名副行：与模型 ID 同列纵排；JS 仅在显示名存在且与 ID 不同（忽略大小写/空格）时渲染，缺失不占位 */
-.mrow .midwrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.mrow .midwrap{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column;gap:1px}
 .mrow .midwrap .mid{flex:0 0 auto}
-.mrow .msub{min-width:0;font-size:var(--fs-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
+.mrow .msub{min-width:0;max-width:100%;font-size:var(--fs-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
 .mrow input{width:96px;padding:4px 8px;font-size:var(--fs-sm);border-radius:var(--r-sm)}
 .mrow .del{background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 6px;display:inline-flex}
 .mrow .del:hover{color:var(--err)}
@@ -185,11 +185,19 @@ select.chip{padding-right:24px}
 #schedPanel label.hblock{display:block;margin:8px 0 0}
 #schedPanel .shint{font-size:var(--fs-xs);color:var(--muted)}
 #schedPanel .shint.big{font-size:var(--fs-sm)}
-/* 表头/模型行/新增行统一等宽列（grid），避免 flex 各自自适应导致列错位 */
+/* 表头/模型行/新增行统一等宽列（grid），避免 flex 各自自适应导致列错位。
+   ID 列写 minmax(120px,1fr)：单个 1fr 的最小尺寸是 auto，长 ID 会把该列顶宽、把后面几列挤出可视区；
+   而纯弹性列在窄弹层里又会被压成 0 宽（ID 只剩一个省略字）。给下限 + 表内横向滚动，两头都不会错位。 */
 .svcform .mhead,
 .svcform .mrow,
-.svcform .addrow{display:grid;grid-template-columns:28px 1fr 96px 96px 60px 56px;gap:8px;align-items:center;text-align:left}
+.svcform .addrow{display:grid;grid-template-columns:28px minmax(120px,1fr) 96px 96px 60px 56px;gap:8px;align-items:center;text-align:left;min-width:416px}
+/* 网格子项同样不能按内容撑宽（.midwrap 是中间层，min-width:0 缺一不可） */
+.svcform .mhead > *,
+.svcform .mrow > *,
+.svcform .addrow > *{min-width:0}
 .svcform .mhead span{width:auto}
+/* 列宽有下限后容器可能放不下：表内横向滚动（sticky 表头照常生效），而不是把 ID 列压成 0 宽 */
+.svcform .mtable,.svcform .fetchpanel{overflow-x:auto;overflow-y:hidden}
 /* 「视觉」勾选列：原生勾选框在网格里按轨道居中；列头文字居中对齐勾选框 */
 .svcform .mhead span.vcol{text-align:center}
 .svcform .mrow input[type=checkbox].vpick{margin:0;justify-self:center;width:auto;padding:0}
@@ -206,17 +214,20 @@ select.chip{padding-right:24px}
 .svcform .fbtable{margin-top:8px}
 .svcform .fbtable .mhead,
 .svcform .fbtable .mrow,
-.svcform .fbtable .addrow{grid-template-columns:1fr 1fr 96px}
+.svcform .fbtable .addrow{grid-template-columns:minmax(0,1fr) minmax(0,1fr) 96px;min-width:300px}
 .svcform .fbops{display:flex;gap:2px;justify-content:flex-end}
 .svcform .fbops button{background:none;border:none;cursor:pointer;color:var(--muted);padding:2px 4px;line-height:1;display:inline-flex}
 .svcform .fbops button:hover{color:var(--accent)}
 .svcform .fbops .del:hover{color:var(--err)}
 .svcform .addrow select{width:100%;min-width:0;padding:4px 24px 4px 8px;font-size:var(--fs-sm);border-radius:var(--r-sm);margin:0}
-/* 拉取模型面板：行复用 .mrow 网格（28px 1fr 96px 96px 56px），勾选列与上方 ★ 列对齐 */
+/* 拉取模型面板：行复用 .mrow 网格（28px minmax(0,1fr) 96px 96px 60px 56px），勾选列与上方 ★ 列对齐 */
 /* 勾选框必须豁免 .mrow input 的 width:96px——被拉宽后原生图形按盒子居中绘制，会压到模型 ID 上 */
 .svcform .frow input[type=checkbox]{margin:0;cursor:pointer;width:auto;padding:0}
+/* 超长模型 ID / 名一律省略号截断（title 已有全文），不许把后面的数字列顶出行外 */
+.svcform .frow .midwrap{overflow:hidden}
 .svcform .frow .mid{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.svcform .ftag{font-size:var(--fs-xs);color:var(--muted);text-align:right;white-space:nowrap}
+.svcform .frow .msub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.svcform .ftag{font-size:var(--fs-xs);color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden}
 .svcform .frow.dis .mid,.svcform .frow.dis .ftag{opacity:.55}
 .svcform .fetchpanel{margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--r-md)}
 .svcform .fetchpanel .fsearch{display:flex;align-items:center;gap:8px;margin-bottom:6px}
@@ -470,8 +481,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   #schedPanel .shead,#schedPanel .srow{min-width:654px}
 }
 @media (max-width:480px){
-  /* 模型表/新增行：列收缩（96→72px），输入框随轨道自适应；勾选框豁免避免图形居中偏移 */
-  .svcform .mhead,.svcform .mrow,.svcform .addrow{grid-template-columns:20px 1fr 72px 72px 52px 44px;gap:6px}
+  /* 窄屏：固定列收窄（96→72px）但 ID 列仍保 110px 下限，整表横向滚动（滚动容器已在上方统一给） */
+  .svcform .mhead,.svcform .mrow,.svcform .addrow{grid-template-columns:20px minmax(110px,1fr) 72px 72px 52px 44px;gap:6px;min-width:400px}
   .svcform .mrow input:not([type=checkbox]),.svcform .addrow input{width:100%;min-width:0;padding:4px 6px}
   .svcform .mhead span{width:auto;flex:none}
   .svcform .addrow .btn{padding:4px 8px}
