@@ -3568,7 +3568,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var parts = []
       if (added) parts.push(t('新增 ', 'Added ') + added + t(' 个', ''))
       if (updated) parts.push(t('更新 ', 'Updated ') + updated + t(' 个', ''))
-      if (parts.length) toast(t('已 ', '') + parts.join(t('、', ', ')) + t('；点「保存」后生效', '; click "Save" to apply'), true)
+      // 结果写弹层左下角的提示槽（.modal-foot 的 msg 槽）：弹层有毛玻璃遮罩，toast 会被糊住看不见
+      if (parts.length) opts.msg(t('已 ', '') + parts.join(t('、', ', ')) + t('；点「保存」后生效', '; click "Save" to apply'), 'ok')
     }
     function doFetch(btn) {
       var ctx = opts.fetchCtx ? opts.fetchCtx() : null
