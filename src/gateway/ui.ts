@@ -319,8 +319,9 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .migrate{border-color:var(--accent);background:var(--accent-weak)}
 .migrate .desc{margin-bottom:10px}
 .details-line{font-size:var(--fs-sm);color:var(--muted);margin-top:2px}
-/* Toast：堆叠容器（#toastWrap）+ 入场动画 + 手动关闭；API 保持 toast(msg, ok) 兼容全部调用点 */
-.toast-wrap{position:fixed;right:18px;bottom:18px;z-index:var(--z-toast);display:flex;flex-direction:column;gap:8px;align-items:flex-end;max-width:420px}
+/* Toast：堆叠容器（#toastWrap）+ 入场动画 + 手动关闭；API 保持 toast(msg, ok) 兼容全部调用点。
+   固定左下角：右下角是 fab「＋」/snav 浮钮栏，z-toast(50)>z-fab(40)，放右下会常驻盖住「添加模型服务」 */
+.toast-wrap{position:fixed;left:18px;bottom:18px;z-index:var(--z-toast);display:flex;flex-direction:column;gap:8px;align-items:flex-start;max-width:420px}
 .toast{display:flex;align-items:flex-start;gap:8px;background:var(--card);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:var(--r-lg);padding:12px 16px;font-size:var(--fs-md);box-shadow:var(--shadow-md);animation:toastIn .18s ease-out}
 .toast .tmsg{flex:1;min-width:0;word-break:break-all}
 .toast .tcopy{flex:0 0 auto;background:none;border:none;cursor:pointer;color:var(--muted);padding:0 2px;line-height:1.2;margin-top:1px;display:inline-flex}
@@ -1381,7 +1382,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         dismissed = null
       }
       renderUpdBadge()
-      // 发现新版：按全站标准 toast 形态提醒一次（右下角、可复制）；持续入口是顶栏徽标
+      // 发现新版：按全站标准 toast 形态提醒一次（左下角、可复制）；持续入口是顶栏徽标
       if (s.available && !updAnnounced && dismissed !== s.latest) {
         updAnnounced = true
         toast(t('发现新版本 v' + s.latest + '：点击顶栏「可更新」查看说明并一键升级（或命令行 modeldock update）', 'New version v' + s.latest + ' available: click "Update" in the top bar to review and install (or run modeldock update)'))
@@ -3611,7 +3612,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
     function doFetch(btn) {
       var ctx = opts.fetchCtx ? opts.fetchCtx() : null
-      // 拉取面板/表单在弹层里：失败写左下角提示槽（弹层磨砂遮罩会糊掉右下角 toast）
+      // 拉取面板/表单在弹层里：失败写底栏就地提示槽（弹层磨砂遮罩会糊掉全局 toast）
       var fail = function (text) {
         if (!document.getElementById(gid('FetchPanel')).hidden) opts.msg(text, 'err')
         else toast(text, false)

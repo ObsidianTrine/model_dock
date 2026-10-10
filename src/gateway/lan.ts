@@ -423,7 +423,7 @@ button.act:disabled{color:var(--muted);cursor:not-allowed}
 button.act.on{background:var(--accent);border-color:var(--accent);color:#fff}
 button.mini{border:none;background:none;color:var(--muted);font:inherit;font-size:var(--fs-xs);cursor:pointer;padding:2px 0}
 button.mini:hover{color:var(--accent)}
-#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 16px;font-size:var(--fs-md);display:none;max-width:88%;z-index:var(--z-toast)}
+#toast{position:fixed;left:18px;bottom:24px;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 16px;font-size:var(--fs-md);display:none;max-width:88%;z-index:var(--z-toast)}
 #confirm{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:20}
 #confirm[hidden]{display:none}
 .confirm-box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;max-width:86%;width:320px}
