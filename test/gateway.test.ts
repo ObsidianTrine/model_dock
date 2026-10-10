@@ -1123,6 +1123,74 @@ describe('网关', () => {
     }
   })
 
+  it('service/update：三协议端点直排 —— protocol 可改、anthropic 端点全量替换（空串=清）；添加 endpoints 同口径校验', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const upd = (body: Record<string, unknown>) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service/update`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+          body: JSON.stringify(body),
+        })
+
+      // 编辑表单直排语义：protocol 随表单提交可变；非默认协议行进 endpoints（空串=清该键）
+      const r1 = await upd({
+        provider: 'up',
+        protocol: 'openai',
+        base_url: 'https://relay.example.com/v1',
+        endpoints: { anthropic: 'https://relay.example.com', openai: 'https://relay.example.com/v1', responses: '' },
+      })
+      expect(((await r1.json()) as any).ok).toBe(true)
+      const after1: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(after1.providers.up.protocol).toBe('openai')
+      expect(after1.providers.up.base_url).toBe('https://relay.example.com/v1')
+      expect(after1.providers.up.endpoints.anthropic).toBe('https://relay.example.com')
+      expect(after1.providers.up.endpoints.openai).toBe('https://relay.example.com/v1')
+      expect(after1.providers.up.endpoints.responses).toBeUndefined()
+
+      // 默认协议改回 anthropic：anthropic 地址落 base_url，endpoints.anthropic 清除
+      const r2 = await upd({
+        provider: 'up',
+        protocol: 'anthropic',
+        base_url: 'https://relay.example.com',
+        endpoints: { anthropic: '', openai: 'https://relay.example.com/v1' },
+      })
+      expect(((await r2.json()) as any).ok).toBe(true)
+      const after2: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(after2.providers.up.protocol).toBe('anthropic')
+      expect(after2.providers.up.base_url).toBe('https://relay.example.com')
+      expect(after2.providers.up.endpoints.anthropic).toBeUndefined()
+      expect(after2.providers.up.endpoints.openai).toBe('https://relay.example.com/v1')
+
+      // 非法 protocol 值忽略（保持现状）
+      const r3 = await upd({ provider: 'up', protocol: 'ws' })
+      expect(((await r3.json()) as any).ok).toBe(true)
+      const after3: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(after3.providers.up.protocol).toBe('anthropic')
+
+      // 添加服务：endpoints 与 /service/update 同口径校验，非法 URL → 400 可操作报错
+      const add = (body: Record<string, unknown>) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+          body: JSON.stringify(body),
+        })
+      const badAdd = await add({ presetId: 'custom', key: 'sk-z', fetch: false, base_url: 'https://relay.example.com', endpoints: { openai: 'ftp://nope' } })
+      expect(badAdd.status).toBe(400)
+      const badAddJson: any = await badAdd.json()
+      expect(String(badAddJson.error?.message ?? '')).toContain('openai')
+      // 合法 anthropic 端点随添加落盘
+      const goodAdd = await add({ presetId: 'custom', key: 'sk-z2', fetch: false, base_url: 'https://relay2.example.com', protocol: 'openai', endpoints: { anthropic: 'https://relay2.example.com/anthropic' } })
+      expect(((await goodAdd.json()) as any).ok).toBe(true)
+      const afterAdd: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(afterAdd.providers.custom.protocol).toBe('openai')
+      expect(afterAdd.providers.custom.endpoints.anthropic).toBe('https://relay2.example.com/anthropic')
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('service/fetch-models：编辑弹窗按 id 用已保存 Key 拉取；显式 key 优先；缺 key 报可操作错误', async () => {
     const t = await setup()
     try {

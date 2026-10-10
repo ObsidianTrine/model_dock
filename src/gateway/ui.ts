@@ -1682,12 +1682,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     $('#addform').hidden = false
     document.getElementById('addFoot').hidden = false // 动作区随表单亮出（弹窗宿主=常驻底栏；内联宿主此脚在壳里不可见，无副作用）
     $('#afTitle').textContent = t('添加「', 'Add "') + p.label + t('」', '"')
-    // 名称/接口地址/协议/端点按预设填好（自定义=空白 + 协议可选）；说明收进地址块下的小字
+    // 名称/协议地址按预设填好（自定义=全空白）；说明收进地址块下的小字
     var isCustom = !p.base_url
-    var is = function (pr) { return p.protocol === pr }
-    var endpoints = {}
-    if (!is('openai') && p.endpoints && p.endpoints.openai) endpoints.openai = p.endpoints.openai
-    if (!is('responses') && p.endpoints && p.endpoints.responses) endpoints.responses = p.endpoints.responses
     afEp.load({
       name: isCustom ? '' : p.label,
       namePlaceholder: isCustom
@@ -1695,8 +1691,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         : '留空=用厂商默认名||empty = use vendor default name',
       baseUrl: p.base_url || '',
       protocol: p.protocol || 'openai',
-      selectable: isCustom,
-      endpoints: endpoints,
+      endpoints: p.endpoints,
       docsHtml: isCustom
         ? docLinkA(t('参考：OpenAI 接口文档', 'Reference: OpenAI API docs'), 'https://platform.openai.com/docs')
         : docLinkA(t('不知道去哪拿 Key？点这里', 'Where to get a key? Click here'), p.docs_url),
@@ -1750,8 +1745,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var key = $('#afKey').value.trim()
     if (!key) { $('#afMsg').textContent = t('请先粘贴 Key', 'Paste your key first'); $('#afMsg').className = 'testline err'; return }
     var ep = afEp.collect()
-    if (!ep.url) { $('#afMsg').textContent = t('请填写默认接口地址（照抄厂商文档的 base_url）', 'Fill in the default base URL (copy it from the vendor docs)'); $('#afMsg').className = 'testline err'; return }
-    if (!/^https?:\\/\\//i.test(ep.url)) { $('#afMsg').textContent = t('接口地址必须以 http:// 或 https:// 开头', 'The base URL must start with http:// or https://'); $('#afMsg').className = 'testline err'; return }
+    if (!ep.url) { $('#afMsg').textContent = t('请至少填写一个协议接口地址（照抄厂商文档）', 'Fill in at least one protocol endpoint (copy from the vendor docs)'); $('#afMsg').className = 'testline err'; return }
+    for (var pk in ep.urls) {
+      if (ep.urls[pk] && !/^https?:\\/\\//i.test(ep.urls[pk])) { $('#afMsg').textContent = t('{proto} 接口地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: pk }); $('#afMsg').className = 'testline err'; return }
+    }
     var collected = afModelB.collect()
     var modelErr = validateModelCollect(collected, afModelB.el)
     if (modelErr) { $('#afMsg').textContent = modelErr; $('#afMsg').className = 'testline err'; return }
@@ -1761,10 +1758,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     $('#afMsg').textContent = t('保存中…', 'Saving…')
     $('#afMsg').className = 'testline'
     var body = { presetId: picked, key: key, protocol: ep.protocol, base_url: ep.url, name: ep.name }
-    var eps = {}
-    if (ep.endpoints.openai) eps.openai = ep.endpoints.openai
-    if (ep.endpoints.responses) eps.responses = ep.endpoints.responses
-    if (Object.keys(eps).length) body.endpoints = eps
+    if (Object.keys(ep.endpoints).length) body.endpoints = ep.endpoints
     // 动过模型目录才提交 models；同时把 ★ 默认模型带给服务端
     if (afModelB.isDirty() && Object.keys(collected.models).length) {
       body.models = collected.models
@@ -3337,63 +3331,65 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 
   function createEndpointBlock(hostId, prefix) {
     var root = document.getElementById(hostId)
-    var st = { selectable: false, protocol: 'openai', docsHtml: '' }
+    var st = { docsHtml: '' }
     var gid = function (s) { return prefix + s }
-    var PROTOS = [['anthropic', 'Anthropic (Messages)'], ['openai', 'OpenAI (/v1)'], ['responses', 'Responses (/responses)']]
-    function protoVendor(pr) { return pr === 'openai' ? t('OpenAI', 'OpenAI') : pr === 'responses' ? t('Responses', 'Responses') : t('Anthropic', 'Anthropic') }
     function html() {
-      // 自定义服务：协议可选（默认 OpenAI）；预设/已有服务：协议固定，只作动态标注
-      var protoCtl = st.selectable
-        ? '<select id="' + gid('Proto') + '" data-i18n-title="本服务默认兼容的接口协议，网关按它转发；其余协议走下方对应端点||The protocol this service speaks by default; the gateway forwards with it, other protocols use the endpoints below">' +
-          PROTOS.map(function (o) { return '<option value="' + o[0] + '">' + o[1] + '</option>' }).join('') + '</select>'
-        : '<span id="' + gid('UrlProto') + '"></span>'
+      // 三协议各一行、预设与自定义同构：厂商支持哪个就填哪行，不再有「默认协议」下拉；
+      // 哪行落 base_url 由 collect 推导（anthropic > openai > responses），对用户不可见
       return '<div class="egrid">' +
         '<label><span data-i18n="显示名称||Display name">显示名称</span><input type="text" id="' + gid('Name') + '"></label>' +
-        '<label><span data-i18n="默认接口地址||Default Base URL">默认接口地址</span>' + protoCtl +
-        '<input type="text" id="' + gid('Url') + '" data-i18n-ph="https://…（照抄厂商文档的 base_url）||https://… (copy the base_url from the vendor\\'s docs)" placeholder="https://…（照抄厂商文档的 base_url）"></label>' +
+        '<label><span data-i18n="Anthropic 接口||Anthropic endpoint">Anthropic 接口</span><input type="text" id="' + gid('EndAnthropic') + '" data-i18n-ph="照抄厂商文档，留空 = 不用||copy from vendor docs, empty = unused" placeholder="照抄厂商文档，留空 = 不用"></label>' +
         '</div>' +
         '<div class="egrid">' +
         '<label><span data-i18n="OpenAI 接口 (/v1)||OpenAI endpoint (/v1)">OpenAI 接口 (/v1)</span><input type="text" id="' + gid('EndOpenai') + '" data-i18n-ph="照抄厂商文档，留空 = 不用||copy from vendor docs, empty = unused" placeholder="照抄厂商文档，留空 = 不用"></label>' +
         '<label><span data-i18n="Responses 接口 (/responses)||Responses endpoint (/responses)">Responses 接口 (/responses)</span><input type="text" id="' + gid('EndResponses') + '" data-i18n-ph="照抄厂商文档，留空 = 不用||copy from vendor docs, empty = unused" placeholder="照抄厂商文档，留空 = 不用"></label>' +
         '</div>' +
-        '<p class="desc-sm"><span data-i18n="地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。||/v1 and /v3 suffixes are vendor-defined API versions — copy from the docs; Codex speaks Responses only.">地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。</span>' + (st.docsHtml ? ' ' + st.docsHtml : '') + '</p>'
+        '<p class="desc-sm"><span data-i18n="厂商支持哪个协议就填哪行（至少一行）；地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。||Fill in the rows for the protocols your vendor supports (at least one); /v1 and /v3 suffixes are vendor-defined API versions — copy from the docs; Codex speaks Responses only.">厂商支持哪个协议就填哪行（至少一行）；地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。</span>' + (st.docsHtml ? ' ' + st.docsHtml : '') + '</p>'
     }
     function load(o) {
-      // o = { name, baseUrl, protocol, selectable, endpoints, presetEndpoints, docsHtml }
-      st.selectable = !!o.selectable
+      // o = { name, namePlaceholder, baseUrl, protocol, endpoints, presetEndpoints, docsHtml }
       st.docsHtml = o.docsHtml || ''
       root.innerHTML = html()
       var nameEl = $('#' + gid('Name'))
       nameEl.value = o.name || ''
       // 占位符随场景变化（预设=留空用厂商默认名；自定义=起名示例），带 data-i18n-ph 让语言切换跟随
       if (o.namePlaceholder) { nameEl.setAttribute('placeholder', i18nPick(o.namePlaceholder)); nameEl.setAttribute('data-i18n-ph', o.namePlaceholder) }
-      $('#' + gid('Url')).value = o.baseUrl || ''
-      if (st.selectable) {
-        $('#' + gid('Proto')).value = o.protocol || 'openai'
-      } else {
-        st.protocol = o.protocol || 'openai'
-        // 接口地址 = 默认协议端点；该协议对客户端的兼容性随默认协议动态标注
-        $('#' + gid('UrlProto')).textContent = t('（兼容 ', ' (compatible with ') + protoVendor(st.protocol) + t(' 接口协议）', ' protocol)')
+      // 三行协议地址：endpoints 优先，默认协议那行回落 base_url（base_url 即默认协议端点）
+      var proto = o.protocol || 'openai'
+      var ep = o.endpoints || {}
+      var rows = {
+        anthropic: ep.anthropic || (proto === 'anthropic' ? o.baseUrl || '' : ''),
+        openai: ep.openai || (proto === 'openai' ? o.baseUrl || '' : ''),
+        responses: ep.responses || (proto === 'responses' ? o.baseUrl || '' : ''),
       }
-      var eo = $('#' + gid('EndOpenai')), er = $('#' + gid('EndResponses'))
-      eo.value = (o.endpoints && o.endpoints.openai) || ''
-      er.value = (o.endpoints && o.endpoints.responses) || ''
-      // 厂商预设补全空端点：只填空字段、默认协议本身由接口地址承担不重复填
+      $('#' + gid('EndAnthropic')).value = rows.anthropic
+      $('#' + gid('EndOpenai')).value = rows.openai
+      $('#' + gid('EndResponses')).value = rows.responses
+      // 已知厂商补全空行：只填空字段
       var pe = o.presetEndpoints
       if (pe) {
-        var def = st.selectable ? ($('#' + gid('Proto')).value || 'openai') : st.protocol
-        if (def !== 'openai' && !eo.value && pe.openai) { eo.value = pe.openai; eo.title = t('已按厂商预设自动填充，可修改', 'Pre-filled from the vendor preset; editable') }
-        if (def !== 'responses' && !er.value && pe.responses) { er.value = pe.responses; er.title = t('已按厂商预设自动填充，可修改', 'Pre-filled from the vendor preset; editable') }
+        var fill = function (id, v) {
+          var el = $('#' + id)
+          if (!el.value && v) { el.value = v; el.title = t('已按厂商预设自动填充，可修改', 'Pre-filled from the vendor preset; editable') }
+        }
+        fill(gid('EndAnthropic'), pe.anthropic)
+        fill(gid('EndOpenai'), pe.openai)
+        fill(gid('EndResponses'), pe.responses)
       }
       applyI18nTree(root)
     }
     function collect() {
-      return {
-        name: $('#' + gid('Name')).value.trim(),
-        url: $('#' + gid('Url')).value.trim(),
-        protocol: st.selectable ? ($('#' + gid('Proto')).value || 'openai') : st.protocol,
-        endpoints: { openai: $('#' + gid('EndOpenai')).value.trim(), responses: $('#' + gid('EndResponses')).value.trim() },
+      // 至少一行有值 → 默认协议取 anthropic > openai > responses 里第一个填写的（与本网关主力客户端同序）；
+      // 默认协议那行落 base_url，其余填写的行进 endpoints（同一地址不重复存）
+      var urls = {
+        anthropic: $('#' + gid('EndAnthropic')).value.trim(),
+        openai: $('#' + gid('EndOpenai')).value.trim(),
+        responses: $('#' + gid('EndResponses')).value.trim(),
       }
+      var protocol = urls.anthropic ? 'anthropic' : urls.openai ? 'openai' : 'responses'
+      var endpoints = {}
+      for (var k in urls) if (urls[k] && k !== protocol) endpoints[k] = urls[k]
+      return { name: $('#' + gid('Name')).value.trim(), url: urls[protocol], protocol: protocol, endpoints: endpoints, urls: urls }
     }
     return { load: load, collect: collect, el: root }
   }
@@ -3899,7 +3895,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var ep = efEp.collect()
       var s = null
       ;(view.services || []).forEach(function (x) { if (x.id === editing) s = x })
-      return { baseUrl: ep.url, protocol: s ? s.protocol : 'anthropic', key: $('#efKey').value.trim(), serviceId: editing }
+      return { baseUrl: ep.url, protocol: ep.protocol || (s ? s.protocol : 'anthropic'), key: $('#efKey').value.trim(), serviceId: editing }
     },
   })
   var efFbB = createFallbackBlock('efFbHost', 'ef', {
@@ -3941,14 +3937,24 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var hostOf = function (u) { try { return new URL(u).host.toLowerCase() } catch (e) { return '' } }
     var pe = null
     ;(view.presets || []).forEach(function (p) {
-      if (!pe && p.endpoints && hostOf(p.base_url) === hostOf(s.base_url)) pe = p.endpoints
+      if (!pe && p.endpoints && hostOf(p.base_url) === hostOf(s.base_url)) {
+        // 已知厂商按 host 匹配预设，三协议端点都参与补全；anthropic 行缺省回落预设 base_url（anthropic 预设的该协议地址就存在 base_url 上）
+        pe = {
+          anthropic: (p.endpoints && p.endpoints.anthropic) || (p.protocol === 'anthropic' ? p.base_url : '') || '',
+          openai: (p.endpoints && p.endpoints.openai) || '',
+          responses: (p.endpoints && p.endpoints.responses) || '',
+        }
+      }
     })
     efEp.load({
       name: s.label,
       baseUrl: s.base_url,
       protocol: s.protocol,
-      selectable: false,
-      endpoints: { openai: (s.endpoints && s.endpoints.openai) || '', responses: (s.endpoints && s.endpoints.responses) || '' },
+      endpoints: {
+        anthropic: (s.endpoints && s.endpoints.anthropic) || '',
+        openai: (s.endpoints && s.endpoints.openai) || '',
+        responses: (s.endpoints && s.endpoints.responses) || '',
+      },
       presetEndpoints: pe,
     })
     // 安全模型：服务端不再回传 Key 明文；留空 = 不修改（空输入时 efSave 不会带 key 字段）
@@ -3973,6 +3979,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (!editing) return
     var body = { provider: editing }
     var ep = efEp.collect()
+    // 与添加表单同口径：至少一行协议地址 + 逐行 URL 格式；全清空会让 base_url 与端点脱节
+    if (!ep.url) { $('#efMsg').textContent = t('请至少填写一个协议接口地址（照抄厂商文档）', 'Fill in at least one protocol endpoint (copy from the vendor docs)'); $('#efMsg').className = 'testline err'; return }
+    for (var pk in ep.urls) {
+      if (ep.urls[pk] && !/^https?:\\/\\//i.test(ep.urls[pk])) { $('#efMsg').textContent = t('{proto} 接口地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: pk }); $('#efMsg').className = 'testline err'; return }
+    }
     var key = $('#efKey').value
     var collected = efModelB.collect()
     var modelErr = validateModelCollect(collected, efModelB.el)
@@ -3982,11 +3993,17 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       return
     }
     if (ep.name) body.name = ep.name
-    if (ep.url) body.base_url = ep.url
+    body.base_url = ep.url
+    body.protocol = ep.protocol
     if (key) body.key = key
     body.models = collected.models
     body.fallback = efFbB.collect()
-    body.endpoints = { openai: ep.endpoints.openai, responses: ep.endpoints.responses }
+    // 全量替换语义（空串=清该协议端点）；默认协议那行落在 base_url，不重复存
+    body.endpoints = {
+      anthropic: ep.protocol !== 'anthropic' ? ep.urls.anthropic : '',
+      openai: ep.protocol !== 'openai' ? ep.urls.openai : '',
+      responses: ep.protocol !== 'responses' ? ep.urls.responses : '',
+    }
     // 只在用户点过星标时写入默认模型；校验它仍在列表中
     var dm = efModelB.getDefault()
     if (efModelB.isDefaultDirty() && dm && collected.models[dm]) body.default_model = dm

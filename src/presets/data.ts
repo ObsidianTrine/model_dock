@@ -117,7 +117,8 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'deepseek-anthropic',
-    get label() { return t('DeepSeek（Anthropic 兼容）', 'DeepSeek (Anthropic-compatible)') },
+    // 主预设不带协议后缀（同 bigmodel-anthropic 先例）：预设自带三协议端点，名字标协议反而误导
+    get label() { return t('DeepSeek', 'DeepSeek') },
     vendor: 'DeepSeek',
     base_url: 'https://api.deepseek.com/anthropic',
     protocol: 'anthropic',
