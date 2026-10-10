@@ -66,6 +66,23 @@ export async function addService(
       )
     )
   }
+  // 协议端点与 /service/update 同口径校验：只认三协议键、URL 格式、剔除空串
+  //（空串会短路 relay 的端点回落：endpoints[proto] 为 '' 时 ?? 不再退 base_url）
+  let cleanEndpoints: Partial<Record<import('./config/types.js').Protocol, string>> | undefined
+  if (opts.endpoints && typeof opts.endpoints === 'object' && !Array.isArray(opts.endpoints)) {
+    const e: Partial<Record<import('./config/types.js').Protocol, string>> = {}
+    for (const [k, v] of Object.entries(opts.endpoints)) {
+      if (!(k === 'anthropic' || k === 'openai' || k === 'responses')) continue
+      if (typeof v !== 'string') continue
+      const val = v.trim()
+      if (!val) continue
+      if (!/^https?:\/\//i.test(val)) {
+        throw new Error(t('{proto} 协议地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: k }))
+      }
+      e[k as import('./config/types.js').Protocol] = val
+    }
+    if (Object.keys(e).length) cleanEndpoints = e
+  }
   // 重复提交兜底：同地址且同 Key 视为重复（Web 双击的最后一道闸）；
   // 同地址不同 Key 允许——那是"同一厂商多个账号分别登记"的合法场景
   const norm = normalizeBaseUrl(finalBaseUrl)
@@ -132,7 +149,7 @@ export async function addService(
     auth_style: preset.auth_style,
     key_ref: keyRef,
     proxy: preset.needs_proxy ? ('env' as const) : ('direct' as const),
-    endpoints: opts.endpoints ?? preset.endpoints ?? undefined,
+    endpoints: cleanEndpoints ?? preset.endpoints ?? undefined,
     models: userM ? mergeUserIntoPreset(presetModels(preset), userM) : presetModels(preset),
   }
 

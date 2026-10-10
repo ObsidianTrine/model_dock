@@ -1557,6 +1557,8 @@ async function handleAdmin(
     if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
     const name = typeof b.name === 'string' ? b.name.trim() : ''
     const baseUrl = typeof b.base_url === 'string' ? b.base_url.trim() : ''
+    // 默认协议随编辑可变（三协议端点直排后由填写的行推导，缺省保持现状）
+    const newProtocol = b.protocol === 'anthropic' || b.protocol === 'openai' || b.protocol === 'responses' ? b.protocol : undefined
     if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
       return sendError(res, 400, t('接口地址必须以 http:// 或 https:// 开头', 'Base URL must start with http:// or https://'))
     }
@@ -1650,6 +1652,7 @@ async function handleAdmin(
       if (!t) return
       if (name) t.name = name
       if (baseUrl) t.base_url = baseUrl
+      if (newProtocol) t.protocol = newProtocol
       if (newKeyRef) t.key_ref = newKeyRef
       if (newModels) t.models = newModels
       // 协议端点：替换/清空
