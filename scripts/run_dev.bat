@@ -17,10 +17,12 @@ if not defined PORT set "PORT=8890"
 set "MODELRDOCK_DEV_SANDBOX=1"
 if not defined MODELRDOCK_FAKE_HOME set "MODELRDOCK_FAKE_HOME=%USERPROFILE%\.modeldock-dev"
 if not exist "%MODELRDOCK_FAKE_HOME%\.modeldock" mkdir "%MODELRDOCK_FAKE_HOME%\.modeldock"
+REM First run: copy the production service config into the sandbox, minus client-attachment
+REM registrations ([harness.*]) - those carry real client-file paths and would make the sandbox
+REM think a client is attached/pinned (delete guard false-positives; see scripts\dev-seed.mjs). Idempotent.
 if not exist "%MODELRDOCK_FAKE_HOME%\.modeldock\config.toml" if exist "%USERPROFILE%\.modeldock\config.toml" (
-  copy /y "%USERPROFILE%\.modeldock\config.toml" "%MODELRDOCK_FAKE_HOME%\.modeldock\config.toml" >nul
-  if exist "%USERPROFILE%\.modeldock\secrets.json" copy /y "%USERPROFILE%\.modeldock\secrets.json" "%MODELRDOCK_FAKE_HOME%\.modeldock\secrets.json" >nul
-  echo [dev] Copied production config into the sandbox; the two are independent from now on.
+  node scripts\dev-seed.mjs
+  echo [dev] Copied production config into the sandbox (client attachments stripped); the two are independent.
 )
 
 REM Sandbox already has a live instance? One sandbox hosts ONE gateway instance - a second

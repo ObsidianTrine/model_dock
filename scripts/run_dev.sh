@@ -30,11 +30,12 @@ export MODELRDOCK_DEV_SANDBOX=1
 export MODELRDOCK_FAKE_HOME="${MODELRDOCK_FAKE_HOME:-$HOME/.modeldock-dev}"
 mkdir -p "$MODELRDOCK_FAKE_HOME/.modeldock"
 
-# 首次使用沙箱：从生产复制服务配置与密钥（此后两边互不影响）
+# 首次使用沙箱：从生产复制服务配置与密钥（此后两边互不影响）。
+# 剥离 [harness.*] 客户端接管登记——登记里的 files 指向真实客户端文件，原样拷贝会让沙箱
+# 误以为客户端已接入/钉定（删除守卫误拦截），detach/重写还可能碰生产客户端文件（见 scripts/dev-seed.mjs）。幂等。
 if [ ! -f "$MODELRDOCK_FAKE_HOME/.modeldock/config.toml" ] && [ -f "$HOME/.modeldock/config.toml" ]; then
-  cp "$HOME/.modeldock/config.toml" "$MODELRDOCK_FAKE_HOME/.modeldock/config.toml"
-  [ -f "$HOME/.modeldock/secrets.json" ] && cp "$HOME/.modeldock/secrets.json" "$MODELRDOCK_FAKE_HOME/.modeldock/secrets.json"
-  echo "▶ 已从生产复制服务配置到沙箱（${MODELRDOCK_FAKE_HOME}），两边此后互不影响"
+  node scripts/dev-seed.mjs
+  echo "▶ 已从生产复制服务配置到沙箱（${MODELRDOCK_FAKE_HOME}，已剥离客户端接管登记），两边此后互不影响"
 fi
 
 if [ "$(uname)" = "Darwin" ]; then OPEN="open"; else OPEN="xdg-open"; fi

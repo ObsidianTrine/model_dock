@@ -770,5 +770,10 @@ export function removeProviderCascade(c: Config, id: string): string[] {
       else sched.windows = kept
     }
   }
+  // file 模式客户端自管路由，不沿网关转发：其 route 仅登记痕迹，服务删除后一并清掉，
+  // 避免残留指向已删 profile 的悬空引用（删除守卫对 file 模式放行，见 server/service/delete）
+  for (const he of Object.values(c.harness ?? {})) {
+    if (he.mode === 'file' && he.route && usedBy.includes(he.route)) he.route = 'default'
+  }
   return usedBy
 }

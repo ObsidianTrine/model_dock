@@ -1749,13 +1749,28 @@ async function handleAdmin(
     // 与 CLI cmdProviderRm 共用 ops.removeProviderCascade：除路由外还清理 auto_route_provider、
     // 各 profile 的 fallback 候选链与定时切换窗口里的悬空条目
     const usedBy = Object.entries(rt.config.profiles).filter(([, pr]) => pr.provider === id).map(([k]) => k)
-    // 有客户端钉定在将被删除的路由上：直接拒绝（删了会留下悬空 route，请求 503），先解除钉定再删
-    const pinned = Object.entries(rt.config.harness).filter(([, he]) => he.route && usedBy.includes(he.route))
+    // 有客户端钉定/直连在将被删除的路由上：直接拒绝（网关钉定删了留下悬空 route → 请求 503；
+    // 独立直连已把该服务 URL+Key 写进客户端文件，删了直连目标失效）。file 模式客户端自管路由、
+    // 不沿网关转发，删除服务不影响它，不拦截（其 route 仅登记痕迹，随删除清掉，见 ops.removeProviderCascade）
+    const pinned = Object.entries(rt.config.harness).filter(
+      ([, he]) => he.route && he.mode !== 'file' && usedBy.includes(he.route)
+    )
     if (pinned.length > 0) {
+      const pinnedGateway = pinned.filter(([, he]) => he.mode !== 'direct').map(([h]) => h).join(t('、', ', '))
+      const pinnedDirect = pinned.filter(([, he]) => he.mode === 'direct').map(([h]) => h).join(t('、', ', '))
       return sendError(
         res,
         400,
-        t('有客户端钉定在该服务的路由上（{list}），先在客户端卡片把路由改回「跟随全局」再删除', 'A client is pinned to a route of this service ({list}); switch the route back to "follow global" on the client card before deleting', { list: pinned.map(([h]) => h).join(t('、', ', ')) })
+        [
+          pinnedGateway
+            ? t('有客户端钉定在该服务的路由上（{list}），先在客户端卡片把路由改回「跟随全局」再删除', 'A client is pinned to a route of this service ({list}); switch the route back to "follow global" on the client card before deleting', { list: pinnedGateway })
+            : '',
+          pinnedDirect
+            ? t('有客户端独立直连到该服务（{list}），请先断开该客户端的接入，或把它切回网关模式再删除', 'A client connects directly to this service ({list}); detach it or switch it back to gateway mode before deleting', { list: pinnedDirect })
+            : '',
+        ]
+          .filter(Boolean)
+          .join(t('；', '; '))
       )
     }
     try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }

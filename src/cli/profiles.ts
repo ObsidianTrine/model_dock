@@ -124,8 +124,9 @@ export async function cmdProfileRm(name: string): Promise<void> {
     console.error(c.red(t('✗ profile「{n}」不存在', '✗ profile "{n}" does not exist', { n: name })))
     process.exit(1)
   }
-  // 钉定保护：删掉会留下悬空 route（该客户端请求 503），先解除再删
-  const pinnedBy = Object.entries(cfg.harness ?? {}).filter(([, he]) => he.route === name).map(([hid]) => hid)
+  // 钉定保护：删掉会留下悬空 route（该客户端请求 503），先解除再删。
+  // file 模式客户端自管路由、不沿网关转发，route 仅登记痕迹，不拦截；删除时一并复位。
+  const pinnedBy = Object.entries(cfg.harness ?? {}).filter(([, he]) => he.route === name && he.mode !== 'file').map(([hid]) => hid)
   if (pinnedBy.length > 0) {
     console.error(c.red(t('✗ profile「{n}」仍被 {c} 个客户端钉定：{ids}', '✗ profile "{n}" is still pinned by {c} client(s): {ids}', { n: name, c: pinnedBy.length, ids: pinnedBy.join(', ') })))
     console.error(c.yellow(t('提示: 先解除钉定（modeldock harness route <id> default），再删除', 'Hint: unpin first (modeldock harness route <id> default), then delete')))
@@ -138,6 +139,10 @@ export async function cmdProfileRm(name: string): Promise<void> {
   await mutateConfig((c2) => {
     delete c2.profiles[name]
     if (c2.active_profile === name) delete c2.active_profile
+    // file 模式客户端不沿网关转发：随 profile 删除复位其登记 route，不留悬空引用
+    for (const he of Object.values(c2.harness ?? {})) {
+      if (he.mode === 'file' && he.route === name) he.route = 'default'
+    }
   })
   console.log(c.green(t('✓ profile「{n}」已删除', '✓ profile "{n}" deleted', { n: name })))
 }

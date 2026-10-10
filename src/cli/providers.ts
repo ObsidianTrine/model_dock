@@ -240,12 +240,13 @@ export async function cmdProviderRm(id: string): Promise<void> {
     process.exit(1)
   }
   const usedBy = Object.entries(cfg.profiles).filter(([, prof]) => prof.provider === id).map(([k]) => k)
-  // 钉定保护：这些 profile 被删除后，钉在上面的 harness.route 会悬空（请求 503），先解除再删
+  // 钉定保护：这些 profile 被删除后，钉在上面的 harness.route 会悬空（请求 503），先解除再删。
+  // file 模式客户端自管路由、不沿网关转发，删除服务不影响它，不拦截（其 route 随删除一并清掉）。
   const pinnedIds = Object.entries(cfg.harness ?? {})
-    .filter(([, he]) => he.route && usedBy.includes(he.route))
+    .filter(([, he]) => he.route && he.mode !== 'file' && usedBy.includes(he.route))
     .map(([hid]) => hid)
   if (pinnedIds.length > 0) {
-    const pinnedProfiles = [...new Set(Object.values(cfg.harness ?? {}).map((he) => he.route).filter((r): r is string => !!r && usedBy.includes(r)))]
+    const pinnedProfiles = [...new Set(Object.values(cfg.harness ?? {}).filter((he) => he.mode !== 'file').map((he) => he.route).filter((r): r is string => !!r && usedBy.includes(r)))]
     console.error(c.red(t('✗ 有客户端钉定在引用该服务的路由上（{routes}）：{ids}', '✗ Clients are pinned to routes that reference this provider ({routes}): {ids}', { routes: pinnedProfiles.join('、'), ids: pinnedIds.join(', ') })))
     console.error(c.yellow(t('提示: 先解除钉定（modeldock harness route <id> default），再删除', 'Hint: unpin first (modeldock harness route <id> default), then delete')))
     process.exit(1)

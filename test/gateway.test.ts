@@ -2809,6 +2809,78 @@ describe('管理面安全（2026-09 审查回归）', () => {
     }
   })
 
+  it('service/delete：file 模式客户端（自管路由）不构成钉定，删除放行且悬空 route 复位', async () => {
+    const h = fakeHome()
+    const up = await startMockUpstream()
+    const base = `http://127.0.0.1:${up.port}`
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      security: { store: 'file' },
+      providers: { up: { name: 'mock', base_url: base, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'sk-up' } },
+      profiles: { demo: { provider: 'up', default_model: 'preset-model' } },
+      harness: { dsh: { mode: 'file', route: 'demo', token: 'tok-dsh' } }, // file 模式：客户端自管路由，route 仅登记痕迹
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    const origin = `http://127.0.0.1:${gwPort}`
+    try {
+      const res = await fetch(`${origin}/_modeldock/service/delete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+        body: JSON.stringify({ provider: 'up' }),
+      })
+      expect(res.status).toBe(200)
+      const j: any = await res.json()
+      expect(j.ok).toBe(true)
+      expect(j.removed).toBe('up')
+      // file 模式的悬空 route 随删除复位 default，不残留指向已删 profile 的引用
+      const onDisk = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(onDisk.harness['dsh'].route).toBe('default')
+    } finally {
+      server.closeAllConnections?.()
+      server.close()
+      up.close()
+      h.restore()
+    }
+  })
+
+  it('service/delete：direct 模式客户端删除被拦，文案引导先断开/切回网关', async () => {
+    const h = fakeHome()
+    const up = await startMockUpstream()
+    const base = `http://127.0.0.1:${up.port}`
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      security: { store: 'file' },
+      providers: { up: { name: 'mock', base_url: base, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'sk-up' } },
+      profiles: { demo: { provider: 'up', default_model: 'preset-model' } },
+      harness: { dsh: { mode: 'direct', route: 'demo', token: 'tok-dsh' } }, // direct：客户端文件已写死该服务 URL+Key
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    const origin = `http://127.0.0.1:${gwPort}`
+    try {
+      const res = await fetch(`${origin}/_modeldock/service/delete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+        body: JSON.stringify({ provider: 'up' }),
+      })
+      expect(res.status).toBe(400)
+      const text = await res.text()
+      expect(text).toContain('独立直连') // 可执行指引（detach/切回网关），而非「改回跟随全局」死胡同
+    } finally {
+      server.closeAllConnections?.()
+      server.close()
+      up.close()
+      h.restore()
+    }
+  })
+
   it('clientProtocolFromPath：embeddings 归 openai，未知路径回退 provider 协议', () => {
     expect(clientProtocolFromPath('/v1/embeddings', 'anthropic')).toBe('openai')
     expect(clientProtocolFromPath('/v1/chat/completions', 'anthropic')).toBe('openai')
