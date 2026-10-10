@@ -3,7 +3,10 @@
 ; 相对路径以本 .iss 所在目录（scripts/）为基准解析，产物实际在仓库根 release/，故用 ..\ 前缀。
 ; 用户级安装（不需要管理员权限）：默认 %LOCALAPPDATA%\Programs\ModelDock，可自选路径；
 ; 写入用户 PATH、开始菜单/桌面快捷方式；卸载时先跑 modeldock uninstall --yes --purge 还原客户端并彻底清理（含配置与密钥）。
-; 界面语言保持英文（与旧 run.bat 一致；中文语言包不在 Inno 默认发行内）。
+; 界面语言跟随系统显示语言：中文 Windows 显示简体中文，其余回退英文。
+; 简体中文包内置在 scripts/inno/lang/（Inno 默认发行不含中文）；来源为 Inno Setup 官方仓库
+; issrc 的 Files/Languages/ChineseSimplified.isl（目标 Inno 6.5.0+，维护者 Kira），
+; 升级 Inno 或需更新译文时从官方仓库同步覆盖该文件。
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -25,6 +28,12 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+; 不弹语言选择框：按系统 UI 语言自动选择（中文系统 → 简体中文；无匹配 → [Languages] 第一项英文）
+ShowLanguageDialog=no
+
+[Languages]
+Name: "english";           MessagesFile: "compiler:Default.isl"
+Name: "chinesesimplified"; MessagesFile: "inno\lang\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
