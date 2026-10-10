@@ -2898,7 +2898,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         if (cliInstalling[c.id]) {
           // 安装进行中：渲染未绑定动作的禁用按钮，跨轮询重绘保持「正在安装…」，安装完成才切换（见 setInstalling）
           btn = '<button class="btn small primary" disabled><span class="spin"></span>' + t('正在安装…', 'Installing…') + '</button>'
-        } else if (c.install && c.install.auto) {
+        } else if (c.install && c.install.auto && c.install.sandboxInstall !== 'unsupported') {
+          // 沙箱内 npm 全局安装可重定向进沙箱，自动安装照常可用；脚本类安装降级为指引
           btn = '<button class="btn small primary" data-install="' + esc(c.id) + '">' + t('安装并接入', 'Install & attach') + '</button>'
         } else if (c.install) {
           btn = '<button class="btn small primary" data-install-guide="' + esc(c.id) + '">' + t('安装并接入', 'Install & attach') + '</button>'
@@ -2976,6 +2977,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           t('安装并接入「', 'Install & attach "') + labelOf(id) + t('」？', '"?'),
           [
             t('将执行安装命令：', 'Will run install command: ') + c.install.command,
+            // 沙箱实例：npm 全局安装落点被重定向进沙箱（真机全局环境零改动），提前讲明
+            c.install.sandboxInstall === 'redirect'
+              ? t('沙箱模式：程序将安装进沙箱内，不改动真机的全局环境与已装客户端', 'Sandbox mode: the client is installed inside the sandbox; the global environment and installed clients on the real machine are untouched')
+              : null,
             t('安装成功后自动写入客户端的空配置文件，再进入接入流程', 'After install, an initial config file is written automatically, then the attach flow starts'),
             t('只安装客户端并写入其初始配置，不影响 ModelDock 其余设置', 'Only installs the client and writes its initial config; other ModelDock settings are untouched')
           ].filter(Boolean),
@@ -3005,6 +3010,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         confirmModal(
           t('安装「', 'Install "') + labelOf(id) + t('」', '"'),
           [
+            // 沙箱内脚本类安装（curl|bash 等）会写真机、落点无法重定向：明确说不支持自动安装
+            c.install.sandboxInstall === 'unsupported'
+              ? t('沙箱环境不支持自动安装该客户端（其安装方式会写进真机，无法重定向）；请按下方指引手动安装，装好后回到这里重新检测', 'Sandbox cannot auto-install this client (its install method writes to the real machine and cannot be redirected); install manually per the guide below, then come back and re-detect')
+              : null,
             c.install.guide,
             c.install.homepage ? t('官方安装页：', 'Official install page: ') + c.install.homepage : null,
             t('装好后点下方按钮重新检测', 'Once installed, click the button below to re-detect')

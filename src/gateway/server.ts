@@ -10,8 +10,8 @@ import { ConfigError, loadConfig, mutateConfig, saveConfig } from '../config/sto
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config, type ProviderConfig } from '../config/types.js'
 import { defaultStore, deleteSecret, getSecret, setSecret } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
-import { resolveInstallCommand, type HarnessAdapter } from '../adapters/types.js'
-import { ensureNodeRuntime, npmRegistry } from '../install/noderuntime.js'
+import { isNpmGlobalInstall, resolveInstallCommand, type HarnessAdapter } from '../adapters/types.js'
+import { ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
 import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService } from '../ops.js'
@@ -36,7 +36,7 @@ import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupda
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
-import { displayPath, gatewayStatePath } from '../util/paths.js'
+import { displayPath, gatewayStatePath, sandboxNpmPrefix } from '../util/paths.js'
 import { UI_HTML } from './ui.js'
 
 export interface GatewayStartOptions {
@@ -82,8 +82,11 @@ function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessE
  * - needsNode 的命令（npm 类）先 ensureNodeRuntime——本机无 Node 时下载托管运行时，并把
  *   其 bin 目录前置到子进程 PATH（系统 node 经 well-known 命中时同样前置，LaunchAgent 的
  *   PATH 常缺 nvm 目录，不前置子进程找不到 npm）；
- * - 注入 npm_config_registry（大陆默认镜像，实测 npmjs.org 直连超时）；只影响本次子进程，
- *   不改用户全局 npm 配置。
+ * - 子进程 env 经 installChildEnv 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。
+ *
+ * 沙箱模式（MODELRDOCK_FAKE_HOME，dev 沙箱与 agent 测试实例）：只放行可重定向落点的 npm
+ * 全局安装——npm_config_prefix/cache 指进沙箱，装完不碰宿主全局 prefix。脚本类安装
+ * （curl|bash、irm|iex 等）落点由第三方脚本决定、无法重定向，直接拒绝并提示手动安装。
  *
  * 声明了 install.probe 的客户端先探测命令是否已在 PATH 上：已存在就跳过安装命令。
  * 页面状态可能是旧的（用户在别处刚装好），而 npm 全局重装会先把现有安装目录与 shim
@@ -93,7 +96,7 @@ export async function runClientInstall(
   adapter: HarnessAdapter,
   cfg: Config,
   port: number
-): Promise<{ ok: boolean; auto: boolean; output: string; installed: boolean; skipped: boolean }> {
+): Promise<{ ok: boolean; auto: boolean; output: string; installed: boolean; skipped: boolean; blocked?: boolean }> {
   const inst = adapter.install
   const lines: string[] = []
   let skipped = false
@@ -106,19 +109,19 @@ export async function runClientInstall(
       if (cmd === null) {
         // 类型上不可达（command 存在才有 cmd）；防御性兜底走指引分支
         lines.push(t('未配置可执行的安装命令', 'No executable install command configured'))
+      } else if (sandboxNpmPrefix() && !isNpmGlobalInstall(cmd) && process.env.MODELRDOCK_INSTALL_ALLOW_ANY !== '1') {
+        // 沙箱内只放行 npm 全局安装：脚本类落点由第三方脚本决定，会写进真机（~/ 目录、PATH 等）。
+        // MODELRDOCK_INSTALL_ALLOW_ANY=1 为单测桩命令（node -e 等）放行，受控环境专用。
+        lines.push(t(
+          '沙箱环境不支持自动安装该客户端：其安装方式（{cmd}）会把程序写进真机，沙箱无法重定向其落点。请按页面安装指引手动安装（装好后点「重新检测」即可接入沙箱配置）',
+          'Sandbox cannot auto-install this client: its install method ({cmd}) writes to the real machine and cannot be redirected. Install manually per the guide, then click Re-detect to attach the sandbox config',
+          { cmd }
+        ))
+        return { ok: false, auto: true, output: tailText(lines), installed: false, skipped: false, blocked: true }
       } else {
         const output: string[] = []
-        // 网关进程常被 npm/npx 工具链拉起（npx tsx、npm run、全局 shim），这些父进程会把
-        // npm_config_global_prefix/globalconfig/prefix 等指向宿主 npm 的变量泄漏进环境；
-        // 托管 npm 照单全收会把全局包装回宿主 prefix（2026-10-03 沙箱实测踩中：dsh 装进了
-        // 宿主 nvm 目录而非托管 runtime）。统一剥掉 npm_* 再注入受控项；用户级 ~/.npmrc 不受影响。
-        const env: NodeJS.ProcessEnv = {}
-        for (const [k, v] of Object.entries(process.env)) {
-          if (v !== undefined && !/^npm_/i.test(k)) env[k] = v
-        }
-        // 语言即地区策略：zh 注入国内镜像 registry，en 保留官方默认与用户自有 npm 配置
-        const reg = npmRegistry()
-        if (reg) env.npm_config_registry = reg
+        // 沙箱模式下 env 里额外带上 npm_config_prefix/cache（指进沙箱）；剥 npm_* 与注镜像同在 installChildEnv
+        const env = installChildEnv(process.env)
         if (inst.needsNode) {
           try {
             const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
@@ -156,6 +159,14 @@ export async function runClientInstall(
 function tailText(lines: string[], max = INSTALL_OUTPUT_MAX): string {
   const text = lines.join('\n').trim()
   return text.length > max ? text.slice(-max) : text
+}
+
+/** 沙箱内该客户端的自动安装能力：无 command → null（本就只展示指引，不执行）；
+ *  npm 全局安装 → 'redirect'（落点可重定向进沙箱）；脚本类 → 'unsupported'（写真机，沙箱内拒绝）。
+ *  非沙箱恒为 null——UI 与安装行为均维持原样。 */
+function sandboxInstallCapability(a: HarnessAdapter): 'redirect' | 'unsupported' | null {
+  if (!sandboxNpmPrefix() || !a.install?.command) return null
+  return isNpmGlobalInstall(resolveInstallCommand(a.install.command) ?? '') ? 'redirect' : 'unsupported'
 }
 
 export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOptions): http.Server {
@@ -616,7 +627,15 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       // 客户端自身 profile（dsh 的 desktop/web 等）：未接入时 UI 据此渲染接入范围选择；attached 后回显已选范围
       clientProfiles: a.clientProfileOptions ? await a.clientProfileOptions() : null,
       clientScope: he?.client_profiles ?? null,
-      install: a.install ? { auto: !!a.install.command, command: resolveInstallCommand(a.install.command), guide: a.install.guide, homepage: a.install.homepage ?? null } : null,
+      // 沙箱安装能力：null=非沙箱（行为不变）；'redirect'=npm 全局安装可重定向进沙箱；
+      // 'unsupported'=脚本类安装会写真机，沙箱内拒绝执行（UI 降级为指引展示）
+      install: a.install ? {
+        auto: !!a.install.command,
+        command: resolveInstallCommand(a.install.command),
+        guide: a.install.guide,
+        homepage: a.install.homepage ?? null,
+        sandboxInstall: sandboxInstallCapability(a),
+      } : null,
     })
     if (he && providerId) (usedByMap[providerId] ||= []).push(a.label)
   }
@@ -1796,7 +1815,11 @@ async function handleAdmin(
       audit(
         bi('安装并接入客户端', 'Install & attach client'),
         a.id,
-        r.ok ? (r.skipped ? bi('命令已存在，跳过安装', 'Command already present, install skipped') : r.auto ? bi('自动安装完成', 'Auto-install finished') : bi('已提供安装指引', 'Install guide provided')) : bi('安装失败', 'Install failed')
+        r.ok
+          ? (r.skipped ? bi('命令已存在，跳过安装', 'Command already present, install skipped') : r.auto ? bi('自动安装完成', 'Auto-install finished') : bi('已提供安装指引', 'Install guide provided'))
+          : r.blocked
+            ? bi('沙箱内不支持自动安装（会写进真机），已提示手动安装', 'Auto-install not supported in sandbox (would write to the real machine); manual install suggested')
+            : bi('安装失败', 'Install failed')
       )
       await reloadRuntime(rt)
       res.writeHead(200, { 'content-type': 'application/json' })

@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { getLang, t, type Lang } from '../util/i18n.js'
 import { atomicWrite, commandOnPathResolved, ensureDir, fileSha256, readTextIfExists } from '../util/fsx.js'
-import { homeDir, modeldockDir } from '../util/paths.js'
+import { homeDir, modeldockDir, sandboxNpmCache, sandboxNpmPrefix } from '../util/paths.js'
 
 /**
  * 托管 Node 运行时：为"本机没有任何 Node"的全新电脑自动补齐 npm 类 AI 客户端
@@ -49,6 +49,29 @@ export function npmRegistry(lang: Lang = getLang()): string | undefined {
   const r = process.env.MODELRDOCK_NPM_REGISTRY?.trim()
   if (r) return r
   return lang === 'zh' ? DEFAULT_NPM_REGISTRY : undefined
+}
+
+/**
+ * 安装命令子进程环境：网关进程常被 npm/npx 工具链拉起（npx tsx、npm run、全局 shim），这些父进程
+ * 会把 npm_config_global_prefix/globalconfig/prefix 等指向宿主 npm 的变量泄漏进环境；托管 npm
+ * 照单全收会把全局包装回宿主 prefix（2026-10-03 沙箱实测踩中：dsh 装进了宿主 nvm 目录而非托管
+ * runtime）。统一剥掉 npm_* 再注入受控项；用户级 ~/.npmrc 不受影响。
+ * 沙箱模式（FAKE_HOME）额外把全局落点与缓存指进沙箱——npm 全局安装完全不碰真机。
+ */
+export function installChildEnv(base: NodeJS.ProcessEnv, lang?: Lang): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== undefined && !/^npm_/i.test(k)) env[k] = v
+  }
+  const reg = npmRegistry(lang)
+  if (reg) env.npm_config_registry = reg
+  const prefix = sandboxNpmPrefix()
+  if (prefix) {
+    env.npm_config_prefix = prefix
+    const cache = sandboxNpmCache()
+    if (cache) env.npm_config_cache = cache
+  }
+  return env
 }
 
 /** 下载失败文案：默认镜像直连（无覆盖）失败按大陆环境提示 VPN；覆盖/官方源失败给通用网络建议 */
@@ -257,6 +280,15 @@ export async function integrateManagedPath(binDir: string, onOut?: (line: string
     return
   }
   if (process.platform === 'win32') {
+    // 沙箱模式不写用户级 PATH：那是真机环境变量，装进沙箱的 shim 没必要也不允许暴露给真机终端
+    // （unix 分支写 homeDir() 下的 shell rc，FAKE_HOME 下本就落沙箱，无需跳过）
+    if (process.env.MODELRDOCK_FAKE_HOME) {
+      onOut?.(t(
+        '沙箱模式：跳过写入 Windows 用户 PATH（沙箱内安装不改动真机环境变量）',
+        'Sandbox mode: skipping the Windows user PATH edit (sandbox installs do not touch real machine environment variables)'
+      ))
+      return
+    }
     await integrateWindowsUserPath(binDir, onOut)
     return
   }

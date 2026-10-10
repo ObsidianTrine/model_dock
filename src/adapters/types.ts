@@ -95,6 +95,13 @@ export function resolveInstallCommand(cmd: ClientInstall['command']): string | n
   return process.platform === 'win32' ? cmd.win32 : cmd.posix
 }
 
+/** 是否为 npm 全局安装（npm i/install/add … -g/--global …）：其落点可经 npm_config_prefix 重定向，
+ *  沙箱模式（MODELRDOCK_FAKE_HOME）因此支持自动安装。脚本类安装（curl|bash、irm|iex 等）
+ *  落点由第三方脚本决定、无法重定向，沙箱内不予执行。 */
+export function isNpmGlobalInstall(cmd: string): boolean {
+  return /^npm(?:\.cmd)?\s+(?:i|install|add)\s+(?:--\S+\s+|-\S+\s+)*(?:-g|--global)(?:\s|$)/.test(cmd.trim())
+}
+
 export class AdapterError extends Error {
   constructor(msg: string) {
     super(msg)

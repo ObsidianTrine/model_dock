@@ -10,6 +10,9 @@ import { saveConfig } from '../src/config/store.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer, runClientInstall } from '../src/gateway/server.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
+import { isNpmGlobalInstall } from '../src/adapters/types.js'
+import { commandOnPathResolved } from '../src/util/fsx.js'
+import { sandboxNpmCache, sandboxNpmPrefix } from '../src/util/paths.js'
 import { getLang, setLang } from '../src/util/i18n.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
@@ -42,6 +45,16 @@ function postInstall(port: number, harness: string) {
     headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-token-x' },
     body: JSON.stringify({ harness }),
   }).then((r) => r.json())
+}
+
+/** 桩命令放行：沙箱 gate 只放行 npm 全局安装，单测的 node -e 桩需要显式豁免（受控环境专用） */
+function allowStubCommands(): () => void {
+  const prev = process.env.MODELRDOCK_INSTALL_ALLOW_ANY
+  process.env.MODELRDOCK_INSTALL_ALLOW_ANY = '1'
+  return () => {
+    if (prev === undefined) delete process.env.MODELRDOCK_INSTALL_ALLOW_ANY
+    else process.env.MODELRDOCK_INSTALL_ALLOW_ANY = prev
+  }
 }
 
 describe('客户端安装并接入', () => {
@@ -88,6 +101,7 @@ describe('客户端安装并接入', () => {
 
   it('自动安装：命令成功后补写 bootstrap 空配置，re-detect 为已安装', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     try {
       const home = process.env.MODELRDOCK_FAKE_HOME!
       const boot = path.join(home, '.claude', 'settings.json')
@@ -111,12 +125,14 @@ describe('客户端安装并接入', () => {
       expect(r.installed).toBe(true)
       expect(fs.readFileSync(boot, 'utf8')).toBe('{}\n')
     } finally {
+      restoreAllow()
       h.restore()
     }
   })
 
   it('自动安装：命令失败返回 {ok:false} 且不写配置文件', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     try {
       const home = process.env.MODELRDOCK_FAKE_HOME!
       const boot = path.join(home, '.claude', 'settings.json')
@@ -139,6 +155,7 @@ describe('客户端安装并接入', () => {
       expect(r.auto).toBe(true)
       expect(fs.existsSync(boot)).toBe(false)
     } finally {
+      restoreAllow()
       h.restore()
     }
   })
@@ -191,6 +208,7 @@ describe('客户端安装并接入', () => {
 
   it('bootstrap 文件已存在时原样保留，不覆盖用户已有配置', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     try {
       const home = process.env.MODELRDOCK_FAKE_HOME!
       const boot = path.join(home, '.claude', 'settings.json')
@@ -215,12 +233,14 @@ describe('客户端安装并接入', () => {
       expect(r.output).toContain('保留不动')
       expect(fs.readFileSync(boot, 'utf8')).toBe('{"env":{"KEEP":"me"}}\n')
     } finally {
+      restoreAllow()
       h.restore()
     }
   })
 
   it('语言即地区策略：zh 注入镜像 registry，en 不注入（保留官方源与用户自有配置）', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     const savedLang = getLang()
     const savedReg = process.env.MODELRDOCK_NPM_REGISTRY
     delete process.env.MODELRDOCK_NPM_REGISTRY
@@ -246,6 +266,7 @@ describe('客户端安装并接入', () => {
       expect(r2.ok).toBe(true)
       expect(r2.output).not.toContain('npmmirror')
     } finally {
+      restoreAllow()
       setLang(savedLang)
       if (savedReg === undefined) delete process.env.MODELRDOCK_NPM_REGISTRY
       else process.env.MODELRDOCK_NPM_REGISTRY = savedReg
@@ -255,6 +276,7 @@ describe('客户端安装并接入', () => {
 
   it('安装子进程剥离 npm_* 环境泄漏（npx 拉起的网关会把宿主 prefix 带进来）', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     const keys = ['npm_config_prefix', 'npm_config_globalconfig', 'npm_execpath', 'npm_config_registry']
     const saved: Record<string, string | undefined> = {}
     for (const k of keys) {
@@ -278,9 +300,13 @@ describe('客户端安装并接入', () => {
       setLang('zh')
       const r = await runClientInstall(fake, emptyConfig(), 8687)
       expect(r.ok).toBe(true)
-      // 宿主泄漏全部剥离；registry 由地区策略重新注入（zh=镜像），而非继承泄漏值
-      expect(r.output).toContain('STRIPPED|STRIPPED|NOEXEC|https://registry.npmmirror.com')
+      // 宿主泄漏全部剥离；registry 由地区策略重新注入（zh=镜像）而非继承泄漏值；
+      // npm_config_prefix 在沙箱下被受控重注入为沙箱落点（真机值绝不穿透）
+      expect(r.output).toContain(
+        `${sandboxNpmPrefix()}|STRIPPED|NOEXEC|https://registry.npmmirror.com`
+      )
     } finally {
+      restoreAllow()
       setLang(savedLang)
       for (const k of keys) {
         if (saved[k] === undefined) delete process.env[k]
@@ -292,6 +318,7 @@ describe('客户端安装并接入', () => {
 
   it('needsNode：托管运行时 bin 目录前置到子进程 PATH（FORCE_DOWNLOAD 注入点，不触发下载）', async () => {
     const h = fakeHome()
+    const restoreAllow = allowStubCommands()
     const envs = ['MODELRDOCK_NODE_FORCE_DOWNLOAD', 'MODELRDOCK_NODE_VERSION']
     const saved = envs.map((k) => process.env[k])
     try {
@@ -327,6 +354,7 @@ describe('客户端安装并接入', () => {
       expect(r.ok).toBe(true)
       expect(r.output).toContain(binDir)
     } finally {
+      restoreAllow()
       envs.forEach((k, i) => {
         if (saved[i] === undefined) delete process.env[k]
         else process.env[k] = saved[i]!
@@ -363,4 +391,125 @@ describe('客户端安装并接入', () => {
       h.restore()
     }
   })
+
+  it('isNpmGlobalInstall：npm 全局安装放行，脚本类/本地安装拒绝', () => {
+    expect(isNpmGlobalInstall('npm i -g @anthropic-ai/claude-code')).toBe(true)
+    expect(isNpmGlobalInstall('npm install -g @deepseek-ai/dsh')).toBe(true)
+    expect(isNpmGlobalInstall('npm i --global opencode-ai')).toBe(true)
+    expect(isNpmGlobalInstall('npm i --registry=https://registry.npmmirror.com -g @openai/codex')).toBe(true)
+    expect(isNpmGlobalInstall('npm i @scope/pkg')).toBe(false)
+    expect(isNpmGlobalInstall('curl -fsSL https://mimo.xiaomi.com/install | bash')).toBe(false)
+    expect(isNpmGlobalInstall('powershell -NoProfile -Command "irm https://mimo.xiaomi.com/install.ps1 | iex"')).toBe(false)
+    expect(isNpmGlobalInstall('node -e ""')).toBe(false)
+    expect(isNpmGlobalInstall('')).toBe(false)
+  })
+
+  it('沙箱 gate：脚本类安装拒绝执行（blocked），bootstrap 不写', async () => {
+    const h = fakeHome()
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const boot = path.join(home, '.mimo-mock', 'config.json')
+      const fake: HarnessAdapter = {
+        id: 'fake-script',
+        label: 'FakeScript',
+        install: {
+          command: 'curl -fsSL https://example.invalid/install | bash',
+          guide: '手动装',
+          bootstrap: { path: boot, content: '{}\n' },
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.ok).toBe(false)
+      expect(r.blocked).toBe(true)
+      expect(r.output).toContain('不支持自动安装')
+      expect(r.output).toContain('example.invalid')
+      expect(fs.existsSync(boot)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('沙箱 env：npm 全局安装子进程注入沙箱 prefix/cache，真机全局零改动', async () => {
+    const h = fakeHome()
+    const restoreAllow = allowStubCommands()
+    try {
+      expect(sandboxNpmPrefix()).toBe(path.join(process.env.MODELRDOCK_FAKE_HOME!, '.modeldock', 'npm-global'))
+      const fake: HarnessAdapter = {
+        id: 'fake-npm',
+        label: 'FakeNpm',
+        install: {
+          command: 'node -e "process.stdout.write([process.env.npm_config_prefix||\'NOPREFIX\',process.env.npm_config_cache||\'NOCACHE\'].join(\'|\'))"',
+          guide: 'x',
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.ok).toBe(true)
+      // 输出尾部还有「已执行安装命令」说明行，断言用 toContain
+      expect(r.output).toContain(`${sandboxNpmPrefix()}|${sandboxNpmCache()}`)
+      expect(r.output).toContain(path.join('.modeldock', 'npm-global'))
+      expect(r.output).toContain(path.join('.modeldock', 'npm-cache'))
+    } finally {
+      restoreAllow()
+      h.restore()
+    }
+  })
+
+  it('沙箱探测回落：装进沙箱 npm-global 的 shim 能被 commandOnPath 看到（PATH 不含它也命中）', async () => {
+    const h = fakeHome()
+    const savedPath = process.env.PATH
+    const savedAppData = process.env.APPDATA
+    try {
+      const binDir = sandboxNpmBinDirPath()
+      fs.mkdirSync(binDir, { recursive: true })
+      // 可执行桩：unix 需真实文件（isFile），win 命中 PATHEXT 后缀
+      if (process.platform === 'win32') {
+        fs.writeFileSync(path.join(binDir, 'fakecli.cmd'), '@echo ok\r\n')
+      } else {
+        fs.writeFileSync(path.join(binDir, 'fakecli'), '#!/bin/sh\necho ok\n')
+        fs.chmodSync(path.join(binDir, 'fakecli'), 0o755)
+      }
+      process.env.PATH = '' // 证明命中来自沙箱 bin 目录，而非继承 PATH
+      delete process.env.APPDATA
+      expect(commandOnPathResolved('fakecli')).toBe(
+        path.join(binDir, process.platform === 'win32' ? 'fakecli.cmd' : 'fakecli')
+      )
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = savedAppData
+      h.restore()
+    }
+  })
+
+  it('overview install.sandboxInstall：npm 类=redirect、脚本类=unsupported、指引类=null', async () => {
+    const t = await setup()
+    try {
+      const j: any = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, {
+        headers: { 'x-modeldock-admin': 'admin-token-x' },
+      }).then((r) => r.json())
+      const cc = j.clients.find((c: any) => c.id === 'claude-code')
+      expect(cc.install.sandboxInstall).toBe('redirect')
+      const mimo = j.clients.find((c: any) => c.id === 'mimo-code')
+      expect(mimo.install.sandboxInstall).toBe('unsupported')
+      const wb = j.clients.find((c: any) => c.id === 'workbuddy')
+      expect(wb.install.sandboxInstall).toBeNull()
+    } finally {
+      t.closeAll()
+    }
+  })
 })
+
+/** 测试内取沙箱 npm-global 的 shim 目录（unix=prefix/bin，win=prefix 根） */
+function sandboxNpmBinDirPath(): string {
+  const prefix = sandboxNpmPrefix()!
+  return process.platform === 'win32' ? prefix : path.join(prefix, 'bin')
+}
