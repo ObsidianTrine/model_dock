@@ -3530,7 +3530,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         var dn = m.display && String(m.display).trim().toLowerCase() !== String(m.id).trim().toLowerCase() ? String(m.display).trim() : ''
         var dis = same ? ' disabled' : ''
         return '<div class="mrow frow' + (same ? ' dis' : '') + '" data-id="' + esc(m.id) + '"' + (dn ? ' data-display="' + esc(dn) + '"' : '') + '>' +
-          '<input type="checkbox" class="fpick"' + (same ? ' disabled title="' + t('已在下方模型列表且参数一致，不重复填入', 'Already in the model list with the same numbers') : ' checked' + (diff ? ' title="' + t('点「填入所选」把拉取到的参数更新到下方该模型', 'Click "Fill selected" to update this model with the fetched numbers') + '"' : '')) + '>' +
+          // title 文案经 esc() 且右引号不可省：英文文案含双引号，属性漏闭合会把整行后续标签吞进属性（曾致「已有」行 DOM 错乱）
+          '<input type="checkbox" class="fpick"' + (same ? ' disabled title="' + esc(t('已在下方模型列表且参数一致，不重复填入', 'Already in the model list with the same numbers')) + '"' : ' checked' + (diff ? ' title="' + esc(t('点「填入所选」把拉取到的参数更新到下方该模型', 'Click "Fill selected" to update this model with the fetched numbers')) + '"' : '')) + '>' +
           '<div class="midwrap"><span class="mid" title="' + esc(m.id) + '">' + esc(m.id) + '</span>' + (dn ? '<span class="msub" title="' + esc(dn) + '">' + esc(dn) + '</span>' : '') + '</div>' +
           '<input type="text" inputmode="numeric" data-f="context_window" value="' + (m.context_window == null ? '' : esc(m.context_window)) + '" placeholder="' + t('未知', 'unknown') + '"' + dis + '>' +
           '<input type="text" inputmode="numeric" data-f="max_output" value="' + (m.max_output == null ? '' : esc(m.max_output)) + '" placeholder="' + t('未知', 'unknown') + '"' + dis + '>' +
