@@ -363,6 +363,10 @@ a{color:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:var(--fs-sm);margin-top:10px}
 th{text-align:left;color:var(--muted);font-weight:500;padding:5px 8px;border-bottom:1px solid var(--border)}
 td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)}
+/* 日志表浮头（卡内滚动变体，滚动容器=.tablescroll）：separate 让边框归属单元格——
+   collapse 的边框画在表层，sticky 表头滚入吸附位会丢底线；th 加不透明背景盖住滚过的行 */
+#logTable{border-collapse:separate;border-spacing:0}
+#logTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
 #logTable th,#logTable td{white-space:nowrap}
 #logTable td:nth-child(4),#logTable td:last-child{white-space:normal;word-break:break-all}
 .note{color:var(--muted);font-size:var(--fs-sm);margin-top:10px}
@@ -476,7 +480,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 /* 弹层开着时的错误就近写底栏左侧槽，不走全局 toast——遮罩 z 在 toast 之上，磨砂会把 toast 糊掉（textContent 填充，上游报错文本不可信） */
 .modal-foot .mferr{flex:1;min-width:0;margin:0;color:var(--err);font-size:var(--fs-sm);word-break:break-all}
 /* —— 窄屏兜底（手机浏览器/半屏分屏）：主布局本就流式折行，这里只处理固定宽度表格与顶栏 —— */
-.tablescroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* 日志表滚动壳=浮头表格契约的卡内滚动容器：竖向也在这里滚（max-height 封顶），thead th 相对它吸附；
+   外滚吸附要对齐页面 sticky 页头高度（窄屏折行不定值），故页级表格用内滚变体 */
+.tablescroll{overflow:auto;max-height:60vh;-webkit-overflow-scrolling:touch}
 @media (max-width:600px){
   /* 顶栏允许折行；健康文本可截断，不把语言/主题按钮挤出视口 */
   header{flex-wrap:wrap;row-gap:4px}
