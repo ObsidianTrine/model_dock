@@ -66,7 +66,7 @@
 | 浮动按钮 | `.fab`（＋添加）/ `.snav`（↑↓跳转） | fixed 右下；显隐由滚动/状态控制 |
 | 展开行 | `.listmore`（虚线 btn） | 长列表「显示全部 N 个」 |
 | 输入基线 | 全类型文本 input + textarea + select | 13px/7px 10px/圆角 r-md；新控件**必须加类**，但裸控件不再走样 |
-| **浮头表格** | 表格块（`.mtable`/`.fetchpanel` 等，自然高度）+ 表头行 `.mhead`（`position:sticky;top:0` + 不透明背景 + z-index）；滚动容器 = `.modal-body`/`.editform` | 长列表滚动时表头吸附弹窗顶、滚过最后一行自动让位、多表各吸各头（sticky 原生语义，零 JS）。**结构契约与两条禁律见下方「浮头表格落地要点」** |
+| **浮头表格** | 表格块（`.mtable`/`.fetchpanel` 等，自然高度）+ 表头行 `.mhead`（`position:sticky;top:0` + 不透明背景 + z-index）；滚动容器 = `.modal-body`/`.editform`；页级表格用卡内滚动变体（`.tablescroll` + `thead th`） | 长列表滚动时表头吸附滚动口顶、滚过最后一行自动让位、多表各吸各头（sticky 原生语义，零 JS）。**结构契约与禁律见下方「浮头表格落地要点」** |
 
 ### 已评审原型、待后续落地（勿自行另造）
 
@@ -87,6 +87,8 @@ Tabs（下划线式）、Progress（含不确定态）、Skeleton、Empty（图�
 - 结构三层：**滚动容器**（真正滚动的元素，如 `.modal-body`/`.editform`）⊇ **表格块**（`.mtable`/`.fetchpanel`，自然高度不设 max-height）⊇ **表头行 `.mhead`**。吸附范围 = 所属表格块：滚过最后一行表头被推走，滚动进入哪张表就吸哪张表头。新表格按此结构挂 `.mhead` 即自动获得浮头。
 - **禁律①**：`.mhead` 与滚动容器之间**不得出现 `overflow:auto/scroll/hidden` 的祖先**——任何 overflow 容器都会成为 sticky 的吸附基准，而表格块自己不竖向滚动，表头就静默失效（2026-10-10 实锤回归：拉取面板表头被「表内横向滚动」规则困死一整天）。确需圆角裁剪写 `overflow:hidden;overflow:clip`（clip 裁剪但不产生滚动容器；旧浏览器回退 hidden＝不吸顶，不破布局）。
 - **禁律②**：横向滚动兜底放**滚动容器**（`overflow-x:auto`），不放表格块——表头与行同处一个滚动口，横向平移永远同步、列不错位。
+- **页级表格用卡内滚动变体**：主页面表格（如请求日志表 `#logTable`）的外层滚动体是 document，外滚吸附要对齐页面 sticky 页头高度（窄屏折行后是变值，对不稳）——改用**卡内滚动容器**：`.tablescroll{overflow:auto;max-height:60vh}` 自己就是滚动容器，表头 `thead th{position:sticky;top:0}` 相对它吸附。真 `<table>` 的 sticky 表头须配 `border-collapse:separate;border-spacing:0`（collapse 的边框画在表层，吸附后丢底线）+ 表头不透明背景。
+- **例外：页首表格不套浮头**（如定时切换面板 `#schedPanel`）——位于页面顶部、行数少，页面滚动永远不会「滚过它的表头」，吸附永不触发；且窄屏横滚兜底必须留在表格块内（上移到 document 会让整页横移），按禁律①它注定与 sticky 无缘。硬套样式是无效果死代码，记录例外即可。
 
 ## 5. 新增/修改 UI 的流程
 
