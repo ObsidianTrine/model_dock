@@ -99,9 +99,12 @@ export async function addService(
       )
     }
   }
-  let id = slugify(presetId)
+  // 服务 ID 取预设短名（slug）派生：历史预设 id 里带协议后缀（deepseek-anthropic），协议已不是服务的区分维度，
+  // ID 不该再暴露它；slug 缺省回落原 id（slugify 结果为空时 slugify 自带 'provider' 兜底）
+  const idBase = slugify(preset.slug || presetId)
+  let id = idBase
   let n = 2
-  while (cfg.providers[id]) id = `${slugify(presetId)}-${n++}`
+  while (cfg.providers[id]) id = `${idBase}-${n++}`
 
   const backend: SecretBackend = cfg.security?.store ?? (await defaultStore())
   const keyRef = await setSecret(id, key, backend)
@@ -155,7 +158,9 @@ export async function addService(
 
   let fetched = 0
   let fetchError: string | undefined
-  if (opts.models === undefined && opts.fetch !== false) {
+  // 只在最终目录为空时才在线补全（预设无目录且用户未提交模型，典型=自定义服务）：
+  // 自带完整目录的预设（DeepSeek 等）拉不到只会往成功提示里塞失败说明，拉取入口收敛为用户点「拉取模型」
+  if (opts.models === undefined && opts.fetch !== false && !presetModels(preset)) {
     try {
       const f = await fetchModelIds(provider)
       const models = { ...(provider.models ?? {}) }

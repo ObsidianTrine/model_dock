@@ -13,6 +13,8 @@ export interface PresetModel {
 
 export interface ProviderPreset {
   id: string
+  /** 添加服务时派生服务 ID 的短名（缺省用 id）；id 里带协议后缀的历史条目（如 deepseek-anthropic）用它给出 deepseek 这类干净 ID */
+  slug?: string
   label: string
   vendor: string
   base_url: string
@@ -117,6 +119,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'deepseek-anthropic',
+    slug: 'deepseek',
     // 主预设不带协议后缀（同 bigmodel-anthropic 先例）：预设自带三协议端点，名字标协议反而误导
     get label() { return t('DeepSeek', 'DeepSeek') },
     vendor: 'DeepSeek',
@@ -133,6 +136,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'deepseek-openai',
+    slug: 'deepseek',
     get label() { return t('DeepSeek（OpenAI 兼容）', 'DeepSeek (OpenAI-compatible)') },
     vendor: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
@@ -147,6 +151,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'bigmodel-anthropic',
+    slug: 'bigmodel',
     get label() { return t('智谱 GLM · bigmodel', 'Zhipu GLM · bigmodel') },
     get vendor() { return t('智谱', 'Zhipu') },
     base_url: 'https://open.bigmodel.cn/api/anthropic',
@@ -162,6 +167,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'bigmodel-openai',
+    slug: 'bigmodel',
     get label() { return t('智谱 GLM · bigmodel（OpenAI 兼容）', 'Zhipu GLM · bigmodel (OpenAI-compatible)') },
     get vendor() { return t('智谱', 'Zhipu') },
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
@@ -176,6 +182,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'zai-anthropic',
+    slug: 'zai',
     get label() { return t('智谱 z.ai', 'Zhipu z.ai') },
     get vendor() { return t('智谱', 'Zhipu') },
     base_url: 'https://api.z.ai/api/anthropic',
@@ -190,6 +197,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'kimi-openai-cn',
+    slug: 'kimi-cn',
     get label() { return t('Kimi / Moonshot（国内 · OpenAI 兼容）', 'Kimi / Moonshot (CN · OpenAI-compatible)') },
     vendor: 'Moonshot',
     base_url: 'https://api.moonshot.cn/v1',
@@ -207,6 +215,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'kimi-anthropic-cn',
+    slug: 'kimi',
     get label() { return t('Kimi / Moonshot（国内）', 'Kimi / Moonshot (CN)') },
     vendor: 'Moonshot',
     base_url: 'https://api.moonshot.cn/anthropic',
@@ -222,6 +231,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'kimi-anthropic-global',
+    slug: 'kimi-global',
     get label() { return t('Kimi / Moonshot（国际）', 'Kimi / Moonshot (Global)') },
     vendor: 'Moonshot',
     base_url: 'https://api.moonshot.ai/anthropic',
@@ -319,6 +329,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'dashscope-openai',
+    slug: 'dashscope',
     get label() { return t('阿里云百炼 DashScope', 'Alibaba Cloud DashScope') },
     get vendor() { return t('阿里云', 'Alibaba Cloud') },
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -328,6 +339,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'gemini-openai',
+    slug: 'gemini',
     label: 'Google Gemini',
     vendor: 'Google',
     base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
