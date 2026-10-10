@@ -1759,8 +1759,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     $('#afMsg').className = 'testline'
     var body = { presetId: picked, key: key, protocol: ep.protocol, base_url: ep.url, name: ep.name }
     if (Object.keys(ep.endpoints).length) body.endpoints = ep.endpoints
-    // 动过模型目录才提交 models；同时把 ★ 默认模型带给服务端
-    if (afModelB.isDirty() && Object.keys(collected.models).length) {
+    // 动过模型目录才提交 models；新模型框手填的行（没点「添加」也在 collect 里）含预设外条目时同样提交——
+    // 否则用户输入被丢、服务端还会误触自动拉取。同时把 ★ 默认模型带给服务端
+    var presetCatalog = {}
+    ;(view.presets || []).forEach(function (p) { if (p.id === picked) { var pm = p.models || {}; for (var k in pm) presetCatalog[k] = 1 } })
+    var hasExtra = Object.keys(collected.models).some(function (k) { return !presetCatalog[k] })
+    if ((afModelB.isDirty() || hasExtra) && Object.keys(collected.models).length) {
       body.models = collected.models
       var dm = afModelB.getDefault()
       if (dm && collected.models[dm]) body.default_model = dm
