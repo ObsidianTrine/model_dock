@@ -66,6 +66,7 @@
 | 浮动按钮 | `.fab`（＋添加）/ `.snav`（↑↓跳转） | fixed 右下；显隐由滚动/状态控制 |
 | 展开行 | `.listmore`（虚线 btn） | 长列表「显示全部 N 个」 |
 | 输入基线 | 全类型文本 input + textarea + select | 13px/7px 10px/圆角 r-md；新控件**必须加类**，但裸控件不再走样 |
+| **浮头表格** | 表格块（`.mtable`/`.fetchpanel` 等，自然高度）+ 表头行 `.mhead`（`position:sticky;top:0` + 不透明背景 + z-index）；滚动容器 = `.modal-body`/`.editform` | 长列表滚动时表头吸附弹窗顶、滚过最后一行自动让位、多表各吸各头（sticky 原生语义，零 JS）。**结构契约与两条禁律见下方「浮头表格落地要点」** |
 
 ### 已评审原型、待后续落地（勿自行另造）
 
@@ -80,6 +81,12 @@ Tabs（下划线式）、Progress（含不确定态）、Skeleton、Empty（图�
 - **caret 热区必须铺满胶囊右端**：`.pill>.caret` 用 `align-self:stretch` + 负外边距吃到胶囊的内边距/边框（`margin:-3px -11px -3px 4px`），左右边界＝分隔线。写死小尺寸（曾为 15×12px）会让"看着属于箭头"的一段里约七成区域点下去其实是开关——手机远程被误关的代价（手机端整体失效）远大于误展开，热区必须偏向无害的那一侧；caret 不要设 `border-radius`（圆角会把角落的命中漏给父级＝开关），圆角只留给 `:focus-visible` 描边。
 - CSS 里给这些按钮做重置时**不能用 `all:unset`**：它会把 `[hidden]` 的 `display:none` 一起重置，caret 就永远隐藏不了。
 - **面板未渲染时不得按 DOM 收集表单数据**：定时开关从 pill 直接切换时面板没打开，按 DOM 抓行会得到空数组并把已存时段一起 POST 掉（实测数据丢失）——未渲染时要用服务端快照（`schedWindowsSnapshot`）。
+
+### 浮头表格落地要点（结构契约）
+
+- 结构三层：**滚动容器**（真正滚动的元素，如 `.modal-body`/`.editform`）⊇ **表格块**（`.mtable`/`.fetchpanel`，自然高度不设 max-height）⊇ **表头行 `.mhead`**。吸附范围 = 所属表格块：滚过最后一行表头被推走，滚动进入哪张表就吸哪张表头。新表格按此结构挂 `.mhead` 即自动获得浮头。
+- **禁律①**：`.mhead` 与滚动容器之间**不得出现 `overflow:auto/scroll/hidden` 的祖先**——任何 overflow 容器都会成为 sticky 的吸附基准，而表格块自己不竖向滚动，表头就静默失效（2026-10-10 实锤回归：拉取面板表头被「表内横向滚动」规则困死一整天）。确需圆角裁剪写 `overflow:hidden;overflow:clip`（clip 裁剪但不产生滚动容器；旧浏览器回退 hidden＝不吸顶，不破布局）。
+- **禁律②**：横向滚动兜底放**滚动容器**（`overflow-x:auto`），不放表格块——表头与行同处一个滚动口，横向平移永远同步、列不错位。
 
 ## 5. 新增/修改 UI 的流程
 

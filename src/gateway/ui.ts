@@ -104,7 +104,9 @@ select.chip{padding-right:24px}
    编辑浮层：头部（标题+关闭）与底部（取消/保存）常驻，仅表单区滚动——长表单（模型表/备用链/拉取面板）
    自然高度互不挤压、滚动时表头吸附，操作按钮不再随内容滚出视野（头/底样式走 kit 的 .modal-head/.modal-foot） */
 #editOverlay .modal{max-width:680px;margin:auto;border:1px solid var(--border);box-shadow:var(--shadow-lg)}
-#editOverlay .editform{overflow-y:auto;min-height:0;padding:14px 20px 16px}
+/* 表头吸附的滚动体就是它：横向滚动兜底也放这里（表头与行同滚动口，横移同步列不错位）；
+   禁止在 .editform 与 .mhead 之间再出现 overflow:auto/scroll/hidden 的祖先——会静默困死 sticky 吸顶 */
+#editOverlay .editform{overflow:auto;min-height:0;padding:14px 20px 16px}
 /* 底栏槽位/按钮通用规则（工厂壳全部弹层生效）：msg 槽占满左侧、按钮不被挤压 */
 .modal-foot .testline{flex:1;min-width:0;margin:0}
 .modal-foot .btn{flex:0 0 auto}
@@ -121,12 +123,14 @@ select.chip{padding-right:24px}
 /* 自定义服务的默认协议下拉（label 行内，紧跟字段名） */
 .svcform label select{margin-top:4px;padding:4px 24px 4px 8px;font-size:var(--fs-sm);border-radius:var(--r-sm)}
 .svcform .mtable{margin-top:10px}
+/* 浮头表格：吸附范围=所属表格块，滚到哪张表吸哪张头；祖先链禁 overflow（契约见 ui-kit「浮头表格」） */
 .svcform .mhead{position:sticky;top:0;z-index:2;background:var(--card)}
 .svcform .addrow{flex:0 0 auto}
 .svcform .mrow{padding:5px 8px}
 .svcform .mrow input.bad{border-color:var(--err)}
 .svcform .row{margin-top:10px;flex:0 0 auto}
-.mtable{margin-top:8px;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+/* hidden 负责裁圆角，但会创建滚动容器困死 sticky；clip 同样裁剪却不困（旧浏览器回退 hidden=不吸顶，不破布局） */
+.mtable{margin-top:8px;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;overflow:clip}
 .mrow{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg)}
 .mrow:hover{background:var(--card)}
 .mrow:last-child{border-bottom:none}
@@ -196,8 +200,8 @@ select.chip{padding-right:24px}
 .svcform .mrow > *,
 .svcform .addrow > *{min-width:0}
 .svcform .mhead span{width:auto}
-/* 列宽有下限后容器可能放不下：表内横向滚动（sticky 表头照常生效），而不是把 ID 列压成 0 宽 */
-.svcform .mtable,.svcform .fetchpanel{overflow-x:auto;overflow-y:hidden}
+/* 列宽有下限后窄屏可能放不下：横向滚动兜底在滚动体上（.editform/.modal-body），不能放表格块——
+   overflow 容器会困死 .mhead 的 sticky 吸顶（2026-10-10 曾因此回归，见 ui-kit「浮头表格」禁律） */
 /* 「视觉」勾选列：原生勾选框在网格里按轨道居中；列头文字居中对齐勾选框 */
 .svcform .mhead span.vcol{text-align:center}
 .svcform .mrow input[type=checkbox].vpick{margin:0;justify-self:center;width:auto;padding:0}
@@ -466,6 +470,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .modal-foot{display:flex;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid var(--border);flex:0 0 auto}
 .modal.pad0{padding:0;overflow:hidden;display:flex;flex-direction:column;max-height:92vh}
 .modal.pad0 .modal-body{overflow-y:auto}
+/* 添加服务弹窗内含浮头表格：横向滚动兜底同样放滚动体（理由同 #editOverlay .editform） */
+#addOverlay .modal-body{overflow-x:auto}
 .modal-foot .end{margin-left:auto}
 /* 弹层开着时的错误就近写底栏左侧槽，不走全局 toast——遮罩 z 在 toast 之上，磨砂会把 toast 糊掉（textContent 填充，上游报错文本不可信） */
 .modal-foot .mferr{flex:1;min-width:0;margin:0;color:var(--err);font-size:var(--fs-sm);word-break:break-all}
