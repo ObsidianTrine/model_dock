@@ -48,3 +48,23 @@ export function dshHomeDir(): string {
   }
   return path.join(homeDir(), '.dsh')
 }
+
+/** 沙箱模式（MODELRDOCK_FAKE_HOME）下安装子进程的全局落点：npm 全局安装经 npm_config_prefix
+ *  重定向到这里，包与 shim 都落沙箱内、不碰宿主全局 prefix（宿主 nvm/npm 全局目录）。
+ *  非沙箱（生产/真机）返回 null——安装行为完全不变。 */
+export function sandboxNpmPrefix(): string | null {
+  return process.env.MODELRDOCK_FAKE_HOME ? path.join(modeldockDir(), 'npm-global') : null
+}
+
+/** 沙箱内 npm 缓存目录：与 prefix 同理收进沙箱，避免真机 ~/.npm 被测试安装写进缓存与日志 */
+export function sandboxNpmCache(): string | null {
+  return process.env.MODELRDOCK_FAKE_HOME ? path.join(modeldockDir(), 'npm-cache') : null
+}
+
+/** 沙箱 npm 全局 shim 所在目录（unix 是 prefix/bin，win 平铺在 prefix 根）：
+ *  commandOnPathResolved 靠它看见装进沙箱的客户端。 */
+export function sandboxNpmBinDir(): string | null {
+  const prefix = sandboxNpmPrefix()
+  if (!prefix) return null
+  return process.platform === 'win32' ? prefix : path.join(prefix, 'bin')
+}

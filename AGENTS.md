@@ -18,7 +18,7 @@
 | 编译到 `dist/` | `npm run build`（tsc） |
 | 测试 | `npm test`（vitest）；**改完 `src/**` 必须全绿** |
 | 开发热跑 | `npm run dev -- <cmd>`（tsx 直跑源码，**无热重载**，改码后重启实例再验证） |
-| 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口；8687 生产端口禁止占用，端口被占会拒绝启动并提示换端口）。**完全沙箱化**：配置/状态/日志/客户端写入均在 `~/.modeldock-dev`，与生产互不影响（首启自动从生产复制服务配置）。**用户本人日常验证专用**：启动前自动探测沙箱内已有实例（冲突明说、不再静默）；**agent 一律不得占用其默认沙箱与 8890 端口**，测试统一走下方硬规则 2 的隔离配方（`MODELRDOCK_FAKE_HOME` + 189xx） |
+| 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口；8687 生产端口禁止占用，端口被占会拒绝启动并提示换端口）。**完全沙箱化**：配置/状态/日志/客户端写入均在 `~/.modeldock-dev`，npm 全局安装（控制台「安装并接入」）也重定向装进沙箱、不碰真机全局环境，脚本类安装（落点不可重定向，如小米官方安装器）在沙箱内拒绝执行并提示手动安装；与生产互不影响（首启自动从生产复制服务配置）。**用户本人日常验证专用**：启动前自动探测沙箱内已有实例（冲突明说、不再静默）；**agent 一律不得占用其默认沙箱与 8890 端口**，测试统一走下方硬规则 2 的隔离配方（`MODELRDOCK_FAKE_HOME` + 189xx） |
 | SEA 可执行包 | `npm run build:sea`（产出 `release/` 下各平台**对外发布物**：压缩包（包内单一入口程序，unix 名 `modeldock`）+ `SHA256SUMS`；darwin 另产 `ModelDock.app` + `.dmg`；win 另产 Inno Setup `*-setup.exe`；裸二进制只作构建中间产物，不外发） |
 | 一键发布（tgz + 可执行 + 安装包） | 双击 `scripts/build.bat`（Win）/ `scripts/build.sh`（mac/Linux），或 `node scripts/build-all.mjs` |
 

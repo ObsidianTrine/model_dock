@@ -2,7 +2,7 @@ import fsp from 'node:fs/promises'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { homeDir, modeldockDir } from './paths.js'
+import { homeDir, modeldockDir, sandboxNpmBinDir } from './paths.js'
 import { t } from './i18n.js'
 
 export async function ensureDir(dir: string, mode = 0o700): Promise<void> {
@@ -40,6 +40,10 @@ export function commandOnPathResolved(cmd: string): string | null {
       ...fs.readdirSync(root).map((v) => (isWin ? path.join(root, v) : path.join(root, v, 'bin')))
     )
   } catch { /* 无托管运行时 */ }
+  // 沙箱模式（FAKE_HOME）下 npm 全局安装被重定向进 <modeldockDir>/npm-global：探测必须看见
+  // 落进沙箱的 shim，装完的 detect/status/probe 才成立（宿主全局 prefix 不会被写入）
+  const sandboxBin = sandboxNpmBinDir()
+  if (sandboxBin) dirs.push(sandboxBin)
   for (const dir of dirs) {
     for (const name of names) {
       try {
