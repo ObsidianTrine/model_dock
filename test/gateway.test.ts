@@ -694,21 +694,22 @@ describe('网关', () => {
       })
       const svcJson: any = await svc.json()
       expect(svcJson.ok).toBe(true)
-      expect(svcJson.providerId).toBe('deepseek-anthropic')
+      // 服务 ID 取预设 slug（deepseek-anthropic → deepseek），不再暴露协议后缀
+      expect(svcJson.providerId).toBe('deepseek')
 
       // 切换服务 → active_profile 变化
       const sw = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/switch`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
-        body: JSON.stringify({ service: 'deepseek-anthropic' }),
+        body: JSON.stringify({ service: 'deepseek' }),
       })
       const swJson: any = await sw.json()
       expect(swJson.ok).toBe(true)
-      expect(swJson.profile).toBe('auto-deepseek-anthropic')
+      expect(swJson.profile).toBe('auto-deepseek')
       const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
-      expect(onDisk.active_profile).toBe('auto-deepseek-anthropic')
-      expect(onDisk.providers['deepseek-anthropic'].base_url).toContain('deepseek')
-      expect(onDisk.providers['deepseek-anthropic'].key_ref).toBe('file:deepseek-anthropic')
+      expect(onDisk.active_profile).toBe('auto-deepseek')
+      expect(onDisk.providers['deepseek'].base_url).toContain('deepseek')
+      expect(onDisk.providers['deepseek'].key_ref).toBe('file:deepseek')
 
       // 按服务测速（provider 直连探测）
       const test = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/test`, {
@@ -740,17 +741,17 @@ describe('网关', () => {
           presetId: 'deepseek-anthropic', key: 'sk-x', fetch: false,
           models: { 'deepseek-flash': { context_window: 262144 } },
           default_model: 'deepseek-flash',
-          fallback: ['up', 'deepseek-anthropic'],
+          fallback: ['up', 'deepseek'],
         }),
       })).json()
       expect(add.ok).toBe(true)
       const cfg: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
-      const prof = cfg.profiles['auto-deepseek-anthropic']
+      const prof = cfg.profiles['auto-deepseek']
       expect(prof.default_model).toBe('deepseek-flash')
       expect(prof.fallback).toEqual(['up'])
       // 精修保留预设 display_name，仅覆盖 context_window
-      expect(cfg.providers['deepseek-anthropic'].models['deepseek-flash'].context_window).toBe(262144)
-      expect(cfg.providers['deepseek-anthropic'].models['deepseek-flash'].display_name).toBeTruthy()
+      expect(cfg.providers['deepseek'].models['deepseek-flash'].context_window).toBe(262144)
+      expect(cfg.providers['deepseek'].models['deepseek-flash'].display_name).toBeTruthy()
       // 校验失败：备用服务不存在 → 400 带可操作报错
       const bad: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
         method: 'POST', headers: ADMIN,
@@ -1109,7 +1110,7 @@ describe('网关', () => {
       })
       expect(((await svc2.json()) as any).ok).toBe(true)
       const ov1: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
-      const dsUrl = ov1.services.find((s: any) => s.id.startsWith('deepseek-openai')).base_url
+      const dsUrl = ov1.services.find((s: any) => s.id.startsWith('deepseek')).base_url
       // 同地址不同 Key：允许（同一厂商多账号分别登记）
       const sameUrlDiffKey = await upd({ provider: 'up', base_url: dsUrl })
       expect(sameUrlDiffKey.status).toBe(200)
@@ -2421,9 +2422,9 @@ describe('添加服务：合并模型目录 + 自定义名称', () => {
       })
       expect(res.status).toBe(200)
       const j: any = await res.json()
-      expect(j.providerId).toBe('deepseek-anthropic')
+      expect(j.providerId).toBe('deepseek')
       const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
-      const prov = onDisk.providers['deepseek-anthropic']
+      const prov = onDisk.providers['deepseek']
       expect(prov.name).toBe('我的DeepSeek')
       // 预设目录 + 提交模型合并：提交的模型在、预设目录的模型也都在（不再整体替换丢模型）
       const catalog = Object.keys(presetModels(findPreset('deepseek-anthropic')!) ?? {})
@@ -2446,13 +2447,58 @@ describe('添加服务：合并模型目录 + 自定义名称', () => {
         }).then((r) => r.json())
       const r1: any = await add('DeepSeek 主用', 'sk-a')
       const r2: any = await add('DeepSeek 备用', 'sk-b')
-      expect(r1.providerId).toBe('deepseek-anthropic')
-      expect(r2.providerId).toMatch(/^deepseek-anthropic(-2)?$/)
+      expect(r1.providerId).toBe('deepseek')
+      expect(r2.providerId).toMatch(/^deepseek(-2)?$/)
       expect(r2.providerId).not.toBe(r1.providerId)
       const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
       expect(onDisk.providers[r1.providerId].name).toBe('DeepSeek 主用')
       expect(onDisk.providers[r2.providerId].name).toBe('DeepSeek 备用')
       expect(onDisk.providers[r1.providerId]).toBeTruthy() // 首个仍在，未被覆盖
+    } finally { t.closeAll() }
+  })
+
+  it('服务 ID 用预设 slug 派生：同厂商不同协议预设共享短名，靠序号去重', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const add = (presetId: string, key: string) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+          body: JSON.stringify({ presetId, key, fetch: false }),
+        }).then((r) => r.json())
+      const r1: any = await add('deepseek-anthropic', 'sk-1')
+      const r2: any = await add('deepseek-openai', 'sk-2')
+      expect(r1.providerId).toBe('deepseek')
+      expect(r2.providerId).toBe('deepseek-2')
+    } finally { t.closeAll() }
+  })
+
+  it('拉取收敛：自带目录的预设添加不再自动拉取；无目录预设（自定义）才在线补全', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const add = (body: Record<string, unknown>) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+          body: JSON.stringify(body),
+        }).then((r) => r.json())
+      // 带完整目录的预设：未提交 models 也不发起拉取（上游 0 请求、无失败说明，目录用预设的）
+      const ds: any = await add({ presetId: 'deepseek-anthropic', key: 'sk-no-fetch' })
+      expect(ds.ok).toBe(true)
+      expect(ds.fetched).toBe(0)
+      expect(ds.fetchError ?? '').toBe('')
+      expect(t.requests.length).toBe(0)
+      const cfg: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(Object.keys(cfg.providers.deepseek.models)).toContain('deepseek-flash')
+      // 无目录预设（custom）：仍自动拉取补全（mock 上游无 /v1/models → 失败，但请求已发出且错误可操作）
+      const upUrl: string = cfg.providers.up.base_url
+      const cus: any = await add({ presetId: 'custom', key: 'sk-fetch', base_url: upUrl })
+      expect(cus.ok).toBe(true)
+      expect(cus.fetched).toBe(0)
+      expect(String(cus.fetchError ?? '')).toContain('候选')
+      expect(t.requests.length).toBeGreaterThan(0)
     } finally { t.closeAll() }
   })
 })

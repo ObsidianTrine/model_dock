@@ -3724,6 +3724,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (!tg || !tg.getAttribute) return
       if (tg.getAttribute('data-f')) st.dirty = true
       if (tg.id === gid('NewId')) {
+        // 手填模型名即算动过目录：保存必带 models（服务端不再自动拉取），没点「添加」按钮也不丢用户输入
+        st.dirty = true
         var km = knownModels[tg.value.trim()]
         if (km) {
           var ctx = $('#' + gid('NewCtx')), out = $('#' + gid('NewOut'))

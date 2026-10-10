@@ -150,7 +150,7 @@ export async function cmdProviderAdd(
   requireValidBaseUrl(baseUrl ?? preset!.base_url)
   warnEndpointRisks(baseUrl ?? preset!.base_url)
 
-  const id = await uniqueId(slugify(opts.name ?? preset?.id ?? 'custom'))
+  const id = await uniqueId(slugify(opts.name ?? preset?.slug ?? preset?.id ?? 'custom'))
   const key = await askKey(opts)
   const backend: SecretBackend = cfg.security?.store ?? (await defaultStore())
   const keyRef = await setSecret(id, key, backend)
