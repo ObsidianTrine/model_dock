@@ -160,6 +160,47 @@ describe('rewriteModel：纯透传快路径与原实现逐字段等价', () => {
     expect(r5.modelAfter).toBe('gpt-x')
     expect(r5.body).toBe(body)
   })
+
+  it('claude 内置模型名无别名时兜底改写为 default_model（网关模式客户端不带模型 env）', () => {
+    const dm = target({ default_model: 'glm-5-3-flash-260828' })
+    for (const m of ['claude-sonnet-4-5-20250929', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-fable-5-1', 'claude-3-5-haiku-20241022']) {
+      const r = rewriteModel(dm, Buffer.from(JSON.stringify({ model: m })), ROUTED)
+      expect(r.modelAfter).toBe('glm-5-3-flash-260828')
+      expect(JSON.parse(r.body.toString('utf8')).model).toBe('glm-5-3-flash-260828')
+    }
+    // 请求名恰为 default_model：不改写不重序列化
+    const bodySame = Buffer.from('{"model":"claude-sonnet-4-5"}')
+    const rSame = rewriteModel(target({ default_model: 'claude-sonnet-4-5' }), bodySame, ROUTED)
+    expect(rSame.modelAfter).toBe('claude-sonnet-4-5')
+    expect(rSame.body).toBe(bodySame)
+    // 显式别名优先于内置名兜底
+    const rAlias = rewriteModel(
+      target({ default_model: 'dm', aliases: { 'claude-sonnet-*': 'sonnet-target' } }),
+      Buffer.from('{"model":"claude-sonnet-4-5"}'),
+      ROUTED
+    )
+    expect(rAlias.modelAfter).toBe('sonnet-target')
+    // 候选级映射仍优先于一切
+    const rOv = rewriteModel(
+      target({ default_model: 'dm', modelOverride: 'override-win' }),
+      Buffer.from('{"model":"claude-sonnet-4-5"}'),
+      ROUTED
+    )
+    expect(rOv.modelAfter).toBe('override-win')
+  })
+
+  it('无 default_model 时 claude 内置名原样透传；非内置名不受兜底影响', () => {
+    // 无 default_model、无别名：快路径纯透传（nothing to rewrite to）
+    const body1 = Buffer.from('{"model":"claude-sonnet-4-5"}')
+    const r1 = rewriteModel(target({}), body1, ROUTED)
+    expect(r1.modelAfter).toBe('claude-sonnet-4-5')
+    expect(r1.body).toBe(body1)
+    // 非 claude 内置名不触发兜底（有 default_model 也不改写）
+    const body2 = Buffer.from('{"model":"gpt-x"}')
+    const r2 = rewriteModel(target({ default_model: 'dm' }), body2, ROUTED)
+    expect(r2.modelAfter).toBe('gpt-x')
+    expect(r2.body).toBe(body2)
+  })
 })
 
 describe('globToRegExp：编译缓存不改变匹配行为', () => {

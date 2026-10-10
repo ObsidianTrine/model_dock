@@ -60,8 +60,13 @@ export function commandOnPathResolved(cmd: string): string | null {
     nvmShims = fs.readdirSync(root).map((v) => path.join(root, v, 'bin', cmd))
   } catch { /* 没有 nvm */ }
   const wellKnown = [
-    `/usr/local/bin/${cmd}`,
-    `/opt/homebrew/bin/${cmd}`,
+    // 机器级绝对路径（系统/Homebrew prefix）在 FAKE_HOME 下跳过：它们不受沙箱重定向，
+    // 宿主任意时刻装/卸命令都会让「空 PATH」类 fakeHome 测试结果漂移（2026-10-10 实测踩中：
+    // 用户往 /usr/local/bin 装了 claude，adapters.test 的「未安装」用例转假）。
+    // 真实沙箱实例不受影响——PATH 扫描先于本兜底，/usr/local/bin 照常经 PATH 命中。
+    ...(process.env.MODELRDOCK_FAKE_HOME
+      ? []
+      : [`/usr/local/bin/${cmd}`, `/opt/homebrew/bin/${cmd}`]),
     path.join(home, '.local', 'bin', cmd),
     ...nvmShims,
   ]

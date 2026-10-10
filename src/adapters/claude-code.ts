@@ -225,6 +225,12 @@ export const claudeCodeAdapter: HarnessAdapter = {
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
         if (root.model === ROOT_MODEL_DIRECT) delete root.model
       }
+      notes.push(
+        t(
+          '网关模式：模型映射不写进本文件——claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端；需要分层用不同模型时在服务的路由别名里配置',
+          'Gateway mode: model mappings are not written here — built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart; configure route aliases on the service for per-tier models'
+        )
+      )
     }
 
     if (prevBase && !isGatewayUrl(prevBase)) {
