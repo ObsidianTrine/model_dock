@@ -8,6 +8,14 @@ import { dispatcherFor, recordOutcome, pickTarget, type GatewayRuntime, type Res
 /** 需要模型名改写的业务端点（其余路径纯透传） */
 const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions|completions|responses|embeddings)$/
 
+/** Claude Code 内置模型 ID（未配置任何模型 env 时客户端就发这些名字，含新旧分层命名）。
+ *  网关模式客户端配置不带模型映射、profile.aliases 又未覆盖时（常见：profile 只有
+ *  default_model），原样透传上游必不认。rewriteModel 对命中此正则且未命中别名的请求名
+ *  兜底改写为 profile.default_model——服务切换 / 定时切换 / 故障切换都即时跟随新目标，
+ *  客户端零改动、长会话不用重启；显式别名仍然优先。仅在目标 profile 配了 default_model
+ *  时才可能触发（那是「用这个服务的模型」的显式意图），无 default_model 的 profile 保持透传。 */
+const CLAUDE_BUILTIN_RE = /^claude-/
+
 /** 从客户端入站 path 推断其协议（出站据此选 Provider 对应协议端点，同协议直连）。
  *  embeddings 归 openai（OpenAI SDK 生态）；未知路径（/v1/models、/v1/files 等非对话端点）
  *  回退 provider 自身协议原样转发，而不是硬编码 anthropic 造成误导性的协议不匹配报错。 */
@@ -299,8 +307,12 @@ export function rewriteModel(
   if (!json || typeof json !== 'object') return { body }
   const requested = typeof json.model === 'string' ? json.model : undefined
   const alias = requested ? matchAlias(target.profile.aliases, requested) : undefined
+  // claude 内置模型名兜底（CLAUDE_BUILTIN_RE 注释）：别名未命中时改写为当前目标服务的默认模型
+  const tierFallback = alias === undefined && requested !== undefined && CLAUDE_BUILTIN_RE.test(requested)
+    ? target.profile.default_model
+    : undefined
   // 候选级映射（"<provider>:<model>" 条目）优先于别名：它是为跨服务商切换显式配置的意图
-  const final = target.modelOverride ?? alias ?? requested ?? target.profile.default_model
+  const final = target.modelOverride ?? alias ?? tierFallback ?? requested ?? target.profile.default_model
   let modelAfter = requested
   if (final !== undefined && final !== requested) {
     json.model = final
