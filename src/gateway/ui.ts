@@ -3781,7 +3781,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       document.getElementById(gid('FbRows')).innerHTML = (rows || []).map(function (f) { return fbRowHtml(f.provider, f.model || '') }).join('') ||
         '<div class="mempty">' + t('暂无备用服务——主服务不可达时将没有可切换的目标。', 'No fallback services yet — if the primary goes down there will be nothing to switch to.') + '</div>'
     }
-    // 新增行下拉：排除自身与已在链中的服务；模型下拉随服务联动（默认选中该服务默认模型）
+    // 新增行下拉：排除自身与已在链中的服务；模型下拉随服务联动（默认=透传原模型名）
     function populateAdd() {
       var svcSel = document.getElementById(gid('FbNewSvc'))
       if (!svcSel) return
@@ -3804,11 +3804,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (!svcSel || !modelSel) return
       var svc = null
       ;(opts.getServices() || []).forEach(function (x) { if (x.id === svcSel.value) svc = x })
+      // 新增行默认「透传原模型名」（value=''），不自动选中服务的默认模型；具体模型由用户主动改选
       var modelOpts = '<option value="">' + t('透传原模型名', 'Pass through original model') + '</option>'
       if (svc) {
         (svc.models || []).forEach(function (m) {
-          var sel = svc.defaultModel && m.id === svc.defaultModel ? ' selected' : ''
-          modelOpts += '<option value="' + esc(m.id) + '"' + sel + '>' + esc(m.id) + '</option>'
+          modelOpts += '<option value="' + esc(m.id) + '">' + esc(m.id) + '</option>'
         })
       }
       modelSel.innerHTML = modelOpts
