@@ -22,7 +22,7 @@ REM registrations ([harness.*]) - those carry real client-file paths and would m
 REM think a client is attached/pinned (delete guard false-positives; see scripts\dev-seed.mjs). Idempotent.
 if not exist "%MODELRDOCK_FAKE_HOME%\.modeldock\config.toml" if exist "%USERPROFILE%\.modeldock\config.toml" (
   node scripts\dev-seed.mjs
-  echo [dev] Copied production config into the sandbox (client attachments stripped); the two are independent.
+  echo [dev] Copied production config into the sandbox ^(client attachments stripped^); the two are independent.
 )
 
 REM Sandbox already has a live instance? One sandbox hosts ONE gateway instance - a second
