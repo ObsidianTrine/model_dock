@@ -20,7 +20,7 @@ const ROOT = path.resolve(import.meta.dirname, '..')
 const DIST = path.join(ROOT, 'dist')
 const RELEASE = path.join(ROOT, 'release')
 
-// ─── 平台映射 ───────────────────────────────────────────────────
+// 平台映射
 const PLATFORMS = {
   'linux-x64':   { os: 'linux',   arch: 'x64',  ext: '',      nodeUrl: 'https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.gz' },
   'linux-arm64': { os: 'linux',   arch: 'arm64', ext: '',      nodeUrl: 'https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-arm64.tar.gz' },
@@ -34,7 +34,7 @@ const currentPlatform = `${process.platform}-${process.arch}`
 // 构建版本号（main() 里 Step 0 从 git tag 同步后设置；无 tag 时回落 package.json）
 let BUILD_VERSION = null
 
-// ─── 参数解析 ───────────────────────────────────────────────────
+// 参数解析
 const args = process.argv.slice(2)
 const targetFlag = args.find(a => a.startsWith('--target'))
 const targetArg = targetFlag
@@ -48,7 +48,7 @@ const targets = targetArg
 // --pack：SEA 构建完成后、版本号还原前顺手打出 npm tgz（保证 tgz 版本 = git tag）
 const packFlag = args.includes('--pack')
 
-// ─── 工具函数 ───────────────────────────────────────────────────
+// 工具函数
 function log(msg)  { console.log(`\x1b[36m[build]\x1b[0m ${msg}`) }
 function warn(msg) { console.log(`\x1b[33m[build]\x1b[0m ${msg}`) }
 function err(msg)  { console.error(`\x1b[31m[build]\x1b[0m ${msg}`); process.exit(1) }
@@ -66,7 +66,7 @@ async function withRetry(maxAttempts, delayMs, fn) {
 }
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex') }
 
-// ─── 版本同步：从 git tag 读取版本号，写入 src/version.ts 和 package.json ──
+// 版本同步：从 git tag 读取版本号，写入 src/version.ts 和 package.json
 const VERSION_TS_PATH = path.join(ROOT, 'src', 'version.ts')
 const PKG_JSON_PATH  = path.join(ROOT, 'package.json')
 
@@ -128,14 +128,14 @@ async function downloadFile(url, dest) {
   return buf
 }
 
-// ─── Step 1: TypeScript 编译 ────────────────────────────────────
+// Step 1: TypeScript 编译
 async function buildTS() {
   log('Step 1/6 — TypeScript 编译')
   run('npx tsc -p tsconfig.json')
   log('  ✓ tsc 完成')
 }
 
-// ─── Step 2: esbuild 打包 ───────────────────────────────────────
+// Step 2: esbuild 打包
 async function buildBundle() {
   log('Step 2/6 — esbuild 打包')
   await fsp.mkdir(DIST, { recursive: true })
@@ -164,7 +164,7 @@ async function buildBundle() {
   log(`  ✓ bundle 完成 (${(size / 1024).toFixed(0)} KB)`)
 }
 
-// ─── Step 3: 生成 SEA blob ──────────────────────────────────────
+// Step 3: 生成 SEA blob
 async function buildBlob() {
   log('Step 3/6 — 生成 SEA blob')
   const seaConfig = path.join(ROOT, 'scripts/sea-config.json')
@@ -174,7 +174,7 @@ async function buildBlob() {
   log(`  ✓ blob 完成 (${((await fsp.stat(blobPath)).size / 1024).toFixed(0)} KB)`)
 }
 
-// ─── Step 4: 为每个 target 构建可执行文件 ──────────────────────
+// Step 4: 为每个 target 构建可执行文件
 async function buildExecutables() {
   log('Step 4/6 — 构建可执行文件')
   // 清空 release 目录内容，避免残留旧平台文件
@@ -303,7 +303,7 @@ async function buildExecutables() {
   await writeSums()
 }
 
-// ─── Step 5.5: 打分平台安装包 ────────────────────────────────────
+// Step 5.5: 打分平台安装包
 /**
  * 每个 target 打一个用户安装包：Windows → .zip，Linux / macOS → .tar.gz。
  * 包内只有一个入口程序（unix 名为 modeldock，Windows 为 modeldock.exe），解压即用；
@@ -339,7 +339,7 @@ async function packageDistributions() {
   }
 }
 
-// ─── Step 5.7: macOS .app + DMG 拖拽安装镜像 ─────────────────────
+// Step 5.7: macOS .app + DMG 拖拽安装镜像
 /**
  * 把 SEA 二进制包成 ModelDock.app（Info.plist + 图标 + ad-hoc 签名），再打成一压缩 DMG：
  * 挂载窗口内是 ModelDock.app + /Applications 快捷方式，用户拖拽即完成安装。
@@ -862,7 +862,7 @@ async function packageMacDmg() {
   }
 }
 
-// ─── Step 5.8: Windows 安装向导 ─────────────────────────────────
+// Step 5.8: Windows 安装向导
 /**
  * Inno Setup 编译 setup.exe：可选安装路径、开始菜单/桌面快捷方式、写入用户 PATH、
  * 卸载联动 `modeldock uninstall --yes --purge`（详见 scripts/installer.iss）。
@@ -981,7 +981,7 @@ async function generateIco(outPath) {
   await fsp.writeFile(outPath, Buffer.concat([header, ...entries, ...pngs]))
 }
 
-// ─── Windows exe 资源嵌入（图标 + 版本信息） ─────────────────────
+// Windows exe 资源嵌入（图标 + 版本信息）
 /**
  * 用 resedit（纯 JS PE 资源编辑器，devDependency 仅构建期使用，不违反纯 JS 依赖约束）
  * 把 generateIco() 的图标与版本信息写入 exe 资源区。
@@ -1032,7 +1032,7 @@ async function embedWinResources(exePath, icoPath) {
   await fsp.rename(tmpPath, exePath)
 }
 
-// ─── Step 5.9: SHA256SUMS ───────────────────────────────────────
+// Step 5.9: SHA256SUMS
 /**
  * 校验名单只覆盖对外发布物（压缩包 / DMG / setup.exe / 自更新整包）；裸二进制不单独外发，不入册 */
 async function writeSums() {

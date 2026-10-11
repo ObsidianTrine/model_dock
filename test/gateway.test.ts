@@ -1084,7 +1084,7 @@ describe('网关', () => {
       execSync(`sqlite3 '${db}' < '${sqlFile}'`)
       const origin = `http://127.0.0.1:${t.gwPort}`
 
-      // 同地址不同 Key 应被视为同一服务重复，只导入「使用中」的那一个（按地址去重）
+      // 按地址去重：只导入「使用中」的那一个
       const det = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/import/detect`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
       const detJson: any = await det.json()
       const actionable = detJson.candidates.filter((c: any) => !c.skipReason)
@@ -1101,7 +1101,7 @@ describe('网关', () => {
       })
       const applyJson: any = await apply.json()
       expect(applyJson.ok).toBe(true)
-      expect(applyJson.imported).toHaveLength(1) // 批内按地址去重：同地址不同 Key 只保留「使用中」的一个
+      expect(applyJson.imported).toHaveLength(1) // 批内按地址去重
 
       const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
       const importedId = applyJson.imported[0]
@@ -1201,9 +1201,8 @@ describe('网关', () => {
       const afterDn2: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
       expect(afterDn2.providers.up.models['model-a'].display_name).toBe('Model A Pro')
 
-      // 非正整数 ctx → 400
+      // 非正整数 ctx：服务端静默忽略（不写入、不报错）
       const bad = await upd({ provider: 'up', models: { 'model-a': { context_window: -5 } } })
-      // 负数在服务端被忽略（不写入）而不是报错？——服务端静默忽略非法值，此处应成功但无 ctx
       const badJson: any = await bad.json()
       expect(badJson.ok).toBe(true)
       const after: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
@@ -1213,13 +1212,12 @@ describe('网关', () => {
       const nope = await upd({ provider: 'nope', models: {} })
       expect(nope.status).toBe(400)
 
-      // 地址冲突校验：把 up 的地址改成与 overview 里它自己相同的地址？不行——
-      // 冲突是「与其他 provider 相同」。先给 up2 建一个不同地址的服务，再让 up 改成它的地址
+      // 地址冲突校验：冲突指「与其他 provider 地址相同」，不含自己——先做不冲突的改址/改回原址，再建第二个服务测真冲突
       const ov0: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
       const upUrl = ov0.services.find((s: any) => s.id === 'up').base_url
       const ok2 = await upd({ provider: 'up', base_url: `${upUrl}-x` }) // 先改成不冲突的地址
       expect(((await ok2.json()) as any).ok).toBe(true)
-      const conflict = await upd({ provider: 'up', base_url: upUrl }) // 改回原地址 → up 已不在该地址？原地址空缺，允许。
+      const conflict = await upd({ provider: 'up', base_url: upUrl }) // 改回原地址：该地址已空缺，允许
       expect(((await conflict.json()) as any).ok).toBe(true)
       // 真正冲突：同地址同 Key → 400。先建第二个服务（同预设不同 Key）
       const svc2 = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
@@ -2368,7 +2366,7 @@ describe('自动路由 Phase3：定时切换', () => {
     expect(activeScheduleWindow(rt, new Date(2026, 9, 4, 5, 0))).toBeNull() // 周日凌晨 → 归属周六
   })
 
-  /** 全天互补的避开窗口（00:00-12:00 + 12:00-00:00 跨午夜），使断言不受真实时钟影响 */
+  /** 同 ALL_DAY：全天互补的避开窗口，断言不受真实时钟影响 */
   const ALL_DAY_AVOID = (target: string) => [
     { start: '00:00', end: '12:00', target, mode: 'avoid' as const },
     { start: '12:00', end: '00:00', target, mode: 'avoid' as const },
@@ -2671,7 +2669,7 @@ describe('自动路由开关', () => {
   })
 })
 
-// ---------- 2026-09 审查回归：管理面安全 ----------
+// 2026-09 审查回归：管理面安全
 
 /** 原始 http 请求（可自定义 Host 头；fetch 不允许改 Host） */
 function rawRequest(

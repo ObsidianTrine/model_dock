@@ -5,7 +5,6 @@ import path from 'node:path'
 import { buildProgram } from './cli/index.js'
 import { t } from './util/i18n.js'
 
-/** 检测是否运行在 SEA（Single Executable Application）模式下 */
 function isSEA(): boolean {
   const exe = path.basename(process.execPath).toLowerCase()
   return exe.startsWith('modeldock')
@@ -51,7 +50,6 @@ async function launchGui(): Promise<void> {
   const cfg = await loadCfg()
   const port = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
 
-  // 如果网关没在运行，后台启动
   let live = await gatewayLive()
   if (!live) {
     console.log(t('正在启动 ModelDock 网关...', 'Starting ModelDock gateway...'))
@@ -66,7 +64,6 @@ async function launchGui(): Promise<void> {
     })
     child.unref()
 
-    // 等待网关就绪
     for (let i = 0; i < 20; i++) {
       await sleep(250)
       live = await gatewayLive()

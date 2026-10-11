@@ -86,7 +86,7 @@ async function stopTrayProcesses(): Promise<void> {
   }
 }
 
-// ─── 安装形态识别 ────────────────────────────────────────────────
+// 安装形态识别
 
 const MAC_APP_RE = /(^|[\\/])[^\\/]*\.app[\\/]Contents[\\/]MacOS[\\/]/i
 
@@ -121,7 +121,7 @@ export function detectInstallShape(
   return 'bare'
 }
 
-// ─── 安装原语 ────────────────────────────────────────────────────
+// 安装原语
 
 /** mac .app 整包交换：staging 里解出的 ModelDock.app 换到 appRoot 位置。旧包保留为 <appRoot>.old 供回滚。 */
 export async function installMacApp(stagingDir: string, appRoot: string): Promise<void> {
@@ -190,7 +190,7 @@ export function buildWinInstallerCommand(
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${inner}"`] }
 }
 
-// ─── 解压 ────────────────────────────────────────────────────────
+// 解压
 
 /** 解压更新包到 dir：tar.gz 走系统 tar（Win10+ 自带 bsdtar），zip 走 PowerShell Expand-Archive */
 export async function extractArchive(archive: string, dir: string): Promise<void> {
@@ -212,7 +212,7 @@ export async function extractArchive(archive: string, dir: string): Promise<void
   }
 }
 
-// ─── 收尾 ────────────────────────────────────────────────────────
+// 收尾
 
 /** 清理上一版残留（.old）：mac-app = <appRoot>.old；裸二进制 = <bin>.old。找不到就静默返回。 */
 export async function cleanOldVersions(execPath: string): Promise<string[]> {

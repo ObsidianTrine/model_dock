@@ -146,7 +146,7 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     await verifyChecksum(file, sums)
     log(c.green(t('✓ 校验通过', '✓ Verified')))
 
-    // —— 校验全过，才进入停机替换段 ——
+    // 校验全过，才进入停机替换段
     const wasLive = await deps.gatewayWasLive()
     log(t('停止网关与托盘…', 'Stopping the gateway and tray…'))
     await deps.stopGateway()

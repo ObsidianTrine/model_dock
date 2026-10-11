@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { Transform } from 'node:stream'
 
-// ---------- 公共小工具 ----------
+// 公共小工具
 
 function target(opts: { default_model?: string; aliases?: Record<string, string>; modelOverride?: string; providerModels?: Record<string, { source: 'manual' }> }): ResolvedTarget {
   return {
@@ -63,7 +63,7 @@ function feedTap(chunks: Buffer[], contentType: string): Promise<UsageStats> {
   })
 }
 
-// ---------- A3：模型改写快路径（顶层 model 浅扫描与全量解析等价） ----------
+// A3：模型改写快路径（顶层 model 浅扫描与全量解析等价）
 
 describe('topLevelModel：浅扫描与 JSON.parse 同语义', () => {
   const cases: Array<[string, string | undefined]> = [
@@ -237,7 +237,7 @@ describe('globToRegExp：编译缓存不改变匹配行为', () => {
   })
 })
 
-// ---------- A1：direct 共享调优 Agent ----------
+// A1：direct 共享调优 Agent
 
 describe('buildDispatcher：direct 单例与代理分支', () => {
   it('direct 两次调用返回同一 Agent 实例（连接复用跨请求生效）', () => {
@@ -266,7 +266,7 @@ describe('buildDispatcher：direct 单例与代理分支', () => {
   })
 })
 
-// ---------- A4：usage tap 预过滤 + UTF-8 跨 chunk ----------
+// A4：usage tap 预过滤 + UTF-8 跨 chunk
 
 describe('createUsageTap：预过滤与多字节边界', () => {
   it('SSE 带中文 content 且 chunk 在多字节字符中间切开：usage 仍提取（StringDecoder）', async () => {
@@ -298,7 +298,7 @@ describe('createUsageTap：预过滤与多字节边界', () => {
   })
 })
 
-// ---------- A2：请求日志常驻流 ----------
+// A2：请求日志常驻流
 
 describe('logRequest：常驻追加流按序落盘', () => {
   it('同文件两条按写入顺序排列，格式与 appendFile 时代一致', async () => {

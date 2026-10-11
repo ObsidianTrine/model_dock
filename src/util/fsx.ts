@@ -151,7 +151,7 @@ export async function readTextIfExists(p: string): Promise<string | null> {
   return text
 }
 
-// ---------- 常驻追加流（高频 JSONL 日志落盘） ----------
+// 常驻追加流（高频 JSONL 日志落盘）
 
 /** 按路径常驻追加流池：fs.appendFile 每条都是 open+write+close 三个 syscall 走线程池，高频
  *  请求下与转发争 IO；常驻流把每条开销降为一次 write，且同文件写入严格有序。写入错误静默，

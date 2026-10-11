@@ -41,7 +41,7 @@ export function setDshCatalogLoader(fn: typeof loadDshCatalog): void {
   catalogLoader = fn
 }
 
-// ---------- 布局发现：旧布局 ~/.dsh/settings.yaml vs 新布局 profiles/<name>/cordis.patch.yml ----------
+// 布局发现：旧布局 ~/.dsh/settings.yaml vs 新布局 profiles/<name>/cordis.patch.yml
 
 export interface DshLayout {
   home: string
@@ -401,7 +401,7 @@ export const dshAdapter: HarnessAdapter = {
     }
     const changes: FileChange[] = []
 
-    // ---- 旧布局：settings.yaml ----
+    // 旧布局：settings.yaml
     if (layout.legacyExists) {
       const text = (await readTextIfExists(layout.legacyFile)) ?? ''
       const doc = parseDocument(text)
@@ -433,7 +433,7 @@ export const dshAdapter: HarnessAdapter = {
       })
     }
 
-    // ---- 新布局：profiles/*/cordis.patch.yml ----
+    // 新布局：profiles/*/cordis.patch.yml
     for (const patchFile of targets.patchFiles) {
       const text = (await readTextIfExists(patchFile)) ?? ''
       const doc = parseDocument(text)
@@ -467,7 +467,7 @@ export const dshAdapter: HarnessAdapter = {
       })
     }
 
-    // ---- 两者皆无：按已有结构决定落点 ----
+    // 两者皆无：按已有结构决定落点
     if (changes.length === 0) {
       if (!(await fileExists(layout.home))) {
         throw new AdapterError(

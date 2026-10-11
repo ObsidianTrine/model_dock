@@ -97,14 +97,13 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
   const cfg = await loadConfig()
   const backend = opts?.backend ?? (cfg.security?.store as SecretBackend | undefined) ?? (await defaultStore())
 
-  // 1) 有明文 key 的条目先重存进本机凭据存储，拿到本机 key_ref
   const keyEntries: Record<string, string> = {}
   for (const [id, p] of Object.entries(doc.data.providers)) {
     if (typeof p.key === 'string' && p.key !== '') keyEntries[id] = p.key
   }
   const refs = await setSecretsBatch(keyEntries, backend)
 
-  // 2) 整包替换 providers/profiles；定时规则替换 windows、「启用」开关（机器态）保留
+  // 定时规则替换 windows、「启用」开关（机器态）保留
   // 校验已保证：无 key 的条目必带 key_ref（env 引用或导出机解析失败的残留）
   const providers: Record<string, ProviderConfig> = {}
   for (const [id, p] of Object.entries(doc.data.providers)) {
@@ -129,7 +128,6 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
     }
   })
 
-  // 3) 自定义预设整体替换（原始 JSON 保真写回）并重载本进程视图
   await atomicWrite(presetsJsonPath(), JSON.stringify(doc.data.userPresets ?? [], null, 2) + '\n', 0o600)
   reloadPresets()
 

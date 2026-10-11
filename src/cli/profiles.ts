@@ -139,7 +139,6 @@ export async function cmdProfileRm(name: string): Promise<void> {
   await mutateConfig((c2) => {
     delete c2.profiles[name]
     if (c2.active_profile === name) delete c2.active_profile
-    // file 模式客户端不沿网关转发：随 profile 删除复位其登记 route，不留悬空引用
     for (const he of Object.values(c2.harness ?? {})) {
       if (he.mode === 'file' && he.route === name) he.route = 'default'
     }

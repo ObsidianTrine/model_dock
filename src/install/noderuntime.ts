@@ -153,7 +153,7 @@ export async function ensureNodeRuntime(onOut?: (line: string) => void): Promise
   return { binDir, nodeBin, source: 'download' }
 }
 
-// ---------- 下载与校验 ----------
+// 下载与校验
 
 async function downloadNodeRuntime(onOut?: (line: string) => void): Promise<void> {
   const version = nodeVersion()
@@ -269,7 +269,7 @@ async function extractArchive(archive: string, stageDir: string, version: string
   }
 }
 
-// ---------- PATH 接入 ----------
+// PATH 接入
 
 /** 下载成功后把托管 bin 目录接进用户 PATH（幂等）：unix 追加 shell rc 带标记行，
  *  Windows 写用户级 PATH。npm 全局装出的客户端 shim 依赖 `env node`，不接 PATH 用户终端里跑不起来。

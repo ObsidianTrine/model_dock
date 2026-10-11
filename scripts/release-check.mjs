@@ -42,7 +42,7 @@ const npm = (npmArgs) =>
     shell: process.platform === 'win32',
   })
 
-// ─── git 状态 ──────────────────────────────────────────────
+// git 状态
 const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']).out
 if (branch === 'develop') add('pass', '当前在 develop 分支')
 else add('warn', `当前在 ${branch} 分支`, '脚本设计为在主仓库 develop 上跑；其他分支/worktree 的结果仅供参考')
@@ -60,13 +60,13 @@ const feats = git(['branch', '--list', 'feature/*']).out
 if (feats) add('warn', '存在 feature 分支残留', '确认其中没有本版该发的内容：\n' + feats)
 else add('pass', '无 feature 分支残留')
 
-// ─── main 分叉（防 hotfix 只合 main 不回 develop，下轮被冲掉）───
+// main 分叉（防 hotfix 只合 main 不回 develop，下轮被冲掉）
 const mainOnly = git(['log', '--no-merges', '--oneline', 'develop..main'])
 if (mainOnly.code !== 0) add('warn', '无法比对 main 分叉', mainOnly.err)
 else if (mainOnly.out) add('fail', 'main 存在 develop 缺失的内容提交', 'hotfix 必须回合 develop：\n' + mainOnly.out)
 else add('pass', 'main 无 develop 缺失的内容提交')
 
-// ─── CHANGELOG ─────────────────────────────────────────────
+// CHANGELOG
 const changelog = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
 const sec = spawnSync(process.execPath, ['scripts/extract-release-notes.mjs', '--check', tag], {
   encoding: 'utf8',
@@ -82,7 +82,7 @@ else add('pass', 'CHANGELOG 无「未发布」残留')
 if (new RegExp(`^\\[${ver}\\]:`, 'm').test(changelog)) add('pass', '版本链接表有对应行')
 else add('fail', `版本链接表缺 [${ver}]: 行`, `文末补一行：[${ver}]: https://github.com/ObsidianTrine/model_dock/releases/tag/${tag}`)
 
-// ─── tag 占用 ──────────────────────────────────────────────
+// tag 占用
 if (git(['tag', '-l', tag]).out) add('fail', `tag ${tag} 本地已存在`, '撤回过的版本号永不复用；确认后换号')
 else add('pass', `tag ${tag} 本地未占用`)
 
@@ -91,7 +91,7 @@ if (remote.code !== 0) add('warn', '远端 tag 查询失败（离线？）', `�
 else if (remote.out) add('fail', `tag ${tag} 远端已存在`, '公开发布过的版本号永不复用（v1.1.0 先例）')
 else add('pass', `tag ${tag} 远端未占用`)
 
-// ─── 版本递增（semver 只增不减；与已发布 tag 相等=重复发布，同样阻断）───
+// 版本递增（semver 只增不减；与已发布 tag 相等=重复发布，同样阻断）
 const latest = git(['describe', '--tags', '--abbrev=0'])
 if (latest.code !== 0 || !/^v\d+\.\d+\.\d+$/.test(latest.out)) {
   add('warn', '无法确定最近已发布 tag', `${latest.err || 'git describe --tags --abbrev=0 无结果'}；develop 对齐 main 后可解（release.md 步骤 6）`)
@@ -103,7 +103,7 @@ if (latest.code !== 0 || !/^v\d+\.\d+\.\d+$/.test(latest.out)) {
   else add('fail', `版本号 ${ver} 不大于最近已发布 ${oldV.join('.')}`, 'semver 只增不减：新功能递增 minor、修复递增 patch；已发布/撤回的版本号永不复用（release.md「版本号怎么定」）')
 }
 
-// ─── src 静态红线 ──────────────────────────────────────────
+// src 静态红线
 const imp = git(['grep', '-n', 'import\\.meta', '--', 'src'])
 if (imp.out) add('fail', 'src 出现 import.meta', 'SEA/esbuild 下不可用（AGENTS 硬约定）：\n' + imp.out.split('\n').slice(0, 5).join('\n'))
 else add('pass', 'src 无 import.meta')
@@ -127,7 +127,7 @@ const todo = git(['grep', '-nE', '\\b(TODO|FIXME|XXX|HACK)\\b', '--', 'src'])
 if (todo.out) add('warn', `src 有 ${todo.out.split('\n').length} 处 TODO/FIXME 残留`, '逐条裁决是否带病发布：\n' + todo.out.split('\n').slice(0, 8).join('\n'))
 else add('pass', 'src 无 TODO/FIXME 残留')
 
-// ─── 慢门禁（已有阻断项时跳过，省 3 分钟）───────────────────
+// 慢门禁（已有阻断项时跳过，省 3 分钟）
 const hardFails = () => results.filter((r) => r.status === 'fail').length
 let testStats = null
 if (skipTest) {
@@ -158,7 +158,7 @@ if (hardFails() === 0) {
   else add('warn', 'audit 未得出结论（网络/证书问题），人工补跑', 'npm audit --omit=dev\n' + aTail)
 }
 
-// ─── 基线漂移（usage §10 的用例数 vs 实测）──────────────────
+// 基线漂移（usage §10 的用例数 vs 实测）
 if (testStats) {
   const usage = fs.readFileSync(path.join(ROOT, 'docs', 'usage.md'), 'utf8')
   const m = usage.match(/测试 (\d+) 例全绿（(\d+) 个文件/)
@@ -168,7 +168,7 @@ if (testStats) {
   else add('pass', 'usage §10 基线数字与实测一致')
 }
 
-// ─── 汇总 ──────────────────────────────────────────────────
+// 汇总
 const icon = { pass: '✓', warn: '⚠', fail: '✗' }
 console.log(`\n═══ 发布门禁 ${tag} ═══`)
 for (const r of results) {

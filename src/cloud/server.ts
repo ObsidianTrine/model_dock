@@ -105,7 +105,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     const url = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
 
-    // —— 静态控制台页 ——
+    // 静态控制台页
     if (method === 'GET' && (url === '/' || url === '/index.html')) {
       const body = renderConsolePage()
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
@@ -115,7 +115,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
 
     const bodyText = method === 'POST' || method === 'PUT' ? await readBody(req) : ''
 
-    // —— 登录（控制台页用；HttpOnly + SameSite=Strict） ——
+    // 登录（控制台页用；HttpOnly + SameSite=Strict）
     if (method === 'POST' && url === '/v1/login') {
       const b = JSON.parse(bodyText || '{}') as { token?: string }
       if (b.token !== opts.consoleToken) {
@@ -127,7 +127,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
       return
     }
 
-    // —— 配对（免鉴权：新设备凭一次性码入网） ——
+    // 配对（免鉴权：新设备凭一次性码入网）
 
     if (method === 'POST' && url === '/v1/pair') {
       const b = JSON.parse(bodyText || '{}') as { pairCode?: string; devid?: string; deviceName?: string }
@@ -149,7 +149,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
       return
     }
 
-    // —— 鉴权：Bearer 头优先，其次控制台 cookie ——
+    // 鉴权：Bearer 头优先，其次控制台 cookie
     const bearer = /^Bearer\s+(.+)$/.exec(req.headers.authorization ?? '')
     const token = bearer?.[1] ?? cookieToken(req)
     if (!token) {
@@ -172,7 +172,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
       return
     }
 
-    // —— 设备端点 ——
+    // 设备端点
 
     if (method === 'GET' && url === '/v1/doc') {
       if (role !== 'device') {
@@ -283,7 +283,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
       return
     }
 
-    // —— 控制台端点 ——
+    // 控制台端点
 
     if (method === 'GET' && url === '/v1/devices') {
       if (role !== 'console') {

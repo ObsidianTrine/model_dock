@@ -87,7 +87,7 @@ export async function saveConfig(cfg: Config): Promise<void> {
   await atomicWrite(configPath(), tomlStringify(cfg), 0o600)
 }
 
-// ─── 写并发控制 ──────────────────────────────────────────────────────────────
+// 写并发控制
 // CLI / 网关 daemon / Web 控制台是三个独立写者，都走"读文件→改内存→整文件写回"，
 // 无互斥会静默丢更新。两层防护：进程内 promise 串行（同进程并发调用）+ 跨进程锁文件。
 

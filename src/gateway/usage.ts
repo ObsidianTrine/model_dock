@@ -92,7 +92,7 @@ export function createUsageTap(contentType: string | undefined): Transform & { g
       } catch {
         /* 解析失败不影响转发 */
       }
-      cb(null, chunk) // 原样透传，一个字节不动
+      cb(null, chunk)
     },
     flush(cb: TransformCallback) {
       try {

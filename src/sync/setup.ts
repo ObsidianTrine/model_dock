@@ -151,14 +151,12 @@ export async function enrollCloud(
   const deviceName = opts?.deviceName ?? os.hostname()
   const now = new Date().toISOString()
 
-  // 1) 配对：一次性码换设备 token
   const pair = await cloudJson(`${url}/v1/pair`, 'POST', { pairCode, devid, deviceName })
   if (pair.code !== 200 || !pair.json?.deviceToken) {
     throw cloudError(pair.code, pair.json, '配对失败')
   }
   const token = String(pair.json.deviceToken)
 
-  // 2) 云端已有文档则按「加入」处理：从信封自包含 KDF 参数派生密钥并验证口令
   const target = createCloudTargetFrom({ url, devid, token })
   const manifest = await target.readManifest()
   if (manifest) {
@@ -204,7 +202,6 @@ export async function enrollCloud(
     return { joined: true, rev: manifest.rev, report, deviceName }
   }
 
-  // 3) 云端为空：本机可同步态作为 rev 1 首推
   const keys = deriveSyncKeys(passphrase, randomBytes(16), randomBytes(32))
   const { doc, report } = await collectSyncdoc()
   const sealed = sealWithKeys(doc, keys)

@@ -279,7 +279,7 @@ export async function cmdProviderSetKey(
   console.log(c.green(t('✓ key 已更新（{b}）；网关热加载后立即生效', '✓ Key updated ({b}); the gateway hot-reloads it immediately', { b: backendLabel(backend) })))
 }
 
-// ---------- 模型目录 ----------
+// 模型目录
 
 export async function cmdModelList(providerId?: string): Promise<void> {
   const cfg = await loadCfg()

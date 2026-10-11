@@ -23,7 +23,7 @@ export function autostartKind(): AutostartKind | null {
   return null
 }
 
-// ─── 服务文件路径 ─────────────────────────────────────────────────────────────
+// 服务文件路径
 
 export function launchdPlistPath(): string {
   return path.join(homeDir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)
@@ -80,7 +80,7 @@ export function updateDaemonArgs(): string[] {
   return argv
 }
 
-// ─── 服务文件内容生成（纯函数）───────────────────────────────────────────────
+// 服务文件内容生成（纯函数）
 
 /** 登记的启动命令随文件落一份（base64 JSON），status/重装前校验用：
  *  nvm 升级 / 二进制移动后旧路径失效，自启会静默失败，必须能探出来。 */
@@ -170,7 +170,7 @@ export function windowsVbs(argv: string[]): string {
   return `' 由 modeldock gateway install 生成；删除本文件即取消开机自启\r\n' ${argvMark(argv)}\r\nCreateObject("WScript.Shell").Run ${lit}, 0, False\r\n`
 }
 
-// ─── 状态 / 安装 / 卸载 ──────────────────────────────────────────────────────
+// 状态 / 安装 / 卸载
 
 function execOk(cmd: string, args: string[], timeoutMs = 5000): { ok: boolean; output: string } {
   try {

@@ -111,17 +111,15 @@ select.chip{padding-right:24px}
 /* 底栏槽位/按钮通用规则（工厂壳全部弹层生效）：msg 槽占满左侧、按钮不被挤压 */
 .modal-foot .testline{flex:1;min-width:0;margin:0}
 .modal-foot .btn{flex:0 0 auto}
-/* —— 服务表单公共块样式（.svcform：添加/编辑两壳共用；块 HTML 由 JS 生成）—— */
+/* 服务表单公共块样式（.svcform：添加/编辑两壳共用；块 HTML 由 JS 生成） */
 .svcform .mhead .defcol{color:var(--star);opacity:.55;font-size:var(--fs-xs)}
 .svcform .egrid{display:grid;grid-template-columns:1fr 1fr;column-gap:12px;row-gap:6px}
-/* 表单分区：字段组之间加分隔线，标题行（模型/故障切换）提权 */
 .svcform .fsec-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);padding-top:12px;margin-top:10px}
 .svcform .fsec{font-size:var(--fs-sm);color:var(--text);font-weight:600}
 .svcform label.fsec{margin:0}
 .svcform label{display:block;font-size:var(--fs-sm);color:var(--muted);margin:8px 0 0}
 /* 顶部字段（label 内 input）才用 100% 宽度；模型表里的输入框保持 96px 与表头对齐 */
 .svcform label input{width:100%;margin-top:4px;padding:6px 10px;font-size:var(--fs-sm)}
-/* 自定义服务的默认协议下拉（label 行内，紧跟字段名） */
 .svcform label select{margin-top:4px;padding:4px 24px 4px 8px;font-size:var(--fs-sm);border-radius:var(--r-sm)}
 .svcform .mtable{margin-top:10px}
 /* 浮头表格：吸附范围=所属表格块，滚到哪张表吸哪张头；祖先链禁 overflow（契约见 ui-kit「浮头表格」） */
@@ -225,7 +223,7 @@ select.chip{padding-right:24px}
 .svcform .fbops button:hover{color:var(--accent)}
 .svcform .fbops .del:hover{color:var(--err)}
 .svcform .addrow select{width:100%;min-width:0;padding:4px 24px 4px 8px;font-size:var(--fs-sm);border-radius:var(--r-sm);margin:0}
-/* 拉取模型面板：行复用 .mrow 网格（28px minmax(0,1fr) 96px 96px 60px 56px），勾选列与上方 ★ 列对齐 */
+/* 拉取模型面板：行复用 .mrow 网格，勾选列与上方 ★ 列对齐 */
 /* 勾选框必须豁免 .mrow input 的 width:96px——被拉宽后原生图形按盒子居中绘制，会压到模型 ID 上 */
 .svcform .frow input[type=checkbox]{margin:0;cursor:pointer;width:auto;padding:0}
 /* 超长模型 ID / 名一律省略号截断（title 已有全文），不许把后面的数字列顶出行外 */
@@ -297,8 +295,8 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .pill.err{color:var(--err);border-color:var(--err);background:rgba(220,38,38,.08)}
 .pill.warn{color:var(--warn);border-color:var(--warn);background:rgba(217,119,6,.08)}
 .pill.dim{opacity:.75}
-/* —— pillSwitch：状态行开关（kit 组件）。视觉与原 pill 一致；主体 / caret 是两个真实按钮，
-   各自可 Tab（role=switch+aria-checked / aria-expanded+aria-controls），内嵌 .ptext 承载文案 —— */
+/* pillSwitch：状态行开关（kit 组件）。视觉与原 pill 一致；主体 / caret 是两个真实按钮，
+   各自可 Tab（role=switch+aria-checked / aria-expanded+aria-controls），内嵌 .ptext 承载文案 */
 .pill.sw{cursor:pointer;user-select:none;transition:border-color var(--dur),color var(--dur),background var(--dur)}
 .pill.sw:hover{border-color:var(--muted);color:var(--text)}
 .pill.sw.ok:hover{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
@@ -353,7 +351,6 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .hint-warn{color:var(--warn)}
 td.st-ok{color:var(--ok)}
 td.st-err{color:var(--err)}
-/* （.actions 底栏规则已随更新弹窗迁入工厂 foot 而删除） */
 a{color:var(--accent)}
 .testline{font-size:var(--fs-sm);margin-top:6px}
 .testline.ok{color:var(--ok)}
@@ -443,10 +440,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .addfoot{display:flex;align-items:center;gap:10px;margin-top:8px}
 .addfoot .testline{flex:1;min-width:0;margin:0}
 #addOverlay .modal-foot .addfoot{flex:1;min-width:0;margin:0}
-/* ============================================================
-   UI Kit 组件（规范见 .agents/conventions/ui-kit.md；新增 UI 先查这里）
-   ============================================================ */
-/* —— Switch：唯一合法的开关形态（绿=开启，替代旧 pill 文字开关）；.tswitch = 开关+文字组合 —— */
+/* UI Kit 组件（规范见 .agents/conventions/ui-kit.md；新增 UI 先查这里） */
+/* Switch：唯一合法的开关形态（绿=开启，替代旧 pill 文字开关）；.tswitch = 开关+文字组合 */
 .switch{position:relative;display:inline-flex;flex:0 0 auto;cursor:pointer;vertical-align:middle}
 .switch input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer}
 .switch .track{display:block;width:36px;height:21px;border-radius:var(--r-full);background:var(--border);position:relative;transition:background var(--dur)}
@@ -455,22 +450,22 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .switch input:checked+.track::after{transform:translateX(15px)}
 .switch input:disabled+.track{opacity:.5}
 .tswitch{display:inline-flex;align-items:center;gap:7px;font-size:var(--fs-sm);color:var(--muted);cursor:pointer;white-space:nowrap}
-/* —— Segmented 分段控件：互斥选项切换；.grow=通宽等分（导入弹层选项卡）；选中=蓝底白字 —— */
+/* Segmented 分段控件：互斥选项切换；.grow=通宽等分（导入弹层选项卡）；选中=蓝底白字 */
 .seg{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:3px;gap:2px}
 .seg button{padding:5px 14px;border-radius:7px;font-size:var(--fs-sm);color:var(--muted);cursor:pointer;white-space:nowrap;transition:all var(--dur)}
 .seg button:hover{color:var(--text)}
 .seg button.on{background:var(--accent);color:#fff;font-weight:600}
 .seg.grow{display:flex;width:100%}
 .seg.grow button{flex:1;justify-content:center;text-align:center}
-/* —— Tooltip：纯 CSS，data-tip 属性（需 i18n 的用 data-i18n-tip 注入）；箭头由 ::before 绘制。
+/* Tooltip：纯 CSS，data-tip 属性（需 i18n 的用 data-i18n-tip 注入）；箭头由 ::before 绘制。
    定位锚点：data-tip 元素自身需为 positioned——fixed/absolute/sticky 元素直接用；
-   静态元素补 .tip 类（不得给 [data-tip] 全局加 position:relative，会把 .fab/.snav 的 fixed 顶掉） —— */
+   静态元素补 .tip 类（不得给 [data-tip] 全局加 position:relative，会把 .fab/.snav 的 fixed 顶掉） */
 .tip{position:relative}
 [data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);background:#111827;color:#f5f5f5;border:1px solid rgba(255,255,255,.12);font-size:var(--fs-xs);line-height:1.4;padding:4px 9px;border-radius:var(--r-sm);white-space:nowrap;pointer-events:none;z-index:calc(var(--z-pop) + 1);animation:tipIn .12s ease-out .3s backwards;box-shadow:var(--shadow-md)}
 [data-tip]:hover::before{content:'';position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%) rotate(45deg);width:7px;height:7px;background:#111827;border-right:1px solid rgba(255,255,255,.12);border-bottom:1px solid rgba(255,255,255,.12);z-index:calc(var(--z-pop) + 1);animation:tipIn .12s ease-out .3s backwards}
 @keyframes tipIn{from{opacity:0}}
-/* —— Modal 壳：head/body/foot 三段（head 标题+关闭常驻、body 滚动、foot 操作常驻）；
-   .pad0 配合三段结构去全局内边距；.end 把首按钮推到右侧（无 testline 的双按钮 foot） —— */
+/* Modal 壳：head/body/foot 三段（head 标题+关闭常驻、body 滚动、foot 操作常驻）；
+   .pad0 配合三段结构去全局内边距；.end 把首按钮推到右侧（无 testline 的双按钮 foot） */
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 20px 12px;border-bottom:1px solid var(--border);flex:0 0 auto}
 .modal-head h3{margin:0;font-size:var(--fs-lg);font-weight:700}
 .modal-body{padding:14px 20px 16px;overflow-y:auto;min-height:0}
@@ -482,7 +477,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .modal-foot .end{margin-left:auto}
 /* 弹层开着时的错误就近写底栏左侧槽，不走全局 toast——遮罩 z 在 toast 之上，磨砂会把 toast 糊掉（textContent 填充，上游报错文本不可信） */
 .modal-foot .mferr{flex:1;min-width:0;margin:0;color:var(--err);font-size:var(--fs-sm);word-break:break-all}
-/* —— 窄屏兜底（手机浏览器/半屏分屏）：主布局本就流式折行，这里只处理固定宽度表格与顶栏 —— */
+/* 窄屏兜底（手机浏览器/半屏分屏）：主布局本就流式折行，这里只处理固定宽度表格与顶栏 */
 /* 日志表滚动壳=浮头表格契约的卡内滚动容器：竖向也在这里滚（max-height 封顶），thead th 相对它吸附；
    外滚吸附要对齐页面 sticky 页头高度（窄屏折行不定值），故页级表格用内滚变体 */
 .tablescroll{overflow:auto;max-height:60vh;-webkit-overflow-scrolling:touch}
@@ -697,7 +692,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 <script>
 (function () {
   var $ = function (s) { return document.querySelector(s) }
-  // —— SVG 图标集（kit 组件）：24 网格 / currentColor / stroke 2，替代跨平台不一致的字符字形；
+  // SVG 图标集（kit 组件）：24 网格 / currentColor / stroke 2，替代跨平台不一致的字符字形；
   //    句子文案内嵌的 ✓⚠ 等保留文本形态，只有「控件上的图标」走这里
   var IC = {
     check: '<path d="M20 6L9 17l-5-5"/>',
@@ -723,7 +718,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function iconInline(name, size) {
     return '<span class="ic">' + icon(name, size) + '</span>'
   }
-  // —— 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / Esc+遮罩关闭 / aria / 底栏槽位。
+  // 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / Esc+遮罩关闭 / aria / 底栏槽位。
   // 此前 6 份手写壳两种背景、Esc 与遮罩关闭各有各的写法；底栏=可配置槽位（msg 槽 + 按钮序列），
   // 谁有取消、谁是主按钮仍由调用方定（评审定稿语义不变）。scrim 沿用既有 overlay id——
   // id 作用域的 CSS/JS 引用全部保持有效；壳逐期迁入（未迁壳走原静态 HTML，互不影响）。
@@ -1024,7 +1019,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 让人误以为点击没生效。标记由 renderClients 消费，跨重绘保持，安装完成/失败后才解除。
   var cliInstalling = {}
 
-  // —— i18n：动态文案用 t(中文, English)；静态节点用 data-i18n(-ph/-title)="中文||English"，applyLang 统一切换 ——
+  // i18n：动态文案用 t(中文, English)；静态节点用 data-i18n(-ph/-title)="中文||English"，applyLang 统一切换
   var LANG = localStorage.getItem('mdk_lang') || 'zh'
   function t(zh, en) { return LANG === 'en' && en != null ? en : zh }
   function i18nPick(pairAttr) {
@@ -1226,7 +1221,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (ti) ti.onkeydown = function (e) { if (e && e.key === 'Enter' && tb) tb.onclick() }
   }
 
-  // —— 旧配置一键迁移（cc-switch / Claude Code / dsh / ZCode） ——
+  // 旧配置一键迁移（cc-switch / Claude Code / dsh / ZCode）
   var SRC_LABEL = { 'cc-switch': 'cc-switch', claude: 'Claude Code', dsh: 'dsh', zcode: 'ZCode' }
 
   function checkMigrate() {
@@ -1359,9 +1354,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     return isNaN(d.getTime()) ? String(iso) : d.toLocaleString()
   }
 
-  // —— 一键更新（顶栏徽标 + 居中模态）：安静模式——有新版才徽标 + toast 提醒一次，无新版零打扰；
+  // 一键更新（顶栏徽标 + 居中模态）：安静模式——有新版才徽标 + toast 提醒一次，无新版零打扰；
   // 「此版本不再提醒」记忆在 localStorage（同版本不再提醒，更新到该版本后自动清除）；
-  // 手动检查走命令行 modeldock update --check 或托盘「检查更新」，网页端不做检查入口 ——
+  // 手动检查走命令行 modeldock update --check 或托盘「检查更新」，网页端不做检查入口
   var upd = null // 最近一次 /admin/update/status
   var updAnnounced = false // 本次页面会话只 toast 提醒一次
   var updApplying = false // 已点更新、等待网关重启重连（按钮态机：更新到 vX → 更新中…）
@@ -1520,7 +1515,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     renderUpdBadge()
     toast(t('已隐藏 v' + upd.latest + ' 的更新提醒；下个新版本会再次提醒', 'Muted update reminders for v' + upd.latest + '; you will be notified again for the next release'))
   }
-  // 点遮罩空白处或按 ESC 关闭（=稍后，下个会话仍会提醒）——由工厂 closeOnScrim/closeOnEsc 承接
 
   function renderAutoRoute() {
     var sel = document.getElementById('autoRouteSel')
@@ -1609,7 +1603,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
   }
 
-  // —— 添加模型服务：已有服务时收起为右下角 + 号，点击浮层展示 ——
+  // 添加模型服务：已有服务时收起为右下角 + 号，点击浮层展示
   var addOpen = false
 
   function layoutAddSection() {
@@ -1960,7 +1954,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
 
   $('#svcQ').addEventListener('input', function () { svcQ = this.value; renderServices() })
-  // —— 状态行开关（pillSwitch；视觉=原 pill，布局/顺序不变）——
+  // 状态行开关（pillSwitch；视觉=原 pill，布局/顺序不变）
   // 自动路由：主体点击切换；失败回弹并提示（busy 期组件防连点）
   var autoRouteApi = pillSwitch('autoRoutePill', {
     label: function () { return t('自动路由', 'Auto route') },
@@ -2012,7 +2006,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     },
   })
 
-  // —— 手机远程（LAN 简版控制台）：主体=开关，caret=收起/展开二维码面板（不停服务） ——
+  // 手机远程（LAN 简版控制台）：主体=开关，caret=收起/展开二维码面板（不停服务）
   var lanPanel = document.getElementById('lanPanel')
   var lanOn = false // 当前 LAN 开关态（render 轮询重绘与 loadLanStatus、开关回调共用一份）
   function applyLanPill(on) { lanOn = !!on; if (lanApi) lanApi.set({ on: lanOn }) }
@@ -2069,7 +2063,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
   loadLanStatus() // 初始开关状态（开/关一眼可见）
 
-  // —— 定时：主体=启用定时切换（原面板内勾选提到 pill），caret=展开/收起时段面板 ——
+  // 定时：主体=启用定时切换（原面板内勾选提到 pill），caret=展开/收起时段面板
   var schedStatus = { windows: 0, autoOn: false, active: null, activeAvoids: [] }
   // 启用态的唯一事实来源：切换即时落盘（不走防抖），切换在飞期间轮询重绘不回灌开关态——
   // 否则 5s 轮询会在防抖窗口内把服务端旧值写回，POST 就带回了旧值（实测复现过的竞态）
@@ -2102,7 +2096,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     onExpand: function (open) { schedOpen = open; if (open) renderSchedPanel(); else schedRowsRendered = false },
   })
 
-  // —— 同网直拉迁移（sync-lan-pull）：A 侧「分享到附近电脑」/ B 侧「从其他电脑导入」 ——
+  // 同网直拉迁移（sync-lan-pull）：A 侧「分享到附近电脑」/ B 侧「从其他电脑导入」
   // 链接含口令（#p= fragment，不出本机也不进审计）；附近直拉链路凭对方放行的一次性 ticket 应用
   function shareToggle(show) { if (show) shareM.open(); else shareM.close() }
   function importToggle(show) { if (show) importM.open(); else importM.close() }
@@ -2329,7 +2323,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
   // 分享/导出/导入/确认/更新弹层的遮罩点击与 Esc 已全部由工厂壳承接，此处不再有手写监听
 
-  // —— 导出配置包（.msync）：与 /m 导出、CLI config export 同一数据链路，桌面浏览器直接下载文件 ——
+  // 导出配置包（.msync）：与 /m 导出、CLI config export 同一数据链路，桌面浏览器直接下载文件
   function pkgToggle(show) { if (show) pkgM.open(); else pkgM.close() }
   function setPkgErr(msg) {
     var el = document.getElementById('pkgErr')
@@ -2364,9 +2358,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         .then(function () { pkgSaveBtn.disabled = false })
     }
   }
-  // 导入弹层的 Esc 关闭由工厂壳承接
 
-  // —— 附近电脑确认式直拉（sync-nearby）——
+  // 附近电脑确认式直拉（sync-nearby）
   // B 侧：切到「附近的电脑」标签即自动搜索 → 点卡片「导入」→ 敲门 → 轮询对方裁决 →
   // granted 直接凭 ticket 应用（A 侧确认卡就是安全门，B 侧不再二次确认）；A 侧：确认卡 [允许][拒绝]（overview 轮询驱动）
   var nearPoll = null
@@ -2489,7 +2482,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
   }
 
-  // —— 定时切换：面板与编辑（窗口按顺序取首个命中；节假日名单日整体跳过） ——
+  // 定时切换：面板与编辑（窗口按顺序取首个命中；节假日名单日整体跳过）
   var schedOpen = false
   var schedSeedDismissed = false // 用户保存过空时段后不再预填默认时段
   function parseTarget(t) {
@@ -2696,9 +2689,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }).join(t(' · ', ' · '))
   }
 
-  // —— 时段选择（Ant Design TimePicker 式交互）：点击输入框直接弹出「时/分」两列滚动面板，
+  // 时段选择（Ant Design TimePicker 式交互）：点击输入框直接弹出「时/分」两列滚动面板，
   //    点选即生效、面板保持打开便于连续微调；输入框同时可键入（宽容解析，键入时两列实时联动高亮）；
-  //    点外部 / Esc / Enter / 滚动页面 关闭 ——
+  //    点外部 / Esc / Enter / 滚动页面 关闭
   function parseTimeInput(v) {
     var s = String(v || '').trim()
     var m = /^(\\d{1,2}):(\\d{1,2})$/.exec(s)
@@ -3340,7 +3333,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
   })
 
-  // —— 编辑模型服务：壳只留 Key 语义与提交动作；字段块见下方「服务表单公共块」 ——
+  // 编辑模型服务：壳只留 Key 语义与提交动作；字段块见下方「服务表单公共块」
   var editing = null
   var knownModels = {} // 填模型名时自动补上下文/输出的兜底总表（内置小表 ∪ models.dev 目录懒加载）
   var catalogTable = {} // models.dev 目录大表（/_modeldock/model-catalog 懒加载一次，不进 overview 轮询）
@@ -3383,7 +3376,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   bindKeyToggle('afKey', 'afKeyToggle')
   bindKeyToggle('pkgPw', 'pkgPwToggle')
 
-  // ———————— 服务表单公共块（添加/编辑两壳共用的一份实现） ————————
+  // 服务表单公共块（添加/编辑两壳共用的一份实现）
   // 三个块：端点(EndpointBlock) / 模型目录+拉取面板(ModelBlock) / 故障切换顺序(FallbackBlock)。
   // HTML 由块生成：文案带 data-i18n（applyLang 的全局扫描会随语言切换刷新），生成时 applyI18nTree 立即生效；
   // 事件全部委托在块根上，load() 重写 innerHTML 不丢监听。两壳各自实例化（id 前缀 ef*/af*），
@@ -3727,7 +3720,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         '<button class="btn small primary" type="button" id="' + gid('FetchFill') + '" data-i18n="填入所选||Fill selected">填入所选</button>' +
         '</div></div>'
     }
-    // 事件委托绑在块根上（load 重绘不丢监听）
     // 按钮内容是 SVG 图标：点击命中的可能是按钮内的 <svg>/<path> 子元素，须经 closest 找到按钮本体再判断
     root.addEventListener('click', function (e) {
       var tg = e.target
@@ -3906,12 +3898,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       })
       return out
     }
-    // 事件委托绑在块根上（load 重绘不丢监听）
     root.addEventListener('click', function (e) {
       var tg = e.target
       if (!tg || !tg.classList) return
       if (tg.id === gid('FbAuto')) {
-        // 把所有启用中的其他服务按优先级排入备用链，模型取各自的默认模型
         var selfId = opts.getSelfId ? opts.getSelfId() : null
         var rows = (opts.getServices() || [])
           .filter(function (x) { return x.id !== selfId && x.enabled !== false })
@@ -3935,7 +3925,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       }
       var r = tg.closest('.fbrow')
       if (!r) return
-      // 按钮内容是 SVG 图标：点击命中的可能是按钮内的 <svg>/<path> 子元素，须经 closest 找到按钮本体再判断
       if (tg.closest('.del')) { r.remove(); populateAdd(); return }
       var upBtn = tg.closest('.fbup'), downBtn = tg.closest('.fbdown')
       if (upBtn || downBtn) {
@@ -3954,7 +3943,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     return { load: load, collect: collect, el: root }
   }
 
-  // —— 两壳的块实例：编辑（ef*）在此创建；添加（af*）在添加表单区创建 ——
+  // 两壳的块实例：编辑（ef*）在此创建；添加（af*）在添加表单区创建
   // msg(text, cls)：写弹层左下角提示槽；cls 走 .testline.err / .testline.ok 语义色
   function testlineWriter(elId) {
     return function (text, cls) {

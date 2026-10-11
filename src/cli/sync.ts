@@ -101,7 +101,7 @@ export async function cmdConfigImport(file: string, opts: { stdinPass?: boolean;
   console.log(c.gray(t('改动前已自动快照到 backups/config/。网关运行中则配置热加载立即生效；自定义预设需重启网关后生效', 'A pre-change snapshot was saved to backups/config/. With the gateway running, config changes hot-reload immediately; custom presets take effect after a gateway restart')))
 }
 
-// —— M2：多机自动同步（docs/design-cloud-sync.md §6） ——
+// M2：多机自动同步（docs/design-cloud-sync.md §6）
 
 async function askTargetConfig(o: { target?: string; url?: string; dir?: string; username?: string; password?: string }): Promise<SyncTargetConfig> {
   let kind = o.target
