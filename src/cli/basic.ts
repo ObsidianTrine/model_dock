@@ -14,10 +14,12 @@ import {
   syncJsonPath,
 } from '../util/paths.js'
 import { loadConfig } from '../config/store.js'
-import { deleteSecret } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
 import { cmdDetach } from './harness.js'
-import { cmdGatewayStop, sweepGatewayProcesses } from './gatewaycmd.js'
+// 注意：gatewaycmd.js / secrets.js 刻意不在顶层 import——它们各自被 test/uninstall.test.ts 以
+// vitest vi.mock 拦截。isolate:false + singleFork 下若在本模块顶层静态引用它们，任何早于
+// uninstall.test 加载本模块的测试会把真实实现固化进共享注册表，导致其 mock 失效。改为在使用处
+// 惰性 import（与下方 autostart/cliinstall 同款做法），运行时才会解析到（被 mock 的）模块。
 
 export async function cmdAdapterList(): Promise<void> {
   const cfg = await loadConfig()
@@ -86,6 +88,7 @@ export async function cmdUsage(): Promise<void> {
 
 /** 卸载共用的程序本体清理：停网关 + 游离清扫 + 移除自启/命令行入口；不动 ~/.modeldock 与客户端接管状态 */
 async function removeProgramArtifacts(): Promise<void> {
+  const { cmdGatewayStop, sweepGatewayProcesses } = await import('./gatewaycmd.js')
   await cmdGatewayStop()
   // 游离网关全量清扫：仅卸载时执行（gateway stop 可能有多实例共存，如生产 8687 + dev/测试实例，不能全杀）
   sweepGatewayProcesses()
@@ -130,6 +133,7 @@ export async function cmdUninstall(opts: { yes?: boolean; purge?: boolean } = {}
         console.error(c.red(t('✗ 还原 {id} 失败：{m}', '✗ Failed to restore {id}: {m}', { id, m: (e as Error).message })))
         console.error(c.yellow(t('  已中止卸载以保留快照（{d}）。排查后重跑 modeldock uninstall --purge；', '  Uninstall aborted to keep the backups ({d}). Fix the issue, then rerun modeldock uninstall --purge;', { d: displayPath(backupsDir()) })))
         console.error(c.yellow(t('  确认放弃快照可手动：modeldock gateway stop && rm -rf {d}', '  To give up the backups deliberately: modeldock gateway stop && rm -rf {d}', { d: modeldockDir() })))
+        const { cmdGatewayStop } = await import('./gatewaycmd.js')
         await cmdGatewayStop().catch(() => {})
         return
       }
@@ -138,6 +142,7 @@ export async function cmdUninstall(opts: { yes?: boolean; purge?: boolean } = {}
     await removeProgramArtifacts()
 
     // 清除密钥：keychain/secret-service 条目不在 ~/.modeldock 里，rm 目录清不掉
+    const { deleteSecret } = await import('../config/secrets.js')
     for (const [id, ref] of keyRefs) {
       try {
         await deleteSecret(ref)
@@ -207,9 +212,11 @@ export async function cmdReset(opts: { yes?: boolean; deep?: boolean } = {}): Pr
     }
   }
 
+  const { cmdGatewayStop } = await import('./gatewaycmd.js')
   await cmdGatewayStop()
 
   // keychain/secret-service 条目不在 secrets.json 里，删文件清不掉
+  const { deleteSecret } = await import('../config/secrets.js')
   for (const [, p] of Object.entries(cfg.providers)) {
     try {
       await deleteSecret(p.key_ref)
