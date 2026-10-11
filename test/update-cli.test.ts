@@ -7,7 +7,7 @@ import { loadConfig, saveConfig } from '../src/config/store.js'
 import { emptyConfig } from '../src/config/types.js'
 import { configPath } from '../src/util/paths.js'
 // cmdUpdate 的网络与安装层整体 mock（工厂内定义 vi.fn，再从被 mock 模块导入引用）：
-// 这里只验证 CLI 编排——令牌存取、参数透传、无令牌可操作报错
+// 这里只验证 CLI 编排——令牌存取、参数透传、无令牌匿名继续
 vi.mock('../src/update/run.js', () => ({
   runUpdate: vi.fn(async () => ({ updated: true, currentVersion: '0.1.0', latestVersion: '9.9.9' })),
   checkUpdate: vi.fn(async () => ({ updated: false, currentVersion: '0.1.0', latestVersion: '9.9.9' })),
@@ -28,18 +28,17 @@ describe('cmdUpdate CLI 编排', () => {
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
-  it('无令牌：报可操作错误（指引 --token），不发起更新', async () => {
+  it('无令牌：匿名继续（公开仓库免 PAT），token=null 透传给 runUpdate', async () => {
     const h = fakeHome()
     try {
-      await cmdUpdate({})
-      expect(process.exitCode).toBe(1)
-      const out = errSpy.mock.calls.map((a) => String(a[0])).join('\n')
-      expect(out).toContain('--token')
-      expect(mockRun).not.toHaveBeenCalled()
-      expect(mockCheck).not.toHaveBeenCalled()
+      await cmdUpdate({ yes: true })
+      expect(process.exitCode).toBeUndefined()
+      expect(mockRun).toHaveBeenCalledTimes(1)
+      const arg = mockRun.mock.calls[0][0] as { repo: string; token: string | null }
+      expect(arg.token).toBeNull()
+      expect(arg.repo.length).toBeGreaterThan(0)
     } finally {
       h.restore()
-      process.exitCode = undefined
     }
   })
 

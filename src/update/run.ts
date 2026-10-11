@@ -35,16 +35,20 @@ import {
   type InstallDeps,
 } from './install.js'
 import { notesSummary } from './notes.js'
+import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 
 export interface UpdateRunOptions {
   repo: string
-  token: string
+  /** GitHub 访问令牌；null = 匿名（公开仓库默认；PAT 可选——私有仓库必需/提升限流） */
+  token: string | null
   yes: boolean
   /** 确认交互（CLI 默认 @inquirer/prompts；--yes / Web 端点传 () => true） */
   confirm: (message: string) => Promise<boolean>
   deps?: InstallDeps
   /** 测试注入：GitHub API 基地址（默认 https://api.github.com） */
   apiBase?: string
+  /** 下载镜像前缀列表（design §6 第 4 项；缺省 DEFAULT_UPDATE_MIRRORS，空数组=关闭镜像只走官方） */
+  mirrors?: string[]
   /** 测试注入：下载重试间隔 ms（默认 2000） */
   retryDelayMs?: number
   /** 测试注入：以这个 execPath 识别安装形态（默认 process.execPath） */
@@ -136,9 +140,11 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     log(t('下载中…', 'Downloading…'))
     const file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
       apiBase: opts.apiBase,
+      mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
     })
     log(t('校验 SHA256…', 'Verifying SHA256…'))
+    // SUMS 刻意不走镜像：完整性锚点必须来自官方 API（design §8）
     const sums = await fetchChecksums(opts.repo, opts.token, m, {
       apiBase: opts.apiBase,
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
@@ -208,7 +214,7 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
 }
 
 /** --check：只看不装（不下载大文件，不发确认） */
-export async function checkUpdate(repo: string, token: string, opts: { apiBase?: string; log?: (m: string) => void } = {}): Promise<UpdateRunResult> {
+export async function checkUpdate(repo: string, token: string | null, opts: { apiBase?: string; log?: (m: string) => void } = {}): Promise<UpdateRunResult> {
   const log = opts.log ?? ((m: string) => console.log(m))
   const m = await fetchLatestRelease(repo, token, opts.apiBase)
   const cmp = compareVersions(m.version, VERSION)

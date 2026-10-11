@@ -79,14 +79,16 @@
 
 ## 4. 【决策】feed 演进路线（三阶段）
 
-> **2026-10-09 更新**：项目已迁至 [ObsidianTrine/model_dock](https://github.com/ObsidianTrine/model_dock) 公开开源（v1.0.0 起），主仓库 `/releases/latest` 匿名可用——公开源的 PAT 已非必需（存量旧版本 ≤1.3.x 仍指向私有旧仓库，升级时才用得上 PAT）。下述三阶段为私有时期的决策记录，M2/M3 是否仍按原计划推进待重新评估。
+> **2026-10-09 更新**：项目已迁至 [ObsidianTrine/model_dock](https://github.com/ObsidianTrine/model_dock) 公开开源（v1.0.0 起），主仓库 `/releases/latest` 匿名可用——公开源的 PAT 已非必需（存量旧版本 ≤1.3.x 仍指向私有旧仓库，升级时才用得上 PAT）。下述三阶段为私有时期的决策记录。
+>
+> **2026-10-11 更新**：M2 按新前提落地——独立 releases 仓库/latest.json 作废，客户端改匿名免 PAT + 可选令牌 + 镜像回退链（详见 §6）；M3 维持规划。
 
 初设计时**仓库私有**（匿名 404），无凭据的公开更新源不可用；公共镜像链（gh-proxy 类）对私有仓库同样 404。据此拍板：
 
 | 阶段 | 更新源 | 触发条件 | 状态 |
 |---|---|---|---|
-| **M1** | GitHub API + 用户 PAT（私有直连） | 现在 | 已实施（v1.2.1 起发布；仓库公开后匿名可用） |
-| **M2** | 公开 releases 专用仓库（如 `ObsidianTrine/modeldock-releases`），release job 同步资产 + latest.json；客户端镜像回退链生效 | 自动更新功能在 M1 稳定使用数个版本后 | 规划 |
+| **M1** | GitHub API + 用户 PAT（私有直连） | 现在 | 已实施（v1.2.1 起发布；2026-10-11 起匿名免 PAT，PAT 转可选） |
+| **M2** | ~~公开 releases 专用仓库 + latest.json~~ → 主仓库直连 + 匿名 + 镜像回退链 | —— | 已实施（2026-10-11，见 §6） |
 | **M3** | VPS / Cloudflare R2 自建源（nginx/caddy 或 R2 + 自定义域），cc-switch 同款；与云同步 VPS 基础设施合流 | VPS 到位后（见 `docs/deploy-cloud.md`） | 规划 |
 
 - M1 的 PAT 仅需 **fine-grained、单仓库、Contents: Read-only**；存在 `secrets.json`（程序管理，0600，现有 `atomicWrite` 链路）。
@@ -180,17 +182,21 @@ modeldock update --clean       # 清理 .old 残留（darwin/win）
 - 真机验收（mac，用户或 agent 协助）：PAT 配置 → `--check` 报新版 → 全量更新 → 8687 自动恢复、Web 控制台/托盘正常 → `--clean` 收尾。**agent 做真机验收前必须与用户确认时点**（涉及生产实例短暂重启）。
 - 验收 = 测试全绿 + 本节真机清单逐条通过。
 
-## 6. M2：公开 releases 专用仓库（规划）
+## 6. M2：公开 releases 专用仓库（规划 → 按主仓库公开落地）
 
 - **触发**：M1 真机稳定使用数个版本后、开始向他人分发之前。
-- **实施状态（2026-10-05）**：用户拍板拆分——**第 5 项（Web 控制台「检查更新」入口 + 托盘菜单项 + 启动静默检查 24h TTL）已随本轮 M2 交付**（`src/update/webupdate.ts` + server 三端点 + ui 徽标/弹层 + 双端托盘菜单；沙箱实例浏览器实测通过）；第 1–4 项（公开仓库迁移 + latest.json + 镜像链）维持规划，待功能真机稳定后另行实施。
-- 改动：
-  1. 新公开仓库 `modeldock-releases`（只放 Release 资产 + `latest.json`）；
-  2. `release.yml` 增加 sync job：复制资产到公开仓库 Release 并生成 `latest.json`（version/notes/pub_date/platforms→{url,sha256,size}——manifest 接口此时落地）；
-  3. 客户端：feed adapter 从「GitHub API+PAT」切「latest.json」；`[update] repo` 指向新仓库；PAT 流程保留为私有仓库兼容模式；
-  4. 镜像回退链：`[update].mirror` 列表，默认 `https://gh-proxy.com/` → `https://ghfast.top/` → 官方直连，逐个超时回退（仅公开资产可用镜像）；
+- **实施状态（2026-10-05）**：用户拍板拆分——**第 5 项（Web 控制台「检查更新」入口 + 托盘菜单项 + 启动静默检查 24h TTL）已随本轮 M2 交付**（`src/update/webupdate.ts` + server 三端点 + ui 徽标/弹层 + 双端托盘菜单；沙箱实例浏览器实测通过）；第 1–4 项维持规划。
+- **实施状态（2026-10-11）**：主仓库已公开开源（ObsidianTrine/model_dock，v1.0.0 起新版本线），原前提（主仓库私有）失效，第 1–4 项按新前提落地（`feature/public-release-update`）：
+  - **第 1–2 项作废**：不再新建独立 releases 仓库、release.yml 不加 sync job——Release 资产直接发布在已公开的主仓库。
+  - **第 3 项改为「匿名 + 可选令牌」**：客户端不开 latest.json（GitHub API 匿名已可用，独立 manifest 无增益）——`fetchLatestRelease/downloadAsset` 的 token 改可空，无 `token_ref` 时省略 Authorization 头匿名访问；PAT 保留为私有仓库兼容模式 + 限流提升（60 次/时 → 5000 次/时）；CLI 不再无令牌硬拒，Web 启动检查无令牌照常进行；401/403/404 文案按有无令牌分流。
+  - **第 4 项镜像回退链落地**：`[update].mirror` 列表（缺省 `DEFAULT_UPDATE_MIRRORS` = `https://gh-proxy.com/` → `https://ghfast.top/`，官方直连为隐式末位），候选链 = 镜像×1（60s 快失败）→ 官方 API 资产端点×3（15min）；仅当 `browser_download_url` 呈 `https://github.com/{repo}/releases/download/` 规范形态才走镜像（防陌生 URL 塞给第三方），Authorization 绝不随镜像请求发出；**SHA256SUMS 永走官方 API**（完整性锚点不经镜像，见 §8）。
+- 改动（原始规划存档）：
+  1. ~~新公开仓库 `modeldock-releases`（只放 Release 资产 + `latest.json`）~~ 主仓库公开后作废；
+  2. ~~`release.yml` 增加 sync job：复制资产到公开仓库 Release 并生成 `latest.json`~~ 作废；
+  3. ~~客户端：feed adapter 从「GitHub API+PAT」切「latest.json」~~ 改为匿名 + 可选令牌（见上）；`[update] repo` 指向主仓库；PAT 流程保留为私有仓库兼容模式；
+  4. 镜像回退链：`[update].mirror` 列表，默认 `https://gh-proxy.com/` → `https://ghfast.top/` → 官方直连，逐个超时回退（仅公开资产可用镜像）——已落地（见上）；
   5. ~~Web 控制台「检查更新」入口、托盘菜单项、启动检查提示~~ **已完成（见上）**。实现要点：网关进程绝不自行安装（apply 仅分离 spawn `update --yes`，argv 由 `updateDaemonArgs()` 传入）；webupdate 模块不静态依赖 autostart（单测整模块 mock 与共享注册表叠加会击穿静态绑定）。
-- 风险：镜像为第三方公共服，只做下载加速，**完整性仍以 SHA256 为准**。
+- 风险：镜像为第三方公共服，只做下载加速，**完整性仍以 SHA256 为准**（SUMS 本体永走官方 API，镜像调包资产会被校验拦截）。
 
 ## 7. M3：VPS / R2 自建源（规划）
 

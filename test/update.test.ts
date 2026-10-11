@@ -9,10 +9,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   UpdateError,
   compareVersions,
+  downloadAsset,
   fetchChecksums,
   fetchLatestRelease,
   selectAssetName,
   verifyChecksum,
+  type ReleaseAsset,
 } from '../src/update/check.js'
 import {
   appRootFromExecPath,
@@ -38,7 +40,7 @@ interface MockRelease {
   tag: string
   /** 资产名 → 内容（Buffer/string）；SHA256SUMS 除外（由 makeSums 生成或测试自定） */
   assets: Record<string, Buffer>
-  /** 额外原始响应覆盖（如 401） */
+  /** 额外原始响应覆盖（如 401/403/404） */
   status?: number
   /** manifest 里声明的 size 覆盖（默认真实长度；测不完整下载时改大） */
   sizeOverride?: Record<string, number>
@@ -46,6 +48,8 @@ interface MockRelease {
   sums?: Buffer
   /** 发布正文（markdown）覆盖：默认一句简短说明 */
   body?: string
+  /** 设置后 manifest 资产带 browser_download_url（真实 GitHub 形态，通过镜像前缀检查），本 mock 同时伺服该路径 */
+  browserBase?: string
 }
 
 function makeSums(assets: Record<string, Buffer>): Buffer {
@@ -57,14 +61,18 @@ function makeSums(assets: Record<string, Buffer>): Buffer {
   )
 }
 
-/** 本地伪造 GitHub API：releases/latest + assets/{id}（octet-stream）。返回基地址与请求路径记录。 */
-async function startMockApi(release: MockRelease): Promise<{ apiBase: string; requests: string[]; close: () => Promise<void> }> {
+/** 本地伪造 GitHub API（公开仓库语义：无 Authorization 头放行，带了但不对才 401）：
+ *  releases/latest + assets/{id}（octet-stream）+ 可选 browser_download_url 路径。
+ *  返回基地址、请求路径与各请求是否带鉴权头记录。 */
+async function startMockApi(release: MockRelease): Promise<{ apiBase: string; requests: string[]; authed: boolean[]; close: () => Promise<void> }> {
   const requests: string[] = []
+  const authed: boolean[] = []
   const names = Object.keys(release.assets)
   const idOf = (n: string) => names.indexOf(n) + 1
   const server = http.createServer((req, res) => {
     requests.push(req.url ?? '')
-    if (!req.headers.authorization || req.headers.authorization !== `Bearer ${TOKEN}`) {
+    authed.push(!!req.headers.authorization)
+    if (req.headers.authorization && req.headers.authorization !== `Bearer ${TOKEN}`) {
       res.writeHead(401).end()
       return
     }
@@ -82,6 +90,7 @@ async function startMockApi(release: MockRelease): Promise<{ apiBase: string; re
             name: n,
             id: idOf(n),
             size: release.sizeOverride?.[n] ?? release.assets[n].length,
+            ...(release.browserBase ? { browser_download_url: `${release.browserBase}/releases/download/${release.tag}/${n}` } : {}),
           })),
         })
       )
@@ -96,6 +105,13 @@ async function startMockApi(release: MockRelease): Promise<{ apiBase: string; re
         return
       }
     }
+    if (release.browserBase) {
+      const b = req.url?.match(/^\/releases\/download\/([^/]+)\/(.+)$/)
+      if (b && b[1] === release.tag && names.includes(b[2])) {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(release.assets[b[2]])
+        return
+      }
+    }
     res.writeHead(404).end()
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -104,8 +120,31 @@ async function startMockApi(release: MockRelease): Promise<{ apiBase: string; re
   return {
     apiBase: `http://127.0.0.1:${addr.port}`,
     requests,
+    authed,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
+}
+
+/** 本地镜像桩：按前缀收请求并按脚本应答（status 默认 200 + body），记录命中路径供断言候选顺序 */
+async function startMirror(script: { status?: number; body?: Buffer } = {}): Promise<{ base: string; hits: string[]; close: () => Promise<void> }> {
+  const hits: string[] = []
+  const server = http.createServer((req, res) => {
+    hits.push(req.url ?? '')
+    res.writeHead(script.status ?? 200, { 'content-type': 'application/octet-stream' }).end(script.body ?? Buffer.alloc(0))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const addr = server.address()
+  if (!addr || typeof addr === 'string') throw new Error('no port')
+  return { base: `http://127.0.0.1:${addr.port}`, hits, close: () => new Promise((resolve) => server.close(() => resolve())) }
+}
+
+/** 占位端口（已关闭的监听套接字）：连接必然被拒，用于测镜像连不通时回退 */
+async function deadPort(): Promise<number> {
+  const s = http.createServer()
+  await new Promise<void>((resolve) => s.listen(0, '127.0.0.1', resolve))
+  const port = (s.address() as { port: number }).port
+  await new Promise((resolve) => s.close(resolve))
+  return port
 }
 
 /** 打一个平台相关的裸二进制更新包（unix=tar.gz 含 modeldock；win=zip 含 modeldock.exe） */
@@ -230,12 +269,36 @@ describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
     expect(api.requests.some((u) => u.endsWith('/releases/latest'))).toBe(true)
   })
 
-  it('401 → 报可操作错误（指引 --token 重配）', async () => {
+  it('401 → 报可操作错误（指引 --token 重配，公开仓库也可改匿名）', async () => {
     const api = await startMockApi({ tag: 'v9.9.9', assets: {}, status: 401 })
     cleanup = api.close
+    // 带错误 token：mock 对不匹配的鉴权头直接 401；带「有效」token 也被 release.status 压成 401
     await expect(fetchLatestRelease(REPO, 'wrong-token', api.apiBase)).rejects.toThrow(UpdateError)
-    // 401 分支在 Authorization 缺失/不符时由 mock 直接给出；带错误 token 同样 401
     await expect(fetchLatestRelease(REPO, TOKEN, api.apiBase)).rejects.toThrow(/--token/)
+  })
+
+  it('匿名检查（无令牌）：不带 Authorization 头，公开仓库可读', async () => {
+    const api = await startMockApi({ tag: 'v9.9.9', assets: {} })
+    cleanup = api.close
+    const m = await fetchLatestRelease(REPO, null, api.apiBase)
+    expect(m.version).toBe('9.9.9')
+    expect(api.requests.some((u) => u.endsWith('/releases/latest'))).toBe(true)
+    // 匿名请求绝不携带鉴权头
+    expect(api.authed.every((a) => a === false)).toBe(true)
+  })
+
+  it('403 分流：匿名 = 限流文案（给可选 --token 指引）；带令牌 = 令牌无效文案', async () => {
+    const api = await startMockApi({ tag: 'v9.9.9', assets: {}, status: 403 })
+    cleanup = api.close
+    await expect(fetchLatestRelease(REPO, null, api.apiBase)).rejects.toThrow(/限流|rate limit/)
+    await expect(fetchLatestRelease(REPO, TOKEN, api.apiBase)).rejects.toThrow(/令牌|token/)
+  })
+
+  it('404 分流：匿名 = 提示仓库/发布缺失；带令牌 = 提示仓库与令牌权限', async () => {
+    const api = await startMockApi({ tag: 'v9.9.9', assets: {}, status: 404 })
+    cleanup = api.close
+    await expect(fetchLatestRelease(REPO, null, api.apiBase)).rejects.toThrow(/正式发布|published/)
+    await expect(fetchLatestRelease(REPO, TOKEN, api.apiBase)).rejects.toThrow(/Contents/)
   })
 
   it('SHA256SUMS 解析 + 强校验：相符放行、不符删除并拒装', async () => {
@@ -279,6 +342,102 @@ describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
     const map = await fetchChecksums(REPO, TOKEN, m, { apiBase: api.apiBase, retryDelayMs: 1 })
     expect(map).not.toBeNull()
     expect(map!['modeldock-9.9.9.tar.gz']).toBe(sha256(asset))
+  })
+})
+
+// 镜像回退链（design §6 第 4 项）：镜像只加速资产，SUMS 与兜底永走官方 API
+
+describe('downloadAsset 镜像回退链', () => {
+  let cleanup: (() => Promise<void>) | null = null
+  afterEach(async () => {
+    await cleanup?.()
+    cleanup = null
+  })
+
+  /** 造一个带真实 GitHub 形态 browser_download_url 的资产（通过镜像前缀检查） */
+  function browserAsset(tag: string, buf: Buffer): { asset: ReleaseAsset; urlPath: string } {
+    const name = 'modeldock-9.9.9-darwin-arm64-app.tar.gz'
+    const asset: ReleaseAsset = { name, id: 1, size: buf.length, browserUrl: `https://github.com/${REPO}/releases/download/${tag}/${name}` }
+    return { asset, urlPath: `/https://github.com/${REPO}/releases/download/${tag}/${name}` }
+  }
+
+  it('镜像回退：首个镜像失败落第二个，命中后官方 API 资产端点零请求', async () => {
+    const buf = Buffer.from('mirror-payload')
+    const api = await startMockApi({ tag: 'v9.9.9', assets: { 'modeldock-9.9.9-darwin-arm64-app.tar.gz': buf }, browserBase: `https://github.com/${REPO}` })
+    const mirrorFail = await startMirror({ status: 500 })
+    const mirrorOk = await startMirror({ body: buf })
+    cleanup = async () => { await Promise.all([api.close(), mirrorFail.close(), mirrorOk.close()]) }
+
+    const { asset, urlPath } = browserAsset('v9.9.9', buf)
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-mirror-'))
+    try {
+      const file = await downloadAsset(REPO, null, asset, tmp, { apiBase: api.apiBase, mirrors: [mirrorFail.base, mirrorOk.base], retryDelayMs: 1 })
+      expect(fs.readFileSync(file)).toEqual(buf)
+      expect(mirrorFail.hits).toEqual([urlPath])
+      expect(mirrorOk.hits).toEqual([urlPath])
+      // 镜像命中：官方资产端点不该再被请求
+      expect(api.requests.every((u) => u.endsWith('/releases/latest'))).toBe(true)
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('镜像全挂（死端口 + 5xx）：回落官方 API 资产端点（3 次重试）', async () => {
+    const buf = Buffer.from('official-fallback')
+    const api = await startMockApi({ tag: 'v9.9.9', assets: { 'modeldock-9.9.9-darwin-arm64-app.tar.gz': buf }, browserBase: `https://github.com/${REPO}` })
+    const mirrorFail = await startMirror({ status: 503 })
+    cleanup = async () => { await Promise.all([api.close(), mirrorFail.close()]) }
+    const dead = await deadPort()
+
+    const { asset } = browserAsset('v9.9.9', buf)
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-mirror-'))
+    try {
+      const file = await downloadAsset(REPO, null, asset, tmp, { apiBase: api.apiBase, mirrors: [`http://127.0.0.1:${dead}`, mirrorFail.base], retryDelayMs: 1 })
+      expect(fs.readFileSync(file)).toEqual(buf)
+      // 官方资产端点接住（镜像候选一个都没成功）
+      expect(api.requests.some((u) => u.includes('/releases/assets/'))).toBe(true)
+      expect(mirrorFail.hits).toHaveLength(1)
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('browser_download_url 非本仓库形态：不走镜像，直接官方 API（防把陌生 URL 塞给第三方）', async () => {
+    const buf = Buffer.from('no-mirror-for-foreign-url')
+    const api = await startMockApi({ tag: 'v9.9.9', assets: { 'modeldock-9.9.9-darwin-arm64-app.tar.gz': buf }, browserBase: `https://github.com/${REPO}` })
+    const mirror = await startMirror({ body: Buffer.from('MIRROR-SHOULD-NOT-BE-USED') })
+    cleanup = async () => { await Promise.all([api.close(), mirror.close()]) }
+
+    const name = 'modeldock-9.9.9-darwin-arm64-app.tar.gz'
+    const asset: ReleaseAsset = { name, id: 1, size: buf.length, browserUrl: `https://github.com/someone-else/other/releases/download/v9.9.9/${name}` }
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-mirror-'))
+    try {
+      const file = await downloadAsset(REPO, null, asset, tmp, { apiBase: api.apiBase, mirrors: [mirror.base], retryDelayMs: 1 })
+      expect(fs.readFileSync(file)).toEqual(buf)
+      expect(mirror.hits).toEqual([])
+      expect(api.requests.some((u) => u.includes('/releases/assets/'))).toBe(true)
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('令牌绝不进镜像：官方 API 候选带 Bearer，镜像候选不带', async () => {
+    const buf = Buffer.from('auth-check')
+    const api = await startMockApi({ tag: 'v9.9.9', assets: { 'modeldock-9.9.9-darwin-arm64-app.tar.gz': buf }, browserBase: `https://github.com/${REPO}` })
+    const mirrorFail = await startMirror({ status: 500 })
+    cleanup = async () => { await Promise.all([api.close(), mirrorFail.close()]) }
+
+    const { asset } = browserAsset('v9.9.9', buf)
+    const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-mirror-'))
+    try {
+      // 镜像挂 → 落官方 API（带令牌）→ 成功
+      const file = await downloadAsset(REPO, TOKEN, asset, tmp, { apiBase: api.apiBase, mirrors: [mirrorFail.base], retryDelayMs: 1 })
+      expect(fs.readFileSync(file)).toEqual(buf)
+      // 官方资产端点请求带了鉴权（mock 对错 token 才 401——成功即鉴权匹配）
+      expect(api.authed[api.authed.length - 1]).toBe(true)
+    } finally {
+      await fsp.rm(tmp, { recursive: true, force: true })
+    }
   })
 })
 
@@ -551,6 +710,60 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       await expect(
         runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath, retryDelayMs: 1 }))
       ).rejects.toThrow(/不完整|incomplete/)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('匿名全链路（无令牌）：公开仓库下载→校验→替换→拉起一路可用，全程不带鉴权头', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+
+      const pkg = makeBareArchive(root, '999.0.0')
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+      calls.wasLive = true
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath, token: null }))
+      expect(r.updated).toBe(true)
+      expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
+      expect(api.authed.every((a) => a === false)).toBe(true)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('SUMS 不走镜像：主资产经镜像加速，校验名单仍取自官方 API 资产端点', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+
+      const pkg = makeBareArchive(root, '999.0.0')
+      const api = await startMockApi({
+        tag: 'v999.0.0',
+        assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) },
+        browserBase: `https://github.com/${REPO}`,
+      })
+      const mirror = await startMirror({ body: pkg.buf })
+      cleanup = async () => { await Promise.all([api.close(), mirror.close()]) }
+      const { deps, calls } = mockDeps()
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath, mirrors: [mirror.base], retryDelayMs: 1 }))
+      expect(r.updated).toBe(true)
+      // 镜像只见过主资产这一次请求；SUMS（资产 id=2）从官方 API 拿
+      expect(mirror.hits).toHaveLength(1)
+      expect(mirror.hits[0]).toContain(pkg.name)
+      expect(api.requests.some((u) => u.endsWith('/releases/assets/2'))).toBe(true)
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
     }

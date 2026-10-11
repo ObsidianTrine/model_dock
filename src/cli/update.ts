@@ -8,7 +8,8 @@ import { checkUpdate, cleanUpdateRemnants, runUpdate } from '../update/run.js'
 /** PAT 在 secrets 里的固定 id（key_ref 存 config.toml [update].token_ref） */
 export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 
-/** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6） */
+/** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
+ *  公开仓库匿名即可更新；--token 可选——私有仓库兼容模式或提升匿名限流（60 次/时 → 5000 次/时） */
 export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean }): Promise<void> {
   // --clean 纯本地清理，不需要令牌与网络
   if (opts.clean) {
@@ -30,21 +31,10 @@ export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: 
     console.log(c.green(t('✓ 更新令牌已保存', '✓ Update token saved')))
   }
 
+  // 未显式给 --token 时读已存的；都没有就走匿名（公开仓库 releases 匿名可读）
   if (!token) {
     const ref = cfg.update?.token_ref
     token = ref ? await getSecret(ref) : null
-  }
-  if (!token) {
-    console.error(
-      c.red(
-        t(
-          '尚未配置更新令牌。到 GitHub → Settings → Developer settings → Fine-grained tokens 生成（仅本仓库、Contents 只读），然后执行：modeldock update --token <令牌>',
-          'No update token configured. Generate a fine-grained token (this repo only, Contents read-only) under GitHub → Settings → Developer settings, then run: modeldock update --token <token>'
-        )
-      )
-    )
-    process.exitCode = 1
-    return
   }
 
   const repo = cfg.update?.repo ?? DEFAULT_UPDATE_REPO
