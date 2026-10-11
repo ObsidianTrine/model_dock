@@ -2025,3 +2025,54 @@ describe('独立直连 Phase 2：dsh / codex / zcode / opencode / workbuddy', ()
     }
   })
 })
+
+describe('定时 prefer 窗口接管：syncBakedClientsForDisplayRoute 跟随', () => {
+  it('窗口接管重写 picker、幂等不重写、窗口结束恢复', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const { applyAttach, syncBakedClientsForDisplayRoute } = await import('../src/ops.js')
+      const { buildRuntime } = await import('../src/gateway/state.js')
+      await withConfig({
+        ...emptyConfig(),
+        gateway: { auto_failover: true },
+        providers: {
+          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } },
+          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+        },
+        profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
+        active_profile: 'proA',
+      })
+      await applyAttach('claude-code', {})
+      const rt = buildRuntime(await loadConfig(), 't')
+      const settingsPath = path.join(h.home, '.claude', 'settings.json')
+      const last: { route?: string } = {}
+      const pickerModels = () => JSON.parse(fs.readFileSync(settingsPath, 'utf8')).modelPicker.options.map((o: any) => o.model)
+
+      // 首次调用（基线 undefined → 展示路由 pa）：写入当前目录（与 attach 内容一致）
+      const r1 = await syncBakedClientsForDisplayRoute(rt, last)
+      expect(r1.changed).toBe(true)
+      expect(pickerModels()).toEqual(['a-model'])
+
+      // prefer 窗口接管 → pb 目录
+      rt.config.gateway!.schedule = { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'pb' }] }
+      const r2 = await syncBakedClientsForDisplayRoute(rt, last)
+      expect(r2.changed).toBe(true)
+      expect(pickerModels()).toEqual(['b-model'])
+
+      // 窗口未变：幂等不重写
+      const r3 = await syncBakedClientsForDisplayRoute(rt, last)
+      expect(r3.changed).toBe(false)
+      expect(pickerModels()).toEqual(['b-model'])
+
+      // 窗口结束：恢复 active_profile 目录
+      rt.config.gateway!.schedule = { enabled: true, windows: [] }
+      const r4 = await syncBakedClientsForDisplayRoute(rt, last)
+      expect(r4.changed).toBe(true)
+      expect(pickerModels()).toEqual(['a-model'])
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+})
