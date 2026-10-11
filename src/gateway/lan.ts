@@ -11,7 +11,8 @@ import { assertExportable, exportFileName, reportOfDoc } from '../sync/exportImp
 import { validateSyncdoc } from '../sync/types.js'
 import { randomToken } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
-import { resolveModelMeta } from '../providers/resolve.js'
+import { safeEqual } from '../util/safe-equal.js'
+import { listenWithRetry, projectModel } from './shared.js'
 import { localIsoTs } from '../util/time.js'
 import { autoRouteInfo, logAudit, parseFallbackEntry, reloadRuntime, type GatewayRuntime } from './state.js'
 import { lanCookieName } from './cookies.js'
@@ -34,13 +35,6 @@ export interface LanHandle {
 export function resolveLanToken(previous: string | null | undefined): string {
   if (previous && /^mdklan_[0-9a-f]{32,}$/.test(previous)) return previous
   return randomToken('mdklan')
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a)
-  const bb = Buffer.from(b)
-  if (ab.length !== bb.length) return false
-  return crypto.timingSafeEqual(ab, bb)
 }
 
 function cookieValue(req: http.IncomingMessage, name: string): string | null {
@@ -314,16 +308,7 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
         service: activeProviderId,
         name: activeProvider.name || activeProviderId,
         default_model: activeProfile?.default_model ?? null,
-        models: Object.entries(activeProvider.models ?? {}).map(([mid, m]) => {
-          // 与桌面控制台同口径：配置缺值时走同一填充链（内置表 → models.dev 目录）
-          const r = resolveModelMeta(mid, m)
-          return {
-            id: mid,
-            name: m.display_name || mid,
-            context_window: r?.context_window ?? null,
-            max_output: r?.max_output ?? null,
-          }
-        }),
+        models: Object.entries(activeProvider.models ?? {}).map(([mid, m]) => projectModel(mid, m, { nameKey: true })),
       }
     : null
   // 手机页与桌面路由控件同口径：双槽位（当前=主服务 / 下一个切换）的生效值与「自动 · X」标签都来自 autoRouteInfo；
@@ -1076,35 +1061,9 @@ export async function startLanServer(rt: GatewayRuntime, opts: { port?: number; 
       else res.end()
     })
   })
-  let port = opts.port ?? DEFAULT_LAN_PORT
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const onError = (e: Error): void => {
-          server.off('listening', onListening)
-          reject(e)
-        }
-        const onListening = (): void => {
-          server.off('error', onError)
-          resolve()
-        }
-        server.once('error', onError)
-        server.once('listening', onListening)
-        server.listen(port, host)
-      })
-      break
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE' && attempt < 10) {
-        console.error(t('[modeldock] 手机控制台端口 {port} 被占用，尝试 {next}', '[modeldock] Mobile console port {port} in use, trying {next}', { port, next: port + 1 }))
-        port++
-        continue
-      }
-      throw e
-    }
-  }
-  // listen(0)（测试/临时实例）时实际端口以内核分配为准
-  const addr = server.address()
-  const actualPort = typeof addr === 'object' && addr ? addr.port : port
+  const basePort = opts.port ?? DEFAULT_LAN_PORT
+  // listen + EADDRINUSE 顺延重试与主网关 start（main.ts）同一实现；listen(0)（测试/临时实例）时取内核分配的实际端口
+  const actualPort = await listenWithRetry(server, basePort, host)
   rt.lan = { server, port: actualPort, token: opts.token, host }
   // 附近发现应答器随 LAN 监听器启停：未开启手机远程时不应答、不可被发现；
   // 广告地址按实际绑定派生（B 不猜应答包源地址——同机多实例 reuseAddr 抢单播时不可靠）
