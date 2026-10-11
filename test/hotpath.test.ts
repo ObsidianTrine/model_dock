@@ -14,7 +14,7 @@ import type { Transform } from 'node:stream'
 
 // ---------- 公共小工具 ----------
 
-function target(opts: { default_model?: string; aliases?: Record<string, string>; modelOverride?: string }): ResolvedTarget {
+function target(opts: { default_model?: string; aliases?: Record<string, string>; modelOverride?: string; providerModels?: Record<string, { source: 'manual' }> }): ResolvedTarget {
   return {
     harness: 'test',
     profileName: 'p',
@@ -24,7 +24,7 @@ function target(opts: { default_model?: string; aliases?: Record<string, string>
       ...(opts.default_model ? { default_model: opts.default_model } : {}),
       ...(opts.aliases ? { aliases: opts.aliases } : {}),
     },
-    provider: { base_url: 'https://up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k' },
+    provider: { base_url: 'https://up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k', ...(opts.providerModels ? { models: opts.providerModels } : {}) },
     ...(opts.modelOverride ? { modelOverride: opts.modelOverride } : {}),
   }
 }
@@ -200,6 +200,32 @@ describe('rewriteModel：纯透传快路径与原实现逐字段等价', () => {
     const r2 = rewriteModel(target({ default_model: 'dm' }), body2, ROUTED)
     expect(r2.modelAfter).toBe('gpt-x')
     expect(r2.body).toBe(body2)
+  })
+
+  it('discovery 别名剥壳：anthropic.<id> 按服务目录还原真实 ID', () => {
+    const cat = { 'glm-5.3': { source: 'manual' as const }, 'anthropic.real': { source: 'manual' as const } }
+    // 目录里有剥壳后的 ID：还原并重写请求体
+    const body1 = Buffer.from('{"model":"anthropic.glm-5.3"}')
+    const r1 = rewriteModel(target({ providerModels: cat }), body1, ROUTED)
+    expect(r1.modelAfter).toBe('glm-5.3')
+    expect(JSON.parse(r1.body.toString('utf8')).model).toBe('glm-5.3')
+    // 上游真有 anthropic. 开头的模型 ID：不误剥
+    const body2 = Buffer.from('{"model":"anthropic.real"}')
+    const r2 = rewriteModel(target({ providerModels: cat }), body2, ROUTED)
+    expect(r2.modelAfter).toBe('anthropic.real')
+    expect(r2.body).toBe(body2)
+    // 剥壳后的 ID 不在目录：保持原样
+    const body3 = Buffer.from('{"model":"anthropic.unknown"}')
+    const r3 = rewriteModel(target({ providerModels: cat }), body3, ROUTED)
+    expect(r3.modelAfter).toBe('anthropic.unknown')
+    expect(r3.body).toBe(body3)
+    // 剥壳后的 ID 与别名表匹配：按别名继续翻译
+    const r5 = rewriteModel(
+      target({ providerModels: cat, aliases: { 'glm-5.3': 'upstream-glm' } }),
+      Buffer.from('{"model":"anthropic.glm-5.3"}'),
+      ROUTED
+    )
+    expect(r5.modelAfter).toBe('upstream-glm')
   })
 })
 

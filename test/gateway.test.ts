@@ -582,6 +582,29 @@ describe('网关', () => {
     }
   })
 
+  it('GET /v1/models：discovery（带 anthropic-version 头）对非 Claude 系 ID 加 anthropic. 前缀，Claude 系 ID 原样', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up.models!['claude-fake-1'] = { source: 'manual', display_name: 'Fake Claude' }
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, {
+        headers: { authorization: `Bearer ${TOKEN}`, 'anthropic-version': '2023-06-01' },
+      })
+      const j: any = await res.json()
+      expect(j.data.map((m: any) => [m.id, m.display_name])).toEqual([
+        ['anthropic.preset-model', 'preset-model'],
+        ['claude-fake-1', 'Fake Claude'],
+      ])
+      // 不带头（OpenAI 系客户端）：ID 原样
+      const res2 = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      const j2: any = await res2.json()
+      expect(j2.data.map((m: any) => m.id)).toEqual(['preset-model', 'claude-fake-1'])
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('GET /v1/models：目录为空返回空列表；未认证 401', async () => {
     const t = await setup()
     try {
