@@ -16,6 +16,28 @@ export function sha256(data: string | Buffer): string {
 /** Windows 可执行文件的后缀（PATHEXT 常见子集，npm 全局 shim 是 .cmd/.exe） */
 const WIN_EXE_SUFFIXES = ['.exe', '.cmd', '.bat']
 
+// overview 每轮对每个适配器调 present → commandOnPath①，单次全量扫描含数百次同步 syscall
+//（PATH 逐目录 existsSync/statSync/readdirSync + nvm/托管 runtime/Homebrew 兜底）。PATH/APPDATA/
+// modeldockDir 探测范围内路径在本进程生命周期内基本不变，按 (调用形态, cmd) 做短 TTL memo。
+// 与 presence.ts 的 regMemo「60s 延迟可接受」同思路：安装/卸载后最多延迟 TTL 反映，可接受
+const COMMAND_TTL = 45_000
+const commandMemo = new Map<string, { at: number; val: string | null }>()
+
+/** 清空 PATH 探测 memo（测试用，或安装/卸载后主动失效）。 */
+export function clearCommandMemo(): void {
+  commandMemo.clear()
+}
+
+function memoGet(key: string): string | null | undefined {
+  const e = commandMemo.get(key)
+  if (!e) return undefined
+  if (Date.now() - e.at >= COMMAND_TTL) {
+    commandMemo.delete(key)
+    return undefined
+  }
+  return e.val
+}
+
 /** 探测某命令对应的可执行文件是否存在（纯文件探测，不 spawn 子进程）。
  *  PATH 逐目录查找之外还要兜底扫常见安装位置：LaunchAgent/SEA GUI 场景的 PATH
  *  常缺 nvm/Homebrew/npm 全局目录，只查 PATH 会把已装命令误判成未安装。 */
@@ -42,8 +64,26 @@ export function commandOnPathSandbox(cmd: string): boolean {
 
 /** 同 commandOnPath，但返回命中的可执行文件绝对路径（供注入子进程 PATH）。
  *  探测范围额外含 ModelDock 托管 Node 运行时的 bin 目录（客户端装进托管 prefix 后 probe 能命中）。
- *  accept：命中过滤谓词（commandOnPathSandbox 用）——不满足时继续向后扫，而非整场判负。 */
+ *  accept：命中过滤谓词（commandOnPathSandbox 用）——不满足时继续向后扫，而非整场判负。
+ *
+ *  memo：查询结果按「调用形态 + cmd」缓存（见顶 COMMAND_TTL）。FAKE_HOME 下完全绕过——沙箱内
+ *  装/卸状态必须对 status/detect 即时可见（2026-10-10 空 PATH 关卡 flakiness、2026-10-11「装完
+ *  立即可见」前车之鉴），且 accept 谓词只出现在沙箱路径，故以「是否带谓词」作缓存形态分隔，
+ *  无谓词（commandOnPath / noderuntime）与带谓词（commandOnPathSandbox）结果不互污染——谓词
+ *  是函数不能当键，但两种形态的键空间隔离即可保证正确。 */
 export function commandOnPathResolved(cmd: string, accept?: (p: string) => boolean): string | null {
+  const useMemo = !process.env.MODELRDOCK_FAKE_HOME
+  const key = `\u0000${accept ? 1 : 0}\u0000${process.platform}\u0000${cmd}`
+  if (useMemo) {
+    const hit = memoGet(key)
+    if (hit !== undefined) return hit
+  }
+  const result = commandOnPathResolvedImpl(cmd, accept)
+  if (useMemo) commandMemo.set(key, { at: Date.now(), val: result })
+  return result
+}
+
+function commandOnPathResolvedImpl(cmd: string, accept?: (p: string) => boolean): string | null {
   const isWin = process.platform === 'win32'
   const names = isWin ? [cmd, ...WIN_EXE_SUFFIXES.map((s) => cmd + s)] : [cmd]
   const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':').filter(Boolean)
@@ -125,13 +165,21 @@ export async function atomicWrite(file: string, content: string | Buffer, mode =
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code
       const delay = backoff.shift()
-      if (delay === undefined || (code !== 'EPERM' && code !== 'EACCES')) {
+      if (delay === undefined || !shouldRetryAtomicWrite(code)) {
         await fsp.rm(tmp, { force: true }).catch(() => {}) // 失败时清掉残留 tmp（旧行为会遗留在目标目录）
         throw e
       }
       await new Promise((r) => setTimeout(r, delay))
     }
   }
+}
+
+/** atomicWrite 覆盖写失败的错误码是否值得重试。Windows rename 覆盖被占文件时，libuv 把
+ *  ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION 映射为 EPERM / EACCES / EBUSY——杀毒、编辑器、
+ *  备份扫描等短暂占用（EBUSY 最常见）；ENOENT 等目标缺失类错误重试无意义，直接失败。
+ *  纯函数导出便于跨平台单测（unix 上 backoff 为空数组本就进不了重试循环，抽函数不影响行为）。 */
+export function shouldRetryAtomicWrite(code: string | undefined): boolean {
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
 }
 
 export async function readTextIfExists(p: string): Promise<string | null> {

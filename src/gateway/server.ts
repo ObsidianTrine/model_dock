@@ -5,7 +5,7 @@ import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { timingSafeEqual, createHash, randomBytes } from 'node:crypto'
-import { commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
+import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig, saveConfig } from '../config/store.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config, type ProviderConfig } from '../config/types.js'
@@ -160,6 +160,9 @@ export async function runClientInstall(
       }
     }
   }
+  // 同一进程刚跑完安装命令就重查 status：PATH memo（PERF-07）可能仍缓存着安装前的 miss，
+  // 不主动失效会让「装完立即可见」缩水为最多 45s 延迟（review_blockers 记）
+  clearCommandMemo()
   const st = await adapter.status(cfg, port)
   return { ok: true, auto: !!inst?.command, output: tailText(lines), installed: st.installed, skipped }
 }
@@ -202,6 +205,7 @@ export async function runClientUninstall(
     }
     const exit = await runShell(cmd, (c) => output.push(c), env)
     if (exit !== 0) {
+      clearCommandMemo() // 卸载命令已执行（不排除部分删除），重查 status 前主动失效 PATH memo
       return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
     }
     const childOut = output.join('').trim()
@@ -219,6 +223,8 @@ export async function runClientUninstall(
       lines.push(t('配置文件已含其他内容，保留不动：{path}', 'Config file has other content, left untouched: {path}', { path: bp }))
     }
   }
+  // 同一进程刚跑完卸载命令就重查 status：主动失效 PATH memo，让「卸完立即可见」
+  clearCommandMemo()
   const st = await adapter.status(cfg, port)
   return { ok: true, output: tailText(lines), installed: st.installed, skipped }
 }
