@@ -35,6 +35,37 @@ func pidAlive(_ pid: Int) -> Bool {
     kill(pid_t(pid), 0) == 0 || errno == EPERM
 }
 
+// ---------- 托盘操作日志与弹窗正文封顶 ----------
+
+/// 托盘操作日志目录：~/Library/Logs/ModelDock（macOS 惯例位置，Console.app 可见）。
+/// 不能用 ~/.modeldock/logs——「清理数据 --deep」会删掉它，等于自己清掉自己的操作记录。
+func trayLogDir() -> String {
+    let dir = NSHomeDirectory() + "/Library/Logs/ModelDock"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+/// CLI 全量输出落盘留档（时间戳命名，回看 / 拷走都方便），返回日志路径；落盘失败返回 nil（弹窗退化为纯摘要）
+@discardableResult
+func writeTrayLog(_ prefix: String, _ text: String) -> String? {
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMdd-HHmmss"
+    let stamp = df.string(from: Date())
+    let path = trayLogDir() + "/\(prefix)-\(stamp).log"
+    let body = "# ModelDock \(prefix) \(stamp)\n\n" + text + "\n"
+    return FileManager.default.createFile(atPath: path, contents: Data(body.utf8)) ? path : nil
+}
+
+/// 弹窗正文封顶：NSAlert 无滚动、会按文本撑高，超长必须截断并给出完整输出的位置，保证按钮永远在屏内
+func cappedInfo(_ text: String, logHint: String?) -> String {
+    let maxChars = 1200
+    guard text.count > maxChars else { return text }
+    var out = String(text.prefix(maxChars)) + "\n\n…（内容过长，已截断"
+    if let hint = logHint { out += "；完整输出：\(hint)" }
+    out += "）"
+    return out
+}
+
 /// 网关可执行文件：优先打包形态（与托盘同目录的主程序），回落已安装 app 与 CLI 链接
 func gatewayBinary() -> String? {
     let selfPath = CommandLine.arguments.first ?? "./ModelDockTray"
@@ -331,7 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let hint = "点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。"
             let a = NSAlert()
             a.messageText = version.isEmpty ? "ModelDock 有新版本" : "ModelDock 有新版本 v\(version)"
-            a.informativeText = trimmed.isEmpty ? hint : trimmed + "\n\n" + hint
+            a.informativeText = cappedInfo(trimmed.isEmpty ? hint : trimmed + "\n\n" + hint, logHint: nil)
             a.addButton(withTitle: "立即更新")
             if releaseUrl != nil { a.addButton(withTitle: "打开发布页") } // 无链接就不摆无用按钮
             a.addButton(withTitle: "稍后")
@@ -347,10 +378,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
-        // 失败（含未配置令牌）：输出本身是可操作指引，原样展示
+        // 失败（含未配置令牌）：输出本身是可操作指引，原样展示（超长封顶，按钮不可被顶出屏幕）
         let a = NSAlert()
         a.messageText = "ModelDock 检查更新失败"
-        a.informativeText = trimmed.isEmpty ? "未知错误，请稍后重试。" : trimmed
+        a.informativeText = cappedInfo(trimmed.isEmpty ? "未知错误，请稍后重试。" : trimmed, logHint: nil)
         a.runModal()
     }
 
@@ -427,13 +458,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let d = h.availableData
             if !d.isEmpty { text.append(d) }
         }
-        proc.terminationHandler = { [weak self] _ in
+        proc.terminationHandler = { [weak self] p in
             out.fileHandleForReading.readabilityHandler = nil
             text.append(out.fileHandleForReading.readDataToEndOfFile())
             let result = String(data: text, encoding: .utf8) ?? ""
+            let code = p.terminationStatus
             DispatchQueue.main.async {
                 self?.pollHealth()
-                self?.showCleanResult(result)
+                self?.showCleanResult(result, exit: code)
             }
         }
         do { try proc.run() } catch {
@@ -444,15 +476,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// 清理结果：CLI 输出本身含「已删除 …」逐条记录，原样展示（用户需要能拷走）
-    private func showCleanResult(_ text: String) {
+    /// 清理结果：弹窗只放结论（与 Windows 托盘同口径），CLI 全量输出落日志供回看/拷走。
+    /// NSAlert 的 informativeText 会按文本撑高且无滚动——原样贴输出曾把按钮顶出屏幕（点不到）。
+    private func showCleanResult(_ text: String, exit: Int32) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let logPath = trimmed.isEmpty ? nil : writeTrayLog("clean", trimmed)
+
         let a = NSAlert()
-        a.messageText = "清理完成"
-        a.informativeText = trimmed.isEmpty
-            ? "数据已清理。重新配置请运行 modeldock init。"
-            : trimmed
-        a.runModal()
+        let failed = exit != 0
+        a.messageText = failed ? "清理未完成" : "清理完成"
+        if failed {
+            // 失败才是需要展开细节的场景：取末尾几行（报错在结尾），仍封顶防撑爆弹窗
+            let lines = trimmed.components(separatedBy: .newlines)
+            let tail = trimmed.isEmpty ? "清理未完成，请改用命令行 modeldock reset --deep 查看错误。" : lines.suffix(8).joined(separator: "\n")
+            a.informativeText = cappedInfo(tail, logHint: logPath)
+        } else {
+            var body = "已还原被接管的客户端，并删除配置、密钥、请求日志、同步状态与本机缓存。\n快照保留，可随时 modeldock restore 回溯；重新配置请运行 modeldock init。"
+            if let lp = logPath { body += "\n\n完整输出：\(lp)" }
+            a.informativeText = body
+        }
+        a.addButton(withTitle: "好")
+        if logPath != nil { a.addButton(withTitle: "查看完整日志") }
+        let answer = a.runModal()
+        if answer == .alertSecondButtonReturn, let lp = logPath {
+            NSWorkspace.shared.open(URL(fileURLWithPath: lp))
+        }
     }
 
     /// 停网关走主程序 CLI 的 gateway stop：正确处理系统服务托管（bootout 再停，避免 KeepAlive 拉锯）
