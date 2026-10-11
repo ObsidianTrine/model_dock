@@ -849,14 +849,13 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
   }
   if (url === '/m/api/switch' && req.method === 'POST') {
     if (!lanAuthorized(req, rt)) return sendJson(res, 403, { ok: false, error: t('令牌缺失或不正确', 'Token missing or incorrect') })
-    const chunks: Buffer[] = []
-    for await (const c of req) chunks.push(c as Buffer)
-    let service = ''
+    let body: Record<string, unknown>
     try {
-      service = String((JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { service?: unknown }).service ?? '')
-    } catch {
-      return sendJson(res, 400, { ok: false, error: t('请求体不是合法 JSON', 'Request body is not valid JSON') })
+      body = await readJsonBody(req)
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: (e as Error).message })
     }
+    const service = String(body.service ?? '')
     const audit = (ok: boolean, err?: string): void =>
       logAudit(rt, {
         ts: localIsoTs(),
@@ -884,14 +883,13 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
   }
   if (url === '/m/api/auto-route' && req.method === 'POST') {
     if (!lanAuthorized(req, rt)) return sendJson(res, 403, { ok: false, error: t('令牌缺失或不正确', 'Token missing or incorrect') })
-    const chunks: Buffer[] = []
-    for await (const c of req) chunks.push(c as Buffer)
-    let b: { enabled?: unknown; provider?: unknown; next?: unknown } = {}
+    let body: Record<string, unknown>
     try {
-      b = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { enabled?: unknown; provider?: unknown; next?: unknown }
-    } catch {
-      return sendJson(res, 400, { ok: false, error: t('请求体不是合法 JSON', 'Request body is not valid JSON') })
+      body = await readJsonBody(req)
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: (e as Error).message })
     }
+    const b = body as { enabled?: unknown; provider?: unknown; next?: unknown }
     // 部分更新语义与桌面 /_modeldock/auto-route 一致：enabled 缺省=保持现状；body 带 provider/next 字段才更新（空/null=恢复自动）
     const enabled = b.enabled === undefined
       ? rt.config.gateway?.auto_failover === true

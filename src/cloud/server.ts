@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto'
 import http from 'node:http'
 import { randomToken } from '../util/fsx.js'
+import { safeEqual } from '../util/safe-equal.js'
 import { CloudStore } from './store.js'
 import { renderConsolePage } from './console.js'
 import { t } from '../util/i18n.js'
@@ -131,7 +132,8 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
 
   function handleLogin(h: EndpointCtx): void {
     const b = JSON.parse(h.bodyText || '{}') as { token?: string }
-    if (b.token !== opts.consoleToken) {
+    // consoleToken 是云端最高价值凭据，与其他面一致走常数时间比较
+    if (typeof b.token !== 'string' || !safeEqual(b.token, opts.consoleToken)) {
       fail(h.res, 401, 'unauthorized', t('控制台令牌不正确', 'Invalid console token'))
       return
     }
@@ -340,7 +342,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     }
     let signerRole: 'console' | 'device' | null = null
     let deviceDevid: string | null = null
-    if (token === opts.consoleToken) {
+    if (safeEqual(token, opts.consoleToken)) {
       signerRole = 'console'
     } else {
       const dev = store.deviceByTokenHash(sha256(token))
