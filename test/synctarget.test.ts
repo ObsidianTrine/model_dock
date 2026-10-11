@@ -9,7 +9,8 @@ import { loadConfig, saveConfig, mutateConfig } from '../src/config/store.js'
 import { getSecret, makeKeyRef, setSecret } from '../src/config/secrets.js'
 import { backupsDir } from '../src/util/paths.js'
 import { setupSyncTarget } from '../src/sync/setup.js'
-import { safeSyncTick, syncTickOnce, SyncLoop } from '../src/sync/engine.js'
+import { safeSyncTick, syncTickOnce, SyncLoop, syncStatus } from '../src/sync/engine.js'
+import { EventEmitter } from 'node:events'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
 import { createWebdavTarget } from '../src/sync/targets/webdav.js'
 import { blobRefOf } from '../src/sync/targets/types.js'
@@ -350,5 +351,78 @@ describe('引擎兜底与开关（单沙箱）', () => {
       // stop 会等在飞 tick 收尾：防止长尾写盘落到文件结束、env 被恢复后的真实 home（2026-10-05 事故根因）
       await loop.stop()
     }
+  })
+
+  it('BUG-03：watcher 异步 error 不抛未捕获异常，记日志并降级，同步状态仍可查询', async () => {
+    newHome()
+    await seedBase()
+    const dir = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir }, 'pass-watch', { backend: 'file' })
+
+    // 桩 watcher：注入 watchFn 返回受控 EventEmitter，便于同步触发异步 'error'
+    const watcher = new EventEmitter() as unknown as fsSync.FSWatcher
+    const logs: string[] = []
+    const loop = new SyncLoop({
+      watchFn: () => watcher as fsSync.FSWatcher,
+      log: (l) => logs.push(l),
+    })
+    loop.start()
+    try {
+      // start 已为 watcher 挂上 'error' 兜底 → emit 不抛、进程存活
+      expect(() => watcher.emit('error', new Error('EMFILE (inotify limit)'))).not.toThrow()
+      // 兜底已记日志（只损失「即时推」，轮询继续）——文案双语不在此钉死
+      expect(logs.length).toBeGreaterThan(0)
+      // watcher 引用已清空，stop() 不再 close 已失效的 watcher（不抛）；状态可查询
+      await loop.stop()
+      const st = await syncStatus()
+      expect(st.mode).toBe('target')
+      expect((await readSyncState())?.lastAppliedRev).toBe(1)
+    } finally {
+      await loop.stop()
+    }
+  })
+})
+
+/**
+ * DRIFT-02 归并后两条 setup 路径的行为锚点（从既有端到端用例迁移，不改语义）：
+ * 仅守住「已有目标→加入收敛」与「全新目标→本机作为 rev1 首推」各自的核心可观察行为。
+ */
+describe('setup 双路径行为锚点（DRIFT-02）', () => {
+  it('全新目标：本机作为 rev1 首推，joined=false，sync.json 落库', async () => {
+    const dir = await newTargetDir()
+    newHome()
+    await seedBase()
+    const setup = await setupSyncTarget({ kind: 'localdir', dir }, 'pass-fresh', { backend: 'file' })
+    expect(setup.joined).toBe(false)
+    expect(setup.rev).toBe(1)
+    expect(setup.report).not.toBeNull()
+    const st = await readSyncState()
+    expect(st?.mode).toBe('target')
+    expect(st?.lastAppliedRev).toBe(1)
+    expect(st?.lastSyncedHash).toBeTruthy()
+    const m = await createLocaldirTarget(dir).readManifest()
+    expect(m?.rev).toBe(1)
+  })
+
+  it('已有目标：B 加入收敛，应用远端 rev1（本机本地改动被远端覆盖），joined=true', async () => {
+    const dir = await newTargetDir()
+    newHome()
+    await seedBase()
+    await setupSyncTarget({ kind: 'localdir', dir }, 'pass-join', { backend: 'file' }) // A 首推 rev1
+    const mBefore = await createLocaldirTarget(dir).readManifest()
+
+    newHome() // 切到 B
+    await seedBase()
+    await mutateConfig((c) => {
+      c.providers!.local_marker = { base_url: 'https://local.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 'env:LOCAL' }
+    })
+    const setupB = await setupSyncTarget({ kind: 'localdir', dir }, 'pass-join', { backend: 'file' })
+    expect(setupB.joined).toBe(true)
+    expect(setupB.rev).toBe(mBefore?.rev)
+    const cfgB = await readCfg()
+    // 本机临时改动被远端覆盖，远端内容胜（ark 单服务、无 local_marker）
+    expect(cfgB.providers?.local_marker).toBeUndefined()
+    expect(Object.keys(cfgB.providers ?? {})).toEqual(['ark'])
+    expect((await readSyncState())?.lastAppliedRev).toBe(mBefore?.rev)
   })
 })

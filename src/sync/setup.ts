@@ -7,11 +7,12 @@ import { randomBytes } from 'node:crypto'
 import os from 'node:os'
 import { request } from 'undici'
 import { collectSyncdoc, applySyncdoc, type SyncdocReport } from './collect.js'
-import { deriveSyncKeys, openWithKeys, sealWithKeys } from './crypto.js'
+import { deriveSyncKeys, openWithKeys, sealWithKeys, type SyncKeys } from './crypto.js'
 import { createCloudTargetFrom, createTarget, hashDoc, keysToCache } from './runtime.js'
-import { blobRefOf, type SyncManifest } from './targets/types.js'
+import { blobRefOf, type SyncManifest, type SyncTarget } from './targets/types.js'
 import { emptySyncState, writeSyncState, type SyncState, type SyncTargetConfig } from './state.js'
 import { validateSyncdoc, type Syncdoc } from './types.js'
+import type { SecretBackend } from '../config/secrets.js'
 import { randomToken } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 
@@ -22,6 +23,58 @@ export interface SetupResult {
   joined: boolean
   rev: number
   report: SyncdocReport | null
+}
+
+/** 加入既有同步目标（target/cloud 共用，详设 §4.4）：密钥必须从远端信封自包含的 KDF 参数派生
+ *  （同口令 → 同密钥），口令不一致时 openWithKeys 的 verifier 先拦下、不污染目标。
+ *  纯拉取不写 sync.json——mode/cloud 差异由调用方拼装 state。 */
+async function joinExistingTarget(o: {
+  target: SyncTarget
+  manifest: SyncManifest
+  passphrase: string
+  backend?: SecretBackend
+  msgs: { notJson: string; badKdf: string; badPass: string }
+}): Promise<{ keys: SyncKeys; report: SyncdocReport | null; afterHash: string }> {
+  const envText = await o.target.readBlob(o.manifest.blobRef)
+  let env: unknown
+  try {
+    env = JSON.parse(envText)
+  } catch {
+    throw new Error(o.msgs.notJson)
+  }
+  const kdf = (env as Record<string, unknown> | null)?.kdf as { salt?: unknown; hkdfSalt?: unknown } | undefined
+  if (typeof kdf?.salt !== 'string' || typeof kdf?.hkdfSalt !== 'string') {
+    throw new Error(o.msgs.badKdf)
+  }
+  const keys = deriveSyncKeys(o.passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'))
+  let remoteDoc: Syncdoc
+  try {
+    remoteDoc = openWithKeys(env, keys)
+  } catch {
+    throw new Error(o.msgs.badPass)
+  }
+  const report = await applySyncdoc(validateSyncdoc(remoteDoc), { backend: o.backend })
+  const { doc: after } = await collectSyncdoc()
+  return { keys, report, afterHash: hashDoc(after) }
+}
+
+/** 全新同步目标首推（target/cloud 共用）：随机生成 salt/hkdfSalt（成为该同步目标的口令身份，
+ *  之后所有机器都从信封内嵌参数派生），本机可同步态密封为 rev 1 推上去。 */
+async function pushFreshTarget(o: { target: SyncTarget; devid: string; passphrase: string; alreadyExistsMsg: string }): Promise<{
+  keys: SyncKeys
+  rev: number
+  ts: string
+  report: SyncdocReport | null
+  afterHash: string
+}> {
+  const keys = deriveSyncKeys(o.passphrase, randomBytes(16), randomBytes(32))
+  const { doc, report } = await collectSyncdoc()
+  const sealed = sealWithKeys(doc, keys)
+  await o.target.writeBlob(1, o.devid, JSON.stringify(sealed, null, 2) + '\n')
+  const first: SyncManifest = { rev: 1, ts: doc.ts, byDevid: o.devid, blobRef: blobRefOf(1, o.devid) }
+  const r = await o.target.writeManifest(first, 0)
+  if (r === 'conflict') throw new Error(o.alreadyExistsMsg)
+  return { keys, rev: 1, ts: first.ts, report, afterHash: hashDoc(doc) }
 }
 
 export async function setupSyncTarget(
@@ -36,76 +89,60 @@ export async function setupSyncTarget(
 
   const manifest = await target.readManifest()
   if (manifest) {
-    // 加入既有同步：密钥必须从远端信封自包含的 KDF 参数派生（同口令 → 同密钥），
-    // 口令不一致时 openWithKeys 的 verifier 先拦下，不污染目标
-    const envText = await target.readBlob(manifest.blobRef)
-    let env: unknown
-    try {
-      env = JSON.parse(envText)
-    } catch {
-      throw new Error(t('同步目标上的最新包不是合法 JSON：目标内容可能被破坏', 'The latest package on the sync target is not valid JSON: the target contents may be corrupted'))
-    }
-    const kdf = (env as Record<string, unknown> | null)?.kdf as { salt?: unknown; hkdfSalt?: unknown } | undefined
-    if (typeof kdf?.salt !== 'string' || typeof kdf?.hkdfSalt !== 'string') {
-      throw new Error(t('同步目标上的最新包缺少 KDF 参数，文件不完整', 'The latest package on the sync target is missing KDF parameters; the file is incomplete'))
-    }
-    const keys = deriveSyncKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'))
-    let remoteDoc: Syncdoc
-    try {
-      remoteDoc = openWithKeys(env, keys)
-    } catch {
-      throw new Error(
-        t(
+    // 加入既有同步：密钥从远端信封派生并验证口令，一致才应用远端
+    const got = await joinExistingTarget({
+      target,
+      manifest,
+      passphrase,
+      backend: opts?.backend,
+      msgs: {
+        notJson: t('同步目标上的最新包不是合法 JSON：目标内容可能被破坏', 'The latest package on the sync target is not valid JSON: the target contents may be corrupted'),
+        badKdf: t('同步目标上的最新包缺少 KDF 参数，文件不完整', 'The latest package on the sync target is missing KDF parameters; the file is incomplete'),
+        badPass: t(
           '口令与该同步目标不一致（解不开最新同步包）。请输入与其他机器相同的同步口令',
           'The passphrase does not match this sync target (cannot open the latest package). Use the same passphrase as on your other machines'
-        )
-      )
-    }
-    const validated = validateSyncdoc(remoteDoc)
-    const report = await applySyncdoc(validated, { backend: opts?.backend })
-    const { doc: after } = await collectSyncdoc()
+        ),
+      },
+    })
     const state: SyncState = {
       ...emptySyncState(),
       mode: 'target',
       target: targetCfg,
-      key: keysToCache(keys),
+      key: keysToCache(got.keys),
       devid,
       deviceName,
       paused: false,
       lastAppliedRev: manifest.rev,
       lastAppliedTs: manifest.ts,
-      lastSyncedHash: hashDoc(after),
+      lastSyncedHash: got.afterHash,
       lastPullTs: now,
     }
     await writeSyncState(state)
-    return { joined: true, rev: manifest.rev, report }
+    return { joined: true, rev: manifest.rev, report: got.report }
   }
 
-  // 全新目标：随机生成 salt/hkdfSalt（成为该同步目标的口令身份，之后所有机器都从信封内嵌参数派生）
-  const keys = deriveSyncKeys(passphrase, randomBytes(16), randomBytes(32))
-  const { doc, report } = await collectSyncdoc()
-  const sealed = sealWithKeys(doc, keys)
-  await target.writeBlob(1, devid, JSON.stringify(sealed, null, 2) + '\n')
-  const first: SyncManifest = { rev: 1, ts: doc.ts, byDevid: devid, blobRef: blobRefOf(1, devid) }
-  const r = await target.writeManifest(first, 0)
-  if (r === 'conflict') {
-    throw new Error(t('首推时目标上已出现更新版本（其他机器同时在配置？），请重跑 modeldock sync setup', 'Another machine pushed while this machine was setting up; re-run modeldock sync setup'))
-  }
+  // 全新目标：随机生成 salt/hkdfSalt 并首推
+  const fresh = await pushFreshTarget({
+    target,
+    devid,
+    passphrase,
+    alreadyExistsMsg: t('首推时目标上已出现更新版本（其他机器同时在配置？），请重跑 modeldock sync setup', 'Another machine pushed while this machine was setting up; re-run modeldock sync setup'),
+  })
   const state: SyncState = {
     ...emptySyncState(),
     mode: 'target',
     target: targetCfg,
-    key: keysToCache(keys),
+    key: keysToCache(fresh.keys),
     devid,
     deviceName,
     paused: false,
-    lastAppliedRev: 1,
-    lastAppliedTs: first.ts,
-    lastSyncedHash: hashDoc(doc),
+    lastAppliedRev: fresh.rev,
+    lastAppliedTs: fresh.ts,
+    lastSyncedHash: fresh.afterHash,
     lastPushTs: now,
   }
   await writeSyncState(state)
-  return { joined: false, rev: 1, report }
+  return { joined: false, rev: fresh.rev, report: fresh.report }
 }
 
 export interface EnrollResult {
@@ -160,70 +197,58 @@ export async function enrollCloud(
   const target = createCloudTargetFrom({ url, devid, token })
   const manifest = await target.readManifest()
   if (manifest) {
-    const envText = await target.readBlob(manifest.blobRef)
-    let env: unknown
-    try {
-      env = JSON.parse(envText)
-    } catch {
-      throw new Error(t('云端最新包不是合法 JSON：云端内容可能被破坏', 'The latest cloud package is not valid JSON: the cloud contents may be corrupted'))
-    }
-    const kdf = (env as Record<string, unknown> | null)?.kdf as { salt?: unknown; hkdfSalt?: unknown } | undefined
-    if (typeof kdf?.salt !== 'string' || typeof kdf?.hkdfSalt !== 'string') {
-      throw new Error(t('云端最新包缺少 KDF 参数，文件不完整', 'The latest cloud package is missing KDF parameters; the file is incomplete'))
-    }
-    const keys = deriveSyncKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'))
-    let remoteDoc: Syncdoc
-    try {
-      remoteDoc = openWithKeys(env, keys)
-    } catch {
-      throw new Error(
-        t(
+    // 加入既有云端文档：密钥从远端信封派生并验证口令，一致才应用远端
+    const got = await joinExistingTarget({
+      target,
+      manifest,
+      passphrase,
+      backend: opts?.backend,
+      msgs: {
+        notJson: t('云端最新包不是合法 JSON：云端内容可能被破坏', 'The latest cloud package is not valid JSON: the cloud contents may be corrupted'),
+        badKdf: t('云端最新包缺少 KDF 参数，文件不完整', 'The latest cloud package is missing KDF parameters; the file is incomplete'),
+        badPass: t(
           '口令与云端不一致（解不开云端最新包）。请输入其他机器相同的同步口令后重试——配对码已被使用，请在云端控制台重新生成',
           'The passphrase does not match the cloud (cannot open the latest package). Use the same passphrase as your other machines and retry — the pair code was consumed; generate a new one in the cloud console'
-        )
-      )
-    }
-    const report = await applySyncdoc(validateSyncdoc(remoteDoc), { backend: opts?.backend })
-    const { doc: after } = await collectSyncdoc()
+        ),
+      },
+    })
     const state: SyncState = {
       ...emptySyncState(),
       mode: 'cloud',
       cloud: { url, devid, token, deviceName },
-      key: keysToCache(keys),
+      key: keysToCache(got.keys),
       devid,
       deviceName,
       paused: false,
       lastAppliedRev: manifest.rev,
       lastAppliedTs: manifest.ts,
-      lastSyncedHash: hashDoc(after),
+      lastSyncedHash: got.afterHash,
       lastPullTs: now,
     }
     await writeSyncState(state)
-    return { joined: true, rev: manifest.rev, report, deviceName }
+    return { joined: true, rev: manifest.rev, report: got.report, deviceName }
   }
 
-  const keys = deriveSyncKeys(passphrase, randomBytes(16), randomBytes(32))
-  const { doc, report } = await collectSyncdoc()
-  const sealed = sealWithKeys(doc, keys)
-  await target.writeBlob(1, devid, JSON.stringify(sealed, null, 2) + '\n')
-  const first: SyncManifest = { rev: 1, ts: doc.ts, byDevid: devid, blobRef: blobRefOf(1, devid) }
-  const r = await target.writeManifest(first, 0)
-  if (r === 'conflict') {
-    throw new Error(t('首推时云端已出现更新版本（其他机器同时在入网？），请重新配对重试', 'Another device pushed while this one was enrolling; pair again and retry'))
-  }
+  // 全新云端：随机生成 salt/hkdfSalt 并首推
+  const fresh = await pushFreshTarget({
+    target,
+    devid,
+    passphrase,
+    alreadyExistsMsg: t('首推时云端已出现更新版本（其他机器同时在入网？），请重新配对重试', 'Another device pushed while this one was enrolling; pair again and retry'),
+  })
   const state: SyncState = {
     ...emptySyncState(),
     mode: 'cloud',
     cloud: { url, devid, token, deviceName },
-    key: keysToCache(keys),
+    key: keysToCache(fresh.keys),
     devid,
     deviceName,
     paused: false,
-    lastAppliedRev: 1,
-    lastAppliedTs: first.ts,
-    lastSyncedHash: hashDoc(doc),
+    lastAppliedRev: fresh.rev,
+    lastAppliedTs: fresh.ts,
+    lastSyncedHash: fresh.afterHash,
     lastPushTs: now,
   }
   await writeSyncState(state)
-  return { joined: false, rev: 1, report, deviceName }
+  return { joined: false, rev: fresh.rev, report: fresh.report, deviceName }
 }
