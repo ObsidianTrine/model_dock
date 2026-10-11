@@ -52,8 +52,9 @@ const REG_UNINSTALL_KEYS = [
 const REG_TTL = 60_000
 const regMemo = new Map<string, { at: number; hit: boolean }>()
 
-/** 卸载表三视图并行查询的聚合：keys 各自 exec（超时由 exec 内部兜底），任一输出含 appName
- *  即判定在场（命中短路——Promise.all 全程并行，未命中时才把三次最坏超时重叠为单次窗口）。
+/** 卸载表三视图并行查询的聚合：keys 各自 exec（超时由 exec 内部兜底），三条全程并发，
+ *  任一输出含 appName 即判定在场（Promise.all 不省并发，无「命中短路」）。相比原串行实现，
+ *  未命中时把三次最坏超时（各 8s）重叠为单次窗口。
  *  独立成注入 exec 的纯函数以便跨平台单测：CI 三平台都不起 Windows reg，真实调用由测试
  *  传入的 exec 桩替代。调用方 registryHas 以真实 execText 传参，等价于原先的串行命中判定。 */
 export async function regQueryAny(
