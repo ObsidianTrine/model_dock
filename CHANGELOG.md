@@ -11,6 +11,7 @@
 ### 改进
 
 - **接入 Claude Code 即开启模型发现**：网关模式「安装并接入 / 一键接入」自动写入 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`，/model 选择器开箱即列出当前服务的真实模型，不用再手动加环境变量；断开接入或切到直连时自动收回。
+- **/model 选择器只显示你的网关模型**：接入时同步写入模型白名单（`availableModels: ["anthropic."]`），Claude Code 内置的 Opus / Sonnet 等档位行从选择器隐藏，列表里只剩当前服务经网关提供的模型（显示名 + "From gateway"）；白名单随断开 / 切直连一并收回，用户自己写的名单不受影响。
 
 - **/model 选择器能列出服务的真实模型了**：网关本地实现 /v1/models，返回当前服务你拉取筛选过的模型目录（显示名称 + 模型 ID），不再把请求透传给上游——上游目录不等于你筛过的目录，上游也未必实现这个接口。Claude Code 在配置里加 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 后，/model 直接列出并选用这些模型；列表跟随钉定路由、定时切换与手动切换服务。
 
