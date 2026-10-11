@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
@@ -11,7 +12,7 @@ import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer, runClientInstall, runClientUninstall } from '../src/gateway/server.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { isNpmGlobalInstall } from '../src/adapters/types.js'
-import { commandOnPathResolved } from '../src/util/fsx.js'
+import { commandOnPath, commandOnPathResolved, commandOnPathSandbox } from '../src/util/fsx.js'
 import { sandboxNpmCache, sandboxNpmPrefix } from '../src/util/paths.js'
 import { getLang, setLang } from '../src/util/i18n.js'
 
@@ -520,6 +521,76 @@ describe('客户端安装并接入', () => {
       expect(wb.install.uninstall).toBeNull()
     } finally {
       t.closeAll()
+    }
+  })
+})
+
+describe('沙箱 presence 隔离', () => {
+  it('commandOnPathSandbox：FAKE_HOME 下宿主 PATH 命中不算在场，沙箱 bin 命中才算', async () => {
+    const h = fakeHome()
+    const savedPath = process.env.PATH
+    const savedAppData = process.env.APPDATA
+    // fakeHome 之外的目录模拟宿主 PATH（真机 /usr/local/bin 场景）
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-outside-'))
+    try {
+      fs.writeFileSync(path.join(outside, process.platform === 'win32' ? 'fakecli.cmd' : 'fakecli'), 'x')
+      process.env.PATH = outside
+      delete process.env.APPDATA
+      expect(commandOnPath('fakecli')).toBe(true) // 并集探测看得见宿主命中
+      expect(commandOnPathSandbox('fakecli')).toBe(false) // 沙箱感知：落点在 fakeHome 外 → 不在场
+      // 沙箱 npm-global bin 内命中 → 在场：宿主与沙箱同时有同名命令（PATH 不清）时，
+      // 不得因「首命中是宿主」而判负——须扫到沙箱内命中为止（2026-10-11 e2e 实测踩中）
+      const sbxBin = sandboxNpmBinDirPath()
+      fs.mkdirSync(sbxBin, { recursive: true })
+      fs.writeFileSync(path.join(sbxBin, process.platform === 'win32' ? 'fakecli.cmd' : 'fakecli'), 'x')
+      expect(commandOnPathSandbox('fakecli')).toBe(true)
+      // 卸载沙箱副本（移除沙箱内 shim）后：只剩宿主命中 → 回到不在场
+      fs.rmSync(path.join(sbxBin, process.platform === 'win32' ? 'fakecli.cmd' : 'fakecli'))
+      expect(commandOnPathSandbox('fakecli')).toBe(false)
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = savedAppData
+      fs.rmSync(outside, { recursive: true, force: true })
+      h.restore()
+    }
+  })
+
+  it('沙箱安装 probe 只认沙箱内命中：宿主真机同名命令不再触发跳过', async () => {
+    const h = fakeHome()
+    const savedPath = process.env.PATH
+    const savedAppData = process.env.APPDATA
+    const savedReg = process.env.MODELRDOCK_NPM_REGISTRY
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-outside-'))
+    try {
+      fs.writeFileSync(path.join(outside, process.platform === 'win32' ? 'claude.cmd' : 'claude'), 'x')
+      process.env.PATH = outside
+      delete process.env.APPDATA
+      expect(commandOnPath('claude')).toBe(true) // 宿主命中存在（真机已装场景）
+      // registry 指向不可达端口：npm 立即失败，用例只断言 probe 是否跳过（离线确定性）
+      process.env.MODELRDOCK_NPM_REGISTRY = 'http://127.0.0.1:1'
+      const fake: HarnessAdapter = {
+        id: 'fake-sbxp',
+        label: 'FakeSbxP',
+        install: { command: 'npm i -g @example/fake-sbxp', probe: 'claude', guide: 'x' },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      }
+      const r = await runClientInstall(fake, emptyConfig(), 8687)
+      expect(r.skipped).toBe(false) // 真机命中不再导致跳过，安装确实尝试执行
+      expect(r.ok).toBe(false) // registry 不可达如期失败
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = savedAppData
+      if (savedReg === undefined) delete process.env.MODELRDOCK_NPM_REGISTRY
+      else process.env.MODELRDOCK_NPM_REGISTRY = savedReg
+      fs.rmSync(outside, { recursive: true, force: true })
+      h.restore()
     }
   })
 })

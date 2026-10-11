@@ -19,7 +19,7 @@ const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
 /** 本体双信号：~/.codex 不随卸载删除，配置在而 codex 命令缺席视为卸载残留，判未安装 */
 function present(): boolean {
-  return cliPresent('codex', 'codex')
+  return cliPresent('codex', 'codex', { sandboxIsolated: true })
 }
 
 // 令牌内联进 http_headers 的 Authorization（Bearer），不写环境变量 → 任何终端/IDE 运行 codex 都能认证，

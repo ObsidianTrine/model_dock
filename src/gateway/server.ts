@@ -5,13 +5,13 @@ import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { timingSafeEqual, createHash, randomBytes } from 'node:crypto'
-import { commandOnPath, randomToken, readTextIfExists } from '../util/fsx.js'
+import { commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig, saveConfig } from '../config/store.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config, type ProviderConfig } from '../config/types.js'
 import { defaultStore, deleteSecret, getSecret, setSecret } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
-import { isNpmGlobalInstall, resolveInstallCommand, type HarnessAdapter } from '../adapters/types.js'
+import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
@@ -102,7 +102,7 @@ export async function runClientInstall(
   const lines: string[] = []
   let skipped = false
   if (inst?.command) {
-    if (inst.probe && commandOnPath(inst.probe)) {
+    if (inst.probe && probePresent(inst, inst.probe)) {
       skipped = true
       lines.push(t('已在 PATH 上检测到 {cmd} 命令，跳过安装步骤（不重跑 npm 全局安装）', 'Found {cmd} already on PATH, skipping install (npm global install not re-run)', { cmd: inst.probe }))
     } else {
@@ -180,7 +180,7 @@ export async function runClientUninstall(
     lines.push(t('该客户端未配置自动卸载方式，请按安装指引手动卸载', 'This client has no automated uninstall; please uninstall it manually per the install guide'))
     return { ok: false, output: tailText(lines), installed: (await adapter.status(cfg, port)).installed, skipped }
   }
-  if (inst?.probe && !commandOnPath(inst.probe)) {
+  if (inst?.probe && !probePresent(inst, inst.probe)) {
     skipped = true
     lines.push(t('{cmd} 命令不在 PATH 上，无需卸载', '{cmd} is not on PATH; nothing to uninstall', { cmd: inst.probe }))
   } else {
@@ -230,6 +230,14 @@ function tailText(lines: string[], max = INSTALL_OUTPUT_MAX): string {
 function sandboxInstallCapability(a: HarnessAdapter): 'redirect' | 'unsupported' | null {
   if (!sandboxNpmPrefix() || !a.install?.command) return null
   return isNpmGlobalInstall(resolveInstallCommand(a.install.command) ?? '') ? 'redirect' : 'unsupported'
+}
+
+/** 安装/卸载前的 probe：可装进沙箱的 npm 类客户端在沙箱实例（FAKE_HOME）下只认沙箱内命中，
+ *  宿主真机的同名命令不算数——否则真机装过的客户端在沙箱里永远「跳过安装」，卸载后状态
+ *  也回不到未安装（2026-10-11 dev 沙箱实测踩中）。脚本类/桌面类只有真机一份拷贝，保持并集。 */
+function probePresent(inst: ClientInstall, cmd: string): boolean {
+  const sandboxIsolated = sandboxNpmPrefix() !== null && isNpmGlobalInstall(resolveInstallCommand(inst.command) ?? '')
+  return sandboxIsolated ? commandOnPathSandbox(cmd) : commandOnPath(cmd)
 }
 
 export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOptions): http.Server {

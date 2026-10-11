@@ -39,9 +39,10 @@ function stripContextSuffix(id: string): string {
 const settingsFile = () => path.join(homeDir(), '.claude', 'settings.json')
 
 /** 本体双信号：~/.claude 不随卸载删除（npm uninstall 不清配置目录），配置在而 claude 命令
- *  缺席视为卸载残留，判未安装——否则控制台会对残留文件显示已接入并提供一键接入。 */
+ *  缺席视为卸载残留，判未安装——否则控制台会对残留文件显示已接入并提供一键接入。
+ *  sandboxIsolated：可装进沙箱的 npm 客户端，沙箱实例只认沙箱内的 claude（见 cliPresent）。 */
 function present(): boolean {
-  return cliPresent('claude', 'claude-code')
+  return cliPresent('claude', 'claude-code', { sandboxIsolated: true })
 }
 
 /** 命令在 PATH 上但 settings.json 还没生成：装好但没跑过首次启动（原生安装器、刚 npm 装完都如此） */
