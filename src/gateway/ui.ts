@@ -1267,7 +1267,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function healthHtml() {
     var sandbox = view && view.gateway && view.gateway.sandbox
     return '<span class="dot"></span> ' + t('本地网关运行中 · 端口 ', 'Local gateway running · port ') + esc(location.port) +
-      (sandbox ? ' <span class="pill" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '" class="pill hint-warn">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '')
+      (sandbox ? ' <span class="pill warn" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '')
   }
 
   function pollHealth() {
