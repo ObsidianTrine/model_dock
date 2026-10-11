@@ -885,6 +885,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     bodyHtml: '<div class="desc-sm" id="updSub"></div><div class="upnotes" id="updNotes" hidden></div><div class="upmore" id="updMore" hidden></div>' +
       '<div class="uphint" data-i18n="更新时网关会短暂中断，完成后本页自动重连。||The gateway restarts briefly during the update; this page reconnects automatically.">更新时网关会短暂中断，完成后本页自动重连。</div>',
     foot: [
+      { slot: 'msg', id: 'updMsg', kind: 'info' },
       { id: 'updCopy', label: '复制说明||Copy notes' },
       { id: 'updDismiss', label: '此版本不再提醒||Skip this version' },
       { id: 'updGo', primary: true },
@@ -1404,6 +1405,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       copy = document.getElementById('updCopy'),
       dismiss = document.getElementById('updDismiss')
     if (!title || !upd) return
+    setUpdMsg('')
     title.textContent = t('可更新到 ', 'Update to ') + upd.latest
     var subText = t('发现新版本 · 当前 v' + upd.current, 'New version · current v' + upd.current)
     if (upd.sizeBytes > 0) subText += t(' · 安装包 ', ' · package ') + (upd.sizeBytes / 1048576).toFixed(1) + ' MB'
@@ -1427,6 +1429,17 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     updModalRender()
   }
 
+  // 更新弹窗底栏提示槽（updMsg）：弹层开着时错误/进度写槽位——磨砂遮罩会糊掉全局 toast；
+  // 弹层已关（用户中途关掉后在等轮询）才回落主页面 toast（AGENTS 弹层提示归宿约定）
+  function setUpdMsg(text, cls) {
+    var el = document.getElementById('updMsg')
+    if (el) { el.textContent = text || ''; el.className = cls === 'err' || cls === 'ok' ? 'testline ' + cls : 'testline' }
+  }
+  function updFail(text) {
+    if (updM.isOpen()) setUpdMsg(text, 'err')
+    else toast(text, false)
+  }
+
   function updApply() {
     if (updApplying) return
     updApplying = true
@@ -1434,17 +1447,17 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     api('/admin/update/apply', { method: 'POST' }).then(function (r) {
       if (r && r.started) {
         try { sessionStorage.setItem('mdk_upd_to', String(r.latest || '')) } catch (e) { /* 隐私模式等 */ }
-        toast(t('开始更新到 v' + r.latest + '：下载校验完成后网关会短暂中断，页面自动重连…', 'Updating to v' + r.latest + ': after download and verification the gateway restarts briefly, then this page reconnects…'))
+        setUpdMsg(t('开始更新到 v' + r.latest + '，完成后本页自动重连', 'Updating to v' + r.latest + '; this page reconnects when done'))
         pollApplyAndGateway(0, false)
       } else {
         updApplying = false
         updModalRender()
-        toast(r && r.reason === 'in_progress' ? t('更新已在进行中，请稍候', 'An update is already in progress') : t('当前没有可安装的新版本', 'No new version to install'), false)
+        updFail(r && r.reason === 'in_progress' ? t('更新已在进行中，请稍候', 'An update is already in progress') : t('当前没有可安装的新版本', 'No new version to install'))
       }
     }).catch(function (e) {
       updApplying = false
       updModalRender()
-      toast(e.message, false)
+      updFail(e.message)
     })
   }
 
@@ -1458,7 +1471,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function pollApplyAndGateway(n, sawDown) {
     if (n > 150) {
       updApplying = false
-      toast(t('等待更新完成超时。网关可能仍在更新中；若长时间无响应，请查看 ~/.modeldock/logs/ 下的 update 日志或重跑 modeldock update', 'Timed out waiting for the update. The gateway may still be updating; if it stays unreachable, check the update log under ~/.modeldock/logs/ or rerun modeldock update'), false)
+      updFail(t('等待更新完成超时。网关可能仍在更新中；若长时间无响应，请查看 ~/.modeldock/logs/ 下的 update 日志或重跑 modeldock update', 'Timed out waiting for the update. The gateway may still be updating; if it stays unreachable, check the update log under ~/.modeldock/logs/ or rerun modeldock update'))
       return
     }
     setTimeout(function () {
@@ -1469,7 +1482,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
             applyPollTimer = null
             updApplying = false
             updModalRender()
-            toast(s.applyError, false)
+            updFail(s.applyError)
             return
           }
           var wanted = String(sessionStorage.getItem('mdk_upd_to') || '')
@@ -3648,11 +3661,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
     function doFetch(btn) {
       var ctx = opts.fetchCtx ? opts.fetchCtx() : null
-      // 拉取面板/表单在弹层里：失败写底栏就地提示槽（弹层磨砂遮罩会糊掉全局 toast）
-      var fail = function (text) {
-        if (!document.getElementById(gid('FetchPanel')).hidden) opts.msg(text, 'err')
-        else toast(text, false)
-      }
+      // 拉取面板/表单挂在弹层（或首用内联卡）里：失败一律写底栏就地提示槽——
+      // 弹窗磨砂遮罩（z-modal）会糊掉全局 toast（z-toast），两个宿主的槽位都常驻可见（AGENTS 弹层提示归宿）
+      var fail = function (text) { opts.msg(text, 'err') }
       if (!ctx || !ctx.baseUrl || !/^https?:\\/\\//i.test(ctx.baseUrl)) { fail(t('请先填写接口地址（http/https）再拉取模型', 'Fill in the base URL (http/https) before fetching models')); return }
       btn.disabled = true; btn.textContent = t('拉取中…', 'Fetching…')
       var body = { base_url: ctx.baseUrl, protocol: ctx.protocol || 'anthropic' }
