@@ -272,6 +272,25 @@ describe('整表加密 cipher 描述符（DUP-07 合并后）', () => {
       h.restore()
     }
   })
+
+  it('DPAPI 桩实现加密→解密往返无损（已带前缀不二次加密）', async () => {
+    // mac 无 win32：桩 dpapiBatch 替换真实 PowerShell spawn，仅验证描述符装配的正确性
+    const { dpapiCipher, __testSetDpapiBatch } = await import('../src/config/secrets.js')
+    // 可逆「保护」变换：base64 字节反转后再 base64——ENC/DEC 同一变换即构成有效往返
+    const protect = (b64: string) => Buffer.from(Buffer.from(b64, 'base64').reverse()).toString('base64')
+    __testSetDpapiBatch(async (_script, b64In) => b64In.map(protect))
+    try {
+      const enc = await dpapiCipher.encryptTable({ a: 'sk-1', b: '', c: 'enc:dpapi:already' })
+      expect(enc.a).toMatch(/^enc:dpapi:/) // 非空值被整表加密
+      expect(enc.b).toBe('') // 空值原样保留
+      expect(enc.c).toBe('enc:dpapi:already') // 已带前缀不二次加密（相对旧 encryptAll 的行为收紧点）
+      const dec = await dpapiCipher.decryptTable({ a: enc.a, b: enc.b })
+      expect(dec.a).toBe('sk-1')
+      expect(dec.b).toBe('')
+    } finally {
+      __testSetDpapiBatch() // 还原为真实实现，避免污染同进程其他用例
+    }
+  })
 })
 
 describe('mutateConfig 并发', () => {

@@ -241,11 +241,19 @@ const DPAPI_ENC = `Add-Type -AssemblyName System.Security
 const DPAPI_DEC = `Add-Type -AssemblyName System.Security
 [Console]::In.ReadToEnd() -split "\\r?\\n" | ForEach-Object { $s=$_.Trim(); if($s){ [Console]::Out.WriteLine([Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($s),$null,'CurrentUser'))) } }`
 
+/** 测试注入的 DPAPI 批量实现（避免真 spawn PowerShell）；undefined=用真实 dpapiBatch。
+ *  与既有 __testSetExternalReader 同套路：模块内 let 替换，不碰 vi.mock 跨文件雷区。 */
+let dpapiImpl: ((script: string, b64In: string[]) => Promise<string[]>) | undefined
+export function __testSetDpapiBatch(fn?: (script: string, b64In: string[]) => Promise<string[]>): void {
+  dpapiImpl = fn
+}
+
 /** 一次 PowerShell 进程批量加/解密多份（base64 入，base64 出，逐行对应）。payload 经 stdin 传、
  *  密钥不进命令行。失败重试一次（覆盖瞬时 spawn 失败）；仍失败即抛——DPAPI Protect/Unprotect
  *  依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条 spawn（旧回退
  *  曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
 function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
+  if (dpapiImpl) return dpapiImpl(script, b64In)
   return (async () => {
     if (b64In.length === 0) return []
     let lastErr: unknown
@@ -288,6 +296,15 @@ interface FileCipher {
   encryptTable: (dec: Record<string, string>) => Promise<Record<string, string>>
 }
 
+/** secrets.json 写路径锁超时的可操作报错（对照 config 的 ConfigError 用 SecretsError 分流） */
+function secretsLockTimeoutError(lp: string): SecretsError {
+  return new SecretsError(
+    t('secrets.json 写锁超时：{lp} 被其他进程长期占用。确认没有其他 modeldock 进程在写密钥后，可删除该 .lock 文件重试',
+      'Timed out acquiring the secrets write lock: {lp} has been held by another process for too long. After confirming no other modeldock process is writing keys, delete the .lock file and retry',
+      { lp })
+  )
+}
+
 export const dpapiCipher: FileCipher = {
   prefix: DPAPI_PREFIX,
   enabled: CAN_DPAPI,
@@ -298,6 +315,13 @@ export const dpapiCipher: FileCipher = {
     const raw: Record<string, string> = { ...dec }
     if (entries.length === 0) return raw
     const outs = await dpapiBatch(DPAPI_ENC, entries.map(([, v]) => Buffer.from(v, 'utf8').toString('base64')))
+    if (outs.length < entries.length) {
+      throw new SecretsError(
+        t('DPAPI 加密表行数与输入不匹配（{got}/{want}），secrets.json 可能未完整加密。请重新写入密钥后重试',
+          'DPAPI encrypt output line count ({got}/{want}) does not match input; secrets.json may be incompletely encrypted. Re-set your keys and retry',
+          { got: String(outs.length), want: String(entries.length) })
+      )
+    }
     entries.forEach(([k], i) => {
       raw[k] = DPAPI_PREFIX + outs[i]
     })
@@ -309,6 +333,13 @@ export const dpapiCipher: FileCipher = {
     for (const [k, v] of Object.entries(raw)) dec[k] = typeof v === 'string' ? v : ''
     if (encs.length === 0) return dec
     const outs = await dpapiBatch(DPAPI_DEC, encs.map(([, v]) => v.slice(DPAPI_PREFIX.length)))
+    if (outs.length < encs.length) {
+      throw new SecretsError(
+        t('DPAPI 解密表行数与输入不匹配（{got}/{want}），secrets.json 可能已损坏。可备份后删除该文件，各密钥重新设置',
+          'DPAPI decrypt output line count ({got}/{want}) does not match input; secrets.json may be corrupted. Back it up, delete it, and re-set your keys',
+          { got: String(outs.length), want: String(encs.length) })
+      )
+    }
     encs.forEach(([k], i) => {
       dec[k] = Buffer.from(outs[i], 'base64').toString('utf8')
     })
@@ -337,7 +368,9 @@ export const machCipher: FileCipher = {
 
 const plainCipher: FileCipher = {
   prefix: '',
-  enabled: true,
+  // enabled=false：明文后端「无加密保护」——正是 loadFileSecrets 触发 warnPlainFileOnce 的分支。
+  // 设为 true 会让 `!cipher.enabled` 恒假、警告永不触发（安全提示回归，2026-10-12 review 复现）。
+  enabled: false,
   async encryptTable(dec) {
     return { ...dec }
   },
@@ -416,7 +449,7 @@ async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
 /** 写路径统一入口：跨进程锁（与 config 同语义）+ 持锁内重读盘拼新鲜的解密表，改后整表写回。
  *  锁内强制跳过内存缓存，避免另一进程刚写入的 key 被本进程旧缓存覆盖（丢更新）。 */
 function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise<T>): Promise<T> {
-  return withFileLock(secretsLockPath(), {}, async () => {
+  return withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
     const store = await loadFileSecrets(false)
     const ret = await fn(store)
     await writeFileSecrets(store)
