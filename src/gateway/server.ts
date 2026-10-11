@@ -15,14 +15,14 @@ import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type Har
 import { ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
-import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService } from '../ops.js'
+import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, buildRuntime, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, buildRuntime, displayRouteProvider, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
@@ -265,6 +265,11 @@ function probePresent(inst: ClientInstall, cmd: string): boolean {
   return sandboxIsolated ? commandOnPathSandbox(cmd) : commandOnPath(cmd)
 }
 
+/** 各网关实例的 picker 展示路由基线（route=上次已同步的展示服务）。模块级 WeakMap：周期检测
+ *  在 createGatewayServer 闭包里跑，而 attach/apply handler 在 handleRequest 里——接入后把
+ *  基线置 undefined（强制下一周期校准 picker）需要两处共享。按 rt 弱引用，实例关闭自动可回收。 */
+const pickerSyncStates = new WeakMap<GatewayRuntime, { route?: string }>()
+
 export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOptions): http.Server {
   const idle = opts.idleTimeoutMs ?? 10 * 60_000
   const retries = opts.retries ?? 1
@@ -324,6 +329,39 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   }, 60_000)
   sweeper.unref?.()
   server.on('close', () => clearInterval(sweeper))
+
+  // 定时 prefer 窗口接管主候选的展示路由跟随：窗口边界没有事件（请求级时间函数），周期对比
+  // 「展示路由」（人工当前 > prefer 窗口 > active_profile，不含熔断等瞬态），变化才把烤模型
+  // 客户端（/model 策划表、模型列表）按窗口目标重写一次——手动切换 / 钉定仍走各自的即时同步。
+  // 基线初始为 undefined：首检按变化处理一次（refresh 有内容一致守卫，已同步则零写盘），
+  // 自愈「网关停摆期间窗口已变」「接入发生在窗口接管期间」两类陈旧；模型生效本身不受此影响
+  // （转发按请求即时翻译）。接入/断开后由 handler 将基线置失效，下一检强制校准。
+  const pickerSync = pickerSyncStates.get(rt) ?? pickerSyncStates.set(rt, { route: undefined }).get(rt)!
+  const pickerSyncTimer = setInterval(() => {
+    void syncBakedClientsForDisplayRoute(rt, pickerSync, { port: rt.port })
+      .then((r) => {
+        if (r.changed) {
+          logAudit(rt, {
+            ts: localIsoTs(),
+            kind: 'audit',
+            op: '定时窗口接管路由',
+            op_en: 'Schedule window takeover',
+            target: r.route ?? '-',
+            detail: r.refreshed.length
+              ? `已同步重写 ${r.refreshed.join('、')} 的客户端配置（重开会话生效）`
+              : undefined,
+            detail_en: r.refreshed.length
+              ? `rewrote client configs for ${r.refreshed.join(', ')} (restart sessions to apply)`
+              : undefined,
+            ok: true,
+            source: 'token',
+          })
+        }
+      })
+      .catch(() => {})
+  }, 5_000)
+  pickerSyncTimer.unref?.()
+  server.on('close', () => clearInterval(pickerSyncTimer))
 
   // 节假日日历每年自动获取（数据源 holiday-cn，国务院公告人工校对）：启动 90s 后首查、之后每 24h；
   // POST /schedule/holidays-cn 可即时触发（CLI/运维用）。失败静默，不影响网关服务
@@ -2009,6 +2047,9 @@ async function handleAdmin(
         gatewayPort: rt.port, // 本实例自己的端口；状态文件在多实例下可能记录的是别的实例
       })
       await reloadRuntime(rt) // 立即刷新内存态，overview 才能即时反映接入结果
+      // attach 写入的 picker 目录取自 active_profile；若此刻正处于 prefer 窗口接管（展示路由 ≠
+      // active_profile），基线置失效让周期检测在 5s 内按窗口目标校准一次
+      pickerSyncStates.get(rt)!.route = undefined
       audit(bi('接入客户端', 'Attach client'), r.harness, bi('端口 {port}，写入 {n} 个文件', 'Port {port}, wrote {n} files', { port: r.port, n: r.files.length }))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, ...r, hint: t('重启 {id} 后生效；原文件已自动快照，可随时断开还原', 'Takes effect after restarting {id}; the original files were auto-snapshotted and can be restored anytime by detaching', { id: r.harness }) }))

@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
-import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
+import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { clientProtocolFromPath, endpointRisks } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
@@ -3258,5 +3258,51 @@ describe('管理面安全（2026-09 审查回归）', () => {
     } finally {
       t.closeAll()
     }
+  })
+})
+
+describe('displayRouteProvider：烤模型客户端的展示路由（人工当前 > prefer 窗口 > active_profile）', () => {
+  const pa = { name: 'A', base_url: 'https://a.example.com', protocol: 'anthropic' as const, auth_style: 'bearer' as const, key_ref: 'file:a' }
+  const pb = { ...pa, name: 'B', base_url: 'https://b.example.com', key_ref: 'file:b' }
+
+  function mkRt(gateway: Config['gateway'], activeProfile = 'proA') {
+    const cfg: Config = {
+      version: 1,
+      active_profile: activeProfile,
+      security: { store: 'file' },
+      providers: { pa, pb },
+      profiles: { proA: { provider: 'pa', default_model: 'a' } },
+      gateway,
+    }
+    return buildRuntime(cfg, 't')
+  }
+
+  it('无窗口/无人工当前：回落 active_profile 的服务', () => {
+    const rt = mkRt({ auto_failover: true })
+    expect(displayRouteProvider(rt)).toBe('pa')
+  })
+
+  it('prefer 窗口接管（仅 auto_failover 开启时参与）', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'pb' }] } })
+    expect(displayRouteProvider(rt)).toBe('pb')
+    // 自动故障切换关闭 → 窗口不参与
+    rt.config.gateway!.auto_failover = false
+    expect(displayRouteProvider(rt)).toBe('pa')
+    // schedule 停用同理
+    rt.config.gateway!.auto_failover = true
+    rt.config.gateway!.schedule = { enabled: false, windows: [{ start: '00:00', end: '23:59', target: 'pb' }] }
+    expect(displayRouteProvider(rt)).toBe('pa')
+  })
+
+  it('人工「当前」优先于窗口；窗口 target 带模型部分时按服务粒度解析', () => {
+    const rt = mkRt({ auto_failover: true, auto_route_provider: 'pa', schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'pb:b-model' }] } })
+    expect(displayRouteProvider(rt)).toBe('pa')
+    delete rt.config.gateway!.auto_route_provider
+    expect(displayRouteProvider(rt)).toBe('pb')
+  })
+
+  it('窗口目标服务不存在：回落 active_profile', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'ghost' }] } })
+    expect(displayRouteProvider(rt)).toBe('pa')
   })
 })

@@ -304,6 +304,24 @@ export function activeAvoidTargets(rt: GatewayRuntime, now = new Date()): string
   return ids
 }
 
+/** 「展示路由」：烤模型客户端（/model 选择器等静态策划面）此刻应当展示的服务——与 pickTarget
+ *  主候选的静态部分同源同序：人工「当前」（auto_route_provider）> prefer 定时窗口（仅自动故障
+ *  切换开启时参与）> active_profile。刻意不含熔断/健康等瞬态：瞬态接管是请求级 failover，模型
+ *  翻译在转发时即时完成，选择器不应跟着抖。窗口边界没有事件（请求级时间函数），调用方需周期
+ *  比对此值的变化来触发客户端重写。 */
+export function displayRouteProvider(rt: GatewayRuntime, now = new Date()): string | undefined {
+  const forced = rt.config.gateway?.auto_route_provider
+  if (forced && rt.config.providers[forced]) return forced
+  const on = rt.config.gateway?.auto_failover === true
+  const win = on ? activeScheduleWindow(rt, now) : null
+  if (win) {
+    const p = parseFallbackEntry(win.target)
+    if (p && rt.config.providers[p.providerId]) return p.providerId
+  }
+  const profName = rt.config.active_profile
+  return profName ? rt.config.profiles[profName]?.provider : undefined
+}
+
 export interface OrderedCandidate {
   target: ResolvedTarget
   providerId: string

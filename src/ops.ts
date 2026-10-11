@@ -10,7 +10,8 @@ import { requireAdapter, getAdapter } from './adapters/registry.js'
 import { applyChanges } from './adapters/engine.js'
 import type { AttachOptions, PlanResult } from './adapters/types.js'
 import { normalizeBaseUrl } from './import/sources.js'
-import { gatewayLive, parseFallbackEntry } from './gateway/state.js'
+import { gatewayLive, parseFallbackEntry, displayRouteProvider, type GatewayRuntime } from './gateway/state.js'
+import { readTextIfExists } from './util/fsx.js'
 import { noteLocalSwitch } from './sync/state.js'
 import {
   listSnapshots,
@@ -315,11 +316,12 @@ async function resolveClientGatewayPort(explicit: number | undefined, cfgPort: n
   return (await gatewayLive())?.port ?? cfgPort ?? DEFAULT_GATEWAY_PORT
 }
 
-/** 全局路由切换后同步"模型烙进客户端文件"的已接入客户端（adapter.bakesModels：dsh / workbuddy / zcode / codex / opencode / mimo）。
+/** 全局路由切换后同步"模型烙进客户端文件"的已接入客户端（adapter.bakesModels：dsh / workbuddy / zcode / codex / opencode / mimo / claude-code）。
  *  这类客户端 attach 时把当时路由的模型列表与默认模型写死在配置里，仅改服务端 active_profile 不会跟随；
- *  这里按新 active_profile 重写一遍（复用 planAttach 管线：快照 + 原子写 + 回读校验，非侵入、只动自己的条目）。
- *  只处理网关模式且跟随全局的客户端：钉定路由的没变、direct/file 模式的目标都是显式的，均不重写。 */
-export async function refreshBakedModelClients(opts: { port?: number } = {}): Promise<RefreshBakedResult> {
+ *  这里按新 active_profile（或显式 profile，见定时窗口接管）重写一遍（复用 planAttach 管线：快照 + 原子写 +
+ *  回读校验，非侵入、只动自己的条目）。只处理网关模式且跟随全局的客户端：钉定路由的没变、direct/file 模式的
+ *  目标都是显式的，均不重写。 */
+export async function refreshBakedModelClients(opts: { port?: number; profile?: string } = {}): Promise<RefreshBakedResult> {
   const cfg = await loadConfig()
   const port = await resolveClientGatewayPort(opts.port, cfg.gateway?.port)
   const refreshed: string[] = []
@@ -331,10 +333,17 @@ export async function refreshBakedModelClients(opts: { port?: number } = {}): Pr
     const adapter = await getAdapter(id, cfg)
     if (!adapter?.bakesModels) continue
     try {
-      const { plan, token } = await planAttach(id, { mode: 'gateway', setDefault: true, gatewayPort: port }, cfg)
+      const { plan, token } = await planAttach(id, { mode: 'gateway', setDefault: true, gatewayPort: port, profile: opts.profile }, cfg)
       const target = plan.changes[0]?.path
       if (target !== undefined && done.has(target)) {
         // 同一文件刚被另一个 harness 身份刷新过，内容已是新路由，不重复写（也不重复快照/审计）
+        refreshed.push(id)
+        continue
+      }
+      // 内容一致守卫：目标文件与计划逐字节相同（重接 / 周期自愈 / 重启场景）则不写不快照，
+      // 让「基线失效 → 强制校准」类调用在稳态下零副作用
+      const before = target !== undefined ? (await readTextIfExists(target)) ?? null : null
+      if (target !== undefined && before !== null && plan.changes.length === 1 && plan.changes[0].before !== null && plan.changes[0].after === before) {
         refreshed.push(id)
         continue
       }
@@ -357,6 +366,49 @@ export async function refreshBakedModelClients(opts: { port?: number } = {}): Pr
     }
   }
   return { refreshed, warnings }
+}
+
+/** 确保某服务存在可引用的 profile（定时窗口接管展示路由时重写烤模型客户端需要 profile 名）：
+ *  已有指向该服务的 profile 直接复用；没有则仿 switchToService 合成 auto-<id>（默认模型取目录首个），
+ *  但不改 active_profile——这是展示层的句柄，不是路由切换。 */
+export async function ensureProfileForProvider(providerId: string): Promise<string> {
+  return mutateConfig((c) => {
+    const existing = Object.entries(c.profiles).find(([, p]) => p.provider === providerId)
+    if (existing) return existing[0]
+    const models = Object.keys(c.providers[providerId]?.models ?? {})
+    const name = `auto-${providerId}`
+    c.profiles[name] = { name, provider: providerId, default_model: models[0] }
+    return name
+  })
+}
+
+export interface DisplayRouteSyncResult {
+  /** 展示路由是否变化（变化才会重写客户端；首次调用仅记基线不写） */
+  changed: boolean
+  /** 当前展示路由（服务 id；无法解析时 undefined） */
+  route?: string
+  refreshed: string[]
+  warnings: string[]
+}
+
+/** 定时 prefer 窗口接管主候选的跟随机制：窗口边界是请求级时间函数、没有事件可挂，调用方
+ *  （网关周期检测）周期性传入 rt 与上次已同步的路由（last.v 就地更新），展示路由变化时把烤模型
+ *  客户端按窗口目标服务的目录重写一遍（/model 选择器等静态策划面跟随窗口）。last.route 由调用方
+ *  维护——网关启动时初始化为当期路由（避免启动即写）；路由未变为无操作。 */
+export async function syncBakedClientsForDisplayRoute(
+  rt: GatewayRuntime,
+  last: { route?: string },
+  opts: { port?: number } = {}
+): Promise<DisplayRouteSyncResult> {
+  const route = displayRouteProvider(rt)
+  if (!route || route === last.route) {
+    last.route = route
+    return { changed: false, route, refreshed: [], warnings: [] }
+  }
+  last.route = route
+  const profileName = await ensureProfileForProvider(route)
+  const r = await refreshBakedModelClients({ port: opts.port, profile: profileName })
+  return { changed: true, route, ...r }
 }
 
 /** 钉定路由后同步单个"烤模型"客户端：按钉定 profile 重跑接入计划（快照 + 原子写，只动自己的条目）。
