@@ -23,7 +23,8 @@ const TIER_ENV_KEYS = [
   ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'claude-fable-*'],
 ] as const
 
-/** 直连模式：根级 model 固定用 sonnet 别名（客户端经 ANTHROPIC_DEFAULT_SONNET_MODEL 解析到真实模型） */
+/** 直连模式：profile 无 default_model 但配置了 sonnet 别名时，根 model 回落 sonnet 别名
+ *  （经别名循环写入的 ANTHROPIC_DEFAULT_SONNET_MODEL 解析）；有 default_model 时根 model 直写真实 ID */
 const ROOT_MODEL_DIRECT = 'sonnet'
 /** 上下文 ≥ 1M tokens 时给模型 ID 追加 [1m] 声明（Claude Code 上下文变体后缀，大小写不敏感） */
 const ONE_M_TOKEN = 1_000_000
@@ -191,6 +192,14 @@ export const claudeCodeAdapter: HarnessAdapter = {
           const ctx = resolveModelMeta(target, provider?.models?.[target], { baseUrl: provider?.base_url })?.context_window
           return ctx !== undefined && ctx >= ONE_M_TOKEN ? `${target}[1m]` : target
         }
+        // 旧版直连把默认模型经 sonnet 别名 + DEFAULT_SONNET_MODEL env 间接映射、并钉定 SUBAGENT——
+        // modelPicker 已全量陈列目录，这组映射不再需要：先清掉（含旧版残留），别名循环按 profile
+        // 现配置重写（用户显式配置了 claude-* 别名才写），Default 行与子代理跟随根 model
+        for (const [envKey] of TIER_ENV_KEYS) {
+          delete env[envKey]
+          delete env[`${envKey}_NAME`]
+        }
+        delete env.CLAUDE_CODE_SUBAGENT_MODEL
         let restored = 0
         for (const [envKey, glob] of TIER_ENV_KEYS) {
           const star = glob.indexOf('*')
@@ -204,18 +213,14 @@ export const claudeCodeAdapter: HarnessAdapter = {
             restored++
           }
         }
-        // 方案 A：sonnet 层 = claude-sonnet-* 别名优先，default_model 兜底（保证根 model: sonnet 有值）
-        const sonnetTarget =
-          env.ANTHROPIC_DEFAULT_SONNET_MODEL ?? (prof.default_model ? suffixed(prof.default_model) : undefined)
-        if (sonnetTarget) {
-          if (!env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-            env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetTarget
-            env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = stripContextSuffix(sonnetTarget)
-            restored++
-          }
-          // 根 model 用 sonnet 别名（不再写 env.ANTHROPIC_MODEL，避免 env 优先级压掉根 model）
+        if (prof.default_model) {
+          // 根 model 直写真实 ID（含 [1m] 声明）：Default 行与子代理（未钉 CLAUDE_CODE_SUBAGENT_MODEL
+          // 时跟随主模型）都落到 profile 默认模型，不需要任何映射 env；仍不写 env.ANTHROPIC_MODEL——
+          // env 优先级高于根 model，会压掉 /model 的会话级选择
+          root.model = suffixed(prof.default_model)
+          restored++
+        } else if (env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
           root.model = ROOT_MODEL_DIRECT
-          env.CLAUDE_CODE_SUBAGENT_MODEL = sonnetTarget
         }
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW
@@ -241,8 +246,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
         }
         notes.push(
           t(
-            '直连模式：已按 profile「{profile}」还原模型映射（{count} 个分层{model}）',
-            'Direct mode: restored model mapping from profile "{profile}" ({count} tier entries{model})',
+            '直连模式：已按 profile「{profile}」还原模型映射（{count} 项{model}）',
+            'Direct mode: restored model mapping from profile "{profile}" ({count} entries{model})',
             {
               profile: String(opts.profile),
               count: restored,
@@ -271,7 +276,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
         delete env.CLAUDE_CODE_SUBAGENT_MODEL
         delete env.CLAUDE_CODE_EFFORT_LEVEL
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
-        if (root.model === ROOT_MODEL_DIRECT) delete root.model
+        // 根 model 可能是真实 ID（现行直连）或 sonnet 别名（旧版直连），都是直连写入的——无条件清
+        delete root.model
       }
       // 网关本地实现 /v1/models（返回当前服务目录）；discovery env 是早期方案（v2.1.296 的
       // discovery 硬过滤只认含 claude/anthropic 的 ID），已被下方 modelPicker 全量策划取代，清除

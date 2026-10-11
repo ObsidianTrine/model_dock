@@ -1700,7 +1700,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
     active_profile: 'demo',
   })
 
-  it('direct：写上游 url+真实 key，完整下发模型映射（DEFAULT_*_MODEL + NAME + 根 model + 调优默认值）；x-api-key 写 API_KEY 并清 AUTH_TOKEN', async () => {
+  it('direct：写上游 url+真实 key，根 model 直写 default_model + 显式别名走 DEFAULT_*_MODEL + 调优默认值；x-api-key 写 API_KEY 并清 AUTH_TOKEN', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
@@ -1728,15 +1728,15 @@ describe('claude-code 独立直连（direct 模式）', () => {
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
-      // 根 model 用 sonnet 别名（不再写 env.ANTHROPIC_MODEL）
-      expect(after.model).toBe('sonnet')
+      // 根 model 直写 default_model（真实 ID，未声明上下文不加 [1m]）；不写 env.ANTHROPIC_MODEL
+      expect(after.model).toBe('demo-model')
       expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
-      // 分层模型映射：sonnet 别名 → 'sonnet-real'；未声明上下文 → 不加 [1m]；NAME = 去后缀 ID
+      // 显式 sonnet 别名仍走映射 env：'sonnet-real'；NAME = 去后缀 ID
       expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('sonnet-real')
       expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe('sonnet-real')
       expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined()
-      // subagent 默认用 sonnet 层模型；effort/compact 默认值
-      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('sonnet-real')
+      // 子代理不再钉定（跟随主模型 = 根 model）；effort/compact 调优默认值保留
+      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
       expect(after.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
       expect(after.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('786432')
       expect(plan.notes.some((n) => n.includes('直连模式'))).toBe(true)
@@ -1761,7 +1761,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
     }
   })
 
-  it('direct：default_model 兜底 sonnet 层（无 claude-sonnet-* 别名时）；上下文≥1M 加 [1m] 后缀', async () => {
+  it('direct：根 model 直写 default_model（≥1M 带 [1m] 后缀）；无显式别名时不写任何映射 env', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
@@ -1772,7 +1772,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
         JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x' } }, null, 2) + '\n',
         0o600
       )
-      // 无 sonnet 别名：default_model 兜底 sonnet 层。glm-5.3-flash 在 known.ts 上下文 1048576 ≥ 1M → 加 [1m]
+      // glm-5.3-flash 在 known.ts 上下文 1048576 ≥ 1M → 根 model 带 [1m]
       const cfg: Config = {
         ...emptyConfig(),
         providers: {
@@ -1795,10 +1795,11 @@ describe('claude-code 独立直连（direct 模式）', () => {
         loaded
       )
       const after = JSON.parse(plan.changes[0].after)
-      expect(after.model).toBe('sonnet')
-      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('glm-5.3-flash[1m]')
-      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe('glm-5.3-flash')
-      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('glm-5.3-flash[1m]')
+      expect(after.model).toBe('glm-5.3-flash[1m]')
+      // 无显式别名：不写任何映射 env（Default 行与子代理跟随根 model）
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBeUndefined()
+      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       h.restore()
@@ -1832,7 +1833,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
       )
       expect(await applyChanges('claude-code', 'direct', plan.changes, { yes: true })).toBe(true)
       const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
-      expect(onDisk.model).toBe('sonnet')
+      expect(onDisk.model).toBe('demo-model')
       expect(onDisk.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('sonnet-real')
 
       // 切回网关：模型映射被清理（网关侧有别名重写，残留会钉死模型）
