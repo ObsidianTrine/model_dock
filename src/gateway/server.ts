@@ -4,7 +4,9 @@ import path from 'node:path'
 import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
-import { timingSafeEqual, createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import { safeEqual } from '../util/safe-equal.js'
+import { projectModel } from './shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig, saveConfig } from '../config/store.js'
@@ -85,6 +87,25 @@ function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessE
   })
 }
 
+/** 子进程引导共步（安装/卸载的 env 构造 + Node 保障 + PATH 前置 + 执行）：installChildEnv 统一构造
+ *  子进程 env，needsNode 时先 ensureNodeRuntime 并把托管 bin 前置 PATH，再 runShell 执行。
+ *  返回未被截尾的原始输出数组与退出码；Node 保障失败时 exit 为 null、output 携带失败消息（调用方各自落失败态）。 */
+async function runInstallCommand(cmd: string, needsNode: boolean): Promise<{ exit: number | null; output: string[] }> {
+  const output: string[] = []
+  const env = installChildEnv(process.env)
+  if (needsNode) {
+    try {
+      const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
+      env.PATH = nrt.binDir + path.delimiter + (env.PATH ?? '')
+    } catch (e) {
+      output.push((e as Error).message)
+      return { exit: null, output }
+    }
+  }
+  const exit = await runShell(cmd, (c) => output.push(c), env)
+  return { exit, output }
+}
+
 /**
  * 客户端安装：有 install.command 则 shell 执行（npm 类 / 平台脚本类自动安装）→ 成功且声明 bootstrap
  * 则复用 applyChanges 补写空配置文件（自动快照 + 原子写，让 detect 生效、attach 可跑）；无 command
@@ -123,18 +144,11 @@ export async function runClientInstall(
         ))
         return { ok: false, auto: true, output: tailText(lines), installed: false, skipped: false, blocked: true }
       } else {
-        const output: string[] = []
-        const env = installChildEnv(process.env)
-        if (inst.needsNode) {
-          try {
-            const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
-            env.PATH = nrt.binDir + path.delimiter + (env.PATH ?? '')
-          } catch (e) {
-            output.push((e as Error).message)
-            return { ok: false, auto: true, output: tailText(output), installed: false, skipped: false }
-          }
+        const { exit, output } = await runInstallCommand(cmd, !!inst.needsNode)
+        if (exit === null) {
+          // Node 保障失败：只报引导错误
+          return { ok: false, auto: true, output: tailText(output), installed: false, skipped: false }
         }
-        const exit = await runShell(cmd, (c) => output.push(c), env)
         // npm 对 engines 不匹配默认只警告（EBADENGINE）不拦：钉死的托管 Node 过期后新客户端
         // 会「装成功、跑就崩」——把埋在日志里的警告提升为可操作提示，失败/成功路径都要可见
         const engineHint = inst.needsNode ? engineWarningHint(output.join('')) : null
@@ -192,18 +206,11 @@ export async function runClientUninstall(
     skipped = true
     lines.push(t('{cmd} 命令不在 PATH 上，无需卸载', '{cmd} is not on PATH; nothing to uninstall', { cmd: inst.probe }))
   } else {
-    const output: string[] = []
-    const env = installChildEnv(process.env)
-    if (inst?.needsNode) {
-      try {
-        const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
-        env.PATH = nrt.binDir + path.delimiter + (env.PATH ?? '')
-      } catch (e) {
-        output.push((e as Error).message)
-        return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
-      }
+    const { exit, output } = await runInstallCommand(cmd, !!inst?.needsNode)
+    if (exit === null) {
+      // Node 保障失败：只报引导错误
+      return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
     }
-    const exit = await runShell(cmd, (c) => output.push(c), env)
     if (exit !== 0) {
       clearCommandMemo() // 卸载命令已执行（不排除部分删除），重查 status 前主动失效 PATH memo
       return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
@@ -363,18 +370,18 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
     void syncBakedClientsForDisplayRoute(rt, pickerSync, { port: rt.port })
       .then((r) => {
         if (r.changed) {
+          // detail 双语经 bi() 成对构造（两个语言参数同写，未来改文案不漏语言），按审计条目的 zh/en 字段落
+          const detail: Bilingual | undefined = r.refreshed.length
+            ? bi(`已同步重写 ${r.refreshed.join('、')} 的客户端配置（重开会话生效）`, `rewrote client configs for ${r.refreshed.join(', ')} (restart sessions to apply)`)
+            : undefined
           logAudit(rt, {
             ts: localIsoTs(),
             kind: 'audit',
             op: '定时窗口接管路由',
             op_en: 'Schedule window takeover',
             target: r.route ?? '-',
-            detail: r.refreshed.length
-              ? `已同步重写 ${r.refreshed.join('、')} 的客户端配置（重开会话生效）`
-              : undefined,
-            detail_en: r.refreshed.length
-              ? `rewrote client configs for ${r.refreshed.join(', ')} (restart sessions to apply)`
-              : undefined,
+            detail: detail?.zh,
+            detail_en: detail?.en,
             ok: true,
             source: 'token',
           })
@@ -593,13 +600,6 @@ async function handleRequest(
 
 // 管理面
 
-/** 常数时间字符串比较（先 sha256 归一化长度，避免长度泄漏），用于 admin token 等高价值凭据 */
-function safeEqual(a: string, b: string): boolean {
-  const ha = createHash('sha256').update(a, 'utf8').digest()
-  const hb = createHash('sha256').update(b, 'utf8').digest()
-  return timingSafeEqual(ha, hb)
-}
-
 /** 管理面所有端点（含 GET）的 Host 白名单：DNS rebinding 的 Host 不是本机，读取类端点同样拒绝。
  *  参照 Vite allowedHosts（CVE-2025-31125 同类问题的标准修法）。 */
 function hostAllowed(req: http.IncomingMessage): boolean {
@@ -688,15 +688,7 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
       auth_style: p.auth_style,
       key_ref: p.key_ref,
       proxy: p.proxy ?? 'direct',
-      models: Object.entries(p.models ?? {}).map(([mid, meta]) => ({
-        id: mid,
-        display_name: meta.display_name ?? null,
-        context_window: resolveModelMeta(mid, meta)?.context_window ?? null,
-        max_output: resolveModelMeta(mid, meta)?.max_output ?? null,
-        // 能力同样走填充链：配置未标时按内置表推断（控制台「视觉」列直接显示推断结果，保存即落到配置）
-        capabilities: meta.capabilities ?? resolveModelMeta(mid, meta)?.capabilities ?? [],
-        source: meta.source,
-      })),
+      models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true, includeSource: true })),
     })),
     profiles: Object.entries(cfg.profiles).map(([name, p]) => ({
       name,
@@ -747,10 +739,8 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
   const services = []
   for (const [id, p] of Object.entries(cfg.providers)) {
     // 引用该 provider 的 profile：active_profile 优先（与 /service/update 写 default_model/候选链的选择逻辑一致）
-    const profs = Object.entries(cfg.profiles).filter(([, pr]) => pr.provider === id)
-    const profileEntry = profs.length
-      ? (cfg.active_profile && profs.some(([n]) => n === cfg.active_profile) ? cfg.profiles[cfg.active_profile] : profs[0][1])
-      : undefined
+    const profileRef = profileRefForProvider(cfg, id)
+    const profileEntry = profileRef ? cfg.profiles[profileRef] : undefined
     const models = Object.keys(p.models ?? {})
     const hasKey = !!(await getSecret(p.key_ref))
     const h = rt.health.get(id)
@@ -774,14 +764,7 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       down: melted,
       meltdown_until: melted ? (h?.meltdown_until ?? null) : null,
       lastMs: h?.lastMs ?? null,
-      models: Object.entries(p.models ?? {}).map(([mid, meta]) => ({
-        id: mid,
-        display_name: meta.display_name ?? null,
-        context_window: resolveModelMeta(mid, meta)?.context_window ?? null,
-        max_output: resolveModelMeta(mid, meta)?.max_output ?? null,
-        // 能力同样走填充链：配置未标时按内置表推断（控制台「视觉」列直接显示推断结果，保存即落到配置）
-        capabilities: meta.capabilities ?? resolveModelMeta(mid, meta)?.capabilities ?? [],
-      })),
+      models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true })),
     })
   }
   const current = services.find((s) => s.isCurrent) ?? null
@@ -877,6 +860,15 @@ function profileForProvider(c: Config, providerId: string): string {
   const name = `__pin_${providerId}`
   c.profiles[name] = { name, provider: providerId, default_model: Object.keys(c.providers[providerId]?.models ?? {})[0] }
   return name
+}
+
+/** 引用该 provider 的 profile 名（active_profile 优先），无则 undefined。buildOverview 的「默认模型/备用链
+ *  读哪个 profile」与 service/update 的「写哪个 profile」是同一选择逻辑，抽共享避免口径漂移。只读，不建隐藏 profile。 */
+function profileRefForProvider(c: Config, providerId: string): string | undefined {
+  const refs = Object.keys(c.profiles).filter((n) => c.profiles[n].provider === providerId)
+  return refs.length
+    ? (c.active_profile && c.profiles[c.active_profile]?.provider === providerId ? c.active_profile : refs[0])
+    : undefined
 }
 
 // 同网直拉迁移（sync-lan-pull，B 机 import 侧）
@@ -1279,6 +1271,11 @@ async function handleAdmin(
       key_ref: key,
       proxy: 'direct',
     }
+    /** 拉取失败/无结果时按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）。声明放在首个调用点之前。 */
+    function knownFallback() {
+      const fb = knownModelsForBaseUrl(baseUrl)
+      return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
+    }
     try {
       const f = await fetchModelIds(provider)
       let arr: { id: string; display: string; context_window: number | null; max_output: number | null; capabilities: string[] }[] = f.ids.map((id: string) => {
@@ -1299,10 +1296,6 @@ async function handleAdmin(
       res.end(JSON.stringify({ ok: true, protocol: proto, from: 'known', models: arr }))
     }
     return
-    function knownFallback() {
-      const fb = knownModelsForBaseUrl(baseUrl)
-      return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
-    }
   }
 
   if (url === '/_modeldock/service' && req.method === 'POST') {
@@ -1882,20 +1875,14 @@ async function handleAdmin(
       }
       // 设置默认模型：写入引用该 provider 的 profile（优先 active_profile）
       if (typeof b.default_model === 'string') {
-        const pros = Object.entries(c.profiles).filter(([, pr]) => pr.provider === id)
-        const profName = pros.length
-          ? (c.active_profile && pros.some(([n]) => n === c.active_profile) ? c.active_profile : pros[0][0])
-          : undefined
+        const profName = profileRefForProvider(c, id)
         if (profName) {
           if (b.default_model) c.profiles[profName].default_model = b.default_model
           else delete c.profiles[profName].default_model
         }
       }
       if (Array.isArray(newFallback)) {
-        const pros = Object.entries(c.profiles).filter(([, pr]) => pr.provider === id)
-        const profName = pros.length
-          ? (c.active_profile && pros.some(([n]) => n === c.active_profile) ? c.active_profile : pros[0][0])
-          : undefined
+        const profName = profileRefForProvider(c, id)
         if (profName) {
           if (newFallback.length) c.profiles[profName].fallback = newFallback
           else delete c.profiles[profName].fallback

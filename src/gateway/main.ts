@@ -1,5 +1,4 @@
 import fs from 'node:fs'
-import type http from 'node:http'
 import { loadConfig } from '../config/store.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config } from '../config/types.js'
 import { migrateSecretsToSecure } from '../ops.js'
@@ -11,6 +10,7 @@ import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
 import { buildRuntime, clearGatewayState, pidAlive, readGatewayState, reloadRuntime, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
+import { listenWithRetry } from './shared.js'
 import { startBootUpdateCheck } from '../update/webupdate.js'
 import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
 import { switchToService } from '../ops.js'
@@ -25,22 +25,6 @@ async function healthOk(port: number): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-function listen(server: http.Server, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (e: Error) => {
-      server.off('listening', onListening)
-      reject(e)
-    }
-    const onListening = () => {
-      server.off('error', onError)
-      resolve()
-    }
-    server.once('error', onError)
-    server.once('listening', onListening)
-    server.listen(port, '127.0.0.1')
-  })
 }
 
 /** 决定本次网关的 admin token：gateway.json 里的旧 token 格式合法（mdkadm_ + 十六进制）就复用，
@@ -108,21 +92,8 @@ export async function startForeground(portOverride?: number): Promise<void> {
     retries: cfg.gateway?.retries,
   })
 
-  let listenPort = requestedPort
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await listen(server, listenPort)
-      break
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE' && attempt < 10) {
-        console.error(t('[modeldock] 端口 {port} 被占用，尝试 {next}', '[modeldock] Port {port} in use, trying {next}', { port: listenPort, next: listenPort + 1 }))
-        listenPort++
-        continue
-      }
-      throw e
-    }
-  }
-
+  // listen + EADDRINUSE 顺延重试与手机控制台（lan.ts）同一实现（src/gateway/shared.ts）
+  const listenPort = await listenWithRetry(server, requestedPort, '127.0.0.1')
   rt.port = listenPort
   // 手机简版控制台（LAN）：开关在 config.lan.enabled；热加载不启停监听器——
   // 启停只走 POST /_modeldock/lan，避免手改配置文件时意外收/放端口
