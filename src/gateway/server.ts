@@ -1093,7 +1093,10 @@ async function handleAdmin(
       res.end()
       return
     }
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag })
+    // 仅 HTML 页覆盖管理面统一 no-store：no-cache = 可存储但每次必须条件重验证，
+    // 浏览器才会存下 236KB 页体并在下一次发 If-None-Match → ETag 304 生效。
+    // 页面是静态壳 + 状态路径，无敏感数据；JSON API 的 no-store 策略不动。
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache' })
     res.end(html)
     return
   }
