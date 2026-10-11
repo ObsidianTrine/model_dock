@@ -172,6 +172,6 @@ export function openEnvelope(env: unknown, passphrase: string): Syncdoc {
   if (!isPlainObject(doc) || doc.fmt !== SYNCDOC_FMT) {
     throw new Error(t('解密后的内容不是 ModelDock 配置文档，文件可能被调包', 'The decrypted content is not a ModelDock sync document; the file may have been swapped'))
   }
-  verifyEnvelopeHmac(doc as unknown as Syncdoc, env as unknown as SyncEnvelope, passphrase)
+  verifyHmacWithKeys(doc as unknown as Syncdoc, env as unknown as SyncEnvelope, macKey)
   return doc as unknown as Syncdoc
 }

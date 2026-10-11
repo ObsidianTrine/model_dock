@@ -212,6 +212,23 @@ function buildDownloadCandidates(repo: string, asset: ReleaseAsset, mirrors: str
   return out
 }
 
+/** 校验 GitHub Releases 资产名，拒绝路径穿越：asset.name 来自 Releases API，直接拼进落盘路径。
+ *  name 含分隔符或含 `..` 路径段即抛 UpdateError（可操作报错）。 */
+export function validateAssetName(name: unknown): asserts name is string {
+  if (typeof name !== 'string' || name === '') {
+    throw new UpdateError(t('下载资产名非法（空或非字符串）', 'Failed to validate the asset name (empty or not a string)'))
+  }
+  if (name.includes('/') || name.includes('\\') || name.split(/[\\/]/).includes('..')) {
+    throw new UpdateError(
+      t(
+        '更新资产名非法（{n}）：不允许含路径分隔符或 ".."。请升级到官方发布的 modeldock 并重试。',
+        'Invalid update asset name ({n}): path separators or ".." are not allowed. Upgrade to the official modeldock release and retry.',
+        { n: name }
+      )
+    )
+  }
+}
+
 /** 下载资产到目标目录，返回落盘路径。按候选链逐个尝试；官方 API 端点整文件重试 3 次
  *  （对象存储间歇断是大陆常态），失败清理半成品 */
 export async function downloadAsset(
@@ -221,6 +238,7 @@ export async function downloadAsset(
   destDir: string,
   opts: { apiBase?: string; mirrors?: string[]; onProgress?: (received: number, total: number) => void; retryDelayMs?: number } = {}
 ): Promise<string> {
+  validateAssetName(asset.name)
   const dest = path.join(destDir, asset.name)
   const retryDelay = opts.retryDelayMs ?? 2000
   const candidates = buildDownloadCandidates(repo, asset, opts.mirrors ?? [], opts.apiBase ?? API_BASE)
