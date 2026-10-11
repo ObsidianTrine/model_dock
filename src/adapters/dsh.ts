@@ -416,12 +416,16 @@ export const dshAdapter: HarnessAdapter = {
           )
         }
       }
-      changes.push({
-        path: layout.legacyFile,
-        before: text,
-        after: doc.toString(),
-        note: t('新增/更新 modeldock provider（含模型列表，settings.yaml 旧布局）', 'Add/update the modeldock provider (with model list, legacy settings.yaml layout)'),
-      })
+      const legacyAfter = doc.toString()
+      // 等值过滤：内容无变化不产生 change，稳态重接（周期 refresh/重复 attach）零快照零写盘
+      if (legacyAfter !== text) {
+        changes.push({
+          path: layout.legacyFile,
+          before: text,
+          after: legacyAfter,
+          note: t('新增/更新 modeldock provider（含模型列表，settings.yaml 旧布局）', 'Add/update the modeldock provider (with model list, legacy settings.yaml layout)'),
+        })
+      }
     }
 
     // 新布局：profiles/*/cordis.patch.yml
@@ -450,16 +454,20 @@ export const dshAdapter: HarnessAdapter = {
           }
         }
       }
-      changes.push({
-        path: patchFile,
-        before: text,
-        after: doc.toString(),
-        note: t('新增/更新 modeldock provider（含模型列表，cordis.patch.yml 新布局）', 'Add/update the modeldock provider (with model list, cordis.patch.yml layout)'),
-      })
+      const patchAfter = doc.toString()
+      // 等值过滤：与 legacy 分支同理，稳态不产生 change
+      if (patchAfter !== text) {
+        changes.push({
+          path: patchFile,
+          before: text,
+          after: patchAfter,
+          note: t('新增/更新 modeldock provider（含模型列表，cordis.patch.yml 新布局）', 'Add/update the modeldock provider (with model list, cordis.patch.yml layout)'),
+        })
+      }
     }
 
-    // 两者皆无：按已有结构决定落点
-    if (changes.length === 0) {
+    // 两者皆无（legacy 不存在且无 patch 目标）才走新建；等值过滤跳过的稳态不算「皆无」
+    if (!layout.legacyExists && targets.patchFiles.length === 0) {
       if (!(await dirExists(layout.home))) {
         throw new AdapterError(
           t(
@@ -531,14 +539,17 @@ export const dshAdapter: HarnessAdapter = {
     const ctext = (await readTextIfExists(credFile())) ?? ''
     const cdoc = parseDocument(ctext)
     cdoc.setIn(['refs', 'MODELDOCK_TOKEN'], d ? d.key : opts.token)
-    changes.push({
-      path: credFile(),
-      before: ctext === '' ? null : ctext,
-      after: cdoc.toString(),
-      note: d
-        ? t('写入上游真实 Key（独立直连）', 'Write the upstream real key (direct mode)')
-        : t('写入本地 token（非上游 key）', 'Write the local token (not an upstream key)'),
-    })
+    const credAfter = cdoc.toString()
+    if (credAfter !== ctext) {
+      changes.push({
+        path: credFile(),
+        before: ctext === '' ? null : ctext,
+        after: credAfter,
+        note: d
+          ? t('写入上游真实 Key（独立直连）', 'Write the upstream real key (direct mode)')
+          : t('写入本地 token（非上游 key）', 'Write the local token (not an upstream key)'),
+      })
+    }
 
     return {
       changes,

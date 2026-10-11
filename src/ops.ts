@@ -386,6 +386,11 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
         refreshed.push(id)
         continue
       }
+      // 计划零改动（如 dsh 等值过滤后的稳态）：无需写盘，也不得用空列表清掉登记的 files
+      if (plan.changes.length === 0) {
+        refreshed.push(id)
+        continue
+      }
       const ok = await applyChanges(id, 'attach', plan.changes, { yes: true, quiet: true, redactions: [token] })
       if (!ok) throw new Error(t('写入被取消', 'Write cancelled'))
       await mutateConfig((c) => {
@@ -526,6 +531,9 @@ export async function planAttach(
       token,
       setDefault: opts.setDefault,
       takeoverModels: opts.takeoverModels,
+      // 重复 attach 透传已登记的当前模式：direct 客户端被重接（doctor 对 pointing 异常也提示 attach）时，
+      // 网关分支需清掉直连遗留的模型映射 env——否则残留钉死模型，表现为「切了路由但模型不变」
+      fromMode: cfg.harness[id]?.mode,
     },
     cfg
   )

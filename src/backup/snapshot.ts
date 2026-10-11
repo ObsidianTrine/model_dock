@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { backupsDir } from '../util/paths.js'
-import { ensureDir, fileMode, fileSha256, sha256 } from '../util/fsx.js'
+import { atomicWrite, ensureDir, fileMode, fileSha256, sha256 } from '../util/fsx.js'
 import { loadConfig } from '../config/store.js'
 import { t } from '../util/i18n.js'
 import { VERSION } from '../version.js'
@@ -136,7 +136,9 @@ export async function restoreSnapshot(manifest: SnapshotManifest): Promise<void>
       )
     }
     await ensureDir(path.dirname(rec.path))
-    await fsp.writeFile(rec.path, buf, { mode: rec.mode })
+    // 与 engine.applyChanges 同规：tmp+rename 原子写——还原是用户最脆弱的时刻，就地截断重写
+    // 遇中途断电/崩溃会留下半截客户端配置（快照 blob 完好可再还原，但一次成功还原不该有此风险）
+    await atomicWrite(rec.path, buf, rec.mode)
   }
 }
 

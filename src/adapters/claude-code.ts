@@ -290,6 +290,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
         // 根 model 可能是真实 ID（现行直连）或 sonnet 别名（旧版直连），都是直连写入的——无条件清
         delete root.model
+        // direct 按 x-api-key 型上游写入的上游真实 Key 同属直连遗留，网关模式不该留在客户端配置里
+        delete env.ANTHROPIC_API_KEY
       }
       // 网关本地实现 /v1/models（返回当前服务目录）；discovery env 是早期方案（v2.1.296 的
       // discovery 硬过滤只认含 claude/anthropic 的 ID），已被下方 modelPicker 全量策划取代，清除

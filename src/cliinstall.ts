@@ -72,6 +72,9 @@ export async function installByCopy(
   markerPath: string,
   version = VERSION
 ): Promise<Exclude<CliInstallResult['action'], 'skipped' | 'declined'>> {
+  // 目标即自身（从 PATH 上的副本直接运行且该副本就是落点）：对运行中的 exe 自拷贝在 Windows 上
+  // 报 sharing violation，每次双击静默失败、版本 marker 永不更新——原位即视为已安装
+  if (path.resolve(copyPath) === path.resolve(target)) return 'current'
   await fs.promises.mkdir(path.dirname(copyPath), { recursive: true })
   let existed = false
   try {
