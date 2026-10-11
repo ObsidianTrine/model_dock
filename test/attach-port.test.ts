@@ -110,6 +110,9 @@ describe('客户端写入端口解析 > 全局切换重写烙模型客户端', (
     const h = fakeHome()
     const fake = await hijackStateWithFakeGateway()
     process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    // claude-code 现已纳入烙模型客户端（modelPicker），baseCfg 里有它的接入登记：
+    // presence 需一并放行，否则刷新会以「未安装」告警污染 warnings
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
       const cfg = baseCfg()
       cfg.harness['zcode'] = { mode: 'gateway', route: 'default', token: 'mdk_zcode_t' }
