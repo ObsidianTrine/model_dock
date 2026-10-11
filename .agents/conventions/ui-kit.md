@@ -53,7 +53,7 @@
 |------|-----------|-----------|
 | 按钮 | `.btn` + `primary`/`small`/`danger`/`ghost-danger`/`direct` | 主操作蓝底；破坏性列表操作用 ghost-danger；独立直连琥珀 |
 | 状态徽标 | `.pill` + `ok/err/warn/dim` | 只读状态；可点击展开面板的加 `#schedToggle` 式 cursor |
-| **状态行开关** | JS `pillSwitch(rootId, opt)` + HTML 骨架 `.pill.sw > button.psw-main(role=switch) [+ button.caret]` | **路由区/工具栏的状态开关一律用它**（视觉=原 pill）。形态由 `caret` 决定：A=无 caret（自动路由/开机自启/临时故障切备用）、B=带 caret（定时/手机远程，**caret 仅开启时显示**、点击只开合面板不停服务）。选项：`label` / `on` / `text(on)`（自定义状态文案，如定时的「07:00–23:59 / N 个时段 / 已停用」）/ `okOn(on)`（何时算绿色生效态）/ `panel()` / `onToggle(next, api)` / `onExpand(open)` / `tip`；返回 `set({on,busy,open})` / `isOn()` / `isOpen()` / `setTip()` |
+| **状态行开关** | JS `pillSwitch(rootId, opt)` + HTML 骨架 `.pill.sw > button.psw-main(role=switch) [+ button.caret]` | **路由区/工具栏的状态开关一律用它**（视觉=原 pill）。形态由 `caret` 决定：A=无 caret（自动路由/开机自启/临时故障切备用）、B=带 caret（定时/手机远程，**caret 仅开启时显示**、点击只开合面板不停服务）。选项：`label`（**接线在模块顶层只执行一次，切语言的 pill 必须传 `function(){ return t(...) }` 惰性求值**，字符串会把 t() 固化在加载时语言）/ `on` / `text(on)`（自定义状态文案，如定时的「07:00–23:59 / N 个时段 / 已停用」）/ `okOn(on)`（何时算绿色生效态）/ `panel()` / `onToggle(next, api)` / `onExpand(open)` / `tip`；返回 `set({on,busy,open})` / `isOn()` / `isOpen()` / `setTip()` / `render()` |
 | 开关（表单用） | `.switch`（label.switch > input + span.track）/ `.tswitch`（带文字） | **表单内的参数开关**用它（当前 ui.ts 暂无使用点，kit 保留）；onchange 提交，失败回弹 `checked`，请求期间 `disabled` 防连点 |
 | 分段控件 | `.seg`（容器）+ `.on`；通宽 `.seg.grow` | 互斥选项卡/语言切换；**选中=蓝底白字**；JS 切换只改按钮 `className = 'on'/' '` |
 | 字段 | `.svcform label`（label>span+input）/ `.flabel` | label 13px muted；输入框走基础层 13px；新字段勿再发明第三种写法 |
@@ -75,6 +75,7 @@ Tabs（下划线式）、Progress（含不确定态）、Skeleton、Empty（图�
 ### pillSwitch 落地要点（都是实测过的坑）
 
 - 文案写内嵌 `.ptext`，**禁止**直写根 `textContent`（会冲掉 caret）。
+- 切语言的 pill：`label` 传惰性函数 + `applyLang` 末尾对存量 pill 逐个 `render()`（组件文案在内部自绘，静态 `data-i18n` 扫不到 `.ptext`；曾因字符串 label 固化加载时语言，切英文后「自动路由」等 5 颗不跟随）。
 - 状态只经 `set({on,busy,open})` 写入：5s 轮询重绘与点击回调共用同一份状态，绕过 setter 会回灌旧值。
 - 请求在飞期间（`busy`）不要让轮询把服务端旧值写回开关态（否则视觉闪回；定时那处用 `schedToggleBusy` 守住）。
 - caret 点击要 `stopPropagation`（只开合面板，不切换开关，服务不停）。
