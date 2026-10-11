@@ -10,12 +10,6 @@ export async function loadCfg(): Promise<Config> {
   return loadConfig()
 }
 
-/** attach 写配置时使用的网关端口：优先取活网关实际端口（可能与 config 有偏差） */
-export async function targetGatewayPort(cfg: Config): Promise<number> {
-  const live = await gatewayLive()
-  return live?.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-}
-
 export async function requireGateway(): Promise<GatewayStateFile> {
   const live = await gatewayLive()
   if (!live) {

@@ -4,7 +4,8 @@ import { getSecret } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
 import { autostartStatus } from '../autostart.js'
 import { autostartLine } from './gatewaycmd.js'
-import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, targetGatewayPort, requireGateway, exitWithError } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, exitWithError } from './shared.js'
+import { resolveClientGatewayPort } from '../ops.js'
 
 export async function cmdStatus(): Promise<void> {
   const cfg = await loadCfg()
@@ -186,7 +187,7 @@ export async function cmdEnv(): Promise<void> {
     console.error(c.gray(t('# 已自动创建 generic-env 接管（无文件改动）；撤销：modeldock detach generic-env', '# generic-env attach was created automatically (no files changed). Undo: modeldock detach generic-env')))
     cfg = await loadConfig()
   }
-  const port = await targetGatewayPort(cfg)
+  const port = await resolveClientGatewayPort(undefined, cfg.gateway?.port)
   const token = cfg.harness['generic-env'].token
   console.log(t('# source 到 shell：eval "$(modeldock env)"', '# Source into your shell: eval "$(modeldock env)"'))
   console.log(`export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`)

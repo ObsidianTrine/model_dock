@@ -2,9 +2,9 @@ import { confirm, input, password, search, select } from '@inquirer/prompts'
 import { readFileSync } from 'node:fs'
 import { c, maskSecret, printTable, slugify, t } from '../util/index.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
-import { removeProviderCascade } from '../ops.js'
+import { addService, removeProviderCascade } from '../ops.js'
 import { defaultStore, deleteSecret, getSecret, setSecret, type SecretBackend } from '../config/secrets.js'
-import { PRESETS, findPreset, ensurePresetsLoaded, presetModels } from '../presets/data.js'
+import { PRESETS, findPreset, ensurePresetsLoaded } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 import { refreshCatalog } from '../providers/catalog.js'
@@ -21,14 +21,6 @@ function backendLabel(backend: SecretBackend): string {
 }
 import type { AuthStyle, Config, Protocol } from '../config/types.js'
 import { loadCfg } from './shared.js'
-
-async function uniqueId(base: string): Promise<string> {
-  const cfg = await loadConfig()
-  if (!cfg.providers[base]) return base
-  let n = 2
-  while (cfg.providers[`${base}-${n}`]) n++
-  return `${base}-${n}`
-}
 
 async function askKey(opts: { key?: string; keyEnv?: string }): Promise<string> {
   if (opts.keyEnv) {
@@ -151,60 +143,46 @@ export async function cmdProviderAdd(
   requireValidBaseUrl(baseUrl ?? preset!.base_url)
   warnEndpointRisks(baseUrl ?? preset!.base_url)
 
-  const id = await uniqueId(slugify(opts.name ?? preset?.slug ?? preset?.id ?? 'custom'))
   const key = await askKey(opts)
   const backend: SecretBackend = cfg.security?.store ?? (await defaultStore())
-  const keyRef = await setSecret(id, key, backend)
 
+  // 是否设为默认路由：yes 直接设（仅空配置时生效），否则交互确认。委托 addService 时一并传入。
+  let setActiveIfEmpty = opts.yes
+  if (!opts.yes) {
+    setActiveIfEmpty = await confirm({ message: t('设为默认路由？', 'Set as the default route?') })
+  }
+
+  // 全部委托 ops.addService：创建/查重/校验/命名（auto-<id>）/激活以 ops 版为准——
+  // 不再无条件抢 active_profile（仅空配置且用户确认时才设）。CLI 与 Web 从此行为一致。
+  let added: import('../ops.js').AddServiceResult
   try {
-    await mutateConfig((c2) => {
-      c2.providers[id] = {
-        name: label ?? preset?.label ?? id,
-        base_url: baseUrl ?? preset!.base_url,
-        protocol: (protocol ?? preset?.protocol ?? 'anthropic') as Protocol,
-        auth_style: (authStyle ?? preset?.auth_style ?? 'bearer') as AuthStyle,
-        key_ref: keyRef,
-        proxy: preset?.needs_proxy ? 'env' : 'direct',
-        models: preset ? presetModels(preset) : undefined,
-      }
+    added = await addService(preset?.id ?? 'custom', key, {
+      setActiveIfEmpty,
+      // 模型填入走下方 refreshModelsInto（还原 CLI 原有自动拉取），避免 addService 在线兜底重复拉
+      fetch: false,
+      name: label,
+      base_url: opts.baseUrl,
+      protocol,
+      auth_style: authStyle,
     })
   } catch (e) {
-    // 配置写入失败：回滚已写入 secret store 的 key，避免留下无引用的孤儿密钥
-    await deleteSecret(keyRef).catch(() => {})
-    throw e
+    console.error(c.red(t('✗ {m}', '✗ {m}', { m: (e as Error).message })))
+    process.exit(1)
   }
+  const id = added.providerId
   console.log(c.green(t('✓ provider「{id}」已添加（key 存入 {b}）', '✓ provider "{id}" added (key stored in {b})', { id, b: backendLabel(backend) })))
   if (preset?.docs_url) console.log(c.gray(t('  获取 key：{u}', '  Get a key: {u}', { u: preset.docs_url })))
 
   if (!opts.noFetch) {
     try {
       const cfgNow = await loadConfig()
-      const { added } = await refreshModelsInto(id, cfgNow)
+      const { added: nAdded } = await refreshModelsInto(id, cfgNow)
       const total = Object.keys(cfgNow.providers[id].models ?? {}).length
-      console.log(c.green(t('✓ 自动拉取模型：新增 {a} 个，共 {n} 个', '✓ Fetched models automatically: {a} new, {n} total', { a: added, n: total })))
+      console.log(c.green(t('✓ 自动拉取模型：新增 {a} 个，共 {n} 个', '✓ Fetched models automatically: {a} new, {n} total', { a: nAdded, n: total })))
     } catch (e) {
       console.log(c.yellow(t('提示: {m}', 'Hint: {m}', { m: (e as Error).message })))
     }
   }
-
-  if (opts.yes) {
-    await ensureProfile(id)
-    return
-  }
-  if (await confirm({ message: t('为它创建同名 profile 并设为默认路由？', 'Create a same-named profile and set it as the default route?') })) {
-    await ensureProfile(id)
-  }
-}
-
-async function ensureProfile(id: string): Promise<void> {
-  await mutateConfig((c) => {
-    if (!c.profiles[id]) {
-      const models = Object.keys(c.providers[id]?.models ?? {})
-      c.profiles[id] = { name: c.providers[id]?.name, provider: id, default_model: models[0] }
-    }
-    c.active_profile = id
-  })
-  console.log(c.green(t('✓ profile「{id}」已创建并设为默认路由', '✓ profile "{id}" created and set as the default route', { id })))
 }
 
 export async function cmdProviderList(): Promise<void> {

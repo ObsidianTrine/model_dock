@@ -1,6 +1,6 @@
 import { randomToken, slugify, t } from './util/index.js'
 import { loadConfig, mutateConfig } from './config/store.js'
-import { DEFAULT_GATEWAY_PORT, type Config } from './config/types.js'
+import { DEFAULT_GATEWAY_PORT, type AuthStyle, type Config, type ModelMeta, type Protocol } from './config/types.js'
 import { defaultStore, deleteSecret, getSecret, setSecret, parseKeyRef, type SecretBackend } from './config/secrets.js'
 import { findPreset, presetModels } from './presets/data.js'
 import { fetchModelIds } from './providers/fetch.js'
@@ -33,31 +33,20 @@ export interface AddServiceResult {
   fetchError?: string
 }
 
-/** 添加一个模型服务：key 入库、url/协议按预设自动填好、自动建对应路由、可选设为当前 */
-export async function addService(
-  presetId: string,
-  key: string,
-  opts: {
-    setActiveIfEmpty?: boolean
-    fetch?: boolean
-    /** 自定义服务显示名（缺省用预设 label） */
-    name?: string
-    base_url?: string
-    protocol?: import('./config/types.js').Protocol
-    endpoints?: Partial<Record<import('./config/types.js').Protocol, string>>
-    models?: Record<string, { display_name?: string; context_window?: number; max_output?: number; capabilities?: unknown }>
-    /** 指定默认模型（须在最终模型目录内，否则落回第一行）；与 UI 添加表单的 ★ 同义 */
-    defaultModel?: string
-    /** 故障切换候选链：条目 "<providerId>" 或 "<providerId>:<modelId>"，与 /service/update 同一校验口径 */
-    fallback?: string[]
-  } = {}
-): Promise<AddServiceResult> {
-  const preset = findPreset(presetId)
-  if (!preset) throw new Error(t('未知服务预设：{id}', 'Unknown service preset: {id}', { id: presetId }))
-  if (!key) throw new Error(t('Key 不能为空', 'Key is required'))
+/** addService 可选的用户提交模型（Web 添加表单/CLI 底层透传）；值域与 config 的 ModelMeta 兼容 */
+export interface AddServiceSubmittedModels {
+  [mid: string]: { display_name?: string; context_window?: number; max_output?: number; capabilities?: unknown }
+}
 
-  const cfg = await loadConfig()
-  const finalBaseUrl = (opts.base_url ?? '').trim() || preset.base_url
+/** 输入校验（纯函数，无 I/O）：确定性地址与协议端点。
+ *  地址缺省回落预设地址，两端都必须 http(s)；协议端点只认三协议键、非 http(s) 抛错、剔除空串。
+ *  非法输入抛可操作双语错误；成功返回归一后的 finalBaseUrl 与 cleanEndpoints。 */
+export function validateServiceInput(opts: {
+  baseUrl?: string
+  presetBaseUrl?: string
+  endpoints?: Partial<Record<Protocol, string>>
+}): { finalBaseUrl: string; cleanEndpoints: Partial<Record<Protocol, string>> | undefined } {
+  const finalBaseUrl = (opts.baseUrl ?? '').trim() || (opts.presetBaseUrl ?? '')
   // 自定义预设没有默认地址：地址必须显式提供（与 /service/update 同一口径）
   if (!finalBaseUrl || !/^https?:\/\//i.test(finalBaseUrl)) {
     throw new Error(
@@ -69,9 +58,9 @@ export async function addService(
   }
   // 协议端点与 /service/update 同口径校验：只认三协议键、URL 格式、剔除空串
   //（空串会短路 relay 的端点回落：endpoints[proto] 为 '' 时 ?? 不再退 base_url）
-  let cleanEndpoints: Partial<Record<import('./config/types.js').Protocol, string>> | undefined
+  let cleanEndpoints: Partial<Record<Protocol, string>> | undefined
   if (opts.endpoints && typeof opts.endpoints === 'object' && !Array.isArray(opts.endpoints)) {
-    const e: Partial<Record<import('./config/types.js').Protocol, string>> = {}
+    const e: Partial<Record<Protocol, string>> = {}
     for (const [k, v] of Object.entries(opts.endpoints)) {
       if (!(k === 'anthropic' || k === 'openai' || k === 'responses')) continue
       if (typeof v !== 'string') continue
@@ -80,10 +69,124 @@ export async function addService(
       if (!/^https?:\/\//i.test(val)) {
         throw new Error(t('{proto} 协议地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: k }))
       }
-      e[k as import('./config/types.js').Protocol] = val
+      e[k as Protocol] = val
     }
     if (Object.keys(e).length) cleanEndpoints = e
   }
+  return { finalBaseUrl, cleanEndpoints }
+}
+
+/** 用户提交模型归一化（纯函数，无 I/O）：空 id 剔除、能力清洗、display_name 缺省回落 id */
+function normalizeUserModels(m: AddServiceSubmittedModels): Record<string, ModelMeta> {
+  const out: Record<string, ModelMeta> = {}
+  for (const [mid, rec] of Object.entries(m)) {
+    if (!mid.trim()) continue
+    const caps = saneCapabilities(rec.capabilities)
+    out[mid] = {
+      display_name: rec.display_name ?? mid,
+      context_window: rec.context_window,
+      max_output: rec.max_output,
+      ...(caps?.length ? { capabilities: caps } : {}),
+      source: 'manual' as const,
+    }
+  }
+  return out
+}
+
+/** 模型目录解析（纯函数，无 I/O）：无用户提交 → 原样返回预设目录；有提交 → 叠加/精修在预设完整目录上，
+ *  不整体替换丢模型——已有 id 保留预设 display_name、仅覆盖 context/max，新 id 追加；能力提交了才覆盖（含清空）。 */
+export function resolveServiceModels(
+  userSubmitted: AddServiceSubmittedModels | undefined,
+  presetModelsArg: Record<string, ModelMeta> | undefined
+): Record<string, ModelMeta> | undefined {
+  const userM = userSubmitted ? normalizeUserModels(userSubmitted) : undefined
+  if (!userM) return presetModelsArg
+  const base = { ...(presetModelsArg ?? {}) }
+  for (const [mid, u] of Object.entries(userM)) {
+    const ex = base[mid]
+    base[mid] = ex
+      ? {
+          ...ex,
+          context_window: u.context_window,
+          max_output: u.max_output,
+          ...(u.capabilities === undefined ? {} : { capabilities: u.capabilities }),
+          source: 'manual' as const,
+        }
+      : { ...u }
+  }
+  return base
+}
+
+/** 故障切换候选链校验与归一（纯函数，无 I/O）：条目 "<providerId>" 或 "<providerId>:<modelId>"；
+ *  跳过自身与重复条目；非法条目/悬空目标抛可操作双语错误。未提供返回 undefined，空数组原样透传。 */
+export function resolveFallbackChain(
+  fallback: string[] | undefined,
+  ownId: string,
+  providers: Record<string, { base_url: string }>
+): string[] | undefined {
+  if (fallback === undefined) return undefined
+  const out: string[] = []
+  const seenIds = new Set<string>()
+  for (const raw of fallback) {
+    const parsed = parseFallbackEntry(raw)
+    if (!parsed) {
+      throw new Error(
+        t(
+          '备用服务条目「{entry}」无效，应为 服务ID 或 服务ID:模型ID',
+          'Invalid fallback entry "{entry}"; expected serviceId or serviceId:modelId',
+          { entry: String(raw ?? '') }
+        )
+      )
+    }
+    if (parsed.providerId === ownId || seenIds.has(parsed.providerId)) continue
+    if (!providers[parsed.providerId]) {
+      throw new Error(
+        t(
+          '备用服务「{id}」不存在；先添加它，或刷新页面同步最新列表',
+          'Fallback service "{id}" does not exist; add it first, or refresh the page to sync the latest list',
+          { id: parsed.providerId }
+        )
+      )
+    }
+    seenIds.add(parsed.providerId)
+    out.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
+  }
+  return out
+}
+
+/** 添加一个模型服务：key 入库、url/协议按预设自动填好、自动建对应路由、可选设为当前 */
+export async function addService(
+  presetId: string,
+  key: string,
+  opts: {
+    setActiveIfEmpty?: boolean
+    fetch?: boolean
+    /** 自定义服务显示名（缺省用预设 label） */
+    name?: string
+    base_url?: string
+    protocol?: Protocol
+    /** 自定义鉴权方式（缺省用预设 auth_style；仅 CLI 自定义流程会覆盖） */
+    auth_style?: AuthStyle
+    endpoints?: Partial<Record<Protocol, string>>
+    models?: AddServiceSubmittedModels
+    /** 指定默认模型（须在最终模型目录内，否则落回第一行）；与 UI 添加表单的 ★ 同义 */
+    defaultModel?: string
+    /** 故障切换候选链：条目 "<providerId>" 或 "<providerId>:<modelId>"，与 /service/update 同一校验口径 */
+    fallback?: string[]
+  } = {}
+): Promise<AddServiceResult> {
+  const preset = findPreset(presetId)
+  if (!preset) throw new Error(t('未知服务预设：{id}', 'Unknown service preset: {id}', { id: presetId }))
+  if (!key) throw new Error(t('Key 不能为空', 'Key is required'))
+
+  // 输入校验（纯函数）：地址必须 http(s)，协议端点同口径
+  const { finalBaseUrl, cleanEndpoints } = validateServiceInput({
+    baseUrl: opts.base_url,
+    presetBaseUrl: preset.base_url,
+    endpoints: opts.endpoints,
+  })
+
+  const cfg = await loadConfig()
   // 重复提交兜底：同地址且同 Key 视为重复（Web 双击的最后一道闸）；
   // 同地址不同 Key 允许——那是"同一厂商多个账号分别登记"的合法场景
   const norm = normalizeBaseUrl(finalBaseUrl)
@@ -109,52 +212,16 @@ export async function addService(
 
   const backend: SecretBackend = cfg.security?.store ?? (await defaultStore())
   const keyRef = await setSecret(id, key, backend)
-  const userModels = (m: Record<string, { display_name?: string; context_window?: number; max_output?: number; capabilities?: unknown }>) => {
-    const out: Record<string, import('./config/types.js').ModelMeta> = {}
-    for (const [mid, rec] of Object.entries(m)) {
-      if (!mid.trim()) continue
-      const caps = saneCapabilities(rec.capabilities)
-      out[mid] = {
-        display_name: rec.display_name ?? mid,
-        context_window: rec.context_window,
-        max_output: rec.max_output,
-        ...(caps?.length ? { capabilities: caps } : {}),
-        source: 'manual' as const,
-      }
-    }
-    return out
-  }
-  // 合并保留全部：#2 修复——提交的模型只叠加/精修在预设完整目录上，不再整体替换丢模型。
-  // 已有 id 保留预设的 display_name、仅覆盖 context/max；新 id 追加。能力：提交了才覆盖（含清空），未提交保留预设值。
-  const mergeUserIntoPreset = (
-    presetModelsArg: Record<string, import('./config/types.js').ModelMeta> | undefined,
-    userM: Record<string, import('./config/types.js').ModelMeta>
-  ): Record<string, import('./config/types.js').ModelMeta> => {
-    const base = { ...(presetModelsArg ?? {}) }
-    for (const [mid, u] of Object.entries(userM)) {
-      const ex = base[mid]
-      base[mid] = ex
-        ? {
-            ...ex,
-            context_window: u.context_window,
-            max_output: u.max_output,
-            ...(u.capabilities === undefined ? {} : { capabilities: u.capabilities }),
-            source: 'manual' as const,
-          }
-        : { ...u }
-    }
-    return base
-  }
-  const userM = opts.models ? userModels(opts.models) : undefined
+
   const provider = {
     name: (opts.name ?? '').trim() || preset.label,
     base_url: finalBaseUrl,
     protocol: opts.protocol ?? preset.protocol,
-    auth_style: preset.auth_style,
+    auth_style: opts.auth_style ?? preset.auth_style,
     key_ref: keyRef,
     proxy: preset.needs_proxy ? ('env' as const) : ('direct' as const),
     endpoints: cleanEndpoints ?? preset.endpoints ?? undefined,
-    models: userM ? mergeUserIntoPreset(presetModels(preset), userM) : presetModels(preset),
+    models: resolveServiceModels(opts.models, presetModels(preset)),
   }
 
   let fetched = 0
@@ -188,35 +255,7 @@ export async function addService(
   const modelIds = Object.keys(provider.models ?? {})
   const explicitDefault = opts.defaultModel && modelIds.includes(opts.defaultModel) ? opts.defaultModel : undefined
   // 故障切换候选链：条目 "<providerId>"（透传）或 "<providerId>:<modelId>"；跳过自身与重复条目
-  let fallbackEntries: string[] | undefined
-  if (opts.fallback !== undefined) {
-    fallbackEntries = []
-    const seenIds = new Set<string>()
-    for (const raw of opts.fallback) {
-      const parsed = parseFallbackEntry(raw)
-      if (!parsed) {
-        throw new Error(
-          t(
-            '备用服务条目「{entry}」无效，应为 服务ID 或 服务ID:模型ID',
-            'Invalid fallback entry "{entry}"; expected serviceId or serviceId:modelId',
-            { entry: String(raw ?? '') }
-          )
-        )
-      }
-      if (parsed.providerId === id || seenIds.has(parsed.providerId)) continue
-      if (!cfg.providers[parsed.providerId]) {
-        throw new Error(
-          t(
-            '备用服务「{id}」不存在；先添加它，或刷新页面同步最新列表',
-            'Fallback service "{id}" does not exist; add it first, or refresh the page to sync the latest list',
-            { id: parsed.providerId }
-          )
-        )
-      }
-      seenIds.add(parsed.providerId)
-      fallbackEntries.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
-    }
-  }
+  const fallbackEntries = resolveFallbackChain(opts.fallback, id, cfg.providers)
 
   const profileName = await mutateConfig((c) => {
     c.providers[id] = provider
@@ -310,7 +349,7 @@ async function gatewayHealthOk(port: number): Promise<boolean> {
  *  多实例（生产 8687 + dev 8890 等）共用一份配置与单一网关状态文件，状态文件只记录"最后启动的实例"——
  *  若直接采信，dev 实例会把真实客户端文件重写到自己的端口（2026-10-01 用户实测踩中：生产控制台
  *  接入/切换服务后，客户端 detail 恒为 http://127.0.0.1:8890）。网关自身的操作必须显式传 rt.port。 */
-async function resolveClientGatewayPort(explicit: number | undefined, cfgPort: number | undefined): Promise<number> {
+export async function resolveClientGatewayPort(explicit: number | undefined, cfgPort: number | undefined): Promise<number> {
   if (explicit) return explicit
   if (await gatewayHealthOk(DEFAULT_GATEWAY_PORT)) return DEFAULT_GATEWAY_PORT
   return (await gatewayLive())?.port ?? cfgPort ?? DEFAULT_GATEWAY_PORT
