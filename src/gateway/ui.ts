@@ -958,8 +958,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var st = { on: !!opt.on, busy: false, open: false }
     var tipOverride = ''
     function fmt() {
-      if (st.busy) return opt.label + t(' · …', ' · …')
-      return opt.text ? opt.text(st.on) : opt.label + ' · ' + (st.on ? t('开', 'on') : t('关', 'off'))
+      // label 允许传函数（惰性求值）：接线在模块顶层只跑一次，字符串 label 会把 t() 固化在加载时的语言里
+      var label = typeof opt.label === 'function' ? opt.label() : opt.label
+      if (st.busy) return label + t(' · …', ' · …')
+      return opt.text ? opt.text(st.on) : label + ' · ' + (st.on ? t('开', 'on') : t('关', 'off'))
     }
     function render() {
       textEl.textContent = fmt()
@@ -1043,6 +1045,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     renderThemeBtn()
     pollHealth() // 横幅健康文案也是动态的，切语言后立即重取
     if (view) render()
+    // 状态行 pill 的文案在组件内自绘（render() 不一定逐个 set）：惰性 label 依赖这次重绘才换语言，根 title 同步跟上
+    Array.prototype.forEach.call([autoRouteApi, errApi, fbApi, asApi, lanApi, schedApi], function (p) { if (p) p.render() })
   }
 
   // 主题：auto（跟随系统）/ dark / light，localStorage 持久化（head 早脚本已按存储值预设 data-theme）
@@ -1942,7 +1946,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // —— 状态行开关（pillSwitch；视觉=原 pill，布局/顺序不变）——
   // 自动路由：主体点击切换；失败回弹并提示（busy 期组件防连点）
   var autoRouteApi = pillSwitch('autoRoutePill', {
-    label: t('自动路由', 'Auto route'),
+    label: function () { return t('自动路由', 'Auto route') },
     onToggle: function (next, pill) {
       pill.set({ busy: true })
       api('/auto-route', { method: 'POST', body: JSON.stringify({ enabled: next }) })
@@ -1952,7 +1956,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   })
   // 临时故障切备用（原「限流(429)/网关错误(503) 切备用」勾选收编；429 限流 / 503 服务不可用同属瞬时故障）
   var errApi = pillSwitch('errPill', {
-    label: t('临时故障切备用', 'Failover on transient errors'),
+    label: function () { return t('临时故障切备用', 'Failover on transient errors') },
     onToggle: function (next, pill) {
       pill.set({ busy: true })
       api('/auto-route', { method: 'POST', body: JSON.stringify({ failoverOn429: next }) })
@@ -1962,7 +1966,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   })
   // 自动备用链：手动链优先，没配/不够时自动把已启用服务补进切换候选（模型名透传，网关不改模型）
   var fbApi = pillSwitch('fbPill', {
-    label: t('自动备用链', 'Auto fallback chain'),
+    label: function () { return t('自动备用链', 'Auto fallback chain') },
     onToggle: function (next, pill) {
       pill.set({ busy: true })
       api('/auto-route', { method: 'POST', body: JSON.stringify({ autoFallback: next }) })
@@ -1973,7 +1977,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 开机自启：轮询重绘与回调共用同一 setter（只等 load() 会让开关在 toast 之后回灌旧值）
   function applyAsPill(on) { if (asApi) asApi.set({ on: !!on }) }
   var asApi = pillSwitch('asPill', {
-    label: t('开机自启', 'Autostart'),
+    label: function () { return t('开机自启', 'Autostart') },
     onToggle: function (next, pill) {
       var asOn = !!(view.gateway && view.gateway.autostart && view.gateway.autostart.installed)
       pill.set({ busy: true })
@@ -1996,7 +2000,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var lanOn = false // 当前 LAN 开关态（render 轮询重绘与 loadLanStatus、开关回调共用一份）
   function applyLanPill(on) { lanOn = !!on; if (lanApi) lanApi.set({ on: lanOn }) }
   var lanApi = pillSwitch('lanPill', {
-    label: t('手机远程', 'Mobile console'),
+    label: function () { return t('手机远程', 'Mobile console') },
     panel: function () { return lanPanel },
     onToggle: function (next, pill) {
       pill.set({ busy: true })
@@ -2059,7 +2063,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var schedWindowsSnapshot = []
   var schedRowsRendered = false
   var schedApi = pillSwitch('schedPill', {
-    label: t('定时', 'Schedule'),
+    label: function () { return t('定时', 'Schedule') },
     // 文案是「状态」不是「开/关」：命中时段=时间区间（绿）/ 开启未命中=N 个时段（灰）/ 关=已停用（灰）
     text: function (on) {
       var n = schedStatus.windows
