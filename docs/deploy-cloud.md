@@ -9,6 +9,8 @@
 | 数据目录 | `/var/lib/modeldock-cloud`（systemd `StateDirectory`） |
 | 端口 | 仅放行 TCP `18443`（示例端口，可改）+ SSH 22（限自己 IP） |
 
+> **共享基建**：本 VPS 未来兼作**自动更新源**（`docs/design-auto-update.md` M3）——部署时预留更新源端口/反代，TLS 证书与控制面统一拍板（两详设开放问题同源）。
+
 ---
 
 ## 1. 购买与初始化
