@@ -96,10 +96,11 @@ describe('claude-code adapter', () => {
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:8687')
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
-      // 网关本地实现 /v1/models：attach 即开启 discovery，/model 选择器列出当前服务真实模型
-      expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe('1')
-      // picker 白名单：只显示网关 discovery 别名，内置档位隐藏
-      expect(after.availableModels).toEqual(['anthropic.'])
+      // modelPicker 取代 discovery env / availableModels：/model 只显示网关模型
+      // （baseCfg 无 provider 目录 → 不写 lineup；内容断言见 refreshBakedModelClients 用例）
+      expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+      expect(after.availableModels).toBeUndefined()
+      expect(after.modelPicker).toBeUndefined()
       expect(after.env.OTHER).toBe('keep')
       expect(plan.notes.some((n) => n.includes('upstream.example.com'))).toBe(true)
 
@@ -107,7 +108,6 @@ describe('claude-code adapter', () => {
       expect(ok).toBe(true)
       const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(onDisk.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
-      expect(onDisk.availableModels).toEqual(['anthropic.'])
       expect(onDisk.includeCoAuthoredBy).toBe(false)
       // diff 已脱敏
       expect(plan.changes[0].after).toContain(TOKEN)
@@ -115,7 +115,7 @@ describe('claude-code adapter', () => {
       // 快照已建
       expect((await listSnapshots('claude-code')).some((s) => s.operation === 'attach')).toBe(true)
 
-      // detach 兜底：移除注入的键（含 discovery 开关与白名单）
+      // detach 兜底：移除注入的键（含历史 discovery 开关与白名单）
       const planDetach = await claudeCodeAdapter.planDetach(await loadConfig())
       await applyChanges('claude-code', 'detach', planDetach.changes, { yes: true })
       const afterDetach = JSON.parse(fs.readFileSync(p, 'utf8'))
@@ -247,16 +247,20 @@ describe('claude-code adapter', () => {
     }
   })
 
-  it('切直连：收回网关注入的 discovery 开关与白名单；用户自己的白名单不动', async () => {
+  it('切直连：收回网关注入的 discovery 开关/白名单/策划 lineup；用户自己的配置不动', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
       const p = path.join(h.home, '.claude', 'settings.json')
       await ensureDir(path.dirname(p))
-      // 网关模式 attach 后的典型状态：BASE_URL 指向网关 + discovery 开 + 我们的白名单
+      // 网关模式 attach 后的典型状态：BASE_URL 指向网关 + discovery 开 + 我们的白名单 + 我们的 lineup
       await atomicWrite(
         p,
-        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' }, availableModels: ['anthropic.'] }, null, 2) + '\n',
+        JSON.stringify({
+          env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' },
+          availableModels: ['anthropic.'],
+          modelPicker: { replaceBuiltInOptions: true, options: [{ model: 'a-model', label: 'A', description: 'Mock A · 由 ModelDock 网关提供' }] },
+        }, null, 2) + '\n',
         0o600
       )
       await withConfig(baseCfg())
@@ -272,11 +276,16 @@ describe('claude-code adapter', () => {
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
       expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
       expect(after.availableModels).toBeUndefined()
+      expect(after.modelPicker).toBeUndefined()
 
-      // 用户自己写的白名单（值不同）：切直连不碰
+      // 用户自己写的白名单与 lineup（无 ModelDock 标记/值不同）：切直连不碰
       await atomicWrite(
         p,
-        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN }, availableModels: ['my-custom-model'] }, null, 2) + '\n',
+        JSON.stringify({
+          env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN },
+          availableModels: ['my-custom-model'],
+          modelPicker: { replaceBuiltInOptions: true, options: [{ model: 'mine', label: 'Mine' }] },
+        }, null, 2) + '\n',
         0o600
       )
       const plan2 = await claudeCodeAdapter.planAttach({
@@ -285,7 +294,56 @@ describe('claude-code adapter', () => {
         token: TOKEN,
         direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
       }, await loadConfig())
-      expect(JSON.parse(plan2.changes[0].after).availableModels).toEqual(['my-custom-model'])
+      const after2 = JSON.parse(plan2.changes[0].after)
+      expect(after2.availableModels).toEqual(['my-custom-model'])
+      expect(after2.modelPicker).toEqual({ replaceBuiltInOptions: true, options: [{ model: 'mine', label: 'Mine' }] })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('全局切换服务后 refreshBakedModelClients 重写 claude-code 的 modelPicker（raw ID，无前缀）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const { applyAttach, switchToService, refreshBakedModelClients } = await import('../src/ops.js')
+      const binDir = path.join(h.home, 'bin')
+      await ensureDir(binDir)
+      fs.writeFileSync(path.join(binDir, process.platform === 'win32' ? 'claude.cmd' : 'claude'), '')
+      await withPathEnv(binDir, async () => {
+        await withConfig({
+          ...emptyConfig(),
+          providers: {
+            pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {}, 'a-model-2': { display_name: 'A 两号' } } },
+            pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+          },
+          profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
+          active_profile: 'proA',
+        })
+
+        await applyAttach('claude-code', {}) // 网关接入：modelPicker 烙上 proA 目录
+        const settingsPath = path.join(h.home, '.claude', 'settings.json')
+        const before = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+        expect(before.modelPicker.replaceBuiltInOptions).toBe(true)
+        expect(before.modelPicker.options.map((o: any) => [o.model, o.label])).toEqual([
+          ['a-model', 'a-model'],
+          ['a-model-2', 'A 两号'],
+        ])
+        expect(before.modelPicker.options[0].description).toContain('ModelDock')
+        // discovery env 与 availableModels 不再是 picker 机制
+        expect(before.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+        expect(before.availableModels).toBeUndefined()
+
+        await switchToService('pb')
+        const r = await refreshBakedModelClients()
+        expect(r.refreshed).toContain('claude-code')
+        expect(r.warnings).toEqual([])
+
+        const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+        expect(after.modelPicker.options.map((o: any) => o.model)).toEqual(['b-model'])
+        expect(after.modelPicker.options[0].description).toContain('ModelDock')
+      })
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       h.restore()
