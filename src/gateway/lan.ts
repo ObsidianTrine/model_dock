@@ -1038,13 +1038,14 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
   }
   if (url === '/m/icon-192.png' && req.method === 'GET') {
     if (!lanAuthorized(req, rt)) return sendJson(res, 403, { ok: false, error: t('令牌缺失或不正确', 'Token missing or incorrect') })
-    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
+    // 图标是编译期内存常量、内容永不变化：长缓存 + immutable，避免移动端每次重拉
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' })
     res.end(LAN_ICON_192_PNG)
     return
   }
   if (url === '/m/icon-512.png' && req.method === 'GET') {
     if (!lanAuthorized(req, rt)) return sendJson(res, 403, { ok: false, error: t('令牌缺失或不正确', 'Token missing or incorrect') })
-    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' })
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=31536000, immutable' })
     res.end(LAN_ICON_512_PNG)
     return
   }

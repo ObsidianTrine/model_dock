@@ -52,8 +52,19 @@ export interface GatewayStartOptions {
 
 /** 锁屏提示展示的 gateway.json 路径：随实例实际 home 走（沙箱/自定义 home 时不是 ~/.modeldock），
  *  缩写规则统一走 paths.displayPath（只对真实系统 home 缩写为 ~） */
-function displayGatewayStatePath(): string {
-  return displayPath(gatewayStatePath())
+// 控制台 HTML 体与 home 路径在单进程内固定（displayPath(gatewayStatePath()) 只随环境变量走），
+// 惰性渲染一次后缓存最终 HTML 与其内容 ETag，避免每请求整包 replaceAll + 算 hash。
+// 缓存以 home 路径为键：生产单进程恒定只算一次；单进程共享单测（fakeHome 每用例换 home）
+// 在 home 变化时自动重渲，不服务到旧路径。
+// lang 不含进缓存键：UI_HTML 文案经 data-i18n 浏览器端切换，静态体与请求语言无关。
+let renderedUICache: { home: string; html: string; etag: string } | null = null
+function getRenderedUI(): { html: string; etag: string } {
+  const home = gatewayStatePath()
+  if (renderedUICache && renderedUICache.home === home) return renderedUICache
+  const html = UI_HTML.replaceAll('__MD_GATEWAY_STATE__', displayPath(home))
+  const etag = '"' + createHash('sha256').update(html).digest('base64url').slice(0, 22) + '"'
+  renderedUICache = { home, html, etag }
+  return renderedUICache
 }
 
 const MAX_BODY = 64 * 1024 * 1024
@@ -645,10 +656,12 @@ async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Pro
 async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unknown>> {
   const cfg = rt.config
   const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  const harnessRows = []
-  for (const a of allAdapters(cfg)) {
-    const st = await a.status(cfg, port)
-    harnessRows.push({
+  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，row 顺序与 allAdapters 一致
+  const adapters = allAdapters(cfg)
+  const statuses = await Promise.all(adapters.map((a) => a.status(cfg, port)))
+  const harnessRows = adapters.map((a, i) => {
+    const st = statuses[i]
+    return {
       id: a.id,
       label: a.label,
       attached: !!cfg.harness[a.id],
@@ -656,8 +669,8 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
       route: cfg.harness[a.id]?.route ?? null,
       pointing: st.pointing ?? 'unknown',
       detail: st.detail ?? '',
-    })
-  }
+    }
+  })
   return {
     active_profile: cfg.active_profile ?? null,
     gateway: { port },
@@ -691,9 +704,10 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
   }
 }
 
-/** overview 短 TTL 缓存（UI 每 5s 轮询，避免每次全量 adapter IO；绑定 runtime 实例 + 配置重载代数，任一变化即失效） */
+/** overview 短 TTL 缓存（UI 每 5s 轮询，避免每次全量 adapter IO；绑定 runtime 实例 + 配置重载代数，任一变化即失效）。
+ *  data 存序列化后的字符串：TTL 内命中直接 end 缓存串，不再对几十-几百 KB 的 view 逐次重复 stringify。 */
 const OVERVIEW_TTL_MS = 2_000
-let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: Record<string, unknown> } | null = null
+let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
 
 /** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
 async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown>> {
@@ -753,9 +767,12 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
   const current = services.find((s) => s.isCurrent) ?? null
   const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
   const usedByMap: Record<string, string[]> = {}
+  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，按 adapter 取回，顺序不受并发影响
+  const adapters = allAdapters(cfg)
+  const statuses = new Map(await Promise.all(adapters.map(async (a) => [a, await a.status(cfg, port)] as const)))
   const clients = []
-  for (const a of allAdapters(cfg)) {
-    const st = await a.status(cfg, port)
+  for (const a of adapters) {
+    const st = statuses.get(a)!
     const he = cfg.harness[a.id]
     const providerId = he && hidSvc[a.id] ? hidSvc[a.id] : undefined
     // 钉定信息：route 存钉住的 profile 名（null = 跟随全局），pinnedProvider 是该 profile 指向的服务 id（UI 下拉回显用）
@@ -1062,8 +1079,16 @@ async function handleAdmin(
       res.end()
       return
     }
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    res.end(UI_HTML.replaceAll('__MD_GATEWAY_STATE__', displayGatewayStatePath()))
+    const { html, etag } = getRenderedUI()
+    // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 236KB 页体。
+    // no-store 由管理面统一策略设置，此处叠 ETag 只做条件请求，不放开 JSON 的缓存策略。
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag })
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag })
+    res.end(html)
     return
   }
 
@@ -1196,13 +1221,14 @@ async function handleAdmin(
     // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
     if (cached && cached.rt === rt && cached.reloads === rt.reloads && cached.lang === getLang() && Date.now() - cached.at < OVERVIEW_TTL_MS) {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify(cached.data))
+      res.end(cached.data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
       return
     }
     const view = await buildOverview(rt)
-    overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data: view }
+    const data = JSON.stringify(view)
+    overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(view))
+    res.end(data)
     return
   }
 
