@@ -1,6 +1,6 @@
 # Orchestrator 使用指南
 
-> 面向使用者（人或 agent）的实操手册。架构与设计决策见 `docs/design-orchestrator.md`（v1.8）；
+> 面向使用者（人或 agent）的实操手册。架构与设计决策见 `docs/design-orchestrator.md`；
 > 简版命令速查见 `.agents/workflows/orchestrator.md`。本文回答三件事：怎么用、和 feature-branch 是什么关系、agent 会不会自动触发。
 
 ## 1. 一句话模型

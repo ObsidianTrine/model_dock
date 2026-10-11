@@ -13,8 +13,8 @@
 | 版本号唯一事实来源 | **git tag**。`scripts/build-sea.mjs` 构建时读 `git describe --tags --abbrev=0`，临时改写 `src/version.ts` + `package.json` 后自动还原。**禁止手动改写文件里的版本号** |
 | 发布触发 | 推 tag 后 GitHub Actions（`.github/workflows/release.yml`）自动构建：preflight（CHANGELOG 预检，缺版本段秒级失败）→ 5 平台构建 → 创建 Release |
 | 发布分支 | 日常开发在 `develop`，发布时合入 `main`，在 `main` 上打 tag；**main 不得有 develop 缺失的内容提交**（脚本强制检查，防 hotfix 只合 main 不回 develop 被下轮冲掉） |
-| 版本号语义 | major = 破坏性变更；minor = 向后兼容新功能；patch = 修复；**公开发布过的版本号永不复用**（v1.1.0 先例，见 release.md「出错回滚」） |
-| 发布物 | 共 11 个资产：5 平台压缩包 + darwin app 整包×2（一键升级用）+ darwin DMG×2 + win setup.exe + 合并 SHA256SUMS（名字不带 v 前缀，如 `modeldock-1.2.1-linux-x64.tar.gz`） |
+| 版本号语义 | major = 破坏性变更；minor = 向后兼容新功能；patch = 修复；**公开发布过的版本号永不复用**（先例见 release.md「出错回滚」） |
+| 发布物 | 共 11 个资产：5 平台压缩包 + darwin app 整包×2（一键升级用）+ darwin DMG×2 + win setup.exe + 合并 SHA256SUMS（名字不带 v 前缀，如 `modeldock-1.0.1-linux-x64.tar.gz`） |
 
 ## 1. 机器门禁（一键跑）
 

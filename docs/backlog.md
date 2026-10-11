@@ -34,7 +34,7 @@
 
 ## C 级：管理面 / 可维护性（离转发热路径远，优先级低）
 
-- [ ] **C1 handleAdmin 路由表化**（`src/gateway/server.ts`，2026-09 审查已知遗留）
+- [ ] **C1 handleAdmin 路由表化**（`src/gateway/server.ts`，早期代码审查已知遗留）
   2100 行 if 链 → 端点路由表（method+path → handler），纯可维护性重构，行为零变化。
   验证：全量 `npm test`（管理面端点覆盖充分）+ 手测控制台主要操作。
 

@@ -124,7 +124,7 @@ git push origin develop
 
 - **tag 推错了但 Release 还没构建完**：立即取消 workflow（agent：`gh run cancel <run-id>`），再删远程 tag（`git push origin :refs/tags/vX.Y.Z`，白名单内）和本地 tag（`git tag -d vX.Y.Z`，白名单内）。
 - **Release 已发布**：不要删已发布的 Release（用户可能已下载）。发一个修正版（递增 patch 号）并在 Release 说明里标注替代关系。
-- **撤回的版本号永不复用**：号一旦公开发布过，即使 Release 与 tag 都删掉也不再使用（用户侧可能已下载/引用）。先例：v1.1.0 因 Intel 机 DMG 签名缺陷发布数小时即撤回，改发 v1.1.1，CHANGELOG 版本段随之更名。
+- **撤回的版本号永不复用**：号一旦公开发布过，即使 Release 与 tag 都删掉也不再使用（用户侧可能已下载/引用）。先例：曾有版本因安装包签名缺陷发布数小时即撤回，递增新号发修正版，CHANGELOG 版本段随之更名。
 
 ## 常见错误对照
 
@@ -134,7 +134,7 @@ git push origin develop
 | 手动改 `src/version.ts` 里的版本号 | 版本号由 git tag 决定，构建脚本自动临时替换并还原 |
 | CHANGELOG 写完直接打 tag | 先推 main → 确认 CI 绿 → 再打 tag |
 | 在 main 上直改 CHANGELOG（或让 agent 代改） | CHANGELOG 在 develop 上改，随 develop 合入 main（分支卫生规则） |
-| 复用已撤回的版本号（如 v1.1.0） | 撤回过的号永不复用，递增到新号发修正版 |
+| 复用已撤回的版本号 | 撤回过的号永不复用，递增到新号发修正版 |
 | 漏更 CHANGELOG 就打 tag | release.yml 的 preflight 在构建前失败并提示修复命令：补版本段后删 tag 重打 |
 | 删除已发布的错误 Release | 发修正版替代，保留原 Release 并标注 |
 

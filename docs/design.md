@@ -2,21 +2,16 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 当前版本 | **v1.4 · 状态同步** |
-| 对齐实现 | 公开仓库 v1.0.0（git tag，2026-10-11 发布）+ develop@37de272 |
+| 当前版本 | **v1.0 · 发布基线** |
+| 对齐实现 | 公开仓库 v1.0.0（git tag，2026-10-11 发布）；develop 分支 |
 | 作者 | ObsidianTrine |
-| 日期 | 2026-10-04（v1.4 状态同步 2026-10-11） |
+| 日期 | 2026-10-11 |
 
 **版本历史**
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
-| v0.1–v0.3 | 2026-09 | 早期提纲式设计（见 git 历史）；v0.2 增补 adapter 三层/非侵入/快照，v0.3 增补易用性设计 |
-| v1.0 | 2026-09-27 | 重构为可评审的概要设计：以实现为准（as-built），补齐术语表、ADR 决策记录、接口设计、关键流程、威胁模型、非功能指标、测试映射、风险与开放问题 |
-| v1.1 | 2026-09-28 | 对齐 v1.0.0 发布：补记密钥安全后端矩阵、开机自启、客户端安装接入、定时切换；R1–R9 给出 v1.0 处置结论；用例数 / 命令数 / 预设数校准（99 例 / 34 条 / 18 个） |
-| v1.2 | 2026-10-04 | 补全自动路由选路语义：候选链三级优先与链尾兜底、多窗口重叠消解（prefer 顺序取首个 / avoid 并行生效）、prefer 目标不可用降级、avoid 软约束、failover_status_codes 例外；新增 ADR-9；修正失效的源码行号引用 |
-| v1.3 | 2026-10-04 | 双槽位路由（人为修改优先于程序自动）：主候选改为「人工钉定 > 定时窗口 > 默认路由」；新增「下一个切换」槽（`gateway.route_next` 插备用链首位）；故障切换常开（`auto_failover` 语义收窄为「程序自动选主」开关，仅控制定时窗口是否参与选主）；桌面/手机路由控件按双槽位重构 |
-| v1.4 | 2026-10-11 | 状态同步：对齐公开仓库 v1.0.0 发布基线——补记多机同步 / 自更新 / LAN 手机控制台 / 独立直连 / 托盘 / 双语 i18n / 客户端安装托管 Node / 额度耗尽熔断等已交付能力；规划项逐条代码复核（网关本地 `/v1/models` 已交付移出 M2，其余 M2/M3 项维持规划）；用例数 / 命令数 / 预设数校准（642 例 / 46 条 / 20 个） |
+| v1.0 | 2026-10-11 | 初版（随公开仓库 v1.0.0 发布）：以实现为准（as-built）的概要设计——术语表、ADR 决策（网关为主/配置即 TOML/密钥分层/纯 JS 依赖/SEA 检测/failover 语义/别名透传/定时切换实时求值）、双槽位路由选路语义、子系统设计、接口设计、关键流程、威胁模型、非功能指标、测试映射（642 例 / 46 条命令 / 20 预设基线）、风险处置与规划项现状 |
 
 **评审记录**（评审后填写）
 
@@ -307,7 +302,7 @@ SEA 检测以 `process.execPath` 文件名判断（ADR-6）。守护进程单实
 
 附加：顶部健康条 5s 轮询；**一键迁移卡片**——扫描本机 cc-switch / Claude Code / dsh / ZCode 存量配置（含 key）一键导入，key 搬入安全存储、原软件不动，"暂不导入"以 localStorage 签名记住；底部请求日志常驻（4xx/5xx 标红）。
 
-v1.0.0（公开）后新增：**LAN 手机控制台**（第二监听器 `/m` 页，扫码带令牌接入 + PWA 常驻主屏，路由控件与桌面同口径；`/m/api/*` 端点，`mdklan_` 令牌持久化，cookie 名内嵌端口防双实例互踢）；**同步状态行**（多机同步只读状态 + 指引去 CLI 配置）；**更新检查入口**（徽标 + 弹层，`/_modeldock/admin/update/status|check|apply`，托盘菜单同步提供）；**「独立直连」救援通道入口**（琥珀警示样式，见 §5.5）；`config export/import` 加密配置包（.msync）在桌面与手机页均可导出导入。
+v1.0.0 已包含：**LAN 手机控制台**（第二监听器 `/m` 页，扫码带令牌接入 + PWA 常驻主屏，路由控件与桌面同口径；`/m/api/*` 端点，`mdklan_` 令牌持久化，cookie 名内嵌端口防双实例互踢）；**同步状态行**（多机同步只读状态 + 指引去 CLI 配置）；**更新检查入口**（徽标 + 弹层，`/_modeldock/admin/update/status|check|apply`，托盘菜单同步提供）；**「独立直连」救援通道入口**（琥珀警示样式，见 §5.5）；`config export/import` 加密配置包（.msync）在桌面与手机页均可导出导入。
 
 ### 5.4 配置与密钥存储
 
@@ -354,7 +349,7 @@ v1.0.0（公开）后新增：**LAN 手机控制台**（第二监听器 `/m` 页
 
 > **评估后不接入**：Trae（自定义模型存 `~/Library/Application Support/Trae*/User/globalStorage/state.vscdb` SQLite ItemTable，键 `AI.agent.modelList` 等，且经 `chat/add_custom_model` 走账号侧同步）——SQLite 二进制与「diff 预览 → 原子写文本」引擎模型不冲突无法安全落笔，且改写需退出应用、无登录态无法验证云同步覆盖，不提供自动接入。手动方式：Trae 设置 → 模型 → 添加模型 → 自定义模型，填网关 `http://127.0.0.1:<port>/v1` + harness token。MiMo Desktop 同理不接入：官方文档仅见小米自有供应商（Token Plan 专属 Base URL），无任意第三方端点证据，且 macOS 仅 ARM、邀测制无法实测。
 
-**独立直连模式（救援通道，v1.0.0 公开前交付）**：`harness direct <id> [profile]` 把上游 `base_url` + **真实 Key** 直接写进客户端配置（走同一套 diff 确认 + 快照 + 原子写），网关不在也照常可用——与网关模式互补的降级路径。`harness route / direct / gateway` 支持运行期改路由与直连⇄网关双向切换（客户端配置零改动由网关模式保证；直连切换则重写客户端配置文件）；`harness restore <harness> [snapshotId]` 承接快照还原（原顶层 `restore` 并入本组）。直连模式下 Claude Code 的模型配置按目标服务目录全量重写（含 1M 上下文标注），切换直连目标不残留旧模型名。
+**独立直连模式（救援通道，已随 v1.0.0 发布）**：`harness direct <id> [profile]` 把上游 `base_url` + **真实 Key** 直接写进客户端配置（走同一套 diff 确认 + 快照 + 原子写），网关不在也照常可用——与网关模式互补的降级路径。`harness route / direct / gateway` 支持运行期改路由与直连⇄网关双向切换（客户端配置零改动由网关模式保证；直连切换则重写客户端配置文件）；`harness restore <harness> [snapshotId]` 承接快照还原（原顶层 `restore` 并入本组）。直连模式下 Claude Code 的模型配置按目标服务目录全量重写（含 1M 上下文标注），切换直连目标不残留旧模型名。
 
 ### 5.6 备份与还原（快照）
 
@@ -381,8 +376,6 @@ v1.0.0（公开）后新增：**LAN 手机控制台**（第二监听器 `/m` 页
 ## 6. 接口设计
 
 ### 6.1 CLI 命令面（46 条叶子命令 · 23 顶层）
-
-> v1.1 基线为 34 条；此后新增 `harness` 运行期管理组、`sync`、`update`、`config export/import`、`gateway rotate-token`、`model catalog`，`restore` 并入 `harness` 组。
 
 | 分组 | 命令 | 用途 |
 |---|---|---|
@@ -430,7 +423,7 @@ v1.0.0（公开）后新增：**LAN 手机控制台**（第二监听器 `/m` 页
 | `/_modeldock/attach/plan`、`/attach/apply`、`/detach` | POST | 修改类 | 接入方案预览 / 执行 / 断开还原 |
 | `/_modeldock/reload`、`/test`、`/reset` | POST | 修改类 | 手动热重载 / 连通探测 / 配置重置 |
 
-v1.0.0（公开）后新增端点：自更新 `/_modeldock/admin/update/status`（GET）/ `check` / `apply`（POST）；LAN 手机控制台为**第二监听器**（`/m` 页 + `/m/api/*`，`mdklan_` 令牌 + PWA manifest，cookie 名内嵌端口防双实例互踢）；云端控制面是**独立进程**（`src/cloud/server.ts`，`/v1/login·pair·doc·heartbeat·devices`），不占网关端口。数据面另有 `GET /v1/models` 本地合成（§5.1）。
+v1.0.0 已包含端点：自更新 `/_modeldock/admin/update/status`（GET）/ `check` / `apply`（POST）；LAN 手机控制台为**第二监听器**（`/m` 页 + `/m/api/*`，`mdklan_` 令牌 + PWA manifest，cookie 名内嵌端口防双实例互踢）；云端控制面是**独立进程**（`src/cloud/server.ts`，`/v1/login·pair·doc·heartbeat·devices`），不占网关端口。数据面另有 `GET /v1/models` 本地合成（§5.1）。
 
 定时切换面板的时段时间为「双模式」输入（Ant Design TimePicker 式交互）：点击输入框直接弹出「时/分」两列滚动面板（各 24/60 项，打开时自动滚到并高亮当前值），点选即生效、面板保持打开便于微调、支持任意分钟值；输入框可同时键入（宽容解析 `9:30`/`0930`/`930`，失焦规范成 HH:mm，非法标红），键入时两列实时联动高亮；Enter/Esc/点外部/滚动页面关闭。面板首次打开且从未配置时段时预填 DeepSeek 低谷半价默认时段（00:30–08:30 → DeepSeek，其余 → Coding Plan，按服务名匹配、缺服务不预填、保存空后本会话不再预填）；删光时段仅放占位行不整体重渲染（避免预填回灌）。窗口的选路与重叠语义见 §5.1「定时切换」。
 
@@ -600,7 +593,7 @@ sequenceDiagram
 
 ### 11.1 测试策略与覆盖（vitest，642 用例 · 47 文件，`fakeHome()` 隔离）
 
-> v1.1 基线为 125 例；v1.0.0（公开）基线校准至 **642 例 / 47 文件**（本机 macOS 实跑：642 passed + 4 skipped 平台相关用例，145s）。单套件精确用例数随迭代漂移快，以 CI 与 `docs/usage.md` 测试基线为准，此处按子系统分域：
+> 642 例 / 47 文件为本机 macOS 实跑基线（642 passed + 4 skipped 平台相关用例，145s）。单套件精确用例数随迭代漂移快，以 CI 与 `docs/usage.md` 测试基线为准，此处按子系统分域：
 
 | 域 | 套件（`test/`） | 覆盖 |
 |---|---|---|
@@ -627,12 +620,7 @@ sequenceDiagram
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
-| v0.1.0 | 2026-09-19 | 单机闭环：网关 + 17 预设 + 适配器体系 + 快照 + 导入 + 诊断 + Web 控制台 |
-| v0.1.1 | 2026-09-20 | 五平台 SEA 单文件 + run/stop 辅助脚本 + GitHub Actions 自动发布 |
-| v0.2.0 | 2026-09-20 | Web 控制台 v2：模型元数据编辑、dsh 目录、日志常驻、编辑浮层 |
-| v0.3.0 | 2026-09-20 | `reset` / `uninstall` 一键还原与清理 |
-| v1.0.0 | 2026-09-28 | 密钥安全存储（Keychain / DPAPI / Secret Service / machine-id AES）、网关开机自启（三平台服务）、客户端「安装并接入」闭环、定时切换/自动路由、Web 控制台 v2 增强（排序/搜索/过滤、模型自动填充） |
-| v1.0.0（公开发布） | 2026-10-11 | 仓库开源起版：全部既有能力归并为首个公开版本随 GitHub Release 发布（含多机同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、运行期 harness 管理组、托盘、双语 i18n、客户端安装托管 Node bootstrap）；此后版本演进以 CHANGELOG 为准 |
+| v1.0.0 | 2026-10-11 | 首个公开发布版本：单机闭环（网关 + 预设 + 适配器体系 + 快照 + 导入 + 诊断 + Web 控制台）、五平台 SEA 单文件与自动发布、密钥安全存储（Keychain / DPAPI / Secret Service / machine-id AES）、网关开机自启（三平台服务）、客户端「安装并接入」闭环（含托管 Node bootstrap）、定时切换与自动路由（双槽位）、多机同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、托盘、双语 i18n |
 
 **超出原设计规划已交付**（as-built 修正）：请求级 failover + 熔断（原列 M3）、opencode / mimo-code / workbuddy 适配器、Web 控制台安装-接入-断开闭环、Linux machine-id 加密后端、额度耗尽熔断（402 收编 + quota 熔断）、Claude 内置模型名网关兜底改写、网关本地 `/v1/models`、模型选择器策划（网关/直连双模式）、多机配置同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、`harness` 运行期管理组、托盘、双语 i18n、客户端安装托管 Node bootstrap（含钉版健康门禁）、`config export/import` 加密配置包、`presets.json` 用户自定义预设扩展、models.dev 元数据补全。
 
@@ -641,8 +629,8 @@ sequenceDiagram
 - M2 剩余（2026-10-11 逐项代码复核，均未实施）：L3 外部插件、presets 远程更新（`presets update` 仍为占位）、管理面「严格模式」（R1）、doctor 检出 watch 失效（R5）、固定端口失败即退出选项（R4）、压测基线（R9）、`backup --all`；usage 统计经评估**不做**（占位命令保留，指引看 logs JSONL）。
 - ~~网关侧 `/v1/models` 合成~~：**已交付**（2026-10-11，数据面本地合成，见 §5.1）。
 - M3：anthropic ↔ openai 协议互相转换、项目级 profile 覆盖。
-- 云同步（详设 [design-cloud-sync.md](./design-cloud-sync.md) v1.1）：M1–M3c 已随 v1.0.0 发布；剩 M4 按需项与 VPS 真机验收（VPS 未购）。
-- 自动更新（详设 [design-auto-update.md](./design-auto-update.md) v1.1）：M1/M2 已随 v1.0.0 发布；M3（更新源迁自建）暂缓待 VPS，届时与云同步基础设施合流。
+- 云同步（详设 [design-cloud-sync.md](./design-cloud-sync.md)）：M1–M3c 已随 v1.0.0 发布；剩 M4 按需项与 VPS 真机验收（VPS 未购）。
+- 自动更新（详设 [design-auto-update.md](./design-auto-update.md)）：M1/M2 已随 v1.0.0 发布；M3（更新源迁自建）暂缓待 VPS，届时与云同步基础设施合流。
 
 ---
 

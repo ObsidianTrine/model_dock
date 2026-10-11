@@ -2,9 +2,9 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 当前版本 | **v1.9 · Planner 环节交付（意图 → 任务卡自动化）** |
+| 当前版本 | **v1.0 · 发布基线（Phase 1 全量交付 + Planner 环节）** |
 | 状态 | Phase 2 推进中 |
-| 日期 | 2026-10-01 |
+| 日期 | 2026-10-11 |
 | 读者 | 接手实现的 agent / 评审人 |
 
 > **给接手 agent 的一句话任务说明**：
@@ -593,14 +593,4 @@ worker 的 token 用量从此有两本账：
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
-| v1.0 | 2026-10-01 | 初版：调研结论 + 五层架构 + Phase 1 详细设计 + 实施/测试计划 + 决策点 |
-| v1.1 | 2026-10-01 | 评审意见吸收：worker 权限模式定死（5.5，P0）；调试/审查迭代独立计数；状态机补审查返工回边；崩溃恢复补孤儿 worker 分支；kill 统一进程树；token 口径含缓存读；port_scan 限定 src/** 防误杀；queue/logs 不入库；policy hook 改 --settings 注入不污染项目级；测试文件固定 .test.ts；Phase 2 补狗粮对账与注入消毒 |
-| v1.1.1 | 2026-10-01 | 真实后端冒烟结论沉淀：上游不回传流式 usage 时运行中 token 熔断自动降级（result 回填兜底，docs 5.10）；worktree 依赖准备（有 lock 无 node_modules 时 npm ci）纳入环境职责 |
-| v1.2 | 2026-10-01 | 策略守护完整版交付（10.1）：集中策略引擎 policy.mjs（命令红线/分支保护/classifyChange 分级/审计），两个 hook 薄壳化行为不变；reviewer 权限层强制只读；闸门摘要显示改动分级 |
-| v1.3 | 2026-10-01 | L0/L1 自动合并交付（10.2）：gate 字段语义升级为自动合并上限（L0/L1/L3，缺省 L3 全人工），分级裁决 + scope 越界回人工 + auto 事件标记供漂移统计；NOTES.md 元文件豁免改动面 |
-| v1.4 | 2026-10-01 | 队列自动调度交付（10.3）：run --next 优先级调度 + drain 子进程隔离循环清空队列 + 连续同任务死循环防护；解析失败卡不阻塞 |
-| v1.5 | 2026-10-01 | nightly 巡检交付（10.4）：scan 命令三信号源（TODO/npm audit/测试失败）+ sanitize 注入消毒 + 内容哈希去重；巡检只生成卡不自动 run；狗粮对账明确列为后续（依赖网关 usage 记录能力） |
-| v1.6 | 2026-10-01 | 质量漂移监控交付（10.5）：drift 命令 revert 信号统计 + 失败率>20% 自动降级全人工（degraded.json 幂等标记）+ 人工 --clear 恢复；git --grep BRE 正则坑实测记录 |
-| v1.7 | 2026-10-01 | 多 worker 并行交付（10.6）：drain --workers N 并发调度 + hintsOverlap 分区互斥（固定前缀段规则，保守优先）+ 每任务重试计数拉黑防护；loadCard 无 id 字段导致的 undefined 调度死循环实测修复 |
-| v1.8 | 2026-10-01 | 狗粮对账交付（10.7）：网关转发层 usage 旁路解析（字节透传、SSE/JSON 三协议口径）落盘 LogEntry；orchestrator reconcile 命令时间窗对账（自报 vs 实测、分歧率、零流量警示）；真实对账复用网关分页与日志体系 |
-| v1.9 | 2026-10-01 | Planner 环节交付（10.8）：intent 命令一句话编译任务卡（readonly 会话 + 校验重试 + gate 强制 L3）+ --draft 确认路径 + 审查联动验收标准完备性检查 + scan --run high 卡自动闭环；人的参与收敛为给意图 + L2/L3 审核 |
+| v1.0 | 2026-10-11 | 初版（随公开仓库 v1.0.0 发布）：调研结论 + 五层架构 + Phase 1 详细设计 + 实施/测试计划 + 决策点；实施状态——策略守护（policy.mjs 命令红线/分级/审计）、L0/L1 自动合并、队列调度（run --next / drain）、nightly 巡检（scan + sanitize）、质量漂移监控（drift 降级/恢复）、多 worker 并行（hintsOverlap 分区互斥）、狗粮对账（reconcile + 网关 usage 旁路解析）、Planner 环节（intent 编译任务卡）均已交付（§10 各节），Phase 2 推进中 |
