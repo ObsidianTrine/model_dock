@@ -3,10 +3,9 @@
  *
  * 检查 = GET /repos/{repo}/releases/latest（公开仓库匿名可读，该端点永不返回 draft/prerelease；
  * 配置 token_ref 时带 PAT——私有仓库兼容模式，顺带把限流从 60 次/时提到 5000 次/时）。
- * 下载候选链（公开仓库）：镜像前缀 + browser_download_url → browser_download_url 直连 →
- * api.github.com 的 assets/{id}（Accept: application/octet-stream，302 跟随到对象存储）；
- * 私有仓库（无 browser_url 可用）自然落到末位 API 资产端点。镜像候选快速失败（60s 上限），
- * 官方候选保留长超时与 3 次重试。
+ * 下载候选链（公开仓库）：镜像前缀 + browser_download_url → api.github.com 的 assets/{id}
+ * （Accept: application/octet-stream，302 跟随到对象存储）；私有仓库（无 browser_url 可用）
+ * 自然落到末位 API 资产端点。镜像候选快速失败（60s 上限），官方候选保留长超时与 3 次重试。
  * SHA256 从发布物的 SHA256SUMS 资产解析，任何资产安装前强校验；SUMS 本体永走官方 API
  * （镜像只做加速，完整性锚点不能经过它，见 design §8）。
  */
@@ -187,7 +186,7 @@ export function findAsset(m: ReleaseManifest, name: string): ReleaseAsset | null
   return m.assets.find((a) => a.name === name) ?? null
 }
 
-/** 下载候选：镜像前缀 + browser 直连（快失败，60s 上限）在先，官方 API 资产端点（15min + 3 次重试）兜底 */
+/** 下载候选：镜像前缀（快失败，60s 上限）在先，官方 API 资产端点（15min + 3 次重试）兜底 */
 interface DownloadCandidate {
   url: string
   attempts: number
@@ -196,7 +195,9 @@ interface DownloadCandidate {
 }
 
 /** 组装候选链：仅当 browser_download_url 是本仓库 releases/download 规范形态（大小写不敏感）才走镜像，
- *  防止把非本仓库 URL 塞给第三方镜像；Authorization 只随官方 API 端点发出（令牌绝不进第三方镜像） */
+ *  防止把非本仓库 URL 塞给第三方镜像；Authorization 只随官方 API 端点发出（令牌绝不进第三方镜像）。
+ *  刻意不设 browser_url 直连候选：它和官方 API 资产端点最终落到同一对象存储 CDN，而检查调用
+ *  已证明 api.github.com 可达——直连候选只多一次绕路（测试里还会漏进真网）。 */
 function buildDownloadCandidates(repo: string, asset: ReleaseAsset, mirrors: string[], apiBase: string): DownloadCandidate[] {
   const out: DownloadCandidate[] = []
   const bu = asset.browserUrl
@@ -206,7 +207,6 @@ function buildDownloadCandidates(repo: string, asset: ReleaseAsset, mirrors: str
       const prefix = m.endsWith('/') ? m : `${m}/`
       out.push({ url: `${prefix}${bu}`, attempts: 1, timeoutMs: MIRROR_TIMEOUT_MS, withAuth: false })
     }
-    out.push({ url: bu, attempts: 1, timeoutMs: MIRROR_TIMEOUT_MS, withAuth: false })
   }
   out.push({ url: `${apiBase}/repos/${repo}/releases/assets/${asset.id}`, attempts: 3, timeoutMs: DOWNLOAD_TIMEOUT_MS, withAuth: true })
   return out
