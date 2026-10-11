@@ -124,9 +124,19 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
 
 export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   const { loadConfig } = await import('../config/store.js')
+  const { invalidateSecretsCache } = await import('../config/secrets.js')
+  // 文件 watcher 触发的 reload 会经过这里：清 file/外部后端密钥缓存，另一进程改的 key 即刻（再读盘）生效
+  invalidateSecretsCache()
   rt.config = await loadConfig()
   rt.tokens = buildTokenIndex(rt.config)
   rt.reloads++
+  // 释放旧的代理 dispatcher（ProxyAgent 连接）；direct 共享 Agent 是模块级单例、跨重载复用，不关
+  const keep = rt.dispatchers.get('direct')
+  for (const d of rt.dispatchers.values()) {
+    if (d && d !== keep && typeof d.close === 'function') {
+      Promise.resolve(d.close()).catch(() => {})
+    }
+  }
   rt.dispatchers.clear()
 }
 
