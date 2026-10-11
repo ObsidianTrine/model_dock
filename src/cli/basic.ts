@@ -37,11 +37,22 @@ export async function cmdAdapterList(): Promise<void> {
   console.log(c.gray(t('L2 声明式 pack 在 config.toml [adapter_packs.<id>] 定义；L3 外部插件在 M2', 'L2 declarative packs are defined in config.toml [adapter_packs.<id>]; L3 external plugins arrive in M2')))
 }
 
+/** 组 shell 命令行参数：始终加双引号，避免含 `&`/`^`/`;` 等元字符（但无空格）的路径被 shell 截断。
+ *  已知残留：双引号内的 `$`、反引号、cmd 的 `%VAR%` 仍会展开——值域仅为 EDITOR 与 configPath()，用户自身环境，低危。 */
+export function quoteArg(s: string): string {
+  return `"${s}"`
+}
+
+/** 编辑器程序 + 参数 + 目标文件 → 一条 shell 命令行（每段都加双引号） */
+export function buildEditCmdline(parts: string[], file: string): string {
+  return [...parts, file].map(quoteArg).join(' ')
+}
+
 export async function cmdConfigEdit(): Promise<void> {
   const editorRaw = process.env.EDITOR || (process.platform === 'win32' ? 'notepad' : 'vi')
   // EDITOR 可能带参数（如 "code -w"）：按空格拆成程序 + 参数，整体经 shell 启动（兼容 Windows 的 .cmd shim）
   const parts = editorRaw.trim().split(/\s+/).filter(Boolean)
-  const cmdline = [...parts, configPath()].map((s) => (/\s/.test(s) ? `"${s}"` : s)).join(' ')
+  const cmdline = buildEditCmdline(parts, configPath())
   const before = fs.existsSync(configPath())
   if (!before) {
     console.log(c.gray(t('配置文件不存在，将创建：{f}', 'The config file does not exist yet; it will be created: {f}', { f: configPath() })))

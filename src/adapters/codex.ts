@@ -66,7 +66,7 @@ export const codexAdapter: HarnessAdapter = {
     },
     // developers.openai.com 大陆 403（实测），换成可达且含安装用法的镜像包页
     homepage: 'https://npmmirror.com/package/@openai/codex',
-    bootstrap: { path: configFile(), content: '' },
+    bootstrap: { path: () => configFile(), content: '' },
   },
 
   async detect(): Promise<DetectResult> {

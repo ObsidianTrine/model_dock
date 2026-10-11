@@ -35,7 +35,9 @@ export function expandHome(p: string): string {
  *  MODELRDOCK_HOME）保持绝对路径——对它们缩写会把提示又变回误导性的 ~/.modeldock */
 export function displayPath(p: string): string {
   const realHome = os.homedir()
-  return p === realHome || p.startsWith(realHome + '/') ? '~' + p.slice(realHome.length) : p
+  // 分隔符兼容 `[\\/]`：path.join 在 Windows 产 `\`，仅匹配 `/` 时永不缩写
+  const underHome = p.startsWith(realHome + '/') || p.startsWith(realHome + '\\')
+  return p === realHome || underHome ? '~' + p.slice(realHome.length) : p
 }
 
 /**

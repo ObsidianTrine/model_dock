@@ -233,7 +233,9 @@ export async function buildDshModelEntries(
 
 export const dshAdapter: HarnessAdapter = {
   id: 'dsh',
-  label: 'dsh（DeepSeek Harness）',
+  get label() {
+    return t('dsh（DeepSeek Harness）', 'dsh (DeepSeek Harness)')
+  },
   directMode: true,
   bakesModels: true,
   install: {
