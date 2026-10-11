@@ -180,7 +180,7 @@ export function lanQrSvg(url: string): string {
   return q.createSvgTag(4, 4).replace('<svg ', '<svg shape-rendering="crispEdges" ')
 }
 
-// ---------- 同网直拉迁移（sync-lan-pull，A 机 offer 侧） ----------
+// 同网直拉迁移（sync-lan-pull，A 机 offer 侧）
 
 const SYNC_OFFER_TTL_MS = 10 * 60 * 1000
 
@@ -191,7 +191,6 @@ let syncOffer: { token: string; envelopeJson: string; createdAt: number } | null
  *  前提：手机远程已开启（直拉端点挂在 LAN 监听器上，8687 仍仅 127.0.0.1）。 */
 export async function createSyncOffer(rt: GatewayRuntime): Promise<{ urls: string[]; passphrase: string; expiresIn: number }> {
   if (!rt.lan) throw new Error(t('手机远程未开启：先在控制台开启「手机远程」，再生成分享链接', 'Mobile console is off: turn it on in the console before creating a share link'))
-  // URL 只列监听器真正绑定的地址（与发现应答共用 lanAdvertiseIps 口径）
   const hosts = lanAdvertiseIps(rt.lan.host)
   if (!hosts.length) throw new Error(t('未检测到局域网 IPv4 地址，无法生成直拉链接', 'No LAN IPv4 address detected; cannot create a pull link'))
   const { doc, report } = await collectSyncdoc()
@@ -206,7 +205,7 @@ export async function createSyncOffer(rt: GatewayRuntime): Promise<{ urls: strin
   }
 }
 
-// ---------- 附近电脑确认式直拉（sync-nearby）：B 敲门 → A 确认 → B 凭一次性 nonce 取授权 ----------
+// 附近电脑确认式直拉（sync-nearby）：B 敲门 → A 确认 → B 凭一次性 nonce 取授权
 
 const SYNC_REQUEST_TTL_MS = 120 * 1000
 const SYNC_GRANT_TTL_MS = 120 * 1000

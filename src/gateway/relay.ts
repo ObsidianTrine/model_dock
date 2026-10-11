@@ -35,7 +35,7 @@ export function upstreamEndpoint(provider: ProviderConfig, proto: Protocol): str
       t('服务商「{name}」未配置 {proto} 协议端点（客户端走的是 {proto} 协议）', 'Provider "{name}" has no {proto} endpoint configured (the client speaks the {proto} protocol)', { name: provider.name ?? '', proto }),
       t('在「编辑服务」里填入该协议的接口地址，或改用该服务商支持的协议', 'Fill in the endpoint URL for this protocol in "Edit Service", or use a protocol the provider supports')
     )
-    e.candidateSkip = true // 该候选不支持客户端协议：跳过它继续试链上其余候选，而不是中止整条链
+    e.candidateSkip = true // 该候选不支持客户端协议
     throw e
   }
   return ep
@@ -344,7 +344,7 @@ export async function forwardToUpstream(
       t('provider「{profile}→{name}」的 key 不可用（key_ref={ref}）', 'API key unavailable for provider "{profile}→{name}" (key_ref={ref})', { profile: target.profileName, name: provider.name ?? target.profile.provider, ref: provider.key_ref }),
       t('modeldock provider set-key {id} 更新 key', 'Run modeldock provider set-key {id} to update the key', { id: target.profile.provider })
     )
-    e.candidateSkip = true // key 未设置的候选跳过，把机会让给链上其余候选（自动备用链的健壮性前提）
+    e.candidateSkip = true // 把机会让给链上其余候选（自动备用链的健壮性前提）
     throw e
   }
 
@@ -493,7 +493,6 @@ export async function forwardWithFailover(
         replayedFrom = c.providerId
         continue
       }
-      // reason 只在偏离「主选直连成功」时设置：改发/重放才标记，普通成功缺席（缺席=无事件）
       const marks: string[] = []
       if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
       if (replayedFrom) marks.push(`replayed_from:${replayedFrom}`)

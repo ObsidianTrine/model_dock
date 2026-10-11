@@ -188,7 +188,7 @@ export function resolveByProfile(
   return { ok: true, target: { harness: harnessId, profileName: routeName, profile, provider } }
 }
 
-// ---------- 自动路由：健康/熔断状态与候选选路 ----------
+// 自动路由：健康/熔断状态与候选选路
 
 /** 滑动窗口 + 熔断更新。cls 仅记录需要熔断的错误类；ok 或 null(4xx 中性)不累计。
  *  quota=额度耗尽（402 / 429+quota 体）：3 次即熔断且冷却 15 分钟——额度不会分钟级恢复，别反复撞耗尽的服务。 */
@@ -229,7 +229,7 @@ export function isMeltdown(rt: GatewayRuntime, providerId: string, now = Date.no
   return !!h && h.meltdown_until != null && h.meltdown_until > now
 }
 
-// ---------- 定时切换：时段求值（纯函数，每次选路实时计算，无定时器/无运行态） ----------
+// 定时切换：时段求值（纯函数，每次选路实时计算，无定时器/无运行态）
 
 function parseHHmm(s: string): number | null {
   const m = /^(\d{1,2}):(\d{2})$/.exec(String(s ?? '').trim())
@@ -587,7 +587,7 @@ function appendLog(file: string, line: string): void {
 
 /** 请求日志：全量按天 JSONL 落盘（不含任何请求体）；仅错误请求（4xx/5xx/异常/自动改发）进内存环形缓冲供 Web 端展示 */
 export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
-  // 正常 2xx 请求只落盘不进 ring：控制台日志表只留错误与改发事件，避免被高频正常请求刷屏
+  // 避免被高频正常请求刷屏
   if (entry.status === undefined || entry.status >= 400 || entry.err || entry.reason) {
     rt.ring.push(entry)
     if (rt.ring.length > RING_MAX) rt.ring.splice(0, rt.ring.length - RING_MAX)

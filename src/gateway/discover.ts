@@ -88,7 +88,6 @@ export function discoverPeers(opts?: {
         // 可达地址以对方自广告为准；应答包源地址只作旧版应答兜底
         const ips = Array.isArray(payload.ips) ? payload.ips.filter((x): x is string => typeof x === 'string' && x !== '') : []
         if (!ips.length) ips.push(rinfo.address)
-        // 同一台机器多网卡应答多次：按 主机名+端口 归组，IP 收进候选列表依次尝试
         const key = `${name}:${payload.port}`
         if (opts?.exclude && name === opts.exclude.name && payload.port === opts.exclude.port) return
         const hit = found.get(key)

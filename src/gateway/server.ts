@@ -75,23 +75,16 @@ function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessE
 }
 
 /**
- * 客户端安装：有 install.command 则 shell 执行（npm 类 / 平台脚本类自动安装）→ 成功且声明
- * bootstrap 则复用 applyChanges 补写空配置文件（自动快照 + 原子写，让 detect 生效、attach 可跑）。
- * 无 command 的客户端（ZCode/WorkBuddy）不执行，仅返回指引，由 Web 控制台展示。
- *
- * 执行前的环境保障：
- * - needsNode 的命令（npm 类）先 ensureNodeRuntime——本机无 Node 时下载托管运行时，并把
- *   其 bin 目录前置到子进程 PATH（系统 node 经 well-known 命中时同样前置，LaunchAgent 的
- *   PATH 常缺 nvm 目录，不前置子进程找不到 npm）；
- * - 子进程 env 经 installChildEnv 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。
- *
- * 沙箱模式（MODELRDOCK_FAKE_HOME，dev 沙箱与 agent 测试实例）：只放行可重定向落点的 npm
- * 全局安装——npm_config_prefix/cache 指进沙箱，装完不碰宿主全局 prefix。脚本类安装
- * （curl|bash、irm|iex 等）落点由第三方脚本决定、无法重定向，直接拒绝并提示手动安装。
- *
- * 声明了 install.probe 的客户端先探测命令是否已在 PATH 上：已存在就跳过安装命令。
- * 页面状态可能是旧的（用户在别处刚装好），而 npm 全局重装会先把现有安装目录与 shim
- * 改名 retire 再重建，postinstall 一旦不成功就只剩报错桩，把本来可用的命令弄坏。
+ * 客户端安装：有 install.command 则 shell 执行（npm 类 / 平台脚本类自动安装）→ 成功且声明 bootstrap
+ * 则复用 applyChanges 补写空配置文件（自动快照 + 原子写，让 detect 生效、attach 可跑）；无 command
+ * 的客户端（ZCode/WorkBuddy）不执行，仅返回指引。needsNode 的命令（npm 类）先 ensureNodeRuntime——
+ * 本机无 Node 时下载托管运行时，其 bin 目录前置到子进程 PATH（系统 node 经 well-known 命中时同样
+ * 前置：LaunchAgent 的 PATH 常缺 nvm 目录，不前置子进程找不到 npm）；子进程 env 经 installChildEnv
+ * 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。沙箱模式（MODELRDOCK_FAKE_HOME）只放行
+ * 可重定向落点的 npm 全局安装——npm_config_prefix/cache 指进沙箱，不碰宿主全局 prefix；脚本类
+ * 安装（curl|bash、irm|iex 等）落点无法重定向，拒绝并提示手动安装。声明 install.probe 的先探测：
+ * 命令已在 PATH 就跳过安装——页面状态可能是旧的（用户在别处刚装好），而 npm 全局重装会先把现有
+ * 安装目录与 shim 改名 retire 再重建，postinstall 一旦不成功就只剩报错桩，把本来可用的命令弄坏。
  */
 export async function runClientInstall(
   adapter: HarnessAdapter,
@@ -111,8 +104,7 @@ export async function runClientInstall(
         // 类型上不可达（command 存在才有 cmd）；防御性兜底走指引分支
         lines.push(t('未配置可执行的安装命令', 'No executable install command configured'))
       } else if (sandboxNpmPrefix() && !isNpmGlobalInstall(cmd) && process.env.MODELRDOCK_INSTALL_ALLOW_ANY !== '1') {
-        // 沙箱内只放行 npm 全局安装：脚本类落点由第三方脚本决定，会写进真机（~/ 目录、PATH 等）。
-        // MODELRDOCK_INSTALL_ALLOW_ANY=1 为单测桩命令（node -e 等）放行，受控环境专用。
+        // MODELRDOCK_INSTALL_ALLOW_ANY=1 为单测桩命令（node -e 等）放行，受控环境专用
         lines.push(t(
           '沙箱环境不支持自动安装该客户端：其安装方式（{cmd}）会把程序写进真机，沙箱无法重定向其落点。请按页面安装指引手动安装（装好后点「重新检测」即可接入沙箱配置）',
           'Sandbox cannot auto-install this client: its install method ({cmd}) writes to the real machine and cannot be redirected. Install manually per the guide, then click Re-detect to attach the sandbox config',
@@ -121,7 +113,6 @@ export async function runClientInstall(
         return { ok: false, auto: true, output: tailText(lines), installed: false, skipped: false, blocked: true }
       } else {
         const output: string[] = []
-        // 沙箱模式下 env 里额外带上 npm_config_prefix/cache（指进沙箱）；剥 npm_* 与注镜像同在 installChildEnv
         const env = installChildEnv(process.env)
         if (inst.needsNode) {
           try {
@@ -158,14 +149,12 @@ export async function runClientInstall(
 }
 
 /**
- * 客户端卸载：有 install.uninstall 则 shell 执行（仅 npm 类客户端声明），与安装共用同一套
- * 子进程环境（installChildEnv——沙箱下全局落点经 npm_config_prefix 重定向，只卸装进沙箱的
- * 副本；needsNode 时先保障 node/npm 可用，托管 runtime 场景 shim 在托管 bin 下、PATH 缺它
- * 找不到 npm）。probe 未命中说明命令已不在（可能从未装或已被手动卸载），跳过执行，仅做
- * bootstrap 清理。未声明 uninstall 的客户端（脚本类安装器 / 桌面应用）拒绝并提示手动卸载。
- *
- * bootstrap 清理：卸载后若客户端配置文件内容恰为安装时写入的空配置（字节相等），删除该文件，
- * 让 detect 回到完全「未安装」；有任何用户内容的文件一律保留。
+ * 客户端卸载：有 install.uninstall 则 shell 执行（仅 npm 类客户端声明），与安装共用同一套子进程
+ * 环境（installChildEnv——沙箱下全局落点经 npm_config_prefix 重定向，只卸装进沙箱的副本；
+ * needsNode 时先保障 node/npm 可用，托管 runtime 的 shim 在托管 bin 下、PATH 缺它找不到 npm）。
+ * probe 未命中说明命令已不在（从未装或已手动卸载），跳过执行仅做 bootstrap 清理；未声明
+ * uninstall 的客户端（脚本类安装器 / 桌面应用）拒绝并提示手动卸载。bootstrap 清理：文件内容
+ * 恰为安装时写入的空配置（字节相等）才删除，让 detect 回到「未安装」；有用户内容一律保留。
  */
 export async function runClientUninstall(
   adapter: HarnessAdapter,
@@ -203,7 +192,6 @@ export async function runClientUninstall(
     if (childOut) lines.push(childOut)
     lines.push(t('已执行卸载命令：{cmd}', 'Ran uninstall command: {cmd}', { cmd }))
   }
-  // bootstrap 清理：仅当文件内容与安装时写入的空配置逐字节一致才删（用户已有内容一律保留）
   if (inst?.bootstrap?.path) {
     const bp = typeof inst.bootstrap.path === 'function' ? inst.bootstrap.path() : inst.bootstrap.path
     if ((await readTextIfExists(bp)) === inst.bootstrap.content) {
@@ -449,7 +437,6 @@ async function handleRequest(
     return
   }
 
-  // 认证 → 路由
   const adminHeader = req.headers['x-modeldock-admin']
   const adminOk = typeof adminHeader === 'string' && safeEqual(adminHeader, rt.adminToken)
   const resolved = adminOk
@@ -544,7 +531,7 @@ async function handleRequest(
   }
 }
 
-// ---------- 管理面 ----------
+// 管理面
 
 /** 常数时间字符串比较（先 sha256 归一化长度，避免长度泄漏），用于 admin token 等高价值凭据 */
 function safeEqual(a: string, b: string): boolean {
@@ -746,8 +733,7 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       // 客户端自身 profile（dsh 的 desktop/web 等）：未接入时 UI 据此渲染接入范围选择；attached 后回显已选范围
       clientProfiles: a.clientProfileOptions ? await a.clientProfileOptions() : null,
       clientScope: he?.client_profiles ?? null,
-      // 沙箱安装能力：null=非沙箱（行为不变）；'redirect'=npm 全局安装可重定向进沙箱；
-      // 'unsupported'=脚本类安装会写真机，沙箱内拒绝执行（UI 降级为指引展示）
+      // 沙箱安装能力（枚举语义见 sandboxInstallCapability）：'unsupported' 时 UI 降级为只展示安装指引
       install: a.install ? {
         auto: !!a.install.command,
         command: resolveInstallCommand(a.install.command),
@@ -812,7 +798,7 @@ function profileForProvider(c: Config, providerId: string): string {
   return name
 }
 
-// ---------- 同网直拉迁移（sync-lan-pull，B 机 import 侧） ----------
+// 同网直拉迁移（sync-lan-pull，B 机 import 侧）
 
 const SYNC_TICKET_TTL_MS = 5 * 60 * 1000
 
@@ -838,7 +824,7 @@ function takeSyncTicket(ticket: string): Syncdoc {
   return hit.doc
 }
 
-// ---------- 附近电脑确认式直拉（sync-nearby，B 机发起侧） ----------
+// 附近电脑确认式直拉（sync-nearby，B 机发起侧）
 
 interface RemoteRequestState {
   status: 'waiting' | 'granted' | 'denied' | 'timeout' | 'failed'
@@ -969,7 +955,6 @@ async function handleAdmin(
 ): Promise<void> {
   const url = (req.url ?? '').split('?')[0]
 
-  // Host 白名单：管理面所有端点（含 GET 读取类）统一校验，封死 DNS rebinding 读配置/偷 Key 的路径
   if (!hostAllowed(req)) {
     return sendError(res, 403, t('管理接口仅限本机访问（Host 必须是 127.0.0.1/localhost）', 'Admin API is local-only (Host must be 127.0.0.1/localhost)'))
   }
@@ -1035,7 +1020,6 @@ async function handleAdmin(
       return
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    // 锁屏提示里的 gateway.json 路径按本实例实际位置注入（沙箱/自定义 home 时不是 ~/.modeldock）
     res.end(UI_HTML.replaceAll('__MD_GATEWAY_STATE__', displayGatewayStatePath()))
     return
   }
@@ -1104,7 +1088,7 @@ async function handleAdmin(
     return
   }
 
-  // —— 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成 ——
+  // 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
   if (url === '/_modeldock/admin/update/status' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(await getUpdateStatus(rt)))
@@ -1154,7 +1138,7 @@ async function handleAdmin(
     return
   }
 
-  // —— 面向任务的服务端点（Web 控制台 v2，全部用户语言，无内部概念） ——
+  // 面向任务的服务端点（Web 控制台 v2，全部用户语言，无内部概念）
 
   if (url === '/_modeldock/model-catalog' && req.method === 'GET') {
     // 模型元数据兜底总表（内置表 ∪ models.dev 目录，8000+ 条）：量大，单端点懒加载一次，
@@ -1165,7 +1149,6 @@ async function handleAdmin(
   }
 
   if (url === '/_modeldock/overview' && req.method === 'GET') {
-    // 短 TTL 缓存：overview 每次遍历全部 adapter 做文件 IO，而 UI 每 5s 轮询；配置变更（reloads 变化）立即失效
     const cached = overviewCache
     // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
     if (cached && cached.rt === rt && cached.reloads === rt.reloads && cached.lang === getLang() && Date.now() - cached.at < OVERVIEW_TTL_MS) {
@@ -1785,7 +1768,7 @@ async function handleAdmin(
         if (!rt.config.providers[parsed.providerId]) {
           return sendError(res, 400, t('备用服务「{id}」不存在', 'Fallback service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
         }
-        if (parsed.providerId === id || seenIds.has(parsed.providerId)) continue // 自身/重复条目跳过
+        if (parsed.providerId === id || seenIds.has(parsed.providerId)) continue
         seenIds.add(parsed.providerId)
         newFallback.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
       }
@@ -1815,7 +1798,6 @@ async function handleAdmin(
           else delete c.profiles[profName].default_model
         }
       }
-      // 故障切换候选链：写入引用该 provider 的 profile（优先 active_profile）；空数组=清除
       if (Array.isArray(newFallback)) {
         const pros = Object.entries(c.profiles).filter(([, pr]) => pr.provider === id)
         const profName = pros.length
@@ -2041,7 +2023,7 @@ async function handleAdmin(
     const b = await jsonRequestBody(req)
     try {
       const r = await detachHarness(String(b.harness ?? ''))
-      await reloadRuntime(rt) // 立即刷新内存态
+      await reloadRuntime(rt)
       audit(bi('断开客户端', 'Detach client'), String(b.harness ?? '-'), r.restored ? bi('已还原到本次接入前（快照 {id}）', 'Restored to the state before this attach (snapshot {id})', { id: r.snapshotId ?? '-' }) : bi('已反向清理网关配置', 'Gateway-side config cleaned up in reverse'))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, ...r }))
