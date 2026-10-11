@@ -57,6 +57,14 @@ interface ClaudeSettings {
   [k: string]: unknown
 }
 
+/** ModelDock 网关模式写入的 picker 白名单（availableModels）：前缀条目匹配全部 discovery 别名。
+ *  detach/切直连时仅当值仍是我们写的这份才删，不碰用户自己的名单。 */
+const GATEWAY_AVAILABLE_MODELS = ['anthropic.']
+
+function isOurAvailableModels(v: unknown): boolean {
+  return JSON.stringify(v) === JSON.stringify(GATEWAY_AVAILABLE_MODELS)
+}
+
 export const claudeCodeAdapter: HarnessAdapter = {
   id: 'claude-code',
   label: 'Claude Code',
@@ -139,9 +147,10 @@ export const claudeCodeAdapter: HarnessAdapter = {
     const prevBase = env.ANTHROPIC_BASE_URL
     env.ANTHROPIC_BASE_URL = d ? d.base_url : gatewayBase(opts.gatewayPort)
     if (d) {
-      // 直连没有网关的 /v1/models 实现，discovery 开关是网关模式注入的，切直连时收回
-      // （上游未必实现该端点，留着只会得到失败请求）
+      // 直连没有网关的 /v1/models 实现，discovery 开关与 picker 白名单都是网关模式注入的，切直连时收回
+      // （上游未必实现该端点；白名单留着会把直连时的内置档位全部藏掉）
       delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+      if (isOurAvailableModels(root.availableModels)) delete root.availableModels
       // 直连按上游鉴权方式写对应变量，并清掉另一种，避免客户端拿旧的凭据变量先用错
       if (d.auth_style === 'x-api-key') {
         env.ANTHROPIC_API_KEY = d.key
@@ -233,10 +242,14 @@ export const claudeCodeAdapter: HarnessAdapter = {
       // 网关本地实现 /v1/models（返回当前服务目录），打开 discovery 让 /model 选择器列出
       // 并选用服务的真实模型 ID——这是 ModelDock 注入的 env，detach 时一并收回
       env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1'
+      // availableModels 白名单（claude 用户级 settings 即生效，官方语义：不在名单里的模型从
+      // picker 隐藏）：前缀条目 anthropic. 匹配 discovery 服务的所有别名 ID、不匹配 claude
+      // 内置分层 → /model 只列网关模型。换服务无需改（别名前缀与服务无关）；detach 收回
+      root.availableModels = GATEWAY_AVAILABLE_MODELS
       notes.push(
         t(
-          '网关模式：已开启模型发现（CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1），/model 选择器将列出当前服务的真实模型；未选具体模型时，claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端',
-          'Gateway mode: model discovery is enabled (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) so /model lists the current service real models; until a specific model is picked, built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart'
+          '网关模式：已开启模型发现（CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1），/model 选择器将只列出当前服务的真实模型（内置 Opus/Sonnet 等档位已隐藏，Default 项为选择器固定行）；未选具体模型时，claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端',
+          'Gateway mode: model discovery is enabled (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) so /model lists only the current service real models (built-in tiers like Opus/Sonnet are hidden; Default is a fixed picker row); until a specific model is picked, built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart'
         )
       )
     }
@@ -304,6 +317,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
       delete env.ANTHROPIC_BASE_URL
       delete env.ANTHROPIC_AUTH_TOKEN
       delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY // attach 注入的 discovery 开关一并收回
+      if (isOurAvailableModels(root.availableModels)) delete root.availableModels // 白名单同理，用户自己的不动
       return {
         changes: [
           {

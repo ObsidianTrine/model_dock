@@ -98,6 +98,8 @@ describe('claude-code adapter', () => {
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
       // 网关本地实现 /v1/models：attach 即开启 discovery，/model 选择器列出当前服务真实模型
       expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe('1')
+      // picker 白名单：只显示网关 discovery 别名，内置档位隐藏
+      expect(after.availableModels).toEqual(['anthropic.'])
       expect(after.env.OTHER).toBe('keep')
       expect(plan.notes.some((n) => n.includes('upstream.example.com'))).toBe(true)
 
@@ -105,6 +107,7 @@ describe('claude-code adapter', () => {
       expect(ok).toBe(true)
       const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(onDisk.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
+      expect(onDisk.availableModels).toEqual(['anthropic.'])
       expect(onDisk.includeCoAuthoredBy).toBe(false)
       // diff 已脱敏
       expect(plan.changes[0].after).toContain(TOKEN)
@@ -112,12 +115,13 @@ describe('claude-code adapter', () => {
       // 快照已建
       expect((await listSnapshots('claude-code')).some((s) => s.operation === 'attach')).toBe(true)
 
-      // detach 兜底：移除注入的键（含 discovery 开关）
+      // detach 兜底：移除注入的键（含 discovery 开关与白名单）
       const planDetach = await claudeCodeAdapter.planDetach(await loadConfig())
       await applyChanges('claude-code', 'detach', planDetach.changes, { yes: true })
       const afterDetach = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(afterDetach.env.ANTHROPIC_BASE_URL).toBeUndefined()
       expect(afterDetach.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+      expect(afterDetach.availableModels).toBeUndefined()
       expect(afterDetach.env.OTHER).toBe('keep')
 
       const st = await claudeCodeAdapter.status(await loadConfig(), 8687)
@@ -243,16 +247,16 @@ describe('claude-code adapter', () => {
     }
   })
 
-  it('切直连：收回网关注入的 discovery 开关；直连配置不新增该 env', async () => {
+  it('切直连：收回网关注入的 discovery 开关与白名单；用户自己的白名单不动', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
       const p = path.join(h.home, '.claude', 'settings.json')
       await ensureDir(path.dirname(p))
-      // 网关模式 attach 后的典型状态：BASE_URL 指向网关 + discovery 开
+      // 网关模式 attach 后的典型状态：BASE_URL 指向网关 + discovery 开 + 我们的白名单
       await atomicWrite(
         p,
-        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' } }, null, 2) + '\n',
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' }, availableModels: ['anthropic.'] }, null, 2) + '\n',
         0o600
       )
       await withConfig(baseCfg())
@@ -263,10 +267,25 @@ describe('claude-code adapter', () => {
         token: TOKEN,
         direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
       }, await loadConfig())
-      const env = JSON.parse(plan.changes[0].after).env
-      expect(env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
-      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
-      expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
+      expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
+      expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+      expect(after.availableModels).toBeUndefined()
+
+      // 用户自己写的白名单（值不同）：切直连不碰
+      await atomicWrite(
+        p,
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN }, availableModels: ['my-custom-model'] }, null, 2) + '\n',
+        0o600
+      )
+      const plan2 = await claudeCodeAdapter.planAttach({
+        mode: 'direct',
+        gatewayPort: 8687,
+        token: TOKEN,
+        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+      }, await loadConfig())
+      expect(JSON.parse(plan2.changes[0].after).availableModels).toEqual(['my-custom-model'])
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       h.restore()
