@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { commandOnPath, homeDir, t } from '../util/index.js'
+import { commandOnPath, commandOnPathSandbox, homeDir, t } from '../util/index.js'
 
 export type AppPresent = boolean | 'unknown'
 
@@ -22,12 +22,15 @@ export function fakePresence(id: string): AppPresent | null {
 }
 
 /** CLI 形态本体：命令在 PATH 上即在场。commandOnPath 纯文件探测（PATH 逐目录 + Windows
- *  %APPDATA%\npm 与 PATHEXT 后缀 + macOS/Linux Homebrew/nvm 等常见位置兜底扫描），不 spawn 子进程。 */
-export function cliPresent(cmd: string, id: string): boolean {
+ *  %APPDATA%\npm 与 PATHEXT 后缀 + macOS/Linux Homebrew/nvm 等常见位置兜底扫描），不 spawn 子进程。
+ *  opts.sandboxIsolated：可装进沙箱的 npm 类客户端传 true——FAKE_HOME 下只认沙箱内命中，
+ *  宿主真机的同名命令不算数（沙箱是独立的「全新机器」）；桌面/脚本类客户端只有真机一份
+ *  拷贝，必须保持并集（否则沙箱里永远无法接入）。 */
+export function cliPresent(cmd: string, id: string, opts: { sandboxIsolated?: boolean } = {}): boolean {
   const forced = fakePresence(id)
   if (forced === true) return true
   if (forced === false) return false
-  return commandOnPath(cmd)
+  return opts.sandboxIsolated ? commandOnPathSandbox(cmd) : commandOnPath(cmd)
 }
 
 function execText(cmd: string, args: string[], timeoutMs: number): Promise<string> {

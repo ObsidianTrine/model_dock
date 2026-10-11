@@ -23,9 +23,27 @@ export function commandOnPath(cmd: string): boolean {
   return commandOnPathResolved(cmd) !== null
 }
 
+/** 沙箱感知探测：非沙箱与 commandOnPath 等价；FAKE_HOME 下只认落点在沙箱 home 内的命中
+ *  （沙箱 npm-global bin、托管 runtime、fake home 本地 bin）——宿主真机的同名命令不算数。
+ *  沙箱是独立的「全新机器」：装/卸/接入状态只反映沙箱自身，否则卸载沙箱副本后卡片仍因
+ *  宿主 PATH 上的同名命令显示已安装（2026-10-11 dev 沙箱实测踩中）。仅用于可装进沙箱的
+ *  npm 类客户端；桌面/脚本类客户端只有真机一份拷贝，presence 仍走并集（commandOnPath）。
+ *  注意不能「取首命中再判位置」——宿主与沙箱都有同名命令时首命中必是宿主（PATH 优先），
+ *  须带谓词扫到沙箱内命中为止。 */
+export function commandOnPathSandbox(cmd: string): boolean {
+  if (!process.env.MODELRDOCK_FAKE_HOME) return commandOnPath(cmd)
+  return (
+    commandOnPathResolved(cmd, (p) => {
+      const rel = path.relative(homeDir(), p)
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+    }) !== null
+  )
+}
+
 /** 同 commandOnPath，但返回命中的可执行文件绝对路径（供注入子进程 PATH）。
- *  探测范围额外含 ModelDock 托管 Node 运行时的 bin 目录（客户端装进托管 prefix 后 probe 能命中）。 */
-export function commandOnPathResolved(cmd: string): string | null {
+ *  探测范围额外含 ModelDock 托管 Node 运行时的 bin 目录（客户端装进托管 prefix 后 probe 能命中）。
+ *  accept：命中过滤谓词（commandOnPathSandbox 用）——不满足时继续向后扫，而非整场判负。 */
+export function commandOnPathResolved(cmd: string, accept?: (p: string) => boolean): string | null {
   const isWin = process.platform === 'win32'
   const names = isWin ? [cmd, ...WIN_EXE_SUFFIXES.map((s) => cmd + s)] : [cmd]
   const dirs = (process.env.PATH ?? '').split(isWin ? ';' : ':').filter(Boolean)
@@ -48,7 +66,7 @@ export function commandOnPathResolved(cmd: string): string | null {
     for (const name of names) {
       try {
         const p = path.join(dir, name)
-        if (fs.existsSync(p) && fs.statSync(p).isFile()) return p
+        if (fs.existsSync(p) && fs.statSync(p).isFile() && (!accept || accept(p))) return p
       } catch { /* 目录不可读/无权限，跳过 */ }
     }
   }
@@ -72,7 +90,7 @@ export function commandOnPathResolved(cmd: string): string | null {
   ]
   for (const p of wellKnown) {
     try {
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) return p
+      if (fs.existsSync(p) && fs.statSync(p).isFile() && (!accept || accept(p))) return p
     } catch { /* 单个位置不可读，继续 */ }
   }
   return null
