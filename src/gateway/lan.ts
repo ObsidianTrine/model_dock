@@ -220,7 +220,16 @@ export interface NearbySyncRequest {
 
 /** 待确认拉取请求：单槽（新顶旧），到期自动消失。overview 轮询读、确认卡展示 */
 let pendingSyncRequest: NearbySyncRequest | null = null
+/** 敲门请求按来源 IP 限频（值=上次请求时刻，窗口见 putSyncRequest）。只增不删会随 LAN 扫一遍 254 个 IP 永久驻留——每次写入顺带按窗口清扫过期键。 */
 const requestRateByIp = new Map<string, number>()
+
+/** 清扫限频表中过期条目（距上次请求已 ≥ windowMs：新请求不会被它限流，留着只占内存）。
+ *  抽成纯函数便于单测清扫逻辑；`now` 可注入。 */
+export function sweepRequestRateByIp(now: number, map: Map<string, number>, windowMs = 10_000): void {
+  for (const [ip, lastAt] of map) {
+    if (now - lastAt >= windowMs) map.delete(ip)
+  }
+}
 
 export function peekSyncRequest(): NearbySyncRequest | null {
   if (pendingSyncRequest && Date.now() - pendingSyncRequest.createdAt > SYNC_REQUEST_TTL_MS) pendingSyncRequest = null
@@ -235,6 +244,7 @@ export function clearSyncRequest(): void {
  *  按来源 IP 限频 10s，防骚扰式刷屏确认卡。 */
 export function putSyncRequest(nonce: string, from: string, sourceIp: string): void {
   const now = Date.now()
+  sweepRequestRateByIp(now, requestRateByIp) // 写入前先清扫过期键，Map 尺寸收敛（防无界增长）
   if (now - (requestRateByIp.get(sourceIp) ?? 0) < 10_000) {
     throw new Error(t('请求过于频繁，请稍后再试', 'Requests too frequent; try again later'))
   }

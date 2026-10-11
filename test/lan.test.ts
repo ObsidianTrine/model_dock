@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
 import { loadConfig, saveConfig } from '../src/config/store.js'
 import { buildRuntime } from '../src/gateway/state.js'
-import { detectDefaultRouteAddress, lanAddresses, lanPrimaryUrl, lanQrSvg, rankLanAddresses, resolveLanToken, startLanServer, stopLan } from '../src/gateway/lan.js'
+import { detectDefaultRouteAddress, lanAddresses, lanPrimaryUrl, lanQrSvg, putSyncRequest, rankLanAddresses, resolveLanToken, startLanServer, stopLan, sweepRequestRateByIp } from '../src/gateway/lan.js'
 import { ensureDir } from '../src/util/fsx.js'
 import { modeldockDir } from '../src/util/paths.js'
 import type { Config } from '../src/config/types.js'
@@ -279,6 +279,34 @@ describe('lan 手机简版控制台', () => {
     const svg = lanQrSvg('http://192.168.1.5:8787/m?token=x')
     expect(svg).toContain('<svg')
     expect(svg).toContain('</svg>')
+  })
+})
+
+describe('requestRateByIp 限频表清扫', () => {
+  it('写入超过上限的过期键后，新写入触发清扫、Map 尺寸收敛（254 个过期 IP 不会永久驻留）', () => {
+    // 模拟 LAN 扫一遍碾过 254 个 IP，清理发生在 10s 后：每个留下的记录都超出了限频窗口（全为过期键）
+    const map = new Map<string, number>()
+    const base = 1_000_000_000_000
+    for (let i = 0; i < 254; i++) map.set(`10.0.0.${i}`, base) // 上次请求已在窗口之前
+    map.set('fresh', base + 9_000) // 9s 前请求，仍在 10s 窗口内的活跃条目
+    expect(map.size).toBe(255)
+
+    // putSyncRequest 写入时先清扫：254 条过期键被移除，Map 收敛到仍在限频窗口内的条目
+    sweepRequestRateByIp(base + 10_000, map)
+    expect(map.size).toBe(1)
+    expect(map.has('fresh')).toBe(true)
+    expect(map.has('10.0.0.0')).toBe(false)
+    expect(map.has('10.0.0.253')).toBe(false)
+
+    // 不传 windowMs 默认 10s，与实际限频窗口一致（过期=距上次 ≥ 10s，新请求本就不会被它限流）
+    sweepRequestRateByIp(base + 100_000, map)
+    expect(map.size).toBe(0)
+  })
+
+  it('putSyncRequest 接线清扫后限流体征不变：同 IP 10s 内重复敲门被拒，不同 IP 各自独立', () => {
+    putSyncRequest('n1', 'host-a', '192.168.1.10')
+    expect(() => putSyncRequest('n2', 'host-a', '192.168.1.10')).toThrow()
+    putSyncRequest('n3', 'host-b', '192.168.1.11') // 另一 IP 不受影响
   })
 })
 
