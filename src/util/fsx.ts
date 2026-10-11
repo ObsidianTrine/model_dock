@@ -287,38 +287,6 @@ export function slugify(s: string): string {
   )
 }
 
-export async function which(cmd: string): Promise<string | null> {
-  try {
-    await fsp.access(cmd)
-    return cmd
-  } catch {
-    /* fallthrough */
-  }
-  // Windows 没有 which 命令（execFile('which') 永远 ENOENT）：扫 PATH 按可执行扩展名探测
-  if (process.platform === 'win32') {
-    const exts = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM')
-      .split(';')
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean)
-    const hasExt = exts.some((e) => cmd.toLowerCase().endsWith(e))
-    for (const dir of (process.env.PATH ?? '').split(';')) {
-      if (!dir) continue
-      const candidates = hasExt ? [cmd] : exts.map((e) => cmd + e)
-      for (const name of candidates) {
-        const p = path.join(dir, name)
-        if (await isFile(p)) return p
-      }
-    }
-    return null
-  }
-  const out = await new Promise<string>((resolve) => {
-    import('node:child_process').then(({ execFile }) => {
-      execFile('which', [cmd], (err, stdout) => resolve(err ? '' : stdout.trim()))
-    })
-  })
-  return out || null
-}
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }

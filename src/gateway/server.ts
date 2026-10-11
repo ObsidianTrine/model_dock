@@ -9,7 +9,7 @@ import { safeEqual } from '../util/safe-equal.js'
 import { projectModel } from './shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
-import { ConfigError, loadConfig, mutateConfig, saveConfig } from '../config/store.js'
+import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config, type ProviderConfig } from '../config/types.js'
 import { defaultStore, deleteSecret, getSecret, setSecret } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
@@ -24,7 +24,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, buildRuntime, displayRouteProvider, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
@@ -507,7 +507,7 @@ async function handleRequest(
   const adminHeader = req.headers['x-modeldock-admin']
   const adminOk = typeof adminHeader === 'string' && safeEqual(adminHeader, rt.adminToken)
   const resolved = adminOk
-    ? resolveByProfile(rt, undefined, req.headers['x-modeldock-profile'] as string | undefined)
+    ? resolveByProfile(rt, req.headers['x-modeldock-profile'] as string | undefined)
     : (() => {
         const token = extractToken(req)
         if (!token) return { ok: false as const, status: 401, message: t('缺少认证 token（Authorization: Bearer 或 x-api-key）', 'Missing auth token (Authorization: Bearer or x-api-key)'), hint: t('各 harness 的 token 见 modeldock status', 'Tokens for each harness are listed by modeldock status') }
@@ -2319,7 +2319,7 @@ async function handleAdmin(
       }
       resolved = { ok: true, target: { harness: 'admin-test', profileName: fakeProfile.name, profile: fakeProfile, provider } }
     } else {
-      resolved = resolveByProfile(rt, undefined, p.profile)
+      resolved = resolveByProfile(rt, p.profile)
     }
     if (!resolved.ok) return sendError(res, resolved.status ?? 400, resolved.message ?? t('无法解析路由', 'Cannot resolve a route'), resolved.hint)
     // mode='ping' → 纯网络延迟（不推理）；否则保持原有的完整模型请求测速
@@ -2503,5 +2503,3 @@ export async function probePing(
     }
   }
 }
-
-export { buildRuntime, randomToken }

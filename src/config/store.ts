@@ -166,7 +166,3 @@ export async function mutateConfig<T>(fn: (cfg: Config) => T | Promise<T>): Prom
     }
   })
 }
-
-/** path 供测试/诊断展示锁位置 */
-export const configLockPath = lockPath
-export const configDir = () => path.dirname(configPath())
