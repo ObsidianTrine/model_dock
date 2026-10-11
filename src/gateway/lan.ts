@@ -15,6 +15,7 @@ import { safeEqual } from '../util/safe-equal.js'
 import { listenWithRetry, projectModel } from './shared.js'
 import { localIsoTs } from '../util/time.js'
 import { autoRouteInfo, logAudit, parseFallbackEntry, reloadRuntime, type GatewayRuntime } from './state.js'
+import { CONSOLE_SHARED_JS } from './console-shared.js'
 import { lanCookieName } from './cookies.js'
 import { LAN_ICON_192_PNG, LAN_ICON_512_PNG } from './lanAssets.js'
 import { startSyncBeacon, stopSyncBeacon } from './discover.js'
@@ -353,7 +354,7 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
   }
 }
 
-function renderMobilePage(): string {
+export function renderMobilePage(): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -475,6 +476,9 @@ footer{color:var(--muted);font-size:var(--fs-xs);text-align:center;margin-top:6p
 <script>
 var LANG = (localStorage.getItem('mdk_lang') || (navigator.language || '').toLowerCase()).indexOf('zh') === 0 ? 'zh' : (localStorage.getItem('mdk_lang') === 'en' ? 'en' : 'zh')
 function tr(zh, en) { return LANG === 'en' ? en : zh }
+// 与桌面控制台（ui.ts）同源的共用逻辑（parseTarget/impWarnList/routeSelectHtml）：注入单份共享片段，trT=本页翻译函数
+var trT = tr
+${CONSOLE_SHARED_JS}
 Array.prototype.forEach.call(document.querySelectorAll('[data-i18n]'), function (el) {
   var pair = el.getAttribute('data-i18n').split('||')
   el.textContent = tr(pair[0], pair[1])
@@ -561,12 +565,6 @@ document.getElementById('expBtn').onclick = function () {
     })
     .catch(function (e) { toast(tr('导出失败：', 'Export failed: ') + e.message); btn.disabled = false })
 }
-function impWarnList(rep) {
-  var warns = []
-  Array.prototype.forEach.call(rep.envKeyRefs || [], function (id) { warns.push(tr('「' + id + '」的 key 走环境变量引用，不随包迁移', '"' + id + '" references its key via env var; not included')) })
-  Array.prototype.forEach.call(rep.missingKeys || [], function (id) { warns.push(tr('「' + id + '」的 key 未随包迁移，导入后需补填', '"' + id + '" key not included; fill it in after import')) })
-  return warns
-}
 document.getElementById('impBtn').onclick = function () {
   var f = document.getElementById('impFile').files[0]
   var pw = document.getElementById('impPw').value
@@ -589,7 +587,6 @@ document.getElementById('impBtn').onclick = function () {
     .catch(function (e) { toast(tr('导入失败：', 'Import failed: ') + e.message) })
     .then(function () { btn.disabled = false })
 }
-function parseTarget(t) { var s = String(t || ''); var i = s.indexOf(':'); return i < 0 ? { p: s } : { p: s.slice(0, i), m: s.slice(i + 1) } }
 function render(j) {
   document.getElementById('host').textContent = j.hostname || ''
   var r = j.route || {}
@@ -609,18 +606,12 @@ function render(j) {
   }
   // 与桌面路由行同口径同行为（扫谁的码就与谁的桌面一致）：双槽位——「当前」=实际使用的主服务（自动·A / 人工钉定）、
   // 「下一个切换」=主服务不可达时切到谁（自动·B / 人工钉定）；人工修改优先于程序自动（含定时窗口）
-  var enList = j.services.filter(function (s) { return s.enabled !== false })
-  function optList() {
-    return enList.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>' }).join('')
-  }
   // 「当前」槽：自动态显示「自动 · A」（A=程序会选的：定时窗口/默认路由），人工钉定时显示钉定服务
   var curAutoOpt = !r.forced && r.autoPrimaryLabel ? tr('自动 · ', 'Auto · ') + r.autoPrimaryLabel : tr('自动', 'Auto')
-  var curOpts = '<option value="">' + esc(curAutoOpt) + '</option>' + optList()
-  if (r.forced && !enList.some(function (s) { return s.id === r.forced })) curOpts += '<option value="' + esc(r.forced) + '">' + esc(r.label || r.forced) + '</option>'
+  var curOpts = routeSelectHtml(j.services || [], curAutoOpt, r.forced, r.label || r.forced)
   // 「下一个切换」槽：自动态显示「自动 · B」（B=自动态真会切到的下一跳，桌面同源 autoNextLabel）；没得切时明说无备用服务
   var nextAutoOpt = r.autoNextLabel ? tr('自动 · ', 'Auto · ') + r.autoNextLabel : tr('自动 · 无备用服务', 'Auto · no fallback')
-  var nextOpts = '<option value="">' + esc(nextAutoOpt) + '</option>' + optList()
-  if (r.routeNext && !enList.some(function (s) { return s.id === r.routeNext })) nextOpts += '<option value="' + esc(r.routeNext) + '">' + esc(r.nextLabel || r.routeNext) + '</option>'
+  var nextOpts = routeSelectHtml(j.services || [], nextAutoOpt, r.routeNext, r.nextLabel || r.routeNext)
   var effSvc = null
   if (r.provider) { for (var i = 0; i < j.services.length; i++) if (j.services[i].id === r.provider) { effSvc = j.services[i]; break } }
   var effName = effSvc ? effSvc.name : (j.active ? j.active.name : null)

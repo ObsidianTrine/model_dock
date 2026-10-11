@@ -13,7 +13,7 @@ import { VERSION } from '../version.js'
 import { DEFAULT_UPDATE_REPO, type Config } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
 import { readGatewayState, writeGatewayState, type GatewayRuntime } from '../gateway/state.js'
-import { logsDir } from '../util/paths.js'
+import { displayPath, logsDir } from '../util/paths.js'
 import { localDateStr, t } from '../util/index.js'
 import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type ReleaseManifest } from './check.js'
 import { detectInstallShape } from './install.js'
@@ -240,7 +240,7 @@ export function watchApplyChild(
 function markApplyFailed(logFile: string): void {
   if (!state.updating) return
   state.updating = false
-  state.applyError = tailErrorLine(logFile) ?? t('更新子进程已退出，但网关未被替换——详见 ~/.modeldock/logs/ 下的 update 日志', 'The updater subprocess exited without replacing the gateway — see the update log under ~/.modeldock/logs/')
+  state.applyError = tailErrorLine(logFile) ?? t('更新子进程已退出，但网关未被替换——详见 {logs} 下的 update 日志', 'The updater subprocess exited without replacing the gateway — see the update log under {logs}', { logs: displayPath(logsDir()) })
 }
 
 /** 取更新日志最后一条非空行作为失败原因（CLI 报错以「✗ 」开头，剥掉前缀） */

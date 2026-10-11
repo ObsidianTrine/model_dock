@@ -4,6 +4,7 @@
  * 管理面读写一律要求 admin 凭据（x-modeldock-admin 头，或 ?token= 登录种下的 mdk_admin cookie）；
  * 未带凭据打开时由 showLoginRequired 给出可操作指引。
  */
+import { CONSOLE_SHARED_JS } from './console-shared.js'
 export const UI_HTML = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1038,11 +1039,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
   function applyLang() {
     document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN'
-    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n]'), function (el) { setI18nText(el, i18nPick(el.getAttribute('data-i18n'))) })
-    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-ph]'), function (el) { el.setAttribute('placeholder', i18nPick(el.getAttribute('data-i18n-ph'))) })
-    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-title]'), function (el) { el.setAttribute('title', i18nPick(el.getAttribute('data-i18n-title'))) })
-    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-tip]'), function (el) { el.setAttribute('data-tip', i18nPick(el.getAttribute('data-i18n-tip'))) })
-    Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-aria]'), function (el) { el.setAttribute('aria-label', i18nPick(el.getAttribute('data-i18n-aria'))) })
+    // 静态节点文案扫描与 applyI18nTree 同源：全树委托，避免整页逐节点遍历写两遍（见 DUP-06）
+    applyI18nTree(document)
     Array.prototype.forEach.call(document.querySelectorAll('#langSwitch button'), function (b) { b.className = b.getAttribute('data-lang') === LANG ? 'on' : '' })
     renderThemeBtn()
     pollHealth() // 横幅健康文案也是动态的，切语言后立即重取
@@ -1076,6 +1074,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
     })
   }
+  // 与手机同步页（lan.ts）同源的共用逻辑（parseTarget/impWarnList/routeSelectHtml）：注入单份共享片段，trT=本页翻译函数
+  var trT = t
+  ${CONSOLE_SHARED_JS}
   function toast(msg, ok) {
     var wrap = document.getElementById('toastWrap')
     if (!wrap) return
@@ -1092,13 +1093,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     btn.title = t('复制完整内容', 'Copy full text')
     btn.innerHTML = icon('copy', 14)
     btn.onclick = function () {
-      var done = function () {
+      copyText(msg, function () {
         btn.innerHTML = icon('check', 12)
         setTimeout(function () { btn.innerHTML = icon('copy', 14) }, 1200)
-      }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(msg).then(done, function () { fallbackCopy(msg); done() })
-      } else { fallbackCopy(msg); done() }
+      })
     }
     el.appendChild(btn)
     var x = document.createElement('button')
@@ -1362,7 +1360,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var upd = null // 最近一次 /admin/update/status
   var updAnnounced = false // 本次页面会话只 toast 提醒一次
   var updApplying = false // 已点更新、等待网关重启重连（按钮态机：更新到 vX → 更新中…）
-  var applyPollTimer = null // 更新等待循环句柄（失败提示后清掉）
 
   function updDismissedVersion() {
     try { return localStorage.getItem('mdk_upd_dismissed') } catch (e) { return null }
@@ -1472,15 +1469,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function pollApplyAndGateway(n, sawDown) {
     if (n > 150) {
       updApplying = false
-      updFail(t('等待更新完成超时。网关可能仍在更新中；若长时间无响应，请查看 ~/.modeldock/logs/ 下的 update 日志或重跑 modeldock update', 'Timed out waiting for the update. The gateway may still be updating; if it stays unreachable, check the update log under ~/.modeldock/logs/ or rerun modeldock update'))
+      updFail(t('等待更新完成超时。网关可能仍在更新中；若长时间无响应，请查看 __MD_LOGS_DIR__ 下的 update 日志或重跑 modeldock update', 'Timed out waiting for the update. The gateway may still be updating; if it stays unreachable, check the update log under __MD_LOGS_DIR__/ or rerun modeldock update'))
       return
     }
     setTimeout(function () {
       var proceed = function (down) {
         api('/admin/update/status').then(function (s) {
           if (updApplying && s.applyError) {
-            clearInterval(applyPollTimer)
-            applyPollTimer = null
             updApplying = false
             updModalRender()
             updFail(s.applyError)
@@ -1505,9 +1500,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     // 模板串内换行必须写 \\n（见 ui.ts 模板串转义坑）
     var text = t('可更新到 ', 'Update to ') + upd.latest + t('（当前 v' + upd.current + '）', ' (current v' + upd.current + ')') + (upd.notes ? '\\n\\n' + upd.notes : '') + (upd.htmlUrl ? '\\n\\n' + upd.htmlUrl : '')
     // 复制成功的即时反馈用 SVG 对号（与 toast 的复制按钮同一套），不写字符字形
-    var done = function () { updCopy.innerHTML = icon('check', 14); setTimeout(function () { updCopy.textContent = t('复制说明', 'Copy notes') }, 1200) }
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done() })
-    else { fallbackCopy(text); done() }
+    copyText(text, function () { updCopy.innerHTML = icon('check', 14); setTimeout(function () { updCopy.textContent = t('复制说明', 'Copy notes') }, 1200) })
   }
   var updDismiss = document.getElementById('updDismiss')
   if (updDismiss) updDismiss.onclick = function () {
@@ -1581,12 +1574,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var routeNext = ar ? ar.routeNext : null
       var nextAutoLabel = ar ? ar.autoNextLabel : null
       var autoNextOpt = nextAutoLabel ? t('自动 · ', 'Auto · ') + nextAutoLabel : t('自动 · 无备用服务', 'Auto · no fallback')
-      var opts = '<option value="">' + esc(autoNextOpt) + '</option>' + (view.services || [])
-        .filter(function (s) { return s.enabled !== false })
-        .map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>' }).join('')
-      // 钉定的下一个切换若不在 enabled 列表(如被手动下线)也保留一项显示
-      if (routeNext && (view.services || []).filter(function (s) { return s.id === routeNext }).length === 0) opts += '<option value="' + esc(routeNext) + '">' + esc(ar.nextLabel || routeNext) + '</option>'
-      sel.innerHTML = opts
+      // 选项由共用 routeSelectHtml 构建（与手机同步页同源）：自动态占位 + enabled 服务 + 钉定项兜底（被下线也保留一项显示）
+      sel.innerHTML = routeSelectHtml(view.services || [], autoNextOpt, routeNext, ar.nextLabel || routeNext)
       sel.value = routeNext || ''
     }
     // 「当前」槽 = 实际使用中的主服务：自动态显示「自动 · X」（X=程序会选的：定时窗口/默认路由），人工选服务=钉定（优先于定时窗口，
@@ -1595,12 +1584,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (curSel) {
       var forced = ar ? ar.forced : null
       var autoCurOpt = !forced && ar && ar.autoPrimaryLabel ? t('自动 · ', 'Auto · ') + ar.autoPrimaryLabel : t('自动', 'Auto')
-      var curOpts = '<option value="">' + esc(autoCurOpt) + '</option>' + (view.services || [])
-        .filter(function (s) { return s.enabled !== false })
-        .map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>' }).join('')
-      // 钉定的服务若不在 enabled 列表(如被手动下线)也保留一项显示
-      if (forced && (view.services || []).filter(function (s) { return s.id === forced }).length === 0) curOpts += '<option value="' + esc(forced) + '">' + esc(ar.providerLabel || forced) + '</option>'
-      curSel.innerHTML = curOpts
+      curSel.innerHTML = routeSelectHtml(view.services || [], autoCurOpt, forced, ar.providerLabel || forced)
       curSel.value = forced || ''
     }
   }
@@ -2046,12 +2030,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (r.enabled && r.qrcode) {
         qr.innerHTML = r.qrcode
         url.textContent = (r.urls && r.urls[0]) || ''
-        url.onclick = function () { if (url.textContent) { fallbackCopy(url.textContent); toast(t('已复制', 'Copied'), true) } }
+        url.onclick = function () { if (url.textContent) copyText(url.textContent, function () { toast(t('已复制', 'Copied'), true) }) }
         // 其余候选地址（服务器已按「手机最可能连上」排序）：主地址不通就换一条，省得用户去猜哪块网卡是物理网卡
         var rest = (r.urls || []).slice(1)
         altUrls.innerHTML = rest.map(function (u) { return '<p class="sharealt">' + esc(u) + '</p>' }).join('')
         Array.prototype.forEach.call(altUrls.querySelectorAll('.sharealt'), function (el) {
-          el.onclick = function () { fallbackCopy(el.textContent); toast(t('已复制', 'Copied'), true) }
+          el.onclick = function () { copyText(el.textContent, function () { toast(t('已复制', 'Copied'), true) }) }
         })
         alt.hidden = !rest.length
       } else {
@@ -2104,9 +2088,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function importToggle(show) { if (show) importM.open(); else importM.close() }
   // 仅分享弹窗内使用（点击复制链接/备选地址）：成功反馈一律走元素翻转（shareCopyFlip / 条目文案翻转）——
   // 弹窗磨砂遮罩会糊掉全局 toast，toast 在这里属遮挡死文案（AGENTS 弹层提示归宿）
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () { fallbackCopy(text) })
-    else fallbackCopy(text)
+  // 全站剪贴板收敛点（DUP-06）：写 + fallback + 成功反馈一份实现，各调用方只传 feedback。
+  // 剪贴板 API 不可用（非安全上下文/老 webview）时回落 fallbackCopy 并同样触发 feedback。
+  function copyText(text, feedback) {
+    var done = function () { if (feedback) feedback() }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done() })
+    } else { fallbackCopy(text); done() }
   }
   var shareFirstUrl = '' // 底栏「复制链接」按钮复制的对象（=urls[0]）
   var copyFlipTimer = null
@@ -2308,12 +2296,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
   // 成功收尾（link/file/nearby 共用）：关弹层 → 主页面 toast 报数量（有需补填的 key 再追一条警告，
   // 并多留几秒看清再刷新）→ 整页刷新拿全新视图
-  function impWarnList(report) {
-    var warns = []
-    ;(report.envKeyRefs || []).forEach(function (id) { warns.push(t('「' + id + '」的 key 走环境变量引用，不随包迁移', '"' + id + '" references its key via env var; not included')) })
-    ;(report.missingKeys || []).forEach(function (id) { warns.push(t('「' + id + '」的 key 未随包迁移，导入后需补填', '"' + id + '" key not included; fill it in after import')) })
-    return warns
-  }
   function impApplyResult(j) {
     var rep = j.report || {}
     var warns = impWarnList(rep)
@@ -2487,11 +2469,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 定时切换：面板与编辑（窗口按顺序取首个命中；节假日名单日整体跳过）
   var schedOpen = false
   var schedSeedDismissed = false // 用户保存过空时段后不再预填默认时段
-  function parseTarget(t) {
-    var s = String(t || '')
-    var i = s.indexOf(':')
-    return i < 0 ? { p: s } : { p: s.slice(0, i), m: s.slice(i + 1) }
-  }
   function schedSvcOptions(sel) {
     var opts = '<option value="">' + t('选择服务…', 'Pick a service…') + '</option>'
     view.services.forEach(function (x) {
@@ -3224,16 +3201,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         var lines = r.lines || []
         if (!lines.length) throw new Error(t('未返回环境变量', 'No env vars returned'))
         var text = lines.join('\\n')
-        var copyDone = function () { toast('✓ ' + t('已复制到剪贴板', 'Copied to clipboard'), true) }
         confirmModal(
           t('环境变量 — ', 'Env vars — ') + labelOf(id),
           [t('写进客户端或 shell 后，即可经本机网关调用所有已配置服务：', 'Write these into the client (or your shell) to reach every configured service through this gateway:')]
             .concat(lines),
           t('复制全部', 'Copy all'),
           function () {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(text).then(copyDone, function () { fallbackCopy(text); copyDone() })
-            } else { fallbackCopy(text); copyDone() }
+            copyText(text, function () { toast('✓ ' + t('已复制到剪贴板', 'Copied to clipboard'), true) })
           }
         )
       })
@@ -4134,10 +4108,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       b.onclick = function () {
         var l = logPageEntries[Number(b.getAttribute('data-li'))]
         if (!l) return
-        var text = logCopyText(l)
-        var done = function () { b.innerHTML = icon('check', 11); setTimeout(function () { b.innerHTML = icon('copy', 12) }, 1200) }
-        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done() })
-        else { fallbackCopy(text); done() }
+        copyText(logCopyText(l), function () { b.innerHTML = icon('check', 11); setTimeout(function () { b.innerHTML = icon('copy', 12) }, 1200) })
       }
     })
   }
