@@ -144,3 +144,42 @@ describe('火山方舟套餐模型元数据（2026-10 官方套餐概览）', ()
     expect(knownModelMeta('deepseek-v4-pro-ga-260813')).toMatchObject({ context_window: 1048576, max_output: 393216 })
   })
 })
+describe('预设目录 2026-10-11 刷新（官方文档核对）', () => {
+  it('Kimi 三预设：K2.7-Code/K2.6 补 32K 输出与视觉，highspeed 补全长，文档直链 platform.kimi 新域', () => {
+    for (const id of ['kimi-openai-cn', 'kimi-anthropic-cn', 'kimi-anthropic-global']) {
+      const models = findPreset(id)!.models ?? []
+      expect(models.find((m) => m.id === 'kimi-k2.7-code')).toMatchObject({
+        context_window: 262144,
+        max_output: 32768,
+        capabilities: expect.arrayContaining(['vision']),
+      })
+      expect(models.find((m) => m.id === 'kimi-k2.6')).toMatchObject({ max_output: 32768, capabilities: expect.arrayContaining(['vision']) })
+      expect(models.find((m) => m.id === 'kimi-k3')?.capabilities).toContain('vision')
+    }
+    expect(findPreset('kimi-openai-cn')!.models!.find((m) => m.id === 'kimi-k2.7-code-highspeed')).toMatchObject({
+      context_window: 262144,
+      max_output: 32768,
+    })
+    expect(findPreset('kimi-anthropic-cn')!.docs_url).toBe('https://platform.kimi.com/docs')
+    expect(findPreset('kimi-anthropic-global')!.docs_url).toBe('https://platform.kimi.ai/docs')
+  })
+
+  it('无目录预设补齐：dashscope=qwen3.8 系、siliconflow=托管热门款、mimo 双预设=v2.6 系、z.ai 补 flashx', () => {
+    expect(findPreset('dashscope-openai')!.models!.map((m) => m.id)).toEqual(['qwen3.8-max', 'qwen3.7-plus', 'qwen3.8-flash'])
+    const sf = findPreset('siliconflow')!.models ?? []
+    expect(sf.find((m) => m.id === 'deepseek-ai/DeepSeek-V4-Pro')).toMatchObject({ context_window: 1048576, max_output: 393216 })
+    expect(sf.find((m) => m.id === 'Pro/moonshotai/Kimi-K2.6')).toMatchObject({ context_window: 262144, max_output: 32768 })
+    for (const id of ['mimo-token-plan-cn', 'mimo-api']) {
+      expect(findPreset(id)!.models!.map((m) => m.id)).toEqual(['mimo-v2.6-pro', 'mimo-v2.6-flash', 'mimo-v2.6-pro-ultraspeed'])
+    }
+    expect(findPreset('zai-anthropic')!.models!.find((m) => m.id === 'glm-5.3-flashx')).toBeDefined()
+  })
+
+  it('knownModelMeta 覆盖 kimi-k2.6 / highspeed 与 MiMo 视觉（存量配置兜底）', async () => {
+    const { knownModelMeta } = await import('../src/providers/known.js')
+    expect(knownModelMeta('kimi-k2.6')).toMatchObject({ context_window: 262144, max_output: 32768 })
+    expect(knownModelMeta('kimi-k2.6')?.capabilities).toContain('vision')
+    expect(knownModelMeta('kimi-k2.7-code-highspeed')?.context_window).toBe(262144)
+    expect(knownModelMeta('mimo-v2.6-flash')?.capabilities).toContain('vision')
+  })
+})

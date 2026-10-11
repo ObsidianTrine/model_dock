@@ -81,7 +81,8 @@ const ARK_PLAN_MODELS: PresetModel[] = [
 /**
  * 内置预设。模型元数据为已知经典模型的保守默认值，用户可随时修改。
  * 各厂商现行清单核对于 2026-10（官方文档/定价页）：DeepSeek=deepseek-flash + deepseek-v4-pro（chat/reasoner 已下线）、
- * OpenAI=GPT-5.1 系、Anthropic=Claude 5.5 系（1M/128K）、Kimi=kimi-k3 系（k2 及更早已退役）、智谱=GLM-5.3 系。
+ * OpenAI=GPT-5.1 系、Anthropic=Claude 5.5 系（1M/128K）、Kimi=kimi-k3 + K2.7-Code/Highspeed + K2.6（k2.5 及更早已退役）、
+ * 智谱=GLM-5.3 系、百炼=qwen3.8 系、小米 MiMo=v2.6 系（2026-10-11 复核补齐输出上限与视觉标记）。
  * 火山方舟 plan 套餐的模型清单走 OpenAPI（ListArkAgentPlanModel/ListArkCodingPlanModel，仅支持 AK/SK 签名），
  * Ark API Key 拉不了 /v1/models（404），故内置套餐已知模型表供拉取失败时兜底（2026-10 官方清单，见 ARK_PLAN_MODELS）。
  */
@@ -191,8 +192,10 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     auth_style: 'bearer',
     docs_url: 'https://docs.z.ai',
     models: [
+      // 2026-10-11 核对：z.ai 在售三款与 bigmodel 同代（flashx 未上 Coding Plan 但普通 API 在售）
       m('glm-5.3', 1048576, 131072, TOOLS_REASON, { zh: 'GLM-5.3（旗舰）', en: 'GLM-5.3 (flagship)' }),
       m('glm-5.3-flash', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-Flash'),
+      m('glm-5.3-flashx', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-FlashX'),
     ],
   },
   {
@@ -203,14 +206,16 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     base_url: 'https://api.moonshot.cn/v1',
     protocol: 'openai',
     auth_style: 'bearer',
-    docs_url: 'https://platform.moonshot.cn',
+    docs_url: 'https://platform.kimi.com/docs',
     endpoints: { responses: 'https://api.moonshot.cn/v1' },
     models: [
-      // 2026-10 核对：k2 系全部退役（2026-05-25），现行 = kimi-k3 旗舰 + K2.7-Code + K2.6
+      // 2026-10-11 核对（官方文档；platform.moonshot.cn 已 301 至 platform.kimi.com，API 域名不变）：
+      // k2.5 及更早已退役，现行 = kimi-k3 旗舰 + K2.7-Code/Highspeed + K2.6；
+      // K2.7/K2.6 系 256K 上下文，max_tokens 默认 32K，全系原生视觉（文本/图片/视频）、思考模式默认开启
       m('kimi-k3', 1048576, 1048576, TOOLS_REASON_VISION, { zh: 'Kimi K3（旗舰）', en: 'Kimi K3 (flagship)' }),
-      m('kimi-k2.7-code', 262144, undefined, TOOLS, 'Kimi K2.7 Code'),
-      m('kimi-k2.7-code-highspeed', undefined, undefined, TOOLS, 'Kimi K2.7 Code Highspeed'),
-      m('kimi-k2.6', 262144, undefined, TOOLS_VISION, 'Kimi K2.6'),
+      m('kimi-k2.7-code', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.7 Code'),
+      m('kimi-k2.7-code-highspeed', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.7 Code Highspeed'),
+      m('kimi-k2.6', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.6'),
     ],
   },
   {
@@ -222,11 +227,11 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'anthropic',
     endpoints: { openai: 'https://api.moonshot.cn/v1', responses: 'https://api.moonshot.cn/v1' },
     auth_style: 'bearer',
-    docs_url: 'https://platform.moonshot.cn',
+    docs_url: 'https://platform.kimi.com/docs',
     models: [
       m('kimi-k3', 1048576, 1048576, TOOLS_REASON_VISION, { zh: 'Kimi K3（旗舰）', en: 'Kimi K3 (flagship)' }),
-      m('kimi-k2.7-code', 262144, undefined, TOOLS, 'Kimi K2.7 Code'),
-      m('kimi-k2.6', 262144, undefined, TOOLS_VISION, 'Kimi K2.6'),
+      m('kimi-k2.7-code', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.7 Code'),
+      m('kimi-k2.6', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.6'),
     ],
   },
   {
@@ -239,11 +244,11 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     endpoints: { openai: 'https://api.moonshot.ai/v1', responses: 'https://api.moonshot.ai/v1' },
     auth_style: 'bearer',
     needs_proxy: true,
-    docs_url: 'https://platform.kimi.ai',
+    docs_url: 'https://platform.kimi.ai/docs',
     models: [
       m('kimi-k3', 1048576, 1048576, TOOLS_REASON_VISION, { zh: 'Kimi K3（旗舰）', en: 'Kimi K3 (flagship)' }),
-      m('kimi-k2.7-code', 262144, undefined, TOOLS, 'Kimi K2.7 Code'),
-      m('kimi-k2.6', 262144, undefined, TOOLS_VISION, 'Kimi K2.6'),
+      m('kimi-k2.7-code', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.7 Code'),
+      m('kimi-k2.6', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.6'),
     ],
   },
   {
@@ -254,6 +259,14 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'anthropic',
     endpoints: { openai: 'https://token-plan-cn.xiaomimimo.com/v1', responses: 'https://token-plan-cn.xiaomimimo.com/v1' },
     auth_style: 'bearer',
+    docs_url: 'https://mimo.mi.com/static/docs/',
+    models: [
+      // 2026-10-11 核对（mimo.mi.com 官方文档）：现行 v2.6 系三款全系 1M 上下文 / 128K 输出、全模态；
+      // v2.5 系 2026-10-21 下线不收录
+      m('mimo-v2.6-pro', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Pro'),
+      m('mimo-v2.6-flash', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Flash'),
+      m('mimo-v2.6-pro-ultraspeed', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Pro Ultraspeed'),
+    ],
   },
   {
     id: 'mimo-api',
@@ -263,6 +276,12 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'anthropic',
     endpoints: { openai: 'https://api.xiaomimimo.com/v1', responses: 'https://api.xiaomimimo.com/v1' },
     auth_style: 'bearer',
+    docs_url: 'https://mimo.mi.com/static/docs/',
+    models: [
+      m('mimo-v2.6-pro', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Pro'),
+      m('mimo-v2.6-flash', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Flash'),
+      m('mimo-v2.6-pro-ultraspeed', 1048576, 131072, TOOLS_REASON_VISION, 'MiMo v2.6 Pro Ultraspeed'),
+    ],
   },
   {
     id: 'openai',
@@ -326,6 +345,17 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'openai',
     auth_style: 'bearer',
     docs_url: 'https://docs.siliconflow.cn',
+    models: [
+      // 2026-10-11 核对：/v1/models 需带 Key 拉取，托管 ID 带厂商前缀易配错，内置官方在售热门款兜底；
+      // 上下文/输出沿用底层模型官方值，GLM/Qwen 系官方未给全长规格则留空
+      m('deepseek-ai/DeepSeek-V4-Pro', 1048576, 393216, TOOLS_REASON, 'DeepSeek V4 Pro'),
+      m('deepseek-ai/DeepSeek-V4-Flash', 1048576, 393216, TOOLS_REASON_VISION, 'DeepSeek V4.1 Flash'),
+      m('Pro/moonshotai/Kimi-K2.6', 262144, 32768, TOOLS_REASON_VISION, 'Kimi K2.6'),
+      md('Pro/zai-org/GLM-5.1', 'GLM-5.1'),
+      md('Qwen/Qwen3.5-397B-A17B', 'Qwen3.5-397B-A17B'),
+      md('Qwen/Qwen3.6-27B', 'Qwen3.6-27B'),
+      md('Qwen/Qwen3.6-35B-A3B', 'Qwen3.6-35B-A3B'),
+    ],
   },
   {
     id: 'dashscope-openai',
@@ -336,6 +366,12 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'openai',
     auth_style: 'bearer',
     docs_url: 'https://help.aliyun.com/zh/dashscope/',
+    models: [
+      // 2026-10-11 核对（官方模型规格页）：现行旗舰一代为 qwen3.8/3.7（无 qwen4-*），全系 1M 上下文 / 128K 输出、原生多模态
+      m('qwen3.8-max', 1000000, 131072, TOOLS_REASON_VISION, { zh: 'Qwen3.8-Max（旗舰）', en: 'Qwen3.8-Max (flagship)' }),
+      m('qwen3.7-plus', 1000000, 131072, TOOLS_REASON_VISION, 'Qwen3.7-Plus'),
+      m('qwen3.8-flash', 1000000, 131072, TOOLS_REASON_VISION, 'Qwen3.8-Flash'),
+    ],
   },
   {
     id: 'gemini-openai',
