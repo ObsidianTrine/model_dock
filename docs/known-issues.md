@@ -8,43 +8,45 @@
 > 3. 标注（推测）的条目是静态推演结论，未经实测基准；实施前先量化验证。
 > 4. 与 `docs/backlog.md`（2026-10-07 热路径评审 B/C 级遗留）少量重叠：backlog 的 **B4 ≈ PERF-17**、**C2 与 PERF-06/07/09 同域**、**B2/B3 仍开放**（本页未重复收录），实施时可合并处理。
 >
+> 2026-10-12 批量修复：PERF-01/04/05/06/07/08/09/10/11/12/17、CORRECT-01、XPLAT-01/03/04/05/07/08/10 共 19 项已修（commit 见总览表），全部经 orchestrator 自治闭环（独立测试门禁 + LLM 审查 + 人工闸门复核 diff），合并后 develop 全量 691 例绿。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
 
 | 编号 | 级别 | 位置 | 一句话 | 状态 |
 |---|---|---|---|---|
-| PERF-01 | **P0** | `src/gateway/relay.ts:298-308` | 配 default_model 时每请求全量 JSON.parse 请求体，即使无需改写 | ☐ 未修 |
+| PERF-01 | **P0** | `src/gateway/relay.ts:298-308` | 配 default_model 时每请求全量 JSON.parse 请求体，即使无需改写 | ☑ 已修（2026-10-12 @6fd71fa） |
 | PERF-02 | P2 | `src/gateway/state.ts:285` | dayFilter 窗口每请求 1 次 statSync | ☐ 未修 |
 | PERF-03 | P1 | `src/cli/index.ts:1-14` | CLI 任何命令静态加载 823KB catalog snapshot | ☐ 未修 |
-| PERF-04 | P1 | `src/cli/diag.ts:1,6` | undici + gateway/proxy 进全命令启动链 | ☐ 未修 |
-| PERF-05 | P1 | `src/adapters/engine.ts:1` | @inquirer 白白进网关常驻进程 | ☐ 未修 |
-| PERF-06 | P1 | `src/gateway/server.ts:757-758` | overview 重建串行 await 9 个适配器 status | ☐ 未修 |
-| PERF-07 | P1 | `src/util/fsx.ts:46-97` | commandOnPathResolved 无 memo，每轮数百次同步 fs | ☐ 未修 |
-| PERF-08 | P1 | `src/adapters/presence.ts:62` | Windows reg /s 全树查询 8s 超时，首建可秒级 | ☐ 未修 |
-| PERF-09 | P2 | `src/gateway/server.ts:1197-1200` | overview 缓存命中仍整包 JSON.stringify | ☐ 未修 |
-| PERF-10 | P2 | `src/gateway/server.ts:1065-1066` | 控制台页 236KB 无 ETag/304/gzip | ☐ 未修 |
-| PERF-11 | P2 | `src/gateway/lan.ts:1041,1047` | PWA 图标 no-store 每次重下 | ☐ 未修 |
-| PERF-12 | P1 | `src/sync/crypto.ts:150,175` | openEnvelope 双重 PBKDF2（600k×2）阻塞事件循环 | ☐ 未修 |
+| PERF-04 | P1 | `src/cli/diag.ts:1,6` | undici + gateway/proxy 进全命令启动链 | ☑ 已修（2026-10-12 @20f6b1c） |
+| PERF-05 | P1 | `src/adapters/engine.ts:1` | @inquirer 白白进网关常驻进程 | ☑ 已修（2026-10-12 @20f6b1c） |
+| PERF-06 | P1 | `src/gateway/server.ts:757-758` | overview 重建串行 await 9 个适配器 status | ☑ 已修（2026-10-12 @e9788a0） |
+| PERF-07 | P1 | `src/util/fsx.ts:46-97` | commandOnPathResolved 无 memo，每轮数百次同步 fs | ☑ 已修（2026-10-12 @54e01c3） |
+| PERF-08 | P1 | `src/adapters/presence.ts:62` | Windows reg /s 全树查询 8s 超时，首建可秒级 | ☑ 已修（2026-10-12 @54e01c3） |
+| PERF-09 | P2 | `src/gateway/server.ts:1197-1200` | overview 缓存命中仍整包 JSON.stringify | ☑ 已修（2026-10-12 @e9788a0） |
+| PERF-10 | P2 | `src/gateway/server.ts:1065-1066` | 控制台页 236KB 无 ETag/304/gzip | ☑ 已修（2026-10-12 @e9788a0，浏览器侧 @328e79a） |
+| PERF-11 | P2 | `src/gateway/lan.ts:1041,1047` | PWA 图标 no-store 每次重下 | ☑ 已修（2026-10-12 @e9788a0） |
+| PERF-12 | P1 | `src/sync/crypto.ts:150,175` | openEnvelope 双重 PBKDF2（600k×2）阻塞事件循环 | ☑ 已修（2026-10-12 @0caad3a） |
 | PERF-13 | P2 | `src/providers/catalog.ts:109-140` | catalogBase 每次 merge+sort+statSync，每模型 3 次调用 | ☐ 未修 |
 | PERF-14 | P2 | `src/config/store.ts:160-163` | mutateConfig 无变化也全量重写；路由变更放大 K+1 次 | ☐ 未修 |
 | PERF-15 | P2 | `src/config/secrets.ts:310-313` | 改一个 key 全表重加密；win32 setSecret spawn PowerShell | ☐ 未修 |
 | PERF-16 | P2 | `src/gateway/state.ts:614,625` | 请求/审计 JSONL 无轮转，磁盘无界增长 | ☐ 未修 |
-| PERF-17 | P2 | `src/gateway/state.ts:130` | reload 不 close() 旧 ProxyAgent（≈backlog B4） | ☐ 未修 |
-| XPLAT-01 | P2 | `src/util/fsx.ts:120-131` | atomicWrite 重试白名单缺 EBUSY | ☐ 未修 |
+| PERF-17 | P2 | `src/gateway/state.ts:130` | reload 不 close() 旧 ProxyAgent（≈backlog B4） | ☑ 已修（2026-10-12 @2a0c5c9） |
+| XPLAT-01 | P2 | `src/util/fsx.ts:120-131` | atomicWrite 重试白名单缺 EBUSY | ☑ 已修（2026-10-12 @54e01c3） |
 | XPLAT-02 | P2 | `src/cli/gatewaycmd.ts:110,123` | Windows stop 硬杀，优雅清理永不执行 | ☐ 未修 |
-| XPLAT-03 | P2 | `src/util/paths.ts:38` | displayPath 在 Windows 永不缩写 ~ | ☐ 未修 |
-| XPLAT-04 | P2 | `src/config/secrets.ts:119` | darwin keychain 经 argv 传密钥，ps 可见 | ☐ 未修 |
-| XPLAT-05 | P2 | `src/cli/basic.ts:44` | config edit 引号只处理空白，cmd 元字符截断（推测） | ☐ 未修 |
+| XPLAT-03 | P2 | `src/util/paths.ts:38` | displayPath 在 Windows 永不缩写 ~ | ☑ 已修（2026-10-12 @0caad3a） |
+| XPLAT-04 | P2 | `src/config/secrets.ts:119` | darwin keychain 经 argv 传密钥，ps 可见 | ☑ 已修（2026-10-12 @2a0c5c9） |
+| XPLAT-05 | P2 | `src/cli/basic.ts:44` | config edit 引号只处理空白，cmd 元字符截断（推测） | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-06 | P2 | `src/autostart.ts:36-39` | Windows VBS 自启长期弃用风险 | ☐ 未修 |
-| XPLAT-07 | P2 | `src/adapters/codex.ts:69` | bootstrap.path 顶层求值，违反惰性约定 | ☐ 未修 |
-| XPLAT-08 | P2 | `src/adapters/dsh.ts:236` | label 写死中文未走 t() | ☐ 未修 |
+| XPLAT-07 | P2 | `src/adapters/codex.ts:69` | bootstrap.path 顶层求值，违反惰性约定 | ☑ 已修（2026-10-12 @0caad3a） |
+| XPLAT-08 | P2 | `src/adapters/dsh.ts:236` | label 写死中文未走 t() | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☐ 未修 |
-| XPLAT-10 | P2 | `src/update/check.ts:224` | 更新资产名未校验（供应链纵深防御） | ☐ 未修 |
+| XPLAT-10 | P2 | `src/update/check.ts:224` | 更新资产名未校验（供应链纵深防御） | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☐ 未修 |
-| CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☐ 未修 |
+| CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☐ 未修 |
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☐ 未修 |
+| CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☐ 未修 |
 
 ---
 
@@ -72,6 +74,7 @@
 - 位置：`src/cli/index.ts:1-14`（12 个命令模块全静态 import）→ `cli/providers.ts` → `providers/catalog.ts:6`（唯一 importer）→ `providers/catalog-snapshot.generated.ts`（33896 行 / 823KB，226 厂商 8000+ 模型）；第二进链点：`adapters/dsh.ts:19` → `providers/resolve.ts:3` → catalog（网关启动 / 触达 adapter registry 的命令同样背负）。
 - 影响：任何 CLI 命令（含 `--help`、`gateway stop`）都解析 823KB 对象字面量；推测 V8 解析+物化 20–50ms、堆 6–12MB；SEA 二进制无 code cache 每次全付。网关常驻进程只付一次，影响小。
 - 修复方向：命令模块下沉到 commander action 内 `await import()`；`catalog-snapshot.generated.ts` 改懒 `import()`（或拆 catalog-lazy 模块），仅 `refreshCatalog` / `catalogModelMeta` 真正触达。
+- 2026-10-12 核查：属实（实测 33896 行 / 772KB，命令模块 10 个）。纯懒 `import()` 需把同步触达点（`resolveModelMeta` 等 15+ 调用点）整体 async 化，SEA 下 createRequire 同步方案另有打包约束——**暂缓，待专项设计**。
 - 验证：`node --cpu-prof` 或简单计时对比 `modeldock --help` 冷启耗时；注意 vitest 隔离模型（跨文件 mock 雷区，见 AGENTS.md）。
 
 **PERF-04（P1）diag.ts 把 undici 与 gateway/proxy 拉进启动链**
@@ -99,14 +102,17 @@
 - 位置：`src/adapters/presence.ts:62`（`reg query <key> /s /f <appName> /d`，超时 8000ms）
 - 现状：未命中时每应用最多 3 个注册表视图串行 × 8s 超时（workbuddy 双名共 6 次）；`regMemo` 60s 只压后续轮询、压不住首建，worst case 秒级甚至更慢（推测，取决于机器）。
 - 修复方向：三视图查询并行化（Promise.all）；或改定点 `reg query <key>\<AppName>` 探测；dirHasEntry 结果也加 TTL。
+- 2026-10-12 核查修正：regMemo 对 miss 也无条件缓存 60s，「每轮询都重扫」不成立，实际最坏每应用每 60s 一轮 3×8s，严重度低于原文；已按三视图并行化修复（54e01c3）。
 
 **PERF-09（P2）overview 缓存命中仍重序列化**
 - 位置：`src/gateway/server.ts:1197-1200`：命中分支 `res.end(JSON.stringify(cached.data))`，view 含全部服务/客户端/预设/knownModels（几十–几百 KB），每 5s 重复一次。
 - 修复方向：缓存序列化后的字符串（失效时才重序列化）。
+- 2026-10-12 核查修正：TTL 实为 2s（`OVERVIEW_TTL_MS = 2_000`）非 5s，重序列化比原文描述更频繁；已修（e9788a0）。
 
 **PERF-10（P2）控制台页无缓存头**
 - 位置：`src/gateway/server.ts:1065-1066`：每请求 `UI_HTML.replaceAll(...)` 后整包 ~236KB 明文返回，无 ETag/304/Cache-Control/gzip。页面低频加载，影响小；局域网/移动端收益明显。
 - 修复方向：加 ETag（内容 hash）+ If-None-Match→304；可预压一份 gzip Buffer 按 Accept-Encoding 发。
+- 2026-10-12 核查与修复补充：admin 面本有统一 `no-store`（server.ts 约 :1005），原文「无缓存头」不准（等效每次整包 200）；e9788a0 加 ETag/304 + 渲染缓存，但浏览器在 no-store 下不存响应、条件请求不生效；328e79a 将 HTML 页 200 覆盖为 `no-cache`（可存储但必须重验证）后浏览器侧 304 真正生效，JSON API 的 no-store 未动。
 
 **PERF-11（P2）PWA 图标 no-store**
 - 位置：`src/gateway/lan.ts:1041,1047`：192/512 PNG 每次重新下载。改 `cache-control: immutable` 长缓存。
@@ -200,10 +206,16 @@
 - 影响：CLI `provider set-key` / 导入 / 另一实例改 key 后，运行中网关持续用旧 key（`relay.ts:340` 每请求经缓存取）→ 上游 401，用户视角"改了没生效"，直到重启。
 - 修复方向：secrets.ts 导出 `invalidateSecretsCache()`（清 fileCache+externalCache），watcher 识别到 secrets.json 变化时调用；或 loadFileSecrets 做 mtime 复核。
 - 连带问题：secrets.json 读-改-写**没有跨进程锁**（config.toml 有两层防护，secrets 没有），CLI 与网关并发 setSecret → 整表覆盖丢更新。建议与缓存失效一并补轻量锁。
+- 2026-10-12 已修（2a0c5c9）：`invalidateSecretsCache()` + reloadRuntime 接线；externalCache 加 60s TTL 兜底 keychain 跨进程改动；darwin keychain 改 `security -i` stdin（XPLAT-04 同 commit）。**连带的跨进程轻量锁未实施，仍开放。**
 
 **CORRECT-02（P2）快照孤儿清理删他进程半成品**
 - 位置：`src/backup/snapshot.ts:154-158`：`valid` 集合 = 有合法 manifest 的目录，其余 `rm -rf`。跨进程并发（网关 pickerSync/attach 与 CLI 同时写）时，对方"文件已拷、manifest 未写"的半成品被整体删除 → 对方 applyChanges 在写客户端文件前抛错。后果是偶发假失败（写操作安全中止），无数据损坏。
 - 顺带：`snapshot.ts:48-55` 的 id 冲突重试是死代码——`mkdir(recursive:true)` 对已存在目录不抛错，真撞 id 会静默共用目录互踩（概率≈0）。
+
+**CORRECT-04（P2，2026-10-12 新增）定时窗口午夜边界闪烁**
+- 现象：00:00:08 前后跑全量测试，「窗口接管重写 picker」「pickTarget 顺延到窗口目标」「displayRouteProvider prefer 窗口接管」等 5 例失败（窗口 `00:00–23:59` 被判不活跃）；23:50 与 00:03 复测同组全绿。与当日合入的改动无交集（失败用例涉及 schedule/pickTarget，同批合并改的是 relay/secrets/fsx/server 轮询）。
+- 推测（未定位）：activeScheduleWindow 对「恰在窗口起点 00:00:00」的判定存在边界差（如按起始日归属/闭区间端点），或测试窗口取整分钟与真实秒级时刻的组合竞态。每日只在午夜±数秒窗口内可复现，复现成本高。
+- 方向：为 activeScheduleWindow 补「now=窗口起止端点」的确定性单测（注入时钟），定位后修复。
 
 **CORRECT-03（P2）config.toml 无写前快照**
 - 现状：全仓快照仅 4 处调用（engine.ts / ops.ts:749 / cli/harness.ts / sync/collect.ts），均针对客户端文件与 sync 导入前；config.toml 直写无快照，写坏（如 migrate/stringify 缺陷）无 undo。推测有意取舍（config 有 .lock + 原子写）。建议至少在 AGENTS.md 澄清边界，或对 migrate 类大改前补快照。
