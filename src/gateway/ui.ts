@@ -100,10 +100,11 @@ select.chip{padding-right:24px}
 .snav[hidden]{display:none}
 #snavDown{bottom:86px}
 #snavUp{bottom:134px}
-/* 添加/编辑弹层已迁 createModal 工厂壳（top 变体=顶对齐+遮罩滚动；宽度/边框按 id 继续生效）。
+/* 添加/编辑弹层已迁 createModal 工厂壳（top 变体=顶对齐+遮罩滚动）。
    编辑浮层：头部（标题+关闭）与底部（取消/保存）常驻，仅表单区滚动——长表单（模型表/备用链/拉取面板）
-   自然高度互不挤压、滚动时表头吸附，操作按钮不再随内容滚出视野（头/底样式走 kit 的 .modal-head/.modal-foot） */
-#editOverlay .modal{max-width:680px;margin:auto;border:1px solid var(--border);box-shadow:var(--shadow-lg)}
+   自然高度互不挤压、滚动时表头吸附，操作按钮不再随内容滚出视野（头/底样式走 kit 的 .modal-head/.modal-foot）。
+   宽度/边框走两壳共用的 .svcmodal 变体（modalClass），改一处即可 */
+.svcmodal.modal{max-width:680px;margin:auto;border:1px solid var(--border);box-shadow:var(--shadow-lg)}
 /* 表头吸附的滚动体就是它：横向滚动兜底也放这里（表头与行同滚动口，横移同步列不错位）；
    禁止在 .editform 与 .mhead 之间再出现 overflow:auto/scroll/hidden 的祖先——会静默困死 sticky 吸顶 */
 #editOverlay .editform{overflow:auto;min-height:0;padding:14px 20px 16px}
@@ -239,7 +240,8 @@ select.chip{padding-right:24px}
 .svcform .fetchcount{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
 .svcform .fetchpanel .factions{display:flex;align-items:center;gap:8px;margin-top:8px}
 .svcform .fetchmsg{flex:1;min-width:0;font-size:var(--fs-xs);color:var(--muted)}
-#addOverlay .modal{max-width:620px;margin:auto;border:1px solid var(--border);box-shadow:var(--shadow-lg);max-height:96vh}
+/* 宽度/边框/阴影走两壳共用的 .svcmodal（与编辑弹层同宽 680px）；这里只留添加弹层自己的高度约束 */
+#addOverlay .modal{max-height:96vh}
 #addModalBody{flex:1 1 auto;min-height:0}
 .close-row{display:flex;justify-content:flex-end;margin:0 0 2px}
 .close-btn{background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 8px;display:inline-flex}
@@ -895,6 +897,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var editM = createModal({
     id: 'editOverlay',
     align: 'top',
+    modalClass: 'svcmodal',
     titleId: 'editTitle',
     bodyClass: 'editform svcform',
     bodyHtml: '<div id="efEpHost"></div>' +
@@ -911,6 +914,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var addM = createModal({
     id: 'addOverlay',
     align: 'top',
+    modalClass: 'svcmodal',
     title: '添加模型服务||Add a model service',
     bodyId: 'addModalBody',
     bodyClass: 'addmodal',
@@ -3712,7 +3716,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         '</div>' +
         '<div class="fetchpanel" id="' + gid('FetchPanel') + '" hidden>' +
         '<div class="fsearch">' +
-        '<input type="text" id="' + gid('FetchQ') + '" data-i18n-ph="搜索模型 ID，如 claude / deepseek…||Search model ID, e.g. claude / deepseek…" placeholder="搜索模型 ID，如 claude / deepseek…">' +
+        '<input type="text" class="fetchq" id="' + gid('FetchQ') + '" data-i18n-ph="搜索模型 ID，如 claude / deepseek…||Search model ID, e.g. claude / deepseek…" placeholder="搜索模型 ID，如 claude / deepseek…">' +
         '<span class="fetchcount" id="' + gid('FetchCount') + '"></span></div>' +
         '<div class="mhead"><input type="checkbox" id="' + gid('FetchAll') + '" data-i18n-title="全选 / 全不选（仅作用于当前可见行）||Select all / none (visible rows only)" title="全选 / 全不选（仅作用于当前可见行）"><span data-i18n="拉取到的模型（勾选后填入）||Fetched models (tick to fill in)">拉取到的模型（勾选后填入）</span><span data-i18n="上下文||Context">上下文</span><span data-i18n="最大输出||Max output">最大输出</span><span class="vcol" data-i18n="视觉||Vision">视觉</span><span></span></div>' +
         '<div id="' + gid('FetchRows') + '"></div>' +
