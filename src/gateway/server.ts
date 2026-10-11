@@ -39,7 +39,7 @@ import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupda
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
-import { displayPath, gatewayStatePath, sandboxNpmPrefix } from '../util/paths.js'
+import { displayPath, gatewayStatePath, logsDir, sandboxNpmPrefix } from '../util/paths.js'
 import { UI_HTML } from './ui.js'
 
 export interface GatewayStartOptions {
@@ -63,7 +63,9 @@ let renderedUICache: { home: string; html: string; etag: string } | null = null
 function getRenderedUI(): { html: string; etag: string } {
   const home = gatewayStatePath()
   if (renderedUICache && renderedUICache.home === home) return renderedUICache
-  const html = UI_HTML.replaceAll('__MD_GATEWAY_STATE__', displayPath(home))
+  const html = UI_HTML
+    .replaceAll('__MD_GATEWAY_STATE__', displayPath(home))
+    .replaceAll('__MD_LOGS_DIR__', displayPath(logsDir()))
   const etag = '"' + createHash('sha256').update(html).digest('base64url').slice(0, 22) + '"'
   renderedUICache = { home, html, etag }
   return renderedUICache
