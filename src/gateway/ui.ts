@@ -2102,9 +2102,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 链接含口令（#p= fragment，不出本机也不进审计）；附近直拉链路凭对方放行的一次性 ticket 应用
   function shareToggle(show) { if (show) shareM.open(); else shareM.close() }
   function importToggle(show) { if (show) importM.open(); else importM.close() }
+  // 仅分享弹窗内使用（点击复制链接/备选地址）：成功反馈一律走元素翻转（shareCopyFlip / 条目文案翻转）——
+  // 弹窗磨砂遮罩会糊掉全局 toast，toast 在这里属遮挡死文案（AGENTS 弹层提示归宿）
   function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast(t('已复制', 'Copied'), true) }, function () { fallbackCopy(text); toast(t('已复制', 'Copied'), true) })
-    else { fallbackCopy(text); toast(t('已复制', 'Copied'), true) }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () { fallbackCopy(text) })
+    else fallbackCopy(text)
   }
   var shareFirstUrl = '' // 底栏「复制链接」按钮复制的对象（=urls[0]）
   var copyFlipTimer = null
@@ -2144,7 +2146,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       altsWrap.classList.remove('open')
       altsWrap.innerHTML = alts.map(function (u) { return '<p class="sharealt">' + esc(u) + '</p>' }).join('')
       Array.prototype.forEach.call(altsWrap.querySelectorAll('.sharealt'), function (el2, i2) {
-        el2.onclick = function () { copyText(alts[i2]) }
+        el2.onclick = function () {
+          copyText(alts[i2])
+          // 复制成功反馈 = 条目文案翻转（与「复制链接」按钮同款，1.6s 后还原）
+          if (el2._flipT) clearTimeout(el2._flipT)
+          el2.textContent = '✓ ' + t('已复制', 'Copied')
+          el2._flipT = setTimeout(function () { el2.textContent = alts[i2]; el2._flipT = null }, 1600)
+        }
       })
     }
   }
