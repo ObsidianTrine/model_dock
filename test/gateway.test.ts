@@ -2355,6 +2355,17 @@ describe('自动路由 Phase3：定时切换', () => {
     expect(activeScheduleWindow(wd, new Date(2026, 9, 5, 10, 0))?.target).toBe('B') // 10-05 周一
   })
 
+  it('activeScheduleWindow：全天 00:00–23:59 含入 23:59 这一分钟（当天结束惯例，死亡分钟回归）', () => {
+    const rt = makeRt({ enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'B' }] })
+    expect(activeScheduleWindow(rt, new Date(2026, 9, 1, 0, 0))?.target).toBe('B')
+    expect(activeScheduleWindow(rt, new Date(2026, 9, 1, 12, 0))?.target).toBe('B')
+    expect(activeScheduleWindow(rt, new Date(2026, 9, 1, 23, 59))?.target).toBe('B')
+    // 非全天窗口的 end 不含语义不受影响（09:00–12:00 在 12:00 不命中）
+    const half = makeRt({ enabled: true, windows: [{ start: '09:00', end: '12:00', target: 'B' }] })
+    expect(activeScheduleWindow(half, new Date(2026, 9, 1, 11, 59))?.target).toBe('B')
+    expect(activeScheduleWindow(half, new Date(2026, 9, 1, 12, 0))).toBeNull()
+  })
+
   /** 写入 holiday-cn 缓存夹具（fakeHome 下），供 dayFilter 日类型判定（daytype.ts 按 mtime 自动重读） */
   function writeCalendar(days: { date: string; isOffDay: boolean }[]): void {
     fs.mkdirSync(path.dirname(holidaysCachePath()), { recursive: true })

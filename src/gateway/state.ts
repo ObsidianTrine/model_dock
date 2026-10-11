@@ -267,7 +267,9 @@ function windowDayMatches(w: ScheduleWindow, ref: Date, calendar: HolidayCalenda
 }
 
 /** 求值当前命中的全部窗口（已停用 → 空数组）。
- *  start 含、end 不含；end < start 视为跨午夜窗口，后半夜（t<end）归属窗口起始日（昨天）——
+ *  start 含、end 不含；唯一例外 e === 1439（23:59）按「当天结束」惯例含入最后一分钟——
+ *  「全天」窗口惯用 00:00–23:59 表达，若按 end 不含会让 23:59:00–23:59:59 静默回落默认路由。
+ *  end < start 视为跨午夜窗口，后半夜（t<end）归属窗口起始日（昨天）——
  *  星期几与日类型都按起始日判定，否则「周五 22:00-06:00」会在周六凌晨因 dow 不符而漏判。 */
 function hitScheduleWindows(rt: GatewayRuntime, now: Date): ScheduleWindow[] {
   const sch = rt.config.gateway?.schedule
@@ -282,7 +284,7 @@ function hitScheduleWindows(rt: GatewayRuntime, now: Date): ScheduleWindow[] {
     if (s == null || e == null || s === e) continue
     let ref: Date
     if (s < e) {
-      if (t < s || t >= e) continue
+      if (t < s || (t >= e && e !== 1439)) continue
       ref = now
     } else if (t >= s) {
       ref = now // 当晚半场
