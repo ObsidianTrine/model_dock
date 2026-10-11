@@ -15,6 +15,7 @@
 
 - [ ] 当前在 `develop` 分支，`git status` 干净，且 `git log origin/develop..develop` 为空（本地不领先远程）。
 - [ ] 机器门禁全过：`node scripts/release-check.mjs vX.Y.Z`（含 npm test，约 3 分钟；清单见 `docs/RELEASE_CHECKLIST.md`，⚠ 警告项须逐条过目）。
+- [ ] 托管 Node 钉版核对含在门禁内（npm 客户端 engines 冲突会 ✗ 阻断、补丁滞后/新 LTS 大版本会 ⚠ 提示）：出现 ⚠ 时按 `docs/RELEASE_CHECKLIST.md` §2 的年度评估条目裁决是否随本版 bump `MANAGED_NODE_VERSION`。
 
 ## 流程（严格按顺序，不可跳步）
 
