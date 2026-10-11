@@ -115,7 +115,9 @@ const EXTRA: Record<string, KnownMeta> = {
   'minimax-m3': { context_window: 1048576, max_output: 131072 },
   'minimax-m3-modelhub': { context_window: 1048576, max_output: 131072 },
   'kimi-k2.7-code': { context_window: 262144, max_output: 32768 },
+  'kimi-k2.7-code-highspeed': { context_window: 262144, max_output: 32768 },
   'kimi-k2-7-code-260601': { context_window: 262144, max_output: 32768 },
+  'kimi-k2.6': { context_window: 262144, max_output: 32768 },
   'kimi-k2-8-preview': { context_window: 1048576, max_output: 1048576 },
   'kimi-k2.8-preview': { context_window: 1048576, max_output: 1048576 },
   'kimi-k2-8-260901': { context_window: 1048576, max_output: 1048576 },
@@ -143,7 +145,8 @@ const VISION_PREFIXES = [
   'gpt-4o', 'gpt-4.1', 'gpt-4-turbo', 'gpt-5', 'gpt-6', 'o1', 'o3', 'o4',
   'gemini',
   'minimax-m3',
-  'kimi-k3', 'kimi-k2.7-code', 'kimi-k2-7-code',
+  'kimi-k3', 'kimi-k2.7-code', 'kimi-k2-7-code', 'kimi-k2.6', 'kimi-k2-6', // K2.7/K2.6 系原生视觉（2026-10 官方核对）
+  'mimo-v2.5', 'mimo-v2.6', // 小米 MiMo v2.5/v2.6 全系全模态
   'doubao-seed-2-1-turbo', 'doubao-seed-2.1-turbo',
   'doubao-seed-evolving',
   'deepseek-v4-flash-vision',
