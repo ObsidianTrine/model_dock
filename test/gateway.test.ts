@@ -513,6 +513,102 @@ describe('网关', () => {
     }
   })
 
+  it('GET /v1/models 本地合成：返回当前服务目录（含 display_name 与 OpenAI 兼容字段），零上游调用', async () => {
+    const t = await setup()
+    try {
+      const before = t.requests.length
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      expect(res.status).toBe(200)
+      const j: any = await res.json()
+      expect(j.data).toEqual([
+        { id: 'preset-model', type: 'model', display_name: 'preset-model', object: 'model', created: 0, owned_by: 'up' },
+      ])
+      expect(j.first_id).toBe('preset-model')
+      expect(j.has_more).toBe(false)
+      expect(j.last_id).toBe('preset-model')
+      // 本地合成的核心验收：上游一个包都没收到（不得透传）
+      expect(t.requests.length).toBe(before)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('GET /v1/models：display_name 优先、无则回落 ID', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up.models!['glm-5.3'] = { source: 'manual', display_name: 'GLM-5.3' }
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      const j: any = await res.json()
+      expect(j.data.map((m: any) => [m.id, m.display_name])).toEqual([
+        ['preset-model', 'preset-model'],
+        ['glm-5.3', 'GLM-5.3'],
+      ])
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('GET /v1/models 跟随选路：钉定路由优先，否则跟 active_profile', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up2 = {
+        name: 'mock-b',
+        base_url: 'http://127.0.0.1:1',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'sk-b',
+        models: { 'b-model': { source: 'manual', display_name: 'B 模型' } },
+      }
+      t.rt.config.profiles.p2 = { provider: 'up2', default_model: 'b-model' }
+      const get = async () =>
+        (await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.json()) as any)
+
+      // 钉定路由：harness route 指向 p2 → up2 的目录
+      t.rt.config.harness['claude-code'].route = 'p2'
+      expect((await get()).data[0].id).toBe('b-model')
+      // 跟随全局：active_profile 指向 p2 的 profile
+      t.rt.config.harness['claude-code'].route = 'default'
+      t.rt.config.active_profile = 'p2'
+      expect((await get()).data[0].id).toBe('b-model')
+      // 切回 demo
+      t.rt.config.active_profile = 'demo'
+      expect((await get()).data[0].id).toBe('preset-model')
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('GET /v1/models：目录为空返回空列表；未认证 401', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.empty = {
+        name: 'empty',
+        base_url: 'http://127.0.0.1:1',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'sk-e',
+      }
+      t.rt.config.profiles.pe = { provider: 'empty', default_model: 'x' }
+      t.rt.config.active_profile = 'pe'
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      const j: any = await res.json()
+      expect(j.data).toEqual([])
+      expect(j.has_more).toBe(false)
+      expect(j.first_id).toBeUndefined()
+
+      const anon = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`)
+      expect(anon.status).toBe(401)
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('usage 落盘：SSE（anthropic）与非流式 JSON（openai）的 token 用量进请求日志', async () => {
     // —— anthropic SSE：message_start 带输入/缓存，message_delta 带输出累计 ——
     const t = await setup()

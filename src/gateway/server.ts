@@ -232,6 +232,28 @@ function sandboxInstallCapability(a: HarnessAdapter): 'redirect' | 'unsupported'
   return isNpmGlobalInstall(resolveInstallCommand(a.install.command) ?? '') ? 'redirect' : 'unsupported'
 }
 
+/** 本地合成 /v1/models 响应：Anthropic 形状为主（type/display_name + 分页字段），兼容 OpenAI 字段
+ *  （object/created/owned_by）——两类 SDK 各取所需，多余字段互不解析。目录按写入顺序排列；
+ *  有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表（picker 无自定义项，
+ *  档位请求仍走内置名兜底改写，不劣化）。 */
+function modelsListPayload(cfg: Config, target: ResolvedTarget) {
+  const provider = cfg.providers[target.profile.provider]
+  const data = Object.entries(provider?.models ?? {}).map(([id, m]) => ({
+    id,
+    type: 'model',
+    display_name: m.display_name || id,
+    object: 'model',
+    created: 0,
+    owned_by: target.profile.provider,
+  }))
+  return {
+    data,
+    first_id: data[0]?.id,
+    has_more: false,
+    last_id: data[data.length - 1]?.id,
+  }
+}
+
 /** 安装/卸载前的 probe：可装进沙箱的 npm 类客户端在沙箱实例（FAKE_HOME）下只认沙箱内命中，
  *  宿主真机的同名命令不算数——否则真机装过的客户端在沙箱里永远「跳过安装」，卸载后状态
  *  也回不到未安装（2026-10-11 dev 沙箱实测踩中）。脚本类/桌面类只有真机一份拷贝，保持并集。 */
@@ -428,6 +450,15 @@ async function handleRequest(
     return sendError(res, resolved.status, resolved.message, resolved.hint)
   }
   const { target } = resolved
+
+  // 本地合成 GET /v1/models：返回当前选路目标服务的模型目录（用户拉取/筛选过的），不透传上游——
+  // 上游目录 ≠ 用户目录，且上游未必实现该端点。Claude Code 开 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+  // 后据此填充 /model 选择器；选路复用 resolveTarget（钉定/定时/active_profile），列表与实际请求同源。
+  if (method === 'GET' && url.split('?')[0] === '/v1/models') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(modelsListPayload(rt.config, target)))
+    return
+  }
 
   const body = await readBody(req)
   const headers: Record<string, string> = {}
