@@ -79,8 +79,9 @@ export const claudeCodeAdapter: HarnessAdapter = {
   id: 'claude-code',
   label: 'Claude Code',
   directMode: true,
-  // /model 选择器经 modelPicker 烙着当前服务的模型列表，全局切换后需按新路由重写
-  // （refreshBakedModelClients / resyncHarnessToRoute，见 ops.ts）
+  // /model 选择器经 modelPicker 烙着当前服务的模型列表（网关与直连两种模式都烙）：网关模式
+  // 全局切换后按新路由重写（refreshBakedModelClients / resyncHarnessToRoute，见 ops.ts，两者
+  // 显式跳过 direct 客户端）；直连目标显式、不随全局切换，重烙发生在接入 / 模式切换时
   bakesModels: true,
   install: {
     command: 'npm i -g @anthropic-ai/claude-code',
@@ -160,8 +161,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
     const prevBase = env.ANTHROPIC_BASE_URL
     env.ANTHROPIC_BASE_URL = d ? d.base_url : gatewayBase(opts.gatewayPort)
     if (d) {
-      // 直连没有网关的 /v1/models 实现，discovery 开关 / picker 白名单 / 策划 lineup 都是网关模式
-      // 注入的，切直连时收回（白名单留着会把直连时的内置档位全部藏掉；lineup 列的是网关目录）
+      // discovery 开关 / availableModels 白名单是网关模式专属，切直连收回（白名单会把内置档位全藏掉）；
+      // 策划 lineup 也先撤网关遗留——下方按直连服务目录重建，profile 缺失 / 目录为空时不残留网关 lineup
       delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
       if (isOurAvailableModels(root.availableModels)) delete root.availableModels
       if (isOurModelPicker(root.modelPicker)) delete root.modelPicker
@@ -218,6 +219,26 @@ export const claudeCodeAdapter: HarnessAdapter = {
         }
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW
+        // /model 选择器同样全量策划（官方 modelPicker 键，v2.1.242+，与网关模式同构）：它是纯客户端
+        // 静态配置（选项烙进 settings.json、不查询 /v1/models），网关挂掉不影响直连可用性；模型 ID
+        // 与上方 env 映射同规则带 [1m] 上下文后缀，label 用显示名，description 换直连措辞、保留
+        // ModelDock 标记供 isOurModelPicker 识别
+        const pickerOptions = Object.entries(provider?.models ?? {}).map(([id, m]) => ({
+          model: suffixed(id),
+          label: m.display_name || stripContextSuffix(id),
+          description: `${provider?.name ?? opts.profile ?? ''} · ${t('由 ModelDock 直连配置', 'direct via ModelDock')}`,
+        }))
+        if (pickerOptions.length > 0) {
+          root.modelPicker = { replaceBuiltInOptions: true, options: pickerOptions }
+          notes.push(
+            t(
+              '直连模式：/model 选择器已列出当前服务的完整模型目录（纯客户端静态配置，不依赖网关存活）；Default 项按 profile 默认模型解析',
+              'Direct mode: /model now lists the full model catalog of the current service (pure client-side static config, no gateway dependency); the Default row resolves via the profile default model'
+            )
+          )
+        } else if (isOurModelPicker(root.modelPicker)) {
+          delete root.modelPicker // 目录为空：撤掉我们的策划表，回退内置 lineup
+        }
         notes.push(
           t(
             '直连模式：已按 profile「{profile}」还原模型映射（{count} 个分层{model}）',
