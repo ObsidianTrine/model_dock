@@ -1,4 +1,6 @@
-import { readTextIfExists, atomicWrite, fileMode } from '../util/fsx.js'
+import path from 'node:path'
+import { readTextIfExists, atomicWrite, fileMode, withFileLock } from '../util/fsx.js'
+import { modeldockDir } from '../util/paths.js'
 import { unifiedDiff, redact } from '../util/diff.js'
 import { c } from '../util/color.js'
 import { t } from '../util/i18n.js'
@@ -12,6 +14,13 @@ export interface ApplyOptions {
   redactions?: string[]
   /** 静默模式：不输出 diff 预览与快照信息（Web 控制台 / 托盘等非终端场景；yes 跳过确认时通常与之成对） */
   quiet?: boolean
+}
+
+/** 客户端文件写入段（快照+逐文件写）的跨进程互斥锁落点。config.toml/secrets.json 各有两层锁，
+ *  客户端配置文件原本裸奔：plan→apply 乐观锁只防「内容漂移」，防不了两进程各自生成 plan 后
+ *  交替写入（未登记 harness 并发 attach 各写各的随机 token → 文件与 config 登记失配，客户端 401）。 */
+function harnessWriteLockPath(): string {
+  return path.join(modeldockDir(), 'harness-write.lock')
 }
 
 /**
@@ -74,35 +83,38 @@ export async function applyChanges(
     }
   }
 
-  const manifest = await snapshot(harness, operation, changes.map((ch) => ch.path))
-  if (!opts.quiet) {
-    console.log(
-      c.green(t('已创建快照 {id}（{count} 个文件）', 'Snapshot {id} created ({count} files)', { id: manifest.id, count: manifest.files.length }))
-    )
-  }
-
-  for (const ch of changes) {
-    // 乐观锁：写前重读，与 plan 时的内容比对。plan→apply 之间被外部改过的文件绝不静默覆盖
-    const current = (await readTextIfExists(ch.path)) ?? ''
-    if (current !== (ch.before ?? '')) {
-      await restoreSnapshot(manifest)
-      throw new Error(
-        t(
-          '{path} 在生成计划后被外部修改过，已中止写入并从快照回滚。请重新执行一次 attach/detach（会基于最新内容重新生成 diff）',
-          '{path} was modified externally after the plan was generated; the write was aborted and rolled back from the snapshot. Run attach/detach again to regenerate the diff from the latest content',
-          { path: ch.path }
-        )
+  // 写入段跨进程互斥（锁内不含确认交互，用户停留时长不占锁）
+  return withFileLock(harnessWriteLockPath(), undefined, async () => {
+    const manifest = await snapshot(harness, operation, changes.map((ch) => ch.path))
+    if (!opts.quiet) {
+      console.log(
+        c.green(t('已创建快照 {id}（{count} 个文件）', 'Snapshot {id} created ({count} files)', { id: manifest.id, count: manifest.files.length }))
       )
     }
-    const mode = await fileMode(ch.path)
-    await atomicWrite(ch.path, ch.after, mode)
-    const verify = await readTextIfExists(ch.path)
-    if (verify !== ch.after) {
-      await restoreSnapshot(manifest)
-      throw new Error(t('写入后回读校验失败，已从快照回滚：{path}', 'Post-write verification failed and was rolled back from the snapshot: {path}', { path: ch.path }))
+
+    for (const ch of changes) {
+      // 乐观锁：写前重读，与 plan 时的内容比对。plan→apply 之间被外部改过的文件绝不静默覆盖
+      const current = (await readTextIfExists(ch.path)) ?? ''
+      if (current !== (ch.before ?? '')) {
+        await restoreSnapshot(manifest)
+        throw new Error(
+          t(
+            '{path} 在生成计划后被外部修改过，已中止写入并从快照回滚。请重新执行一次 attach/detach（会基于最新内容重新生成 diff）',
+            '{path} was modified externally after the plan was generated; the write was aborted and rolled back from the snapshot. Run attach/detach again to regenerate the diff from the latest content',
+            { path: ch.path }
+          )
+        )
+      }
+      const mode = await fileMode(ch.path)
+      await atomicWrite(ch.path, ch.after, mode)
+      const verify = await readTextIfExists(ch.path)
+      if (verify !== ch.after) {
+        await restoreSnapshot(manifest)
+        throw new Error(t('写入后回读校验失败，已从快照回滚：{path}', 'Post-write verification failed and was rolled back from the snapshot: {path}', { path: ch.path }))
+      }
     }
-  }
-  return true
+    return true
+  })
 }
 
 function indentDiff(diff: string): string {

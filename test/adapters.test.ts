@@ -381,6 +381,26 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('attach 稳态等值过滤：重接同一 token 无内容变化时计划零改动（不重复写盘/快照）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig(baseCfg())
+
+      const opts = { mode: 'gateway' as const, gatewayPort: 8687, token: TOKEN, profile: 'demo' }
+      const plan1 = await dshAdapter.planAttach(opts, await loadConfig())
+      expect(plan1.changes.length).toBeGreaterThan(0)
+      await applyChanges('dsh', 'attach', plan1.changes, { yes: true, redactions: [TOKEN] })
+
+      const plan2 = await dshAdapter.planAttach(opts, await loadConfig())
+      expect(plan2.changes).toEqual([])
+    } finally {
+      h.restore()
+    }
+  })
+
   it('attach 写入完整模型列表（ModelDock 元数据优先 + catalog 补全 + 回写）', async () => {
     const h = fakeHome()
     try {
@@ -2030,6 +2050,47 @@ describe('claude-code 独立直连（direct 模式）', () => {
       expect(afterBack.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
       expect(afterBack.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
       expect(afterBack.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('direct（x-api-key 型上游）切回网关：写入的上游真实 Key ANTHROPIC_API_KEY 一并清理', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x' } }, null, 2) + '\n',
+        0o600
+      )
+      await withConfig(directCfg())
+      const loaded = await loadConfig()
+
+      const plan = await claudeCodeAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: 'mdk_x',
+          profile: 'demo',
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'x-api-key' },
+        },
+        loaded
+      )
+      expect(await applyChanges('claude-code', 'direct', plan.changes, { yes: true })).toBe(true)
+      const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
+      expect(onDisk.env.ANTHROPIC_API_KEY).toBe('sk-direct-plain')
+
+      const back = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: 'mdk_x', profile: 'demo', fromMode: 'direct' },
+        await loadConfig()
+      )
+      const afterBack = JSON.parse(back.changes[0].after)
+      expect(afterBack.env.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(afterBack.env.ANTHROPIC_AUTH_TOKEN).toBe('mdk_x')
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       h.restore()

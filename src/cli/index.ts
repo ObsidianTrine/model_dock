@@ -152,7 +152,7 @@ export function buildProgram(): Command {
   gw.command('install').description(t('开机自启：登录自动拉起网关，崩溃自动重启', 'Start at login: gateway auto-starts on login and restarts on crash')).action(() => cmdGatewayInstall())
   gw.command('uninstall').description(t('移除开机自启（不影响当前运行的网关）', 'Remove start-at-login (does not stop the running gateway)')).action(() => cmdGatewayUninstall())
   gw.command('log')
-    .description(t('查看请求日志（同 logs）', 'Show request logs (same as logs)'))
+    .description(t('查看网关请求日志', 'Show gateway request logs'))
     .option('-n, --lines <n>', t('条数', 'Number of lines'), '30')
     .option('-f, --follow', t('跟随', 'Follow'))
     .option('--harness <id>', t('过滤 harness', 'Filter by harness'))
