@@ -199,6 +199,103 @@ export async function readTextIfExists(p: string): Promise<string | null> {
   return text
 }
 
+// 跨进程写锁（纯 JS，无 native）
+// 供 config.toml / secrets.json 等「读文件→改内存→整文件写回」的共享数据做跨进程互斥：CLI /
+// 网关 daemon / Web 控制台是三个独立写者，无互斥会静默丢更新。两层防护：进程内 promise 串行
+// serialize（同进程并发调用）+ 跨进程 O_CREAT|O_EXCL 锁文件。
+
+const LOCK_TIMEOUT_MS = 10_000
+/** 持锁超过该时长视为持有者已死（临界区内不应有慢 I/O），允许抢占。语义即老 config 锁语义，勿改。 */
+export const lockStaleMs = 15_000
+
+function lockTimeoutError(lp: string): Error {
+  return new Error(
+    t('文件写入锁超时：{lp} 被其他进程长期占用（可能是异常退出的残留锁）。确认没有其他 modeldock 进程在写该文件后，可删除该 .lock 文件重试',
+      'Timed out acquiring the write lock: {lp} has been held by another process for too long (possibly a stale lock from a crashed process). After confirming no other modeldock process is writing this file, delete the .lock file and retry',
+      { lp })
+  )
+}
+
+/** 跨进程互斥：O_CREAT|O_EXCL 独占创建锁文件；陈旧锁抢占；超时给可操作报错。
+ *  release 做 pid 归属校验——仅当锁文件仍写着本进程 pid 才删除。超时抢占后原持有者收尾不删
+ *  **新持有者**的锁，第三个写者不会误入临界区。@returns 释放锁的函数。 */
+export async function acquireFileLock(
+  lockFile: string,
+  opts?: { timeoutError?: (lp: string) => Error }
+): Promise<() => void> {
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true }) // 首次运行时 ~/.modeldock 可能还不存在
+  const t0 = Date.now()
+  const err = opts?.timeoutError ?? lockTimeoutError
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockFile, 'wx')
+      try {
+        fs.writeSync(fd, String(process.pid))
+      } finally {
+        fs.closeSync(fd)
+      }
+      return () => {
+        try {
+          // 归属校验：仅当锁文件仍写着本进程 pid 才删（被抢占/删改则不动，留待新持有者收尾）
+          if (fs.readFileSync(lockFile, 'utf8') === String(process.pid)) {
+            fs.unlinkSync(lockFile)
+          }
+        } catch {
+          /* 已被抢占/删除则忽略 */
+        }
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      try {
+        const st = fs.statSync(lockFile)
+        if (Date.now() - st.mtimeMs > lockStaleMs) {
+          fs.unlinkSync(lockFile)
+          continue
+        }
+      } catch {
+        /* 锁刚被释放，直接重试 */
+      }
+      if (Date.now() - t0 > LOCK_TIMEOUT_MS) {
+        throw err(lockFile)
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+// 进程内串行队列：按锁文件分队列，互不相关文件（config / secrets）的写并发互不阻塞。
+const lockQueues = new Map<string, Promise<unknown>>()
+
+function enqueueLocked<T>(lockFile: string, job: () => Promise<T>): Promise<T> {
+  const prev = lockQueues.get(lockFile) ?? Promise.resolve()
+  const next = prev.then(job, job)
+  lockQueues.set(
+    lockFile,
+    next.then(
+      () => undefined,
+      () => undefined
+    )
+  )
+  return next
+}
+
+/** 读-改-写 便捷封装（同进程串行 + 跨进程互斥锁）。config 的 mutateConfig 与 secrets 写路径共用。
+ *  fn 内不要做慢 I/O，避免长期占锁。@param{timeoutError} 覆盖默认超时报错（store 用它装成 ConfigError）。 */
+export async function withFileLock<T>(
+  lockFile: string,
+  opts: { timeoutError?: (lp: string) => Error } | undefined,
+  job: () => Promise<T>
+): Promise<T> {
+  return enqueueLocked(lockFile, async () => {
+    const release = await acquireFileLock(lockFile, opts)
+    try {
+      return await job()
+    } finally {
+      release()
+    }
+  })
+}
+
 // 常驻追加流（高频 JSONL 日志落盘）
 
 /** 按路径常驻追加流池：fs.appendFile 每条都是 open+write+close 三个 syscall 走线程池，高频
