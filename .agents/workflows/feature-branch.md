@@ -12,6 +12,7 @@ node .agents/scripts/feature-branch.mjs start <task-id>
 
 - `<task-id>`：小写短横线短词，如 `fix-presets-merge`、`add-export-cmd`。
 - 成功后输出 worktree 路径（`.agents/worktrees/<task-id>`）和分支名（`feature/<task-id>`，基于基准分支，见 `.agents/workflow.json` 的 `baseBranch`）。
+- start 会在建好 worktree 后自动执行 `.agents/workflow.json` 的 `setupCmd`（本仓库为 `npm ci --prefer-offline`，装好 node_modules），**worktree 产出即可直接跑测试**，无需手工补装依赖。setup 失败只告警不中断——worktree 本身没问题，按提示手动重跑该命令即可。
 - 每个 agent 一个独立 worktree，互不干扰；主目录基准分支检出保持不动。
 
 ### 2. 在 worktree 内修改
@@ -39,6 +40,8 @@ node .agents/scripts/feature-branch.mjs finish <task-id>
 ```
 
 finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。
+
+- **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者会收到「另一 finish 进行中」的提示，等它结束后重跑即可；若上次 finish 崩溃留下陈锁（属主进程已死），下次 finish 自动接管，无需手动清理。
 
 - rebase 冲突：在 worktree 内解决 → `git add -A && git rebase --continue` → 重新跑 finish。
 - finish 里的验证失败：回 worktree 修复 → 提交 → 重跑 finish。
@@ -105,11 +108,13 @@ mkdir -p .claude && cp <模板项目>/.claude/settings.json .claude/
 ```json
 {
   "baseBranch": "develop",
+  "setupCmd": "npm ci --prefer-offline",
   "testCmd": "cmake --build build && ctest --test-dir build --output-on-failure"
 }
 ```
 
 - `baseBranch`：feature 分支的合并目标。没有 develop 分支的项目直接写 `main`。
+- `setupCmd`：start 建好 worktree 后自动执行的环境准备命令（装依赖等，shell 执行），写法与 `testCmd` 相同（字符串 / 数组 / 平台映射）。配置后每个新 worktree 产出即可直接自测，agent 不必自己发现并补装依赖；缺省 = 跳过 setup。setup 失败仅告警不阻断（worktree 已建好，命令可手动重跑）。
 - `testCmd`：finish 时在 worktree 内运行的验证命令（shell 执行），支持三种写法：
   - **字符串**——所有平台同一条命令：
     ```json

@@ -2,14 +2,17 @@
 // feature-branch.mjs — per-task git worktree workflow for parallel AI agents.
 //
 // Usage:
-//   node .agents/scripts/feature-branch.mjs start <task-id>            create worktree + feature/<task-id> branch off develop
+//   node .agents/scripts/feature-branch.mjs start <task-id>            create worktree + feature/<task-id> branch off develop,
+//                                                                      then run setupCmd from workflow.json inside it (deps install etc.)
 //   node .agents/scripts/feature-branch.mjs finish <task-id> [--skip-test] [--message "msg"]
 //                                                              rebase onto develop, run tests, merge --no-ff, cleanup
 //   node .agents/scripts/feature-branch.mjs list                       list active task worktrees
 //
 // Worktrees live under .agents/worktrees/<task-id> (gitignored). Each agent
 // edits only inside its own worktree, so parallel agents never clobber each
-// other's files; integration happens serially at finish time on develop.
+// other's files. Integration happens on the shared main checkout, so finish
+// serializes on a lock file (.finish.lock): concurrent finishes queue safely
+// instead of colliding on git's index.lock.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -73,10 +76,50 @@ function die(msg) {
   process.exit(1);
 }
 
+// Finish is the only step that mutates the base branch (the merge runs on the main
+// checkout), so two agents finishing at once would collide on git's index.lock. An
+// exclusive lock file serializes them. The owner pid lets a later finish tell a
+// crashed predecessor (lock left behind by SIGKILL / power loss) from a live one:
+// stale locks are taken over automatically, live ones refuse with a retry hint.
+const FINISH_LOCK = path.join(WORKTREES_DIR, '.finish.lock');
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM'; // exists but owned by another user — still alive
+  }
+}
+
+function acquireFinishLock(taskId) {
+  fs.mkdirSync(WORKTREES_DIR, { recursive: true });
+  for (let takeovers = 0; ; takeovers++) {
+    try {
+      fs.writeFileSync(FINISH_LOCK, JSON.stringify({ pid: process.pid, task: taskId, time: new Date().toISOString() }), { flag: 'wx' });
+    } catch (e) {
+      if (e.code !== 'EEXIST') die(`could not create finish lock ${FINISH_LOCK}: ${e.message}`);
+      let info = null;
+      try { info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8')); } catch { /* corrupt lock — treat as stale */ }
+      if (info && Number.isInteger(info.pid) && pidAlive(info.pid)) {
+        die(`another finish is already running (pid ${info.pid}${info.task ? `, task "${info.task}"` : ''}${info.time ? `, started ${info.time}` : ''}).` + CRLF_N +
+          `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
+          `  If you are certain no finish is in progress, delete ${FINISH_LOCK} and retry.`);
+      }
+      if (takeovers >= 2) die(`finish lock ${FINISH_LOCK} is stale but could not be removed. Delete it manually and re-run.`);
+      try { fs.rmSync(FINISH_LOCK, { force: true }); } catch { /* next iteration re-checks */ }
+      continue;
+    }
+    process.on('exit', () => { try { fs.rmSync(FINISH_LOCK, { force: true }); } catch { /* best effort */ } });
+    return;
+  }
+}
+
 // Per-project workflow config: .agents/workflow.json (commit it into the repo).
 //   baseBranch — integration branch feature branches merge back into (default: develop if present)
 //   testCmd    — verification command(s) run by finish inside the worktree (default: none, tests skipped).
-//                Accepted forms (all language-agnostic):
+//   setupCmd   — one-time environment setup command(s) run by start inside the fresh worktree
+//                (dependency install etc.; default: none). Accepted forms for both (all language-agnostic):
 //                  "cmd"                          same command on every platform
 //                  ["cmd1", "cmd2"]               several commands, run in order
 //                  { "win32": ..., "unix": ... }  per-platform; "unix" covers linux+darwin;
@@ -94,13 +137,14 @@ function loadWorkflowConfig() {
   }
   return {
     baseBranch: typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null,
-    testCmd: resolveTestCmd(raw.testCmd),
+    testCmd: resolveCmds(raw.testCmd),
+    setupCmd: resolveCmds(raw.setupCmd),
   };
 }
 
-// Normalize a testCmd declaration (see forms above) into an array of commands
+// Normalize a testCmd/setupCmd declaration (see forms above) into an array of commands
 // for the current platform, or null when nothing applies.
-function resolveTestCmd(raw) {
+function resolveCmds(raw) {
   const toList = (v) => {
     if (typeof v === 'string') return v.trim() ? [v.trim()] : null;
     if (Array.isArray(v)) {
@@ -227,9 +271,31 @@ function cmdStart(taskId) {
   git(['worktree', 'add', wtPath, '-b', branch, base]);
   writeNotesStub(taskId, wtPath, base);
 
+  // One-time environment setup (e.g. dependency install) so the worktree is immediately
+  // testable — the top friction point for parallel agents: a fresh worktree has no
+  // node_modules and every agent would otherwise discover and run the install by hand.
+  // Failure is a warning, not an abort: the worktree itself is fine and the command can
+  // be re-run manually (a failed install is often transient — network, lock contention).
+  const setupCmds = loadWorkflowConfig().setupCmd;
+  let setupFailed = false;
+  for (const cmd of setupCmds || []) {
+    console.log(`Running setup inside the worktree: ${cmd}`);
+    const s = spawnSync(cmd, { cwd: wtPath, stdio: 'inherit', shell: true });
+    if (s.status !== 0) {
+      setupFailed = true;
+      console.warn(`WARNING: setup failed (exit ${s.status}). The worktree is ready, but run the setup manually before testing:` + CRLF_N +
+        `  cd "${wtPath}" && ${cmd}`);
+    }
+  }
+  const setupNote = !setupCmds || setupCmds.length === 0
+    ? ''
+    : setupFailed
+      ? '\n  setup:  FAILED — re-run the setup command manually inside the worktree before testing.'
+      : '\n  setup:  done.';
+
   console.log(`Worktree ready:
   path:   ${wtPath}
-  branch: ${branch} (based on ${base})
+  branch: ${branch} (based on ${base})${setupNote}
 
 Next steps:
   0. Fill in NOTES.md (handoff doc) in the worktree — goals/plan first, keep it updated; if the task is left unfinished, the next agent continues from it.
@@ -245,6 +311,8 @@ function cmdFinish(taskId, args) {
   const mergeMsg = msgIdx >= 0 ? args[msgIdx + 1] : undefined;
   const branch = `feature/${taskId}`;
   const wtPath = path.join(WORKTREES_DIR, taskId);
+
+  acquireFinishLock(taskId);
 
   const trees = listWorktrees();
   const wt = trees.find((t) => path.resolve(t.path) === path.resolve(wtPath));
