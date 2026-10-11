@@ -1855,6 +1855,120 @@ describe('claude-code 独立直连（direct 模式）', () => {
       h.restore()
     }
   })
+
+  it('direct：modelPicker 全量烙入服务目录（≥1M 带 [1m]、label 显示名、description 直连措辞含 ModelDock 标记），网关遗留 lineup 被重写', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      // 网关模式遗留：我们的 lineup（description 带 ModelDock）→ 切直连应被直连目录重写
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x' },
+            modelPicker: { replaceBuiltInOptions: true, options: [{ model: 'gw-model', label: 'GW', description: 'Mock · 由 ModelDock 网关提供' }] },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      const cfg: Config = {
+        ...emptyConfig(),
+        providers: {
+          p: {
+            name: 'Mock Up',
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'sk-direct-plain',
+            models: {
+              'm-1m': { display_name: '百万上下文', context_window: 1048576 },
+              'm-std': { display_name: '标准' },
+            },
+          },
+        },
+        profiles: { demo: { provider: 'p', default_model: 'm-std' } },
+        active_profile: 'demo',
+      }
+      await withConfig(cfg)
+
+      const plan = await claudeCodeAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: 'mdk_x',
+          profile: 'demo',
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.modelPicker.replaceBuiltInOptions).toBe(true)
+      // 目录全量直列（>5 个也不截断）：≥1M 上下文的模型与 env 映射同规则带 [1m] 后缀
+      expect(after.modelPicker.options.map((o: any) => [o.model, o.label])).toEqual([
+        ['m-1m[1m]', '百万上下文'],
+        ['m-std', '标准'],
+      ])
+      // 直连措辞 + ModelDock 标记（isOurModelPicker 靠它识别 detach / 模式切换清理）
+      expect(after.modelPicker.options[0].description).toContain('直连')
+      expect(after.modelPicker.options[0].description).toContain('ModelDock')
+      expect(plan.notes.some((n) => n.includes('完整模型目录'))).toBe(true)
+
+      // 切回网关：同一配置目录非空 → 网关 lineup 重写（措辞回到「网关提供」）
+      const back = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: 'mdk_x', profile: 'demo', fromMode: 'direct' },
+        await loadConfig()
+      )
+      const afterBack = JSON.parse(back.changes[0].after)
+      // 网关分支直列 raw ID（不带 [1m] 后缀，与既有网关行为一致）
+      expect(afterBack.modelPicker.options.map((o: any) => o.model)).toEqual(['m-1m', 'm-std'])
+      expect(afterBack.modelPicker.options[0].description).toContain('网关')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('direct：目录为空时不残留 lineup；已落盘的直连 lineup 切回网关时被撤掉（description 标记可识别）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      // 直连落盘态：base_url 指向上游 + 我们的直连 lineup
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            model: 'sonnet',
+            env: {
+              ANTHROPIC_BASE_URL: 'https://api.up.example.com',
+              ANTHROPIC_AUTH_TOKEN: 'sk-direct-plain',
+              ANTHROPIC_DEFAULT_SONNET_MODEL: 'm-std',
+            },
+            modelPicker: { replaceBuiltInOptions: true, options: [{ model: 'm-std', label: '标准', description: 'Mock Up · 由 ModelDock 直连配置' }] },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      // 目标服务无目录：切回网关时应撤掉我们的 lineup，回退内置
+      await withConfig(directCfg())
+      const back = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: 'mdk_x', profile: 'demo', fromMode: 'direct' },
+        await loadConfig()
+      )
+      const after = JSON.parse(back.changes[0].after)
+      expect(after.modelPicker).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
 })
 
 describe('独立直连 Phase 2：dsh / codex / zcode / opencode / workbuddy', () => {
