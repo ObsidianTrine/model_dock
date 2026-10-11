@@ -62,6 +62,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
   directMode: true,
   install: {
     command: 'npm i -g @anthropic-ai/claude-code',
+    uninstall: 'npm uninstall -g @anthropic-ai/claude-code',
     needsNode: true,
     probe: 'claude',
     get guide() {

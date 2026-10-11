@@ -8,7 +8,7 @@ import type { HarnessAdapter } from '../src/adapters/types.js'
 import { emptyConfig } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
 import { buildRuntime } from '../src/gateway/state.js'
-import { createGatewayServer, runClientInstall } from '../src/gateway/server.js'
+import { createGatewayServer, runClientInstall, runClientUninstall } from '../src/gateway/server.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { isNpmGlobalInstall } from '../src/adapters/types.js'
 import { commandOnPathResolved } from '../src/util/fsx.js'
@@ -504,6 +504,138 @@ describe('客户端安装并接入', () => {
       expect(wb.install.sandboxInstall).toBeNull()
     } finally {
       t.closeAll()
+    }
+  })
+
+  it('overview install.uninstall：npm 类携带命令与沙箱标记，指引类为 null', async () => {
+    const t = await setup()
+    try {
+      const j: any = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, {
+        headers: { 'x-modeldock-admin': 'admin-token-x' },
+      }).then((r) => r.json())
+      const cc = j.clients.find((c: any) => c.id === 'claude-code')
+      expect(cc.install.uninstall.command).toBe('npm uninstall -g @anthropic-ai/claude-code')
+      expect(cc.install.uninstall.sandbox).toBe(true) // setup 走 fakeHome
+      const wb = j.clients.find((c: any) => c.id === 'workbuddy')
+      expect(wb.install.uninstall).toBeNull()
+    } finally {
+      t.closeAll()
+    }
+  })
+})
+
+describe('客户端卸载', () => {
+  const bootOf = (h: { home: string }) => path.join(h.home, '.claude', 'settings.json')
+  const fakeAdapter = (h: { home: string }, opts: { probe?: string; uninstall?: string; content?: string }): HarnessAdapter => ({
+    id: 'fake-un',
+    label: 'FakeUn',
+    install: {
+      command: 'npm i -g @example/fake',
+      ...(opts.uninstall !== undefined ? { uninstall: opts.uninstall } : {}),
+      ...(opts.probe ? { probe: opts.probe } : {}),
+      guide: 'x',
+      bootstrap: { path: bootOf(h), content: opts.content ?? '{}\n' },
+    },
+    detect: async () => ({ installed: fs.existsSync(bootOf(h)), configFiles: [] }),
+    planAttach: async () => ({ changes: [], notes: [] }),
+    planDetach: async () => ({ changes: [], notes: [] }),
+    status: async () => ({ installed: fs.existsSync(bootOf(h)), attached: false }),
+  })
+
+  it('probe 未命中（命令已不在 PATH）：跳过执行，bootstrap 空配置一并清理', async () => {
+    const h = fakeHome()
+    const savedPath = process.env.PATH
+    const savedAppData = process.env.APPDATA
+    try {
+      fs.mkdirSync(path.dirname(bootOf(h)), { recursive: true })
+      fs.writeFileSync(bootOf(h), '{}\n')
+      process.env.PATH = path.join(h.home, 'empty-bin') // 空目录：claude 探不到
+      delete process.env.APPDATA
+      const r = await runClientUninstall(fakeAdapter(h, { probe: 'claude', uninstall: 'npm uninstall -g @example/fake' }), emptyConfig(), 8687)
+      expect(r.ok).toBe(true)
+      expect(r.skipped).toBe(true)
+      expect(r.output).toContain('无需卸载')
+      expect(fs.existsSync(bootOf(h))).toBe(false) // 空配置随卸载清理
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = savedAppData
+      h.restore()
+    }
+  })
+
+  it('probe 命中：执行声明命令；bootstrap 已含其他内容则保留', async () => {
+    const h = fakeHome()
+    const restoreAllow = allowStubCommands()
+    try {
+      fs.mkdirSync(path.dirname(bootOf(h)), { recursive: true })
+      fs.writeFileSync(bootOf(h), '{"env":{"USER":"data"}}\n')
+      const r = await runClientUninstall(
+        fakeAdapter(h, { uninstall: 'node -e "process.stdout.write(\'ok\')"' }),
+        emptyConfig(),
+        8687
+      )
+      expect(r.ok).toBe(true)
+      expect(r.skipped).toBe(false)
+      expect(r.output).toContain('已执行卸载命令')
+      expect(fs.readFileSync(bootOf(h), 'utf8')).toBe('{"env":{"USER":"data"}}\n') // 用户内容保留
+    } finally {
+      restoreAllow()
+      h.restore()
+    }
+  })
+
+  it('卸载子进程与安装共用沙箱 env：prefix/cache 指进沙箱', async () => {
+    const h = fakeHome()
+    const restoreAllow = allowStubCommands()
+    try {
+      const r = await runClientUninstall(
+        fakeAdapter(h, { uninstall: 'node -e "process.stdout.write([process.env.npm_config_prefix||\'NOPFX\',process.env.npm_config_cache||\'NOCACHE\'].join(\'|\'))"' }),
+        emptyConfig(),
+        8687
+      )
+      expect(r.ok).toBe(true)
+      expect(r.output).toContain(`${sandboxNpmPrefix()}|${sandboxNpmCache()}`)
+    } finally {
+      restoreAllow()
+      h.restore()
+    }
+  })
+
+  it('未声明 uninstall 的客户端：拒绝并提示手动卸载', async () => {
+    const h = fakeHome()
+    try {
+      const r = await runClientUninstall(fakeAdapter(h, { uninstall: undefined as unknown as string }), emptyConfig(), 8687)
+      expect(r.ok).toBe(false)
+      expect(r.output).toContain('未配置自动卸载')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('卸载端点：已接入的客户端 400 拦截（先断开再卸载）', async () => {
+    // harness 必须在建 server 前写进 cfg：端点读运行时内存对象，mutateConfig 只落盘不回填
+    const h = fakeHome()
+    const cfg = emptyConfig()
+    cfg.security = { store: 'file' }
+    cfg.harness['claude-code'] = { mode: 'gateway', route: 'default', token: 'mdk_x' }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const res = await fetch(`http://127.0.0.1:${gwPort}/_modeldock/uninstall`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-token-x' },
+        body: JSON.stringify({ harness: 'claude-code' }),
+      })
+      expect(res.status).toBe(400)
+      const j: any = await res.json()
+      expect(j.error.message).toContain('断开')
+    } finally {
+      server.close()
+      h.restore()
     }
   })
 })
