@@ -120,10 +120,10 @@ export async function extractArchive(
 ): Promise<void> {
   await fsp.mkdir(dir, { recursive: true })
   if (archive.toLowerCase().endsWith('.zip')) {
-    if (platform === 'win32' && (archive.includes('"') || dir.includes('"'))) {
-      // Expand-Archive 用 LiteralPath 传路径，引号会把命令拼坏；unix tar 无此问题。
-      // 原 noderuntime 该守卫仅 win 有意义，unix 分支不应被引号误伤。
-      throw new Error(t('路径含引号，无法解压：{p}', 'Path contains a quote character, cannot extract: {p}', { p: archive }))
+    if (platform === 'win32' && (/["`$]/.test(archive) || /["`$]/.test(dir))) {
+      // Expand-Archive 经 -Command 双引号串传路径：引号把命令拼坏，反引号/$( 触发 PowerShell 插值展开；
+      // unix tar 无此问题。落点来自 mkdtemp + validateAssetName，守卫属纵深防御。
+      throw new Error(t('路径含引号或 PowerShell 元字符，无法解压：{p}', 'Path contains a quote or PowerShell metacharacter, cannot extract: {p}', { p: archive }))
     }
     await run('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${archive}" -DestinationPath "${dir}" -Force`])
   } else {

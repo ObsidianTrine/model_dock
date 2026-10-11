@@ -18,6 +18,17 @@ function readPassStdin(): string {
   return v
 }
 
+/** 口令强度提示（非阻断）：加密本身可靠，但低熵口令可被离线暴力猜解——PBKDF2-600k 只是抬高成本，不改变熵 */
+export function passphraseHint(pw: string): string | null {
+  if (pw.length < 8 || /^\d+$/.test(pw)) {
+    return t(
+      '○ 口令偏弱（短于 8 位或纯数字）：建议混合字母、数字与符号；口令遗忘则包内容无法恢复',
+      '○ Weak passphrase (under 8 chars or all digits): mix letters, digits and symbols; a forgotten passphrase means the package is unrecoverable'
+    )
+  }
+  return null
+}
+
 async function askPassTwice(): Promise<string> {
   const a = await password({ message: t('设置同步口令（输入不回显；口令遗忘则包内容无法恢复）', 'Set a sync passphrase (input hidden; a forgotten passphrase means the package is unrecoverable)'), mask: '*' })
   if (!a) {
@@ -29,6 +40,8 @@ async function askPassTwice(): Promise<string> {
     console.error(c.red(t('✗ 两次输入的口令不一致，未导出。请重跑命令', '✗ The two passphrases do not match; nothing was exported. Re-run the command')))
     process.exit(1)
   }
+  const hint = passphraseHint(a)
+  if (hint) console.log(c.yellow(hint))
   return a
 }
 

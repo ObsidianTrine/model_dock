@@ -238,6 +238,10 @@ describe('版本比较与资产选择', () => {
     expect(
       detectInstallShape('C:\\Users\\u\\AppData\\Local\\Programs\\ModelDock\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local')
     ).toBe('win-setup')
+    // 回归（发布审查 P1-02）：真机用户名 ≠ 占位符 u——漏传 localAppData 时 win-setup 永远误判 win-bare
+    expect(
+      detectInstallShape('C:\\Users\\zhang\\AppData\\Local\\Programs\\ModelDock\\modeldock.exe', 'win32', 'C:\\Users\\zhang\\AppData\\Local')
+    ).toBe('win-setup')
     expect(detectInstallShape('D:\\tools\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local')).toBe('win-bare')
     expect(detectInstallShape('/usr/local/bin/modeldock', 'linux')).toBe('bare')
   })

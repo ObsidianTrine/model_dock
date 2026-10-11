@@ -143,7 +143,8 @@ export interface UpdateStatusPayload {
 
 /** 本机适配安装包的体积（字节）：按安装形态与架构选资产名；选不到返回 null */
 function matchedAssetSize(m: ReleaseManifest): number | null {
-  const name = selectAssetName(detectInstallShape(process.execPath, process.platform), process.platform, process.arch, m.version)
+  // 第三参必须显式传 LOCALAPPDATA（同 run.ts）：漏传真机永远判 win-bare，资产体积基线选错
+  const name = selectAssetName(detectInstallShape(process.execPath, process.platform, process.env.LOCALAPPDATA), process.platform, process.arch, m.version)
   return name ? findAsset(m, name)?.size ?? null : null
 }
 

@@ -86,6 +86,11 @@ export function createWebdavTarget(opts: WebdavOptions): SyncTarget {
       return 'ok'
     },
     async readBlob(ref) {
+      // 与 localdir 的 resolve 前缀校验同级：encodeURIComponent 不编码 '..'，不校验则
+      // manifest 里被塞入的 '../x' 可读到同步根之外（内容仍须过解密，属纵深防御）
+      if (!/^blobs\/[^/]+\.msync$/.test(ref)) {
+        throw new Error(t('同步目标返回的 blob 路径非法：{ref}', 'Invalid blob path from the sync target: {ref}', { ref }))
+      }
       const text = await readUrl(`${root}/${ref.split('/').map(encodeURIComponent).join('/')}`)
       if (text === null) {
         throw new Error(t('同步历史包缺失（{ref}）：同步目标上的 blobs 目录被清理过？', 'Sync blob missing ({ref}): was the blobs folder cleaned up on the target?', { ref }))

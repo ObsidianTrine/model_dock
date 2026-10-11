@@ -145,7 +145,9 @@ async function cloudHeartbeat(state: SyncState, opts?: SyncHooks): Promise<void>
   if (desired === currentProvider) return
   // 时间戳保护：防止云端的旧指令覆盖用户在本机更新的手动切换（本机任何切换都经 switchToService 记 lastLocalSwitchTs）
   const lastSwitchMs = state.lastLocalSwitchTs ? Date.parse(state.lastLocalSwitchTs) : 0
-  if (Date.parse(desiredTs) <= lastSwitchMs) return
+  // NaN <= x 恒 false：畸形 desiredTs 不显式判有限会反过来绕过本保护
+  const desiredMs = Date.parse(desiredTs)
+  if (!Number.isFinite(desiredMs) || desiredMs <= lastSwitchMs) return
   if (!opts?.applySwitch) return // 无应用回调（如 CLI 手动 tick）则只上报不切
   opts?.log?.(t('[modeldock] 应用云端远程切换：当前服务 → {svc}', '[modeldock] Applying remote switch from the cloud: current service → {svc}', { svc: desired }))
   await opts.applySwitch(desired)

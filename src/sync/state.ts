@@ -3,7 +3,7 @@
  * 与被同步的 config.toml 分文件：凭据不能随包被同步回去。0600 atomicWrite。
  */
 import os from 'node:os'
-import { atomicWrite, readTextIfExists } from '../util/fsx.js'
+import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { syncJsonPath } from '../util/paths.js'
 import { t } from '../util/i18n.js'
 
@@ -104,16 +104,27 @@ export async function readSyncState(): Promise<SyncState | null> {
   return { ...emptySyncState(), ...(raw as object), v: SYNC_STATE_VERSION } as SyncState
 }
 
-export async function writeSyncState(state: SyncState): Promise<void> {
-  await atomicWrite(syncJsonPath(), JSON.stringify(state, null, 2) + '\n', 0o600)
+/** sync.json 读改写跨进程锁：config.toml / secrets.json 都有锁，网关引擎 tick 与另一进程的
+ *  sync setup/enroll 并发写此前是整文件互相覆盖（丢的多是簿记字段，可自愈，但语义不齐） */
+function syncStateLockPath(): string {
+  return syncJsonPath() + '.lock'
 }
 
-/** 读-改-写 sync.json（仅补丁字段） */
+export async function writeSyncState(state: SyncState): Promise<void> {
+  await withFileLock(syncStateLockPath(), undefined, async () => {
+    await atomicWrite(syncJsonPath(), JSON.stringify(state, null, 2) + '\n', 0o600)
+  })
+}
+
+/** 读-改-写 sync.json（仅补丁字段）。读在锁内：与网关 tick / 另一进程 setup 并发时不丢补丁。
+ *  锁内直接 atomicWrite——同进程对同一锁文件再入 withFileLock 会死锁。 */
 export async function updateSyncState(patch: Partial<SyncState>): Promise<SyncState> {
-  const cur = (await readSyncState()) ?? emptySyncState()
-  const next: SyncState = { ...cur, ...patch, v: SYNC_STATE_VERSION }
-  await writeSyncState(next)
-  return next
+  return withFileLock(syncStateLockPath(), undefined, async () => {
+    const cur = (await readSyncState()) ?? emptySyncState()
+    const next: SyncState = { ...cur, ...patch, v: SYNC_STATE_VERSION }
+    await atomicWrite(syncJsonPath(), JSON.stringify(next, null, 2) + '\n', 0o600)
+    return next
+  })
 }
 
 /** 记录本机最近一次切换时间（云端 desired 状态机的保护锚点，详设 §7.4-5）。
@@ -121,5 +132,5 @@ export async function updateSyncState(patch: Partial<SyncState>): Promise<SyncSt
 export async function noteLocalSwitch(now = new Date().toISOString()): Promise<void> {
   const st = await readSyncState().catch(() => null)
   if (!st || st.mode === 'off') return
-  await writeSyncState({ ...st, lastLocalSwitchTs: now })
+  await updateSyncState({ lastLocalSwitchTs: now })
 }
