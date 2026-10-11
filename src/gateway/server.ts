@@ -1,6 +1,7 @@
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { timingSafeEqual, createHash, randomBytes } from 'node:crypto'
@@ -154,6 +155,68 @@ export async function runClientInstall(
   }
   const st = await adapter.status(cfg, port)
   return { ok: true, auto: !!inst?.command, output: tailText(lines), installed: st.installed, skipped }
+}
+
+/**
+ * 客户端卸载：有 install.uninstall 则 shell 执行（仅 npm 类客户端声明），与安装共用同一套
+ * 子进程环境（installChildEnv——沙箱下全局落点经 npm_config_prefix 重定向，只卸装进沙箱的
+ * 副本；needsNode 时先保障 node/npm 可用，托管 runtime 场景 shim 在托管 bin 下、PATH 缺它
+ * 找不到 npm）。probe 未命中说明命令已不在（可能从未装或已被手动卸载），跳过执行，仅做
+ * bootstrap 清理。未声明 uninstall 的客户端（脚本类安装器 / 桌面应用）拒绝并提示手动卸载。
+ *
+ * bootstrap 清理：卸载后若客户端配置文件内容恰为安装时写入的空配置（字节相等），删除该文件，
+ * 让 detect 回到完全「未安装」；有任何用户内容的文件一律保留。
+ */
+export async function runClientUninstall(
+  adapter: HarnessAdapter,
+  cfg: Config,
+  port: number
+): Promise<{ ok: boolean; output: string; installed: boolean; skipped: boolean }> {
+  const inst = adapter.install
+  const lines: string[] = []
+  let skipped = false
+  const cmd = resolveInstallCommand(inst?.uninstall)
+  if (!cmd) {
+    lines.push(t('该客户端未配置自动卸载方式，请按安装指引手动卸载', 'This client has no automated uninstall; please uninstall it manually per the install guide'))
+    return { ok: false, output: tailText(lines), installed: (await adapter.status(cfg, port)).installed, skipped }
+  }
+  if (inst?.probe && !commandOnPath(inst.probe)) {
+    skipped = true
+    lines.push(t('{cmd} 命令不在 PATH 上，无需卸载', '{cmd} is not on PATH; nothing to uninstall', { cmd: inst.probe }))
+  } else {
+    const output: string[] = []
+    const env = installChildEnv(process.env)
+    if (inst?.needsNode) {
+      try {
+        const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
+        env.PATH = nrt.binDir + path.delimiter + (env.PATH ?? '')
+      } catch (e) {
+        output.push((e as Error).message)
+        return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
+      }
+    }
+    const exit = await runShell(cmd, (c) => output.push(c), env)
+    if (exit !== 0) {
+      return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
+    }
+    const childOut = output.join('').trim()
+    if (childOut) lines.push(childOut)
+    lines.push(t('已执行卸载命令：{cmd}', 'Ran uninstall command: {cmd}', { cmd }))
+  }
+  // bootstrap 清理：仅当文件内容与安装时写入的空配置逐字节一致才删（用户已有内容一律保留）
+  if (inst?.bootstrap?.path) {
+    const bp = typeof inst.bootstrap.path === 'function' ? inst.bootstrap.path() : inst.bootstrap.path
+    if ((await readTextIfExists(bp)) === inst.bootstrap.content) {
+      try {
+        await fsp.unlink(bp)
+        lines.push(t('已删除安装时写入的空配置：{path}', 'Removed the empty bootstrap config written at install time: {path}', { path: bp }))
+      } catch { /* 删除失败不阻断卸载结果 */ }
+    } else if (await readTextIfExists(bp) !== null) {
+      lines.push(t('配置文件已含其他内容，保留不动：{path}', 'Config file has other content, left untouched: {path}', { path: bp }))
+    }
+  }
+  const st = await adapter.status(cfg, port)
+  return { ok: true, output: tailText(lines), installed: st.installed, skipped }
 }
 
 function tailText(lines: string[], max = INSTALL_OUTPUT_MAX): string {
@@ -635,6 +698,11 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
         guide: a.install.guide,
         homepage: a.install.homepage ?? null,
         sandboxInstall: sandboxInstallCapability(a),
+        // 自动卸载能力：null=未声明（UI 不出卸载按钮）；sandbox=卸载是否只落沙箱（FAKE_HOME 下
+        // npm 全局卸载经 prefix 重定向，只卸装进沙箱的副本）
+        uninstall: resolveInstallCommand(a.install.uninstall)
+          ? { command: resolveInstallCommand(a.install.uninstall)!, sandbox: sandboxNpmPrefix() !== null }
+          : null,
       } : null,
     })
     if (he && providerId) (usedByMap[providerId] ||= []).push(a.label)
@@ -1834,6 +1902,30 @@ async function handleAdmin(
           homepage: a.install?.homepage ?? null,
         })
       )
+    } catch (e) {
+      sendError(res, 400, (e as Error).message)
+    }
+    return
+  }
+
+  if (url === '/_modeldock/uninstall' && req.method === 'POST') {
+    const b = await jsonRequestBody(req)
+    try {
+      const a = await requireAdapter(String(b.harness ?? ''), rt.config)
+      // 接入中的客户端先断开：卸载只删程序本体，配置还原是 detach 的职责，顺序反了会留下指向网关的孤儿配置
+      if (rt.config.harness[a.id]) {
+        throw new Error(t('该客户端仍处于接入状态，请先「断开并还原」再卸载', 'This client is still attached — detach & restore first, then uninstall'))
+      }
+      const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
+      const r = await runClientUninstall(a, rt.config, port)
+      audit(
+        bi('卸载客户端', 'Uninstall client'),
+        a.id,
+        r.ok ? (r.skipped ? bi('命令不在 PATH，无需卸载', 'Command not on PATH; nothing to uninstall') : bi('卸载完成', 'Uninstall finished')) : bi('卸载失败', 'Uninstall failed')
+      )
+      await reloadRuntime(rt)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: r.ok, skipped: r.skipped, output: r.output, installed: r.installed }))
     } catch (e) {
       sendError(res, 400, (e as Error).message)
     }

@@ -83,6 +83,10 @@ export interface ClientInstall {
   guide: string
   /** 官方链接（可省；仅填确信的，避免编造 URL） */
   homepage?: string
+  /** 自动卸载命令（npm 类客户端声明；脚本类安装器无官方卸载、桌面应用走系统卸载，均省略——
+   *  省略时控制台不提供卸载按钮、/uninstall 端点拒绝）。执行环境与安装一致：沙箱下全局落点
+   *  同样经 npm_config_prefix 重定向，只卸装进沙箱的副本 */
+  uninstall?: string | { posix: string; win32: string }
   /** 安装成功后需生成的空配置文件：让 detect 的 installed 生效、planAttach 可运行。
    *  path 惰性求值（模块加载时 homeDir 可能尚未被测试重定向） */
   bootstrap?: { path: string | (() => string); content: string }

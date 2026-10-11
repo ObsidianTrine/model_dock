@@ -55,6 +55,7 @@ export const codexAdapter: HarnessAdapter = {
   bakesModels: true,
   install: {
     command: 'npm i -g @openai/codex',
+    uninstall: 'npm uninstall -g @openai/codex',
     needsNode: true,
     probe: 'codex',
     get guide() {

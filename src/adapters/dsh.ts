@@ -238,6 +238,7 @@ export const dshAdapter: HarnessAdapter = {
   bakesModels: true,
   install: {
     command: 'npm install -g @deepseek-ai/dsh',
+    uninstall: 'npm uninstall -g @deepseek-ai/dsh',
     needsNode: true,
     probe: 'dsh',
     get guide() {

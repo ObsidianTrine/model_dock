@@ -2923,7 +2923,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           scopeSel = '<select class="routesel" data-cliscope="' + esc(c.id) + '" title="' +
             t('选择接入写入哪些端；桌面版与网页版配置相互独立', 'Choose which variants to write; desktop and web have independent configs') + '">' + sopts.join('') + '</select> '
         }
-        btn = scopeSel + '<button class="btn small primary" data-attach="' + esc(c.id) + '">' + t('一键接入', 'Attach') + '</button>'
+        // 卸载按钮：仅声明了自动卸载的客户端（npm 类）提供；断开 ≠ 卸载——这里补上生命周期最后一环
+        var uninstallBtn = c.install && c.install.uninstall
+          ? '<button class="btn small ghost-danger" data-uninstall="' + esc(c.id) + '">' + t('卸载', 'Uninstall') + '</button>'
+          : ''
+        btn = scopeSel + '<button class="btn small primary" data-attach="' + esc(c.id) + '">' + t('一键接入', 'Attach') + '</button> ' + uninstallBtn
       }
       // 钉定路由下拉（仅已接入）：gateway 模式 = 跟随全局/钉服务（只改服务端内存，即时生效）；
       // direct 模式 = 更换直连目标（重写客户端配置文件，走快照 + 确认）
@@ -3025,6 +3029,34 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           ].filter(Boolean),
           t('我装好了，重新检测', 'Installed — re-detect'),
           function () { load() }
+        )
+      }
+    })
+    document.querySelectorAll('[data-uninstall]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute('data-uninstall')
+        var c = clientOf(id)
+        if (!c || !c.install || !c.install.uninstall) return
+        confirmModal(
+          t('卸载「', 'Uninstall "') + labelOf(id) + t('」？', '"?'),
+          [
+            t('将执行卸载命令：', 'Will run uninstall command: ') + c.install.uninstall.command,
+            c.install.uninstall.sandbox
+              ? t('沙箱模式：只卸载装进沙箱内的程序，真机全局环境与已装客户端不受影响', 'Sandbox mode: only the copy inside the sandbox is removed; the real machine global environment and installed clients are untouched')
+              : t('将从本机全局环境卸载该客户端（其他程序不受影响）', 'The client will be removed from this machine global environment (other programs are untouched)'),
+            t('客户端配置文件保留；若仍是安装时写入的空配置会一并删除', 'Client config files are kept; the empty bootstrap config written at install time is removed along with the program')
+          ].filter(Boolean),
+          t('卸载', 'Uninstall'),
+          function () {
+            api('/uninstall', { method: 'POST', body: JSON.stringify({ harness: id }), timeoutMs: 120000 })
+              .then(function (r) {
+                toast('✓ ' + (r.skipped
+                  ? t('命令已不在 PATH 上，无需卸载', 'Command already absent from PATH; nothing to uninstall')
+                  : t('已卸载', 'Uninstalled')), true)
+                return load()
+              })
+              .catch(function (e) { toast(t('卸载失败：', 'Uninstall failed: ') + e.message, false) })
+          }
         )
       }
     })

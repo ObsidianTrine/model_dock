@@ -10,6 +10,7 @@ export const openCodeAdapter = craftProviderJsonAdapter({
   configFiles: () => [path.join(homeDir(), '.config', 'opencode', 'opencode.json')],
   install: {
     command: 'npm i -g opencode-ai',
+    uninstall: 'npm uninstall -g opencode-ai',
     needsNode: true,
     probe: 'opencode',
     get guide() {
