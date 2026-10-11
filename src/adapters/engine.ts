@@ -11,7 +11,7 @@ export interface ApplyOptions {
   yes?: boolean
   /** diff 展示前要抹掉的敏感串（token、key 等） */
   redactions?: string[]
-  /** 静默模式：只输出必要信息 */
+  /** 静默模式：不输出 diff 预览与快照信息（Web 控制台 / 托盘等非终端场景；yes 跳过确认时通常与之成对） */
   quiet?: boolean
 }
 
@@ -30,31 +30,35 @@ export async function applyChanges(
     return true
   }
 
-  // 展示 diff（与磁盘当前内容比，而非 plan 时的旧内容，防止 plan→apply 之间文件被外部修改造成误导）
-  const sections: string[] = []
-  for (const ch of changes) {
-    const current = (await readTextIfExists(ch.path)) ?? ''
-    const diff = unifiedDiff(current, ch.after)
-    const header = `${ch.path}${ch.note ? c.gray(`  — ${ch.note}`) : ''}`
-    sections.push(
-      diff
-        ? `${c.bold(header)}\n${indentDiff(redact(diff, opts.redactions ?? []))}`
-        : `${c.bold(header)}\n${c.gray(t('  （内容无变化）', '  (no content change)'))}`
-    )
-    // TOML 重建丢注释是格式固有限制：提前说破，别让用户事后才发现
-    if (ch.path.toLowerCase().endsWith('.toml') && ch.before && /^\s*#/m.test(ch.before)) {
+  // 展示 diff（与磁盘当前内容比，而非 plan 时的旧内容，防止 plan→apply 之间文件被外部修改造成误导）。
+  // quiet（Web 控制台 / 托盘等非终端场景）整段跳过：diff 是确认环节的预览，非交互流程没有确认环节，
+  // 原样打印会把上百行配置 diff 灌进调用方（曾把托盘「清理完成」弹窗撑出屏幕、按钮顶出可点区域）。
+  if (!opts.quiet) {
+    const sections: string[] = []
+    for (const ch of changes) {
+      const current = (await readTextIfExists(ch.path)) ?? ''
+      const diff = unifiedDiff(current, ch.after)
+      const header = `${ch.path}${ch.note ? c.gray(`  — ${ch.note}`) : ''}`
       sections.push(
-        c.yellow(
-          t(
-            '  ⚠ {path} 含注释行；TOML 重写无法保留注释，原注释会丢失（原文已自动快照，可 restore 找回）',
-            '  ⚠ {path} contains comment lines; rewriting TOML cannot preserve comments and they will be lost (the original is snapshotted automatically and can be restored)',
-            { path: ch.path }
+        diff
+          ? `${c.bold(header)}\n${indentDiff(redact(diff, opts.redactions ?? []))}`
+          : `${c.bold(header)}\n${c.gray(t('  （内容无变化）', '  (no content change)'))}`
+      )
+      // TOML 重建丢注释是格式固有限制：提前说破，别让用户事后才发现
+      if (ch.path.toLowerCase().endsWith('.toml') && ch.before && /^\s*#/m.test(ch.before)) {
+        sections.push(
+          c.yellow(
+            t(
+              '  ⚠ {path} 含注释行；TOML 重写无法保留注释，原注释会丢失（原文已自动快照，可 restore 找回）',
+              '  ⚠ {path} contains comment lines; rewriting TOML cannot preserve comments and they will be lost (the original is snapshotted automatically and can be restored)',
+              { path: ch.path }
+            )
           )
         )
-      )
+      }
     }
+    console.log(sections.join('\n\n'))
   }
-  console.log(sections.join('\n\n'))
 
   if (!opts.yes) {
     const ok = await confirm({

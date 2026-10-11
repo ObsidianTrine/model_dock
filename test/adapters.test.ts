@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from 'vitest'
+import { describe, expect, it, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -1378,6 +1378,34 @@ describe('applyChanges 引擎', () => {
       await (await import('../src/backup/snapshot.js')).restoreSnapshot(manifest)
       expect(await matchesSnapshot(manifest)).toBe(true)
       expect(fs.readFileSync(p, 'utf8')).toBe('{"v":1}')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('quiet 不打印 diff 预览与快照信息，非 quiet 仍打印（托盘/Web 静默场景）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, 'quiet.json')
+      const v1 = '{\n  "a": 1\n}\n'
+      const v2 = '{\n  "a": 2\n}\n'
+      const v3 = '{\n  "a": 3\n}\n'
+      await atomicWrite(p, v1, 0o600)
+      const logs: string[] = []
+      const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+        logs.push(args.map((a) => String(a)).join(' '))
+      })
+      try {
+        await applyChanges('x', 'detach', [{ path: p, before: v1, after: v2 }], { yes: true, quiet: true })
+        expect(logs.join('\n')).not.toContain('@@')
+        expect(logs.join('\n')).not.toContain('已创建快照')
+        logs.length = 0
+        await applyChanges('x', 'detach', [{ path: p, before: v2, after: v3 }], { yes: true })
+        expect(logs.join('\n')).toContain('@@')
+        expect(logs.join('\n')).toContain('已创建快照')
+      } finally {
+        spy.mockRestore()
+      }
     } finally {
       h.restore()
     }
