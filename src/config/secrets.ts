@@ -88,39 +88,85 @@ function secretToolOp(op: 'store' | 'lookup' | 'clear', account: string, secret?
   })
 }
 
-// 外部后端（keychain / secret-service）解密结果缓存：扩展转发每请求读 key，必须避免每请求 spawn 子进程
-const externalCache = new Map<string, string | null>()
+// 外部后端（keychain / secret-service）解密结果缓存：扩展转发每请求读 key，必须避免每请求 spawn 子进程。
+// 带 60s TTL：keychain 这类外部源经其他进程 / 控制台直接改 key 不会产生文件事件，TTL 保证最迟 1 分钟生效；
+// 命中路径仍是纯内存时间戳比较，不给转发热路径加 I/O。TTL 结构参考 src/adapters/presence.ts 的 regMemo。
+const EXT_TTL = 60_000
+const externalCache = new Map<string, { at: number; val: string | null }>()
 const extKey = (scheme: string, id: string) => `${scheme}:${id}`
 
-async function getExternal(scheme: 'keychain' | 'secret-service', id: string): Promise<string | null> {
-  const ck = extKey(scheme, id)
-  if (externalCache.has(ck)) return externalCache.get(ck) ?? null
-  let val: string | null = null
+type ExternalReader = (scheme: 'keychain' | 'secret-service', id: string) => Promise<string | null>
+
+/** 真实外部读取：keychain 经 `security find-generic-password`，secret-service 经 secret-tool。 */
+const realReadExternal: ExternalReader = async (scheme, id) => {
   if (scheme === 'keychain') {
     try {
       const { stdout } = await exec('security', ['find-generic-password', '-s', 'modeldock', '-a', id, '-w'])
-      val = stdout.trim() || null
+      return stdout.trim() || null
     } catch {
-      val = null
+      return null
     }
   } else {
     try {
-      val = (await secretToolOp('lookup', id)) || null
+      return (await secretToolOp('lookup', id)) || null
     } catch {
-      val = null
+      return null
     }
   }
-  externalCache.set(ck, val)
+}
+
+let readExternal: ExternalReader = realReadExternal
+/** 测试注入外部读取器（替换 keychain/secret-service 后端读取，避免真 spawn 外部进程）；传 undefined 还原为真实读取器。 */
+export function __testSetExternalReader(fn?: ExternalReader): void {
+  readExternal = fn ?? realReadExternal
+}
+
+async function getExternal(scheme: 'keychain' | 'secret-service', id: string): Promise<string | null> {
+  const ck = extKey(scheme, id)
+  const memo = externalCache.get(ck)
+  if (memo && Date.now() - memo.at < EXT_TTL) return memo.val
+  const val = await readExternal(scheme, id)
+  externalCache.set(ck, { at: Date.now(), val })
   return val
+}
+
+/** 供 keychain 交互模式命令行的值/账号转义：双引号包裹，内部 `"` 与 `\` 转义。
+ *  含换行 / NUL 等无法在单个 `-w "<token>"` 内安全表达的控制字符时返回 null（调用方回落 argv 路径）。 */
+export function keychainArgValue(value: string): string | null {
+  if (/[\r\n\0]/.test(value)) return null
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+/** darwin keychain 写入走 `security -i` 交互模式：把子命令喂给 stdin，密钥不进 argv（ps 不可见）。
+ *  命令形态 `add-generic-password -s modeldock -a <account> -w "<value>" -U`。 */
+function setKeychain(id: string, value: string): Promise<void> {
+  const account = keychainArgValue(id)
+  const quoted = keychainArgValue(value)
+  if (account == null || quoted == null) {
+    // 值含换行或无法安全转义：回落 argv 路径（原有形态），保功能不回归优先
+    return exec('security', ['add-generic-password', '-s', 'modeldock', '-a', id, '-w', value, '-U']).then(() => undefined)
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn('security', ['-i'], { windowsHide: true })
+    let err = ''
+    child.stderr.on('data', (d) => (err += d))
+    child.on('error', reject)
+    child.on('close', (code) => {
+      // 交互模式 `-i`：逐行执行 stdin 的子命令直至 EOF；密钥在 stdin 而非 argv
+      if (code === 0) resolve()
+      else reject(new Error(err.trim() || `security exited ${code}`))
+    })
+    child.stdin.end(`add-generic-password -s modeldock -a ${account} -w ${quoted} -U\n`)
+  })
 }
 
 async function setExternal(scheme: 'keychain' | 'secret-service', id: string, value: string): Promise<void> {
   if (scheme === 'keychain') {
-    await exec('security', ['add-generic-password', '-s', 'modeldock', '-a', id, '-w', value, '-U'])
+    await setKeychain(id, value)
   } else {
     await secretToolOp('store', id, value)
   }
-  externalCache.set(extKey(scheme, id), value)
+  externalCache.set(extKey(scheme, id), { at: Date.now(), val: value })
 }
 
 async function removeExternal(scheme: 'keychain' | 'secret-service', id: string): Promise<void> {
@@ -129,7 +175,7 @@ async function removeExternal(scheme: 'keychain' | 'secret-service', id: string)
   } else {
     await secretToolOp('clear', id).catch(() => {})
   }
-  externalCache.set(extKey(scheme, id), null)
+  externalCache.set(extKey(scheme, id), { at: Date.now(), val: null })
 }
 
 // Windows DPAPI 加密（file 后端在 win32 上加密存储）
@@ -310,6 +356,13 @@ async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
   const raw = CAN_DPAPI ? await encryptAll(dec) : CAN_MACH ? await encryptMachineAll(dec) : { ...dec }
   await atomicWrite(secretsPath(), JSON.stringify(raw, null, 2) + '\n', 0o600)
   fileCache = dec
+}
+
+/** 清除全部密钥缓存（file 后端整表解密缓存 + 外部后端 TTL 缓存）：
+ *  文件 watcher 触发的 reload 调用此后，另一进程 / 控制台改的 key 即刻（file）或最迟 1 分钟（keychain）生效。 */
+export function invalidateSecretsCache(): void {
+  fileCache = null
+  externalCache.clear()
 }
 
 /** 读取 key；plain 代表明文内嵌在 config 里（不推荐，直接返回） */
