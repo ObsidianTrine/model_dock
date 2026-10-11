@@ -13,7 +13,8 @@ import {
   type AdapterStatus,
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
-import { cliPresent } from './presence.js'
+import { cliPresent, residueNote } from './presence.js'
+import { stripContextSuffix } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 const TIER_ENV_KEYS = [
@@ -32,10 +33,7 @@ const ONE_M_TOKEN = 1_000_000
 const DIRECT_EFFORT_LEVEL = 'max'
 const DIRECT_AUTO_COMPACT_WINDOW = '786432'
 
-/** 去掉 [1m]/[1M]/[128k] 等上下文变体后缀（NAME 显示用；与 import/sources.ts 的清洗正则一致） */
-function stripContextSuffix(id: string): string {
-  return id.replace(/\[\d+[MmKk]\]$/, '')
-}
+/** 去掉 [1m]/[1M]/[128k] 等上下文变体后缀（NAME 显示用；与 import/sources.ts 的清洗正则一致），见 shared.ts */
 
 const settingsFile = () => path.join(homeDir(), '.claude', 'settings.json')
 
@@ -116,11 +114,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: t(
-          '检测到配置残留（{path}），但未找到 claude 命令——Claude Code 可能已卸载；若仍在使用，请重新安装后点「重新检测」',
-          'Found leftover config ({path}) but the claude command is missing — Claude Code may have been uninstalled; if you still use it, reinstall and click Re-detect',
-          { path: p }
-        ),
+        note: residueNote([p], 'Claude Code'),
       }
     }
     let root: ClaudeSettings = {}

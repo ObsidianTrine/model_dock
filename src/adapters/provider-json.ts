@@ -1,4 +1,4 @@
-import { commandOnPath, readTextIfExists, t } from '../util/index.js'
+import { biJoin, commandOnPath, readTextIfExists, t } from '../util/index.js'
 import type { Config } from '../config/types.js'
 import {
   AdapterError,
@@ -11,7 +11,8 @@ import {
   type PlanResult,
 } from './types.js'
 import { detectJsonIndent, parseJsonTolerant, serializeJson } from './format.js'
-import { cliPresent } from './presence.js'
+import { cliPresent, residueNote } from './presence.js'
+import { directAttachNote, resolveRoute, routeModelNote } from './shared.js'
 
 interface JsonConfig {
   provider?: Record<
@@ -54,7 +55,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
   const missingNote = () =>
     t('未找到 {label} 配置（{files}）', '{label} config not found ({files})', {
       label: factory.label,
-      files: configFiles().join(' / '),
+      files: biJoin(' / ', ', ', configFiles()),
     })
 
   async function firstExisting(): Promise<string | null> {
@@ -99,11 +100,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
         return {
           installed: false,
           configFiles: [],
-          note: t(
-            '检测到配置残留（{path}），但未找到 {bin} 命令——{label} 可能已卸载；若仍在使用，请重新安装后点「重新检测」',
-            'Found leftover config ({path}) but the {bin} command is missing — {label} may have been uninstalled; if you still use it, reinstall and click Re-detect',
-            { path: p, bin: String(binName), label: factory.label }
-          ),
+          note: residueNote([p], factory.label),
         }
       }
       const text = await readTextIfExists(p)
@@ -156,23 +153,15 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
       }
       let modelsNote: string | undefined
       // 模型列表与默认模型必须同源：都按 opts.profile（钉定路由）优先，钉定时不能偷偷跟随全局
-      const routeName = opts.profile ?? cfg.active_profile
+      const { routeName, provider, providerId } = resolveRoute(opts, cfg)
       if (factory.declareModels) {
-        const profile = routeName ? cfg.profiles[routeName] : undefined
-        const providerId = profile?.provider
-        const provider = providerId ? cfg.providers[providerId] : undefined
-        const modelMap = provider?.models
-        const ids = Object.keys(modelMap ?? {})
+        const ids = Object.keys(provider?.models ?? {})
         if (ids.length > 0) {
           providers.modeldock.models = Object.fromEntries(
-            ids.map((id) => [id, { name: modelMap?.[id]?.display_name || id }])
+            ids.map((id) => [id, { name: provider?.models?.[id]?.display_name || id }])
           )
           providers.modeldock.only_configured_models = true
-          modelsNote = t(
-            '模型列表取自当前路由「{route}」（{provider}）：{count} 个模型',
-            'The model list comes from the current route "{route}" ({provider}): {count} models',
-            { route: String(routeName), provider: String(provider?.name ?? providerId), count: ids.length }
-          )
+          modelsNote = routeModelNote(String(routeName), String(provider?.name ?? providerId), ids.length)
         }
       }
 
@@ -182,11 +171,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
         }),
         ...(d
           ? [
-              t(
-                '独立直连：已写入上游 {url} 与真实 Key（明文），网关挂掉后该客户端不受影响',
-                'Direct mode: wrote the upstream {url} and the real key (plaintext); this client keeps working if the gateway is down',
-                { url: String(directBase) }
-              ),
+              directAttachNote(directBase),
             ]
           : [
               t(

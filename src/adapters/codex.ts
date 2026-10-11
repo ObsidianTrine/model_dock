@@ -13,7 +13,8 @@ import {
   type PlanResult,
 } from './types.js'
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
-import { cliPresent } from './presence.js'
+import { cliPresent, residueNote } from './presence.js'
+import { directAttachNote } from './shared.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -95,11 +96,7 @@ export const codexAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: t(
-          '检测到配置残留（{path}），但未找到 codex 命令——Codex 可能已卸载；若仍在使用，请重新安装后点「重新检测」',
-          'Found leftover config ({path}) but the codex command is missing — Codex may have been uninstalled; if you still use it, reinstall and click Re-detect',
-          { path: p }
-        ),
+        note: residueNote([p], 'Codex'),
       }
     }
     try {
@@ -146,13 +143,7 @@ export const codexAdapter: HarnessAdapter = {
       wire_api: 'responses',
     }
     if (d) {
-      directNotes.push(
-        t(
-          '独立直连：已写入上游 {url} 与真实 Key（明文，http_headers Bearer），网关挂掉后该客户端不受影响',
-          'Direct mode: wrote the upstream {url} and the real key (plaintext, http_headers Bearer); this client keeps working if the gateway is down',
-          { url: String(directBase) }
-        )
-      )
+      directNotes.push(directAttachNote(directBase))
       if (!d.base_url_responses) {
         directNotes.push(
           t(

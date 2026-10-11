@@ -13,7 +13,8 @@ import {
   type PlanResult,
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
-import { desktopPresent, cliPresent, type AppPresent } from './presence.js'
+import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
+import { directAttachNote, directResponsesNote, directWire, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -160,11 +161,7 @@ export const zcodeAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: t(
-          '检测到 ZCode 配置残留（{files}），但未找到 ZCode 本体（zcode 命令不在 PATH 上，常见安装目录也没有桌面应用）——ZCode 可能已卸载；若仍在使用，请重新安装并启动一次后点「重新检测」',
-          'Found leftover ZCode config ({files}) but the ZCode app itself is missing (no zcode command on PATH and no desktop app in the common install directories) — ZCode may have been uninstalled; if you still use it, reinstall, launch it once, then click Re-detect',
-          { files: configFiles.join('、') }
-        ),
+        note: residueNote(configFiles, 'ZCode'),
       }
     }
 
@@ -218,23 +215,14 @@ export const zcodeAdapter: HarnessAdapter = {
       )
     }
 
-    // 模型列表：与 dsh 一致，取当前路由对应服务的模型目录
-    const routeName = opts.profile ?? cfg.active_profile
-    const profile = routeName ? cfg.profiles[routeName] : undefined
-    const providerId = profile?.provider
-    const provider = providerId ? cfg.providers[providerId] : undefined
-    const modelMap = provider?.models ?? {}
-    const modelIds = Object.keys(modelMap)
+    // 模型列表：与 dsh 一致，取当前路由对应服务的模型目录（resolveRoute 与 dsh/workbuddy/provider-json 共用）
+    const route = resolveRoute(opts, cfg)
+    const { routeName, profile, providerId, provider } = route
+    const modelIds = Object.keys(route.modelMap)
 
     const notes: string[] = []
     if (providerId && profile) {
-      notes.push(
-        t(
-          '模型列表取自当前路由「{route}」（{provider}）：{count} 个模型',
-          'The model list comes from the current route "{route}" ({provider}): {count} models',
-          { route: String(routeName), provider: String(provider?.name ?? providerId), count: modelIds.length }
-        )
-      )
+      notes.push(routeModelNote(String(routeName), String(provider?.name ?? providerId), modelIds.length))
     } else {
       notes.push(
         t(
@@ -265,17 +253,11 @@ export const zcodeAdapter: HarnessAdapter = {
 
     const changes: FileChange[] = []
 
-    // 直连：写上游真实 Key 与对应协议端点（ZCode 与 dsh 同源 llm-pi wire：anthropic-messages / openai-completions）
+    // 直连：写上游真实 Key 与对应协议端点（directWire 与 dsh 共用 llm-pi wire 选择）
     const d = opts.direct
-    const directApi = d ? (d.protocol === 'openai' ? 'openai-completions' : 'anthropic-messages') : undefined
-    const directBase = d ? (d.protocol === 'openai' ? (d.base_url_openai ?? d.base_url) : d.base_url) : undefined
+    const { api: directApi, base: directBase } = directWire(d)
     if (d && d.protocol === 'responses') {
-      notes.push(
-        t(
-          '提示: 该服务是 Responses 协议，ZCode 不支持该 wire 类型；直连条目按 anthropic-messages 写入，请确认上游兼容',
-          'Note: this service uses the Responses protocol, which ZCode does not support as a wire type; the direct entry is written as anthropic-messages — make sure the upstream is compatible'
-        )
-      )
+      notes.push(directResponsesNote('ZCode'))
     }
 
     // 现行存储：provider_config.json 个人供应商
@@ -298,7 +280,7 @@ export const zcodeAdapter: HarnessAdapter = {
     const manual = (mconf.manualProviderModelRules ??= []).filter((r) => r?.providerId !== PROVIDER_ID)
     for (const mid of modelIds) {
       // 配置缺上下文/输出时走填充链（内置表 → models.dev 目录）补齐，补不齐的仍按「推荐配置」兜底不写规则
-      const ruleConfig = modelRuleConfig(resolvedModelView(mid, modelMap[mid], provider?.base_url))
+      const ruleConfig = modelRuleConfig(resolvedModelView(mid, route.modelMap[mid], provider?.base_url))
       if (ruleConfig) manual.push({ providerId: PROVIDER_ID, modelId: mid, config: ruleConfig })
     }
     mconf.manualProviderModelRules = manual
@@ -346,13 +328,7 @@ export const zcodeAdapter: HarnessAdapter = {
     }
 
     if (d) {
-      notes.push(
-        t(
-          '独立直连：已写入上游 {url} 与真实 Key（明文），网关挂掉后该客户端不受影响',
-          'Direct mode: wrote the upstream {url} and the real key (plaintext); this client keeps working if the gateway is down',
-          { url: String(directBase) }
-        )
-      )
+      notes.push(directAttachNote(directBase))
     }
 
     return { changes, notes, writtenBaseUrl: directBase }

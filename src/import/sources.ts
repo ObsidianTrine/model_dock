@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
-import { homeDir, readTextIfExists, slugify } from '../util/index.js'
-import { dshLayout } from '../adapters/dsh.js'
+import { homeDir, isFile, readTextIfExists, slugify } from '../util/index.js'
+import { credFile, dshLayout, providersOf } from '../adapters/dsh.js'
+import { stripContextSuffix } from '../adapters/shared.js'
 import { parseDocument } from 'yaml'
 import type { AuthStyle, Config, ModelMeta, Protocol } from '../config/types.js'
 import { defaultStore, getSecret, setSecretsBatch } from '../config/secrets.js'
@@ -110,7 +111,7 @@ async function readCcSwitchProviders(dbPath: string): Promise<RawRow[] | null> {
 /** cc-switch：providers 表里每个 provider 的 settings_config 是一份 Claude env 配置 */
 async function scanCcSwitch(): Promise<ImportCandidate[]> {
   const dbPath = path.join(homeDir(), '.cc-switch', 'cc-switch.db')
-  if (!(await fileExists(dbPath))) return []
+  if (!(await isFile(dbPath))) return []
   let rows: RawRow[]
   const nativeRows = await readCcSwitchProviders(dbPath)
   if (nativeRows !== null) {
@@ -169,8 +170,8 @@ function collectModelEnvs(env: Record<string, unknown>): string[] {
   for (const [k, v] of Object.entries(env ?? {})) {
     if (typeof v !== 'string' || v === '') continue
     if (k === 'ANTHROPIC_MODEL' || k.startsWith('ANTHROPIC_DEFAULT_')) {
-      // 去掉 [1M] 等上下文变体后缀：那是请求参数标记，不是独立模型 id
-      const base = v.replace(/\[\d+[MmKk]\]$/, '').trim()
+      // 去掉 [1M] 等上下文变体后缀：那是请求参数标记，不是独立模型 id（stripContextSuffix 与 claude-code.ts 共用）
+      const base = stripContextSuffix(v).trim()
       if (base) out.add(base)
     }
   }
@@ -226,7 +227,7 @@ async function scanDsh(): Promise<ImportCandidate[]> {
   for (const f of layout.patchFiles) files.push({ file: f, kind: 'patch' })
   if (files.length === 0) return []
 
-  const credsText = await readTextIfExists(path.join(layout.home, '.credentials.yaml'))
+  const credsText = await readTextIfExists(credFile())
   let refs: Record<string, string> = {}
   if (credsText) {
     try {
@@ -245,12 +246,7 @@ async function scanDsh(): Promise<ImportCandidate[]> {
       out.push(placeholder('dsh', t('{file} 存在但解析失败（YAML 语法错误），无法读取', '{file} exists but failed to parse (YAML syntax error); cannot read it', { file: path.basename(file) })))
       continue
     }
-    const providers =
-      (kind === 'legacy'
-        ? js?.['llm-pi-ai']?.providers
-        : Array.isArray(js)
-          ? (js as any[]).find((e) => e?.id === 'llm-pi-ai')?.config?.providers
-          : undefined) ?? {}
+    const providers = providersOf(js, kind) ?? {}
     for (const [id, raw] of Object.entries<any>(providers)) {
       if (seen.has(id)) continue
       seen.add(id)
@@ -333,15 +329,6 @@ function placeholder(source: ImportSource, note: string): ImportCandidate {
     auth_style: 'bearer',
     key: null,
     skip_reason: note,
-  }
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    await (await import('node:fs/promises')).access(p)
-    return true
-  } catch {
-    return false
   }
 }
 
@@ -448,21 +435,6 @@ function toMeta(models: string[] | undefined): Record<string, ModelMeta> | undef
     out[id] = known
       ? { source: 'manual', context_window: known.context_window, max_output: known.max_output }
       : { source: 'manual' }
-  }
-  return out
-}
-
-/** 清洗模型 id：去掉 [1M] 等上下文变体后缀并去重（存量数据修复用） */
-export function normalizeModelIds(models: Record<string, ModelMeta>): Record<string, ModelMeta> {
-  const out: Record<string, ModelMeta> = {}
-  for (const [mid, meta] of Object.entries(models)) {
-    const base = mid.replace(/\[\d+[MmKk]\]$/, '').trim()
-    if (!base) continue
-    const prev = out[base]
-    // 变体与基名合并时，保留元数据更全的那份
-    if (!prev || (prev.context_window === undefined && meta.context_window !== undefined)) {
-      out[base] = prev ? { ...meta, display_name: meta.display_name ?? prev.display_name } : meta
-    }
   }
   return out
 }

@@ -12,6 +12,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { detectJsonIndent, parseDocument, parseJsonStrict, serializeJson, tomlParse, tomlStringify } from './format.js'
+import { directAttachNote } from './shared.js'
 
 export interface PackVars {
   token: string
@@ -148,15 +149,12 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       }
       const note = opts.direct
         ? t('adapter pack upsert（独立直连：写入上游地址与真实 Key）', 'adapter pack upsert (direct mode: writes the upstream URL and the real key)')
-        : 'adapter pack upsert'
+        : t('adapter pack upsert', 'adapter pack upsert')
       return {
         changes: [{ path: p, before: text, after: applyPackUpsert(text, pack, vars), note }],
         notes: opts.direct
           ? [
-              t(
-                '独立直连：已写入上游 base_url 与真实 Key（明文），网关挂掉后该客户端不受影响',
-                'Direct mode: wrote the upstream base_url and the real key (plaintext); this client keeps working if the gateway is down'
-              ),
+              directAttachNote(opts.direct.base_url),
             ]
           : [],
         writtenBaseUrl: opts.direct?.base_url,

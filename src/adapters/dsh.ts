@@ -1,7 +1,7 @@
 import path from 'node:path'
 import fsp from 'node:fs/promises'
 import { isMap, isSeq, type YAMLSeq } from 'yaml'
-import { dshHomeDir, readTextIfExists, t } from '../util/index.js'
+import { biJoin, dshHomeDir, isFile, readTextIfExists, t } from '../util/index.js'
 import type { Config, ModelMeta } from '../config/types.js'
 import {
   AdapterError,
@@ -14,22 +14,26 @@ import {
   type HarnessAdapter,
   type PlanResult,
 } from './types.js'
-import { parseDocument, yamlDelete, yamlSetText } from './format.js'
+import { parseDocument } from './format.js'
+import { directAttachNote, directResponsesNote, directWire, resolveRoute, routeModelNote } from './shared.js'
 import { catalogForRoute, catalogLookupById, loadDshCatalog, type CatalogModel } from '../providers/dshcatalog.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
-const PROVIDERS_ROOT = 'llm-pi-ai' // dsh provider 注册条目 id（旧 settings.yaml 顶层键 / 新 profile patch 的条目 id）
+/** dsh provider 注册条目 id（旧 settings.yaml 顶层键 / 新 profile patch 的条目 id）；import/sources.ts 也用它定位 */
+export const PROVIDERS_ROOT = 'llm-pi-ai'
 const AGENT_DEFAULT = 'agent-default-model'
 const PATCH_FILE = 'cordis.patch.yml' // 新版 dsh 的 profile 用户层配置（顶层为 patch 条目数组）
 
 type YamlDoc = ReturnType<typeof parseDocument>
 
-const credFile = () => path.join(dshHomeDir(), '.credentials.yaml')
+/** .credentials.yaml 凭据文件（含 refs 表，ModelDock 注入 token/上游 key）；import/sources.ts 复用 */
+export const credFile = () => path.join(dshHomeDir(), '.credentials.yaml')
 
-async function fileExists(p: string): Promise<boolean> {
+/** 目录存在探测：只在确为目录的探针上用（~/.dsh 本体及 sessions/storages 等目录型安装信号），
+ *  普通文件探针一律 isFile（见 dshInstalled / planAttach 的 fileExists 收敛） */
+async function dirExists(p: string): Promise<boolean> {
   try {
-    await fsp.access(p)
-    return true
+    return (await fsp.stat(p)).isDirectory()
   } catch {
     return false
   }
@@ -57,7 +61,7 @@ export interface DshLayout {
 export async function dshLayout(): Promise<DshLayout> {
   const home = dshHomeDir()
   const legacyFile = path.join(home, 'settings.yaml')
-  const legacyExists = await fileExists(legacyFile)
+  const legacyExists = await isFile(legacyFile)
   const profileDirs: string[] = []
   const patchFiles: string[] = []
   let names: string[] = []
@@ -71,7 +75,7 @@ export async function dshLayout(): Promise<DshLayout> {
   for (const name of names) {
     const dir = path.join(home, 'profiles', name)
     const patch = path.join(dir, PATCH_FILE)
-    if (await fileExists(patch)) {
+    if (await isFile(patch)) {
       profileDirs.push(dir)
       patchFiles.push(patch)
       continue
@@ -97,16 +101,16 @@ async function dshInstalled(layout: DshLayout): Promise<boolean> {
     layout.legacyExists,
     layout.patchFiles.length > 0,
     layout.profileDirs.length > 0,
-    fileExists(credFile()),
-    fileExists(path.join(h, 'settings.yaml.imported')),
-    fileExists(path.join(h, 'sessions')),
-    fileExists(path.join(h, 'storages')),
+    isFile(credFile()),
+    isFile(path.join(h, 'settings.yaml.imported')),
+    dirExists(path.join(h, 'sessions')),
+    dirExists(path.join(h, 'storages')),
   ]
   return (await Promise.all(signals)).some(Boolean)
 }
 
-/** 从两种布局的 toJS 结果里取 llm-pi-ai 的 providers 表 */
-function providersOf(js: unknown, kind: 'legacy' | 'patch'): Record<string, any> | undefined {
+/** 从两种布局的 toJS 结果里取 llm-pi-ai 的 providers 表（import/sources.ts 复用，dsh 改名不再静默失配） */
+export function providersOf(js: unknown, kind: 'legacy' | 'patch'): Record<string, any> | undefined {
   if (kind === 'legacy') return (js as any)?.[PROVIDERS_ROOT]?.providers
   if (!Array.isArray(js)) return undefined
   const entry = (js as any[]).find((e) => e?.id === PROVIDERS_ROOT)
@@ -141,7 +145,7 @@ function filterProfiles(
       t(
         'dsh 不存在 profile：{unknown}（现有：{available}）；桌面版 / 网页版各为一个 profile（desktop / web），请核对 ~/.dsh/profiles/ 下的目录名',
         'dsh has no profile: {unknown} (existing: {available}); desktop and web are separate profiles (desktop / web) — check the directory names under ~/.dsh/profiles/',
-        { unknown: unknown.join('、'), available: available.join('、') || t('无', 'none') }
+        { unknown: biJoin('、', ', ', unknown), available: available.length > 0 ? biJoin('、', ', ', available) : t('无', 'none') }
       )
     )
   }
@@ -307,7 +311,7 @@ export const dshAdapter: HarnessAdapter = {
         ? t(
             '检测到 {count} 个 dsh profile：{names}（接入默认全部写入，可用 --client-profile 只挑桌面版/网页版）',
             'Found {count} dsh profiles: {names} (attach writes to all of them by default; use --client-profile to pick only desktop/web)',
-            { count: profileNames.length, names: profileNames.join('、') }
+            { count: profileNames.length, names: biJoin('、', ', ', profileNames) }
           )
         : undefined
     const noConfig =
@@ -326,26 +330,17 @@ export const dshAdapter: HarnessAdapter = {
     const targets = filterProfiles(layout, opts.clientProfiles)
 
     // 解析路由：显式 --profile 优先（含字面名为 "default" 的 profile），否则 active_profile
-    const routeName = opts.profile ?? cfg.active_profile
-    const profile = routeName ? cfg.profiles[routeName] : undefined
-    const providerId = profile?.provider
-    const provider = providerId ? cfg.providers[providerId] : undefined
-    const modelMap = provider?.models ?? {}
+    //（resolveRoute 与 zcode/workbuddy/provider-json 共用）
+    const { routeName, profile, providerId, provider } = resolveRoute(opts, cfg)
     const { entries, mergedMeta, metaFilled, catalogUsed } = await buildDshModelEntries(
       providerId ?? '',
-      modelMap,
+      provider?.models ?? {},
       cfg
     )
 
     const notes: string[] = []
     if (providerId && profile) {
-      notes.push(
-        t(
-          '模型列表取自当前路由「{route}」（{provider}）：{count} 个模型',
-          'The model list comes from the current route "{route}" ({provider}): {count} models',
-          { route: String(routeName), provider: String(provider?.name ?? providerId), count: entries.length }
-        )
-      )
+      notes.push(routeModelNote(String(routeName), String(provider?.name ?? providerId), entries.length))
     } else {
       notes.push(
         t(
@@ -381,9 +376,8 @@ export const dshAdapter: HarnessAdapter = {
     }
 
     const d = opts.direct
-    // 直连按上游协议选 api 类型与端点：dsh 支持 anthropic-messages / openai-completions 两种 wire
-    const directApi = d ? (d.protocol === 'openai' ? 'openai-completions' : 'anthropic-messages') : undefined
-    const directBase = d ? (d.protocol === 'openai' ? (d.base_url_openai ?? d.base_url) : d.base_url) : undefined
+    // 直连按上游协议选 api 类型与端点（directWire 与 ZCode 共用 llm-pi wire 选择）
+    const { api: directApi, base: directBase } = directWire(d)
 
     const providerEntry: Record<string, unknown> = {
       api: directApi ?? 'anthropic-messages',
@@ -394,12 +388,7 @@ export const dshAdapter: HarnessAdapter = {
 
     const defaultModel = profile?.default_model ?? (entries[0]?.id as string | undefined)
     if (d && d.protocol === 'responses') {
-      notes.push(
-        t(
-          '提示: 该服务是 Responses 协议，dsh 不支持该 wire 类型；直连条目按 anthropic-messages 写入，请确认上游兼容',
-          'Note: this service uses the Responses protocol, which dsh does not support as a wire type; the direct entry is written as anthropic-messages — make sure the upstream is compatible'
-        )
-      )
+      notes.push(directResponsesNote('dsh'))
     }
     const changes: FileChange[] = []
 
@@ -407,10 +396,10 @@ export const dshAdapter: HarnessAdapter = {
     if (layout.legacyExists) {
       const text = (await readTextIfExists(layout.legacyFile)) ?? ''
       const doc = parseDocument(text)
-      yamlSetText(doc, [PROVIDERS_ROOT, 'providers', 'modeldock'], providerEntry)
+      doc.setIn([PROVIDERS_ROOT, 'providers', 'modeldock'], providerEntry)
       if (opts.setDefault) {
         if (defaultModel) {
-          yamlSetText(doc, [AGENT_DEFAULT], { provider: 'modeldock', model: defaultModel })
+          doc.setIn([AGENT_DEFAULT], { provider: 'modeldock', model: defaultModel })
           notes.push(
             t(
               'agent-default-model 已切换为 modeldock / {model}（settings.yaml）',
@@ -471,7 +460,7 @@ export const dshAdapter: HarnessAdapter = {
 
     // 两者皆无：按已有结构决定落点
     if (changes.length === 0) {
-      if (!(await fileExists(layout.home))) {
+      if (!(await dirExists(layout.home))) {
         throw new AdapterError(
           t(
             '未找到 dsh 配置目录 {home}，请先安装 dsh 并运行一次生成配置（或设置 DSH_HOME 指向其目录）',
@@ -499,9 +488,9 @@ export const dshAdapter: HarnessAdapter = {
       } else {
         // 旧布局 dsh（或尚未运行过的新版 dsh：启动时会把 settings.yaml 导入 profile）
         const doc = parseDocument(`${PROVIDERS_ROOT}:\n  providers: {}\n`)
-        yamlSetText(doc, [PROVIDERS_ROOT, 'providers', 'modeldock'], providerEntry)
+        doc.setIn([PROVIDERS_ROOT, 'providers', 'modeldock'], providerEntry)
         if (opts.setDefault && defaultModel) {
-          yamlSetText(doc, [AGENT_DEFAULT], { provider: 'modeldock', model: defaultModel })
+          doc.setIn([AGENT_DEFAULT], { provider: 'modeldock', model: defaultModel })
         }
         changes.push({
           path: layout.legacyFile,
@@ -518,13 +507,13 @@ export const dshAdapter: HarnessAdapter = {
         t(
           '已按 --client-profile 限定范围，只写入：{names}（其余 profile 未动）',
           'Scoped by --client-profile, writing only: {names} (other profiles untouched)',
-          { names: scopeNames.join('、') || t('（无匹配目标）', '(no matching target)') }
+          { names: scopeNames.length > 0 ? biJoin('、', ', ', scopeNames) : t('（无匹配目标）', '(no matching target)') }
         )
       )
     }
     notes.push(
       t('写入目标：{targets}', 'Write targets: {targets}', {
-        targets: changes.map((ch) => path.relative(layout.home, ch.path) || ch.path).join('、'),
+        targets: biJoin('、', ', ', changes.map((ch) => path.relative(layout.home, ch.path) || ch.path)),
       })
     )
     notes.push(
@@ -535,16 +524,13 @@ export const dshAdapter: HarnessAdapter = {
     )
     notes.push(
       d
-        ? t(
-            '独立直连：上游真实 Key 已写入 .credentials.yaml 的 refs.MODELDOCK_TOKEN（明文），网关挂掉后该客户端不受影响',
-            'Direct mode: the upstream real key was written to refs.MODELDOCK_TOKEN in .credentials.yaml (plaintext); this client keeps working if the gateway is down'
-          )
+        ? directAttachNote()
         : t('token 已写入 {file} 的 refs.MODELDOCK_TOKEN', 'The token was written to refs.MODELDOCK_TOKEN in {file}', { file: credFile() })
     )
 
     const ctext = (await readTextIfExists(credFile())) ?? ''
     const cdoc = parseDocument(ctext)
-    yamlSetText(cdoc, ['refs', 'MODELDOCK_TOKEN'], d ? d.key : opts.token)
+    cdoc.setIn(['refs', 'MODELDOCK_TOKEN'], d ? d.key : opts.token)
     changes.push({
       path: credFile(),
       before: ctext === '' ? null : ctext,
@@ -574,9 +560,9 @@ export const dshAdapter: HarnessAdapter = {
       const js = doc.toJS() as Record<string, any>
       const entry = js?.[PROVIDERS_ROOT]?.providers?.modeldock
       if (entry && isOursGatewayUrl(typeof entry.baseURL === 'string' ? entry.baseURL : undefined, 'dsh', cfg)) {
-        yamlDelete(doc, [PROVIDERS_ROOT, 'providers', 'modeldock'])
+        doc.deleteIn([PROVIDERS_ROOT, 'providers', 'modeldock'])
         if (js?.[AGENT_DEFAULT]?.provider === 'modeldock') {
-          yamlDelete(doc, [AGENT_DEFAULT])
+          doc.deleteIn([AGENT_DEFAULT])
         }
         changes.push({
           path: layout.legacyFile,
@@ -636,8 +622,8 @@ export const dshAdapter: HarnessAdapter = {
     const ctext = await readTextIfExists(credFile())
     if (ctext !== null) {
       const cdoc = parseDocument(ctext)
-      yamlDelete(cdoc, ['refs', 'MODELDOCK_TOKEN'])
-      yamlDelete(cdoc, ['refs', 'MODELRDOCK_TOKEN']) // 旧拼写（<0.3.1）一并清理
+      cdoc.deleteIn(['refs', 'MODELDOCK_TOKEN'])
+      cdoc.deleteIn(['refs', 'MODELRDOCK_TOKEN']) // 旧拼写（<0.3.1）一并清理
       changes.push({ path: credFile(), before: ctext, after: cdoc.toString(), note: t('移除本地 token', 'Remove the local token') })
     }
     return {
