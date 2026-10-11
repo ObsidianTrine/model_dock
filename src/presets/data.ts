@@ -350,7 +350,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   },
 ]
 
-// ─── 运行时预设 = 内置库 + 用户自定义覆盖（~/.modeldock/presets.json） ───────
+// 运行时预设 = 内置库 + 用户自定义覆盖（~/.modeldock/presets.json）
 // 扩展性入口：把公司内部网关/模型注册成"一等公民"预设，只需在配置目录写一个
 // presets.json。同名 id 的自定义条目覆盖内置预设；新 id 追加。改动后重启网关生效
 // （长驻进程内可直接调用 reloadPresets()）。文件缺失视为无自定义；格式错误则抛可操作报错。

@@ -49,7 +49,7 @@ export async function defaultStore(): Promise<SecretBackend> {
   }
 }
 
-// ─── Linux Secret Service（secret-tool / libsecret） ───────────────────────────
+// Linux Secret Service（secret-tool / libsecret）
 // 仅桌面环境（GNOME/KDE 等带钥匙环守护进程）可用；无头服务器通常没有，回退 file 后端。
 let secretToolAvailable: boolean | null = null
 async function hasSecretTool(): Promise<boolean> {
@@ -132,7 +132,7 @@ async function removeExternal(scheme: 'keychain' | 'secret-service', id: string)
   externalCache.set(extKey(scheme, id), null)
 }
 
-// ─── Windows DPAPI 加密（file 后端在 win32 上加密存储） ────────────────────────
+// Windows DPAPI 加密（file 后端在 win32 上加密存储）
 // 值前缀 `enc:dpapi:<base64>`；密文绑定当前 Windows 账号，换账号/换机器后解不开
 // （getSecret 对解不开的置空，绝不回退明文）。关键：整表批量加/解密用**一次** PowerShell
 // 进程处理，避免每条目 spawn 子进程——逐条曾使导入 6 个 key 慢到几十秒。payload 经 stdin 传、
@@ -140,7 +140,7 @@ async function removeExternal(scheme: 'keychain' | 'secret-service', id: string)
 const CAN_DPAPI = process.platform === 'win32'
 const DPAPI_PREFIX = 'enc:dpapi:'
 
-// ─── Linux file 后端本机绑定加密（AES-256-GCM，密钥从 machine-id 派生） ─────────────
+// Linux file 后端本机绑定加密（AES-256-GCM，密钥从 machine-id 派生）
 // 无 secret-service 钥匙环时，Linux 的 file 后端用本机 machine-id 绑定加密，避免明文落盘。
 // 防"secrets.json 单独被拷贝/上传/备份"后直接读到明文 Key（非本机 machine-id 解不出）。
 const MACH_PREFIX = 'enc:mach:'

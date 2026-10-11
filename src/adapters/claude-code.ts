@@ -185,7 +185,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
         )
       } else {
         const provider = prof.provider ? _cfg.providers[prof.provider] : undefined
-        // 目标模型上下文 ≥ 1M 时给模型 ID 追加 [1m] 声明（元数据分层解析：配置 > 内置表 > 目录）
+        // 元数据分层解析：配置 > 内置表 > 目录
         const suffixed = (target: string): string => {
           const ctx = resolveModelMeta(target, provider?.models?.[target], { baseUrl: provider?.base_url })?.context_window
           return ctx !== undefined && ctx >= ONE_M_TOKEN ? `${target}[1m]` : target
@@ -216,7 +216,6 @@ export const claudeCodeAdapter: HarnessAdapter = {
           root.model = ROOT_MODEL_DIRECT
           env.CLAUDE_CODE_SUBAGENT_MODEL = sonnetTarget
         }
-        // 直连调优默认值
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW
         notes.push(

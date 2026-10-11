@@ -278,7 +278,7 @@ export const zcodeAdapter: HarnessAdapter = {
       )
     }
 
-    // ---- 现行存储：provider_config.json 个人供应商 ----
+    // 现行存储：provider_config.json 个人供应商
     const root = personalText !== null ? (parseJsonStrict(personalText, personalPath) as ZcodePersonalConfig) : freshPersonalConfig()
     const pconf = (root.config ??= {})
     const rules = ((pconf.providerConfigRules ??= {}).providerRules ??= [])
@@ -323,7 +323,7 @@ export const zcodeAdapter: HarnessAdapter = {
       })
     }
 
-    // ---- 旧版存储：清理本工具历史版本写入的 builtin:modeldock（新版 ZCode 一律忽略）----
+    // 旧版存储：清理本工具历史版本写入的 builtin:modeldock（新版 ZCode 一律忽略）
     if (legacyText !== null) {
       try {
         const legacy = JSON.parse(legacyText) as { provider?: Record<string, unknown> }
