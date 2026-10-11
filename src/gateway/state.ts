@@ -159,13 +159,12 @@ export function resolveTarget(rt: GatewayRuntime, token: string, profileOverride
       hint: t('token 见 modeldock status；token 丢失可重新 attach（会生成新 token）', 'Tokens are listed by modeldock status; if a token is lost, re-attach to generate a new one'),
     }
   }
-  return resolveByProfile(rt, undefined, profileOverride, harness)
+  return resolveByProfile(rt, profileOverride, harness)
 }
 
 /** admin 探测/test 用：按 profile 名解析（harness 记为 admin-test） */
 export function resolveByProfile(
   rt: GatewayRuntime,
-  _tokenPlaceholder?: string,
   profileOverride?: string,
   harnessId = 'admin-test'
 ): ResolveResult {
@@ -535,7 +534,7 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
   const on = rt.config.gateway?.auto_failover === true
   const forced = rt.config.gateway?.auto_route_provider ?? null
   const routeNext = rt.config.gateway?.route_next ?? null
-  const base = resolveByProfile(rt, undefined, rt.config.active_profile)
+  const base = resolveByProfile(rt, rt.config.active_profile)
   let provider: string | null = null
   let next: string | null = null
   let autoPrimary: string | null = null
