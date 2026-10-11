@@ -208,6 +208,33 @@ describe('云端控制面 API v1', () => {
     }
   })
 
+  it('角色守卫：device/console 互访各端点均拒 403（路由表化回归）', async () => {
+    const s = await startServer()
+    try {
+      const tok = await pairDevice(s.port, s.consoleToken, 'mdksync_a', 'A')
+      // device 凭据访问控制台端点 → 403
+      const consoleOnly: Array<[string, string, unknown]> = [
+        ['GET', '/v1/devices', undefined],
+        ['POST', '/v1/desire', { devid: 'mdksync_a', service: 'ark' }],
+        ['POST', '/v1/paircode', {}],
+      ]
+      for (const [m, p, body] of consoleOnly) {
+        expect((await req(s.port, m, p, { token: tok, body })).status, `${m} ${p} 应拒 device 角色`).toBe(403)
+      }
+      // console 凭据访问设备端点 → 403
+      const deviceOnly: Array<[string, string, unknown, Record<string, string>?]> = [
+        ['GET', '/v1/doc', undefined, {}],
+        ['PUT', '/v1/doc', { envelope: ENVELOPE('2026-10-05T01:00:00.000Z'), ts: '2026-10-05T01:00:00.000Z' }, { 'if-match': '0' }],
+        ['POST', '/v1/heartbeat', { devid: 'mdksync_a' }, {}],
+      ]
+      for (const [m, p, body, headers] of deviceOnly) {
+        expect((await req(s.port, m, p, { token: s.consoleToken, body, headers })).status, `${m} ${p} 应拒 console 角色`).toBe(403)
+      }
+    } finally {
+      await s.close()
+    }
+  })
+
   it('限速：超阈值 429（内存计数）', async () => {
     const s = await startServer({ rateLimitPerMin: 3 })
     try {

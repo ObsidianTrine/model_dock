@@ -4,9 +4,11 @@
  * `--backup` 执行一次在线快照后退出（部署 runbook 的 crontab 每日备份用）。
  */
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { randomToken } from '../util/fsx.js'
+import { randomToken, atomicWrite } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
+import { homeDir } from '../util/paths.js'
 import { CloudStore } from './store.js'
 import { createCloudServer } from './server.js'
 
@@ -18,8 +20,10 @@ interface Args {
   rateLimit: number
 }
 
-function parseArgs(argv: string[]): Args {
-  const args: Args = { port: 18443, host: '127.0.0.1', dataDir: path.join(process.env.HOME ?? '.', '.modeldock-cloud'), backup: false, rateLimit: 60 }
+export function parseArgs(argv: string[]): Args {
+  // 数据目录经 homeDir() 派生（paths.ts 约定）：Windows 上 HOME 未设时 os.homedir() 仍回落
+  // USERPROFILE，不会像旧的 `HOME ?? '.'` 一样静默写进 CWD 相对目录（DESIGN-06）。
+  const args: Args = { port: 18443, host: '127.0.0.1', dataDir: path.join(homeDir(), '.modeldock-cloud'), backup: false, rateLimit: 60 }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     const next = (): string => argv[++i] ?? ''
@@ -48,28 +52,21 @@ function parseArgs(argv: string[]): Args {
   return args
 }
 
-/** consoleToken 持久化：<data>/cloud.json（0600，跨重启稳定） */
-function resolveConsoleToken(dataDir: string): { token: string; created: boolean } {
+/** consoleToken 持久化：<data>/cloud.json（0600，跨重启稳定）；经 atomicWrite 原子写（DESIGN-06） */
+export async function resolveConsoleToken(dataDir: string): Promise<{ token: string; created: boolean }> {
   const file = path.join(dataDir, 'cloud.json')
   try {
-    const j = JSON.parse(fs.readFileSync(file, 'utf8')) as { consoleToken?: string }
+    const j = JSON.parse(await fsp.readFile(file, 'utf8')) as { consoleToken?: string }
     if (j.consoleToken && /^mdkcloud_[0-9a-f]{32,}$/.test(j.consoleToken)) return { token: j.consoleToken, created: false }
   } catch {
     /* 首次启动或文件损坏 → 重新生成 */
   }
   const token = randomToken('mdkcloud')
-  const tmp = file + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify({ consoleToken: token }, null, 2) + '\n', { mode: 0o600 })
-  fs.renameSync(tmp, file)
-  try {
-    fs.chmodSync(file, 0o600)
-  } catch {
-    /* Windows 忽略 */
-  }
+  await atomicWrite(file, JSON.stringify({ consoleToken: token }, null, 2) + '\n', 0o600)
   return { token, created: true }
 }
 
-export function main(argv: string[]): void {
+export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv)
   const store = new CloudStore(args.dataDir)
 
@@ -88,7 +85,7 @@ export function main(argv: string[]): void {
     return
   }
 
-  const { token, created } = resolveConsoleToken(args.dataDir)
+  const { token, created } = await resolveConsoleToken(args.dataDir)
   const server = createCloudServer(store, { consoleToken: token, rateLimitPerMin: args.rateLimit })
   server.listen(args.port, args.host, () => {
     const proto = 'http'
@@ -110,5 +107,5 @@ export function main(argv: string[]): void {
 }
 
 if (process.argv[1] && /cloud[\\/]main\.(js|ts)$/.test(process.argv[1])) {
-  main(process.argv.slice(2))
+  void main(process.argv.slice(2))
 }
