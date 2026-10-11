@@ -221,6 +221,24 @@ export const claudeCodeAdapter: HarnessAdapter = {
           restored++
         } else if (env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
           root.model = ROOT_MODEL_DIRECT
+        } else {
+          // 无默认模型也无别名：回落服务目录首个模型——直连没有改写层，根 model 必须是本服务
+          // 认识的具体 ID，绝不能残留上一目标的值（切直连目标后写死即错）；目录也为空则撤掉，
+          // 让「Default 项按 profile 默认模型解析」回落到选择器首行
+          const firstModel = Object.keys(provider?.models ?? {})[0]
+          if (firstModel !== undefined) {
+            root.model = suffixed(firstModel)
+            restored++
+            notes.push(
+              t(
+                '直连模式：该 profile 未配置默认模型，根模型已回落服务目录首个模型 {model}',
+                'Direct mode: this profile has no default model; the root model fell back to the first catalog model {model}',
+                { model: firstModel }
+              )
+            )
+          } else {
+            delete root.model
+          }
         }
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW

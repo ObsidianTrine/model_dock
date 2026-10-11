@@ -1806,6 +1806,76 @@ describe('claude-code 独立直连（direct 模式）', () => {
     }
   })
 
+  it('direct：profile 无默认模型时根 model 回落服务目录首个模型；目录也为空则撤掉根 model（不残留上一目标）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      // 上一目标（火山 GLM）的直连残留：根 model 写死旧服务模型——切到无默认模型的新目标必须被替换
+      await atomicWrite(
+        p,
+        JSON.stringify({ model: 'glm-5-3-flash-260828[1m]', env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x' } }, null, 2) + '\n',
+        0o600
+      )
+      // 目标 profile 无 default_model、无别名；目录首个 = m-first
+      const cfg: Config = {
+        ...emptyConfig(),
+        providers: {
+          p: {
+            name: 'Mock Up',
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'sk-direct-plain',
+            models: { 'm-first': { display_name: '首个' }, 'm-second': {} },
+          },
+        },
+        profiles: { demo: { provider: 'p' } },
+        active_profile: 'demo',
+      }
+      await withConfig(cfg)
+      const plan = await claudeCodeAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: 'mdk_x',
+          profile: 'demo',
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.model).toBe('m-first')
+      expect(plan.notes.some((n) => n.includes('回落服务目录首个模型'))).toBe(true)
+
+      // 目录也为空：根 model 撤掉，不残留 glm
+      const emptyCfg: Config = {
+        ...emptyConfig(),
+        providers: { p: { base_url: 'https://api.up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'sk-direct-plain' } },
+        profiles: { demo: { provider: 'p' } },
+        active_profile: 'demo',
+      }
+      await withConfig(emptyCfg)
+      const plan2 = await claudeCodeAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: 'mdk_x',
+          profile: 'demo',
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      const after2 = JSON.parse(plan2.changes[0].after)
+      expect(after2.model).toBeUndefined()
+      expect(after2.modelPicker).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('direct 落盘后切回网关（fromMode: direct）：清掉 direct 写入的模型映射与根 model，恢复网关地址与本地 token', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
