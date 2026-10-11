@@ -162,7 +162,7 @@ function runOpts(over: Partial<UpdateRunOptions>): UpdateRunOptions {
   return { repo: REPO, token: TOKEN, yes: true, confirm: async () => true, ...over }
 }
 
-// ─── 纯函数 ──────────────────────────────────────────────────────
+// 纯函数
 
 describe('版本比较与资产选择', () => {
   it('compareVersions：逐段数值比较，前导 v 已由调用方剥离', () => {
@@ -208,7 +208,7 @@ describe('版本比较与资产选择', () => {
   })
 })
 
-// ─── GitHub API 发现与校验 ───────────────────────────────────────
+// GitHub API 发现与校验
 
 describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
   let cleanup: (() => Promise<void>) | null = null
@@ -282,7 +282,7 @@ describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
   })
 })
 
-// ─── 检查输出（托盘原生弹窗的正文来源） ──────────────────────────
+// 检查输出（托盘原生弹窗的正文来源）
 
 describe('checkUpdate 输出：说明降级 + 摘要收口 + 发布页链接', () => {
   let cleanup: (() => Promise<void>) | null = null
@@ -344,7 +344,7 @@ describe('checkUpdate 输出：说明降级 + 摘要收口 + 发布页链接', (
   })
 })
 
-// ─── 安装原语（真实文件系统，临时目录） ──────────────────────────
+// 安装原语（真实文件系统，临时目录）
 describe('安装原语', () => {
   let tmp = ''
   beforeEach(async () => {
@@ -396,7 +396,7 @@ describe('安装原语', () => {
   })
 })
 
-// ─── 全链路编排 ──────────────────────────────────────────────────
+// 全链路编排
 
 describe('runUpdate 全链路（mock API + 副作用注入）', () => {
   let cleanup: (() => Promise<void>) | null = null
@@ -537,7 +537,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
   it('下载不完整（size 声明大于实际）：重试耗尽后报错', async () => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
     try {
-      // 裸二进制形态（三平台同构）：资产名与包体按当前平台生成
+      // 裸二进制形态：资产名与包体按当前平台生成
       const pkg = makeBareArchive(root, '999.0.0')
       const api = await startMockApi({
         tag: 'v999.0.0',

@@ -151,12 +151,10 @@ describe('服务文件内容生成与登记命令回读', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
 // 真实生效层（launchctl / systemctl / 启动文件夹）：此前零覆盖。
 // 守则：daemon 用 /bin/sleep 桩（不拉起真实网关、不碰 8687/8890）；KeepAlive/
 // Restart 的桩在 bootout/disable 后即死，不残留；测试前探测用户真实服务，
 // 已加载则 skip（绝不碰用户已注册的自启服务）。
-// ---------------------------------------------------------------------------
 
 function launchdLoaded(): boolean {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501

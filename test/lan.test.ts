@@ -231,7 +231,6 @@ describe('lan 手机简版控制台', () => {
     expect(cfg.active_profile).toBe('auto-p2')
     expect(rt.config.active_profile).toBe('auto-p2')
     expect(rt.config.active_profile).not.toBe('auto-p1')
-    // 审计：环形缓冲含 source=lan 条目
     const auditEntry = rt.ring.find((e) => e.kind === 'audit' && e.op === '手机切换服务')
     expect(auditEntry).toBeTruthy()
     const bad = await fetch(`${base}/m/api/switch`, {

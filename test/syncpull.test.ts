@@ -348,7 +348,7 @@ describe('配置包桌面导出（/config/export）', () => {
     expect(Object.keys(after.providers).sort()).toEqual(['ark', 'envprov'])
     expect(after.profiles).toEqual({ main: { provider: 'ark', default_model: 'auto' } })
     expect(await getSecret(after.providers.ark.key_ref!)).toBe('sk-ark-pull-plaintext')
-    // 机器态不动：B 的 admin token / 空机 harness 不被替换
+    // 机器态不动（详见「直拉迁移」用例）
     expect(Object.keys(after.harness)).toEqual([])
   })
 

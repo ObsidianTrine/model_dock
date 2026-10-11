@@ -109,7 +109,7 @@ describe('claude-code adapter', () => {
       const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(onDisk.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
       expect(onDisk.includeCoAuthoredBy).toBe(false)
-      // diff 已脱敏
+      // 脱敏只作用于展示 diff：changes 内容仍带真实 token（落盘需要）
       expect(plan.changes[0].after).toContain(TOKEN)
 
       // 快照已建
@@ -1357,8 +1357,7 @@ describe('applyChanges 引擎', () => {
     try {
       const p = path.join(h.home, 'f.txt')
       await atomicWrite(p, 'old\n', 0o600)
-      // 模拟取消：applyChanges 内部 confirm 会阻塞 TTY，这里直接验证快照+写入路径，取消路径由 confirm 返回 false 覆盖
-      // 以 no-change 快速路径代替：
+      // confirm 会阻塞 TTY：取消路径由 confirm 返回 false 覆盖，这里以 no-change 快速路径代替
       const ok = await applyChanges('x', 'attach', [], { yes: true })
       expect(ok).toBe(true)
       expect(await readTextIfExists(p)).toBe('old\n')
