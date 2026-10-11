@@ -171,6 +171,8 @@ export interface SyncLoopOpts extends SyncHooks {
   pollMs?: number
   jitterRatio?: number
   debounceMs?: number
+  /** 测试注入：替换 fs.watch 以触发异步 error（默认 = fs.watch）。返回值的 .on('error') 订阅必须可用 */
+  watchFn?: (watchPath: string, listener: fs.WatchListener<string>) => fs.FSWatcher
 }
 
 /** 轮询 + 本地变更监听的循环。多触发源（定时/文件变更/手动）共用单飞tick，不并发推拉 */
@@ -199,12 +201,19 @@ export class SyncLoop {
     // 启动即拉取一次：加入目标的新机器立即收敛
     void this.beginTick('safe')
     this.schedulePoll()
+    const watch = this.opts.watchFn ?? ((p: string, l: fs.WatchListener<string>) => fs.watch(p, l))
     try {
-      this.watcher = fs.watch(modeldockDir(), (_event, filename) => {
+      this.watcher = watch(modeldockDir(), (_event, filename) => {
         // 引擎自己 apply 远端也会写这三个文件：此刻 lastSyncedHash 已更新，tick 空转跳过，不会回环推送
         if (filename !== 'config.toml' && filename !== 'secrets.json' && filename !== 'presets.json') return
         clearTimeout(this.debounce)
         this.debounce = setTimeout(() => void this.beginTick('safe'), this.opts.debounceMs ?? DEFAULT_DEBOUNCE_MS)
+      })
+      // watcher 同步构造不抛、但异步失败（EMFILE/ENOSPC 或目录被删）会发 'error'：
+      // 不接则变成 uncaught exception 杀网关，这里挂兜底——清理引用、降级为仅轮询（只损失「即时推」）
+      this.watcher.on('error', (err) => {
+        this.watcher = undefined
+        this.opts.log?.(t('[modeldock] 配置同步本地文件监听失效（{msg}）：不再即时推送，改为仅轮询同步（不影响网关工作）', '[modeldock] Local file watcher for config sync failed ({msg}): realtime push disabled, polling only (gateway unaffected)', { msg: (err as Error).message }))
       })
     } catch {
       /* 目录监听失败只损失「即时推」，轮询兜底 */
