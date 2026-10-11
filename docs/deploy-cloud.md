@@ -8,6 +8,7 @@
 | 部署机 | 阿里云 ECS 2C2G 99 元/年档（续费同价；腾讯轻量同价位可替代），Ubuntu 24.04 LTS |
 | 数据目录 | `/var/lib/modeldock-cloud`（systemd `StateDirectory`） |
 | 端口 | 仅放行 TCP `18443`（示例端口，可改）+ SSH 22（限自己 IP） |
+| 状态 | runbook 已就绪并随 v1.0.0 发布；**待执行**（VPS 未购，2026-10-11 确认）——购机后按 §1 起逐节执行，替换全文占位 IP |
 
 > **共享基建**：本 VPS 未来兼作**自动更新源**（`docs/design-auto-update.md` M3）——部署时预留更新源端口/反代，TLS 证书与控制面统一拍板（两详设开放问题同源）。
 
@@ -28,6 +29,7 @@ node dist/cloud/main.js --port 18443 --host 0.0.0.0 --data /var/lib/modeldock-cl
 ```
 
 - 首次启动会生成 `consoleToken` 写入 `/var/lib/modeldock-cloud/cloud.json`（0600）并打印到 stdout——**这是云端控制台登录凭据，请立即存入密码管理器**。
+- 限速默认单 IP 60 req/min（详设 §7.2）；需调整时加 `--rate-limit <次/分>`。
 - 域名非必需（裸 IP + 端口，免备案）；将来上域名（含备案）再切 Let's Encrypt TLS。
 - 防火墙只开 18443；`curl http://127.0.0.1:18443/` 本机自检。
 
@@ -47,6 +49,7 @@ ExecStart=/usr/bin/node /root/modeldock/dist/cloud/main.js --port 18443 --host 0
 Restart=always
 RestartSec=3
 StateDirectory=modeldock-cloud
+# StateDirectory 保证 /var/lib/modeldock-cloud 存在；ExecStart 的 --data 显式指向同一目录
 # 环境不同按实际 Node 路径调整（which node）
 
 [Install]
@@ -65,6 +68,8 @@ journalctl -u modeldock-cloud -f
 ```
 
 `--backup` 用 SQLite `VACUUM INTO` 在线快照到 `<data>/backups/`，自动保留最近 14 份。
+
+**恢复**：`systemctl stop modeldock-cloud` → 用某份快照覆盖数据目录的 `cloud.db`，并删掉同目录的 `cloud.db-wal` / `cloud.db-shm` 残留（WAL 模式下旧日志不能与新库混用）→ `systemctl start modeldock-cloud`。`cloud.json`（consoleToken）不在数据库里、保持不动，控制台登录不受影响；快照之后新入网的设备会回到快照时点，需重新配对。
 
 ## 5. 升级
 
