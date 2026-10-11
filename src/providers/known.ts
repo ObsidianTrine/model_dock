@@ -1,4 +1,4 @@
-import { PRESETS } from '../presets/data.js'
+import { PRESETS, ensurePresetsLoaded } from '../presets/data.js'
 
 export interface KnownMeta {
   context_window?: number
@@ -36,11 +36,13 @@ export function saneCapabilities(v: unknown): string[] | undefined {
  * 用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
  * 优先级：预设库已有模型 > 此处补充的全局常见模型。
  */
-const EXTRA: Record<string, KnownMeta> = {
-  // OpenAI（用户常以自定义 provider 导入）
-  'gpt-6-astra': { context_window: 1050000, max_output: 128000 },
-  'gpt-6-sol': { context_window: 1050000, max_output: 128000 },
-  'gpt-5.5': { context_window: 1000000, max_output: 128000 },
+/** 全局常见模型的保守默认元数据（上下文 / 最大输出，单位 tokens）。
+ *  用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
+ *  优先级：预设库已有模型（见 knownByIdTable()）> 此处补充的全局常见模型。
+ *  DUP-10：EXTRA 与预设库 BY_ID 无交集——凡预设库已收录的 id 一律不在此重复（合并表 { ...EXTRA, ...BY_ID } 会恒被 BY_ID 覆盖），
+ *  只保留真正非预设的变体，杜绝人肉双份维护。 */
+export const EXTRA: Record<string, KnownMeta> = {
+  // OpenAI（用户常以自定义 provider 导入；gpt-6-astra/sol、gpt-5.5 已由 openai 预设收录，见 BY_ID）
   'gpt-4o': { context_window: 128000, max_output: 16384 },
   'gpt-4o-mini': { context_window: 128000, max_output: 16384 },
   'gpt-4-turbo': { context_window: 128000, max_output: 4096 },
@@ -52,7 +54,7 @@ const EXTRA: Record<string, KnownMeta> = {
   'o3': { context_window: 200000, max_output: 100000 },
   'o3-mini': { context_window: 200000, max_output: 100000 },
   'o4-mini': { context_window: 200000, max_output: 100000 },
-  // Anthropic（5.5 系 / Fable 由预设库提供权威值，此处补日期后缀等变体）
+  // Anthropic（5.5 系 / Fable 由预设库提供权威值，此处补日期后缀等变体；claude-sonnet-5-5/opus-5-5 等见 BY_ID）
   'claude-fable-5': { context_window: 1048576, max_output: 128000 },
   'claude-sonnet-4-20250514': { context_window: 200000, max_output: 64000 },
   'claude-haiku-4-5-20251001': { context_window: 200000, max_output: 64000 },
@@ -61,82 +63,65 @@ const EXTRA: Record<string, KnownMeta> = {
   'claude-3-5-haiku-20241022': { context_window: 200000, max_output: 8192 },
   'claude-3-opus-20240229': { context_window: 200000, max_output: 4096 },
   'claude-3-haiku-20240307': { context_window: 200000, max_output: 4096 },
-  // DeepSeek（deepseek-chat / deepseek-reasoner 由预设库提供，见 BY_ID）
+  // DeepSeek（deepseek-flash / deepseek-v4-pro 由预设库提供，见 BY_ID）
   'deepseek-coder': { context_window: 128000, max_output: 8192 },
   // DeepSeek V4（1M 上下文；-ga/-vision 为推理平台/视觉等变体）
-  'deepseek-flash': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4.1-flash': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4-flash': { context_window: 1048576, max_output: 393216 },
-  'deepseek-v4-pro': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4-flash-max': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4-pro-max': { context_window: 1048576, max_output: 393216 },
-  'deepseek-v4-flash-ga-260731': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4-flash-vision-exp': { context_window: 1048576, max_output: 393216 },
-  // DeepSeek V4.1（1M / 384K）。官方 id 用点号 v4.1，这里补连字符 v4-1 及平台日期后缀变体
+  // DeepSeek V4.1（1M / 384K）。官方 id 用点号 v4.1，这里补连字符 v4-1 等非预设变体；-260910 已由预设收录
   'deepseek-v4-1-flash': { context_window: 1048576, max_output: 393216 },
   'deepseek-v4-1-pro': { context_window: 1048576, max_output: 393216 },
-  'deepseek-v4-1-flash-260910': { context_window: 1048576, max_output: 393216 },
-  // 智谱 GLM-5.3（2026-09：1M 上下文 / 128K 输出）
-  'glm-5.3': { context_window: 1048576, max_output: 131072 },
-  // 智谱 GLM-5.3-Flash（2026-08：1M 上下文 / 128K 输出；-260828 为方舟日期后缀）
-  'glm-5.3-flash': { context_window: 1048576, max_output: 131072 },
-  'glm-5.3-flashx': { context_window: 1048576, max_output: 131072 },
+  // 智谱 GLM-5.3（glm-5.3 / glm-5.3-flash / glm-5.3-flashx / glm-5-3-flash-260828 已由预设收录，见 BY_ID）
   'glm-5.3-flash-260828': { context_window: 1048576, max_output: 131072 },
-  'glm-5-3-flash-260828': { context_window: 1048576, max_output: 131072 },
   // 智谱 GLM-4.5-Air（轻量版：128K 上下文 / 16K 输出）
   'glm-4.5-air': { context_window: 131072, max_output: 16384 },
   // 通义 Qwen3-32B（阿里云/AWS 权威：原生 32K 上下文 / 8K 输出；-20250429 为日期后缀）
   'qwen3-32b': { context_window: 32768, max_output: 8192 },
   'qwen3-32b-20250429': { context_window: 32768, max_output: 8192 },
-  // Kimi K3（Moonshot 2026-07：1M / 1M）
-  'kimi-k3': { context_window: 1048576, max_output: 1048576 },
-  // 小米 MiMo V2.5 / V2.6（2026：1M 上下文 / 128K 输出）
+  // 小米 MiMo V2.5（2026：1M 上下文 / 128K 输出；v2.6 系已由预设收录）
   'mimo-v2.5': { context_window: 1048576, max_output: 131072 },
   'mimo-v2.5-pro': { context_window: 1048576, max_output: 131072 },
   'mimo-v2.6': { context_window: 1048576, max_output: 131072 },
-  'mimo-v2.6-pro': { context_window: 1048576, max_output: 131072 },
-  'mimo-v2.6-flash': { context_window: 1048576, max_output: 131072 },
   // 火山方舟 Coding/Agent Plan（2026-10 官方套餐概览，output_name 经用户 team 账号实测核对）。
-  // output_name 随版本换代（日期后缀变化），同一模型的新旧 id 形态同值收录，存量配置展示兜底即刻生效；
+  // 带日期后缀的 output_name 由预设收录；这里只收非预设的旧/新 id 形态（共存配置展示兜底）。
   // auto（智能调度）无固定限额、doubao-seed-2-0-lite 官方未公布长度，均不收录
-  'doubao-seed-evolving': { context_window: 1048576, max_output: 262144 },
   'doubao-seed-evolving-latest-version': { context_window: 1048576, max_output: 262144 },
-  'doubao-seed-2-1-pro-260915': { context_window: 1048576, max_output: 262144 },
   'doubao-seed-2-1-pro': { context_window: 1048576, max_output: 262144 },
   'doubao-seed-2.1-pro': { context_window: 1048576, max_output: 262144 },
-  'doubao-seed-2-1-lite-260915': { context_window: 1048576, max_output: 262144 },
   'doubao-seed-2-1-lite': { context_window: 1048576, max_output: 262144 },
   'doubao-seed-2.1-lite': { context_window: 1048576, max_output: 262144 },
-  'doubao-seed-2-1-turbo-260628': { context_window: 262144, max_output: 65536 },
   'doubao-seed-2-1-turbo': { context_window: 262144, max_output: 65536 },
-  'doubao-seed-2-0-mini-260428': { context_window: 262144, max_output: 131072 },
   'doubao-seed-2-0-mini': { context_window: 262144, max_output: 131072 },
   'doubao-seed-2.0-mini': { context_window: 262144, max_output: 131072 },
-  'minimax-m3': { context_window: 1048576, max_output: 131072 },
   'minimax-m3-modelhub': { context_window: 1048576, max_output: 131072 },
-  'kimi-k2.7-code': { context_window: 262144, max_output: 32768 },
-  'kimi-k2.7-code-highspeed': { context_window: 262144, max_output: 32768 },
   'kimi-k2-7-code-260601': { context_window: 262144, max_output: 32768 },
-  'kimi-k2.6': { context_window: 262144, max_output: 32768 },
-  'kimi-k2-8-preview': { context_window: 1048576, max_output: 1048576 },
   'kimi-k2.8-preview': { context_window: 1048576, max_output: 1048576 },
   'kimi-k2-8-260901': { context_window: 1048576, max_output: 1048576 },
-  'deepseek-v4-pro-ga-260813': { context_window: 1048576, max_output: 393216 },
   // 火山方舟 ark-code-latest（官方 256K / 32K；代码 Agent 套餐默认）
   'ark-code-latest': { context_window: 256000, max_output: 32768 },
 }
 
-/** 预设库（各厂商已内置其模型的权威值）并按 id 建索引 */
-const BY_ID: Record<string, KnownMeta> = {}
-for (const p of PRESETS) {
-  for (const pm of p.models ?? []) {
-    if (!pm.context_window) continue
-    BY_ID[pm.id] = {
-      context_window: pm.context_window,
-      max_output: pm.max_output,
-      ...(pm.capabilities ? { capabilities: [...pm.capabilities] } : {}),
+let byIdTable: Record<string, KnownMeta> | undefined
+/** 预设库模型索引（预设已内置各厂商权威值，按 id 建表）。懒构建：首次查询时确保预设已加载（BUG-12）再建表，与 EXTRA 一起合并成完整已知表 */
+export function knownByIdTable(): Record<string, KnownMeta> {
+  ensurePresetsLoaded()
+  if (byIdTable) return byIdTable
+  const out: Record<string, KnownMeta> = {}
+  for (const p of PRESETS) {
+    for (const pm of p.models ?? []) {
+      if (!pm.context_window) continue
+      out[pm.id] = {
+        context_window: pm.context_window,
+        max_output: pm.max_output,
+        ...(pm.capabilities ? { capabilities: [...pm.capabilities] } : {}),
+      }
     }
   }
+  byIdTable = out
+  return out
 }
 
 /** 视觉模型（id 前缀或基名匹配；日期后缀等变体经 baseModelIds 逐级命中）。可选能力，只在此显式声明 */
@@ -151,8 +136,9 @@ const VISION_PREFIXES = [
   'doubao-seed-evolving',
   'deepseek-v4-flash-vision',
 ]
-/** id 自带视觉语义（vision/vl）：表未收录的新变体也能识别 */
-const VISION_ID_RE = /(?:^|[-_.])(?:vision|vl)(?![a-z0-9])|vision/i
+/** id 自带视觉语义（vision/vl）：表未收录的新变体也能识别。
+ *  只匹配词边界整段（-vision / _vision / .vision / 开头 vision），避免裸 /vision/i 把 envisign/revision 等误判为视觉模型 */
+const VISION_ID_RE = /(?:^|[-_.])vision(?![a-z0-9])|(?:^|[-_.])vl(?![a-z0-9])/i
 
 /** 归一化阶梯：deepseek-v4-flash-ga-260731 → ['deepseek-v4-flash-ga-260731','deepseek-v4-flash-260731','deepseek-v4-flash']
  *  平台日期后缀（-260731 / -20250429）与版本标签（-ga/-preview/-exp…）逐级剥离，供聚变体查表兜底 */
@@ -175,7 +161,7 @@ export function baseModelIds(id: string): string[] {
  *  精确未命中时按 baseModelIds 逐级兜底（同一模型换代只改日期后缀时仍能补全）；仍无但 id 自带视觉语义则只给能力标记 */
 export function knownModelMeta(id: string): KnownMeta | undefined {
   for (const cand of baseModelIds(id)) {
-    const hit = BY_ID[cand] ?? EXTRA[cand]
+    const hit = knownByIdTable()[cand] ?? EXTRA[cand]
     if (!hit) continue
     return VISION_PREFIXES.some((pre) => cand.startsWith(pre)) && !hit.capabilities ? { ...hit, capabilities: ['vision'] } : hit
   }
@@ -185,7 +171,7 @@ export function knownModelMeta(id: string): KnownMeta | undefined {
 
 /** 合并后的完整已知表（预设库 id 优先，与 knownModelMeta 同一优先级）。用于前端"填模型名→自动补上下文/输出"。 */
 export function knownMetaTable(): Record<string, KnownMeta> {
-  const out: Record<string, KnownMeta> = { ...EXTRA, ...BY_ID }
+  const out: Record<string, KnownMeta> = { ...EXTRA, ...knownByIdTable() }
   for (const [id, m] of Object.entries(out)) {
     if (VISION_PREFIXES.some((pre) => id.startsWith(pre)) && !m.capabilities) out[id] = { ...m, capabilities: ['vision'] }
   }

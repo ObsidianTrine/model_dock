@@ -21,35 +21,51 @@ export interface HolidayDayLike {
 /** 年份 → 日期键（YYYY-MM-DD）→ 是否放假日（false=调休补班） */
 export type HolidayCalendar = Map<string, Map<string, boolean>>
 
-/** 进程内缓存：按「路径+mtime」记忆解析结果，拉取落盘后下次读取自动生效 */
-let memo: { key: string; years: HolidayCalendar } | null = null
+interface CalendarData {
+  years: HolidayCalendar
+  days: HolidayDayNamed[]
+}
 
-/** 读取 holiday-cn 缓存为日历表；文件缺失/损坏返回空表（全部按星期几降级）。每次调用至多一次 statSync。 */
-export function loadCalendar(): HolidayCalendar {
+// 进程内缓存：按「路径+mtime」记忆解析结果，拉取落盘后下次读取自动生效。
+// DUP-09：两个公开函数 loadCalendar / loadHolidayDays 共用这一份 memo 与 stat+读+解析，失效逻辑只此一处——
+// 改文件 mtime 后，任一入口的首次调用都会重读，另一个入口拿到的也必定是新数据，杜绝「改一处失效、另一处静默失步」。
+let memo: { key: string; data: CalendarData } | null = null
+
+function loadCalendarData(): CalendarData {
   const p = holidaysCachePath()
   let mtime = 0
   try {
     mtime = fs.statSync(p).mtimeMs
   } catch {
-    return new Map()
+    return { years: new Map(), days: [] } // 文件缺失：日历/条目都空，全部按星期几降级
   }
   const key = p + '\0' + mtime
-  if (memo && memo.key === key) return memo.years
+  if (memo && memo.key === key) return memo.data
   const years: HolidayCalendar = new Map()
+  const days: HolidayDayNamed[] = []
   try {
     const j = JSON.parse(fs.readFileSync(p, 'utf8')) as { data?: Record<string, { days?: HolidayDayLike[] }> }
     for (const [y, yd] of Object.entries(j?.data ?? {})) {
       const m = new Map<string, boolean>()
       for (const d of yd?.days ?? []) {
-        if (d && /^\d{4}-\d{2}-\d{2}$/.test(String(d.date))) m.set(String(d.date), d.isOffDay === true)
+        if (d && /^\d{4}-\d{2}-\d{2}$/.test(String(d.date))) {
+          m.set(String(d.date), d.isOffDay === true)
+          days.push({ date: String(d.date), isOffDay: d.isOffDay === true, name: typeof (d as HolidayDayNamed).name === 'string' ? (d as HolidayDayNamed).name : undefined })
+        }
       }
       if (m.size) years.set(y, m)
     }
   } catch {
-    return new Map() // 缓存损坏当作无日历，等待下次拉取重建
+    return { years: new Map(), days: [] } // 缓存损坏当作无日历，等待下次拉取重建
   }
-  memo = { key, years }
-  return years
+  days.sort((a, b) => a.date.localeCompare(b.date))
+  memo = { key, data: { years, days } }
+  return memo.data
+}
+
+/** 读取 holiday-cn 缓存为日历表；文件缺失/损坏返回空表（全部按星期几降级）。每次调用至多一次 statSync。 */
+export function loadCalendar(): HolidayCalendar {
+  return loadCalendarData().years
 }
 
 export function localDateKey(d: Date): string {
@@ -61,35 +77,9 @@ export interface HolidayDayNamed extends HolidayDayLike {
   name?: string
 }
 
-let daysMemo: { key: string; days: HolidayDayNamed[] } | null = null
-
-/** 读取缓存日历的全部条目（含假期名与调休补班日），按日期升序；文件缺失/损坏返回空表。memo 策略与 loadCalendar 相同。 */
+/** 读取缓存日历的全部条目（含假期名与调休补班日），按日期升序；文件缺失/损坏返回空表。与 loadCalendar 共享同一份 memo。 */
 export function loadHolidayDays(): HolidayDayNamed[] {
-  const p = holidaysCachePath()
-  let mtime = 0
-  try {
-    mtime = fs.statSync(p).mtimeMs
-  } catch {
-    return []
-  }
-  const key = p + '\0' + mtime
-  if (daysMemo && daysMemo.key === key) return daysMemo.days
-  const days: HolidayDayNamed[] = []
-  try {
-    const j = JSON.parse(fs.readFileSync(p, 'utf8')) as { data?: Record<string, { days?: HolidayDayNamed[] }> }
-    for (const yd of Object.values(j?.data ?? {})) {
-      for (const d of yd?.days ?? []) {
-        if (d && /^\d{4}-\d{2}-\d{2}$/.test(String(d.date))) {
-          days.push({ date: String(d.date), isOffDay: d.isOffDay === true, name: typeof d.name === 'string' ? d.name : undefined })
-        }
-      }
-    }
-  } catch {
-    return [] // 缓存损坏当作无日历，等待下次拉取重建
-  }
-  days.sort((a, b) => a.date.localeCompare(b.date))
-  daysMemo = { key, days }
-  return days
+  return loadCalendarData().days
 }
 
 export interface HolidayRange {

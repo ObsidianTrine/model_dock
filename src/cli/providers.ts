@@ -4,7 +4,7 @@ import { c, maskSecret, printTable, slugify, t } from '../util/index.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { removeProviderCascade } from '../ops.js'
 import { defaultStore, deleteSecret, getSecret, setSecret, type SecretBackend } from '../config/secrets.js'
-import { PRESETS, findPreset, presetModels } from '../presets/data.js'
+import { PRESETS, findPreset, ensurePresetsLoaded, presetModels } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 import { refreshCatalog } from '../providers/catalog.js'
@@ -104,6 +104,7 @@ export async function cmdProviderAdd(
   opts: { name?: string; baseUrl?: string; protocol?: Protocol; auth?: AuthStyle; key?: string; keyEnv?: string; noFetch?: boolean; yes?: boolean }
 ): Promise<void> {
   const cfg = await loadCfg()
+  ensurePresetsLoaded()
   let preset = presetId ? findPreset(presetId) : undefined
   if (presetId && !preset) {
     console.error(c.red(t('✗ 未知预设「{id}」', '✗ Unknown preset: {id}', { id: presetId })))
