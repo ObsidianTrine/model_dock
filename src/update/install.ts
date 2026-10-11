@@ -62,24 +62,17 @@ export function defaultInstallDeps(): InstallDeps {
 /** 停托盘：按命令行精确匹配 ModelDockTray（不按映像名全局杀）。尽力而为，失败静默。 */
 async function stopTrayProcesses(): Promise<void> {
   try {
-    const { listProcessLines } = await import('../cli/gatewaycmd.js')
+    const [{ listProcessLines }, { parsePidCommandLines, killByPid }] = await Promise.all([
+      import('../cli/gatewaycmd.js'),
+      import('../cli/shared.js'),
+    ])
     const lines = listProcessLines()
     if (!lines) return
-    for (const line of lines.split('\n')) {
-      const m = line.match(/^\s*(\d+)\s+(.*)$/)
-      if (!m) continue
-      const [, pid, cmd] = m
+    for (const { pid, cmd } of parsePidCommandLines(lines)) {
       // 匹配托盘可执行名；排除本进程与自身路径里的误配（托盘进程极小概率自己重名）
       if (!/ModelDockTray(\.exe)?(\s|$|")/i.test(cmd)) continue
-      try {
-        if (process.platform === 'win32') {
-          spawnSync('taskkill', ['/PID', pid, '/F', '/T'], { stdio: 'ignore', windowsHide: true })
-        } else {
-          process.kill(Number(pid), 'SIGTERM')
-        }
-      } catch {
-        /* 已退出/权限不足：托盘残留不影响新版本运行 */
-      }
+      // 已退出/权限不足：托盘残留不影响新版本运行
+      killByPid(pid)
     }
   } catch {
     /* 进程枚举不可用时跳过（不影响主流程） */
