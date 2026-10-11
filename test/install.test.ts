@@ -364,6 +364,66 @@ describe('客户端安装并接入', () => {
     }
   })
 
+  it('EBADENGINE 警告提升为可操作提示：成功与失败路径都可见', async () => {
+    const h = fakeHome()
+    const restoreAllow = allowStubCommands()
+    const envs = ['MODELRDOCK_NODE_FORCE_DOWNLOAD', 'MODELRDOCK_NODE_VERSION', 'MODELRDOCK_EB_FIXTURE']
+    const saved = envs.map((k) => process.env[k])
+    try {
+      const home = process.env.MODELRDOCK_FAKE_HOME!
+      const binDir = process.platform === 'win32'
+        ? path.join(home, '.modeldock', 'runtime', 'node', 'v0.0.0-test')
+        : path.join(home, '.modeldock', 'runtime', 'node', 'v0.0.0-test', 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      // 与上方 needsNode 用例同一手法：win 桩=真实 node 拷贝；unix 桩无执行位会被 shell 跳过、回落真实 node
+      if (process.platform === 'win32') {
+        fs.copyFileSync(process.execPath, path.join(binDir, 'node.exe'))
+      } else {
+        fs.writeFileSync(path.join(binDir, 'node'), '#!/bin/sh\n')
+      }
+      process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD = '1'
+      process.env.MODELRDOCK_NODE_VERSION = '0.0.0-test'
+      // fixture 经 env 传给 node -e（installChildEnv 透传非 npm_* 变量），避开 shell 引号地狱
+      process.env.MODELRDOCK_EB_FIXTURE = [
+        'npm warn EBADENGINE Unsupported engine {',
+        "npm warn EBADENGINE   package: 'some-dep@1.0.0'",
+        "npm warn EBADENGINE   required: { node: '>=26.0.0' }",
+        "npm warn EBADENGINE   current: { node: 'v0.0.0-test' }",
+        'npm warn EBADENGINE }',
+      ].join('\n')
+      const mkFake = (id: string, code: number): HarnessAdapter => ({
+        id,
+        label: 'FakeEb',
+        install: {
+          command: `node -e "process.stderr.write(process.env.MODELRDOCK_EB_FIXTURE||'');process.exit(${code})"`,
+          needsNode: true,
+          guide: 'x',
+        },
+        detect: async () => ({ installed: false, configFiles: [] }),
+        planAttach: async () => ({ changes: [], notes: [] }),
+        planDetach: async () => ({ changes: [], notes: [] }),
+        status: async () => ({ installed: false, attached: false }),
+      })
+      // npm 的 EBADENGINE 走 stderr：runShell 同时捕获 stdout/stderr 才看得见（此处即验证 stderr 路径）
+      const ok = await runClientInstall(mkFake('fake-eb-ok', 0), emptyConfig(), 8687)
+      expect(ok.ok).toBe(true)
+      expect(ok.output).toContain('EBADENGINE')
+      expect(ok.output).toContain('>=26.0.0')
+      expect(ok.output).toContain('MODELRDOCK_NODE_VERSION')
+      const bad = await runClientInstall(mkFake('fake-eb-bad', 3), emptyConfig(), 8687)
+      expect(bad.ok).toBe(false)
+      expect(bad.output).toContain('EBADENGINE')
+      expect(bad.output).toContain('>=26.0.0')
+    } finally {
+      restoreAllow()
+      envs.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]!
+      })
+      h.restore()
+    }
+  })
+
   it('dsh probe 命中：跳过 npm 安装，仍预写 ~/.dsh/settings.yaml 骨架（boot 后 detect 即 installed）', async () => {
     const h = fakeHome()
     try {

@@ -90,6 +90,24 @@ export function downloadFailureMessage(bases: string[], err: string): Error {
   ))
 }
 
+/**
+ * 从 npm 安装输出识别 EBADENGINE（依赖 engines 与运行时不匹配）并生成可操作提示。
+ * npm 对 engines 默认只警告不拦截：钉死的托管 Node 过期后，新客户端会「装成功、跑就崩」，
+ * 把埋在安装日志里的警告提升到安装结果，过期钉版第一时间可见。无 EBADENGINE 时返回 null。
+ */
+export function engineWarningHint(output: string): string | null {
+  if (!output.includes('EBADENGINE')) return null
+  const required = [...new Set(
+    [...output.matchAll(/required:\s*\{[^}]*\bnode:\s*'([^']+)'/g)].map((m) => m[1])
+  )]
+  const current = output.match(/current:\s*\{[^}]*\bnode:\s*'([^']+)'/)?.[1]
+  return t(
+    '检测到 EBADENGINE 警告：有依赖要求 Node {req}（本次安装用 {cur}）。安装可能照常完成，但客户端运行可能异常——建议升级系统 Node 到要求版本后点「重新检测」，或设 MODELRDOCK_NODE_VERSION=<更高版本> 重新安装',
+    'EBADENGINE warnings detected: a dependency requires Node {req} (this install ran on {cur}). The install may have completed, but the client may fail to run — upgrade the system Node to the required version and click Re-detect, or set MODELRDOCK_NODE_VERSION=<a newer version> and reinstall',
+    { req: required.join('、') || '?', cur: current ?? '?' }
+  )
+}
+
 export function managedNodeDir(version = nodeVersion()): string {
   return path.join(modeldockDir(), 'runtime', 'node', `v${version}`)
 }

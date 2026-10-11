@@ -12,7 +12,7 @@ import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config, type ProviderConfi
 import { defaultStore, deleteSecret, getSecret, setSecret } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
-import { ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
+import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
 import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService, syncBakedClientsForDisplayRoute } from '../ops.js'
@@ -124,12 +124,17 @@ export async function runClientInstall(
           }
         }
         const exit = await runShell(cmd, (c) => output.push(c), env)
+        // npm 对 engines 不匹配默认只警告（EBADENGINE）不拦：钉死的托管 Node 过期后新客户端
+        // 会「装成功、跑就崩」——把埋在日志里的警告提升为可操作提示，失败/成功路径都要可见
+        const engineHint = inst.needsNode ? engineWarningHint(output.join('')) : null
         if (exit !== 0) {
+          if (engineHint) output.push(engineHint)
           return { ok: false, auto: true, output: tailText(output), installed: false, skipped: false }
         }
         // 成功也带回子进程输出（npm 进度/下载占比），tailText 统一截尾
         const childOut = output.join('').trim()
         if (childOut) lines.push(childOut)
+        if (engineHint) lines.push(engineHint)
         lines.push(t('已执行安装命令：{cmd}', 'Ran install command: {cmd}', { cmd }))
       }
     }

@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import {
   downloadFailureMessage,
+  engineWarningHint,
   ensureNodeRuntime,
   integrateManagedPath,
   managedNodeBinDir,
@@ -207,6 +208,28 @@ describe('noderuntime 纯函数', () => {
     expect(downloadFailureMessage([zhMirror], 'timeout').message).toContain('VPN')
     expect(downloadFailureMessage(['https://nodejs.org/dist'], 'timeout').message).not.toContain('VPN')
     expect(downloadFailureMessage([zhMirror, 'https://nodejs.org/dist'], 'timeout').message).not.toContain('VPN')
+  })
+
+  it('engineWarningHint：识别 EBADENGINE、提取 required/current，无警告返回 null', () => {
+    const block = (pkg: string) => [
+      'npm warn EBADENGINE Unsupported engine {',
+      `npm warn EBADENGINE   package: '${pkg}'`,
+      "npm warn EBADENGINE   required: { node: '>=22.12.0' }",
+      "npm warn EBADENGINE   current: { node: 'v24.21.0', npm: '10.9.4' }",
+      'npm warn EBADENGINE }',
+    ].join('\n')
+    const hint = engineWarningHint(`added 3 packages in 2s\n${block('commander@15.1.0')}`)
+    // 断言全用语言无关子串（env 变量名/版本号/警告标记），语言链 zh/en 都不影响
+    expect(hint).toContain('>=22.12.0')
+    expect(hint).toContain('v24.21.0')
+    expect(hint).toContain('MODELRDOCK_NODE_VERSION')
+    // 多包同下限去重，不重复点名
+    const dup = engineWarningHint(block('commander@15.1.0') + '\n' + block('chalk@6.0.0'))
+    expect(dup).toContain('>=22.12.0')
+    expect(dup.split('>=22.12.0').length - 1).toBe(1)
+    // 格式漂移兜底：有 EBADENGINE 无结构化行也提示，不让警告静默消失
+    expect(engineWarningHint('npm warn EBADENGINE Unsupported engine')).toContain('EBADENGINE')
+    expect(engineWarningHint('added 52 packages in 9s')).toBeNull()
   })
 
   it('版本覆盖：MODELRDOCK_NODE_VERSION 生效', () => {

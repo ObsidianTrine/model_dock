@@ -156,6 +156,81 @@ if (hardFails() === 0) {
   if (a.status === 0) add('pass', 'npm audit --omit=dev 无漏洞')
   else if (/vulnerabilities/i.test(aOut)) add('fail', '依赖存在漏洞', aTail)
   else add('warn', 'audit 未得出结论（网络/证书问题），人工补跑', 'npm audit --omit=dev\n' + aTail)
+
+  // 托管 Node 钉版健康（src/install/noderuntime.ts MANAGED_NODE_VERSION）：npm 客户端 engines 下限
+  // 只升不降（gemini-cli 18→20 先例），钉版过期会让无系统 Node 的全新机器「装成功、跑就崩」
+  // （npm 对 engines 默认只告 EBADENGINE 不拦）。engines 冲突=✗；补丁滞后/有更新 LTS 大版本=⚠。
+  const pin = fs.readFileSync(path.join(ROOT, 'src', 'install', 'noderuntime.ts'), 'utf8')
+    .match(/MANAGED_NODE_VERSION = '([\d.]+)'/)?.[1]
+  const installCmdRe = /(?:command|posix|win32):\s*'(npm (?:i|install) -g [^']+)'/g
+  const pkgs = new Set()
+  for (const f of fs.readdirSync(path.join(ROOT, 'src', 'adapters')).filter((f) => f.endsWith('.ts'))) {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'adapters', f), 'utf8')
+    for (const m of src.matchAll(installCmdRe)) pkgs.add(m[1].trim().split(/\s+/).pop())
+  }
+  if (!pin || pkgs.size === 0) {
+    add('warn', '托管 Node 钉版核对未执行', `解析失败：钉版=${pin || '未找到'}，npm 客户端=${pkgs.size} 个——src 结构变了，人工核对 engines 与 MANAGED_NODE_VERSION`)
+  } else {
+    const vercmp = (a, b) => {
+      const pa = a.split('.'), pb = b.split('.')
+      for (let i = 0; i < 3; i++) {
+        const d = (+pa[i] || 0) - (+pb[i] || 0)
+        if (d) return d
+      }
+      return 0
+    }
+    const floors = []
+    let viewErr = ''
+    for (const pkg of pkgs) {
+      const v = npm(['view', pkg, 'engines.node', '--registry=https://registry.npmmirror.com'])
+      if (v.status !== 0) viewErr = ((v.stdout || '') + (v.stderr || '')).trim().split('\n').slice(-3).join('\n')
+      floors.push({ pkg, req: ((v.stdout || '').trim().replace(/^"|"$/g, '')) })
+    }
+    if (viewErr) {
+      add('warn', 'npm 客户端 engines 查询失败（网络/registry）', `人工核对 ${[...pkgs].join('、')} 的 engines 与钉版 ${pin}：\n${viewErr}`)
+    } else {
+      const over = []
+      const noted = []
+      for (const { pkg, req } of floors) {
+        if (!req) continue // 未声明 engines：明细里已标注，无需人工跟进
+        const m = req.match(/^(?:>=?|\^|~)?\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/)
+        if (!m) { noted.push(`${pkg} engines「${req}」无法自动比对（人工核对）`); continue }
+        const floor = `${m[1]}.${m[2] || 0}.${m[3] || 0}`
+        if (vercmp(floor, pin) > 0) over.push(`${pkg} 要求 >=${floor}`)
+      }
+      if (over.length) {
+        add('fail', 'npm 客户端 engines 超出托管 Node 钉版', `${over.join('；')}（钉版 ${pin}）——无系统 Node 的全新机器会装成功但跑不起来；升 src/install/noderuntime.ts 的 MANAGED_NODE_VERSION（与 SEA/CI 大版本同步）`)
+      } else {
+        add('pass', `npm 客户端 engines 全部满足托管 Node 钉版 ${pin}`,
+          floors.map((f) => f.req ? `${f.pkg} ${f.req}` : `${f.pkg} 未声明`).join('、') + (noted.length ? '；' + noted.join('；') : ''))
+      }
+    }
+    // 新鲜度：node dist 镜像 index 取「钉版大版本最新 patch」与「最新 LTS 大版本」；fetch 经 node 子进程，主脚本保持同步风格
+    const idxScript = "fetch('https://cdn.npmmirror.com/binaries/node/index.json',{signal:AbortSignal.timeout(30000)})" +
+      `.then(r=>r.json()).then(d=>{const lts=d.find(x=>x.lts);const maj=d.find(x=>x.version.startsWith('v${pin.split('.')[0]}.'));` +
+      "process.stdout.write(JSON.stringify({newestLts:lts?{v:lts.version,name:lts.lts}:null,pinLatest:maj?maj.version:null}))}).catch(()=>process.exit(1))"
+    const idx = spawnSync(process.execPath, ['-e', idxScript], { encoding: 'utf8', timeout: 60000 })
+    if (idx.status !== 0) {
+      add('warn', '托管 Node 钉版新鲜度未核对（node 镜像查询失败）', ((idx.stderr || '') + (idx.stdout || '')).trim().slice(0, 200))
+    } else {
+      let info = null
+      try { info = JSON.parse(idx.stdout) } catch { /* 响应异常按未核对处理 */ }
+      if (!info?.pinLatest || !info?.newestLts?.v) {
+        add('warn', '托管 Node 钉版新鲜度未核对（镜像 index 结构异常）', (idx.stdout || '').slice(0, 200))
+      } else {
+        const stale = []
+        if (vercmp(info.pinLatest.replace(/^v/, ''), pin) > 0) {
+          stale.push(`钉版 ${pin} 非 ${pin.split('.')[0]} 线最新（${info.pinLatest}）——安全补丁滞后，发版顺手 bump`)
+        }
+        const ltsMajor = Number(String(info.newestLts.v).match(/^v(\d+)\./)?.[1])
+        if (ltsMajor > Number(pin.split('.')[0])) {
+          stale.push(`已有更新 LTS 大版本 ${info.newestLts.v}（${info.newestLts.name}）——评估随发版切换（与 SEA/CI/开发机大版本同步）`)
+        }
+        if (stale.length) add('warn', '托管 Node 钉版新鲜度', stale.join('\n'))
+        else add('pass', `托管 Node 钉版 ${pin} 为当前线最新且是最新 LTS 大版本`)
+      }
+    }
+  }
 }
 
 // 基线漂移（usage §10 的用例数 vs 实测）

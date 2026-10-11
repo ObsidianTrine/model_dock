@@ -34,10 +34,12 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 | ✗ | `npm test` 全绿（脚本解析并报告用例数 / 文件数） |
 | ✗ | `npm run build`（tsc）零错误 |
 | ✗ | `npm audit --omit=dev` 无漏洞（registry 不可达降级 ⚠） |
+| ✗ | 托管 Node 钉版满足全部 npm 客户端 engines 下限（npmmirror 实查 `src/adapters` 的 4 个 npm 安装命令；冲突 = 无系统 Node 的全新机器「装成功、跑就崩」，升 `MANAGED_NODE_VERSION`；查询失败降级 ⚠ 人工核对） |
 | ✗ | `src/` 无 `import.meta`（SEA 约定）、无 `listen(8687/8890)`（端口红线） |
 | ✗ | 密钥扫描（src / scripts）无真实密钥（test/ 命中降级 ⚠，人工确认是假值） |
 | ⚠ | `src/` TODO / FIXME / XXX / HACK 残留（列出供裁决） |
 | ⚠ | develop 领先 origin/develop（提示推送备份）、feature/* 分支残留（确认不含本版内容） |
+| ⚠ | 托管 Node 钉版新鲜度：非当前大版本最新 patch（安全补丁滞后，顺手 bump）/ 已有更新 LTS 大版本（提示评估切版，与 SEA/CI 同步） |
 | ⚠ | 基线漂移：实测用例数 / 文件数 ≠ [usage.md](usage.md) §10 所写（提示更新 usage.md） |
 
 ## 2. 人工判断项（脚本替代不了）
@@ -53,6 +55,7 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 - [ ] `package.json` 元数据正确（description / engines node>=22 / files 仅 dist）
 - [ ] secrets.json 永不入库，.gitignore 覆盖 dist / release / .cache / *.tgz；管理面不回传 Key 明文（reveal-key 受 Host 白名单 + 同源校验）
 - [ ] 网关仅监听 127.0.0.1（设计约束，改动即 major + 威胁模型更新）
+- [ ] 托管 Node 钉版年度评估：每年 10 月新 LTS 落地后择发版升级 `MANAGED_NODE_VERSION`（与 SEA 内嵌运行时 / CI / 开发机同大版本切换）；平时发版按门禁 ⚠ 提示跟进当前线最新 patch
 - [ ] 已知限制（AGENTS.md「已知限制」）逐条确认仍成立
 
 ## 3. 发布执行
