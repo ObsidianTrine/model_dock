@@ -5,6 +5,7 @@ import path from 'node:path'
 import { getLang, t, type Lang } from '../util/i18n.js'
 import { atomicWrite, commandOnPathResolved, ensureDir, fileSha256, readTextIfExists } from '../util/fsx.js'
 import { homeDir, modeldockDir, sandboxNpmCache, sandboxNpmPrefix } from '../util/paths.js'
+import { downloadText, downloadToFile, extractArchive, parseSums } from '../update/transfer.js'
 
 /**
  * 托管 Node 运行时：为"本机没有任何 Node"的全新电脑自动补齐 npm 类 AI 客户端
@@ -23,7 +24,6 @@ const OFFICIAL_NODE_DIST = 'https://nodejs.org/dist'
 /** zh 用户代跑 npm 安装命令时注入的 registry（env 覆盖优先；不改用户全局 npm 配置） */
 export const DEFAULT_NPM_REGISTRY = 'https://registry.npmmirror.com'
 
-const DOWNLOAD_TIMEOUT_MS = 10 * 60_000
 const PROGRESS_STEP = 8 * 1024 * 1024
 const RC_PATH_MARK = 'ModelDock Node 运行时'
 
@@ -123,7 +123,7 @@ export function nodeAssetName(
   platform = process.platform,
   arch = process.arch
 ): string {
-  const plat = platform === 'win32' ? 'win' : platform
+  const plat = normalizeNodePlat(platform)
   if (plat !== 'darwin' && plat !== 'linux' && plat !== 'win') {
     throw new Error(t('不支持的操作系统：{p}', 'Unsupported operating system: {p}', { p: platform }))
   }
@@ -131,6 +131,26 @@ export function nodeAssetName(
     throw new Error(t('不支持的 CPU 架构：{a}，托管运行时仅提供 x64/arm64', 'Unsupported CPU architecture: {a}; the managed runtime ships x64/arm64 only', { a: arch }))
   }
   return `node-v${version}-${plat}-${arch}.${plat === 'win' ? 'zip' : 'tar.gz'}`
+}
+
+/** 平台段的唯一归一（win32→win）：资产名与包内顶层目录名共用，杜绝两处独立拼接漂移（DESIGN-11） */
+export function normalizeNodePlat(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? 'win' : platform
+}
+
+/** 解压包内顶层目录名（node dist 命名规则 node-v<ver>-<plat>-<arch>）。与资产名共用平台归一，
+ *  downloadNodeRuntime 的两处内层校验/换名一律经此（DESIGN-11 单一来源）。 */
+/** 暂存目录名：按资产名派生（.stage-<asset>），不同版本/架构的资产并发下载互不踩目录（DESIGN-11）。 */
+export function nodeStageDirName(asset: string): string {
+  return `.stage-${asset}`
+}
+
+export function nodeInnerDirName(
+  version = nodeVersion(),
+  platform: NodeJS.Platform = process.platform,
+  arch = process.arch
+): string {
+  return `node-v${version}-${normalizeNodePlat(platform)}-${arch}`
 }
 
 export interface NodeRuntimeInfo {
@@ -178,7 +198,9 @@ async function downloadNodeRuntime(onOut?: (line: string) => void): Promise<void
   const asset = nodeAssetName(version)
   const bases = nodeDownloadBases()
   const root = path.join(modeldockDir(), 'runtime', 'node')
-  const stageDir = path.join(root, `.stage-${process.pid}`)
+  // 暂存目录按资产名派生（.stage-<asset>），不同资产并发下载互不踩目录（DESIGN-11）：
+  // 同进程并发 ensureNodeRuntime 不再因共享 `.stage-<pid>` 一方 rm/rename 毁另一方。
+  const stageDir = path.join(root, nodeStageDirName(asset))
   await fsp.rm(stageDir, { recursive: true, force: true })
   await ensureDir(stageDir)
   const archive = path.join(stageDir, asset)
@@ -188,10 +210,21 @@ async function downloadNodeRuntime(onOut?: (line: string) => void): Promise<void
     for (const base of bases) {
       try {
         // 资产与 SHASUMS256 必须同一来源：镜像同步存在差异时不能混搭校验
-        const sumsUrl = `${base}/v${version}/SHASUMS256.txt`
-        const sums = await downloadText(sumsUrl)
-        await downloadFile(`${base}/v${version}/${asset}`, archive, onOut)
-        const expect = extractExpectedSha(sums, asset)
+        const origin = `${base}/v${version}`
+        const sums = await downloadText(`${origin}/SHASUMS256.txt`)
+        let nextReport = PROGRESS_STEP
+        await downloadToFile(`${origin}/${asset}`, archive, {
+          onProgress: (seen: number, total: number) => {
+            if (onOut && seen >= nextReport) {
+              onOut(t('已下载 {mb} MB{total}', 'Downloaded {mb} MB{total}', {
+                mb: Math.round(seen / 1024 / 1024),
+                total: total > 0 ? ` / ${Math.round(total / 1024 / 1024)} MB` : '',
+              }))
+              nextReport = seen + PROGRESS_STEP
+            }
+          },
+        })
+        const expect = parseSums(sums)[asset]
         if (!expect) throw new Error(t('SHASUMS256.txt 中找不到 {asset} 的校验项', 'SHASUMS256.txt has no entry for {asset}', { asset }))
         const actual = await fileSha256(archive)
         if (actual !== expect) {
@@ -207,53 +240,18 @@ async function downloadNodeRuntime(onOut?: (line: string) => void): Promise<void
     if (!ok) {
       throw downloadFailureMessage(bases, lastErr)
     }
-    await extractArchive(archive, stageDir, version)
-    const inner = path.join(stageDir, `node-v${version}-${process.platform === 'win32' ? 'win' : process.platform}-${process.arch}`)
+    await extractArchive(archive, stageDir)
+    // 解压产物缺失说明包内容与预期不符（资产名对不上内容），让上层报错前先归因
+    const inner = path.join(stageDir, nodeInnerDirName(version))
+    if (!fs.existsSync(inner)) {
+      throw new Error(t('压缩包内未找到目录 {dir}', 'Directory {dir} not found inside the archive', { dir: path.basename(inner) }))
+    }
     const target = managedNodeDir(version)
     await fsp.rm(target, { recursive: true, force: true })
     await fsp.rename(inner, target)
   } finally {
     await fsp.rm(stageDir, { recursive: true, force: true }).catch(() => {})
   }
-}
-
-async function downloadText(url: string): Promise<string> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`)
-  return res.text()
-}
-
-async function downloadFile(url: string, dest: string, onOut?: (line: string) => void): Promise<void> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) })
-  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} ${url}`)
-  const total = Number(res.headers.get('content-length') ?? 0)
-  let seen = 0
-  let nextReport = PROGRESS_STEP
-  const fh = await fsp.open(dest, 'w', 0o600)
-  try {
-    for await (const chunk of res.body) {
-      const buf = Buffer.from(chunk as ArrayBuffer)
-      seen += buf.length
-      await fh.write(buf)
-      if (onOut && seen >= nextReport) {
-        onOut?.(t('已下载 {mb} MB{total}', 'Downloaded {mb} MB{total}', {
-          mb: Math.round(seen / 1024 / 1024),
-          total: total > 0 ? ` / ${Math.round(total / 1024 / 1024)} MB` : '',
-        }))
-        nextReport = seen + PROGRESS_STEP
-      }
-    }
-  } finally {
-    await fh.close()
-  }
-}
-
-function extractExpectedSha(sums: string, filename: string): string | null {
-  for (const line of sums.split('\n')) {
-    const m = line.trim().match(/^([0-9a-f]{64})\s+\*?(.+)$/)
-    if (m && m[2] === filename) return m[1]
-  }
-  return null
 }
 
 function spawnAwait(cmd: string, args: string[]): Promise<void> {
@@ -267,24 +265,6 @@ function spawnAwait(cmd: string, args: string[]): Promise<void> {
       else reject(new Error(err.trim() || t('进程退出码 {code}', 'process exited with code {code}', { code: code ?? -1 })))
     })
   })
-}
-
-/** unix 用系统自带 tar（bsdtar），Windows 用系统自带 PowerShell Expand-Archive——零第三方依赖 */
-async function extractArchive(archive: string, stageDir: string, version: string): Promise<void> {
-  if (process.platform === 'win32') {
-    if (archive.includes('"') || stageDir.includes('"')) {
-      throw new Error(t('路径含引号，无法解压：{p}', 'Path contains a quote character, cannot extract: {p}', { p: archive }))
-    }
-    await spawnAwait('powershell', ['-NoProfile', '-Command',
-      `Expand-Archive -LiteralPath "${archive}" -DestinationPath "${stageDir}" -Force`])
-  } else {
-    await spawnAwait('tar', ['-xzf', archive, '-C', stageDir])
-  }
-  // 解压产物缺失说明包内容与预期不符（资产名对不上内容），让上层报错前先归因
-  const inner = path.join(stageDir, `node-v${version}-${process.platform === 'win32' ? 'win' : process.platform}-${process.arch}`)
-  if (!fs.existsSync(inner)) {
-    throw new Error(t('压缩包内未找到目录 {dir}', 'Directory {dir} not found inside the archive', { dir: path.basename(inner) }))
-  }
 }
 
 // PATH 接入

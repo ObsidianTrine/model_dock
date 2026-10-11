@@ -29,11 +29,11 @@ import {
   cleanOldVersions,
   defaultInstallDeps,
   detectInstallShape,
-  extractArchive,
   installBareBinary,
   installMacApp,
   type InstallDeps,
 } from './install.js'
+import { extractArchive } from './transfer.js'
 import { notesSummary } from './notes.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 
@@ -66,6 +66,19 @@ export interface UpdateRunResult {
 
 function mb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/**
+ * 「已是最新」早退判定（runUpdate / checkUpdate 两路复用）：版本不高于当前即打行并返回 true，
+ * 调用方据此直接返回 checkedOnly 结果，避免复制 fetchLatestRelease→compareVersions 块。
+ */
+export function logAlreadyUpToDate(
+  m: ReleaseManifest,
+  log: (msg: string) => void
+): UpdateRunResult | null {
+  if (compareVersions(m.version, VERSION) > 0) return null
+  log(c.green(t('已是最新版本（v{v}）', 'Already up to date (v{v})', { v: VERSION })))
+  return { updated: false, currentVersion: VERSION, latestVersion: m.version, checkedOnly: true }
 }
 
 /**
@@ -105,11 +118,8 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     )
   }
   const m: ReleaseManifest = await fetchLatestRelease(opts.repo, opts.token, opts.apiBase)
-  const cmp = compareVersions(m.version, VERSION)
-  if (cmp <= 0) {
-    log(c.green(t('已是最新版本（v{v}）', 'Already up to date (v{v})', { v: VERSION })))
-    return { updated: false, currentVersion: VERSION, latestVersion: m.version, checkedOnly: true }
-  }
+  const already = logAlreadyUpToDate(m, log)
+  if (already) return already
 
   const assetName = selectAssetName(shape, platform, process.arch, m.version)
   const asset = assetName ? findAsset(m, assetName) : null
@@ -217,11 +227,8 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
 export async function checkUpdate(repo: string, token: string | null, opts: { apiBase?: string; log?: (m: string) => void } = {}): Promise<UpdateRunResult> {
   const log = opts.log ?? ((m: string) => console.log(m))
   const m = await fetchLatestRelease(repo, token, opts.apiBase)
-  const cmp = compareVersions(m.version, VERSION)
-  if (cmp <= 0) {
-    log(c.green(t('已是最新版本（v{v}）', 'Already up to date (v{v})', { v: VERSION })))
-    return { updated: false, currentVersion: VERSION, latestVersion: m.version, checkedOnly: true }
-  }
+  const already = logAlreadyUpToDate(m, log)
+  if (already) return already
   log(c.bold(t('有新版本：v{a}（当前 v{b}）', 'New version available: v{a} (current v{b})', { a: m.version, b: VERSION })))
   logReleaseNotes(m, log)
   log(t('执行 modeldock update 安装', 'Run modeldock update to install'))

@@ -9,15 +9,16 @@
  * SHA256 从发布物的 SHA256SUMS 资产解析，任何资产安装前强校验；SUMS 本体永走官方 API
  * （镜像只做加速，完整性锚点不能经过它，见 design §8）。
  */
-import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import crypto from 'node:crypto'
 import { t } from '../util/i18n.js'
+import { fileSha256 } from '../util/fsx.js'
+import { downloadToFile, parseSums } from './transfer.js'
 
 const API_BASE = 'https://api.github.com'
 const CHECK_TIMEOUT_MS = 15_000
+/** 官方 API 资产端点下载超时（对象存储间歇断是大陆常态，留足余量）；镜像候选另用快失败超时 */
 const DOWNLOAD_TIMEOUT_MS = 15 * 60_000
 /** 镜像/直连候选的失败上限：镜像死了要快速落到下一候选，不能占满 15 分钟 */
 const MIRROR_TIMEOUT_MS = 60_000
@@ -246,37 +247,23 @@ export async function downloadAsset(
   for (const cand of candidates) {
     for (let attempt = 1; attempt <= cand.attempts; attempt++) {
       try {
-        const res = await fetch(cand.url, {
-          headers: ghHeaders(cand.withAuth ? token : null, 'application/octet-stream'),
-          signal: AbortSignal.timeout(cand.timeoutMs),
-          redirect: 'follow',
-        })
-        if (!res.ok || !res.body) {
-          throw new UpdateError(
-            t('下载 {n} 失败：HTTP {s}', 'Failed to download {n}: HTTP {s}', { n: asset.name, s: res.status })
-          )
-        }
-        await fsp.mkdir(destDir, { recursive: true })
-        const out = fs.createWriteStream(dest)
-        let received = 0
+        // 进镜像候选时锁定的 size 来自 manifest，作完整性基线（drain 节奏与进度节流留在下载原语内）
         let lastReport = 0
-        const reader = res.body.getReader()
-        try {
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (done) break
-            received += value.byteLength
-            if (!out.write(Buffer.from(value))) {
-              await new Promise<void>((resolve) => out.once('drain', resolve))
-            }
-            if (opts.onProgress && received - lastReport > 5 * 1024 * 1024) {
-              lastReport = received
-              opts.onProgress(received, asset.size)
-            }
-          }
-        } finally {
-          await new Promise<void>((resolve) => out.end(resolve))
-        }
+        const received = await downloadToFile(cand.url, dest, {
+          headers: ghHeaders(cand.withAuth ? token : null, 'application/octet-stream'),
+          timeoutMs: cand.timeoutMs,
+          objectName: asset.name,
+          ...(opts.onProgress
+            ? {
+                onProgress: (r: number) => {
+                  if (r - lastReport > 5 * 1024 * 1024) {
+                    lastReport = r
+                    opts.onProgress!(r, asset.size)
+                  }
+                },
+              }
+            : {}),
+        })
         if (asset.size > 0 && received !== asset.size) {
           throw new UpdateError(
             t(
@@ -312,25 +299,11 @@ export async function fetchChecksums(
   try {
     const file = await downloadAsset(repo, token, sums, tmpDir, opts)
     const text = await fsp.readFile(file, 'utf8')
-    const map: Record<string, string> = {}
-    for (const line of text.split('\n')) {
-      const mm = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/)
-      if (mm) map[mm[2].trim()] = mm[1].toLowerCase()
-    }
+    const map = parseSums(text)
     return Object.keys(map).length ? map : null
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   }
-}
-
-export function sha256File(file: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const h = crypto.createHash('sha256')
-    const s = fs.createReadStream(file)
-    s.on('data', (d) => h.update(d))
-    s.on('end', () => resolve(h.digest('hex')))
-    s.on('error', reject)
-  })
 }
 
 /** 强校验：SUMS 名册存在但资产不在册/哈希不符 → 抛错并删除下载物。校验不过绝不进入安装。 */
@@ -347,7 +320,7 @@ export async function verifyChecksum(file: string, sums: Record<string, string> 
       t('{n} 不在 SHA256SUMS 名册中，拒绝安装', '{n} is not listed in SHA256SUMS; refusing to install', { n: name })
     )
   }
-  const actual = await sha256File(file)
+  const actual = await fileSha256(file)
   if (actual !== expected.toLowerCase()) {
     await fsp.rm(file, { force: true }).catch(() => {})
     throw new UpdateError(

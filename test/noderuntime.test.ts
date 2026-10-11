@@ -14,6 +14,8 @@ import {
   managedNodeDir,
   nodeAssetName,
   nodeDownloadBases,
+  nodeInnerDirName,
+  nodeStageDirName,
   npmRegistry,
   nodeVersion,
   MANAGED_NODE_VERSION,
@@ -247,5 +249,24 @@ describe('noderuntime 纯函数', () => {
   it('版本默认值与资产命名一致性', () => {
     expect(nodeVersion()).toBe(MANAGED_NODE_VERSION)
     expect(nodeAssetName()).toContain(`node-v${MANAGED_NODE_VERSION}-`)
+  })
+
+  it('暂存目录按资产名派生、inner 目录名单一来源（DESIGN-11 并发隔离）', () => {
+    // 不同版本/架构资产 → 独立暂存目录，不再共享 .stage-<pid>（并发 ensureNodeRuntime 互不踩）
+    const a = nodeStageDirName(nodeAssetName('24.21.0', 'darwin', 'arm64'))
+    const b = nodeStageDirName(nodeAssetName('24.21.0', 'darwin', 'x64'))
+    expect(a).not.toBe(b)
+    expect(a).toContain('node-v24.21.0-darwin-arm64.tar.gz')
+    expect(a.startsWith('.stage-')).toBe(true)
+    // inner 目录名（node-v<ver>-<plat>-<arch>）与资产名同用平台归一，两者拼不出不一致
+    expect(nodeInnerDirName('24.21.0', 'darwin', 'arm64')).toBe('node-v24.21.0-darwin-arm64')
+    expect(nodeInnerDirName('24.21.0', 'win32', 'x64')).toBe('node-v24.21.0-win-x64')
+    expect(nodeInnerDirName('24.21.0', 'linux', 'x64')).toBe('node-v24.21.0-linux-x64')
+    // 平台归一一致：inner 段 = 资产名去掉扩展名的同名前缀（win32→win、其余原样）
+    for (const pf of ['win32', 'darwin', 'linux']) {
+      const [plat, arch] = pf === 'win32' ? ['win', 'x64'] : [pf, 'x64']
+      expect(nodeInnerDirName('24.21.0', pf as never, 'x64')).toBe(`node-v24.21.0-${plat}-${arch}`)
+    }
+    expect(nodeInnerDirName().startsWith(`node-v${nodeVersion()}-`)).toBe(true)
   })
 })

@@ -192,25 +192,8 @@ export function buildWinInstallerCommand(
 
 // 解压
 
-/** 解压更新包到 dir：tar.gz 走系统 tar（Win10+ 自带 bsdtar），zip 走 PowerShell Expand-Archive */
-export async function extractArchive(archive: string, dir: string): Promise<void> {
-  await fsp.mkdir(dir, { recursive: true })
-  if (archive.endsWith('.zip')) {
-    const r = spawnSync(
-      'powershell',
-      ['-NoProfile', '-Command', `Expand-Archive -Path '${archive}' -DestinationPath '${dir}' -Force; if (!$?) { exit 1 }`],
-      { stdio: 'ignore', windowsHide: true }
-    )
-    if (r.status !== 0) throw new UpdateError(t('更新包解压失败', 'Failed to extract the update package'))
-    return
-  }
-  const r = spawnSync('tar', ['xzf', archive, '-C', dir], { stdio: 'ignore', windowsHide: true })
-  if (r.status !== 0 || r.error) {
-    throw new UpdateError(
-      t('更新包解压失败（tar 退出码 {s}）', 'Failed to extract the update package (tar exit code {s})', { s: r.status ?? -1 })
-    )
-  }
-}
+// 注：解压原语已收敛到 transfer.ts 的 extractArchive（tar / Expand-Archive 平台分支、可注入执行器），
+// 本域 run.ts 经 src/update/run.ts 从 transfer 引入，install.ts 不再各自维护一份。
 
 // 收尾
 
