@@ -3,12 +3,23 @@ import { promisify } from 'node:util'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { secretsPath } from '../util/paths.js'
-import { atomicWrite, readTextIfExists } from '../util/fsx.js'
+import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 
 const exec = promisify(execFile)
 
 export type SecretBackend = 'file' | 'keychain' | 'secret-service'
+
+/** secrets.json 损坏 / 不可操作时的可操作报错（对照 store.ts 的 ConfigError） */
+export class SecretsError extends Error {
+  constructor(msg: string) {
+    super(msg)
+    this.name = 'SecretsError'
+  }
+}
+
+/** secrets.json 写锁文件路径（与 config.toml 的 .lock 同语义、独立文件，互不串扰） */
+export const secretsLockPath = () => secretsPath() + '.lock'
 
 export interface KeyRef {
   scheme: 'file' | 'keychain' | 'secret-service' | 'env' | 'plain'
@@ -217,16 +228,6 @@ async function decMach(b64: string): Promise<string> {
   decipher.setAuthTag(buf.subarray(12, 28))
   return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString('utf8')
 }
-async function encryptMachineAll(dec: Record<string, string>): Promise<Record<string, string>> {
-  const raw: Record<string, string> = {}
-  for (const [k, v] of Object.entries(dec)) raw[k] = typeof v === 'string' && v !== '' ? await encMach(v) : v
-  return raw
-}
-async function decryptMachineAll(raw: Record<string, string>): Promise<Record<string, string>> {
-  const dec: Record<string, string> = {}
-  for (const [k, v] of Object.entries(raw)) dec[k] = typeof v === 'string' && v.startsWith(MACH_PREFIX) ? await decMach(v.slice(MACH_PREFIX.length)) : v
-  return dec
-}
 
 let warnedPlainFile = false
 function warnPlainFileOnce(): void {
@@ -240,122 +241,187 @@ const DPAPI_ENC = `Add-Type -AssemblyName System.Security
 const DPAPI_DEC = `Add-Type -AssemblyName System.Security
 [Console]::In.ReadToEnd() -split "\\r?\\n" | ForEach-Object { $s=$_.Trim(); if($s){ [Console]::Out.WriteLine([Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($s),$null,'CurrentUser'))) } }`
 
-/** 一次 PowerShell 进程批量加/解密多份（base64 入，base64 出，逐行对应） */
+/** 一次 PowerShell 进程批量加/解密多份（base64 入，base64 出，逐行对应）。payload 经 stdin 传、
+ *  密钥不进命令行。失败重试一次（覆盖瞬时 spawn 失败）；仍失败即抛——DPAPI Protect/Unprotect
+ *  依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条 spawn（旧回退
+ *  曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
 function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
-  if (b64In.length === 0) return Promise.resolve([])
-  return new Promise((resolve, reject) => {
-    const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
+  return (async () => {
+    if (b64In.length === 0) return []
+    let lastErr: unknown
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await new Promise<string[]>((resolve, reject) => {
+          const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+            windowsHide: true,
+          })
+          let out = ''
+          let err = ''
+          child.stdout.on('data', (d) => (out += d))
+          child.stderr.on('data', (d) => (err += d))
+          child.on('error', reject)
+          child.on('close', (code) => {
+            if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
+            resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
+          })
+          child.stdin.end(b64In.join('\n'))
+        })
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    throw lastErr
+  })()
+}
+
+// 整表加解密统一模型（DUP-07：encryptAll/decryptAll 与 encryptMachineAll/decryptMachineAll 同构
+// 双实现合并）：file 后端按平台一次选定加密方案，读/写分支只认 { prefix, encryptTable, decryptTable }。
+// win32→DPAPI（逐条 spawn 曾致几十秒，改用整表一次 PowerShell），linux 无钥匙环→machine-id 绑定 AES，
+// 其余→明文。
+
+interface FileCipher {
+  prefix: string
+  enabled: boolean
+  /** 整表解密：raw（带 prefix 的密文表）→ 明文表；未带 prefix 的值原样透传（存量明文/普通值） */
+  decryptTable: (raw: Record<string, string>) => Promise<Record<string, string>>
+  /** 整表加密：dec（明文表）→ 带 prefix 的密文表；空值/已带 prefix 原样保留 */
+  encryptTable: (dec: Record<string, string>) => Promise<Record<string, string>>
+}
+
+export const dpapiCipher: FileCipher = {
+  prefix: DPAPI_PREFIX,
+  enabled: CAN_DPAPI,
+  async encryptTable(dec) {
+    const entries = Object.entries(dec).filter(
+      ([, v]) => typeof v === 'string' && v !== '' && !v.startsWith(DPAPI_PREFIX)
+    )
+    const raw: Record<string, string> = { ...dec }
+    if (entries.length === 0) return raw
+    const outs = await dpapiBatch(DPAPI_ENC, entries.map(([, v]) => Buffer.from(v, 'utf8').toString('base64')))
+    entries.forEach(([k], i) => {
+      raw[k] = DPAPI_PREFIX + outs[i]
     })
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (d) => (out += d))
-    child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
-      resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
+    return raw
+  },
+  async decryptTable(raw) {
+    const encs = Object.entries(raw).filter(([, v]) => typeof v === 'string' && v.startsWith(DPAPI_PREFIX))
+    const dec: Record<string, string> = {}
+    for (const [k, v] of Object.entries(raw)) dec[k] = typeof v === 'string' ? v : ''
+    if (encs.length === 0) return dec
+    const outs = await dpapiBatch(DPAPI_DEC, encs.map(([, v]) => v.slice(DPAPI_PREFIX.length)))
+    encs.forEach(([k], i) => {
+      dec[k] = Buffer.from(outs[i], 'base64').toString('utf8')
     })
-    child.stdin.end(b64In.join('\n'))
-  })
+    return dec
+  },
 }
 
-async function dpapiProtect(plainUtf8: string): Promise<string> {
-  const [enc] = await dpapiBatch(DPAPI_ENC, [Buffer.from(plainUtf8, 'utf8').toString('base64')])
-  return enc
+export const machCipher: FileCipher = {
+  prefix: MACH_PREFIX,
+  enabled: CAN_MACH,
+  async encryptTable(dec) {
+    const raw: Record<string, string> = {}
+    for (const [k, v] of Object.entries(dec)) {
+      raw[k] = typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX) ? await encMach(v) : v
+    }
+    return raw
+  },
+  async decryptTable(raw) {
+    const dec: Record<string, string> = {}
+    for (const [k, v] of Object.entries(raw)) {
+      dec[k] = typeof v === 'string' && v.startsWith(MACH_PREFIX) ? await decMach(v.slice(MACH_PREFIX.length)) : v
+    }
+    return dec
+  },
 }
 
-async function dpapiUnprotect(encB64: string): Promise<string> {
-  const [plainB64] = await dpapiBatch(DPAPI_DEC, [encB64])
-  return Buffer.from(plainB64, 'base64').toString('utf8')
+const plainCipher: FileCipher = {
+  prefix: '',
+  enabled: true,
+  async encryptTable(dec) {
+    return { ...dec }
+  },
+  async decryptTable(raw) {
+    return { ...raw }
+  },
 }
 
-/** 整表批量加密 plain → `enc:dpapi:` 条目（一次 PowerShell 进程，失败回退逐条） */
-async function encryptAll(dec: Record<string, string>): Promise<Record<string, string>> {
-  const entries = Object.entries(dec).filter(([, v]) => typeof v === 'string' && v !== '')
-  const raw: Record<string, string> = { ...dec }
-  if (entries.length === 0) return raw
-  const inputs = entries.map(([, v]) => Buffer.from(v, 'utf8').toString('base64'))
-  let outs: string[]
-  try {
-    outs = await dpapiBatch(DPAPI_ENC, inputs)
-  } catch {
-    outs = []
-    for (const v of entries.map(([, v]) => v)) outs.push(await dpapiProtect(v))
-  }
-  entries.forEach(([k], i) => {
-    raw[k] = DPAPI_PREFIX + outs[i]
-  })
-  return raw
-}
-
-/** 整表批量解密 `enc:dpapi:` 条目 → 明文（一次 PowerShell 进程，失败回退逐条） */
-async function decryptAll(raw: Record<string, string>): Promise<Record<string, string>> {
-  const encs = Object.entries(raw).filter(([, v]) => typeof v === 'string' && v.startsWith(DPAPI_PREFIX))
-  const dec: Record<string, string> = {}
-  for (const [k, v] of Object.entries(raw)) dec[k] = typeof v === 'string' ? v : ''
-  if (encs.length === 0) return dec
-  const inputs = encs.map(([, v]) => v.slice(DPAPI_PREFIX.length))
-  let outs: string[]
-  try {
-    outs = await dpapiBatch(DPAPI_DEC, inputs)
-  } catch {
-    outs = []
-    for (const b64 of inputs) outs.push(await dpapiUnprotect(b64))
-  }
-  encs.forEach(([k], i) => {
-    dec[k] = Buffer.from(outs[i], 'base64').toString('utf8')
-  })
-  return dec
+/** 按平台一次选定 file 后端加密方案（DPAPI > machine-id AES > 明文） */
+export function pickFileCipher(): FileCipher {
+  if (CAN_DPAPI) return dpapiCipher
+  if (CAN_MACH) return machCipher
+  return plainCipher
 }
 
 // file 后端的解密缓存：扩展转发每请求读 key，缓存避免每请求 spawn 子进程。
-let fileCache: Record<string, string> | null = null
+// 缓存按 secrets.json 路径归属（path + data）：切换 MODELRDOCK_FAKE_HOME（测试多沙箱）或换数据源时，
+// 路径不同自然失效，避免拿上一份数据（home）的缓存污染当前读取。单 home 生产下路径恒定，行为同旧缓存。
+let fileCache: { path: string; data: Record<string, string> } | null = null
 
-/** 读取 file 后端解密表；win32 首次加载会把存量明文自动加密迁移（整表一次进程） */
-async function loadFileSecrets(): Promise<Record<string, string>> {
-  if (fileCache) return fileCache
-  let raw: Record<string, string> = {}
+/** 读 secrets.json 原始明文表；损坏抛可操作 SecretsError（不再静默当「无密钥」） */
+async function readSecretsRaw(): Promise<Record<string, string>> {
   const text = await readTextIfExists(secretsPath())
-  if (text) {
-    try {
-      raw = JSON.parse(text)
-    } catch {
-      raw = {}
-    }
-  }
-  if (CAN_DPAPI) {
-    const dec = await decryptAll(raw)
-    const hasLegacyPlain = Object.values(raw).some(
-      (v) => typeof v === 'string' && v !== '' && !v.startsWith(DPAPI_PREFIX)
+  if (!text) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (e) {
+    throw new SecretsError(
+      t('secrets.json 解析失败：{msg}\n文件路径：{p}\n请备份后删除或修正该文件，各密钥重新设置即可',
+        'Failed to parse secrets.json: {msg}\nPath: {p}\nBack up, then delete or fix this file; re-set your keys afterwards',
+        { msg: (e as Error).message, p: secretsPath() })
     )
-    if (hasLegacyPlain) {
-      await atomicWrite(secretsPath(), JSON.stringify(await encryptAll(dec), null, 2) + '\n', 0o600)
-    }
-    fileCache = dec
-    return dec
   }
-  if (CAN_MACH) {
-    const dec = await decryptMachineAll(raw)
-    const hasLegacyPlain = Object.values(raw).some(
-      (v) => typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new SecretsError(
+      t('secrets.json 内容不是密钥表对象（当前是{kind}）。文件路径：{p}\n请备份后删除或修正该文件，各密钥重新设置即可',
+        'secrets.json is not a key-table object (got {kind}). Path: {p}\nBack up, then delete or fix this file; re-set your keys afterwards',
+        { kind: Array.isArray(parsed) ? '数组/array' : typeof parsed, p: secretsPath() })
     )
-    if (hasLegacyPlain) {
-      await atomicWrite(secretsPath(), JSON.stringify(await encryptMachineAll(dec), null, 2) + '\n', 0o600)
-    }
-    fileCache = dec
-    return dec
   }
-  warnPlainFileOnce()
-  fileCache = raw
-  return raw
+  return parsed as Record<string, string>
+}
+
+/** 读取 file 后端解密表；win32/linux 首次加载会把存量明文自动加密迁移（整表一次进程）。
+ *  @param useCache 默认读内存缓存（转发热路径）；写路径传 false 强制重读盘，避免跨进程改 key 丢更新。 */
+async function loadFileSecrets(useCache = true): Promise<Record<string, string>> {
+  if (useCache && fileCache && fileCache.path === secretsPath()) return fileCache.data
+  const path = secretsPath()
+  const raw = await readSecretsRaw()
+  const cipher = pickFileCipher()
+  if (!cipher.enabled) {
+    warnPlainFileOnce()
+    fileCache = { path, data: raw }
+    return raw
+  }
+  const hasLegacyPlain = Object.values(raw).some(
+    (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
+  )
+  const dec = await cipher.decryptTable(raw)
+  if (hasLegacyPlain) {
+    await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+  }
+  fileCache = { path, data: dec }
+  return dec
 }
 
 /** 解密表整体加密写回文件（file 后端；整表一次进程，而非逐条） */
 async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
-  const raw = CAN_DPAPI ? await encryptAll(dec) : CAN_MACH ? await encryptMachineAll(dec) : { ...dec }
+  const cipher = pickFileCipher()
+  const raw = await cipher.encryptTable(dec)
   await atomicWrite(secretsPath(), JSON.stringify(raw, null, 2) + '\n', 0o600)
-  fileCache = dec
+  fileCache = { path: secretsPath(), data: dec }
+}
+
+/** 写路径统一入口：跨进程锁（与 config 同语义）+ 持锁内重读盘拼新鲜的解密表，改后整表写回。
+ *  锁内强制跳过内存缓存，避免另一进程刚写入的 key 被本进程旧缓存覆盖（丢更新）。 */
+function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise<T>): Promise<T> {
+  return withFileLock(secretsLockPath(), {}, async () => {
+    const store = await loadFileSecrets(false)
+    const ret = await fn(store)
+    await writeFileSecrets(store)
+    return ret
+  })
 }
 
 /** 清除全部密钥缓存（file 后端整表解密缓存 + 外部后端 TTL 缓存）：
@@ -382,13 +448,13 @@ export async function setSecret(id: string, value: string, backend: SecretBacken
     await setExternal(backend, id, value)
     return makeKeyRef(backend, id)
   }
-  const store = await loadFileSecrets()
-  store[id] = value
-  await writeFileSecrets(store)
-  return makeKeyRef('file', id)
+  return mutateFileSecrets((store) => {
+    store[id] = value
+    return makeKeyRef('file', id)
+  })
 }
 
-/** 批量写入多个 key（导入用）：file/dpapi 后端只做一次整表写盘，避免逐 key 重写；
+/** 批量写入多个 key（导入用）：file backend 只做一次整表写盘，避免逐 key 重写；
  *  keychain/secret-service 各写入一次外部存储。返回 id → key_ref。 */
 export async function setSecretsBatch(
   entries: Record<string, string>,
@@ -402,13 +468,13 @@ export async function setSecretsBatch(
     }
     return refs
   }
-  const store = await loadFileSecrets()
-  for (const [id, val] of Object.entries(entries)) {
-    store[id] = val
-    refs[id] = makeKeyRef('file', id)
-  }
-  await writeFileSecrets(store)
-  return refs
+  return mutateFileSecrets((store) => {
+    for (const [id, val] of Object.entries(entries)) {
+      store[id] = val
+      refs[id] = makeKeyRef('file', id)
+    }
+    return refs
+  })
 }
 
 export async function deleteSecret(ref: string): Promise<void> {
@@ -418,7 +484,7 @@ export async function deleteSecret(ref: string): Promise<void> {
     return
   }
   if (scheme !== 'file') return
-  const store = await loadFileSecrets()
-  delete store[id]
-  await writeFileSecrets(store)
+  return mutateFileSecrets((store) => {
+    delete store[id]
+  })
 }

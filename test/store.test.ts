@@ -5,9 +5,17 @@ import { fakeHome } from './helpers.js'
 import { loadConfig, saveConfig, ConfigError, mutateConfig } from '../src/config/store.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 import { removeProviderCascade } from '../src/ops.js'
-import { getSecret, parseKeyRef, setSecret, deleteSecret } from '../src/config/secrets.js'
+import {
+  getSecret,
+  parseKeyRef,
+  setSecret,
+  deleteSecret,
+  setSecretsBatch,
+  secretsLockPath,
+  invalidateSecretsCache,
+} from '../src/config/secrets.js'
 import { configPath, secretsPath } from '../src/util/paths.js'
-import { readTextIfExists } from '../src/util/fsx.js'
+import { readTextIfExists, acquireFileLock, withFileLock, sleep } from '../src/util/fsx.js'
 
 afterEach(() => {
   // fakeHome 的 restore 由各用例自行调用（before/after 配对）
@@ -146,15 +154,17 @@ describe('secrets', () => {
     }
   })
 
-  it('secrets.json 损坏时按空处理不崩溃', async () => {
+  it('secrets.json 损坏时抛可操作报错（含文件路径），不再静默当无密钥', async () => {
     const h = fakeHome()
     try {
       const { ensureDir, atomicWrite } = await import('../src/util/fsx.js')
       const { modeldockDir } = await import('../src/util/paths.js')
       await ensureDir(modeldockDir())
-      await atomicWrite(secretsPath(), '{broken', 0o600)
-      const ref = await setSecret('a', 'b', 'file')
-      expect(await getSecret(ref)).toBe('b')
+      await atomicWrite(secretsPath(), 'not json', 0o600)
+      await expect(setSecret('a', 'b', 'file')).rejects.toThrow(/secrets.json 解析失败|Failed to parse secrets.json/)
+      // getSecret 命中缓存时仍返回旧值（既定语病）；失效后重读盘应抛同样可操作错
+      invalidateSecretsCache()
+      await expect(getSecret('file:a')).rejects.toThrow(/secrets\.json/)
     } finally {
       h.restore()
     }
@@ -164,6 +174,100 @@ describe('secrets', () => {
     const h = fakeHome()
     try {
       expect(await readTextIfExists(`${h.home}/nope`)).toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('跨进程写锁（BUG-06/07）', () => {
+  it('acquireFileLock 释放做 pid 归属校验：伪造他者 pid 不删锁，本 pid 才删锁', async () => {
+    const h = fakeHome()
+    try {
+      // 场景 A：本进程持锁后锁内容被改写为他者 pid（模拟超时后被他进程抢占）→ release 不动他者的锁
+      const lp1 = path.join(h.home, 'own.lock')
+      const release1 = await acquireFileLock(lp1)
+      expect(fs.readFileSync(lp1, 'utf8')).toBe(String(process.pid))
+      fs.writeFileSync(lp1, '99999') // 伪造他进程 pid
+      release1()
+      expect(fs.existsSync(lp1)).toBe(true) // 他者的锁不被误删，第三个写者不会误入临界区
+      // 清理伪造锁（为场景 B 腾出空位）
+      for (let i = 0; i < 5; i++) {
+        try {
+          fs.unlinkSync(lp1)
+          break
+        } catch {
+          await sleep(10)
+        }
+      }
+      // 场景 B：锁内容仍为本进程 pid → release 正常删锁
+      const lp2 = path.join(h.home, 'own2.lock')
+      const release2 = await acquireFileLock(lp2)
+      expect(fs.readFileSync(lp2, 'utf8')).toBe(String(process.pid))
+      release2()
+      expect(fs.existsSync(lp2)).toBe(false) // 本进程锁被删除
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('secrets 写路径经 withFileLock 互斥调用序（后一个临界区等前一个释放才进入）', async () => {
+    const h = fakeHome()
+    try {
+      const lp = secretsLockPath()
+      const order: string[] = []
+      let unlock1: () => void = () => {}
+      const gate1 = new Promise<void>((r) => (unlock1 = r))
+      const p1 = withFileLock(lp, undefined, async () => {
+        order.push('job1-start')
+        await gate1
+        order.push('job1-end')
+      }).then(() => order.push('job1-done'))
+      await sleep(20) // 让 job1 抢到锁、进入临界区
+      const p2 = withFileLock(lp, undefined, async () => {
+        order.push('job2')
+      })
+      await sleep(20)
+      expect(order).toEqual(['job1-start']) // job2 被锁串行挡住，未执行
+      unlock1()
+      await p1
+      await p2
+      expect(order).toEqual(['job1-start', 'job1-end', 'job1-done', 'job2'])
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('并发 setSecret/setSecretsBatch 写入同一 secrets.json，键互不丢失', async () => {
+    const h = fakeHome()
+    try {
+      await Promise.all([
+        setSecret('a', 'va', 'file'),
+        setSecret('b', 'vb', 'file'),
+        setSecretsBatch({ c: 'vc' }, 'file'),
+      ])
+      expect(await getSecret('file:a')).toBe('va')
+      expect(await getSecret('file:b')).toBe('vb')
+      expect(await getSecret('file:c')).toBe('vc')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('整表加密 cipher 描述符（DUP-07 合并后）', () => {
+  it('machine 加密→解密往返无损（加密非空、空值透传、已带前缀不二次加密）', async () => {
+    const h = fakeHome()
+    try {
+      const { machCipher } = await import('../src/config/secrets.js')
+      const enc = await machCipher.encryptTable({ a: 'sk-1', b: '', c: 'enc:mach:already' })
+      expect(enc.a).toMatch(/^enc:mach:/) // 非空值被整表加密
+      expect(enc.b).toBe('') // 空值原样保留
+      expect(enc.c).toBe('enc:mach:already') // 已带前缀不二次加密
+      // 仅对真实加密的条目做往返（假前缀条目不喂进解密，避免塞无效密文）
+      const dec = await machCipher.decryptTable({ a: enc.a, b: enc.b })
+      expect(dec.a).toBe('sk-1')
+      expect(dec.b).toBe('')
     } finally {
       h.restore()
     }
