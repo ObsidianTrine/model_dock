@@ -169,6 +169,21 @@ describe('WebDAV 同步目标（内存假件，随机端口）', () => {
       await fake.close()
     }
   })
+
+  it('readBlob 拒绝越界 ref（encodeURIComponent 不编码 ..，与 localdir 前缀校验同级）', async () => {
+    const expectAuth = 'Basic ' + Buffer.from('user:pass').toString('base64')
+    const fake = await startWebdavFake(expectAuth)
+    try {
+      const target = createWebdavTarget({ url: `http://127.0.0.1:${fake.port}/dav`, dir: 'modeldock', username: 'user', password: 'pass' })
+      await expect(target.readBlob('../secret.txt')).rejects.toThrow(/非法|Invalid/)
+      await expect(target.readBlob('blobs/../../etc/passwd')).rejects.toThrow(/非法|Invalid/)
+      await expect(target.readBlob('blobs')).rejects.toThrow(/非法|Invalid/)
+      // 合法形态放行：文件缺失走「历史包缺失」而非「非法」
+      await expect(target.readBlob('blobs/9-somedev.msync')).rejects.toThrow(/缺失|missing/)
+    } finally {
+      await fake.close()
+    }
+  })
 })
 
 describe('双机端到端（localdir 目标，交错沙箱）', () => {

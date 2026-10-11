@@ -119,11 +119,30 @@ async function restoreVersionFiles(saved) {
   await fsp.writeFile(PKG_JSON_PATH, saved.origPkgJson)
 }
 
-async function downloadFile(url, dest) {
+/** Node 官方 SHASUMS256 表（与 url 同目录的 SHASUMS256.txt），key=文件名 */
+async function fetchNodeShasums(url) {
+  const base = url.replace(/\/[^/]+$/, '')
+  const res = await fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(60_000) })
+  if (!res.ok) err(`下载 SHASUMS256.txt 失败: ${res.status}（供应链门禁，拒绝跳过校验）`)
+  const map = new Map()
+  for (const line of (await res.text()).split('\n')) {
+    const m = /^([0-9a-f]{64})\s+(\S+)$/.exec(line.trim())
+    if (m) map.set(m[2], m[1])
+  }
+  return map
+}
+
+async function downloadFile(url, dest, shasums) {
   log(`下载 ${url}`)
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: AbortSignal.timeout(600_000) })
   if (!res.ok) err(`下载失败: ${res.status} ${res.statusText}`)
   const buf = Buffer.from(await res.arrayBuffer())
+  if (shasums) {
+    const name = path.basename(url)
+    if (shasums.get(name) !== sha256(buf)) {
+      err(`Node 工具链哈希校验失败（${name} 与 nodejs.org SHASUMS256 不符）：拒绝落盘注入 SEA`)
+    }
+  }
   await fsp.writeFile(dest, buf)
   return buf
 }
@@ -207,8 +226,18 @@ async function buildExecutables() {
       const archiveName = path.basename(url)
       const archivePath = path.join(cacheDir, archiveName)
 
+      // 供应链门禁：交叉下载的 Node 二进制注入 SEA 后进入发布物，必须与 nodejs.org 官方
+      // SHASUMS256 比对；缓存命中也复核（防缓存污染），不符即重新下载，仍不符则整体失败
+      const shasums = await fetchNodeShasums(url)
+      if (fs.existsSync(archivePath)) {
+        const cachedOk = sha256(await fsp.readFile(archivePath)) === shasums.get(archiveName)
+        if (!cachedOk) {
+          warn(`  ! 缓存的 ${archiveName} 与官方 SHASUMS256 不符，重新下载`)
+          await fsp.rm(archivePath, { force: true })
+        }
+      }
       if (!fs.existsSync(archivePath)) {
-        await downloadFile(url, archivePath)
+        await downloadFile(url, archivePath, shasums)
       }
 
       // 从压缩包中提取 node 二进制

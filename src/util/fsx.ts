@@ -249,7 +249,13 @@ export async function acquireFileLock(
       try {
         const st = fs.statSync(lockFile)
         if (Date.now() - st.mtimeMs > lockStaleMs) {
-          fs.unlinkSync(lockFile)
+          // 抢占前复核身份（ino/mtime/size）：stat 与 unlink 之间锁可能已被他人删除重建，
+          // 无条件 unlink 会误删新锁造成双持锁（正是本锁要防的丢更新）。复核把竞态窗口从
+          // 一次陈旧判定 IO 收窄到两次背靠背 stat 之间（µs 级；纯 JS 无 flock，这是无原生依赖下的务实上限）
+          const st2 = fs.statSync(lockFile)
+          if (st2.ino === st.ino && st2.mtimeMs === st.mtimeMs && st2.size === st.size) {
+            fs.unlinkSync(lockFile)
+          }
           continue
         }
       } catch {

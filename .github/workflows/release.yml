@@ -61,18 +61,33 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Build SEA
-        run: node scripts/build-sea.mjs --target ${{ matrix.target }}
-
-      # setup.exe 由 Inno Setup 编译（windows-latest 预装 ISCC 6；缺失时 choco 兜底）
-      - name: Build Windows installer
+      # setup.exe 由 build-sea 内部调 Inno Setup 编译（windows-latest 预装 ISCC 6）；
+      # ISCC 兜底安装必须放在 build-sea 之前——build-sea 内 ISCC 缺失会直接报错退出
+      - name: Ensure Inno Setup
         if: matrix.target == 'win32-x64'
         shell: pwsh
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
-          $ver = $env:GITHUB_REF_NAME -replace '^v',''
-          & $iscc "/DAppVersion=$ver" "scripts/installer.iss"
+
+      - name: Build SEA
+        run: node scripts/build-sea.mjs --target ${{ matrix.target }}
+
+      # 发布资产与校验名单一致性门：Inno Setup 不保证逐字节可复现，若在此重新构建会让
+      # SHA256SUMS 与实际上传资产失配（win-setup 自更新将永久校验失败）——这里只复核不重建
+      - name: Verify checksums
+        shell: pwsh
+        run: |
+          $sumsFile = "release/SHA256SUMS-${{ matrix.target }}"
+          $failed = $false
+          Get-Content $sumsFile | ForEach-Object {
+            if (-not $_.Trim()) { return }
+            $expected, $file = $_ -split '  ', 2
+            $actual = (Get-FileHash -Algorithm SHA256 "release/$file").Hash.ToLower()
+            if ($actual -ne $expected) { Write-Error "checksum mismatch: $file"; $failed = $true }
+            else { Write-Host "ok  $file" }
+          }
+          if ($failed) { exit 1 }
 
       # 只上传对外发布物（压缩包 / DMG / setup / 校验名单）；裸二进制不外发
       - name: Upload artifacts

@@ -133,7 +133,7 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
     }
   })
 
-  it('win32 解压路径含引号会拒绝（Expand-Archive 拼坏防护）', async () => {
+  it('win32 解压路径含引号或 PowerShell 元字符会拒绝（Expand-Archive 拼坏/插值防护）', async () => {
     const calls: string[][] = []
     const runner: SpawnRunner = async (_cmd, args) => { calls.push(args) }
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ok-'))
@@ -142,9 +142,12 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
       await extractArchive(path.join(dir, 'pkg.zip'), dir, runner, 'win32')
       expect(calls).toHaveLength(1)
       expect(calls[0].join(' ')).toContain('Expand-Archive')
-      // 含引号：拒绝且不跑任何命令
+      // 含引号 / PowerShell 插值元字符（反引号、$(）：拒绝且不跑任何命令
       calls.length = 0
       await expect(extractArchive('a"b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
+      await expect(extractArchive('a`b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
+      await expect(extractArchive('a$(x).zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
+      await expect(extractArchive('ab.zip', 'dir`with$tick', runner, 'win32')).rejects.toThrow(/引号|quote/)
       expect(calls).toHaveLength(0)
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
   })
