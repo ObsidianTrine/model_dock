@@ -610,6 +610,69 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('BUG-01①：patch 仅含 modeldock 自建条目（无用户 provider）时 detach 后无残留、用户条目保留', async () => {
+    const h = fakeHome()
+    try {
+      const dir = path.join(h.home, '.dsh', 'profiles', 'web')
+      await ensureDir(dir)
+      await atomicWrite(path.join(dir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: [] } } }), 0o600)
+      const patchPath = path.join(dir, 'cordis.patch.yml')
+      await atomicWrite(patchPath, `- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n  config:\n    preference: dark\n`, 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await dshAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
+        await loadConfig()
+      )
+      await applyChanges('dsh', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const attached = fs.readFileSync(patchPath, 'utf8')
+      expect(attached).toContain('modeldock')
+      expect(attached).toContain('agent-default-model')
+
+      const planDetach = await dshAdapter.planDetach(await loadConfig())
+      await applyChanges('dsh', 'detach', planDetach.changes, { yes: true })
+      const finalText = fs.readFileSync(patchPath, 'utf8')
+      // config 清空后 llm-pi-ai 与 agent-default 两条自建条目都从序列移除，无残留
+      expect(finalText).not.toContain('modeldock')
+      expect(finalText).not.toContain('agent-default-model')
+      expect(finalText).toContain('ui-theme') // 用户条目保留，patch 仍是合法序列
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('BUG-01②：用户条目位于自建条目之后时 detach 后用户条目原样保留（不被错删）', async () => {
+    const h = fakeHome()
+    try {
+      const dir = path.join(h.home, '.dsh', 'profiles', 'web')
+      await ensureDir(dir)
+      await atomicWrite(path.join(dir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: [] } } }), 0o600)
+      const patchPath = path.join(dir, 'cordis.patch.yml')
+      await atomicWrite(patchPath, `- id: ui-theme\n  name: "@deepseek-ai/dsh-client-ui-theme"\n  config:\n    preference: dark\n`, 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await dshAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
+        await loadConfig()
+      )
+      await applyChanges('dsh', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+
+      // 接入后序列为 [ui-theme, llm-pi-ai, agent-default]；在末尾补一个用户条目（位于自建条目之后）
+      const afterAttach = fs.readFileSync(patchPath, 'utf8')
+      const userLine = '- id: my-profile\n  name: "@deepseek-ai/my-profile"\n  config:\n    theme: light\n'
+      fs.writeFileSync(patchPath, afterAttach.replace(/\n$/, '\n') + userLine)
+
+      const planDetach = await dshAdapter.planDetach(await loadConfig())
+      await applyChanges('dsh', 'detach', planDetach.changes, { yes: true })
+      const finalText = fs.readFileSync(patchPath, 'utf8')
+      expect(finalText).not.toContain('modeldock')
+      expect(finalText).not.toContain('agent-default-model')
+      expect(finalText).toContain('my-profile') // 序列末的用户条目被保留，未因删除错位而误删
+    } finally {
+      h.restore()
+    }
+  })
+
   it('clientProfiles：attach 只写指定 profile（desktop），其余（web）不动；未知 profile 报错', async () => {
     const h = fakeHome()
     try {
@@ -1601,6 +1664,24 @@ describe('workbuddy adapter', () => {
       const final = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(final.models).toEqual([{ id: 'u1', url: 'https://a.example.com' }])
       expect(final.availableModels).toEqual(['u1'])
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_WORKBUDDY_PRESENT
+      h.restore()
+    }
+  })
+
+  it('BUG-09：models.json 内容为字面量 null 时 planDetach 返回跳过 notes 而非抛错', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_WORKBUDDY_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.workbuddy-ai', 'models.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'null', 0o600) // JSON.parse 可解析但结果为 null
+      await withConfig(wbCfg())
+
+      const planDetach = await workbuddyAdapter.planDetach(await loadConfig())
+      expect(planDetach.changes).toHaveLength(0)
+      expect(planDetach.notes.some((n) => n.includes('结构无法识别'))).toBe(true)
     } finally {
       delete process.env.MODELRDOCK_FAKE_WORKBUDDY_PRESENT
       h.restore()
