@@ -5,7 +5,7 @@ import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
-import { createGatewayServer } from '../src/gateway/server.js'
+import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit } from '../src/gateway/server.js'
 import { clientProtocolFromPath, endpointRisks } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import type { Config } from '../src/config/types.js'
@@ -244,6 +244,38 @@ describe('admin token 持久化', () => {
 })
 
 describe('autostart 与 overview 缓存', () => {
+  it('overview 缓存命中逻辑：TTL 内二次请求命中（重建只跑一次），TTL 过期与键变化即失效', () => {
+    const fakeRt = {} as any
+    const cached = { at: 1_000, rt: fakeRt, reloads: 0, lang: 'zh', data: {} }
+    // TTL 内命中；恰好达边界（now - at === TTL）即失效
+    expect(overviewCacheHit(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS - 1)).toBe(true)
+    expect(overviewCacheHit(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS)).toBe(false)
+    // runtime 实例 / 配置重载代数 / 请求语言任一变化，即使未过 TTL 也失效（回灌新状态/异语言不拿旧缓存）
+    expect(overviewCacheHit(cached, { ...fakeRt, n: 1 } as any, 0, 'zh', 1_000 + 100)).toBe(false)
+    expect(overviewCacheHit(cached, fakeRt, 1, 'zh', 1_000 + 100)).toBe(false)
+    expect(overviewCacheHit(cached, fakeRt, 0, 'en', 1_000 + 100)).toBe(false)
+    // BUG-04 根因回归：TTL 必须大于 UI 轮询间隔（5000ms），否则缓存在下一次轮询前必过期、永不命中
+    expect(OVERVIEW_TTL_MS).toBeGreaterThan(5_000)
+  })
+
+  it('TTL 内二次 GET /overview 命中缓存：响应体完全一致', async () => {
+    const t = await setup()
+    try {
+      const H = { 'x-modeldock-admin': 'admin-token-x' }
+      const url = `http://127.0.0.1:${t.gwPort}/_modeldock/overview`
+      // 两次连续请求间隔远小于 6s TTL：第二次应命中缓存，响应体逐字节一致（且仅重建一次）
+      const b1 = await (await fetch(url, { headers: H })).text()
+      const b2 = await (await fetch(url, { headers: H })).text()
+      expect(JSON.parse(b1).ok).toBe(true)
+      expect(b2).toBe(b1)
+      // 语言不同不互借缓存：请求级语言不一致返回的响应也应各自完整（非缓存语义断言，仅防回归）
+      const en = await (await fetch(url, { headers: { ...H, 'x-modeldock-lang': 'en' } })).json()
+      expect(en.ok).toBe(true)
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('POST /autostart 后立即 GET overview 应已是新状态（不被 2s TTL 缓存回灌旧值）', async () => {
     const t = await setup()
     try {

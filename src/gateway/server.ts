@@ -711,9 +711,23 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
 }
 
 /** overview 短 TTL 缓存（UI 每 5s 轮询，避免每次全量 adapter IO；绑定 runtime 实例 + 配置重载代数，任一变化即失效）。
- *  data 存序列化后的字符串：TTL 内命中直接 end 缓存串，不再对几十-几百 KB 的 view 逐次重复 stringify。 */
-const OVERVIEW_TTL_MS = 2_000
+ *  data 存序列化后的字符串：TTL 内命中直接 end 缓存串，不再对几十-几百 KB 的 view 逐次重复 stringify。
+ *  TTL 必须**大于** UI 轮询间隔（5000ms）才会在两次轮询之间有命中——曾为 2000ms，下次 5s 轮询前必过期，
+ *  稳态每次轮询全量重跑 buildOverview（每 provider 一次 keychain getSecret + 适配器 status 探测），缓存形同虚设。 */
+export const OVERVIEW_TTL_MS = 6_000
 let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
+
+/** overview 缓存命中判定（`now` 可注入便于单测给定 TTL 窗口）：
+ *  命中须同 runtime 实例 + 同配置重载代数 + 同语言（overview 文案随请求语言生成，语言不同不能互借）+ 未过 TTL。 */
+export function overviewCacheHit(
+  cached: NonNullable<typeof overviewCache>,
+  rt: GatewayRuntime,
+  reloads: number,
+  lang: string,
+  now: number
+): boolean {
+  return cached.rt === rt && cached.reloads === reloads && cached.lang === lang && now - cached.at < OVERVIEW_TTL_MS
+}
 
 /** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
 async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown>> {
@@ -1228,7 +1242,7 @@ async function handleAdmin(
   if (url === '/_modeldock/overview' && req.method === 'GET') {
     const cached = overviewCache
     // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
-    if (cached && cached.rt === rt && cached.reloads === rt.reloads && cached.lang === getLang() && Date.now() - cached.at < OVERVIEW_TTL_MS) {
+    if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(cached.data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
       return
