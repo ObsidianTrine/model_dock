@@ -282,31 +282,9 @@ export function topLevelModel(body: Buffer): string | undefined | null {
   }
 }
 
-/** 请求体中的模型重写：aliases 精确/通配 → default_model 兜底；未命中透传。
- *  纯透传快路径：无候选级映射、无别名、无 default_model 时不可能改写（final 恒等于 requested
- *  或 undefined），跳过全量 JSON.parse——大上下文请求体（数百 KB）下这是热路径最大的一块纯
- *  CPU 开销；modelAfter 经顶层浅扫描取得，扫描器拿不准时退回完整解析，行为与原路径逐字节等价。 */
-export function rewriteModel(
-  target: ResolvedTarget,
-  body: Buffer,
-  path: string
-): { body: Buffer; modelAfter?: string } {
-  if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
-  const aliases = target.profile.aliases
-  const pre = topLevelModel(body)
-  // discovery 别名（/v1/models 服务的 anthropic. 前缀 ID）需要还原，纯透传快路径不适用
-  const passthrough = !target.modelOverride && !target.profile.default_model && !(aliases && Object.keys(aliases).length > 0) && !(pre != null && /^anthropic\./i.test(pre))
-  if (passthrough) {
-    if (pre !== null) return { body, modelAfter: pre }
-  }
-  let json: any
-  try {
-    json = JSON.parse(body.toString('utf8'))
-  } catch {
-    return { body }
-  }
-  if (!json || typeof json !== 'object') return { body }
-  const wire = typeof json.model === 'string' ? json.model : undefined
+/** 纯模型名改写判定：仅输入字符串，输出最终改写目标。供「浅扫描快路径」（pre 非 null）与
+ *  「全量解析路径」（pre === null）共用，避免两套判定逻辑漂移。语义与既有实现逐字段等价。 */
+function resolveModelFinal(target: ResolvedTarget, wire: string | undefined): string | undefined {
   let requested = wire
   // discovery 别名剥壳：anthropic.<id> 仅当真实 ID 在服务目录里时还原——上游真有 anthropic. 开头
   // 的模型 ID 时保持原样，不误剥。wire 保留请求体原值，改写判定始终与它比较
@@ -320,13 +298,57 @@ export function rewriteModel(
     ? target.profile.default_model
     : undefined
   // 候选级映射（"<provider>:<model>" 条目）优先于别名：它是为跨服务商切换显式配置的意图
-  const final = target.modelOverride ?? alias ?? tierFallback ?? requested ?? target.profile.default_model
-  let modelAfter = wire
-  if (final !== undefined && final !== wire) {
-    json.model = final
-    modelAfter = final
-    return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter }
+  return target.modelOverride ?? alias ?? tierFallback ?? requested ?? target.profile.default_model
+}
+
+/** 确需改写时的模型注入 + 重序列化。解析失败 / 顶层非对象时返回 null，调用方原样透传（不进解析时
+ *  已判模型，此处仅做改写所需的完整 parse，失败只能透传）。 */
+function injectModel(body: Buffer, final: string): { body: Buffer; modelAfter: string } | null {
+  let json: any
+  try {
+    json = JSON.parse(body.toString('utf8'))
+  } catch {
+    return null
   }
+  if (!json || typeof json !== 'object') return null
+  json.model = final
+  return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter: final }
+}
+
+/** 请求体中的模型重写：aliases 精确/通配 → default_model 兜底；未命中透传。
+ *  懒解析快路径：改写判定的全部输入就是模型名字符串，无需完整文档。pre 非 null 时先用顶层浅扫描
+ *  拿到模型字符串独立完成判定（default_model / aliases / tierFallback / anthropic. 剥壳全在此步），
+ *  仅当确需改写（final !== wire）才 parse+重序列化——大上下文请求体（数百 KB ~ MB 级）下，JSON.parse
+ *  阻塞事件循环并串行化同实例并发流，这是热路径最大的一块纯 CPU 开销。final === wire 时不 parse、
+ *  不重序列化，直接返回入参的同一个 Buffer 引用（body === body）。扫描器拿不准（pre === null：
+ *  含转义键 / 非顶层对象 / 非 JSON）时退回完整解析路径，行为与原实现逐字节等价。 */
+export function rewriteModel(
+  target: ResolvedTarget,
+  body: Buffer,
+  path: string
+): { body: Buffer; modelAfter?: string } {
+  if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
+  const pre = topLevelModel(body)
+  if (pre !== null) {
+    // 快路径：全部改写判定只用 pre 字符串完成，不再全量 parse
+    const final = resolveModelFinal(target, pre)
+    let modelAfter = pre
+    if (final !== undefined && final !== pre) return injectModel(body, final) ?? { body }
+    if (final !== undefined) modelAfter = final
+    return { body, modelAfter }
+  }
+  // pre === null：退回全量解析路径（行为与原实现逐字节等价）
+  let json: any
+  try {
+    json = JSON.parse(body.toString('utf8'))
+  } catch {
+    return { body }
+  }
+  if (!json || typeof json !== 'object') return { body }
+  const wire = typeof json.model === 'string' ? json.model : undefined
+  const final = resolveModelFinal(target, wire)
+  let modelAfter = wire
+  if (final !== undefined && final !== wire) return injectModel(body, final) ?? { body }
   if (final !== undefined) modelAfter = final
   return { body, modelAfter }
 }
