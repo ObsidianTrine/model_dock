@@ -17,8 +17,10 @@ import {
   kickUpdateCheck,
   resetUpdateStateForTests,
   setUpdateApiBaseForTests,
+  setUpdateFetchForTests,
   watchApplyChild,
 } from '../src/update/webupdate.js'
+import type { ReleaseManifest } from '../src/update/check.js'
 import { updateDaemonArgs } from '../src/autostart.js'
 
 const TOKEN = 'ghp_test-token'
@@ -89,6 +91,7 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
   })
   afterEach(async () => {
     setUpdateApiBaseForTests(null)
+    setUpdateFetchForTests(null)
     await cleanup?.()
     cleanup = null
   })
@@ -246,6 +249,71 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       expect(r2.started).toBe(true)
       expect((await getUpdateStatus(rt)).applyError).toBeNull() // 新 apply 清空旧失败
       fs.rmSync(logFile, { force: true })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('watchApplyChild：子进程 spawn 失败只发 error（不发 exit）→ 立即按失败收尾、updating 复位可重试', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      const argv = updateDaemonArgs()
+      const logFile = path.join(os.tmpdir(), `watch-apply-error-${Date.now()}.log`)
+      fs.writeFileSync(logFile, '✗ spawn failed\n')
+      applyUpdate(rt, { argv, latest: '999.0.0', spawner: () => {} })
+      const child = new EventEmitter()
+      watchApplyChild(child, logFile, { delayMs: 10 })
+      child.emit('error', new Error('ENOENT')) // Node 不保证跟随 exit；error 应立即失败
+      const s = await getUpdateStatus(rt)
+      expect(s.applyError).toBe('spawn failed')
+      // 未卡 in_progress：失败后 updating 复位，可直接重试
+      const r2 = applyUpdate(rt, { argv, latest: '999.0.0', spawner: () => {} })
+      expect(r2.started).toBe(true)
+      fs.rmSync(logFile, { force: true })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('watchApplyChild：先 error 后 exit 不双触发（settled 防重入，失败只收尾一次）', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      const argv = updateDaemonArgs()
+      const logFile = path.join(os.tmpdir(), `watch-apply-double-${Date.now()}.log`)
+      fs.writeFileSync(logFile, '✗ spawn failed\n')
+      applyUpdate(rt, { argv, latest: '999.0.0', spawner: () => {} })
+      const child = new EventEmitter()
+      watchApplyChild(child, logFile, { delayMs: 10 })
+      child.emit('error', new Error('EACCES'))
+      child.emit('exit', 1) // 迟到的 exit 不应再次触发失败收尾
+      await new Promise((r) => setTimeout(r, 80))
+      const s = await getUpdateStatus(rt)
+      expect(s.applyError).toBe('spawn failed')
+      const r2 = applyUpdate(rt, { argv, latest: '999.0.0', spawner: () => {} }) // 仍可重试，说明 updating 只被复位一次且干净
+      expect(r2.started).toBe(true)
+      fs.rmSync(logFile, { force: true })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('kickUpdateCheck：并发同步两次调用（不 await 首次）底层拉取只执行一次（inflight 在任何 await 前同步占位）', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt({ update: { repo: REPO } }) // 无 token_ref，跳过 getSecret
+      let fetches = 0
+      setUpdateFetchForTests(async (_repo, _token, _apiBase): Promise<ReleaseManifest> => {
+        fetches++
+        await new Promise((r) => setTimeout(r, 20))
+        return { version: '999.0.0', tagName: 'v999.0.0', notes: '', htmlUrl: 'https://github.com/owner/repo', assets: [] }
+      })
+      const p1 = kickUpdateCheck(rt, { force: true })
+      const p2 = kickUpdateCheck(rt, { force: true }) // 不 await p1 的同步并发——修前两路都穿透、双拉
+      await Promise.all([p1, p2])
+      expect(fetches).toBe(1)
+      expect((await getUpdateStatus(rt)).latest).toBe('999.0.0')
     } finally {
       h.restore()
     }

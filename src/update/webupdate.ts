@@ -36,10 +36,17 @@ const state: UpdateWebState = { checking: false, lastCheckedAt: null, lastError:
 let inflight: Promise<void> | null = null
 /** 测试注入：本地 mock API 基地址（null = 官方 https://api.github.com） */
 let apiBaseOverride: string | null = null
+/** 测试注入：替换底层拉取函数（单测并发防重入时用桩计数） */
+let fetchOverride: ((repo: string, token: string | null, apiBase?: string) => Promise<ReleaseManifest>) | null = null
 
 /** 测试专用：注入更新检查的 API 基地址（单测用本地 http server 伪造 GitHub API） */
 export function setUpdateApiBaseForTests(base: string | null): void {
   apiBaseOverride = base
+}
+
+/** 测试专用：注入底层拉取函数（null = 默认 fetchLatestRelease） */
+export function setUpdateFetchForTests(fn: ((repo: string, token: string | null, apiBase?: string) => Promise<ReleaseManifest>) | null): void {
+  fetchOverride = fn
 }
 
 /** 测试专用：清空模块级状态（manifest/updating/检查时间跨用例泄漏会让守卫误判） */
@@ -70,12 +77,15 @@ export async function restoreUpdateCheckState(): Promise<void> {
 /** 发起一次检查：检查中 / TTL 内（未 force）静默跳过。匿名（无令牌）照常检查。不等待完成，状态经 getUpdateStatus 轮询。 */
 export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolean } = {}): Promise<void> {
   if (state.checking || inflight) return
-  const resolved = await resolveTokenAndRepo(rt.config)
-  if (!opts.force && state.lastCheckedAt && Date.now() - state.lastCheckedAt < CHECK_TTL_MS) return
-  inflight = (async () => {
+  // 在任何 await 之前同步创建并占位 inflight：并发两次 kick 才能被上方 guard 挡住。
+  // （此前 inflight 赋值在首个 await resolveTokenAndRepo 之后——并发调用双双穿透，双拉 GitHub 耗 rate-limit。）
+  const p = (async () => {
     state.checking = true
     try {
-      const m = await fetchLatestRelease(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase)
+      const resolved = await resolveTokenAndRepo(rt.config)
+      if (!opts.force && state.lastCheckedAt && Date.now() - state.lastCheckedAt < CHECK_TTL_MS) return
+      const fetchFn = fetchOverride ?? fetchLatestRelease
+      const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase)
       state.manifest = { version: m.version, notes: m.notes, htmlUrl: m.htmlUrl, sizeBytes: matchedAssetSize(m) }
       state.lastError = null
       state.lastCheckedAt = Date.now()
@@ -90,7 +100,8 @@ export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolea
       inflight = null
     }
   })()
-  await inflight
+  inflight = p
+  await p
 }
 
 async function persistCheckTime(version?: string): Promise<void> {
@@ -205,14 +216,24 @@ export function applyUpdate(
 }
 
 /** 子进程退出而本网关还活着 = 更新失败（成功路径里网关会先被停掉，看不到它的退出）。
- *  延迟 watching：给「正在停网关」的成功路径留出死亡窗口，避免把成功误判为失败。 */
+ *  延迟 watching：给「正在停网关」的成功路径留出死亡窗口，避免把成功误判为失败。
+ *  spawn 失败（ENOENT/EACCES…）Node 不保证发 exit——只发 error：error 视为立即失败，
+ *  否则 updating 永久卡 true、后续 apply 全返回 in_progress；settled 防 exit+error 双触发。 */
 export function watchApplyChild(
-  child: { on: (event: string, cb: (code: number | null) => void) => void },
+  child: { on: (event: string, cb: (...args: unknown[]) => void) => void },
   logFile: string,
   opts: { delayMs?: number } = {}
 ): void {
+  let settled = false
   child.on('exit', () => {
+    if (settled) return
+    settled = true
     setTimeout(() => markApplyFailed(logFile), opts.delayMs ?? 3000)
+  })
+  child.on('error', () => {
+    if (settled) return
+    settled = true
+    markApplyFailed(logFile)
   })
 }
 
