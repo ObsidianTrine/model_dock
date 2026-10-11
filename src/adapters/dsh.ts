@@ -597,6 +597,7 @@ export const dshAdapter: HarnessAdapter = {
       let changed = false
 
       const idx = js.findIndex((e: any) => e?.id === PROVIDERS_ROOT)
+      let delIndex = -1
       if (idx >= 0) {
         const entry = js[idx]?.config?.providers?.modeldock
         if (entry && isOursGatewayUrl(typeof entry.baseURL === 'string' ? entry.baseURL : undefined, 'dsh', cfg)) {
@@ -604,14 +605,19 @@ export const dshAdapter: HarnessAdapter = {
           const providers = doc.getIn([idx, 'config', 'providers'])
           if (isMap(providers) && providers.items.length === 0) doc.deleteIn([idx, 'config', 'providers'])
           const cfgNode = doc.getIn([idx, 'config'])
-          if (isMap(cfgNode) && cfgNode.items.length === 0) seq.delete(idx)
+          if (isMap(cfgNode) && cfgNode.items.length === 0) delIndex = idx
           changed = true
         }
       }
       const j = js.findIndex((e: any) => e?.id === AGENT_DEFAULT)
+      let delJ = -1
       if (j >= 0 && js[j]?.config?.provider === 'modeldock') {
-        seq.delete(j)
+        delJ = j
         changed = true
+      }
+      // 两个下标都取自对象快照 js；先删高下标再删低下标，避免第一次删除改动活序列后第二处下标错位
+      for (const k of [delIndex, delJ].filter((x) => x >= 0).sort((a, b) => b - a)) {
+        seq.delete(k)
       }
       if (changed) {
         changes.push({

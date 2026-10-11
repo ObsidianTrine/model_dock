@@ -242,7 +242,8 @@ async function scanDsh(): Promise<ImportCandidate[]> {
     try {
       js = parseDocument((await readTextIfExists(file)) ?? '').toJS()
     } catch {
-      return [placeholder('dsh', t('{file} 存在但解析失败（YAML 语法错误），无法读取', '{file} exists but failed to parse (YAML syntax error); cannot read it', { file: path.basename(file) }))]
+      out.push(placeholder('dsh', t('{file} 存在但解析失败（YAML 语法错误），无法读取', '{file} exists but failed to parse (YAML syntax error); cannot read it', { file: path.basename(file) })))
+      continue
     }
     const providers =
       (kind === 'legacy'

@@ -367,9 +367,12 @@ export const workbuddyAdapter: HarnessAdapter = {
       return { changes: [], notes: [t('models.json 无法解析，跳过（可用 restore 还原快照）', 'models.json cannot be parsed; skipped (you can restore from a snapshot)')] }
     }
     const isArray = Array.isArray(root)
+    // 字面量 null / 非对象（如数字、字符串）都不是合法结构，走既有跳过路径，避免对 null 取属性抛 TypeError
     const entries = isArray
       ? (root as WorkbuddyModelEntry[])
-      : (root as WorkbuddyModelsObject).models
+      : root !== null && typeof root === 'object'
+        ? (root as WorkbuddyModelsObject).models
+        : undefined
     if (!Array.isArray(entries)) return { changes: [], notes: [t('models.json 结构无法识别，跳过', 'models.json has an unrecognized structure; skipped')] }
 
     const ours = entries.filter((e) => isOursEntry(e, cfg))
