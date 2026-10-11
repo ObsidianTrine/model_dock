@@ -1,6 +1,7 @@
 {
   "baseBranch": "develop",
   "testCmd": "npm test",
+  "setupCmd": "npm ci --prefer-offline",
   "buildCmd": "npm run build",
   "packageManager": "npm",
   "protectedPorts": ["8687", "8890"],

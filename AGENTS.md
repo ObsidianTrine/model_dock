@@ -175,7 +175,8 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 
 - `task-id` 用小写短横线短词（如 `fix-presets-merge`）。
 - **未完成的任务必须在 worktree 的 `NOTES.md` 里留交接**（start 自动生成模板；目标/已完成/剩余步骤/如何验证），接手 agent 从 `list` 与 NOTES.md 续起——详见 `.agents/workflows/feature-branch.md`「任务交接」。
-- finish 会自动跑验证命令（`.agents/workflow.json` 的 `testCmd`，本仓库为 `npm test`；不影响行为的纯文档改动可 `--skip-test`）。
+- start 建好 worktree 会自动跑 `.agents/workflow.json` 的 `setupCmd`（本仓库为 `npm ci --prefer-offline`，新 worktree 免手工装依赖；失败仅告警，可手动重跑）。
+- finish 会自动跑验证命令（`.agents/workflow.json` 的 `testCmd`，本仓库为 `npm test`；不影响行为的纯文档改动可 `--skip-test`）；finish 全程持锁串行，多 agent 同时合并会自动排队（崩溃残留的陈锁下次自动接管）。
 - 例外：确需直接改 develop 时设 `AGENTS_ALLOW_BASE_EDIT=1`（旧名 `MODELRDOCK_ALLOW_DEVELOP_EDIT=1` 兼容），且必须能向用户说明理由。
 - 派发并行任务时按文件归属分区（如一个 agent 只动 `src/gateway/`，另一个只动 `src/adapters/`），减少合并冲突。
 
