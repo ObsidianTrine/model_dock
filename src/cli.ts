@@ -92,7 +92,10 @@ async function launchGui(): Promise<void> {
   // 托盘内部单实例（flock/Mutex）：重复拉起会静默退出，重复双击 app 无副作用。
   const trayPath = path.join(path.dirname(process.execPath), 'ModelDockTray' + (process.platform === 'win32' ? '.exe' : ''))
   if (fs.existsSync(trayPath)) {
-    spawn(trayPath, [], { detached: true, stdio: 'ignore', env: process.env, windowsHide: true }).unref()
+    // existsSync 前置检查挡得住 ENOENT 但挡不住 EACCES 等；tray 非关键路径，挂空 error 吞掉即可，避免未监听崩进程
+    spawn(trayPath, [], { detached: true, stdio: 'ignore', env: process.env, windowsHide: true })
+      .on('error', () => {})
+      .unref()
   }
 
   // CLI 自动安装（幂等）：等待有界时间——GUI 进程没有别的东西拖住事件循环，
