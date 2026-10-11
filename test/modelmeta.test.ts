@@ -7,7 +7,7 @@ import { fakeHome } from './helpers.js'
 import { fetchModelIds, parseUpstreamModelMeta } from '../src/providers/fetch.js'
 import { catalogModelMeta, clearCatalogMemo, normalizeApiCatalog, readCatalogCache, refreshCatalog } from '../src/providers/catalog.js'
 import { fullKnownTable, resolveModelMeta } from '../src/providers/resolve.js'
-import { baseModelIds, knownModelMeta } from '../src/providers/known.js'
+import { EXTRA, baseModelIds, knownByIdTable, knownModelMeta, knownMetaTable } from '../src/providers/known.js'
 import { setSecret } from '../src/config/secrets.js'
 import type { ProviderConfig } from '../src/config/types.js'
 
@@ -307,6 +307,30 @@ describe('fullKnownTable（内置表 ∪ 目录，内置优先）', () => {
       h.restore()
       clearCatalogMemo()
     }
+  })
+})
+
+describe('VISION_ID_RE 词边界（BUG-13：envision/revision 不再误判视觉）', () => {
+  it('envision-xx / revision-xx 类不带词边界的 id 不判视觉；既有整段 vision/vl 语义 id 仍命中', () => {
+    // 裸 /vision/i 会让 envision/revision 误命中；新正则要求 [-_.] 词边界或开头整段匹配
+    expect(knownModelMeta('envision-xx')).toBeUndefined()
+    expect(knownModelMeta('envision-2026')).toBeUndefined()
+    expect(knownModelMeta('revision-xx')).toBeUndefined()
+    // 真实词边界整段（-vision / -vl- / 开头 vision/vl）仍识别为视觉能力
+    expect(knownModelMeta('my-vision-x')?.capabilities).toEqual(['vision'])
+    expect(knownModelMeta('qwen-vl-max')?.capabilities).toEqual(['vision'])
+    expect(knownModelMeta('deepseek-v4-flash-vision-exp')?.capabilities).toContain('vision')
+  })
+})
+
+describe('DUP-10：EXTRA 与预设库 BY_ID 无交集，合并目录总数与改前一致', () => {
+  it('EXTRA 无一条 id 落在预设库 BY_ID（杜绝人肉双份维护，数字以 preset 为准）', () => {
+    const byId = knownByIdTable()
+    expect(Object.keys(EXTRA).filter((id) => id in byId)).toEqual([])
+  })
+  it('合并目录条目总数与 DUP-10 删除重复前一致（删除的 25 条 EXTRA 全在 BY_ID 中，{ ...EXTRA, ...BY_ID } 合并结果不变）', () => {
+    // 改前旧 EXTRA 比现在多 25 条，但那些 id 全被预设库 BY_ID 收录；删后合并表条目数不变，仍为 83
+    expect(Object.keys(knownMetaTable()).length).toBe(83)
   })
 })
 

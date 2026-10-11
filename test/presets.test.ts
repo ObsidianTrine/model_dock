@@ -81,6 +81,28 @@ describe('readUserPresets（文件读取 + 校验）', () => {
   })
 })
 
+describe('懒加载（BUG-12：模块载入不碰 user presets，格式错误推迟到首次查询才抛）', () => {
+  it('presets.json 格式错误：import presets/data 不抛（module 顶层零 IO 零 throw），首次 findPreset 才抛可操作报错（含文件路径）', async () => {
+    const h = fakeHome()
+    try {
+      const dir = path.join(h.home, '.modeldock')
+      fs.mkdirSync(dir, { recursive: true })
+      const fp = path.join(dir, 'presets.json')
+      fs.writeFileSync(fp, '{ not json ')
+      // query 参数强制独立模块实例：fresh 的懒加载态（presetsLoaded=false），避免吃到本文件顶部 import 已加载的真实模块状态
+      const mod = await import('../src/presets/data.js?lazyerror')
+      // 顶层的 findPreset 若在读文件的懒加载路径上抛错，就证明 import 本身没抛、错误在查询时到达：
+      // 这里能走到 import 成功 + 查询抛错两步，分别对应「import 不抛」与「首次查询抛可操作报错」
+      expect(() => mod.findPreset('any-id')).toThrow(/格式错误/)
+      expect(() => mod.findPreset('any-id')).toThrow(/presets\.json/) // 文案含文件路径
+      // 同一 fresh 实例再次查询仍走失败路径（未缓存半加载态），保持一致
+      expect(() => mod.reloadPresets()).toThrow(/格式错误/)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('reloadPresets（合并进运行时列表）', () => {
   it('自定义覆盖内置 custom 且 findPreset 生效', () => {
     const h = fakeHome()

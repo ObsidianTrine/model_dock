@@ -106,14 +106,19 @@ export async function fetchHolidayData(
     const key = String(year)
     let done = false
     let lastErr = ''
+    // 用类型化标志区分「公告未发布」与「其他失败」，而不是拿 t() 文案当控制流哨兵
+    // （DESIGN-09：比较 t() 串改文案/切语言即碎）。值反映「最后一次数据源尝试」的性质，与 old 行为一致
+    let lastErrKind: 'not-published' | 'other' = 'other'
     for (const tpl of holidaySources()) {
       try {
         const res = await fetch(tpl.replace('{year}', key), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
         if (res.status === 404) {
+          lastErrKind = 'not-published'
           lastErr = t('公告尚未发布', 'announcement not published yet')
           continue
         }
         if (!res.ok) {
+          lastErrKind = 'other'
           lastErr = `HTTP ${res.status}`
           continue
         }
@@ -121,11 +126,12 @@ export async function fetchHolidayData(
         done = true
         break
       } catch (e) {
+        lastErrKind = 'other'
         lastErr = e instanceof Error ? e.message : String(e)
       }
     }
     if (!done) {
-      if (lastErr === t('公告尚未发布', 'announcement not published yet')) notPublished.push(year)
+      if (lastErrKind === 'not-published') notPublished.push(year)
       else failures.push(`${year}: ${lastErr || t('全部数据源不可达', 'all data sources unreachable')}`)
     }
   }

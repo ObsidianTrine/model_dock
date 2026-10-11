@@ -497,15 +497,28 @@ export function readUserPresets(): ProviderPreset[] {
   })
 }
 
-PRESETS.push(...applyUserPresets(readUserPresets()))
+// 运行时预设懒加载：user presets 只在首次查询时才读取（findPreset / knownModelsForBaseUrl / reloadPresets 等查询入口）。
+// 原因（BUG-12）：模块加载期零 IO 零 throw——presets.json 格式错误时，ESM 求值先于命令解析，会让 --help 也裸栈崩溃、
+// 丢掉已写好的可操作报错。错误改在查询时抛出，经命令层既有错误格式化输出；禁止回退到「顶层 try/catch 吞错」。
+let presetsLoaded = false
 
-/** 重读用户自定义预设并合并进运行时列表（改文件后调用；正常使用无需——重启网关即生效） */
+/** 确保运行时预设已加载（幂等；文件不存在=空，格式错误在此抛可操作报错） */
+export function ensurePresetsLoaded(): void {
+  if (presetsLoaded) return
+  PRESETS.push(...applyUserPresets(readUserPresets()))
+  presetsLoaded = true
+}
+
+/** 重读用户自定义预设并合并进运行时列表（改文件后调用；正常使用无需——重启网关即生效）。失败则保持未加载态，下次查询重试 */
 export function reloadPresets(): void {
+  presetsLoaded = false
   PRESETS.length = 0
   PRESETS.push(...applyUserPresets(readUserPresets()))
+  presetsLoaded = true
 }
 
 export function findPreset(id: string): ProviderPreset | undefined {
+  ensurePresetsLoaded()
   return PRESETS.find((p) => p.id === id)
 }
 
@@ -527,6 +540,7 @@ export function presetModels(preset: ProviderPreset): Record<string, ModelMeta> 
 
 /** 按 base_url 的 host 匹配预设，返回该厂商已知模型（含 display/context/max，source:'preset'），供拉取失败时兜底 */
 export function knownModelsForBaseUrl(baseUrl: string): Record<string, ModelMeta> {
+  ensurePresetsLoaded()
   let host = ''
   try { host = new URL(baseUrl).host } catch { return {} }
   const out: Record<string, ModelMeta> = {}

@@ -14,7 +14,7 @@ import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
-import { PRESETS, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
+import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
 import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
@@ -831,6 +831,7 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
   }
   // 每个服务被哪些客户端使用
   services.forEach((s: any) => { s.usedBy = usedByMap[s.id] ?? [] })
+  ensurePresetsLoaded() // 懒加载预设（BUG-12）：presets.json 格式错误在此抛可操作报错，而不是把网关启动都卡死
   return {
     ok: true,
     gateway: {

@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { loadHolidayDays, localDateKey, upcomingHolidays } from '../src/gateway/daytype.js'
+import { loadCalendar, loadHolidayDays, localDateKey, upcomingHolidays } from '../src/gateway/daytype.js'
 import { holidaysCachePath } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 
@@ -134,6 +134,35 @@ describe('loadHolidayDays（读缓存文件，fakeHome 隔离）', () => {
     try {
       seedCache('{broken')
       expect(loadHolidayDays()).toEqual([])
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('DUP-09：loadCalendar / loadHolidayDays 共享同一份失效（改一个数据文件 mtime，两者同步重读）', () => {
+  it('覆盖写缓存并改 mtime，任一入口先触发重读，另一个入口拿到同一份新数据', () => {
+    const h = fakeHome()
+    try {
+      const p = holidaysCachePath()
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      const cache = (offDay: boolean): string =>
+        JSON.stringify({ data: { 2027: { year: 2027, days: [{ name: '元旦', date: '2027-01-01', isOffDay: offDay }] } } })
+
+      // 版本 A：isOffDay=true
+      fs.writeFileSync(p, cache(true))
+      expect(loadCalendar().get('2027')?.get('2027-01-01')).toBe(true)
+      expect(loadHolidayDays()[0]).toMatchObject({ date: '2027-01-01', isOffDay: true })
+
+      // 覆盖为版本 B：isOffDay=false，并显式推进 mtime 确保 memo key 必然变化
+      fs.writeFileSync(p, cache(false))
+      const st = fs.statSync(p)
+      fs.utimesSync(p, st.mtime, new Date(st.mtimeMs + 20_000))
+
+      // 先经 loadHolidayDays 触发共享 memo 刷新
+      expect(loadHolidayDays()[0]).toMatchObject({ date: '2027-01-01', isOffDay: false })
+      // loadCalendar 拿到同一份新数据——两者共用单一 memo，未静默失步
+      expect(loadCalendar().get('2027')?.get('2027-01-01')).toBe(false)
     } finally {
       h.restore()
     }
