@@ -2896,12 +2896,13 @@ describe('管理面安全（2026-09 审查回归）', () => {
       expect(directCfg.env.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
       expect(directCfg.env.ANTHROPIC_BASE_URL).not.toBe('http://127.0.0.1:8687') // 指向上游而非网关
       expect(directCfg.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-upstream-secret')
-      // 根 model 用 sonnet 别名（不再写 env.ANTHROPIC_MODEL）；sonnet 层 = claude-sonnet-* 别名（方案 A）
-      expect(directCfg.model).toBe('sonnet')
+      // 根 model 直写 default_model（preset-model 上下文 1000 <1M 无 [1m]）；不写 env.ANTHROPIC_MODEL；
+      // 显式 sonnet 别名仍走映射 env；子代理不再钉定（跟随主模型）
+      expect(directCfg.model).toBe('preset-model')
       expect(directCfg.env.ANTHROPIC_MODEL).toBeUndefined()
       expect(directCfg.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('ds-flash-target')
       expect(directCfg.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe('ds-flash-target')
-      expect(directCfg.env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('ds-flash-target')
+      expect(directCfg.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
       expect(directCfg.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('max')
       expect(directCfg.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('786432')
 
