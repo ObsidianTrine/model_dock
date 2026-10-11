@@ -1,9 +1,9 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { c, sleep, ensureDir, localDateStr, t, getLang } from '../util/index.js'
+import { c, sleep, localDateStr, t } from '../util/index.js'
 import { randomToken } from '../util/fsx.js'
-import { logsDir, modeldockDir } from '../util/paths.js'
+import { logsDir } from '../util/paths.js'
 import { readGatewayState, writeGatewayState } from '../gateway/state.js'
 import {
   autostartStatus,
@@ -14,7 +14,7 @@ import {
   type AutostartKind,
   type AutostartStatus,
 } from '../autostart.js'
-import { DEFAULT_GATEWAY_PORT, loadCfg, gatewayLive, requireGateway } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
 
 export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean }): Promise<void> {
   const cfg = await loadCfg()
@@ -31,25 +31,13 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean })
     return
   }
 
-  const daemonArgv = gatewayDaemonArgs()
-  // cwd 指向 ~/.modeldock：spawn 的 cwd 必须已存在，首次运行时先建目录
-  await ensureDir(modeldockDir())
-  const child = spawn(
-    daemonArgv[0],
-    [...daemonArgv.slice(1), '--port', String(port)],
-    // daemon 与 CLI 语言一致：config.toml 尚无 language 时 CLI 的 --lang/环境变量选择也要传下去
-    { detached: true, stdio: 'ignore', env: { ...process.env, MODELRDOCK_LANG: getLang() }, cwd: modeldockDir(), windowsHide: true }
-  )
-  child.unref()
-  for (let i = 0; i < 20; i++) {
-    await sleep(250)
-    const state = await gatewayLive()
-    if (state) {
-      console.log(c.green(t('✓ 网关已后台启动：http://127.0.0.1:{port}（pid {pid}）', '✓ Gateway started in the background: http://127.0.0.1:{port} (pid {pid})', { port: state.port, pid: state.pid })))
-      return
-    }
+  const daemonArgv = [...gatewayDaemonArgs(), '--port', String(port)]
+  const state = await spawnDaemonAndWait(daemonArgv)
+  if (state) {
+    console.log(c.green(t('✓ 网关已后台启动：http://127.0.0.1:{port}（pid {pid}）', '✓ Gateway started in the background: http://127.0.0.1:{port} (pid {pid})', { port: state.port, pid: state.pid })))
+    return
   }
-  console.error(c.red(t('✗ 网关后台启动超时，请前台运行查看错误：modeldock gateway start', '✗ Timed out starting the gateway in the background. Run it in the foreground to see the error: modeldock gateway start')))
+  console.error(c.red(t('✗ 网关启动超时。可在命令行运行 modeldock gateway start 查看详细错误。', '✗ Gateway start timed out. Run "modeldock gateway start" in a terminal for details.')))
   process.exit(1)
 }
 
@@ -108,15 +96,10 @@ export async function cmdGatewayStop(): Promise<void> {
   }
   if (live) {
     process.kill(live.pid, 'SIGTERM')
-    for (let i = 0; i < 10; i++) {
-      await sleep(200)
-      try {
-        process.kill(live.pid, 0)
-      } catch {
-        console.log(c.green(t('✓ 网关已停止（pid {pid}）', '✓ Gateway stopped (pid {pid})', { pid: live.pid })))
-        if (managed) console.log(c.gray(t('  服务保留，下次登录自动重启；彻底移除：modeldock gateway uninstall', '  The service stays installed and restarts on next login. Remove it fully: modeldock gateway uninstall')))
-        return
-      }
+    if (await pidExitedWithin(live.pid)) {
+      console.log(c.green(t('✓ 网关已停止（pid {pid}）', '✓ Gateway stopped (pid {pid})', { pid: live.pid })))
+      if (managed) console.log(c.gray(t('  服务保留，下次登录自动重启；彻底移除：modeldock gateway uninstall', '  The service stays installed and restarts on next login. Remove it fully: modeldock gateway uninstall')))
+      return
     }
     console.log(c.yellow(t('进程未在 2s 内退出，已发 SIGKILL', 'The process did not exit within 2s; sent SIGKILL')))
     try {
@@ -124,7 +107,27 @@ export async function cmdGatewayStop(): Promise<void> {
     } catch {
       /* 已退出 */
     }
+    // SIGKILL 同样复核并给出成败输出（此前静默收场，失败会留下悬空网关不自知）
+    if (await pidExitedWithin(live.pid)) {
+      console.log(c.green(t('✓ 网关已停止（pid {pid}）', '✓ Gateway stopped (pid {pid})', { pid: live.pid })))
+      if (managed) console.log(c.gray(t('  服务保留，下次登录自动重启；彻底移除：modeldock gateway uninstall', '  The service stays installed and restarts on next login. Remove it fully: modeldock gateway uninstall')))
+    } else {
+      console.log(c.red(t('✗ 网关进程未能停止（pid {pid}），请手动结束该进程', '✗ The gateway process did not stop (pid {pid}). End it manually')))
+    }
   }
+}
+
+/** 轮询等待进程退位（10×200ms，kill(pid,0) 抛错即视为已退出）。 */
+async function pidExitedWithin(pid: number): Promise<boolean> {
+  for (let i = 0; i < 10; i++) {
+    await sleep(200)
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+  }
+  return false
 }
 
 /** 按命令行签名清扫游离网关进程（含 dev 的 tsx 实例与 SEA 二进制实例）。仅本机尽力而为，失败静默跳过。
@@ -136,22 +139,13 @@ export function sweepGatewayProcesses(): void {
       if (pass) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300) // 同步小睡：等守护父进程重生子进程后再补一刀
       const lines = listProcessLines()
       if (!lines) return
-      for (const line of lines.split('\n')) {
-        const m = line.match(/^\s*(\d+)\s+(.*)$/)
-        if (!m) continue
-        const pid = Number(m[1])
-        const cmd = m[2]
+      for (const { pid, cmd } of parsePidCommandLines(lines)) {
         if (pid === process.pid) continue
         // 双条件收敛误杀面：必须是“网关启动”命令，且命令属于 ModelDock（CLI 源码路径或 modeldock 二进制）
         const isGatewayStart = /gateway start|--sea-gateway/.test(cmd)
         const isModelDock = /modeldock|src[\\/]cli\.ts/.test(cmd)
         if (!isGatewayStart || !isModelDock) continue
-        try {
-          process.kill(pid, 'SIGTERM')
-          killed++
-        } catch {
-          /* 权限不足或已退出 */
-        }
+        if (killByPid(pid)) killed++
       }
     }
   } catch {
@@ -254,22 +248,6 @@ export async function cmdGatewayLog(opts: { n?: string; follow?: boolean; harnes
     console.log(c.gray(t('暂无请求日志（logs/ 目录为空）', 'No request logs yet (the logs/ directory is empty)')))
     return
   }
-  const readAll = (): { line: string; obj: any }[] => {
-    const out: { line: string; obj: any }[] = []
-    for (const f of files) {
-      const text = fs.readFileSync(f, 'utf8')
-      for (const line of text.split('\n')) {
-        if (!line.trim()) continue
-        try {
-          out.push({ line, obj: JSON.parse(line) })
-        } catch {
-          /* skip */
-        }
-      }
-    }
-    return out
-  }
-
   const print = (entries: { obj: any }[]) => {
     const filtered = entries.filter((e) => !opts.harness || e.obj.harness === opts.harness)
     const tail = filtered.slice(-(Number(opts.n ?? 30) || 30))
@@ -281,37 +259,48 @@ export async function cmdGatewayLog(opts: { n?: string; follow?: boolean; harnes
       )
     }
   }
-  print(readAll())
+  const lastSizes = new Map<string, number>()
+  for (const f of files) lastSizes.set(f, 0)
+  print(readLogLines(files, lastSizes))
 
   if (!opts.follow) return
   console.log(c.gray(t('--- 跟随中，Ctrl+C 退出 ---', '--- Following. Press Ctrl+C to exit ---')))
-  // 以文件路径记录读取位置：每轮重新收集日志文件，跨天轮转后新文件也能跟上
-  const lastSizes = new Map<string, number>()
-  for (const f of files) lastSizes.set(f, fs.statSync(f).size)
   for (;;) {
     await sleep(1000)
-    const entries: { obj: any }[] = []
-    for (const f of [todayFile(), yesterdayFile()].filter((x) => fs.existsSync(x))) {
-      const size = fs.statSync(f).size
-      const last = lastSizes.get(f) ?? 0
-      if (size > last) {
-        const fd = fs.openSync(f, 'r')
-        const buf = Buffer.alloc(size - last)
-        fs.readSync(fd, buf, 0, buf.length, last)
-        fs.closeSync(fd)
-        for (const line of buf.toString('utf8').split('\n')) {
-          if (!line.trim()) continue
-          try {
-            entries.push({ obj: JSON.parse(line) })
-          } catch {
-            /* 半行等下次 */
-          }
-        }
-      }
-      lastSizes.set(f, size)
-    }
-    print(entries)
+    // 每轮重新收集日志文件：跨天轮转后新文件也能跟上
+    const rotated = [todayFile(), yesterdayFile()].filter((x) => fs.existsSync(x))
+    print(readLogLines(rotated, lastSizes))
   }
+}
+
+/** 读出日志文件里 since 之后的新增行（since 为每次读取的字节位置，跨文件轮转追赶）。
+ *  首次读取传 lastSizes 全 0 → 读整份；JSON 半行/坏行静默跳过（半行等下次轮转）。 */
+function readLogLines(files: string[], since: Map<string, number>): { obj: any }[] {
+  const out: { obj: any }[] = []
+  for (const f of files) {
+    let size: number
+    try {
+      size = fs.statSync(f).size
+    } catch {
+      continue
+    }
+    const last = since.get(f) ?? 0
+    if (size <= last) continue
+    const fd = fs.openSync(f, 'r')
+    const buf = Buffer.alloc(size - last)
+    fs.readSync(fd, buf, 0, buf.length, last)
+    fs.closeSync(fd)
+    for (const line of buf.toString('utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        out.push({ obj: JSON.parse(line) })
+      } catch {
+        /* 半行或坏行：等下次轮转或跳过 */
+      }
+    }
+    since.set(f, size)
+  }
+  return out
 }
 
 function todayFile(): string {
@@ -328,17 +317,7 @@ export async function cmdUi(): Promise<void> {
   const live = await requireGateway()
   // 管理面读写已全面要求 admin 凭据：带 token 打开（服务端种 7 天 HttpOnly cookie）
   const base = `http://127.0.0.1:${live.port}/_modeldock/ui?token=${live.admin_token}`
-  const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open'
-  // start 把第一个带引号的参数当窗口标题：给空标题占位，URL 才不会被吞掉/被 shell 元字符截断
-  const args = process.platform === 'win32' ? ['/c', 'start', '', base] : [base]
-  try {
-    // 异步 error 事件必须挂监听：Linux 无 xdg-open 时 spawn 失败不监听会让整个进程崩掉
-    spawn(opener, args, { detached: true, stdio: 'ignore', windowsHide: true })
-      .on('error', () => {})
-      .unref()
-  } catch {
-    /* 打不开就手动复制地址 */
-  }
+  await openUrlInBrowser(base)
   console.log(c.green(t('✓ Web 控制台已在浏览器打开', '✓ Web console opened in your browser')))
   console.log(c.gray(t('地址：{u}（仅本机可访问）', 'URL: {u} (local access only)', { u: base })))
 }

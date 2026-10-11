@@ -16,7 +16,7 @@ import { VERSION } from './version.js'
  */
 
 export interface CliInstallResult {
-  action: 'installed' | 'updated' | 'current' | 'skipped' | 'declined'
+  action: 'installed' | 'updated' | 'current' | 'skipped' | 'declined' | 'aborted'
   path?: string
   note?: string
 }
@@ -87,12 +87,20 @@ export async function installByCopy(
   return existed ? 'updated' : 'installed'
 }
 
-/** AppleScript 提权执行（管理员密码弹窗）。返回是否成功；用户取消 → false */
-function osaAdminRun(script: string): Promise<boolean> {
+/** AppleScript 提权执行（管理员密码弹窗）。返回是否成功；用户取消 → false。
+ *  传 signal 时，abort（如 GUI 超时退出）会 kill 子进程并返回 false，避免弹窗孤儿续跑。 */
+export function osaAdminRun(script: string, signal?: AbortSignal, spawnFn: typeof spawn = spawn): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn('osascript', ['-e', script], { stdio: 'ignore' })
+    const child = spawnFn('osascript', ['-e', script], { stdio: 'ignore' })
     child.on('error', () => resolve(false))
     child.on('close', (code) => resolve(code === 0))
+    if (!signal) return
+    if (signal.aborted) {
+      child.kill()
+      resolve(false)
+      return
+    }
+    signal.addEventListener('abort', () => { child.kill(); resolve(false) }, { once: true })
   })
 }
 
@@ -109,8 +117,9 @@ function healQuarantine(execPath: string): void {
   child.unref()
 }
 
-/** 双击 GUI 启动时调用：确保 `modeldock` 命令在 PATH 里。失败一律不阻断 GUI。 */
-export async function ensureCliInstalled(): Promise<CliInstallResult> {
+/** 双击 GUI 启动时调用：确保 `modeldock` 命令在 PATH 里。失败一律不阻断 GUI。
+ *  传 signal 时提权弹窗受其节制（超时 kill 子进程），超时不写「已拒绝」标记以便下次重试。 */
+export async function ensureCliInstalled(signal?: AbortSignal): Promise<CliInstallResult> {
   const link = cliLinkPath()
   if (!link) return { action: 'skipped', note: t('当前平台无双击安装场景', 'No double-click install on this platform') }
 
@@ -141,7 +150,11 @@ export async function ensureCliInstalled(): Promise<CliInstallResult> {
   const script =
     `do shell script "mkdir -p ${shQuote(path.dirname(link))} && ln -sfn ${shQuote(process.execPath)} ${shQuote(link)}" ` +
     'with administrator privileges'
-  const ok = await osaAdminRun(script)
+  const ok = await osaAdminRun(script, signal)
+  if (signal?.aborted) {
+    // 超时中止：不写「已拒绝」标记，下次双击仍可重试提权
+    return { action: 'aborted', path: link, note: t('安装已超时中止，可稍后重试', 'Installation timed out; you can retry later') }
+  }
   if (!ok) {
     await fs.promises.mkdir(modeldockDir(), { recursive: true })
     await fs.promises.writeFile(declinedMarker(), '')
