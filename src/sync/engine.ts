@@ -237,7 +237,7 @@ export class SyncLoop {
   }
 }
 
-// —— 网关进程内挂载（单例） ——
+// 网关进程内挂载（单例）
 
 let active: SyncLoop | null = null
 let activeSig: string | null = null

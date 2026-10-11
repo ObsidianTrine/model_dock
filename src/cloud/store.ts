@@ -64,7 +64,7 @@ export class CloudStore {
     this.db.exec(DDL)
   }
 
-  // —— devices ——
+  // devices
 
   upsertDevice(devid: string, name: string, tokenHash: string, now: string): void {
     this.db
@@ -105,7 +105,7 @@ export class CloudStore {
     return Number(r.changes)
   }
 
-  // —— doc ——
+  // doc
 
   getDoc(): DocRow | null {
     const row = this.db.prepare('SELECT rev, envelope, ts, by_devid FROM doc WHERE id = 1').get() as Record<string, unknown> | undefined
@@ -122,7 +122,7 @@ export class CloudStore {
       .run(rev, envelope, ts, byDevid)
   }
 
-  // —— paircodes ——
+  // paircodes
 
   createPairCode(code: string, expiresAt: string): void {
     this.db.prepare('INSERT INTO paircodes(code, expires_at) VALUES(?, ?)').run(code, expiresAt)

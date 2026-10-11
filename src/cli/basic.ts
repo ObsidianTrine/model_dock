@@ -187,7 +187,6 @@ export async function cmdReset(opts: { yes?: boolean; deep?: boolean } = {}): Pr
     }))
   if (!goOn) return
 
-  //1. detach 所有 harness
   for (const id of attached) {
     try {
       await cmdDetach(id, { yes: true })
@@ -197,20 +196,18 @@ export async function cmdReset(opts: { yes?: boolean; deep?: boolean } = {}): Pr
     }
   }
 
-  //2. 停网关
   await cmdGatewayStop()
 
-  //3. 清除 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
+  // keychain/secret-service 条目不在 secrets.json 里，删文件清不掉
   for (const [, p] of Object.entries(cfg.providers)) {
     try {
       await deleteSecret(p.key_ref)
     } catch { /* 单项失败不阻断 */ }
   }
 
-  //4. 删除配置文件（保留 backups/ 和 logs/）
   removeDataPaths([configPath(), secretsPath()])
 
-  //5. --deep：连日志、同步状态与本机缓存一起清（保留 backups/、tray.lock、自定义预设等未列出的数据）
+  // 保留 backups/、tray.lock、自定义预设等未列出的数据
   if (opts.deep === true) {
     removeDataPaths([logsDir(), syncJsonPath(), holidaysCachePath(), modelCatalogCachePath()])
   }
@@ -225,9 +222,8 @@ export async function cmdReset(opts: { yes?: boolean; deep?: boolean } = {}): Pr
   console.log(c.bold(t('  下一步：modeldock init 重新配置', '  Next: run modeldock init to set up again')))
 }
 
-/** 清理一批数据路径（文件或目录），逐个报告结果：不存在跳过，单个失败只告警——清理必须走到底。
- *  导出仅为单测：本仓库测试是 isolate:false，调用 cmdReset 会连带碰到网关/钥匙环等共享模块，
- *  纯路径清理这一段单独可测。 */
+/** 清理一批数据路径：不存在跳过，单个失败只告警，清理必须走到底。
+ *  导出仅为单测：isolate:false 下调 cmdReset 会连带网关/钥匙环等共享模块，纯路径清理需单独可测。 */
 export function removeDataPaths(paths: string[]): void {
   for (const p of paths) {
     try {

@@ -25,7 +25,6 @@ export interface AttachFlags {
   yes?: boolean
 }
 
-/** "a, b" → ['a','b']（去空项）；未传返回 undefined */
 function splitClientProfiles(v?: string): string[] | undefined {
   const list = v?.split(',').map((s) => s.trim()).filter(Boolean)
   return list && list.length > 0 ? list : undefined
@@ -126,7 +125,7 @@ export async function cmdHarnessRoute(id: string, profile?: string): Promise<voi
       ? c.green(t('✓ {id} 已恢复跟随全局（active_profile: {ap}）', '✓ {id} now follows the global route again (active_profile: {ap})', { id, ap: cfg.active_profile ?? t('未设置', 'not set') }))
       : c.green(t('✓ {id} 已钉到 profile「{p}」', '✓ {id} pinned to profile "{p}"', { id, p: profile }))
   )
-  // 烤模型客户端按目标 profile 重写模型列表（恢复跟随 = 按 active_profile 重写；透明客户端为空操作）
+  // 恢复跟随 = 按 active_profile 重写；透明客户端为空操作
   const syncProfile = profile === 'default' ? cfg.active_profile ?? undefined : profile
   const synced = syncProfile
     ? await resyncHarnessToRoute(id, syncProfile)

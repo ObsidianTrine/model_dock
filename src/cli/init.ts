@@ -19,7 +19,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
     if (!goOn) return
   }
 
-  // 1. 检测 harness
   console.log(c.bold(t('① 检测本机 harness', '① Detect local harnesses')))
   const harnessAdapters = allAdapters(cfg).filter((a) => a.id !== 'generic-env')
   for (const a of harnessAdapters) {
@@ -32,7 +31,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
   }
   console.log()
 
-  // 2. 收编存量配置
   console.log(c.bold(t('② 收编现有 provider 配置（只读扫描，key 存入 ModelDock）', '② Collect existing provider configs (read-only scan; keys are stored in ModelDock)')))
   const cands = await scanSources('all')
   let chosen = cands.filter((x) => !x.skip_reason)
@@ -63,7 +61,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
   }
   console.log()
 
-  // 3. 若一个 provider 都没有 → 预设库添加
   cfg = await loadConfig()
   if (Object.keys(cfg.providers).length === 0) {
     console.log(c.bold(t('③ 从预设库添加 provider（url 已预填，只需粘贴 key）', '③ Add a provider from the preset library (URL prefilled; just paste the key)')))
@@ -71,7 +68,7 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
     console.log()
   }
 
-  // 4. 默认路由
+  // 默认路由
   cfg = await loadConfig()
   if (!cfg.active_profile) {
     const names = Object.keys(cfg.profiles)
@@ -92,7 +89,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
   }
   console.log()
 
-  // 5. 启动网关
   console.log(c.bold(t('④ 启动网关（127.0.0.1）', '④ Start the gateway (127.0.0.1)')))
   const live = await gatewayLive()
   if (live) {
@@ -106,7 +102,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
   }
   console.log()
 
-  // 6. 接管 harness
   console.log(c.bold(t('⑤ 接管 harness（写入前展示 diff，自动快照）', '⑤ Attach harnesses (shows a diff before writing; automatic backups)')))
   cfg = await loadConfig()
   const installed: string[] = []
@@ -132,7 +127,6 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
   }
   console.log()
 
-  // 7. 总结
   console.log(c.bold(t('⑥ 完成', '⑥ Done')))
   console.log(c.gray(t('验证连通性：modeldock test', 'Check connectivity: modeldock test')))
   console.log(c.gray(t('整体体检：modeldock doctor', 'Full health check: modeldock doctor')))
