@@ -1,5 +1,5 @@
 import { craftProviderJsonAdapter } from './provider-json.js'
-import { desktopPresent } from './presence.js'
+import { desktopPresent, residueNote } from './presence.js'
 import { configCandidates } from './mimo-code.js'
 import {
   AdapterError,
@@ -60,11 +60,7 @@ export const mimoDesktopAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: t(
-          '检测到配置残留（{files}），但未找到 MiMo 桌面端（注册表卸载项/常见安装目录都没有）——可能已卸载；若仍在使用，请重新安装并启动一次后点「重新检测」',
-          'Found leftover config ({files}) but the MiMo desktop app is missing (neither the registry uninstall entries nor common install directories have it) — it may have been uninstalled; if you still use it, reinstall, launch it once, then click Re-detect',
-          { files: det.configFiles.join('、') }
-        ),
+        note: residueNote(det.configFiles, 'MiMo 桌面端'),
       }
     }
     if (!det.installed && present === true) {

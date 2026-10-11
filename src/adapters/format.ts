@@ -84,15 +84,6 @@ export function parseJsonTolerant(text: string): { value: unknown; comments: boo
   }
 }
 
-/** YAML 文档级修改：未触碰的节点连同注释一起保留 */
-export function yamlSetText(doc: ReturnType<typeof parseDocument>, path: (string | number)[], value: unknown): void {
-  doc.setIn(path, value)
-}
-
-export function yamlDelete(doc: ReturnType<typeof parseDocument>, path: (string | number)[]): void {
-  doc.deleteIn(path)
-}
-
 /**
  * TOML 根层标量必须出现在任何 [table] 之前；重建对象时把标量提到最前，
  * 避免既有 config 中键顺序导致的序列化非法。

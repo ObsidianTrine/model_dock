@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { homeDir, readTextIfExists, t } from '../util/index.js'
+import { biJoin, homeDir, readTextIfExists, t } from '../util/index.js'
 import type { Config } from '../config/types.js'
 import {
   AdapterError,
@@ -13,7 +13,8 @@ import {
   type PlanResult,
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
-import { desktopPresent } from './presence.js'
+import { desktopPresent, residueNote } from './presence.js'
+import { directAttachNote, resolveRoute, routeModelNote } from './shared.js'
 
 /**
  * WorkBuddy AI（腾讯 AI 办公客户端）的自定义模型走本地 models.json：应用只读该文件并
@@ -109,14 +110,6 @@ async function appPresent(): Promise<boolean | 'unknown'> {
   return desktopPresent(['WorkBuddy', 'CodeBuddy'], 'workbuddy')
 }
 
-/** detect 的卸载残留提示（两处文案一致） */
-const residueDetected = (path: string): string =>
-  t(
-    '检测到 WorkBuddy 配置残留（{path}），但未找到桌面应用（注册表卸载项/常见安装目录）——可能已卸载；若仍在使用，请重新安装并启动一次后点「重新检测」',
-    'Found leftover WorkBuddy config ({path}) but the desktop app is missing (registry uninstall entries / common install directories) — it may have been uninstalled; if you still use it, reinstall, launch it once, then click Re-detect',
-    { path }
-  )
-
 export const workbuddyAdapter: HarnessAdapter = {
   id: 'workbuddy',
   get label() { return t('WorkBuddy（腾讯 AI 办公客户端）', 'WorkBuddy (Tencent AI office client)') },
@@ -141,7 +134,7 @@ export const workbuddyAdapter: HarnessAdapter = {
           return {
             installed: false,
             configFiles: [],
-            note: residueDetected(marker),
+            note: residueNote([marker], 'WorkBuddy'),
           }
         }
         return {
@@ -176,7 +169,7 @@ export const workbuddyAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: residueDetected(p),
+        note: residueNote([p], 'WorkBuddy'),
       }
     }
     const text = await readTextIfExists(p)
@@ -204,23 +197,14 @@ export const workbuddyAdapter: HarnessAdapter = {
     const text = existing !== null ? await readTextIfExists(existing) : null
 
     // 模型列表：与 zcode 一致，取当前路由对应服务的模型目录；请求 model 名 = 条目 id，
-    // 网关对未命中别名的模型名原样透传，所以 id 必须是真实模型名
-    const routeName = opts.profile ?? cfg.active_profile
-    const profile = routeName ? cfg.profiles[routeName] : undefined
-    const providerId = profile?.provider
-    const provider = providerId ? cfg.providers[providerId] : undefined
-    const modelMap = provider?.models ?? {}
-    const modelIds = Object.keys(modelMap)
+    // 网关对未命中别名的模型名原样透传，所以 id 必须是真实模型名（resolveRoute 与 dsh/zcode/provider-json 共用）
+    const route = resolveRoute(opts, cfg)
+    const { routeName, profile, providerId, provider } = route
+    const modelIds = Object.keys(route.modelMap)
 
     const notes: string[] = []
     if (providerId && profile) {
-      notes.push(
-        t(
-          '模型列表取自当前路由「{route}」（{provider}）：{count} 个模型',
-          'The model list comes from the current route "{route}" ({provider}): {count} models',
-          { route: String(routeName), provider: String(provider?.name ?? providerId), count: modelIds.length }
-        )
-      )
+      notes.push(routeModelNote(String(routeName), String(provider?.name ?? providerId), modelIds.length))
     }
     if (modelIds.length === 0) {
       throw new AdapterError(
@@ -244,13 +228,7 @@ export const workbuddyAdapter: HarnessAdapter = {
     }))
     const directNotes: string[] = []
     if (d) {
-      directNotes.push(
-        t(
-          '独立直连：已按上游 {url} 写入真实 Key（明文），网关挂掉后该客户端不受影响',
-          'Direct mode: wrote the real key against the upstream {url} (plaintext); this client keeps working if the gateway is down',
-          { url: base }
-        )
-      )
+      directNotes.push(directAttachNote(base))
       if (d.protocol !== 'openai' && !d.base_url_openai) {
         directNotes.push(
           t(
@@ -303,7 +281,7 @@ export const workbuddyAdapter: HarnessAdapter = {
         t(
           '这些模型你已有自己的自定义条目（指向其它端点），ModelDock 不覆盖：{ids}',
           'You already have your own custom entries for these models (pointing elsewhere); ModelDock does not overwrite them: {ids}',
-          { ids: skipped.join('、') }
+          { ids: biJoin('、', ', ', skipped) }
         )
       )
     }
