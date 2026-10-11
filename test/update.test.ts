@@ -15,6 +15,7 @@ import {
   selectAssetName,
   verifyChecksum,
   type ReleaseAsset,
+  type ReleaseManifest,
 } from '../src/update/check.js'
 import {
   appRootFromExecPath,
@@ -23,7 +24,7 @@ import {
   installBareBinary,
   installMacApp,
 } from '../src/update/install.js'
-import { checkUpdate, runUpdate, type UpdateRunOptions } from '../src/update/run.js'
+import { checkUpdate, logAlreadyUpToDate, runUpdate, type UpdateRunOptions } from '../src/update/run.js'
 import { VERSION } from '../src/version.js'
 
 // 本文件绝不触达真实网络与真实实例：GitHub API 用本地 http server 伪造，
@@ -209,6 +210,18 @@ describe('版本比较与资产选择', () => {
     expect(compareVersions('1.10.0', '1.9.9')).toBeGreaterThan(0)
     expect(compareVersions('0.3.0', '1.0.0')).toBeLessThan(0)
     expect(compareVersions('2.0.1', '2.0.0')).toBeGreaterThan(0)
+  })
+
+  it('logAlreadyUpToDate：早退协议与 runUpdate/checkUpdate 共用一致（DUP-02）', () => {
+    const current: ReleaseManifest = { version: VERSION, tagName: `v${VERSION}`, notes: '', htmlUrl: '', assets: [] }
+    // 发布版本不高于当前 → 打「已是最新」并返回 checkedOnly 结果，不进入下载/安装
+    const lines: string[] = []
+    const r = logAlreadyUpToDate(current, (m) => lines.push(m))
+    expect(r).toEqual({ updated: false, currentVersion: VERSION, latestVersion: VERSION, checkedOnly: true })
+    expect(lines.join('\n')).toContain(VERSION)
+    // 有新版本 → 返回 null，交由调用方继续下载/安装流程
+    const upgrade: ReleaseManifest = { version: '999.0.0', tagName: 'v999.0.0', notes: '', htmlUrl: '', assets: [] }
+    expect(logAlreadyUpToDate(upgrade, () => {})).toBeNull()
   })
 
   it('selectAssetName：四种安装形态按发布物命名规则选包', () => {
