@@ -93,17 +93,19 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
     cleanup = null
   })
 
-  it('无令牌：kick 静默跳过，status 报 configured=false', async () => {
+  it('无令牌：匿名照常检查（公开仓库免 PAT），status 报 configured=false', async () => {
     const h = fakeHome()
+    const api = await startMockApi('v999.0.0')
+    cleanup = api.close
+    setUpdateApiBaseForTests(api.apiBase)
     try {
-      const rt = await mkRt({ update: {} })
+      const rt = await mkRt({ update: { repo: REPO } })
       await kickUpdateCheck(rt, { force: true })
       const s = await getUpdateStatus(rt)
       expect(s.configured).toBe(false)
-      expect(s.lastCheckedAt).toBeNull()
-      expect(s.available).toBe(false)
-      expect(s.notes).toBeNull()
-      expect(s.htmlUrl).toBeNull()
+      expect(s.available).toBe(true)
+      expect(s.latest).toBe('999.0.0')
+      expect(s.lastCheckedAt).not.toBeNull()
     } finally {
       h.restore()
     }
@@ -266,6 +268,10 @@ describe('server 更新端点（admin 门内）', () => {
   it('未鉴权 401；鉴权后 status/apply/check 响应正确；apply 无新版不 spawn', async () => {
     resetUpdateStateForTests() // 服务用例的 manifest/updating 残留会让 apply 误判（模块级状态）
     const h = fakeHome()
+    // 匿名检查不再被令牌门槛挡下：check 端点会真发请求，须挂本地 mock；
+    // tag 用旧版本——manifest 不抬成可更新，apply 才走 no_update 路径（绝不 spawn 真更新器）
+    const api = await startMockApi('v0.9.9')
+    setUpdateApiBaseForTests(api.apiBase)
     let closeAll: (() => void) | null = null
     try {
       const cfg: Config = { ...emptyConfig(), security: { store: 'file' }, update: { repo: REPO } }
@@ -299,7 +305,9 @@ describe('server 更新端点（admin 门内）', () => {
       expect(check.status).toBe(200)
       expect(((await check.json()) as { ok: boolean }).ok).toBe(true)
     } finally {
+      setUpdateApiBaseForTests(null)
       closeAll?.()
+      await api.close()
       await h.restore()
     }
   })

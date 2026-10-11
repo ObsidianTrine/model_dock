@@ -1,10 +1,13 @@
 /**
- * 自动更新 M1——GitHub Releases 发现与下载（实施基准：docs/design-auto-update.md §5）
+ * 自动更新——GitHub Releases 发现与下载（实施基准：docs/design-auto-update.md §5/§6）
  *
- * 检查 = GET /repos/{repo}/releases/latest（PAT 认证，私有仓库直连；该端点永不返回 draft/prerelease）；
- * 下载 = 同 api.github.com 的 assets/{id}（Accept: application/octet-stream），302 跟随到
- * objects.githubusercontent.com——检查流量全部留在连通性最好的 api.github.com 上。
- * SHA256 从发布物的 SHA256SUMS 资产解析，任何资产安装前强校验。
+ * 检查 = GET /repos/{repo}/releases/latest（公开仓库匿名可读，该端点永不返回 draft/prerelease；
+ * 配置 token_ref 时带 PAT——私有仓库兼容模式，顺带把限流从 60 次/时提到 5000 次/时）。
+ * 下载候选链（公开仓库）：镜像前缀 + browser_download_url → api.github.com 的 assets/{id}
+ * （Accept: application/octet-stream，302 跟随到对象存储）；私有仓库（无 browser_url 可用）
+ * 自然落到末位 API 资产端点。镜像候选快速失败（60s 上限），官方候选保留长超时与 3 次重试。
+ * SHA256 从发布物的 SHA256SUMS 资产解析，任何资产安装前强校验；SUMS 本体永走官方 API
+ * （镜像只做加速，完整性锚点不能经过它，见 design §8）。
  */
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -16,6 +19,8 @@ import { t } from '../util/i18n.js'
 const API_BASE = 'https://api.github.com'
 const CHECK_TIMEOUT_MS = 15_000
 const DOWNLOAD_TIMEOUT_MS = 15 * 60_000
+/** 镜像/直连候选的失败上限：镜像死了要快速落到下一候选，不能占满 15 分钟 */
+const MIRROR_TIMEOUT_MS = 60_000
 
 export class UpdateError extends Error {
   constructor(msg: string) {
@@ -28,6 +33,8 @@ export interface ReleaseAsset {
   name: string
   id: number
   size: number
+  /** releases/latest 返回的 browser_download_url（公开仓库可匿名直连，可走镜像前缀） */
+  browserUrl?: string
 }
 
 export interface ReleaseManifest {
@@ -39,21 +46,24 @@ export interface ReleaseManifest {
   assets: ReleaseAsset[]
 }
 
-function ghHeaders(token: string, accept = 'application/vnd.github+json'): Record<string, string> {
-  return {
-    Authorization: `Bearer ${token}`,
+/** token 为空（匿名模式）时省略 Authorization 头——公开仓库匿名可读；
+ *  带无效令牌反而会被 GitHub 拒 401，把本来能成功的匿名请求打挂 */
+function ghHeaders(token: string | null, accept = 'application/vnd.github+json'): Record<string, string> {
+  const h: Record<string, string> = {
     Accept: accept,
     'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'modeldock-updater',
   }
+  if (token) h.Authorization = `Bearer ${token}`
+  return h
 }
 
 function isSemver(v: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(v)
 }
 
-/** 拉取最新正式发布并派生统一 manifest（apiBase 供测试注入本地服务） */
-export async function fetchLatestRelease(repo: string, token: string, apiBase = API_BASE): Promise<ReleaseManifest> {
+/** 拉取最新正式发布并派生统一 manifest（token 可空=匿名；apiBase 供测试注入本地服务） */
+export async function fetchLatestRelease(repo: string, token: string | null, apiBase = API_BASE): Promise<ReleaseManifest> {
   let res: Response
   try {
     res = await fetch(`${apiBase}/repos/${repo}/releases/latest`, {
@@ -69,20 +79,44 @@ export async function fetchLatestRelease(repo: string, token: string, apiBase = 
       )
     )
   }
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
     throw new UpdateError(
       t(
-        'GitHub 拒绝访问（{s}）：更新令牌无效或过期。到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读），然后执行 modeldock update --token <令牌>',
-        'GitHub access denied ({s}): the update token is invalid or expired. Regenerate a fine-grained token (this repo only, Contents read-only) under GitHub → Settings → Developer settings, then run modeldock update --token <token>',
-        { s: res.status }
+        'GitHub 拒绝访问（401）：已配置的更新令牌无效或过期。到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读）后执行 modeldock update --token <令牌>；公开仓库也可删掉 config.toml [update] 的 token_ref 改用匿名更新',
+        'GitHub access denied (401): the configured update token is invalid or expired. Regenerate a fine-grained token (this repo only, Contents read-only) and run modeldock update --token <token>; for a public repo you can also remove token_ref from [update] in config.toml and update anonymously',
+      )
+    )
+  }
+  if (res.status === 403) {
+    if (token) {
+      throw new UpdateError(
+        t(
+          'GitHub 拒绝访问（403）：更新令牌无效或过期。到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读），然后执行 modeldock update --token <令牌>',
+          'GitHub access denied (403): the update token is invalid or expired. Regenerate a fine-grained token (this repo only, Contents read-only) under GitHub → Settings → Developer settings, then run modeldock update --token <token>',
+        )
+      )
+    }
+    throw new UpdateError(
+      t(
+        'GitHub API 限流（匿名 60 次/小时已用尽）：稍后重试，或执行 modeldock update --token <令牌> 配置令牌把限额提到 5000 次/小时（可选）',
+        'GitHub API rate limit hit (60/hour anonymous): retry later, or run modeldock update --token <token> to raise it to 5000/hour (optional)',
       )
     )
   }
   if (res.status === 404) {
+    if (token) {
+      throw new UpdateError(
+        t(
+          '找不到仓库 {repo} 的发布（404）：检查 config.toml [update] repo 是否写对（owner/name），且令牌对该仓库有 Contents 只读权限',
+          'No release found for {repo} (404): check [update] repo in config.toml (owner/name) and that the token has read-only Contents access to it',
+          { repo }
+        )
+      )
+    }
     throw new UpdateError(
       t(
-        '找不到仓库 {repo} 的发布（404）：检查 config.toml [update] repo 是否写对（owner/name），且令牌对该仓库有 Contents 只读权限',
-        'No release found for {repo} (404): check [update] repo in config.toml (owner/name) and that the token has read-only Contents access to it',
+        '找不到仓库 {repo} 的发布（404）：检查 config.toml [update] repo 是否写对（owner/name）；公开仓库还需至少有一个正式发布的 Release（非草稿/预发布）',
+        'No release found for {repo} (404): check [update] repo in config.toml (owner/name); a public repo also needs at least one published (non-draft, non-prerelease) release',
         { repo }
       )
     )
@@ -96,7 +130,7 @@ export async function fetchLatestRelease(repo: string, token: string, apiBase = 
     tag_name?: string
     body?: string
     html_url?: string
-    assets?: { name?: string; id?: number; size?: number }[]
+    assets?: { name?: string; id?: number; size?: number; browser_download_url?: string }[]
   }
   const version = String(j.tag_name ?? '').replace(/^v/, '')
   if (!isSemver(version)) {
@@ -109,8 +143,13 @@ export async function fetchLatestRelease(repo: string, token: string, apiBase = 
     )
   }
   const assets = (j.assets ?? [])
-    .filter((a): a is { name: string; id: number; size: number } => typeof a.name === 'string' && typeof a.id === 'number')
-    .map((a) => ({ name: a.name, id: a.id, size: a.size ?? 0 }))
+    .filter((a): a is { name: string; id: number; size: number; browser_download_url?: string } => typeof a.name === 'string' && typeof a.id === 'number')
+    .map((a) => ({
+      name: a.name,
+      id: a.id,
+      size: a.size ?? 0,
+      ...(typeof a.browser_download_url === 'string' && a.browser_download_url ? { browserUrl: a.browser_download_url } : {}),
+    }))
   return {
     version,
     tagName: String(j.tag_name),
@@ -147,75 +186,105 @@ export function findAsset(m: ReleaseManifest, name: string): ReleaseAsset | null
   return m.assets.find((a) => a.name === name) ?? null
 }
 
-/** 下载资产到目标目录，返回落盘路径。整文件重试 3 次（对象存储间歇断是大陆常态），失败清理半成品 */
+/** 下载候选：镜像前缀（快失败，60s 上限）在先，官方 API 资产端点（15min + 3 次重试）兜底 */
+interface DownloadCandidate {
+  url: string
+  attempts: number
+  timeoutMs: number
+  withAuth: boolean
+}
+
+/** 组装候选链：仅当 browser_download_url 是本仓库 releases/download 规范形态（大小写不敏感）才走镜像，
+ *  防止把非本仓库 URL 塞给第三方镜像；Authorization 只随官方 API 端点发出（令牌绝不进第三方镜像）。
+ *  刻意不设 browser_url 直连候选：它和官方 API 资产端点最终落到同一对象存储 CDN，而检查调用
+ *  已证明 api.github.com 可达——直连候选只多一次绕路（测试里还会漏进真网）。 */
+function buildDownloadCandidates(repo: string, asset: ReleaseAsset, mirrors: string[], apiBase: string): DownloadCandidate[] {
+  const out: DownloadCandidate[] = []
+  const bu = asset.browserUrl
+  const canBrowser = !!bu && bu.toLowerCase().startsWith(`https://github.com/${repo.toLowerCase()}/releases/download/`)
+  if (canBrowser && bu) {
+    for (const m of mirrors) {
+      const prefix = m.endsWith('/') ? m : `${m}/`
+      out.push({ url: `${prefix}${bu}`, attempts: 1, timeoutMs: MIRROR_TIMEOUT_MS, withAuth: false })
+    }
+  }
+  out.push({ url: `${apiBase}/repos/${repo}/releases/assets/${asset.id}`, attempts: 3, timeoutMs: DOWNLOAD_TIMEOUT_MS, withAuth: true })
+  return out
+}
+
+/** 下载资产到目标目录，返回落盘路径。按候选链逐个尝试；官方 API 端点整文件重试 3 次
+ *  （对象存储间歇断是大陆常态），失败清理半成品 */
 export async function downloadAsset(
   repo: string,
-  token: string,
+  token: string | null,
   asset: ReleaseAsset,
   destDir: string,
-  opts: { apiBase?: string; onProgress?: (received: number, total: number) => void; retryDelayMs?: number } = {}
+  opts: { apiBase?: string; mirrors?: string[]; onProgress?: (received: number, total: number) => void; retryDelayMs?: number } = {}
 ): Promise<string> {
   const dest = path.join(destDir, asset.name)
-  const url = `${opts.apiBase ?? API_BASE}/repos/${repo}/releases/assets/${asset.id}`
   const retryDelay = opts.retryDelayMs ?? 2000
+  const candidates = buildDownloadCandidates(repo, asset, opts.mirrors ?? [], opts.apiBase ?? API_BASE)
   let lastErr: Error | null = null
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(url, {
-        headers: ghHeaders(token, 'application/octet-stream'),
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-        redirect: 'follow',
-      })
-      if (!res.ok || !res.body) {
-        throw new UpdateError(
-          t('下载 {n} 失败：HTTP {s}', 'Failed to download {n}: HTTP {s}', { n: asset.name, s: res.status })
-        )
-      }
-      await fsp.mkdir(destDir, { recursive: true })
-      const out = fs.createWriteStream(dest)
-      let received = 0
-      let lastReport = 0
-      const reader = res.body.getReader()
+  for (const cand of candidates) {
+    for (let attempt = 1; attempt <= cand.attempts; attempt++) {
       try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          received += value.byteLength
-          if (!out.write(Buffer.from(value))) {
-            await new Promise<void>((resolve) => out.once('drain', resolve))
-          }
-          if (opts.onProgress && received - lastReport > 5 * 1024 * 1024) {
-            lastReport = received
-            opts.onProgress(received, asset.size)
-          }
-        }
-      } finally {
-        await new Promise<void>((resolve) => out.end(resolve))
-      }
-      if (asset.size > 0 && received !== asset.size) {
-        throw new UpdateError(
-          t(
-            '下载 {n} 不完整（{r}/{t} 字节），已重试仍失败——请检查网络后重跑',
-            'Download of {n} is incomplete ({r}/{t} bytes) even after retries — check the network and rerun',
-            { n: asset.name, r: received, t: asset.size }
+        const res = await fetch(cand.url, {
+          headers: ghHeaders(cand.withAuth ? token : null, 'application/octet-stream'),
+          signal: AbortSignal.timeout(cand.timeoutMs),
+          redirect: 'follow',
+        })
+        if (!res.ok || !res.body) {
+          throw new UpdateError(
+            t('下载 {n} 失败：HTTP {s}', 'Failed to download {n}: HTTP {s}', { n: asset.name, s: res.status })
           )
-        )
+        }
+        await fsp.mkdir(destDir, { recursive: true })
+        const out = fs.createWriteStream(dest)
+        let received = 0
+        let lastReport = 0
+        const reader = res.body.getReader()
+        try {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            received += value.byteLength
+            if (!out.write(Buffer.from(value))) {
+              await new Promise<void>((resolve) => out.once('drain', resolve))
+            }
+            if (opts.onProgress && received - lastReport > 5 * 1024 * 1024) {
+              lastReport = received
+              opts.onProgress(received, asset.size)
+            }
+          }
+        } finally {
+          await new Promise<void>((resolve) => out.end(resolve))
+        }
+        if (asset.size > 0 && received !== asset.size) {
+          throw new UpdateError(
+            t(
+              '下载 {n} 不完整（{r}/{t} 字节），已重试仍失败——请检查网络后重跑',
+              'Download of {n} is incomplete ({r}/{t} bytes) even after retries — check the network and rerun',
+              { n: asset.name, r: received, t: asset.size }
+            )
+          )
+        }
+        return dest
+      } catch (e) {
+        lastErr = e as Error
+        await fsp.rm(dest, { force: true }).catch(() => {})
+        if (attempt >= cand.attempts) break
+        await new Promise((r) => setTimeout(r, retryDelay * attempt))
       }
-      return dest
-    } catch (e) {
-      lastErr = e as Error
-      await fsp.rm(dest, { force: true }).catch(() => {})
-      if (attempt >= 3) break
-      await new Promise((r) => setTimeout(r, retryDelay * attempt))
     }
   }
   throw lastErr ?? new UpdateError(t('下载失败', 'Download failed'))
 }
 
-/** 拉取并解析发布物的 SHA256SUMS（"哈希  文件名" 每行一条）；缺失返回 null（调用方决定是否放行） */
+/** 拉取并解析发布物的 SHA256SUMS（"哈希  文件名" 每行一条）；缺失返回 null（调用方决定是否放行）。
+ *  刻意不带 mirrors——SUMS 是完整性锚点，永走官方 API（design §8：镜像只做加速） */
 export async function fetchChecksums(
   repo: string,
-  token: string,
+  token: string | null,
   m: ReleaseManifest,
   opts: { apiBase?: string; retryDelayMs?: number } = {}
 ): Promise<Record<string, string> | null> {

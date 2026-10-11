@@ -53,11 +53,11 @@ export function resetUpdateStateForTests(): void {
   inflight = null
 }
 
-async function resolveTokenAndRepo(cfg: Config): Promise<{ repo: string; token: string; apiBase?: string } | null> {
+/** 公开仓库匿名即可检查；配置了 token_ref 才带令牌（私有仓库兼容/提升限流）。
+ *  返回 null 仅在极端异常（无 config）时——repo 恒有默认值 */
+async function resolveTokenAndRepo(cfg: Config): Promise<{ repo: string; token: string | null; apiBase?: string }> {
   const ref = cfg.update?.token_ref
-  if (!ref) return null
-  const token = await getSecret(ref)
-  if (!token) return null
+  const token = ref ? await getSecret(ref) : null
   return { repo: cfg.update?.repo ?? DEFAULT_UPDATE_REPO, token, apiBase: cfg.update?.api_base }
 }
 
@@ -67,11 +67,10 @@ export async function restoreUpdateCheckState(): Promise<void> {
   if (s?.update_check?.at) state.lastCheckedAt = s.update_check.at
 }
 
-/** 发起一次检查：无令牌 / 检查中 / TTL 内（未 force）都静默跳过。不等待完成，状态经 getUpdateStatus 轮询。 */
+/** 发起一次检查：检查中 / TTL 内（未 force）静默跳过。匿名（无令牌）照常检查。不等待完成，状态经 getUpdateStatus 轮询。 */
 export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolean } = {}): Promise<void> {
   if (state.checking || inflight) return
   const resolved = await resolveTokenAndRepo(rt.config)
-  if (!resolved) return
   if (!opts.force && state.lastCheckedAt && Date.now() - state.lastCheckedAt < CHECK_TTL_MS) return
   inflight = (async () => {
     state.checking = true
@@ -114,7 +113,7 @@ export function startBootUpdateCheck(rt: GatewayRuntime): void {
 
 export interface UpdateStatusPayload {
   current: string
-  /** 是否已配置更新令牌（未配置时控制台给出 CLI 配置指引） */
+  /** 是否配置了更新令牌（可选：公开仓库匿名即可更新；令牌=私有仓库兼容/提升限流） */
   configured: boolean
   checking: boolean
   lastCheckedAt: number | null
@@ -147,7 +146,7 @@ export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusP
   const notes = available && state.manifest?.notes ? notesToPlain(state.manifest.notes).trim() : ''
   return {
     current: VERSION,
-    configured: !!resolved,
+    configured: !!resolved?.token,
     checking: state.checking,
     lastCheckedAt: state.lastCheckedAt,
     lastError: state.lastError,

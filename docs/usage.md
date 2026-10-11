@@ -130,13 +130,13 @@ modeldock update                  # 一键升级：下载 → SHA256 校验 → 
 ### 版本更新（一键升级）
 
 ```bash
-modeldock update --token <令牌>   # 首次：保存 GitHub 访问令牌（仅本仓库、Contents 只读；存系统安全存储）
 modeldock update --check          # 只看有没有新版（摘要 + 发布页链接），不安装
-modeldock update                  # 检查 → 确认 → 下载校验 → 替换 → 自动重启网关
+modeldock update                  # 检查 → 确认 → 下载校验 → 替换 → 自动重启网关（公开仓库匿名即可，无需令牌）
+modeldock update --token <令牌>   # 可选：保存 GitHub 访问令牌（fine-grained、Contents 只读；存系统安全存储）——仅更新源为私有仓库时必需，配置后可把匿名限流 60 次/时提到 5000 次/时
 modeldock update --clean          # 清理上一版残留（ModelDock.app.old / *.old）
 ```
 
-发新版后不用再手动下载重装：`modeldock update` 一条命令完成，安装前会校验下载包的 SHA256 完整性，替换时网关短暂中断、完成后按原状态自动拉起（macOS 从 ModelDock.app 启动的会自动重开应用与托盘）。更新源与令牌记录在 `~/.modeldock/`（config.toml `[update]` 段 + 密钥安全存储），详见 `docs/design-auto-update.md`。
+发新版后不用再手动下载重装：`modeldock update` 一条命令完成，安装前会校验下载包的 SHA256 完整性（校验名单永走 GitHub 官方，下载大文件可经镜像加速），替换时网关短暂中断、完成后按原状态自动拉起（macOS 从 ModelDock.app 启动的会自动重开应用与托盘）。更新源/令牌/镜像记录在 `~/.modeldock/`（config.toml `[update]` 段 + 密钥安全存储；`mirror` 缺省走 gh-proxy → ghfast → 官方直连回退链，置空数组可关闭），详见 `docs/design-auto-update.md`。
 
 > 不想敲命令也可以：网关运行中发现新版本时，控制台右下角会弹一条可复制的提醒，顶栏出现琥珀色「可更新 vX.Y.Z」徽标——点开居中更新卡片（版本 / 安装包大小 / 更新说明正文，底部给「在 GitHub 查看完整说明」链接）并一键升级，更新后页面自动重连；升级失败会立即提示原因；不想升级可选「此版本不再提醒」；没有新版本时界面零打扰（手动检查可用 `modeldock update --check` 或 macOS 菜单栏 / Windows 托盘的「检查更新…」——托盘弹窗里是收口后的摘要（首段 + 几条要点 + 共 N 项改动），可直接点「立即更新」就地升级，或点「打开发布页」逐条细看）。网关启动时会自动静默检查一次（24 小时内不重复，失败不打扰）。
 

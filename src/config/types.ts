@@ -126,14 +126,18 @@ export interface LanConfig {
   port?: number
 }
 
-/** 自动更新（M1：GitHub API + PAT 私有直连；三阶段演进见 docs/design-auto-update.md） */
+/** 自动更新（公开仓库匿名直连 + 可选 PAT + 镜像回退链，见 docs/design-auto-update.md §6） */
 export interface UpdateConfig {
-  /** 更新源仓库 owner/name。M1 = 私有主仓库；M2 起可切公开 releases 专用仓库 */
+  /** 更新源仓库 owner/name（默认公开主仓库；改指私有仓库时需配 token_ref） */
   repo?: string
   /** 更新 feed 基地址（默认 GitHub API；自建源/本地 mock 可覆盖，见 docs/design-auto-update.md §4 三阶段） */
   api_base?: string
-  /** PAT 在 secrets 中的 key_ref（setSecret 返回值；令牌本体存 secrets.json/keychain，不进 config 明文） */
+  /** PAT 在 secrets 中的 key_ref（setSecret 返回值；令牌本体存 secrets.json/keychain，不进 config 明文）。
+   *  可选：公开仓库匿名即可更新，令牌仅私有仓库必需、或把匿名限流 60 次/时提到 5000 次/时 */
   token_ref?: string
+  /** 下载镜像前缀列表（拼在 browser_download_url 前；仅资产走镜像，SHA256SUMS 永走官方 API）。
+   *  空数组 = 关闭镜像只走官方直连；缺省用 DEFAULT_UPDATE_MIRRORS */
+  mirror?: string[]
 }
 
 export const CONFIG_VERSION = 1
@@ -141,8 +145,11 @@ export const CONFIG_VERSION = 1
 /** 网关默认端口（唯一常量出处；config.gateway.port 可覆盖） */
 export const DEFAULT_GATEWAY_PORT = 8687
 
-/** 自动更新默认源仓库（M1 私有主仓库；M2 起切公开 releases 专用仓库，见 docs/design-auto-update.md §4） */
+/** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design-auto-update.md §6） */
 export const DEFAULT_UPDATE_REPO = 'ObsidianTrine/model_dock'
+
+/** 下载镜像回退链默认值（大陆加速；design §6 第 4 项）。官方直连是隐式末位，不在此列 */
+export const DEFAULT_UPDATE_MIRRORS = ['https://gh-proxy.com/', 'https://ghfast.top/']
 
 /** 手机简版控制台默认端口（主端口顺延链 8687+10 之外，避免撞车） */
 export const DEFAULT_LAN_PORT = 8787
