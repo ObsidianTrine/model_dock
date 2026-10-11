@@ -139,6 +139,9 @@ export const claudeCodeAdapter: HarnessAdapter = {
     const prevBase = env.ANTHROPIC_BASE_URL
     env.ANTHROPIC_BASE_URL = d ? d.base_url : gatewayBase(opts.gatewayPort)
     if (d) {
+      // 直连没有网关的 /v1/models 实现，discovery 开关是网关模式注入的，切直连时收回
+      // （上游未必实现该端点，留着只会得到失败请求）
+      delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
       // 直连按上游鉴权方式写对应变量，并清掉另一种，避免客户端拿旧的凭据变量先用错
       if (d.auth_style === 'x-api-key') {
         env.ANTHROPIC_API_KEY = d.key
@@ -227,10 +230,13 @@ export const claudeCodeAdapter: HarnessAdapter = {
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
         if (root.model === ROOT_MODEL_DIRECT) delete root.model
       }
+      // 网关本地实现 /v1/models（返回当前服务目录），打开 discovery 让 /model 选择器列出
+      // 并选用服务的真实模型 ID——这是 ModelDock 注入的 env，detach 时一并收回
+      env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1'
       notes.push(
         t(
-          '网关模式：模型映射不写进本文件——claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端；需要分层用不同模型时在服务的路由别名里配置',
-          'Gateway mode: model mappings are not written here — built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart; configure route aliases on the service for per-tier models'
+          '网关模式：已开启模型发现（CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1），/model 选择器将列出当前服务的真实模型；未选具体模型时，claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端',
+          'Gateway mode: model discovery is enabled (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) so /model lists the current service real models; until a specific model is picked, built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart'
         )
       )
     }
@@ -297,6 +303,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
     if (isOursGatewayUrl(env.ANTHROPIC_BASE_URL, 'claude-code', cfg)) {
       delete env.ANTHROPIC_BASE_URL
       delete env.ANTHROPIC_AUTH_TOKEN
+      delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY // attach 注入的 discovery 开关一并收回
       return {
         changes: [
           {

@@ -96,6 +96,8 @@ describe('claude-code adapter', () => {
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:8687')
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
+      // 网关本地实现 /v1/models：attach 即开启 discovery，/model 选择器列出当前服务真实模型
+      expect(after.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe('1')
       expect(after.env.OTHER).toBe('keep')
       expect(plan.notes.some((n) => n.includes('upstream.example.com'))).toBe(true)
 
@@ -110,11 +112,12 @@ describe('claude-code adapter', () => {
       // 快照已建
       expect((await listSnapshots('claude-code')).some((s) => s.operation === 'attach')).toBe(true)
 
-      // detach 兜底：移除注入的两个键
+      // detach 兜底：移除注入的键（含 discovery 开关）
       const planDetach = await claudeCodeAdapter.planDetach(await loadConfig())
       await applyChanges('claude-code', 'detach', planDetach.changes, { yes: true })
       const afterDetach = JSON.parse(fs.readFileSync(p, 'utf8'))
       expect(afterDetach.env.ANTHROPIC_BASE_URL).toBeUndefined()
+      expect(afterDetach.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
       expect(afterDetach.env.OTHER).toBe('keep')
 
       const st = await claudeCodeAdapter.status(await loadConfig(), 8687)
@@ -236,6 +239,36 @@ describe('claude-code adapter', () => {
         expect(det.note).toContain('未找到 claude 命令')
       })
     } finally {
+      h.restore()
+    }
+  })
+
+  it('切直连：收回网关注入的 discovery 开关；直连配置不新增该 env', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      // 网关模式 attach 后的典型状态：BASE_URL 指向网关 + discovery 开
+      await atomicWrite(
+        p,
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: TOKEN, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' } }, null, 2) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({
+        mode: 'direct',
+        gatewayPort: 8687,
+        token: TOKEN,
+        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+      }, await loadConfig())
+      const env = JSON.parse(plan.changes[0].after).env
+      expect(env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
+      expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       h.restore()
     }
   })
