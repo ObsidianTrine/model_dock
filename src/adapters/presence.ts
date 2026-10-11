@@ -52,16 +52,27 @@ const REG_UNINSTALL_KEYS = [
 const REG_TTL = 60_000
 const regMemo = new Map<string, { at: number; hit: boolean }>()
 
+/** 卸载表三视图并行查询的聚合：keys 各自 exec（超时由 exec 内部兜底），任一输出含 appName
+ *  即判定在场（命中短路——Promise.all 全程并行，未命中时才把三次最坏超时重叠为单次窗口）。
+ *  独立成注入 exec 的纯函数以便跨平台单测：CI 三平台都不起 Windows reg，真实调用由测试
+ *  传入的 exec 桩替代。调用方 registryHas 以真实 execText 传参，等价于原先的串行命中判定。 */
+export async function regQueryAny(
+  exec: (cmd: string, args: string[], timeoutMs: number) => Promise<string>,
+  keys: readonly string[],
+  appName: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const outs = await Promise.all(
+    keys.map((k) => exec('reg', ['query', k, '/s', '/f', appName, '/d'], timeoutMs))
+  )
+  return outs.some((o) => o.toLowerCase().includes(appName.toLowerCase()))
+}
+
 async function registryHas(appName: string): Promise<boolean> {
   const memo = regMemo.get(appName)
   if (memo && Date.now() - memo.at < REG_TTL) return memo.hit
-  let hit = false
-  for (const key of REG_UNINSTALL_KEYS) {
-    if (hit) break
-    // /d 只搜数据值（DisplayName 等）；/s /f 全树递归且大小写不敏感，无匹配时 reg 退出码非 0、输出为空
-    const out = await execText('reg', ['query', key, '/s', '/f', appName, '/d'], 8000)
-    if (out.toLowerCase().includes(appName.toLowerCase())) hit = true
-  }
+  // /d 只搜数据值（DisplayName 等）；/s /f 全树递归且大小写不敏感，无匹配时 reg 退出码非 0、输出为空
+  const hit = await regQueryAny(execText, REG_UNINSTALL_KEYS, appName, 8000)
   regMemo.set(appName, { at: Date.now(), hit })
   return hit
 }
