@@ -90,7 +90,9 @@ select.chip{padding-right:24px}
 #addCard .desc{margin:0 0 8px}
 /* 卡片搬进弹层后页面标题与弹层标题重复：弹层里不画卡片自己的 h2（内联首用仍保留步骤标题） */
 #addOverlay:has(#addCard) #addCard > h2{display:none}
-.fab{position:fixed;right:22px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(37,99,235,.45);z-index:var(--z-fab);display:flex;align-items:center;justify-content:center;padding:0}
+/* 层级须压过同列 .snav（几何上两列不重叠，仅 tooltip 相交）：fab 的 data-tip 伪元素
+   被困在 fab 自己的层叠上下文里，snav 同为 z-fab 且 DOM 靠后会整层盖住 tooltip */
+.fab{position:fixed;right:22px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(37,99,235,.45);z-index:calc(var(--z-fab) + 1);display:flex;align-items:center;justify-content:center;padding:0}
 .fab[hidden]{display:none}
 .fab:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(37,99,235,.55)}
 /* 回到顶部/跳到底部按钮：竖排在右下角「＋」按钮上方（dsh 风格细箭头） */
