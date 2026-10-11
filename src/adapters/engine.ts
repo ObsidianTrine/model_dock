@@ -1,4 +1,3 @@
-import { confirm } from '@inquirer/prompts'
 import { readTextIfExists, atomicWrite, fileMode } from '../util/fsx.js'
 import { unifiedDiff, redact } from '../util/diff.js'
 import { c } from '../util/color.js'
@@ -61,6 +60,8 @@ export async function applyChanges(
   }
 
   if (!opts.yes) {
+    // 交互式确认仅在需要时加载：网关进程对 applyChanges 的调用全部 yes:true，快路径不触达 @inquirer/prompts
+    const { confirm } = await import('@inquirer/prompts')
     const ok = await confirm({
       message: t(
         '写入以上改动？（写入前自动快照，可随时 restore/detach 还原）',

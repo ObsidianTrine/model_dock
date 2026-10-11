@@ -1,9 +1,7 @@
-import { request } from 'undici'
 import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { getSecret } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
-import { buildDispatcher } from '../gateway/proxy.js'
 import { autostartStatus } from '../autostart.js'
 import { autostartLine } from './gatewaycmd.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, targetGatewayPort, requireGateway, exitWithError } from './shared.js'
@@ -38,7 +36,10 @@ export async function cmdStatus(): Promise<void> {
   if (attached.length === 0) console.log(c.gray(t('尚未接管任何 harness；modeldock attach <harness> 或 modeldock init', 'No harnesses attached yet. Use modeldock attach <harness> or modeldock init')))
 }
 
-async function upstreamReachable(base: string, proxy?: string): Promise<{ ok: boolean; detail: string }> {
+export async function upstreamReachable(base: string, proxy?: string): Promise<{ ok: boolean; detail: string }> {
+  // undici 与网关代理模块仅在此使用：惰性加载，避免任何 CLI 命令 / 网关进程为其付出启动成本
+  const { request } = await import('undici')
+  const { buildDispatcher } = await import('../gateway/proxy.js')
   try {
     const up = await request(base.replace(/\/+$/, '') + '/', {
       method: 'GET',
