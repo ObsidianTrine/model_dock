@@ -130,4 +130,35 @@ describe('控制台缓存与轮询优化', () => {
       expect(res.headers.get('cache-control')).toContain('immutable')
     }
   })
+
+  it('HTML：200 响应 cache-control 为 no-cache 且带 etag（可存储但每次条件重验证，ETag/304 生效前提）', async () => {
+    const t = await start()
+    ctxs.push(t)
+    const res = await fetch(`${t.base}/ui`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-cache')
+    expect(res.headers.get('etag')).toBeTruthy()
+  })
+
+  it('JSON API：/overview 仍为 no-store（HTML 放开 no-store 不波及敏感 JSON）', async () => {
+    const t = await start()
+    ctxs.push(t)
+    const res = await fetch(`${t.base}/overview`, { headers: ADMIN })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toContain('no-store')
+  })
+
+  it('HTML：带匹配 ETag 的 If-None-Match 二次请求仍 304 且无 body', async () => {
+    const t = await start()
+    ctxs.push(t)
+    const url = `${t.base}/ui`
+    const first = await fetch(url)
+    expect(first.status).toBe(200)
+    const etag = first.headers.get('etag')
+    expect(etag).toBeTruthy()
+
+    const second = await fetch(url, { headers: { 'if-none-match': etag!, 'cache-control': 'no-cache' } })
+    expect(second.status).toBe(304)
+    expect(await second.text()).toBe('')
+  })
 })
