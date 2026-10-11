@@ -293,10 +293,11 @@ export function rewriteModel(
 ): { body: Buffer; modelAfter?: string } {
   if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
   const aliases = target.profile.aliases
-  const passthrough = !target.modelOverride && !target.profile.default_model && !(aliases && Object.keys(aliases).length > 0)
+  const pre = topLevelModel(body)
+  // discovery 别名（/v1/models 服务的 anthropic. 前缀 ID）需要还原，纯透传快路径不适用
+  const passthrough = !target.modelOverride && !target.profile.default_model && !(aliases && Object.keys(aliases).length > 0) && !(pre != null && /^anthropic\./i.test(pre))
   if (passthrough) {
-    const requested = topLevelModel(body)
-    if (requested !== null) return { body, modelAfter: requested }
+    if (pre !== null) return { body, modelAfter: pre }
   }
   let json: any
   try {
@@ -305,7 +306,14 @@ export function rewriteModel(
     return { body }
   }
   if (!json || typeof json !== 'object') return { body }
-  const requested = typeof json.model === 'string' ? json.model : undefined
+  const wire = typeof json.model === 'string' ? json.model : undefined
+  let requested = wire
+  // discovery 别名剥壳：anthropic.<id> 仅当真实 ID 在服务目录里时还原——上游真有 anthropic. 开头
+  // 的模型 ID 时保持原样，不误剥。wire 保留请求体原值，改写判定始终与它比较
+  if (requested && /^anthropic\./i.test(requested)) {
+    const stripped = requested.slice('anthropic.'.length)
+    if (stripped && target.provider.models?.[stripped]) requested = stripped
+  }
   const alias = requested ? matchAlias(target.profile.aliases, requested) : undefined
   // claude 内置模型名兜底（CLAUDE_BUILTIN_RE 注释）：别名未命中时改写为当前目标服务的默认模型
   const tierFallback = alias === undefined && requested !== undefined && CLAUDE_BUILTIN_RE.test(requested)
@@ -313,8 +321,8 @@ export function rewriteModel(
     : undefined
   // 候选级映射（"<provider>:<model>" 条目）优先于别名：它是为跨服务商切换显式配置的意图
   const final = target.modelOverride ?? alias ?? tierFallback ?? requested ?? target.profile.default_model
-  let modelAfter = requested
-  if (final !== undefined && final !== requested) {
+  let modelAfter = wire
+  if (final !== undefined && final !== wire) {
     json.model = final
     modelAfter = final
     return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter }
