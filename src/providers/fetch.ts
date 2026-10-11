@@ -1,7 +1,7 @@
 import { request } from 'undici'
 import type { ProviderConfig } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
-import { buildDispatcher } from '../gateway/proxy.js'
+import { buildDispatcher } from '../util/net.js'
 import { t } from '../util/i18n.js'
 import { saneContextWindow, saneMaxOutput } from './known.js'
 
