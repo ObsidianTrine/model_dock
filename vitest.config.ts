@@ -14,6 +14,20 @@ export default defineConfig({
     env: {
       NODE_NO_WARNINGS: '1'
     },
+    // 覆盖率（默认关闭，`npm run test:coverage` 显式开启）：发布前人工审缺口用，不设硬阈值门禁
+    // （覆盖率是手段不是目的；singleFork 串行全量约 +1 分钟）。生成文件与内联 UI 资产不计入。
+    coverage: {
+      provider: 'v8',
+      include: ['src/**'],
+      exclude: [
+        'src/providers/catalog-snapshot.generated.ts',
+        'src/gateway/ui.ts',
+        'src/gateway/lanAssets.ts',
+        'src/version.ts'
+      ],
+      reporter: ['text', 'html'],
+      reportsDirectory: 'coverage'
+    },
     pool: 'forks',
     // ①isolate:false + maxWorkers:1（vitest4 迁移：原 forks.singleFork，见
     //   https://vitest.dev/guide/migration 的 pool rework 节）：全部文件在同一子进程
