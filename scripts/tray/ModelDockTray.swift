@@ -8,7 +8,6 @@
 // 单文件直接编译（文件即 main），顶层代码作入口；accessory 策略不占 Dock。
 
 import AppKit
-import CoreText
 import Darwin
 
 // ---------- 路径与状态读取 ----------
@@ -151,32 +150,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let color = running ? NSColor.black : NSColor.black.withAlphaComponent(0.7)
         let img = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
             guard let cg = NSGraphicsContext.current?.cgContext else { return false }
-            // 文字绘制不遵守 clear 合成，改用 M 字形轮廓 + even-odd 一次填充把 M 抠成镂空
-            // 用 heavy 字重：bold 笔画太细，M 中间的 V 形缺口与竖/斜之间的缝在 17pt 下糊成白斑；
-            // heavy 下侧缝基本闭合、只剩中间一条细缝，又不至于像 black 那样过粗
-            let ptSize: CGFloat = 12
-            let nsFont = NSFont.systemFont(ofSize: ptSize, weight: .heavy)
-            let font = CTFontCreateWithFontDescriptor(nsFont.fontDescriptor, ptSize, nil)
-            var ch: UniChar = UniChar(UnicodeScalar("M").value)
-            var glyph = CGGlyph()
-            let combined = CGMutablePath()
             // 圆角半径随方块等比放大，保持原来的观感比例
             let radius = tileSide * (5.5 / 15)
-            combined.addPath(CGPath(roundedRect: NSRect(x: tileInset, y: tileInset, width: tileSide, height: tileSide),
-                                    cornerWidth: radius, cornerHeight: radius, transform: nil))
-            if CTFontGetGlyphsForCharacters(font, &ch, &glyph, 1),
-               let m = CTFontCreatePathForGlyph(font, glyph, nil) {
-                // 按字形墨迹框居中：必须减去 bbox.minX/minY，只减 width/height 会整体偏右约 1pt
-                let bb = m.boundingBoxOfPath
-                var tr = CGAffineTransform(translationX: (size - bb.width) / 2 - bb.minX,
-                                           y: (size - bb.height) / 2 - bb.minY)
-                if let mTranslated = m.copy(using: &tr) {
-                    combined.addPath(mTranslated)
-                }
-            }
-            cg.addPath(combined)
+            let tile = CGPath(roundedRect: NSRect(x: tileInset, y: tileInset, width: tileSide, height: tileSide),
+                              cornerWidth: radius, cornerHeight: radius, transform: nil)
+            cg.addPath(tile)
             cg.setFillColor(color.cgColor)
-            cg.fillPath(using: .evenOdd)
+            cg.fillPath()
+            // 镂空 M：先填方块，再用 .clear 合成把 M 笔画抠掉。字标与 app 图标同源
+            // （build-sea.mjs ICON_M_SEGS 四段圆头笔画，坐标按方块边长归一）。
+            // 不走字体字形：17pt 下 V 形缺口与笔画间缝是亚像素宽，抗锯齿糊成半透明白斑；
+            // 圆头笔画在 @2x 下笔画约 3.4px、缝 ≥3px，任意尺寸都干净，且无字体依赖
+            let k = tileSide / 0.8046 // app 图标中方块占画布 0.8046，换算归一坐标 → pt
+            let segs: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+                (0.295, 0.360, 0.295, 0.645), // 左竖
+                (0.295, 0.360, 0.500, 0.565), // 左斜（下探至中部）
+                (0.500, 0.565, 0.705, 0.360), // 右斜
+                (0.705, 0.360, 0.705, 0.645), // 右竖
+            ]
+            cg.setBlendMode(.clear)
+            cg.setLineWidth(0.081 * k)
+            cg.setLineCap(.round)
+            for (u1, v1, u2, v2) in segs {
+                // app 图标 v 轴向下，翻成 CG y 向上；M 墨迹纵向中心 0.5025 对齐方块中心
+                let x1 = size / 2 + (u1 - 0.5) * k
+                let y1 = size / 2 + (0.5025 - v1) * k
+                let x2 = size / 2 + (u2 - 0.5) * k
+                let y2 = size / 2 + (0.5025 - v2) * k
+                cg.move(to: CGPoint(x: x1, y: y1))
+                cg.addLine(to: CGPoint(x: x2, y: y2))
+                cg.strokePath()
+            }
+            cg.setBlendMode(.normal)
             return true
         }
         img.isTemplate = true
