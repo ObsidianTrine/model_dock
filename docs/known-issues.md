@@ -46,7 +46,7 @@
 | CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☐ 未修 |
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☐ 未修 |
-| CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☐ 未修 |
+| CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/release-review-2026-10-12.md §五 |
 
 ---
 
@@ -216,6 +216,7 @@
 - 现象：00:00:08 前后跑全量测试，「窗口接管重写 picker」「pickTarget 顺延到窗口目标」「displayRouteProvider prefer 窗口接管」等 5 例失败（窗口 `00:00–23:59` 被判不活跃）；23:50 与 00:03 复测同组全绿。与当日合入的改动无交集（失败用例涉及 schedule/pickTarget，同批合并改的是 relay/secrets/fsx/server 轮询）。
 - 推测（未定位）：activeScheduleWindow 对「恰在窗口起点 00:00:00」的判定存在边界差（如按起始日归属/闭区间端点），或测试窗口取整分钟与真实秒级时刻的组合竞态。每日只在午夜±数秒窗口内可复现，复现成本高。
 - 方向：为 activeScheduleWindow 补「now=窗口起止端点」的确定性单测（注入时钟），定位后修复。
+- ☑ **已修 2026-10-12（@85558ca）**：根因不是午夜边界——是 end 排他语义在分钟粒度下产生的「死亡分钟」：`00:00–23:59`（e=1439）在 23:59:00–23:59:59（t=1439 ≥ e）被判不活跃，全量跑到这一分钟才红（00:00:08 只是观察时刻）。修法：`e === 1439` 特判含入最后一分钟（「当天结束」惯例），普通窗口 end 不含语义不变；补全天窗口 23:59 回归用例。完整反例推演见 docs/release-review-2026-10-12.md §五。
 
 **CORRECT-03（P2）config.toml 无写前快照**
 - 现状：全仓快照仅 4 处调用（engine.ts / ops.ts:749 / cli/harness.ts / sync/collect.ts），均针对客户端文件与 sync 导入前；config.toml 直写无快照，写坏（如 migrate/stringify 缺陷）无 undo。推测有意取舍（config 有 .lock + 原子写）。建议至少在 AGENTS.md 澄清边界，或对 migrate 类大改前补快照。

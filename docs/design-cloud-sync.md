@@ -323,7 +323,7 @@ CREATE TABLE paircodes( code TEXT PRIMARY KEY, expires_at TEXT NOT NULL );
 5. 本机任何手动切换（UI/CLI）后：`lastLocalSwitchTs = now`，心跳自然把 reported 报上去；云端**不**因 reported 自动改写 desired（desired 只由控制台/`all` 指令写）。
 6. 切换失败（如 profile 的 provider 缺 key）：保留现状，心跳 reported 带失败标记，控制台对该设备显示「云端期望 X，本机应用失败」提示。
 
-### 7.5 客户端 sync agent（`src/sync/agent.ts` + `src/cli/sync.ts` 扩展）
+### 7.5 客户端 sync agent（`src/sync/engine.ts` + `src/cli/sync.ts` 扩展）
 
 ```bash
 modeldock sync enroll --server https://<ip>:<port> --code XXXX-XXXX   # 交互输同步口令（派生密钥入 sync.json）

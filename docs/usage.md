@@ -1,5 +1,8 @@
 # ModelDock 使用指南
 
+**简体中文** ｜ [English](en/usage.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/usage.md)），约定见 .agents/conventions/docs-writing.md -->
+
 > 一句话：把所有 AI harness（Claude Code / ZCode / dsh / Codex / …）的 base_url + key 收进 ModelDock 统一保管，harness 只需指向本地网关一次，此后换供应商、换模型映射都是一条命令、即时生效。
 
 **目录**：[核心概念](#1-三分钟理解核心概念) · [安装与构建](#2-安装与构建) · [首次上手](#3-首次上手推荐路径) · [接管各 harness](#4-接管各-harness-的具体行为) · [日常使用](#5-日常使用) · [Web 控制台](#55-web-控制台) · [还原与卸载](#6-还原与卸载全部可逆) · [配置文件速查](#7-配置文件速查modeldock) · [网关与端口](#8-网关与端口) · [故障排查](#9-故障排查) · [实现状态](#10-当前实现状态v100)
@@ -11,11 +14,11 @@ provider（上游凭据：base_url + key + 模型目录）
    ↓
 profile（一条路由：用哪个 provider + 默认模型 + 模型别名映射）
    ↓
-harness（每个客户端怎么接入：claude-code / zcode / dsh / codex / opencode / mimo-code / workbuddy / generic-env）
+harness（每个客户端怎么接入：claude-code / zcode / dsh / codex / opencode / mimo-code / mimo-desktop / workbuddy / generic-env）
 ```
 
 - **网关模式（默认）**：harness 的配置里只写 `http://127.0.0.1:8687` + 一个本地 token，真实 key 永不出 ModelDock。切换 provider 改的是 ModelDock 的路由，harness 配置零改动。
-- **非侵入**：不执行 `attach` 之前，ModelDock 对你现有的 harness 配置**只读不写**；每次写盘前自动快照，`detach` / `restore` 随时还原。
+- **非侵入**：不执行 `attach` 之前，ModelDock 对你现有的 harness 配置**只读不写**；接入/切换等对客户端配置的写盘前自动快照（`config.toml` 自身由锁 + 原子写保护），`detach` / `restore` 随时还原。
 
 ## 2. 安装与构建
 
@@ -97,7 +100,7 @@ modeldock attach claude-code
 | harness | 命令 | attach 做了什么 | 之后你要做的 |
 |---|---|---|---|
 | Claude Code | `modeldock attach claude-code [--takeover-models]` | 改 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 两个值，其余字段不动；`--takeover-models` 可选：把 `DEFAULT_*_MODEL` 映射迁进 profile 并从文件删除 | 重启 Claude Code |
-| ZCode | `modeldock attach zcode` | 在 `~/.zcode/v2/config.json` **新增** `builtin:modeldock` provider 条目，不动既有条目 | 在 ZCode 设置里手动选择一次 ModelDock provider |
+| ZCode | `modeldock attach zcode` | 在 `~/.zcode/v2/provider_config.json` **新增** modeldock provider 条目（热加载，立即生效），不动既有条目；旧版写入 `config.json` 的 `builtin:modeldock` 条目会在接入时自动清理 | 在 ZCode 设置里手动选择一次 ModelDock provider |
 | dsh | `modeldock attach dsh [--set-default]` | `~/.dsh/settings.yaml` 新增 modeldock provider（apiKeyEnv 间接引用），token 写进 `.credentials.yaml`；`--set-default` 顺带切 agent-default-model | 重启 dsh |
 | Codex | `modeldock attach codex [--set-default]` | 创建/修改 `~/.codex/config.toml` 注册 modeldock provider（wire_api=chat） | `export MODELRDOCK_CODEX_TOKEN=$(modeldock token codex)` 写进 `~/.zshrc`（一次） |
 | OpenCode | `modeldock attach opencode` | 在 `~/.config/opencode/opencode.json` 新增 `provider.modeldock`（OpenAI 兼容 `/v1`） | 重启 OpenCode |
@@ -116,8 +119,8 @@ modeldock gateway install         # ★ 开机自启（常驻）：注册系统�
 modeldock status                  # 总览：网关 / active profile / 各 harness 指向
 modeldock test [profile]          # 连通性自测：key、模型名、流式、延迟一次说清
 modeldock doctor                  # 全面体检，每条问题附修复命令
-modeldock logs -f                 # 实时请求日志（只有元数据，不落 prompt）
-modeldock logs --harness claude-code
+modeldock gateway log -f          # 实时请求日志（只有元数据，不落 prompt）
+modeldock gateway log --harness claude-code
 modeldock config export           # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）；默认写到 modeldock-config-<日期>-<时间>.msync，用 -o 指定路径
 modeldock config import <file>    # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup              # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
@@ -183,7 +186,7 @@ enabled = true
 
 ```bash
 modeldock model list                     # 每个模型的输入上下文/最大输出/能力/来源
-modeldock provider refresh <id>          # 从上游 /v1/models 自动拉取
+modeldock model refresh <id>             # 从上游 /v1/models 自动拉取
 modeldock model set <provider> <model> --ctx 262144 --max-out 32768   # 手动改元数据
 modeldock model set <provider> <model> --cap reasoning,vision         # 手动改能力标记
 ```
@@ -217,7 +220,7 @@ modeldock sync status            # 目标 / 版本 / 最近推拉 / 错误与冲
 
 **免复制粘贴：附近电脑点选**：新电脑「从其他电脑导入」弹层里点**「搜索附近的电脑…」**，同网络中开启「手机远程」的 ModelDock 电脑自动列出，点选即发起拉取；旧电脑会弹出确认卡（显示对方主机名），点**「允许拉取」**后配置自动送达、预览确认即完成。发现走本地网络（UDP 广播，不经任何外部服务器）；若路由器开了客户端隔离搜不到，改用上方链接或文件方式。
 
-也可以自建云端中枢统一管理多台设备（进阶）：在一台云服务器上部署控制面（一页 runbook 见 [docs/deploy-cloud.md](docs/deploy-cloud.md)），电脑 `modeldock sync enroll --server http://<IP>:18443 --code <配对码>` 入网；浏览器（手机最佳）打开云端地址、粘贴 consoleToken 登录，即可查看所有设备、单台 / 批量切换服务（1 分钟内生效）、生成新设备配对码。入网设备心跳上报各自的服务目录，切换下拉自动列出目标机可用的全部服务。
+也可以自建云端中枢统一管理多台设备（进阶）：在一台云服务器上部署控制面（一页 runbook 见 [deploy-cloud.md](deploy-cloud.md)），电脑 `modeldock sync enroll --server http://<IP>:18443 --code <配对码>` 入网；浏览器（手机最佳）打开云端地址、粘贴 consoleToken 登录，即可查看所有设备、单台 / 批量切换服务（1 分钟内生效）、生成新设备配对码。入网设备心跳上报各自的服务目录，切换下拉自动列出目标机可用的全部服务。
 
 ## 6. 还原与卸载（全部可逆）
 
@@ -296,16 +299,16 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 |---|---|
 | harness 报 401 | token 不对：`modeldock status` 核对，重跑 attach；codex 检查 `MODELRDOCK_CODEX_TOKEN` |
 | 上游 401/403 | key 失效：`modeldock provider set-key <id>` |
-| 上游 404 model | `modeldock provider refresh <id>` 拉模型，或换 profile |
+| 上游 404 model | `modeldock model refresh <id>` 拉模型，或换 profile |
 | 疑似上下文超限 | `modeldock model list` 看该模型 ctx；换长上下文模型 |
 | 网关挂了 harness 全断 | 已装自启服务（`gateway install`）会自动拉起；否则 `modeldock gateway start --daemon`，应急 `modeldock detach <harness>` 立即回到直连 |
 | ZCode 没走网关 | attach 只注册了 provider，还需在 ZCode 设置里选择它（一次性） |
 | 配置改坏了 | `modeldock config edit` 或 `modeldock restore` |
 
-## 10. 当前实现状态（v1.0.0）
+## 10. 当前实现状态（2026-10-12 基线；发版时随版本号刷新）
 
 已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；预设库 20 个（含多协议端点与 2026 模型参数）；import 四来源；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 启动文件夹）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 静默安装器 / 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
 
-验证状态：TypeScript 编译通过；测试 641 例全绿（47 个文件：store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / orchestrator / update 等套件，含 Web 端点、手机控制台与云端控制面）；CLI 二进制冒烟通过；Windows / Linux / macOS 跨平台测试通过。真实 harness 的 attach 联调待你在本机执行——首次使用建议保留 diff 确认，并先跑 `modeldock test` / `modeldock doctor`。
+验证状态：TypeScript 编译通过；测试 776 例全绿（63 个文件：store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / orchestrator / update 等套件，含 Web 端点、手机控制台与云端控制面；另 4 例按平台跳过）；CLI 二进制冒烟通过；Windows / Linux / macOS 跨平台测试通过。真实 harness 的 attach 联调待你在本机执行——首次使用建议保留 diff 确认，并先跑 `modeldock test` / `modeldock doctor`。
 
-计划中（M2/M3）：L3 外部插件、预设库远程更新、管理面「严格模式」（只读端点也要求 token）、doctor 检出热加载失效、网关侧 `/v1/models` 合成、anthropic↔openai 协议转换；用量统计经评估不做；云同步 M4 完善项（恢复码 / 吊销设备 / 口令缓存可选开关）与云端控制面 VPS 真机验收按详设（Phase 2）推进。
+计划中（M2/M3）：L3 外部插件、预设库远程更新、管理面「严格模式」（只读端点也要求 token）、doctor 检出热加载失效、anthropic↔openai 协议转换；用量统计经评估不做；云同步 M4 完善项（恢复码 / 吊销设备 / 口令缓存可选开关）与云端控制面 VPS 真机验收按详设（Phase 2）推进。

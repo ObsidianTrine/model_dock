@@ -95,7 +95,7 @@
 - **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照。
 - **SEA 检测**：用 `process.execPath` 文件名（开头 `modeldock`）判断，**不要**依赖 `sea-config.json` 的 `env` 或 `import.meta.url`（postject 注入下失效）。
 - **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。
-- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、不清手改；dsh/ZCode 的 YAML 用 `yaml` Document API 操作以保留注释。
+- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、不清手改；dsh/ZCode 的 YAML 用 `yaml` Document API 操作以保留注释。注意：config.toml 经程序写入（`mutateConfig`）是**整包重序列化，用户手写的注释与排版会被抹除**（TOML 侧无 Document API，已知取舍，见 docs/known-issues.md CORRECT-03/审查报告 P2-14）。
 - **预设扩展**：运行时预设 = 内置库 `src/presets/data.ts` 的 `BUILTIN_PRESETS` + 用户自定义覆盖文件 **`~/.modeldock/presets.json`**（启动时同步读取合并，见 `src/presets/data.ts` 的 `applyUserPresets/readUserPresets/reloadPresets`）。句式：同名 `id` 的条目覆盖内置预设、新 `id` 追加；文件缺失视为无自定义、格式错误抛可操作报错（阻断启动）。**不要**新增 provider 时只写内嵌，把能预见复用的先落到 presets.json 扩展机制。
 - **错误信息**：必须可操作，附修复建议。
 - **双语文案**：用户可见文案（CLI 输出、报错、帮助、网关 message/hint）一律经 `src/util/i18n.ts` 的 `t(中文, English, params?)` 输出（中文原文即 key，占位符 `{name}`），**新增文案两个语言参数必须同写**；语言解析链 `--lang > MODELRDOCK_LANG > config.toml language > zh`（`src/config/lang.ts`，commander 分支必须在 `buildProgram()` 前 `initLang()`）。中文段输出须与既有文案逐字节一致（测试有中文断言）；注释、枚举值、会被程序比较/写进客户端配置的字符串不走 t()；模块顶层常量不要直接求值 t()（会在 initLang 前固化语言），用 getter/懒函数。Web 控制台 `ui.ts` 内嵌的 `data-i18n="中文||English"` 浏览器端机制独立存在，勿混用。**新增任何用户可见文案（日志、报错、控制台 label/pill/toast/弹层标题）动手前先想双语**；Web 端长生命周期组件在模块顶层只接线一次，其 label/title **必须传惰性函数** `function () { return t('中文', 'English') }`——传字符串会把语言固化在页面加载时刻，切语言不跟随（2026-10 状态行 5 颗 pill 曾踩），且要在 `applyLang()` 末尾为该组件补一次 `render()`。

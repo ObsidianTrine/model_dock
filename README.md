@@ -1,5 +1,8 @@
 # ModelDock
 
+**简体中文** ｜ [English](docs/en/README.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](docs/ja/README.md)），约定见 .agents/conventions/docs-writing.md -->
+
 [![test](https://github.com/ObsidianTrine/model_dock/actions/workflows/test.yml/badge.svg)](https://github.com/ObsidianTrine/model_dock/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen)
@@ -9,7 +12,7 @@
 
 - 网关模式（默认）：harness 只需指向 `http://127.0.0.1:8687` 一次，切换 provider / 模型映射全部在 ModelDock 侧完成，即时生效，harness 配置文件里不再出现真实上游 key。
 - 灵活路由：定时切换可按时段自动换服务（低谷/高峰/节假日，法定节假日自动识别），单个客户端可钉定专属服务/模型，也可切「直连」不经网关直接访问上游；主服务连不上、限流或额度用完时自动切到其他已启用的服务（自动备用链）。
-- 非侵入：未执行 `attach` 前，ModelDock 对现有 harness 零写入；每次写入前自动快照，`detach` / `restore` 一键还原。
+- 非侵入：未执行 `attach` 前，ModelDock 对现有 harness 零写入；接入/切换等对客户端配置的写入前自动快照（`config.toml` 自身由锁 + 原子写保护），`detach` / `restore` 一键还原。
 - 密钥安全：上游 key 集中存入平台安全后端（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环时回退机器绑定加密），存量明文自动迁移。
 - 常驻可靠：`gateway install` 注册开机自启（macOS LaunchAgent / Linux systemd / Windows 启动文件夹），崩溃自动拉起，网关挂掉不再断连。
 - 菜单栏常驻：macOS 菜单栏 / Windows 系统托盘常驻入口——打开控制台、在浏览器打开、开关自启、看日志、一键清理数据；关掉控制台窗口网关照常运行，托盘「退出」即停网关。
@@ -17,7 +20,7 @@
 - 配置可搬家：`modeldock config export` 一条命令导出口令加密的配置包（服务、路由、自定义预设、定时规则，连同 Key），新电脑 `modeldock config import` 导入即用；同一局域网内更简单——新电脑控制台「从其他电脑导入」里搜索附近电脑、旧电脑点一下「允许」即完成，不用复制粘贴；手机控制台也能扫码导出/导入当搬运工。
 - 多机自动同步：`modeldock sync setup` 把同步目标设为 WebDAV 网盘或本地同步盘，多台电脑的服务、Key、路由改动自动双向收敛，冲突不丢数据；进阶可自建云端中枢（[docs/deploy-cloud.md](docs/deploy-cloud.md)），手机单页管理所有设备、远程切换服务。
 - 一键升级：`modeldock update` 检查并安装新版本——下载、SHA256 校验、替换、自动重启网关一条命令完成，不再需要手动到 Releases 页下载重装；Web 控制台顶栏与托盘菜单也会提示新版本，弹窗里给出更新摘要与发布页链接，可在界面里一键升级。
-- 可扩展：内置 adapter（Claude Code / ZCode / dsh / Codex / OpenCode / MiMo Code / WorkBuddy / 通用 env）+ 声明式 adapter pack（零代码接入新 harness）。
+- 可扩展：内置 adapter（Claude Code / ZCode / dsh / Codex / OpenCode / MiMo Code / MiMo 桌面端 / WorkBuddy / 通用 env）+ 声明式 adapter pack（零代码接入新 harness）。
 
 ## 快速开始
 
@@ -80,11 +83,11 @@ modeldock attach claude-code      # 接管 Claude Code（先展示 diff，确认
 modeldock status                # 总览：网关/active profile/各 harness 接管状态
 modeldock test                  # 端到端连通性自测（key/模型/流式/延迟）
 modeldock doctor                # 逐 harness 体检，附修复命令建议
-modeldock logs -f               # 网关请求日志（不落 prompt）
+modeldock gateway log -f        # 网关请求日志（不落 prompt）
 modeldock use <profile>         # 切换 provider，网关模式即时生效，零改动 harness
 modeldock gateway install       # 开机自启（常驻）：登录自动拉起、崩溃自动重启
 modeldock update                # 一键升级：下载 → 校验 → 替换 → 自动重启网关（--check 只看不安）
-modeldock provider refresh <id> # 自动拉取上游可用模型列表
+modeldock model refresh <id>    # 自动拉取上游可用模型列表
 modeldock config export         # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）；默认名带日期时间，-o 指定路径
 modeldock config import <file>  # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup            # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
@@ -100,6 +103,7 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 ## 文档
 
 - **使用指南：[docs/usage.md](docs/usage.md)**（配置与日常操作全流程）
+- 英文版文档：[docs/en/](docs/en/)（README / CHANGELOG / 使用指南等镜像，随版本同步）
 - 设计文档：[docs/design.md](docs/design.md)（架构、ADR、威胁模型）
 - 换电脑与多机同步：[docs/multi-machine-sync.md](docs/multi-machine-sync.md)（网盘同步盘接入新电脑的完整步骤与排错）
 - 云端部署：[docs/deploy-cloud.md](docs/deploy-cloud.md)（自建云端同步中枢 runbook）
