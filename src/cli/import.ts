@@ -1,16 +1,54 @@
-import { checkbox } from '@inquirer/prompts'
+import { checkbox, input } from '@inquirer/prompts'
 import { c, maskSecret, printTable, t } from '../util/index.js'
 import { mutateConfig } from '../config/store.js'
-import { applyImport, scanSources, type ImportSource } from '../import/sources.js'
+import { applyImport, scanSources, type ImportScanOptions, type ImportSource } from '../import/sources.js'
 
-export async function cmdImport(opts: { from?: string; yes?: boolean; withProfiles?: boolean }): Promise<void> {
+const SOURCES: (ImportSource | 'all')[] = [
+  'all',
+  'cc-switch',
+  'claude',
+  'dsh',
+  'zcode',
+  'codex',
+  'opencode',
+  'mimocode',
+  'workbuddy',
+  'ccr',
+  'crush',
+  'gemini',
+  'oneapi',
+]
+
+export async function cmdImport(opts: { from?: string; yes?: boolean; withProfiles?: boolean; url?: string; token?: string }): Promise<void> {
   const from = (opts.from ?? 'all') as ImportSource | 'all'
-  if (!['all', 'cc-switch', 'claude', 'dsh', 'zcode'].includes(from)) {
-    console.error(c.red(t('✗ 未知来源 {f}（可选 all/cc-switch/claude/dsh/zcode）', '✗ Unknown source {f} (choose all/cc-switch/claude/dsh/zcode)', { f: from })))
+  if (!SOURCES.includes(from)) {
+    console.error(c.red(t('✗ 未知来源 {f}（可选 {list}）', '✗ Unknown source {f} (choose {list})', { f: from, list: SOURCES.join('/') })))
     process.exit(1)
   }
-  console.log(c.gray(t('扫描现有 harness 配置（只读，不会改动原文件）…', 'Scanning existing harness configs (read-only; original files are not touched)…')))
-  const cands = await scanSources(from)
+  let scanOpts: ImportScanOptions = {}
+  if (from === 'oneapi') {
+    const url = opts.url?.trim() || (await input({ message: t('one-api / new-api 站点地址（如 https://api.example.com）', 'one-api / new-api site URL (e.g. https://api.example.com)') })).trim()
+    const token =
+      opts.token?.trim() ||
+      (await input({
+        message: t('系统访问令牌（one-api「个人设置 → 系统访问令牌」）', 'System access token (one-api "Personal settings → System access token")'),
+      })).trim()
+    if (!url || !token) {
+      console.error(c.red(t('✗ 站点地址与系统访问令牌都不能为空', '✗ Both the site URL and the system access token are required')))
+      process.exit(1)
+    }
+    scanOpts = { oneapi: { url, token } }
+    console.log(c.gray(t('正在从 one-api / new-api 拉取渠道（只读，不会改动站点配置）…', 'Fetching channels from one-api / new-api (read-only; the site is not changed)…')))
+  } else {
+    console.log(c.gray(t('扫描现有 harness 配置（只读，不会改动原文件）…', 'Scanning existing harness configs (read-only; original files are not touched)…')))
+  }
+  let cands
+  try {
+    cands = await scanSources(from, scanOpts)
+  } catch (e) {
+    console.error(c.red(t('✗ {msg}', '✗ {msg}', { msg: (e as Error).message })))
+    process.exit(1)
+  }
   if (cands.length === 0) {
     console.log(c.yellow(t('未发现可导入的 provider 配置', 'No importable provider configs found')))
     return

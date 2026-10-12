@@ -7,6 +7,11 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- **One-click import now covers far more apps**: legacy-config import grows from 4 sources to 11 — newly supported are Codex CLI, OpenCode, MiMo Code (shared with the MiMo desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays; Codex / Gemini profiles in newer cc-switch versions are no longer missed. The first-run wizard and the web banner pick them up automatically.
+- **Import channels from one-api / new-api**: `modeldock import --from oneapi --url <site> --token <system access token>` bulk-moves channels from your self-hosted relay site into ModelDock (generate the token under "Personal settings → System access token" on the site); only OpenAI-compatible / Anthropic channels are imported — ones ModelDock cannot reach directly (Azure, native Gemini, etc.) are skipped with the reason shown.
+
 ### Fixed
 
 - **The tray's "Cleanup finished" dialog keeps its buttons reachable (macOS)**: after cleaning data, the dialog shows only the conclusion lines with buttons always on screen; the full process output is saved to "~/Library/Logs/ModelDock" (a timestamped log file) — click "View full log" in the dialog to open it. Previously the entire execution output was stuffed into the dialog, pushing the buttons off-screen.

@@ -1720,7 +1720,8 @@ async function handleAdmin(
   }
 
   if (url === '/_modeldock/import/detect' && req.method === 'GET') {
-    // 扫描本机 cc-switch / Claude Code / dsh / ZCode 的现有配置；绝不回传 Key 明文
+    // 扫描本机各客户端/工具的现有配置（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode /
+    // MiMo / WorkBuddy / CCR / Crush / Gemini CLI）；绝不回传 Key 明文
     const cands = await scanSources('all')
     const existingNorms = new Set(
       Object.values(rt.config.providers).map((p) => normalizeBaseUrl(p.base_url))
