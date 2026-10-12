@@ -1,5 +1,8 @@
 # 多机配置同步：本机实录 + 新电脑接入指南
 
+**简体中文** ｜ [English](en/multi-machine-sync.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/multi-machine-sync.md)），约定见 .agents/conventions/docs-writing.md -->
+
 > 适用：`modeldock sync setup` 的**本地同步盘（localdir）**目标（Google Drive / iCloud / OneDrive / 坚果云同步盘…），文末附 WebDAV 差异。
 > 本文是"照着做就能成"的操作手册，不是设计文档；设计取舍见 [design-cloud-sync.md](design-cloud-sync.md)。
 

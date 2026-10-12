@@ -26,6 +26,12 @@
 - [ ] 流程、端口策略、工程约定有变化？→ 对应章节同步更新（AGENTS.md 是活文档）。
 - [ ] 新增了工作流文件？→ 「多 Agent 并行开发约定」章节的工作流列表同步更新。
 
+### 英文镜像（docs/en/）
+
+- [ ] 这次改动涉及对外文档（README / CHANGELOG / CONTRIBUTING / SECURITY / docs/usage / multi-machine-sync / deploy-cloud）吗？
+  - 有 → 同一交付里更新 `docs/en/` 下对应英文镜像（中文是事实来源，英文跟随；纯内部文档不翻译，结构约定见 `.agents/conventions/docs-writing.md`「多语言文档结构」）。
+  - 顺手核对新旧文档顶部语言切换行的链接都未断。
+
 ### 报错 / 界面文案
 
 - [ ] 新增或改了报错信息？→ 符合"说清出了什么 + 怎么修"，不暴露堆栈和内部变量名。

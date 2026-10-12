@@ -1,5 +1,8 @@
 # 安全政策（Security Policy）
 
+**简体中文** ｜ [English](docs/en/SECURITY.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](docs/ja/SECURITY.md)），约定见 .agents/conventions/docs-writing.md -->
+
 感谢帮助 ModelDock 变得更安全。**请勿在公开 issue 中报告安全漏洞。**
 
 ## 支持范围

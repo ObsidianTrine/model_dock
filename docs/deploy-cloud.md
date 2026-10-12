@@ -1,5 +1,8 @@
 # ModelDock 云端控制面部署 runbook（M3）
 
+**简体中文** ｜ [English](en/deploy-cloud.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/deploy-cloud.md)），约定见 .agents/conventions/docs-writing.md -->
+
 > 对应详设 `docs/design-cloud-sync.md` §7.7。服务端零第三方依赖（`node:http` + `node:sqlite`，Node ≥22.5，部署机统一 Node 24 LTS），与主仓同栈同测。
 
 | 文档属性 | 内容 |

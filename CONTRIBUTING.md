@@ -1,5 +1,8 @@
 # 参与贡献
 
+**简体中文** ｜ [English](docs/en/CONTRIBUTING.md)
+<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](docs/ja/CONTRIBUTING.md)），约定见 .agents/conventions/docs-writing.md -->
+
 感谢有兴趣为 ModelDock 做贡献！提交 PR 前请先读 [AGENTS.md](AGENTS.md)（工程约定与硬性约束，AI agent 必读）。
 
 ## 开发环境
