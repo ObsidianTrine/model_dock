@@ -68,7 +68,7 @@ npm run build:sea -- --target darwin-arm64
 modeldock init
 ```
 
-向导会依次：检测本机 harness → 列出从 cc-switch / Claude Code / dsh / ZCode 发现的现有 provider（勾选导入，key 一并入库）→ 没有可导入的就走预设库添加 → 选默认路由 → 后台启动网关 → 逐个 attach（每步先展示 diff）。`--yes` 可全自动。
+向导会依次：检测本机 harness → 列出从 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 发现的现有 provider（勾选导入，key 一并入库）→ 没有可导入的就走预设库添加 → 选默认路由 → 后台启动网关 → 逐个 attach（每步先展示 diff）。`--yes` 可全自动。
 
 ### 方式 B：从 cc-switch 迁移（本机现状推荐）
 
@@ -82,6 +82,14 @@ modeldock test                      # 端到端连通性自测
 ```
 
 迁移完成后**退出 cc-switch（或关掉它的本地代理）**，避免两边同时改 `~/.claude/settings.json`。
+
+`import` 不只认 cc-switch：`--from` 可选 all / cc-switch / claude / dsh / zcode / codex / opencode / mimocode / workbuddy / ccr / crush / gemini——Codex、OpenCode、MiMo Code（与桌面端共用配置）、WorkBuddy、claude-code-router、Crush、Gemini CLI 中转里的上游一并只读收编。one-api / new-api 自建站点的渠道走管理 API 拉取：
+
+```bash
+modeldock import --from oneapi --url https://你的站点 --token <系统访问令牌>
+```
+
+令牌在 one-api「个人设置 → 系统访问令牌」生成（new-api 同入口）；只导入 OpenAI 兼容 / Anthropic 类型的渠道，Azure、Gemini 原生等 ModelDock 无法直连的渠道会注明原因跳过。
 
 ### 方式 C：手动逐个配置
 
@@ -151,7 +159,7 @@ modeldock update --clean          # 清理上一版残留（ModelDock.app.old / 
 modeldock ui
 ```
 
-**打开页面会自动探测旧配置**：如果本机装有 cc-switch（或 Claude Code / dsh / ZCode 里已有 provider 配置），顶部会出现「🧲 检测到旧配置，一键搬进来」横幅——点一下即全部导入（Key 一并安全搬入、原软件不受影响、已导入的自动去重不再提示；点「暂不导入」可隐藏）。
+**打开页面会自动探测旧配置**：如果本机的 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 里已有 provider 配置，顶部会出现「🧲 检测到旧配置，一键搬进来」横幅——点一下即全部导入（Key 一并安全搬入、原软件不受影响、已导入的自动去重不再提示；点「暂不导入」可隐藏）。
 
 界面就是三步，**没有任何需要理解的新概念**：
 

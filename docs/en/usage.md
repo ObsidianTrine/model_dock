@@ -68,7 +68,7 @@ Dev mode: `npm run dev -- <command>` (equivalent to running the source with tsx)
 modeldock init
 ```
 
-The wizard, in order: detects local harnesses → lists existing providers discovered from cc-switch / Claude Code / dsh / ZCode (tick to import, keys included) → adds from the preset library if there's nothing to import → picks the default route → starts the gateway in the background → attaches each harness (showing the diff at every step). `--yes` runs fully unattended.
+The wizard, in order: detects local harnesses → lists existing providers discovered from cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI (tick to import, keys included) → adds from the preset library if there's nothing to import → picks the default route → starts the gateway in the background → attaches each harness (showing the diff at every step). `--yes` runs fully unattended.
 
 ### Option B: migrate from cc-switch (recommended if you use it today)
 
@@ -82,6 +82,14 @@ modeldock test                      # end-to-end connectivity self-test
 ```
 
 After migrating, **quit cc-switch (or stop its local proxy)** so the two sides don't edit `~/.claude/settings.json` at the same time.
+
+`import` covers more than cc-switch: `--from` accepts all / cc-switch / claude / dsh / zcode / codex / opencode / mimocode / workbuddy / ccr / crush / gemini — upstreams configured in Codex, OpenCode, MiMo Code (shared with the desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays are absorbed read-only as well. Channels on a self-hosted one-api / new-api site are pulled over its admin API:
+
+```bash
+modeldock import --from oneapi --url https://your-site --token <system access token>
+```
+
+Generate the token under one-api "Personal settings → System access token" (new-api has the same entry); only OpenAI-compatible / Anthropic channels are imported — Azure, native Gemini, and other protocols ModelDock cannot reach directly are skipped with the reason shown.
 
 ### Option C: configure manually, step by step
 
@@ -151,7 +159,7 @@ Open `http://127.0.0.1:8687/_modeldock/ui` in a browser, or simply:
 modeldock ui
 ```
 
-**Opening the page auto-detects legacy configs**: if cc-switch is installed (or Claude Code / dsh / ZCode already have provider configs), a "🧲 Legacy config detected — move it in with one click" banner appears at the top — one click imports everything (keys move in securely, the original software is unaffected, already-imported items are deduplicated and never re-prompted; "Not now" hides the banner).
+**Opening the page auto-detects legacy configs**: if any of cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI already has provider configs, a "🧲 Legacy config detected — move it in with one click" banner appears at the top — one click imports everything (keys move in securely, the original software is unaffected, already-imported items are deduplicated and never re-prompted; "Not now" hides the banner).
 
 The UI is three steps with **no new concepts to learn**:
 

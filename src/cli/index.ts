@@ -36,8 +36,10 @@ export function buildProgram(): Command {
 
   prog
     .command('import')
-    .description(t('只读收编存量配置（cc-switch / Claude Code / dsh / ZCode）', 'Read-only import of existing configs (cc-switch / Claude Code / dsh / ZCode)'))
-    .option('--from <source>', 'all | cc-switch | claude | dsh | zcode', 'all')
+    .description(t('只读收编存量配置（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo / WorkBuddy / CCR / Crush / Gemini CLI；one-api / new-api 渠道用 --from oneapi）', 'Read-only import of existing configs (cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo / WorkBuddy / CCR / Crush / Gemini CLI; one-api / new-api channels via --from oneapi)'))
+    .option('--from <source>', 'all | cc-switch | claude | dsh | zcode | codex | opencode | mimocode | workbuddy | ccr | crush | gemini | oneapi', 'all')
+    .option('--url <url>', t('one-api / new-api 站点地址（--from oneapi 时用）', 'one-api / new-api site URL (with --from oneapi)'))
+    .option('--token <token>', t('one-api / new-api 系统访问令牌（--from oneapi 时用）', 'one-api / new-api system access token (with --from oneapi)'))
     .option('--yes', t('跳过勾选，导入全部可导入项', 'Skip prompts, import everything importable'))
     .option('--no-with-profiles', t('不为导入项自动创建 profile', 'Do not auto-create profiles for imported items'))
     .action((o) => cmdImport(o))

@@ -54,6 +54,11 @@ function candidateFiles(): string[] {
   return candidateDirs().map((d) => path.join(d, 'models.json'))
 }
 
+/** 导入扫描（import/sources.ts）复用：models.json 候选路径 */
+export function modelsFileCandidates(): string[] {
+  return candidateFiles()
+}
+
 /** 已接入文件解析：多个候选都存在时取第一个（与 planAttach 写入目标一致） */
 async function activeFile(): Promise<string | null> {
   for (const p of candidateFiles()) {

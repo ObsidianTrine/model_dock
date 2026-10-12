@@ -1221,8 +1221,20 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (ti) ti.onkeydown = function (e) { if (e && e.key === 'Enter' && tb) tb.onclick() }
   }
 
-  // 旧配置一键迁移（cc-switch / Claude Code / dsh / ZCode）
-  var SRC_LABEL = { 'cc-switch': 'cc-switch', claude: 'Claude Code', dsh: 'dsh', zcode: 'ZCode' }
+  // 旧配置一键迁移（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo / WorkBuddy / CCR / Crush / Gemini CLI）
+  var SRC_LABEL = {
+    'cc-switch': 'cc-switch',
+    claude: 'Claude Code',
+    dsh: 'dsh',
+    zcode: 'ZCode',
+    codex: 'Codex CLI',
+    opencode: 'OpenCode',
+    mimocode: 'MiMo Code',
+    workbuddy: 'WorkBuddy',
+    ccr: 'Claude Code Router',
+    crush: 'Crush',
+    gemini: 'Gemini CLI',
+  }
 
   function checkMigrate() {
     return api('/import/detect')

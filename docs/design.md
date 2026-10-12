@@ -162,7 +162,7 @@ flowchart LR
 | `gateway/` | HTTP 网关（`server.ts` 数据面+管理面）、转发与重写（`relay.ts`）、运行态与健康（`state.ts`）、上游代理（`proxy.ts`）、Web 控制台（`ui.ts`，单文件内联 HTML/JS） |
 | `adapters/` | 适配器契约（`types.ts`）、L1 内置 8 个、L2 pack 引擎（`packs.ts`）、落盘引擎（`engine.ts`） |
 | `backup/` | 快照、sha256 校验还原、滚动保留 |
-| `import/` | cc-switch / Claude Code / dsh / ZCode 存量配置只读扫描与收编 |
+| `import/` | 存量配置只读扫描与收编：cc-switch（含 v3 Codex/Gemini 行）/ Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI + one-api/new-api 渠道拉取（管理 API） |
 | `presets/` | 内置 20 个 provider 预设（含模型元数据与多协议端点；另有 `presets.json` 用户扩展） |
 | `providers/` | 模型目录拉取（`fetch.ts`）、已知模型元数据表（`known.ts`）、dsh catalog（`dshcatalog.ts`） |
 | `sync/` + `cloud/` | 多机配置同步（syncdoc 数据模型、同步代理、WebDAV/localdir 目标）与云端控制面（独立进程，详设见 design-cloud-sync.md） |
@@ -300,7 +300,7 @@ SEA 检测以 `process.execPath` 文件名判断（ADR-6）。守护进程单实
 2. **我的服务**：搜索/排序/过滤、"应用"全局切换（提示哪些客户端将跟随）、延迟 ping、端到端流式测速、编辑浮层、删除；路由双槽位（「当前」=主服务自动·A/人工钉定、「下一个切换」=备用自动·B/人工钉定）+「程序自动选主」开关。两个「自动」选项都写明程序会选谁——A 取 `ignoreManual` 链（忽略两处钉定），B 取 `ignoreRouteNext` 链（只清本槽钉定、保留主服务钉定/窗口/链尾兜底；若按忽略两处钉定算，主服务被钉定时链尾兜底会被一起抹掉、算不出名字）；候选链只有主服务（未配 `profile.fallback`）时 B 显示「自动 · 无备用服务」而不是光秃秃的「自动」。
 3. **接入 AI 客户端**：客户端安装（自动命令或指引，见 §9.1 威胁 T7）、一键接入（先 `/attach/plan` 预览 diff，确认后 apply，自动快照可还原）、断开并还原。
 
-附加：顶部健康条 5s 轮询；**一键迁移卡片**——扫描本机 cc-switch / Claude Code / dsh / ZCode 存量配置（含 key）一键导入，key 搬入安全存储、原软件不动，"暂不导入"以 localStorage 签名记住；底部请求日志常驻（4xx/5xx 标红）。
+附加：顶部健康条 5s 轮询；**一键迁移卡片**——扫描本机 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 存量配置（含 key）一键导入，key 搬入安全存储、原软件不动，"暂不导入"以 localStorage 签名记住；底部请求日志常驻（4xx/5xx 标红）。
 
 v1.0.0 已包含：**LAN 手机控制台**（第二监听器 `/m` 页，扫码带令牌接入 + PWA 常驻主屏，路由控件与桌面同口径；`/m/api/*` 端点，`mdklan_` 令牌持久化，cookie 名内嵌端口防双实例互踢）；**同步状态行**（多机同步只读状态 + 指引去 CLI 配置）；**更新检查入口**（徽标 + 弹层，`/_modeldock/admin/update/status|check|apply`，托盘菜单同步提供）；**「独立直连」救援通道入口**（琥珀警示样式，见 §5.5）；`config export/import` 加密配置包（.msync）在桌面与手机页均可导出导入。
 

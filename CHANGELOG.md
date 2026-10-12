@@ -7,6 +7,11 @@
 
 ## [未发布]
 
+### 新增
+
+- **一键导入覆盖更全**：存量配置收编从 4 个来源扩到 11 个——新增 Codex CLI、OpenCode、MiMo Code（与 MiMo 桌面端共用配置）、WorkBuddy、claude-code-router、Crush、Gemini CLI 中转；cc-switch 新版里的 Codex / Gemini 档案也不再漏掉。首启向导与网页横幅自动带上。
+- **支持导入 one-api / new-api 渠道**：`modeldock import --from oneapi --url <站点> --token <系统访问令牌>` 一条命令把自建中转站的渠道批量搬进 ModelDock（令牌在站点「个人设置 → 系统访问令牌」生成）；只导入 OpenAI 兼容 / Anthropic 类型的渠道，无法直连的（Azure、Gemini 原生等）会注明原因跳过。
+
 ### 修复
 
 - **托盘「清理完成」弹窗按钮点得到（macOS）**：清理数据后的弹窗只显示结论几行，按钮始终在屏内；完整过程输出存到「~/Library/Logs/ModelDock」（时间戳命名的日志文件），点弹窗里的「查看完整日志」即可打开——此前整段执行输出原样塞进弹窗，会把按钮顶出屏幕。
