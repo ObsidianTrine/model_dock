@@ -34,6 +34,7 @@
     "dev": "tsx src/cli.ts",
     "dev:watch": "tsx watch src/cli.ts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "prepack": "npm run build"
   },
   "dependencies": {
@@ -46,6 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "esbuild": "^0.25.0",
     "postject": "^1.0.0-alpha.6",
     "resedit": "^3.1.0",

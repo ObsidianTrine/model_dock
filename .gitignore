@@ -30,3 +30,6 @@ page*
 
 # planner 草稿（确认路径产物，不进队列不入库）
 .agents/orchestrator/drafts/
+
+# vitest coverage 报告（test:coverage 产物，不入库）
+coverage/
