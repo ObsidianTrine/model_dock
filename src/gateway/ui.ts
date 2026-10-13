@@ -571,7 +571,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     <!-- 收编入口放 addCard 直属层（不进 #addform）：不选服务商也要可见可用 -->
     <p class="altline"><button type="button" class="btn small" id="legacyImportLink" data-i18n="从本机客户端导入存量配置…||Import existing configs from local apps…">从本机客户端导入存量配置…</button></p>
   </div>
-</div>
 
 <div class="card">
   <h2 id="svcH">② 我的服务</h2>
