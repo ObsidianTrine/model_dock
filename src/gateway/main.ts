@@ -79,6 +79,17 @@ export async function startForeground(portOverride?: number): Promise<void> {
 
   await ensureDir(modeldockDir())
   logEndpointRisks(cfg)
+  // 沙箱隔离：种子配置可能带着指向生产钥匙环的 keychain 引用（dev-seed 原样复制 key），
+  // 启动时落地为沙箱本地 file 引用，此后沙箱改/删密钥与生产钥匙环彻底解耦
+  if (process.env.MODELRDOCK_FAKE_HOME) {
+    try {
+      const { migrateSandboxKeyRefsToLocal } = await import('../config/sandbox.js')
+      const migrated = await migrateSandboxKeyRefsToLocal()
+      if (migrated.length > 0) {
+        console.log(t('[modeldock] 沙箱模式：已把 {n} 个密钥引用从系统钥匙环落地为沙箱本地存储', '[modeldock] Sandbox mode: moved {n} key ref(s) from the OS keychain to sandbox-local storage', { n: String(migrated.length) }))
+      }
+    } catch { /* 迁移失败不阻断启动；deleteSecret 沙箱守卫兜底 */ }
+  }
   // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动
   migrateSecretsToSecure().catch(() => {})
   const adminToken = resolveAdminToken(previousToken)
