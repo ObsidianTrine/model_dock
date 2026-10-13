@@ -61,3 +61,41 @@ export async function listenWithRetry(server: http.Server, port: number, host: s
   const addr = server.address()
   return typeof addr === 'object' && addr ? addr.port : current
 }
+
+/** 按分享链接拉取配置包信封原文（桌面 /sync/import 与手机 /m/api/sync/import 共用）：
+ *  fragment（#p=…）是口令，只在本机拆用、不发往网络；响应体 10MB 封顶。 */
+export async function fetchEnvelopeFromUrl(rawUrl: string): Promise<string> {
+  let u: URL
+  try {
+    u = new URL(rawUrl)
+  } catch {
+    throw new Error(t('链接格式不正确', 'Invalid link format'))
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(t('仅支持 http/https 链接', 'Only http/https links are supported'))
+  u.hash = '' // fragment 是口令，只在本机拆用，不发往网络
+  let res: Response
+  try {
+    res = await fetch(u.toString(), { redirect: 'error', signal: AbortSignal.timeout(10_000) })
+  } catch (e) {
+    if ((e as Error).name === 'TimeoutError' || (e as Error).name === 'AbortError') {
+      throw new Error(t('拉取超时：确认两机在同一局域网、来源电脑已开启手机远程且链接未过期', 'Fetch timed out: check both machines are on the same LAN, mobile console is on at the source, and the link has not expired'))
+    }
+    throw new Error(t('拉取失败：{msg}', 'Fetch failed: {msg}', { msg: (e as Error).message }))
+  }
+  if (!res.ok) throw new Error(t('拉取失败：HTTP {status}', 'Fetch failed: HTTP {status}', { status: res.status }))
+  const reader = res.body?.getReader()
+  if (!reader) throw new Error(t('来源返回了空响应', 'The source returned an empty response'))
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.length
+    if (total > 10 * 1024 * 1024) {
+      await reader.cancel().catch(() => {})
+      throw new Error(t('响应体超过 10MB 上限，疑似异常来源', 'Response exceeds the 10MB cap; the source looks abnormal'))
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}

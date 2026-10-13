@@ -395,31 +395,37 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #lanPanel .lanurl{word-break:break-all;margin:0 0 8px;cursor:pointer;font-family:var(--mono);font-size:var(--fs-sm)}
 #lanPanel .shint{font-size:var(--fs-sm);color:var(--muted);margin:0}
 #lanPanel svg{display:block;background:#fff;border-radius:8px;padding:4px;width:88px;height:88px}
-/* 同网直拉迁移（sync-lan-pull）：导入弹层已迁 createModal 工厂壳，内容样式按 id 继续生效 */
-#shareOverlay .shareurl{display:flex;align-items:center;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;margin:0;cursor:pointer}
-#shareOverlay .shareurl:hover{border-color:var(--accent)}
-#shareOverlay .shareurl .u{flex:1;min-width:0;font-family:var(--mono);font-size:var(--fs-sm);white-space:nowrap;overflow-x:auto}
-#shareOverlay .shareurl .u::-webkit-scrollbar{height:6px}
-#shareOverlay .shareurl .u::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-#shareOverlay .alt-toggle{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-xs);color:var(--muted);margin:10px 0 0;cursor:pointer}
-#shareOverlay .alt-toggle:hover{color:var(--accent)}
-#shareOverlay .alt-toggle::before{content:'';width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform var(--dur)}
-#shareOverlay .alt-toggle.open::before{transform:rotate(45deg)}
-#shareOverlay .altlist{display:none;margin:6px 0 0}
-#shareOverlay .altlist.open{display:block}
-#shareOverlay .sharealt,#lanPanel .sharealt{font-size:var(--fs-xs);color:var(--muted);margin:2px 0;cursor:pointer;word-break:break-all}
-#shareOverlay .sharealt:hover,#lanPanel .sharealt:hover{color:var(--accent)}
-#shareOverlay .sharealt{font-family:var(--mono)}
+/* 同网直拉迁移（sync-lan-pull）：配置包统一弹层（pkgOverlay，吸收原 shareOverlay/importOverlay），
+   内容样式改挂 #pkgOverlay 继续生效 */
+#pkgOverlay .shareurl{display:flex;align-items:center;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;margin:0;cursor:pointer}
+#pkgOverlay .shareurl:hover{border-color:var(--accent)}
+#pkgOverlay .shareurl .u{flex:1;min-width:0;font-family:var(--mono);font-size:var(--fs-sm);white-space:nowrap;overflow-x:auto}
+#pkgOverlay .shareurl .u::-webkit-scrollbar{height:6px}
+#pkgOverlay .shareurl .u::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+#pkgOverlay .alt-toggle{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-xs);color:var(--muted);margin:10px 0 0;cursor:pointer}
+#pkgOverlay .alt-toggle:hover{color:var(--accent)}
+#pkgOverlay .alt-toggle::before{content:'';width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform var(--dur)}
+#pkgOverlay .alt-toggle.open::before{transform:rotate(45deg)}
+#pkgOverlay .altlist{display:none;margin:6px 0 0}
+#pkgOverlay .altlist.open{display:block}
+#pkgOverlay .sharealt,#lanPanel .sharealt{font-size:var(--fs-xs);color:var(--muted);margin:2px 0;cursor:pointer;word-break:break-all}
+#pkgOverlay .sharealt:hover,#lanPanel .sharealt:hover{color:var(--accent)}
+#pkgOverlay .sharealt{font-family:var(--mono)}
 .modal-body .help{font-size:var(--fs-xs);color:var(--muted);margin:8px 0 0;line-height:1.5}
-#shareOverlay .shint,#importOverlay .shint{font-size:var(--fs-sm);color:var(--muted);word-break:break-all;margin:6px 0}
-#importOverlay textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-family:var(--mono);font-size:var(--fs-sm)}
-#importOverlay .orline{text-align:center;color:var(--muted);font-size:var(--fs-xs);margin:10px 0}
-#importOverlay ul{margin:6px 0 10px;padding-left:20px;color:var(--muted);font-size:var(--fs-sm)}
+#pkgOverlay .shint{font-size:var(--fs-sm);color:var(--muted);word-break:break-all;margin:6px 0}
+#pkgOverlay textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-family:var(--mono);font-size:var(--fs-sm)}
 /* 导入弹层选项卡：三个互斥来源各一页（走 kit 的 .seg.grow，选中蓝底白字） */
 #importTabs{margin:0 0 14px}
 /* 附近电脑卡片列表 */
 #impPeers .peercard{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;margin:0 0 8px}
 #impPeers .peercard .pname{flex:1;min-width:0;word-break:break-all;font-weight:600}
+/* 存量收编勾选列表（导入存量配置弹层） */
+.legacyrow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)}
+.legacyrow:last-child{border-bottom:none}
+.legacyrow .lname{flex:1;min-width:0;word-break:break-all;font-size:var(--fs-base)}
+.legacyrow .lsrc{flex:0 0 auto;font-size:var(--fs-xs);color:var(--muted)}
+/* 添加表单尾部的收编入口：次级文字按钮，弱于主保存动作 */
+#addCard .altline{margin:10px 0 0}
 /* 已选配置包文件的文件名 chip（可移除） */
 .filechip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:99px;padding:4px 10px;font-size:var(--fs-sm);max-width:60%}
 .filechip .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -561,6 +567,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       <button class="btn" id="afCancel" data-i18n="取消||Cancel">取消</button>
       <button class="btn primary" id="afSave" data-i18n="保存||Save">保存</button>
     </div>
+    <p class="altline"><button type="button" class="btn small" id="legacyImportLink" data-i18n="从本机客户端导入存量配置…||Import existing configs from local apps…">从本机客户端导入存量配置…</button></p>
   </div>
 </div>
 
@@ -613,7 +620,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         <button type="button" class="psw-main" role="switch" aria-checked="false" data-i18n-aria="手机远程||Mobile console" data-i18n-title="手机扫码查看当前服务并切换（仅限局域网，不含 Key）；点击开关手机远程，点右侧箭头收起/展开二维码||Scan to view the active service and switch from your phone (LAN only, no keys); click to enable/disable, click the arrow to collapse/expand the QR"><span class="ptext">手机远程</span></button>
         <button type="button" class="caret" id="lanCaret" aria-expanded="false" aria-controls="lanPanel" data-i18n-title="展开/收起二维码面板（不停服务）||Expand/collapse the QR panel (service stays on)"></button>
       </span>
-      <button type="button" class="btn small" id="pkgPill" data-i18n="导出配置包||Export package" data-i18n-title="把服务/路由/自定义预设/定时规则封装成口令保护的加密 .msync 文件（含 Key 密文），发给新电脑导入；客户端接入等机器态不随包||Seals providers, routes, custom presets, and schedule rules into a passphrase-protected encrypted .msync file (keys encrypted) for importing on a new computer; client attaches stay put">导出配置包</button>
+      <button type="button" class="btn small" id="pkgPill" data-i18n="配置包||Config package" data-i18n-title="把服务/路由/自定义预设/定时规则封装成口令保护的加密 .msync 文件（含 Key 密文），或生成一次性链接、允许附近电脑直接拉取；也能从文件/链接/附近电脑导入。客户端接入等机器态不随包||Seals providers, routes, custom presets, and schedule rules into a passphrase-protected encrypted .msync file (keys encrypted), or generates a one-time link and lets nearby computers pull directly; import from a file, a link, or nearby computers as well. Client attaches stay put">配置包</button>
     </div>
   </div>
   <div id="lanPanel" hidden>
@@ -627,7 +634,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         </div>
         <p class="shint" data-i18n="手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。||Phone on the same Wi-Fi: scan or type the address. The page is view &amp; switch only — no keys.">手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。</p>
         <p class="shint" id="lanWinHint" hidden data-i18n="Windows 首次开启手机远程会弹防火墙提示：请点「允许访问」，且把「专用网络」「公用网络」都勾上；漏点或点「取消」会导致手机打不开。||On Windows, enabling the mobile console pops a firewall alert the first time: click 'Allow access' and keep both Private and Public networks checked. Dismissing it makes the phone page unreachable.">Windows 首次开启手机远程会弹防火墙提示：请点「允许访问」，且把「专用网络」「公用网络」都勾上；漏点或点「取消」会导致手机打不开。</p>
-        <p style="margin:8px 0 0"><button class="btn small" id="lanShareBtn" data-i18n="分享配置到附近电脑…||Share config to a nearby computer…">分享配置到附近电脑…</button></p>
       </div>
     </div>
   </div>
@@ -817,29 +823,71 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (mm._closeOnEsc !== false) { mm.close(); break }
     }
   })
-  // 一期迁入：分享到附近电脑 / 导出配置包 / 通用确认弹窗（底栏语义与旧壳逐字段一致）
-  var shareM = createModal({
-    id: 'shareOverlay',
-    title: '分享到附近电脑||Share to a nearby computer',
-    closeOnScrim: true,
-    bodyHtml: '<div id="shareUrls"></div><button type="button" class="alt-toggle" id="shareAltToggle" hidden></button><div class="altlist" id="shareAlts" hidden></div>' +
-      '<p class="help" data-i18n="10 分钟内有效 · 拉取一次即作废 · 链接含口令，仅发本人||Valid for 10 minutes and works once; the link carries the passphrase — send it only to the intended recipient.">10 分钟内有效 · 拉取一次即作废 · 链接含口令，仅发本人</p>',
-    foot: [
-      { slot: 'msg', id: 'shareErr', kind: 'err' },
-      { id: 'shareRegen', label: '重新生成||Regenerate', end: true, title: '作废当前链接并生成新的||Invalidate the current link and create a new one' },
-      { id: 'shareCopyBtn', primary: true, html: '<span id="shareCopyIc"></span><span id="shareCopyTxt" data-i18n="复制链接||Copy link">复制链接</span>' },
-    ],
-  })
+  // 配置包统一弹层（导出|导入 一级方向 Seg；导出=附近的电脑/导出链接/导出配置包 三方式，
+  // 与导入面板同名同序镜像）。吸收原 shareM（链接）与 importM（导入三来源），
+  // 导入内部结构原样保留（segNearby/segLink/segFile 等 id 不变，JS 接线零改动）。
   var pkgM = createModal({
     id: 'pkgOverlay',
-    title: '导出配置包||Export config package',
+    title: '配置包||Config package',
+    align: 'top',
     closeOnScrim: true,
-    bodyHtml: '<span class="keywrap"><input type="password" id="pkgPw" autocomplete="new-password" data-i18n-ph="设置口令||Set a passphrase" placeholder="设置口令">' +
+    bodyHtml: '<div id="pkgDir" class="seg grow">' +
+      '<button type="button" class="on" id="pkgDirExport" data-i18n="导出||Export">导出</button>' +
+      '<button type="button" id="pkgDirImport" data-i18n="导入||Import">导入</button></div>' +
+      '<div id="pkgExportPane">' +
+      '<div id="pkgExpTabs" class="seg grow" style="margin-top:10px">' +
+      '<button type="button" id="segExpNearby" data-i18n="附近的电脑||Nearby computers">附近的电脑</button>' +
+      '<button type="button" id="segExpLink" data-i18n="导出链接||Export a link">导出链接</button>' +
+      '<button type="button" class="on" id="segExpFile" data-i18n="导出配置包||Export package file">导出配置包</button></div>' +
+      '<div id="panelExpNearby" hidden style="margin-top:10px">' +
+      '<p class="testline" id="expNearbyState"></p>' +
+      '<p class="row" style="margin:6px 0 0"><button type="button" class="btn small" id="expLanOn" hidden data-i18n="立即开启||Enable now">立即开启</button></p>' +
+      '<p class="help" data-i18n="无需导出操作：对方在「导入 → 附近的电脑」里选中这台电脑即可直接拉取；对方发起时你会收到授权请求，点「允许拉取」完成。Windows 首次开启会弹防火墙提示，选「允许访问」。||Nothing to export here: on the other computer, pick this machine under Import → Nearby computers to pull directly. When they initiate, you get an approval prompt — click Allow. On Windows, first enable pops a firewall alert; choose Allow access.">无需导出操作：对方在「导入 → 附近的电脑」里选中这台电脑即可直接拉取；对方发起时你会收到授权请求，点「允许拉取」完成。Windows 首次开启会弹防火墙提示，选「允许访问」。</p></div>' +
+      '<div id="panelExpLink" hidden style="margin-top:10px">' +
+      '<div id="shareUrls"></div><button type="button" class="alt-toggle" id="shareAltToggle" hidden></button><div class="altlist" id="shareAlts" hidden></div>' +
+      '<p class="help" data-i18n="10 分钟内有效 · 拉取一次即作废 · 链接含口令，仅发本人；两台电脑需连同一局域网。||Valid for 10 minutes and works once; the link carries the passphrase — send it only to the intended recipient. Both computers need the same LAN.">10 分钟内有效 · 拉取一次即作废 · 链接含口令，仅发本人；两台电脑需连同一局域网。</p></div>' +
+      '<div id="panelExpFile" style="margin-top:10px">' +
+      '<span class="keywrap"><input type="password" id="pkgPw" autocomplete="new-password" data-i18n-ph="设置口令||Set a passphrase" placeholder="设置口令">' +
       '<button type="button" id="pkgPwToggle" data-i18n-title="显示明文||Show plaintext" title="显示明文" class="iconbtn"></button></span>' +
-      '<p class="help" data-i18n="文件含全部 Key · 口令丢失无法找回，建议与文件分开发送||The file carries every key (encrypted); a lost passphrase cannot be recovered — send it separately from the file.">文件含全部 Key · 口令丢失无法找回，建议与文件分开发送</p>',
+      '<p class="help" data-i18n="文件含全部 Key · 口令丢失无法找回，建议与文件分开发送；不要求同一局域网。||The file carries every key (encrypted); a lost passphrase cannot be recovered — send it separately from the file. No LAN needed.">文件含全部 Key · 口令丢失无法找回，建议与文件分开发送；不要求同一局域网。</p></div>' +
+      '</div>' +
+      '<div id="pkgImportPane" hidden>' +
+      '<div id="importTabs" class="seg grow" style="margin-top:10px">' +
+      '<button type="button" class="on" id="segNearby" data-i18n="附近的电脑||Nearby computers">附近的电脑</button>' +
+      '<button type="button" id="segLink" data-i18n="粘贴链接||Paste a link">粘贴链接</button>' +
+      '<button type="button" id="segFile" data-i18n="配置包文件||Package file">配置包文件</button></div>' +
+      '<div id="importPanels"><div id="panelNearby"><p class="shint" id="nearbyStatus" style="margin-top:0"></p><div id="impPeers"></div></div>' +
+      '<div id="panelLink" hidden><textarea id="impUrl" data-i18n-ph="粘贴分享链接：http://192.168.x.x:8787/…#p=…||Paste the share link: http://192.168.x.x:8787/…#p=…" placeholder="粘贴分享链接：http://192.168.x.x:8787/…#p=…"></textarea></div>' +
+      '<div id="panelFile" hidden><p class="row" style="margin:0 0 10px;align-items:center">' +
+      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
+      '<span id="impFileChip" class="filechip" hidden></span>' +
+      // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan.ts 同处说明）
+      '<input type="file" id="impFile2" hidden></p>' +
+      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
+      '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
+      '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
+      '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +
+      '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p></div>',
     foot: [
       { slot: 'msg', id: 'pkgErr', kind: 'err' },
+      { id: 'shareRegen', label: '重新生成||Regenerate', end: true, title: '作废当前链接并生成新的||Invalidate the current link and create a new one' },
+      { id: 'shareCopyBtn', primary: true, html: '<span id="shareCopyIc"></span><span id="shareCopyTxt" data-i18n="复制链接||Copy link">复制链接</span>' },
+      { id: 'impImportBtn', label: '导入||Import', primary: true, end: true, disabled: true },
       { id: 'pkgSaveBtn', label: '生成并下载||Create and download', primary: true, end: true },
+    ],
+  })
+  // 存量收编重开入口（设计定稿）：首启横幅之外的常驻路径——从「添加服务」进入，勾选式导入；
+  // 与配置包导入是两个概念（收编=本机客户端配置；配置包=.msync 文件/链接/附近）。
+  var legacyM = createModal({
+    id: 'legacyOverlay',
+    title: '导入存量配置||Import existing configs',
+    align: 'top',
+    closeOnScrim: true,
+    bodyHtml: '<p class="shint" id="legacyDesc" style="margin-top:0"></p><div id="legacyList"></div>' +
+      '<p class="help" data-i18n="只读收编：读取一份副本建服务，原客户端不受影响；导入后可在「我的服务」里切换。||Read-only: a copy is read to create services; your original apps stay untouched. Switch them under My services afterwards.">只读收编：读取一份副本建服务，原客户端不受影响；导入后可在「我的服务」里切换。</p>',
+    foot: [
+      { slot: 'msg', id: 'legacyErr', kind: 'err' },
+      { id: 'legacyGo', label: '导入所选||Import selected', primary: true, end: true, disabled: true },
     ],
   })
   var confirmM = createModal({
@@ -854,29 +902,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     ],
     onClose: function () { mCb = null },
   })
-  // 二期迁入：从其他电脑导入 / 检查更新弹窗
-  var importM = createModal({
-    id: 'importOverlay',
-    title: '从其他电脑导入||Import from another computer',
-    closeOnScrim: true,
-    bodyHtml: '<div id="importTabs" class="seg grow">' +
-      '<button type="button" class="on" id="segNearby" data-i18n="附近的电脑||Nearby computers">附近的电脑</button>' +
-      '<button type="button" id="segLink" data-i18n="粘贴链接||Paste a link">粘贴链接</button>' +
-      '<button type="button" id="segFile" data-i18n="配置包文件||Package file">配置包文件</button></div>' +
-      '<div id="importPanels"><div id="panelNearby"><p class="shint" id="nearbyStatus" style="margin-top:0"></p><div id="impPeers"></div></div>' +
-      '<div id="panelLink" hidden><textarea id="impUrl" data-i18n-ph="粘贴分享链接：http://192.168.x.x:8787/…#p=…||Paste the share link: http://192.168.x.x:8787/…#p=…" placeholder="粘贴分享链接：http://192.168.x.x:8787/…#p=…"></textarea></div>' +
-      '<div id="panelFile" hidden><p class="row" style="margin:0 0 10px;align-items:center">' +
-      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
-      '<span id="impFileChip" class="filechip" hidden></span>' +
-      // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan.ts 同处说明）
-      '<input type="file" id="impFile2" hidden></p>' +
-      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
-      '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p>',
-    foot: [
-      { slot: 'msg', id: 'impErr', kind: 'err' },
-      { id: 'impImportBtn', label: '导入||Import', primary: true, end: true, disabled: true },
-    ],
-  })
+  // 存量收编勾选列表已并入上方 legacyM；检查更新弹窗保持独立
   var updM = createModal({
     id: 'updOverlay',
     modalClass: 'upmodal',
@@ -1345,7 +1371,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (s.paused) { txt = t('同步已暂停', 'Sync paused'); cls += ' dim' }
     else if (s.lastConflictTs) { txt = t('同步冲突待处理', 'Sync conflict pending'); cls += ' warn' }
     else if (s.lastError) { txt = t('同步错误', 'Sync error'); cls += ' err' }
-    else { txt = t('配置同步 · 已开启', 'Config sync · on') }
+    else { txt = t('多机同步 · 已开启', 'Device sync · on') }
     var tip = []
     if (s.targetLabel) tip.push(t('目标：', 'Target: ') + s.targetLabel)
     if (typeof s.lastAppliedRev === 'number' && s.lastAppliedRev > 0) tip.push(t('已同步到第 ', 'Synced to rev ') + s.lastAppliedRev + t(' 版', ''))
@@ -2094,10 +2120,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     onExpand: function (open) { schedOpen = open; if (open) renderSchedPanel(); else schedRowsRendered = false },
   })
 
-  // 同网直拉迁移（sync-lan-pull）：A 侧「分享到附近电脑」/ B 侧「从其他电脑导入」
+  // 同网直拉迁移（sync-lan-pull）：A 侧「导出链接/让对方来拉」/ B 侧「导入 → 附近的电脑/粘贴链接」
   // 链接含口令（#p= fragment，不出本机也不进审计）；附近直拉链路凭对方放行的一次性 ticket 应用
-  function shareToggle(show) { if (show) shareM.open(); else shareM.close() }
-  function importToggle(show) { if (show) importM.open(); else importM.close() }
+  // shareM/importM 已并入 pkgM 统一弹层：两个旧开关名保留为薄封装，调用方（createOffer/impApplyResult 等）零改动
+  function shareToggle(show) { if (show) pkgM.open(); else pkgM.close() }
+  function importToggle(show) { if (show) pkgM.open(); else { stopNearbyPoll(); pkgM.close() } }
   // 仅分享弹窗内使用（点击复制链接/备选地址）：成功反馈一律走元素翻转（shareCopyFlip / 条目文案翻转）——
   // 弹窗磨砂遮罩会糊掉全局 toast，toast 在这里属遮挡死文案（AGENTS 弹层提示归宿）
   // 全站剪贴板收敛点（DUP-06）：写 + fallback + 成功反馈一份实现，各调用方只传 feedback。
@@ -2157,7 +2184,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     }
   }
   function setShareErr(msg) {
-    var el = document.getElementById('shareErr')
+    // shareM/importM 并入 pkgM 后三套错误归一到底栏同一个 msg 槽位
+    var el = document.getElementById('pkgErr')
     if (el) el.textContent = msg || ''
   }
   function createOffer() {
@@ -2168,18 +2196,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         if (btn) btn.disabled = false
         setShareErr('')
         renderShareUrls(j.urls || [])
-        shareToggle(true)
       })
       .catch(function (e) {
         if (btn) btn.disabled = false
-        var msg = t('生成分享链接失败：', 'Failed to create the share link: ') + e.message
-        // 弹层已开（重新生成失败）错误写底栏内联槽；尚未开（首次点分享失败）toast 可见
-        if (shareM.isOpen()) setShareErr(msg)
-        else toast(msg, false)
+        // 只在配置包弹层的「导出链接」tab 内触发（切 tab 自动生成 / 重新生成），错误一律写底栏槽位
+        setShareErr(t('生成分享链接失败：', 'Failed to create the share link: ') + e.message)
       })
   }
-  var lanShareBtn = document.getElementById('lanShareBtn')
-  if (lanShareBtn) lanShareBtn.onclick = createOffer
   var shareAltToggle = document.getElementById('shareAltToggle')
   if (shareAltToggle) shareAltToggle.onclick = function () {
     shareAltToggle.classList.toggle('open')
@@ -2198,10 +2221,14 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 导入弹层选项卡（互斥三来源）：nearby=自动搜索点选 / link=粘贴链接 / file=配置包文件。
   // 「导入」一键直达（apply 单请求）；错误写底栏左侧内联槽（弹层开着时 toast 会被磨砂遮罩糊住）
   var impTab = 'nearby'
+  // 配置包统一弹层状态：pkgDirCur=一级方向（导出|导入），pkgExpTab=导出面板三方式
+  var pkgDirCur = 'export'
+  var pkgExpTab = 'file'
   var IMP_SEGS = { nearby: 'segNearby', link: 'segLink', file: 'segFile' }
   var IMP_PANELS = { nearby: 'panelNearby', link: 'panelLink', file: 'panelFile' }
   function setImpErr(msg) {
-    var el = document.getElementById('impErr')
+    // 与 setShareErr/setPkgErr 同槽：统一弹层只有一个底栏 msg 位
+    var el = document.getElementById('pkgErr')
     if (el) el.textContent = msg || ''
   }
   function switchImpTab(tab) {
@@ -2219,7 +2246,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function updateImpPrimary() {
     var btn = document.getElementById('impImportBtn')
     if (!btn) return
-    btn.hidden = impTab === 'nearby'
+    // 只在导入方向显示；附近 tab 无需按钮（对方授权即确认门）
+    btn.hidden = pkgDirCur !== 'import' || impTab === 'nearby'
     if (btn.hidden) return
     if (impTab === 'link') {
       var u = document.getElementById('impUrl')
@@ -2252,21 +2280,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     chip.hidden = false
   }
   function openImportOverlay() {
-    stopNearbyPoll()
-    var u = document.getElementById('impUrl')
-    var f = document.getElementById('impFile2')
-    var pw = document.getElementById('impPw2')
-    if (u) u.value = ''
-    if (f) f.value = ''
-    if (pw) pw.value = ''
-    showImpFileChip(null)
-    setImpErr('')
-    importToggle(true)
-    switchImpTab('nearby') // 默认落在最高频路径：附近电脑（自动搜索）
-  }
-  function closeImport() {
-    stopNearbyPoll()
-    importToggle(false)
+    openPkgOverlay('import') // 空态入口固定落在导入方向（附近电脑默认 tab）
   }
   var segNearby = document.getElementById('segNearby')
   if (segNearby) segNearby.onclick = function () { switchImpTab('nearby') }
@@ -2300,12 +2314,47 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       }
       btn.disabled = true
       setImpErr('')
+      hideImpPreview()
+      // 先预览（服务端解包出 report，包不入库）再确认：对齐 CLI 的「将被替换/不受影响」确认步
       bodyP
-        .then(function (src) { return api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'apply', source: src }) }) })
-        .then(impApplyResult)
-        .catch(function (e) { setImpErr(t('导入失败：', 'Import failed: ') + e.message); btn.disabled = false })
+        .then(function (src) { return api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'preview', source: src }) }) })
+        .then(function (j) {
+          impPendingTicket = j.ticket || ''
+          var rep = j.report || {}
+          var meta = j.meta || {}
+          var line = document.getElementById('impPreviewLine')
+          if (line) {
+            line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules')
+              .replace('{n}', (rep.providers || []).length).replace('{n2}', (rep.profiles || []).length).replace('{n3}', rep.presetCount || 0).replace('{n4}', rep.scheduleRules || 0)
+              + (meta.createdBy ? t('（配置包来自 ', ' (package from ') + meta.createdBy + t('）', ')') : '')
+              + t('。导入会整体替换现有配置（自动快照）。', '. This replaces the whole current config (snapshot taken first).')
+          }
+          var pv = document.getElementById('impPreview')
+          if (pv) pv.hidden = false
+          btn.disabled = false
+        })
+        .catch(function (e) { setImpErr(t('读取配置包失败：', 'Failed to read the package: ') + e.message); btn.disabled = false })
     }
   }
+  // 预览 → 确认：确认时凭 preview 发放的一次性 ticket 直发 apply（与附近直拉链路同一形态）
+  var impPendingTicket = ''
+  function hideImpPreview() {
+    impPendingTicket = ''
+    var pv = document.getElementById('impPreview')
+    if (pv) pv.hidden = true
+  }
+  var impConfirmBtn = document.getElementById('impConfirmBtn')
+  if (impConfirmBtn) {
+    impConfirmBtn.onclick = function () {
+      impConfirmBtn.disabled = true
+      setImpErr('')
+      api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'apply', source: { kind: 'ticket', ticket: impPendingTicket } }) })
+        .then(impApplyResult)
+        .catch(function (e) { setImpErr(t('导入失败：', 'Import failed: ') + e.message); impConfirmBtn.disabled = false })
+    }
+  }
+  var impBackBtn = document.getElementById('impBackBtn')
+  if (impBackBtn) impBackBtn.onclick = hideImpPreview
   // 成功收尾（link/file/nearby 共用）：关弹层 → 主页面 toast 报数量（有需补填的 key 再追一条警告，
   // 并多留几秒看清再刷新）→ 整页刷新拿全新视图
   function impApplyResult(j) {
@@ -2319,19 +2368,117 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
   // 分享/导出/导入/确认/更新弹层的遮罩点击与 Esc 已全部由工厂壳承接，此处不再有手写监听
 
-  // 导出配置包（.msync）：与 /m 导出、CLI config export 同一数据链路，桌面浏览器直接下载文件
-  function pkgToggle(show) { if (show) pkgM.open(); else pkgM.close() }
+  // 配置包统一弹层：方向（导出|导入）与导出三方式（附近的电脑/链接/文件）的切换、
+  // 底栏按钮随 tab 显隐（一个 msg 槽 + 各方向自己的主按钮）、LAN 前置状态、入口分发
   function setPkgErr(msg) {
     var el = document.getElementById('pkgErr')
     if (el) el.textContent = msg || ''
   }
-  function openPkgOverlay() {
+  function updatePkgFoot() {
+    var show = { shareRegen: false, shareCopyBtn: false, impImportBtn: false, pkgSaveBtn: false }
+    if (pkgDirCur === 'export') {
+      if (pkgExpTab === 'link') { show.shareRegen = true; show.shareCopyBtn = true }
+      if (pkgExpTab === 'file') show.pkgSaveBtn = true
+    } else {
+      show.impImportBtn = true
+    }
+    Object.keys(show).forEach(function (id) {
+      var b = document.getElementById(id)
+      if (b) b.hidden = !show[id]
+    })
+    updateImpPrimary()
+  }
+  function setPkgDir(dir) {
+    pkgDirCur = dir
+    var de = document.getElementById('pkgDirExport')
+    var di = document.getElementById('pkgDirImport')
+    if (de) de.className = dir === 'export' ? 'on' : ''
+    if (di) di.className = dir === 'import' ? 'on' : ''
+    var ep = document.getElementById('pkgExportPane')
+    var ip = document.getElementById('pkgImportPane')
+    if (ep) ep.hidden = dir !== 'export'
+    if (ip) ip.hidden = dir !== 'import'
+    if (dir === 'export') switchExpTab(pkgExpTab || 'file')
+    else switchImpTab(impTab || 'nearby')
+    updatePkgFoot()
+  }
+  var EXP_SEGS = { nearby: 'segExpNearby', link: 'segExpLink', file: 'segExpFile' }
+  var EXP_PANELS = { nearby: 'panelExpNearby', link: 'panelExpLink', file: 'panelExpFile' }
+  function switchExpTab(tab) {
+    pkgExpTab = tab
+    setPkgErr('')
+    hideImpPreview()
+    Object.keys(EXP_PANELS).forEach(function (k) {
+      var seg = document.getElementById(EXP_SEGS[k])
+      var panel = document.getElementById(EXP_PANELS[k])
+      if (seg) seg.className = k === tab ? 'on' : ''
+      if (panel) panel.hidden = k !== tab
+    })
+    if (tab === 'nearby') renderExpNearby()
+    if (tab === 'link' && !shareFirstUrl) createOffer() // 首次切到链接 tab 自动生成，无需先找按钮
+    updatePkgFoot()
+  }
+  function renderExpNearby() {
+    var st = document.getElementById('expNearbyState')
+    var on = document.getElementById('expLanOn')
+    if (!st) return
+    if (lanOn) {
+      st.textContent = t('✓ 局域网可达：手机远程已开启，附近电脑可以搜索到这台电脑。', '✓ On the LAN: mobile console is on — nearby computers can find this machine.')
+      st.className = 'testline ok'
+      if (on) on.hidden = true
+    } else {
+      st.textContent = t('手机远程未开启：附近电脑暂时搜不到这台电脑。', 'Mobile console is off — nearby computers cannot find this machine yet.')
+      st.className = 'testline'
+      if (on) on.hidden = false
+    }
+  }
+  function openPkgOverlay(dir) {
+    stopNearbyPoll()
     var pw = document.getElementById('pkgPw')
+    var u = document.getElementById('impUrl')
+    var f = document.getElementById('impFile2')
+    var pw2 = document.getElementById('impPw2')
     if (pw) pw.value = ''
-    pkgToggle(true)
+    if (u) u.value = ''
+    if (f) f.value = ''
+    if (pw2) pw2.value = ''
+    showImpFileChip(null)
+    setPkgErr('')
+    hideImpPreview()
+    renderShareUrls([])
+    // 方向按配置状态推断：空配置=新电脑要导入；有配置=多半是分享/迁移出去
+    setPkgDir(dir || (view && view.services && view.services.length ? 'export' : 'import'))
+    pkgM.open()
   }
   var pkgPill = document.getElementById('pkgPill')
-  if (pkgPill) pkgPill.onclick = openPkgOverlay
+  if (pkgPill) pkgPill.onclick = function () { openPkgOverlay() }
+  var pkgDirExport = document.getElementById('pkgDirExport')
+  if (pkgDirExport) pkgDirExport.onclick = function () { setPkgDir('export') }
+  var pkgDirImport = document.getElementById('pkgDirImport')
+  if (pkgDirImport) pkgDirImport.onclick = function () { setPkgDir('import') }
+  var segExpNearby = document.getElementById('segExpNearby')
+  if (segExpNearby) segExpNearby.onclick = function () { switchExpTab('nearby') }
+  var segExpLink = document.getElementById('segExpLink')
+  if (segExpLink) segExpLink.onclick = function () { switchExpTab('link') }
+  var segExpFile = document.getElementById('segExpFile')
+  if (segExpFile) segExpFile.onclick = function () { switchExpTab('file') }
+  var expLanOn = document.getElementById('expLanOn')
+  if (expLanOn) {
+    expLanOn.onclick = function () {
+      expLanOn.disabled = true
+      api('/lan', { method: 'POST', body: JSON.stringify({ enabled: true }) })
+        .then(function (r) {
+          if (r && r.ok === false) throw new Error(r.error || '')
+          lanOn = true
+          applyLanPill(true) // 与状态行 pill 共用同一份开关状态，别处轮询重绘不回灌
+          setPkgErr('')
+          renderExpNearby()
+          loadLanStatus()
+        })
+        .catch(function (e) { setPkgErr(t('开启手机远程失败：', 'Failed to enable mobile console: ') + e.message) })
+        .then(function () { expLanOn.disabled = false })
+    }
+  }
   var pkgSaveBtn = document.getElementById('pkgSaveBtn')
   if (pkgSaveBtn) {
     pkgSaveBtn.onclick = function () {
@@ -2347,11 +2494,89 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           document.body.appendChild(a)
           a.click()
           setTimeout(function () { URL.revokeObjectURL(a.href); a.remove() }, 0)
-          pkgToggle(false)
+          pkgM.close()
           toast(t('配置包已生成，浏览器开始下载', 'Package created; your browser is downloading it'), true)
         })
         .catch(function (e) { setPkgErr(t('导出失败：', 'Export failed: ') + e.message) })
         .then(function () { pkgSaveBtn.disabled = false })
+    }
+  }
+
+  // 存量收编重开入口（添加服务弹层 → 勾选导入）：/import/detect 候选可勾选，/import/apply 按 ids 应用；
+  // 收编与配置包导入是两个概念（收编=本机客户端配置；配置包=.msync 文件/链接/附近）
+  var legacyCands = []
+  var legacyChecked = []
+  function setLegacyErr(msg) {
+    var el = document.getElementById('legacyErr')
+    if (el) el.textContent = msg || ''
+  }
+  function updateLegacyGo() {
+    var go = document.getElementById('legacyGo')
+    if (!go) return
+    var n = legacyChecked.filter(function (x) { return x }).length
+    go.disabled = n === 0
+    go.textContent = t('导入所选（{n}）||Import selected ({n})').replace('{n}', String(n))
+  }
+  function renderLegacy() {
+    var list = document.getElementById('legacyList')
+    var desc = document.getElementById('legacyDesc')
+    legacyCands = []
+    legacyChecked = []
+    if (list) list.innerHTML = ''
+    if (desc) desc.textContent = t('正在检测本机客户端的存量配置…', 'Scanning local apps for existing configs…')
+    setLegacyErr('')
+    api('/import/detect', { timeoutMs: 20000 })
+      .then(function (r) {
+        var cands = (r.candidates || []).filter(function (c) { return !c.skipReason && c.base_url })
+        legacyCands = cands
+        legacyChecked = cands.map(function () { return true })
+        if (desc) desc.textContent = cands.length
+          ? t('检测到 {n} 个模型服务，勾选要搬进来的：', 'Found {n} model services. Pick the ones to bring in:').replace('{n}', String(cands.length))
+          : t('没有检测到可导入的存量配置。', 'No importable legacy configs found.')
+        if (list) {
+          list.innerHTML = ''
+          cands.forEach(function (c, i) {
+            var row = document.createElement('label')
+            row.className = 'legacyrow'
+            var cb = document.createElement('input')
+            cb.type = 'checkbox'
+            cb.checked = true
+            cb.onchange = function () { legacyChecked[i] = cb.checked; updateLegacyGo() }
+            var nm = document.createElement('span')
+            nm.className = 'lname'
+            nm.textContent = c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '')
+            var src = document.createElement('span')
+            src.className = 'lsrc'
+            src.textContent = SRC_LABEL[c.source] || c.source
+            row.appendChild(cb)
+            row.appendChild(nm)
+            row.appendChild(src)
+            list.appendChild(row)
+          })
+        }
+        updateLegacyGo()
+      })
+      .catch(function (e) {
+        if (desc) desc.textContent = ''
+        setLegacyErr(t('检测失败：', 'Detection failed: ') + e.message)
+      })
+  }
+  var legacyImportLink = document.getElementById('legacyImportLink')
+  if (legacyImportLink) legacyImportLink.onclick = function () { legacyM.open(); renderLegacy() }
+  var legacyGo = document.getElementById('legacyGo')
+  if (legacyGo) {
+    legacyGo.onclick = function () {
+      var ids = legacyCands.filter(function (_, i) { return legacyChecked[i] }).map(function (c) { return c.id })
+      if (!ids.length) return
+      legacyGo.disabled = true
+      api('/import/apply', { method: 'POST', body: JSON.stringify({ ids: ids }) })
+        .then(function (r) {
+          var n = (r.imported || []).length
+          legacyM.close()
+          toast('✓ ' + t('已导入 ', 'Imported ') + n + t(' 个服务，下方「我的服务」里可以查看和切换', ' services. See and switch them under "My services" below'), true)
+          return load()
+        })
+        .catch(function (e) { setLegacyErr(t('导入失败：', 'Import failed: ') + e.message); legacyGo.disabled = false })
     }
   }
 
