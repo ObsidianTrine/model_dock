@@ -20,10 +20,15 @@ import { detectInstallShape } from './install.js'
 import { notesToPlain } from './notes.js'
 
 const CHECK_TTL_MS = 24 * 3600_000
+/** 检查失败后的重试间隔：失败不该占用 24h 成功窗口（否则 GitHub 偶发不可达要隔天才能再试） */
+const FAIL_RETRY_MS = 30 * 60_000
 
 interface UpdateWebState {
   checking: boolean
+  /** 最近一次成功检查的时间（可用性判断的时间基准）；失败不写它 */
   lastCheckedAt: number | null
+  /** 最近一次失败检查的时间（失败重试退避用） */
+  lastFailAt: number | null
   lastError: string | null
   /** 最近一次成功检查的最新版本与说明（可用性按 available 现算，不落旧态）；sizeBytes = 本机适配安装包体积（找不到适配资产为 null） */
   manifest: { version: string; notes: string; htmlUrl: string; sizeBytes: number | null } | null
@@ -32,7 +37,7 @@ interface UpdateWebState {
   applyError: string | null
 }
 
-const state: UpdateWebState = { checking: false, lastCheckedAt: null, lastError: null, manifest: null, updating: false, applyError: null }
+const state: UpdateWebState = { checking: false, lastCheckedAt: null, lastFailAt: null, lastError: null, manifest: null, updating: false, applyError: null }
 let inflight: Promise<void> | null = null
 /** 测试注入：本地 mock API 基地址（null = 官方 https://api.github.com） */
 let apiBaseOverride: string | null = null
@@ -53,6 +58,7 @@ export function setUpdateFetchForTests(fn: ((repo: string, token: string | null,
 export function resetUpdateStateForTests(): void {
   state.checking = false
   state.lastCheckedAt = null
+  state.lastFailAt = null
   state.lastError = null
   state.manifest = null
   state.updating = false
@@ -72,9 +78,11 @@ async function resolveTokenAndRepo(cfg: Config): Promise<{ repo: string; token: 
 export async function restoreUpdateCheckState(): Promise<void> {
   const s = await readGatewayState()
   if (s?.update_check?.at) state.lastCheckedAt = s.update_check.at
+  if (s?.update_check?.failedAt) state.lastFailAt = s.update_check.failedAt
 }
 
-/** 发起一次检查：检查中 / TTL 内（未 force）静默跳过。匿名（无令牌）照常检查。不等待完成，状态经 getUpdateStatus 轮询。 */
+/** 发起一次检查：检查中 / 成功 TTL 内 / 失败重试窗内（未 force）静默跳过。匿名（无令牌）照常检查。
+ *  不等待完成，状态经 getUpdateStatus 轮询。 */
 export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolean } = {}): Promise<void> {
   if (state.checking || inflight) return
   // 在任何 await 之前同步创建并占位 inflight：并发两次 kick 才能被上方 guard 挡住。
@@ -83,17 +91,23 @@ export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolea
     state.checking = true
     try {
       const resolved = await resolveTokenAndRepo(rt.config)
-      if (!opts.force && state.lastCheckedAt && Date.now() - state.lastCheckedAt < CHECK_TTL_MS) return
+      const now = Date.now()
+      if (!opts.force) {
+        if (state.lastCheckedAt && now - state.lastCheckedAt < CHECK_TTL_MS) return
+        if (state.lastFailAt && now - state.lastFailAt < FAIL_RETRY_MS) return
+      }
       const fetchFn = fetchOverride ?? fetchLatestRelease
       const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase)
       state.manifest = { version: m.version, notes: m.notes, htmlUrl: m.htmlUrl, sizeBytes: matchedAssetSize(m) }
       state.lastError = null
+      state.lastFailAt = null
       state.lastCheckedAt = Date.now()
       await persistCheckTime(m.version)
     } catch (e) {
-      // 检查失败静默（不打扰用户），但记录 lastError 供控制台手动检查时展示
+      // 检查失败静默（不打扰用户），lastError 供控制台手动检查时展示。
+      // 失败不占成功 TTL（lastCheckedAt 不动），只记 lastFailAt 走 30min 重试退避
       state.lastError = (e as Error).message
-      state.lastCheckedAt = Date.now()
+      state.lastFailAt = Date.now()
       await persistCheckTime()
     } finally {
       state.checking = false
@@ -104,13 +118,27 @@ export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolea
   await p
 }
 
-async function persistCheckTime(version?: string): Promise<void> {
-  try {
-    const s = await readGatewayState()
-    if (s) await writeGatewayState({ ...s, update_check: { at: state.lastCheckedAt ?? Date.now(), ...(version ? { version } : {}) } })
-  } catch {
-    /* 持久化失败不影响主流程（内存态仍在） */
-  }
+/** 把检查时间落 gateway.json：成功写 at/version 并清 failedAt；失败只写 failedAt（保留此前成功时间） */
+function persistCheckTime(version?: string): Promise<void> {
+  return (async () => {
+    try {
+      const s = await readGatewayState()
+      if (!s) return
+      const prev = s.update_check
+      if (state.lastFailAt != null) {
+        await writeGatewayState({
+          ...s,
+          update_check: { ...(prev ? { at: prev.at, version: prev.version } : {}), failedAt: state.lastFailAt },
+        })
+        return
+      }
+      if (state.lastCheckedAt != null) {
+        await writeGatewayState({ ...s, update_check: { at: state.lastCheckedAt, ...(version ? { version } : {}) } })
+      }
+    } catch {
+      /* 持久化失败不影响主流程（内存态仍在） */
+    }
+  })()
 }
 
 /** 网关启动钩子（main.ts 调用）：fire-and-forget，绝不阻塞启动；MODELRDOCK_DISABLE_UPDATE_CHECK=1 关闭 */

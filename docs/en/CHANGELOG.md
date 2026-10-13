@@ -19,6 +19,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **Update reminders no longer miss releases on long-running gateways**: the check previously ran only at gateway startup, so a gateway that stayed up never learned about newer releases; the console now auto-rechecks while open (still on a 24h cadence), and a failed check retries after 30 minutes instead of occupying the 24h window.
 - **Console page layout fixed (v1.1.0 regression)**: an extra closing tag in v1.1.0's page markup ended the container early, leaving the services area without its centered width and a blank strip at the top of the page; the original layout is restored.
 - **Menu bar icon rendering fixed (macOS)**: the tray icon's "M" mark previously showed white blotches/holes; it now uses a round-stroke mark from the same source as the app icon, staying clean on any menu bar background.
 - **CLI commands respond faster**: CLI commands no longer load unused networking and interactive components at startup, so everyday commands produce results sooner.

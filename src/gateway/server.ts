@@ -1140,6 +1140,10 @@ async function handleAdmin(
 
   // 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
   if (url === '/_modeldock/admin/update/status' && req.method === 'GET') {
+    // 惰性周期重查：控制台每 60s 轮询一次状态，顺带触发一次检查——
+    // kick 内部有 成功 24h TTL / 失败 30min 退避 双守卫，命中即静默跳过，
+    // 常驻网关因此不必重启也能在控制台开着时发现新版本（此前只在启动时查一次）
+    void kickUpdateCheck(rt).catch(() => {})
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify(await getUpdateStatus(rt)))
     return
