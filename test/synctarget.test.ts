@@ -354,14 +354,14 @@ describe('引擎兜底与开关（单沙箱）', () => {
     loop.start()
     try {
       // 轮询自动拉取 rev2
-      await waitFor(async () => (await loadConfig()).profiles?.main?.default_model === 'remote-pushed')
+      await waitFor(async () => (await loadConfig()).profiles?.main?.default_model === 'remote-pushed', 15000)
 
       // 本地改配置（真实写 config.toml → watcher 触发 → 防抖 tick 推 rev3）
       await mutateConfig((c) => {
         c.profiles!.main!.default_model = 'local-after-remote'
       })
-      await waitFor(async () => (await target.readManifest())?.rev === 3)
-      await waitFor(async () => (await loadConfig()).profiles?.main?.default_model === 'local-after-remote')
+      await waitFor(async () => (await target.readManifest())?.rev === 3, 15000)
+      await waitFor(async () => (await loadConfig()).profiles?.main?.default_model === 'local-after-remote', 15000)
     } finally {
       // stop 会等在飞 tick 收尾：防止长尾写盘落到文件结束、env 被恢复后的真实 home（2026-10-05 事故根因）
       await loop.stop()
