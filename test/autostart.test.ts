@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { fakeHome } from './helpers.js'
 import {
   SERVICE_LABEL,
+  serviceLabel,
   launchdPlistPath,
   launchdPlistXml,
   readRecordedArgv,
@@ -22,7 +23,7 @@ describe('autostart 服务文件路径', () => {
   it('launchd plist 落在 home/Library/LaunchAgents（fakeHome 可隔离）', () => {
     const h = fakeHome()
     try {
-      expect(launchdPlistPath()).toBe(path.join(h.home, 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`))
+      expect(launchdPlistPath()).toBe(path.join(h.home, 'Library', 'LaunchAgents', `${serviceLabel()}.plist`))
     } finally {
       h.restore()
     }
@@ -31,25 +32,51 @@ describe('autostart 服务文件路径', () => {
   it('systemd user unit 落在 home/.config/systemd/user', () => {
     const h = fakeHome()
     try {
-      expect(systemdUnitPath()).toBe(path.join(h.home, '.config', 'systemd', 'user', `${SERVICE_LABEL}.service`))
+      expect(systemdUnitPath()).toBe(path.join(h.home, '.config', 'systemd', 'user', `${serviceLabel()}.service`))
     } finally {
       h.restore()
     }
   })
 
-  it('Windows 启动项以显式 APPDATA 为准', () => {
+  it('Windows 启动项路径：沙箱忽略 APPDATA（真机「启动」文件夹不可被沙箱写入）', () => {
     const h = fakeHome()
-    const prev = process.env.APPDATA
-    process.env.APPDATA = path.join(h.home, 'AppData', 'Roaming')
+    const prevAppData = process.env.APPDATA
+    process.env.APPDATA = path.join(os.tmpdir(), 'appdata-outside-sandbox')
     try {
       expect(windowsStartupPath()).toBe(
         path.join(h.home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'modeldock-gateway.vbs')
       )
     } finally {
-      if (prev === undefined) delete process.env.APPDATA
-      else process.env.APPDATA = prev
+      if (prevAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = prevAppData
       h.restore()
     }
+  })
+
+  it('Windows 启动项路径：非沙箱以显式 APPDATA 为准', () => {
+    const prevFake = process.env.MODELRDOCK_FAKE_HOME
+    const prevAppData = process.env.APPDATA
+    delete process.env.MODELRDOCK_FAKE_HOME
+    process.env.APPDATA = path.join(os.tmpdir(), 'appdata-elsewhere')
+    try {
+      expect(windowsStartupPath()).toBe(
+        path.join(os.tmpdir(), 'appdata-elsewhere', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'modeldock-gateway.vbs')
+      )
+    } finally {
+      if (prevFake === undefined) delete process.env.MODELRDOCK_FAKE_HOME
+      else process.env.MODELRDOCK_FAKE_HOME = prevFake
+      if (prevAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = prevAppData
+    }
+  })
+  it('沙箱用独立服务标识（launchctl/systemctl 操作不与生产同名）', () => {
+    const h = fakeHome()
+    try {
+      expect(serviceLabel()).toBe(`${SERVICE_LABEL}.sandbox`)
+    } finally {
+      h.restore()
+    }
+    expect(serviceLabel()).toBe(SERVICE_LABEL)
   })
 })
 
@@ -113,7 +140,7 @@ describe('服务文件内容生成与登记命令回读', () => {
       '/o.log',
       '/e.log'
     )
-    expect(xml).toContain(`<string>${SERVICE_LABEL}</string>`)
+    expect(xml).toContain(`<string>${serviceLabel()}</string>`)
     expect(xml).toContain('<key>RunAtLoad</key>\n  <true/>')
     expect(xml).toContain('<key>KeepAlive</key>\n  <true/>')
     expect(xml).toContain('<string>/a&amp;b/cli.js</string>')
@@ -159,7 +186,7 @@ describe('服务文件内容生成与登记命令回读', () => {
 function launchdLoaded(): boolean {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501
   try {
-    execFileSync('launchctl', ['print', `gui/${uid}/${SERVICE_LABEL}`], { stdio: 'ignore' })
+    execFileSync('launchctl', ['print', `gui/${uid}/${serviceLabel()}`], { stdio: 'ignore' })
     return true
   } catch {
     return false
@@ -177,7 +204,7 @@ function systemdUserAvailable(): boolean {
 
 function systemdActive(): boolean {
   try {
-    const out = execFileSync('systemctl', ['--user', 'is-active', `${SERVICE_LABEL}.service`], { encoding: 'utf8' })
+    const out = execFileSync('systemctl', ['--user', 'is-active', `${serviceLabel()}.service`], { encoding: 'utf8' })
     return out.trim() === 'active'
   } catch {
     return false
@@ -237,7 +264,7 @@ describe.skipIf(process.platform !== 'linux')('autostart 真实生效 > Linux sy
     }
     // 注意：不能用 fakeHome——systemd 用户管理器只读真实 ~/.config/systemd/user，
     // 不受测试进程 homeDir 影响（曾因此 enable 报 unit 不存在）。改用真实路径 + 守卫：
-    const realUnit = path.join(os.homedir(), '.config', 'systemd', 'user', `${SERVICE_LABEL}.service`)
+    const realUnit = path.join(os.homedir(), '.config', 'systemd', 'user', `${serviceLabel()}.service`)
     if (fs.existsSync(realUnit)) {
       ctx.skip() // 用户已注册真实自启 unit：绝不碰
       return

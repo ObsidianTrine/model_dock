@@ -18,7 +18,7 @@
 | 编译到 `dist/` | `npm run build`（tsc） |
 | 测试 | `npm test`（vitest）；**改完 `src/**` 必须全绿** |
 | 开发热跑 | `npm run dev -- <cmd>`（tsx 直跑源码，**无热重载**，改码后重启实例再验证） |
-| 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口；8687 生产端口禁止占用，端口被占会拒绝启动并提示换端口）。**完全沙箱化**：配置/状态/日志/客户端写入均在 `~/.modeldock-dev`，npm 全局安装（控制台「安装并接入」）也重定向装进沙箱、不碰真机全局环境，脚本类安装（落点不可重定向，如小米官方安装器）在沙箱内拒绝执行并提示手动安装；与生产互不影响（首启自动从生产复制服务配置）。**用户本人日常验证专用**：启动前自动探测沙箱内已有实例（冲突明说、不再静默）；**agent 一律不得占用其默认沙箱与 8890 端口**，测试统一走下方硬规则 2 的隔离配方（`MODELRDOCK_FAKE_HOME` + 189xx） |
+| 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口；8687 生产端口禁止占用，端口被占会拒绝启动并提示换端口）。**完全沙箱化**：配置/状态/日志/密钥/客户端写入均在 `~/.modeldock-dev`（密钥一律本地 file 存储，**不写系统钥匙环**；重置/卸载/自启/进程清扫在沙箱里只作用于沙箱自身），npm 全局安装（控制台「安装并接入」）也重定向装进沙箱、不碰真机全局环境，脚本类安装（落点不可重定向，如小米官方安装器）在沙箱内拒绝执行并提示手动安装；与生产互不影响（首启自动从生产复制服务配置）。**用户本人日常验证专用**：启动前自动探测沙箱内已有实例（冲突明说、不再静默）；**agent 一律不得占用其默认沙箱与 8890 端口**，测试统一走下方硬规则 2 的隔离配方（`MODELRDOCK_FAKE_HOME` + 189xx） |
 | SEA 可执行包 | `npm run build:sea`（产出 `release/` 下各平台**对外发布物**：压缩包（包内单一入口程序，unix 名 `modeldock`）+ `SHA256SUMS`；darwin 另产 `ModelDock.app` + `.dmg`；win 另产 Inno Setup `*-setup.exe`；裸二进制只作构建中间产物，不外发） |
 | 一键发布（tgz + 可执行 + 安装包） | 双击 `scripts/build.bat`（Win）/ `scripts/build.sh`（mac/Linux），或 `node scripts/build-all.mjs` |
 
@@ -48,7 +48,7 @@
    - **端口红线**：**8687（生产）绝对禁止**；**8890 是用户专属 dev 沙箱，agent 一律不得占用**（不启动、不 stop、不抹它的数据）。**agent 只用 189xx**，且必须与 `MODELRDOCK_FAKE_HOME` **成对指定**：只换端口不换沙箱会落进 `~/.modeldock-dev`，与用户 dev 实例同壳互撞单实例保护——表现为一方静默拒绝启动、页面连接被拒却无报错（一个沙箱只有一份 `gateway.json`，`gateway stop`/令牌/设备记忆都按它寻址）。
    - **测试数据怎么来（两个合法来源）**：
      1）**自造**（推荐，状态可控）：先 `export MODELRDOCK_FAKE_HOME=<沙箱>`，再用种子脚本调 `mutateConfig()` + `setSecret(id, key, 'file')` 造服务/路由；`npx tsx <脚本>` 时脚本内先 `process.env.MODELRDOCK_FAKE_HOME = '<沙箱>'` 再动态 import 源码模块。
-     2）**拷一份 dev 数据**（只读拷贝，绝不改 dev 沙箱）：`mkdir -p $SB/.modeldock && cp ~/.modeldock-dev/.modeldock/config.toml $SB/.modeldock/`，有 `secrets.json` 一并拷。**务必不要拷 `gateway.json`**——它含旧 pid / 端口 / 令牌，会让新实例误判「已在运行」。dev 沙箱若走 keychain 存密钥（无 secrets.json），拷过去后对应服务会显示「Key 未设置」属正常。
+     2）**拷一份 dev 数据**（只读拷贝，绝不改 dev 沙箱）：`mkdir -p $SB/.modeldock && cp ~/.modeldock-dev/.modeldock/config.toml $SB/.modeldock/`，有 `secrets.json` 一并拷。**务必不要拷 `gateway.json`**——它含旧 pid / 端口 / 令牌，会让新实例误判「已在运行」。dev 沙箱密钥一律本地 file 存储（config 的 `file:` 引用 + secrets.json 成对拷贝即可用）；拷的是旧版沙箱数据（残留 keychain 引用）时，新实例首次启动会自动把引用落地为本地 file。
    - agent 不要用 `scripts/run_dev.sh` / `scripts/run_dev.bat` 起测试实例（默认沙箱是用户 dev 专属；确要复用必须 `MODELRDOCK_FAKE_HOME` 与端口成对覆盖）。
 3. **不做全量清扫**：`gateway stop` 可能存在多实例共存（生产 8687 + dev / 测试实例），只停目标实例；全量清扫游离网关仅在完整卸载时执行（见 `src/cli/basic.ts`）。
 4. **测试结束必须清理自己拉起的进程**：本次测试 / 调试启动的所有临时进程——网关实例、mock 上游、其他后台辅助进程——收尾前必须全部停止；配套的临时沙箱目录（如 `/tmp/modeldock-test-*`）一并删除。注意：后台启动的进程（`nohup` / `&` / agent 后台任务）不会随会话结束自动退出，且 mock 上游这类非网关进程不在实例注册表里、`gateway stop` 管不到，只能按 PID / 端口自行清理。清理后**核实再收工**：`lsof -nP -iTCP:<port> -sTCP:LISTEN` 确认端口已释放、`ps aux | grep` 确认无残留进程；任务中断需要交接的，把已拉起的进程和端口写进 worktree 的 `NOTES.md`。

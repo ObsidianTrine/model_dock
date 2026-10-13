@@ -14,6 +14,12 @@ import { preferInstalledCli } from './cliinstall.js'
 
 export const SERVICE_LABEL = 'com.modeldock.gateway'
 
+/** 沙箱用独立服务标识：launchd 的 label / systemd 的 unit 名是机器级全局命名空间，与生产共用
+ *  同名时沙箱 install/uninstall 的 launchctl/systemctl 操作会卸掉生产服务。沙箱一律挂 .sandbox 后缀。 */
+export function serviceLabel(): string {
+  return process.env.MODELRDOCK_FAKE_HOME ? `${SERVICE_LABEL}.sandbox` : SERVICE_LABEL
+}
+
 export type AutostartKind = 'launchd' | 'systemd' | 'windows'
 
 export function autostartKind(): AutostartKind | null {
@@ -26,15 +32,18 @@ export function autostartKind(): AutostartKind | null {
 // 服务文件路径
 
 export function launchdPlistPath(): string {
-  return path.join(homeDir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`)
+  return path.join(homeDir(), 'Library', 'LaunchAgents', `${serviceLabel()}.plist`)
 }
 
 export function systemdUnitPath(): string {
-  return path.join(homeDir(), '.config', 'systemd', 'user', `${SERVICE_LABEL}.service`)
+  return path.join(homeDir(), '.config', 'systemd', 'user', `${serviceLabel()}.service`)
 }
 
 export function windowsStartupPath(): string {
-  const base = process.env.APPDATA || path.join(homeDir(), 'AppData', 'Roaming')
+  // 沙箱守卫：APPDATA 不随 MODELRDOCK_FAKE_HOME 重定向，直接用会把沙箱启动项写进真机「启动」文件夹
+  const base = process.env.MODELRDOCK_FAKE_HOME
+    ? path.join(homeDir(), 'AppData', 'Roaming')
+    : process.env.APPDATA || path.join(homeDir(), 'AppData', 'Roaming')
   return path.join(base, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'modeldock-gateway.vbs')
 }
 
@@ -111,7 +120,7 @@ export function launchdPlistXml(argv: string[], workDir: string, outLog: string,
 <dict>
   <!-- ${argvMark(argv)} -->
   <key>Label</key>
-  <string>${SERVICE_LABEL}</string>
+  <string>${serviceLabel()}</string>
   <key>ProgramArguments</key>
   <array>
 ${args}
@@ -210,9 +219,9 @@ export function autostartStatus(): AutostartStatus | null {
   let loaded = true
   if (kind === 'launchd') {
     const uid = currentUid()
-    loaded = uid != null && execOk('launchctl', ['print', `gui/${uid}/${SERVICE_LABEL}`]).ok
+    loaded = uid != null && execOk('launchctl', ['print', `gui/${uid}/${serviceLabel()}`]).ok
   } else if (kind === 'systemd') {
-    loaded = execOk('systemctl', ['--user', 'is-enabled', `${SERVICE_LABEL}.service`]).ok
+    loaded = execOk('systemctl', ['--user', 'is-enabled', `${serviceLabel()}.service`]).ok
   }
   const stale = !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
   return { kind, installed, loaded, stale, file, argv }
@@ -329,7 +338,7 @@ export async function installAutostart(opts: { argv?: string[] } = {}): Promise<
   }
 
   if (kind === 'systemd') {
-    const unit = `${SERVICE_LABEL}.service`
+    const unit = `${serviceLabel()}.service`
     const dr = execOk('systemctl', ['--user', 'daemon-reload'])
     if (!dr.ok) {
       throw new Error(
@@ -389,11 +398,11 @@ export function stopService(): boolean {
   if (kind === 'launchd') {
     const uid = currentUid()
     if (uid == null) return false
-    let r = execOk('launchctl', ['bootout', `gui/${uid}/${SERVICE_LABEL}`])
-    if (!r.ok) r = execOk('launchctl', ['remove', SERVICE_LABEL])
+    let r = execOk('launchctl', ['bootout', `gui/${uid}/${serviceLabel()}`])
+    if (!r.ok) r = execOk('launchctl', ['remove', serviceLabel()])
     return r.ok
   }
-  if (kind === 'systemd') return execOk('systemctl', ['--user', 'stop', `${SERVICE_LABEL}.service`], 8000).ok
+  if (kind === 'systemd') return execOk('systemctl', ['--user', 'stop', `${serviceLabel()}.service`], 8000).ok
   return false
 }
 
@@ -409,7 +418,7 @@ export async function uninstallAutostart(): Promise<AutostartUninstallResult> {
   const wasInstalled = fs.existsSync(file)
   if (!wasInstalled) return { removed: file, wasInstalled: false }
   if (kind !== 'windows') stopService()
-  if (kind === 'systemd') execOk('systemctl', ['--user', 'disable', `${SERVICE_LABEL}.service`])
+  if (kind === 'systemd') execOk('systemctl', ['--user', 'disable', `${serviceLabel()}.service`])
   await fs.promises.rm(file, { force: true })
   if (kind === 'systemd') execOk('systemctl', ['--user', 'daemon-reload'])
   return { removed: file, wasInstalled }

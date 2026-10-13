@@ -46,8 +46,12 @@ export function makeKeyRef(backend: SecretBackend, id: string): string {
 }
 
 /** 当前平台默认的安全后端；未显式配置 security.store 时使用。
- *  win32→file（其内部用 DPAPI 加密），darwin→keychain，linux→secret-service（无钥匙环则回退 file）。 */
+ *  win32→file（其内部用 DPAPI 加密），darwin→keychain，linux→secret-service（无钥匙环则回退 file）。
+ *  沙箱（MODELRDOCK_FAKE_HOME，dev/测试重定向 home）一律返回 file：keychain/secret-service 是机器级
+ *  全局存储、不随 home 重定向隔离，沙箱里写/删钥匙环条目动的是生产实例的密钥。附带效果：
+ *  migrateSecretsToSecure 在沙箱因 target==='file' 直接 no-op，不会把沙箱密钥迁进真钥匙环。 */
 export async function defaultStore(): Promise<SecretBackend> {
+  if (process.env.MODELRDOCK_FAKE_HOME) return 'file'
   switch (process.platform) {
     case 'darwin':
       return 'keychain'
@@ -475,8 +479,12 @@ export async function getSecret(ref: string): Promise<string | null> {
   return typeof v === 'string' && v !== '' ? v : null
 }
 
-/** 写入 key，返回应写入 config 的 key_ref */
+/** 写入 key，返回应写入 config 的 key_ref。
+ *  沙箱守卫：即便调用方（如显式 security.store="keychain"）传入外部后端，也强制落沙箱 secrets.json。 */
 export async function setSecret(id: string, value: string, backend: SecretBackend): Promise<string> {
+  if (process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service')) {
+    backend = 'file'
+  }
   if (backend === 'keychain' || backend === 'secret-service') {
     await setExternal(backend, id, value)
     return makeKeyRef(backend, id)
@@ -494,6 +502,9 @@ export async function setSecretsBatch(
   backend: SecretBackend
 ): Promise<Record<string, string>> {
   const refs: Record<string, string> = {}
+  if (process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service')) {
+    backend = 'file'
+  }
   if (backend === 'keychain' || backend === 'secret-service') {
     for (const [id, val] of Object.entries(entries)) {
       await setExternal(backend, id, val)
@@ -510,9 +521,13 @@ export async function setSecretsBatch(
   })
 }
 
+/** 删除 key。
+ *  沙箱守卫：沙箱配置里的 keychain/secret-service 引用源自生产种子（dev-seed 原样复制 key 照搬），
+ *  而外部存储是机器级全局、不随 home 隔离——按引用删除删掉的是生产正在用的条目，跳过外部删除。 */
 export async function deleteSecret(ref: string): Promise<void> {
   const { scheme, id } = parseKeyRef(ref)
   if (scheme === 'keychain' || scheme === 'secret-service') {
+    if (process.env.MODELRDOCK_FAKE_HOME) return
     await removeExternal(scheme, id)
     return
   }

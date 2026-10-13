@@ -23,9 +23,18 @@ export interface CliInstallResult {
 
 export const declinedMarker = () => path.join(modeldockDir(), 'cli-install-declined')
 
-/** CLI 命令安装目录；null = 该平台不做自动安装 */
+/** CLI 命令安装目录；null = 该平台不做自动安装。
+ *  沙箱守卫：/usr/local/bin（macOS 软链）与 %LOCALAPPDATA%\WindowsApps（Windows 副本）是机器级
+ *  全局落点，dev/测试沙箱（MODELRDOCK_FAKE_HOME）里装/摘都会动真机的 CLI 入口——重定向进
+ *  沙箱数据目录，与 npm_config_prefix 沙箱重定向同一思路。 */
 export function cliBinDir(): string | null {
   if (process.env.MODELRDOCK_CLI_BIN_DIR) return process.env.MODELRDOCK_CLI_BIN_DIR
+  if (process.env.MODELRDOCK_FAKE_HOME) {
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      return path.join(modeldockDir(), 'cli-bin')
+    }
+    return null
+  }
   if (process.platform === 'darwin') return '/usr/local/bin'
   if (process.platform === 'win32') {
     const base = process.env.LOCALAPPDATA || path.join(homeDir(), 'AppData', 'Local')

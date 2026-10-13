@@ -47,6 +47,7 @@
 | CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☐ 未修 |
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☐ 未修 |
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/release-review-2026-10-12.md §五 |
+| CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 
 ---
 
@@ -220,6 +221,18 @@
 
 **CORRECT-03（P2）config.toml 无写前快照**
 - 现状：全仓快照仅 4 处调用（engine.ts / ops.ts:749 / cli/harness.ts / sync/collect.ts），均针对客户端文件与 sync 导入前；config.toml 直写无快照，写坏（如 migrate/stringify 缺陷）无 undo。推测有意取舍（config 有 .lock + 原子写）。建议至少在 AGENTS.md 澄清边界，或对 migrate 类大改前补快照。
+
+**CORRECT-05（P1，2026-10-13 用户实测踩中）dev/测试沙箱操作外溢生产**
+- 事故：用户清 dev 沙箱（`~/.modeldock-dev`）数据后，生产实例的 provider Key 全部失效（401）。
+- 根因（沙箱 = MODELRDOCK_FAKE_HOME，run_dev 的 dev 实例与 agent 测试实例同命中）：
+  1. **钥匙环全局共享**（事故根源）：`src/config/secrets.ts` darwin 默认 keychain / linux secret-service 是机器级全局存储，不随 home 重定向隔离；`scripts/dev-seed.mjs` 原样复制生产的 `keychain:` 引用（注释明写「provider/profile/key 照搬」）；CLI `cmdReset`（basic.ts）、Web `/_modeldock/reset`（server.ts）、`uninstall --purge` 均循环 deleteSecret 按引用删真钥匙环；`migrateSecretsToSecure`（ops.ts，网关启动）还会把沙箱 file 密钥迁进真钥匙环。
+  2. `src/cli/gatewaycmd.ts` sweepGatewayProcesses：按命令行签名全机杀网关进程（modeldock + gateway start/--sea-gateway），沙箱 uninstall 会杀掉生产 8687。
+  3. `src/cliinstall.ts` cliBinDir：/usr/local/bin 软链（macOS）、%LOCALAPPDATA%\WindowsApps（Windows）是全局落点，沙箱 uninstall 摘掉真机 CLI 入口。
+  4. `src/autostart.ts`：launchd label / systemd unit 名机器级全局，沙箱 install/uninstall 的 launchctl/systemctl 操作会卸生产服务；windowsStartupPath 用未重定向的 APPDATA，沙箱启动项写进真机「启动」文件夹。
+  5. `src/import/sources.ts` readOpencodeAuth：win32 APPDATA 分支读真机密钥（只读泄漏）。
+- 已核查安全：npm 全局安装（installChildEnv 的 npm_config_prefix 沙箱重定向）、自更新（run.ts 开发态守卫）、客户端文件/自启文件/快照/日志/网关状态写入（全部走 homeDir()）。
+- ☑ **已修（2026-10-13 @d6e3a59）**：沙箱一律 file 后端（defaultStore 早退，顺带让 migrateSecretsToSecure 在沙箱 no-op）；setSecret/setSecretsBatch 外部后端强制转 file；deleteSecret 沙箱跳过外部删除（守卫兜底）；新增 `src/config/sandbox.ts` 启动迁移把沙箱配置的外部 key 引用落地为 file（值只读拷入沙箱 secrets.json，幂等，gateway main.ts 挂钩）；sweepGatewayProcesses 沙箱跳过；cliBinDir 沙箱重定向进 `modeldockDir()/cli-bin`；autostart 新增 `serviceLabel()`（沙箱 `com.modeldock.gateway.sandbox`）+ windowsStartupPath 沙箱走 homeDir；导入 APPDATA 分支沙箱跳过。
+- 遗留清理：旧版沙箱若曾装过自启（生产 label 指向沙箱路径），需手动核对 `launchctl print gui/$(id -u)/com.modeldock.gateway` 的 program 路径后 `launchctl bootout` 清理；新版不会再产生该状态。
 
 ---
 

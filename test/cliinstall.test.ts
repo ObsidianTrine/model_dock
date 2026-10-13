@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fakeHome } from './helpers.js'
+import { modeldockDir } from '../src/util/paths.js'
 import {
   cliBinDir,
   cliLinkPath,
@@ -31,6 +32,19 @@ describe('CLI 安装位解析', () => {
     } finally {
       if (prev === undefined) delete process.env.MODELRDOCK_CLI_BIN_DIR
       else process.env.MODELRDOCK_CLI_BIN_DIR = prev
+    }
+  })
+
+  it('沙箱（FAKE_HOME）安装位重定向进沙箱数据目录（不碰 /usr/local/bin 与 %LOCALAPPDATA%）', () => {
+    const h = fakeHome()
+    try {
+      if (process.platform === 'darwin' || process.platform === 'win32') {
+        expect(cliBinDir()).toBe(path.join(modeldockDir(), 'cli-bin'))
+      } else {
+        expect(cliBinDir()).toBeNull()
+      }
+    } finally {
+      h.restore()
     }
   })
 })

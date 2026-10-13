@@ -131,8 +131,15 @@ async function pidExitedWithin(pid: number): Promise<boolean> {
 }
 
 /** 按命令行签名清扫游离网关进程（含 dev 的 tsx 实例与 SEA 二进制实例）。仅本机尽力而为，失败静默跳过。
- *  做两遍：先杀子进程时，tsx watch 之类的守护父进程可能立刻重生它。 */
+ *  做两遍：先杀子进程时，tsx watch 之类的守护父进程可能立刻重生它。
+ *  沙箱守卫：清扫按命令行签名全机匹配杀进程（modeldock + gateway start），生产 8687 同样命中——
+ *  沙箱（MODELRDOCK_FAKE_HOME，dev/测试实例）里执行卸载会连生产一起杀掉。沙箱只停自己
+ *  （gateway stop 按 gateway.json 寻址），绝不全局扫。 */
 export function sweepGatewayProcesses(): void {
+  if (process.env.MODELRDOCK_FAKE_HOME) {
+    console.log(c.gray(t('沙箱模式：跳过游离网关清扫（不波及其他实例）', 'Sandbox mode: skipping stray gateway sweep (other instances untouched)')))
+    return
+  }
   let killed = 0
   try {
     for (let pass = 0; pass < 2; pass++) {

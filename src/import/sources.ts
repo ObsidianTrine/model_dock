@@ -673,7 +673,8 @@ async function scanProviderJson(source: 'opencode' | 'mimocode', files: string[]
 
 async function readOpencodeAuth(): Promise<Record<string, string>> {
   const candidates = [path.join(homeDir(), '.local', 'share', 'opencode', 'auth.json')]
-  if (process.platform === 'win32' && process.env.APPDATA) {
+  // 沙箱守卫：APPDATA 不随 MODELRDOCK_FAKE_HOME 重定向，沙箱里跳过，避免读到真机的 opencode 密钥
+  if (process.platform === 'win32' && process.env.APPDATA && !process.env.MODELRDOCK_FAKE_HOME) {
     candidates.push(path.join(process.env.APPDATA, 'opencode', 'auth.json'))
   }
   for (const p of candidates) {
