@@ -17,10 +17,29 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **One-click import now covers far more apps**: legacy-config import grows from 4 sources to 11 — newly supported are Codex CLI, OpenCode, MiMo Code (shared with the MiMo desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays; Codex / Gemini profiles in newer cc-switch versions are no longer missed. The first-run wizard and the web banner pick them up automatically.
 - **Import channels from one-api / new-api**: `modeldock import --from oneapi --url <site> --token <system access token>` bulk-moves channels from your self-hosted relay site into ModelDock (generate the token under "Personal settings → System access token" on the site); only OpenAI-compatible / Anthropic channels are imported — ones ModelDock cannot reach directly (Azure, native Gemini, etc.) are skipped with the reason shown.
 
+## [1.1.1] - 2026-10-14
+
+Fixes the v1.1.0 console layout regression and makes long-running gateways receive update reminders in time.
+
 ### Fixed
 
 - **Update reminders no longer miss releases on long-running gateways**: the check previously ran only at gateway startup, so a gateway that stayed up never learned about newer releases; the console now auto-rechecks while open (still on a 24h cadence), and a failed check retries after 30 minutes instead of occupying the 24h window.
 - **Console page layout fixed (v1.1.0 regression)**: an extra closing tag in v1.1.0's page markup ended the container early, leaving the services area without its centered width and a blank strip at the top of the page; the original layout is restored.
+
+## [1.1.0] - 2026-10-13
+
+"Moving house" is consolidated into one Config package entry, existing configs can be re-imported anytime, and dev-sandbox operations no longer touch the production instance.
+
+### Added
+
+- **One "Config package" entry for import & export**: the former "Export package" button on the status row becomes "Config package", opening one dialog with export and import directions. Export offers three ways — Nearby computers (shows LAN reachability, with a one-click enable of the mobile console so the other computer can pull directly), Export a link (10-minute one-time), and Export package file; import is no longer "gone after first use", and a list of what will be imported is shown for confirmation before anything is replaced. The share-link entry also moves out of the mobile-console panel into the open.
+- **Re-import existing configs anytime**: after clicking "Not now" on the legacy-config banner, the import entry used to disappear from the UI entirely; the add-service dialog now has "Import existing configs from local apps…" with checkboxes for the services to bring in.
+- **Paste share links on mobile too**: the mobile console's package import accepts a pasted share link in addition to picking a file (the link carries its own passphrase, used automatically).
+- **One-click import now covers far more apps**: legacy-config import grows from 4 sources to 11 — newly supported are Codex CLI, OpenCode, MiMo Code (shared with the MiMo desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays; Codex / Gemini profiles in newer cc-switch versions are no longer missed. The first-run wizard and the web banner pick them up automatically.
+- **Import channels from one-api / new-api**: `modeldock import --from oneapi --url <site> --token <system access token>` bulk-moves channels from your self-hosted relay site into ModelDock (generate the token under "Personal settings → System access token" on the site); only OpenAI-compatible / Anthropic channels are imported — ones ModelDock cannot reach directly (Azure, native Gemini, etc.) are skipped with the reason shown.
+
+### Fixed
+
 - **Menu bar icon rendering fixed (macOS)**: the tray icon's "M" mark previously showed white blotches/holes; it now uses a round-stroke mark from the same source as the app icon, staying clean on any menu bar background.
 - **CLI commands respond faster**: CLI commands no longer load unused networking and interactive components at startup, so everyday commands produce results sooner.
 - **The dev sandbox no longer affects production**: resetting/cleaning data, uninstalling, or installing start-at-login inside the dev sandbox (`scripts/run_dev`) could previously reach the production instance — deleting production's OS-keychain keys (showing up as sudden 401s), killing the production gateway process, or removing the `modeldock` command-line entry. Sandbox keys are now stored entirely inside the sandbox directory and never touch the OS keychain; start-at-login registers under a separate label; machine-wide process sweeps and command-line entry operations in the sandbox only ever affect the sandbox itself.
@@ -143,6 +162,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
-[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ObsidianTrine/model_dock/releases/tag/v1.0.0
