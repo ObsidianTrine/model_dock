@@ -5,7 +5,9 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-13
+
+"Moving house" is consolidated into one Config package entry, existing configs can be re-imported anytime, and dev-sandbox operations no longer touch the production instance.
 
 ### Added
 
@@ -17,6 +19,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **Menu bar icon rendering fixed (macOS)**: the tray icon's "M" mark previously showed white blotches/holes; it now uses a round-stroke mark from the same source as the app icon, staying clean on any menu bar background.
+- **CLI commands respond faster**: CLI commands no longer load unused networking and interactive components at startup, so everyday commands produce results sooner.
 - **The dev sandbox no longer affects production**: resetting/cleaning data, uninstalling, or installing start-at-login inside the dev sandbox (`scripts/run_dev`) could previously reach the production instance — deleting production's OS-keychain keys (showing up as sudden 401s), killing the production gateway process, or removing the `modeldock` command-line entry. Sandbox keys are now stored entirely inside the sandbox directory and never touch the OS keychain; start-at-login registers under a separate label; machine-wide process sweeps and command-line entry operations in the sandbox only ever affect the sandbox itself.
 - **The tray's "Cleanup finished" dialog keeps its buttons reachable (macOS)**: after cleaning data, the dialog shows only the conclusion lines with buttons always on screen; the full process output is saved to "~/Library/Logs/ModelDock" (a timestamped log file) — click "View full log" in the dialog to open it. Previously the entire execution output was stuffed into the dialog, pushing the buttons off-screen.
 - **Failed cleanups show the error directly**: the result dialog now distinguishes success from failure; on failure it shows the error from the end of the output and the same "View full log" entry — previously failures were also titled "Cleanup finished", with errors buried in long output.
@@ -137,5 +141,6 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
-[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ObsidianTrine/model_dock/releases/tag/v1.0.0

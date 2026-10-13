@@ -5,7 +5,9 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.1.0] - 2026-10-13
+
+把「搬家」收拢成一个「配置包」入口，存量配置可随时再收编，并修复 dev 沙箱操作可能影响生产实例的问题。
 
 ### 新增
 
@@ -17,6 +19,8 @@
 
 ### 修复
 
+- **菜单栏图标显示修复（macOS）**：托盘图标的「M」字标此前会出现白斑空洞，现改用与应用图标同源的圆头笔画字标，任意菜单栏底色下都干净清晰。
+- **命令行响应更快**：CLI 各命令启动时不再加载用不到的网络与交互组件，日常命令更快出结果。
 - **dev 沙箱测试不再影响生产**：在 dev 沙箱（`scripts/run_dev`）里重置/清理数据、卸载或安装开机自启，此前可能动到生产实例——删掉生产正在用的系统钥匙环密钥（表现为生产请求突然 401）、杀掉生产网关进程、摘掉 `modeldock` 命令行入口。现在沙箱的密钥全部存在沙箱目录里、不再写系统钥匙环；开机自启用独立标识注册；涉及全机的进程清扫与命令行入口操作在沙箱里一律只作用于沙箱自身。
 - **托盘「清理完成」弹窗按钮点得到（macOS）**：清理数据后的弹窗只显示结论几行，按钮始终在屏内；完整过程输出存到「~/Library/Logs/ModelDock」（时间戳命名的日志文件），点弹窗里的「查看完整日志」即可打开——此前整段执行输出原样塞进弹窗，会把按钮顶出屏幕。
 - **清理没成功时直接看到报错**：结果弹窗区分成功与失败，失败时显示输出末尾的错误信息与同一「查看完整日志」入口——此前失败也标题「清理完成」，错误埋在长输出里。
@@ -137,5 +141,6 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
-[未发布]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...HEAD
+[未发布]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ObsidianTrine/model_dock/releases/tag/v1.0.0
