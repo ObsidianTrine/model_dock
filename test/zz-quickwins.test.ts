@@ -57,7 +57,10 @@ describe('quickwins 3: displayPath Windows 分隔符缩写', () => {
       expect(displayPath(home + '\\x')).toBe('~' + '\\x')
       expect(displayPath('/home/user/x')).toBe('~/x')
       expect(displayPath('/elsewhere/x')).toBe('/elsewhere/x')
-      expect(displayPath(path.join(home, 'a', 'b'))).toBe('~/a/b')
+      // path.join 在 win32 产反斜杠形态（\home\user\a\b），与 posix 形态的 mock home
+      // 字面不相容——期望值按「缩写前缀 + 后缀原样保留」的平台无关语义计算
+      const joined = path.join(home, 'a', 'b')
+      expect(displayPath(joined)).toBe('~' + joined.slice(home.length))
     } finally {
       spy.mockRestore()
     }
