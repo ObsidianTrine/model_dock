@@ -12,7 +12,7 @@ import { validateSyncdoc } from '../sync/types.js'
 import { randomToken } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { safeEqual } from '../util/safe-equal.js'
-import { listenWithRetry, projectModel } from './shared.js'
+import { listenWithRetry, projectModel, fetchEnvelopeFromUrl } from './shared.js'
 import { localIsoTs } from '../util/time.js'
 import { autoRouteInfo, logAudit, parseFallbackEntry, reloadRuntime, type GatewayRuntime } from './state.js'
 import { CONSOLE_SHARED_JS } from './console-shared.js'
@@ -443,25 +443,26 @@ footer{color:var(--muted);font-size:var(--fs-xs);text-align:center;margin-top:6p
   <div id="services"></div>
 </div>
 <div class="card">
-  <p class="label" data-i18n="配置同步||Config sync">配置同步</p>
+  <p class="label" data-i18n="配置包||Config package">配置包</p>
   <p class="rlabel2" data-i18n="导出配置包（AES-256-GCM 加密）||Export config package (AES-256-GCM encrypted)">导出配置包（AES-256-GCM 加密）</p>
   <p class="rrow">
     <input type="password" id="expPw" class="tinput" autocomplete="new-password" data-i18n-ph="口令（导入方需输同一口令）||Passphrase (importer types the same one)" placeholder="口令（导入方需输同一口令）">
     <button type="button" class="act on" id="expBtn" data-i18n="导出||Export">导出</button>
   </p>
   <hr class="rsep">
-  <p class="rlabel2" data-i18n="导入配置包（选择本机 .msync 文件）||Import config package (pick a local .msync file)">导入配置包（选择本机 .msync 文件）</p>
+  <p class="rlabel2" data-i18n="导入配置包（文件或分享链接）||Import config package (file or share link)">导入配置包（文件或分享链接）</p>
   <!-- 不设 accept：iOS 选择器按文件类型过滤，.msync 未注册会被灰掉选不中（实测 .json 可选、.txt 与 .msync 不可选），放开才列得出文件 -->
   <p class="rrow"><input type="file" id="impFile"></p>
   <p class="rrow">
     <input type="password" id="impPw" class="tinput" autocomplete="new-password" data-i18n-ph="导出时设置的口令||Passphrase set at export time" placeholder="导出时设置的口令">
     <button type="button" class="act" id="impBtn" data-i18n="导入||Import">导入</button>
   </p>
+  <p class="rrow"><textarea id="impLinkUrl" class="tinput" rows="2" data-i18n-ph="或粘贴分享链接：http://192.168.x.x:8787/…#p=…||Or paste a share link: http://192.168.x.x:8787/…#p=…" placeholder="或粘贴分享链接：http://192.168.x.x:8787/…#p=…"></textarea></p>
   <p class="hint" data-i18n="导入会整体替换现有配置，导入前自动快照。||Importing replaces the whole config; a snapshot is taken first.">导入会整体替换现有配置，导入前自动快照。</p>
 </div>
 <p class="a2hsrow"><button type="button" class="mini" id="a2hsBtn" data-i18n="常驻到手机桌面 · 怎么做？||Keep on home screen · how?">常驻到手机桌面 · 怎么做？</button></p>
 <div class="card" id="a2hsCard" hidden><p class="hint" id="a2hsText"></p></div>
-<footer data-i18n="仅限局域网 · 状态 / 切换 / 配置同步 · 不显示 Key||LAN only · status / switch / config sync · keys never shown">仅限局域网 · 状态 / 切换 / 配置同步 · 不显示 Key</footer>
+<footer data-i18n="仅限局域网 · 状态 / 切换 / 配置包 · 不显示 Key||LAN only · status / switch / config package · keys never shown">仅限局域网 · 状态 / 切换 / 配置包 · 不显示 Key</footer>
 <div id="toast"></div>
 <div id="confirm" hidden>
   <div class="confirm-box">
@@ -566,15 +567,25 @@ document.getElementById('expBtn').onclick = function () {
     .catch(function (e) { toast(tr('导出失败：', 'Export failed: ') + e.message); btn.disabled = false })
 }
 document.getElementById('impBtn').onclick = function () {
+  var link = (document.getElementById('impLinkUrl').value || '').trim()
   var f = document.getElementById('impFile').files[0]
   var pw = document.getElementById('impPw').value
-  if (!f) { toast(tr('请先选择 .msync 配置包文件', 'Pick a .msync package file first')); return }
-  if (!pw) { toast(tr('请输入导出时设置的口令', 'Enter the passphrase set at export time')); return }
   var btn = this
+  var bodyP
+  if (link) {
+    // 链接自带口令（#p= fragment），口令输入框只服务文件导入
+    var i = link.indexOf('#p=')
+    if (i < 0) { toast(tr('链接缺口号段（#p=…）：请回旧电脑复制完整链接', 'The link lacks the passphrase part (#p=…): copy the full link on the old computer')); return }
+    bodyP = Promise.resolve({ phase: 'apply', url: link.slice(0, i), passphrase: link.slice(i + 3) })
+  } else {
+    if (!f) { toast(tr('请先选择 .msync 配置包文件，或粘贴分享链接', 'Pick a .msync package file first, or paste a share link')); return }
+    if (!pw) { toast(tr('请输入导出时设置的口令', 'Enter the passphrase set at export time')); return }
+    bodyP = f.text().then(function (txt) { return { phase: 'apply', file: txt, passphrase: pw } })
+  }
   btn.disabled = true
-  f.text()
-    .then(function (txt) {
-      return fetch('/m/api/sync/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phase: 'apply', file: txt, passphrase: pw }) })
+  bodyP
+    .then(function (b2) {
+      return fetch('/m/api/sync/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b2) })
         .then(function (r) { return r.json().then(function (aj) { if (!r.ok || !aj.ok) throw new Error(aj.error || r.status); return aj }) })
     })
     .then(function (aj) {
@@ -968,15 +979,19 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
     }
     const phase = body.phase === 'apply' ? 'apply' : 'preview'
     const file = typeof body.file === 'string' ? body.file : ''
+    // 粘贴链接导入：信封在来源电脑的局域网端点上，由服务端代拉（手机页跨源 fetch 会被 CORS 拦）
+    const url = typeof body.url === 'string' ? body.url : ''
     const passphrase = typeof body.passphrase === 'string' ? body.passphrase : ''
     const audit = (ok: boolean, err?: string): void =>
       logAudit(rt, { ts: localIsoTs(), kind: 'audit', op: '手机导入配置', op_en: 'Mobile config import', target: phase, ok, err, source: 'lan' })
     try {
-      if (!file) throw new Error(t('缺少配置包内容', 'Missing package content'))
+      let envText = file
+      if (!envText && url) envText = await fetchEnvelopeFromUrl(url)
+      if (!envText) throw new Error(t('缺少配置包内容（文件或分享链接）', 'Missing package content (file or share link)'))
       if (!passphrase) throw new Error(t('口令不能为空', 'Passphrase must not be empty'))
       let env: unknown
       try {
-        env = JSON.parse(file)
+        env = JSON.parse(envText)
       } catch {
         throw new Error(t('不是合法的配置包（JSON 解析失败）', 'Not a valid sync package (JSON parse failed)'))
       }

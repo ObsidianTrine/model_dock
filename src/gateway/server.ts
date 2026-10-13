@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { safeEqual } from '../util/safe-equal.js'
-import { projectModel } from './shared.js'
+import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
@@ -985,42 +985,6 @@ async function runRemoteRequest(requestId: string, ips: string[], port: number):
 
 /** 从来源电脑拉取信封（用户自粘的链接）：仅 http/https、禁止重定向、10s 超时、响应体 ≤10MB。
  *  调用者=本机管理员（admin 鉴权 + Host 白名单），无凭据外泄面；上限防异常大包拖垮网关。 */
-async function fetchEnvelopeFromUrl(rawUrl: string): Promise<string> {
-  let u: URL
-  try {
-    u = new URL(rawUrl)
-  } catch {
-    throw new Error(t('链接格式不正确', 'Invalid link format'))
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(t('仅支持 http/https 链接', 'Only http/https links are supported'))
-  u.hash = '' // fragment 是口令，只在本机拆用，不发往网络
-  let res: Response
-  try {
-    res = await fetch(u.toString(), { redirect: 'error', signal: AbortSignal.timeout(10_000) })
-  } catch (e) {
-    if ((e as Error).name === 'TimeoutError' || (e as Error).name === 'AbortError') {
-      throw new Error(t('拉取超时：确认两机在同一局域网、来源电脑已开启手机远程且链接未过期', 'Fetch timed out: check both machines are on the same LAN, mobile console is on at the source, and the link has not expired'))
-    }
-    throw new Error(t('拉取失败：{msg}', 'Fetch failed: {msg}', { msg: (e as Error).message }))
-  }
-  if (!res.ok) throw new Error(t('拉取失败：HTTP {status}', 'Fetch failed: HTTP {status}', { status: res.status }))
-  const reader = res.body?.getReader()
-  if (!reader) throw new Error(t('来源返回了空响应', 'The source returned an empty response'))
-  const chunks: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.length
-    if (total > 10 * 1024 * 1024) {
-      await reader.cancel().catch(() => {})
-      throw new Error(t('响应体超过 10MB 上限，疑似异常来源', 'Response exceeds the 10MB cap; the source looks abnormal'))
-    }
-    chunks.push(value)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
 async function handleAdmin(
   rt: GatewayRuntime,
   req: http.IncomingMessage,

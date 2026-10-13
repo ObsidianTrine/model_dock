@@ -114,6 +114,17 @@ function readState(sandbox: string): { pid: number; port: number; started_at: st
   return JSON.parse(fs.readFileSync(gatewayStatePath(), 'utf8'))
 }
 
+/** health 首次可达（listen 成功）与 gateway.json 落盘（writeGatewayState）之间存在窗口，
+ *  高负载下测试直读会 ENOENT（偶发红，实测轮换命中不同用例）——读前等文件出现。 */
+async function waitStateFile(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (fs.existsSync(gatewayStatePath())) return
+    if (Date.now() > deadline) throw new Error('gateway.json 未在期限内落盘')
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
 function writeState(sandbox: string, state: Record<string, unknown>): void {
   fs.mkdirSync(path.dirname(gatewayStatePath()), { recursive: true })
   fs.writeFileSync(gatewayStatePath(), JSON.stringify(state, null, 2))
@@ -129,6 +140,7 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       await waitHealthy(port)
 
       // state 文件与子进程对账：pid 就是拉起的子进程
+      await waitStateFile()
       const state = readState(h.home)
       expect(state.pid).toBe(child.pid)
       expect(state.port).toBe(port)
@@ -184,6 +196,7 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       const port = await freePort()
       child = startGateway(h.home, port)
       await waitHealthy(port)
+      await waitStateFile()
 
       const state = readState(h.home)
       expect(state.pid).toBe(child.pid)
@@ -201,6 +214,7 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       const port = await freePort()
       child = startGateway(h.home, port)
       await waitHealthy(port)
+      await waitStateFile()
       const real = readState(h.home)
 
       // 伪造 started_at 骗过 CLI 层 gatewayLive 的三重校验，但 health 仍是真网关

@@ -207,9 +207,11 @@ describe('LAN 配置同步（/m 页导出/导入）', () => {
     const page = await fetch(`${a.base}/m`, { headers: { authorization: `Bearer ${AUTH.authorization.slice(7)}` } })
     expect(page.status).toBe(200)
     const html = await page.text()
-    expect(html).toContain('data-i18n="配置同步||Config sync"')
+    expect(html).toContain('data-i18n="配置包||Config package"')
     expect(html).toContain('id="expBtn"')
     expect(html).toContain('id="impFile"')
+    // 手机端支持粘贴分享链接导入（服务端代拉信封，避开跨源 fetch）
+    expect(html).toContain('id="impLinkUrl"')
     // 导入一键直达：按钮就是「导入」（data-i18n 双语在位），不再有预览确认按钮
     expect(html).toContain('id="impBtn"')
     expect(html).toContain('data-i18n="导入||Import"')
