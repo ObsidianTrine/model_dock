@@ -567,6 +567,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       <button class="btn" id="afCancel" data-i18n="取消||Cancel">取消</button>
       <button class="btn primary" id="afSave" data-i18n="保存||Save">保存</button>
     </div>
+    </div>
+    <!-- 收编入口放 addCard 直属层（不进 #addform）：不选服务商也要可见可用 -->
     <p class="altline"><button type="button" class="btn small" id="legacyImportLink" data-i18n="从本机客户端导入存量配置…||Import existing configs from local apps…">从本机客户端导入存量配置…</button></p>
   </div>
 </div>
@@ -2515,7 +2517,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (!go) return
     var n = legacyChecked.filter(function (x) { return x }).length
     go.disabled = n === 0
-    go.textContent = t('导入所选（{n}）||Import selected ({n})').replace('{n}', String(n))
+    // 浏览器内嵌 t() 只有两参（不支持 params 占位），占位符手动 replace（与 impApplyResult 同法）
+    go.textContent = t('导入所选（{n}）', 'Import selected ({n})').replace('{n}', String(n))
   }
   function renderLegacy() {
     var list = document.getElementById('legacyList')
@@ -2562,7 +2565,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       })
   }
   var legacyImportLink = document.getElementById('legacyImportLink')
-  if (legacyImportLink) legacyImportLink.onclick = function () { legacyM.open(); renderLegacy() }
+  if (legacyImportLink) legacyImportLink.onclick = function () {
+    // 切换弹层而非叠加：addM 的壳在 DOM 里更靠后，同 z-index 会盖住 legacyM（实测点击被其遮罩吃掉）
+    addM.close()
+    legacyM.open()
+    renderLegacy()
+  }
   var legacyGo = document.getElementById('legacyGo')
   if (legacyGo) {
     legacyGo.onclick = function () {
