@@ -16,6 +16,7 @@ import {
   getUpdateStatus,
   kickUpdateCheck,
   resetUpdateStateForTests,
+  restoreUpdateCheckState,
   setUpdateApiBaseForTests,
   setUpdateFetchForTests,
   watchApplyChild,
@@ -203,6 +204,94 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       expect((await getUpdateStatus(rt)).latest).toBe('777.0.0')
     } finally {
       await h.restore()
+    }
+  })
+
+  it('检查失败不占成功 TTL：lastCheckedAt 保留、failedAt 落盘（30min 重试退避），成功后清 failedAt', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      await writeGatewayState({ pid: process.pid, port: 18999, admin_token: 'x', started_at: 't' })
+
+      // 1) 成功一次（旧版）：lastCheckedAt 落盘
+      let calls = 0
+      let fail = false
+      const manifest: ReleaseManifest = { version: '777.0.0', tagName: 'v777.0.0', notes: '', htmlUrl: '', assets: [] }
+      setUpdateFetchForTests(() => {
+        calls++
+        if (fail) return Promise.reject(new Error('网络不可达'))
+        return Promise.resolve(manifest)
+      })
+      await kickUpdateCheck(rt, { force: true })
+      const okAt = (await getUpdateStatus(rt)).lastCheckedAt
+      expect(okAt).not.toBeNull()
+
+      // 2) 失败：lastCheckedAt 不被覆盖（成功时间保留），lastError/failedAt 记录
+      fail = true
+      await kickUpdateCheck(rt, { force: true })
+      const s2 = await getUpdateStatus(rt)
+      expect(s2.lastError).toContain('网络不可达')
+      expect(s2.lastCheckedAt).toBe(okAt)
+      const st2 = await readGatewayState()
+      expect(st2?.update_check?.at).toBe(okAt)
+      expect(st2?.update_check?.failedAt).not.toBeNull()
+      expect(st2?.update_check?.version).toBe('777.0.0') // 失败不冲掉此前看到的版本
+
+      // 3) 成功 TTL 过期后，失败退避仍生效：at 拨回 25h 前（成功 TTL 过）→ 失败退避(30min)内 → 不重试
+      const st3 = await readGatewayState()
+      await writeGatewayState({ ...st3!, update_check: { ...st3!.update_check!, at: Date.now() - 25 * 3600_000 } })
+      await restoreUpdateCheckState()
+      const before = calls
+      await kickUpdateCheck(rt)
+      expect(calls).toBe(before)
+
+      // 4) failedAt 拨回 31 分钟前（退避到期）→ 非 force kick 重试成功 → failedAt 清除
+      const st4 = await readGatewayState()
+      await writeGatewayState({ ...st4!, update_check: { ...st4!.update_check!, failedAt: Date.now() - 31 * 60_000 } })
+      await restoreUpdateCheckState()
+      fail = false
+      await kickUpdateCheck(rt)
+      expect(calls).toBe(before + 1)
+      const s4 = await getUpdateStatus(rt)
+      expect(s4.lastError).toBeNull()
+      const st5 = await readGatewayState()
+      expect(st5?.update_check?.failedAt).toBeUndefined()
+      expect(st5?.update_check?.at).toBe(s4.lastCheckedAt)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('从未成功过时失败也持久化 failedAt（无 at 可保留），退避到期后重试成功补齐 at', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      await writeGatewayState({ pid: process.pid, port: 18999, admin_token: 'x', started_at: 't' })
+      let fail = true
+      setUpdateFetchForTests(() => (fail ? Promise.reject(new Error('拉取失败')) : Promise.resolve({ version: '999.0.0', tagName: 'v999.0.0', notes: '', htmlUrl: '', assets: [] })))
+      await kickUpdateCheck(rt, { force: true })
+      const st1 = await readGatewayState()
+      expect(st1?.update_check?.failedAt).not.toBeNull()
+      expect(st1?.update_check?.at).toBeUndefined()
+
+      // 退避内不重试
+      await kickUpdateCheck(rt)
+      const st2 = await readGatewayState()
+      expect(st2?.update_check?.failedAt).toBe(st1!.update_check!.failedAt)
+
+      // 退避到期 + 恢复 → 成功补齐 at/version、清 failedAt
+      await writeGatewayState({ ...st2!, update_check: { failedAt: Date.now() - 31 * 60_000 } })
+      await restoreUpdateCheckState()
+      fail = false
+      await kickUpdateCheck(rt)
+      const st3 = await readGatewayState()
+      expect(st3?.update_check?.at).not.toBeNull()
+      expect(st3?.update_check?.failedAt).toBeUndefined()
+      const s = await getUpdateStatus(rt)
+      expect(s.available).toBe(true)
+      expect(s.latest).toBe('999.0.0')
+    } finally {
+      h.restore()
     }
   })
 
