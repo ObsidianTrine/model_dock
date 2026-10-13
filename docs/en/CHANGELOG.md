@@ -19,6 +19,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **Console page layout fixed (v1.1.0 regression)**: an extra closing tag in v1.1.0's page markup ended the container early, leaving the services area without its centered width and a blank strip at the top of the page; the original layout is restored.
 - **Menu bar icon rendering fixed (macOS)**: the tray icon's "M" mark previously showed white blotches/holes; it now uses a round-stroke mark from the same source as the app icon, staying clean on any menu bar background.
 - **CLI commands respond faster**: CLI commands no longer load unused networking and interactive components at startup, so everyday commands produce results sooner.
 - **The dev sandbox no longer affects production**: resetting/cleaning data, uninstalling, or installing start-at-login inside the dev sandbox (`scripts/run_dev`) could previously reach the production instance — deleting production's OS-keychain keys (showing up as sudden 401s), killing the production gateway process, or removing the `modeldock` command-line entry. Sandbox keys are now stored entirely inside the sandbox directory and never touch the OS keychain; start-at-login registers under a separate label; machine-wide process sweeps and command-line entry operations in the sandbox only ever affect the sandbox itself.
