@@ -49,7 +49,23 @@ export function mkRepo(opts?: { testCmd?: string }): TestRepo {
   fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n.agents/orchestrator/queue/\n.agents/orchestrator/logs/\n')
   g('add -A')
   g('commit -m init')
-  return { root, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
+  return { root, cleanup: () => rmRfRetry(root) }
+}
+
+/** git 对象落盘/异步收尾可能在 rmSync 瞬间仍在进行：ENOTEMPTY/EBUSY 退避重试
+ *  （与主 test/helpers.ts 的 rmRfWithRetry 同策略；CI 实测高负载下偶发 ENOTEMPTY）。 */
+function rmRfRetry(p: string): void {
+  const backoffMs = [10, 50, 100, 250, 500, 1000]
+  for (let i = 0; ; i++) {
+    try {
+      fs.rmSync(p, { recursive: true, force: true })
+      return
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? ''
+      if (!['ENOTEMPTY', 'EBUSY', 'EPERM', 'EACCES'].includes(code) || i >= backoffMs.length) throw e
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffMs[i])
+    }
+  }
 }
 
 /** 生成任务卡 markdown。 */
