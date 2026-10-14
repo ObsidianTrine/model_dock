@@ -5,8 +5,8 @@
 // 在资源管理器中打开日志；退出 = 停止网关 + 托盘退出。
 //
 // 编译：csc（.NET Framework 4.x 随 Windows 10/11 预装）——
-//   csc /target:winexe /out:ModelDockTray.exe /win32icon:modeldock.ico
-//       /r:System.Windows.Forms.dll /r:System.Drawing.dll ModelDockTray.cs
+//   csc /target:winexe /out:ModelDockTray.exe /win32manifest:ModelDockTray.manifest
+//       /win32icon:modeldock.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll ModelDockTray.cs
 // 语法限制：C# 5（无 $"" 插值、无 ?. ）——目标编译器是 Framework 自带的 v4.0.30319。
 
 using System;
@@ -351,10 +351,14 @@ namespace ModelDockTray
             string lastError = JsonString(json, "lastError");
             string htmlUrl = JsonString(json, "htmlUrl");
             string notes = JsonUnescape(JsonString(json, "notes"));
+            // summary = 服务端摘要收口（首段+要点，与命令行检查输出同形）；旧版网关没有该字段时回落全文
+            string summary = JsonUnescape(JsonString(json, "summary"));
             if (available)
             {
                 string title = string.IsNullOrEmpty(latest) ? "ModelDock 有新版本" : "ModelDock 有新版本 v" + latest;
-                string body = (notes ?? "") + "\n\n点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。";
+                // 小窗只放摘要（全文塞进 560×400 会变成一面墙的长段落）；底部 hint Label 常驻说明，
+                // 正文不再重复拼一遍（原先正文和 Label 各一份同文案）
+                string body = string.IsNullOrEmpty(summary) ? (notes ?? "") : summary;
                 DialogResult r = ShowUpdateDialog(title, body, htmlUrl);
                 if (r == DialogResult.OK)
                 {
@@ -585,6 +589,10 @@ namespace ModelDockTray
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = true;
+            // 按 DPI 缩放：控件坐标都按 96dpi 设计，配 manifest 的 PerMonitorV2
+            // 在 125%/150% 缩放的 Win11 上不再整体位图拉伸发糊
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(560, 400);
 
             var box = new TextBox();
@@ -771,6 +779,10 @@ namespace ModelDockTray
         public UpdateProgressForm(string title)
         {
             Text = title;
+            Font = SystemFonts.MessageBoxFont;
+            // 按 DPI 缩放：控件坐标都按 96dpi 设计，配 manifest 的 PerMonitorV2 高分屏不发糊
+            AutoScaleDimensions = new SizeF(96F, 96F);
+            AutoScaleMode = AutoScaleMode.Dpi;
             Width = 440;
             Height = 140;
             FormBorderStyle = FormBorderStyle.FixedDialog;

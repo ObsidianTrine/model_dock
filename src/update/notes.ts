@@ -1,11 +1,13 @@
 /**
- * 更新说明的展示降级（纯函数，无依赖）。
+ * 更新说明的展示降级（纯函数；仅依赖 i18n 的 t() 做计数行文案）。
  *
  * 发布说明的来源是 GitHub Release 正文 = CHANGELOG 段落原文（markdown），而消费它的界面
  * 全是纯文本：菜单栏 / 托盘的原生弹窗（NSAlert / WinForms）没有渲染器，Web 控制台是手写 DOM
  * 不引 markdown 库。因此三面共用这里的一份实现：先「去标记」，再「摘要收口」——
  * 弹窗只留首段 + 几条点题，逐条细节交给发布页链接（业界同类工具即此形态）。
  */
+
+import { t } from '../util/i18n.js'
 
 /** 弹窗里最多列几条点题（其余用「另有 N 项」带过，细节看发布页） */
 const MAX_ITEMS = 4
@@ -167,4 +169,21 @@ export function notesSummary(
       .slice(0, maxItems),
     total: bullets.length,
   }
+}
+
+/** 摘要收口的整段纯文本：与 run.ts 的 CLI 检查输出（logReleaseNotes）同源同形，
+ *  供 /admin/update/status 的 summary 字段给 Windows 托盘小窗——原生弹窗放全文会变成
+ *  一面墙的长段落，这里只给首段 + 点题，细节交给弹窗上的发布页链接 */
+export function notesSummaryText(
+  md: string,
+  opts: { maxItems?: number; maxItemChars?: number; maxSummaryChars?: number } = {}
+): string {
+  const s = notesSummary(md, opts)
+  const lines: string[] = []
+  if (s.summary) lines.push(s.summary)
+  for (const item of s.items) lines.push(`· ${item}`)
+  if (s.total > s.items.length) {
+    lines.push(t('（共 {n} 项改动，其余见发布页）', '({n} changes in total — see the release page for the rest)', { n: s.total }))
+  }
+  return lines.join('\n')
 }

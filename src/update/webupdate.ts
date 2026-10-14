@@ -17,7 +17,7 @@ import { displayPath, logsDir } from '../util/paths.js'
 import { localDateStr, t } from '../util/index.js'
 import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type ReleaseManifest } from './check.js'
 import { detectInstallShape } from './install.js'
-import { notesToPlain } from './notes.js'
+import { notesSummaryText, notesToPlain } from './notes.js'
 import { readUpdateProgress, type UpdateProgress } from './progress.js'
 
 const CHECK_TTL_MS = 24 * 3600_000
@@ -162,6 +162,8 @@ export interface UpdateStatusPayload {
   available: boolean
   /** available 时的更新说明（已降级为纯文本：去 markdown 标记、保留标题与条目结构） */
   notes: string | null
+  /** available 时的说明摘要（首段+要点，同 CLI 检查输出；给原生小窗用，全文仍是 notes） */
+  summary: string | null
   /** available 时的发布页地址（GitHub Release），供界面「查看完整说明」外链 */
   htmlUrl: string | null
   /** available 时本机适配安装包体积（字节；找不到适配资产为 null），供界面显示 MB */
@@ -196,6 +198,8 @@ export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusP
     latest,
     available,
     notes: notes || null,
+    // 原生小窗（Windows 托盘）放全文会变成一面墙的长段落，摘要与 CLI 检查输出同源同形（notesSummaryText）
+    summary: available && state.manifest?.notes ? notesSummaryText(state.manifest.notes) : null,
     // 空串收敛成 null：发布缺 html_url 时上游给的是空串，界面按「有无链接」判断
     htmlUrl: available ? state.manifest?.htmlUrl || null : null,
     sizeBytes: available ? state.manifest?.sizeBytes ?? null : null,

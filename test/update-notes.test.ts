@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { notesSummary, notesToPlain } from '../src/update/notes.js'
+import { notesSummary, notesSummaryText, notesToPlain } from '../src/update/notes.js'
 
-// 纯函数（无 i18n、无网络、无文件）：只锚定「去标记 + 摘要收口」的行为契约
+// 纯函数（无 i18n 依赖注入、无网络、无文件）：只锚定「去标记 + 摘要收口」的行为契约
 
 /** 与真实发布说明同构：首段摘要 + 「### 新增/改进/修复」+ 加粗点题的长条目 */
 const RELEASE_BODY = `一个「日常维护更省心」的版本：菜单栏可一键清理数据，没配备用链也能自动切、额度用完自动切。
@@ -132,5 +132,23 @@ describe('notesSummary：摘要收口', () => {
   it('空说明：不产生空条目（原生弹窗据此跳过说明区）', () => {
     const s = notesSummary('   \n\n')
     expect(s).toMatchObject({ summary: '', items: [], total: 0 })
+  })
+})
+
+describe('notesSummaryText：摘要整段纯文本（CLI 检查输出与 /admin/update/status 的 summary 字段同源同形）', () => {
+  it('首段 + 「· 」条目；原文条目多于收录数时补「（共 N 项改动，其余见发布页）」', () => {
+    const out = notesSummaryText(RELEASE_BODY)
+    expect(out.startsWith('一个「日常维护更省心」的版本：')).toBe(true)
+    expect(out).toContain('\n· 菜单栏 / 托盘可以一键清理数据')
+    expect(out).toContain('（共 7 项改动，其余见发布页）')
+    // 只收 maxItems 条
+    expect(out.split('\n').filter((l) => l.startsWith('· '))).toHaveLength(4)
+    expect(out).not.toContain('###')
+    expect(out).not.toContain('**')
+  })
+
+  it('条目未超量不补总数行；全空输入 → 空串', () => {
+    expect(notesSummaryText('- **甲**：细节')).toBe('· 甲')
+    expect(notesSummaryText('   \n\n')).toBe('')
   })
 })
