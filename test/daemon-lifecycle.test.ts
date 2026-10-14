@@ -125,6 +125,15 @@ async function waitStateFile(timeoutMs = 10_000): Promise<void> {
   }
 }
 
+/** 读 state（接管重写窗口内文件可能被 clear 后短暂缺失）：缺失/损坏返回 null 交调用方重试 */
+function readStateSafe(): { pid: number; port: number; started_at: string } | null {
+  try {
+    return JSON.parse(fs.readFileSync(gatewayStatePath(), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 function writeState(sandbox: string, state: Record<string, unknown>): void {
   fs.mkdirSync(path.dirname(gatewayStatePath()), { recursive: true })
   fs.writeFileSync(gatewayStatePath(), JSON.stringify(state, null, 2))
@@ -196,11 +205,17 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       const port = await freePort()
       child = startGateway(h.home, port)
       await waitHealthy(port)
-      await waitStateFile()
+      // 监听先于落盘（startForeground 在 listen 之后才 writeGatewayState）：health 就绪的瞬间
+      // state 可能还是上面预置的陈旧 pid（CI 高负载下偶发挂），轮询等新实例回写完成再断言
+      const deadline = Date.now() + 10_000
+      let state = readStateSafe()
+      while (state?.pid !== child.pid && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100))
+        state = readStateSafe()
+      }
 
-      const state = readState(h.home)
-      expect(state.pid).toBe(child.pid)
-      expect(state.port).toBe(port)
+      expect(state?.pid).toBe(child.pid)
+      expect(state?.port).toBe(port)
     } finally {
       await stopChild(child)
       h.restore()
