@@ -1353,6 +1353,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     renderSyncBadge()
     renderServices()
     renderAutoRoute()
+    refreshSchedSvcOptions()
     renderClients()
     renderShareRequest()
   }
@@ -2765,6 +2766,45 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     })
     return opts
   }
+  // 服务列表指纹（id+名+模型表拼接）：定时面板下拉只在列表真变时重建选项，2s 轮询零开销
+  function viewServicesSig() {
+    return (view.services || []).map(function (s) {
+      return s.id + '\\u0001' + s.label + '\\u0001' + (s.models || []).map(function (m) { return m.id }).join(',')
+    }).join('\\u0002')
+  }
+  var schedSvcSig = ''
+  // 服务增删/改名/改模型表后只重建定时面板的 <option>，不动行结构与未保存输入——整体重渲染会冲掉
+  // 正在编辑的时段时间、把预填时段灌回来（见 schedRowsEl click 处注释）；已选值原样带回，
+  // 行内服务/模型已被删除时补一项原值兜底（与 routeSelectHtml 钉定兜底同口径），不静默清空已保存配置
+  function refreshSchedSvcOptions() {
+    if (!schedRowsRendered || !view) return
+    var sig = viewServicesSig()
+    if (sig === schedSvcSig) return
+    schedSvcSig = sig
+    var ns = document.getElementById('schedNewSvc'), nm = document.getElementById('schedNewModel')
+    if (ns) {
+      var curSvc = ns.value
+      ns.innerHTML = schedSvcOptions(curSvc)
+      if (nm) nm.innerHTML = schedModelOptions(ns.value, nm.value)
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('#schedRows .srow'), function (r) {
+      var svcSel = r.querySelector('.ssvc'), modSel = r.querySelector('.smod')
+      if (!svcSel) return
+      var keepSvc = svcSel.value
+      svcSel.innerHTML = schedSvcOptions(keepSvc)
+      // 先赋值再判断：选项列表里已无原值（服务被删）时补一项原值兜底，行不静默变成“未选服务”
+      if (keepSvc && svcSel.value !== keepSvc) {
+        svcSel.innerHTML += '<option value="' + esc(keepSvc) + '" selected>' + esc(keepSvc) + '</option>'
+      }
+      if (modSel && !modSel.disabled) {
+        var keepModel = modSel.value
+        modSel.innerHTML = schedModelOptions(svcSel.value, keepModel)
+        if (keepModel && modSel.value !== keepModel) {
+          modSel.innerHTML += '<option value="' + esc(keepModel) + '" selected>' + esc(keepModel) + '</option>'
+        }
+      }
+    })
+  }
   // 生效日下拉：''=每天；wd/we/hol=日类型过滤（工作日/周末/法定节假日）；自定义星期几回显为 custom（原值以逗号串存 data-days，保存时沿用）
   function daysSelectHtml(cls, days, dayFilter, title) {
     var key = (days || []).slice().sort().join(',')
@@ -2837,6 +2877,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     document.getElementById('schedNewDays').value = ''
     document.getElementById('schedNewSvc').innerHTML = schedSvcOptions('')
     document.getElementById('schedNewModel').innerHTML = schedModelOptions('', '')
+    schedSvcSig = viewServicesSig()
     if (!seeded) $('#schedMsg').textContent = ''
     renderSchedUpcoming()
   }
