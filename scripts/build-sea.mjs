@@ -916,7 +916,9 @@ async function packageWinSetup() {
     if (!csc) throw new Error('未找到 csc.exe（.NET Framework 4.x）')
     const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.cs')
     const trayOut = path.join(RELEASE, 'ModelDockTray.exe')
-    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll "${traySrc}"`)
+    // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊
+    const trayManifest = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.manifest')
+    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll "${traySrc}"`)
     log('  ✓ Windows 托盘已编译')
   } catch (e) {
     warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含 Windows 托盘`)

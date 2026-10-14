@@ -72,11 +72,18 @@ export function openUrlInBrowser(url: string, spawnFn: typeof spawn = spawn): Pr
 }
 
 /** 按 PID 终止进程：win32 用 taskkill /T /F 杀整棵进程树（Windows 无信号语义，SIGTERM 即硬杀且不管子树）；
- *  unix 保持 SIGTERM（优雅退出）。返回是否实际发出终结信号（false = 已退出/权限不足，调用方据此决定计数）。
+ *  unix 保持 SIGTERM（优雅退出）。opts.tree=false 只杀该进程本身、不递归子树——更新流程停托盘时必须用它：
+ *  托盘发起的更新里更新器就是托盘的子进程，树杀会把自己一并杀掉，安装步骤永远执行不到。
+ *  返回是否实际发出终结信号（false = 已退出/权限不足，调用方据此决定计数）。
  *  spawnSyncFn 执行器可注入（单测传 fake，绝不真杀进程）。 */
-export function killByPid(pid: number, spawnSyncFn: typeof spawnSync = spawnSync): boolean {
+export function killByPid(
+  pid: number,
+  spawnSyncFn: typeof spawnSync = spawnSync,
+  opts: { tree?: boolean } = {}
+): boolean {
   if (process.platform === 'win32') {
-    const r = spawnSyncFn('taskkill', ['/PID', String(pid), '/F', '/T'], { stdio: 'ignore', windowsHide: true })
+    const args = ['/PID', String(pid), '/F', ...(opts.tree === false ? [] : ['/T'])]
+    const r = spawnSyncFn('taskkill', args, { stdio: 'ignore', windowsHide: true })
     // spawnSync 正常返回 status 非 0 表示未找到目标/失败；注入的 fake 返回 undefined 视为成功（只桩命令拼装）
     return !r || r.status === 0
   }

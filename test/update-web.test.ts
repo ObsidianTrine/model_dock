@@ -136,6 +136,9 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       expect(s.notes).toContain('· 点题：细节')
       expect(s.notes).not.toContain('**')
       expect(s.notes).not.toContain('###')
+      // summary = 摘要收口（首段 + 要点，同 CLI 检查输出）：原生小窗放全文会变成一面墙的长段落
+      expect(s.summary).toBe('更新说明摘要：一条改动\n· 点题')
+      expect(s.summary).not.toContain('新增')
       expect(s.htmlUrl).toBe(`https://github.com/${REPO}/releases/tag/v999.0.0`)
       expect(s.sizeBytes).toBeNull() // mock 发布无资产：体积缺省 null
       expect(s.lastCheckedAt).not.toBeNull()

@@ -81,6 +81,16 @@ describe('killByPid 平台分支（注入 fake spawnSync，桩验命令拼装，
       kill.mockRestore()
     }
   })
+  it('win32 + tree:false：只杀该进程本身，不带 /T（更新流程停托盘用——更新器是托盘的子进程，树杀会自杀）', () => {
+    const plat = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+    const fakeSpawnSync = vi.fn()
+    try {
+      killByPid(42, fakeSpawnSync, { tree: false })
+      expect(fakeSpawnSync).toHaveBeenCalledWith('taskkill', ['/PID', '42', '/F'], expect.objectContaining({ stdio: 'ignore' }))
+    } finally {
+      plat.mockRestore()
+    }
+  })
   it('unix：走 process.kill(pid, SIGTERM)，不调 taskkill', () => {
     const plat = vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => {})

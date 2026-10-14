@@ -25,6 +25,8 @@ import {
   installMacApp,
 } from '../src/update/install.js'
 import { checkUpdate, logAlreadyUpToDate, runUpdate, type UpdateRunOptions } from '../src/update/run.js'
+import { readUpdateProgress } from '../src/update/progress.js'
+import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
 
 // 本文件绝不触达真实网络与真实实例：GitHub API 用本地 http server 伪造，
@@ -647,6 +649,46 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(calls.detached).toEqual([{ file: execPath, args: ['--sea-gateway'] }])
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // win-setup 安装器链路只认 Windows 形态（cmd 串联、LOCALAPPDATA 目录判定）
+  it.skipIf(process.platform !== 'win32')('win-setup 形态全链路：静默安装器分离拉起；进度停在 restarting 不谎报 done', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    const h = fakeHome()
+    const prevLocalAppData = process.env.LOCALAPPDATA
+    try {
+      // 形态识别按 %LOCALAPPDATA%\Programs\ModelDock 前缀判定（runUpdate 显式读环境变量）
+      process.env.LOCALAPPDATA = root
+      const execPath = path.join(root, 'Programs', 'ModelDock', 'modeldock.exe')
+      fs.mkdirSync(path.dirname(execPath), { recursive: true })
+      fs.writeFileSync(execPath, 'OLD-BIN')
+
+      const setupName = 'modeldock-999.0.0-win32-x64-setup.exe'
+      const setupBuf = Buffer.from('SETUP-EXE')
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [setupName]: setupBuf, SHA256SUMS: makeSums({ [setupName]: setupBuf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath }))
+      expect(r.updated).toBe(true)
+      expect(calls.stopGateway).toBe(1)
+      expect(calls.stopTray).toBe(1)
+      // 安装器经 cmd 串联分离拉起（更新器随即退出释放自身 exe 锁）；静默参数齐全，托盘路径指向安装目录
+      expect(calls.detached).toHaveLength(1)
+      expect(calls.detached[0].file).toBe('cmd.exe')
+      const cmdLine = calls.detached[0].args.join(' ')
+      expect(cmdLine).toContain('/VERYSILENT')
+      expect(cmdLine).toContain(setupName)
+      expect(cmdLine).toContain('ModelDockTray.exe')
+      // 安装器成败异步发生、更新器无人能替它收尾：进度必须停在 restarting，绝不谎报 done
+      const prog = await readUpdateProgress()
+      expect(prog?.stage).toBe('restarting')
+    } finally {
+      if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA
+      else process.env.LOCALAPPDATA = prevLocalAppData
+      h.restore()
+      await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
     }
   })
 

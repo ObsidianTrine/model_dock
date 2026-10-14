@@ -34,7 +34,7 @@ import {
   type InstallDeps,
 } from './install.js'
 import { extractArchive } from './transfer.js'
-import { notesSummary } from './notes.js'
+import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 
@@ -88,14 +88,8 @@ export function logAlreadyUpToDate(
  * （形如 `完整说明：https://…`，托盘按 http(s) 正则取出即可加「打开发布页」按钮）。
  */
 function logReleaseNotes(m: ReleaseManifest, log: (msg: string) => void): void {
-  const s = notesSummary(m.notes)
-  const lines: string[] = []
-  if (s.summary) lines.push(s.summary)
-  for (const item of s.items) lines.push(`· ${item}`)
-  if (s.total > s.items.length) {
-    lines.push(t('（共 {n} 项改动，其余见发布页）', '({n} changes in total — see the release page for the rest)', { n: s.total }))
-  }
-  if (lines.length) log(c.gray(lines.join('\n')))
+  const text = notesSummaryText(m.notes)
+  if (text) log(c.gray(text))
   if (m.htmlUrl) log(c.gray(t('完整说明：{u}', 'Full notes: {u}', { u: m.htmlUrl })))
 }
 
@@ -197,6 +191,10 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
         const cmd = buildWinInstallerCommand(file, path.join(path.dirname(execPath), 'ModelDockTray.exe'))
         log(c.green(t('✓ 已校验，正在静默安装 v{v}（完成后自动拉起托盘）…', '✓ Verified; installing v{v} silently (the tray relaunches automatically)…', { v: m.version })))
         deps.spawnDetached(cmd.file, cmd.args, { verbatim: true })
+        // 安装器成败异步发生，更新器必须立即退出释放自身 exe 锁，无人能替它收尾：
+        // 进度停在 restarting（托盘对 10 分钟未刷新的进度文件按残留过期自动收起），不谎报 done
+        await writeUpdateProgress('restarting', asset.size, asset.size)
+        return { updated: true, currentVersion: VERSION, latestVersion: m.version }
       } else {
         const staging = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-bin-'))
         try {

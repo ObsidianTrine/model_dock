@@ -71,8 +71,9 @@ async function stopTrayProcesses(): Promise<void> {
     for (const { pid, cmd } of parsePidCommandLines(lines)) {
       // 匹配托盘可执行名；排除本进程与自身路径里的误配（托盘进程极小概率自己重名）
       if (!/ModelDockTray(\.exe)?(\s|$|")/i.test(cmd)) continue
-      // 已退出/权限不足：托盘残留不影响新版本运行
-      killByPid(pid)
+      // tree:false——托盘发起的更新里更新器就是托盘的子进程，taskkill /T 会把自己一并杀掉，
+      // 安装步骤永远执行不到（Windows 托盘更新必败的根因）；托盘无必须连带清理的子进程
+      killByPid(pid, spawnSync, { tree: false })
     }
   } catch {
     /* 进程枚举不可用时跳过（不影响主流程） */
