@@ -5,25 +5,22 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [1.1.0] - 2026-10-13
+## [1.1.2] - 2026-10-14
 
-"Moving house" is consolidated into one Config package entry, existing configs can be re-imported anytime, and dev-sandbox operations no longer touch the production instance.
-
-### Added
-
-- **One "Config package" entry for import & export**: the former "Export package" button on the status row becomes "Config package", opening one dialog with export and import directions. Export offers three ways — Nearby computers (shows LAN reachability, with a one-click enable of the mobile console so the other computer can pull directly), Export a link (10-minute one-time), and Export package file; import is no longer "gone after first use", and a list of what will be imported is shown for confirmation before anything is replaced. The share-link entry also moves out of the mobile-console panel into the open.
-- **Re-import existing configs anytime**: after clicking "Not now" on the legacy-config banner, the import entry used to disappear from the UI entirely; the add-service dialog now has "Import existing configs from local apps…" with checkboxes for the services to bring in.
-- **Paste share links on mobile too**: the mobile console's package import accepts a pasted share link in addition to picking a file (the link carries its own passphrase, used automatically).
-- **One-click import now covers far more apps**: legacy-config import grows from 4 sources to 11 — newly supported are Codex CLI, OpenCode, MiMo Code (shared with the MiMo desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays; Codex / Gemini profiles in newer cc-switch versions are no longer missed. The first-run wizard and the web banner pick them up automatically.
-- **Import channels from one-api / new-api**: `modeldock import --from oneapi --url <site> --token <system access token>` bulk-moves channels from your self-hosted relay site into ModelDock (generate the token under "Personal settings → System access token" on the site); only OpenAI-compatible / Anthropic channels are imported — ones ModelDock cannot reach directly (Azure, native Gemini, etc.) are skipped with the reason shown.
-
-## [Unreleased]
+Windows tray update fixes and update-experience polish, plus instant refresh for the console's schedule panel.
 
 ### Added
 
 - **The whole update flow is now visible**: clicking "Check for updates…" in the tray immediately shows a "Checking…" panel (previously it waited silently for up to 15 seconds, feeling like a dead click); applying an update upgrades to a progress window/progress bar — download percentage and size, verify, swap, and restart stages are all visible.
 - **Update checks no longer hit GitHub every time**: while the gateway is running, the tray and console share one check cache (24h cadence, failed checks retry after 30 minutes); with a warm cache a click returns instantly. Only when the gateway is down does the tray fall back to a direct CLI check.
 - **No more double-clicking during a check**: the menu item grays out as "Checking…" while a check is in flight; a timed-out check also explains itself in a dialog instead of staying silent.
+
+### Fixed
+
+- **"Update now" from the Windows tray is fixed**: updates started from the tray menu always stalled halfway — the updater was stopped along with the tray while preparing to install, so the install never began and everything looked unchanged after "updating"; the flow now runs to completion, and the gateway and tray return on the new version automatically.
+- **Cleaner update notes in the Windows tray**: the update dialog now shows a short summary (the full details remain one click away on the release page), and the operation hint no longer appears twice.
+- **No more blurry tray UI on high-DPI screens**: tray dialogs render at the system's scaling factor, so text is crisp again on Win11 machines at 125% / 150% scaling.
+- **Schedule panel's service list updates instantly**: after adding or removing a service in the web console, the schedule panel's "Pick a service" dropdown follows immediately — no page refresh (or collapse/re-expand) needed.
 
 ## [1.1.1] - 2026-10-14
 
@@ -170,7 +167,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
-[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...HEAD
+[1.1.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ObsidianTrine/model_dock/releases/tag/v1.0.0
