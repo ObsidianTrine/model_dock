@@ -14,6 +14,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -236,58 +237,170 @@ namespace ModelDockTray
         /// 有新版弹说明窗（正文 = CLI 输出：那边已去 markdown 标记 + 摘要收口）+ 可点发布页链接，
         /// 点「立即更新」即就地更新（与控制台一键升级同一条链路）；
         /// 失败（含未配置令牌）原样展示输出——本身就是可操作指引。
+        private static bool _checkingUpdate = false;
+        private static UpdateProgressForm _progressForm;
+
+        public static bool CheckingUpdate { get { return _checkingUpdate; } }
+
+        /// 检查更新入口：网关存活走网关缓存接口（控制台/托盘/网关三方同源，TTL 内不打 GitHub），
+        /// 网关未运行退回 CLI 现查。点击后立刻弹「检查中」进度窗——此前静默等待最长 15s，
+        /// 用户以为点击无效（v1.1.1 实测反馈）。检查期间菜单项置灰，这里再兜底防连点。
         public static void CheckUpdate()
         {
-            var bin = GatewayBinaryPath();
-            if (bin == null) return;
-            ThreadPool.QueueUserWorkItem(delegate
+            if (_checkingUpdate) { ShowProgressForm("正在检查更新…"); return; }
+            if (GatewayBinaryPath() == null) return;
+            _checkingUpdate = true;
+            ShowProgressForm("正在检查更新…");
+            if (ReadState())
             {
-                string output = "";
-                int exit = 1;
-                try
+                ThreadPool.QueueUserWorkItem(delegate { CheckViaGateway(); });
+            }
+            else
+            {
+                ThreadPool.QueueUserWorkItem(delegate { CheckViaCli(); });
+            }
+        }
+
+        private static void FinishCheck()
+        {
+            _checkingUpdate = false;
+            CloseProgressForm();
+        }
+
+        /// 网关缓存路径：GET /admin/update/status 自带惰性检查（成功 24h TTL / 失败 30min 退避），
+        /// checking=true 轮询至 false 取结果；HTTP 不通退回 CLI 现查
+        private static void CheckViaGateway()
+        {
+            for (int attempt = 0; attempt < 60; attempt++)
+            {
+                string json;
+                try { json = HttpGet("http://127.0.0.1:" + _port + "/_modeldock/admin/update/status", _token); }
+                catch { CheckViaCli(); return; }
+                if (!JsonBool(json, "checking"))
                 {
-                    var psi = new ProcessStartInfo
+                    FinishCheck();
+                    ShowStatusResult(json);
+                    return;
+                }
+                Thread.Sleep(500);
+            }
+            FinishCheck();
+            MessageBox.Show("检查更新超过 30 秒仍未返回（网络异常？）。可稍后重试，或用命令行 modeldock update --check 查看。", "ModelDock 检查更新超时", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        /// CLI 现查兜底：工作线程跑 CLI（不卡托盘），按输出弹窗；40s 看门狗防 CLI 真挂住后永久沉默
+        private static void CheckViaCli()
+        {
+            var bin = GatewayBinaryPath();
+            if (bin == null) { FinishCheck(); return; }
+            string output = "";
+            int exit = 1;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = bin,
+                    Arguments = "update --check",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = System.Text.Encoding.UTF8,
+                    StandardErrorEncoding = System.Text.Encoding.UTF8,
+                };
+                using (var p = Process.Start(psi))
+                {
+                    if (p != null)
                     {
-                        FileName = bin,
-                        Arguments = "update --check",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        StandardOutputEncoding = System.Text.Encoding.UTF8,
-                        StandardErrorEncoding = System.Text.Encoding.UTF8,
-                    };
-                    using (var p = Process.Start(psi))
-                    {
-                        if (p != null)
-                        {
-                            output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                            p.WaitForExit();
-                            exit = p.ExitCode;
-                        }
+                        output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                        p.WaitForExit();
+                        exit = p.ExitCode;
                     }
                 }
-                catch (Exception ex) { output = ex.Message; }
-                string text = output.Trim();
-                if (exit == 0 && text.Contains("已是最新"))
+            }
+            catch (Exception ex) { output = ex.Message; }
+            string text = output.Trim();
+            if (exit == 0 && text.Contains("已是最新"))
+            {
+                FinishCheck();
+                MessageBox.Show("已是最新版本。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else if (exit == 0 && text.Contains("有新版本"))
+            {
+                string ver = FirstVersion(text);
+                string title = ver.Length > 0 ? "ModelDock 有新版本 v" + ver : "ModelDock 有新版本";
+                DialogResult r = ShowUpdateDialog(title, text, LastUrl(text));
+                FinishCheck();
+                if (r == DialogResult.OK)
                 {
-                    MessageBox.Show("已是最新版本。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    StartUpdate();
+                    ShowProgressForm("正在更新到 v" + (ver.Length > 0 ? ver : ""));
                 }
-                else if (exit == 0 && text.Contains("有新版本"))
+            }
+            else
+            {
+                FinishCheck();
+                MessageBox.Show(text.Length > 0 ? text : "未知错误，请稍后重试。", "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private static void ShowStatusResult(string json)
+        {
+            bool available = JsonBool(json, "available");
+            string latest = JsonString(json, "latest");
+            string lastError = JsonString(json, "lastError");
+            string htmlUrl = JsonString(json, "htmlUrl");
+            string notes = JsonUnescape(JsonString(json, "notes"));
+            if (available)
+            {
+                string title = string.IsNullOrEmpty(latest) ? "ModelDock 有新版本" : "ModelDock 有新版本 v" + latest;
+                string body = (notes ?? "") + "\n\n点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。";
+                DialogResult r = ShowUpdateDialog(title, body, htmlUrl);
+                if (r == DialogResult.OK)
                 {
-                    string ver = FirstVersion(text);
-                    string title = ver.Length > 0 ? "ModelDock 有新版本 v" + ver : "ModelDock 有新版本";
-                    if (ShowUpdateDialog(title, text, LastUrl(text)) == DialogResult.OK)
-                    {
-                        StartUpdate();
-                        MessageBox.Show("正在更新" + (ver.Length > 0 ? "到 v" + ver : "") + "：下载校验完成后自动重启，期间网关会短暂中断。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
+                    StartUpdate();
+                    ShowProgressForm("正在更新到 v" + (latest ?? ""));
                 }
-                else
-                {
-                    MessageBox.Show(text.Length > 0 ? text : "未知错误，请稍后重试。", "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-            });
+                return;
+            }
+            if (string.IsNullOrEmpty(latest) && !string.IsNullOrEmpty(lastError))
+            {
+                // 从未成功检查到任何版本：按失败对待（GitHub 不可达等），错误原样展示
+                MessageBox.Show(lastError, "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            MessageBox.Show("已是最新版本。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private static string HttpGet(string url, string token)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = 5000;
+            req.Method = "GET";
+            if (!string.IsNullOrEmpty(token)) req.Headers["x-modeldock-admin"] = token;
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var sr = new StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8))
+            {
+                return sr.ReadToEnd();
+            }
+        }
+
+        private static bool JsonBool(string json, string field)
+        {
+            return Regex.IsMatch(json, "\"" + field + "\"\\s*:\\s*true");
+        }
+
+        internal static string JsonString(string json, string field)
+        {
+            var m = Regex.Match(json, "\"" + field + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            if (!m.Success) return null;
+            return JsonUnescape(m.Groups[1].Value);
+        }
+
+        internal static string JsonUnescape(string v)
+        {
+            if (v == null) return null;
+            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\"", "\"").Replace("\u0001", "\\\\");
         }
 
         /// 就地更新：分离跑 `modeldock update --yes`（弹窗里的「立即更新」即用户确认）。
@@ -308,6 +421,28 @@ namespace ModelDockTray
                 });
             }
             catch { }
+        }
+
+        /// 进度小窗（自有 STA 线程 + 消息循环，跨线程 Close 走 BeginInvoke）：
+        /// 每秒自轮询 update-progress.json 刷新阶段与百分比；替换段托盘被更新流程停掉，窗随之消失属预期
+        public static void ShowProgressForm(string title)
+        {
+            if (_progressForm != null && !_progressForm.IsDisposed) { _progressForm.BringToFront(); return; }
+            _progressForm = new UpdateProgressForm(title);
+            var t = new Thread(delegate() { Application.Run(_progressForm); });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        public static void CloseProgressForm()
+        {
+            var f = _progressForm;
+            _progressForm = null;
+            if (f != null && !f.IsDisposed)
+            {
+                try { f.BeginInvoke(new Action(delegate { f.Close(); })); } catch { }
+            }
         }
 
         /// 清理数据：确认弹窗后分离跑 `modeldock reset --yes --deep`（清理逻辑全在 CLI，
@@ -591,10 +726,11 @@ namespace ModelDockTray
             clean.Enabled = TrayActions.GatewayBinaryPath() != null;
             menu.Add(clean);
 
-            // 检查更新：调主程序 CLI `update --check`；有新版弹窗直接给「立即更新」（就地升级，同控制台链路）
-            var upd = new ToolStripMenuItem("检查更新…");
+            // 检查更新：网关存活走网关缓存接口（三方同源，TTL 内不打 GitHub），未运行退回 CLI 现查；
+            // 检查进行中置灰防连点，进度在小窗可见
+            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? "检查中…" : "检查更新…");
             upd.Click += delegate { TrayActions.CheckUpdate(); };
-            upd.Enabled = TrayActions.GatewayBinaryPath() != null;
+            upd.Enabled = !TrayActions.CheckingUpdate && TrayActions.GatewayBinaryPath() != null;
             menu.Add(upd);
 
             if (!_running)
@@ -619,6 +755,105 @@ namespace ModelDockTray
             var t = new System.Windows.Forms.Timer { Interval = 400 };
             t.Tick += delegate { t.Stop(); _icon.Visible = false; Application.Exit(); };
             t.Start();
+        }
+    }
+
+    /// 更新进度小窗：自有 STA 线程消息循环（ShowProgressForm/CloseProgressForm 跨线程驱动），
+    /// 每秒自轮询 update-progress.json 刷新阶段与百分比——进度文件由 `modeldock update --yes`
+    /// 子进程写入（src/update/progress.ts）；替换段托盘被更新流程停掉，窗随之消失属预期（新版自动拉起）。
+    public class UpdateProgressForm : Form
+    {
+        private readonly Label _label = new Label();
+        private readonly ProgressBar _bar = new ProgressBar();
+        private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
+        private readonly string _file;
+
+        public UpdateProgressForm(string title)
+        {
+            Text = title;
+            Width = 440;
+            Height = 140;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            StartPosition = FormStartPosition.CenterScreen;
+            MaximizeBox = false;
+            ShowInTaskbar = false;
+            _label.SetBounds(16, 14, 400, 40);
+            _bar.SetBounds(16, 60, 400, 22);
+            _label.Text = "正在准备更新…";
+            Controls.Add(_label);
+            Controls.Add(_bar);
+            _bar.Style = ProgressBarStyle.Marquee;
+            _bar.MarqueeAnimationSpeed = 30;
+            _file = TrayActions.Home() + "\\update-progress.json";
+            _timer.Interval = 1000;
+            _timer.Tick += delegate { Poll(); };
+            _timer.Start();
+        }
+
+        private void Poll()
+        {
+            try
+            {
+                if (!File.Exists(_file)) return;
+                string text = File.ReadAllText(_file);
+                string stage = TrayActions.JsonString(text, "stage");
+                if (stage == null) return;
+                var at = Regex.Match(text, "\"at\"\\s*:\\s*(\\d+)");
+                if (at.Success)
+                {
+                    // 残留过期（10 分钟未更新）：上次更新留下的进度文件，不再展示
+                    double age = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds - double.Parse(at.Groups[1].Value);
+                    if (age > 10 * 60 * 1000) { _timer.Stop(); Close(); return; }
+                }
+                if (stage == "failed")
+                {
+                    _timer.Stop();
+                    string err = TrayActions.JsonUnescape(TrayActions.JsonString(text, "error"));
+                    MessageBox.Show(string.IsNullOrEmpty(err) ? "更新失败，可重试 modeldock update。" : err, "ModelDock 更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Close();
+                    return;
+                }
+                var recv = Regex.Match(text, "\"received\"\\s*:\\s*([0-9.]+)");
+                var tot = Regex.Match(text, "\"total\"\\s*:\\s*([0-9.]+)");
+                var pct = Regex.Match(text, "\"percent\"\\s*:\\s*(\\d+)");
+                double received = recv.Success ? double.Parse(recv.Groups[1].Value) : 0;
+                double total = tot.Success ? double.Parse(tot.Groups[1].Value) : 0;
+                int percent = pct.Success ? int.Parse(pct.Groups[1].Value) : 0;
+                if (stage == "done")
+                {
+                    _timer.Stop();
+                    _bar.Style = ProgressBarStyle.Continuous;
+                    _bar.Value = 100;
+                    _label.Text = "更新完成。网关与托盘将自动重启。";
+                    return;
+                }
+                string name = StageName(stage);
+                string mb = total > 0 ? "（" + (received / 1048576).ToString("F1") + " / " + (total / 1048576).ToString("F1") + " MB）" : "";
+                _label.Text = name + (stage == "downloading" && total > 0 ? " " + percent + "%" + mb : "");
+                if (total > 0)
+                {
+                    _bar.Style = ProgressBarStyle.Continuous;
+                    _bar.Minimum = 0;
+                    _bar.Maximum = 100;
+                    _bar.Value = Math.Max(0, Math.Min(100, percent));
+                }
+                else
+                {
+                    _bar.Style = ProgressBarStyle.Marquee;
+                    _bar.MarqueeAnimationSpeed = 30;
+                }
+            }
+            catch { }
+        }
+
+        private static string StageName(string stage)
+        {
+            if (stage == "downloading") return "下载中";
+            if (stage == "verifying") return "校验安装包";
+            if (stage == "swapping") return "停止网关并替换安装";
+            if (stage == "restarting") return "重启服务";
+            if (stage == "done") return "更新完成";
+            return stage;
         }
     }
 }

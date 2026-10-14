@@ -21,6 +21,7 @@ import {
   setUpdateFetchForTests,
   watchApplyChild,
 } from '../src/update/webupdate.js'
+import { writeUpdateProgress, updateProgressPath } from '../src/update/progress.js'
 import type { ReleaseManifest } from '../src/update/check.js'
 import { updateDaemonArgs } from '../src/autostart.js'
 
@@ -290,6 +291,23 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       const s = await getUpdateStatus(rt)
       expect(s.available).toBe(true)
       expect(s.latest).toBe('999.0.0')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('status 载荷透传 update-progress.json：更新期间界面可见进度；残留过期收 null', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      await writeUpdateProgress('downloading', 300, 1000)
+      const s = await getUpdateStatus(rt)
+      expect(s.progress).toMatchObject({ stage: 'downloading', received: 300, total: 1000, percent: 30 })
+      // at 拨回 11 分钟前：上次更新的残留文件，载荷不携带
+      const raw = JSON.parse(fs.readFileSync(updateProgressPath(), 'utf8'))
+      raw.at = Date.now() - 11 * 60_000
+      fs.writeFileSync(updateProgressPath(), JSON.stringify(raw))
+      expect((await getUpdateStatus(rt)).progress).toBeNull()
     } finally {
       h.restore()
     }

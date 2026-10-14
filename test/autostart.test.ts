@@ -13,6 +13,7 @@ import {
   gatewayDaemonArgs,
   installAutostart,
   uninstallAutostart,
+  serviceFilePath,
   systemdUnitIni,
   systemdUnitPath,
   windowsStartupPath,
@@ -242,8 +243,11 @@ describe.skipIf(process.platform !== 'darwin')('autostart 真实生效 > macOS l
   })
 
   it('uninstall 幂等：未安装时调用返回 wasInstalled=false 且不动系统', async (ctx) => {
-    if (launchdLoaded()) {
-      ctx.skip() // 本机已有该 label 的服务（用户真实自启或残留加载），幂等路径不适用
+    // 守卫必须查「服务文件是否存在」而不只是 launchd 是否加载：本机装了自启但网关以手动方式
+    // 运行时（更新后未走 launchd 拉起），加载态为否——此前守卫漏判，本用例会删掉用户真实
+    // 自启文件（2026-10-14 本机实测踩中）。真实文件在 = 用户自有自启，绝不触碰。
+    if (launchdLoaded() || fs.existsSync(serviceFilePath())) {
+      ctx.skip() // 本机已有该 label 的服务或真实自启文件（用户环境），不碰
       return
     }
     const un = await uninstallAutostart()
