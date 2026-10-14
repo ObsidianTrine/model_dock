@@ -18,6 +18,7 @@ import { localDateStr, t } from '../util/index.js'
 import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type ReleaseManifest } from './check.js'
 import { detectInstallShape } from './install.js'
 import { notesToPlain } from './notes.js'
+import { readUpdateProgress, type UpdateProgress } from './progress.js'
 
 const CHECK_TTL_MS = 24 * 3600_000
 /** 检查失败后的重试间隔：失败不该占用 24h 成功窗口（否则 GitHub 偶发不可达要隔天才能再试） */
@@ -167,6 +168,8 @@ export interface UpdateStatusPayload {
   sizeBytes: number | null
   /** 一键更新失败原因（更新子进程已退出而网关未重启；null = 无进行中的失败） */
   applyError: string | null
+  /** `update --yes` 子进程写下的阶段进度（无进行中的更新 / 文件缺失或残留过期 = null） */
+  progress: UpdateProgress | null
 }
 
 /** 本机适配安装包的体积（字节）：按安装形态与架构选资产名；选不到返回 null */
@@ -197,6 +200,7 @@ export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusP
     htmlUrl: available ? state.manifest?.htmlUrl || null : null,
     sizeBytes: available ? state.manifest?.sizeBytes ?? null : null,
     applyError: state.applyError,
+    progress: await readUpdateProgress(),
   }
 }
 

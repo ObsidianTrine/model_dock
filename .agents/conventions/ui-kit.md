@@ -57,6 +57,7 @@
 | 开关（表单用） | `.switch`（label.switch > input + span.track）/ `.tswitch`（带文字） | **表单内的参数开关**用它（当前 ui.ts 暂无使用点，kit 保留）；onchange 提交，失败回弹 `checked`，请求期间 `disabled` 防连点 |
 | 分段控件 | `.seg`（容器）+ `.on`；通宽 `.seg.grow` | 互斥选项卡/语言切换；**选中=蓝底白字**；JS 切换只改按钮 `className = 'on'/' '` |
 | 字段 | `.svcform label`（label>span+input）/ `.flabel` | label 13px muted；输入框走基础层 13px；新字段勿再发明第三种写法 |
+| **进度条** | `.progress`（track）+ `.progress-fill`；`.indet` 不确定态 | 确定：fill 设 `width: n%`；总量未知/校验等待用 `.indet` 往复动画。现用于更新弹窗（updM）下载进度；纯展示不可点 |
 | Toast | JS `toast(msg, ok)`；容器 `#toastWrap` | 固定**左下角**（右下角是 fab「＋」/snav 浮钮栏，z-toast(50)>z-fab(40)，放右下会常驻盖住「添加模型服务」）；堆叠、入场动画、复制按钮、✕ 手动关；错误 8s/其余 4.2s；**签名勿变**（74+ 调用点） |
 | Tooltip | `data-tip` 属性（+`data-i18n-tip` 走 i18n） | 纯 CSS 悬停 0.3s 延迟；**宿主须 positioned**：fixed/absolute/sticky 元素直接用，静态元素补 `.tip` 类——**禁止**给 `[data-tip]` 全局加 position（会顶掉 .fab/.snav 的 fixed，已踩坑） |
 | Modal 壳 | **工厂 `createModal(opts)` 代码化（ui.ts）——七个弹层壳已全部迁入，新增弹层一律走工厂，禁止再手写壳 HTML**。opts：`id`（scrim 沿用既有 overlay id，id 作用域 CSS/JS 全部继续生效）、`title`（`中文\|\|English`）/`titleId`（动态标题）、`align:'top'\|'center'`（top=顶对齐+遮罩滚动，长表单用）、`modalClass`（宽度变体如 upmodal；svcmodal=添加+编辑服务弹层共用的 680px 宽度/边框/阴影，改宽度只动这一条）、`closeButton:false`=确认类无 ✕、`closeOnEsc/closeOnScrim`（默认 true）、`bodyClass/bodyId/bodyHtml`、`footId/footHidden`、`foot:[{slot:'msg',id,kind:'err'\|'info'}（.mferr/.testline 左槽 flex:1）\|{id,label/html,title,primary,end,disabled,onClick}]`；返回 `{open/close/isOpen/body/foot}`，open 自动清 .mferr；全局 Esc=关最上层（modalStack，closeOnEsc:false 不穿透）；底栏槽位规则已归一 `.modal-foot .testline/.mferr{flex:1}`、`.modal-foot .btn{flex:0 0 auto}` | head=标题+✕常驻、body 滚动、foot 操作常驻；长表单放 body。**底栏规则（评审定稿）**：有 ✕ 的弹层 footer 不放「关闭/取消」；footer 只放与内容直接相关的动作，主按钮=用户下一步最可能的动作（分享弹层=复制链接，重新生成降次要；复制成功图标/文案翻转「✓ 已复制」1.6s）；确认类小弹层（无 ✕，如删除确认）保留「取消」=唯一反悔路径。**共享表单双宿主的动作区**（添加服务：首用内联卡 + ＋号弹窗）：`.addfoot` 单实例放表单尾，openAdd 时整体搬入工厂 foot 常驻、closeAdd 搬回（单元素 appendChild 搬移，**勿复制成两份 id**）；foot 显隐随表单（pickPreset 亮、close 熄）。**弹层开着时错误与一切提示（校验 / 接口失败 / 进度反馈）一律写底栏 msg 槽位**（`.mferr` 红=kind:'err'、`.testline` 中性+`.ok/.err` 语义色；textContent 填充，上游报错文本不可信；open 自动清 .mferr），**禁止走全局 toast**——遮罩 z-modal(100) 盖过 z-toast(50) 且带磨砂，toast 会被糊掉不可见；只有动作会关闭弹层/页面时反馈才走 toast（成功即关弹层，无遮挡；确认弹窗回调在 close 后执行，toast 可见）；弹层内复制成功的即时反馈=按钮图标/文案翻转，不走槽位也不走 toast。**新弹层 foot 必须配 `{slot:'msg'}`**（updM 曾漏配：4 条失败路径的 toast 全被遮罩糊掉）；「开着写槽位 / 已关 toast」分流写法参考 createOffer（shareM）/ updFail（updM）。**正文原则=内容即界面**：引导段落不进弹层，说明压成一行 `.help`（12px muted）或收进悬停提示（如分享链接框 title）。**正文里的网址自动可点**：`confirmModal` 的每一行都过 `linkifyText()`（按原文切出 http(s) 链接 → 展示文本与 href 各自转义 → 交 `docLinkA` 加外链图标新窗口打开），指引类文案直接写网址即可，不必拼 HTML；只认 `http(s)://`，其余文本与标签一律转义（弹层里可能有上游错误文本），因此**不要**改成 innerHTML 直插 |
@@ -70,7 +71,7 @@
 
 ### 已评审原型、待后续落地（勿自行另造）
 
-Tabs（下划线式）、Progress（含不确定态）、Skeleton、Empty（图标+标题+描述+动作）、KeyValue 列表、Dropdown Menu/Pop（`openPop` 定位原语）、Stepper。需要时先按原型补 CSS 再用。**扩充此清单必须先出原型经用户审核**。
+Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、KeyValue 列表、Dropdown Menu/Pop（`openPop` 定位原语）、Stepper。需要时先按原型补 CSS 再用。**扩充此清单必须先出原型经用户审核**。
 
 ### pillSwitch 落地要点（都是实测过的坑）
 

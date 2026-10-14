@@ -426,6 +426,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .legacyrow .lsrc{flex:0 0 auto;font-size:var(--fs-xs);color:var(--muted)}
 /* 添加表单尾部的收编入口：次级文字按钮，弱于主保存动作 */
 #addCard .altline{margin:10px 0 0}
+/* Progress 进度条（ui-kit 已评审原型落地，规范见 .agents/conventions/ui-kit.md）：
+   track 6px 圆角、fill=accent 随 width 过渡；.indet 不确定态=30% 宽往复动画（下载总量未知时用） */
+.progress{height:6px;border-radius:var(--r-full);background:var(--bg);border:1px solid var(--border);overflow:hidden}
+.progress .progress-fill{height:100%;border-radius:var(--r-full);background:var(--accent);transition:width var(--dur) linear}
+.progress.indet .progress-fill{width:30%;animation:progress-indet 1.2s ease-in-out infinite}
+@keyframes progress-indet{0%{margin-left:-30%}100%{margin-left:100%}}
 /* 已选配置包文件的文件名 chip（可移除） */
 .filechip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:99px;padding:4px 10px;font-size:var(--fs-sm);max-width:60%}
 .filechip .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -909,7 +915,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     modalClass: 'upmodal',
     titleId: 'updTitle',
     closeOnScrim: true, // 点遮罩/Esc = 稍后（下个会话仍会提醒），与旧语义一致
-    bodyHtml: '<div class="desc-sm" id="updSub"></div><div class="upnotes" id="updNotes" hidden></div><div class="upmore" id="updMore" hidden></div>' +
+    bodyHtml: '<div class="desc-sm" id="updSub"></div>' +
+      // 更新进度（v1.1.1 起由 update-progress.json 驱动）：下载/校验/替换/重启各阶段 + 百分比
+      '<div id="updProgress" hidden style="margin:8px 0 4px"><div class="progress"><div class="progress-fill" id="updProgressFill" style="width:0%"></div></div>' +
+      '<p class="shint" id="updProgressText" style="margin:6px 0 0"></p></div>' +
+      '<div class="upnotes" id="updNotes" hidden></div><div class="upmore" id="updMore" hidden></div>' +
       '<div class="uphint" data-i18n="更新时网关会短暂中断，完成后本页自动重连。||The gateway restarts briefly during the update; this page reconnects automatically.">更新时网关会短暂中断，完成后本页自动重连。</div>',
     foot: [
       { slot: 'msg', id: 'updMsg', kind: 'info' },
@@ -1456,6 +1466,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     go.disabled = updApplying
     copy.disabled = updApplying
     dismiss.disabled = updApplying
+    updProgressRender(upd)
   }
 
   function updModalToggle(forceHide) {
@@ -1475,6 +1486,29 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   function updFail(text) {
     if (updM.isOpen()) setUpdMsg(text, 'err')
     else toast(text, false)
+  }
+  // 更新进度渲染：s.progress 来自 update --yes 子进程写的 update-progress.json（stale 过期时载荷为 null）。
+  // 仅在本页发起的一键更新（updApplying）时展示；非确定态（下载总量未知）用 .indet 往复动画兜底
+  function updProgressRender(s) {
+    var box = document.getElementById('updProgress')
+    if (!box) return
+    var p = s && s.progress
+    var show = !!(updApplying && p && p.stage !== 'failed')
+    box.hidden = !show
+    if (!show) return
+    var fill = document.getElementById('updProgressFill')
+    var txt = document.getElementById('updProgressText')
+    var names = { downloading: t('下载中', 'Downloading'), verifying: t('校验安装包', 'Verifying package'), swapping: t('停止网关并替换安装', 'Stopping gateway and swapping'), restarting: t('重启服务', 'Restarting'), done: t('更新完成', 'Update complete') }
+    var stageText = names[p.stage] || p.stage
+    var indet = !(p.total > 0) && p.stage !== 'done'
+    if (fill) {
+      fill.parentNode.className = 'progress' + (indet ? ' indet' : '')
+      fill.style.width = indet ? '' : (p.stage === 'done' ? '100%' : p.percent + '%')
+    }
+    if (txt) {
+      var mbInfo = p.total > 0 ? '（' + (p.received / 1048576).toFixed(1) + ' / ' + (p.total / 1048576).toFixed(1) + ' MB）' : ''
+      txt.textContent = stageText + (p.stage === 'downloading' && p.total > 0 ? ' ' + p.percent + '%' + mbInfo : '')
+    }
   }
 
   function updApply() {
@@ -1514,6 +1548,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     setTimeout(function () {
       var proceed = function (down) {
         api('/admin/update/status').then(function (s) {
+          updProgressRender(s)
           if (updApplying && s.applyError) {
             updApplying = false
             updModalRender()

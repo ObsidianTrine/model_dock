@@ -65,6 +65,35 @@ func cappedInfo(_ text: String, logHint: String?) -> String {
     return out
 }
 
+/// 网关 /admin/update/status 载荷（只取托盘关心的字段；多余字段 Decodable 自动忽略）
+struct UpdateStatusPayload: Decodable {
+    let current: String
+    let checking: Bool
+    let lastError: String?
+    let latest: String?
+    let available: Bool
+    let notes: String?
+    let htmlUrl: String?
+}
+
+/// update-progress.json（update --yes 子进程写的进度；读方按 at 过期判残留）
+struct UpdateProgressFile: Decodable {
+    let stage: String
+    let received: Double
+    let total: Double
+    let percent: Int
+    let error: String?
+    let at: Double
+}
+
+func readUpdateProgressFile() -> UpdateProgressFile? {
+    let path = modeldockHome() + "/update-progress.json"
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    guard let p = try? JSONDecoder().decode(UpdateProgressFile.self, from: data) else { return nil }
+    if Date().timeIntervalSince1970 * 1000 - p.at > 10 * 60_000 { return nil } // 残留过期
+    return p
+}
+
 /// 网关可执行文件：优先打包形态（与托盘同目录的主程序），回落已安装 app 与 CLI 链接
 func gatewayBinary() -> String? {
     let selfPath = CommandLine.arguments.first ?? "./ModelDockTray"
@@ -76,6 +105,57 @@ func gatewayBinary() -> String? {
         "/usr/local/bin/modeldock",
     ]
     return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+// ---------- 更新进度小窗：检查中 / 更新中复用（非模态，更新期间可见，替换段随托盘退出消失） ----------
+
+final class ProgressPanel: NSObject, NSWindowDelegate {
+    private let win: NSWindow
+    private let label = NSTextField(labelWithString: "")
+    private let bar = NSProgressIndicator()
+    private var closedByUser = false
+
+    var visible: Bool { win.isVisible }
+
+    override init() {
+        win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 88),
+                       styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "ModelDock"
+        win.isReleasedWhenClosed = false
+        let view = win.contentView!
+        label.frame = NSRect(x: 20, y: 52, width: 360, height: 18)
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.lineBreakMode = .byTruncatingTail
+        bar.frame = NSRect(x: 20, y: 24, width: 360, height: 20)
+        bar.style = .bar
+        bar.isIndeterminate = true
+        view.addSubview(label)
+        view.addSubview(bar)
+        win.center()
+        super.init()
+        win.delegate = self
+    }
+    func windowWillClose(_ notification: Notification) { closedByUser = true }
+
+    /// 展示/复用小窗；文本刷新，percent=nil 表示不确定态（转圈）
+    func show(title: String, text: String, percent: Double? = nil) {
+        closedByUser = false
+        win.title = title
+        label.stringValue = text
+        if let p = percent {
+            bar.isIndeterminate = false
+            bar.doubleValue = min(100, max(0, p))
+        } else {
+            bar.isIndeterminate = true
+            bar.startAnimation(nil)
+        }
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func close() { win.orderOut(nil) }
+    var wasClosedByUser: Bool { closedByUser }
 }
 
 // ---------- 单实例（flock） ----------
@@ -102,6 +182,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var running = false
     var port = 0
     var timer: Timer?
+    // 更新检查/进度状态：gen 计数让迟到的异步回调（超时/慢网）自动作废
+    var checkingUpdate = false
+    var updateActionGen = 0
+    var updatePanel: ProgressPanel?
+    var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // 不占 Dock，仅菜单栏
@@ -237,10 +322,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clean.isEnabled = gatewayBinary() != nil
         menu.addItem(clean)
 
-        // 检查更新：调主程序 CLI `update --check`；有新版弹窗直接给「立即更新」（就地升级，同控制台链路）
-        let upd = NSMenuItem(title: "检查更新…", action: #selector(checkUpdateClicked), keyEquivalent: "")
+        // 检查更新：网关运行中走网关缓存接口（24h TTL / 失败 30min 退避，与控制台同源，TTL 内不打 GitHub）；
+        // 网关未运行退回 CLI 现查。进行中菜单项置灰防连点，进度在小窗可见
+        let upd = NSMenuItem(title: checkingUpdate ? "检查中…" : "检查更新…", action: checkingUpdate ? nil : #selector(checkUpdateClicked), keyEquivalent: "")
         upd.target = self
-        upd.isEnabled = gatewayBinary() != nil
+        upd.isEnabled = !checkingUpdate && gatewayBinary() != nil
         menu.addItem(upd)
 
         if !alive {
@@ -328,10 +414,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }
 
-    /// 检查更新：异步跑 CLI `update --check`（CLI 无 TTY 不输出色码，纯文本可直接展示），
-    /// 结束后按输出弹窗（有新版给「立即更新」/「打开发布页」）
+    /// 检查更新入口：网关存活走网关缓存接口（控制台/托盘/网关三方同源），否则退回 CLI 现查。
+    /// 点击后立刻弹「正在检查更新…」小窗——此前静默等待最长 15s，用户以为点击无效（v1.1.1 实测反馈）。
     @objc func checkUpdateClicked() {
-        guard let bin = gatewayBinary() else { return }
+        guard !checkingUpdate else { return } // 菜单项已置灰，这里兜底防连点
+        guard gatewayBinary() != nil else { return }
+        checkingUpdate = true
+        updateActionGen += 1
+        let gen = updateActionGen
+        updatePanel = updatePanel ?? ProgressPanel()
+        updatePanel!.show(title: "ModelDock", text: "正在检查更新…")
+        let state = readState()
+        if let s = state, pidAlive(s.pid) {
+            pollGatewayUpdateStatus(state: s, attempts: 0, gen: gen)
+        } else {
+            checkViaCli(gen: gen)
+        }
+    }
+
+    /// 网关缓存路径：GET /admin/update/status 自带惰性检查（24h TTL / 失败 30min 退避），
+    /// checking=true 表示首次检查在飞，0.5s 轮询到 false 取结果；HTTP 不通退回 CLI 现查
+    private func pollGatewayUpdateStatus(state: GatewayState, attempts: Int, gen: Int) {
+        guard checkingUpdate, gen == updateActionGen else { return } // 已被超时/新操作作废
+        guard let url = URL(string: "http://127.0.0.1:\(state.port)/_modeldock/admin/update/status") else {
+            checkViaCli(gen: gen)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        req.setValue(state.admin_token, forHTTPHeaderField: "x-modeldock-admin")
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            DispatchQueue.main.async {
+                guard let self = self, self.checkingUpdate, gen == self.updateActionGen else { return }
+                let ok = (resp as? HTTPURLResponse)?.statusCode == 200
+                guard err == nil, ok, let data = data,
+                      let st = try? JSONDecoder().decode(UpdateStatusPayload.self, from: data) else {
+                    self.checkViaCli(gen: gen)
+                    return
+                }
+                if st.checking && attempts < 60 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.pollGatewayUpdateStatus(state: state, attempts: attempts + 1, gen: gen)
+                    }
+                    return
+                }
+                self.finishUpdateCheck(gen: gen)
+                self.showUpdateCheckResultPayload(st)
+            }
+        }.resume()
+    }
+
+    /// CLI 现查（网关未运行 / 网关接口不可达时的兜底）：与旧流程一致，异步跑 `update --check`
+    private func checkViaCli(gen: Int) {
+        guard let bin = gatewayBinary() else { finishUpdateCheck(gen: gen); return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = ["update", "--check"]
@@ -340,14 +475,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         proc.standardError = pipe
         var out = Data()
         pipe.fileHandleForReading.readabilityHandler = { h in out.append(h.availableData) }
-        do { try proc.run() } catch { return }
+        do { try proc.run() } catch {
+            finishUpdateCheck(gen: gen)
+            let a = NSAlert()
+            a.messageText = "ModelDock 检查更新失败"
+            a.informativeText = "无法启动更新检查程序：\(error.localizedDescription)"
+            a.runModal()
+            return
+        }
+        // 40s 看门狗：CLI 自带 15s 网络超时，正常必在此前返回；真挂住也给用户交代而非永久沉默
+        DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
+            guard let self = self, self.checkingUpdate, gen == self.updateActionGen else { return }
+            self.finishUpdateCheck(gen: gen)
+            let a = NSAlert()
+            a.messageText = "ModelDock 检查更新超时"
+            a.informativeText = "检查用时超过 40 秒仍未返回（网络异常？）。可稍后重试，或用命令行 modeldock update --check 查看详情。"
+            a.runModal()
+        }
         proc.terminationHandler = { [weak self] p in
             pipe.fileHandleForReading.readabilityHandler = nil
             out.append(pipe.fileHandleForReading.readDataToEndOfFile())
             let text = String(data: out, encoding: .utf8) ?? ""
             let exit = p.terminationStatus
-            DispatchQueue.main.async { self?.showUpdateCheckResult(text: text, exit: exit) }
+            DispatchQueue.main.async {
+                self?.finishUpdateCheck(gen: gen)
+                self?.showUpdateCheckResult(text: text, exit: exit)
+            }
         }
+    }
+
+    /// 收尾：关进度小窗、放开检查中状态（gen 不匹配的迟到回调自动作废）
+    private func finishUpdateCheck(gen: Int) {
+        guard gen == updateActionGen else { return }
+        checkingUpdate = false
+        updatePanel?.close()
+    }
+
+    /// 检查结果弹窗（网关路径）：字段齐全，不再解析 CLI 文本
+    private func showUpdateCheckResultPayload(_ st: UpdateStatusPayload) {
+        if st.available {
+            let hint = "点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。"
+            let a = NSAlert()
+            a.messageText = "ModelDock 有新版本 v\(st.latest ?? "")"
+            a.informativeText = cappedInfo((st.notes ?? "") + "\n\n" + hint, logHint: nil)
+            a.addButton(withTitle: "立即更新")
+            if st.htmlUrl != nil { a.addButton(withTitle: "打开发布页") } // 无链接就不摆无用按钮
+            a.addButton(withTitle: "稍后")
+            let answer = a.runModal()
+            if answer == .alertFirstButtonReturn {
+                startUpdateCli()
+                showUpdateApplyPanel(target: st.latest ?? "")
+            } else if let urlStr = st.htmlUrl, answer == .alertSecondButtonReturn, let url = URL(string: urlStr) {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+        if st.latest == nil, let err = st.lastError {
+            // 从未成功检查到任何版本：按失败对待（GitHub 不可达等），错误原样展示
+            let a = NSAlert()
+            a.messageText = "ModelDock 检查更新失败"
+            a.informativeText = cappedInfo(err, logHint: nil)
+            a.runModal()
+            return
+        }
+        let a = NSAlert()
+        a.messageText = "ModelDock"
+        a.informativeText = "已是最新版本。"
+        a.runModal()
+    }
+
+    /// 更新进度窗：每秒读 update-progress.json 刷新阶段与百分比；
+    /// 替换段托盘会被更新流程停掉（换包后新版自动拉起），小窗随之消失属预期
+    private func showUpdateApplyPanel(target: String) {
+        updatePanel = updatePanel ?? ProgressPanel()
+        updatePanel!.show(title: "正在更新到 v\(target)", text: "正在启动更新程序…")
+        updateTimer?.invalidate()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshUpdateApplyPanel(target: target)
+        }
+    }
+
+    private func refreshUpdateApplyPanel(target: String) {
+        guard let panel = updatePanel else { updateTimer?.invalidate(); return }
+        if !panel.visible { updateTimer?.invalidate(); return } // 用户手动关窗：停止刷新
+        guard let p = readUpdateProgressFile() else { return } // 阶段间隙暂无进度：保留上一帧
+        if p.stage == "failed" {
+            updateTimer?.invalidate()
+            panel.close()
+            let a = NSAlert()
+            a.messageText = "ModelDock 更新失败"
+            a.informativeText = cappedInfo(p.error ?? "未知错误，可重试 modeldock update。", logHint: nil)
+            a.runModal()
+            return
+        }
+        let names = ["downloading": "下载中", "verifying": "校验安装包", "swapping": "停止网关并替换安装", "restarting": "重启服务", "done": "更新完成"]
+        let name = names[p.stage] ?? p.stage
+        let mbInfo = p.total > 0 ? "（\(String(format: "%.1f", p.received / 1048576)) / \(String(format: "%.1f", p.total / 1048576)) MB）" : ""
+        let text = p.stage == "done" ? "更新完成。网关与菜单栏将自动重启。" : name + (p.stage == "downloading" && p.total > 0 ? " \(p.percent)%\(mbInfo)" : "")
+        panel.show(title: "正在更新到 v\(target)", text: text, percent: p.total > 0 ? Double(p.percent) : (p.stage == "done" ? 100 : nil))
     }
 
     /// 检查结果弹窗：正文直接用 CLI 的检查输出——那边已去 markdown 标记 + 摘要收口

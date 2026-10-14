@@ -17,6 +17,14 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **One-click import now covers far more apps**: legacy-config import grows from 4 sources to 11 — newly supported are Codex CLI, OpenCode, MiMo Code (shared with the MiMo desktop app), WorkBuddy, claude-code-router, Crush, and Gemini CLI relays; Codex / Gemini profiles in newer cc-switch versions are no longer missed. The first-run wizard and the web banner pick them up automatically.
 - **Import channels from one-api / new-api**: `modeldock import --from oneapi --url <site> --token <system access token>` bulk-moves channels from your self-hosted relay site into ModelDock (generate the token under "Personal settings → System access token" on the site); only OpenAI-compatible / Anthropic channels are imported — ones ModelDock cannot reach directly (Azure, native Gemini, etc.) are skipped with the reason shown.
 
+## [Unreleased]
+
+### Added
+
+- **The whole update flow is now visible**: clicking "Check for updates…" in the tray immediately shows a "Checking…" panel (previously it waited silently for up to 15 seconds, feeling like a dead click); applying an update upgrades to a progress window/progress bar — download percentage and size, verify, swap, and restart stages are all visible.
+- **Update checks no longer hit GitHub every time**: while the gateway is running, the tray and console share one check cache (24h cadence, failed checks retry after 30 minutes); with a warm cache a click returns instantly. Only when the gateway is down does the tray fall back to a direct CLI check.
+- **No more double-clicking during a check**: the menu item grays out as "Checking…" while a check is in flight; a timed-out check also explains itself in a dialog instead of staying silent.
+
 ## [1.1.1] - 2026-10-14
 
 Fixes the v1.1.0 console layout regression and makes long-running gateways receive update reminders in time.

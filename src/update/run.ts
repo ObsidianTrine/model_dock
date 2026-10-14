@@ -35,6 +35,7 @@ import {
 } from './install.js'
 import { extractArchive } from './transfer.js'
 import { notesSummary } from './notes.js'
+import { writeUpdateProgress } from './progress.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 
 export interface UpdateRunOptions {
@@ -149,12 +150,18 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-update-'))
   try {
+    // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
+    await writeUpdateProgress('downloading', 0, asset.size)
     log(t('下载中…', 'Downloading…'))
     const file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
       apiBase: opts.apiBase,
       mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
+      onProgress: (received, total) => {
+        void writeUpdateProgress('downloading', received, total)
+      },
     })
+    await writeUpdateProgress('verifying', asset.size, asset.size)
     log(t('校验 SHA256…', 'Verifying SHA256…'))
     // SUMS 刻意不走镜像：完整性锚点必须来自官方 API（design §8）
     const sums = await fetchChecksums(opts.repo, opts.token, m, {
@@ -165,6 +172,7 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     log(c.green(t('✓ 校验通过', '✓ Verified')))
 
     // 校验全过，才进入停机替换段
+    await writeUpdateProgress('swapping', asset.size, asset.size)
     const wasLive = await deps.gatewayWasLive()
     log(t('停止网关与托盘…', 'Stopping the gateway and tray…'))
     await deps.stopGateway()
@@ -218,8 +226,14 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
       throw e
     }
 
+    await writeUpdateProgress('restarting', asset.size, asset.size)
     log(c.green(t('全部完成。旧版残留可用 modeldock update --clean 清理', 'All done. Clean up the previous version with modeldock update --clean')))
+    await writeUpdateProgress('done', asset.size, asset.size)
     return { updated: true, currentVersion: VERSION, latestVersion: m.version }
+  } catch (e) {
+    // 下载/校验/安装任一步失败：进度文件标 failed（读方据此展示失败而非无限转圈）
+    await writeUpdateProgress('failed', 0, 0, (e as Error).message)
+    throw e
   } finally {
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   }
