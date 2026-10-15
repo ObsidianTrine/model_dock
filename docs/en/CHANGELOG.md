@@ -5,6 +5,13 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **dsh-attached models fail with 400 "INVALID_REQUEST"**: dsh by default sends a "disable thinking" parameter that thinking-built-in models (such as the GLM series) reject outright; the parameter is no longer sent and chats work again. The thinking selector in dsh no longer offers an "off" level for these models (the model's own default behavior applies).
+- **Client errors show up as garbage text or "terminated" with no real cause**: when an upstream returns a compressed error body, the gateway used to relay it verbatim, leaving clients with mojibake or a failed decompression; error bodies are now decompressed before forwarding, so the upstream's real message (e.g. "this model does not support disabling thinking") is visible.
+
 ## [1.1.2] - 2026-10-14
 
 Windows tray update fixes and update-experience polish, plus instant refresh for the console's schedule panel.
