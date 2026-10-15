@@ -496,9 +496,10 @@ describe('dsh adapter', () => {
       const models = doc['llm-pi-ai'].providers.modeldock.models
       const plain = models.find((m) => (m as { id: string }).id === 'plain-model') as Record<string, unknown>
       const vision = models.find((m) => (m as { id: string }).id === 'kimi-k3') as Record<string, unknown>
-      // 四档等级与 dsh 官方一致；off 留空 = 支持关闭且不发参数
-      expect(plain.reasoningEfforts).toEqual({ off: null, low: 'low', medium: 'medium', high: 'high' })
-      expect(vision.reasoningEfforts).toEqual({ off: null, low: 'low', medium: 'medium', high: 'high' })
+      // 三档等级与 dsh 官方一致；off 不声明 = resolver 落 map.off=null，pi-ai 不发 thinking 参数
+      // （声明 off: null 会让 pi-ai 0.84.x 发 thinking:{type:'disabled'}，思考内建模型上游 400 拒收）
+      expect(plain.reasoningEfforts).toEqual({ low: 'low', medium: 'medium', high: 'high' })
+      expect(vision.reasoningEfforts).toEqual({ low: 'low', medium: 'medium', high: 'high' })
       // 视觉是可选能力：只有声明了 vision 的模型带 input
       expect(plain.input).toBeUndefined()
       expect(vision.input).toEqual(['text', 'image'])

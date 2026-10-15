@@ -1,4 +1,5 @@
 import { request } from 'undici'
+import zlib from 'node:zlib'
 import { getSecret } from '../config/secrets.js'
 import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
@@ -454,6 +455,36 @@ export function filterResponseHeaders(headers: Record<string, string>): Record<s
   return out
 }
 
+/** 读上游错误体为文本：按 content-encoding 解压后再解码。
+ *  undici request 不自动解压，压缩错误体（如火山方舟的 gzip 400 体）直读是一段乱码，
+ *  客户端只会看到不可诊断的 upstream_error，错误分类（额度特征识别）也随之失效。
+ *  解压失败 / 无压缩头回落原始字节按 utf8 解码，不向上抛。 */
+export async function readUpstreamErrorText(
+  headers: Record<string, string>,
+  body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }
+): Promise<string> {
+  let buf: Buffer
+  try {
+    buf = typeof body.arrayBuffer === 'function'
+      ? Buffer.from(await body.arrayBuffer())
+      : Buffer.from(await body.text(), 'utf8')
+  } catch {
+    return ''
+  }
+  const enc = (headers['content-encoding'] ?? headers['Content-Encoding'] ?? '').toLowerCase().trim()
+  try {
+    if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf).toString('utf8')
+    if (enc === 'deflate') {
+      // deflate 有 zlib 包头与裸流两种形态，上层无法区分，逐个尝试
+      try { return zlib.inflateSync(buf).toString('utf8') } catch { return zlib.inflateRawSync(buf).toString('utf8') }
+    }
+    if (enc === 'br') return zlib.brotliDecompressSync(buf).toString('utf8')
+  } catch {
+    /* 回落原文 */
+  }
+  return buf.toString('utf8')
+}
+
 export interface FailoverResult extends UpstreamResult {
   usedProviderId: string
   /** 改发/重放事件标记（failover_to:<id>、replayed_from:<id>）；主选直连成功不设——日志过滤与 Web 展示依赖「非空即事件」约定 */
@@ -470,6 +501,16 @@ function isTransportFailure(e: unknown): boolean {
 const QUOTA_BODY_RE = /quota|insufficient/i
 function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
+}
+
+/** 摘掉 content-encoding 头（大小写不敏感）：体被解压/重包为明文后不得再声明压缩 */
+function withoutContentEncoding(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === 'content-encoding') continue
+    out[k] = v
+  }
+  return out
 }
 
 /**
@@ -502,7 +543,7 @@ export async function forwardWithFailover(
       const ms = Date.now() - t0
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
-      if (up.status === 429 || up.status === 402) bodyText = await up.body.text().catch(() => '')
+      if (up.status === 429 || up.status === 402) bodyText = await readUpstreamErrorText(up.headers, up.body)
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
@@ -511,16 +552,19 @@ export async function forwardWithFailover(
       else recordOutcome(rt, c.providerId, { ok: true, ms })
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < picked.ordered.length - 1) {
-        if (bodyText === undefined) await up.body.text().catch(() => {}) // 排空响应释放连接后再改发
+        if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
         replayedFrom = c.providerId
         continue
       }
       const marks: string[] = []
       if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
       if (replayedFrom) marks.push(`replayed_from:${replayedFrom}`)
-      // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留
+      // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
+      // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
       const drained = bodyText
-      const out: UpstreamResult = drained !== undefined ? { ...up, body: { text: async () => drained } } : up
+      const out: UpstreamResult = drained !== undefined
+        ? { ...up, headers: withoutContentEncoding(up.headers), body: { text: async () => drained } }
+        : up
       return { ...out, usedProviderId: c.providerId, reason: marks.length ? marks.join(',') : undefined }
     } catch (e) {
       lastErr = e
