@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import http from 'node:http'
+import zlib from 'node:zlib'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -87,6 +88,22 @@ function startMockUpstream(): Promise<{ port: number; requests: CapturedRequest[
         body,
       })
       if (req.url === '/v1/messages') {
+        // 压缩错误体：火山方舟等上游对 4xx 回 gzip 体（真实事故 2026-10-15：dsh 只看到乱码报错）
+        if (body.includes('gzip-err-model')) {
+          const payload = Buffer.from(
+            JSON.stringify({ error: { type: 'BadRequest', code: 'InvalidParameter', message: 'thinking.type `disabled` is not supported by this model' } }),
+            'utf8'
+          )
+          res.writeHead(400, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+          res.end(zlib.gzipSync(payload))
+          return
+        }
+        if (body.includes('gzip-429-model')) {
+          const payload = Buffer.from(JSON.stringify({ error: { message: 'rate limited, slow down' } }), 'utf8')
+          res.writeHead(429, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+          res.end(zlib.gzipSync(payload))
+          return
+        }
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}\n\n')
         res.write('event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n')
@@ -474,6 +491,43 @@ describe('网关', () => {
     try {
       const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, { method: 'POST', body: '{}' })
       expect(res.status).toBe(401)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('上游 gzip 压缩错误体：中继给客户端的是解压后的可读 JSON，且不再声明 content-encoding', async () => {
+    const t = await setup()
+    try {
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gzip-err-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res.status).toBe(400)
+      expect(res.headers.get('content-encoding')).toBeNull()
+      const j: any = await res.json()
+      expect(j.error.code).toBe('InvalidParameter')
+      expect(j.error.message).toContain('thinking.type')
+      expect(j.modeldock.hint).toBeTruthy()
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('429 排空重包路径：gzip 体解压判别（非额度类不切换），客户端拿到明文错误', async () => {
+    const t = await setup()
+    try {
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gzip-429-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res.status).toBe(429)
+      expect(res.headers.get('content-encoding')).toBeNull()
+      const j: any = await res.json()
+      expect(j.error.message).toContain('rate limited')
+      expect(j.modeldock.hint).toBeTruthy()
     } finally {
       t.closeAll()
     }

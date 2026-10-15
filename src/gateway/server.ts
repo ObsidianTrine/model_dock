@@ -36,7 +36,7 @@ import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from 
 import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
-import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
+import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, sandboxNpmPrefix } from '../util/paths.js'
@@ -577,12 +577,19 @@ async function handleRequest(
 
   const resHeaders = filterResponseHeaders(result.headers)
   if (result.status >= 400) {
-    const text = await result.body.text()
+    // 错误体重新序列化后回发：先按 content-encoding 解码（上游 gzip 错误体直读是乱码），
+    // 回发头摘掉 content-encoding —— 明文 JSON 再声明 gzip 会让客户端解包失败报 "terminated"
+    const text = await readUpstreamErrorText(result.headers, result.body)
     const wrapped = translateUpstreamError(result.status, text, {
       providerId,
       model,
     })
-    res.writeHead(result.status, { ...resHeaders, 'content-type': 'application/json' })
+    const errHeaders: Record<string, string> = {}
+    for (const [k, v] of Object.entries(resHeaders)) {
+      if (k.toLowerCase() === 'content-encoding') continue
+      errHeaders[k] = v
+    }
+    res.writeHead(result.status, { ...errHeaders, 'content-type': 'application/json' })
     res.end(wrapped)
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: wrapped.slice(0, 200), reason })
     return

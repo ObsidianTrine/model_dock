@@ -207,7 +207,10 @@ export async function buildDshModelEntries(
     // 推理等级：dsh 把「手写声明的模型」一律当只支持 off，不声明则 profile 里保存的思考等级
     // （agent-default-model.reasoningEffort，用户侧存的）会让每次请求直接报 UNSUPPORTED_REASONING_EFFORT。
     // 等级名与 dsh 官方一致；wire 值由 pi-ai 按协议映射（anthropic 下只决定可选等级，实际发 budget_tokens）。
-    rec.reasoningEfforts = { off: null, low: 'low', medium: 'medium', high: 'high' }
+    // 必须省略 off：dsh 的 resolver 把「声明 off: null」落成 map 里无 off 键，pi-ai（0.84.x）对无 off 键
+    // 的模型在默认路径发 thinking:{type:'disabled'}，思考内建模型（如 glm-5.3-flash）上游会 400 拒收；
+    // 省略 off 才会落成 map.off=null → 不发 thinking 参数，dsh UI 也随之隐藏 off 档。
+    rec.reasoningEfforts = { low: 'low', medium: 'medium', high: 'high' }
     // 视觉：可选能力（控制台「视觉」列 / 内置表推断）；不声明时 dsh 按纯文本模态处理，图片会被拦下
     const resolvedCaps = meta.capabilities ?? resolveModelMeta(mid, meta, { baseUrl: cfg.providers[providerId]?.base_url })?.capabilities
     const caps = resolvedCaps ?? []
