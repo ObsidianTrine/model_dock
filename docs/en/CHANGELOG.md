@@ -11,6 +11,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 - **Update downloads stall at 0%**: the updater ignored the system proxy — with Clash or similar running it still connected to GitHub's download CDN directly and sat at zero progress on mainland networks; the local proxy is now auto-detected per machine (environment variables / macOS system proxy / Windows registry — nothing hardcoded) and the check plus downloads go through it. Set `MODELRDOCK_NO_SYS_PROXY=1` to disable.
 - **No more false "waiting timed out" during healthy updates**: the console waited on a fixed 5-minute total clock, flagging large packages on slow links; it now keeps waiting as long as progress advances and only flags after 10 minutes of no movement.
+- **dsh / ZCode falsely warn "client file points elsewhere"**: when an OpenAI-protocol service was pinned, the attach-status check still compared against the old gateway address without the `/v1` suffix, so the newly written address was misread as "written by another ModelDock instance" and "Rewrite for this gateway" could never clear the warning; both canonical gateway addresses (with and without `/v1`) are now recognized.
 
 ## [1.1.3] - 2026-10-17
 

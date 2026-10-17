@@ -5,7 +5,6 @@ import { biJoin, dshHomeDir, isFile, readTextIfExists, t } from '../util/index.j
 import type { Config, ModelMeta } from '../config/types.js'
 import {
   AdapterError,
-  gatewayBase,
   isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
@@ -15,7 +14,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { parseDocument } from './format.js'
-import { directAttachNote, directResponsesNote, directWire, gatewayWire, resolveRoute, routeModelNote } from './shared.js'
+import { directAttachNote, directResponsesNote, directWire, gatewayWire, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
 import { catalogForRoute, catalogLookupById, loadDshCatalog, type CatalogModel } from '../providers/dshcatalog.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
@@ -679,7 +678,7 @@ export const dshAdapter: HarnessAdapter = {
       return {
         installed: true,
         attached: !!cfg.harness['dsh'],
-        pointing: base === gatewayBase(port) ? 'gateway' : base ? 'other' : 'unknown',
+        pointing: isGatewayBase(base, port) ? 'gateway' : base ? 'other' : 'unknown',
         detail:
           (base ?? t('(无 modeldock provider)', '(no modeldock provider)')) +
           (models > 0 ? t(' · {count} 个模型', ' · {count} models', { count: models }) : ''),
