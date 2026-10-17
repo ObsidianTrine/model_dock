@@ -5,6 +5,13 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Update downloads stall at 0%**: the updater ignored the system proxy — with Clash or similar running it still connected to GitHub's download CDN directly and sat at zero progress on mainland networks; the local proxy is now auto-detected per machine (environment variables / macOS system proxy / Windows registry — nothing hardcoded) and the check plus downloads go through it. Set `MODELRDOCK_NO_SYS_PROXY=1` to disable.
+- **No more false "waiting timed out" during healthy updates**: the console waited on a fixed 5-minute total clock, flagging large packages on slow links; it now keeps waiting as long as progress advances and only flags after 10 minutes of no movement.
+
 ## [1.1.3] - 2026-10-17
 
 A batch of dsh onboarding and gateway forwarding fixes: dsh attaches cleanly on both old and new releases, requests to OpenAI-protocol services no longer 404, and editing a service no longer resurrects cleared endpoints.

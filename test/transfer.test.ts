@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import type { AddressInfo } from 'node:net'
+import net, { type AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { downloadText, downloadToFile, extractArchive, parseSums, type SpawnRunner } from '../src/update/transfer.js'
 import { UpdateError, validateAssetName, downloadAsset, verifyChecksum, type ReleaseAsset } from '../src/update/check.js'
@@ -150,5 +150,47 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
       await expect(extractArchive('ab.zip', 'dir`with$tick', runner, 'win32')).rejects.toThrow(/引号|quote/)
       expect(calls).toHaveLength(0)
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
+  })
+})
+
+describe('transfer 代理转发（系统代理链路）', () => {
+  const servers: http.Server[] = []
+  let root = ''
+  beforeEach(async () => { root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-proxy-')) })
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))))
+    await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
+  })
+  const serve = (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<`http://127.0.0.1:${number}`> => {
+    const server = http.createServer(handler)
+    servers.push(server)
+    return listenEphemeral(server).then((port) => `http://127.0.0.1:${port}`)
+  }
+
+  it('downloadToFile：proxyUrl 确实把请求交给代理（7.x CONNECT 隧道 / 8.x 绝对形态都算命中）', async () => {
+    const body = Buffer.from('proxied-payload')
+    const targetBase = await serve((_req, res) => { res.writeHead(200, { 'content-length': String(body.length) }); res.end(body) })
+    let proxySeen = ''
+    // undici 7.x 对 http 目标也走 CONNECT 隧道、8.x 走绝对形态请求行——mock 两种都接，断言二者其一
+    const proxyServer = http.createServer((req, res) => { proxySeen = `ABSOLUTE ${req.url}`; res.writeHead(200, { 'content-length': String(body.length) }); res.end(body) })
+    proxyServer.on('connect', (req, clientSocket: net.Socket, head: Buffer) => {
+      proxySeen = `CONNECT ${req.url}`
+      const [h, p] = String(req.url).split(':')
+      const up = net.connect(Number(p), h, () => {
+        clientSocket.write('HTTP/1.1 200 Connection established\r\n\r\n')
+        if (head?.length) up.write(head)
+        up.pipe(clientSocket)
+        clientSocket.pipe(up)
+      })
+      up.on('error', () => clientSocket.end())
+    })
+    servers.push(proxyServer)
+    const proxyPort = await listenEphemeral(proxyServer)
+    const dest = path.join(root, 'px.bin')
+    const received = await downloadToFile(`${targetBase}/file`, dest, { proxyUrl: `http://127.0.0.1:${proxyPort}` })
+    expect(received).toBe(body.length)
+    expect(fs.readFileSync(dest)).toEqual(body)
+    // 命中形式 = 确实经代理转发，而非直连；回环免代理保护在 runUpdate 侧（apiBase 注入即不走代理）
+    expect(proxySeen).toMatch(new RegExp(`CONNECT ${targetBase.slice(7)}|ABSOLUTE ${targetBase}/file`))
   })
 })
