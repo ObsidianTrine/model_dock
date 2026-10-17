@@ -37,6 +37,7 @@ import { extractArchive } from './transfer.js'
 import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
+import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
 export interface UpdateRunOptions {
   repo: string
@@ -114,7 +115,12 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
       )
     )
   }
-  const m: ReleaseManifest = await fetchLatestRelease(opts.repo, opts.token, opts.apiBase)
+  // 代理解析（系统代理/环境变量，见 util/sysproxy.ts）：Node fetch 不认系统代理，大陆网络直连
+  // GitHub CDN 会长时间 0 字节卡死；检测到就在检查与下载前明说，方便日志定位。
+  // apiBase 是测试注入缝隙：注入即本地 mock 服务器，绝不代理（真网路径 apiBase 缺省）
+  const proxyUrl = opts.apiBase ? null : await resolveUpdateProxyUrl()
+  if (proxyUrl) log(c.gray(t('已检测到系统代理 {u}，检查与下载将经由它', 'System proxy detected at {u}; the check and downloads go through it', { u: proxyUrl })))
+  const m: ReleaseManifest = await fetchLatestRelease(opts.repo, opts.token, opts.apiBase, { proxyUrl })
   const already = logAlreadyUpToDate(m, log)
   if (already) return already
 
@@ -150,6 +156,7 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     const file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
       apiBase: opts.apiBase,
       mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
+      proxyUrl,
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
       onProgress: (received, total) => {
         void writeUpdateProgress('downloading', received, total)
@@ -160,6 +167,7 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
     // SUMS 刻意不走镜像：完整性锚点必须来自官方 API（design §8）
     const sums = await fetchChecksums(opts.repo, opts.token, m, {
       apiBase: opts.apiBase,
+      proxyUrl,
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
     })
     await verifyChecksum(file, sums)
@@ -240,7 +248,9 @@ export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult
 /** --check：只看不装（不下载大文件，不发确认） */
 export async function checkUpdate(repo: string, token: string | null, opts: { apiBase?: string; log?: (m: string) => void } = {}): Promise<UpdateRunResult> {
   const log = opts.log ?? ((m: string) => console.log(m))
-  const m = await fetchLatestRelease(repo, token, opts.apiBase)
+  const proxyUrl = opts.apiBase ? null : await resolveUpdateProxyUrl()
+  if (proxyUrl) log(c.gray(t('已检测到系统代理 {u}，检查将经由它', 'System proxy detected at {u}; the check goes through it', { u: proxyUrl })))
+  const m = await fetchLatestRelease(repo, token, opts.apiBase, { proxyUrl })
   const already = logAlreadyUpToDate(m, log)
   if (already) return already
   log(c.bold(t('有新版本：v{a}（当前 v{b}）', 'New version available: v{a} (current v{b})', { a: m.version, b: VERSION })))

@@ -14,7 +14,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { t } from '../util/i18n.js'
 import { fileSha256 } from '../util/fsx.js'
-import { downloadToFile, parseSums } from './transfer.js'
+import { downloadToFile, doFetch, parseSums } from './transfer.js'
 
 const API_BASE = 'https://api.github.com'
 const CHECK_TIMEOUT_MS = 15_000
@@ -63,14 +63,14 @@ function isSemver(v: string): boolean {
   return /^\d+\.\d+\.\d+$/.test(v)
 }
 
-/** 拉取最新正式发布并派生统一 manifest（token 可空=匿名；apiBase 供测试注入本地服务） */
-export async function fetchLatestRelease(repo: string, token: string | null, apiBase = API_BASE): Promise<ReleaseManifest> {
+/** 拉取最新正式发布并派生统一 manifest（token 可空=匿名；apiBase 供测试注入本地服务；proxyUrl 非空时代理转发） */
+export async function fetchLatestRelease(repo: string, token: string | null, apiBase = API_BASE, opts: { proxyUrl?: string | null } = {}): Promise<ReleaseManifest> {
   let res: Response
   try {
-    res = await fetch(`${apiBase}/repos/${repo}/releases/latest`, {
+    res = await doFetch(`${apiBase}/repos/${repo}/releases/latest`, {
       headers: ghHeaders(token),
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-    })
+    }, opts.proxyUrl)
   } catch (e) {
     throw new UpdateError(
       t(
@@ -237,7 +237,7 @@ export async function downloadAsset(
   token: string | null,
   asset: ReleaseAsset,
   destDir: string,
-  opts: { apiBase?: string; mirrors?: string[]; onProgress?: (received: number, total: number) => void; retryDelayMs?: number } = {}
+  opts: { apiBase?: string; mirrors?: string[]; onProgress?: (received: number, total: number) => void; retryDelayMs?: number; proxyUrl?: string | null } = {}
 ): Promise<string> {
   validateAssetName(asset.name)
   const dest = path.join(destDir, asset.name)
@@ -253,6 +253,7 @@ export async function downloadAsset(
           headers: ghHeaders(cand.withAuth ? token : null, 'application/octet-stream'),
           timeoutMs: cand.timeoutMs,
           objectName: asset.name,
+          proxyUrl: opts.proxyUrl,
           ...(opts.onProgress
             ? {
                 onProgress: (r: number) => {
@@ -291,7 +292,7 @@ export async function fetchChecksums(
   repo: string,
   token: string | null,
   m: ReleaseManifest,
-  opts: { apiBase?: string; retryDelayMs?: number } = {}
+  opts: { apiBase?: string; retryDelayMs?: number; proxyUrl?: string | null } = {}
 ): Promise<Record<string, string> | null> {
   const sums = findAsset(m, 'SHA256SUMS')
   if (!sums) return null

@@ -1540,8 +1540,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 成功=网关先被停掉（health 出现过失败）再恢复 → 重载进新版；
   // 下载阶段网关活着是预期，不触发重载（修复点：此前 health 正常即重载，失败时秒重载假完成）。
   // 极端竞态（网关在两次轮询间完成下线+恢复）：current 已到目标版本也视为成功。
-  function pollApplyAndGateway(n, sawDown) {
-    if (n > 150) {
+  function pollApplyAndGateway(n, sawDown, lastProgressKey) {
+    if (n > 300) {
       updApplying = false
       updFail(t('等待更新完成超时。网关可能仍在更新中；若长时间无响应，请查看 __MD_LOGS_DIR__ 下的 update 日志或重跑 modeldock update', 'Timed out waiting for the update. The gateway may still be updating; if it stays unreachable, check the update log under __MD_LOGS_DIR__/ or rerun modeldock update'))
       return
@@ -1558,8 +1558,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           }
           var wanted = String(sessionStorage.getItem('mdk_upd_to') || '')
           if (down || (wanted && s.current >= wanted)) { location.reload(); return }
-          pollApplyAndGateway(n + 1, down)
-        }).catch(function () { pollApplyAndGateway(n + 1, true) })
+          // 超时只按「毫无动静」计（300 轮 ≈ 10 分钟）：进度有推进（阶段/字节变化）就重新计时，
+          // 大安装包走慢链路下载超 5 分钟是常态，固定总时长会把健康下载误报成超时
+          var key = s.progress ? s.progress.stage + ':' + (s.progress.received != null ? s.progress.received : '') : ''
+          pollApplyAndGateway(key === lastProgressKey ? n + 1 : 0, down, key)
+        }).catch(function () { pollApplyAndGateway(n + 1, true, lastProgressKey) })
       }
       api('/health').then(function () { proceed(sawDown) }, function () { proceed(true) })
     }, 2000)

@@ -13,11 +13,34 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { fetch as undiciFetch, type Dispatcher } from 'undici'
 import { ensureDir } from '../util/fsx.js'
+import { buildDispatcher } from '../util/net.js'
 import { t } from '../util/i18n.js'
 
 /** 通用下载超时：providers/update/noderuntime 三者共用（fetch 未走慢时网络也要给足余量） */
 export const DOWNLOAD_TIMEOUT_MS = 10 * 60_000
+
+/** 代理 dispatcher 按 URL 复用：镜像候选 + 官方候选 + 重试共享一条代理连接池 */
+const proxyDispatchers = new Map<string, Dispatcher>()
+function dispatcherFor(proxyUrl: string): Dispatcher {
+  let d = proxyDispatchers.get(proxyUrl)
+  if (!d) {
+    d = buildDispatcher(proxyUrl)
+    proxyDispatchers.set(proxyUrl, d)
+  }
+  return d
+}
+
+/**
+ * 代理感知 fetch：proxyUrl 非空走 undici fetch + ProxyAgent（Node 全局 fetch 不认系统代理，
+ * 也不支持运行时注入 env 代理——见 util/sysproxy.ts 头注）；空则全局 fetch 直连（行为不变）。
+ * undici 与全局 fetch 的 Response 同源（@types/node 即 undici-types），仅 init 多 dispatcher 项。
+ */
+export async function doFetch(url: string, init: { headers?: Record<string, string>; signal?: AbortSignal; redirect?: 'follow' | 'error' | 'manual' }, proxyUrl?: string | null): Promise<Response> {
+  if (!proxyUrl) return fetch(url, init)
+  return (await undiciFetch(url, { ...init, dispatcher: dispatcherFor(proxyUrl) })) as unknown as Response
+}
 
 export interface DownloadToFileOpts {
   /** 进度回调：received/total 为字节数；total=0 表示上游未给 content-length */
@@ -28,6 +51,8 @@ export interface DownloadToFileOpts {
   headers?: Record<string, string>
   /** redirect 策略透传给 fetch（避免引用 DOM 全局类型，union 展开） */
   redirect?: 'follow' | 'error' | 'manual'
+  /** 非空 = 经该代理（http://host:port / socks5://）转发；缺省直连。由 resolveUpdateProxyUrl 解析得出 */
+  proxyUrl?: string | null
 }
 
 /**
@@ -36,11 +61,11 @@ export interface DownloadToFileOpts {
  * 测试用本地 mock 服务器桩测，不 vi.mock 模块。
  */
 export async function downloadToFile(url: string, dest: string, opts: DownloadToFileOpts & { objectName?: string } = {}): Promise<number> {
-  const res = await fetch(url, {
+  const res = await doFetch(url, {
     headers: opts.headers,
     signal: AbortSignal.timeout(opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS),
     redirect: opts.redirect ?? 'follow',
-  })
+  }, opts.proxyUrl)
   if (!res.ok || !res.body) {
     throw new Error(
       opts.objectName
@@ -68,13 +93,13 @@ export async function downloadToFile(url: string, dest: string, opts: DownloadTo
 /** 下载 URL 为文本（SUMS 等小文件）。调用方按语义决定超时。 */
 export async function downloadText(
   url: string,
-  opts: { timeoutMs?: number; headers?: Record<string, string>; redirect?: 'follow' | 'error' | 'manual' } = {}
+  opts: { timeoutMs?: number; headers?: Record<string, string>; redirect?: 'follow' | 'error' | 'manual'; proxyUrl?: string | null } = {}
 ): Promise<string> {
-  const res = await fetch(url, {
+  const res = await doFetch(url, {
     headers: opts.headers,
     signal: AbortSignal.timeout(opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS),
     redirect: opts.redirect ?? 'follow',
-  })
+  }, opts.proxyUrl)
   if (!res.ok) throw new Error(t('下载 {url} 失败：HTTP {s}', 'Failed to download {url}: HTTP {s}', { url, s: res.status }))
   return res.text()
 }
