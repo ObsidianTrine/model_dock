@@ -15,7 +15,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { parseDocument } from './format.js'
-import { directAttachNote, directResponsesNote, directWire, resolveRoute, routeModelNote } from './shared.js'
+import { directAttachNote, directResponsesNote, directWire, gatewayWire, resolveRoute, routeModelNote } from './shared.js'
 import { catalogForRoute, catalogLookupById, loadDshCatalog, type CatalogModel } from '../providers/dshcatalog.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
@@ -379,12 +379,14 @@ export const dshAdapter: HarnessAdapter = {
     }
 
     const d = opts.direct
-    // 直连按上游协议选 api 类型与端点（directWire 与 ZCode 共用 llm-pi wire 选择）
+    // 直连按上游协议选 api 类型与端点（directWire 与 ZCode 共用 llm-pi wire 选择）；
+    // 网关模式同样跟随当前路由服务的协议（gatewayWire 与 directWire 同规则）
     const { api: directApi, base: directBase } = directWire(d)
+    const gw = gatewayWire(provider)
 
     const providerEntry: Record<string, unknown> = {
-      api: directApi ?? 'anthropic-messages',
-      baseURL: directBase ?? gatewayBase(opts.gatewayPort),
+      api: directApi ?? gw.api,
+      baseURL: directBase ?? gw.base(opts.gatewayPort),
       apiKeyEnv: 'MODELDOCK_TOKEN',
     }
     if (entries.length > 0) providerEntry.models = entries

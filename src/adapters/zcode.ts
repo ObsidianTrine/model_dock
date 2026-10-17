@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
-import { directAttachNote, directResponsesNote, directWire, resolveRoute, routeModelNote } from './shared.js'
+import { directAttachNote, directResponsesNote, directWire, gatewayWire, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -253,9 +253,11 @@ export const zcodeAdapter: HarnessAdapter = {
 
     const changes: FileChange[] = []
 
-    // 直连：写上游真实 Key 与对应协议端点（directWire 与 dsh 共用 llm-pi wire 选择）
+    // 直连：写上游真实 Key 与对应协议端点（directWire 与 dsh 共用 llm-pi wire 选择）；
+    // 网关模式同样跟随当前路由服务的协议（gatewayWire 与 directWire 同规则）
     const d = opts.direct
     const { api: directApi, base: directBase } = directWire(d)
+    const gw = gatewayWire(provider)
     if (d && d.protocol === 'responses') {
       notes.push(directResponsesNote('ZCode'))
     }
@@ -271,7 +273,7 @@ export const zcodeAdapter: HarnessAdapter = {
       config: {
         group: 'standard-personal',
         access: { type: 'api-key', apiKey: d ? d.key : opts.token },
-        api: { type: directApi ?? 'anthropic-messages', baseUrl: directBase ?? gatewayBase(opts.gatewayPort) },
+        api: { type: directApi ?? gw.api, baseUrl: directBase ?? gw.base(opts.gatewayPort) },
         ...(modelIds.length > 0 ? { personalModelIds: [...modelIds], modelOrder: [...modelIds] } : {}),
       },
     })
