@@ -401,6 +401,65 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('网关模式 wire 跟随服务协议：openai 服务下发 openai-completions 且 base 带 /v1', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'openai 服务',
+            base_url: 'https://x.example.com/v4',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const plan = await dshAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      const after = plan.changes[0]?.after ?? ''
+      expect(after).toContain('api: openai-completions')
+      expect(after).toContain('baseURL: http://127.0.0.1:8687/v1')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('网关模式 wire 跟随服务协议：anthropic 服务维持 anthropic-messages 且 base 不带 /v1', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'anthropic 服务',
+            base_url: 'https://x.example.com/api/anthropic',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const plan = await dshAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      const after = plan.changes[0]?.after ?? ''
+      expect(after).toContain('api: anthropic-messages')
+      expect(after).toContain('baseURL: http://127.0.0.1:8687')
+      expect(after).not.toContain('baseURL: http://127.0.0.1:8687/v1')
+    } finally {
+      h.restore()
+    }
+  })
+
   it('attach 写入完整模型列表（ModelDock 元数据优先 + catalog 补全 + 回写）', async () => {
     const h = fakeHome()
     try {
@@ -809,6 +868,54 @@ describe('dsh adapter', () => {
 })
 
 describe('zcode adapter', () => {
+  it('网关模式 wire 跟随服务协议：openai 服务下发 openai-completions 且 base 带 /v1', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: { providerRules: [] },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'openai 服务',
+            base_url: 'https://x.example.com/v4',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const plan = await zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      await applyChanges('zcode', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+
+      const after = JSON.parse(fs.readFileSync(pp, 'utf8'))
+      const rule = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
+      expect(rule.config.api).toEqual({ type: 'openai-completions', baseUrl: 'http://127.0.0.1:8687/v1' })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('attach 写入个人供应商存储（provider_config.json），不动用户既有供应商；同时清理旧版 builtin:modeldock 残留', async () => {
     const h = fakeHome()
     // detect/status 现要求 ZCode 本体在场才算已安装；用测试钩子注入，避免依赖测试机真实安装

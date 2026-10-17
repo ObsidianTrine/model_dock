@@ -1,6 +1,7 @@
 import { t } from '../util/i18n.js'
-import type { Config, ModelMeta } from '../config/types.js'
+import type { Config, ModelMeta, Protocol } from '../config/types.js'
 import type { AttachOptions } from './types.js'
+import { gatewayBase, gatewayBaseOpenAI } from './types.js'
 
 /** 上下文变体后缀（[1m]/[128k] 等）：是请求参数标记，不是独立模型 id；NAME 显示与清洗时剥掉 */
 export const CONTEXT_SUFFIX_RE = /\[\d+[MmKk]\]$/
@@ -54,6 +55,20 @@ export function directResponsesNote(label: string): string {
     'Note: this service uses the Responses protocol, which {label} does not support as a wire type; the direct entry is written as anthropic-messages — make sure the upstream is compatible',
     { label }
   )
+}
+
+/** 网关模式 wire 选择：与 directWire 同规则，跟随当前路由服务的协议。网关不做跨协议转换，
+ *  客户端说哪门 wire 必须与服务协议一致，否则 anthropic 路径拼上 openai 端点必 404。
+ *  openai 协议 → openai-completions 且 base 带 /v1（llm-pi 的 openai wire 追加 /chat/completions，
+ *  落到网关规范路径 /v1/chat/completions，ROUTED_PATH_RE 的模型改写才生效）；
+ *  anthropic/responses → anthropic-messages 且 base 不带 /v1（追加 /v1/messages）。无路由时保持旧默认。 */
+export function gatewayWire(provider: { protocol: Protocol } | undefined): {
+  api: 'anthropic-messages' | 'openai-completions'
+  base: (port: number) => string
+} {
+  return provider?.protocol === 'openai'
+    ? { api: 'openai-completions', base: gatewayBaseOpenAI }
+    : { api: 'anthropic-messages', base: gatewayBase }
 }
 
 /** 「独立直连已写入明文 Key」note（codex/dsh/zcode/provider-json/packs/workbuddy 手抄收敛为同一文案）。
