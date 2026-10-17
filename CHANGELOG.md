@@ -5,12 +5,17 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.1.3] - 2026-10-17
+
+dsh 接入与网关转发的集中修复：新旧版 dsh 都能正常接入，OpenAI 协议服务的请求不再 404。
 
 ### 修复
 
+- **接入 OpenAI 协议的服务后，dsh / ZCode 的请求报「处理失败」**：网关模式此前一律按 Anthropic 接口路径转发客户端请求，接到 OpenAI 协议的服务时上游直接 404；现在按服务自身的协议转发，两种协议的服务都正常。
+- **新版 dsh 接入后无法连接**：新版 dsh 对凭据文件的校验更严，ModelDock 写入的凭据缺一个必需的版本声明会被整份拒绝加载，dsh 启动即无法联网；现在写入时补上该声明，新旧版 dsh 都能正常接入。
 - **dsh 接入的模型报 400「INVALID_REQUEST」**：dsh 默认会给模型发送「关闭思考」参数，思考内建的模型（如 GLM 系列）不接受而直接拒绝请求；现在不再发送该参数，对话恢复正常。dsh 里这些模型的思考档位不再提供「关闭」选项（默认即模型自身行为）。
 - **客户端报错是一段乱码或「terminated」，看不到真实原因**：上游返回压缩的错误说明时，网关此前原样转述，客户端只能看到乱码甚至解包失败；现在自动解压后转发，可直接看到上游的真实报错（例如「该模型不支持关闭思考」）。
+- **编辑服务时手动清空的接口地址自动复原**：编辑弹窗此前会按服务地址自动回填厂商预设的端点——删掉的行下次打开时复活，直接保存还可能把协议悄悄翻回去；现在编辑时不再自动回填，留空即表示不使用该协议。
 
 ## [1.1.2] - 2026-10-14
 
@@ -174,6 +179,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.1.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0

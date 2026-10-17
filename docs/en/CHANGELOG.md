@@ -5,12 +5,17 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.1.3] - 2026-10-17
+
+A batch of dsh onboarding and gateway forwarding fixes: dsh attaches cleanly on both old and new releases, requests to OpenAI-protocol services no longer 404, and editing a service no longer resurrects cleared endpoints.
 
 ### Fixed
 
+- **Requests fail after attaching dsh / ZCode to an OpenAI-protocol service**: in gateway mode the client's requests were always forwarded along Anthropic-style API paths, so OpenAI-protocol services answered 404 outright; requests are now forwarded in the service's own protocol, and both kinds of services work.
+- **Attaching fails on newer dsh releases**: newer dsh validates credential files more strictly — the credentials ModelDock wrote were missing a required version header and got rejected wholesale, leaving dsh unable to connect; the header is now written, so both old and new dsh attach cleanly.
 - **dsh-attached models fail with 400 "INVALID_REQUEST"**: dsh by default sends a "disable thinking" parameter that thinking-built-in models (such as the GLM series) reject outright; the parameter is no longer sent and chats work again. The thinking selector in dsh no longer offers an "off" level for these models (the model's own default behavior applies).
 - **Client errors show up as garbage text or "terminated" with no real cause**: when an upstream returns a compressed error body, the gateway used to relay it verbatim, leaving clients with mojibake or a failed decompression; error bodies are now decompressed before forwarding, so the upstream's real message (e.g. "this model does not support disabling thinking") is visible.
+- **Endpoints you cleared in the service editor come back on their own**: the edit dialog used to auto-refill empty protocol-endpoint lines from the vendor preset matched by the service's host — a deleted endpoint resurrected on the next edit, and saving right after could silently flip the protocol back; the editor no longer auto-refills, and an empty line now simply means "not using this protocol".
 
 ## [1.1.2] - 2026-10-14
 
@@ -174,6 +179,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.1.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.0.0...v1.1.0
