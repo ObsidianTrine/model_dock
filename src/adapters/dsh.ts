@@ -543,6 +543,9 @@ export const dshAdapter: HarnessAdapter = {
 
     const ctext = (await readTextIfExists(credFile())) ?? ''
     const cdoc = parseDocument(ctext)
+    // dsh-credentials-local 新版要求 version: 1，缺失按 pre-release flat layout 拒载，
+    // dsh 启动直接失败（credentials 插件不起，全部依赖服务跟着瘫）；已有 version 不覆写
+    if (cdoc.get('version') === undefined) cdoc.set('version', 1)
     cdoc.setIn(['refs', 'MODELDOCK_TOKEN'], d ? d.key : opts.token)
     const credAfter = cdoc.toString()
     if (credAfter !== ctext) {

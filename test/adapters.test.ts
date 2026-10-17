@@ -372,10 +372,38 @@ describe('dsh adapter', () => {
       expect(after).toContain('# 顶层注释') // 注释保留
       expect(after).toContain('https://ark.example.com/api/coding') // 原条目未动
       expect(after).toContain('modeldock')
-      expect(fs.readFileSync(path.join(h.home, '.dsh', '.credentials.yaml'), 'utf8')).toContain('MODELDOCK_TOKEN')
+      const cred = fs.readFileSync(path.join(h.home, '.dsh', '.credentials.yaml'), 'utf8')
+      expect(cred).toContain('MODELDOCK_TOKEN')
+      expect(cred).toContain('version: 1') // 新版 dsh-credentials-local 必需，缺失拒载
 
       const st = await dshAdapter.status(await loadConfig(), 8687)
       expect(st.pointing).toBe('gateway')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('credentials 旧文件（无 version 头）attach 时补 version: 1 且保留既有 refs 条目', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      const cp = path.join(h.home, '.dsh', '.credentials.yaml')
+      await atomicWrite(cp, 'refs:\n  OTHER_REF: keep-me\n', 0o600)
+      await withConfig(baseCfg())
+
+      const opts = { mode: 'gateway' as const, gatewayPort: 8687, token: TOKEN, profile: 'demo' }
+      const plan = await dshAdapter.planAttach(opts, await loadConfig())
+      await applyChanges('dsh', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const cred = fs.readFileSync(cp, 'utf8')
+      expect(cred).toContain('version: 1')
+      expect(cred).toContain('OTHER_REF: keep-me')
+      expect(cred).toContain('MODELDOCK_TOKEN')
+
+      const plan2 = await dshAdapter.planAttach(opts, await loadConfig())
+      const credChange = plan2.changes.filter((c) => c.path === cp)
+      expect(credChange).toEqual([]) // 稳态：version 已在，credentials 零改动
     } finally {
       h.restore()
     }
