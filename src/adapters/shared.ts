@@ -71,6 +71,13 @@ export function gatewayWire(provider: { protocol: Protocol } | undefined): {
     : { api: 'anthropic-messages', base: gatewayBase }
 }
 
+/** 网关模式接入状态判定：客户端 base 为本网关两种规范形态（anthropic 不带 /v1、openai 带 /v1）
+ *  之一即本网关。gatewayWire 起写入形态随服务协议二选一，status 只认旧形态会把新写入误判
+ *  为「其他实例写入」且重写无法消除（重写幂等写回同形态）。 */
+export function isGatewayBase(base: string | undefined, port: number): boolean {
+  return base === gatewayBase(port) || base === gatewayBaseOpenAI(port)
+}
+
 /** 「独立直连已写入明文 Key」note（codex/dsh/zcode/provider-json/packs/workbuddy 手抄收敛为同一文案）。
  *  url 缺失（dsh 这类经 refs 间接引用、note 不带地址的）时省略地址子句。 */
 export function directAttachNote(url?: string | number): string {

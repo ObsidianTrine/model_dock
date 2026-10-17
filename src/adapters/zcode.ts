@@ -3,7 +3,6 @@ import { homeDir, readTextIfExists, t } from '../util/index.js'
 import type { Config, ModelMeta } from '../config/types.js'
 import {
   AdapterError,
-  gatewayBase,
   isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
@@ -14,7 +13,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
-import { directAttachNote, directResponsesNote, directWire, gatewayWire, resolveRoute, routeModelNote } from './shared.js'
+import { directAttachNote, directResponsesNote, directWire, gatewayWire, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -461,7 +460,7 @@ export const zcodeAdapter: HarnessAdapter = {
     return {
       installed: true,
       attached: !!cfg.harness['zcode'],
-      pointing: base === gatewayBase(port) ? 'gateway' : base ? 'other' : 'unknown',
+      pointing: isGatewayBase(base, port) ? 'gateway' : base ? 'other' : 'unknown',
       detail:
         (base ?? t('(未注册 modeldock 供应商)', '(no modeldock provider registered)')) +
         (models > 0 ? t(' · {count} 个模型', ' · {count} models', { count: models }) : ''),

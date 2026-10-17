@@ -458,6 +458,38 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('openai 服务接入后 status 判定本网关（/v1 形态 base 不误报「其他实例写入」）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'openai 服务',
+            base_url: 'https://x.example.com/v4',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const { applyAttach } = await import('../src/ops.js')
+      await applyAttach('dsh', { profile: 'demo' })
+
+      const st = await dshAdapter.status(await loadConfig(), 8687)
+      expect(st.attached).toBe(true)
+      expect(st.pointing).toBe('gateway')
+      expect(st.detail).toContain('http://127.0.0.1:8687/v1')
+    } finally {
+      h.restore()
+    }
+  })
+
   it('网关模式 wire 跟随服务协议：anthropic 服务维持 anthropic-messages 且 base 不带 /v1', async () => {
     const h = fakeHome()
     try {
@@ -938,6 +970,55 @@ describe('zcode adapter', () => {
       const after = JSON.parse(fs.readFileSync(pp, 'utf8'))
       const rule = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
       expect(rule.config.api).toEqual({ type: 'openai-completions', baseUrl: 'http://127.0.0.1:8687/v1' })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('openai 服务接入后 status 判定本网关（/v1 形态 base 不误报「其他实例写入」）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: { providerRules: [] },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'openai 服务',
+            base_url: 'https://x.example.com/v4',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const { applyAttach } = await import('../src/ops.js')
+      await applyAttach('zcode', {})
+
+      const st = await zcodeAdapter.status(await loadConfig(), 8687)
+      expect(st.attached).toBe(true)
+      expect(st.pointing).toBe('gateway')
+      expect(st.detail).toContain('http://127.0.0.1:8687/v1')
     } finally {
       delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
       h.restore()
