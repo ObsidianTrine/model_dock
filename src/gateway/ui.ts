@@ -3711,14 +3711,15 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         '<p class="desc-sm"><span data-i18n="厂商支持哪个协议就填哪行（至少一行）；地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。||Fill in the rows for the protocols your vendor supports (at least one); /v1 and /v3 suffixes are vendor-defined API versions — copy from the docs; Codex speaks Responses only.">厂商支持哪个协议就填哪行（至少一行）；地址末尾的 /v1、/v3 是厂商自定的版本号，照抄厂商文档即可；Codex 只认 Responses。</span>' + (st.docsHtml ? ' ' + st.docsHtml : '') + '</p>'
     }
     function load(o) {
-      // o = { name, namePlaceholder, baseUrl, protocol, endpoints, presetEndpoints, docsHtml }
+      // o = { name, namePlaceholder, baseUrl, protocol, endpoints, docsHtml }
       st.docsHtml = o.docsHtml || ''
       root.innerHTML = html()
       var nameEl = $('#' + gid('Name'))
       nameEl.value = o.name || ''
       // 占位符随场景变化（预设=留空用厂商默认名；自定义=起名示例），带 data-i18n-ph 让语言切换跟随
       if (o.namePlaceholder) { nameEl.setAttribute('placeholder', i18nPick(o.namePlaceholder)); nameEl.setAttribute('data-i18n-ph', o.namePlaceholder) }
-      // 三行协议地址：endpoints 优先，默认协议那行回落 base_url（base_url 即默认协议端点）
+      // 三行协议地址：endpoints 优先，默认协议那行回落 base_url（base_url 即默认协议端点）。
+      // 刻意不做厂商预设回填：空行 = 用户显式不用该协议（尤其编辑场景，回填会让删掉的地址复活）
       var proto = o.protocol || 'openai'
       var ep = o.endpoints || {}
       var rows = {
@@ -3729,17 +3730,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       $('#' + gid('EndAnthropic')).value = rows.anthropic
       $('#' + gid('EndOpenai')).value = rows.openai
       $('#' + gid('EndResponses')).value = rows.responses
-      // 已知厂商补全空行：只填空字段
-      var pe = o.presetEndpoints
-      if (pe) {
-        var fill = function (id, v) {
-          var el = $('#' + id)
-          if (!el.value && v) { el.value = v; el.title = t('已按厂商预设自动填充，可修改', 'Pre-filled from the vendor preset; editable') }
-        }
-        fill(gid('EndAnthropic'), pe.anthropic)
-        fill(gid('EndOpenai'), pe.openai)
-        fill(gid('EndResponses'), pe.responses)
-      }
       applyI18nTree(root)
     }
     function collect() {
@@ -4292,33 +4282,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     if (!s) return
     editing = id
     $('#editTitle').textContent = t('编辑「', 'Edit "') + s.label + t('」', '"')
-    // 已知厂商按预设 base_url 匹配，自动补全多协议端点；只填空字段、不覆盖用户已保存的值。
-    // 同一 host 常挂多套餐预设（火山 coding/agent、智谱/Moonshot 双协议、DeepSeek）：
-    // 按 base_url 路径前缀取最具体（路径最长）的命中者，路径都对不上才退回首个 host 命中兜底，
-    // 否则编辑火山 Agent Plan 会被数组在前的 Coding Plan 预设填成 /api/coding/v3
-    // Codex 只支持 Responses 协议（新版已移除 wire_api=chat），预填保存后接入即可直接用
-    var hostOf = function (u) { try { return new URL(u).host.toLowerCase() } catch (e) { return '' } }
-    var baseOf = function (u) {
-      // 模板串内正则反斜杠会被转义吃掉，去尾斜杠用字符串方式写
-      try { var x = new URL(u); var p = x.pathname; while (p.slice(-1) === '/') p = p.slice(0, -1); return x.origin.toLowerCase() + p } catch (e) { return '' }
-    }
-    var svcBase = baseOf(s.base_url)
-    var pe = null
-    var peScore = -1
-    ;(view.presets || []).forEach(function (p) {
-      if (!p.endpoints || hostOf(p.base_url) !== hostOf(s.base_url)) return
-      // 打分：base_url 前缀命中（相等或其子路径）= 预设路径长度，仅 host 命中 = 0；同分先到先得保持旧兜底行为
-      // anthropic 行缺省回落预设 base_url（anthropic 预设的该协议地址就存在 base_url 上）
-      var pb = baseOf(p.base_url)
-      var score = pb && (svcBase === pb || svcBase.indexOf(pb + '/') === 0) ? pb.length : 0
-      if (peScore >= score) return
-      peScore = score
-      pe = {
-        anthropic: (p.endpoints && p.endpoints.anthropic) || (p.protocol === 'anthropic' ? p.base_url : '') || '',
-        openai: (p.endpoints && p.endpoints.openai) || '',
-        responses: (p.endpoints && p.endpoints.responses) || '',
-      }
-    })
+    // 编辑时不做厂商预设回填：表单里每个地址行只反映用户已保存的值，留空 = 用户显式不用该协议。
+    // （曾按 host 匹配预设自动补全空行——用户删掉的端点会被猜回来，且回填后保存会把协议静默翻回
+    //  anthropic 优先的推导，已移除；添加流程的预设填充见 pickPreset，属用户显式选择，保留。）
     efEp.load({
       name: s.label,
       baseUrl: s.base_url,
@@ -4328,7 +4294,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         openai: (s.endpoints && s.endpoints.openai) || '',
         responses: (s.endpoints && s.endpoints.responses) || '',
       },
-      presetEndpoints: pe,
     })
     // 安全模型：服务端不再回传 Key 明文；留空 = 不修改（空输入时 efSave 不会带 key 字段）
     $('#efKey').value = ''
