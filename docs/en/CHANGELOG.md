@@ -13,6 +13,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **No more false "waiting timed out" during healthy updates**: the console waited on a fixed 5-minute total clock, flagging large packages on slow links; it now keeps waiting as long as progress advances and only flags after 10 minutes of no movement.
 - **dsh / ZCode falsely warn "client file points elsewhere"**: when an OpenAI-protocol service was pinned, the attach-status check still compared against the old gateway address without the `/v1` suffix, so the newly written address was misread as "written by another ModelDock instance" and "Rewrite for this gateway" could never clear the warning; both canonical gateway addresses (with and without `/v1`) are now recognized.
 - **Latency-test failures no longer blow up the services list**: failure details used to stretch the service row across the page; they now clamp to a single inline line (hover for the full text, click to copy it) and lead with "cause → suggestion" instead of a raw JSON dump.
+- **The tray "Update now" log is no longer garbled**: when an update was started multiple times, the log writers overwrote each other's positions, turning the whole file into mojibake; the log is now written in append mode (with a timestamped separator per run), so every run stays readable.
+- **Updates can no longer be started twice at once**: clicking "Update now" while a previous update is still running now shows a wait prompt instead of launching a second updater (two updaters would stop the gateway and overwrite the install over each other); repeating the command line gets a clear error as well.
 
 ## [1.1.3] - 2026-10-17
 

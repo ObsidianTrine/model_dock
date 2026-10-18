@@ -94,6 +94,20 @@ func readUpdateProgressFile() -> UpdateProgressFile? {
     return p
 }
 
+/// update-tray.log 轮转：超 1MB 换 .1；内容已损坏（非法 UTF-8，旧版固定偏移写入互踩所致）换 .bad。
+/// 损坏字节不会自愈，macOS 阅读器会因它整份按 Latin-1 显示；换名留档，下次更新从新文件写起
+private func rotateUpdateLogIfNeeded(_ path: String) {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return }
+    let size = (attrs[.size] as? Int) ?? 0
+    guard size > 0 else { return }
+    let data = FileManager.default.contents(atPath: path)
+    let corrupt = data != nil && String(data: data!, encoding: .utf8) == nil
+    guard size > 1024 * 1024 || corrupt else { return }
+    let target = "\(path).\(corrupt ? "bad" : "1")"
+    try? FileManager.default.removeItem(atPath: target)
+    try? FileManager.default.moveItem(atPath: path, toPath: target)
+}
+
 /// 网关可执行文件：优先打包形态（与托盘同目录的主程序），回落已安装 app 与 CLI 链接
 func gatewayBinary() -> String? {
     let selfPath = CommandLine.arguments.first ?? "./ModelDockTray"
@@ -187,6 +201,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var updateActionGen = 0
     var updatePanel: ProgressPanel?
     var updateTimer: Timer?
+    // 更新子进程在途标志：进度文件尚未首写的短窗兜底（拉起后几秒内），长窗以磁盘进度为准
+    var updating = false
+    var updatingSince = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // 不占 Dock，仅菜单栏
@@ -323,10 +340,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(clean)
 
         // 检查更新：网关运行中走网关缓存接口（24h TTL / 失败 30min 退避，与控制台同源，TTL 内不打 GitHub）；
-        // 网关未运行退回 CLI 现查。进行中菜单项置灰防连点，进度在小窗可见
-        let upd = NSMenuItem(title: checkingUpdate ? "检查中…" : "检查更新…", action: checkingUpdate ? nil : #selector(checkUpdateClicked), keyEquivalent: "")
+        // 网关未运行退回 CLI 现查。检查/更新进行中菜单项置灰防连点——更新中再拉起会与在途更新互踩日志与安装
+        let busy = checkingUpdate || updateInFlight()
+        let upd = NSMenuItem(title: checkingUpdate ? "检查中…" : (busy ? "更新中…" : "检查更新…"), action: busy ? nil : #selector(checkUpdateClicked), keyEquivalent: "")
         upd.target = self
-        upd.isEnabled = !checkingUpdate && gatewayBinary() != nil
+        upd.isEnabled = !busy && gatewayBinary() != nil
         menu.addItem(upd)
 
         if !alive {
@@ -523,8 +541,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             a.addButton(withTitle: "稍后")
             let answer = a.runModal()
             if answer == .alertFirstButtonReturn {
-                startUpdateCli()
-                showUpdateApplyPanel(target: st.latest ?? "")
+                if startUpdateCli() {
+                    showUpdateApplyPanel(target: st.latest ?? "")
+                }
             } else if let urlStr = st.htmlUrl, answer == .alertSecondButtonReturn, let url = URL(string: urlStr) {
                 NSWorkspace.shared.open(url)
             }
@@ -597,8 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if releaseUrl != nil { a.addButton(withTitle: "打开发布页") } // 无链接就不摆无用按钮
             a.addButton(withTitle: "稍后")
             let answer = a.runModal()
-            if answer == .alertFirstButtonReturn {
-                startUpdateCli()
+            if answer == .alertFirstButtonReturn, startUpdateCli() {
                 let b = NSAlert()
                 b.messageText = version.isEmpty ? "正在更新" : "正在更新到 v\(version)"
                 b.informativeText = "下载校验完成后自动重启 ModelDock；期间网关会短暂中断。"
@@ -633,29 +651,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return URL(string: String(text[r]))
     }
 
+    /// 更新是否在途：磁盘进度为准（update --yes 子进程写的进度，10 分钟未刷新自动过期，
+    /// 见 readUpdateProgressFile）；内存标志只兜进度文件尚未首写的短窗——更新刚拉起、
+    /// 第一次进度还没落盘时防连点。done/failed 一律视为已收尾，即使进度小窗没开着。
+    private func updateInFlight() -> Bool {
+        if updating, Date().timeIntervalSince(updatingSince) < 60 { return true }
+        if let p = readUpdateProgressFile() { return p.stage != "done" && p.stage != "failed" }
+        return false
+    }
+
     /// 就地更新：分离跑 `modeldock update --yes`（弹窗里的「立即更新」即用户确认），
     /// 输出追加到 logs/update-tray.log。更新流程会停掉托盘自身（换包后由新版自动拉起），故不等待子进程。
-    private func startUpdateCli() {
-        guard let bin = gatewayBinary() else { return }
+    /// 返回是否真正拉起：在途更新被拒绝时返回 false，调用方不再弹进度窗。
+    @discardableResult
+    private func startUpdateCli() -> Bool {
+        guard let bin = gatewayBinary() else { return false }
+        if updateInFlight() {
+            let a = NSAlert()
+            a.messageText = "更新正在进行中"
+            a.informativeText = "上一个更新流程尚未完成，请等它结束（或查看进度小窗）后再试。"
+            a.runModal()
+            return false
+        }
+        updating = true
+        updatingSince = Date()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = ["update", "--yes"]
         let logDir = modeldockHome() + "/logs"
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/update-tray.log"
-        if !FileManager.default.fileExists(atPath: logPath) {
-            FileManager.default.createFile(atPath: logPath, contents: nil)
-        }
+        rotateUpdateLogIfNeeded(logPath)
+        // O_APPEND 打开（旧版 seekToEndOfFile 只定位一次）：多个更新进程各按陈旧偏移写同一份日志
+        // 会互踩，UTF-8 多字节字符被劈开成非法序列，macOS 阅读器整份按 Latin-1 显示成乱码；
+        // O_APPEND 由内核每次 write 定位到当前 EOF，多进程追加互不干扰。
         // 子进程自己持有日志句柄：托盘被更新流程停掉后，日志照常写入（失败原因可查）
-        if let fh = FileHandle(forWritingAtPath: logPath) {
-            fh.seekToEndOfFile()
+        let fd = open(logPath.cString(using: .utf8)!, O_CREAT | O_WRONLY | O_APPEND, 0o644)
+        if fd >= 0 {
+            let df = DateFormatter()
+            df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            fh.write(Data("\n---- \(df.string(from: Date())) 托盘发起更新 ----\n".utf8))
             proc.standardOutput = fh
             proc.standardError = fh
         } else {
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice
         }
-        try? proc.run()
+        do {
+            try proc.run()
+            return true
+        } catch {
+            updating = false // 拉起失败：放开防重入，否则这一轮托盘永远点不动更新
+            return false
+        }
     }
 
     /// 清理数据：弹窗确认后调主程序 CLI `reset --yes --deep`（清理逻辑全在 CLI，
