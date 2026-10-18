@@ -1222,6 +1222,23 @@ describe('zcode adapter', () => {
     }
   })
 
+  it('provider_config.json 内容不是 JSON 对象时明确中止（不覆盖用户的文件）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      await atomicWrite(path.join(v2, 'provider_config.json'), 'null\n', 0o600)
+      await withConfig(baseCfg())
+      await expect(
+        zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.toThrow(/不是 JSON 对象/)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('重接时清掉 ZCode 侧给 modeldock 留下的智能规则（同 model 双声明会整份拒收）', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
@@ -1237,8 +1254,12 @@ describe('zcode adapter', () => {
             config: {
               providerConfigRules: { providerRules: [] },
               modelConfigRules: {
-                // 用户曾在 ZCode 里给 modeldock 的模型选「推荐配置」，ZCode 写下智能规则
-                providerModelRules: [{ providerId: 'modeldock', modelId: 'm1', config: { properties: { contextWindow: 8000 } } }],
+                // 用户曾在 ZCode 里给 modeldock 的模型选「推荐配置」，ZCode 写下智能规则：
+                // m1 会与 ModelDock 写的手动规则撞车（必须清），m2 没 metadata 不写手动规则（应保留）
+                providerModelRules: [
+                  { providerId: 'modeldock', modelId: 'm1', config: { properties: { contextWindow: 8000 } } },
+                  { providerId: 'modeldock', modelId: 'm2', config: { enabled: false } },
+                ],
                 manualProviderModelRules: [],
               },
             },
@@ -1266,7 +1287,8 @@ describe('zcode adapter', () => {
       expect(plan.notes.some((n) => n.includes('整份个人供应商配置'))).toBe(false)
       const after = JSON.parse(plan.changes[0].after as string)
       const smart = after.config.modelConfigRules.providerModelRules.filter((r: any) => r.providerId === 'modeldock')
-      expect(smart).toHaveLength(0)
+      // 只清撞车的 m1；m2 的智能选择（用户设置的 enabled:false）原样保留，不被静默重置
+      expect(smart).toEqual([{ providerId: 'modeldock', modelId: 'm2', config: { enabled: false } }])
       // 手动规则照旧写入；status 不再报冲突
       expect(after.config.modelConfigRules.manualProviderModelRules.some((r: any) => r.providerId === 'modeldock')).toBe(true)
       await applyChanges('zcode', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })

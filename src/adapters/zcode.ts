@@ -406,6 +406,15 @@ export const zcodeAdapter: HarnessAdapter = {
 
     // 现行存储：provider_config.json 个人供应商
     const root = personalText !== null ? (parseJsonStrict(personalText, personalPath) as ZcodePersonalConfig) : freshPersonalConfig()
+    if (!root || typeof root !== 'object' || Array.isArray(root)) {
+      throw new AdapterError(
+        t(
+          '{file} 内容不是 JSON 对象，已中止（未做任何改动）；请修正或删除该文件后重新接入',
+          '{file} does not contain a JSON object; aborted (nothing changed). Fix or delete the file and attach again',
+          { file: personalPath }
+        )
+      )
+    }
     const pconf = (root.config ??= {})
     const rules = ((pconf.providerConfigRules ??= {}).providerRules ??= [])
     pconf.providerConfigRules.providerRules = rules.filter((r) => r?.providerId !== PROVIDER_ID)
@@ -420,8 +429,9 @@ export const zcodeAdapter: HarnessAdapter = {
       },
     })
     const mconf = (pconf.modelConfigRules ??= { providerModelRules: [], manualProviderModelRules: [] })
-    mconf.providerModelRules ??= []
-    const manual = (mconf.manualProviderModelRules ??= []).filter((r) => r?.providerId !== PROVIDER_ID)
+    mconf.providerModelRules = Array.isArray(mconf.providerModelRules) ? mconf.providerModelRules : []
+    const existingManual = Array.isArray(mconf.manualProviderModelRules) ? mconf.manualProviderModelRules : []
+    const manual = existingManual.filter((r) => r?.providerId !== PROVIDER_ID)
     for (const mid of modelIds) {
       // 配置缺上下文/输出时走填充链（内置表 → models.dev 目录）补齐，补不齐的仍按「推荐配置」兜底不写规则
       const ruleConfig = modelRuleConfig(resolvedModelView(mid, route.modelMap[mid], provider?.base_url))
