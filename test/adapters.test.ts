@@ -1059,6 +1059,7 @@ describe('zcode adapter', () => {
 
       const st = await zcodeAdapter.status(emptyConfig(), 8687)
       expect(st.pointing).toBe('unknown')
+      expect(st.detail.startsWith('⚠ ')).toBe(true) // 控制台 detail 是灰字，靠 ⚠ 提示用户
       expect(st.detail).toContain('openai-completions')
       expect(st.detail).toContain('ZCode 会忽略整份个人供应商配置')
     } finally {
