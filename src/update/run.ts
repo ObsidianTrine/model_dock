@@ -36,6 +36,7 @@ import {
 import { extractArchive } from './transfer.js'
 import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
+import { acquireUpdateLock } from './lock.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
@@ -95,6 +96,17 @@ function logReleaseNotes(m: ReleaseManifest, log: (msg: string) => void): void {
 }
 
 export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult> {
+  // 跨进程互斥：托盘 / Web 控制台 / 手动 CLI 三条入口都可能发起，并发更新会互相
+  // 停网关、互相替换安装位置，还会把同一份 update 日志写花（update.lock）
+  const release = await acquireUpdateLock()
+  try {
+    return await runUpdateOnce(opts)
+  } finally {
+    release()
+  }
+}
+
+async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   const log = opts.log ?? ((m: string) => console.log(m))
   const deps = opts.deps ?? defaultInstallDeps()
   const execPath = opts.execPath ?? process.execPath
