@@ -358,7 +358,7 @@ a{color:var(--accent)}
 .testline{font-size:var(--fs-sm);margin-top:6px}
 .testline.ok{color:var(--ok)}
 .testline.err{color:var(--err)}
-.testres{font-size:var(--fs-xs);margin-right:10px;color:var(--muted);white-space:nowrap}
+.testres{font-size:var(--fs-xs);margin-right:10px;color:var(--muted);white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 .testres.ok{color:var(--ok)}
 .testres.err{color:var(--err)}
 .editform label{display:block;font-size:var(--fs-sm);color:var(--muted);margin:12px 0 0}
@@ -1978,16 +1978,40 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         }
       }
     })
+    // 探测失败文案瘦身：api() 抛的「HTTP 5xx: {json}」里若有结构化 err/hint 就只取用这两段，
+    // 避免整包 JSON 上屏（截断由 .testres 的 ellipsis 兜底，这里让常用路径本就短）
+    function probeErrMsg(e) {
+      var m = (e && e.message) || ''
+      var i = m.indexOf('{')
+      if (i >= 0) {
+        try {
+          var j = JSON.parse(m.slice(i))
+          if (j && (j.err || j.hint)) return (j.err || '') + (j.hint ? (j.err ? ' → ' : '') + j.hint : '')
+        } catch (e2) { /* 响应体不是 JSON，原样返回 */ }
+      }
+      return m
+    }
     document.querySelectorAll('[data-ping]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-ping')
         var lbl = document.getElementById('pingres-' + id)
         if (!lbl) return
+        // 点击复制全文（截断后细节不丢，复制反馈=文案翻转）；title 悬浮看全文
+        lbl.onclick = function () {
+          var full = lbl.title
+          if (!full) return
+          copyText(full, function () {
+            lbl.textContent = '✓ ' + t('已复制', 'Copied')
+            if (lbl._copyT) clearTimeout(lbl._copyT)
+            lbl._copyT = setTimeout(function () { lbl.textContent = full }, 1600)
+          })
+        }
         b.disabled = true
         b.textContent = t('测中…', 'Pinging…')
         lbl.hidden = false
         lbl.className = 'testres'
         lbl.textContent = t('检测中…', 'Checking…')
+        lbl.title = ''
         api('/test', { method: 'POST', body: JSON.stringify({ provider: id, mode: 'ping' }) })
           .then(function (r) {
             lbl.hidden = false
@@ -1995,8 +2019,14 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
             lbl.textContent = r.ok
               ? '✓ ' + t('延迟 ', 'latency ') + (r.ms ?? '?') + 'ms'
               : '✗ ' + t('网络不通 ', 'unreachable ') + (r.err || '') + (r.hint ? ' → ' + r.hint : '')
+            lbl.title = lbl.textContent
           })
-          .catch(function (e) { lbl.hidden = false; lbl.className = 'testres err'; lbl.textContent = '✗ ' + t('探测失败：', 'Ping failed: ') + e.message })
+          .catch(function (e) {
+            lbl.hidden = false
+            lbl.className = 'testres err'
+            lbl.textContent = '✗ ' + t('探测失败：', 'Ping failed: ') + probeErrMsg(e)
+            lbl.title = lbl.textContent
+          })
           .then(function () { b.disabled = false; b.textContent = t('延迟', 'Ping') })
       }
     })
