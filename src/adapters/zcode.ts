@@ -142,8 +142,9 @@ function personalConfigIssues(root: ZcodePersonalConfig): string[] {
           )
         )
       }
+      // group 在 ZCode schema 里可空（nullable optional）：null 是合法「未分组」，只查非法字符串
       const group = rule?.config?.group
-      if (group !== undefined && !(ZCODE_GROUPS as readonly string[]).includes(String(group))) {
+      if (group != null && !(ZCODE_GROUPS as readonly string[]).includes(String(group))) {
         issues.push(
           t('供应商「{id}」的分组「{value}」ZCode 不认', 'the group "{value}" of provider "{id}" is not accepted by ZCode', {
             id: id || '-',

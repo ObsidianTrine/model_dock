@@ -1063,6 +1063,52 @@ describe('zcode adapter', () => {
     }
   })
 
+  it('ZCode 允许的形态不误报（null 分组、无 api 的 account 条目）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: {
+                providerRules: [
+                  {
+                    providerId: 'modeldock',
+                    providerName: 'ModelDock',
+                    config: {
+                      group: null, // ZCode schema 里 nullable optional，合法
+                      access: { type: 'api-key', apiKey: 'mdk_x' },
+                      api: { type: 'openai-chat-completions', baseUrl: 'http://127.0.0.1:8687/v1' },
+                    },
+                  },
+                  // account provider 只有 access/builtinModelIds，没有 api —— 也不该被当成坏条目
+                  { providerId: 'account:zai', config: { access: { type: 'zhipu-account' } } },
+                ],
+              },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+
+      const st = await zcodeAdapter.status(emptyConfig(), 8687)
+      expect(st.pointing).toBe('gateway')
+      expect(st.detail).toContain('http://127.0.0.1:8687/v1')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('接入时若文件里还有别人写坏的条目，明确提示 ZCode 会连 ModelDock 一起忽略', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
