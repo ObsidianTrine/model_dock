@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { directAttachNote } from './shared.js'
+import { directAttachNote, directResponsesEndpointNote } from './shared.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -144,14 +144,7 @@ export const codexAdapter: HarnessAdapter = {
     }
     if (d) {
       directNotes.push(directAttachNote(directBase))
-      if (!d.base_url_responses) {
-        directNotes.push(
-          t(
-            '提示: 该服务未配置 Responses 协议端点，直连使用了默认地址；请确认上游支持 Responses API，或在「编辑服务」里补填',
-            'Note: this service has no Responses protocol endpoint, so direct mode used the default URL; make sure the upstream supports the Responses API, or fill it in under Edit Service'
-          )
-        )
-      }
+      if (!d.base_url_responses) directNotes.push(directResponsesEndpointNote())
     }
     if (opts.setDefault) {
       root.model_provider = 'modeldock'

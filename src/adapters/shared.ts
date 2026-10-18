@@ -72,36 +72,19 @@ export function gatewayWire(provider: { protocol: Protocol } | undefined): {
     : { api: 'anthropic-messages', base: gatewayBase }
 }
 
-/** ZCode 的接口格式枚举。ZCode 对整份个人供应商配置（~/.zcode/v2/provider_config.json）做严格
- *  Zod 校验（源码 packages/provider/src/config/provider-data-schema.ts）：任一条目字段非法就丢弃
- *  整份文件、界面里一个自定义供应商都不显示，且只在日志里留一行 warn。因此接入写值、读回校验
- *  必须共用这份枚举，不要复用 dsh 的 llm-pi wire 名（那是 openai-completions，ZCode 不认）。 */
-export const ZCODE_API_TYPES = ['anthropic-messages', 'openai-chat-completions', 'openai-responses'] as const
-export type ZcodeApiType = (typeof ZCODE_API_TYPES)[number]
-
-export function isZcodeApiType(value: unknown): value is ZcodeApiType {
-  return typeof value === 'string' && (ZCODE_API_TYPES as readonly string[]).includes(value)
-}
-
-/** 协议 → ZCode api.type：openai 走 chat completions，responses 走 responses（ZCode 两种都支持），
- *  其余按 anthropic messages */
-export function zcodeApiType(protocol: Protocol | undefined): ZcodeApiType {
-  if (protocol === 'openai') return 'openai-chat-completions'
-  if (protocol === 'responses') return 'openai-responses'
-  return 'anthropic-messages'
-}
-
-/** ZCode 的 baseUrl 形态与 api.type 配对：openai/responses 带 /v1（ZCode 只追加 /chat/completions
- *  或 /responses），anthropic 不带 /v1（ZCode 追加 /v1/messages）。 */
-export function zcodeGatewayBase(protocol: Protocol | undefined, port: number): string {
-  return protocol === 'openai' || protocol === 'responses' ? gatewayBaseOpenAI(port) : gatewayBase(port)
-}
-
 /** 网关模式接入状态判定：客户端 base 为本网关两种规范形态（anthropic 不带 /v1、openai 带 /v1）
  *  之一即本网关。gatewayWire 起写入形态随服务协议二选一，status 只认旧形态会把新写入误判
  *  为「其他实例写入」且重写无法消除（重写幂等写回同形态）。 */
 export function isGatewayBase(base: string | undefined, port: number): boolean {
   return base === gatewayBase(port) || base === gatewayBaseOpenAI(port)
+}
+
+/** 「未配置 Responses 协议端点、直连回退了默认地址」note（codex / zcode 同款） */
+export function directResponsesEndpointNote(): string {
+  return t(
+    '提示: 该服务未配置 Responses 协议端点，直连使用了默认地址；请确认上游支持 Responses API，或在「编辑服务」里补填',
+    'Note: this service has no Responses protocol endpoint, so direct mode used the default URL; make sure the upstream supports the Responses API, or fill it in under Edit Service'
+  )
 }
 
 /** 「独立直连已写入明文 Key」note（codex/dsh/zcode/provider-json/packs/workbuddy 手抄收敛为同一文案）。
