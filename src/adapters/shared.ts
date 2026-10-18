@@ -37,7 +37,8 @@ export function routeModelNote(routeName: string, provider: string, count: numbe
   )
 }
 
-/** 直连 wire 选择：dsh 与 ZCode 同源 llm-pi wire（anthropic-messages / openai-completions），逐字同款 */
+/** 直连 wire 选择：dsh（llm-pi 插件）专用。ZCode 的 api.type 是另一套枚举，走下方 zcodeApiType，
+ *  两者不可互换——dsh 的 openai wire 名 openai-completions 写进 ZCode 会让整份 provider_config.json 被拒收。 */
 export function directWire(d: AttachOptions['direct'] | undefined): {
   api: 'anthropic-messages' | 'openai-completions' | undefined
   base: string | undefined
@@ -48,7 +49,7 @@ export function directWire(d: AttachOptions['direct'] | undefined): {
   }
 }
 
-/** 直连 Responses 协议警告（dsh/zcode 同款，只差客户端名） */
+/** 直连 Responses 协议警告（dsh 专用：llm-pi 没有 responses wire，ZCode 自己有 openai-responses 不用此提示） */
 export function directResponsesNote(label: string): string {
   return t(
     '提示: 该服务是 Responses 协议，{label} 不支持该 wire 类型；直连条目按 anthropic-messages 写入，请确认上游兼容',
@@ -57,7 +58,7 @@ export function directResponsesNote(label: string): string {
   )
 }
 
-/** 网关模式 wire 选择：与 directWire 同规则，跟随当前路由服务的协议。网关不做跨协议转换，
+/** 网关模式 wire 选择（dsh/llm-pi 专用）：跟随当前路由服务的协议。网关不做跨协议转换，
  *  客户端说哪门 wire 必须与服务协议一致，否则 anthropic 路径拼上 openai 端点必 404。
  *  openai 协议 → openai-completions 且 base 带 /v1（llm-pi 的 openai wire 追加 /chat/completions，
  *  落到网关规范路径 /v1/chat/completions，ROUTED_PATH_RE 的模型改写才生效）；
@@ -69,6 +70,31 @@ export function gatewayWire(provider: { protocol: Protocol } | undefined): {
   return provider?.protocol === 'openai'
     ? { api: 'openai-completions', base: gatewayBaseOpenAI }
     : { api: 'anthropic-messages', base: gatewayBase }
+}
+
+/** ZCode 的接口格式枚举。ZCode 对整份个人供应商配置（~/.zcode/v2/provider_config.json）做严格
+ *  Zod 校验（源码 packages/provider/src/config/provider-data-schema.ts）：任一条目字段非法就丢弃
+ *  整份文件、界面里一个自定义供应商都不显示，且只在日志里留一行 warn。因此接入写值、读回校验
+ *  必须共用这份枚举，不要复用 dsh 的 llm-pi wire 名（那是 openai-completions，ZCode 不认）。 */
+export const ZCODE_API_TYPES = ['anthropic-messages', 'openai-chat-completions', 'openai-responses'] as const
+export type ZcodeApiType = (typeof ZCODE_API_TYPES)[number]
+
+export function isZcodeApiType(value: unknown): value is ZcodeApiType {
+  return typeof value === 'string' && (ZCODE_API_TYPES as readonly string[]).includes(value)
+}
+
+/** 协议 → ZCode api.type：openai 走 chat completions，responses 走 responses（ZCode 两种都支持），
+ *  其余按 anthropic messages */
+export function zcodeApiType(protocol: Protocol | undefined): ZcodeApiType {
+  if (protocol === 'openai') return 'openai-chat-completions'
+  if (protocol === 'responses') return 'openai-responses'
+  return 'anthropic-messages'
+}
+
+/** ZCode 的 baseUrl 形态与 api.type 配对：openai/responses 带 /v1（ZCode 只追加 /chat/completions
+ *  或 /responses），anthropic 不带 /v1（ZCode 追加 /v1/messages）。 */
+export function zcodeGatewayBase(protocol: Protocol | undefined, port: number): string {
+  return protocol === 'openai' || protocol === 'responses' ? gatewayBaseOpenAI(port) : gatewayBase(port)
 }
 
 /** 网关模式接入状态判定：客户端 base 为本网关两种规范形态（anthropic 不带 /v1、openai 带 /v1）
