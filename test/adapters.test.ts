@@ -928,7 +928,7 @@ describe('dsh adapter', () => {
 })
 
 describe('zcode adapter', () => {
-  it('网关模式 wire 跟随服务协议：openai 服务下发 openai-completions 且 base 带 /v1', async () => {
+  it('网关模式 wire 跟随服务协议：openai 服务下发 ZCode 认的 openai-chat-completions 且 base 带 /v1', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
     try {
@@ -969,7 +969,331 @@ describe('zcode adapter', () => {
 
       const after = JSON.parse(fs.readFileSync(pp, 'utf8'))
       const rule = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
-      expect(rule.config.api).toEqual({ type: 'openai-completions', baseUrl: 'http://127.0.0.1:8687/v1' })
+      // ZCode 的 api.type 是它自己的枚举（不是 dsh 的 openai-completions）：写错会让 ZCode 丢弃整份配置
+      expect(rule.config.api).toEqual({ type: 'openai-chat-completions', baseUrl: 'http://127.0.0.1:8687/v1' })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('网关模式 responses 服务：写 openai-responses 且 base 带 /v1（ZCode 追加 /responses 落到网关规范路径）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          { schemaVersion: 1, config: { providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            name: 'responses 服务',
+            base_url: 'https://r.example.com/v1',
+            protocol: 'responses',
+            auth_style: 'bearer',
+            key_ref: 'file:k',
+            models: { m1: { source: 'manual' } },
+          },
+        },
+      })
+
+      const plan = await zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after as string)
+      const rule = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
+      expect(rule.config.api).toEqual({ type: 'openai-responses', baseUrl: 'http://127.0.0.1:8687/v1' })
+      // /v1 形态也要被判为本网关（不能被当成「其他实例写入」）
+      await applyChanges('zcode', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const st = await zcodeAdapter.status(await loadConfig(), 8687)
+      expect(st.pointing).toBe('gateway')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('文件里有 ZCode 不认的条目时 status 不再假绿灯（报「整份配置会被忽略」）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      // 历史版本 ModelDock 写下的非法 api.type：ZCode 加载失败 → 界面空白，但 baseUrl 仍指向网关
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: {
+                providerRules: [
+                  {
+                    providerId: 'modeldock',
+                    providerName: 'ModelDock',
+                    config: {
+                      group: 'standard-personal',
+                      access: { type: 'api-key', apiKey: 'mdk_x' },
+                      api: { type: 'openai-completions', baseUrl: 'http://127.0.0.1:8687/v1' },
+                    },
+                  },
+                ],
+              },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+
+      const st = await zcodeAdapter.status(emptyConfig(), 8687)
+      expect(st.pointing).toBe('unknown')
+      expect(st.detail.startsWith('⚠ ')).toBe(true) // 控制台 detail 是灰字，靠 ⚠ 提示用户
+      expect(st.detail).toContain('openai-completions')
+      expect(st.detail).toContain('ZCode 会忽略整份个人供应商配置')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('ZCode 允许的形态不误报（null 分组、无 api 的 account 条目）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: {
+                providerRules: [
+                  {
+                    providerId: 'modeldock',
+                    providerName: 'ModelDock',
+                    config: {
+                      group: null, // ZCode schema 里 nullable optional，合法
+                      access: { type: 'api-key', apiKey: 'mdk_x' },
+                      api: { type: 'openai-chat-completions', baseUrl: 'http://127.0.0.1:8687/v1' },
+                    },
+                  },
+                  // account provider 不能自带 access，config 为空对象是合法形态 —— 不该被当成坏条目
+                  { providerId: 'account:zai', config: {} },
+                  // api.type 在个人供应商 schema 里是 nullable optional（暂存草稿），null 不该报坏
+                  { providerId: 'draft', config: { api: { type: null, baseUrl: 'https://draft.example.com/v1' } } },
+                ],
+              },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+
+      const st = await zcodeAdapter.status(emptyConfig(), 8687)
+      expect(st.pointing).toBe('gateway')
+      expect(st.detail).toContain('http://127.0.0.1:8687/v1')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('接入时若文件里还有别人写坏的条目，明确提示 ZCode 会连 ModelDock 一起忽略', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: {
+                providerRules: [
+                  {
+                    providerId: 'broken',
+                    providerName: 'Broken',
+                    config: {
+                      group: 'standard-personal',
+                      access: { type: 'api-key', apiKey: 'sk-x' },
+                      api: { type: 'openai-completions', baseUrl: 'https://broken.example.com/v1' },
+                    },
+                  },
+                ],
+              },
+              modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      expect(plan.notes.some((n) => n.includes('整份个人供应商配置') && n.includes('broken'))).toBe(true)
+      // ModelDock 自己那条必须是合法值；坏条目原样保留（不擅自改用户/别的工具的配置）
+      const after = JSON.parse(plan.changes[0].after as string)
+      const ours = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
+      expect(ours.config.api.type).toBe('anthropic-messages')
+      expect(after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'broken').config.api.type).toBe(
+        'openai-completions'
+      )
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('ZCode 不认的各类字段都在 status 里报出来（分组 / 鉴权 / 重复 / 版本 / 列表 / 智能手动冲突）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      const rule = (over: Record<string, unknown>) => ({
+        providerId: 'x',
+        config: {
+          group: 'standard-personal',
+          access: { type: 'api-key', apiKey: 'sk-x' },
+          api: { type: 'openai-chat-completions', baseUrl: 'https://x.example.com/v1' },
+          ...over,
+        },
+      })
+      const base = (over: Record<string, unknown>) => ({
+        schemaVersion: 1,
+        config: {
+          providerConfigRules: { providerRules: [rule({})] },
+          modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+          ...over,
+        },
+      })
+      const cases: Array<[string, Record<string, unknown>]> = [
+        ['分组', base({ providerConfigRules: { providerRules: [rule({ group: 'zai-family' })] } })],
+        ['鉴权类型', base({ providerConfigRules: { providerRules: [rule({ access: { type: 'oauth' } })] } })],
+        // access 是 discriminatedUnion("type")：写了 access 就必须带合法 type
+        ['鉴权类型', base({ providerConfigRules: { providerRules: [rule({ access: {} })] } })],
+        ['account', base({ providerConfigRules: { providerRules: [{ ...rule({}), providerId: 'account:zai' }] } })],
+        ['重复', base({ providerConfigRules: { providerRules: [rule({}), rule({})] } })],
+        ['配置版本（schemaVersion）', { ...base({}), schemaVersion: 2 }],
+        ['providerRules', { schemaVersion: 1, config: { providerConfigRules: {}, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }],
+        [
+          '智能与手动',
+          base({
+            modelConfigRules: {
+              providerModelRules: [{ providerId: 'x', modelId: 'm1', config: {} }],
+              manualProviderModelRules: [{ providerId: 'x', modelId: 'm1', config: {} }],
+            },
+          }),
+        ],
+      ]
+      for (const [needle, root] of cases) {
+        await atomicWrite(pp, JSON.stringify(root, null, 2) + '\n', 0o600)
+        const st = await zcodeAdapter.status(emptyConfig(), 8687)
+        expect(st.pointing, needle).toBe('unknown')
+        expect(st.detail, needle).toContain(needle)
+      }
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('provider_config.json 内容不是 JSON 对象时明确中止（不覆盖用户的文件）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      await atomicWrite(path.join(v2, 'provider_config.json'), 'null\n', 0o600)
+      await withConfig(baseCfg())
+      await expect(
+        zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.toThrow(/不是 JSON 对象/)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('重接时清掉 ZCode 侧给 modeldock 留下的智能规则（同 model 双声明会整份拒收）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      const v2 = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(v2)
+      const pp = path.join(v2, 'provider_config.json')
+      await atomicWrite(
+        pp,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            config: {
+              providerConfigRules: { providerRules: [] },
+              modelConfigRules: {
+                // 用户曾在 ZCode 里给 modeldock 的模型选「推荐配置」，ZCode 写下智能规则：
+                // m1 会与 ModelDock 写的手动规则撞车（必须清），m2 没 metadata 不写手动规则（应保留）
+                providerModelRules: [
+                  { providerId: 'modeldock', modelId: 'm1', config: { properties: { contextWindow: 8000 } } },
+                  { providerId: 'modeldock', modelId: 'm2', config: { enabled: false } },
+                ],
+                manualProviderModelRules: [],
+              },
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            base_url: 'https://x.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: { m1: { source: 'manual', context_window: 131072, max_output: 8192 } },
+          },
+        },
+      })
+
+      const plan = await zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      // 冲突被清掉 → 不该再有「整份配置会被忽略」的警告
+      expect(plan.notes.some((n) => n.includes('整份个人供应商配置'))).toBe(false)
+      const after = JSON.parse(plan.changes[0].after as string)
+      const smart = after.config.modelConfigRules.providerModelRules.filter((r: any) => r.providerId === 'modeldock')
+      // 只清撞车的 m1；m2 的智能选择（用户设置的 enabled:false）原样保留，不被静默重置
+      expect(smart).toEqual([{ providerId: 'modeldock', modelId: 'm2', config: { enabled: false } }])
+      // 手动规则照旧写入；status 不再报冲突
+      expect(after.config.modelConfigRules.manualProviderModelRules.some((r: any) => r.providerId === 'modeldock')).toBe(true)
+      await applyChanges('zcode', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const st = await zcodeAdapter.status(await loadConfig(), 8687)
+      expect(st.pointing).toBe('gateway')
     } finally {
       delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
       h.restore()
@@ -2517,7 +2841,7 @@ describe('独立直连 Phase 2：dsh / codex / zcode / opencode / workbuddy', ()
     }
   })
 
-  it('zcode：access.apiKey 写上游真实 Key，api.type 随协议', async () => {
+  it('zcode（直连）：access.apiKey 写上游真实 Key，api.type 用 ZCode 枚举', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
     try {
@@ -2530,7 +2854,64 @@ describe('独立直连 Phase 2：dsh / codex / zcode / opencode / workbuddy', ()
       const rule = onDisk.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
       expect(rule.config.access.apiKey).toBe('sk-direct-plain')
       expect(rule.config.api.baseUrl).toBe('https://openai.up.example.com/v1')
-      expect(rule.config.api.type).toBe('openai-completions')
+      expect(rule.config.api.type).toBe('openai-chat-completions')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('zcode（直连）：responses 服务写 openai-responses + responses 端点（ZCode 自己支持该 wire）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      await withConfig({
+        ...dcfg(),
+        providers: {
+          p: {
+            ...dcfg().providers.p,
+            protocol: 'responses',
+            endpoints: { responses: 'https://resp.up.example.com/v1' },
+          },
+        },
+      })
+      const plan = await zcodeAdapter.planAttach(
+        {
+          ...directOpts,
+          direct: {
+            ...directOpts.direct,
+            base_url_responses: 'https://resp.up.example.com/v1',
+            protocol: 'responses' as const,
+          },
+        },
+        await loadConfig()
+      )
+      expect(plan.writtenBaseUrl).toBe('https://resp.up.example.com/v1')
+      await applyChanges('zcode', 'direct', plan.changes, { yes: true })
+      const p = path.join(h.home, '.zcode', 'v2', 'provider_config.json')
+      const onDisk = JSON.parse(fs.readFileSync(p, 'utf8'))
+      const rule = onDisk.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
+      expect(rule.config.api).toEqual({ type: 'openai-responses', baseUrl: 'https://resp.up.example.com/v1' })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('zcode（直连）：responses 服务缺 responses 端点时给出可操作提示', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      await withConfig({
+        ...dcfg(),
+        providers: { p: { ...dcfg().providers.p, protocol: 'responses' } },
+      })
+      const plan = await zcodeAdapter.planAttach(
+        { ...directOpts, direct: { ...directOpts.direct, protocol: 'responses' as const } },
+        await loadConfig()
+      )
+      expect(plan.writtenBaseUrl).toBe('https://api.up.example.com')
+      expect(plan.notes.some((n) => n.includes('未配置 Responses 协议端点'))).toBe(true)
     } finally {
       delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
       h.restore()

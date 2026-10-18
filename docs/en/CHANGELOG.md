@@ -5,6 +5,14 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **ModelDock is invisible after attaching ZCode (and your own providers vanish too)**: the API format written into ZCode used a value it does not recognize, so ZCode discarded the whole custom-provider config; ModelDock now writes the format ZCode expects and shows up in the model picker right after attaching.
+- **Attach status no longer shows a false green light**: when the file contains an entry ZCode rejects, the console now says the whole config will be ignored and which field to fix, instead of just reporting "pointing at the gateway".
+- **Attaching a Responses-protocol service**: both direct and gateway mode now target the Responses API instead of being treated as an Anthropic endpoint and failing with 404.
+
 ## [1.1.4] - 2026-10-18
 
 A batch of update-pipeline fixes: checks and downloads follow the system proxy, concurrent updates no longer interfere with each other, and dsh / ZCode attach status no longer misreports.

@@ -1,8 +1,10 @@
 import path from 'node:path'
 import { homeDir, readTextIfExists, t } from '../util/index.js'
-import type { Config, ModelMeta } from '../config/types.js'
+import type { Config, ModelMeta, Protocol } from '../config/types.js'
 import {
   AdapterError,
+  gatewayBase,
+  gatewayBaseOpenAI,
   isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
@@ -13,7 +15,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
-import { directAttachNote, directResponsesNote, directWire, gatewayWire, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
+import { directAttachNote, directResponsesEndpointNote, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -99,6 +101,138 @@ function modelRuleConfig(meta: ModelMeta | undefined): Record<string, unknown> |
 function findPersonalRule(root: ZcodePersonalConfig): ZcodePersonalRule | undefined {
   const rules = root.config?.providerConfigRules?.providerRules
   return Array.isArray(rules) ? rules.find((r) => r?.providerId === PROVIDER_ID) : undefined
+}
+
+/** ZCode 的接口格式枚举。ZCode 对整份个人供应商配置（~/.zcode/v2/provider_config.json）做严格
+ *  Zod 校验（源码 packages/provider/src/config/provider-data-schema.ts）：任一条目字段非法就丢弃
+ *  整份文件、界面里一个自定义供应商都不显示，且只在日志里留一行 warn。因此写入值与读回校验
+ *  必须共用这份枚举——不要复用 dsh 的 llm-pi wire 名（那是 openai-completions，ZCode 不认）。 */
+const ZCODE_API_TYPES = ['anthropic-messages', 'openai-chat-completions', 'openai-responses'] as const
+type ZcodeApiType = (typeof ZCODE_API_TYPES)[number]
+/** 个人供应商只允许 standard-personal（zai-family / bigmodel-family 是内置供应商专用的分组） */
+const ZCODE_PERSONAL_GROUPS = ['standard-personal'] as const
+const ZCODE_ACCESS_TYPES = ['api-key', 'zhipu-coding-plan-api-key', 'zhipu-account'] as const
+
+function isZcodeApiType(value: unknown): value is ZcodeApiType {
+  return typeof value === 'string' && (ZCODE_API_TYPES as readonly string[]).includes(value)
+}
+
+/** 协议 → ZCode api.type：openai 走 chat completions，responses 走 responses（ZCode 两种都支持），
+ *  其余按 anthropic messages */
+function zcodeApiType(protocol: Protocol | undefined): ZcodeApiType {
+  if (protocol === 'openai') return 'openai-chat-completions'
+  if (protocol === 'responses') return 'openai-responses'
+  return 'anthropic-messages'
+}
+
+/** ZCode 的 baseUrl 形态与 api.type 配对：openai/responses 带 /v1（ZCode 只追加 /chat/completions
+ *  或 /responses），anthropic 不带 /v1（ZCode 追加 /v1/messages）。 */
+function zcodeGatewayBase(protocol: Protocol | undefined, port: number): string {
+  return protocol === 'openai' || protocol === 'responses' ? gatewayBaseOpenAI(port) : gatewayBase(port)
+}
+
+/** 整份个人供应商配置的最小校验。ZCode 用严格 Zod schema 解析 provider_config.json：任一条目字段非法
+ *  （schemaVersion 不是 1、缺 providerRules、api.type / group / access.type 不在枚举、providerId 重复、
+ *  同一 provider/model 同时声明智能与手动规则）就会丢弃整份文件、界面里看不到任何自定义供应商
+ *  （日志只留一行 warn、状态行却仍是绿灯）。这里只覆盖能写坏这份文件的字段——ZCode 收紧 schema 时
+ *  要同步扩这张表；接入写值后的自检与 status 判定共用同一份判断。 */
+function personalConfigIssues(root: ZcodePersonalConfig | null | undefined): string[] {
+  const issues: string[] = []
+  if (!root || typeof root !== 'object') {
+    return [t('配置文件内容不是 JSON 对象', 'the config file is not a JSON object')]
+  }
+  if (root.schemaVersion !== 1) {
+    issues.push(
+      t('配置版本（schemaVersion）是 {value}，ZCode 只认 1', 'the config version (schemaVersion) is {value}; ZCode only accepts 1', {
+        value: String(root.schemaVersion ?? '-'),
+      })
+    )
+  }
+  if (!root.config || typeof root.config !== 'object') {
+    return [...issues, t('配置缺少 config 段', 'the config has no config section')]
+  }
+  const rules = root.config.providerConfigRules?.providerRules
+  if (!Array.isArray(rules)) {
+    issues.push(t('配置缺少供应商列表（providerRules）', 'the config has no providerRules list'))
+  } else {
+    const seen = new Set<string>()
+    for (const rule of rules) {
+      const id = typeof rule?.providerId === 'string' ? rule.providerId : ''
+      if (id === '') {
+        issues.push(t('存在没有 providerId 的供应商条目', 'a provider entry has no providerId'))
+        continue
+      }
+      if (seen.has(id)) {
+        issues.push(t('供应商 id「{id}」重复', 'duplicate provider id "{id}"', { id }))
+        continue
+      }
+      seen.add(id)
+      // 个人供应商的 api 用 sparseShape 构建，type 是 nullable optional（暂存中的草稿也合法），
+      // 所以只查「写了值但不是 ZCode 认的取值」——写错一个值才会让 ZCode 丢弃整份文件。
+      const api = rule?.config?.api
+      if (api?.type != null && !isZcodeApiType(api.type)) {
+        issues.push(
+          t(
+            '供应商「{id}」的接口格式「{value}」ZCode 不认（可选 {allowed}）',
+            'the api format "{value}" of provider "{id}" is not accepted by ZCode (allowed: {allowed})',
+            { id, value: String(api.type), allowed: ZCODE_API_TYPES.join(' / ') }
+          )
+        )
+      }
+      // group 在 ZCode schema 里可空（nullable optional）：null 是合法「未分组」
+      const group = rule?.config?.group
+      if (group != null && !(ZCODE_PERSONAL_GROUPS as readonly string[]).includes(String(group))) {
+        issues.push(
+          t('供应商「{id}」的分组「{value}」ZCode 不认', 'the group "{value}" of provider "{id}" is not accepted by ZCode', {
+            id,
+            value: String(group),
+          })
+        )
+      }
+      // access 是 discriminatedUnion("type")：只要写了 access 就必须带合法 type；
+      // account: 前缀的固定供应商不允许自带 access（access: null 也算写了，ZCode 会整份拒收）
+      const access = rule?.config?.access
+      if (id.startsWith('account:') && access !== undefined) {
+        issues.push(
+          t(
+            'account 供应商「{id}」不能自带鉴权配置（只能由 ZCode 内置配置声明）',
+            'account provider "{id}" cannot carry its own access config (only ZCode built-in config may declare it)',
+            { id }
+          )
+        )
+      } else if (access != null && !(ZCODE_ACCESS_TYPES as readonly string[]).includes(String(access.type))) {
+        issues.push(
+          t(
+            '供应商「{id}」的鉴权类型「{value}」ZCode 不认（可选 {allowed}）',
+            'the access type "{value}" of provider "{id}" is not accepted by ZCode (allowed: {allowed})',
+            { id, value: String(access.type ?? '-'), allowed: ZCODE_ACCESS_TYPES.join(' / ') }
+          )
+        )
+      }
+    }
+  }
+  const mconf = root.config.modelConfigRules
+  if (!Array.isArray(mconf?.providerModelRules) || !Array.isArray(mconf?.manualProviderModelRules)) {
+    issues.push(t('配置缺少模型规则列表', 'the config has no model rule lists'))
+    return issues
+  }
+  const key = (r: unknown) => {
+    const rule = r as { providerId?: unknown; modelId?: unknown } | undefined
+    return JSON.stringify([rule?.providerId, rule?.modelId])
+  }
+  const smartKeys = new Set(mconf.providerModelRules.map(key))
+  for (const rule of mconf.manualProviderModelRules) {
+    if (smartKeys.has(key(rule))) {
+      issues.push(
+        t(
+          '模型「{provider} / {model}」同时声明了智能与手动配置（ZCode 拒绝加载整份配置）',
+          'model "{provider} / {model}" declares both smart and manual config (ZCode refuses to load the whole config)',
+          { provider: String(rule?.providerId ?? '-'), model: String(rule?.modelId ?? '-') }
+        )
+      )
+    }
+  }
+  return issues
 }
 
 /**
@@ -252,17 +386,35 @@ export const zcodeAdapter: HarnessAdapter = {
 
     const changes: FileChange[] = []
 
-    // 直连：写上游真实 Key 与对应协议端点（directWire 与 dsh 共用 llm-pi wire 选择）；
-    // 网关模式同样跟随当前路由服务的协议（gatewayWire 与 directWire 同规则）
+    // 直连写上游真实 Key 与对应协议端点；网关模式同样跟随当前路由服务的协议。
+    // 这里的 type 是 ZCode 自己的枚举（openai-chat-completions / openai-responses / anthropic-messages），
+    // 不是 dsh 的 llm-pi wire 名——写错一个值，ZCode 会丢弃整份个人供应商配置（界面里一条都不显示）。
     const d = opts.direct
-    const { api: directApi, base: directBase } = directWire(d)
-    const gw = gatewayWire(provider)
-    if (d && d.protocol === 'responses') {
-      notes.push(directResponsesNote('ZCode'))
+    const protocol: Protocol = d ? d.protocol : (provider?.protocol ?? 'anthropic')
+    const apiType = zcodeApiType(protocol)
+    const directBase = d
+      ? protocol === 'openai'
+        ? (d.base_url_openai ?? d.base_url)
+        : protocol === 'responses'
+          ? (d.base_url_responses ?? d.base_url)
+          : d.base_url
+      : undefined
+    const baseUrl = directBase ?? zcodeGatewayBase(protocol, opts.gatewayPort)
+    if (d && protocol === 'responses' && !d.base_url_responses) {
+      notes.push(directResponsesEndpointNote())
     }
 
     // 现行存储：provider_config.json 个人供应商
     const root = personalText !== null ? (parseJsonStrict(personalText, personalPath) as ZcodePersonalConfig) : freshPersonalConfig()
+    if (!root || typeof root !== 'object' || Array.isArray(root)) {
+      throw new AdapterError(
+        t(
+          '{file} 内容不是 JSON 对象，已中止（未做任何改动）；请修正或删除该文件后重新接入',
+          '{file} does not contain a JSON object; aborted (nothing changed). Fix or delete the file and attach again',
+          { file: personalPath }
+        )
+      )
+    }
     const pconf = (root.config ??= {})
     const rules = ((pconf.providerConfigRules ??= {}).providerRules ??= [])
     pconf.providerConfigRules.providerRules = rules.filter((r) => r?.providerId !== PROVIDER_ID)
@@ -272,21 +424,43 @@ export const zcodeAdapter: HarnessAdapter = {
       config: {
         group: 'standard-personal',
         access: { type: 'api-key', apiKey: d ? d.key : opts.token },
-        api: { type: directApi ?? gw.api, baseUrl: directBase ?? gw.base(opts.gatewayPort) },
+        api: { type: apiType, baseUrl },
         ...(modelIds.length > 0 ? { personalModelIds: [...modelIds], modelOrder: [...modelIds] } : {}),
       },
     })
     const mconf = (pconf.modelConfigRules ??= { providerModelRules: [], manualProviderModelRules: [] })
-    mconf.providerModelRules ??= []
-    const manual = (mconf.manualProviderModelRules ??= []).filter((r) => r?.providerId !== PROVIDER_ID)
+    mconf.providerModelRules = Array.isArray(mconf.providerModelRules) ? mconf.providerModelRules : []
+    const existingManual = Array.isArray(mconf.manualProviderModelRules) ? mconf.manualProviderModelRules : []
+    const manual = existingManual.filter((r) => r?.providerId !== PROVIDER_ID)
     for (const mid of modelIds) {
       // 配置缺上下文/输出时走填充链（内置表 → models.dev 目录）补齐，补不齐的仍按「推荐配置」兜底不写规则
       const ruleConfig = modelRuleConfig(resolvedModelView(mid, route.modelMap[mid], provider?.base_url))
       if (ruleConfig) manual.push({ providerId: PROVIDER_ID, modelId: mid, config: ruleConfig })
     }
     mconf.manualProviderModelRules = manual
+    // ZCode 拒绝「同一 provider/model 同时有智能规则与手动规则」的整份配置（用户曾在 ZCode 里给
+    // modeldock 的模型选过「推荐配置」就会落一条智能规则）——只清与本次要写的手动规则同 model 的那些，
+    // 其余模型的智能选择（如用户设的 enabled:false）原样保留。
+    const manualIds = new Set(manual.filter((r) => r?.providerId === PROVIDER_ID).map((r) => String(r?.modelId)))
+    mconf.providerModelRules = mconf.providerModelRules.filter((r) => {
+      const rule = r as { providerId?: string; modelId?: string } | undefined
+      return !(rule?.providerId === PROVIDER_ID && manualIds.has(String(rule?.modelId)))
+    })
     if (Array.isArray(pconf.providerOrder)) {
       pconf.providerOrder = [...pconf.providerOrder.filter((id) => id !== PROVIDER_ID), PROVIDER_ID]
+    }
+
+    // 写值自检：ModelDock 自己刚写的条目一定合法，但文件里可能还有别的坏条目（历史版本 / 手改残留），
+    // 它会让 ZCode 连 modeldock 一起忽略——接入时就该说明白，而不是等用户发现界面空白。
+    const issues = personalConfigIssues(root)
+    if (issues.length > 0) {
+      notes.push(
+        t(
+          '警告：{issue}——ZCode 会因此忽略整份个人供应商配置（含 ModelDock），请修正该条目',
+          'Warning: {issue} — ZCode will therefore ignore the whole personal provider config (ModelDock included); fix that entry',
+          { issue: issues[0] }
+        )
+      )
     }
 
     const afterPersonal = serializeJson(
@@ -352,6 +526,13 @@ export const zcodeAdapter: HarnessAdapter = {
           const manual = root.config?.modelConfigRules?.manualProviderModelRules
           if (Array.isArray(manual)) {
             root.config!.modelConfigRules!.manualProviderModelRules = manual.filter((r) => r?.providerId !== PROVIDER_ID)
+          }
+          // 手工/旧版在 ZCode 里给 modeldock 模型留的智能规则一并清掉，避免下次接入时与手动规则撞车
+          const smart = root.config?.modelConfigRules?.providerModelRules
+          if (Array.isArray(smart)) {
+            root.config!.modelConfigRules!.providerModelRules = smart.filter(
+              (r) => (r as { providerId?: string } | undefined)?.providerId !== PROVIDER_ID
+            )
           }
           if (Array.isArray(root.config?.providerOrder)) {
             root.config!.providerOrder = root.config!.providerOrder!.filter((id) => id !== PROVIDER_ID)
@@ -436,10 +617,9 @@ export const zcodeAdapter: HarnessAdapter = {
     let base: string | undefined
     let models = 0
     if (personalText !== null) {
+      let root: ZcodePersonalConfig
       try {
-        const rule = findPersonalRule(JSON.parse(personalText) as ZcodePersonalConfig)
-        base = rule?.config?.api?.baseUrl
-        models = Array.isArray(rule?.config?.personalModelIds) ? rule!.config!.personalModelIds!.length : 0
+        root = JSON.parse(personalText) as ZcodePersonalConfig
       } catch {
         return {
           installed: true,
@@ -448,6 +628,25 @@ export const zcodeAdapter: HarnessAdapter = {
           detail: t('provider_config.json 解析失败', 'Failed to parse provider_config.json'),
         }
       }
+      // 文件被 ZCode 拒收时它一条个人供应商都不加载（界面空白），此时 base 看起来仍指向网关——
+      // 只报「已接入 + 指向网关」是假绿灯，必须按文件是否被接受来判。
+      const issues = personalConfigIssues(root)
+      if (issues.length > 0) {
+        return {
+          installed: true,
+          attached: !!cfg.harness['zcode'],
+          pointing: 'unknown',
+          // detail 在控制台是普通灰字，加 ⚠ 前缀让「已接入」绿灯不再是唯一信号
+          detail: '⚠ ' + t(
+            '{issue}——ZCode 会忽略整份个人供应商配置（含 ModelDock），请修正该字段或重新接入',
+            '{issue} — ZCode ignores the whole personal provider config (ModelDock included); fix that field or attach again',
+            { issue: issues[0] }
+          ),
+        }
+      }
+      const rule = findPersonalRule(root)
+      base = rule?.config?.api?.baseUrl
+      models = Array.isArray(rule?.config?.personalModelIds) ? rule!.config!.personalModelIds!.length : 0
     }
     if (base === undefined && legacyText !== null) {
       try {

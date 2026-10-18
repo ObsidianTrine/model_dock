@@ -37,7 +37,8 @@ export function routeModelNote(routeName: string, provider: string, count: numbe
   )
 }
 
-/** 直连 wire 选择：dsh 与 ZCode 同源 llm-pi wire（anthropic-messages / openai-completions），逐字同款 */
+/** 直连 wire 选择：dsh（llm-pi 插件）专用。ZCode 的 api.type 是另一套枚举，走下方 zcodeApiType，
+ *  两者不可互换——dsh 的 openai wire 名 openai-completions 写进 ZCode 会让整份 provider_config.json 被拒收。 */
 export function directWire(d: AttachOptions['direct'] | undefined): {
   api: 'anthropic-messages' | 'openai-completions' | undefined
   base: string | undefined
@@ -48,7 +49,7 @@ export function directWire(d: AttachOptions['direct'] | undefined): {
   }
 }
 
-/** 直连 Responses 协议警告（dsh/zcode 同款，只差客户端名） */
+/** 直连 Responses 协议警告（dsh 专用：llm-pi 没有 responses wire，ZCode 自己有 openai-responses 不用此提示） */
 export function directResponsesNote(label: string): string {
   return t(
     '提示: 该服务是 Responses 协议，{label} 不支持该 wire 类型；直连条目按 anthropic-messages 写入，请确认上游兼容',
@@ -57,7 +58,7 @@ export function directResponsesNote(label: string): string {
   )
 }
 
-/** 网关模式 wire 选择：与 directWire 同规则，跟随当前路由服务的协议。网关不做跨协议转换，
+/** 网关模式 wire 选择（dsh/llm-pi 专用）：跟随当前路由服务的协议。网关不做跨协议转换，
  *  客户端说哪门 wire 必须与服务协议一致，否则 anthropic 路径拼上 openai 端点必 404。
  *  openai 协议 → openai-completions 且 base 带 /v1（llm-pi 的 openai wire 追加 /chat/completions，
  *  落到网关规范路径 /v1/chat/completions，ROUTED_PATH_RE 的模型改写才生效）；
@@ -76,6 +77,14 @@ export function gatewayWire(provider: { protocol: Protocol } | undefined): {
  *  为「其他实例写入」且重写无法消除（重写幂等写回同形态）。 */
 export function isGatewayBase(base: string | undefined, port: number): boolean {
   return base === gatewayBase(port) || base === gatewayBaseOpenAI(port)
+}
+
+/** 「未配置 Responses 协议端点、直连回退了默认地址」note（codex / zcode 同款） */
+export function directResponsesEndpointNote(): string {
+  return t(
+    '提示: 该服务未配置 Responses 协议端点，直连使用了默认地址；请确认上游支持 Responses API，或在「编辑服务」里补填',
+    'Note: this service has no Responses protocol endpoint, so direct mode used the default URL; make sure the upstream supports the Responses API, or fill it in under Edit Service'
+  )
 }
 
 /** 「独立直连已写入明文 Key」note（codex/dsh/zcode/provider-json/packs/workbuddy 手抄收敛为同一文案）。
