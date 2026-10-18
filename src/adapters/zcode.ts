@@ -136,8 +136,11 @@ function zcodeGatewayBase(protocol: Protocol | undefined, port: number): string 
  *  同一 provider/model 同时声明智能与手动规则）就会丢弃整份文件、界面里看不到任何自定义供应商
  *  （日志只留一行 warn、状态行却仍是绿灯）。这里只覆盖能写坏这份文件的字段——ZCode 收紧 schema 时
  *  要同步扩这张表；接入写值后的自检与 status 判定共用同一份判断。 */
-function personalConfigIssues(root: ZcodePersonalConfig): string[] {
+function personalConfigIssues(root: ZcodePersonalConfig | null | undefined): string[] {
   const issues: string[] = []
+  if (!root || typeof root !== 'object') {
+    return [t('配置文件内容不是 JSON 对象', 'the config file is not a JSON object')]
+  }
   if (root.schemaVersion !== 1) {
     issues.push(
       t('配置版本（schemaVersion）是 {value}，ZCode 只认 1', 'the config version (schemaVersion) is {value}; ZCode only accepts 1', {
@@ -164,17 +167,17 @@ function personalConfigIssues(root: ZcodePersonalConfig): string[] {
         continue
       }
       seen.add(id)
+      // 个人供应商的 api 用 sparseShape 构建，type 是 nullable optional（暂存中的草稿也合法），
+      // 所以只查「写了值但不是 ZCode 认的取值」——写错一个值才会让 ZCode 丢弃整份文件。
       const api = rule?.config?.api
-      if (api != null) {
-        if (!isZcodeApiType(api.type)) {
-          issues.push(
-            t(
-              '供应商「{id}」的接口格式「{value}」ZCode 不认（可选 {allowed}）',
-              'the api format "{value}" of provider "{id}" is not accepted by ZCode (allowed: {allowed})',
-              { id, value: String(api.type ?? '-'), allowed: ZCODE_API_TYPES.join(' / ') }
-            )
+      if (api?.type != null && !isZcodeApiType(api.type)) {
+        issues.push(
+          t(
+            '供应商「{id}」的接口格式「{value}」ZCode 不认（可选 {allowed}）',
+            'the api format "{value}" of provider "{id}" is not accepted by ZCode (allowed: {allowed})',
+            { id, value: String(api.type), allowed: ZCODE_API_TYPES.join(' / ') }
           )
-        }
+        )
       }
       // group 在 ZCode schema 里可空（nullable optional）：null 是合法「未分组」
       const group = rule?.config?.group
@@ -186,13 +189,23 @@ function personalConfigIssues(root: ZcodePersonalConfig): string[] {
           })
         )
       }
-      const accessType = rule?.config?.access?.type
-      if (accessType !== undefined && !(ZCODE_ACCESS_TYPES as readonly string[]).includes(String(accessType))) {
+      // access 是 discriminatedUnion("type")：只要写了 access 就必须带合法 type；
+      // account: 前缀的固定供应商不允许自带 access（access: null 也算写了，ZCode 会整份拒收）
+      const access = rule?.config?.access
+      if (id.startsWith('account:') && access !== undefined) {
         issues.push(
           t(
-            '供应商「{id}」的鉴权类型「{value}」ZCode 不认',
-            'the access type "{value}" of provider "{id}" is not accepted by ZCode',
-            { id, value: String(accessType) }
+            'account 供应商「{id}」不能自带鉴权配置（只能由 ZCode 内置配置声明）',
+            'account provider "{id}" cannot carry its own access config (only ZCode built-in config may declare it)',
+            { id }
+          )
+        )
+      } else if (access != null && !(ZCODE_ACCESS_TYPES as readonly string[]).includes(String(access.type))) {
+        issues.push(
+          t(
+            '供应商「{id}」的鉴权类型「{value}」ZCode 不认（可选 {allowed}）',
+            'the access type "{value}" of provider "{id}" is not accepted by ZCode (allowed: {allowed})',
+            { id, value: String(access.type ?? '-'), allowed: ZCODE_ACCESS_TYPES.join(' / ') }
           )
         )
       }
@@ -408,12 +421,6 @@ export const zcodeAdapter: HarnessAdapter = {
     })
     const mconf = (pconf.modelConfigRules ??= { providerModelRules: [], manualProviderModelRules: [] })
     mconf.providerModelRules ??= []
-    // ZCode 拒绝「同一 provider/model 同时有智能规则与手动规则」的整份配置；modeldock 的模型配置
-    // 由 ModelDock 掌管（写在 manualProviderModelRules），所以重接时先清掉 ZCode 侧可能留下的同供应商
-    // 智能规则（用户曾在 ZCode 里给 modeldock 的模型选过「推荐配置」就会落一条）——不清就会写出被拒收的文件。
-    mconf.providerModelRules = mconf.providerModelRules.filter(
-      (r) => (r as { providerId?: string } | undefined)?.providerId !== PROVIDER_ID
-    )
     const manual = (mconf.manualProviderModelRules ??= []).filter((r) => r?.providerId !== PROVIDER_ID)
     for (const mid of modelIds) {
       // 配置缺上下文/输出时走填充链（内置表 → models.dev 目录）补齐，补不齐的仍按「推荐配置」兜底不写规则
@@ -421,6 +428,14 @@ export const zcodeAdapter: HarnessAdapter = {
       if (ruleConfig) manual.push({ providerId: PROVIDER_ID, modelId: mid, config: ruleConfig })
     }
     mconf.manualProviderModelRules = manual
+    // ZCode 拒绝「同一 provider/model 同时有智能规则与手动规则」的整份配置（用户曾在 ZCode 里给
+    // modeldock 的模型选过「推荐配置」就会落一条智能规则）——只清与本次要写的手动规则同 model 的那些，
+    // 其余模型的智能选择（如用户设的 enabled:false）原样保留。
+    const manualIds = new Set(manual.filter((r) => r?.providerId === PROVIDER_ID).map((r) => String(r?.modelId)))
+    mconf.providerModelRules = mconf.providerModelRules.filter((r) => {
+      const rule = r as { providerId?: string; modelId?: string } | undefined
+      return !(rule?.providerId === PROVIDER_ID && manualIds.has(String(rule?.modelId)))
+    })
     if (Array.isArray(pconf.providerOrder)) {
       pconf.providerOrder = [...pconf.providerOrder.filter((id) => id !== PROVIDER_ID), PROVIDER_ID]
     }

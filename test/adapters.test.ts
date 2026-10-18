@@ -1092,8 +1092,10 @@ describe('zcode adapter', () => {
                       api: { type: 'openai-chat-completions', baseUrl: 'http://127.0.0.1:8687/v1' },
                     },
                   },
-                  // account provider 只有 access/builtinModelIds，没有 api —— 也不该被当成坏条目
-                  { providerId: 'account:zai', config: { access: { type: 'zhipu-account' } } },
+                  // account provider 不能自带 access，config 为空对象是合法形态 —— 不该被当成坏条目
+                  { providerId: 'account:zai', config: {} },
+                  // api.type 在个人供应商 schema 里是 nullable optional（暂存草稿），null 不该报坏
+                  { providerId: 'draft', config: { api: { type: null, baseUrl: 'https://draft.example.com/v1' } } },
                 ],
               },
               modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
@@ -1192,10 +1194,12 @@ describe('zcode adapter', () => {
       const cases: Array<[string, Record<string, unknown>]> = [
         ['分组', base({ providerConfigRules: { providerRules: [rule({ group: 'zai-family' })] } })],
         ['鉴权类型', base({ providerConfigRules: { providerRules: [rule({ access: { type: 'oauth' } })] } })],
+        // access 是 discriminatedUnion("type")：写了 access 就必须带合法 type
+        ['鉴权类型', base({ providerConfigRules: { providerRules: [rule({ access: {} })] } })],
+        ['account', base({ providerConfigRules: { providerRules: [{ ...rule({}), providerId: 'account:zai' }] } })],
         ['重复', base({ providerConfigRules: { providerRules: [rule({}), rule({})] } })],
         ['配置版本（schemaVersion）', { ...base({}), schemaVersion: 2 }],
         ['providerRules', { schemaVersion: 1, config: { providerConfigRules: {}, modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } }],
-        ['接口格式', base({ providerConfigRules: { providerRules: [rule({ api: { baseUrl: 'https://x.example.com/v1' } })] } })],
         [
           '智能与手动',
           base({
