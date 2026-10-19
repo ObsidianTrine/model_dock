@@ -298,7 +298,7 @@ describe('双机端到端（localdir 目标，交错沙箱）', () => {
     const stA3 = await readSyncState()
     expect(stA3?.lastAppliedRev).toBe(4)
     expect(stA3?.lastConflictTs).toBeNull()
-  })
+  }, 60_000) // 多轮 KDF + 交错 tick 在 Windows 慢机约 30s，高于全局 20s；显式放宽避免误杀
 
   it('加入时口令错误被拒且可操作，目标内容不被破坏', async () => {
     const dir = await newTargetDir()
