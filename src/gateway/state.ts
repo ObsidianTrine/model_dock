@@ -315,22 +315,46 @@ export function activeAvoidTargets(rt: GatewayRuntime, now = new Date()): string
   return ids
 }
 
-/** 「展示路由」：烤模型客户端（/model 选择器等静态策划面）此刻应当展示的服务——与 pickTarget
- *  主候选的静态部分同源同序：人工「当前」（auto_route_provider）> prefer 定时窗口（仅自动故障
- *  切换开启时参与）> active_profile。刻意不含熔断/健康等瞬态：瞬态接管是请求级 failover，模型
- *  翻译在转发时即时完成，选择器不应跟着抖。窗口边界没有事件（请求级时间函数），调用方需周期
- *  比对此值的变化来触发客户端重写。 */
-export function displayRouteProvider(rt: GatewayRuntime, now = new Date()): string | undefined {
+/** 只读解析 provider 对应的 profile（active_profile 优先，其次首个引用该 provider 的 profile）。
+ *  窗口/钉定把主候选切到别的服务时，用它把「目标服务的默认模型/别名」一起带过去；否则 base
+ *  profile 的 default_model 会被写进另一个上游（模型名可能根本不存在）。 */
+function profileForProviderReadonly(cfg: Config, providerId: string): { name: string; profile: ProfileConfig } | undefined {
+  if (cfg.active_profile && cfg.profiles[cfg.active_profile]?.provider === providerId) {
+    return { name: cfg.active_profile, profile: cfg.profiles[cfg.active_profile] }
+  }
+  for (const [name, profile] of Object.entries(cfg.profiles)) {
+    if (profile.provider === providerId) return { name, profile }
+  }
+  return undefined
+}
+
+/** 静态首选路由（展示层/烤模型客户端用）：人工钉定 > prefer 窗口 > active_profile。
+ *  与 pickTarget 同序，但只看 enabled（已下线即跳过）、刻意忽略熔断等瞬态——瞬态接管是请求级
+ *  failover，模型翻译在转发时即时完成，选择器不应跟着抖。窗口边界没有事件（请求级时间函数），
+ *  调用方需周期比对此值的变化来触发客户端重写。 */
+function preferredRoute(
+  rt: GatewayRuntime,
+  now: Date
+): { providerId: string | null; source: 'pinned' | 'schedule' | 'default' } {
   const forced = rt.config.gateway?.auto_route_provider
-  if (forced && rt.config.providers[forced]) return forced
+  if (forced) {
+    const p = rt.config.providers[forced]
+    if (p && p.enabled !== false) return { providerId: forced, source: 'pinned' }
+  }
   const on = rt.config.gateway?.auto_failover === true
   const win = on ? activeScheduleWindow(rt, now) : null
   if (win) {
-    const p = parseFallbackEntry(win.target)
-    if (p && rt.config.providers[p.providerId]) return p.providerId
+    const parsed = parseFallbackEntry(win.target)
+    const p = parsed ? rt.config.providers[parsed.providerId] : undefined
+    if (parsed && p && p.enabled !== false) return { providerId: parsed.providerId, source: 'schedule' }
   }
   const profName = rt.config.active_profile
-  return profName ? rt.config.profiles[profName]?.provider : undefined
+  return { providerId: profName ? (rt.config.profiles[profName]?.provider ?? null) : null, source: 'default' }
+}
+
+/** 「展示路由」：烤模型客户端（/model 选择器等静态策划面）此刻应当展示的服务。 */
+export function displayRouteProvider(rt: GatewayRuntime, now = new Date()): string | undefined {
+  return preferredRoute(rt, now).providerId ?? undefined
 }
 
 export interface OrderedCandidate {
@@ -354,8 +378,16 @@ export function parseFallbackEntry(entry: string): { providerId: string; model?:
   return model ? { providerId, model } : { providerId }
 }
 
+/** 主候选来源：人工钉定 / 定时窗口 / 默认路由 / 首选不可用后的故障降级 */
+export type RouteSource = 'pinned' | 'schedule' | 'default' | 'failover'
+
 export type PickResult =
-  | { ok: true; ordered: OrderedCandidate[] }
+  | {
+      ok: true
+      ordered: OrderedCandidate[]
+      /** 首候选的选路来源：pinned/schedule/default 为首选三级；首候选不是首选目标时= failover */
+      primary: { source: RouteSource; providerId: string; degradedFrom?: 'pinned' | 'schedule' }
+    }
   | { ok: false; reason: 'down_all' }
 
 /** 自动备用链最多补进的候选数（手动 fallback 不计入）；防极端服务数下串联一长串上游 */
@@ -369,9 +401,9 @@ export function pickTarget(
   rt: GatewayRuntime,
   base: ResolvedTarget,
   fallbackIds: string[] | undefined,
-  opts?: { ignoreManual?: boolean; ignoreRouteNext?: boolean }
+  opts?: { ignoreManual?: boolean; ignoreRouteNext?: boolean; now?: number }
 ): PickResult {
-  const now = Date.now()
+  const now = opts?.now ?? Date.now()
   const eligible = (id: string): boolean => {
     const p = rt.config.providers[id]
     if (!p) return false
@@ -379,13 +411,22 @@ export function pickTarget(
     if (isMeltdown(rt, id, now)) return false
     return true
   }
-  const makeTarget = (id: string, modelOverride?: string): ResolvedTarget => ({
-    harness: base.harness,
-    profileName: base.profileName,
-    profile: { ...base.profile, provider: id },
-    provider: rt.config.providers[id],
-    ...(modelOverride ? { modelOverride } : {}),
-  })
+  // pairProfile：主候选来自钉定/窗口（可能不是默认路由的服务）时，把目标服务自己的 profile
+  // （默认模型 + 别名）一起带过去，保证「换服务就换模型口径」；备用链候选保持 base profile，
+  // 不影响既有故障切换语义。
+  const makeTarget = (id: string, modelOverride?: string, pairProfile = false): ResolvedTarget => {
+    const pair = pairProfile && id !== base.profile.provider ? profileForProviderReadonly(rt.config, id) : undefined
+    const profile = pair
+      ? { ...pair.profile, provider: id, default_model: pair.profile.default_model ?? Object.keys(rt.config.providers[id]?.models ?? {})[0] }
+      : { ...base.profile, provider: id }
+    return {
+      harness: base.harness,
+      profileName: pair?.name ?? base.profileName,
+      profile,
+      provider: rt.config.providers[id],
+      ...(modelOverride ? { modelOverride } : {}),
+    }
+  }
   // 主候选三级优先：人工钉定（当前槽，人为修改优先于程序自动——程序出错时人工修改就是想要的）> 定时窗口（仅「程序自动选主」开启时参与）> 默认路由。
   // 钉定/窗口目标不可用（下线/熔断）时顺延到下一级，不打死在坏服务上；接管主候选时默认服务排链尾兜底。
   // 定时窗口一次求值，主候选 / 自动链权重 / 避开三处共用（原先各调一次 hitScheduleWindows，
@@ -399,10 +440,22 @@ export function pickTarget(
   const winEligible = !forcedEligible && !!(winParsed && rt.config.providers[winParsed.providerId] && eligible(winParsed.providerId))
   const primaryId = forcedEligible ? forcedId! : winEligible ? winParsed!.providerId : base.profile.provider
   const primaryOverride = winEligible ? winParsed!.model : undefined
+  const preferredKind: 'pinned' | 'schedule' | 'default' = forcedEligible ? 'pinned' : winEligible ? 'schedule' : 'default'
+  // 包一层统一出口：首候选被避开/首选不可用时如实标记来源与降级来源，供「正在使用」显示
+  const choose = (list: OrderedCandidate[]): PickResult => {
+    const first = list[0]
+    const source: RouteSource = first.providerId === primaryId ? preferredKind : 'failover'
+    const degradedFrom = source === 'failover' ? (forcedId ? 'pinned' : win && on ? 'schedule' : undefined) : undefined
+    return {
+      ok: true,
+      ordered: list,
+      primary: { source, providerId: first.providerId, ...(degradedFrom ? { degradedFrom } : {}) },
+    }
+  }
   const ordered: OrderedCandidate[] = []
   const seen = new Set<string>()
   if (eligible(primaryId)) {
-    ordered.push({ target: makeTarget(primaryId, primaryOverride), providerId: primaryId, isPrimary: true, modelOverride: primaryOverride })
+    ordered.push({ target: makeTarget(primaryId, primaryOverride, true), providerId: primaryId, isPrimary: true, modelOverride: primaryOverride })
     seen.add(primaryId)
   }
   // 「下一个切换」人工钉定：插到备用链首位（与主候选同服务则不重复插，seen 去重兜底；它也不可用时由 eligible 剔除、自然顺延到自动排序的备用）
@@ -484,17 +537,127 @@ export function pickTarget(
     const p = parseFallbackEntry(w.target)
     if (p && !avoid.includes(p.providerId)) avoid.push(p.providerId)
   }
-  if (!avoid.length) return { ok: true, ordered }
+  if (!avoid.length) return choose(ordered)
   const kept = ordered.filter((c) => !avoid.includes(c.providerId))
-  if (kept.length) return { ok: true, ordered: kept }
+  if (kept.length) return choose(kept)
   // 候选链全被避开（典型：主服务被避开且未配故障切换）——「避开 X，其他服务都行」：链外其余可用服务按 priority 降序补入候选
   const extras = Object.entries(rt.config.providers)
     .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !avoid.includes(id) && !isMeltdown(rt, id, now))
     .sort((a, b) => (b[1].priority ?? 0) - (a[1].priority ?? 0))
     .map(([id]) => ({ target: makeTarget(id), providerId: id, isPrimary: false }))
-  if (extras.length) return { ok: true, ordered: extras }
+  if (extras.length) return choose(extras)
   // 全部服务都被避开或不可用：回退原链（软约束——宁可用被避开的服务也不能无服务可用）
-  return { ok: true, ordered }
+  return choose(ordered)
+}
+
+/** 命中的定时窗口（展示/诊断用，不含 mode——prefer 与 avoid 分开存放） */
+export interface ScheduleHit {
+  start: string
+  end: string
+  target: string
+}
+
+/** 统一路由状态：服务端唯一计算入口，所有「正在使用」展示（桌面/手机/客户端行/模型列表）都消费它。
+ *  effective 与请求转发同源（pickTarget 首候选，含 enabled/熔断过滤）；default 是 active_profile、
+ *  只用于接入/直连等配置态；display 是烤模型客户端的静态展示路由（忽略熔断，避免抖动）。 */
+export interface RouteState {
+  effective: {
+    providerId: string | null
+    /** 请求默认模型：窗口/候选的模型映射 > 目标 profile 的 default_model（与 relay 改写同源） */
+    model: string | null
+    profileName: string | null
+    source: RouteSource
+    /** 首选三级目标不可用、降级到后续候选时的来源 */
+    degradedFrom?: 'pinned' | 'schedule'
+  }
+  /** 默认路由（active_profile）：配置态，不代表「正在使用」 */
+  default: { providerId: string | null; model: string | null; profileName: string | null }
+  schedule: {
+    /** 命中的首个「优先走」窗口（时间函数；命中 ≠ 接管） */
+    hit: ScheduleHit | null
+    /** 命中的全部「避开」窗口 */
+    avoidHits: ScheduleHit[]
+    /** 窗口是否真的接管了主候选 */
+    applied: boolean
+    /** 命中但未接管的原因：被人工钉定压过 / 目标不可用 / 自动选主关闭 */
+    suppressedBy: 'pin' | 'unavailable' | 'off' | null
+  }
+  next: string | null
+  autoPrimary: string | null
+  autoNext: string | null
+}
+
+/** 计算当前路由状态（纯读，无副作用）。`now` 可注入便于测试窗口边界。 */
+export function routeState(rt: GatewayRuntime, opts?: { now?: Date }): RouteState {
+  const at = opts?.now ?? new Date()
+  const now = at.getTime()
+  const on = rt.config.gateway?.auto_failover === true
+  const forced = rt.config.gateway?.auto_route_provider ?? null
+  const base = resolveByProfile(rt, rt.config.active_profile)
+  const hitWins = hitScheduleWindows(rt, at)
+  const hitWin = hitWins.find((w) => w.mode !== 'avoid') ?? null
+  const avoidHits = hitWins.filter((w) => w.mode === 'avoid')
+  const def = base.ok
+    ? {
+        providerId: base.target.profile.provider,
+        model: base.target.profile.default_model ?? null,
+        profileName: base.target.profileName,
+      }
+    : { providerId: null, model: null, profileName: null }
+  let effective: RouteState['effective'] = { providerId: null, model: null, profileName: null, source: 'default' }
+  let next: string | null = null
+  let autoPrimary: string | null = null
+  let autoNext: string | null = null
+  if (base.ok) {
+    const fallback = base.target.profile.fallback
+    const picked = pickTarget(rt, base.target, fallback, { now })
+    if (picked.ok) {
+      const first = picked.ordered[0]
+      effective = {
+        providerId: first.providerId,
+        model: first.modelOverride ?? first.target.profile.default_model ?? null,
+        profileName: first.target.profileName,
+        source: picked.primary.source,
+        ...(picked.primary.degradedFrom ? { degradedFrom: picked.primary.degradedFrom } : {}),
+      }
+      next = picked.ordered[1]?.providerId ?? null
+    }
+    // 「当前 · 自动」= 清两处钉定后程序会选谁；「下一个切换 · 自动」= 只清本槽钉定
+    const autoPicked = pickTarget(rt, base.target, fallback, { ignoreManual: true, now })
+    if (autoPicked.ok) autoPrimary = autoPicked.ordered[0]?.providerId ?? null
+    const nextAutoPicked = pickTarget(rt, base.target, fallback, { ignoreRouteNext: true, now })
+    if (nextAutoPicked.ok) autoNext = nextAutoPicked.ordered[1]?.providerId ?? null
+  } else if (forced && rt.config.providers[forced]) {
+    const pair = profileForProviderReadonly(rt.config, forced)
+    effective = {
+      providerId: forced,
+      model: pair?.profile.default_model ?? Object.keys(rt.config.providers[forced].models ?? {})[0] ?? null,
+      profileName: pair?.name ?? null,
+      source: 'pinned',
+    }
+  }
+  const suppressedBy: RouteState['schedule']['suppressedBy'] = !hitWin
+    ? null
+    : effective.source === 'schedule'
+      ? null
+      : effective.source === 'pinned'
+        ? 'pin'
+        : !on
+          ? 'off'
+          : 'unavailable'
+  return {
+    effective,
+    default: def,
+    schedule: {
+      hit: hitWin ? { start: hitWin.start, end: hitWin.end, target: hitWin.target } : null,
+      avoidHits: avoidHits.map((w) => ({ start: w.start, end: w.end, target: w.target })),
+      applied: effective.source === 'schedule',
+      suppressedBy,
+    },
+    next,
+    autoPrimary,
+    autoNext,
+  }
 }
 
 export interface AutoRouteInfo {
@@ -502,7 +665,12 @@ export interface AutoRouteInfo {
   /** 实际生效主服务（含人工钉定，pickTarget 首候选） */
   provider: string | null
   providerLabel: string | null
+  /** 统一的服务默认模型：窗口/候选映射 > 目标 profile 的 default_model */
   model: string | null
+  /** 生效来源：人工钉定 / 定时窗口 / 默认路由 / 首选不可用后的故障降级 */
+  source: RouteSource
+  /** 首选三级目标（钉定/窗口）不可用而降级时的来源，供 UI 解释「为什么不是它」 */
+  degradedFrom?: 'pinned' | 'schedule'
   /** 「当前」槽人工钉定（null=自动态） */
   forced: string | null
   /** 自动态（无钉定）程序会选的主服务（「自动 · X」的 X） */
@@ -516,6 +684,10 @@ export interface AutoRouteInfo {
   /** 自动态的下一个切换（「自动 · B」的 B）= 不含「下一个切换」钉定、但保留「当前」钉定/窗口/链尾兜底的下一跳 */
   autoNext: string | null
   autoNextLabel: string | null
+  /** 默认路由（active_profile）——配置态，接入/直连等场景用它，不代表「正在使用」 */
+  defaultProvider: string | null
+  defaultProviderLabel: string | null
+  defaultModel: string | null
   schedule: {
     enabled: boolean
     /** 完整窗口列表（供控制台编辑回显） */
@@ -524,6 +696,10 @@ export interface AutoRouteInfo {
     active: { start: string; end: string; target: string } | null
     /** 当前命中的全部「避开」时段（供控制台状态显示） */
     activeAvoids: { start: string; end: string; target: string }[]
+    /** 窗口是否真的接管了主候选（命中 ≠ 接管：人工钉定/目标不可用/未开启时为 false） */
+    applied: boolean
+    /** 命中但未接管的原因 */
+    suppressedBy: 'pin' | 'unavailable' | 'off' | null
     /** 今天日类型（供控制台解释各时段今天是否生效） */
     today: DayType
     /** 今天（含）起最近 3 个法定假期（供控制台面板底部被动展示；日历缓存缺失时为空） */
@@ -531,64 +707,39 @@ export interface AutoRouteInfo {
   }
 }
 
-/** 自动路由显示信息：实际生效（钉定>窗口>默认）+ 自动态会选谁 + 双槽位钉定状态。 */
+/** 自动路由显示信息：routeState 的纯映射（唯一计算入口见 routeState）。 */
 export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
+  const rs = routeState(rt)
   const on = rt.config.gateway?.auto_failover === true
   const forced = rt.config.gateway?.auto_route_provider ?? null
   const routeNext = rt.config.gateway?.route_next ?? null
-  const base = resolveByProfile(rt, rt.config.active_profile)
-  let provider: string | null = null
-  let next: string | null = null
-  let autoPrimary: string | null = null
-  let autoNext: string | null = null
-  if (base.ok) {
-    // 生效链（含钉定）与两条自动链各算一次：三者的差异决定双槽位「自动」选项各写谁
-    const picked = pickTarget(rt, base.target, base.target.profile.fallback)
-    if (picked.ok) {
-      provider = picked.ordered[0]?.providerId ?? null
-      next = picked.ordered[1]?.providerId ?? null
-    }
-    // 「当前 · 自动」= 清掉主服务钉定后程序会选谁（两处钉定都不算）
-    const autoPicked = pickTarget(rt, base.target, base.target.profile.fallback, { ignoreManual: true })
-    if (autoPicked.ok) {
-      autoPrimary = autoPicked.ordered[0]?.providerId ?? null
-      autoNext = autoPicked.ordered[1]?.providerId ?? null
-    }
-    // 「下一个切换 · 自动」= 只清掉本槽钉定、保留主服务钉定/窗口/链尾兜底后的下一跳——
-    // 主服务钉着别的服务时链尾兜底才排进来，ignoreManual 会把它连同钉定一起抹掉，写不出真会切过去的目标
-    const nextAutoPicked = pickTarget(rt, base.target, base.target.profile.fallback, { ignoreRouteNext: true })
-    if (nextAutoPicked.ok) autoNext = nextAutoPicked.ordered[1]?.providerId ?? null
-  } else if (forced) {
-    provider = forced
-  }
   const nameOf = (id: string | null): string | null => (id ? rt.config.providers[id]?.name ?? id : null)
-  const providerCfg = provider ? rt.config.providers[provider] : undefined
-  const profileEntry = provider ? Object.values(rt.config.profiles).find((p) => p.provider === provider) : undefined
-  const model =
-    profileEntry?.default_model ??
-    (providerCfg ? Object.keys(providerCfg.models ?? {})[0] : undefined) ??
-    null
   const sch = rt.config.gateway?.schedule
-  const win = activeScheduleWindow(rt)
-  const avoidWins = hitScheduleWindows(rt, new Date()).filter((w) => w.mode === 'avoid')
   return {
     on,
-    provider,
-    providerLabel: nameOf(provider),
-    model,
+    provider: rs.effective.providerId,
+    providerLabel: nameOf(rs.effective.providerId),
+    model: rs.effective.model,
+    source: rs.effective.source,
+    ...(rs.effective.degradedFrom ? { degradedFrom: rs.effective.degradedFrom } : {}),
     forced,
-    autoPrimary,
-    autoPrimaryLabel: nameOf(autoPrimary),
+    autoPrimary: rs.autoPrimary,
+    autoPrimaryLabel: nameOf(rs.autoPrimary),
     routeNext,
-    next,
-    nextLabel: nameOf(next),
-    autoNext,
-    autoNextLabel: nameOf(autoNext),
+    next: rs.next,
+    nextLabel: nameOf(rs.next),
+    autoNext: rs.autoNext,
+    autoNextLabel: nameOf(rs.autoNext),
+    defaultProvider: rs.default.providerId,
+    defaultProviderLabel: nameOf(rs.default.providerId),
+    defaultModel: rs.default.model,
     schedule: {
       enabled: sch ? sch.enabled !== false : true,
       windows: sch?.windows ?? [],
-      active: win ? { start: win.start, end: win.end, target: win.target } : null,
-      activeAvoids: avoidWins.map((w) => ({ start: w.start, end: w.end, target: w.target })),
+      active: rs.schedule.hit,
+      activeAvoids: rs.schedule.avoidHits,
+      applied: rs.schedule.applied,
+      suppressedBy: rs.schedule.suppressedBy,
       today: dayTypeFor(new Date()),
       upcomingHolidays: upcomingHolidays(new Date()),
     },

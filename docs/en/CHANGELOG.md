@@ -9,6 +9,9 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **"In use" is consistent everywhere**: service-card badges, the top "In use" line, the mobile page, and model lists now follow the same effective route — when a schedule window moves traffic to another service, they all move together (no more "DeepSeek at the top, Volcano Ark on the card").
+- **Scheduled windows now say why they are not active**: when the primary is pinned manually, or the target is offline or circuit-broken, the schedule pill no longer shows green — it says "pinned" or "target unavailable".
+- **The model follows the service**: when a schedule window or manual pin switches the primary, its default model and model mapping now come from the target service's own profile instead of sending the old service's model name to the new upstream; direct mode still uses the default route.
 - **ModelDock is invisible after attaching ZCode (and your own providers vanish too)**: the API format written into ZCode used a value it does not recognize, so ZCode discarded the whole custom-provider config; ModelDock now writes the format ZCode expects and shows up in the model picker right after attaching.
 - **Attach status no longer shows a false green light**: when the file contains an entry ZCode rejects, the console now says the whole config will be ignored and which field to fix, instead of just reporting "pointing at the gateway".
 - **Attaching a Responses-protocol service**: both direct and gateway mode now target the Responses API instead of being treated as an Anthropic endpoint and failing with 404.

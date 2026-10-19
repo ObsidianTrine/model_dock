@@ -14,7 +14,7 @@ import { t } from '../util/i18n.js'
 import { safeEqual } from '../util/safe-equal.js'
 import { listenWithRetry, projectModel, fetchEnvelopeFromUrl } from './shared.js'
 import { localIsoTs } from '../util/time.js'
-import { autoRouteInfo, logAudit, parseFallbackEntry, reloadRuntime, type GatewayRuntime } from './state.js'
+import { autoRouteInfo, logAudit, reloadRuntime, type GatewayRuntime } from './state.js'
 import { CONSOLE_SHARED_JS } from './console-shared.js'
 import { lanCookieName } from './cookies.js'
 import { LAN_ICON_192_PNG, LAN_ICON_512_PNG } from './lanAssets.js'
@@ -294,10 +294,13 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
   const activeProfileName = cfg.active_profile ?? null
   const activeProfile = activeProfileName ? cfg.profiles[activeProfileName] : undefined
   const activeProviderId = activeProfile?.provider ?? null
+  // 手机页与桌面同源：双槽位标签与「使用中」都来自 autoRouteInfo（统一 routeState 口径），
+  // 不再用 active_profile 单独推断服务/模型（那会和定时窗口/钉定的实际走向打架）
+  const ar = autoRouteInfo(rt)
   const services = Object.entries(cfg.providers).map(([id, p]) => ({
     id,
     name: p.name || id,
-    active: id === activeProviderId,
+    active: id === ar.provider,
     enabled: p.enabled !== false,
     count: Object.keys(p.models ?? {}).length,
     models: Object.entries(p.models ?? {}).map(([mid, m]) => ({ id: mid, name: m.display_name || mid })),
@@ -312,17 +315,15 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
         models: Object.entries(activeProvider.models ?? {}).map(([mid, m]) => projectModel(mid, m, { nameKey: true })),
       }
     : null
-  // 手机页与桌面路由控件同口径：双槽位（当前=主服务 / 下一个切换）的生效值与「自动 · X」标签都来自 autoRouteInfo；
-  // 模型取真实请求所带：窗口为主候选（未钉定）时用窗口模型改写，否则 active_profile 默认模型（选主换 provider 不换 profile 模型映射）
-  const ar = autoRouteInfo(rt)
-  const winModel = !ar.forced && ar.schedule.active ? parseFallbackEntry(ar.schedule.active.target)?.model ?? null : null
   const route = {
     on: ar.on,
     failover429: (cfg.gateway?.failover_status_codes ?? []).includes(429),
     autoFallback: cfg.gateway?.auto_fallback !== false,
     provider: ar.provider,
     label: ar.providerLabel,
-    model: winModel ?? activeProfile?.default_model ?? ar.model ?? null,
+    model: ar.model,
+    source: ar.source,
+    ...(ar.degradedFrom ? { degradedFrom: ar.degradedFrom } : {}),
     forced: ar.forced,
     autoPrimaryLabel: ar.autoPrimaryLabel,
     routeNext: ar.routeNext,
@@ -333,6 +334,8 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
       enabled: ar.schedule.enabled,
       active: ar.schedule.active,
       activeAvoids: ar.schedule.activeAvoids,
+      applied: ar.schedule.applied,
+      suppressedBy: ar.schedule.suppressedBy,
       windows: ar.schedule.windows.map((w) => ({
         start: w.start,
         end: w.end,
@@ -632,7 +635,9 @@ function render(j) {
   if (sch.active) why.push(tr('定时 ', 'Schedule ') + sch.active.start + '–' + sch.active.end + ' · ' + tr('优先 ', 'prefer ') + targetLabel(sch.active.target))
   var av = sch.activeAvoids || []
   if (av.length) why.push(tr('定时避开 ', 'Avoiding ') + av.map(function (w) { return targetLabel(w.target) }).join(tr('、', ', ')) + ' · ' + av[0].start + '–' + av[0].end)
-  if (r.forced) why.push(tr('主服务已人工钉定 · 定时窗口暂停，选回「自动」恢复', 'Primary pinned manually — schedule windows paused; pick "Auto" to resume'))
+  if (r.source === 'pinned') why.push(tr('主服务已人工钉定 · 定时窗口暂停，选回「自动」恢复', 'Primary pinned manually — schedule windows paused; pick "Auto" to resume'))
+  if (r.degradedFrom === 'pinned') why.push(tr('钉定的主服务不可用，已临时切到其他服务', 'Pinned primary unavailable — temporarily on another service'))
+  if (r.degradedFrom === 'schedule') why.push(tr('定时目标不可用，已临时切到其他服务', 'Schedule target unavailable — temporarily on another service'))
   if (!r.on && wins.length) why.push(tr('自动选主未开启：时段不生效（故障切换不受影响）', 'Auto primary selection is off: windows are inactive (failover still works)'))
   // 故障切换常开：主服务不可达即按候选链切换，与自动选主开关无关
   why.push(tr('限流(429)/网关错误(503) 切备用 · ', 'Fallback on 429/503 · ') + (r.failover429 ? tr('开', 'on') : tr('关', 'off')))
@@ -723,7 +728,8 @@ function render(j) {
   var box = document.getElementById('services')
   if (!j.services.length) { box.innerHTML = '<p class="empty">' + tr('还没有服务，请先在电脑端添加', 'No services yet — add one on the computer') + '</p>'; return }
   box.innerHTML = j.services.map(function (s) {
-    // 「使用中」=全局默认路由（active_profile），与桌面服务卡「正在使用」同口径；实际走向见上方「实际生效」行
+    // 「使用中」= 全局生效主服务（钉定/定时窗口/默认，含可用性过滤），与桌面服务卡徽标、
+    // 「实际生效」行、/v1/models 同源，不再写 active_profile 的旧口径
     var badge = s.active ? '<span class="badge">' + tr('使用中', 'in use') + '</span>' : ''
     return '<div class="row"><div class="info"><div class="nm">' + esc(s.name) + badge + '</div>' +
       '<div class="meta">' + tr('{n} 个模型', '{n} models').replace('{n}', s.count) + ' <button type="button" class="mini" data-expand="' + esc(s.id) + '">' + tr('展开', 'show') + '</button></div>' +

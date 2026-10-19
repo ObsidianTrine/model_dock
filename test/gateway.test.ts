@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
-import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
+import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit } from '../src/gateway/server.js'
 import { clientProtocolFromPath, endpointRisks } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
@@ -660,9 +660,45 @@ describe('网关', () => {
       t.rt.config.harness['claude-code'].route = 'default'
       t.rt.config.active_profile = 'p2'
       expect((await get()).data[0].id).toBe('b-model')
+      // 定时窗口接管：active_profile 回 demo，但窗口目标 p2 → 列表仍切到窗口服务（与转发同源）
+      t.rt.config.active_profile = 'demo'
+      t.rt.config.gateway = { auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'up2' }] } }
+      expect((await get()).data[0].id).toBe('b-model')
+      delete t.rt.config.gateway
       // 切回 demo
       t.rt.config.active_profile = 'demo'
       expect((await get()).data[0].id).toBe('preset-model')
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('overview：「正在使用」与服务卡 inUse 跟随定时窗口，defaultRoute 保持默认路由', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up2 = {
+        name: 'mock-b',
+        base_url: 'http://127.0.0.1:1',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'sk-b',
+        models: { 'b-model': { source: 'manual' } },
+      }
+      t.rt.config.profiles.p2 = { provider: 'up2', default_model: 'b-model' }
+      t.rt.config.gateway = { auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'up2' }] } }
+      const ov: any = await (
+        await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
+      ).json()
+      // 唯一的「正在使用」口径：服务端 routeState → autoRoute/current/services.inUse 三处一致
+      expect(ov.gateway.autoRoute).toMatchObject({ provider: 'up2', model: 'b-model', source: 'schedule' })
+      expect(ov.gateway.autoRoute.schedule).toMatchObject({ applied: true, suppressedBy: null })
+      expect(ov.current).toMatchObject({ id: 'up2', label: 'mock-b', model: 'b-model' })
+      // 默认路由是独立概念（接入/直连用），不跟着窗口变
+      expect(ov.defaultRoute).toMatchObject({ id: 'up', model: 'preset-model' })
+      expect(ov.services.find((s: any) => s.id === 'up2')).toMatchObject({ inUse: true, isCurrent: true })
+      expect(ov.services.find((s: any) => s.id === 'up')).toMatchObject({ inUse: false, isCurrent: false })
+      // 跟随全局的客户端行也跟着窗口走（不再是 active_profile 的旧值）
+      expect(ov.clients.find((c: any) => c.id === 'claude-code').service).toBe('mock-b')
     } finally {
       t.closeAll()
     }
@@ -3369,7 +3405,7 @@ describe('displayRouteProvider：烤模型客户端的展示路由（人工当�
       active_profile: activeProfile,
       security: { store: 'file' },
       providers: { pa, pb },
-      profiles: { proA: { provider: 'pa', default_model: 'a' } },
+      profiles: { proA: { provider: 'pa', default_model: 'a' }, proB: { provider: 'pb', default_model: 'b' } },
       gateway,
     }
     return buildRuntime(cfg, 't')
@@ -3402,5 +3438,88 @@ describe('displayRouteProvider：烤模型客户端的展示路由（人工当�
   it('窗口目标服务不存在：回落 active_profile', () => {
     const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'ghost' }] } })
     expect(displayRouteProvider(rt)).toBe('pa')
+  })
+})
+
+describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 默认，模型随目标服务）', () => {
+  const pa = { name: 'A', base_url: 'https://a.example.com', protocol: 'anthropic' as const, auth_style: 'bearer' as const, key_ref: 'file:a' }
+  const pb = { ...pa, name: 'B', base_url: 'https://b.example.com', key_ref: 'file:b' }
+
+  function mkRt(gateway: Config['gateway'], activeProfile = 'proA') {
+    const cfg: Config = {
+      version: 1,
+      active_profile: activeProfile,
+      security: { store: 'file' },
+      // 每个用例独立 provider 对象：某个用例改 enabled 不污染后续用例
+      providers: { pa: { ...pa }, pb: { ...pb } },
+      profiles: { proA: { provider: 'pa', default_model: 'a' }, proB: { provider: 'pb', default_model: 'b' } },
+      gateway,
+    }
+    return buildRuntime(cfg, 't')
+  }
+  const winB = { start: '00:00', end: '23:59', target: 'pb' }
+
+  it('窗口接管：生效服务/模型取窗口目标服务的 profile，default 仍是 active_profile', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [winB] } })
+    const rs = routeState(rt)
+    expect(rs.effective).toMatchObject({ providerId: 'pb', model: 'b', source: 'schedule' })
+    expect(rs.default).toMatchObject({ providerId: 'pa', model: 'a' })
+    expect(rs.schedule).toMatchObject({ applied: true, suppressedBy: null })
+    expect(rs.schedule.hit).toMatchObject({ start: '00:00', end: '23:59', target: 'pb' })
+  })
+
+  it('窗口带模型映射：模型改写值优先于目标服务默认模型', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ ...winB, target: 'pb:b-override' }] } })
+    expect(routeState(rt).effective).toMatchObject({ providerId: 'pb', model: 'b-override', source: 'schedule' })
+  })
+
+  it('人工钉定压过窗口：source=pinned、窗口 hit 但 applied=false', () => {
+    const rt = mkRt({ auto_failover: true, auto_route_provider: 'pa', schedule: { enabled: true, windows: [winB] } })
+    const rs = routeState(rt)
+    expect(rs.effective).toMatchObject({ providerId: 'pa', model: 'a', source: 'pinned' })
+    expect(rs.schedule).toMatchObject({ applied: false, suppressedBy: 'pin' })
+  })
+
+  it('窗口目标下线 → 回落默认路由，并说明未接管原因', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [winB] } })
+    ;(rt.config.providers.pb as { enabled?: boolean }).enabled = false
+    const rs = routeState(rt)
+    expect(rs.effective).toMatchObject({ providerId: 'pa', source: 'default' })
+    expect(rs.schedule).toMatchObject({ applied: false, suppressedBy: 'unavailable' })
+  })
+
+  it('自动选主关闭：窗口不参与，suppressedBy=off', () => {
+    const rt = mkRt({ auto_failover: false, schedule: { enabled: true, windows: [winB] } })
+    const rs = routeState(rt)
+    expect(rs.effective).toMatchObject({ providerId: 'pa', source: 'default' })
+    expect(rs.schedule).toMatchObject({ applied: false, suppressedBy: 'off' })
+  })
+
+  it('钉定服务熔断且无窗口：降到自动备用链，标记 failover/degradedFrom=pinned', () => {
+    const rt = mkRt({ auto_failover: true, auto_route_provider: 'pa' })
+    for (let i = 0; i < 3; i++) recordOutcome(rt, 'pa', { ok: false, cls: 'connect' })
+    const rs = routeState(rt)
+    expect(rs.effective.providerId).toBe('pb')
+    expect(rs.effective.source).toBe('failover')
+    expect(rs.effective.degradedFrom).toBe('pinned')
+  })
+
+  it('展示路由忽略熔断但跳过已下线：钉定服务下线后写回默认路由', () => {
+    const rt = mkRt({ auto_failover: true, auto_route_provider: 'pa' }, 'proB')
+    ;(rt.config.providers.pa as { enabled?: boolean }).enabled = false
+    expect(displayRouteProvider(rt)).toBe('pb')
+  })
+
+  it('autoRouteInfo 与 routeState 同源：手机/桌面读到的服务、模型、来源一致', () => {
+    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [winB] } })
+    const rs = routeState(rt)
+    const ar = autoRouteInfo(rt)
+    expect([ar.provider, ar.model, ar.source, ar.schedule.applied, ar.defaultProvider]).toEqual([
+      rs.effective.providerId,
+      rs.effective.model,
+      rs.effective.source,
+      rs.schedule.applied,
+      rs.default.providerId,
+    ])
   })
 })

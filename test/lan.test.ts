@@ -144,8 +144,12 @@ describe('lan 手机简版控制台', () => {
       expect(body.route.failover429).toBe(true)
       expect(body.route.provider).toBe('p2') // 人工钉定压过定时窗口
       expect(body.route.label).toBe('服务二')
-      // 模型=真实请求所带：钉定生效时窗口模型改写不参与，取 active_profile 默认模型
-      expect(body.route.model).toBe('model-one')
+      // 模型随生效服务走：钉定 p2（profile auto-p2 无 default_model → 回落 p2 首个模型 model-three），
+      // 与转发改写同源（旧实现取 active_profile 的 model-one，会和实际发往 p2 的模型对不上）
+      expect(body.route.model).toBe('model-three')
+      expect(body.route.source).toBe('pinned')
+      expect(body.route.schedule.applied).toBe(false)
+      expect(body.route.schedule.suppressedBy).toBe('pin')
       // 双槽位显示字段：自动态会选的主服务（「自动 · X」的 X）与下一个切换
       expect(body.route.autoPrimaryLabel).toBe('服务一')
       expect(body.route.routeNext).toBeNull()
@@ -157,6 +161,30 @@ describe('lan 手机简版控制台', () => {
       expect(body.route.schedule.windows).toEqual([
         { start: '00:00', end: '23:59', target: 'p1', mode: 'prefer', dayFilter: null, days: null },
       ])
+    } finally {
+      stopLan(rt)
+    }
+  })
+
+  it('state「使用中」与 route 同源：窗口接管时服务卡徽标切到窗口目标，默认路由保持', async () => {
+    await ensureDir(modeldockDir())
+    const cfg = twoServiceConfig()
+    cfg.gateway = { auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'p2' }] } }
+    await saveConfig(cfg)
+    const rt = buildRuntime(await loadConfig(), 'mdkadm_test')
+    const handle = await startLanServer(rt, { port: 0, token: 'mdklan_' + 'a'.repeat(32), host: '127.0.0.1' })
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/m/api/state`, { headers: { authorization: `Bearer ${handle.token}` } })
+      const body: any = await res.json()
+      expect(body.route.provider).toBe('p2')
+      expect(body.route.model).toBe('model-three')
+      expect(body.route.source).toBe('schedule')
+      expect(body.route.schedule.applied).toBe(true)
+      // 服务卡「使用中」= 全局生效（窗口目标），不再跟着 active_profile（p1）走
+      expect(body.services.find((s: any) => s.id === 'p2').active).toBe(true)
+      expect(body.services.find((s: any) => s.id === 'p1').active).toBe(false)
+      // 默认路由（active_profile）仍作为独立信息保留
+      expect(body.active.service).toBe('p1')
     } finally {
       stopLan(rt)
     }

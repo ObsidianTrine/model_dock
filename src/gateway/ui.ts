@@ -388,6 +388,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #routebox .rrow2{display:flex;align-items:center;gap:6px 16px;flex-wrap:wrap;padding:9px 12px;border-top:1px dashed var(--border)}
 #routebox.solo .rrow2{border-top:none}
 #routebox .rrow1 label{font-size:var(--fs-sm);color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer}
+/* 「正在使用」状态行：与服务卡徽标/手机页/模型列表同源（服务端 routeState），单行解释服务·模型·来源 */
+#routebox .rrow3{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;padding:0 12px 9px;font-size:var(--fs-xs);color:var(--muted)}
+#routebox .rrow3 b{color:var(--text);font-weight:600}
+#routebox .rrow3 .mono{font-family:var(--mono)}
+#routebox .rrow3 .src{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px}
+#routebox .rrow3 .src.on{border-color:var(--ok);color:var(--ok)}
 #pkgPill{margin-left:auto}
 #lanPanel{margin:-6px 0 12px;padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r-md)}
 #lanPanel .lanflex{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
@@ -610,6 +616,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         <select id="autoRouteSel"><option value="">自动</option></select>
       </label>
     </div>
+    <div class="rrow3" id="rrowEff" hidden></div>
     <div class="rrow2" id="rrow2">
       <span class="pill sw" id="autoRoutePill">
         <button type="button" class="psw-main" role="switch" aria-checked="true" data-i18n-aria="自动路由||Auto route" data-i18n-title="开启后：定时时段由程序自动接管主服务（按窗口/默认路由选主）。故障切换（主服务不可达时切「下一个切换」）不受此开关影响，始终可用||When on, the program takes over primary selection during schedule windows (by window/default route). Failover (switching to Next when the primary is down) is always available regardless of this switch"><span class="ptext">自动路由</span></button>
@@ -1601,6 +1608,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var noSvc = view.services.length === 0
     var rrow1 = document.getElementById('rrow1')
     if (rrow1) rrow1.hidden = noSvc
+    var rrowEff = document.getElementById('rrowEff')
+    if (rrowEff) rrowEff.hidden = noSvc
     var routebox = document.getElementById('routebox')
     if (routebox) routebox.classList.toggle('solo', noSvc)
     var errPillEl = document.getElementById('errPill')
@@ -1640,14 +1649,45 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       schedStatus.autoOn = on
       schedStatus.active = act || null
       schedStatus.activeAvoids = avoidAct
+      schedStatus.applied = !!(sch && sch.applied)
+      schedStatus.suppressedBy = sch && sch.suppressedBy ? sch.suppressedBy : null
       schedEnabledState = enabled
       if (!schedToggleBusy) schedApi.set({ on: enabled })
       var tips = []
-      if (on && act) tips.push(t('优先 ', 'prefer ') + targetLabel(act.target) + ' ' + act.start + '–' + act.end)
+      if (on && act) {
+        // 命中 ≠ 接管：钉定/目标不可用/未开启时如实说明，避免绿色 pill 误导（本次误判的放大器）
+        var actWhy = schedStatus.applied ? ''
+          : sch.suppressedBy === 'pin' ? t('（人工钉定暂停）', ' (paused: pinned)')
+          : sch.suppressedBy === 'unavailable' ? t('（目标不可用）', ' (target unavailable)')
+          : ''
+        tips.push(t('优先 ', 'prefer ') + targetLabel(act.target) + ' ' + act.start + '–' + act.end + actWhy)
+      }
       if (on) avoidAct.forEach(function (w) { tips.push(t('避开 ', 'avoid ') + targetLabel(w.target) + ' ' + w.start + '–' + w.end) })
       if (!on && n) tips.push(t('开启自动选主后时段生效', 'Windows apply once auto primary selection is on'))
-      if (ar && ar.forced) tips.push(t('已人工钉定主服务，定时窗口暂停；「当前」选回「自动」即恢复', 'Primary is pinned manually; schedule windows are paused. Pick "Auto" in Current to resume'))
+      if (ar && ar.source === 'pinned') tips.push(t('已人工钉定主服务，定时窗口暂停；「当前」选回「自动」即恢复', 'Primary is pinned manually; schedule windows are paused. Pick "Auto" in Current to resume'))
       schedApi.setTip(tips.length ? tips.join(t('；', '; ')) : t('按时间段自动切换主服务/模型；主体开关=启用/停用，右侧箭头=编辑时段', 'Switch primary service/model by time of day; body = enable/disable, arrow = edit windows'))
+    }
+    // 统一「正在使用」状态行：消费服务端 routeState 的唯一口径（服务卡徽标/手机页/模型列表同源）
+    if (rrowEff) {
+      var effSrc = ar && ar.source === 'pinned' ? t('人工钉定', 'Pinned')
+        : ar && ar.source === 'schedule' ? t('定时窗口', 'Schedule window')
+        : ar && ar.source === 'failover' ? t('故障切换', 'Failover')
+        : t('默认路由', 'Default route')
+      if (ar && ar.providerLabel) {
+        var effHtml = t('正在使用：', 'In use: ') + '<b>' + esc(ar.providerLabel) + '</b>' +
+          (ar.model ? ' · <span class="mono">' + esc(ar.model) + '</span>' : '') +
+          ' <span class="src' + (ar.source === 'schedule' ? ' on' : '') + '">' + esc(effSrc) + '</span>'
+        if (ar.source === 'schedule' && ar.schedule && ar.schedule.active) {
+          effHtml += ' ' + esc(ar.schedule.active.start + '–' + ar.schedule.active.end)
+        } else if (ar.degradedFrom === 'pinned') {
+          effHtml += ' ' + t('（钉定的服务不可用，已降级）', '(pinned service unavailable; degraded)')
+        } else if (ar.degradedFrom === 'schedule') {
+          effHtml += ' ' + t('（定时目标不可用，已降级）', '(schedule target unavailable; degraded)')
+        }
+        rrowEff.innerHTML = effHtml
+      } else {
+        rrowEff.textContent = ''
+      }
     }
     if (sel) {
       // 「下一个切换」槽：主服务不可达时切到它。自动态显示程序会选的备用（自动 · B），人工选服务=钉定该槽。
@@ -1878,7 +1918,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var list = view.services.filter(function (s) {
       if (svcFilter === 'key') return s.hasKey
       if (svcFilter === 'nokey') return !s.hasKey
-      if (svcFilter === 'current') return s.isCurrent
+      if (svcFilter === 'current') return s.inUse
       return true
     })
     var q = svcQ.trim().toLowerCase()
@@ -1900,7 +1940,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       list = list.slice().sort(function (a, b) { return (a.modelsCount || 0) - (b.modelsCount || 0) || byName(a, b) })
     } else {
       list = list.slice().sort(function (a, b) {
-        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1
+        if (a.inUse !== b.inUse) return a.inUse ? -1 : 1
         return byName(a, b)
       })
     }
@@ -1930,16 +1970,16 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       } else {
         slice = list.slice(0, SVC_COLLAPSE_N)
         var curSvc = null
-        list.forEach(function (s) { if (s.isCurrent) curSvc = s })
+        list.forEach(function (s) { if (s.inUse) curSvc = s })
         if (curSvc && slice.indexOf(curSvc) < 0) slice = slice.concat([curSvc])
         moreHtml = '<div class="listmore"><button class="btn small" id="svcMore">' + t('显示全部 ', 'Show all ') + list.length + t(' 个服务', ' services') + '</button></div>'
       }
     }
     el.innerHTML = slice.map(function (s) {
-      var useBtn = s.isCurrent
+      var useBtn = s.inUse
         ? '<span class="pill ok">' + t('正在使用', 'In use') + '</span>'
         : '<button class="btn small primary" data-use="' + esc(s.id) + '">' + t('应用', 'Apply') + '</button>'
-      return '<div class="service' + (s.isCurrent ? ' cur' : '') + '">' +
+      return '<div class="service' + (s.inUse ? ' cur' : '') + '">' +
         '<div class="info"><span class="name" title="' + esc(s.base_url) + '">' + esc(s.label) + '</span><br>' +
         '<span class="meta">' + t('默认 ', 'Default ') + esc(s.defaultModel || t('未设置', 'not set')) +
         (s.lastMs != null ? t(' · 延迟 ', ' · latency ') + s.lastMs + 'ms' : '') + ' · ' + s.modelsCount + t(' 个模型', ' models') +
@@ -2162,7 +2202,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   loadLanStatus() // 初始开关状态（开/关一眼可见）
 
   // 定时：主体=启用定时切换（原面板内勾选提到 pill），caret=展开/收起时段面板
-  var schedStatus = { windows: 0, autoOn: false, active: null, activeAvoids: [] }
+  var schedStatus = { windows: 0, autoOn: false, active: null, activeAvoids: [], applied: false, suppressedBy: null }
   // 启用态的唯一事实来源：切换即时落盘（不走防抖），切换在飞期间轮询重绘不回灌开关态——
   // 否则 5s 轮询会在防抖窗口内把服务端旧值写回，POST 就带回了旧值（实测复现过的竞态）
   var schedEnabledState = true
@@ -2178,11 +2218,19 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var n = schedStatus.windows
       if (!on) return t('定时 · 已停用', 'Schedule · off')
       if (!n) return t('定时 · 开', 'Schedule · on') // 无时段时也明示开关态（原 pill 无开关，故为新增文案）
-      if (schedStatus.autoOn && schedStatus.active) return t('定时 · ', 'Schedule · ') + schedStatus.active.start + '–' + schedStatus.active.end
+      if (schedStatus.autoOn && schedStatus.active) {
+        var span = schedStatus.active.start + '–' + schedStatus.active.end
+        // 绿色只代表「真的接管了」：命中但被钉定/目标不可用时写清原因，不再用绿点伪装生效
+        if (schedStatus.applied) return t('定时 · ', 'Schedule · ') + span
+        var why = schedStatus.suppressedBy === 'pin' ? t('钉定暂停', 'pinned')
+          : schedStatus.suppressedBy === 'unavailable' ? t('目标不可用', 'target unavailable')
+          : t('未生效', 'inactive')
+        return t('定时 · ', 'Schedule · ') + span + t('（', ' (') + why + t('）', ')')
+      }
       if (schedStatus.autoOn && schedStatus.activeAvoids.length) return t('定时 · ', 'Schedule · ') + schedStatus.activeAvoids[0].start + '–' + schedStatus.activeAvoids[0].end + (schedStatus.activeAvoids.length > 1 ? t(' 等', ' etc.') : '')
       return t('定时 · ', 'Schedule · ') + n + t(' 个时段', ' windows')
     },
-    okOn: function (on) { return !!on && schedStatus.autoOn && (!!schedStatus.active || schedStatus.activeAvoids.length > 0) },
+    okOn: function (on) { return !!on && schedStatus.autoOn && ((!!schedStatus.active && schedStatus.applied) || schedStatus.activeAvoids.length > 0) },
     panel: function () { return document.getElementById('schedPanel') },
     onToggle: function (next, pill) {
       pill.set({ on: next })
@@ -3475,7 +3523,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       b.onclick = function () {
         var id = b.getAttribute('data-direct')
         var c = clientOf(id)
-        var svc = (c && c.service) || (view.current && view.current.label) || ''
+        // 直连目标由服务端按客户端钉定/默认路由（active_profile）解析：跟随全局的取 defaultRoute，
+        // 不能用「正在使用」的窗口目标冒充
+        var svc = c && c.followsActive
+          ? ((view.defaultRoute && view.defaultRoute.label) || '')
+          : ((c && c.service) || (view.defaultRoute && view.defaultRoute.label) || '')
         confirmModal(t('把「', 'Switch "') + labelOf(id) + t('」切换为独立直连？', '" to direct mode?'), [
           t('将把服务「', 'This writes service "') + esc(svc) +
             t('」的地址与真实 Key 明文写入该客户端的配置文件（改前自动快照，可一键切回）', '" and its real key in plaintext into the client config (snapshot first; switch back anytime)'),

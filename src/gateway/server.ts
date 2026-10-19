@@ -24,7 +24,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, pickTarget, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
@@ -524,12 +524,16 @@ async function handleRequest(
 
   // 本地合成 GET /v1/models：返回当前选路目标服务的模型目录（用户拉取/筛选过的），不透传上游——
   // 上游目录 ≠ 用户目录，且上游未必实现该端点。Claude Code 开 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
-  // 后据此填充 /model 选择器；选路复用 resolveTarget（钉定/定时/active_profile），列表与实际请求同源。
+  // 后据此填充 /model 选择器；选路复用 pickTarget 首候选（含钉定/定时窗口），保证列表与实际请求同源。
   // 带 anthropic-version 头 = Claude Code discovery：对非 Claude 系 ID 加 anthropic. 前缀别名
   // 以通过其 ID 过滤（DISCOVERY_ID_RE），转发侧按目录还原。
   if (method === 'GET' && url.split('?')[0] === '/v1/models') {
+    // target 由 resolveTarget 解析（active_profile 或 harness 钉定），不含定时窗口；
+    // 用同一 pickTarget 首候选把目录切到真正在用的服务，避免窗口期列表与转发各说各话
+    const picked = pickTarget(rt, target, target.profile.fallback)
+    const listTarget = picked.ok ? picked.ordered[0].target : target
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(modelsListPayload(rt.config, target, req.headers['anthropic-version'] !== undefined)))
+    res.end(JSON.stringify(modelsListPayload(rt.config, listTarget, req.headers['anthropic-version'] !== undefined)))
     return
   }
 
@@ -733,9 +737,10 @@ export function overviewCacheHit(
 /** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
 async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown>> {
   const cfg = rt.config
-  const currentProfile = cfg.active_profile ? cfg.profiles[cfg.active_profile] : undefined
-  const currentProviderId = currentProfile?.provider
-  // harness → 当前路由到的 provider（钉死的 route 优先，否则跟随 active_profile）
+  // 唯一「正在使用」口径：钉定 > 可用窗口 > 默认（含 enabled/熔断过滤，与转发同源）。
+  // 服务卡、客户端行、手机页、/v1/models 全部消费它，不再各自用 active_profile 推算。
+  const route = autoRouteInfo(rt)
+  // harness → 当前路由到的 provider（钉死的 route 优先，否则跟随全局生效路由）
   const hidSvc: Record<string, string> = {}
   const hidFollows: Record<string, boolean> = {}
   for (const [hid, he] of Object.entries(cfg.harness ?? {})) {
@@ -767,7 +772,8 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
         .map((e) => parseFallbackEntry(e))
         .filter((x): x is { providerId: string; model?: string } => x !== null)
         .map((x) => ({ provider: x.providerId, model: x.model ?? null })),
-      isCurrent: id === currentProviderId,
+      // 「正在使用」= 全局生效主服务（钉定/定时窗口/默认，含可用性过滤），不是 active_profile
+      inUse: id === route.provider,
       enabled: p.enabled !== false,
       priority: p.priority ?? 0,
       down: melted,
@@ -776,7 +782,15 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true })),
     })
   }
-  const current = services.find((s) => s.isCurrent) ?? null
+  // 兼容旧字段名：isCurrent 与 inUse 同值（移动端/PWA 旧页面可能仍读它）
+  services.forEach((s: { isCurrent?: boolean; inUse: boolean }) => { s.isCurrent = s.inUse })
+  const current = route.provider
+    ? { id: route.provider, label: route.providerLabel ?? route.provider, model: route.model }
+    : null
+  // 默认路由（active_profile）：配置态语义（接入跟随/直连目标），与「正在使用」分开
+  const defaultRoute = route.defaultProvider
+    ? { id: route.defaultProvider, label: route.defaultProviderLabel ?? route.defaultProvider, model: route.defaultModel }
+    : null
   const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
   const usedByMap: Record<string, string[]> = {}
   // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，按 adapter 取回，顺序不受并发影响
@@ -786,7 +800,9 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
   for (const a of adapters) {
     const st = statuses.get(a)!
     const he = cfg.harness[a.id]
-    const providerId = he && hidSvc[a.id] ? hidSvc[a.id] : undefined
+    const baseProviderId = he && hidSvc[a.id] ? hidSvc[a.id] : undefined
+    // 跟随全局的客户端：服务随「正在使用」走（含定时窗口）；钉定路由的仍写自己的服务
+    const providerId = he && hidFollows[a.id] ? (route.provider ?? baseProviderId) : baseProviderId
     // 钉定信息：route 存钉住的 profile 名（null = 跟随全局），pinnedProvider 是该 profile 指向的服务 id（UI 下拉回显用）
     const pinnedRoute = he?.route && he.route !== 'default' ? he.route : null
     clients.push({
@@ -839,7 +855,9 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       },
       autostart: autostartOverview(),
     },
-    current: current ? { id: current.id, label: current.label, model: current.defaultModel } : null,
+    current: current ? { id: current.id, label: current.label, model: current.model } : null,
+    // 默认路由（active_profile）：与 current（正在使用）区分，供电台「跟随全局」/直连目标等配置态使用
+    defaultRoute,
     services,
     clients,
     // 预设附带模型目录（添加页首屏直显预设模型；只带用户可见的三个字段，source 等内部字段不出域）
