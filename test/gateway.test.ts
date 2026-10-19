@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit } from '../src/gateway/server.js'
-import { clientProtocolFromPath, endpointRisks } from '../src/gateway/relay.js'
+import { clientProtocolFromPath, endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import type { Config } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
@@ -61,6 +61,10 @@ process.env.MODELRDOCK_DISABLE_HOLIDAY_FETCH = '1'
 // 模型目录（models.dev）同理禁用：网关启动定时器 / 目录端点不得触发出站请求
 process.env.MODELRDOCK_DISABLE_CATALOG_FETCH = '1'
 
+/** zstd 单测能力开关：zlib.zstd(De)CompressSync 由 Node ≥22.15 提供，旧运行时跳过相关用例 */
+const HAS_ZSTD =
+  typeof zlib.zstdCompressSync === 'function' && typeof zlib.zstdDecompressSync === 'function'
+
 interface CapturedRequest {
   url: string
   authorization?: string
@@ -88,7 +92,7 @@ function startMockUpstream(): Promise<{ port: number; requests: CapturedRequest[
         body,
       })
       if (req.url === '/v1/messages') {
-        // 压缩错误体：火山方舟等上游对 4xx 回 gzip 体（真实事故 2026-10-15：dsh 只看到乱码报错）
+        // 压缩错误体：火山方舟等上游对 4xx 回 gzip/zstd/br 体（真实事故 2026-10-15：dsh 只看到乱码报错）
         if (body.includes('gzip-err-model')) {
           const payload = Buffer.from(
             JSON.stringify({ error: { type: 'BadRequest', code: 'InvalidParameter', message: 'thinking.type `disabled` is not supported by this model' } }),
@@ -102,6 +106,21 @@ function startMockUpstream(): Promise<{ port: number; requests: CapturedRequest[
           const payload = Buffer.from(JSON.stringify({ error: { message: 'rate limited, slow down' } }), 'utf8')
           res.writeHead(429, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
           res.end(zlib.gzipSync(payload))
+          return
+        }
+        if (body.includes('zstd-err-model') && typeof zlib.zstdCompressSync === 'function') {
+          const payload = Buffer.from(
+            JSON.stringify({ error: { type: 'BadRequest', code: 'InvalidParameter', message: 'model "glm-5.3-flash" is not supported by this model' } }),
+            'utf8'
+          )
+          res.writeHead(400, { 'content-type': 'application/json', 'content-encoding': 'zstd' })
+          res.end(zlib.zstdCompressSync(payload))
+          return
+        }
+        if (body.includes('zstd-429-quota-model') && typeof zlib.zstdCompressSync === 'function') {
+          const payload = Buffer.from(JSON.stringify({ error: { message: 'insufficient quota for this model' } }), 'utf8')
+          res.writeHead(429, { 'content-type': 'application/json', 'content-encoding': 'zstd' })
+          res.end(zlib.zstdCompressSync(payload))
           return
         }
         res.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -130,6 +149,11 @@ function startMockUpstream(): Promise<{ port: number; requests: CapturedRequest[
       if (req.url === '/boom') {
         res.writeHead(500, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: { message: 'context length exceeded' } }))
+        return
+      }
+      if (req.url === '/model-invalid') {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'model "invalid-model" is not supported by this engine' } }))
         return
       }
       res.writeHead(404, { 'content-type': 'application/json' })
@@ -533,6 +557,39 @@ describe('网关', () => {
     }
   })
 
+  // zstd 体解压需要 Node ≥22.15 的 zlib.zstd(De)CompressSync：旧运行时整条跳过（CI 低版本 Node 不红）
+  it.skipIf(!HAS_ZSTD)('上游 zstd 压缩错误体：400/429 都解压为可读 JSON 并附可诊断 hint', async () => {
+    const t = await setup()
+    try {
+      // 400：模型不匹配（zstd 压缩）→ 明文 JSON + 模型提示，且不得再声明 content-encoding
+      const res400 = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'zstd-err-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res400.status).toBe(400)
+      expect(res400.headers.get('content-encoding')).toBeNull()
+      const j400: any = await res400.json()
+      expect(j400.error.code).toBe('InvalidParameter')
+      expect(j400.error.message).toContain('glm-5.3-flash')
+      expect(j400.modeldock.hint).toContain('模型不匹配')
+
+      // 429 额度类（zstd 压缩）：解压后识别 quota → 明文回传并给额度提示
+      const res429 = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'zstd-429-quota-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res429.status).toBe(429)
+      expect(res429.headers.get('content-encoding')).toBeNull()
+      const j429: any = await res429.json()
+      expect(j429.error.message).toContain('insufficient quota')
+      expect(j429.modeldock.hint).toContain('额度')
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('根路径：无认证 GET / → 302 到控制台；带 token / POST 不受影响', async () => {
     const t = await setup()
     try {
@@ -826,9 +883,48 @@ describe('网关', () => {
       const j: any = await res.json()
       expect(j.error.message).toBe('invalid api key')
       expect(j.modeldock.hint).toContain('set-key')
+
+      // 404 模型不存在：沿用既有 404 分支的提示（刷新模型目录 / 切 profile）
+      const res404 = await fetch(`http://127.0.0.1:${t.gwPort}/model-missing-path`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ model: 'nonexistent-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res404.status).toBe(404)
+      const j404: any = await res404.json()
+      expect(j404.error.message).toContain('model not found')
+      expect(j404.modeldock.hint).toContain('模型不存在')
+      expect(j404.modeldock.hint).toContain('modeldock model refresh')
+
+      // 400 模型不匹配：新增分支给出「查拼写 / 刷新目录」的可操作提示
+      const res400 = await fetch(`http://127.0.0.1:${t.gwPort}/model-invalid`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ model: 'invalid-model', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+      expect(res400.status).toBe(400)
+      const j400: any = await res400.json()
+      expect(j400.error.message).toContain('is not supported')
+      expect(j400.modeldock.hint).toContain('模型不匹配或不存在')
+      expect(j400.modeldock.hint).toContain('检查模型名称拼写')
+      expect(j400.modeldock.hint).toContain('modeldock model refresh')
     } finally {
       t.closeAll()
     }
+  })
+
+  it('translateUpstreamError：400 模型类错误给可操作提示（正反语序/中文），其他场景不误判', () => {
+    const ctx = { providerId: 'up', model: 'glm-5.3-flash' }
+    // 正序：model ... does not exist
+    expect(translateUpstreamError(400, JSON.stringify({ error: { message: 'The model `glm-5.3-flash` does not exist' } }), ctx)).toContain('模型不匹配')
+    // 反序：invalid model name
+    expect(translateUpstreamError(400, 'invalid model name: glm-5.3-flash', ctx)).toContain('模型不匹配')
+    // 中文原文错误
+    expect(translateUpstreamError(400, '{"error":{"message":"模型不存在"}}', ctx)).toContain('模型不匹配')
+    // 400 上下文超限仍走上下文提示（该分支先于模型分支）
+    expect(translateUpstreamError(400, 'maximum context length exceeded', ctx)).toContain('上下文')
+    // 5xx 不得被误判成模型问题（状态码守卫）
+    expect(translateUpstreamError(500, 'model does not exist', ctx)).toContain('HTTP 500')
   })
 
   it('管理面：health 开放，读写一律要求 admin 凭据，伪造同源也被拒', async () => {

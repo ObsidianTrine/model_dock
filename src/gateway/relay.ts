@@ -409,6 +409,12 @@ export async function forwardToUpstream(
   }
 }
 
+/** 模型不匹配类错误特征：上游 400 体里点名模型不存在 / 不支持 / 无效（正反两种语序都算：
+ *  「model ... not supported」与「invalid model name」）。中文原文错误同样覆盖。
+ *  （真实案例 2026-10：claude-direct 只认 Claude 系模型，glm-5.3-flash 被 400 拒绝，客户端只看到原始英文报错） */
+const MODEL_MISSING_RE =
+  /model.*(?:does not exist|is not supported|not available|not found|invalid)|(?:invalid|unsupported|unknown|no such)\s+model|模型.*(?:不存在|不支持|无效|不可用)/i
+
 /** 上游 4xx/5xx → 附带可执行修复建议 */
 export function translateUpstreamError(
   status: number,
@@ -432,6 +438,8 @@ export function translateUpstreamError(
     hint = t('上游额度不足（HTTP 402）：余额/套餐额度已耗尽。等待额度重置、更换 key，或在服务上手动挂起；有备用服务时网关会自动切换', 'Upstream out of quota (HTTP 402): balance/plan quota exhausted. Wait for reset, replace the key, or suspend the service; the gateway fails over automatically when a fallback exists')
   } else if (status === 429) {
     hint = t('上游限流或额度不足：稍后重试，或切换 profile（modeldock profile use）', 'Upstream rate-limited or out of quota: retry later, or switch profile (modeldock profile use)')
+  } else if (status === 400 && MODEL_MISSING_RE.test(bodyText)) {
+    hint = t('模型不匹配或不存在：{model}。检查模型名称拼写，或执行 modeldock model refresh {id} 拉取可用模型', 'Model mismatch or not found: {model}. Check the model name spelling, or run modeldock model refresh {id} to fetch available models', { model: ctx.model ?? '?', id: ctx.providerId })
   } else {
     hint = t('上游返回 HTTP {status}；网络/凭据问题可执行 modeldock test 排查', 'Upstream returned HTTP {status}; for network/credential issues run modeldock test to diagnose', { status })
   }
@@ -455,10 +463,18 @@ export function filterResponseHeaders(headers: Record<string, string>): Record<s
   return out
 }
 
+/** zstd 解压器（zlib.zstdDecompressSync，Node ≥22.15 提供）。运行时探测而非比对版本号：
+ *  22.15+ / 23.x / 24.x 都应有该 API，按版本字符串判断会在 22.16 或 24 上误关。
+ *  缺失（旧运行时）时保持 null，错误体回落按 utf8 直读，不抛错、不影响 gzip/deflate/br。 */
+type ZstdDecoder = (buf: Buffer) => Buffer
+const zstdDecoder: ZstdDecoder | null =
+  typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null
+
 /** 读上游错误体为文本：按 content-encoding 解压后再解码。
  *  undici request 不自动解压，压缩错误体（如火山方舟的 gzip 400 体）直读是一段乱码，
  *  客户端只会看到不可诊断的 upstream_error，错误分类（额度特征识别）也随之失效。
- *  解压失败 / 无压缩头回落原始字节按 utf8 解码，不向上抛。 */
+ *  解压失败 / 无压缩头回落原始字节按 utf8 解码，不向上抛。
+ *  zstd（上游新出现的压缩算法）同样按此规则处理。 */
 export async function readUpstreamErrorText(
   headers: Record<string, string>,
   body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }
@@ -479,6 +495,7 @@ export async function readUpstreamErrorText(
       try { return zlib.inflateSync(buf).toString('utf8') } catch { return zlib.inflateRawSync(buf).toString('utf8') }
     }
     if (enc === 'br') return zlib.brotliDecompressSync(buf).toString('utf8')
+    if (enc === 'zstd' && zstdDecoder) return zstdDecoder(buf).toString('utf8')
   } catch {
     /* 回落原文 */
   }
