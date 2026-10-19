@@ -239,6 +239,9 @@ namespace ModelDockTray
         /// 失败（含未配置令牌）原样展示输出——本身就是可操作指引。
         private static bool _checkingUpdate = false;
         private static UpdateProgressForm _progressForm;
+        // 更新子进程在途标志：进度文件尚未首写的短窗兜底（拉起后几秒内），长窗以磁盘进度为准（对齐 macOS 托盘）
+        private static bool _updating = false;
+        private static DateTime _updatingSince = DateTime.MinValue;
 
         public static bool CheckingUpdate { get { return _checkingUpdate; } }
 
@@ -333,8 +336,7 @@ namespace ModelDockTray
                 FinishCheck();
                 if (r == DialogResult.OK)
                 {
-                    StartUpdate();
-                    ShowProgressForm("正在更新到 v" + (ver.Length > 0 ? ver : ""));
+                    if (StartUpdate()) ShowProgressForm("正在更新到 v" + (ver.Length > 0 ? ver : ""));
                 }
             }
             else
@@ -362,8 +364,7 @@ namespace ModelDockTray
                 DialogResult r = ShowUpdateDialog(title, body, htmlUrl);
                 if (r == DialogResult.OK)
                 {
-                    StartUpdate();
-                    ShowProgressForm("正在更新到 v" + (latest ?? ""));
+                    if (StartUpdate()) ShowProgressForm("正在更新到 v" + (latest ?? ""));
                 }
                 return;
             }
@@ -404,16 +405,55 @@ namespace ModelDockTray
         internal static string JsonUnescape(string v)
         {
             if (v == null) return null;
-            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\"", "\"").Replace("\u0001", "\\\\");
+            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\\"", "\"").Replace("\u0001", "\\\\");
+        }
+
+        internal static long JsonLong(string json, string field)
+        {
+            var m = Regex.Match(json, "\"" + field + "\"\\s*:\\s*(-?[0-9]+)");
+            long v;
+            return (m.Success && long.TryParse(m.Groups[1].Value, out v)) ? v : 0;
+        }
+
+        /// 更新是否在途（对齐 macOS 托盘口径）：磁盘进度为准（update --yes 子进程写的进度，
+        /// 10 分钟未刷新按上次残留过期）；内存标志只兜进度文件尚未首写的短窗。
+        /// done/failed 一律视为已收尾，即使进度小窗没开着。
+        public static bool UpdateInFlight()
+        {
+            if (_updating && (DateTime.UtcNow - _updatingSince).TotalSeconds < 60) return true;
+            try
+            {
+                var file = Home() + "\\update-progress.json";
+                if (!File.Exists(file)) return false;
+                var text = File.ReadAllText(file);
+                var stage = JsonString(text, "stage");
+                if (stage == null || stage == "done" || stage == "failed") return false;
+                var at = JsonLong(text, "at");
+                if (at > 0)
+                {
+                    long epochMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                    if (epochMs - at > 10 * 60 * 1000) return false; // 残留过期
+                }
+                return true;
+            }
+            catch { return false; }
         }
 
         /// 就地更新：分离跑 `modeldock update --yes`（弹窗里的「立即更新」即用户确认）。
         /// 不重定向输出——更新流程会停掉托盘自身（换包后由新版拉起），托盘死了日志也写不成；
         /// 失败原因更新后可在控制台或命令行复查。
-        public static void StartUpdate()
+        /// 返回是否真正拉起：在途更新被拒绝时返回 false，调用方不再弹进度窗（对齐 macOS 托盘）。
+        public static bool StartUpdate()
         {
+            if (UpdateInFlight())
+            {
+                MessageBox.Show("上一个更新流程尚未完成，请等它结束（或查看进度小窗）后再试。", "更新正在进行中", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
             var bin = GatewayBinaryPath();
-            if (bin == null) return;
+            if (bin == null) return false;
+            _updating = true;
+            _updatingSince = DateTime.UtcNow;
             try
             {
                 Process.Start(new ProcessStartInfo
@@ -423,8 +463,13 @@ namespace ModelDockTray
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 });
+                return true;
             }
-            catch { }
+            catch
+            {
+                _updating = false; // 拉起失败：放开防重入，否则这一轮托盘永远点不动更新
+                return false;
+            }
         }
 
         /// 进度小窗（自有 STA 线程 + 消息循环，跨线程 Close 走 BeginInvoke）：
@@ -735,10 +780,11 @@ namespace ModelDockTray
             menu.Add(clean);
 
             // 检查更新：网关存活走网关缓存接口（三方同源，TTL 内不打 GitHub），未运行退回 CLI 现查；
-            // 检查进行中置灰防连点，进度在小窗可见
-            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? "检查中…" : "检查更新…");
+            // 检查/更新进行中置灰防连点——更新中再拉起会与在途更新互踩安装（对齐 macOS 托盘口径）
+            var updBusy = TrayActions.CheckingUpdate || TrayActions.UpdateInFlight();
+            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? "检查中…" : (updBusy ? "更新中…" : "检查更新…"));
             upd.Click += delegate { TrayActions.CheckUpdate(); };
-            upd.Enabled = !TrayActions.CheckingUpdate && TrayActions.GatewayBinaryPath() != null;
+            upd.Enabled = !updBusy && TrayActions.GatewayBinaryPath() != null;
             menu.Add(upd);
 
             if (!_running)
