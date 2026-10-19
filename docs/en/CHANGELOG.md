@@ -9,6 +9,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **Deleted models no longer reappear when adding a service**: rows removed from the model list now stay removed after saving; previously deleted preset models were filled back in on save, no matter how many times you deleted them.
+- **Adding Zhipu GLM · bigmodel no longer pre-fills the Anthropic endpoint**: Zhipu's bigmodel API no longer offers an Anthropic-compatible interface, so selecting this service now pre-fills the OpenAI-compatible address instead of creating a service that could never connect.
 - **"In use" is consistent everywhere**: service-card badges, the top "In use" line, the mobile page, and model lists now follow the same effective route — when a schedule window moves traffic to another service, they all move together (no more "DeepSeek at the top, Volcano Ark on the card").
 - **Scheduled windows now say why they are not active**: when the primary is pinned manually, or the target is offline or circuit-broken, the schedule pill no longer shows green — it says "pinned" or "target unavailable".
 - **The model follows the service**: when a schedule window or manual pin switches the primary, its default model and model mapping now come from the target service's own profile instead of sending the old service's model name to the new upstream; direct mode still uses the default route.

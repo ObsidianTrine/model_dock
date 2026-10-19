@@ -2753,8 +2753,8 @@ describe('自动路由 Phase3：定时切换', () => {
   })
 })
 
-describe('添加服务：合并模型目录 + 自定义名称', () => {
-  it('提交的模型与预设目录合并保留，且使用自定义名称', async () => {
+describe('添加服务：提交模型目录即权威 + 自定义名称', () => {
+  it('提交的模型按提交全量落盘（删掉的预设模型不回填），且使用自定义名称', async () => {
     const t = await setup()
     try {
       const origin = `http://127.0.0.1:${t.gwPort}`
@@ -2763,7 +2763,7 @@ describe('添加服务：合并模型目录 + 自定义名称', () => {
         headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
         body: JSON.stringify({
           presetId: 'deepseek-anthropic', key: 'sk-merge-test', name: '我的DeepSeek', fetch: false,
-          models: { 'just-fetched-model': { context_window: 1024, max_output: 512 } },
+          models: { 'deepseek-flash': { context_window: 1024, max_output: 512 } }, // 只保留一个，其余预设模型视为用户删除
         }),
       })
       expect(res.status).toBe(200)
@@ -2772,12 +2772,29 @@ describe('添加服务：合并模型目录 + 自定义名称', () => {
       const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
       const prov = onDisk.providers['deepseek']
       expect(prov.name).toBe('我的DeepSeek')
-      // 预设目录 + 提交模型合并：提交的模型在、预设目录的模型也都在（不再整体替换丢模型）
+      // 提交 = 权威全量：提交的模型在、未提交的预设模型不复活（旧叠加语义曾把删掉的行保存后填回）
       const catalog = Object.keys(presetModels(findPreset('deepseek-anthropic')!) ?? {})
       expect(catalog.length).toBeGreaterThan(0)
       const ids = Object.keys(prov.models)
-      expect(ids).toContain('just-fetched-model')
-      catalog.forEach((m) => expect(ids).toContain(m))
+      expect(ids).toEqual(['deepseek-flash'])
+      expect(prov.models['deepseek-flash'].context_window).toBe(1024)
+      catalog.forEach((m) => { if (m !== 'deepseek-flash') expect(ids).not.toContain(m) })
+    } finally { t.closeAll() }
+  })
+
+  it('提交空模型对象 = 用户删光：保存空目录，不回落预设、不触发在线拉取', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+        body: JSON.stringify({ presetId: 'deepseek-anthropic', key: 'sk-empty-test', fetch: false, models: {} }),
+      })
+      expect(res.status).toBe(200)
+      const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      const prov = onDisk.providers['deepseek']
+      expect(prov.models).toEqual({}) // 删光就保持删光，预设目录不再填回
     } finally { t.closeAll() }
   })
 
