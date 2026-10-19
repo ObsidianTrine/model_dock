@@ -5,10 +5,16 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.1.5] - 2026-10-19
+
+Windows 托盘恢复随包分发与更新链路收口，外加 ZCode 接入、路由口径一致性与上游报错可读性的集中修复。
 
 ### 修复
 
+- **Windows 托盘图标回来了**：v1.1.2 至 v1.1.4 的 Windows 包因构建缺陷静默缺失托盘程序，升级后系统托盘里没有 ModelDock 图标；本版已修复，托盘照常显示。
+- **慢链路大包更新不再被二次发起打断**：下载超过 1 小时后再次发起更新，此前会把进行中的更新打断、两个更新互相覆盖安装；现在只要更新仍在推进就继续等待。Windows 托盘同步对齐——更新进行中菜单置灰显示「更新中…」，重复点击被拦下。
+- **网页与托盘的「检查更新」也走系统代理**：v1.1.4 的代理修复只覆盖了命令行，系统代理（VPN）机器上网页 / 托盘检查更新仍连不上 GitHub；现在与命令行同口径。
+- **控制台打不开时自动重试**：网关重启窗口或冷启动超时导致首屏加载失败时，页面此前永久停在空骨架；现在会自动重试恢复。
 - **添加服务时删掉的模型不再被自动填回**：在模型列表里删除的行，保存后就按删除后的列表生效；此前删掉的模型会在保存时被重新填回，怎么删都删不掉。
 - **添加智谱 GLM · bigmodel 不再默认填 Anthropic 协议地址**：智谱 bigmodel 现已不提供 Anthropic 兼容接口，选该服务默认填入 OpenAI 兼容地址，不再生成连不上的服务。
 - **「正在使用」到处一致**：服务卡徽标、顶部「正在使用」、手机页与模型列表现在都按同一份生效路由显示——定时时段把流量切到别的服务后一起跟着变，不再出现「顶部说 DeepSeek、卡片说火山」。
@@ -207,6 +213,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...v1.1.2

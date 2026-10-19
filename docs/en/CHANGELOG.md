@@ -5,10 +5,16 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.1.5] - 2026-10-19
+
+The Windows tray ships again and the update pipeline gets hardened, plus a batch of fixes for ZCode attaching, route-state consistency, and upstream error readability.
 
 ### Fixed
 
+- **The Windows tray icon is back**: Windows packages from v1.1.2 through v1.1.4 silently shipped without the tray program due to a build defect — no ModelDock icon appeared in the system tray after upgrading; this release fixes it and the tray shows up again.
+- **Slow large-package updates are no longer interrupted by a second start**: when a download ran past one hour, starting an update again would interrupt the in-flight one and the two installs overwrote each other; an update that is still progressing is now left running. The Windows tray follows the same rule — the menu grays out as "Updating…" while an update is in flight, and repeated clicks are refused.
+- **"Check for updates" from the web console and tray also follows the system proxy**: the v1.1.4 proxy fix only covered the command line — on system-proxy (VPN) machines the web/tray check still failed to reach GitHub; it now behaves the same as the CLI.
+- **The console recovers by itself after a failed first load**: when the first screen failed during a gateway restart window or a cold-start timeout, the page stayed on an empty skeleton forever; it now retries automatically and recovers.
 - **Deleted models no longer reappear when adding a service**: rows removed from the model list now stay removed after saving; previously deleted preset models were filled back in on save, no matter how many times you deleted them.
 - **Adding Zhipu GLM · bigmodel no longer pre-fills the Anthropic endpoint**: Zhipu's bigmodel API no longer offers an Anthropic-compatible interface, so selecting this service now pre-fills the OpenAI-compatible address instead of creating a service that could never connect.
 - **"In use" is consistent everywhere**: service-card badges, the top "In use" line, the mobile page, and model lists now follow the same effective route — when a schedule window moves traffic to another service, they all move together (no more "DeepSeek at the top, Volcano Ark on the card").
@@ -207,6 +213,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.1...v1.1.2
