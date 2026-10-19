@@ -1190,7 +1190,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   }
 
   function load() {
-    return api('/overview').then(function (v) {
+    // 首屏 overview 比常规请求慢：冷启动要等全部 adapter status 探测（Windows 注册表探测单次最长 8s，
+    // 见 presence.ts），默认 15s 在低内存/慢盘机器上会误超时，放宽到 45s
+    return api('/overview', { timeoutMs: 45000 }).then(function (v) {
       view = v
       knownModels = Object.assign({}, catalogTable, (v && v.knownModels) || {})
       loadCatalog()
@@ -1334,7 +1336,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // 状态自动刷新：定时切换窗口翻转、熔断、其他端改配置等发生时页面自动跟上，无需手动刷新。
   // diff 门控——数据没变就不动 DOM（不干扰正在编辑的弹窗/表单），变了才整页重绘一次；失败静默（健康横幅另有提示）
   function pollOverview() {
-    if (!view) return
+    // 首屏 /overview 失败（网关重启窗口、冷启动探测慢超时）时 view 仍为空：轮询档自动重试首屏，
+    // 否则页面永远停在静态骨架（②③ 空态、pill 全默认），只能手动刷新恢复。静默吞错防 toast 刷屏
+    if (!view) { load().catch(function () {}); return }
     fetch('/_modeldock/overview', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (v) {
       if (!v || JSON.stringify(v) === JSON.stringify(view)) return
       view = v
