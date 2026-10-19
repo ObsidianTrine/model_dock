@@ -2,13 +2,15 @@
  * 更新跨进程互斥锁（update.lock）：托盘 / Web 控制台 / 手动 CLI 三条入口都能发起
  * `modeldock update --yes`，并发更新会互相停网关、互相替换安装位置，还会按各自的
  * 陈旧文件偏移把同一份日志写花。'wx' 独占创建 + pid 探活 + 启动时间兜底：
- * 进程崩溃残留的陈锁可被接管，持有者存活时给出可操作报错。
+ * 进程崩溃残留的陈锁可被接管，持有者存活时给出可操作报错；锁超时但持有者存活且
+ * 更新进度文件仍在途（下载未终态）同样不接管——慢链路大包下载可超 1h。
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import { modeldockDir } from '../util/paths.js'
 import { t } from '../util/i18n.js'
 import { UpdateError } from './check.js'
+import { readUpdateProgress } from './progress.js'
 
 /** 锁超过这个时长视为陈锁（交互确认可以挂很久，取 1 小时） */
 const STALE_MS = 60 * 60_000
@@ -41,10 +43,18 @@ function readHolder(p: string): LockBody | null {
   }
 }
 
+/** 锁持有者是否仍有更新在跑：update-progress.json 新鲜（readUpdateProgress 自带 10min
+ *  残留过期）且未到终态。崩溃残留不受影响——进度 10min 不刷新即返回 null，照旧接管。 */
+async function holderUpdating(): Promise<boolean> {
+  const prog = await readUpdateProgress()
+  return prog != null && prog.stage !== 'done' && prog.stage !== 'failed'
+}
+
 /**
  * 独占持有更新锁直至 release。被占用且持有者存活时抛 UpdateError（可操作指引）；
- * 持有者已死或锁超时（崩溃残留）自动接管。release 只删自己写的锁——接管竞态下
- * 文件可能已易主，误删会把别人的锁拆掉。
+ * 持有者已死或锁超时（崩溃残留）自动接管——但锁超时且持有者存活、进度文件仍在途时
+ * 不接管（真更新还在跑）。release 只删自己写的锁——接管竞态下文件可能已易主，
+ * 误删会把别人的锁拆掉。
  */
 export async function acquireUpdateLock(): Promise<() => void> {
   const p = updateLockPath()
@@ -77,8 +87,11 @@ export async function acquireUpdateLock(): Promise<() => void> {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
       const holder = readHolder(p)
+      const holderAlive = !!holder && !!holder.pid && processAlive(holder.pid)
       const fresh = holder ? Date.now() - Date.parse(holder.startedAt) < STALE_MS : false
-      const stale = !holder || !holder.pid || !processAlive(holder.pid) || !fresh
+      // 仅「持有者存活但锁已超时」才查进度文件：慢链路下载超 1h 时锁会先过期，
+      // 在途进度是唯一可信的「更新仍在跑」信号；其余分支短路，不多读一次磁盘
+      const stale = !holder || !holder.pid || !holderAlive || (!fresh && !(await holderUpdating()))
       if (!stale) {
         throw new UpdateError(
           t(

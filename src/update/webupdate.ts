@@ -19,6 +19,7 @@ import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type R
 import { detectInstallShape } from './install.js'
 import { notesSummaryText, notesToPlain } from './notes.js'
 import { readUpdateProgress, type UpdateProgress } from './progress.js'
+import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
 const CHECK_TTL_MS = 24 * 3600_000
 /** 检查失败后的重试间隔：失败不该占用 24h 成功窗口（否则 GitHub 偶发不可达要隔天才能再试） */
@@ -42,8 +43,8 @@ const state: UpdateWebState = { checking: false, lastCheckedAt: null, lastFailAt
 let inflight: Promise<void> | null = null
 /** 测试注入：本地 mock API 基地址（null = 官方 https://api.github.com） */
 let apiBaseOverride: string | null = null
-/** 测试注入：替换底层拉取函数（单测并发防重入时用桩计数） */
-let fetchOverride: ((repo: string, token: string | null, apiBase?: string) => Promise<ReleaseManifest>) | null = null
+/** 测试注入：替换底层拉取函数（单测并发防重入时用桩计数）；第 4 参为代理解析结果 */
+let fetchOverride: ((repo: string, token: string | null, apiBase?: string, opts?: { proxyUrl?: string | null }) => Promise<ReleaseManifest>) | null = null
 
 /** 测试专用：注入更新检查的 API 基地址（单测用本地 http server 伪造 GitHub API） */
 export function setUpdateApiBaseForTests(base: string | null): void {
@@ -51,7 +52,7 @@ export function setUpdateApiBaseForTests(base: string | null): void {
 }
 
 /** 测试专用：注入底层拉取函数（null = 默认 fetchLatestRelease） */
-export function setUpdateFetchForTests(fn: ((repo: string, token: string | null, apiBase?: string) => Promise<ReleaseManifest>) | null): void {
+export function setUpdateFetchForTests(fn: ((repo: string, token: string | null, apiBase?: string, opts?: { proxyUrl?: string | null }) => Promise<ReleaseManifest>) | null): void {
   fetchOverride = fn
 }
 
@@ -97,8 +98,11 @@ export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolea
         if (state.lastCheckedAt && now - state.lastCheckedAt < CHECK_TTL_MS) return
         if (state.lastFailAt && now - state.lastFailAt < FAIL_RETRY_MS) return
       }
+      // 仅在真的要发请求时才解析代理（TTL 命中的常驻轮询不付 scutil/注册表查询成本）。
+      // 与 run.ts 同口径：apiBase 是测试注入缝隙，注入即本地 mock，绝不代理
+      const proxyUrl = apiBaseOverride ? null : await resolveUpdateProxyUrl()
       const fetchFn = fetchOverride ?? fetchLatestRelease
-      const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase)
+      const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase, { proxyUrl })
       state.manifest = { version: m.version, notes: m.notes, htmlUrl: m.htmlUrl, sizeBytes: matchedAssetSize(m) }
       state.lastError = null
       state.lastFailAt = null
