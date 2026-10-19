@@ -1052,9 +1052,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     return api
   }
   var COMMON = ['custom', 'deepseek-anthropic', 'openai', 'anthropic']
-  // 「更多服务」Top 10 白名单（2026-10 热度排序）：按服务商合并、条目本身已带多协议端点，
-  // 选完表单里三行协议地址自动填好。协议变体与长尾厂商不再在 UI 列出（预设库保留，CLI / presets.json 仍可用）
-  var MORE_TOP = ['bigmodel-anthropic', 'kimi-anthropic-cn', 'ark-coding-plan', 'ark-agent-plan', 'zai-anthropic', 'kimi-anthropic-global', 'mimo-token-plan-cn', 'dashscope-openai', 'openrouter', 'gemini-openai']
+  // 「更多服务」Top 10 白名单（2026-10 热度排序）：按服务商合并，选完表单协议地址按预设自动填好。
+  // 协议变体与长尾厂商不再在 UI 列出（预设库保留，CLI / presets.json 仍可用）。
+  // bigmodel 只列 openai 预设——其 anthropic 兼容端点已下线（2026-10 实测），anthropic 变体预设已移除
+  var MORE_TOP = ['bigmodel-openai', 'kimi-anthropic-cn', 'ark-coding-plan', 'ark-agent-plan', 'zai-anthropic', 'kimi-anthropic-global', 'mimo-token-plan-cn', 'dashscope-openai', 'openrouter', 'gemini-openai']
   var view = null
   var svcQ = '', svcSort = 'default', svcFilter = 'all'
   // 长列表防撑高：服务默认只渲染前 N 个（一键展开/收起，不用分页——切换服务不该翻页找）；客户端未安装项默认折叠
@@ -1883,12 +1884,12 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     $('#afMsg').className = 'testline'
     var body = { presetId: picked, key: key, protocol: ep.protocol, base_url: ep.url, name: ep.name }
     if (Object.keys(ep.endpoints).length) body.endpoints = ep.endpoints
-    // 动过模型目录才提交 models；新模型框手填的行（没点「添加」也在 collect 里）含预设外条目时同样提交——
-    // 否则用户输入被丢、服务端还会误触自动拉取。同时把 ★ 默认模型带给服务端
+    // 动过模型目录就整表提交（含删光 = 空对象）：服务端按提交全量落盘，删掉的行不再由预设目录猜回；
+    // 未动才留给服务端做预设合并+在线拉取。新模型框手填的行（没点「添加」也在 collect 里）一并提交，用户输入不丢
     var presetCatalog = {}
     ;(view.presets || []).forEach(function (p) { if (p.id === picked) { var pm = p.models || {}; for (var k in pm) presetCatalog[k] = 1 } })
     var hasExtra = Object.keys(collected.models).some(function (k) { return !presetCatalog[k] })
-    if ((afModelB.isDirty() || hasExtra) && Object.keys(collected.models).length) {
+    if (afModelB.isDirty() || hasExtra) {
       body.models = collected.models
       var dm = afModelB.getDefault()
       if (dm && collected.models[dm]) body.default_model = dm

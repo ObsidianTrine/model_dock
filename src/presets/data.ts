@@ -121,7 +121,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
   {
     id: 'deepseek-anthropic',
     slug: 'deepseek',
-    // 主预设不带协议后缀（同 bigmodel-anthropic 先例）：预设自带三协议端点，名字标协议反而误导
+    // 主预设不带协议后缀：预设自带多协议端点，名字标协议反而误导
     get label() { return t('DeepSeek', 'DeepSeek') },
     vendor: 'DeepSeek',
     base_url: 'https://api.deepseek.com/anthropic',
@@ -151,25 +151,11 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     ],
   },
   {
-    id: 'bigmodel-anthropic',
-    slug: 'bigmodel',
-    get label() { return t('智谱 GLM · bigmodel', 'Zhipu GLM · bigmodel') },
-    get vendor() { return t('智谱', 'Zhipu') },
-    base_url: 'https://open.bigmodel.cn/api/anthropic',
-    protocol: 'anthropic',
-    endpoints: { openai: 'https://open.bigmodel.cn/api/paas/v4' },
-    auth_style: 'bearer',
-    docs_url: 'https://docs.bigmodel.cn/cn/guide/develop/claude/introduction.md',
-    models: [
-      m('glm-5.3', 1048576, 131072, TOOLS_REASON, { zh: 'GLM-5.3（旗舰）', en: 'GLM-5.3 (flagship)' }),
-      m('glm-5.3-flash', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-Flash'),
-      m('glm-5.3-flashx', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-FlashX'),
-    ],
-  },
-  {
+    // 2026-10：bigmodel 的 anthropic 兼容端点已下线（用户实测不支持），只保留 OpenAI 兼容预设；
+    // 历史 id bigmodel-anthropic 不再内置，需要时走 presets.json 自定义
     id: 'bigmodel-openai',
     slug: 'bigmodel',
-    get label() { return t('智谱 GLM · bigmodel（OpenAI 兼容）', 'Zhipu GLM · bigmodel (OpenAI-compatible)') },
+    get label() { return t('智谱 GLM · bigmodel', 'Zhipu GLM · bigmodel') },
     get vendor() { return t('智谱', 'Zhipu') },
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     protocol: 'openai',

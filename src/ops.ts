@@ -93,28 +93,14 @@ function normalizeUserModels(m: AddServiceSubmittedModels): Record<string, Model
   return out
 }
 
-/** 模型目录解析（纯函数，无 I/O）：无用户提交 → 原样返回预设目录；有提交 → 叠加/精修在预设完整目录上，
- *  不整体替换丢模型——已有 id 保留预设 display_name、仅覆盖 context/max，新 id 追加；能力提交了才覆盖（含清空）。 */
+/** 模型目录解析（纯函数，无 I/O）：用户提交 = 权威全量目录——添加表单展示即所得，删掉的行不再由
+ *  预设目录合并回来（旧叠加语义曾把用户删除的预设模型在保存后复活）；空对象 = 用户删光，合法。
+ *  未提交才回落预设目录（服务端预设目录初始化 + 在线拉取兜底仍适用，见 addService）。 */
 export function resolveServiceModels(
   userSubmitted: AddServiceSubmittedModels | undefined,
   presetModelsArg: Record<string, ModelMeta> | undefined
 ): Record<string, ModelMeta> | undefined {
-  const userM = userSubmitted ? normalizeUserModels(userSubmitted) : undefined
-  if (!userM) return presetModelsArg
-  const base = { ...(presetModelsArg ?? {}) }
-  for (const [mid, u] of Object.entries(userM)) {
-    const ex = base[mid]
-    base[mid] = ex
-      ? {
-          ...ex,
-          context_window: u.context_window,
-          max_output: u.max_output,
-          ...(u.capabilities === undefined ? {} : { capabilities: u.capabilities }),
-          source: 'manual' as const,
-        }
-      : { ...u }
-  }
-  return base
+  return userSubmitted ? normalizeUserModels(userSubmitted) : presetModelsArg
 }
 
 /** 故障切换候选链校验与归一（纯函数，无 I/O）：条目 "<providerId>" 或 "<providerId>:<modelId>"；

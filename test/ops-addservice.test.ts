@@ -49,7 +49,7 @@ describe('validateServiceInput（纯函数：地址/协议端点校验）', () =
   })
 })
 
-describe('resolveServiceModels（纯函数：模型目录合并）', () => {
+describe('resolveServiceModels（纯函数：模型目录解析——提交即权威）', () => {
   const presetModels: Record<string, { display_name: string; context_window?: number; max_output?: number; source: 'preset' }> = {
     a: { display_name: 'A', context_window: 128000, max_output: 4096, source: 'preset' },
     c: { display_name: 'C', context_window: 32000, source: 'preset' },
@@ -59,15 +59,19 @@ describe('resolveServiceModels（纯函数：模型目录合并）', () => {
     expect(resolveServiceModels(undefined, presetModels)).toEqual(presetModels)
   })
 
-  it('合法：用户提交叠加/精修在预设完整目录上（不整体替换丢模型）', () => {
+  it('合法：用户提交 = 权威全量目录（删掉的预设模型不复活）', () => {
     const submitted: AddServiceSubmittedModels = {
-      a: { context_window: 200000 }, // 已有 id：仅覆盖 context，保留 display/source 与预设其余
+      a: { context_window: 200000, display_name: 'A' }, // 保留 a 并精修
       b: { display_name: 'B 新', context_window: 100 }, // 新 id 追加
     }
     const r = resolveServiceModels(submitted, presetModels)!
     expect(r.a).toMatchObject({ context_window: 200000, display_name: 'A', source: 'manual' })
     expect(r.b).toMatchObject({ display_name: 'B 新', context_window: 100, source: 'manual' })
-    expect(r.c).toEqual(presetModels.c) // 未提交的原样保留
+    expect(r.c).toBeUndefined() // 用户删掉的预设模型不得由预设目录猜回
+  })
+
+  it('合法：空对象提交 = 用户删光，返回空目录（不回落预设）', () => {
+    expect(resolveServiceModels({}, presetModels)).toEqual({})
   })
 
   it('非法/归一：空 id 剔除，只保留非空 id', () => {
