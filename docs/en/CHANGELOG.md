@@ -5,6 +5,21 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [1.2.0] - 2026-10-20
+
+An independent "in use" status bar and truthful routing info, plus one-click import card fixes and richer candidate annotations.
+
+### Improvements
+
+- **"In use" gets its own status bar**: moved out of the route config card to a standalone bar above "My services" (soft background with a left accent stripe) — the effective service, model, and source are visible at a glance, with "Next failover: <service>" appended, so who is serving now and where traffic goes on failure read in one line.
+- **Richer import-candidate annotations**: candidates on the same host but a different endpoint are annotated as "same site as existing service X"; same-address dedup no longer lets a keyless candidate outrank one that has a key.
+
+### Fixed
+
+- **The one-click import card no longer keeps popping back**: the dismiss list is now remembered server-side (it used to live in the browser, so a different browser or a cleared cache resurrected it); later changes such as deleting a service no longer bring the card back.
+- **Keyless import candidates are no longer swallowed**: one-click import only carries candidates that have a key; keyless ones are listed separately and annotated, carried only via an explicit "import all anyway"; a card with only keyless candidates no longer pops up at all.
+- **"Next failover · Auto" no longer misreports**: failed requests no longer count toward latency probing — a fast-failing service used to pose as the "fastest" and jump to the front of the auto candidate chain; when a pin is not actually in effect, the dropdown now labels the real direction instead of parroting the pinned target.
+
 ## [1.1.5] - 2026-10-19
 
 The Windows tray ships again and the update pipeline gets hardened, plus a batch of fixes for ZCode attaching, route-state consistency, and upstream error readability.
@@ -213,6 +228,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0
 [1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.2...v1.1.3
