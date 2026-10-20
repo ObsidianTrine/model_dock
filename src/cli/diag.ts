@@ -20,8 +20,10 @@ export async function cmdStatus(): Promise<void> {
   console.log(`active_profile: ${c.bold(cfg.active_profile ?? t('(未设置)', '(not set)'))}`)
   const port = live?.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
   const rows: Record<string, string>[] = []
-  for (const a of allAdapters(cfg)) {
-    const st = await a.status(cfg, port)
+  // status 各自独立只读，Promise.all 并行（与网关侧 buildOverview 同款），~9 个 adapter 不再逐个串行等
+  const statusAdapters = allAdapters(cfg)
+  const statusResults = await Promise.all(statusAdapters.map(async (a) => [a, await a.status(cfg, port)] as const))
+  for (const [a, st] of statusResults) {
     const he = cfg.harness[a.id]
     const pinned = he?.route && he.route !== 'default' ? he.route : undefined
     rows.push({
@@ -101,13 +103,15 @@ export async function cmdDoctor(): Promise<void> {
   }
 
   const port = live?.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  for (const a of allAdapters(cfg)) {
-    // 单个 adapter 异常（如 pack 目标文件损坏）不应击穿整条体检
-    let st: import('../adapters/types.js').AdapterStatus
-    try {
-      st = await a.status(cfg, port)
-    } catch (e) {
-      bad(t('{l}：状态检查失败（{m}）', '{l}: status check failed ({m})', { l: a.label, m: (e as Error).message }), t('modeldock adapter list 查看；若配置了 adapter pack 请检查目标文件', 'Run modeldock adapter list to inspect; if an adapter pack is configured, check its target files'))
+  // 并行探测（status 各自独立只读）；单个 adapter 异常（如 pack 目标文件损坏）不应击穿整条体检——
+  // 错误随 adapter 带回，按原顺序逐个输出
+  const doctorAdapters = allAdapters(cfg)
+  const doctorStatuses = await Promise.all(
+    doctorAdapters.map(async (a) => [a, await a.status(cfg, port).catch((e: Error) => e)] as const)
+  )
+  for (const [a, st] of doctorStatuses) {
+    if (st instanceof Error) {
+      bad(t('{l}：状态检查失败（{m}）', '{l}: status check failed ({m})', { l: a.label, m: st.message }), t('modeldock adapter list 查看；若配置了 adapter pack 请检查目标文件', 'Run modeldock adapter list to inspect; if an adapter pack is configured, check its target files'))
       continue
     }
     if (st.attached && st.pointing === 'gateway') ok(t('{l}：已接管且指向网关', '{l}: attached and pointing at the gateway', { l: a.label }))

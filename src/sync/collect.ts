@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import type { ProviderConfig } from '../config/types.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { defaultStore, getSecret, parseKeyRef, setSecretsBatch, type SecretBackend } from '../config/secrets.js'
-import { readUserPresets, reloadPresets } from '../presets/data.js'
+import { reloadPresets, validateUserPresetEntries } from '../presets/data.js'
 import { snapshot } from '../backup/snapshot.js'
 import { atomicWrite } from '../util/fsx.js'
 import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
@@ -68,9 +68,10 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
     const { key_ref: _dropped, ...rest } = p
     providers[id] = { ...rest, key: plain }
   }
-  // readUserPresets 逐条校验（缺 id 等问题在导出侧就给出可操作报错），原始 JSON 保真随包
-  readUserPresets()
+  // 逐条校验（缺 id 等问题在导出侧就给出可操作报错），原始 JSON 保真随包——校验与取原始值
+  // 共用同一次文件读（readRawUserPresets），presets.json 不再被读+解析两遍
   const userPresets = readRawUserPresets()
+  validateUserPresetEntries(Array.isArray(userPresets) ? userPresets : userPresets.presets, presetsJsonPath())
   const scheduleRules = cfg.gateway?.schedule?.windows ? [...cfg.gateway.schedule.windows] : []
   const profileIds = Object.keys(cfg.profiles)
   const providerIds = Object.keys(providers)

@@ -153,7 +153,10 @@ export async function pruneSnapshots(harness: string, keep = 20): Promise<number
   } catch {
     return 0
   }
-  const valid = new Set((await listSnapshots(harness)).map((m) => m.id))
+  // listSnapshots 只调一次：清理孤儿（无合法 manifest 的目录）不会改变合法快照集合，
+  // 修剪 keep 之外的最旧份直接复用同一份列表（此前每次写快照把备份目录 manifest 全量读两遍）
+  const manifests = await listSnapshots(harness)
+  const valid = new Set(manifests.map((m) => m.id))
   let removed = 0
   for (const e of entries) {
     if (!valid.has(e)) {
@@ -161,9 +164,8 @@ export async function pruneSnapshots(harness: string, keep = 20): Promise<number
       removed++
     }
   }
-  const all = await listSnapshots(harness)
-  for (let i = keep; i < all.length; i++) {
-    await fsp.rm(path.join(root, all[i].id), { recursive: true, force: true }).catch(() => {})
+  for (let i = keep; i < manifests.length; i++) {
+    await fsp.rm(path.join(root, manifests[i].id), { recursive: true, force: true }).catch(() => {})
     removed++
   }
   return removed

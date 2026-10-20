@@ -1065,6 +1065,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   // bigmodel 只列 openai 预设——其 anthropic 兼容端点已下线（2026-10 实测），anthropic 变体预设已移除
   var MORE_TOP = ['bigmodel-openai', 'kimi-anthropic-cn', 'ark-coding-plan', 'ark-agent-plan', 'zai-anthropic', 'kimi-anthropic-global', 'mimo-token-plan-cn', 'dashscope-openai', 'openrouter', 'gemini-openai']
   var view = null
+  var overviewLastText = '' // 上次 overview 原始响应串：pollOverview 文本级 diff 用
   var svcQ = '', svcSort = 'default', svcFilter = 'all'
   // 长列表防撑高：服务默认只渲染前 N 个（一键展开/收起，不用分页——切换服务不该翻页找）；客户端未安装项默认折叠
   var SVC_COLLAPSE_N = 8
@@ -1379,10 +1380,15 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     // 首屏 /overview 失败（网关重启窗口、冷启动探测慢超时）时 view 仍为空：轮询档自动重试首屏，
     // 否则页面永远停在静态骨架（②③ 空态、pill 全默认），只能手动刷新恢复。静默吞错防 toast 刷屏
     if (!view) { load().catch(function () {}); return }
-    fetch('/_modeldock/overview', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (v) {
-      if (!v || JSON.stringify(v) === JSON.stringify(view)) return
+    fetch('/_modeldock/overview', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.text() : null }).then(function (txt) {
+      // 文本级 diff：服务端命中缓存直发缓存串，串相同即整包没变——跳过 parse 与重绘
+      //（此前每次轮询对几十–几百 KB 的 overview 做 JSON.stringify 双串比较，纯浪费）
+      if (!txt || txt === overviewLastText) return
+      var v = null
+      try { v = JSON.parse(txt) } catch (e) { return }
+      overviewLastText = txt
       view = v
-      knownModels = Object.assign({}, catalogTable, (v && v.knownModels) || {})
+      knownModels = Object.assign({}, catalogTable, v.knownModels || {})
       render()
       // 沙箱徽标挂在健康横幅上：view 就绪后（含首次 load）补一次，避免徽标晚到下一个轮询周期
       $('#health').innerHTML = healthHtml()

@@ -339,6 +339,10 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
 
   // 健康清扫：周期性探活处于熔断冷却期的服务，连通即恢复（故障切换常开后熔断态任何模式下都可能命中，清扫不再看开关）
   const sweeper = setInterval(() => {
+    // 顺带清扫直拉票据：孤儿条目（preview 后无人确认 / 附近直拉无人跟进）此前只在同类入口懒清扫，
+    // 无人认领就常驻到进程结束（含解密 Syncdoc 与 report）
+    sweepSyncTickets()
+    sweepRemoteRequests()
     const now = Date.now()
     for (const [id, h] of rt.health) {
       if (h.meltdown_until == null || h.meltdown_until > now) continue
@@ -620,13 +624,24 @@ function hostAllowed(req: http.IncomingMessage): boolean {
   return /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i.test(host)
 }
 
+// cookie 名 → 提取正则缓存：admin/device cookie 名在进程内只有个位数个（随端口），避免每请求重新编译
+const cookieValueReCache = new Map<string, RegExp>()
+function cookieValueRe(name: string): RegExp {
+  let re = cookieValueReCache.get(name)
+  if (!re) {
+    re = new RegExp(`(?:^|;\\s*)${name}=([^;]+)`)
+    cookieValueReCache.set(name, re)
+  }
+  return re
+}
+
 function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean {
   const h = req.headers['x-modeldock-admin']
   if (typeof h === 'string' && safeEqual(h, rt.adminToken)) return true
   // Web 控制台的 cookie 登录（HttpOnly + SameSite=Lax，跨站 POST 不携带）
   const cookie = req.headers.cookie
   if (typeof cookie === 'string') {
-    const m = new RegExp(`(?:^|;\\s*)${adminCookieName(rt.port ?? DEFAULT_GATEWAY_PORT)}=([^;]+)`).exec(cookie)
+    const m = cookieValueRe(adminCookieName(rt.port ?? DEFAULT_GATEWAY_PORT)).exec(cookie)
     if (m && safeEqual(decodeURIComponent(m[1]), rt.adminToken)) return true
   }
   return false
@@ -910,12 +925,16 @@ const SYNC_TICKET_TTL_MS = 5 * 60 * 1000
 const syncTickets = new Map<string, { doc: Syncdoc; createdAt: number }>()
 
 function putSyncTicket(doc: Syncdoc): string {
-  for (const [k, v] of syncTickets) {
-    if (Date.now() - v.createdAt > SYNC_TICKET_TTL_MS) syncTickets.delete(k)
-  }
+  sweepSyncTickets()
   const ticket = randomToken('mdkticket')
   syncTickets.set(ticket, { doc, createdAt: Date.now() })
   return ticket
+}
+
+function sweepSyncTickets(): void {
+  for (const [k, v] of syncTickets) {
+    if (Date.now() - v.createdAt > SYNC_TICKET_TTL_MS) syncTickets.delete(k)
+  }
 }
 
 function takeSyncTicket(ticket: string): Syncdoc {
@@ -946,6 +965,18 @@ function sweepRemoteRequests(): void {
   for (const [k, v] of remoteRequests) {
     if (Date.now() - v.createdAt > REMOTE_REQUEST_TTL_MS) remoteRequests.delete(k)
   }
+}
+
+// fetch-models 失败负缓存：键 = 协议|地址|key 摘要（明文 key 不进 Map 键）。上游不可达时
+// 60s 内同键请求直接复用上次失败信息，不再重跑 8 端点×15s 的候选链；改 Key/地址即换键不受影响
+const FETCH_MODEL_FAIL_TTL_MS = 60_000
+const fetchModelFailMemo = new Map<string, { at: number; msg: string }>()
+function rememberFetchModelFail(key: string, msg: string): void {
+  const now = Date.now()
+  for (const [k, v] of fetchModelFailMemo) {
+    if (now - v.at > FETCH_MODEL_FAIL_TTL_MS) fetchModelFailMemo.delete(k)
+  }
+  fetchModelFailMemo.set(key, { at: now, msg })
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -1109,7 +1140,7 @@ async function handleAdmin(
   if (url === '/_modeldock/auth/relogin' && req.method === 'POST') {
     const port = rt.port ?? DEFAULT_GATEWAY_PORT
     const cookie = req.headers.cookie
-    const m = cookie ? new RegExp(`(?:^|;\\s*)${deviceCookieName(port)}=([^;]+)`).exec(cookie) : null
+    const m = cookie ? cookieValueRe(deviceCookieName(port)).exec(cookie) : null
     const device = m ? decodeURIComponent(m[1]) : ''
     const state = await readGatewayState()
     const known = typeof device === 'string' && device.startsWith('mdkdev_') && (state?.devices ?? []).some((d) => safeEqual(d, device))
@@ -1275,7 +1306,15 @@ async function handleAdmin(
       const fb = knownModelsForBaseUrl(baseUrl)
       return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
     }
+    // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响
+    const failKey = `${proto}|${baseUrl}|${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+    let cachedFail = false
     try {
+      const recentFail = fetchModelFailMemo.get(failKey)
+      if (recentFail && Date.now() - recentFail.at < FETCH_MODEL_FAIL_TTL_MS) {
+        cachedFail = true
+        throw new Error(recentFail.msg)
+      }
       const f = await fetchModelIds(provider)
       let arr: { id: string; display: string; context_window: number | null; max_output: number | null; capabilities: string[] }[] = f.ids.map((id: string) => {
         // 填充链：上游响应自带值 > 内置表 > models.dev 目录（按 base_url host 精确匹配优先）；能力只看内置表（上游不报此项）
@@ -1288,6 +1327,7 @@ async function handleAdmin(
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, protocol: proto, from, models: arr }))
     } catch (e) {
+      if (!cachedFail) rememberFetchModelFail(failKey, (e as Error).message)
       // 拉取失败 → 按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）
       const arr = knownFallback()
       if (!arr.length) return sendError(res, 400, t('拉取模型失败：{msg}', 'Failed to fetch models: {msg}', { msg: (e as Error).message }), t('检查接口地址 / Key / 网络（境外上游需代理）', 'Check the endpoint URL / key / network (overseas upstreams need a proxy)'))

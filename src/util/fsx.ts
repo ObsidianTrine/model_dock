@@ -137,7 +137,10 @@ function commandOnPathResolvedImpl(cmd: string, accept?: (p: string) => boolean)
 }
 
 export async function fileSha256(p: string): Promise<string> {
-  return sha256(await fsp.readFile(p))
+  // 流式 hash：更新包 / Node 运行时包 50–150MB，整读内存峰值 ≈ 包体积（低配 Windows 可感）
+  const h = crypto.createHash('sha256')
+  for await (const chunk of fs.createReadStream(p)) h.update(chunk as Buffer)
+  return h.digest('hex')
 }
 
 /** tmp + rename 原子写，显式设置权限位；rename 前 fsync，断电场景不留半截文件 */
