@@ -1838,6 +1838,10 @@ describe('mimo-code adapter', () => {
             models: {
               'm-a': { source: 'manual', display_name: 'Model A' },
               'm-b': { source: 'manual' },
+              // 手填元数据 + 视觉能力：写入 mimocode schema 的 limit / attachment / modalities
+              'm-c': { source: 'manual', context_window: 200000, max_output: 64000, capabilities: ['vision'] },
+              // 只有上下文、缺最大输出：schema 要求 context/output 同为必填，整段不写
+              'm-d': { source: 'manual', context_window: 100000 },
             },
           },
         },
@@ -1851,9 +1855,50 @@ describe('mimo-code adapter', () => {
       expect(after.provider.modeldock.models).toEqual({
         'm-a': { name: 'Model A' },
         'm-b': { name: 'm-b' },
+        'm-c': {
+          name: 'm-c',
+          limit: { context: 200000, output: 64000 },
+          attachment: true,
+          modalities: { input: ['text', 'image'], output: ['text'] },
+        },
+        'm-d': { name: 'm-d' },
       })
       expect(after.model).toBe('modeldock/demo-model')
       expect(plan.notes.some((n) => n.includes('模型列表取自当前路由'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_MIMO_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('declareModels：内置表可补全的元数据一并写入（mimo-v2.6 系 1M/128K + 视觉）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_MIMO_CODE_PRESENT = '1'
+    try {
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            base_url: 'https://x.example.com',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            // 仅声明 id：上下文/输出/视觉由内置表（预设库）推导
+            models: { 'mimo-v2.6-pro': { source: 'manual' } },
+          },
+        },
+      })
+      const plan = await mimoCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.provider.modeldock.models['mimo-v2.6-pro']).toEqual({
+        name: 'mimo-v2.6-pro',
+        limit: { context: 1048576, output: 131072 },
+        attachment: true,
+        modalities: { input: ['text', 'image'], output: ['text'] },
+      })
     } finally {
       delete process.env.MODELRDOCK_FAKE_MIMO_CODE_PRESENT
       h.restore()

@@ -13,6 +13,18 @@ import {
 import { detectJsonIndent, parseJsonTolerant, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
 import { directAttachNote, resolveRoute, routeModelNote } from './shared.js'
+import { resolveModelMeta } from '../providers/resolve.js'
+
+/** mimocode schema 的单模型条目（$schema https://mimo.xiaomi.com/mimocode/config.json 的 provider.<id>.models 值） */
+interface JsonModelEntry {
+  name?: string
+  /** 上下文/输出上限（tokens）：schema 里 context 与 output 均必填，缺一整段不写 */
+  limit?: { context: number; output: number }
+  /** 文件/图片附件支持（models.dev 同构字段） */
+  attachment?: boolean
+  /** 输入/输出模态：视觉模型 input 含 image，客户端据此放行图片 */
+  modalities?: { input: string[]; output: string[] }
+}
 
 interface JsonConfig {
   provider?: Record<
@@ -21,7 +33,7 @@ interface JsonConfig {
       name?: string
       options?: Record<string, string>
       npm?: string
-      models?: Record<string, { name?: string }>
+      models?: Record<string, JsonModelEntry>
       only_configured_models?: boolean
     }
   >
@@ -155,10 +167,28 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
       // 模型列表与默认模型必须同源：都按 opts.profile（钉定路由）优先，钉定时不能偷偷跟随全局
       const { routeName, provider, providerId } = resolveRoute(opts, cfg)
       if (factory.declareModels) {
-        const ids = Object.keys(provider?.models ?? {})
+        const models = provider?.models ?? {}
+        const ids = Object.keys(models)
         if (ids.length > 0) {
+          // mimocode 模型条目按官方 schema 补元数据（limit/modalities/attachment）：
+          // 解析链与控制台一致（配置值 > 内置表 > models.dev 目录），只补空不覆盖
           providers.modeldock.models = Object.fromEntries(
-            ids.map((id) => [id, { name: provider?.models?.[id]?.display_name || id }])
+            ids.map((id) => {
+              const r = resolveModelMeta(id, models[id], { baseUrl: provider?.base_url })
+              const entry: JsonModelEntry = { name: models[id]?.display_name || id }
+              // schema 里 context 与 output 同为必填：缺任一侧不写整段，避免客户端拒载
+              if (r?.context_window !== undefined && r?.max_output !== undefined) {
+                entry.limit = { context: r.context_window, output: r.max_output }
+              }
+              // 能力未知时不声明（客户端按纯文本默认处理），与 dsh 适配器同策略
+              const caps = models[id]?.capabilities ?? r?.capabilities
+              if (caps !== undefined) {
+                const vision = caps.includes('vision')
+                entry.attachment = vision
+                entry.modalities = { input: vision ? ['text', 'image'] : ['text'], output: ['text'] }
+              }
+              return [id, entry]
+            })
           )
           providers.modeldock.only_configured_models = true
           modelsNote = routeModelNote(String(routeName), String(provider?.name ?? providerId), ids.length)
