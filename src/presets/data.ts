@@ -406,8 +406,6 @@ export function readUserPresets(): ProviderPreset[] {
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return []
     throw new Error(t('读取自定义预设 {file} 失败：{err}', 'Failed to read the custom presets file {file}: {err}', { file: fp, err: (e as Error).message }))
   }
-  const PROTOCOLS: Protocol[] = ['anthropic', 'openai', 'responses']
-  const AUTH: AuthStyle[] = ['bearer', 'x-api-key']
   let arr: unknown
   try {
     const doc: unknown = JSON.parse(text)
@@ -429,6 +427,15 @@ export function readUserPresets(): ProviderPreset[] {
       )
     )
   }
+  return validateUserPresetEntries(arr as unknown[], fp)
+}
+
+/** 逐条校验并归一化用户预设条目（缺 id 等问题抛含文件名/序号的可操作报错）。
+ *  供 readUserPresets 与 sync collect 共用：collect 侧已有原始 JSON（readRawUserPresets 读一次），
+ *  对其跑一遍校验即可在导出侧给出可操作报错，不必把 presets.json 再整读+解析一遍。 */
+export function validateUserPresetEntries(arr: unknown[], fp: string): ProviderPreset[] {
+  const PROTOCOLS: Protocol[] = ['anthropic', 'openai', 'responses']
+  const AUTH: AuthStyle[] = ['bearer', 'x-api-key']
   return (arr as unknown[]).map((raw, i) => {
     const o = (raw ?? {}) as Record<string, unknown>
     const id = String(o.id ?? '').trim()

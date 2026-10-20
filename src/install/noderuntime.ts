@@ -211,7 +211,8 @@ async function downloadNodeRuntime(onOut?: (line: string) => void): Promise<void
       try {
         // 资产与 SHASUMS256 必须同一来源：镜像同步存在差异时不能混搭校验
         const origin = `${base}/v${version}`
-        const sums = await downloadText(`${origin}/SHASUMS256.txt`)
+        // SHASUMS 是 ~1KB 小文本：不套 10min 通用下载超时，短超时让挂死连接尽快落到下一镜像源
+        const sums = await downloadText(`${origin}/SHASUMS256.txt`, { timeoutMs: 30_000 })
         let nextReport = PROGRESS_STEP
         await downloadToFile(`${origin}/${asset}`, archive, {
           onProgress: (seen: number, total: number) => {

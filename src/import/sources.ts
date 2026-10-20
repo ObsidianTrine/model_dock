@@ -973,14 +973,20 @@ export async function scanOneApi(src: OneApiImportSource): Promise<ImportCandida
   if (!token) {
     throw new Error(t('管理令牌不能为空（one-api「个人设置 → 系统访问令牌」）', 'The admin token cannot be empty (one-api "Personal settings → System access token")'))
   }
-  // one-api 原版按固定页大小分页（忽略 page_size），循环翻到空页为止；new-api 沿用同路由
+  // one-api 原版按固定页大小分页（忽略 page_size），循环翻到空页为止；new-api 沿用同路由。
+  // 60s 整体 deadline：50 页×15s 串行最坏 ~12min，deadline 到点抛可操作报错而不是无限拖
+  const deadline = Date.now() + 60_000
   const rows: RawRow[] = []
   for (let page = 0; page < 50; page++) {
+    const remaining = deadline - Date.now()
+    if (remaining < 1_000) {
+      throw new Error(t('one-api 拉取超时（整体超过 60 秒，站点过慢或渠道过多）', 'one-api pagination timed out (over 60s total; site too slow or too many channels)'))
+    }
     let res: Response
     try {
       res = await fetch(`${root}/api/channel/?p=${page}&page_size=100`, {
         headers: { Authorization: token },
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(Math.min(15_000, remaining)),
       })
     } catch (e) {
       const msg = (e as Error).name === 'TimeoutError' ? t('请求超时', 'request timed out') : (e as Error).message

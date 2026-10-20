@@ -106,9 +106,9 @@ export async function desktopPresent(appNames: string[], id: string): Promise<Ap
   try {
     if (process.platform === 'win32') {
       const keywords = appNames.map((n) => n.toLowerCase())
-      for (const name of appNames) {
-        if (await registryHas(name)) return true
-      }
+      // 多 app 并行查注册表（registryHas 自带 60s memo，结果与逐个短路等价）；串行在慢盘机器上逐 app 累加
+      const hits = await Promise.all(appNames.map((name) => registryHas(name)))
+      if (hits.some(Boolean)) return true
       const bases = [
         process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : null,
         process.env['ProgramFiles'],

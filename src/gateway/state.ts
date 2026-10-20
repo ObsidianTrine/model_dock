@@ -141,6 +141,10 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
     }
   }
   rt.dispatchers.clear()
+  // 已删除的 provider 健康条目一并清掉：长生命周期进程反复增删服务不残留（recordOutcome 只增不删）
+  for (const id of rt.health.keys()) {
+    if (!rt.config.providers[id]) rt.health.delete(id)
+  }
 }
 
 /** per-provider 代理：direct 直连；env 读环境变量；字符串视为代理 URL（兼容 clash） */

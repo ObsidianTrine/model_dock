@@ -104,12 +104,49 @@ export function readCatalogCache(): CatalogData | undefined {
 
 export function clearCatalogMemo(): void {
   cacheMemo = undefined
+  baseMemo = undefined
+}
+
+// 合并视图 memo：键 = 缓存文件 path+mtime（CATALOG_SNAPSHOT 为构建期常量）。catalogModelMeta 在
+// 展示/编辑/适配器写配置的多条路径上被高频调用，此前每次调用都重建 226 家合并对象并重新 sort；
+// memo 后稳态零 statSync（mtime 变化或 clearCatalogMemo 时重建）。data/sortedKeys/flat 共享同一份，
+// 返回的是共享只读对象，调用方不得修改。
+interface CatalogBaseMemo {
+  path: string
+  mtimeMs: number
+  data: CatalogData
+  sortedKeys: string[]
+  flat: Record<string, CatalogEntry>
+}
+let baseMemo: CatalogBaseMemo | undefined
+
+function catalogBaseMemo(): CatalogBaseMemo {
+  const p = modelCatalogCachePath()
+  let mtimeMs = -1
+  try {
+    mtimeMs = fs.statSync(p).mtimeMs
+  } catch {
+    /* 无缓存文件：mtime 记 -1，纯 snapshot 态 */
+  }
+  if (baseMemo && baseMemo.path === p && baseMemo.mtimeMs === mtimeMs) return baseMemo
+  const cache = readCatalogCache()
+  const data =
+    !cache || Object.keys(cache.providers).length === 0
+      ? CATALOG_SNAPSHOT
+      : { fetchedAt: cache.fetchedAt || CATALOG_SNAPSHOT_FETCHED_AT, providers: { ...CATALOG_SNAPSHOT.providers, ...cache.providers } }
+  const sortedKeys = Object.keys(data.providers).sort()
+  const flat: Record<string, CatalogEntry> = {}
+  for (const k of sortedKeys) {
+    for (const [id, e] of Object.entries(data.providers[k].models)) {
+      if (!flat[id]) flat[id] = e
+    }
+  }
+  baseMemo = { path: p, mtimeMs, data, sortedKeys, flat }
+  return baseMemo
 }
 
 function catalogBase(): CatalogData {
-  const cache = readCatalogCache()
-  if (!cache || Object.keys(cache.providers).length === 0) return CATALOG_SNAPSHOT
-  return { fetchedAt: cache.fetchedAt || CATALOG_SNAPSHOT_FETCHED_AT, providers: { ...CATALOG_SNAPSHOT.providers, ...cache.providers } }
+  return catalogBaseMemo().data
 }
 
 function hostOf(u: string | null | undefined): string {
@@ -127,7 +164,8 @@ function hostOf(u: string | null | undefined): string {
  */
 export function catalogModelMeta(id: string, baseUrl?: string): CatalogEntry | undefined {
   if (!id) return undefined
-  const cat = catalogBase()
+  const base = catalogBaseMemo()
+  const cat = base.data
   const host = hostOf(baseUrl)
   if (host) {
     for (const p of Object.values(cat.providers)) {
@@ -137,23 +175,17 @@ export function catalogModelMeta(id: string, baseUrl?: string): CatalogEntry | u
       }
     }
   }
-  for (const k of Object.keys(cat.providers).sort()) {
+  for (const k of base.sortedKeys) {
     const e = cat.providers[k].models[id]
     if (e) return e
   }
   return undefined
 }
 
-/** 目录的扁平 id 索引（字母序遍历、首见优先），供 knownModels 合并表 / 前端自动补值 */
+/** 目录的扁平 id 索引（字母序遍历、首见优先），供 knownModels 合并表 / 前端自动补值。
+ *  返回 memo 内的共享对象，调用方不得修改（要改请先展开拷贝）。 */
 export function catalogFlatTable(): Record<string, CatalogEntry> {
-  const cat = catalogBase()
-  const out: Record<string, CatalogEntry> = {}
-  for (const k of Object.keys(cat.providers).sort()) {
-    for (const [id, e] of Object.entries(cat.providers[k].models)) {
-      if (!out[id]) out[id] = e
-    }
-  }
-  return out
+  return catalogBaseMemo().flat
 }
 
 export function catalogCacheFresh(): boolean {

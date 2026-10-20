@@ -777,10 +777,34 @@ function load() {
     .catch(function (e) { document.getElementById('services').innerHTML = '<p class="empty">' + esc(e.message) + '</p>' })
 }
 load()
-setInterval(load, 30000)
+// 后台标签停止轮询（与桌面控制台同款门控）；切回前台立即刷一次
+setInterval(function () { if (!document.hidden) load() }, 30000)
+document.addEventListener('visibilitychange', function () { if (!document.hidden) load() })
 </script>
 </body>
 </html>`
+}
+
+// 手机页进程内缓存（页面为静态壳）：懒渲染一次，之后每请求直接回放缓存串 + ETag/304，
+// 不再每请求重拼 ~63KB HTML；200 覆盖管理面统一 no-store 为 no-cache，条件请求才会真正发生
+let mobilePageCache: { html: string; etag: string } | null = null
+function getMobilePage(): { html: string; etag: string } {
+  if (!mobilePageCache) {
+    const html = renderMobilePage()
+    mobilePageCache = { html, etag: '"' + crypto.createHash('sha256').update(html).digest('base64url').slice(0, 22) + '"' }
+  }
+  return mobilePageCache
+}
+
+function serveMobilePage(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const { html, etag } = getMobilePage()
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304)
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache' })
+  res.end(html)
 }
 
 function renderDeniedPage(): string {
@@ -800,13 +824,11 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
       // 带令牌原地伺服（不重定向剥令牌）：微信「在浏览器中打开」/「添加到主屏幕」都只携带
       // 当前地址栏 URL，令牌必须留在 URL 里才能跨浏览器/跨存储自举（cookie 仅作会话续命）。
       // 令牌本身即桌面二维码明文内容、作用域仅 LAN 控制台，地址栏可见无新增暴露。
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(renderMobilePage())
+      serveMobilePage(req, res)
       return
     }
     if (lanAuthorized(req, rt)) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(renderMobilePage())
+      serveMobilePage(req, res)
       return
     }
     res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
