@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Current version always visible in the menu bar / tray**: the macOS menu bar and Windows tray menus now show "ModelDock vX.Y.Z" as the first item; the "up to date" and "new version" dialogs from "Check for updates" also include version numbers (e.g. 已是最新版本 v1.2.3。 / ModelDock 有新版本 v1.2.4（当前 v1.2.3）), so you no longer need to run an update check just to find out which version you are on.
+
 ## [1.2.0] - 2026-10-20
 
 An independent "in use" status bar and truthful routing info, plus one-click import card fixes and richer candidate annotations.
