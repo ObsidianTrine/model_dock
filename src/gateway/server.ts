@@ -1719,8 +1719,34 @@ async function handleAdmin(
     const existingNorms = new Set(
       Object.values(rt.config.providers).map((p) => normalizeBaseUrl(p.base_url))
     )
+    const dismissed = new Set((rt.config.import?.dismissed ?? []).map((u) => normalizeBaseUrl(u)))
+    // 同站点提示索引：同主机不同端点（双协议各登记一份等）不算重复，但标注出来供用户判断
+    const hostNames = new Map<string, string[]>()
+    for (const [pid, p] of Object.entries(rt.config.providers)) {
+      try {
+        const h = new URL(p.base_url).hostname.toLowerCase()
+        const nm = p.name?.trim() || pid
+        const arr = hostNames.get(h) ?? []
+        if (!arr.includes(nm)) arr.push(nm)
+        hostNames.set(h, arr)
+      } catch {
+        /* 非法地址不参与提示 */
+      }
+    }
     const candidates = cands.map((c) => {
-      const dup = existingNorms.has(normalizeBaseUrl(c.base_url))
+      const norm = normalizeBaseUrl(c.base_url)
+      const dup = existingNorms.has(norm)
+      let sameSite: string | undefined
+      if (!dup && c.base_url) {
+        try {
+          const names = hostNames.get(new URL(c.base_url).hostname.toLowerCase())
+          if (names?.length) {
+            sameSite = t('与已有服务「{name}」同一站点', 'Same site as existing service "{name}"', { name: names.join('、') })
+          }
+        } catch {
+          /* 非法地址不参与提示 */
+        }
+      }
       return {
         id: c.suggest_id,
         source: c.source,
@@ -1728,6 +1754,8 @@ async function handleAdmin(
         base_url: c.base_url,
         hasKey: !!c.key,
         isCurrent: !!c.is_current,
+        dismissed: dismissed.has(norm) || undefined,
+        sameSite,
         skipReason: c.skip_reason ?? (dup ? t('已在 ModelDock 中', 'Already in ModelDock') : undefined),
       }
     })
@@ -1754,6 +1782,27 @@ async function handleAdmin(
     audit(bi('导入配置', 'Import configs'), report.providers.join(',') || '-', bi('导入 {p} 个服务 / {r} 条路由', 'Imported {p} services / {r} routes', { p: report.providers.length, r: report.profiles.length }))
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, imported: report.providers, profiles: report.profiles, skipped: report.skipped }))
+    return
+  }
+
+  if (url === '/_modeldock/import/dismiss' && req.method === 'POST') {
+    // 忽略候选（按归一化地址持久化，跨浏览器生效）：自动弹卡不再提示；勾选导入手动入口不受影响，随时可搬回
+    const b = await jsonRequestBody(req)
+    const urls = Array.isArray(b.urls)
+      ? [...new Set(b.urls.map(String).map((u) => normalizeBaseUrl(u)).filter(Boolean))]
+      : []
+    if (urls.length === 0) {
+      return sendError(res, 400, t('缺少 urls：要忽略的候选地址数组', 'Missing urls: the array of candidate base URLs to dismiss'))
+    }
+    await mutateConfig((c) => {
+      const set = new Set(c.import?.dismissed ?? [])
+      for (const u of urls) set.add(u)
+      c.import = { ...c.import, dismissed: [...set] }
+    })
+    await reloadRuntime(rt)
+    audit(bi('忽略导入候选', 'Dismiss import candidates'), String(urls.length))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, dismissed: urls.length }))
     return
   }
 

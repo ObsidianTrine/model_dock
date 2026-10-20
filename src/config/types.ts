@@ -117,6 +117,13 @@ export interface Config {
   security?: { store?: 'file' | 'keychain' }
   backup?: { keep?: number }
   update?: UpdateConfig
+  import?: ImportStateConfig
+}
+
+/** 一键导入（存量收编）状态 */
+export interface ImportStateConfig {
+  /** 已忽略候选的归一化地址（「暂不导入」/导入完成后记忆）：自动弹卡不再提示；「添加服务 → 勾选导入」手动入口不受影响 */
+  dismissed?: string[]
 }
 
 /** 手机简版控制台（LAN）配置 */

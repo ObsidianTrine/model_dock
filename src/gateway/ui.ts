@@ -547,6 +547,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   <p class="desc" id="migDesc"></p>
   <div class="row">
     <button class="btn primary" id="migGo" data-i18n="一键导入||Import now">一键导入</button>
+    <button class="btn" id="migStill" hidden data-i18n="仍然导入全部（含无 Key）||Import all (incl. keyless)">仍然导入全部（含无 Key）</button>
     <button class="btn" id="migSkip" data-i18n="暂不导入||Not now">暂不导入</button>
   </div>
   <div class="testline" id="migMsg"></div>
@@ -1289,15 +1290,22 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     gemini: 'Gemini CLI',
   }
 
+  // 忽略候选（服务端持久化，跨浏览器生效）：自动弹卡不再提示；失败静默（只影响提醒，不影响功能）
+  function dismissCandidates(urls) {
+    return api('/import/dismiss', { method: 'POST', body: JSON.stringify({ urls: urls }) }).catch(function () {})
+  }
+
   function checkMigrate() {
     return api('/import/detect')
       .then(function (r) {
-        var cands = (r.candidates || []).filter(function (c) { return !c.skipReason && c.base_url })
+        try { localStorage.removeItem('mdk_mig_skip') } catch (e) { /* 旧版按签名的跳过记忆已被服务端 dismissed 取代 */ }
         var card = $('#migrateCard')
-        if (cands.length === 0) { card.hidden = true; return }
-        var sig = cands.map(function (c) { return c.id }).sort().join(',')
-        if (localStorage.getItem('mdk_mig_skip') === sig) { card.hidden = true; return }
-        var names = cands.map(function (c) {
+        var cands = (r.candidates || []).filter(function (c) { return !c.skipReason && c.base_url && !c.dismissed })
+        var keyed = cands.filter(function (c) { return c.hasKey })
+        var keyless = cands.filter(function (c) { return !c.hasKey })
+        // 只在有 Key 的候选时弹卡：无 Key 的多为登录态/环境变量引用，一键导入不了还添堵（要用「添加服务 → 勾选导入」手动搬）
+        if (keyed.length === 0) { card.hidden = true; return }
+        var names = keyed.map(function (c) {
           return c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '')
         }).join('、')
         var srcs = []
@@ -1305,19 +1313,30 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
           var label = SRC_LABEL[c.source] || c.source
           if (srcs.indexOf(label) < 0) srcs.push(label)
         })
-        $('#migDesc').innerHTML = t('在 <b>', 'Found ') + esc(srcs.join('、')) + t('</b> 里发现 ', ' model services in <b>') + cands.length + t(' 个模型服务：<b>', '</b>: <b>') +
+        var desc = t('在 <b>', 'Found ') + esc(srcs.join('、')) + t('</b> 里发现 ', ' model services in <b>') + keyed.length + t(' 个模型服务：<b>', '</b>: <b>') +
           esc(names) + t('</b>。导入后它们的 Key 会一并安全搬进 ModelDock，原软件不受任何影响。', '</b>. Importing moves their keys safely into ModelDock; the original apps are untouched.')
+        if (keyless.length) {
+          desc += '<br>' + t('另有 ', 'Also found ') + keyless.length +
+            t(' 个无 Key 的配置不自动导入（多为登录态或环境变量引用）：', ' keyless configs are not auto-imported (OAuth logins or env/file references): ') +
+            esc(keyless.map(function (c) { return c.name }).join('、')) +
+            t('。需要的话用「添加服务 → 勾选导入」手动搬。', '. Use "Add service → Import" to bring them in manually.')
+        }
+        $('#migDesc').innerHTML = desc
         card.hidden = false
-        $('#migGo').onclick = function () {
+        // 导入/忽略后记住本轮展示过的全部候选地址（含无 Key 的），删除服务等后续变化不再让卡片回弹
+        var dismissAll = function () {
+          return dismissCandidates(cands.map(function (c) { return c.base_url }))
+        }
+        var importIds = function (ids) {
           $('#migGo').disabled = true
           $('#migMsg').textContent = t('导入中…', 'Importing…')
           $('#migMsg').className = 'testline'
-          api('/import/apply', { method: 'POST', body: JSON.stringify({ ids: cands.map(function (c) { return c.id }) }) })
+          api('/import/apply', { method: 'POST', body: JSON.stringify({ ids: ids }) })
             .then(function (r) {
               var n = (r.imported || []).length
               toast('✓ ' + t('已导入 ', 'Imported ') + n + t(' 个服务，下方「我的服务」里可以查看和切换', ' services. See and switch them under "My services" below'), true)
               card.hidden = true
-              return load()
+              return dismissAll().then(function () { return load() })
             })
             .catch(function (e) {
               $('#migMsg').textContent = t('导入失败：', 'Import failed: ') + e.message
@@ -1325,8 +1344,14 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
               $('#migGo').disabled = false
             })
         }
+        $('#migGo').onclick = function () { importIds(keyed.map(function (c) { return c.id })) }
+        var still = $('#migStill')
+        if (still) {
+          still.hidden = keyless.length === 0
+          still.onclick = function () { importIds(cands.map(function (c) { return c.id })) }
+        }
         $('#migSkip').onclick = function () {
-          localStorage.setItem('mdk_mig_skip', sig)
+          dismissAll()
           card.hidden = true
         }
       })
@@ -2676,7 +2701,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
             cb.onchange = function () { legacyChecked[i] = cb.checked; updateLegacyGo() }
             var nm = document.createElement('span')
             nm.className = 'lname'
-            nm.textContent = c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '')
+            nm.textContent = c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '') +
+              (c.hasKey ? '' : t('（无 Key）', ' (no key)')) + (c.sameSite ? ' · ' + c.sameSite : '')
             var src = document.createElement('span')
             src.className = 'lsrc'
             src.textContent = SRC_LABEL[c.source] || c.source
@@ -2703,12 +2729,15 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var legacyGo = document.getElementById('legacyGo')
   if (legacyGo) {
     legacyGo.onclick = function () {
-      var ids = legacyCands.filter(function (_, i) { return legacyChecked[i] }).map(function (c) { return c.id })
+      var picked = legacyCands.filter(function (_, i) { return legacyChecked[i] })
+      var ids = picked.map(function (c) { return c.id })
       if (!ids.length) return
       legacyGo.disabled = true
       api('/import/apply', { method: 'POST', body: JSON.stringify({ ids: ids }) })
         .then(function (r) {
           var n = (r.imported || []).length
+          // 导入成功后记住这些候选地址：之后删除该服务，自动弹卡不再拿它回头
+          dismissCandidates(picked.map(function (c) { return c.base_url }))
           legacyM.close()
           toast('✓ ' + t('已导入 ', 'Imported ') + n + t(' 个服务，下方「我的服务」里可以查看和切换', ' services. See and switch them under "My services" below'), true)
           return load()

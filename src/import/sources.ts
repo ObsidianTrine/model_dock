@@ -97,13 +97,18 @@ function hostOf(url: string): string {
   }
 }
 
-/** 迁移导入按「地址」去重：同一地址（尾斜杠/大小写归一化）视为同一个服务，优先保留「使用中」的那个。
- *  注意：这里刻意忽略 Key——迁移时同地址往往是一份配置的多个历史/备份 key，只导入使用中的即可，避免重复服务；
+/** 迁移导入按「地址」去重：同一地址（尾斜杠/大小写归一化）视为同一个服务，保留优先级「使用中 > 有 Key > 先出现」。
+ *  注意：这里刻意忽略 Key 的具体值——迁移时同地址往往是一份配置的多个历史/备份 key，只导一条即可，避免重复服务；
  *  真正的多账号请在导入后通过「添加服务」分别登记。
  *  带 skip_reason 的占位项（base_url 为空的诊断信息，如"无 sqlite3"）不去重、不丢弃。 */
 export function dedupeCandidates(cands: ImportCandidate[]): ImportCandidate[] {
   const by = new Map<string, ImportCandidate>()
   const diagnostics: ImportCandidate[] = []
+  const better = (c: ImportCandidate, prev: ImportCandidate): boolean => {
+    if (!prev.is_current && c.is_current) return true
+    if (!prev.key && c.key) return true
+    return false
+  }
   for (const c of cands) {
     if (!c.base_url) {
       if (c.skip_reason) diagnostics.push(c)
@@ -111,7 +116,7 @@ export function dedupeCandidates(cands: ImportCandidate[]): ImportCandidate[] {
     }
     const key = normalizeBaseUrl(c.base_url)
     const prev = by.get(key)
-    if (!prev || (!prev.is_current && c.is_current)) by.set(key, c)
+    if (!prev || better(c, prev)) by.set(key, c)
   }
   return [...by.values(), ...diagnostics]
 }
