@@ -1921,6 +1921,16 @@ describe('自动路由 Phase1', () => {
     expect(isMeltdown(rt, 'A')).toBe(false)
   })
 
+  it('recordOutcome：lastMs 只记成功耗时——失败（哪怕几毫秒的快速失败）不更新，坏服务不伪装成「最快」', () => {
+    const { rt } = makeRuntime()
+    recordOutcome(rt, 'A', { ok: true, ms: 120 })
+    expect(rt.health.get('A')?.lastMs).toBe(120)
+    recordOutcome(rt, 'A', { ok: false, cls: 'connect', ms: 3 })
+    expect(rt.health.get('A')?.lastMs).toBe(120)
+    recordOutcome(rt, 'A', { ok: true, ms: 80 })
+    expect(rt.health.get('A')?.lastMs).toBe(80)
+  })
+
   it('端到端：主服务连接失败→自动改发 fallback，日志记 reason，B 收到请求', async () => {
     const h = fakeHome()
     const up = await startMockUpstream()
@@ -3710,5 +3720,19 @@ describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 
       rs.schedule.applied,
       rs.default.providerId,
     ])
+  })
+
+  it('nextPinnedSkipped：钉定「下一个切换」到下线服务 → 标注未生效且 next 回落可用服务；正常钉定 → false', () => {
+    const rt = mkRt({ auto_failover: true, route_next: 'pb' })
+    rt.config.providers.pc = { ...pa, name: 'C', key_ref: 'file:c' }
+    expect(autoRouteInfo(rt)).toMatchObject({ routeNext: 'pb', next: 'pb', nextPinnedSkipped: false })
+    ;(rt.config.providers.pb as { enabled?: boolean }).enabled = false
+    const ar = autoRouteInfo(rt)
+    expect(ar).toMatchObject({ routeNext: 'pb', next: 'pc', nextLabel: 'C', nextPinnedSkipped: true })
+  })
+
+  it('nextPinnedSkipped：钉定目标 = 当前主服务 → 钉定必然未生效（主服务自身失败无处可切）', () => {
+    const rt = mkRt({ auto_failover: true, route_next: 'pa' })
+    expect(autoRouteInfo(rt)).toMatchObject({ routeNext: 'pa', next: 'pb', nextPinnedSkipped: true })
   })
 })

@@ -97,7 +97,7 @@ export interface HealthState {
   meltdown_until?: number
   /** 连续成功次数（≥3 清零熔断） */
   okStreak: number
-  /** 最近一次探活/请求的耗时 ms（供 overview 展示） */
+  /** 最近一次成功请求/探活的耗时 ms（供 overview 展示与备用链同优先级决胜；失败不写，见 recordOutcome） */
   lastMs?: number
 }
 
@@ -212,7 +212,9 @@ export function recordOutcome(
     h = { errWindow: { t0: now, count: 0 }, okStreak: 0 }
     rt.health.set(providerId, h)
   }
-  if (r.ms != null) h.lastMs = r.ms
+  // lastMs 只记成功耗时：备用链同优先级按它决胜，失败请求（尤其几毫秒的 connect 快速失败）
+  // 若也写入，会让正在出错的服务伪装成「最快」被排到候选链前排、还被展示成「下一个切换」
+  if (r.ms != null && r.ok) h.lastMs = r.ms
   if (r.ok) {
     h.okStreak += 1
     h.errWindow = { t0: now, count: 0 }
@@ -684,6 +686,8 @@ export interface AutoRouteInfo {
   /** 自动态的下一个切换（「自动 · B」的 B）= 不含「下一个切换」钉定、但保留「当前」钉定/窗口/链尾兜底的下一跳 */
   autoNext: string | null
   autoNextLabel: string | null
+  /** 「下一个切换」钉定未生效：钉定目标不可用或与主候选相同，实际下一跳（next）≠ 钉定项，供下拉如实标注 */
+  nextPinnedSkipped: boolean
   /** 默认路由（active_profile）——配置态，接入/直连等场景用它，不代表「正在使用」 */
   defaultProvider: string | null
   defaultProviderLabel: string | null
@@ -728,6 +732,7 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
     routeNext,
     next: rs.next,
     nextLabel: nameOf(rs.next),
+    nextPinnedSkipped: routeNext != null && rs.next !== routeNext,
     autoNext: rs.autoNext,
     autoNextLabel: nameOf(rs.autoNext),
     defaultProvider: rs.default.providerId,
