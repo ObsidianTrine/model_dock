@@ -4,7 +4,7 @@ import http from 'node:http'
 import os from 'node:os'
 import qrcode from 'qrcode-generator'
 import { DEFAULT_LAN_PORT } from '../config/types.js'
-import { refreshBakedModelClients, setAutoRoute, setRouteNext, switchToService } from '../ops.js'
+import { refreshBakedModelClients, setAutoRoute, setRouteNext, switchToServiceWithRoute } from '../ops.js'
 import { applySyncdoc, collectSyncdoc } from '../sync/collect.js'
 import { openEnvelope, sealEnvelope } from '../sync/crypto.js'
 import { assertExportable, exportFileName, reportOfDoc } from '../sync/exportImport.js'
@@ -888,8 +888,7 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
     try {
       if (!rt.config.providers[service]) throw new Error(t('服务不存在：{id}', 'Service not found: {id}', { id: service }))
       // 与桌面「应用/当前」同一链路：写 active_profile + 人工钉定主服务（人为优先于定时窗口）→ 热加载 → 重烤跟随全局的客户端
-      await switchToService(service)
-      await setAutoRoute(rt.config.gateway?.auto_failover === true, service)
+      await switchToServiceWithRoute(service, rt.config.gateway?.auto_failover === true)
       await reloadRuntime(rt)
       await refreshBakedModelClients({ port: rt.port })
       audit(true)

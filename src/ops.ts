@@ -176,10 +176,12 @@ export async function addService(
   // 重复提交兜底：同地址且同 Key 视为重复（Web 双击的最后一道闸）；
   // 同地址不同 Key 允许——那是"同一厂商多个账号分别登记"的合法场景
   const norm = normalizeBaseUrl(finalBaseUrl)
-  for (const [pid, p] of Object.entries(cfg.providers)) {
-    if (normalizeBaseUrl(p.base_url) !== norm) continue
-    const existingKey = await getSecret(p.key_ref)
-    if (existingKey === key) {
+  // 同地址服务并行取 key 比对（keychain 后端每取一次 spawn 一次外部进程，串行 N 次拖慢添加）
+  const sameUrl = Object.entries(cfg.providers).filter(([, p]) => normalizeBaseUrl(p.base_url) === norm)
+  const sameUrlKeys = await Promise.all(sameUrl.map(([, p]) => getSecret(p.key_ref)))
+  for (let i = 0; i < sameUrl.length; i++) {
+    if (sameUrlKeys[i] === key) {
+      const [pid, p] = sameUrl[i]
       throw new Error(
         t(
           '该服务已存在（「{name}」，同地址同 Key），无需重复添加；切换请用「应用」',
@@ -314,6 +316,28 @@ export async function switchToService(providerId: string): Promise<string> {
   return name
 }
 
+/** 「应用」一站式切换（桌面 /switch 与手机端切换服务的热路径）：active_profile 与 auto_route 一次整包落盘。
+ *  语义与 switchToService(id) → setAutoRoute(autoFailover, id) 依次调用完全一致，只是把两次整包
+ *  读改写+两次快照合并为一次（known-issues PERF-14 写放大）。noteLocalSwitch 时间戳保护语义不变。 */
+export async function switchToServiceWithRoute(providerId: string, autoFailover: boolean): Promise<string> {
+  const name = await mutateConfig((c) => {
+    if (!c.providers[providerId]) throw new Error(t('服务「{id}」不存在', 'Service "{id}" does not exist', { id: providerId }))
+    const existing = Object.entries(c.profiles).find(([, p]) => p.provider === providerId)
+    let name = existing?.[0]
+    if (!name) {
+      const models = Object.keys(c.providers[providerId].models ?? {})
+      name = `auto-${providerId}`
+      c.profiles[name] = { name, provider: providerId, default_model: models[0] }
+    }
+    c.active_profile = name
+    const g = { ...(c.gateway ?? {}), auto_failover: autoFailover, auto_route_provider: providerId }
+    c.gateway = g
+    return name
+  })
+  await noteLocalSwitch().catch(() => {})
+  return name
+}
+
 export interface RefreshBakedResult {
   /** 已按新路由重写配置文件的客户端 id */
   refreshed: string[]
@@ -352,6 +376,7 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
   const refreshed: string[] = []
   const warnings: string[] = []
   const done = new Set<string>() // 已重写的配置文件路径：共用同一文件的 harness 身份（mimo-code / mimo-desktop 同用 mimocode.jsonc）只写一次
+  const fileRegs: { id: string; files: string[] }[] = [] // files 登记循环内只收集，循环外一次批量落盘（known-issues PERF-14 写放大）
   for (const [id, he] of Object.entries(cfg.harness)) {
     if (he.mode !== 'gateway') continue
     if (he.route && he.route !== 'default') continue // 钉定路由不随全局切换
@@ -379,10 +404,7 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
       }
       const ok = await applyChanges(id, 'attach', plan.changes, { yes: true, quiet: true, redactions: [token] })
       if (!ok) throw new Error(t('写入被取消', 'Write cancelled'))
-      await mutateConfig((c) => {
-        const entry = c.harness[id]
-        if (entry) entry.files = plan.changes.map((ch) => ch.path)
-      })
+      fileRegs.push({ id, files: plan.changes.map((ch) => ch.path) })
       plan.changes.forEach((ch) => done.add(ch.path))
       refreshed.push(id)
     } catch (e) {
@@ -393,6 +415,19 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
           err: (e as Error).message,
         })
       )
+    }
+  }
+  // files 登记一次批量落盘：客户端文件本身已各自写完，这里只是 config.toml 侧的簿记
+  if (fileRegs.length) {
+    try {
+      await mutateConfig((c) => {
+        for (const r of fileRegs) {
+          const entry = c.harness[r.id]
+          if (entry) entry.files = r.files
+        }
+      })
+    } catch (e) {
+      warnings.push(t('客户端文件清单登记失败：{err}', 'Failed to record client file lists: {err}', { err: (e as Error).message }))
     }
   }
   return { refreshed, warnings }
