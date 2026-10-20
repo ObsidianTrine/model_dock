@@ -1357,6 +1357,82 @@ describe('网关', () => {
     }
   })
 
+  it('一键迁移：dismiss 忽略持久化 + detect 标记 dismissed/sameSite + 无 Key 候选', async () => {
+    const t = await setup()
+    try {
+      const { execSync } = await import('node:child_process')
+      let hasSqlite = true
+      try {
+        execSync('which sqlite3', { stdio: 'ignore' })
+      } catch {
+        hasSqlite = false
+      }
+      if (!hasSqlite) {
+        console.log('skip: 环境无 sqlite3')
+        return
+      }
+      const home = process.env.MODELRDOCK_FAKE_HOME as string
+      const db = path.join(home, '.cc-switch', 'cc-switch.db')
+      fs.mkdirSync(path.dirname(db), { recursive: true })
+      const seed = (rows: string[]): void => {
+        const f = path.join(home, 'seed.sql')
+        fs.writeFileSync(f, rows.join('\n'))
+        execSync(`sqlite3 '${db}' < '${f}'`)
+      }
+      seed([
+        'CREATE TABLE IF NOT EXISTS providers (id INTEGER, app TEXT, name TEXT, settings_config TEXT, is_current INTEGER);',
+        `INSERT INTO providers VALUES (1,'claude','同站点 A','{"env":{"ANTHROPIC_BASE_URL":"https://ark.example.com/api/coding","ANTHROPIC_AUTH_TOKEN":"sk-a"}}',1);`,
+        `INSERT INTO providers VALUES (2,'claude','无 Key 行','{"env":{"ANTHROPIC_BASE_URL":"https://keyless.example.com/api"}}',0);`,
+      ])
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const get = (p: string) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock${p}`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
+      const post = (p: string, body: unknown) =>
+        fetch(`http://127.0.0.1:${t.gwPort}/_modeldock${p}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' },
+          body: JSON.stringify(body),
+        })
+
+      // 初次 detect：有 Key / 无 Key 候选都返回（一键导入只搬有 Key 的分流在 UI 层做）；
+      // cc-switch 无 Key 行没有 skipReason（导入后可补 Key），只是 UI 不自动导
+      const det: any = await (await get('/import/detect')).json()
+      const keyed = det.candidates.find((c: any) => c.name === '同站点 A')
+      const keyless = det.candidates.find((c: any) => c.name === '无 Key 行')
+      expect(keyed.hasKey).toBe(true)
+      expect(keyed.dismissed).toBeFalsy()
+      expect(keyed.sameSite).toBeFalsy()
+      expect(keyless.hasKey).toBe(false)
+      expect(keyless.skipReason).toBeFalsy()
+
+      // dismiss：空入参 400；地址带尾斜杠 → 服务端归一化后持久化，detect 标记 dismissed
+      expect((await post('/import/dismiss', {})).status).toBe(400)
+      const dis: any = await (await post('/import/dismiss', { urls: ['https://ark.example.com/api/coding/'] })).json()
+      expect(dis.ok).toBe(true)
+      const det2: any = await (await get('/import/detect')).json()
+      expect(det2.candidates.find((c: any) => c.name === '同站点 A').dismissed).toBeTruthy()
+      expect(det2.candidates.find((c: any) => c.name === '无 Key 行').dismissed).toBeFalsy()
+      const onDisk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(onDisk.import.dismissed).toContain('https://ark.example.com/api/coding')
+
+      // dismissed 只影响自动弹卡：显式按 id 导入仍然放行（手动勾选导入的合法路径）
+      const apply: any = await (await post('/import/apply', { ids: [keyed.id] })).json()
+      expect(apply.imported).toHaveLength(1)
+
+      // 同主机不同端点不算重复（不弹 skipReason），但 sameSite 标注与已有服务同源
+      seed([`INSERT INTO providers VALUES (3,'claude','同站点 B','{"env":{"ANTHROPIC_BASE_URL":"https://ark.example.com/api/openai","ANTHROPIC_AUTH_TOKEN":"sk-b"}}',0);`])
+      const det3: any = await (await get('/import/detect')).json()
+      const b3 = det3.candidates.find((c: any) => c.name === '同站点 B')
+      expect(b3.skipReason).toBeFalsy()
+      expect(b3.sameSite).toContain('同站点 A')
+      // 已导入的 A 现在按地址判重，走 skipReason 而非 dismissed
+      const a3 = det3.candidates.find((c: any) => c.name === '同站点 A')
+      expect(a3.skipReason).toBeTruthy()
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('service/update：模型目录编辑（改/删/新增/校验）', async () => {
     const t = await setup()
     try {

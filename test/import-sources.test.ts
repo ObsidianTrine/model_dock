@@ -48,6 +48,24 @@ describe('import sources · dedupeCandidates（同一服务只导一条）', () 
     expect(out).toHaveLength(1)
   })
 
+  it('都不在「使用中」时优先保留有 Key 的那条（无 Key 的先出现也不能顶掉）', () => {
+    expect(dedupeCandidates([
+      cand({ suggest_id: 'nokey' }),
+      cand({ suggest_id: 'keyed', key: 'sk-1' }),
+    ]).map((c) => c.suggest_id)).toEqual(['keyed'])
+    expect(dedupeCandidates([
+      cand({ suggest_id: 'keyed', key: 'sk-1' }),
+      cand({ suggest_id: 'nokey' }),
+    ]).map((c) => c.suggest_id)).toEqual(['keyed'])
+  })
+
+  it('「使用中」优先级高于「有 Key」：使用中的无 Key 条目仍胜出', () => {
+    expect(dedupeCandidates([
+      cand({ suggest_id: 'keyed', key: 'sk-1' }),
+      cand({ suggest_id: 'cur', is_current: true }),
+    ]).map((c) => c.suggest_id)).toEqual(['cur'])
+  })
+
   it('不同地址全部保留（含端口/路径差异）', () => {
     const out = dedupeCandidates([
       cand({ suggest_id: 'a', base_url: 'https://api.example.com/v1' }),

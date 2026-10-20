@@ -46,6 +46,7 @@ function migrate(raw: Record<string, unknown>): Config {
     security: raw.security as Config['security'],
     backup: raw.backup as Config['backup'],
     update: raw.update as Config['update'],
+    import: raw.import as Config['import'],
   }
   return cfg
 }
