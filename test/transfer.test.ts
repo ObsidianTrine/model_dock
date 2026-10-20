@@ -142,12 +142,14 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
       await extractArchive(path.join(dir, 'pkg.zip'), dir, runner, 'win32')
       expect(calls).toHaveLength(1)
       expect(calls[0].join(' ')).toContain('Expand-Archive')
-      // 含引号 / PowerShell 插值元字符（反引号、$(）：拒绝且不跑任何命令
+      // 含引号 / PowerShell 插值元字符（反引号、$(）：拒绝且不跑任何命令、不落盘建目录
       calls.length = 0
       await expect(extractArchive('a"b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
       await expect(extractArchive('a`b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
       await expect(extractArchive('a$(x).zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
-      await expect(extractArchive('ab.zip', 'dir`with$tick', runner, 'win32')).rejects.toThrow(/引号|quote/)
+      const badDir = path.join(dir, 'dir`with$tick')
+      await expect(extractArchive('ab.zip', badDir, runner, 'win32')).rejects.toThrow(/引号|quote/)
+      await expect(fsp.access(badDir).then(() => true, () => false)).resolves.toBe(false)
       expect(calls).toHaveLength(0)
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
   })
