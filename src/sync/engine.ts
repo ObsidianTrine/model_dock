@@ -183,6 +183,9 @@ export class SyncLoop {
   private watcher: fs.FSWatcher | undefined
   private debounce: NodeJS.Timeout | undefined
   private inflight: Promise<TickOutcome> | null = null
+  /** 在飞期间又有触发到达（文件变更/手动 tick/轮询）：记一次，收尾后立即补跑一轮，
+   *  否则这批改动要等下轮轮询（60/120s±抖动）才推出——上游慢时单 tick 可拖 15s，感知明显 */
+  private trailing = false
   private stopped = false
 
   constructor(private opts: SyncLoopOpts = {}) {}
@@ -190,10 +193,19 @@ export class SyncLoop {
   /** 单飞：在飞期间所有触发源共用同一 promise。跟踪在飞是为了 stop() 能等它收尾——
    *  否则测试进程切换/清除 MODELRDOCK_FAKE_HOME 后，长尾 tick 会把簿记写进真实 home（2026-10-05 事故根因） */
   private beginTick(mode: 'safe' | 'raw'): Promise<TickOutcome> {
-    if (this.inflight) return this.inflight
+    if (this.inflight) {
+      this.trailing = true
+      return this.inflight
+    }
     const base = mode === 'raw' ? syncTickOnce(this.opts) : safeSyncTick(this.opts)
     const wrapped = base.finally(() => {
       this.inflight = null
+      // 补跑只在循环存活时进行：stop() 后绝不写盘（同上 2026-10-05 事故不变式）。
+      // 补跑固定走 safe：自身 apply 的写盘经 lastSyncedHash 令下轮空转，链自然终止，不会回环推送
+      if (this.trailing && !this.stopped) {
+        this.trailing = false
+        this.beginTick('safe').catch(() => {})
+      }
     })
     this.inflight = wrapped
     return wrapped

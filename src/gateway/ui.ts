@@ -4509,6 +4509,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
   var logsLastGood = ''
   var logPageEntries = [] // 当前页错误行的原始条目，供 ⧉ 复制按钮按索引取用
   var logsFailStreak = 0
+  var logsLastSig = '' // 上次成功响应的整体签名：没变化就跳过整表重建（否则每 5s 白重建一次，打断选中文本/复制）
   // 分页状态：page 从 1 数起（服务端第 1 页 = 最新 n 条）；每页条数记忆在 localStorage
   var logPage = 1
   var logPages = 1
@@ -4547,6 +4548,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       logPages = j.pages || Math.max(1, Math.ceil(total / logPageSize))
       // 环形缓冲滚动挤掉了旧记录导致当前页越界时，退回最后一页再取一次
       if (!retried && logPage > logPages) { logPage = logPages; loadLogs(true); return }
+      // 响应与上次完全一致则不动 DOM（与 load() 的 stringify diff 同款）：分页文案/滚动位置/选中态都保住
+      var sig = JSON.stringify(j)
+      if (!retried && sig === logsLastSig) { logsFailStreak = 0; return }
+      logsLastSig = sig
       logPageEntries = []
       var rows = logs.map(function (l) {
         var bad = l.status >= 400 || !!l.err

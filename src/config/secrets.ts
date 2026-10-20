@@ -109,6 +109,8 @@ function secretToolOp(op: 'store' | 'lookup' | 'clear', account: string, secret?
 const EXT_TTL = 60_000
 const externalCache = new Map<string, { at: number; val: string | null }>()
 const extKey = (scheme: string, id: string) => `${scheme}:${id}`
+// TTL 过期瞬间的在途读取共享：不收敛则并发请求各自 spawn 一次 security/secret-tool（N 倍延迟尖峰）
+const inflightExternal = new Map<string, Promise<string | null>>()
 
 type ExternalReader = (scheme: 'keychain' | 'secret-service', id: string) => Promise<string | null>
 
@@ -140,9 +142,19 @@ async function getExternal(scheme: 'keychain' | 'secret-service', id: string): P
   const ck = extKey(scheme, id)
   const memo = externalCache.get(ck)
   if (memo && Date.now() - memo.at < EXT_TTL) return memo.val
-  const val = await readExternal(scheme, id)
-  externalCache.set(ck, { at: Date.now(), val })
-  return val
+  const inflight = inflightExternal.get(ck)
+  if (inflight) return inflight
+  const task = (async () => {
+    try {
+      const val = await readExternal(scheme, id)
+      externalCache.set(ck, { at: Date.now(), val })
+      return val
+    } finally {
+      inflightExternal.delete(ck)
+    }
+  })()
+  inflightExternal.set(ck, task)
+  return task
 }
 
 /** 供 keychain 交互模式命令行的值/账号转义：双引号包裹，内部 `"` 与 `\` 转义。

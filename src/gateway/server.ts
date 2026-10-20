@@ -17,7 +17,7 @@ import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type Har
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
-import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToService, syncBakedClientsForDisplayRoute } from '../ops.js'
+import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
@@ -751,12 +751,16 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
     hidFollows[hid] = !pinned
   }
   const services = []
-  for (const [id, p] of Object.entries(cfg.providers)) {
+  // key 是否已配置并行预取：串行 await 在 keychain 后端下是逐 provider spawn 外部进程（overview
+  // 稳态约每几秒重建一次，串行 N 次造成周期性延迟尖峰），结果与逐个 await 完全一致
+  const providerEntries = Object.entries(cfg.providers)
+  const keyPresence = new Map(await Promise.all(providerEntries.map(async ([id, p]) => [id, !!(await getSecret(p.key_ref))] as const)))
+  for (const [id, p] of providerEntries) {
     // 引用该 provider 的 profile：active_profile 优先（与 /service/update 写 default_model/候选链的选择逻辑一致）
     const profileRef = profileRefForProvider(cfg, id)
     const profileEntry = profileRef ? cfg.profiles[profileRef] : undefined
     const models = Object.keys(p.models ?? {})
-    const hasKey = !!(await getSecret(p.key_ref))
+    const hasKey = keyPresence.get(id) ?? false
     const h = rt.health.get(id)
     const melted = isMeltdown(rt, id)
     services.push({
@@ -1328,10 +1332,9 @@ async function handleAdmin(
   if (url === '/_modeldock/switch' && req.method === 'POST') {
     const b = await jsonRequestBody(req)
     try {
-      const profileName = await switchToService(String(b.service ?? ''))
-      // 「应用/当前」= 人工钉定主服务（人为修改优先于定时窗口与自动选路），默认路由同步跟随最后一次人工选择；
-      // 钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位
-      await setAutoRoute(rt.config.gateway?.auto_failover === true, String(b.service ?? ''))
+      // 一次整包落盘完成 active_profile + 人工钉定主服务（人为修改优先于定时窗口与自动选路），默认路由同步跟随
+      // 最后一次人工选择；钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位
+      const profileName = await switchToServiceWithRoute(String(b.service ?? ''), rt.config.gateway?.auto_failover === true)
       await reloadRuntime(rt)
       // dsh/workbuddy/zcode 的模型列表烙在客户端配置文件里，切全局后需按新路由重写才跟随
       const baked = await refreshBakedModelClients({ port: rt.port })

@@ -9,6 +9,7 @@
 > 4. 与 `docs/backlog.md`（2026-10-07 热路径评审 B/C 级遗留）少量重叠：backlog 的 **B4 ≈ PERF-17**、**C2 与 PERF-06/07/09 同域**、**B2/B3 仍开放**（本页未重复收录），实施时可合并处理。
 >
 > 2026-10-12 批量修复：PERF-01/04/05/06/07/08/09/10/11/12/17、CORRECT-01、XPLAT-01/03/04/05/07/08/10 共 19 项已修（commit 见总览表），全部经 orchestrator 自治闭环（独立测试门禁 + LLM 审查 + 人工闸门复核 diff），合并后 develop 全量 691 例绿。
+> 2026-10-20 性能复审批量修复：PERF-02 全修、PERF-03/14 部分修（@2540618，切换服务写放大同步收敛）；同日四路并行复审新增 PERF-18..36（P2）留底，见 §一.F。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -16,8 +17,8 @@
 | 编号 | 级别 | 位置 | 一句话 | 状态 |
 |---|---|---|---|---|
 | PERF-01 | **P0** | `src/gateway/relay.ts:298-308` | 配 default_model 时每请求全量 JSON.parse 请求体，即使无需改写 | ☑ 已修（2026-10-12 @6fd71fa） |
-| PERF-02 | P2 | `src/gateway/state.ts:285` | dayFilter 窗口每请求 1 次 statSync | ☐ 未修 |
-| PERF-03 | P1 | `src/cli/index.ts:1-14` | CLI 任何命令静态加载 823KB catalog snapshot | ☐ 未修 |
+| PERF-02 | P2 | `src/gateway/state.ts:285` | dayFilter 窗口每请求 1 次 statSync | ☑ 已修（2026-10-20 @2540618） |
+| PERF-03 | P1 | `src/cli/index.ts:1-14` | CLI 任何命令静态加载 823KB catalog snapshot | ◐ 部分修复（2026-10-20 @2540618，命令模块已 action 内动态 import；snapshot 懒加载仍待专项） |
 | PERF-04 | P1 | `src/cli/diag.ts:1,6` | undici + gateway/proxy 进全命令启动链 | ☑ 已修（2026-10-12 @20f6b1c） |
 | PERF-05 | P1 | `src/adapters/engine.ts:1` | @inquirer 白白进网关常驻进程 | ☑ 已修（2026-10-12 @20f6b1c） |
 | PERF-06 | P1 | `src/gateway/server.ts:757-758` | overview 重建串行 await 9 个适配器 status | ☑ 已修（2026-10-12 @e9788a0） |
@@ -28,10 +29,29 @@
 | PERF-11 | P2 | `src/gateway/lan.ts:1041,1047` | PWA 图标 no-store 每次重下 | ☑ 已修（2026-10-12 @e9788a0） |
 | PERF-12 | P1 | `src/sync/crypto.ts:150,175` | openEnvelope 双重 PBKDF2（600k×2）阻塞事件循环 | ☑ 已修（2026-10-12 @0caad3a） |
 | PERF-13 | P2 | `src/providers/catalog.ts:109-140` | catalogBase 每次 merge+sort+statSync，每模型 3 次调用 | ☐ 未修 |
-| PERF-14 | P2 | `src/config/store.ts:160-163` | mutateConfig 无变化也全量重写；路由变更放大 K+1 次 | ☐ 未修 |
+| PERF-14 | P2 | `src/config/store.ts:160-163` | mutateConfig 无变化也全量重写；路由变更放大 K+1 次 | ◐ 部分修复（2026-10-20 @2540618，K 次登记合并为 1 次 + 切换写合并；无变化重写仍开放） |
 | PERF-15 | P2 | `src/config/secrets.ts:310-313` | 改一个 key 全表重加密；win32 setSecret spawn PowerShell | ☐ 未修 |
 | PERF-16 | P2 | `src/gateway/state.ts:614,625` | 请求/审计 JSONL 无轮转，磁盘无界增长 | ☐ 未修 |
 | PERF-17 | P2 | `src/gateway/state.ts:130` | reload 不 close() 旧 ProxyAgent（≈backlog B4） | ☑ 已修（2026-10-12 @2a0c5c9） |
+| PERF-18 | P2 | `src/gateway/server.ts:629,1108` | admin 鉴权每请求 new RegExp 编译（UI 5s 轮询持续触发） | ☐ 未修 |
+| PERF-19 | P2 | `src/gateway/server.ts:939-945` | syncTickets/remoteRequests 孤儿条目仅在同类入口懒清扫，无人认领常驻内存 | ☐ 未修 |
+| PERF-20 | P2 | `src/gateway/state.ts:125-141` | reloadRuntime 不清 rt.health，已删服务的健康条目永久残留 | ☐ 未修 |
+| PERF-21 | P2 | `src/gateway/server.ts:540` | 请求体全量 buffer 后才转发（改写管线设计前提；GET/DELETE 可跳过） | ☐ 未修 |
+| PERF-22 | P2 | `src/gateway/ui.ts:1383` | pollOverview 双 JSON.stringify diff，overview 几百 KB 时每 5s 两次 O(n) 序列化 | ☐ 未修 |
+| PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☐ 未修 |
+| PERF-24 | P2 | `src/gateway/lan.ts:780` | 手机页 30s 轮询无 document.hidden 门控；页面每请求重拼无 ETag | ☐ 未修 |
+| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☐ 未修 |
+| PERF-26 | P2 | `src/sync/collect.ts:72-73` | 每次 collect 把 presets.json 读+解析两遍 | ☐ 未修 |
+| PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☐ 未修 |
+| PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☐ 未修 |
+| PERF-29 | P2 | `src/providers/fetch.ts:106-157` | 拉取模型无失败负缓存：上游不可达时每次开弹窗重跑候选链（8 端点×15s 串行，最长 60s） | ☐ 未修 |
+| PERF-30 | P2 | `src/util/fsx.ts:139-141` | fileSha256 整文件读内存（更新包 50–150MB 内存峰值），应流式 hash | ☐ 未修 |
+| PERF-31 | P2 | `src/install/noderuntime.ts:214` | 1KB 的 SHASUMS256.txt 用 10min 默认超时，连接挂死最坏 20–40min 才切下一源 | ☐ 未修 |
+| PERF-32 | P2 | `src/import/sources.ts:978-1007` | one-api 分页最多 50 页×15s 串行无整体 deadline，慢站点最坏 ~12min | ☐ 未修 |
+| PERF-33 | P2 | `src/cli/diag.ts:24,104-108` | cmdStatus/cmdDoctor 对全部 adapter 串行 await status（网关侧已 Promise.all） | ☐ 未修 |
+| PERF-34 | P2 | `src/adapters/presence.ts:109-111` | Windows desktopPresent 逐 app 串行 registryHas（reg /s 全树扫） | ☐ 未修 |
+| PERF-35 | P2 | `src/backup/snapshot.ts:156,164` | pruneSnapshots 调 listSnapshots 两次，每次写快照备份目录 manifest 全量读两遍 | ☐ 未修 |
+| PERF-36 | P2 | `src/ops.ts:830-843` | migrateSecretsToSecure 循环内逐 key mutateConfig 整包写 + 2N 次密钥表写 | ☐ 未修 |
 | XPLAT-01 | P2 | `src/util/fsx.ts:120-131` | atomicWrite 重试白名单缺 EBUSY | ☑ 已修（2026-10-12 @54e01c3） |
 | XPLAT-02 | P2 | `src/cli/gatewaycmd.ts:110,123` | Windows stop 硬杀，优雅清理永不执行 | ☐ 未修 |
 | XPLAT-03 | P2 | `src/util/paths.ts:38` | displayPath 在 Windows 永不缩写 ~ | ☑ 已修（2026-10-12 @0caad3a） |
@@ -66,6 +86,7 @@
 - 位置：`src/gateway/state.ts:285` → `src/gateway/daytype.ts:33`
 - 现状：仅「配了定时切换 + dayFilter」的部署命中；mtime memo 免了读文件、免不了每请求 1 次 stat。
 - 修复方向：窗口匹配结果按分钟级时间戳缓存进 rt。
+- 2026-10-20 已修（@2540618）：日历挂 rt 30s TTL 缓存，`windowDayMatches` 改 getter 惰性求值——顺带修掉日历作为实参总是求值、days-only 窗口也走 statSync 的问题；日历缓存文件更新最迟 30s 生效（变更极低频，可接受）。
 
 其余热路径项已核查**无问题**（勿重复审查）：config/tokens/provider 全内存；getSecret 命中 fileCache/externalCache 零落盘；SSE 经 `pipeline(上游body → usageTap → res)` 逐块透传、backpressure 正确、无整体缓冲；undici `request` + 缓存 dispatcher（direct 模块级单例 Agent，keepAliveTimeout 55s；headersTimeout 60s 可配 / bodyTimeout 10min），连接类错误重试 1 次；usage tap 以 `includes('usage')` 预过滤跳过 95%+ 的 SSE 行解析；请求日志走常驻 WriteStream（`util/fsx.ts:162-179` appendLine 流池）无逐条 open/fsync；鉴权 `Map.get` O(1) + admin token sha256 + `timingSafeEqual`；glob 正则按 pattern 缓存；路由分发为字符串前缀线性链（~30 个，纳秒级）；内存无只增不减结构（ring≤500、appendStreams LRU≤8、syncTickets TTL 清扫等）。
 
@@ -77,6 +98,7 @@
 - 修复方向：命令模块下沉到 commander action 内 `await import()`；`catalog-snapshot.generated.ts` 改懒 `import()`（或拆 catalog-lazy 模块），仅 `refreshCatalog` / `catalogModelMeta` 真正触达。
 - 2026-10-12 核查：属实（实测 33896 行 / 772KB，命令模块 10 个）。纯懒 `import()` 需把同步触达点（`resolveModelMeta` 等 15+ 调用点）整体 async 化，SEA 下 createRequire 同步方案另有打包约束——**暂缓，待专项设计**。
 - 验证：`node --cpu-prof` 或简单计时对比 `modeldock --help` 冷启耗时；注意 vitest 隔离模型（跨文件 mock 雷区，见 AGENTS.md）。
+- 2026-10-20 部分修复（@2540618）：cli/index.ts 全部命令模块改 action 内动态 import——`--help`/`--version` 及不触达 adapters/ops 的命令不再静态加载 providers/adapters 模块图与 @inquirer；走 adapter/ops 链的命令仍经 `resolve.ts` 背 snapshot，懒 `import()` 专项（同步触达点 async 化）继续开放。
 
 **PERF-04（P1）diag.ts 把 undici 与 gateway/proxy 拉进启动链**
 - 位置：`src/cli/diag.ts:1,6`（`import { request } from 'undici'`、`import { buildDispatcher } from '../gateway/proxy.js'`）
@@ -134,6 +156,7 @@
 - 位置：`src/config/store.ts:160-163`（fn 无改动也 `saveConfig`：全量 stringify + fsync + rename）；`src/ops.ts:352-355`（refreshBakedModelClients 循环内**每客户端各一次** mutateConfig，只为更新 entry.files）；`src/ops.ts:374-383`（ensureProfileForProvider 命中已有 profile 时 no-op 也全量重写一次）。
 - 影响：一次路由变更（手动切换/定时窗口接管/手机端应用）放大为 K+1 次全量 TOML 重写；每次重写还经 fs.watch 触发 reloadRuntime 再全量解析（与主动 reload 叠加，一次保存重载两代）。**不在每请求路径上**（pickerSync 定时器 5s 一跳但路由未变零 I/O）。
 - 修复方向：mutateConfig 比较 stringify 结果未变则跳过写；refreshBakedModelClients 合并循环内 K 次为一次。
+- 2026-10-20 部分修复（@2540618）：refreshBakedModelClients 的 K 次 files 登记合并为循环外一次 mutateConfig；新增 `switchToServiceWithRoute` 把「切换服务 + 钉定主服务」两次整包写合并为一次（桌面 /switch 与手机端同款链路均改走）。mutateConfig「无变化跳写」仍开放。
 
 **PERF-15（P2）secrets 单 key 修改 O(N)**
 - 位置：`src/config/secrets.ts:310-313`（writeFileSecrets 对全部条目重新加密）；win32 每次 setSecret/deleteSecret spawn 一次 PowerShell 批处理（~1s 级，冷启动首请求延迟尖峰，之后有缓存）。
@@ -149,6 +172,87 @@
 **PERF-17（P2）reload 不关旧 ProxyAgent（≈backlog B4）**
 - 位置：`src/gateway/state.ts:130`（`rt.dispatchers.clear()` 不调 close，旧连接池靠 keepAlive 空闲超时自然收尾；direct 单例不受影响，非无界泄漏）。
 - 修复方向：clear 前对非 direct 的 dispatcher 逐个 `close()`。
+
+### F. 2026-10-20 性能复审新增（P2，留底待修）
+
+> 来源：四路并行复审（网关热路径 / Web 控制台 / 配置与启动链 / 同步与供应商目录），关键结论经人工到源码复核。同日 P1 已批量修复（PERF-02 全修、PERF-03/14 部分，另含切换服务写放大、overview/addService 并行取密钥、keychain 在途去重、loadLogs 重建、sync tick 补跑，@2540618）；下列 P2 留底。
+> 整体结论：转发热路径（SSE 真流式、全内存索引、异步日志流池）、控制台轮询设计（可见性门控/ETag/懒加载/分页）与同步引擎（单飞+防抖+watcher 降级）无 P0/P1 遗留，本节均为卫生级。
+
+**PERF-18（P2）admin 鉴权每请求编译正则**
+- 位置：`src/gateway/server.ts:629,1108`（`new RegExp(`(?:^|;\\s*)${adminCookieName(...)}=([^;]+)`)）
+- 现状：UI 每 5s 轮询 overview 都触发，开销小但纯浪费。修复方向：按端口 memo 编译结果。
+
+**PERF-19（P2）syncTickets/remoteRequests 孤儿条目清扫不全**
+- 位置：`src/gateway/server.ts:939-945`（sweep 只挂在 request-remote/remote-status 入口）
+- 现状：无人认领的票据（含解密 Syncdoc、report）常驻到进程结束。修复方向：并入既有 60s 周期清扫。
+
+**PERF-20（P2）reload 不清 rt.health 已删服务残留**
+- 位置：`src/gateway/state.ts:125-141`（reloadRuntime 重建 config/tokens/dispatchers，不动 health）
+- 现状：反复增删服务的长生命周期进程累积小对象，量级极小。修复方向：reload 时按现配置过滤。
+
+**PERF-21（P2）请求体全量 buffer 后才转发**
+- 位置：`src/gateway/server.ts:540`（chunks 收集 → Buffer.concat，上限 64MB）
+- 现状：模型改写管线的设计前提（topLevelModel 浅扫描已把解析成本压到最低），非纯浪费；TTFB 含完整上传，大请求高并发内存峰值 = 64MB×N。修复方向：无改写需求的 GET/DELETE 跳过 buffer。
+
+**PERF-22（P2）pollOverview 双 stringify diff**
+- 位置：`src/gateway/ui.ts:1383`（`JSON.stringify(v) === JSON.stringify(view)`）
+- 现状：overview 几十–几百 KB，每 5s 主线程两次 O(n) 序列化（约 3–10ms），纯浪费。修复方向：`res.text()` 先比串（服务端本就回发缓存串），相等才 parse。
+
+**PERF-23（P2）编辑弹层/拉取模型全量渲染无上限**
+- 位置：`src/gateway/ui.ts:3919,4046`（`innerHTML = rows.map(...).join('')`；服务端 fetch-models 不截断）
+- 现状：数百模型的供应商一次插数千节点，勾选时全表 querySelectorAll。修复方向：拉取结果截断前 N 条 +「显示全部」；勾选改事件委托（:4153 已有基础）。
+
+**PERF-24（P2）手机页轮询无可见性门控、页面无 ETag**
+- 位置：`src/gateway/lan.ts:780`（`setInterval(load, 30000)` 无 `document.hidden` 判断）；`server.ts:804,809`（每请求重拼 ~63KB HTML）
+- 现状：后台标签每 30s 冗余请求（载荷小、移动端浏览器会节流，危害轻）。修复方向：补 hidden 判断 + visibilitychange 立刷；页面套桌面端现成 ETag/304 模式（server.ts:63-71）。
+
+**PERF-25（P2）控制台页 304KB 无压缩**
+- 位置：`src/gateway/ui.ts:8`（模板字面量约 302KB + 注入后 304KB：body 21KB + CSS 45KB + 内联 JS 236KB，其中注释约 29KB）；`server.ts:1087` 注释「236KB」数字已过时
+- 现状：ETag/304 已兜住重复加载，首载解析 236KB JS 约 30–80ms（一次性）。修复方向：构建期剥内联 JS 注释；顺手更正注释数字。
+
+**PERF-26（P2）presets.json 每 tick 读+解析两遍**
+- 位置：`src/sync/collect.ts:72-73`（`readUserPresets()` 后紧跟 `readRawUserPresets()`，各自 readFileSync+JSON.parse+逐条校验）
+- 修复方向：读一次，校验复用同一解析结果。
+
+**PERF-27（P2）sync tick 重复全量 loadConfig**
+- 位置：`src/sync/engine.ts:116,57`（cloud 每 tick 心跳与 collectSyncdoc 各 loadConfig 一次；target 每 tick 全量 collect，无 mtime 短路）
+- 现状：配置小则毫秒级，属持续性重复 I/O。修复方向：tick 内复用同一份 cfg；或按 config.toml/secrets.json mtime 指纹短路。
+
+**PERF-28（P2）WebDAV readManifest 无条件请求**
+- 位置：`src/sync/targets/webdav.ts:75-77`（每 tick 全量 GET manifest.json，不带 ETag；cloud 目标 `cloud.ts:44` 已用 if-none-match/304）
+- 修复方向：缓存 ETag 带 If-None-Match。
+
+**PERF-29（P2）拉取模型无失败负缓存**
+- 位置：`src/providers/fetch.ts:106-157`（候选链最多 8 端点逐个串行 × 15s，总 60s 封顶）+ `src/gateway/server.ts:1275`（每请求直连上游）
+- 现状：上游不可达时用户每开一次弹窗白等最长 60s。修复方向：失败结果做 ~60s 短 TTL 负缓存。
+
+**PERF-30（P2）fileSha256 整文件读内存**
+- 位置：`src/util/fsx.ts:139-141`（`sha256(await fsp.readFile(p))`）；调用点 `update/check.ts:324`、`install/noderuntime.ts:229`（SEA/app 包 50–150MB）
+- 现状：更新/装运行时瞬间内存峰值 ≈ 包体积，低配 Windows 可感。修复方向：createHash 流式管道。
+
+**PERF-31（P2）SHASUMS 小文本用 10min 默认超时**
+- 位置：`src/install/noderuntime.ts:214`（`downloadText` 未传 timeoutMs，落 `DOWNLOAD_TIMEOUT_MS`=10min；每 base 的 sums 与 archive 各自独立计时串行）
+- 现状：连接挂死时装 Node 运行时最坏 20–40min 才落到下一源。修复方向：小文本给 15–30s 短超时。
+
+**PERF-32（P2）one-api 分页无整体 deadline**
+- 位置：`src/import/sources.ts:978-1007`（最多 50 页 × 15s/页串行）
+- 现状：慢站点最坏拖 ~12min（仅显式 `--from oneapi` 路径）。修复方向：加 60s 级整体 deadline。
+
+**PERF-33（P2）CLI status/doctor 串行探测 adapter**
+- 位置：`src/cli/diag.ts:24,104-108`（`for (const a of allAdapters(cfg)) await a.status(...)`；网关侧 server.ts:680,798 已 Promise.all）
+- 现状：~9 个 adapter 文件探测串行累加，status/doctor 慢数百 ms。修复方向：与网关侧对齐改 Promise.all。
+
+**PERF-34（P2）Windows 注册表逐 app 串行扫**
+- 位置：`src/adapters/presence.ts:109-111`（`for (const name of appNames) if (await registryHas(name)) return true`，reg /s 全树）
+- 现状：慢盘机器 overview 重建可能撞秒级注册表扫描（已有 memo + overview 缓存大幅缓解，仅 Windows）。修复方向：多 app 的 registryHas 并行。
+
+**PERF-35（P2）pruneSnapshots 重复全量列快照**
+- 位置：`src/backup/snapshot.ts:156,164`（`listSnapshots` 调两次，各 readdir + 逐目录 manifest.json parse；snapshot() 内还先 loadConfig 多 parse 一次 TOML）
+- 现状：每次写快照把备份目录 manifest 全量读两遍（keep=20 即 ~40 次文件读）。修复方向：一次 listSnapshots 复用于 valid 集与修剪列表。
+
+**PERF-36（P2）密钥安全迁移循环逐 key 整包写**
+- 位置：`src/ops.ts:830-843`（循环内每 key 一次 mutateConfig + setSecret + deleteSecret）
+- 现状：N 个存量明文 key = N 次全量配置写 + 2N 次密钥表写；fire-and-forget 不阻塞启动，仅迁移期发生。修复方向：key_ref 更新合并为一次 mutateConfig；补 deleteSecretsBatch 批量形态。
 
 ---
 

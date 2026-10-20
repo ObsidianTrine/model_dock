@@ -87,6 +87,9 @@ export interface GatewayRuntime {
   port?: number
   /** 手机简版控制台（LAN）第二监听器运行态；随网关生命周期启停。host=实际绑定地址（对外 URL 只列真正可达的地址） */
   lan?: { server: import('node:http').Server; port: number; token: string; host: string }
+  /** 定时窗口 dayFilter 评估用的节假日日历（30s TTL 懒加载，见 hitScheduleWindows；日历缓存文件更新最迟 30s 生效） */
+  calendar?: HolidayCalendar
+  calendarAt?: number
 }
 
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */
@@ -255,14 +258,17 @@ function dowOf(d: Date): number {
   return d.getDay() === 0 ? 7 : d.getDay()
 }
 
+/** 日历 rt 缓存 TTL：TTL 内 dayFilter 判定零文件 IO */
+const CALENDAR_TTL_MS = 30_000
+
 /** 窗口在归属日期 ref 是否生效：days（星期几）与 dayFilter（日类型）同时配置时取交集。
- *  calendar 由调用方传入（hitScheduleWindows 懒加载后共享）——转发热路径避免每次判定都走
- *  loadCalendar 的 statSync。 */
-function windowDayMatches(w: ScheduleWindow, ref: Date, calendar: HolidayCalendar): boolean {
+ *  calendar 传 getter 惰性取：days-only 窗口短路在前，无 dayFilter 的部署零文件 IO；
+ *  日历经 rt 缓存（30s TTL），转发热路径不做每请求 statSync。 */
+function windowDayMatches(w: ScheduleWindow, ref: Date, calendar: () => HolidayCalendar): boolean {
   if (w.days?.length && !w.days.includes(dowOf(ref))) return false
   const f = w.dayFilter
   if (!f || (f as string) === 'any') return true // 'any' 仅为手改配置的容错，正常写入不会产生
-  const dt = dayTypeFor(ref, calendar)
+  const dt = dayTypeFor(ref, calendar())
   if (f === 'holiday') return dt === 'holiday'
   if (f === 'weekend') return dt === 'weekend'
   return dt === 'workday' || dt === 'makeup' // workday：周一至五与调休补班日，法定节假日不算
@@ -277,8 +283,16 @@ function hitScheduleWindows(rt: GatewayRuntime, now: Date): ScheduleWindow[] {
   const sch = rt.config.gateway?.schedule
   if (!sch || sch.enabled === false) return []
   const t = now.getHours() * 60 + now.getMinutes()
-  // 日历懒加载：仅存在配了 dayFilter 的窗口才读（statSync），无 dayFilter 的部署零文件 IO
-  let calendar: HolidayCalendar | undefined
+  // 日历经 rt 缓存 + 30s TTL：此前每请求都走 loadCalendar 的 statSync（旧写法把日历做成了函数局部
+  // 变量且作为实参总是求值，随 QPS 放大；known-issues PERF-02）。日历文件由 models.dev 目录拉取落盘，
+  // 变更极低频，30s 内生效的延迟可接受。
+  const cal = () => {
+    if (!rt.calendar || Date.now() - (rt.calendarAt ?? 0) > CALENDAR_TTL_MS) {
+      rt.calendar = loadCalendar()
+      rt.calendarAt = Date.now()
+    }
+    return rt.calendar
+  }
   const hit: ScheduleWindow[] = []
   for (const w of sch.windows ?? []) {
     const s = parseHHmm(w.start)
@@ -295,7 +309,7 @@ function hitScheduleWindows(rt: GatewayRuntime, now: Date): ScheduleWindow[] {
     } else {
       continue
     }
-    if (windowDayMatches(w, ref, calendar ?? (calendar = loadCalendar()))) hit.push(w)
+    if (windowDayMatches(w, ref, cal)) hit.push(w)
   }
   return hit
 }
