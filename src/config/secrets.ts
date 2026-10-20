@@ -480,6 +480,17 @@ export function invalidateSecretsCache(): void {
   externalCache.clear()
 }
 
+/** doctor 体检用：验证 file 后端密钥表可读（解析/解密失败给可操作错误而不是抛出）。
+ *  外部后端（keychain 等）不在此校验，仍由 getSecret 按条读取。 */
+export async function verifySecretsStore(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await loadFileSecrets()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+}
+
 /** 读取 key；plain 代表明文内嵌在 config 里（不推荐，直接返回） */
 export async function getSecret(ref: string): Promise<string | null> {
   const { scheme, id } = parseKeyRef(ref)

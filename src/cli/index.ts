@@ -165,7 +165,13 @@ export function buildProgram(): Command {
     .option('-t, --timeout <s>', t('超时秒数', 'Timeout seconds'), '90')
     .action(async (p, o) => (await import('./diag.js')).cmdTest(p, o))
 
-  prog.command('doctor').description(t('整体体检：配置/网关/上游/各 harness 指向，附修复命令', 'Full health check: config/gateway/upstream/harness targets, with fix commands')).action(async () => (await import('./diag.js')).cmdDoctor())
+  prog
+    .command('doctor')
+    .description(t('整体体检：配置/网关/上游/各 harness 指向，附修复命令', 'Full health check: config/gateway/upstream/harness targets, with fix commands'))
+    .option('--fix', t('执行修复：安全项自动，敏感项逐项确认', 'Apply fixes: safe ones automatically, sensitive ones with per-item confirmation'))
+    .option('--yes', t('跳过修复确认（配合 --fix）', 'Skip fix confirmations (with --fix)'))
+    .option('--json', t('机器可读 JSON 输出', 'Machine-readable JSON output'))
+    .action(async (o) => (await import('./diag.js')).cmdDoctor({ fix: o.fix, yes: o.yes, json: o.json }))
   prog.command('status').description(t('一眼总览：网关/active profile/各 harness 接管状态', 'At-a-glance overview: gateway/active profile/harness attach status')).action(async () => (await import('./diag.js')).cmdStatus())
   prog.command('env').description(t('输出 shell 环境变量（任意 harness 兜底接入）', 'Print shell env vars (fallback attach for any harness)')).action(async () => (await import('./diag.js')).cmdEnv())
 
