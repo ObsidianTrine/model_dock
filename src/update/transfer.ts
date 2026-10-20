@@ -143,13 +143,14 @@ export async function extractArchive(
   run: SpawnRunner = defaultSpawnRunner,
   platform: NodeJS.Platform = process.platform
 ): Promise<void> {
+  // Expand-Archive 经 -Command 双引号串传路径：引号把命令拼坏，反引号/$( 触发 PowerShell 插值展开；
+  // unix tar 无此问题。落点来自 mkdtemp + validateAssetName，守卫属纵深防御。
+  // 守卫先于 mkdir：被拒路径不得落盘（2026-10 测试传相对路径曾把目录建进进程 CWD）
+  if (archive.toLowerCase().endsWith('.zip') && platform === 'win32' && (/["`$]/.test(archive) || /["`$]/.test(dir))) {
+    throw new Error(t('路径含引号或 PowerShell 元字符，无法解压：{p}', 'Path contains a quote or PowerShell metacharacter, cannot extract: {p}', { p: archive }))
+  }
   await fsp.mkdir(dir, { recursive: true })
   if (archive.toLowerCase().endsWith('.zip')) {
-    if (platform === 'win32' && (/["`$]/.test(archive) || /["`$]/.test(dir))) {
-      // Expand-Archive 经 -Command 双引号串传路径：引号把命令拼坏，反引号/$( 触发 PowerShell 插值展开；
-      // unix tar 无此问题。落点来自 mkdtemp + validateAssetName，守卫属纵深防御。
-      throw new Error(t('路径含引号或 PowerShell 元字符，无法解压：{p}', 'Path contains a quote or PowerShell metacharacter, cannot extract: {p}', { p: archive }))
-    }
     await run('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${archive}" -DestinationPath "${dir}" -Force`])
   } else {
     await run('tar', ['-xzf', archive, '-C', dir])
