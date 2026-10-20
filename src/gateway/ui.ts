@@ -388,12 +388,17 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #routebox .rrow2{display:flex;align-items:center;gap:6px 16px;flex-wrap:wrap;padding:9px 12px;border-top:1px dashed var(--border)}
 #routebox.solo .rrow2{border-top:none}
 #routebox .rrow1 label{font-size:var(--fs-sm);color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer}
-/* 「正在使用」状态行：与服务卡徽标/手机页/模型列表同源（服务端 routeState），单行解释服务·模型·来源 */
-#routebox .rrow3{display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;padding:0 12px 9px;font-size:var(--fs-xs);color:var(--muted)}
-#routebox .rrow3 b{color:var(--text);font-weight:600}
-#routebox .rrow3 .mono{font-family:var(--mono)}
-#routebox .rrow3 .src{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px}
-#routebox .rrow3 .src.on{border-color:var(--ok);color:var(--ok)}
+/* 「正在使用」状态横栏：routeState 唯一口径的桌面展示点（服务卡徽标/手机页/模型列表同源）。
+   独立于 routebox 配置卡放在「我的服务」卡之前——实际生效与配置意图分开呈现；
+   弱底色 + 左侧主题色竖条（与使用中服务卡同语言），一眼锁定 */
+#inuseBar{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--accent-weak);box-shadow:inset 3px 0 0 var(--accent)}
+#inuseBar .ilabel{font-size:var(--fs-sm);color:var(--muted)}
+#inuseBar .iname{font-size:var(--fs-base);font-weight:600;color:var(--accent)}
+#inuseBar .imodel{font-family:var(--mono);font-size:var(--fs-sm);color:var(--muted)}
+#inuseBar .src{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px;font-size:var(--fs-xs)}
+#inuseBar .src.on{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
+#inuseBar .itime{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+#inuseBar .ihint{font-size:var(--fs-sm);color:var(--warn)}
 #pkgPill{margin-left:auto}
 #lanPanel{margin:-6px 0 12px;padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r-md)}
 #lanPanel .lanflex{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
@@ -584,6 +589,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     <p class="altline"><button type="button" class="btn small" id="legacyImportLink" data-i18n="从本机客户端导入存量配置…||Import existing configs from local apps…">从本机客户端导入存量配置…</button></p>
   </div>
 
+<div class="inusebar" id="inuseBar" hidden></div>
+
 <div class="card">
   <h2 id="svcH">② 我的服务</h2>
   <p class="desc" data-i18n="点「应用」全局切换，已接入的客户端立即生效。||Click &quot;Apply&quot; to switch globally; attached clients take effect immediately.">点「应用」全局切换，已接入的客户端立即生效。</p>
@@ -616,7 +623,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         <select id="autoRouteSel"><option value="">自动</option></select>
       </label>
     </div>
-    <div class="rrow3" id="rrowEff" hidden></div>
     <div class="rrow2" id="rrow2">
       <span class="pill sw" id="autoRoutePill">
         <button type="button" class="psw-main" role="switch" aria-checked="true" data-i18n-aria="自动路由||Auto route" data-i18n-title="开启后：定时时段由程序自动接管主服务（按窗口/默认路由选主）。故障切换（主服务不可达时切「下一个切换」）不受此开关影响，始终可用||When on, the program takes over primary selection during schedule windows (by window/default route). Failover (switching to Next when the primary is down) is always available regardless of this switch"><span class="ptext">自动路由</span></button>
@@ -1609,8 +1615,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     var noSvc = view.services.length === 0
     var rrow1 = document.getElementById('rrow1')
     if (rrow1) rrow1.hidden = noSvc
-    var rrowEff = document.getElementById('rrowEff')
-    if (rrowEff) rrowEff.hidden = noSvc
+    var inuseBar = document.getElementById('inuseBar')
+    if (inuseBar) inuseBar.hidden = noSvc
     var routebox = document.getElementById('routebox')
     if (routebox) routebox.classList.toggle('solo', noSvc)
     var errPillEl = document.getElementById('errPill')
@@ -1668,26 +1674,28 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (ar && ar.source === 'pinned') tips.push(t('已人工钉定主服务，定时窗口暂停；「当前」选回「自动」即恢复', 'Primary is pinned manually; schedule windows are paused. Pick "Auto" in Current to resume'))
       schedApi.setTip(tips.length ? tips.join(t('；', '; ')) : t('按时间段自动切换主服务/模型；主体开关=启用/停用，右侧箭头=编辑时段', 'Switch primary service/model by time of day; body = enable/disable, arrow = edit windows'))
     }
-    // 统一「正在使用」状态行：消费服务端 routeState 的唯一口径（服务卡徽标/手机页/模型列表同源）
-    if (rrowEff) {
+    // 统一「正在使用」状态横栏：消费服务端 routeState 的唯一口径（服务卡徽标/手机页/模型列表同源）
+    if (inuseBar) {
       var effSrc = ar && ar.source === 'pinned' ? t('人工钉定', 'Pinned')
         : ar && ar.source === 'schedule' ? t('定时窗口', 'Schedule window')
         : ar && ar.source === 'failover' ? t('故障切换', 'Failover')
         : t('默认路由', 'Default route')
       if (ar && ar.providerLabel) {
-        var effHtml = t('正在使用：', 'In use: ') + '<b>' + esc(ar.providerLabel) + '</b>' +
-          (ar.model ? ' · <span class="mono">' + esc(ar.model) + '</span>' : '') +
+        var effHtml = '<span class="ilabel">' + t('正在使用：', 'In use: ') + '</span>' +
+          '<b class="iname">' + esc(ar.providerLabel) + '</b>' +
+          (ar.model ? ' <span class="imodel">' + esc(ar.model) + '</span>' : '') +
           ' <span class="src' + (ar.source === 'schedule' ? ' on' : '') + '">' + esc(effSrc) + '</span>'
         if (ar.source === 'schedule' && ar.schedule && ar.schedule.active) {
-          effHtml += ' ' + esc(ar.schedule.active.start + '–' + ar.schedule.active.end)
+          effHtml += ' <span class="itime">' + esc(ar.schedule.active.start + '–' + ar.schedule.active.end) + '</span>'
         } else if (ar.degradedFrom === 'pinned') {
-          effHtml += ' ' + t('（钉定的服务不可用，已降级）', '(pinned service unavailable; degraded)')
+          effHtml += ' <span class="ihint">' + t('（钉定的服务不可用，已降级）', '(pinned service unavailable; degraded)') + '</span>'
         } else if (ar.degradedFrom === 'schedule') {
-          effHtml += ' ' + t('（定时目标不可用，已降级）', '(schedule target unavailable; degraded)')
+          effHtml += ' <span class="ihint">' + t('（定时目标不可用，已降级）', '(schedule target unavailable; degraded)') + '</span>'
         }
-        rrowEff.innerHTML = effHtml
+        inuseBar.innerHTML = effHtml
       } else {
-        rrowEff.textContent = ''
+        inuseBar.textContent = ''
+        inuseBar.hidden = true
       }
     }
     if (sel) {
