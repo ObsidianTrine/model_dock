@@ -7,6 +7,9 @@
 // 编译：csc（.NET Framework 4.x 随 Windows 10/11 预装）——
 //   csc /target:winexe /out:ModelDockTray.exe /win32manifest:ModelDockTray.manifest
 //       /win32icon:modeldock.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll ModelDockTray.cs
+//       ModelDockTray.Version.generated.cs
+//   第二个文件由 scripts/build-sea.mjs 构建时生成（TrayMeta.Version 常量，git tag 版本号）；
+//   手动重编译时缺它可自建同名常量，否则 TrayMeta.Version 引用编译不过。
 // 语法限制：C# 5（无 $"" 插值、无 ?. ）——目标编译器是 Framework 自带的 v4.0.30319。
 
 using System;
@@ -326,12 +329,12 @@ namespace ModelDockTray
             if (exit == 0 && text.Contains("已是最新"))
             {
                 FinishCheck();
-                MessageBox.Show("已是最新版本。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(UpToDateText(FirstVersion(text)), "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else if (exit == 0 && text.Contains("有新版本"))
             {
                 string ver = FirstVersion(text);
-                string title = ver.Length > 0 ? "ModelDock 有新版本 v" + ver : "ModelDock 有新版本";
+                string title = NewVersionTitle(ver, CurrentVersion(text));
                 DialogResult r = ShowUpdateDialog(title, text, LastUrl(text));
                 FinishCheck();
                 if (r == DialogResult.OK)
@@ -357,7 +360,7 @@ namespace ModelDockTray
             string summary = JsonUnescape(JsonString(json, "summary"));
             if (available)
             {
-                string title = string.IsNullOrEmpty(latest) ? "ModelDock 有新版本" : "ModelDock 有新版本 v" + latest;
+                string title = NewVersionTitle(latest, JsonString(json, "current"));
                 // 小窗只放摘要（全文塞进 560×400 会变成一面墙的长段落）；底部 hint Label 常驻说明，
                 // 正文不再重复拼一遍（原先正文和 Label 各一份同文案）
                 string body = string.IsNullOrEmpty(summary) ? (notes ?? "") : summary;
@@ -374,7 +377,7 @@ namespace ModelDockTray
                 MessageBox.Show(lastError, "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            MessageBox.Show("已是最新版本。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(UpToDateText(JsonString(json, "current")), "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private static string HttpGet(string url, string token)
@@ -590,6 +593,27 @@ namespace ModelDockTray
             return m.Success ? m.Groups[1].Value : "";
         }
 
+        /// 从 CLI 输出取「当前 vX.Y.Z」括注里的版本（「有新版本：v1.2.2（当前 v1.2.1）」）；
+        /// 「已是最新版本（v1.2.3）」没有该括注，当前版本直接用 FirstVersion 取（全文唯一版本号）
+        private static string CurrentVersion(string text)
+        {
+            var m = Regex.Match(text, @"当前 v([0-9]+\.[0-9]+\.[0-9]+)");
+            return m.Success ? m.Groups[1].Value : "";
+        }
+
+        /// 「已是最新版本 vX.Y.Z。」：当前版本取得到就带上（CLI 输出 / 网关 status 自带），取不到回落旧文案
+        private static string UpToDateText(string current)
+        {
+            return string.IsNullOrEmpty(current) ? "已是最新版本。" : "已是最新版本 v" + current + "。";
+        }
+
+        /// 「ModelDock 有新版本 vX（当前 vY）」标题：当前版本取得到才带括注
+        private static string NewVersionTitle(string latest, string current)
+        {
+            string title = string.IsNullOrEmpty(latest) ? "ModelDock 有新版本" : "ModelDock 有新版本 v" + latest;
+            return string.IsNullOrEmpty(current) ? title : title + "（当前 v" + current + "）";
+        }
+
         /// 从 CLI 输出里取发布页地址（「完整说明：https://github.com/.../releases/tag/v1.2.3」）。
         /// 取最后一个匹配：说明正文里可能带别的链接（降级后的行内链接写作「文字 (url)」），
         /// 而发布页那行是输出末尾的固定收尾（按位置而非中文前缀取，英文界面下同样成立）
@@ -748,6 +772,11 @@ namespace ModelDockTray
         {
             var menu = _menu.Items;
             menu.Clear();
+
+            // 版本首项（置灰不可点）：随时可见当前版本，不必专门点「检查更新」
+            var verItem = new ToolStripMenuItem("ModelDock v" + TrayMeta.Version);
+            verItem.Enabled = false;
+            menu.Add(verItem);
 
             var status = new ToolStripMenuItem(_running ? "网关运行中 · 端口 " + _port : "网关未运行");
             status.Enabled = false;

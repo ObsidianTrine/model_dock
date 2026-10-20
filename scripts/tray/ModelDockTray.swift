@@ -302,6 +302,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let state = readState()
         let alive = state != nil && pidAlive(state!.pid)
 
+        // 版本首项（置灰不可点）：随时可见当前版本，不必专门点「检查更新」
+        let ver = NSMenuItem(title: trayVersion().map { "ModelDock v\($0)" } ?? "ModelDock", action: nil, keyEquivalent: "")
+        ver.isEnabled = false
+        menu.addItem(ver)
+
         let status = NSMenuItem(
             title: alive ? "网关运行中 · 端口 \(state!.port)" : "网关未运行",
             action: nil, keyEquivalent: ""
@@ -534,7 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if st.available {
             let hint = "点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。"
             let a = NSAlert()
-            a.messageText = "ModelDock 有新版本 v\(st.latest ?? "")"
+            a.messageText = newVersionTitle(latest: st.latest ?? "", current: st.current)
             a.informativeText = cappedInfo((st.notes ?? "") + "\n\n" + hint, logHint: nil)
             a.addButton(withTitle: "立即更新")
             if st.htmlUrl != nil { a.addButton(withTitle: "打开发布页") } // 无链接就不摆无用按钮
@@ -559,7 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let a = NSAlert()
         a.messageText = "ModelDock"
-        a.informativeText = "已是最新版本。"
+        a.informativeText = upToDateText(current: st.current)
         a.runModal()
     }
 
@@ -601,7 +606,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if exit == 0 && trimmed.contains("已是最新") {
             let a = NSAlert()
             a.messageText = "ModelDock"
-            a.informativeText = "已是最新版本。"
+            a.informativeText = upToDateText(current: firstVersion(in: trimmed))
             a.runModal()
             return
         }
@@ -610,7 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let releaseUrl = firstUrl(in: trimmed)
             let hint = "点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。"
             let a = NSAlert()
-            a.messageText = version.isEmpty ? "ModelDock 有新版本" : "ModelDock 有新版本 v\(version)"
+            a.messageText = newVersionTitle(latest: version, current: currentVersion(in: trimmed))
             a.informativeText = cappedInfo(trimmed.isEmpty ? hint : trimmed + "\n\n" + hint, logHint: nil)
             a.addButton(withTitle: "立即更新")
             if releaseUrl != nil { a.addButton(withTitle: "打开发布页") } // 无链接就不摆无用按钮
@@ -649,6 +654,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let range = NSRange(text.startIndex..., in: text)
         guard let m = re.matches(in: text, range: range).last, let r = Range(m.range, in: text) else { return nil }
         return URL(string: String(text[r]))
+    }
+
+    /// 当前版本号（菜单首项与更新弹窗展示）：打包形态读 Info.plist 的 CFBundleShortVersionString
+    /// （构建时写入，与 Windows 托盘的 TrayMeta.Version 同源）；裸二进制/开发态读不到返回 nil
+    private func trayVersion() -> String? {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
+
+    /// 「已是最新版本 vX.Y.Z。」：当前版本取得到就带上，取不到回落旧文案
+    private func upToDateText(current: String?) -> String {
+        guard let v = current, !v.isEmpty else { return "已是最新版本。" }
+        return "已是最新版本 v\(v)。"
+    }
+
+    /// 「ModelDock 有新版本 vX（当前 vY）」标题：当前版本取得到才带括注
+    private func newVersionTitle(latest: String, current: String?) -> String {
+        let base = latest.isEmpty ? "ModelDock 有新版本" : "ModelDock 有新版本 v\(latest)"
+        guard let c = current, !c.isEmpty else { return base }
+        return base + "（当前 v\(c)）"
+    }
+
+    /// 从 CLI 输出取「当前 vX.Y.Z」括注里的版本（「有新版本：v1.2.2（当前 v1.2.1）」）；
+    /// 「已是最新版本（v1.2.3）」没有该括注，当前版本直接用 firstVersion(in:) 取（全文唯一版本号）
+    private func currentVersion(in text: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: "当前 v([0-9]+\\.[0-9]+\\.[0-9]+)") else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let m = re.firstMatch(in: text, range: range), let r = Range(m.range(at: 1), in: text) else { return nil }
+        return String(text[r])
     }
 
     /// 更新是否在途：磁盘进度为准（update --yes 子进程写的进度，10 分钟未刷新自动过期，

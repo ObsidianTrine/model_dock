@@ -916,9 +916,17 @@ async function packageWinSetup() {
     if (!csc) throw new Error('未找到 csc.exe（.NET Framework 4.x）')
     const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.cs')
     const trayOut = path.join(RELEASE, 'ModelDockTray.exe')
+    // 托盘版本常量：TrayMeta.Version 供托盘菜单首项与更新弹窗展示当前版本（与 mac Info.plist 同源）
+    const trayVerCs = path.join(RELEASE, 'ModelDockTray.Version.generated.cs')
+    await fsp.writeFile(
+      trayVerCs,
+      '// 构建时由 scripts/build-sea.mjs 生成（git tag 版本），勿手改\n' +
+      'namespace ModelDockTray\n{\n    internal static class TrayMeta\n    {\n' +
+      `        internal const string Version = "${String(BUILD_VERSION ?? '0.0.0')}";\n    }\n}\n`
+    )
     // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊
     const trayManifest = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.manifest')
-    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll "${traySrc}"`)
+    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll "${traySrc}" "${trayVerCs}"`)
     log('  ✓ Windows 托盘已编译')
   } catch (e) {
     warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含 Windows 托盘`)
