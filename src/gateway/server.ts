@@ -1788,8 +1788,9 @@ async function handleAdmin(
   if (url === '/_modeldock/import/dismiss' && req.method === 'POST') {
     // 忽略候选（按归一化地址持久化，跨浏览器生效）：自动弹卡不再提示；勾选导入手动入口不受影响，随时可搬回
     const b = await jsonRequestBody(req)
-    const urls = Array.isArray(b.urls)
-      ? [...new Set(b.urls.map(String).map((u) => normalizeBaseUrl(u)).filter(Boolean))]
+    // b 是不可信 JSON（any）：显式按 unknown[] 收口——元素 String() 归一化后归一化地址、过滤空值
+    const urls: string[] = Array.isArray(b.urls)
+      ? [...new Set((b.urls as unknown[]).map((u) => normalizeBaseUrl(String(u))).filter((u): u is string => !!u))]
       : []
     if (urls.length === 0) {
       return sendError(res, 400, t('缺少 urls：要忽略的候选地址数组', 'Missing urls: the array of candidate base URLs to dismiss'))
