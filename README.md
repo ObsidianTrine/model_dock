@@ -82,7 +82,7 @@ modeldock attach claude-code      # 接管 Claude Code（先展示 diff，确认
 ```bash
 modeldock status                # 总览：网关/active profile/各 harness 接管状态
 modeldock test                  # 端到端连通性自测（key/模型/流式/延迟）
-modeldock doctor                # 逐 harness 体检，附修复命令建议
+modeldock doctor                # 逐 harness 体检；--fix 自动修复（敏感项确认），--json 机器可读
 modeldock gateway log -f        # 网关请求日志（不落 prompt）
 modeldock use <profile>         # 切换 provider，网关模式即时生效，零改动 harness
 modeldock gateway install       # 开机自启（常驻）：登录自动拉起、崩溃自动重启

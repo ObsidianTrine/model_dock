@@ -9,6 +9,9 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Added
 
+- **One-shot fixes in the doctor checkup (`modeldock doctor --fix`)**: findings are tiered — safe ones (starting the gateway, refetching the model catalog, removing dangling profiles) apply automatically (an automatic snapshot runs first); sensitive ones (rewriting a client's gateway target) ask per item (`--yes` skips prompts); decisions that are yours (expired keys, unreachable upstream) stay advisory.
+- **Machine-readable doctor output (`modeldock doctor --json`)**: every check carries a stable id and level for scripts and other tools to consume.
+- **Three new doctor checks**: the configured port taken by another process (the gateway would drift to a different port on start), a corrupt secrets store, and broken config-dir watching (the scenario where gateway hot-reload silently dies).
 - **Current version always visible in the menu bar / tray**: the macOS menu bar and Windows tray menus now show "ModelDock vX.Y.Z" as the first item; the "up to date" and "new version" dialogs from "Check for updates" also include version numbers (e.g. 已是最新版本 v1.2.3。 / ModelDock 有新版本 v1.2.4（当前 v1.2.3）), so you no longer need to run an update check just to find out which version you are on.
 
 ## [1.2.0] - 2026-10-20

@@ -82,7 +82,7 @@ modeldock attach claude-code      # take over Claude Code (shows the diff first;
 ```bash
 modeldock status                # overview: gateway / active profile / attach status per harness
 modeldock test                  # end-to-end connectivity self-test (key / models / streaming / latency)
-modeldock doctor                # per-harness health check with suggested fix commands
+modeldock doctor                # per-harness health check; --fix applies fixes (sensitive ones confirm), --json for machines
 modeldock gateway log -f        # gateway request logs (prompts are never logged)
 modeldock use <profile>         # switch provider — instant in gateway mode, zero harness changes
 modeldock gateway install       # auto-start on boot (resident): launches on login, restarts on crash
