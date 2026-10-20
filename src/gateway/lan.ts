@@ -327,6 +327,7 @@ function buildState(rt: GatewayRuntime): Record<string, unknown> {
     forced: ar.forced,
     autoPrimaryLabel: ar.autoPrimaryLabel,
     routeNext: ar.routeNext,
+    routeNextLabel: ar.routeNextLabel,
     next: ar.next,
     nextLabel: ar.nextLabel,
     autoNextLabel: ar.autoNextLabel,
@@ -625,7 +626,7 @@ function render(j) {
   var curOpts = routeSelectHtml(j.services || [], curAutoOpt, r.forced, r.label || r.forced)
   // 「下一个切换」槽：自动态显示「自动 · B」（B=自动态真会切到的下一跳，桌面同源 autoNextLabel）；没得切时明说无备用服务
   var nextAutoOpt = r.autoNextLabel ? tr('自动 · ', 'Auto · ') + r.autoNextLabel : tr('自动 · 无备用服务', 'Auto · no fallback')
-  var nextOpts = routeSelectHtml(j.services || [], nextAutoOpt, r.routeNext, r.nextLabel || r.routeNext)
+  var nextOpts = routeSelectHtml(j.services || [], nextAutoOpt, r.routeNext, r.routeNextLabel || r.routeNext)
   var effSvc = null
   if (r.provider) { for (var i = 0; i < j.services.length; i++) if (j.services[i].id === r.provider) { effSvc = j.services[i]; break } }
   var effName = effSvc ? effSvc.name : (j.active ? j.active.name : null)

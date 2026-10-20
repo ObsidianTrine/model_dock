@@ -399,6 +399,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #inuseBar .src.on{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
 #inuseBar .itime{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
 #inuseBar .ihint{font-size:var(--fs-sm);color:var(--warn)}
+#inuseBar .inext{font-size:var(--fs-sm);color:var(--muted)}
 #pkgPill{margin-left:auto}
 #lanPanel{margin:-6px 0 12px;padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r-md)}
 #lanPanel .lanflex{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
@@ -1717,6 +1718,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
         } else if (ar.degradedFrom === 'schedule') {
           effHtml += ' <span class="ihint">' + t('（定时目标不可用，已降级）', '(schedule target unavailable; degraded)') + '</span>'
         }
+        // 末尾补「下一个切换」：与「正在使用」拼成完整路由事实（在用谁 → 挂了去哪）；取真实下一跳
+        // （钉定时=钉定服务，自动态=全条件现算），无备用时明说，不留空白让人以为有兜底
+        effHtml += ' <span class="inext tip" data-tip="' + esc(t('主服务不可达时切到它；自动态按备用优先级/最近成功耗时实时排序', 'Where traffic goes when the primary is down; in auto mode ranked live by fallback priority / last successful latency')) + '">' +
+          t('下一个切换：', 'Next failover: ') + esc(ar.nextLabel || t('无备用服务', 'no fallback')) + '</span>'
         inuseBar.innerHTML = effHtml
       } else {
         inuseBar.textContent = ''
@@ -1730,9 +1735,20 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var routeNext = ar ? ar.routeNext : null
       var nextAutoLabel = ar ? ar.autoNextLabel : null
       var autoNextOpt = nextAutoLabel ? t('自动 · ', 'Auto · ') + nextAutoLabel : t('自动 · 无备用服务', 'Auto · no fallback')
-      // 选项由共用 routeSelectHtml 构建（与手机同步页同源）：自动态占位 + enabled 服务 + 钉定项兜底（被下线也保留一项显示）
-      sel.innerHTML = routeSelectHtml(view.services || [], autoNextOpt, routeNext, ar.nextLabel || routeNext)
+      // 选项由共用 routeSelectHtml 构建（与手机同步页同源）：自动态占位 + enabled 服务 + 钉定项兜底（被下线也保留一项显示）。
+      // 兜底项名字必须用钉定服务自己的名字（routeNextLabel）——旧写法传 nextLabel，钉定未生效时会显示成实际切向的别家服务名
+      sel.innerHTML = routeSelectHtml(view.services || [], autoNextOpt, routeNext, ar.routeNextLabel || routeNext)
       sel.value = routeNext || ''
+      // 钉定未生效（目标不可用/与主候选相同，真实下一跳 ≠ 钉定项）：在钉定项上如实标注，
+      // 避免「显示钉了 A、实际切了 B」的误读；文案中性——不区分「不可用」与「与主服务相同」两种原因
+      if (routeNext && ar.nextPinnedSkipped) {
+        var pinNote = ar.nextLabel
+          ? ' ' + t('（实际将切到 ', ' (will switch to ') + ar.nextLabel + t('）', ')')
+          : ' ' + t('（实际无可用备用）', ' (no usable fallback)')
+        Array.prototype.forEach.call(sel.options, function (o) {
+          if (o.value === routeNext) o.textContent += pinNote
+        })
+      }
     }
     // 「当前」槽 = 实际使用中的主服务：自动态显示「自动 · X」（X=程序会选的：定时窗口/默认路由），人工选服务=钉定（优先于定时窗口，
     // 持续到选回「自动」）。与「下一个切换」槽各自独立，人工修改优先于程序自动
