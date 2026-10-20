@@ -1735,8 +1735,9 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       var routeNext = ar ? ar.routeNext : null
       var nextAutoLabel = ar ? ar.autoNextLabel : null
       var autoNextOpt = nextAutoLabel ? t('自动 · ', 'Auto · ') + nextAutoLabel : t('自动 · 无备用服务', 'Auto · no fallback')
-      // 选项由共用 routeSelectHtml 构建（与手机同步页同源）：自动态占位 + enabled 服务 + 钉定项兜底（被下线也保留一项显示）
-      sel.innerHTML = routeSelectHtml(view.services || [], autoNextOpt, routeNext, ar.nextLabel || routeNext)
+      // 选项由共用 routeSelectHtml 构建（与手机同步页同源）：自动态占位 + enabled 服务 + 钉定项兜底（被下线也保留一项显示）。
+      // 兜底项名字必须用钉定服务自己的名字（routeNextLabel）——旧写法传 nextLabel，钉定未生效时会显示成实际切向的别家服务名
+      sel.innerHTML = routeSelectHtml(view.services || [], autoNextOpt, routeNext, ar.routeNextLabel || routeNext)
       sel.value = routeNext || ''
       // 钉定未生效（目标不可用/与主候选相同，真实下一跳 ≠ 钉定项）：在钉定项上如实标注，
       // 避免「显示钉了 A、实际切了 B」的误读；文案中性——不区分「不可用」与「与主服务相同」两种原因

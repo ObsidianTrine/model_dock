@@ -683,6 +683,8 @@ export interface AutoRouteInfo {
   nextLabel: string | null
   /** 「下一个切换」槽人工钉定（null=自动态） */
   routeNext: string | null
+  /** 钉定服务自己的名字（下拉钉定项兜底显示用；≠ nextLabel——钉定未生效时 next 是实际切向的别家服务） */
+  routeNextLabel: string | null
   /** 自动态的下一个切换（「自动 · B」的 B）= 不含「下一个切换」钉定、但保留「当前」钉定/窗口/链尾兜底的下一跳 */
   autoNext: string | null
   autoNextLabel: string | null
@@ -730,6 +732,7 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
     autoPrimary: rs.autoPrimary,
     autoPrimaryLabel: nameOf(rs.autoPrimary),
     routeNext,
+    routeNextLabel: nameOf(routeNext),
     next: rs.next,
     nextLabel: nameOf(rs.next),
     nextPinnedSkipped: routeNext != null && rs.next !== routeNext,

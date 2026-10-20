@@ -3725,10 +3725,11 @@ describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 
   it('nextPinnedSkipped：钉定「下一个切换」到下线服务 → 标注未生效且 next 回落可用服务；正常钉定 → false', () => {
     const rt = mkRt({ auto_failover: true, route_next: 'pb' })
     rt.config.providers.pc = { ...pa, name: 'C', key_ref: 'file:c' }
-    expect(autoRouteInfo(rt)).toMatchObject({ routeNext: 'pb', next: 'pb', nextPinnedSkipped: false })
+    expect(autoRouteInfo(rt)).toMatchObject({ routeNext: 'pb', routeNextLabel: 'B', next: 'pb', nextPinnedSkipped: false })
     ;(rt.config.providers.pb as { enabled?: boolean }).enabled = false
     const ar = autoRouteInfo(rt)
-    expect(ar).toMatchObject({ routeNext: 'pb', next: 'pc', nextLabel: 'C', nextPinnedSkipped: true })
+    // nextLabel 已是实际切向的别家服务，钉定项兜底显示必须用 routeNextLabel（钉定服务自己的名字）
+    expect(ar).toMatchObject({ routeNext: 'pb', routeNextLabel: 'B', next: 'pc', nextLabel: 'C', nextPinnedSkipped: true })
   })
 
   it('nextPinnedSkipped：钉定目标 = 当前主服务 → 钉定必然未生效（主服务自身失败无处可切）', () => {
