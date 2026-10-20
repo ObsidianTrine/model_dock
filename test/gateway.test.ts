@@ -12,7 +12,7 @@ import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import type { Config } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
 import { getSecret } from '../src/config/secrets.js'
-import { configPath, gatewayStatePath, holidaysCachePath, logsDir } from '../src/util/paths.js'
+import { configPath, displayPath, gatewayStatePath, holidaysCachePath, logsDir } from '../src/util/paths.js'
 import { parse as tomlParse } from 'smol-toml'
 import { findPreset, presetModels } from '../src/presets/data.js'
 
@@ -449,8 +449,9 @@ describe('锁屏重登（设备记忆）', () => {
       expect(html).toContain('自动 · 无备用服务')
       expect(html).not.toContain('modeldock ui</code>')
       // gateway.json 路径按实例实际 home 注入（fakeHome 沙箱下不是 ~/.modeldock），占位符不得残留。
-      // 期望值必须走 path.join 与服务端同构：Windows 注入的是反斜杠路径，模板串硬拼 '/' 会在 CI 失配
-      expect(html).toContain(path.join(process.env.MODELRDOCK_FAKE_HOME ?? '', '.modeldock', 'gateway.json'))
+      // 服务端经 displayPath 渲染（真实 home 下的路径缩写为 ~，Windows 的 os.tmpdir 在
+      // C:\Users\<user>\ 下会被缩写）；期望值必须走同一条 displayPath，直接拼 path.join 会在 Windows 失配
+      expect(html).toContain(displayPath(path.join(process.env.MODELRDOCK_FAKE_HOME ?? '', '.modeldock', 'gateway.json')))
       // 弹窗正文里的网址要可点：mList 渲染必须过 linkifyText（改回 esc(l) 会让安装指引里的链接变回纯文本）
       expect(html).toContain('function linkifyText(s)')
       expect(html).toContain('linkifyText(l)')

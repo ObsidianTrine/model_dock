@@ -72,7 +72,11 @@ export async function startForeground(portOverride?: number): Promise<void> {
   if (existing && pidAlive(existing.pid)) {
     if (await healthOk(existing.port)) {
       console.error(t('网关已在运行：127.0.0.1:{port}（pid {pid}）', 'Gateway already running: 127.0.0.1:{port} (pid {pid})', { port: existing.port, pid: existing.pid }))
-      process.exit(1)
+      // 不用 process.exit(1)：stdout 还是管道时（CLI 被脚本/测试捕获输出）强退会在
+      // Windows 上撞 libuv 的 UV_HANDLE_CLOSING 断言（进程以 0xC000013A 崩掉而非退出码 1）；
+      // 置 exitCode 后自然退出，等管道刷完，行为一致且三平台同码
+      process.exitCode = 1
+      return
     }
     await clearGatewayState()
   }
