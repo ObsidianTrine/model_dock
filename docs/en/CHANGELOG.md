@@ -17,6 +17,14 @@ This file records ModelDock's version history. The format follows [Keep a Change
 ### Improvements
 
 - **The "In use" banner is now a status card**: the active service name becomes the page's visual anchor with a breathing green status dot; the route source (schedule window / pinned / failover) turns into a small colored icon chip; "Next failover" gets its own readout on the card's right edge — who is serving and where traffic fails over to are readable at a glance; stacks automatically on narrow screens.
+- **Service switching and the overview feel snappier**: switching a service writes to disk once (previously two full-file writes plus two snapshots); the overview's key checks run in parallel — no more periodic stalls with system keychains.
+- **The CLI responds faster**: command modules now load on demand, so `--help`, `gateway stop`, and friends print noticeably sooner; `status` / `doctor` probe clients in parallel.
+- **Smoother, lighter console and phone page**: the request log no longer rebuilds its whole table every 5 seconds when nothing changed (no flicker, selection and copy undisturbed); the phone page supports conditional caching, pauses polling in background tabs, and refreshes immediately on return; high-frequency reads such as the model catalog are memoized, so steady state no longer rescans the disk.
+- **"Fetch models" stops waiting a full minute after a failure**: when an upstream is unreachable the failure is cached briefly, so retries return immediately; changing the config or the key invalidates the cache right away.
+
+### Fixed
+
+- **MiMo Code attaches with full model metadata**: the models' context limits and image support used to be written in a format MiMo Code could not read, so it saw none of them; they now follow the official schema.
 
 ## [1.2.0] - 2026-10-20
 
