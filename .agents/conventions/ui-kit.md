@@ -6,15 +6,16 @@
 
 ## 1. 令牌（设计令牌）
 
-全站只经 CSS 变量取值，**禁止写死**字号/圆角/颜色/间距/阴影/z-index。主题相关色（bg/card/text/muted/border/accent/ok/warn/err/direct-*、shadow-*）在 `:root`（暗色）与两个 light 分支（`[data-theme="light"]` + `prefers-color-scheme` 媒体查询）**三处同步定义**；新增主题无关令牌只放 `:root`。
+全站只经 CSS 变量取值，**禁止写死**字号/圆角/颜色/间距/阴影/z-index。主题相关色（bg/card/text/muted/border/accent/ok/warn/err/direct-*、*-weak、ok-halo、sheen、shadow-*）在 `:root`（暗色）与两个 light 分支（`[data-theme="light"]` + `prefers-color-scheme` 媒体查询）**三处同步定义**；新增主题无关令牌只放 `:root`。
 
 | 组 | 令牌 |
 |----|------|
-| 字号 | `--fs-xs 12 / --fs-sm 13 / --fs-md 14 / --fs-base 15 / --fs-lg 17 / --fs-xl 18` |
+| 字号 | `--fs-xs 12 / --fs-sm 13 / --fs-md 14 / --fs-base 15 / --fs-lg 17 / --fs-xl 18 / --fs-2xl 22` |
 | 圆角 | `--r-sm 8 / --r-md 10 / --r-lg 14 / --r-full 999` |
 | 间距 | `--sp-1 4 / --sp-2 8 / --sp-3 12 / --sp-4 16 / --sp-5 20 / --sp-6 24` |
 | 控制高度 | `--h-sm 28 / --h-md 34 / --h-lg 40` |
 | 阴影 | `--shadow-sm`（卡内浮起）/ `--shadow-md`（下拉/toast）/ `--shadow-lg`（弹窗） |
+| 状态卡（hero） | `--warn-weak / --neutral-weak`（来源徽弱底）/ `--ok-halo`（绿点呼吸光晕）/ `--sheen`（卡面顶部 1px 高光） |
 | 其他色 | `--star`（默认星标琥珀，主题无关） |
 | 层级 | `--z-sticky 35 / --z-fab 40 / --z-toast 50 / --z-pop 70 / --z-modal 100`（一切弹层=modal，无 60 档） |
 | 其他 | `--scrim`（遮罩）、`--dur .15s`（过渡）、`--mono`（等宽栈） |
@@ -24,6 +25,7 @@
 | 元素 | 字号 |
 |------|------|
 | 正文 / 服务名 / 弹窗标题以下 | 15px（`--fs-base`） |
+| **hero 服务名**（`#inuseBar .iname`，页面主视觉） | **22px（`--fs-2xl`）** |
 | **输入框 / 下拉 / 文本域**（基础层已统一） | **13px（`--fs-sm`）** |
 | 按钮（`.btn`，含弹窗 foot 主按钮） | 14px（`--fs-md`） |
 | 行内小按钮 `.btn.small` / 表格 / 描述 / 字段 label | 13px（`--fs-sm`） |
@@ -53,6 +55,7 @@
 |------|-----------|-----------|
 | 按钮 | `.btn` + `primary`/`small`/`danger`/`ghost-danger`/`direct` | 主操作蓝底；破坏性列表操作用 ghost-danger；独立直连琥珀 |
 | 状态徽标 | `.pill` + `ok/err/warn/dim` | 只读状态；可点击展开面板的加 `#schedToggle` 式 cursor |
+| **Hero 状态卡** | `#inuseBar`（渲染块拼 innerHTML）：`.imain`＞`.iline`(.idot 绿点+.ilive+.ichip 来源徽)＞`.ititle`(.iname+.imodel)［+.inote］＋ `.iside`(.islabel+.isvalue) | routeState 唯一口径的桌面展示点（2026-10 方案 A 评审落地）。**只读展示，禁止往里塞可交互控件**；来源徽 `.ichip`+`ok/warn/dim`（绿=定时窗口生效、琥珀=故障切换/已降级、灰=人工钉定/默认路由），徽内图标走 `iconInline`（clock/pin/zap/alert-triangle）；降级=warn 徽+`.inote` 说明行；无备用时 `.isvalue` 加 `warn`；绿点动画尊重 `prefers-reduced-motion`；窄屏 ≤600px `.iside` 独占一行左对齐 |
 | **状态行开关** | JS `pillSwitch(rootId, opt)` + HTML 骨架 `.pill.sw > button.psw-main(role=switch) [+ button.caret]` | **路由区/工具栏的状态开关一律用它**（视觉=原 pill）。形态由 `caret` 决定：A=无 caret（自动路由/开机自启/临时故障切备用）、B=带 caret（定时/手机远程，**caret 仅开启时显示**、点击只开合面板不停服务）。选项：`label`（**接线在模块顶层只执行一次，切语言的 pill 必须传 `function(){ return t(...) }` 惰性求值**，字符串会把 t() 固化在加载时语言）/ `on` / `text(on)`（自定义状态文案，如定时的「07:00–23:59 / N 个时段 / 已停用」）/ `okOn(on)`（何时算绿色生效态）/ `panel()` / `onToggle(next, api)` / `onExpand(open)` / `tip`；返回 `set({on,busy,open})` / `isOn()` / `isOpen()` / `setTip()` / `render()` |
 | 开关（表单用） | `.switch`（label.switch > input + span.track）/ `.tswitch`（带文字） | **表单内的参数开关**用它（当前 ui.ts 暂无使用点，kit 保留）；onchange 提交，失败回弹 `checked`，请求期间 `disabled` 防连点 |
 | 分段控件 | `.seg`（容器）+ `.on`；通宽 `.seg.grow` | 互斥选项卡/语言切换；**选中=蓝底白字**；JS 切换只改按钮 `className = 'on'/' '` |
