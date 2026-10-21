@@ -35,7 +35,10 @@ function deadPid(): number {
 }
 
 function childEnv(sandbox: string): NodeJS.ProcessEnv {
-  const env = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox, MODELRDOCK_LANG: 'zh' }
+  // 关更新检查：首启后的异步查更新会把真实 started_at 连同 update_check 写回 gateway.json，
+  // 网络往返的落地时间可能闯进篡改用例的窗口（真实值覆盖篡改值 → 二次 start 走 CLI 层
+  // 「已在运行」优雅分支 exit 0，纵深断言拿到 0）——慢速 arm64 runner 上实测翻车
+  const env = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox, MODELRDOCK_LANG: 'zh', MODELRDOCK_DISABLE_UPDATE_CHECK: '1' }
   delete env.MODELRDOCK_HOME
   return env
 }
