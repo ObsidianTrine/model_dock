@@ -1833,6 +1833,46 @@ describe('自动路由 Phase1', () => {
     expect((r as { ok: true; ordered: { providerId: string }[] }).ordered[0].providerId).toBe('C')
   })
 
+  it('pickTarget：客户端钉住压过定时窗口与全局当前槽（钉住不受全局「正在使用」控制）', () => {
+    const { rt } = makeRuntime()
+    ;(rt.config.gateway as { auto_route_provider?: string }).auto_route_provider = 'B'
+    ;(rt.config.gateway as { schedule?: object }).schedule = {
+      enabled: true,
+      windows: [{ start: '00:00', end: '23:59', target: 'C' }],
+    }
+    const base = { ...baseOf(rt), viaHarnessPin: true }
+    const r = pickTarget(rt, base, rt.config.profiles.demo.fallback!)
+    const first = (r as { ok: true; ordered: { providerId: string }[]; primary: { source: string } }).ordered[0]
+    expect(first.providerId).toBe('A') // 钉住服务 A：当前槽(B)与窗口(C)都不接管
+    expect((r as { ok: true; primary: { source: string } }).primary.source).toBe('pinned')
+  })
+
+  it('pickTarget：客户端钉住服务熔断时顺延到当前槽/窗口，不打死在坏服务上', () => {
+    const { rt } = makeRuntime()
+    ;(rt.config.gateway as { auto_route_provider?: string }).auto_route_provider = 'B'
+    ;(rt.config.gateway as { schedule?: object }).schedule = {
+      enabled: true,
+      windows: [{ start: '00:00', end: '23:59', target: 'C' }],
+    }
+    for (let i = 0; i < 3; i++) recordOutcome(rt, 'A', { ok: false, cls: 'connect' })
+    const base = { ...baseOf(rt), viaHarnessPin: true }
+    const r = pickTarget(rt, base, rt.config.profiles.demo.fallback!)
+    expect((r as { ok: true; ordered: { providerId: string }[] }).ordered[0].providerId).toBe('B') // 钉住熔断 → 顺延当前槽
+  })
+
+  it('pickTarget：客户端钉住的服务豁免 avoid 窗口剔除（时段规则不甩钉住客户端）', () => {
+    const { rt } = makeRuntime()
+    ;(rt.config.gateway as { schedule?: object }).schedule = {
+      enabled: true,
+      windows: [{ start: '00:00', end: '23:59', target: 'A', mode: 'avoid' }],
+    }
+    const pinned = pickTarget(rt, { ...baseOf(rt), viaHarnessPin: true }, rt.config.profiles.demo.fallback!)
+    expect((pinned as { ok: true; ordered: { providerId: string }[] }).ordered[0].providerId).toBe('A')
+    // 对照：跟随全局的基准仍按 avoid 剔除 A（C priority 3 排 B 前）
+    const follow = pickTarget(rt, baseOf(rt), rt.config.profiles.demo.fallback!)
+    expect((follow as { ok: true; ordered: { providerId: string }[] }).ordered.map((c) => c.providerId)).toEqual(['C', 'B'])
+  })
+
   it('pickTarget：「下一个切换」人工钉定插到备用链首位；ignoreManual 忽略两处钉定', () => {
     const { rt } = makeRuntime()
     ;(rt.config.gateway as { auto_route_provider?: string }).auto_route_provider = 'C' // 主服务钉定
@@ -3138,6 +3178,64 @@ describe('管理面安全（2026-09 审查回归）', () => {
     } finally {
       server.close()
       up.close()
+      h.restore()
+    }
+  })
+
+  it('钉定 route + prefer 窗口同时命中：请求走钉住服务，窗口不接管（2026-10-21 mimo-desktop 报障回归）', async () => {
+    const h = fakeHome()
+    const upPin = await startMockUpstream()
+    const upWin = await startMockUpstream()
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'winp',
+      security: { store: 'file' },
+      providers: {
+        pinp: {
+          name: 'pin',
+          base_url: `http://127.0.0.1:${upPin.port}`,
+          protocol: 'anthropic',
+          auth_style: 'bearer',
+          key_ref: 'sk-pin',
+          models: { 'pin-model': { source: 'manual', context_window: 1000, max_output: 100 } },
+        },
+        winp: {
+          name: 'win',
+          base_url: `http://127.0.0.1:${upWin.port}`,
+          protocol: 'anthropic',
+          auth_style: 'bearer',
+          key_ref: 'sk-win',
+          models: { 'win-model': { source: 'manual', context_window: 1000, max_output: 100 } },
+        },
+      },
+      profiles: {
+        pinp: { provider: 'pinp', default_model: 'pin-model' },
+        winp: { provider: 'winp', default_model: 'win-model' },
+      },
+      gateway: {
+        auto_failover: true,
+        schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'winp' }] },
+      },
+      harness: { 'mimo-desktop': { mode: 'gateway', route: 'pinp', token: 'mdk_mimo_pinned' } },
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const res = await fetch(`http://127.0.0.1:${gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer mdk_mimo_pinned' },
+        body: JSON.stringify({ messages: [] }),
+      })
+      expect(res.status).toBe(200)
+      expect(upPin.requests).toHaveLength(1)
+      expect(JSON.parse(upPin.requests[0]!.body!).model).toBe('pin-model')
+      expect(upWin.requests).toHaveLength(0) // 窗口目标服务零请求
+    } finally {
+      server.close()
+      upPin.close()
+      upWin.close()
       h.restore()
     }
   })
