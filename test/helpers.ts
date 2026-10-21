@@ -3,6 +3,14 @@ import os from 'node:os'
 import path from 'node:path'
 import { closeAppendStreams } from '../src/util/fsx.js'
 
+// os.tmpdir() 在部分 Windows 机器返回 8.3 短名路径（如 ZHOUQI~1）：网关热加载 / 同步引擎的
+// fs.watch(modeldockDir) 在该目录收到文件事件时踩 libuv fs-event 断言（assert
+// !_wcsnicmp(filename, dir, dirlen)），整个进程原生崩溃（0xC0000409 fast-fail）——被测网关
+// 子进程与测试 fork 都会中招（2026-10-21 本机实测：daemon-lifecycle 篡改纵深用例 exit 0xC0000409、
+// synctarget SyncLoop worker 死亡；CI temp 无短名所以不现形）。native realpath 走
+// GetFinalPathNameByHandle 把短名展开为长路径；普通 realpathSync 不展开。测试沙箱一律用它打底。
+const TMP = fs.realpathSync.native(os.tmpdir())
+
 /**
  * 清理历史测试进程崩溃/被强杀时留下的 modeldock-test-* 残骸（restore 未执行）。
  * 只删超过 24 小时的：新残骸可能是并发测试进程的活跃目录，绝不能碰。
@@ -12,9 +20,9 @@ import { closeAppendStreams } from '../src/util/fsx.js'
 function sweepStaleFakeHomes(): void {
   try {
     const cutoff = Date.now() - 24 * 3600_000
-    for (const e of fs.readdirSync(os.tmpdir())) {
+    for (const e of fs.readdirSync(TMP)) {
       if (!e.startsWith('modeldock-test-')) continue
-      const p = path.join(os.tmpdir(), e)
+      const p = path.join(TMP, e)
       try {
         if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true })
       } catch {
@@ -55,7 +63,7 @@ function rmRfWithRetry(p: string): void {
 /** 临时假 HOME（隔离真实机器配置）；用完必须 restore */
 export function fakeHome(): { home: string; restore: () => void } {
   sweepStaleFakeHomes()
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-test-'))
+  const home = fs.mkdtempSync(path.join(TMP, 'modeldock-test-'))
   const prevFake = process.env.MODELRDOCK_FAKE_HOME
   const prevMdHome = process.env.MODELRDOCK_HOME
   process.env.MODELRDOCK_FAKE_HOME = home

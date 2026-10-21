@@ -14,6 +14,10 @@ function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-tray-'))
 }
 
+// 托盘二进制文件名随平台分支（win=ModelDockTray.exe，见 build-sea.mjs 产物与 tray.ts 查找逻辑）；
+// 测试里写死无后缀名在 win32 下永远找不到——4 个用例 CI Windows 全红即此
+const trayName = `ModelDockTray${process.platform === 'win32' ? '.exe' : ''}`
+
 interface SpawnCall {
   file: string
   args: string[]
@@ -49,8 +53,8 @@ describe('trayBinaryPath', () => {
     const dir = tmpDir()
     const exe = path.join(dir, 'modeldock')
     fs.writeFileSync(exe, '')
-    fs.writeFileSync(path.join(dir, 'ModelDockTray'), '')
-    expect(trayBinaryPath(exe)).toBe(path.join(dir, 'ModelDockTray'))
+    fs.writeFileSync(path.join(dir, trayName), '')
+    expect(trayBinaryPath(exe)).toBe(path.join(dir, trayName))
   })
 
   it('旁无托盘二进制时返回 null（npm/dev 形态）', () => {
@@ -87,11 +91,11 @@ describe('spawnTrayIfPresent', () => {
     const dir = tmpDir()
     const exe = path.join(dir, 'modeldock')
     fs.writeFileSync(exe, '')
-    fs.writeFileSync(path.join(dir, 'ModelDockTray'), '')
+    fs.writeFileSync(path.join(dir, trayName), '')
     const calls: SpawnCall[] = []
     spawnTrayIfPresent({ execPath: exe, spawnFn: fakeSpawn(calls) })
     expect(calls).toHaveLength(1)
-    expect(calls[0].file).toBe(path.join(dir, 'ModelDockTray'))
+    expect(calls[0].file).toBe(path.join(dir, trayName))
     expect(calls[0].args).toEqual([])
     expect(calls[0].opts.detached).toBe(true)
     expect(calls[0].opts.stdio).toBe('ignore')
@@ -106,7 +110,7 @@ describe('spawnTrayWhenGatewayReady', () => {
     const dir = tmpDir()
     const exe = path.join(dir, 'modeldock')
     fs.writeFileSync(exe, '')
-    fs.writeFileSync(path.join(dir, 'ModelDockTray'), '')
+    fs.writeFileSync(path.join(dir, trayName), '')
     const calls: SpawnCall[] = []
     await spawnTrayWhenGatewayReady({
       execPath: exe,
@@ -121,7 +125,7 @@ describe('spawnTrayWhenGatewayReady', () => {
     const dir = tmpDir()
     const exe = path.join(dir, 'modeldock')
     fs.writeFileSync(exe, '')
-    fs.writeFileSync(path.join(dir, 'ModelDockTray'), '')
+    fs.writeFileSync(path.join(dir, trayName), '')
     const calls: SpawnCall[] = []
     let n = 0
     await spawnTrayWhenGatewayReady({
