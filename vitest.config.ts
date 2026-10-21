@@ -9,7 +9,10 @@ const watchdog = process.env.VITEST_WATCHDOG === '1'
 
 export default defineConfig({
   test: {
-    include: ['test/**/*.test.ts'],
+    // 产品套件 = test/ 顶层。agent 工作流套件（test/orchestrator/**，测 .agents/ 编排器与
+    // 守卫 hook）拆到 vitest.workflow.config.ts，经 `npm run test:workflow` 单独运行——
+    // 产品门禁不再为其支付 ~40s（方案 A）；池策略等防死锁设置两处必须保持同构。
+    include: ['test/*.test.ts'],
     testTimeout: 20000,
     env: {
       NODE_NO_WARNINGS: '1'

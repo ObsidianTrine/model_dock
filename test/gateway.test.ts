@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit } from '../src/gateway/server.js'
-import { clientProtocolFromPath, endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
+import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import type { Config } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
@@ -299,16 +299,13 @@ describe('autostart 与 overview 缓存', () => {
     expect(OVERVIEW_TTL_MS).toBeGreaterThan(5_000)
   })
 
-  it('TTL 内二次 GET /overview 命中缓存：响应体完全一致', async () => {
+  it('TTL 缓存不互借语言：缓存命中后请求级语言切换仍拿到完整响应（命中逐字节一致性归 console-cache 套件）', async () => {
     const t = await setup()
     try {
       const H = { 'x-modeldock-admin': 'admin-token-x' }
       const url = `http://127.0.0.1:${t.gwPort}/_modeldock/overview`
-      // 两次连续请求间隔远小于 6s TTL：第二次应命中缓存，响应体逐字节一致（且仅重建一次）
       const b1 = await (await fetch(url, { headers: H })).text()
-      const b2 = await (await fetch(url, { headers: H })).text()
       expect(JSON.parse(b1).ok).toBe(true)
-      expect(b2).toBe(b1)
       // 语言不同不互借缓存：请求级语言不一致返回的响应也应各自完整（非缓存语义断言，仅防回归）
       const en = await (await fetch(url, { headers: { ...H, 'x-modeldock-lang': 'en' } })).json()
       expect(en.ok).toBe(true)
@@ -3446,15 +3443,7 @@ describe('管理面安全（2026-09 审查回归）', () => {
     }
   })
 
-  it('clientProtocolFromPath：embeddings 归 openai，未知路径回退 provider 协议', () => {
-    expect(clientProtocolFromPath('/v1/embeddings', 'anthropic')).toBe('openai')
-    expect(clientProtocolFromPath('/v1/chat/completions', 'anthropic')).toBe('openai')
-    expect(clientProtocolFromPath('/v1/responses', 'anthropic')).toBe('responses')
-    expect(clientProtocolFromPath('/v1/messages', 'anthropic')).toBe('anthropic')
-    // 未知路径（/v1/models 等非对话端点）回退 provider 自身协议，而不是硬编码 anthropic
-    expect(clientProtocolFromPath('/v1/models', 'openai')).toBe('openai')
-    expect(clientProtocolFromPath('/v1/models', 'anthropic')).toBe('anthropic')
-  })
+  // clientProtocolFromPath 断言归 relay.test.ts（曾在此复读其子集，2026-10-21 去重删除）。
 
   it('endpointRisks：公网 https 无风险；公网明文 http 与内网/本机地址给提示', () => {
     // 正常公网 https：无风险提示
@@ -3616,29 +3605,8 @@ describe('displayRouteProvider：烤模型客户端的展示路由（人工当�
     expect(displayRouteProvider(rt)).toBe('pa')
   })
 
-  it('prefer 窗口接管（仅 auto_failover 开启时参与）', () => {
-    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'pb' }] } })
-    expect(displayRouteProvider(rt)).toBe('pb')
-    // 自动故障切换关闭 → 窗口不参与
-    rt.config.gateway!.auto_failover = false
-    expect(displayRouteProvider(rt)).toBe('pa')
-    // schedule 停用同理
-    rt.config.gateway!.auto_failover = true
-    rt.config.gateway!.schedule = { enabled: false, windows: [{ start: '00:00', end: '23:59', target: 'pb' }] }
-    expect(displayRouteProvider(rt)).toBe('pa')
-  })
-
-  it('人工「当前」优先于窗口；窗口 target 带模型部分时按服务粒度解析', () => {
-    const rt = mkRt({ auto_failover: true, auto_route_provider: 'pa', schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'pb:b-model' }] } })
-    expect(displayRouteProvider(rt)).toBe('pa')
-    delete rt.config.gateway!.auto_route_provider
-    expect(displayRouteProvider(rt)).toBe('pb')
-  })
-
-  it('窗口目标服务不存在：回落 active_profile', () => {
-    const rt = mkRt({ auto_failover: true, schedule: { enabled: true, windows: [{ start: '00:00', end: '23:59', target: 'ghost' }] } })
-    expect(displayRouteProvider(rt)).toBe('pa')
-  })
+  // 窗口接管 / 人工钉定优先 / 窗口目标不存在回落三条规则归 routeState describe
+  //（断言更全：带 source/suppressedBy 元数据；曾在此双写，2026-10-21 去重删除）。
 })
 
 describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 默认，模型随目标服务）', () => {

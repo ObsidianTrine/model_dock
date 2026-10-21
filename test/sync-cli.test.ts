@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
-import { cmdSyncPause, cmdSyncResume, cmdSyncSetup, cmdSyncStatus, passphraseHint } from '../src/cli/sync.js'
+import { cmdSyncPause, cmdSyncResume, cmdSyncSetup, cmdSyncStatus } from '../src/cli/sync.js'
 import { readSyncState, updateSyncState } from '../src/sync/state.js'
 
 // sync CLI 壳：status/pause/resume 全路径进程内可测（只读写 sync.json，无网络）；
@@ -130,11 +130,5 @@ describe('cmdSyncSetup 参数校验', () => {
   })
 })
 
-describe('passphraseHint 边界（等价类）', () => {
-  it('短于 8 位或纯数字 → 弱口令提示；8 位混合 → null', () => {
-    expect(passphraseHint('a1')).not.toBeNull()
-    expect(passphraseHint('12345678')).not.toBeNull() // 够长但纯数字
-    expect(passphraseHint('a1b2c3d4')).toBeNull()
-    expect(passphraseHint('abcd123!@#')).toBeNull()
-  })
-})
+// passphraseHint 等价类归 passphrase-hint.test.ts（曾在此双写，2026-10-21 去重删除；独有
+// 的 'abcd123!@#' 用例已并入）。

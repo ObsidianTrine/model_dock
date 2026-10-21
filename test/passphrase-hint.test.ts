@@ -7,6 +7,7 @@ describe('passphraseHint（同步口令强度提示，非阻断）', () => {
     expect(passphraseHint('abc123')).toMatch(/弱|weak/i)
     expect(passphraseHint('12345678')).toMatch(/弱|weak/i) // 长度够但纯数字
     expect(passphraseHint('abc12345')).toBeNull()
+    expect(passphraseHint('abcd123!@#')).toBeNull() // 8 位含符号（原 sync-cli 用例并入）
     expect(passphraseHint('')).toMatch(/弱|weak/i)
   })
 })
