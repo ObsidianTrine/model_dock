@@ -5,7 +5,9 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.2.1] - 2026-10-21
+
+One-shot doctor fixes and machine-readable output, the always-visible tray version, the "In use" status card redesign, plus two rounds of performance work.
 
 ### Added
 
@@ -249,6 +251,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0
 [1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.3...v1.1.4

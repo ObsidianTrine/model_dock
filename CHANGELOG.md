@@ -5,7 +5,9 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.2.1] - 2026-10-21
+
+体检一键修复与机器可读输出、托盘版本常驻、「正在使用」状态卡重设计，外加两轮性能批修。
 
 ### 新增
 
@@ -249,6 +251,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0
 [1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.3...v1.1.4
