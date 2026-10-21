@@ -20,16 +20,18 @@ export const UI_HTML = `<!doctype html>
 :root{
   --bg:#0f1115; --card:#171a21; --text:#e5e7eb; --muted:#9ca3af; --border:#2a2f3a;
   --accent:#3b82f6; --accent-weak:#16233c; --ok:#22c55e; --ok-weak:#10241a; --warn:#d97706; --err:#ef4444;
+  --warn-weak:rgba(217,119,6,.16); --neutral-weak:rgba(255,255,255,.07); --ok-halo:rgba(34,197,94,.4);
   --direct-bg:rgba(217,119,6,.16); --direct-border:rgba(217,119,6,.55); --direct-text:#f5b04c;
   --direct-bg-h:rgba(217,119,6,.28); --direct-border-h:rgba(217,119,6,.8); --direct-text-h:#ffc06a;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  /* 设计令牌：字号 6 档 / 圆角 3 档 / 星标琥珀，全站只经变量取值（控件图标一律走 SVG 图标集 icon()，句子文案里的 ✓⚠ 除外）；
-   * 控件字级=sm 13、按钮=md 14、徽标/注释=xs 12、正文=base 15（见 .agents/conventions/ui-kit.md） */
-  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-base:15px; --fs-lg:17px; --fs-xl:18px;
+  /* 设计令牌：字号 7 档 / 圆角 3 档 / 星标琥珀，全站只经变量取值（控件图标一律走 SVG 图标集 icon()，句子文案里的 ✓⚠ 除外）；
+   * 控件字级=sm 13、按钮=md 14、徽标/注释=xs 12、正文=base 15、hero 服务名=2xl 22（见 .agents/conventions/ui-kit.md） */
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-base:15px; --fs-lg:17px; --fs-xl:18px; --fs-2xl:22px;
   --r-sm:8px; --r-md:10px; --r-lg:14px; --r-full:999px;
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
   --h-sm:28px; --h-md:34px; --h-lg:40px;
   --shadow-sm:0 1px 2px rgba(0,0,0,.25); --shadow-md:0 4px 14px rgba(0,0,0,.2); --shadow-lg:0 18px 50px rgba(0,0,0,.35);
+  --sheen:rgba(255,255,255,.05);
   --star:#f5a623;
   --scrim:rgba(0,0,0,.5);
   --z-sticky:35; --z-fab:40; --z-toast:50; --z-pop:70; --z-modal:100;
@@ -39,18 +41,22 @@ export const UI_HTML = `<!doctype html>
 :root[data-theme="light"]{
   --bg:#f5f6f8; --card:#ffffff; --text:#1a1f2e; --muted:#6b7280; --border:#e5e7eb;
   --accent:#2563eb; --accent-weak:#eff6ff; --ok:#16a34a; --ok-weak:#f0fdf4; --err:#dc2626;
+  --warn-weak:rgba(217,119,6,.12); --neutral-weak:rgba(26,31,46,.06); --ok-halo:rgba(22,163,74,.35);
   --direct-bg:rgba(217,119,6,.14); --direct-border:rgba(217,119,6,.5); --direct-text:#b45309;
   --direct-bg-h:rgba(217,119,6,.24); --direct-border-h:rgba(217,119,6,.75); --direct-text-h:#b45309;
   --shadow-sm:0 1px 2px rgba(0,0,0,.08); --shadow-md:0 4px 14px rgba(0,0,0,.1); --shadow-lg:0 18px 50px rgba(0,0,0,.18);
+  --sheen:rgba(255,255,255,.65);
   color-scheme:light;
 }
 @media (prefers-color-scheme: light){
   :root:not([data-theme="dark"]):not([data-theme="light"]){
     --bg:#f5f6f8; --card:#ffffff; --text:#1a1f2e; --muted:#6b7280; --border:#e5e7eb;
     --accent:#2563eb; --accent-weak:#eff6ff; --ok:#16a34a; --ok-weak:#f0fdf4; --err:#dc2626;
+  --warn-weak:rgba(217,119,6,.12); --neutral-weak:rgba(26,31,46,.06); --ok-halo:rgba(22,163,74,.35);
     --direct-bg:rgba(217,119,6,.14); --direct-border:rgba(217,119,6,.5); --direct-text:#b45309;
     --direct-bg-h:rgba(217,119,6,.24); --direct-border-h:rgba(217,119,6,.75); --direct-text-h:#b45309;
     --shadow-sm:0 1px 2px rgba(0,0,0,.08); --shadow-md:0 4px 14px rgba(0,0,0,.1); --shadow-lg:0 18px 50px rgba(0,0,0,.18);
+  --sheen:rgba(255,255,255,.65);
     color-scheme:light;
   }
 }
@@ -388,18 +394,31 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #routebox .rrow2{display:flex;align-items:center;gap:6px 16px;flex-wrap:wrap;padding:9px 12px;border-top:1px dashed var(--border)}
 #routebox.solo .rrow2{border-top:none}
 #routebox .rrow1 label{font-size:var(--fs-sm);color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer}
-/* 「正在使用」状态横栏：routeState 唯一口径的桌面展示点（服务卡徽标/手机页/模型列表同源）。
-   独立于 routebox 配置卡放在「我的服务」卡之前——实际生效与配置意图分开呈现；
-   弱底色 + 左侧主题色竖条（与使用中服务卡同语言），一眼锁定 */
-#inuseBar{display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap;margin:0 0 16px;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--accent-weak);box-shadow:inset 3px 0 0 var(--accent)}
-#inuseBar .ilabel{font-size:var(--fs-sm);color:var(--muted)}
-#inuseBar .iname{font-size:var(--fs-base);font-weight:600;color:var(--accent)}
+/* 「正在使用」状态横栏（hero 状态卡）：routeState 唯一口径的桌面展示点（服务卡徽标/手机页/模型列表同源）。
+   独立于 routebox 配置卡放在「我的服务」卡之前——实际生效与配置意图分开呈现。
+   中性卡面 + 绿色呼吸点（使用中=绿，kit 语义）+ 大字服务名（--fs-2xl），来源收进状态行小徽
+   （绿=定时窗口生效、琥珀=故障切换/已降级、灰=人工钉定/默认路由），「下一个切换」成右缘读数 */
+#inuseBar{display:flex;align-items:stretch;justify-content:space-between;gap:16px 24px;flex-wrap:wrap;margin:0 0 16px;padding:16px 20px;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-sm),inset 0 1px 0 var(--sheen)}
+#inuseBar .imain{flex:1 1 300px;min-width:240px}
+#inuseBar .iline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+#inuseBar .idot{flex:0 0 auto;width:8px;height:8px;border-radius:var(--r-full);background:var(--ok);animation:inuse-pulse 2.6s ease-out infinite}
+@keyframes inuse-pulse{0%{box-shadow:0 0 0 0 var(--ok-halo)}75%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){#inuseBar .idot{animation:none}}
+#inuseBar .ilive{font-size:var(--fs-xs);font-weight:500;letter-spacing:.02em;color:var(--ok)}
+#inuseBar .ichip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:var(--r-full);font-size:var(--fs-xs);line-height:1;white-space:nowrap}
+#inuseBar .ichip svg{width:12px;height:12px}
+#inuseBar .ichip.ok{background:var(--ok-weak);color:var(--ok)}
+#inuseBar .ichip.warn{background:var(--warn-weak);color:var(--warn)}
+#inuseBar .ichip.dim{background:var(--neutral-weak);color:var(--muted)}
+#inuseBar .inum{font-family:var(--mono)}
+#inuseBar .ititle{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+#inuseBar .iname{font-size:var(--fs-2xl);font-weight:600;letter-spacing:-.015em;line-height:1.25;color:var(--text)}
 #inuseBar .imodel{font-family:var(--mono);font-size:var(--fs-sm);color:var(--muted)}
-#inuseBar .src{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px;font-size:var(--fs-xs)}
-#inuseBar .src.on{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
-#inuseBar .itime{font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
-#inuseBar .ihint{font-size:var(--fs-sm);color:var(--warn)}
-#inuseBar .inext{font-size:var(--fs-sm);color:var(--muted)}
+#inuseBar .inote{font-size:var(--fs-xs);color:var(--warn);margin-top:6px}
+#inuseBar .iside{flex:0 0 auto;display:flex;flex-direction:column;justify-content:center;text-align:right;border-left:1px solid var(--border);padding-left:20px}
+#inuseBar .islabel{font-size:var(--fs-xs);color:var(--muted);margin-bottom:3px}
+#inuseBar .isvalue{font-family:var(--mono);font-size:var(--fs-sm);color:var(--text)}
+#inuseBar .isvalue.warn{color:var(--warn)}
 #pkgPill{margin-left:auto}
 #lanPanel{margin:-6px 0 12px;padding:10px 12px;border:1px dashed var(--border);border-radius:var(--r-md)}
 #lanPanel .lanflex{display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
@@ -516,6 +535,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
      1fr 列需最小宽度，否则被压成逐字竖排而不是触发滚动 */
   #schedPanel{overflow-x:auto}
   #schedPanel .shead,#schedPanel .srow{min-width:654px}
+  /* hero 状态卡窄屏：读数区独占一行改左对齐，发丝线换成上虚线（与 routebox 行分隔同语言） */
+  #inuseBar .iside{width:100%;border-left:none;padding-left:0;text-align:left;border-top:1px dashed var(--border);padding-top:10px}
 }
 @media (max-width:480px){
   /* 窄屏：固定列收窄（96→72px）但 ID 列仍保 110px 下限，整表横向滚动（滚动容器已在上方统一给） */
@@ -740,6 +761,11 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
     link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
     'arrow-up-right': '<path d="M7 17L17 7M8 7h9v9"/>',
+    // 路由来源徽标：时钟=定时窗口生效、图钉=人工钉定、闪电=故障切换、三角叹号=已降级
+    clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    pin: '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/>',
+    zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    'alert-triangle': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
   }
   function icon(name, size) {
     var w = size || 14
@@ -1706,28 +1732,46 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
       if (ar && ar.source === 'pinned') tips.push(t('已人工钉定主服务，定时窗口暂停；「当前」选回「自动」即恢复', 'Primary is pinned manually; schedule windows are paused. Pick "Auto" in Current to resume'))
       schedApi.setTip(tips.length ? tips.join(t('；', '; ')) : t('按时间段自动切换主服务/模型；主体开关=启用/停用，右侧箭头=编辑时段', 'Switch primary service/model by time of day; body = enable/disable, arrow = edit windows'))
     }
-    // 统一「正在使用」状态横栏：消费服务端 routeState 的唯一口径（服务卡徽标/手机页/模型列表同源）
+    // 统一「正在使用」状态横栏（hero 状态卡）：消费服务端 routeState 的唯一口径（服务卡徽标/手机页/模型列表同源）。
+    // 左主区=状态行（绿点+使用中+来源徽）与大字服务名，右读数=下一个切换；来源徽语义：绿=定时窗口生效、
+    // 琥珀=故障切换/已降级、灰=人工钉定/默认路由（kit 色彩语义）
     if (inuseBar) {
-      var effSrc = ar && ar.source === 'pinned' ? t('人工钉定', 'Pinned')
-        : ar && ar.source === 'schedule' ? t('定时窗口', 'Schedule window')
-        : ar && ar.source === 'failover' ? t('故障切换', 'Failover')
-        : t('默认路由', 'Default route')
       if (ar && ar.providerLabel) {
-        var effHtml = '<span class="ilabel">' + t('正在使用：', 'In use: ') + '</span>' +
-          '<b class="iname">' + esc(ar.providerLabel) + '</b>' +
-          (ar.model ? ' <span class="imodel">' + esc(ar.model) + '</span>' : '') +
-          ' <span class="src' + (ar.source === 'schedule' ? ' on' : '') + '">' + esc(effSrc) + '</span>'
-        if (ar.source === 'schedule' && ar.schedule && ar.schedule.active) {
-          effHtml += ' <span class="itime">' + esc(ar.schedule.active.start + '–' + ar.schedule.active.end) + '</span>'
-        } else if (ar.degradedFrom === 'pinned') {
-          effHtml += ' <span class="ihint">' + t('（钉定的服务不可用，已降级）', '(pinned service unavailable; degraded)') + '</span>'
-        } else if (ar.degradedFrom === 'schedule') {
-          effHtml += ' <span class="ihint">' + t('（定时目标不可用，已降级）', '(schedule target unavailable; degraded)') + '</span>'
+        var degradedWhy = ar.degradedFrom === 'pinned' ? t('钉定的服务不可用，已自动切到备用', 'Pinned service unavailable; failed over automatically')
+          : ar.degradedFrom === 'schedule' ? t('定时目标不可用，已自动切到备用', 'Schedule target unavailable; failed over automatically')
+          : ''
+        var chipCls = 'ichip'
+        var chipHtml = ''
+        if (degradedWhy) {
+          chipCls += ' warn'
+          chipHtml = iconInline('alert-triangle', 12) + '<span>' + t('已降级', 'Degraded') + '</span>'
+        } else if (ar.source === 'schedule') {
+          chipCls += ' ok'
+          chipHtml = iconInline('clock', 12) + '<span>' + t('定时窗口', 'Schedule window') + '</span>' +
+            (ar.schedule && ar.schedule.active ? '<span class="inum">' + esc(ar.schedule.active.start + '–' + ar.schedule.active.end) + '</span>' : '')
+        } else if (ar.source === 'pinned') {
+          chipCls += ' dim'
+          chipHtml = iconInline('pin', 12) + '<span>' + t('人工钉定', 'Pinned') + '</span>'
+        } else if (ar.source === 'failover') {
+          chipCls += ' warn'
+          chipHtml = iconInline('zap', 12) + '<span>' + t('故障切换', 'Failover') + '</span>'
+        } else {
+          chipCls += ' dim'
+          chipHtml = '<span>' + t('默认路由', 'Default route') + '</span>'
         }
-        // 末尾补「下一个切换」：与「正在使用」拼成完整路由事实（在用谁 → 挂了去哪）；取真实下一跳
-        // （钉定时=钉定服务，自动态=全条件现算），无备用时明说，不留空白让人以为有兜底
-        effHtml += ' <span class="inext tip" data-tip="' + esc(t('主服务不可达时切到它；自动态按备用优先级/最近成功耗时实时排序', 'Where traffic goes when the primary is down; in auto mode ranked live by fallback priority / last successful latency')) + '">' +
-          t('下一个切换：', 'Next failover: ') + esc(ar.nextLabel || t('无备用服务', 'no fallback')) + '</span>'
+        var effHtml = '<div class="imain">' +
+          '<div class="iline"><span class="idot" aria-hidden="true"></span><span class="ilive">' + t('使用中', 'In use') + '</span>' +
+          '<span class="' + chipCls + '">' + chipHtml + '</span></div>' +
+          '<div class="ititle"><span class="iname">' + esc(ar.providerLabel) + '</span>' +
+          (ar.model ? '<span class="imodel">' + esc(ar.model) + '</span>' : '') + '</div>' +
+          (degradedWhy ? '<div class="inote">' + esc(degradedWhy) + '</div>' : '') +
+          '</div>' +
+          // 「下一个切换」读数：与在用服务拼成完整路由事实（在用谁 → 挂了去哪）；取真实下一跳
+          // （钉定时=钉定服务，自动态=全条件现算），无备用时明说并以琥珀示警，不留空白让人以为有兜底
+          '<div class="iside tip" data-tip="' + esc(t('主服务不可达时切到它；自动态按备用优先级/最近成功耗时实时排序', 'Where traffic goes when the primary is down; in auto mode ranked live by fallback priority / last successful latency')) + '">' +
+          '<div class="islabel">' + t('下一个切换', 'Next failover') + '</div>' +
+          '<div class="isvalue' + (ar.nextLabel ? '' : ' warn') + '">' + esc(ar.nextLabel || t('无备用服务', 'No fallback')) + '</div>' +
+          '</div>'
         inuseBar.innerHTML = effHtml
       } else {
         inuseBar.textContent = ''
