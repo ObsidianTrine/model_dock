@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The menu bar / tray icon no longer goes missing after autostart**: after rebooting, only the gateway used to run in the background — the ModelDock icon (with its console entry etc.) never appeared in the macOS menu bar or the Windows system tray; now the tray is launched automatically once the gateway is ready.
+
 ## [1.2.1] - 2026-10-21
 
 One-shot doctor fixes and machine-readable output, the always-visible tray version, the "In use" status card redesign, plus two rounds of performance work.

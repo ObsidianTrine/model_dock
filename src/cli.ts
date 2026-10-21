@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { buildProgram } from './cli/index.js'
 import { openUrlInBrowser } from './cli/shared.js'
+import { spawnTrayIfPresent, spawnTrayWhenGatewayReady } from './tray.js'
 import { t } from './util/i18n.js'
 
 function isSEA(): boolean {
@@ -18,6 +19,9 @@ if (process.argv.includes('--sea-gateway')) {
       await initLang()
       const idx = process.argv.indexOf('--port')
       const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
+      // 自启（VBS / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
+      // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
+      void spawnTrayWhenGatewayReady()
       return startForeground(port)
     })
     .catch((e) => {
@@ -75,15 +79,8 @@ async function launchGui(): Promise<void> {
   const url = `http://127.0.0.1:${live.port}/_modeldock/ui?token=${live.admin_token}`
   await openConsole(url)
 
-  // 菜单栏/托盘（打包形态才有 helper 文件随 app 分发；npm/dev 运行时 execPath 旁没有，跳过）。
-  // 托盘内部单实例（flock/Mutex）：重复拉起会静默退出，重复双击 app 无副作用。
-  const trayPath = path.join(path.dirname(process.execPath), 'ModelDockTray' + (process.platform === 'win32' ? '.exe' : ''))
-  if (fs.existsSync(trayPath)) {
-    // existsSync 前置检查挡得住 ENOENT 但挡不住 EACCES 等；tray 非关键路径，挂空 error 吞掉即可，避免未监听崩进程
-    spawn(trayPath, [], { detached: true, stdio: 'ignore', env: process.env, windowsHide: true })
-      .on('error', () => {})
-      .unref()
-  }
+  // 菜单栏/托盘：与 daemon 自启路径共用拉起逻辑（tray.ts），托盘内部单实例挡重复拉起
+  spawnTrayIfPresent()
 
   // CLI 自动安装（幂等）：等待有界时间——GUI 进程没有别的东西拖住事件循环，
   // 不等待的话首次双击可能在软链落盘前就退出。超时中止 osascript 提权弹窗（避免弹窗孤儿
