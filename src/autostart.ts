@@ -247,8 +247,11 @@ export interface AutostartInstallResult {
 /** 安装开机自启。网关已在运行时只登记文件、不 bootstrap（否则第二个实例被单实例保护
  *  拒掉，KeepAlive 会陷入重启循环）；未运行时立即拉起并等健康端点就绪。
  *  opts.argv：注入 daemon 启动命令（测试用——缺省按当前运行时形态推导，vitest 下
- *  会登记 node+vitest-cli 而非产品网关，无法做真实链路测试）。 */
-export async function installAutostart(opts: { argv?: string[] } = {}): Promise<AutostartInstallResult> {
+ *  会登记 node+vitest-cli 而非产品网关，无法做真实链路测试）。
+ *  opts.healthTimeoutMs：健康等待时限（缺省 10s）。测试注入假 daemon 必然不就绪，
+ *  缩短到 2s 可把用例从固定 10s 降下来；断言力不变——launchctl bootstrap / systemctl
+ *  enable --now 成功即已加载，健康等待只是等它就绪。 */
+export async function installAutostart(opts: { argv?: string[]; healthTimeoutMs?: number } = {}): Promise<AutostartInstallResult> {
   const kind = autostartKind()
   if (!kind) {
     throw new Error(
@@ -261,6 +264,7 @@ export async function installAutostart(opts: { argv?: string[] } = {}): Promise<
   await ensureDir(modeldockDir())
   await ensureDir(logsDir())
   const argv = opts.argv ?? gatewayDaemonArgs()
+  const healthWaitMs = opts.healthTimeoutMs ?? 10_000
   const outLog = path.join(logsDir(), 'service-out.log')
   const errLog = path.join(logsDir(), 'service-err.log')
   const workDir = modeldockDir()
@@ -324,13 +328,13 @@ export async function installAutostart(opts: { argv?: string[] } = {}): Promise<
         )
       )
     }
-    const live = await waitGatewayLive(10_000)
+    const live = await waitGatewayLive(healthWaitMs)
     if (!live) {
       throw new Error(
         t(
-          '服务已加载但网关未在 10s 内就绪，查看服务日志：{log}',
-          'The service is loaded but the gateway is not ready within 10s; check the service log: {log}',
-          { log: errLog }
+          '服务已加载但网关未在 {s}s 内就绪，查看服务日志：{log}',
+          'The service is loaded but the gateway is not ready within {s}s; check the service log: {log}',
+          { s: healthWaitMs / 1000, log: errLog }
         )
       )
     }
@@ -366,13 +370,13 @@ export async function installAutostart(opts: { argv?: string[] } = {}): Promise<
         ),
       }
     }
-    const live = await waitGatewayLive(10_000)
+    const live = await waitGatewayLive(healthWaitMs)
     if (!live) {
       throw new Error(
         t(
-          '服务已启用但网关未在 10s 内就绪，查看：journalctl --user -u {unit}',
-          'The service is enabled but the gateway is not ready within 10s; check: journalctl --user -u {unit}',
-          { unit }
+          '服务已启用但网关未在 {s}s 内就绪，查看：journalctl --user -u {unit}',
+          'The service is enabled but the gateway is not ready within {s}s; check: journalctl --user -u {unit}',
+          { s: healthWaitMs / 1000, unit }
         )
       )
     }

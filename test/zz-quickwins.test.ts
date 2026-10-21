@@ -2,26 +2,13 @@ import path from 'node:path'
 import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeHome } from './helpers.js'
-import { openEnvelope, sealEnvelope } from '../src/sync/crypto.js'
 import { displayPath } from '../src/util/paths.js'
 import { codexAdapter } from '../src/adapters/codex.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { runWithLang, setLang } from '../src/util/i18n.js'
 import { UpdateError, validateAssetName } from '../src/update/check.js'
 
-describe('quickwins 1: openEnvelope 复用 macKey', () => {
-  const doc = { fmt: 'modeldock-syncdoc' as const, v: 1, ts: 't', data: { providers: {}, profiles: {} } }
-
-  it('正确口令解密成功', () => {
-    const env = sealEnvelope(doc as never, 'right')
-    expect(openEnvelope(env as never, 'right')).toEqual(doc as never)
-  })
-
-  it('错误口令仍拒', () => {
-    const env = sealEnvelope(doc as never, 'right')
-    expect(() => openEnvelope(env as never, 'wrong')).toThrow(/口令不正确|incorrect/)
-  })
-})
+// 信封 seal/open 往返与错口令断言归 syncdoc.test.ts（曾在此重复，2026-10-21 去重删除）。
 
 describe('quickwins 2: config edit 引号', () => {
   // basic.ts 是「扇出很广」模块（AGENTS 已知踩雷点）：静态 import 会早于 uninstall.test 加载

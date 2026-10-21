@@ -139,26 +139,6 @@ describe('控制台缓存与轮询优化', () => {
     expect(res.headers.get('cache-control')).toBe('no-cache')
     expect(res.headers.get('etag')).toBeTruthy()
   })
-
-  it('JSON API：/overview 仍为 no-store（HTML 放开 no-store 不波及敏感 JSON）', async () => {
-    const t = await start()
-    ctxs.push(t)
-    const res = await fetch(`${t.base}/overview`, { headers: ADMIN })
-    expect(res.status).toBe(200)
-    expect(res.headers.get('cache-control')).toContain('no-store')
-  })
-
-  it('HTML：带匹配 ETag 的 If-None-Match 二次请求仍 304 且无 body', async () => {
-    const t = await start()
-    ctxs.push(t)
-    const url = `${t.base}/ui`
-    const first = await fetch(url)
-    expect(first.status).toBe(200)
-    const etag = first.headers.get('etag')
-    expect(etag).toBeTruthy()
-
-    const second = await fetch(url, { headers: { 'if-none-match': etag!, 'cache-control': 'no-cache' } })
-    expect(second.status).toBe(304)
-    expect(await second.text()).toBe('')
-  })
+  // 「/overview 仍为 no-store」与「带 no-cache 请求头的 304」曾在此各有一对双胞胎
+  //（上方 84-105 与 107-121 已覆盖同一语义，2026-10-21 去重删除）。
 })

@@ -40,8 +40,8 @@ function autoMergeTask(repo: string, id: string): { start: string; end: string }
   }
 }
 
-describe('gateway usage tap > 解析与透传', () => {
-  it('SSE 流解析 anthropic usage，字节原样透传', async () => {
+describe('gateway usage tap > 透传与兜底（usage 提取断言归 hotpath 套件）', () => {
+  it('SSE 流字节原样透传', async () => {
     const { default: assert } = await import('node:assert')
     const tap = createUsageTap('text/event-stream')
     const chunks: Buffer[] = []
@@ -52,18 +52,9 @@ describe('gateway usage tap > 解析与透传', () => {
       tap.end(Buffer.from(payload))
     })
     assert.equal(Buffer.concat(chunks).toString(), payload) // 字节零改变
-    expect(tap.getUsage()).toEqual({ input_tokens: 10, output_tokens: 7, cache_read_tokens: 2, cache_creation_tokens: 0 })
   })
 
-  it('非流式 JSON 解析 openai 口径；非 JSON 体不炸', async () => {
-    const jsonTap = createUsageTap('application/json')
-    jsonTap.resume() // 触发数据流动，flush 才会执行
-    await new Promise<void>((resolve) => {
-      jsonTap.on('finish', resolve)
-      jsonTap.end(Buffer.from(JSON.stringify({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 3 } })))
-    })
-    expect(jsonTap.getUsage()).toEqual({ input_tokens: 5, output_tokens: 3, cache_read_tokens: 0, cache_creation_tokens: 0 })
-
+  it('非 JSON 体不炸：usage 保持 0', async () => {
     const textTap = createUsageTap('text/plain')
     textTap.resume()
     await new Promise<void>((resolve) => {

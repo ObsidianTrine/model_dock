@@ -213,7 +213,7 @@ function systemdActive(): boolean {
 }
 
 describe.skipIf(process.platform !== 'darwin')('autostart 真实生效 > macOS launchd', () => {
-  it('install：plutil 校验 + bootstrap 真实加载（无网关 → 10s 健康等待失败抛错，服务保持已加载）；uninstall：bootout + 移除', { timeout: 30_000 }, async (ctx) => {
+  it('install：plutil 校验 + bootstrap 真实加载（无网关 → 健康等待失败抛错，服务保持已加载）；uninstall：bootout + 移除', { timeout: 30_000 }, async (ctx) => {
     if (launchdLoaded()) {
       ctx.skip() // 用户已注册真实自启服务：绝不碰
       return
@@ -222,13 +222,14 @@ describe.skipIf(process.platform !== 'darwin')('autostart 真实生效 > macOS l
     try {
       let installError: Error | null = null
       try {
-        await installAutostart({ argv: ['/bin/sleep', '30'] })
+        // 假 daemon 必然不就绪：healthTimeoutMs 注入 2s，断言力不变（bootstrap 成功即已加载）
+        await installAutostart({ argv: ['/bin/sleep', '30'], healthTimeoutMs: 2_000 })
       } catch (e) {
         installError = e as Error
       }
       // 无网关 → 健康等待必然失败；但服务必须已被 launchd 真实加载（本测试核心断言）
       expect(installError).not.toBeNull()
-      expect(installError!.message).toMatch(/未在 10s 内就绪/)
+      expect(installError!.message).toMatch(/未在 2s 内就绪/)
       expect(launchdLoaded()).toBe(true)
       expect(fs.existsSync(launchdPlistPath())).toBe(true)
 
@@ -257,7 +258,7 @@ describe.skipIf(process.platform !== 'darwin')('autostart 真实生效 > macOS l
 })
 
 describe.skipIf(process.platform !== 'linux')('autostart 真实生效 > Linux systemd', () => {
-  it('install：daemon-reload + enable --now 真实激活（无网关 → 10s 健康等待失败抛错，服务保持 active）；uninstall：disable + stop + 移除', { timeout: 30_000 }, async (ctx) => {
+  it('install：daemon-reload + enable --now 真实激活（无网关 → 健康等待失败抛错，服务保持 active）；uninstall：disable + stop + 移除', { timeout: 30_000 }, async (ctx) => {
     if (!systemdUserAvailable()) {
       ctx.skip() // CI runner 可能没有 systemd 用户实例
       return
@@ -282,12 +283,12 @@ describe.skipIf(process.platform !== 'linux')('autostart 真实生效 > Linux sy
     try {
       let installError: Error | null = null
       try {
-        await installAutostart({ argv: ['/bin/sleep', '30'] })
+        await installAutostart({ argv: ['/bin/sleep', '30'], healthTimeoutMs: 2_000 })
       } catch (e) {
         installError = e as Error
       }
       expect(installError).not.toBeNull()
-      expect(installError!.message).toMatch(/未在 10s 内就绪/)
+      expect(installError!.message).toMatch(/未在 2s 内就绪/)
       expect(systemdActive()).toBe(true)
       expect(fs.existsSync(systemdUnitPath())).toBe(true)
 
