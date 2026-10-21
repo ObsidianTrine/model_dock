@@ -65,6 +65,9 @@ export interface ResolvedTarget {
   provider: ProviderConfig
   /** 故障切换候选的模型映射（"<providerId>:<modelId>" 条目）；设置时请求体模型强制改写为该值 */
   modelOverride?: string
+  /** 该 target 由客户端钉住路由（harness.route）解析而来：pickTarget 以钉住服务为最高优先主候选，
+   *  不随全局「正在使用」（当前槽/定时窗口）走——与展示层口径一致（overview 客户端卡、烤模型重写均豁免钉住） */
+  viaHarnessPin?: boolean
 }
 
 export type ResolveResult =
@@ -201,7 +204,9 @@ export function resolveByProfile(
       hint: t('modeldock provider list 查看', 'Run modeldock provider list to view providers'),
     }
   }
-  return { ok: true, target: { harness: harnessId, profileName: routeName, profile, provider } }
+  // 客户端钉住路由生效（he.route 且未被 profileOverride 覆盖）：给 target 打标，pickTarget 据此把钉住服务列为主候选最高级
+  const viaHarnessPin = !profileOverride && !!he?.route && he.route !== 'default'
+  return { ok: true, target: { harness: harnessId, profileName: routeName, profile, provider, ...(viaHarnessPin ? { viaHarnessPin: true } : {}) } }
 }
 
 // 自动路由：健康/熔断状态与候选选路
@@ -413,9 +418,11 @@ export type PickResult =
 /** 自动备用链最多补进的候选数（手动 fallback 不计入）；防极端服务数下串联一长串上游 */
 const AUTO_FALLBACK_MAX = 3
 
-/** 在 resolveByProfile 的静态基准之上做运行时选路：人工钉定 > 定时窗口 > 默认路由，备用链按 priority 排序；过滤 enabled/熔断态。全灭返回 down_all。
+/** 在 resolveByProfile 的静态基准之上做运行时选路：客户端钉住 > 人工钉定（当前槽）> 定时窗口 > 默认路由，备用链按 priority 排序；过滤 enabled/熔断态。全灭返回 down_all。
+ *  客户端钉住（harness.route → viaHarnessPin）不受全局「正在使用」控制：当前槽与 prefer 窗口都不接管它，avoid 窗口也不剔除它（钉住服务可用时）；
+ *  钉住服务不可用（下线/熔断）才顺延到下一级，不打死在坏服务上——与展示层口径一致（烤模型重写、overview 客户端卡均豁免钉住）。
  *  手动 fallback 之后自动补尾（auto_fallback 开启时，见 AUTO_FALLBACK_MAX），保证「没配备用链也能自动切」。
- *  ignoreManual：忽略两处人工钉定（主服务钉定与「下一个切换」钉定），供「当前 · 自动」标签计算程序自动会选谁。
+ *  ignoreManual：忽略两处全局人工钉定（主服务钉定与「下一个切换」钉定），供「当前 · 自动」标签计算程序自动会选谁；不影响客户端钉住（那是请求基准，不是全局槽位）。
  *  ignoreRouteNext：只忽略「下一个切换」钉定、保留主服务钉定与窗口，供「下一个切换 · 自动」标签计算自动态真会切到谁。 */
 export function pickTarget(
   rt: GatewayRuntime,
@@ -447,8 +454,10 @@ export function pickTarget(
       ...(modelOverride ? { modelOverride } : {}),
     }
   }
-  // 主候选三级优先：人工钉定（当前槽，人为修改优先于程序自动——程序出错时人工修改就是想要的）> 定时窗口（仅「程序自动选主」开启时参与）> 默认路由。
-  // 钉定/窗口目标不可用（下线/熔断）时顺延到下一级，不打死在坏服务上；接管主候选时默认服务排链尾兜底。
+  // 主候选四级优先：客户端钉住（harness.route，钉住客户端不随全局「正在使用」走——当前槽与 prefer 窗口都压不过它，
+  // 否则钉住会在窗口时段被静默甩到别家，2026-10-21 mimo-desktop 报障即此）> 人工钉定（当前槽，人为修改优先于程序自动——
+  // 程序出错时人工修改就是想要的）> 定时窗口（仅「程序自动选主」开启时参与）> 默认路由。
+  // 钉住/钉定/窗口目标不可用（下线/熔断）时顺延到下一级，不打死在坏服务上；接管主候选时默认服务排链尾兜底。
   // 定时窗口一次求值，主候选 / 自动链权重 / 避开三处共用（原先各调一次 hitScheduleWindows，
   // 时间基点同为 now 结果必然一致；无 schedule 时早退空数组，零开销）
   const hitWins = hitScheduleWindows(rt, new Date(now))
@@ -456,11 +465,13 @@ export function pickTarget(
   const win = on ? (hitWins.find((w) => w.mode !== 'avoid') ?? null) : null
   const winParsed = win ? parseFallbackEntry(win.target) : null
   const forcedId = opts?.ignoreManual ? undefined : rt.config.gateway?.auto_route_provider
-  const forcedEligible = !!forcedId && eligible(forcedId)
+  const pinEligible = base.viaHarnessPin === true && eligible(base.profile.provider)
+  const forcedEligible = !pinEligible && !!forcedId && eligible(forcedId)
   const winEligible = !forcedEligible && !!(winParsed && rt.config.providers[winParsed.providerId] && eligible(winParsed.providerId))
-  const primaryId = forcedEligible ? forcedId! : winEligible ? winParsed!.providerId : base.profile.provider
-  const primaryOverride = winEligible ? winParsed!.model : undefined
-  const preferredKind: 'pinned' | 'schedule' | 'default' = forcedEligible ? 'pinned' : winEligible ? 'schedule' : 'default'
+  const primaryId = pinEligible ? base.profile.provider : forcedEligible ? forcedId! : winEligible ? winParsed!.providerId : base.profile.provider
+  // 钉住即该服务自己的口径：窗口条目携带的模型改写不参与（与全局钉定同规，见「钉定为服务级」用例）
+  const primaryOverride = !pinEligible && winEligible ? winParsed!.model : undefined
+  const preferredKind: 'pinned' | 'schedule' | 'default' = pinEligible || forcedEligible ? 'pinned' : winEligible ? 'schedule' : 'default'
   // 包一层统一出口：首候选被避开/首选不可用时如实标记来源与降级来源，供「正在使用」显示
   const choose = (list: OrderedCandidate[]): PickResult => {
     const first = list[0]
@@ -557,8 +568,13 @@ export function pickTarget(
     const p = parseFallbackEntry(w.target)
     if (p && !avoid.includes(p.providerId)) avoid.push(p.providerId)
   }
+  // 避开窗口：命中期间从候选链剔除目标服务（避开优先窗口/强制/主服务，正窗目标恰被避开时顺延到后续候选）
+  // 客户端钉住的服务豁免 avoid（服务可用时）：钉住不随全局时段走，避免时段规则把钉住客户端甩到别家；
+  // 其余候选仍按 avoid 剔除。钉住服务已熔断/下线时本就不在链里，过滤对它无操作
   if (!avoid.length) return choose(ordered)
-  const kept = ordered.filter((c) => !avoid.includes(c.providerId))
+  const kept = base.viaHarnessPin === true
+    ? ordered.filter((c) => c.providerId === base.profile.provider || !avoid.includes(c.providerId))
+    : ordered.filter((c) => !avoid.includes(c.providerId))
   if (kept.length) return choose(kept)
   // 候选链全被避开（典型：主服务被避开且未配故障切换）——「避开 X，其他服务都行」：链外其余可用服务按 priority 降序补入候选
   const extras = Object.entries(rt.config.providers)

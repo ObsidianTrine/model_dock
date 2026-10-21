@@ -28,10 +28,15 @@ import type { Config } from '../src/config/types.js'
  */
 const PREV_FAKE_HOME = process.env.MODELRDOCK_FAKE_HOME
 const PREV_MD_HOME = process.env.MODELRDOCK_HOME
+// os.tmpdir() 在部分 Windows 机器返回 8.3 短名路径（如 ZHOUQI~1）：fs.watch 该目录时
+// 文件事件会踩 libuv fs-event 断言（assert !_wcsnicmp(filename, dir, dirlen)）原生崩溃、
+// 拖死整个测试 fork（SyncLoop 用例必崩，2026-10-21 本机实测）。native realpath 走
+// GetFinalPathNameByHandle 把短名展开为长路径；普通 realpathSync 不展开。测试沙箱一律用它打底。
+const TMP = fsSync.realpathSync.native(os.tmpdir())
 const homes: string[] = []
 const targetDirs: string[] = []
 function newHome(): string {
-  const h = fsSync.mkdtempSync(path.join(os.tmpdir(), 'modeldock-test-'))
+  const h = fsSync.mkdtempSync(path.join(TMP, 'modeldock-test-'))
   homes.push(h)
   gotoHome(h)
   return h
@@ -42,7 +47,7 @@ function gotoHome(h: string): void {
 }
 /** 每个用例独立的同步目标目录（防用例间 manifest/blob 串场） */
 async function newTargetDir(): Promise<string> {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 'modeldock-sync-target-'))
+  const d = await fs.mkdtemp(path.join(TMP, 'modeldock-sync-target-'))
   targetDirs.push(d)
   return d
 }

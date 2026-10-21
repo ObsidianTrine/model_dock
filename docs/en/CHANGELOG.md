@@ -10,6 +10,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 ### Fixed
 
 - **The menu bar / tray icon no longer goes missing after autostart**: after rebooting, only the gateway used to run in the background — the ModelDock icon (with its console entry etc.) never appeared in the macOS menu bar or the Windows system tray; now the tray is launched automatically once the gateway is ready.
+- **A client pinned to a service is no longer hijacked by schedule windows**: after pinning a client card to a service, requests were still switched to the window's target service while a preferred schedule window was active (the pin had no effect — typically pinning service A yet getting service B's "model not supported" error); a pinned client now always goes through its own pinned service, and only falls back along the failover chain when that service is down or in meltdown.
 
 ## [1.2.1] - 2026-10-21
 
