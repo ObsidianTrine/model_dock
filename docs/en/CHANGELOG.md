@@ -7,6 +7,10 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Improved
+
+- **The "In use" status card is now a slim one-line status strip**: about half the previous height, leaving more room above the fold; the service name is highlighted in blue, the route source (schedule window / pinned / failover / degraded) becomes a small colored icon chip, the status dot turns amber on failover or degradation, and the line ends with an amber warning when no fallback exists; the model and the client list are no longer shown here (client attribution lives on each service card's "used by N clients").
+
 ### Fixed
 
 - **The menu bar / tray icon no longer goes missing after autostart**: after rebooting, only the gateway used to run in the background — the ModelDock icon (with its console entry etc.) never appeared in the macOS menu bar or the Windows system tray; now the tray is launched automatically once the gateway is ready.
