@@ -2,9 +2,9 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 当前版本 | **v0.1 · 草案（未实现）** |
-| 状态 | 待评审；开放决策点见第 11 章，其中 D1（npm 分发渠道）阻塞实施 |
-| 日期 | 2026-10-20 |
+| 当前版本 | **v0.3 · §8.1 引流 v0 已实现** |
+| 状态 | 实现于 `dsh-modeldock` 独立仓库（5 工具 + github-release 渠道 + 单测/沙箱集成测试全绿）；client UI 与 npm 渠道默认未启用（D4/D1）；开放决策点见第 11 章 |
+| 日期 | 2026-10-25（v0.2 同日：修订资产命名与沙箱 dsh home 两处事实错误、补 CLI 版本门槛、增 8.1；v0.3：A5 `attach --port` 已落地并按 8.1 完成实现） |
 | 读者 | 接手实现的 agent / 评审人 |
 
 > **给接手 agent 的一句话任务说明**：
@@ -74,7 +74,7 @@ dsh 用户在插件市场一键安装本插件后，**几分钟内**（无需了
 
 ### 2.2 必须避开的坑（调研中确认）
 
-1. **npm 名 `modeldock` 已被第三方占用**：npm 上 `modeldock@0.1.2` 是 nimjal 的另一款产品（"A unified AI workspace"），与本仓库无关。**任何引导 `npm i -g modeldock` / `npx modeldock` 的路径都会装错包**，插件内严禁出现这两个命令；本仓库 CLI 的 npm 分发必须用 scoped 名（见 5.A1，阻塞项）。
+1. **npm 名 `modeldock` 已被第三方占用**：npm 上 `modeldock@0.1.2` 是 nimjal 的另一款产品（"A unified AI workspace"），与本仓库无关（2026-10-25 复核仍为 0.1.2，结论有效）。**任何引导 `npm i -g modeldock` / `npx modeldock` 的路径都会装错包**，插件内严禁出现这两个命令；本仓库 CLI 的 npm 分发必须用 scoped 名（见 5.A1，阻塞项）。
 2. **bundle 层 patch 的值会变成「所有 profile 的显式配置」**：plugin-mall 在其 cordis.patch.yml 注释里明确踩过（曾把 `defaultProfile: web` 写进 bundle 层，导致其他 profile 的行为被静默钉死）。本插件 bundle patch 只放插件自身注册项与用户无关的默认值，环境相关值留给用户层或运行时探测。
 3. **dsh 仍在 0.2.x RC**：插件 API（cordis-plugin-loader、dsh-tools）无稳定承诺；`engines` 钉范围 + CI 里按 dsh 当前版本回归是底线。
 4. **同插件被多个 profile 加载**：desktop 与 web 是两个 profile 两个进程，插件代码在两边各跑一份。工具注册天然隔离无碍，但安装/接入类动作必须幂等、防并发（jobs 服务 + 幂等设计，见 4.6）。
@@ -100,7 +100,7 @@ dsh（llm-pi-ai provider，apiKeyEnv=MODELDOCK_TOKEN）
 
 **薄插件原则**（本设计的核心取舍）：插件是「安装器 + 遥控器」，不是「第二个实现」。凡 ModelDock CLI 已有的能力（diff 预览、快照、新旧布局迁移、等值过滤跳过、凭据写入），插件一律 spawn CLI 复用，自己只做探测、下载、调命令、展示。代价是插件依赖 CLI 已安装且在 PATH（安装步骤正是为此存在）；收益是接入逻辑单实现、无漂移，dsh 布局再变也只改 ModelDock 一侧。
 
-环境变量链路：插件进程是 dsh 的子进程，`DSH_HOME` 天然继承，spawn 出的 `modeldock` 再继承一层——ModelDock 的 `dshHomeDir()`（`$DSH_HOME` > `~/.dsh`）与 dsh 自身解析规则一致，非默认安装位置无需插件特殊处理。
+环境变量链路：插件进程是 dsh 的子进程，`DSH_HOME` 天然继承，spawn 出的 `modeldock` 再继承一层——ModelDock 的 `dshHomeDir()`（`$DSH_HOME` > `~/.dsh`）与 dsh 自身解析规则一致，非默认安装位置无需插件特殊处理。（沙箱测试例外：`MODELRDOCK_FAKE_HOME` 下 `dshHomeDir()` 会**忽略 `DSH_HOME`**、强制解析到 `$FAKE_HOME/.dsh`，见 `src/util/paths.ts` 与第 9 章联调配方。）
 
 ## 4. 插件详细设计
 
@@ -113,7 +113,7 @@ dsh-modeldock/
 ├─ src/index.js          # apply(ctx, config) + 五个工具
 ├─ src/install.js        # CLI 安装器（npm 渠道 / GitHub Releases 下载）
 ├─ src/client.js         # 设置页 UI（状态卡 + 向导）
-├─ locale/zh.json        # 双语文案（与 ModelDock i18n 约定同风格：中文原文即 key）
+├─ locale/zh.json        # 双语文案（key 结构对齐 rewind 的 locale 导出；「中文原文即 key」仅在 dsh client locale loader 支持时可用，实现前复核）
 ├─ locale/en.json
 └─ README.md             # market_info 会读取；中英双语、含截图
 ```
@@ -174,11 +174,13 @@ package.json 关键字段（建议值，名称最终见 D2）：
 |---|---|---|---|
 | `modeldock_status` | 无 | ① `which`/`where` 探测 PATH 上有无 `modeldock` CLI 及版本（`modeldock --version`）② GET `/_modeldock/health` 探活 ③ 读 dsh patch 判断当前 profile 是否已接入（检测 modeldock provider 条目，判据与 `isGatewayBase` 一致：baseURL 指向 `127.0.0.1:gatewayPort`） | 结构化状态：`{ cliInstalled, cliVersion, gatewayUp, gatewayPort, attached }` + 下一步建议文案 |
 | `modeldock_install` | `{ channel?, autoStart? }` | background job：按渠道安装 CLI（见 4.6）；装完探测版本；`suggestAutoStart` 时提示可执行 `modeldock gateway install` | job id；完成回执含版本与 PATH 提示 |
-| `modeldock_attach` | `{ setDefault?, clientProfiles? }` | 前置探活（未运行则拒绝并给指引：`modeldock gateway start` / `gateway install`）；然后 spawn `modeldock attach dsh --mode gateway --yes [--set-default] [--client-profile <…>]` | CLI 的 diff/快照回执（原样转述），接入前后 patch 摘要 |
+| `modeldock_attach` | `{ setDefault?, clientProfiles? }` | 前置探活（未运行则拒绝并给指引：`modeldock gateway start` / `gateway install`）；然后 spawn `modeldock attach dsh --mode gateway --yes --port <gatewayPort> [--set-default] [--client-profile <…>]`（显式端口跳过 CLI 的 8687 探测启发式，需 CLI ≥ A5 版本） | CLI 的 diff/快照回执（原样转述），接入前后 patch 摘要 |
 | `modeldock_detach` | `{ yes? }` | spawn `modeldock detach dsh --yes`；二次确认语义（`yes` 缺省时先回传将执行的还原说明再等确认） | CLI 回执 |
 | `modeldock_health` | 无 | GET `/_modeldock/health`（无鉴权，见 5.A4）；失败时附 `modeldock doctor` 指路 | `{ up, version?, latencyMs }` |
 
 幂等与并发约束：`modeldock_install` 用 jobs 服务做单飞（同 profile 已有运行中的 install job 时直接返回该 job）；attach/detach 天然幂等（CLI 等值过滤不产生重复变更）。desktop/web 两 profile 同时调用 install 的竞态：安装动作落在本机全局环境（npm -g / 系统安装器），两个进程最多重复探测版本，重复安装由 npm/安装器自身语义兜底；文档标注此为已知非原子点。
+
+版本门槛：插件不假设 PATH 上 `modeldock` 的选项面（`--client-profile` 等随 CLI 版本演进）。`modeldock_status` 与 install 完成回执校验 `cliVersion` ≥ 插件声明的最低版本（门槛值在 M0 落地后按当时发布版钉定），低于门槛时给升级指引而非直接 spawn。
 
 ### 4.5 client UI（设置页 tab）
 
@@ -196,7 +198,7 @@ UI 只做展示与触发，所有状态来自工具同款探测函数（client �
 
 **GitHub Releases 渠道（fallback，不依赖 5.A1）**：
 
-1. 按平台 × 架构映射资产名（与 `build-sea.mjs` 产出一致：`modeldock-<os>-<arch>.tar.gz` / `.zip`，darwin 另有 `.dmg`，win 另有 `-setup.exe`）；
+1. 按平台 × 架构映射资产名（与 `build-sea.mjs` 产出一致，**文件名内嵌版本号**：`modeldock-<ver>-<os>-<arch>.tar.gz`（linux / darwin）/ `modeldock-<ver>-<os>-<arch>.zip`（win），darwin 另有 `.dmg`，win 另有 `-setup.exe`；os 段取 `linux` / `darwin` / `win32`，arch 段取 `x64` / `arm64`）。版本号从 latest release 元数据读取，或按资产名前后缀匹配解析，**禁止写死固定文件名**；darwin 的 `-app.tar.gz` 是自更新专用件，不取；
 2. 拉取 latest release 的 `SHA256SUMS` + 对应资产，**逐字节校验哈希**，不匹配即中止并报错；
 3. 解压出单一入口程序，装入用户可写 bin 目录（mac/Linux：`~/.local/bin` 并提示 PATH；Windows：引导运行 `*-setup.exe`（Inno Setup 支持静默参数）或手动放置）；
 4. 完成后 `modeldock --version` 复验。
@@ -206,7 +208,7 @@ UI 只做展示与触发，所有状态来自工具同款探测函数（client �
 ### 4.7 接入流程（`modeldock_attach`）
 
 1. `modeldock_status` 前置检查：CLI 已装、网关存活（health 200）；网关未运行 → 返回指引（`modeldock gateway start` 手动拉起，或建议先 `modeldock gateway install` 常驻），**插件绝不代替用户拉起网关**（网关生命周期属于 ModelDock 自身，避免插件侧再养进程）；
-2. spawn `modeldock attach dsh --mode gateway --yes [--set-default] [--client-profile <…>]`：写入 provider patch（含模型列表、reasoningEfforts 声明）与 `.credentials.yaml` 的 `refs.MODELDOCK_TOKEN`——全部是现有 adapter 行为；
+2. spawn `modeldock attach dsh --mode gateway --yes --port <gatewayPort> [--set-default] [--client-profile <…>]`：写入 provider patch（含模型列表、reasoningEfforts 声明）与 `.credentials.yaml` 的 `refs.MODELDOCK_TOKEN`——全部是现有 adapter 行为；`--port` 见 5.A5（多实例下不写错端口，沙箱联调不触 8687）；
 3. 回执：CLI 的 diff 预览与 notes 原样转述；提示「patch 生效是否需要重启 profile 见 D5 实测结论」。
 
 v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）。
@@ -223,6 +225,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 | A2 | `modeldock status` / `doctor` 增加 `--json` 机器可读输出 | 建议 | 插件 UI 与 status 工具消费；无它则插件自行拼 patch 解析（能做但不薄） |
 | A3 | `attach` 支持 `--json` 输出结果摘要 | 可选 | v1 可先靠 stdout 转述，不阻塞 |
 | A4 | `/_modeldock/health` 响应体带版本号字段 | 可选 | 现响应为 `{ ok, started_at, uptime_ms, reloads, active_profile }`（无鉴权豁免已实证），缺版本号字段；补 `version` 后插件可展示「网关 vX.Y.Z」。`active_profile` 字段现状即可复用为状态展示 |
+| A5 | `attach` 支持 `--port <n>` 显式网关端口（透传 planAttach.gatewayPort，跳过 8687 探测启发式） | **已落地**（2026-10-25 合入 develop，含全链路回归测试） | 多实例下启发式会把客户端文件写到别的实例端口（ops.ts 注释自警，attach-cli.test.ts 记载的可测性缺口）；插件 attach 一律显式传端口，沙箱联调全程不触生产 8687 |
 
 ## 6. 安全与校验
 
@@ -251,12 +254,24 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 | M3 | 接入闭环：`modeldock_attach`/`modeldock_detach` + UI 接入/断开 | M1 | 1 天 |
 | M4 | 发布：npm 发插件包、GitHub 仓库打 topic `dsh-plugin`、README 双语 + 截图、market_info 自检 | M1–M3 | 0.5 天 |
 
-新插件代码放独立仓库（不进本仓库 src/，避免 SEA 打包与插件发布互相牵制）；本仓库仅承担 M0 配套改动（走 feature-branch 工作流）。
+新插件代码放独立仓库（不进本仓库 src/，避免 SEA 打包与插件发布互相牵制；且 market_search 按**仓库级** topic `dsh-plugin` 检索，插件须独立成仓才能被命中——塞本仓库子目录等于放弃市场发现渠道）；本仓库仅承担 M0 配套改动（走 feature-branch 工作流）。
+
+### 8.1 引流优先的 v0 裁剪路线（推荐起点）
+
+若首要目标是**引流**（把 dsh 用户导流到 ModelDock）而非完整安装体验，按下面裁剪出 1–2 天可发面的 v0，且 ModelDock 侧只需 A5 一处小改（已落地；A1/D1 仍不在关键路径）：
+
+- 砍 client UI（设置页向导）：D4（desktop 端 web plane 可用性）的不确定性直接消失，引导靠 agent 工具回执 + README；
+- 安装渠道只留 GitHub Releases（不依赖 A1）；npm 渠道等 D1 落地后再补为默认；
+- 工具面 5 → 3：`modeldock_status`（吸收 health 探活）、`modeldock_install`（仅 github 渠道）、`modeldock_attach`；detach 与卸载指引放 README（`modeldock detach dsh` / `modeldock restore dsh` 本就是一条 CLI 命令）；
+- 红线不裁：不写 dsh 配置、不起 HTTP 服务、密钥零接触——「薄」正是这个插件的价值来源；
+- 发布 = 双语 README（含安装截图）+ GitHub 仓库打 topic `dsh-plugin` + `npm publish`（裸名 `dsh-modeldock` 未被占，定了尽早占名）。
+
+落地状态（2026-10-25）：v0 已在 `dsh-modeldock` 独立仓库实现——5 工具齐备、github-release 渠道（SHA256SUMS 逐字节校验）+ npm 渠道护栏、CLI 版本门槛（≥1.3.0，A5）、双语 README；单测 + 沙箱集成测试（真实网关 189xx × 假 dsh home × PATH shim 全流程）全绿。ModelDock 侧仅落地 A5 一处小改（已合入 develop）。待办：npm publish 占名、GitHub topic、（后续）client UI 与 npm 渠道默认切换（D4/D1）。
 
 ## 9. 测试计划
 
 - **插件单元**（插件仓库内）：`apply` 可被 cordis-plugin-loader 加载（冒烟）；Config 校验（非法端口/渠道拒载）；工具 handler 用注入的假 spawn/fake fetch 测三态状态、attach 前置探活拒绝路径、SHA256 不匹配中止路径。
-- **集成联调**（沙箱，遵守 AGENTS.md 端口红线）：临时 dsh profile（`DSH_HOME` 指向临时目录）+ 临时 ModelDock 实例（`MODELRDOCK_FAKE_HOME=<独立目录>` + `--port 189xx`，**绝不触 8687/8890**）→ 全流程：install（对 npm 渠道可用 Verdaccio/本地 registry 代理或直接测 github-release 渠道）→ attach → health → detach → 复原断言。
+- **集成联调**（沙箱，遵守 AGENTS.md 端口红线）：临时 ModelDock 实例（`MODELRDOCK_FAKE_HOME=<独立目录>` + `--port 189xx`，**绝不触 8687/8890**）+ 临时 dsh home 放在 **`$FAKE_HOME/.dsh`**——注意 `MODELRDOCK_FAKE_HOME` 下 `dshHomeDir()` 会忽略 `DSH_HOME`、强制解析到 `$FAKE_HOME/.dsh`（`src/util/paths.ts`），把 `DSH_HOME` 另指外部目录会被无视、attach 写错位置 → 全流程：install（npm 渠道用 Verdaccio / 本地 registry 代理并配临时 npm prefix，不污染真机全局；或直接测 github-release 渠道）→ attach → health → detach → 复原断言。
 - **市场验收**：`market_info` 能读到本插件 `dsh.bundle` 与 README；`market_install` 装进干净 profile 后 `dsh --dump-config` 可见 bundle 层注册项。
 - **三平台**：P1/P2/P3 各分支在 CI matrix（或至少 Windows 实机）过一遍 install 渠道。
 
@@ -272,7 +287,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 | # | 决策 | 建议 | 阻塞性 |
 |---|---|---|---|
 | D1 | ModelDock CLI 的 npm scoped 包名（`@obsidiantrine/modeldock` / `@modeldock/cli` / 其他） | `@obsidiantrine/modeldock`（与 GitHub 归属一致，防抢注误导） | **阻塞 M0** |
-| D2 | 插件包名与仓库归属（`dsh-modeldock` 裸名 vs scoped；独立仓库 or 本仓库 monorepo 子目录） | 裸名 `dsh-modeldock` + 独立仓库（市场检索友好，生态惯例如此） | M1 前 |
+| D2 | 插件包名与仓库归属（`dsh-modeldock` 裸名 vs scoped；独立仓库 or 本仓库 monorepo 子目录） | 裸名 `dsh-modeldock` + 独立仓库（市场检索友好，生态惯例如此；npm 裸名 `dsh-modeldock` 2026-10-25 查询未被注册，定了尽早占名防抢注） | M1 前 |
 | D3 | 是否支持 `--mode file`（直连）接入入口 | v1 不做：直连绕开网关，插件价值与统一管理目标相悖；需求出现再议 | 否 |
 | D4 | 桌面版 profile 的 client UI 可用性（`platform: "web"` 是否覆盖 desktop；推测桌面端同为 web plane） | 实测确认；不可用则 desktop 侧仅靠 agent 工具 | M1 前实测 |
 | D5 | patch 写入后 dsh 是否需重启 profile 才生效（llm-pi-ai provider 配置热加载与否） | 实测；若需重启，attach 回执中明确提示，并可评估市场 `allowRestart` 能力 | M3 前实测 |
@@ -282,5 +297,5 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 - 本机实证：dsh 0.2.0-rc.2（`dsh --help`：profile/patch/plugin 命令面）；`~/.dsh/profiles/web/package.json`（bundles 结构）；`@1e0zj/dsh-plugin-mall@0.4.17`（`src/index.js` 头部插件契约注释、`cordis.patch.yml` bundle 层教训注释、installer/restart 协议）；`dsh-rewind-plugin@0.17.1`（`dsh.client` 出口、`engines.dsh` 钉法、`./locale/*.json` exports）。
 - npm 公开包：`@deepseek-ai/cordis-plugin-loader@1.0.6`（"Plugin loader for cordis"）、`@deepseek-ai/dsh-tools@0.0.1-rc.1`（"Tool registry and execution pipeline for the DeepSeek Harness"）。
 - npm 名占用：`modeldock@0.1.2` → nimjal/ModelDock（"A unified AI workspace"），与本仓库无关。
-- 本仓库锚点：`src/adapters/dsh.ts`（接入写入逻辑）、`src/cli/index.ts`（`attach/detach/token`、`gateway start/install` 选项面）、`src/gateway/server.ts`（`/_modeldock/health` 无鉴权豁免）、`scripts/build-sea.mjs`（发布资产命名）。
+- 本仓库锚点：`src/adapters/dsh.ts`（接入写入逻辑）、`src/cli/index.ts`（`attach/detach/token`、`gateway start/install` 选项面）、`src/gateway/server.ts`（`/_modeldock/health` 无鉴权豁免）、`scripts/build-sea.mjs`（发布资产命名）、`src/util/paths.ts`（`dshHomeDir()` 的 `$DSH_HOME` > `~/.dsh` 解析与沙箱覆盖）。
 - 相关文档：`docs/design-orchestrator.md`（体例参照）、`AGENTS.md`（端口红线、三平台清单、i18n 约定）。
