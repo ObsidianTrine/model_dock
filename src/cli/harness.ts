@@ -23,6 +23,9 @@ export interface AttachFlags {
   setDefault?: boolean
   takeoverModels?: boolean
   yes?: boolean
+  /** 显式网关端口：传给 planAttach.gatewayPort，跳过 resolveClientGatewayPort 的 8687 探测启发式
+   *  （生产 + dev/沙箱多实例共存时，缺省探测会把客户端文件写到别的实例端口，见 ops.ts 注释） */
+  port?: string
 }
 
 function splitClientProfiles(v?: string): string[] | undefined {
@@ -50,6 +53,7 @@ export async function cmdAttach(id: string, opts: AttachFlags): Promise<void> {
       mode: opts.mode,
       setDefault: opts.setDefault,
       takeoverModels: opts.takeoverModels,
+      gatewayPort: opts.port ? Number(opts.port) : undefined,
     },
     cfg
   )
