@@ -149,13 +149,23 @@ function catalogBase(): CatalogData {
   return catalogBaseMemo().data
 }
 
+// hostOf 结果 memo：catalogModelMeta 按 baseUrl 查找时会对全部厂商（226 家）逐个解析 api host，
+// fetch-models 这类逐模型批量查询就是 N 模型 × 全厂商次 URL parse。host 对同一字符串幂等，输入
+// 集合有界（目录 api 值 + 本机 provider 地址）；带上限防异常输入把 Map 撑大
+const hostMemo = new Map<string, string>()
 function hostOf(u: string | null | undefined): string {
   if (!u) return ''
+  const hit = hostMemo.get(u)
+  if (hit !== undefined) return hit
+  let host = ''
   try {
-    return new URL(u).hostname.toLowerCase()
+    host = new URL(u).hostname.toLowerCase()
   } catch {
-    return ''
+    /* 非法 URL 视为无 host */
   }
+  if (hostMemo.size > 4096) hostMemo.clear()
+  hostMemo.set(u, host)
+  return host
 }
 
 /**

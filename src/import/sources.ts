@@ -128,18 +128,24 @@ export interface ImportScanOptions {
 
 export async function scanSources(source: ImportSource | 'all', opts: ImportScanOptions = {}): Promise<ImportCandidate[]> {
   const wanted = (s: ImportSource) => source === 'all' || source === s
+  // 各本地扫描器相互独立（各自只读自己的固定路径集合），并行执行把延迟从「各扫描之和」压到
+  // 「最慢一个」；Promise.all 保序，候选顺序与串行一致，dedupeCandidates 的去重口径不变
+  const localScanners: Array<[ImportSource, () => Promise<ImportCandidate[]>]> = [
+    ['cc-switch', scanCcSwitch],
+    ['claude', scanClaude],
+    ['dsh', scanDsh],
+    ['zcode', scanZcode],
+    ['codex', scanCodex],
+    ['opencode', scanOpenCode],
+    ['mimocode', scanMimocode],
+    ['workbuddy', scanWorkbuddy],
+    ['ccr', scanCcr],
+    ['crush', scanCrush],
+    ['gemini', scanGemini],
+  ]
   const out: ImportCandidate[] = []
-  if (wanted('cc-switch')) out.push(...(await scanCcSwitch()))
-  if (wanted('claude')) out.push(...(await scanClaude()))
-  if (wanted('dsh')) out.push(...(await scanDsh()))
-  if (wanted('zcode')) out.push(...(await scanZcode()))
-  if (wanted('codex')) out.push(...(await scanCodex()))
-  if (wanted('opencode')) out.push(...(await scanOpenCode()))
-  if (wanted('mimocode')) out.push(...(await scanMimocode()))
-  if (wanted('workbuddy')) out.push(...(await scanWorkbuddy()))
-  if (wanted('ccr')) out.push(...(await scanCcr()))
-  if (wanted('crush')) out.push(...(await scanCrush()))
-  if (wanted('gemini')) out.push(...(await scanGemini()))
+  const results = await Promise.all(localScanners.filter(([s]) => wanted(s)).map(([, scan]) => scan()))
+  for (const r of results) out.push(...r)
   if (source === 'oneapi') {
     // oneapi 需要站点凭据，不进 'all'（自动扫描拿不到），只走显式 --from oneapi
     if (!opts.oneapi) {

@@ -284,12 +284,24 @@ function markApplyFailed(logFile: string): void {
   state.applyError = tailErrorLine(logFile) ?? t('更新子进程已退出，但网关未被替换——详见 {logs} 下的 update 日志', 'The updater subprocess exited without replacing the gateway — see the update log under {logs}', { logs: displayPath(logsDir()) })
 }
 
-/** 取更新日志最后一条非空行作为失败原因（CLI 报错以「✗ 」开头，剥掉前缀） */
+/** 取更新日志最后一条非空行作为失败原因（CLI 报错以「✗ 」开头，剥掉前缀）。
+ *  只读文件尾部固定窗口：下载重试输出叠加时日志可达 MB 级，整读纯属浪费——最后一条非空行
+ *  必然落在尾部，窗口首行可能被截半（属更旧的行，直接丢弃不影响结果）。 */
+const TAIL_WINDOW_BYTES = 64 * 1024
 function tailErrorLine(logFile: string): string | null {
   try {
-    const lines = fs.readFileSync(logFile, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean)
-    const last = lines[lines.length - 1]
-    return last ? last.replace(/^✗\s*/, '') : null
+    const fd = fs.openSync(logFile, 'r')
+    try {
+      const size = fs.fstatSync(fd).size
+      const start = Math.max(0, size - TAIL_WINDOW_BYTES)
+      const buf = Buffer.alloc(size - start)
+      fs.readSync(fd, buf, 0, buf.length, start)
+      const lines = buf.toString('utf8').split('\n').map((l) => l.trim()).filter(Boolean)
+      const last = lines[lines.length - 1]
+      return last ? last.replace(/^✗\s*/, '') : null
+    } finally {
+      fs.closeSync(fd)
+    }
   } catch {
     return null
   }

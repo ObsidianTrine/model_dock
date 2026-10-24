@@ -23,18 +23,18 @@ import { cmdDetach } from './harness.js'
 
 export async function cmdAdapterList(): Promise<void> {
   const cfg = await loadConfig()
-  const rows: Record<string, string>[] = []
-  for (const a of allAdapters(cfg)) {
-    const det = await a.detect()
-    rows.push({
-      id: a.id,
-      label: a.label,
-      installed: det.installed ? '✓' : '○',
-      attached: cfg.harness[a.id] ? '✓' : '○',
-      current: det.current ?? '',
-      note: det.note ?? '',
-    })
-  }
+  const adapters = allAdapters(cfg)
+  // detect 并行执行（Windows 注册表探测单次最坏 8s，串行 3 个桌面客户端可累到 20s 级）；
+  // Promise.all 保序，row 顺序与 allAdapters 一致——与 diag.ts 的 cmdStatus 同款
+  const dets = await Promise.all(adapters.map((a) => a.detect()))
+  const rows = adapters.map((a, i) => ({
+    id: a.id,
+    label: a.label,
+    installed: dets[i].installed ? '✓' : '○',
+    attached: cfg.harness[a.id] ? '✓' : '○',
+    current: dets[i].current ?? '',
+    note: dets[i].note ?? '',
+  }))
   printTable(rows, ['id', 'label', 'installed', 'attached', 'current', 'note'])
   console.log(c.gray(t('L2 声明式 pack 在 config.toml [adapter_packs.<id>] 定义；L3 外部插件在 M2', 'L2 declarative packs are defined in config.toml [adapter_packs.<id>]; L3 external plugins arrive in M2')))
 }

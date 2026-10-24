@@ -52,21 +52,32 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
   const providers: Record<string, SyncProviderEntry> = {}
   const envKeyRefs: string[] = []
   const missingKeys: string[] = []
-  for (const [id, p] of Object.entries(cfg.providers)) {
-    const { scheme } = parseKeyRef(p.key_ref)
-    if (scheme === 'env') {
-      providers[id] = { ...p }
-      envKeyRefs.push(id)
+  // 密钥解析并行预取：keychain/secret-service 后端每取一次 spawn 一次外部进程，sync tick 又以
+  // 分钟级周期全量重收（与密钥缓存 TTL 同频），串行 N 次会把 tick 拖到秒级——与 ops.addService
+  // 的并行化同款。env:/plain 分支不触外部 IO，一并进 map 保序；组装循环按同序写
+  // providers/envKeyRefs/missingKeys，结果与逐个串行 await 完全一致
+  const resolved = await Promise.all(
+    Object.entries(cfg.providers).map(async ([id, p]) => {
+      const { scheme } = parseKeyRef(p.key_ref)
+      if (scheme === 'env') return { id, p, kind: 'env' as const }
+      const plain = scheme === 'plain' ? p.key_ref : await getSecret(p.key_ref)
+      if (plain === null || plain === '') return { id, p, kind: 'missing' as const }
+      return { id, p, kind: 'ok' as const, plain }
+    })
+  )
+  for (const r of resolved) {
+    if (r.kind === 'env') {
+      providers[r.id] = { ...r.p }
+      envKeyRefs.push(r.id)
       continue
     }
-    const plain = scheme === 'plain' ? p.key_ref : await getSecret(p.key_ref)
-    if (plain === null || plain === '') {
-      providers[id] = { ...p }
-      missingKeys.push(id)
+    if (r.kind === 'missing') {
+      providers[r.id] = { ...r.p }
+      missingKeys.push(r.id)
       continue
     }
-    const { key_ref: _dropped, ...rest } = p
-    providers[id] = { ...rest, key: plain }
+    const { key_ref: _dropped, ...rest } = r.p
+    providers[r.id] = { ...rest, key: r.plain }
   }
   // 逐条校验（缺 id 等问题在导出侧就给出可操作报错），原始 JSON 保真随包——校验与取原始值
   // 共用同一次文件读（readRawUserPresets），presets.json 不再被读+解析两遍

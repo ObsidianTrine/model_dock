@@ -78,17 +78,35 @@ async function registryHas(appName: string): Promise<boolean> {
   return hit
 }
 
+// 目录安装痕迹探测 memo（与 regMemo 同思路）：overview 每 5s 轮询会对每个桌面客户端重复
+// readdir 同几个目录（/Applications、%LOCALAPPDATA%\Programs 等），目录内容只有装卸才会变。
+// 「重新检测」与装卸后最多延迟 TTL 反映，与 regMemo 的既定取舍一致。FAKE_HOME（测试/沙箱）
+// 下绕过：沙箱内装/卸状态必须对 detect/status 即时可见（与 fsx PATH memo 同款豁免）
+const DIR_TTL = 60_000
+const dirMemo = new Map<string, { at: number; hit: boolean }>()
+
 /** 目录下任一子项名字含关键字（不区分大小写）即视为安装痕迹；目录不存在/不可读视为无 */
 async function dirHasEntry(dir: string, keywords: string[]): Promise<boolean> {
+  const useMemo = !process.env.MODELRDOCK_FAKE_HOME
+  const key = dir + '\0' + keywords.join('\0')
+  if (useMemo) {
+    const memo = dirMemo.get(key)
+    if (memo && Date.now() - memo.at < DIR_TTL) return memo.hit
+  }
+  let hit = false
   try {
     for (const e of await fsp.readdir(dir)) {
       const lc = e.toLowerCase()
-      if (keywords.some((k) => lc.includes(k))) return true
+      if (keywords.some((k) => lc.includes(k))) {
+        hit = true
+        break
+      }
     }
   } catch {
     /* 目录不存在或不可读 */
   }
-  return false
+  if (useMemo) dirMemo.set(key, { at: Date.now(), hit })
+  return hit
 }
 
 /**

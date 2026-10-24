@@ -6,7 +6,7 @@ import { logsDir, gatewayStatePath } from '../util/paths.js'
 import { appendLine, atomicWrite } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { buildDispatcher } from './proxy.js'
-import { dayTypeFor, loadCalendar, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayRange } from './daytype.js'
+import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from './daytype.js'
 
 export interface LogEntry {
   ts: string
@@ -90,8 +90,10 @@ export interface GatewayRuntime {
   port?: number
   /** 手机简版控制台（LAN）第二监听器运行态；随网关生命周期启停。host=实际绑定地址（对外 URL 只列真正可达的地址） */
   lan?: { server: import('node:http').Server; port: number; token: string; host: string }
-  /** 定时窗口 dayFilter 评估用的节假日日历（30s TTL 懒加载，见 hitScheduleWindows；日历缓存文件更新最迟 30s 生效） */
+  /** 节假日日历的 rt 级缓存（30s TTL 懒加载，见 calendarCache；日历缓存文件更新最迟 30s 生效）：
+   *  定时窗口 dayFilter 判定与 overview 日类型/假期展示共用 */
   calendar?: HolidayCalendar
+  calendarDays?: HolidayDayNamed[]
   calendarAt?: number
 }
 
@@ -267,8 +269,21 @@ function dowOf(d: Date): number {
   return d.getDay() === 0 ? 7 : d.getDay()
 }
 
-/** 日历 rt 缓存 TTL：TTL 内 dayFilter 判定零文件 IO */
+/** 日历 rt 缓存 TTL：TTL 内 dayFilter 判定与 overview 日类型/假期展示零文件 IO */
 const CALENDAR_TTL_MS = 30_000
+
+/** rt 级日历缓存（30s TTL，known-issues PERF-02 的治理口径）：hitScheduleWindows 的 dayFilter
+ *  判定与 autoRouteInfo 的「今天日类型 / 近 3 个假期」展示共用同一份，不再各自 statSync。
+ *  loadCalendarFull 一次 stat 同取 years/days（daytype 内部另有 mtime memo，日历落盘最迟 30s 生效）。 */
+function calendarCache(rt: GatewayRuntime): { years: HolidayCalendar; days: HolidayDayNamed[] } {
+  if (!rt.calendar || Date.now() - (rt.calendarAt ?? 0) > CALENDAR_TTL_MS) {
+    const full = loadCalendarFull()
+    rt.calendar = full.years
+    rt.calendarDays = full.days
+    rt.calendarAt = Date.now()
+  }
+  return { years: rt.calendar, days: rt.calendarDays! }
+}
 
 /** 窗口在归属日期 ref 是否生效：days（星期几）与 dayFilter（日类型）同时配置时取交集。
  *  calendar 传 getter 惰性取：days-only 窗口短路在前，无 dayFilter 的部署零文件 IO；
@@ -292,16 +307,10 @@ function hitScheduleWindows(rt: GatewayRuntime, now: Date): ScheduleWindow[] {
   const sch = rt.config.gateway?.schedule
   if (!sch || sch.enabled === false) return []
   const t = now.getHours() * 60 + now.getMinutes()
-  // 日历经 rt 缓存 + 30s TTL：此前每请求都走 loadCalendar 的 statSync（旧写法把日历做成了函数局部
-  // 变量且作为实参总是求值，随 QPS 放大；known-issues PERF-02）。日历文件由 models.dev 目录拉取落盘，
-  // 变更极低频，30s 内生效的延迟可接受。
-  const cal = () => {
-    if (!rt.calendar || Date.now() - (rt.calendarAt ?? 0) > CALENDAR_TTL_MS) {
-      rt.calendar = loadCalendar()
-      rt.calendarAt = Date.now()
-    }
-    return rt.calendar
-  }
+  // 日历经 rt 缓存 + 30s TTL（calendarCache）：此前每请求都走 loadCalendar 的 statSync（旧写法
+  // 把日历做成了函数局部变量且作为实参总是求值，随 QPS 放大；known-issues PERF-02）。
+  // 惰性 getter：days-only 窗口短路在前，无 dayFilter 的部署零文件 IO
+  const cal = () => calendarCache(rt).years
   const hit: ScheduleWindow[] = []
   for (const w of sch.windows ?? []) {
     const s = parseHHmm(w.start)
@@ -755,6 +764,9 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
   const routeNext = rt.config.gateway?.route_next ?? null
   const nameOf = (id: string | null): string | null => (id ? rt.config.providers[id]?.name ?? id : null)
   const sch = rt.config.gateway?.schedule
+  // 展示字段也走 rt 日历缓存（calendarCache）：此前这两处直调 dayTypeFor/upcomingHolidays，
+  // 每次 overview 重建（约每 5-10s）都各付一次 statSync，与 PERF-02 的口径不一致
+  const cal = calendarCache(rt)
   return {
     on,
     provider: rs.effective.providerId,
@@ -782,8 +794,8 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
       activeAvoids: rs.schedule.avoidHits,
       applied: rs.schedule.applied,
       suppressedBy: rs.schedule.suppressedBy,
-      today: dayTypeFor(new Date()),
-      upcomingHolidays: upcomingHolidays(new Date()),
+      today: dayTypeFor(new Date(), cal.years),
+      upcomingHolidays: upcomingHolidays(new Date(), 3, cal.days),
     },
   }
 }

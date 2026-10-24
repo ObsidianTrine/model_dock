@@ -19,8 +19,10 @@ const WIN_EXE_SUFFIXES = ['.exe', '.cmd', '.bat']
 // overview 每轮对每个适配器调 present → commandOnPath①，单次全量扫描含数百次同步 syscall
 //（PATH 逐目录 existsSync/statSync/readdirSync + nvm/托管 runtime/Homebrew 兜底）。PATH/APPDATA/
 // modeldockDir 探测范围内路径在本进程生命周期内基本不变，按 (调用形态, cmd) 做短 TTL memo。
-// 与 presence.ts 的 regMemo「60s 延迟可接受」同思路：安装/卸载后最多延迟 TTL 反映，可接受
-const COMMAND_TTL = 45_000
+// 与 presence.ts 的 regMemo「60s 延迟可接受」同思路：安装/卸载后最多延迟 TTL 反映，可接受。
+// TTL 取 2 分钟：命令装卸是低频事件且装/卸路径已有主动 clearCommandMemo 失效——45s 时与
+// overview 5s 轮询组合，稳态下每 ~45s 必产生一轮全 PATH 同步重扫脉冲，无法收敛
+const COMMAND_TTL = 120_000
 const commandMemo = new Map<string, { at: number; val: string | null }>()
 
 /** 清空 PATH 探测 memo（测试用，或安装/卸载后主动失效）。 */
