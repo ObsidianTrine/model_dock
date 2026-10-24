@@ -28,10 +28,10 @@
 
 ## C 级：管理面 / 可维护性（离转发热路径远，优先级低）
 
-- [ ] **C1 handleAdmin 路由表化**（`src/gateway/server.ts`，早期代码审查已知遗留）
-  2600 行 if 链 → 端点路由表（method+path → handler），纯可维护性重构，行为零变化。
-  价值在多 agent 并行开发下的合并冲突面收敛 + 鉴权分层显式化（M2「严格模式」的前置）。
-  验证：全量 `npm test`（管理面端点覆盖充分）+ webui-static 的 L0-5 端点审计同步改提取方式。
+- [x] **C1 handleAdmin 路由表化**（2026-10-25 实施）：admin 门后 45 端点收敛为模块级路由表
+  （`ADMIN_ROUTES`，键 = "METHOD /path"），tier-1（health/ui/relogin）与鉴权门原样保留；handler
+  逐字搬移（独立脚本逐行比对确认与原 if 块字节一致），行为零变化。L0-5 端点审计同步改为
+  双形态提取（`url ===` if 形态 + 表键形态）。全量 69 文件绿。
 
 - [ ] **C4 `safeEqual` 长度预比较——评估后放弃**（2026-10-25）：被优化的路径只在管理面跑
   （数据面 token 是 Map 查找不走 safeEqual），每 5s 轮询两次微秒级哈希，量不出收益。
