@@ -82,6 +82,13 @@ export function loadHolidayDays(): HolidayDayNamed[] {
   return loadCalendarData().days
 }
 
+/** 一次读取日历的两种视图（years 表 + 带名条目）：共用 loadCalendarData 的一次 stat+解析，
+ *  需要两种视图的调用方（网关 rt 日历缓存）不必各付一次 statSync。 */
+export function loadCalendarFull(): { years: HolidayCalendar; days: HolidayDayNamed[] } {
+  const data = loadCalendarData()
+  return { years: data.years, days: data.days }
+}
+
 export interface HolidayRange {
   name: string
   start: string

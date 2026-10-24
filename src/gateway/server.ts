@@ -71,7 +71,15 @@ function getRenderedUI(): { html: string; etag: string } {
   return renderedUICache
 }
 
-const MAX_BODY = 64 * 1024 * 1024
+/** 请求体缓冲上限（默认 16MB，可经 gateway.max_body_mb 调整）。模型名改写需要完整请求体，
+ *  全量缓冲是设计前提；16MB 覆盖 1M token 文本 + 多图 base64 的常规包体，真需要更大的
+ *  （大 PDF/多附件）在 config.toml [gateway] max_body_mb 抬上限，超限更早 413 也让异常大包
+ *  不再各占两份内存（chunks 数组 + concat 副本）。导出供单测断言换算与回落规则。 */
+const DEFAULT_MAX_BODY_MB = 16
+export function maxBodyBytes(cfg?: Config): number {
+  const mb = Number(cfg?.gateway?.max_body_mb)
+  return Number.isFinite(mb) && mb >= 1 ? Math.floor(mb) * 1024 * 1024 : DEFAULT_MAX_BODY_MB * 1024 * 1024
+}
 
 /** 收集命令输出的上限（防止日志/响应被刷爆） */
 const INSTALL_OUTPUT_MAX = 4000
@@ -177,7 +185,7 @@ export async function runClientInstall(
     }
   }
   // 同一进程刚跑完安装命令就重查 status：PATH memo（PERF-07）可能仍缓存着安装前的 miss，
-  // 不主动失效会让「装完立即可见」缩水为最多 45s 延迟（review_blockers 记）
+  // 不主动失效会让「装完立即可见」缩水为最多 memo TTL 的延迟（review_blockers 记）
   clearCommandMemo()
   const st = await adapter.status(cfg, port)
   return { ok: true, auto: !!inst?.command, output: tailText(lines), installed: st.installed, skipped }
@@ -372,7 +380,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   // 自愈「网关停摆期间窗口已变」「接入发生在窗口接管期间」两类陈旧；模型生效本身不受此影响
   // （转发按请求即时翻译）。接入/断开后由 handler 将基线置失效，下一检强制校准。
   const pickerSync = pickerSyncStates.get(rt) ?? pickerSyncStates.set(rt, { route: undefined }).get(rt)!
-  const pickerSyncTimer = setInterval(() => {
+  const pickerSyncTick = () => {
     void syncBakedClientsForDisplayRoute(rt, pickerSync, { port: rt.port })
       .then((r) => {
         if (r.changed) {
@@ -394,9 +402,19 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
         }
       })
       .catch(() => {})
-  }, 5_000)
+  }
+  // 周期 15s：定时窗口的判定粒度是分钟（HH:mm），更密的 tick 只产生注定 changed:false 的空转
+  // （路由未变时是纯内存短路）。首检延后 30s 错峰：基线初始 undefined，首检必做一次全量烤模型
+  // 客户端校准（读客户端文件 + 解析 + 比对，有内容一致守卫不写盘），不必叠在启动窗口——
+  // 同期还有 sync 引擎首 tick 与 90s 后的节假日/模型目录拉取
+  const pickerSyncFirst = setTimeout(pickerSyncTick, 30_000)
+  const pickerSyncTimer = setInterval(pickerSyncTick, 15_000)
+  pickerSyncFirst.unref?.()
   pickerSyncTimer.unref?.()
-  server.on('close', () => clearInterval(pickerSyncTimer))
+  server.on('close', () => {
+    clearTimeout(pickerSyncFirst)
+    clearInterval(pickerSyncTimer)
+  })
 
   // 节假日日历每年自动获取（数据源 holiday-cn，国务院公告人工校对）：启动 90s 后首查、之后每 24h；
   // POST /schedule/holidays-cn 可即时触发（CLI/运维用）。失败静默，不影响网关服务
@@ -458,14 +476,18 @@ function extractToken(req: http.IncomingMessage): string | null {
   return null
 }
 
-async function readBody(req: http.IncomingMessage): Promise<Buffer> {
+async function readBody(req: http.IncomingMessage, max: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
     req.on('data', (chunk: Buffer) => {
       size += chunk.length
-      if (size > MAX_BODY) {
-        reject(new UpstreamError(413, t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max: MAX_BODY })))
+      if (size > max) {
+        reject(new UpstreamError(
+          413,
+          t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max }),
+          t('模型改写需完整缓冲请求体；确需更大包体，在 config.toml 的 [gateway] 下设置 max_body_mb 后重启网关', 'Model rewriting buffers the full body; to allow larger bodies set max_body_mb under [gateway] in config.toml and restart the gateway')
+        ))
         req.destroy()
         return
       }
@@ -541,7 +563,7 @@ async function handleRequest(
     return
   }
 
-  const body = await readBody(req)
+  const body = await readBody(req, maxBodyBytes(rt.config))
   const headers: Record<string, string> = {}
   for (const [k, v] of Object.entries(req.headers)) {
     if (typeof v === 'string') headers[k] = v
@@ -672,7 +694,7 @@ async function registerWebDevice(rt: GatewayRuntime, device: string): Promise<vo
  * 跨站 drive-by 靠 SameSite=Lax 挡住；DNS rebinding 靠 hostAllowed 挡住；本机程序一律需要 token。
  */
 async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
-  const raw = await readBody(req)
+  const raw = await readBody(req, maxBodyBytes())
   if (raw.length === 0) return {}
   try {
     return JSON.parse(raw.toString('utf8'))
@@ -2388,7 +2410,7 @@ async function handleAdmin(
   }
 
   if (url === '/_modeldock/test' && req.method === 'POST') {
-    const body = await readBody(req)
+    const body = await readBody(req, maxBodyBytes(rt.config))
     let p: { profile?: string; provider?: string; model?: string; stream?: boolean; mode?: string } = {}
     try {
       p = body.length ? JSON.parse(body.toString('utf8')) : {}

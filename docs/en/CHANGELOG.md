@@ -10,6 +10,9 @@ This file records ModelDock's version history. The format follows [Keep a Change
 ### Improved
 
 - **The "In use" status card is now a slim one-line status strip**: about half the previous height, leaving more room above the fold; the service name is highlighted in blue, the route source (schedule window / pinned / failover / degraded) becomes a small colored icon chip, the status dot turns amber on failover or degradation, and the line ends with an amber warning when no fallback exists; the model and the client list are no longer shown here (client attribution lives on each service card's "used by N clients").
+- **Lower idle overhead in the background**: device sync and schedule-window checks no longer spawn keychain subprocesses or rescan directories every minute (the hidden per-minute cost with OS-keychain backends is gone), steady-state console polling probes less often, and startup-time background work is spread out instead of piling up.
+- **`adapter list` and config-import scans run in parallel**: on Windows the first run no longer stacks each desktop client's registry probe serially (previously up to 20+ seconds in the worst case); total time now roughly equals the slowest single probe.
+- **Request-body buffering cap lowered to 16MB by default**: abnormally large requests are rejected earlier (413); if you genuinely send very large payloads (big PDFs / many attachments), add `max_body_mb = 64` under `[gateway]` in config.toml and restart the gateway to raise it.
 
 ### Fixed
 
