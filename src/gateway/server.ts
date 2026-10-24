@@ -81,6 +81,20 @@ export function maxBodyBytes(cfg?: Config): number {
   return Number.isFinite(mb) && mb >= 1 ? Math.floor(mb) * 1024 * 1024 : DEFAULT_MAX_BODY_MB * 1024 * 1024
 }
 
+/** 模型目录端点视图缓存（backlog C3）：fullKnownTable() 的 8000+ 条序列化一次几百 KB，此前每次
+ *  请求都全量 stringify。缓存键 = 表对象引用——catalog.ts 的 baseMemo 在目录刷新（mtime 变化/
+ *  clearCatalogMemo）时重建对象，引用变化自然失效，无需额外接线。ETag 供 If-None-Match 命中
+ *  304，连 stringify 都省掉。 */
+let catalogViewCache: { table: object; data: string; etag: string } | null = null
+function catalogView(): { data: string; etag: string } {
+  const table = fullKnownTable()
+  if (catalogViewCache && catalogViewCache.table === table) return catalogViewCache
+  const data = JSON.stringify({ ok: true, models: table })
+  const etag = '"' + createHash('sha256').update(data).digest('base64url').slice(0, 22) + '"'
+  catalogViewCache = { table, data, etag }
+  return catalogViewCache
+}
+
 /** 收集命令输出的上限（防止日志/响应被刷爆） */
 const INSTALL_OUTPUT_MAX = 4000
 
@@ -1278,9 +1292,17 @@ async function handleAdmin(
 
   if (url === '/_modeldock/model-catalog' && req.method === 'GET') {
     // 模型元数据兜底总表（内置表 ∪ models.dev 目录，8000+ 条）：量大，单端点懒加载一次，
-    // 不进 overview（每 5s 轮询，塞进去每秒多出百 KB 流量）
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, models: fullKnownTable() }))
+    // 不进 overview（每 5s 轮询，塞进去每秒多出百 KB 流量）。序列化结果缓存 + ETag：
+    // 控制台每次刷新重拉时命中 304，不再重复 stringify/传输几百 KB（cache-control 覆盖
+    // 管理面统一 no-store 为 no-cache：可存储但必须条件重验证，与 /ui 页同款策略）
+    const { data, etag } = catalogView()
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { etag, 'cache-control': 'no-cache' })
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/json', etag, 'cache-control': 'no-cache' })
+    res.end(data)
     return
   }
 

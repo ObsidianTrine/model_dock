@@ -139,6 +139,27 @@ describe('控制台缓存与轮询优化', () => {
     expect(res.headers.get('cache-control')).toBe('no-cache')
     expect(res.headers.get('etag')).toBeTruthy()
   })
+
+  it('model-catalog（C3）：首次 200 + ETag；If-None-Match 二次 304；未命中 ETag 仍回完整大表', async () => {
+    const t = await start()
+    ctxs.push(t)
+    const url = `${t.base}/model-catalog`
+    const first = await fetch(url, { headers: ADMIN })
+    expect(first.status).toBe(200)
+    expect(first.headers.get('content-type')).toMatch(/application\/json/)
+    const etag = first.headers.get('etag')
+    expect(etag).toBeTruthy()
+    const body1 = await first.text()
+    expect(body1.length).toBeGreaterThan(1000) // 8000+ 条目录表，量级护栏
+
+    const second = await fetch(url, { headers: { ...ADMIN, 'if-none-match': etag! } })
+    expect(second.status).toBe(304)
+    expect(await second.text()).toBe('')
+
+    const third = await fetch(url, { headers: { ...ADMIN, 'if-none-match': '"stale-not-matching"' } })
+    expect(third.status).toBe(200)
+    expect(await third.text()).toBe(body1) // 同一份缓存串，逐字节一致
+  })
   // 「/overview 仍为 no-store」与「带 no-cache 请求头的 304」曾在此各有一对双胞胎
   //（上方 84-105 与 107-121 已覆盖同一语义，2026-10-21 去重删除）。
 })
