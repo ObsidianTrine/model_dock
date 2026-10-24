@@ -27,21 +27,11 @@
   openai/responses 协议每请求重新解析一次端点 URL。可按 provider 配置对象引用缓存解析结果。
   验证：单测断言同 provider 反复调用命中缓存；改端点配置后缓存失效。
 
-- [ ] **B4 reload 时不关旧 dispatcher**（`src/gateway/state.ts` reloadRuntime）
-  现状：`rt.dispatchers.clear()` 只丢引用不 close，ProxyAgent 连接池泄漏（长期运行 + 频繁改
-  代理配置时累积）。clear 前对旧值逐个 `close()`（注意共享的 direct Agent 不在此列，勿关）。
-  验证：改 provider.proxy 触发 reload 后，上游连接数不随 reload 次数增长。
-
 ## C 级：管理面 / 可维护性（离转发热路径远，优先级低）
 
 - [ ] **C1 handleAdmin 路由表化**（`src/gateway/server.ts`，早期代码审查已知遗留）
   2100 行 if 链 → 端点路由表（method+path → handler），纯可维护性重构，行为零变化。
   验证：全量 `npm test`（管理面端点覆盖充分）+ 手测控制台主要操作。
-
-- [ ] **C2 overview 轮询成本**（`src/gateway/server.ts`）
-  TTL 2s + UI 5s 轮询 = 每次轮询全量重建（逐 adapter 读文件）。TTL 提到 4.5s（等于轮询周期，
-  配置变更经 reloads 立即失效）可省约一半重建；`adminAuthorized`/cookie 解析的每请求
-  `new RegExp` 可按端口预编译。验证：控制台 5s 轮询下 CPU 采样对比；reloads 后首查即时生效。
 
 - [ ] **C3 `/model-catalog` 加 ETag**：8000+ 条全量响应，控制台懒加载一次但刷新页面即重拉；
   按 `fullKnownTable()` 内容 hash 出 ETag，命中 304 省流量。验证：二次请求返回 304。
@@ -49,7 +39,7 @@
 - [ ] **C4 `safeEqual` 长度预比较**（`src/gateway/server.ts`）：sha256 归一化是为防长度泄漏，
   但本机 admin 场景可先比长度再做常数时间比较省两次 hash。微小收益，顺手项。
 
-## 已完成（A 级，存档备查）
+## 已完成（A 级 + 后续收口，存档备查）
 
 - [x] A1 上游连接 keep-alive 调优：direct 走共享调优 Agent（空闲 55s 复用，原全局 dispatcher 4s 即断），
       ProxyAgent 透传同参数——省掉间隔超过 4s 的请求重付 TCP+TLS 握手（跨境 100ms+）。
@@ -61,3 +51,7 @@
       delta 行的 JSON.parse；StringDecoder 修复多字节字符跨 chunk 截坏导致的用量漏记。
 - [x] A5 pickTarget 定时窗口单次求值（原 3 次 hitScheduleWindows）+ 日历懒加载：无 dayFilter 窗口的
       部署零 statSync，有 dayFilter 的每请求至多 1 次。
+- [x] B4 reload 时关闭旧 dispatcher（state.ts reloadRuntime）：除共享 direct Agent 外逐个 `close()`
+      再 clear，ProxyAgent 连接池不再随 reload 累积（2026-10 随 develop 演进交付）。
+- [x] C2 overview 轮询成本：缓存 TTL 提至 6s（大于 UI 5s 轮询周期，稳态命中；配置变更经 reloads
+      立即失效）+ 命中直接回放缓存串免重复 stringify；cookie 名正则按端口预编译缓存（同上）。
