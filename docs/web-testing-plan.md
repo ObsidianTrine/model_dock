@@ -42,3 +42,20 @@ Web 控制台的后端就是 `/_modeldock/*` 管理面，gateway.test.ts 已覆�
 2. L1（半天）：跑端点审计 → 按缺口补 3-6 例契约用例。
 3. L2（1 天，含 spike）：happy-dom 环境 + 三个行为用例；spike 失败则 L2 降级为「纯函数片段测试」并在本文件记录原因。
 4. 全程遵守：不跨文件 vi.mock 共享模块；`npm test` 全绿；Windows CI 兼容（无路径/进程敏感操作，天然安全）。
+
+## 落地记录（2026-10-24，feature/webui-tests-docs）
+
+- **L0 已实施**：`test/webui-static.test.ts`（9 用例）——i18n 双语对完整（含单引号属性防漏扫）、
+  弹层 foot msg 槽位（白名单：通用确认弹层 mCancel/mOk 先关后执行、反馈按分流规则落页面 toast；
+  `foot: []` 无弹层内动作者豁免）、toast 容器唯一、惰性 label 禁直接求值、端点漂移审计（前端
+  调用 ↔ 服务端路由双向；反向无引用清单只打印不阻断）。**存量零违规**，无需修页面代码。
+- **L2 已实施且 spike 成功**：`test/webui-dom.test.ts`（4 用例，`@vitest-environment happy-dom`，
+  新增 devDependency `happy-dom@21` 纯 JS 无 native，SEA 兼容）——4700 行内嵌脚本在 happy-dom
+  求值 + 首屏 load() 走通；overview 渲染契约（2 服务 2 卡 + 「正在使用」pill）；语言切换重渲染
+  （静态 data-i18n 节点 + 动态服务卡跟随且可逆）；弹层校验失败写 foot 槽位而非全局 toast。
+  实现要点：伪定时器冻结 5s/60s 轮询（singleFork 共享进程防滞留，afterAll 还原）、fetch 按端点
+  stub 夹具、`innerHTML` 注入 body 段后 `new Function` 手动求值脚本（happy-dom 不执行 innerHTML
+  里的 `<script>`）。
+- **L1 维持既有覆盖**：gateway.test.ts 对管理面端点已充分；端点契约形状断言由 L2 的 overview
+  渲染契约用例部分承担（夹具即契约，键改名 → 渲染断言红灯）。
+- **L3 不变**：发布前 agent + browser-use 对沙箱实例抽查。

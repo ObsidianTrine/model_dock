@@ -2,15 +2,16 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 当前版本 | **v1.0 · 发布基线** |
-| 对齐实现 | 公开仓库 v1.0.0（git tag，2026-10-11 发布）；develop 分支 |
+| 当前版本 | **v1.1 · as-built 刷新** |
+| 对齐实现 | develop 分支（2026-10-24；发布版本见 git tag 与 CHANGELOG，最新 v1.2.1 + 未发布段） |
 | 作者 | ObsidianTrine |
-| 日期 | 2026-10-11 |
+| 日期 | 2026-10-24 |
 
 **版本历史**
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| v1.1 | 2026-10-24 | as-built 刷新（对齐 develop）：请求体上限改为默认 16MB 且可经 `gateway.max_body_mb` 调整；修正 R1/T2/§6.2 的「overview 返回 key 明文」描述（现为 `hasKey` 布尔 + 显式 `reveal-key` 端点，带审计）；测试基线与里程碑表更新；其余章节经复核与实现一致 |
 | v1.0 | 2026-10-11 | 初版（随公开仓库 v1.0.0 发布）：以实现为准（as-built）的概要设计——术语表、ADR 决策（网关为主/配置即 TOML/密钥分层/纯 JS 依赖/SEA 检测/failover 语义/别名透传/定时切换实时求值）、双槽位路由选路语义、子系统设计、接口设计、关键流程、威胁模型、非功能指标、测试映射（642 例 / 46 条命令 / 20 预设基线）、风险处置与规划项现状 |
 
 **评审记录**（评审后填写）
@@ -228,7 +229,7 @@ SEA 检测以 `process.execPath` 文件名判断（ADR-6）。守护进程单实
 2. URL 分流：`/_modeldock/*` → 管理面；无 token 的 `GET /` → 302 控制台；`/favicon.ico` → 204；**其余所有路径不设白名单**，认证后整体透传上游。
 3. 认证（双轨）：`x-modeldock-admin` 头（CLI 用，可附 `x-modeldock-profile` 覆盖路由）→ 管理面；否则取 `Authorization: Bearer` 或 `x-api-key` → token→harness 索引；未知 token 401。
 4. 路由解析：profile 覆盖 → harness 钉死的 `route`（非 `default` 时）→ `active_profile`；任一层缺失返回 503 + 可执行修复提示。
-5. 读请求体上限 64MB（超出 413）。
+5. 读请求体上限默认 16MB（`gateway.max_body_mb` 可调；超出 413，报错附调整指引）。
 6. **模型重写**：仅对 6 条路由路径生效（`/v1/messages`、`/v1/messages/count_tokens`、`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/embeddings`）；规则为精确 alias 优先于 `*` 通配，未命中透传，无 model 字段注入 `default_model`（ADR-8）；例外：Claude 内置模型名（`claude-*`）未命中别名时改写为 `default_model`（开箱即用），discovery 别名（`anthropic.` 前缀 ID）转发前还原真实 ID；其余路径纯透传。**`GET /v1/models` 本地合成**（不透传上游）：返回当前选路目标服务的模型目录（显示名 + ID，Anthropic 形状为主、兼容 OpenAI 字段），跟随钉定路由与手动切换——上游目录不等于用户筛选过的目录，上游也未必实现该接口。
 7. **出站构造**：按入站 path 推断客户端协议，取 `provider.endpoints[protocol]`（缺端点 400 可操作错误）；剥离 hop-by-hop / host / content-length / 入站凭据头；按 `auth_style` 注入真实 key（anthropic 补 `anthropic-version: 2023-06-01` 缺省值）。
 8. **上游代理**：`provider.proxy = direct | env | http://...`（undici ProxyAgent，兼容 clash），dispatcher 按 provider 缓存。
@@ -245,7 +246,7 @@ SEA 检测以 `process.execPath` 文件名判断（ADR-6）。守护进程单实
 | headersTimeout | 60 s | 上游响应头超时 |
 | keepAliveTimeout | 75 s | 连接保活 |
 | `gateway.retries` | 1 | 仅传输层连接错误类（ECONNREFUSED / ECONNRESET / ENOTFOUND / ETIMEDOUT / EPIPE / UND_ERR_CONNECT_TIMEOUT） |
-| 请求体上限 | 64 MB | 超出 413 |
+| 请求体上限 | 16 MB（`gateway.max_body_mb` 可调） | 超出 413；模型改写需完整缓冲请求体 |
 | 热加载防抖 | 250 ms | fs.watch 触发后合并 |
 
 **自动路由候选链**（`gateway/state.ts` 的 `pickTarget` / `parseFallbackEntry`；恒启用——故障切换不依赖任何开关）
@@ -318,7 +319,7 @@ v1.0.0 已包含：**LAN 手机控制台**（第二监听器 `/m` 页，扫码�
 | `profiles.<name>` | `provider`、`default_model?`、`aliases?`（支持 `*` 通配）、`fallback?`（string[]） | 路由档案 |
 | `harness.<id>` | `mode`（gateway/file）、`route?`（default=跟随 active_profile）、`token?`、`attached_at?`、`files?` | 接入状态。`mode=file` 为 schema 预留枚举，当前所有内置适配器均按网关模式写入 |
 | `adapter_packs.<id>` | `format`（json/toml/yaml）、`config_file`、`detect?`、`upsert`（路径表达式 → 值模板，变量 `{token}{port}{base_url}{base_url_openai}`） | L2 声明式接入 |
-| `gateway` | `port?` / `idle_timeout_ms?` / `headers_timeout_ms?` / `retries?` / `auto_failover?`（程序自动选主开关，默认 false；故障切换不受影响）/ `auto_route_provider?`（「当前」槽人工钉定）/ `route_next?`（「下一个切换」槽人工钉定）/ `failover_status_codes?`（已送达状态允许切换的备用状态码，默认空）/ `schedule?`（定时切换：windows / enabled；窗口带 dayFilter 生效日类型，节假日日历由 holiday-cn 缓存判定） | 网关行为 |
+| `gateway` | `port?` / `idle_timeout_ms?` / `headers_timeout_ms?` / `retries?` / `max_body_mb?`（请求体缓冲上限 MB，默认 16）/ `auto_failover?`（程序自动选主开关，默认 false；故障切换不受影响）/ `auto_route_provider?`（「当前」槽人工钉定）/ `route_next?`（「下一个切换」槽人工钉定）/ `failover_status_codes?`（已送达状态允许切换的备用状态码，默认空）/ `schedule?`（定时切换：windows / enabled；窗口带 dayFilter 生效日类型，节假日日历由 holiday-cn 缓存判定） | 网关行为 |
 | `security` | `store?`（file/keychain） | 密钥后端显式覆盖 |
 | `backup` | `keep?` | 每 harness 快照滚动保留数（默认 20，非法或 <1 钳到 1） |
 
@@ -414,7 +415,7 @@ v1.0.0 已包含：**LAN 手机控制台**（第二监听器 `/m` 页，扫码�
 |---|---|---|---|
 | `/_modeldock/health` | GET | 只读免鉴权 | 存活 / uptime / reloads |
 | `/_modeldock/ui` | GET | 页面免鉴权；`?token=` 校验通过种 HttpOnly cookie 后 302 | Web 控制台 |
-| `/_modeldock/status`、`/config`、`/overview`、`/logs?n=` | GET | 只读免鉴权 | 概要 / 配置视图 / 控制台总览（含 key 明文，见 R1）/ 环形日志 |
+| `/_modeldock/status`、`/config`、`/overview`、`/logs?n=` | GET | 只读免鉴权 | 概要 / 配置视图 / 控制台总览（overview 只含 `hasKey` 布尔，key 明文经显式 `POST /service/reveal-key` 按需取且记审计）/ 环形日志 |
 | `/_modeldock/import/detect` | GET | 只读免鉴权 | 存量配置扫描 |
 | `/_modeldock/import/apply` | POST | 修改类 | 一键导入 |
 | `/_modeldock/service`、`/service/update`、`/service/delete`、`/switch` | POST | 修改类 | 服务增删改与切换 |
@@ -541,7 +542,7 @@ sequenceDiagram
 | # | 资产 | 威胁 | 对策 |
 |---|---|---|---|
 | T1 | 上游 API key | 泄露到 harness 配置 / 仓库 | key 只存 ModelDock 安全后端；harness 配置只见本地 token；`list`/`show` 与 diff 展示一律脱敏 |
-| T2 | 上游 API key | 本机其他进程/用户读取 | 平台安全后端（Keychain/DPAPI/Secret Service/机器绑定 AES）；明文仅 0600 末位降级；`overview` 端点返回 key 明文属本机边界已知取舍（R1） |
+| T2 | 上游 API key | 本机其他进程/用户读取 | 平台安全后端（Keychain/DPAPI/Secret Service/机器绑定 AES）；明文仅 0600 末位降级；`overview` 只返回 `hasKey` 布尔，key 明文经显式 `POST /service/reveal-key`（需 admin 凭据 + Host 白名单）按需取且记审计（v1.0 曾随总览批量下发，已收紧） |
 | T3 | 网关转发通道 | 未授权进程经网关调用上游 | per-harness token（24 字节随机）；未知 token 401；仅监听 127.0.0.1 |
 | T4 | 配置 | 浏览器 drive-by / DNS rebinding 篡改 | 修改类端点要求浏览器同源（Host=127.0.0.1 且 Origin 同源或 `Sec-Fetch-Site: same-origin`）或 admin token；管理面响应不带 CORS 头 |
 | T5 | 用户数据 | 日志泄露 prompt | 日志只记元数据（方法/路径/状态/耗时/provider/model），不落请求体 |
@@ -593,15 +594,16 @@ sequenceDiagram
 
 ## 11. 测试与验收
 
-### 11.1 测试策略与覆盖（vitest，642 用例 · 47 文件，`fakeHome()` 隔离）
+### 11.1 测试策略与覆盖（vitest，`fakeHome()` 隔离）
 
-> 642 例 / 47 文件为本机 macOS 实跑基线（642 passed + 4 skipped 平台相关用例，145s）。单套件精确用例数随迭代漂移快，以 CI 与 `docs/usage.md` 测试基线为准，此处按子系统分域：
+> 用例数随迭代漂移快，此处记 as-built 基线：**851 例 / 69 文件（2026-10-24 develop 本机 macOS 实跑，845 passed + 6 skipped）**；v1.0 基线为 642 例 / 47 文件。以 CI 与 `docs/usage.md` 测试基线为准，此处按子系统分域：
 
 | 域 | 套件（`test/`） | 覆盖 |
 |---|---|---|
 | 网关 | `gateway` / `gatewaycmd` / `hotpath` / `attach-port` / `modelmeta` | 数据面认证/别名重写/SSE 透传/协议路由/错误翻译/本地 `/v1/models`；管理面防跨站与端点；自动路由与定时切换 pickTarget / 熔断（含 quota 类）/ 端到端 failover |
+| Web 控制台 | `webui-static`（L0 静态契约）/ `webui-dom`（L2 happy-dom DOM 行为）/ `ui-html` / `ui-edit-backfill` / `console-cache` / `dedup-smoke` | i18n 双语对/弹层 msg 槽位/惰性 label/端点漂移审计；首屏渲染契约、语言切换重渲染、弹层校验错误写槽位；HTML 结构配对与脚本编译冒烟 |
 | 适配与安装 | `adapters` / `install` / `cliinstall` / `noderuntime` | 各 harness attach/detach（takeover、catalog 回写、既有条目保留）、applyChanges 引擎、客户端自动安装与托管 Node bootstrap |
-| 配置与备份 | `store` / `backup` / `presets` / `util` | config 往返与原子写、secrets 各后端与 0600（按平台分支）、快照/sha256/保留数、预设库、别名 glob/JSONPath/diff 脱敏/L2 pack |
+| 配置与备份 | `store` / `backup` / `presets` / `util` / `perf-fixes` / `fsx-memo` | config 往返与原子写、secrets 各后端与 0600（按平台分支）、快照/sha256/保留数、预设库、别名 glob/JSONPath/diff 脱敏/L2 pack、请求体上限换算、PATH memo |
 | 运维 | `autostart` / `reset` / `reset-cli` / `uninstall` | 三平台自启服务文件生成、重置与卸载（子进程端到端 + 选项注册） |
 | 同步与云 | `syncagent` / `syncdoc` / `syncexport` / `syncpull` / `synctarget` / `cloudconsole` / `cloudserver` | .msync 配置包、WebDAV/localdir 目标与轮换、同步代理收敛、云端控制面 |
 | LAN / 更新 / 定时 / i18n | `lan` / `lansync` / `update` / `update-cli` / `update-notes` / `update-web` / `daytype` / `i18n` | 手机控制台与扫码、自更新链路与发布说明、生效日类型、双语文案 |
@@ -623,6 +625,8 @@ sequenceDiagram
 | 版本 | 日期 | 内容 |
 |---|---|---|
 | v1.0.0 | 2026-10-11 | 首个公开发布版本：单机闭环（网关 + 预设 + 适配器体系 + 快照 + 导入 + 诊断 + Web 控制台）、五平台 SEA 单文件与自动发布、密钥安全存储（Keychain / DPAPI / Secret Service / machine-id AES）、网关开机自启（三平台服务）、客户端「安装并接入」闭环（含托管 Node bootstrap）、定时切换与自动路由（双槽位）、多机同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、托盘、双语 i18n |
+| v1.1.x – v1.2.1 | 2026-10-13 ~ 10-21 | 「配置包」统一搬家入口、dev 沙箱隔离治理、「正在使用」状态条与路由信息如实化、一键导入卡治理、doctor `--fix`/`--json`、托盘版本常驻、两轮性能批修（详见 CHANGELOG） |
+| 未发布（develop） | — | 性能批修（同步取密钥/适配器探测/导入扫描并行化、周期任务降频错峰、请求体上限默认 16MB 可调）、Web 控制台分层测试落地（L0 静态契约 + L2 happy-dom DOM 行为，见 docs/web-testing-plan.md） |
 
 **超出原设计规划已交付**（as-built 修正）：请求级 failover + 熔断（原列 M3）、opencode / mimo-code / workbuddy 适配器、Web 控制台安装-接入-断开闭环、Linux machine-id 加密后端、额度耗尽熔断（402 收编 + quota 熔断）、Claude 内置模型名网关兜底改写、网关本地 `/v1/models`、模型选择器策划（网关/直连双模式）、多机配置同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、`harness` 运行期管理组、托盘、双语 i18n、客户端安装托管 Node bootstrap（含钉版健康门禁）、`config export/import` 加密配置包、`presets.json` 用户自定义预设扩展、models.dev 元数据补全。
 
@@ -640,7 +644,7 @@ sequenceDiagram
 
 | # | 风险/问题 | 现状 | v1.0 处置 |
 |---|---|---|---|
-| R1 | 管理面只读端点完全免鉴权，`overview` 返回 key 明文 | 依据"本机边界 + 无 CORS 头"取舍；本机任意非浏览器进程可无凭据读取全部配置与明文 key | **接受**（本机单用户边界）；「严格模式」（GET 也要求 admin token）列为 M2 候选 |
+| R1 | 管理面只读端点完全免鉴权 | 依据"本机边界 + 无 CORS 头"取舍；本机任意非浏览器进程可无凭据读取配置元数据（key 明文已不随只读端点下发：overview 只含 `hasKey` 布尔，明文走需凭据且记审计的 `POST /service/reveal-key`） | **接受**（本机单用户边界）；「严格模式」（GET 也要求 admin token）列为 M2 候选 |
 | R2 | `/install` 在网关进程内 spawn shell | 命令为编译期常量，无注入面；但管理面鉴权一旦被绕过即等同本机代码执行 | **接受**；收敛为 CLI 侧执行列为 M2 候选 |
 | R3 | `backup.keep` 配置项已定义未接线（落盘引擎以硬编码 20 二次修剪，配大无效） | v1.0.0 已统一由配置驱动，非法/<1 钳到 1 | **已修复**（含回归测试） |
 | R4 | 端口漂移：占用时自动 +1，已 attach 的 harness 若指向旧端口会失效 | 当前以实际端口提示缓解，attach 用实际端口；跨重启漂移仍是边界场景 | **接受**；"固定端口失败即退出"选项列为 M2 候选 |
