@@ -1079,6 +1079,1416 @@ async function runRemoteRequest(requestId: string, ips: string[], port: number):
   }
 }
 
+// ===== admin 端点处理器（模块级，逐字搬自 handleAdmin 原 if 链，行为零变化）=====
+// 分层鉴权不变：tier-1 豁免端点与 admin 门仍留在 handleAdmin；命中 ADMIN_ROUTES 即已过门。
+
+/** admin 门之后各端点处理器的请求上下文：handleAdmin 每请求构造一次 */
+interface AdminCtx {
+  rt: GatewayRuntime
+  req: http.IncomingMessage
+  res: http.ServerResponse
+  /** 请求级审计闭包（handleAdmin 每请求构造，见原 audit 函数） */
+  audit: (op: Bilingual, target: string | Bilingual, detail?: Bilingual, err?: Bilingual | string) => void
+  o: { idle: number; retries: number }
+}
+type AdminHandler = (c: AdminCtx) => Promise<void>
+
+// attach 请求体里的 client_profiles：["desktop"] 或 "desktop,web"（后者兼容表单直传）；非法输入一律忽略为全部
+const parseClientProfiles = (v: unknown): string[] | undefined => {
+  const list = Array.isArray(v)
+    ? v.map((x) => String(x).trim()).filter(Boolean)
+    : typeof v === 'string'
+      ? v.split(',').map((s) => s.trim()).filter(Boolean)
+      : []
+  return list.length > 0 ? list : undefined
+}
+
+// 轮换管理令牌（需当前已鉴权，故位于 admin 门之后）：旧 token/cookie 立即失效。
+async function hRotate(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  try {
+    rt.adminToken = randomToken('mdkadm')
+    // 只更新状态文件里的 token；无状态文件（测试/嵌入式启动）则只换内存态
+    const state = await readGatewayState()
+    if (state) await writeGatewayState({ ...state, admin_token: rt.adminToken })
+    const host = req.headers.host ?? `127.0.0.1:${rt.port ?? ''}`
+    const consoleUrl = `http://${host}/_modeldock/ui?token=${rt.adminToken}`
+    audit(bi('轮换管理令牌', 'Rotate admin token'), '-', bi('旧令牌已失效', 'Old token revoked'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, admin_token: rt.adminToken, console_url: consoleUrl }))
+  } catch (e) {
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hStatus(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      ok: true,
+      active_profile: rt.config.active_profile ?? null,
+      providers: Object.keys(rt.config.providers),
+      profiles: Object.keys(rt.config.profiles),
+      harness: Object.keys(rt.config.harness),
+      reloads: rt.reloads,
+      uptime_ms: Date.now() - rt.startedAt,
+    })
+  )
+  return
+}
+
+// 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
+async function hUpdateStatus(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  // 惰性周期重查：控制台每 60s 轮询一次状态，顺带触发一次检查——
+  // kick 内部有 成功 24h TTL / 失败 30min 退避 双守卫，命中即静默跳过，
+  // 常驻网关因此不必重启也能在控制台开着时发现新版本（此前只在启动时查一次）
+  void kickUpdateCheck(rt).catch(() => {})
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(await getUpdateStatus(rt)))
+  return
+}
+
+async function hUpdateCheck(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  // 立即返回，页面轮询 status 取结果（GitHub 检查可能十几秒，不占请求）
+  void kickUpdateCheck(rt, { force: true }).catch(() => {})
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true }))
+  return
+}
+
+async function hUpdateApply(c: AdminCtx): Promise<void> {
+  const { rt, res, audit } = c
+  const r = applyUpdate(rt, { argv: updateDaemonArgs() })
+  if (r.started) {
+    audit(bi('一键更新', 'One-click update'), '-', bi('开始更新到 v{v}，网关将短暂中断', 'Updating to v{v}; the gateway restarts briefly', { v: r.latest ?? '?' }))
+  } else {
+    const reasonZh = r.reason === 'in_progress' ? '更新已在进行中' : '没有可安装的新版本'
+    const reasonEn = r.reason === 'in_progress' ? 'an update is already in progress' : 'no new version to install'
+    audit(bi('一键更新', 'One-click update'), '-', bi('未执行：{r}', 'Not started: {r}', { r: bi(reasonZh, reasonEn) }))
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: r.started, ...r }))
+  return
+}
+
+async function hLogs(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const n = Math.min(500, Math.max(1, Number(q.get('n') ?? 50) || 50))
+  const total = rt.ring.length
+  // page 从 1 数起，第 1 页是最新 n 条（ring 按 时间正序 追加）；越界页返回空数组
+  const page = Math.max(1, Number(q.get('page') ?? 1) || 1)
+  const pages = Math.max(1, Math.ceil(total / n))
+  const end = Math.max(0, total - (page - 1) * n)
+  const start = Math.max(0, end - n)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ logs: rt.ring.slice(start, end), total, page, pages }))
+  return
+}
+
+async function hConfig(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const view = await buildConfigView(rt)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(view))
+  return
+}
+
+// 面向任务的服务端点（Web 控制台 v2，全部用户语言，无内部概念）
+async function hModelCatalog(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  // 模型元数据兜底总表（内置表 ∪ models.dev 目录，8000+ 条）：量大，单端点懒加载一次，
+  // 不进 overview（每 5s 轮询，塞进去每秒多出百 KB 流量）。序列化结果缓存 + ETag：
+  // 控制台每次刷新重拉时命中 304，不再重复 stringify/传输几百 KB（cache-control 覆盖
+  // 管理面统一 no-store 为 no-cache：可存储但必须条件重验证，与 /ui 页同款策略）
+  const { data, etag } = catalogView()
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { etag, 'cache-control': 'no-cache' })
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json', etag, 'cache-control': 'no-cache' })
+  res.end(data)
+  return
+}
+
+async function hOverview(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const cached = overviewCache
+  // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
+  if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(cached.data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
+    return
+  }
+  const view = await buildOverview(rt)
+  const data = JSON.stringify(view)
+  overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(data)
+  return
+}
+
+async function hFetchModels(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  // 添加服务时预览拉取：按临时地址+Key 拉取模型，不落盘。
+  // 编辑弹窗场景传 id 而不传 key（Key 输入框留空=不修改）：用该服务已保存的 Key 拉取
+  const b = await jsonRequestBody(req)
+  const baseUrl = typeof b.base_url === 'string' ? b.base_url.trim() : ''
+  let key = typeof b.key === 'string' ? b.key.trim() : ''
+  const refId = typeof b.id === 'string' ? b.id.trim() : ''
+  if (!key && refId) {
+    const ref = rt.config.providers[refId]
+    if (!ref) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: refId }))
+    key = (await getSecret(ref.key_ref)) ?? ''
+    if (!key) return sendError(res, 400, t('已保存的 Key 不可读（未设置或系统安全后端拒绝访问），请手动粘贴 Key 后拉取', 'Saved key unreadable (not set or the OS keychain refused access); paste the key manually and fetch again'))
+  }
+  const proto = (b.protocol === 'openai' || b.protocol === 'responses') ? b.protocol : 'anthropic'
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return sendError(res, 400, t('请先填写协议接口地址（http/https）', 'Fill in the endpoint URL first (http/https)'))
+  if (!key) return sendError(res, 400, t('key 不能为空：请先粘贴 Key 再拉取', 'Key is empty: paste the key before fetching'))
+  const provider: import('../config/types.js').ProviderConfig = {
+    base_url: baseUrl,
+    protocol: proto,
+    auth_style: 'bearer',
+    key_ref: key,
+    proxy: 'direct',
+  }
+  /** 拉取失败/无结果时按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）。声明放在首个调用点之前。 */
+  function knownFallback() {
+    const fb = knownModelsForBaseUrl(baseUrl)
+    return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
+  }
+  // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响
+  const failKey = `${proto}|${baseUrl}|${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+  let cachedFail = false
+  try {
+    const recentFail = fetchModelFailMemo.get(failKey)
+    if (recentFail && Date.now() - recentFail.at < FETCH_MODEL_FAIL_TTL_MS) {
+      cachedFail = true
+      throw new Error(recentFail.msg)
+    }
+    const f = await fetchModelIds(provider)
+    let arr: { id: string; display: string; context_window: number | null; max_output: number | null; capabilities: string[] }[] = f.ids.map((id: string) => {
+      // 填充链：上游响应自带值 > 内置表 > models.dev 目录（按 base_url host 精确匹配优先）；能力只看内置表（上游不报此项）
+      const km = resolveModelMeta(id, null, { upstream: f.meta?.[id], baseUrl })
+      return { id, display: f.display[id] ?? id, context_window: km?.context_window ?? null, max_output: km?.max_output ?? null, capabilities: km?.capabilities ?? [] }
+    })
+    let from = 'fetched'
+    if (arr.length === 0) { arr = knownFallback(); from = 'known' }
+    if (arr.length === 0) return sendError(res, 400, t('未拉取到模型，且本地没有该厂商的已知模型', 'No models fetched and no known models for this vendor locally'), t('可在「编辑服务」里手动登记模型', 'You can register models manually in "Edit Service"'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, protocol: proto, from, models: arr }))
+  } catch (e) {
+    if (!cachedFail) rememberFetchModelFail(failKey, (e as Error).message)
+    // 拉取失败 → 按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）
+    const arr = knownFallback()
+    if (!arr.length) return sendError(res, 400, t('拉取模型失败：{msg}', 'Failed to fetch models: {msg}', { msg: (e as Error).message }), t('检查接口地址 / Key / 网络（境外上游需代理）', 'Check the endpoint URL / key / network (overseas upstreams need a proxy)'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, protocol: proto, from: 'known', models: arr }))
+  }
+  return
+}
+
+async function hServiceAdd(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const r = await addService(String(b.presetId ?? ''), String(b.key ?? ''), {
+      setActiveIfEmpty: b.setActiveIfEmpty !== false,
+      fetch: b.fetch !== false,
+      name: typeof b.name === 'string' ? b.name : undefined,
+      base_url: typeof b.base_url === 'string' ? b.base_url : undefined,
+      protocol: (b.protocol === 'anthropic' || b.protocol === 'openai' || b.protocol === 'responses') ? b.protocol : undefined,
+      endpoints: b.endpoints && typeof b.endpoints === 'object' && !Array.isArray(b.endpoints) ? b.endpoints : undefined,
+      models: b.models && typeof b.models === 'object' && !Array.isArray(b.models) ? b.models : undefined,
+      defaultModel: typeof b.default_model === 'string' && b.default_model.trim() ? b.default_model.trim() : undefined,
+      fallback: Array.isArray(b.fallback) ? b.fallback.map((x: unknown) => String(x)) : undefined,
+    })
+    await reloadRuntime(rt)
+    audit(
+      bi('添加服务', 'Add service'),
+      r.providerId,
+      biCat(
+        bi('预设 {preset}，路由 {route}，模型 {n} 个', 'Preset {preset}, route {route}, {n} models', { preset: String(b.presetId ?? '-'), route: r.profileName, n: r.fetched }),
+        r.fetchError ? bi('（拉取失败已兜底：{msg}）', ' (fetch failed, fell back: {msg})', { msg: r.fetchError }) : ''
+      )
+    )
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r }))
+  } catch (e) {
+    audit(bi('添加服务', 'Add service'), String(b.presetId ?? '-'), undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSwitch(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    // 一次整包落盘完成 active_profile + 人工钉定主服务（人为修改优先于定时窗口与自动选路），默认路由同步跟随
+    // 最后一次人工选择；钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位
+    const profileName = await switchToServiceWithRoute(String(b.service ?? ''), rt.config.gateway?.auto_failover === true)
+    await reloadRuntime(rt)
+    // dsh/workbuddy/zcode 的模型列表烙在客户端配置文件里，切全局后需按新路由重写才跟随
+    const baked = await refreshBakedModelClients({ port: rt.port })
+    const detail = biCat(
+      bi('当前路由 → {route}', 'Current route → {route}', { route: profileName }),
+      baked.refreshed.length ? bi('；已同步重写 {list} 的客户端配置', '; rewrote client configs for {list}', { list: biJoin('、', ', ', baked.refreshed) }) : '',
+      baked.warnings.length ? bi('；{list}', '; {list}', { list: biJoin('；', '; ', baked.warnings) }) : ''
+    )
+    audit(bi('切换服务', 'Switch service'), String(b.service ?? '-'), detail)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, service: b.service, profile: profileName, ...baked }))
+  } catch (e) {
+    audit(bi('切换服务', 'Switch service'), String(b.service ?? '-'), undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hAutoRoute(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    // 部分更新语义：未传的字段保持现状（开关 / 主服务钉定 / 下一个切换钉定 / 限流切换 / 自动备用链在 UI 各自独立调用）
+    const enabled = b.enabled === undefined
+      ? rt.config.gateway?.auto_failover === true
+      : b.enabled === true || b.enabled === 'true'
+    const provider = 'provider' in b
+      ? (typeof b.provider === 'string' && b.provider.trim() ? b.provider.trim() : null)
+      : undefined
+    const failoverOn429 = b.failoverOn429 === undefined ? undefined : b.failoverOn429 === true
+    const autoFallback = b.autoFallback === undefined ? undefined : b.autoFallback === true
+    const next = 'next' in b
+      ? (typeof b.next === 'string' && b.next.trim() ? b.next.trim() : null)
+      : undefined
+    const r = await setAutoRoute(enabled, provider, failoverOn429, autoFallback)
+    const n = next === undefined ? undefined : await setRouteNext(next)
+    await reloadRuntime(rt)
+    audit(
+      bi('自动路由', 'Auto route'),
+      enabled ? bi('开启', 'on') : bi('关闭', 'off'),
+      biCat(
+        `auto_failover=${r.enabled} primary=`,
+        r.provider ?? bi('自动', 'auto'),
+        n === undefined ? '' : biCat(' next=', n ?? bi('自动', 'auto')),
+        failoverOn429 === undefined ? '' : bi(' 限流切换={v}', ' failover-on-429={v}', { v: failoverOn429 ? bi('开', 'on') : bi('关', 'off') }),
+        autoFallback === undefined ? '' : bi(' 自动备用链={v}', ' auto-fallback={v}', { v: autoFallback ? bi('开', 'on') : bi('关', 'off') })
+      )
+    )
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r, next: n ?? rt.config.gateway?.route_next ?? null }))
+  } catch (e) {
+    audit(bi('自动路由', 'Auto route'), '-', undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSchedule(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 定时切换：整体替换 {enabled, windows}。窗口按配置顺序取首个命中；空 windows = 清除
+  const b = await jsonRequestBody(req)
+  const enabled = b.enabled !== false
+  if (b.windows !== undefined && !Array.isArray(b.windows)) {
+    return sendError(res, 400, t('windows 应为数组', 'windows must be an array'))
+  }
+  const windows: import('../config/types.js').ScheduleWindow[] = []
+  for (const w of b.windows ?? []) {
+    const start = String(w?.start ?? '').trim()
+    const end = String(w?.end ?? '').trim()
+    const target = String(w?.target ?? '').trim()
+    const hhmm = /^([01]?\d|2[0-3]):[0-5]\d$/
+    if (!hhmm.test(start) || !hhmm.test(end)) {
+      return sendError(res, 400, t('时段「{from}-{to}」无效，时间应为 HH:mm', 'Window "{from}-{to}" is invalid; times must be HH:mm', { from: start || '?', to: end || '?' }))
+    }
+    if (start === end) return sendError(res, 400, t('时段「{from}-{to}」起止相同，不会生效', 'Window "{from}-{to}" has identical start and end; it would never apply', { from: start, to: end }))
+    const parsed = parseFallbackEntry(target)
+    if (!parsed) return sendError(res, 400, t('时段目标「{target}」无效，应为 服务ID 或 服务ID:模型ID', 'Window target "{target}" is invalid; expected ServiceID or ServiceID:ModelID', { target }))
+    if (!rt.config.providers[parsed.providerId]) {
+      return sendError(res, 400, t('时段目标服务「{id}」不存在', 'Window target service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
+    }
+    // 窗口模式：avoid（避开该服务）或缺省 prefer（优先走该服务/模型）；avoid 仅到服务粒度，模型部分剥掉按整个服务避开
+    const mode = w.mode === undefined || w.mode === null || w.mode === '' ? undefined : String(w.mode).trim()
+    if (mode !== undefined && mode !== 'prefer' && mode !== 'avoid') {
+      return sendError(res, 400, t('时段模式「{mode}」无效，应为 prefer（优先走）或 avoid（避开）', 'Window mode "{mode}" is invalid; expected prefer or avoid', { mode }))
+    }
+    const avoid = mode === 'avoid'
+    // 生效日类型：缺省/any=每天；workday=周一至五与调休补班日（不含法定节假日）；weekend；holiday
+    const dayFilterRaw = w.dayFilter === undefined || w.dayFilter === null || w.dayFilter === '' ? undefined : String(w.dayFilter).trim()
+    if (dayFilterRaw !== undefined && dayFilterRaw !== 'any' && dayFilterRaw !== 'workday' && dayFilterRaw !== 'weekend' && dayFilterRaw !== 'holiday') {
+      return sendError(res, 400, t('生效日类型「{v}」无效，应为 any / workday / weekend / holiday', 'Day filter "{v}" is invalid; expected any / workday / weekend / holiday', { v: dayFilterRaw }))
+    }
+    const dayFilter = !dayFilterRaw || dayFilterRaw === 'any' ? undefined : (dayFilterRaw as 'workday' | 'weekend' | 'holiday')
+    let days: number[] | undefined
+    if (Array.isArray(w.days)) {
+      const set = new Set<number>()
+      for (const d of w.days as unknown[]) {
+        const n = Number(d)
+        if (Number.isInteger(n) && n >= 1 && n <= 7) set.add(n)
+      }
+      days = [...set]
+      if (days.length === 0) days = undefined
+    }
+    windows.push({
+      start,
+      end,
+      target: !avoid && parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId,
+      ...(avoid ? { mode: 'avoid' as const } : {}),
+      ...(days ? { days } : {}),
+      ...(dayFilter ? { dayFilter } : {}),
+    })
+  }
+  await persistConfig(rt, (c) => {
+    const g: import('../config/types.js').GatewayConfig = { ...(c.gateway ?? {}) }
+    if (!windows.length) delete g.schedule
+    else g.schedule = { enabled, windows }
+    c.gateway = g
+  })
+  audit(bi('定时切换', 'Schedule'), enabled ? bi('启用', 'enabled') : bi('停用', 'disabled'), bi('{n} 个时段', '{n} windows', { n: windows.length }))
+  // 用户开始使用定时切换后立即后台拉取一次法定节假日（数据源 holiday-cn，失败静默）
+  void refreshCalendar(rt, { manual: false }).catch(() => {})
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, windows: windows.length }))
+  return
+}
+
+async function hHolidaysCn(c: AdminCtx): Promise<void> {
+  const { rt, res, audit } = c
+  // 手动触发节假日日历更新（控制台已删手动按钮，日历每日自动更新；端点留给 CLI/运维）：拉取今年/明年数据写缓存，日类型判定随之生效
+  const r = await refreshCalendar(rt, { manual: true }).catch((e) => {
+    throw Object.assign(new Error(e instanceof Error ? e.message : String(e)), { hint: t('请检查网络后重试；数据源为 holiday-cn（依据国务院办公厅公告校对）', 'Check the network and retry; data source is holiday-cn (verified against State Council announcements)') })
+  })
+  audit(
+    bi('节假日日历', 'Holiday calendar'),
+    bi('获取', 'Fetch'),
+    r.years.length
+      ? bi('更新 {years}，共 {n} 条', 'Updated {years}, {n} entries', { years: biJoin('、', ', ', r.years), n: r.updatedDays })
+      : bi('数据源无变化', 'No changes from data sources')
+  )
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, ...r }))
+  return
+}
+
+async function hLanGet(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  // 手机简版控制台状态（二维码只对已过 admin 鉴权的本机控制台返回）
+  // 顺带重算默认出口地址：换 Wi-Fi / 起停 VPN 后该用哪块网卡会变，面板一刷新即纠正二维码
+  await refreshPreferredAddress()
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
+  return
+}
+
+async function hLanPost(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 开关手机简版控制台：config.lan.enabled 落盘并即时启停第二监听器；
+  // LAN 凭据复用 gateway.json 旧值（手机 cookie 跨重启不掉），没有才新生成
+  const b = await jsonRequestBody(req)
+  try {
+    if (b.enabled === true) {
+      const state = await readGatewayState()
+      const lanToken = resolveLanToken(state?.lan_token ?? null)
+      await startLanServer(rt, { port: rt.config.lan?.port ?? DEFAULT_LAN_PORT, token: lanToken })
+      await mutateConfig((c) => {
+        c.lan = { ...(c.lan ?? {}), enabled: true }
+      })
+      await reloadRuntime(rt)
+      const refreshed = await readGatewayState()
+      if (refreshed) await writeGatewayState({ ...refreshed, lan_token: lanToken, lan_port: rt.lan?.port })
+      audit(bi('手机远程', 'Mobile console'), bi('开启', 'on'), bi('端口 {port}', 'port {port}', { port: rt.lan?.port ?? 0 }))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
+    } else {
+      stopLan(rt)
+      await mutateConfig((c) => {
+        c.lan = { ...(c.lan ?? {}), enabled: false }
+      })
+      await reloadRuntime(rt)
+      const refreshed = await readGatewayState()
+      if (refreshed) await writeGatewayState({ ...refreshed, lan_port: undefined })
+      audit(bi('手机远程', 'Mobile console'), bi('关闭', 'off'))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
+    }
+  } catch (e) {
+    audit(bi('手机远程', 'Mobile console'), '-', undefined, (e as Error).message)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: (e as Error).message }))
+  }
+  return
+}
+
+async function hSyncOffer(c: AdminCtx): Promise<void> {
+  const { rt, res, audit } = c
+  // 同网直拉迁移（A 机）：生成一次性链接（口令藏 fragment，10 分钟有效、取走即焚）
+  try {
+    const r = await createSyncOffer(rt)
+    audit(bi('分享配置到附近电脑', 'Share config nearby'), bi('已生成直拉链接', 'pull link created'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r }))
+  } catch (e) {
+    audit(bi('分享配置到附近电脑', 'Share config nearby'), '-', undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSyncImport(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 同网直拉迁移（B 机）：apply 一键应用（url/file 直发，或附近直拉链路的 ticket）；preview（→ 票据）保留给 API 兼容。
+  // 审计只记 phase 与来源形态，绝不记 URL（查询串含 token）与口令
+  const b = await jsonRequestBody(req)
+  const phase = b.phase === 'apply' ? 'apply' : 'preview'
+  const source = (b.source ?? {}) as Record<string, unknown>
+  const srcKind = typeof source.kind === 'string' ? source.kind : ''
+  const resolveDoc = async (): Promise<{ doc: ReturnType<typeof validateSyncdoc>; env: unknown }> => {
+    const passphrase = typeof source.passphrase === 'string' ? source.passphrase : ''
+    let envText = ''
+    if (srcKind === 'url') {
+      envText = await fetchEnvelopeFromUrl(typeof source.url === 'string' ? source.url : '')
+    } else if (srcKind === 'file') {
+      envText = typeof source.file === 'string' ? source.file : ''
+      if (!envText) throw new Error(t('缺少配置包内容', 'Missing package content'))
+    } else {
+      throw new Error(t('来源类型必须是 url 或 file', 'Source kind must be url or file'))
+    }
+    if (!passphrase) throw new Error(t('缺少口令（链接 #p= 后段，或导出时设置的口令）', 'Missing passphrase (the #p= part of the link, or the one set at export)'))
+    let env: unknown
+    try {
+      env = JSON.parse(envText)
+    } catch {
+      throw new Error(t('不是合法的配置包（JSON 解析失败）', 'Not a valid sync package (JSON parse failed)'))
+    }
+    return { doc: validateSyncdoc(openEnvelope(env, passphrase)), env }
+  }
+  try {
+    if (phase === 'apply') {
+      const ticket = typeof source.ticket === 'string' ? source.ticket : ''
+      const doc = ticket ? takeSyncTicket(ticket) : (await resolveDoc()).doc
+      const report = await applyImportedDoc(doc)
+      await reloadRuntime(rt)
+      audit(bi('配置直拉导入', 'Config pull import'), phase, bi(ticket ? 'ticket' : srcKind, ticket ? 'ticket' : srcKind))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, phase, report }))
+    } else {
+      const { doc, env } = await resolveDoc()
+      const metaEnv = env as Record<string, unknown>
+      const ticket = putSyncTicket(doc)
+      audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind, srcKind))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        ok: true,
+        phase,
+        ticket,
+        report: reportOfDoc(doc),
+        meta: { createdBy: String(metaEnv.created_by ?? ''), createdAt: String(metaEnv.created_at ?? '') },
+      }))
+    }
+  } catch (e) {
+    audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind || '-', srcKind || '-'), (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hConfigExport(c: AdminCtx): Promise<void> {
+  const { req, res, audit } = c
+  // 导出加密配置包（.msync）：与 /m 导出、CLI config export 同一数据链路（密文出机器，口令保护）。
+  // 响应走 JSON 由前端存盘下载；审计只记结果，不记口令
+  const b = await jsonRequestBody(req)
+  const passphrase = typeof b.passphrase === 'string' ? b.passphrase : ''
+  try {
+    if (!passphrase) throw new Error(t('口令不能为空', 'Passphrase must not be empty'))
+    const { doc, report } = await collectSyncdoc()
+    assertExportable(report)
+    const env = sealEnvelope(doc, passphrase)
+    const name = exportFileName()
+    audit(bi('导出配置包', 'Export config package'), name, bi('已生成', 'created'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, envelope: env, filename: name }))
+  } catch (e) {
+    audit(bi('导出配置包', 'Export config package'), '-', undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSyncDiscover(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  // 搜寻附近运行 ModelDock 且开启手机远程的电脑（UDP 广播，1.5s 收集；排除自己）
+  try {
+    const peers = await discoverPeers({ timeoutMs: 1500, exclude: { name: os.hostname(), port: rt.lan?.port } })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, peers }))
+  } catch (e) {
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSyncRequestRemote(c: AdminCtx): Promise<void> {
+  const { req, res, audit } = c
+  // B 机发起：向选中的附近电脑敲门并后台轮询授权，立即返回 requestId 供前端轮询
+  const b = await jsonRequestBody(req)
+  try {
+    const ips = Array.isArray(b.ips) ? (b.ips as unknown[]).filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : []
+    const port = Number(b.port)
+    if (!ips.length || !Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error(t('目标电脑参数不完整', 'Invalid target computer'))
+    }
+    sweepRemoteRequests()
+    const requestId = randomToken('mdknear')
+    remoteRequests.set(requestId, { status: 'waiting', createdAt: Date.now() })
+    void runRemoteRequest(requestId, ips, port).catch(() => {
+      /* runRemoteRequest 内部已兜底落 failed 状态 */
+    })
+    audit(bi('附近配置直拉', 'Nearby config pull'), bi('已发送请求', 'request sent'), bi(`${ips[0]}:${port}`, `${ips[0]}:${port}`))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, requestId }))
+  } catch (e) {
+    audit(bi('附近配置直拉', 'Nearby config pull'), '-', undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hSyncRemoteStatus(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  sweepRemoteRequests()
+  const st = remoteRequests.get(q.get('id') ?? '')
+  if (!st) return sendError(res, 404, t('请求不存在或已过期', 'Request not found or expired'))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, ...st }))
+  return
+}
+
+async function hSyncOfferApprove(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // A 机裁决（桌面确认卡）：approve=true 生成一次性直拉链接写入 grant（对方凭 nonce 取走即焚）；
+  // approve=false 写拒绝标记让对方立即结束等待
+  const b = await jsonRequestBody(req)
+  const nonce = typeof b.nonce === 'string' ? b.nonce : ''
+  const approve = b.approve === true
+  try {
+    const pending = peekSyncRequest()
+    if (!pending || pending.nonce !== nonce) throw new Error(t('请求不存在或已过期', 'Request not found or expired'))
+    if (approve) {
+      const offer = await createSyncOffer(rt)
+      putSyncGrant(nonce, { url: offer.urls[0], passphrase: offer.passphrase })
+      audit(bi('附近配置直拉', 'Nearby config pull'), bi('已允许', 'approved'), bi(pending.from, pending.from))
+    } else {
+      putSyncGrant(nonce, { denied: true })
+      audit(bi('附近配置直拉', 'Nearby config pull'), bi('已拒绝', 'denied'), bi(pending.from, pending.from))
+    }
+    clearSyncRequest()
+    overviewCache = null // 确认卡即时消失（overview 有 2s TTL 缓存）
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } catch (e) {
+    audit(bi('附近配置直拉', 'Nearby config pull'), approve ? bi('已允许', 'approved') : bi('已拒绝', 'denied'), bi('-', '-'), (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hAutostart(c: AdminCtx): Promise<void> {
+  const { req, res, audit } = c
+  // 开机自启开关。网关必然处于运行中，install 只登记服务文件、不 bootstrap——
+  // 否则第二个实例被单实例保护拒掉，launchd KeepAlive 会陷入重启循环。
+  const b = await jsonRequestBody(req)
+  try {
+    if (b.enabled === true) {
+      const r = await installAutostart()
+      audit(bi('开机自启', 'Start at login'), bi('开启', 'on'), bi('服务文件 {file}', 'Service file {file}', { file: r.file }))
+      // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 2s TTL 旧值，UI 回灌旧状态
+      overviewCache = null
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, installed: true, note: r.note ?? t('下次登录自动启动', 'Starts automatically at next login') }))
+    } else {
+      const r = await uninstallAutostart()
+      audit(bi('开机自启', 'Start at login'), bi('关闭', 'off'), r.wasInstalled ? bi('已移除 {path}', 'Removed {path}', { path: r.removed }) : bi('本就未安装', 'Was not installed'))
+      overviewCache = null
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, installed: false }))
+    }
+  } catch (e) {
+    audit(bi('开机自启', 'Start at login'), '-', undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hImportDetect(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  // 扫描本机各客户端/工具的现有配置（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode /
+  // MiMo / WorkBuddy / CCR / Crush / Gemini CLI）；绝不回传 Key 明文
+  const cands = await scanSources('all')
+  const existingNorms = new Set(
+    Object.values(rt.config.providers).map((p) => normalizeBaseUrl(p.base_url))
+  )
+  const dismissed = new Set((rt.config.import?.dismissed ?? []).map((u) => normalizeBaseUrl(u)))
+  // 同站点提示索引：同主机不同端点（双协议各登记一份等）不算重复，但标注出来供用户判断
+  const hostNames = new Map<string, string[]>()
+  for (const [pid, p] of Object.entries(rt.config.providers)) {
+    try {
+      const h = new URL(p.base_url).hostname.toLowerCase()
+      const nm = p.name?.trim() || pid
+      const arr = hostNames.get(h) ?? []
+      if (!arr.includes(nm)) arr.push(nm)
+      hostNames.set(h, arr)
+    } catch {
+      /* 非法地址不参与提示 */
+    }
+  }
+  const candidates = cands.map((c) => {
+    const norm = normalizeBaseUrl(c.base_url)
+    const dup = existingNorms.has(norm)
+    let sameSite: string | undefined
+    if (!dup && c.base_url) {
+      try {
+        const names = hostNames.get(new URL(c.base_url).hostname.toLowerCase())
+        if (names?.length) {
+          sameSite = t('与已有服务「{name}」同一站点', 'Same site as existing service "{name}"', { name: names.join('、') })
+        }
+      } catch {
+        /* 非法地址不参与提示 */
+      }
+    }
+    return {
+      id: c.suggest_id,
+      source: c.source,
+      name: c.name,
+      base_url: c.base_url,
+      hasKey: !!c.key,
+      isCurrent: !!c.is_current,
+      dismissed: dismissed.has(norm) || undefined,
+      sameSite,
+      skipReason: c.skip_reason ?? (dup ? t('已在 ModelDock 中', 'Already in ModelDock') : undefined),
+    }
+  })
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, candidates }))
+  return
+}
+
+async function hImportApply(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const wantedIds: string[] | null = Array.isArray(b.ids) ? b.ids.map(String) : null
+  const cands = await scanSources('all')
+  // 地址重复的兜底在 applyImport 内（含批内去重），这里只按用户勾选与可导入性过滤
+  const chosen = cands.filter(
+    (c) => !c.skip_reason && c.base_url && (wantedIds === null || wantedIds.includes(c.suggest_id))
+  )
+  if (chosen.length === 0) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, imported: [], profiles: [], skipped: [] }))
+    return
+  }
+  const report = await mutateConfig((c) => applyImport(c, chosen, { withProfiles: true }))
+  await reloadRuntime(rt)
+  audit(bi('导入配置', 'Import configs'), report.providers.join(',') || '-', bi('导入 {p} 个服务 / {r} 条路由', 'Imported {p} services / {r} routes', { p: report.providers.length, r: report.profiles.length }))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, imported: report.providers, profiles: report.profiles, skipped: report.skipped }))
+  return
+}
+
+async function hImportDismiss(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 忽略候选（按归一化地址持久化，跨浏览器生效）：自动弹卡不再提示；勾选导入手动入口不受影响，随时可搬回
+  const b = await jsonRequestBody(req)
+  // b 是不可信 JSON（any）：显式按 unknown[] 收口——元素 String() 归一化后归一化地址、过滤空值
+  const urls: string[] = Array.isArray(b.urls)
+    ? [...new Set((b.urls as unknown[]).map((u) => normalizeBaseUrl(String(u))).filter((u): u is string => !!u))]
+    : []
+  if (urls.length === 0) {
+    return sendError(res, 400, t('缺少 urls：要忽略的候选地址数组', 'Missing urls: the array of candidate base URLs to dismiss'))
+  }
+  await mutateConfig((c) => {
+    const set = new Set(c.import?.dismissed ?? [])
+    for (const u of urls) set.add(u)
+    c.import = { ...c.import, dismissed: [...set] }
+  })
+  await reloadRuntime(rt)
+  audit(bi('忽略导入候选', 'Dismiss import candidates'), String(urls.length))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, dismissed: urls.length }))
+  return
+}
+
+async function hServiceUpdate(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 编辑模型服务：显示名称 / 接口地址 / Key / 模型目录（任选）
+  const b = await jsonRequestBody(req)
+  const id = typeof b.provider === 'string' ? b.provider : ''
+  const p = rt.config.providers[id]
+  if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
+  const name = typeof b.name === 'string' ? b.name.trim() : ''
+  const baseUrl = typeof b.base_url === 'string' ? b.base_url.trim() : ''
+  // 默认协议随编辑可变（三协议端点直排后由填写的行推导，缺省保持现状）
+  const newProtocol = b.protocol === 'anthropic' || b.protocol === 'openai' || b.protocol === 'responses' ? b.protocol : undefined
+  if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+    return sendError(res, 400, t('接口地址必须以 http:// 或 https:// 开头', 'Base URL must start with http:// or https://'))
+  }
+  // 去重口径与 addService 一致：同地址且同 Key 才算重复；
+  // 同地址不同 Key 是「同一厂商多个账号分别登记」的合法场景，允许共存。
+  // 仅当本次提交真正改动了地址或 Key 时才校验，避免历史同对数据在改名等无关编辑时被误拦。
+  const hasNewKey = typeof b.key === 'string' && !!b.key
+  const oldKey = p.key_ref ? (await getSecret(p.key_ref)) ?? '' : ''
+  const effectiveKey = hasNewKey ? (b.key as string) : oldKey
+  const urlChanged = !!baseUrl && normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(p.base_url)
+  const keyChanged = hasNewKey && (b.key as string) !== oldKey
+  if (urlChanged || keyChanged) {
+    const norm = normalizeBaseUrl(baseUrl || p.base_url)
+    for (const [pid, other] of Object.entries(rt.config.providers)) {
+      if (pid === id) continue
+      if (normalizeBaseUrl(other.base_url) !== norm) continue
+      const otherKey = other.key_ref ? (await getSecret(other.key_ref)) ?? '' : ''
+      if (otherKey === effectiveKey) {
+        return sendError(res, 400, t('该地址与已有服务「{id}」重复（同地址同 Key）；同地址不同 API Key 可分别保存', 'This URL duplicates existing service "{id}" (same URL and key); the same URL with different API keys can coexist', { id: pid }))
+      }
+    }
+  }
+  let newEndpoints: Partial<Record<import('../config/types.js').Protocol, string>> | undefined
+  if (b.endpoints && typeof b.endpoints === 'object' && !Array.isArray(b.endpoints)) {
+    const e: Partial<Record<import('../config/types.js').Protocol, string>> = {}
+    for (const [k, v] of Object.entries(b.endpoints)) {
+      if (!(k === 'anthropic' || k === 'openai' || k === 'responses')) continue
+      if (typeof v !== 'string') continue
+      const val = v.trim()
+      if (!val) { e[k as import('../config/types.js').Protocol] = ''; continue }
+      if (!/^https?:\/\//i.test(val)) return sendError(res, 400, t('{proto} 协议地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: k }))
+      e[k as import('../config/types.js').Protocol] = val
+    }
+    if (Object.keys(e).length) newEndpoints = e
+  }
+  let newKeyRef: string | undefined
+  if (typeof b.key === 'string' && b.key) {
+    newKeyRef = await setSecret(id, b.key, rt.config.security?.store ?? (await defaultStore()))
+  }
+  // 模型目录：完整列表替换语义（UI 传全量）。校验：id 非空去重、ctx/out 为正整数；
+  // 显示名随模型提交（编辑浮层在 ID 下以副行回显，仅回显与 ID 不同者）
+  let newModels: Record<string, import('../config/types.js').ModelMeta> | undefined
+  if (b.models && typeof b.models === 'object' && !Array.isArray(b.models)) {
+    newModels = {}
+    for (const [rawId, rawMeta] of Object.entries(b.models as Record<string, unknown>)) {
+      const mid = rawId.trim()
+      if (!mid) continue
+      const meta = rawMeta as { display_name?: unknown; context_window?: unknown; max_output?: unknown; capabilities?: unknown }
+      const rec: import('../config/types.js').ModelMeta = { source: 'manual' }
+      const prev = p.models?.[mid]
+      // 显示名：提交非空且 ≠ ID 才采用；留空/同名保留既有（预设/CLI 写入的权威名不丢）
+      const dn = typeof meta?.display_name === 'string' ? meta.display_name.trim() : ''
+      if (dn && dn.toLowerCase() !== mid.toLowerCase()) rec.display_name = dn
+      else if (prev?.display_name) rec.display_name = prev.display_name
+      const ctx = Number(meta?.context_window)
+      const out = Number(meta?.max_output)
+      if (Number.isFinite(ctx) && ctx > 0 && Number.isInteger(ctx)) rec.context_window = ctx
+      if (Number.isFinite(out) && out > 0 && Number.isInteger(out)) rec.max_output = out
+      // 用户留空时，用填充链补齐（内置表 → models.dev 目录；拉取时已收的上游值不会走到这里）
+      const k = resolveModelMeta(mid)
+      if (rec.context_window == null && k?.context_window != null) rec.context_window = k.context_window
+      if (rec.max_output == null && k?.max_output != null) rec.max_output = k.max_output
+      // 能力：显式提交 > 保留既有 > 内置表推断（如 kimi-k3 自动带 vision）；空数组=清空
+      const caps = saneCapabilities(meta?.capabilities)
+      const nextCaps = caps ?? prev?.capabilities ?? saneCapabilities(k?.capabilities)
+      if (nextCaps?.length) rec.capabilities = nextCaps
+      newModels[mid] = rec
+    }
+  }
+  // 故障切换候选链：写入引用该 provider 的 profile（与 default_model 同一选择逻辑）。
+  // 条目 "<providerId>"（透传原模型）或 "<providerId>:<modelId>"（改写模型）；空数组=清空；缺省=不动
+  let newFallback: string[] | undefined
+  if (Array.isArray(b.fallback)) {
+    newFallback = []
+    const seenIds = new Set<string>()
+    for (const raw of b.fallback) {
+      const parsed = parseFallbackEntry(String(raw ?? ''))
+      if (!parsed) {
+        return sendError(res, 400, t('备用服务条目「{entry}」无效，应为 服务ID 或 服务ID:模型ID', 'Fallback entry "{entry}" is invalid; expected ServiceID or ServiceID:ModelID', { entry: String(raw ?? '') }))
+      }
+      if (!rt.config.providers[parsed.providerId]) {
+        return sendError(res, 400, t('备用服务「{id}」不存在', 'Fallback service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
+      }
+      if (parsed.providerId === id || seenIds.has(parsed.providerId)) continue
+      seenIds.add(parsed.providerId)
+      newFallback.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
+    }
+  }
+  await persistConfig(rt, (c) => {
+    const t = c.providers[id]
+    if (!t) return
+    if (name) t.name = name
+    if (baseUrl) t.base_url = baseUrl
+    if (newProtocol) t.protocol = newProtocol
+    if (newKeyRef) t.key_ref = newKeyRef
+    if (newModels) t.models = newModels
+    // 协议端点：替换/清空
+    if (newEndpoints) {
+      const e = { ...(t.endpoints ?? {}) }
+      for (const [k, v] of Object.entries(newEndpoints)) { const kp = k as import('../config/types.js').Protocol; if (v) e[kp] = v; else delete e[kp] }
+      t.endpoints = Object.keys(e).length ? e : undefined
+    }
+    // 设置默认模型：写入引用该 provider 的 profile（优先 active_profile）
+    if (typeof b.default_model === 'string') {
+      const profName = profileRefForProvider(c, id)
+      if (profName) {
+        if (b.default_model) c.profiles[profName].default_model = b.default_model
+        else delete c.profiles[profName].default_model
+      }
+    }
+    if (Array.isArray(newFallback)) {
+      const profName = profileRefForProvider(c, id)
+      if (profName) {
+        if (newFallback.length) c.profiles[profName].fallback = newFallback
+        else delete c.profiles[profName].fallback
+      }
+    }
+  })
+  // 审计摘要：列出本次实际变更的字段（不落密钥明文）
+  const changes = [
+    name ? bi('名称 → {name}', 'Name → {name}', { name }) : '',
+    baseUrl ? bi('地址 → {url}', 'URL → {url}', { url: baseUrl }) : '',
+    newKeyRef ? bi('Key 已更新', 'Key updated') : '',
+    newModels ? bi('模型目录 {n} 个', '{n} models', { n: Object.keys(newModels).length }) : '',
+    newEndpoints ? bi('端点 {list} 已更新', 'Endpoints {list} updated', { list: Object.keys(newEndpoints).join('/') }) : '',
+    typeof b.default_model === 'string' ? bi('默认模型 → {model}', 'Default model → {model}', { model: b.default_model || bi('(清除)', '(cleared)') }) : '',
+    Array.isArray(newFallback) ? bi('备用服务 {n} 个', '{n} fallback services', { n: newFallback.length }) : '',
+  ].filter(Boolean) as Array<Bilingual | ''>
+  audit(bi('编辑服务', 'Edit service'), id, changes.length ? biJoin('，', ', ', changes) : bi('无字段变更', 'No fields changed'))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true }))
+  return
+}
+
+async function hRevealKey(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 按需查看单个服务的已保存 Key（编辑弹窗点 👁 时调用）。Key 不随 overview 批量下发，
+  // 只有显式动作才取一份明文：列表/截屏/日志场景不泄漏，Host 白名单 + 同源校验在此入口统一生效
+  const b = await jsonRequestBody(req)
+  const id = typeof b.id === 'string' ? b.id : ''
+  const p = rt.config.providers[id]
+  if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
+  const key = await getSecret(p.key_ref)
+  audit(bi('查看 Key', 'View key'), id, key ? bi('读取成功', 'Read ok') : bi('Key 不可读（未设置或安全后端拒绝）', 'Key unreadable (not set or the OS keychain refused)'))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, key: key ?? null }))
+  return
+}
+
+async function hHarnessEnv(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 按需取某客户端经网关接入用的环境变量（generic-env 的「复制环境变量」按钮调用）。
+  // token 属敏感值，与 reveal-key 同策略：不随 overview 批量下发，显式动作才返回一份
+  const b = await jsonRequestBody(req)
+  const hid = String(b.harness ?? '')
+  const he = rt.config.harness[hid]
+  if (!he) return sendError(res, 400, t('客户端「{id}」尚未接入，先接入再获取环境变量', 'Client "{id}" is not attached yet; attach it first to get env vars', { id: hid }))
+  const token = he.token ?? ''
+  if (!token) return sendError(res, 400, t('客户端「{id}」没有网关令牌（该客户端不经本网关转发）', 'Client "{id}" has no gateway token (it does not route through this gateway)', { id: hid }))
+  const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  const base = `http://127.0.0.1:${port}`
+  audit(bi('查看环境变量', 'View env vars'), hid)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      ok: true,
+      harness: hid,
+      base_url: base,
+      token,
+      lines: [
+        `export ANTHROPIC_BASE_URL=${base}`,
+        `export ANTHROPIC_AUTH_TOKEN=${token}`,
+        `export OPENAI_BASE_URL=${base}/v1`,
+        `export OPENAI_API_KEY=${token}`,
+      ],
+    })
+  )
+  return
+}
+
+async function hServiceDelete(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const id = typeof b.provider === 'string' ? b.provider : ''
+  const p = rt.config.providers[id]
+  if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
+  // 与 CLI cmdProviderRm 共用 ops.removeProviderCascade：除路由外还清理 auto_route_provider、
+  // 各 profile 的 fallback 候选链与定时切换窗口里的悬空条目
+  const usedBy = Object.entries(rt.config.profiles).filter(([, pr]) => pr.provider === id).map(([k]) => k)
+  // 有客户端钉定/直连在将被删除的路由上：直接拒绝（网关钉定删了留下悬空 route → 请求 503；
+  // 独立直连已把该服务 URL+Key 写进客户端文件，删了直连目标失效）。file 模式客户端自管路由、
+  // 不沿网关转发，删除服务不影响它，不拦截（其 route 仅登记痕迹，随删除清掉，见 ops.removeProviderCascade）
+  const pinned = Object.entries(rt.config.harness).filter(
+    ([, he]) => he.route && he.mode !== 'file' && usedBy.includes(he.route)
+  )
+  if (pinned.length > 0) {
+    const pinnedGateway = pinned.filter(([, he]) => he.mode !== 'direct').map(([h]) => h).join(t('、', ', '))
+    const pinnedDirect = pinned.filter(([, he]) => he.mode === 'direct').map(([h]) => h).join(t('、', ', '))
+    return sendError(
+      res,
+      400,
+      [
+        pinnedGateway
+          ? t('有客户端钉定在该服务的路由上（{list}），先在客户端卡片把路由改回「跟随全局」再删除', 'A client is pinned to a route of this service ({list}); switch the route back to "follow global" on the client card before deleting', { list: pinnedGateway })
+          : '',
+        pinnedDirect
+          ? t('有客户端独立直连到该服务（{list}），请先断开该客户端的接入，或把它切回网关模式再删除', 'A client connects directly to this service ({list}); detach it or switch it back to gateway mode before deleting', { list: pinnedDirect })
+          : '',
+      ]
+        .filter(Boolean)
+        .join(t('；', '; '))
+    )
+  }
+  try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
+  let removedProfiles: string[] = []
+  await persistConfig(rt, (c) => {
+    removedProfiles = removeProviderCascade(c, id)
+  })
+  audit(bi('删除服务', 'Delete service'), id, removedProfiles.length ? bi('同时删除路由 {list}', 'Also removed routes {list}', { list: biJoin('、', ', ', removedProfiles) }) : undefined)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, removed: id, profiles: removedProfiles }))
+  return
+}
+
+async function hInstall(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const a = await requireAdapter(String(b.harness ?? ''), rt.config)
+    const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
+    const r = await runClientInstall(a, rt.config, port)
+    audit(
+      bi('安装并接入客户端', 'Install & attach client'),
+      a.id,
+      r.ok
+        ? (r.skipped ? bi('命令已存在，跳过安装', 'Command already present, install skipped') : r.auto ? bi('自动安装完成', 'Auto-install finished') : bi('已提供安装指引', 'Install guide provided'))
+        : r.blocked
+          ? bi('沙箱内不支持自动安装（会写进真机），已提示手动安装', 'Auto-install not supported in sandbox (would write to the real machine); manual install suggested')
+          : bi('安装失败', 'Install failed')
+    )
+    await reloadRuntime(rt)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        ok: r.ok,
+        auto: r.auto,
+        skipped: r.skipped,
+        output: r.output,
+        installed: r.installed,
+        guide: a.install?.guide ?? '',
+        homepage: a.install?.homepage ?? null,
+      })
+    )
+  } catch (e) {
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hUninstall(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const a = await requireAdapter(String(b.harness ?? ''), rt.config)
+    // 接入中的客户端先断开：卸载只删程序本体，配置还原是 detach 的职责，顺序反了会留下指向网关的孤儿配置
+    if (rt.config.harness[a.id]) {
+      throw new Error(t('该客户端仍处于接入状态，请先「断开并还原」再卸载', 'This client is still attached — detach & restore first, then uninstall'))
+    }
+    const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
+    const r = await runClientUninstall(a, rt.config, port)
+    audit(
+      bi('卸载客户端', 'Uninstall client'),
+      a.id,
+      r.ok ? (r.skipped ? bi('命令不在 PATH，无需卸载', 'Command not on PATH; nothing to uninstall') : bi('卸载完成', 'Uninstall finished')) : bi('卸载失败', 'Uninstall failed')
+    )
+    await reloadRuntime(rt)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: r.ok, skipped: r.skipped, output: r.output, installed: r.installed }))
+  } catch (e) {
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hAttachPlan(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const plan = await planAttach(String(b.harness ?? ''), {
+      profile: typeof b.profile === 'string' && b.profile ? b.profile : undefined,
+      clientProfiles: parseClientProfiles(b.client_profiles),
+      setDefault: b.setDefault === true,
+      takeoverModels: b.takeoverModels === true,
+      gatewayPort: rt.port, // 本实例自己的端口；状态文件在多实例下可能记录的是别的实例
+    })
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...plan }))
+  } catch (e) {
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hAttachApply(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const r = await applyAttach(String(b.harness ?? ''), {
+      profile: typeof b.profile === 'string' && b.profile ? b.profile : undefined,
+      clientProfiles: parseClientProfiles(b.client_profiles),
+      setDefault: b.setDefault === true,
+      takeoverModels: b.takeoverModels === true,
+      gatewayPort: rt.port, // 本实例自己的端口；状态文件在多实例下可能记录的是别的实例
+    })
+    await reloadRuntime(rt) // 立即刷新内存态，overview 才能即时反映接入结果
+    // attach 写入的 picker 目录取自 active_profile；若此刻正处于 prefer 窗口接管（展示路由 ≠
+    // active_profile），基线置失效让周期检测在 5s 内按窗口目标校准一次
+    pickerSyncStates.get(rt)!.route = undefined
+    audit(bi('接入客户端', 'Attach client'), r.harness, bi('端口 {port}，写入 {n} 个文件', 'Port {port}, wrote {n} files', { port: r.port, n: r.files.length }))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r, hint: t('重启 {id} 后生效；原文件已自动快照，可随时断开还原', 'Takes effect after restarting {id}; the original files were auto-snapshotted and can be restored anytime by detaching', { id: r.harness }) }))
+  } catch (e) {
+    audit(bi('接入客户端', 'Attach client'), String(b.harness ?? '-'), undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hDetach(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  try {
+    const r = await detachHarness(String(b.harness ?? ''))
+    await reloadRuntime(rt)
+    audit(bi('断开客户端', 'Detach client'), String(b.harness ?? '-'), r.restored ? bi('已还原到本次接入前（快照 {id}）', 'Restored to the state before this attach (snapshot {id})', { id: r.snapshotId ?? '-' }) : bi('已反向清理网关配置', 'Gateway-side config cleaned up in reverse'))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r }))
+  } catch (e) {
+    audit(bi('断开客户端', 'Detach client'), String(b.harness ?? '-'), undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hHarnessRoute(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 客户端钉路由：UI 按「服务」（provider）操作，API 也可直接指定 profile 名；default = 恢复跟随全局。
+  // 路由本身只改 config 的 harness.route（服务端内存，热加载后下一请求生效）；烤模型客户端
+  // （dsh/workbuddy/zcode，adapter.bakesModels）的模型列表烙在客户端文件里，钉定后需按新 profile 重写
+  const b = await jsonRequestBody(req)
+  const hid = String(b.harness ?? '')
+  try {
+    if (!rt.config.harness[hid]) return sendError(res, 400, t('客户端「{id}」未接入，先接入再设置路由', 'Client "{id}" is not attached; attach it first to set a route', { id: hid }))
+    if (rt.config.harness[hid].mode === 'direct') {
+      return sendError(res, 400, t('客户端「{id}」是独立直连模式：更换直连目标请用 /harness/mode（需要重写客户端配置文件）', 'Client "{id}" is in standalone direct mode: use /harness/mode to change the direct target (client config files get rewritten)', { id: hid }))
+    }
+    if (rt.config.harness[hid].mode === 'file') {
+      return sendError(res, 400, t('客户端「{id}」是 file 模式（客户端自管路由），不支持钉定', 'Client "{id}" is in file mode (it manages its own routing) and cannot be pinned', { id: hid }))
+    }
+    const toDefault = b.default === true
+    const profileName = typeof b.profile === 'string' && b.profile ? b.profile : ''
+    const providerId = typeof b.provider === 'string' && b.provider ? b.provider : ''
+    if (!toDefault && !profileName && !providerId) {
+      return sendError(res, 400, t('缺少路由目标：provider / profile / default 三选一', 'Missing route target: provide one of provider / profile / default'))
+    }
+    if (profileName && !rt.config.profiles[profileName]) {
+      return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name: profileName }))
+    }
+    if (providerId && !rt.config.providers[providerId]) {
+      return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }))
+    }
+    let finalRoute = toDefault ? 'default' : profileName
+    await persistConfig(rt, (c) => {
+      if (!toDefault && !profileName && providerId) {
+        finalRoute = profileForProvider(c, providerId)
+      }
+      c.harness[hid] = { ...(c.harness[hid] ?? rt.config.harness[hid]!), route: finalRoute }
+    })
+    // 烤模型客户端按目标 profile 重写模型列表（恢复跟随 = 按 active_profile 重写；透明客户端为空操作）
+    const syncProfile = toDefault ? rt.config.active_profile ?? undefined : finalRoute
+    const synced = syncProfile
+      ? await resyncHarnessToRoute(hid, syncProfile, { port: rt.port })
+      : { refreshed: [], warnings: [] }
+    const detail = biCat(
+      finalRoute === 'default' ? bi('恢复跟随全局', 'Back to follow global') : bi('钉到 {route}', 'Pinned to {route}', { route: finalRoute }),
+      synced.refreshed.length ? bi('；已同步重写 {id} 的模型列表（重启该客户端生效）', '; rewrote the model list of {id} (restart the client to apply)', { id: hid }) : '',
+      synced.warnings.length ? bi('；{list}', '; {list}', { list: biJoin('；', '; ', synced.warnings) }) : ''
+    )
+    audit(bi('客户端钉路由', 'Pin client route'), hid, detail)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, route: finalRoute, ...synced, hint: synced.refreshed.length ? t('已同步重写该客户端的模型列表，重启该客户端后生效', 'Rewrote the model list of this client; restart the client to apply') : undefined }))
+  } catch (e) {
+    audit(bi('客户端钉路由', 'Pin client route'), hid, undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hHarnessMode(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  // 接入模式切换：direct（独立直连，写上游 url+真实 Key，重写客户端文件）⇄ gateway（切回网关）。
+  // 复用 ops.switchHarnessMode（快照/原子写/登记），直连后客户端不经过网关，网关挂掉仍可用作救援通道
+  const b = await jsonRequestBody(req)
+  const hid = String(b.harness ?? '')
+  const mode = b.mode === 'direct' ? 'direct' : b.mode === 'gateway' ? 'gateway' : ''
+  if (!mode) return sendError(res, 400, t('mode 必须是 gateway 或 direct', 'mode must be gateway or direct'))
+  const he = rt.config.harness[hid]
+  if (!he) return sendError(res, 400, t('客户端「{id}」未接入，先接入再切换模式', 'Client "{id}" is not attached; attach it first to switch modes', { id: hid }))
+  if (he.mode === 'file') return sendError(res, 400, t('file 模式的客户端暂不支持切换直连', 'Clients in file mode do not support switching to direct yet'))
+  if (mode === 'gateway' && he.mode !== 'direct') {
+    return sendError(res, 400, t('客户端「{id}」已是网关接入模式', 'Client "{id}" is already in gateway mode', { id: hid }))
+  }
+  if (mode === 'direct' && he.mode === 'direct' && !b.profile && !b.provider) {
+    return sendError(res, 400, t('客户端「{id}」已是独立直连模式；更换直连目标请带 profile 或 provider', 'Client "{id}" is already in standalone direct mode; pass profile or provider to change the direct target', { id: hid }))
+  }
+  const profileOverride = typeof b.profile === 'string' && b.profile ? b.profile : ''
+  const providerOverride = typeof b.provider === 'string' && b.provider ? b.provider : ''
+  if (profileOverride && !rt.config.profiles[profileOverride]) {
+    return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name: profileOverride }))
+  }
+  if (providerOverride && !rt.config.providers[providerOverride]) {
+    return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerOverride }))
+  }
+  try {
+    let profile = profileOverride || undefined
+    if (mode === 'direct' && !profile && providerOverride) {
+      await persistConfig(rt, (c) => {
+        profile = profileForProvider(c, providerOverride)
+      })
+    }
+    const r = await switchHarnessMode(hid, mode, { profile, yes: true, port: rt.port })
+    await reloadRuntime(rt)
+    audit(mode === 'direct' ? bi('客户端切直连', 'Client switched to direct') : bi('客户端切回网关', 'Client switched back to gateway'), hid, bi('目标 {target}，写入 {n} 个文件', 'Target {target}, wrote {n} files', { target: r.profile, n: r.files.length }))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, ...r, hint: t('重启 {id} 后生效', 'Takes effect after restarting {id}', { id: hid }) }))
+  } catch (e) {
+    audit(mode === 'direct' ? bi('客户端切直连', 'Client switched to direct') : bi('客户端切回网关', 'Client switched back to gateway'), hid, undefined, (e as Error).message)
+    sendError(res, 400, (e as Error).message)
+  }
+  return
+}
+
+async function hUse(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const name = typeof b.profile === 'string' ? b.profile : ''
+  if (!name || !rt.config.profiles[name]) {
+    return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name }), t('modeldock profile list 查看', 'Run modeldock profile list to view profiles'))
+  }
+  await persistConfig(rt, (c) => {
+    c.active_profile = name
+  })
+  audit(bi('切换路由', 'Switch route'), name)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, active_profile: name }))
+  return
+}
+
+async function hProfile(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const name = typeof b.name === 'string' ? b.name : ''
+  const provider = typeof b.provider === 'string' ? b.provider : ''
+  if (!/^[a-zA-Z0-9_-]{1,40}$/.test(name)) {
+    return sendError(res, 400, t('profile 名称只能是字母/数字/-/_，长度 ≤40', 'Profile name allows only letters/digits/-/_ and must be ≤40 chars'))
+  }
+  if (!provider || !rt.config.providers[provider]) {
+    return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
+  }
+  if (rt.config.profiles[name]) {
+    return sendError(res, 400, t('profile「{name}」已存在', 'Profile "{name}" already exists', { name }))
+  }
+  const models = rt.config.providers[provider].models ?? {}
+  const defaultModel = typeof b.default_model === 'string' && b.default_model ? b.default_model : undefined
+  if (defaultModel && Object.keys(models).length > 0 && !models[defaultModel]) {
+    return sendError(res, 400, t('模型「{model}」不在 {id} 的目录里', 'Model "{model}" is not in the catalog of {id}', { model: defaultModel, id: provider }), 'modeldock model list ' + provider)
+  }
+  const aliases =
+    b.aliases && typeof b.aliases === 'object' && !Array.isArray(b.aliases)
+      ? Object.fromEntries(
+          Object.entries(b.aliases as Record<string, unknown>)
+            .filter(([k, v]) => typeof k === 'string' && k && typeof v === 'string')
+            .map(([k, v]) => [k, String(v)])
+        )
+      : undefined
+  await persistConfig(rt, (c) => {
+    c.profiles[name] = { name, provider, default_model: defaultModel, aliases }
+    if (!c.active_profile) c.active_profile = name
+  })
+  audit(bi('新建路由', 'Create route'), name, biCat(`provider=${provider}`, defaultModel ? bi('，默认模型 {model}', ', default model {model}', { model: defaultModel }) : ''))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, profile: name }))
+  return
+}
+
+async function hKey(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const provider = typeof b.provider === 'string' ? b.provider : ''
+  const key = typeof b.key === 'string' ? b.key : ''
+  if (!provider || !rt.config.providers[provider]) {
+    return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
+  }
+  if (!key) {
+    return sendError(res, 400, t('key 不能为空', 'Key must not be empty'))
+  }
+  const backend = rt.config.security?.store ?? (await defaultStore())
+  const keyRef = await setSecret(provider, key, backend)
+  await persistConfig(rt, (c) => {
+    if (c.providers[provider]) c.providers[provider].key_ref = keyRef
+  })
+  audit(bi('更新密钥', 'Update key'), provider, bi('存入 {backend}', 'Stored in {backend}', { backend }))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true }))
+  return
+}
+
+async function hReload(c: AdminCtx): Promise<void> {
+  const { rt, res, audit } = c
+  try {
+    await reloadRuntime(rt)
+    audit(bi('重载配置', 'Reload config'), '-', bi('第 {n} 次热重载', 'Hot reload #{n}', { n: rt.reloads }))
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, reloads: rt.reloads }))
+  } catch (e) {
+    audit(bi('重载配置', 'Reload config'), '-', undefined, (e as Error).message)
+    sendError(res, 500, t('配置重载失败：{msg}', 'Failed to reload config: {msg}', { msg: (e as Error).message }))
+  }
+  return
+}
+
+async function hTest(c: AdminCtx): Promise<void> {
+  const { rt, req, res, o } = c
+  const url = '/_modeldock/test'
+  const body = await readBody(req, maxBodyBytes(rt.config))
+  let p: { profile?: string; provider?: string; model?: string; stream?: boolean; mode?: string } = {}
+  try {
+    p = body.length ? JSON.parse(body.toString('utf8')) : {}
+  } catch {
+    return sendError(res, 400, t('test 请求体必须是 JSON', 'The test request body must be JSON'))
+  }
+  let resolved: { ok: boolean; target?: ResolvedTarget; status?: number; message?: string; hint?: string }
+  if (p.provider) {
+    // 按服务直接探测（不必先建路由）
+    const provider = rt.config.providers[p.provider]
+    if (!provider) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: p.provider }))
+    const models = Object.keys(provider.models ?? {})
+    const fakeProfile = {
+      name: `probe-${p.provider}`,
+      provider: p.provider,
+      default_model: p.model ?? models[0],
+    }
+    resolved = { ok: true, target: { harness: 'admin-test', profileName: fakeProfile.name, profile: fakeProfile, provider } }
+  } else {
+    resolved = resolveByProfile(rt, p.profile)
+  }
+  if (!resolved.ok) return sendError(res, resolved.status ?? 400, resolved.message ?? t('无法解析路由', 'Cannot resolve a route'), resolved.hint)
+  // mode='ping' → 纯网络延迟（不推理）；否则保持原有的完整模型请求测速
+  const out = p.mode === 'ping'
+    ? await probePing(rt, resolved.target!.provider)
+    : await probe(rt, resolved.target!, p.model, p.stream === true, o)
+  // 连接测试也记入请求日志（客户端记为 admin-test），便于追溯测试失败原因
+  logRequest(rt, {
+    ts: localIsoTs(),
+    harness: 'admin-test',
+    profile: resolved.target?.profileName ?? '-',
+    provider: p.provider ?? resolved.target?.profile.provider ?? '-',
+    model: (out as { model?: string }).model ?? p.model,
+    path: p.mode === 'ping' ? 'ping' : url,
+    status: out.ok ? 200 : 502,
+    ms: out.ms,
+    err: out.err,
+  })
+  res.writeHead(out.ok ? 200 : 502, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(out))
+  return
+}
+
+async function hReset(c: AdminCtx): Promise<void> {
+  const { rt, res, audit } = c
+  const { configPath, secretsPath } = await import('../util/paths.js')
+  const fs = await import('node:fs')
+  // 先清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
+  let secretsCleared = 0
+  for (const [id, p] of Object.entries(rt.config.providers)) {
+    try {
+      await deleteSecret(p.key_ref)
+      secretsCleared++
+    } catch { /* 单项失败不影响其余 */ }
+  }
+  const files = [configPath(), secretsPath()]
+  const deleted: string[] = []
+  for (const f of files) {
+    try {
+      if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
+    } catch { /* 忽略 */ }
+  }
+  // 重载为空配置
+  await reloadRuntime(rt)
+  audit(bi('重置配置', 'Reset config'), '-', bi('删除 {files}，清除 {n} 个密钥', 'Deleted {files}; cleared {n} keys', { files: deleted.length ? biJoin('、', ', ', deleted) : bi('无文件', 'no files'), n: secretsCleared }))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, deleted, hint: t('配置已清空（含钥匙环密钥）；快照和日志保留。运行 modeldock init 重新配置', 'Config cleared (including keychain keys); snapshots and logs are kept. Run modeldock init to set up again') }))
+  return
+}
+
+/** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串） */
+const ADMIN_ROUTES: Record<string, AdminHandler> = {
+  'POST /_modeldock/admin/rotate': hRotate,
+  'GET /_modeldock/status': hStatus,
+  'GET /_modeldock/admin/update/status': hUpdateStatus,
+  'POST /_modeldock/admin/update/check': hUpdateCheck,
+  'POST /_modeldock/admin/update/apply': hUpdateApply,
+  'GET /_modeldock/logs': hLogs,
+  'GET /_modeldock/config': hConfig,
+  'GET /_modeldock/model-catalog': hModelCatalog,
+  'GET /_modeldock/overview': hOverview,
+  'POST /_modeldock/service/fetch-models': hFetchModels,
+  'POST /_modeldock/service': hServiceAdd,
+  'POST /_modeldock/switch': hSwitch,
+  'POST /_modeldock/auto-route': hAutoRoute,
+  'POST /_modeldock/auto-route/schedule': hSchedule,
+  'POST /_modeldock/schedule/holidays-cn': hHolidaysCn,
+  'GET /_modeldock/lan': hLanGet,
+  'POST /_modeldock/lan': hLanPost,
+  'POST /_modeldock/sync/offer': hSyncOffer,
+  'POST /_modeldock/sync/import': hSyncImport,
+  'POST /_modeldock/config/export': hConfigExport,
+  'POST /_modeldock/sync/discover': hSyncDiscover,
+  'POST /_modeldock/sync/request-remote': hSyncRequestRemote,
+  'GET /_modeldock/sync/remote-status': hSyncRemoteStatus,
+  'POST /_modeldock/sync/offer-approve': hSyncOfferApprove,
+  'POST /_modeldock/autostart': hAutostart,
+  'GET /_modeldock/import/detect': hImportDetect,
+  'POST /_modeldock/import/apply': hImportApply,
+  'POST /_modeldock/import/dismiss': hImportDismiss,
+  'POST /_modeldock/service/update': hServiceUpdate,
+  'POST /_modeldock/service/reveal-key': hRevealKey,
+  'POST /_modeldock/harness/env': hHarnessEnv,
+  'POST /_modeldock/service/delete': hServiceDelete,
+  'POST /_modeldock/install': hInstall,
+  'POST /_modeldock/uninstall': hUninstall,
+  'POST /_modeldock/attach/plan': hAttachPlan,
+  'POST /_modeldock/attach/apply': hAttachApply,
+  'POST /_modeldock/detach': hDetach,
+  'POST /_modeldock/harness/route': hHarnessRoute,
+  'POST /_modeldock/harness/mode': hHarnessMode,
+  'POST /_modeldock/use': hUse,
+  'POST /_modeldock/profile': hProfile,
+  'POST /_modeldock/key': hKey,
+  'POST /_modeldock/reload': hReload,
+  'POST /_modeldock/test': hTest,
+  'POST /_modeldock/reset': hReset,
+}
+
 /** 从来源电脑拉取信封（用户自粘的链接）：仅 http/https、禁止重定向、10s 超时、响应体 ≤10MB。
  *  调用者=本机管理员（admin 鉴权 + Host 白名单），无凭据外泄面；上限防异常大包拖垮网关。 */
 async function handleAdmin(
@@ -1200,1308 +2610,8 @@ async function handleAdmin(
     return sendError(res, 401, t('需要登录', 'Sign-in required'), t('控制台请用 modeldock ui 打开（自动携带令牌）；脚本请求请带 x-modeldock-admin 头', 'Open the console with modeldock ui (token carried automatically); scripts must send the x-modeldock-admin header'))
   }
 
-  // 轮换管理令牌（需当前已鉴权，故位于 admin 门之后）：旧 token/cookie 立即失效。
-  if (url === '/_modeldock/admin/rotate' && req.method === 'POST') {
-    try {
-      rt.adminToken = randomToken('mdkadm')
-      // 只更新状态文件里的 token；无状态文件（测试/嵌入式启动）则只换内存态
-      const state = await readGatewayState()
-      if (state) await writeGatewayState({ ...state, admin_token: rt.adminToken })
-      const host = req.headers.host ?? `127.0.0.1:${rt.port ?? ''}`
-      const consoleUrl = `http://${host}/_modeldock/ui?token=${rt.adminToken}`
-      audit(bi('轮换管理令牌', 'Rotate admin token'), '-', bi('旧令牌已失效', 'Old token revoked'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, admin_token: rt.adminToken, console_url: consoleUrl }))
-    } catch (e) {
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/status' && req.method === 'GET') {
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(
-      JSON.stringify({
-        ok: true,
-        active_profile: rt.config.active_profile ?? null,
-        providers: Object.keys(rt.config.providers),
-        profiles: Object.keys(rt.config.profiles),
-        harness: Object.keys(rt.config.harness),
-        reloads: rt.reloads,
-        uptime_ms: Date.now() - rt.startedAt,
-      })
-    )
-    return
-  }
-
-  // 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
-  if (url === '/_modeldock/admin/update/status' && req.method === 'GET') {
-    // 惰性周期重查：控制台每 60s 轮询一次状态，顺带触发一次检查——
-    // kick 内部有 成功 24h TTL / 失败 30min 退避 双守卫，命中即静默跳过，
-    // 常驻网关因此不必重启也能在控制台开着时发现新版本（此前只在启动时查一次）
-    void kickUpdateCheck(rt).catch(() => {})
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(await getUpdateStatus(rt)))
-    return
-  }
-
-  if (url === '/_modeldock/admin/update/check' && req.method === 'POST') {
-    // 立即返回，页面轮询 status 取结果（GitHub 检查可能十几秒，不占请求）
-    void kickUpdateCheck(rt, { force: true }).catch(() => {})
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true }))
-    return
-  }
-
-  if (url === '/_modeldock/admin/update/apply' && req.method === 'POST') {
-    const r = applyUpdate(rt, { argv: updateDaemonArgs() })
-    if (r.started) {
-      audit(bi('一键更新', 'One-click update'), '-', bi('开始更新到 v{v}，网关将短暂中断', 'Updating to v{v}; the gateway restarts briefly', { v: r.latest ?? '?' }))
-    } else {
-      const reasonZh = r.reason === 'in_progress' ? '更新已在进行中' : '没有可安装的新版本'
-      const reasonEn = r.reason === 'in_progress' ? 'an update is already in progress' : 'no new version to install'
-      audit(bi('一键更新', 'One-click update'), '-', bi('未执行：{r}', 'Not started: {r}', { r: bi(reasonZh, reasonEn) }))
-    }
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: r.started, ...r }))
-    return
-  }
-
-  if (url === '/_modeldock/logs' && req.method === 'GET') {
-    const q = new URL(req.url ?? '', 'http://x').searchParams
-    const n = Math.min(500, Math.max(1, Number(q.get('n') ?? 50) || 50))
-    const total = rt.ring.length
-    // page 从 1 数起，第 1 页是最新 n 条（ring 按 时间正序 追加）；越界页返回空数组
-    const page = Math.max(1, Number(q.get('page') ?? 1) || 1)
-    const pages = Math.max(1, Math.ceil(total / n))
-    const end = Math.max(0, total - (page - 1) * n)
-    const start = Math.max(0, end - n)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ logs: rt.ring.slice(start, end), total, page, pages }))
-    return
-  }
-
-  if (url === '/_modeldock/config' && req.method === 'GET') {
-    const view = await buildConfigView(rt)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(view))
-    return
-  }
-
-  // 面向任务的服务端点（Web 控制台 v2，全部用户语言，无内部概念）
-
-  if (url === '/_modeldock/model-catalog' && req.method === 'GET') {
-    // 模型元数据兜底总表（内置表 ∪ models.dev 目录，8000+ 条）：量大，单端点懒加载一次，
-    // 不进 overview（每 5s 轮询，塞进去每秒多出百 KB 流量）。序列化结果缓存 + ETag：
-    // 控制台每次刷新重拉时命中 304，不再重复 stringify/传输几百 KB（cache-control 覆盖
-    // 管理面统一 no-store 为 no-cache：可存储但必须条件重验证，与 /ui 页同款策略）
-    const { data, etag } = catalogView()
-    if (req.headers['if-none-match'] === etag) {
-      res.writeHead(304, { etag, 'cache-control': 'no-cache' })
-      res.end()
-      return
-    }
-    res.writeHead(200, { 'content-type': 'application/json', etag, 'cache-control': 'no-cache' })
-    res.end(data)
-    return
-  }
-
-  if (url === '/_modeldock/overview' && req.method === 'GET') {
-    const cached = overviewCache
-    // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
-    if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(cached.data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
-      return
-    }
-    const view = await buildOverview(rt)
-    const data = JSON.stringify(view)
-    overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(data)
-    return
-  }
-
-  if (url === '/_modeldock/service/fetch-models' && req.method === 'POST') {
-    // 添加服务时预览拉取：按临时地址+Key 拉取模型，不落盘。
-    // 编辑弹窗场景传 id 而不传 key（Key 输入框留空=不修改）：用该服务已保存的 Key 拉取
-    const b = await jsonRequestBody(req)
-    const baseUrl = typeof b.base_url === 'string' ? b.base_url.trim() : ''
-    let key = typeof b.key === 'string' ? b.key.trim() : ''
-    const refId = typeof b.id === 'string' ? b.id.trim() : ''
-    if (!key && refId) {
-      const ref = rt.config.providers[refId]
-      if (!ref) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: refId }))
-      key = (await getSecret(ref.key_ref)) ?? ''
-      if (!key) return sendError(res, 400, t('已保存的 Key 不可读（未设置或系统安全后端拒绝访问），请手动粘贴 Key 后拉取', 'Saved key unreadable (not set or the OS keychain refused access); paste the key manually and fetch again'))
-    }
-    const proto = (b.protocol === 'openai' || b.protocol === 'responses') ? b.protocol : 'anthropic'
-    if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return sendError(res, 400, t('请先填写协议接口地址（http/https）', 'Fill in the endpoint URL first (http/https)'))
-    if (!key) return sendError(res, 400, t('key 不能为空：请先粘贴 Key 再拉取', 'Key is empty: paste the key before fetching'))
-    const provider: import('../config/types.js').ProviderConfig = {
-      base_url: baseUrl,
-      protocol: proto,
-      auth_style: 'bearer',
-      key_ref: key,
-      proxy: 'direct',
-    }
-    /** 拉取失败/无结果时按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）。声明放在首个调用点之前。 */
-    function knownFallback() {
-      const fb = knownModelsForBaseUrl(baseUrl)
-      return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
-    }
-    // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响
-    const failKey = `${proto}|${baseUrl}|${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
-    let cachedFail = false
-    try {
-      const recentFail = fetchModelFailMemo.get(failKey)
-      if (recentFail && Date.now() - recentFail.at < FETCH_MODEL_FAIL_TTL_MS) {
-        cachedFail = true
-        throw new Error(recentFail.msg)
-      }
-      const f = await fetchModelIds(provider)
-      let arr: { id: string; display: string; context_window: number | null; max_output: number | null; capabilities: string[] }[] = f.ids.map((id: string) => {
-        // 填充链：上游响应自带值 > 内置表 > models.dev 目录（按 base_url host 精确匹配优先）；能力只看内置表（上游不报此项）
-        const km = resolveModelMeta(id, null, { upstream: f.meta?.[id], baseUrl })
-        return { id, display: f.display[id] ?? id, context_window: km?.context_window ?? null, max_output: km?.max_output ?? null, capabilities: km?.capabilities ?? [] }
-      })
-      let from = 'fetched'
-      if (arr.length === 0) { arr = knownFallback(); from = 'known' }
-      if (arr.length === 0) return sendError(res, 400, t('未拉取到模型，且本地没有该厂商的已知模型', 'No models fetched and no known models for this vendor locally'), t('可在「编辑服务」里手动登记模型', 'You can register models manually in "Edit Service"'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, protocol: proto, from, models: arr }))
-    } catch (e) {
-      if (!cachedFail) rememberFetchModelFail(failKey, (e as Error).message)
-      // 拉取失败 → 按厂商 host 回退到 ModelDock 已知模型（预设自带上下文/输出）
-      const arr = knownFallback()
-      if (!arr.length) return sendError(res, 400, t('拉取模型失败：{msg}', 'Failed to fetch models: {msg}', { msg: (e as Error).message }), t('检查接口地址 / Key / 网络（境外上游需代理）', 'Check the endpoint URL / key / network (overseas upstreams need a proxy)'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, protocol: proto, from: 'known', models: arr }))
-    }
-    return
-  }
-
-  if (url === '/_modeldock/service' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const r = await addService(String(b.presetId ?? ''), String(b.key ?? ''), {
-        setActiveIfEmpty: b.setActiveIfEmpty !== false,
-        fetch: b.fetch !== false,
-        name: typeof b.name === 'string' ? b.name : undefined,
-        base_url: typeof b.base_url === 'string' ? b.base_url : undefined,
-        protocol: (b.protocol === 'anthropic' || b.protocol === 'openai' || b.protocol === 'responses') ? b.protocol : undefined,
-        endpoints: b.endpoints && typeof b.endpoints === 'object' && !Array.isArray(b.endpoints) ? b.endpoints : undefined,
-        models: b.models && typeof b.models === 'object' && !Array.isArray(b.models) ? b.models : undefined,
-        defaultModel: typeof b.default_model === 'string' && b.default_model.trim() ? b.default_model.trim() : undefined,
-        fallback: Array.isArray(b.fallback) ? b.fallback.map((x: unknown) => String(x)) : undefined,
-      })
-      await reloadRuntime(rt)
-      audit(
-        bi('添加服务', 'Add service'),
-        r.providerId,
-        biCat(
-          bi('预设 {preset}，路由 {route}，模型 {n} 个', 'Preset {preset}, route {route}, {n} models', { preset: String(b.presetId ?? '-'), route: r.profileName, n: r.fetched }),
-          r.fetchError ? bi('（拉取失败已兜底：{msg}）', ' (fetch failed, fell back: {msg})', { msg: r.fetchError }) : ''
-        )
-      )
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r }))
-    } catch (e) {
-      audit(bi('添加服务', 'Add service'), String(b.presetId ?? '-'), undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/switch' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      // 一次整包落盘完成 active_profile + 人工钉定主服务（人为修改优先于定时窗口与自动选路），默认路由同步跟随
-      // 最后一次人工选择；钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位
-      const profileName = await switchToServiceWithRoute(String(b.service ?? ''), rt.config.gateway?.auto_failover === true)
-      await reloadRuntime(rt)
-      // dsh/workbuddy/zcode 的模型列表烙在客户端配置文件里，切全局后需按新路由重写才跟随
-      const baked = await refreshBakedModelClients({ port: rt.port })
-      const detail = biCat(
-        bi('当前路由 → {route}', 'Current route → {route}', { route: profileName }),
-        baked.refreshed.length ? bi('；已同步重写 {list} 的客户端配置', '; rewrote client configs for {list}', { list: biJoin('、', ', ', baked.refreshed) }) : '',
-        baked.warnings.length ? bi('；{list}', '; {list}', { list: biJoin('；', '; ', baked.warnings) }) : ''
-      )
-      audit(bi('切换服务', 'Switch service'), String(b.service ?? '-'), detail)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, service: b.service, profile: profileName, ...baked }))
-    } catch (e) {
-      audit(bi('切换服务', 'Switch service'), String(b.service ?? '-'), undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/auto-route' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      // 部分更新语义：未传的字段保持现状（开关 / 主服务钉定 / 下一个切换钉定 / 限流切换 / 自动备用链在 UI 各自独立调用）
-      const enabled = b.enabled === undefined
-        ? rt.config.gateway?.auto_failover === true
-        : b.enabled === true || b.enabled === 'true'
-      const provider = 'provider' in b
-        ? (typeof b.provider === 'string' && b.provider.trim() ? b.provider.trim() : null)
-        : undefined
-      const failoverOn429 = b.failoverOn429 === undefined ? undefined : b.failoverOn429 === true
-      const autoFallback = b.autoFallback === undefined ? undefined : b.autoFallback === true
-      const next = 'next' in b
-        ? (typeof b.next === 'string' && b.next.trim() ? b.next.trim() : null)
-        : undefined
-      const r = await setAutoRoute(enabled, provider, failoverOn429, autoFallback)
-      const n = next === undefined ? undefined : await setRouteNext(next)
-      await reloadRuntime(rt)
-      audit(
-        bi('自动路由', 'Auto route'),
-        enabled ? bi('开启', 'on') : bi('关闭', 'off'),
-        biCat(
-          `auto_failover=${r.enabled} primary=`,
-          r.provider ?? bi('自动', 'auto'),
-          n === undefined ? '' : biCat(' next=', n ?? bi('自动', 'auto')),
-          failoverOn429 === undefined ? '' : bi(' 限流切换={v}', ' failover-on-429={v}', { v: failoverOn429 ? bi('开', 'on') : bi('关', 'off') }),
-          autoFallback === undefined ? '' : bi(' 自动备用链={v}', ' auto-fallback={v}', { v: autoFallback ? bi('开', 'on') : bi('关', 'off') })
-        )
-      )
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r, next: n ?? rt.config.gateway?.route_next ?? null }))
-    } catch (e) {
-      audit(bi('自动路由', 'Auto route'), '-', undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/auto-route/schedule' && req.method === 'POST') {
-    // 定时切换：整体替换 {enabled, windows}。窗口按配置顺序取首个命中；空 windows = 清除
-    const b = await jsonRequestBody(req)
-    const enabled = b.enabled !== false
-    if (b.windows !== undefined && !Array.isArray(b.windows)) {
-      return sendError(res, 400, t('windows 应为数组', 'windows must be an array'))
-    }
-    const windows: import('../config/types.js').ScheduleWindow[] = []
-    for (const w of b.windows ?? []) {
-      const start = String(w?.start ?? '').trim()
-      const end = String(w?.end ?? '').trim()
-      const target = String(w?.target ?? '').trim()
-      const hhmm = /^([01]?\d|2[0-3]):[0-5]\d$/
-      if (!hhmm.test(start) || !hhmm.test(end)) {
-        return sendError(res, 400, t('时段「{from}-{to}」无效，时间应为 HH:mm', 'Window "{from}-{to}" is invalid; times must be HH:mm', { from: start || '?', to: end || '?' }))
-      }
-      if (start === end) return sendError(res, 400, t('时段「{from}-{to}」起止相同，不会生效', 'Window "{from}-{to}" has identical start and end; it would never apply', { from: start, to: end }))
-      const parsed = parseFallbackEntry(target)
-      if (!parsed) return sendError(res, 400, t('时段目标「{target}」无效，应为 服务ID 或 服务ID:模型ID', 'Window target "{target}" is invalid; expected ServiceID or ServiceID:ModelID', { target }))
-      if (!rt.config.providers[parsed.providerId]) {
-        return sendError(res, 400, t('时段目标服务「{id}」不存在', 'Window target service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
-      }
-      // 窗口模式：avoid（避开该服务）或缺省 prefer（优先走该服务/模型）；avoid 仅到服务粒度，模型部分剥掉按整个服务避开
-      const mode = w.mode === undefined || w.mode === null || w.mode === '' ? undefined : String(w.mode).trim()
-      if (mode !== undefined && mode !== 'prefer' && mode !== 'avoid') {
-        return sendError(res, 400, t('时段模式「{mode}」无效，应为 prefer（优先走）或 avoid（避开）', 'Window mode "{mode}" is invalid; expected prefer or avoid', { mode }))
-      }
-      const avoid = mode === 'avoid'
-      // 生效日类型：缺省/any=每天；workday=周一至五与调休补班日（不含法定节假日）；weekend；holiday
-      const dayFilterRaw = w.dayFilter === undefined || w.dayFilter === null || w.dayFilter === '' ? undefined : String(w.dayFilter).trim()
-      if (dayFilterRaw !== undefined && dayFilterRaw !== 'any' && dayFilterRaw !== 'workday' && dayFilterRaw !== 'weekend' && dayFilterRaw !== 'holiday') {
-        return sendError(res, 400, t('生效日类型「{v}」无效，应为 any / workday / weekend / holiday', 'Day filter "{v}" is invalid; expected any / workday / weekend / holiday', { v: dayFilterRaw }))
-      }
-      const dayFilter = !dayFilterRaw || dayFilterRaw === 'any' ? undefined : (dayFilterRaw as 'workday' | 'weekend' | 'holiday')
-      let days: number[] | undefined
-      if (Array.isArray(w.days)) {
-        const set = new Set<number>()
-        for (const d of w.days as unknown[]) {
-          const n = Number(d)
-          if (Number.isInteger(n) && n >= 1 && n <= 7) set.add(n)
-        }
-        days = [...set]
-        if (days.length === 0) days = undefined
-      }
-      windows.push({
-        start,
-        end,
-        target: !avoid && parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId,
-        ...(avoid ? { mode: 'avoid' as const } : {}),
-        ...(days ? { days } : {}),
-        ...(dayFilter ? { dayFilter } : {}),
-      })
-    }
-    await persistConfig(rt, (c) => {
-      const g: import('../config/types.js').GatewayConfig = { ...(c.gateway ?? {}) }
-      if (!windows.length) delete g.schedule
-      else g.schedule = { enabled, windows }
-      c.gateway = g
-    })
-    audit(bi('定时切换', 'Schedule'), enabled ? bi('启用', 'enabled') : bi('停用', 'disabled'), bi('{n} 个时段', '{n} windows', { n: windows.length }))
-    // 用户开始使用定时切换后立即后台拉取一次法定节假日（数据源 holiday-cn，失败静默）
-    void refreshCalendar(rt, { manual: false }).catch(() => {})
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, windows: windows.length }))
-    return
-  }
-
-  if (url === '/_modeldock/schedule/holidays-cn' && req.method === 'POST') {
-    // 手动触发节假日日历更新（控制台已删手动按钮，日历每日自动更新；端点留给 CLI/运维）：拉取今年/明年数据写缓存，日类型判定随之生效
-    const r = await refreshCalendar(rt, { manual: true }).catch((e) => {
-      throw Object.assign(new Error(e instanceof Error ? e.message : String(e)), { hint: t('请检查网络后重试；数据源为 holiday-cn（依据国务院办公厅公告校对）', 'Check the network and retry; data source is holiday-cn (verified against State Council announcements)') })
-    })
-    audit(
-      bi('节假日日历', 'Holiday calendar'),
-      bi('获取', 'Fetch'),
-      r.years.length
-        ? bi('更新 {years}，共 {n} 条', 'Updated {years}, {n} entries', { years: biJoin('、', ', ', r.years), n: r.updatedDays })
-        : bi('数据源无变化', 'No changes from data sources')
-    )
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, ...r }))
-    return
-  }
-
-  if (url === '/_modeldock/lan' && req.method === 'GET') {
-    // 手机简版控制台状态（二维码只对已过 admin 鉴权的本机控制台返回）
-    // 顺带重算默认出口地址：换 Wi-Fi / 起停 VPN 后该用哪块网卡会变，面板一刷新即纠正二维码
-    await refreshPreferredAddress()
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-    return
-  }
-
-  if (url === '/_modeldock/lan' && req.method === 'POST') {
-    // 开关手机简版控制台：config.lan.enabled 落盘并即时启停第二监听器；
-    // LAN 凭据复用 gateway.json 旧值（手机 cookie 跨重启不掉），没有才新生成
-    const b = await jsonRequestBody(req)
-    try {
-      if (b.enabled === true) {
-        const state = await readGatewayState()
-        const lanToken = resolveLanToken(state?.lan_token ?? null)
-        await startLanServer(rt, { port: rt.config.lan?.port ?? DEFAULT_LAN_PORT, token: lanToken })
-        await mutateConfig((c) => {
-          c.lan = { ...(c.lan ?? {}), enabled: true }
-        })
-        await reloadRuntime(rt)
-        const refreshed = await readGatewayState()
-        if (refreshed) await writeGatewayState({ ...refreshed, lan_token: lanToken, lan_port: rt.lan?.port })
-        audit(bi('手机远程', 'Mobile console'), bi('开启', 'on'), bi('端口 {port}', 'port {port}', { port: rt.lan?.port ?? 0 }))
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-      } else {
-        stopLan(rt)
-        await mutateConfig((c) => {
-          c.lan = { ...(c.lan ?? {}), enabled: false }
-        })
-        await reloadRuntime(rt)
-        const refreshed = await readGatewayState()
-        if (refreshed) await writeGatewayState({ ...refreshed, lan_port: undefined })
-        audit(bi('手机远程', 'Mobile console'), bi('关闭', 'off'))
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-      }
-    } catch (e) {
-      audit(bi('手机远程', 'Mobile console'), '-', undefined, (e as Error).message)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: (e as Error).message }))
-    }
-    return
-  }
-
-  if (url === '/_modeldock/sync/offer' && req.method === 'POST') {
-    // 同网直拉迁移（A 机）：生成一次性链接（口令藏 fragment，10 分钟有效、取走即焚）
-    try {
-      const r = await createSyncOffer(rt)
-      audit(bi('分享配置到附近电脑', 'Share config nearby'), bi('已生成直拉链接', 'pull link created'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r }))
-    } catch (e) {
-      audit(bi('分享配置到附近电脑', 'Share config nearby'), '-', undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/sync/import' && req.method === 'POST') {
-    // 同网直拉迁移（B 机）：apply 一键应用（url/file 直发，或附近直拉链路的 ticket）；preview（→ 票据）保留给 API 兼容。
-    // 审计只记 phase 与来源形态，绝不记 URL（查询串含 token）与口令
-    const b = await jsonRequestBody(req)
-    const phase = b.phase === 'apply' ? 'apply' : 'preview'
-    const source = (b.source ?? {}) as Record<string, unknown>
-    const srcKind = typeof source.kind === 'string' ? source.kind : ''
-    const resolveDoc = async (): Promise<{ doc: ReturnType<typeof validateSyncdoc>; env: unknown }> => {
-      const passphrase = typeof source.passphrase === 'string' ? source.passphrase : ''
-      let envText = ''
-      if (srcKind === 'url') {
-        envText = await fetchEnvelopeFromUrl(typeof source.url === 'string' ? source.url : '')
-      } else if (srcKind === 'file') {
-        envText = typeof source.file === 'string' ? source.file : ''
-        if (!envText) throw new Error(t('缺少配置包内容', 'Missing package content'))
-      } else {
-        throw new Error(t('来源类型必须是 url 或 file', 'Source kind must be url or file'))
-      }
-      if (!passphrase) throw new Error(t('缺少口令（链接 #p= 后段，或导出时设置的口令）', 'Missing passphrase (the #p= part of the link, or the one set at export)'))
-      let env: unknown
-      try {
-        env = JSON.parse(envText)
-      } catch {
-        throw new Error(t('不是合法的配置包（JSON 解析失败）', 'Not a valid sync package (JSON parse failed)'))
-      }
-      return { doc: validateSyncdoc(openEnvelope(env, passphrase)), env }
-    }
-    try {
-      if (phase === 'apply') {
-        const ticket = typeof source.ticket === 'string' ? source.ticket : ''
-        const doc = ticket ? takeSyncTicket(ticket) : (await resolveDoc()).doc
-        const report = await applyImportedDoc(doc)
-        await reloadRuntime(rt)
-        audit(bi('配置直拉导入', 'Config pull import'), phase, bi(ticket ? 'ticket' : srcKind, ticket ? 'ticket' : srcKind))
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, phase, report }))
-      } else {
-        const { doc, env } = await resolveDoc()
-        const metaEnv = env as Record<string, unknown>
-        const ticket = putSyncTicket(doc)
-        audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind, srcKind))
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({
-          ok: true,
-          phase,
-          ticket,
-          report: reportOfDoc(doc),
-          meta: { createdBy: String(metaEnv.created_by ?? ''), createdAt: String(metaEnv.created_at ?? '') },
-        }))
-      }
-    } catch (e) {
-      audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind || '-', srcKind || '-'), (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/config/export' && req.method === 'POST') {
-    // 导出加密配置包（.msync）：与 /m 导出、CLI config export 同一数据链路（密文出机器，口令保护）。
-    // 响应走 JSON 由前端存盘下载；审计只记结果，不记口令
-    const b = await jsonRequestBody(req)
-    const passphrase = typeof b.passphrase === 'string' ? b.passphrase : ''
-    try {
-      if (!passphrase) throw new Error(t('口令不能为空', 'Passphrase must not be empty'))
-      const { doc, report } = await collectSyncdoc()
-      assertExportable(report)
-      const env = sealEnvelope(doc, passphrase)
-      const name = exportFileName()
-      audit(bi('导出配置包', 'Export config package'), name, bi('已生成', 'created'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, envelope: env, filename: name }))
-    } catch (e) {
-      audit(bi('导出配置包', 'Export config package'), '-', undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/sync/discover' && req.method === 'POST') {
-    // 搜寻附近运行 ModelDock 且开启手机远程的电脑（UDP 广播，1.5s 收集；排除自己）
-    try {
-      const peers = await discoverPeers({ timeoutMs: 1500, exclude: { name: os.hostname(), port: rt.lan?.port } })
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, peers }))
-    } catch (e) {
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/sync/request-remote' && req.method === 'POST') {
-    // B 机发起：向选中的附近电脑敲门并后台轮询授权，立即返回 requestId 供前端轮询
-    const b = await jsonRequestBody(req)
-    try {
-      const ips = Array.isArray(b.ips) ? (b.ips as unknown[]).filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : []
-      const port = Number(b.port)
-      if (!ips.length || !Number.isInteger(port) || port <= 0 || port > 65535) {
-        throw new Error(t('目标电脑参数不完整', 'Invalid target computer'))
-      }
-      sweepRemoteRequests()
-      const requestId = randomToken('mdknear')
-      remoteRequests.set(requestId, { status: 'waiting', createdAt: Date.now() })
-      void runRemoteRequest(requestId, ips, port).catch(() => {
-        /* runRemoteRequest 内部已兜底落 failed 状态 */
-      })
-      audit(bi('附近配置直拉', 'Nearby config pull'), bi('已发送请求', 'request sent'), bi(`${ips[0]}:${port}`, `${ips[0]}:${port}`))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, requestId }))
-    } catch (e) {
-      audit(bi('附近配置直拉', 'Nearby config pull'), '-', undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/sync/remote-status' && req.method === 'GET') {
-    const q = new URL(req.url ?? '', 'http://x').searchParams
-    sweepRemoteRequests()
-    const st = remoteRequests.get(q.get('id') ?? '')
-    if (!st) return sendError(res, 404, t('请求不存在或已过期', 'Request not found or expired'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, ...st }))
-    return
-  }
-
-  if (url === '/_modeldock/sync/offer-approve' && req.method === 'POST') {
-    // A 机裁决（桌面确认卡）：approve=true 生成一次性直拉链接写入 grant（对方凭 nonce 取走即焚）；
-    // approve=false 写拒绝标记让对方立即结束等待
-    const b = await jsonRequestBody(req)
-    const nonce = typeof b.nonce === 'string' ? b.nonce : ''
-    const approve = b.approve === true
-    try {
-      const pending = peekSyncRequest()
-      if (!pending || pending.nonce !== nonce) throw new Error(t('请求不存在或已过期', 'Request not found or expired'))
-      if (approve) {
-        const offer = await createSyncOffer(rt)
-        putSyncGrant(nonce, { url: offer.urls[0], passphrase: offer.passphrase })
-        audit(bi('附近配置直拉', 'Nearby config pull'), bi('已允许', 'approved'), bi(pending.from, pending.from))
-      } else {
-        putSyncGrant(nonce, { denied: true })
-        audit(bi('附近配置直拉', 'Nearby config pull'), bi('已拒绝', 'denied'), bi(pending.from, pending.from))
-      }
-      clearSyncRequest()
-      overviewCache = null // 确认卡即时消失（overview 有 2s TTL 缓存）
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true }))
-    } catch (e) {
-      audit(bi('附近配置直拉', 'Nearby config pull'), approve ? bi('已允许', 'approved') : bi('已拒绝', 'denied'), bi('-', '-'), (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/autostart' && req.method === 'POST') {
-    // 开机自启开关。网关必然处于运行中，install 只登记服务文件、不 bootstrap——
-    // 否则第二个实例被单实例保护拒掉，launchd KeepAlive 会陷入重启循环。
-    const b = await jsonRequestBody(req)
-    try {
-      if (b.enabled === true) {
-        const r = await installAutostart()
-        audit(bi('开机自启', 'Start at login'), bi('开启', 'on'), bi('服务文件 {file}', 'Service file {file}', { file: r.file }))
-        // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 2s TTL 旧值，UI 回灌旧状态
-        overviewCache = null
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, installed: true, note: r.note ?? t('下次登录自动启动', 'Starts automatically at next login') }))
-      } else {
-        const r = await uninstallAutostart()
-        audit(bi('开机自启', 'Start at login'), bi('关闭', 'off'), r.wasInstalled ? bi('已移除 {path}', 'Removed {path}', { path: r.removed }) : bi('本就未安装', 'Was not installed'))
-        overviewCache = null
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, installed: false }))
-      }
-    } catch (e) {
-      audit(bi('开机自启', 'Start at login'), '-', undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/import/detect' && req.method === 'GET') {
-    // 扫描本机各客户端/工具的现有配置（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode /
-    // MiMo / WorkBuddy / CCR / Crush / Gemini CLI）；绝不回传 Key 明文
-    const cands = await scanSources('all')
-    const existingNorms = new Set(
-      Object.values(rt.config.providers).map((p) => normalizeBaseUrl(p.base_url))
-    )
-    const dismissed = new Set((rt.config.import?.dismissed ?? []).map((u) => normalizeBaseUrl(u)))
-    // 同站点提示索引：同主机不同端点（双协议各登记一份等）不算重复，但标注出来供用户判断
-    const hostNames = new Map<string, string[]>()
-    for (const [pid, p] of Object.entries(rt.config.providers)) {
-      try {
-        const h = new URL(p.base_url).hostname.toLowerCase()
-        const nm = p.name?.trim() || pid
-        const arr = hostNames.get(h) ?? []
-        if (!arr.includes(nm)) arr.push(nm)
-        hostNames.set(h, arr)
-      } catch {
-        /* 非法地址不参与提示 */
-      }
-    }
-    const candidates = cands.map((c) => {
-      const norm = normalizeBaseUrl(c.base_url)
-      const dup = existingNorms.has(norm)
-      let sameSite: string | undefined
-      if (!dup && c.base_url) {
-        try {
-          const names = hostNames.get(new URL(c.base_url).hostname.toLowerCase())
-          if (names?.length) {
-            sameSite = t('与已有服务「{name}」同一站点', 'Same site as existing service "{name}"', { name: names.join('、') })
-          }
-        } catch {
-          /* 非法地址不参与提示 */
-        }
-      }
-      return {
-        id: c.suggest_id,
-        source: c.source,
-        name: c.name,
-        base_url: c.base_url,
-        hasKey: !!c.key,
-        isCurrent: !!c.is_current,
-        dismissed: dismissed.has(norm) || undefined,
-        sameSite,
-        skipReason: c.skip_reason ?? (dup ? t('已在 ModelDock 中', 'Already in ModelDock') : undefined),
-      }
-    })
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, candidates }))
-    return
-  }
-
-  if (url === '/_modeldock/import/apply' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    const wantedIds: string[] | null = Array.isArray(b.ids) ? b.ids.map(String) : null
-    const cands = await scanSources('all')
-    // 地址重复的兜底在 applyImport 内（含批内去重），这里只按用户勾选与可导入性过滤
-    const chosen = cands.filter(
-      (c) => !c.skip_reason && c.base_url && (wantedIds === null || wantedIds.includes(c.suggest_id))
-    )
-    if (chosen.length === 0) {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, imported: [], profiles: [], skipped: [] }))
-      return
-    }
-    const report = await mutateConfig((c) => applyImport(c, chosen, { withProfiles: true }))
-    await reloadRuntime(rt)
-    audit(bi('导入配置', 'Import configs'), report.providers.join(',') || '-', bi('导入 {p} 个服务 / {r} 条路由', 'Imported {p} services / {r} routes', { p: report.providers.length, r: report.profiles.length }))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, imported: report.providers, profiles: report.profiles, skipped: report.skipped }))
-    return
-  }
-
-  if (url === '/_modeldock/import/dismiss' && req.method === 'POST') {
-    // 忽略候选（按归一化地址持久化，跨浏览器生效）：自动弹卡不再提示；勾选导入手动入口不受影响，随时可搬回
-    const b = await jsonRequestBody(req)
-    // b 是不可信 JSON（any）：显式按 unknown[] 收口——元素 String() 归一化后归一化地址、过滤空值
-    const urls: string[] = Array.isArray(b.urls)
-      ? [...new Set((b.urls as unknown[]).map((u) => normalizeBaseUrl(String(u))).filter((u): u is string => !!u))]
-      : []
-    if (urls.length === 0) {
-      return sendError(res, 400, t('缺少 urls：要忽略的候选地址数组', 'Missing urls: the array of candidate base URLs to dismiss'))
-    }
-    await mutateConfig((c) => {
-      const set = new Set(c.import?.dismissed ?? [])
-      for (const u of urls) set.add(u)
-      c.import = { ...c.import, dismissed: [...set] }
-    })
-    await reloadRuntime(rt)
-    audit(bi('忽略导入候选', 'Dismiss import candidates'), String(urls.length))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, dismissed: urls.length }))
-    return
-  }
-
-  if (url === '/_modeldock/service/update' && req.method === 'POST') {
-    // 编辑模型服务：显示名称 / 接口地址 / Key / 模型目录（任选）
-    const b = await jsonRequestBody(req)
-    const id = typeof b.provider === 'string' ? b.provider : ''
-    const p = rt.config.providers[id]
-    if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
-    const name = typeof b.name === 'string' ? b.name.trim() : ''
-    const baseUrl = typeof b.base_url === 'string' ? b.base_url.trim() : ''
-    // 默认协议随编辑可变（三协议端点直排后由填写的行推导，缺省保持现状）
-    const newProtocol = b.protocol === 'anthropic' || b.protocol === 'openai' || b.protocol === 'responses' ? b.protocol : undefined
-    if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
-      return sendError(res, 400, t('接口地址必须以 http:// 或 https:// 开头', 'Base URL must start with http:// or https://'))
-    }
-    // 去重口径与 addService 一致：同地址且同 Key 才算重复；
-    // 同地址不同 Key 是「同一厂商多个账号分别登记」的合法场景，允许共存。
-    // 仅当本次提交真正改动了地址或 Key 时才校验，避免历史同对数据在改名等无关编辑时被误拦。
-    const hasNewKey = typeof b.key === 'string' && !!b.key
-    const oldKey = p.key_ref ? (await getSecret(p.key_ref)) ?? '' : ''
-    const effectiveKey = hasNewKey ? (b.key as string) : oldKey
-    const urlChanged = !!baseUrl && normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(p.base_url)
-    const keyChanged = hasNewKey && (b.key as string) !== oldKey
-    if (urlChanged || keyChanged) {
-      const norm = normalizeBaseUrl(baseUrl || p.base_url)
-      for (const [pid, other] of Object.entries(rt.config.providers)) {
-        if (pid === id) continue
-        if (normalizeBaseUrl(other.base_url) !== norm) continue
-        const otherKey = other.key_ref ? (await getSecret(other.key_ref)) ?? '' : ''
-        if (otherKey === effectiveKey) {
-          return sendError(res, 400, t('该地址与已有服务「{id}」重复（同地址同 Key）；同地址不同 API Key 可分别保存', 'This URL duplicates existing service "{id}" (same URL and key); the same URL with different API keys can coexist', { id: pid }))
-        }
-      }
-    }
-    let newEndpoints: Partial<Record<import('../config/types.js').Protocol, string>> | undefined
-    if (b.endpoints && typeof b.endpoints === 'object' && !Array.isArray(b.endpoints)) {
-      const e: Partial<Record<import('../config/types.js').Protocol, string>> = {}
-      for (const [k, v] of Object.entries(b.endpoints)) {
-        if (!(k === 'anthropic' || k === 'openai' || k === 'responses')) continue
-        if (typeof v !== 'string') continue
-        const val = v.trim()
-        if (!val) { e[k as import('../config/types.js').Protocol] = ''; continue }
-        if (!/^https?:\/\//i.test(val)) return sendError(res, 400, t('{proto} 协议地址必须以 http:// 或 https:// 开头', 'The {proto} endpoint URL must start with http:// or https://', { proto: k }))
-        e[k as import('../config/types.js').Protocol] = val
-      }
-      if (Object.keys(e).length) newEndpoints = e
-    }
-    let newKeyRef: string | undefined
-    if (typeof b.key === 'string' && b.key) {
-      newKeyRef = await setSecret(id, b.key, rt.config.security?.store ?? (await defaultStore()))
-    }
-    // 模型目录：完整列表替换语义（UI 传全量）。校验：id 非空去重、ctx/out 为正整数；
-    // 显示名随模型提交（编辑浮层在 ID 下以副行回显，仅回显与 ID 不同者）
-    let newModels: Record<string, import('../config/types.js').ModelMeta> | undefined
-    if (b.models && typeof b.models === 'object' && !Array.isArray(b.models)) {
-      newModels = {}
-      for (const [rawId, rawMeta] of Object.entries(b.models as Record<string, unknown>)) {
-        const mid = rawId.trim()
-        if (!mid) continue
-        const meta = rawMeta as { display_name?: unknown; context_window?: unknown; max_output?: unknown; capabilities?: unknown }
-        const rec: import('../config/types.js').ModelMeta = { source: 'manual' }
-        const prev = p.models?.[mid]
-        // 显示名：提交非空且 ≠ ID 才采用；留空/同名保留既有（预设/CLI 写入的权威名不丢）
-        const dn = typeof meta?.display_name === 'string' ? meta.display_name.trim() : ''
-        if (dn && dn.toLowerCase() !== mid.toLowerCase()) rec.display_name = dn
-        else if (prev?.display_name) rec.display_name = prev.display_name
-        const ctx = Number(meta?.context_window)
-        const out = Number(meta?.max_output)
-        if (Number.isFinite(ctx) && ctx > 0 && Number.isInteger(ctx)) rec.context_window = ctx
-        if (Number.isFinite(out) && out > 0 && Number.isInteger(out)) rec.max_output = out
-        // 用户留空时，用填充链补齐（内置表 → models.dev 目录；拉取时已收的上游值不会走到这里）
-        const k = resolveModelMeta(mid)
-        if (rec.context_window == null && k?.context_window != null) rec.context_window = k.context_window
-        if (rec.max_output == null && k?.max_output != null) rec.max_output = k.max_output
-        // 能力：显式提交 > 保留既有 > 内置表推断（如 kimi-k3 自动带 vision）；空数组=清空
-        const caps = saneCapabilities(meta?.capabilities)
-        const nextCaps = caps ?? prev?.capabilities ?? saneCapabilities(k?.capabilities)
-        if (nextCaps?.length) rec.capabilities = nextCaps
-        newModels[mid] = rec
-      }
-    }
-    // 故障切换候选链：写入引用该 provider 的 profile（与 default_model 同一选择逻辑）。
-    // 条目 "<providerId>"（透传原模型）或 "<providerId>:<modelId>"（改写模型）；空数组=清空；缺省=不动
-    let newFallback: string[] | undefined
-    if (Array.isArray(b.fallback)) {
-      newFallback = []
-      const seenIds = new Set<string>()
-      for (const raw of b.fallback) {
-        const parsed = parseFallbackEntry(String(raw ?? ''))
-        if (!parsed) {
-          return sendError(res, 400, t('备用服务条目「{entry}」无效，应为 服务ID 或 服务ID:模型ID', 'Fallback entry "{entry}" is invalid; expected ServiceID or ServiceID:ModelID', { entry: String(raw ?? '') }))
-        }
-        if (!rt.config.providers[parsed.providerId]) {
-          return sendError(res, 400, t('备用服务「{id}」不存在', 'Fallback service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
-        }
-        if (parsed.providerId === id || seenIds.has(parsed.providerId)) continue
-        seenIds.add(parsed.providerId)
-        newFallback.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
-      }
-    }
-    await persistConfig(rt, (c) => {
-      const t = c.providers[id]
-      if (!t) return
-      if (name) t.name = name
-      if (baseUrl) t.base_url = baseUrl
-      if (newProtocol) t.protocol = newProtocol
-      if (newKeyRef) t.key_ref = newKeyRef
-      if (newModels) t.models = newModels
-      // 协议端点：替换/清空
-      if (newEndpoints) {
-        const e = { ...(t.endpoints ?? {}) }
-        for (const [k, v] of Object.entries(newEndpoints)) { const kp = k as import('../config/types.js').Protocol; if (v) e[kp] = v; else delete e[kp] }
-        t.endpoints = Object.keys(e).length ? e : undefined
-      }
-      // 设置默认模型：写入引用该 provider 的 profile（优先 active_profile）
-      if (typeof b.default_model === 'string') {
-        const profName = profileRefForProvider(c, id)
-        if (profName) {
-          if (b.default_model) c.profiles[profName].default_model = b.default_model
-          else delete c.profiles[profName].default_model
-        }
-      }
-      if (Array.isArray(newFallback)) {
-        const profName = profileRefForProvider(c, id)
-        if (profName) {
-          if (newFallback.length) c.profiles[profName].fallback = newFallback
-          else delete c.profiles[profName].fallback
-        }
-      }
-    })
-    // 审计摘要：列出本次实际变更的字段（不落密钥明文）
-    const changes = [
-      name ? bi('名称 → {name}', 'Name → {name}', { name }) : '',
-      baseUrl ? bi('地址 → {url}', 'URL → {url}', { url: baseUrl }) : '',
-      newKeyRef ? bi('Key 已更新', 'Key updated') : '',
-      newModels ? bi('模型目录 {n} 个', '{n} models', { n: Object.keys(newModels).length }) : '',
-      newEndpoints ? bi('端点 {list} 已更新', 'Endpoints {list} updated', { list: Object.keys(newEndpoints).join('/') }) : '',
-      typeof b.default_model === 'string' ? bi('默认模型 → {model}', 'Default model → {model}', { model: b.default_model || bi('(清除)', '(cleared)') }) : '',
-      Array.isArray(newFallback) ? bi('备用服务 {n} 个', '{n} fallback services', { n: newFallback.length }) : '',
-    ].filter(Boolean) as Array<Bilingual | ''>
-    audit(bi('编辑服务', 'Edit service'), id, changes.length ? biJoin('，', ', ', changes) : bi('无字段变更', 'No fields changed'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true }))
-    return
-  }
-
-  if (url === '/_modeldock/service/reveal-key' && req.method === 'POST') {
-    // 按需查看单个服务的已保存 Key（编辑弹窗点 👁 时调用）。Key 不随 overview 批量下发，
-    // 只有显式动作才取一份明文：列表/截屏/日志场景不泄漏，Host 白名单 + 同源校验在此入口统一生效
-    const b = await jsonRequestBody(req)
-    const id = typeof b.id === 'string' ? b.id : ''
-    const p = rt.config.providers[id]
-    if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
-    const key = await getSecret(p.key_ref)
-    audit(bi('查看 Key', 'View key'), id, key ? bi('读取成功', 'Read ok') : bi('Key 不可读（未设置或安全后端拒绝）', 'Key unreadable (not set or the OS keychain refused)'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, key: key ?? null }))
-    return
-  }
-
-  if (url === '/_modeldock/harness/env' && req.method === 'POST') {
-    // 按需取某客户端经网关接入用的环境变量（generic-env 的「复制环境变量」按钮调用）。
-    // token 属敏感值，与 reveal-key 同策略：不随 overview 批量下发，显式动作才返回一份
-    const b = await jsonRequestBody(req)
-    const hid = String(b.harness ?? '')
-    const he = rt.config.harness[hid]
-    if (!he) return sendError(res, 400, t('客户端「{id}」尚未接入，先接入再获取环境变量', 'Client "{id}" is not attached yet; attach it first to get env vars', { id: hid }))
-    const token = he.token ?? ''
-    if (!token) return sendError(res, 400, t('客户端「{id}」没有网关令牌（该客户端不经本网关转发）', 'Client "{id}" has no gateway token (it does not route through this gateway)', { id: hid }))
-    const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-    const base = `http://127.0.0.1:${port}`
-    audit(bi('查看环境变量', 'View env vars'), hid)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(
-      JSON.stringify({
-        ok: true,
-        harness: hid,
-        base_url: base,
-        token,
-        lines: [
-          `export ANTHROPIC_BASE_URL=${base}`,
-          `export ANTHROPIC_AUTH_TOKEN=${token}`,
-          `export OPENAI_BASE_URL=${base}/v1`,
-          `export OPENAI_API_KEY=${token}`,
-        ],
-      })
-    )
-    return
-  }
-
-  if (url === '/_modeldock/service/delete' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    const id = typeof b.provider === 'string' ? b.provider : ''
-    const p = rt.config.providers[id]
-    if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
-    // 与 CLI cmdProviderRm 共用 ops.removeProviderCascade：除路由外还清理 auto_route_provider、
-    // 各 profile 的 fallback 候选链与定时切换窗口里的悬空条目
-    const usedBy = Object.entries(rt.config.profiles).filter(([, pr]) => pr.provider === id).map(([k]) => k)
-    // 有客户端钉定/直连在将被删除的路由上：直接拒绝（网关钉定删了留下悬空 route → 请求 503；
-    // 独立直连已把该服务 URL+Key 写进客户端文件，删了直连目标失效）。file 模式客户端自管路由、
-    // 不沿网关转发，删除服务不影响它，不拦截（其 route 仅登记痕迹，随删除清掉，见 ops.removeProviderCascade）
-    const pinned = Object.entries(rt.config.harness).filter(
-      ([, he]) => he.route && he.mode !== 'file' && usedBy.includes(he.route)
-    )
-    if (pinned.length > 0) {
-      const pinnedGateway = pinned.filter(([, he]) => he.mode !== 'direct').map(([h]) => h).join(t('、', ', '))
-      const pinnedDirect = pinned.filter(([, he]) => he.mode === 'direct').map(([h]) => h).join(t('、', ', '))
-      return sendError(
-        res,
-        400,
-        [
-          pinnedGateway
-            ? t('有客户端钉定在该服务的路由上（{list}），先在客户端卡片把路由改回「跟随全局」再删除', 'A client is pinned to a route of this service ({list}); switch the route back to "follow global" on the client card before deleting', { list: pinnedGateway })
-            : '',
-          pinnedDirect
-            ? t('有客户端独立直连到该服务（{list}），请先断开该客户端的接入，或把它切回网关模式再删除', 'A client connects directly to this service ({list}); detach it or switch it back to gateway mode before deleting', { list: pinnedDirect })
-            : '',
-        ]
-          .filter(Boolean)
-          .join(t('；', '; '))
-      )
-    }
-    try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
-    let removedProfiles: string[] = []
-    await persistConfig(rt, (c) => {
-      removedProfiles = removeProviderCascade(c, id)
-    })
-    audit(bi('删除服务', 'Delete service'), id, removedProfiles.length ? bi('同时删除路由 {list}', 'Also removed routes {list}', { list: biJoin('、', ', ', removedProfiles) }) : undefined)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, removed: id, profiles: removedProfiles }))
-    return
-  }
-
-  if (url === '/_modeldock/install' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const a = await requireAdapter(String(b.harness ?? ''), rt.config)
-      const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-      const r = await runClientInstall(a, rt.config, port)
-      audit(
-        bi('安装并接入客户端', 'Install & attach client'),
-        a.id,
-        r.ok
-          ? (r.skipped ? bi('命令已存在，跳过安装', 'Command already present, install skipped') : r.auto ? bi('自动安装完成', 'Auto-install finished') : bi('已提供安装指引', 'Install guide provided'))
-          : r.blocked
-            ? bi('沙箱内不支持自动安装（会写进真机），已提示手动安装', 'Auto-install not supported in sandbox (would write to the real machine); manual install suggested')
-            : bi('安装失败', 'Install failed')
-      )
-      await reloadRuntime(rt)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          ok: r.ok,
-          auto: r.auto,
-          skipped: r.skipped,
-          output: r.output,
-          installed: r.installed,
-          guide: a.install?.guide ?? '',
-          homepage: a.install?.homepage ?? null,
-        })
-      )
-    } catch (e) {
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/uninstall' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const a = await requireAdapter(String(b.harness ?? ''), rt.config)
-      // 接入中的客户端先断开：卸载只删程序本体，配置还原是 detach 的职责，顺序反了会留下指向网关的孤儿配置
-      if (rt.config.harness[a.id]) {
-        throw new Error(t('该客户端仍处于接入状态，请先「断开并还原」再卸载', 'This client is still attached — detach & restore first, then uninstall'))
-      }
-      const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-      const r = await runClientUninstall(a, rt.config, port)
-      audit(
-        bi('卸载客户端', 'Uninstall client'),
-        a.id,
-        r.ok ? (r.skipped ? bi('命令不在 PATH，无需卸载', 'Command not on PATH; nothing to uninstall') : bi('卸载完成', 'Uninstall finished')) : bi('卸载失败', 'Uninstall failed')
-      )
-      await reloadRuntime(rt)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: r.ok, skipped: r.skipped, output: r.output, installed: r.installed }))
-    } catch (e) {
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  // attach 请求体里的 client_profiles：["desktop"] 或 "desktop,web"（后者兼容表单直传）；非法输入一律忽略为全部
-  const parseClientProfiles = (v: unknown): string[] | undefined => {
-    const list = Array.isArray(v)
-      ? v.map((x) => String(x).trim()).filter(Boolean)
-      : typeof v === 'string'
-        ? v.split(',').map((s) => s.trim()).filter(Boolean)
-        : []
-    return list.length > 0 ? list : undefined
-  }
-
-  if (url === '/_modeldock/attach/plan' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const plan = await planAttach(String(b.harness ?? ''), {
-        profile: typeof b.profile === 'string' && b.profile ? b.profile : undefined,
-        clientProfiles: parseClientProfiles(b.client_profiles),
-        setDefault: b.setDefault === true,
-        takeoverModels: b.takeoverModels === true,
-        gatewayPort: rt.port, // 本实例自己的端口；状态文件在多实例下可能记录的是别的实例
-      })
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...plan }))
-    } catch (e) {
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/attach/apply' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const r = await applyAttach(String(b.harness ?? ''), {
-        profile: typeof b.profile === 'string' && b.profile ? b.profile : undefined,
-        clientProfiles: parseClientProfiles(b.client_profiles),
-        setDefault: b.setDefault === true,
-        takeoverModels: b.takeoverModels === true,
-        gatewayPort: rt.port, // 本实例自己的端口；状态文件在多实例下可能记录的是别的实例
-      })
-      await reloadRuntime(rt) // 立即刷新内存态，overview 才能即时反映接入结果
-      // attach 写入的 picker 目录取自 active_profile；若此刻正处于 prefer 窗口接管（展示路由 ≠
-      // active_profile），基线置失效让周期检测在 5s 内按窗口目标校准一次
-      pickerSyncStates.get(rt)!.route = undefined
-      audit(bi('接入客户端', 'Attach client'), r.harness, bi('端口 {port}，写入 {n} 个文件', 'Port {port}, wrote {n} files', { port: r.port, n: r.files.length }))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r, hint: t('重启 {id} 后生效；原文件已自动快照，可随时断开还原', 'Takes effect after restarting {id}; the original files were auto-snapshotted and can be restored anytime by detaching', { id: r.harness }) }))
-    } catch (e) {
-      audit(bi('接入客户端', 'Attach client'), String(b.harness ?? '-'), undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/detach' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    try {
-      const r = await detachHarness(String(b.harness ?? ''))
-      await reloadRuntime(rt)
-      audit(bi('断开客户端', 'Detach client'), String(b.harness ?? '-'), r.restored ? bi('已还原到本次接入前（快照 {id}）', 'Restored to the state before this attach (snapshot {id})', { id: r.snapshotId ?? '-' }) : bi('已反向清理网关配置', 'Gateway-side config cleaned up in reverse'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r }))
-    } catch (e) {
-      audit(bi('断开客户端', 'Detach client'), String(b.harness ?? '-'), undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/harness/route' && req.method === 'POST') {
-    // 客户端钉路由：UI 按「服务」（provider）操作，API 也可直接指定 profile 名；default = 恢复跟随全局。
-    // 路由本身只改 config 的 harness.route（服务端内存，热加载后下一请求生效）；烤模型客户端
-    // （dsh/workbuddy/zcode，adapter.bakesModels）的模型列表烙在客户端文件里，钉定后需按新 profile 重写
-    const b = await jsonRequestBody(req)
-    const hid = String(b.harness ?? '')
-    try {
-      if (!rt.config.harness[hid]) return sendError(res, 400, t('客户端「{id}」未接入，先接入再设置路由', 'Client "{id}" is not attached; attach it first to set a route', { id: hid }))
-      if (rt.config.harness[hid].mode === 'direct') {
-        return sendError(res, 400, t('客户端「{id}」是独立直连模式：更换直连目标请用 /harness/mode（需要重写客户端配置文件）', 'Client "{id}" is in standalone direct mode: use /harness/mode to change the direct target (client config files get rewritten)', { id: hid }))
-      }
-      if (rt.config.harness[hid].mode === 'file') {
-        return sendError(res, 400, t('客户端「{id}」是 file 模式（客户端自管路由），不支持钉定', 'Client "{id}" is in file mode (it manages its own routing) and cannot be pinned', { id: hid }))
-      }
-      const toDefault = b.default === true
-      const profileName = typeof b.profile === 'string' && b.profile ? b.profile : ''
-      const providerId = typeof b.provider === 'string' && b.provider ? b.provider : ''
-      if (!toDefault && !profileName && !providerId) {
-        return sendError(res, 400, t('缺少路由目标：provider / profile / default 三选一', 'Missing route target: provide one of provider / profile / default'))
-      }
-      if (profileName && !rt.config.profiles[profileName]) {
-        return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name: profileName }))
-      }
-      if (providerId && !rt.config.providers[providerId]) {
-        return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }))
-      }
-      let finalRoute = toDefault ? 'default' : profileName
-      await persistConfig(rt, (c) => {
-        if (!toDefault && !profileName && providerId) {
-          finalRoute = profileForProvider(c, providerId)
-        }
-        c.harness[hid] = { ...(c.harness[hid] ?? rt.config.harness[hid]!), route: finalRoute }
-      })
-      // 烤模型客户端按目标 profile 重写模型列表（恢复跟随 = 按 active_profile 重写；透明客户端为空操作）
-      const syncProfile = toDefault ? rt.config.active_profile ?? undefined : finalRoute
-      const synced = syncProfile
-        ? await resyncHarnessToRoute(hid, syncProfile, { port: rt.port })
-        : { refreshed: [], warnings: [] }
-      const detail = biCat(
-        finalRoute === 'default' ? bi('恢复跟随全局', 'Back to follow global') : bi('钉到 {route}', 'Pinned to {route}', { route: finalRoute }),
-        synced.refreshed.length ? bi('；已同步重写 {id} 的模型列表（重启该客户端生效）', '; rewrote the model list of {id} (restart the client to apply)', { id: hid }) : '',
-        synced.warnings.length ? bi('；{list}', '; {list}', { list: biJoin('；', '; ', synced.warnings) }) : ''
-      )
-      audit(bi('客户端钉路由', 'Pin client route'), hid, detail)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, route: finalRoute, ...synced, hint: synced.refreshed.length ? t('已同步重写该客户端的模型列表，重启该客户端后生效', 'Rewrote the model list of this client; restart the client to apply') : undefined }))
-    } catch (e) {
-      audit(bi('客户端钉路由', 'Pin client route'), hid, undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/harness/mode' && req.method === 'POST') {
-    // 接入模式切换：direct（独立直连，写上游 url+真实 Key，重写客户端文件）⇄ gateway（切回网关）。
-    // 复用 ops.switchHarnessMode（快照/原子写/登记），直连后客户端不经过网关，网关挂掉仍可用作救援通道
-    const b = await jsonRequestBody(req)
-    const hid = String(b.harness ?? '')
-    const mode = b.mode === 'direct' ? 'direct' : b.mode === 'gateway' ? 'gateway' : ''
-    if (!mode) return sendError(res, 400, t('mode 必须是 gateway 或 direct', 'mode must be gateway or direct'))
-    const he = rt.config.harness[hid]
-    if (!he) return sendError(res, 400, t('客户端「{id}」未接入，先接入再切换模式', 'Client "{id}" is not attached; attach it first to switch modes', { id: hid }))
-    if (he.mode === 'file') return sendError(res, 400, t('file 模式的客户端暂不支持切换直连', 'Clients in file mode do not support switching to direct yet'))
-    if (mode === 'gateway' && he.mode !== 'direct') {
-      return sendError(res, 400, t('客户端「{id}」已是网关接入模式', 'Client "{id}" is already in gateway mode', { id: hid }))
-    }
-    if (mode === 'direct' && he.mode === 'direct' && !b.profile && !b.provider) {
-      return sendError(res, 400, t('客户端「{id}」已是独立直连模式；更换直连目标请带 profile 或 provider', 'Client "{id}" is already in standalone direct mode; pass profile or provider to change the direct target', { id: hid }))
-    }
-    const profileOverride = typeof b.profile === 'string' && b.profile ? b.profile : ''
-    const providerOverride = typeof b.provider === 'string' && b.provider ? b.provider : ''
-    if (profileOverride && !rt.config.profiles[profileOverride]) {
-      return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name: profileOverride }))
-    }
-    if (providerOverride && !rt.config.providers[providerOverride]) {
-      return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerOverride }))
-    }
-    try {
-      let profile = profileOverride || undefined
-      if (mode === 'direct' && !profile && providerOverride) {
-        await persistConfig(rt, (c) => {
-          profile = profileForProvider(c, providerOverride)
-        })
-      }
-      const r = await switchHarnessMode(hid, mode, { profile, yes: true, port: rt.port })
-      await reloadRuntime(rt)
-      audit(mode === 'direct' ? bi('客户端切直连', 'Client switched to direct') : bi('客户端切回网关', 'Client switched back to gateway'), hid, bi('目标 {target}，写入 {n} 个文件', 'Target {target}, wrote {n} files', { target: r.profile, n: r.files.length }))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...r, hint: t('重启 {id} 后生效', 'Takes effect after restarting {id}', { id: hid }) }))
-    } catch (e) {
-      audit(mode === 'direct' ? bi('客户端切直连', 'Client switched to direct') : bi('客户端切回网关', 'Client switched back to gateway'), hid, undefined, (e as Error).message)
-      sendError(res, 400, (e as Error).message)
-    }
-    return
-  }
-
-  if (url === '/_modeldock/use' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    const name = typeof b.profile === 'string' ? b.profile : ''
-    if (!name || !rt.config.profiles[name]) {
-      return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name }), t('modeldock profile list 查看', 'Run modeldock profile list to view profiles'))
-    }
-    await persistConfig(rt, (c) => {
-      c.active_profile = name
-    })
-    audit(bi('切换路由', 'Switch route'), name)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, active_profile: name }))
-    return
-  }
-
-  if (url === '/_modeldock/profile' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    const name = typeof b.name === 'string' ? b.name : ''
-    const provider = typeof b.provider === 'string' ? b.provider : ''
-    if (!/^[a-zA-Z0-9_-]{1,40}$/.test(name)) {
-      return sendError(res, 400, t('profile 名称只能是字母/数字/-/_，长度 ≤40', 'Profile name allows only letters/digits/-/_ and must be ≤40 chars'))
-    }
-    if (!provider || !rt.config.providers[provider]) {
-      return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
-    }
-    if (rt.config.profiles[name]) {
-      return sendError(res, 400, t('profile「{name}」已存在', 'Profile "{name}" already exists', { name }))
-    }
-    const models = rt.config.providers[provider].models ?? {}
-    const defaultModel = typeof b.default_model === 'string' && b.default_model ? b.default_model : undefined
-    if (defaultModel && Object.keys(models).length > 0 && !models[defaultModel]) {
-      return sendError(res, 400, t('模型「{model}」不在 {id} 的目录里', 'Model "{model}" is not in the catalog of {id}', { model: defaultModel, id: provider }), 'modeldock model list ' + provider)
-    }
-    const aliases =
-      b.aliases && typeof b.aliases === 'object' && !Array.isArray(b.aliases)
-        ? Object.fromEntries(
-            Object.entries(b.aliases as Record<string, unknown>)
-              .filter(([k, v]) => typeof k === 'string' && k && typeof v === 'string')
-              .map(([k, v]) => [k, String(v)])
-          )
-        : undefined
-    await persistConfig(rt, (c) => {
-      c.profiles[name] = { name, provider, default_model: defaultModel, aliases }
-      if (!c.active_profile) c.active_profile = name
-    })
-    audit(bi('新建路由', 'Create route'), name, biCat(`provider=${provider}`, defaultModel ? bi('，默认模型 {model}', ', default model {model}', { model: defaultModel }) : ''))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, profile: name }))
-    return
-  }
-
-  if (url === '/_modeldock/key' && req.method === 'POST') {
-    const b = await jsonRequestBody(req)
-    const provider = typeof b.provider === 'string' ? b.provider : ''
-    const key = typeof b.key === 'string' ? b.key : ''
-    if (!provider || !rt.config.providers[provider]) {
-      return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
-    }
-    if (!key) {
-      return sendError(res, 400, t('key 不能为空', 'Key must not be empty'))
-    }
-    const backend = rt.config.security?.store ?? (await defaultStore())
-    const keyRef = await setSecret(provider, key, backend)
-    await persistConfig(rt, (c) => {
-      if (c.providers[provider]) c.providers[provider].key_ref = keyRef
-    })
-    audit(bi('更新密钥', 'Update key'), provider, bi('存入 {backend}', 'Stored in {backend}', { backend }))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true }))
-    return
-  }
-
-  if (url === '/_modeldock/reload' && req.method === 'POST') {
-    try {
-      await reloadRuntime(rt)
-      audit(bi('重载配置', 'Reload config'), '-', bi('第 {n} 次热重载', 'Hot reload #{n}', { n: rt.reloads }))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, reloads: rt.reloads }))
-    } catch (e) {
-      audit(bi('重载配置', 'Reload config'), '-', undefined, (e as Error).message)
-      sendError(res, 500, t('配置重载失败：{msg}', 'Failed to reload config: {msg}', { msg: (e as Error).message }))
-    }
-    return
-  }
-
-  if (url === '/_modeldock/test' && req.method === 'POST') {
-    const body = await readBody(req, maxBodyBytes(rt.config))
-    let p: { profile?: string; provider?: string; model?: string; stream?: boolean; mode?: string } = {}
-    try {
-      p = body.length ? JSON.parse(body.toString('utf8')) : {}
-    } catch {
-      return sendError(res, 400, t('test 请求体必须是 JSON', 'The test request body must be JSON'))
-    }
-    let resolved: { ok: boolean; target?: ResolvedTarget; status?: number; message?: string; hint?: string }
-    if (p.provider) {
-      // 按服务直接探测（不必先建路由）
-      const provider = rt.config.providers[p.provider]
-      if (!provider) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: p.provider }))
-      const models = Object.keys(provider.models ?? {})
-      const fakeProfile = {
-        name: `probe-${p.provider}`,
-        provider: p.provider,
-        default_model: p.model ?? models[0],
-      }
-      resolved = { ok: true, target: { harness: 'admin-test', profileName: fakeProfile.name, profile: fakeProfile, provider } }
-    } else {
-      resolved = resolveByProfile(rt, p.profile)
-    }
-    if (!resolved.ok) return sendError(res, resolved.status ?? 400, resolved.message ?? t('无法解析路由', 'Cannot resolve a route'), resolved.hint)
-    // mode='ping' → 纯网络延迟（不推理）；否则保持原有的完整模型请求测速
-    const out = p.mode === 'ping'
-      ? await probePing(rt, resolved.target!.provider)
-      : await probe(rt, resolved.target!, p.model, p.stream === true, o)
-    // 连接测试也记入请求日志（客户端记为 admin-test），便于追溯测试失败原因
-    logRequest(rt, {
-      ts: localIsoTs(),
-      harness: 'admin-test',
-      profile: resolved.target?.profileName ?? '-',
-      provider: p.provider ?? resolved.target?.profile.provider ?? '-',
-      model: (out as { model?: string }).model ?? p.model,
-      path: p.mode === 'ping' ? 'ping' : url,
-      status: out.ok ? 200 : 502,
-      ms: out.ms,
-      err: out.err,
-    })
-    res.writeHead(out.ok ? 200 : 502, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(out))
-    return
-  }
-
-  if (url === '/_modeldock/reset' && req.method === 'POST') {
-    const { configPath, secretsPath } = await import('../util/paths.js')
-    const fs = await import('node:fs')
-    // 先清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
-    let secretsCleared = 0
-    for (const [id, p] of Object.entries(rt.config.providers)) {
-      try {
-        await deleteSecret(p.key_ref)
-        secretsCleared++
-      } catch { /* 单项失败不影响其余 */ }
-    }
-    const files = [configPath(), secretsPath()]
-    const deleted: string[] = []
-    for (const f of files) {
-      try {
-        if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
-      } catch { /* 忽略 */ }
-    }
-    // 重载为空配置
-    await reloadRuntime(rt)
-    audit(bi('重置配置', 'Reset config'), '-', bi('删除 {files}，清除 {n} 个密钥', 'Deleted {files}; cleared {n} keys', { files: deleted.length ? biJoin('、', ', ', deleted) : bi('无文件', 'no files'), n: secretsCleared }))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, deleted, hint: t('配置已清空（含钥匙环密钥）；快照和日志保留。运行 modeldock init 重新配置', 'Config cleared (including keychain keys); snapshots and logs are kept. Run modeldock init to set up again') }))
-    return
-  }
-
+  const handler = ADMIN_ROUTES[`${req.method ?? 'GET'} ${url}`]
+  if (handler) return handler({ rt, req, res, audit, o })
   sendError(res, 404, t('未知管理端点 {url}', 'Unknown admin endpoint {url}', { url }))
 }
 

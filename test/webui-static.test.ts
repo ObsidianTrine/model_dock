@@ -107,6 +107,16 @@ describe('L0-3 组件 label/title 传参不做语言固化', () => {
 // L0-5 端点漂移审计：前端调用的每个管理端点必须存在于对应服务端路由源码；
 // 反向（有路由无前端引用）只 console.log 清单供人工确认，不阻断
 describe('L0-5 前端端点 ↔ 服务端路由不漂移', () => {
+  /** 服务端 admin 路由路径全集：admin 门之前的三条 tier-1 豁免端点仍是 if 链形态
+   *  （url === '/_modeldock/…'），门后端点收敛为路由表键（'GET /_modeldock/…'）——
+   *  两种形态都提取，按路径合并去重 */
+  function serverAdminRoutes(): Set<string> {
+    const routes = new Set<string>()
+    for (const m of SERVER_SRC.matchAll(/url === '(\/_modeldock[^']*)'/g)) routes.add(m[1])
+    for (const m of SERVER_SRC.matchAll(/'(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) (\/_modeldock[^']*)'/g)) routes.add(m[1])
+    return routes
+  }
+
   /** 页面脚本里实际调用的端点全集（api() 相对路径补 /_modeldock 前缀；查询串剥掉） */
   function frontendPaths(html: string): string[] {
     const out = new Set<string>()
@@ -121,9 +131,10 @@ describe('L0-5 前端端点 ↔ 服务端路由不漂移', () => {
   }
 
   it('桌面/手机页调用的每个端点都能在服务端路由源码中找到', () => {
+    const adminRoutes = serverAdminRoutes()
     const missing: string[] = []
     for (const p of frontendPaths(UI_HTML)) {
-      if (!SERVER_SRC.includes(`'${p}'`)) missing.push(p)
+      if (!adminRoutes.has(p)) missing.push(p)
     }
     for (const p of frontendPaths(LAN_HTML)) {
       // 手机页模板与 /m/api 路由同在 lan.ts：按「url === '路径'」的路由形态断言，排除模板自身字面量的自证
@@ -134,8 +145,7 @@ describe('L0-5 前端端点 ↔ 服务端路由不漂移', () => {
 
   it('反向审计：无前端引用的路由只列清单不阻断', () => {
     const fe = new Set([...frontendPaths(UI_HTML), ...frontendPaths(LAN_HTML)])
-    const routes = new Set<string>()
-    for (const m of SERVER_SRC.matchAll(/url === '(\/_modeldock[^']*)'/g)) routes.add(m[1])
+    const routes = serverAdminRoutes()
     for (const m of LAN_SRC.matchAll(/url === '(\/m\/api[^']*)'/g)) routes.add(m[1])
     const unreferenced = [...routes].filter((r) => !fe.has(r))
     // 预期少量无前端引用（CLI/运维专用端点，如 reload/reset/holidays-cn/use/profile/key）：
