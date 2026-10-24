@@ -160,6 +160,18 @@ function isConnectError(e: unknown): boolean {
   )
 }
 
+/** 超时类连接失败（连接挂死/被黑洞）：到达这一步前已等满整个超时窗口，原样重试只会把
+ *  最坏等待翻倍才轮到 failover 下一候选（backlog B2）。拒绝类（ECONNREFUSED 等）失败是
+ *  毫秒级，保留立即重试一次应对瞬时抖动。导出供单测断言分类口径。
+ *  注意 ETIMEDOUT 也可能是「请求已送达、等响应超时」——但 undici 的 bodyTimeout/headersTimeout
+ *  走的是另外的错误形态（UND_ERR_HEADERS_TIMEOUT / UND_ERR_BODY_TIMEOUT），不在此列，
+ *  那类错误本就不重试（isConnectError 不含它们）。 */
+export function isConnectTimeoutError(e: unknown): boolean {
+  const err = e as { code?: string; cause?: { code?: string } }
+  const code = err?.code ?? err?.cause?.code
+  return code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT'
+}
+
 /** 组装上游请求头：剥离 hop-by-hop 与客户端凭据，按 provider 协议注入真实 key。
  *  cookie 与 x-modeldock-* 一并剥离：admin token / 会话 cookie 绝不能转发给第三方上游。 */
 async function buildUpstreamHeaders(
@@ -397,7 +409,9 @@ export async function forwardToUpstream(
         ms: Date.now() - t0,
       }
     } catch (e) {
-      if (attempt < opts.retries && isConnectError(e)) continue
+      // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
+      // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
+      if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
       const errNew = new UpstreamError(
         502,
         t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),

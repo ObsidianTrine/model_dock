@@ -9,35 +9,32 @@
 
 ## B 级：转发热路径（涉及时延语义变化，需拍板后再做）
 
-- [ ] **B1 纯透传路径流式化**（`src/gateway/server.ts` readBody）
-  现状：所有代理请求体先全量缓冲（上限 64MB）再转发——这是故障切换「传输层失败重放」的前提，
-  路由端点（/v1/messages 等）必须保留。可做的是 `ROUTED_PATH_RE` 之外的纯透传端点（文件类等）
-  边收边 pipe，省一次大体内存驻留。代价：这些路径失去 transport 失败重试（或仅对无体 GET 保留）。
-  验证：构造 10MB 上传走非路由路径，对比内存峰值与 TTFB；回归 `npm test` gateway 套件。
+- [x] **B2 连接错误重试策略**（2026-10-25 实施，只做了一半并明确放弃另一半）
+  已做：`isConnectTimeoutError` 分类——超时类（ETIMEDOUT / UND_ERR_CONNECT_TIMEOUT，已等满超时
+  窗口）不再重试、直接走 failover 下一候选，挂死上游的最坏等待从 2×连接超时降到 1×；拒绝类
+  （ECONNREFUSED/ECONNRESET/ENOTFOUND/EPIPE，毫秒级失败）保留立即重试 1 次应对瞬时抖动。
+  放弃：`headers_timeout_ms` 默认调低不做——非流式长推理的响应头要等推理完才到，60s 默认是
+  设计文档明示的合法场景（§5.1 参数表），降默认会误伤；确有需要的用户已有配置项可调。
+  验证：relay.test.ts 分类单测 + 全量 failover 用例回归。
 
-- [ ] **B2 连接错误重试策略**（`src/gateway/relay.ts` forwardToUpstream 重试环）
-  现状：connect 类错误立即重试（`retries` 默认 1），ETIMEDOUT/ENOTFOUND 本身就慢，重试让最坏
-  等待翻倍；`headers_timeout_ms` 默认 60s，挂死的上游每请求占满 60s。
-  候选：超时类（ETIMEDOUT/UND_ERR_CONNECT_TIMEOUT）不再重试（保留 ECONNREFUSED 快速重试），
-  或加 100ms 退避；`headers_timeout_ms` 默认调低（如 30s）并在文档标注。
-  ⚠ 改变最坏时延语义，需明确决策后实施。验证：mock 上游模拟 connect refused / 挂死两端点，
-  断言失败路径耗时上界；回归 failover 相关用例。
+- [ ] **B1 纯透传路径流式化——评估后放弃**（2026-10-25）：本产品 harness 的大请求体几乎全走
+  路由端点（/v1/messages 等，改写+重放必须全量缓冲），非路由大上传（/v1/files 类）真实频率
+  极低；且请求体上限已降为默认 16MB + `max_body_mb` 可调，内存顾虑已缓解。双通道（缓冲/流式）
+  进最热路径的复杂度 + 丢失传输失败重试，收益撑不起风险。重启条件：有用户真实反馈大文件
+  端点使用。
 
-- [ ] **B3 `joinUpstreamUrl` 每请求 `new URL`**（`src/gateway/relay.ts`）
-  openai/responses 协议每请求重新解析一次端点 URL。可按 provider 配置对象引用缓存解析结果。
-  验证：单测断言同 provider 反复调用命中缓存；改端点配置后缓存失效。
+- [ ] **B3 `joinUpstreamUrl` 每请求 `new URL`——评估后放弃**（2026-10-25）：微秒级开销相对转发
+  本身的头部重建/TLS 可忽略，加缓存反而引入失效状态；违反「先 profile 再优化」纪律。
 
 ## C 级：管理面 / 可维护性（离转发热路径远，优先级低）
 
 - [ ] **C1 handleAdmin 路由表化**（`src/gateway/server.ts`，早期代码审查已知遗留）
-  2100 行 if 链 → 端点路由表（method+path → handler），纯可维护性重构，行为零变化。
-  验证：全量 `npm test`（管理面端点覆盖充分）+ 手测控制台主要操作。
+  2600 行 if 链 → 端点路由表（method+path → handler），纯可维护性重构，行为零变化。
+  价值在多 agent 并行开发下的合并冲突面收敛 + 鉴权分层显式化（M2「严格模式」的前置）。
+  验证：全量 `npm test`（管理面端点覆盖充分）+ webui-static 的 L0-5 端点审计同步改提取方式。
 
-- [ ] **C3 `/model-catalog` 加 ETag**：8000+ 条全量响应，控制台懒加载一次但刷新页面即重拉；
-  按 `fullKnownTable()` 内容 hash 出 ETag，命中 304 省流量。验证：二次请求返回 304。
-
-- [ ] **C4 `safeEqual` 长度预比较**（`src/gateway/server.ts`）：sha256 归一化是为防长度泄漏，
-  但本机 admin 场景可先比长度再做常数时间比较省两次 hash。微小收益，顺手项。
+- [ ] **C4 `safeEqual` 长度预比较——评估后放弃**（2026-10-25）：被优化的路径只在管理面跑
+  （数据面 token 是 Map 查找不走 safeEqual），每 5s 轮询两次微秒级哈希，量不出收益。
 
 ## 已完成（A 级 + 后续收口，存档备查）
 
@@ -51,6 +48,9 @@
       delta 行的 JSON.parse；StringDecoder 修复多字节字符跨 chunk 截坏导致的用量漏记。
 - [x] A5 pickTarget 定时窗口单次求值（原 3 次 hitScheduleWindows）+ 日历懒加载：无 dayFilter 窗口的
       部署零 statSync，有 dayFilter 的每请求至多 1 次。
+- [x] C3 `/model-catalog` ETag/304（2026-10-25）：序列化结果按表对象引用缓存（目录刷新自动失效），
+      If-None-Match 命中 304 短路——控制台每次刷新不再重复 stringify/传输几百 KB 大表。
+      验证：console-cache.test.ts（200+ETag / 304 / 未命中回全表逐字节一致）。
 - [x] B4 reload 时关闭旧 dispatcher（state.ts reloadRuntime）：除共享 direct Agent 外逐个 `close()`
       再 clear，ProxyAgent 连接池不再随 reload 累积（2026-10 随 develop 演进交付）。
 - [x] C2 overview 轮询成本：缓存 TTL 提至 6s（大于 UI 5s 轮询周期，稳态命中；配置变更经 reloads

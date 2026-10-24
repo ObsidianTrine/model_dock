@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { UpstreamError, clientProtocolFromPath, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
+import { UpstreamError, clientProtocolFromPath, isConnectTimeoutError, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
 import type { ProviderConfig } from '../src/config/types.js'
 
 /** 只测 relay.ts 里真实导出的纯函数。
@@ -104,5 +104,22 @@ describe('relay · joinUpstreamUrl（出站 URL 拼接）', () => {
   it('端点不是合法 URL 时原样拼接、不抛（让后续请求自然报错，而不是在这里炸掉转发链路）', () => {
     expect(() => joinUpstreamUrl('not-a-url', '/v1/chat/completions', 'openai')).not.toThrow()
     expect(joinUpstreamUrl('not-a-url', '/v1/chat/completions', 'openai')).toBe('not-a-url/v1/chat/completions')
+  })
+})
+
+describe('relay · isConnectTimeoutError（B2 重试分类：超时类不重试）', () => {
+  it('超时类（含经 cause 包装 / Error 子类）判 true——这类失败已等满超时窗口，不该再重试', () => {
+    expect(isConnectTimeoutError({ code: 'ETIMEDOUT' })).toBe(true)
+    expect(isConnectTimeoutError({ code: 'UND_ERR_CONNECT_TIMEOUT' })).toBe(true)
+    expect(isConnectTimeoutError({ cause: { code: 'ETIMEDOUT' } })).toBe(true)
+    expect(isConnectTimeoutError(Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' }))).toBe(true)
+  })
+
+  it('拒绝类与其余错误判 false（毫秒级快速失败保留立即重试的原语义）', () => {
+    for (const code of ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EPIPE']) {
+      expect(isConnectTimeoutError({ code })).toBe(false)
+    }
+    expect(isConnectTimeoutError(new Error('no code'))).toBe(false)
+    expect(isConnectTimeoutError(undefined)).toBe(false)
   })
 })
