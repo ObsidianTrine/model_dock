@@ -104,6 +104,7 @@ export function buildProgram(): Command {
     .option('--set-default', t('同时切换该 harness 的默认 provider/model（codex/dsh）', 'Also switch the harness default provider/model (codex/dsh)'))
     .option('--takeover-models', t('把 Claude Code 的 DEFAULT_*_MODEL 映射迁入 profile 并删除', 'Migrate Claude Code DEFAULT_*_MODEL mappings into the profile and remove them'))
     .option('--yes', t('跳过确认（diff 仍展示）', 'Skip confirmation (diff is still shown)'))
+    .option('--port <n>', t('显式网关端口（多实例下跳过 8687 探测启发式，避免解析到别的实例）', 'Explicit gateway port (skips the 8687 probe heuristic so multi-instance setups never resolve to another instance)'))
     .action(async (id, o) => (await import('./harness.js')).cmdAttach(id, o))
   prog
     .command('detach <harness>')
