@@ -49,8 +49,11 @@ export function allowedTools(cfg = loadWorkflowConfig()) {
 
 const DISALLOWED_TOOLS = ['Bash(git push:*)', 'Bash(git tag:*)', 'Bash(git -C * push:*)', 'Bash(npm publish:*)', 'Bash(pnpm publish:*)', 'Bash(yarn publish:*)'];
 
-/** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 到 Bash matcher）。 */
-export function writeWorkerSettings(settingsPath) {
+/** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 到 Bash matcher）。
+ *  envPatch 非空时并入 settings.env（--settings 优先级高于用户级 settings.json，
+ *  tier token 据此覆盖接入时写入的全局凭据）——子进程 env 同时补一份双保险，
+ *  两层哪层生效都到得了网关。 */
+export function writeWorkerSettings(settingsPath, envPatch = {}) {
   // hook 命令的 cwd 是 worktree；.agents/hooks/policy-worker.mjs 随仓库 checkout 到 worktree 内
   const settings = {
     hooks: {
@@ -62,6 +65,7 @@ export function writeWorkerSettings(settingsPath) {
       ],
     },
   };
+  if (envPatch && Object.keys(envPatch).length) settings.env = { ...envPatch };
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   return settingsPath;
 }
@@ -106,7 +110,7 @@ export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
 export const claudeHeadlessBackend = {
   name: 'claude-headless',
 
-  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly, model }) {
+  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly, model, envPatch }) {
     return new Promise((resolve, reject) => {
       const prompt = fs.readFileSync(promptFile, 'utf8');
       const args = buildClaudeArgs({ maxTurns, readonly, model, settingsFile });
@@ -116,6 +120,7 @@ export const claudeHeadlessBackend = {
         cwd,
         detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...(envPatch && Object.keys(envPatch).length ? { env: { ...process.env, ...envPatch } } : {}),
       });
       onEvent({ type: 'worker_spawned', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
 

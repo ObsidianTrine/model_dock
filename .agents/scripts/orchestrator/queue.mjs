@@ -227,6 +227,10 @@ export function validateCard(meta) {
   if (meta.ui_check !== undefined && meta.ui_check !== true && meta.ui_check !== false) {
     fail(`任务卡 ui_check "${JSON.stringify(meta.ui_check)}" 不合法：只允许 true | false（缺省不写 = 不跑 UI 冒烟门禁）`);
   }
+  // tier：任务等级，对应 workflow.json tiers 键名（凭据/模型在该处声明，键不存在时运行期告警降级）
+  if (meta.tier !== undefined && (typeof meta.tier !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(meta.tier))) {
+    fail(`任务卡 tier "${JSON.stringify(meta.tier)}" 不合法：只允许小写字母/数字/短横线（如 heavy，对应 workflow.json tiers 键名）`);
+  }
   const budget = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
   for (const k of Object.keys(DEFAULT_BUDGET)) requirePositiveInt(budget, k);
   meta.budget = budget;
