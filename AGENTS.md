@@ -181,6 +181,20 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 - 例外：确需直接改 develop 时设 `AGENTS_ALLOW_BASE_EDIT=1`（旧名 `MODELRDOCK_ALLOW_DEVELOP_EDIT=1` 兼容），且必须能向用户说明理由。
 - 派发并行任务时按文件归属分区（如一个 agent 只动 `src/gateway/`，另一个只动 `src/adapters/`），减少合并冲突。
 
+### GitHub 侧自动化（PR 审查 bot + Dependabot）
+
+本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secrets，未配置时 bot 跳过（Actions 日志有 warning）：
+
+| 文件 | 作用 | 需要 secrets |
+|------|------|------|
+| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `ANTHROPIC_API_KEY` |
+| `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
+| `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `ANTHROPIC_API_KEY` + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
+
+- **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（GitHub 平台行为）：Dependabot PR 的评论/推送必须经 `DEPENDABOT_GH_TOKEN`（PAT）；缺 PAT 时 dependabot-fix 打 warning 后跳过，PR 留给人工。
+- **防回环**：Claude 修复提交固定 `[dependabot-fix]` 前缀，review bot 检测到尾提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入）。
+- **合并权在人**：bot 只发评论与修复提交，不 approve、不 merge；发版仍走 release.md 人工授权流程。
+
 ## 判定边界（Boundaries）
 
 **必须做**

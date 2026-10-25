@@ -1,0 +1,94 @@
+name: dependabot-fix
+
+# Dependabot 依赖升级 PR 的自动验证/修复层：
+#   Dependabot 开 PR（actor=dependabot[bot]）→ Claude 接手：
+#   npm ci + 全量 npm test → 全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
+#
+# 启用前提：仓库 Settings → Secrets and variables → Actions 配置
+#   ANTHROPIC_API_KEY —— Anthropic API key
+#   DEPENDABOT_GH_TOKEN —— PAT（fine-grained：Contents 读写 + Pull requests 读写；classic：repo）。
+#     原因：Dependabot 触发的 workflow 拿到的 GITHUB_TOKEN 一律只读（GitHub 平台行为），
+#     没有 PAT 就无法在 PR 上评论/推送。缺 PAT 时本工作流打 warning 后跳过，不影响 PR 本身。
+#
+# 防回环设计：
+#   - 本工作流只在 actor=dependabot[bot] 时执行；Claude 用 PAT 推送触发的 synchronize actor 是
+#     PAT 属主，不会重入。
+#   - Claude 的修复提交带 [dependabot-fix] 前缀，claude-review.yml 据此跳过复审。
+#
+# 安全提示：本工作流会在 CI 上安装并运行 PR 声明的依赖（与 GitHub 官方 Copilot 接手 Dependabot
+# PR 的做法一致）。合并永远由人工完成，Claude 无权 approve/merge。
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: dependabot-fix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard:
+    # secrets 不能可靠地用在 job 级 if 上，经 step 输出中转
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      has_pat: ${{ steps.pat.outputs.has_pat }}
+    steps:
+      - id: pat
+        env:
+          PAT: ${{ secrets.DEPENDABOT_GH_TOKEN }}
+        run: |
+          if [ -n "$PAT" ]; then
+            echo "has_pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pat=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 secrets.DEPENDABOT_GH_TOKEN（需 Contents+Pull requests 写权限），无法在 Dependabot PR 上评论/推送，跳过自动修复。"
+          fi
+
+  fix:
+    needs: guard
+    if: needs.guard.outputs.has_pat == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Dependabot 触发的 run 只读 token，必须用 PAT 才能评论/推送
+          github_token: ${{ secrets.DEPENDABOT_GH_TOKEN }}
+          allowed_bots: "dependabot[bot]"
+          base_branch: develop
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            这是 Dependabot 的依赖升级 PR。项目背景：ModelDock（TypeScript ESM、Node 22+、
+            纯 JS 依赖禁止 native addon——若升级引入依赖树中的 native 包，直接按无法自动修复处理）。
+            完整约定见仓库根目录 AGENTS.md。请按以下步骤完成验证：
+
+            1. 先 gh pr view / gh pr diff 弄清升级了哪些包、是否跨 major。
+            2. npm ci 后跑 npm run build 与完整 npm test。
+            3. 全绿：不改任何代码，用 gh pr comment 发一条顶层评论（中文）：测试通过结论 + 升级要点
+               （涉及包、大版本跨度、有无值得注意的行为变化），明确"可合并"。
+            4. 有失败：判断是否本次升级引入。若不是（main 上就有的既有失败），按第 3 步评论说明，不要修码。
+               若是：做**最小修复**（只写适配新版所必需的改动，测试断言更新也算修复），
+               以 "[dependabot-fix] 适配 <包名> <版本>" 为提交信息提交（git add -A && git commit），
+               git push 回当前 PR 分支，然后评论：失败原因、修复内容、测试结果。
+            5. 无法自动修复（major 语义破坏需要大改 / 触碰 native addon / 修复超过几处文件）：
+               不硬改代码，评论说明破坏点、影响面与建议方案（例如走本地 feature-branch 流程人工升级）。
+
+            评论一律中文、结论先行、简洁。最终输出一律走 gh pr comment，不要只把结论留在会话消息里。
+          claude_args: |
+            --max-turns 50
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),WebFetch,WebSearch"
