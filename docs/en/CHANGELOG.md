@@ -24,6 +24,7 @@ A slim one-line "In use" strip, explicit attach ports, faster failover on hung u
 
 ### Fixed
 
+- **Security update of the bundled HTTP stack**: undici upgraded to 7.30.1, clearing three published advisories (two denial-of-service, one subresource-integrity bypass); the managed Node runtime follows with the 24.22.1 security patch.
 - **The menu bar / tray icon no longer goes missing after autostart**: after rebooting, only the gateway used to run in the background — the ModelDock icon (with its console entry etc.) never appeared in the macOS menu bar or the Windows system tray; now the tray is launched automatically once the gateway is ready.
 - **A client pinned to a service is no longer hijacked by schedule windows**: after pinning a client card to a service, requests were still switched to the window's target service while a preferred schedule window was active (the pin had no effect — typically pinning service A yet getting service B's "model not supported" error); a pinned client now always goes through its own pinned service, and only falls back along the failover chain when that service is down or in meltdown.
 
