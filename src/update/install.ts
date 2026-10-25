@@ -122,8 +122,7 @@ export function detectInstallShape(
     const prefix = (lad + path.sep + path.join('Programs', 'ModelDock')).toLowerCase().replace(/\\/g, '/')
     const norm = execPath.toLowerCase().replace(/\\/g, '/')
     if (norm.startsWith(prefix + '/')) return 'win-setup'
-    // 自定义目录兜底：有卸载器指纹即安装器安装；setup 记住上次安装目录（UsePreviousAppDir），
-    // 静默重装仍落在原处，主程序与托盘一并更新
+    // 自定义目录兜底：有卸载器指纹即安装器安装；静默安装 /DIR 钉死当前目录，主程序与托盘原位一并更新
     return hasUninstaller ? 'win-setup' : 'win-bare'
   }
   return 'bare'
@@ -186,15 +185,19 @@ async function checkWritable(dir: string): Promise<void> {
   }
 }
 
-/** win 静默安装命令构造（纯函数）：更新器退出后由 cmd 等 setup 退出再拉托盘。trayPath 缺省（构建无托盘）时只装。 */
+/** win 静默安装命令构造（纯函数）：更新器退出后由 cmd 等 setup 退出再拉托盘。trayPath 缺省（构建无托盘）时只装。
+ *  installDir 必传 = 当前运行安装目录：/DIR 把更新落点钉死在用户当初选的路径。/VERYSILENT 全程无向导，
+ *  用户绝不见路径选择页；不钉 /DIR 时落点靠注册表 UsePreviousAppDir 记忆——注册表被清理软件删掉或
+ *  用户搬过安装目录时会失效，静默安装落回 DefaultDirName 制造第二份安装。 */
 export function buildWinInstallerCommand(
   setupPath: string,
-  trayPath: string | null
+  trayPath: string | null,
+  installDir: string
 ): { file: string; args: string[] } {
   const inner = trayPath
-    ? `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS && start "" "${trayPath}"`
-    : `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`
-  // /s /c + 首尾引号：cmd 剥掉外层引号后按内层解析，含空格路径安全
+    ? `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="${installDir}" && start "" "${trayPath}"`
+    : `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="${installDir}"`
+  // /s /c + 首尾引号：cmd 剥掉外层引号后按内层解析，含空格路径安全；/DIR 引号内 & 等元字符同样受保护
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${inner}"`] }
 }
 

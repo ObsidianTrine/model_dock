@@ -10,6 +10,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 ### Fixed
 
 - **Tray version no longer lags behind after auto-update on Windows custom install directories**: on machines where the install path was changed during setup (e.g. `D:\Programs\ModelDock`), updating only replaced the main program and left the system tray on the old version; updates now recognize such installer-based installs and refresh the tray along with everything else.
+- **Windows upgrades always install back into the path you originally chose**: the auto-update runs fully silently with no path-choosing step, and even if the install record was wiped by a system cleaner, the update lands in the program's current location instead of creating a second install.
 
 ## [1.2.2] - 2026-10-25
 
