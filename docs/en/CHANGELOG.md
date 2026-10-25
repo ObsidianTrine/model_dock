@@ -5,7 +5,13 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.2.3] - 2026-10-25
+
+A wide-screen console layout overhaul and Windows install / update pipeline fixes.
+
+### Improved
+
+- **The console layout breathes on wide screens**: content holds roughly the middle 60% of the viewport on wide windows (comfortable line lengths, no endless stretching) and returns to full width when the window narrows; wider panels such as the schedule editor scroll horizontally inside themselves instead of being squeezed.
 
 ### Fixed
 
@@ -282,6 +288,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0

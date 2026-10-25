@@ -5,11 +5,13 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.2.3] - 2026-10-25
 
-### 新增
+控制台宽屏布局改造与 Windows 安装更新链路修复。
 
-- **控制台宽屏布局更舒展**：页面内容加宽并在超宽屏封顶居中，每行文字长度保持适中、不再无限拉伸；窗口变窄时自动回到全宽。
+### 改进
+
+- **控制台宽屏布局更舒展**：宽窗口下内容恒占约六成宽度居中呈现（行长适中、不再无限拉伸），窄窗口自动回到全宽；定时面板等较宽内容放不下时在面板内横向滚动兜底，不再被压瘪。
 
 ### 修复
 
@@ -286,6 +288,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0
