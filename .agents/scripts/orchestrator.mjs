@@ -33,7 +33,7 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, changedFiles, GateError } from './orchestrator/gates.mjs';
-import { getBackend, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
+import { getBackend, resolveBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig } from './workflow-config.mjs';
@@ -199,11 +199,9 @@ async function cmdRun(repoRoot, taskId, opts) {
   const qdir = logDir(repoRoot, taskId);
 
   // backend 持久化：retry/resume 续跑沿用上次会话的后端（显式 --backend 可覆盖）
-  if (!opts.backend) {
-    const prior = readEvents(qdir).find((e) => e.type === 'worker_spawned')?.backend;
-    opts.backend = prior ?? 'claude-headless';
-    log(`沿用上次会话后端：${opts.backend}`);
-  }
+  const resolved = resolveBackendName(opts, qdir, readEvents);
+  opts.backend = resolved.name;
+  if (resolved.inherited) log(`沿用上次会话后端：${opts.backend}`);
 
   const resuming = found.state === 'running';
   if (resuming) cleanupOrphanWorker(repoRoot, taskId);
@@ -914,6 +912,7 @@ async function cmdIntent(repoRoot, opts) {
   if (!intentText) die('用法：intent "<一句话描述任务>" [--draft] [--backend mock]');
   const root = queueRoot(repoRoot);
   ensureQueue(root);
+  opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-planner-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-intent-')), 'planner-prompt.md');
@@ -994,6 +993,7 @@ async function cmdIntent(repoRoot, opts) {
 async function cmdSpecStart(repoRoot, opts) {
   const intentText = (opts.intent ?? []).join(' ').trim();
   if (!intentText) die('用法：spec "<一句话描述特性>" [--backend mock]');
+  opts.backend = resolveBackendName(opts, null).name; // 同 intent：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
