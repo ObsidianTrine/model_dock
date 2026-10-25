@@ -100,6 +100,10 @@ class Budget {
     if (!this.tripReason) {
       this.tripReason = { reason, detail };
       clearTimeout(this.wallTimer);
+      // 看门狗：trip 即杀当前在跑的 worker/reviewer 进程树——熔断只在 spawn
+      // 返回后检查，而 spawn 只有进程退出才 resolve（zcode 无 max-turns、网络
+      // 挂死时 claude 也可能长时间不返回）；不主动杀，wall-clock 熔断形同虚设。
+      this.onTrip?.();
     }
   }
 
@@ -247,6 +251,18 @@ async function cmdRun(repoRoot, taskId, opts) {
   let debugIter = debugIterations(events);
   let reviewIter = reviewIterations(events);
   const budget = new Budget(card, () => {});
+  // 进程级看门狗接线：熔断触发时杀当前在跑的 spawn（worker 或 reviewer），
+  // spawn 因 close 事件 resolve 后，下方 budget.tripped 检查接手落 blocked/
+  let livePid = null;
+  budget.onTrip = () => {
+    if (livePid) {
+      log(`⏱ 熔断触发，终止在跑进程树（pid=${livePid}）……`);
+      killTree(livePid);
+    }
+  };
+  const trackPid = (e) => {
+    if (e.type === 'worker_spawned') livePid = e.pid;
+  };
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-prompt-')), 'prompt.md');
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'settings.json');
 
@@ -278,10 +294,12 @@ async function cmdRun(repoRoot, taskId, opts) {
           maxTurns: meta.budget.max_turns,
           onEvent: (e) => {
             appendEvent(qdir, e.type, e);
+            trackPid(e);
             if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
           },
           settingsFile,
         });
+        livePid = null;
         workerOutput = result.output ?? '';
         if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
         if (budget.tripped) {
@@ -396,19 +414,25 @@ async function cmdRun(repoRoot, taskId, opts) {
       // 记录审查引擎，retry/resume 沿用；fallback 回落同源时留痕供 drift 分析。
       const diff = execFileSync('git', ['diff', `${baseBranch}...HEAD`], { cwd: worktree, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
       moveCard(root, taskId, 'running', 'reviewing');
-      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend });
       if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
         appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
       }
       const reviewPromptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-')), 'review-prompt.md');
       fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes));
+      // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
+      // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
       const review = await reviewBackend.spawn({
         promptFile: reviewPromptFile,
         cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
         maxTurns: 30,
-        onEvent: (e) => appendEvent(qdir, e.type, e),
+        onEvent: (e) => {
+          appendEvent(qdir, e.type, e);
+          trackPid(e);
+        },
         readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
       });
+      livePid = null;
+      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend });
       const verdict = parseReviewVerdict(review.output ?? '');
       appendEvent(qdir, 'review_verdict', {
         blockers: verdict?.blockers ?? -1,
@@ -470,7 +494,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         classification,
       };
       if (opts.interactive && process.stdin.isTTY) {
-        await humanGateInteractive(repoRoot, taskId, root, qdir, summary, { backend: opts.backend });
+        await humanGateInteractive(repoRoot, taskId, root, qdir, summary, { backend: opts.backend, reviewBackend: opts.reviewBackend });
       } else {
         log('审查通过，任务已进入 awaiting-human/（L3 人工合并闸门）。');
         printGateSummary(taskId, summary);
@@ -1467,7 +1491,7 @@ async function main() {
         const found = findCard(root, args[0]);
         if (!found) die(`任务 "${args[0]}" 不在队列中。`);
         if (found.state !== 'awaiting-human') die(`任务 "${args[0]}" 状态为 ${found.state}，只有 awaiting-human 可 retry。`);
-        await doRetry(repoRoot, args[0], root, logDir(repoRoot, args[0]), opts.note ?? '', { backend: opts.backend });
+        await doRetry(repoRoot, args[0], root, logDir(repoRoot, args[0]), opts.note ?? '', { backend: opts.backend, reviewBackend: opts.reviewBackend });
       }
       return;
     case 'logs':

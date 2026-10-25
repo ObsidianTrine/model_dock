@@ -238,7 +238,9 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
       return true; // mock 等非 CLI 后端视为可用
     });
   if (explicit) return { name: explicit === 'same' ? worker : explicit, mode: 'explicit' };
-  if (prior) return { name: prior, mode: 'prior' };
+  // prior 沿用有个例外：prior 是 mock 而 worker 已换真实后端时忽略——mock reviewer
+  // 固定输出「无阻塞」，把它当真实审查结果喂门禁等于跳过审查（且无任何日志）
+  if (prior && !(prior === 'mock' && worker !== 'mock')) return { name: prior, mode: 'prior' };
   const OTHER = { 'claude-headless': 'zcode-headless', 'zcode-headless': 'claude-headless' };
   const other = OTHER[worker];
   if (other && probeFn(other)) return { name: other, mode: 'heterogeneous' };

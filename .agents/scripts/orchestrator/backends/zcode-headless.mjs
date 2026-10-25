@@ -1,9 +1,10 @@
 // zcode-headless.mjs — 真实后端：包装 ZCode CLI headless（`zcode -p … --json`）。
 // 与 claude-headless 平级的第二个真实引擎，供「执行/审查分体、异构互审」组合：
 //   worker：--mode yolo（headless 无 TTY 无法确认权限，全自动）+ 项目 hook 红线——
-//     cwd=worktree 时加载 worktree 的 .zcode/config.json，Bash matcher 命中
-//     policy-zcode.mjs（ORCH_POLICY_ENFORCE=1 时按 policy.mjs 裁决，日常会话直通），
-//     与 claude --settings 注入 policy-worker 同一裁决来源。
+//     红线经 ORCH_POLICY_ENFORCE=1 激活 policy-zcode.mjs（与 claude --settings 注入
+//     policy-worker 同一裁决来源）。**注册通道必须是用户级 ~/.zcode/cli/config.json**
+//     （绝对路径指向主仓库 checkout 的 hook）：项目级 .zcode/config.json 有 workspace
+//     trust 门且 headless 下被平台禁用，实证拦不住（详见 policy-zcode.mjs 头注）。
 //   reviewer（readonly）：--mode plan（只读）+ --disallowed-tools 整工具禁用双保险
 //     （该旗标不匹配命令模式，只能整工具禁，故红线不靠它）。
 // CLI 定位：ORCH_ZCODE_CLI 环境变量优先（ZCode 桌面版不装 PATH 命令，指向应用内
@@ -35,7 +36,12 @@ export function zcodeCliSpec() {
   return { ok: true, cmd: 'zcode', baseArgs: [] };
 }
 
-/** zcode CLI 可用性探测（spawnSync --version，失败即不可用；结果按进程缓存）。 */
+/**
+ * zcode CLI 可用性探测（spawnSync --version，失败即不可用；结果按进程缓存）。
+ * 刻意不用 shell:true：真实 spawn 经 argv 直传 prompt（万字符级），套 shell 在
+ * Windows 会截断/改写参数——探测必须与 spawn 同语义，宁可误报不可用（回落 worker
+ * 同源 + fallback 事件），不可「探测可用、spawn 起不来」（审查无谓转 blocked）。
+ */
 let zcodeProbeCache;
 export function zcodeAvailable() {
   if (zcodeProbeCache === undefined) {
@@ -47,7 +53,6 @@ export function zcodeAvailable() {
         const r = spawnSync(spec.cmd, [...spec.baseArgs, '--version'], {
           encoding: 'utf8',
           timeout: 30_000,
-          shell: process.platform === 'win32', // Windows 全局命令可能是 .cmd 包装
         });
         zcodeProbeCache = r.status === 0;
       } catch {
@@ -80,14 +85,18 @@ export function parseHeadlessJson(stdout) {
     // 回落逐行
   }
   const lines = text.split('\n').filter((l) => l.trim().startsWith('{'));
-  for (let i = lines.length - 1; i >= 0; i--) {
-    // 从该行拼到文本尾再试（JSON 可能跨行）
-    const tail = text.slice(text.indexOf(lines[i]));
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    // 顺序推进 offset：从每个 '{' 行的真实位置拼到文本尾再试（JSON 可能跨行；
+    // 按位置推进避免内容重复时 indexOf 命中更早的相同行）
+    const at = text.indexOf(lines[i], offset);
+    if (at < 0) continue;
+    offset = at;
     try {
-      const j = JSON.parse(tail);
+      const j = JSON.parse(text.slice(at));
       if (j && typeof j === 'object' && 'response' in j) return j;
     } catch {
-      // 继续找更靠前的起始行
+      // 起始行不对，推进到下一个 '{' 行再试
     }
   }
   return null;
@@ -103,6 +112,17 @@ export const zcodeHeadlessBackend = {
   spawn({ promptFile, cwd, onEvent, readonly }) {
     return new Promise((resolve, reject) => {
       const prompt = fs.readFileSync(promptFile, 'utf8');
+      // zcode headless 只能经 argv 传 prompt（无 stdin 形态）：Windows 命令行上限
+      // ~32KB，spec 卡会把 design 全文注入背景——超限快速失败并给可操作出路
+      if (prompt.length > 30_000) {
+        reject(
+          new Error(
+            `prompt 过大（${prompt.length} 字符 > 30000，zcode headless 经 argv 传递受命令行长度上限约束）。\n` +
+              `修复：收窄任务卡背景段（如去掉注入的 design 全文），或该任务改用 --backend claude-headless（stdin 传递无此限制）。`
+          )
+        );
+        return;
+      }
       const spec = zcodeCliSpec();
       if (!spec.ok) {
         reject(

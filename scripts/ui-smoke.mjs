@@ -94,6 +94,7 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-uismoke-'));
 const stateFile = path.join(fakeHome, '.modeldock', 'gateway.json');
 let child = null;
 let port = 0;
+let gport = 0; // gateway.json 实际监听端口（listenWithRetry 可能顺延；finally 里核实清理也用它）
 let stderrTail = '';
 let exitCode = 0;
 
@@ -113,14 +114,19 @@ try {
         detached: process.platform !== 'win32',
       }
     );
+    // spawn 级失败（ENOENT 等）没有 error 监听会以 unhandled error 崩掉整个脚本
+    let spawnErr = null;
+    c.on('error', (e) => {
+      spawnErr = e;
+    });
     c.stderr.setEncoding('utf8');
     c.stderr.on('data', (chunk) => {
       stderrTail = (stderrTail + chunk).slice(-2000);
     });
 
-    // 就绪 = 健康端点 200；进程提前退出 = 端口被占/启动失败，换下一个端口
+    // 就绪 = 健康端点 200；进程提前退出/spawn 失败 = 端口被占/启动失败，换下一个端口
     const healthy = await waitFor(async () => {
-      if (c.exitCode !== null || c.signalCode !== null) return 'exited';
+      if (spawnErr || c.exitCode !== null || c.signalCode !== null) return 'exited';
       const r = await probe('/_modeldock/health', p);
       return r?.status === 200 ? 'ready' : null;
     }, START_TIMEOUT_MS, `gateway :${p}`);
@@ -139,7 +145,8 @@ try {
   }
   console.log(`[ui-smoke] 网关已就绪：127.0.0.1:${port}（FAKE_HOME=${fakeHome}）`);
 
-  // adminToken（gateway.json 启动即写；轮询等它出现）
+  // adminToken + 实际监听端口（listenWithRetry 端口被占会顺延——后续探测一律以
+  // gateway.json 的 port 为准，防止健康探活命中别的实例、页面打到空端口的错位）
   const state = await waitFor(() => {
     try {
       return JSON.parse(fs.readFileSync(stateFile, 'utf8'));
@@ -148,19 +155,26 @@ try {
     }
   }, 10_000, 'gateway.json');
   if (!state?.admin_token) fail(`gateway.json 缺 admin_token：${stateFile}`);
+  gport = Number(state.port) || port;
+  if (gport !== port) console.log(`[ui-smoke] 实际监听端口 ${gport}（请求端口 ${port} 被顺延）`);
 
-  // 控制台页断言（两段，对齐真实登录流）：
-  //   ?token= 命中 → 302 下发 admin/device cookie；带 cookie 的页面 → 200 + 稳定标记
-  //   （<title>ModelDock 与 data-i18n 机制在页面上）。
-  const login = await probe(`/_modeldock/ui?token=${encodeURIComponent(state.admin_token)}`, port);
+  // 控制台页断言（三段，对齐真实登录流）：
+  //   ?token= 命中 → 302 下发 admin/device cookie；带 cookie 的页面 → 200 + 稳定标记；
+  //   受保护 API 带 cookie 200 / 无凭据非 200——鉴权数据链路真正打通
+  //   （/_modeldock/ui 的静态壳在管理门之前、无凭据也 200，单靠它证不了鉴权）。
+  const login = await probe(`/_modeldock/ui?token=${encodeURIComponent(state.admin_token)}`, gport);
   if (!login || login.status !== 302) fail(`token 登录跳转异常（${login?.status ?? '无响应'}，预期 302 下发 cookie）`);
   const cookie = login.setCookie.map((c) => c.split(';')[0]).join('; ');
-  const page = await probe('/_modeldock/ui', port, { headers: cookie ? { cookie } : {} });
+  const page = await probe('/_modeldock/ui', gport, { headers: cookie ? { cookie } : {} });
   if (!page || page.status !== 200) fail(`控制台页 /_modeldock/ui 返回 ${page?.status ?? '无响应'}（预期 200）`);
   if (!page.body.includes('ModelDock')) fail('控制台页缺少 ModelDock 标题标记');
   if (!page.body.includes('data-i18n')) fail('控制台页缺少 data-i18n（双语机制）标记');
+  const apiAuthed = await probe('/_modeldock/status', gport, { headers: cookie ? { cookie } : {} });
+  if (!apiAuthed || apiAuthed.status !== 200) fail(`受保护 API /_modeldock/status 带 cookie 返回 ${apiAuthed?.status ?? '无响应'}（预期 200）`);
+  const apiAnon = await probe('/_modeldock/status', gport);
+  if (apiAnon && (apiAnon.status === 200 || apiAnon.status === 302)) fail(`受保护 API 无凭据竟返回 ${apiAnon.status}（鉴权失效）`);
 
-  console.log('[ui-smoke] PASS：健康端点 200；token 登录 302；控制台页 200 + 标题/双语标记齐全');
+  console.log('[ui-smoke] PASS：健康端点 200；token 登录 302；控制台页 200 + 标记齐全；鉴权 API 带 cookie 200 / 无凭据拒绝');
 } catch (e) {
   console.error(`[ui-smoke] FAIL: ${e?.message ?? e}`);
   exitCode = 1;
@@ -180,8 +194,8 @@ try {
   }
   // 核实端口已释放（尽力而为；失败不改变门禁结果，但留提示）
   if (child) {
-    const linger = await probe('/_modeldock/health', port);
-    if (linger) console.error(`[ui-smoke] ⚠ 端口 ${port} 仍可连通——请核查进程清理（pid=${child.pid}）`);
+    const linger = await probe('/_modeldock/health', gport || port);
+    if (linger) console.error(`[ui-smoke] ⚠ 端口 ${gport || port} 仍可连通——请核查进程清理（pid=${child.pid}）`);
   }
 }
 process.exit(exitCode);

@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-// policy-zcode.mjs — ZCode 项目级 Bash 守卫（.zcode/config.json 注册，Bash matcher）。
-// 服务对象：orchestrator zcode-headless worker 会话——与 claude --settings 注入
-// policy-worker.mjs 同一裁决来源（policy.mjs evaluateCommand，单一事实来源）。
-//
+// policy-zcode.mjs — ZCode Bash 守卫，服务 orchestrator zcode-headless worker 会话。
+// 与 claude --settings 注入 policy-worker.mjs 同一裁决来源（policy.mjs evaluateCommand，
+// 单一事实来源）。**注册通道（2026-10-25 实证）**：
+//   - 用户级 ~/.zcode/cli/config.json 的 hooks 块（绝对路径指向本文件）——无信任门、
+//     headless 会话照常执行，是**唯一可靠通道**；指向主仓库 checkout 的本文件。
+//   - 项目级 .zcode/config.json 的注册只是交互桌面的备用带（ZCode 对项目级 hook
+//     有 workspace trust 门，且 headless 下 workspace hooks feature 直接禁用——
+//     两层都过不去，日志 config_project_hooks_pending_trust / workspace_hooks_feature_disabled 实证）。
 // 环境变量门控：仅当 ORCH_POLICY_ENFORCE=1（zcode-headless spawn 注入）时执行
-// 红线裁决；日常 ZCode 会话直通零拦截——policy-worker 不注册项目级是刻意设计
-//（会误伤日常操作，docs 5.5），本 hook 是给 ZCode 补上「只进自治会话」的等价通道。
+// 红线裁决；日常 ZCode 会话直通零拦截（policy-worker 不注册项目级是刻意设计——
+// 会误伤日常操作，docs 5.5）。
 //
 // Hook contract（与 guard-develop.mjs 一致）：exit 0 = allow；exit 2 = block，stderr 回传模型。
 

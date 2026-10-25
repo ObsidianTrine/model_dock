@@ -21,7 +21,7 @@ describe('resolveReviewBackendName > 解析顺序与异构矩阵', () => {
     expect(resolveReviewBackendName({ worker: 'zcode-headless', explicit: 'same' })).toEqual({ name: 'zcode-headless', mode: 'explicit' })
   })
 
-  it('上次 review_spawned 的后端其次（retry/resume 不换审查引擎）', () => {
+  it('上次 review_spawned 的后端其次（retry/resume 不换审查引擎）；prior=mock 且 worker 已换真实后端时忽略', () => {
     expect(resolveReviewBackendName({ worker: 'claude-headless', explicit: 'mock', prior: 'zcode-headless' })).toEqual({
       name: 'mock',
       mode: 'explicit',
@@ -29,6 +29,15 @@ describe('resolveReviewBackendName > 解析顺序与异构矩阵', () => {
     expect(resolveReviewBackendName({ worker: 'claude-headless', prior: 'claude-headless', probe: probeOf({ 'zcode-headless': true }) })).toEqual({
       name: 'claude-headless',
       mode: 'prior',
+    })
+    // mock reviewer 固定输出「无阻塞」—— worker 换真实后端后继续沿用 mock 等于静默跳过审查
+    expect(resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': true }) })).toEqual({
+      name: 'zcode-headless',
+      mode: 'heterogeneous',
+    })
+    expect(resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': false }) })).toEqual({
+      name: 'claude-headless',
+      mode: 'fallback',
     })
   })
 
