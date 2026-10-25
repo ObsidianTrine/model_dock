@@ -113,6 +113,31 @@ pending → running → reviewing → awaiting-human → merged
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
 - **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id。
 
+## 规格驱动（spec，Spec Kit/Kiro 式三件套）
+
+`intent` 适合小改动（一句话直达任务卡）；**需要「先设计后施工」的特性走 `spec`**——Planner 只读会话产出 requirements（用户故事 + EARS 验收标准）→ design（现状/方案/取舍/风险）→ tasks（可独立合并的任务段）三件套，**人工审阅设计后再拆卡**：
+
+```bash
+# 1. 意图 → 三件套（落 .agents/orchestrator/specs/<id>/，不进队列）
+node .agents/scripts/orchestrator.mjs spec "支持配置导出为 JSON 文件"
+
+# 2. 人工审阅/手改三件套（直接编辑 specs/<id>/ 下的 md，这是你的设计稿）
+
+# 3. 确认设计后拆卡进队列（幂等；design 全文注入每张卡的背景段）
+node .agents/scripts/orchestrator.mjs spec build <id>
+
+# 浏览
+node .agents/scripts/orchestrator.mjs spec list
+node .agents/scripts/orchestrator.mjs spec show <id>
+
+# 4. 之后就是常规闭环：drain 逐张跑（按任务序先后调度），合并逐张等人工 approve
+```
+
+- **人工闸门在「审设计」这一步**：Planner 只产文档不动代码；tasks 里的「文件」行直接成为任务卡的 `files_hint`，写得越准分区越好。
+- 任务卡的 `created_at` 按任务序递增——drain 同优先级先到先跑，「依赖: 任务 N」天然先跑被依赖方（不引入显式依赖图）。
+- specs/ 是人工审阅工作区（不入库）；「文件」行缺失的任务卡 files_hint 兜底为 `**`（独占分区）并告警提示手改收窄。
+- 拆出的卡 `gate: L3`、`created_by: planner`：开发→测试→审查照走 orchestrator 闭环，合并仍人工——**设计与施工分离、审点前置**。
+
 ## 队列自动调度（Phase 2）
 
 ```bash
