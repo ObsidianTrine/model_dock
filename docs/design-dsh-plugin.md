@@ -2,9 +2,9 @@
 
 | 文档属性 | 内容 |
 |---|---|
-| 当前版本 | **v0.3 · §8.1 引流 v0 已实现** |
-| 状态 | 实现于 `dsh-modeldock` 独立仓库（5 工具 + github-release 渠道 + 单测/沙箱集成测试全绿）；client UI 与 npm 渠道默认未启用（D4/D1）；开放决策点见第 11 章 |
-| 日期 | 2026-10-25（v0.2 同日：修订资产命名与沙箱 dsh home 两处事实错误、补 CLI 版本门槛、增 8.1；v0.3：A5 `attach --port` 已落地并按 8.1 完成实现） |
+| 当前版本 | **v0.4 · §8.1 v0 + §4.5 设置页 tab 已实现** |
+| 状态 | 实现于 `dsh-modeldock` 独立仓库（5 工具 + github-release 渠道 + 设置页 ModelDock tab + 单测/沙箱集成测试全绿，已装入本机 dsh web profile 验证）；npm 渠道默认未启用（D1）；开放决策点见第 11 章 |
+| 日期 | 2026-10-25（v0.3 同日：A5 `attach --port` 落地 + §8.1 实现；v0.4：§4.5 设置页 tab 落地，D4 就 web 端实测坐实） |
 | 读者 | 接手实现的 agent / 评审人 |
 
 > **给接手 agent 的一句话任务说明**：
@@ -184,6 +184,12 @@ package.json 关键字段（建议值，名称最终见 D2）：
 
 ### 4.5 client UI（设置页 tab）
 
+> **落地状态（2026-10-25，v0.2.0）**：已实现并装入本机 dsh web profile——tab 注入
+> `settings.plugins.tab` 槽位（id `modeldock`、order 40，与「插件市场」并列），浏览器端经
+> `window.__ModuleLoader__.load` 契约挂载（对齐 plugin-mall：宿主共享 React、ES5 无构建、dsw 设计令牌），
+> 动作全部走主进程 `/modeldock` RPC（status/install/attach/detach，见 `dsh-modeldock/src/rpc.js`），
+> 与 agent 工具共用同一套动作本体与安装 job 单飞管理器。
+
 三态状态卡 + 向导，全部文案走 locale 双语：
 
 1. **未安装 CLI**：渠道选择（npm / GitHub Releases）→ 安装按钮（触发 `modeldock_install` job，进度展示）→ 完成后提示「需重启 dsh 使 PATH 生效」（见 7-P2）；
@@ -266,7 +272,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 - 红线不裁：不写 dsh 配置、不起 HTTP 服务、密钥零接触——「薄」正是这个插件的价值来源；
 - 发布 = 双语 README（含安装截图）+ GitHub 仓库打 topic `dsh-plugin` + `npm publish`（裸名 `dsh-modeldock` 未被占，定了尽早占名）。
 
-落地状态（2026-10-25）：v0 已在 `dsh-modeldock` 独立仓库实现——5 工具齐备、github-release 渠道（SHA256SUMS 逐字节校验）+ npm 渠道护栏、CLI 版本门槛（≥1.3.0，A5）、双语 README；单测 + 沙箱集成测试（真实网关 189xx × 假 dsh home × PATH shim 全流程）全绿。ModelDock 侧仅落地 A5 一处小改（已合入 develop）。待办：npm publish 占名、GitHub topic、（后续）client UI 与 npm 渠道默认切换（D4/D1）。
+落地状态（2026-10-25）：v0 已在 `dsh-modeldock` 独立仓库实现——5 工具齐备、github-release 渠道（SHA256SUMS 逐字节校验）+ npm 渠道护栏、CLI 版本门槛（≥1.3.0，A5）、双语 README；单测 + 沙箱集成测试（真实网关 189xx × 假 dsh home × PATH shim 全流程）全绿。**v0.2.0 增设页 tab（§4.5，含 `/modeldock` RPC）并已装入本机 dsh web profile 验证（40 测试用例全绿 + 已装位全链路 15 项 PASS）**。ModelDock 侧仅落地 A5 一处小改（已合入 develop）。待办：npm publish 占名、GitHub topic、desktop 端 tab 可用性实测（D4 剩余）、npm 渠道默认切换（D1）。
 
 ## 9. 测试计划
 
@@ -289,7 +295,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 | D1 | ModelDock CLI 的 npm scoped 包名（`@obsidiantrine/modeldock` / `@modeldock/cli` / 其他） | `@obsidiantrine/modeldock`（与 GitHub 归属一致，防抢注误导） | **阻塞 M0** |
 | D2 | 插件包名与仓库归属（`dsh-modeldock` 裸名 vs scoped；独立仓库 or 本仓库 monorepo 子目录） | 裸名 `dsh-modeldock` + 独立仓库（市场检索友好，生态惯例如此；npm 裸名 `dsh-modeldock` 2026-10-25 查询未被注册，定了尽早占名防抢注） | M1 前 |
 | D3 | 是否支持 `--mode file`（直连）接入入口 | v1 不做：直连绕开网关，插件价值与统一管理目标相悖；需求出现再议 | 否 |
-| D4 | 桌面版 profile 的 client UI 可用性（`platform: "web"` 是否覆盖 desktop；推测桌面端同为 web plane） | 实测确认；不可用则 desktop 侧仅靠 agent 工具 | M1 前实测 |
+| D4 | 桌面版 profile 的 client UI 可用性（`platform: "web"` 是否覆盖 desktop） | **web 端已实测坐实**（本机 plugin-mall 同机制实证 + dsh-modeldock v0.2.0 设置页 tab 落地）；desktop 端仍未测，不可用则 desktop 侧仅靠 agent 工具 | desktop 实测待做 |
 | D5 | patch 写入后 dsh 是否需重启 profile 才生效（llm-pi-ai provider 配置热加载与否） | 实测；若需重启，attach 回执中明确提示，并可评估市场 `allowRestart` 能力 | M3 前实测 |
 
 ## 12. 附录：证据与参考
