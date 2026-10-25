@@ -728,6 +728,54 @@ describe('网关', () => {
     }
   })
 
+  it('GET /v1/models?provider=：按点名服务返回目录；未知服务 404；空值回落当前路由', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up2 = {
+        name: 'mock-b',
+        base_url: 'http://127.0.0.1:1',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'sk-b',
+        models: { 'b-model': { source: 'manual', display_name: 'B 模型' } },
+      }
+      const before = t.requests.length
+      // 点名 up2：目录来自 up2，与当前路由（demo→up）无关；owned_by 跟随点名服务
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models?provider=up2`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      expect(res.status).toBe(200)
+      const j: any = await res.json()
+      expect(j.data.map((m: any) => [m.id, m.display_name])).toEqual([['b-model', 'B 模型']])
+      expect(j.data[0].owned_by).toBe('up2')
+      // 未知服务：404 + 可操作提示
+      const miss = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models?provider=nope`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      expect(miss.status).toBe(404)
+      const mj: any = await miss.json()
+      expect(mj.error.message).toContain('nope')
+      expect(mj.modeldock.hint).toBeTruthy()
+      // 空值 = 未点名：回落当前路由（demo→up）的目录
+      const fallback = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models?provider=`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      })
+      expect(((await fallback.json()) as any).data[0].id).toBe('preset-model')
+      // 只查目录不动路由：点名之后的对话请求仍走原选路（up / preset-model）
+      await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ messages: [] }),
+      })
+      expect(t.requests.at(-1)!.url).toBe('/v1/messages')
+      expect(JSON.parse(t.requests.at(-1)!.body!).model).toBe('preset-model')
+      // 本地合成不透传：除上面主动发的对话请求外，零上游调用
+      expect(t.requests.length).toBe(before + 1)
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('overview：「正在使用」与服务卡 inUse 跟随定时窗口，defaultRoute 保持默认路由', async () => {
     const t = await setup()
     try {
