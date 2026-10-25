@@ -4,6 +4,7 @@
 // 行为注入（集成测试在子进程里通过 env 控制）：
 //   ORCH_MOCK_WORKER_STATUS=done|stuck   worker 结果块的状态（默认 done）
 //   ORCH_MOCK_REVIEW_BLOCKERS=<n>        reviewer 输出的阻塞项数（默认 0）
+//   ORCH_MOCK_SPAWN_ERROR=1              spawn 直接抛错（测 cmdRun 异常兜底落 blocked）
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
 
 import fs from 'node:fs';
@@ -13,6 +14,10 @@ import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESI
 export const mockBackend = {
   name: 'mock',
   async spawn({ promptFile, cwd, onEvent }) {
+    // ORCH_MOCK_SPAWN_ERROR：模拟 claude CLI 缺失/启动失败（backend.spawn reject）
+    if (process.env.ORCH_MOCK_SPAWN_ERROR === '1') {
+      throw new Error('mock: spawn 注入失败（ORCH_MOCK_SPAWN_ERROR=1，模拟 claude CLI 不可用）');
+    }
     // ORCH_MOCK_DELAY_MS：模拟慢 worker（并发调度测试观测"同时在跑"用）
     const delay = parseInt(process.env.ORCH_MOCK_DELAY_MS ?? '0', 10) || 0;
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
