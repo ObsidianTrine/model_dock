@@ -189,6 +189,8 @@ package.json 关键字段（建议值，名称最终见 D2）：
 > `window.__ModuleLoader__.load` 契约挂载（对齐 plugin-mall：宿主共享 React、ES5 无构建、dsw 设计令牌），
 > 动作全部走主进程 `/modeldock` RPC（status/install/attach/detach，见 `dsh-modeldock/src/rpc.js`），
 > 与 agent 工具共用同一套动作本体与安装 job 单飞管理器。
+> **v0.3.0 增左侧栏入口**：`sidebar.panellist` 行（id `dsh-modeldock`、order 2，正好排在插件市场
+> order 1 之下）+ `"main"` 面板（key 同 id，点击条目主区域渲染同款面板）——契约照抄 dshmarket 的侧边栏实现。
 
 三态状态卡 + 向导，全部文案走 locale 双语：
 
