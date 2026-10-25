@@ -45,6 +45,7 @@ import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } fr
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { notify, buildNightlySummary } from './orchestrator/notify.mjs';
+import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -243,6 +244,44 @@ async function cmdRun(repoRoot, taskId, opts) {
     log(`引擎模型：执行 ${workerModel ?? '（默认）'} / 审查 ${reviewModel ?? '（默认）'}（model 仅 claude 系生效，zcode 跟随其默认）`);
   }
 
+  // ---- 任务等级（tier）：按难度选服务与模型 ----
+  // 卡显式 tier > files_hint 命中核心/发布路径自动升 heavy > 无（保持全局默认路由）。
+  // 凭据经 tokenEnv 环境变量注入（token 不入库）；显式点名但未配置 → 告警降级，
+  // 自动升级但 token 未设 → 静默跳过（高频路径，告警会淹日志）。
+  const tier = resolveTier(meta, cfg);
+  if (meta.tier && tier?.inactive === 'unconfigured') {
+    log(`⚠ tier "${meta.tier}" 未生效：workflow.json 未配置该 tiers 键——按全局默认路由执行`);
+  } else if (meta.tier && tier?.inactive === 'token') {
+    log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
+  } else if (tier?.token) {
+    log(`任务等级：${tier.name}${tier.auto ? '（files_hint 命中核心/发布路径自动升级）' : ''}（token 来自 ${tier.tokenEnv}）`);
+  }
+  // 模型生效优先级：CLI 单次覆盖 > tier 配置 > workflow.json 全局默认
+  const effWorkerModel = opts.workerModel ?? tier?.workerModel ?? workerModel;
+  const effReviewModel = opts.reviewModel ?? tier?.reviewModel ?? reviewModel;
+  if (tier?.token && (effWorkerModel !== workerModel || effReviewModel !== reviewModel)) {
+    log(`tier 模型：执行 ${effWorkerModel ?? '（默认）'} / 审查 ${effReviewModel ?? '（默认）'}`);
+  }
+  appendEvent(qdir, 'tier_resolved', {
+    tier: tier?.name ?? (meta.tier ?? null),
+    ...(tier?.auto ? { auto: true } : {}),
+    ...(tier?.inactive ? { inactive: tier.inactive } : {}),
+    ...(tier?.token && tier.provider ? { provider: tier.provider } : {}),
+    ...(effWorkerModel ? { worker_model: effWorkerModel } : {}),
+    ...(effReviewModel ? { review_model: effReviewModel } : {}),
+  });
+  // 目录校验（advisory）：模型名不在服务目录 → 告警不阻断，上游/网关报错为准
+  if (tier?.token && tier.provider && (effWorkerModel || effReviewModel)) {
+    const v = await validateTierModel({
+      gatewayBase: tier.gatewayBase,
+      token: tier.token,
+      provider: tier.provider,
+      models: [effWorkerModel, effReviewModel],
+    });
+    if (!v.ok) log(`⚠ tier 目录校验：${v.reason}${v.missing?.length ? `（${v.missing.join(', ')}）` : ''}——继续派发，留意网关模型报错`);
+  }
+  const tierEnv = tierEnvPatch(tier);
+
   const resuming = found.state === 'running';
   if (resuming) cleanupOrphanWorker(repoRoot, taskId);
   if (found.state === 'pending') {
@@ -300,8 +339,8 @@ async function cmdRun(repoRoot, taskId, opts) {
       let workerOutput = '';
       {
         fs.writeFileSync(promptFile, promptText);
-        if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
-        appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(workerModel ? { model: workerModel } : {}) });
+        if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
+        appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
         result = await backend.spawn({
           promptFile,
           cwd: worktree,
@@ -312,7 +351,8 @@ async function cmdRun(repoRoot, taskId, opts) {
             if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
           },
           settingsFile,
-          model: workerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
+          model: effWorkerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
+          envPatch: tierEnv, // tier 凭据注入（claude：settings.env + 子进程 env；zcode：子进程 env）
         });
         livePid = null;
         workerOutput = result.output ?? '';
@@ -436,6 +476,13 @@ async function cmdRun(repoRoot, taskId, opts) {
       fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes));
       // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
       // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
+      // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
+      const reviewWantsSettings = opts.reviewBackend === 'claude-headless' && Object.keys(tierEnv).length > 0;
+      let reviewSettingsFile;
+      if (reviewWantsSettings) {
+        reviewSettingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-')), 'review-settings.json');
+        writeWorkerSettings(reviewSettingsFile, tierEnv);
+      }
       const review = await reviewBackend.spawn({
         promptFile: reviewPromptFile,
         cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
@@ -445,10 +492,12 @@ async function cmdRun(repoRoot, taskId, opts) {
           trackPid(e);
         },
         readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
-        model: reviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
+        model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
+        settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
+        envPatch: tierEnv,
       });
       livePid = null;
-      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(reviewModel ? { model: reviewModel } : {}) });
+      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
       const verdict = parseReviewVerdict(review.output ?? '');
       appendEvent(qdir, 'review_verdict', {
         blockers: verdict?.blockers ?? -1,

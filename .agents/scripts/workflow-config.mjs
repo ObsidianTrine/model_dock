@@ -71,6 +71,7 @@ export function loadWorkflowConfig(repoRoot) {
     uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
     worker: resolveEngine(raw.worker),
     review: resolveEngine(raw.review),
+    tiers: resolveTiers(raw.tiers),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
   };
 }
@@ -85,6 +86,27 @@ function resolveEngine(raw) {
   if (!backend) return null;
   const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : null;
   return { backend, model };
+}
+
+/** 任务等级表 tiers.<name> → { tokenEnv, workerModel?, reviewModel?, provider?, gatewayBase? }。
+ *  任务卡按 tier 键名点名等级，凭据走 tokenEnv 环境变量（token 本体绝不入库）。
+ *  键名不合法 / 值非对象的条目丢弃（其余条目照常生效）；无 tiers 键 = 空表（功能关闭）。 */
+function resolveTiers(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [name, v] of Object.entries(raw)) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name) || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+    const str = (x) => (typeof x === 'string' && x.trim() ? x.trim() : null);
+    const gatewayBase = str(v.gatewayBase);
+    out[name] = {
+      tokenEnv: str(v.tokenEnv),
+      workerModel: str(v.workerModel),
+      reviewModel: str(v.reviewModel),
+      provider: str(v.provider),
+      gatewayBase: gatewayBase && /^https?:\/\//.test(gatewayBase) ? gatewayBase : null,
+    };
+  }
+  return out;
 }
 
 /** testCmd 三形态（字符串 / 数组 / 平台映射）→ 当前平台的命令数组或 null。与 feature-branch.mjs 同语义。 */

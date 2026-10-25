@@ -109,7 +109,7 @@ export const zcodeHeadlessBackend = {
    * maxTurns 参数接受但忽略：zcode headless 无 --max-turns 旗标，轮次熔断不可用，
    * 预算靠 Budget 的 wall-clock / token 兜底（orchestrator 侧 killTree 不受影响）。
    */
-  spawn({ promptFile, cwd, onEvent, readonly }) {
+  spawn({ promptFile, cwd, onEvent, readonly, envPatch }) {
     return new Promise((resolve, reject) => {
       const prompt = fs.readFileSync(promptFile, 'utf8');
       // zcode headless 只能经 argv 传 prompt（无 stdin 形态）：Windows 命令行上限
@@ -139,12 +139,13 @@ export const zcodeHeadlessBackend = {
         ...spec.baseArgs,
         ...buildZcodeArgs({ prompt, mode, disallowed: readonly ? REVIEWER_DISALLOWED : [] }),
       ];
-      // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）
+      // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）；envPatch 透传 tier 凭据
+      //（是否被 ZCode CLI 认属待验证项，不认时为无害 no-op，回落 harness 全局 token）
       const child = spawn(spec.cmd, args, {
         cwd,
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ORCH_POLICY_ENFORCE: '1' },
+        env: { ...process.env, ORCH_POLICY_ENFORCE: '1', ...(envPatch && Object.keys(envPatch).length ? envPatch : {}) },
       });
       onEvent({ type: 'worker_spawned', backend: 'zcode-headless', pid: child.pid });
 
