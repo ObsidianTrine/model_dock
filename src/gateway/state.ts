@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import type { Dispatcher } from 'undici'
 import type { Config, ProfileConfig, ProviderConfig, ScheduleWindow } from '../config/types.js'
 import { logsDir, gatewayStatePath } from '../util/paths.js'
-import { appendLine, atomicWrite } from '../util/fsx.js'
+import { appendLine, atomicWrite, closeAppendStream } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { buildDispatcher } from './proxy.js'
 import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from './daytype.js'
@@ -842,6 +842,42 @@ export function logAudit(rt: GatewayRuntime, entry: AuditEntry): void {
   } catch {
     /* 审计失败不影响操作本身 */
   }
+}
+
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit- 按天日文件无界累积，超保留天数的在
+ *  网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻流池持有句柄的
+ *  日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），删除失败跳过、
+ *  次日定时重试。返回删除数；retentionDays 非正数视为禁用。 */
+const LOG_DAY_FILE_RE = /^(gateway|audit)-(\d{4})-(\d{2})-(\d{2})\.jsonl$/
+
+export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
+  const days = Math.floor(Number(retentionDays))
+  if (!Number.isFinite(days) || days <= 0) return 0
+  const dir = logsDir()
+  let names: string[]
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return 0
+  }
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  let pruned = 0
+  for (const name of names) {
+    const m = LOG_DAY_FILE_RE.exec(name)
+    if (!m) continue
+    const fileDate = new Date(Number(m[2]), Number(m[3]) - 1, Number(m[4])).getTime()
+    if (!Number.isFinite(fileDate)) continue
+    if (startOfToday - fileDate <= days * 86_400_000) continue
+    const full = path.join(dir, name)
+    await closeAppendStream(full)
+    try {
+      fs.unlinkSync(full)
+      pruned++
+    } catch {
+      /* 被外部进程占用等：跳过，次日定时重试 */
+    }
+  }
+  return pruned
 }
 
 export interface GatewayStateFile {

@@ -340,6 +340,26 @@ export function closeAppendStreams(): void {
   appendStreams.clear()
 }
 
+/** 关闭指定路径的常驻流并等待句柄释放（日志保留期清理删文件前必须先关流——Windows 上
+ *  文件有本进程未关 fd 时 unlink 报 EPERM/EBUSY）。无此路径的流立即返回；带超时兜底，
+ *  个别流挂住时不阻塞清理（最坏退化为本次删除失败、次日重试）。 */
+export async function closeAppendStream(file: string, timeoutMs = 1000): Promise<void> {
+  const ws = appendStreams.get(file)
+  if (!ws) return
+  appendStreams.delete(file)
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      if (ws.destroyed || ws.closed) return resolve()
+      ws.once('close', () => resolve())
+      ws.end()
+    }),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs)
+      timer.unref?.()
+    }),
+  ])
+}
+
 /** 优雅关停时排空常驻流：流自带缓冲（默认 16KB），直接 process.exit 会丢掉尾部尚未刷盘的
  *  日志行——appendFile 时代每条独立落盘不会有此问题，属常驻流引入的持久性缺口。带超时兜底
  *  防止个别流挂住阻塞关停（超时即放弃，最坏退化为丢掉尾部日志）。 */

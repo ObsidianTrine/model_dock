@@ -75,6 +75,8 @@ export interface GatewayConfig {
   headers_timeout_ms?: number
   /** 网关请求体缓冲上限（MB，默认 16）。模型改写需完整缓冲请求体；超限返回 413。确需更大包体（大 PDF/多附件）时上调 */
   max_body_mb?: number
+  /** JSONL 日志（gateway-*.jsonl / audit-*.jsonl）按天文件保留天数：早于该天数的日文件在网关启动与每日定时自动删除（默认 30）；0 = 禁用清理、全部保留 */
+  log_retention_days?: number
   /** 开启「程序自动选主」（定时窗口按时间接管主服务；默认关=主服务完全由人工/默认路由决定）。故障切换（主服务不可达时切备用）不受此开关影响，始终可用 */
   auto_failover?: boolean
   /** 「当前」槽人工钉定的主服务 id：设置后实际路由优先走它（人为修改优先于程序自动，含定时窗口；它不可达时自动落回窗口/默认路由再故障切换）；留空=自动态，程序按窗口/默认路由选主 */
@@ -153,6 +155,9 @@ export const CONFIG_VERSION = 1
 
 /** 网关默认端口（唯一常量出处；config.gateway.port 可覆盖） */
 export const DEFAULT_GATEWAY_PORT = 8687
+
+/** JSONL 日志日文件默认保留天数（见 GatewayConfig.log_retention_days；0 = 禁用清理） */
+export const DEFAULT_LOG_RETENTION_DAYS = 30
 
 /** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design-auto-update.md §6） */
 export const DEFAULT_UPDATE_REPO = 'ObsidianTrine/model_dock'
