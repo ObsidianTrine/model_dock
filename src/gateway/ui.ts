@@ -30,6 +30,7 @@ export const UI_HTML = `<!doctype html>
   --r-sm:8px; --r-md:10px; --r-lg:14px; --r-full:999px;
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
   --h-sm:28px; --h-md:34px; --h-lg:40px;
+  --wrap-max:1200px;
   --shadow-sm:0 1px 2px rgba(0,0,0,.25); --shadow-md:0 4px 14px rgba(0,0,0,.2); --shadow-lg:0 18px 50px rgba(0,0,0,.35);
   --star:#f5a623;
   --scrim:rgba(0,0,0,.5);
@@ -63,7 +64,9 @@ export const UI_HTML = `<!doctype html>
 button{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer}
 button:disabled{cursor:not-allowed;opacity:.55}
 body{margin:0;background:var(--bg);color:var(--text);font:var(--fs-base)/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
-.wrap{max-width:860px;margin:0 auto;padding:0 16px 64px}
+.wrap{max-width:var(--wrap-max);margin:0 auto;padding:0 16px 64px}
+/* 壳封顶后说明行不横贯整屏：仅视口宽于壳上限时兜底行宽，更窄时保持原观感 */
+@media (min-width:1200px){.card .desc,.card .shint{max-width:70ch}}
 header{position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);display:flex;align-items:center;gap:10px;padding:12px 0 10px;border-bottom:1px solid var(--border);margin-bottom:14px}
 .logo{display:flex;align-items:center}
 .logo svg{display:block;border-radius:7px;box-shadow:0 1px 4px rgba(79,70,229,.35)}

@@ -18,6 +18,7 @@
 | 状态条（hero） | `--warn-weak / --neutral-weak`（来源徽弱底）/ `--ok-halo / --warn-halo`（状态点呼吸光晕，绿/琥珀） |
 | 其他色 | `--star`（默认星标琥珀，主题无关） |
 | 层级 | `--z-sticky 35 / --z-fab 40 / --z-toast 50 / --z-pop 70 / --z-modal 100`（一切弹层=modal，无 60 档） |
+| 页面壳 | `--wrap-max 1200`（`.wrap` 宽屏居中封顶，窄于上限流式全宽；视口 ≥1200px 时 `.card` 内 `.desc/.shint` 行宽兜底 70ch，防止说明句横贯整屏） |
 | 其他 | `--scrim`（遮罩）、`--dur .15s`（过渡）、`--mono`（等宽栈） |
 
 ## 2. 字级约定（对齐原版，评审定稿）
