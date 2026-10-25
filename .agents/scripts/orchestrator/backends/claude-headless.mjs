@@ -196,3 +196,16 @@ export async function getBackend(name) {
   if (name === 'mock') return (await import('./mock.mjs')).mockBackend;
   throw new Error(`未知后端 "${name}"（允许：claude-headless | mock）`);
 }
+
+/**
+ * 后端名解析：显式 --backend 优先；run 场景（qdir 非空）沿用任务上次会话的后端
+ * （retry/resume 续跑不换引擎）；否则缺省 claude-headless。
+ * intent/spec 的规划会话不记账（qdir 传 null），首次即缺省——此前它们直接把
+ * opts.backend（undefined）喂给 getBackend 炸「未知后端 "undefined"」（裸跑
+ * `spec "..."` 实测踩中；历史测试全带 --backend mock 所以从未暴露）。
+ */
+export function resolveBackendName(opts, qdir, readEventsFn) {
+  if (opts?.backend) return { name: opts.backend, inherited: false };
+  const prior = qdir && readEventsFn ? readEventsFn(qdir).find((e) => e.type === 'worker_spawned')?.backend : undefined;
+  return { name: prior ?? 'claude-headless', inherited: prior !== undefined };
+}
