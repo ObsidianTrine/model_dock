@@ -42,13 +42,19 @@ if (modelCount === 0) {
   process.exit(1)
 }
 const fetchedAt = new Date().toISOString()
-const body = JSON.stringify({ fetchedAt, providers }, null, 1)
+const payload = JSON.stringify({ fetchedAt, providers })
+// 对拍：parse 回读与源数据一致才落盘（模板/转义事故兜底）
+if (JSON.stringify(JSON.parse(payload)) !== payload) {
+  console.error('对拍失败：payload JSON 往返不一致，未写出快照')
+  process.exit(1)
+}
 const ts = `// 由 scripts/gen-catalog-snapshot.mjs 生成（数据源 models.dev api.json，${fetchedAt}）；勿手改，
 // 刷新：node scripts/gen-catalog-snapshot.mjs。运行时以 ~/.modeldock/model-catalog.json 缓存（若存在）为准。
-import type { CatalogData } from './catalog.js'
+// JSON 字符串形态 + catalog.ts 的 catalogSnapshot() 懒解析（PERF-03）：对象字面量在模块求值时
+// 就要付整包解析成本，字符串把成本推迟到首次触达模型目录（--help / gateway stop 等命令零成本）。
 
 export const CATALOG_SNAPSHOT_FETCHED_AT = '${fetchedAt}'
-export const CATALOG_SNAPSHOT: CatalogData = ${body}
+export const CATALOG_SNAPSHOT_JSON = ${JSON.stringify(payload)}
 `
 fs.writeFileSync(out, ts)
 console.log(`快照已生成：${Object.keys(providers).length} 厂商 / ${modelCount} 模型 → ${path.relative(root, out)}（${fs.statSync(out).size} 字节）`)

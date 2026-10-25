@@ -3,7 +3,17 @@ import { atomicWrite } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { modelCatalogCachePath } from '../util/paths.js'
 import { saneContextWindow, saneMaxOutput } from './known.js'
-import { CATALOG_SNAPSHOT, CATALOG_SNAPSHOT_FETCHED_AT } from './catalog-snapshot.generated.js'
+import { CATALOG_SNAPSHOT_JSON, CATALOG_SNAPSHOT_FETCHED_AT } from './catalog-snapshot.generated.js'
+
+// 懒解析 memo（PERF-03）：snapshot 以 JSON 字符串形态捆绑，解析推迟到首次触达模型目录——
+// --help / gateway stop 等不查模型元数据的命令不再白付 789KB 的解析成本。同步语义不变
+// （JSON.parse 同步），resolveModelMeta 等调用点零改动；进程内解析一次后共享同一只读对象。
+let snapshotMemo: CatalogData | undefined
+
+export function catalogSnapshot(): CatalogData {
+  if (!snapshotMemo) snapshotMemo = JSON.parse(CATALOG_SNAPSHOT_JSON) as CatalogData
+  return snapshotMemo
+}
 
 /**
  * 模型元数据远程目录（数据源 models.dev 社区数据库，226 家厂商 / 八千余模型，含 context/output 上限）。
@@ -107,10 +117,10 @@ export function clearCatalogMemo(): void {
   baseMemo = undefined
 }
 
-// 合并视图 memo：键 = 缓存文件 path+mtime（CATALOG_SNAPSHOT 为构建期常量）。catalogModelMeta 在
-// 展示/编辑/适配器写配置的多条路径上被高频调用，此前每次调用都重建 226 家合并对象并重新 sort；
-// memo 后稳态零 statSync（mtime 变化或 clearCatalogMemo 时重建）。data/sortedKeys/flat 共享同一份，
-// 返回的是共享只读对象，调用方不得修改。
+// 合并视图 memo：键 = 缓存文件 path+mtime（snapshot 为构建期常量，catalogSnapshot() 进程内
+// 同一对象）。catalogModelMeta 在展示/编辑/适配器写配置的多条路径上被高频调用，此前每次调用
+// 都重建 226 家合并对象并重新 sort；memo 后稳态零 statSync（mtime 变化或 clearCatalogMemo 时重建）。
+// data/sortedKeys/flat 共享同一份，返回的是共享只读对象，调用方不得修改。
 interface CatalogBaseMemo {
   path: string
   mtimeMs: number
@@ -130,10 +140,11 @@ function catalogBaseMemo(): CatalogBaseMemo {
   }
   if (baseMemo && baseMemo.path === p && baseMemo.mtimeMs === mtimeMs) return baseMemo
   const cache = readCatalogCache()
+  const snapshot = catalogSnapshot()
   const data =
     !cache || Object.keys(cache.providers).length === 0
-      ? CATALOG_SNAPSHOT
-      : { fetchedAt: cache.fetchedAt || CATALOG_SNAPSHOT_FETCHED_AT, providers: { ...CATALOG_SNAPSHOT.providers, ...cache.providers } }
+      ? snapshot
+      : { fetchedAt: cache.fetchedAt || CATALOG_SNAPSHOT_FETCHED_AT, providers: { ...snapshot.providers, ...cache.providers } }
   const sortedKeys = Object.keys(data.providers).sort()
   const flat: Record<string, CatalogEntry> = {}
   for (const k of sortedKeys) {
