@@ -151,7 +151,7 @@ CI 产物（现有 + 新增）：
 
 **unix 裸二进制**：新二进制写 `<target>.new`（同目录）→ 旧改名 `.old` → 新改名到位 + chmod 755 → 对每个停掉的实例 spawn `<新二进制> gateway start` 拉回。
 
-**win 安装器版**：下载 setup.exe → 校验 → 停实例与托盘 → detached spawn `cmd /s /c "<setup>" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART && start "" "<新托盘路径>"`（cmd 等 setup 退出后自拉托盘；更新器随即退出释放 exe 锁）。**win 裸二进制**：同 unix rename dance（NTFS 允许改名运行中 exe），`.old` 清理延迟到下次更新。
+**win 安装器版**：下载 setup.exe → 校验 → 停实例与托盘 → detached spawn `cmd /s /c "<setup>" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="<当前安装目录>" && start "" "<新托盘路径>"`（cmd 等 setup 退出后自拉托盘；更新器随即退出释放 exe 锁）。`/DIR` 把更新落点钉死在当前运行安装目录（= 用户当初安装时选的路径），不依赖注册表 UsePreviousAppDir 记忆（注册表被清理或用户搬过目录时静默安装会落回 DefaultDirName 制造重复安装）；`/VERYSILENT` 全程无向导，用户绝不见路径选择页。**win 裸二进制**：同 unix rename dance（NTFS 允许改名运行中 exe），`.old` 清理延迟到下次更新。
 
 - 硬约束：安装路径不可写 / 自身不拥有二进制（如未来 npm 全局安装）→ 拒绝并指引用对应方式升级；`/Applications` 无写权限 → 指引用 Finder 安装或修正权限。
 - 更新过程中 **8687 短暂中断是本功能的预期行为**（用户主动触发）；但测试代码绝不允许触达真实实例（见 §5.7）。

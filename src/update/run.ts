@@ -216,7 +216,8 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
       } else if (shape === 'win-setup') {
         // setup.exe 不能在更新器还持有自身 exe 锁时等待它跑完：分离拉起 cmd 串联
         // （安装器静默装完 → 自动拉起新托盘），更新器随即退出释放锁。
-        const cmd = buildWinInstallerCommand(file, path.join(path.dirname(execPath), 'ModelDockTray.exe'))
+        // /DIR 钉死当前运行安装目录：更新原位落袋（用户当初选的路径），不依赖注册表记忆。
+        const cmd = buildWinInstallerCommand(file, path.join(path.dirname(execPath), 'ModelDockTray.exe'), path.dirname(execPath))
         log(c.green(t('✓ 已校验，正在静默安装 v{v}（完成后自动拉起托盘）…', '✓ Verified; installing v{v} silently (the tray relaunches automatically)…', { v: m.version })))
         deps.spawnDetached(cmd.file, cmd.args, { verbatim: true })
         // 安装器成败异步发生，更新器必须立即退出释放自身 exe 锁，无人能替它收尾：

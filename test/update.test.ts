@@ -285,16 +285,19 @@ describe('版本比较与资产选择', () => {
     expect(appRootFromExecPath('/usr/local/bin/modeldock')).toBeNull()
   })
 
-  it('buildWinInstallerCommand：静默参数齐全；有托盘时串联拉起，无托盘时只装', () => {
-    const withTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', 'C:\\Programs\\ModelDock\\ModelDockTray.exe')
+  it('buildWinInstallerCommand：静默参数齐全 + /DIR 钉死安装目录；有托盘时串联拉起，无托盘时只装', () => {
+    const withTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', 'C:\\Programs\\ModelDock\\ModelDockTray.exe', 'D:\\Programs\\ModelDock')
     expect(withTray.file).toBe('cmd.exe')
     const joined = withTray.args.join(' ')
     expect(joined).toContain('/VERYSILENT')
     expect(joined).toContain('/NORESTART')
     expect(joined).toContain('setup.exe')
     expect(joined).toContain('ModelDockTray.exe')
-    const noTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', null)
+    // 更新落点必须显式钉死在用户当初选的安装目录（不依赖注册表 UsePreviousAppDir 记忆）
+    expect(joined).toContain('/DIR="D:\\Programs\\ModelDock"')
+    const noTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', null, 'D:\\Programs\\ModelDock')
     expect(noTray.args.join(' ')).not.toContain('start')
+    expect(noTray.args.join(' ')).toContain('/DIR="D:\\Programs\\ModelDock"')
   })
 })
 
@@ -713,6 +716,8 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(cmdLine).toContain('/VERYSILENT')
       expect(cmdLine).toContain(setupName)
       expect(cmdLine).toContain('ModelDockTray.exe')
+      // 落点钉死当前安装目录（= 用户当初选的路径），不依赖注册表记忆
+      expect(cmdLine).toContain(`/DIR="${path.dirname(execPath)}"`)
       // 安装器成败异步发生、更新器无人能替它收尾：进度必须停在 restarting，绝不谎报 done
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
@@ -753,6 +758,8 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(cmdLine).toContain('/VERYSILENT')
       expect(cmdLine).toContain(setupName)
       expect(cmdLine).toContain(path.join(path.dirname(execPath), 'ModelDockTray.exe'))
+      // /DIR 钉死自定义目录：更新原位落袋，绝不落回默认目录制造重复安装
+      expect(cmdLine).toContain(`/DIR="${path.dirname(execPath)}"`)
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
     } finally {
