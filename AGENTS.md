@@ -187,9 +187,11 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
-| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `ANTHROPIC_API_KEY` |
+| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `GLM_API_KEY`（智谱 API key，走 Anthropic 兼容端点） |
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
-| `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `ANTHROPIC_API_KEY` + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
+| `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `GLM_API_KEY` + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
+
+- **模型接入**：bot 默认走智谱 GLM 的 Anthropic 兼容端点（`open.bigmodel.cn/api/anthropic`，`ANTHROPIC_AUTH_TOKEN` 认证）；`ANTHROPIC_API_KEY` 同值仅用于过 claude-code-action 的启动校验。想改走 Anthropic 官方 API：删各步骤 env 块、恢复 `anthropic_api_key` 输入。
 
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（GitHub 平台行为）：Dependabot PR 的评论/推送必须经 `DEPENDABOT_GH_TOKEN`（PAT）；缺 PAT 时 dependabot-fix 打 warning 后跳过，PR 留给人工。
 - **防回环**：Claude 修复提交固定 `[dependabot-fix]` 前缀，review bot 检测到尾提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入）。

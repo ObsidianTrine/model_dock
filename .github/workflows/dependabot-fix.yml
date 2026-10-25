@@ -5,7 +5,8 @@ name: dependabot-fix
 #   npm ci + 全量 npm test → 全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置
-#   ANTHROPIC_API_KEY —— Anthropic API key
+#   GLM_API_KEY —— 智谱 API key（bot 默认走 GLM 的 Anthropic 兼容端点；改走 Anthropic 官方 API
+#     则删掉 fix job 里 claude-code-action 的 env 块，改回 anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}）
 #   DEPENDABOT_GH_TOKEN —— PAT（fine-grained：Contents 读写 + Pull requests 读写；classic：repo）。
 #     原因：Dependabot 触发的 workflow 拿到的 GITHUB_TOKEN 一律只读（GitHub 平台行为），
 #     没有 PAT 就无法在 PR 上评论/推送。缺 PAT 时本工作流打 warning 后跳过，不影响 PR 本身。
@@ -63,8 +64,13 @@ jobs:
           node-version: 24
           cache: npm
       - uses: anthropics/claude-code-action@v1
+        env:
+          # GLM 的 Anthropic 兼容端点；ANTHROPIC_API_KEY 仅为满足 action 启动校验，
+          # 实际请求走 AUTH_TOKEN（Bearer）
+          ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.GLM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.GLM_API_KEY }}
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Dependabot 触发的 run 只读 token，必须用 PAT 才能评论/推送
           github_token: ${{ secrets.DEPENDABOT_GH_TOKEN }}
           allowed_bots: "dependabot[bot]"
