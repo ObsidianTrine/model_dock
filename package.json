@@ -48,14 +48,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "esbuild": "^0.25.0",
     "happy-dom": "^21.0.4",
     "postject": "^1.0.0-alpha.6",
     "resedit": "^3.1.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "files": [
     "dist"
