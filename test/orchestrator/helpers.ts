@@ -19,7 +19,7 @@ export interface TestRepo {
 }
 
 /** 建一个最小可跑 orchestrator 的临时仓库：develop 分支 + 初始 commit。 */
-export function mkRepo(opts?: { testCmd?: string }): TestRepo {
+export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string }): TestRepo {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'))
   const g = (args: string) => git(root, args)
   // git init -b 需要 git ≥2.28（本机 2.23）；symbolic-ref 全版本可用
@@ -34,10 +34,9 @@ export function mkRepo(opts?: { testCmd?: string }): TestRepo {
   // pickNextCard 下轮再选中它 → 死循环（实测踩中）。
   fs.mkdirSync(path.join(root, '.agents', 'workflows'), { recursive: true })
   fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
-  fs.writeFileSync(
-    path.join(root, '.agents', 'workflow.json'),
-    JSON.stringify({ baseBranch: 'develop', testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"' }),
-  )
+  const workflow: Record<string, unknown> = { baseBranch: 'develop', testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"' }
+  if (opts?.uiCheckCmd) workflow.uiCheckCmd = opts.uiCheckCmd
+  fs.writeFileSync(path.join(root, '.agents', 'workflow.json'), JSON.stringify(workflow))
   fs.writeFileSync(path.join(root, '.agents', 'workflows', 'feature-branch.md'), '# feature-branch（stub）\n\n测试占位。')
   fs.writeFileSync(
     path.join(root, 'AGENTS.md'),

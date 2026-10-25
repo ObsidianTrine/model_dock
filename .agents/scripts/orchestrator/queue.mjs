@@ -224,6 +224,9 @@ export function validateCard(meta) {
   if (!Array.isArray(meta.workflows) || meta.workflows.length === 0) {
     fail('任务卡 workflows 必须是非空数组（至少注入 feature-branch）');
   }
+  if (meta.ui_check !== undefined && meta.ui_check !== true && meta.ui_check !== false) {
+    fail(`任务卡 ui_check "${JSON.stringify(meta.ui_check)}" 不合法：只允许 true | false（缺省不写 = 不跑 UI 冒烟门禁）`);
+  }
   const budget = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
   for (const k of Object.keys(DEFAULT_BUDGET)) requirePositiveInt(budget, k);
   meta.budget = budget;

@@ -7,11 +7,12 @@
 //     只进 worker 会话，不污染项目级 .claude/settings.json）
 // 预算口径：tokensIn = input + cache_read + cache_creation（缓存读计入）。
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
+import { zcodeAvailable } from './zcode-headless.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -193,8 +194,57 @@ function lastToolName(evt) {
 // 供 orchestrator.mjs 动态选择后端
 export async function getBackend(name) {
   if (name === 'claude-headless') return claudeHeadlessBackend;
+  if (name === 'zcode-headless') return (await import('./zcode-headless.mjs')).zcodeHeadlessBackend;
   if (name === 'mock') return (await import('./mock.mjs')).mockBackend;
-  throw new Error(`未知后端 "${name}"（允许：claude-headless | mock）`);
+  throw new Error(`未知后端 "${name}"（允许：claude-headless | zcode-headless | mock）`);
+}
+
+/** claude CLI 可用性探测（spawnSync --version；Windows 走 shell 以命中 .cmd 包装；按进程缓存）。 */
+let claudeProbeCache;
+export function claudeAvailable() {
+  if (claudeProbeCache === undefined) {
+    try {
+      const r = spawnSync('claude', ['--version'], {
+        encoding: 'utf8',
+        timeout: 30_000,
+        shell: process.platform === 'win32',
+      });
+      claudeProbeCache = r.status === 0;
+    } catch {
+      claudeProbeCache = false;
+    }
+  }
+  return claudeProbeCache;
+}
+
+/**
+ * 审查后端解析（异构审查）：把「执行」与「审查」拆成两个 agent 会话——
+ * 但真正解决「既当运动员又当裁判」靠的是**引擎异源**（不同 CLI/模型家族无共同盲区），
+ * 仅拆会话仍同源时只能部分去相关。解析顺序：
+ *   1. 显式 --review-backend（'same' = 强制与 worker 同源）；
+ *   2. 任务上次 review_spawned 的后端（retry/resume 不换审查引擎）；
+ *   3. 自动异构：worker 为真实后端时选另一个 CLI 可用的真实后端
+ *      （mock worker 永不异构——测试零外部调用前提）；
+ *   4. 回落 worker 同源（mode='fallback'，调用方记 review_backend_fallback 事件）。
+ * 返回 { name, mode: 'explicit' | 'prior' | 'heterogeneous' | 'fallback' }。
+ * 未知显式后端名由调用方经 getBackend 校验（统一报「未知后端」）。
+ */
+export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}) {
+  const probeFn =
+    probe ??
+    ((name) => {
+      if (name === 'claude-headless') return claudeAvailable();
+      if (name === 'zcode-headless') return zcodeAvailable();
+      return true; // mock 等非 CLI 后端视为可用
+    });
+  if (explicit) return { name: explicit === 'same' ? worker : explicit, mode: 'explicit' };
+  // prior 沿用有个例外：prior 是 mock 而 worker 已换真实后端时忽略——mock reviewer
+  // 固定输出「无阻塞」，把它当真实审查结果喂门禁等于跳过审查（且无任何日志）
+  if (prior && !(prior === 'mock' && worker !== 'mock')) return { name: prior, mode: 'prior' };
+  const OTHER = { 'claude-headless': 'zcode-headless', 'zcode-headless': 'claude-headless' };
+  const other = OTHER[worker];
+  if (other && probeFn(other)) return { name: other, mode: 'heterogeneous' };
+  return { name: worker, mode: 'fallback' };
 }
 
 /**
