@@ -24,6 +24,10 @@ npm install
 | 热跑调试 | `npm run dev -- <cmd>` |
 | 本机网关 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux） |
 
+## AI 自治流水线
+
+目标明确、验收标准可机器检查的任务可以交给本地自治闭环（任务卡进、合并出）：一句话给意图或写张任务卡 → 自动改码、跑测试、独立审查 → 人工闸门放行合并。上手路径与完整用法（spec 三件套、nightly 巡检、schedule 定时、发版提案）见 [docs/ai-pipeline-guide.md](docs/ai-pipeline-guide.md)。
+
 ## 提交 PR
 
 1. 从 `develop` 拉分支；多 agent 并行开发时用 `node .agents/scripts/feature-branch.mjs start <task-id>`（见 AGENTS.md「多 Agent 并行开发约定」）

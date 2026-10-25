@@ -24,6 +24,10 @@ npm install
 | Run from source | `npm run dev -- <cmd>` |
 | Local gateway | `scripts/run_dev.bat` (Win) / `scripts/run_dev.sh` (mac/Linux) |
 
+## AI autonomous pipeline
+
+Tasks with clear goals and machine-checkable acceptance criteria can be handed to the local autonomous pipeline (task cards in, merged code out): give a one-line intent or write a task card → code, tests and independent review run automatically → you approve the merge. For the quick start and full usage (spec trio, nightly inspection, scheduled runs, release proposals), see [docs/ai-pipeline-guide.md](../ai-pipeline-guide.md) (Chinese).
+
 ## Submitting PRs
 
 1. Branch from `develop`; for multi-agent parallel development use `node .agents/scripts/feature-branch.mjs start <task-id>` (see AGENTS.md, "Multi-agent parallel development")
