@@ -29,6 +29,7 @@ import {
   cleanOldVersions,
   defaultInstallDeps,
   detectInstallShape,
+  hasWindowsUninstaller,
   installBareBinary,
   installMacApp,
   type InstallDeps,
@@ -114,8 +115,15 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
 
   log(c.gray(t('正在检查新版本…', 'Checking for a new version…')))
   // 第三参必须显式传 LOCALAPPDATA：漏传时 win-setup 判定回落占位用户目录（C:\Users\u\…），
-  // 真机路径永远不匹配 → 安装器用户被误判 win-bare，自更新退化成裸 zip 替换（跳过安装器登记、托盘不随更）
-  const shape: InstallShape = detectInstallShape(execPath, platform, process.env.LOCALAPPDATA)
+  // 真机路径永远不匹配 → 安装器用户被误判 win-bare，自更新退化成裸 zip 替换（跳过安装器登记、托盘不随更）。
+  // 第四参带卸载器指纹（仅 win 探测）：安装器装在自定义目录（可自选，非 LOCALAPPDATA 前缀）时
+  // 同样要认出 win-setup，否则该人群自更新永远走裸 zip、托盘停旧版（2026-10 用户实证 D:\Programs\ModelDock）
+  const shape: InstallShape = detectInstallShape(
+    execPath,
+    platform,
+    process.env.LOCALAPPDATA,
+    platform === 'win32' ? hasWindowsUninstaller(execPath) : false
+  )
   // 开发态保护：tsx 直跑源码时 execPath 是 node 运行时，裸二进制替换会把 node 换成 SEA 包（毁掉 dev 环境）。
   // 覆盖 bare 与 win-bare 两种裸形态（Windows dev 态 execPath=node.exe 归 win-bare，漏掉会把 node.exe 换掉）；
   // 正式安装的 ModelDock（SEA 二进制 basename 一律 modeldock* / ModelDock）不受影响；守卫放在下载前，点了也不会发起网络请求。

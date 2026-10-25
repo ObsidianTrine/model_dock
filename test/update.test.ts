@@ -21,6 +21,7 @@ import {
   appRootFromExecPath,
   buildWinInstallerCommand,
   detectInstallShape,
+  hasWindowsUninstaller,
   installBareBinary,
   installMacApp,
 } from '../src/update/install.js'
@@ -246,6 +247,37 @@ describe('版本比较与资产选择', () => {
     ).toBe('win-setup')
     expect(detectInstallShape('D:\\tools\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local')).toBe('win-bare')
     expect(detectInstallShape('/usr/local/bin/modeldock', 'linux')).toBe('bare')
+  })
+
+  it('detectInstallShape：win 自定义目录靠卸载器指纹兜底（装到 D 盘的安装器安装不再误判 win-bare）', () => {
+    // 用户实证（2026-10）：安装器装到 D:\Programs\ModelDock，路径前缀永远判不到 →
+    // 自更新退化成裸 zip 替换，ModelDockTray.exe 停旧版
+    expect(
+      detectInstallShape('D:\\Programs\\ModelDock\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local', true)
+    ).toBe('win-setup')
+    // 同目录无卸载器指纹（裸 zip 安装 / 手动清理过）→ 仍是 win-bare
+    expect(
+      detectInstallShape('D:\\Programs\\ModelDock\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local', false)
+    ).toBe('win-bare')
+    // 默认目录路径判定优先，不受指纹缺席影响
+    expect(
+      detectInstallShape('C:\\Users\\u\\AppData\\Local\\Programs\\ModelDock\\modeldock.exe', 'win32', 'C:\\Users\\u\\AppData\\Local', false)
+    ).toBe('win-setup')
+    // 指纹参数只在 win 分支生效
+    expect(detectInstallShape('/usr/local/bin/modeldock', 'linux', undefined, true)).toBe('bare')
+  })
+
+  it('hasWindowsUninstaller：execPath 旁存在 unins000.exe 才算安装器指纹', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-unins-'))
+    try {
+      const execPath = path.join(dir, process.platform === 'win32' ? 'modeldock.exe' : 'modeldock')
+      fs.writeFileSync(execPath, 'BIN')
+      expect(hasWindowsUninstaller(execPath)).toBe(false)
+      fs.writeFileSync(path.join(dir, 'unins000.exe'), 'INNO-UNINSTALLER')
+      expect(hasWindowsUninstaller(execPath)).toBe(true)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('appRootFromExecPath：从 execPath 上溯 .app 根', () => {
@@ -687,6 +719,43 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
     } finally {
       if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA
       else process.env.LOCALAPPDATA = prevLocalAppData
+      h.restore()
+      await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  // 自定义安装目录（installer.iss 允许自选，用户实证装到 D:\Programs\ModelDock）：
+  // 路径前缀判定不到，全靠 execPath 旁的 unins000.exe 指纹认出安装器安装——漏了它托盘就永不更新
+  it.skipIf(process.platform !== 'win32')('win-setup 自定义目录：unins000.exe 指纹兜底，仍走静默安装器链路', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    const h = fakeHome()
+    try {
+      // 故意不动 LOCALAPPDATA：自定义目录与它无关，指纹是唯一判定依据
+      const execPath = path.join(root, 'CustomDir', 'ModelDock', 'modeldock.exe')
+      fs.mkdirSync(path.dirname(execPath), { recursive: true })
+      fs.writeFileSync(execPath, 'OLD-BIN')
+      fs.writeFileSync(path.join(path.dirname(execPath), 'unins000.exe'), 'INNO-UNINSTALLER')
+
+      const setupName = 'modeldock-999.0.0-win32-x64-setup.exe'
+      const setupBuf = Buffer.from('SETUP-EXE')
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [setupName]: setupBuf, SHA256SUMS: makeSums({ [setupName]: setupBuf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath }))
+      expect(r.updated).toBe(true)
+      expect(calls.stopGateway).toBe(1)
+      expect(calls.stopTray).toBe(1)
+      // 走安装器链路而非裸 zip：下载的是 setup.exe、经 cmd 串联分离拉起，托盘路径指向自定义目录
+      expect(calls.detached).toHaveLength(1)
+      expect(calls.detached[0].file).toBe('cmd.exe')
+      const cmdLine = calls.detached[0].args.join(' ')
+      expect(cmdLine).toContain('/VERYSILENT')
+      expect(cmdLine).toContain(setupName)
+      expect(cmdLine).toContain(path.join(path.dirname(execPath), 'ModelDockTray.exe'))
+      const prog = await readUpdateProgress()
+      expect(prog?.stage).toBe('restarting')
+    } finally {
       h.restore()
       await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
     }
