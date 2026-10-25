@@ -203,6 +203,7 @@ package.json 关键字段（建议值，名称最终见 D2）：
 > 需 token 登录（插件红线拿不到也不该拿），iframe 只会展示登录页；内嵌=养第二份控制台表面会随上游
 > 演进无声碎裂；整页应用塞侧栏变形；跨源/Cookie/CSP 雷区。跳转经 CLI 自动登录后一年设备记忆免登，
 > 长期摩擦≈0。
+> **v0.5.0 新机器全自动链路（三个断点闭环）**：① `resolveCli` 常驻探测安装落点 defaultBinDir + 动作一律用解析到的**绝对路径** spawn——github 渠道装完立即可用，「重启 dsh 使 PATH 生效」场景（§7-P2）就此消掉；② 新 `gateway` 端点 + 面板「启动网关」主按钮（CLI 已装而网关离线时）——spawn `modeldock gateway start --daemon`，红线不破：网关生命周期仍全归 CLI（注册表/守护/自启），插件只是代按一次 CLI 命令，与 attach/detach 委托同构；③ attach 成功回执尾追引导行指向「打开控制台」。至此新机器 funnel 全程面板内完成：装 CLI → 起网关 → 接入 → 打开控制台，零终端零文档。
 
 三态状态卡 + 向导，全部文案走 locale 双语：
 
