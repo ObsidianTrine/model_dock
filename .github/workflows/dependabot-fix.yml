@@ -5,11 +5,12 @@ name: dependabot-fix
 #   npm ci + 全量 npm test → 全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置
-#   GLM_API_KEY —— 智谱 API key（bot 默认走 GLM 的 Anthropic 兼容端点；改走 Anthropic 官方 API
-#     则删掉 fix job 里 claude-code-action 的 env 块，改回 anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}）
+#   ANTHROPIC_API_KEY —— Anthropic API key（bot 默认走 Anthropic 官方 API；换 Anthropic 兼容
+#     端点如智谱 GLM / 火山方舟见 docs/ci-bots.md「换供应商」）
 #   DEPENDABOT_GH_TOKEN —— PAT（fine-grained：Contents 读写 + Pull requests 读写；classic：repo）。
 #     原因：Dependabot 触发的 workflow 拿到的 GITHUB_TOKEN 一律只读（GitHub 平台行为），
-#     没有 PAT 就无法在 PR 上评论/推送。缺 PAT 时本工作流打 warning 后跳过，不影响 PR 本身。
+#     没有 PAT 就无法在 PR 上评论/推送。缺任一 secret 时本工作流打 warning 后跳过，不影响 PR 本身。
+#   未配置时零 token 消耗。设置与用途详见 docs/ci-bots.md。
 #
 # 防回环设计：
 #   - 本工作流只在 actor=dependabot[bot] 时执行；Claude 用 PAT 推送触发的 synchronize actor 是
@@ -37,22 +38,30 @@ jobs:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     outputs:
-      has_pat: ${{ steps.pat.outputs.has_pat }}
+      ready: ${{ steps.check.outputs.ready }}
     steps:
-      - id: pat
+      - id: check
         env:
           PAT: ${{ secrets.DEPENDABOT_GH_TOKEN }}
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -n "$PAT" ]; then
-            echo "has_pat=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_pat=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 secrets.DEPENDABOT_GH_TOKEN（需 Contents+Pull requests 写权限），无法在 Dependabot PR 上评论/推送，跳过自动修复。"
+          ok=true
+          if [ -z "$PAT" ]; then
+            ok=false
+            echo "::warning::未配置 secrets.DEPENDABOT_GH_TOKEN（需 Contents+Pull requests 写权限），无法在 Dependabot PR 上评论/推送。"
           fi
+          if [ -z "$KEY" ]; then
+            ok=false
+            echo "::warning::未配置 secrets.ANTHROPIC_API_KEY，Claude 无法运行。"
+          fi
+          if [ "$ok" != "true" ]; then
+            echo "::warning::依赖升级自动修复未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+          fi
+          echo "ready=$ok" >> "$GITHUB_OUTPUT"
 
   fix:
     needs: guard
-    if: needs.guard.outputs.has_pat == 'true'
+    if: needs.guard.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -64,13 +73,8 @@ jobs:
           node-version: 24
           cache: npm
       - uses: anthropics/claude-code-action@v1
-        env:
-          # GLM 的 Anthropic 兼容端点；ANTHROPIC_API_KEY 仅为满足 action 启动校验，
-          # 实际请求走 AUTH_TOKEN（Bearer）
-          ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.GLM_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.GLM_API_KEY }}
         with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Dependabot 触发的 run 只读 token，必须用 PAT 才能评论/推送
           github_token: ${{ secrets.DEPENDABOT_GH_TOKEN }}
           allowed_bots: "dependabot[bot]"
