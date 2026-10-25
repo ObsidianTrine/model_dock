@@ -67,7 +67,7 @@ node .agents/scripts/orchestrator.mjs status               # 确认进了 pendin
 - 单张卡：`node .agents/scripts/orchestrator.mjs run <task-id>`
 - 多张卡：`node .agents/scripts/orchestrator.mjs drain`（循环清空队列；确需并发再加 `--workers N`，按 files_hint 分区互斥）
 
-**引擎指定（对话可直接说）**：用户口头指定「执行用 X+模型 / 审查用 Y+模型」时，翻译成参数附加在 run/drain 后——`--worker-backend <claude-headless|zcode-headless|mock> --worker-model <m> --review-backend <…> --review-model <m>`。默认取 workflow.json 的 `worker`/`review`（当前：执行 zcode-headless、审查 claude-headless+opus）；用户没提就不传参。注意：zcode 无 `--model`（模型跟随 ZCode 默认，需用户在 App 内切换），模型项只对 claude 系生效。
+**引擎指定（对话可直接说）**：用户口头指定「执行用 X+模型 / 审查用 Y+模型」时，翻译成参数附加在 run/drain 后——`--worker-backend <claude-headless|zcode-headless|mock> --worker-model <m> --review-backend <…> --review-model <m>`。默认取 workflow.json 的 `worker`/`review`（当前：执行 zcode-headless、审查 claude-headless+opus）；用户没提就不传参。注意：zcode 无 `--model`（模型跟随 ZCode 默认，需用户在 App 内切换），模型项只对 claude 系生效。任务卡也可带 `tier: <名>` 按难度自动换服务与模型（配置与环境变量见 `.agents/workflows/orchestrator.md`「任务等级（tier）」节；仅 claude 系生效）。
 
 run/drain 在非交互环境下不会停在人工闸门——到 awaiting-human 就打印提示退出；L1 自动合并的卡会一路跑到 merged。后台任务完成通知到达后继续第 3 步。
 

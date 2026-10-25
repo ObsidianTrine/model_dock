@@ -61,6 +61,7 @@ files_hint:                      # 预期改动范围（glob），超出只是�
 workflows:                       # 注入 worker 的 playbook（至少 feature-branch）
   - feature-branch
 ui_check: true                   # 可选：改 Web 控制台/网关页面的任务开启 UI 冒烟门禁（跑 workflow.json uiCheckCmd）
+tier: heavy                      # 可选：任务等级（按难度选服务/模型，见「任务等级（tier）」节）；缺省时 files_hint 命中核心/发布路径自动升 heavy
 gate: L3                         # Phase 1 固定值
 ---
 
@@ -106,6 +107,43 @@ pending → running → reviewing → awaiting-human → merged
 | 审查返工超 `max_review_iterations` | blocked |
 
 熔断全部记录 `circuit_breaker` 事件（`logs <task-id>` 可查），**永不静默重试**。
+
+## 任务等级（tier）：按难度选服务与模型
+
+重活走旗舰模型服务、轻活走便宜快服务——等级决策在任务卡与配置里声明，凭据经环境变量注入，**token 不入库**：
+
+1. **ModelDock 侧（一次性）**：按等级建 profile（如 `orch-heavy` → 旗舰服务、`orch-light` → 便宜快服务），再各建一个钉定路由的 harness（config.toml 直编，热加载即时生效）：
+
+   ```toml
+   [harness.orch-heavy]
+   mode = "gateway"
+   route = "orch-heavy"     # 钉定到重活 profile
+   token = "mdk_随机串1"
+
+   [harness.orch-light]
+   mode = "gateway"
+   route = "orch-light"
+   token = "mdk_随机串2"
+   ```
+
+   写完 `modeldock test orch-heavy` 逐级验证连通（经网关对该 profile 发最小请求）。
+
+2. **workflow.json 声明等级**：`tokenEnv` 引用环境变量名（值在 shell 导出，如 `export MDK_TIER_HEAVY_TOKEN=…`）；`workerModel`/`reviewModel` 覆盖该等级的模型；`provider` + `gatewayBase` 用于派发前目录校验：
+
+   ```json
+   "tiers": {
+     "heavy": { "tokenEnv": "MDK_TIER_HEAVY_TOKEN", "workerModel": "kimi-k2-…", "reviewModel": "…", "provider": "服务ID", "gatewayBase": "http://127.0.0.1:8687" }
+   }
+   ```
+
+3. **任务卡点名**：frontmatter 写 `tier: heavy`。模型生效优先级：CLI `--worker-model/--review-model` > tier 的 `workerModel`/`reviewModel` > workflow.json 全局默认。
+
+生效机制与降级（事件 `tier_resolved` 留痕，不含 token 值）：
+
+- token 注入 worker/reviewer 子进程；claude 系同时写入每会话专属 `--settings` 文件的 env 块（优先级高于用户级 settings.json，实测生效）。
+- 显式 tier 未配置 / 环境变量未设 → 告警并回落全局默认路由，不阻断；自动升级但 token 未设 → 静默跳过（该路径高频，不刷日志）。
+- 派发前经 `/v1/models?provider=<服务ID>` 校验模型名在目标服务目录内（advisory：网关不可达/目录缺失只告警，上游报错为准）。
+- **zcode-headless 不支持 tier**：ZCode CLI 不认 `ANTHROPIC_BASE_URL/AUTH_TOKEN` 环境变量（实测），zcode worker 模型跟随 ZCode 自身配置；claude 系 tier 生效的前提是客户端已按**网关模式**接入 ModelDock（base_url 指向网关，而非直连上游）。
 
 ## 常见问题
 
