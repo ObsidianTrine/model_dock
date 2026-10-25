@@ -15,19 +15,22 @@
 
 ## 模型接入（现状与换供应商）
 
-bot 默认走**智谱 GLM 的 Anthropic 兼容端点**：各 claude-code-action 步骤的 env 块注入
+bot 默认走 **Anthropic 官方 API**：claude-code-action 步骤直接传 `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`。
+
+**换供应商**（智谱 GLM / 火山方舟 agent plan 等 Anthropic 兼容端点）：删掉 `anthropic_api_key` 输入，给每个 claude-code-action 步骤加 env 块——
 
 ```yaml
-ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-ANTHROPIC_AUTH_TOKEN: ${{ secrets.GLM_API_KEY }}   # 实际请求走这里（Bearer）
-ANTHROPIC_API_KEY: ${{ secrets.GLM_API_KEY }}      # 同值，仅为过 action 启动校验
+env:
+  ANTHROPIC_BASE_URL: <兼容端点 URL>          # 以各家官方文档为准，不在此臆测
+  ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_AUTH_TOKEN }}  # 实际请求走这里（Bearer）
+  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}     # 同值，仅为过 action 启动校验
 ```
 
-**后续换供应商**（如火山方舟 agent plan）：任何 Anthropic 兼容端点都适用——把每个 claude-code-action 步骤 env 块里的 `ANTHROPIC_BASE_URL` 与 token secret 换掉即可（claude-review.yml 两个 job + dependabot-fix.yml 一个 job，共三处）；端点 URL 以各家官方文档为准。想回 Anthropic 官方 API：删 env 块、恢复 `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` 输入。
+共三处：claude-review.yml 两个 job + dependabot-fix.yml 一个 job；换完同步改 keyguard/guard 检查的 secret 名。想切回 Anthropic 官方：恢复 `anthropic_api_key` 输入、删 env 块。
 
 ## 启用步骤（后续开启时做）
 
-1. **API key**：仓库 Settings → Secrets and variables → Actions → New repository secret → `GLM_API_KEY`（智谱 key）。claude-review 与 dependabot-fix 共用。
+1. **API key**：仓库 Settings → Secrets and variables → Actions → New repository secret → `ANTHROPIC_API_KEY`（Anthropic 官方 API key）。claude-review 与 dependabot-fix 共用；想走兼容端点见上节「换供应商」。
 2. **PAT（仅 dependabot-fix 需要）**：再建 secret `DEPENDABOT_GH_TOKEN`。
    - fine-grained PAT：Repository access 选本仓库，权限给 **Contents: Read+Write**、**Pull requests: Read+Write**（classic PAT 给 repo scope）。
    - 为什么必须 PAT：Dependabot 触发的 workflow，其内置 GITHUB_TOKEN 被 GitHub 平台**强制只读**，在 Dependabot PR 上评论/推送必须自备 token。

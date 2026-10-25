@@ -3,9 +3,8 @@ name: claude-review
 # PR 审查 bot：PR 打开/更新时自动出审查意见；在 PR/issue 评论里 @claude 可追问或要求改码。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置
-#   GLM_API_KEY —— 智谱 API key（bot 默认走 GLM 的 Anthropic 兼容端点）
-#   （想改走 Anthropic 官方 API：删除各 claude-code-action 步骤的 env 块，
-#     改回 with.anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}）
+#   ANTHROPIC_API_KEY —— Anthropic API key（bot 默认走 Anthropic 官方 API）
+#   （想改走 Anthropic 兼容端点如智谱 GLM / 火山方舟：见 docs/ci-bots.md「换供应商」）
 #   未配置时 bot 静默跳过（Actions 日志 warning），零 token 消耗。
 #   设置与用途详见 docs/ci-bots.md。
 #
@@ -44,12 +43,11 @@ jobs:
       - name: 未配置 API key 时静默跳过（未启用状态零消耗）
         id: keyguard
         env:
-          GLM_KEY: ${{ secrets.GLM_API_KEY }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -z "$GLM_KEY" ] && [ -z "$ANTHROPIC_KEY" ]; then
+          if [ -z "$KEY" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 secrets.GLM_API_KEY，PR 审查 bot 未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+            echo "::warning::未配置 secrets.ANTHROPIC_API_KEY，PR 审查 bot 未启用，本次跳过。启用方法见 docs/ci-bots.md。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -66,13 +64,8 @@ jobs:
           esac
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
-        env:
-          # GLM 的 Anthropic 兼容端点；模型名等由 claude CLI 自行协商
-          ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.GLM_API_KEY }}
-          # action 启动校验硬性要求存在 ANTHROPIC_API_KEY；实际请求走上面的 AUTH_TOKEN（Bearer）
-          ANTHROPIC_API_KEY: ${{ secrets.GLM_API_KEY }}
         with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -116,12 +109,11 @@ jobs:
       - name: 未配置 API key 时静默跳过（未启用状态零消耗）
         id: keyguard
         env:
-          GLM_KEY: ${{ secrets.GLM_API_KEY }}
-          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -z "$GLM_KEY" ] && [ -z "$ANTHROPIC_KEY" ]; then
+          if [ -z "$KEY" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 secrets.GLM_API_KEY，@claude 交互未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+            echo "::warning::未配置 secrets.ANTHROPIC_API_KEY，@claude 交互未启用，本次跳过。启用方法见 docs/ci-bots.md。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -129,12 +121,8 @@ jobs:
           fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true'
-        env:
-          # 与 auto-review 同款 GLM 认证；改走 Anthropic 官方 API 时同步替换
-          ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.GLM_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.GLM_API_KEY }}
         with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           base_branch: develop
           claude_args: |
             --max-turns 60
