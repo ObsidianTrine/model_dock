@@ -43,6 +43,8 @@ import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
+import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
+import { notify, buildNightlySummary } from './orchestrator/notify.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -430,6 +432,11 @@ async function cmdRun(repoRoot, taskId, opts) {
       appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
       return;
     }
+  } catch (e) {
+    // 异步异常兜底：backend spawn 失败等——卡不得悬在 running/（见 failTaskToBlocked 注释）
+    const reason = failTaskToBlocked(root, qdir, taskId, e);
+    if (reason) die(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
+    throw e;
   } finally {
     clearTimeout(budget.wallTimer);
     try {
@@ -437,6 +444,23 @@ async function cmdRun(repoRoot, taskId, opts) {
       fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
     } catch {}
   }
+}
+
+/**
+ * cmdRun 异常兜底（工业级恢复性）：backend 启动失败（claude CLI 缺失/未登录）、
+ * 内部未知错误等异步异常若不处理，任务卡会悬在 running/——状态机显示在跑、
+ * 实际无进程，只能人工发现后 resume。这里统一落 blocked/ 附原因，resume 可续。
+ * （业务性失败各环节已自行 die/迁移，不经过这里。）
+ */
+function failTaskToBlocked(root, qdir, taskId, err) {
+  const found = findCard(root, taskId);
+  if (found && ['running', 'reviewing'].includes(found.state)) {
+    const reason = `异常中断：${String(err?.message ?? err).slice(0, 300)}`;
+    appendEvent(qdir, 'failed', { reason });
+    moveCard(root, taskId, found.state, 'blocked');
+    return reason;
+  }
+  return null;
 }
 
 function safeRead(p) {
@@ -626,37 +650,49 @@ function cmdLogs(repoRoot, taskId) {
 function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
-  const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
-  if (workers > 1) return cmdDrainParallel(repoRoot, root, opts, workers);
-  const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
-  let done = 0;
-  let lastTried = null;
-  for (;;) {
-    if (done >= max) {
-      log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。`);
-      return;
+  // 调度器互斥：drain / nightly / scan --run 同刻只允许一个在跑（run-lock.mjs）。
+  // 子进程经 childEnvForHeldLock 豁免（run 不抢锁；被 spawn 的 drain 继承父锁语义）。
+  const lock = acquireSchedulerLock(repoRoot, 'drain');
+  if (!lock.held) {
+    log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——本次退出，不并发调度。`);
+    return;
+  }
+  try {
+    const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
+    if (workers > 1) return cmdDrainParallel(repoRoot, root, opts, workers);
+    const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
+    let done = 0;
+    let lastTried = null;
+    for (;;) {
+      if (done >= max) {
+        log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。`);
+        return;
+      }
+      const next = pickNextCard(root);
+      if (!next) {
+        const stuck = listCards(root, 'pending');
+        if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
+        else log(`队列已清空：本次 drain 共跑完 ${done} 个任务。`);
+        return;
+      }
+      // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
+      // 连续两轮选中同一任务 = 子进程根本没能处理它（执行环境损坏/脚本缺失），立即停止而不是烧下去。
+      if (next.id === lastTried) {
+        die(`任务 "${next.id}" 连续两轮仍在 pending——run 子进程未能处理它（检查 repoRoot/.agents/scripts 是否完整、node 是否可用）。已停止 drain 以防空转。`, 1);
+      }
+      lastTried = next.id;
+      log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
+      // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+        cwd: repoRoot,
+        stdio: 'inherit',
+        env: { ...process.env, ...childEnvForHeldLock() },
+      });
+      done += 1;
+      if (r.status !== 0) log(`任务 ${next.id} 退出码 ${r.status}（已落 blocked/failed/，继续调度下一个）。`);
     }
-    const next = pickNextCard(root);
-    if (!next) {
-      const stuck = listCards(root, 'pending');
-      if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
-      else log(`队列已清空：本次 drain 共跑完 ${done} 个任务。`);
-      return;
-    }
-    // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
-    // 连续两轮选中同一任务 = 子进程根本没能处理它（执行环境损坏/脚本缺失），立即停止而不是烧下去。
-    if (next.id === lastTried) {
-      die(`任务 "${next.id}" 连续两轮仍在 pending——run 子进程未能处理它（检查 repoRoot/.agents/scripts 是否完整、node 是否可用）。已停止 drain 以防空转。`, 1);
-    }
-    lastTried = next.id;
-    log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
-    // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
-    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
-      cwd: repoRoot,
-      stdio: 'inherit',
-    });
-    done += 1;
-    if (r.status !== 0) log(`任务 ${next.id} 退出码 ${r.status}（已落 blocked/failed/，继续调度下一个）。`);
+  } finally {
+    releaseSchedulerLock(repoRoot);
   }
 }
 
@@ -683,6 +719,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
     const child = spawn('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', card.id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
       cwd: repoRoot,
       stdio: 'inherit',
+      env: { ...process.env, ...childEnvForHeldLock() },
     });
     launched += 1;
     active.set(child.pid, { id: card.id, hint: card.meta.files_hint });
@@ -840,17 +877,28 @@ function cmdScan(repoRoot, opts) {
 
   // --run：对本次生成的 high 优先级卡立即发起闭环（gate=L3 兜底——合并仍人工，
   // 自动 run 的风险被分级闸门完整兜住）。仅机器信号类（audit/testfail）是 high。
+  // 调度器互斥（run-lock.mjs）：抢不到锁只落卡不自动跑，提示人工推进。
   if (flags.has('--run') && created.length) {
-    const high = created.filter((c) => !c.startsWith('[dry-run]')).map((c) => c.replace(/^pending\//, ''));
-    for (const id of high) {
-      const text = safeRead(cardPath(root, 'pending', id));
-      if (!/priority:\s*high/.test(text)) continue;
-      log(`\n═══ scan --run → ${id}（priority=high）═══`);
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
-        cwd: repoRoot,
-        stdio: 'inherit',
-      });
-      if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+    const lock = acquireSchedulerLock(repoRoot, 'scan --run');
+    if (!lock.held) {
+      log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——卡已生成，本次不自动 run；稍后手动 run/drain。`);
+      return;
+    }
+    try {
+      const high = created.filter((c) => !c.startsWith('[dry-run]')).map((c) => c.replace(/^pending\//, ''));
+      for (const id of high) {
+        const text = safeRead(cardPath(root, 'pending', id));
+        if (!/priority:\s*high/.test(text)) continue;
+        log(`\n═══ scan --run → ${id}（priority=high）═══`);
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+          cwd: repoRoot,
+          stdio: 'inherit',
+          env: { ...process.env, ...childEnvForHeldLock() },
+        });
+        if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+      }
+    } finally {
+      releaseSchedulerLock(repoRoot);
     }
   }
 }
@@ -1066,48 +1114,68 @@ function rotateNightlyLog(repoRoot) {
  * --auto N 追加：对本次生成的 high 卡发起闭环（gate=L3 兜底，合并仍人工）后
  * drain --max N 清一部分队列。给 cron/launchd/schtasks 定时拉起用（schedule install），
  * 手动跑同效。烧钱动作（worker）只发生在 --auto 下，默认零成本巡检。
+ * 结束（含异常）发通知（webhook / macOS，见 notify.mjs）——巡检无人看等于白跑。
  */
-function cmdNightly(repoRoot, opts) {
+async function cmdNightly(repoRoot, opts) {
   rotateNightlyLog(repoRoot);
+  const lock = acquireSchedulerLock(repoRoot, 'nightly');
+  if (!lock.held) {
+    log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——本次退出，不并发调度。`);
+    return;
+  }
   const flags = opts.flags ?? new Set();
   log(`════════ nightly 巡检 ${new Date().toISOString()} ════════`);
   const root = queueRoot(repoRoot);
   ensureQueue(root);
+  const childEnv = { ...process.env, ...childEnvForHeldLock() };
+  let created = [];
+  let skipped = [];
+  let warnings = [];
+  let errMsg = null;
 
-  // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径）
-  const { created, skipped, warnings } = runScan(repoRoot, {
-    todo: true,
-    audit: true,
-    tests: flags.has('--tests'),
-    testCmd: runConfig(repoRoot).testCmd.join(' && '),
-  });
-  for (const w of warnings) log(`⚠ ${w}`);
-  for (const c of created) log(`已生成任务卡：pending/${c}.md`);
-  for (const s of skipped) log(`已存在，跳过：${s}`);
-  if (!created.length && !skipped.length && !warnings.length) log('巡检完成：无新信号。');
+  try {
+    // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径）
+    ({ created, skipped, warnings } = runScan(repoRoot, {
+      todo: true,
+      audit: true,
+      tests: flags.has('--tests'),
+      testCmd: runConfig(repoRoot).testCmd.join(' && '),
+    }));
+    for (const w of warnings) log(`⚠ ${w}`);
+    for (const c of created) log(`已生成任务卡：pending/${c}.md`);
+    for (const s of skipped) log(`已存在，跳过：${s}`);
+    if (!created.length && !skipped.length && !warnings.length) log('巡检完成：无新信号。');
 
-  // 2) 质量漂移报告
-  printDriftReport(repoRoot);
+    // 2) 质量漂移报告
+    printDriftReport(repoRoot);
 
-  // 3) --auto N：high 卡先跑（安全信号类），再 drain --max N 推进队列；
-  //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续
-  if (opts.auto) {
-    for (const id of created) {
-      const text = safeRead(cardPath(root, 'pending', id));
-      if (!/priority:\s*high/.test(text)) continue;
-      log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+    // 3) --auto N：high 卡先跑（安全信号类），再 drain --max N 推进队列；
+    //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续
+    if (opts.auto) {
+      for (const id of created) {
+        const text = safeRead(cardPath(root, 'pending', id));
+        if (!/priority:\s*high/.test(text)) continue;
+        log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+          cwd: repoRoot,
+          stdio: 'inherit',
+          env: childEnv,
+        });
+        if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+      }
+      log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : [])], {
         cwd: repoRoot,
         stdio: 'inherit',
+        env: childEnv,
       });
-      if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+      if (r.status !== 0) log(`drain 退出码 ${r.status}。`);
     }
-    log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
-    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : [])], {
-      cwd: repoRoot,
-      stdio: 'inherit',
-    });
-    if (r.status !== 0) log(`drain 退出码 ${r.status}。`);
+  } catch (e) {
+    errMsg = String(e?.message ?? e);
+    log(`✗ nightly 异常中断：${errMsg}`);
+  } finally {
+    releaseSchedulerLock(repoRoot);
   }
 
   // 4) 收尾摘要 + 早上的人工操作指引
@@ -1117,6 +1185,20 @@ function cmdNightly(repoRoot, opts) {
   log(`新生成任务卡: ${created.length}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
   if (awaiting.length) log(`人工放行：node .agents/scripts/orchestrator.mjs approve <task-id>`);
   if (pending.length && !opts.auto) log(`推进队列：node .agents/scripts/orchestrator.mjs drain（或下次 nightly --auto）`);
+
+  // 通知先于退出投递（die 是 process.exit，会截断未决 promise）
+  await notify({
+    title: 'ModelDock nightly',
+    body: buildNightlySummary({
+      created: created.length,
+      awaiting: awaiting.length,
+      pending: pending.length,
+      degraded: Boolean(readDegraded(repoRoot)),
+      autoRan: opts.auto ?? 0,
+      error: errMsg,
+    }),
+  });
+  if (errMsg) die(`nightly 异常中断：${errMsg}`, 1);
 }
 
 /**

@@ -112,6 +112,9 @@ pending → running → reviewing → awaiting-human → merged
 - **worker 被什么拦了**：worker 会话注入专属 policy hook（`.agents/hooks/policy-worker.mjs`），git push/tag、npm publish、碰 8687/8890 一律拒；这些是硬编码红线，任务卡写了也没用。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
 - **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id。
+- **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
+- **worker 起不来（claude CLI 缺失/未登录）会怎样**：任务卡自动落 `blocked/`（failed 事件附原因），不会悬在 running/ 冒充在跑；修好环境后 `resume <task-id>` 续做。
+- **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `MODELRDOCK_NIGHTLY_WEBHOOK=<url>`（写进 schedule install 前的 shell 或 wrapper 同目录环境）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
 
 ## 规格驱动（spec，Spec Kit/Kiro 式三件套）
 
