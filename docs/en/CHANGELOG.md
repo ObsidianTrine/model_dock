@@ -5,6 +5,14 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Improved
+
+- **Gateway logs are pruned by retention**: daily request/audit JSONL log files used to accumulate forever with no disk ceiling; they are now pruned automatically at gateway startup and on a daily timer, keeping 30 days by default. Tune it with `log_retention_days` under `[gateway]` in config.toml (0 = keep everything).
+- **Commands that don't touch model metadata start lighter**: the bundled model catalog snapshot (~790 KB) used to be parsed on every command start; it is now parsed on first actual use, so `--help`, `gateway stop` and similar commands no longer pay for it.
+- **Saving unchanged configuration no longer rewrites config.toml**: saves from the console or clients used to rewrite the whole file even with no actual change; identical content is now detected byte-for-byte and the write is skipped, avoiding needless disk writes.
+
 ## [1.2.3] - 2026-10-25
 
 A wide-screen console layout overhaul and Windows install / update pipeline fixes.

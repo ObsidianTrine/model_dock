@@ -11,6 +11,7 @@
 > 2026-10-12 批量修复：PERF-01/04/05/06/07/08/09/10/11/12/17、CORRECT-01、XPLAT-01/03/04/05/07/08/10 共 19 项已修（commit 见总览表），全部经 orchestrator 自治闭环（独立测试门禁 + LLM 审查 + 人工闸门复核 diff），合并后 develop 全量 691 例绿。
 > 2026-10-20 性能复审批量修复：PERF-02 全修、PERF-03/14 部分修（@2540618，切换服务写放大同步收敛）；同日四路并行复审新增 PERF-18..36（P2）留底，见 §一.F。
 > 2026-10-20 P2 批量修复：PERF-13/18/19/20/22/24/26/29/30/31/32/33/34/35 共 14 项已修（@ff407bd）；PERF-21/23/25/27/28/36 复核后暂缓（理由见 §一.F 各条注记）。
+> 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -19,7 +20,7 @@
 |---|---|---|---|---|
 | PERF-01 | **P0** | `src/gateway/relay.ts:298-308` | 配 default_model 时每请求全量 JSON.parse 请求体，即使无需改写 | ☑ 已修（2026-10-12 @6fd71fa） |
 | PERF-02 | P2 | `src/gateway/state.ts:285` | dayFilter 窗口每请求 1 次 statSync | ☑ 已修（2026-10-20 @2540618） |
-| PERF-03 | P1 | `src/cli/index.ts:1-14` | CLI 任何命令静态加载 823KB catalog snapshot | ◐ 部分修复（2026-10-20 @2540618，命令模块已 action 内动态 import；snapshot 懒加载仍待专项） |
+| PERF-03 | P1 | `src/cli/index.ts:1-14` | CLI 任何命令静态加载 823KB catalog snapshot | ☑ 已修（2026-10-20 @2540618 命令模块 action 内动态 import + 2026-10-26 @01e1a7f snapshot JSON 字符串懒解析） |
 | PERF-04 | P1 | `src/cli/diag.ts:1,6` | undici + gateway/proxy 进全命令启动链 | ☑ 已修（2026-10-12 @20f6b1c） |
 | PERF-05 | P1 | `src/adapters/engine.ts:1` | @inquirer 白白进网关常驻进程 | ☑ 已修（2026-10-12 @20f6b1c） |
 | PERF-06 | P1 | `src/gateway/server.ts:757-758` | overview 重建串行 await 9 个适配器 status | ☑ 已修（2026-10-12 @e9788a0） |
@@ -30,9 +31,9 @@
 | PERF-11 | P2 | `src/gateway/lan.ts:1041,1047` | PWA 图标 no-store 每次重下 | ☑ 已修（2026-10-12 @e9788a0） |
 | PERF-12 | P1 | `src/sync/crypto.ts:150,175` | openEnvelope 双重 PBKDF2（600k×2）阻塞事件循环 | ☑ 已修（2026-10-12 @0caad3a） |
 | PERF-13 | P2 | `src/providers/catalog.ts:109-140` | catalogBase 每次 merge+sort+statSync，每模型 3 次调用 | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-14 | P2 | `src/config/store.ts:160-163` | mutateConfig 无变化也全量重写；路由变更放大 K+1 次 | ◐ 部分修复（2026-10-20 @2540618，K 次登记合并为 1 次 + 切换写合并；无变化重写仍开放） |
-| PERF-15 | P2 | `src/config/secrets.ts:310-313` | 改一个 key 全表重加密；win32 setSecret spawn PowerShell | ☐ 未修 |
-| PERF-16 | P2 | `src/gateway/state.ts:614,625` | 请求/审计 JSONL 无轮转，磁盘无界增长 | ☐ 未修 |
+| PERF-14 | P2 | `src/config/store.ts:160-163` | mutateConfig 无变化也全量重写；路由变更放大 K+1 次 | ☑ 已修（2026-10-20 @2540618 写合并 + 2026-10-26 @0b65ace 无变化跳写） |
+| PERF-15 | P2 | `src/config/secrets.ts:310-313` | 改一个 key 全表重加密；win32 setSecret spawn PowerShell | ☐ 未修（DUP-07 重构已消 win32 逐条 spawn；交互低频路径暂缓） |
+| PERF-16 | P2 | `src/gateway/state.ts:614,625` | 请求/审计 JSONL 无轮转，磁盘无界增长 | ☑ 已修（2026-10-26 @26bccbb，gateway.log_retention_days 保留期清理，默认 30） |
 | PERF-17 | P2 | `src/gateway/state.ts:130` | reload 不 close() 旧 ProxyAgent（≈backlog B4） | ☑ 已修（2026-10-12 @2a0c5c9） |
 | PERF-18 | P2 | `src/gateway/server.ts:629,1108` | admin 鉴权每请求 new RegExp 编译（UI 5s 轮询持续触发） | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-19 | P2 | `src/gateway/server.ts:939-945` | syncTickets/remoteRequests 孤儿条目仅在同类入口懒清扫，无人认领常驻内存 | ☑ 已修（2026-10-20 @ff407bd） |
@@ -100,6 +101,7 @@
 - 2026-10-12 核查：属实（实测 33896 行 / 772KB，命令模块 10 个）。纯懒 `import()` 需把同步触达点（`resolveModelMeta` 等 15+ 调用点）整体 async 化，SEA 下 createRequire 同步方案另有打包约束——**暂缓，待专项设计**。
 - 验证：`node --cpu-prof` 或简单计时对比 `modeldock --help` 冷启耗时；注意 vitest 隔离模型（跨文件 mock 雷区，见 AGENTS.md）。
 - 2026-10-20 部分修复（@2540618）：cli/index.ts 全部命令模块改 action 内动态 import——`--help`/`--version` 及不触达 adapters/ops 的命令不再静态加载 providers/adapters 模块图与 @inquirer；走 adapter/ops 链的命令仍经 `resolve.ts` 背 snapshot，懒 `import()` 专项（同步触达点 async 化）继续开放。
+- 2026-10-26 收口（@01e1a7f）：snapshot 改 JSON 字符串形态 + `catalog.ts` 的 `catalogSnapshot()` 进程内 memo 懒解析——保持同步语义、15+ 调用点零改动（无需 async 化），SEA 约束不破（无运行时 fs / import.meta）；gen 脚本写盘前对拍。`--help` / `gateway stop` 等命令零解析成本。
 
 **PERF-04（P1）diag.ts 把 undici 与 gateway/proxy 拉进启动链**
 - 位置：`src/cli/diag.ts:1,6`（`import { request } from 'undici'`、`import { buildDispatcher } from '../gateway/proxy.js'`）
@@ -158,6 +160,7 @@
 - 影响：一次路由变更（手动切换/定时窗口接管/手机端应用）放大为 K+1 次全量 TOML 重写；每次重写还经 fs.watch 触发 reloadRuntime 再全量解析（与主动 reload 叠加，一次保存重载两代）。**不在每请求路径上**（pickerSync 定时器 5s 一跳但路由未变零 I/O）。
 - 修复方向：mutateConfig 比较 stringify 结果未变则跳过写；refreshBakedModelClients 合并循环内 K 次为一次。
 - 2026-10-20 部分修复（@2540618）：refreshBakedModelClients 的 K 次 files 登记合并为循环外一次 mutateConfig；新增 `switchToServiceWithRoute` 把「切换服务 + 钉定主服务」两次整包写合并为一次（桌面 /switch 与手机端同款链路均改走）。mutateConfig「无变化跳写」仍开放。
+- 2026-10-26 收口（@0b65ace）：saveConfig 序列化结果与磁盘现值逐字节一致时跳过 atomicWrite——无实际改动的 mutateConfig / 同值保存不再整包重写（tmp/rename 写放大收口）；比较在写锁内，归一化首写语义不回退。
 
 **PERF-15（P2）secrets 单 key 修改 O(N)**
 - 位置：`src/config/secrets.ts:310-313`（writeFileSecrets 对全部条目重新加密）；win32 每次 setSecret/deleteSecret spawn 一次 PowerShell 批处理（~1s 级，冷启动首请求延迟尖峰，之后有缓存）。
@@ -169,6 +172,7 @@
 **PERF-16（P2）JSONL 日志无轮转**
 - 位置：`src/gateway/state.ts:614`（`gateway-YYYY-MM-DD.jsonl`）、`:625`（audit 同款）。写盘本身健康（常驻流池、无逐条 fsync、错误 ring≤500），但按天落盘**永不清理**，磁盘无界增长。
 - 修复方向：启动/每日惰性清理 N 天前日志。
+- 2026-10-26 已修（@26bccbb）：`gateway.log_retention_days`（默认 30，0=禁用）保留期清理——网关启动即清一次 + 每日定时；文件名严格锚定、流池持有的日文件先关句柄再删（Windows unlink EPERM/EBUSY 跳过、次日重试）。
 
 **PERF-17（P2）reload 不关旧 ProxyAgent（≈backlog B4）**
 - 位置：`src/gateway/state.ts:130`（`rt.dispatchers.clear()` 不调 close，旧连接池靠 keepAlive 空闲超时自然收尾；direct 单例不受影响，非无界泄漏）。
