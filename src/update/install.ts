@@ -97,11 +97,22 @@ export function appRootFromExecPath(execPath: string): string | null {
   return segs.length ? segs.join('/') + '/' + appSeg : appSeg
 }
 
-/** 识别当前安装形态（纯函数；win 用显式参数而非读环境，便于三平台测试） */
+/** Windows 安装器指纹：Inno 卸载器 unins000.exe 与主程序同目录（装完即在，卸载才移除）。
+ *  独立成函数让 detectInstallShape 保持纯逻辑（单测传布尔即可），真机判定统一经这里。 */
+export function hasWindowsUninstaller(execPath: string): boolean {
+  return fs.existsSync(path.join(path.dirname(execPath), 'unins000.exe'))
+}
+
+/** 识别当前安装形态（纯函数；win 用显式参数而非读环境，便于三平台测试）。
+ *  hasUninstaller = hasWindowsUninstaller(execPath) 的探测结果：安装目录可自选（installer.iss
+ *  DefaultDirName 之外用户可改），装到自定义目录时路径前缀判定不到，只认 LOCALAPPDATA 会把
+ *  安装器安装误判 win-bare → 自更新退化成裸 zip 替换、托盘不随更（2026-10 用户实证：装在
+ *  D:\Programs\ModelDock 的机器每次升级托盘都停旧版）。 */
 export function detectInstallShape(
   execPath: string,
   platform: string,
-  localAppData?: string
+  localAppData?: string,
+  hasUninstaller = false
 ): InstallShape {
   if (platform === 'darwin') {
     return MAC_APP_RE.test(execPath) ? 'mac-app' : 'bare'
@@ -110,7 +121,10 @@ export function detectInstallShape(
     const lad = localAppData ?? 'C:\\Users\\u\\AppData\\Local'
     const prefix = (lad + path.sep + path.join('Programs', 'ModelDock')).toLowerCase().replace(/\\/g, '/')
     const norm = execPath.toLowerCase().replace(/\\/g, '/')
-    return norm.startsWith(prefix + '/') ? 'win-setup' : 'win-bare'
+    if (norm.startsWith(prefix + '/')) return 'win-setup'
+    // 自定义目录兜底：有卸载器指纹即安装器安装；setup 记住上次安装目录（UsePreviousAppDir），
+    // 静默重装仍落在原处，主程序与托盘一并更新
+    return hasUninstaller ? 'win-setup' : 'win-bare'
   }
   return 'bare'
 }

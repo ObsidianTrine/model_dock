@@ -129,7 +129,7 @@ CI 产物（现有 + 新增）：
 |---|---|---|
 | darwin 装在 .app 内 | `modeldock-<ver>-darwin-<arch>-app.tar.gz`（**新增**，包内顶层 ModelDock.app） | `process.execPath` 路径含 `.app/Contents/MacOS/` 段 |
 | darwin / linux 裸二进制 | `modeldock-<ver>-<target>.tar.gz`（现有） | 其余 unix |
-| win 安装器版 | `modeldock-<ver>-win32-x64-setup.exe`（现有） | execPath 在 `%LOCALAPPDATA%\Programs\ModelDock\` 下 |
+| win 安装器版 | `modeldock-<ver>-win32-x64-setup.exe`（现有） | execPath 在 `%LOCALAPPDATA%\Programs\ModelDock\` 下，或旁路有 Inno 卸载器 `unins000.exe`（自定义安装目录兜底，2026-10：D:\Programs\ModelDock 曾误判 win-bare 致托盘不随更） |
 | win 裸二进制 | `modeldock-<ver>-win32-x64.zip`（现有） | 其余 win |
 
 - arch 映射 `process.arch` → `arm64|x64`；选不到资产 → 报错并附该 release 资产清单。

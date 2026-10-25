@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Tray version no longer lags behind after auto-update on Windows custom install directories**: on machines where the install path was changed during setup (e.g. `D:\Programs\ModelDock`), updating only replaced the main program and left the system tray on the old version; updates now recognize such installer-based installs and refresh the tray along with everything else.
+
 ## [1.2.2] - 2026-10-25
 
 A slim one-line "In use" strip, explicit attach ports, faster failover on hung upstreams, and a batch of background-overhead reductions.

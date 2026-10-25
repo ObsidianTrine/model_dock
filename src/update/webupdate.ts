@@ -16,7 +16,7 @@ import { readGatewayState, writeGatewayState, type GatewayRuntime } from '../gat
 import { displayPath, logsDir } from '../util/paths.js'
 import { localDateStr, t } from '../util/index.js'
 import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type ReleaseManifest } from './check.js'
-import { detectInstallShape } from './install.js'
+import { detectInstallShape, hasWindowsUninstaller } from './install.js'
 import { notesSummaryText, notesToPlain } from './notes.js'
 import { readUpdateProgress, type UpdateProgress } from './progress.js'
 import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
@@ -180,8 +180,15 @@ export interface UpdateStatusPayload {
 
 /** 本机适配安装包的体积（字节）：按安装形态与架构选资产名；选不到返回 null */
 function matchedAssetSize(m: ReleaseManifest): number | null {
-  // 第三参必须显式传 LOCALAPPDATA（同 run.ts）：漏传真机永远判 win-bare，资产体积基线选错
-  const name = selectAssetName(detectInstallShape(process.execPath, process.platform, process.env.LOCALAPPDATA), process.platform, process.arch, m.version)
+  // 第三参必须显式传 LOCALAPPDATA（同 run.ts）：漏传真机永远判 win-bare，资产体积基线选错；
+  // 第四参带卸载器指纹（同 run.ts）：安装器装在自定义目录时按 win-setup 选包，界面体积与实际更新一致
+  const shape = detectInstallShape(
+    process.execPath,
+    process.platform,
+    process.env.LOCALAPPDATA,
+    process.platform === 'win32' ? hasWindowsUninstaller(process.execPath) : false
+  )
+  const name = selectAssetName(shape, process.platform, process.arch, m.version)
   return name ? findAsset(m, name)?.size ?? null : null
 }
 
