@@ -531,12 +531,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 /* 顶栏允许折行；健康文本可截断，不把语言/主题按钮挤出内容带 */
 header{flex-wrap:wrap;row-gap:4px}
 #health{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 定时切换面板列宽固定，容器放不下时面板内横向滚动、不让页面横移（页首表格不套浮头的既定例外，禁律①不适用）；
-   手机断点给行加最小宽度，保证列宽可预期 */
+/* 定时切换面板列宽固定：行保持最小 654px 列宽，容器放不下时面板内横向滚动、不让页面横移
+   （页首表格不套浮头的既定例外，禁律①不适用）；比例壳收窄内容带后与手机断点同一套行为 */
 #schedPanel{overflow-x:auto}
-@media (max-width:600px){
-  #schedPanel .shead,#schedPanel .srow{min-width:654px}
-}
+#schedPanel .shead,#schedPanel .srow{min-width:654px}
 @media (max-width:480px){
   /* 窄屏：固定列收窄（96→72px）但 ID 列仍保 110px 下限，整表横向滚动（滚动容器已在上方统一给） */
   .svcform .mhead,.svcform .mrow,.svcform .addrow{grid-template-columns:20px minmax(110px,1fr) 72px 72px 52px 44px;gap:6px;min-width:400px}
