@@ -27,6 +27,8 @@
 git log vX.Y.Z..develop --oneline --no-merges    # vX.Y.Z 替换为上一个已发布的 tag
 ```
 
+> 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orchestrator.md`「发版提案」）。
+
 - 上个 tag 打在 main 侧，develop 的 `git describe` 够不着它，这里必须显式写 tag 名。
 - 逐条归纳成「新增 / 变更 / 修复」清单：既查漏（开发中没记进 CHANGELOG 的改动），也查杂（不该进这个版本的内容）。
 

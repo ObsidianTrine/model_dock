@@ -40,6 +40,8 @@ import { loadWorkflowConfig } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { readDegraded, evaluateDrift, clearDegraded, DRIFT_THRESHOLD } from './orchestrator/drift.mjs';
 import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
+import { proposeRelease } from './orchestrator/release-propose.mjs';
+import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -752,6 +754,10 @@ function cmdDrift(repoRoot, opts) {
     }
     return;
   }
+  printDriftReport(repoRoot);
+}
+
+function printDriftReport(repoRoot) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const { autoTotal, autoReverted, humanTotal, rate, degraded } = evaluateDrift(repoRoot, root);
@@ -928,6 +934,143 @@ async function cmdIntent(repoRoot, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// nightly / schedule —— 定时巡检编排与三平台调度（release-please 式触发层，Phase 2 展望项落地）
+// ---------------------------------------------------------------------------
+
+const NIGHTLY_LOG_MAX = 5 * 1024 * 1024;
+
+/** 调度日志滚动：nightly.log 超 5MB 轮转成 .old（wrapper 只会追加，不自增清理）。 */
+function rotateNightlyLog(repoRoot) {
+  const p = nightlyLogPath(repoRoot);
+  try {
+    const st = fs.statSync(p);
+    if (st.size > NIGHTLY_LOG_MAX) fs.renameSync(p, `${p}.old`);
+  } catch {
+    // 不存在/被占：首次运行或 Windows 句柄占用，跳过轮转不阻断
+  }
+}
+
+/**
+ * nightly——一次完整巡检编排：scan（生成任务卡，绝不自动 run）+ drift 报告；
+ * --auto N 追加：对本次生成的 high 卡发起闭环（gate=L3 兜底，合并仍人工）后
+ * drain --max N 清一部分队列。给 cron/launchd/schtasks 定时拉起用（schedule install），
+ * 手动跑同效。烧钱动作（worker）只发生在 --auto 下，默认零成本巡检。
+ */
+function cmdNightly(repoRoot, opts) {
+  rotateNightlyLog(repoRoot);
+  const flags = opts.flags ?? new Set();
+  log(`════════ nightly 巡检 ${new Date().toISOString()} ════════`);
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+
+  // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径）
+  const { created, skipped, warnings } = runScan(repoRoot, {
+    todo: true,
+    audit: true,
+    tests: flags.has('--tests'),
+    testCmd: runConfig(repoRoot).testCmd.join(' && '),
+  });
+  for (const w of warnings) log(`⚠ ${w}`);
+  for (const c of created) log(`已生成任务卡：pending/${c}.md`);
+  for (const s of skipped) log(`已存在，跳过：${s}`);
+  if (!created.length && !skipped.length && !warnings.length) log('巡检完成：无新信号。');
+
+  // 2) 质量漂移报告
+  printDriftReport(repoRoot);
+
+  // 3) --auto N：high 卡先跑（安全信号类），再 drain --max N 推进队列；
+  //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续
+  if (opts.auto) {
+    for (const id of created) {
+      const text = safeRead(cardPath(root, 'pending', id));
+      if (!/priority:\s*high/.test(text)) continue;
+      log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+        cwd: repoRoot,
+        stdio: 'inherit',
+      });
+      if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+    }
+    log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
+    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : [])], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+    });
+    if (r.status !== 0) log(`drain 退出码 ${r.status}。`);
+  }
+
+  // 4) 收尾摘要 + 早上的人工操作指引
+  const awaiting = listCards(root, 'awaiting-human');
+  const pending = listCards(root, 'pending');
+  log(`\n════════ nightly 摘要 ════════`);
+  log(`新生成任务卡: ${created.length}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
+  if (awaiting.length) log(`人工放行：node .agents/scripts/orchestrator.mjs approve <task-id>`);
+  if (pending.length && !opts.auto) log(`推进队列：node .agents/scripts/orchestrator.mjs drain（或下次 nightly --auto）`);
+}
+
+/**
+ * release-propose——发版提案（release-please 形态）：自动盘点上个 tag..develop、
+ * conventional 前缀推 semver、核对 CHANGELOG 未发布段，产出提案文件。
+ * 纯只读仓库；版本号是建议，确认权在人（用户说「发布 vX.Y.Z」后才走 release.md 代理发布）。
+ */
+function cmdReleasePropose(repoRoot, versionHint) {
+  const p = proposeRelease(repoRoot, versionHint ? { versionHint } : {});
+  if (p.nothingToRelease) {
+    log(`上个 tag ${p.base} 以来无内容提交、CHANGELOG 也无「未发布」段——没有可发布内容。`);
+    return;
+  }
+  log(`════════ 发版提案 v${p.suggested} ════════`);
+  log(`上个已发布 tag: ${p.base}    建议档位: ${p.level}`);
+  log(`信号: feat ${p.counts.feat} / fix ${p.counts.fix} / breaking ${p.counts.breaking}    盘点提交: ${p.commits.length} 条`);
+  if (p.counts.breaking > 0 && p.level === 'minor') log('⚠ 存在 breaking 提交，0.x 惯例走 minor——升 1.0 前请人工确认');
+  if (p.counts.feat + p.counts.fix === 0) log('⚠ 无 feat/fix 提交（内容偏文档/杂务），是否值得发版请人工裁决');
+  if (p.localTaken) log(`✗ v${p.suggested} 本地 tag 已占用——请换版本号`);
+  else if (p.remoteTaken === true) log(`✗ v${p.suggested} 远端 tag 已占用——请换版本号`);
+  else if (p.remoteTaken === null) log('⚠ 远端 tag 查询失败（离线？）——release-check 会复核');
+  log(`提案文件: ${p.proposalPath}`);
+  log(`确认后对 agent 说「发布 v${p.suggested}」→ .agents/workflows/release.md 代理发布执行序`);
+}
+
+/**
+ * schedule——nightly 定时调度注册（macOS launchd / Linux crontab / Windows schtasks，
+ * 经 nightly-runner wrapper 绝对路径启动）。install --dry-run 只写 runner 打印计划。
+ */
+function cmdSchedule(repoRoot, sub, opts) {
+  if (sub === 'install') {
+    const r = installSchedule(repoRoot, {
+      hour: opts.hour,
+      minute: opts.minute,
+      tests: opts.flags?.has('--tests'),
+      auto: opts.auto,
+      backend: opts.backend,
+      dryRun: opts.flags?.has('--dry-run'),
+    });
+    if (r.dryRun) {
+      log(`[dry-run] 未触碰系统调度。计划：`);
+      log(`  ${r.plan}`);
+      log(`  wrapper 已写入: ${r.runner}`);
+      return;
+    }
+    log(`nightly 调度已安装（每天 ${r.when} 拉起 ${r.runner}）。`);
+    log(`日志: ${nightlyLogPath(repoRoot)}    卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`);
+    return;
+  }
+  if (sub === 'uninstall') {
+    const r = uninstallSchedule();
+    log(r.removed ? 'nightly 调度已卸载。' : '未发现已安装的 nightly 调度（无需卸载）。');
+    return;
+  }
+  if (sub === 'status') {
+    const s = scheduleStatus(repoRoot);
+    log(`nightly 调度: ${s.installed ? `已安装${s.when ? `（${s.when.trim()}）` : ''}` : '未安装'}`);
+    log(`wrapper: ${s.runner}${s.runnerReady ? '' : '（缺失——schedule install 生成）'}`);
+    if (!s.installed) log('安装: node .agents/scripts/orchestrator.mjs schedule install [--hour 2] [--auto 3]');
+    return;
+  }
+  die('用法：schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]');
+}
+
+// ---------------------------------------------------------------------------
 // CLI 分发
 // ---------------------------------------------------------------------------
 
@@ -941,6 +1084,10 @@ function usage() {
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
   scan [--todo] [--audit] [--tests] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
+  nightly [--tests] [--auto N]            一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
+  schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]
+                                          nightly 定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动）
+  release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
   reconcile [task-id]                      用量对账：worker 自报 token vs 网关实测（merged 任务，分歧降序；需项目网关支持）
   resume <task-id> [--backend mock]       崩溃任务带恢复上下文续做
@@ -968,6 +1115,9 @@ async function main() {
     else if (a === '--reason' || a === '--note') opts[a.slice(2)] = argv[++i];
     else if (a === '--max') opts.max = parseInt(argv[++i], 10);
     else if (a === '--workers') opts.workers = parseInt(argv[++i], 10);
+    else if (a === '--hour') opts.hour = parseInt(argv[++i], 10);
+    else if (a === '--minute') opts.minute = parseInt(argv[++i], 10);
+    else if (a === '--auto') opts.auto = parseInt(argv[++i], 10);
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
   }
@@ -1004,6 +1154,12 @@ async function main() {
       return cmdIntent(repoRoot, opts);
     case 'scan':
       return cmdScan(repoRoot, opts);
+    case 'nightly':
+      return cmdNightly(repoRoot, opts);
+    case 'schedule':
+      return cmdSchedule(repoRoot, args[0], opts);
+    case 'release-propose':
+      return cmdReleasePropose(repoRoot, args[0]);
     case 'drift':
       return cmdDrift(repoRoot, opts);
     case 'reconcile':
