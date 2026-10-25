@@ -141,6 +141,50 @@ node .agents/scripts/orchestrator.mjs scan --dry-run
 - 卡 id 按内容哈希：信号不变重复扫描自动去重；cron 每晚调 `scan` 即为 nightly
 - 巡检后用 `run --next` / `drain` 推进队列（见上节）
 
+## nightly 编排与定时调度（schedule）
+
+`nightly` = 一次完整巡检编排（scan 落卡 + drift 报告 + 队列摘要）；`schedule` 把它注册成每日定时任务——「夜里自动巡检（可选自动优化）、早上人工放行」的完整形态：
+
+```bash
+# 手动跑一次编排（零烧钱：只巡检落卡，不跑 worker）
+node .agents/scripts/orchestrator.mjs nightly
+
+# 含慢信号源（跑测试套件）
+node .agents/scripts/orchestrator.mjs nightly --tests
+
+# 注册每日 02:30 定时（macOS launchd / Linux crontab / Windows schtasks，经 wrapper 绝对路径启动，
+# 不依赖调度器环境的 PATH）；--auto 3 = 夜间对 high 卡发起闭环并 drain 3 个任务（worker 烧钱仅在此档，
+# gate=L3 兜底：合并仍等人工 approve）
+node .agents/scripts/orchestrator.mjs schedule install --hour 2 --minute 30 --auto 3
+
+# 只看会做什么，不动系统调度（写 wrapper + 打印注册计划）
+node .agents/scripts/orchestrator.mjs schedule install --dry-run --hour 2
+
+node .agents/scripts/orchestrator.mjs schedule status     # 查注册状态
+node .agents/scripts/orchestrator.mjs schedule uninstall  # 卸载
+```
+
+- wrapper（`.agents/orchestrator/nightly-runner.sh|cmd`）在 install 时刻固化仓库/node 的绝对路径——launchd、schtasks 的执行环境 PATH 极瘦，运行时一律不做环境发现；仓库挪位置后需重跑 `schedule install`。
+- 日志落在 `.agents/orchestrator/logs/nightly.log`（每次 nightly 自动轮转：超 5MB 转 `.old`）。
+- 默认档（不带 `--auto`）零烧钱：只生成任务卡与报告，等人工 `drain`；`--auto` 档夜里真跑 worker，合并闸门不变。
+
+## 发版提案（release-propose，release-please 形态的触发层）
+
+把 release.md 步骤 1 的「盘点 + 定档 + 草稿」自动化：自动解析上个 tag..develop 的内容提交（conventional 前缀），推 semver 档位（breaking 在 0.x 按惯例走 minor），核对 CHANGELOG「未发布」段找疑似漏记，产出提案文件：
+
+```bash
+# 自动定档出提案（纯只读仓库；提案落 .agents/orchestrator/release-proposals/）
+node .agents/scripts/orchestrator.mjs release-propose
+
+# 指定版本（校验 semver 与只增不减）
+node .agents/scripts/orchestrator.mjs release-propose 1.4.0
+```
+
+- 提案含：建议版本与依据、盘点清单（含「待人工归类」的无前缀提交）、CHANGELOG 版本段草稿、版本链接表行、下一步指引。
+- **版本号是建议，决定权在人**（发布是不可逆公开动作）：确认后对 agent 说「发布 vX.Y.Z」，走 release.md「代理发布」执行序；本命令不写 CHANGELOG、不提交、不打 tag。
+- 无 feat/fix（纯文档/杂务）会提示人工裁决是否值得发版。
+
+
 ## 质量漂移监控（Phase 3）
 
 ```bash

@@ -31,6 +31,10 @@ page*
 # planner 草稿（确认路径产物，不进队列不入库）
 .agents/orchestrator/drafts/
 
+# 发版提案与 nightly 调度 wrapper（运行态产物，不入库）
+.agents/orchestrator/release-proposals/
+.agents/orchestrator/nightly-runner.*
+
 # vitest coverage 报告（test:coverage 产物，不入库）
 coverage/
 tmp/
