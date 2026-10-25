@@ -1,17 +1,24 @@
 ---
 name: orchestrate
-description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。
+description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含三条路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检、release-propose 发版提案。
 ---
 
 # orchestrate —— 把任务交给自治编排闭环
 
 用户输入 `/orchestrate <任务描述>`（无描述则问一句要做什么）。你的角色是**编排者**：把任务拆成任务卡、启动闭环、处理闸门、汇报结果。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
 
-## 第 0 步：适用判定
+## 第 0 步：意图路由与适用判定
 
-适合走闭环：目标明确、验收标准可写成**可机器检查的断言**（测试命令、文件存在性、grep 模式）、改动范围清晰——小 bugfix、小功能、文档同步、测试补充、巡检卡处理。
+先按意图特征分流（判断不了就问一句用户）：
 
-不适合（拒绝并说明，建议手动走 feature-branch 工作流）：探索性/架构级改动（验收标准写不出来）、需要频繁人工决策、要动发布流水线的任务。
+| 意图特征 | 走法 |
+|---|---|
+| 目标明确的小改动（bugfix / 小功能 / 文档 / 测试） | **主流程**（下方第 1–4 步） |
+| 特性级改动，用户要「先出设计/方案/spec」 | **路径 B**（spec 三件套，见文末） |
+| 巡检 / 夜间自动化 / 定时任务 / schedule | **路径 C**（nightly / schedule，见文末） |
+| 发版 / 盘点可发内容 / 版本号 | **路径 D**（release-propose，见文末） |
+
+主流程的适用判定：验收标准可写成**可机器检查的断言**（测试命令、文件存在性、grep 模式）、改动范围清晰。不适合（拒绝并说明，建议手动走 feature-branch 工作流）：探索性/架构级改动（验收标准写不出来）、需要频繁人工决策、要动发布流水线的任务——特性级改动若用户接受「先设计」，转路径 B 而不是直接拒。
 
 **同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 
@@ -79,6 +86,30 @@ run/drain 在非交互环境下不会停在人工闸门——到 awaiting-human 
 ## 第 4 步：收尾汇报
 
 全部卡落定后逐任务汇报：改了什么（文件与要点）、测试与门禁结果、审查结论（阻塞/建议数）、合并 commit、耗时与 token 用量（可 `reconcile <task-id>` 对账）。**最后一行固定提示：已合并到本地 develop，未 push 远程，是否 push 由用户决定。**
+
+## 路径 B：特性先设计（spec，Spec Kit/Kiro 式三件套）
+
+适合：特性级改动，值得「先设计后施工」。入口命令 `spec "<意图>"`，Planner 只读会话产出 requirements（用户故事 + EARS 验收）→ design（方案/取舍/风险）→ tasks（任务段）三件套。**设计与施工分离，人工闸门在「审设计」这一步。**
+
+1. `node .agents/scripts/orchestrator.mjs spec "<用户意图>"`（LLM 会话 1–5 分钟，后台跑）。
+2. 完成后**向用户呈现三件套摘要**：requirements 的验收标准、design 的方案要点、tasks 的任务清单（每任务的文件范围与依赖），并提醒可直接手改 `.agents/orchestrator/specs/<id>/` 下的 md。
+3. **停下等用户确认设计——你不能代审**。用户要求改就改完再确认。
+4. 确认后 `node .agents/scripts/orchestrator.mjs spec build <id>` 拆卡进 pending/。
+5. 卡默认 `gate: L3`（逐张等人 approve）。用户已在对话中明确授权自动合并时，可参照第 1 步对 intent 卡的同一处理：run 前把每张卡的 gate 改成 L1；分级裁决与 scope 纯度照常生效。
+6. 之后回到主流程第 2–4 步（run/drain 后台跑、闸门处理、汇报）。
+
+## 路径 C：巡检与定时调度（nightly / schedule）
+
+1. **手动巡检**：`node .agents/scripts/orchestrator.mjs nightly`（后台；scan 落卡 + drift 报告 + 队列摘要，默认零烧钱不跑 worker）。跑完向用户汇报：新生成卡、待审任务、漂移状态；卡要不要 drain 由用户决定（要跑就回主流程第 2 步）。`--tests` 加慢信号源、`--auto N` 夜间档语义见 `.agents/workflows/orchestrator.md`。
+2. **装定时**：先 `schedule status` 报现状；**用户明确要求才 install**——默认档零烧钱；`--auto N` 档夜间真跑 worker（烧钱），装前向用户说明并确认。装完报告：每日时刻、日志路径（`.agents/orchestrator/logs/nightly.log`）、卸载命令（`schedule uninstall`）。
+3. **卸载/查询**：`schedule uninstall` / `schedule status` 直接执行并回报。
+
+## 路径 D：发版提案（release-propose）
+
+1. `node .agents/scripts/orchestrator.mjs release-propose [X.Y.Z]`（版本号可带用户口述值；不带则自动定档）。
+2. 向用户汇报：建议版本与依据（feat/fix/breaking 计数、semver 档位）、疑似漏记清单、提案文件路径。
+3. **版本号决定权在用户，到此为止**：用户说「发布 vX.Y.Z」后才走 `.agents/workflows/release.md`「代理发布」执行序（`AGENTS_ALLOW_RELEASE=1` 白名单）——**那不在本技能范围**（本技能终点是本地 develop，永不 push）。
+4. 用户只采纳草稿时：可按提案在 develop 上收口 CHANGELOG（文档直改放行），同样不 push。
 
 ## 红线（永不）
 
