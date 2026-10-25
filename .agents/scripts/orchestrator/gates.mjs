@@ -112,6 +112,19 @@ export function gateTscBuild(cwd, buildCmd = loadWorkflowConfig().buildCmd) {
 }
 
 /**
+ * ui_check：跑 workflow.json 的 uiCheckCmd（Web 控制台沙箱冒烟——脚本自备
+ * 189xx 端口 + MODELRDOCK_FAKE_HOME 隔离与进程清理，orchestrator 不感知细节）。
+ * 任务卡未声明 ui_check 时调用方根本不调这里；命令未配置 → 跳过。
+ * 失败进调试子循环（与 build 同级），不是红线。
+ */
+export function gateUiCheck(cwd, uiCheckCmd = loadWorkflowConfig().uiCheckCmd) {
+  if (!uiCheckCmd) return { ok: true, skipped: true };
+  const r = runCmd(uiCheckCmd, cwd);
+  if (!r.ok) throw new GateError('ui_check', `uiCheckCmd 退出码 ${r.exitCode}`, r.output);
+  return r;
+}
+
+/**
  * port_scan：只扫 src/** 的新增行里的 listen/端口绑定模式（docs 5.7——
  * 测试与文档合法提及受保护端口不算红线，红线是"让服务监听保护端口"）。
  * 端口清单来自 workflow.json protectedPorts（可显式注入）；空 = 跳过。

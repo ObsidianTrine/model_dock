@@ -26,13 +26,14 @@ export function nightlyLogPath(repoRoot) {
 
 /**
  * nightly CLI 参数（nightly/schedule install 共用一份拼装，保证 wrapper 与手动跑行为一致）。
- * opts: { tests, auto, backend }
+ * opts: { tests, auto, backend, reviewBackend }
  */
 export function nightlyArgs(opts = {}) {
   const args = ['nightly'];
   if (opts.tests) args.push('--tests');
   if (Number.isInteger(opts.auto) && opts.auto > 0) args.push('--auto', String(opts.auto));
   if (opts.backend) args.push('--backend', opts.backend);
+  if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
   return args;
 }
 

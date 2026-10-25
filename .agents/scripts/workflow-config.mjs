@@ -12,6 +12,7 @@
 //   corePaths       核心路径（改动即 L2 人工 / 人工闸门标红）
 //   releasePaths    发布流水线路径前缀（触及即 L3 永远人工）
 //   reviewNotes     注入独立审查提示词的项目红线文本（自由文本）
+//   uiCheckCmd      UI 冒烟门禁命令（任务卡 ui_check: true 时跑；缺省 = 卡声明 ui_check 直接报错）
 //   envPrefix       escape hatch 环境变量前缀（默认 "AGENTS" → AGENTS_ALLOW_RELEASE 等；
 //                   旧项目名 MODELRDOCK_* 永远兼容识别）
 //
@@ -67,6 +68,7 @@ export function loadWorkflowConfig(repoRoot) {
     corePaths: strArr(raw.corePaths),
     releasePaths: strArr(raw.releasePaths),
     reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
+    uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
   };
 }

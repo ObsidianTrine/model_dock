@@ -32,8 +32,8 @@ import {
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
-import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, changedFiles, GateError } from './orchestrator/gates.mjs';
-import { getBackend, resolveBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
+import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
+import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig } from './workflow-config.mjs';
@@ -198,10 +198,32 @@ async function cmdRun(repoRoot, taskId, opts) {
   const card = { meta, body };
   const qdir = logDir(repoRoot, taskId);
 
+  // ui_check 预校验：卡要求 UI 冒烟但仓库没配 uiCheckCmd → 快速失败，卡留 pending 不动
+  if (meta.ui_check && !runConfig(repoRoot).uiCheckCmd) {
+    die('任务卡声明 ui_check: true，但 .agents/workflow.json 未配置 uiCheckCmd（Web 控制台沙箱冒烟命令）。\n补配置（如 "node scripts/ui-smoke.mjs"）或去掉该字段后重试。');
+  }
+
   // backend 持久化：retry/resume 续跑沿用上次会话的后端（显式 --backend 可覆盖）
   const resolved = resolveBackendName(opts, qdir, readEvents);
   opts.backend = resolved.name;
   if (resolved.inherited) log(`沿用上次会话后端：${opts.backend}`);
+
+  // 审查后端（异构审查）：执行与审查分体。显式 --review-backend > 上次会话 >
+  // 自动异构（真实后端互审，mock 永不异构）> 回落同源。未知名字在这里快速失败。
+  const resolvedReview = resolveReviewBackendName({
+    worker: opts.backend,
+    explicit: opts.reviewBackend,
+    prior: readEvents(qdir).find((e) => e.type === 'review_spawned')?.backend,
+  });
+  opts.reviewBackend = resolvedReview.name;
+  const reviewBackend = await getBackend(opts.reviewBackend); // 校验存在性并复用（未知后端统一在此报错，不进 worker 循环）
+  if (resolvedReview.mode === 'heterogeneous') {
+    log(`审查后端（异构）：${opts.reviewBackend}（worker=${opts.backend}，引擎异源互审，避免同源自审盲区）`);
+  } else if (resolvedReview.mode === 'explicit' && opts.reviewBackend !== opts.backend) {
+    log(`审查后端（显式）：${opts.reviewBackend}`);
+  } else if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
+    log(`⚠ 异构审查候选 CLI 不可用——审查回落 worker 同源（${opts.backend}）。安装另一引擎（claude / zcode）后可恢复互审。`);
+  }
 
   const resuming = found.state === 'running';
   if (resuming) cleanupOrphanWorker(repoRoot, taskId);
@@ -340,6 +362,27 @@ async function cmdRun(repoRoot, taskId, opts) {
         die(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
 
+      // UI 冒烟门禁（任务卡 ui_check: true 才跑）：跑 workflow.json uiCheckCmd
+      // （脚本自备沙箱/端口/清理，orchestrator 不感知细节）。失败进调试子循环（与 build 同级），不是红线。
+      if (meta.ui_check) {
+        try {
+          const uiResult = gateUiCheck(worktree, cfg.uiCheckCmd);
+          appendEvent(qdir, 'gate_result', { gate: 'ui_check', result: 'pass', ...(uiResult.skipped ? { skipped: true } : {}) });
+        } catch (e) {
+          if (!(e instanceof GateError)) throw e;
+          appendEvent(qdir, 'gate_result', { gate: 'ui_check', result: 'fail' });
+          debugIter += 1;
+          appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: 'ui_check_failure', max: meta.budget.max_test_iterations });
+          if (debugIter > meta.budget.max_test_iterations) {
+            appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
+            moveCard(root, taskId, 'running', 'blocked');
+            die(`调试子循环超限（${debugIter} 次，ui_check 不过）。任务转 blocked/，人工接手。`);
+          }
+          promptText = buildFixupPrompt(card, ctx, 'ui_check_failure', e.output, debugIter);
+          continue;
+        }
+      }
+
       const purity = gateScopePurity(worktree, meta.files_hint);
       appendEvent(qdir, 'gate_result', {
         gate: 'scope_purity',
@@ -349,16 +392,22 @@ async function cmdRun(repoRoot, taskId, opts) {
       const cliTouched = gateCliEntry(worktree, baseBranch, cfg.corePaths); // 返回被触及的核心路径列表
 
       // ---- LLM 独立审查（全新上下文；权限层强制只读，不靠 prompt 自觉）----
+      // 审查用独立后端（reviewBackend ≠ worker backend 时为异构互审）：review_spawned
+      // 记录审查引擎，retry/resume 沿用；fallback 回落同源时留痕供 drift 分析。
       const diff = execFileSync('git', ['diff', `${baseBranch}...HEAD`], { cwd: worktree, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
       moveCard(root, taskId, 'running', 'reviewing');
+      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend });
+      if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
+        appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
+      }
       const reviewPromptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-')), 'review-prompt.md');
       fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes));
-      const review = await backend.spawn({
+      const review = await reviewBackend.spawn({
         promptFile: reviewPromptFile,
         cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
         maxTurns: 30,
         onEvent: (e) => appendEvent(qdir, e.type, e),
-        readonly: true, // 策略守护完整版：allowedTools 收敛为 Read/Glob/Grep（fail-closed）
+        readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
       });
       const verdict = parseReviewVerdict(review.output ?? '');
       appendEvent(qdir, 'review_verdict', {
@@ -681,7 +730,7 @@ function cmdDrain(repoRoot, opts) {
       lastTried = next.id;
       log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
       // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
         cwd: repoRoot,
         stdio: 'inherit',
         env: { ...process.env, ...childEnvForHeldLock() },
@@ -714,7 +763,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   const launch = (card) => {
     retryCount.set(card.id, (retryCount.get(card.id) ?? 0) + 1);
     log(`\n═══ drain [${launched + 1}/${workers} 并发] → ${card.id}（priority=${card.meta.priority}，active=${active.size + 1}）═══`);
-    const child = spawn('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', card.id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+    const child = spawn('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', card.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
       cwd: repoRoot,
       stdio: 'inherit',
       env: { ...process.env, ...childEnvForHeldLock() },
@@ -888,7 +937,7 @@ function cmdScan(repoRoot, opts) {
         const text = safeRead(cardPath(root, 'pending', id));
         if (!/priority:\s*high/.test(text)) continue;
         log(`\n═══ scan --run → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: { ...process.env, ...childEnvForHeldLock() },
@@ -1156,7 +1205,7 @@ async function cmdNightly(repoRoot, opts) {
         const text = safeRead(cardPath(root, 'pending', id));
         if (!/priority:\s*high/.test(text)) continue;
         log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : [])], {
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: childEnv,
@@ -1164,7 +1213,7 @@ async function cmdNightly(repoRoot, opts) {
         if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
       }
       log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : [])], {
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
         cwd: repoRoot,
         stdio: 'inherit',
         env: childEnv,
@@ -1236,6 +1285,7 @@ function cmdSchedule(repoRoot, sub, opts) {
       tests: opts.flags?.has('--tests'),
       auto: opts.auto,
       backend: opts.backend,
+      reviewBackend: opts.reviewBackend,
       dryRun: opts.flags?.has('--dry-run'),
     });
     if (r.dryRun) {
@@ -1272,16 +1322,19 @@ function usage() {
 用法：node .agents/scripts/orchestrator.mjs <cmd> [args]
 
   submit <card.md>                        校验任务卡并提交到 pending/
-  run <task-id|—next> [--backend mock]    启动单任务闭环（--next 自动取最高优先级 pending）
-  drain [--max N] [--workers N] [--backend mock]  清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
+  run <task-id|—next> [--backend mock] [--review-backend <name|same>]
+                                          启动单任务闭环（--next 自动取最高优先级 pending；审查后端缺省自动异构互审）
+  drain [--max N] [--workers N] [--backend mock] [--review-backend …]
+                                          清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
   spec "<一句话描述特性>" [--backend mock]      规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   scan [--todo] [--audit] [--tests] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
-  nightly [--tests] [--auto N]            一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
-  schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]
+  nightly [--tests] [--auto N] [--backend …] [--review-backend …]
+                                          一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
+  schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--backend …] [--review-backend …] [--dry-run]
                                           nightly 定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
@@ -1293,6 +1346,8 @@ function usage() {
   retry <task-id> --note "..."            人工闸门：打回重试（附补充指令）
   logs <task-id>                          打印事件时间线
 
+后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
+审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
 红线：发布动作永远人工；端口红线按 workflow.json protectedPorts（配置即生效）；熔断不可关闭。`);
 }
 
@@ -1308,6 +1363,7 @@ async function main() {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--backend') opts.backend = argv[++i];
+    else if (a === '--review-backend') opts.reviewBackend = argv[++i];
     else if (a === '--reason' || a === '--note') opts[a.slice(2)] = argv[++i];
     else if (a === '--max') opts.max = parseInt(argv[++i], 10);
     else if (a === '--workers') opts.workers = parseInt(argv[++i], 10);

@@ -8,6 +8,12 @@
           "hooks": [
             { "type": "command", "command": "node .agents/hooks/guard-develop.mjs" }
           ]
+        },
+        {
+          "matcher": "Bash",
+          "hooks": [
+            { "type": "command", "command": "node .agents/hooks/policy-zcode.mjs" }
+          ]
         }
       ]
     }
