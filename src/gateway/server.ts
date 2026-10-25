@@ -289,8 +289,8 @@ function discoveryModelId(id: string): string {
  *  有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表（picker 无自定义项，
  *  档位请求仍走内置名兜底改写，不劣化）。discoveryAliases=true（请求带 anthropic-version 头，
  *  即 Claude Code discovery）时对非 Claude 系 ID 加 anthropic. 前缀别名，否则原样。 */
-function modelsListPayload(cfg: Config, target: ResolvedTarget, discoveryAliases: boolean) {
-  const provider = cfg.providers[target.profile.provider]
+function modelsListPayload(cfg: Config, providerId: string, discoveryAliases: boolean) {
+  const provider = cfg.providers[providerId]
   const data = Object.entries(provider?.models ?? {}).map(([rawId, m]) => {
     const id = discoveryAliases ? discoveryModelId(rawId) : rawId
     return {
@@ -299,7 +299,7 @@ function modelsListPayload(cfg: Config, target: ResolvedTarget, discoveryAliases
       display_name: m.display_name || rawId,
       object: 'model',
       created: 0,
-      owned_by: target.profile.provider,
+      owned_by: providerId,
     }
   })
   return {
@@ -582,18 +582,31 @@ async function handleRequest(
   }
   const { target } = resolved
 
-  // 本地合成 GET /v1/models：返回当前选路目标服务的模型目录（用户拉取/筛选过的），不透传上游——
+  // 本地合成 GET /v1/models：默认返回当前选路目标服务的模型目录（用户拉取/筛选过的），不透传上游——
   // 上游目录 ≠ 用户目录，且上游未必实现该端点。Claude Code 开 CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
   // 后据此填充 /model 选择器；选路复用 pickTarget 首候选（含钉定/定时窗口），保证列表与实际请求同源。
+  // ?provider=<服务ID> 显式点名服务：返回该服务目录、不影响路由（调用方按任务挑服务选型用）。
   // 带 anthropic-version 头 = Claude Code discovery：对非 Claude 系 ID 加 anthropic. 前缀别名
   // 以通过其 ID 过滤（DISCOVERY_ID_RE），转发侧按目录还原。
   if (method === 'GET' && url.split('?')[0] === '/v1/models') {
-    // target 由 resolveTarget 解析（active_profile 或 harness 钉定），不含定时窗口；
-    // 用同一 pickTarget 首候选把目录切到真正在用的服务，避免窗口期列表与转发各说各话
-    const picked = pickTarget(rt, target, target.profile.fallback)
-    const listTarget = picked.ok ? picked.ordered[0].target : target
+    const wanted = (new URL(req.url ?? '/', 'http://x').searchParams.get('provider') ?? '').trim()
+    if (wanted && !rt.config.providers[wanted]) {
+      return sendError(
+        res,
+        404,
+        t('服务「{id}」不存在', 'Service "{id}" not found', { id: wanted }),
+        t('modeldock provider list 查看服务列表，或在 Web 控制台「服务」页确认 ID', 'Run modeldock provider list to view services, or check the ID on the Services page of the web console')
+      )
+    }
+    let listProviderId = wanted
+    if (!listProviderId) {
+      // target 由 resolveTarget 解析（active_profile 或 harness 钉定），不含定时窗口；
+      // 用同一 pickTarget 首候选把目录切到真正在用的服务，避免窗口期列表与转发各说各话
+      const picked = pickTarget(rt, target, target.profile.fallback)
+      listProviderId = (picked.ok ? picked.ordered[0].target : target).profile.provider
+    }
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(modelsListPayload(rt.config, listTarget, req.headers['anthropic-version'] !== undefined)))
+    res.end(JSON.stringify(modelsListPayload(rt.config, listProviderId, req.headers['anthropic-version'] !== undefined)))
     return
   }
 
