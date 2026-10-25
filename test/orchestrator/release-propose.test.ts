@@ -13,6 +13,10 @@ describe('orchestrator release-propose > 纯函数', () => {
     expect(parseCommit('fix: 修复').breaking).toBe(false)
     expect(parseCommit('feat!: 破坏性').breaking).toBe(true)
     expect(parseCommit('feat: x', '其他行\nBREAKING CHANGE: 接口变更').breaking).toBe(true)
+    expect(parseCommit('feat: x', '其他行\nBREAKING-CHANGE: 接口变更').breaking).toBe(true)
+    // 提及字样但非 footer 声明（无冒号）→ 不算 breaking：正文描述误顶 major 的实测误报来源
+    expect(parseCommit('feat: x', '盘点时做 BREAKING CHANGE 识别').breaking).toBe(false)
+    expect(parseCommit('feat: x', 'BREAKING CHANGE 识别）之类的字样在行首也不算').breaking).toBe(false)
     expect(parseCommit('随手一提没有前缀').type).toBeNull()
     expect(parseCommit('随手一提没有前缀').desc).toBe('随手一提没有前缀')
   })

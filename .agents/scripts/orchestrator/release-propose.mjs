@@ -42,14 +42,17 @@ export function latestTag(repoRoot) {
   return first && /^v\d+\.\d+\.\d+$/.test(first) ? first : null;
 }
 
-/** 解析单个提交：type（conventional 前缀，无前缀为 null）+ breaking 标记。 */
+/** 解析单个提交：type（conventional 前缀，无前缀为 null）+ breaking 标记。
+ *  body 的 breaking 只认 conventional footer 形态「BREAKING CHANGE: …」（含连字符变体、必须带冒号）——
+ *  正文里提及「BREAKING CHANGE 识别」这类描述性字样不是声明，宽松匹配会把普通 feat 误判成
+ *  breaking、直接顶到 major（实测踩中：本功能自身的提交信息）。 */
 export function parseCommit(subject, body = '') {
   const m = SUBJECT_RE.exec(subject);
   return {
     subject,
     type: m ? m[1] : null,
     desc: m ? m[4].trim() : subject.trim(),
-    breaking: Boolean(m?.[3]) || /^BREAKING CHANGES?\b/im.test(body),
+    breaking: Boolean(m?.[3]) || /^BREAKING[ -]CHANGES?:/im.test(body),
   };
 }
 
