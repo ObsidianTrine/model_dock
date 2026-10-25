@@ -84,7 +84,13 @@ export async function loadConfig(): Promise<Config> {
 }
 
 export async function saveConfig(cfg: Config): Promise<void> {
-  await atomicWrite(configPath(), tomlStringify(cfg), 0o600)
+  const next = tomlStringify(cfg)
+  // 无变化跳写（PERF-14 残余收口）：序列化结果与磁盘现值逐字节一致时不落盘——mutateConfig
+  // 读-改-写后 fn 零改动、或同值重写（控制台轮询保存等）不再产生整包写 + tmp/rename 换新
+  // inode 的写放大。比较在调用方的写锁内；字节级比较让归一化首写（磁盘内容不同）语义不回退
+  const cur = await readTextIfExists(configPath())
+  if (cur !== null && cur === next) return
+  await atomicWrite(configPath(), next, 0o600)
 }
 
 // 写并发控制（实现见 src/util/fsx.ts 的 withFileLock：进程内 promise 串行 + 跨进程 O_CREAT|O_EXCL 锁）
