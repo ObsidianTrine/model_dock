@@ -2,6 +2,7 @@
 
 > 面向使用者（人或 agent）的实操手册。架构与设计决策见 `docs/design-orchestrator.md`；
 > 简版命令速查见 `.agents/workflows/orchestrator.md`。本文回答三件事：怎么用、和 feature-branch 是什么关系、agent 会不会自动触发。
+> spec 三件套 / nightly 巡检编排 / schedule 定时 / release-propose 发版提案的完整用法见 [AI 自治流水线使用指南](ai-pipeline-guide.md)。
 
 ## 1. 一句话模型
 
@@ -105,6 +106,8 @@ node .agents/scripts/orchestrator.mjs scan --dry-run       # 先看会生成什�
 node .agents/scripts/orchestrator.mjs drift                # 自动合并健康度（回溯失败率>20% 自动降级全人工）
 node .agents/scripts/orchestrator.mjs drift --clear        # 人工确认后恢复自动合并
 ```
+
+> spec / nightly / schedule / release-propose 四条路径不在本手册展开，完整用法见 [ai-pipeline-guide.md](ai-pipeline-guide.md)。
 
 ### 4.5 人工闸门与善后
 
