@@ -183,7 +183,7 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 
 ### GitHub 侧自动化（PR 审查 bot + Dependabot）
 
-本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secrets，未配置时 bot 跳过（Actions 日志有 warning）：
+本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secrets，未配置时 bot 跳过（Actions 日志有 warning）；完整设置步骤、成本控制与换供应商方法见 **`docs/ci-bots.md`**：
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|

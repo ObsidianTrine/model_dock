@@ -6,6 +6,8 @@ name: claude-review
 #   GLM_API_KEY —— 智谱 API key（bot 默认走 GLM 的 Anthropic 兼容端点）
 #   （想改走 Anthropic 官方 API：删除各 claude-code-action 步骤的 env 块，
 #     改回 with.anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}）
+#   未配置时 bot 静默跳过（Actions 日志 warning），零 token 消耗。
+#   设置与用途详见 docs/ci-bots.md。
 #
 # 边界：
 #   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论），
@@ -39,11 +41,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: 未配置 API key 时静默跳过（未启用状态零消耗）
+        id: keyguard
+        env:
+          GLM_KEY: ${{ secrets.GLM_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$GLM_KEY" ] && [ -z "$ANTHROPIC_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 secrets.GLM_API_KEY，PR 审查 bot 未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+          fi
       - uses: actions/checkout@v7
+        if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 1
       - name: 跳过 bot 自身修复提交（防审查回环）
         id: guard
+        if: steps.keyguard.outputs.skip != 'true'
         run: |
           msg="$(git log -1 --pretty=%s)"
           echo "last commit subject: $msg"
@@ -51,7 +65,7 @@ jobs:
             "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
       - uses: anthropics/claude-code-action@v1
-        if: steps.guard.outputs.skip != 'true'
+        if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
           # GLM 的 Anthropic 兼容端点；模型名等由 claude CLI 自行协商
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
@@ -99,10 +113,22 @@ jobs:
       issues: write
       id-token: write
     steps:
+      - name: 未配置 API key 时静默跳过（未启用状态零消耗）
+        id: keyguard
+        env:
+          GLM_KEY: ${{ secrets.GLM_API_KEY }}
+          ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$GLM_KEY" ] && [ -z "$ANTHROPIC_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 secrets.GLM_API_KEY，@claude 交互未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+          fi
       - uses: actions/checkout@v7
+        if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
+        if: steps.keyguard.outputs.skip != 'true'
         env:
           # 与 auto-review 同款 GLM 认证；改走 Anthropic 官方 API 时同步替换
           ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
