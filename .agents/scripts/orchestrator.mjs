@@ -31,7 +31,7 @@ import {
   pickNextCard,
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, changedFiles, GateError } from './orchestrator/gates.mjs';
 import { getBackend, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
@@ -42,6 +42,7 @@ import { readDegraded, evaluateDrift, clearDegraded, DRIFT_THRESHOLD } from './o
 import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
+import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -934,6 +935,116 @@ async function cmdIntent(repoRoot, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// spec —— 规格驱动（Spec Kit/Kiro 式三件套，Phase 2 展望项落地，docs 10.9）
+// ---------------------------------------------------------------------------
+
+/**
+ * spec start：Planner 只读会话把意图编译成 requirements/design/tasks 三件套，落盘
+ * specs/<id>/ 等人工审阅（可手改文件），不进队列。与 intent 的分工：intent = 小改动
+ * 一句话直达任务卡；spec = 需要「先设计后施工」的特性，人审设计后再拆卡。
+ */
+async function cmdSpecStart(repoRoot, opts) {
+  const intentText = (opts.intent ?? []).join(' ').trim();
+  if (!intentText) die('用法：spec "<一句话描述特性>" [--backend mock]');
+  const backend = await getBackend(opts.backend);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
+
+  try {
+    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot);
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
+        maxTurns: 30,
+        onEvent: () => {},
+        readonly: true,
+        settingsFile,
+      });
+      const parsed = parseSpecBlocks(result.output ?? '');
+      if (!parsed) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出缺少规格契约块）\n请严格按产出契约重新输出：agents-spec / agents-requirements / agents-design / agents-tasks 四个 fenced block 齐全。`;
+          continue;
+        }
+        die(`Spec Planner ${MAX_ATTEMPTS} 次均未产出三件套契约块。请改用 intent（小改动）或手写 specs/ 文档。`);
+      }
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(parsed.id)) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（id "${parsed.id}" 不合法）\nid 只允许小写字母/数字/短横线，请修正 agents-spec 块后重新输出。`;
+          continue;
+        }
+        die(`Spec Planner 产出的 id "${parsed.id}" 不合法（只允许小写字母/数字/短横线）。`);
+      }
+      if (!parseTasksDoc(parsed.tasks).length) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（tasks 未解析到任务段）\ntasks 块必须含「## 任务 N:标题」段（每段带 目标/文件/完成条件/依赖 四行），请修正后重新输出。`;
+          continue;
+        }
+        die('Spec Planner 产出的 tasks 未解析到任何「## 任务 N:」段。');
+      }
+      if (fs.existsSync(path.join(repoRoot, '.agents', 'orchestrator', 'specs', parsed.id))) {
+        die(`规格 id "${parsed.id}" 已存在（specs/${parsed.id}/）。换个意图措辞重试，或手改既有规格后直接 spec build。`);
+      }
+      const dir = writeSpec(repoRoot, parsed);
+      log(`规格三件套已生成（人工审阅/手改后再拆卡）：${dir}`);
+      log(`  requirements.md（需求：用户故事 + EARS 验收标准）`);
+      log(`  design.md（技术设计：现状/方案/取舍/风险）`);
+      log(`  tasks.md（任务分解：可独立合并的工作段）`);
+      log(`确认设计后拆卡进队列：node .agents/scripts/orchestrator.mjs spec build ${parsed.id}`);
+      return;
+    }
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/** spec build：把已审阅规格的 tasks 拆成任务卡进 pending/（幂等，同 id 跳过）。 */
+function cmdSpecBuild(repoRoot, id) {
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  if (!listSpecs(repoRoot).includes(id)) {
+    die(`规格 "${id}" 不存在。spec list 查看已有规格；spec "<意图>" 生成新的。`);
+  }
+  const { created, skipped, warnings } = buildSpecCards(repoRoot, root, id);
+  for (const w of warnings) log(`⚠ ${w}`);
+  for (const c of created) log(`已生成任务卡：pending/${c}.md（gate=L3，design 全文已注入卡背景）`);
+  for (const s of skipped) log(`已存在，跳过：${s}`);
+  if (!created.length && !skipped.length) return;
+  log(`推进：node .agents/scripts/orchestrator.mjs drain（卡按任务序先后调度，合并逐张等人工 approve）`);
+}
+
+/** spec list/show：浏览规格目录与单规格概要。 */
+function cmdSpecList(repoRoot) {
+  const ids = listSpecs(repoRoot);
+  if (!ids.length) {
+    log('尚无规格。生成：node .agents/scripts/orchestrator.mjs spec "<一句话描述特性>"');
+    return;
+  }
+  for (const id of ids) {
+    const s = readSpec(repoRoot, id);
+    const tasks = parseTasksDoc(s.tasks);
+    log(`${id.padEnd(28)} ${s.meta.title}（${tasks.length} 个任务，${s.dir}）`);
+  }
+}
+
+function cmdSpecShow(repoRoot, id) {
+  if (!listSpecs(repoRoot).includes(id)) die(`规格 "${id}" 不存在。spec list 查看。`);
+  const s = readSpec(repoRoot, id);
+  log(`════════ 规格 ${id}：${s.meta.title} ════════`);
+  log(`目录: ${s.dir}`);
+  const tasks = parseTasksDoc(s.tasks);
+  for (const t of tasks) log(`  任务 ${t.n}: ${t.title}（文件: ${t.files.join(', ')}；${t.deps}）`);
+  log(`拆卡进队列：node .agents/scripts/orchestrator.mjs spec build ${id}`);
+}
+
+// ---------------------------------------------------------------------------
 // nightly / schedule —— 定时巡检编排与三平台调度（release-please 式触发层，Phase 2 展望项落地）
 // ---------------------------------------------------------------------------
 
@@ -1083,6 +1194,9 @@ function usage() {
   drain [--max N] [--workers N] [--backend mock]  清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
+  spec "<一句话描述特性>" [--backend mock]      规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡
+  spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
+  spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   scan [--todo] [--audit] [--tests] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
   nightly [--tests] [--auto N]            一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
   schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]
@@ -1152,6 +1266,20 @@ async function main() {
     case 'intent':
       opts.intent = args;
       return cmdIntent(repoRoot, opts);
+    case 'spec': {
+      const sub = args[0];
+      if (sub === 'build') {
+        if (!args[1]) die('用法：spec build <spec-id>');
+        return cmdSpecBuild(repoRoot, args[1]);
+      }
+      if (sub === 'list') return cmdSpecList(repoRoot);
+      if (sub === 'show') {
+        if (!args[1]) die('用法：spec show <spec-id>');
+        return cmdSpecShow(repoRoot, args[1]);
+      }
+      opts.intent = args;
+      return cmdSpecStart(repoRoot, opts);
+    }
     case 'scan':
       return cmdScan(repoRoot, opts);
     case 'nightly':

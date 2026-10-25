@@ -209,3 +209,90 @@ export function parseCardBlock(text) {
   const m = re.exec(text ?? '');
   return m ? m[1] : null;
 }
+
+// ---------------------------------------------------------------------------
+// Spec Planner（spec 命令）：把一句话意图编译成 Spec Kit/Kiro 式三件套
+// （requirements → design → tasks，docs 10.9）。产出契约 = 四个 fenced block；
+// 三件套落盘 .agents/orchestrator/specs/<id>/，人工审阅后由 spec build 拆成任务卡。
+// ---------------------------------------------------------------------------
+
+/** spec planner 输出契约的 fenced block 标记（元信息 + 三件套）。 */
+export const SPEC_META_MARKER = 'agents-spec';
+export const REQUIREMENTS_MARKER = 'agents-requirements';
+export const DESIGN_MARKER = 'agents-design';
+export const TASKS_MARKER = 'agents-tasks';
+
+/** 从 fenced block 里提取标记内容；找不到返回 null。 */
+function parseMarkerBlock(text, marker) {
+  const re = new RegExp('```' + marker + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  return m ? m[1] : null;
+}
+
+/**
+ * 组装 spec planner prompt：只读会话（Read/Glob/Grep）探索仓库，产出三件套。
+ * 与 buildPlannerPrompt 同构（AGENTS.md 注入 + 意图消毒 + 契约模板 + 硬性要求），
+ * 差异在产物：单张任务卡 → requirements/design/tasks 三份文档（人审后再拆卡）。
+ */
+export function buildSpecPrompt(intentText, repoRoot) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const clean = sanitizeIntent(intentText);
+  const fence = '```';
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：把下面的意图编译成规格三件套（requirements → design → tasks）\n\n` +
+    `用户意图：${clean}\n\n` +
+    `你可以用 Read/Glob/Grep 探索本仓库（当前目录就是仓库根）来了解现状：定位相关模块、\n` +
+    `看测试怎么组织、确认涉及的真实文件路径。禁止编造不存在的文件与端点。\n\n` +
+    `# 产出契约\n\n` +
+    `探索完成后，按顺序输出四个 fenced block：\n\n` +
+    `${fence}${SPEC_META_MARKER}\n` +
+    `id: <小写短横线，体现意图>\n` +
+    `title: <一句话标题>\n` +
+    `${fence}\n\n` +
+    `${fence}${REQUIREMENTS_MARKER}\n` +
+    `# <标题>\n\n` +
+    `## 背景\n<为什么做：现状痛点、触发场景>\n\n` +
+    `## 用户故事\n- 作为 <角色>，我希望 <能力>，以便 <价值>。\n\n` +
+    `## 验收标准（EARS 式，可机器检查）\n- 当 <触发>，系统应当 <可观察行为>。\n` +
+    `${fence}\n\n` +
+    `${fence}${DESIGN_MARKER}\n` +
+    `# 技术设计：<标题>\n\n` +
+    `## 现状\n<探索到的相关模块/文件（写真实路径）与现有行为>\n\n` +
+    `## 方案\n<改动方案与关键决策>\n\n` +
+    `## 取舍\n<备选方案与放弃理由>\n\n` +
+    `## 风险\n<平台兼容/端口/兼容性等风险与规避>\n` +
+    `${fence}\n\n` +
+    `${fence}${TASKS_MARKER}\n` +
+    `# 任务分解：<标题>\n\n` +
+    `## 任务 1：<短标题>\n` +
+    `- 目标: <这个任务做什么>\n` +
+    `- 文件: <glob1>, <glob2>（你探索后确认的真实范围）\n` +
+    `- 完成条件: <可机器检查的断言>\n` +
+    `- 依赖: 无（或：任务 N）\n\n` +
+    `（按需增加「## 任务 2:…」，每个任务一个段；任务应可独立合并，粒度=一次 worktree 闭环）\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 验收标准与完成条件必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止空洞标准；\n` +
+    `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；\n` +
+    `3. 任务间依赖显式写「依赖: 任务 N」，无依赖写「依赖: 无」；\n` +
+    `4. 设计不得违反 AGENTS.md 红线（端口 8687/8890、native 依赖、import.meta 等）；\n` +
+    `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
+  );
+}
+
+/**
+ * 从 spec planner 输出提取四块。返回 { id, title, requirements, design, tasks }；
+ * 任一块缺失或 meta 解析失败返回 null（调用方喂回重试）。
+ */
+export function parseSpecBlocks(text) {
+  const metaRaw = parseMarkerBlock(text, SPEC_META_MARKER);
+  const requirements = parseMarkerBlock(text, REQUIREMENTS_MARKER);
+  const design = parseMarkerBlock(text, DESIGN_MARKER);
+  const tasks = parseMarkerBlock(text, TASKS_MARKER);
+  if (!metaRaw || !requirements || !design || !tasks) return null;
+  const id = /^id:\s*(.+)$/m.exec(metaRaw)?.[1]?.trim();
+  const title = /^title:\s*(.+)$/m.exec(metaRaw)?.[1]?.trim();
+  if (!id || !title) return null;
+  return { id, title: title.trim(), requirements, design, tasks };
+}

@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -18,8 +18,73 @@ export const mockBackend = {
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     const prompt = fs.readFileSync(promptFile, 'utf8');
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
-    const isPlanner = prompt.includes(CARD_MARKER);
+    const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
+    const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
     onEvent({ type: 'worker_spawned', backend: 'mock', pid: process.pid });
+
+    if (isSpecPlanner) {
+      // spec planner 模式：输出三件套契约块（两个任务、文件明确，供 spec build 端到端拆卡）；
+      // ORCH_MOCK_PLANNER_INVALID=1 复用 planner 的非法输出注入（重试路径测试）
+      const invalid = process.env.ORCH_MOCK_PLANNER_INVALID === '1';
+      const specId = /用户意图：\s*(.+)$/m.exec(prompt)?.[1]?.trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'planner-mock-spec';
+      const output = invalid
+        ? '规格想好了但没有产出契约块。'
+        : [
+            '已探索仓库,意图编译为规格三件套。',
+            '',
+            '```' + SPEC_META_MARKER,
+            `id: ${specId}`,
+            'title: mock 规格标题',
+            '```',
+            '',
+            '```' + REQUIREMENTS_MARKER,
+            '# mock 规格标题',
+            '',
+            '## 背景',
+            'mock planner 背景。',
+            '',
+            '## 用户故事',
+            '- 作为用户，我希望 mock 能力，以便测试。',
+            '',
+            '## 验收标准（EARS 式，可机器检查）',
+            '- 当 mock 命令运行，系统应当产出 mock 产物。',
+            '```',
+            '',
+            '```' + DESIGN_MARKER,
+            '# 技术设计：mock 规格标题',
+            '',
+            '## 现状',
+            'src/mock-现状占位。',
+            '',
+            '## 方案',
+            'mock 设计方案：docs/ 下新增说明文档。',
+            '',
+            '## 取舍',
+            '无（mock）。',
+            '',
+            '## 风险',
+            '无（mock）。',
+            '```',
+            '',
+            '```' + TASKS_MARKER,
+            '# 任务分解：mock 规格标题',
+            '',
+            '## 任务 1:写文档',
+            '- 目标: 新增 docs/mock-a.md',
+            '- 文件: docs/**',
+            '- 完成条件: docs/mock-a.md 存在且非空',
+            '- 依赖: 无',
+            '',
+            '## 任务 2:补测试说明',
+            '- 目标: 扩充 docs/mock-b.md',
+            '- 文件: docs/**',
+            '- 完成条件: docs/mock-b.md 存在且非空',
+            '- 依赖: 任务 1',
+            '```',
+          ].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-spec-planner' });
+      return { exitCode: 0, output, usage: { tokensIn: 400, tokensOut: 300 }, pid: process.pid };
+    }
 
     if (isPlanner) {
       // planner 模式：输出一张合法任务卡（契约块）；ORCH_MOCK_PLANNER_INVALID=1 模拟非法输出（校验重试路径测试）

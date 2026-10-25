@@ -35,6 +35,9 @@ page*
 .agents/orchestrator/release-proposals/
 .agents/orchestrator/nightly-runner.*
 
+# 规格三件套（spec 命令产物，人工审阅的工作区；拆出的任务卡进队列即完成使命）
+.agents/orchestrator/specs/
+
 # vitest coverage 报告（test:coverage 产物，不入库）
 coverage/
 tmp/
