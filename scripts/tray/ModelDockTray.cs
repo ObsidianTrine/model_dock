@@ -28,11 +28,16 @@ namespace ModelDockTray
         /// 双击安装后的快捷方式 = 运行本程序（GUI 子系统，无黑窗）：
         /// 首次运行 → 确保网关拉起 + 弹控制台 + 常驻托盘；托盘已在时 → 仅确保网关 + 再弹一次控制台。
         /// 主程序 modeldock.exe 是控制台子系统（SEA），直接双击会带黑窗——快捷方式一律指向本程序。
+        /// 单实例互斥必须 static 持有：原先 GC.KeepAlive(mutex) 写在 Application.Run 之前，
+        /// 进入消息循环后局部变量即成死引用，GC 一回收句柄即关、命名 Mutex 随之销毁——之后
+        /// 每次双击都 Owned=true 再起真实例，托盘区多一个图标（2026-10 Windows 多图标报障）。
+        private static Mutex _singleton;
+
         [STAThread]
         static void Main()
         {
             bool owned;
-            var mutex = new Mutex(true, "Local\\ModelDockTray", out owned);
+            _singleton = new Mutex(true, "Local\\ModelDockTray", out owned);
             if (!owned)
             {
                 // 托盘已在：把这次双击当作「打开控制台」
@@ -40,7 +45,6 @@ namespace ModelDockTray
                 OpenConsoleWhenAlive();
                 return;
             }
-            GC.KeepAlive(mutex);
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
