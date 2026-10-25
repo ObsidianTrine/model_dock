@@ -5,12 +5,19 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.2.2] - 2026-10-25
+
+A slim one-line "In use" strip, explicit attach ports, faster failover on hung upstreams, and a batch of background-overhead reductions.
+
+### Added
+
+- **Explicit gateway port for attaching clients (`modeldock attach <client> --port`)**: with multiple instances running, the auto-detection heuristic could point a client at the wrong instance's port; `--port` now settles it in one stroke.
 
 ### Improved
 
 - **The "In use" status card is now a slim one-line status strip**: about half the previous height, leaving more room above the fold; the service name is highlighted in blue, the route source (schedule window / pinned / failover / degraded) becomes a small colored icon chip, the status dot turns amber on failover or degradation, and the line ends with an amber warning when no fallback exists; the model and the client list are no longer shown here (client attribution lives on each service card's "used by N clients").
 - **Faster failover when the primary service hangs**: timeout-class failures (typically a proxy or network silently dropping connections) used to be retried once before switching, doubling the worst-case wait; they now go straight to the next candidate service, while millisecond-fast refusals keep their immediate retry.
+- **The model-catalog endpoint supports conditional requests**: console / phone polling of the model catalog gets a short 304 response when nothing changed — the repeated serialization of the large table is gone.
 - **Lower idle overhead in the background**: device sync and schedule-window checks no longer spawn keychain subprocesses or rescan directories every minute (the hidden per-minute cost with OS-keychain backends is gone), steady-state console polling probes less often, and startup-time background work is spread out instead of piling up.
 - **`adapter list` and config-import scans run in parallel**: on Windows the first run no longer stacks each desktop client's registry probe serially (previously up to 20+ seconds in the worst case); total time now roughly equals the slowest single probe.
 - **Request-body buffering cap lowered to 16MB by default**: abnormally large requests are rejected earlier (413); if you genuinely send very large payloads (big PDFs / many attachments), add `max_body_mb = 64` under `[gateway]` in config.toml and restart the gateway to raise it.
@@ -266,6 +273,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.2.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.5...v1.2.0
 [1.1.5]: https://github.com/ObsidianTrine/model_dock/compare/v1.1.4...v1.1.5
