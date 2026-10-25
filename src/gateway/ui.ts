@@ -30,7 +30,7 @@ export const UI_HTML = `<!doctype html>
   --r-sm:8px; --r-md:10px; --r-lg:14px; --r-full:999px;
   --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px;
   --h-sm:28px; --h-md:34px; --h-lg:40px;
-  --wrap-max:1200px;
+  --wrap-ratio:61.8%;
   --shadow-sm:0 1px 2px rgba(0,0,0,.25); --shadow-md:0 4px 14px rgba(0,0,0,.2); --shadow-lg:0 18px 50px rgba(0,0,0,.35);
   --star:#f5a623;
   --scrim:rgba(0,0,0,.5);
@@ -64,9 +64,12 @@ export const UI_HTML = `<!doctype html>
 button{font:inherit;color:inherit;background:none;border:none;padding:0;cursor:pointer}
 button:disabled{cursor:not-allowed;opacity:.55}
 body{margin:0;background:var(--bg);color:var(--text);font:var(--fs-base)/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
-.wrap{max-width:var(--wrap-max);margin:0 auto;padding:0 16px 64px}
-/* 壳封顶后说明行不横贯整屏：仅视口宽于壳上限时兜底行宽，更窄时保持原观感 */
-@media (min-width:1200px){.card .desc,.card .shint{max-width:70ch}}
+.wrap{margin:0 auto;padding:0 16px 64px}
+/* 黄金比例壳：视口 ≥1000px 时内容带恒占 61.8%、两侧留白均分（19.1%×2），任何宽度比例一致、不设上限；
+ * <1000px 时 61.8% 容不下固定宽度表格（时段面板 654px / 模型行 416px），回退流式全宽 */
+@media (min-width:1000px){.wrap{width:var(--wrap-ratio)}}
+/* 内容带按比例收窄后说明行不横贯整屏：行宽兜底与比例同档生效 */
+@media (min-width:1000px){.card .desc,.card .shint{max-width:70ch}}
 header{position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);display:flex;align-items:center;gap:10px;padding:12px 0 10px;border-bottom:1px solid var(--border);margin-bottom:14px}
 .logo{display:flex;align-items:center}
 .logo svg{display:block;border-radius:7px;box-shadow:0 1px 4px rgba(79,70,229,.35)}
@@ -521,17 +524,17 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .modal-foot .end{margin-left:auto}
 /* 弹层开着时的错误就近写底栏左侧槽，不走全局 toast——遮罩 z 在 toast 之上，磨砂会把 toast 糊掉（textContent 填充，上游报错文本不可信） */
 .modal-foot .mferr{flex:1;min-width:0;margin:0;color:var(--err);font-size:var(--fs-sm);word-break:break-all}
-/* 窄屏兜底（手机浏览器/半屏分屏）：主布局本就流式折行，这里只处理固定宽度表格与顶栏 */
+/* 自适应兜底（任何宽度恒开，不再只限窄屏）：比例壳 ≥1000px 收窄内容带后，顶栏与固定宽度表格同样要活下来 */
 /* 日志表滚动壳=浮头表格契约的卡内滚动容器：竖向也在这里滚（max-height 封顶），thead th 相对它吸附；
    外滚吸附要对齐页面 sticky 页头高度（窄屏折行不定值），故页级表格用内滚变体 */
 .tablescroll{overflow:auto;max-height:60vh;-webkit-overflow-scrolling:touch}
+/* 顶栏允许折行；健康文本可截断，不把语言/主题按钮挤出内容带 */
+header{flex-wrap:wrap;row-gap:4px}
+#health{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 定时切换面板列宽固定，容器放不下时面板内横向滚动、不让页面横移（页首表格不套浮头的既定例外，禁律①不适用）；
+   手机断点给行加最小宽度，保证列宽可预期 */
+#schedPanel{overflow-x:auto}
 @media (max-width:600px){
-  /* 顶栏允许折行；健康文本可截断，不把语言/主题按钮挤出视口 */
-  header{flex-wrap:wrap;row-gap:4px}
-  #health{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  /* 定时切换面板保持网格列宽，面板内横向滚动（网格列多为固定 px，窄屏放不下）；
-     1fr 列需最小宽度，否则被压成逐字竖排而不是触发滚动 */
-  #schedPanel{overflow-x:auto}
   #schedPanel .shead,#schedPanel .srow{min-width:654px}
 }
 @media (max-width:480px){
