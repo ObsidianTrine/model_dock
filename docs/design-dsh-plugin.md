@@ -198,6 +198,11 @@ package.json 关键字段（建议值，名称最终见 D2）：
 > `connection.requestRejection`，在场复用宿主 fence+浏览器登录，不在场回退 loopback 开放），
 > 客户端改 `fetch` 直连；connection 通道注册保留（未来宿主生效时自带鉴权）。已在真实 dsh 第二实例
 > （`--patch` 换端口）curl 验证 status 200 + attach 版本门槛拒绝路径。
+> **v0.4.0 引流入口**：面板「打开控制台」按钮 + 引导行 → 新 `console` 端点 spawn `modeldock ui`
+> （CLI 代持 admin token 自动登录开浏览器，插件零密钥）。**决策：跳转而非内嵌控制台**——控制台
+> 需 token 登录（插件红线拿不到也不该拿），iframe 只会展示登录页；内嵌=养第二份控制台表面会随上游
+> 演进无声碎裂；整页应用塞侧栏变形；跨源/Cookie/CSP 雷区。跳转经 CLI 自动登录后一年设备记忆免登，
+> 长期摩擦≈0。
 
 三态状态卡 + 向导，全部文案走 locale 双语：
 
