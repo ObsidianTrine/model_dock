@@ -191,6 +191,13 @@ package.json 关键字段（建议值，名称最终见 D2）：
 > 与 agent 工具共用同一套动作本体与安装 job 单飞管理器。
 > **v0.3.0 增左侧栏入口**：`sidebar.panellist` 行（id `dsh-modeldock`、order 2，正好排在插件市场
 > order 1 之下）+ `"main"` 面板（key 同 id，点击条目主区域渲染同款面板）——契约照抄 dshmarket 的侧边栏实现。
+> **v0.3.1 传输修正（405 排查结论）**：connection 的 `rpc.handle` 通道在本宿主（dsh 0.2.0-rc.2 web
+> profile）不生效——浏览器 POST 落 SPA 兜底回 405（plugin-mall 的 `/market` 同宿主同样 405）；
+> 实测 dshmarket 走的是 **webServer 直挂路由**（`/dsh-market/*` 200）。插件改为同款姿势：
+> 主进程 `ctx.inject(["webServer"])` 挂 `POST /modeldock/<endpoint>` prefix 路由（鉴权门请求时读
+> `connection.requestRejection`，在场复用宿主 fence+浏览器登录，不在场回退 loopback 开放），
+> 客户端改 `fetch` 直连；connection 通道注册保留（未来宿主生效时自带鉴权）。已在真实 dsh 第二实例
+> （`--patch` 换端口）curl 验证 status 200 + attach 版本门槛拒绝路径。
 
 三态状态卡 + 向导，全部文案走 locale 双语：
 
