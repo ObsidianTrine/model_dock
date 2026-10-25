@@ -397,3 +397,55 @@ target = "agent"
     }
   })
 })
+
+describe('saveConfig 无变化跳写（PERF-14 残余）', () => {
+  it('no-op mutateConfig / 同值 saveConfig 不落盘：mtime 与内容不变', async () => {
+    const h = fakeHome()
+    try {
+      await mutateConfig((c) => {
+        c.language = 'zh'
+      })
+      const content = fs.readFileSync(configPath(), 'utf8')
+      const before = fs.statSync(configPath()).mtimeMs
+      await sleep(30)
+      await mutateConfig(() => {})
+      await saveConfig(await loadConfig())
+      expect(fs.statSync(configPath()).mtimeMs).toBe(before)
+      expect(fs.readFileSync(configPath(), 'utf8')).toBe(content)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('有变化 mutate 照常落盘：mtime 前进、内容更新', async () => {
+    const h = fakeHome()
+    try {
+      await mutateConfig((c) => {
+        c.language = 'zh'
+      })
+      const before = fs.statSync(configPath()).mtimeMs
+      await sleep(30)
+      await mutateConfig((c) => {
+        c.language = 'en'
+      })
+      expect(fs.statSync(configPath()).mtimeMs).not.toBe(before)
+      expect((await loadConfig()).language).toBe('en')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('文件缺失时照常首写；同内容二写不报错', async () => {
+    const h = fakeHome()
+    try {
+      expect(fs.existsSync(configPath())).toBe(false)
+      await saveConfig(emptyConfig())
+      expect(fs.existsSync(configPath())).toBe(true)
+      const content = fs.readFileSync(configPath(), 'utf8')
+      await saveConfig(emptyConfig())
+      expect(fs.readFileSync(configPath(), 'utf8')).toBe(content)
+    } finally {
+      h.restore()
+    }
+  })
+})
