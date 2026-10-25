@@ -74,35 +74,42 @@ export function newWorkerSettingsPath() {
   return path.join(fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'orch-settings-')), 'worker-settings.json');
 }
 
+/** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。 */
+export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
+  const args = [
+    '-p',
+    '--output-format',
+    'stream-json',
+    '--verbose', // --print 下用 stream-json 必须带 --verbose（claude CLI 校验）
+    '--max-turns',
+    String(maxTurns),
+  ];
+  if (model) args.push('--model', model);
+  if (readonly) {
+    // 只读会话（reviewer）：白名单收敛为只读工具，无 acceptEdits——headless 下
+    // 未列入白名单的工具调用被自动拒绝（fail-closed），编辑/命令不可能发生
+    args.push('--allowedTools', 'Read', 'Glob', 'Grep');
+  } else {
+    args.push(
+      '--permission-mode',
+      'acceptEdits',
+      '--allowedTools',
+      ...allowedTools(),
+      '--disallowedTools',
+      ...DISALLOWED_TOOLS,
+    );
+  }
+  if (settingsFile) args.push('--settings', settingsFile);
+  return args;
+}
+
 export const claudeHeadlessBackend = {
   name: 'claude-headless',
 
-  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly }) {
+  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly, model }) {
     return new Promise((resolve, reject) => {
       const prompt = fs.readFileSync(promptFile, 'utf8');
-      const args = [
-        '-p',
-        '--output-format',
-        'stream-json',
-        '--verbose', // --print 下用 stream-json 必须带 --verbose（claude CLI 校验）
-        '--max-turns',
-        String(maxTurns),
-      ];
-      if (readonly) {
-        // 只读会话（reviewer）：白名单收敛为只读工具，无 acceptEdits——headless 下
-        // 未列入白名单的工具调用被自动拒绝（fail-closed），编辑/命令不可能发生
-        args.push('--allowedTools', 'Read', 'Glob', 'Grep');
-      } else {
-        args.push(
-          '--permission-mode',
-          'acceptEdits',
-          '--allowedTools',
-          ...allowedTools(),
-          '--disallowedTools',
-          ...DISALLOWED_TOOLS,
-        );
-      }
-      if (settingsFile) args.push('--settings', settingsFile);
+      const args = buildClaudeArgs({ maxTurns, readonly, model, settingsFile });
 
       // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）
       const child = spawn('claude', args, {
@@ -110,7 +117,7 @@ export const claudeHeadlessBackend = {
         detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      onEvent({ type: 'worker_spawned', backend: 'claude-headless', pid: child.pid });
+      onEvent({ type: 'worker_spawned', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
 
       let tokensIn = 0;
       let tokensOut = 0;

@@ -69,8 +69,22 @@ export function loadWorkflowConfig(repoRoot) {
     releasePaths: strArr(raw.releasePaths),
     reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
     uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
+    worker: resolveEngine(raw.worker),
+    review: resolveEngine(raw.review),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
   };
+}
+
+/** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎」的声明位。
+ *  backend 必须非空字符串；model 可选（仅 claude 系 CLI 支持 --model，zcode 模型
+ *  跟随 ZCode 默认）。CLI 的 --worker-×× 与 --review-×× 单次覆盖。形状不对返回
+ *  null（缺省：执行沿用 resolveBackendName 链、审查走自动异构）。 */
+function resolveEngine(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const backend = typeof raw.backend === 'string' ? raw.backend.trim() : '';
+  if (!backend) return null;
+  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : null;
+  return { backend, model };
 }
 
 /** testCmd 三形态（字符串 / 数组 / 平台映射）→ 当前平台的命令数组或 null。与 feature-branch.mjs 同语义。 */

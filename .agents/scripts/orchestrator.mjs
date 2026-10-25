@@ -208,18 +208,29 @@ async function cmdRun(repoRoot, taskId, opts) {
   }
 
   // backend 持久化：retry/resume 续跑沿用上次会话的后端（显式 --backend 可覆盖）
+  const backendExplicit = opts.backend; // undefined 或用户显式 --backend（覆写前捕获，配置默认判定用）
   const resolved = resolveBackendName(opts, qdir, readEvents);
   opts.backend = resolved.name;
   if (resolved.inherited) log(`沿用上次会话后端：${opts.backend}`);
 
-  // 审查后端（异构审查）：执行与审查分体。显式 --review-backend > 上次会话 >
-  // 自动异构（真实后端互审，mock 永不异构）> 回落同源。未知名字在这里快速失败。
+  // 执行引擎：显式 --worker-backend > 显式 --backend（整体指定，mock 测试路径依赖此语义）
+  // > resume 沿用（resolved.inherited，任务连续性优先）> workflow.json worker.backend 默认 > 缺省。
+  if (opts.workerBackend) opts.backend = opts.workerBackend;
+  else if (!backendExplicit && !resolved.inherited && cfg.worker?.backend && cfg.worker.backend !== opts.backend) {
+    opts.backend = cfg.worker.backend;
+    log(`执行引擎（workflow.json worker 默认）：${opts.backend}`);
+  }
+  const workerModel = opts.workerModel ?? cfg.worker?.model ?? undefined; // 仅 claude 系 CLI 生效（--model）
+
+  // 审查后端（异构审查）：执行与审查分体。显式 --review-backend / workflow.json review >
+  // 上次会话 > 自动异构（真实后端互审，mock 永不异构）> 回落同源。未知名字在这里快速失败。
   const resolvedReview = resolveReviewBackendName({
     worker: opts.backend,
-    explicit: opts.reviewBackend,
+    explicit: opts.reviewBackend ?? cfg.review?.backend ?? undefined,
     prior: readEvents(qdir).find((e) => e.type === 'review_spawned')?.backend,
   });
   opts.reviewBackend = resolvedReview.name;
+  const reviewModel = opts.reviewModel ?? cfg.review?.model ?? undefined;
   const reviewBackend = await getBackend(opts.reviewBackend); // 校验存在性并复用（未知后端统一在此报错，不进 worker 循环）
   if (resolvedReview.mode === 'heterogeneous') {
     log(`审查后端（异构）：${opts.reviewBackend}（worker=${opts.backend}，引擎异源互审，避免同源自审盲区）`);
@@ -227,6 +238,9 @@ async function cmdRun(repoRoot, taskId, opts) {
     log(`审查后端（显式）：${opts.reviewBackend}`);
   } else if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
     log(`⚠ 异构审查候选 CLI 不可用——审查回落 worker 同源（${opts.backend}）。安装另一引擎（claude / zcode）后可恢复互审。`);
+  }
+  if (workerModel || reviewModel) {
+    log(`引擎模型：执行 ${workerModel ?? '（默认）'} / 审查 ${reviewModel ?? '（默认）'}（model 仅 claude 系生效，zcode 跟随其默认）`);
   }
 
   const resuming = found.state === 'running';
@@ -287,7 +301,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       {
         fs.writeFileSync(promptFile, promptText);
         if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
-        appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter });
+        appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(workerModel ? { model: workerModel } : {}) });
         result = await backend.spawn({
           promptFile,
           cwd: worktree,
@@ -298,6 +312,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
           },
           settingsFile,
+          model: workerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
         });
         livePid = null;
         workerOutput = result.output ?? '';
@@ -430,9 +445,10 @@ async function cmdRun(repoRoot, taskId, opts) {
           trackPid(e);
         },
         readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
+        model: reviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
       });
       livePid = null;
-      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend });
+      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(reviewModel ? { model: reviewModel } : {}) });
       const verdict = parseReviewVerdict(review.output ?? '');
       appendEvent(qdir, 'review_verdict', {
         blockers: verdict?.blockers ?? -1,
@@ -712,6 +728,17 @@ function cmdLogs(repoRoot, taskId) {
   console.log(formatTimeline(events));
 }
 
+/** 引擎选择透传：drain/nightly/scan--run spawn 的 run/drain 子进程继承本次引擎参数
+ *  （workflow.json 的默认不用传——子进程自己会读同一份配置）。 */
+function engineArgs(opts) {
+  const args = [];
+  if (opts.workerBackend) args.push('--worker-backend', opts.workerBackend);
+  if (opts.workerModel) args.push('--worker-model', opts.workerModel);
+  if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
+  if (opts.reviewModel) args.push('--review-model', opts.reviewModel);
+  return args;
+}
+
 /**
  * drain——队列自动调度（Phase 2，docs 10.3）：循环把 pending/ 跑到空。
  * 每个任务用**子进程**跑 `run --next`：cmdRun 的熔断走 process.exit，
@@ -754,7 +781,7 @@ function cmdDrain(repoRoot, opts) {
       lastTried = next.id;
       log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
       // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
         cwd: repoRoot,
         stdio: 'inherit',
         env: { ...process.env, ...childEnvForHeldLock() },
@@ -787,7 +814,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   const launch = (card) => {
     retryCount.set(card.id, (retryCount.get(card.id) ?? 0) + 1);
     log(`\n═══ drain [${launched + 1}/${workers} 并发] → ${card.id}（priority=${card.meta.priority}，active=${active.size + 1}）═══`);
-    const child = spawn('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', card.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
+    const child = spawn('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', card.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
       cwd: repoRoot,
       stdio: 'inherit',
       env: { ...process.env, ...childEnvForHeldLock() },
@@ -961,7 +988,7 @@ function cmdScan(repoRoot, opts) {
         const text = safeRead(cardPath(root, 'pending', id));
         if (!/priority:\s*high/.test(text)) continue;
         log(`\n═══ scan --run → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: { ...process.env, ...childEnvForHeldLock() },
@@ -1229,7 +1256,7 @@ async function cmdNightly(repoRoot, opts) {
         const text = safeRead(cardPath(root, 'pending', id));
         if (!/priority:\s*high/.test(text)) continue;
         log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: childEnv,
@@ -1237,7 +1264,7 @@ async function cmdNightly(repoRoot, opts) {
         if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
       }
       log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...(opts.reviewBackend ? ['--review-backend', opts.reviewBackend] : [])], {
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
         cwd: repoRoot,
         stdio: 'inherit',
         env: childEnv,
@@ -1387,7 +1414,10 @@ async function main() {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--backend') opts.backend = argv[++i];
+    else if (a === '--worker-backend') opts.workerBackend = argv[++i]; // 显式 worker 引擎（优先于 --backend 的整体指定）
+    else if (a === '--worker-model') opts.workerModel = argv[++i];
     else if (a === '--review-backend') opts.reviewBackend = argv[++i];
+    else if (a === '--review-model') opts.reviewModel = argv[++i];
     else if (a === '--reason' || a === '--note') opts[a.slice(2)] = argv[++i];
     else if (a === '--max') opts.max = parseInt(argv[++i], 10);
     else if (a === '--workers') opts.workers = parseInt(argv[++i], 10);
