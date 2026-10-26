@@ -89,8 +89,6 @@ export interface GatewayConfig {
   auto_fallback?: boolean
   /** 定时切换：时段内优先走指定服务/模型（每次请求实时求值，无定时器）；生效日由日类型判定（法定节假日数据源 holiday-cn） */
   schedule?: { enabled?: boolean; windows?: ScheduleWindow[] }
-  /** 托盘轻量模式（默认开）：托盘菜单展开快速操作区（切服务/模型、接入断开客户端），控制台仅在托盘按需打开；关 = 托盘回到精简菜单。开关端点 POST /_modeldock/tray-lite */
-  tray_lite?: boolean
 }
 
 export interface ScheduleWindow {

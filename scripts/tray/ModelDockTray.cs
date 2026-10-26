@@ -1,7 +1,7 @@
 // ModelDockTray — ModelDock Windows 托盘（右下角 NotifyIcon）
 //
 // 职责与 macOS 版对齐：常驻托盘图标；打开控制台（Chromium --app 独立窗口，与双击 app
-// 同源）；在浏览器打开；轻量模式快速操作区——切当前服务、切默认模型、接入/断开客户端、
+// 同源）；在浏览器打开；快速操作区——切当前服务、切默认模型、接入/断开客户端、
 // 客户端钉定路由，全部直调网关管理端点（admin 头 + x-modeldock-source: tray），控制台
 // 仅在托盘按需打开；开机自启开关（复用主程序 CLI gateway install/uninstall）；
 // 在资源管理器中打开日志；退出 = 停止网关 + 托盘退出。
@@ -149,7 +149,7 @@ namespace ModelDockTray
         }
     }
 
-    /// 托盘轻量模式状态（GET /_modeldock/tray-state，服务端 overview 的瘦身投影）
+    /// 托盘状态（GET /_modeldock/tray-state，服务端 overview 的瘦身投影）
     internal class TrayStateData
     {
         public class Svc
@@ -165,7 +165,7 @@ namespace ModelDockTray
             public bool Attached;
         }
 
-        public bool TrayLite = true;
+        public bool TrayOnly = true;
         public string CurrentId, CurrentLabel, CurrentModel;
         public string AutoPin;
         public bool ScheduleApplied;
@@ -178,7 +178,7 @@ namespace ModelDockTray
             if (root == null) return null;
             var st = new TrayStateData();
             object v;
-            if (root.TryGetValue("trayLite", out v)) st.TrayLite = JsonMap.Bool(root, "trayLite");
+            if (root.TryGetValue("trayOnly", out v)) st.TrayOnly = JsonMap.Bool(root, "trayOnly");
             if (root.TryGetValue("autoPin", out v)) st.AutoPin = v as string;
             if (root.TryGetValue("scheduleApplied", out v)) st.ScheduleApplied = JsonMap.Bool(root, "scheduleApplied");
             if (root.TryGetValue("current", out v))
@@ -378,9 +378,9 @@ namespace ModelDockTray
             return File.Exists(startup + "\\modeldock-gateway.vbs");
         }
 
-        // ---------- 托盘轻量模式（tray-state 轮询 + 管理端点直调，对齐 macOS 托盘） ----------
+        // ---------- 托盘状态（tray-state 轮询 + 管理端点直调，对齐 macOS 托盘） ----------
 
-        /// 轻量模式状态缓存：后台线程写、UI 线程读（引用赋值原子；菜单只在 UI 线程构建，
+        /// 托盘状态缓存：后台线程写、UI 线程读（引用赋值原子；菜单只在 UI 线程构建，
         /// 故无需跨线程 Marshal——菜单在下次 Opening / 轮询 tick 用上新数据）
         public static TrayStateData State;
 
@@ -405,7 +405,7 @@ namespace ModelDockTray
             return v == null ? "" : v.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
-        /// 直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、轻量开关统一出口。
+        /// 直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、仅托盘开关统一出口。
         /// 成功返回 null；失败返回可展示消息（4xx 的 JSON 报错服务端文案本身可操作，原样透出）。
         /// attach/detach 要快照 + 重写客户端文件，超时放宽到 30s
         public static string PostAdmin(string path, string json)
@@ -1048,8 +1048,8 @@ namespace ModelDockTray
             web.Enabled = _running;
             menu.Add(web);
 
-            // ---- 轻量模式快速操作区：切服务 / 切默认模型 / 接入断开客户端（开关见下方「轻量模式」） ----
-            if (st != null && st.TrayLite && st.CurrentId != null)
+            // ---- 快速操作区（常开，不再受任何开关门控）：切服务 / 切默认模型 / 接入断开客户端 ----
+            if (st != null && st.CurrentId != null)
             {
                 BuildQuickSection(menu, st);
                 menu.Add(new ToolStripSeparator());
@@ -1086,16 +1086,17 @@ namespace ModelDockTray
                 menu.Add(start);
             }
 
-            // 轻量模式开关：勾选 = 托盘承载全部日常操作（快速区展开）；关 = 回精简菜单。
-            // 状态存 config.gateway.tray_lite（服务端端点），网关未运行时无从读写故不显示
+            // 仅托盘模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
+            // 点击 = 广播关闭请求（已开页面自关，浏览器拦截时页面显示手动关闭提示）；已勾选时点击无操作。
+            // 网关未运行时无从读写状态故不显示
             if (st != null)
             {
-                var lite = new ToolStripMenuItem(I18n.L("轻量模式", "Lightweight Mode"));
-                lite.Checked = st.TrayLite;
+                var lite = new ToolStripMenuItem(I18n.L("仅托盘模式", "Tray-Only Mode"));
+                lite.Checked = st.TrayOnly;
                 lite.Click += delegate
                 {
-                    bool next = !st.TrayLite;
-                    TrayActions.QuickAction("/_modeldock/tray-lite", "{\"enabled\":" + (next ? "true" : "false") + "}");
+                    if (st.TrayOnly) return; // 已在仅托盘态：点击无操作
+                    TrayActions.QuickAction("/_modeldock/tray-only", "{}");
                 };
                 menu.Add(lite);
             }

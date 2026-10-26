@@ -1,7 +1,7 @@
 // ModelDockTray — ModelDock 菜单栏托盘（macOS）
 //
 // 职责：常驻菜单栏图标（template 实心圆角方块 + 镂空 M，与系统菜单栏风格一致）；打开控制台
-// （带令牌 URL，免登录）；轻量模式快速操作区——切当前服务、切默认模型、接入/断开客户端、
+// （带令牌 URL，免登录）；快速操作区——切当前服务、切默认模型、接入/断开客户端、
 // 客户端钉定路由，全部直调网关管理端点（admin 头 + x-modeldock-source: tray），控制台仅在
 // 托盘按需打开；「退出」= 停止网关服务 + 托盘退出，不留后台。
 // 单实例用 flock 保证（重复拉起即退出）。
@@ -54,7 +54,7 @@ func pidAlive(_ pid: Int) -> Bool {
     kill(pid_t(pid), 0) == 0 || errno == EPERM
 }
 
-// ---------- 托盘轻量模式状态（GET /_modeldock/tray-state，overview 瘦身投影） ----------
+// ---------- 托盘状态（GET /_modeldock/tray-state，overview 瘦身投影） ----------
 
 struct TrayModel: Decodable {
     let id: String
@@ -90,7 +90,7 @@ struct TrayCurrent: Decodable {
 }
 
 struct TrayState: Decodable {
-    let trayLite: Bool
+    let trayOnly: Bool
     let current: TrayCurrent?
     let autoPin: String?
     let scheduleApplied: Bool
@@ -260,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var running = false
     var port = 0
     var timer: Timer?
-    // 轻量模式状态（GET /_modeldock/tray-state）：快速菜单的数据源，5s 轮询 + 动作后即时刷新
+    // 托盘状态（GET /_modeldock/tray-state）：快速菜单与「仅托盘模式」勾选的数据源，5s 轮询 + 动作后即时刷新
     var trayState: TrayState?
     // 更新检查/进度状态：gen 计数让迟到的异步回调（超时/慢网）自动作废
     var checkingUpdate = false
@@ -328,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.resume()
     }
 
-    /// 托盘直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、轻量开关统一出口。
+    /// 托盘直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、仅托盘开关统一出口。
     /// 超时放宽到 30s：attach/detach 要快照 + 重写客户端文件
     private func adminPost(_ s: GatewayState, path: String, body: [String: Any],
                            done: @escaping (_ ok: Bool, _ message: String) -> Void) {
@@ -464,8 +464,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         web.isEnabled = alive
         menu.addItem(web)
 
-        // ---- 轻量模式快速操作区：切服务 / 切默认模型 / 接入断开客户端（开关见下方「轻量模式」） ----
-        if alive, let st = trayState, st.trayLite {
+        // ---- 快速操作区（常开，不再受任何开关门控）：切服务 / 切默认模型 / 接入断开客户端 ----
+        if alive, let st = trayState {
             if let svcMenu = buildServiceMenu(st) {
                 let svc = NSMenuItem(title: L("当前服务", "Current Service"), action: nil, keyEquivalent: "")
                 svc.submenu = svcMenu
@@ -515,13 +515,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(start)
         }
 
-        // 轻量模式开关：勾选 = 托盘承载全部日常操作（快速区展开）；关 = 回精简菜单。
-        // 状态存 config.gateway.tray_lite（服务端端点），网关未运行时无从读写故不显示
+        // 仅托盘模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
+        // 点击 = 广播关闭请求（已开页面自关，浏览器拦截时页面显示手动关闭提示）；已勾选时点击无操作。
+        // 网关未运行时无从读写状态故不显示
         if alive, let st = trayState {
-            let lite = NSMenuItem(title: L("轻量模式", "Lightweight Mode"), action: #selector(toggleLiteClicked), keyEquivalent: "")
+            let lite = NSMenuItem(title: L("仅托盘模式", "Tray-Only Mode"), action: #selector(trayOnlyClicked), keyEquivalent: "")
             lite.target = self
-            lite.state = st.trayLite ? .on : .off
-            lite.toolTip = L("勾选后托盘菜单提供快速切换（服务/模型/客户端），无需打开控制台", "When checked, the tray menu offers quick switching (services / models / clients) without opening the console")
+            lite.state = st.trayOnly ? .on : .off
+            lite.toolTip = L("收起全部 ModelDock 窗口只留托盘；重新打开控制台会自动退出该状态", "Collapse every ModelDock window and keep only the tray; opening the console again exits this state automatically")
             menu.addItem(lite)
         }
         menu.addItem(.separator())
@@ -538,7 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if alive, let s = state { fetchTrayState(s) }
     }
 
-    // ---------- 轻量模式快速菜单 ----------
+    // ---------- 快速操作菜单 ----------
 
     /// 「当前服务」子菜单：点击即整包切换（active_profile + 钉定 + 烤模型同步，与控制台/手机页同链路）。
     /// 勾选口径：钉定时勾被钉服务，未钉定时勾当前生效服务；首项「自动选路」清钉定（= 控制台选回「自动」）
@@ -676,9 +677,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         performAdminAction(path: "/_modeldock/harness/route", body: body)
     }
 
-    @objc func toggleLiteClicked() {
-        guard let st = trayState else { return }
-        performAdminAction(path: "/_modeldock/tray-lite", body: ["enabled": !st.trayLite])
+    @objc func trayOnlyClicked() {
+        guard let st = trayState, !st.trayOnly else { return } // 已在仅托盘态：点击无操作
+        performAdminAction(path: "/_modeldock/tray-only", body: ["enabled": true])
     }
 
     /// 打开控制台：与双击 app（cli.ts openAppWindow）同源——Chromium 内核浏览器 --app 独立窗口，
