@@ -24,7 +24,8 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, isMeltdown, logAudit, logRequest, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { dispatcherFor } from './proxy.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { markUiLeaving, markUiPing, markUiSeen, pendingTrayOnlyRequest, requestTrayOnly, trayOnlyActive } from './presence.js'
@@ -481,6 +482,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
 }
 
 function sendError(res: http.ServerResponse, status: number, message: string, hint?: string): void {
+  if (status === 413) res.setHeader('connection', 'close') // 请求体未读完即响应，连接不可复用
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(hint ? { error: { message }, modeldock: { hint } } : { error: { message } }))
 }
@@ -515,19 +517,24 @@ async function readBody(req: http.IncomingMessage, max: number): Promise<Buffer>
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
-    req.on('data', (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       size += chunk.length
       if (size > max) {
+        req.removeListener('data', onData)
+        req.resume()
         reject(new UpstreamError(
           413,
           t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max }),
           t('模型改写需完整缓冲请求体；确需更大包体，在 config.toml 的 [gateway] 下设置 max_body_mb 后重启网关', 'Model rewriting buffers the full body; to allow larger bodies set max_body_mb under [gateway] in config.toml and restart the gateway')
         ))
-        req.destroy()
+        // 不在 data 回调里 destroy：先毁 socket 客户端只收到 ECONNRESET（SDK 还会自动重试，
+        // 形成超大包重传循环），413 与修复提示永远到不了。摘掉监听 + resume 排空剩余数据，
+        // 让 413 响应正常发出（sendError 对 413 补 Connection: close）。
         return
       }
       chunks.push(chunk)
-    })
+    }
+    req.on('data', onData)
     req.on('end', () => resolve(Buffer.concat(chunks)))
     req.on('error', reject)
   })

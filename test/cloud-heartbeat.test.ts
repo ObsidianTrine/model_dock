@@ -21,6 +21,7 @@ const h = fakeHome()
 
 const applied: string[] = []
 let hbReply: Record<string, unknown> = {}
+let docReqs = 0 // 心跳之后到达的文档同步请求数（验证 desired 应用失败不阻断后续推拉）
 
 const fake = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url?.includes('/v1/heartbeat')) {
@@ -31,6 +32,7 @@ const fake = http.createServer((req, res) => {
     })
     return
   }
+  docReqs++
   // 心跳之后的文档同步一律 500：safeSyncTick 记账后返回 skipped，不影响心跳断言
   res.writeHead(500)
   res.end('nope')
@@ -125,5 +127,16 @@ describe('cloudHeartbeat desired 状态机（P2-11 回归）', () => {
     hbReply = { desiredProfile: 'ark', desiredTs: new Date().toISOString() }
     await tick()
     expect(applied).toEqual([])
+  })
+
+  it('applySwitch 抛错 → 只记错，本 tick 文档同步照常走（P1 回归）', async () => {
+    await setSwitchAnchor(null)
+    hbReply = { desiredProfile: 'other-svc', desiredTs: new Date().toISOString() }
+    docReqs = 0
+    // desired 指向本机没有的服务：switchToService 会 throw。修复前异常冒泡中止整个 tick，
+    // 文档推拉全部停摆、每 60s 永续重试不收敛；修复后只记错、继续推拉。
+    const outcome = await safeSyncTick({ applySwitch: async () => { throw new Error('unknown service: other-svc') } })
+    expect(docReqs).toBeGreaterThan(0)
+    expect(outcome).toBe('skipped') // 文档端点被假件 500 拒绝，记账 skipped
   })
 })

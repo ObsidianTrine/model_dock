@@ -44,6 +44,19 @@ describe('启动链路惰性加载', () => {
     const engine = fs.readFileSync(path.join(REPO_ROOT, 'src', 'adapters', 'engine.ts'), 'utf8')
     expect(engine).toMatch(/await import\('@inquirer\/prompts'\)/)
   })
+
+  it('gateway/state.ts 顶层无 ./proxy.js 静态 import（undici 不得进 CLI 启动链）', () => {
+    // state.ts 是 gatewayLive/运行态的 CLI 侧公共入口（cli/shared、tray、autostart、ops 均静态
+    // 引它）：此前它对 ./proxy.js 的静态 import 把 undici（util/net.ts 顶层 new Agent）拖进每条
+    // CLI 命令的启动链。dispatcherFor 已下沉 proxy.ts——state.ts 对 undici 只允许 import type。
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'state.ts'), 'utf8')
+    const top = src.match(/^import[^\n]*$/gm) ?? []
+    expect(top.some((l) => l.includes("from './proxy.js'")), 'state.ts 顶层出现 ./proxy.js 静态 import').toBe(false)
+    expect(
+      top.some((l) => l.includes("'undici'") && !l.startsWith('import type')),
+      'state.ts 对 undici 只允许 import type（运行时 import 会拉进 undici）'
+    ).toBe(false)
+  })
 })
 
 describe('upstreamReachable（真实请求，不 mock undici）', () => {

@@ -238,6 +238,28 @@ async function setup(opts?: { upPath?: string; protocol?: 'anthropic' | 'openai'
   }
 }
 
+describe('readBody 413 wire 回归（超限响应必须送达客户端）', () => {
+  it('超限 POST 收到 413 JSON + connection: close（此前先毁 socket，客户端只见 ECONNRESET 并自动重试）', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.gateway = { ...t.rt.config.gateway, max_body_mb: 1 } // 上限压到 1MB，测试体量可控
+      const big = 'x'.repeat(1536 * 1024)
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'preset-model', messages: [{ role: 'user', content: big }] }),
+      })
+      expect(res.status).toBe(413)
+      expect(res.headers.get('connection')).toBe('close')
+      const j = (await res.json()) as { error?: { message?: string }; modeldock?: { hint?: string } }
+      expect(j.error?.message ?? '').toContain('字节上限')
+      expect(j.modeldock?.hint ?? '').toContain('max_body_mb')
+    } finally {
+      t.closeAll()
+    }
+  })
+})
+
 describe('admin token 持久化', () => {
   it('consoleBanner：TTY 输出带 token 的登录地址；重定向时降级不落 token', () => {
     const token = 'mdkadm_' + 'b'.repeat(40)

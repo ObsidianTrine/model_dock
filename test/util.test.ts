@@ -72,6 +72,18 @@ describe('格式工具', () => {
     expect(detectJsonIndent('{"a":1}')).toBe('  ')
   })
 
+  it('detectJsonIndent 顶层数组取元素缩进，重写不再翻倍（P1 回归）', () => {
+    // 旧实现对数组根命中的是元素内键的缩进（基础×2），重写后再探测再×2，无界翻倍
+    expect(detectJsonIndent('[\n  {\n    "id": 1\n  }\n]')).toBe('  ')
+    expect(detectJsonIndent('[\n    {"a": 1},\n    {"b": 2}\n]')).toBe('    ')
+    // 稳态：按探测值重写后再探测应得到同一缩进
+    const src = '[\n  {\n    "id": 1\n  }\n]'
+    const indent = detectJsonIndent(src)
+    const rewritten = JSON.stringify(JSON.parse(src), null, indent) + '\n'
+    expect(rewritten).toBe(src + '\n')
+    expect(detectJsonIndent(rewritten)).toBe(indent)
+  })
+
   it('reorderTomlRoot 把标量提到表前，序列化合法', () => {
     const root = { model_providers: { md: { base_url: 'http://x' } }, model_provider: 'md', other: 1 }
     const out = reorderTomlRoot(root as Record<string, unknown>)

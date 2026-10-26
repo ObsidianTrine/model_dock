@@ -150,7 +150,13 @@ async function cloudHeartbeat(state: SyncState, opts?: SyncHooks): Promise<void>
   if (!Number.isFinite(desiredMs) || desiredMs <= lastSwitchMs) return
   if (!opts?.applySwitch) return // 无应用回调（如 CLI 手动 tick）则只上报不切
   opts?.log?.(t('[modeldock] 应用云端远程切换：当前服务 → {svc}', '[modeldock] Applying remote switch from the cloud: current service → {svc}', { svc: desired }))
-  await opts.applySwitch(desired)
+  // 失败只记错不外抛：desired 指向本机没有的服务（「应用到全部」下发到部分机器）时
+  // switchToService 会 throw，若让它冒泡会阻断本 tick 的文档推拉，同步每 60s 永续重试不收敛
+  try {
+    await opts.applySwitch(desired)
+  } catch (e) {
+    opts?.log?.(t('[modeldock] 应用云端切换失败（不阻断文档同步）：{err}', '[modeldock] Failed to apply cloud switch (doc sync continues): {err}', { err: (e as Error).message }))
+  }
 }
 
 /** 带兜底的 tick：任何错误记入 sync.json.lastError（状态行可见），绝不向上抛——同步永远不影响网关本职 */
