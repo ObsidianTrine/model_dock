@@ -39,7 +39,7 @@ import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
-import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
+import { gatewayLogsDir, reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
@@ -994,6 +994,12 @@ function printDriftReport(repoRoot) {
 function cmdReconcile(repoRoot, taskId) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
+  // 对账未启用（workflow.json gatewayLogDir 未配置且无 env 重定向）→ 显式说明，不落到
+  // 「尚无已合并任务可对账」的误导输出（任务明明有，是对账没开）
+  if (!gatewayLogsDir(loadWorkflowConfig(repoRoot))) {
+    log('未启用网关对账：.agents/workflow.json 未配置 gatewayLogDir（网关请求日志目录，支持 ~/ 展开）。配置后重新运行本命令。');
+    return;
+  }
   const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
   const show = (r) => {
     if (r.skipped) return log(`  ${r.reason}`);

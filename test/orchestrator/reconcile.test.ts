@@ -157,6 +157,10 @@ describe('orchestrator reconcile > 启用条件（gatewayLogDir 配置化，可�
         const r = reconcileTask(repo.root, 'r-off', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
         expect(r.skipped).toBe(true)
         expect(r.reason).toContain('gatewayLogDir')
+        // CLI 全量路径：未启用 → 显式说明（而非误导性的「尚无已合并任务可对账」）
+        const cli = runOrch(repo.root, 'reconcile')
+        expect(cli.stdout).toContain('未启用网关对账')
+        expect(cli.stdout).not.toContain('尚无已合并任务可对账')
       })
     } finally {
       repo.cleanup()

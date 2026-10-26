@@ -139,4 +139,17 @@ describe('policy-dispatch > 直通与容错（fail-open 语义）', () => {
       repo.cleanup()
     }
   })
+
+  it('项目 workflow.json 损坏（evaluateCommand 抛错）→ fail-open 放行 + stderr 指向检查配置', () => {
+    const repo = mkRepo()
+    try {
+      fs.writeFileSync(path.join(repo.root, '.agents', 'workflow.json'), '{ not json', 'utf8')
+      const r = runDispatch(bashEvent(repo.root, 'git push origin main'))
+      expect(r.status).toBe(0)
+      expect(r.stderr).toContain('裁决异常')
+      expect(r.stderr).toContain('workflow.json')
+    } finally {
+      repo.cleanup()
+    }
+  })
 })
