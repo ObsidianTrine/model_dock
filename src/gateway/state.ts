@@ -5,7 +5,6 @@ import type { Config, ProfileConfig, ProviderConfig, ScheduleWindow } from '../c
 import { logsDir, gatewayStatePath } from '../util/paths.js'
 import { appendLine, atomicWrite, closeAppendStream } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
-import { buildDispatcher } from './proxy.js'
 import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from './daytype.js'
 
 export interface LogEntry {
@@ -150,15 +149,6 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   for (const id of rt.health.keys()) {
     if (!rt.config.providers[id]) rt.health.delete(id)
   }
-}
-
-/** per-provider 代理：direct 直连；env 读环境变量；字符串视为代理 URL（兼容 clash） */
-export function dispatcherFor(rt: GatewayRuntime, provider: ProviderConfig): Dispatcher | undefined {
-  const mode = provider.proxy ?? 'direct'
-  if (rt.dispatchers.has(mode)) return rt.dispatchers.get(mode)
-  const created = buildDispatcher(provider.proxy)
-  rt.dispatchers.set(mode, created)
-  return created
 }
 
 export function resolveTarget(rt: GatewayRuntime, token: string, profileOverride?: string): ResolveResult {

@@ -7,6 +7,13 @@ export { tomlParse, tomlStringify }
 export { parseDocument }
 
 export function detectJsonIndent(text: string): string {
+  // 顶层数组须先于对象形态判定：下面两条正则锚定「{ 或 : , 后的缩进」，对数组根命中的是
+  // 元素内键的缩进 = 基础缩进×2，重写后再探测再×2，缩进无界翻倍（workbuddy models.json
+  // 就是顶层数组）。数组根取开括号后首个缩进 = 元素缩进 = JSON.stringify 的 indent 值。
+  if (text.trimStart().startsWith('[')) {
+    const m = text.match(/\[\s*\n([ \t]+)/)
+    return m ? m[1] : '  '
+  }
   const m = text.match(/\{\s*\n([ \t]+)"/) ?? text.match(/[:,]\s*\n([ \t]+)"/)
   return m ? m[1] : '  '
 }

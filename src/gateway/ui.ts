@@ -1537,6 +1537,17 @@ header{flex-wrap:wrap;row-gap:4px}
     try { return localStorage.getItem('mdk_upd_dismissed') } catch (e) { return null }
   }
 
+  // 版本号比较（x.y.z 逐段数值）：字典序 '1.9.0' >= '1.10.0' 为真，会把跨位版本对误判成
+  // 「已到位」——更新轮询提前 reload 丢进度 UI、启动核验弹假完成。三处核验共用本函数。
+  function cmpSemver(a, b) {
+    var pa = String(a || '').split('.'), pb = String(b || '').split('.')
+    for (var i = 0; i < 3; i++) {
+      var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0
+      if (x !== y) return x < y ? -1 : 1
+    }
+    return 0
+  }
+
   function renderUpdBadge() {
     var el = document.getElementById('updBadge')
     if (!el) return
@@ -1550,9 +1561,9 @@ header{flex-wrap:wrap;row-gap:4px}
   function refreshUpdStatus(cb) {
     api('/admin/update/status').then(function (s) {
       upd = s
-      // 已更新到被跳过的版本：清掉记忆（字符串比较足够——dismissed 一定晚于写入时的 current）
+      // 已更新到被跳过的版本：清掉记忆（dismissed 一定晚于写入时的 current）
       var dismissed = updDismissedVersion()
-      if (dismissed && s.current >= dismissed) {
+      if (dismissed && cmpSemver(s.current, dismissed) >= 0) {
         try { localStorage.removeItem('mdk_upd_dismissed') } catch (e) { /* 隐私模式等 */ }
         dismissed = null
       }
@@ -1679,7 +1690,7 @@ header{flex-wrap:wrap;row-gap:4px}
             return
           }
           var wanted = String(sessionStorage.getItem('mdk_upd_to') || '')
-          if (down || (wanted && s.current >= wanted)) { location.reload(); return }
+          if (down || (wanted && cmpSemver(s.current, wanted) >= 0)) { location.reload(); return }
           // 超时只按「毫无动静」计（300 轮 ≈ 10 分钟）：进度有推进（阶段/字节变化）就重新计时，
           // 大安装包走慢链路下载超 5 分钟是常态，固定总时长会把健康下载误报成超时
           var key = s.progress ? s.progress.stage + ':' + (s.progress.received != null ? s.progress.received : '') : ''
@@ -4727,7 +4738,7 @@ header{flex-wrap:wrap;row-gap:4px}
     if (toV) {
       sessionStorage.removeItem('mdk_upd_to')
       api('/admin/update/status').then(function (s) {
-        if (s.current >= toV) toast(t('已更新到 v' + s.current, 'Updated to v' + s.current))
+        if (cmpSemver(s.current, toV) >= 0) toast(t('已更新到 v' + s.current, 'Updated to v' + s.current))
       }).catch(function () {})
     }
   } catch (e) { /* 隐私模式等 */ }

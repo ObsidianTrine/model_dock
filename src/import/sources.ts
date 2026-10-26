@@ -1071,6 +1071,7 @@ export async function applyImport(
   // ① 先算好每个候选的 id 与是否要写 key（不立即写盘）
   //    检测层已按「归一化地址」去重（保留使用中）；这里再按地址+key 精确判断与已有服务的重复并跳过
   const addedByPair = new Map<string, string>()
+  const usedIds = new Set<string>()
   const meta: { id: string; cand: ImportCandidate }[] = []
   const keyBatch: Record<string, string> = {}
   for (const cand of cands) {
@@ -1093,8 +1094,13 @@ export async function applyImport(
       continue
     }
     let id = cand.suggest_id || slugify(cand.name || cand.base_url)
+    // 撞车兜底须同时查两处：cfg.providers（已有服务）+ 本批已用 id——批内条目到第③步才落盘，
+    // 只查 cfg 的话，base_url 不同但 suggest_id 相同的两个候选（one-api 同名渠道、cc-switch
+    // 同名行很常见，CLI checkbox 还按 suggest_id 连选）会拿到同一 id，写入时后者静默覆盖前者。
+    const base = id
     let n = 2
-    while (cfg.providers[id]) id = `${cand.suggest_id}-${n++}`
+    while (cfg.providers[id] || usedIds.has(id)) id = `${base}-${n++}`
+    usedIds.add(id)
     addedByPair.set(pair, id)
     meta.push({ id, cand })
     if (cand.key) keyBatch[id] = cand.key

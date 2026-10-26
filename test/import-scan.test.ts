@@ -631,4 +631,28 @@ describe('applyImport（候选 → provider/profile/secret）', () => {
       h.restore()
     }
   })
+
+  it('批内 suggest_id 撞车（不同 base_url 同名）→ 各自后缀，不静默覆盖（P1 回归）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = await loadConfig()
+      cfg.security = { store: 'file' }
+      const report = await applyImport(
+        cfg,
+        [
+          cand({ suggest_id: 'chan', name: 'chan', base_url: 'https://a.example.com', key: 'sk-a' }),
+          // 同名不同址（one-api 同名渠道常见）：撞车兜底须查本批已用 id，否则后者覆盖前者
+          cand({ suggest_id: 'chan', name: 'chan', base_url: 'https://b.example.com', key: 'sk-b' }),
+        ],
+        { withProfiles: false }
+      )
+      expect(report.providers).toEqual(['chan', 'chan-2'])
+      expect(cfg.providers['chan']?.base_url).toBe('https://a.example.com')
+      expect(cfg.providers['chan-2']?.base_url).toBe('https://b.example.com')
+      expect(await getSecret(cfg.providers['chan']!.key_ref!)).toBe('sk-a')
+      expect(await getSecret(cfg.providers['chan-2']!.key_ref!)).toBe('sk-b')
+    } finally {
+      h.restore()
+    }
+  })
 })

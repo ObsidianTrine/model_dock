@@ -4,7 +4,8 @@ import { getSecret } from '../config/secrets.js'
 import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
-import { dispatcherFor, recordOutcome, pickTarget, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import { recordOutcome, pickTarget, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import { dispatcherFor } from './proxy.js'
 
 /** 需要模型名改写的业务端点（其余路径纯透传） */
 const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions|completions|responses|embeddings)$/

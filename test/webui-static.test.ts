@@ -154,3 +154,12 @@ describe('L0-5 前端端点 ↔ 服务端路由不漂移', () => {
     expect(true).toBe(true)
   })
 })
+
+// 更新核验的版本比较必须逐段数值（字典序 '1.9.0' >= '1.10.0' 为真：跨位版本对会提前 reload
+// 丢下载进度、重载后弹「已更新」假完成——恰是核验要防的）。三处核验共用 cmpSemver。
+describe('L0-6 更新流程版本核验', () => {
+  it('ui.ts 定义 cmpSemver 且无 s.current 字符串 >= 残留', () => {
+    expect(SRC_UI).toContain('function cmpSemver(')
+    expect(SRC_UI).not.toMatch(/s\.current\s*>=/)
+  })
+})
