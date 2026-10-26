@@ -250,10 +250,12 @@ async function main() {
   console.log('2. 修剪 playbook：.agents/workflows/ 里 add-adapter / add-preset / incident-response / ui-kit 等是');
   console.log('   模板项目的领域手册，删除或按本项目重写；feature-branch / code-review / docs-sync /');
   console.log('   worktree-rescue / release / hotfix / orchestrator 是通用手册，可留用。');
-  console.log('3. headless worker 的 Bash 红线 hook 在本项目级 hook 之外还需注册到用户级 ZCode 配置');
-  console.log('   （headless 会话下项目级 hook 被信任门禁用）。在 ~/.zcode/cli/config.json 的');
-  console.log('   hooks.events.PreToolUse 数组追加：');
-  console.log('     { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node <本项目绝对路径>/.agents/hooks/policy-zcode.mjs" }] }');
+  console.log('3. headless worker 的 Bash 红线 hook 在本项目级 hook 之外还需用户级注册');
+  console.log('   （headless 会话下项目级 hook 被信任门禁用）。推荐机器级 dispatcher——一次注册全项目生效：');
+  console.log('     cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/');
+  console.log('     然后在 ~/.zcode/cli/config.json 的 hooks.events.PreToolUse 数组追加：');
+  console.log('       { "matcher": "Bash", "hooks": [{ "type": "command", "command": "node <家目录>/.agents/hooks/policy-dispatch.mjs" }] }');
+  console.log('   或逐项目注册：{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "node <本项目绝对路径>/.agents/hooks/policy-zcode.mjs" }] }');
   console.log('   说明见 .agents/workflows/orchestrator.md。');
   console.log('4. nightly 定时巡检（可选）：node .agents/scripts/orchestrator.mjs schedule install --dry-run 先看计划。');
 }
