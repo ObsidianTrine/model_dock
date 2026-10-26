@@ -47,7 +47,15 @@ try {
   process.exit(0);
 }
 
-const verdict = policy.evaluateCommand(cmd);
+let verdict;
+try {
+  verdict = policy.evaluateCommand(cmd);
+} catch (e) {
+  // 同 fail-open：项目 workflow.json 损坏等会让 evaluateCommand 抛错（「配置损坏阻断启动」
+  // 的语义止于 orchestrator；hook 崩溃退出只会让红线引擎从此静默失效，比放行更糟）
+  console.error(`[policy-dispatch] 裁决异常（已放行，检查 ${cwd}/.agents/workflow.json）：${e?.message ?? e}`);
+  process.exit(0);
+}
 if (verdict.allowed) {
   policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'allowed', target: cmd.slice(0, 200) });
   process.exit(0);

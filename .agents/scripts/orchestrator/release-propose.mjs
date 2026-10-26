@@ -168,10 +168,16 @@ export function proposeRelease(repoRoot, opts = {}) {
   const tag = `v${suggested}`;
   const localTaken = Boolean(git(repoRoot, ['tag', '-l', tag]));
   let remoteTaken = null;
-  try {
-    remoteTaken = git(repoRoot, ['ls-remote', '--tags', 'origin', tag], { timeout: 30000 }) !== '';
-  } catch {
-    remoteTaken = null; // 离线：查不到不代表没占用，提案里明说
+  if (process.env.ORCH_SKIP_REMOTE_CHECK === '1') {
+    // 测试/离线批处理显式跳过：ls-remote 会真发网络请求，单测不应依赖网络时延
+    // （实测踩中：fixture 带 GitHub remote + 断网环境，每次提案挂满 30s 超时）。
+    // 提案里远端占用显示「查询失败」，真正阻断在 release-check。
+  } else {
+    try {
+      remoteTaken = git(repoRoot, ['ls-remote', '--tags', 'origin', tag], { timeout: 30000 }) !== '';
+    } catch {
+      remoteTaken = null; // 离线：查不到不代表没占用，提案里明说
+    }
   }
 
   // 提案文件（运行态产物，.gitignore 已排除 release-proposals/）

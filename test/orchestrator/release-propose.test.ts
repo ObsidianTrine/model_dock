@@ -72,6 +72,8 @@ describe('orchestrator release-propose > githubRepoBase（远端解析，链接�
 })
 
 describe('orchestrator release-propose > CLI 端到端', () => {
+  // ls-remote 占用检查会真发网络请求——单测统一跳过（fixture 的 remote 只为解析链接表行）
+  const SKIP_REMOTE = { ORCH_SKIP_REMOTE_CHECK: '1' }
   function seedRepo(): { root: string; cleanup: () => void } {
     const repo = mkRepo()
     const g = (args: string) => git(repo.root, args)
@@ -93,7 +95,7 @@ describe('orchestrator release-propose > CLI 端到端', () => {
       git(repo.root, 'commit --allow-empty -m "feat(ui): 新功能A"')
       git(repo.root, 'commit --allow-empty -m "fix: 修复B"')
       git(repo.root, 'commit --allow-empty -m "随手提交无前缀"')
-      const out = runOrch(repo.root, 'release-propose')
+      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.1.0')
       expect(out.stdout).toContain('上个已发布 tag: v1.0.0')
       expect(out.stdout).toContain('feat 1 / fix 1 / breaking 0')
@@ -120,7 +122,7 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     try {
       git(repo.root, 'remote remove origin')
       git(repo.root, 'commit --allow-empty -m "feat: 新功能"')
-      const out = runOrch(repo.root, 'release-propose')
+      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.1.0')
       const dir = path.join(repo.root, '.agents', 'orchestrator', 'release-proposals')
       const files = fs.readdirSync(dir).filter((f) => f.startsWith('v1.1.0-'))
@@ -136,11 +138,11 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'commit --allow-empty -m "fix: 只修不发新功能"')
-      expect(runOrch(repo.root, 'release-propose').stdout).toContain('发版提案 v1.0.1')
+      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('发版提案 v1.0.1')
       // 0.x breaking 惯例由 bumpLevel 纯函数覆盖；CLI 自动档位始终基于最新 tag（v1.0.0）
       git(repo.root, 'commit --allow-empty -m "feat!: 破坏性改动"')
-      expect(runOrch(repo.root, 'release-propose').stdout).toContain('发版提案 v2.0.0')
-      expect(runOrch(repo.root, 'release-propose 2.1.0').stdout).toContain('发版提案 v2.1.0')
+      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('发版提案 v2.0.0')
+      expect(runOrch(repo.root, 'release-propose 2.1.0', SKIP_REMOTE).stdout).toContain('发版提案 v2.1.0')
     } finally {
       repo.cleanup()
     }
@@ -150,9 +152,9 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'commit --allow-empty -m "feat: x"')
-      expect(tryOrch(repo.root, 'release-propose 1.x').status).toBe(1)
-      expect(tryOrch(repo.root, 'release-propose 1.0.0').stderr).toContain('不大于最近已发布')
-      expect(tryOrch(repo.root, 'release-propose 0.9.0').stderr).toContain('不大于最近已发布')
+      expect(tryOrch(repo.root, 'release-propose 1.x', SKIP_REMOTE).status).toBe(1)
+      expect(tryOrch(repo.root, 'release-propose 1.0.0', SKIP_REMOTE).stderr).toContain('不大于最近已发布')
+      expect(tryOrch(repo.root, 'release-propose 0.9.0', SKIP_REMOTE).stderr).toContain('不大于最近已发布')
     } finally {
       repo.cleanup()
     }
