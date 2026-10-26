@@ -146,8 +146,13 @@ describe('GET /_modeldock/tray-state（托盘状态数据源 + 仅托盘派生�
       // 初始：无任何 UI 打开 → 派生仅托盘态为真
       expect((await getState()).trayOnly).toBe(true)
 
-      // 打开控制台页面（托盘开控制台 / 双击 app / 浏览器，同走 GET /_modeldock/ui）→ 自动退出仅托盘
+      // 无凭据的 /ui 请求（本机程序探测/预取）不算「UI 打开」：不退出仅托盘（2026-10 复审收窄）
       expect((await fetch(base + '/ui')).status).toBe(200)
+      expect((await getState()).trayOnly).toBe(true)
+
+      // 打开控制台页面（托盘开控制台 / 双击 app / 浏览器，?token= 登录后带 cookie/头重取，
+      // 同走 GET /_modeldock/ui）→ 自动退出仅托盘
+      expect((await fetch(base + '/ui', { headers: ADMIN })).status).toBe(200)
       expect((await getState()).trayOnly).toBe(false)
 
       // 托盘点「仅托盘模式」→ 广播关闭请求；页面还开着（在场未过期）→ trayOnly 仍 false，
@@ -168,7 +173,7 @@ describe('GET /_modeldock/tray-state（托盘状态数据源 + 仅托盘派生�
       expect((await getOverview()).gateway.trayOnlyRequest).toBeGreaterThan(0)
 
       // 新页面加载：自动退出仅托盘 + 清广播 + overview 缓存同步失效（首拉不得拿到旧广播，防误自关）
-      expect((await fetch(base + '/ui')).status).toBe(200)
+      expect((await fetch(base + '/ui', { headers: ADMIN })).status).toBe(200)
       expect((await getState()).trayOnly).toBe(false)
       expect((await getOverview()).gateway.trayOnlyRequest).toBe(0)
 

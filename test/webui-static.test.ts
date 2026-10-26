@@ -163,3 +163,18 @@ describe('L0-6 更新流程版本核验', () => {
     expect(SRC_UI).not.toMatch(/s\.current\s*>=/)
   })
 })
+
+// 弹层壳键盘路径（ui-kit §9 焦点管理内置 + Esc 不穿透）：createModal open 移焦/close 还原、
+// 全局 keydown 只处理最上层、closeOnEsc:false 的壳盖着时 Esc 就地吞掉（不穿透关被遮弹层）；
+// 手机页 toast 语义播报（桌面已有 role=status）
+describe('L0-7 弹层键盘路径与 toast 语义', () => {
+  it('createModal 含焦点管理与 Tab 圈闭，Esc 分派只看最上层', () => {
+    expect(SRC_UI).toContain('function firstFocusable(')
+    expect(SRC_UI).toContain('_lastFocus')
+    expect(SRC_UI).toContain("if (ev.key === 'Escape') {\n      if (top._closeOnEsc !== false) top.close()\n      return\n    }")
+  })
+  it('手机页 toast 带 role=status aria-live，确认弹层是 dialog', () => {
+    expect(LAN_HTML).toContain('id="toast" role="status" aria-live="polite"')
+    expect(LAN_HTML).toContain('id="confirm" hidden role="dialog"')
+  })
+})
