@@ -335,7 +335,8 @@ async function buildExecutables() {
 // Step 5.5: 打分平台安装包
 /**
  * 每个 target 打一个用户安装包：Windows → .zip，Linux / macOS → .tar.gz。
- * 包内只有一个入口程序（unix 名为 modeldock，Windows 为 modeldock.exe），解压即用；
+ * 包内是入口程序（unix 名为 modeldock，Windows 为 modeldock.exe）+ 托盘（编译成功才放；
+ * 网关与托盘必须同包同版本换新，否则 bare 自更新只换主程序、托盘停旧版）；解压即用。
  * 图形化安装各走各的：macOS DMG（Step 5.7）、Windows setup 向导（Step 5.8）。
  */
 async function packageDistributions() {
@@ -351,20 +352,86 @@ async function packageDistributions() {
     await fsp.mkdir(staging, { recursive: true })
     await fsp.copyFile(path.join(RELEASE, binName), path.join(staging, entryName))
     await fsp.chmod(path.join(staging, entryName), 0o755)
+    // 托盘一并入包（与入口同版本）：编译失败优雅降级为只有入口
+    const packed = [entryName]
+    const trayName = spec.ext === '.exe' ? 'ModelDockTray.exe' : spec.os === 'darwin' ? 'ModelDockTray' : null
+    if (trayName) {
+      const traySrc = spec.ext === '.exe' ? await ensureWinTray() : await ensureMacTray(target)
+      if (traySrc && fs.existsSync(traySrc)) {
+        await fsp.copyFile(traySrc, path.join(staging, trayName))
+        await fsp.chmod(path.join(staging, trayName), 0o755)
+        packed.push(trayName)
+      }
+    }
     const archiveName = `modeldock-${BUILD_VERSION}-${target}${spec.ext === '.exe' ? '.zip' : '.tar.gz'}`
     const archivePath = path.join(RELEASE, archiveName)
+    const fileArgs = packed.map((n) => `"${n}"`).join(' ')
     if (spec.ext === '.exe') {
       if (process.platform === 'win32') {
         // if (!$?) { exit 1 }：PowerShell 对 cmdlet 的 Write-Error 是非终止错误、exit 0，必须显式转成失败码，否则打包失败静默过关
-        await withRetry(3, 2000, () => run(`powershell -Command "Compress-Archive -Path '${path.join(staging, entryName)}' -DestinationPath '${archivePath}' -Force; if (!$?) { exit 1 }"`))
+        // Compress-Archive 收多文件：包内网关+托盘并排，解压即可整目录替换
+        const multi = packed.map((n) => `'${path.join(staging, n)}'`).join(',')
+        await withRetry(3, 2000, () => run(`powershell -Command "Compress-Archive -Path @(${multi}) -DestinationPath '${archivePath}' -Force; if (!$?) { exit 1 }"`))
       } else {
-        run(`cd "${staging}" && zip -q "${archivePath}" "${entryName}"`)
+        run(`cd "${staging}" && zip -q "${archivePath}" ${fileArgs}`)
       }
     } else {
-      run(`tar czf "${archivePath}" -C "${staging}" "${entryName}"`)
+      run(`tar czf "${archivePath}" -C "${staging}" ${fileArgs}`)
     }
     await fsp.rm(staging, rmOpts)
-    log(`  ✓ ${archiveName}（${entryName}）`)
+    log(`  ✓ ${archiveName}（${packed.join(' + ')}）`)
+  }
+}
+
+/** Windows 托盘编译到 release/ModelDockTray.exe（已存在则复用；失败返回 null 优雅降级）。
+ *  必须在 packageDistributions 之前可用——zip 里要带托盘，setup.exe 的 [Files] 也指向它。 */
+async function ensureWinTray() {
+  const trayOut = path.join(RELEASE, 'ModelDockTray.exe')
+  if (fs.existsSync(trayOut)) return trayOut
+  try {
+    await generateIco(path.join(RELEASE, 'modeldock.ico'))
+    const windir = process.env.WINDIR ?? 'C:\\Windows'
+    const cscCandidates = [
+      `${windir}\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe`,
+      `${windir}\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe`,
+    ]
+    const csc = cscCandidates.find((p) => fs.existsSync(p))
+    if (!csc) throw new Error('未找到 csc.exe（.NET Framework 4.x）')
+    const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.cs')
+    // 托盘版本常量：TrayMeta.Version 供托盘菜单首项与更新弹窗展示当前版本（与 mac Info.plist 同源）
+    const trayVerCs = path.join(RELEASE, 'ModelDockTray.Version.generated.cs')
+    await fsp.writeFile(
+      trayVerCs,
+      '// 构建时由 scripts/build-sea.mjs 生成（git tag 版本），勿手改\n' +
+      'namespace ModelDockTray\n{\n    internal static class TrayMeta\n    {\n' +
+      `        internal const string Version = "${String(BUILD_VERSION ?? '0.0.0')}";\n    }\n}\n`
+    )
+    // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊；
+    // System.Web.Extensions 提供 JavaScriptSerializer——托盘轻量菜单解析 tray-state 嵌套 JSON 用
+    const trayManifest = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.manifest')
+    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "${traySrc}" "${trayVerCs}"`)
+    log('  ✓ Windows 托盘已编译')
+    return trayOut
+  } catch (e) {
+    warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含 Windows 托盘`)
+    return null
+  }
+}
+
+/** macOS 托盘编译到 release/ModelDockTray（按 target 架构；失败返回 null）。 */
+async function ensureMacTray(target) {
+  const trayOut = path.join(RELEASE, 'ModelDockTray')
+  try {
+    const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.swift')
+    const swiftTarget = PLATFORMS[target].arch === 'arm64' ? 'arm64-apple-macos13.0' : 'x86_64-apple-macos13.0'
+    run(`swiftc -O -target ${swiftTarget} "${traySrc}" -o "${trayOut}"`)
+    await fsp.chmod(trayOut, 0o755)
+    run(`codesign --force --sign - "${trayOut}"`)
+    log('  ✓ macOS 托盘已编译')
+    return trayOut
+  } catch (e) {
+    warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含托盘`)
+    return null
   }
 }
 
@@ -904,34 +971,8 @@ async function packageWinSetup() {
   await generateIco(path.join(RELEASE, 'modeldock.ico'))
   log('  ✓ modeldock.ico')
 
-  // Windows 托盘（C# WinForms NotifyIcon）：csc 随 .NET Framework 预装于所有 Win10/11。
-  // 失败优雅降级：没有 tray 不影响主程序，cli.ts 按「托盘文件是否存在」决定是否拉起
-  try {
-    const windir = process.env.WINDIR ?? 'C:\\Windows'
-    const cscCandidates = [
-      `${windir}\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe`,
-      `${windir}\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe`,
-    ]
-    const csc = cscCandidates.find((p) => fs.existsSync(p))
-    if (!csc) throw new Error('未找到 csc.exe（.NET Framework 4.x）')
-    const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.cs')
-    const trayOut = path.join(RELEASE, 'ModelDockTray.exe')
-    // 托盘版本常量：TrayMeta.Version 供托盘菜单首项与更新弹窗展示当前版本（与 mac Info.plist 同源）
-    const trayVerCs = path.join(RELEASE, 'ModelDockTray.Version.generated.cs')
-    await fsp.writeFile(
-      trayVerCs,
-      '// 构建时由 scripts/build-sea.mjs 生成（git tag 版本），勿手改\n' +
-      'namespace ModelDockTray\n{\n    internal static class TrayMeta\n    {\n' +
-      `        internal const string Version = "${String(BUILD_VERSION ?? '0.0.0')}";\n    }\n}\n`
-    )
-    // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊；
-    // System.Web.Extensions 提供 JavaScriptSerializer——托盘轻量菜单解析 tray-state 嵌套 JSON 用
-    const trayManifest = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.manifest')
-    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "${traySrc}" "${trayVerCs}"`)
-    log('  ✓ Windows 托盘已编译')
-  } catch (e) {
-    warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含 Windows 托盘`)
-  }
+  // 托盘复用 ensureWinTray（packageDistributions 已编过则直接用；失败优雅降级：setup 的 [Files] skipifsourcedoesntexist）
+  await ensureWinTray()
 
   if (process.platform !== 'win32') {
     warn('跳过 setup.exe：Inno Setup 仅能在 Windows 上编译（CI 的 windows job 会自动补上）')
