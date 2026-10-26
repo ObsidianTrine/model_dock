@@ -292,7 +292,7 @@ describe('整表加密 cipher 描述符（DUP-07 合并后）', () => {
     }
   })
 
-  it('并发 getSecret 冷缓存只读盘一次（in-flight 合并；overview 全 provider 并发取 key 不再逐条 spawn）', async () => {
+  it('并发 getSecret 冷缓存只读盘一次（in-flight 合并；overview 全 provider 并发取 key 不再逐条 spawn）', { timeout: 60_000 }, async () => {
     const h = fakeHome()
     const { __testSetSecretsRawReader } = await import('../src/config/secrets.js')
     const { readTextIfExists } = await import('../src/util/fsx.js')

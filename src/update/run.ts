@@ -113,6 +113,9 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   const execPath = opts.execPath ?? process.execPath
   const platform = process.platform
 
+  // 上次 win-setup 刻意留下的下载目录（setup.exe 留给 Inno）在这里清扫；拿到更新锁后才扫，不误删在途
+  await sweepStaleUpdateStaging()
+
   log(c.gray(t('正在检查新版本…', 'Checking for a new version…')))
   // 第三参必须显式传 LOCALAPPDATA：漏传时 win-setup 判定回落占位用户目录（C:\Users\u\…），
   // 真机路径永远不匹配 → 安装器用户被误判 win-bare，自更新退化成裸 zip 替换（跳过安装器登记、托盘不随更）。
@@ -169,6 +172,10 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   }
 
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-update-'))
+  // win-setup 成功路径必须保住 tmpDir：setup.exe 在里面，cmd→Inno 还要读它。
+  // 此前 finally 无条件删 tmpDir，与 cmd 拉起安装器赛跑——Defender 扫未签名 exe 时几乎必输，
+  // 表现为「已停网关托盘、无安装界面、托盘不随更」（2026-10-26 用户实证）。
+  let keepTmpDir = false
   try {
     // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
     await writeUpdateProgress('downloading', 0, asset.size)
@@ -223,6 +230,8 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
         // 安装器成败异步发生，更新器必须立即退出释放自身 exe 锁，无人能替它收尾：
         // 进度停在 restarting（托盘对 10 分钟未刷新的进度文件按残留过期自动收起），不谎报 done
         await writeUpdateProgress('restarting', asset.size, asset.size)
+        // tmpDir 里就是 setup.exe 本体，交给下次 runUpdate 清扫
+        keepTmpDir = true
         return { updated: true, currentVersion: VERSION, latestVersion: m.version }
       } else {
         const staging = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-bin-'))
@@ -235,15 +244,26 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
             throw new UpdateError(t('更新包里没有入口程序 {n}，包内容异常；已中止', 'The update package does not contain the entry program {n}; aborted', { n: entryName }))
           }
           await installBareBinary(newBin, execPath)
+          // 托盘与网关同包同版本换新：包里带了就一并 rename dance（缺组件/目标都跳过，不报错）
+          const trayEntry = platform === 'win32' ? 'ModelDockTray.exe' : 'ModelDockTray'
+          const newTray = path.join(staging, trayEntry)
+          const targetTray = path.join(path.dirname(execPath), trayEntry)
+          if (fs.existsSync(newTray)) {
+            await installBareBinary(newTray, targetTray)
+          }
+          log(c.green(t('✓ 已更新到 v{v}', '✓ Updated to v{v}', { v: m.version })))
+          if (wasLive) {
+            deps.spawnDetached(execPath, ['--sea-gateway'])
+            log(c.green(t('✓ 网关已按原状态拉起', '✓ Gateway restarted as before')))
+            // 托盘不在这里抢拉：daemon 就绪后由 spawnTrayWhenGatewayReady 补拉，
+            // 否则托盘 EnsureGateway 会在 state 未落盘窗口再拉第二个 daemon 抢端口
+          } else {
+            log(c.gray(t('网关之前未在运行，未自动拉起（需要时：modeldock gateway start --daemon）', 'The gateway was not running; not started automatically (start with: modeldock gateway start --daemon)')))
+            // 网关本不在跑则直接拉托盘（托盘自带 EnsureGateway）；与 win-setup 的「装完 start 托盘」同口径
+            if (fs.existsSync(targetTray)) deps.startTray(targetTray)
+          }
         } finally {
           await fsp.rm(staging, { recursive: true, force: true }).catch(() => {})
-        }
-        log(c.green(t('✓ 已更新到 v{v}', '✓ Updated to v{v}', { v: m.version })))
-        if (wasLive) {
-          deps.spawnDetached(execPath, ['--sea-gateway'])
-          log(c.green(t('✓ 网关已按原状态拉起', '✓ Gateway restarted as before')))
-        } else {
-          log(c.gray(t('网关之前未在运行，未自动拉起（需要时：modeldock gateway start --daemon）', 'The gateway was not running; not started automatically (start with: modeldock gateway start --daemon)')))
         }
       }
     } catch (e) {
@@ -262,7 +282,23 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
     await writeUpdateProgress('failed', 0, 0, (e as Error).message)
     throw e
   } finally {
-    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    if (!keepTmpDir) {
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/** 清扫上次更新残留的暂存：下载目录 modeldock-update-*（win-setup 成功路径刻意留下的 setup.exe）
+ *  与孤儿 modeldock-setup-*。调用方须已持有更新锁；被 Inno 占用的文件删不掉就留给再下一次。 */
+export async function sweepStaleUpdateStaging(): Promise<void> {
+  try {
+    const tmp = os.tmpdir()
+    for (const name of await fsp.readdir(tmp)) {
+      if (!/^modeldock-(update|setup)-/.test(name)) continue
+      await fsp.rm(path.join(tmp, name), { recursive: true, force: true }).catch(() => {})
+    }
+  } catch {
+    /* 目录枚举失败不影响主流程 */
   }
 }
 

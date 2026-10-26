@@ -25,7 +25,7 @@ import {
   installBareBinary,
   installMacApp,
 } from '../src/update/install.js'
-import { checkUpdate, logAlreadyUpToDate, runUpdate, type UpdateRunOptions } from '../src/update/run.js'
+import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
 import { readUpdateProgress } from '../src/update/progress.js'
 import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
@@ -152,15 +152,21 @@ async function deadPort(): Promise<number> {
 }
 
 /** 打一个平台相关的裸二进制更新包（unix=tar.gz 含 modeldock；win=zip 含 modeldock.exe） */
-function makeBareArchive(dir: string, version: string): { name: string; buf: Buffer } {
+function makeBareArchive(dir: string, version: string, opts: { withTray?: boolean } = {}): { name: string; buf: Buffer } {
   const staging = path.join(dir, 'pkg')
   fs.mkdirSync(staging, { recursive: true })
   if (process.platform === 'win32') {
     const name = `modeldock-${version}-win32-x64.zip`
     const entry = path.join(staging, 'modeldock.exe')
     fs.writeFileSync(entry, 'NEW-BIN')
+    const parts = [`'${entry}'`]
+    if (opts.withTray) {
+      const tray = path.join(staging, 'ModelDockTray.exe')
+      fs.writeFileSync(tray, 'NEW-TRAY')
+      parts.push(`'${tray}'`)
+    }
     const archive = path.join(dir, name)
-    const r = spawnSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${entry}' -DestinationPath '${archive}' -Force; if (!$?) { exit 1 }`], { stdio: 'ignore' })
+    const r = spawnSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path @(${parts.join(',')}) -DestinationPath '${archive}' -Force; if (!$?) { exit 1 }`], { stdio: 'ignore' })
     if (r.status !== 0) throw new Error('Compress-Archive failed')
     return { name, buf: fs.readFileSync(archive) }
   }
@@ -169,8 +175,13 @@ function makeBareArchive(dir: string, version: string): { name: string; buf: Buf
   const name = `modeldock-${version}-${plat}-${arch}.tar.gz`
   const entry = path.join(staging, 'modeldock')
   fs.writeFileSync(entry, 'NEW-BIN')
+  const files = ['modeldock']
+  if (opts.withTray) {
+    fs.writeFileSync(path.join(staging, 'ModelDockTray'), 'NEW-TRAY')
+    files.push('ModelDockTray')
+  }
   const archive = path.join(dir, name)
-  const r = spawnSync('tar', ['czf', archive, '-C', staging, 'modeldock'])
+  const r = spawnSync('tar', ['czf', archive, '-C', staging, ...files])
   if (r.status !== 0) throw new Error('tar failed')
   return { name, buf: fs.readFileSync(archive) }
 }
@@ -190,13 +201,14 @@ function makeAppArchive(dir: string, version: string): { name: string; buf: Buff
 }
 
 function mockDeps() {
-  const calls = { stopGateway: 0, stopTray: 0, openApp: [] as string[], detached: [] as { file: string; args: string[] }[], wasLive: false }
+  const calls = { stopGateway: 0, stopTray: 0, openApp: [] as string[], detached: [] as { file: string; args: string[] }[], startTray: [] as string[], wasLive: false }
   const deps = {
     stopGateway: vi.fn(async () => { calls.stopGateway++ }),
     stopTray: vi.fn(async () => { calls.stopTray++ }),
     openApp: vi.fn((p: string) => { calls.openApp.push(p) }),
     spawnDetached: vi.fn((file: string, args: string[]) => { calls.detached.push({ file, args }) }),
     gatewayWasLive: vi.fn(async () => calls.wasLive),
+    startTray: vi.fn((p: string) => { calls.startTray.push(p) }),
   }
   return { deps, calls }
 }
@@ -718,10 +730,15 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(cmdLine).toContain('ModelDockTray.exe')
       // 落点钉死当前安装目录（= 用户当初选的路径），不依赖注册表记忆
       expect(cmdLine).toContain(`/DIR="${path.dirname(execPath)}"`)
+      // P0 回归：spawn 后安装包必须还活着——tmpDir 不得被 finally 删掉（否则 cmd→Inno 找不到 setup.exe）
+      const setupArg = calls.detached[0].args.join(' ').match(/"([^"]*modeldock-999\.0\.0-win32-x64-setup\.exe)"/i)
+      expect(setupArg?.[1]).toBeTruthy()
+      expect(fs.existsSync(setupArg![1]!)).toBe(true)
       // 安装器成败异步发生、更新器无人能替它收尾：进度必须停在 restarting，绝不谎报 done
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
     } finally {
+      await sweepStaleUpdateStaging()
       if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA
       else process.env.LOCALAPPDATA = prevLocalAppData
       h.restore()
@@ -762,6 +779,68 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(cmdLine).toContain(`/DIR="${path.dirname(execPath)}"`)
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
+    } finally {
+      await sweepStaleUpdateStaging()
+      h.restore()
+      await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  // P1/P2：bare 包内带托盘时一并换新；网关本不在跑则拉托盘（与 win-setup 装完 start 同口径）
+  it('bare 形态：包内托盘与主程序一并 rename dance 换新', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    const h = fakeHome()
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const trayName = process.platform === 'win32' ? 'ModelDockTray.exe' : 'ModelDockTray'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+      fs.writeFileSync(path.join(binDir, trayName), 'OLD-TRAY')
+
+      const pkg = makeBareArchive(root, '999.0.0', { withTray: true })
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+      calls.wasLive = true
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath }))
+      expect(r.updated).toBe(true)
+      expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
+      expect(fs.readFileSync(path.join(binDir, trayName), 'utf8')).toBe('NEW-TRAY')
+      // 网关在跑 → 拉回 daemon（托盘由 spawnTrayWhenGatewayReady 补拉，这里不抢）
+      expect(calls.detached.some((d) => d.args.includes('--sea-gateway'))).toBe(true)
+      expect(calls.startTray).toHaveLength(0)
+    } finally {
+      h.restore()
+      await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  it('bare 形态：网关本不在跑且包内/盘上有托盘 → 收尾拉托盘', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    const h = fakeHome()
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const trayName = process.platform === 'win32' ? 'ModelDockTray.exe' : 'ModelDockTray'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+      fs.writeFileSync(path.join(binDir, trayName), 'OLD-TRAY')
+
+      const pkg = makeBareArchive(root, '999.0.0', { withTray: true })
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+      calls.wasLive = false
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath }))
+      expect(r.updated).toBe(true)
+      expect(fs.readFileSync(path.join(binDir, trayName), 'utf8')).toBe('NEW-TRAY')
+      expect(calls.detached).toHaveLength(0)
+      expect(calls.startTray).toEqual([path.join(binDir, trayName)])
     } finally {
       h.restore()
       await fsp.rm(root, { recursive: true, force: true }).catch(() => {})

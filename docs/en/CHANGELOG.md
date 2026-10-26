@@ -5,6 +5,14 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Windows installer users no longer see "processes stopped but nothing installed" after one-click update**: the updater used to wipe its download temp directory as soon as it launched the silent installer, often deleting setup.exe before the installer could read it — the gateway and tray both stopped, no install UI appeared, and the tray stayed on the old version; the installer package now survives until the installer has read it, and leftovers are swept on the next update.
+- **Portable (zip) users get the tray updated along with the main program**: the update package now ships the tray binary and replaces both at the same version; previously only the main program was replaced, leaving the tray permanently stale.
+- **The tray comes back after a portable update**: when the gateway was not running, the update now relaunches the tray (matching the installer path); when the gateway was running it is still pulled after the gateway is ready, to avoid racing on the port.
+
 ## [1.3.0] - 2026-10-26
 
 Tray lightweight mode, per-service model catalog filtering, a faster console first paint, and background-overhead reductions.

@@ -30,6 +30,8 @@ export interface InstallDeps {
   spawnDetached: (file: string, args: string[], opts?: { verbatim?: boolean }) => void
   /** 更新前的网关存活状态（决定换完是否拉回） */
   gatewayWasLive: () => Promise<boolean>
+  /** 拉起托盘（bare 收尾用；win-setup 由 cmd 串联 start 托盘，不走这里） */
+  startTray: (trayPath: string) => void
 }
 
 export function defaultInstallDeps(): InstallDeps {
@@ -55,6 +57,9 @@ export function defaultInstallDeps(): InstallDeps {
     gatewayWasLive: async () => {
       const { gatewayLive } = await import('../gateway/state.js')
       return !!(await gatewayLive())
+    },
+    startTray: (trayPath) => {
+      spawn(trayPath, [], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
     },
   }
 }
@@ -154,7 +159,8 @@ export async function installMacApp(stagingDir: string, appRoot: string): Promis
   await fsp.chmod(bin, 0o755).catch(() => {})
 }
 
-/** 裸二进制 rename dance：newBin 换到 targetBin 位置，旧文件保留为 .old。Windows 允许改名运行中 exe。 */
+/** 裸二进制 rename dance：newBin 换到 targetBin 位置，旧文件保留为 .old。Windows 允许改名运行中 exe。
+ *  目标不存在时直接落位（包里新增组件如托盘首次旁路带入，没有可改名的旧文件）。 */
 export async function installBareBinary(newBin: string, targetBin: string): Promise<void> {
   await checkWritable(path.dirname(targetBin))
   const staging = targetBin + '.new'
@@ -162,11 +168,12 @@ export async function installBareBinary(newBin: string, targetBin: string): Prom
   if (process.platform !== 'win32') await fsp.chmod(staging, 0o755)
   const old = targetBin + '.old'
   await fsp.rm(old, { force: true }).catch(() => {})
-  await fsp.rename(targetBin, old)
+  const hadTarget = fs.existsSync(targetBin)
+  if (hadTarget) await fsp.rename(targetBin, old)
   try {
     await fsp.rename(staging, targetBin)
   } catch (e) {
-    await fsp.rename(old, targetBin).catch(() => {})
+    if (hadTarget) await fsp.rename(old, targetBin).catch(() => {})
     throw e
   }
 }
