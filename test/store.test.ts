@@ -291,6 +291,30 @@ describe('整表加密 cipher 描述符（DUP-07 合并后）', () => {
       __testSetDpapiBatch() // 还原为真实实现，避免污染同进程其他用例
     }
   })
+
+  it('并发 getSecret 冷缓存只读盘一次（in-flight 合并；overview 全 provider 并发取 key 不再逐条 spawn）', async () => {
+    const h = fakeHome()
+    const { __testSetSecretsRawReader } = await import('../src/config/secrets.js')
+    const { readTextIfExists } = await import('../src/util/fsx.js')
+    const { secretsPath } = await import('../src/util/paths.js')
+    for (let i = 1; i <= 12; i++) await setSecret(`svc${i}`, `sk-${i}`, 'file')
+    let readCalls = 0
+    __testSetSecretsRawReader(async () => {
+      readCalls++
+      return JSON.parse((await readTextIfExists(secretsPath())) ?? '{}')
+    })
+    try {
+      invalidateSecretsCache() // 清内存缓存，模拟 overview 重建碰到的冷路径
+      const refs = Array.from({ length: 12 }, (_, i) => `file:svc${i + 1}`)
+      const values = await Promise.all(refs.map((r) => getSecret(r)))
+      expect(values).toEqual(Array.from({ length: 12 }, (_, i) => `sk-${i + 1}`))
+      // 12 并发共享同一次读盘：Windows DPAPI 后端下即 1 次 PowerShell 整表解密，而非 12 个并发 spawn
+      expect(readCalls).toBe(1)
+    } finally {
+      __testSetSecretsRawReader()
+      h.restore()
+    }
+  })
 })
 
 describe('mutateConfig 并发', () => {

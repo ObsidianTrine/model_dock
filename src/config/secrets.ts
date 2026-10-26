@@ -408,7 +408,15 @@ export function pickFileCipher(): FileCipher {
 let fileCache: { path: string; data: Record<string, string> } | null = null
 
 /** 读 secrets.json 原始明文表；损坏抛可操作 SecretsError（不再静默当「无密钥」） */
+/** 测试注入的整表原始读取（数读盘次数用）；undefined=真实实现。与 __testSetDpapiBatch 同套路：
+ *  模块内 let 替换，不碰 vi.mock 跨文件雷区。 */
+let secretsRawImpl: (() => Promise<Record<string, string>>) | undefined
+export function __testSetSecretsRawReader(fn?: () => Promise<Record<string, string>>): void {
+  secretsRawImpl = fn
+}
+
 async function readSecretsRaw(): Promise<Record<string, string>> {
+  if (secretsRawImpl) return secretsRawImpl()
   const text = await readTextIfExists(secretsPath())
   if (!text) return {}
   let parsed: unknown
@@ -431,27 +439,43 @@ async function readSecretsRaw(): Promise<Record<string, string>> {
   return parsed as Record<string, string>
 }
 
+// 并发去重单飞：overview 的 keyPresence 会对全部 provider 并发 getSecret，缓存冷时若各自走
+// loadFileSecrets，DPAPI 后端（win32 整表解密 spawn 一次 PowerShell）会并发 spawn 12 份、12 次重复
+// 读盘——12 个 PowerShell 冷启动同时抢 CPU 正是 Windows 首屏秒级尖峰的大头。读请求共享同一次
+// 读盘+解密；写路径（useCache=false，锁内强制重读）不参与合并，保持锁内新鲜语义。
+let fileLoadInflight: Promise<Record<string, string>> | null = null
+
 /** 读取 file 后端解密表；win32/linux 首次加载会把存量明文自动加密迁移（整表一次进程）。
  *  @param useCache 默认读内存缓存（转发热路径）；写路径传 false 强制重读盘，避免跨进程改 key 丢更新。 */
 async function loadFileSecrets(useCache = true): Promise<Record<string, string>> {
   if (useCache && fileCache && fileCache.path === secretsPath()) return fileCache.data
-  const path = secretsPath()
-  const raw = await readSecretsRaw()
-  const cipher = pickFileCipher()
-  if (!cipher.enabled) {
-    warnPlainFileOnce()
-    fileCache = { path, data: raw }
-    return raw
+  if (useCache && fileLoadInflight) return fileLoadInflight
+  const job = (async () => {
+    const path = secretsPath()
+    const raw = await readSecretsRaw()
+    const cipher = pickFileCipher()
+    if (!cipher.enabled) {
+      warnPlainFileOnce()
+      fileCache = { path, data: raw }
+      return raw
+    }
+    const hasLegacyPlain = Object.values(raw).some(
+      (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
+    )
+    const dec = await cipher.decryptTable(raw)
+    if (hasLegacyPlain) {
+      await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+    }
+    fileCache = { path, data: dec }
+    return dec
+  })()
+  if (!useCache) return job
+  fileLoadInflight = job
+  try {
+    return await job
+  } finally {
+    if (fileLoadInflight === job) fileLoadInflight = null
   }
-  const hasLegacyPlain = Object.values(raw).some(
-    (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
-  )
-  const dec = await cipher.decryptTable(raw)
-  if (hasLegacyPlain) {
-    await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
-  }
-  fileCache = { path, data: dec }
-  return dec
 }
 
 /** 解密表整体加密写回文件（file 后端；整表一次进程，而非逐条） */
