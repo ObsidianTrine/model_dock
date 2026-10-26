@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^8.7.4",
-    "commander": "^14.0.0",
+    "commander": "^15.0.0",
     "qrcode-generator": "^1.5.2",
     "smol-toml": "^1.9.1",
     "undici": "^7.10.0",
