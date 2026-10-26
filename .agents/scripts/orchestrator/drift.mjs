@@ -9,8 +9,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { listCards } from './queue.mjs';
 import { readEvents } from './events.mjs';
+import { loadWorkflowConfig } from '../workflow-config.mjs';
 
-/** 自动合并回溯失败率阈值（超过即降级全人工）。硬编码保守值，与熔断同哲学：不可配置关闭。 */
+/** 自动合并回溯失败率阈值的缺省值（workflow.json driftThreshold 可调，不可关闭）。 */
 export const DRIFT_THRESHOLD = 0.2;
 
 export function degradedFile(repoRoot) {
@@ -60,24 +61,26 @@ export function detectReverted(repoRoot, taskId) {
 
 /**
  * 评估漂移：统计 + 超阈值自动写降级标记（幂等——已降级不覆盖原标记的降级时间）。
- * 返回 { autoTotal, autoReverted, humanTotal, rate, degraded }。
+ * 阈值来自 workflow.json driftThreshold（缺省 DRIFT_THRESHOLD）。
+ * 返回 { autoTotal, autoReverted, humanTotal, rate, threshold, degraded }。
  */
 export function evaluateDrift(repoRoot, queueRootDir) {
+  const threshold = loadWorkflowConfig(repoRoot).driftThreshold ?? DRIFT_THRESHOLD;
   const merges = collectMerges(repoRoot, queueRootDir);
   const autoMerges = merges.filter((m) => m.auto);
   const reverted = autoMerges.filter((m) => detectReverted(repoRoot, m.id));
   const rate = autoMerges.length ? reverted.length / autoMerges.length : 0;
   let degraded = readDegraded(repoRoot);
-  if (autoMerges.length > 0 && rate > DRIFT_THRESHOLD && !degraded) {
+  if (autoMerges.length > 0 && rate > threshold && !degraded) {
     degraded = {
       degraded_at: new Date().toISOString(),
-      reason: `自动合并回溯失败率 ${(rate * 100).toFixed(0)}% 超阈值 ${DRIFT_THRESHOLD * 100}%（${reverted.length}/${autoMerges.length}）`,
+      reason: `自动合并回溯失败率 ${(rate * 100).toFixed(0)}% 超阈值 ${threshold * 100}%（${reverted.length}/${autoMerges.length}）`,
       failed_tasks: reverted.map((m) => m.id),
       auto_total: autoMerges.length,
     };
     writeDegraded(repoRoot, degraded);
   }
-  return { autoTotal: autoMerges.length, autoReverted: reverted.length, humanTotal: merges.length - autoMerges.length, rate, degraded };
+  return { autoTotal: autoMerges.length, autoReverted: reverted.length, humanTotal: merges.length - autoMerges.length, rate, threshold, degraded };
 }
 
 /** 人工恢复（--clear）：删除降级标记。 */

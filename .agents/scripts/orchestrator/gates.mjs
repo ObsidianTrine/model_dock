@@ -112,6 +112,25 @@ export function gateTscBuild(cwd, buildCmd = loadWorkflowConfig().buildCmd) {
 }
 
 /**
+ * lint：跑 workflow.json 的 lintCmd（业界共识：lint/类型检查是独立确定性门禁，
+ * 比 testCmd 粒度细、比 LLM 审查可靠）。未配置 → 跳过；失败进调试子循环（与 build 同级）。
+ */
+export function gateLint(cwd, lintCmd = loadWorkflowConfig().lintCmd) {
+  if (!lintCmd) return { ok: true, skipped: true };
+  const r = runCmd(lintCmd, cwd);
+  if (!r.ok) throw new GateError('lint', `${lintCmd} 退出码 ${r.exitCode}`, r.output);
+  return r;
+}
+
+/** typecheck：跑 workflow.json 的 typecheckCmd。语义与 lint 同（未配置跳过、失败可调试）。 */
+export function gateTypecheck(cwd, typecheckCmd = loadWorkflowConfig().typecheckCmd) {
+  if (!typecheckCmd) return { ok: true, skipped: true };
+  const r = runCmd(typecheckCmd, cwd);
+  if (!r.ok) throw new GateError('typecheck', `${typecheckCmd} 退出码 ${r.exitCode}`, r.output);
+  return r;
+}
+
+/**
  * ui_check：跑 workflow.json 的 uiCheckCmd（Web 控制台沙箱冒烟——脚本自备
  * 189xx 端口 + MODELRDOCK_FAKE_HOME 隔离与进程清理，orchestrator 不感知细节）。
  * 任务卡未声明 ui_check 时调用方根本不调这里；命令未配置 → 跳过。
