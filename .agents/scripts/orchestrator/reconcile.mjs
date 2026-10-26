@@ -8,14 +8,21 @@
 // 汇总实测用量与自报用量对比。worker 走网关（吃狗粮）时两本账应该贴近；直连上游时实测账为 0。
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { listCards } from './queue.mjs';
 import { readEvents } from './events.mjs';
+import { loadWorkflowConfig } from '../workflow-config.mjs';
 
-/** 网关日志目录（真实 HOME 下的 ~/.modeldock/logs；测试经 MODELRDOCK_* 重定向隔离）。 */
-export function gatewayLogsDir() {
-  return path.join(process.env.MODELRDOCK_FAKE_HOME || process.env.MODELRDOCK_HOME || os.homedir(), '.modeldock', 'logs');
+/**
+ * 网关日志目录解析序：
+ *   1. MODELRDOCK_FAKE_HOME / MODELRDOCK_HOME 环境重定向（测试隔离/多实例，既有机制，优先）；
+ *   2. workflow.json gatewayLogDir（载入时已展开 ~/）——显式配置才启用对账；
+ *   3. 都没有 → null（对账关闭。吃狗粮是走网关的项目才有的能力，其他项目缺省不可用）。
+ */
+export function gatewayLogsDir(cfg) {
+  const envBase = process.env.MODELRDOCK_FAKE_HOME || process.env.MODELRDOCK_HOME;
+  if (envBase) return path.join(envBase, '.modeldock', 'logs');
+  return (cfg ?? loadWorkflowConfig()).gatewayLogDir || null;
 }
 
 function usageTotal(u) {
@@ -64,7 +71,9 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
     tokensOut: Math.max(0, ...snapshots.map((e) => e.tokens_out ?? 0)),
   };
 
-  const gwDir = gatewayLogsDir();
+  // 锚定 repoRoot 的配置（临时仓库/测试才有正确归属；env 重定向仍优先——测试隔离通道）
+  const gwDir = gatewayLogsDir(loadWorkflowConfig(repoRoot));
+  if (!gwDir) return { skipped: true, reason: '未启用网关对账（workflow.json gatewayLogDir 未配置）' };
   const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0 };
   for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
     const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);

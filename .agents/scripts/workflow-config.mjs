@@ -11,10 +11,17 @@
 //   protectedPorts  受保护端口（空 = 不做端口红线）；如 ["8687","8890"]
 //   corePaths       核心路径（改动即 L2 人工 / 人工闸门标红）
 //   releasePaths    发布流水线路径前缀（触及即 L3 永远人工）
-//   reviewNotes     注入独立审查提示词的项目红线文本（自由文本）
+//   reviewNotes     注入独立审查/spec planner 提示词的项目红线文本（自由文本）
 //   uiCheckCmd      UI 冒烟门禁命令（任务卡 ui_check: true 时跑；缺省 = 卡声明 ui_check 直接报错）
 //   envPrefix       escape hatch 环境变量前缀（默认 "AGENTS" → AGENTS_ALLOW_RELEASE 等；
 //                   旧项目名 MODELRDOCK_* 永远兼容识别）
+//   version         配置 schema 版本（agent-init 生成时写 1；工具链按缺失向后兼容）
+//   projectName     项目展示名（通知标题/调度任务名）；缺省 package.json name > 仓库目录名
+//   listenCommandNames  项目自备可执行命令名，参与受保护端口的「启动监听」拦截正则
+//                       （node/tsx/npx/npm run 是通用形态永远参与；如 ["modeldock","gateway"]）
+//   scheduleId      nightly 调度标识（launchd label / crontab 标记段）；缺省 com.<slug(projectName)>.orchestrator-nightly
+//   gatewayLogDir   网关请求日志目录（支持 ~/ 展开）——配置了才启用 reconcile 对账；
+//                   缺省 = 对账关闭（吃狗粮是走网关的项目才有的能力）
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -25,11 +32,13 @@
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_ANCHOR_CONFIG = path.resolve(HERE, '..', 'workflow.json');
+const SCRIPT_ANCHOR_REPO = path.resolve(HERE, '..', '..');
 
 /** workflow.json 的路径。repoRoot 显式给出时锚定该仓库，否则锚定脚本自身所在仓库。 */
 export function workflowConfigPath(repoRoot) {
@@ -59,6 +68,7 @@ export function loadWorkflowConfig(repoRoot) {
   }
   const strArr = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
   return {
+    version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : null,
     baseBranch: typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null,
     baseBranches: strArr(raw.baseBranches),
     testCmd: resolveTestCmd(raw.testCmd),
@@ -73,7 +83,40 @@ export function loadWorkflowConfig(repoRoot) {
     review: resolveEngine(raw.review),
     tiers: resolveTiers(raw.tiers),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
+    projectName: deriveProjectName(repoRoot, raw),
+    listenCommandNames: strArr(raw.listenCommandNames),
+    scheduleId: typeof raw.scheduleId === 'string' && raw.scheduleId.trim() ? raw.scheduleId.trim() : null,
+    gatewayLogDir: typeof raw.gatewayLogDir === 'string' && raw.gatewayLogDir.trim() ? expandHome(raw.gatewayLogDir.trim()) : null,
   };
+}
+
+/** 项目名派生：workflow.json 显式 projectName > package.json name > 仓库目录名（可移植缺省链）。 */
+function deriveProjectName(repoRoot, raw) {
+  if (typeof raw.projectName === 'string' && raw.projectName.trim()) return raw.projectName.trim();
+  const root = repoRoot ?? SCRIPT_ANCHOR_REPO;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    if (typeof pkg.name === 'string' && pkg.name.trim()) return pkg.name.trim();
+  } catch {
+    /* 无 package.json → 目录名兜底 */
+  }
+  return path.basename(root) || 'project';
+}
+
+/** 展示名（通知标题/调度任务名）：按 -_. 分段各自首字母大写后拼接。"model-dock" → "ModelDock"。 */
+export function displayProjectName(name) {
+  return String(name ?? '')
+    .split(/[-_.]/)
+    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
+    .join('');
+}
+
+/** 展开 ~/ 前缀（gatewayLogDir 等用户目录级配置路径）。 */
+export function expandHome(p) {
+  const s = String(p ?? '');
+  if (s === '~') return os.homedir();
+  if (s.startsWith('~/') || s.startsWith('~\\')) return path.join(os.homedir(), s.slice(2));
+  return s;
 }
 
 /** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎」的声明位。

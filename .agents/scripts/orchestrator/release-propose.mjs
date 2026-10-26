@@ -42,6 +42,22 @@ export function latestTag(repoRoot) {
   return first && /^v\d+\.\d+\.\d+$/.test(first) ? first : null;
 }
 
+/**
+ * 解析 origin 远端 → 仓库主页基址（版本链接表行用）。
+ * 认得 https / ssh 两种 GitHub 形态；其他托管或无远端返回 null（提案降级为提示行，
+ * 不猜 URL 形态——compare 路径各家 forge 不同）。
+ */
+export function githubRepoBase(repoRoot) {
+  let url = '';
+  try {
+    url = git(repoRoot, ['remote', 'get-url', 'origin'], { timeout: 10_000 });
+  } catch {
+    return null;
+  }
+  const m = /github\.com[:/](.+?)\/(.+?)(?:\.git)?\/?$/i.exec(url.trim());
+  return m ? `https://github.com/${m[1]}/${m[2]}` : null;
+}
+
 /** 解析单个提交：type（conventional 前缀，无前缀为 null）+ breaking 标记。
  *  body 的 breaking 只认 conventional footer 形态「BREAKING CHANGE: …」（含连字符变体、必须带冒号）——
  *  正文里提及「BREAKING CHANGE 识别」这类描述性字样不是声明，宽松匹配会把普通 feat 误判成
@@ -163,7 +179,8 @@ export function proposeRelease(repoRoot, opts = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const stamp = toIsoLocal().replace(/[-:T]/g, '').slice(0, 12); // YYYYMMDDHHmm
   const proposalPath = path.join(dir, `${tag}-proposal-${stamp}.md`);
-  fs.writeFileSync(proposalPath, renderProposal({ base, tag, suggested, level, counts, commits, unreleased, localTaken, remoteTaken }));
+  const repoBase = githubRepoBase(repoRoot);
+  fs.writeFileSync(proposalPath, renderProposal({ base, tag, suggested, level, counts, commits, unreleased, localTaken, remoteTaken, repoBase }));
 
   return {
     base,
@@ -233,7 +250,7 @@ function renderProposal(p) {
   lines.push('');
   lines.push('## 版本链接表行（CHANGELOG 文末追加）');
   lines.push('');
-  lines.push(`[${p.suggested}]: https://github.com/ObsidianTrine/model_dock/compare/${p.base}...${p.tag}`);
+  lines.push(p.repoBase ? `[${p.suggested}]: ${p.repoBase}/compare/${p.base}...${p.tag}` : `- （未识别 GitHub 远端（origin），跳过链接表行；或按你的托管平台手工补 compare 链接）`);
   lines.push('');
   lines.push('## 下一步');
   lines.push('');

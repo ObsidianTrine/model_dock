@@ -1,9 +1,13 @@
 {
+  "version": 1,
+  "projectName": "ModelDock",
   "baseBranch": "develop",
   "testCmd": "npm test",
   "setupCmd": "npm ci --prefer-offline",
   "buildCmd": "npm run build",
   "packageManager": "npm",
+  "listenCommandNames": ["modeldock", "gateway"],
+  "gatewayLogDir": "~/.modeldock/logs",
   "protectedPorts": [
     "8687",
     "8890"

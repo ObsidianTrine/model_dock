@@ -36,7 +36,7 @@ import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurit
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
-import { loadWorkflowConfig } from './workflow-config.mjs';
+import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { readDegraded, evaluateDrift, clearDegraded, DRIFT_THRESHOLD } from './orchestrator/drift.mjs';
 import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
@@ -44,7 +44,7 @@ import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
-import { notify, buildNightlySummary } from './orchestrator/notify.mjs';
+import { notify, buildNightlySummary, nightlyWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1148,7 +1148,7 @@ async function cmdSpecStart(repoRoot, opts) {
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
 
   try {
-    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot);
+    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -1336,8 +1336,10 @@ async function cmdNightly(repoRoot, opts) {
   if (pending.length && !opts.auto) log(`推进队列：node .agents/scripts/orchestrator.mjs drain（或下次 nightly --auto）`);
 
   // 通知先于退出投递（die 是 process.exit，会截断未决 promise）
+  const cfg = loadWorkflowConfig(repoRoot);
   await notify({
-    title: 'ModelDock nightly',
+    title: `${displayProjectName(cfg.projectName)} nightly`,
+    webhookEnvs: nightlyWebhookEnvs(repoRoot),
     body: buildNightlySummary({
       created: created.length,
       awaiting: awaiting.length,
@@ -1399,7 +1401,7 @@ function cmdSchedule(repoRoot, sub, opts) {
     return;
   }
   if (sub === 'uninstall') {
-    const r = uninstallSchedule();
+    const r = uninstallSchedule(repoRoot);
     log(r.removed ? 'nightly 调度已卸载。' : '未发现已安装的 nightly 调度（无需卸载）。');
     return;
   }

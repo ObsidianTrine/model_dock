@@ -1,13 +1,22 @@
 // notify.mjs — nightly 结果通知（可观测性补口）：巡检跑完/跑挂只有日志文件等于没跑。
 // 两个通道，全部尽力而为（失败静默，通知绝不影响编排本身）：
-//   1. MODELRDOCK_NIGHTLY_WEBHOOK 环境变量：fetch POST JSON（企业微信/飞书/Slack
-//      的 incoming webhook 均可接一层适配；本层只管发 {title, body, ts}）
+//   1. webhook 环境变量：fetch POST JSON（企业微信/飞书/Slack 的 incoming webhook
+//      均可接一层适配；本层只管发 {title, body, ts}）。变量名 ${envPrefix}_NIGHTLY_WEBHOOK
+//      （envPrefix 来自 workflow.json，默认 AGENTS）；旧项目名 MODELRDOCK_NIGHTLY_WEBHOOK 永远兼容
 //   2. macOS 本地通知：osascript display notification（无依赖，登录会话可见）
 // dryRun 模式返回将执行的命令/payload 不发送（测试用）。
 
 import { spawnSync } from 'node:child_process';
+import { loadWorkflowConfig } from '../workflow-config.mjs';
 
+/** 旧项目名的 webhook 变量（兼容识别，永不删除——已注册过通知的老环境不断供）。 */
 export const NIGHTLY_WEBHOOK_ENV = 'MODELRDOCK_NIGHTLY_WEBHOOK';
+
+/** webhook 环境变量名清单（按优先序）：${envPrefix}_NIGHTLY_WEBHOOK + 旧名兼容。 */
+export function nightlyWebhookEnvs(repoRoot) {
+  const prefix = loadWorkflowConfig(repoRoot).envPrefix || 'AGENTS';
+  return [...new Set([`${prefix}_NIGHTLY_WEBHOOK`, NIGHTLY_WEBHOOK_ENV])];
+}
 
 /** 组装单行多段的 nightly 摘要正文（通知场景：短、可扫读）。 */
 export function buildNightlySummary({ created, awaiting, pending, degraded, autoRan, error } = {}) {
@@ -21,13 +30,14 @@ export function buildNightlySummary({ created, awaiting, pending, degraded, auto
 }
 
 /**
- * 发通知。opts: { title, body, dryRun }
+ * 发通知。opts: { title, body, dryRun, webhookEnvs }
+ * webhookEnvs 缺省只查旧名（独立调用者兼容）；cmdNightly 传 nightlyWebhookEnvs(repoRoot) 全清单。
  * 返回 { delivered: string[] }（已投递通道描述；dryRun 时为「将执行」描述）。
  */
 export async function notify(opts = {}) {
-  const { title = 'ModelDock nightly', body = '', dryRun = false } = opts;
+  const { title = 'nightly', body = '', dryRun = false, webhookEnvs = [NIGHTLY_WEBHOOK_ENV] } = opts;
   const delivered = [];
-  const webhook = process.env[NIGHTLY_WEBHOOK_ENV];
+  const webhook = webhookEnvs.map((n) => process.env[n]).find(Boolean);
   if (webhook) {
     const payload = JSON.stringify({ title, body, ts: new Date().toISOString() });
     if (dryRun) {

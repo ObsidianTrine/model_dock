@@ -289,6 +289,23 @@ node .agents/scripts/orchestrator.mjs reconcile
 node .agents/scripts/orchestrator.mjs reconcile <task-id>
 ```
 
-- **两本账**：自报 = 任务 events 的 budget_snapshot（stream-json 回填）；实测 = 网关转发日志的 usage 字段（网关从上游响应旁路解析，worker 流量过 8687 才有实测账）
+- **两本账**：自报 = 任务 events 的 budget_snapshot（stream-json 回填）；实测 = 网关转发日志的 usage 字段（网关从上游响应旁路解析，worker 流量过网关才有实测账）
 - **分歧率** = |自报 − 实测| / max(两账)；口径含缓存读计入输入。网关零流量会标 ⚠——说明 worker 直连了上游
 - 纯只读报告。想让自己的任务可对账，保持 worker 走本机网关（默认即是）
+- **启用条件**：workflow.json `gatewayLogDir` 指向网关请求日志目录（支持 `~/` 展开）才启用；未配置 = 对账关闭（吃狗粮是走网关的项目才有的能力）。测试隔离沿用 `MODELRDOCK_FAKE_HOME`/`MODELRDOCK_HOME` 重定向，优先于配置值
+
+## 移植（把工具链带去其他项目）
+
+代码零项目专属假设，全部项目数据住在 `.agents/workflow.json`；新项目落地用一键脚本：
+
+```bash
+cp -r <模板项目>/.agents .            # 整目录拷贝
+node .agents/scripts/agent-init.mjs   # 交互生成 workflow.json + 注册双客户端 hook + AGENTS.md 骨架
+# 非交互（agent 代跑）：node .agents/scripts/agent-init.mjs --defaults [--force] [--skip-agents-md]
+```
+
+- 派生链：`projectName` 缺省取 package.json name（通知标题、schedule 标识 `com.<slug>.orchestrator-nightly`、Windows 任务名都由它派生）；`scheduleId` 可显式指定以兼容既有注册。
+- 受保护端口的「启动监听」拦截正则 = 通用可执行名（node/tsx/npx/npm run）+ workflow.json `listenCommandNames`（项目自备 CLI 名）。
+- webhook 通知环境变量 = `${envPrefix}_NIGHTLY_WEBHOOK`（envPrefix 缺省 AGENTS；旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 永远兼容）。
+- 领域 playbook（add-adapter / add-preset / incident-response / ui-kit 等）是模板项目专属，移植时删除或重写；feature-branch / code-review / docs-sync / worktree-rescue / release / hotfix / orchestrator 通用可留用。
+

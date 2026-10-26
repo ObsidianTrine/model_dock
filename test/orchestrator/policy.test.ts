@@ -70,6 +70,19 @@ describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
     expect(evaluateCommand('node src/cli.ts --sea-gateway --port 8687')).toMatchObject({ allowed: false, rule: 'port' })
   })
 
+  it('listenCommandNames：项目自备命令名进监听正则（配置驱动，非硬编码）', () => {
+    // 本仓库 workflow.json 配了 ["modeldock","gateway"]：项目 CLI 携带受保护端口启动 → 拦
+    expect(evaluateCommand('modeldock gateway start --port 8687')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('gateway --port 8890')).toMatchObject({ allowed: false, rule: 'port' })
+    // 通用可执行名永远参与
+    expect(evaluateCommand('node server.js --port 8687')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('npx tsx serve --port 8687')).toMatchObject({ allowed: false, rule: 'port' })
+    // 未配置的自备命令名不拦（其他项目装了 foo-server 不误伤）
+    expect(evaluateCommand('foo-server --port 8687').allowed).toBe(true)
+    // 项目命令的 status/logs 查询由通用豁免覆盖
+    expect(evaluateCommand('modeldock gateway status 8687').allowed).toBe(true)
+  })
+
   it('只读探查与普通测试端口放行', () => {
     expect(evaluateCommand('lsof -nP -iTCP:8687 -sTCP:LISTEN').allowed).toBe(true)
     expect(evaluateCommand('gateway status').allowed).toBe(true)
