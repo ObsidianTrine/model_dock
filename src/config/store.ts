@@ -37,18 +37,45 @@ function migrate(raw: Record<string, unknown>): Config {
     version: CONFIG_VERSION,
     language,
     active_profile: raw.active_profile as string | undefined,
-    providers: (raw.providers as Config['providers']) ?? {},
-    profiles: (raw.profiles as Config['profiles']) ?? {},
-    harness: (raw.harness as Config['harness']) ?? {},
+    providers: containerOrEmpty(raw.providers, 'providers'),
+    profiles: containerOrEmpty(raw.profiles, 'profiles'),
+    harness: containerOrEmpty(raw.harness, 'harness'),
     adapter_packs: raw.adapter_packs as Config['adapter_packs'],
-    gateway: normalizeGateway(raw.gateway as Config['gateway']),
-    lan: raw.lan as Config['lan'],
-    security: raw.security as Config['security'],
-    backup: raw.backup as Config['backup'],
-    update: raw.update as Config['update'],
-    import: raw.import as Config['import'],
+    gateway: normalizeGateway(normalizable(raw.gateway, 'gateway')),
+    lan: normalizable(raw.lan, 'lan'),
+    security: normalizable(raw.security, 'security'),
+    backup: normalizable(raw.backup, 'backup'),
+    update: normalizable(raw.update, 'update'),
+    import: normalizable(raw.import, 'import'),
   }
   return cfg
+}
+
+/** 容器键形状守卫：手写 TOML 合法但形状错（如 `providers = 5`）时，`as` 断言会原样放行、
+ *  下游 Object.entries 抛原始 TypeError。这里显式拦下给可操作 ConfigError（含键名）。 */
+function containerOrEmpty<T extends object>(v: unknown, key: string): T {
+  if (v === undefined || v === null) return {} as T
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    throw new ConfigError(
+      t('config.toml 的 [{key}] 必须是表（当前是{kind}）。请把该项改为 `[providers.x]` 形态的表，或删除该行恢复默认',
+        'config.toml [{key}] must be a table (got {kind}). Change it to a table like `[providers.x]`, or remove the line to use defaults',
+        { key, kind: Array.isArray(v) ? '数组/array' : typeof v })
+    )
+  }
+  return v as T
+}
+
+/** 可选对象键形状守卫：非 undefined/null 时必须是对象（标量/数组直接给 ConfigError） */
+function normalizable<T extends object>(v: unknown, key: string): T | undefined {
+  if (v === undefined || v === null) return undefined
+  if (typeof v !== 'object' || Array.isArray(v)) {
+    throw new ConfigError(
+      t('config.toml 的 [{key}] 必须是表（当前是{kind}）。请把该项改为表形态，或删除该行恢复默认',
+        'config.toml [{key}] must be a table (got {kind}). Change it to a table, or remove the line to use defaults',
+        { key, kind: Array.isArray(v) ? '数组/array' : typeof v })
+    )
+  }
+  return v as T
 }
 
 /** 定时切换规范化（日类型模型，2026-10 起）：

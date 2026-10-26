@@ -20,6 +20,7 @@ import {
 import {
   appRootFromExecPath,
   buildWinInstallerCommand,
+  cleanOldVersions,
   detectInstallShape,
   hasWindowsUninstaller,
   installBareBinary,
@@ -618,6 +619,31 @@ describe('安装原语', () => {
     expect(fs.readFileSync(target, 'utf8')).toBe('NEW-BIN')
     expect(fs.readFileSync(target + '.old', 'utf8')).toBe('OLD-BIN')
     expect(fs.existsSync(target + '.new')).toBe(false)
+  })
+
+  it('cleanOldVersions 一并清理托盘 .old（裸形态托盘同版本换新后的收尾）', async () => {
+    const exe = path.join(tmp, 'bin', process.platform === 'win32' ? 'modeldock.exe' : 'modeldock')
+    fs.mkdirSync(path.dirname(exe), { recursive: true })
+    fs.writeFileSync(exe, 'CUR')
+    const trayExe = 'ModelDockTray' + (process.platform === 'win32' ? '.exe' : '')
+    fs.mkdirSync(path.join(path.dirname(exe), trayExe + '.old'), { recursive: true })
+
+    const removed = await cleanOldVersions(exe)
+
+    expect(removed.some((p) => p.includes(trayExe + '.old'))).toBe(true)
+    expect(fs.existsSync(path.join(path.dirname(exe), trayExe + '.old'))).toBe(false)
+  })
+
+  it('sweepStaleUpdateStaging 覆盖全部 mkdtemp 前缀（app/bin/sums 崩溃残留可收）', async () => {
+    const mk = (n: string) => { const d = path.join(os.tmpdir(), n); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'x'), '1'); return d }
+    const made = ['modeldock-app-sweeptest', 'modeldock-bin-sweeptest', 'modeldock-sums-sweeptest', 'modeldock-setup-sweeptest', 'modeldock-unrelated-sweeptest'].map(mk)
+    try {
+      await sweepStaleUpdateStaging()
+      for (const d of made.slice(0, 4)) expect(fs.existsSync(d)).toBe(false)
+      expect(fs.existsSync(made[4])).toBe(true) // 其他前缀不误伤
+    } finally {
+      await fsp.rm(made[4], { recursive: true, force: true }).catch(() => {})
+    }
   })
 })
 

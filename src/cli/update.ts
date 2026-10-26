@@ -4,6 +4,7 @@ import { getSecret, setSecret, defaultStore } from '../config/secrets.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { DEFAULT_UPDATE_REPO } from '../config/types.js'
 import { checkUpdate, cleanUpdateRemnants, runUpdate } from '../update/run.js'
+import { acquireUpdateLock } from '../update/lock.js'
 
 /** PAT 在 secrets 里的固定 id（key_ref 存 config.toml [update].token_ref） */
 export const UPDATE_TOKEN_SECRET_ID = 'update-token'
@@ -11,9 +12,15 @@ export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 /** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
  *  公开仓库匿名即可更新；--token 可选——私有仓库兼容模式或提升匿名限流（60 次/时 → 5000 次/时） */
 export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean }): Promise<void> {
-  // --clean 纯本地清理，不需要令牌与网络
+  // --clean 纯本地清理，不需要令牌与网络；但必须持更新锁——恰逢另一 update 在 rename dance
+  // （旧 exe 已改名 .old、新 exe 未落位）或 mac 回滚窗口时，裸删 .old 会让失败回滚无从执行
   if (opts.clean) {
-    await cleanUpdateRemnants(process.execPath)
+    const release = await acquireUpdateLock()
+    try {
+      await cleanUpdateRemnants(process.execPath)
+    } finally {
+      release()
+    }
     return
   }
 

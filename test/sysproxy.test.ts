@@ -43,7 +43,7 @@ describe('parseScutilProxy（macOS scutil --proxy 输出）', () => {
   it('仅 HTTP 开 → http://host:port', () => {
     expect(parseScutilProxy(httpsOn.replace(/HTTPS\w*\s*:\s*\S+/g, (m) => m.startsWith('HTTPSEnable') ? 'HTTPSEnable : 0' : m))).toBe('http://127.0.0.1:7896')
   })
-  it('仅 SOCKS 开 → socks5://host:port', () => {
+  it('仅 SOCKS 开 → null（undici 不支持 socks5，弃用走直连）', () => {
     const out = `<dictionary> {
   HTTPEnable : 0
   HTTPSEnable : 0
@@ -51,7 +51,7 @@ describe('parseScutilProxy（macOS scutil --proxy 输出）', () => {
   SOCKSPort : 1080
   SOCKSProxy : 192.168.1.9
 }`
-    expect(parseScutilProxy(out)).toBe('socks5://192.168.1.9:1080')
+    expect(parseScutilProxy(out)).toBeNull()
   })
   it('全部关闭 → null', () => {
     const out = `<dictionary> {
@@ -71,10 +71,10 @@ describe('parseWinProxyServer（Windows 注册表 ProxyServer 值）', () => {
   it('整机形态 host:port', () => {
     expect(parseWinProxyServer('127.0.0.1:7890')).toBe('http://127.0.0.1:7890')
   })
-  it('分协议形态取 https，退 http/socks', () => {
+  it('分协议形态取 https，退 http；socks 条目弃用', () => {
     expect(parseWinProxyServer('ftp=10.0.0.1:21;http=10.0.0.2:8080;https=10.0.0.3:8443')).toBe('http://10.0.0.3:8443')
     expect(parseWinProxyServer('http=10.0.0.2:8080;socks=10.0.0.4:1080')).toBe('http://10.0.0.2:8080')
-    expect(parseWinProxyServer('socks=10.0.0.4:1080')).toBe('socks5://10.0.0.4:1080')
+    expect(parseWinProxyServer('socks=10.0.0.4:1080')).toBeNull()
   })
   it('空值/缺端口 → null', () => {
     expect(parseWinProxyServer('')).toBeNull()
@@ -100,5 +100,11 @@ describe('resolveUpdateProxyUrl（解析链与逃生口）', () => {
 
   it('MODELRDOCK_NO_SYS_PROXY=1 → 一键禁用（优先于环境变量）', async () => {
     expect(await resolveUpdateProxyUrl({ HTTPS_PROXY: 'http://10.1.1.1:8888', MODELRDOCK_NO_SYS_PROXY: '1' })).toBeNull()
+  })
+
+  it('环境变量是 SOCKS 形态 → 弃用（继续查系统代理），绝不交 socks5:// 出去', async () => {
+    const r = await resolveUpdateProxyUrl({ ALL_PROXY: 'socks5://c:3' })
+    // 结果可能是 null（无系统代理）或系统 HTTP 代理，但绝不会是 SOCKS——undici ProxyAgent 不支持
+    expect(r ?? '').not.toMatch(/^socks/i)
   })
 })

@@ -15,7 +15,7 @@ import {
   invalidateSecretsCache,
 } from '../src/config/secrets.js'
 import { configPath, secretsPath } from '../src/util/paths.js'
-import { readTextIfExists, acquireFileLock, withFileLock, sleep } from '../src/util/fsx.js'
+import { atomicWrite, readTextIfExists, acquireFileLock, withFileLock, sleep } from '../src/util/fsx.js'
 
 afterEach(() => {
   // fakeHome 的 restore 由各用例自行调用（before/after 配对）
@@ -469,6 +469,71 @@ describe('saveConfig 无变化跳写（PERF-14 残余）', () => {
       await saveConfig(emptyConfig())
       expect(fs.readFileSync(configPath(), 'utf8')).toBe(content)
     } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('config 形状守卫与密文守卫（2026-10 复审 P2）', () => {
+  it('手写 TOML 容器键为标量（providers = 5）→ 可操作 ConfigError，不抛原始 TypeError', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(configPath(), 'providers = 5\n', 0o600)
+      await expect(loadConfig()).rejects.toThrow(ConfigError)
+      await expect(loadConfig()).rejects.toThrow(/providers/)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('removeProviderCascade 清 gateway.route_next（悬空钉定不残留）', () => {
+    const c = {
+      version: 1 as const,
+      providers: { gone: { base_url: 'https://x', protocol: 'anthropic' as const, auth_style: 'bearer' as const } },
+      profiles: {},
+      harness: {},
+      gateway: { route_next: 'gone', auto_route_provider: 'other' },
+    } as unknown as Parameters<typeof removeProviderCascade>[0]
+    removeProviderCascade(c, 'gone')
+    expect(c.gateway!.route_next).toBeUndefined()
+    expect(c.gateway!.auto_route_provider).toBe('other')
+  })
+
+  it('secrets.json 含异平台密文（跨机拷贝）→ 可操作 SecretsError，绝不二次加密重写', async () => {
+    const h = fakeHome()
+    const { pickFileCipher, SecretsError } = await import('../src/config/secrets.js')
+    const cipher = pickFileCipher()
+    if (!cipher.enabled) {
+      h.restore() // 明文后端（mac 无 DPAPI/mach）：守卫在启用加密的分支内，本用例不适用
+      return
+    }
+    try {
+      const foreignPrefix = cipher.prefix === 'enc:dpapi:' ? 'enc:mach:' : 'enc:dpapi:'
+      const raw = JSON.stringify({ a: foreignPrefix + 'QUJD' }) + '\n'
+      await atomicWrite(secretsPath(), raw, 0o600)
+      await expect(getSecret('file:a')).rejects.toBeInstanceOf(SecretsError)
+      // 文件保持原样：不再被「存量明文自动迁移」包一层加密
+      expect(await readTextIfExists(secretsPath())).toBe(raw)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('解密失败 → 可操作 SecretsError（不透传 PowerShell/GCM 原始报错）', async () => {
+    const h = fakeHome()
+    const { pickFileCipher, __testSetDpapiBatch, SecretsError } = await import('../src/config/secrets.js')
+    if (pickFileCipher().prefix !== 'enc:dpapi:') {
+      h.restore() // 非 DPAPI 平台：解密失败的包装路径不适用（mach 侧由 GCM 直接抛）
+      return
+    }
+    __testSetDpapiBatch(async () => {
+      throw new Error('boom-unprotect')
+    })
+    try {
+      await atomicWrite(secretsPath(), JSON.stringify({ a: 'enc:dpapi:QUJD' }) + '\n', 0o600)
+      await expect(getSecret('file:a')).rejects.toBeInstanceOf(SecretsError)
+    } finally {
+      __testSetDpapiBatch()
       h.restore()
     }
   })

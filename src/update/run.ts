@@ -244,12 +244,18 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
             throw new UpdateError(t('更新包里没有入口程序 {n}，包内容异常；已中止', 'The update package does not contain the entry program {n}; aborted', { n: entryName }))
           }
           await installBareBinary(newBin, execPath)
-          // 托盘与网关同包同版本换新：包里带了就一并 rename dance（缺组件/目标都跳过，不报错）
+          // 托盘与网关同包同版本换新：包里带了就一并 rename dance（缺组件/目标都跳过，不报错）。
+          // 托盘替换失败只降级为警告——此刻主程序已换新成功，若让异常冒泡会整体标「安装失败」、
+          // 网关不拉起，而重试只会回「已是最新」（运行中的已是新版），用户卡死在失败态
           const trayEntry = platform === 'win32' ? 'ModelDockTray.exe' : 'ModelDockTray'
           const newTray = path.join(staging, trayEntry)
           const targetTray = path.join(path.dirname(execPath), trayEntry)
           if (fs.existsSync(newTray)) {
-            await installBareBinary(newTray, targetTray)
+            try {
+              await installBareBinary(newTray, targetTray)
+            } catch (te) {
+              log(c.yellow(t('⚠ 托盘替换失败（主程序已更新）：{m}。旧托盘若还在运行，手动重启即可换新', '⚠ Tray replacement failed (main program updated): {m}. If the old tray is still running, restart it manually to refresh', { m: (te as Error).message })))
+            }
           }
           log(c.green(t('✓ 已更新到 v{v}', '✓ Updated to v{v}', { v: m.version })))
           if (wasLive) {
@@ -289,12 +295,15 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
 }
 
 /** 清扫上次更新残留的暂存：下载目录 modeldock-update-*（win-setup 成功路径刻意留下的 setup.exe）
- *  与孤儿 modeldock-setup-*。调用方须已持有更新锁；被 Inno 占用的文件删不掉就留给再下一次。 */
+ *  与孤儿 modeldock-setup-*。调用方须已持有更新锁；被 Inno 占用的文件删不掉就留给再下一次。
+ *  前缀覆盖本域全部 mkdtemp 形态：app（mac .app staging）/ bin（裸二进制，单份可达上百 MB）/
+ *  sums（校验和下载）——这些只靠正常路径的 finally 清理，更新器进程被杀/崩溃时残留，
+ *  下次更新必须收掉，否则孤儿 staging 永久占盘。 */
 export async function sweepStaleUpdateStaging(): Promise<void> {
   try {
     const tmp = os.tmpdir()
     for (const name of await fsp.readdir(tmp)) {
-      if (!/^modeldock-(update|setup)-/.test(name)) continue
+      if (!/^modeldock-(update|setup|app|bin|sums)-/.test(name)) continue
       await fsp.rm(path.join(tmp, name), { recursive: true, force: true }).catch(() => {})
     }
   } catch {

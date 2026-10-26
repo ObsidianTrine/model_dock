@@ -74,8 +74,12 @@ async function stopTrayProcesses(): Promise<void> {
     const lines = listProcessLines()
     if (!lines) return
     for (const { pid, cmd } of parsePidCommandLines(lines)) {
-      // 匹配托盘可执行名；排除本进程与自身路径里的误配（托盘进程极小概率自己重名）
-      if (!/ModelDockTray(\.exe)?(\s|$|")/i.test(cmd)) continue
+      // 只把「命令行的可执行段（首个 token）」当判定对象：ModelDockTray 出现在参数里
+      // （grep ModelDockTray …、tail -f … 之类以它作参数的进程）不再误杀——CORRECT-05 对
+      // sweep 的教训同源：按命令行签名全机杀进程要收敛误杀面。取首 token 对带空格的
+      // 未加引号路径会失手（Windows CIM 输出对含空格路径惯例加引号，best-effort 可接受）
+      const exe = cmd.startsWith('"') ? cmd.slice(1, cmd.indexOf('"', 1)) : cmd.split(/\s/)[0]
+      if (!exe || !/ModelDockTray(\.exe)?$/i.test(path.basename(exe.replace(/"/g, '')))) continue
       // tree:false——托盘发起的更新里更新器就是托盘的子进程，taskkill /T 会把自己一并杀掉，
       // 安装步骤永远执行不到（Windows 托盘更新必败的根因）；托盘无必须连带清理的子进程
       killByPid(pid, spawnSync, { tree: false })
@@ -215,13 +219,19 @@ export function buildWinInstallerCommand(
 
 // 收尾
 
-/** 清理上一版残留（.old）：mac-app = <appRoot>.old；裸二进制 = <bin>.old。找不到就静默返回。 */
+/** 清理上一版残留（.old）：mac-app = <appRoot>.old；裸二进制 = <bin>.old + 托盘
+ *  <binDir>/ModelDockTray(.exe).old（2026-10-26 起「托盘同版本换新」在裸形态也替换托盘并留
+ *  .old——不清理的话每次自更新都攒一份旧托盘，update --clean 永远清不掉）。找不到就静默返回。 */
 export async function cleanOldVersions(execPath: string): Promise<string[]> {
   const removed: string[] = []
   const candidates: string[] = []
   const appRoot = appRootFromExecPath(execPath)
   if (appRoot) candidates.push(appRoot + '.old')
-  else candidates.push(execPath + '.old')
+  else {
+    candidates.push(execPath + '.old')
+    const trayExe = 'ModelDockTray' + (process.platform === 'win32' ? '.exe' : '')
+    candidates.push(path.join(path.dirname(execPath), trayExe + '.old'))
+  }
   for (const c of candidates) {
     const norm = c.replace(/\\/g, '/')
     if (norm === execPath.replace(/\\/g, '/')) continue

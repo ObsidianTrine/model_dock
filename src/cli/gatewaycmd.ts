@@ -95,7 +95,14 @@ export async function cmdGatewayStop(): Promise<void> {
     return
   }
   if (live) {
-    process.kill(live.pid, 'SIGTERM')
+    // 验活与 kill 之间的竞态（进程恰好退出/pid 被复用后瞬间死亡）会抛 ESRCH：
+    // 与下方 SIGKILL 分支对称包住，视为「已停止」继续走 pidExitedWithin 复核；
+    // 不包的话手动 stop 报原始错误、经 update 流程会以「安装失败：kill ESRCH」中止整个更新
+    try {
+      process.kill(live.pid, 'SIGTERM')
+    } catch {
+      /* 已退出 */
+    }
     if (await pidExitedWithin(live.pid)) {
       console.log(c.green(t('✓ 网关已停止（pid {pid}）', '✓ Gateway stopped (pid {pid})', { pid: live.pid })))
       if (managed) console.log(c.gray(t('  服务保留，下次登录自动重启；彻底移除：modeldock gateway uninstall', '  The service stays installed and restarts on next login. Remove it fully: modeldock gateway uninstall')))
