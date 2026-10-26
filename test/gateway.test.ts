@@ -6,7 +6,7 @@ import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
-import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit } from '../src/gateway/server.js'
+import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision } from '../src/gateway/server.js'
 import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import type { Config } from '../src/config/types.js'
@@ -297,6 +297,17 @@ describe('autostart 与 overview 缓存', () => {
     expect(overviewCacheHit(cached, fakeRt, 0, 'en', 1_000 + 100)).toBe(false)
     // BUG-04 根因回归：TTL 必须大于 UI 轮询间隔（5000ms），否则缓存在下一次轮询前必过期、永不命中
     expect(OVERVIEW_TTL_MS).toBeGreaterThan(5_000)
+  })
+
+  it('overview 响应决策：TTL 内直发、键匹配过期走 SWR（旧快照先行）、键不匹配同步重建', () => {
+    const fakeRt = {} as any
+    const cached = { at: 1_000, rt: fakeRt, reloads: 0, lang: 'zh', data: '{}' }
+    expect(overviewServeDecision(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS - 1)).toBe('hit')
+    expect(overviewServeDecision(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS)).toBe('stale')
+    // SWR 只在键匹配时给旧快照：配置写（reloads 递增）/语言切换/换 runtime 一律 miss（同步重建，写后立即可见）
+    expect(overviewServeDecision(cached, fakeRt, 1, 'zh', 1_000 + 100)).toBe('miss')
+    expect(overviewServeDecision(cached, fakeRt, 0, 'en', 1_000 + 100)).toBe('miss')
+    expect(overviewServeDecision(cached, { ...fakeRt, n: 1 } as any, 0, 'zh', 1_000 + 100)).toBe('miss')
   })
 
   it('TTL 缓存不互借语言：缓存命中后请求级语言切换仍拿到完整响应（命中逐字节一致性归 console-cache 套件）', async () => {

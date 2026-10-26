@@ -9,7 +9,7 @@ import { gatewayStatePath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
 import { buildRuntime, clearGatewayState, pidAlive, readGatewayState, reloadRuntime, writeGatewayState } from './state.js'
-import { createGatewayServer } from './server.js'
+import { createGatewayServer, warmupOverview } from './server.js'
 import { listenWithRetry } from './shared.js'
 import { startBootUpdateCheck } from '../update/webupdate.js'
 import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
@@ -155,6 +155,10 @@ export async function startForeground(portOverride?: number): Promise<void> {
   // 更新静默检查（M2）：启动后台查一次（24h TTL 持久化在 gateway.json），失败不打扰；
   // 结果经 /_modeldock/admin/update/status 供控制台徽标展示
   startBootUpdateCheck(rt)
+
+  // 控制台首屏预热：后台构建一次 overview，把适配器探测 memo（Windows reg query / PATH 扫描）、
+  // secrets 解密缓存与缓存串全部焐热——用户随后打开 Web 控制台不再等冷探测的数秒尖峰
+  warmupOverview(rt)
 
 
   // 配置热加载：CLI 原子写 config.toml → rename 事件 → 防抖重载

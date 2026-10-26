@@ -815,7 +815,60 @@ export function overviewCacheHit(
   lang: string,
   now: number
 ): boolean {
-  return cached.rt === rt && cached.reloads === reloads && cached.lang === lang && now - cached.at < OVERVIEW_TTL_MS
+  return overviewServeDecision(cached, rt, reloads, lang, now) === 'hit'
+}
+
+/** overview 响应决策（`now` 可注入便于单测）：
+ *  - hit：键匹配且 TTL 内——直发缓存串；
+ *  - stale：键匹配但过 TTL——先回旧快照（零等待），后台单飞重建，UI 下一轮轮询（≤5s）拿到新数据。
+ *    Windows 冷探测（桌面客户端 reg query 全树、DPAPI 解密 spawn PowerShell、PATH 同步全扫）只发生在
+ *    后台，不再挡在用户打开页面的关键路径上；
+ *  - miss：键不匹配（配置写经 reloads 递增、语言切换、冷启动）——同步重建，保证写后立即可见新配置。 */
+export function overviewServeDecision(
+  cached: NonNullable<typeof overviewCache>,
+  rt: GatewayRuntime,
+  reloads: number,
+  lang: string,
+  now: number
+): 'hit' | 'stale' | 'miss' {
+  if (cached.rt !== rt || cached.reloads !== reloads || cached.lang !== lang) return 'miss'
+  return now - cached.at < OVERVIEW_TTL_MS ? 'hit' : 'stale'
+}
+
+let overviewRebuilding: Promise<unknown> | null = null
+
+async function rebuildOverview(rt: GatewayRuntime): Promise<string> {
+  const view = await buildOverview(rt)
+  const data = JSON.stringify(view)
+  overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
+  return data
+}
+
+/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；键匹配但过期走 SWR
+ * （旧串先行 + 后台单飞重建）；键不匹配同步重建。缓存键含请求语言：view 里的客户端卡片描述等
+ * 文案随请求语言生成，语言不同不能互借缓存。 */
+async function overviewViewData(rt: GatewayRuntime): Promise<string> {
+  const cached = overviewCache
+  if (!cached) return rebuildOverview(rt)
+  const decision = overviewServeDecision(cached, rt, rt.reloads, getLang(), Date.now())
+  if (decision === 'hit') return cached.data
+  if (decision === 'stale') {
+    if (!overviewRebuilding) {
+      overviewRebuilding = rebuildOverview(rt).catch(() => {}).finally(() => { overviewRebuilding = null })
+    }
+    return cached.data
+  }
+  return rebuildOverview(rt)
+}
+
+/** 启动预热：后台构建一次 overview（顺带焐热适配器探测 memo、secrets 解密缓存与缓存串本身）。
+ *  daemon 起来 2s 后用户大概率还没打开控制台——把 Windows 冷探测的数秒成本在无人等待时提前付掉，
+ *  用户随后打开页面首屏直接命中或走 SWR 秒回。失败静默（下次请求/轮询照常重建）。 */
+export function warmupOverview(rt: GatewayRuntime, delayMs = 2_000): void {
+  const timer = setTimeout(() => {
+    overviewViewData(rt).catch(() => {})
+  }, delayMs)
+  timer.unref?.()
 }
 
 /** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
@@ -881,12 +934,18 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
     : null
   const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
   const usedByMap: Record<string, string[]> = {}
-  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，按 adapter 取回，顺序不受并发影响
+  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，按 adapter 取回，顺序不受并发影响。
+  // clientProfileOptions 与 status 一并并发：曾放在下方 clients 组装循环里逐个 await（当前仅 dsh
+  // 实现，读 YAML 目录），是 overview 重建路径上唯一的串行点，并行后与 status 同窗口完成
   const adapters = allAdapters(cfg)
-  const statuses = new Map(await Promise.all(adapters.map(async (a) => [a, await a.status(cfg, port)] as const)))
+  const [statuses, profileOptsList] = await Promise.all([
+    Promise.all(adapters.map(async (a) => [a, await a.status(cfg, port)] as const)),
+    Promise.all(adapters.map((a) => (a.clientProfileOptions ? a.clientProfileOptions() : Promise.resolve(null)))),
+  ])
+  const statusByAdapter = new Map(statuses)
   const clients = []
-  for (const a of adapters) {
-    const st = statuses.get(a)!
+  for (const [i, a] of adapters.entries()) {
+    const st = statusByAdapter.get(a)!
     const he = cfg.harness[a.id]
     const baseProviderId = he && hidSvc[a.id] ? hidSvc[a.id] : undefined
     // 跟随全局的客户端：服务随「正在使用」走（含定时窗口）；钉定路由的仍写自己的服务
@@ -907,7 +966,7 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
       route: pinnedRoute,
       pinnedProvider: pinnedRoute ? (cfg.profiles[pinnedRoute]?.provider ?? null) : null,
       // 客户端自身 profile（dsh 的 desktop/web 等）：未接入时 UI 据此渲染接入范围选择；attached 后回显已选范围
-      clientProfiles: a.clientProfileOptions ? await a.clientProfileOptions() : null,
+      clientProfiles: profileOptsList[i],
       clientScope: he?.client_profiles ?? null,
       // 沙箱安装能力（枚举语义见 sandboxInstallCapability）：'unsupported' 时 UI 降级为只展示安装指引
       install: a.install ? {
@@ -1256,17 +1315,6 @@ async function hOverview(c: AdminCtx): Promise<void> {
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
   return
-}
-
-/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串，否则重建并写缓存。
- *  缓存键含请求语言：view 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存。 */
-async function overviewViewData(rt: GatewayRuntime): Promise<string> {
-  const cached = overviewCache
-  if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) return cached.data
-  const view = await buildOverview(rt)
-  const data = JSON.stringify(view)
-  overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
-  return data
 }
 
 /** 托盘轻量模式数据源：overview 的瘦身投影（托盘菜单需要的字段，几 KB）。
