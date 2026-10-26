@@ -39,7 +39,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@inquirer/prompts": "^7.5.0",
+    "@inquirer/prompts": "^8.7.4",
     "commander": "^14.0.0",
     "qrcode-generator": "^1.5.2",
     "smol-toml": "^1.9.1",
