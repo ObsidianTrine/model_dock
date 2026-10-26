@@ -61,7 +61,7 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
   // 下次整包重写不再落回盘——下方 spread 会原样透传未知键，残留须在此显式删
   const gw = { ...input } as Record<string, unknown>
   delete gw.tray_lite
-  const cfg = gw as Config['gateway']
+  const cfg = gw as NonNullable<Config['gateway']>
   const sch = cfg.schedule
   if (!sch) return cfg
   const windows = (sch.windows ?? []).map((w) => {
