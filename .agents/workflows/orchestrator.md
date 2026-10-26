@@ -150,12 +150,15 @@ pending → running → reviewing → awaiting-human → merged
 - **改 backend**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话的后端（retry/resume 场景），首次运行默认 claude-headless。mock 只用于测试闭环本身。zcode-headless 走 ZCode CLI headless（`-p --json`）：桌面版不装 PATH 命令时设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`（macOS 例：`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`）；差异是 headless 无 `--max-turns`，轮次熔断不可用——wall-clock/token 熔断触发时 orchestrator 直接杀在跑进程树（进程级看门狗），prompt 经 argv 传递、超 30000 字符快速失败（该任务改用 claude-headless，stdin 无此限制）。
 - **审查用的是哪个引擎（异构审查）**：执行与审查是两个独立会话，审查引擎独立解析——`--review-backend <name|same>` 显式指定 > workflow.json `review.backend` 默认 > 上次 `review_spawned` 事件（retry/resume 不换审查引擎；prior 为 mock 而 worker 已换真实后端时忽略，防 mock 审查冒充真实审查）> **自动异构**（worker 为真实后端时，自动选另一个 CLI 可用的真实引擎，如 claude 干活 / zcode 审查；mock worker 永不异构）> 回落同源并记 `review_backend_fallback` 事件。**注意：去相关的关键是引擎异源（不同模型家族），只拆会话不换引擎仍有共同盲区**；`same` 可强制回到同源。zcode worker 的红线走 `.agents/hooks/policy-zcode.mjs`（`ORCH_POLICY_ENFORCE=1` 才裁决，日常 ZCode 会话直通）。
 - **引擎与模型的默认声明位（workflow.json）**：`worker: { backend, model? }` / `review: { backend, model? }`——仓库级声明「执行/审查各用什么引擎与模型」，CLI 四参数（`--worker-backend/--worker-model/--review-backend/--review-model`）单次覆盖，drain/nightly/scan --run 自动透传。优先级：CLI 显式 > resume 沿用（任务连续性）> 配置默认 > 既有缺省链。model 仅 claude 系 CLI 生效（`--model`）；zcode 无 `--model` 参数，模型跟随 ZCode 当前默认（App 内切换）。`review_spawned` 事件带 model 留痕可审计。本仓库当前默认：执行 zcode-headless、审查 claude-headless + opus。
-- **worker 被什么拦了**：worker 会话注入专属 policy hook（`.agents/hooks/policy-worker.mjs`），git push/tag、npm publish、碰 8687/8890 一律拒；这些是硬编码红线，任务卡写了也没用。zcode worker 走同一裁决（policy-zcode.mjs），但注册通道不同：**必须在用户级 `~/.zcode/cli/config.json` 的 hooks 块注册（绝对路径指向主仓库 checkout 的 `.agents/hooks/policy-zcode.mjs`，`enabled: true`）**——项目级 `.zcode/config.json` 的注册有 workspace trust 门且 headless 下被平台整体禁用（`config_project_hooks_pending_trust` / `workspace_hooks_feature_disabled`，2026-10-25 真跑 zcode 实证：项目级不生效、用户级成功拦截 git push 并留审计）。该 hook 以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
+- **worker 被什么拦了**：worker 会话注入专属 policy hook（`.agents/hooks/policy-worker.mjs`），git push/tag、npm publish、碰受保护端口一律拒；发布动作是硬编码红线，任务卡写了也没用（端口红线按 workflow.json protectedPorts 配置）。zcode worker 走同一裁决（policy-zcode.mjs / policy-dispatch.mjs），但注册通道不同：**必须在用户级 `~/.zcode/cli/config.json` 的 hooks 块注册（`enabled: true`）**——项目级 `.zcode/config.json` 的注册有 workspace trust 门且 headless 下被平台整体禁用（`config_project_hooks_pending_trust` / `workspace_hooks_feature_disabled`，2026-10-25 真跑 zcode 实证：项目级不生效、用户级成功拦截 git push 并留审计）。用户级注册二选一：
+  - **机器级 dispatcher（推荐，一次注册全项目生效）**：`cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/`，用户级 hook 指向它——它按 hook 事件的 cwd 委托该项目自带的 `.agents/scripts/policy.mjs`，新项目只要带 `.agents/` 就自动受保护，零注册；
+  - **逐项目绝对路径（旧行为）**：每个项目注册自己的 `<项目绝对路径>/.agents/hooks/policy-zcode.mjs`。
+  两者都以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
 - **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id。
 - **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
 - **worker 起不来（claude CLI 缺失/未登录）会怎样**：任务卡自动落 `blocked/`（failed 事件附原因），不会悬在 running/ 冒充在跑；修好环境后 `resume <task-id>` 续做。
-- **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `MODELRDOCK_NIGHTLY_WEBHOOK=<url>`（写进 schedule install 前的 shell 或 wrapper 同目录环境）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
+- **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `${envPrefix}_NIGHTLY_WEBHOOK=<url>`（envPrefix 缺省 AGENTS，旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 兼容识别）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
 
 ## UI 冒烟门禁（ui_check）
 
@@ -307,5 +310,6 @@ node .agents/scripts/agent-init.mjs   # 交互生成 workflow.json + 注册双�
 - 派生链：`projectName` 缺省取 package.json name（通知标题、schedule 标识 `com.<slug>.orchestrator-nightly`、Windows 任务名都由它派生）；`scheduleId` 可显式指定以兼容既有注册。
 - 受保护端口的「启动监听」拦截正则 = 通用可执行名（node/tsx/npx/npm run）+ workflow.json `listenCommandNames`（项目自备 CLI 名）。
 - webhook 通知环境变量 = `${envPrefix}_NIGHTLY_WEBHOOK`（envPrefix 缺省 AGENTS；旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 永远兼容）。
+- **headless worker 的 Bash 红线**（zcode-headless 必需）装一次机器级 dispatcher 即可全项目生效：`cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/`，再在用户级 `~/.zcode/cli/config.json` 注册指向它（详见「worker 被什么拦了」）。
 - 领域 playbook（add-adapter / add-preset / incident-response / ui-kit 等）是模板项目专属，移植时删除或重写；feature-branch / code-review / docs-sync / worktree-rescue / release / hotfix / orchestrator 通用可留用。
 
