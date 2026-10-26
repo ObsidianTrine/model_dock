@@ -2,9 +2,11 @@
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { createUsageTap } from '../../src/gateway/usage.js'
 import { gatewayLogsDir, readGatewayLog, reconcileAll, reconcileTask } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
 import { cardText, mkRepo, runOrch } from './helpers.js'
 import { fakeHome } from '../helpers.js'
@@ -124,6 +126,64 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     } finally {
       repo.cleanup()
       h.restore()
+    }
+  })
+})
+
+describe('orchestrator reconcile > 启用条件（gatewayLogDir 配置化，可移植缺省关闭）', () => {
+  /** 清掉重定向 env 模拟「未启用」环境，finally 恢复。 */
+  function withoutRedirectEnv<T>(fn: () => T): T {
+    const savedFake = process.env.MODELRDOCK_FAKE_HOME
+    const savedHome = process.env.MODELRDOCK_HOME
+    delete process.env.MODELRDOCK_FAKE_HOME
+    delete process.env.MODELRDOCK_HOME
+    try {
+      return fn()
+    } finally {
+      if (savedFake !== undefined) process.env.MODELRDOCK_FAKE_HOME = savedFake
+      else delete process.env.MODELRDOCK_FAKE_HOME
+      if (savedHome !== undefined) process.env.MODELRDOCK_HOME = savedHome
+      else delete process.env.MODELRDOCK_HOME
+    }
+  }
+
+  it('未配置 gatewayLogDir → 对账关闭（gatewayLogsDir null / reconcileTask skipped 可操作原因）', () => {
+    const repo = mkRepo() // fixture workflow.json 无 gatewayLogDir
+    try {
+      withoutRedirectEnv(() => {
+        expect(gatewayLogsDir(loadWorkflowConfig(repo.root))).toBeNull()
+        submitCard(repo.root, 'r-off')
+        runOrch(repo.root, 'run r-off --backend mock', { ORCH_MOCK_FILE: 'docs/notes-r-off.md' })
+        const r = reconcileTask(repo.root, 'r-off', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+        expect(r.skipped).toBe(true)
+        expect(r.reason).toContain('gatewayLogDir')
+      })
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('显式 gatewayLogDir → 对账启用（repoRoot 锚定，env 重定向优先级更高）', () => {
+    const logs = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-logs-'))
+    const repo = mkRepo()
+    try {
+      const wfPath = path.join(repo.root, '.agents', 'workflow.json')
+      const wf = JSON.parse(fs.readFileSync(wfPath, 'utf8'))
+      wf.gatewayLogDir = logs
+      fs.writeFileSync(wfPath, JSON.stringify(wf))
+      withoutRedirectEnv(() => {
+        expect(gatewayLogsDir(loadWorkflowConfig(repo.root))).toBe(logs)
+        // env 重定向永远优先（测试隔离通道不被配置抢走）
+        process.env.MODELRDOCK_FAKE_HOME = path.join(os.tmpdir(), 'gw-fake-')
+        try {
+          expect(gatewayLogsDir(loadWorkflowConfig(repo.root))).toBe(path.join(process.env.MODELRDOCK_FAKE_HOME, '.modeldock', 'logs'))
+        } finally {
+          delete process.env.MODELRDOCK_FAKE_HOME
+        }
+      })
+    } finally {
+      repo.cleanup()
+      fs.rmSync(logs, { recursive: true, force: true })
     }
   })
 })

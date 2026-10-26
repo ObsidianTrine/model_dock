@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { isNpmFamily, loadWorkflowConfig, releaseHatches, resolveTestCmd, workflowConfigPath } from '../../.agents/scripts/workflow-config.mjs'
+import { displayProjectName, expandHome, isNpmFamily, loadWorkflowConfig, releaseHatches, resolveTestCmd, workflowConfigPath } from '../../.agents/scripts/workflow-config.mjs'
 
 describe('workflow-config > 脚本锚定（hook 场景）', () => {
   it('无 repoRoot 参数 → 读 .agents 自身仓库的 workflow.json（本仓库已配置红线）', () => {
@@ -102,6 +102,75 @@ describe('workflow-config > baseBranches（多基准分支保护）', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('workflow-config > 可移植性派生字段（projectName/listenCommandNames/scheduleId/gatewayLogDir/version）', () => {
+  function fixture(workflow: Record<string, unknown>, opts?: { packageJson?: Record<string, unknown> | null }): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-port-'))
+    fs.mkdirSync(path.join(dir, '.agents'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(workflow))
+    if (opts?.packageJson !== null) {
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(opts?.packageJson ?? { name: 'my-app' }))
+    }
+    return dir
+  }
+
+  it('projectName 派生链：显式 > package.json name > 仓库目录名', () => {
+    const dir = fixture({ projectName: 'My App' })
+    try {
+      expect(loadWorkflowConfig(dir).projectName).toBe('My App')
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify({}))
+      expect(loadWorkflowConfig(dir).projectName).toBe('my-app') // package.json name
+      fs.rmSync(path.join(dir, 'package.json'))
+      expect(loadWorkflowConfig(dir).projectName).toBe(path.basename(dir)) // 目录名兜底
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('脚本锚定（无 repoRoot）也走同一条派生链（本仓库显式 projectName 优先于 package.json name）', () => {
+    expect(loadWorkflowConfig().projectName).toBe('ModelDock')
+  })
+
+  it('缺省值：listenCommandNames 空、scheduleId null、gatewayLogDir null、version null', () => {
+    const dir = fixture({})
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.listenCommandNames).toEqual([])
+      expect(cfg.scheduleId).toBeNull()
+      expect(cfg.gatewayLogDir).toBeNull()
+      expect(cfg.version).toBeNull()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('显式字段解析：listenCommandNames/scheduleId/version；gatewayLogDir 展开 ~/', () => {
+    const dir = fixture({ version: 1, listenCommandNames: ['foo-cli', 'bar-server'], scheduleId: 'com.example.nightly', gatewayLogDir: '~/.gw/logs' })
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.version).toBe(1)
+      expect(cfg.listenCommandNames).toEqual(['foo-cli', 'bar-server'])
+      expect(cfg.scheduleId).toBe('com.example.nightly')
+      expect(cfg.gatewayLogDir).toBe(path.join(expandHome('~'), '.gw', 'logs'))
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('displayProjectName：分段首字母大写（通知标题/调度任务名展示用）', () => {
+    expect(displayProjectName('modeldock')).toBe('Modeldock')
+    expect(displayProjectName('ModelDock')).toBe('ModelDock')
+    expect(displayProjectName('my-app')).toBe('MyApp')
+    expect(displayProjectName('')).toBe('')
+  })
+
+  it('expandHome：~/ 与 ~ 展开，其余原样', () => {
+    expect(expandHome('~')).toBe(os.homedir())
+    expect(expandHome('~/logs')).toBe(path.join(os.homedir(), 'logs'))
+    expect(expandHome('/abs/path')).toBe('/abs/path')
+    expect(expandHome('')).toBe('')
   })
 })
 

@@ -20,6 +20,17 @@ export function protectedPorts() {
   return loadWorkflowConfig().protectedPorts;
 }
 
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * 监听类命令的项目自备可执行名（workflow.json listenCommandNames，缺省空）。
+ * node/tsx/npx/npm run 是语言生态通用形态永远参与拦截；项目自装 CLI（如本仓库的
+ * modeldock/gateway）经配置注入——代码不携带任何项目专属命令名。
+ */
+export function listenCommandNames(cfg) {
+  return (cfg ?? loadWorkflowConfig()).listenCommandNames;
+}
+
 /**
  * 基准分支集合（guard 的保护对象）。
  * workflow.json `baseBranches` 显式清单存在 = 保护集合为它 ∪ 合并目标（多基准分支仓库，
@@ -134,11 +145,13 @@ export function evaluateCommand(cmd) {
   const port = ports.find((p) => command.includes(p));
   if (port) {
     const destructive = /\b(kill|killall|pkill|taskkill|fuser|lsof\s+-t)\b/i;
-    const listenCmd = /\b(node|tsx|npx|npm\s+run(\s+\S+)?|modeldock|gateway)\b/i;
+    const names = listenCommandNames().map(escapeRegExp);
+    const listenCmd = new RegExp(`\\b(node|tsx|npx|npm\\s+run(\\s+\\S+)?${names.length ? `|${names.join('|')}` : ''})\\b`, 'i');
     if (destructive.test(command)) {
       return { allowed: false, rule: 'port', reason: `对端口 ${port} 相关进程执行 kill/stop（受保护端口见 workflow.json protectedPorts，永远人工处置）` };
     }
-    if (listenCmd.test(command) && !/\bgateway\s+(status|logs)\b/.test(command) && !/\b(status|logs|list)\b/.test(command)) {
+    // status/logs/list 查询类放行（read-only 诊断；项目命令的 status/logs 子命令同样被通用豁免覆盖）
+    if (listenCmd.test(command) && !/\b(status|logs|list)\b/.test(command)) {
       return { allowed: false, rule: 'port', reason: `启动/重启命令携带受保护端口 ${port}（受保护端口见 workflow.json protectedPorts，测试必须用随机/高位端口）` };
     }
     for (const p of ports) {

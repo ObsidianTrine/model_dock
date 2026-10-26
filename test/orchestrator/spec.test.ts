@@ -54,6 +54,13 @@ describe('orchestrator spec > prompt 构建与解析', () => {
     expect(p).toContain('EARS')
     expect(p).toContain('files_hint')
     expect(p).toContain('AGENTS.md 红线')
+    // 红线经 reviewNotes 注入（可移植：不写死任何项目的端口/框架名）；缺省不展开
+    expect(p).toContain('设计不得违反 AGENTS.md 红线；')
+  })
+
+  it('spec prompt 第三参数注入项目红线（workflow.json reviewNotes）', () => {
+    const p = buildSpecPrompt('支持配置导出', process.cwd(), '受保护端口 7000、禁止手写锁文件')
+    expect(p).toContain('设计不得违反 AGENTS.md 红线（受保护端口 7000、禁止手写锁文件）；')
   })
 
   it('parseSpecBlocks：四块齐全解出 id/title；缺块或缺 meta 字段返回 null', () => {

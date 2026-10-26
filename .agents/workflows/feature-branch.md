@@ -83,13 +83,20 @@ node .agents/scripts/feature-branch.mjs list
 
 本工作流与项目语言无关，唯一依赖是 **Node.js ≥18**（脚本纯 Node 标准库，零第三方依赖）。C++ / Rust / Python 等项目照搬即可。
 
-### 拷贝清单（一个目录 + 一行 hook 注册）
+### 拷贝清单（一个目录 + 一键初始化）
 
-工作流的全部内容自包含在 `.agents/` 目录中，**整目录拷贝即可**：
+工作流的全部内容自包含在 `.agents/` 目录中，**整目录拷贝后跑一键初始化**：
 
 ```bash
 # 在目标项目根目录：
 cp -r <模板项目>/.agents .          # hooks/ + workflows/ + scripts/ + workflow.json 一次到位
+node .agents/scripts/agent-init.mjs # 交互生成本项目 workflow.json + 注册双客户端 hook + AGENTS.md 骨架
+# 非交互（agent 代跑）：加 --defaults；已有 workflow.json 重生成加 --force
+```
+
+只想要最小 feature-branch（不含 orchestrator）时，手工方式仍然可用：
+
+```bash
 # 另需 hook 注册（.claude/settings.json，内容原样即可；或改配到用户级 ~/.claude/settings.json）：
 mkdir -p .claude && cp <模板项目>/.claude/settings.json .claude/
 ```

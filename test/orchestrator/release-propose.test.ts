@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { parseCommit, bumpLevel, incVersion, extractUnreleased } from '../../.agents/scripts/orchestrator/release-propose.mjs'
+import { githubRepoBase, parseCommit, bumpLevel, incVersion, extractUnreleased } from '../../.agents/scripts/orchestrator/release-propose.mjs'
 import { mkRepo, git, runOrch, tryOrch } from './helpers.js'
 
 describe('orchestrator release-propose > 纯函数', () => {
@@ -43,10 +43,39 @@ describe('orchestrator release-propose > 纯函数', () => {
   })
 })
 
+describe('orchestrator release-propose > githubRepoBase（远端解析，链接表行数据源）', () => {
+  it('https / ssh / 带 .git 尾巴三种 GitHub 形态都解析；仓库主页不含 .git', () => {
+    const repo = mkRepo()
+    try {
+      git(repo.root, 'remote add origin https://github.com/ObsidianTrine/model_dock.git')
+      expect(githubRepoBase(repo.root)).toBe('https://github.com/ObsidianTrine/model_dock')
+      git(repo.root, 'remote set-url origin git@github.com:foo/bar.git')
+      expect(githubRepoBase(repo.root)).toBe('https://github.com/foo/bar')
+      git(repo.root, 'remote set-url origin https://github.com/foo/bar')
+      expect(githubRepoBase(repo.root)).toBe('https://github.com/foo/bar')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('非 GitHub 托管 / 无远端 → null（提案降级提示，不猜 compare URL）', () => {
+    const repo = mkRepo()
+    try {
+      git(repo.root, 'remote add origin https://gitlab.com/foo/bar.git')
+      expect(githubRepoBase(repo.root)).toBeNull()
+      git(repo.root, 'remote remove origin')
+      expect(githubRepoBase(repo.root)).toBeNull()
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
 describe('orchestrator release-propose > CLI 端到端', () => {
   function seedRepo(): { root: string; cleanup: () => void } {
     const repo = mkRepo()
     const g = (args: string) => git(repo.root, args)
+    g('remote add origin https://github.com/ObsidianTrine/model_dock.git')
     g('commit --allow-empty -m "chore: baseline"')
     g('tag -a v1.0.0 -m v1.0.0')
     fs.writeFileSync(
@@ -81,6 +110,23 @@ describe('orchestrator release-propose > CLI 端到端', () => {
       expect(text).toContain('- **测试条目**：内容。') // 未发布段原样进草稿
       // 只读红线：CHANGELOG.md 内容未被改动
       expect(fs.readFileSync(path.join(repo.root, 'CHANGELOG.md'), 'utf8')).toContain('## [未发布]')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('无远端 → 链接表行降级为提示行（不猜 compare URL）', () => {
+    const repo = seedRepo()
+    try {
+      git(repo.root, 'remote remove origin')
+      git(repo.root, 'commit --allow-empty -m "feat: 新功能"')
+      const out = runOrch(repo.root, 'release-propose')
+      expect(out.stdout).toContain('发版提案 v1.1.0')
+      const dir = path.join(repo.root, '.agents', 'orchestrator', 'release-proposals')
+      const files = fs.readdirSync(dir).filter((f) => f.startsWith('v1.1.0-'))
+      const text = fs.readFileSync(path.join(dir, files[0]), 'utf8')
+      expect(text).toContain('未识别 GitHub 远端')
+      expect(text).not.toContain('[1.1.0]: https://github.com/')
     } finally {
       repo.cleanup()
     }

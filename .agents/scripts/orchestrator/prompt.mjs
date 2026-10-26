@@ -233,8 +233,9 @@ function parseMarkerBlock(text, marker) {
  * 组装 spec planner prompt：只读会话（Read/Glob/Grep）探索仓库，产出三件套。
  * 与 buildPlannerPrompt 同构（AGENTS.md 注入 + 意图消毒 + 契约模板 + 硬性要求），
  * 差异在产物：单张任务卡 → requirements/design/tasks 三份文档（人审后再拆卡）。
+ * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 只提 AGENTS.md 不展开）
  */
-export function buildSpecPrompt(intentText, repoRoot) {
+export function buildSpecPrompt(intentText, repoRoot, redlines = '') {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const clean = sanitizeIntent(intentText);
   const fence = '```';
@@ -276,7 +277,7 @@ export function buildSpecPrompt(intentText, repoRoot) {
     `1. 验收标准与完成条件必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止空洞标准；\n` +
     `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；\n` +
     `3. 任务间依赖显式写「依赖: 任务 N」，无依赖写「依赖: 无」；\n` +
-    `4. 设计不得违反 AGENTS.md 红线（端口 8687/8890、native 依赖、import.meta 等）；\n` +
+    `4. 设计不得违反 AGENTS.md 红线${redlines ? `（${redlines}）` : ''}；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
