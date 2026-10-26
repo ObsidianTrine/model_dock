@@ -55,9 +55,15 @@ function migrate(raw: Record<string, unknown>): Config {
  *  - 旧「节假日名单」退役——名单日语义由窗口 dayFilter 表达，存量 holidays 键丢弃；
  *  - 旧 days 简写迁移为 dayFilter：[1..5]→workday（节假日不生效，即「节假日不避开」的既定语义）、[6,7]→weekend；
  *    其余 days 组合（如单日、[1,3]）原样保留。幂等，仅在旧形态出现时改写。 */
-function normalizeGateway(gw: Config['gateway']): Config['gateway'] {
-  const sch = gw?.schedule
-  if (!sch) return gw
+function normalizeGateway(input: Config['gateway']): Config['gateway'] {
+  if (!input) return input
+  // tray_lite 已废弃（旧「托盘轻量模式」键，语义由仅托盘派生态取代）：读入即剥除，
+  // 下次整包重写不再落回盘——下方 spread 会原样透传未知键，残留须在此显式删
+  const gw = { ...input } as Record<string, unknown>
+  delete gw.tray_lite
+  const cfg = gw as Config['gateway']
+  const sch = cfg.schedule
+  if (!sch) return cfg
   const windows = (sch.windows ?? []).map((w) => {
     if (w.dayFilter || !w.days?.length) return w
     const isWorkday = w.days.length === 5 && [1, 2, 3, 4, 5].every((n, i) => w.days![i] === n)
@@ -66,7 +72,7 @@ function normalizeGateway(gw: Config['gateway']): Config['gateway'] {
     const { days: _legacy, ...rest } = w
     return { ...rest, dayFilter: isWorkday ? ('workday' as const) : ('weekend' as const) }
   })
-  return { ...gw, schedule: { ...(sch.enabled === undefined ? {} : { enabled: sch.enabled }), ...(windows.length ? { windows } : {}) } }
+  return { ...cfg, schedule: { ...(sch.enabled === undefined ? {} : { enabled: sch.enabled }), ...(windows.length ? { windows } : {}) } }
 }
 
 export async function loadConfig(): Promise<Config> {

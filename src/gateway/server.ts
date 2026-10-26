@@ -27,6 +27,7 @@ import { fetchModelIds } from '../providers/fetch.js'
 import { autoRouteInfo, dispatcherFor, isMeltdown, logAudit, logRequest, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
+import { markUiLeaving, markUiPing, markUiSeen, pendingTrayOnlyRequest, requestTrayOnly, trayOnlyActive } from './presence.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
 import { createUsageTap } from './usage.js'
 import { refreshCalendar } from './holidays.js'
@@ -806,6 +807,11 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
 export const OVERVIEW_TTL_MS = 6_000
 let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
 
+/** 立即失效 overview 缓存（仅托盘广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
+function invalidateOverviewCache(): void {
+  overviewCache = null
+}
+
 /** overview 缓存命中判定（`now` 可注入便于单测给定 TTL 窗口）：
  *  命中须同 runtime 实例 + 同配置重载代数 + 同语言（overview 文案随请求语言生成，语言不同不能互借）+ 未过 TTL。 */
 export function overviewCacheHit(
@@ -1001,8 +1007,10 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
         autoFallback: rt.config.gateway?.auto_fallback !== false,
       },
       autostart: autostartOverview(),
-      // 托盘轻量模式（缺省开）：tray-state 投影与托盘菜单消费
-      trayLite: rt.config.gateway?.tray_lite !== false,
+      // 仅托盘模式（派生态，不落盘）：无任何 Web UI 打开时为 true；trayOnlyRequest 供已开页面
+      // 轮询感知「进入仅托盘」的关闭广播（时间戳，页面侧按新于上次所见去重）
+      trayOnly: trayOnlyActive(Date.now()),
+      trayOnlyRequest: pendingTrayOnlyRequest(),
     },
     current: current ? { id: current.id, label: current.label, model: current.model } : null,
     // 默认路由（active_profile）：与 current（正在使用）区分，供电台「跟随全局」/直连目标等配置态使用
@@ -1312,25 +1320,27 @@ async function hModelCatalog(c: AdminCtx): Promise<void> {
 
 async function hOverview(c: AdminCtx): Promise<void> {
   const { rt, res } = c
+  markUiPing(Date.now()) // 控制台页面的 5s overview 轮询即在场心跳（免新端点高频调用）
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
   return
 }
 
-/** 托盘轻量模式数据源：overview 的瘦身投影（托盘菜单需要的字段，几 KB）。
+/** 托盘状态数据源：overview 的瘦身投影（托盘菜单需要的字段，几 KB）。
  *  复用 overview 的 6s TTL 缓存——托盘 5s 轮询与控制台轮询共享同一份重建，不抬高 buildOverview 频率；
  *  两平台托盘共用本端点（C# 侧无 Decodable，正则解析吃不动嵌套数组，载荷必须小） */
 async function hTrayState(c: AdminCtx): Promise<void> {
   const { rt, res } = c
   const view = JSON.parse(await overviewViewData(rt)) as {
-    gateway?: { trayLite?: boolean; autoRoute?: { forced?: string | null; schedule?: { applied?: boolean } } }
+    gateway?: { autoRoute?: { forced?: string | null; schedule?: { applied?: boolean } } }
     current?: { id: string; label: string; model?: string | null } | null
     services?: Array<{ id: string; label: string; inUse?: boolean; enabled?: boolean; down?: boolean; defaultModel?: string | null; models?: Array<{ id: string; display_name?: string | null }> }>
     clients?: Array<{ id: string; label: string; installed?: boolean; attached?: boolean; mode?: string | null; route?: string | null; pinnedProvider?: string | null; followsActive?: boolean; service?: string | null }>
   }
   const payload = {
     ok: true,
-    trayLite: view.gateway?.trayLite !== false,
+    // 仅托盘为派生态，live 求值而非读 6s 缓存的 overview 串：托盘勾选态少一档陈旧
+    trayOnly: trayOnlyActive(Date.now()),
     current: view.current ?? null,
     autoPin: view.gateway?.autoRoute?.forced ?? null,
     scheduleApplied: view.gateway?.autoRoute?.schedule?.applied === true,
@@ -1361,22 +1371,29 @@ async function hTrayState(c: AdminCtx): Promise<void> {
   return
 }
 
-/** 托盘轻量模式开关：写 config.gateway.tray_lite（缺省开），托盘菜单据此决定是否展开快速操作区 */
-async function hTrayLite(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  const b = await jsonRequestBody(req)
-  const enabled = b.enabled === true || b.enabled === 'true'
-    ? true
-    : b.enabled === false || b.enabled === 'false' ? false : null
-  if (enabled === null) {
-    return sendError(res, 400, t('enabled 必须是布尔值（true/false）', 'enabled must be a boolean (true/false)'))
-  }
-  await persistConfig(rt, (cfg) => {
-    cfg.gateway = { ...(cfg.gateway ?? {}), tray_lite: enabled }
-  })
-  audit(bi('托盘轻量模式', 'Tray lightweight mode'), enabled ? bi('开启', 'on') : bi('关闭', 'off'))
+/** 仅托盘模式入口（托盘菜单点击）：向已开页面广播关闭请求（overview 的 trayOnlyRequest 字段，
+ *  页面感知后 window.close()，被浏览器拦截时页面显示手动关闭提示）。请求体不解析
+ *  （托盘双端发 {} / {"enabled":true}，仅读取以复用连接） */
+async function hTrayOnly(c: AdminCtx): Promise<void> {
+  const { req, res, audit } = c
+  await jsonRequestBody(req)
+  requestTrayOnly(Date.now())
+  invalidateOverviewCache() // 广播时间戳即刻可见：页面最迟下一个 5s 轮询拿到
+  audit(bi('进入仅托盘模式', 'Enter tray-only mode'), '-')
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, trayLite: enabled }))
+  res.end(JSON.stringify({ ok: true, trayOnly: trayOnlyActive(Date.now()) }))
+  return
+}
+
+/** 页面在场心跳（页面 15s 一次，不受 document.hidden 门控——后台标签页也算「打开的 UI」）；
+ *  pagehide 的 sendBeacon 带 {"leaving":true} 即刻离场，不等 TTL */
+async function hUiPresence(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const b = await jsonRequestBody(req)
+  if (b.leaving === true) markUiLeaving(Date.now())
+  else markUiPing(Date.now())
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true }))
   return
 }
 
@@ -2615,7 +2632,8 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'GET /_modeldock/model-catalog': hModelCatalog,
   'GET /_modeldock/overview': hOverview,
   'GET /_modeldock/tray-state': hTrayState,
-  'POST /_modeldock/tray-lite': hTrayLite,
+  'POST /_modeldock/tray-only': hTrayOnly,
+  'POST /_modeldock/ui-presence': hUiPresence,
   'POST /_modeldock/service/fetch-models': hFetchModels,
   'POST /_modeldock/service': hServiceAdd,
   'POST /_modeldock/switch': hSwitch,
@@ -2734,6 +2752,10 @@ async function handleAdmin(
       return
     }
     const { html, etag } = getRenderedUI()
+    // 页面加载（含 304 重验证）= UI 打开：续在场并撤销在途仅托盘广播——任何方式打开控制台自动退出仅托盘。
+    // 必须同步失效 overview 缓存：刚加载的页面首拉 overview 若命中携带旧广播时间戳的缓存串会误自关
+    markUiSeen(Date.now())
+    invalidateOverviewCache()
     // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 236KB 页体。
     // no-store 由管理面统一策略设置，此处叠 ETag 只做条件请求，不放开 JSON 的缓存策略。
     if (req.headers['if-none-match'] === etag) {

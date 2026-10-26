@@ -42,7 +42,8 @@ export function trayOnlyActive(now: number): boolean {
 
 /** 待广播的关闭请求时间戳（0 = 无）。只被 markUiSeen（新页面加载 = 用户要 UI）清除，
  *  不随 trayOnlyActive 失效：多页同开时先关的页面 sendBeacon 会即时清空在场，
- *  若据此失效广播，还没轮询到的页面会漏掉自关；「新开页面不误触发自关」由 markUiSeen 清零承担，
+ *  若据此失效广播，还没轮询到的页面会漏掉自关。「新开页面不误拿旧广播」由服务端在
+ *  GET /_modeldock/ui 命中时同步失效 overview 缓存承担（见 server.ts /ui 分支的注释），
  *  页面侧按「时间戳新于上次所见」去重，陈旧值不会重复触发。 */
 export function pendingTrayOnlyRequest(): number {
   return closeRequestedAt

@@ -7,7 +7,8 @@ import { fakeHome } from './helpers.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import type { Config } from '../src/config/types.js'
-import { saveConfig } from '../src/config/store.js'
+import { saveConfig, mutateConfig } from '../src/config/store.js'
+import { resetUiPresence } from '../src/gateway/presence.js'
 import { parse as tomlParse } from 'smol-toml'
 import { configPath } from '../src/util/paths.js'
 
@@ -31,6 +32,8 @@ const ADMIN = { 'x-modeldock-admin': 'admin-token-x' }
 const ADAPTER_IDS = ['claude-code', 'zcode', 'dsh', 'codex', 'opencode', 'mimo-code', 'mimo-desktop', 'workbuddy']
 const presenceKey = (id: string): string => `MODELRDOCK_FAKE_${id.toUpperCase().replace(/-/g, '_')}_PRESENT`
 beforeEach(() => {
+  // presence（仅托盘在场）是跨文件共享的模块态：本文件断言它，先复位再跑
+  resetUiPresence()
   for (const id of ADAPTER_IDS) process.env[presenceKey(id)] = '0'
 })
 afterEach(() => {
@@ -79,8 +82,8 @@ async function setup(): Promise<{ gwPort: string; home: string; closeAll: () => 
   }
 }
 
-describe('GET /_modeldock/tray-state（托盘轻量模式数据源）', () => {
-  it('未鉴权 401；瘦身载荷：trayLite 默认开、services 带模型目录与 defaultModel、clients 只含已安装客户端', async () => {
+describe('GET /_modeldock/tray-state（托盘状态数据源 + 仅托盘派生态）', () => {
+  it('未鉴权 401；瘦身载荷：无 UI 打开时 trayOnly 为真、services 带模型目录与 defaultModel、clients 只含已安装客户端', async () => {
     const t = await setup()
     // claude-code 需要命令在 PATH 才算已安装：测试注入 presence（gateway.test.ts 的桌面客户端同款机制）
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
@@ -100,7 +103,7 @@ describe('GET /_modeldock/tray-state（托盘轻量模式数据源）', () => {
       expect(res.status).toBe(200)
       const j: any = await res.json()
       expect(j.ok).toBe(true)
-      expect(j.trayLite).toBe(true) // config 未设置 → 缺省开
+      expect(j.trayOnly).toBe(true) // 测试无 UI 打开 → 派生仅托盘态为真
       expect(j.current).toEqual({ id: 'up', label: 'mock', model: 'preset-model' })
       expect(j.autoPin).toBeNull()
       expect(j.scheduleApplied).toBe(false)
@@ -127,37 +130,58 @@ describe('GET /_modeldock/tray-state（托盘轻量模式数据源）', () => {
     }
   })
 
-  it('POST /tray-lite 闭环：写 config.toml、overview 同步反映、接受字符串布尔、非法值 400', async () => {
+  it('仅托盘闭环：/ui 打开即退出并撤销广播、/tray-only 广播可感知、ui-presence 心跳与离场、旧 /tray-lite 404、残留 tray_lite 键读入剥除', async () => {
     const t = await setup()
     try {
       const base = `http://127.0.0.1:${t.gwPort}/_modeldock`
-      const post = (body: unknown) =>
-        fetch(base + '/tray-lite', {
+      const post = (p: string, body: unknown) =>
+        fetch(base + p, {
           method: 'POST',
           headers: { ...ADMIN, 'content-type': 'application/json' },
           body: JSON.stringify(body),
         })
+      const getState = async () => (await (await fetch(base + '/tray-state', { headers: ADMIN })).json()) as any
+      const getOverview = async () => (await (await fetch(base + '/overview', { headers: ADMIN })).json()) as any
 
-      expect((await post({ enabled: 1 })).status).toBe(400)
-      expect((await post({})).status).toBe(400)
+      // 初始：无任何 UI 打开 → 派生仅托盘态为真
+      expect((await getState()).trayOnly).toBe(true)
 
-      const off = await post({ enabled: false })
-      expect(off.status).toBe(200)
-      expect(((await off.json()) as any).trayLite).toBe(false)
+      // 打开控制台页面（托盘开控制台 / 双击 app / 浏览器，同走 GET /_modeldock/ui）→ 自动退出仅托盘
+      expect((await fetch(base + '/ui')).status).toBe(200)
+      expect((await getState()).trayOnly).toBe(false)
 
-      const st: any = await (await fetch(base + '/tray-state', { headers: ADMIN })).json()
-      expect(st.trayLite).toBe(false)
-      const ov: any = await (await fetch(base + '/overview', { headers: ADMIN })).json()
-      expect(ov.gateway.trayLite).toBe(false)
+      // 托盘点「仅托盘模式」→ 广播关闭请求；页面还开着（在场未过期）→ trayOnly 仍 false，
+      // overview 携带请求时间戳供页面感知（缓存已随 /tray-only 失效，读到的是新值）
+      const req = await post('/tray-only', {})
+      expect(req.status).toBe(200)
+      expect(((await req.json()) as any).trayOnly).toBe(false)
+      const ov1: any = await getOverview()
+      expect(ov1.gateway.trayOnly).toBe(false)
+      expect(ov1.gateway.trayOnlyRequest).toBeGreaterThan(0)
 
-      // 落盘校验（smol-toml 直读 config.toml，与 mutateConfig 写入同一文件）
-      const toml = tomlParse(fs.readFileSync(configPath(), 'utf8')) as any
-      expect(toml.gateway.tray_lite).toBe(false)
+      // 页面心跳续场；离场信标（pagehide sendBeacon 同款）→ 即刻回到仅托盘
+      expect((await post('/ui-presence', {})).status).toBe(200)
+      expect((await getState()).trayOnly).toBe(false)
+      expect((await post('/ui-presence', { leaving: true })).status).toBe(200)
+      expect((await getState()).trayOnly).toBe(true)
+      // 广播字段不随在场过期清零（多页同开时慢页不漏收），由页面按「新于上次所见」去重
+      expect((await getOverview()).gateway.trayOnlyRequest).toBeGreaterThan(0)
 
-      // 字符串布尔（托盘 C# 侧历史风格）也接受
-      expect((await (await post({ enabled: 'true' })).json() as any).trayLite).toBe(true)
-      const st2: any = await (await fetch(base + '/tray-state', { headers: ADMIN })).json()
-      expect(st2.trayLite).toBe(true)
+      // 新页面加载：自动退出仅托盘 + 清广播 + overview 缓存同步失效（首拉不得拿到旧广播，防误自关）
+      expect((await fetch(base + '/ui')).status).toBe(200)
+      expect((await getState()).trayOnly).toBe(false)
+      expect((await getOverview()).gateway.trayOnlyRequest).toBe(0)
+
+      // 旧「轻量模式」端点已移除
+      expect((await post('/tray-lite', { enabled: true })).status).toBe(404)
+
+      // 残留 tray_lite 键：读入即剥除，任一次配置写盘都以剥除后的形态整包重写，不再落回盘
+      await mutateConfig((cfg) => {
+        cfg.gateway = { ...(cfg.gateway ?? {}), tray_lite: false } as typeof cfg.gateway
+      })
+      expect((tomlParse(fs.readFileSync(configPath(), 'utf8')) as any).gateway.tray_lite).toBe(false)
+      await mutateConfig(() => {})
+      expect((tomlParse(fs.readFileSync(configPath(), 'utf8')) as any).gateway.tray_lite).toBeUndefined()
     } finally {
       t.closeAll()
     }
