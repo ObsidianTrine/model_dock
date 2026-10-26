@@ -5,11 +5,18 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.3.0] - 2026-10-26
+
+Tray lightweight mode, per-service model catalog filtering, a faster console first paint, and background-overhead reductions.
+
+### Added
+
+- **Tray lightweight mode: daily switching without opening the console**: the tray menu gains "Current Service", "Default Model" and "Clients" — switch the active service, change the default model, attach or detach AI clients, and pin a client to a specific service, all from the tray; on by default, uncheck "Lightweight Mode" in the tray menu to collapse it back.
+- **The model-list endpoint filters by service**: `/v1/models` gains a `?provider=<service>` parameter that returns the named service's model catalog (previously only the active service's was returned) without touching routing; unknown services get a 404 with a hint.
 
 ### Improved
 
-- **Tray lightweight mode: daily switching without opening the console**: the tray menu gains "Current Service", "Default Model" and "Clients" — switch the active service, change the default model, attach or detach AI clients, and pin a client to a specific service, all from the tray; on by default, uncheck "Lightweight Mode" in the tray menu to collapse it back.
+- **The console first paint is faster**: overview data renders immediately from the last snapshot and refreshes in the background, common data is warmed up right after gateway start, and key reads are deduplicated in flight — cold starts and fresh page opens no longer stare at an empty skeleton while probes run.
 - **Changing a service's default model now rewrites baked client lists immediately**: changing the default model in the console used to leave the local model lists of clients like dsh stale until re-attaching; clients that follow the service are rewritten right away (restart the client to apply).
 - **Gateway logs are pruned by retention**: daily request/audit JSONL log files used to accumulate forever with no disk ceiling; they are now pruned automatically at gateway startup and on a daily timer, keeping 30 days by default. Tune it with `log_retention_days` under `[gateway]` in config.toml (0 = keep everything).
 - **Commands that don't touch model metadata start lighter**: the bundled model catalog snapshot (~790 KB) used to be parsed on every command start; it is now parsed on first actual use, so `--help`, `gateway stop` and similar commands no longer pay for it.
@@ -298,6 +305,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.0...v1.2.1
