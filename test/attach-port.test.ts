@@ -85,19 +85,18 @@ describe('客户端写入端口解析 > 显式端口压过被劫持的状态文�
     }
   })
 
-  it('不带 gatewayPort（CLI 启发式）→ 生产默认端口存活则优先，否则按状态文件', async () => {
+  it('不带 gatewayPort（CLI 启发式）→ 沙箱不探测生产端口，按状态文件', async () => {
     const h = fakeHome()
     const fake = await hijackStateWithFakeGateway()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
       await saveConfig(baseCfg())
-      // 启发式：8687（生产）有存活网关 → 一律用 8687（多实例下状态文件不再是唯一事实）；
-      // 8687 无网关（CI 环境，测试也绝不监听生产端口）→ 回落状态文件端口
-      const prodAlive = await fetch('http://127.0.0.1:8687/_modeldock/health', { signal: AbortSignal.timeout(1000) })
-        .then((r) => r.ok)
-        .catch(() => false)
+      // 2026-10 复审收口：沙箱（FAKE_HOME）是「独立机器」，不探测生产默认端口——
+      // 沙箱内的 harness token 生产网关并不认识，把客户端文件指到 8687 只会 401。
+      // 即使真机 8687 存活也按状态文件（沙箱自己的）端口走；生产机器上的「8687 存活优先」
+      // 启发式仅非沙箱路径生效，测试无法安全覆盖（绝不监听生产端口）
       const plan = await planAttach('claude-code', {})
-      expect(plan.port).toBe(prodAlive ? 8687 : fake.port)
+      expect(plan.port).toBe(fake.port)
     } finally {
       fake.close()
       h.restore()
