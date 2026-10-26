@@ -9,6 +9,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Improved
 
+- **Tray lightweight mode: daily switching without opening the console**: the tray menu gains "Current Service", "Default Model" and "Clients" — switch the active service, change the default model, attach or detach AI clients, and pin a client to a specific service, all from the tray; on by default, uncheck "Lightweight Mode" in the tray menu to collapse it back.
+- **Changing a service's default model now rewrites baked client lists immediately**: changing the default model in the console used to leave the local model lists of clients like dsh stale until re-attaching; clients that follow the service are rewritten right away (restart the client to apply).
 - **Gateway logs are pruned by retention**: daily request/audit JSONL log files used to accumulate forever with no disk ceiling; they are now pruned automatically at gateway startup and on a daily timer, keeping 30 days by default. Tune it with `log_retention_days` under `[gateway]` in config.toml (0 = keep everything).
 - **Commands that don't touch model metadata start lighter**: the bundled model catalog snapshot (~790 KB) used to be parsed on every command start; it is now parsed on first actual use, so `--help`, `gateway stop` and similar commands no longer pay for it.
 - **Saving unchanged configuration no longer rewrites config.toml**: saves from the console or clients used to rewrite the whole file even with no actual change; identical content is now detected byte-for-byte and the write is skipped, avoiding needless disk writes.

@@ -52,8 +52,8 @@ export interface AuditEntry {
   err?: string
   /** err 的英文渲染（err 为动态文本时无对译则缺省） */
   err_en?: string
-  /** 来源：web（本机控制台同源）、token（携带 admin token，CLI 兼容调用）、lan（手机简版控制台） */
-  source: 'web' | 'token' | 'lan'
+  /** 来源：web（本机控制台同源）、token（携带 admin token，CLI 兼容调用）、lan（手机简版控制台）、tray（系统托盘，x-modeldock-source 头标记） */
+  source: 'web' | 'token' | 'lan' | 'tray'
 }
 
 export type RingEntry = LogEntry | AuditEntry

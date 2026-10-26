@@ -942,6 +942,8 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
         autoFallback: rt.config.gateway?.auto_fallback !== false,
       },
       autostart: autostartOverview(),
+      // 托盘轻量模式（缺省开）：tray-state 投影与托盘菜单消费
+      trayLite: rt.config.gateway?.tray_lite !== false,
     },
     current: current ? { id: current.id, label: current.label, model: current.model } : null,
     // 默认路由（active_profile）：与 current（正在使用）区分，供电台「跟随全局」/直连目标等配置态使用
@@ -1251,18 +1253,82 @@ async function hModelCatalog(c: AdminCtx): Promise<void> {
 
 async function hOverview(c: AdminCtx): Promise<void> {
   const { rt, res } = c
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
+  return
+}
+
+/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串，否则重建并写缓存。
+ *  缓存键含请求语言：view 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存。 */
+async function overviewViewData(rt: GatewayRuntime): Promise<string> {
   const cached = overviewCache
-  // 缓存键含请求语言：overview 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存
-  if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) {
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(cached.data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
-    return
-  }
+  if (cached && overviewCacheHit(cached, rt, rt.reloads, getLang(), Date.now())) return cached.data
   const view = await buildOverview(rt)
   const data = JSON.stringify(view)
   overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
+  return data
+}
+
+/** 托盘轻量模式数据源：overview 的瘦身投影（托盘菜单需要的字段，几 KB）。
+ *  复用 overview 的 6s TTL 缓存——托盘 5s 轮询与控制台轮询共享同一份重建，不抬高 buildOverview 频率；
+ *  两平台托盘共用本端点（C# 侧无 Decodable，正则解析吃不动嵌套数组，载荷必须小） */
+async function hTrayState(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const view = JSON.parse(await overviewViewData(rt)) as {
+    gateway?: { trayLite?: boolean; autoRoute?: { forced?: string | null; schedule?: { applied?: boolean } } }
+    current?: { id: string; label: string; model?: string | null } | null
+    services?: Array<{ id: string; label: string; inUse?: boolean; enabled?: boolean; down?: boolean; defaultModel?: string | null; models?: Array<{ id: string; display_name?: string | null }> }>
+    clients?: Array<{ id: string; label: string; installed?: boolean; attached?: boolean; mode?: string | null; route?: string | null; pinnedProvider?: string | null; followsActive?: boolean; service?: string | null }>
+  }
+  const payload = {
+    ok: true,
+    trayLite: view.gateway?.trayLite !== false,
+    current: view.current ?? null,
+    autoPin: view.gateway?.autoRoute?.forced ?? null,
+    scheduleApplied: view.gateway?.autoRoute?.schedule?.applied === true,
+    services: (view.services ?? []).map((s) => ({
+      id: s.id,
+      label: s.label,
+      inUse: s.inUse === true,
+      enabled: s.enabled !== false,
+      down: s.down === true,
+      defaultModel: s.defaultModel ?? null,
+      models: (s.models ?? []).map((m) => ({ id: m.id, display: m.display_name ?? null })),
+    })),
+    clients: (view.clients ?? [])
+      .filter((cl) => cl.installed === true)
+      .map((cl) => ({
+        id: cl.id,
+        label: cl.label,
+        attached: cl.attached === true,
+        mode: cl.mode ?? null,
+        route: cl.route ?? null,
+        pinnedProvider: cl.pinnedProvider ?? null,
+        followsActive: cl.followsActive === true,
+        service: cl.service ?? null,
+      })),
+  }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(data)
+  res.end(JSON.stringify(payload))
+  return
+}
+
+/** 托盘轻量模式开关：写 config.gateway.tray_lite（缺省开），托盘菜单据此决定是否展开快速操作区 */
+async function hTrayLite(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const enabled = b.enabled === true || b.enabled === 'true'
+    ? true
+    : b.enabled === false || b.enabled === 'false' ? false : null
+  if (enabled === null) {
+    return sendError(res, 400, t('enabled 必须是布尔值（true/false）', 'enabled must be a boolean (true/false)'))
+  }
+  await persistConfig(rt, (cfg) => {
+    cfg.gateway = { ...(cfg.gateway ?? {}), tray_lite: enabled }
+  })
+  audit(bi('托盘轻量模式', 'Tray lightweight mode'), enabled ? bi('开启', 'on') : bi('关闭', 'off'))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, trayLite: enabled }))
   return
 }
 
@@ -1956,6 +2022,9 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       newFallback.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
     }
   }
+  // 默认模型基线（persist 前取）：persist 后比对，真变了才触发烤模型客户端同步
+  const prevProfName = profileRefForProvider(rt.config, id)
+  const prevDefaultModel = prevProfName ? rt.config.profiles[prevProfName]?.default_model : undefined
   await persistConfig(rt, (c) => {
     const t = c.providers[id]
     if (!t) return
@@ -1986,6 +2055,18 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
   })
+  // 默认模型真变了才同步烤模型客户端（dsh/workbuddy/zcode 模型列表烙在客户端文件里，
+  // 与全局切换 hSwitch 同口径）；钉定路由的客户端不在其职责内，不受影响
+  const bakedParts: Array<Bilingual | ''> = []
+  if (typeof b.default_model === 'string' && b.default_model !== (prevDefaultModel ?? '')) {
+    const baked = await refreshBakedModelClients({ port: rt.port })
+    if (baked.refreshed.length) {
+      bakedParts.push(bi('；已同步重写 {list} 的模型列表（重启该客户端生效）', '; rewrote model lists for {list} (restart the clients to apply)', { list: biJoin('、', ', ', baked.refreshed) }))
+    }
+    if (baked.warnings.length) {
+      bakedParts.push(bi('；{list}', '; {list}', { list: biJoin('；', '; ', baked.warnings) }))
+    }
+  }
   // 审计摘要：列出本次实际变更的字段（不落密钥明文）
   const changes = [
     name ? bi('名称 → {name}', 'Name → {name}', { name }) : '',
@@ -1995,10 +2076,11 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     newEndpoints ? bi('端点 {list} 已更新', 'Endpoints {list} updated', { list: Object.keys(newEndpoints).join('/') }) : '',
     typeof b.default_model === 'string' ? bi('默认模型 → {model}', 'Default model → {model}', { model: b.default_model || bi('(清除)', '(cleared)') }) : '',
     Array.isArray(newFallback) ? bi('备用服务 {n} 个', '{n} fallback services', { n: newFallback.length }) : '',
+    ...bakedParts,
   ].filter(Boolean) as Array<Bilingual | ''>
   audit(bi('编辑服务', 'Edit service'), id, changes.length ? biJoin('，', ', ', changes) : bi('无字段变更', 'No fields changed'))
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true }))
+  res.end(JSON.stringify({ ok: true, ...(bakedParts.length ? { resynced: true } : {}) }))
   return
 }
 
@@ -2484,6 +2566,8 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'GET /_modeldock/config': hConfig,
   'GET /_modeldock/model-catalog': hModelCatalog,
   'GET /_modeldock/overview': hOverview,
+  'GET /_modeldock/tray-state': hTrayState,
+  'POST /_modeldock/tray-lite': hTrayLite,
   'POST /_modeldock/service/fetch-models': hFetchModels,
   'POST /_modeldock/service': hServiceAdd,
   'POST /_modeldock/switch': hSwitch,
@@ -2540,9 +2624,13 @@ async function handleAdmin(
   res.setHeader('cache-control', 'no-store')
 
   // 操作审计：修改类操作的成功/失败都记一条（环形缓冲 + audit-日期.jsonl，不含密钥明文）
-  // 能走到端点的请求都过了 adminAuthorized：带 token 头的记为 token（CLI），否则是 cookie 登录的浏览器
+  // 能走到端点的请求都过了 adminAuthorized：托盘（x-modeldock-source: tray）归 tray，
+  // 其余带 token 头的记为 token（CLI），cookie 登录的浏览器记为 web
   // op/target/detail 双语存储（bi 渲染与当前请求语言无关）：控制台日志表按界面语言取字段，历史条目缺英文时回退主字段
-  const src = typeof req.headers['x-modeldock-admin'] === 'string' ? 'token' as const : 'web' as const
+  const srcHeader = typeof req.headers['x-modeldock-source'] === 'string' ? String(req.headers['x-modeldock-source']) : ''
+  const src = srcHeader === 'tray'
+    ? 'tray' as const
+    : typeof req.headers['x-modeldock-admin'] === 'string' ? 'token' as const : 'web' as const
   const audit = (op: Bilingual, target: string | Bilingual, detail?: Bilingual, err?: Bilingual | string) => {
     const errZh = err === undefined || typeof err === 'string' ? err : err.zh
     const errEn = err === undefined || typeof err === 'string' ? undefined : err.en

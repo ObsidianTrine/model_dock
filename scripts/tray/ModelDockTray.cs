@@ -1,24 +1,29 @@
 // ModelDockTray — ModelDock Windows 托盘（右下角 NotifyIcon）
 //
 // 职责与 macOS 版对齐：常驻托盘图标；打开控制台（Chromium --app 独立窗口，与双击 app
-// 同源）；在浏览器打开；开机自启开关（复用主程序 CLI gateway install/uninstall）；
+// 同源）；在浏览器打开；轻量模式快速操作区——切当前服务、切默认模型、接入/断开客户端、
+// 客户端钉定路由，全部直调网关管理端点（admin 头 + x-modeldock-source: tray），控制台
+// 仅在托盘按需打开；开机自启开关（复用主程序 CLI gateway install/uninstall）；
 // 在资源管理器中打开日志；退出 = 停止网关 + 托盘退出。
 //
 // 编译：csc（.NET Framework 4.x 随 Windows 10/11 预装）——
 //   csc /target:winexe /out:ModelDockTray.exe /win32manifest:ModelDockTray.manifest
-//       /win32icon:modeldock.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll ModelDockTray.cs
-//       ModelDockTray.Version.generated.cs
+//       /win32icon:modeldock.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll
+//       /r:System.Web.Extensions.dll ModelDockTray.cs ModelDockTray.Version.generated.cs
 //   第二个文件由 scripts/build-sea.mjs 构建时生成（TrayMeta.Version 常量，git tag 版本号）；
 //   手动重编译时缺它可自建同名常量，否则 TrayMeta.Version 引用编译不过。
 // 语法限制：C# 5（无 $"" 插值、无 ?. ）——目标编译器是 Framework 自带的 v4.0.30319。
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace ModelDockTray
@@ -105,6 +110,139 @@ namespace ModelDockTray
                 }
                 Thread.Sleep(400);
             }
+        }
+    }
+
+    /// 双语文案：托盘是独立进程（不读网关 config.toml），语言来源 MODELRDOCK_LANG（daemon
+    /// 拉起时继承，zh/en）> 系统 UI 语言（zh* → 中文，其余英文）；都取不到回退中文
+    /// （与 src/config/lang.ts 缺省一致）。
+    internal static class I18n
+    {
+        public static readonly bool Zh = DetectZh();
+
+        private static bool DetectZh()
+        {
+            var env = Environment.GetEnvironmentVariable("MODELRDOCK_LANG");
+            if (env == "zh") return true;
+            if (env == "en") return false;
+            try { return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh"; }
+            catch { return true; }
+        }
+
+        public static string L(string zh, string en) { return Zh ? zh : en; }
+    }
+
+    /// tray-state JSON 的解析辅助（JavaScriptSerializer 在 System.Web.Extensions，随 Framework 预装；
+    /// 载荷是 overview 的瘦身投影（几 KB），嵌套数组用 TrayActions 里的正则解析吃不动）
+    internal static class JsonMap
+    {
+        public static string Str(Dictionary<string, object> d, string k)
+        {
+            object v;
+            return d.TryGetValue(k, out v) ? v as string : null;
+        }
+
+        public static bool Bool(Dictionary<string, object> d, string k)
+        {
+            object v;
+            return d.TryGetValue(k, out v) && v is bool && (bool)v;
+        }
+    }
+
+    /// 托盘轻量模式状态（GET /_modeldock/tray-state，服务端 overview 的瘦身投影）
+    internal class TrayStateData
+    {
+        public class Svc
+        {
+            public string Id, Label, DefaultModel;
+            public bool InUse, Enabled, Down;
+            public readonly List<string[]> Models = new List<string[]>(); // 每项 [id, display]
+        }
+
+        public class Cli
+        {
+            public string Id, Label, Mode, Route, PinnedProvider, Service;
+            public bool Attached;
+        }
+
+        public bool TrayLite = true;
+        public string CurrentId, CurrentLabel, CurrentModel;
+        public string AutoPin;
+        public bool ScheduleApplied;
+        public readonly List<Svc> Services = new List<Svc>();
+        public readonly List<Cli> Clients = new List<Cli>();
+
+        public static TrayStateData Parse(string json)
+        {
+            var root = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+            if (root == null) return null;
+            var st = new TrayStateData();
+            object v;
+            if (root.TryGetValue("trayLite", out v)) st.TrayLite = JsonMap.Bool(root, "trayLite");
+            if (root.TryGetValue("autoPin", out v)) st.AutoPin = v as string;
+            if (root.TryGetValue("scheduleApplied", out v)) st.ScheduleApplied = JsonMap.Bool(root, "scheduleApplied");
+            if (root.TryGetValue("current", out v))
+            {
+                var cur = v as Dictionary<string, object>;
+                if (cur != null)
+                {
+                    st.CurrentId = JsonMap.Str(cur, "id");
+                    st.CurrentLabel = JsonMap.Str(cur, "label");
+                    st.CurrentModel = JsonMap.Str(cur, "model");
+                }
+            }
+            object services;
+            if (root.TryGetValue("services", out services))
+            {
+                var arr = services as object[];
+                if (arr != null)
+                    foreach (object o in arr)
+                    {
+                        var d = o as Dictionary<string, object>;
+                        if (d == null) continue;
+                        var s = new Svc();
+                        s.Id = JsonMap.Str(d, "id");
+                        s.Label = JsonMap.Str(d, "label");
+                        s.DefaultModel = JsonMap.Str(d, "defaultModel");
+                        s.InUse = JsonMap.Bool(d, "inUse");
+                        s.Enabled = JsonMap.Bool(d, "enabled");
+                        s.Down = JsonMap.Bool(d, "down");
+                        object models;
+                        if (d.TryGetValue("models", out models))
+                        {
+                            var ms = models as object[];
+                            if (ms != null)
+                                foreach (object mo in ms)
+                                {
+                                    var md = mo as Dictionary<string, object>;
+                                    if (md == null) continue;
+                                    s.Models.Add(new[] { JsonMap.Str(md, "id"), JsonMap.Str(md, "display") });
+                                }
+                        }
+                        st.Services.Add(s);
+                    }
+            }
+            object clients;
+            if (root.TryGetValue("clients", out clients))
+            {
+                var arr = clients as object[];
+                if (arr != null)
+                    foreach (object o in arr)
+                    {
+                        var d = o as Dictionary<string, object>;
+                        if (d == null) continue;
+                        var c = new Cli();
+                        c.Id = JsonMap.Str(d, "id");
+                        c.Label = JsonMap.Str(d, "label");
+                        c.Attached = JsonMap.Bool(d, "attached");
+                        c.Mode = JsonMap.Str(d, "mode");
+                        c.Route = JsonMap.Str(d, "route");
+                        c.PinnedProvider = JsonMap.Str(d, "pinnedProvider");
+                        c.Service = JsonMap.Str(d, "service");
+                        st.Clients.Add(c);
+                    }
+            }
+            return st;
         }
     }
 
@@ -240,6 +378,95 @@ namespace ModelDockTray
             return File.Exists(startup + "\\modeldock-gateway.vbs");
         }
 
+        // ---------- 托盘轻量模式（tray-state 轮询 + 管理端点直调，对齐 macOS 托盘） ----------
+
+        /// 轻量模式状态缓存：后台线程写、UI 线程读（引用赋值原子；菜单只在 UI 线程构建，
+        /// 故无需跨线程 Marshal——菜单在下次 Opening / 轮询 tick 用上新数据）
+        public static TrayStateData State;
+
+        /// 后台拉托盘状态（fire-and-forget）：5s 轮询与菜单展开时各拉一次；
+        /// 服务端与控制台共享 6s 缓存，不抬高 overview 重建频率
+        public static void FetchStateAsync()
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                if (!ReadState()) { State = null; return; }
+                try
+                {
+                    State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + _port + "/_modeldock/tray-state", _token));
+                }
+                catch { State = null; }
+            });
+        }
+
+        /// JSON 字符串转义（id/label 拼进请求体）
+        internal static string JsonEscape(string v)
+        {
+            return v == null ? "" : v.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+
+        /// 直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、轻量开关统一出口。
+        /// 成功返回 null；失败返回可展示消息（4xx 的 JSON 报错服务端文案本身可操作，原样透出）。
+        /// attach/detach 要快照 + 重写客户端文件，超时放宽到 30s
+        public static string PostAdmin(string path, string json)
+        {
+            if (!ReadState()) return I18n.L("网关未运行", "Gateway not running");
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + _port + path);
+                req.Timeout = 30000;
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Headers["x-modeldock-admin"] = _token;
+                req.Headers["x-modeldock-source"] = "tray";
+                var body = System.Text.Encoding.UTF8.GetBytes(json);
+                req.ContentLength = body.Length;
+                using (var rs = req.GetRequestStream()) { rs.Write(body, 0, body.Length); }
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                {
+                    return (int)resp.StatusCode == 200 ? null : "HTTP " + (int)resp.StatusCode;
+                }
+            }
+            catch (WebException ex)
+            {
+                try
+                {
+                    var resp = ex.Response as HttpWebResponse;
+                    if (resp != null)
+                        using (var sr = new StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8))
+                        {
+                            var text = sr.ReadToEnd();
+                            if (text.Length > 0) return text;
+                        }
+                }
+                catch { }
+                return ex.Message;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+
+        /// 快捷动作统一收口（工作线程跑，不卡托盘消息循环）：成功后立即重拉状态
+        /// （服务端动作已 bump reloads，下一次 tray-state 必是新状态），失败弹可操作报错
+        public static void QuickAction(string path, string json)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                var err = PostAdmin(path, json);
+                if (err == null)
+                {
+                    if (ReadState())
+                    {
+                        try { State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + _port + "/_modeldock/tray-state", _token)); }
+                        catch { }
+                    }
+                }
+                else
+                {
+                    MessageBox.Show(I18n.L("操作失败：", "Action failed: ") + err, "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            });
+        }
+
         /// 检查更新（工作线程跑 CLI，不卡托盘）：CLI 无 TTY 输出纯文本（UTF-8），按内容弹窗；
         /// 有新版弹说明窗（正文 = CLI 输出：那边已去 markdown 标记 + 摘要收口）+ 可点发布页链接，
         /// 点「立即更新」即就地更新（与控制台一键升级同一条链路）；
@@ -257,10 +484,10 @@ namespace ModelDockTray
         /// 用户以为点击无效（v1.1.1 实测反馈）。检查期间菜单项置灰，这里再兜底防连点。
         public static void CheckUpdate()
         {
-            if (_checkingUpdate) { ShowProgressForm("正在检查更新…"); return; }
+            if (_checkingUpdate) { ShowProgressForm(I18n.L("正在检查更新…", "Checking for updates…")); return; }
             if (GatewayBinaryPath() == null) return;
             _checkingUpdate = true;
-            ShowProgressForm("正在检查更新…");
+            ShowProgressForm(I18n.L("正在检查更新…", "Checking for updates…"));
             if (ReadState())
             {
                 ThreadPool.QueueUserWorkItem(delegate { CheckViaGateway(); });
@@ -295,7 +522,7 @@ namespace ModelDockTray
                 Thread.Sleep(500);
             }
             FinishCheck();
-            MessageBox.Show("检查更新超过 30 秒仍未返回（网络异常？）。可稍后重试，或用命令行 modeldock update --check 查看。", "ModelDock 检查更新超时", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(I18n.L("检查更新超过 30 秒仍未返回（网络异常？）。可稍后重试，或用命令行 modeldock update --check 查看。", "No result after 30 seconds (network issue?). Retry later, or run `modeldock update --check` for details."), I18n.L("ModelDock 检查更新超时", "ModelDock Update Check Timed Out"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         /// CLI 现查兜底：工作线程跑 CLI（不卡托盘），按输出弹窗；40s 看门狗防 CLI 真挂住后永久沉默
@@ -343,13 +570,13 @@ namespace ModelDockTray
                 FinishCheck();
                 if (r == DialogResult.OK)
                 {
-                    if (StartUpdate()) ShowProgressForm("正在更新到 v" + (ver.Length > 0 ? ver : ""));
+                    if (StartUpdate()) ShowProgressForm(I18n.L("正在更新到 v", "Updating to v") + (ver.Length > 0 ? ver : ""));
                 }
             }
             else
             {
                 FinishCheck();
-                MessageBox.Show(text.Length > 0 ? text : "未知错误，请稍后重试。", "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(text.Length > 0 ? text : I18n.L("未知错误，请稍后重试。", "Unknown error; try again later."), I18n.L("ModelDock 检查更新失败", "ModelDock Update Check Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -371,14 +598,14 @@ namespace ModelDockTray
                 DialogResult r = ShowUpdateDialog(title, body, htmlUrl);
                 if (r == DialogResult.OK)
                 {
-                    if (StartUpdate()) ShowProgressForm("正在更新到 v" + (latest ?? ""));
+                    if (StartUpdate()) ShowProgressForm(I18n.L("正在更新到 v", "Updating to v") + (latest ?? ""));
                 }
                 return;
             }
             if (string.IsNullOrEmpty(latest) && !string.IsNullOrEmpty(lastError))
             {
                 // 从未成功检查到任何版本：按失败对待（GitHub 不可达等），错误原样展示
-                MessageBox.Show(lastError, "ModelDock 检查更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(lastError, I18n.L("ModelDock 检查更新失败", "ModelDock Update Check Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             MessageBox.Show(UpToDateText(JsonString(json, "current")), "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -454,7 +681,7 @@ namespace ModelDockTray
         {
             if (UpdateInFlight())
             {
-                MessageBox.Show("上一个更新流程尚未完成，请等它结束（或查看进度小窗）后再试。", "更新正在进行中", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(I18n.L("上一个更新流程尚未完成，请等它结束（或查看进度小窗）后再试。", "A previous update is still running; wait for it to finish (or check the progress window) and try again."), I18n.L("更新正在进行中", "Update in Progress"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return false;
             }
             var bin = GatewayBinaryPath();
@@ -506,15 +733,15 @@ namespace ModelDockTray
         public static void CleanData()
         {
             if (MessageBox.Show(
-                    "还原被接管的客户端，然后删除 ModelDock 保存的全部数据：\r\n配置与密钥、请求日志、同步状态与本机缓存。\r\n\r\n快照保留（可 modeldock restore 回溯）。清理后需重新运行 modeldock init 配置。",
-                    "清理数据？", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+                    I18n.L("还原被接管的客户端，然后删除 ModelDock 保存的全部数据：\r\n配置与密钥、请求日志、同步状态与本机缓存。\r\n\r\n快照保留（可 modeldock restore 回溯）。清理后需重新运行 modeldock init 配置。", "Restore taken-over clients, then delete all data ModelDock has saved:\r\nconfig & keys, request logs, sync state and local cache.\r\n\r\nSnapshots are kept (recoverable via `modeldock restore`). Run `modeldock init` to set up again."),
+                    I18n.L("清理数据？", "Reset Data?"), MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
                 return;
             if (!StartCleanCli())
             {
-                MessageBox.Show("无法启动清理程序，请改用命令行：modeldock reset --deep", "ModelDock 清理数据", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(I18n.L("无法启动清理程序，请改用命令行：modeldock reset --deep", "Failed to launch the reset process; run `modeldock reset --deep` instead."), "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            MessageBox.Show("正在清理：会先还原被接管的客户端，再删除配置、密钥与日志，完成后自动提示。", "ModelDock 清理数据", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(I18n.L("正在清理：会先还原被接管的客户端，再删除配置、密钥与日志，完成后自动提示。", "Resetting: taken-over clients are restored first, then config, keys and logs are deleted; you will be notified when done."), "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         /// 管理线程跑 CLI（清理耗时数秒，不能卡住托盘消息循环）
@@ -555,8 +782,10 @@ namespace ModelDockTray
                     string trimmed = text.Trim();
                     string body = trimmed.Length > 0
                         ? trimmed
-                        : (exit == 0 ? "数据已清理。重新配置请运行 modeldock init。" : "清理未完成，请改用命令行：modeldock reset --deep");
-                    MessageBox.Show(body, "ModelDock 清理数据", MessageBoxButtons.OK,
+                        : (exit == 0
+                            ? I18n.L("数据已清理。重新配置请运行 modeldock init。", "Data reset. Run `modeldock init` to set up again.")
+                            : I18n.L("清理未完成，请改用命令行：modeldock reset --deep", "Reset incomplete; run `modeldock reset --deep` to see the error."));
+                    MessageBox.Show(body, "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK,
                         exit == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
                 });
                 return true;
@@ -580,7 +809,7 @@ namespace ModelDockTray
                 {
                     // 线程体里的未处理异常会直接结束进程（.NET 2.0+），而这条线程不在 WinForms 的兜底上：
                     // 兜住并回落成「稍后」，说明仍可从控制台或命令行查看
-                    MessageBox.Show("无法显示更新说明（" + ex.Message + "）。可改用命令行 modeldock update --check 查看。", "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(I18n.L("无法显示更新说明（", "Cannot show the release notes (") + ex.Message + I18n.L("）。可改用命令行 modeldock update --check 查看。", "). Run `modeldock update --check` for details instead."), "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             });
             t.SetApartmentState(ApartmentState.STA);
@@ -608,14 +837,18 @@ namespace ModelDockTray
         /// 「已是最新版本 vX.Y.Z。」：当前版本取得到就带上（CLI 输出 / 网关 status 自带），取不到回落旧文案
         private static string UpToDateText(string current)
         {
-            return string.IsNullOrEmpty(current) ? "已是最新版本。" : "已是最新版本 v" + current + "。";
+            return string.IsNullOrEmpty(current)
+                ? I18n.L("已是最新版本。", "Already up to date.")
+                : I18n.L("已是最新版本 v" + current + "。", "Already up to date (v" + current + ").");
         }
 
         /// 「ModelDock 有新版本 vX（当前 vY）」标题：当前版本取得到才带括注
         private static string NewVersionTitle(string latest, string current)
         {
-            string title = string.IsNullOrEmpty(latest) ? "ModelDock 有新版本" : "ModelDock 有新版本 v" + latest;
-            return string.IsNullOrEmpty(current) ? title : title + "（当前 v" + current + "）";
+            string title = string.IsNullOrEmpty(latest)
+                ? I18n.L("ModelDock 有新版本", "ModelDock update available")
+                : I18n.L("ModelDock 有新版本 v" + latest, "ModelDock update available: v" + latest);
+            return string.IsNullOrEmpty(current) ? title : title + I18n.L("（当前 v" + current + "）", " (current v" + current + ")");
         }
 
         /// 从 CLI 输出里取发布页地址（「完整说明：https://github.com/.../releases/tag/v1.2.3」）。
@@ -686,7 +919,7 @@ namespace ModelDockTray
             if (!string.IsNullOrEmpty(releaseUrl))
             {
                 var link = new LinkLabel();
-                link.Text = "在浏览器打开发布页（完整说明）";
+                link.Text = I18n.L("在浏览器打开发布页（完整说明）", "Open the release page in browser (full notes)");
                 link.AutoSize = true;
                 link.Location = new Point(14, 312);
                 string url = releaseUrl;
@@ -695,19 +928,19 @@ namespace ModelDockTray
             }
 
             var hint = new Label();
-            hint.Text = "点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。";
+            hint.Text = I18n.L("点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray will restart when done.");
             hint.AutoSize = false;
             hint.ForeColor = SystemColors.GrayText;
             hint.SetBounds(14, 336, 532, 18);
             Controls.Add(hint);
 
             var go = new Button();
-            go.Text = "立即更新";
+            go.Text = I18n.L("立即更新", "Update Now");
             go.DialogResult = DialogResult.OK;
             go.SetBounds(378, 362, 80, 26);
 
             var later = new Button();
-            later.Text = "稍后";
+            later.Text = I18n.L("稍后", "Later");
             later.DialogResult = DialogResult.Cancel;
             later.SetBounds(466, 362, 80, 26);
 
@@ -731,7 +964,7 @@ namespace ModelDockTray
             _icon = new NotifyIcon
             {
                 Icon = ExtractIcon(),
-                Text = "ModelDock 网关未运行",
+                Text = I18n.L("ModelDock 网关未运行", "ModelDock gateway not running"),
                 Visible = true,
                 ContextMenuStrip = _menu,
             };
@@ -742,6 +975,7 @@ namespace ModelDockTray
             _menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
             {
                 BuildMenu();
+                if (_running) TrayActions.FetchStateAsync(); // 展开时顺带刷新，下次打开更新鲜
             };
             _poll.Interval = 5000;
             _poll.Tick += delegate { PollHealth(); };
@@ -764,9 +998,12 @@ namespace ModelDockTray
             _port = _running ? int.Parse(TrayActions.CurrentPort) : 0;
             try
             {
-                _icon.Text = _running ? "ModelDock 网关运行中（端口 " + _port + "）" : "ModelDock 网关未运行";
+                _icon.Text = _running
+                    ? I18n.L("ModelDock 网关运行中（端口 " + _port + "）", "ModelDock gateway running (port " + _port + ")")
+                    : I18n.L("ModelDock 网关未运行", "ModelDock gateway not running");
             }
             catch { }
+            if (_running) TrayActions.FetchStateAsync();
             if (_menu.Visible) BuildMenu();
         }
 
@@ -782,32 +1019,53 @@ namespace ModelDockTray
             verItem.Enabled = false;
             menu.Add(verItem);
 
-            var status = new ToolStripMenuItem(_running ? "网关运行中 · 端口 " + _port : "网关未运行");
+            var status = new ToolStripMenuItem(_running
+                ? I18n.L("网关运行中 · 端口 " + _port, "Gateway running · port " + _port)
+                : I18n.L("网关未运行", "Gateway not running"));
             status.Enabled = false;
             menu.Add(status);
+
+            // 当前生效路由（灰字）：钉定/定时窗口/默认选路后的「正在使用」，与控制台「当前」同口径
+            TrayStateData st = _running ? TrayActions.State : null;
+            if (st != null && st.CurrentId != null && st.CurrentLabel != null)
+            {
+                string line = I18n.L("当前：", "Current: ") + st.CurrentLabel;
+                if (!string.IsNullOrEmpty(st.CurrentModel)) line += " · " + st.CurrentModel;
+                if (st.ScheduleApplied) line += I18n.L("（定时窗口）", " (schedule)");
+                var cur = new ToolStripMenuItem(line);
+                cur.Enabled = false;
+                menu.Add(cur);
+            }
             menu.Add(new ToolStripSeparator());
 
-            var open = new ToolStripMenuItem("打开控制台");
+            var open = new ToolStripMenuItem(I18n.L("打开控制台", "Open Console"));
             open.Click += delegate { TrayActions.OpenConsole(); };
             open.Enabled = _running;
             menu.Add(open);
 
-            var web = new ToolStripMenuItem("在浏览器打开");
+            var web = new ToolStripMenuItem(I18n.L("在浏览器打开", "Open in Browser"));
             web.Click += delegate { TrayActions.OpenWeb(); };
             web.Enabled = _running;
             menu.Add(web);
 
-            var auto = new ToolStripMenuItem(TrayActions.AutostartOn() ? "开机自启 ✓" : "开机自启");
+            // ---- 轻量模式快速操作区：切服务 / 切默认模型 / 接入断开客户端（开关见下方「轻量模式」） ----
+            if (st != null && st.TrayLite && st.CurrentId != null)
+            {
+                BuildQuickSection(menu, st);
+                menu.Add(new ToolStripSeparator());
+            }
+
+            var auto = new ToolStripMenuItem(TrayActions.AutostartOn() ? I18n.L("开机自启 ✓", "Start at Login ✓") : I18n.L("开机自启", "Start at Login"));
             auto.Click += delegate { TrayActions.ToggleAutostart(); };
             auto.Enabled = TrayActions.GatewayBinaryPath() != null;
             menu.Add(auto);
 
-            var logs = new ToolStripMenuItem("在资源管理器中打开日志");
+            var logs = new ToolStripMenuItem(I18n.L("在资源管理器中打开日志", "Reveal Logs in Explorer"));
             logs.Click += delegate { TrayActions.RevealLogs(); };
             menu.Add(logs);
 
             // 清理数据：还原客户端 + 删配置/密钥/日志/同步状态（确认弹窗在动作里）
-            var clean = new ToolStripMenuItem("清理数据…");
+            var clean = new ToolStripMenuItem(I18n.L("清理数据…", "Reset Data…"));
             clean.Click += delegate { TrayActions.CleanData(); };
             clean.Enabled = TrayActions.GatewayBinaryPath() != null;
             menu.Add(clean);
@@ -815,23 +1073,124 @@ namespace ModelDockTray
             // 检查更新：网关存活走网关缓存接口（三方同源，TTL 内不打 GitHub），未运行退回 CLI 现查；
             // 检查/更新进行中置灰防连点——更新中再拉起会与在途更新互踩安装（对齐 macOS 托盘口径）
             var updBusy = TrayActions.CheckingUpdate || TrayActions.UpdateInFlight();
-            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? "检查中…" : (updBusy ? "更新中…" : "检查更新…"));
+            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? I18n.L("检查中…", "Checking…") : (updBusy ? I18n.L("更新中…", "Updating…") : I18n.L("检查更新…", "Check for Updates…")));
             upd.Click += delegate { TrayActions.CheckUpdate(); };
             upd.Enabled = !updBusy && TrayActions.GatewayBinaryPath() != null;
             menu.Add(upd);
 
             if (!_running)
             {
-                var start = new ToolStripMenuItem("启动网关");
+                var start = new ToolStripMenuItem(I18n.L("启动网关", "Start Gateway"));
                 start.Click += delegate { TrayActions.RunGatewayCli("--sea-gateway"); };
                 start.Enabled = TrayActions.GatewayBinaryPath() != null;
                 menu.Add(start);
             }
+
+            // 轻量模式开关：勾选 = 托盘承载全部日常操作（快速区展开）；关 = 回精简菜单。
+            // 状态存 config.gateway.tray_lite（服务端端点），网关未运行时无从读写故不显示
+            if (st != null)
+            {
+                var lite = new ToolStripMenuItem(I18n.L("轻量模式", "Lightweight Mode"));
+                lite.Checked = st.TrayLite;
+                lite.Click += delegate
+                {
+                    bool next = !st.TrayLite;
+                    TrayActions.QuickAction("/_modeldock/tray-lite", "{\"enabled\":" + (next ? "true" : "false") + "}");
+                };
+                menu.Add(lite);
+            }
             menu.Add(new ToolStripSeparator());
 
-            var quit = new ToolStripMenuItem(_running ? "退出（停止网关）" : "退出");
+            var quit = new ToolStripMenuItem(_running ? I18n.L("退出（停止网关）", "Quit (Stop Gateway)") : I18n.L("退出", "Quit"));
             quit.Click += delegate { QuitClicked(); };
             menu.Add(quit);
+        }
+
+        /// 快速操作区：当前服务（整包切换 + 自动选路）、默认模型（当前服务目录）、客户端接入（接入/断开 + 指向）
+        private void BuildQuickSection(ToolStripItemCollection menu, TrayStateData st)
+        {
+            var svcItem = new ToolStripMenuItem(I18n.L("当前服务", "Current Service"));
+            var auto = (ToolStripMenuItem)svcItem.DropDownItems.Add(I18n.L("自动选路（跟随程序选择）", "Auto (follow program choice)"));
+            auto.Checked = st.AutoPin == null;
+            auto.Click += delegate { TrayActions.QuickAction("/_modeldock/auto-route", "{\"provider\":null}"); };
+            svcItem.DropDownItems.Add(new ToolStripSeparator());
+            foreach (var s in st.Services)
+            {
+                string title = s.Label + (s.Down ? I18n.L("（不可用）", " (unreachable)") : "");
+                var it = (ToolStripMenuItem)svcItem.DropDownItems.Add(title);
+                it.Checked = (st.AutoPin ?? st.CurrentId) == s.Id;
+                it.Enabled = s.Enabled && !s.Down;
+                string sid = s.Id;
+                it.Click += delegate { TrayActions.QuickAction("/_modeldock/switch", "{\"service\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
+            }
+            menu.Add(svcItem);
+
+            // 默认模型：当前生效服务的模型目录（目录为空不显示）；点击写该服务路由 profile 的 default_model
+            var cur = st.Services.Find(x => x.Id == st.CurrentId);
+            if (cur != null && cur.Models.Count > 0)
+            {
+                var mItem = new ToolStripMenuItem(I18n.L("默认模型", "Default Model"));
+                foreach (var pair in cur.Models)
+                {
+                    string title = string.IsNullOrEmpty(pair[1]) ? pair[0] : pair[1];
+                    var it = (ToolStripMenuItem)mItem.DropDownItems.Add(title);
+                    it.Checked = cur.DefaultModel == pair[0];
+                    string pid = cur.Id, mid = pair[0];
+                    it.Click += delegate { TrayActions.QuickAction("/_modeldock/service/update", "{\"provider\":\"" + TrayActions.JsonEscape(pid) + "\",\"default_model\":\"" + TrayActions.JsonEscape(mid) + "\"}"); };
+                }
+                menu.Add(mItem);
+            }
+
+            var cliItem = new ToolStripMenuItem(I18n.L("客户端接入", "Clients"));
+            if (st.Clients.Count == 0)
+            {
+                var none = (ToolStripMenuItem)cliItem.DropDownItems.Add(I18n.L("没有已安装的客户端", "No installed clients"));
+                none.Enabled = false;
+            }
+            else
+            {
+                foreach (var c in st.Clients)
+                {
+                    var parent = new ToolStripMenuItem(c.Label);
+                    string cid = c.Id, clabel = c.Label ?? c.Id;
+                    bool attached = c.Attached;
+                    var toggle = (ToolStripMenuItem)parent.DropDownItems.Add(attached ? I18n.L("断开并还原…", "Detach & Restore…") : I18n.L("接入", "Attach"));
+                    toggle.Click += delegate { ToggleClient(cid, clabel, attached); };
+                    if (attached && c.Mode == "gateway")
+                    {
+                        parent.DropDownItems.Add(new ToolStripSeparator());
+                        var follow = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("跟随当前服务", "Follow current service"));
+                        follow.Checked = string.IsNullOrEmpty(c.Route) || c.Route == "default";
+                        follow.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"default\":true}"); };
+                        foreach (var s in st.Services)
+                        {
+                            if (!s.Enabled || s.Down) continue;
+                            var pin = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("钉到 ", "Pin to ") + s.Label);
+                            pin.Checked = c.PinnedProvider == s.Id;
+                            string sid = s.Id;
+                            pin.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"provider\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
+                        }
+                    }
+                    cliItem.DropDownItems.Add(parent);
+                }
+            }
+            menu.Add(cliItem);
+        }
+
+        /// 接入/断开客户端（断开会还原配置——自动快照、可重接，托盘误点代价高，确认一次）
+        private void ToggleClient(string id, string label, bool attached)
+        {
+            if (!attached)
+            {
+                TrayActions.QuickAction("/_modeldock/attach/apply", "{\"harness\":\"" + TrayActions.JsonEscape(id) + "\"}");
+                return;
+            }
+            if (MessageBox.Show(
+                    I18n.L("该客户端的配置会还原到本次接入前（自动快照），需要时可重新接入。", "The client's config will be restored to its pre-attach state (auto snapshot); attach again anytime."),
+                    I18n.L("断开 ", "Detach ") + label + I18n.L("？", "?"),
+                    MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return;
+            TrayActions.QuickAction("/_modeldock/detach", "{\"harness\":\"" + TrayActions.JsonEscape(id) + "\"}");
         }
 
         // ---------- 动作（薄壳：实现收敛在 TrayActions） ----------
@@ -870,7 +1229,7 @@ namespace ModelDockTray
             ShowInTaskbar = false;
             _label.SetBounds(16, 14, 400, 40);
             _bar.SetBounds(16, 60, 400, 22);
-            _label.Text = "正在准备更新…";
+            _label.Text = I18n.L("正在准备更新…", "Preparing update…");
             Controls.Add(_label);
             Controls.Add(_bar);
             _bar.Style = ProgressBarStyle.Marquee;
@@ -900,7 +1259,7 @@ namespace ModelDockTray
                 {
                     _timer.Stop();
                     string err = TrayActions.JsonUnescape(TrayActions.JsonString(text, "error"));
-                    MessageBox.Show(string.IsNullOrEmpty(err) ? "更新失败，可重试 modeldock update。" : err, "ModelDock 更新失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(string.IsNullOrEmpty(err) ? I18n.L("更新失败，可重试 modeldock update。", "Update failed; retry with `modeldock update`.") : err, I18n.L("ModelDock 更新失败", "ModelDock Update Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     Close();
                     return;
                 }
@@ -915,11 +1274,11 @@ namespace ModelDockTray
                     _timer.Stop();
                     _bar.Style = ProgressBarStyle.Continuous;
                     _bar.Value = 100;
-                    _label.Text = "更新完成。网关与托盘将自动重启。";
+                    _label.Text = I18n.L("更新完成。网关与托盘将自动重启。", "Update finished. The gateway and tray will restart automatically.");
                     return;
                 }
                 string name = StageName(stage);
-                string mb = total > 0 ? "（" + (received / 1048576).ToString("F1") + " / " + (total / 1048576).ToString("F1") + " MB）" : "";
+                string mb = total > 0 ? I18n.L("（", " (") + (received / 1048576).ToString("F1") + " / " + (total / 1048576).ToString("F1") + " MB" + I18n.L("）", ")") : "";
                 _label.Text = name + (stage == "downloading" && total > 0 ? " " + percent + "%" + mb : "");
                 if (total > 0)
                 {
@@ -939,11 +1298,11 @@ namespace ModelDockTray
 
         private static string StageName(string stage)
         {
-            if (stage == "downloading") return "下载中";
-            if (stage == "verifying") return "校验安装包";
-            if (stage == "swapping") return "停止网关并替换安装";
-            if (stage == "restarting") return "重启服务";
-            if (stage == "done") return "更新完成";
+            if (stage == "downloading") return I18n.L("下载中", "Downloading");
+            if (stage == "verifying") return I18n.L("校验安装包", "Verifying package");
+            if (stage == "swapping") return I18n.L("停止网关并替换安装", "Stopping gateway and swapping install");
+            if (stage == "restarting") return I18n.L("重启服务", "Restarting service");
+            if (stage == "done") return I18n.L("更新完成", "Update finished");
             return stage;
         }
     }
