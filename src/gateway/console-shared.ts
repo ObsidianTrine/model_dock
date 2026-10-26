@@ -10,6 +10,15 @@
  *   - `esc`  = 各页自带的非法字符转义函数。
  * 片段内只用单/双引号拼接、不用反引号与 ${}，避免在宿主模板串里二次转义。
  */
+
+/**
+ * 两页共用的 CSP 基线（纵深防御）：页面全内联脚本/样式，unsafe-inline 不可避免，但
+ * default-src 'self' + connect-src 'self' 仍能挡住未来某处遗漏转义时的外链脚本注入与
+ * 数据外传；object/base 收口。图标走 data:（lanAssets base64），导出下载走 blob: 锚点
+ * （导航类动作不受 fetch 指令约束）。
+ */
+export const CONSOLE_CSP =
+  "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'"
 export const CONSOLE_SHARED_JS = `// ═══ 桌面 / 手机控制台共用逻辑（console-shared.ts 注入；trT=各页翻译函数、esc=各页转义函数）═══
 function parseTarget(t) {
   var s = String(t || '')

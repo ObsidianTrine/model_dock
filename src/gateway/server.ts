@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
+import { CONSOLE_CSP } from './console-shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
@@ -24,7 +25,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, isMeltdown, logAudit, logRequest, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, writeGatewayState, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, isMeltdown, logAudit, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { dispatcherFor } from './proxy.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
@@ -712,6 +713,16 @@ function cookieValueRe(name: string): RegExp {
   return re
 }
 
+/** cookie 值解码：畸形值（如裸 `%`）会让 decodeURIComponent 抛 URIError 穿到顶层变 500，
+ *  这里按解码失败=值不匹配处理，让鉴权路径落到正常的 401/403。 */
+function safeCookieDecode(v: string): string {
+  try {
+    return decodeURIComponent(v)
+  } catch {
+    return v
+  }
+}
+
 function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean {
   const h = req.headers['x-modeldock-admin']
   if (typeof h === 'string' && safeEqual(h, rt.adminToken)) return true
@@ -719,7 +730,7 @@ function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean
   const cookie = req.headers.cookie
   if (typeof cookie === 'string') {
     const m = cookieValueRe(adminCookieName(rt.port ?? DEFAULT_GATEWAY_PORT)).exec(cookie)
-    if (m && safeEqual(decodeURIComponent(m[1]), rt.adminToken)) return true
+    if (m && safeEqual(safeCookieDecode(m[1]), rt.adminToken)) return true
   }
   return false
 }
@@ -727,18 +738,18 @@ function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean
 /** 登记「设备记忆」值到 gateway.json 的 devices（FIFO 上限 20）。失败不影响登录本身。 */
 async function registerWebDevice(rt: GatewayRuntime, device: string): Promise<void> {
   try {
-    const state = await readGatewayState()
-    const devices = [device, ...(state?.devices ?? []).filter((d) => d !== device)].slice(0, 20)
-    if (state) await writeGatewayState({ ...state, devices })
-    // 无状态文件（测试/嵌入式启动）：用运行时信息补一个最小状态，设备记忆才有落点
-    else
-      await writeGatewayState({
+    await mutateGatewayState((state) => {
+      const devices = [device, ...(state?.devices ?? []).filter((d) => d !== device)].slice(0, 20)
+      if (state) return { ...state, devices }
+      // 无状态文件（测试/嵌入式启动）：用运行时信息补一个最小状态，设备记忆才有落点
+      return {
         pid: process.pid,
         port: rt.port ?? 0,
         admin_token: rt.adminToken,
         started_at: localIsoTs(new Date(rt.startedAt)),
         devices,
-      })
+      }
+    })
   } catch {
     /* 登记失败不影响登录 */
   }
@@ -1133,7 +1144,11 @@ async function runRemoteRequest(requestId: string, ips: string[], port: number):
   const nonce = randomBytes(24).toString('hex')
   const from = os.hostname().slice(0, 128)
   const set = (patch: Omit<RemoteRequestState, 'createdAt'>): void => {
-    remoteRequests.set(requestId, { ...remoteRequests.get(requestId)!, ...patch })
+    // 条目可能已被 5min TTL 清扫（敲门逐 IP 5s 超时 + 授权轮询，总时长可超 TTL）：
+    // 缺失时须以当前时间重建 createdAt，否则 ...undefined 展开产出无 createdAt 的条目，
+    // Date.now() - undefined = NaN 永不过期 → 每次晚完成的请求留一个「永生」条目
+    const prev = remoteRequests.get(requestId)
+    remoteRequests.set(requestId, { ...(prev ?? { createdAt: Date.now() }), ...patch })
   }
   try {
     // 敲门：候选 IP 逐个尝试（同机 127.0.0.1 / 局域网多网卡），任一成功即可
@@ -1217,9 +1232,8 @@ async function hRotate(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   try {
     rt.adminToken = randomToken('mdkadm')
-    // 只更新状态文件里的 token；无状态文件（测试/嵌入式启动）则只换内存态
-    const state = await readGatewayState()
-    if (state) await writeGatewayState({ ...state, admin_token: rt.adminToken })
+    // 只更新状态文件里的 token（串行队列防并发丢字段）；无状态文件（测试/嵌入式启动）则只换内存态
+    await mutateGatewayState((state) => (state ? { ...state, admin_token: rt.adminToken } : null))
     const host = req.headers.host ?? `127.0.0.1:${rt.port ?? ''}`
     const consoleUrl = `http://${host}/_modeldock/ui?token=${rt.adminToken}`
     audit(bi('轮换管理令牌', 'Rotate admin token'), '-', bi('旧令牌已失效', 'Old token revoked'))
@@ -1671,8 +1685,9 @@ async function hLanPost(c: AdminCtx): Promise<void> {
         c.lan = { ...(c.lan ?? {}), enabled: true }
       })
       await reloadRuntime(rt)
-      const refreshed = await readGatewayState()
-      if (refreshed) await writeGatewayState({ ...refreshed, lan_token: lanToken, lan_port: rt.lan?.port })
+      await mutateGatewayState((refreshed) =>
+        refreshed ? { ...refreshed, lan_token: lanToken, lan_port: rt.lan?.port } : null
+      )
       audit(bi('手机远程', 'Mobile console'), bi('开启', 'on'), bi('端口 {port}', 'port {port}', { port: rt.lan?.port ?? 0 }))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
@@ -1682,8 +1697,7 @@ async function hLanPost(c: AdminCtx): Promise<void> {
         c.lan = { ...(c.lan ?? {}), enabled: false }
       })
       await reloadRuntime(rt)
-      const refreshed = await readGatewayState()
-      if (refreshed) await writeGatewayState({ ...refreshed, lan_port: undefined })
+      await mutateGatewayState((refreshed) => (refreshed ? { ...refreshed, lan_port: undefined } : null))
       audit(bi('手机远程', 'Mobile console'), bi('关闭', 'off'))
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
@@ -1860,7 +1874,7 @@ async function hSyncOfferApprove(c: AdminCtx): Promise<void> {
       audit(bi('附近配置直拉', 'Nearby config pull'), bi('已拒绝', 'denied'), bi(pending.from, pending.from))
     }
     clearSyncRequest()
-    overviewCache = null // 确认卡即时消失（overview 有 2s TTL 缓存）
+    overviewCache = null // 确认卡即时消失（overview 有 6s TTL 缓存）
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true }))
   } catch (e) {
@@ -1879,7 +1893,7 @@ async function hAutostart(c: AdminCtx): Promise<void> {
     if (b.enabled === true) {
       const r = await installAutostart()
       audit(bi('开机自启', 'Start at login'), bi('开启', 'on'), bi('服务文件 {file}', 'Service file {file}', { file: r.file }))
-      // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 2s TTL 旧值，UI 回灌旧状态
+      // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 6s TTL 旧值，UI 回灌旧状态
       overviewCache = null
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, installed: true, note: r.note ?? t('下次登录自动启动', 'Starts automatically at next login') }))
@@ -2235,11 +2249,13 @@ async function hServiceDelete(c: AdminCtx): Promise<void> {
         .join(t('；', '; '))
     )
   }
-  try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
+  // 先落配置再删密钥：persistConfig 失败（写锁超时等）时服务仍在配置里但 key 已不可读，
+  // 后续转发 503；先写成功、后删密钥，失败至多留一个无引用的孤儿密钥条目（无副作用）
   let removedProfiles: string[] = []
   await persistConfig(rt, (c) => {
     removedProfiles = removeProviderCascade(c, id)
   })
+  try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
   audit(bi('删除服务', 'Delete service'), id, removedProfiles.length ? bi('同时删除路由 {list}', 'Also removed routes {list}', { list: biJoin('、', ', ', removedProfiles) }) : undefined)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, removed: id, profiles: removedProfiles }))
@@ -2395,10 +2411,16 @@ async function hHarnessRoute(c: AdminCtx): Promise<void> {
     }
     let finalRoute = toDefault ? 'default' : profileName
     await persistConfig(rt, (c) => {
+      // 只以写锁内的最新配置为源：并发 detach（CLI/Web 同时操作）时 rt.config 还是进 handler
+      // 前的旧引用，拿它兜底会把 {route} 幽灵条目写回已断开的客户端（指向无 token 的死路由）
+      const he = c.harness[hid]
+      if (!he) {
+        throw new UpstreamError(400, t('客户端「{id}」刚刚断开，路由未设置；请刷新后重试', 'Client "{id}" was just detached; route not set — refresh and retry', { id: hid }))
+      }
       if (!toDefault && !profileName && providerId) {
         finalRoute = profileForProvider(c, providerId)
       }
-      c.harness[hid] = { ...(c.harness[hid] ?? rt.config.harness[hid]!), route: finalRoute }
+      c.harness[hid] = { ...he, route: finalRoute }
     })
     // 烤模型客户端按目标 profile 重写模型列表（恢复跟随 = 按 active_profile 重写；透明客户端为空操作）
     const syncProfile = toDefault ? rt.config.active_profile ?? undefined : finalRoute
@@ -2679,8 +2701,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/reset': hReset,
 }
 
-/** 从来源电脑拉取信封（用户自粘的链接）：仅 http/https、禁止重定向、10s 超时、响应体 ≤10MB。
- *  调用者=本机管理员（admin 鉴权 + Host 白名单），无凭据外泄面；上限防异常大包拖垮网关。 */
+/** 管理面入口：Host 白名单 → tier-1 豁免端点（health/ui/relogin）→ admin 鉴权 → 路由表分发。 */
 async function handleAdmin(
   rt: GatewayRuntime,
   req: http.IncomingMessage,
@@ -2760,20 +2781,24 @@ async function handleAdmin(
     }
     const { html, etag } = getRenderedUI()
     // 页面加载（含 304 重验证）= UI 打开：续在场并撤销在途仅托盘广播——任何方式打开控制台自动退出仅托盘。
-    // 必须同步失效 overview 缓存：刚加载的页面首拉 overview 若命中携带旧广播时间戳的缓存串会误自关
-    markUiSeen(Date.now())
-    invalidateOverviewCache()
+    // 必须同步失效 overview 缓存：刚加载的页面首拉 overview 若命中携带旧广播时间戳的缓存串会误自关。
+    // 收窄到带有效凭据的请求：本机程序对 /ui 的无凭据探测/预取不该抑制仅托盘、打穿 overview 缓存
+    // （真登录路径 302 后浏览器带 cookie 重取，必再走到这里）
+    if (adminAuthorized(rt, req)) {
+      markUiSeen(Date.now())
+      invalidateOverviewCache()
+    }
     // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 236KB 页体。
     // no-store 由管理面统一策略设置，此处叠 ETag 只做条件请求，不放开 JSON 的缓存策略。
     if (req.headers['if-none-match'] === etag) {
-      res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag })
+      res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag, 'content-security-policy': CONSOLE_CSP })
       res.end()
       return
     }
     // 仅 HTML 页覆盖管理面统一 no-store：no-cache = 可存储但每次必须条件重验证，
     // 浏览器才会存下 236KB 页体并在下一次发 If-None-Match → ETag 304 生效。
     // 页面是静态壳 + 状态路径，无敏感数据；JSON API 的 no-store 策略不动。
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache' })
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP })
     res.end(html)
     return
   }
@@ -2785,7 +2810,7 @@ async function handleAdmin(
     const port = rt.port ?? DEFAULT_GATEWAY_PORT
     const cookie = req.headers.cookie
     const m = cookie ? cookieValueRe(deviceCookieName(port)).exec(cookie) : null
-    const device = m ? decodeURIComponent(m[1]) : ''
+    const device = m ? safeCookieDecode(m[1]) : ''
     const state = await readGatewayState()
     const known = typeof device === 'string' && device.startsWith('mdkdev_') && (state?.devices ?? []).some((d) => safeEqual(d, device))
     if (!known) {

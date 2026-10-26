@@ -919,6 +919,22 @@ export async function writeGatewayState(state: GatewayStateFile): Promise<void> 
   await atomicWrite(gatewayStatePath(), JSON.stringify(state, null, 2), 0o600)
 }
 
+/** gateway.json 读-改-写的进程内串行队列。登录种设备记忆、lan_token/lan_port 回写、admin_token
+ *  轮换都是 read→modify→write：atomicWrite 只保证不写坏、不保证不丢字段，浏览器登录与托盘/
+ *  手机端并发写会互相覆盖（丢 devices / lan_port）。单写者即本网关进程，进程内 promise 链
+ *  串行即可；fn 返回 null 表示无需写盘。 */
+let gatewayStateQueue: Promise<void> = Promise.resolve()
+export async function mutateGatewayState(
+  fn: (state: GatewayStateFile | null) => GatewayStateFile | null
+): Promise<void> {
+  const run = gatewayStateQueue.then(async () => {
+    const next = fn(await readGatewayState())
+    if (next) await writeGatewayState(next)
+  })
+  gatewayStateQueue = run.catch(() => {})
+  await run
+}
+
 export async function clearGatewayState(): Promise<void> {
   await fs.promises.rm(gatewayStatePath(), { force: true }).catch(() => {})
 }

@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
-import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
+import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, mutateGatewayState, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision } from '../src/gateway/server.js'
 import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
@@ -254,6 +254,46 @@ describe('readBody 413 wire 回归（超限响应必须送达客户端）', () =
       const j = (await res.json()) as { error?: { message?: string }; modeldock?: { hint?: string } }
       expect(j.error?.message ?? '').toContain('字节上限')
       expect(j.modeldock?.hint ?? '').toContain('max_body_mb')
+    } finally {
+      t.closeAll()
+    }
+  })
+})
+
+describe('管理面健壮性回归（2026-10 复审 P2）', () => {
+  it('mutateGatewayState 串行化并发读改写：第二个写者读到第一个的结果，不丢字段', async () => {
+    const h = fakeHome()
+    try {
+      await Promise.all([
+        mutateGatewayState(() => ({ pid: 1, port: 1, admin_token: 'a', started_at: 't', devices: ['d1'] })),
+        mutateGatewayState((s) => (s ? { ...s, devices: [...(s.devices ?? []), 'd2'] } : null)),
+      ])
+      const st = await readGatewayState()
+      expect(st?.devices).toEqual(['d1', 'd2'])
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('畸形 cookie 值（裸 %）→ 401 而非 500（URIError 不再穿透）', async () => {
+    const t = await setup()
+    try {
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, {
+        headers: { cookie: `mdk_admin_${t.gwPort}=%` },
+      })
+      expect(res.status).toBe(401)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('控制台页带 CSP 基线（default-src self，防外链注入/数据外传）', async () => {
+    const t = await setup()
+    try {
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/ui`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-security-policy')).toContain("default-src 'self'")
+      expect(res.headers.get('content-security-policy')).toContain("connect-src 'self'")
     } finally {
       t.closeAll()
     }

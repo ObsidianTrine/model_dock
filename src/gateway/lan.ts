@@ -15,7 +15,7 @@ import { safeEqual } from '../util/safe-equal.js'
 import { listenWithRetry, projectModel, fetchEnvelopeFromUrl } from './shared.js'
 import { localIsoTs } from '../util/time.js'
 import { autoRouteInfo, logAudit, reloadRuntime, type GatewayRuntime } from './state.js'
-import { CONSOLE_SHARED_JS } from './console-shared.js'
+import { CONSOLE_SHARED_JS, CONSOLE_CSP } from './console-shared.js'
 import { lanCookieName } from './cookies.js'
 import { LAN_ICON_192_PNG, LAN_ICON_512_PNG } from './lanAssets.js'
 import { startSyncBeacon, stopSyncBeacon } from './discover.js'
@@ -371,7 +371,7 @@ export function renderMobilePage(): string {
 <meta name="apple-mobile-web-app-title" content="ModelDock">
 <link rel="manifest" href="/m/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/m/icon-192.png">
-<title>ModelDock · 手机</title>
+<title data-i18n="ModelDock · 手机||ModelDock · Mobile">ModelDock · 手机</title>
 <style>
 /* 令牌与桌面控制台（src/gateway/ui.ts）同源，见 .agents/conventions/ui-kit.md；
  * 控件（.act/.badge/#toast/#confirm）为移动变体保留：16px 输入=iOS 聚焦防缩放特例，44px=触控最小高度 */
@@ -467,8 +467,8 @@ footer{color:var(--muted);font-size:var(--fs-xs);text-align:center;margin-top:6p
 <p class="a2hsrow"><button type="button" class="mini" id="a2hsBtn" data-i18n="常驻到手机桌面 · 怎么做？||Keep on home screen · how?">常驻到手机桌面 · 怎么做？</button></p>
 <div class="card" id="a2hsCard" hidden><p class="hint" id="a2hsText"></p></div>
 <footer data-i18n="仅限局域网 · 状态 / 切换 / 配置包 · 不显示 Key||LAN only · status / switch / config package · keys never shown">仅限局域网 · 状态 / 切换 / 配置包 · 不显示 Key</footer>
-<div id="toast"></div>
-<div id="confirm" hidden>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="confirm" hidden role="dialog" aria-modal="true">
   <div class="confirm-box">
     <p id="confirmMsg"></p>
     <p id="confirmHint" class="chint" hidden></p>
@@ -479,7 +479,10 @@ footer{color:var(--muted);font-size:var(--fs-xs);text-align:center;margin-top:6p
   </div>
 </div>
 <script>
-var LANG = (localStorage.getItem('mdk_lang') || (navigator.language || '').toLowerCase()).indexOf('zh') === 0 ? 'zh' : (localStorage.getItem('mdk_lang') === 'en' ? 'en' : 'zh')
+// 语言：显式选择（localStorage）优先；未选择时英文浏览器兜底 en、其余缺省 zh（与桌面同口径）。
+// 旧写法把 navigator.language 并进首判断、又只在 localStorage==='en' 时才取 en——navigator 分支是死逻辑，英文系统手机永远中文。
+var _savedLang = localStorage.getItem('mdk_lang')
+var LANG = _savedLang === 'en' || (_savedLang === null && /^en/i.test(navigator.language || '')) ? 'en' : 'zh'
 function tr(zh, en) { return LANG === 'en' ? en : zh }
 // 与桌面控制台（ui.ts）同源的共用逻辑（parseTarget/impWarnList/routeSelectHtml）：注入单份共享片段，trT=本页翻译函数
 var trT = tr
@@ -515,7 +518,8 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-i18n-ph]'), functi
 })()
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] }) }
 function toast(msg) { var t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(function () { t.style.display = 'none' }, 2600) }
-// 自绘确认弹层（浏览器原生 confirm 的按钮顺序不可控）：右侧确定、左侧取消；hint 为灰色补充说明（路由被自动路由接管时提示切换的实际效果）
+// 自绘确认弹层（浏览器原生 confirm 的按钮顺序不可控）：右侧确定、左侧取消；hint 为灰色补充说明（路由被自动路由接管时提示切换的实际效果）。
+// 基础键盘路径：打开即聚焦确定键、Esc=取消、关闭还原出发点（桌面 createModal 有完整焦点管理，此处按移动页最小集实现）
 function confirmDialog(msg, hint) {
   return new Promise(function (resolve) {
     var box = document.getElementById('confirm')
@@ -526,12 +530,20 @@ function confirmDialog(msg, hint) {
     msgEl.textContent = msg
     if (hint) { hintEl.textContent = hint; hintEl.hidden = false } else { hintEl.textContent = ''; hintEl.hidden = true }
     box.hidden = false
+    var lastFocus = document.activeElement
+    yes.focus()
+    function onKey(ev) {
+      if (ev.key === 'Escape') { ev.stopPropagation(); done(false) }
+    }
     function done(v) {
       box.hidden = true
       yes.onclick = null
       no.onclick = null
+      document.removeEventListener('keydown', onKey, true)
+      if (lastFocus && lastFocus.focus) { try { lastFocus.focus() } catch (e) { /* 出发点已移除 */ } }
       resolve(v)
     }
+    document.addEventListener('keydown', onKey, true)
     yes.onclick = function () { done(true) }
     no.onclick = function () { done(false) }
   })
@@ -799,11 +811,11 @@ function getMobilePage(): { html: string; etag: string } {
 function serveMobilePage(req: http.IncomingMessage, res: http.ServerResponse): void {
   const { html, etag } = getMobilePage()
   if (req.headers['if-none-match'] === etag) {
-    res.writeHead(304)
+    res.writeHead(304, { 'content-security-policy': CONSOLE_CSP })
     res.end()
     return
   }
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache' })
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP })
   res.end(html)
 }
 

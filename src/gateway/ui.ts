@@ -855,6 +855,12 @@ header{flex-wrap:wrap;row-gap:4px}
         Array.prototype.forEach.call(foot.querySelectorAll('.mferr'), function (el) { el.textContent = '' })
         scrim.hidden = false
         modalStack.push(m)
+        // 焦点管理（ui-kit §9 声明的壳内置能力）：open 移焦入弹层、close 还原出发点、
+        // Tab 圈闭（下方全局 keydown）——否则键盘/读屏用户会 Tab 进遮罩后面的页面内容
+        m._lastFocus = document.activeElement
+        if (!modal.hasAttribute('tabindex')) modal.setAttribute('tabindex', '-1')
+        var f = firstFocusable()
+        ;(f || modal).focus()
         if (opts.onOpen) opts.onOpen()
       },
       close: function () {
@@ -862,18 +868,36 @@ header{flex-wrap:wrap;row-gap:4px}
         scrim.hidden = true
         var at = modalStack.indexOf(m)
         if (at >= 0) modalStack.splice(at, 1)
+        if (m._lastFocus && m._lastFocus.focus) { try { m._lastFocus.focus() } catch (e) { /* 出发点已移除 */ } }
+        m._lastFocus = null
         if (opts.onClose) opts.onClose()
       },
     }
+    function firstFocusable() {
+      var sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      var list = modal.querySelectorAll(sel)
+      return list.length ? list[0] : null
+    }
     return m
   }
-  // Esc 关最上层弹层（closeOnEsc:false 的壳跳过且不穿透到下层）
+  // Esc 只关最上层弹层：closeOnEsc:false 的壳（如仅托盘提示层）盖着时按键就地吞掉——
+  // 此前的循环写法会穿透关掉被遮住的弹层（编辑弹层的未保存输入静默丢弃）。
+  // Tab 在弹层打开时圈闭于最上层壳内（createModal 焦点管理配套）。
   document.addEventListener('keydown', function (ev) {
-    if (ev.key !== 'Escape' || !modalStack.length) return
-    for (var i = modalStack.length - 1; i >= 0; i--) {
-      var mm = modalStack[i]
-      if (mm._closeOnEsc !== false) { mm.close(); break }
+    if (!modalStack.length) return
+    var top = modalStack[modalStack.length - 1]
+    if (ev.key === 'Escape') {
+      if (top._closeOnEsc !== false) top.close()
+      return
     }
+    if (ev.key !== 'Tab') return
+    var sel = 'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    var list = top.scrim.querySelectorAll(sel)
+    if (!list.length) return
+    var inside = top.scrim.contains(document.activeElement)
+    var first = list[0], last = list[list.length - 1]
+    if (ev.shiftKey && (document.activeElement === first || !inside)) { last.focus(); ev.preventDefault() }
+    else if (!ev.shiftKey && (document.activeElement === last || !inside)) { first.focus(); ev.preventDefault() }
   })
   // 配置包统一弹层（导出|导入 一级方向 Seg；导出=附近的电脑/导出链接/导出配置包 三方式，
   // 与导入面板同名同序镜像）。吸收原 shareM（链接）与 importM（导入三来源），
@@ -883,6 +907,9 @@ header{flex-wrap:wrap;row-gap:4px}
     title: '配置包||Config package',
     align: 'top',
     closeOnScrim: true,
+    // 关闭路径（✕/Esc/遮罩）也要停「附近的电脑」等待轮询：否则 1Hz /remote-status 空转到
+    // 65s deadline，票据/授权结果不再被消费（openPkgOverlay 与 importToggle 只盖住了部分入口）
+    onClose: function () { stopNearbyPoll() },
     bodyHtml: '<div id="pkgDir" class="seg grow">' +
       '<button type="button" class="on" id="pkgDirExport" data-i18n="导出||Export">导出</button>' +
       '<button type="button" id="pkgDirImport" data-i18n="导入||Import">导入</button></div>' +
@@ -1449,7 +1476,16 @@ header{flex-wrap:wrap;row-gap:4px}
     // 首屏 /overview 失败（网关重启窗口、冷启动探测慢超时）时 view 仍为空：轮询档自动重试首屏，
     // 否则页面永远停在静态骨架（②③ 空态、pill 全默认），只能手动刷新恢复。静默吞错防 toast 刷屏
     if (!view) { load().catch(function () {}); return }
-    fetch('/_modeldock/overview', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.text() : null }).then(function (txt) {
+    fetch('/_modeldock/overview', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
+      // 401 不能吞成「无变化」：会话过期（cookie 7 天/令牌轮换）后轮询全部静默 401，
+      // 健康横幅照常显示运行中，用户看到的是冻结的假实时页面——弹出重新登录。
+      // 已在登录页则跳过（重绘会打断用户正在输入的令牌）
+      if (r.status === 401) {
+        if (!document.querySelector('.loginbox')) showLoginRequired()
+        return null
+      }
+      return r.ok ? r.text() : null
+    }).then(function (txt) {
       // 文本级 diff：服务端命中缓存直发缓存串，串相同即整包没变——跳过 parse 与重绘
       //（此前每次轮询对几十–几百 KB 的 overview 做 JSON.stringify 双串比较，纯浪费）
       if (!txt || txt === overviewLastText) return
@@ -4744,7 +4780,7 @@ header{flex-wrap:wrap;row-gap:4px}
   } catch (e) { /* 隐私模式等 */ }
   refreshUpdStatus()
   setInterval(function () { if (!document.hidden) refreshUpdStatus() }, 60000)
-  load().then(loadLogs).catch(function (e) {
+  load().then(function () { loadLogs() }).catch(function (e) {
     if (e && e.status === 401) { showLoginRequired(); return }
     toast(t('加载失败：', 'Failed to load: ') + e.message, false)
   })
