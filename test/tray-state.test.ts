@@ -12,7 +12,7 @@ import { resetUiPresence } from '../src/gateway/presence.js'
 import { parse as tomlParse } from 'smol-toml'
 import { configPath } from '../src/util/paths.js'
 
-// 本文件只碰 tray-state / tray-lite / switch / service-update / attach（无转发、无定时窗口），
+// 本文件只碰 tray-state / tray-only / ui-presence / switch / service-update / attach（无转发、无定时窗口），
 // 但 overview 重建会读日历缓存与模型目录兜底：与 gateway.test.ts 同口径禁用出站请求。
 process.env.MODELRDOCK_DISABLE_HOLIDAY_FETCH = '1'
 process.env.MODELRDOCK_DISABLE_CATALOG_FETCH = '1'
