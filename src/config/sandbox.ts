@@ -28,29 +28,40 @@ export async function migrateSandboxKeyRefsToLocal(): Promise<string[]> {
     return []
   }
 
+  const okProviderIds: string[] = []
   for (const [id, p] of providerRefs) {
     try {
       const val = await getSecret(p.key_ref)
-      await setSecret(id, val ?? '', 'file')
+      // 读不到（外部条目缺失/钥匙环读取失败）：不落空 key、引用保持原样由守卫兜底——
+      // 此前 val ?? '' 会把原本可用的生产 keychain 引用永久替换成指向空 key 的 file 引用
+      if (val == null) continue
+      await setSecret(id, val, 'file')
       migrated.push(id)
+      okProviderIds.push(id)
     } catch { /* 单项失败不阻断：引用保持原样，deleteSecret 沙箱守卫兜底 */ }
   }
+  let okTokenId: string | null = null
   if (isExternal(tokenRef)) {
     try {
       const parsed = parseKeyRef(tokenRef)
       const val = await getSecret(tokenRef)
-      await setSecret(parsed.id, val ?? '', 'file')
-      migrated.push(`update:${parsed.id}`)
+      if (val != null) {
+        await setSecret(parsed.id, val, 'file')
+        migrated.push(`update:${parsed.id}`)
+        okTokenId = parsed.id
+      }
     } catch { /* 同上 */ }
   }
 
   await mutateConfig((c2) => {
-    for (const [id] of providerRefs) {
+    // 只改写「值已成功落进沙箱 secrets.json」的引用：读失败的条目保留外部引用（守卫兜底），
+    // 不然引用翻转后指向不存在的 file 条目，比保留外部引用更糟
+    for (const id of okProviderIds) {
       if (c2.providers[id]) c2.providers[id].key_ref = `file:${id}`
     }
     const tr = c2.update?.token_ref
-    if (isExternal(tr)) {
-      c2.update = { ...c2.update, token_ref: `file:${parseKeyRef(tr).id}` }
+    if (okTokenId && isExternal(tr) && parseKeyRef(tr).id === okTokenId) {
+      c2.update = { ...c2.update, token_ref: `file:${okTokenId}` }
     }
     const st = c2.security?.store as string | undefined
     if (st === 'keychain' || st === 'secret-service') {

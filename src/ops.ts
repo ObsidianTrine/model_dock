@@ -76,16 +76,31 @@ export function validateServiceInput(opts: {
   return { finalBaseUrl, cleanEndpoints }
 }
 
+/** 数值字段守卫：undefined/null/空串视为未填（落盘时省略该字段）；其余必须是正数，违者给
+ *  可操作报错。与 presets/data.ts 的 validateUserPresetEntries 同口径——此前 Web 直通 null
+ *  会让 smol-toml 序列化抛原始错误、字符串落成畸形目录。 */
+function saneModelNumber(v: unknown, label: string, mid: string): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+    throw new Error(
+      t('模型「{id}」的 {label} 必须是正数（当前值：{v}）', 'Model "{id}" {label} must be a positive number (got: {v})', { id: mid, label, v: String(v) })
+    )
+  }
+  return v
+}
+
 /** 用户提交模型归一化（纯函数，无 I/O）：空 id 剔除、能力清洗、display_name 缺省回落 id */
 function normalizeUserModels(m: AddServiceSubmittedModels): Record<string, ModelMeta> {
   const out: Record<string, ModelMeta> = {}
   for (const [mid, rec] of Object.entries(m)) {
     if (!mid.trim()) continue
     const caps = saneCapabilities(rec.capabilities)
+    const cw = saneModelNumber(rec.context_window, 'context_window', mid)
+    const mo = saneModelNumber(rec.max_output, 'max_output', mid)
     out[mid] = {
       display_name: rec.display_name ?? mid,
-      context_window: rec.context_window,
-      max_output: rec.max_output,
+      ...(cw !== undefined ? { context_window: cw } : {}),
+      ...(mo !== undefined ? { max_output: mo } : {}),
       ...(caps?.length ? { capabilities: caps } : {}),
       source: 'manual' as const,
     }
@@ -361,7 +376,9 @@ async function gatewayHealthOk(port: number): Promise<boolean> {
  *  接入/切换服务后，客户端 detail 恒为 http://127.0.0.1:8890）。网关自身的操作必须显式传 rt.port。 */
 export async function resolveClientGatewayPort(explicit: number | undefined, cfgPort: number | undefined): Promise<number> {
   if (explicit) return explicit
-  if (await gatewayHealthOk(DEFAULT_GATEWAY_PORT)) return DEFAULT_GATEWAY_PORT
+  // 沙箱（FAKE_HOME）是「独立机器」：不得探测生产默认端口的存活网关——否则沙箱内 CLI 未显式
+  // 传端口的 attach/刷新会把客户端文件指到真机 8687，破坏沙箱隔离语义（CORRECT-05 同域）
+  if (!process.env.MODELRDOCK_FAKE_HOME && (await gatewayHealthOk(DEFAULT_GATEWAY_PORT))) return DEFAULT_GATEWAY_PORT
   return (await gatewayLive())?.port ?? cfgPort ?? DEFAULT_GATEWAY_PORT
 }
 
@@ -898,6 +915,9 @@ export function removeProviderCascade(c: Config, id: string): string[] {
   for (const k of usedBy) delete c.profiles[k]
   if (c.active_profile && usedBy.includes(c.active_profile)) delete c.active_profile
   if (c.gateway?.auto_route_provider === id) delete c.gateway.auto_route_provider
+  // 「下一个切换」钉定同样要清：留着会成为悬空引用，控制台显示死 id、nextPinnedSkipped 误报
+  //（转发侧 pickTarget 对未知 id 安全跳过，无请求级故障，但 UI 侧展示脏）
+  if (c.gateway?.route_next === id) delete c.gateway.route_next
   for (const prof of Object.values(c.profiles)) {
     if (prof.fallback?.some((e) => e === id || e.startsWith(`${id}:`))) {
       prof.fallback = prof.fallback.filter((e) => e !== id && !e.startsWith(`${id}:`))

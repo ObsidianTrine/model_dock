@@ -21,14 +21,17 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
 
   console.log(c.bold(t('① 检测本机 harness', '① Detect local harnesses')))
   const harnessAdapters = allAdapters(cfg).filter((a) => a.id !== 'generic-env')
-  for (const a of harnessAdapters) {
-    const det = await a.detect()
+  // 并行探测保序输出（diag.ts 同款）：Windows 桌面客户端逐个串行注册表探测最坏 8s/个，
+  // 首屏会拖到数十秒
+  const dets = await Promise.all(harnessAdapters.map((a) => a.detect()))
+  harnessAdapters.forEach((a, i) => {
+    const det = dets[i]
     console.log(
       det.installed
         ? `  ${c.green('✓')} ${a.label}${det.current ? c.gray(t('  当前 → {c}', '  current → {c}', { c: det.current })) : ''}`
         : `  ${c.gray('○')} ${a.label}${c.gray(t('（未安装，跳过）', ' (not installed, skipped)'))}`
     )
-  }
+  })
   console.log()
 
   console.log(c.bold(t('② 收编现有 provider 配置（只读扫描，key 存入 ModelDock）', '② Collect existing provider configs (read-only scan; keys are stored in ModelDock)')))
@@ -104,12 +107,10 @@ export async function cmdInit(opts: { yes?: boolean }): Promise<void> {
 
   console.log(c.bold(t('⑤ 接管 harness（写入前展示 diff，自动快照）', '⑤ Attach harnesses (shows a diff before writing; automatic backups)')))
   cfg = await loadConfig()
-  const installed: string[] = []
-  for (const a of allAdapters(cfg)) {
-    if (a.id === 'generic-env') continue
-    const det = await a.detect()
-    if (det.installed) installed.push(a.id)
-  }
+  // 并行探测（与第①步同理由）：安装前逐个串行 detect 在 Windows 上可拖数十秒
+  const attachAdapters = allAdapters(cfg).filter((a) => a.id !== 'generic-env')
+  const dets2 = await Promise.all(attachAdapters.map((a) => a.detect()))
+  const installed: string[] = attachAdapters.filter((a, i) => dets2[i].installed).map((a) => a.id)
   let toAttach: string[] = installed
   if (!opts.yes && installed.length > 0) {
     const ids = await checkbox({

@@ -29,8 +29,9 @@ export function pickEnvProxy(env: NodeJS.ProcessEnv = process.env): string | nul
 }
 
 /**
- * 解析 macOS `scutil --proxy` 输出。优先 HTTPS（更新目标是 https），
- * 其次 HTTP，最后 SOCKS（socks5:// 前缀——ProxyAgent 只认完整 URL 形态）。
+ * 解析 macOS `scutil --proxy` 输出。优先 HTTPS（更新目标是 https），其次 HTTP。
+ * SOCKS-only 配置不产出（undici ProxyAgent 只认 HTTP 代理，socks5:// 交进去更新必然失败）——
+ * 按「无可用代理」回落直连，系统若同配了 HTTP 口则已在上分支返回。
  */
 export function parseScutilProxy(out: string): string | null {
   const read = (key: string): string | null => {
@@ -52,26 +53,21 @@ export function parseScutilProxy(out: string): string | null {
     const port = num('HTTPPort')
     if (host && port && validHostPort(host, port)) return `http://${host}:${port}`
   }
-  if (enabled('SOCKSEnable')) {
-    const host = read('SOCKSProxy')
-    const port = num('SOCKSPort')
-    if (host && port && validHostPort(host, port)) return `socks5://${host}:${port}`
-  }
-  return null
+  return null // SOCKS-only：undici 不支持，弃用走直连（不产出 socks5://）
 }
 
 /**
  * 解析 Windows 注册表 ProxyServer 值。两种形态：整機 "host:port"；
- * 分协议 "http=h:p;https=h:p;socks=h:p"（取 https，退 http/socks）。
+ * 分协议 "http=h:p;https=h:p;socks=h:p"（取 https，退 http；socks 条目弃用——undici 不支持）。
  */
 export function parseWinProxyServer(value: string): string | null {
   const v = value.trim()
   if (!v) return null
   if (v.includes('=')) {
-    for (const scheme of ['https', 'http', 'socks']) {
+    for (const scheme of ['https', 'http']) {
       const m = v.match(new RegExp(`(?:^|;)${scheme}=([^;]+)`, 'i'))
       if (m) {
-        const url = normalizeWinEntry(scheme === 'socks' ? `socks5://${m[1]}` : m[1])
+        const url = normalizeWinEntry(m[1])
         if (url) return url
       }
     }
@@ -87,7 +83,7 @@ function normalizeWinEntry(entry: string): string | null {
   const host = entry.slice(0, idx).trim()
   const port = Number(entry.slice(idx + 1).trim())
   if (!validHostPort(host, port)) return null
-  return entry.startsWith('socks5://') ? entry : `http://${host}:${port}`
+  return `http://${host}:${port}`
 }
 
 /** 注册表查询输出 → ProxyServer 值（值串不含空白，REG_SZ 后第一个 token） */
@@ -131,15 +127,28 @@ async function detectSystemProxy(): Promise<string | null> {
   return null // linux/其他：无统一桌面代理接口，回落环境变量链（pickEnvProxy 已在先）
 }
 
+/** undici ProxyAgent 只支持 HTTP(S) 代理：socks5:// 类 URL 交进去必然失败。识别即弃用
+ *  （SOCKS-only 场景回落直连，好过更新必挂）；本仓不支持 SOCKS 代理，留档于此。 */
+function httpProxyUrl(v: string): string | null {
+  const s = v.trim()
+  if (!s) return null
+  return /^socks[45h]?:\/\//i.test(s) ? null : s
+}
+
 /**
  * 更新链路的代理解析入口：显式环境变量优先（含用户 shell 里的 HTTPS_PROXY），
  * 其后 macOS/Windows 系统代理设置；MODELRDOCK_NO_SYS_PROXY=1 直接禁用。
- * 返回 null = 未检测到代理，按直连走（与既有行为一致）。
+ * 环境变量是 SOCKS 形态（Clash 常见）时弃用，继续查系统代理的 HTTP 口——
+ * 与其把必然失败的 socks5:// 交出去，不如按「无可用的环境变量代理」处理。
+ * 返回 null = 未检测到可用代理，按直连走（与既有行为一致）。
  */
 export async function resolveUpdateProxyUrl(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   if (env.MODELRDOCK_NO_SYS_PROXY === '1') return null
   const fromEnv = pickEnvProxy(env)
-  if (fromEnv) return fromEnv
+  if (fromEnv) {
+    const usable = httpProxyUrl(fromEnv)
+    if (usable) return usable
+  }
   cached ??= detectSystemProxy()
   return cached
 }

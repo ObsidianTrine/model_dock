@@ -98,8 +98,14 @@ function secretToolOp(op: 'store' | 'lookup' | 'clear', account: string, secret?
       else if (code === 0) resolve(out.trim())
       else reject(new Error(err.trim() || `secret-tool exited ${code}`))
     })
-    if (op === 'store' && secret != null) child.stdin.end(Buffer.from(secret, 'utf8'))
-    else child.stdin.end()
+    if (op === 'store' && secret != null) {
+      // 同上：子进程早退时 stdin EPIPE 不能崩整个进程
+      child.stdin.on('error', () => {})
+      child.stdin.end(Buffer.from(secret, 'utf8'))
+    } else {
+      child.stdin.on('error', () => {})
+      child.stdin.end()
+    }
   })
 }
 
@@ -114,21 +120,23 @@ const inflightExternal = new Map<string, Promise<string | null>>()
 
 type ExternalReader = (scheme: 'keychain' | 'secret-service', id: string) => Promise<string | null>
 
-/** 真实外部读取：keychain 经 `security find-generic-password`，secret-service 经 secret-tool。 */
+/** 真实外部读取：keychain 经 `security find-generic-password`，secret-service 经 secret-tool。
+ *  「条目不存在」返回 null（可缓存，避免未命中条目每请求都 spawn）；其他失败（钥匙环被锁、
+ *  工具瞬时故障）向上抛——失败结果不进 60s 缓存，下一次读取立即重试。此前一切异常都当
+ *  null 缓存 60s：钥匙环解锁前的整分钟内网关都在发无 key 请求（上游 401）。 */
 const realReadExternal: ExternalReader = async (scheme, id) => {
   if (scheme === 'keychain') {
     try {
       const { stdout } = await exec('security', ['find-generic-password', '-s', 'modeldock', '-a', id, '-w'])
       return stdout.trim() || null
-    } catch {
-      return null
+    } catch (e) {
+      // 44 = errSecItemNotFound：条目确实不存在，按 null（可缓存）；其余退出码 = 瞬时故障，上抛
+      if ((e as { code?: unknown }).code === 44) return null
+      throw e
     }
   } else {
-    try {
-      return (await secretToolOp('lookup', id)) || null
-    } catch {
-      return null
-    }
+    // secret-tool lookup 无匹配时退出码 1、输出为空（secretToolOp 对 lookup 一律 resolve 输出串）
+    return (await secretToolOp('lookup', id)) || null
   }
 }
 
@@ -147,6 +155,8 @@ async function getExternal(scheme: 'keychain' | 'secret-service', id: string): P
   const task = (async () => {
     try {
       const val = await readExternal(scheme, id)
+      // 只缓存成功读取（含「确认不存在」的 null）；readExternal 对瞬时故障上抛，任务 reject、
+      // 缓存不落——外层 getSecret 转成可操作 SecretsError
       externalCache.set(ck, { at: Date.now(), val })
       return val
     } finally {
@@ -178,6 +188,8 @@ function setKeychain(id: string, value: string): Promise<void> {
     let err = ''
     child.stderr.on('data', (d) => (err += d))
     child.on('error', reject)
+    // 子进程早退时 stdin EPIPE 不能崩整个进程（同 dpapiBatch 的 stdin 守卫）
+    child.stdin.on('error', () => {})
     child.on('close', (code) => {
       // 交互模式 `-i`：逐行执行 stdin 的子命令直至 EOF；密钥在 stdin 而非 argv
       if (code === 0) resolve()
@@ -207,9 +219,9 @@ async function removeExternal(scheme: 'keychain' | 'secret-service', id: string)
 
 // Windows DPAPI 加密（file 后端在 win32 上加密存储）
 // 值前缀 `enc:dpapi:<base64>`；密文绑定当前 Windows 账号，换账号/换机器后解不开
-// （getSecret 对解不开的置空，绝不回退明文）。关键：整表批量加/解密用**一次** PowerShell
-// 进程处理，避免每条目 spawn 子进程——逐条曾使导入 6 个 key 慢到几十秒。payload 经 stdin 传、
-// 密钥不进命令行。
+// （解不开时 loadFileSecrets 抛可操作 SecretsError 提示重设密钥，绝不回退明文——见其解密守卫）。
+// 关键：整表批量加/解密用**一次** PowerShell 进程处理，避免每条目 spawn 子进程——逐条曾使
+// 导入 6 个 key 慢到几十秒。payload 经 stdin 传、密钥不进命令行。
 const CAN_DPAPI = process.platform === 'win32'
 const DPAPI_PREFIX = 'enc:dpapi:'
 
@@ -284,6 +296,8 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
           child.stdout.on('data', (d) => (out += d))
           child.stderr.on('data', (d) => (err += d))
           child.on('error', reject)
+          // 子进程早退/ spawn 失败时 stdin 可能发 EPIPE：未监听会以 uncaught exception 崩掉整个进程
+          child.stdin.on('error', () => {})
           child.on('close', (code) => {
             if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
             resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
@@ -459,10 +473,35 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
       fileCache = { path, data: raw }
       return raw
     }
+    // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
+    // 时，异源密文不带本平台 prefix，会被下方 hasLegacyPlain 当「存量明文」再包一层加密——
+    // 原值永久丢失，解出来的还是密文串（发上游 401）。检测到异源前缀即抛可操作错误，绝不重加密。
+    const foreign = Object.entries(raw).find(
+      ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(cipher.prefix)
+    )
+    if (foreign) {
+      const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
+      throw new SecretsError(
+        t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密。请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json',
+          '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here. Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json',
+          { k: foreign[0], p: fp })
+      )
+    }
     const hasLegacyPlain = Object.values(raw).some(
       (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
     )
-    const dec = await cipher.decryptTable(raw)
+    let dec: Record<string, string>
+    try {
+      dec = await cipher.decryptTable(raw)
+    } catch (e) {
+      if (e instanceof SecretsError) throw e
+      // 解不开（换 Windows 账号/换机器/文件损坏）：给可操作错误，不透传 PowerShell stderr / GCM 英文原文
+      throw new SecretsError(
+        t('secrets.json 解密失败（{msg}）：密文可能来自其他 Windows 账号或机器。请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建',
+          'Failed to decrypt secrets.json ({msg}): the ciphertext may come from another Windows account or machine. Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild',
+          { msg: (e as Error).message })
+      )
+    }
     if (hasLegacyPlain) {
       await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
     }
@@ -520,7 +559,18 @@ export async function getSecret(ref: string): Promise<string | null> {
   const { scheme, id } = parseKeyRef(ref)
   if (scheme === 'plain') return id
   if (scheme === 'env') return process.env[id] ?? null
-  if (scheme === 'keychain' || scheme === 'secret-service') return getExternal(scheme, id)
+  if (scheme === 'keychain' || scheme === 'secret-service') {
+    try {
+      return await getExternal(scheme, id)
+    } catch (e) {
+      if (e instanceof SecretsError) throw e
+      throw new SecretsError(
+        t('读取系统钥匙环失败（{scheme}:{id}）：{msg}。钥匙环可能被锁定——解锁后重试；或改用 file 存储（config.toml [security] store="file"）后重新设置该 key',
+          'Failed to read the system keyring ({scheme}:{id}): {msg}. The keyring may be locked — unlock it and retry, or switch to file storage (config.toml [security] store="file") and re-set the key',
+          { scheme, id, msg: (e as Error).message })
+      )
+    }
+  }
   const store = await loadFileSecrets()
   const v = store[id]
   return typeof v === 'string' && v !== '' ? v : null

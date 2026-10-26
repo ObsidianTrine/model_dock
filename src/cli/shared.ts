@@ -29,12 +29,14 @@ export function exitWithError(msg: string, hint?: string): never {
 
 // ── CLI/进程原语（去重，DUP-01）────────────────────────────────────────────
 
-/** 分离拉起网关守护进程并轮询就绪（20×250ms）。返回活网关状态；超时返回 null。
- *  probe 探活函数、spawnFn 执行器均可注入（单测传 fake，避免真实探测网关/起 daemon）。 */
+/** 分离拉起网关守护进程并轮询就绪（默认 20×250ms=5s；rounds 可调）。返回活网关状态；超时返回 null。
+ *  probe 探活函数、spawnFn 执行器均可注入（单测传 fake，避免真实探测网关/起 daemon）。
+ *  SEA 双击冷启逢 Defender/SmartScreen 扫描可能 >5s，GUI 路径（cli.ts launchGui）传更大 rounds。 */
 export async function spawnDaemonAndWait(
   argv: string[],
   probe: () => Promise<GatewayStateFile | null> = gatewayLive,
-  spawnFn: typeof spawn = spawn
+  spawnFn: typeof spawn = spawn,
+  rounds = 20
 ): Promise<GatewayStateFile | null> {
   await ensureDir(modeldockDir())
   const child = spawnFn(argv[0], argv.slice(1), {
@@ -46,7 +48,7 @@ export async function spawnDaemonAndWait(
     windowsHide: true, // Windows：detached 控制台程序默认弹驻留窗口，隐藏之
   })
   child.unref()
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < rounds; i++) {
     await sleep(250)
     const live = await probe()
     if (live) return live

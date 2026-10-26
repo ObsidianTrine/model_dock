@@ -174,6 +174,8 @@ describe('沙箱隔离：密钥不落 OS 钥匙环', () => {
   it('启动迁移：keychain 引用与 security.store 落地为 file，值进沙箱 secrets.json；幂等', async () => {
     const h = fakeHome()
     try {
+      // update-token 故意返回 null（模拟外部条目读不到）：按新契约跳过该条——不落空 key、
+      // 引用保持原样由守卫兜底（旧行为会把可用的生产引用永久替换成指向空 key 的 file 引用）
       __testSetExternalReader(async (_scheme, id) => (id === 'prod-a' ? 'sk-aaa' : null))
       try {
         await mutateConfig((c) => {
@@ -184,14 +186,39 @@ describe('沙箱隔离：密钥不落 OS 钥匙环', () => {
         })
         const migrated = await migrateSandboxKeyRefsToLocal()
         expect(migrated).toContain('prod-a')
-        expect(migrated).toContain('update:update-token')
+        expect(migrated).not.toContain('update:update-token')
         const cfg2 = await loadConfig()
         expect(cfg2.providers['prod-a'].key_ref).toBe('file:prod-a')
         expect(cfg2.providers['local-p'].key_ref).toBe('file:local-p')
         expect(cfg2.security?.store).toBe('file')
-        expect(cfg2.update?.token_ref).toBe('file:update-token')
+        // 读不到的条目引用保持原样（deleteSecret 沙箱守卫兜底，不再写坏它）
+        expect(cfg2.update?.token_ref).toBe('keychain:update-token')
         expect(await getSecret('file:prod-a')).toBe('sk-aaa')
         expect(await migrateSandboxKeyRefsToLocal()).toEqual([])
+      } finally {
+        __testSetExternalReader()
+      }
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('启动迁移：外部值可读时 update token 引用照常落地为 file', async () => {
+    const h = fakeHome()
+    try {
+      // 模拟 daemon 启动的新进程：清掉本文件前一用例经 externalCache 缓存的 null（isolate:false 共享注册表）
+      invalidateSecretsCache()
+      __testSetExternalReader(async (_scheme, id) => (id === 'update-token' ? 'ghp_xxx' : null))
+      try {
+        await mutateConfig((c) => {
+          c.security = { store: 'keychain' }
+          c.update = { token_ref: 'keychain:update-token' }
+        })
+        const migrated = await migrateSandboxKeyRefsToLocal()
+        expect(migrated).toContain('update:update-token')
+        const cfg2 = await loadConfig()
+        expect(cfg2.update?.token_ref).toBe('file:update-token')
+        expect(await getSecret('file:update-token')).toBe('ghp_xxx')
       } finally {
         __testSetExternalReader()
       }

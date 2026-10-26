@@ -58,7 +58,10 @@ async function launchGui(): Promise<void> {
   let live = await gatewayLive()
   if (!live) {
     console.log(t('正在启动 ModelDock 网关...', 'Starting ModelDock gateway...'))
-    const daemon = await spawnDaemonAndWait([process.execPath, '--sea-gateway', '--port', String(port)])
+    // GUI 双击路径用 30s 等待（与 CLI 安装等待对齐）：未签名 SEA 冷启逢 Defender/SmartScreen
+    // 扫描可能 >5s，默认 5s 会误报「启动超时」而 daemon 数秒后照常起，用户重双击才恢复
+    const { spawn: nodeSpawn } = await import('node:child_process')
+    const daemon = await spawnDaemonAndWait([process.execPath, '--sea-gateway', '--port', String(port)], gatewayLive, nodeSpawn, 120)
     if (!daemon) {
       console.error(
         t(
