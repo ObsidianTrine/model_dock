@@ -22,14 +22,14 @@
 | 圆角 | `--r-sm 8 / --r-md 10 / --r-lg 14 / --r-full 999` |
 | 间距 | `--sp-1 4 / --sp-2 8 / --sp-3 12 / --sp-4 16 / --sp-5 20 / --sp-6 24` |
 | 控制高度 | `--h-sm 28 / --h-md 34 / --h-lg 40` |
-| 阴影 | `--shadow-sm`（卡内浮起）/ `--shadow-md`（下拉/toast）/ `--shadow-lg`（弹窗） |
+| 阴影 | `--shadow-sm`（卡内浮起）/ `--shadow-md`（下拉/toast）/ `--shadow-lg`（弹窗）；`--shadow-accent/-h/-soft`（fab/snav accent 彩色投影三档）、`--shadow-float`（snav 常态）、`--shadow-pop`（popover 弹出） |
 | 状态条（hero） | `--warn-weak / --neutral-weak`（来源徽弱底）/ `--ok-halo / --warn-halo`（状态点呼吸光晕，绿/琥珀） |
-| 其他色 | `--star`（默认星标琥珀，主题无关） |
+| 其他色 | `--star`（默认星标琥珀）；`--err-weak`（err 弱底 .08）/ `--warn-tint`（warn 弱底 .08，与三分支的 `--warn-weak` .16/.12 是两档，勿混用）；`--hover-tint`（中性悬停 .18）/ `--divider`（分隔线 .35）；`--on-accent`（主题色底白）/ `--on-accent-dim`（spinner 轨道 .33）——以上均为主题不变量，只放 `:root` |
 | 层级 | `--z-sticky 35 / --z-fab 40 / --z-toast 50 / --z-pop 70 / --z-modal 100`（一切弹层=modal，无 60 档） |
 | 页面壳 | `--wrap-ratio 61.8%`（**黄金比例壳**，冻结为品牌特征，见 §3） |
 | 其他 | `--scrim`（遮罩）、`--dur .15s`（过渡）、`--mono`（等宽栈） |
 
-**新增令牌的流程**：① ui.ts 三分支同步（主题相关）；② 本表登记；③ `test/ui-lint.test.ts` 的 `THEME_REQUIRED` / `PARITY_*` 清单同步（门禁会红着提醒）。**待收编令牌**（散落值已在门禁白名单挂号）：`--err-weak`、`--hover-tint`、`--divider`、`--shadow-accent`、`--on-accent`——收编时补令牌 + 清白名单（§14）。
+**新增令牌的流程**：① ui.ts 三分支同步（主题相关）或只放 `:root`（主题不变量）；② 本表登记；③ `test/ui-lint.test.ts` 的 `THEME_REQUIRED` / `INVARIANT_REQUIRED` / `PARITY_*` 清单同步（门禁会红着提醒）。存量散落值已于 2026-10 收编完毕（见 §14），白名单只剩永久豁免类目。
 
 ## 3. 布局与间距
 
@@ -159,7 +159,7 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 | ④ | 封闭集：字号只走 `--fs-*`（lan 豁免档 16/11/13px）；圆角只走 `--r-*`/50%/0/999px；z-index 只走 `--z-*`/calc/1\|2；box-shadow 只走 `--shadow-*` 或 var()/inset/transparent 组合 | ui.ts、lan.ts |
 | ⑤ | 核心令牌对 WCAG 对比度（明暗两主题 4.5:1 / 3:1，断言对见 §5） | ui.ts |
 
-**白名单登记制**（COLOR_WL / RADIUS_WL / SHADOW_WL）：每条 = 文件 + 行级正则 + **理由**。两个方向都被门禁管着：新裸色值没登记 → 红；登记了却不再命中（陈旧条目）→ 红。理由里标「待收编」的条目就是散落值令牌化任务清单（§14）。**登记特例的门槛**：只有品牌固定色（logo/二维码/PWA）、结构性固定色（on-accent 白字白芯、tooltip 反色调色板）或已有存量才可登记；新代码一律先走令牌。
+**白名单登记制**（COLOR_WL / RADIUS_WL / SHADOW_WL）：每条 = 文件 + 行级正则 + **理由**。两个方向都被门禁管着：新裸色值没登记 → 红；登记了却不再命中（陈旧条目）→ 红。**可登记的只有三类永久豁免**：① 品牌固定色（logo 渐变与投影、PWA/浏览器 chrome、webmanifest）；② 结构性固定色（on-accent 白字白芯、tooltip 反色调色板、二维码白底）；③ 独立降级页内联样式与 JS id 选择器误报；另有视觉配套特例（logo/seg 7px 圆角、滚动条 thumb 3px）。**新代码一律先走令牌，禁止为新样式登记白名单**。
 
 **常见改动对照**：新增主题令牌 → ui.ts 三分支 + §2 表 + `THEME_REQUIRED`；新增组件 → §9 登记 + 五态齐备（§6）；确需特例 → 白名单登记（写清为什么不能走令牌）；收编散落值 → 补令牌 + 删白名单条目。
 
@@ -179,7 +179,7 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 - `#updOverlay`（更新弹层）保留旧自包含结构，未迁 `.pad0` 三段壳（近期刚改过，避免无谓回归）；其余弹层（编辑/添加/确认/分享/导入/配置包）均已三段化。
 - `/m` 手机页（lan.ts）与云控制台（cloud/console.ts）令牌已与桌面同源（§2 值一致，门禁②保护）；控件为**移动变体**保留自有形态（16px 输入=iOS 聚焦防缩放、44px 触控高度、左下角 toast，与桌面同口径），新增移动端 UI 也先查本文件选令牌，勿再自造色值。
 - svcform 三公共块的 label 写法与 `.field` 规范等价，暂不重写模板。
-- **散落值收编清单**（当前以门禁白名单形式挂号，收编 = 补令牌 + 删白名单条目）：`--err-weak`（ghost-danger .06 / pill.err .08 两档）、`--hover-tint`（时间选择 hover .18）、`--divider`（caret 分隔线 .35）、`--shadow-accent`（fab/snav accent 彩色投影）、`--on-accent`（主题色底白字白芯：fab/主按钮/seg 选中/开关钮/spinner）、snav 与 timePickPop 自定义黑投影、lan.ts 的 `--scrim` 与 z-index 令牌缺口、存量圆角（logo/seg 7px、#health 点与 filechip 99px、二维码容器 8px、滚动条 thumb 3px）。
+- **散落值收编（2026-10-26 完成）**：`--err-weak`、`--warn-tint`、`--hover-tint`、`--divider`、`--on-accent`、`--on-accent-dim`、`--shadow-accent/-h/-soft`、`--shadow-float`、`--shadow-pop`（ui.ts）与 `--scrim`、`--on-accent`（lan.ts）已落地，存量圆角 99px/8px 已归位 `--r-full`/`--r-sm`；唯一视觉微调：ghost-danger:hover 弱底 .06→.08 统一。白名单仅剩 §12 三类永久豁免。lan `z-index:20`（移动 confirm 独立层级档）与 lan `--scrim` .55（比桌面 .5 略深）为现状行为保留，不改值。
 - **transition 收编**：存量过渡硬编码 `.15s`（§8），收编前门禁不设断言。
 - **亮色主题对比度缺口**（§5 表）：ok/warn/star 小字与弱底合成未达 AA，调值是设计决策，需用户评审后统一调。
 - **cloud console.ts 未接入完整令牌体系**：仅 9 个色变量受门禁②同源保护；字号/圆角/裸色值扫描豁免。对齐桌面体系时补齐并移出豁免。
