@@ -924,9 +924,10 @@ async function packageWinSetup() {
       'namespace ModelDockTray\n{\n    internal static class TrayMeta\n    {\n' +
       `        internal const string Version = "${String(BUILD_VERSION ?? '0.0.0')}";\n    }\n}\n`
     )
-    // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊
+    // /win32manifest 带 PerMonitorV2 DPI 声明：缺省时进程 DPI-unaware，Win11 125%/150% 缩放整窗发糊；
+    // System.Web.Extensions 提供 JavaScriptSerializer——托盘轻量菜单解析 tray-state 嵌套 JSON 用
     const trayManifest = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.manifest')
-    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll "${traySrc}" "${trayVerCs}"`)
+    run(`"${csc}" /nologo /target:winexe /out:"${trayOut}" /win32manifest:"${trayManifest}" /win32icon:"${path.join(RELEASE, 'modeldock.ico')}" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll "${traySrc}" "${trayVerCs}"`)
     log('  ✓ Windows 托盘已编译')
   } catch (e) {
     warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含 Windows 托盘`)
