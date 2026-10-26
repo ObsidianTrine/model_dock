@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { changedFiles, gateCliEntry, gateNativeScan, gatePortScan, gateScopePurity, globToRegExp, runCmd } from '../../.agents/scripts/orchestrator/gates.mjs'
+import { changedFiles, gateCliEntry, gateLint, gateNativeScan, gatePortScan, gateScopePurity, gateTypecheck, globToRegExp, runCmd, GateError } from '../../.agents/scripts/orchestrator/gates.mjs'
 import { git, mkRepo } from './helpers.js'
 
 /** 在临时仓库建 feature 分支并写一组文件提交，供门禁 diff 检查。 */
@@ -138,6 +138,43 @@ describe('orchestrator gates > scope_purity / cli_entry', () => {
       expect(gateCliEntry(repo.root)).toEqual(['src/cli.ts'])
       expect(gateCliEntry(repo.root, 'develop', ['not/here.ts'])).toEqual([])
       expect(changedFiles(repo.root)).toContain('src/cli.ts')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+describe('orchestrator gates > lint / typecheck（未配置跳过、失败可调试）', () => {
+  it('未配置（null）→ skipped，不抛错', () => {
+    const repo = mkRepo()
+    try {
+      expect(gateLint(repo.root, null)).toMatchObject({ ok: true, skipped: true })
+      expect(gateTypecheck(repo.root, null)).toMatchObject({ ok: true, skipped: true })
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('命令通过返回 ok；失败抛 GateError（gate 名对应、output 带命令输出）', () => {
+    const repo = mkRepo()
+    try {
+      expect(gateLint(repo.root, 'node -e "process.stdout.write(\'lint-ok\')"').ok).toBe(true)
+      expect(gateTypecheck(repo.root, 'node -e "process.exit(0)"').ok).toBe(true)
+      try {
+        gateTypecheck(repo.root, 'node -e "process.stderr.write(\'ts-error\'); process.exit(2)"')
+        expect.unreachable('应当抛出 GateError')
+      } catch (e) {
+        expect(e).toBeInstanceOf(GateError)
+        expect(e.gate).toBe('typecheck')
+        expect(e.output).toContain('ts-error')
+      }
+      try {
+        gateLint(repo.root, 'node -e "process.exit(1)"')
+        expect.unreachable('应当抛出 GateError')
+      } catch (e) {
+        expect(e).toBeInstanceOf(GateError)
+        expect(e.gate).toBe('lint')
+      }
     } finally {
       repo.cleanup()
     }

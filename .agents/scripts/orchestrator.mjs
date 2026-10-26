@@ -32,13 +32,13 @@ import {
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
-import { gateNpmTest, gateTscBuild, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
+import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
-import { readDegraded, evaluateDrift, clearDegraded, DRIFT_THRESHOLD } from './orchestrator/drift.mjs';
+import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
@@ -413,6 +413,33 @@ async function cmdRun(repoRoot, taskId, opts) {
         continue;
       }
 
+      // lint / typecheck 门禁（workflow.json lintCmd/typecheckCmd，未配置 → skipped）：
+      // 确定性检查打底（业界共识：LLM 互审不可靠，细粒度静态检查独立跑）。失败进调试子循环。
+      let staticGateFailed = false;
+      for (const [gateName, gateFn, cmd, trigger] of [
+        ['lint', gateLint, cfg.lintCmd, 'lint_failure'],
+        ['typecheck', gateTypecheck, cfg.typecheckCmd, 'typecheck_failure'],
+      ]) {
+        try {
+          const r = gateFn(worktree, cmd); // cmd 未配置 → 直接 skipped 返回
+          appendEvent(qdir, 'gate_result', { gate: gateName, result: 'pass', ...(r.skipped ? { skipped: true } : {}) });
+        } catch (e) {
+          if (!(e instanceof GateError)) throw e;
+          appendEvent(qdir, 'gate_result', { gate: gateName, result: 'fail' });
+          debugIter += 1;
+          appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger, max: meta.budget.max_test_iterations });
+          if (debugIter > meta.budget.max_test_iterations) {
+            appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
+            moveCard(root, taskId, 'running', 'blocked');
+            die(`调试子循环超限（${debugIter} 次，${gateName} 不过）。任务转 blocked/，人工接手。`);
+          }
+          promptText = buildFixupPrompt(card, ctx, trigger, e.output, debugIter);
+          staticGateFailed = true;
+          break; // 与 build/ui_check 同级：失败即返工，不再跑后续门禁
+        }
+      }
+      if (staticGateFailed) continue; // promptText 是循环携带变量，必须用专用标志位判断（不能判 promptText 本身）
+
       // 红线门禁：直接 failed，不可调试（未配置的红线在门禁内 skipped 返回，仍记 pass 事件）
       try {
         const portResult = gatePortScan(worktree, baseBranch, cfg.protectedPorts);
@@ -486,7 +513,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       const review = await reviewBackend.spawn({
         promptFile: reviewPromptFile,
         cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
-        maxTurns: 30,
+        maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
         onEvent: (e) => {
           appendEvent(qdir, e.type, e);
           trackPid(e);
@@ -945,10 +972,10 @@ function cmdDrift(repoRoot, opts) {
 function printDriftReport(repoRoot) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
-  const { autoTotal, autoReverted, humanTotal, rate, degraded } = evaluateDrift(repoRoot, root);
+  const { autoTotal, autoReverted, humanTotal, rate, threshold, degraded } = evaluateDrift(repoRoot, root);
   log(`════════ 质量漂移报告 ════════`);
   log(`自动合并: ${autoTotal}（其中被 revert: ${autoReverted}）    人工合并: ${humanTotal}`);
-  log(`自动合并回溯失败率: ${(rate * 100).toFixed(0)}%（阈值 ${DRIFT_THRESHOLD * 100}%）`);
+  log(`自动合并回溯失败率: ${(rate * 100).toFixed(0)}%（阈值 ${threshold * 100}%，workflow.json driftThreshold 可调）`);
   if (degraded) {
     log(`⚠ 当前处于降级状态：自动合并已全部回人工（${degraded.reason}）`);
     log(`  恢复方式：人工确认漂移根因消除后 node .agents/scripts/orchestrator.mjs drift --clear`);
@@ -1002,11 +1029,12 @@ function cmdScan(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const flags = opts.flags ?? new Set();
-  const anySignal = ['--todo', '--audit', '--tests'].some((f) => flags.has(f));
+  const anySignal = ['--todo', '--audit', '--tests', '--issues'].some((f) => flags.has(f));
   const runOpts = {
     todo: !anySignal || flags.has('--todo'),
     audit: !anySignal || flags.has('--audit'),
     tests: flags.has('--tests'), // 要跑测试套件，慢——显式开启
+    issues: !anySignal || flags.has('--issues'), // gh best-effort：未安装/非 GitHub 远端 → 警告跳过
     dryRun: flags.has('--dry-run'),
     testCmd: runConfig(repoRoot).testCmd.join(' && '),
   };
@@ -1283,10 +1311,11 @@ async function cmdNightly(repoRoot, opts) {
   let errMsg = null;
 
   try {
-    // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径）
+    // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues 为 gh best-effort）
     ({ created, skipped, warnings } = runScan(repoRoot, {
       todo: true,
       audit: true,
+      issues: true,
       tests: flags.has('--tests'),
       testCmd: runConfig(repoRoot).testCmd.join(' && '),
     }));
@@ -1433,7 +1462,7 @@ function usage() {
   spec "<一句话描述特性>" [--backend mock]      规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
-  scan [--todo] [--audit] [--tests] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
+  scan [--todo] [--audit] [--tests] [--issues] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
   nightly [--tests] [--auto N] [--backend …] [--review-backend …]
                                           一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
   schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--backend …] [--review-backend …] [--dry-run]

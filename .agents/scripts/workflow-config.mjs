@@ -7,6 +7,8 @@
 //                   多基准分支仓库用：如 develop+master 双分支保护 ["develop","master"]
 //   testCmd         finish/门禁的验证命令（字符串 | 数组 | {win32,unix} 平台映射）
 //   buildCmd        构建门禁命令（缺省 = 跳过 build 门禁）
+//   lintCmd         lint 门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
+//   typecheckCmd    类型检查门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
 //   packageManager  npm | pnpm | yarn | bun | 其他任意串；npm 系才启用 native addon 扫描
 //   protectedPorts  受保护端口（空 = 不做端口红线）；如 ["8687","8890"]
 //   corePaths       核心路径（改动即 L2 人工 / 人工闸门标红）
@@ -22,6 +24,9 @@
 //   scheduleId      nightly 调度标识（launchd label / crontab 标记段）；缺省 com.<slug(projectName)>.orchestrator-nightly
 //   gatewayLogDir   网关请求日志目录（支持 ~/ 展开）——配置了才启用 reconcile 对账；
 //                   缺省 = 对账关闭（吃狗粮是走网关的项目才有的能力）
+//   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
+//                   不可关闭——漂移监控没有「不监控」档
+//   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -73,6 +78,8 @@ export function loadWorkflowConfig(repoRoot) {
     baseBranches: strArr(raw.baseBranches),
     testCmd: resolveTestCmd(raw.testCmd),
     buildCmd: typeof raw.buildCmd === 'string' && raw.buildCmd.trim() ? raw.buildCmd.trim() : null,
+    lintCmd: typeof raw.lintCmd === 'string' && raw.lintCmd.trim() ? raw.lintCmd.trim() : null,
+    typecheckCmd: typeof raw.typecheckCmd === 'string' && raw.typecheckCmd.trim() ? raw.typecheckCmd.trim() : null,
     packageManager: typeof raw.packageManager === 'string' && raw.packageManager.trim() ? raw.packageManager.trim().toLowerCase() : null,
     protectedPorts: strArr(raw.protectedPorts),
     corePaths: strArr(raw.corePaths),
@@ -87,6 +94,8 @@ export function loadWorkflowConfig(repoRoot) {
     listenCommandNames: strArr(raw.listenCommandNames),
     scheduleId: typeof raw.scheduleId === 'string' && raw.scheduleId.trim() ? raw.scheduleId.trim() : null,
     gatewayLogDir: typeof raw.gatewayLogDir === 'string' && raw.gatewayLogDir.trim() ? expandHome(raw.gatewayLogDir.trim()) : null,
+    driftThreshold: typeof raw.driftThreshold === 'number' && Number.isFinite(raw.driftThreshold) && raw.driftThreshold > 0 && raw.driftThreshold <= 1 ? raw.driftThreshold : 0.2,
+    reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
   };
 }
 

@@ -1,5 +1,5 @@
 // scan.mjs — nightly 巡检信号源（Phase 2，docs 10.4）。
-// 扫描 TODO/FIXME、npm audit、测试失败三类信号，**消毒后**生成任务卡进 pending/。
+// 扫描 TODO/FIXME、npm audit、测试失败、GitHub issues 四类信号，**消毒后**生成任务卡进 pending/。
 // 巡检只生成卡、绝不自动 run（created_by: scanner 的卡等人工决定）——
 // 仓库内容进 worker prompt 的注入面，第一道闸就是这里的内容消毒 + 人工 approve。
 
@@ -127,6 +127,52 @@ export function scanTests(repoRoot, testCmdStr) {
   ];
 }
 
+/** 纯映射：gh issue list 的 JSON → 任务卡数组（issue 内容过 sanitize——外部用户可写内容）。 */
+export function issuesToCards(issues) {
+  return (Array.isArray(issues) ? issues : [])
+    .filter((i) => i && Number.isInteger(i.number) && typeof i.title === 'string' && i.title.trim())
+    .map((i) => ({
+      id: `scan-issue-${i.number}-${sha8(i.title.trim())}`,
+      type: 'bugfix',
+      priority: 'normal',
+      files_hint: ['**'], // issue 不带文件线索：全通配（scope_purity 不误报；L3 人工闸兜底）
+      goal: `处理 GitHub issue #${i.number}：${sanitize(i.title.trim(), 200)}`,
+      acceptance: `- issue #${i.number} 所述问题已修复或有明确结论（关联提交/评论注明 #${i.number}，issue 可关闭）`,
+      background: `巡检发现 open issue：${sanitize(i.url ?? '', 200) || '（无 URL）'}；正文摘录：${sanitize(i.body ?? '', 400) || '（无正文）'}`,
+    }));
+}
+
+/**
+ * 信号源 4：GitHub open issues（gh CLI，best-effort）。仅 origin 指向 GitHub 的仓库启用；
+ * gh 未安装/未登录/超时 → { skipped, reason } 警告，不阻塞其余信号源。
+ * opts.run 可注入假执行器（测试）；ORCH_GH_CLI 环境变量可指认 gh 路径（对齐 ORCH_ZCODE_CLI 惯例）。
+ */
+export function scanIssues(repoRoot, opts = {}) {
+  let remote = '';
+  try {
+    remote = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: repoRoot, encoding: 'utf8', timeout: 10_000 }).stdout ?? '';
+  } catch {
+    /* 无 git/无远端 */
+  }
+  if (!/github\.com[:/]/i.test(remote.trim())) return { skipped: true, reason: 'origin 非 GitHub 远端，跳过 issues 信号源' };
+  const gh = opts.gh ?? process.env.ORCH_GH_CLI ?? 'gh';
+  const r = (opts.run ?? defaultGhRun)(gh, ['issue', 'list', '--state', 'open', '--limit', '50', '--json', 'number,title,body,url'], repoRoot);
+  if (r.status !== 0) {
+    return { skipped: true, reason: `gh issue list 不可用（未安装 gh 或未 gh auth login？）：${sanitize(r.stderr || '', 120) || `exit ${r.status}`}` };
+  }
+  let issues;
+  try {
+    issues = JSON.parse(r.stdout ?? '[]');
+  } catch {
+    return { skipped: true, reason: 'gh 输出不可解析，跳过 issues 信号源' };
+  }
+  return issuesToCards(issues);
+}
+
+function defaultGhRun(gh, args, cwd) {
+  return spawnSync(gh, args, { cwd, encoding: 'utf8', timeout: 30_000 });
+}
+
 // ---------------------------------------------------------------------------
 // 生成任务卡（写 pending/；id 已存在于任何状态目录则跳过）
 // ---------------------------------------------------------------------------
@@ -160,7 +206,7 @@ function renderCard(c) {
 
 /**
  * 执行巡检并落卡。返回 { created: string[], skipped: string[], warnings: string[] }。
- * opts: { todo, audit, tests, dryRun, testCmd }
+ * opts: { todo, audit, tests, issues, dryRun, testCmd, gh }
  */
 export function runScan(repoRoot, opts = {}) {
   const root = path.join(repoRoot, '.agents', 'orchestrator', 'queue');
@@ -177,6 +223,11 @@ export function runScan(repoRoot, opts = {}) {
     else candidates.push(...r);
   }
   if (opts.tests) candidates.push(...scanTests(repoRoot, opts.testCmd));
+  if (opts.issues) {
+    const r = scanIssues(repoRoot, { gh: opts.gh, run: opts.ghRun }); // ghRun：测试注入假执行器
+    if (r.skipped) warnings.push(r.reason);
+    else candidates.push(...r);
+  }
 
   for (const c of candidates) {
     const existing = findCard(root, c.id);

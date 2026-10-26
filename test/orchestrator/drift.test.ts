@@ -74,6 +74,35 @@ describe('orchestrator drift > 回溯失败率统计与自动降级', () => {
       repo.cleanup()
     }
   }, 60_000)
+
+  it('driftThreshold 可配：workflow.json 调严（0.3）后更低失败率即降级；非法值回落缺省 0.2', () => {
+    const repo = mkRepo()
+    try {
+      // 2 个自动合并，revert 1 个 = 50%：> 0.3（调严）也 > 0.2（缺省）
+      for (const id of ['c1', 'c2']) autoMergeTask(repo.root, id)
+      const bad = git(repo.root, 'log develop --format=%H --grep="Merge branch \'feature/c1\'"')
+      git(repo.root, `revert -m 1 --no-edit ${bad.split('\n')[0]}`)
+      const wfPath = path.join(repo.root, '.agents', 'workflow.json')
+      const writeWf = (patch: Record<string, unknown>) => {
+        const wf = JSON.parse(fs.readFileSync(wfPath, 'utf8'))
+        fs.writeFileSync(wfPath, JSON.stringify({ ...wf, ...patch }))
+      }
+      writeWf({ driftThreshold: 0.3 })
+      const strict = evaluateDrift(repo.root, `${repo.root}/.agents/orchestrator/queue`)
+      expect(strict.threshold).toBe(0.3)
+      expect(strict.degraded).not.toBeNull()
+      expect(strict.degraded.reason).toContain('超阈值 30%')
+      clearDegraded(repo.root)
+      // 非法值（0 / 超 1 / 非数值）一律回落缺省 0.2——漂移监控不可关闭
+      for (const bad of [0, 1.5, 'off', null]) {
+        writeWf({ driftThreshold: bad })
+        expect(evaluateDrift(repo.root, `${repo.root}/.agents/orchestrator/queue`).threshold).toBe(0.2)
+      }
+      clearDegraded(repo.root)
+    } finally {
+      repo.cleanup()
+    }
+  }, 60_000)
 })
 
 describe('orchestrator drift > 降级期间自动合并回人工', () => {

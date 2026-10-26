@@ -141,6 +141,10 @@ describe('workflow-config > 可移植性派生字段（projectName/listenCommand
       expect(cfg.scheduleId).toBeNull()
       expect(cfg.gatewayLogDir).toBeNull()
       expect(cfg.version).toBeNull()
+      expect(cfg.lintCmd).toBeNull()
+      expect(cfg.typecheckCmd).toBeNull()
+      expect(cfg.driftThreshold).toBe(0.2)
+      expect(cfg.reviewMaxTurns).toBe(30)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -154,6 +158,30 @@ describe('workflow-config > 可移植性派生字段（projectName/listenCommand
       expect(cfg.listenCommandNames).toEqual(['foo-cli', 'bar-server'])
       expect(cfg.scheduleId).toBe('com.example.nightly')
       expect(cfg.gatewayLogDir).toBe(path.join(expandHome('~'), '.gw', 'logs'))
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('lintCmd/typecheckCmd/driftThreshold/reviewMaxTurns：显式值生效；非法值回落缺省', () => {
+    const dir = fixture({ lintCmd: 'npm run lint', typecheckCmd: 'tsc --noEmit', driftThreshold: 0.3, reviewMaxTurns: 50 })
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.lintCmd).toBe('npm run lint')
+      expect(cfg.typecheckCmd).toBe('tsc --noEmit')
+      expect(cfg.driftThreshold).toBe(0.3)
+      expect(cfg.reviewMaxTurns).toBe(50)
+      // 非法值回落：threshold 必须 0<v≤1、maxTurns 必须正整数（漂移监控不可经配置关闭）
+      const wfPath = path.join(dir, '.agents', 'workflow.json')
+      fs.writeFileSync(wfPath, JSON.stringify({ driftThreshold: 0, reviewMaxTurns: -1 }))
+      expect(loadWorkflowConfig(dir).driftThreshold).toBe(0.2)
+      expect(loadWorkflowConfig(dir).reviewMaxTurns).toBe(30)
+      fs.writeFileSync(wfPath, JSON.stringify({ driftThreshold: 1.5, reviewMaxTurns: 2.5 }))
+      expect(loadWorkflowConfig(dir).driftThreshold).toBe(0.2)
+      expect(loadWorkflowConfig(dir).reviewMaxTurns).toBe(30)
+      fs.writeFileSync(wfPath, JSON.stringify({ driftThreshold: 1, reviewMaxTurns: 1 }))
+      expect(loadWorkflowConfig(dir).driftThreshold).toBe(1)
+      expect(loadWorkflowConfig(dir).reviewMaxTurns).toBe(1)
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

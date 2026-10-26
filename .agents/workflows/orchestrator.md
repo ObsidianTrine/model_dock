@@ -205,7 +205,7 @@ node .agents/scripts/orchestrator.mjs drain --max 5
 ## nightly 巡检（Phase 2）
 
 ```bash
-# 扫描 TODO/FIXME 与 npm audit（默认信号源），生成任务卡进 pending/（不自动 run）
+# 扫描 TODO/FIXME、npm audit 与 GitHub open issues（默认信号源），生成任务卡进 pending/（不自动 run）
 node .agents/scripts/orchestrator.mjs scan
 
 # 全量巡检（含测试套件，慢）；先看会生成什么再落卡
@@ -215,6 +215,7 @@ node .agents/scripts/orchestrator.mjs scan --dry-run
 
 - 生成卡 `created_by: scanner`、gate=L3——**是否 run 由人工决定**，扫描内容经消毒（无法携带指令结构进 worker prompt）
 - 卡 id 按内容哈希：信号不变重复扫描自动去重；cron 每晚调 `scan` 即为 nightly
+- **issues 信号源**（gh CLI，best-effort）：仅 origin 指向 GitHub 的仓库启用；gh 未安装/未登录 → 警告跳过。每个 open issue 一张卡，id 含 issue 号 + 标题哈希（标题改了会出新卡）；`ORCH_GH_CLI` 可指认 gh 路径（对齐 `ORCH_ZCODE_CLI` 惯例）
 - 巡检后用 `run --next` / `drain` 推进队列（见上节）
 
 ## nightly 编排与定时调度（schedule）
@@ -272,6 +273,8 @@ node .agents/scripts/orchestrator.mjs drift --clear
 
 降级期间 `run` 的 L0/L1 自动合并全部回人工闸门（事件 reason=drift_degraded）。被 revert 的自动合并任务是主要失败信号，`drift` 报告会列出失败任务清单。
 
+- 阈值 workflow.json `driftThreshold` 可调（0<v≤1，缺省 0.2）——**只可调严/调松，不可关闭**：漂移监控没有「不监控」档，非法值回落缺省。
+
 ## 多 worker 并行（Phase 3）
 
 ```bash
@@ -310,6 +313,7 @@ node .agents/scripts/agent-init.mjs   # 交互生成 workflow.json + 注册双�
 - 派生链：`projectName` 缺省取 package.json name（通知标题、schedule 标识 `com.<slug>.orchestrator-nightly`、Windows 任务名都由它派生）；`scheduleId` 可显式指定以兼容既有注册。
 - 受保护端口的「启动监听」拦截正则 = 通用可执行名（node/tsx/npx/npm run）+ workflow.json `listenCommandNames`（项目自备 CLI 名）。
 - webhook 通知环境变量 = `${envPrefix}_NIGHTLY_WEBHOOK`（envPrefix 缺省 AGENTS；旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 永远兼容）。
+- 门禁命令：`testCmd` 必配；`buildCmd`/`lintCmd`/`typecheckCmd`/`uiCheckCmd` 配了才跑（lint/typecheck 失败进调试子循环，与 build 同级）。审查会话轮次 `reviewMaxTurns`（缺省 30）。
 - **headless worker 的 Bash 红线**（zcode-headless 必需）装一次机器级 dispatcher 即可全项目生效：`cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/`，再在用户级 `~/.zcode/cli/config.json` 注册指向它（详见「worker 被什么拦了」）。
 - 领域 playbook（add-adapter / add-preset / incident-response / ui-kit 等）是模板项目专属，移植时删除或重写；feature-branch / code-review / docs-sync / worktree-rescue / release / hotfix / orchestrator 通用可留用。
 
