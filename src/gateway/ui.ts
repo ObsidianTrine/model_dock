@@ -34,6 +34,13 @@ export const UI_HTML = `<!doctype html>
   --shadow-sm:0 1px 2px rgba(0,0,0,.25); --shadow-md:0 4px 14px rgba(0,0,0,.2); --shadow-lg:0 18px 50px rgba(0,0,0,.35);
   --star:#f5a623;
   --scrim:rgba(0,0,0,.5);
+  /* 主题不变量（单值双主题，2026-10 自散落值收编）：弱底 tint / 中性细节 / on-accent 白 / 浮动投影 */
+  --err-weak:rgba(220,38,38,.08); --warn-tint:rgba(217,119,6,.08);
+  --hover-tint:rgba(127,127,127,.18); --divider:rgba(127,127,127,.35);
+  --on-accent:#fff; --on-accent-dim:rgba(255,255,255,.33);
+  --shadow-accent:0 8px 24px rgba(37,99,235,.45); --shadow-accent-h:0 10px 28px rgba(37,99,235,.55);
+  --shadow-accent-soft:0 6px 18px rgba(37,99,235,.22);
+  --shadow-float:0 2px 10px rgba(0,0,0,.10); --shadow-pop:0 8px 30px rgba(0,0,0,.35);
   --z-sticky:35; --z-fab:40; --z-toast:50; --z-pop:70; --z-modal:100;
   --dur:.15s;
   color-scheme:dark;
@@ -75,7 +82,7 @@ header{position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);displa
 .logo svg{display:block;border-radius:7px;box-shadow:0 1px 4px rgba(79,70,229,.35)}
 .brand{font-size:var(--fs-xl);font-weight:700;letter-spacing:.01em}
 #health{margin-left:8px;font-size:var(--fs-sm);color:var(--muted)}
-#health .dot{display:inline-block;width:8px;height:8px;border-radius:99px;background:var(--ok);margin-right:5px}
+#health .dot{display:inline-block;width:8px;height:8px;border-radius:var(--r-full);background:var(--ok);margin-right:5px}
 /* 语言切换 = .seg 分段控件（选中蓝底白字，见 kit 组件段）；这里只补头部专属定位与紧凑尺寸 */
 #langSwitch{margin-left:auto;flex:0 0 auto}
 #langSwitch button{padding:3px 12px;font-size:var(--fs-xs)}
@@ -102,12 +109,12 @@ select.chip{padding-right:24px}
 #addOverlay:has(#addCard) #addCard > h2{display:none}
 /* 层级须压过同列 .snav（几何上两列不重叠，仅 tooltip 相交）：fab 的 data-tip 伪元素
    被困在 fab 自己的层叠上下文里，snav 同为 z-fab 且 DOM 靠后会整层盖住 tooltip */
-.fab{position:fixed;right:22px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(37,99,235,.45);z-index:calc(var(--z-fab) + 1);display:flex;align-items:center;justify-content:center;padding:0}
+.fab{position:fixed;right:22px;bottom:22px;width:54px;height:54px;border-radius:50%;background:var(--accent);border:none;color:var(--on-accent);cursor:pointer;box-shadow:var(--shadow-accent);z-index:calc(var(--z-fab) + 1);display:flex;align-items:center;justify-content:center;padding:0}
 .fab[hidden]{display:none}
-.fab:hover{transform:translateY(-2px);box-shadow:0 10px 28px rgba(37,99,235,.55)}
+.fab:hover{transform:translateY(-2px);box-shadow:var(--shadow-accent-h)}
 /* 回到顶部/跳到底部按钮：竖排在右下角「＋」按钮上方（dsh 风格细箭头） */
-.snav{position:fixed;right:29px;width:40px;height:40px;border-radius:50%;background:var(--card);border:1px solid var(--border);color:var(--muted);cursor:pointer;z-index:var(--z-fab);display:flex;align-items:center;justify-content:center;padding:0;box-shadow:0 2px 10px rgba(0,0,0,.10);transition:color .15s,border-color .15s,background .15s,transform .15s,box-shadow .15s}
-.snav:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-weak);transform:translateY(-2px);box-shadow:0 6px 18px rgba(37,99,235,.22)}
+.snav{position:fixed;right:29px;width:40px;height:40px;border-radius:50%;background:var(--card);border:1px solid var(--border);color:var(--muted);cursor:pointer;z-index:var(--z-fab);display:flex;align-items:center;justify-content:center;padding:0;box-shadow:var(--shadow-float);transition:color .15s,border-color .15s,background .15s,transform .15s,box-shadow .15s}
+.snav:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-weak);transform:translateY(-2px);box-shadow:var(--shadow-accent-soft)}
 .snav svg{display:block}
 .snav[hidden]{display:none}
 #snavDown{bottom:86px}
@@ -167,7 +174,7 @@ select.chip{padding-right:24px}
 #schedPanel .tinput{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:var(--r-sm);padding:5px 8px;font:inherit;font-size:var(--fs-sm);width:100%;min-width:0;box-sizing:border-box;margin:0;cursor:pointer}
 #schedPanel .tinput.bad{border-color:var(--err)}
 #schedPanel select,#schedPanel textarea{background-color:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:var(--r-sm);padding:5px 24px 5px 8px;font:inherit;font-size:var(--fs-sm);width:100%;box-sizing:border-box;margin:0}
-#timePickPop{position:fixed;z-index:var(--z-pop);display:none;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);box-shadow:0 8px 30px rgba(0,0,0,.35);padding:8px}
+#timePickPop{position:fixed;z-index:var(--z-pop);display:none;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);box-shadow:var(--shadow-pop);padding:8px}
 /* 检查更新弹窗已迁 createModal 工厂壳（宽度/头部件样式按 id 继续生效） */
 #updOverlay .upmodal{max-width:520px}
 #updOverlay .modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px}
@@ -181,8 +188,8 @@ select.chip{padding-right:24px}
 #timePickPop .tpcols{display:flex;gap:6px}
 #timePickPop .tpcol{width:72px;height:224px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px;scrollbar-width:thin}
 #timePickPop .tpcell{display:block;width:100%;border:none;background:none;color:var(--text);border-radius:var(--r-sm);padding:4px 0;font:inherit;font-size:var(--fs-sm);cursor:pointer;text-align:center;line-height:1.4}
-#timePickPop .tpcell:hover{background:rgba(127,127,127,.18)}
-#timePickPop .tpcell.on{background:var(--accent);color:#fff}
+#timePickPop .tpcell:hover{background:var(--hover-tint)}
+#timePickPop .tpcell.on{background:var(--accent);color:var(--on-accent)}
 #schedPanel .shead,#schedPanel .srow{display:grid;grid-template-columns:86px 92px 110px 110px 1fr 1fr 40px;gap:5px;align-items:center}
 /* 表头与控件列文字对齐：左内边距 = 控件 padding 8px + 边框 1px；表头是列说明，降为 13px 灰色 */
 #schedPanel .shead{font-size:var(--fs-sm);color:var(--muted);font-weight:500;padding-bottom:2px}
@@ -281,8 +288,8 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 ::placeholder{color:var(--muted);opacity:.8}
 .btn{border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:var(--r-md);padding:7px 14px;font:inherit;font-size:var(--fs-md);cursor:pointer;transition:all .15s}
 .btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{opacity:.88;color:#fff}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{opacity:.88;color:var(--on-accent)}
 .btn.danger:hover{border-color:var(--err);color:var(--err)}
 .btn.small{padding:4px 12px;font-size:var(--fs-sm);border-radius:var(--r-sm)}
 .btn.small.primary{padding:4px 16px;font-weight:600}
@@ -294,7 +301,7 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .service:last-child{border-bottom:none}
 /* 次要破坏性操作平时收为幽灵按钮（弱灰、无边框），悬停才显危险色——降低列表视觉噪音 */
 .btn.ghost-danger{border-color:transparent;background:transparent;color:var(--muted)}
-.btn.ghost-danger:hover{border-color:var(--err);color:var(--err);background:rgba(220,38,38,.06)}
+.btn.ghost-danger:hover{border-color:var(--err);color:var(--err);background:var(--err-weak)}
 /* 当前使用中的服务：页面最重要的状态——弱底色 + 左侧主题色竖条，一眼锁定 */
 .service.cur{background:var(--accent-weak);border-bottom-color:transparent;box-shadow:inset 3px 0 0 var(--accent);margin:3px 0}
 .service.cur:last-child{margin-bottom:0}
@@ -304,8 +311,8 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .service .meta{color:var(--muted);font-size:var(--fs-sm);font-family:var(--mono)}
 .pill{display:inline-flex;align-items:center;padding:2px 10px;border-radius:var(--r-full);font-size:var(--fs-xs);border:1px solid var(--border);color:var(--muted);white-space:nowrap;font-weight:400}
 .pill.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-weak)}
-.pill.err{color:var(--err);border-color:var(--err);background:rgba(220,38,38,.08)}
-.pill.warn{color:var(--warn);border-color:var(--warn);background:rgba(217,119,6,.08)}
+.pill.err{color:var(--err);border-color:var(--err);background:var(--err-weak)}
+.pill.warn{color:var(--warn);border-color:var(--warn);background:var(--warn-tint)}
 .pill.dim{opacity:.75}
 /* pillSwitch：状态行开关（kit 组件）。视觉与原 pill 一致；主体 / caret 是两个真实按钮，
    各自可 Tab（role=switch+aria-checked / aria-expanded+aria-controls），内嵌 .ptext 承载文案 */
@@ -318,12 +325,12 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 /* 右侧箭头：热区铺满胶囊右端（全高 + 吃掉右侧内边距与上下留白），分隔线即命中边界。
    此前热区写死 15×12px，视觉上"属于箭头"的那一段里有约七成区域点下去其实是主体的开关——
    手机远程被误关的代价（手机端整体失效）远大于误展开，故把无害的那一侧热区放大 */
-.pill>.caret{background:none;border:none;color:inherit;font:inherit;align-self:stretch;margin:-3px -11px -3px 4px;padding:0 11px 0 8px;border-left:1px solid rgba(127,127,127,.35);cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.pill>.caret{background:none;border:none;color:inherit;font:inherit;align-self:stretch;margin:-3px -11px -3px 4px;padding:0 11px 0 8px;border-left:1px solid var(--divider);cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .pill>.caret::before{content:'';display:inline-block;width:7px;height:7px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg) translate(-1px,-1px);transition:transform var(--dur)}
 .pill>.caret.open::before{transform:rotate(225deg)}
 .pill>.caret:hover{color:var(--accent)}
 .pill>.caret:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:0 var(--r-full) var(--r-full) 0}
-.spin{display:inline-block;width:12px;height:12px;border:2px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-1px;margin-right:6px}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--on-accent-dim);border-top-color:var(--on-accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-1px;margin-right:6px}
 .spin.plain{border:2px solid var(--border);border-top-color:var(--accent)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .btn:disabled{cursor:not-allowed;opacity:.55}
@@ -426,7 +433,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #lanPanel .laninfo{flex:1;min-width:200px}
 #lanPanel .lanurl{word-break:break-all;margin:0 0 8px;cursor:pointer;font-family:var(--mono);font-size:var(--fs-sm)}
 #lanPanel .shint{font-size:var(--fs-sm);color:var(--muted);margin:0}
-#lanPanel svg{display:block;background:#fff;border-radius:8px;padding:4px;width:88px;height:88px}
+#lanPanel svg{display:block;background:#fff;border-radius:var(--r-sm);padding:4px;width:88px;height:88px}
 /* 同网直拉迁移（sync-lan-pull）：配置包统一弹层（pkgOverlay，吸收原 shareOverlay/importOverlay），
    内容样式改挂 #pkgOverlay 继续生效 */
 #pkgOverlay .shareurl{display:flex;align-items:center;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;margin:0;cursor:pointer}
@@ -465,7 +472,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .progress.indet .progress-fill{width:30%;animation:progress-indet 1.2s ease-in-out infinite}
 @keyframes progress-indet{0%{margin-left:-30%}100%{margin-left:100%}}
 /* 已选配置包文件的文件名 chip（可移除） */
-.filechip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:99px;padding:4px 10px;font-size:var(--fs-sm);max-width:60%}
+.filechip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:var(--r-full);padding:4px 10px;font-size:var(--fs-sm);max-width:60%}
 .filechip .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .filechip button{border:none;background:none;color:var(--muted);cursor:pointer;font:inherit;padding:0 2px}
 .filechip button:hover{color:var(--accent)}
@@ -492,7 +499,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .switch{position:relative;display:inline-flex;flex:0 0 auto;cursor:pointer;vertical-align:middle}
 .switch input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer}
 .switch .track{display:block;width:36px;height:21px;border-radius:var(--r-full);background:var(--border);position:relative;transition:background var(--dur)}
-.switch .track::after{content:'';position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;box-shadow:var(--shadow-sm);transition:transform var(--dur)}
+.switch .track::after{content:'';position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:var(--on-accent);box-shadow:var(--shadow-sm);transition:transform var(--dur)}
 .switch input:checked+.track{background:var(--ok)}
 .switch input:checked+.track::after{transform:translateX(15px)}
 .switch input:disabled+.track{opacity:.5}
@@ -501,7 +508,7 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .seg{display:inline-flex;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-md);padding:3px;gap:2px}
 .seg button{padding:5px 14px;border-radius:7px;font-size:var(--fs-sm);color:var(--muted);cursor:pointer;white-space:nowrap;transition:all var(--dur)}
 .seg button:hover{color:var(--text)}
-.seg button.on{background:var(--accent);color:#fff;font-weight:600}
+.seg button.on{background:var(--accent);color:var(--on-accent);font-weight:600}
 .seg.grow{display:flex;width:100%}
 .seg.grow button{flex:1;justify-content:center;text-align:center}
 /* Tooltip：纯 CSS，data-tip 属性（需 i18n 的用 data-i18n-tip 注入）；箭头由 ::before 绘制。
