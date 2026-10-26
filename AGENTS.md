@@ -99,7 +99,7 @@
 - **预设扩展**：运行时预设 = 内置库 `src/presets/data.ts` 的 `BUILTIN_PRESETS` + 用户自定义覆盖文件 **`~/.modeldock/presets.json`**（启动时同步读取合并，见 `src/presets/data.ts` 的 `applyUserPresets/readUserPresets/reloadPresets`）。句式：同名 `id` 的条目覆盖内置预设、新 `id` 追加；文件缺失视为无自定义、格式错误抛可操作报错（阻断启动）。**不要**新增 provider 时只写内嵌，把能预见复用的先落到 presets.json 扩展机制。
 - **错误信息**：必须可操作，附修复建议。
 - **双语文案**：用户可见文案（CLI 输出、报错、帮助、网关 message/hint）一律经 `src/util/i18n.ts` 的 `t(中文, English, params?)` 输出（中文原文即 key，占位符 `{name}`），**新增文案两个语言参数必须同写**；语言解析链 `--lang > MODELRDOCK_LANG > config.toml language > zh`（`src/config/lang.ts`，commander 分支必须在 `buildProgram()` 前 `initLang()`）。中文段输出须与既有文案逐字节一致（测试有中文断言）；注释、枚举值、会被程序比较/写进客户端配置的字符串不走 t()；模块顶层常量不要直接求值 t()（会在 initLang 前固化语言），用 getter/懒函数。Web 控制台 `ui.ts` 内嵌的 `data-i18n="中文||English"` 浏览器端机制独立存在，勿混用。**新增任何用户可见文案（日志、报错、控制台 label/pill/toast/弹层标题）动手前先想双语**；Web 端长生命周期组件在模块顶层只接线一次，其 label/title **必须传惰性函数** `function () { return t('中文', 'English') }`——传字符串会把语言固化在页面加载时刻，切语言不跟随（2026-10 状态行 5 颗 pill 曾踩），且要在 `applyLang()` 末尾为该组件补一次 `render()`。
-- **Web UI 组件与令牌**（控制台 ui.ts / 任何 ModelDock Web 界面）：一律用 `.agents/conventions/ui-kit.md` 的令牌与组件（字级/色彩语义/Switch/Seg/Toast/Modal 壳等），禁止写死样式值、禁止 pill 文字当开关；新增 UI 先查该规范，改组件须同步更新它；**组件库缺组件时必须先提原型经用户审核再扩充，禁止绕过组件库就地写一次性样式**。
+- **Web UI 组件与令牌**（控制台 ui.ts / 任何 ModelDock Web 界面）：一律用 `.agents/conventions/ui-kit.md` 的令牌与组件（字级/色彩语义/Switch/Seg/Toast/Modal 壳等），禁止写死样式值、禁止 pill 文字当开关；新增 UI 先查该规范，改组件须同步更新它；**组件库缺组件时必须先提原型经用户审核再扩充，禁止绕过组件库就地写一次性样式**。该规范含工业级约束（布局 4px 网格、交互五态完备、可访问性基线、动效档位），且有**机器门禁** `test/ui-lint.test.ts`（主题令牌三分支同步/跨文件同源/裸色值白名单/封闭集/对比度）随 `npm test` 强制——改 UI 前读规范、改完门禁必须绿；特例走白名单登记（必须写理由）。
 - **弹层提示归宿（强制）**：Modal 弹层开着时，其中按钮触发的错误与一切提示（校验、接口失败、进度反馈）一律写该弹层底栏的 msg 槽位（`.mferr` / `.testline`+语义色），**禁止走全局 toast**——磨砂遮罩（z-modal 100）会盖住并糊掉 toast（z-toast 50）；只有动作会关闭弹层或页面（如保存成功关弹层、确认弹窗回调、更新后页面重连）时，反馈才写在主 Web 页面左下角 toast。新弹层 foot 必须配 `{slot:'msg'}` 槽位；「弹层开着写槽位 / 已关写 toast」分流参考 `createOffer`（shareM）与 `updFail`（updM）；弹层内复制成功的即时反馈 = 按钮图标/文案翻转（2026-10 曾有两处违规：拉取模型校验错误、updM 四条失败路径）。
 - **对外文档与用户文案**（CHANGELOG / README / 报错与界面文案）：用户视角、一条一事、粗体点题、不写内部实现黑话（❌「detach 还原最近快照」→ ✅「断开不再冲掉自己改动」）。改这些内容前必读 `.agents/conventions/docs-writing.md`。
 - **端口使用**：遵循上方「端口与实例约定」——**8687（生产）任何形式的测试/访问/改动一律禁止**，**8890（用户 dev 沙箱）一律不得占用**；agent 测试统一 `MODELRDOCK_FAKE_HOME=<独立目录>` + `--port 189xx`（详见端口章节 ⛔ 禁令）。
@@ -180,6 +180,18 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 - finish 会自动跑验证命令（`.agents/workflow.json` 的 `testCmd`，本仓库为 `npm test`；不影响行为的纯文档改动可 `--skip-test`）；finish 全程持锁串行，多 agent 同时合并会自动排队（崩溃残留的陈锁下次自动接管）。
 - 例外：确需直接改 develop 时设 `AGENTS_ALLOW_BASE_EDIT=1`（旧名 `MODELRDOCK_ALLOW_DEVELOP_EDIT=1` 兼容），且必须能向用户说明理由。
 - 派发并行任务时按文件归属分区（如一个 agent 只动 `src/gateway/`，另一个只动 `src/adapters/`），减少合并冲突。
+
+### 把工作流移植到其他项目
+
+`.agents/` 工具链零项目专属假设（项目数据全在 workflow.json，代码按缺省派生）。新项目落地：
+
+```bash
+cp -r <本项目>/.agents <目标项目>/     # 整目录拷贝
+cd <目标项目> && node .agents/scripts/agent-init.mjs   # 交互生成 workflow.json + 注册双客户端 hook + AGENTS.md 骨架（--defaults 非交互）
+cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器级 Bash 红线 dispatcher：用户级 hook 注册一次、全项目生效
+```
+
+字段说明见 `.agents/scripts/workflow-config.mjs` 头注释；移植要点（派生链、playbook 取舍、headless worker 注册）见 `.agents/workflows/orchestrator.md`「移植」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
 
 ### GitHub 侧自动化（PR 审查 bot + Dependabot）
 
