@@ -1,12 +1,20 @@
-# ModelDock Web UI Kit — 使用规范
+# ModelDock Web UI 设计规范（ui-kit）
 
-> 适用范围：`src/gateway/ui.ts`（桌面控制台）、后续任何 ModelDock Web 界面。
-> 组件 CSS/JS 的唯一事实来源是 `src/gateway/ui.ts` 内嵌样式与脚本；本文件是**使用规范**（什么场景用什么、不许怎么做）。
-> 改组件本身 = 改 ui.ts + 同步更新本文件。原型评审稿见会话产物 `/tmp/modeldock-ui-kit/*.html`（不进 git）。
+> 适用范围：`src/gateway/ui.ts`（桌面控制台）、`src/gateway/lan.ts`（手机页）、后续任何 ModelDock Web 界面。
+> 本文件 = **设计规范 + 组件使用规范**：§1–8 是设计约束（令牌/布局/字级/色彩/状态/可访问性/动效），§9–11 是组件用法与实测坑，§12 是机器门禁，§13–14 是流程与例外。
+> 组件 CSS/JS 的唯一事实来源是 `src/gateway/ui.ts` 内嵌样式与脚本；改组件本身 = 改 ui.ts + 同步更新本文件 + 过 §12 门禁。原型评审稿见会话产物 `/tmp/modeldock-ui-kit/*.html`（不进 git）。
 
-## 1. 令牌（设计令牌）
+## 1. 设计原则
 
-全站只经 CSS 变量取值，**禁止写死**字号/圆角/颜色/间距/阴影/z-index。主题相关色（bg/card/text/muted/border/accent/ok/warn/err/direct-*、*-weak、ok-halo/warn-halo、shadow-*）在 `:root`（暗色）与两个 light 分支（`[data-theme="light"]` + `prefers-color-scheme` 媒体查询）**三处同步定义**；新增主题无关令牌只放 `:root`。
+1. **一切视觉值可追溯令牌**：字号/圆角/间距/控制高度/阴影/层级只经 CSS 变量取值，主题块外禁裸色值——由 §12 门禁机器强制，不靠自觉。
+2. **单一事实来源**：组件实现只在 ui.ts；本文档管「什么场景用什么、不许怎么做」；两处必须同步改。
+3. **状态完备才算完工**：交互组件五态 + loading/empty 缺一不可（§6）。
+4. **可访问是底线不是加分**：AA 对比度、focus-visible、reduced-motion（§5/§7）。
+5. **缺组件先原型评审**，禁止就地发明一次性样式绕过组件库（§13）。
+
+## 2. 令牌（设计令牌）
+
+全站只经 CSS 变量取值，**禁止写死**字号/圆角/颜色/间距/阴影/z-index（门禁断言，见 §12）。主题相关色（bg/card/text/muted/border/accent/ok/warn/err/direct-*、*-weak、ok-halo/warn-halo、shadow-*）在 `:root`（暗色）与两个 light 分支（`[data-theme="light"]` + `prefers-color-scheme` 媒体查询）**三处同步定义**——键集合与值的一致性由门禁①机器校验；**主题不变量**（两主题同值，如 `--warn`/`--star`/`--mono`）只放 `:root`。新增主题无关令牌只放 `:root`。
 
 | 组 | 令牌 |
 |----|------|
@@ -18,10 +26,18 @@
 | 状态条（hero） | `--warn-weak / --neutral-weak`（来源徽弱底）/ `--ok-halo / --warn-halo`（状态点呼吸光晕，绿/琥珀） |
 | 其他色 | `--star`（默认星标琥珀，主题无关） |
 | 层级 | `--z-sticky 35 / --z-fab 40 / --z-toast 50 / --z-pop 70 / --z-modal 100`（一切弹层=modal，无 60 档） |
-| 页面壳 | `--wrap-ratio 61.8%`（**黄金比例壳**：视口 ≥1000px 时 `.wrap` 恒占 61.8%、两侧留白各 19.1%，无上限、任何宽度比例一致；<1000px 放不下固定宽度表格，回退流式全宽；`.card` 内 `.desc/.shint` 同档 70ch 行宽兜底。顶栏 `flex-wrap`、`#health` 截断、`#schedPanel` 面板内横滚三条兜底因此恒开，不再只限窄屏） |
+| 页面壳 | `--wrap-ratio 61.8%`（**黄金比例壳**，冻结为品牌特征，见 §3） |
 | 其他 | `--scrim`（遮罩）、`--dur .15s`（过渡）、`--mono`（等宽栈） |
 
-## 2. 字级约定（对齐原版，评审定稿）
+**新增令牌的流程**：① ui.ts 三分支同步（主题相关）；② 本表登记；③ `test/ui-lint.test.ts` 的 `THEME_REQUIRED` / `PARITY_*` 清单同步（门禁会红着提醒）。**待收编令牌**（散落值已在门禁白名单挂号）：`--err-weak`、`--hover-tint`、`--divider`、`--shadow-accent`、`--on-accent`——收编时补令牌 + 清白名单（§14）。
+
+## 3. 布局与间距
+
+- **4px 基线网格**：布局间距（margin/padding/gap）一律走 `--sp-1..6`（4/8/12/16/20/24）。组件内部填充（按钮 7px 14px、输入 7px 10px 等）由组件类定义，不新增离网值。
+- **黄金比例壳（冻结）**：视口 ≥1000px 时 `.wrap` 恒占 61.8%、两侧留白各 19.1%，无上限、任何宽度比例一致；<1000px 回退流式全宽；`.card` 内 `.desc/.shint` 同档 70ch 行宽兜底。顶栏 `flex-wrap`、`#health` 截断、`#schedPanel` 面板内横滚三条兜底因此恒开，不再只限窄屏。改动此壳 = 品牌决策，先过用户评审。
+- **断点唯一**：桌面壳 1000px 一档；移动页（lan.ts）独立体系。新增响应式行为先查既有兜底写法，不新造断点。
+
+## 4. 字级约定（对齐原版，评审定稿）
 
 | 元素 | 字号 |
 |------|------|
@@ -31,9 +47,9 @@
 | 行内小按钮 `.btn.small` / 表格 / 描述 / 字段 label | 13px（`--fs-sm`） |
 | 徽标 `.pill` / 注释 / 密集表格输入 / seg 紧凑态 | 12px（`--fs-xs`） |
 
-按钮略大于输入框是**有意的主次关系**，勿改平。
+按钮略大于输入框是**有意的主次关系**，勿改平。**字重封闭集**：400 正文、500 表头/次强调、600 服务名/seg 选中、700 标题——不引入 300/800 等新档。移动变体例外档（16px 输入=iOS 聚焦防缩放、11px badge、降级页 13px）登记在门禁用例内。
 
-## 3. 色彩语义（评审定稿）
+## 5. 色彩语义（评审定稿）
 
 | 颜色 | 含义 | 用在哪 |
 |------|------|--------|
@@ -46,8 +62,44 @@
 - Switch 开启态固定绿色（**不是** accent 蓝）。
 - pill 只做**状态展示**（可点击展开面板的除外，如「定时」）；**开关一律用 Switch**，禁止再用 pill 文字当开关。
 - 「正在使用」等状态 pill 内不加对号图标；「已接入」保留锁 + 对号（历史约定；锁/链/对号 2026-10 起一律走 SVG `icon()`，不再是 emoji 字形）。
+- **弱底 tint**：新弱底优先复用既有 `--ok-weak/--warn-weak/--neutral-weak/--accent-weak`；确需新档位先过用户评审（存量透明度档位 .06–.16）。
 
-## 4. 组件清单与用法
+### 对比度硬指标（WCAG 2.2 AA）
+
+正文文本 ≥**4.5:1**；UI 部件边界 / 焦点环 / 图形 ≥**3:1**。门禁⑤断言的达标对（明暗两主题）：`text/bg`、`text/card`、`muted/card`、`accent/bg`、`accent/card`、`err/card`（4.5:1）+ 白 on accent（3:1）+ tooltip 反色对（4.5:1）。**改断言对清单 = 设计决策**，先过用户评审。
+
+**对比度技术债（亮色主题实测，待调，改值需用户确认）**：`ok/card` 3.30、`warn/card` 3.19、`warn/warn-weak` 2.68、`star/card` 2.03（图标）、`muted/bg` 4.47（临界）、`direct-text/card` 4.22、err 弱底合成 4.28。调法方向：亮色主题为状态色引入更深的 text 档（700 系），不动暗色。
+
+## 6. 交互状态完备性
+
+交互组件**五态必备**，缺态不算完工：
+
+| 态 | 要求 | 既有先例 |
+|----|------|----------|
+| default | 基线外观 | `.btn` |
+| hover | 明确反馈（边框/变色/位移） | `.btn:hover`、`.chip:hover` |
+| focus-visible | 2px accent 轮廓 + offset | `button:focus-visible` |
+| active | 按压反馈（能用则用） | fab `translateY` |
+| disabled | `opacity .55` + `not-allowed` | `.btn:disabled` |
+
+另：异步动作加 **loading**（`.spin`，请求期间 disabled 防连点、失败回弹——pillSwitch busy 先例）；数据列表/区域加 **empty**（`.empty`）；表单校验失败加 **error**（`.bad` 红边）。新组件照先例补齐，门禁不查状态完备性（人工评审项）。
+
+## 7. 可访问性基线（WCAG 2.2 AA）
+
+- **焦点**：一切可交互元素键盘可达；`focus-visible` 2px accent 轮廓；**禁止** `outline:none` 无替代。
+- **语义**：开关 `role=switch` + `aria-checked`；展开箭头 `aria-expanded` + `aria-controls`；装饰性 SVG `aria-hidden`。弹层走 `createModal`（Esc 关最上层、焦点管理内置）。
+- **热区通律**：可点区域与视觉边界一致；一处视觉分叉两个热点时，**大热区给无害侧**（pillSwitch caret 先例：误关服务的代价远大于误展开）；重置按钮样式**禁用 `all:unset`**（吞 `[hidden]`）。
+- **动画**：循环/呼吸动画必须挂 `@media (prefers-reduced-motion: reduce)` 豁免（inuse-pulse 先例）。
+- **颜色不是唯一通道**：状态色必须伴随文字或图标差异（pill 带文案、ichip 带图标）。
+
+## 8. 动效
+
+- **时长档位**：微交互/过渡 `--dur .15s`；入场动画 120–180ms（tipIn .12s / toastIn .18s）；spinner .7s、呼吸 2.6s（循环类）。>300ms 的过渡需说明理由。
+- **缓动**：统一 ease-out 家族；linear 仅 spinner 类匀速运动。
+- **规则**：新过渡优先 `var(--dur)`；循环动画必挂 reduced-motion（§7）。
+- **技术债**：存量 transition 大多硬编码 `.15s`（未收编 `--dur`），门禁暂不设 transition 断言；收编属待办（§14），收编前新增代码请直接写 `var(--dur)` 带头。
+
+## 9. 组件清单与用法
 
 ### 已落地（ui.ts 可直接用）
 
@@ -76,7 +128,7 @@
 
 Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、KeyValue 列表、Dropdown Menu/Pop（`openPop` 定位原语）、Stepper。需要时先按原型补 CSS 再用。**扩充此清单必须先出原型经用户审核**。
 
-### pillSwitch 落地要点（都是实测过的坑）
+## 10. pillSwitch 落地要点（都是实测过的坑）
 
 - 文案写内嵌 `.ptext`，**禁止**直写根 `textContent`（会冲掉 caret）。
 - 切语言的 pill：`label` 传惰性函数 + `applyLang` 末尾对存量 pill 逐个 `render()`（组件文案在内部自绘，静态 `data-i18n` 扫不到 `.ptext`；曾因字符串 label 固化加载时语言，切英文后「自动路由」等 5 颗不跟随）。
@@ -87,7 +139,7 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 - CSS 里给这些按钮做重置时**不能用 `all:unset`**：它会把 `[hidden]` 的 `display:none` 一起重置，caret 就永远隐藏不了。
 - **面板未渲染时不得按 DOM 收集表单数据**：定时开关从 pill 直接切换时面板没打开，按 DOM 抓行会得到空数组并把已存时段一起 POST 掉（实测数据丢失）——未渲染时要用服务端快照（`schedWindowsSnapshot`）。
 
-### 浮头表格落地要点（结构契约）
+## 11. 浮头表格落地要点（结构契约）
 
 - 结构三层：**滚动容器**（真正滚动的元素，如 `.modal-body`/`.editform`）⊇ **表格块**（`.mtable`/`.fetchpanel`，自然高度不设 max-height）⊇ **表头行 `.mhead`**。吸附范围 = 所属表格块：滚过最后一行表头被推走，滚动进入哪张表就吸哪张表头。新表格按此结构挂 `.mhead` 即自动获得浮头。
 - **禁律①**：`.mhead` 与滚动容器之间**不得出现 `overflow:auto/scroll/hidden` 的祖先**——任何 overflow 容器都会成为 sticky 的吸附基准，而表格块自己不竖向滚动，表头就静默失效（2026-10-10 实锤回归：拉取面板表头被「表内横向滚动」规则困死一整天）。确需圆角裁剪写 `overflow:hidden;overflow:clip`（clip 裁剪但不产生滚动容器；旧浏览器回退 hidden＝不吸顶，不破布局）。
@@ -95,18 +147,39 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 - **页级表格用卡内滚动变体**：主页面表格（如请求日志表 `#logTable`）的外层滚动体是 document，外滚吸附要对齐页面 sticky 页头高度（窄屏折行后是变值，对不稳）——改用**卡内滚动容器**：`.tablescroll{overflow:auto;max-height:60vh}` 自己就是滚动容器，表头 `thead th{position:sticky;top:0}` 相对它吸附。真 `<table>` 的 sticky 表头须配 `border-collapse:separate;border-spacing:0`（collapse 的边框画在表层，吸附后丢底线）+ 表头不透明背景。
 - **例外：页首表格不套浮头**（如定时切换面板 `#schedPanel`）——位于页面顶部、行数少，页面滚动永远不会「滚过它的表头」，吸附永不触发；且窄屏横滚兜底必须留在表格块内（上移到 document 会让整页横移），按禁律①它注定与 sticky 无缘。硬套样式是无效果死代码，记录例外即可。
 
-## 5. 新增/修改 UI 的流程
+## 12. UI 静态门禁（机器强制）
+
+**位置**：`test/ui-lint.test.ts`，挂进 `npm test`，三平台 CI 生效。改任何 `src/**` UI 文件后必须绿；规范中可机器判定的约束全部在此落牙。
+
+| # | 断言 | 覆盖文件 |
+|---|------|----------|
+| ① | 主题令牌三分支同步：两个亮色分支键集合与值一致、只覆写 `:root` 已有令牌、`THEME_REQUIRED` 23 项三处齐全 | ui.ts |
+| ② | 跨文件令牌同源：lan/cloud 与桌面暗色 `:root` 同名令牌逐值一致（`PARITY_LAN`/`PARITY_CLOUD`） | lan.ts、console.ts |
+| ③ | 主题块外禁裸色值（hex/rgba）——**白名单登记制** | ui.ts、lan.ts |
+| ④ | 封闭集：字号只走 `--fs-*`（lan 豁免档 16/11/13px）；圆角只走 `--r-*`/50%/0/999px；z-index 只走 `--z-*`/calc/1\|2；box-shadow 只走 `--shadow-*` 或 var()/inset/transparent 组合 | ui.ts、lan.ts |
+| ⑤ | 核心令牌对 WCAG 对比度（明暗两主题 4.5:1 / 3:1，断言对见 §5） | ui.ts |
+
+**白名单登记制**（COLOR_WL / RADIUS_WL / SHADOW_WL）：每条 = 文件 + 行级正则 + **理由**。两个方向都被门禁管着：新裸色值没登记 → 红；登记了却不再命中（陈旧条目）→ 红。理由里标「待收编」的条目就是散落值令牌化任务清单（§14）。**登记特例的门槛**：只有品牌固定色（logo/二维码/PWA）、结构性固定色（on-accent 白字白芯、tooltip 反色调色板）或已有存量才可登记；新代码一律先走令牌。
+
+**常见改动对照**：新增主题令牌 → ui.ts 三分支 + §2 表 + `THEME_REQUIRED`；新增组件 → §9 登记 + 五态齐备（§6）；确需特例 → 白名单登记（写清为什么不能走令牌）；收编散落值 → 补令牌 + 删白名单条目。
+
+## 13. 新增/修改 UI 的流程
 
 1. **先查本文件**：有现成组件直接用；没有 → **扩充组件库，且扩充必须先经用户审核**（原型/截图评审通过后才能进 ui.ts kit 段与本文件），禁止就地发明一次性样式绕过组件库。
-2. 新颜色/令牌：主题相关必须三分支同步；语义色严格按第 3 节，不得新造含义。
+2. 新颜色/令牌：主题相关必须三分支同步；语义色严格按第 5 节，不得新造含义。
 3. 文案：一切用户可见文案走 `t(中, 英)` / `data-i18n*`（含 `data-i18n-tip`），双语同写。
 4. ui.ts 是 JS 模板字符串：内嵌代码**禁用反引号与 `${`**；正则反斜杠双写；`\n` 要写 `\\n`；改完必须 `node --check` 抽查内嵌脚本。
-5. 验收：`npm test` 全绿 + `MODELRDOCK_FAKE_HOME=<独立目录> npx tsx src/cli.ts gateway start --port 189xx` 起隔离实例真开页（IAB）过一遍交互；**tsx 无热重载，改码后必须重启实例**。端口红线见 AGENTS.md（8687/8890 禁占）。
-6. 移动端 `/m`（lan.ts）暂有独立迷你令牌，对齐桌面是技术债（见下）。
+5. **过门禁**：`npx vitest run test/ui-lint.test.ts`（或随全量 `npm test`）必须绿——令牌三分支、裸色值、封闭集、对比度都是红灯项。
+6. 验收：`npm test` 全绿 + `MODELRDOCK_FAKE_HOME=<独立目录> npx tsx src/cli.ts gateway start --port 189xx` 起隔离实例真开页（IAB）过一遍交互；**tsx 无热重载，改码后必须重启实例**。端口红线见 AGENTS.md（8687/8890 禁占）。
+7. 移动端 `/m`（lan.ts）暂有独立迷你令牌，对齐桌面是技术债（见下）。
 
-## 6. 已知例外与技术债
+## 14. 已知例外与技术债
 
 - 主题按钮的 🎨🌙☀️ 前缀是按钮三态文本的一部分（textContent 切换），保留 emoji；句子文案里的 ✓⚠✗ 同理（如 toast 的「✓ 已切换」、延迟探测的「✗ 网络不通」）。**状态/语义图标（锁 🔒 / 链 🔗 / 齿轮 ⚙ / 时钟 🕐 / 外链 ↗）已全部 SVG 化**——emoji 只允许留在装饰性标题（🧲/📲）与句子文案里；提示语要指向某个控件时写「点右侧按钮」这类文字，不要在文案里画图标。
 - `#updOverlay`（更新弹层）保留旧自包含结构，未迁 `.pad0` 三段壳（近期刚改过，避免无谓回归）；其余弹层（编辑/添加/确认/分享/导入/配置包）均已三段化。
-- `/m` 手机页（lan.ts）与云控制台（cloud/console.ts）令牌已与桌面同源（§1 值一致）；控件为**移动变体**保留自有形态（16px 输入=iOS 聚焦防缩放、44px 触控高度、左下角 toast，与桌面同口径），新增移动端 UI 也先查本文件选令牌，勿再自造色值。
+- `/m` 手机页（lan.ts）与云控制台（cloud/console.ts）令牌已与桌面同源（§2 值一致，门禁②保护）；控件为**移动变体**保留自有形态（16px 输入=iOS 聚焦防缩放、44px 触控高度、左下角 toast，与桌面同口径），新增移动端 UI 也先查本文件选令牌，勿再自造色值。
 - svcform 三公共块的 label 写法与 `.field` 规范等价，暂不重写模板。
+- **散落值收编清单**（当前以门禁白名单形式挂号，收编 = 补令牌 + 删白名单条目）：`--err-weak`（ghost-danger .06 / pill.err .08 两档）、`--hover-tint`（时间选择 hover .18）、`--divider`（caret 分隔线 .35）、`--shadow-accent`（fab/snav accent 彩色投影）、`--on-accent`（主题色底白字白芯：fab/主按钮/seg 选中/开关钮/spinner）、snav 与 timePickPop 自定义黑投影、lan.ts 的 `--scrim` 与 z-index 令牌缺口、存量圆角（logo/seg 7px、#health 点与 filechip 99px、二维码容器 8px、滚动条 thumb 3px）。
+- **transition 收编**：存量过渡硬编码 `.15s`（§8），收编前门禁不设断言。
+- **亮色主题对比度缺口**（§5 表）：ok/warn/star 小字与弱底合成未达 AA，调值是设计决策，需用户评审后统一调。
+- **cloud console.ts 未接入完整令牌体系**：仅 9 个色变量受门禁②同源保护；字号/圆角/裸色值扫描豁免。对齐桌面体系时补齐并移出豁免。
