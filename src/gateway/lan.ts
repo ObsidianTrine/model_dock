@@ -375,7 +375,7 @@ export function renderMobilePage(): string {
 <style>
 /* 令牌与桌面控制台（src/gateway/ui.ts）同源，见 .agents/conventions/ui-kit.md；
  * 控件（.act/.badge/#toast/#confirm）为移动变体保留：16px 输入=iOS 聚焦防缩放特例，44px=触控最小高度 */
-:root{--bg:#0f1115;--card:#171a21;--text:#e5e7eb;--muted:#9ca3af;--border:#2a2f3a;--accent:#3b82f6;--accent-weak:#16233c;--ok:#22c55e;--ok-weak:#10241a;--warn:#d97706;--err:#ef4444;
+:root{--bg:#0f1115;--card:#171a21;--text:#e5e7eb;--muted:#9ca3af;--border:#2a2f3a;--accent:#3b82f6;--accent-weak:#16233c;--ok:#22c55e;--ok-weak:#10241a;--warn:#d97706;--err:#ef4444;--scrim:rgba(0,0,0,.55);--on-accent:#fff;
 --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 --fs-xs:12px;--fs-sm:13px;--fs-md:14px;--fs-base:15px;--fs-lg:17px;--fs-xl:18px;
 --r-sm:8px;--r-md:10px;--r-lg:14px;--r-full:999px;
@@ -386,7 +386,7 @@ export function renderMobilePage(): string {
 body{margin:0;background:var(--bg);color:var(--text);font:var(--fs-base)/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:0 14px calc(20px + env(safe-area-inset-bottom))}
 /* 主屏独立窗口（standalone）下页面顶到状态栏：header 让出安全区 */
 header{display:flex;align-items:center;gap:8px;padding:calc(14px + env(safe-area-inset-top)) 0 10px}
-.dot{width:8px;height:8px;border-radius:99px;background:var(--ok);flex:0 0 auto}
+.dot{width:8px;height:8px;border-radius:var(--r-full);background:var(--ok);flex:0 0 auto}
 .brand{font-weight:700;font-size:var(--fs-xl)}
 .host{margin-left:auto;color:var(--muted);font-size:var(--fs-xs);border:1px solid var(--border);border-radius:var(--r-full);padding:2px 10px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px 16px;margin-bottom:12px}
@@ -419,18 +419,18 @@ header{display:flex;align-items:center;gap:8px;padding:calc(14px + env(safe-area
 input[type=file]{color:var(--muted);font-size:var(--fs-sm);max-width:100%}
 button.act{border:1px solid var(--border);background:var(--bg);color:var(--accent);border-radius:var(--r-md);padding:9px 14px;font:inherit;font-size:var(--fs-md);cursor:pointer;min-height:44px}
 button.act:disabled{color:var(--muted);cursor:not-allowed}
-button.act.on{background:var(--accent);border-color:var(--accent);color:#fff}
+button.act.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 button.mini{border:none;background:none;color:var(--muted);font:inherit;font-size:var(--fs-xs);cursor:pointer;padding:2px 0}
 button.mini:hover{color:var(--accent)}
 #toast{position:fixed;left:18px;bottom:24px;background:var(--card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 16px;font-size:var(--fs-md);display:none;max-width:88%;z-index:var(--z-toast)}
-#confirm{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:20}
+#confirm{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;z-index:20}
 #confirm[hidden]{display:none}
 .confirm-box{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;max-width:86%;width:320px}
 .confirm-box p{margin:0 0 16px;font-size:var(--fs-base);line-height:1.5;word-break:break-all}
 .confirm-box p.chint{color:var(--muted);font-size:var(--fs-sm);margin:-6px 0 14px}
 .confirm-btns{display:flex;gap:10px;justify-content:flex-end}
 button.cbtn{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:var(--r-md);padding:9px 18px;font:inherit;font-size:var(--fs-base);cursor:pointer;min-height:44px}
-#confirmYes{background:var(--accent);border-color:var(--accent);color:#fff}
+#confirmYes{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 footer{color:var(--muted);font-size:var(--fs-xs);text-align:center;margin-top:6px}
 .empty{color:var(--muted);font-size:var(--fs-md);text-align:center;padding:18px 0}
 .a2hsrow{text-align:center;margin:2px 0 6px}

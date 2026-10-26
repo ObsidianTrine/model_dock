@@ -86,6 +86,19 @@ describe('① ui.ts 主题令牌三分支同步', () => {
       expect(missing, `分支缺令牌（新令牌必须 :root + 两个亮色分支三处同步，见 ui-kit §令牌）`).toEqual([])
     }
   })
+
+  // 主题不变量（单值双主题，只放 :root）：收编自散落值的弱底 tint / 中性细节 / on-accent 白 / 浮动投影
+  const INVARIANT_REQUIRED = [
+    '--err-weak', '--warn-tint', '--hover-tint', '--divider',
+    '--on-accent', '--on-accent-dim',
+    '--shadow-accent', '--shadow-accent-h', '--shadow-accent-soft',
+    '--shadow-float', '--shadow-pop',
+  ]
+
+  it('主题不变量令牌（收编的弱底/细节/投影）在 :root 齐备', () => {
+    const missing = INVARIANT_REQUIRED.filter(k => !UI_ROOT.has(k))
+    expect(missing, '不变量令牌缺失（它们已被组件引用，删除即断样式）').toEqual([])
+  })
 })
 
 // ---------------------------------------------------------------- ② 跨文件令牌同源
@@ -93,11 +106,12 @@ describe('① ui.ts 主题令牌三分支同步', () => {
 // lan.ts（手机页）与 cloud console.ts 的令牌必须与桌面暗色 :root 逐值一致（ui-kit「已知例外」：同源约定）
 const PARITY_LAN = [
   '--bg', '--card', '--text', '--muted', '--border', '--accent', '--accent-weak',
-  '--ok', '--ok-weak', '--warn', '--err', '--mono',
+  '--ok', '--ok-weak', '--warn', '--err', '--mono', '--on-accent',
   '--fs-xs', '--fs-sm', '--fs-md', '--fs-base', '--fs-lg', '--fs-xl',
   '--r-sm', '--r-md', '--r-lg', '--r-full',
   '--shadow-sm', '--shadow-md', '--shadow-lg',
   '--z-sticky', '--z-fab', '--z-toast', '--z-pop', '--z-modal', '--dur',
+  // --scrim 不入本清单：lan=.55 与桌面 .5 是存量差异（移动 confirm 略深），强同源属设计变更
 ]
 const PARITY_CLOUD = ['--bg', '--card', '--border', '--text', '--muted', '--ok', '--warn', '--err', '--accent']
 
@@ -118,37 +132,28 @@ describe('② 跨文件令牌同源（lan / cloud ↔ ui 暗色 :root）', () =>
 type WlEntry = { file: 'ui' | 'lan'; re: RegExp; why: string }
 
 // 白名单登记制：每条 = 文件 + 行级正则 + 理由。主题块外的每个 hex/rgba 必须命中至少一条；
-// 反向约束：每条也必须命中至少一处（防陈旧条目沉淀）。理由里的「待收编」= 散落值令牌化任务清单。
+// 反向约束：每条也必须命中至少一处（防陈旧条目沉淀）。可登记的只有三类：品牌固定色、
+// 结构性固定色（on-accent 白/tooltip 反色调色板/二维码白底）、独立降级页与 JS 选择器误报；
+// 其余一律先令牌化（2026-10 存量散落值已收编为 --err-weak/--warn-tint/--hover-tint/--divider/
+// --on-accent(--dim)/--shadow-accent 系/--shadow-float/--shadow-pop，见 ui-kit §2/§14）。
 const COLOR_WL: WlEntry[] = [
-  // —— 品牌固定色（主题无关，合法豁免）
+  // —— 品牌固定色（主题无关）
   { file: 'ui', re: /\.logo svg\{[^{}]*rgba\(79,70,229,\.35\)/, why: 'logo 品牌靛蓝投影（品牌固定色）' },
   { file: 'ui', re: /stop-color="#(6d7cff|4f46e5)"/, why: '品牌 logo 渐变（品牌固定色）' },
   { file: 'ui', re: /stroke="#fff"/, why: 'logo 描边白（品牌固定色）' },
   { file: 'lan', re: /theme-color" content="#0f1115"/, why: 'PWA 浏览器 chrome 品牌色' },
   { file: 'lan', re: /background_color: '#0f1115'/, why: 'webmanifest 品牌色' },
   { file: 'lan', re: /theme_color: '#0f1115'/, why: 'webmanifest 品牌色' },
-  // —— on-accent 固定白（主题色底上的白字/白芯），待收编 --on-accent
-  { file: 'ui', re: /color:#fff(?![\w])/, why: 'on-accent 白字（fab/主按钮/seg 选中/时间选择选中），待收编 --on-accent' },
-  { file: 'ui', re: /border:2px solid #ffffff55/, why: 'primary 底上的 spinner 白边（on-accent 固定白）' },
-  { file: 'ui', re: /\.switch \.track::after\{[^{}]*background:#fff/, why: '开关钮白芯（on-accent 固定白）' },
-  { file: 'lan', re: /color:#fff(?![\w])/, why: 'on-accent 白字（同桌面口径），待收编 --on-accent' },
   // —— 结构性固定色
   { file: 'ui', re: /#lanPanel svg\{[^{}]*background:#fff/, why: '二维码必须白底（扫码识别要求）' },
   { file: 'ui', re: /background:#111827/, why: 'tooltip 反色底（组件自带调色板，对比度已由本文件门禁）' },
   { file: 'ui', re: /color:#f5f5f5/, why: 'tooltip 反色字（组件自带调色板）' },
   { file: 'ui', re: /rgba\(255,255,255,\.12\)/, why: 'tooltip 反色系边框' },
   { file: 'ui', re: /#fabAdd/, why: 'JS id 选择器，非色值' },
-  // —— 降级页/遮罩（独立页无令牌壳），待收编
-  { file: 'lan', re: /background:#0f1115/, why: '降级页内联底色（独立页无令牌壳），待收编' },
-  { file: 'lan', re: /color:#e5e7eb/, why: '降级页内联字色，待收编' },
-  { file: 'lan', re: /color:#9ca3af/, why: '降级页内联次级色，待收编' },
-  { file: 'lan', re: /rgba\(0,0,0,\.55\)/, why: 'confirm 遮罩（lan 缺 --scrim 令牌），待收编' },
-  // —— 存量散落 tint/阴影，待收编令牌
-  { file: 'ui', re: /rgba\(37,99,235/, why: 'accent 彩色投影（fab/snav），待收编 --shadow-accent' },
-  { file: 'ui', re: /box-shadow:[^;{}]*rgba\(0,0,0/, why: '自定义黑投影（snav/timePickPop），待收编 shadow 档' },
-  { file: 'ui', re: /rgba\(127,127,127/, why: '中性 hover tint / caret 分隔线，待收编 --hover-tint / --divider' },
-  { file: 'ui', re: /rgba\(220,38,38/, why: 'err 弱底两档（ghost-danger/pill.err），待收编 --err-weak' },
-  { file: 'ui', re: /rgba\(217,119,6,\.08\)/, why: 'pill.warn 弱底第二档（--warn-weak 为 .16），待收编' },
+  // —— 独立降级页（无令牌壳的 standalone 页面内联样式）
+  { file: 'lan', re: /background:#0f1115/, why: '降级页内联底色（独立页无令牌壳）' },
+  { file: 'lan', re: /color:#e5e7eb/, why: '降级页内联字色（独立页无令牌壳）' },
+  { file: 'lan', re: /color:#9ca3af/, why: '降级页内联次级色（独立页无令牌壳）' },
 ]
 
 const HEX_RE = /(?<=[(:,="'\s])#[0-9a-fA-F]{3,8}\b/g
@@ -197,20 +202,14 @@ describe('③ 主题块外禁裸色值（白名单登记制）', () => {
 // ---------------------------------------------------------------- ④ 字号 / 圆角 / z-index / box-shadow 封闭集
 
 const RADIUS_OK = /^(0|50%|999px|var\(--r-[\w-]+\))$/
-// 存量视觉配套圆角（26px 品牌图标、seg 内嵌、二维码容器、滚动条 thumb 等），待收编任务清单
+// 视觉配套特例（永久豁免，非债务）：小尺寸品牌元素的配套圆角与滚动条 thumb
 const RADIUS_WL: WlEntry[] = [
-  { file: 'ui', re: /border-radius:7px/, why: 'logo 与 seg 内嵌按钮的视觉配套圆角，待收编' },
-  { file: 'ui', re: /border-radius:99px/, why: '等价 --r-full 的存量写法（#health 点/filechip），待收编' },
-  { file: 'ui', re: /border-radius:8px/, why: '二维码容器（88px 面板）圆角，待收编 --r-sm' },
+  { file: 'ui', re: /border-radius:7px/, why: 'logo（26px 品牌图标）与 seg 内嵌按钮的视觉配套圆角' },
   { file: 'ui', re: /border-radius:3px/, why: '滚动条 thumb 刻意小圆角' },
-  { file: 'lan', re: /border-radius:99px/, why: 'badge 存量写法，待收编' },
 ]
-// 存量自定义投影（尚未令牌化的档位）
+// 自定义投影特例（永久豁免）：品牌元素投影
 const SHADOW_WL: WlEntry[] = [
   { file: 'ui', re: /\.logo svg\{[^{}]*box-shadow/, why: 'logo 品牌投影' },
-  { file: 'ui', re: /\.fab(:hover)?\{[^{}]*box-shadow/, why: 'fab 彩色投影，待收编 --shadow-accent' },
-  { file: 'ui', re: /\.snav(:hover)?\{[^{}]*box-shadow/, why: 'snav 自定义投影，待收编' },
-  { file: 'ui', re: /box-shadow:0 8px 30px rgba\(0,0,0,\.35\)/, why: 'timePickPop 自定义投影，待收编' },
 ]
 
 function violatingLines(src: string, re: RegExp, okValue: (m: RegExpExecArray) => boolean, wl: WlEntry[], file: 'ui' | 'lan'): string[] {
