@@ -123,6 +123,18 @@ export async function saveConfig(cfg: Config): Promise<void> {
   // inode 的写放大。比较在调用方的写锁内；字节级比较让归一化首写（磁盘内容不同）语义不回退
   const cur = await readTextIfExists(configPath())
   if (cur !== null && cur === next) return
+  // 版本迁移类写盘先快照（CORRECT-03）：migrate/stringify 缺陷的破坏窗口只发生在版本升级写——
+  // 磁盘 version 低于当前工具版本时，把旧 config.toml 快照进 backups/config/（'config' 伪 harness，
+  // 与 sync 导入前快照同址同型），写坏可经 modeldock restore config 撤销；快照失败不阻断写盘。
+  const diskVersion = Number(/^version\s*\=\s*(\d+)/m.exec(cur ?? '')?.[1] ?? 0)
+  if (cur !== null && cur.trim() !== '' && diskVersion < CONFIG_VERSION) {
+    try {
+      const { snapshot } = await import('../backup/snapshot.js')
+      await snapshot('config', 'pre-migrate', [configPath()])
+    } catch {
+      /* 快照失败不阻断写盘：atomicWrite 的原子性仍然兜底 */
+    }
+  }
   await atomicWrite(configPath(), next, 0o600)
 }
 

@@ -70,7 +70,7 @@
 | XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☐ 未修 |
 | CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☑ 已修（2026-10-28，.incomplete 占位 + prune 宽限期，见 §三） |
-| CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☐ 未修 |
+| CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☑ 已修（2026-10-28，版本迁移写盘前快照，见 §三） |
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 
@@ -346,6 +346,7 @@
 
 **CORRECT-03（P2）config.toml 无写前快照**
 - 现状：全仓快照仅 4 处调用（engine.ts / ops.ts:749 / cli/harness.ts / sync/collect.ts），均针对客户端文件与 sync 导入前；config.toml 直写无快照，写坏（如 migrate/stringify 缺陷）无 undo。推测有意取舍（config 有 .lock + 原子写）。建议至少在 AGENTS.md 澄清边界，或对 migrate 类大改前补快照。
+- 2026-10-28 已修（采纳「migrate 类大改前补快照」方向）：saveConfig 检测磁盘 version 低于当前 CONFIG_VERSION 时（且非空文件），先经 `snapshot('config', 'pre-migrate', [config.toml])` 快照到 backups/config/（与 sync 导入前快照同址同型，`modeldock restore config` 可撤），快照失败不阻断写盘；动态 import 避免与 snapshot.ts 的 loadConfig 循环依赖。逐次写前快照不做——常规写高频，20 份滚动窗口秒级即被冲掉，无 undo 价值（AGENTS.md 已补边界说明）。回归：test/store.test.ts「版本迁移写盘前快照」。
 
 **CORRECT-05（P1，2026-10-13 用户实测踩中）dev/测试沙箱操作外溢生产**
 - 事故：用户清 dev 沙箱（`~/.modeldock-dev`）数据后，生产实例的 provider Key 全部失效（401）。
@@ -421,7 +422,7 @@
 | REVIEW-24 | P2 | `src/import/sources.ts`（scanZcode） | 只扫旧版 config.json，漏现行 provider_config.json（用户自定义供应商常年漏导） | ☑ 已修（两代合并扫描；修掉旧文件缺席早退短路；import-scan 回归） |
 | REVIEW-25 | P2 | `src/adapters/*` + `src/presets/data.ts` | claude-code 网关分支不清 ANTHROPIC_API_KEY；codex stripEnvBlock 全局压缩用户排版；5 适配器 planAttach 无等值过滤；reloadPresets 不失效 known 表 | ☑ 已修（无条件清 + 接缝局部收敛 + changeIfChanged 帮手统一五处 + clearKnownTable；adapters 幂等契约更新） |
 | REVIEW-26 | P2 | `src/sync/collect.ts`（applySyncdoc） | 远端删除正激活 profile 后本机残留悬空 active_profile | ☑ **复核为既定语义，留档不改**（机器态保护：当前激活路由不随包覆盖，lansync/syncexport 测试钉死；转发侧 pickTarget 对未知 profile 安全回落，用户重选即恢复） |
-| REVIEW-27 | P2 | `src/cloud/server.ts` | putDoc 畸形 ts 入库后 NaN 恒 false 打穿 422 回滚保护；login/pair 畸形 JSON 500 外泄 V8 原文；cookieToken 畸形值 500；配对码 Math.random 非 CSPRNG | ☑ 已修（Number.isFinite 拒收 + parseBody 回落 + 解码守卫 + randomInt；cloudserver 回归） |
+| REVIEW-27 | P2 | `src/cloud/server.ts` | putDoc 畸形 ts 入库后 NaN 恒 false 打穿 422 回滚保护；login/pair 畸形 JSON 500 外泄 V8 原文；cookieToken 畸形值 500；配对码 Math.random 非 CSPRNG | ☑ 已修（Number.isFinite 拒收 + parseBody 回落 + 解码守卫 + randomInt；cloudserver 回归；2026-10-28 补 null/数组/标量穿透守卫，T07 实证） |
 | REVIEW-28 | P2 | `src/sync/targets/webdav.ts` + `localdir.ts` | manifest CAS 两段写：双机窗口互覆双双记成功后永久 idle 静默分叉（连冲突快照都没有） | ☑ 已修（写后回读复核归属，被覆写方转 conflict 走引擎冲突分支；synctarget 回归） |
 | REVIEW-29 | P2 | `src/cloud/console.ts` + 死代码 | 云控制台 10s 轮询无 document.hidden 门控；CLOUD_ENVELOPE_REF 导出与 sha256Hex 再导出无使用点 | ☑ 已修（hidden 门控 + visibilitychange 立刷；死代码删除） |
 
