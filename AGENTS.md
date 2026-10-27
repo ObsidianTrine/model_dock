@@ -199,11 +199,11 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
-| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `ANTHROPIC_API_KEY` |
+| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `CLAUDE_AUTH_TOKEN`（key） |
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
-| `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `ANTHROPIC_API_KEY` + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
+| `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `CLAUDE_AUTH_TOKEN`（key） + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
 
-- **模型接入**：bot 默认走 Anthropic 官方 API（`ANTHROPIC_API_KEY`）。想改走 Anthropic 兼容端点（智谱 GLM / 火山方舟等）：删 `anthropic_api_key` 输入、给 claude-code-action 步骤加 env 块（`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`，`ANTHROPIC_API_KEY` 同值过启动校验），详见 `docs/ci-bots.md`「换供应商」。
+- **模型接入**：bot 走 Anthropic 兼容端点、**配置全在 GitHub 侧不写死**——secret `CLAUDE_AUTH_TOKEN`（key，必配）+ Variables `CLAUDE_BASE_URL`（未配默认 DeepSeek `https://api.deepseek.com/anthropic`）与 `CLAUDE_MODEL`（未配默认 `deepseek-flash`）；换供应商在 GitHub UI 改这几个值即可。Bearer 型端点注意项与切回官方方法见 `docs/ci-bots.md`「模型接入」。
 
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（GitHub 平台行为）：Dependabot PR 的评论/推送必须经 `DEPENDABOT_GH_TOKEN`（PAT）；缺 PAT 时 dependabot-fix 打 warning 后跳过，PR 留给人工。
 - **防回环**：Claude 修复提交固定 `[dependabot-fix]` 前缀，review bot 检测到尾提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入）。

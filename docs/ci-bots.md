@@ -15,22 +15,30 @@
 
 ## 模型接入（现状与换供应商）
 
-bot 默认走 **Anthropic 官方 API**：claude-code-action 步骤直接传 `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`。
+bot 走 **Anthropic 兼容端点**（2026-10 起现配 DeepSeek），**端点 / 模型 / key 全部来自仓库配置，换供应商不动代码**：
 
-**换供应商**（智谱 GLM / 火山方舟 agent plan 等 Anthropic 兼容端点）：删掉 `anthropic_api_key` 输入，给每个 claude-code-action 步骤加 env 块——
+| 配置项 | GitHub 位置 | 必填？ | 说明 |
+|------|------|------|------|
+| `CLAUDE_AUTH_TOKEN` | **Secrets**（加密） | 是 | 供应商 API key |
+| `CLAUDE_BASE_URL` | **Variables**（明文可改） | 否 | Anthropic 兼容端点 URL；未配默认 `https://api.deepseek.com/anthropic` |
+| `CLAUDE_MODEL` | **Variables**（明文可改） | 否 | 模型名，经 `claude_args --model` 下发；未配默认 `deepseek-flash` |
+
+yml 内共三处 env 块（claude-review.yml 两个 job + dependabot-fix.yml 一个 job），形如：
 
 ```yaml
 env:
-  ANTHROPIC_BASE_URL: <兼容端点 URL>          # 以各家官方文档为准，不在此臆测
-  ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_AUTH_TOKEN }}  # 实际请求走这里（Bearer）
-  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}     # 同值，仅为过 action 启动校验
+  ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL || 'https://api.deepseek.com/anthropic' }}
+  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}   # 走 x-api-key，DeepSeek 官方文档背书
 ```
 
-共三处：claude-review.yml 两个 job + dependabot-fix.yml 一个 job；换完同步改 keyguard/guard 检查的 secret 名。想切回 Anthropic 官方：恢复 `anthropic_api_key` 输入、删 env 块。
+- `--model ${{ vars.CLAUDE_MODEL || 'deepseek-flash' }}` 写在各步 claude_args 首行；keyguard/guard 检查的 secret 名为 `CLAUDE_AUTH_TOKEN`。
+- DeepSeek 端点模型档位：`deepseek-flash`（快/省，现默认）、`deepseek-v4-pro`（强/贵），Variables 里改 `CLAUDE_MODEL` 即切换；不配时端点也会把默认 claude* 名自动映射到 flash（opus* → v4-pro），不会报错。
+- **换供应商**：Variables 改 `CLAUDE_BASE_URL` / `CLAUDE_MODEL` + Secrets 换 key，零代码改动。例外：目标端点只认 Bearer 认证时（如智谱 GLM / 火山方舟），需给三处 env 块各加一行 `ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_AUTH_TOKEN }}`（CLI 优先走 Bearer；DeepSeek 官方端点只背书 x-api-key，故默认不加，加了可能反而不被接受）。
+- **切回 Anthropic 官方**：恢复各步 `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` 输入、删三处 env 块。
 
 ## 启用步骤（后续开启时做）
 
-1. **API key**：仓库 Settings → Secrets and variables → Actions → New repository secret → `ANTHROPIC_API_KEY`（Anthropic 官方 API key）。claude-review 与 dependabot-fix 共用；想走兼容端点见上节「换供应商」。
+1. **API key**：仓库 Settings → Secrets and variables → Actions → New repository secret → `CLAUDE_AUTH_TOKEN`（现用 DeepSeek API key，platform.deepseek.com 申请）。claude-review 与 dependabot-fix 共用；端点/模型默认值够用就不用建 Variables，想自定义或换供应商 → 同页 **Variables** tab 建 `CLAUDE_BASE_URL` / `CLAUDE_MODEL`，见上节「模型接入」。
 2. **PAT（仅 dependabot-fix 需要）**：再建 secret `DEPENDABOT_GH_TOKEN`。
    - fine-grained PAT：Repository access 选本仓库，权限给 **Contents: Read+Write**、**Pull requests: Read+Write**（classic PAT 给 repo scope）。
    - 为什么必须 PAT：Dependabot 触发的 workflow，其内置 GITHUB_TOKEN 被 GitHub 平台**强制只读**，在 Dependabot PR 上评论/推送必须自备 token。
