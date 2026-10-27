@@ -141,11 +141,8 @@ function filterProfiles(
   const unknown = [...set].filter((n) => !available.includes(n))
   if (unknown.length > 0) {
     throw new AdapterError(
-      t(
-        'dsh 不存在 profile：{unknown}（现有：{available}）；桌面版 / 网页版各为一个 profile（desktop / web），请核对 ~/.dsh/profiles/ 下的目录名',
-        'dsh has no profile: {unknown} (existing: {available}); desktop and web are separate profiles (desktop / web) — check the directory names under ~/.dsh/profiles/',
-        { unknown: biJoin('、', ', ', unknown), available: available.length > 0 ? biJoin('、', ', ', available) : t('无', 'none') }
-      )
+      t('dsh 不存在 profile：{unknown}（现有：{available}）', 'dsh has no profile: {unknown} (existing: {available})', { unknown: biJoin('、', ', ', unknown), available: available.length > 0 ? biJoin('、', ', ', available) : t('无', 'none') }),
+      t('桌面版 / 网页版各为一个 profile（desktop / web），请核对 ~/.dsh/profiles/ 下的目录名', 'Desktop and web are separate profiles (desktop / web) — check the directory names under ~/.dsh/profiles/')
     )
   }
   return {
@@ -474,11 +471,8 @@ export const dshAdapter: HarnessAdapter = {
     if (!layout.legacyExists && targets.patchFiles.length === 0) {
       if (!(await dirExists(layout.home))) {
         throw new AdapterError(
-          t(
-            '未找到 dsh 配置目录 {home}，请先安装 dsh 并运行一次生成配置（或设置 DSH_HOME 指向其目录）',
-            'dsh config directory {home} not found; install dsh and run it once to generate the config (or set DSH_HOME to its directory)',
-            { home: layout.home }
-          )
+          t('未找到 dsh 配置目录 {home}', 'dsh config directory {home} not found', { home: layout.home }),
+          t('请先安装 dsh 并运行一次生成配置（或设置 DSH_HOME 指向其目录）', 'Install dsh and run it once to generate the config (or set DSH_HOME to its directory)')
         )
       }
       if (targets.profileDirs.length > 0) {

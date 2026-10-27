@@ -240,7 +240,11 @@ export async function cmdGatewayInstall(): Promise<void> {
       console.log(c.gray(t('  提示：桌面登录后自启；SSH/无登录场景可执行 sudo loginctl enable-linger $USER', '  Note: starts on desktop login. For SSH / headless setups run: sudo loginctl enable-linger $USER')))
     }
   } catch (e) {
-    console.error(c.red(`✗ ${(e as Error).message}`))
+    // 语义特殊：保持 process.exitCode 而非立即 exit——自启安装失败不阻断 CLI 自然退出（后续清理/输出仍要走），
+    // 不照搬 exitWithError；业务错误类带 hint 时手动补打「提示: …」行
+    const err = e as Error & { hint?: string }
+    console.error(c.red(`✗ ${err.message}`))
+    if (err.hint) console.error(c.yellow(t('提示: {h}', 'Hint: {h}', { h: err.hint })))
     process.exitCode = 1
   }
 }

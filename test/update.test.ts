@@ -37,6 +37,17 @@ import { VERSION } from '../src/version.js'
 const TOKEN = 'ghp_test-token'
 const REPO = 'owner/repo'
 
+/** UpdateError 断言：错误类型体系统一后，事实在 message、修复建议在 hint 字段——两段分别匹配 */
+async function rejectsWithUpdateHint(p: Promise<unknown>, msgRe: RegExp, hintRe: RegExp): Promise<void> {
+  const err: unknown = await p.then(
+    () => { throw new Error('expected the promise to reject') },
+    (e) => e
+  )
+  expect(err).toBeInstanceOf(UpdateError)
+  expect((err as Error).message).toMatch(msgRe)
+  expect((err as { hint?: string }).hint ?? '').toMatch(hintRe)
+}
+
 function sha256(buf: Buffer): string {
   return crypto.createHash('sha256').update(buf).digest('hex')
 }
@@ -348,7 +359,8 @@ describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
     cleanup = api.close
     // 带错误 token：mock 对不匹配的鉴权头直接 401；带「有效」token 也被 release.status 压成 401
     await expect(fetchLatestRelease(REPO, 'wrong-token', api.apiBase)).rejects.toThrow(UpdateError)
-    await expect(fetchLatestRelease(REPO, TOKEN, api.apiBase)).rejects.toThrow(/--token/)
+    // 修复建议在 UpdateError.hint 字段（错误类型体系统一后 message 只留事实，hint 留操作）
+    await rejectsWithUpdateHint(fetchLatestRelease(REPO, TOKEN, api.apiBase), /401/, /--token/)
   })
 
   it('匿名检查（无令牌）：不带 Authorization 头，公开仓库可读', async () => {
@@ -371,8 +383,8 @@ describe('fetchLatestRelease / SHA256 校验（本地 mock API）', () => {
   it('404 分流：匿名 = 提示仓库/发布缺失；带令牌 = 提示仓库与令牌权限', async () => {
     const api = await startMockApi({ tag: 'v9.9.9', assets: {}, status: 404 })
     cleanup = api.close
-    await expect(fetchLatestRelease(REPO, null, api.apiBase)).rejects.toThrow(/正式发布|published/)
-    await expect(fetchLatestRelease(REPO, TOKEN, api.apiBase)).rejects.toThrow(/Contents/)
+    await rejectsWithUpdateHint(fetchLatestRelease(REPO, null, api.apiBase), /找不到仓库|No release found/, /正式发布|published/)
+    await rejectsWithUpdateHint(fetchLatestRelease(REPO, TOKEN, api.apiBase), /找不到仓库|No release found/, /Contents/)
   })
 
   it('SHA256SUMS 解析 + 强校验：相符放行、不符删除并拒装', async () => {

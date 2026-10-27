@@ -6,9 +6,12 @@ import { t } from '../util/i18n.js'
 import { CONFIG_VERSION, emptyConfig, type Config, type Lang } from './types.js'
 
 export class ConfigError extends Error {
-  constructor(msg: string) {
+  /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
+  hint?: string
+  constructor(msg: string, hint?: string) {
     super(msg)
     this.name = 'ConfigError'
+    this.hint = hint
   }
 }
 
@@ -17,7 +20,8 @@ function migrate(raw: Record<string, unknown>): Config {
   const version = Number(raw.version ?? 1)
   if (version > CONFIG_VERSION) {
     throw new ConfigError(
-      t('config.toml 的 version={v} 高于当前工具支持的 {max}，请先升级 modeldock', 'config.toml version is {v}, newer than the supported {max}; upgrade modeldock first', { v: version, max: CONFIG_VERSION })
+      t('config.toml 的 version={v} 高于当前工具支持的 {max}', 'config.toml version is {v}, newer than the supported {max}', { v: version, max: CONFIG_VERSION }),
+      t('请先升级 modeldock 后重试', 'Upgrade modeldock first and retry')
     )
   }
   let language: Lang | undefined
@@ -57,9 +61,8 @@ function containerOrEmpty<T extends object>(v: unknown, key: string): T {
   if (v === undefined || v === null) return {} as T
   if (typeof v !== 'object' || Array.isArray(v)) {
     throw new ConfigError(
-      t('config.toml 的 [{key}] 必须是表（当前是{kind}）。请把该项改为 `[providers.x]` 形态的表，或删除该行恢复默认',
-        'config.toml [{key}] must be a table (got {kind}). Change it to a table like `[providers.x]`, or remove the line to use defaults',
-        { key, kind: Array.isArray(v) ? '数组/array' : typeof v })
+      t('config.toml 的 [{key}] 必须是表（当前是{kind}）', 'config.toml [{key}] must be a table (got {kind})', { key, kind: Array.isArray(v) ? '数组/array' : typeof v }),
+      t('请把该项改为 `[providers.x]` 形态的表，或删除该行恢复默认', 'Change it to a table like `[providers.x]`, or remove the line to use defaults')
     )
   }
   return v as T
@@ -70,9 +73,8 @@ function normalizable<T extends object>(v: unknown, key: string): T | undefined 
   if (v === undefined || v === null) return undefined
   if (typeof v !== 'object' || Array.isArray(v)) {
     throw new ConfigError(
-      t('config.toml 的 [{key}] 必须是表（当前是{kind}）。请把该项改为表形态，或删除该行恢复默认',
-        'config.toml [{key}] must be a table (got {kind}). Change it to a table, or remove the line to use defaults',
-        { key, kind: Array.isArray(v) ? '数组/array' : typeof v })
+      t('config.toml 的 [{key}] 必须是表（当前是{kind}）', 'config.toml [{key}] must be a table (got {kind})', { key, kind: Array.isArray(v) ? '数组/array' : typeof v }),
+      t('请把该项改为表形态，或删除该行恢复默认', 'Change it to a table, or remove the line to use defaults')
     )
   }
   return v as T
@@ -110,7 +112,8 @@ export async function loadConfig(): Promise<Config> {
     raw = tomlParse(text) as Record<string, unknown>
   } catch (e) {
     throw new ConfigError(
-      t('config.toml 解析失败：{msg}\n运行 modeldock config edit 修复，或 modeldock restore 恢复备份', 'Failed to parse config.toml: {msg}\nRun modeldock config edit to fix it, or modeldock restore to restore a backup', { msg: (e as Error).message })
+      t('config.toml 解析失败：{msg}', 'Failed to parse config.toml: {msg}', { msg: (e as Error).message }),
+      t('运行 modeldock config edit 修复，或 modeldock restore 恢复备份', 'Run modeldock config edit to fix it, or modeldock restore to restore a backup')
     )
   }
   return migrate(raw)
@@ -152,9 +155,8 @@ export async function mutateConfig<T>(fn: (cfg: Config) => T | Promise<T>): Prom
     {
       timeoutError: (lp) =>
         new ConfigError(
-          t('配置写入超时：{lp} 被其他进程长期占用（可能是异常退出的残留锁）。确认没有其他 modeldock 进程在写配置后，可删除该 .lock 文件重试',
-            'Timed out writing config: {lp} has been held by another process for too long (possibly a stale lock from a crashed process). After confirming no other modeldock process is writing the config, delete the .lock file and retry',
-            { lp })
+          t('配置写入超时：{lp} 被其他进程长期占用（可能是异常退出的残留锁）', 'Timed out writing config: {lp} has been held by another process for too long (possibly a stale lock from a crashed process)', { lp }),
+          t('确认没有其他 modeldock 进程在写配置后，可删除该 .lock 文件重试', 'After confirming no other modeldock process is writing the config, delete the .lock file and retry')
         ),
     },
     async () => {

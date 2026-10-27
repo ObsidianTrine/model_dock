@@ -94,11 +94,8 @@ export async function acquireUpdateLock(): Promise<() => void> {
       const stale = !holder || !holder.pid || !holderAlive || (!fresh && !(await holderUpdating()))
       if (!stale) {
         throw new UpdateError(
-          t(
-            '另一个更新进程正在运行（pid {pid}，{time} 启动）。请等它完成后再试；若确认没有更新在跑，删除 {p} 后重试',
-            'Another update is already running (pid {pid}, started at {time}). Wait for it to finish; if no update is running, delete {p} and retry',
-            { pid: String(holder!.pid), time: holder!.startedAt, p }
-          )
+          t('另一个更新进程正在运行（pid {pid}，{time} 启动）', 'Another update is already running (pid {pid}, started at {time})', { pid: String(holder!.pid), time: holder!.startedAt }),
+          t('请等它完成后再试；若确认没有更新在跑，删除 {p} 后重试', 'Wait for it to finish; if no update is running, delete {p} and retry', { p })
         )
       }
       // 陈锁（进程已死 / 超时 / 内容损坏）：接管
@@ -110,10 +107,7 @@ export async function acquireUpdateLock(): Promise<() => void> {
     }
   }
   throw new UpdateError(
-    t(
-      '更新启动冲突：无法取得更新锁（{p}），请稍后重试',
-      'Update conflict: could not acquire the update lock ({p}); please retry shortly',
-      { p }
-    )
+    t('更新启动冲突：无法取得更新锁（{p}）', 'Update conflict: could not acquire the update lock ({p})', { p }),
+    t('请稍后重试', 'Please retry shortly')
   )
 }

@@ -129,10 +129,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
   async planAttach(opts: AttachOptions, _cfg: Config): Promise<PlanResult> {
     if (!present()) {
       throw new AdapterError(
-        t(
-          '未找到 claude 命令——Claude Code 可能已卸载（~/.claude 只是残留配置）；请先安装 Claude Code 后再接入',
-          'claude command not found — Claude Code may have been uninstalled (~/.claude is leftover config only); install Claude Code first, then attach'
-        )
+        t('未找到 claude 命令——Claude Code 可能已卸载（~/.claude 只是残留配置）', 'claude command not found — Claude Code may have been uninstalled (~/.claude is leftover config only)'),
+        t('请先安装 Claude Code 后再接入', 'Install Claude Code first, then attach')
       )
     }
     const p = settingsFile()

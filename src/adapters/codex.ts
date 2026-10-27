@@ -118,10 +118,8 @@ export const codexAdapter: HarnessAdapter = {
   async planAttach(opts: AttachOptions, cfg: Config): Promise<PlanResult> {
     if (!present()) {
       throw new AdapterError(
-        t(
-          '未找到 codex 命令——Codex 可能已卸载（~/.codex 只是残留配置）；请先安装 Codex CLI 后再接入',
-          'codex command not found — Codex may have been uninstalled (~/.codex is leftover config only); install Codex CLI first, then attach'
-        )
+        t('未找到 codex 命令——Codex 可能已卸载（~/.codex 只是残留配置）', 'codex command not found — Codex may have been uninstalled (~/.codex is leftover config only)'),
+        t('请先安装 Codex CLI 后再接入', 'Install Codex CLI first, then attach')
       )
     }
     const p = configFile()

@@ -79,10 +79,8 @@ export const mimoDesktopAdapter: HarnessAdapter = {
   async planAttach(opts: AttachOptions, cfg: Config): Promise<PlanResult> {
     if ((await appPresent()) === false) {
       throw new AdapterError(
-        t(
-          '未找到 MiMo 桌面端本体（注册表卸载项/常见安装目录都没有）——可能已卸载（配置只是残留）；请先安装并启动一次 MiMo 桌面端后再接入',
-          'The MiMo desktop app itself was not found (neither the registry uninstall entries nor common install directories have it) — it may have been uninstalled (the config is leftover only); install and launch the MiMo desktop app once before attaching'
-        )
+        t('未找到 MiMo 桌面端本体（注册表卸载项/常见安装目录都没有）——可能已卸载（配置只是残留）', 'The MiMo desktop app itself was not found (neither the registry uninstall entries nor common install directories have it) — it may have been uninstalled (the config is leftover only)'),
+        t('请先安装并启动一次 MiMo 桌面端后再接入', 'Install and launch the MiMo desktop app once before attaching')
       )
     }
     return base.planAttach(opts, cfg)

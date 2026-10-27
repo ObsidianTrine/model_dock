@@ -1,6 +1,9 @@
 /** admin 门共享底座：请求上下文类型与跨域小帮手（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import http from 'node:http'
 import { ConfigError, mutateConfig } from '../config/store.js'
+import { SecretsError } from '../config/secrets.js'
+import { AdapterError } from '../adapters/types.js'
+import { UpdateError } from '../update/check.js'
 import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
 import { reloadRuntime, type GatewayRuntime } from './state.js'
 import { UpstreamError } from './relay.js'
@@ -49,20 +52,21 @@ export function sendError(res: http.ServerResponse, status: number, message: str
 }
 
 /** 顶层兜底的错误→响应映射。此前 jsonRequestBody 的 400（非法 JSON）、readBody 的 413（超限）、
- *  写配置锁超时的 ConfigError、节假日拉取附带的 hint，一旦漏出端点局部 try/catch 都会被
- *  顶层吞成 500「网关内部错误」；这里统一还原为正确状态码与可操作提示。 */
+ *  写配置/密钥锁超时的 ConfigError/SecretsError、adapter 的 AdapterError 一旦漏出端点局部
+ *  try/catch 都会被顶层吞成 500「网关内部错误」；这里统一还原为正确状态码与可操作提示。
+ *  （err-taxonomy：五类业务错误的 hint 收口为类型字段，duck 读 hint 的逃逸口一并移除。） */
 export function errorReply(e: unknown): { status: number; message: string; hint?: string } {
   if (e instanceof UpstreamError) return { status: e.status, message: e.message, hint: e.hint }
-  if (e instanceof ConfigError) return { status: 400, message: e.message }
-  const err = e as Error & { status?: unknown; hint?: unknown }
+  if (e instanceof ConfigError) return { status: 400, message: e.message, hint: e.hint }
+  if (e instanceof SecretsError) return { status: 400, message: e.message, hint: e.hint }
+  if (e instanceof AdapterError) return { status: 400, message: e.message, hint: e.hint }
+  if (e instanceof UpdateError) return { status: 500, message: e.message, hint: e.hint }
+  const err = e as Error & { status?: unknown }
   const msg = err && typeof err.message === 'string' ? err.message : String(e)
-  const hint = err && typeof err.hint === 'string' ? err.hint : undefined
-  // 显式带数值 status 的业务错误（如 413 上限）按原状态透出
+  // 显式带数值 status 的业务错误（如 413 上限）按原状态透出（不带 hint：全仓无非 UpstreamError 的 status+hint 组合）
   if (typeof err?.status === 'number' && err.status >= 400 && err.status <= 599) {
-    return { status: err.status, message: msg, hint }
+    return { status: err.status, message: msg }
   }
-  // 带 hint 但无状态码（如节假日拉取失败）：按上游失败处理
-  if (hint) return { status: 502, message: msg, hint }
   return { status: 500, message: t('网关内部错误：{msg}', 'Gateway internal error: {msg}', { msg }) }
 }
 

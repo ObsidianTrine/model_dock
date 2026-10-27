@@ -191,10 +191,8 @@ export const workbuddyAdapter: HarnessAdapter = {
   async planAttach(opts: AttachOptions, cfg: Config): Promise<PlanResult> {
     if ((await appPresent()) === false) {
       throw new AdapterError(
-        t(
-          '未找到 WorkBuddy 桌面应用（注册表卸载项/常见安装目录都没有）——可能已卸载（~/.workbuddy-ai/ 只是残留配置）；请先安装并启动一次 WorkBuddy 后再接入',
-          'The WorkBuddy desktop app was not found (neither the registry uninstall entries nor common install directories have it) — it may have been uninstalled (~/.workbuddy-ai/ is leftover config only); install and launch WorkBuddy once before attaching'
-        )
+        t('未找到 WorkBuddy 桌面应用（注册表卸载项/常见安装目录都没有）——可能已卸载（~/.workbuddy-ai/ 只是残留配置）', 'The WorkBuddy desktop app was not found (neither the registry uninstall entries nor common install directories have it) — it may have been uninstalled (~/.workbuddy-ai/ is leftover config only)'),
+        t('请先安装并启动一次 WorkBuddy 后再接入', 'Install and launch WorkBuddy once before attaching')
       )
     }
     const existing = await activeFile()
@@ -213,11 +211,8 @@ export const workbuddyAdapter: HarnessAdapter = {
     }
     if (modelIds.length === 0) {
       throw new AdapterError(
-        t(
-          '当前路由（{route}）没有可写入的模型目录。请先在 ModelDock 中应用服务/拉取模型，再重新接入 WorkBuddy',
-          'The current route ({route}) has no model catalog to write. Apply a service / fetch models in ModelDock first, then attach WorkBuddy again',
-          { route: routeName ?? '(未设置)' }
-        )
+        t('当前路由（{route}）没有可写入的模型目录', 'The current route ({route}) has no model catalog to write', { route: routeName ?? '(未设置)' }),
+        t('请先在 ModelDock 中应用服务/拉取模型，再重新接入 WorkBuddy', 'Apply a service / fetch models in ModelDock first, then attach WorkBuddy again')
       )
     }
 
@@ -258,11 +253,8 @@ export const workbuddyAdapter: HarnessAdapter = {
         shape = 'object'
       } else {
         throw new AdapterError(
-          t(
-            '{path} 既不是模型数组也不是 { models: [...] } 结构，已中止；请手工整理后再接入（原文可经 restore 找回旧快照）',
-            '{path} is neither a model array nor a { models: [...] } object; aborted — tidy it up by hand before attaching (the original can be recovered from an older snapshot via restore)',
-            { path: p }
-          )
+          t('{path} 既不是模型数组也不是 { models: [...] } 结构，已中止', '{path} is neither a model array nor a { models: [...] } object; aborted', { path: p }),
+          t('请手工整理后再接入（原文可经 restore 找回旧快照）', 'Tidy it up by hand before attaching (the original can be recovered from an older snapshot via restore)')
         )
       }
     }

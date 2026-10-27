@@ -12,9 +12,12 @@ export type SecretBackend = 'file' | 'keychain' | 'secret-service'
 
 /** secrets.json 损坏 / 不可操作时的可操作报错（对照 store.ts 的 ConfigError） */
 export class SecretsError extends Error {
-  constructor(msg: string) {
+  /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
+  hint?: string
+  constructor(msg: string, hint?: string) {
     super(msg)
     this.name = 'SecretsError'
+    this.hint = hint
   }
 }
 
@@ -329,9 +332,8 @@ interface FileCipher {
 /** secrets.json 写路径锁超时的可操作报错（对照 config 的 ConfigError 用 SecretsError 分流） */
 function secretsLockTimeoutError(lp: string): SecretsError {
   return new SecretsError(
-    t('secrets.json 写锁超时：{lp} 被其他进程长期占用。确认没有其他 modeldock 进程在写密钥后，可删除该 .lock 文件重试',
-      'Timed out acquiring the secrets write lock: {lp} has been held by another process for too long. After confirming no other modeldock process is writing keys, delete the .lock file and retry',
-      { lp })
+    t('secrets.json 写锁超时：{lp} 被其他进程长期占用', 'Timed out acquiring the secrets write lock: {lp} has been held by another process for too long', { lp }),
+    t('确认没有其他 modeldock 进程在写密钥后，可删除该 .lock 文件重试', 'After confirming no other modeldock process is writing keys, delete the .lock file and retry')
   )
 }
 
@@ -347,9 +349,8 @@ export const dpapiCipher: FileCipher = {
     const outs = await dpapiBatch(DPAPI_ENC, entries.map(([, v]) => Buffer.from(v, 'utf8').toString('base64')))
     if (outs.length < entries.length) {
       throw new SecretsError(
-        t('DPAPI 加密表行数与输入不匹配（{got}/{want}），secrets.json 可能未完整加密。请重新写入密钥后重试',
-          'DPAPI encrypt output line count ({got}/{want}) does not match input; secrets.json may be incompletely encrypted. Re-set your keys and retry',
-          { got: String(outs.length), want: String(entries.length) })
+        t('DPAPI 加密表行数与输入不匹配（{got}/{want}），secrets.json 可能未完整加密', 'DPAPI encrypt output line count ({got}/{want}) does not match input; secrets.json may be incompletely encrypted', { got: String(outs.length), want: String(entries.length) }),
+        t('请重新写入密钥后重试', 'Re-set your keys and retry')
       )
     }
     entries.forEach(([k], i) => {
@@ -365,9 +366,8 @@ export const dpapiCipher: FileCipher = {
     const outs = await dpapiBatch(DPAPI_DEC, encs.map(([, v]) => v.slice(DPAPI_PREFIX.length)))
     if (outs.length < encs.length) {
       throw new SecretsError(
-        t('DPAPI 解密表行数与输入不匹配（{got}/{want}），secrets.json 可能已损坏。可备份后删除该文件，各密钥重新设置',
-          'DPAPI decrypt output line count ({got}/{want}) does not match input; secrets.json may be corrupted. Back it up, delete it, and re-set your keys',
-          { got: String(outs.length), want: String(encs.length) })
+        t('DPAPI 解密表行数与输入不匹配（{got}/{want}），secrets.json 可能已损坏', 'DPAPI decrypt output line count ({got}/{want}) does not match input; secrets.json may be corrupted', { got: String(outs.length), want: String(encs.length) }),
+        t('可备份后删除该文件，各密钥重新设置', 'Back it up, delete it, and re-set your keys')
       )
     }
     encs.forEach(([k], i) => {
@@ -438,16 +438,14 @@ async function readSecretsRaw(): Promise<Record<string, string>> {
     parsed = JSON.parse(text)
   } catch (e) {
     throw new SecretsError(
-      t('secrets.json 解析失败：{msg}\n文件路径：{p}\n请备份后删除或修正该文件，各密钥重新设置即可',
-        'Failed to parse secrets.json: {msg}\nPath: {p}\nBack up, then delete or fix this file; re-set your keys afterwards',
-        { msg: (e as Error).message, p: secretsPath() })
+      t('secrets.json 解析失败：{msg}\n文件路径：{p}', 'Failed to parse secrets.json: {msg}\nPath: {p}', { msg: (e as Error).message, p: secretsPath() }),
+      t('请备份后删除或修正该文件，各密钥重新设置即可', 'Back up, then delete or fix this file; re-set your keys afterwards')
     )
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new SecretsError(
-      t('secrets.json 内容不是密钥表对象（当前是{kind}）。文件路径：{p}\n请备份后删除或修正该文件，各密钥重新设置即可',
-        'secrets.json is not a key-table object (got {kind}). Path: {p}\nBack up, then delete or fix this file; re-set your keys afterwards',
-        { kind: Array.isArray(parsed) ? '数组/array' : typeof parsed, p: secretsPath() })
+      t('secrets.json 内容不是密钥表对象（当前是{kind}）。文件路径：{p}', 'secrets.json is not a key-table object (got {kind}). Path: {p}', { kind: Array.isArray(parsed) ? '数组/array' : typeof parsed, p: secretsPath() }),
+      t('请备份后删除或修正该文件，各密钥重新设置即可', 'Back up, then delete or fix this file; re-set your keys afterwards')
     )
   }
   return parsed as Record<string, string>
@@ -482,9 +480,8 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
     if (foreign) {
       const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
       throw new SecretsError(
-        t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密。请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json',
-          '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here. Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json',
-          { k: foreign[0], p: fp })
+        t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密', '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here', { k: foreign[0], p: fp }),
+        t('请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json', 'Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json')
       )
     }
     const hasLegacyPlain = Object.values(raw).some(
@@ -497,9 +494,8 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
       if (e instanceof SecretsError) throw e
       // 解不开（换 Windows 账号/换机器/文件损坏）：给可操作错误，不透传 PowerShell stderr / GCM 英文原文
       throw new SecretsError(
-        t('secrets.json 解密失败（{msg}）：密文可能来自其他 Windows 账号或机器。请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建',
-          'Failed to decrypt secrets.json ({msg}): the ciphertext may come from another Windows account or machine. Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild',
-          { msg: (e as Error).message })
+        t('secrets.json 解密失败（{msg}）：密文可能来自其他 Windows 账号或机器', 'Failed to decrypt secrets.json ({msg}): the ciphertext may come from another Windows account or machine', { msg: (e as Error).message }),
+        t('请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建', 'Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild')
       )
     }
     if (hasLegacyPlain) {
@@ -565,9 +561,8 @@ export async function getSecret(ref: string): Promise<string | null> {
     } catch (e) {
       if (e instanceof SecretsError) throw e
       throw new SecretsError(
-        t('读取系统钥匙环失败（{scheme}:{id}）：{msg}。钥匙环可能被锁定——解锁后重试；或改用 file 存储（config.toml [security] store="file"）后重新设置该 key',
-          'Failed to read the system keyring ({scheme}:{id}): {msg}. The keyring may be locked — unlock it and retry, or switch to file storage (config.toml [security] store="file") and re-set the key',
-          { scheme, id, msg: (e as Error).message })
+        t('读取系统钥匙环失败（{scheme}:{id}）：{msg}', 'Failed to read the system keyring ({scheme}:{id}): {msg}', { scheme, id, msg: (e as Error).message }),
+        t('钥匙环可能被锁定——解锁后重试；或改用 file 存储（config.toml [security] store="file"）后重新设置该 key', 'The keyring may be locked — unlock it and retry, or switch to file storage (config.toml [security] store="file") and re-set the key')
       )
     }
   }

@@ -9,7 +9,7 @@ import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { endpointRisks } from '../gateway/relay.js'
-import { exitWithError } from './shared.js'
+import { exitWithError, exitWithThrown } from './shared.js'
 import { displayPath, modelCatalogCachePath, secretsPath } from '../util/paths.js'
 
 function backendLabel(backend: SecretBackend): string {
@@ -166,8 +166,7 @@ export async function cmdProviderAdd(
       auth_style: authStyle,
     })
   } catch (e) {
-    console.error(c.red(t('✗ {m}', '✗ {m}', { m: (e as Error).message })))
-    process.exit(1)
+    exitWithThrown(e)
   }
   const id = added.providerId
   console.log(c.green(t('✓ provider「{id}」已添加（key 存入 {b}）', '✓ provider "{id}" added (key stored in {b})', { id, b: backendLabel(backend) })))
