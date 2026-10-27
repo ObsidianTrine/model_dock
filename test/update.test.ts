@@ -670,9 +670,16 @@ describe('安装原语', () => {
 
 describe('runUpdate 全链路（mock API + 副作用注入）', () => {
   let cleanup: (() => Promise<void>) | null = null
+  // 全链路要 acquireUpdateLock（update.lock 在 modeldockDir() 下）：必须 fakeHome 隔离，
+  // 否则测试会读写真实 home 的锁与进度文件——机器上任何真实/残留锁都会让套件环境依赖性变红
+  let h: ReturnType<typeof fakeHome>
+  beforeEach(() => {
+    h = fakeHome()
+  })
   afterEach(async () => {
     await cleanup?.()
     cleanup = null
+    h.restore()
   })
 
   it('已是最新：直接返回不下载、不停实例', async () => {
