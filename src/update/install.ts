@@ -4,8 +4,8 @@
  * 三种替换手法：
  * - mac .app 整包交换：unix 允许 rename 运行中目录——旧 .app 改名 .old → 新 .app 落位 → `open` 拉起新版；
  * - unix/win 裸二进制 rename dance：旧 exe 改名 .old（Windows 允许改名运行中 exe，不允许覆盖/删除）→ 新 exe 落位；
- * - win 安装器版：下载 setup.exe 校验后静默安装（/VERYSILENT /NORESTART），更新器先退出释放自身 exe 锁，
- *   由 cmd 串联在安装器退出后拉起托盘。
+ * - win 安装器版：下载 setup.exe 校验后弹出与首次安装一致的 Inno 向导（不静默，失败可见 + /LOG 落盘），
+ *   更新器先退出释放自身 exe 锁；成功由向导 [Run] 拉起托盘，失败/被取消由 cmd `||` 串联拉回旧托盘兜底。
  *
  * 所有副作用（停网关/停托盘/open/spawn）收敛进 InstallDeps：单测注入 mock，绝不触达真实实例。
  */
@@ -131,7 +131,7 @@ export function detectInstallShape(
     const prefix = (lad + path.sep + path.join('Programs', 'ModelDock')).toLowerCase().replace(/\\/g, '/')
     const norm = execPath.toLowerCase().replace(/\\/g, '/')
     if (norm.startsWith(prefix + '/')) return 'win-setup'
-    // 自定义目录兜底：有卸载器指纹即安装器安装；静默安装 /DIR 钉死当前目录，主程序与托盘原位一并更新
+    // 自定义目录兜底：有卸载器指纹即安装器安装；向导 /DIR 预选当前目录，主程序与托盘原位一并更新
     return hasUninstaller ? 'win-setup' : 'win-bare'
   }
   return 'bare'
@@ -196,18 +196,24 @@ async function checkWritable(dir: string): Promise<void> {
   }
 }
 
-/** win 静默安装命令构造（纯函数）：更新器退出后由 cmd 等 setup 退出再拉托盘。trayPath 缺省（构建无托盘）时只装。
- *  installDir 必传 = 当前运行安装目录：/DIR 把更新落点钉死在用户当初选的路径。/VERYSILENT 全程无向导，
- *  用户绝不见路径选择页；不钉 /DIR 时落点靠注册表 UsePreviousAppDir 记忆——注册表被清理软件删掉或
- *  用户搬过安装目录时会失效，静默安装落回 DefaultDirName 制造第二份安装。 */
+/** win 更新安装命令构造（纯函数）：弹出与首次安装一致的 Inno 向导（不静默），/DIR 预选当前安装目录。
+ *  安装成功时托盘由向导收尾页的 [Run] 勾选拉起（skipifsilent 只拦静默安装，向导不受影响）；
+ *  失败或被取消（退出码非 0）时 cmd 串联 `||` 拉回旧托盘兜底——旧托盘 EnsureGateway 把网关带回来，
+ *  用户回到可用的旧版本而不是整机失联，两路互斥不重复弹控制台。trayPath 缺省（构建无托盘）时只装不拉。
+ *  installDir 必传 = 当前运行安装目录：/DIR 把更新落点钉死在用户当初选的路径；不钉 /DIR 时落点靠
+ *  注册表 UsePreviousAppDir 记忆——注册表被清理软件删掉或用户搬过安装目录时会失效，落回
+ *  DefaultDirName 制造第二份安装。setupLogPath 传 /LOG 落盘：静默更新曾三连败于安装中途
+ *  （2026-10-27 用户实证：unins000 已重写而主程序未换，/SUPPRESSMSGBOXES 把错误框也吞了，
+ *  表现为「托盘没了、网关不回、无任何提示」），可见向导 + 落盘日志让失败当面可见、有据可查。 */
 export function buildWinInstallerCommand(
   setupPath: string,
   trayPath: string | null,
-  installDir: string
+  installDir: string,
+  setupLogPath?: string | null
 ): { file: string; args: string[] } {
-  const inner = trayPath
-    ? `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="${installDir}" && start "" "${trayPath}"`
-    : `"${setupPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="${installDir}"`
+  const log = setupLogPath ? ` /LOG="${setupLogPath}"` : ''
+  const setup = `"${setupPath}" /DIR="${installDir}" /CLOSEAPPLICATIONS /NORESTART${log}`
+  const inner = trayPath ? `${setup} || start "" "${trayPath}"` : setup
   // /s /c + 首尾引号：cmd 剥掉外层引号后按内层解析，含空格路径安全；/DIR 引号内 & 等元字符同样受保护
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${inner}"`] }
 }

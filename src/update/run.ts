@@ -10,6 +10,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { c, t } from '../util/index.js'
+import { logsDir } from '../util/paths.js'
 import { VERSION } from '../version.js'
 import {
   UpdateError,
@@ -222,10 +223,17 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
         deps.openApp(appRootFromExecPath(execPath)!)
       } else if (shape === 'win-setup') {
         // setup.exe 不能在更新器还持有自身 exe 锁时等待它跑完：分离拉起 cmd 串联
-        // （安装器静默装完 → 自动拉起新托盘），更新器随即退出释放锁。
+        // （弹出与首次安装一致的向导，装完由 Inno [Run] 勾选拉起新托盘；失败/被取消时 `||`
+        // 拉回旧托盘兜底，不再整机失联），更新器随即退出释放锁。
         // /DIR 钉死当前运行安装目录：更新原位落袋（用户当初选的路径），不依赖注册表记忆。
-        const cmd = buildWinInstallerCommand(file, path.join(path.dirname(execPath), 'ModelDockTray.exe'), path.dirname(execPath))
-        log(c.green(t('✓ 已校验，正在静默安装 v{v}（完成后自动拉起托盘）…', '✓ Verified; installing v{v} silently (the tray relaunches automatically)…', { v: m.version })))
+        // /LOG 落 logs 目录：静默更新曾三连败于安装中途且无任何提示（2026-10-27 用户实证）。
+        const cmd = buildWinInstallerCommand(
+          file,
+          path.join(path.dirname(execPath), 'ModelDockTray.exe'),
+          path.dirname(execPath),
+          path.join(logsDir(), 'update-setup.log')
+        )
+        log(c.green(t('✓ 已校验，正在打开 v{v} 安装向导（与首次安装一致，按提示完成即可）…', '✓ Verified; opening the v{v} install wizard (same as a fresh install — follow the prompts)…', { v: m.version })))
         deps.spawnDetached(cmd.file, cmd.args, { verbatim: true })
         // 安装器成败异步发生，更新器必须立即退出释放自身 exe 锁，无人能替它收尾：
         // 进度停在 restarting（托盘对 10 分钟未刷新的进度文件按残留过期自动收起），不谎报 done

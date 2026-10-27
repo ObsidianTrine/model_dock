@@ -5,6 +5,18 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [1.4.2] - 2026-10-27
+
+The Windows one-click update now shows the install wizard instead of failing silently.
+
+### Improved
+
+- **The update opens a wizard, just like installing**: the Windows one-click update now opens the same install wizard as a fresh install (the install path is pre-selected to your current one); click through and the upgrade is done. The wizard also writes a full log to `update-setup.log` under the logs directory, so problems leave a trail.
+
+### Fixed
+
+- **A failed update no longer takes everything down**: the update used to be fully silent — if the installer died halfway there was no message at all, and the tray and gateway never came back (the tray simply vanished after clicking update). The wizard is now visible with errors shown in person, and when the install is cancelled or fails, the tray automatically brings the gateway back up on the previous version.
+
 ## [1.4.1] - 2026-10-27
 
 The tray menu item takes back the "Lightweight mode" name, aligned with Clash Verge; behavior is unchanged.
@@ -352,6 +364,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.4.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0

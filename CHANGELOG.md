@@ -5,6 +5,18 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.2] - 2026-10-27
+
+Windows 一键更新改为弹出安装向导，失败不再无声无息。
+
+### 改进
+
+- **更新像安装一样弹出向导**：Windows 一键更新现在打开与首次安装相同的安装向导（安装路径已预选为你当前在用的目录），按提示点完即升级完成；向导全程日志会写到 logs 目录的 `update-setup.log`，出问题有据可查。
+
+### 修复
+
+- **更新失败不再整机失联**：此前更新全程静默，安装器中途失败时没有任何提示，托盘和网关也不会回来（表现为点了更新后托盘直接消失）；现在向导可见、错误当面显示，且安装被取消或失败时托盘会自动用原版本把网关拉起来。
+
 ## [1.4.1] - 2026-10-27
 
 托盘菜单项恢复「轻量模式」之名，与 Clash Verge 对齐；功能行为不变。
@@ -352,6 +364,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.4.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0

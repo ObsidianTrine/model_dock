@@ -298,18 +298,25 @@ describe('版本比较与资产选择', () => {
     expect(appRootFromExecPath('/usr/local/bin/modeldock')).toBeNull()
   })
 
-  it('buildWinInstallerCommand：静默参数齐全 + /DIR 钉死安装目录；有托盘时串联拉起，无托盘时只装', () => {
-    const withTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', 'C:\\Programs\\ModelDock\\ModelDockTray.exe', 'D:\\Programs\\ModelDock')
+  it('buildWinInstallerCommand：可见向导（不静默）+ /DIR 钉死 + /LOG 落盘；有托盘时失败兜底拉起，无托盘时只装', () => {
+    const withTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', 'C:\\Programs\\ModelDock\\ModelDockTray.exe', 'D:\\Programs\\ModelDock', 'C:\\logs\\update-setup.log')
     expect(withTray.file).toBe('cmd.exe')
     const joined = withTray.args.join(' ')
-    expect(joined).toContain('/VERYSILENT')
+    // 不再静默：错误框与向导必须可见（静默更新曾三连败于安装中途且零提示，2026-10-27 用户实证）
+    expect(joined).not.toContain('/VERYSILENT')
+    expect(joined).not.toContain('/SUPPRESSMSGBOXES')
     expect(joined).toContain('/NORESTART')
+    expect(joined).toContain('/CLOSEAPPLICATIONS')
+    expect(joined).toContain('/LOG="C:\\logs\\update-setup.log"')
     expect(joined).toContain('setup.exe')
     expect(joined).toContain('ModelDockTray.exe')
     // 更新落点必须显式钉死在用户当初选的安装目录（不依赖注册表 UsePreviousAppDir 记忆）
     expect(joined).toContain('/DIR="D:\\Programs\\ModelDock"')
+    // 失败/被取消时 `||` 拉回旧托盘兜底；成功路径由向导 [Run] 勾选拉起，两路互斥
+    expect(joined).toContain('|| start')
     const noTray = buildWinInstallerCommand('C:\\tmp\\setup.exe', null, 'D:\\Programs\\ModelDock')
     expect(noTray.args.join(' ')).not.toContain('start')
+    expect(noTray.args.join(' ')).not.toContain('/LOG=')
     expect(noTray.args.join(' ')).toContain('/DIR="D:\\Programs\\ModelDock"')
   })
 })
@@ -726,7 +733,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
   })
 
   // win-setup 安装器链路只认 Windows 形态（cmd 串联、LOCALAPPDATA 目录判定）
-  it.skipIf(process.platform !== 'win32')('win-setup 形态全链路：静默安装器分离拉起；进度停在 restarting 不谎报 done', async () => {
+  it.skipIf(process.platform !== 'win32')('win-setup 形态全链路：安装向导分离拉起（不静默）；进度停在 restarting 不谎报 done', async () => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
     const h = fakeHome()
     const prevLocalAppData = process.env.LOCALAPPDATA
@@ -747,11 +754,13 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(r.updated).toBe(true)
       expect(calls.stopGateway).toBe(1)
       expect(calls.stopTray).toBe(1)
-      // 安装器经 cmd 串联分离拉起（更新器随即退出释放自身 exe 锁）；静默参数齐全，托盘路径指向安装目录
+      // 安装器经 cmd 串联分离拉起（更新器随即退出释放自身 exe 锁）；可见向导参数齐全，托盘路径指向安装目录
       expect(calls.detached).toHaveLength(1)
       expect(calls.detached[0].file).toBe('cmd.exe')
       const cmdLine = calls.detached[0].args.join(' ')
-      expect(cmdLine).toContain('/VERYSILENT')
+      expect(cmdLine).not.toContain('/VERYSILENT')
+      expect(cmdLine).toContain('/LOG=')
+      expect(cmdLine).toContain('|| start')
       expect(cmdLine).toContain(setupName)
       expect(cmdLine).toContain('ModelDockTray.exe')
       // 落点钉死当前安装目录（= 用户当初选的路径），不依赖注册表记忆
@@ -774,7 +783,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
 
   // 自定义安装目录（installer.iss 允许自选，用户实证装到 D:\Programs\ModelDock）：
   // 路径前缀判定不到，全靠 execPath 旁的 unins000.exe 指纹认出安装器安装——漏了它托盘就永不更新
-  it.skipIf(process.platform !== 'win32')('win-setup 自定义目录：unins000.exe 指纹兜底，仍走静默安装器链路', async () => {
+  it.skipIf(process.platform !== 'win32')('win-setup 自定义目录：unins000.exe 指纹兜底，仍走安装向导链路', async () => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
     const h = fakeHome()
     try {
@@ -798,7 +807,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(calls.detached).toHaveLength(1)
       expect(calls.detached[0].file).toBe('cmd.exe')
       const cmdLine = calls.detached[0].args.join(' ')
-      expect(cmdLine).toContain('/VERYSILENT')
+      expect(cmdLine).not.toContain('/VERYSILENT')
       expect(cmdLine).toContain(setupName)
       expect(cmdLine).toContain(path.join(path.dirname(execPath), 'ModelDockTray.exe'))
       // /DIR 钉死自定义目录：更新原位落袋，绝不落回默认目录制造重复安装
