@@ -110,6 +110,13 @@ export function readRecordedArgv(text: string): string[] | null {
   }
 }
 
+/** 登记的启动命令是否失效：argv[0] 不存在，或非 -- 开头的参数指向的文件已不存在
+ *  （nvm 升级 / 二进制移动后旧路径失效，自启会静默失败，必须能探出来）。
+ *  纯函数（只做 fs.existsSync，无 spawn），autostartStatus 与 doctor 共用。 */
+export function recordedArgvStale(argv: string[]): boolean {
+  return !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
+}
+
 const xmlEscape = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
 export function launchdPlistXml(argv: string[], workDir: string, outLog: string, errLog: string): string {
@@ -223,7 +230,7 @@ export function autostartStatus(): AutostartStatus | null {
   } else if (kind === 'systemd') {
     loaded = execOk('systemctl', ['--user', 'is-enabled', `${serviceLabel()}.service`]).ok
   }
-  const stale = !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
+  const stale = recordedArgvStale(argv)
   return { kind, installed, loaded, stale, file, argv }
 }
 

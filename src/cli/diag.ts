@@ -1,14 +1,24 @@
 import fs from 'node:fs'
 import net from 'node:net'
+import path from 'node:path'
 import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
-import { getSecret, verifySecretsStore } from '../config/secrets.js'
+import type { Config } from '../config/types.js'
+import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
-import { autostartStatus, gatewayDaemonArgs } from '../autostart.js'
+import {
+  autostartStatus,
+  gatewayDaemonArgs,
+  readRecordedArgv,
+  recordedArgvStale,
+  serviceFilePath,
+  uninstallAutostart,
+} from '../autostart.js'
 import { autostartLine } from './gatewaycmd.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, exitWithError, spawnDaemonAndWait } from './shared.js'
 import { resolveClientGatewayPort } from '../ops.js'
-import { modeldockDir } from '../util/paths.js'
+import { modeldockDir, secretsPath } from '../util/paths.js'
+import { readTextIfExists } from '../util/fsx.js'
 
 export async function cmdStatus(): Promise<void> {
   const cfg = await loadCfg()
@@ -66,7 +76,7 @@ export type DoctorLevel = 'ok' | 'warn' | 'bad' | 'info'
 
 export interface DoctorFix {
   /** 稳定 kind（--json 消费方按它识别修复动作） */
-  kind: 'start-gateway' | 'model-refresh' | 'attach' | 'set-proxy' | 'remove-dangling-profiles'
+  kind: 'start-gateway' | 'model-refresh' | 'attach' | 'set-proxy' | 'remove-dangling-profiles' | 'autostart-cleanup'
   /** 修复对象（provider/harness id 或 profile 名单） */
   target?: string
   /** 需用户把关的修复（依赖外部环境/动第三方状态）：无 --yes 时先确认。attach 例外——自身 diff 确认流程已把关 */
@@ -124,6 +134,46 @@ function probeFsWatch(): boolean {
   }
 }
 
+/** 服务文件里「指向 dev 沙箱 home（~/.modeldock-dev）」的路径片段（CORRECT-05 残留特征：
+ *  旧版沙箱曾把生产 label 自启写进真机）。抓取含该片段的连续非空白/引号段用于展示，
+ *  分隔符兼容 [\\/]（Windows 反斜杠）；`(?=[\\/]|$)` 防止误匹配 .modeldock-dev-xxx 这类名字。 */
+const SANDBOX_REF_RE = /[^\s"'<>|]*[\\/]\.modeldock-dev(?=[\\/]|$)[^\s"'<>|]*/
+
+/** 跨机密文引用检测（REVIEW-18 语义，doctor 项 secrets.foreign_cipher）。返回受影响引用列表（空=无）。
+ *  检测两层：① secrets.json 原始表内出现非本平台加密前缀的密文（跨机拷贝 home 残留，本机解不开）；
+ *  ② provider key_ref 内嵌 enc: 密文、或指向 ① 的条目（正常只存引用，密文只该在 secrets.json）。
+ *  直接读原始文件，不触发解密；secrets.json 缺失/损坏返回 []——损坏由 secrets.store 项另行报告。 */
+async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
+  const nativePrefix = pickFileCipher().prefix
+  const foreignIds = new Set<string>()
+  const hits: string[] = []
+  try {
+    const text = await readTextIfExists(secretsPath())
+    if (text) {
+      const parsed: unknown = JSON.parse(text)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
+          if (typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(nativePrefix)) {
+            foreignIds.add(k)
+            hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
+          }
+        }
+      }
+    }
+  } catch {
+    /* 解析失败：secrets.json 损坏由 secrets.store 项报告，此处不重复 */
+  }
+  for (const [pid, p] of Object.entries(cfg.providers)) {
+    if (p.key_ref.includes('enc:mach:') || p.key_ref.includes('enc:dpapi:')) {
+      hits.push(`${pid}(key_ref)`)
+      continue
+    }
+    const ref = parseKeyRef(p.key_ref)
+    if (ref.scheme === 'file' && foreignIds.has(ref.id)) hits.push(`${pid}(key_ref→${ref.id})`)
+  }
+  return hits
+}
+
 export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<DoctorFinding[]> {
   const F: DoctorFinding[] = []
   const ok = (id: string, msg: string) => F.push({ id, level: 'ok', msg })
@@ -150,6 +200,18 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     }
   } catch {
     /* 验证自身异常不拦截：交由逐条 key 检查暴露 */
+  }
+
+  // 跨机密文引用（REVIEW-18）：file 后端密文绑定原机器/平台（win DPAPI / linux machine-id），
+  // 跨机拷贝 home 后本机解不开、发上游必 401。在通用 secrets.store 报错之上点名受影响引用与服务，
+  // 提示对相应服务重新 set-key（--json 消费方按 id=secrets.foreign_cipher 识别）
+  const foreignRefs = await detectForeignCipherRefs(cfg)
+  if (foreignRefs.length) {
+    bad(
+      'secrets.foreign_cipher',
+      t('此配置含他机密文引用（{list}）：密文绑定其他机器/平台，本机无法解密', 'This config contains cross-machine ciphertext references ({list}): the ciphertext is bound to another machine or platform and cannot be decrypted here', { list: foreignRefs.join(', ') }),
+      t('对相应服务重新设置密钥：modeldock provider set-key <服务 id>；不要直接把别机的 secrets.json 拷到本机', "Re-set the key for each affected service: modeldock provider set-key <provider id>; do not copy another machine's secrets.json here")
+    )
   }
 
   const live = await gatewayLive()
@@ -197,6 +259,50 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
       t('配置目录监听不可用（fs.watch 异常）：网关热加载失效，改配置不会自动生效', 'Config-dir watching is unavailable (fs.watch error): gateway hot-reload is broken; config changes will not apply automatically'),
       t('先重启网关试试；仍不行就改配置后手动热加载（POST /_modeldock/reload）或重启网关', 'Restart the gateway first; if it persists, reload manually after changes (POST /_modeldock/reload) or restart the gateway')
     )
+  }
+
+  // 自启登记核查（known-issues CORRECT-05 遗留清理）：只读服务文件内容判定，不 spawn launchctl/systemctl。
+  // 登记指向沙箱路径 = 旧版沙箱曾把自启写进真机的残留；指向已不存在的文件 = nvm 升级/二进制移动后
+  // 自启静默失败。沙箱上下文（FAKE_HOME）下 serviceFilePath 已重定向，只核沙箱自身登记，且豁免自引用
+  // （dev 沙箱自己的服务文件引用自家路径属正常）；--fix 走 uninstallAutostart，confirm 把关 + 删前
+  // 由本项 msg/hint 打印将删内容（登记文件与指向），不自动删任何数据。
+  const svcFile = serviceFilePath()
+  if (svcFile && fs.existsSync(svcFile)) {
+    let text = ''
+    try {
+      text = fs.readFileSync(svcFile, 'utf8')
+    } catch {
+      /* 读不了按无登记内容处理，退当前运行时 argv */
+    }
+    const argv = readRecordedArgv(text) ?? gatewayDaemonArgs()
+    const fakeHomeRoot = process.env.MODELRDOCK_FAKE_HOME ? path.resolve(process.env.MODELRDOCK_FAKE_HOME) : null
+    const sandboxHit = fakeHomeRoot
+      ? argv.find((a) => SANDBOX_REF_RE.test(a) && !a.startsWith(fakeHomeRoot))
+      : SANDBOX_REF_RE.exec(text)?.[0]
+    const autostartCleanup: DoctorFix = {
+      kind: 'autostart-cleanup',
+      confirm: true,
+      label: t('移除开机自启登记（{f}）', 'Remove the autostart entry ({f})', { f: svcFile }),
+      run: async () => (await uninstallAutostart()).removed,
+    }
+    if (sandboxHit) {
+      warn(
+        'autostart.residue',
+        t('开机自启登记指向沙箱路径（{a}）：多为旧版沙箱自启残留，下次登录会拉起失效实例', 'The autostart entry points into a sandbox path ({a}): likely residue from an old sandbox install; it will launch a broken instance at next login', { a: sandboxHit }),
+        t('确认是残留后用 --fix 移除（删除登记文件并卸载服务），或手动 modeldock gateway uninstall', 'Remove it with --fix after confirming it is residue (deletes the entry file and unloads the service), or run modeldock gateway uninstall manually'),
+        autostartCleanup
+      )
+    } else if (recordedArgvStale(argv)) {
+      const staleArg = fs.existsSync(argv[0]) ? (argv.slice(1).find((a) => !a.startsWith('--') && !fs.existsSync(a)) ?? argv[0]) : argv[0]
+      warn(
+        'autostart.residue',
+        t('开机自启登记的启动命令指向不存在的文件（{a}）：下次登录自启将静默失败', 'The autostart start command points at missing files ({a}): autostart will silently fail at next login', { a: staleArg }),
+        t('重装自启：modeldock gateway uninstall 后再 modeldock gateway install；不再需要可用 --fix 移除登记', 'Reinstall it: modeldock gateway uninstall then modeldock gateway install; or remove the entry with --fix if no longer needed'),
+        autostartCleanup
+      )
+    } else {
+      ok('autostart.entry', t('开机自启登记有效（{f}）', 'Autostart entry is healthy ({f})', { f: svcFile }))
+    }
   }
 
   // 悬空 profile：引用的 provider 不存在（active_profile 的在下方链路体检里报告，这里只收其余）。
@@ -249,7 +355,13 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
             if (key) ok('provider.key', t('上游 key 可读取（{k}）', 'Upstream key is readable ({k})', { k: maskSecret(key) }))
             else bad('provider.key', t('上游 key 不可用（key_ref={r}）', 'Upstream key is unavailable (key_ref={r})', { r: provider.key_ref }), `modeldock provider set-key ${profile.provider}`)
           } catch (e) {
-            bad('provider.key', t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }))
+            // 读取失败（钥匙环被锁/暂时不可用）≠ 未配置密钥：前者是瞬时故障、解锁即恢复，
+            // 报 warn + 解锁 hint，不与缺失条目（bad + set-key）混同（REVIEW-19 语义对齐）
+            warn(
+              'provider.key',
+              t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }),
+              t('这是读取故障（如钥匙环被锁定），与未配置密钥不同：解锁钥匙环后重跑 modeldock doctor 即可恢复；反复出现可改用 file 存储后重新 set-key', 'This is a read failure (e.g. a locked keyring), not a missing key: unlock the keyring and re-run modeldock doctor to recover; if it keeps happening, switch to file storage and re-set the key')
+            )
           }
         }
         const reach = await upstreamReachable(provider.base_url, provider.proxy)

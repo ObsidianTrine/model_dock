@@ -1,8 +1,12 @@
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
 import { cmdDoctor, cmdStatus, cmdTest, runFixes, type DoctorFinding } from '../src/cli/diag.js'
-import { verifySecretsStore } from '../src/config/secrets.js'
+import { __testSetExternalReader, invalidateSecretsCache, verifySecretsStore } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
+import { autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsVbs } from '../src/autostart.js'
 
 // cmdDoctor/cmdStatus 是只读体检壳：无网络路径（上游可达性探测指向本地拒绝端口，瞬时失败）。
 // cmdEnv/cmdTest 完整链会经 resolveClientGatewayPort 无条件探测 8687（开发机=生产实例，红线），
@@ -150,6 +154,189 @@ describe('cmdDoctor --json', () => {
       const j = JSON.parse(logs.join('\n')) as { findings: { id: string; level: string }[] }
       const f = j.findings.find((x) => x.id === 'gateway.port_busy')
       expect(f?.level).toBe('warn')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+/** --json 输出解析（capture 期内最近一次 cmdDoctor --json 的 logs） */
+function jsonFindings(): {
+  version: number
+  ok: boolean
+  findings: { id: string; level: string; msg: string; hint?: string; fix?: { kind: string; target?: string; confirm: boolean } }[]
+} {
+  return JSON.parse(logs.join('\n'))
+}
+
+/** 按当前平台在沙箱内写一份自启服务文件（登记 argv 经 ARGV_MARK 随文件落盘，doctor 据此核查）；
+ *  serviceFilePath 在 FAKE_HOME 下已重定向，落点全在沙箱内 */
+function seedAutostartEntry(home: string, argv: string[]): string {
+  const file = serviceFilePath()
+  if (!file) throw new Error('autostart not supported on this platform')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const workDir = path.join(home, '.modeldock')
+  const outLog = path.join(workDir, 'logs', 'service-out.log')
+  const errLog = path.join(workDir, 'logs', 'service-err.log')
+  const content =
+    autostartKind() === 'launchd'
+      ? launchdPlistXml(argv, workDir, outLog, errLog)
+      : autostartKind() === 'systemd'
+        ? systemdUnitIni(argv, workDir, outLog, errLog)
+        : windowsVbs(argv)
+  fs.writeFileSync(file, content, 'utf8')
+  return file
+}
+
+describe('doctor 沙箱自启残留核查（CORRECT-05）', () => {
+  it('登记指向沙箱路径：warn + autostart-cleanup 修复元数据（confirm 把关）', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      // 残留形态：登记命令指向 dev 沙箱 home（~/.modeldock-dev）内路径，且不在当前测试沙箱内（非自引用）
+      const ghost = path.join(os.homedir(), '.modeldock-dev', '.modeldock', 'ghost-entry')
+      seedAutostartEntry(h.home, [process.execPath, ghost, '--sea-gateway'])
+      await cmdDoctor({ json: true }, noProbe)
+      const j = jsonFindings()
+      const f = j.findings.find((x) => x.id === 'autostart.residue')
+      expect(f?.level).toBe('warn')
+      expect(f?.msg).toContain('沙箱路径')
+      expect(f?.msg).toContain('.modeldock-dev')
+      expect(f?.fix?.kind).toBe('autostart-cleanup')
+      expect(f?.fix?.confirm).toBe(true) // 删用户登记必须确认，不自动执行
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('登记指向失效路径：warn；--fix 经确认移除登记文件', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 } // 显式 189xx：防 start-gateway 兜底路径碰默认端口
+      })
+      const file = seedAutostartEntry(h.home, [path.join(h.home, 'no-such-node-xyz'), '--sea-gateway'])
+      await cmdDoctor({ json: true }, noProbe)
+      const f = jsonFindings().findings.find((x) => x.id === 'autostart.residue')
+      expect(f?.level).toBe('warn')
+      expect(f?.msg).toContain('不存在的文件')
+      // startGateway 必须注入：gateway.down 修复 confirm=false 会自动执行，真跑会 spawn daemon
+      await cmdDoctor({ fix: true }, { ...noProbe, startGateway: async () => 'http://127.0.0.1:18941', confirm: async () => true })
+      expect(fs.existsSync(file)).toBe(false) // 确认通过 → 登记文件已删（删前内容已由 msg/hint 打印）
+      expect(logs.join('\n')).toContain('移除开机自启登记')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('登记健康：ok，不报残留', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      seedAutostartEntry(h.home, [process.execPath, '--sea-gateway'])
+      await cmdDoctor({ json: true }, noProbe)
+      const j = jsonFindings()
+      expect(j.findings.find((x) => x.id === 'autostart.entry')?.level).toBe('ok')
+      expect(j.findings.find((x) => x.id === 'autostart.residue')).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('doctor 钥匙环故障 vs 条目缺失区分（REVIEW-19）', () => {
+  it('钥匙环读取失败：warn + 解锁 hint，不与未配置密钥混同', async () => {
+    const h = fakeHome()
+    __testSetExternalReader(async () => {
+      throw new Error('keyring locked (test)')
+    })
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'keychain:doc-kc-fail' }
+        c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+        c.active_profile = 'main'
+      })
+      await cmdDoctor({ json: true }, noProbe)
+      const f = jsonFindings().findings.find((x) => x.id === 'provider.key')
+      expect(f?.level).toBe('warn') // 读取故障是瞬时态，降为 warn（条目缺失才是 bad）
+      expect(f?.msg).toContain('上游 key 读取失败')
+      expect(f?.hint).toContain('与未配置密钥不同')
+      expect(f?.hint).toContain('解锁')
+    } finally {
+      __testSetExternalReader() // 还原真实读取器，避免污染同进程其他用例
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+
+  it('条目缺失：仍报 bad + set-key hint（与读取失败区分）', async () => {
+    const h = fakeHome()
+    __testSetExternalReader(async () => null) // 「确认不存在」语义（对应真实后端 44/空输出）
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'keychain:doc-kc-missing' }
+        c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+        c.active_profile = 'main'
+      })
+      await cmdDoctor({ json: true }, noProbe)
+      const f = jsonFindings().findings.find((x) => x.id === 'provider.key')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('上游 key 不可用')
+      expect(f?.hint).toContain('set-key')
+    } finally {
+      __testSetExternalReader()
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+})
+
+describe('doctor 跨机密文引用（REVIEW-18）', () => {
+  it('secrets.json 含异平台前缀密文 + key_ref 内嵌密文：报 bad 并点名服务', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k1' }
+        c.providers['pv2'] = { name: 'PV2', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'plain:enc:dpapi:QUJD' }
+        c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+        c.active_profile = 'main'
+      })
+      // 异平台前缀按平台取补集：linux（mach 为本机前缀）用 dpapi，其余平台用 mach——保证任何平台都是「非本平台前缀」
+      const foreignPrefix = process.platform === 'linux' ? 'enc:dpapi:' : 'enc:mach:'
+      fs.mkdirSync(path.join(h.home, '.modeldock'), { recursive: true })
+      fs.writeFileSync(path.join(h.home, '.modeldock', 'secrets.json'), JSON.stringify({ k1: foreignPrefix + 'AAAA' }), 'utf8')
+      await cmdDoctor({ json: true }, noProbe)
+      const f = jsonFindings().findings.find((x) => x.id === 'secrets.foreign_cipher')
+      expect(f?.level).toBe('bad') // 密文本机解不开、发上游必 401
+      expect(f?.msg).toContain('他机密文引用')
+      expect(f?.msg).toContain('k1') // ① secrets 表内异平台密文条目
+      expect(f?.msg).toContain('pv(key_ref→k1)') // ② key_ref 指向该条目的服务被点名
+      expect(f?.msg).toContain('pv2(key_ref)') // ② key_ref 内嵌密文的服务被点名
+      expect(f?.hint).toContain('set-key')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('无跨机密文（密钥表为空）：不误报', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'env:MD_DOC_KEY' }
+        c.profiles['main'] = { name: 'main', provider: 'pv' }
+        c.active_profile = 'main'
+      })
+      await cmdDoctor({ json: true }, noProbe)
+      expect(jsonFindings().findings.find((x) => x.id === 'secrets.foreign_cipher')).toBeUndefined()
     } finally {
       h.restore()
     }
