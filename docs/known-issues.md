@@ -62,7 +62,7 @@
 | XPLAT-03 | P2 | `src/util/paths.ts:38` | displayPath 在 Windows 永不缩写 ~ | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-04 | P2 | `src/config/secrets.ts:119` | darwin keychain 经 argv 传密钥，ps 可见 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | XPLAT-05 | P2 | `src/cli/basic.ts:44` | config edit 引号只处理空白，cmd 元字符截断（推测） | ☑ 已修（2026-10-12 @0caad3a） |
-| XPLAT-06 | P2 | `src/autostart.ts:36-39` | Windows VBS 自启长期弃用风险 | ☐ 未修 |
+| XPLAT-06 | P2 | `src/autostart.ts:36-39` | Windows VBS 自启长期弃用风险 | ☑ 已修（2026-10-28，注册表 Run 键 + 自分离隐藏启动，见 §三） |
 | XPLAT-07 | P2 | `src/adapters/codex.ts:69` | bootstrap.path 顶层求值，违反惰性约定 | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-08 | P2 | `src/adapters/dsh.ts:236` | label 写死中文未走 t() | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☐ 未修 |
@@ -301,6 +301,7 @@
 **XPLAT-06（P2）Windows 自启用 VBS，长期有弃用风险**
 - 位置：`src/autostart.ts:36-39,166-171`：`%APPDATA%\...\Startup\modeldock-gateway.vbs` + WScript.Shell.Run。实现本身正确（隐藏窗口、argv base64 落档、卸载对称），但 Microsoft 正把 VBScript 转 Feature-on-Demand（Win11 24H2 起可移除，推测未来默认关闭），部分企业策略禁 Startup VBS。
 - 备选：注册表 Run 键或 schtasks（后者才有崩溃拉起）。现状注释已如实标注"无崩溃拉起"，属信息项，择机迁移。
+- 2026-10-28 已修（T10 任务卡，Run 键方向）：自启改写 HKCU Run 键（`reg add/query/delete` 子进程），安装时顺带清理旧 VBS、卸载对称清两种形态。schtasks 实测否决：未提权 `schtasks /create /sc onlogon` 报「拒绝访问」（ONLOGON/ONSTART 触发器需管理员），装个自启不该弹 UAC。黑窗问题：Run 键直启控制台程序会常驻黑窗，登记命令带 `--autostart` 标记，由 cli.ts 以 windowsHide（CREATE_NO_WINDOW）分离重拉 daemon、父进程即退——黑窗只存活亚秒级（纯 JS，无 native）。沙箱（MODELRDOCK_FAKE_HOME）不碰真机注册表，Run 键值落沙箱内镜像文件（兼作 overview 免 spawn 在场判断）。崩溃拉起维持 Windows 平台缺口（与 VBS 现状同等能力，schtasks 方向因权限面大弃用）。
 
 **XPLAT-07（P2）codex.ts bootstrap.path 顶层求值**
 - 位置：`src/adapters/codex.ts:69`：`bootstrap: { path: configFile(), content: '' }` 模块加载即求值——是全部适配器中唯一违例（claude-code.ts:99、dsh.ts:254、opencode.ts:24、mimo-code.ts:55 均传函数；types.ts:91 明文约定惰性求值）。

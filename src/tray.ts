@@ -5,7 +5,7 @@ import { gatewayLive } from './gateway/state.js'
 
 /** 托盘拉起。打包形态托盘二进制随 app 分发在主程序旁（mac `ModelDockTray` / win `ModelDockTray.exe`），
  *  npm / dev 形态没有，按「文件是否存在」决定是否拉起。
- *  开机自启（Windows VBS / LaunchAgent / systemd）只登记网关 daemon（autostart.ts 的
+ *  开机自启（Windows 注册表 Run 键 / LaunchAgent / systemd）只登记网关 daemon（autostart.ts 的
  *  gatewayDaemonArgs），daemon 就绪后由 spawnTrayWhenGatewayReady() 在此补拉——这是自启场景
  *  托盘唯一的拉起点（双击场景由 cli.ts launchGui 自己拉，daemon 再拉会被托盘单实例挡掉）。 */
 

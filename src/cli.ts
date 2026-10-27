@@ -14,20 +14,23 @@ function isSEA(): boolean {
 
 // SEA 网关模式：独立可执行文件自身作为 daemon 子进程时，直接启动网关
 if (process.argv.includes('--sea-gateway')) {
-  Promise.all([import('./gateway/main.js'), import('./config/lang.js')])
-    .then(async ([{ startForeground }, { initLang }]) => {
-      await initLang()
-      const idx = process.argv.indexOf('--port')
-      const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
-      // 自启（VBS / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
-      // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
-      void spawnTrayWhenGatewayReady()
-      return startForeground(port)
-    })
-    .catch((e) => {
-      console.error(t('✗ 网关启动失败: {msg}', '✗ Failed to start gateway: {msg}', { msg: (e as Error).message }))
-      process.exit(1)
-    })
+  void (async () => {
+    // Windows 注册表 Run 键自启：Explorer 直启控制台程序会常驻黑窗，先分离重拉隐藏 daemon
+    // （Run 键登记的命令带 --autostart 标记；重拉失败或手动运行时照常前台启动）
+    const { relaunchHiddenIfAutostart } = await import('./autostart.js')
+    if (await relaunchHiddenIfAutostart()) return
+    const [{ startForeground }, { initLang }] = await Promise.all([import('./gateway/main.js'), import('./config/lang.js')])
+    await initLang()
+    const idx = process.argv.indexOf('--port')
+    const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
+    // 自启（Run 键 / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
+    // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
+    void spawnTrayWhenGatewayReady()
+    return startForeground(port)
+  })().catch((e) => {
+    console.error(t('✗ 网关启动失败: {msg}', '✗ Failed to start gateway: {msg}', { msg: (e as Error).message }))
+    process.exit(1)
+  })
 } else if (isSEA() && process.argv.length <= 2) {
   // SEA 双击启动：后台网关 + 打开浏览器
   launchGui().catch((e) => {
