@@ -246,6 +246,8 @@ modeldock reset --deep                   # 清理数据：上面全部 + 删日�
 
 ## 7. 配置文件速查（~/.modeldock/）
 
+每个配置键的类型、默认值与语义，见 **[config.toml 配置参考](config-reference.md)**（本节只列常用形态）。
+
 ```
 config.toml    主配置：providers / profiles / harness / adapter_packs / gateway
 secrets.json   key 存储（macOS 用系统 Keychain、Windows 用 DPAPI 加密、Linux 用 Secret Service；仅无钥匙环时回退 0600 明文；存量明文启动自动迁移）
