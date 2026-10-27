@@ -313,9 +313,46 @@ export async function withFileLock<T>(
  *  请求下与转发争 IO；常驻流把每条开销降为一次 write，且同文件写入严格有序。写入错误静默，
  *  流 destroyed 后由下一条写入按需重建。调用方需保证目录已存在（先 ensureDir/mkdirSync）。 */
 const APPEND_STREAM_CAP = 8
+/** 空闲刷盘阈值：一条流超过该时长没有新写入就 end 掉（缓冲随关流强制落盘），下一条写入按需重建。
+ *  Windows 的 gateway stop 是 TerminateProcess（无信号语义），main.ts 的 cleanup/drainAppendStreams
+ *  走不到，不关流的话最后缓冲的尾部日志随进程一起丢；空闲即关把最坏丢失窗口从「直到下次 stop」
+ *  压到本阈值秒级，且收益独立于停机路径（崩溃/被杀同样受益）。 */
+const APPEND_IDLE_MS = 3000
 const appendStreams = new Map<string, fs.WriteStream>()
+const appendStreamLastUse = new Map<string, number>()
+let appendIdleTimer: NodeJS.Timeout | undefined
+
+/** 周期扫描流池，把空闲超阈值的流关掉刷盘。unref 定时器：不阻止进程自然退出。 */
+function appendIdleSweep(): void {
+  const now = Date.now()
+  for (const [file, ws] of appendStreams) {
+    if (now - (appendStreamLastUse.get(file) ?? 0) < APPEND_IDLE_MS) continue
+    // 先摘出 map 再 end：appendLine 按 map 命中复用流，摘除后并发到来的写入会走重建分支，
+    // 不会命中一个已 end 的流（write after end 会静默丢行）
+    appendStreams.delete(file)
+    appendStreamLastUse.delete(file)
+    ws.end()
+  }
+}
+
+function ensureAppendIdleTimer(): void {
+  if (appendIdleTimer) return
+  appendIdleTimer = setInterval(appendIdleSweep, 1000)
+  appendIdleTimer.unref?.()
+}
+
+/** 停掉空闲刷盘定时器并清空 lastUse 簿记（关停/清理路径收尾用） */
+function stopAppendIdleTimer(): void {
+  if (appendIdleTimer) {
+    clearInterval(appendIdleTimer)
+    appendIdleTimer = undefined
+  }
+  appendStreamLastUse.clear()
+}
 
 export function appendLine(file: string, line: string): void {
+  appendStreamLastUse.set(file, Date.now())
+  ensureAppendIdleTimer()
   const existing = appendStreams.get(file)
   if (existing && !existing.destroyed) {
     existing.write(line)
@@ -328,6 +365,7 @@ export function appendLine(file: string, line: string): void {
       const oldestKey = appendStreams.keys().next().value as string
       const oldest = appendStreams.get(oldestKey)
       appendStreams.delete(oldestKey)
+      appendStreamLastUse.delete(oldestKey)
       oldest?.end()
     }
     ws.write(line)
@@ -336,6 +374,7 @@ export function appendLine(file: string, line: string): void {
 
 /** 关闭全部常驻流：临时目录删除前必须调用——Windows 上目录内有本进程未关的 fd 会 EBUSY。 */
 export function closeAppendStreams(): void {
+  stopAppendIdleTimer()
   for (const ws of appendStreams.values()) ws.end()
   appendStreams.clear()
 }
@@ -347,6 +386,7 @@ export async function closeAppendStream(file: string, timeoutMs = 1000): Promise
   const ws = appendStreams.get(file)
   if (!ws) return
   appendStreams.delete(file)
+  appendStreamLastUse.delete(file)
   await Promise.race([
     new Promise<void>((resolve) => {
       if (ws.destroyed || ws.closed) return resolve()
@@ -364,6 +404,7 @@ export async function closeAppendStream(file: string, timeoutMs = 1000): Promise
  *  日志行——appendFile 时代每条独立落盘不会有此问题，属常驻流引入的持久性缺口。带超时兜底
  *  防止个别流挂住阻塞关停（超时即放弃，最坏退化为丢掉尾部日志）。 */
 export async function drainAppendStreams(timeoutMs = 1000): Promise<void> {
+  stopAppendIdleTimer()
   const streams = [...appendStreams.values()]
   appendStreams.clear()
   if (!streams.length) return
