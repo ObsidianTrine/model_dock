@@ -14,7 +14,8 @@ import {
   secretsLockPath,
   invalidateSecretsCache,
 } from '../src/config/secrets.js'
-import { configPath, secretsPath } from '../src/util/paths.js'
+import { configPath, secretsPath, backupsDir } from '../src/util/paths.js'
+import { listSnapshots } from '../src/backup/snapshot.js'
 import { atomicWrite, readTextIfExists, acquireFileLock, withFileLock, sleep } from '../src/util/fsx.js'
 
 afterEach(() => {
@@ -534,6 +535,26 @@ describe('config 形状守卫与密文守卫（2026-10 复审 P2）', () => {
       await expect(getSecret('file:a')).rejects.toBeInstanceOf(SecretsError)
     } finally {
       __testSetDpapiBatch()
+      h.restore()
+    }
+  })
+})
+
+describe('config 版本迁移写盘前快照（CORRECT-03）', () => {
+  it('磁盘 version 落后时首次写盘先快照 config.toml；迁移完成后的常规写不再触发', async () => {
+    const h = fakeHome()
+    try {
+      const legacy = '# 手写配置' + String.fromCharCode(92) + 'n[providers.p0]' + String.fromCharCode(92) + 'nname = "旧"' + String.fromCharCode(92) + 'n'
+      await atomicWrite(configPath(), legacy, 0o600)
+      await mutateConfig((cfg) => { cfg.active_profile = 'x' })
+      const pre = (await listSnapshots('config')).filter((s) => s.operation === 'pre-migrate')
+      expect(pre).toHaveLength(1)
+      expect(pre[0].files[0].path).toBe(configPath())
+      const blob = fs.readFileSync(path.join(backupsDir(), 'config', pre[0].id, 'files', '0.blob'), 'utf8')
+      expect(blob).toBe(legacy)
+      await mutateConfig((cfg) => { cfg.active_profile = 'y' })
+      expect((await listSnapshots('config')).filter((s) => s.operation === 'pre-migrate')).toHaveLength(1)
+    } finally {
       h.restore()
     }
   })

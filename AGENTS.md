@@ -94,7 +94,7 @@
   - **进程**：Windows 无信号语义，`process.kill(pid, 'SIGTERM')` 是硬杀、且管不到子进程树（要停进程树用 `taskkill /T /F`）；枚举外部进程按既有 win32 分支写法（PowerShell CIM 见 `gatewaycmd.ts` 的 `listProcessLines`，opener 三分支写法同文件）；spawn 全局命令（npm / git / tsc 等）Windows 是 `.cmd` 包装，直调会 ENOENT，需 `shell: true` 或补后缀。
   - **平台分支**：行为差异一律 `process.platform` 显式分支（参考 `gatewaycmd.ts` 既有写法），不假设 unix-only；mac 本机验证不到 Windows 分支时，diff 里显式复查该分支逻辑再交付。
 - **路径**：所有文件系统路径经 `src/util/paths.ts`，**禁止硬编码** `~/.modeldock`。测试用 `MODELRDOCK_FAKE_HOME` 重定向临时目录。
-- **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照。
+- **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照（边界：config.toml 自身由 .lock + 原子写保护，无逐次写前快照——版本迁移类写盘与同步导入前会快照到 backups/config/）。
 - **SEA 检测**：用 `process.execPath` 文件名（开头 `modeldock`）判断，**不要**依赖 `sea-config.json` 的 `env` 或 `import.meta.url`（postject 注入下失效）。
 - **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。
 - **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、不清手改；dsh/ZCode 的 YAML 用 `yaml` Document API 操作以保留注释。注意：config.toml 经程序写入（`mutateConfig`）是**整包重序列化，用户手写的注释与排版会被抹除**（TOML 侧无 Document API，已知取舍，见 docs/known-issues.md CORRECT-03/审查报告 P2-14）。
