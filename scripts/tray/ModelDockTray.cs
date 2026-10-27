@@ -32,6 +32,9 @@ namespace ModelDockTray
     {
         /// 双击安装后的快捷方式 = 运行本程序（GUI 子系统，无黑窗）：
         /// 首次运行 → 确保网关拉起 + 弹控制台 + 常驻托盘；托盘已在时 → 仅确保网关 + 再弹一次控制台。
+        /// 程序拉起（守护补拉 / cli.ts launchGui，spawnTrayIfPresent 注入 MODELRDOCK_TRAY_AUTOSPAWN=1）
+        /// 不是用户意图弹控制台：标记进程内一律不自动弹（见 OpenConsoleWhenAlive）——否则 setup.exe
+        /// 装完「[Run] 托盘 → 守护 → 补拉托盘」链会把控制台弹两份（2026-10 v1.3.0 安装双窗口报障）。
         /// 主程序 modeldock.exe 是控制台子系统（SEA），直接双击会带黑窗——快捷方式一律指向本程序。
         /// 单实例互斥必须 static 持有：原先 GC.KeepAlive(mutex) 写在 Application.Run 之前，
         /// 进入消息循环后局部变量即成死引用，GC 一回收句柄即关、命名 Mutex 随之销毁——之后
@@ -45,7 +48,8 @@ namespace ModelDockTray
             _singleton = new Mutex(true, "Local\\ModelDockTray", out owned);
             if (!owned)
             {
-                // 托盘已在：把这次双击当作「打开控制台」
+                // 托盘已在：用户双击 → 把这次当作「打开控制台」；
+                // 程序拉起（带 AUTOSPAWN 标记）→ OpenConsoleWhenAlive 内静默跳过
                 EnsureGateway();
                 OpenConsoleWhenAlive();
                 return;
@@ -95,11 +99,19 @@ namespace ModelDockTray
         }
 
         // 启动自动弹窗一次性守卫：Main 主线程与 EnsureGateway 后台线程都等网关就绪后弹控制台，
-        // Interlocked 保证两条并发路径只弹一个窗口；用户手点（托盘/菜单）直调 OpenConsole 不受此限
+        // Interlocked 保证两条并发路径只弹一个窗口；用户手点（托盘/菜单）直调 OpenConsole 不受此限。
+        // 程序拉起标记（MODELRDOCK_TRAY_AUTOSPAWN=1，src/tray.ts spawnTrayIfPresent 注入）：本次不是
+        // 用户双击，全进程不自动弹——标记只在进程内生效，跨进程的重复弹窗正靠它在源头上避免
         private static int _autoOpened;
+
+        /// 程序拉起的托盘（守护补拉 / GUI 路径）不自动弹控制台：控制台由调用方（launchGui 自开）
+        /// 或用户手点负责；开机自启补拉的真实例同样只常驻托盘、不弹窗
+        private static readonly bool AutoSpawn =
+            Environment.GetEnvironmentVariable("MODELRDOCK_TRAY_AUTOSPAWN") == "1";
 
         private static void OpenConsoleWhenAlive()
         {
+            if (AutoSpawn) return;
             // 就绪即弹；未就绪（拉起失败/超时）静默放弃，托盘菜单仍有「启动网关」
             for (int i = 0; i < 35; i++)
             {

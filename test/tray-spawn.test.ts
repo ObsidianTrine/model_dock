@@ -103,6 +103,16 @@ describe('spawnTrayIfPresent', () => {
     expect(calls[0].errored).toBe(true)
     expect(calls[0].unreffed).toBe(true)
   })
+
+  it('spawn env 继承当前环境并注入 MODELRDOCK_TRAY_AUTOSPAWN=1（win 托盘按它跳过自动弹控制台）', () => {
+    const dir = tmpDir()
+    const exe = path.join(dir, 'modeldock')
+    fs.writeFileSync(exe, '')
+    fs.writeFileSync(path.join(dir, trayName), '')
+    const calls: SpawnCall[] = []
+    spawnTrayIfPresent({ execPath: exe, spawnFn: fakeSpawn(calls) })
+    expect(calls[0].opts.env).toEqual({ ...process.env, MODELRDOCK_TRAY_AUTOSPAWN: '1' })
+  })
 })
 
 describe('spawnTrayWhenGatewayReady', () => {
