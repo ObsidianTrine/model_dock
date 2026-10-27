@@ -124,10 +124,14 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     { method: 'POST', path: '/v1/paircode', role: 'console', run: (h) => handlePairCode(h) },
   ]
 
-  /** 静默解析：非法/空 body 回落 fallback（与旧实现各端点的 try/catch 语义一致） */
+  /** 静默解析：非法/空 body 回落 fallback（与旧实现各端点的 try/catch 语义一致）。
+   *  JSON 字面量 null / 数组 / 标量同样按非法回落——null 原样穿透到 b.token 等属性访问
+   *  会抛 TypeError 被顶层 500 兜底外泄 V8 原文（REVIEW-27 修复残留，T07 测试实证，2026-10-28 补守卫）。 */
   function parseBody<T>(bodyText: string, fallback: T): T {
     try {
-      return JSON.parse(bodyText || '{}') as T
+      const v: unknown = JSON.parse(bodyText || '{}')
+      if (v === null || typeof v !== 'object' || Array.isArray(v)) return fallback
+      return v as T
     } catch {
       return fallback
     }
@@ -194,7 +198,9 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     }
     let b: { envelope?: unknown; ts?: unknown }
     try {
-      b = JSON.parse(h.bodyText || '{}')
+      const v: unknown = JSON.parse(h.bodyText || '{}')
+      if (v === null || typeof v !== 'object' || Array.isArray(v)) throw new Error('not an object')
+      b = v as { envelope?: unknown; ts?: unknown }
     } catch {
       fail(h.res, 400, 'invalid', t('请求体不是合法 JSON', 'Request body is not valid JSON'))
       return
