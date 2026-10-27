@@ -10,7 +10,7 @@
 | `workflows/test.yml` | CI | push（main/develop）+ 任意 PR | 三 OS build + test | 否 |
 | `workflows/release.yml` | CI | 推送 `v*` tag | 5 平台构建并发布到 Releases | 否 |
 | `workflows/claude-review.yml` | AI bot | PR 打开/更新；PR/issue 评论 `@claude` | 自动审查（只读）/ 交互改码 | **是** |
-| `dependabot.yml` | 依赖配置 | 每周（仅默认分支 main 生效） | 自动开依赖升级 PR | 否 |
+| `dependabot.yml` | 依赖配置 | 每周六上午（Asia/Shanghai；仅默认分支 main 生效） | 自动开依赖升级 PR | 否 |
 | `workflows/dependabot-fix.yml` | AI bot | Dependabot PR 打开/更新 | 验证升级、失败做最小修复推回 | **是** |
 
 ## 模型接入（三件套全在 GitHub，供应商无关）
@@ -59,7 +59,7 @@ keyguard/guard 会校验三件套齐全，缺任一项打 warning 指明缺哪�
 
 ## dependabot.yml 详解
 
-- npm + GitHub Actions 两个 ecosystem，每周检查。
+- npm + GitHub Actions 两个 ecosystem，每周六检查（`day: saturday` + `timezone: Asia/Shanghai`；`time: 09:00` 仅为当天内意向提示，实际时刻按平台负载漂移）。
 - npm：minor/patch 合并成一条组 PR 降噪，major 单独开；挂起上限 5 条。
 - commit 前缀 `chore:`：release-propose 解析 conventional 提交时归为 chore，不会虚推发版档位。
 
