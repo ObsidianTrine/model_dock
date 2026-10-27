@@ -107,9 +107,12 @@ export function isNpmGlobalInstall(cmd: string): boolean {
 }
 
 export class AdapterError extends Error {
-  constructor(msg: string) {
+  /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
+  hint?: string
+  constructor(msg: string, hint?: string) {
     super(msg)
     this.name = 'AdapterError'
+    this.hint = hint
   }
 }
 

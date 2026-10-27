@@ -24,9 +24,12 @@ const DOWNLOAD_TIMEOUT_MS = 15 * 60_000
 const MIRROR_TIMEOUT_MS = 60_000
 
 export class UpdateError extends Error {
-  constructor(msg: string) {
+  /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
+  hint?: string
+  constructor(msg: string, hint?: string) {
     super(msg)
     this.name = 'UpdateError'
+    this.hint = hint
   }
 }
 
@@ -73,58 +76,44 @@ export async function fetchLatestRelease(repo: string, token: string | null, api
     }, opts.proxyUrl)
   } catch (e) {
     throw new UpdateError(
-      t(
-        '无法访问 GitHub API：{m}。请检查网络或代理设置后重试',
-        'Cannot reach the GitHub API: {m}. Check network or proxy settings and retry',
-        { m: (e as Error).message }
-      )
+      t('无法访问 GitHub API：{m}', 'Cannot reach the GitHub API: {m}', { m: (e as Error).message }),
+      t('请检查网络或代理设置后重试', 'Check network or proxy settings and retry')
     )
   }
   if (res.status === 401) {
     throw new UpdateError(
-      t(
-        'GitHub 拒绝访问（401）：已配置的更新令牌无效或过期。到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读）后执行 modeldock update --token <令牌>；公开仓库也可删掉 config.toml [update] 的 token_ref 改用匿名更新',
-        'GitHub access denied (401): the configured update token is invalid or expired. Regenerate a fine-grained token (this repo only, Contents read-only) and run modeldock update --token <token>; for a public repo you can also remove token_ref from [update] in config.toml and update anonymously',
-      )
+      t('GitHub 拒绝访问（401）：已配置的更新令牌无效或过期', 'GitHub access denied (401): the configured update token is invalid or expired'),
+      t('到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读）后执行 modeldock update --token <令牌>；公开仓库也可删掉 config.toml [update] 的 token_ref 改用匿名更新', 'Regenerate a fine-grained token (this repo only, Contents read-only) and run modeldock update --token <token>; for a public repo you can also remove token_ref from [update] in config.toml and update anonymously')
     )
   }
   if (res.status === 403) {
     if (token) {
       throw new UpdateError(
-        t(
-          'GitHub 拒绝访问（403）：更新令牌无效或过期。到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读），然后执行 modeldock update --token <令牌>',
-          'GitHub access denied (403): the update token is invalid or expired. Regenerate a fine-grained token (this repo only, Contents read-only) under GitHub → Settings → Developer settings, then run modeldock update --token <token>',
-        )
+        t('GitHub 拒绝访问（403）：更新令牌无效或过期', 'GitHub access denied (403): the update token is invalid or expired'),
+        t('到 GitHub → Settings → Developer settings → Fine-grained tokens 重新生成（仅本仓库、Contents 只读），然后执行 modeldock update --token <令牌>', 'Regenerate a fine-grained token (this repo only, Contents read-only) under GitHub → Settings → Developer settings, then run modeldock update --token <token>')
       )
     }
     throw new UpdateError(
-      t(
-        'GitHub API 限流（匿名 60 次/小时已用尽）：稍后重试，或执行 modeldock update --token <令牌> 配置令牌把限额提到 5000 次/小时（可选）',
-        'GitHub API rate limit hit (60/hour anonymous): retry later, or run modeldock update --token <token> to raise it to 5000/hour (optional)',
-      )
+      t('GitHub API 限流（匿名 60 次/小时已用尽）', 'GitHub API rate limit hit (60/hour anonymous)'),
+      t('稍后重试，或执行 modeldock update --token <令牌> 配置令牌把限额提到 5000 次/小时（可选）', 'Retry later, or run modeldock update --token <token> to raise it to 5000/hour (optional)')
     )
   }
   if (res.status === 404) {
     if (token) {
       throw new UpdateError(
-        t(
-          '找不到仓库 {repo} 的发布（404）：检查 config.toml [update] repo 是否写对（owner/name），且令牌对该仓库有 Contents 只读权限',
-          'No release found for {repo} (404): check [update] repo in config.toml (owner/name) and that the token has read-only Contents access to it',
-          { repo }
-        )
+        t('找不到仓库 {repo} 的发布（404）', 'No release found for {repo} (404)', { repo }),
+        t('检查 config.toml [update] repo 是否写对（owner/name），且令牌对该仓库有 Contents 只读权限', 'Check [update] repo in config.toml (owner/name) and that the token has read-only Contents access to it')
       )
     }
     throw new UpdateError(
-      t(
-        '找不到仓库 {repo} 的发布（404）：检查 config.toml [update] repo 是否写对（owner/name）；公开仓库还需至少有一个正式发布的 Release（非草稿/预发布）',
-        'No release found for {repo} (404): check [update] repo in config.toml (owner/name); a public repo also needs at least one published (non-draft, non-prerelease) release',
-        { repo }
-      )
+      t('找不到仓库 {repo} 的发布（404）', 'No release found for {repo} (404)', { repo }),
+      t('检查 config.toml [update] repo 是否写对（owner/name）；公开仓库还需至少有一个正式发布的 Release（非草稿/预发布）', 'Check [update] repo in config.toml (owner/name); a public repo also needs at least one published (non-draft, non-prerelease) release')
     )
   }
   if (!res.ok) {
     throw new UpdateError(
-      t('GitHub API 返回 {s}，稍后重试', 'GitHub API returned {s}; try again later', { s: res.status })
+      t('GitHub API 返回 {s}', 'GitHub API returned {s}', { s: res.status }),
+      t('稍后重试', 'Try again later')
     )
   }
   const j = (await res.json()) as {

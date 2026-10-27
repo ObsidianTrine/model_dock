@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildProgram } from './cli/index.js'
-import { openUrlInBrowser } from './cli/shared.js'
+import { exitWithThrown, openUrlInBrowser } from './cli/shared.js'
 import { spawnTrayIfPresent, spawnTrayWhenGatewayReady } from './tray.js'
 import { t } from './util/i18n.js'
 
@@ -42,10 +42,8 @@ if (process.argv.includes('--sea-gateway')) {
   import('./config/lang.js')
     .then(({ initLang }) => initLang(process.argv))
     .then((rest) => buildProgram().parseAsync(rest))
-    .catch((e) => {
-      console.error(`✗ ${(e as Error).message}`)
-      process.exit(1)
-    })
+    // 统一出口：业务错误类打「✗ message + 提示: hint」两行，未知错误只打 message（见 shared.exitWithThrown）
+    .catch((e) => exitWithThrown(e))
 }
 
 async function launchGui(): Promise<void> {

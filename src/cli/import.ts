@@ -2,6 +2,7 @@ import { checkbox, input } from '@inquirer/prompts'
 import { c, maskSecret, printTable, t } from '../util/index.js'
 import { mutateConfig } from '../config/store.js'
 import { applyImport, scanSources, type ImportScanOptions, type ImportSource } from '../import/sources.js'
+import { exitWithThrown } from './shared.js'
 
 const SOURCES: (ImportSource | 'all')[] = [
   'all',
@@ -46,8 +47,7 @@ export async function cmdImport(opts: { from?: string; yes?: boolean; withProfil
   try {
     cands = await scanSources(from, scanOpts)
   } catch (e) {
-    console.error(c.red(t('✗ {msg}', '✗ {msg}', { msg: (e as Error).message })))
-    process.exit(1)
+    exitWithThrown(e)
   }
   if (cands.length === 0) {
     console.log(c.yellow(t('未发现可导入的 provider 配置', 'No importable provider configs found')))

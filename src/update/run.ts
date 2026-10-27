@@ -133,10 +133,8 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   // 正式安装的 ModelDock（SEA 二进制 basename 一律 modeldock* / ModelDock）不受影响；守卫放在下载前，点了也不会发起网络请求。
   if ((shape === 'bare' || shape === 'win-bare') && path.basename(execPath).toLowerCase().startsWith('node')) {
     throw new UpdateError(
-      t(
-        '当前是开发态（tsx 直跑源码），不支持自更新；请用正式安装的 ModelDock 执行 modeldock update，或用安装包/安装器升级',
-        'Running from source (tsx): self-update is not supported. Run modeldock update from an installed ModelDock, or upgrade with the installer/package'
-      )
+      t('当前是开发态（tsx 直跑源码），不支持自更新', 'Running from source (tsx): self-update is not supported'),
+      t('请用正式安装的 ModelDock 执行 modeldock update，或用安装包/安装器升级', 'Run modeldock update from an installed ModelDock, or upgrade with the installer/package')
     )
   }
   // 代理解析（系统代理/环境变量，见 util/sysproxy.ts）：Node fetch 不认系统代理，大陆网络直连

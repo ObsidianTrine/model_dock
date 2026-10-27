@@ -132,11 +132,8 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
     async planAttach(opts: AttachOptions, cfg: Config): Promise<PlanResult> {
       if (!present()) {
         throw new AdapterError(
-          t(
-            '未找到 {bin} 命令——{label} 可能已卸载（配置只是残留）；请先安装后再接入',
-            '{bin} command not found — {label} may have been uninstalled (the config is leftover only); install it first, then attach',
-            { bin: String(binName), label: factory.label }
-          )
+          t('未找到 {bin} 命令——{label} 可能已卸载（配置只是残留）', '{bin} command not found — {label} may have been uninstalled (the config is leftover only)', { bin: String(binName), label: factory.label }),
+          t('请先安装后再接入', 'Install it first, then attach')
         )
       }
       const p = (await firstExisting()) ?? configFiles()[0]

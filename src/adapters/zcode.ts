@@ -332,19 +332,14 @@ export const zcodeAdapter: HarnessAdapter = {
     const present = await appPresent()
     if (present === false) {
       throw new AdapterError(
-        t(
-          '未找到 ZCode 本体（zcode 命令不在 PATH 上，注册表/常见安装目录也没有桌面应用）——ZCode 可能已卸载；请先安装并启动一次 ZCode 后再接入',
-          'The ZCode app itself was not found (no zcode command on PATH and no desktop app in the registry / common install directories) — ZCode may have been uninstalled; install and launch ZCode once before attaching'
-        )
+        t('未找到 ZCode 本体（zcode 命令不在 PATH 上，注册表/常见安装目录也没有桌面应用）——ZCode 可能已卸载', 'The ZCode app itself was not found (no zcode command on PATH and no desktop app in the registry / common install directories) — ZCode may have been uninstalled'),
+        t('请先安装并启动一次 ZCode 后再接入', 'Install and launch ZCode once before attaching')
       )
     }
     if (personalText === null && legacyText === null && present !== true) {
       throw new AdapterError(
-        t(
-          '未找到 {path}，也无法确认 ZCode 已安装；请先安装并启动一次 ZCode 后再接入',
-          '{path} not found and ZCode could not be confirmed as installed; install and launch ZCode once before attaching',
-          { path: personalPath }
-        )
+        t('未找到 {path}，也无法确认 ZCode 已安装', '{path} not found and ZCode could not be confirmed as installed', { path: personalPath }),
+        t('请先安装并启动一次 ZCode 后再接入', 'Install and launch ZCode once before attaching')
       )
     }
 
@@ -408,11 +403,8 @@ export const zcodeAdapter: HarnessAdapter = {
     const root = personalText !== null ? (parseJsonStrict(personalText, personalPath) as ZcodePersonalConfig) : freshPersonalConfig()
     if (!root || typeof root !== 'object' || Array.isArray(root)) {
       throw new AdapterError(
-        t(
-          '{file} 内容不是 JSON 对象，已中止（未做任何改动）；请修正或删除该文件后重新接入',
-          '{file} does not contain a JSON object; aborted (nothing changed). Fix or delete the file and attach again',
-          { file: personalPath }
-        )
+        t('{file} 内容不是 JSON 对象，已中止（未做任何改动）', '{file} does not contain a JSON object; aborted (nothing changed)', { file: personalPath }),
+        t('请修正或删除该文件后重新接入', 'Fix or delete the file and attach again')
       )
     }
     const pconf = (root.config ??= {})

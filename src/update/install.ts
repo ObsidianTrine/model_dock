@@ -187,11 +187,8 @@ async function checkWritable(dir: string): Promise<void> {
     await fsp.access(dir, fs.constants.W_OK)
   } catch {
     throw new UpdateError(
-      t(
-        '安装目录不可写：{d}。macOS 请确认 ModelDock.app 在「应用程序」且当前用户是管理员；或用 sudo 修正属主后重试',
-        'Install directory is not writable: {d}. On macOS make sure ModelDock.app is in Applications and the current user is an admin; fix ownership (sudo) and retry',
-        { d: dir }
-      )
+      t('安装目录不可写：{d}', 'Install directory is not writable: {d}', { d: dir }),
+      t('macOS 请确认 ModelDock.app 在「应用程序」且当前用户是管理员；或用 sudo 修正属主后重试', 'On macOS make sure ModelDock.app is in Applications and the current user is an admin; fix ownership (sudo) and retry')
     )
   }
 }

@@ -27,6 +27,17 @@ export function exitWithError(msg: string, hint?: string): never {
   process.exit(1)
 }
 
+/** unknown 抛出值的统一出口（顶层 catch 与各命令 inline catch 共用）：
+ *  业务错误类（ConfigError/SecretsError/AdapterError/UpstreamError/UpdateError）统一携带可选
+ *  hint 字段——有就打「提示: …」两行式；未知错误只打 message。
+ *  duck 读 hint 而非 instanceof：relay(undici)/adapters 等重模块图不应为此进所有命令的启动链
+ *  （PERF-03 同理）；hint 供给方已收口为五类的类型字段（裸 Error 挂 hint 的逃逸口已移除），不会误伤未知错误。 */
+export function exitWithThrown(e: unknown): never {
+  const err = e as Error & { hint?: unknown }
+  const msg = err && typeof err.message === 'string' ? err.message : String(e)
+  return exitWithError(msg, err && typeof err.hint === 'string' && err.hint ? err.hint : undefined)
+}
+
 // ── CLI/进程原语（去重，DUP-01）────────────────────────────────────────────
 
 /** 分离拉起网关守护进程并轮询就绪（默认 20×250ms=5s；rounds 可调）。返回活网关状态；超时返回 null。

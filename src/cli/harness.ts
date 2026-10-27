@@ -13,7 +13,7 @@ import {
   snapshot,
   type SnapshotManifest,
 } from '../backup/snapshot.js'
-import { loadCfg } from './shared.js'
+import { exitWithThrown, loadCfg } from './shared.js'
 
 export interface AttachFlags {
   mode?: 'gateway' | 'file'
@@ -165,8 +165,7 @@ export async function cmdHarnessMode(id: string, mode: 'direct' | 'gateway', pro
     console.log(c.green(t('✓ {id} 已切换为{mode}（目标 profile「{p}」）', '✓ {id} switched to {mode} (target profile "{p}")', { id, mode: r.mode === 'direct' ? t('独立直连', 'direct mode') : t('网关接入', 'gateway mode'), p: r.profile })))
     console.log(c.gray(t('重启该客户端后生效。', 'Restart the client to apply.')))
   } catch (e) {
-    console.error(c.red(`✗ ${(e as Error).message}`))
-    process.exit(1)
+    exitWithThrown(e)
   }
 }
 

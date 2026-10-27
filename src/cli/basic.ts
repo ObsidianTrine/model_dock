@@ -16,6 +16,7 @@ import {
 import { loadConfig } from '../config/store.js'
 import { allAdapters } from '../adapters/registry.js'
 import { cmdDetach } from './harness.js'
+import { exitWithThrown } from './shared.js'
 // 注意：gatewaycmd.js / secrets.js 刻意不在顶层 import——它们各自被 test/uninstall.test.ts 以
 // vitest vi.mock 拦截。isolate:false + singleFork 下若在本模块顶层静态引用它们，任何早于
 // uninstall.test 加载本模块的测试会把真实实现固化进共享注册表，导致其 mock 失效。改为在使用处
@@ -73,8 +74,7 @@ export async function cmdConfigEdit(): Promise<void> {
     await loadConfig()
     console.log(c.green(t('✓ 配置校验通过；网关会自动热加载', '✓ Config is valid; the gateway hot-reloads it automatically')))
   } catch (e) {
-    console.error(c.red(`✗ ${(e as Error).message}`))
-    process.exit(1)
+    exitWithThrown(e) // ConfigError 带 hint（config edit / restore 建议），两行式透出
   }
 }
 

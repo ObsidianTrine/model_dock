@@ -54,7 +54,11 @@ export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: 
     }
     await runUpdate({ repo, token, yes: opts.yes === true, confirm: confirmFn })
   } catch (e) {
-    console.error(c.red(`✗ ${(e as Error).message}`))
+    // 语义特殊：保持 process.exitCode 而非立即 exit——更新链可能还有子进程/输出待收尾，不照搬 exitWithError；
+    // UpdateError 带 hint，手动补打「提示: …」行（与 exitWithError 同款两行式）
+    const err = e as Error & { hint?: string }
+    console.error(c.red(`✗ ${err.message}`))
+    if (err.hint) console.error(c.yellow(t('提示: {h}', 'Hint: {h}', { h: err.hint })))
     process.exitCode = 1
   }
 }
