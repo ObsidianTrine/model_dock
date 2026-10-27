@@ -73,6 +73,8 @@ Dependabot PR 触发后 Claude 接手：
 3. 失败且确系升级引入 → **最小修复**，以 `[dependabot-fix] 适配 <包名> <版本>` 提交推回 PR 分支，评论说明；
 4. 大破坏（major 语义大改 / 依赖树引入 native addon）→ 不硬修，评论给人工方案（走本地 feature-branch 流程）。
 
+> **运维注意（2026-10-27 实测）**：低端模型（deepseek-flash）偶尔会提前结束会话且不发评论（action 仍显示 success）。Dependabot PR 迟迟没有验证评论时，在 PR 里评论 `@dependabot recreate` 重触发一次即可；频发则把 Variables `CLAUDE_MODEL` 换成更强档位（如 `deepseek-v4-pro`）。另：会话里的 permission_denials 是 allowlist 在拦复合命令，属正常沙箱行为，模型会自行绕开。
+
 合并权始终在人：bot 不 approve、不 merge；发版仍走 release.md 人工授权。
 
 ## 成本控制
