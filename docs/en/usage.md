@@ -246,6 +246,8 @@ modeldock reset --deep                   # clean data: all of the above + delete
 
 ## 7. Config file reference (~/.modeldock/)
 
+For the type, default and meaning of every config key, see the **[config.toml configuration reference](config-reference.md)** (this section lists the common shapes only).
+
 ```
 config.toml    main config: providers / profiles / harness / adapter_packs / gateway
 secrets.json   key storage (macOS Keychain, Windows DPAPI encryption, Linux Secret Service; falls back to 0600 plaintext only without a keyring; existing plaintext migrates automatically at startup)
