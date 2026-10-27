@@ -16,7 +16,7 @@ release/
 NOTES.md
 .claude/settings.local.json
 
-page*
+/page*
 .playwright-mcp/
 .workbuddy/
 .tz_backup/
