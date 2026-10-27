@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -12,7 +12,11 @@ import { fileURLToPath } from 'node:url'
 // 硬编码 .15s，暂不设门禁。
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const SRC_UI = readFileSync(path.join(ROOT, 'src', 'gateway', 'ui.ts'), 'utf8')
+// T04 拆分后页面源码 = 拼装壳 ui.ts + src/gateway/ui/ 各域模块：门禁扫描全部源拼接（规则语义不变）
+const SRC_UI = [
+  path.join(ROOT, 'src', 'gateway', 'ui.ts'),
+  ...readdirSync(path.join(ROOT, 'src', 'gateway', 'ui')).filter((f) => f.endsWith('.ts')).sort().map((f) => path.join(ROOT, 'src', 'gateway', 'ui', f)),
+].map((p) => readFileSync(p, 'utf8')).join('\n')
 const SRC_LAN = readFileSync(path.join(ROOT, 'src', 'gateway', 'lan.ts'), 'utf8')
 const SRC_CLOUD = readFileSync(path.join(ROOT, 'src', 'cloud', 'console.ts'), 'utf8')
 

@@ -220,6 +220,7 @@
 - 位置：`src/gateway/ui.ts:8`（模板字面量约 302KB + 注入后 304KB：body 21KB + CSS 45KB + 内联 JS 236KB，其中注释约 29KB）；`server.ts:1087` 注释「236KB」数字已过时
 - 现状：ETag/304 已兜住重复加载，首载解析 236KB JS 约 30–80ms（一次性）。修复方向：构建期剥内联 JS 注释；顺手更正注释数字。
 - 2026-10-20 复核：**暂缓**——注释剥离须字符串/正则感知（裸正则容易把含 `//` 的字符串字面量剥坏），应随构建链改造一并引入正规最小化，不宜手写剥离器；注释数字过时属一行文档修正，顺手提交时带上。
+- 2026-10-28（T04 Phase 1 完成）：单文件 ui.ts（4817 行）已拆为拼装壳（43 行）+ `src/gateway/ui/` 15 个域模块（styles/page/kit/modals/i18n/shared/overview/update/autoroute/services/schedule/configpack/clients/edit/logs），拆分经「拆分前 UI_HTML 字节基线 vs 拆分后」cmp 全等验证（314896B），ui-lint / webui-static 门禁源读取同步扩到模块集。**本条核心（构建链正规最小化，Phase 2）维持暂缓**，与拆分解绑、另开卡；server.ts 体积注释修正由 T11 随手批处理。
 
 **PERF-26（P2）presets.json 每 tick 读+解析两遍**
 - 位置：`src/sync/collect.ts:72-73`（`readUserPresets()` 后紧跟 `readRawUserPresets()`，各自 readFileSync+JSON.parse+逐条校验）
