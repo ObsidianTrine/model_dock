@@ -1,10 +1,14 @@
 version: 2
 updates:
-  # 依赖周更：minor/patch 合并成一条 PR 降噪，major 单独出 PR（由 dependabot-fix.yml 验证修复）
+  # 依赖周更（周六）：minor/patch 合并成一条 PR 降噪，major 单独出 PR（由 dependabot-fix.yml 验证修复）
+  # time 仅为当天内意向提示：Dependabot 按平台负载排队，不保证精确时刻
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
+      day: saturday
+      time: "09:00"
+      timezone: Asia/Shanghai
     open-pull-requests-limit: 5
     groups:
       minor-and-patch:
@@ -16,11 +20,14 @@ updates:
       prefix: chore
       prefix-development: chore
 
-  # 本仓库自用的 GitHub Actions 版本更新
+  # 本仓库自用的 GitHub Actions 版本更新（同为周六）
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+      day: saturday
+      time: "09:00"
+      timezone: Asia/Shanghai
     groups:
       actions:
         patterns:
