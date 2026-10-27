@@ -84,7 +84,7 @@ function normalizable<T extends object>(v: unknown, key: string): T | undefined 
  *    其余 days 组合（如单日、[1,3]）原样保留。幂等，仅在旧形态出现时改写。 */
 function normalizeGateway(input: Config['gateway']): Config['gateway'] {
   if (!input) return input
-  // tray_lite 已废弃（旧「托盘轻量模式」键，语义由仅托盘派生态取代）：读入即剥除，
+  // tray_lite 已废弃（旧「托盘轻量模式」键，语义由轻量模式派生态取代）：读入即剥除，
   // 下次整包重写不再落回盘——下方 spread 会原样透传未知键，残留须在此显式删
   const gw = { ...input } as Record<string, unknown>
   delete gw.tray_lite

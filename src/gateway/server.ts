@@ -29,7 +29,7 @@ import { autoRouteInfo, isMeltdown, logAudit, logRequest, mutateGatewayState, pa
 import { dispatcherFor } from './proxy.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
-import { markUiLeaving, markUiPing, markUiSeen, pendingTrayOnlyRequest, requestTrayOnly, trayOnlyActive } from './presence.js'
+import { markUiLeaving, markUiPing, markUiSeen, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
 import { createUsageTap } from './usage.js'
 import { refreshCalendar } from './holidays.js'
@@ -825,7 +825,7 @@ async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unkno
 export const OVERVIEW_TTL_MS = 6_000
 let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
 
-/** 立即失效 overview 缓存（仅托盘广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
+/** 立即失效 overview 缓存（轻量模式广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
 function invalidateOverviewCache(): void {
   overviewCache = null
 }
@@ -1025,10 +1025,10 @@ async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown
         autoFallback: rt.config.gateway?.auto_fallback !== false,
       },
       autostart: autostartOverview(),
-      // 仅托盘模式（派生态，不落盘）：无任何 Web UI 打开时为 true；trayOnlyRequest 供已开页面
-      // 轮询感知「进入仅托盘」的关闭广播（时间戳，页面侧按新于上次所见去重）
-      trayOnly: trayOnlyActive(Date.now()),
-      trayOnlyRequest: pendingTrayOnlyRequest(),
+      // 轻量模式（派生态，不落盘）：无任何 Web UI 打开时为 true；trayLiteRequest 供已开页面
+      // 轮询感知「进入轻量模式」的关闭广播（时间戳，页面侧按新于上次所见去重）
+      trayLite: trayLiteActive(Date.now()),
+      trayLiteRequest: pendingTrayLiteRequest(),
     },
     current: current ? { id: current.id, label: current.label, model: current.model } : null,
     // 默认路由（active_profile）：与 current（正在使用）区分，供电台「跟随全局」/直连目标等配置态使用
@@ -1360,8 +1360,8 @@ async function hTrayState(c: AdminCtx): Promise<void> {
   }
   const payload = {
     ok: true,
-    // 仅托盘为派生态，live 求值而非读 6s 缓存的 overview 串：托盘勾选态少一档陈旧
-    trayOnly: trayOnlyActive(Date.now()),
+    // 轻量模式为派生态，live 求值而非读 6s 缓存的 overview 串：托盘勾选态少一档陈旧
+    trayLite: trayLiteActive(Date.now()),
     current: view.current ?? null,
     autoPin: view.gateway?.autoRoute?.forced ?? null,
     scheduleApplied: view.gateway?.autoRoute?.schedule?.applied === true,
@@ -1392,17 +1392,17 @@ async function hTrayState(c: AdminCtx): Promise<void> {
   return
 }
 
-/** 仅托盘模式入口（托盘菜单点击）：向已开页面广播关闭请求（overview 的 trayOnlyRequest 字段，
+/** 轻量模式入口（托盘菜单点击）：向已开页面广播关闭请求（overview 的 trayLiteRequest 字段，
  *  页面感知后 window.close()，被浏览器拦截时页面显示手动关闭提示）。请求体不解析
  *  （托盘双端发 {} / {"enabled":true}，仅读取以复用连接） */
-async function hTrayOnly(c: AdminCtx): Promise<void> {
+async function hTrayLite(c: AdminCtx): Promise<void> {
   const { req, res, audit } = c
   await jsonRequestBody(req)
-  requestTrayOnly(Date.now())
+  requestTrayLite(Date.now())
   invalidateOverviewCache() // 广播时间戳即刻可见：页面最迟下一个 5s 轮询拿到
-  audit(bi('进入仅托盘模式', 'Enter tray-only mode'), '-')
+  audit(bi('进入轻量模式', 'Enter lightweight mode'), '-')
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, trayOnly: trayOnlyActive(Date.now()) }))
+  res.end(JSON.stringify({ ok: true, trayLite: trayLiteActive(Date.now()) }))
   return
 }
 
@@ -2661,7 +2661,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'GET /_modeldock/model-catalog': hModelCatalog,
   'GET /_modeldock/overview': hOverview,
   'GET /_modeldock/tray-state': hTrayState,
-  'POST /_modeldock/tray-only': hTrayOnly,
+  'POST /_modeldock/tray-lite': hTrayLite,
   'POST /_modeldock/ui-presence': hUiPresence,
   'POST /_modeldock/service/fetch-models': hFetchModels,
   'POST /_modeldock/service': hServiceAdd,
@@ -2780,9 +2780,9 @@ async function handleAdmin(
       return
     }
     const { html, etag } = getRenderedUI()
-    // 页面加载（含 304 重验证）= UI 打开：续在场并撤销在途仅托盘广播——任何方式打开控制台自动退出仅托盘。
+    // 页面加载（含 304 重验证）= UI 打开：续在场并撤销在途轻量模式广播——任何方式打开控制台自动退出轻量模式。
     // 必须同步失效 overview 缓存：刚加载的页面首拉 overview 若命中携带旧广播时间戳的缓存串会误自关。
-    // 收窄到带有效凭据的请求：本机程序对 /ui 的无凭据探测/预取不该抑制仅托盘、打穿 overview 缓存
+    // 收窄到带有效凭据的请求：本机程序对 /ui 的无凭据探测/预取不该抑制轻量模式、打穿 overview 缓存
     // （真登录路径 302 后浏览器带 cookie 重取，必再走到这里）
     if (adminAuthorized(rt, req)) {
       markUiSeen(Date.now())
