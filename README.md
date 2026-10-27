@@ -84,7 +84,7 @@ modeldock status                # 总览：网关/active profile/各 harness 接
 modeldock test                  # 端到端连通性自测（key/模型/流式/延迟）
 modeldock doctor                # 逐 harness 体检；--fix 自动修复（敏感项确认），--json 机器可读
 modeldock gateway log -f        # 网关请求日志（不落 prompt）
-modeldock use <profile>         # 切换 provider，网关模式即时生效，零改动 harness
+modeldock profile use <name>    # 切换 provider，网关模式即时生效，零改动 harness
 modeldock gateway install       # 开机自启（常驻）：登录自动拉起、崩溃自动重启
 modeldock update                # 一键升级：下载 → 校验 → 替换 → 自动重启网关（--check 只看不安）
 modeldock model refresh <id>    # 自动拉取上游可用模型列表

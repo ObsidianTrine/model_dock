@@ -84,7 +84,7 @@ modeldock status                # overview: gateway / active profile / attach st
 modeldock test                  # end-to-end connectivity self-test (key / models / streaming / latency)
 modeldock doctor                # per-harness health check; --fix applies fixes (sensitive ones confirm), --json for machines
 modeldock gateway log -f        # gateway request logs (prompts are never logged)
-modeldock use <profile>         # switch provider — instant in gateway mode, zero harness changes
+modeldock profile use <name>    # switch provider — instant in gateway mode, zero harness changes
 modeldock gateway install       # auto-start on boot (resident): launches on login, restarts on crash
 modeldock update                # one-command upgrade: download → verify → replace → auto-restart gateway (--check to look only)
 modeldock model refresh <id>    # fetch the upstream model list automatically

@@ -558,7 +558,6 @@ export function pickTarget(
     ordered.push({ target: makeTarget(base.profile.provider), providerId: base.profile.provider, isPrimary: false })
     seen.add(base.profile.provider)
   }
-  // 避开窗口：命中期间从候选链剔除目标服务（避开优先窗口/强制/主服务，正窗目标恰被避开时顺延到后续候选）
   if (!ordered.length) return { ok: false, reason: 'down_all' }
   const avoid: string[] = []
   for (const w of hitWins) {

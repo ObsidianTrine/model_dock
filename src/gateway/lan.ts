@@ -798,7 +798,7 @@ document.addEventListener('visibilitychange', function () { if (!document.hidden
 }
 
 // 手机页进程内缓存（页面为静态壳）：懒渲染一次，之后每请求直接回放缓存串 + ETag/304，
-// 不再每请求重拼 ~63KB HTML；200 覆盖管理面统一 no-store 为 no-cache，条件请求才会真正发生
+// 不再每请求重拼 ~34KB HTML（实测 33707 字节 @2026-10-28）；200 覆盖管理面统一 no-store 为 no-cache，条件请求才会真正发生
 let mobilePageCache: { html: string; etag: string } | null = null
 function getMobilePage(): { html: string; etag: string } {
   if (!mobilePageCache) {
