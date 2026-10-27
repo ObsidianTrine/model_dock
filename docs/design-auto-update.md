@@ -56,7 +56,7 @@
 | Claude Code | 自有 CDN manifest + stable/latest 渠道；启动+周期检查，**静默后台装**、下次启动生效，多版本共存 symlink | 检查与安装分离；渠道概念（M2 起可留接口） |
 | deno / bun | GitHub Releases API 发现 + sha256/签名校验 + **rename dance**：unix 直接换运行中二进制；Windows 运行中 exe **可改名不可覆盖**——旧 exe 改名 `.old` → 新 exe 移入 → 延迟清理 | 平台替换手法的权威参照（本项目同款实现） |
 | opencode | 检查后仅提示「run opencode upgrade」，不静默装 | 与本项目「确认后安装」取向一致 |
-| Windows Inno 惯例 | 下载 setup.exe → 应用先退出 → `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`；**注意 `/SUPPRESSMSGBOXES` 会吞掉 CloseApplications 对话框**，所以「更新器先停实例再装」更稳 | M1 win 流程按此实现 |
+| Windows Inno 惯例 | 下载 setup.exe → 应用先退出 → `/SILENT` 系静默参数。**本项目弃用静默**：2026-10-27 用户实证三次静默安装全部中途无声失败（unins000 已重写而主程序未换），`/SUPPRESSMSGBOXES` 连错误框都吞掉，用户面对「托盘没了、网关不回、零提示」；改走**可见向导** + `/LOG` 落盘，失败当面可见、有据可查 | M1 曾按静默实现，2026-10-27 改向导 |
 | GitHub API | `GET /repos/{owner}/{repo}/releases/latest` **永不返回 draft/prerelease**；未认证 60 req/h/IP（token 后 5000/h），应缓存/少调 | M1 检查走此端点（PAT 认证）；M1 无缓存必要（用户手动触发） |
 
 **来源**：github.com/farion1231/cc-switch（tauri.conf.json / src/lib/updater.ts / scripts/rewrite-updater-manifest.mjs / .github/workflows/sync-r2.yml）、code.claude.com/docs/en/setup、denoland/deno `cli/tools/upgrade.rs`、bun.com/docs/cli/upgrade、github.com/sst/opencode、jrsoftware.org/ishelp、docs.github.com/rest/releases。
@@ -151,7 +151,7 @@ CI 产物（现有 + 新增）：
 
 **unix 裸二进制**：新二进制写 `<target>.new`（同目录）→ 旧改名 `.old` → 新改名到位 + chmod 755 → 对每个停掉的实例 spawn `<新二进制> gateway start` 拉回。
 
-**win 安装器版**：下载 setup.exe → 校验 → 停实例与托盘 → detached spawn `cmd /s /c "<setup>" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="<当前安装目录>" && start "" "<新托盘路径>"`（cmd 等 setup 退出后自拉托盘；更新器随即退出释放 exe 锁）。`/DIR` 把更新落点钉死在当前运行安装目录（= 用户当初安装时选的路径），不依赖注册表 UsePreviousAppDir 记忆（注册表被清理或用户搬过目录时静默安装会落回 DefaultDirName 制造重复安装）；`/VERYSILENT` 全程无向导，用户绝不见路径选择页。**安装包存活期**：setup.exe 在下载临时目录里，更新器退出时**不得**删该目录（否则 cmd→Inno 找不到安装包，表现为「已停机、无安装、托盘不更」——2026-10-26 用户实证）；残留由下次 `runUpdate` 在拿到锁后清扫。**win 裸二进制**：同 unix rename dance（NTFS 允许改名运行中 exe），`.old` 清理延迟到下次更新；**包内托盘（ModelDockTray.exe / mac ModelDockTray）与主程序一并替换**（网关+托盘同版本换新）；收尾拉起：网关原在跑 → spawn `--sea-gateway`（daemon 就绪后由 `spawnTrayWhenGatewayReady` 补拉托盘，避免 EnsureGateway 双 daemon 抢端口）；网关原不在跑 → 直接 start 托盘（托盘自带 EnsureGateway）。
+**win 安装器版**：下载 setup.exe → 校验 → 停实例与托盘 → detached spawn `cmd /s /c "<setup>" /DIR="<当前安装目录>" /CLOSEAPPLICATIONS /NORESTART /LOG="<logs>/update-setup.log" || start "" "<托盘路径>"`（**弹出与首次安装一致的 Inno 向导，不静默**——静默版曾在安装中途无声失败且零提示，2026-10-27 用户实证三连败；安装成功时托盘由向导收尾页 [Run] 勾选拉起，skipifsilent 只拦静默安装、向导不受影响；失败或被取消（退出码非 0）时 `||` 拉回旧托盘兜底，旧托盘 EnsureGateway 把网关带回来，两路互斥不重复弹控制台；更新器随即退出释放 exe 锁）。`/DIR` 把更新落点钉死在当前运行安装目录（= 用户当初安装时选的路径），不依赖注册表 UsePreviousAppDir 记忆（注册表被清理或用户搬过目录时安装会落回 DefaultDirName 制造重复安装）。**安装包存活期**：setup.exe 在下载临时目录里，更新器退出时**不得**删该目录（否则 cmd→Inno 找不到安装包，表现为「已停机、无安装、托盘不更」——2026-10-26 用户实证）；残留由下次 `runUpdate` 在拿到锁后清扫。**win 裸二进制**：同 unix rename dance（NTFS 允许改名运行中 exe），`.old` 清理延迟到下次更新；**包内托盘（ModelDockTray.exe / mac ModelDockTray）与主程序一并替换**（网关+托盘同版本换新）；收尾拉起：网关原在跑 → spawn `--sea-gateway`（daemon 就绪后由 `spawnTrayWhenGatewayReady` 补拉托盘，避免 EnsureGateway 双 daemon 抢端口）；网关原不在跑 → 直接 start 托盘（托盘自带 EnsureGateway）。
 
 - 硬约束：安装路径不可写 / 自身不拥有二进制（如未来 npm 全局安装）→ 拒绝并指引用对应方式升级；`/Applications` 无写权限 → 指引用 Finder 安装或修正权限。
 - 更新过程中 **8687 短暂中断是本功能的预期行为**（用户主动触发）；但测试代码绝不允许触达真实实例（见 §5.7）。
