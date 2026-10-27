@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWrite, ensureDir } from './util/fsx.js'
@@ -9,7 +9,7 @@ import { preferInstalledCli } from './cliinstall.js'
 
 /** 开机自启（常驻）：把网关注册为登录自动拉起、崩溃自动重启的系统服务。
  *  macOS → LaunchAgent（KeepAlive 崩溃拉起）；Linux → systemd user unit（Restart）；
- *  Windows → 启动文件夹 VBS（登录自启，无崩溃拉起）。
+ *  Windows → HKCU 注册表 Run 键（登录自启，无崩溃拉起；崩溃拉起是 Windows 平台已知缺口）。
  *  服务文件路径全部相对 home 推导，MODELRDOCK_FAKE_HOME 下自动隔离，测试可断言。 */
 
 export const SERVICE_LABEL = 'com.modeldock.gateway'
@@ -40,6 +40,7 @@ export function systemdUnitPath(): string {
 }
 
 export function windowsStartupPath(): string {
+  // 旧版形态（XPLAT-06 迁移前）：Startup 文件夹 VBS，已不再生成，保留用于残留检测与清理。
   // 沙箱守卫：APPDATA 不随 MODELRDOCK_FAKE_HOME 重定向，直接用会把沙箱启动项写进真机「启动」文件夹
   const base = process.env.MODELRDOCK_FAKE_HOME
     ? path.join(homeDir(), 'AppData', 'Roaming')
@@ -47,11 +48,139 @@ export function windowsStartupPath(): string {
   return path.join(base, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'modeldock-gateway.vbs')
 }
 
+// ── Windows：注册表 Run 键（XPLAT-06，替代 Startup 文件夹 VBS）──
+// 选型：Run 键（HKCU）而非 schtasks——schtasks /sc onlogon 未提权创建被拒（实测
+// 「错误: 拒绝访问。」，ONLOGON/ONSTART 触发器需管理员），装个自启不该要 UAC；
+// Run 键无需管理员、无弃用风险（VBS 已转 Feature-on-Demand）。黑窗问题：Run 键
+// 直启控制台程序会常驻黑窗，故登记的命令带 --autostart 标记，由 cli.ts 以
+// windowsHide（CREATE_NO_WINDOW）分离重拉 daemon、父进程即退——黑窗只存活亚秒级。
+
+export const WINDOWS_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+export const WINDOWS_RUN_VALUE = 'modeldock-gateway'
+
+/** 登录自启标记：Run 键登记的命令尾参。被 Explorer 拉起的进程由 cli.ts 据此分离重拉
+ *  隐藏 daemon（控制台程序被直启会常驻黑窗），普通命令行手动跑 --sea-gateway 不受影响。 */
+export const AUTOSTART_LAUNCH_FLAG = '--autostart'
+
+/** 注册表条目的「显示路径」（诊断/状态展示用；非文件系统路径，不可 fs 存在性判断） */
+export function windowsRunValueDisplay(): string {
+  return `${WINDOWS_RUN_KEY}\\${WINDOWS_RUN_VALUE}`
+}
+
+/** Run 键在盘的镜像文件：生产上 reg add 成功后同步落一份，供 autostartOverview 做
+ *  免 spawn 的在场判断（overview 5s 轮询不能 spawn reg.exe）；沙箱（MODELRDOCK_FAKE_HOME）
+ *  下不碰真机注册表，它就是 Run 键值数据本体。两者都以它为 uninstall 的删除对象之一。 */
+function runValueMirrorFile(): string {
+  return path.join(modeldockDir(), 'autostart-run-key.txt')
+}
+
+/** Run 键值数据：argv 全 token 带引号空格拼接（Windows 路径不允许出现引号，可无损往返） */
+export function windowsRunCommandLine(argv: string[]): string {
+  return argv.map((a) => `"${a}"`).join(' ')
+}
+
+/** 从 Run 键值数据还原 argv（windowsRunCommandLine 的逆变换） */
+export function parseRunCommandLine(data: string): string[] | null {
+  const out: string[] = []
+  const re = /"([^"]*)"/g
+  for (let m = re.exec(data); m !== null; m = re.exec(data)) out.push(m[1])
+  return out.length > 0 ? out : null
+}
+
+/** reg query 值行解析。输出行形如 `    modeldock-gateway    REG_SZ    "C:\..." --sea-gateway`；
+ *  键名/类型 token 是固定结构（不受系统语言影响），数据段原样取出。 */
+function parseRegQueryValue(output: string): string | null {
+  const re = new RegExp(`^\\s*${WINDOWS_RUN_VALUE}\\s+REG_SZ\\s+(.+)$`)
+  for (const line of output.split(/\r?\n/)) {
+    const m = line.match(re)
+    if (m) return m[1].trim()
+  }
+  return null
+}
+
+function inSandbox(): boolean {
+  return !!process.env.MODELRDOCK_FAKE_HOME
+}
+
+function readRunValueData(): string | null {
+  if (inSandbox()) {
+    try {
+      return fs.readFileSync(runValueMirrorFile(), 'utf8')
+    } catch {
+      return null
+    }
+  }
+  const r = execOk('reg', ['query', WINDOWS_RUN_KEY, '/v', WINDOWS_RUN_VALUE])
+  return r.ok ? parseRegQueryValue(r.output) : null
+}
+
+async function writeRunValueData(data: string): Promise<void> {
+  if (inSandbox()) {
+    await atomicWrite(runValueMirrorFile(), data, 0o644)
+    return
+  }
+  const r = execOk('reg', ['add', WINDOWS_RUN_KEY, '/v', WINDOWS_RUN_VALUE, '/t', 'REG_SZ', '/d', data, '/f'])
+  if (!r.ok) {
+    const manual = `reg add ${WINDOWS_RUN_KEY} /v ${WINDOWS_RUN_VALUE} /t REG_SZ /d ${data} /f`
+    throw new Error(
+      t(
+        '写入注册表启动项失败：{out}。可手动执行：{manual}',
+        'Failed to write the registry Run entry: {out}. To do it manually: {manual}',
+        { out: r.output, manual }
+      )
+    )
+  }
+  // 免 spawn 在场指示（autostartOverview 用），与注册表条目同步落/删
+  await atomicWrite(runValueMirrorFile(), data, 0o644)
+}
+
+function deleteRunValueData(): boolean {
+  const mirror = runValueMirrorFile()
+  if (inSandbox()) {
+    const existed = fs.existsSync(mirror)
+    try {
+      fs.rmSync(mirror, { force: true })
+    } catch {
+      /* 删不掉的残留不阻断卸载 */
+    }
+    return existed
+  }
+  const existed = readRunValueData() != null || fs.existsSync(mirror)
+  execOk('reg', ['delete', WINDOWS_RUN_KEY, '/v', WINDOWS_RUN_VALUE, '/f'])
+  try {
+    fs.rmSync(mirror, { force: true })
+  } catch {
+    /* 同上 */
+  }
+  return existed
+}
+
+/** Run 键（Explorer）拉起的进程带 --autostart 时：以 windowsHide（CREATE_NO_WINDOW）分离
+ *  重拉 daemon 本体，父进程随即退出——Explorer 直启控制台程序的黑窗只存活亚秒级瞬间。
+ *  返回 true = 已重拉，调用方应直接退出；false = 非自启路径或重拉失败，照常前台运行。 */
+export async function relaunchHiddenIfAutostart(opts: { argv?: string[] } = {}): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  let child: string[]
+  if (opts.argv) child = opts.argv // 测试注入（与 installAutostart 的 opts.argv 同款约定）
+  else if (process.argv.includes(AUTOSTART_LAUNCH_FLAG)) child = gatewayDaemonArgs()
+  else return false
+  return new Promise<boolean>((resolve) => {
+    const c = spawn(child[0], child.slice(1), { detached: true, stdio: 'ignore', windowsHide: true })
+    c.on('error', () => resolve(false))
+    c.on('spawn', () => {
+      c.unref()
+      resolve(true)
+    })
+  })
+}
+
 export function serviceFilePath(): string | null {
   switch (autostartKind()) {
     case 'launchd': return launchdPlistPath()
     case 'systemd': return systemdUnitPath()
-    case 'windows': return windowsStartupPath()
+    // 注册表形态没有服务文件：给诊断/状态展示用的「显示路径」，不可拿去做 fs 存在性判断
+    // （windows 的 installed/argv 判定走 readRunValueData/旧 VBS 专用逻辑，见 windowsStatus）
+    case 'windows': return windowsRunValueDisplay()
     default: return null
   }
 }
@@ -179,13 +308,6 @@ WantedBy=default.target
 `
 }
 
-export function windowsVbs(argv: string[]): string {
-  // Run 第二参 0 = 隐藏窗口；VB 字符串内引号翻倍，整个命令行作为单个带引号值传递
-  const cmd = argv.map((a) => `"${a}"`).join(' ')
-  const lit = '"' + cmd.replace(/"/g, '""') + '"'
-  return `' 由 modeldock gateway install 生成；删除本文件即取消开机自启\r\n' ${argvMark(argv)}\r\nCreateObject("WScript.Shell").Run ${lit}, 0, False\r\n`
-}
-
 // 状态 / 安装 / 卸载
 
 function execOk(cmd: string, args: string[], timeoutMs = 5000): { ok: boolean; output: string } {
@@ -213,12 +335,34 @@ export interface AutostartStatus {
   argv: string[]
 }
 
+/** Windows 状态：注册表 Run 键（新形态）+ 旧 VBS（迁移前安装的残留）双源判定。
+ *  新形态优先：两者并存（半迁移态）按 Run 键报告；仅剩旧 VBS 也视为已安装（用户的
+ *  自启在升级后依然有效），file 报 VBS 路径、argv 从 VBS 内容的 argv 标记回读。 */
+function windowsStatus(): AutostartStatus {
+  const display = windowsRunValueDisplay()
+  const data = readRunValueData()
+  const legacyPath = windowsStartupPath()
+  let legacyArgv: string[] | null = null
+  try {
+    legacyArgv = fs.existsSync(legacyPath) ? readRecordedArgv(fs.readFileSync(legacyPath, 'utf8')) : null
+  } catch {
+    legacyArgv = null
+  }
+  if (!data && !legacyArgv) {
+    return { kind: 'windows', installed: false, loaded: false, stale: false, file: display, argv: gatewayDaemonArgs() }
+  }
+  const argv = (data ? parseRunCommandLine(data) : legacyArgv) ?? gatewayDaemonArgs()
+  const stale = !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
+  return { kind: 'windows', installed: true, loaded: true, stale, file: data ? display : legacyPath, argv }
+}
+
 /** 完整状态（含 init 系统查询，spawnSync 级开销）——CLI / 诊断用；
  *  overview 等 5s 轮询路径请用 autostartOverview()（纯 stat，无 spawn）。 */
 export function autostartStatus(): AutostartStatus | null {
   const kind = autostartKind()
   const file = serviceFilePath()
   if (!kind || !file) return null
+  if (kind === 'windows') return windowsStatus()
   const installed = fs.existsSync(file)
   if (!installed) return { kind, installed: false, loaded: false, stale: false, file, argv: gatewayDaemonArgs() }
   const text = fs.readFileSync(file, 'utf8')
@@ -234,11 +378,16 @@ export function autostartStatus(): AutostartStatus | null {
   return { kind, installed, loaded, stale, file, argv }
 }
 
-/** overview 轮询用轻量状态：仅 stat 服务文件，无任何 spawn */
+/** overview 轮询用轻量状态：仅 stat 服务文件，无任何 spawn。
+ *  Windows 用镜像文件 + 旧 VBS 存在性做免 spawn 判断（生产上镜像与注册表条目同步落/删；
+ *  用户手动进注册表删条目属罕见漂移，CLI 侧 autostartStatus 查 reg 是权威，重新安装自愈）。 */
 export function autostartOverview(): { installed: boolean; kind: AutostartKind } | null {
   const kind = autostartKind()
   const file = serviceFilePath()
   if (!kind || !file) return null
+  if (kind === 'windows') {
+    return { installed: fs.existsSync(runValueMirrorFile()) || fs.existsSync(windowsStartupPath()), kind }
+  }
   return { installed: fs.existsSync(file), kind }
 }
 
@@ -276,18 +425,39 @@ export async function installAutostart(opts: { argv?: string[]; healthTimeoutMs?
   const errLog = path.join(logsDir(), 'service-err.log')
   const workDir = modeldockDir()
 
+  if (kind === 'windows') {
+    // windows：注册表 Run 键即全部，无运行态可立即拉起。
+    // 迁移（XPLAT-06）：装新形态时顺带清掉旧 VBS 残留（幂等，文件不存在是常态）
+    const file = windowsRunValueDisplay()
+    await writeRunValueData(windowsRunCommandLine([...argv, AUTOSTART_LAUNCH_FLAG]))
+    const legacy = windowsStartupPath()
+    const hadLegacy = fs.existsSync(legacy)
+    await fs.promises.rm(legacy, { force: true })
+    return {
+      kind,
+      file,
+      argv,
+      started: false,
+      note: hadLegacy
+        ? t(
+            '下次登录自动启动（已改用注册表启动项并清理旧版 VBS；无崩溃自动拉起）',
+            'Starts automatically at next login (switched to the registry Run entry and removed the legacy VBS; no restart on crash)'
+          )
+        : t(
+            '下次登录自动启动（Windows 启动项无崩溃自动拉起）',
+            'Starts automatically at next login (the Windows startup entry does not restart on crash)'
+          ),
+    }
+  }
+
   let file: string
   let content: string
   if (kind === 'launchd') {
     file = launchdPlistPath()
     content = launchdPlistXml(argv, workDir, outLog, errLog)
-  } else if (kind === 'systemd') {
+  } else {
     file = systemdUnitPath()
     content = systemdUnitIni(argv, workDir, outLog, errLog)
-    await ensureDir(path.dirname(file))
-  } else {
-    file = windowsStartupPath()
-    content = windowsVbs(argv)
     await ensureDir(path.dirname(file))
   }
   await atomicWrite(file, content, 0o644)
@@ -348,59 +518,46 @@ export async function installAutostart(opts: { argv?: string[]; healthTimeoutMs?
     return { kind, file, argv, started: true }
   }
 
-  if (kind === 'systemd') {
-    const unit = `${serviceLabel()}.service`
-    const dr = execOk('systemctl', ['--user', 'daemon-reload'])
-    if (!dr.ok) {
-      throw new Error(
-        t(
-          'systemd 用户实例不可用：{out}。无桌面会话时改用 modeldock gateway start --daemon',
-          'The systemd user instance is unavailable: {out}. Without a desktop session, use modeldock gateway start --daemon instead',
-          { out: dr.output }
-        )
+  // 走到这里 kind 已收窄为 'systemd'（windows 在上方早退，launchd 分支全部路径已 return/throw）
+  const unit = `${serviceLabel()}.service`
+  const dr = execOk('systemctl', ['--user', 'daemon-reload'])
+  if (!dr.ok) {
+    throw new Error(
+      t(
+        'systemd 用户实例不可用：{out}。无桌面会话时改用 modeldock gateway start --daemon',
+        'The systemd user instance is unavailable: {out}. Without a desktop session, use modeldock gateway start --daemon instead',
+        { out: dr.output }
       )
+    )
+  }
+  const running = await gatewayLive()
+  const r = running
+    ? execOk('systemctl', ['--user', 'enable', unit])
+    : execOk('systemctl', ['--user', 'enable', '--now', unit])
+  if (!r.ok) throw new Error(t('systemctl enable 失败：{out}', 'systemctl enable failed: {out}', { out: r.output }))
+  if (running) {
+    return {
+      kind,
+      file,
+      argv,
+      started: false,
+      note: t(
+        '当前网关继续由本次启动托管，服务在下次登录时自动接管',
+        'The current gateway keeps running under this launch; the service takes over automatically at next login'
+      ),
     }
-    const running = await gatewayLive()
-    const r = running
-      ? execOk('systemctl', ['--user', 'enable', unit])
-      : execOk('systemctl', ['--user', 'enable', '--now', unit])
-    if (!r.ok) throw new Error(t('systemctl enable 失败：{out}', 'systemctl enable failed: {out}', { out: r.output }))
-    if (running) {
-      return {
-        kind,
-        file,
-        argv,
-        started: false,
-        note: t(
-          '当前网关继续由本次启动托管，服务在下次登录时自动接管',
-          'The current gateway keeps running under this launch; the service takes over automatically at next login'
-        ),
-      }
-    }
-    const live = await waitGatewayLive(healthWaitMs)
-    if (!live) {
-      throw new Error(
-        t(
-          '服务已启用但网关未在 {s}s 内就绪，查看：journalctl --user -u {unit}',
-          'The service is enabled but the gateway is not ready within {s}s; check: journalctl --user -u {unit}',
-          { s: healthWaitMs / 1000, unit }
-        )
+  }
+  const live = await waitGatewayLive(healthWaitMs)
+  if (!live) {
+    throw new Error(
+      t(
+        '服务已启用但网关未在 {s}s 内就绪，查看：journalctl --user -u {unit}',
+        'The service is enabled but the gateway is not ready within {s}s; check: journalctl --user -u {unit}',
+        { s: healthWaitMs / 1000, unit }
       )
-    }
-    return { kind, file, argv, started: true }
+    )
   }
-
-  // windows：启动项文件即全部，无运行态可立即拉起
-  return {
-    kind,
-    file,
-    argv,
-    started: false,
-    note: t(
-      '下次登录自动启动（Windows 启动项无崩溃自动拉起）',
-      'Starts automatically at next login (the Windows startup entry does not restart on crash)'
-    ),
-  }
+  return { kind, file, argv, started: true }
 }
 
 /** 停止并卸载已加载的服务（进程随之被 init 系统终止）；服务文件保留。返回是否执行了卸载。 */
@@ -424,11 +581,20 @@ export interface AutostartUninstallResult {
 
 export async function uninstallAutostart(): Promise<AutostartUninstallResult> {
   const kind = autostartKind()
+  if (!kind) throw new Error(t('当前平台不支持开机自启', 'Autostart is not supported on this platform'))
+  if (kind === 'windows') {
+    // 两种形态对称清理：注册表 Run 键（新）+ 旧版 VBS 残留（迁移前安装的），缺哪个都幂等
+    const hadRun = deleteRunValueData()
+    const legacy = windowsStartupPath()
+    const hadLegacy = fs.existsSync(legacy)
+    await fs.promises.rm(legacy, { force: true })
+    return { removed: hadRun ? windowsRunValueDisplay() : legacy, wasInstalled: hadRun || hadLegacy }
+  }
   const file = serviceFilePath()
-  if (!kind || !file) throw new Error(t('当前平台不支持开机自启', 'Autostart is not supported on this platform'))
+  if (!file) throw new Error(t('当前平台不支持开机自启', 'Autostart is not supported on this platform'))
   const wasInstalled = fs.existsSync(file)
   if (!wasInstalled) return { removed: file, wasInstalled: false }
-  if (kind !== 'windows') stopService()
+  stopService()
   if (kind === 'systemd') execOk('systemctl', ['--user', 'disable', `${serviceLabel()}.service`])
   await fs.promises.rm(file, { force: true })
   if (kind === 'systemd') execOk('systemctl', ['--user', 'daemon-reload'])
