@@ -44,6 +44,12 @@ import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, sandboxNpmPrefix } from '../util/paths.js'
 import { UI_HTML } from './ui.js'
+import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
+import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
+import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
+import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hTrayLite, hTrayState, hUiPresence, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
+import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
+import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
 
 export interface GatewayStartOptions {
   port: number
@@ -74,15 +80,6 @@ function getRenderedUI(): { html: string; etag: string } {
   return renderedUICache
 }
 
-/** 请求体缓冲上限（默认 16MB，可经 gateway.max_body_mb 调整）。模型名改写需要完整请求体，
- *  全量缓冲是设计前提；16MB 覆盖 1M token 文本 + 多图 base64 的常规包体，真需要更大的
- *  （大 PDF/多附件）在 config.toml [gateway] max_body_mb 抬上限，超限更早 413 也让异常大包
- *  不再各占两份内存（chunks 数组 + concat 副本）。导出供单测断言换算与回落规则。 */
-const DEFAULT_MAX_BODY_MB = 16
-export function maxBodyBytes(cfg?: Config): number {
-  const mb = Number(cfg?.gateway?.max_body_mb)
-  return Number.isFinite(mb) && mb >= 1 ? Math.floor(mb) * 1024 * 1024 : DEFAULT_MAX_BODY_MB * 1024 * 1024
-}
 
 /** 模型目录端点视图缓存（backlog C3）：fullKnownTable() 的 8000+ 条序列化一次几百 KB，此前每次
  *  请求都全量 stringify。缓存键 = 表对象引用——catalog.ts 的 baseMemo 在目录刷新（mtime 变化/
@@ -98,183 +95,11 @@ function catalogView(): { data: string; etag: string } {
   return catalogViewCache
 }
 
-/** 收集命令输出的上限（防止日志/响应被刷爆） */
-const INSTALL_OUTPUT_MAX = 4000
 
-function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessEnv): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env })
-    child.stdout?.on('data', (d) => onOut(String(d)))
-    child.stderr?.on('data', (d) => onOut(String(d)))
-    child.on('error', (e) => {
-      onOut(String(e.message))
-      resolve(1)
-    })
-    child.on('close', (code) => resolve(code ?? 1))
-  })
-}
 
-/** 子进程引导共步（安装/卸载的 env 构造 + Node 保障 + PATH 前置 + 执行）：installChildEnv 统一构造
- *  子进程 env，needsNode 时先 ensureNodeRuntime 并把托管 bin 前置 PATH，再 runShell 执行。
- *  返回未被截尾的原始输出数组与退出码；Node 保障失败时 exit 为 null、output 携带失败消息（调用方各自落失败态）。 */
-async function runInstallCommand(cmd: string, needsNode: boolean): Promise<{ exit: number | null; output: string[] }> {
-  const output: string[] = []
-  const env = installChildEnv(process.env)
-  if (needsNode) {
-    try {
-      const nrt = await ensureNodeRuntime((l) => output.push(l + '\n'))
-      env.PATH = nrt.binDir + path.delimiter + (env.PATH ?? '')
-    } catch (e) {
-      output.push((e as Error).message)
-      return { exit: null, output }
-    }
-  }
-  const exit = await runShell(cmd, (c) => output.push(c), env)
-  return { exit, output }
-}
 
-/**
- * 客户端安装：有 install.command 则 shell 执行（npm 类 / 平台脚本类自动安装）→ 成功且声明 bootstrap
- * 则复用 applyChanges 补写空配置文件（自动快照 + 原子写，让 detect 生效、attach 可跑）；无 command
- * 的客户端（ZCode/WorkBuddy）不执行，仅返回指引。needsNode 的命令（npm 类）先 ensureNodeRuntime——
- * 本机无 Node 时下载托管运行时，其 bin 目录前置到子进程 PATH（系统 node 经 well-known 命中时同样
- * 前置：LaunchAgent 的 PATH 常缺 nvm 目录，不前置子进程找不到 npm）；子进程 env 经 installChildEnv
- * 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。沙箱模式（MODELRDOCK_FAKE_HOME）只放行
- * 可重定向落点的 npm 全局安装——npm_config_prefix/cache 指进沙箱，不碰宿主全局 prefix；脚本类
- * 安装（curl|bash、irm|iex 等）落点无法重定向，拒绝并提示手动安装。声明 install.probe 的先探测：
- * 命令已在 PATH 就跳过安装——页面状态可能是旧的（用户在别处刚装好），而 npm 全局重装会先把现有
- * 安装目录与 shim 改名 retire 再重建，postinstall 一旦不成功就只剩报错桩，把本来可用的命令弄坏。
- */
-export async function runClientInstall(
-  adapter: HarnessAdapter,
-  cfg: Config,
-  port: number
-): Promise<{ ok: boolean; auto: boolean; output: string; installed: boolean; skipped: boolean; blocked?: boolean }> {
-  const inst = adapter.install
-  const lines: string[] = []
-  let skipped = false
-  if (inst?.command) {
-    if (inst.probe && probePresent(inst, inst.probe)) {
-      skipped = true
-      lines.push(t('已在 PATH 上检测到 {cmd} 命令，跳过安装步骤（不重跑 npm 全局安装）', 'Found {cmd} already on PATH, skipping install (npm global install not re-run)', { cmd: inst.probe }))
-    } else {
-      const cmd = resolveInstallCommand(inst.command)
-      if (cmd === null) {
-        // 类型上不可达（command 存在才有 cmd）；防御性兜底走指引分支
-        lines.push(t('未配置可执行的安装命令', 'No executable install command configured'))
-      } else if (sandboxNpmPrefix() && !isNpmGlobalInstall(cmd) && process.env.MODELRDOCK_INSTALL_ALLOW_ANY !== '1') {
-        // MODELRDOCK_INSTALL_ALLOW_ANY=1 为单测桩命令（node -e 等）放行，受控环境专用
-        lines.push(t(
-          '沙箱环境不支持自动安装该客户端：其安装方式（{cmd}）会把程序写进真机，沙箱无法重定向其落点。请按页面安装指引手动安装（装好后点「重新检测」即可接入沙箱配置）',
-          'Sandbox cannot auto-install this client: its install method ({cmd}) writes to the real machine and cannot be redirected. Install manually per the guide, then click Re-detect to attach the sandbox config',
-          { cmd }
-        ))
-        return { ok: false, auto: true, output: tailText(lines), installed: false, skipped: false, blocked: true }
-      } else {
-        const { exit, output } = await runInstallCommand(cmd, !!inst.needsNode)
-        if (exit === null) {
-          // Node 保障失败：只报引导错误
-          return { ok: false, auto: true, output: tailText(output), installed: false, skipped: false }
-        }
-        // npm 对 engines 不匹配默认只警告（EBADENGINE）不拦：钉死的托管 Node 过期后新客户端
-        // 会「装成功、跑就崩」——把埋在日志里的警告提升为可操作提示，失败/成功路径都要可见
-        const engineHint = inst.needsNode ? engineWarningHint(output.join('')) : null
-        if (exit !== 0) {
-          if (engineHint) output.push(engineHint)
-          return { ok: false, auto: true, output: tailText(output), installed: false, skipped: false }
-        }
-        // 成功也带回子进程输出（npm 进度/下载占比），tailText 统一截尾
-        const childOut = output.join('').trim()
-        if (childOut) lines.push(childOut)
-        if (engineHint) lines.push(engineHint)
-        lines.push(t('已执行安装命令：{cmd}', 'Ran install command: {cmd}', { cmd }))
-      }
-    }
-    if (inst.bootstrap && inst.bootstrap.path) {
-      const bp = typeof inst.bootstrap.path === 'function' ? inst.bootstrap.path() : inst.bootstrap.path
-      // bootstrap 语义是"补写空配置"，不是覆盖：文件已存在时原样保留（before:null 的写入会被引擎的乐观锁拦下）
-      if ((await readTextIfExists(bp)) === null) {
-        await applyChanges(adapter.id, 'install', [{ path: bp, before: null, after: inst.bootstrap.content }], { yes: true, quiet: true })
-        lines.push(t('已写入空配置：{path}', 'Wrote empty config: {path}', { path: bp }))
-      } else {
-        lines.push(t('配置已存在，保留不动：{path}', 'Config already exists, left untouched: {path}', { path: bp }))
-      }
-    }
-  }
-  // 同一进程刚跑完安装命令就重查 status：PATH memo（PERF-07）可能仍缓存着安装前的 miss，
-  // 不主动失效会让「装完立即可见」缩水为最多 memo TTL 的延迟（review_blockers 记）
-  clearCommandMemo()
-  const st = await adapter.status(cfg, port)
-  return { ok: true, auto: !!inst?.command, output: tailText(lines), installed: st.installed, skipped }
-}
 
-/**
- * 客户端卸载：有 install.uninstall 则 shell 执行（仅 npm 类客户端声明），与安装共用同一套子进程
- * 环境（installChildEnv——沙箱下全局落点经 npm_config_prefix 重定向，只卸装进沙箱的副本；
- * needsNode 时先保障 node/npm 可用，托管 runtime 的 shim 在托管 bin 下、PATH 缺它找不到 npm）。
- * probe 未命中说明命令已不在（从未装或已手动卸载），跳过执行仅做 bootstrap 清理；未声明
- * uninstall 的客户端（脚本类安装器 / 桌面应用）拒绝并提示手动卸载。bootstrap 清理：文件内容
- * 恰为安装时写入的空配置（字节相等）才删除，让 detect 回到「未安装」；有用户内容一律保留。
- */
-export async function runClientUninstall(
-  adapter: HarnessAdapter,
-  cfg: Config,
-  port: number
-): Promise<{ ok: boolean; output: string; installed: boolean; skipped: boolean }> {
-  const inst = adapter.install
-  const lines: string[] = []
-  let skipped = false
-  const cmd = resolveInstallCommand(inst?.uninstall)
-  if (!cmd) {
-    lines.push(t('该客户端未配置自动卸载方式，请按安装指引手动卸载', 'This client has no automated uninstall; please uninstall it manually per the install guide'))
-    return { ok: false, output: tailText(lines), installed: (await adapter.status(cfg, port)).installed, skipped }
-  }
-  if (inst?.probe && !probePresent(inst, inst.probe)) {
-    skipped = true
-    lines.push(t('{cmd} 命令不在 PATH 上，无需卸载', '{cmd} is not on PATH; nothing to uninstall', { cmd: inst.probe }))
-  } else {
-    const { exit, output } = await runInstallCommand(cmd, !!inst?.needsNode)
-    if (exit === null) {
-      // Node 保障失败：只报引导错误
-      return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
-    }
-    if (exit !== 0) {
-      clearCommandMemo() // 卸载命令已执行（不排除部分删除），重查 status 前主动失效 PATH memo
-      return { ok: false, output: tailText(output), installed: (await adapter.status(cfg, port)).installed, skipped }
-    }
-    const childOut = output.join('').trim()
-    if (childOut) lines.push(childOut)
-    lines.push(t('已执行卸载命令：{cmd}', 'Ran uninstall command: {cmd}', { cmd }))
-  }
-  if (inst?.bootstrap?.path) {
-    const bp = typeof inst.bootstrap.path === 'function' ? inst.bootstrap.path() : inst.bootstrap.path
-    if ((await readTextIfExists(bp)) === inst.bootstrap.content) {
-      try {
-        await fsp.unlink(bp)
-        lines.push(t('已删除安装时写入的空配置：{path}', 'Removed the empty bootstrap config written at install time: {path}', { path: bp }))
-      } catch { /* 删除失败不阻断卸载结果 */ }
-    } else if (await readTextIfExists(bp) !== null) {
-      lines.push(t('配置文件已含其他内容，保留不动：{path}', 'Config file has other content, left untouched: {path}', { path: bp }))
-    }
-  }
-  // 同一进程刚跑完卸载命令就重查 status：主动失效 PATH memo，让「卸完立即可见」
-  clearCommandMemo()
-  const st = await adapter.status(cfg, port)
-  return { ok: true, output: tailText(lines), installed: st.installed, skipped }
-}
 
-function tailText(lines: string[], max = INSTALL_OUTPUT_MAX): string {
-  const text = lines.join('\n').trim()
-  return text.length > max ? text.slice(-max) : text
-}
-
-/** 沙箱内该客户端的自动安装能力：无 command → null（本就只展示指引，不执行）；
- *  npm 全局安装 → 'redirect'（落点可重定向进沙箱）；脚本类 → 'unsupported'（写真机，沙箱内拒绝）。
- *  非沙箱恒为 null——UI 与安装行为均维持原样。 */
-function sandboxInstallCapability(a: HarnessAdapter): 'redirect' | 'unsupported' | null {
-  if (!sandboxNpmPrefix() || !a.install?.command) return null
-  return isNpmGlobalInstall(resolveInstallCommand(a.install.command) ?? '') ? 'redirect' : 'unsupported'
-}
 
 /** Claude Code gateway discovery 的硬过滤：模型 ID 不含 claude/anthropic 字样的条目全部丢弃
  *  （2.1.296 二进制实测：filter(te=>/(claude|anthropic)/i.test(te.id))，全滤光时
@@ -311,14 +136,6 @@ function modelsListPayload(cfg: Config, providerId: string, discoveryAliases: bo
     has_more: false,
     last_id: data[data.length - 1]?.id,
   }
-}
-
-/** 安装/卸载前的 probe：可装进沙箱的 npm 类客户端在沙箱实例（FAKE_HOME）下只认沙箱内命中，
- *  宿主真机的同名命令不算数——否则真机装过的客户端在沙箱里永远「跳过安装」，卸载后状态
- *  也回不到未安装（2026-10-11 dev 沙箱实测踩中）。脚本类/桌面类只有真机一份拷贝，保持并集。 */
-function probePresent(inst: ClientInstall, cmd: string): boolean {
-  const sandboxIsolated = sandboxNpmPrefix() !== null && isNpmGlobalInstall(resolveInstallCommand(inst.command) ?? '')
-  return sandboxIsolated ? commandOnPathSandbox(cmd) : commandOnPath(cmd)
 }
 
 /** 各网关实例的 picker 展示路由基线（route=上次已同步的展示服务）。模块级 WeakMap：周期检测
@@ -482,29 +299,6 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   return server
 }
 
-function sendError(res: http.ServerResponse, status: number, message: string, hint?: string): void {
-  if (status === 413) res.setHeader('connection', 'close') // 请求体未读完即响应，连接不可复用
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(hint ? { error: { message }, modeldock: { hint } } : { error: { message } }))
-}
-
-/** 顶层兜底的错误→响应映射。此前 jsonRequestBody 的 400（非法 JSON）、readBody 的 413（超限）、
- *  写配置锁超时的 ConfigError、节假日拉取附带的 hint，一旦漏出端点局部 try/catch 都会被
- *  顶层吞成 500「网关内部错误」；这里统一还原为正确状态码与可操作提示。 */
-function errorReply(e: unknown): { status: number; message: string; hint?: string } {
-  if (e instanceof UpstreamError) return { status: e.status, message: e.message, hint: e.hint }
-  if (e instanceof ConfigError) return { status: 400, message: e.message }
-  const err = e as Error & { status?: unknown; hint?: unknown }
-  const msg = err && typeof err.message === 'string' ? err.message : String(e)
-  const hint = err && typeof err.hint === 'string' ? err.hint : undefined
-  // 显式带数值 status 的业务错误（如 413 上限）按原状态透出
-  if (typeof err?.status === 'number' && err.status >= 400 && err.status <= 599) {
-    return { status: err.status, message: msg, hint }
-  }
-  // 带 hint 但无状态码（如节假日拉取失败）：按上游失败处理
-  if (hint) return { status: 502, message: msg, hint }
-  return { status: 500, message: t('网关内部错误：{msg}', 'Gateway internal error: {msg}', { msg }) }
-}
 
 function extractToken(req: http.IncomingMessage): string | null {
   const auth = req.headers.authorization
@@ -514,32 +308,6 @@ function extractToken(req: http.IncomingMessage): string | null {
   return null
 }
 
-async function readBody(req: http.IncomingMessage, max: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    const onData = (chunk: Buffer) => {
-      size += chunk.length
-      if (size > max) {
-        req.removeListener('data', onData)
-        req.resume()
-        reject(new UpstreamError(
-          413,
-          t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max }),
-          t('模型改写需完整缓冲请求体；确需更大包体，在 config.toml 的 [gateway] 下设置 max_body_mb 后重启网关', 'Model rewriting buffers the full body; to allow larger bodies set max_body_mb under [gateway] in config.toml and restart the gateway')
-        ))
-        // 不在 data 回调里 destroy：先毁 socket 客户端只收到 ECONNRESET（SDK 还会自动重试，
-        // 形成超大包重传循环），413 与修复提示永远到不了。摘掉监听 + resume 排空剩余数据，
-        // 让 413 响应正常发出（sendError 对 413 补 Connection: close）。
-        return
-      }
-      chunks.push(chunk)
-    }
-    req.on('data', onData)
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
-  })
-}
 
 async function handleRequest(
   rt: GatewayRuntime,
@@ -735,486 +503,34 @@ function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean
   return false
 }
 
-/** 登记「设备记忆」值到 gateway.json 的 devices（FIFO 上限 20）。失败不影响登录本身。 */
-async function registerWebDevice(rt: GatewayRuntime, device: string): Promise<void> {
-  try {
-    await mutateGatewayState((state) => {
-      const devices = [device, ...(state?.devices ?? []).filter((d) => d !== device)].slice(0, 20)
-      if (state) return { ...state, devices }
-      // 无状态文件（测试/嵌入式启动）：用运行时信息补一个最小状态，设备记忆才有落点
-      return {
-        pid: process.pid,
-        port: rt.port ?? 0,
-        admin_token: rt.adminToken,
-        started_at: localIsoTs(new Date(rt.startedAt)),
-        devices,
-      }
-    })
-  } catch {
-    /* 登记失败不影响登录 */
-  }
-}
 
-/**
- * 管理面统一鉴权：admin token（CLI 兼容）或控制台 cookie（?token= 登种，HttpOnly + SameSite=Lax）。
- * 跨站 drive-by 靠 SameSite=Lax 挡住；DNS rebinding 靠 hostAllowed 挡住；本机程序一律需要 token。
- */
-async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
-  const raw = await readBody(req, maxBodyBytes())
-  if (raw.length === 0) return {}
-  try {
-    return JSON.parse(raw.toString('utf8'))
-  } catch {
-    throw new UpstreamError(400, t('请求体必须是 JSON', 'Request body must be JSON'))
-  }
-}
 
-/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态 */
-async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
-  await mutateConfig(fn)
-  await reloadRuntime(rt)
-}
 
-async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unknown>> {
-  const cfg = rt.config
-  const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，row 顺序与 allAdapters 一致
-  const adapters = allAdapters(cfg)
-  const statuses = await Promise.all(adapters.map((a) => a.status(cfg, port)))
-  const harnessRows = adapters.map((a, i) => {
-    const st = statuses[i]
-    return {
-      id: a.id,
-      label: a.label,
-      attached: !!cfg.harness[a.id],
-      mode: cfg.harness[a.id]?.mode ?? null,
-      route: cfg.harness[a.id]?.route ?? null,
-      pointing: st.pointing ?? 'unknown',
-      detail: st.detail ?? '',
-    }
-  })
-  return {
-    active_profile: cfg.active_profile ?? null,
-    gateway: { port },
-    providers: Object.entries(cfg.providers).map(([id, p]) => ({
-      id,
-      name: p.name ?? id,
-      base_url: p.base_url,
-      protocol: p.protocol,
-      auth_style: p.auth_style,
-      key_ref: p.key_ref,
-      proxy: p.proxy ?? 'direct',
-      models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true, includeSource: true })),
-    })),
-    profiles: Object.entries(cfg.profiles).map(([name, p]) => ({
-      name,
-      provider: p.provider,
-      default_model: p.default_model ?? null,
-      aliases: p.aliases ?? {},
-    })),
-    harness: harnessRows,
-    uptime_ms: Date.now() - rt.startedAt,
-    reloads: rt.reloads,
-  }
-}
 
-/** overview 短 TTL 缓存（UI 每 5s 轮询，避免每次全量 adapter IO；绑定 runtime 实例 + 配置重载代数，任一变化即失效）。
- *  data 存序列化后的字符串：TTL 内命中直接 end 缓存串，不再对几十-几百 KB 的 view 逐次重复 stringify。
- *  TTL 必须**大于** UI 轮询间隔（5000ms）才会在两次轮询之间有命中——曾为 2000ms，下次 5s 轮询前必过期，
- *  稳态每次轮询全量重跑 buildOverview（每 provider 一次 keychain getSecret + 适配器 status 探测），缓存形同虚设。 */
-export const OVERVIEW_TTL_MS = 6_000
-let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
 
-/** 立即失效 overview 缓存（轻量模式广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
-function invalidateOverviewCache(): void {
-  overviewCache = null
-}
 
-/** overview 缓存命中判定（`now` 可注入便于单测给定 TTL 窗口）：
- *  命中须同 runtime 实例 + 同配置重载代数 + 同语言（overview 文案随请求语言生成，语言不同不能互借）+ 未过 TTL。 */
-export function overviewCacheHit(
-  cached: NonNullable<typeof overviewCache>,
-  rt: GatewayRuntime,
-  reloads: number,
-  lang: string,
-  now: number
-): boolean {
-  return overviewServeDecision(cached, rt, reloads, lang, now) === 'hit'
-}
 
-/** overview 响应决策（`now` 可注入便于单测）：
- *  - hit：键匹配且 TTL 内——直发缓存串；
- *  - stale：键匹配但过 TTL——先回旧快照（零等待），后台单飞重建，UI 下一轮轮询（≤5s）拿到新数据。
- *    Windows 冷探测（桌面客户端 reg query 全树、DPAPI 解密 spawn PowerShell、PATH 同步全扫）只发生在
- *    后台，不再挡在用户打开页面的关键路径上；
- *  - miss：键不匹配（配置写经 reloads 递增、语言切换、冷启动）——同步重建，保证写后立即可见新配置。 */
-export function overviewServeDecision(
-  cached: NonNullable<typeof overviewCache>,
-  rt: GatewayRuntime,
-  reloads: number,
-  lang: string,
-  now: number
-): 'hit' | 'stale' | 'miss' {
-  if (cached.rt !== rt || cached.reloads !== reloads || cached.lang !== lang) return 'miss'
-  return now - cached.at < OVERVIEW_TTL_MS ? 'hit' : 'stale'
-}
 
-let overviewRebuilding: Promise<unknown> | null = null
 
-async function rebuildOverview(rt: GatewayRuntime): Promise<string> {
-  const view = await buildOverview(rt)
-  const data = JSON.stringify(view)
-  overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data }
-  return data
-}
 
-/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；键匹配但过期走 SWR
- * （旧串先行 + 后台单飞重建）；键不匹配同步重建。缓存键含请求语言：view 里的客户端卡片描述等
- * 文案随请求语言生成，语言不同不能互借缓存。 */
-async function overviewViewData(rt: GatewayRuntime): Promise<string> {
-  const cached = overviewCache
-  if (!cached) return rebuildOverview(rt)
-  const decision = overviewServeDecision(cached, rt, rt.reloads, getLang(), Date.now())
-  if (decision === 'hit') return cached.data
-  if (decision === 'stale') {
-    if (!overviewRebuilding) {
-      overviewRebuilding = rebuildOverview(rt).catch(() => {}).finally(() => { overviewRebuilding = null })
-    }
-    return cached.data
-  }
-  return rebuildOverview(rt)
-}
 
-/** 启动预热：后台构建一次 overview（顺带焐热适配器探测 memo、secrets 解密缓存与缓存串本身）。
- *  daemon 起来 2s 后用户大概率还没打开控制台——把 Windows 冷探测的数秒成本在无人等待时提前付掉，
- *  用户随后打开页面首屏直接命中或走 SWR 秒回。失败静默（下次请求/轮询照常重建）。 */
-export function warmupOverview(rt: GatewayRuntime, delayMs = 2_000): void {
-  const timer = setTimeout(() => {
-    overviewViewData(rt).catch(() => {})
-  }, delayMs)
-  timer.unref?.()
-}
 
-/** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
-async function buildOverview(rt: GatewayRuntime): Promise<Record<string, unknown>> {
-  const cfg = rt.config
-  // 唯一「正在使用」口径：钉定 > 可用窗口 > 默认（含 enabled/熔断过滤，与转发同源）。
-  // 服务卡、客户端行、手机页、/v1/models 全部消费它，不再各自用 active_profile 推算。
-  const route = autoRouteInfo(rt)
-  // harness → 当前路由到的 provider（钉死的 route 优先，否则跟随全局生效路由）
-  const hidSvc: Record<string, string> = {}
-  const hidFollows: Record<string, boolean> = {}
-  for (const [hid, he] of Object.entries(cfg.harness ?? {})) {
-    const pinned = !!(he.route && he.route !== 'default')
-    const routeName = pinned ? he.route : cfg.active_profile
-    const prof = routeName ? cfg.profiles[routeName] : undefined
-    if (prof) hidSvc[hid] = prof.provider
-    hidFollows[hid] = !pinned
-  }
-  const services = []
-  // key 是否已配置并行预取：串行 await 在 keychain 后端下是逐 provider spawn 外部进程（overview
-  // 稳态约每几秒重建一次，串行 N 次造成周期性延迟尖峰），结果与逐个 await 完全一致
-  const providerEntries = Object.entries(cfg.providers)
-  const keyPresence = new Map(await Promise.all(providerEntries.map(async ([id, p]) => [id, !!(await getSecret(p.key_ref))] as const)))
-  for (const [id, p] of providerEntries) {
-    // 引用该 provider 的 profile：active_profile 优先（与 /service/update 写 default_model/候选链的选择逻辑一致）
-    const profileRef = profileRefForProvider(cfg, id)
-    const profileEntry = profileRef ? cfg.profiles[profileRef] : undefined
-    const models = Object.keys(p.models ?? {})
-    const hasKey = keyPresence.get(id) ?? false
-    const h = rt.health.get(id)
-    const melted = isMeltdown(rt, id)
-    services.push({
-      id,
-      label: p.name ?? id,
-      base_url: p.base_url,
-      protocol: p.protocol,
-      endpoints: p.endpoints ?? undefined,
-      hasKey,
-      modelsCount: models.length,
-      defaultModel: profileEntry?.default_model ?? models[0] ?? null,
-      fallback: (profileEntry?.fallback ?? [])
-        .map((e) => parseFallbackEntry(e))
-        .filter((x): x is { providerId: string; model?: string } => x !== null)
-        .map((x) => ({ provider: x.providerId, model: x.model ?? null })),
-      // 「正在使用」= 全局生效主服务（钉定/定时窗口/默认，含可用性过滤），不是 active_profile
-      inUse: id === route.provider,
-      enabled: p.enabled !== false,
-      priority: p.priority ?? 0,
-      down: melted,
-      meltdown_until: melted ? (h?.meltdown_until ?? null) : null,
-      lastMs: h?.lastMs ?? null,
-      models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true })),
-    })
-  }
-  // 兼容旧字段名：isCurrent 与 inUse 同值（移动端/PWA 旧页面可能仍读它）
-  services.forEach((s: { isCurrent?: boolean; inUse: boolean }) => { s.isCurrent = s.inUse })
-  const current = route.provider
-    ? { id: route.provider, label: route.providerLabel ?? route.provider, model: route.model }
-    : null
-  // 默认路由（active_profile）：配置态语义（接入跟随/直连目标），与「正在使用」分开
-  const defaultRoute = route.defaultProvider
-    ? { id: route.defaultProvider, label: route.defaultProviderLabel ?? route.defaultProvider, model: route.defaultModel }
-    : null
-  const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  const usedByMap: Record<string, string[]> = {}
-  // 各适配器 status 相互独立、只读，并发执行；Promise.all 保序，按 adapter 取回，顺序不受并发影响。
-  // clientProfileOptions 与 status 一并并发：曾放在下方 clients 组装循环里逐个 await（当前仅 dsh
-  // 实现，读 YAML 目录），是 overview 重建路径上唯一的串行点，并行后与 status 同窗口完成
-  const adapters = allAdapters(cfg)
-  const [statuses, profileOptsList] = await Promise.all([
-    Promise.all(adapters.map(async (a) => [a, await a.status(cfg, port)] as const)),
-    Promise.all(adapters.map((a) => (a.clientProfileOptions ? a.clientProfileOptions() : Promise.resolve(null)))),
-  ])
-  const statusByAdapter = new Map(statuses)
-  const clients = []
-  for (const [i, a] of adapters.entries()) {
-    const st = statusByAdapter.get(a)!
-    const he = cfg.harness[a.id]
-    const baseProviderId = he && hidSvc[a.id] ? hidSvc[a.id] : undefined
-    // 跟随全局的客户端：服务随「正在使用」走（含定时窗口）；钉定路由的仍写自己的服务
-    const providerId = he && hidFollows[a.id] ? (route.provider ?? baseProviderId) : baseProviderId
-    // 钉定信息：route 存钉住的 profile 名（null = 跟随全局），pinnedProvider 是该 profile 指向的服务 id（UI 下拉回显用）
-    const pinnedRoute = he?.route && he.route !== 'default' ? he.route : null
-    clients.push({
-      id: a.id,
-      label: a.label,
-      installed: st.installed,
-      attached: st.attached,
-      pointing: st.pointing ?? 'unknown',
-      detail: st.detail ?? '',
-      service: providerId ? (cfg.providers[providerId]?.name ?? providerId) : null,
-      followsActive: !!(he && hidFollows[a.id]),
-      mode: he?.mode ?? null,
-      directSupported: a.directMode === true,
-      route: pinnedRoute,
-      pinnedProvider: pinnedRoute ? (cfg.profiles[pinnedRoute]?.provider ?? null) : null,
-      // 客户端自身 profile（dsh 的 desktop/web 等）：未接入时 UI 据此渲染接入范围选择；attached 后回显已选范围
-      clientProfiles: profileOptsList[i],
-      clientScope: he?.client_profiles ?? null,
-      // 沙箱安装能力（枚举语义见 sandboxInstallCapability）：'unsupported' 时 UI 降级为只展示安装指引
-      install: a.install ? {
-        auto: !!a.install.command,
-        command: resolveInstallCommand(a.install.command),
-        guide: a.install.guide,
-        homepage: a.install.homepage ?? null,
-        sandboxInstall: sandboxInstallCapability(a),
-        // 自动卸载能力：null=未声明（UI 不出卸载按钮）；sandbox=卸载是否只落沙箱（FAKE_HOME 下
-        // npm 全局卸载经 prefix 重定向，只卸装进沙箱的副本）
-        uninstall: resolveInstallCommand(a.install.uninstall)
-          ? { command: resolveInstallCommand(a.install.uninstall)!, sandbox: sandboxNpmPrefix() !== null }
-          : null,
-      } : null,
-    })
-    if (he && providerId) (usedByMap[providerId] ||= []).push(a.label)
-  }
-  // 每个服务被哪些客户端使用
-  services.forEach((s: any) => { s.usedBy = usedByMap[s.id] ?? [] })
-  ensurePresetsLoaded() // 懒加载预设（BUG-12）：presets.json 格式错误在此抛可操作报错，而不是把网关启动都卡死
-  return {
-    ok: true,
-    gateway: {
-      port,
-      running: true,
-      // dev 沙箱实例（run_dev 设置）：配置/日志/客户端写入全部隔离在沙箱 home，UI 据此显示徽标与写操作警示
-      sandbox: process.env.MODELRDOCK_DEV_SANDBOX === '1',
-      home: (await import('../util/paths.js')).modeldockDir(),
-      autoRoute: {
-        ...autoRouteInfo(rt),
-        failoverOn429: (rt.config.gateway?.failover_status_codes ?? []).includes(429),
-        autoFallback: rt.config.gateway?.auto_fallback !== false,
-      },
-      autostart: autostartOverview(),
-      // 轻量模式（派生态，不落盘）：无任何 Web UI 打开时为 true；trayLiteRequest 供已开页面
-      // 轮询感知「进入轻量模式」的关闭广播（时间戳，页面侧按新于上次所见去重）
-      trayLite: trayLiteActive(Date.now()),
-      trayLiteRequest: pendingTrayLiteRequest(),
-    },
-    current: current ? { id: current.id, label: current.label, model: current.model } : null,
-    // 默认路由（active_profile）：与 current（正在使用）区分，供电台「跟随全局」/直连目标等配置态使用
-    defaultRoute,
-    services,
-    clients,
-    // 预设附带模型目录（添加页首屏直显预设模型；只带用户可见的三个字段，source 等内部字段不出域）
-    presets: PRESETS.map((p) => {
-      const pm = presetModels(p)
-      return {
-        id: p.id, label: p.label, vendor: p.vendor, base_url: p.base_url, protocol: p.protocol,
-        endpoints: p.endpoints ?? undefined, docs_url: p.docs_url ?? null,
-        models: pm ? Object.fromEntries(Object.entries(pm).map(([mid, m]) => [mid, { display_name: m.display_name, context_window: m.context_window, max_output: m.max_output, capabilities: m.capabilities ?? [] }])) : undefined,
-      }
-    }),
-    knownModels: knownMetaTable(),
-    // 多机同步状态行（M2）：只读展示，控制台不做同步配置（去电脑端命令行）
-    sync: await syncStatus(),
-    // 附近电脑的待确认拉取请求（sync-nearby，单槽 120s）：确认卡据此显示
-    syncRequest: peekSyncRequest(),
-  }
-}
 
-/** 服务 → profile 解析（UI 按「服务」操作、底层路由单元是 profile）：
- *  优先 active_profile（若指向该服务），其次已引用该服务的第一个 profile；一个都没有则建隐藏 profile（__pin_<id>）。
- *  可能写 cfg（新建隐藏 profile），必须在 persistConfig 的回调里调用。 */
-function profileForProvider(c: Config, providerId: string): string {
-  if (c.active_profile && c.profiles[c.active_profile]?.provider === providerId) return c.active_profile
-  const existing = Object.keys(c.profiles).find((n) => c.profiles[n].provider === providerId)
-  if (existing) return existing
-  const name = `__pin_${providerId}`
-  c.profiles[name] = { name, provider: providerId, default_model: Object.keys(c.providers[providerId]?.models ?? {})[0] }
-  return name
-}
 
-/** 引用该 provider 的 profile 名（active_profile 优先），无则 undefined。buildOverview 的「默认模型/备用链
- *  读哪个 profile」与 service/update 的「写哪个 profile」是同一选择逻辑，抽共享避免口径漂移。只读，不建隐藏 profile。 */
-function profileRefForProvider(c: Config, providerId: string): string | undefined {
-  const refs = Object.keys(c.profiles).filter((n) => c.profiles[n].provider === providerId)
-  return refs.length
-    ? (c.active_profile && c.profiles[c.active_profile]?.provider === providerId ? c.active_profile : refs[0])
-    : undefined
-}
 
-// 同网直拉迁移（sync-lan-pull，B 机 import 侧）
 
-const SYNC_TICKET_TTL_MS = 5 * 60 * 1000
 
-/** 票据：preview 阶段解密后的 doc 存内存（网关本就持有 secrets 明文缓存，无新增暴露等级），单次 + 5min TTL */
-const syncTickets = new Map<string, { doc: Syncdoc; createdAt: number }>()
 
-function putSyncTicket(doc: Syncdoc): string {
-  sweepSyncTickets()
-  const ticket = randomToken('mdkticket')
-  syncTickets.set(ticket, { doc, createdAt: Date.now() })
-  return ticket
-}
 
-function sweepSyncTickets(): void {
-  for (const [k, v] of syncTickets) {
-    if (Date.now() - v.createdAt > SYNC_TICKET_TTL_MS) syncTickets.delete(k)
-  }
-}
 
-function takeSyncTicket(ticket: string): Syncdoc {
-  const hit = ticket ? syncTickets.get(ticket) : undefined
-  if (!hit || Date.now() - hit.createdAt > SYNC_TICKET_TTL_MS) {
-    if (ticket) syncTickets.delete(ticket)
-    throw new Error(t('票据无效或已过期，请重新预览', 'Ticket invalid or expired; preview again'))
-  }
-  syncTickets.delete(ticket) // 单次：确认导入后即焚
-  return hit.doc
-}
 
-// 附近电脑确认式直拉（sync-nearby，B 机发起侧）
 
-interface RemoteRequestState {
-  status: 'waiting' | 'granted' | 'denied' | 'timeout' | 'failed'
-  ticket?: string
-  report?: ReturnType<typeof reportOfDoc>
-  meta?: { createdBy: string; createdAt: string }
-  error?: string
-  createdAt: number
-}
 
-const REMOTE_REQUEST_TTL_MS = 5 * 60 * 1000
-const remoteRequests = new Map<string, RemoteRequestState>()
 
-function sweepRemoteRequests(): void {
-  for (const [k, v] of remoteRequests) {
-    if (Date.now() - v.createdAt > REMOTE_REQUEST_TTL_MS) remoteRequests.delete(k)
-  }
-}
 
-// fetch-models 失败负缓存：键 = 协议|地址|key 摘要（明文 key 不进 Map 键）。上游不可达时
-// 60s 内同键请求直接复用上次失败信息，不再重跑 8 端点×15s 的候选链；改 Key/地址即换键不受影响
-const FETCH_MODEL_FAIL_TTL_MS = 60_000
-const fetchModelFailMemo = new Map<string, { at: number; msg: string }>()
-function rememberFetchModelFail(key: string, msg: string): void {
-  const now = Date.now()
-  for (const [k, v] of fetchModelFailMemo) {
-    if (now - v.at > FETCH_MODEL_FAIL_TTL_MS) fetchModelFailMemo.delete(k)
-  }
-  fetchModelFailMemo.set(key, { at: now, msg })
-}
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-/** B 机后台链路：向选中的附近电脑敲门（多网卡候选 IP 依次尝试）→ 轮询授权（A 用户在确认卡
- *  点允许/拒绝）→ 拿到一次性直拉链接 → 拉信封（pull 端点焚毁）→ 验签 → 存票据。
- *  全程包体恒密文；失败/拒绝/超时都落状态供前端轮询展示。 */
-async function runRemoteRequest(requestId: string, ips: string[], port: number): Promise<void> {
-  const nonce = randomBytes(24).toString('hex')
-  const from = os.hostname().slice(0, 128)
-  const set = (patch: Omit<RemoteRequestState, 'createdAt'>): void => {
-    // 条目可能已被 5min TTL 清扫（敲门逐 IP 5s 超时 + 授权轮询，总时长可超 TTL）：
-    // 缺失时须以当前时间重建 createdAt，否则 ...undefined 展开产出无 createdAt 的条目，
-    // Date.now() - undefined = NaN 永不过期 → 每次晚完成的请求留一个「永生」条目
-    const prev = remoteRequests.get(requestId)
-    remoteRequests.set(requestId, { ...(prev ?? { createdAt: Date.now() }), ...patch })
-  }
-  try {
-    // 敲门：候选 IP 逐个尝试（同机 127.0.0.1 / 局域网多网卡），任一成功即可
-    let knocked = false
-    let knockedIp = ''
-    let lastErr = ''
-    for (const ip of ips) {
-      try {
-        const knock = await fetch(`http://${ip}:${port}/m/sync/request`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ nonce, from }),
-          signal: AbortSignal.timeout(5000),
-        })
-        if (!knock.ok) {
-          lastErr = t('对方未接受请求（HTTP {status}）', 'The other computer rejected the request (HTTP {status})', { status: knock.status })
-          continue
-        }
-        knocked = true
-        knockedIp = ip
-        break
-      } catch (e) {
-        lastErr = (e as Error).message
-      }
-    }
-    if (!knocked) throw new Error(lastErr || t('对方不可达', 'The other computer is unreachable'))
-    let grant: { url: string; passphrase: string } | { denied: true } | null = null
-    for (let i = 0; i < 60 && !grant; i++) {
-      await sleep(1000)
-      const g = await fetch(`http://${knockedIp}:${port}/m/sync/grant?n=${nonce}`, { signal: AbortSignal.timeout(3000) })
-      if (g.status === 403) grant = { denied: true }
-      else if (g.ok) {
-        const j = (await g.json()) as { url?: string; passphrase?: string }
-        if (j.url && j.passphrase) grant = { url: j.url, passphrase: j.passphrase }
-      }
-    }
-    if (!grant) {
-      set({ status: 'timeout' })
-      return
-    }
-    if ('denied' in grant) {
-      set({ status: 'denied' })
-      return
-    }
-    const envText = await fetchEnvelopeFromUrl(grant.url)
-    const env: unknown = JSON.parse(envText)
-    const doc = validateSyncdoc(openEnvelope(env, grant.passphrase))
-    const metaEnv = env as Record<string, unknown>
-    set({ status: 'granted', ticket: putSyncTicket(doc), report: reportOfDoc(doc), meta: { createdBy: String(metaEnv.created_by ?? ''), createdAt: String(metaEnv.created_at ?? '') } })
-  } catch (e) {
-    set({ status: 'failed', error: (e as Error).message })
-  }
-}
 
-// ===== admin 端点处理器（模块级，逐字搬自 handleAdmin 原 if 链，行为零变化）=====
-// 分层鉴权不变：tier-1 豁免端点与 admin 门仍留在 handleAdmin；命中 ADMIN_ROUTES 即已过门。
-
-/** admin 门之后各端点处理器的请求上下文：handleAdmin 每请求构造一次 */
-interface AdminCtx {
-  rt: GatewayRuntime
-  req: http.IncomingMessage
-  res: http.ServerResponse
-  /** 请求级审计闭包（handleAdmin 每请求构造，见原 audit 函数） */
-  audit: (op: Bilingual, target: string | Bilingual, detail?: Bilingual, err?: Bilingual | string) => void
-  o: { idle: number; retries: number }
-}
 type AdminHandler = (c: AdminCtx) => Promise<void>
 
 // attach 请求体里的 client_profiles：["desktop"] 或 "desktop,web"（后者兼容表单直传）；非法输入一律忽略为全部
@@ -1262,41 +578,7 @@ async function hStatus(c: AdminCtx): Promise<void> {
   return
 }
 
-// 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
-async function hUpdateStatus(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  // 惰性周期重查：控制台每 60s 轮询一次状态，顺带触发一次检查——
-  // kick 内部有 成功 24h TTL / 失败 30min 退避 双守卫，命中即静默跳过，
-  // 常驻网关因此不必重启也能在控制台开着时发现新版本（此前只在启动时查一次）
-  void kickUpdateCheck(rt).catch(() => {})
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(await getUpdateStatus(rt)))
-  return
-}
 
-async function hUpdateCheck(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  // 立即返回，页面轮询 status 取结果（GitHub 检查可能十几秒，不占请求）
-  void kickUpdateCheck(rt, { force: true }).catch(() => {})
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true }))
-  return
-}
-
-async function hUpdateApply(c: AdminCtx): Promise<void> {
-  const { rt, res, audit } = c
-  const r = applyUpdate(rt, { argv: updateDaemonArgs() })
-  if (r.started) {
-    audit(bi('一键更新', 'One-click update'), '-', bi('开始更新到 v{v}，网关将短暂中断', 'Updating to v{v}; the gateway restarts briefly', { v: r.latest ?? '?' }))
-  } else {
-    const reasonZh = r.reason === 'in_progress' ? '更新已在进行中' : '没有可安装的新版本'
-    const reasonEn = r.reason === 'in_progress' ? 'an update is already in progress' : 'no new version to install'
-    audit(bi('一键更新', 'One-click update'), '-', bi('未执行：{r}', 'Not started: {r}', { r: bi(reasonZh, reasonEn) }))
-  }
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: r.started, ...r }))
-  return
-}
 
 async function hLogs(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
@@ -1339,84 +621,8 @@ async function hModelCatalog(c: AdminCtx): Promise<void> {
   return
 }
 
-async function hOverview(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  markUiPing(Date.now()) // 控制台页面的 5s overview 轮询即在场心跳（免新端点高频调用）
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
-  return
-}
 
-/** 托盘状态数据源：overview 的瘦身投影（托盘菜单需要的字段，几 KB）。
- *  复用 overview 的 6s TTL 缓存——托盘 5s 轮询与控制台轮询共享同一份重建，不抬高 buildOverview 频率；
- *  两平台托盘共用本端点（C# 侧无 Decodable，正则解析吃不动嵌套数组，载荷必须小） */
-async function hTrayState(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  const view = JSON.parse(await overviewViewData(rt)) as {
-    gateway?: { autoRoute?: { forced?: string | null; schedule?: { applied?: boolean } } }
-    current?: { id: string; label: string; model?: string | null } | null
-    services?: Array<{ id: string; label: string; inUse?: boolean; enabled?: boolean; down?: boolean; defaultModel?: string | null; models?: Array<{ id: string; display_name?: string | null }> }>
-    clients?: Array<{ id: string; label: string; installed?: boolean; attached?: boolean; mode?: string | null; route?: string | null; pinnedProvider?: string | null; followsActive?: boolean; service?: string | null }>
-  }
-  const payload = {
-    ok: true,
-    // 轻量模式为派生态，live 求值而非读 6s 缓存的 overview 串：托盘勾选态少一档陈旧
-    trayLite: trayLiteActive(Date.now()),
-    current: view.current ?? null,
-    autoPin: view.gateway?.autoRoute?.forced ?? null,
-    scheduleApplied: view.gateway?.autoRoute?.schedule?.applied === true,
-    services: (view.services ?? []).map((s) => ({
-      id: s.id,
-      label: s.label,
-      inUse: s.inUse === true,
-      enabled: s.enabled !== false,
-      down: s.down === true,
-      defaultModel: s.defaultModel ?? null,
-      models: (s.models ?? []).map((m) => ({ id: m.id, display: m.display_name ?? null })),
-    })),
-    clients: (view.clients ?? [])
-      .filter((cl) => cl.installed === true)
-      .map((cl) => ({
-        id: cl.id,
-        label: cl.label,
-        attached: cl.attached === true,
-        mode: cl.mode ?? null,
-        route: cl.route ?? null,
-        pinnedProvider: cl.pinnedProvider ?? null,
-        followsActive: cl.followsActive === true,
-        service: cl.service ?? null,
-      })),
-  }
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(payload))
-  return
-}
 
-/** 轻量模式入口（托盘菜单点击）：向已开页面广播关闭请求（overview 的 trayLiteRequest 字段，
- *  页面感知后 window.close()，被浏览器拦截时页面显示手动关闭提示）。请求体不解析
- *  （托盘双端发 {} / {"enabled":true}，仅读取以复用连接） */
-async function hTrayLite(c: AdminCtx): Promise<void> {
-  const { req, res, audit } = c
-  await jsonRequestBody(req)
-  requestTrayLite(Date.now())
-  invalidateOverviewCache() // 广播时间戳即刻可见：页面最迟下一个 5s 轮询拿到
-  audit(bi('进入轻量模式', 'Enter lightweight mode'), '-')
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, trayLite: trayLiteActive(Date.now()) }))
-  return
-}
-
-/** 页面在场心跳（页面 15s 一次，不受 document.hidden 门控——后台标签页也算「打开的 UI」）；
- *  pagehide 的 sendBeacon 带 {"leaving":true} 即刻离场，不等 TTL */
-async function hUiPresence(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  const b = await jsonRequestBody(req)
-  if (b.leaving === true) markUiLeaving(Date.now())
-  else markUiPing(Date.now())
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true }))
-  return
-}
 
 async function hFetchModels(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
@@ -1710,179 +916,11 @@ async function hLanPost(c: AdminCtx): Promise<void> {
   return
 }
 
-async function hSyncOffer(c: AdminCtx): Promise<void> {
-  const { rt, res, audit } = c
-  // 同网直拉迁移（A 机）：生成一次性链接（口令藏 fragment，10 分钟有效、取走即焚）
-  try {
-    const r = await createSyncOffer(rt)
-    audit(bi('分享配置到附近电脑', 'Share config nearby'), bi('已生成直拉链接', 'pull link created'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, ...r }))
-  } catch (e) {
-    audit(bi('分享配置到附近电脑', 'Share config nearby'), '-', undefined, (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
-async function hSyncImport(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  // 同网直拉迁移（B 机）：apply 一键应用（url/file 直发，或附近直拉链路的 ticket）；preview（→ 票据）保留给 API 兼容。
-  // 审计只记 phase 与来源形态，绝不记 URL（查询串含 token）与口令
-  const b = await jsonRequestBody(req)
-  const phase = b.phase === 'apply' ? 'apply' : 'preview'
-  const source = (b.source ?? {}) as Record<string, unknown>
-  const srcKind = typeof source.kind === 'string' ? source.kind : ''
-  const resolveDoc = async (): Promise<{ doc: ReturnType<typeof validateSyncdoc>; env: unknown }> => {
-    const passphrase = typeof source.passphrase === 'string' ? source.passphrase : ''
-    let envText = ''
-    if (srcKind === 'url') {
-      envText = await fetchEnvelopeFromUrl(typeof source.url === 'string' ? source.url : '')
-    } else if (srcKind === 'file') {
-      envText = typeof source.file === 'string' ? source.file : ''
-      if (!envText) throw new Error(t('缺少配置包内容', 'Missing package content'))
-    } else {
-      throw new Error(t('来源类型必须是 url 或 file', 'Source kind must be url or file'))
-    }
-    if (!passphrase) throw new Error(t('缺少口令（链接 #p= 后段，或导出时设置的口令）', 'Missing passphrase (the #p= part of the link, or the one set at export)'))
-    let env: unknown
-    try {
-      env = JSON.parse(envText)
-    } catch {
-      throw new Error(t('不是合法的配置包（JSON 解析失败）', 'Not a valid sync package (JSON parse failed)'))
-    }
-    return { doc: validateSyncdoc(openEnvelope(env, passphrase)), env }
-  }
-  try {
-    if (phase === 'apply') {
-      const ticket = typeof source.ticket === 'string' ? source.ticket : ''
-      const doc = ticket ? takeSyncTicket(ticket) : (await resolveDoc()).doc
-      const report = await applyImportedDoc(doc)
-      await reloadRuntime(rt)
-      audit(bi('配置直拉导入', 'Config pull import'), phase, bi(ticket ? 'ticket' : srcKind, ticket ? 'ticket' : srcKind))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, phase, report }))
-    } else {
-      const { doc, env } = await resolveDoc()
-      const metaEnv = env as Record<string, unknown>
-      const ticket = putSyncTicket(doc)
-      audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind, srcKind))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({
-        ok: true,
-        phase,
-        ticket,
-        report: reportOfDoc(doc),
-        meta: { createdBy: String(metaEnv.created_by ?? ''), createdAt: String(metaEnv.created_at ?? '') },
-      }))
-    }
-  } catch (e) {
-    audit(bi('配置直拉导入', 'Config pull import'), phase, bi(srcKind || '-', srcKind || '-'), (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
-async function hConfigExport(c: AdminCtx): Promise<void> {
-  const { req, res, audit } = c
-  // 导出加密配置包（.msync）：与 /m 导出、CLI config export 同一数据链路（密文出机器，口令保护）。
-  // 响应走 JSON 由前端存盘下载；审计只记结果，不记口令
-  const b = await jsonRequestBody(req)
-  const passphrase = typeof b.passphrase === 'string' ? b.passphrase : ''
-  try {
-    if (!passphrase) throw new Error(t('口令不能为空', 'Passphrase must not be empty'))
-    const { doc, report } = await collectSyncdoc()
-    assertExportable(report)
-    const env = sealEnvelope(doc, passphrase)
-    const name = exportFileName()
-    audit(bi('导出配置包', 'Export config package'), name, bi('已生成', 'created'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, envelope: env, filename: name }))
-  } catch (e) {
-    audit(bi('导出配置包', 'Export config package'), '-', undefined, (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
-async function hSyncDiscover(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  // 搜寻附近运行 ModelDock 且开启手机远程的电脑（UDP 广播，1.5s 收集；排除自己）
-  try {
-    const peers = await discoverPeers({ timeoutMs: 1500, exclude: { name: os.hostname(), port: rt.lan?.port } })
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, peers }))
-  } catch (e) {
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
-async function hSyncRequestRemote(c: AdminCtx): Promise<void> {
-  const { req, res, audit } = c
-  // B 机发起：向选中的附近电脑敲门并后台轮询授权，立即返回 requestId 供前端轮询
-  const b = await jsonRequestBody(req)
-  try {
-    const ips = Array.isArray(b.ips) ? (b.ips as unknown[]).filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : []
-    const port = Number(b.port)
-    if (!ips.length || !Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new Error(t('目标电脑参数不完整', 'Invalid target computer'))
-    }
-    sweepRemoteRequests()
-    const requestId = randomToken('mdknear')
-    remoteRequests.set(requestId, { status: 'waiting', createdAt: Date.now() })
-    void runRemoteRequest(requestId, ips, port).catch(() => {
-      /* runRemoteRequest 内部已兜底落 failed 状态 */
-    })
-    audit(bi('附近配置直拉', 'Nearby config pull'), bi('已发送请求', 'request sent'), bi(`${ips[0]}:${port}`, `${ips[0]}:${port}`))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, requestId }))
-  } catch (e) {
-    audit(bi('附近配置直拉', 'Nearby config pull'), '-', undefined, (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
-async function hSyncRemoteStatus(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  const q = new URL(req.url ?? '', 'http://x').searchParams
-  sweepRemoteRequests()
-  const st = remoteRequests.get(q.get('id') ?? '')
-  if (!st) return sendError(res, 404, t('请求不存在或已过期', 'Request not found or expired'))
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, ...st }))
-  return
-}
-
-async function hSyncOfferApprove(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  // A 机裁决（桌面确认卡）：approve=true 生成一次性直拉链接写入 grant（对方凭 nonce 取走即焚）；
-  // approve=false 写拒绝标记让对方立即结束等待
-  const b = await jsonRequestBody(req)
-  const nonce = typeof b.nonce === 'string' ? b.nonce : ''
-  const approve = b.approve === true
-  try {
-    const pending = peekSyncRequest()
-    if (!pending || pending.nonce !== nonce) throw new Error(t('请求不存在或已过期', 'Request not found or expired'))
-    if (approve) {
-      const offer = await createSyncOffer(rt)
-      putSyncGrant(nonce, { url: offer.urls[0], passphrase: offer.passphrase })
-      audit(bi('附近配置直拉', 'Nearby config pull'), bi('已允许', 'approved'), bi(pending.from, pending.from))
-    } else {
-      putSyncGrant(nonce, { denied: true })
-      audit(bi('附近配置直拉', 'Nearby config pull'), bi('已拒绝', 'denied'), bi(pending.from, pending.from))
-    }
-    clearSyncRequest()
-    overviewCache = null // 确认卡即时消失（overview 有 6s TTL 缓存）
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true }))
-  } catch (e) {
-    audit(bi('附近配置直拉', 'Nearby config pull'), approve ? bi('已允许', 'approved') : bi('已拒绝', 'denied'), bi('-', '-'), (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
 async function hAutostart(c: AdminCtx): Promise<void> {
   const { req, res, audit } = c
@@ -1894,13 +932,13 @@ async function hAutostart(c: AdminCtx): Promise<void> {
       const r = await installAutostart()
       audit(bi('开机自启', 'Start at login'), bi('开启', 'on'), bi('服务文件 {file}', 'Service file {file}', { file: r.file }))
       // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 6s TTL 旧值，UI 回灌旧状态
-      overviewCache = null
+      invalidateOverviewCache()
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, installed: true, note: r.note ?? t('下次登录自动启动', 'Starts automatically at next login') }))
     } else {
       const r = await uninstallAutostart()
       audit(bi('开机自启', 'Start at login'), bi('关闭', 'off'), r.wasInstalled ? bi('已移除 {path}', 'Removed {path}', { path: r.removed }) : bi('本就未安装', 'Was not installed'))
-      overviewCache = null
+      invalidateOverviewCache()
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, installed: false }))
     }
@@ -2262,65 +1300,6 @@ async function hServiceDelete(c: AdminCtx): Promise<void> {
   return
 }
 
-async function hInstall(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  const b = await jsonRequestBody(req)
-  try {
-    const a = await requireAdapter(String(b.harness ?? ''), rt.config)
-    const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-    const r = await runClientInstall(a, rt.config, port)
-    audit(
-      bi('安装并接入客户端', 'Install & attach client'),
-      a.id,
-      r.ok
-        ? (r.skipped ? bi('命令已存在，跳过安装', 'Command already present, install skipped') : r.auto ? bi('自动安装完成', 'Auto-install finished') : bi('已提供安装指引', 'Install guide provided'))
-        : r.blocked
-          ? bi('沙箱内不支持自动安装（会写进真机），已提示手动安装', 'Auto-install not supported in sandbox (would write to the real machine); manual install suggested')
-          : bi('安装失败', 'Install failed')
-    )
-    await reloadRuntime(rt)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(
-      JSON.stringify({
-        ok: r.ok,
-        auto: r.auto,
-        skipped: r.skipped,
-        output: r.output,
-        installed: r.installed,
-        guide: a.install?.guide ?? '',
-        homepage: a.install?.homepage ?? null,
-      })
-    )
-  } catch (e) {
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
-
-async function hUninstall(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  const b = await jsonRequestBody(req)
-  try {
-    const a = await requireAdapter(String(b.harness ?? ''), rt.config)
-    // 接入中的客户端先断开：卸载只删程序本体，配置还原是 detach 的职责，顺序反了会留下指向网关的孤儿配置
-    if (rt.config.harness[a.id]) {
-      throw new Error(t('该客户端仍处于接入状态，请先「断开并还原」再卸载', 'This client is still attached — detach & restore first, then uninstall'))
-    }
-    const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-    const r = await runClientUninstall(a, rt.config, port)
-    audit(
-      bi('卸载客户端', 'Uninstall client'),
-      a.id,
-      r.ok ? (r.skipped ? bi('命令不在 PATH，无需卸载', 'Command not on PATH; nothing to uninstall') : bi('卸载完成', 'Uninstall finished')) : bi('卸载失败', 'Uninstall failed')
-    )
-    await reloadRuntime(rt)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: r.ok, skipped: r.skipped, output: r.output, installed: r.installed }))
-  } catch (e) {
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
 async function hAttachPlan(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
