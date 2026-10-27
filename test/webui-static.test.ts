@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { UI_HTML } from '../src/gateway/ui.js'
@@ -16,7 +16,11 @@ const LAN_HTML = renderMobilePage()
 const SERVER_SRC = readFileSync(path.join(ROOT, 'src', 'gateway', 'server.ts'), 'utf8').replace(/\r\n/g, '\n')
 const LAN_SRC = readFileSync(path.join(ROOT, 'src', 'gateway', 'lan.ts'), 'utf8').replace(/\r\n/g, '\n')
 // ui.ts 源码单读一份（L0-2 的 foot 块解析作用在源码模板上，而非求值产物）
-const SRC_UI = readFileSync(path.join(ROOT, 'src', 'gateway', 'ui.ts'), 'utf8').replace(/\r\n/g, '\n')
+// T04 拆分后页面源码 = 拼装壳 ui.ts + src/gateway/ui/ 各域模块：foot 块解析扫全部源拼接（规则语义不变）
+const SRC_UI = [
+  path.join(ROOT, 'src', 'gateway', 'ui.ts'),
+  ...readdirSync(path.join(ROOT, 'src', 'gateway', 'ui')).filter((f) => f.endsWith('.ts')).sort().map((f) => path.join(ROOT, 'src', 'gateway', 'ui', f)),
+].map((p) => readFileSync(p, 'utf8')).join('\n').replace(/\r\n/g, '\n')
 
 /** 内嵌页面的全部 <script> 块（求值后的最终 HTML，含 ${CONSOLE_SHARED_JS} 注入段） */
 function scriptBlocks(html: string): string[] {
