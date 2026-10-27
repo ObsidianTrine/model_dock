@@ -44,6 +44,11 @@ import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, sandboxNpmPrefix } from '../util/paths.js'
 import { UI_HTML } from './ui.js'
+
+// T05 拆分后保持原导入面：测试与潜在外部引用仍按 server.js 路径取这些符号
+export { OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision, warmupOverview } from './overview-view.js'
+export { runClientInstall, runClientUninstall } from './install.js'
+export { maxBodyBytes } from './admin-shared.js'
 import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
 import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
 import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
