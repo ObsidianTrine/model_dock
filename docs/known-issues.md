@@ -8,6 +8,8 @@
 > 3. 标注（推测）的条目是静态推演结论，未经实测基准；实施前先量化验证。
 > 4. 与 `docs/backlog.md`（2026-10-07 热路径评审 B/C 级遗留）少量重叠：backlog 的 **B4 ≈ PERF-17**、**C2 与 PERF-06/07/09 同域**、**B2/B3 仍开放**（本页未重复收录），实施时可合并处理。
 >
+> 2026-10-27 六分区全量复审（网关核心 / Web 控制台与 LAN / 配置与工具 / CLI 与更新链 / 适配器与导入 / 云同步）：新增 **REVIEW-01..29**，除 REVIEW-26 按既定语义留档外全部修复（四个 feature 分支合并：fix-review-p1 @a471295、fix-review-p2-web @f60f67a、fix-review-p2-core @e94e0e1、fix-review-p2-data @50ab868）。明细见文末 §六。
+>
 > 2026-10-12 批量修复：PERF-01/04/05/06/07/08/09/10/11/12/17、CORRECT-01、XPLAT-01/03/04/05/07/08/10 共 19 项已修（commit 见总览表），全部经 orchestrator 自治闭环（独立测试门禁 + LLM 审查 + 人工闸门复核 diff），合并后 develop 全量 691 例绿。
 > 2026-10-20 性能复审批量修复：PERF-02 全修、PERF-03/14 部分修（@2540618，切换服务写放大同步收敛）；同日四路并行复审新增 PERF-18..36（P2）留底，见 §一.F。
 > 2026-10-20 P2 批量修复：PERF-13/18/19/20/22/24/26/29/30/31/32/33/34/35 共 14 项已修（@ff407bd）；PERF-21/23/25/27/28/36 复核后暂缓（理由见 §一.F 各条注记）。
@@ -376,3 +378,44 @@
 6. 其余 P2 按需排期；与 `docs/backlog.md` 重叠项（B2/B3/B4/C2）合并实施。
 
 > 修复纪律提醒：改 `src/**` 必须全绿 `npm test`；一律走 feature-branch 工作流（`node .agents/scripts/feature-branch.mjs start <task-id>`）；涉及 hot path 的改动用手测沙箱配方验证（`MODELRDOCK_FAKE_HOME` + 189xx，禁碰 8687/8890）。修完回到本页勾选。
+
+---
+
+## 六、2026-10-27 六分区全量复审（REVIEW 系列）
+
+> 来源： expert 复审（6 分区并行审查 + 人工复核全部 P1），基线为本文档既有条目之外的新发现。
+> 全部 P1 + P2 已修复合并（develop @50ab868），仅 REVIEW-26 经核为既定设计语义、留档不改。
+
+| 编号 | 级别 | 位置 | 一句话 | 状态 |
+|---|---|---|---|---|
+| REVIEW-01 | **P1** | `src/gateway/server.ts`（readBody） | 413 超限路径先毁 socket，响应永远到不了客户端（SDK 自动重传循环） | ☑ 已修（@4e048eb，排空请求体 + sendError 对 413 补 connection: close；wire 级回归测试） |
+| REVIEW-02 | **P1** | `src/gateway/ui.ts:1682` 等三处 | 更新核验版本号用字符串 `>=`（'1.9.0' >= '1.10.0'），跨位版本对假完成/丢进度 | ☑ 已修（cmpSemver 逐段数值比较；webui-static 契约测试） |
+| REVIEW-03 | **P1** | `src/gateway/state.ts` → `proxy.ts` | undici 经 state.ts 对 proxy.js 的静态 import 进全部 CLI 启动链（PERF-04 残留入口） | ☑ 已修（dispatcherFor 下沉 proxy.ts；startup-lazy 结构断言） |
+| REVIEW-04 | **P1** | `src/import/sources.ts`（applyImport） | 批内 suggest_id 撞车静默覆盖（只查 cfg 不查本批），one-api 同名渠道丢服务丢 key | ☑ 已修（usedIds Set 兜底；import-scan 回归） |
+| REVIEW-05 | **P1** | `src/adapters/format.ts`（detectJsonIndent） | 顶层数组 JSON 探测出 2 倍缩进，每次重写翻倍无上界（workbuddy models.json） | ☑ 已修（数组根分支 + 稳态回归测试） |
+| REVIEW-06 | **P1** | `src/sync/engine.ts:153` | 云端 desired 应用失败阻断整个 tick，多机同步每 60s 永续重试不收敛 | ☑ 已修（applySwitch try/catch 只记错；cloud-heartbeat 回归） |
+| REVIEW-07 | P2 | `src/gateway/server.ts`（runRemoteRequest） | 条目被 TTL 清扫后 set() 重写丢 createdAt → remoteRequests 永生条目 | ☑ 已修（缺失时按当前时间重建） |
+| REVIEW-08 | P2 | `src/gateway/server.ts:722,2791` | 畸形 cookie 值（裸 %）decodeURIComponent 抛 URIError → admin 500 | ☑ 已修（safeCookieDecode，按不匹配走 401/403） |
+| REVIEW-09 | P2 | `src/gateway/server.ts`（registerWebDevice/hRotate/hLanPost） | gateway.json 读-改-写无并发防护，并发丢字段 | ☑ 已修（state.ts 新增 mutateGatewayState 进程内串行；回归测试） |
+| REVIEW-10 | P2 | `src/gateway/server.ts`（hServiceDelete） | 先删密钥再写配置：写锁失败留下引用已删 key 的 503 服务 | ☑ 已修（先 persistConfig 后 deleteSecret） |
+| REVIEW-11 | P2 | `src/gateway/server.ts`（hHarnessRoute） | persistConfig 回调以陈旧 rt.config 兜底，并发 detach 写回幽灵 harness 条目 | ☑ 已修（只以写锁内最新配置为源，缺失即中止） |
+| REVIEW-12 | P2 | `src/gateway/server.ts`（/ui） | 未鉴权 GET /ui 也 markUiSeen + 失效 overview 缓存（本机探测抑制仅托盘） | ☑ 已修（收窄到带有效凭据请求；tray-state 契约更新） |
+| REVIEW-13 | P2 | `src/gateway/server.ts:2657,1876` | handleAdmin 文档注释错位；两处「2s TTL」注释过时（实为 6s） | ☑ 已修 |
+| REVIEW-14 | P2 | `src/gateway/ui.ts`（createModal/Esc 分派） | 弹层壳无焦点管理（违反 ui-kit §9 声明）；Esc 穿透 closeOnEsc:false 关掉被遮弹层丢未保存输入 | ☑ 已修（open 移焦/close 还原/Tab 圈闭 + Esc 只看最上层；webui-static 断言） |
+| REVIEW-15 | P2 | `src/gateway/ui.ts`（pkgM/pollOverview/load 链） | 配置包弹层无 onClose 停轮询（空转 65s）；轮询 401 静默冻结假实时页；load().then(loadLogs) 把 Promise 传真值形参 | ☑ 已修（onClose 停 nearbyPoll；401 弹重登带防重入；显式回调） |
+| REVIEW-16 | P2 | `src/gateway/ui.ts:1682` 同域 | 两页均无 CSP（纵深防御） | ☑ 已修（console-shared CONSOLE_CSP 基线，桌面/手机页 200/304 接线；gateway 回归断言） |
+| REVIEW-17 | P2 | `src/gateway/lan.ts:482,517` | 手机页语言判定 navigator 死逻辑（英文系统恒中文）；toast 无 aria-live；确认弹层无键盘路径；title 未双语 | ☑ 已修（en 兜底 + role=status + Esc/焦点还原 + data-i18n title） |
+| REVIEW-18 | P2 | `src/config/secrets.ts`（loadFileSecrets） | 跨机拷贝的异平台密文（enc:mach:/enc:dpapi:）被当存量明文二次加密，原值不可逆损毁 | ☑ 已修（异源前缀守卫抛可操作 SecretsError，绝不重加密；store 回归） |
+| REVIEW-19 | P2 | `src/config/secrets.ts`（外部后端读取） | 读取失败与条目不存在混同 null 且缓存 60s（钥匙环锁定期发无 key 请求）；解密失败透传原始报错；三处 stdin 无 EPIPE 守卫 | ☑ 已修（44/空输出=不存在可缓存，故障上抛；失败转可操作 SecretsError；stdin on('error')；注释纠正） |
+| REVIEW-20 | P2 | `src/config/store.ts`（migrate） | 容器键形状无校验，`providers = 5` 类合法 TOML 标量抛原始 TypeError | ☑ 已修（containerOrEmpty/normalizable 守卫给含键名 ConfigError；回归测试） |
+| REVIEW-21 | P2 | `src/ops.ts` + `src/config/sandbox.ts` | normalizeUserModels 数值无校验；removeProviderCascade 漏清 route_next；沙箱迁移读不到落空 key 翻转引用；沙箱下仍探测生产 8687 | ☑ 已修（saneModelNumber + 级联清理 + 只改写成功条目 + FAKE_HOME 跳过探测；attach-port 契约更新） |
+| REVIEW-22 | P2 | `src/util/sysproxy.ts` | SOCKS 系统代理产出 undici 不支持的 socks5://（更新必挂） | ☑ 已修（识别即弃用回落直连/HTTP 口；sysproxy 契约测试更新） |
+| REVIEW-23 | P2 | `src/update/*` + `src/cli/*` | cleanOldVersions 漏托盘 .old；托盘替换失败击穿安装；sweep 前缀缺 app/bin/sums；--clean 不持锁；stopTray 子串误杀；gatewaycmd 首次 kill 无 ESRCH 守卫；init 两轮 detect 串行；daemon 等待 5s 对 SEA 冷启过短 | ☑ 已修（八项全收；托盘替换降级警告；spawnDaemonAndWait rounds 可调、GUI 30s；update 回归） |
+| REVIEW-24 | P2 | `src/import/sources.ts`（scanZcode） | 只扫旧版 config.json，漏现行 provider_config.json（用户自定义供应商常年漏导） | ☑ 已修（两代合并扫描；修掉旧文件缺席早退短路；import-scan 回归） |
+| REVIEW-25 | P2 | `src/adapters/*` + `src/presets/data.ts` | claude-code 网关分支不清 ANTHROPIC_API_KEY；codex stripEnvBlock 全局压缩用户排版；5 适配器 planAttach 无等值过滤；reloadPresets 不失效 known 表 | ☑ 已修（无条件清 + 接缝局部收敛 + changeIfChanged 帮手统一五处 + clearKnownTable；adapters 幂等契约更新） |
+| REVIEW-26 | P2 | `src/sync/collect.ts`（applySyncdoc） | 远端删除正激活 profile 后本机残留悬空 active_profile | ☑ **复核为既定语义，留档不改**（机器态保护：当前激活路由不随包覆盖，lansync/syncexport 测试钉死；转发侧 pickTarget 对未知 profile 安全回落，用户重选即恢复） |
+| REVIEW-27 | P2 | `src/cloud/server.ts` | putDoc 畸形 ts 入库后 NaN 恒 false 打穿 422 回滚保护；login/pair 畸形 JSON 500 外泄 V8 原文；cookieToken 畸形值 500；配对码 Math.random 非 CSPRNG | ☑ 已修（Number.isFinite 拒收 + parseBody 回落 + 解码守卫 + randomInt；cloudserver 回归） |
+| REVIEW-28 | P2 | `src/sync/targets/webdav.ts` + `localdir.ts` | manifest CAS 两段写：双机窗口互覆双双记成功后永久 idle 静默分叉（连冲突快照都没有） | ☑ 已修（写后回读复核归属，被覆写方转 conflict 走引擎冲突分支；synctarget 回归） |
+| REVIEW-29 | P2 | `src/cloud/console.ts` + 死代码 | 云控制台 10s 轮询无 document.hidden 门控；CLOUD_ENVELOPE_REF 导出与 sha256Hex 再导出无使用点 | ☑ 已修（hidden 门控 + visibilitychange 立刷；死代码删除） |
+
+> 测试盲区（同步 engine 推送部分失败簿记、CloudStore 专属用例、applySyncdoc 半完成态恢复等）未在本轮补齐，作为后续测试建设方向；本轮各修复均带定向回归测试，全量 913 例绿（develop @50ab868）。
