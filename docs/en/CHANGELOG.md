@@ -5,13 +5,44 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.4.0] - 2026-10-27
+
+A new "Tray-only mode" for the tray, concentrated fixes to the Windows update chain, plus a batch of fixes and security hardening from a full-repo review.
+
+### Added
+
+- **Tray-only mode: collapse every window and keep only the tray**: the tray menu gains "Tray-only mode" — one click collapses all ModelDock windows, leaving only the menu-bar / system-tray icon; reopening the console (tray menu, double-clicking the program, or the browser) exits that state automatically. The checkmark follows in real time: unchecked while any window is open, checked once all are closed.
+
+### Improved
+
+- **Tray quick actions are here to stay**: quick tray actions (switch service, change default model, attach / detach clients) used to be gated by the "Lightweight mode" toggle; they now always live in the tray menu, and the toggle's place is taken by "Tray-only mode".
+- **Lighter command startup**: the network forwarding stack no longer loads for every command — `doctor`, `gateway stop` and similar commands produce results faster.
+- **The cloud console idles in background tabs**: polling pauses while the page is hidden and refreshes once as soon as you come back.
 
 ### Fixed
 
 - **Windows installer users no longer see "processes stopped but nothing installed" after one-click update**: the updater used to wipe its download temp directory as soon as it launched the silent installer, often deleting setup.exe before the installer could read it — the gateway and tray both stopped, no install UI appeared, and the tray stayed on the old version; the installer package now survives until the installer has read it, and leftovers are swept on the next update.
 - **Portable (zip) users get the tray updated along with the main program**: the update package now ships the tray binary and replaces both at the same version; previously only the main program was replaced, leaving the tray permanently stale.
 - **The tray comes back after a portable update**: when the gateway was not running, the update now relaunches the tray (matching the installer path); when the gateway was running it is still pulled after the gateway is ready, to avoid racing on the port.
+- **No more double console windows after installing on Windows**: the post-install tray launch chain used to start the tray program twice, each popping its own console window; the re-launched tray no longer pops a second one — open the console by hand anytime.
+- **Requests over the size limit now get a clear error**: the gateway used to cut the connection outright, leaving the client with a connection error and an automatic retry loop; it now returns a clear "request too large" error.
+- **Update completion checks handle multi-digit versions**: the update verifier compared version numbers as strings (1.10.0 counting as less than 1.9.0), which could fake completion or drop progress across digit-count boundaries; comparison is now numeric per segment.
+- **Bulk import no longer silently overwrites same-named entries**: one-api-style bulk imports used to overwrite same-named candidates within a batch, losing services and keys; names are now de-duplicated and everything is kept.
+- **Array-topped client configs (e.g. WorkBuddy) no longer bloat on every write**: the indentation of these JSON files doubled on every rewrite with no ceiling; it now stays stable.
+- **Cloud sync no longer stalls on a single failed entry**: when one remote change failed to apply, the whole sync tick used to retry it forever without converging; failures are now logged and the rest proceeds, self-healing next tick.
+- **Two machines syncing at once no longer silently overwrite each other**: in the narrow double-write window on WebDAV / local sync folders, both sides used to overwrite each other, both record success, and fork silently forever (without even a conflict snapshot); ownership is now re-verified after writing, and the overwritten side enters the normal conflict flow.
+- **The console no longer returns internal errors on odd login cookies**: a stray character in the cookie value used to take admin endpoints down with a 500.
+- **Concurrent multi-tab operations no longer stomp each other**: device memory and similar state no longer lose fields; a failed service deletion no longer leaves an unreachable service behind; a concurrent detach no longer resurrects ghost entries.
+- **Modal keyboard handling fixes**: stacked modals close only the top one on Esc instead of reaching through and discarding unsaved input underneath; focus is trapped inside while open and restored on close.
+- **An expired login no longer pretends to be live**: with an expired session the console used to freeze silently on stale data; it now brings the re-login dialog; closing the config-package panel also stops its background polling.
+- **The phone page now shows English on English systems**: language detection used to be dead logic that always produced Chinese; accessibility announcements and a keyboard path for the confirm dialog are added along the way.
+- **Keys copied over from another machine no longer get corrupted**: ciphertext from a different machine (especially a different OS) used to be re-encrypted as if it were plaintext, destroying the original value; foreign-machine ciphertext is now recognized with actionable guidance.
+- **No more keyless requests while the system keyring is busy**: a failed keyring read used to be treated as "this service has no key" and cached, sending requests that were doomed to 401; the gateway now waits for the keyring to recover.
+- **Updates no longer always fail when the system proxy is SOCKS**: SOCKS system proxies produce addresses the built-in network stack cannot use, so updates always failed; SOCKS is now skipped in favor of a direct connection or an HTTP proxy.
+- **A batch of robustness fixes in the Windows update / daemon chain**: leftover sweeps no longer miss tray backups; a failed tray replacement degrades to a warning instead of failing the whole update; stopping the tray no longer kills unrelated processes with a matching name prefix; the daemon wait window grows for slow cold starts instead of reporting a false startup failure.
+- **ZCode import now finds the current config file**: scanning used to read only the legacy config file, so custom providers of current ZCode versions were never imported; both generations are now merged into one scan.
+- **Re-attaching no longer produces meaningless diffs**: equality checks across attach runs are unified (some clients used to leave fake diffs on every rewrite); a leftover `ANTHROPIC_API_KEY` is now cleared when Claude Code attaches through the gateway; Codex config rewrites no longer compress your hand-written formatting.
+- **Security hardening**: the desktop / phone console pages gain a content-security-policy baseline; the cloud hub tightens input validation — malformed data no longer leaks internal error text, and pairing codes now use a cryptographically secure random source.
 
 ## [1.3.0] - 2026-10-26
 
@@ -313,6 +344,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.4.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.1...v1.2.2
