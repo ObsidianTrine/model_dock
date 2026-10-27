@@ -177,7 +177,7 @@ namespace ModelDockTray
             public bool Attached;
         }
 
-        public bool TrayOnly = true;
+        public bool TrayLite = true;
         public string CurrentId, CurrentLabel, CurrentModel;
         public string AutoPin;
         public bool ScheduleApplied;
@@ -190,7 +190,7 @@ namespace ModelDockTray
             if (root == null) return null;
             var st = new TrayStateData();
             object v;
-            if (root.TryGetValue("trayOnly", out v)) st.TrayOnly = JsonMap.Bool(root, "trayOnly");
+            if (root.TryGetValue("trayLite", out v)) st.TrayLite = JsonMap.Bool(root, "trayLite");
             if (root.TryGetValue("autoPin", out v)) st.AutoPin = v as string;
             if (root.TryGetValue("scheduleApplied", out v)) st.ScheduleApplied = JsonMap.Bool(root, "scheduleApplied");
             if (root.TryGetValue("current", out v))
@@ -417,7 +417,7 @@ namespace ModelDockTray
             return v == null ? "" : v.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
-        /// 直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、仅托盘开关统一出口。
+        /// 直调网关管理端点（admin 头 + 来源标记 tray）：切服务/模型、接入断开、钉定、轻量模式开关统一出口。
         /// 成功返回 null；失败返回可展示消息（4xx 的 JSON 报错服务端文案本身可操作，原样透出）。
         /// attach/detach 要快照 + 重写客户端文件，超时放宽到 30s
         public static string PostAdmin(string path, string json)
@@ -1098,17 +1098,17 @@ namespace ModelDockTray
                 menu.Add(start);
             }
 
-            // 仅托盘模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
+            // 轻量模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
             // 点击 = 广播关闭请求（已开页面自关，浏览器拦截时页面显示手动关闭提示）；已勾选时点击无操作。
             // 网关未运行时无从读写状态故不显示
             if (st != null)
             {
-                var lite = new ToolStripMenuItem(I18n.L("仅托盘模式", "Tray-Only Mode"));
-                lite.Checked = st.TrayOnly;
+                var lite = new ToolStripMenuItem(I18n.L("轻量模式", "Lightweight Mode"));
+                lite.Checked = st.TrayLite;
                 lite.Click += delegate
                 {
-                    if (st.TrayOnly) return; // 已在仅托盘态：点击无操作
-                    TrayActions.QuickAction("/_modeldock/tray-only", "{}");
+                    if (st.TrayLite) return; // 已在轻量模式：点击无操作
+                    TrayActions.QuickAction("/_modeldock/tray-lite", "{}");
                 };
                 menu.Add(lite);
             }

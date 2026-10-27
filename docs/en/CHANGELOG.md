@@ -5,6 +5,14 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [1.4.1] - 2026-10-27
+
+The tray menu item takes back the "Lightweight mode" name, aligned with Clash Verge; behavior is unchanged.
+
+### Improved
+
+- **Tray menu item "Tray-only mode" is renamed "Lightweight mode"**: the name now matches Clash Verge — one click collapses all ModelDock windows and leaves only the tray resident, and reopening the console exits that state automatically. Behavior is unchanged, and tray quick actions stay always-on.
+
 ## [1.4.0] - 2026-10-27
 
 A new "Tray-only mode" for the tray, concentrated fixes to the Windows update chain, plus a batch of fixes and security hardening from a full-repo review.
@@ -344,6 +352,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.4.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3

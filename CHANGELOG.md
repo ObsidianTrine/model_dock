@@ -5,6 +5,14 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.4.1] - 2026-10-27
+
+托盘菜单项恢复「轻量模式」之名，与 Clash Verge 对齐；功能行为不变。
+
+### 改进
+
+- **托盘菜单「仅托盘模式」更名为「轻量模式」**：名称与 Clash Verge 一致——点一下收起全部 ModelDock 窗口、只留托盘常驻，重新打开控制台自动退出该状态；功能行为不变，托盘快捷操作保持常开。
+
 ## [1.4.0] - 2026-10-27
 
 托盘新增「仅托盘模式」，Windows 更新链集中修复，外加一轮全仓体检收出的一批修复与安全加固。
@@ -344,6 +352,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.4.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.2.2...v1.2.3

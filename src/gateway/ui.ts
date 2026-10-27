@@ -880,7 +880,7 @@ header{flex-wrap:wrap;row-gap:4px}
     }
     return m
   }
-  // Esc 只关最上层弹层：closeOnEsc:false 的壳（如仅托盘提示层）盖着时按键就地吞掉——
+  // Esc 只关最上层弹层：closeOnEsc:false 的壳（如轻量模式提示层）盖着时按键就地吞掉——
   // 此前的循环写法会穿透关掉被遮住的弹层（编辑弹层的未保存输入静默丢弃）。
   // Tab 在弹层打开时圈闭于最上层壳内（createModal 焦点管理配套）。
   document.addEventListener('keydown', function (ev) {
@@ -1269,9 +1269,9 @@ header{flex-wrap:wrap;row-gap:4px}
     return api('/overview', { timeoutMs: 45000 }).then(function (v) {
       view = v
       knownModels = Object.assign({}, catalogTable, (v && v.knownModels) || {})
-      // 首屏同感知仅托盘广播（正常应为 0：服务端在 /ui 加载时已清广播并失效缓存；留守防护真并发）
-      var tor = (v && v.gateway && v.gateway.trayOnlyRequest) || 0
-      if (tor > lastTrayOnlyRequestSeen) { lastTrayOnlyRequestSeen = tor; enterTrayOnly() }
+      // 首屏同感知轻量模式广播（正常应为 0：服务端在 /ui 加载时已清广播并失效缓存；留守防护真并发）
+      var tor = (v && v.gateway && v.gateway.trayLiteRequest) || 0
+      if (tor > lastTrayLiteRequestSeen) { lastTrayLiteRequestSeen = tor; enterTrayLite() }
       loadCatalog()
       render()
       // 首次加载即刷新沙箱徽标与配置路径显示（pollOverview 只管后续轮询）
@@ -1434,14 +1434,14 @@ header{flex-wrap:wrap;row-gap:4px}
     })
   }
 
-  // 仅托盘模式（Clash Verge 式「只留托盘」）：进入动作在托盘发起，服务端把广播时间戳放在
-  // overview.gateway.trayOnlyRequest；页面看到新于上次所见的请求即自关（--app 窗口可靠；
-  // 普通标签页被浏览器拦截脚本关窗时，下方提示层兜底）。打开页面本身即自动退出仅托盘
+  // 轻量模式（Clash Verge 式「只留托盘」）：进入动作在托盘发起，服务端把广播时间戳放在
+  // overview.gateway.trayLiteRequest；页面看到新于上次所见的请求即自关（--app 窗口可靠；
+  // 普通标签页被浏览器拦截脚本关窗时，下方提示层兜底）。打开页面本身即自动退出轻量模式
   // （服务端在 GET /_modeldock/ui 命中时清广播并失效缓存），页面侧无需上报「打开」。
-  var lastTrayOnlyRequestSeen = 0
-  var trayOnlyM = createModal({
-    id: 'trayOnlyOverlay',
-    title: '已进入仅托盘模式||Tray-only mode is on',
+  var lastTrayLiteRequestSeen = 0
+  var trayLiteM = createModal({
+    id: 'trayLiteOverlay',
+    title: '已进入轻量模式||Lightweight mode is on',
     closeButton: false,
     closeOnEsc: false,
     closeOnScrim: false,
@@ -1449,13 +1449,13 @@ header{flex-wrap:wrap;row-gap:4px}
     footHidden: true
   })
   // 先开提示层再尝试自关：关窗成功整页（含提示层）一并消失；被拦时提示层已就位，无闪烁窗口期
-  function enterTrayOnly() {
-    if (trayOnlyM.isOpen()) return
-    trayOnlyM.open()
+  function enterTrayLite() {
+    if (trayLiteM.isOpen()) return
+    trayLiteM.open()
     try { window.close() } catch (e) { /* 浏览器拦截：留在提示层 */ }
   }
   // UI 在场心跳：加载即报一次 + 15s 一次，不受 document.hidden 门控（后台标签页也是「打开的 UI」）。
-  // 离场（关闭/刷新/跳转）走 pagehide 的 sendBeacon：服务端即刻收「仅托盘」勾，不等 TTL
+  // 离场（关闭/刷新/跳转）走 pagehide 的 sendBeacon：服务端即刻收「轻量模式」勾，不等 TTL
   function uiPresence(leaving) {
     if (leaving && navigator.sendBeacon) {
       try {
@@ -1493,9 +1493,9 @@ header{flex-wrap:wrap;row-gap:4px}
       try { v = JSON.parse(txt) } catch (e) { return }
       overviewLastText = txt
       view = v
-      // 仅托盘广播：请求时间戳新于上次所见即自关（陈旧值靠严格大于去重，不重复触发）
-      var tor = (v.gateway && v.gateway.trayOnlyRequest) || 0
-      if (tor > lastTrayOnlyRequestSeen) { lastTrayOnlyRequestSeen = tor; enterTrayOnly() }
+      // 轻量模式广播：请求时间戳新于上次所见即自关（陈旧值靠严格大于去重，不重复触发）
+      var tor = (v.gateway && v.gateway.trayLiteRequest) || 0
+      if (tor > lastTrayLiteRequestSeen) { lastTrayLiteRequestSeen = tor; enterTrayLite() }
       knownModels = Object.assign({}, catalogTable, v.knownModels || {})
       render()
       // 沙箱徽标挂在健康横幅上：view 就绪后（含首次 load）补一次，避免徽标晚到下一个轮询周期
@@ -4791,7 +4791,7 @@ header{flex-wrap:wrap;row-gap:4px}
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) { pollHealth(); pollOverview(); loadLogs() }
   })
-  // 仅托盘在场心跳：加载即报一次 + 15s 一次（不看 document.hidden）；离场走 pagehide 信标
+  // 轻量模式在场心跳：加载即报一次 + 15s 一次（不看 document.hidden）；离场走 pagehide 信标
   uiPresence(false)
   setInterval(function () { uiPresence(false) }, 15000)
   window.addEventListener('pagehide', function () { uiPresence(true) })
