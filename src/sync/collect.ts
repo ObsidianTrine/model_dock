@@ -133,15 +133,12 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
     c.providers = providers
     c.profiles = profiles
     // 新机导入后没有任何路由在供：客户端无可用 profile、手机控制台「实际生效」显示不可用。
-    // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由是机器态，不随包覆盖。
+    // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由
+    // 是机器态，不随包覆盖（lansync/syncexport 测试钉死的语义）。远端删掉了正激活 profile 时
+    // 会短暂留下悬空引用：转发侧 pickTarget 对未知 profile 安全回落（首候选/无路由），用户
+    // 重选一次即恢复；不做自动重指——那会覆盖用户的机器态选择。
     const first = Object.keys(profiles)[0]
-    if (!c.active_profile && first) {
-      c.active_profile = first
-    } else if (c.active_profile && !profiles[c.active_profile]) {
-      // 拉下来的文档删掉了本机正激活的 profile：悬空引用会让 currentProvider=null、
-      // 转发无路由、云端 desired 守卫失真——重指到首个剩余 profile（全部删光则清空）
-      c.active_profile = first
-    }
+    if (!c.active_profile && first) c.active_profile = first
     if (rules.length > 0 || c.gateway?.schedule) {
       c.gateway = { ...c.gateway, schedule: { ...(c.gateway?.schedule?.enabled === undefined ? {} : { enabled: c.gateway.schedule.enabled }), windows: [...rules] } }
     }
