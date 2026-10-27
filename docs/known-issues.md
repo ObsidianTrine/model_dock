@@ -57,7 +57,7 @@
 | PERF-35 | P2 | `src/backup/snapshot.ts:156,164` | pruneSnapshots 调 listSnapshots 两次，每次写快照备份目录 manifest 全量读两遍 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-36 | P2 | `src/ops.ts:830-843` | migrateSecretsToSecure 循环内逐 key mutateConfig 整包写 + 2N 次密钥表写 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | XPLAT-01 | P2 | `src/util/fsx.ts:120-131` | atomicWrite 重试白名单缺 EBUSY | ☑ 已修（2026-10-12 @54e01c3） |
-| XPLAT-02 | P2 | `src/cli/gatewaycmd.ts:110,123` | Windows stop 硬杀，优雅清理永不执行 | ☐ 未修 |
+| XPLAT-02 | P2 | `src/cli/gatewaycmd.ts:110,123` | Windows stop 硬杀，优雅清理永不执行 | ☑ 已修（2026-10-27，appendLine 流池 idle 刷盘兜底，见 §二） |
 | XPLAT-03 | P2 | `src/util/paths.ts:38` | displayPath 在 Windows 永不缩写 ~ | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-04 | P2 | `src/config/secrets.ts:119` | darwin keychain 经 argv 传密钥，ps 可见 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | XPLAT-05 | P2 | `src/cli/basic.ts:44` | config edit 引号只处理空白，cmd 元字符截断（推测） | ☑ 已修（2026-10-12 @0caad3a） |
@@ -283,6 +283,8 @@
 - 位置：`src/cli/gatewaycmd.ts:110,123`：Windows 上 `process.kill(pid, 'SIGTERM'/'SIGKILL')` 都是 TerminateProcess；`src/gateway/main.ts:223-236` 的 cleanup（drainAppendStreams / server.close / stopSyncEngine）在 unix 才走得到。
 - 影响：常驻日志流最多 16KB/流缓冲未刷盘即丢（推测每次 stop 丢尾部若干行）；sync 引擎不做停机收敛。网关无子进程树，无需 taskkill /T。
 - 修复方向：Windows 下先用 CTRL_BREAK（GenerateConsoleCtrlEvent）尝试优雅（推测，收益有限），或缩短日志流缓冲/关停前主动 flush。
+- 2026-10-27 已修（T02 任务卡，A 方向「关停前主动 flush」）：appendLine 常驻流池加 idle 定时刷盘——流超过 3s 无新写入即 end 关流（缓冲随关流强制落盘），下一条写入按需重建（src/util/fsx.ts）。最坏丢失窗口从「直到下次 stop」压到秒级，且收益独立于停机路径（崩溃/被杀同样受益）。验证：test/hotpath.test.ts 新增三用例——不 drain 不 close 行已完整落盘、空闲关流后重建行序完整、子进程不经任何清理路径直接退出后尾部完整（模拟 TerminateProcess 的丢弃语义）。
+- 优雅停机通道（B 方向）未做：需新增带鉴权 shutdown 管理面端点，与 server.ts 拆分计划（T04/T05）撞车且收益有限（stop 前最后 3s 空闲窗内仍在写的行，硬杀下仍可能丢——秒级残余窗口，接受）。
 
 **XPLAT-03（P2）displayPath 在 Windows 永不缩写 ~**
 - 位置：`src/util/paths.ts:38`：`p.startsWith(realHome + '/')` —— Windows 下 path.join 产出 `\` 分隔，子路径永不匹配（`p === realHome` 仍命中）。修：匹配 `[\\/]`。

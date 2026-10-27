@@ -6,11 +6,18 @@ import { buildDispatcher } from '../src/gateway/proxy.js'
 import { createUsageTap, type UsageStats } from '../src/gateway/usage.js'
 import { buildRuntime, logRequest, type ResolvedTarget } from '../src/gateway/state.js'
 import { globToRegExp, matchAlias } from '../src/util/glob.js'
-import { drainAppendStreams } from '../src/util/fsx.js'
+import { drainAppendStreams, appendLine } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
+import { spawnSync } from 'node:child_process'
 import type { Transform } from 'node:stream'
+
+// 子进程端到端配方（同 test/reset.test.ts）：tsx 的 ESM loader 经 node --import 直跑 .ts 源码
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
 // 公共小工具
 
@@ -329,6 +336,72 @@ describe('logRequest：常驻追加流按序落盘', () => {
       const file = fs.readdirSync(dir).find((f) => f.startsWith('gateway-'))!
       const entries = fs.readFileSync(path.join(dir, file), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
       expect(entries.at(-1).ms).toBe(7)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('appendLine 空闲刷盘（XPLAT-02：Windows stop 硬杀前的尾部持久性）', () => {
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+  // 阈值 3s + 扫描间隔 1s + 落盘余量：等待必须覆盖「最后一次写入 → sweep 命中 → end 刷盘完成」全程
+  const IDLE_WAIT_MS = 4600
+
+  it('空闲超阈值自动刷盘：不 drain 不 close，行已完整落盘', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(logsDir(), { recursive: true }) // appendLine 契约：调用方保证目录存在
+      const file = path.join(logsDir(), 'idle-flush.jsonl')
+      for (let i = 0; i < 30; i++) appendLine(file, JSON.stringify({ i, msg: `行-${i}` }) + '\n')
+      await sleep(IDLE_WAIT_MS)
+      // 关键：读之前不做任何 drain/close——数据必须已因 idle 刷盘写到 fd，而非还在流缓冲里
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n')
+      expect(lines).toHaveLength(30)
+      expect(JSON.parse(lines.at(-1)!).i).toBe(29)
+      await drainAppendStreams() // 仅收尾释放 fd（Windows 上 restore 删目录需无占用）
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('空闲被关流后再次写入：流自动重建、两段行序完整不丢', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(logsDir(), { recursive: true }) // appendLine 契约：调用方保证目录存在
+      const file = path.join(logsDir(), 'idle-recreate.jsonl')
+      appendLine(file, JSON.stringify({ seq: 1 }) + '\n')
+      await sleep(IDLE_WAIT_MS) // sweep 已把该流 end 并摘出池
+      appendLine(file, JSON.stringify({ seq: 2 }) + '\n') // 走重建分支
+      await drainAppendStreams()
+      const lines = fs.readFileSync(file, 'utf8').trim().split('\n')
+      expect(lines.map((l) => JSON.parse(l).seq)).toEqual([1, 2])
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('端到端：子进程写日志不经清理路径直接退出，尾部完整（模拟 Windows stop 硬杀）', async () => {
+    const h = fakeHome()
+    try {
+      const child = [
+        `import { appendLine } from '${pathToFileURL(path.join(REPO_ROOT, 'src', 'util', 'fsx.ts')).href}'`,
+        `const file = process.argv[2]`,
+        `for (let i = 0; i < 30; i++) appendLine(file, JSON.stringify({ i, msg: 'tail-' + i }) + '\\n')`,
+        // 不 drain 不 close：等 idle 刷盘扫过再自灭退出（无清理路径 ≈ Windows TerminateProcess 的丢弃语义）
+        `setTimeout(() => process.exit(0), 5000)`,
+      ].join('\n')
+      const script = path.join(h.home, 'idle-exit-child.mjs')
+      fs.writeFileSync(script, child)
+      fs.mkdirSync(logsDir(), { recursive: true }) // appendLine 契约：调用方保证目录存在
+      const r = spawnSync(process.execPath, ['--import', TSX_LOADER, script, path.join(logsDir(), 'e2e.jsonl')], {
+        env: { ...process.env, MODELRDOCK_FAKE_HOME: h.home },
+        encoding: 'utf8',
+        timeout: 60_000,
+      })
+      expect(r.status).toBe(0)
+      const lines = fs.readFileSync(path.join(logsDir(), 'e2e.jsonl'), 'utf8').trim().split('\n')
+      expect(lines).toHaveLength(30)
+      expect(JSON.parse(lines.at(-1)!).i).toBe(29)
     } finally {
       h.restore()
     }
