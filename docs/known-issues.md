@@ -68,7 +68,7 @@
 | XPLAT-10 | P2 | `src/update/check.ts:224` | 更新资产名未校验（供应链纵深防御） | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☐ 未修 |
 | CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
-| CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☐ 未修 |
+| CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☑ 已修（2026-10-28，.incomplete 占位 + prune 宽限期，见 §三） |
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☐ 未修 |
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
@@ -333,6 +333,7 @@
 **CORRECT-02（P2）快照孤儿清理删他进程半成品**
 - 位置：`src/backup/snapshot.ts:154-158`：`valid` 集合 = 有合法 manifest 的目录，其余 `rm -rf`。跨进程并发（网关 pickerSync/attach 与 CLI 同时写）时，对方"文件已拷、manifest 未写"的半成品被整体删除 → 对方 applyChanges 在写客户端文件前抛错。后果是偶发假失败（写操作安全中止），无数据损坏。
 - 顺带：`snapshot.ts:48-55` 的 id 冲突重试是死代码——`mkdir(recursive:true)` 对已存在目录不抛错，真撞 id 会静默共用目录互踩（概率≈0）。
+- 2026-10-28 已修（T03 任务卡）：① snapshot 目录建好后先落 `.incomplete` 占位、manifest 写盘后移除；pruneSnapshots 对无 manifest 目录见到**新鲜占位**（<10min）即视为他进程正在写、跳过，占位超龄（兜底崩溃残留）或无占位（旧版本残留半成品）才清。keep 语义不变、manifest 格式不变（占位是目录内文件，不进 manifest 解析路径，旧 reader 兼容）。② id 冲突改非 recursive mkdir（叶子已存在即 EEXIST，跨进程原子判定），撞了换随机后缀重试、连续 3 次冲突抛可操作错误——原「重试」意图首次真正生效。验证：test/backup.test.ts 新增三用例（宽限期幸存 + 无占位/超龄仍清、并发交错互不删、同秒双快照 id 独立）。
 
 **CORRECT-04（P2，2026-10-12 新增）定时窗口午夜边界闪烁**
 - 现象：00:00:08 前后跑全量测试，「窗口接管重写 picker」「pickTarget 顺延到窗口目标」「displayRouteProvider prefer 窗口接管」等 5 例失败（窗口 `00:00–23:59` 被判不活跃）；23:50 与 00:03 复测同组全绿。与当日合入的改动无交集（失败用例涉及 schedule/pickTarget，同批合并改的是 relay/secrets/fsx/server 轮询）。

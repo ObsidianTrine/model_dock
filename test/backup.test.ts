@@ -6,6 +6,7 @@ import { listSnapshots, matchesSnapshot, pruneSnapshots, restoreSnapshot, snapsh
 import { saveConfig } from '../src/config/store.js'
 import { emptyConfig } from '../src/config/types.js'
 import { atomicWrite, ensureDir, fileSha256 } from '../src/util/fsx.js'
+import { backupsDir } from '../src/util/paths.js'
 
 afterEach(() => {})
 
@@ -111,6 +112,90 @@ describe('backup snapshot', () => {
       const m = await snapshot('h', 'attach', [file])
       await atomicWrite(file, 'two\n', 0o600)
       expect(await matchesSnapshot(m)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('快照孤儿清理竞态（CORRECT-02）', () => {
+  it('宽限期内带 .incomplete 占位的半成品不被 prune 删除；无占位孤儿与占位超龄孤儿仍被清理', async () => {
+    const h = fakeHome()
+    try {
+      const root = path.join(backupsDir(), 'claude-code')
+      // 他进程半成品：有内容、无 manifest、占位新鲜 → 宽限期内必须幸存
+      const halfDone = path.join(root, '20990101T000000-attach-alive')
+      fs.mkdirSync(path.join(halfDone, 'files'), { recursive: true })
+      fs.writeFileSync(path.join(halfDone, 'files', '0.blob'), 'partial')
+      fs.writeFileSync(path.join(halfDone, '.incomplete'), '')
+      // 旧版本残留：无占位半成品 → 维持清理
+      const legacy = path.join(root, '20990101T000000-attach-legacy')
+      fs.mkdirSync(legacy, { recursive: true })
+      fs.writeFileSync(path.join(legacy, 'junk'), 'x')
+      // 崩溃残留：占位 mtime 回拨 11 分钟（> 10min 宽限）→ 兜底清理
+      const stale = path.join(root, '20990101T000000-attach-stale')
+      fs.mkdirSync(stale, { recursive: true })
+      const staleMarker = path.join(stale, '.incomplete')
+      fs.writeFileSync(staleMarker, '')
+      const old = new Date(Date.now() - 11 * 60_000)
+      fs.utimesSync(staleMarker, old, old)
+
+      const removed = await pruneSnapshots('claude-code', 20)
+      expect(fs.existsSync(halfDone)).toBe(true)
+      expect(fs.existsSync(legacy)).toBe(false)
+      expect(fs.existsSync(stale)).toBe(false)
+      expect(removed).toBe(2)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('并发交错：snapshot 内部触发 prune 不删他进程新鲜半成品；对方 manifest 落盘、占位移除后正常入列且被后续 prune 保留', async () => {
+    const h = fakeHome()
+    try {
+      const file = path.join(h.home, 'settings.json')
+      await atomicWrite(file, '{"a":1}\n', 0o600)
+      // 模拟另一执行流进行到一半：目录建好、blob 已拷、占位已落、manifest 未写
+      const root = path.join(backupsDir(), 'claude-code')
+      const otherId = '20990101T000000-attach-other'
+      const other = path.join(root, otherId)
+      fs.mkdirSync(path.join(other, 'files'), { recursive: true })
+      fs.writeFileSync(path.join(other, 'files', '0.blob'), 'other-partial')
+      fs.writeFileSync(path.join(other, '.incomplete'), '')
+
+      const m = await snapshot('claude-code', 'attach', [file]) // 内部触发 prune
+      expect(fs.existsSync(other)).toBe(true) // 交错中的他方半成品幸存
+      expect(fs.existsSync(path.join(root, m.id, '.incomplete'))).toBe(false) // 自己完成后占位已撤
+
+      // 他方写完 manifest、撤占位 → 正常入列；再次快照（再次触发 prune）仍按合法快照保留
+      const manifest = {
+        id: otherId,
+        harness: 'claude-code',
+        operation: 'attach',
+        timestamp: '2099-01-01T00:00:00.000Z',
+        tool_version: 'test',
+        files: [],
+      }
+      fs.writeFileSync(path.join(other, 'manifest.json'), JSON.stringify(manifest))
+      fs.rmSync(path.join(other, '.incomplete'))
+      await snapshot('claude-code', 'detach', [file])
+      const listed = await listSnapshots('claude-code')
+      expect(listed.some((x) => x.id === otherId)).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('同秒连续两次快照：目录独立、id 不冲突（id 冲突重试死代码修复后语义）', async () => {
+    const h = fakeHome()
+    try {
+      const file = path.join(h.home, 's.json')
+      await atomicWrite(file, 'v\n', 0o600)
+      const m1 = await snapshot('ids', 'attach', [file])
+      const m2 = await snapshot('ids', 'attach', [file])
+      expect(m1.id).not.toBe(m2.id)
+      const listed = await listSnapshots('ids')
+      expect(listed).toHaveLength(2)
     } finally {
       h.restore()
     }

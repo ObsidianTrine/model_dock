@@ -27,6 +27,12 @@ async function snapshotRoot(harness: string): Promise<string> {
   return path.join(backupsDir(), harness)
 }
 
+/** 半成品占位标记：snapshot 目录建好后先落此文件、manifest 写盘后移除。pruneSnapshots 见到
+ *  新鲜占位即视为他进程正在写，宽限期内不动（CORRECT-02）。 */
+const INCOMPLETE_MARKER = '.incomplete'
+/** 占位超龄阈值：写入方崩溃后的残留目录，超龄后允许清理兜底 */
+const ORPHAN_GRACE_MS = 10 * 60_000
+
 function stamp(): string {
   const d = new Date()
   const p = (n: number, w = 2) => String(n).padStart(w, '0')
@@ -42,17 +48,31 @@ export async function snapshot(
   activeProfile?: string
 ): Promise<SnapshotManifest> {
   const root = await snapshotRoot(harness)
-  // id 冲突（同秒同随机段）时换一个随机后缀重试，避免静默覆盖上一份快照
+  await ensureDir(root, 0o700)
+  // id 冲突：旧实现对叶子目录 recursive mkdir——已存在时不抛错，重试永不触发（死代码），真撞 id
+  // （同秒同随机段，概率≈0）会静默共用目录互踩。改为非 recursive mkdir：叶子已存在即 EEXIST
+  // （跨进程原子判定），撞了换随机后缀重试。
   let dir = ''
   let id = ''
   for (let attempt = 0; attempt < 3; attempt++) {
     id = `${stamp()}-${operation}-${Math.random().toString(36).slice(2, 8)}`
     dir = path.join(root, id)
     try {
-      await fsp.mkdir(dir, { recursive: true })
+      await fsp.mkdir(dir)
       break
-    } catch { /* 理论上 recursive 不冲突；保守重试 */ }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') throw e
+      dir = ''
+    }
   }
+  if (!dir) {
+    throw new Error(t('快照目录 id 连续 3 次冲突（{root}），请重试', 'Snapshot directory id collided 3 times in a row ({root}); please retry', { root }))
+  }
+  // 半成品占位：pruneSnapshots 以「有合法 manifest」为 valid 判据，跨进程并发时（网关
+  // pickerSync/attach 与 CLI 同时写快照）会把他进程「已开写、未写 manifest」的目录当孤儿整删
+  // （CORRECT-02）。先落占位、manifest 落盘后移除。
+  const marker = path.join(dir, INCOMPLETE_MARKER)
+  await fsp.writeFile(marker, '', { mode: 0o600 })
   const filesDir = path.join(dir, 'files')
   await ensureDir(filesDir, 0o700)
 
@@ -83,6 +103,8 @@ export async function snapshot(
   await fsp.writeFile(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), {
     mode: 0o600,
   })
+  // manifest 已落盘、目录自洽，撤掉占位（force：撤除失败不致命——prune 按占位 mtime 宽限，不会误删）
+  await fsp.rm(marker, { force: true }).catch(() => {})
   try {
     const cfg = await loadConfig()
     await pruneSnapshots(harness, cfg.backup?.keep ?? 20)
@@ -142,7 +164,10 @@ export async function restoreSnapshot(manifest: SnapshotManifest): Promise<void>
   }
 }
 
-/** 每个 harness 滚动保留 keep 份；孤儿目录（半成品、无合法 manifest，可能含敏感文件副本）一律清理 */
+/** 每个 harness 滚动保留 keep 份；孤儿目录（无合法 manifest，可能含敏感文件副本）一律清理——
+ *  唯独带新鲜 .incomplete 占位的除外：那是他进程「已开写、未写 manifest」的半成品（CORRECT-02），
+ *  删了会让对方 applyChanges 假失败。占位超龄（>10min，兜底写入方崩溃残留）或无占位（旧版本
+ *  残留半成品）才清。 */
 export async function pruneSnapshots(harness: string, keep = 20): Promise<number> {
   // 防呆：非法或 <1 一律钳到 1——快照是还原底线，不允许配置成"一个不留"
   keep = Number.isFinite(keep) ? Math.max(1, Math.floor(keep)) : 20
@@ -160,7 +185,14 @@ export async function pruneSnapshots(harness: string, keep = 20): Promise<number
   let removed = 0
   for (const e of entries) {
     if (!valid.has(e)) {
-      await fsp.rm(path.join(root, e), { recursive: true, force: true }).catch(() => {})
+      const target = path.join(root, e)
+      try {
+        const st = await fsp.stat(path.join(target, INCOMPLETE_MARKER))
+        if (Date.now() - st.mtimeMs < ORPHAN_GRACE_MS) continue // 他进程正在写，宽限期内不动
+      } catch {
+        /* 无占位：旧版本半成品或占位写盘前崩溃，维持删除 */
+      }
+      await fsp.rm(target, { recursive: true, force: true }).catch(() => {})
       removed++
     }
   }
