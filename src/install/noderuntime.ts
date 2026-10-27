@@ -138,13 +138,13 @@ export function normalizeNodePlat(platform: NodeJS.Platform): string {
   return platform === 'win32' ? 'win' : platform
 }
 
-/** 解压包内顶层目录名（node dist 命名规则 node-v<ver>-<plat>-<arch>）。与资产名共用平台归一，
- *  downloadNodeRuntime 的两处内层校验/换名一律经此（DESIGN-11 单一来源）。 */
 /** 暂存目录名：按资产名派生（.stage-<asset>），不同版本/架构的资产并发下载互不踩目录（DESIGN-11）。 */
 export function nodeStageDirName(asset: string): string {
   return `.stage-${asset}`
 }
 
+/** 解压包内顶层目录名（node dist 命名规则 node-v<ver>-<plat>-<arch>）。与资产名共用平台归一，
+ *  downloadNodeRuntime 的两处内层校验/换名一律经此（DESIGN-11 单一来源）。 */
 export function nodeInnerDirName(
   version = nodeVersion(),
   platform: NodeJS.Platform = process.platform,

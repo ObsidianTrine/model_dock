@@ -17,6 +17,8 @@
 | 装依赖 | `npm install` |
 | 编译到 `dist/` | `npm run build`（tsc） |
 | 测试 | `npm test`（vitest）；**改完 `src/**` 必须全绿** |
+| 工作流套件 | `npm run test:workflow`（.agents/ 编排器与守卫 hook，随仓库改动按需跑） |
+| 覆盖率 | `npm run test:coverage` |
 | 开发热跑 | `npm run dev -- <cmd>`（tsx 直跑源码，**无热重载**，改码后重启实例再验证） |
 | 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `scripts/run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口；8687 生产端口禁止占用，端口被占会拒绝启动并提示换端口）。**完全沙箱化**：配置/状态/日志/密钥/客户端写入均在 `~/.modeldock-dev`（密钥一律本地 file 存储，**不写系统钥匙环**；重置/卸载/自启/进程清扫在沙箱里只作用于沙箱自身），npm 全局安装（控制台「安装并接入」）也重定向装进沙箱、不碰真机全局环境，脚本类安装（落点不可重定向，如小米官方安装器）在沙箱内拒绝执行并提示手动安装；与生产互不影响（首启自动从生产复制服务配置）。**用户本人日常验证专用**：启动前自动探测沙箱内已有实例（冲突明说、不再静默）；**agent 一律不得占用其默认沙箱与 8890 端口**，测试统一走下方硬规则 2 的隔离配方（`MODELRDOCK_FAKE_HOME` + 189xx） |
 | SEA 可执行包 | `npm run build:sea`（产出 `release/` 下各平台**对外发布物**：压缩包（包内单一入口程序，unix 名 `modeldock`）+ `SHA256SUMS`；darwin 另产 `ModelDock.app` + `.dmg`；win 另产 Inno Setup `*-setup.exe`；裸二进制只作构建中间产物，不外发） |
@@ -117,7 +119,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ## 测试指南
 
-- 套件：`store`（配置+密钥）/ `backup`（快照）/ `adapters`（接入断开）/ `gateway`（网关端点）/ `util`（工具），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- 套件：test/ 下 75+ 个文件（store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，随演进增删——以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687（生产）/ 8890（用户 dev）/ 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
 - 新增 / 改动测试必须三大 OS 都能过：临时目录用 `os.tmpdir()` + `path.join()`，**不写死 `/tmp` 或盘符**；断言权限、进程行为、换行等平台差异前先想 Windows 会怎样（Windows CI 红多来自测试而非实现）。

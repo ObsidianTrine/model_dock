@@ -24,7 +24,7 @@
 - **持久化条目**：审计日志 `op/target/detail/err` 双语双存（主字段恒中文渲染，`*_en` 缺省回退），控制台日志表按界面语言取字段。
 - **Web 控制台**：`ui.ts` 内嵌 `data-i18n="中文||English"` 属性 + 浏览器端 `t(zh, en)`，与 `localStorage.mdk_lang` 联动，独立于服务端机制。
 - **展示型数据字段**（预设 label/vendor、模型 display_name、adapter label）：一律 **getter 懒求值**调 t()，禁止模块加载期求值（会在 initLang 前固化语言）。
-- **规模**：约 600 条 t() 调用 + ui.ts 约 450 条 data-i18n/t()；中文输出为逐字节契约（测试断言锚定）。
+- **规模**：t() 调用与 data-i18n 键数量以仓库现状为准（口径类数字不写死；data-i18n 遍布 Web 控制台模板 src/gateway/ui/）；中文输出为逐字节契约（测试断言锚定）。
 
 ## 2. 【决策】维持内联双语对，暂不做字典化改造
 

@@ -1767,7 +1767,7 @@ async function handleAdmin(
       markUiSeen(Date.now())
       invalidateOverviewCache()
     }
-    // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 236KB 页体。
+    // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 ~308KB 页体（UI_HTML 实测 314896 字节 @2026-10-28）。
     // no-store 由管理面统一策略设置，此处叠 ETag 只做条件请求，不放开 JSON 的缓存策略。
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag, 'content-security-policy': CONSOLE_CSP })
@@ -1775,7 +1775,7 @@ async function handleAdmin(
       return
     }
     // 仅 HTML 页覆盖管理面统一 no-store：no-cache = 可存储但每次必须条件重验证，
-    // 浏览器才会存下 236KB 页体并在下一次发 If-None-Match → ETag 304 生效。
+    // 浏览器才会存下 ~308KB 页体并在下一次发 If-None-Match → ETag 304 生效。
     // 页面是静态壳 + 状态路径，无敏感数据；JSON API 的 no-store 策略不动。
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP })
     res.end(html)
