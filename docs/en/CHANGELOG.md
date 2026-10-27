@@ -5,6 +5,16 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Improved
+
+- **"Start at Login" now uses a native check mark**: the tray menu item shows its on/off state with the same native check mark as the other options (it used to append a ✓ to the text).
+
+### Fixed
+
+- **The Windows tray menu no longer flickers**: the menu used to be rebuilt from scratch every 5 seconds while open, resetting the hover highlight and collapsing any open submenu; the menu structure now stays stable and only changed items are updated.
+
 ## [1.4.2] - 2026-10-27
 
 The Windows one-click update now shows the install wizard instead of failing silently.

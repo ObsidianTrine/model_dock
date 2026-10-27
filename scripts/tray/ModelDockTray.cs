@@ -986,7 +986,7 @@ namespace ModelDockTray
             };
             _menu.Opening += delegate(object sender, System.ComponentModel.CancelEventArgs e)
             {
-                BuildMenu();
+                UpdateMenu(); // 展开前一刻 diff 刷新：展开即最新，且打开期间不再整份重建
                 if (_running) TrayActions.FetchStateAsync(); // 展开时顺带刷新，下次打开更新鲜
             };
             _poll.Interval = 5000;
@@ -1016,178 +1016,329 @@ namespace ModelDockTray
             }
             catch { }
             if (_running) TrayActions.FetchStateAsync();
-            if (_menu.Visible) BuildMenu();
+            UpdateMenu(); // 菜单开着也只做 diff（原地改属性），不再整份重建——5s 轮询不再闪烁
         }
 
-        // ---------- 菜单（每次展开重建，状态实时） ----------
+        // ---------- 菜单（骨架常驻 + 按需 diff） ----------
+        // 固定项建一次不再增删；状态项只原地改 Text/Checked/Enabled/Visible；集合项（服务/模型/客户端）
+        // 按 Id 对齐：序列一致仅改属性，变了才增删。展开与 5s 轮询走同一条 diff 路径——打开中的菜单
+        // 不再整份 Clear 重建，悬停高亮与展开中的子菜单保持稳定（对齐 Clash Verge / mac 版观感）。
 
-        private void BuildMenu()
+        private bool _skeletonReady;
+        private ToolStripMenuItem _statusItem, _curItem, _openItem, _webItem;
+        private ToolStripMenuItem _svcItem, _modelItem, _cliItem, _autoLoginItem, _cleanItem, _updItem, _startItem, _liteItem, _quitItem;
+        private ToolStripItem _sepQuick;
+        // 集合项 diff 依据：id 序列 / 当前服务 pid / 客户端整份签名；一致即原地更新，不一致才重建
+        private List<string> _svcIds;
+        private readonly Dictionary<string, ToolStripMenuItem> _svcMap = new Dictionary<string, ToolStripMenuItem>();
+        private ToolStripMenuItem _svcAutoItem;
+        private string _modelPid;
+        private List<string> _modelIds;
+        private readonly Dictionary<string, ToolStripMenuItem> _modelMap = new Dictionary<string, ToolStripMenuItem>();
+        private string _cliSig;
+        private readonly List<ToolStripItem> _cliChildren = new List<ToolStripItem>();
+
+        /// 菜单刷新唯一入口（Opening 与轮询 tick 共用）：骨架未就位先建，再把当前健康/状态 diff 进去
+        private void UpdateMenu()
         {
-            var menu = _menu.Items;
-            menu.Clear();
+            EnsureSkeleton();
+            RefreshMenu();
+        }
 
-            // 版本首项（置灰不可点）：随时可见当前版本，不必专门点「检查更新」
+        /// 骨架一次性就位：常驻项按固定顺序 Add，Click 只挂这一次（项长存，不再随重建换新）
+        private void EnsureSkeleton()
+        {
+            if (_skeletonReady) return;
+            _skeletonReady = true;
+
             var verItem = new ToolStripMenuItem("ModelDock v" + TrayMeta.Version);
-            verItem.Enabled = false;
+            verItem.Enabled = false; // 版本首项置灰不可点：随时可见当前版本，不必专门点「检查更新」
+
+            _statusItem = new ToolStripMenuItem();
+            _statusItem.Enabled = false;
+
+            _curItem = new ToolStripMenuItem();
+            _curItem.Enabled = false;
+
+            _openItem = new ToolStripMenuItem(I18n.L("打开控制台", "Open Console"));
+            _openItem.Click += delegate { TrayActions.OpenConsole(); };
+
+            _webItem = new ToolStripMenuItem(I18n.L("在浏览器打开", "Open in Browser"));
+            _webItem.Click += delegate { TrayActions.OpenWeb(); };
+
+            _svcItem = new ToolStripMenuItem(I18n.L("当前服务", "Current Service"));
+            _modelItem = new ToolStripMenuItem(I18n.L("默认模型", "Default Model"));
+            _cliItem = new ToolStripMenuItem(I18n.L("客户端接入", "Clients"));
+
+            _sepQuick = new ToolStripSeparator();
+
+            _autoLoginItem = new ToolStripMenuItem(I18n.L("开机自启", "Start at Login"));
+            _autoLoginItem.Click += delegate { TrayActions.ToggleAutostart(); };
+
+            var logsItem = new ToolStripMenuItem(I18n.L("在资源管理器中打开日志", "Reveal Logs in Explorer"));
+            logsItem.Click += delegate { TrayActions.RevealLogs(); };
+
+            // 清理数据：还原客户端 + 删配置/密钥/日志/同步状态（确认弹窗在动作里）
+            _cleanItem = new ToolStripMenuItem(I18n.L("清理数据…", "Reset Data…"));
+            _cleanItem.Click += delegate { TrayActions.CleanData(); };
+
+            _updItem = new ToolStripMenuItem();
+            _updItem.Click += delegate { TrayActions.CheckUpdate(); };
+
+            _startItem = new ToolStripMenuItem(I18n.L("启动网关", "Start Gateway"));
+            _startItem.Click += delegate { TrayActions.RunGatewayCli("--sea-gateway"); };
+
+            _liteItem = new ToolStripMenuItem(I18n.L("轻量模式", "Lightweight Mode"));
+            // 轻量模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
+            // 点击 = 广播关闭请求（已开页面自关，浏览器拦截时页面显示手动关闭提示）；已勾选时点击无操作。
+            // 点击读现值而非建项时的快照：项长存后状态可能已变（旧实现捕获快照 st，diff 化后必须改）
+            _liteItem.Click += delegate
+            {
+                TrayStateData now = TrayActions.State;
+                if (now == null || now.TrayLite) return;
+                TrayActions.QuickAction("/_modeldock/tray-lite", "{}");
+            };
+
+            _quitItem = new ToolStripMenuItem();
+            _quitItem.Click += delegate { QuitClicked(); };
+
+            ToolStripItemCollection menu = _menu.Items;
             menu.Add(verItem);
+            menu.Add(_statusItem);
+            menu.Add(_curItem);
+            menu.Add(new ToolStripSeparator());
+            menu.Add(_openItem);
+            menu.Add(_webItem);
+            menu.Add(_svcItem);
+            menu.Add(_modelItem);
+            menu.Add(_cliItem);
+            menu.Add(_sepQuick);
+            menu.Add(_autoLoginItem);
+            menu.Add(logsItem);
+            menu.Add(_cleanItem);
+            menu.Add(_updItem);
+            menu.Add(_startItem);
+            menu.Add(_liteItem);
+            menu.Add(new ToolStripSeparator());
+            menu.Add(_quitItem);
+        }
 
-            var status = new ToolStripMenuItem(_running
+        /// 把当前健康/状态 diff 进既有骨架：只改属性与可见性、集合按 Id 增删，绝不 Clear 整菜单。
+        /// 属性 setter 对同值赋值是 no-op，5s tick 全量刷一遍也无视觉扰动
+        private void RefreshMenu()
+        {
+            // ---- 健康与常驻项 ----
+            _statusItem.Text = _running
                 ? I18n.L("网关运行中 · 端口 " + _port, "Gateway running · port " + _port)
-                : I18n.L("网关未运行", "Gateway not running"));
-            status.Enabled = false;
-            menu.Add(status);
+                : I18n.L("网关未运行", "Gateway not running");
+            _openItem.Enabled = _running;
+            _webItem.Enabled = _running;
 
-            // 当前生效路由（灰字）：钉定/定时窗口/默认选路后的「正在使用」，与控制台「当前」同口径
+            bool hasBin = TrayActions.GatewayBinaryPath() != null;
+            _autoLoginItem.Checked = TrayActions.AutostartOn(); // 原生勾选态替代旧「✓」文字后缀
+            _autoLoginItem.Enabled = hasBin;
+            _cleanItem.Enabled = hasBin;
+            _startItem.Enabled = hasBin;
+            _startItem.Visible = !_running;
+
+            // 检查更新：检查/更新进行中改文案并置灰防连点——更新中再拉起会与在途更新互踩安装（对齐 macOS 托盘口径）
+            bool updBusy = TrayActions.CheckingUpdate || TrayActions.UpdateInFlight();
+            _updItem.Text = TrayActions.CheckingUpdate
+                ? I18n.L("检查中…", "Checking…")
+                : (updBusy ? I18n.L("更新中…", "Updating…") : I18n.L("检查更新…", "Check for Updates…"));
+            _updItem.Enabled = !updBusy && hasBin;
+
+            _quitItem.Text = _running ? I18n.L("退出（停止网关）", "Quit (Stop Gateway)") : I18n.L("退出", "Quit");
+
+            // ---- 状态投影项：当前路由（灰字，与控制台「当前」同口径）/ 快捷区 / 轻量模式 ----
             TrayStateData st = _running ? TrayActions.State : null;
+            bool quick = st != null && st.CurrentId != null;
+            _sepQuick.Visible = quick;
+            _svcItem.Visible = quick;
+            _cliItem.Visible = quick;
+            _liteItem.Visible = st != null; // 网关未运行时无从读写状态故不显示
+            _liteItem.Checked = st != null && st.TrayLite;
+
             if (st != null && st.CurrentId != null && st.CurrentLabel != null)
             {
                 string line = I18n.L("当前：", "Current: ") + st.CurrentLabel;
                 if (!string.IsNullOrEmpty(st.CurrentModel)) line += " · " + st.CurrentModel;
                 if (st.ScheduleApplied) line += I18n.L("（定时窗口）", " (schedule)");
-                var cur = new ToolStripMenuItem(line);
-                cur.Enabled = false;
-                menu.Add(cur);
-            }
-            menu.Add(new ToolStripSeparator());
-
-            var open = new ToolStripMenuItem(I18n.L("打开控制台", "Open Console"));
-            open.Click += delegate { TrayActions.OpenConsole(); };
-            open.Enabled = _running;
-            menu.Add(open);
-
-            var web = new ToolStripMenuItem(I18n.L("在浏览器打开", "Open in Browser"));
-            web.Click += delegate { TrayActions.OpenWeb(); };
-            web.Enabled = _running;
-            menu.Add(web);
-
-            // ---- 快速操作区（常开，不再受任何开关门控）：切服务 / 切默认模型 / 接入断开客户端 ----
-            if (st != null && st.CurrentId != null)
-            {
-                BuildQuickSection(menu, st);
-                menu.Add(new ToolStripSeparator());
-            }
-
-            var auto = new ToolStripMenuItem(TrayActions.AutostartOn() ? I18n.L("开机自启 ✓", "Start at Login ✓") : I18n.L("开机自启", "Start at Login"));
-            auto.Click += delegate { TrayActions.ToggleAutostart(); };
-            auto.Enabled = TrayActions.GatewayBinaryPath() != null;
-            menu.Add(auto);
-
-            var logs = new ToolStripMenuItem(I18n.L("在资源管理器中打开日志", "Reveal Logs in Explorer"));
-            logs.Click += delegate { TrayActions.RevealLogs(); };
-            menu.Add(logs);
-
-            // 清理数据：还原客户端 + 删配置/密钥/日志/同步状态（确认弹窗在动作里）
-            var clean = new ToolStripMenuItem(I18n.L("清理数据…", "Reset Data…"));
-            clean.Click += delegate { TrayActions.CleanData(); };
-            clean.Enabled = TrayActions.GatewayBinaryPath() != null;
-            menu.Add(clean);
-
-            // 检查更新：网关存活走网关缓存接口（三方同源，TTL 内不打 GitHub），未运行退回 CLI 现查；
-            // 检查/更新进行中置灰防连点——更新中再拉起会与在途更新互踩安装（对齐 macOS 托盘口径）
-            var updBusy = TrayActions.CheckingUpdate || TrayActions.UpdateInFlight();
-            var upd = new ToolStripMenuItem(TrayActions.CheckingUpdate ? I18n.L("检查中…", "Checking…") : (updBusy ? I18n.L("更新中…", "Updating…") : I18n.L("检查更新…", "Check for Updates…")));
-            upd.Click += delegate { TrayActions.CheckUpdate(); };
-            upd.Enabled = !updBusy && TrayActions.GatewayBinaryPath() != null;
-            menu.Add(upd);
-
-            if (!_running)
-            {
-                var start = new ToolStripMenuItem(I18n.L("启动网关", "Start Gateway"));
-                start.Click += delegate { TrayActions.RunGatewayCli("--sea-gateway"); };
-                start.Enabled = TrayActions.GatewayBinaryPath() != null;
-                menu.Add(start);
-            }
-
-            // 轻量模式：勾选 = 当前没有任何 Web UI 打开（派生态，服务端按页面在场心跳实时求值）。
-            // 点击 = 广播关闭请求（已开页面自关，浏览器拦截时页面显示手动关闭提示）；已勾选时点击无操作。
-            // 网关未运行时无从读写状态故不显示
-            if (st != null)
-            {
-                var lite = new ToolStripMenuItem(I18n.L("轻量模式", "Lightweight Mode"));
-                lite.Checked = st.TrayLite;
-                lite.Click += delegate
-                {
-                    if (st.TrayLite) return; // 已在轻量模式：点击无操作
-                    TrayActions.QuickAction("/_modeldock/tray-lite", "{}");
-                };
-                menu.Add(lite);
-            }
-            menu.Add(new ToolStripSeparator());
-
-            var quit = new ToolStripMenuItem(_running ? I18n.L("退出（停止网关）", "Quit (Stop Gateway)") : I18n.L("退出", "Quit"));
-            quit.Click += delegate { QuitClicked(); };
-            menu.Add(quit);
-        }
-
-        /// 快速操作区：当前服务（整包切换 + 自动选路）、默认模型（当前服务目录）、客户端接入（接入/断开 + 指向）
-        private void BuildQuickSection(ToolStripItemCollection menu, TrayStateData st)
-        {
-            var svcItem = new ToolStripMenuItem(I18n.L("当前服务", "Current Service"));
-            var auto = (ToolStripMenuItem)svcItem.DropDownItems.Add(I18n.L("自动选路（跟随程序选择）", "Auto (follow program choice)"));
-            auto.Checked = st.AutoPin == null;
-            auto.Click += delegate { TrayActions.QuickAction("/_modeldock/auto-route", "{\"provider\":null}"); };
-            svcItem.DropDownItems.Add(new ToolStripSeparator());
-            foreach (var s in st.Services)
-            {
-                string title = s.Label + (s.Down ? I18n.L("（不可用）", " (unreachable)") : "");
-                var it = (ToolStripMenuItem)svcItem.DropDownItems.Add(title);
-                it.Checked = (st.AutoPin ?? st.CurrentId) == s.Id;
-                it.Enabled = s.Enabled && !s.Down;
-                string sid = s.Id;
-                it.Click += delegate { TrayActions.QuickAction("/_modeldock/switch", "{\"service\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
-            }
-            menu.Add(svcItem);
-
-            // 默认模型：当前生效服务的模型目录（目录为空不显示）；点击写该服务路由 profile 的 default_model
-            var cur = st.Services.Find(x => x.Id == st.CurrentId);
-            if (cur != null && cur.Models.Count > 0)
-            {
-                var mItem = new ToolStripMenuItem(I18n.L("默认模型", "Default Model"));
-                foreach (var pair in cur.Models)
-                {
-                    string title = string.IsNullOrEmpty(pair[1]) ? pair[0] : pair[1];
-                    var it = (ToolStripMenuItem)mItem.DropDownItems.Add(title);
-                    it.Checked = cur.DefaultModel == pair[0];
-                    string pid = cur.Id, mid = pair[0];
-                    it.Click += delegate { TrayActions.QuickAction("/_modeldock/service/update", "{\"provider\":\"" + TrayActions.JsonEscape(pid) + "\",\"default_model\":\"" + TrayActions.JsonEscape(mid) + "\"}"); };
-                }
-                menu.Add(mItem);
-            }
-
-            var cliItem = new ToolStripMenuItem(I18n.L("客户端接入", "Clients"));
-            if (st.Clients.Count == 0)
-            {
-                var none = (ToolStripMenuItem)cliItem.DropDownItems.Add(I18n.L("没有已安装的客户端", "No installed clients"));
-                none.Enabled = false;
+                _curItem.Text = line;
+                _curItem.Visible = true;
             }
             else
             {
-                foreach (var c in st.Clients)
-                {
-                    var parent = new ToolStripMenuItem(c.Label);
-                    string cid = c.Id, clabel = c.Label ?? c.Id;
-                    bool attached = c.Attached;
-                    var toggle = (ToolStripMenuItem)parent.DropDownItems.Add(attached ? I18n.L("断开并还原…", "Detach & Restore…") : I18n.L("接入", "Attach"));
-                    toggle.Click += delegate { ToggleClient(cid, clabel, attached); };
-                    if (attached && c.Mode == "gateway")
-                    {
-                        parent.DropDownItems.Add(new ToolStripSeparator());
-                        var follow = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("跟随当前服务", "Follow current service"));
-                        follow.Checked = string.IsNullOrEmpty(c.Route) || c.Route == "default";
-                        follow.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"default\":true}"); };
-                        foreach (var s in st.Services)
-                        {
-                            if (!s.Enabled || s.Down) continue;
-                            var pin = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("钉到 ", "Pin to ") + s.Label);
-                            pin.Checked = c.PinnedProvider == s.Id;
-                            string sid = s.Id;
-                            pin.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"provider\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
-                        }
-                    }
-                    cliItem.DropDownItems.Add(parent);
-                }
+                _curItem.Visible = false;
             }
-            menu.Add(cliItem);
+
+            if (quick)
+            {
+                DiffServices(st);
+                TrayStateData.Svc curSvc = st.Services.Find(x => x.Id == st.CurrentId);
+                _modelItem.Visible = curSvc != null && curSvc.Models.Count > 0; // 目录为空不显示
+                if (_modelItem.Visible) DiffModels(curSvc);
+                DiffClients(st);
+            }
+        }
+
+        /// 服务子菜单 diff：id 序列一致 → 原地改 Text/Checked/Enabled（悬停浏览零扰动）；变了才整体重排。
+        /// 「自动选路」与分隔线常驻前两位，不参与重排
+        private void DiffServices(TrayStateData st)
+        {
+            if (_svcAutoItem == null)
+            {
+                _svcAutoItem = new ToolStripMenuItem(I18n.L("自动选路（跟随程序选择）", "Auto (follow program choice)"));
+                _svcAutoItem.Click += delegate { TrayActions.QuickAction("/_modeldock/auto-route", "{\"provider\":null}"); };
+                _svcItem.DropDownItems.Add(_svcAutoItem);
+                _svcItem.DropDownItems.Add(new ToolStripSeparator());
+            }
+            _svcAutoItem.Checked = st.AutoPin == null;
+
+            var want = new List<string>();
+            foreach (TrayStateData.Svc s in st.Services) want.Add(s.Id ?? "");
+            bool same = _svcIds != null && _svcIds.Count == want.Count;
+            if (same)
+                for (int i = 0; i < want.Count; i++)
+                    if (_svcIds[i] != want[i]) { same = false; break; }
+
+            if (!same)
+            {
+                foreach (KeyValuePair<string, ToolStripMenuItem> kv in _svcMap)
+                {
+                    _svcItem.DropDownItems.Remove(kv.Value);
+                    kv.Value.Dispose();
+                }
+                _svcMap.Clear();
+                _svcIds = want;
+                for (int i = 0; i < st.Services.Count; i++)
+                {
+                    TrayStateData.Svc s = st.Services[i];
+                    var it = new ToolStripMenuItem(s.Label + (s.Down ? I18n.L("（不可用）", " (unreachable)") : ""));
+                    it.Checked = (st.AutoPin ?? st.CurrentId) == s.Id;
+                    it.Enabled = s.Enabled && !s.Down;
+                    string sid = s.Id;
+                    it.Click += delegate { TrayActions.QuickAction("/_modeldock/switch", "{\"service\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
+                    _svcMap[s.Id ?? ""] = it;
+                    _svcItem.DropDownItems.Insert(2 + i, it);
+                }
+                return;
+            }
+
+            for (int i = 0; i < st.Services.Count; i++)
+            {
+                TrayStateData.Svc s = st.Services[i];
+                ToolStripMenuItem it;
+                if (!_svcMap.TryGetValue(s.Id ?? "", out it)) continue;
+                it.Text = s.Label + (s.Down ? I18n.L("（不可用）", " (unreachable)") : "");
+                it.Checked = (st.AutoPin ?? st.CurrentId) == s.Id;
+                it.Enabled = s.Enabled && !s.Down;
+            }
+        }
+
+        /// 默认模型子菜单 diff：pid 或 id 序列变了才整体换血（基本只发生在菜单关闭时），否则原地改文案与勾选
+        private void DiffModels(TrayStateData.Svc cur)
+        {
+            var want = new List<string>();
+            foreach (string[] pair in cur.Models) want.Add(pair[0] ?? "");
+            bool same = _modelPid == cur.Id && _modelIds != null && _modelIds.Count == want.Count;
+            if (same)
+                for (int i = 0; i < want.Count; i++)
+                    if (_modelIds[i] != want[i]) { same = false; break; }
+
+            if (!same)
+            {
+                foreach (KeyValuePair<string, ToolStripMenuItem> kv in _modelMap)
+                {
+                    _modelItem.DropDownItems.Remove(kv.Value);
+                    kv.Value.Dispose();
+                }
+                _modelMap.Clear();
+                _modelPid = cur.Id;
+                _modelIds = want;
+                foreach (string[] pair in cur.Models)
+                {
+                    string title = string.IsNullOrEmpty(pair[1]) ? pair[0] : pair[1];
+                    var it = new ToolStripMenuItem(title);
+                    it.Checked = cur.DefaultModel == pair[0];
+                    string pid = cur.Id, mid = pair[0];
+                    it.Click += delegate { TrayActions.QuickAction("/_modeldock/service/update", "{\"provider\":\"" + TrayActions.JsonEscape(pid) + "\",\"default_model\":\"" + TrayActions.JsonEscape(mid) + "\"}"); };
+                    _modelMap[pair[0] ?? ""] = it;
+                    _modelItem.DropDownItems.Add(it);
+                }
+                return;
+            }
+
+            foreach (string[] pair in cur.Models)
+            {
+                ToolStripMenuItem it;
+                if (!_modelMap.TryGetValue(pair[0] ?? "", out it)) continue;
+                it.Text = string.IsNullOrEmpty(pair[1]) ? pair[0] : pair[1];
+                it.Checked = cur.DefaultModel == pair[0];
+            }
+        }
+
+        /// 客户端子菜单 diff：整份签名（各客户端 id/label/attached/mode/route/pinned + 可钉服务序列）
+        /// 不变 → 什么都不做；变了 → 重建。客户端变化都由点击动作触发（点击即收起菜单），
+        /// 重建几乎总发生在菜单关闭时，不构成打开中的闪烁
+        private void DiffClients(TrayStateData st)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (TrayStateData.Cli c in st.Clients)
+            {
+                sb.Append(c.Id).Append('\u0001').Append(c.Label).Append('\u0001').Append(c.Attached ? '1' : '0')
+                  .Append('\u0001').Append(c.Mode).Append('\u0001').Append(c.Route).Append('\u0001').Append(c.PinnedProvider).Append('\u0001');
+                foreach (TrayStateData.Svc s in st.Services)
+                {
+                    if (!s.Enabled || s.Down) continue;
+                    sb.Append(s.Id).Append(':').Append(s.Label).Append(';');
+                }
+                sb.Append('\u0002');
+            }
+            string sig = sb.ToString();
+            if (sig == _cliSig) return;
+            _cliSig = sig;
+
+            foreach (ToolStripItem old in _cliChildren)
+            {
+                _cliItem.DropDownItems.Remove(old);
+                old.Dispose();
+            }
+            _cliChildren.Clear();
+
+            if (st.Clients.Count == 0)
+            {
+                var none = new ToolStripMenuItem(I18n.L("没有已安装的客户端", "No installed clients"));
+                none.Enabled = false;
+                _cliItem.DropDownItems.Add(none);
+                _cliChildren.Add(none);
+                return;
+            }
+            foreach (TrayStateData.Cli c in st.Clients)
+            {
+                var parent = new ToolStripMenuItem(c.Label);
+                string cid = c.Id, clabel = c.Label ?? c.Id;
+                bool attached = c.Attached;
+                var toggle = (ToolStripMenuItem)parent.DropDownItems.Add(attached ? I18n.L("断开并还原…", "Detach & Restore…") : I18n.L("接入", "Attach"));
+                toggle.Click += delegate { ToggleClient(cid, clabel, attached); };
+                if (attached && c.Mode == "gateway")
+                {
+                    parent.DropDownItems.Add(new ToolStripSeparator());
+                    var follow = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("跟随当前服务", "Follow current service"));
+                    follow.Checked = string.IsNullOrEmpty(c.Route) || c.Route == "default";
+                    follow.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"default\":true}"); };
+                    foreach (TrayStateData.Svc s in st.Services)
+                    {
+                        if (!s.Enabled || s.Down) continue;
+                        var pin = (ToolStripMenuItem)parent.DropDownItems.Add(I18n.L("钉到 ", "Pin to ") + s.Label);
+                        pin.Checked = c.PinnedProvider == s.Id;
+                        string sid = s.Id;
+                        pin.Click += delegate { TrayActions.QuickAction("/_modeldock/harness/route", "{\"harness\":\"" + TrayActions.JsonEscape(cid) + "\",\"provider\":\"" + TrayActions.JsonEscape(sid) + "\"}"); };
+                    }
+                }
+                _cliItem.DropDownItems.Add(parent);
+                _cliChildren.Add(parent);
+            }
         }
 
         /// 接入/断开客户端（断开会还原配置——自动快照、可重接，托盘误点代价高，确认一次）
