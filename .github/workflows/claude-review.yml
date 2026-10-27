@@ -22,11 +22,9 @@ on:
   pull_request_review_comment:
     types: [created]
 
-# 同一 PR 的旧审查自动取消，省排队时间
-concurrency:
-  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
+# 同一 PR 的旧审查自动取消，省排队时间——并发组在 job 级（见各 job 的 concurrency），
+# 因为 workflow 级并发会把「所有 job 都不满足条件的空 run」（如 bot 自己评论触发的 issue_comment）
+# 也计入并发组，把进行中的审查取消掉。
 permissions:
   contents: read
   pull-requests: write
@@ -39,6 +37,9 @@ jobs:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     steps:
       - name: 配置三件套不齐时静默跳过（未启用状态零消耗）
         id: keyguard
@@ -106,10 +107,14 @@ jobs:
   interactive:
     # 评论 @claude → 交互会话：可追问，也可按评论指示修改代码（需要 contents: write 才能推送）
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      github.actor != 'claude[bot]' &&
+      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')))
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     permissions:
       contents: write
       pull-requests: write

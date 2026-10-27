@@ -85,3 +85,4 @@ Dependabot PR 触发后 Claude 接手：
 
 - Claude 修复提交固定 `[dependabot-fix]` 前缀；auto-review 检测尾提交为该前缀即跳过复审。
 - dependabot-fix 仅 `actor=dependabot[bot]` 时执行：Claude 用 PAT 推送触发的 synchronize，actor 是 PAT 属主，不会重入。
+- interactive 不响应 `claude[bot]` 自己发的评论（actor 排除）；并发组在 **job 级**——bot 评论触发的空 run 不进并发组，不会把进行中的审查取消掉（2026-10-27 实测：bot 发完评论自取消，行内标注被跳过，遂改 job 级）。
