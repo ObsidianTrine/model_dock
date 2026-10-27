@@ -4,9 +4,8 @@ name: dependabot-fix
 #   Dependabot 开 PR（actor=dependabot[bot]）→ Claude 接手：
 #   npm ci + 全量 npm test → 全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
 #
-# 启用前提：仓库 Settings → Secrets and variables → Actions 配置
-#   secret CLAUDE_AUTH_TOKEN —— 供应商 API key（bot 走 Anthropic 兼容端点，现配 DeepSeek；
-#     端点/模型走 Variables，换供应商见 docs/ci-bots.md「模型接入」）
+# 启用前提：仓库 Settings → Secrets and variables → Actions 配置三件套（供应商无关，yml 零默认值）
+#   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL（含义见 docs/ci-bots.md「模型接入」）
 #   DEPENDABOT_GH_TOKEN —— PAT（fine-grained：Contents 读写 + Pull requests 读写；classic：repo）。
 #     原因：Dependabot 触发的 workflow 拿到的 GITHUB_TOKEN 一律只读（GitHub 平台行为），
 #     没有 PAT 就无法在 PR 上评论/推送。缺任一 secret 时本工作流打 warning 后跳过，不影响 PR 本身。
@@ -44,18 +43,24 @@ jobs:
         env:
           PAT: ${{ secrets.DEPENDABOT_GH_TOKEN }}
           KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+          BASE: ${{ vars.CLAUDE_BASE_URL }}
+          MODEL: ${{ vars.CLAUDE_MODEL }}
         run: |
           ok=true
           if [ -z "$PAT" ]; then
             ok=false
             echo "::warning::未配置 secrets.DEPENDABOT_GH_TOKEN（需 Contents+Pull requests 写权限），无法在 Dependabot PR 上评论/推送。"
           fi
-          if [ -z "$KEY" ]; then
+          miss=""
+          [ -z "$KEY" ] && miss="$miss secrets.CLAUDE_AUTH_TOKEN"
+          [ -z "$BASE" ] && miss="$miss vars.CLAUDE_BASE_URL"
+          [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
+          if [ -n "$miss" ]; then
             ok=false
-            echo "::warning::未配置 secrets.CLAUDE_AUTH_TOKEN，Claude 无法运行。"
+            echo "::warning::Claude 配置不齐（缺:$miss）。补齐方法见 docs/ci-bots.md「模型接入」。"
           fi
           if [ "$ok" != "true" ]; then
-            echo "::warning::依赖升级自动修复未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+            echo "::warning::依赖升级自动修复未启用，本次跳过。"
           fi
           echo "ready=$ok" >> "$GITHUB_OUTPUT"
 
@@ -74,9 +79,8 @@ jobs:
           cache: npm
       - uses: anthropics/claude-code-action@v1
         env:
-          # 端点/模型走仓库 Variables（换供应商在 UI 改配置即可），未配时回落 DeepSeek；
-          # 认证走 x-api-key（DeepSeek 官方背书；Bearer 型端点需另加 AUTH_TOKEN，见 docs/ci-bots.md）
-          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL || 'https://api.deepseek.com/anthropic' }}
+          # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
+          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
         with:
           # Dependabot 触发的 run 只读 token，必须用 PAT 才能评论/推送
@@ -104,6 +108,6 @@ jobs:
 
             评论一律中文、结论先行、简洁。最终输出一律走 gh pr comment，不要只把结论留在会话消息里。
           claude_args: |
-            --model ${{ vars.CLAUDE_MODEL || 'deepseek-flash' }}
+            --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 50
             --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),WebFetch,WebSearch"

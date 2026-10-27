@@ -2,12 +2,11 @@ name: claude-review
 
 # PR 审查 bot：PR 打开/更新时自动出审查意见；在 PR/issue 评论里 @claude 可追问或要求改码。
 #
-# 启用前提：仓库 Settings → Secrets and variables → Actions 配置
-#   secret CLAUDE_AUTH_TOKEN —— 供应商 API key（bot 走 Anthropic 兼容端点，现配 DeepSeek）
-#   variable CLAUDE_BASE_URL / CLAUDE_MODEL —— 端点与模型，未配时用下方默认值；换供应商改这两个值即可，零代码改动
-#   （各配置项含义与切换步骤见 docs/ci-bots.md「模型接入」）
-#   未配置时 bot 静默跳过（Actions 日志 warning），零 token 消耗。
-#   设置与用途详见 docs/ci-bots.md。
+# 启用前提：仓库 Settings → Secrets and variables → Actions 配置三件套（供应商无关，yml 零默认值）
+#   secret   CLAUDE_AUTH_TOKEN —— Anthropic 兼容端点的 API key
+#   variable CLAUDE_BASE_URL —— 兼容端点 URL；variable CLAUDE_MODEL —— 模型名（经 claude_args --model 下发）
+#   三件套缺任一项 bot 静默跳过（Actions 日志 warning 指明缺哪项），零 token 消耗。
+#   配置项含义、换供应商与切回官方步骤见 docs/ci-bots.md「模型接入」。
 #
 # 边界：
 #   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论），
@@ -41,14 +40,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: 未配置 API key 时静默跳过（未启用状态零消耗）
+      - name: 配置三件套不齐时静默跳过（未启用状态零消耗）
         id: keyguard
         env:
           KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+          BASE: ${{ vars.CLAUDE_BASE_URL }}
+          MODEL: ${{ vars.CLAUDE_MODEL }}
         run: |
-          if [ -z "$KEY" ]; then
+          miss=""
+          [ -z "$KEY" ] && miss="$miss secrets.CLAUDE_AUTH_TOKEN"
+          [ -z "$BASE" ] && miss="$miss vars.CLAUDE_BASE_URL"
+          [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
+          if [ -n "$miss" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 secrets.CLAUDE_AUTH_TOKEN，PR 审查 bot 未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+            echo "::warning::bot 配置不齐（缺:$miss），PR 审查 bot 未启用。在 Settings → Secrets and variables → Actions 补齐即可，见 docs/ci-bots.md「模型接入」。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -66,9 +71,8 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
-          # 端点/模型走仓库 Variables（换供应商在 UI 改配置即可），未配时回落 DeepSeek；
-          # 认证走 x-api-key（DeepSeek 官方背书；Bearer 型端点需另加 AUTH_TOKEN，见 docs/ci-bots.md）
-          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL || 'https://api.deepseek.com/anthropic' }}
+          # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
+          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
         with:
           prompt: |
@@ -95,7 +99,7 @@ jobs:
             - 没有值得报告的问题时，顶层评论只写一句通过结论，不要凑数。
             - 注意：PR 分支已检出于当前工作目录。
           claude_args: |
-            --model ${{ vars.CLAUDE_MODEL || 'deepseek-flash' }}
+            --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 30
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 
@@ -112,14 +116,20 @@ jobs:
       issues: write
       id-token: write
     steps:
-      - name: 未配置 API key 时静默跳过（未启用状态零消耗）
+      - name: 配置三件套不齐时静默跳过（未启用状态零消耗）
         id: keyguard
         env:
           KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+          BASE: ${{ vars.CLAUDE_BASE_URL }}
+          MODEL: ${{ vars.CLAUDE_MODEL }}
         run: |
-          if [ -z "$KEY" ]; then
+          miss=""
+          [ -z "$KEY" ] && miss="$miss secrets.CLAUDE_AUTH_TOKEN"
+          [ -z "$BASE" ] && miss="$miss vars.CLAUDE_BASE_URL"
+          [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
+          if [ -n "$miss" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 secrets.CLAUDE_AUTH_TOKEN，@claude 交互未启用，本次跳过。启用方法见 docs/ci-bots.md。"
+            echo "::warning::bot 配置不齐（缺:$miss），@claude 交互未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -128,12 +138,11 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true'
         env:
-          # 端点/模型走仓库 Variables（换供应商在 UI 改配置即可），未配时回落 DeepSeek；
-          # 认证走 x-api-key（DeepSeek 官方背书；Bearer 型端点需另加 AUTH_TOKEN，见 docs/ci-bots.md）
-          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL || 'https://api.deepseek.com/anthropic' }}
+          # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
+          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
         with:
           base_branch: develop
           claude_args: |
-            --model ${{ vars.CLAUDE_MODEL || 'deepseek-flash' }}
+            --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 60

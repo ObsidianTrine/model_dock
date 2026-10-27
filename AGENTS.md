@@ -195,7 +195,7 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 
 ### GitHub 侧自动化（PR 审查 bot + Dependabot）
 
-本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secrets，未配置时 bot 跳过（Actions 日志有 warning）；完整设置步骤、成本控制与换供应商方法见 **`docs/ci-bots.md`**：
+本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 bot 跳过，Actions 日志有 warning）；完整设置步骤、成本控制与换供应商方法见 **`docs/ci-bots.md`**：
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
@@ -203,7 +203,7 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `CLAUDE_AUTH_TOKEN`（key） + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
 
-- **模型接入**：bot 走 Anthropic 兼容端点、**配置全在 GitHub 侧不写死**——secret `CLAUDE_AUTH_TOKEN`（key，必配）+ Variables `CLAUDE_BASE_URL`（未配默认 DeepSeek `https://api.deepseek.com/anthropic`）与 `CLAUDE_MODEL`（未配默认 `deepseek-flash`）；换供应商在 GitHub UI 改这几个值即可。Bearer 型端点注意项与切回官方方法见 `docs/ci-bots.md`「模型接入」。
+- **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**——secret `CLAUDE_AUTH_TOKEN`（key）+ Variables `CLAUDE_BASE_URL`（端点 URL）与 `CLAUDE_MODEL`（模型名），三件套缺一 bot 跳过并告警；换供应商只改这三个值。Bearer 型端点注意项与切回官方方法见 `docs/ci-bots.md`「模型接入」。
 
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（GitHub 平台行为）：Dependabot PR 的评论/推送必须经 `DEPENDABOT_GH_TOKEN`（PAT）；缺 PAT 时 dependabot-fix 打 warning 后跳过，PR 留给人工。
 - **防回环**：Claude 修复提交固定 `[dependabot-fix]` 前缀，review bot 检测到尾提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入）。
