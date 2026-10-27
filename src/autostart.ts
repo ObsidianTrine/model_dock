@@ -70,7 +70,7 @@ export function windowsRunValueDisplay(): string {
 /** Run 键在盘的镜像文件：生产上 reg add 成功后同步落一份，供 autostartOverview 做
  *  免 spawn 的在场判断（overview 5s 轮询不能 spawn reg.exe）；沙箱（MODELRDOCK_FAKE_HOME）
  *  下不碰真机注册表，它就是 Run 键值数据本体。两者都以它为 uninstall 的删除对象之一。 */
-function runValueMirrorFile(): string {
+export function windowsRunValueMirrorFile(): string {
   return path.join(modeldockDir(), 'autostart-run-key.txt')
 }
 
@@ -105,7 +105,7 @@ function inSandbox(): boolean {
 function readRunValueData(): string | null {
   if (inSandbox()) {
     try {
-      return fs.readFileSync(runValueMirrorFile(), 'utf8')
+      return fs.readFileSync(windowsRunValueMirrorFile(), 'utf8')
     } catch {
       return null
     }
@@ -116,7 +116,7 @@ function readRunValueData(): string | null {
 
 async function writeRunValueData(data: string): Promise<void> {
   if (inSandbox()) {
-    await atomicWrite(runValueMirrorFile(), data, 0o644)
+    await atomicWrite(windowsRunValueMirrorFile(), data, 0o644)
     return
   }
   const r = execOk('reg', ['add', WINDOWS_RUN_KEY, '/v', WINDOWS_RUN_VALUE, '/t', 'REG_SZ', '/d', data, '/f'])
@@ -131,11 +131,11 @@ async function writeRunValueData(data: string): Promise<void> {
     )
   }
   // 免 spawn 在场指示（autostartOverview 用），与注册表条目同步落/删
-  await atomicWrite(runValueMirrorFile(), data, 0o644)
+  await atomicWrite(windowsRunValueMirrorFile(), data, 0o644)
 }
 
 function deleteRunValueData(): boolean {
-  const mirror = runValueMirrorFile()
+  const mirror = windowsRunValueMirrorFile()
   if (inSandbox()) {
     const existed = fs.existsSync(mirror)
     try {
@@ -386,7 +386,7 @@ export function autostartOverview(): { installed: boolean; kind: AutostartKind }
   const file = serviceFilePath()
   if (!kind || !file) return null
   if (kind === 'windows') {
-    return { installed: fs.existsSync(runValueMirrorFile()) || fs.existsSync(windowsStartupPath()), kind }
+    return { installed: fs.existsSync(windowsRunValueMirrorFile()) || fs.existsSync(windowsStartupPath()), kind }
   }
   return { installed: fs.existsSync(file), kind }
 }
