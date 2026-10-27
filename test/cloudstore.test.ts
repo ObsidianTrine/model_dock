@@ -221,9 +221,9 @@ describe('畸形 JSON 请求体不 500（REVIEW-27 延伸覆盖）', () => {
     const s = await startServer()
     try {
       const tok = await pairDevice(s.port, s.consoleToken, 'mdksync_mal')
-      // 已知残留（报告单列，不在本套件断言）：body 为字面量 null 时 parseBody 返回 null，
-      // b.token/b.pairCode 属性访问抛 TypeError → 500。此处只钉当前已安全的畸形形态。
+      // 字面量 null 曾穿透 parseBody 抛 TypeError → 500（REVIEW-27 残留，2026-10-28 修复后入矩阵）
       const bodies: Array<[string, string]> = [
+        ['null', '字面量 null'],
         ['{oops', '截断 JSON'],
         ['[1,2]', '顶层数组'],
         ['123', '顶层数字'],
