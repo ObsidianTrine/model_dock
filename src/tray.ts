@@ -15,13 +15,22 @@ export function trayBinaryPath(execPath = process.execPath): string | null {
   return fs.existsSync(p) ? p : null
 }
 
-/** 拉起托盘（best-effort）：托盘内部单实例（mac flock / win Mutex），重复拉起静默退出无副作用；
+/** 拉起托盘（best-effort）：托盘内部单实例（mac flock / win Mutex）。注入
+ *  MODELRDOCK_TRAY_AUTOSPAWN=1 告知托盘「本次为程序拉起（守护补拉 / cli.ts launchGui），不是用户
+ *  双击」——win 托盘抢不到单实例时会把这次拉起当双击自动弹控制台（_autoOpened 守卫是进程内的，
+ *  跨进程无效），v1.3.0 安装链「[Run] 托盘 → 守护 → 补拉托盘」因此把控制台弹两份（2026-10 报障）；
+ *  带标记的托盘进程一律不自动弹、抢不到单实例即静默退出（控制台由调用方或用户手点负责）。
  *  spawn 失败吞掉——托盘非关键路径，不能拖垮 daemon */
 export function spawnTrayIfPresent(opts: { execPath?: string; spawnFn?: typeof spawn } = {}): void {
   const trayPath = trayBinaryPath(opts.execPath)
   if (!trayPath) return
   const spawnFn = opts.spawnFn ?? spawn
-  spawnFn(trayPath, [], { detached: true, stdio: 'ignore', env: process.env, windowsHide: true })
+  spawnFn(trayPath, [], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, MODELRDOCK_TRAY_AUTOSPAWN: '1' },
+    windowsHide: true,
+  })
     .on('error', () => {})
     .unref()
 }
