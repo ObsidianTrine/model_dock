@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, residueNote } from './presence.js'
-import { directAttachNote, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, resolveRoute, routeModelNote } from './shared.js'
 
 /**
  * WorkBuddy AI（腾讯 AI 办公客户端）的自定义模型走本地 models.json：应用只读该文件并
@@ -308,16 +308,15 @@ export const workbuddyAdapter: HarnessAdapter = {
     }
 
     const after = serializeJson(root, text !== null ? detectJsonIndent(text) : '  ', text !== null ? text.endsWith('\n') : true)
-    const changes: FileChange[] = [
-      {
-        path: p,
-        before: text,
-        after,
-        note: text === null
-          ? t('创建 models.json 并写入 ModelDock 模型', 'Create models.json and write the ModelDock models')
-          : t('更新 ModelDock 模型条目（不动其它条目）', 'Update the ModelDock model entries (other entries untouched)'),
-      },
-    ]
+    const attachChange = changeIfChanged(
+      p,
+      text,
+      after,
+      text === null
+        ? t('创建 models.json 并写入 ModelDock 模型', 'Create models.json and write the ModelDock models')
+        : t('更新 ModelDock 模型条目（不动其它条目）', 'Update the ModelDock model entries (other entries untouched)')
+    )
+    const changes: FileChange[] = attachChange ? [attachChange] : []
 
     notes.push(
       t(
@@ -378,17 +377,17 @@ export const workbuddyAdapter: HarnessAdapter = {
     const after = serializeJson(afterRoot, detectJsonIndent(text!), text!.endsWith('\n'))
     return {
       changes: [
-        {
-          path: p,
-          before: text,
+        changeIfChanged(
+          p,
+          text,
           after,
-          note: t(
+          t(
             '移除 {count} 个 ModelDock 模型条目（其余条目不动）',
             'Remove {count} ModelDock model entries (other entries untouched)',
             { count: ours.length }
-          ),
-        },
-      ],
+          )
+        ),
+      ].filter((c): c is NonNullable<typeof c> => c !== null),
       notes: [t('若 WorkBuddy 模型列表仍显示 ModelDock，重启 WorkBuddy', 'If WorkBuddy still shows ModelDock in its model list, restart WorkBuddy')],
     }
   },

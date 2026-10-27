@@ -1808,8 +1808,9 @@ describe('mimo-code adapter', () => {
       expect(after.provider.modeldock.options.baseURL).toBe('http://127.0.0.1:8687/v1')
 
       const plan2 = await mimoCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
-      const after2 = JSON.parse(plan2.changes[0].after)
-      expect(Object.keys(after2.provider)).toEqual(['bigmodel', 'modeldock']) // 幂等，不重复
+      // 幂等重接：条目不重复，且等值过滤产出空 changes（稳态零快照零写盘，2026-10 复审 P2）
+      expect(plan2.changes).toEqual([])
+      expect(Object.keys(JSON.parse(fs.readFileSync(p, 'utf8')).provider)).toEqual(['bigmodel', 'modeldock'])
 
       const planDetach = await mimoCodeAdapter.planDetach(await loadConfig())
       await applyChanges('mimo-code', 'detach', planDetach.changes, { yes: true })
@@ -2152,10 +2153,10 @@ describe('workbuddy adapter', () => {
       expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toHaveLength(2)
       expect((await listSnapshots('workbuddy')).some((s) => s.operation === 'attach')).toBe(true)
 
-      // 幂等重接：条目不翻倍
+      // 幂等重接：条目不翻倍，且等值过滤产出空 changes（稳态零快照零写盘，2026-10 复审 P2）
       const plan2 = await workbuddyAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
-      const after2 = JSON.parse(plan2.changes[0].after)
-      expect(after2).toHaveLength(2)
+      expect(plan2.changes).toEqual([])
+      expect(JSON.parse(fs.readFileSync(p, 'utf8'))).toHaveLength(2)
 
       // 模拟 registerAttach 的登记（单测不走 ops 层），覆盖 gateway_base 匹配路径
       const regged = await loadConfig()

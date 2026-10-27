@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { stripContextSuffix } from './shared.js'
+import { changeIfChanged, stripContextSuffix } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 const TIER_ENV_KEYS = [
@@ -278,6 +278,10 @@ export const claudeCodeAdapter: HarnessAdapter = {
       }
     } else {
       env.ANTHROPIC_AUTH_TOKEN = opts.token
+      // 网关模式凭据唯一：清掉任何既有 ANTHROPIC_API_KEY（用户手动配的旧上游 Key 或 direct 遗留）
+      // ——两凭据并存时客户端可能仍带旧 x-api-key 请求（网关按 token 解析必 401，且难排查）；
+      // attach 前有快照，detach 可还原
+      delete env.ANTHROPIC_API_KEY
       // 从直连切回：清掉 direct 分支写入的模型映射 env 与根 model——网关侧有别名重写，残留会钉死模型
       if (opts.fromMode === 'direct') {
         delete env.ANTHROPIC_MODEL
@@ -290,8 +294,6 @@ export const claudeCodeAdapter: HarnessAdapter = {
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
         // 根 model 可能是真实 ID（现行直连）或 sonnet 别名（旧版直连），都是直连写入的——无条件清
         delete root.model
-        // direct 按 x-api-key 型上游写入的上游真实 Key 同属直连遗留，网关模式不该留在客户端配置里
-        delete env.ANTHROPIC_API_KEY
       }
       // 网关本地实现 /v1/models（返回当前服务目录）；discovery env 是早期方案（v2.1.296 的
       // discovery 硬过滤只认含 claude/anthropic 的 ID），已被下方 modelPicker 全量策划取代，清除
@@ -358,12 +360,12 @@ export const claudeCodeAdapter: HarnessAdapter = {
 
     return {
       changes: [
-        {
-          path: p,
-          before: text,
-          after: serializeJson(root, text === null ? '  ' : detectJsonIndent(text), text === null || text.endsWith('\n')),
-        },
-      ],
+        changeIfChanged(
+          p,
+          text,
+          serializeJson(root, text === null ? '  ' : detectJsonIndent(text), text === null || text.endsWith('\n'))
+        ),
+      ].filter((c): c is NonNullable<typeof c> => c !== null),
       notes,
       profileUpdates: Object.keys(profileUpdates).length > 0 ? profileUpdates : undefined,
       writtenBaseUrl: d?.base_url,
@@ -389,12 +391,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
       if (isOurModelPicker(root.modelPicker)) delete root.modelPicker // 策划 lineup 同理
       return {
         changes: [
-          {
-            path: p,
-            before: text,
-            after: serializeJson(root, detectJsonIndent(text), text.endsWith('\n')),
-          },
-        ],
+          changeIfChanged(p, text, serializeJson(root, detectJsonIndent(text), text.endsWith('\n'))),
+        ].filter((c): c is NonNullable<typeof c> => c !== null),
         notes: [
           t(
             '已移除 ModelDock 注入的变量；恢复接管前的完整原配置请用 detach 的快照还原',

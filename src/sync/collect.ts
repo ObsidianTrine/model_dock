@@ -3,6 +3,7 @@ import type { ProviderConfig } from '../config/types.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { defaultStore, getSecret, parseKeyRef, setSecretsBatch, type SecretBackend } from '../config/secrets.js'
 import { reloadPresets, validateUserPresetEntries } from '../presets/data.js'
+import { clearKnownTable } from '../providers/known.js'
 import { snapshot } from '../backup/snapshot.js'
 import { atomicWrite } from '../util/fsx.js'
 import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
@@ -132,7 +133,10 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
     c.providers = providers
     c.profiles = profiles
     // 新机导入后没有任何路由在供：客户端无可用 profile、手机控制台「实际生效」显示不可用。
-    // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由是机器态，不随包覆盖。
+    // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由
+    // 是机器态，不随包覆盖（lansync/syncexport 测试钉死的语义）。远端删掉了正激活 profile 时
+    // 会短暂留下悬空引用：转发侧 pickTarget 对未知 profile 安全回落（首候选/无路由），用户
+    // 重选一次即恢复；不做自动重指——那会覆盖用户的机器态选择。
     const first = Object.keys(profiles)[0]
     if (!c.active_profile && first) c.active_profile = first
     if (rules.length > 0 || c.gateway?.schedule) {
@@ -142,6 +146,9 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
 
   await atomicWrite(presetsJsonPath(), JSON.stringify(doc.data.userPresets ?? [], null, 2) + '\n', 0o600)
   reloadPresets()
+  // reloadPresets 只重建预设表：known.ts 的模型索引（byIdTable）首建后不失效的话，
+  // 长驻网关进程内同步下来的预设模型元数据一直用旧值直到重启
+  clearKnownTable()
 
   return {
     providers: Object.keys(providers),

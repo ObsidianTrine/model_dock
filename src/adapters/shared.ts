@@ -1,7 +1,19 @@
 import { t } from '../util/i18n.js'
 import type { Config, ModelMeta, Protocol } from '../config/types.js'
-import type { AttachOptions } from './types.js'
+import type { AttachOptions, FileChange } from './types.js'
 import { gatewayBase, gatewayBaseOpenAI } from './types.js'
+
+/** 等值过滤帮手：内容无变化返回 null（稳态重接/周期 refresh 零快照零写盘），有变化才产出 FileChange。
+ *  dsh/zcode 内联了同款判定；其余适配器统一走这里（known-issues P2：此前 5 处稳态重接也整包
+ *  快照+写盘，与 dsh 声明的设计意图不一致）。 */
+export function changeIfChanged(
+  path: string,
+  before: string | null,
+  after: string,
+  note?: string
+): FileChange | null {
+  return after === before ? null : { path, before, after, note }
+}
 
 /** 上下文变体后缀（[1m]/[128k] 等）：是请求参数标记，不是独立模型 id；NAME 显示与清洗时剥掉 */
 export const CONTEXT_SUFFIX_RE = /\[\d+[MmKk]\]$/

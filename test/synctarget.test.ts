@@ -446,3 +446,53 @@ describe('setup 双路径行为锚点（DRIFT-02）', () => {
     expect((await readSyncState())?.lastAppliedRev).toBe(mBefore?.rev)
   })
 })
+
+describe('WebDAV manifest 写后回读（双机互覆闭环，2026-10 复审 P2）', () => {
+  it('PUT 后回读发现归属非本机 → conflict（不再静默分叉）', async () => {
+    // 假件模拟竞态对手：对 manifest.json 的任何 PUT 都被对方同 rev 的新鲜写入覆盖（byDevid 不同）
+    const competitor = JSON.stringify({ rev: 5, ts: '2026-10-20T00:00:00.000Z', byDevid: 'mdksync_rival', blobRef: 'blobs/5-mdksync_rival.msync' }, null, 2) + '\n'
+    const store = new Map<string, string>()
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        const p = req.url ?? '/'
+        const body = Buffer.concat(chunks).toString('utf8')
+        if (req.method === 'MKCOL') {
+          store.set(p, '')
+          res.statusCode = 201
+          res.end()
+          return
+        }
+        if (req.method === 'PUT') {
+          store.set(p, p.endsWith('/manifest.json') ? competitor : body)
+          res.statusCode = 201
+          res.end()
+          return
+        }
+        if (req.method === 'GET') {
+          const v = store.get(p)
+          if (v === undefined) {
+            res.statusCode = 404
+            res.end('not found')
+            return
+          }
+          res.statusCode = 200
+          res.end(v)
+          return
+        }
+        res.statusCode = 405
+        res.end()
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const port = (server.address() as net.AddressInfo).port
+    try {
+      const target = createWebdavTarget({ url: `http://127.0.0.1:${port}/dav`, dir: 'modeldock', username: 'user', password: 'pass' })
+      const r = await target.writeManifest({ rev: 5, ts: '2026-10-20T00:00:00.000Z', byDevid: 'mdksync_me', blobRef: 'blobs/5-mdksync_me.msync' }, 4)
+      expect(r).toBe('conflict')
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+})

@@ -656,3 +656,39 @@ describe('applyImport（候选 → provider/profile/secret）', () => {
     }
   })
 })
+describe('import sources · scanZcode（现行个人供应商存储）', () => {
+  it('扫到 provider_config.json 的自定义供应商；跳过 modeldock 条目与停用条目（P2 回归）', async () => {
+    const h = fakeHome()
+    try {
+      const dir = path.join(h.home, '.zcode', 'v2')
+      await ensureDir(dir)
+      await atomicWrite(
+        path.join(dir, 'provider_config.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          config: {
+            providerConfigRules: {
+              providerRules: [
+                { providerId: 'my-up', providerName: 'My Up', enabled: true, config: { access: { type: 'api-key', apiKey: 'sk-z1' }, api: { type: 'openai-chat-completions', baseUrl: 'https://z.example.com/v1' } } },
+                // ModelDock 自己的条目不收编
+                { providerId: 'modeldock', providerName: 'ModelDock', enabled: true, config: { access: { type: 'api-key', apiKey: 'mdk' }, api: { type: 'anthropic-messages', baseUrl: 'http://127.0.0.1:8687' } } },
+                // 停用条目不收编
+                { providerId: 'off-one', providerName: 'Off', enabled: false, config: { access: { type: 'api-key', apiKey: 'sk-off' }, api: { type: 'anthropic-messages', baseUrl: 'https://off.example.com' } } },
+                // 无 enabled 字段视为启用
+                { providerId: 'anth-one', providerName: 'Anth', config: { access: { type: 'api-key', apiKey: 'sk-anth' }, api: { type: 'anthropic-messages', baseUrl: 'https://anth.example.com' } } },
+              ],
+            },
+          },
+        }),
+        0o600
+      )
+      const out = await scanSources('zcode')
+      const mine = out.filter((c) => !c.skip_reason)
+      expect(mine.map((c) => c.base_url)).toEqual(['https://z.example.com/v1', 'https://anth.example.com'])
+      expect(mine[0]).toMatchObject({ protocol: 'openai', key: 'sk-z1' })
+      expect(mine[1]).toMatchObject({ protocol: 'anthropic', key: 'sk-anth' })
+    } finally {
+      h.restore()
+    }
+  })
+})

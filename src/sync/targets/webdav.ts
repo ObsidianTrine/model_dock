@@ -83,6 +83,12 @@ export function createWebdavTarget(opts: WebdavOptions): SyncTarget {
       const cur = await readUrl(`${root}/manifest.json`)
       if (cur !== null && parseManifest(cur).rev !== baseRev) return 'conflict'
       await putWithMkcol(`${root}/manifest.json`, JSON.stringify(m, null, 2) + '\n')
+      // 回读复核归属：WebDAV 服务器对 If-Match 支持参差，CAS 是「读-比-写」两段式——双机在
+      // 窗口内互覆时两边都会收到 'ok' 并各自把 lastSyncedHash 记成自己的内容，此后 rev 相同、
+      // 双机永远 idle，先写方的改动静默丢失（连冲突快照都没有）。写后读回校验归属，
+      // 被覆写一方转 conflict 走引擎冲突分支，静默分叉闭环。
+      const back = await readUrl(`${root}/manifest.json`)
+      if (back !== null && parseManifest(back).byDevid !== m.byDevid) return 'conflict'
       return 'ok'
     },
     async readBlob(ref) {

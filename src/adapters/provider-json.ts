@@ -12,7 +12,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonTolerant, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { directAttachNote, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, resolveRoute, routeModelNote } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 /** mimocode schema 的单模型条目（$schema https://mimo.xiaomi.com/mimocode/config.json 的 provider.<id>.models 值） */
@@ -245,13 +245,13 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
 
       return {
         changes: [
-          {
-            path: p,
-            before: text,
-            after: serializeJson(root, text ? detectJsonIndent(text) : '  ', text ? text.endsWith('\n') : true),
-            note: t('注册 modeldock provider', 'Register the modeldock provider'),
-          },
-        ],
+          changeIfChanged(
+            p,
+            text,
+            serializeJson(root, text ? detectJsonIndent(text) : '  ', text ? text.endsWith('\n') : true),
+            t('注册 modeldock provider', 'Register the modeldock provider')
+          ),
+        ].filter((c): c is NonNullable<typeof c> => c !== null),
         notes,
         writtenBaseUrl: directBase,
       }
@@ -286,12 +286,8 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
         }
         return {
           changes: [
-            {
-              path: p,
-              before: text,
-              after: serializeJson(root, detectJsonIndent(text!), text!.endsWith('\n')),
-            },
-          ],
+            changeIfChanged(p, text, serializeJson(root, detectJsonIndent(text!), text!.endsWith('\n'))),
+          ].filter((c): c is NonNullable<typeof c> => c !== null),
           notes,
         }
       }
