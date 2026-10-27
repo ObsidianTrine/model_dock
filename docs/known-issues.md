@@ -325,7 +325,8 @@
 - 影响：CLI `provider set-key` / 导入 / 另一实例改 key 后，运行中网关持续用旧 key（`relay.ts:340` 每请求经缓存取）→ 上游 401，用户视角"改了没生效"，直到重启。
 - 修复方向：secrets.ts 导出 `invalidateSecretsCache()`（清 fileCache+externalCache），watcher 识别到 secrets.json 变化时调用；或 loadFileSecrets 做 mtime 复核。
 - 连带问题：secrets.json 读-改-写**没有跨进程锁**（config.toml 有两层防护，secrets 没有），CLI 与网关并发 setSecret → 整表覆盖丢更新。建议与缓存失效一并补轻量锁。
-- 2026-10-12 已修（2a0c5c9）：`invalidateSecretsCache()` + reloadRuntime 接线；externalCache 加 60s TTL 兜底 keychain 跨进程改动；darwin keychain 改 `security -i` stdin（XPLAT-04 同 commit）。**连带的跨进程轻量锁未实施，仍开放。**
+- 2026-10-12 已修（2a0c5c9）：`invalidateSecretsCache()` + reloadRuntime 接线；externalCache 加 60s TTL 兜底 keychain 跨进程改动；darwin keychain 改 `security -i` stdin（XPLAT-04 同 commit）。
+- 连带的跨进程轻量锁**已补**（2026-10-12 @8b12b77）：secrets 写路径（setSecret / setSecretsBatch / deleteSecret → `mutateFileSecrets`）统一走 `withFileLock`（`secretsLockPath` = secrets.json 旁 `.lock`，与 config.toml 锁同语义：进程内 promise 串行 + O_EXCL 锁文件 + 陈锁抢占），锁内强制跳过内存缓存重读盘拼新鲜表，改后整表写回。并发回归：test/store.test.ts「secrets 写路径经 withFileLock 互斥调用序」「并发 setSecret/setSecretsBatch 写入同一 secrets.json，键互不丢失」（2026-10-27 任务卡 T01 复核确认收口；残余边界：loadFileSecrets 读路径的存量明文迁移写不走锁——锁不可重入，锁内再取锁会死锁，且该写仅在首次迁移时发生、窗口极小）。
 
 **CORRECT-02（P2）快照孤儿清理删他进程半成品**
 - 位置：`src/backup/snapshot.ts:154-158`：`valid` 集合 = 有合法 manifest 的目录，其余 `rm -rf`。跨进程并发（网关 pickerSync/attach 与 CLI 同时写）时，对方"文件已拷、manifest 未写"的半成品被整体删除 → 对方 applyChanges 在写客户端文件前抛错。后果是偶发假失败（写操作安全中止），无数据损坏。
