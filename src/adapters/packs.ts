@@ -12,7 +12,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { detectJsonIndent, parseDocument, parseJsonStrict, serializeJson, tomlParse, tomlStringify } from './format.js'
-import { directAttachNote } from './shared.js'
+import { changeIfChanged, directAttachNote } from './shared.js'
 
 export interface PackVars {
   token: string
@@ -150,8 +150,9 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       const note = opts.direct
         ? t('adapter pack upsert（独立直连：写入上游地址与真实 Key）', 'adapter pack upsert (direct mode: writes the upstream URL and the real key)')
         : t('adapter pack upsert', 'adapter pack upsert')
+      const change = changeIfChanged(p, text, applyPackUpsert(text, pack, vars), note)
       return {
-        changes: [{ path: p, before: text, after: applyPackUpsert(text, pack, vars), note }],
+        changes: change ? [change] : [],
         notes: opts.direct
           ? [
               directAttachNote(opts.direct.base_url),

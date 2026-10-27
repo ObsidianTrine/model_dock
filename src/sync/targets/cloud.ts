@@ -14,8 +14,6 @@ export interface CloudTargetOptions {
 }
 
 const TIMEOUT_MS = 10_000
-/** 云端模式的 blobRef 常量：信封随 manifest 一体存取，无独立 blob 路径 */
-export const CLOUD_ENVELOPE_REF = 'envelope'
 
 export function createCloudTarget(opts: CloudTargetOptions): SyncTarget {
   const base = opts.url.replace(/\/+$/, '')

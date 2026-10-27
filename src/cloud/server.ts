@@ -5,7 +5,7 @@
  * desired 语义按「应用」按钮同款：值是服务（provider）id——详设 §7.2 写 profileId，
  * 实现取 UI 面向用户的「服务」口径（与 switchToService 对齐），字段兼容 service | profileId。
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomInt } from 'node:crypto'
 import http from 'node:http'
 import { randomToken } from '../util/fsx.js'
 import { safeEqual } from '../util/safe-equal.js'
@@ -42,10 +42,12 @@ function fail(res: http.ServerResponse, status: number, code: string, message: s
   json(res, status, { error: { code, message } })
 }
 
-/** 配对码：XXXX-XXXX，去掉易混字符（0/O/1/I/L） */
+/** 配对码：XXXX-XXXX，去掉易混字符（0/O/1/I/L）。用 CSPRNG（randomInt）：配对码是免鉴权
+ *  端点的唯一入网凭据，安全凭据不用 Math.random（xorshift128+ 非密码学安全；同文件 device
+ *  token 走 randomBytes，标准一致）。 */
 export function generatePairCode(): string {
   const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-  const pick = (): string => alphabet[Math.floor(Math.random() * alphabet.length)]
+  const pick = (): string => alphabet[randomInt(alphabet.length)]
   return [0, 1, 2, 3].map(pick).join('') + '-' + [0, 1, 2, 3].map(pick).join('')
 }
 
@@ -72,7 +74,14 @@ function cookieToken(req: http.IncomingMessage): string | null {
   if (!raw) return null
   for (const pair of raw.split(';')) {
     const [k, ...rest] = pair.trim().split('=')
-    if (k === 'mdkcloud') return decodeURIComponent(rest.join('='))
+    if (k === 'mdkcloud') {
+      // 畸形 cookie 值（如裸 %）解码抛 URIError 会穿到顶层变 500，按无凭据处理（走 401）
+      try {
+        return decodeURIComponent(rest.join('='))
+      } catch {
+        return null
+      }
+    }
   }
   return null
 }
@@ -131,7 +140,8 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
   }
 
   function handleLogin(h: EndpointCtx): void {
-    const b = JSON.parse(h.bodyText || '{}') as { token?: string }
+    // 畸形 JSON 走 parseBody 回落：直接 JSON.parse 会把 V8 解析错误原文当 500 'internal' 外泄
+    const b = parseBody<{ token?: unknown }>(h.bodyText, {})
     // consoleToken 是云端最高价值凭据，与其他面一致走常数时间比较
     if (typeof b.token !== 'string' || !safeEqual(b.token, opts.consoleToken)) {
       fail(h.res, 401, 'unauthorized', t('控制台令牌不正确', 'Invalid console token'))
@@ -142,8 +152,8 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
   }
 
   function handlePair(h: EndpointCtx): void {
-    // 配对（免鉴权：新设备凭一次性码入网）
-    const b = JSON.parse(h.bodyText || '{}') as { pairCode?: string; devid?: string; deviceName?: string }
+    // 配对（免鉴权：新设备凭一次性码入网）；畸形 JSON 同 handleLogin 走 parseBody 回落
+    const b = parseBody<{ pairCode?: unknown; devid?: unknown; deviceName?: unknown }>(h.bodyText, {})
     const pairCode = String(b.pairCode ?? '').trim().toUpperCase()
     const devid = String(b.devid ?? '').trim()
     const deviceName = String(b.deviceName ?? '').trim() || 'device'
@@ -208,6 +218,12 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     const cur = store.getDoc()
     if (cur && cur.rev !== baseRev) {
       json(h.res, 409, { error: { code: 'conflict', message: t('基线修订号不符', 'Base revision mismatch') }, rev: cur.rev, ts: cur.ts })
+      return
+    }
+    // 畸形 ts 直接拒收：NaN 参与比较恒 false——畸形包一旦入库，后续任何回滚比较都会放行，
+    // 全局回滚保护（422）从此失效（engine 侧同型陷阱已有 Number.isFinite 防护，服务端补齐）
+    if (!Number.isFinite(Date.parse(ts))) {
+      fail(h.res, 400, 'invalid', t('ts 不是合法的时间串', 'ts is not a valid timestamp'))
       return
     }
     if (cur && Date.parse(ts) < Date.parse(cur.ts)) {
@@ -376,5 +392,3 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
 
   return server
 }
-
-export { sha256 as sha256Hex }

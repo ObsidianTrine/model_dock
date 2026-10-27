@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { directAttachNote, directResponsesEndpointNote } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesEndpointNote } from './shared.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -36,10 +36,13 @@ function rcCandidates(): string[] {
 }
 
 /** detach 时清理旧版接入残留的哨兵段（新版内联 http_headers，不再写环境变量）。
- *  只收敛删除段附近的多余空行，不全局压缩用户 rc 文件自己的空行排版。 */
+ *  空行收敛只作用于删除接缝：哨兵段连同其紧邻的前后空行一起匹配，接缝统一收敛为至多一个
+ *  空行——不碰用户 rc 文件其他位置的空行排版（此前 `\n{3,}` 全局 replace 会顺手抹掉用户自己的排版）。 */
 function stripEnvBlock(before: string): string {
-  const re = new RegExp('[^\\n]*' + RC_BEGIN + '[\\s\\S]*?' + RC_END + '[^\\n]*\\n?')
-  return before.replace(re, '').replace(/\n{3,}/g, '\n\n')
+  const re = new RegExp(
+    '(?:\\r?\\n)*[^\\n]*' + RC_BEGIN + '[\\s\\S]*?' + RC_END + '[^\\n]*(?:\\r?\\n|$)(?:\\r?\\n)*'
+  )
+  return before.replace(re, (_m: string, off: number) => (off === 0 ? '' : '\n\n'))
 }
 
 interface CodexConfig {
@@ -177,7 +180,9 @@ export const codexAdapter: HarnessAdapter = {
     else notes.push(t('未改动默认 provider，需要路由到 ModelDock 请加 --set-default', 'Default provider unchanged; add --set-default to route through ModelDock'))
 
     return {
-      changes: [{ path: p, before: text, after, note: t('注册 modeldock provider', 'Register the modeldock provider') }],
+      changes: [
+        changeIfChanged(p, text, after, t('注册 modeldock provider', 'Register the modeldock provider')),
+      ].filter((c): c is NonNullable<typeof c> => c !== null),
       notes,
       writtenBaseUrl: d ? directBase : undefined,
     }
@@ -198,19 +203,21 @@ export const codexAdapter: HarnessAdapter = {
       if (entry && isOursGatewayUrl(typeof entry.base_url === 'string' ? entry.base_url : undefined, 'codex', cfg)) {
         delete root.model_providers!.modeldock
         if (root.model_provider === 'modeldock') delete root.model_provider
-        changes.push({ path: p, before: text, after: tomlStringify(reorderTomlRoot(root)) })
+        const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
+        if (c2) changes.push(c2)
       }
     }
     // 还原 shell 启动文件里由接入写入的令牌，其余内容不动
     for (const cand of rcCandidates()) {
       const cur = await readTextIfExists(cand)
       if (cur !== null && cur.includes(RC_BEGIN)) {
-        changes.push({
-          path: cand,
-          before: cur,
-          after: stripEnvBlock(cur),
-          note: t('移除 {file} 里的 {env}', 'Remove {env} from {file}', { file: path.basename(cand), env: TOKEN_ENV }),
-        })
+        const c3 = changeIfChanged(
+          cand,
+          cur,
+          stripEnvBlock(cur),
+          t('移除 {file} 里的 {env}', 'Remove {env} from {file}', { file: path.basename(cand), env: TOKEN_ENV })
+        )
+        if (c3) changes.push(c3)
       }
     }
     if (changes.length === 0) return { changes: [], notes: [t('Codex 未指向 ModelDock 网关，无需改动', 'Codex is not pointing at the ModelDock gateway; nothing to change')] }

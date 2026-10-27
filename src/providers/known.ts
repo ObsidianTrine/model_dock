@@ -105,6 +105,11 @@ export const EXTRA: Record<string, KnownMeta> = {
 }
 
 let byIdTable: Record<string, KnownMeta> | undefined
+/** 清掉已构建的预设模型索引（reloadPresets 后调用）：同步下来的自定义预设改变模型元数据，
+ *  长驻网关进程内不失效的话 resolveModelMeta/knownMetaTable 一直用旧值直到重启 */
+export function clearKnownTable(): void {
+  byIdTable = undefined
+}
 /** 预设库模型索引（预设已内置各厂商权威值，按 id 建表）。懒构建：首次查询时确保预设已加载（BUG-12）再建表，与 EXTRA 一起合并成完整已知表 */
 export function knownByIdTable(): Record<string, KnownMeta> {
   ensurePresetsLoaded()

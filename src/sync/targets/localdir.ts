@@ -28,6 +28,10 @@ export function createLocaldirTarget(dir: string): SyncTarget {
       if (cur !== null && parseManifest(cur).rev !== baseRev) return 'conflict'
       await ensureDir(root)
       await atomicWrite(path.join(root, 'manifest.json'), JSON.stringify(m, null, 2) + '\n', 0o600)
+      // 回读复核归属（与 webdav 同口径）：目录在同步盘（iCloud/OneDrive）上时，两台机器的
+      // 「读-比-写」同样存在互覆窗口；被覆写一方转 conflict 走引擎冲突分支，不留静默分叉
+      const back = await readTextIfExists(path.join(root, 'manifest.json'))
+      if (back !== null && parseManifest(back).byDevid !== m.byDevid) return 'conflict'
       return 'ok'
     },
     async readBlob(ref) {

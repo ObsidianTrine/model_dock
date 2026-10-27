@@ -3,6 +3,7 @@ import type { ProviderConfig } from '../config/types.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { defaultStore, getSecret, parseKeyRef, setSecretsBatch, type SecretBackend } from '../config/secrets.js'
 import { reloadPresets, validateUserPresetEntries } from '../presets/data.js'
+import { clearKnownTable } from '../providers/known.js'
 import { snapshot } from '../backup/snapshot.js'
 import { atomicWrite } from '../util/fsx.js'
 import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
@@ -134,7 +135,13 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
     // 新机导入后没有任何路由在供：客户端无可用 profile、手机控制台「实际生效」显示不可用。
     // 只在本机还没选过路由时补默认（首個 profile），已有路由的机器一律不动——当前激活路由是机器态，不随包覆盖。
     const first = Object.keys(profiles)[0]
-    if (!c.active_profile && first) c.active_profile = first
+    if (!c.active_profile && first) {
+      c.active_profile = first
+    } else if (c.active_profile && !profiles[c.active_profile]) {
+      // 拉下来的文档删掉了本机正激活的 profile：悬空引用会让 currentProvider=null、
+      // 转发无路由、云端 desired 守卫失真——重指到首个剩余 profile（全部删光则清空）
+      c.active_profile = first
+    }
     if (rules.length > 0 || c.gateway?.schedule) {
       c.gateway = { ...c.gateway, schedule: { ...(c.gateway?.schedule?.enabled === undefined ? {} : { enabled: c.gateway.schedule.enabled }), windows: [...rules] } }
     }
@@ -142,6 +149,9 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
 
   await atomicWrite(presetsJsonPath(), JSON.stringify(doc.data.userPresets ?? [], null, 2) + '\n', 0o600)
   reloadPresets()
+  // reloadPresets 只重建预设表：known.ts 的模型索引（byIdTable）首建后不失效的话，
+  // 长驻网关进程内同步下来的预设模型元数据一直用旧值直到重启
+  clearKnownTable()
 
   return {
     providers: Object.keys(providers),

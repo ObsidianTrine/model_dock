@@ -263,3 +263,34 @@ describe('云端控制面 API v1', () => {
     store2.close()
   })
 })
+
+describe('云端畸形输入面（2026-10 复审 P2）', () => {
+  it('PUT /v1/doc 畸形 ts → 400，回滚保护不被 NaN 打穿', async () => {
+    const s = await startServer()
+    try {
+      const tok = await pairDevice(s.port, s.consoleToken, 'mdksync_a', 'A')
+      const bad = await req(s.port, 'PUT', '/v1/doc', { token: tok, headers: { 'if-match': '0' }, body: { envelope: ENVELOPE('not-a-date'), ts: 'not-a-date' } })
+      expect(bad.status).toBe(400)
+      // 合法包随后照常入库
+      const ok = await req(s.port, 'PUT', '/v1/doc', { token: tok, headers: { 'if-match': '0' }, body: { envelope: ENVELOPE('2026-10-05T01:00:00.000Z'), ts: '2026-10-05T01:00:00.000Z' } })
+      expect(ok.status).toBe(200)
+      // 早于已存 ts 的旧包仍被 422 拒（保护活着，未被畸形包写废）
+      const old = await req(s.port, 'PUT', '/v1/doc', { token: tok, headers: { 'if-match': '1' }, body: { envelope: ENVELOPE('2026-10-04T01:00:00.000Z'), ts: '2026-10-04T01:00:00.000Z' } })
+      expect(old.status).toBe(422)
+    } finally {
+      await s.close()
+    }
+  })
+
+  it('/v1/login 畸形 JSON → 401（不再 500 外泄解析错误）；畸形 cookie → 401', async () => {
+    const s = await startServer()
+    try {
+      const bad = await fetch(`http://127.0.0.1:${s.port}/v1/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{oops' })
+      expect(bad.status).toBe(401)
+      const probe = await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { cookie: 'mdkcloud=%' } })
+      expect(probe.status).toBe(401)
+    } finally {
+      await s.close()
+    }
+  })
+})

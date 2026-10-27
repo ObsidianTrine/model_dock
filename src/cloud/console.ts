@@ -247,7 +247,10 @@ export function renderConsolePage(): string {
 
   applyI18n()
   load()
-  setInterval(load, 10000)
+  // 后台标签不轮询（手机常驻页多标签并存时，10s 轮询会互相挤占 60/min 限速配额触发 429）；
+  // 回前台立刷一次（与桌面控制台 / 手机同步页的 visibilitychange 门控同款）
+  setInterval(function () { if (!document.hidden) load() }, 10000)
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) load() })
 })()
 </script>
 </body>
