@@ -80,6 +80,7 @@ Dependabot PR 触发后 Claude 接手：
 - 已配置想临时停：仓库 Actions 页 → 左侧选中 workflow → `⋯` → **Disable workflow**（恢复同入口 Enable）。
 - 消耗点（每次 = 一次完整 agent 会话）：auto-review 在每次 PR 打开/更新各烧一次；`@claude`、dependabot-fix 各一次。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
 - 同 PR 并发互斥（concurrency 组），旧审查自动取消，不会叠加烧；auto-review 检测到尾提交是 `[dependabot-fix]` 也会跳过。
+- **冒烟测试法**（验证 bot 链路是否正常）：开一个任意小改动的 PR → auto-review 出审查评论即整链路通（供应商端点 + key + 模型）；dependabot-fix 需要真实 Dependabot PR 才触发，Dependabot 最近检查时间看仓库 **Insights → Dependency graph → Dependabot**（或 `network/updates` 页）。
 
 ## 防回环设计
 
