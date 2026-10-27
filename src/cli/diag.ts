@@ -6,7 +6,7 @@ import { loadConfig, mutateConfig } from '../config/store.js'
 import type { Config } from '../config/types.js'
 import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
-import {
+import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
   autostartStatus,
   gatewayDaemonArgs,
   readRecordedArgv,
@@ -266,7 +266,13 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
   // 自启静默失败。沙箱上下文（FAKE_HOME）下 serviceFilePath 已重定向，只核沙箱自身登记，且豁免自引用
   // （dev 沙箱自己的服务文件引用自家路径属正常）；--fix 走 uninstallAutostart，confirm 把关 + 删前
   // 由本项 msg/hint 打印将删内容（登记文件与指向），不自动删任何数据。
-  const svcFile = serviceFilePath()
+  // Windows 注册表形态（XPLAT-06）没有服务文件：读 Run 键镜像文件（生产 reg add 同步落盘，沙箱下即键值本体）；
+  // 仅剩旧 VBS（升级未重装）回读 VBS 内容（ARGV_MARK）——与 windowsStatus 的双源判定同口径
+  const svcFile = autostartKind() === 'windows'
+    ? (fs.existsSync(windowsRunValueMirrorFile())
+        ? windowsRunValueMirrorFile()
+        : fs.existsSync(windowsStartupPath()) ? windowsStartupPath() : null)
+    : serviceFilePath()
   if (svcFile && fs.existsSync(svcFile)) {
     let text = ''
     try {
@@ -274,7 +280,7 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     } catch {
       /* 读不了按无登记内容处理，退当前运行时 argv */
     }
-    const argv = readRecordedArgv(text) ?? gatewayDaemonArgs()
+    const argv = (autostartKind() === 'windows' ? parseRunCommandLine(text) : readRecordedArgv(text)) ?? gatewayDaemonArgs()
     const fakeHomeRoot = process.env.MODELRDOCK_FAKE_HOME ? path.resolve(process.env.MODELRDOCK_FAKE_HOME) : null
     const sandboxHit = fakeHomeRoot
       ? argv.find((a) => SANDBOX_REF_RE.test(a) && !a.startsWith(fakeHomeRoot))

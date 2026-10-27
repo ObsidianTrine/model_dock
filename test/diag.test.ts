@@ -6,7 +6,7 @@ import { fakeHome } from './helpers.js'
 import { cmdDoctor, cmdStatus, cmdTest, runFixes, type DoctorFinding } from '../src/cli/diag.js'
 import { __testSetExternalReader, invalidateSecretsCache, verifySecretsStore } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
-import { autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsVbs } from '../src/autostart.js'
+import { AUTOSTART_LAUNCH_FLAG, autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsRunCommandLine, windowsRunValueMirrorFile } from '../src/autostart.js'
 
 // cmdDoctor/cmdStatus 是只读体检壳：无网络路径（上游可达性探测指向本地拒绝端口，瞬时失败）。
 // cmdEnv/cmdTest 完整链会经 resolveClientGatewayPort 无条件探测 8687（开发机=生产实例，红线），
@@ -172,18 +172,20 @@ function jsonFindings(): {
 /** 按当前平台在沙箱内写一份自启服务文件（登记 argv 经 ARGV_MARK 随文件落盘，doctor 据此核查）；
  *  serviceFilePath 在 FAKE_HOME 下已重定向，落点全在沙箱内 */
 function seedAutostartEntry(home: string, argv: string[]): string {
-  const file = serviceFilePath()
+  // Windows 注册表形态（XPLAT-06）：播种 Run 键镜像文件（键值数据 = windowsRunCommandLine），
+  // 落点 modeldockDir()/autostart-run-key.txt 在 FAKE_HOME 下全在沙箱内；其余平台写服务文件
+  const isWin = autostartKind() === 'windows'
+  const file = isWin ? windowsRunValueMirrorFile() : serviceFilePath()
   if (!file) throw new Error('autostart not supported on this platform')
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const workDir = path.join(home, '.modeldock')
   const outLog = path.join(workDir, 'logs', 'service-out.log')
   const errLog = path.join(workDir, 'logs', 'service-err.log')
-  const content =
-    autostartKind() === 'launchd'
+  const content = isWin
+    ? windowsRunCommandLine([...argv, AUTOSTART_LAUNCH_FLAG])
+    : autostartKind() === 'launchd'
       ? launchdPlistXml(argv, workDir, outLog, errLog)
-      : autostartKind() === 'systemd'
-        ? systemdUnitIni(argv, workDir, outLog, errLog)
-        : windowsVbs(argv)
+      : systemdUnitIni(argv, workDir, outLog, errLog)
   fs.writeFileSync(file, content, 'utf8')
   return file
 }
