@@ -43,6 +43,7 @@ keyguard/guard 会校验三件套齐全，缺任一项打 warning 指明缺哪�
 2. **PAT（仅 dependabot-fix 需要）**：再建 secret `DEPENDABOT_GH_TOKEN`。
    - fine-grained PAT：Repository access 选本仓库，权限给 **Contents: Read+Write**、**Pull requests: Read+Write**（classic PAT 给 repo scope）。
    - 为什么必须 PAT：Dependabot 触发的 workflow，其内置 GITHUB_TOKEN 被 GitHub 平台**强制只读**，在 Dependabot PR 上评论/推送必须自备 token。
+   - **关键坑（2026-10-27 实测）**：Dependabot PR 触发的 run **读不到 Actions 页签的 Secrets**（平台视同 fork：只给只读 token、不注入 Actions secrets；Variables 反而可见）。所以 `CLAUDE_AUTH_TOKEN` 与 `DEPENDABOT_GH_TOKEN` 必须在 **Settings → Secrets and variables → Dependabot 页签**再配一份（同名同值），dependabot-fix 的 guard 才拿得到；guard 会点名缺哪项。
 3. `dependabot.yml` 只在**默认分支（main）**生效：develop 合入 main 之后，Dependabot 才开始每周开升级 PR；只停在 develop 不会触发。
 
 ## 未启用时的行为（当前状态）
