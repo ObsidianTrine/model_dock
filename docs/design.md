@@ -626,7 +626,7 @@ sequenceDiagram
 |---|---|---|
 | v1.0.0 | 2026-10-11 | 首个公开发布版本：单机闭环（网关 + 预设 + 适配器体系 + 快照 + 导入 + 诊断 + Web 控制台）、五平台 SEA 单文件与自动发布、密钥安全存储（Keychain / DPAPI / Secret Service / machine-id AES）、网关开机自启（三平台服务）、客户端「安装并接入」闭环（含托管 Node bootstrap）、定时切换与自动路由（双槽位）、多机同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、托盘、双语 i18n |
 | v1.1.x – v1.2.1 | 2026-10-13 ~ 10-21 | 「配置包」统一搬家入口、dev 沙箱隔离治理、「正在使用」状态条与路由信息如实化、一键导入卡治理、doctor `--fix`/`--json`、托盘版本常驻、两轮性能批修（详见 CHANGELOG） |
-| 未发布（develop） | — | 性能批修（同步取密钥/适配器探测/导入扫描并行化、周期任务降频错峰、请求体上限默认 16MB 可调）、Web 控制台分层测试落地（L0 静态契约 + L2 happy-dom DOM 行为，见 docs/web-testing-plan.md） |
+| 未发布（develop） | — | 性能批修（同步取密钥/适配器探测/导入扫描并行化、周期任务降频错峰、请求体上限默认 16MB 可调）、Web 控制台分层测试落地（L0 静态契约 + L2 happy-dom DOM 行为，见 docs/archive/web-testing-plan.md） |
 
 **超出原设计规划已交付**（as-built 修正）：请求级 failover + 熔断（原列 M3）、opencode / mimo-code / workbuddy 适配器、Web 控制台安装-接入-断开闭环、Linux machine-id 加密后端、额度耗尽熔断（402 收编 + quota 熔断）、Claude 内置模型名网关兜底改写、网关本地 `/v1/models`、模型选择器策划（网关/直连双模式）、多机配置同步 M1–M3c、自更新 M1/M2、LAN 手机控制台与 PWA、独立直连救援通道、`harness` 运行期管理组、托盘、双语 i18n、客户端安装托管 Node bootstrap（含钉版健康门禁）、`config export/import` 加密配置包、`presets.json` 用户自定义预设扩展、models.dev 元数据补全。
 

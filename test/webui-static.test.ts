@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { UI_HTML } from '../src/gateway/ui.js'
 import { renderMobilePage } from '../src/gateway/lan.js'
 
-// Web 控制台静态契约（docs/web-testing-plan.md L0）：对内嵌页面的求值产物做可执行规则，
+// Web 控制台静态契约（docs/archive/web-testing-plan.md L0）：对内嵌页面的求值产物做可执行规则，
 // 把 AGENTS.md 的 UI 纪律（双语对、弹层提示归宿、惰性 label、端点不漂移）变成 CI 红灯。
 // 本文件不 vi.mock 任何模块（singleFork 共享注册表，见测试指南）；脚本语法编译检查在
 // dedup-smoke.test.ts（L0 第 4 条），此处不重复。

@@ -2,7 +2,7 @@
 import { describe, expect, it, vi, beforeAll, afterAll } from 'vitest'
 import { UI_HTML } from '../src/gateway/ui.js'
 
-// Web 控制台 DOM 行为测试（docs/web-testing-plan.md L2）：把桌面页内嵌脚本挂进 happy-dom
+// Web 控制台 DOM 行为测试（docs/archive/web-testing-plan.md L2）：把桌面页内嵌脚本挂进 happy-dom
 // （纯 JS，无 native，不违反 SEA 依赖约束），stub fetch 返回 /overview 契约夹具，断言渲染与
 // 语言切换行为。伪定时器冻结 5s/60s 轮询（singleFork 共享进程：afterAll 必须还原全部桩）。
 //
