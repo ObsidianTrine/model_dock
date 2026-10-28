@@ -50,5 +50,11 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 |----|-----|---------|------|
 | 2026-10-update-stoptray | win 更新停托盘「尽力而为」零验证，托盘带锁活到安装向导，RM 30s 超时安装卡死 | 22f20fd | ✅ 审出（P0 定位到根因 + 顺带挖出 HEAD 仍在的 e4ac854 相关问题，见 runs/2026-10-29-first-run.md） |
 | 2026-10-diag-darwin-cipher | 跨机密文检测缺 darwin / 无加密形态分支，macOS secrets 表条目漏报 | 53da3e2 | ✅ 审出（证据链完整复现 53da3e2 修复逻辑 + 1 个 [存量] 建议 + 3 条存疑） |
+| 2026-10-tray-mutex-gc | win 托盘单实例 Mutex 局部变量被 GC 回收，双击叠出多个图标 | cbb9265 | ✅ 审出（[P0] 精确定位 GC.KeepAlive 在 Application.Run 之前无效，机制+行号齐全，报告见 runs/2026-10-29-tray-mutex-gc.md） |
+| 2026-10-update-shape-customdir | 安装器装到自定义目录被 detectInstallShape 误判 win-bare，托盘永不更新 | d1d3eab | ✅ 审出（[核心] 即修复目标，交叉引用 installer.iss DefaultDirName 可改目录 + 占位默认值同险，报告见 runs/2026-10-29-update-shape-customdir.md） |
+| 2026-10-cloud-null-body | 请求体 JSON 字面量 null 穿透 parseBody，500 外泄 V8 原文（REVIEW-27 残留） | 78cf650 | ✅ 审出（P1 定位主根因并扫出 5 端点同型点 + 1 个 5MB 请求体额外问题，报告见 runs/2026-10-29-cloud-null-body.md） |
+| 2026-10-fsx-idle-flush | appendLine 常驻流池无空闲刷盘，Windows 硬杀丢日志尾 | 0ba0d65 | ✅ 审出（[高] 直接点名硬杀丢日志尾 + Windows 无信号语义，报告见 runs/2026-10-29-fsx-idle-flush.md） |
+| 2026-10-backup-prune-race | 快照孤儿清理误删他进程半成品 + recursive mkdir 死代码重试 | a494d81 | ✅ 审出（3 连中：prune 竞争 / restore 自删保护快照 / 死代码重试，报告见 runs/2026-10-29-backup-prune-race.md） |
+| 2026-10-route-pin-precedence | 客户端钉住路由被定时窗口/全局当前槽接管，模型发错上游 404 | baa820c | ✅ 审出（[高] 钉定被优先级覆盖，定位 state.ts:483+499-505，报告见 runs/2026-10-29-route-pin-precedence.md） |
 
-首跑 2/2：当前 REVIEW.md + 红线组合的召回足够，这两题作为回归基线保留；此后任何审查者改动跑分低于 2/2 即不保留。
+全量 8/8 审出（两批首跑合计）：当前 REVIEW.md + 红线组合对「真实逃过审查的 bug」召回足够——这批题作为回归基线保留，此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于 8/8 即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。

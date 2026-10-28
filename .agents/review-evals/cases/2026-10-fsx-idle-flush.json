@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-fsx-idle-flush",
+  "title": "appendLine 常驻流池只进不出、无空闲刷盘——Windows gateway stop 是 TerminateProcess（无信号语义）drain 走不到，最后缓冲的尾部日志随进程一起丢",
+  "reviewRef": "0ba0d65^",
+  "fixedBy": "0ba0d65",
+  "files": ["src/util/fsx.ts"],
+  "expect": ["appendline", "flush", "落盘", "丢失"],
+  "note": "XPLAT-02。修复 = 流 3s 无写入即 end 强制落盘、下条按需重建。审查侧教训：「写入静默」的常驻资源要反问「进程被硬杀/崩溃时缓冲去哪」——Windows 无信号语义，cleanup/drain 路径不可依赖"
+}

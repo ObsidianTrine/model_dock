@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-shape-customdir",
+  "title": "win 安装器装到自定义目录（如 D:\\Programs\\ModelDock）被 detectInstallShape 误判 win-bare——自更新退化成裸 zip 替换，托盘永不更新（用户实证 v1.2.1→v1.2.2 托盘停旧版）",
+  "reviewRef": "d1d3eab^",
+  "fixedBy": "d1d3eab",
+  "files": ["src/update/install.ts"],
+  "expect": ["detectinstallshape", "bare"],
+  "note": "修复 = detectInstallShape 增 unins000.exe 卸载器指纹兜底（hasWindowsUninstaller），不再只认 LOCALAPPDATA 路径前缀。审查侧教训：按路径前缀枚举现实安装形态必有遗漏，反问「用户可改目录/非常规形态走哪条分支」"
+}

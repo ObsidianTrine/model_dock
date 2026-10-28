@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-route-pin-precedence",
+  "title": "客户端钉住路由被定时窗口/全局当前槽接管——mimo-desktop 钉住 hundsun-mimo 后请求仍被 14:00-18:00 窗口压到 agent-plan，模型发错上游 404 UnsupportedModel（2026-10-21 用户报障）",
+  "reviewRef": "baa820c^",
+  "fixedBy": "baa820c",
+  "files": ["src/gateway/state.ts"],
+  "expect": ["pin", "钉"],
+  "note": "git 考古：该优先级缺口自仓库 init 即存在（非回归）。修复 = resolveByProfile 给钉住解析打 viaHarnessPin 标记，pickTarget 以钉住服务为最高优先主候选、熔断才顺延。审查侧教训：多来源选路（客户端钉住/定时窗口/全局当前槽）要写死优先级口径并与展示层一致——审查时对照文档/AGENTS 里的既定语义，而不是只看代码「能跑」"
+}

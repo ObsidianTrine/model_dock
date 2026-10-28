@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-backup-prune-race",
+  "title": "快照孤儿清理（prune）会误删他进程正在写的半成品目录；id 冲突重试是死代码——recursive mkdir 已存在时不抛错，重试永不触发，真撞 id 会静默共用目录互踩",
+  "reviewRef": "a494d81^",
+  "fixedBy": "a494d81",
+  "files": ["src/backup/snapshot.ts"],
+  "expect": ["prune", "recursive", "eexist"],
+  "note": "CORRECT-02。修复 = .incomplete 占位 + 新鲜占位 10min 宽限 + 非 recursive mkdir 原子 EEXIST 判定。审查侧教训：跨进程共享目录的清理要有「正在写」判据（占位/宽限）；重试逻辑要先验证触发条件可达（死代码重试比没有更危险——给人已防护的错觉）"
+}

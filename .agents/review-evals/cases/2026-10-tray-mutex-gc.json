@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-mutex-gc",
+  "title": "win 托盘单实例 Mutex 是局部变量、GC.KeepAlive 写在 Application.Run 之前——进入消息循环后局部变量即成死引用，GC 回收句柄后命名 Mutex 销毁，之后每次双击都再起真实例、托盘叠出多个图标",
+  "reviewRef": "cbb9265^",
+  "fixedBy": "cbb9265",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["keepalive", "mutex", "gc"],
+  "note": "2026-10 Windows 多图标报障。审查侧教训：跨语言源码（C#）也在审查面内；GC/句柄生命周期类要单列自查——「保活写在无效果的位置」等于没保活"
+}
