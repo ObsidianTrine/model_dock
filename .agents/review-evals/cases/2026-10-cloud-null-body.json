@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-cloud-null-body",
+  "title": "请求体为 JSON 字面量 null 时 parseBody 原样穿透，后续属性访问抛 TypeError 被 500 兜底外泄 V8 原文（REVIEW-27 修复残留，T07 测试实证）",
+  "reviewRef": "78cf650^",
+  "fixedBy": "78cf650",
+  "files": ["src/cloud/server.ts"],
+  "expect": ["null", "parsebody"],
+  "note": "修复 = parseBody 与 PUT /v1/doc 自解析点对 null/数组/标量回落 4xx。审查侧教训：JSON.parse 对 'null'/'[]'/标量都「成功」——解析成功≠是对象；曾复审标记过的问题（REVIEW-27）修了主路径后残留同型点，同型守卫要扫全仓"
+}
