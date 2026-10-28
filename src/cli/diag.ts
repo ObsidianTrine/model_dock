@@ -153,7 +153,9 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
       const parsed: unknown = JSON.parse(text)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
-          if (typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(nativePrefix)) {
+          // nativePrefix 为空（本平台 file 后端无加密，如 darwin keychain 形态）时，任何 enc: 密文都
+          // 不是本机产出的——统一按异机密文报（否则 !v.startsWith('') 恒假，darwin 永不触发）
+          if (typeof v === 'string' && v.startsWith('enc:') && (nativePrefix === '' || !v.startsWith(nativePrefix))) {
             foreignIds.add(k)
             hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
           }
