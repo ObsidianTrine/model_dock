@@ -27,7 +27,11 @@ UninstallDisplayIcon={app}\modeldock.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-CloseApplications=yes
+; force：RM 关闭占用者直接强杀——无窗口托盘（NotifyIcon 隐藏窗口）收不到优雅关闭消息，
+; yes 档必然 30s 超时后弹 Abort/Retry/Ignore 卡住安装（2026-10-28 用户实证）。
+; 更新器已先行停网关停托盘，能锁住待换文件的只可能是自家残留进程，强杀无损；
+; 1.4.3 的旧更新器不带 /FORCECLOSEAPPLICATIONS 命令行参数，此指令保证过渡那次更新同样顺滑。
+CloseApplications=force
 ; 不弹语言选择框：按系统 UI 语言自动选择（中文系统 → 简体中文；无匹配 → [Languages] 第一项英文）
 ShowLanguageDialog=no
 
