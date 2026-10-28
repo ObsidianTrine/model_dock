@@ -51,6 +51,7 @@ function migrate(raw: Record<string, unknown>): Config {
     backup: normalizable(raw.backup, 'backup'),
     update: normalizable(raw.update, 'update'),
     import: normalizable(raw.import, 'import'),
+    sync_assets: normalizable(raw.sync_assets, 'sync_assets'),
   }
   return cfg
 }

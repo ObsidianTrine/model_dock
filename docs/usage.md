@@ -134,6 +134,7 @@ modeldock config export           # 换电脑搬家：导出口令加密配置�
 modeldock config import <file>    # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup              # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
 modeldock sync status             # 同步状态：目标/最近推拉/冲突（sync pause / resume 暂停恢复）
+modeldock sync assets             # 文本资产白名单：自建 skills / 全局记忆等目录随同步收敛（assets add <目录> / rm 管理清单）
 modeldock update                  # 一键升级：下载 → SHA256 校验 → 替换 → 自动重启网关
 ```
 
@@ -233,6 +234,7 @@ modeldock sync status            # 目标 / 版本 / 最近推拉 / 错误与冲
 ```
 
 - 改动自动双向收敛：新加服务、换 Key、改路由，别的电脑自动跟上；冲突自动保留双方快照，不丢数据。目标已有配置时，新入网的电脑自动收敛到最新；同步状态显示为控制台顶栏的小徽标（正常为「配置同步 · 已开启」，冲突 / 错误 / 暂停会变色提醒，冲突提醒在本机改动成功推送回去后自动消失，鼠标悬浮可看同步目标、版本与最近推拉详情；配置与管理在电脑端命令行）。
+- **文本资产同步（可选）**：把自建 skills、全局记忆、AGENTS.md 这类「一个目录」加入白名单，目录内的**文本文件**随同步包跨机收敛——远端有则写入、内容相同则跳过、本机多出的**绝不删除**（改动前自动快照）。`modeldock sync assets add <目录>` 加入（目录须在 home 内）、`sync assets` 查看清单、`sync assets rm <目录>` 移出（不动磁盘文件）。安全边界：`~/.modeldock`（含密钥）与 `node_modules` 永不入包，二进制自动跳过，单文件 ≤512KB、总量 ≤4MB、最多 200 个文件；白名单是每台机器自己的选择，不随包同步。
 - 同步口令请妥善保管——遗忘则密文不可恢复。
 - **换新电脑**：网盘客户端把文件同步过来只是"运输"，新电脑还需手动跑一次 `modeldock sync setup`（选同一目标、输同一口令）才会接入并自动收敛。完整步骤（前置检查与排错对照表）见 [multi-machine-sync.md](multi-machine-sync.md)。
 

@@ -9,9 +9,11 @@ import { atomicWrite } from '../util/fsx.js'
 import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
 import { t } from '../util/i18n.js'
 import { SCHEMA_VERSION, SYNCDOC_FMT, type Syncdoc, type SyncProviderEntry } from './types.js'
+import { applyAssets, collectAssetFiles, existingAssetPaths } from './assets.js'
 
 /** 收集/应用摘要：providers/profiles 为 id 清单；envKeyRefs=走环境变量引用不随包的服务；
- *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数 */
+ *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数；
+ *  assetsFiles=随包的文本资产数；assetsSkipped=导出时跳过的二进制/超限文件；assetsWritten=导入时实际写入的资产数 */
 export interface SyncdocReport {
   providers: string[]
   profiles: string[]
@@ -20,6 +22,9 @@ export interface SyncdocReport {
   envKeyRefs: string[]
   missingKeys: string[]
   keysRestored?: number
+  assetsFiles?: number
+  assetsSkipped?: string[]
+  assetsWritten?: number
 }
 
 /** 读取 presets.json 原始 JSON（保真不归一化，应用时原样写回）；缺失视为无自定义，格式错误抛可操作报错 */
@@ -85,6 +90,8 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
   const userPresets = readRawUserPresets()
   validateUserPresetEntries(Array.isArray(userPresets) ? userPresets : userPresets.presets, presetsJsonPath())
   const scheduleRules = cfg.gateway?.schedule?.windows ? [...cfg.gateway.schedule.windows] : []
+  // 文本资产：白名单目录内的文本文件随包（上限/排除/二进制跳过见 assets.ts）；目录缺失视为无
+  const assets = collectAssetFiles(cfg.sync_assets?.dirs ?? [])
   const profileIds = Object.keys(cfg.profiles)
   const providerIds = Object.keys(providers)
   return {
@@ -92,9 +99,24 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
       fmt: SYNCDOC_FMT,
       v: SCHEMA_VERSION,
       ts: new Date().toISOString(),
-      data: { providers, profiles: { ...cfg.profiles }, userPresets, scheduleRules },
+      data: {
+        providers,
+        profiles: { ...cfg.profiles },
+        userPresets,
+        scheduleRules,
+        ...(Object.keys(assets.files).length > 0 ? { assets: { files: assets.files } } : {}),
+      },
     },
-    report: { providers: providerIds, profiles: profileIds, presetCount: countPresets(userPresets), scheduleRules: scheduleRules.length, envKeyRefs, missingKeys },
+    report: {
+      providers: providerIds,
+      profiles: profileIds,
+      presetCount: countPresets(userPresets),
+      scheduleRules: scheduleRules.length,
+      envKeyRefs,
+      missingKeys,
+      assetsFiles: Object.keys(assets.files).length,
+      assetsSkipped: assets.skipped,
+    },
   }
 }
 
@@ -106,7 +128,9 @@ function countPresets(up: unknown[] | { presets: unknown[] }): number {
  *  顺序：快照（config.toml/secrets.json/presets.json）→ key 按本机后端重存 → 整包替换 → 写预设。
  *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。 */
 export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend }): Promise<SyncdocReport> {
-  await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath()])
+  // 文本资产的目标文件一并进快照：既有文件才进快照清单（新文件无需快照）
+  const assetFiles = doc.data.assets?.files ?? {}
+  await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath(), ...existingAssetPaths(assetFiles)])
   const cfg = await loadConfig()
   const backend = opts?.backend ?? (cfg.security?.store as SecretBackend | undefined) ?? (await defaultStore())
 
@@ -150,6 +174,12 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
   // 长驻网关进程内同步下来的预设模型元数据一直用旧值直到重启
   clearKnownTable()
 
+  // 文本资产最后落地：快照已覆盖既有目标；只写有差异的文件、绝不删除本机多出的文件
+  let assetsWritten: number | undefined
+  if (Object.keys(assetFiles).length > 0) {
+    assetsWritten = (await applyAssets(assetFiles)).written.length
+  }
+
   return {
     providers: Object.keys(providers),
     profiles: Object.keys(doc.data.profiles),
@@ -160,5 +190,7 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
       .filter(([, p]) => !(typeof p.key === 'string' && p.key !== '') && ['file', 'keychain', 'secret-service'].includes(parseKeyRef(p.key_ref ?? '').scheme))
       .map(([id]) => id),
     keysRestored: Object.keys(keyEntries).length,
+    assetsFiles: Object.keys(assetFiles).length,
+    ...(assetsWritten !== undefined ? { assetsWritten } : {}),
   }
 }
