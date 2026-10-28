@@ -15,8 +15,11 @@
 //   10% GET /v1/models；每 30s 一次 admin overview 轮询；每 5min 一次配置 reload（mutateConfig
 //   翻转 retries 制造无害字节变化，触发网关热加载，并按 /health 的 reloads 计数核实生效）→
 //   每 30s 追加一行采样到 metrics.csv（网关 RSS + 请求日志 JSONL 累计行数/错误数）→ 结束写
-//   report.md（时长/请求数/非 2xx 分类/RSS 首峰值末值/日志增长/结论行）。
-//   结论行：RSS 增幅（末值-首值）/首值 <20% 且错误率 <0.5% 判 PASS。
+//   report.md（时长/请求数/非 2xx 分类/RSS 曲线摘要/日志增长/结论行）。
+//   结论行判据口径：RSS 增幅以「计划时长前 10% 结束后的首个采样」为基准（WARMUP_FRACTION），
+//   (末值-基准)/基准 <20% 且错误率 <0.5% 判 PASS。基准刻意排除预热期：Node/V8 启动后堆持续
+//   扩容（实测 134MB→225MB 后 2.5h 严格走平），按首值判定会把预热误判为泄漏。report.md 另附
+//   平台判定（基准后按前后半段增幅对比识别「涨完走平 / 持续上涨」，仅辅助判读不参与判定）。
 //
 // 端口红线：一切监听只在 127.0.0.1 的 18910-18919 段（8687 生产 / 8890 用户 dev 绝对禁止），
 // 网关实际监听端口（listenWithRetry 可能顺延）读取后再次白名单校验，越界即失败。FAKE_HOME
@@ -44,6 +47,11 @@ const START_TIMEOUT_MS = 60_000
 const POLL_INTERVAL_MS = 300
 const SAMPLE_MS = 30_000
 const RELOAD_MS = 5 * 60_000
+// RSS 判据基准：计划时长前 10% 结束后的首个采样——排除 Node/V8 预热期堆增长（实测预热期
+// 134MB→225MB 后长期走平，按首值判会误报泄漏），判据只看预热窗之后的稳态增长。
+const WARMUP_FRACTION = 0.1
+// 平台判定阈值（仅辅助判读，不参与 PASS/FAIL）：基准后采样对半分，后半段增幅 <5% 视为走平。
+const PLATEAU_HALF_GROWTH = 0.05
 const WORKERS = 4
 const WORKER_DELAY_MIN_MS = 40
 const WORKER_DELAY_MAX_MS = 160
@@ -643,9 +651,10 @@ async function main() {
   const sampleOnce = (note) => {
     const s = jsonlStats(logsDir, logState)
     const rss = rssMb(ctx.child.pid)
-    const rec = { note: note ?? '', rss, lines: s.totalLines, errors: s.totalErrors, sent: stats.sent, transportErr: stats.transportErr }
+    const now = Date.now() // 采样时刻：rec 带上用于基准/平台判定选点，CSV 列保持兼容不新增
+    const rec = { ts: now, note: note ?? '', rss, lines: s.totalLines, errors: s.totalErrors, sent: stats.sent, transportErr: stats.transportErr }
     samples.push(rec)
-    fs.appendFileSync(csvPath, `${new Date().toISOString()},${rss ?? ''},${s.totalLines},${s.totalErrors},${stats.sent},${stats.transportErr}\n`, 'utf8')
+    fs.appendFileSync(csvPath, `${new Date(now).toISOString()},${rss ?? ''},${s.totalLines},${s.totalErrors},${stats.sent},${stats.transportErr}\n`, 'utf8')
     console.log(`[soak] ${note ?? '采样'} rss=${rss ?? '?'}MB log_lines=${s.totalLines} log_errors=${s.totalErrors} sent=${stats.sent} transport_err=${stats.transportErr}`)
     return rec
   }
@@ -681,8 +690,8 @@ async function main() {
   const startedAt = Date.now()
   const deadline = startedAt + minutes * 60_000
   console.log(`[soak] 流量启动: ${WORKERS} 路并发（90% /v1/messages 流式/非流式混合 + 10% /v1/models），每 30s 采样 + admin 轮询，每 5min 配置 reload`)
-  // 基线前落定 5s：启动一次性分配（模块装载/warmup 尾部）与首批流量不混进增幅判定，
-  // 否则 2 分钟自检会被启动分配干扰、4 小时挂机反而无感——增幅口径应是稳态后的增长
+  // 首值前落定 5s：躲开启动一次性分配（模块装载/warmup 尾部），让首值本身可读。判据基准不取
+  // 首值——另按「计划时长前 10% 结束后的首个采样」选取（WARMUP_FRACTION），预热期涨幅不进判定
   await sleep(5000)
   sampleOnce('首值')
 
@@ -715,13 +724,41 @@ async function main() {
   // ===== 报告 =====
   const interrupted = ctx.aborted
   const gatewayDied = ctx.child.exitCode !== null || ctx.child.signalCode !== null
-  const rssVals = samples.map((s) => s.rss).filter((v) => v !== null)
-  const rssFirst = rssVals[0] ?? null
-  const rssPeak = rssVals.length ? Math.max(...rssVals) : null
-  const rssLast = rssVals[rssVals.length - 1] ?? null
-  // 增幅口径：末值相对首值（长稳泄漏观测）；峰值相对首值一并报告，不参与判定
-  const rssGrowthRaw = rssFirst ? (rssLast - rssFirst) / rssFirst : null
-  const rssPeakRaw = rssFirst ? (rssPeak - rssFirst) / rssFirst : null
+  const rssSamples = samples.filter((s) => s.rss !== null)
+  const rssFirst = rssSamples[0]?.rss ?? null
+  const rssPeak = rssSamples.length ? Math.max(...rssSamples.map((s) => s.rss)) : null
+  const rssLast = rssSamples.length ? rssSamples[rssSamples.length - 1].rss : null
+  // 判据基准：计划时长前 10% 结束后的首个非空采样（排除 Node/V8 预热期堆增长，见头注释口径）。
+  // 运行早于预热窗结束（中断/极短时长）时退化为首个非空采样，报告会注明。
+  const warmupEndTs = startedAt + minutes * 60_000 * WARMUP_FRACTION
+  const afterWarmup = rssSamples.filter((s) => s.ts >= warmupEndTs)
+  const baseRec = afterWarmup[0] ?? rssSamples[0] ?? null
+  const baseFallback = baseRec !== null && afterWarmup.length === 0
+  const rssBase = baseRec?.rss ?? null
+  // 增幅口径：末值相对基准（长稳泄漏观测，预热期不参与）；峰值相对基准一并报告（含预热期高点），不参与判定
+  const rssGrowthRaw = rssBase ? (rssLast - rssBase) / rssBase : null
+  const rssPeakRaw = rssBase ? (rssPeak - rssBase) / rssBase : null
+  // 平台判定（辅助判读，不参与 PASS/FAIL）：基准后采样按条数对半分，比较前后半段增幅——
+  // 后半段 <PLATEAU_HALF_GROWTH 视为走平（预热后进入稳态），否则视为持续上涨（疑似泄漏，
+  // 建议延长观察复核）。采样不足（<4 个）如实报无法判定。
+  const plateau = (() => {
+    if (!baseRec) return { label: '无 RSS 采样，无法判定', g1: null, g2: null }
+    const post = rssSamples.filter((s) => s.ts >= baseRec.ts)
+    if (post.length < 4) return { label: `采样不足（基准后仅 ${post.length} 个），无法判定`, g1: null, g2: null }
+    const halfGrowth = (arr) => {
+      const a = arr[0].rss
+      const b = arr[arr.length - 1].rss
+      return a ? (b - a) / a : null
+    }
+    const mid = Math.floor(post.length / 2)
+    const g1 = halfGrowth(post.slice(0, mid))
+    const g2 = halfGrowth(post.slice(mid))
+    const label =
+      g2 !== null && g2 < PLATEAU_HALF_GROWTH
+        ? '走平（后半段增幅 <5%，未见持续上涨）'
+        : '持续上涨（后半段增幅 ≥5%，疑似泄漏，建议延长观察复核）'
+    return { label, g1, g2 }
+  })()
   const totalReq = logState.totalLines
   const totalErr = logState.totalErrors + stats.transportErr
   const errRateRaw = totalReq + stats.transportErr > 0 ? totalErr / (totalReq + stats.transportErr) : null
@@ -730,14 +767,14 @@ async function main() {
   const reasons = []
   if (interrupted) reasons.push('运行被中断')
   if (gatewayDied) reasons.push('网关进程中途退出')
-  if (rssGrowthRaw === null || rssGrowthRaw >= 0.2) reasons.push(`RSS 增幅 ${pct(rssGrowthRaw)}（阈值 <20%）`)
+  if (rssGrowthRaw === null || rssGrowthRaw >= 0.2) reasons.push(`RSS 预热后增幅 ${pct(rssGrowthRaw)}（末值-基准，阈值 <20%）`)
   if (errRateRaw === null || errRateRaw >= 0.005) reasons.push(`错误率 ${pct(errRateRaw)}（阈值 <0.5%）`)
   if (totalReq === 0) reasons.push('请求日志为零（流量未生效）')
   if (pollOk === 0 && pollFail > 0) reasons.push(`admin overview 轮询全部失败（${pollFail} 次）`)
   if (reloadFail > 0) reasons.push(`配置 reload 失败 ${reloadFail} 次`)
   const pass = reasons.length === 0
   const conclusion = pass
-    ? `结论: PASS（RSS 增幅 ${pct(rssGrowthRaw)} < 20%；错误率 ${pct(errRateRaw)} < 0.5%）`
+    ? `结论: PASS（RSS 预热后增幅 ${pct(rssGrowthRaw)} < 20%；错误率 ${pct(errRateRaw)} < 0.5%）`
     : `结论: FAIL（${reasons.join('；')}）`
 
   const histLines = logState.hist.size
@@ -773,7 +810,9 @@ async function main() {
       `- 总请求数: ${totalReq}（网关请求日志 JSONL 行数；/v1/models 本地合成不入日志。客户端合计发出 ${stats.sent}，其中客户端观测 4xx/5xx ${stats.httpErr}、传输失败 ${stats.transportErr}）`,
       `- 非 2xx 计数与分类（JSONL 状态字段；status 缺失=流中断类异常）:`,
       histLines,
-      `- RSS 采样（MB，${samples.length} 个采样，30s 间隔）: 首值 ${rssFirst ?? '?'} / 峰值 ${rssPeak ?? '?'} / 末值 ${rssLast ?? '?'}；增幅（末值-首值）/首值 = ${pct(rssGrowthRaw)}（峰值相对首值 ${pct(rssPeakRaw)}，仅展示不参与判定；首值=流量启动 5s 后的基线采样）`,
+      `- RSS 曲线摘要（MB，${samples.length} 个采样，30s 间隔）: 首值 ${rssFirst ?? '?'}（流量启动 5s 后首采，预热期内，仅展示）/ 基准 ${rssBase ?? '?'}（${baseRec ? baseRec.note || '预热窗结束后首采' : '无'}）/ 末值 ${rssLast ?? '?'} / 峰值 ${rssPeak ?? '?'}；预热后增幅（末值-基准）/基准 = ${pct(rssGrowthRaw)}（阈值 <20%，判据见口径行）；峰值相对基准 ${pct(rssPeakRaw)}（含预热期高点，仅展示不参与判定）`,
+      `- RSS 平台判定（辅助判读，不参与 PASS/FAIL）: ${plateau.label}；基准后前半段增幅 ${pct(plateau.g1)} / 后半段增幅 ${pct(plateau.g2)}（后半段 <5% 视为走平）`,
+      `- RSS 判据口径: 基准取计划时长前 ${Math.round(WARMUP_FRACTION * 100)}%（本跑约 ${Math.round(minutes * WARMUP_FRACTION * 10) / 10} 分钟）结束后的首个采样，以排除 Node/V8 预热期堆增长（预热期涨幅可达 60%+，之后长期走平，按首值判定会把预热误判为泄漏）${baseFallback ? '；本次运行早于预热窗结束，基准退化为首个非空采样' : ''}；PASS = 预热后增幅 <20% 且错误率 <0.5%`,
       `- JSONL 日志增长摘要: 共 ${totalBytes} B（${totalReq} 行，平均 ${avgLineB} B/行；沙箱新建，总量即增长）；明细:`,
       ...logFiles.map((l) => `  - ${l}`),
       `- admin overview 轮询: 成功 ${pollOk} / 失败 ${pollFail}；配置 reload: 成功 ${reloadOk} / 失败 ${reloadFail}`,
