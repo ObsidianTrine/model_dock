@@ -223,25 +223,20 @@ export const UI_JS_CLIENTS = `  function renderClients() {
       }
     })
     // 钉定路由：gateway 模式选「跟随全局」= default，选某服务 = 钉定（服务端内存，立即生效）；
-    // direct 模式选某服务 = 更换直连目标（重写客户端配置，快照 + 确认）
+    // direct 模式选某服务 = 更换直连目标（重写客户端配置，自动快照；选定即确认，不弹窗）
     document.querySelectorAll('[data-route]').forEach(function (sel) {
       sel.onchange = function () {
         var id = sel.getAttribute('data-route')
         var v = sel.value
         var c = clientOf(id)
         if (c && c.mode === 'direct') {
-          confirmModal(t('更换直连目标？', 'Change direct target?'), [
-            t('将把服务「', 'This rewrites the client config with service "') + serviceLabel(v) +
-              t('」的地址与真实 Key 写入该客户端配置（明文；自动快照）', '" and its real key in plaintext (snapshot taken automatically)'),
-            t('重启该客户端后生效', 'Restart the client to take effect')
-          ], t('确认更换', 'Change'), function () {
-            api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'direct', provider: v }) })
-              .then(function () {
-                toast('✓ ' + t('直连目标已更换，重启客户端后生效', 'Direct target changed; restart the client'), true)
-                return load()
-              })
-              .catch(function (e) { toast(t('更换失败：', 'Change failed: ') + e.message, false); load() })
-          })
+          // 下拉选定即确认：直接换直连目标（服务端改前自动快照，可再选回/切回网关还原）
+          api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'direct', provider: v }) })
+            .then(function () {
+              toast('✓ ' + t('直连目标已更换，重启客户端后生效', 'Direct target changed; restart the client'), true)
+              return load()
+            })
+            .catch(function (e) { toast(t('更换失败：', 'Change failed: ') + e.message, false); load() })
           return
         }
         var body = v === 'default' ? { harness: id, default: true } : { harness: id, provider: v }
@@ -258,29 +253,18 @@ export const UI_JS_CLIENTS = `  function renderClients() {
           })
       }
     })
-    // 切独立直连 / 切回网关：都重写客户端配置文件（服务端走 switchHarnessMode：快照 + 原子写 + 登记）
+    // 切独立直连（点击即执行，不弹确认）/ 切回网关：都重写客户端配置文件（服务端走 switchHarnessMode：快照 + 原子写 + 登记）
     document.querySelectorAll('[data-direct]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-direct')
-        var c = clientOf(id)
-        // 直连目标由服务端按客户端钉定/默认路由（active_profile）解析：跟随全局的取 defaultRoute，
-        // 不能用「正在使用」的窗口目标冒充
-        var svc = c && c.followsActive
-          ? ((view.defaultRoute && view.defaultRoute.label) || '')
-          : ((c && c.service) || (view.defaultRoute && view.defaultRoute.label) || '')
-        confirmModal(t('把「', 'Switch "') + labelOf(id) + t('」切换为独立直连？', '" to direct mode?'), [
-          t('将把服务「', 'This writes service "') + esc(svc) +
-            t('」的地址与真实 Key 明文写入该客户端的配置文件（改前自动快照，可一键切回）', '" and its real key in plaintext into the client config (snapshot first; switch back anytime)'),
-          t('此后不经过网关：无请求日志、无熔断切换；模型映射按当前路由尽量还原', 'No longer goes through the gateway: no logs or failover; model mappings are restored from the current route'),
-          t('重启该客户端后生效', 'Restart the client to take effect')
-        ], t('切换为独立直连', 'Go direct'), function () {
-          api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'direct' }) })
-            .then(function () {
-              toast('✓ ' + t('已切换为独立直连，重启客户端后生效', 'Now in direct mode; restart the client'), true)
-              return load()
-            })
-            .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false) })
-        })
+        // 点击即确认，不再弹窗；直连目标由服务端按客户端钉定/默认路由（active_profile）解析，
+        // 改前自动快照、随时可「切回网关」还原，生效提示走 toast
+        api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'direct' }) })
+          .then(function () {
+            toast('✓ ' + t('已切换为独立直连，重启客户端后生效', 'Now in direct mode; restart the client'), true)
+            return load()
+          })
+          .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false) })
       }
     })
     document.querySelectorAll('[data-toGateway]').forEach(function (b) {
