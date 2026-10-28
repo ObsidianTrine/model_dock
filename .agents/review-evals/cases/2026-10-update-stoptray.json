@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-stoptray",
+  "title": "win 更新停托盘「尽力而为」零验证——枚举空 / kill 未生效皆无痕，托盘带锁活到安装向导，RM 优雅关闭 30s 超时弹「无法自动关闭所有应用程序」，安装卡死",
+  "reviewRef": "22f20fd^",
+  "fixedBy": "22f20fd",
+  "files": ["src/update/install.ts"],
+  "expect": ["stoptray", "tray"],
+  "note": "2026-10-27/28 三次真实更新全中（用户实证）。根因：stopTrayProcesses 旧实现尽力而为零验证、全程不写日志，失败静默。堵法：杀→复查→补刀（按映像名 /IM ModelDockTray.exe 兜底）+ 每步结果进更新日志 + /FORCECLOSEAPPLICATIONS；审查侧教训：更新/安装这类「失败不可见」的清理逻辑，静默吞错应按 P0 报"
+}

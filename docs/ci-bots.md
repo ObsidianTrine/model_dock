@@ -1,6 +1,9 @@
-# GitHub Actions 自动化（PR 审查 bot + Dependabot）——设置与用途
+# GitHub Actions 自动化（分层 PR 审查 + Dependabot）——设置与用途
 
-> 维护者文档。三个自动化配置都在 `.github/`，**全部跑在 GitHub 云端 runner 上**：不占本地进程/端口，不经过本地网关 8687。token 消耗只在配置了 API key 之后发生；**未配置 secrets 时一切静默跳过（Actions 日志有 warning），零消耗**。
+> 维护者文档。自动化配置都在 `.github/`，**全部跑在 GitHub 云端 runner 上**：不占本地进程/端口，不经过本地网关 8687。
+> token 消耗只在配置了 API key 之后发生；**未配置 secrets 时 AI job 一切静默跳过（Actions 日志有 warning），零消耗**；
+> `risk-tier` 风险分级是确定性脚本，不依赖 secrets、照常运行。
+> 分层设计总览与改进闭环见 docs/ai-review-system.md。
 > 改动这些文件照常走 worktree 流程（CI yml 属于「带执行语义的配置」，develop 直改会被 hook 拦）。
 
 ## 一览
@@ -9,7 +12,7 @@
 |------|------|------|--------|-----------|
 | `workflows/test.yml` | CI | push（main/develop）+ 任意 PR | 三 OS build + test | 否 |
 | `workflows/release.yml` | CI | 推送 `v*` tag | 5 平台构建并发布到 Releases | 否 |
-| `workflows/claude-review.yml` | AI bot | PR 打开/更新；PR/issue 评论 `@claude` | 自动审查（只读）/ 交互改码 | **是** |
+| `workflows/claude-review.yml` | AI bot | PR 打开/更新；PR/issue 评论 `@claude` | risk-tier 风险分级（确定性）/ auto-review 自动审查（只读）/ security-review 安全审查（可阻塞）/ interactive 交互改码 | 分级**否**，其余**是** |
 | `dependabot.yml` | 依赖配置 | 每周六上午（Asia/Shanghai；仅默认分支 main 生效） | 自动开依赖升级 PR | 否 |
 | `workflows/dependabot-fix.yml` | AI bot | Dependabot PR 打开/更新 | 验证升级、失败做最小修复推回 | **是** |
 
@@ -23,7 +26,7 @@ bot 走任意 **Anthropic 兼容端点**，端点 / 模型 / key 三件套**全�
 | `CLAUDE_BASE_URL` | **Variables**（明文） | 是 | Anthropic 兼容端点 URL |
 | `CLAUDE_MODEL` | **Variables**（明文） | 是 | 模型名，经各步 claude_args 首行 `--model ${{ vars.CLAUDE_MODEL }}` 下发 |
 
-yml 内三处 env 块（claude-review.yml 两个 job + dependabot-fix.yml 一个 job）形如：
+yml 内四处 env 块（claude-review.yml 三个 AI job + dependabot-fix.yml 一个 job）形如：
 
 ```yaml
 env:
@@ -48,13 +51,16 @@ keyguard/guard 会校验三件套齐全，缺任一项打 warning 指明缺哪�
 
 ## 未启用时的行为（当前状态）
 
-- PR 上**不会出现失败的 AI 检查**：缺 key 的 run 静默跳过，Actions 日志留 `::warning::` 指向本文档。
+- PR 上**不会出现失败的 AI 检查**：缺 key 的 AI job 静默跳过，Actions 日志留 `::warning::` 指向本文档。
+- `risk-tier` 照常运行（纯脚本 + GH_TOKEN，不依赖三件套），PR 照常打 risk:* label。
 - Dependabot PR（若已在 main 生效）照常开出，只是没人验证——按 `.agents/workflows/dependency-upgrade.md` 人工处理。
 - test.yml / release.yml 与 API key 无关，永远正常跑。
 
 ## claude-review.yml 详解
 
-- **auto-review（只读）**：PR 打开/更新时跑一次完整审查会话，只发评论与 inline 标注、不改码。审查重点 = AGENTS.md 硬约定（三平台兼容 / t() 双语 / atomicWrite / 纯 JS 依赖 / 测试端口红线等），输出 [P0]/[P1]/[P2] 分级。
+- **risk-tier（确定性，零消耗）**：`gh pr diff --name-only` 的文件列表喂给 `scripts/pr-risk-tier.mjs`，按 `.agents/workflow.json` 的 corePaths / releasePaths（加安装器/密钥注入面）取最高档，打 `risk:low/medium/high` label（旧档位自动摘除）；opened/reopened 时评论一次判定依据，synchronize 不刷屏。等级含义与调整规则见 docs/ai-review-system.md「风险分级」。
+- **auto-review（只读）**：PR 打开/更新时跑一次完整审查会话，只发评论与 inline 标注、不改码。先读 REVIEW.md 审查纪律；输出顶层评论 = 首行「风险等级」+「发现 N 个问题」，inline 按 [P0]/[P1]/[P2] 分级。降噪与收敛：每条发现先自证（文件+行号）、风格/清理类不报、非本 PR 引入标 [存量]、不重复既往评论、复查只看新增 diff、3 轮不收敛建议换方案。
+- **security-review（可阻塞）**：独立安全审查会话，只查注入 / 密钥泄漏 / 鉴权越权 / 路径穿越 / 供应链与安装器五类。顶层评论首行固定 `SECURITY-VERDICT: PASS|FAIL（N 项）`；job 尾的确定性门禁步骤抓该行，**FAIL 或没有 verdict（bot 静默失败）都判 job 失败**——把 `security-review` 设为分支保护 required check 即成合并门禁（步骤见 docs/ai-review-system.md）。
 - **interactive（可写）**：PR/issue 评论里 `@claude` 触发；可按评论指示修改代码并推送（该 job 才有 contents: write），新分支基于 develop。
 - **自动跳过**：Dependabot 的 PR（交给 dependabot-fix 专职处理）；尾提交带 `[dependabot-fix]` 前缀的 PR（防自己复审自己的修复）。
 
@@ -81,7 +87,7 @@ Dependabot PR 触发后 Claude 接手：
 
 - **零消耗开关就是 secrets**：不配 / 删掉 secret 即全停，无需改 yml。
 - 已配置想临时停：仓库 Actions 页 → 左侧选中 workflow → `⋯` → **Disable workflow**（恢复同入口 Enable）。
-- 消耗点（每次 = 一次完整 agent 会话）：auto-review 在每次 PR 打开/更新各烧一次；`@claude`、dependabot-fix 各一次。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
+- 消耗点（每次 = 一次完整 agent 会话）：auto-review 与 security-review 在每次 PR 打开/更新各烧一次（即一个 PR 更新 = 两次会话）；`@claude`、dependabot-fix 各一次。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
 - 同 PR 并发互斥（concurrency 组），旧审查自动取消，不会叠加烧；auto-review 检测到尾提交是 `[dependabot-fix]` 也会跳过。
 
 ## 防回环设计

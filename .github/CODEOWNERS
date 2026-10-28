@@ -1,0 +1,18 @@
+# 敏感路径代码所有者：这些文件的改动必须过 owner 人工审查。
+# 配合分支保护「Require review from Code Owners」生效（配置清单见 docs/ai-review-system.md）。
+# 与 scripts/pr-risk-tier.mjs 的高风险面同源（corePaths/releasePaths + 发布面）。
+
+/.github/workflows/          @ObsidianTrine
+/.github/CODEOWNERS          @ObsidianTrine
+/scripts/installer.iss       @ObsidianTrine
+/scripts/build-sea.mjs       @ObsidianTrine
+/scripts/build-all.mjs       @ObsidianTrine
+/scripts/sea-config.json     @ObsidianTrine
+/src/cli.ts                  @ObsidianTrine
+/src/gateway/server.ts       @ObsidianTrine
+/src/gateway/state.ts        @ObsidianTrine
+/src/gateway/relay.ts        @ObsidianTrine
+/src/gateway/proxy.ts        @ObsidianTrine
+/src/config/store.ts         @ObsidianTrine
+/src/config/secrets.ts       @ObsidianTrine
+/src/util/paths.ts           @ObsidianTrine

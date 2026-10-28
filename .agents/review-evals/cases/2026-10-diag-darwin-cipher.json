@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-diag-darwin-cipher",
+  "title": "跨机密文检测缺 darwin / 无加密形态分支——nativePrefix 为空（plain cipher）时任何 enc: 密文按异机报的判定缺失，macOS 上 secrets 表条目漏报",
+  "reviewRef": "53da3e2^",
+  "fixedBy": "53da3e2",
+  "files": ["src/cli/diag.ts"],
+  "expect": ["nativeprefix", "enc:", "darwin"],
+  "note": "T09 检查的平台分支缺口，CI macos 实测暴露。审查侧教训：process.platform 分支新增时，反问「mac/win/linux 各形态各走哪条路」要成为审查者的固定自查项（对应 AGENTS.md 三平台兼容条）"
+}

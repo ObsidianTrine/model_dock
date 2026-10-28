@@ -77,6 +77,8 @@ node .agents/scripts/feature-branch.mjs finish <task-id>
 ```
 请审查这个 diff。任务目标是：<从 NOTES.md 复制"目标"字段，如"修复 presets 合并时用户配置被覆盖的问题">。
 
+审查纪律：先读仓库根 REVIEW.md（各区域「失败长什么样」/红线/报告纪律——每条发现给文件+行号，风格/清理类不报，非本 PR 引入标 [存量]）。
+
 项目背景：
 - TypeScript ESM 项目，Node.js ≥22，全部纯 JS 依赖（无 native addon）
 - 本地模型配置托管中心 + API 网关
