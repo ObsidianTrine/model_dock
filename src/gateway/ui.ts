@@ -20,6 +20,7 @@ import { UI_JS_SERVICES } from './ui/services.js'
 import { UI_JS_SCHED_STATE, UI_JS_SCHEDULE } from './ui/schedule.js'
 import { UI_JS_CONFIGPACK } from './ui/configpack.js'
 import { UI_JS_CLIENTS } from './ui/clients.js'
+import { UI_JS_MCP } from './ui/mcp.js'
 import { UI_JS_EDIT } from './ui/edit.js'
 import { UI_JS_LOGS } from './ui/logs.js'
 
@@ -37,7 +38,7 @@ ${UI_CSS}</style>
 </head>
 <body>
 ${UI_BODY_HTML}<script>
-${UI_JS_KIT}${UI_JS_MODALS}${UI_JS_WIRING}${UI_JS_I18N}${UI_JS_SHARED}${UI_JS_APP}${UI_JS_OVERVIEW}${UI_JS_UPDATE}${UI_JS_AUTOROUTE}${UI_JS_SERVICES}${UI_JS_SCHED_STATE}${UI_JS_CONFIGPACK}${UI_JS_SCHEDULE}${UI_JS_CLIENTS}${UI_JS_EDIT}${UI_JS_LOGS}${UI_JS_BOOT}</script>
+${UI_JS_KIT}${UI_JS_MODALS}${UI_JS_WIRING}${UI_JS_I18N}${UI_JS_SHARED}${UI_JS_APP}${UI_JS_OVERVIEW}${UI_JS_UPDATE}${UI_JS_AUTOROUTE}${UI_JS_SERVICES}${UI_JS_SCHED_STATE}${UI_JS_CONFIGPACK}${UI_JS_SCHEDULE}${UI_JS_CLIENTS}${UI_JS_MCP}${UI_JS_EDIT}${UI_JS_LOGS}${UI_JS_BOOT}</script>
 </body>
 </html>
 `

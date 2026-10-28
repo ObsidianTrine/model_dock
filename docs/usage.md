@@ -127,6 +127,7 @@ modeldock gateway install         # ★ 开机自启（常驻）：注册系统�
 modeldock status                  # 总览：网关 / active profile / 各 harness 指向
 modeldock test [profile]          # 连通性自测：key、模型名、流式、延迟一次说清
 modeldock doctor                  # 全面体检；--fix 自动修复（敏感项逐项确认），--json 机器可读
+modeldock mcp list                # MCP 服务器盘点：各客户端本机配置聚合一览（只读，--json 机器可读）
 modeldock gateway log -f          # 实时请求日志（只有元数据，不落 prompt）
 modeldock gateway log --harness claude-code
 modeldock config export           # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）；默认写到 modeldock-config-<日期>-<时间>.msync，用 -o 指定路径
@@ -208,6 +209,19 @@ modeldock model set <provider> <model> --cap reasoning,vision         # 手动�
 ```bash
 modeldock provider set-key <id>          # 隐藏输入；或 --key-env MY_VAR
 ```
+
+### MCP 服务器盘点（只读）
+
+各 AI 客户端的 MCP（Model Context Protocol）服务器配置散在各自的配置文件里，ModelDock 聚合成一份清单——回答「我到底配了哪些 MCP、各客户端之间是否一致」：
+
+```bash
+modeldock mcp list                       # 名称 / 来源客户端 / 类型 / 命令或地址 / 范围
+modeldock mcp list --json                # 机器可读
+```
+
+- 同一个名字在多个客户端重复出现会**点名提醒**——换命令或换 token 时最容易漏一处。
+- 覆盖用户级配置：Claude Code（`~/.claude.json`）、Codex（`~/.codex/config.toml`）、ZCode（`~/.zcode/cli/config.json`，缺省回退 `~/.agents/mcp.json`）、OpenCode（`~/.config/opencode/opencode.json`）；**各仓库工作区配置**（`<repo>/.mcp.json`、`<repo>/.zcode/config.json`）不在盘点范围。
+- **环境变量只记名字、绝不收集值**——清单可以放心贴出去排查。Web 控制台首页有同一份「MCP 服务器」卡片（自动刷新），文件损坏的来源会就地提示。
 
 ### 多机同步与云端管理（进阶）
 
