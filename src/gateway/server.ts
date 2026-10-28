@@ -21,6 +21,7 @@ import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } fro
 import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
+import { scanMcpServers } from '../mcp/scan.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
@@ -650,6 +651,15 @@ async function hConfig(c: AdminCtx): Promise<void> {
   const view = await buildConfigView(rt)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify(view))
+  return
+}
+
+// MCP 服务器盘点（只读）：聚合各客户端本机 MCP 配置，env 值绝不收集（见 mcp/scan.ts）
+async function hMcp(c: AdminCtx): Promise<void> {
+  const { res } = c
+  const result = await scanMcpServers()
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, servers: result.entries, errors: result.errors }))
   return
 }
 
@@ -1766,6 +1776,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/update/check': hUpdateCheck,
   'POST /_modeldock/admin/update/apply': hUpdateApply,
   'GET /_modeldock/logs': hLogs,
+  'GET /_modeldock/mcp': hMcp,
   'GET /_modeldock/config': hConfig,
   'GET /_modeldock/model-catalog': hModelCatalog,
   'GET /_modeldock/overview': hOverview,
