@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
@@ -130,7 +131,7 @@ describe('tiers > 配置解析与卡校验', () => {
 
 describe('tiers > settings 注入', () => {
   it('writeWorkerSettings 带 envPatch 时写入 settings.env；不带保持仅 hooks', () => {
-    const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'tier-set-'))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tier-set-'))
     try {
       const withEnv = JSON.parse(fs.readFileSync(writeWorkerSettings(path.join(dir, 'a.json'), { ANTHROPIC_AUTH_TOKEN: 'tok' }), 'utf8'))
       expect(withEnv.env).toEqual({ ANTHROPIC_AUTH_TOKEN: 'tok' })
