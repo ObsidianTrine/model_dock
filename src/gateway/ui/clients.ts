@@ -209,17 +209,16 @@ export const UI_JS_CLIENTS = `  function renderClients() {
     document.querySelectorAll('[data-detach]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-detach')
-        confirmModal(t('断开「', 'Detach "') + labelOf(id) + t('」？', '"?'), [t('配置将还原到接入前的样子，该客户端不再经过 ModelDock', 'Config will be restored to its pre-attach state; the client no longer goes through ModelDock')], t('断开并还原', 'Detach & restore'), function () {
-          api('/detach', { method: 'POST', body: JSON.stringify({ harness: id }), timeoutMs: 60000 })
-            .then(function (r) {
-              var msg = '✓ ' + t('已断开并还原原配置', 'Detached and original config restored')
-              if (r.restored && r.consistent === false) msg = t('已还原（部分文件与备份不完全一致）', 'Restored (some files differ slightly from the backup)')
-              if ((r.notes || []).length) msg += '：' + r.notes.join('；')
-              toast(msg, true)
-              return load()
-            })
-            .catch(function (e) { toast(t('断开失败：', 'Detach failed: ') + e.message, false) })
-        })
+        // 点击即确认：断开并还原（服务端走快照管线，可随时重新接入），不再弹窗
+        api('/detach', { method: 'POST', body: JSON.stringify({ harness: id }), timeoutMs: 60000 })
+          .then(function (r) {
+            var msg = '✓ ' + t('已断开并还原原配置', 'Detached and original config restored')
+            if (r.restored && r.consistent === false) msg = t('已还原（部分文件与备份不完全一致）', 'Restored (some files differ slightly from the backup)')
+            if ((r.notes || []).length) msg += '：' + r.notes.join('；')
+            toast(msg, true)
+            return load()
+          })
+          .catch(function (e) { toast(t('断开失败：', 'Detach failed: ') + e.message, false) })
       }
     })
     // 钉定路由：gateway 模式选「跟随全局」= default，选某服务 = 钉定（服务端内存，立即生效）；
@@ -253,7 +252,7 @@ export const UI_JS_CLIENTS = `  function renderClients() {
           })
       }
     })
-    // 切独立直连（点击即执行，不弹确认）/ 切回网关：都重写客户端配置文件（服务端走 switchHarnessMode：快照 + 原子写 + 登记）
+    // 切独立直连 / 切回网关：都点击即执行、不弹确认，重写客户端配置文件（服务端走 switchHarnessMode：快照 + 原子写 + 登记）
     document.querySelectorAll('[data-direct]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-direct')
@@ -270,17 +269,13 @@ export const UI_JS_CLIENTS = `  function renderClients() {
     document.querySelectorAll('[data-toGateway]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-toGateway')
-        confirmModal(t('把「', 'Switch "') + labelOf(id) + t('」切回网关接入？', '" back to gateway mode?'), [
-          t('客户端配置将改回指向本地网关（写入的是本地网关 token，非上游真实 Key）', 'The client config points back to the local gateway (local gateway token, not the upstream key)'),
-          t('重启该客户端后生效', 'Restart the client to take effect')
-        ], t('切回网关', 'To gateway'), function () {
-          api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'gateway' }) })
-            .then(function () {
-              toast('✓ ' + t('已切回网关接入，重启客户端后生效', 'Back to gateway mode; restart the client'), true)
-              return load()
-            })
-            .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false) })
-        })
+        // 点击即确认：写回本地网关 token（非上游真实 Key），随时可再切直连，不再弹窗
+        api('/harness/mode', { method: 'POST', body: JSON.stringify({ harness: id, mode: 'gateway' }) })
+          .then(function () {
+            toast('✓ ' + t('已切回网关接入，重启客户端后生效', 'Back to gateway mode; restart the client'), true)
+            return load()
+          })
+          .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false) })
       }
     })
   }
