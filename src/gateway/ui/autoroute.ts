@@ -271,9 +271,10 @@ export const UI_JS_AUTOROUTE = `  function renderAutoRoute() {
     $('#afKey').focus()
     $('#addform').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
-  // 外链图标由这里统一追加（文案里不再写 ↗ 字形）——图标随 <a> 一起打开新窗口
+  // 外链图标由这里统一追加（文案里不再写 ↗ 字形）——图标随 <a> 一起打开新窗口。
+  // href 只放行 http(s)：docs_url 可来自用户 presets.json，不得携带 javascript: 等危险协议
   function docLinkA(txt, url) {
-    return url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + txt + ' ' + iconInline('arrow-up-right', 12) + '</a>' : ''
+    return url && /^https?:\\/\\//i.test(url) ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + txt + ' ' + iconInline('arrow-up-right', 12) + '</a>' : ''
   }
   // 纯文本行里的网址自动变可点（安装指引等整段文案里的 URL 不必逐条改数据结构）：
   // 按原文切链接以便剔掉句尾标点，展示文本与 href 各自转义；href 只可能以 http(s):// 开头，

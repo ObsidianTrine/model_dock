@@ -138,7 +138,13 @@ async function cloudHeartbeat(state: SyncState, opts?: SyncHooks): Promise<void>
   if (res.statusCode !== 200) {
     throw new Error(t('云端心跳被拒（HTTP {code}）', 'Cloud heartbeat rejected (HTTP {code})', { code: res.statusCode }))
   }
-  const body = JSON.parse(text || '{}') as { desiredProfile?: string | null; desiredTs?: string | null }
+  let body: { desiredProfile?: string | null; desiredTs?: string | null }
+  try {
+    body = JSON.parse(text || '{}')
+  } catch {
+    // 云端经反代可能回 200+错误页（HTML）：显式报错进 lastError、下一轮重试，不让 SyntaxError 裸穿
+    throw new Error(t('云端心跳返回非 JSON（可能经反代返回了错误页）：{url}', 'Cloud heartbeat returned non-JSON (likely a reverse-proxy error page): {url}', { url: cloud.url }))
+  }
   const desired = body.desiredProfile ?? null
   const desiredTs = body.desiredTs ?? null
   if (!desired || !desiredTs) return

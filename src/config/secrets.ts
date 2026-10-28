@@ -212,10 +212,22 @@ async function setExternal(scheme: 'keychain' | 'secret-service', id: string, va
 }
 
 async function removeExternal(scheme: 'keychain' | 'secret-service', id: string): Promise<void> {
-  if (scheme === 'keychain') {
-    await exec('security', ['delete-generic-password', '-s', 'modeldock', '-a', id]).catch(() => {})
-  } else {
-    await secretToolOp('clear', id).catch(() => {})
+  try {
+    if (scheme === 'keychain') {
+      await exec('security', ['delete-generic-password', '-s', 'modeldock', '-a', id])
+    } else {
+      await secretToolOp('clear', id)
+    }
+  } catch (e) {
+    // macOS 删不存在的条目返回 44（errSecItemNotFound）：等价删除成功。其余失败（钥匙环被锁等）
+    // 上抛——旧 key 实际还在，绝不能把 null 写进缓存（TTL 过后旧值「复活」、UI 误报已删）
+    if (!(scheme === 'keychain' && (e as { code?: unknown }).code === 44)) {
+      externalCache.delete(extKey(scheme, id))
+      throw new SecretsError(
+        t('删除系统钥匙环条目失败（{scheme}:{id}）：{msg}', 'Failed to delete the system keyring entry ({scheme}:{id}): {msg}', { scheme, id, msg: (e as Error).message }),
+        t('钥匙环可能被锁定——解锁后重试，或稍后再删（条目仍在，既有 key 不受影响）', 'The keyring may be locked — unlock it and retry, or delete later (the entry remains; existing keys keep working)')
+      )
+    }
   }
   externalCache.set(extKey(scheme, id), { at: Date.now(), val: null })
 }

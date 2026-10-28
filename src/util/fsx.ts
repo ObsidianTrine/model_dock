@@ -152,13 +152,19 @@ export async function atomicWrite(file: string, content: string | Buffer, mode =
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${Math.random().toString(36).slice(2, 8)}`
   )
-  const fh = await fsp.open(tmp, 'w', mode)
   try {
-    await fh.writeFile(content)
-    await fh.chmod(mode)
-    await fh.sync()
-  } finally {
-    await fh.close()
+    const fh = await fsp.open(tmp, 'w', mode)
+    try {
+      await fh.writeFile(content)
+      await fh.chmod(mode)
+      await fh.sync()
+    } finally {
+      await fh.close()
+    }
+  } catch (e) {
+    // 写入阶段失败（磁盘满/权限）：与 rename 失败路径同规清掉残留 tmp，不在目标目录留垃圾
+    await fsp.rm(tmp, { force: true }).catch(() => {})
+    throw e
   }
   // Windows：rename 覆盖已有文件时，若目标正被其他进程短暂打开（网关热加载读配置、杀毒扫描）
   // 会抛 EPERM/EACCES（libuv 的 REPLACE_EXISTING 不重试）。小步退避重试数次，unix 语义不变。

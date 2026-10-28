@@ -10,7 +10,7 @@ import { setSecret, makeKeyRef } from '../src/config/secrets.js'
 import { CloudStore } from '../src/cloud/store.js'
 import { createCloudServer } from '../src/cloud/server.js'
 import { enrollCloud } from '../src/sync/setup.js'
-import { safeSyncTick } from '../src/sync/engine.js'
+import { safeSyncTick, syncStatus } from '../src/sync/engine.js'
 import { readSyncState, updateSyncState, type SyncState } from '../src/sync/state.js'
 import type { Config } from '../src/config/types.js'
 
@@ -21,12 +21,18 @@ const h = fakeHome()
 
 const applied: string[] = []
 let hbReply: Record<string, unknown> = {}
+let hbRaw: string | null = null // 非 null 时心跳原样回该串（反代错误页场景）
 let docReqs = 0 // 心跳之后到达的文档同步请求数（验证 desired 应用失败不阻断后续推拉）
 
 const fake = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url?.includes('/v1/heartbeat')) {
     req.resume()
     req.on('end', () => {
+      if (hbRaw !== null) {
+        res.writeHead(200, { 'content-type': 'text/html' })
+        res.end(hbRaw)
+        return
+      }
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify(hbReply))
     })
@@ -126,6 +132,20 @@ describe('cloudHeartbeat desired 状态机（P2-11 回归）', () => {
     expect(cfg.profiles[cfg.active_profile!]?.provider).toBe('ark')
     hbReply = { desiredProfile: 'ark', desiredTs: new Date().toISOString() }
     await tick()
+    expect(applied).toEqual([])
+  })
+
+  it('心跳 200 但体非 JSON（反代错误页）→ 显式报错记账，不应用切换', async () => {
+    await setSwitchAnchor(null)
+    hbRaw = '<html>502 Bad Gateway</html>'
+    try {
+      const outcome = await tick()
+      expect(outcome).toBe('skipped')
+      // 修复前记的是裸 SyntaxError（"Unexpected token '<'"）无从排查；修复后报可定位的云端异常
+      expect((await syncStatus()).lastError).toContain('非 JSON')
+    } finally {
+      hbRaw = null
+    }
     expect(applied).toEqual([])
   })
 

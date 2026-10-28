@@ -134,6 +134,8 @@ export interface ForwardOptions {
   body: Buffer
   idleTimeoutMs: number
   retries: number
+  /** 客户端断开信号：中止在途上游请求与 failover 候选迭代，不再为已离开的客户端白烧上游 token */
+  signal?: AbortSignal
 }
 
 export interface UpstreamBody {
@@ -307,8 +309,10 @@ function resolveModelFinal(target: ResolvedTarget, wire: string | undefined): st
     if (stripped && target.provider.models?.[stripped]) requested = stripped
   }
   const alias = requested ? matchAlias(target.profile.aliases, requested) : undefined
-  // claude 内置模型名兜底（CLAUDE_BUILTIN_RE 注释）：别名未命中时改写为当前目标服务的默认模型
-  const tierFallback = alias === undefined && requested !== undefined && CLAUDE_BUILTIN_RE.test(requested)
+  // claude 内置模型名兜底（CLAUDE_BUILTIN_RE 注释）：别名未命中且服务目录里没有该 ID 时才改写为
+  // 默认模型——上游真提供 claude-* 模型（中转服务）时客户端显式点名保持透传（与上方 anthropic.
+  // 剥壳同规，只信服务目录）；目录未管理（缺省）时不拦，维持原兜底
+  const tierFallback = alias === undefined && requested !== undefined && CLAUDE_BUILTIN_RE.test(requested) && target.provider.models?.[requested] === undefined
     ? target.profile.default_model
     : undefined
   // 候选级映射（"<provider>:<model>" 条目）优先于别名：它是为跨服务商切换显式配置的意图
@@ -373,7 +377,20 @@ export async function forwardToUpstream(
   opts: ForwardOptions
 ): Promise<UpstreamResult> {
   const { provider } = target
-  const key = await getSecret(provider.key_ref)
+  let key: string | null
+  try {
+    key = await getSecret(provider.key_ref)
+  } catch (e) {
+    // 钥匙环锁定/瞬时故障与「key 缺失」同规：跳下一候选而非打断整条 failover 链；
+    // 包成 503+hint——非 UpstreamError 会被 errorReply 落成 500「内部错误」
+    const e2 = new UpstreamError(
+      503,
+      t('provider「{profile}→{name}」的 key 读取失败：{msg}', 'Failed to read the API key for provider "{profile}→{name}": {msg}', { profile: target.profileName, name: provider.name ?? target.profile.provider, msg: (e as Error).message }),
+      (e as { hint?: string }).hint ?? t('检查系统钥匙环是否已解锁，解锁后重试', 'Check that the system keyring is unlocked and retry')
+    )
+    e2.candidateSkip = true
+    throw e2
+  }
   if (!key) {
     const e = new UpstreamError(
       503,
@@ -398,6 +415,7 @@ export async function forwardToUpstream(
         headers,
         body: rewritten.body.length > 0 ? rewritten.body : undefined,
         dispatcher,
+        signal: opts.signal,
         // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
         headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
         bodyTimeout: opts.idleTimeoutMs,
@@ -410,6 +428,8 @@ export async function forwardToUpstream(
         ms: Date.now() - t0,
       }
     } catch (e) {
+      // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
+      if (opts.signal?.aborted) throw e
       // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
       // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
       if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
@@ -599,6 +619,8 @@ export async function forwardWithFailover(
         : up
       return { ...out, usedProviderId: c.providerId, reason: marks.length ? marks.join(',') : undefined }
     } catch (e) {
+      // 客户端已断开：中止错误不记熔断、不迭代下一候选，直接终止整条链
+      if (opts.signal?.aborted) throw e
       lastErr = e
       const ms = Date.now() - t0
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)

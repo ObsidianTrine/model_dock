@@ -431,6 +431,13 @@ async function handleRequest(
     else if (Array.isArray(v)) headers[k] = v[0]
   }
 
+  // 客户端断开即中止转发：非流式长推理动辄分钟级，客户端早走人了，继续等只是白烧上游 token。
+  // res 'close' 在正常完成时也会触发，用 writableEnded 区分真断开；响应头已到后的管道阶段由
+  // pipeline 的流销毁语义兜底，这里只管最贵的「等上游响应」阶段
+  const fwdAbort = new AbortController()
+  res.on('close', () => {
+    if (!res.writableEnded) fwdAbort.abort()
+  })
   let result: UpstreamResult & { usedProviderId?: string; reason?: string }
   try {
     // 故障切换常开：主候选不可达时按 pickTarget 候选链自动改发（备用链/「下一个切换」钉定），不与「程序自动选主」开关绑定；
@@ -443,8 +450,14 @@ async function handleRequest(
       idleTimeoutMs: o.idle,
       retries: o.retries,
       fallbackIds: target.profile.fallback,
+      signal: fwdAbort.signal,
     })
   } catch (e) {
+    if (fwdAbort.signal.aborted) {
+      // 客户端已离开：无处应答，也不进 500 噪音；499（约定俗成的 client closed request）进请求日志
+      log({ harness: target.harness, profile: target.profileName, provider: target.profile.provider, path: url, status: 499, ms: Date.now() - started, err: t('客户端已断开，转发中止', 'Client disconnected; forwarding aborted') })
+      return
+    }
     if (e instanceof UpstreamError) {
       log({
         harness: target.harness,

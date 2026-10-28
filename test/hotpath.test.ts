@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { Agent, ProxyAgent } from 'undici'
 import { fakeHome } from './helpers.js'
-import { rewriteModel, topLevelModel } from '../src/gateway/relay.js'
+import { rewriteModel, topLevelModel, forwardToUpstream, UpstreamError } from '../src/gateway/relay.js'
 import { buildDispatcher } from '../src/gateway/proxy.js'
 import { createUsageTap, type UsageStats } from '../src/gateway/usage.js'
 import { buildRuntime, logRequest, type ResolvedTarget } from '../src/gateway/state.js'
+import { setSecret } from '../src/config/secrets.js'
 import { globToRegExp, matchAlias } from '../src/util/glob.js'
 import { drainAppendStreams, appendLine } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'
@@ -196,6 +197,17 @@ describe('rewriteModel：纯透传快路径与原实现逐字段等价', () => {
     expect(rOv.modelAfter).toBe('override-win')
   })
 
+  it('服务目录里真有 claude-* 模型（中转上游）：显式点名透传，不兜底改写', () => {
+    const dm = target({ default_model: 'dm', providerModels: { 'claude-sonnet-4-5': { source: 'manual' as const } } })
+    const body = Buffer.from('{"model":"claude-sonnet-4-5"}')
+    const r = rewriteModel(dm, body, ROUTED)
+    expect(r.modelAfter).toBe('claude-sonnet-4-5')
+    expect(r.body).toBe(body)
+    // 目录里没有的其他 claude-* 仍走兜底
+    const r2 = rewriteModel(dm, Buffer.from('{"model":"claude-haiku-4-5"}'), ROUTED)
+    expect(r2.modelAfter).toBe('dm')
+  })
+
   it('无 default_model 时 claude 内置名原样透传；非内置名不受兜底影响', () => {
     // 无 default_model、无别名：快路径纯透传（nothing to rewrite to）
     const body1 = Buffer.from('{"model":"claude-sonnet-4-5"}')
@@ -337,6 +349,34 @@ describe('logRequest：常驻追加流按序落盘', () => {
       const entries = fs.readFileSync(path.join(dir, file), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
       expect(entries.at(-1).ms).toBe(7)
     } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('forwardToUpstream：客户端断开中止', () => {
+  it('signal 已中止：中止错误原样上抛，不包成 UpstreamError、不触发重试链', async () => {
+    const h = fakeHome()
+    try {
+      await setSecret('k', 'sk-test', 'file')
+      const rt = buildRuntime({ providers: {}, profiles: {}, harness: {} } as any, 'tok')
+      const ctl = new AbortController()
+      ctl.abort()
+      let caught: unknown
+      try {
+        await forwardToUpstream(rt, target({}), {
+          method: 'POST', path: '/v1/messages', headers: {},
+          body: Buffer.from('{"model":"m"}'), idleTimeoutMs: 1000, retries: 3, signal: ctl.signal,
+        })
+        expect.unreachable('应抛出中止错误')
+      } catch (e) {
+        caught = e
+      }
+      // 断开短路的核心语义：错误不被包成 502 UpstreamError（修复前 ECONNREFUSED 类会重试 3 次
+      // 再包成 transport 错误走 failover）、不重试——signal.aborted 分支先于重试判断直接上抛
+      expect(caught).not.toBeInstanceOf(UpstreamError)
+    } finally {
+      await drainAppendStreams()
       h.restore()
     }
   })
