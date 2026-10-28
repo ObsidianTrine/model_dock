@@ -17,8 +17,8 @@
 | `label` | 展示名，如 `火山方舟 · Coding Plan` |
 | `vendor` | 厂商名，如 `火山引擎` |
 | `base_url` | API 根地址，如 `https://ark.cn-beijing.volces.com/api/coding` |
-| `protocol` | 协议：`openai` / `anthropic` / `generic`（参考 `src/config/types.ts` 的 `Protocol`） |
-| `auth_style` | 认证方式：`bearer` / `apikey` / `x-api-key` |
+| `protocol` | 协议：`anthropic` / `openai` / `responses`（参考 `src/config/types.ts` 的 `Protocol`） |
+| `auth_style` | 认证方式：`bearer` / `x-api-key` |
 | `docs_url` | 官方文档地址（可选） |
 | `needs_proxy` | 国内访问是否走代理（可选，默认 false） |
 | `endpoints` | 额外协议端点映射（可选，见下方） |
@@ -62,6 +62,8 @@
 - 同名 `id` 的条目覆盖内置预设
 - 新 `id` 追加到预设列表
 
+> 长驻网关进程内改动 `presets.json` 后需重启实例生效（或直接调 `reloadPresets()` 热加载）；改 `BUILTIN_PRESETS` 属代码改动，随发版生效。
+
 ### 4. 方式 B：写进 BUILTIN_PRESETS
 
 编辑 `src/presets/data.ts`，在 `BUILTIN_PRESETS` 数组中新增条目（参考已有条目格式）。
@@ -95,17 +97,19 @@
 
 ```typescript
 import { describe, expect, it } from 'vitest'
-import { reloadPresets } from '../../src/presets/data.js'
+import { PRESETS, reloadPresets } from '../../src/presets/data.js'
 
 describe('presets', () => {
-  it('includes my-provider', async () => {
-    const presets = await reloadPresets()
-    const p = presets.find((x) => x.id === 'my-provider')
+  it('includes my-provider', () => {
+    reloadPresets() // 同步重载（内置 + ~/.modeldock/presets.json 合并），无返回值
+    const p = PRESETS.find((x) => x.id === 'my-provider')
     expect(p).toBeDefined()
     expect(p!.label).toBe('我的供应商')
   })
 })
 ```
+
+> 注意 vitest 隔离模型（AGENTS.md「跨文件 mock 是雷区」）：`reloadPresets()` 改的是全局 `PRESETS` 数组，测试里改完不污染其他用例断言（重载回内置态或避免跨文件依赖执行顺序）。
 
 ### 6. 验证
 
@@ -145,8 +149,8 @@ npm run build      # tsc 编译通过
       "label": "<展示名>",
       "vendor": "<厂商名>",
       "base_url": "<API 根地址，不带尾部斜杠>",
-      "protocol": "<openai | anthropic | generic>",
-      "auth_style": "<bearer | apikey | x-api-key>",
+      "protocol": "<anthropic | openai | responses>",
+      "auth_style": "<bearer | x-api-key>",
       "docs_url": "<官方文档地址，可选>",
       "needs_proxy": <true | false，可选，默认 false>,
       "endpoints": {
@@ -211,8 +215,8 @@ npm run build      # tsc 编译通过
   label: '<展示名>',
   vendor: '<厂商名>',
   base_url: '<API 根地址，不带尾部斜杠>',
-  protocol: '<openai | anthropic | generic>',
-  auth_style: '<bearer | apikey | x-api-key>',
+  protocol: '<anthropic | openai | responses>',
+  auth_style: '<bearer | x-api-key>',
   docs_url: '<官方文档地址，可选>',
   needs_proxy: <true | false，可选>,
   endpoints: { <额外协议>: '<端点地址>' },  // 可选
@@ -236,7 +240,7 @@ npm run build      # tsc 编译通过
   vendor: '智谱',
   base_url: 'https://open.bigmodel.cn/api/paas/v4',
   protocol: 'openai',
-  auth_style': 'bearer',
+  auth_style: 'bearer',
   docs_url: 'https://open.bigmodel.cn/dev/api',
   needs_proxy: false,
   endpoints: {

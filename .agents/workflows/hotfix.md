@@ -28,7 +28,7 @@ git checkout -b hotfix/<简述> main
 ### 2. 修复 + 测试
 
 - 改代码、写/改测试，确保 `npm test` 全绿。
-- 对修复场景做最小手测验证（如网关问题：在**非 8687** 端口起实例复现并验证修复）。
+- 对修复场景做最小手测验证（如网关问题：在隔离沙箱 + **非 8687** 端口起实例复现并验证修复——`MODELRDOCK_FAKE_HOME` 与 189xx 端口成对指定，见 `incident-response.md` 步骤 2）。
 
 ### 3. 合入 main 并发紧急版本
 
@@ -111,10 +111,11 @@ $ npm test
 # ✅ 全绿，包括新加的泄漏测试
 ```
 
-在高端口实例手测验证：
+在隔离沙箱实例手测验证（`MODELRDOCK_FAKE_HOME` 与 189xx 端口成对指定；禁止 run_dev/8890）：
 
 ```bash
-$ npm run dev -- gateway start --port 18990
+$ export MODELRDOCK_FAKE_HOME=/tmp/modeldock-hotfix-test
+$ npx tsx src/cli.ts gateway start --port 18990
 # 在另一个终端发一个会触发 500 的请求，确认响应里没有 API Key
 ```
 

@@ -153,12 +153,12 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
       const parsed: unknown = JSON.parse(text)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
-          // nativePrefix 为空（本平台 file 后端无加密，如 darwin keychain 形态）时，任何 enc: 密文都
-          // 不是本机产出的——统一按异机密文报（否则 !v.startsWith('') 恒假，darwin 永不触发）
-          if (typeof v === 'string' && v.startsWith('enc:') && (nativePrefix === '' || !v.startsWith(nativePrefix))) {
-            foreignIds.add(k)
-            hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
-          }
+          if (typeof v !== 'string' || !v.startsWith('enc:')) continue
+          // 本机明文后端（plainCipher，prefix=''）下任何 enc: 密文都非本机产物——
+          // startsWith('') 恒真会让异平台密文整类漏报（macOS 实证），前缀为空时 enc: 即异源
+          if (nativePrefix && v.startsWith(nativePrefix)) continue
+          foreignIds.add(k)
+          hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
         }
       }
     }

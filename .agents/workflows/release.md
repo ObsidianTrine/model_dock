@@ -86,7 +86,8 @@ git push origin main
 
 - 到 GitHub Releases 页面确认 `release.yml` 构建完成，5 平台产物齐全（共 11 个资产，名字不带 v 前缀）：
   - 每平台一个压缩包：darwin/linux `.tar.gz`、win `.zip`（包内单一入口程序，unix 名 `modeldock`）——共 5 个
-  - darwin 另有 `.dmg` 拖拽安装镜像（内含 ModelDock.app）——共 2 个
+  - darwin 另有每平台一个自更新整包 `*-darwin-{x64,arm64}-app.tar.gz`（内含 ModelDock.app）——共 2 个
+  - darwin 另有 `.dmg` 拖拽安装镜像——共 2 个
   - win 另有 Inno Setup `*-setup.exe` 安装向导——共 1 个
   - 一份合并的 `SHA256SUMS`（覆盖上述全部发布物）
 - **确认 Release 正文**是该版本在 CHANGELOG 里的完整段（首行版本概述 + 分节齐全），不是「ModelDock vX.Y.Z + 链接」占位——出现占位说明漏了版本段（正常应已被 release.yml 的 preflight 在构建前拦下，见「常见错误对照」）。
@@ -239,9 +240,10 @@ $ git push origin v1.3.0
 到 GitHub Releases 页面，等 `release.yml` 构建完成（约 10-15 分钟），确认产物列表包含（共 11 个资产）：
 
 ```
-modeldock-1.2.1-darwin-arm64-app.tar.gz
+modeldock-1.3.0-darwin-arm64-app.tar.gz
 modeldock-1.3.0-darwin-arm64.dmg
 modeldock-1.3.0-darwin-arm64.tar.gz
+modeldock-1.3.0-darwin-x64-app.tar.gz
 modeldock-1.3.0-darwin-x64.dmg
 modeldock-1.3.0-darwin-x64.tar.gz
 modeldock-1.3.0-linux-arm64.tar.gz
