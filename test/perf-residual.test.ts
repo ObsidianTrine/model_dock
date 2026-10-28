@@ -40,19 +40,21 @@ function rawGet(url: string, headers: Record<string, string> = {}): Promise<{ st
 }
 
 describe('loadConfig stat 记忆（PERF-27 部分收口）', () => {
-  it('文件未变：重复 load 返回同一对象；mutateConfig 后读到新值', async () => {
+  it('文件未变：重复 load 返回等值但独立的 clone（无别名共享）；mutateConfig 后读到新值', async () => {
     mkHome()
     const cfg: Config = { ...emptyConfig(), active_profile: 'a' }
     await saveConfig(cfg)
     const first = await loadConfig()
     const second = await loadConfig()
-    expect(second).toBe(first) // 同一 Config 对象（parse 一次复用）
+    expect(second).toEqual(first)
+    expect(second).not.toBe(first) // memo 原始对象绝不外借：mutateConfig 的原地改动不得被其他调用者看见
     await mutateConfig((c) => {
       c.active_profile = 'b'
     })
     const third = await loadConfig()
-    expect(third).not.toBe(first)
+    expect(third).not.toEqual(first)
     expect(third.active_profile).toBe('b')
+    expect(first.active_profile).toBe('a') // 共享过的原始 memo 对象也不被 mutateConfig 污染
   })
 
   it('mutateConfig 的 fn 抛错：共享对象不被污染（未落盘的改动不泄漏给后续读）', async () => {

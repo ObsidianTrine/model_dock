@@ -107,13 +107,14 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
 }
 
 // loadConfig stat 记忆（PERF-27 部分收口）：cloud 心跳 + 文档收集每个同步 tick 重复 parse 整份
-// TOML，overview/CLI 各读路径同样反复 parse。键 = mtimeMs:size，文件未变直接复用同一 Config 对象
-// （纯函数，语义透明）。刻意不把这套记忆扩到 collectSyncdoc 整体：keychain 后端的密钥轮换不落任何
-// 被同步文件的盘（setSecret 只写钥匙串），整包记忆会把旧明文 key 继续推给其他机器——这正是原
-// 复核暂缓的语义担忧，密钥解析保持每次现取（其自身已有 TTL 缓存吸收 spawn 成本）。
-// 别名注意：返回对象跨调用共享（只读约定）；mutateConfig 的 fn 会原地改它——saveConfig 成功后
-// mtime 必变、下次自然 miss，但 saveConfig 失败 / 同毫秒同尺寸写两个边角在 mutateConfig/saveConfig
-// 里显式清记忆兜底（见下）。
+// TOML，overview/CLI 各读路径同样反复 parse。键 = mtimeMs:size，文件未变时复用「原始 Config」，
+// 每次调用返回 structuredClone——**绝不外借 memo 对象本身**：mutateConfig 的 fn 会原地改拿到的
+// cfg，若共享原始对象，未落盘的中间状态会立刻被其他 loadConfig 调用者看见（synctarget 的
+// SyncLoop 端到端用例实证：等待远端收敛的轮询在 apply 落盘前就放行，把随后的本地写钉进
+// apply→post-collect 窗口，lastSyncedHash 吞掉本地改动、永不推送）。clone 成本远低于重新 parse。
+// 刻意不把记忆扩到 collectSyncdoc 整体：keychain 后端的密钥轮换不落任何被同步文件的盘（setSecret
+// 只写钥匙串），整包记忆会把旧明文 key 继续推给其他机器——原复核暂缓的语义担忧成立，密钥解析
+// 保持每次现取（其自身已有 TTL 缓存吸收 spawn 成本）。
 let loadMemo: { key: string; cfg: Config } | null = null
 
 async function configStatKey(): Promise<string> {
@@ -128,7 +129,7 @@ async function configStatKey(): Promise<string> {
 export async function loadConfig(): Promise<Config> {
   const key = await configStatKey()
   if (key === 'missing') return emptyConfig()
-  if (loadMemo && loadMemo.key === key) return loadMemo.cfg
+  if (loadMemo && loadMemo.key === key) return structuredClone(loadMemo.cfg)
   const text = await readTextIfExists(configPath())
   if (text === null || text.trim() === '') return emptyConfig()
   let raw: Record<string, unknown>
@@ -142,7 +143,7 @@ export async function loadConfig(): Promise<Config> {
   }
   const cfg = migrate(raw)
   loadMemo = { key, cfg }
-  return cfg
+  return structuredClone(cfg)
 }
 
 export async function saveConfig(cfg: Config): Promise<void> {
