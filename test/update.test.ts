@@ -25,6 +25,7 @@ import {
   hasWindowsUninstaller,
   installBareBinary,
   installMacApp,
+  trayPidsFromProcessLines,
 } from '../src/update/install.js'
 import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
 import { readUpdateProgress } from '../src/update/progress.js'
@@ -329,6 +330,24 @@ describe('版本比较与资产选择', () => {
     expect(noTray.args.join(' ')).not.toContain('start')
     expect(noTray.args.join(' ')).not.toContain('/LOG=')
     expect(noTray.args.join(' ')).toContain('/DIR="D:\\Programs\\ModelDock"')
+    // RM 兜底必须强杀：无窗口托盘优雅关闭必然 30s 超时弹 Abort/Retry/Ignore（2026-10-28 用户实证）
+    expect(withTray.args.join(' ')).toContain('/FORCECLOSEAPPLICATIONS')
+  })
+
+  it('trayPidsFromProcessLines：首 token 是托盘本体才杀；出现在参数里的 ModelDockTray 不误杀', () => {
+    // 样本行来自真机 CIM 输出（win 引号包裹路径 / 无引号形态 / mac 无 .exe 后缀）
+    const lines = [
+      '101 "D:\\Programs\\ModelDock\\ModelDockTray.exe"', // win 安装器 [Run] 拉起：引号包裹（路径无空格也带引号）
+      '202 D:\\Programs\\ModelDock\\ModelDockTray.exe', // 无引号形态
+      '303 "/mnt/apps/ModelDockTray"', // mac 无 .exe 后缀
+      '404 modeldock.exe update --yes', // 更新器自身：不匹配
+      '505 powershell -Command grep ModelDockTray.exe', // 托盘名出现在参数里：不杀（首 token 判定）
+      '606 "D:\\Other\\notepad.exe" ModelDockTray.exe', // 同上
+      '707 "D:\\Tools\\FooModelDockTray.exe"', // 同前缀不同映像名：不杀
+      'garbage line without pid', // 脏行容错
+    ].join('\n')
+    expect(trayPidsFromProcessLines(lines)).toEqual([101, 202, 303])
+    expect(trayPidsFromProcessLines('')).toEqual([])
   })
 })
 
