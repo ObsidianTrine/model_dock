@@ -124,8 +124,8 @@ export async function cmdProviderAdd(
     if (picked === '__custom__') {
       baseUrl = await input({ message: t('base_url（如 https://api.example.com）', 'base_url (e.g. https://api.example.com)') })
       protocol = (await select({ message: t('协议', 'Protocol'), choices: [
-        { name: 'anthropic（/v1/messages）', value: 'anthropic' as Protocol },
-        { name: 'openai（/v1/chat/completions）', value: 'openai' as Protocol },
+        { name: t('anthropic（/v1/messages）', 'anthropic (/v1/messages)'), value: 'anthropic' as Protocol },
+        { name: t('openai（/v1/chat/completions）', 'openai (/v1/chat/completions)'), value: 'openai' as Protocol },
       ] })) as Protocol
       authStyle = (await select({ message: t('鉴权方式', 'Auth style'), choices: [
         { name: t('Bearer（Authorization 头）', 'Bearer (Authorization header)'), value: 'bearer' as AuthStyle },

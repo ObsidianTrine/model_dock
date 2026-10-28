@@ -60,7 +60,7 @@ export const mimoDesktopAdapter: HarnessAdapter = {
       return {
         installed: false,
         configFiles: [],
-        note: residueNote(det.configFiles, 'MiMo 桌面端'),
+        note: residueNote(det.configFiles, { zh: 'MiMo 桌面端', en: 'MiMo Desktop' }),
       }
     }
     if (!det.installed && present === true) {
