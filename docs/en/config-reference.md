@@ -313,3 +313,18 @@ Example:
 # dismissed = ["https://api.example.com"]  # program-managed; no need to edit
 ```
 
+## 14. Text-asset sync (sync_assets)
+
+Whitelisted directories converged via multi-machine sync (chosen per machine; the list itself does not sync).
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `dirs` | `string[]` | no | none (no text assets synced) | Text-asset sync whitelist: text files inside these home-relative directories converge across machines via the sync package — written when missing, skipped when identical, extra local files never deleted; a snapshot is taken before changes. ~/.modeldock and node_modules are never packaged; binaries are skipped (≤512KB per file, ≤4MB total, ≤200 files). Manage with modeldock sync assets add / list / rm. |
+
+Example:
+
+```toml
+[sync_assets]
+dirs = ["skills"]
+```
+
