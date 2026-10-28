@@ -1,6 +1,6 @@
 # 维护性任务交接清单（2026-10-27）
 
-> **2026-10-28 完成收口：T01–T12 全部实施并合入 develop，最终全量测试 79 文件 948 例绿。**择机卡 T10 已实施（注册表 Run 键 + 自分离隐藏启动，schtasks 需管理员实测否决）；PERF-25 的 Phase 2（esbuild 最小化）按卡属可选项维持暂缓，另开卡再做。
+> **2026-10-28 完成收口：T01–T12 全部实施并合入 develop，最终全量测试 80 文件 958 例绿（另有 .agents 工作流套件 253 例，Windows 临时目录兼容 bug 已修）。**择机卡 T10 已实施（注册表 Run 键 + 自分离隐藏启动，schtasks 需管理员实测否决）；PERF-25 的 Phase 2（esbuild 最小化）按卡属可选项维持暂缓，另开卡再做。
 > 来源：基于 docs/known-issues.md、docs/backlog.md 与全仓结构盘点（2026-10-27 develop 快照）产出的「**不加新功能**」维护清单，经用户确认拆分为可独立交接的任务卡。
 > 用法：每张卡自包含、按 orchestrator 任务卡 schema 写（frontmatter + 目标/验收标准/红线/背景）。**全部 12 张卡已抽为独立文件 `docs/task-cards/T*.md`（与本页同源生成于 2026-10-27，schema 已过 validateCard 校验）**：orchestrator 派发直接 `node .agents/scripts/orchestrator.mjs submit docs/task-cards/T<NN>-<id>.md`，交互 agent 派发直接把对应卡文件交给它；修改任务内容以卡文件为准并回同步本页总览。本页保留全局纪律、批次建议与「不做清单」。
 > 注意：文中行号基于审查当日代码，**动手前先读对应源码确认仍成立**（known-issues.md 同款纪律）。
