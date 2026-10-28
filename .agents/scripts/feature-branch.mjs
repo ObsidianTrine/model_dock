@@ -411,8 +411,10 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
       `Switch the main repo first: git checkout ${base} (commit or stash local changes).`);
   }
   // main checkout must be clean too: a dirty base branch makes the merge fail midway
-  // (or entangle unrelated local edits in the conflict resolution).
-  if (git(['status', '--porcelain'])) {
+  // (or entangle unrelated local edits in the conflict resolution). 只看已跟踪改动
+  //（-uno）：未跟踪文件不参与合并、不会纠缠冲突（编排器测试的临时仓库里 worktrees/
+  // 目录必然存在，真机仓库也常有本地未跟踪文件），把它们算脏是误伤。
+  if (git(['status', '--porcelain', '--untracked-files=no'])) {
     die(`main repo (${base}) has uncommitted changes. Commit or stash them first:\n  git status --short`);
   }
   const message = mergeMsg || `Merge branch '${branch}'`;
