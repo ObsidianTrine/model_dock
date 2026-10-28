@@ -15,6 +15,7 @@
 > 2026-10-20 性能复审批量修复：PERF-02 全修、PERF-03/14 部分修（@2540618，切换服务写放大同步收敛）；同日四路并行复审新增 PERF-18..36（P2）留底，见 §一.F。
 > 2026-10-20 P2 批量修复：PERF-13/18/19/20/22/24/26/29/30/31/32/33/34/35 共 14 项已修（@ff407bd）；PERF-21/23/25/27/28/36 复核后暂缓（理由见 §一.F 各条注记）。
 > 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
+> 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -45,10 +46,10 @@
 | PERF-22 | P2 | `src/gateway/ui.ts:1383` | pollOverview 双 JSON.stringify diff，overview 几百 KB 时每 5s 两次 O(n) 序列化 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | PERF-24 | P2 | `src/gateway/lan.ts:780` | 手机页 30s 轮询无 document.hidden 门控；页面每请求重拼无 ETag | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☑ 已修（2026-10-29 @60163fe，serve 侧一次性 gzip 预压缩 + 形态 ETag/Vary；源码注释按规范保留不剥） |
 | PERF-26 | P2 | `src/sync/collect.ts:72-73` | 每次 collect 把 presets.json 读+解析两遍 | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
-| PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☑ 部分修（2026-10-29 @60163fe，loadConfig 按 mtimeMs:size 记忆——tick 双 parse 归一、全部读路径受益；collect 整包记忆复核后维持不做：keychain 轮换不落盘，整包缓存会把旧明文 key 推给其他机器，见 §一.F） |
+| PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☑ 已修（2026-10-29 @60163fe，If-None-Match/304 + 本地 manifest 记忆；无 ETag 服务器自动回退旧行为） |
 | PERF-29 | P2 | `src/providers/fetch.ts:106-157` | 拉取模型无失败负缓存：上游不可达时每次开弹窗重跑候选链（8 端点×15s 串行，最长 60s） | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-30 | P2 | `src/util/fsx.ts:139-141` | fileSha256 整文件读内存（更新包 50–150MB 内存峰值），应流式 hash | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-31 | P2 | `src/install/noderuntime.ts:214` | 1KB 的 SHASUMS256.txt 用 10min 默认超时，连接挂死最坏 20–40min 才切下一源 | ☑ 已修（2026-10-20 @ff407bd） |
@@ -222,6 +223,7 @@
 - 现状：ETag/304 已兜住重复加载，首载解析 236KB JS 约 30–80ms（一次性）。修复方向：构建期剥内联 JS 注释；顺手更正注释数字。
 - 2026-10-20 复核：**暂缓**——注释剥离须字符串/正则感知（裸正则容易把含 `//` 的字符串字面量剥坏），应随构建链改造一并引入正规最小化，不宜手写剥离器；注释数字过时属一行文档修正，顺手提交时带上。
 - 2026-10-28（T04 Phase 1 完成）：单文件 ui.ts（4817 行）已拆为拼装壳（43 行）+ `src/gateway/ui/` 15 个域模块（styles/page/kit/modals/i18n/shared/overview/update/autoroute/services/schedule/configpack/clients/edit/logs），拆分经「拆分前 UI_HTML 字节基线 vs 拆分后」cmp 全等验证（314896B），ui-lint / webui-static 门禁源读取同步扩到模块集。**本条核心（构建链正规最小化，Phase 2）维持暂缓**，与拆分解绑、另开卡；server.ts 体积注释修正由 T11 随手批处理。
+- 2026-10-29：**serve 侧压缩已修**（@60163fe）——getRenderedUI 对最终 HTML 一次性 `gzipSync(level 9)` 预压缩缓存（~308KB → gzip 后约 1/5，静态体终身复用），响应按 Accept-Encoding 协商，gzip 形态用独立内容 ETag + `Vary: Accept-Encoding`，304 按形态命中。源码内联注释按规范保留不剥，构建链正规最小化（Phase 2）仍维持暂缓。
 
 **PERF-26（P2）presets.json 每 tick 读+解析两遍**
 - 位置：`src/sync/collect.ts:72-73`（`readUserPresets()` 后紧跟 `readRawUserPresets()`，各自 readFileSync+JSON.parse+逐条校验）
@@ -231,11 +233,13 @@
 - 位置：`src/sync/engine.ts:116,57`（cloud 每 tick 心跳与 collectSyncdoc 各 loadConfig 一次；target 每 tick 全量 collect，无 mtime 短路）
 - 现状：配置小则毫秒级，属持续性重复 I/O。修复方向：tick 内复用同一份 cfg；或按 config.toml/secrets.json mtime 指纹短路。
 - 2026-10-20 复核：**暂缓**——config.toml 为 KB 级小文件，每分钟两次毫秒级解析实测无感；共享 cfg 需要穿 cloudHeartbeat/collectSyncdoc 内部签名，同步域改动从谨慎原则暂缓。
+- 2026-10-29：**部分修**（@60163fe）——loadConfig 按 mtimeMs:size stat 记忆，文件未变直接复用同一 Config 对象：cloud tick 双 parse 归一，overview/CLI 全部读路径同样受益，无需穿内部签名（调用方语义透明）。saveConfig 落盘与 mutateConfig 失败路径显式清记忆，堵同毫秒同尺寸写与「fn 改脏共享对象后落盘失败」两个边角。**collect 整包 mtime 短路复核后维持不做**：keychain 后端 set-key 只写钥匙串、不落任何被同步文件的盘，整包缓存会把旧明文 key 继续推给其他机器——语义风险大于收益；密钥解析保持每次现取（自身 TTL 缓存已吸收 spawn 成本）。
 
 **PERF-28（P2）WebDAV readManifest 无条件请求**
 - 位置：`src/sync/targets/webdav.ts:75-77`（每 tick 全量 GET manifest.json，不带 ETag；cloud 目标 `cloud.ts:44` 已用 if-none-match/304）
 - 修复方向：缓存 ETag 带 If-None-Match。
 - 2026-10-20 复核：**暂缓**——manifest 是同步收敛方向判定的安全输入，ETag 缓存引入「陈旧 manifest」风险面；WebDAV 服务器对 ETag 的支持参差（部分返回弱 ETag 或随时间变化），需专项设计失效兜底后再做。
+- 2026-10-29：**已修**（@60163fe）——readManifest 缓存上次的 ETag + manifest 文本，带 If-None-Match 条件请求：304 复用本地文本（收敛判定输入不变——内容没变才 304，陈旧风险不存在），200/404/无 ETag 服务器自动回退旧行为；writeManifest 写前失效记忆。弱 ETag 原样作 If-None-Match 值使用（HTTP 语义允许，等值比较由服务器裁决），参差支持由「无 ETag → 不记忆」兜底。
 
 **PERF-29（P2）拉取模型无失败负缓存**
 - 位置：`src/providers/fetch.ts:106-157`（候选链最多 8 端点逐个串行 × 15s，总 60s 封顶）+ `src/gateway/server.ts:1275`（每请求直连上游）
