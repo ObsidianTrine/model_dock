@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process'
+import path from 'node:path'
 import type { Config } from '../config/types.js'
 import { DEFAULT_GATEWAY_PORT } from '../config/types.js'
 import { loadConfig } from '../config/store.js'
 import { gatewayLive, type GatewayStateFile } from '../gateway/state.js'
-import { c, t, ensureDir, sleep, getLang } from '../util/index.js'
-import { modeldockDir } from '../util/paths.js'
+import { c, t, ensureDir, sleep, getLang, appendLine, localDateStr } from '../util/index.js'
+import { logsDir, modeldockDir } from '../util/paths.js'
 
 export { gatewayLive, DEFAULT_GATEWAY_PORT }
 
@@ -50,15 +51,52 @@ export async function spawnDaemonAndWait(
   rounds = 20
 ): Promise<GatewayStateFile | null> {
   await ensureDir(modeldockDir())
+  await ensureDir(logsDir()) // daemon 日志目录：appendLine 只追加不建目录
+  const daemonLog = path.join(logsDir(), `daemon-${localDateStr()}.log`)
   const child = spawnFn(argv[0], argv.slice(1), {
     detached: true,
-    stdio: 'ignore',
+    // stderr 收进 logs/daemon-<date>.log（保留期随 pruneExpiredLogs 按天清理）：此前 stdio 全
+    // ignore，daemon 崩溃/启动报错凭空蒸发，用户只见「启动超时」无从排查。stdout 无诊断价值保持 ignore
+    stdio: ['ignore', 'ignore', 'pipe'],
     // daemon 与 CLI 语言一致：config.toml 尚无 language 时 CLI 的 --lang/环境变量选择也要传下去
     env: { ...process.env, MODELRDOCK_LANG: getLang() },
     cwd: modeldockDir(),
     windowsHide: true, // Windows：detached 控制台程序默认弹驻留窗口，隐藏之
   })
   child.unref()
+  // 异步 spawn 失败（ENOENT/权限）必须挂 error 监听：不接则成 uncaught exception 杀 CLI。
+  // 拉起失败时轮询会自然超时返回 null，这里只留可见报错
+  child.on('error', (err) => {
+    console.error(t('[modeldock] daemon 进程拉起失败：{msg}', '[modeldock] Failed to spawn the daemon process: {msg}', { msg: err.message }))
+  })
+  // stderr 按行追加进 daemon 日志（常驻流池）；跨 chunk 的半行先缓冲，流关时补写尾行
+  let pending = ''
+  const writeLine = (line: string): void => {
+    const cleaned = line.replace(/\r$/, '') // Windows 文本换行归一
+    if (cleaned) {
+      try {
+        appendLine(daemonLog, cleaned + '\n')
+      } catch {
+        /* 日志失败不影响拉起 */
+      }
+    }
+  }
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    pending += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    for (;;) {
+      const i = pending.indexOf('\n')
+      if (i < 0) break
+      writeLine(pending.slice(0, i))
+      pending = pending.slice(i + 1)
+    }
+  })
+  child.stderr?.on('close', () => {
+    if (pending) {
+      writeLine(pending)
+      pending = ''
+    }
+  })
+
   for (let i = 0; i < rounds; i++) {
     await sleep(250)
     const live = await probe()
