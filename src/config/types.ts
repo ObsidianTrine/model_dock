@@ -122,6 +122,8 @@ export interface Config {
   backup?: { keep?: number }
   update?: UpdateConfig
   import?: ImportStateConfig
+  /** 文本资产同步白名单目录（家目录相对 POSIX 路径，见 src/sync/assets.ts）；每机自选属机器态，不随包同步 */
+  sync_assets?: { dirs?: string[] }
 }
 
 /** 一键导入（存量收编）状态 */

@@ -246,6 +246,18 @@ export function buildProgram(): Command {
     .option('--stdin-pass', t('同步口令经 stdin 读入（脚本用）', 'Read the sync passphrase from stdin (for scripts)'))
     .action(async (o) => (await import('./sync.js')).cmdSyncEnroll(o))
   syncCmd.command('resume').description(t('恢复本机的自动同步', 'Resume automatic sync on this machine')).action(async () => (await import('./sync.js')).cmdSyncResume())
+  const assetsCmd = syncCmd.command('assets').description(t('文本资产白名单：目录内的文本文件随同步包跨机收敛', 'Text-asset whitelist: text files inside the dirs converge across machines via the sync package'))
+  // 裸 `sync assets` = list（父命令挂缺省动作，帮助里的主查看入口不必多打一个词）
+  assetsCmd.action(async () => (await import('./sync.js')).cmdSyncAssetsList())
+  assetsCmd.command('list').description(t('查看白名单目录与各自的文件数/大小', 'Show whitelisted dirs with file counts/sizes')).action(async () => (await import('./sync.js')).cmdSyncAssetsList())
+  assetsCmd
+    .command('add <dir>')
+    .description(t('加入白名单（目录须在 home 内；~/.modeldock 与 node_modules 不收）', 'Whitelist a directory (must be inside home; ~/.modeldock and node_modules are excluded)'))
+    .action(async (dir) => (await import('./sync.js')).cmdSyncAssetsAdd(dir))
+  assetsCmd
+    .command('rm <dir>')
+    .description(t('移出白名单（不动磁盘文件）', 'Remove from the whitelist (files on disk untouched)'))
+    .action(async (dir) => (await import('./sync.js')).cmdSyncAssetsRm(dir))
 
   prog.command('presets').description(t('预设库', 'Preset library')).command('update').description(t('更新内置预设库（M2）', 'Update the built-in preset library (M2)')).action(async () => (await import('./basic.js')).cmdPresetsUpdate())
   prog.command('usage').description(t('用量统计（M2）', 'Usage statistics (M2)')).action(async () => (await import('./basic.js')).cmdUsage())
