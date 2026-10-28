@@ -60,7 +60,7 @@ keyguard/guard 会校验三件套齐全，缺任一项打 warning 指明缺哪�
 
 - **risk-tier（确定性，零消耗）**：`gh pr diff --name-only` 的文件列表喂给 `scripts/pr-risk-tier.mjs`，按 `.agents/workflow.json` 的 corePaths / releasePaths（加安装器/密钥注入面）取最高档，打 `risk:low/medium/high` label（旧档位自动摘除）；opened/reopened 时评论一次判定依据，synchronize 不刷屏。等级含义与调整规则见 docs/ai-review-system.md「风险分级」。
 - **auto-review（只读）**：PR 打开/更新时跑一次完整审查会话，只发评论与 inline 标注、不改码。先读 REVIEW.md 审查纪律；输出顶层评论 = 首行「风险等级」+「发现 N 个问题」，inline 按 [P0]/[P1]/[P2] 分级。降噪与收敛：每条发现先自证（文件+行号）、风格/清理类不报、非本 PR 引入标 [存量]、不重复既往评论、复查只看新增 diff、3 轮不收敛建议换方案。
-- **security-review（可阻塞）**：独立安全审查会话，只查注入 / 密钥泄漏 / 鉴权越权 / 路径穿越 / 供应链与安装器五类。顶层评论首行固定 `SECURITY-VERDICT: PASS|FAIL（N 项）`；job 尾的确定性门禁步骤抓该行，**FAIL 或没有 verdict（bot 静默失败）都判 job 失败**——把 `security-review` 设为分支保护 required check 即成合并门禁（步骤见 docs/ai-review-system.md）。
+- **security-review（可阻塞）**：独立安全审查会话，只查注入 / 密钥泄漏 / 鉴权越权 / 路径穿越 / 供应链与安装器五类。顶层评论首行固定 `SECURITY-VERDICT: PASS|FAIL（N 项）`；job 尾的确定性门禁步骤抓该行，**FAIL 或没有 verdict（bot 静默失败）都判 job 失败**。**已是合并门禁**：2026-10-29 经 `gh api` 把 `security-review`（连同三 OS `test` / `test-workflow` / `risk-tier`）设为 main 与 develop 的 required check，并开启 required conversation resolution（审查线程必须 resolve 才能合并）；语义与改动注意项见 docs/ai-review-system.md「安全审查门禁」。
 - **interactive（可写）**：PR/issue 评论里 `@claude` 触发；可按评论指示修改代码并推送（该 job 才有 contents: write），新分支基于 develop。
 - **自动跳过**：Dependabot 的 PR（交给 dependabot-fix 专职处理）；尾提交带 `[dependabot-fix]` 前缀的 PR（防自己复审自己的修复）。
 

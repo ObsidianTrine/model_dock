@@ -39,14 +39,17 @@
 
 - 独立 job（独立会话，不与一般审查混注意力）：只查注入、密钥泄漏、鉴权越权、路径穿越、供应链与安装器五类。
 - **verdict 机制**：顶层评论首行固定 `SECURITY-VERDICT: PASS` 或 `SECURITY-VERDICT: FAIL（N 项）`；job 内确定性步骤 `gh pr view` 抓最后一行 verdict——FAIL 或**没有 verdict（bot 静默失败）都判失败**（保守侧）。
-- **设为 required check**（启用门禁时做）：Settings → Branches → Branch protection（对 main 与 develop）→ Required status checks 勾选 `security-review`（以及 `test` 矩阵）。
+- **required check（已启用，2026-10-29 经 `gh api` 配置）**：main 与 develop 两个分支的保护均已设置——Required status checks = 三 OS `test` 矩阵 + `test-workflow` + `risk-tier` + `security-review`；同时开启 **required conversation resolution**（PR 上的审查线程必须 resolve 才能合并，对应文章「每条发现必须被回答」）。语义注意：
+  - `strict=false`（不强制分支最新）、`enforce_admins=false`（owner 保留人工覆盖权）、未设 PR 审查要求（单人流本地合并，分支保护只管 PR 合并侧，不拦直推）。
+  - **三件套 secrets 未配置时 `security-review` job 整体 skip，skip 视为通过**——门禁随 secrets 配置自动生效，不会卡 PR。
+  - 改动检查名单时同步更新本节与 `.github/workflows/*.yml` 的 job `name:`（required check 按名字精确匹配）。
 - **误报处理**：在该 inline 下回复依据说明，然后 resolve 线程——对应文章的「每条发现必须被回答」。反复误报修进 REVIEW.md 或 prompt（见改进闭环）。
 
 ## 人工批准与分支保护（第 5 层的刚性）
 
 文章的「低 0 / 中 1 / 高 2 个批准」由 GitHub 批准机制承担；本仓库是单维护者（owner 无法 approve 自己的 PR），刚性改由两处承担：
 
-1. **required checks**：`test`（三 OS）+ `security-review` 不绿不能合并——这是机器门禁。
+1. **required checks（已于 2026-10-29 启用，见上节）**：`test`（三 OS）+ `security-review` 等六项不绿不能合并——这是机器门禁。
 2. **人工纪律**：中/高风险 PR，owner 合并前实际读过 diff 与全部发现（PR 模板的「风险等级」「如何回滚」「测试方式」三栏是最低自查面）；高风险改动建议再走一遍 .agents/workflows/code-review.md 的 fresh-context 独立审查。
 
 启用「Require review from Code Owners」仅当出现第二位维护者时再做；`.github/CODEOWNERS` 已先行登记敏感路径归属。
@@ -57,6 +60,7 @@
 
 - 位置：`.agents/review-evals/cases/*.json`，schema 与加题步骤见同目录 README.md。
 - 跑分：`node scripts/review-eval.mjs [--case <id>] [--dry] [--out <md>]`——物化修复前代码 → 按 REVIEW.md 组装审查 prompt → 本地 claude CLI 跑 → expect 关键词打分（启发式）。
+- **基线（2026-10-29 首跑，claude CLI 2.1.214）：2/2 全中**，且都给出可用的证据链（darwin 题完整复现修复逻辑，stoptray 题定位 P0 根因并顺带挖出一个 HEAD 仍在的问题）；报告存 `.agents/review-evals/runs/2026-10-29-first-run.md`。此后改审查者跑分低于 2/2 即不保留改动。
 - **时机**：每次 revert / 事故修复合并后加题；改 REVIEW.md、workflow prompt、换模型之后全量重跑一次，分数升了才保留改动。
 
 ### 噪声度量
