@@ -14,6 +14,8 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { t } from '../util/i18n.js'
+import { c, sleep } from '../util/index.js'
+import { killByPid, parsePidCommandLines } from '../cli/shared.js'
 import { UpdateError, type InstallShape } from './check.js'
 
 export type { InstallShape }
@@ -22,8 +24,9 @@ export type { InstallShape }
 export interface InstallDeps {
   /** 停掉受管网关实例（生产实现 = cmdGatewayStop；先卸自启服务防 KeepAlive 拉锯） */
   stopGateway: () => Promise<void>
-  /** 停托盘进程（找不到就不动；mac=ModelDockTray，win=ModelDockTray.exe） */
-  stopTray: () => Promise<void>
+  /** 停托盘进程（找不到就不动；mac=ModelDockTray，win=ModelDockTray.exe）。
+   *  log 进更新日志：杀/验/补刀每步结果可见，失败不再静默（静默失败 = 托盘带锁活到向导）。 */
+  stopTray: (log: (msg: string) => void) => Promise<void>
   /** mac：`open` 拉起新 .app（GUI 分支自会拉起网关与托盘） */
   openApp: (appPath: string) => void
   /** 分离 spawn（win 串联 cmd / unix 拉起新网关 daemon）；verbatim = 参数原样传（cmd /s /c 引号语义需要） */
@@ -40,8 +43,8 @@ export function defaultInstallDeps(): InstallDeps {
       const { cmdGatewayStop } = await import('../cli/gatewaycmd.js')
       await cmdGatewayStop()
     },
-    stopTray: async () => {
-      await stopTrayProcesses()
+    stopTray: async (log) => {
+      await stopTrayProcesses(log)
     },
     openApp: (appPath) => {
       spawn('open', [appPath], { detached: true, stdio: 'ignore' }).unref()
@@ -64,28 +67,75 @@ export function defaultInstallDeps(): InstallDeps {
   }
 }
 
-/** 停托盘：按命令行精确匹配 ModelDockTray（不按映像名全局杀）。尽力而为，失败静默。 */
-async function stopTrayProcesses(): Promise<void> {
-  try {
-    const [{ listProcessLines }, { parsePidCommandLines, killByPid }] = await Promise.all([
-      import('../cli/gatewaycmd.js'),
-      import('../cli/shared.js'),
-    ])
-    const lines = listProcessLines()
-    if (!lines) return
-    for (const { pid, cmd } of parsePidCommandLines(lines)) {
-      // 只把「命令行的可执行段（首个 token）」当判定对象：ModelDockTray 出现在参数里
-      // （grep ModelDockTray …、tail -f … 之类以它作参数的进程）不再误杀——CORRECT-05 对
-      // sweep 的教训同源：按命令行签名全机杀进程要收敛误杀面。取首 token 对带空格的
-      // 未加引号路径会失手（Windows CIM 输出对含空格路径惯例加引号，best-effort 可接受）
-      const exe = cmd.startsWith('"') ? cmd.slice(1, cmd.indexOf('"', 1)) : cmd.split(/\s/)[0]
-      if (!exe || !/ModelDockTray(\.exe)?$/i.test(path.basename(exe.replace(/"/g, '')))) continue
-      // tree:false——托盘发起的更新里更新器就是托盘的子进程，taskkill /T 会把自己一并杀掉，
-      // 安装步骤永远执行不到（Windows 托盘更新必败的根因）；托盘无必须连带清理的子进程
-      killByPid(pid, spawnSync, { tree: false })
+/** 从 listProcessLines 输出（"pid command" 行）筛出托盘 pid（纯函数，单测直接喂样本行）。
+ *  判定对象是「命令行的可执行段（首个 token）」：ModelDockTray 出现在参数里（grep ModelDockTray …
+ *  之类以它作参数的进程）不误杀——CORRECT-05 对 sweep 的教训同源：按命令行签名全机杀进程要收敛误杀面。
+ *  取首 token 对带空格的未加引号路径会失手（CIM 输出对含空格路径惯例加引号，best-effort 可接受）。 */
+export function trayPidsFromProcessLines(lines: string): number[] {
+  const pids: number[] = []
+  for (const { pid, cmd } of parsePidCommandLines(lines)) {
+    const exe = cmd.startsWith('"') ? cmd.slice(1, cmd.indexOf('"', 1)) : cmd.split(/\s/)[0]
+    if (!exe) continue
+    if (!/^ModelDockTray(\.exe)?$/i.test(path.basename(exe.replace(/"/g, '')))) continue
+    pids.push(pid)
+  }
+  return pids
+}
+
+/** 停托盘：按命令行精确匹配 ModelDockTray（不按映像名全局杀），
+ *  「杀 → 复查 → 补刀」两遍式，每步结果写进更新日志、失败不再静默。
+ *  旧实现是尽力而为零验证：枚举空 / kill 未生效都无痕迹，托盘带锁存活到安装向导——
+ *  RM 只能优雅关闭无窗口托盘（收不到关闭消息，30s 超时）→ Abort/Retry/Ignore 弹框，
+ *  安装卡死在「无法自动关闭所有应用程序」（2026-10-28 用户实证，连续三次更新全中）。 */
+async function stopTrayProcesses(log: (msg: string) => void): Promise<void> {
+  const isWin = process.platform === 'win32'
+  const { listProcessLines } = await import('../cli/gatewaycmd.js')
+  let killedAny = false
+  for (let pass = 1; pass <= 2; pass++) {
+    let lines: string | null = null
+    try {
+      lines = listProcessLines()
+    } catch {
+      lines = null // 枚举瞬时失败按 null 走兜底/下一遍
     }
+    if (lines == null) {
+      // 枚举不可用：win 按映像名兜底强杀（ModelDockTray.exe 为 ModelDock 专用映像名，
+      // 更新器自身是 modeldock.exe，无自伤面）；unix 无等价物，交给终验明说
+      if (!isWin) break
+      log(c.yellow(t('进程枚举不可用，改按映像名强杀托盘（ModelDockTray.exe）', 'Process enumeration unavailable; killing the tray by image name (ModelDockTray.exe) instead')))
+      spawnSync('taskkill', ['/IM', 'ModelDockTray.exe', '/F'], { stdio: 'ignore', windowsHide: true })
+      killedAny = true
+      await sleep(800)
+      continue
+    }
+    const pids = trayPidsFromProcessLines(lines)
+    if (pids.length === 0) {
+      // 第一遍就为空 = 托盘本就未运行；第二遍为空 = 已杀干净
+      if (killedAny) log(c.green(t('✓ 托盘已停止', '✓ Tray stopped')))
+      else log(c.gray(t('托盘未在运行', 'Tray not running')))
+      return
+    }
+    log(t('停止托盘进程（pid {pids}）…', 'Stopping tray process(es) (pid {pids})…', { pids: pids.join(', ') }))
+    // tree:false——托盘发起的更新里更新器就是托盘的子进程，taskkill /T 会把自己一并杀掉，
+    // 安装步骤永远执行不到（Windows 托盘更新必败的根因）；托盘无必须连带清理的子进程
+    for (const pid of pids) killByPid(pid, spawnSync, { tree: false })
+    killedAny = true
+    await sleep(800) // taskkill 返回到句柄释放有短窗，给复查枚举留出真实视图
+  }
+  // 终验：两遍后给明确结论——杀干净 ✓，没杀干净 / 无法确认 ⚠（旧行为的失败就败在无痕）
+  let final: string | null = null
+  try {
+    final = listProcessLines()
   } catch {
-    /* 进程枚举不可用时跳过（不影响主流程） */
+    final = null
+  }
+  const alivePids = final != null ? trayPidsFromProcessLines(final) : null
+  if (alivePids != null && alivePids.length === 0) {
+    log(c.green(t('✓ 托盘已停止', '✓ Tray stopped')))
+  } else if (alivePids == null) {
+    log(c.yellow(t('⚠ 进程枚举不可用，无法确认托盘是否已停止；若向导弹出「关闭应用程序」确认框请按提示处理', '⚠ Process enumeration unavailable; cannot confirm whether the tray stopped. If the wizard shows a "close applications" prompt, follow it')))
+  } else {
+    log(c.yellow(t('⚠ 托盘仍未停止（pid {pids}），向导将尝试强制关闭；也可手动退出托盘后重试更新', '⚠ Tray still running (pid {pids}); the wizard will try to force-close it. You can also quit the tray manually and retry the update', { pids: alivePids.map(String).join(', ') })))
   }
 }
 
@@ -201,7 +251,10 @@ async function checkWritable(dir: string): Promise<void> {
  *  注册表 UsePreviousAppDir 记忆——注册表被清理软件删掉或用户搬过安装目录时会失效，落回
  *  DefaultDirName 制造第二份安装。setupLogPath 传 /LOG 落盘：静默更新曾三连败于安装中途
  *  （2026-10-27 用户实证：unins000 已重写而主程序未换，/SUPPRESSMSGBOXES 把错误框也吞了，
- *  表现为「托盘没了、网关不回、无任何提示」），可见向导 + 落盘日志让失败当面可见、有据可查。 */
+ *  表现为「托盘没了、网关不回、无任何提示」），可见向导 + 落盘日志让失败当面可见、有据可查。
+ *  /FORCECLOSEAPPLICATIONS：RM 兜底直接强杀残留占用者——无窗口托盘（NotifyIcon 隐藏窗口收不到
+ *  关闭消息）优雅关闭必然 30s 超时 → Abort/Retry/Ignore 弹框卡住安装（2026-10-28 用户实证）；
+ *  更新器已先行停托盘，此参数只兜极端残留，锁我们文件的只可能是自家进程，强杀无损。 */
 export function buildWinInstallerCommand(
   setupPath: string,
   trayPath: string | null,
@@ -209,7 +262,7 @@ export function buildWinInstallerCommand(
   setupLogPath?: string | null
 ): { file: string; args: string[] } {
   const log = setupLogPath ? ` /LOG="${setupLogPath}"` : ''
-  const setup = `"${setupPath}" /DIR="${installDir}" /CLOSEAPPLICATIONS /NORESTART${log}`
+  const setup = `"${setupPath}" /DIR="${installDir}" /CLOSEAPPLICATIONS /FORCECLOSEAPPLICATIONS /NORESTART${log}`
   const inner = trayPath ? `${setup} || start "" "${trayPath}"` : setup
   // /s /c + 首尾引号：cmd 剥掉外层引号后按内层解析，含空格路径安全；/DIR 引号内 & 等元字符同样受保护
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${inner}"`] }

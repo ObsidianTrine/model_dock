@@ -204,7 +204,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
     const wasLive = await deps.gatewayWasLive()
     log(t('停止网关与托盘…', 'Stopping the gateway and tray…'))
     await deps.stopGateway()
-    await deps.stopTray()
+    await deps.stopTray(log) // 托盘停没停必须写进日志——静默失败会让托盘带锁活到向导（2026-10-28 实证）
 
     try {
       if (shape === 'mac-app') {

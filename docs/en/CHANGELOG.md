@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **One-click update no longer sticks at "cannot close applications"**: the pre-update step that stops the tray used to fail silently, leaving the tray running with a file lock so the install wizard stalled at an "unable to close all applications" prompt (needing a manual retry or quitting the tray by hand); the tray is now stopped with kill-verify-retry, every step is written to the update log, and the wizard force-closes any remaining lockers instead of waiting 30 seconds for a confirmation prompt.
+
 ## [1.4.3] - 2026-10-27
 
 Windows tray menu stability fix: the menu no longer repaints itself periodically while open.
