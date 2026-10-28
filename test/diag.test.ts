@@ -1,16 +1,22 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
-import { cmdDoctor, cmdStatus, cmdTest, runFixes, type DoctorFinding } from '../src/cli/diag.js'
+import { cmdDoctor, cmdEnv, cmdStatus, cmdTest, runFixes, type DoctorFinding } from '../src/cli/diag.js'
 import { __testSetExternalReader, invalidateSecretsCache, verifySecretsStore } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
+import { DEFAULT_GATEWAY_PORT } from '../src/config/types.js'
+import { writeGatewayState } from '../src/gateway/state.js'
 import { AUTOSTART_LAUNCH_FLAG, autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsRunCommandLine, windowsRunValueMirrorFile } from '../src/autostart.js'
 
 // cmdDoctor/cmdStatus 是只读体检壳：无网络路径（上游可达性探测指向本地拒绝端口，瞬时失败）。
-// cmdEnv/cmdTest 完整链会经 resolveClientGatewayPort 无条件探测 8687（开发机=生产实例，红线），
-// 因此只覆盖 cmdTest 的 requireGateway 拒绝分支。
+// cmdTest 完整链经 requireGateway 读状态文件端口（沙箱内指向本地假网关，红线安全），
+// 这里只覆盖 requireGateway 拒绝分支。cmdEnv 自 2026-10-29 端口修复后走 gatewayLive 优先、
+// 无 live 回落 config——不再经 resolveClientGatewayPort 探测生产默认端口 8687，可在沙箱内
+// 完整覆盖（见「cmdEnv 端口来源」用例；假网关一律 listen(0) 随机端口）。
 // doctor 的端口占用探测同样要防误连 8687：所有 cmdDoctor 用例一律注入 portProbe fake。
 const noProbe = { portProbe: async () => false }
 class ExitError extends Error {
@@ -497,6 +503,73 @@ describe('cmdTest', () => {
     try {
       await expect(cmdTest(undefined, {})).rejects.toBeInstanceOf(ExitError)
       expect(errs.join('\n')).toContain('网关未运行')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('cmdEnv 端口来源（gatewayLive 优先，无 live 回落 config）', () => {
+  /** 起一个 health 端点应答的假网关（listen(0) 随机端口），并把状态文件写成它——
+   *  started_at 与 health 应答一致，gatewayLive() 的三重校验（pid+health+started_at）全过。 */
+  async function startFakeGateway(): Promise<{ port: number; close: () => void }> {
+    const startedAt = new Date().toISOString()
+    const server = http.createServer((req, res) => {
+      if (req.url === '/_modeldock/health') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, started_at: startedAt }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    await writeGatewayState({ pid: process.pid, port, admin_token: 'x', started_at: startedAt })
+    return { port, close: () => server.close() }
+  }
+
+  it('live 实例存在：用其实际端口，压过 config.gateway.port', async () => {
+    const h = fakeHome()
+    const fake = await startFakeGateway()
+    try {
+      // 配置里写另一个端口：live 端口必须赢（修复前 resolveClientGatewayPort 在非沙箱下
+      // 会先探测生产默认端口，非默认实例被压掉恒打默认值）
+      await mutateConfig((c) => { c.gateway = { port: 18999 } })
+      capture()
+      await cmdEnv()
+      const out = logs.join('\n')
+      expect(out).toContain(`export ANTHROPIC_BASE_URL=http://127.0.0.1:${fake.port}`)
+      expect(out).toContain(`export OPENAI_BASE_URL=http://127.0.0.1:${fake.port}/v1`)
+      expect(out).not.toContain('http://127.0.0.1:18999')
+    } finally {
+      fake.close()
+      h.restore()
+    }
+  })
+
+  it('无 live 实例：回落 config.gateway.port', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => { c.gateway = { port: 18999 } })
+      await cmdEnv()
+      const out = logs.join('\n')
+      expect(out).toContain('export ANTHROPIC_BASE_URL=http://127.0.0.1:18999')
+      expect(out).toContain('export OPENAI_BASE_URL=http://127.0.0.1:18999/v1')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('无 live 且 config 未设端口：回落 DEFAULT_GATEWAY_PORT', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await cmdEnv()
+      const out = logs.join('\n')
+      expect(out).toContain(`export ANTHROPIC_BASE_URL=http://127.0.0.1:${DEFAULT_GATEWAY_PORT}`)
+      expect(out).toContain(`export OPENAI_BASE_URL=http://127.0.0.1:${DEFAULT_GATEWAY_PORT}/v1`)
     } finally {
       h.restore()
     }

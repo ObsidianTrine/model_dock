@@ -17,7 +17,6 @@ import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValue
 } from '../autostart.js'
 import { autostartLine } from './gatewaycmd.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, exitWithError, spawnDaemonAndWait } from './shared.js'
-import { resolveClientGatewayPort } from '../ops.js'
 import { modeldockDir, secretsPath } from '../util/paths.js'
 import { readTextIfExists } from '../util/fsx.js'
 
@@ -615,7 +614,13 @@ export async function cmdEnv(): Promise<void> {
     console.error(c.gray(t('# 已自动创建 generic-env 接管（无文件改动）；撤销：modeldock detach generic-env', '# generic-env attach was created automatically (no files changed). Undo: modeldock detach generic-env')))
     cfg = await loadConfig()
   }
-  const port = await resolveClientGatewayPort(undefined, cfg.gateway?.port)
+  // 端口与 gateway status / modeldock test 同源（gatewayLive 优先）：运行中实例的实际端口
+  // 即便不是默认端口也如实输出——用户刚起了一个非默认端口实例，env 就该指向它。
+  // 刻意不走 resolveClientGatewayPort：那条链供写客户端文件用，为 CORRECT-05 / 2026-10-01
+  // 事故固定「生产默认端口存活优先」，会压过状态文件里的非默认实例（2026-10-29 实测 env 恒打 8687）。
+  // 无 live 实例回落 config.gateway.port，再回落 DEFAULT_GATEWAY_PORT（与 cmdStatus 同款链）。
+  const live = await gatewayLive()
+  const port = live?.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
   const token = cfg.harness['generic-env'].token
   console.log(t('# source 到 shell：eval "$(modeldock env)"', '# Source into your shell: eval "$(modeldock env)"'))
   console.log(`export ANTHROPIC_BASE_URL=http://127.0.0.1:${port}`)
