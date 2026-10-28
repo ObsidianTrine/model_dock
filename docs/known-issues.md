@@ -16,6 +16,7 @@
 > 2026-10-20 P2 批量修复：PERF-13/18/19/20/22/24/26/29/30/31/32/33/34/35 共 14 项已修（@ff407bd）；PERF-21/23/25/27/28/36 复核后暂缓（理由见 §一.F 各条注记）。
 > 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
 > 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
+> 2026-10-29 正确性批（fix-sync-race）：CORRECT-06 已修（@b917687，withFileLock 同路径重入 + 同步拉取 apply/collect 原子化）。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -74,7 +75,7 @@
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☑ 已修（2026-10-28，版本迁移写盘前快照，见 §三） |
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
-| CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☐ 未修（2026-10-29 perf-residual 批实证暴露，见 §三；修复需 apply+collect 原子化，注意 withFileLock 同进程重入语义） |
+| CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
 
 ---
 
@@ -369,7 +370,7 @@
 - 位置：`src/sync/engine.ts:77-78`（`applySyncdoc(...)` 落盘后紧接 `collectSyncdoc()` 取 after 态算 `lastSyncedHash`）。
 - 竞态：另一调用方（CLI mutateConfig、控制台写路径等）的本地改动若恰好落在「apply 落盘」与「post-apply collect 读盘」之间，会被计入 lastSyncedHash 基线——该本地改动此后 tick 判 idle，**既不推送也不产生冲突快照**，静默丢失（直到下一次无关改动捎带出去）。窗口毫秒级，天然触发概率极低；perf-residual 批的 loadConfig memo 首版（外借共享对象）曾让测试轮询在 apply 落盘前放行、把它确定性钉进窗口，memo 改 clone 后恢复原概率，但窗口本身仍在。
 - 修复方向：apply+post-collect 对 config 写锁原子化（同一 `withFileLock` 域内完成）；注意 applySyncdoc 内部自身会 mutateConfig——withFileLock 若非同进程重入式会自锁死，动手前先核 `src/util/fsx.ts` 的实现语义。stash 方向（post-collect 前记录 mtime、变化则重试）也可评估。
-- ☐ 未修：本批只登记不改（同步域改动从谨慎原则单独立卡）；PERF-27 的 memo 已按 clone 语义消除了本次的确定性触发路径。
+- ☑ **已修（2026-10-29 @b917687）**：`withFileLock` 增加 AsyncLocalStorage 同路径重入识别（promise 队列无线程式属主，嵌套申请曾会排在自身后面死锁；现持有者调用树内同路径申请内联执行，文件锁与队列仍归外层，跨路径嵌套照常排队）+ store 导出 `configLockPath`；engine 拉取分支与 setup 加入收敛的「applySyncdoc → post-apply collectSyncdoc」包进同一把 config 锁——并发本地写只能排在锁后，重收集基线只含远端应用态，本地改动照常走下个 tick 推送。代价：持锁窗口包含重收集的密钥解析（keychain 后端可能 spawn），极端时延后并发 config 写毫秒级，tick 分钟级一次可接受。回归守卫 test/sync-race.test.ts（重入不死锁 / 排队语义保留 / 原子性）。
 
 ---
 

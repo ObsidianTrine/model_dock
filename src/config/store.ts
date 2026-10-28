@@ -177,6 +177,12 @@ function lockPath(): string {
   return configPath() + '.lock'
 }
 
+/** config 写锁路径（引擎把「applySyncdoc + post-apply 重收集」包进同一把锁用，CORRECT-06）：
+ *  与 mutateConfig 同一路径字符串，队列与文件锁自然共用。 */
+export function configLockPath(): string {
+  return lockPath()
+}
+
 /** 读-改-写 便捷封装（带锁：同进程串行、跨进程互斥；fn 内不要做慢 I/O，避免长期占锁） */
 export async function mutateConfig<T>(fn: (cfg: Config) => T | Promise<T>): Promise<T> {
   return withFileLock(

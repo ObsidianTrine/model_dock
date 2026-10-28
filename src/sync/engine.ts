@@ -12,7 +12,8 @@ import { applySyncdoc, collectSyncdoc } from './collect.js'
 import { openWithKeys, sealWithKeys } from './crypto.js'
 import { createTarget, hashDoc, keysFromState, targetFromState } from './runtime.js'
 import { blobRefOf } from './targets/types.js'
-import { loadConfig } from '../config/store.js'
+import { loadConfig, configLockPath } from '../config/store.js'
+import { withFileLock } from '../util/fsx.js'
 import { readSyncState, updateSyncState, type SyncState } from './state.js'
 import { validateSyncdoc, type Syncdoc } from './types.js'
 import { VERSION } from '../version.js'
@@ -58,13 +59,8 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
   const localHash = hashDoc(localDoc)
 
   if (manifest && manifest.rev > state.lastAppliedRev) {
-    // 远端有新版本。本地同时有未推改动 → D6 冲突：本地待推内容快照后由远端覆盖
-    const conflict = localHash !== state.lastSyncedHash
-    if (conflict) {
-      const file = path.join(backupsDir(), `sync-conflict-${Date.now()}.json`)
-      await atomicWrite(file, JSON.stringify(localDoc, null, 2) + '\n', 0o600)
-      opts?.log?.(t('[modeldock] 配置同步冲突：本机改动已快照到 {file}，已应用其他机器的最新配置（不做自动合并，差异请在任一机器重做）', '[modeldock] Config sync conflict: local changes were snapshotted to {file}; the latest config from another machine was applied (no auto-merge — redo the differences on either machine)', { file: displayPath(file) }))
-    }
+    // 远端有新版本。本地同时有未推改动 → D6 冲突：本地待推内容快照后由远端覆盖。
+    // readBlob/解密（网络 + KDF，最长 15s）留在锁外，不拉长持锁时间
     const envText = await target.readBlob(manifest.blobRef)
     let remoteDoc: Syncdoc
     try {
@@ -74,12 +70,31 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
         t('拉取失败：解不开最新同步包（{msg}）。可能其他机器更换了同步口令，请在本机重跑 modeldock sync setup', 'Pull failed: cannot open the latest package ({msg}). The passphrase may have been changed on another machine; run modeldock sync setup again on this machine', { msg: (e as Error).message })
       )
     }
-    await applySyncdoc(validateSyncdoc(remoteDoc))
-    const { doc: after } = await collectSyncdoc()
+    // CORRECT-06 原子化：冲突判定、本地待推快照、apply、post-apply 基线重收集整段对 config 写锁
+    // 原子化。并发本地写只能排在锁后——任何一段不进锁都有同型静默丢失窗口：改动落在「判定收集」
+    // 与「快照落盘」之间 → 被远端覆盖且不留快照；落在「apply 落盘」与「基线重收集」之间 → 被计入
+    // lastSyncedHash，此后 tick 判 idle，既不推送也不冲突。持锁期间 collectSyncdoc 的密钥解析
+    // （file 后端读盘 / keychain 后端可能 spawn）也在锁内，极端时延后并发 config 写毫秒级——
+    // tick 分钟级一次可接受。withFileLock 同路径重入内联（AsyncLocalStorage 识别持有者调用树）：
+    // applySyncdoc 内部的 mutateConfig 不会自锁死。
+    let conflict = false
+    let afterHash = ''
+    await withFileLock(configLockPath(), undefined, async () => {
+      const { doc: localNow } = await collectSyncdoc()
+      conflict = hashDoc(localNow) !== state.lastSyncedHash
+      if (conflict) {
+        const file = path.join(backupsDir(), `sync-conflict-${Date.now()}.json`)
+        await atomicWrite(file, JSON.stringify(localNow, null, 2) + '\n', 0o600)
+        opts?.log?.(t('[modeldock] 配置同步冲突：本机改动已快照到 {file}，已应用其他机器的最新配置（不做自动合并，差异请在任一机器重做）', '[modeldock] Config sync conflict: local changes were snapshotted to {file}; the latest config from another machine was applied (no auto-merge — redo the differences on either machine)', { file: displayPath(file) }))
+      }
+      await applySyncdoc(validateSyncdoc(remoteDoc))
+      const { doc: after } = await collectSyncdoc()
+      afterHash = hashDoc(after)
+    })
     await updateSyncState({
       lastAppliedRev: manifest.rev,
       lastAppliedTs: manifest.ts,
-      lastSyncedHash: hashDoc(after),
+      lastSyncedHash: afterHash,
       lastPullTs: now,
       lastError: null,
       ...(conflict ? { lastConflictTs: now } : {}),
