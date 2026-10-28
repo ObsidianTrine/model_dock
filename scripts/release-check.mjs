@@ -5,7 +5,7 @@
  * 用法：node scripts/release-check.mjs <版本> [--skip-test]
  *   版本：1.2.0 或 v1.2.0（对应 CHANGELOG 的 ## [1.2.0] 段与 tag v1.2.0）；
  *   必须大于最近已发布 tag（semver 只增不减，与最近 tag 相等=重复发布同样阻断）
- *   --skip-test：跳过 npm test（测试刚在别处全绿时；build/audit 照常跑）
+ *   --skip-test：跳过 npm test 与 test:workflow（两套件刚在别处全绿时；build/audit 照常跑）
  *
  * 退出码：存在 ✗（阻断项）→ 1，否则 0。⚠（警告项）不改退出码，但必须逐条过目。
  *
@@ -127,11 +127,11 @@ const todo = git(['grep', '-nE', '\\b(TODO|FIXME|XXX|HACK)\\b', '--', 'src'])
 if (todo.out) add('warn', `src 有 ${todo.out.split('\n').length} 处 TODO/FIXME 残留`, '逐条裁决是否带病发布：\n' + todo.out.split('\n').slice(0, 8).join('\n'))
 else add('pass', 'src 无 TODO/FIXME 残留')
 
-// 慢门禁（已有阻断项时跳过，省 3 分钟）
+// 慢门禁（已有阻断项时跳过）
 const hardFails = () => results.filter((r) => r.status === 'fail').length
 let testStats = null
 if (skipTest) {
-  add('warn', 'npm test 已跳过（--skip-test）', '确认测试刚在别处全绿')
+  add('warn', 'npm test / test:workflow 已跳过（--skip-test）', '确认两套件刚在别处全绿（本地或 CI）')
 } else if (hardFails() === 0) {
   console.error('…… npm test（约 2-3 分钟）')
   const t = npm(['test'])
@@ -143,6 +143,15 @@ if (skipTest) {
     add('pass', `npm test 全绿：${testStats.passed} 例${testStats.skipped ? `（另 ${testStats.skipped} 跳过）` : ''} / ${testStats.files} 文件`)
   } else {
     add('fail', 'npm test 未全绿', '修复后重跑；缺依赖先 npm ci。输出尾部：\n' + out.split('\n').slice(-15).join('\n'))
+  }
+  // 工作流套件与产品套件拆分运行（方案 A）：不进 npm test，CI 单独 job 跑——
+  // v1.5.0 实证它红时本地门禁全绿放行到 CI 才炸（tag 已推只能走删 tag 回滚）。
+  // 发布是收口动作，本地多花 1-2 分钟把两套件都拦住。
+  if (testStats) {
+    console.error('…… npm run test:workflow（约 1-2 分钟）')
+    const w = npm(['run', 'test:workflow'])
+    if (w.status === 0) add('pass', 'npm run test:workflow 全绿（编排器 + 守卫 hook）')
+    else add('fail', 'test:workflow 未全绿', '修复后重跑。输出尾部：\n' + ((w.stdout || '') + (w.stderr || '')).split('\n').slice(-15).join('\n'))
   }
 }
 if (hardFails() === 0) {

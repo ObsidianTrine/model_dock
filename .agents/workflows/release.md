@@ -14,7 +14,7 @@
 ## 前置检查（动手前，在 develop 上）
 
 - [ ] 当前在 `develop` 分支，`git status` 干净，且 `git log origin/develop..develop` 为空（本地不领先远程）。
-- [ ] 机器门禁全过：`node scripts/release-check.mjs vX.Y.Z`（含 npm test，约 3 分钟；清单见 `docs/RELEASE_CHECKLIST.md`，⚠ 警告项须逐条过目）。
+- [ ] 机器门禁全过：`node scripts/release-check.mjs vX.Y.Z`（含 npm test + test:workflow 两套件，约 5 分钟；清单见 `docs/RELEASE_CHECKLIST.md`，⚠ 警告项须逐条过目）。
 - [ ] 托管 Node 钉版核对含在门禁内（npm 客户端 engines 冲突会 ✗ 阻断、补丁滞后/新 LTS 大版本会 ⚠ 提示）：出现 ⚠ 时按 `docs/RELEASE_CHECKLIST.md` §2 的年度评估条目裁决是否随本版 bump `MANAGED_NODE_VERSION`。
 
 ## 流程（严格按顺序，不可跳步）
@@ -59,7 +59,9 @@ git push origin main
 
 ### 3. 等 test workflow 全绿
 
-- 推送后到 GitHub 仓库网页的 **Actions** 标签页看 `test.yml` 跑完且**全绿**（已装 gh CLI：`gh run watch` 盯进度；网页亦可）。
+- 推送后到 GitHub 仓库网页的 **Actions** 标签页看 `test.yml` 跑完且**全部 job 全绿**（三平台矩阵 + 工作流套件共 4 个 job；已装 gh CLI：`gh run watch` 盯进度；网页亦可）。
+- **盯 run 必按 workflow 过滤并以提交核对**：`gh run list --branch main --workflow=test` + headSha 比对——同分支混着 Dependabot 等 run，裸 `--limit 1` 会盯错对象（v1.2.3 实证）。
+- CI 腿被「未获分配」取消（典型：macos arm64 runner 容量短缺，排队 15 分钟即取消）时，**ci-retry.yml 自动重跑失败腿**（≤3 次尝试，只重跑最新 run）；连续多轮仍取消 = 平台故障，等恢复后 `gh run rerun <run-id> --failed` 补一脚即可，不必重推。
 - **不绿就停**：在 develop 修好后重新合入 main 并推送，回到本步。绝不带病打 tag。
 
 ### 4. 打 tag，只推这一个
@@ -118,7 +120,7 @@ git push origin develop
 2. 盘点 + 文档收口（本文件「流程」步骤 1 的内容，含 CHANGELOG / README / usage 核对）
 3. `git checkout main && git merge develop`
 4. `AGENTS_ALLOW_RELEASE=1 git push origin main`
-5. `gh run watch`（test.yml 三平台全绿；gh 不可用时降级为网页查看，**不绿就停**）
+5. `gh run watch`（test.yml 全部 job 全绿：三平台 + 工作流套件，按 `--workflow=test` 过滤并以 headSha 核对提交；gh 不可用时降级为网页查看，**不绿就停**；腿被基础设施取消时 ci-retry 自动重跑，见步骤 3）
 6. `node scripts/release-check.mjs <X.Y.Z> --skip-test`（tag 前快速复核；此时在 main 上，「当前在 main 分支」warn 属预期）→ `AGENTS_ALLOW_RELEASE=1 git tag -a v<X.Y.Z> -m "v<X.Y.Z>"` → `AGENTS_ALLOW_RELEASE=1 git push origin v<X.Y.Z>`
 7. `gh run watch`（release.yml）→ `gh release view v<X.Y.Z>` 核对 11 资产与正文非占位 → 下载抽包跑 `--version`（即「流程」步骤 5）
 8. develop 对齐 main（「流程」步骤 6）：`git checkout develop && git merge --ff-only main` → `AGENTS_ALLOW_RELEASE=1 git push origin develop`（develop 有新提交时 ff 拒绝，改普通 merge）
@@ -140,6 +142,24 @@ git push origin develop
 | 复用已撤回的版本号 | 撤回过的号永不复用，递增到新号发修正版 |
 | 漏更 CHANGELOG 就打 tag | release.yml 的 preflight 在构建前失败并提示修复命令：补版本段后删 tag 重打 |
 | 删除已发布的错误 Release | 发修正版替代，保留原 Release 并标注 |
+
+## 实战事故沉淀（2026-10，v1.1.5–v1.5.0 六次发布）
+
+每次发布遇到过的坑与已落地的对策。动手发布前扫一遍——命中过的坑不踩第二次。
+
+| 事故 | 对策（✅ = 已自动化） |
+|---|---|
+| macos 腿排队期 15m01s 被「未获分配」取消（GitHub arm64 runner 容量短缺，v1.5.0 连挂 7 次） | ✅ ci-retry.yml 自动重跑失败腿（≤3 次尝试、只重跑最新 run、cancelled 也算失败腿）；连续多轮仍取消 = 平台故障，等恢复后 `gh run rerun <run-id> --failed`，不必重推 |
+| CHANGELOG 漏记（v1.1.5 补 4 条、v1.2.3 补 2 条、v1.5.0 无未发布段需整段归纳） | ✅ release-propose 自动盘点 + 疑似漏记清单；收口仍以 `git log v上一版..develop --no-merges` 逐条对账，「提交里有而日志没有 = 对外失真」 |
+| 本地 npm test 绿、CI 工作流套件红（v1.5.0：feature-branch finish 把未跟踪文件算脏，编排器套件成组挂） | ✅ release-check 补跑 `npm run test:workflow`，发布前本地拦住两套件；修法教训：把「未跟踪」当「脏」会误伤临时仓库与本地杂物，校验用 `--porcelain --untracked-files=no` |
+| release 构建在 test.yml 不覆盖的平台红、tag 已推（v1.2.1 linux-arm64：测试与网关后台写状态文件竞态） | 测试侧去竞态（用环境开关隔离后台写）；按「出错回滚」删 tag 重打，版本号不消耗。教训：与被测进程有共享状态的测试，先把后台写隔离再断言 |
+| 门禁 §10 基线检查与口径化后的 usage 脱节（v1.5.0 报「未找到句式」） | ✅ 检查同时认硬编码数字（校验漂移）与口径句（数字以 npm test 实测为准） |
+| audit 网络超时「未得出结论」（v1.2.2 / v1.2.3 / v1.5.0 三次） | 人工补跑 `npm audit --omit=dev`（带重试）拿到确定结论；查出漏洞**当版修**（v1.2.2 undici 三 CVE 先例），已发布版本可能带病 |
+| 推平后 `--amend` 已推提交 → push 被拒（force push 禁用） | 永不 amend 已推提交；补救 = 软重置回远端已有提交 + 把差异补成新提交（v1.2.1 先例） |
+| 多会话并行修同一 bug → rebase 冲突（v1.5.0 darwin 跨机密文两份等价修复） | `git pull --rebase` 同步；两解等价时二选一，**冲突解算后必须全量测试复验再推** |
+| 托管 Node 钉版落后新 patch（v1.2.2 警告） | 门禁 ⚠ 即当版 bump `MANAGED_NODE_VERSION`；不当版 bump 须能说明非安全补丁 |
+| 本地深夜测试三连挂、清晨复跑全绿（v1.1.5：scan.test spawnSync 240s 超时） | 环境性偶发的判定口径：同提交 CI 绿 + 本地复跑绿；悬死诊断开 `VITEST_WATCHDOG=1`（观测器判读见 test/vitest-watchdog.mjs）。注意 vitest 单进程串行下同步 exec 阻塞事件循环，testTimeout 打不断 execSync |
+| 构建产物 / API 网络抖动（curl 56、gh API 502，大陆网络常态） | 命令一律带 `--retry`；关键比对（SHA256SUMS 对账、CI 结论）缺输出就单独补跑闭合，不留「应该没问题」 |
 
 ---
 
