@@ -71,9 +71,9 @@ node dist/cli.js init     # 首启向导；开发调试用 `npm run dev -- <命�
 ### 手动等价流程
 
 ```bash
-modeldock provider add            # 从预设库选择（火山方舟/DeepSeek/GLM/Kimi/MiMo/OpenAI…），粘贴 key 即用
-modeldock profile use <name>      # 设置默认路由
-modeldock gateway start           # 启动本地网关（127.0.0.1:8687）
+modeldock provider add            # 从预设库选择（火山方舟/DeepSeek/GLM/Kimi/MiMo/OpenAI…），粘贴 key 即用；自动建 auto-<服务id> 路由
+modeldock profile use <name>      # 设置默认路由（modeldock profile list 查看；provider add 自动建的是 auto-<服务id>）
+modeldock gateway start --daemon  # 后台启动本地网关（127.0.0.1:8687；不带 --daemon 则前台运行、一直占用终端）
 modeldock attach claude-code      # 接管 Claude Code（先展示 diff，确认后写入并自动快照）
 ```
 
