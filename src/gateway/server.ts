@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
 import { createHash, randomBytes } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
@@ -76,15 +77,19 @@ export interface GatewayStartOptions {
 // 缓存以 home 路径为键：生产单进程恒定只算一次；单进程共享单测（fakeHome 每用例换 home）
 // 在 home 变化时自动重渲，不服务到旧路径。
 // lang 不含进缓存键：UI_HTML 文案经 data-i18n 浏览器端切换，静态体与请求语言无关。
-let renderedUICache: { home: string; html: string; etag: string } | null = null
-function getRenderedUI(): { html: string; etag: string } {
+let renderedUICache: { home: string; html: string; etag: string; gzip: Buffer; gzipEtag: string } | null = null
+function getRenderedUI(): { html: string; etag: string; gzip: Buffer; gzipEtag: string } {
   const home = gatewayStatePath()
   if (renderedUICache && renderedUICache.home === home) return renderedUICache
   const html = UI_HTML
     .replaceAll('__MD_GATEWAY_STATE__', displayPath(home))
     .replaceAll('__MD_LOGS_DIR__', displayPath(logsDir()))
   const etag = '"' + createHash('sha256').update(html).digest('base64url').slice(0, 22) + '"'
-  renderedUICache = { home, html, etag }
+  // gzip 形态一次性预压缩（PERF-25）：页体 ~308KB 走回环也要整包传输，gzip 后 ~1/5；静态体压缩
+  // 一次终身使用。gzip 形态用独立 ETag（表示形态不同）——304 比较按请求的 Accept-Encoding 选形态
+  const gzip = gzipSync(Buffer.from(html, 'utf8'), { level: 9 })
+  const gzipEtag = '"' + createHash('sha256').update(gzip).digest('base64url').slice(0, 22) + '"'
+  renderedUICache = { home, html, etag, gzip, gzipEtag }
   return renderedUICache
 }
 
@@ -1899,7 +1904,12 @@ async function handleAdmin(
       res.end()
       return
     }
-    const { html, etag } = getRenderedUI()
+    const { html, etag, gzip, gzipEtag } = getRenderedUI()
+    // gzip 协商（PERF-25）：Accept-Encoding 带 gzip 就发预压缩形态（独立 ETag 标识表示形态；
+    // Vary: Accept-Encoding 让缓存/代理按该头区分两形态）。304 比较用同一形态的 ETag，
+    // 浏览器对同一形态的重验证恒命中。
+    const wantGzip = /\bgzip\b/i.test(String(req.headers['accept-encoding'] ?? ''))
+    const serveEtag = wantGzip ? gzipEtag : etag
     // 页面加载（含 304 重验证）= UI 打开：续在场并撤销在途轻量模式广播——任何方式打开控制台自动退出轻量模式。
     // 必须同步失效 overview 缓存：刚加载的页面首拉 overview 若命中携带旧广播时间戳的缓存串会误自关。
     // 收窄到带有效凭据的请求：本机程序对 /ui 的无凭据探测/预取不该抑制轻量模式、打穿 overview 缓存
@@ -1910,15 +1920,20 @@ async function handleAdmin(
     }
     // 带匹配 ETag 的重复请求直接 304（空 body，保留既有头）：省掉每请求原样重发 ~308KB 页体（UI_HTML 实测 314896 字节 @2026-10-28）。
     // no-store 由管理面统一策略设置，此处叠 ETag 只做条件请求，不放开 JSON 的缓存策略。
-    if (req.headers['if-none-match'] === etag) {
-      res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag, 'content-security-policy': CONSOLE_CSP })
+    if (req.headers['if-none-match'] === serveEtag) {
+      res.writeHead(304, { 'content-type': 'text/html; charset=utf-8', etag: serveEtag, 'content-security-policy': CONSOLE_CSP, vary: 'Accept-Encoding' })
       res.end()
       return
     }
     // 仅 HTML 页覆盖管理面统一 no-store：no-cache = 可存储但每次必须条件重验证，
     // 浏览器才会存下 ~308KB 页体并在下一次发 If-None-Match → ETag 304 生效。
     // 页面是静态壳 + 状态路径，无敏感数据；JSON API 的 no-store 策略不动。
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP })
+    if (wantGzip) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag: serveEtag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP, vary: 'Accept-Encoding', 'content-encoding': 'gzip' })
+      res.end(gzip)
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag: serveEtag, 'cache-control': 'no-cache', 'content-security-policy': CONSOLE_CSP, vary: 'Accept-Encoding' })
     res.end(html)
     return
   }

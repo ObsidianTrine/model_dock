@@ -15,6 +15,7 @@
 > 2026-10-20 性能复审批量修复：PERF-02 全修、PERF-03/14 部分修（@2540618，切换服务写放大同步收敛）；同日四路并行复审新增 PERF-18..36（P2）留底，见 §一.F。
 > 2026-10-20 P2 批量修复：PERF-13/18/19/20/22/24/26/29/30/31/32/33/34/35 共 14 项已修（@ff407bd）；PERF-21/23/25/27/28/36 复核后暂缓（理由见 §一.F 各条注记）。
 > 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
+> 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -45,10 +46,10 @@
 | PERF-22 | P2 | `src/gateway/ui.ts:1383` | pollOverview 双 JSON.stringify diff，overview 几百 KB 时每 5s 两次 O(n) 序列化 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | PERF-24 | P2 | `src/gateway/lan.ts:780` | 手机页 30s 轮询无 document.hidden 门控；页面每请求重拼无 ETag | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☑ 已修（2026-10-29 @60163fe，serve 侧一次性 gzip 预压缩 + 形态 ETag/Vary；源码注释按规范保留不剥） |
 | PERF-26 | P2 | `src/sync/collect.ts:72-73` | 每次 collect 把 presets.json 读+解析两遍 | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
-| PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☑ 部分修（2026-10-29 @60163fe，loadConfig 按 mtimeMs:size 记忆、返回 clone——tick 双 parse 归一、全部读路径受益；collect 整包记忆复核后维持不做：keychain 轮换不落盘，整包缓存会把旧明文 key 推给其他机器，见 §一.F） |
+| PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☑ 已修（2026-10-29 @60163fe，If-None-Match/304 + 本地 manifest 记忆；无 ETag 服务器自动回退旧行为） |
 | PERF-29 | P2 | `src/providers/fetch.ts:106-157` | 拉取模型无失败负缓存：上游不可达时每次开弹窗重跑候选链（8 端点×15s 串行，最长 60s） | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-30 | P2 | `src/util/fsx.ts:139-141` | fileSha256 整文件读内存（更新包 50–150MB 内存峰值），应流式 hash | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-31 | P2 | `src/install/noderuntime.ts:214` | 1KB 的 SHASUMS256.txt 用 10min 默认超时，连接挂死最坏 20–40min 才切下一源 | ☑ 已修（2026-10-20 @ff407bd） |
@@ -73,6 +74,7 @@
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☑ 已修（2026-10-28，版本迁移写盘前快照，见 §三） |
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
+| CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☐ 未修（2026-10-29 perf-residual 批实证暴露，见 §三；修复需 apply+collect 原子化，注意 withFileLock 同进程重入语义） |
 
 ---
 
@@ -222,6 +224,7 @@
 - 现状：ETag/304 已兜住重复加载，首载解析 236KB JS 约 30–80ms（一次性）。修复方向：构建期剥内联 JS 注释；顺手更正注释数字。
 - 2026-10-20 复核：**暂缓**——注释剥离须字符串/正则感知（裸正则容易把含 `//` 的字符串字面量剥坏），应随构建链改造一并引入正规最小化，不宜手写剥离器；注释数字过时属一行文档修正，顺手提交时带上。
 - 2026-10-28（T04 Phase 1 完成）：单文件 ui.ts（4817 行）已拆为拼装壳（43 行）+ `src/gateway/ui/` 15 个域模块（styles/page/kit/modals/i18n/shared/overview/update/autoroute/services/schedule/configpack/clients/edit/logs），拆分经「拆分前 UI_HTML 字节基线 vs 拆分后」cmp 全等验证（314896B），ui-lint / webui-static 门禁源读取同步扩到模块集。**本条核心（构建链正规最小化，Phase 2）维持暂缓**，与拆分解绑、另开卡；server.ts 体积注释修正由 T11 随手批处理。
+- 2026-10-29：**serve 侧压缩已修**（@60163fe）——getRenderedUI 对最终 HTML 一次性 `gzipSync(level 9)` 预压缩缓存（~308KB → gzip 后约 1/5，静态体终身复用），响应按 Accept-Encoding 协商，gzip 形态用独立内容 ETag + `Vary: Accept-Encoding`，304 按形态命中。源码内联注释按规范保留不剥，构建链正规最小化（Phase 2）仍维持暂缓。
 
 **PERF-26（P2）presets.json 每 tick 读+解析两遍**
 - 位置：`src/sync/collect.ts:72-73`（`readUserPresets()` 后紧跟 `readRawUserPresets()`，各自 readFileSync+JSON.parse+逐条校验）
@@ -231,11 +234,13 @@
 - 位置：`src/sync/engine.ts:116,57`（cloud 每 tick 心跳与 collectSyncdoc 各 loadConfig 一次；target 每 tick 全量 collect，无 mtime 短路）
 - 现状：配置小则毫秒级，属持续性重复 I/O。修复方向：tick 内复用同一份 cfg；或按 config.toml/secrets.json mtime 指纹短路。
 - 2026-10-20 复核：**暂缓**——config.toml 为 KB 级小文件，每分钟两次毫秒级解析实测无感；共享 cfg 需要穿 cloudHeartbeat/collectSyncdoc 内部签名，同步域改动从谨慎原则暂缓。
+- 2026-10-29：**部分修**（@60163fe）——loadConfig 按 mtimeMs:size stat 记忆，文件未变免重新 parse，cloud tick 双 parse 归一，overview/CLI 全部读路径受益，无需穿内部签名（调用方语义透明）。memo 存原始对象、**每次调用返回 structuredClone**：mutateConfig 的 fn 原地改的是 clone，未落盘中间状态绝不被其他调用者看见——首版直接外借共享对象，被 synctarget 的 SyncLoop 端到端用例当场打回（等待远端收敛的轮询在 apply 落盘前放行，暴露下方 CORRECT-06 的既有竞态），clone 后复跑绿。saveConfig 落盘与 mutateConfig 失败路径显式清记忆，堵同毫秒同尺寸写等边角。**collect 整包 mtime 短路复核后维持不做**：keychain 后端 set-key 只写钥匙串、不落任何被同步文件的盘，整包缓存会把旧明文 key 继续推给其他机器——语义风险大于收益；密钥解析保持每次现取（自身 TTL 缓存已吸收 spawn 成本）。
 
 **PERF-28（P2）WebDAV readManifest 无条件请求**
 - 位置：`src/sync/targets/webdav.ts:75-77`（每 tick 全量 GET manifest.json，不带 ETag；cloud 目标 `cloud.ts:44` 已用 if-none-match/304）
 - 修复方向：缓存 ETag 带 If-None-Match。
 - 2026-10-20 复核：**暂缓**——manifest 是同步收敛方向判定的安全输入，ETag 缓存引入「陈旧 manifest」风险面；WebDAV 服务器对 ETag 的支持参差（部分返回弱 ETag 或随时间变化），需专项设计失效兜底后再做。
+- 2026-10-29：**已修**（@60163fe）——readManifest 缓存上次的 ETag + manifest 文本，带 If-None-Match 条件请求：304 复用本地文本（收敛判定输入不变——内容没变才 304，陈旧风险不存在），200/404/无 ETag 服务器自动回退旧行为；writeManifest 写前失效记忆。弱 ETag 原样作 If-None-Match 值使用（HTTP 语义允许，等值比较由服务器裁决），参差支持由「无 ETag → 不记忆」兜底。
 
 **PERF-29（P2）拉取模型无失败负缓存**
 - 位置：`src/providers/fetch.ts:106-157`（候选链最多 8 端点逐个串行 × 15s，总 60s 封顶）+ `src/gateway/server.ts:1275`（每请求直连上游）
@@ -359,6 +364,12 @@
 - 已核查安全：npm 全局安装（installChildEnv 的 npm_config_prefix 沙箱重定向）、自更新（run.ts 开发态守卫）、客户端文件/自启文件/快照/日志/网关状态写入（全部走 homeDir()）。
 - ☑ **已修（2026-10-13 @d6e3a59）**：沙箱一律 file 后端（defaultStore 早退，顺带让 migrateSecretsToSecure 在沙箱 no-op）；setSecret/setSecretsBatch 外部后端强制转 file；deleteSecret 沙箱跳过外部删除（守卫兜底）；新增 `src/config/sandbox.ts` 启动迁移把沙箱配置的外部 key 引用落地为 file（值只读拷入沙箱 secrets.json，幂等，gateway main.ts 挂钩）；sweepGatewayProcesses 沙箱跳过；cliBinDir 沙箱重定向进 `modeldockDir()/cli-bin`；autostart 新增 `serviceLabel()`（沙箱 `com.modeldock.gateway.sandbox`）+ windowsStartupPath 沙箱走 homeDir；导入 APPDATA 分支沙箱跳过。
 - 遗留清理：旧版沙箱若曾装过自启（生产 label 指向沙箱路径），需手动核对 `launchctl print gui/$(id -u)/com.modeldock.gateway` 的 program 路径后 `launchctl bootout` 清理；新版不会再产生该状态。
+
+**CORRECT-06（P2，2026-10-29 perf-residual 批实证暴露）同步拉取的 post-apply collect 竞态窗口**
+- 位置：`src/sync/engine.ts:77-78`（`applySyncdoc(...)` 落盘后紧接 `collectSyncdoc()` 取 after 态算 `lastSyncedHash`）。
+- 竞态：另一调用方（CLI mutateConfig、控制台写路径等）的本地改动若恰好落在「apply 落盘」与「post-apply collect 读盘」之间，会被计入 lastSyncedHash 基线——该本地改动此后 tick 判 idle，**既不推送也不产生冲突快照**，静默丢失（直到下一次无关改动捎带出去）。窗口毫秒级，天然触发概率极低；perf-residual 批的 loadConfig memo 首版（外借共享对象）曾让测试轮询在 apply 落盘前放行、把它确定性钉进窗口，memo 改 clone 后恢复原概率，但窗口本身仍在。
+- 修复方向：apply+post-collect 对 config 写锁原子化（同一 `withFileLock` 域内完成）；注意 applySyncdoc 内部自身会 mutateConfig——withFileLock 若非同进程重入式会自锁死，动手前先核 `src/util/fsx.ts` 的实现语义。stash 方向（post-collect 前记录 mtime、变化则重试）也可评估。
+- ☐ 未修：本批只登记不改（同步域改动从谨慎原则单独立卡）；PERF-27 的 memo 已按 clone 语义消除了本次的确定性触发路径。
 
 ---
 

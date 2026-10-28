@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { stat } from 'node:fs/promises'
 import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml'
 import { configPath } from '../util/paths.js'
 import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
@@ -105,7 +106,30 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
   return { ...cfg, schedule: { ...(sch.enabled === undefined ? {} : { enabled: sch.enabled }), ...(windows.length ? { windows } : {}) } }
 }
 
+// loadConfig stat 记忆（PERF-27 部分收口）：cloud 心跳 + 文档收集每个同步 tick 重复 parse 整份
+// TOML，overview/CLI 各读路径同样反复 parse。键 = mtimeMs:size，文件未变时复用「原始 Config」，
+// 每次调用返回 structuredClone——**绝不外借 memo 对象本身**：mutateConfig 的 fn 会原地改拿到的
+// cfg，若共享原始对象，未落盘的中间状态会立刻被其他 loadConfig 调用者看见（synctarget 的
+// SyncLoop 端到端用例实证：等待远端收敛的轮询在 apply 落盘前就放行，把随后的本地写钉进
+// apply→post-collect 窗口，lastSyncedHash 吞掉本地改动、永不推送）。clone 成本远低于重新 parse。
+// 刻意不把记忆扩到 collectSyncdoc 整体：keychain 后端的密钥轮换不落任何被同步文件的盘（setSecret
+// 只写钥匙串），整包记忆会把旧明文 key 继续推给其他机器——原复核暂缓的语义担忧成立，密钥解析
+// 保持每次现取（其自身已有 TTL 缓存吸收 spawn 成本）。
+let loadMemo: { key: string; cfg: Config } | null = null
+
+async function configStatKey(): Promise<string> {
+  try {
+    const st = await stat(configPath())
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return 'missing'
+  }
+}
+
 export async function loadConfig(): Promise<Config> {
+  const key = await configStatKey()
+  if (key === 'missing') return emptyConfig()
+  if (loadMemo && loadMemo.key === key) return structuredClone(loadMemo.cfg)
   const text = await readTextIfExists(configPath())
   if (text === null || text.trim() === '') return emptyConfig()
   let raw: Record<string, unknown>
@@ -117,7 +141,9 @@ export async function loadConfig(): Promise<Config> {
       t('运行 modeldock config edit 修复，或 modeldock restore 恢复备份', 'Run modeldock config edit to fix it, or modeldock restore to restore a backup')
     )
   }
-  return migrate(raw)
+  const cfg = migrate(raw)
+  loadMemo = { key, cfg }
+  return structuredClone(cfg)
 }
 
 export async function saveConfig(cfg: Config): Promise<void> {
@@ -140,6 +166,8 @@ export async function saveConfig(cfg: Config): Promise<void> {
     }
   }
   await atomicWrite(configPath(), next, 0o600)
+  // 落盘即失忆：防同毫秒同尺寸写（mtimeMs:size 键撞不出来的边角）让下一次 loadConfig 拿到旧内容
+  loadMemo = null
 }
 
 // 写并发控制（实现见 src/util/fsx.ts 的 withFileLock：进程内 promise 串行 + 跨进程 O_CREAT|O_EXCL 锁）
@@ -162,9 +190,15 @@ export async function mutateConfig<T>(fn: (cfg: Config) => T | Promise<T>): Prom
     },
     async () => {
       const cfg = await loadConfig()
-      const ret = await fn(cfg)
-      await saveConfig(cfg)
-      return ret
+      try {
+        const ret = await fn(cfg)
+        await saveConfig(cfg)
+        return ret
+      } catch (e) {
+        // fn 或落盘失败：共享的 memo 对象可能已被 fn 改脏——宁可下次重 parse，也不让未落盘状态漏出去
+        loadMemo = null
+        throw e
+      }
     }
   )
 }

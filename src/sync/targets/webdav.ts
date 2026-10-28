@@ -31,15 +31,17 @@ export function createWebdavTarget(opts: WebdavOptions): SyncTarget {
     headers.authorization = 'Basic ' + Buffer.from(`${opts.username ?? ''}:${opts.password ?? ''}`).toString('base64')
   }
 
-  async function call(method: string, url: string, body?: string): Promise<{ code: number; text: string }> {
+  async function call(method: string, url: string, body?: string, extra?: Record<string, string>): Promise<{ code: number; text: string; etag: string | null }> {
     let res
     try {
-      res = await request(url, { method, headers, body, signal: AbortSignal.timeout(TIMEOUT_MS) })
+      res = await request(url, { method, headers: { ...headers, ...extra }, body, signal: AbortSignal.timeout(TIMEOUT_MS) })
     } catch (e) {
       throw new Error(t('同步目标不可达（{url}）：{err}', 'Sync target unreachable ({url}): {err}', { url, err: (e as Error).message }))
     }
     const text = await res.body.text().catch(() => '')
-    return { code: res.statusCode, text }
+    const etagRaw = res.headers['etag']
+    const etag = Array.isArray(etagRaw) ? (etagRaw[0] ?? null) : (etagRaw ?? null)
+    return { code: res.statusCode, text, etag }
   }
 
   /** WebDAV 集合不存在时 PUT 会 409：补 MKCOL 后重试一次（坚果云等要求父集合存在） */
@@ -71,15 +73,31 @@ export function createWebdavTarget(opts: WebdavOptions): SyncTarget {
     return r.text
   }
 
+  // manifest 条件读记忆（PERF-28）：tick 每 1-2 分钟 GET 一次 manifest，绝大多数 tick 内容没变。
+  // 带上次的 ETag 发 If-None-Match，服务器回 304 就复用本地缓存的 manifest 文本——省掉整包下载与
+  // 重复解析。服务器不给 ETag（回 200 永远成立）则记忆保持空，行为与从前完全一致。
+  let manifestMemo: { etag: string; text: string } | null = null
+
   return {
     async readManifest(): Promise<SyncManifest | null> {
-      const text = await readUrl(`${root}/manifest.json`)
-      return text === null ? null : parseManifest(text)
+      const url = `${root}/manifest.json`
+      const r = await call('GET', url, undefined, manifestMemo ? { 'if-none-match': manifestMemo.etag } : undefined)
+      if (r.code === 304 && manifestMemo) return parseManifest(manifestMemo.text)
+      if (r.code === 404) {
+        manifestMemo = null
+        return null
+      }
+      if (r.code < 200 || r.code >= 300) {
+        throw new Error(t('读取同步目标失败（HTTP {code}）：{url}', 'Failed to read from the sync target (HTTP {code}): {url}', { code: r.code, url }))
+      }
+      manifestMemo = r.etag ? { etag: r.etag, text: r.text } : null
+      return parseManifest(r.text)
     },
     async writeBlob(rev, devid, envelope) {
       await putWithMkcol(`${root}/${blobRefOf(rev, devid)}`, envelope)
     },
     async writeManifest(m, baseRev) {
+      manifestMemo = null // 本机即将改写服务器内容：条件读记忆作废，下次 readManifest 全量取回重新武装
       const cur = await readUrl(`${root}/manifest.json`)
       if (cur !== null && parseManifest(cur).rev !== baseRev) return 'conflict'
       await putWithMkcol(`${root}/manifest.json`, JSON.stringify(m, null, 2) + '\n')
