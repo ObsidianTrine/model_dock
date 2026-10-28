@@ -82,61 +82,129 @@ export function trayPidsFromProcessLines(lines: string): number[] {
   return pids
 }
 
+/** 停托盘的可注入依赖：单测全 mock（枚举与 kill 绝不触达真实进程——生产托盘常在运行），
+ *  生产走 defaultInstallDeps().stopTray 的缺省实现（动态 import 真模块）。 */
+export interface TrayStopDeps {
+  /** 枚举本机进程命令行（"pid command" 行）；不可用返回 null */
+  listProcessLines: () => string | null | Promise<string | null>
+  /** 按 PID 杀进程（win=taskkill /PID，unix=SIGTERM）；返回是否生效 */
+  killByPid: (pid: number, spawnSyncFn: typeof spawnSync, opts?: { tree?: boolean }) => boolean
+  /** 按映像名兜底强杀所用的同步执行器（win 专属路径，注入后不触达真实 taskkill） */
+  spawnSync: typeof spawnSync
+  /** 杀与复查之间的小睡：taskkill 返回到句柄释放有短窗，复查枚举需要真实视图 */
+  sleep: (ms: number) => Promise<void>
+  /** 平台判定（单测注入 'win32' 以确定性地覆盖强杀路径；缺省 process.platform） */
+  platform: string
+}
+
+async function defaultListProcessLines(): Promise<string | null> {
+  const { listProcessLines } = await import('../cli/gatewaycmd.js')
+  return listProcessLines()
+}
+
 /** 停托盘：按命令行精确匹配 ModelDockTray（不按映像名全局杀），
- *  「杀 → 复查 → 补刀」两遍式，每步结果写进更新日志、失败不再静默。
+ *  「枚举 → 按 PID 杀 → 复查 → 补刀」两遍式，每步结果写进更新日志、失败不再静默；
+ *  两遍后仍未停时 win 按映像名兜底强杀（ModelDockTray.exe 为 ModelDock 专用映像名，
+ *  更新器自身是 modeldock.exe，无自伤面）。
  *  旧实现是尽力而为零验证：枚举空 / kill 未生效都无痕迹，托盘带锁存活到安装向导——
  *  RM 只能优雅关闭无窗口托盘（收不到关闭消息，30s 超时）→ Abort/Retry/Ignore 弹框，
  *  安装卡死在「无法自动关闭所有应用程序」（2026-10-28 用户实证，连续三次更新全中）。 */
-async function stopTrayProcesses(log: (msg: string) => void): Promise<void> {
-  const isWin = process.platform === 'win32'
-  const { listProcessLines } = await import('../cli/gatewaycmd.js')
-  let killedAny = false
-  for (let pass = 1; pass <= 2; pass++) {
-    let lines: string | null = null
+export async function stopTrayProcesses(log: (msg: string) => void, deps?: Partial<TrayStopDeps>): Promise<void> {
+  const isWin = (deps?.platform ?? process.platform) === 'win32'
+  const list = deps?.listProcessLines ?? defaultListProcessLines
+  const kill = deps?.killByPid ?? killByPid
+  const runSync = deps?.spawnSync ?? spawnSync
+  const nap = deps?.sleep ?? sleep
+  /** 枚举 + 解析托盘 pid；枚举不可用 / 抛异常统一按 null（走兜底 / 终验明说） */
+  const enumTray = async (): Promise<number[] | null> => {
     try {
-      lines = listProcessLines()
+      const lines = await list()
+      return lines == null ? null : trayPidsFromProcessLines(lines)
     } catch {
-      lines = null // 枚举瞬时失败按 null 走兜底/下一遍
+      return null
     }
-    if (lines == null) {
+  }
+  const killedLog = t('✓ 托盘已停止', '✓ Tray stopped')
+  const unconfirmedLog = t('⚠ 进程枚举不可用，无法确认托盘是否已停止；若向导弹出「关闭应用程序」确认框请按提示处理', '⚠ Process enumeration unavailable; cannot confirm whether the tray stopped. If the wizard shows a "close applications" prompt, follow it')
+  let killedAny = false
+  /** 循环内出现过未生效的杀/强杀（kill 返回 false 或 taskkill 状态非 0）：此后空枚举与失败记录矛盾
+   *  （枚举抖动 / taskkill 竞态），不再直接采信「✓ 已停止」——交给终验再枚举一次仲裁；
+   *  终验枚举恰好不可用（null）时也据此在 win 补一发映像名强杀（S1） */
+  let hadKillFailure = false
+  /** 按映像名兜底强杀并记录结果（结果不再静默：status 非 0 = 未找到目标/失败；
+   *  注入的 fake 返回 undefined 视为成功——与 killByPid 同约定，只桩命令拼装） */
+  const forceKillByImage = (): void => {
+    const r = runSync('taskkill', ['/IM', 'ModelDockTray.exe', '/F'], { stdio: 'ignore', windowsHide: true })
+    const ok = !r || r.status === 0
+    if (!ok) hadKillFailure = true
+    log(ok
+      ? c.gray(t('  已按映像名强杀托盘', '  Tray force-killed by image name'))
+      : c.yellow(t('  ⚠ 按映像名强杀托盘未生效', '  ⚠ Force-killing the tray by image name did not take effect')))
+  }
+  for (let pass = 1; pass <= 2; pass++) {
+    const pids = await enumTray()
+    if (pids == null) {
       // 枚举不可用：win 按映像名兜底强杀（ModelDockTray.exe 为 ModelDock 专用映像名，
       // 更新器自身是 modeldock.exe，无自伤面）；unix 无等价物，交给终验明说
       if (!isWin) break
       log(c.yellow(t('进程枚举不可用，改按映像名强杀托盘（ModelDockTray.exe）', 'Process enumeration unavailable; killing the tray by image name (ModelDockTray.exe) instead')))
-      spawnSync('taskkill', ['/IM', 'ModelDockTray.exe', '/F'], { stdio: 'ignore', windowsHide: true })
+      forceKillByImage()
       killedAny = true
-      await sleep(800)
+      await nap(800)
       continue
     }
-    const pids = trayPidsFromProcessLines(lines)
     if (pids.length === 0) {
+      // 有过未生效的杀/强杀：空枚举与失败记录矛盾，不轻信「✓ 已停止」，交终验下结论
+      if (hadKillFailure) break
       // 第一遍就为空 = 托盘本就未运行；第二遍为空 = 已杀干净
-      if (killedAny) log(c.green(t('✓ 托盘已停止', '✓ Tray stopped')))
-      else log(c.gray(t('托盘未在运行', 'Tray not running')))
+      log(killedAny ? c.green(killedLog) : c.gray(t('托盘未在运行', 'Tray not running')))
       return
     }
     log(t('停止托盘进程（pid {pids}）…', 'Stopping tray process(es) (pid {pids})…', { pids: pids.join(', ') }))
     // tree:false——托盘发起的更新里更新器就是托盘的子进程，taskkill /T 会把自己一并杀掉，
     // 安装步骤永远执行不到（Windows 托盘更新必败的根因）；托盘无必须连带清理的子进程
-    for (const pid of pids) killByPid(pid, spawnSync, { tree: false })
-    killedAny = true
-    await sleep(800) // taskkill 返回到句柄释放有短窗，给复查枚举留出真实视图
+    for (const pid of pids) {
+      const ok = kill(pid, runSync, { tree: false })
+      if (!ok) hadKillFailure = true
+      log(ok
+        ? c.gray(t('  已杀 pid {pid}', '  Killed pid {pid}', { pid: String(pid) }))
+        : c.yellow(t('  ⚠ 杀 pid {pid} 未生效', '  ⚠ Failed to kill pid {pid}', { pid: String(pid) })))
+    }
+    killedAny = true // 做过杀动作即算：下一遍为空时给「✓ 已停止」而非「未在运行」
+    await nap(800) // taskkill 返回到句柄释放有短窗，给复查枚举留出真实视图
   }
   // 终验：两遍后给明确结论——杀干净 ✓，没杀干净 / 无法确认 ⚠（旧行为的失败就败在无痕）
-  let final: string | null = null
-  try {
-    final = listProcessLines()
-  } catch {
-    final = null
+  let alive = await enumTray()
+  if (alive != null && alive.length === 0) {
+    log(c.green(killedLog))
+    return
   }
-  const alivePids = final != null ? trayPidsFromProcessLines(final) : null
-  if (alivePids != null && alivePids.length === 0) {
-    log(c.green(t('✓ 托盘已停止', '✓ Tray stopped')))
-  } else if (alivePids == null) {
-    log(c.yellow(t('⚠ 进程枚举不可用，无法确认托盘是否已停止；若向导弹出「关闭应用程序」确认框请按提示处理', '⚠ Process enumeration unavailable; cannot confirm whether the tray stopped. If the wizard shows a "close applications" prompt, follow it')))
-  } else {
-    log(c.yellow(t('⚠ 托盘仍未停止（pid {pids}），向导将尝试强制关闭；也可手动退出托盘后重试更新', '⚠ Tray still running (pid {pids}); the wizard will try to force-close it. You can also quit the tray manually and retry the update', { pids: alivePids.map(String).join(', ') })))
+  if (alive == null) {
+    // 循环内已有「杀/强杀未生效」的实证而终验枚举恰好不可用（瞬时 PS 失败）：
+    // win 仍按映像名补一发（S1），结果写日志后照旧落无法确认——不因枚举失败漏掉既定兜底
+    if (isWin && hadKillFailure) {
+      log(c.yellow(t('⚠ 托盘停止未确认且此前有杀/强杀未生效，再按映像名强杀一次（ModelDockTray.exe）', '⚠ Tray stop unconfirmed after earlier kill failures; retrying force-kill by image name (ModelDockTray.exe)')))
+      forceKillByImage()
+    }
+    log(c.yellow(unconfirmedLog))
+    return
   }
+  if (isWin) {
+    // 兜底降级：两遍按 PID 仍未停 → 按映像名强杀（更新器自身是 modeldock.exe，无自伤面），结果写日志
+    log(c.yellow(t('⚠ 按 PID 停托盘未完全生效（pid {pids}），改按映像名强杀（ModelDockTray.exe）', '⚠ Stopping the tray by pid did not fully take effect (pid {pids}); force-killing by image name (ModelDockTray.exe)', { pids: alive.map(String).join(', ') })))
+    forceKillByImage()
+    await nap(800)
+    alive = await enumTray()
+    if (alive != null && alive.length === 0) {
+      log(c.green(killedLog))
+    } else if (alive == null) {
+      log(c.yellow(unconfirmedLog))
+    } else {
+      log(c.yellow(t('⚠ 托盘仍未停止（pid {pids}），向导将尝试强制关闭；也可手动退出托盘后重试更新', '⚠ Tray still running (pid {pids}); the wizard will try to force-close it. You can also quit the tray manually and retry the update', { pids: alive.map(String).join(', ') })))
+    }
+    return
+  }
+  log(c.yellow(t('⚠ 托盘仍未停止（pid {pids}），向导将尝试强制关闭；也可手动退出托盘后重试更新', '⚠ Tray still running (pid {pids}); the wizard will try to force-close it. You can also quit the tray manually and retry the update', { pids: alive.map(String).join(', ') })))
 }
 
 // 安装形态识别

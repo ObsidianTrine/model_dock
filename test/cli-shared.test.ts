@@ -65,6 +65,13 @@ describe('parsePidCommandLines（纯函数，无副作用）', () => {
   it('空输入返回空数组', () => {
     expect(parsePidCommandLines('')).toEqual([])
   })
+  it('Windows CRLF 输出（PowerShell 重定向实态）：行尾 \\r 归一后再匹配，不丢行', () => {
+    const out = parsePidCommandLines('12345 node src/cli.ts --sea-gateway\r\n  678 rest of the line\r\n')
+    expect(out).toEqual([
+      { pid: 12345, cmd: 'node src/cli.ts --sea-gateway' },
+      { pid: 678, cmd: 'rest of the line' },
+    ])
+  })
 })
 
 describe('killByPid 平台分支（注入 fake spawnSync，桩验命令拼装，绝不真杀进程）', () => {
