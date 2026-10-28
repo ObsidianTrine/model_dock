@@ -40,7 +40,7 @@
     "gen:ui-min": "node scripts/gen-ui-min.mjs"
   },
   "dependencies": {
-    "@inquirer/prompts": "^8.7.4",
+    "@inquirer/prompts": "^8.7.5",
     "commander": "^15.0.0",
     "qrcode-generator": "^1.5.2",
     "smol-toml": "^1.9.1",
@@ -48,7 +48,7 @@
     "yaml": "^2.7.0"
   },
   "devDependencies": {
-    "@types/node": "^22.13.0",
+    "@types/node": "^22.20.5",
     "@vitest/coverage-v8": "^5.0.5",
     "esbuild": "^0.28.2",
     "happy-dom": "^21.0.4",
