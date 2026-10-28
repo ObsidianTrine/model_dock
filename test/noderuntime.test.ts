@@ -9,6 +9,7 @@ import {
   downloadFailureMessage,
   engineWarningHint,
   ensureNodeRuntime,
+  installChildEnv,
   integrateManagedPath,
   managedNodeBinDir,
   managedNodeDir,
@@ -20,7 +21,8 @@ import {
   nodeVersion,
   MANAGED_NODE_VERSION,
 } from '../src/install/noderuntime.js'
-import { fileSha256 } from '../src/util/fsx.js'
+import { commandOnPathResolved, fileSha256 } from '../src/util/fsx.js'
+import { sandboxNpmCache, sandboxNpmPrefix } from '../src/util/paths.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -268,5 +270,185 @@ describe('noderuntime 纯函数', () => {
       expect(nodeInnerDirName('24.21.0', pf as never, 'x64')).toBe(`node-v24.21.0-${plat}-${arch}`)
     }
     expect(nodeInnerDirName().startsWith(`node-v${nodeVersion()}-`)).toBe(true)
+  })
+})
+
+describe('installChildEnv（安装子进程环境装配）', () => {
+  const envKeys = ['npm_config_prefix', 'npm_config_globalconfig', 'npm_execpath', 'npm_config_registry', 'MODELRDOCK_NPM_REGISTRY', 'KEEP_ME']
+
+  it('剥离 npm_* 泄漏；zh 注入镜像 registry；沙箱下注入 prefix/cache；en 不注入', () => {
+    const h = fakeHome()
+    const saved = envKeys.map((k) => process.env[k])
+    try {
+      process.env.npm_config_prefix = '/leaked/prefix'
+      process.env.npm_config_globalconfig = '/leaked/globalconfig'
+      process.env.npm_execpath = '/leaked/npm'
+      process.env.npm_config_registry = 'http://leaked-registry.example'
+      delete process.env.MODELRDOCK_NPM_REGISTRY
+      process.env.KEEP_ME = 'yes'
+
+      const envZh = installChildEnv(process.env, 'zh')
+      expect(envZh.npm_config_prefix).toBe(sandboxNpmPrefix()) // 受控重注入为沙箱落点，真机值绝不穿透
+      expect(envZh.npm_config_cache).toBe(sandboxNpmCache())
+      expect(envZh.npm_config_globalconfig).toBeUndefined() // 泄漏剥离
+      expect(envZh.npm_execpath).toBeUndefined()
+      expect(envZh.npm_config_registry).toBe('https://registry.npmmirror.com') // 地区策略重新注入
+      expect(envZh.KEEP_ME).toBe('yes') // 非 npm_* 变量透传
+
+      const envEn = installChildEnv(process.env, 'en')
+      expect(envEn.npm_config_registry).toBeUndefined() // en 不注入，保留官方默认
+      expect(envEn.npm_config_prefix).toBe(sandboxNpmPrefix())
+
+      // 显式 registry 覆盖对两种语言生效
+      process.env.MODELRDOCK_NPM_REGISTRY = 'https://reg.example'
+      expect(installChildEnv(process.env, 'en').npm_config_registry).toBe('https://reg.example')
+      expect(installChildEnv(process.env, 'zh').npm_config_registry).toBe('https://reg.example')
+    } finally {
+      envKeys.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]!
+      })
+      h.restore()
+    }
+  })
+})
+
+describe('ensureNodeRuntime · path 短路', () => {
+  // 前提 = 运行环境 PATH 有 node；被裁剪的极端环境跳过而不是误入托管下载（真实外网）
+  it.skipIf(commandOnPathResolved('node') === null)('系统 node 可用：source=path，不触发托管下载', async () => {
+    const h = fakeHome()
+    const saved = process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD
+    delete process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD
+    try {
+      const info = await ensureNodeRuntime()
+      expect(info.source).toBe('path')
+      expect(info.nodeBin).toContain('node')
+      expect(info.binDir.length).toBeGreaterThan(0)
+      // 不落任何托管运行时目录
+      expect(fs.existsSync(managedNodeDir())).toBe(false)
+    } finally {
+      if (saved === undefined) delete process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD
+      else process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD = saved
+      h.restore()
+    }
+  })
+})
+
+/** 打定制 tarball：可去掉 bin/node 或改内层目录名（缺二进制 / 目录缺失两类归因分支） */
+function makeCustomTarball(dir: string, version: string, opts: { omitNode?: boolean; innerDir?: string }): { tarball: string; asset: string } {
+  const plat = process.platform
+  const asset = `node-v${version}-${plat}-${process.arch}.tar.gz`
+  const inner = path.join(dir, opts.innerDir ?? `node-v${version}-${plat}-${process.arch}`)
+  fs.mkdirSync(path.join(inner, 'bin'), { recursive: true })
+  fs.writeFileSync(path.join(inner, 'bin', 'npm'), '#!/bin/sh\necho fixture-npm\n')
+  if (!opts.omitNode) {
+    const p = path.join(inner, 'bin', 'node')
+    fs.writeFileSync(p, '#!/bin/sh\necho fixture-node\n')
+    fs.chmodSync(p, 0o755)
+  }
+  const tarball = path.join(dir, asset)
+  const r = spawnSync('tar', ['-czf', tarball, '-C', dir, path.basename(inner)])
+  if (r.status !== 0) throw new Error(`fixture tar failed: ${r.stderr}`)
+  return { tarball, asset }
+}
+
+/** 起一个只答一个资产请求的本地 mock 镜像（SHASUMS + 资产二进制） */
+async function serveOneAsset(tarball: string, asset: string, version: string): Promise<{ port: number; close: () => void }> {
+  const sha = await fileSha256(tarball)
+  const server = http.createServer((req, res) => {
+    if (req.url === `/v${version}/SHASUMS256.txt`) {
+      res.end(`${sha}  ${asset}\n`)
+    } else if (req.url === `/v${version}/${asset}`) {
+      res.end(fs.readFileSync(tarball))
+    } else {
+      res.statusCode = 404
+      res.end('nope')
+    }
+  })
+  const port = await listenEphemeral(server)
+  return { port, close: () => server.close() }
+}
+
+describePosix('noderuntime 下载后归因缺口（缺二进制 / 内层目录缺失）', () => {
+  const version = '0.0.0-test'
+  const envs = ['MODELRDOCK_NODE_MIRROR', 'MODELRDOCK_NODE_VERSION', 'MODELRDOCK_NODE_FORCE_DOWNLOAD']
+
+  it('解压后缺 node 二进制：报「缺少」且不留半截目录', async () => {
+    const h = fakeHome()
+    const saved = envs.map((k) => process.env[k])
+    let mirror: { port: number; close: () => void } | null = null
+    try {
+      const { tarball, asset } = makeCustomTarball(fs.mkdtempSync(path.join(h.home, 'fixture-')), version, { omitNode: true })
+      mirror = await serveOneAsset(tarball, asset, version)
+      process.env.MODELRDOCK_NODE_MIRROR = `http://127.0.0.1:${mirror.port}`
+      process.env.MODELRDOCK_NODE_VERSION = version
+      process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD = '1'
+      await expect(ensureNodeRuntime()).rejects.toThrow(/缺少/)
+      // 解压已到位（rename 完成），缺的是包内 node 二进制本身——报错发生在归因检查步
+      expect(fs.existsSync(path.join(managedNodeDir(), 'bin', 'npm'))).toBe(true)
+      expect(fs.existsSync(path.join(managedNodeDir(), 'bin', 'node'))).toBe(false)
+      const root = path.join(h.home, '.modeldock', 'runtime', 'node')
+      expect(fs.readdirSync(root).filter((e) => e.startsWith('.stage-'))).toEqual([])
+    } finally {
+      mirror?.close()
+      envs.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]!
+      })
+      h.restore()
+    }
+  })
+
+  it('压缩包内层目录名不符：报「未找到目录」（下载与校验均通过）', async () => {
+    const h = fakeHome()
+    const saved = envs.map((k) => process.env[k])
+    let mirror: { port: number; close: () => void } | null = null
+    try {
+      const { tarball, asset } = makeCustomTarball(fs.mkdtempSync(path.join(h.home, 'fixture-')), version, { innerDir: 'wrong-top-dir' })
+      mirror = await serveOneAsset(tarball, asset, version)
+      process.env.MODELRDOCK_NODE_MIRROR = `http://127.0.0.1:${mirror.port}`
+      process.env.MODELRDOCK_NODE_VERSION = version
+      process.env.MODELRDOCK_NODE_FORCE_DOWNLOAD = '1'
+      await expect(ensureNodeRuntime()).rejects.toThrow(/未找到目录/)
+      expect(fs.existsSync(managedNodeDir())).toBe(false)
+    } finally {
+      mirror?.close()
+      envs.forEach((k, i) => {
+        if (saved[i] === undefined) delete process.env[k]
+        else process.env[k] = saved[i]!
+      })
+      h.restore()
+    }
+  })
+
+  it('多个 shell rc 都存在时都写入 PATH 行（既有内容保留）', async () => {
+    const h = fakeHome()
+    try {
+      const binDir = managedNodeBinDir()
+      fs.writeFileSync(path.join(h.home, '.zshrc'), 'export Z=1\n')
+      fs.writeFileSync(path.join(h.home, '.bashrc'), 'export B=1')
+      await integrateManagedPath(binDir)
+      const zsh = fs.readFileSync(path.join(h.home, '.zshrc'), 'utf8')
+      const bash = fs.readFileSync(path.join(h.home, '.bashrc'), 'utf8')
+      expect(zsh).toContain('export Z=1')
+      expect(zsh).toContain(binDir)
+      expect(bash).toContain('export B=1')
+      expect(bash).toContain(binDir)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('noderuntime PATH 接入 · Windows 沙箱分支', () => {
+  it.skipIf(process.platform !== 'win32')('FAKE_HOME 下跳过写用户 PATH（沙箱不碰真机环境变量）', async () => {
+    const h = fakeHome()
+    const lines: string[] = []
+    try {
+      await integrateManagedPath(managedNodeBinDir(), (l) => lines.push(l))
+      expect(lines.join('\n')).toContain('沙箱模式')
+    } finally {
+      h.restore()
+    }
   })
 })

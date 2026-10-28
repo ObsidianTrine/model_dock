@@ -128,6 +128,44 @@ describe('cmdSyncSetup 参数校验', () => {
       h.restore()
     }
   })
+
+  it('webdav：地址为空 exit(1)（显式传参，不经交互）', async () => {
+    // 注：只测空串——纯空白串在此分支漏检（sync.ts askTargetConfig 对显式传入的 o.url 不做
+    // trim，与 dir/username 的写法不一致，疑似源码笔误，已记入交付说明另立卡）
+    const h = fakeHome()
+    stubExit()
+    capture()
+    try {
+      await expect(cmdSyncSetup({ target: 'webdav', url: '', username: 'u', password: 'p' })).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('地址不能为空')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('webdav：用户名与密码为空 exit(1)', async () => {
+    const h = fakeHome()
+    stubExit()
+    capture()
+    try {
+      await expect(cmdSyncSetup({ target: 'webdav', url: 'https://dav.example.com', dir: 'md', username: '', password: '' })).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('用户名与密码不能为空')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('localdir：目录为空 exit(1)', async () => {
+    const h = fakeHome()
+    stubExit()
+    capture()
+    try {
+      await expect(cmdSyncSetup({ target: 'localdir', dir: '   ' })).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('目录不能为空')
+    } finally {
+      h.restore()
+    }
+  })
 })
 
 // passphraseHint 等价类归 passphrase-hint.test.ts（曾在此双写，2026-10-21 去重删除；独有
