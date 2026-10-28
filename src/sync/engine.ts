@@ -12,7 +12,8 @@ import { applySyncdoc, collectSyncdoc } from './collect.js'
 import { openWithKeys, sealWithKeys } from './crypto.js'
 import { createTarget, hashDoc, keysFromState, targetFromState } from './runtime.js'
 import { blobRefOf } from './targets/types.js'
-import { loadConfig } from '../config/store.js'
+import { loadConfig, configLockPath } from '../config/store.js'
+import { withFileLock } from '../util/fsx.js'
 import { readSyncState, updateSyncState, type SyncState } from './state.js'
 import { validateSyncdoc, type Syncdoc } from './types.js'
 import { VERSION } from '../version.js'
@@ -74,12 +75,21 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
         t('拉取失败：解不开最新同步包（{msg}）。可能其他机器更换了同步口令，请在本机重跑 modeldock sync setup', 'Pull failed: cannot open the latest package ({msg}). The passphrase may have been changed on another machine; run modeldock sync setup again on this machine', { msg: (e as Error).message })
       )
     }
-    await applySyncdoc(validateSyncdoc(remoteDoc))
-    const { doc: after } = await collectSyncdoc()
+    // apply + post-apply 重收集对 config 写锁原子化（CORRECT-06）：并发本地写若落在「apply 落盘」
+    // 与「重收集读盘」之间，会被计入 lastSyncedHash 基线——该改动此后 tick 判 idle，既不推送也不
+    // 冲突快照，静默丢失。持锁期间 collectSyncdoc 的密钥解析（file 后端读盘 / keychain 后端可能
+    // spawn）也在锁内，极端时延后并发 config 写毫秒级——tick 分钟级一次，可接受。withFileLock
+    // 同路径重入内联（AsyncLocalStorage 识别持有者调用树）：applySyncdoc 内部的 mutateConfig 不会自锁死。
+    let afterHash = ''
+    await withFileLock(configLockPath(), undefined, async () => {
+      await applySyncdoc(validateSyncdoc(remoteDoc))
+      const { doc: after } = await collectSyncdoc()
+      afterHash = hashDoc(after)
+    })
     await updateSyncState({
       lastAppliedRev: manifest.rev,
       lastAppliedTs: manifest.ts,
-      lastSyncedHash: hashDoc(after),
+      lastSyncedHash: afterHash,
       lastPullTs: now,
       lastError: null,
       ...(conflict ? { lastConflictTs: now } : {}),
