@@ -45,7 +45,7 @@ harness（每个客户端怎么接入：claude-code / zcode / dsh / codex / open
 ```bash
 git clone https://github.com/ObsidianTrine/model_dock.git
 cd model_dock
-npm install
+npm ci                 # 按 lockfile 安装依赖（与 README 一致）
 npm run build          # TypeScript 编译，产物在 dist/
 npm link               # 全局注册 modeldock 命令
 modeldock --help
@@ -68,7 +68,7 @@ npm run build:sea -- --target darwin-arm64
 modeldock init
 ```
 
-向导会依次：检测本机 harness → 列出从 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 发现的现有 provider（勾选导入，key 一并入库）→ 没有可导入的就走预设库添加 → 选默认路由 → 后台启动网关 → 逐个 attach（每步先展示 diff）。`--yes` 可全自动。
+向导会依次：检测本机 harness → 列出从 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 发现的现有 provider（勾选导入，key 一并入库）→ 没有可导入的就走预设库添加 → 设默认路由 → 后台启动网关 → 逐个 attach（每步先展示 diff）。`--yes` 跳过所有确认与勾选（导入全部发现项、attach 全部已安装客户端）；**预设库选择与粘贴 key 仍需交互**——非交互环境可先 `modeldock provider add <预设id> --key <key> --yes` 完成这一步再 init。
 
 ### 方式 B：从 cc-switch 迁移（本机现状推荐）
 
@@ -188,7 +188,7 @@ enabled = true
 
 简版页只开放状态查看、切换服务、路由调整与配置同步，管理凭据不下发；主网关仍只监听 `127.0.0.1`，不对外开放。
 
-安全：控制台仅本机可访问；读取无需任何密码，修改类操作要求"浏览器同源请求"（防止其他网页暗中驱动本机网关）——**没有 admin token 概念，也不需要输入任何密码**。
+安全：控制台仅本机可访问，**不需要记任何密码**——管理令牌由程序自动生成与保管（`gateway.json`）。`modeldock ui` 打开时自动携带令牌登录（种 7 天 HttpOnly cookie；页面锁定后用「重新登录」凭设备记忆一键恢复）。管理接口（读取与修改，健康检查除外）都校验该凭据——其他网页无法暗中驱动本机网关；`modeldock gateway rotate-token` 可随时轮换令牌、使旧登录全部失效。
 
 ### 模型目录（自动获取 + 默认填好 + 随手改）
 
@@ -301,7 +301,7 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 - 默认 `127.0.0.1:8687`，仅本机可访问；端口被占用会自动 +1 并打印实际端口（attach 以实际端口写入）。
 - 常驻：`modeldock gateway install` 注册开机自启（登录自动拉起 + macOS/Linux 崩溃自动重启；`gateway uninstall` 移除）；`gateway status` 显示自启状态，能检出服务里登记的启动路径已失效（如 nvm 升级后）。
 - 国外上游（OpenAI / Anthropic / Gemini…）的预设默认 `proxy = "env"`，读 `HTTPS_PROXY` 环境变量，兼容 clash；国内上游直连。
-- 管理端点：`/_modeldock/health` 与各读取端点本机免鉴权；修改类操作要求同源请求或 admin token（gateway.json，CLI 自动使用）。浏览器直接访问 `http://127.0.0.1:8687` 会自动跳转到 Web 控制台。
+- 管理端点：`/_modeldock/health` 与数据面 `GET /v1/health` 免鉴权（探活用）；其余管理接口**读写均要求 admin 凭据**（`x-modeldock-admin` 头或 `?token=` 登录种的 cookie，CLI 与 `modeldock ui` 自动携带；令牌存于 gateway.json，`modeldock gateway rotate-token` 可轮换）。浏览器直接访问 `http://127.0.0.1:8687` 会自动跳转到 Web 控制台。
 
 ## 9. 故障排查
 
