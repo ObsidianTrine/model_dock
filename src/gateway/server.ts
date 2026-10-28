@@ -12,7 +12,7 @@ import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, rea
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getSecret, setSecret } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getSecret, setSecret, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -25,7 +25,9 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, isMeltdown, logAudit, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { readSyncState } from '../sync/state.js'
+import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
@@ -42,7 +44,7 @@ import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupda
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
-import { displayPath, gatewayStatePath, logsDir, sandboxNpmPrefix } from '../util/paths.js'
+import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
 import { UI_HTML } from './ui.js'
 
 // T05 拆分后保持原导入面：测试与潜在外部引用仍按 server.js 路径取这些符号
@@ -240,7 +242,10 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
           })
         }
       })
-      .catch(() => {})
+      .catch((e: unknown) => {
+        // 定时窗口接管重写客户端失败不再无声吞掉：事件落 ring/events.jsonl 可排查
+        logEvent(rt, { level: 'warn', op: 'display_route_sync', err: e instanceof Error ? e.message : String(e) })
+      })
   }
   // 周期 15s：定时窗口的判定粒度是分钟（HH:mm），更密的 tick 只产生注定 changed:false 的空转
   // （路由未变时是纯内存短路）。首检延后 30s 错峰：基线初始 undefined，首检必做一次全量烤模型
@@ -259,7 +264,9 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   // POST /schedule/holidays-cn 可即时触发（CLI/运维用）。失败静默，不影响网关服务
   const holidayTimers: NodeJS.Timeout[] = []
   if (opts.autoHolidayRefresh !== false) {
-    const auto = () => void refreshCalendar(rt, { manual: false }).catch(() => {})
+    const auto = () => void refreshCalendar(rt, { manual: false }).catch((e: unknown) => {
+      logEvent(rt, { level: 'warn', op: 'calendar_refresh', err: e instanceof Error ? e.message : String(e) })
+    })
     const first = setTimeout(auto, 90_000)
     const loop = setInterval(auto, 24 * 3600_000)
     first.unref?.()
@@ -324,8 +331,13 @@ async function handleRequest(
   const url = req.url ?? '/'
   const method = (req.method ?? 'GET').toUpperCase()
 
+  // 请求关联 ID（8 字节 hex）：响应头 x-modeldock-request-id + 本请求全部日志条目 requestId +
+  // 错误响应体 modeldock.requestId（sendError 自动读响应头）三处一致，一次失败请求可凭 id 全链路检索。
+  const requestId = randomBytes(8).toString('hex')
+  res.setHeader('x-modeldock-request-id', requestId)
+
   const log = (entry: Omit<LogEntry, 'ts'>) => {
-    logRequest(rt, { ...entry, ts: localIsoTs() })
+    logRequest(rt, { ...entry, ts: localIsoTs(), requestId })
   }
 
   // 管理面
@@ -348,18 +360,38 @@ async function handleRequest(
     return
   }
 
+  // 数据面健康探针 GET /v1/health：与管理面 /_modeldock/health 同一 healthView、同样免鉴权——
+  // 探活不该需要凭据。必须在下方鉴权解析之前分支（否则未带 token 先落 401）；紧邻 /v1/models
+  // 同区便于对照。全量自检字段缺失时降级返回部分（亚健康也要能答）。
+  if (method === 'GET' && url.split('?')[0] === '/v1/health') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(await healthView(rt)))
+    return
+  }
+
   const adminHeader = req.headers['x-modeldock-admin']
   const adminOk = typeof adminHeader === 'string' && safeEqual(adminHeader, rt.adminToken)
+  const token = extractToken(req)
   const resolved = adminOk
     ? resolveByProfile(rt, req.headers['x-modeldock-profile'] as string | undefined)
-    : (() => {
-        const token = extractToken(req)
-        if (!token) return { ok: false as const, status: 401, message: t('缺少认证 token（Authorization: Bearer 或 x-api-key）', 'Missing auth token (Authorization: Bearer or x-api-key)'), hint: t('各 harness 的 token 见 modeldock status', 'Tokens for each harness are listed by modeldock status') }
-        return resolveTarget(rt, token)
-      })()
+    : token
+      ? resolveTarget(rt, token)
+      : { ok: false as const, status: 401, message: t('缺少认证 token（Authorization: Bearer 或 x-api-key）', 'Missing auth token (Authorization: Bearer or x-api-key)'), hint: t('各 harness 的 token 见 modeldock status', 'Tokens for each harness are listed by modeldock status') }
 
   if (!resolved.ok) {
-    log({ harness: '-', profile: '-', provider: '-', path: url, status: resolved.status, err: resolved.message, ms: Date.now() - started })
+    // 401 归因：无效 token 只取前 8 字符记入 tokenHint（绝不写完整 token），并按前缀反查已知
+    // harness——命中时 err 文案直接点名是哪个客户端拿错了/过期 token，排查不用逐个对表
+    let tokenHint: string | undefined
+    let err = resolved.message
+    if (!adminOk && token && resolved.status === 401) {
+      const hint8 = token.slice(0, 8)
+      tokenHint = hint8
+      const known = [...rt.tokens].find(([k]) => k.startsWith(hint8))?.[1]
+      if (known) {
+        err += t('（token 前缀 {hint}… 属于 harness「{h}」）', ' (token prefix {hint}… belongs to harness "{h}")', { hint: hint8, h: known })
+      }
+    }
+    log({ harness: '-', profile: '-', provider: '-', path: url, status: resolved.status, err, ms: Date.now() - started, ...(tokenHint ? { tokenHint } : {}) })
     return sendError(res, resolved.status, resolved.message, resolved.hint)
   }
   const { target } = resolved
@@ -1633,9 +1665,89 @@ async function hReset(c: AdminCtx): Promise<void> {
   return
 }
 
+// ===== 健康自检（/_modeldock/health 与数据面 /v1/health 共用）=====
+
+/** secrets 自检缓存：verifySecretsStore 读盘+解密，health 高频被探（gatewayLive / 托盘 / 监控），
+ *  结果按 secrets.json mtime 缓存 60s——mtime 未变且 60s 内直接复用，mtime 变化立即重验。 */
+let secretsHealthCache: { at: number; mtimeMs: number; ok: boolean } | null = null
+
+async function secretsOkCached(): Promise<boolean> {
+  const now = Date.now()
+  let mtimeMs = 0
+  try {
+    mtimeMs = (await fsp.stat(secretsPath())).mtimeMs
+  } catch {
+    /* 文件不存在（未设过任何 key）：mtime 记 0，verify 给出确定结论 */
+  }
+  const c = secretsHealthCache
+  if (c && c.mtimeMs === mtimeMs && now - c.at < 60_000) return c.ok
+  const r = await verifySecretsStore()
+  secretsHealthCache = { at: now, mtimeMs, ok: r.ok }
+  return r.ok
+}
+
+/** /health 只读自检视图。全量子检（secrets/watcher/磁盘/同步）各自独立 try/catch：
+ *  任一项失败置 null / 降级返回部分，亚健康也要能答（探活不能因自检项异常而 5xx）。 */
+async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> {
+  const now = Date.now()
+  // secrets_ok：密钥表可读可解密（mtime 缓存 60s）
+  let secretsOk: boolean
+  try {
+    secretsOk = await secretsOkCached()
+  } catch {
+    secretsOk = false // verifySecretsStore 自身不抛，此处兜底异常路径
+  }
+  // disk_free_mb：modeldockDir 所在盘剩余空间（fs.statfs，Node≥18 三平台可用；失败置 null）
+  let diskFreeMb: number | null = null
+  try {
+    const st = await fsp.statfs(modeldockDir())
+    const bytes = Number(st.bsize) * Number(st.bavail)
+    if (Number.isFinite(bytes) && bytes >= 0) diskFreeMb = Math.floor(bytes / (1024 * 1024))
+  } catch {
+    diskFreeMb = null
+  }
+  // sync：多机同步状态（sync.json 损坏/缺失降级为 null 字段，不影响其余自检）
+  let syncMode: string | null = null
+  let syncLastErrorTs: string | null = null
+  try {
+    const st = await readSyncState()
+    if (st) {
+      syncMode = st.mode
+      syncLastErrorTs = st.lastErrorTs
+    }
+  } catch {
+    /* sync.json 非法：同步域自检降级，健康端点照常应答 */
+  }
+  return {
+    ok: true,
+    started_at: localIsoTs(new Date(rt.startedAt)),
+    uptime_ms: now - rt.startedAt,
+    reloads: rt.reloads,
+    active_profile: rt.config.active_profile ?? null,
+    secrets_ok: secretsOk,
+    watcher_alive: rt.watcherAlive === true ? true : rt.watcherAlive === false ? false : null,
+    log_write_errors: appendLineErrorCount(),
+    disk_free_mb: diskFreeMb,
+    sync: { mode: syncMode, lastErrorTs: syncLastErrorTs },
+  }
+}
+
+/** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟。
+ *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。 */
+async function hMetrics(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const providers: Record<string, unknown> = {}
+  for (const [id, m] of rt.metricsLatency) {
+    providers[id] = { count: m.count, last_ms: m.lastMs ?? null, ...latencyQuantiles(m.samples) }
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers }))
+}
+
 /** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串） */
 const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/rotate': hRotate,
+  'GET /_modeldock/metrics': hMetrics,
   'GET /_modeldock/status': hStatus,
   'GET /_modeldock/admin/update/status': hUpdateStatus,
   'POST /_modeldock/admin/update/check': hUpdateCheck,

@@ -8,13 +8,19 @@ import { localIsoTs } from '../util/time.js'
 import { gatewayStatePath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
-import { buildRuntime, clearGatewayState, pidAlive, readGatewayState, reloadRuntime, writeGatewayState } from './state.js'
+import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
 import { warmupOverview } from './overview-view.js'
 import { listenWithRetry } from './shared.js'
 import { startBootUpdateCheck } from '../update/webupdate.js'
 import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
 import { switchToService } from '../ops.js'
+import { appendCrashLog, installCrashHandlers } from '../util/crash.js'
+import { startEventLoopDelaySampler } from './state.js'
+
+// 崩溃痕迹兜底：本模块是 --sea-gateway 守护进程入口，daemon 由 stdio 收敛拉起，未处理异常/
+// rejection 此前凭空蒸发（无任何落盘）。幂等，cli.ts 已装也不重复。
+installCrashHandlers()
 
 async function healthOk(port: number): Promise<boolean> {
   try {
@@ -95,13 +101,18 @@ export async function startForeground(portOverride?: number): Promise<void> {
       }
     } catch { /* 迁移失败不阻断启动；deleteSecret 沙箱守卫兜底 */ }
   }
-  // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动
-  migrateSecretsToSecure().catch(() => {})
   const adminToken = resolveAdminToken(previousToken)
+  const rt = buildRuntime(cfg, adminToken)
+  // ops 层（switchToService 等，无 rt 上下文）的后台事件经此转发进本网关运行时 ring，页面日志表可见
+  setEventRingSink((entry) => pushRing(rt, entry))
+  // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动，但不再无声吞掉——
+  // 经 logEvent 落 ring 与 events.jsonl（放在 rt 构建之后，事件才有环形缓冲可进）
+  migrateSecretsToSecure().catch((e: unknown) => {
+    logEvent(rt, { level: 'warn', op: 'secrets_migrate', err: e instanceof Error ? e.message : String(e) })
+  })
   // LAN 凭据只在「开着或曾开过」时生成，不在 gateway.json 留无意义字段
   const lanEnabled = !!cfg.lan?.enabled
   const lanToken = lanEnabled || previousLanToken ? resolveLanToken(previousLanToken) : null
-  const rt = buildRuntime(cfg, adminToken)
   const server = createGatewayServer(rt, {
     port: requestedPort,
     idleTimeoutMs: cfg.gateway?.idle_timeout_ms,
@@ -151,12 +162,17 @@ export async function startForeground(portOverride?: number): Promise<void> {
     await switchToService(serviceId)
     await reloadRuntime(rt)
   }
-  void remountSyncEngine({ applySwitch })
+  // fire-and-forget 不再无声：失败落盘（daemon 无 stdout 观众）+ 前台可见
+  void remountSyncEngine({ applySwitch }).catch((e: Error) => {
+    console.error(t('[modeldock] 同步引擎初始挂载失败：{msg}', '[modeldock] Failed to mount the sync engine at startup: {msg}', { msg: e.message }))
+    appendCrashLog('remountSyncEngine(startup): ' + (e.stack ?? e.message))
+  })
 
   // 更新静默检查（M2）：启动后台查一次（24h TTL 持久化在 gateway.json），失败不打扰；
   // 结果经 /_modeldock/admin/update/status 供控制台徽标展示
   startBootUpdateCheck(rt)
 
+  startEventLoopDelaySampler()
   // 控制台首屏预热：后台构建一次 overview，把适配器探测 memo（Windows reg query / PATH 扫描）、
   // secrets 解密缓存与缓存串全部焐热——用户随后打开 Web 控制台不再等冷探测的数秒尖峰
   warmupOverview(rt)
@@ -188,6 +204,16 @@ export async function startForeground(portOverride?: number): Promise<void> {
       if (!filename || filename === 'config.toml' || filename === 'secrets.json') scheduleReload()
       // 只认精确文件名：引擎自己写 sync.json（lastAppliedRev 等簿记）签名未变，remount 幂等空转
       if (filename === 'sync.json') scheduleSyncRemount()
+    })
+    rt.watcherAlive = true
+    // watcher 同步构造不抛、但异步失败（EMFILE/ENOSPC 或目录被删）会发 'error'：不接则成
+    // uncaught exception 杀网关（sync/engine.ts:233 同款自防）。关闭引用降级，热加载失效
+    // 依赖既有 POST /_modeldock/reload 手动兜底（与下方同步 catch 的提示一致）
+    watcher.on('error', (err) => {
+      console.error(t('[modeldock] 配置目录监听失效（{msg}）：热加载不可用，可 POST /_modeldock/reload 手动触发', '[modeldock] Config dir watcher failed ({msg}): hot reload unavailable; POST /_modeldock/reload to reload manually', { msg: (err as Error).message }))
+      watcher?.close()
+      watcher = undefined
+      rt.watcherAlive = false
     })
   } catch {
     console.error(t('[modeldock] 配置目录监听失败（热加载不可用，可 POST /_modeldock/reload 手动触发）', '[modeldock] Failed to watch config dir (hot reload unavailable; POST /_modeldock/reload to reload manually)'))

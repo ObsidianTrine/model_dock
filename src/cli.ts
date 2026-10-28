@@ -6,6 +6,11 @@ import { buildProgram } from './cli/index.js'
 import { exitWithThrown, openUrlInBrowser } from './cli/shared.js'
 import { spawnTrayIfPresent, spawnTrayWhenGatewayReady } from './tray.js'
 import { t } from './util/i18n.js'
+import { installCrashHandlers } from './util/crash.js'
+
+// 崩溃痕迹兜底：三路分发（--sea-gateway / SEA GUI / commander CLI）都先经这里，未处理异常与
+// rejection 落 logs/crash-YYYYMMDD.log。幂等，gateway/main.ts 已装也不重复。
+installCrashHandlers()
 
 function isSEA(): boolean {
   const exe = path.basename(process.execPath).toLowerCase()
@@ -25,7 +30,11 @@ if (process.argv.includes('--sea-gateway')) {
     const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
     // 自启（Run 键 / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
     // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
-    void spawnTrayWhenGatewayReady()
+    // fire-and-forget 补 catch：CLI 侧无 daemon.log 可依赖，失败走 stderr（daemon 形态由
+    // spawnDaemonAndWait 的 stderr 收集顺带落盘）
+    void spawnTrayWhenGatewayReady().catch((e) => {
+      console.error(t('[modeldock] 托盘拉起失败：{msg}', '[modeldock] Failed to start the tray: {msg}', { msg: (e as Error).message }))
+    })
     return startForeground(port)
   })().catch((e) => {
     console.error(t('✗ 网关启动失败: {msg}', '✗ Failed to start gateway: {msg}', { msg: (e as Error).message }))

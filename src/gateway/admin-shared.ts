@@ -47,8 +47,14 @@ export async function readBody(req: http.IncomingMessage, max: number): Promise<
 }
 export function sendError(res: http.ServerResponse, status: number, message: string, hint?: string): void {
   if (status === 413) res.setHeader('connection', 'close') // 请求体未读完即响应，连接不可复用
+  // 请求关联 ID 回填错误体（handleRequest 入口已 set 到响应头，这里读回即可覆盖全部 sendError 调用点，
+  // 包括 handleAdmin 内的管理面错误）：modeldock.requestId 与响应头 x-modeldock-request-id 同值
+  const rid = res.getHeader('x-modeldock-request-id')
+  const modeldock: Record<string, string> = {}
+  if (hint) modeldock.hint = hint
+  if (typeof rid === 'string' && rid) modeldock.requestId = rid
   res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(hint ? { error: { message }, modeldock: { hint } } : { error: { message } }))
+  res.end(JSON.stringify({ error: { message }, ...(Object.keys(modeldock).length ? { modeldock } : {}) }))
 }
 
 /** 顶层兜底的错误→响应映射。此前 jsonRequestBody 的 400（非法 JSON）、readBody 的 413（超限）、

@@ -313,6 +313,17 @@ export async function withFileLock<T>(
  *  请求下与转发争 IO；常驻流把每条开销降为一次 write，且同文件写入严格有序。写入错误静默，
  *  流 destroyed 后由下一条写入按需重建。调用方需保证目录已存在（先 ensureDir/mkdirSync）。 */
 const APPEND_STREAM_CAP = 8
+/** 每路径累计的追加写失败次数（进程生命周期内单调递增）。写入错误原先无限期静默——磁盘满等
+ *  持久故障无任何观测面；现首次失败打一条双语日志、此后只计数，经 appendLineErrorCount()
+ *  暴露给健康检查（/_modeldock/health 的 log_write_errors）。 */
+const appendErrorCounts = new Map<string, number>()
+
+/** 全部路径的追加写失败总次数（/health 的 log_write_errors 消费）。 */
+export function appendLineErrorCount(): number {
+  let total = 0
+  for (const n of appendErrorCounts.values()) total += n
+  return total
+}
 /** 空闲刷盘阈值：一条流超过该时长没有新写入就 end 掉（缓冲随关流强制落盘），下一条写入按需重建。
  *  Windows 的 gateway stop 是 TerminateProcess（无信号语义），main.ts 的 cleanup/drainAppendStreams
  *  走不到，不关流的话最后缓冲的尾部日志随进程一起丢；空闲即关把最坏丢失窗口从「直到下次 stop」
@@ -358,7 +369,14 @@ export function appendLine(file: string, line: string): void {
     existing.write(line)
   } else {
     const ws = fs.createWriteStream(file, { flags: 'a' })
-    ws.on('error', () => {})
+    ws.on('error', (e) => {
+      const n = (appendErrorCounts.get(file) ?? 0) + 1
+      appendErrorCounts.set(file, n)
+      if (n === 1) {
+        // 仅首次失败打日志（磁盘满时刷屏报错只会加速故障），后续同类失败只计数
+        console.error(t('日志写入失败（{file}）：{msg}；此后该文件的写入失败只计数，可通过 GET /_modeldock/health 的 log_write_errors 观察', 'Log write failed ({file}): {msg}; further write failures for this file are only counted (see log_write_errors via GET /_modeldock/health)', { file, msg: (e as Error).message }))
+      }
+    })
     appendStreams.delete(file)
     appendStreams.set(file, ws)
     while (appendStreams.size > APPEND_STREAM_CAP) {

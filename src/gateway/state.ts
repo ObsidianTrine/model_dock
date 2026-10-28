@@ -1,10 +1,12 @@
 import path from 'node:path'
 import fs from 'node:fs'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
 import type { Dispatcher } from 'undici'
 import type { Config, ProfileConfig, ProviderConfig, ScheduleWindow } from '../config/types.js'
 import { logsDir, gatewayStatePath } from '../util/paths.js'
 import { appendLine, atomicWrite, closeAppendStream } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
+import { localIsoTs } from '../util/time.js'
 import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from './daytype.js'
 
 export interface LogEntry {
@@ -21,6 +23,11 @@ export interface LogEntry {
   err?: string
   /** 路由事件标记：仅在偏离主选直连成功时设置（failover_to:<id>、replayed_from:<id>、down_all）；缺席=普通成功，日志过滤依赖「非空即事件」 */
   reason?: string
+  /** 请求关联 ID（8 字节 hex）：handleRequest 入口生成，与响应头 x-modeldock-request-id、错误响应体
+   *  modeldock.requestId 三处一致，供用户拿 id 在日志里检索一次失败请求的全链路。 */
+  requestId?: string
+  /** 401 归因线索：无效 token 的前 8 字符（绝不写完整 token）；err 文案按此前缀反查已知 harness 点名归属 */
+  tokenHint?: string
   /** 上游响应观测到的 token 用量（狗粮对账口径：缓存读计入输入成本）。
    *  从响应流旁路解析（SSE 逐行 / 小体积 JSON），尽力而为——旧日志与解析失败时缺省。 */
   usage?: {
@@ -55,7 +62,23 @@ export interface AuditEntry {
   source: 'web' | 'token' | 'lan' | 'tray'
 }
 
-export type RingEntry = LogEntry | AuditEntry
+/** 后台链路事件（无请求上下文的吞错上报）：定时任务、后台挂载、密钥迁移等失败，经
+ *  logEvent（有 rt）/ reportEvent（ops 层无 rt）记录。op 是程序字段用英文短词；err 是错误
+ *  原文（动态文本，可能是任一语言）。harness/profile/provider/path 为占位：页面日志表把非
+ *  audit 条目按请求行渲染，占位保证各列不显示 undefined（UI 不必改）。 */
+export interface EventEntry {
+  ts: string
+  kind: 'event'
+  level: 'warn' | 'error'
+  op: string
+  err: string
+  harness: '-'
+  profile: '-'
+  provider: '-'
+  path: string
+}
+
+export type RingEntry = LogEntry | AuditEntry | EventEntry
 
 export interface ResolvedTarget {
   harness: string
@@ -94,6 +117,20 @@ export interface GatewayRuntime {
   calendar?: HolidayCalendar
   calendarDays?: HolidayDayNamed[]
   calendarAt?: number
+  /** 配置目录 watcher 存活状态（main.ts 接线：watch 建立成功 → true，watcher close → false）。
+   *  只读状态位：health 端点消费；未接线（嵌入式/测试直建 rt）为 undefined → health 报 null（未知）。 */
+  watcherAlive?: boolean
+  /** providerId → 轻量耗时 ring（最近 500 条 ms 采样 + 累计请求数；/_modeldock/metrics 消费）。
+   *  logRequest 顺手累计，reload 不清空（跨热加载保留观测连续性）。 */
+  metricsLatency: Map<string, ProviderLatencyRing>
+}
+
+/** per-provider 耗时采样的有界结构：samples 是环形窗口（超出裁最旧），count 是进程生命周期
+ *  内该 provider 的总请求数（单调递增，不受窗口裁剪影响），lastMs 是最近一条耗时。 */
+export interface ProviderLatencyRing {
+  samples: number[]
+  count: number
+  lastMs?: number
 }
 
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */
@@ -126,6 +163,7 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     reloads: 0,
     dispatchers: new Map(),
     health: new Map(),
+    metricsLatency: new Map(),
   }
 }
 
@@ -791,6 +829,13 @@ export function autoRouteInfo(rt: GatewayRuntime): AutoRouteInfo {
 
 const RING_MAX = 500
 
+/** 内存环形缓冲统一入口（保持 RING_MAX 上限，先进先出挤掉最旧）。导出供 setEventRingSink
+ *  注册的转发等模块外写入用。 */
+export function pushRing(rt: GatewayRuntime, entry: RingEntry): void {
+  rt.ring.push(entry)
+  if (rt.ring.length > RING_MAX) rt.ring.splice(0, rt.ring.length - RING_MAX)
+}
+
 /** 日志目录只建一次（按路径记忆）：转发热路径上每次写日志都 mkdirSync 是无谓的同步 syscall；
  *  fake home 等目录切换时路径不同会自动重建。 */
 let ensuredLogDir = ''
@@ -812,8 +857,20 @@ function appendLog(file: string, line: string): void {
 export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
   // 避免被高频正常请求刷屏
   if (entry.status === undefined || entry.status >= 400 || entry.err || entry.reason) {
-    rt.ring.push(entry)
-    if (rt.ring.length > RING_MAX) rt.ring.splice(0, rt.ring.length - RING_MAX)
+    pushRing(rt, entry)
+  }
+  // 轻量 metrics：per-provider 耗时采样。与 health.lastMs 的「只记成功」口径不同——metrics 是
+  // 吞吐/延迟观测面，失败请求的耗时同样计入分布；provider '-'（未鉴权噪音）不计
+  if (entry.ms != null && entry.provider && entry.provider !== '-') {
+    let m = rt.metricsLatency.get(entry.provider)
+    if (!m) {
+      m = { samples: [], count: 0 }
+      rt.metricsLatency.set(entry.provider, m)
+    }
+    m.count++
+    m.lastMs = entry.ms
+    m.samples.push(entry.ms)
+    if (m.samples.length > METRICS_SAMPLES_MAX) m.samples.splice(0, m.samples.length - METRICS_SAMPLES_MAX)
   }
   try {
     appendLog(`gateway-${entry.ts.slice(0, 10)}.jsonl`, JSON.stringify(entry) + '\n')
@@ -824,13 +881,112 @@ export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
 
 /** 操作审计：环形缓冲（页面日志表可见）+ 按天 JSONL 落盘 audit-日期.jsonl（不含密钥明文） */
 export function logAudit(rt: GatewayRuntime, entry: AuditEntry): void {
-  rt.ring.push(entry)
-  if (rt.ring.length > RING_MAX) rt.ring.splice(0, rt.ring.length - RING_MAX)
+  pushRing(rt, entry)
   try {
     appendLog(`audit-${entry.ts.slice(0, 10)}.jsonl`, JSON.stringify(entry) + '\n')
   } catch {
     /* 审计失败不影响操作本身 */
   }
+}
+
+let eventRingSink: ((entry: EventEntry) => void) | null = null
+/** 注册事件 → ring 转发（网关进程启动时调一次，main.ts）：ops 层（switchToService 等）没有
+ *  rt 上下文，reportEvent 只落 events.jsonl；经此把同一事件同步进网关运行时 ring，页面日志表
+ *  可见。传 null 撤销（测试用）。 */
+export function setEventRingSink(fn: ((entry: EventEntry) => void) | null): void {
+  eventRingSink = fn
+}
+
+function eventEntryOf(e: { level: 'warn' | 'error'; op: string; err: string }): EventEntry {
+  return {
+    ts: localIsoTs(),
+    kind: 'event',
+    level: e.level,
+    op: e.op,
+    err: e.err,
+    harness: '-',
+    profile: '-',
+    provider: '-',
+    path: `event:${e.op}`,
+  }
+}
+
+/** 后台链路事件（有 rt）：错误 ring（页面日志表可见）+ events.jsonl 落盘。
+ *  吞错上报通道——后台 catch 原先 `.catch(() => {})` 的失败改调这里，无声失败变成可排查痕迹。 */
+export function logEvent(rt: GatewayRuntime, e: { level: 'warn' | 'error'; op: string; err: string }): void {
+  const entry = eventEntryOf(e)
+  pushRing(rt, entry)
+  try {
+    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+  } catch {
+    /* 事件日志失败不影响主流程 */
+  }
+}
+
+/** 后台链路事件（无 rt 的 ops 层）：events.jsonl 恒落；网关进程内经 eventRingSink 同步进 ring，
+ *  纯 CLI 上下文（网关未运行）只落文件。 */
+export function reportEvent(e: { level: 'warn' | 'error'; op: string; err: string }): void {
+  const entry = eventEntryOf(e)
+  try {
+    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+  } catch {
+    /* 事件日志失败不影响主流程 */
+  }
+  try {
+    eventRingSink?.(entry)
+  } catch {
+    /* 转发失败不影响主流程 */
+  }
+}
+
+// ===== 轻量 metrics（/_modeldock/metrics，admin 门内）=====
+
+/** per-provider 耗时采样窗口上限（与日志 ring 同量级，内存有界：500 条 × 8 字节 × 服务数） */
+const METRICS_SAMPLES_MAX = 500
+
+/** 分位数（线性插值，Prometheus 口径）。samples 任意顺序、不改原数组；空数组三个分位均为 null。
+ *  纯函数：/_modeldock/metrics 与单测共用。 */
+export function latencyQuantiles(
+  samples: readonly number[]
+): { p50: number | null; p95: number | null; p99: number | null } {
+  if (!samples.length) return { p50: null, p95: null, p99: null }
+  const sorted = [...samples].sort((a, b) => a - b)
+  const at = (q: number): number => {
+    const pos = (sorted.length - 1) * q
+    const lo = Math.floor(pos)
+    const hi = Math.ceil(pos)
+    return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo)
+  }
+  return { p50: at(0.5), p95: at(0.95), p99: at(0.99) }
+}
+
+// 事件循环延迟采样：main.ts 启动处挂一次（懒初始化——单测直建 rt 不挂，metrics.eventLoopLagMs
+// 为 null，避免测试副作用）。monitorEventLoopDelay 直方图每 60s 取一次均值后 reset。
+let loopLagHist: import('node:perf_hooks').IntervalHistogram | null = null
+let loopLagMs: number | null = null
+
+/** 启动事件循环延迟采样（重复调用幂等）。失败静默：采样不可用只影响 metrics 观测面。 */
+export function startEventLoopDelaySampler(sampleMs = 60_000): void {
+  if (loopLagHist) return
+  try {
+    const h = monitorEventLoopDelay({ resolution: 20 })
+    h.enable()
+    loopLagHist = h
+    const timer = setInterval(() => {
+      const hist = loopLagHist
+      if (!hist || hist.count === 0) return // 空闲窗口无样本：保留上一次采样值
+      loopLagMs = hist.mean / 1e6 // ns → ms
+      hist.reset()
+    }, sampleMs)
+    timer.unref?.()
+  } catch {
+    /* 采样不可用不影响网关；eventLoopLagMs 保持 null */
+  }
+}
+
+/** 最近一次采样的事件循环延迟均值（ms）；未启动采样或首个采样窗口未满时为 null。 */
+export function eventLoopLagMs(): number | null {
+  return loopLagMs
 }
 
 /** JSONL 日志保留期清理（PERF-16）：gateway-/audit- 按天日文件无界累积，超保留天数的在
