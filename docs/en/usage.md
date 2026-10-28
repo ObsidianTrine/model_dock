@@ -159,6 +159,8 @@ Open `http://127.0.0.1:8687/_modeldock/ui` in a browser, or simply:
 modeldock ui
 ```
 
+![ModelDock web console](../images/console.png)
+
 **Opening the page auto-detects legacy configs**: if any of cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI already has provider configs, a "🧲 Legacy config detected — move it in with one click" banner appears at the top — one click imports everything (keys move in securely, the original software is unaffected, already-imported items are deduplicated and never re-prompted; "Not now" hides the banner).
 
 The UI is three steps with **no new concepts to learn**:

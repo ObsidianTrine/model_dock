@@ -17,9 +17,16 @@
 
 ### README.md
 
-- [ ] 新增了用户可见能力？→ 能力清单加一条（写用户收益，不写实现）。
-- [ ] 新增 / 改了 CLI 命令或参数？→ 命令表同步更新。
+- [ ] 新增了用户可见能力？→ **核心能力表**加一行（写用户收益，不写实现）。
+- [ ] 新增 / 改了 CLI 命令或参数？→ 「日常使用」命令块同步更新。
 - [ ] 支持列表（平台 / 客户端 / 供应商）有变化？→ 对应表格更新。
+- [ ] 动了整体结构（新增 / 删除章节、改版）？→ 遵循 `.agents/conventions/docs-writing.md` 的「README 结构蓝图」与「文档体系」归位表，README 不堆长文。
+- [ ] 收尾核对：README / usage 里的相对链接与截图（`docs/images/`）全部可达；首屏三问（是什么 / 解决什么 / 怎么开始）仍成立；截图与当前 UI 一致（UI 大改版后重拍）。
+
+### 使用指南与配置参考（docs/usage.md、docs/config-reference.md）
+
+- [ ] 安装 / 卸载 / 命令行为变了？→ usage.md 对应节同步（细节级改动 README 不展开，落 usage.md）。
+- [ ] 新增 / 改了配置键？→ config-reference 由脚本生成（`node scripts/gen-config-reference.mjs`），确认生成结果已随交付更新，勿手编。
 
 ### AGENTS.md
 
@@ -44,6 +51,7 @@
 | 新增 CLI 子命令 | README 命令表 + CHANGELOG 条目 |
 | 改了默认端口 / 路径 | AGENTS.md 端口表 + README 快速开始 |
 | 新增 harness 适配器 | README 支持列表 + CHANGELOG 条目 |
+| README / usage 大改版 | docs/en/ 镜像同结构重写 + docs/images/ 截图重拍 + 全量链接自检 |
 | 改了报错信息 | CHANGELOG 条目（如果影响用户排查） |
 | 新增工作流文件 | AGENTS.md「多 Agent 并行开发约定」列表 |
 

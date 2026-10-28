@@ -159,6 +159,8 @@ modeldock update --clean          # 清理上一版残留（ModelDock.app.old / 
 modeldock ui
 ```
 
+![ModelDock Web 控制台](images/console.png)
+
 **打开页面会自动探测旧配置**：如果本机的 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 里已有 provider 配置，顶部会出现「🧲 检测到旧配置，一键搬进来」横幅——点一下即全部导入（Key 一并安全搬入、原软件不受影响、已导入的自动去重不再提示；点「暂不导入」可隐藏）。
 
 界面就是三步，**没有任何需要理解的新概念**：
