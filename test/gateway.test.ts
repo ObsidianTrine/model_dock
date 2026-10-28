@@ -522,9 +522,12 @@ describe('锁屏重登（设备记忆）', () => {
       // 服务端经 displayPath 渲染（真实 home 下的路径缩写为 ~，Windows 的 os.tmpdir 在
       // C:\Users\<user>\ 下会被缩写）；期望值必须走同一条 displayPath，直接拼 path.join 会在 Windows 失配
       expect(html).toContain(displayPath(path.join(process.env.MODELRDOCK_FAKE_HOME ?? '', '.modeldock', 'gateway.json')))
-      // 弹窗正文里的网址要可点：mList 渲染必须过 linkifyText（改回 esc(l) 会让安装指引里的链接变回纯文本）
-      expect(html).toContain('function linkifyText(s)')
-      expect(html).toContain('linkifyText(l)')
+      // 弹窗正文里的网址要可点：mList 渲染必须过 linkifyText（改回 esc(l) 会让安装指引里的链接变回纯文本）。
+      // Phase 2 最小化后页体里函数名会被改名——断言读源片段模块：定义在 autoroute 域、调用点在 clients 域
+      const autorouteSrc = fs.readFileSync(path.join(process.cwd(), 'src', 'gateway', 'ui', 'autoroute.ts'), 'utf8')
+      const clientsSrc = fs.readFileSync(path.join(process.cwd(), 'src', 'gateway', 'ui', 'clients.ts'), 'utf8')
+      expect(autorouteSrc).toContain('function linkifyText(s)')
+      expect(clientsSrc).toContain('linkifyText(l)')
       // 导入配置包的文件选择框不得带 accept：iOS 选择器按类型过滤，未注册的 .msync 会被灰掉选不中
       expect(html).not.toMatch(/<input[^>]*id="impFile2"[^>]*accept/)
       expect(html).not.toContain('__MD_GATEWAY_STATE__')

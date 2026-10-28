@@ -45,7 +45,7 @@
 | PERF-22 | P2 | `src/gateway/ui.ts:1383` | pollOverview 双 JSON.stringify diff，overview 几百 KB 时每 5s 两次 O(n) 序列化 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | PERF-24 | P2 | `src/gateway/lan.ts:780` | 手机页 30s 轮询无 document.hidden 门控；页面每请求重拼无 ETag | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☑ 已修（2026-10-28，esbuild 正规最小化 + 拆分后 gen 对拍链，见 §一.F） |
 | PERF-26 | P2 | `src/sync/collect.ts:72-73` | 每次 collect 把 presets.json 读+解析两遍 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-27 | P2 | `src/sync/engine.ts:116,57` | cloud 每 tick 全量 loadConfig×2；target 每 tick 全量 collect 无 mtime 短路 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | PERF-28 | P2 | `src/sync/targets/webdav.ts:75-77` | readManifest 每 tick 全量 GET，无 ETag/304（cloud 目标已用） | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
@@ -222,6 +222,7 @@
 - 现状：ETag/304 已兜住重复加载，首载解析 236KB JS 约 30–80ms（一次性）。修复方向：构建期剥内联 JS 注释；顺手更正注释数字。
 - 2026-10-20 复核：**暂缓**——注释剥离须字符串/正则感知（裸正则容易把含 `//` 的字符串字面量剥坏），应随构建链改造一并引入正规最小化，不宜手写剥离器；注释数字过时属一行文档修正，顺手提交时带上。
 - 2026-10-28（T04 Phase 1 完成）：单文件 ui.ts（4817 行）已拆为拼装壳（43 行）+ `src/gateway/ui/` 15 个域模块（styles/page/kit/modals/i18n/shared/overview/update/autoroute/services/schedule/configpack/clients/edit/logs），拆分经「拆分前 UI_HTML 字节基线 vs 拆分后」cmp 全等验证（314896B），ui-lint / webui-static 门禁源读取同步扩到模块集。**本条核心（构建链正规最小化，Phase 2）维持暂缓**，与拆分解绑、另开卡；server.ts 体积注释修正由 T11 随手批处理。
+- 2026-10-28 已修（T04 Phase 2）：scripts/gen-ui-min.mjs 把 17 个源片段按 T04 域次序求值拼装后交 esbuild 正规最小化，产物落 src/gateway/ui-minified.ts（ui.ts 只引用 ${UI_JS_MIN}；源片段模块保留为维护面 + ui-lint 扫描面）。页体 314896B → 229139B（-27%），webui-dom（happy-dom 真执行）/webui-static/ui-lint/CSP/304 门禁全绿。防漂移：test/ui-min-fresh.test.ts 对拍 + 生成器强制「ui/ 新增 UI_JS_* 片段必须登记进 ORDER、ui.ts 必须保持引用产物形态」。
 
 **PERF-26（P2）presets.json 每 tick 读+解析两遍**
 - 位置：`src/sync/collect.ts:72-73`（`readUserPresets()` 后紧跟 `readRawUserPresets()`，各自 readFileSync+JSON.parse+逐条校验）

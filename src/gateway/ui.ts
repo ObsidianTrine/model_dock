@@ -8,20 +8,8 @@
  *  片段按原次序拼接、与拆分前逐字节一致（拆分脚本自检 + webui-static/ui-lint 门禁保证）。
  *  token/port 的 replaceAll 注入逻辑在 server.ts 侧，维持原状未动。 */
 import { UI_CSS } from './ui/styles.js'
+import { UI_JS_MIN } from './ui-minified.js'
 import { UI_BODY_HTML } from './ui/page.js'
-import { UI_JS_KIT, UI_JS_WIRING } from './ui/kit.js'
-import { UI_JS_MODALS } from './ui/modals.js'
-import { UI_JS_I18N } from './ui/i18n.js'
-import { UI_JS_SHARED } from './ui/shared.js'
-import { UI_JS_APP, UI_JS_OVERVIEW, UI_JS_BOOT } from './ui/overview.js'
-import { UI_JS_UPDATE } from './ui/update.js'
-import { UI_JS_AUTOROUTE } from './ui/autoroute.js'
-import { UI_JS_SERVICES } from './ui/services.js'
-import { UI_JS_SCHED_STATE, UI_JS_SCHEDULE } from './ui/schedule.js'
-import { UI_JS_CONFIGPACK } from './ui/configpack.js'
-import { UI_JS_CLIENTS } from './ui/clients.js'
-import { UI_JS_EDIT } from './ui/edit.js'
-import { UI_JS_LOGS } from './ui/logs.js'
 
 export const UI_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -37,7 +25,7 @@ ${UI_CSS}</style>
 </head>
 <body>
 ${UI_BODY_HTML}<script>
-${UI_JS_KIT}${UI_JS_MODALS}${UI_JS_WIRING}${UI_JS_I18N}${UI_JS_SHARED}${UI_JS_APP}${UI_JS_OVERVIEW}${UI_JS_UPDATE}${UI_JS_AUTOROUTE}${UI_JS_SERVICES}${UI_JS_SCHED_STATE}${UI_JS_CONFIGPACK}${UI_JS_SCHEDULE}${UI_JS_CLIENTS}${UI_JS_EDIT}${UI_JS_LOGS}${UI_JS_BOOT}</script>
+${UI_JS_MIN}</script>
 </body>
 </html>
 `
