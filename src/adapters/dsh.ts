@@ -320,7 +320,7 @@ export const dshAdapter: HarnessAdapter = {
             'dsh is installed but has no config file yet; run dsh once to generate it (new dsh keeps its config at profiles/<name>/cordis.patch.yml)'
           )
         : undefined
-    const note = [scopeHint, noConfig].filter(Boolean).join('；') || undefined
+    const note = [scopeHint, noConfig].filter(Boolean).join(t('；', '; ')) || undefined
     return { installed: true, configFiles, current, note }
   },
 

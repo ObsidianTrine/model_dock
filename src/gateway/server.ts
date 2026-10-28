@@ -229,11 +229,12 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
           const detail: Bilingual | undefined = r.refreshed.length
             ? bi(`已同步重写 ${r.refreshed.join('、')} 的客户端配置（重开会话生效）`, `rewrote client configs for ${r.refreshed.join(', ')} (restart sessions to apply)`)
             : undefined
+          const takeoverOp = bi('定时窗口接管路由', 'Schedule window takeover')
           logAudit(rt, {
             ts: localIsoTs(),
             kind: 'audit',
-            op: '定时窗口接管路由',
-            op_en: 'Schedule window takeover',
+            op: takeoverOp.zh,
+            op_en: takeoverOp.en,
             target: r.route ?? '-',
             detail: detail?.zh,
             detail_en: detail?.en,

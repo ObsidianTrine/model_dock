@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { biJoin, commandOnPath, commandOnPathSandbox, homeDir, t } from '../util/index.js'
+import type { BiValue } from '../util/i18n.js'
 
 export type AppPresent = boolean | 'unknown'
 
@@ -152,7 +153,7 @@ export async function desktopPresent(appNames: string[], id: string): Promise<Ap
 
 /** detect/status 通用语义：配置在而本体缺席 → 未安装（卸载残留），附可操作提示。
  *  六适配器（claude-code/codex/zcode/workbuddy/provider-json/mimo-desktop）统一走这里。 */
-export function residueNote(configFiles: string[], what: string): string {
+export function residueNote(configFiles: string[], what: BiValue): string {
   return t(
     '检测到 {what} 配置残留（{files}），但未找到程序本体——{what} 可能已卸载；若仍在使用，请重新安装并启动一次后点「重新检测」',
     'Found leftover {what} config ({files}) but the app itself is missing — {what} may have been uninstalled; if you still use it, reinstall, launch it once, then click Re-detect',

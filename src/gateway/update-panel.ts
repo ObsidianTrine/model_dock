@@ -33,9 +33,9 @@ export async function hUpdateApply(c: AdminCtx): Promise<void> {
   if (r.started) {
     audit(bi('一键更新', 'One-click update'), '-', bi('开始更新到 v{v}，网关将短暂中断', 'Updating to v{v}; the gateway restarts briefly', { v: r.latest ?? '?' }))
   } else {
-    const reasonZh = r.reason === 'in_progress' ? '更新已在进行中' : '没有可安装的新版本'
-    const reasonEn = r.reason === 'in_progress' ? 'an update is already in progress' : 'no new version to install'
-    audit(bi('一键更新', 'One-click update'), '-', bi('未执行：{r}', 'Not started: {r}', { r: bi(reasonZh, reasonEn) }))
+    const reason =
+      r.reason === 'in_progress' ? bi('更新已在进行中', 'an update is already in progress') : bi('没有可安装的新版本', 'no new version to install')
+    audit(bi('一键更新', 'One-click update'), '-', bi('未执行：{r}', 'Not started: {r}', { r: reason }))
   }
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: r.started, ...r }))

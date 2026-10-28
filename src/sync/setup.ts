@@ -190,7 +190,7 @@ export async function enrollCloud(
 
   const pair = await cloudJson(`${url}/v1/pair`, 'POST', { pairCode, devid, deviceName })
   if (pair.code !== 200 || !pair.json?.deviceToken) {
-    throw cloudError(pair.code, pair.json, '配对失败')
+    throw cloudError(pair.code, pair.json, t('配对失败', 'Pairing failed'))
   }
   const token = String(pair.json.deviceToken)
 
