@@ -1,0 +1,48 @@
+name: ci-retry
+
+# 非绿自动重跑（自限）：test / Release 两个 workflow 结论非 success 时，自动重跑失败腿。
+# 动机：macos arm64 hosted runner 容量短缺期间，腿在排队期 15m01s 被「未获分配」取消
+#（2026-10-28 夜实测连挂 7 次，每次都要人工 gh run rerun --failed）。
+#
+# 为什么是独立 workflow 而不是原 workflow 里的收尾 job：rerun API 只接受「已完成」的 run，
+# 原 workflow 内的收尾 job 自己不结束 run 就永远 completed 不了（死锁）；workflow_run
+# 完成事件在 run 落定后触发，恰好是唯一合法的 rerun 时机。
+#
+# 三重自限，防止无限循环与新旧 run 互踩：
+# - run_attempt < 3：最多 3 次尝试，真回归 / 烧额度不无限重放，超限交人工；
+# - 只重跑「该 workflow 当前最新的 run」：concurrency 顶替产生的旧 run 不复活
+#   （新推送的 run 才是未来，旧 run 重跑只会烧额度）；
+# - --failed 只重跑失败 / 被取消的腿，已绿腿保留原结论不重复烧。
+# 结论为 cancelled 也重跑：runner 未获分配的取消正是要吸收的主要场景；
+# 人为取消属于罕见路径（取消后通常紧随修复推送，顶替守卫即生效）。
+
+on:
+  workflow_run:
+    workflows: [test, Release]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.run_attempt < 3 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 重跑失败腿（自限）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WF_PATH: ${{ github.event.workflow_run.path }}
+        run: |
+          WF=$(basename "$WF_PATH")
+          LATEST=$(gh run list --workflow "$WF" --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ "$LATEST" != "$RUN_ID" ]; then
+            echo "run $RUN_ID 已非 $WF 最新 run（最新 $LATEST）——被新推送 / 新 tag 顶替，不自动重跑"
+            exit 0
+          fi
+          echo "$WF run $RUN_ID 第 $ATTEMPT 次尝试结论 $CONCLUSION——自动重跑失败腿"
+          gh run rerun "$RUN_ID" --failed
