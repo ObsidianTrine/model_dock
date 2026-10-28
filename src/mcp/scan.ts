@@ -28,6 +28,9 @@ export interface McpServerEntry {
   project?: string
   /** 引用的环境变量名（只记名字，值绝不收集） */
   envKeys: string[]
+  /** 环境变量值——仅 scanMcpServersDetailed（本机安检）携带；盘点出口（scanMcpServers）一律剥离，
+   *  盘点结果会进控制台与日志，值绝不出本机 */
+  envValues?: Record<string, string>
   /** 配置来源文件（绝对路径） */
   sourceFile: string
 }
@@ -74,13 +77,28 @@ function commandTarget(command: unknown, args: unknown): string | null {
 }
 
 /** 归一化单条服务器配置；形态无法识别返回 null（调用方记录错误）。
- *  env 值在这里被丢弃，只留变量名。 */
-function normalizeServer(name: string, raw: unknown, meta: { harness: string; sourceFile: string; scope: 'user' | 'project'; project?: string }): McpServerEntry | null {
+ *  env 只留变量名；keepEnvValues 时额外带值（仅本机安检路径，见 McpServerEntry.envValues）。 */
+function normalizeServer(
+  name: string,
+  raw: unknown,
+  meta: { harness: string; sourceFile: string; scope: 'user' | 'project'; project?: string },
+  keepEnvValues = false
+): McpServerEntry | null {
   if (!isPlainObject(raw)) return null
   const s = raw as ServerRaw
   const envSrc = isPlainObject(s.env) ? s.env : isPlainObject(s.environment) ? s.environment : null
   const envKeys = envSrc ? Object.keys(envSrc) : []
-  const base = { name, harness: meta.harness, envKeys, sourceFile: meta.sourceFile, scope: meta.scope, ...(meta.project ? { project: meta.project } : {}) }
+  const base = {
+    name,
+    harness: meta.harness,
+    envKeys,
+    ...(keepEnvValues && envSrc
+      ? { envValues: Object.fromEntries(Object.entries(envSrc).filter(([, v]) => typeof v === 'string')) as Record<string, string> }
+      : {}),
+    sourceFile: meta.sourceFile,
+    scope: meta.scope,
+    ...(meta.project ? { project: meta.project } : {}),
+  }
   if (typeof s.url === 'string' && s.url) {
     return { ...base, transport: s.type === 'sse' ? 'sse' : 'http', target: s.url }
   }
@@ -93,11 +111,12 @@ function recordServers(
   map: unknown,
   meta: { harness: string; sourceFile: string; scope: 'user' | 'project'; project?: string },
   out: McpServerEntry[],
-  errors: McpScanError[]
+  errors: McpScanError[],
+  keepEnvValues = false
 ): void {
   if (!isPlainObject(map)) return
   for (const [name, raw] of Object.entries(map)) {
-    const entry = normalizeServer(name, raw, meta)
+    const entry = normalizeServer(name, raw, meta, keepEnvValues)
     if (entry) out.push(entry)
     else errors.push({ source: `${meta.sourceFile} · ${name}`, message: t('配置形态无法识别（既无 command 也无 url）', 'Unrecognized shape (neither command nor url)') })
   }
@@ -116,22 +135,22 @@ async function readJson(file: string, errors: McpScanError[]): Promise<Record<st
   }
 }
 
-async function scanClaudeCode(out: McpServerEntry[], errors: McpScanError[]): Promise<void> {
+async function scanClaudeCode(out: McpServerEntry[], errors: McpScanError[], keepEnvValues: boolean): Promise<void> {
   const file = path.join(homeDir(), '.claude.json')
   const root = await readJson(file, errors)
   if (!root) return
   // user scope：顶层 mcpServers（该文件同时存会话状态等私有数据，只取需要的键）
-  recordServers(root.mcpServers, { harness: 'claude-code', sourceFile: file, scope: 'user' }, out, errors)
+  recordServers(root.mcpServers, { harness: 'claude-code', sourceFile: file, scope: 'user' }, out, errors, keepEnvValues)
   // project scope：projects.<项目路径>.mcpServers
   if (isPlainObject(root.projects)) {
     for (const [proj, pc] of Object.entries(root.projects)) {
       if (!isPlainObject(pc)) continue
-      recordServers((pc as Record<string, unknown>).mcpServers, { harness: 'claude-code', sourceFile: file, scope: 'project', project: proj }, out, errors)
+      recordServers((pc as Record<string, unknown>).mcpServers, { harness: 'claude-code', sourceFile: file, scope: 'project', project: proj }, out, errors, keepEnvValues)
     }
   }
 }
 
-async function scanCodex(out: McpServerEntry[], errors: McpScanError[]): Promise<void> {
+async function scanCodex(out: McpServerEntry[], errors: McpScanError[], keepEnvValues: boolean): Promise<void> {
   const file = path.join(homeDir(), '.codex', 'config.toml')
   const text = await readTextIfExists(file)
   if (text === null) return
@@ -143,39 +162,47 @@ async function scanCodex(out: McpServerEntry[], errors: McpScanError[]): Promise
     return
   }
   if (!isPlainObject(root)) return
-  recordServers((root as Record<string, unknown>).mcp_servers, { harness: 'codex', sourceFile: file, scope: 'user' }, out, errors)
+  recordServers((root as Record<string, unknown>).mcp_servers, { harness: 'codex', sourceFile: file, scope: 'user' }, out, errors, keepEnvValues)
 }
 
-async function scanZcode(out: McpServerEntry[], errors: McpScanError[]): Promise<void> {
+async function scanZcode(out: McpServerEntry[], errors: McpScanError[], keepEnvValues: boolean): Promise<void> {
   const zcFile = path.join(homeDir(), '.zcode', 'cli', 'config.json')
   const zc = await readJson(zcFile, errors)
   // 回退规则（ZCode 官方文档）：~/.zcode/cli/config.json 没有任何 MCP 服务器时才读 ~/.agents/mcp.json
   const mcpSection = zc && isPlainObject((zc as Record<string, unknown>).mcp) ? (zc as Record<string, unknown>).mcp : null
   const servers = mcpSection && isPlainObject((mcpSection as Record<string, unknown>).servers) ? (mcpSection as Record<string, unknown>).servers : null
   if (servers && Object.keys(servers).length > 0) {
-    recordServers(servers, { harness: 'zcode', sourceFile: zcFile, scope: 'user' }, out, errors)
+    recordServers(servers, { harness: 'zcode', sourceFile: zcFile, scope: 'user' }, out, errors, keepEnvValues)
     return
   }
   const fbFile = path.join(homeDir(), '.agents', 'mcp.json')
   const fb = await readJson(fbFile, errors)
   if (!fb) return
-  recordServers((fb as Record<string, unknown>).mcpServers, { harness: 'zcode', sourceFile: fbFile, scope: 'user' }, out, errors)
+  recordServers((fb as Record<string, unknown>).mcpServers, { harness: 'zcode', sourceFile: fbFile, scope: 'user' }, out, errors, keepEnvValues)
 }
 
-async function scanOpencode(out: McpServerEntry[], errors: McpScanError[]): Promise<void> {
+async function scanOpencode(out: McpServerEntry[], errors: McpScanError[], keepEnvValues: boolean): Promise<void> {
   const file = path.join(homeDir(), '.config', 'opencode', 'opencode.json')
   const root = await readJson(file, errors)
   if (!root) return
-  recordServers((root as Record<string, unknown>).mcp, { harness: 'opencode', sourceFile: file, scope: 'user' }, out, errors)
+  recordServers((root as Record<string, unknown>).mcp, { harness: 'opencode', sourceFile: file, scope: 'user' }, out, errors, keepEnvValues)
 }
 
 /** 扫描全部来源；单个来源损坏不影响其余（错误随结果返回）。文件缺失 = 该客户端未配置，静默跳过。 */
 export async function scanMcpServers(): Promise<McpScanResult> {
+  const { entries, errors } = await scanMcpServersDetailed()
+  // 盘点出口剥离 env 值：结果会进控制台与日志，值绝不出本机
+  return { entries: entries.map(({ envValues: _v, ...rest }) => rest), errors }
+}
+
+/** 同 scanMcpServers，但条目携带 env 值（McpServerEntry.envValues）——仅供本机安检（mcp/security.ts），
+ *  不得进任何输出/日志面 */
+export async function scanMcpServersDetailed(): Promise<McpScanResult> {
   const entries: McpServerEntry[] = []
   const errors: McpScanError[] = []
   for (const scan of [scanClaudeCode, scanCodex, scanZcode, scanOpencode]) {
     try {
-      await scan(entries, errors)
+      await scan(entries, errors, true)
     } catch (e) {
       errors.push({ source: 'scan', message: (e as Error).message })
     }

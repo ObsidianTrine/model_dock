@@ -6,6 +6,7 @@ import { loadConfig, mutateConfig } from '../config/store.js'
 import type { Config } from '../config/types.js'
 import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
+import { collectClientSecurityFindings } from '../mcp/security.js'
 import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
   autostartStatus,
   gatewayDaemonArgs,
@@ -457,6 +458,18 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     else if (st.attached) warn('harness.pointing', t('{l}：已接管但未检测到指向（file 模式或待重启）', '{l}: attached but no pointing detected (file mode, or restart pending)', { l: a.label }))
     else if (st.installed) warn('harness.detached', t('{l}：已安装未接管（不影响使用）', '{l}: installed but not attached (no impact on use)', { l: a.label }), `modeldock attach ${a.id}`)
     else if (a.id !== 'generic-env') info('harness.absent', t('{l}：未安装，跳过', '{l}: not installed, skipped', { l: a.label }))
+  }
+
+  // Agent 配置安全体检（只读，见 mcp/security.ts）：MCP 危险命令 / env 明文凭据 / 同名重复 / 直连明文 key。
+  // 发现本身不带 --fix（都是用户的显式选择，体检只把泄漏面说清）；安检自身异常不击穿整条体检
+  try {
+    const sec = await collectClientSecurityFindings(cfg)
+    for (const f of sec) {
+      if (f.level === 'warn') warn(f.id, f.msg, f.hint)
+      else info(f.id, f.msg, f.hint)
+    }
+  } catch {
+    /* MCP 配置损坏等已在 scan 侧带错误返回，这里不重复报告 */
   }
 
   return F

@@ -331,6 +331,12 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 | ZCode 没走网关 | attach 只注册了 provider，还需在 ZCode 设置里选择它（一次性） |
 | 配置改坏了 | `modeldock config edit` 或 `modeldock restore` |
 
+`modeldock doctor` 的体检里含 **Agent 配置安检**（只读、不自动改动，是否调整由你决定）：
+
+- MCP 启动命令是「下载内容管道进 shell/解释器」（`curl … | bash`、`irm … | iex`、`bash -c "$(curl …)"`）→ **警告点名**——这类命令每次启动都在执行远端内容，源头被篡改就会直接进本机；建议固定版本安装。
+- MCP 环境变量带**明文凭据**、客户端以**独立直连**运行（上游 key 明文写在其配置文件）→ 提示泄漏面：只点名服务器与变量名，**值绝不显示**；泄露或换机时先 `modeldock provider set-key` 轮换。
+- 同名 MCP 服务器在多处重复配置 → 提醒换 key / 改命令时容易漏一处（对照 `modeldock mcp list`）。
+
 ## 10. 当前实现状态（2026-10-27 基线；发版时随版本号刷新）
 
 已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
