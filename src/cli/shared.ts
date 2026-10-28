@@ -146,12 +146,16 @@ export function killByPid(
   }
 }
 
-/** 解析 "pid command" 行（listProcessLines 输出）。容错：空行/脏行跳过。 */
+/** 解析 "pid command" 行（listProcessLines 输出）。容错：空行/脏行跳过。
+ *  先剥行尾 \r：Windows 上 PowerShell CIM 重定向输出为 CRLF（PS 5.1 实态），
+ *  不归一化则每行（除恰好无换行的末行）尾部 \r 让 `(.*)$` 全部失配、解析恒为空——
+ *  Windows 枚举恒空正是 stopTrayProcesses 旧实现「托盘杀不掉且无痕」的根源
+ *  （2026-10-28 用户实证，三次更新托盘全存活）。 */
 const PROC_LINE_RE = /^\s*(\d+)\s+(.*)$/
 export function parsePidCommandLines(lines: string): { pid: number; cmd: string }[] {
   const out: { pid: number; cmd: string }[] = []
   for (const line of lines.split('\n')) {
-    const m = line.match(PROC_LINE_RE)
+    const m = line.replace(/\r$/, '').match(PROC_LINE_RE)
     if (!m) continue
     out.push({ pid: Number(m[1]), cmd: m[2] })
   }
