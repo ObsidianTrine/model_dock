@@ -195,13 +195,16 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 
 字段说明见 `.agents/scripts/workflow-config.mjs` 头注释；移植要点（派生链、playbook 取舍、headless worker 注册）见 `.agents/workflows/orchestrator.md`「移植」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
 
-### GitHub 侧自动化（PR 审查 bot + Dependabot）
+### GitHub 侧自动化（分层 PR 审查 + Dependabot）
 
-本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 bot 跳过，Actions 日志有 warning）；完整设置步骤、成本控制与换供应商方法见 **`docs/ci-bots.md`**：
+本地 orchestrator 之外的远端半场：agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程；分层设计参照 Anthropic《How the Claude Code team does code review》，总览与运维见 **`docs/ai-review-system.md`**）。启用需在仓库 Settings → Secrets and variables → Actions 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 AI job 跳过，Actions 日志有 warning）；完整设置步骤、成本控制与换供应商方法见 **`docs/ci-bots.md`**：
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
-| `workflows/claude-review.yml` | PR 打开/更新自动审查（只读，顶层评论 + inline 标注，按本文件硬约定出 [P0]/[P1]/[P2]）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `CLAUDE_AUTH_TOKEN`（key） |
+| `workflows/claude-review.yml` | 分层 PR 审查：`risk-tier` 风险分级打 `risk:*` label（确定性零消耗）+ `auto-review` 自动审查（只读，读根目录 REVIEW.md 纪律，[P0]/[P1]/[P2] + inline 标注，自验证/不重复/3 轮收敛）+ `security-review` 安全审查（`SECURITY-VERDICT` 门禁，FAIL 即 job 失败，可设 required check）；PR/issue 评论 `@claude` 可交互追问或要求改码 | `CLAUDE_AUTH_TOKEN`（key；risk-tier 不需要） |
+| `REVIEW.md` + `.github/CODEOWNERS` | 审查纪律（各区域「失败长什么样」/红线/报告纪律，AI 与人工审查者共用）+ 敏感路径归属；审查者动手前必读 | 无 |
+| `scripts/pr-risk-tier.mjs` | PR 风险分级脚本（规则对齐 `.agents/workflow.json` corePaths/releasePaths；测试 `test/pr-risk-tier.test.ts`） | 无 |
+| `.agents/review-evals/` | 审查评测集：事故 / revert 变考题（`scripts/review-eval.mjs` 给审查者跑分）——**出事故后必读加题**，改 REVIEW.md / prompt / 模型后全量重跑 | 无 |
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `CLAUDE_AUTH_TOKEN`（key） + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
 

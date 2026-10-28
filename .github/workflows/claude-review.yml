@@ -1,17 +1,29 @@
 name: claude-review
 
-# PR 审查 bot：PR 打开/更新时自动出审查意见；在 PR/issue 评论里 @claude 可追问或要求改码。
+# 分层 PR 审查（设计来源：Anthropic《How the Claude Code team does code review》
+# https://claude.dev/blog/solving-code-review-at-anthropic/ ，落地说明见 docs/ai-review-system.md）：
+#
+#   risk-tier        确定性风险分级（零 API 消耗）：按改动文件打 risk:* label；
+#                    opened/reopened 时评论一次判定依据。分级规则 = scripts/pr-risk-tier.mjs
+#                    （对齐 .agents/workflow.json 的 corePaths / releasePaths）。
+#   auto-review      AI 审查（只读）：读 REVIEW.md 审查纪律，自验证每条发现、不重复既往
+#                    评论、复查只看新增 diff、风格/清理类不报、存量问题标 [存量]。
+#   security-review  AI 安全审查（可阻塞）：独立会话专查安全面；顶层评论 SECURITY-VERDICT
+#                    行作门禁信号，FAIL 则本 job 失败（可设为分支保护 required check）。
+#   interactive      评论 @claude 交互会话（可改码推送），与审查无关，保持原样。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置三件套（供应商无关，yml 零默认值）
 #   secret   CLAUDE_AUTH_TOKEN —— Anthropic 兼容端点的 API key
 #   variable CLAUDE_BASE_URL —— 兼容端点 URL；variable CLAUDE_MODEL —— 模型名（经 claude_args --model 下发）
-#   三件套缺任一项 bot 静默跳过（Actions 日志 warning 指明缺哪项），零 token 消耗。
+#   三件套缺任一项，AI job 静默跳过（Actions 日志 warning 指明缺哪项），零 token 消耗；
+#   risk-tier 是确定性脚本，不依赖三件套、照常运行。
 #   配置项含义、换供应商与切回官方步骤见 docs/ci-bots.md「模型接入」。
 #
 # 边界：
-#   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论），
+#   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论/label），
 #     由 dependabot-fix.yml 专职处理。
-#   - Claude 自己推的修复提交带 [dependabot-fix] 前缀，auto-review 检测到尾提交为该前缀时跳过，防审查回环。
+#   - Claude 自己推的修复提交带 [dependabot-fix] 前缀，auto-review / security-review 检测到
+#     尾提交为该前缀时跳过，防审查回环。
 #   - fork PR 拿不到 secrets，本工作流不覆盖（本仓库 PR 均来自同仓库分支）。
 
 on:
@@ -32,6 +44,48 @@ permissions:
   id-token: write
 
 jobs:
+  risk-tier:
+    # 风险分级（确定性，零消耗）：改动文件 → low/medium/high label；opened/reopened 评论判定依据
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: claude-review-tier-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: 分级并打 label
+        id: tier
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr diff --name-only "$PR" > /tmp/pr-files.txt
+          tier=$(node scripts/pr-risk-tier.mjs --tier-only < /tmp/pr-files.txt)
+          echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          echo "risk tier: $tier"
+          case "$tier" in
+            high)   color=d93f0b ;;
+            medium) color=fbca04 ;;
+            *)      color=0e8a16 ;;
+          esac
+          gh label create "risk:$tier" --color "$color" --force
+          gh pr edit "$PR" --add-label "risk:$tier"
+          # 旧档位 label 摘掉，PR 上只留当前档位
+          for old in low medium high; do
+            if [ "$old" != "$tier" ]; then gh pr edit "$PR" --remove-label "risk:$old" 2>/dev/null || true; fi
+          done
+      - name: 首次出现时评论判定依据（synchronize 不刷屏）
+        if: github.event.action != 'synchronize'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          node scripts/pr-risk-tier.mjs --markdown < /tmp/pr-files.txt > /tmp/tier.md
+          gh pr comment "$PR" --body-file /tmp/tier.md
+
   auto-review:
     # PR 打开/更新 → 只读审查（不推代码，只发评论与 inline 标注）
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
@@ -69,6 +123,14 @@ jobs:
           case "$msg" in
             "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
+      - name: 本地复算风险分级（写入工作目录，prompt 引用）
+        if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr diff --name-only "$PR" | node scripts/pr-risk-tier.mjs --markdown > risk-tier.md
+          cat risk-tier.md
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
@@ -81,7 +143,8 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             请审查这个 PR。项目背景：ModelDock = 本地模型配置托管中心 + API 网关（TypeScript ESM、
-            Node ≥22、SEA 单文件打包）。完整约定以仓库根目录 AGENTS.md 为准，审查重点：
+            Node ≥22、SEA 单文件打包）。完整约定以仓库根目录 AGENTS.md 为准；**先读仓库根目录
+            REVIEW.md（代码所有者的审查纪律，遵循它的报告格式与红线）**。技术审查重点：
 
             1. 正确性：逻辑错误、边界条件、错误处理遗漏、资源泄漏（进程/句柄/端口）。
             2. 三平台兼容（Windows 是高频事故源）：路径必须 path.join()/path.resolve()（正则分隔符写 [\\/]）；
@@ -92,17 +155,112 @@ jobs:
                测试禁止监听写死端口（8687 生产 / 8890 用户 dev 绝不允许出现在测试代码里）。
             5. 安全：密钥不落日志、网关凭据处理正确。
 
-            要求：
-            - 审查输出一律中文；只报有把握的真问题，每条标注 [P0]/[P1]/[P2]（P0=必须修，P1=应修，P2=建议）。
-            - 具体代码问题用 mcp__github_inline_comment__create_inline_comment（confirmed: true）标注到行；
-              总体结论用 gh pr comment 发一条顶层评论（优点一句话即可，重点列问题与建议）。
+            审查纪律（REVIEW.md 亦有约定，冲突时以 REVIEW.md 为准）：
+            - 每条发现先自行验证：读文件确认行号与代码属实，证据不足不报；风格/诊断/清理类不报。
+            - 非 PR 引入的问题照报但标 [存量]，不让作者背锅。
+            - 同类问题一次说全（标明「同类还有 N 处」），不要每轮挤牙膏。
+            - 复查判定：先用 gh pr view 看 PR 上 claude[bot] 的既往审查评论。若有，本次为复查——
+              只看新增改动，不重复既往发现；同一问题连续 3 轮复查仍在，就在顶层评论明确建议
+              「停下来重新考虑方案」，不再逐行找新问题。
+            - 顶层评论（gh pr comment）结构：第一行「风险等级：<低|中|高>」（读工作目录 risk-tier.md，
+              与其保持一致）；第二行起「发现 N 个问题」，N=0 时只写一句通过结论，不凑数。
+            - 具体代码问题用 mcp__github_inline_comment__create_inline_comment（confirmed: true）标注到行。
             - 只做只读审查：不要 Edit/Write 任何文件、不要 push。
-            - 没有值得报告的问题时，顶层评论只写一句通过结论，不要凑数。
             - 注意：PR 分支已检出于当前工作目录。
           claude_args: |
             --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 30
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+  security-review:
+    # AI 安全审查（可阻塞）：独立会话专查安全面，与 auto-review 分开跑避免互相稀释注意力。
+    # 顶层评论的 SECURITY-VERDICT 行是门禁信号：FAIL → 本 job 失败（可设为 required check）。
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: claude-review-sec-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: 配置三件套不齐时静默跳过（未启用状态零消耗）
+        id: keyguard
+        env:
+          KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+          BASE: ${{ vars.CLAUDE_BASE_URL }}
+          MODEL: ${{ vars.CLAUDE_MODEL }}
+        run: |
+          miss=""
+          [ -z "$KEY" ] && miss="$miss secrets.CLAUDE_AUTH_TOKEN"
+          [ -z "$BASE" ] && miss="$miss vars.CLAUDE_BASE_URL"
+          [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
+          if [ -n "$miss" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::bot 配置不齐（缺:$miss），安全审查未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.keyguard.outputs.skip != 'true'
+        with:
+          fetch-depth: 1
+      - name: 跳过 bot 自身修复提交（防审查回环）
+        id: guard
+        if: steps.keyguard.outputs.skip != 'true'
+        run: |
+          msg="$(git log -1 --pretty=%s)"
+          case "$msg" in
+            "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: anthropics/claude-code-action@v1
+        if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+        with:
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            这是安全专项审查（ModelDock = 本地模型配置托管中心 + API 网关，TypeScript ESM、Node ≥22、
+            SEA 单文件打包；项目背景见 AGENTS.md）。**只报安全问题，不报一般 bug 与风格问题**。逐项检查：
+
+            1. 注入与命令拼接：spawn/exec 参数拼进 shell 字符串（shell:true、模板串拼命令、
+               用户可配置值未加引号进入 shell）。
+            2. 密钥泄漏：API key / token / secrets.json 内容写进日志、错误消息、HTTP 响应体，
+               或落盘为宽权限明文。
+            3. 鉴权与越权：新增 HTTP 端点是否漏过既有 token 校验中间件（对照 src/gateway/server.ts
+               的鉴权路径）；管理面操作是否可被普通 token 触达。
+            4. 路径穿越：文件读写参数来自请求/远端配置且未归一化、未限定白名单目录。
+            5. 供应链与安装器：新增依赖是否破坏「纯 JS、无 native addon」约束、来源是否可疑；
+               安装器/更新器（scripts/installer.iss、src/update/）是否引入可被劫持的下载 URL
+               或未校验的执行路径。
+
+            要求：
+            - 每条发现给 文件+行号 与一句话攻击路径；没有把握不报，宁可漏报不确定的也不编造。
+            - 有发现：inline 标注（mcp__github_inline_comment__create_inline_comment，confirmed: true）
+              + 顶层评论（gh pr comment）首行固定写「SECURITY-VERDICT: FAIL（N 项）」，随后逐项列出。
+            - 无发现：顶层评论只发一行「SECURITY-VERDICT: PASS」，不要写其他内容。
+            - 只读审查：不要 Edit/Write 任何文件、不要 push。PR 分支已检出于当前工作目录。
+          claude_args: |
+            --model ${{ vars.CLAUDE_MODEL }}
+            --max-turns 25
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+      - name: 门禁判定（FAIL 则本 job 失败，可作 required check）
+        if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          verdict=$(gh pr view "$PR" --json comments -q '.comments[].body' | grep -E '^SECURITY-VERDICT:' | tail -1 || true)
+          echo "verdict: ${verdict:-<none>}"
+          case "$verdict" in
+            "SECURITY-VERDICT: PASS")
+              echo "安全审查通过" ;;
+            "SECURITY-VERDICT: FAIL"*)
+              echo "::error::安全审查发现未解决问题（见 PR 上的安全 inline 标注）。修复后新推送会自动重审；判定为误报时在该 inline 下回复依据并联系维护者复核。"
+              exit 1 ;;
+            *)
+              echo "::error::安全审查未产出 SECURITY-VERDICT 结论（bot 静默失败？见 docs/ci-bots.md「运维注意」）。保守起见按未通过处理。"
+              exit 1 ;;
+          esac
 
   interactive:
     # 评论 @claude → 交互会话：可追问，也可按评论指示修改代码（需要 contents: write 才能推送）
