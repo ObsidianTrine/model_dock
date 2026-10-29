@@ -74,8 +74,9 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 | 2026-10-engine-quiet-ignore | 引擎接了 quiet 选项但 diff 预览照常输出（它撒谎） | b9c859a | ✅（10-30，GLM subagent）沿全部调用方核实影响链；同文件 3 个历史修复全中 |
 | 2026-10-clean-chore-rm-debug | 噪声对照：纯删除 43 行调试壳（干净改动） | fe53330 | ✅ 无误报（10-30，GLM subagent）——核实后零报告 |
 | 2026-10-clean-docs-bench | 噪声对照：新增 bench 基线文档（出题人误标干净） | 6fc99b7 | ❌ 机械口径误报，人工复核=真问题（:34/:56 首字节定义自相矛盾，「它撒谎」命中）——ground truth 标注错误的正例，保留作歧义样本 |
+| 2026-10-server-reexport-drop | server.ts 拆分后原导入面 7 个符号未 re-export，外部测试全断 | d039010 | ✅（10-30，GLM subagent）穷尽式核对 13→6 导出 + 逐条对上快照树测试导入；+2 个活缺陷（catalog 缓存永不命中、probe 对 responses 必失败） |
 
-**基线：召回 20/20 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 12/12）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（20/20，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+**基线：召回 21/21 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 13/13）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 评测循环产出（2026-10-30 夜训）
 
@@ -88,4 +89,5 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
   - `src/update/webupdate.ts`：applyUpdate 的 updating 门闩无同步异常回滚（永久卡死一键更新）。
   - `scripts/tray/ModelDockTray.cs`：CheckViaCli 按中文子串分类输出（英文环境把成功当失败）；注释承诺的 40s 看门狗不存在；TrayActions `_port`/`_token` 静态字段多线程无同步读写。
   - `docs/bench-baseline.md:56`：「首字节」定义（响应头起算）与 :34 自称的端到端实测口径矛盾（clean-docs-bench 题审出，出题人误标干净的「误报」实为真问题）。
+  - `src/gateway/server.ts`：/_modeldock/model-catalog 视图缓存永不命中（fullKnownTable 每次 spread 新对象，注释宣称的缓存优化不存在）；probe() 对 responses 协议服务必失败且报错误导（server-reexport-drop 题审出）。
 - **方法论收获**：审出率 100% 说明「给足 REVIEW.md 纪律 + 干净单文件考题」的组合对这类历史 bug 召回充分；出题的瓶颈在**选题**（批次修复提交一文件多 bug 归因不清、需部署上下文的题、超 120KB 的巨型文件都要避开）。
