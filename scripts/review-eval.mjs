@@ -87,7 +87,8 @@ function runClaude(prompt, model) {
     throw new Error('本机未找到 claude CLI：请安装并登录后重跑（或先用 --dry 检查 prompt 组装）。')
   }
   if (r.status !== 0) {
-    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 500)}`)
+    // claude CLI 的认证/配额错误打在 stdout（如 401 key invalid），stderr 常为空——两头都带上
+    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 300) || String(r.stdout || '').slice(0, 300)}`)
   }
   return String(r.stdout || '')
 }
