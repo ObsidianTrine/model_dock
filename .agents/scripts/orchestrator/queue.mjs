@@ -21,6 +21,9 @@ export const DEFAULT_BUDGET = {
 const TASK_TYPES = ['bugfix', 'feature', 'docs', 'deps', 'refactor'];
 const PRIORITIES = ['low', 'normal', 'high'];
 
+/** 任务 id 统一规则：小写字母/数字/短横线（git 分支名安全 + 跨平台文件名安全）。 */
+export const TASK_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+
 /** 状态迁移白名单（语义由 orchestrator 驱动，这里只防非法跳变）。 */
 const TRANSITIONS = {
   'pending': ['running'],

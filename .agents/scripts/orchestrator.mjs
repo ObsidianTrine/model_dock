@@ -44,6 +44,7 @@ import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
+import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, nightlyWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 
@@ -202,6 +203,20 @@ async function cmdRun(repoRoot, taskId, opts) {
   validateCard(meta); // budget 缺失字段回落默认值（熔断不可关闭）
   const card = { meta, body };
   const qdir = logDir(repoRoot, taskId);
+
+  // 任务级互斥（task-lock.mjs）：同一任务同一时刻只允许一个闭环进程驱动——手动
+  // run/resume/retry 撞上 drain、双重手动操作等所有"两个 worker 写同一个 worktree"
+  // 的路径都在这里被拒。持有进程死亡 = 陈锁自动接管，崩溃恢复语义不变（下方的
+  // cleanupOrphanWorker 因此只会在接管后遇到活孤儿）。
+  const taskLock = acquireTaskLock(repoRoot, taskId);
+  if (!taskLock.held) {
+    if (taskLock.unremovable) {
+      die(`任务 "${taskId}" 的任务锁无法接管（陈锁删除失败，可能被其他进程占用）。\n手动删除 ${taskLockPath(repoRoot, taskId)} 后重试。`);
+    }
+    const owner = taskLock.owner;
+    die(`任务 "${taskId}" 已有进行中的闭环（pid ${owner.pid}${owner.cmd ? `，${owner.cmd}` : ''}${owner.acquired_at ? `，始于 ${owner.acquired_at}` : ''}）——同一任务不允许两个进程同时驱动（两个 worker 会写同一个 worktree）。\n`
+      + `  等当前 run 结束后再操作；确认进程已卡死时，终止 pid ${owner.pid} 后重试（陈锁自动接管）。`);
+  }
 
   // ui_check 预校验：卡要求 UI 冒烟但仓库没配 uiCheckCmd → 快速失败，卡留 pending 不动
   if (meta.ui_check && !runConfig(repoRoot).uiCheckCmd) {
@@ -611,6 +626,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     throw e;
   } finally {
     clearTimeout(budget.wallTimer);
+    releaseTaskLock(repoRoot, taskId);
     try {
       fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
       fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
@@ -795,6 +811,13 @@ function cmdAbandon(repoRoot, taskId) {
   const root = queueRoot(repoRoot);
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中。`);
+  // 闭环进程还活着时不许 abandon：它会杀掉在跑的 worker 并把卡落 failed/。
+  // 确认卡死时先终止该进程再 abandon（陈锁自动接管，下方的孤儿清理照常生效）。
+  const liveLock = readTaskLock(repoRoot, taskId);
+  if (liveLock && Number.isInteger(liveLock.pid) && isAlive(liveLock.pid)) {
+    die(`任务 "${taskId}" 的闭环仍在运行（pid ${liveLock.pid}${liveLock.cmd ? `，${liveLock.cmd}` : ''}）——abandon 会终止在跑的 worker，先确认它真的卡死。\n`
+      + `  终止 pid ${liveLock.pid} 后再 abandon（陈锁自动接管，孤儿 worker 会被清理）。`);
+  }
   cleanupOrphanWorker(repoRoot, taskId);
   const qdir = logDir(repoRoot, taskId);
   if (found.state !== 'failed' && found.state !== 'merged') {
@@ -1495,6 +1518,7 @@ function usage() {
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
 审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
+互斥：调度器级（drain/nightly/scan --run 全局单实例）+ 任务级（同任务同时只允许一个 run 闭环，陈锁自动接管）。
 红线：发布动作永远人工；端口红线按 workflow.json protectedPorts（配置即生效）；熔断不可关闭。`);
 }
 

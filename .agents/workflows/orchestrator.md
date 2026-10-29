@@ -157,8 +157,9 @@ pending → running → reviewing → awaiting-human → merged
   - **逐项目绝对路径（旧行为）**：每个项目注册自己的 `<项目绝对路径>/.agents/hooks/policy-zcode.mjs`。
   两者都以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
-- **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id。
-- **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
+- **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id（orchestrator 侧已由任务锁强制单写者，见下一条 FAQ；人工侧仍是纪律——start 会因分支已存在拒绝重复认领）。
+- **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢调度器锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
+- **同一个任务能被两个进程同时跑吗**：不能。每个任务有任务级互斥锁（`.agents/orchestrator/.run-<task-id>.lock`）：run/resume/retry 进入闭环时抢锁，他人持锁且存活时后来者报错退出（手动 run 撞上 drain、双重手动操作都不会出现两个 worker 写同一个 worktree）；持有进程已死 = 陈锁自动接管（崩溃恢复：接管后仍会先清理孤儿 worker）。闭环落位（merged/awaiting-human/blocked/failed）即释放；`abandon` 在闭环存活时会被拒（防止误杀在跑 worker），确认卡死先终止该进程再 abandon。
 - **worker 起不来（claude CLI 缺失/未登录）会怎样**：任务卡自动落 `blocked/`（failed 事件附原因），不会悬在 running/ 冒充在跑；修好环境后 `resume <task-id>` 续做。
 - **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `${envPrefix}_NIGHTLY_WEBHOOK=<url>`（envPrefix 缺省 AGENTS，旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 兼容识别）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
 

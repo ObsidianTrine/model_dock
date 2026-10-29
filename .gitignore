@@ -25,6 +25,10 @@ NOTES.md
 .agents/orchestrator/queue/
 .agents/orchestrator/logs/
 
+# 调度器/任务互斥锁（运行态；陈锁自动接管，不人工清理）
+.agents/orchestrator/.scheduler-lock.json
+.agents/orchestrator/.run-*.lock
+
 # 策略拦截审计（运行态）
 .agents/policy/audit.jsonl
 
