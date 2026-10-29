@@ -606,6 +606,50 @@ describe('checkUpdate 输出：说明降级 + 摘要收口 + 发布页链接', (
     expect(out).not.toContain('共 0 项')
     expect(out).not.toContain('·')
   })
+
+  // --json：win 托盘 CheckViaCli 的机器可读路径（旧实现按中文子串分类 CLI 输出，英文环境全落空）
+  it('--json 有新版本：吞掉人类文案，末行单行 JSON（字段与网关 status 同形）', async () => {
+    const api = await startMockApi({ tag: 'v999.0.0', assets: {}, body: BODY })
+    cleanup = api.close
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const result = await checkUpdate(REPO, TOKEN, { apiBase: api.apiBase, json: true })
+      expect(result.checkedOnly).toBe(true)
+      // json 模式人类文案全部走 no-op log，console 只落收口 JSON 一行
+      expect(logSpy).toHaveBeenCalledTimes(1)
+      const line = String(logSpy.mock.calls[0][0])
+      expect(line.startsWith('{')).toBe(true)
+      expect(line.endsWith('}')).toBe(true)
+      expect(line).not.toContain('\n')
+      const parsed = JSON.parse(line) as Record<string, unknown>
+      expect(parsed.available).toBe(true)
+      expect(parsed.latest).toBe('999.0.0')
+      expect(parsed.current).toBe(VERSION)
+      expect(parsed.htmlUrl).toBe(`https://github.com/${REPO}/releases/tag/v999.0.0`)
+      expect(String(parsed.summary)).toContain('三件小事')
+      // markdown 标记不进托盘弹窗正文
+      expect(String(parsed.summary)).not.toContain('**')
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+
+  it('--json 已是最新：available=false，语言无关（不依赖任何子串）', async () => {
+    const api = await startMockApi({ tag: `v${VERSION}`, assets: {}, body: BODY })
+    cleanup = api.close
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const result = await checkUpdate(REPO, TOKEN, { apiBase: api.apiBase, json: true })
+      expect(result.checkedOnly).toBe(true)
+      expect(logSpy).toHaveBeenCalledTimes(1)
+      const parsed = JSON.parse(String(logSpy.mock.calls[0][0])) as Record<string, unknown>
+      expect(parsed.available).toBe(false)
+      expect(parsed.latest).toBe(VERSION)
+      expect(parsed.current).toBe(VERSION)
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
 })
 
 // 安装原语（真实文件系统，临时目录）

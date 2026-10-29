@@ -266,10 +266,11 @@ export function buildProgram(): Command {
     .command('update')
     .description(t('检查并安装 ModelDock 新版本：下载 → SHA256 校验 → 替换 → 重启网关', 'Check and install a new ModelDock version: download → SHA256 verify → swap → restart gateway'))
     .option('--check', t('只检查不安装', 'Check only, do not install'))
+    .option('--json', t('机器可读输出：单行 JSON（win 托盘/脚本用），字段与 GET /_modeldock/admin/update/status 同形', 'Machine-readable output: single-line JSON (for the Windows tray/scripts), same fields as GET /_modeldock/admin/update/status'))
     .option('--yes', t('跳过确认', 'Skip confirmation'))
     .option('--token <pat>', t('可选。保存 GitHub 访问令牌（fine-grained，Contents 只读）——仅私有仓库必需，公开仓库匿名即可更新；配置后匿名限流 60 次/时提到 5000 次/时', 'Optional. Save the GitHub access token (fine-grained, Contents read-only) — only needed for private repos; a public repo updates anonymously, and a token raises the rate limit from 60/h to 5000/h'))
     .option('--clean', t('清理上一版残留（.old）', 'Remove previous-version leftovers (.old)'))
-    .action(async (o) => (await import('./update.js')).cmdUpdate({ check: o.check, yes: o.yes, token: o.token, clean: o.clean }))
+    .action(async (o) => (await import('./update.js')).cmdUpdate({ check: o.check, yes: o.yes, token: o.token, clean: o.clean, json: o.json }))
 
   prog
     .command('reset')
