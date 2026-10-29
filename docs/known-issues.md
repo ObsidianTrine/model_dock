@@ -17,6 +17,7 @@
 > 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
 > 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
 > 2026-10-29 正确性批（fix-sync-race）：CORRECT-06 已修（@b917687，withFileLock 同路径重入 + 同步拉取 apply/collect 原子化）。
+> 2026-10-29 注记：① §二「已核查无问题」的 PowerShell CIM 进程枚举补记一行——其输出的行解析曾因 Windows CRLF 行尾全行失配、枚举恒空（@e4ac854 已修）；② 转发热路径首份可复现基线落档（scripts/bench-relay.mjs + docs/bench-baseline.md，PERF-01 条目已附实测对照）——「（推测）」条目的量化验证从此有同机 before/after 基建；③ 文末测试盲区注记更新（§六尾注三处已于 T07 @05dd0a6 补齐，另补配置/运维与 CLI/安装两批 @083284d/@3d74124）。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -89,6 +90,7 @@
 - 影响：Claude Code/ZCode 长上下文请求体常达 0.5–10MB，每请求 5–100ms（推测）事件循环阻塞，串行化同实例所有并发流（含正在推流的 SSE）。
 - 修复方向（已人工复核可行）：`topLevelModel` 扫描结果 `pre` 非 null 时，modelOverride / aliases 匹配 / tierFallback（CLAUDE_BUILTIN_RE）/ anthropic. 剥壳 / default_model 兜底的**全部判定只用模型名字符串即可完成**；仅当 `final !== wire` 确需改写时才 parse + 重序列化。`pre === null`（扫描器放弃）再退回现有全量解析路径，逻辑与现路径逐字节等价。
 - 验证：用大请求体（≥5MB）压测对比 p99；回归 gateway 套件的 rewriteModel 用例。
+- 2026-10-29 实测对照（docs/bench-baseline.md 首份基线，i5-8250U/Node 24）：5MB 改写 p50 94.4ms vs 纯透传 73.3ms——修复后「确需改写」路径的全量 parse+重序列化开销约 21ms/5MB（p50 差值），与原「5–100ms（推测）」估算同量级；relay 后续改动用 scripts/bench-relay.mjs 同机 before/after 对比。
 
 **PERF-02（P2）dayFilter 每请求 statSync**
 - 位置：`src/gateway/state.ts:285` → `src/gateway/daytype.ts:33`
@@ -326,7 +328,7 @@
 **XPLAT-11（P2，推测）老 conhost ANSI**
 - 位置：`src/util/color.ts`：NO_COLOR 与 isTTY 均支持，但未做 Windows 版本/conhost 的 ANSI 能力检测。Win10+ 与 Windows Terminal 正常；项目实际门槛 Win10+ 时无碍。
 
-**已核查无问题的跨平台项（勿重复审查）**：181 条相对 import 大小写逐一比对 0 错误；路径拼接全走 path.join、无手写分隔符拼文件路径；`taskkill /T /F`（update/install.ts:76）正确；进程枚举 PowerShell CIM 分支（gatewaycmd.ts listProcessLines 参考写法）；reg 查询三视图（HKCU/HKLM/WOW6432）实现正确；三平台自启齐全（launchd KeepAlive / systemd Restart+linger / VBS）且卸载对称；dsh/zcode YAML 走 Document API 保注释；全 src 无 `import.meta`（SEA 约定未破坏）；同步 spawnSync 类调用严格限 CLI 进程，网关进程内无同步阻塞 spawn。
+**已核查无问题的跨平台项（勿重复审查）**：181 条相对 import 大小写逐一比对 0 错误；路径拼接全走 path.join、无手写分隔符拼文件路径；`taskkill /T /F`（update/install.ts:76）正确；进程枚举 PowerShell CIM 分支（gatewaycmd.ts listProcessLines 参考写法；2026-10-29 补记：其输出按行解析时行尾 `\r` 曾致 `(.*)$` 全行失配、枚举恒空——Windows 停托盘静默空转与游离清扫失效的共同根因，e4ac854 已在 parsePidCommandLines 统一剥 \r；行解析类正则务必容忍 `\r`）；reg 查询三视图（HKCU/HKLM/WOW6432）实现正确；三平台自启齐全（launchd KeepAlive / systemd Restart+linger / VBS）且卸载对称；dsh/zcode YAML 走 Document API 保注释；全 src 无 `import.meta`（SEA 约定未破坏）；同步 spawnSync 类调用严格限 CLI 进程，网关进程内无同步阻塞 spawn。
 
 ---
 
@@ -439,4 +441,4 @@
 | REVIEW-28 | P2 | `src/sync/targets/webdav.ts` + `localdir.ts` | manifest CAS 两段写：双机窗口互覆双双记成功后永久 idle 静默分叉（连冲突快照都没有） | ☑ 已修（写后回读复核归属，被覆写方转 conflict 走引擎冲突分支；synctarget 回归） |
 | REVIEW-29 | P2 | `src/cloud/console.ts` + 死代码 | 云控制台 10s 轮询无 document.hidden 门控；CLOUD_ENVELOPE_REF 导出与 sha256Hex 再导出无使用点 | ☑ 已修（hidden 门控 + visibilitychange 立刷；死代码删除） |
 
-> 测试盲区（同步 engine 推送部分失败簿记、CloudStore 专属用例、applySyncdoc 半完成态恢复等）未在本轮补齐，作为后续测试建设方向；本轮各修复均带定向回归测试，全量 913 例绿（develop @50ab868）。
+> 测试盲区跟踪：REVIEW 轮所列三处（同步 engine 推送部分失败簿记、CloudStore 专属用例、applySyncdoc 半完成态恢复）已于 2026-10-28 补齐（T07 @05dd0a6，test/sync-push-partial / cloudstore / syncdoc-recovery）；2026-10-29 再补两批——配置持久层与 src 根模块（@083284d，config-gaps / ops-autostart-gaps）、CLI 命令层与安装链（@3d74124，注册面全量断言 + provider/profile/import 行为 + noderuntime / update-cli 分支）。REVIEW 轮各修复均带定向回归测试（当时全量 913 例绿，develop @50ab868），全量规模以 `npm test` 实时输出为准。

@@ -62,6 +62,8 @@ npm run build:sea -- --target darwin-arm64
 
 ## 3. 首次上手（推荐路径）
 
+> 想先看完整走一遍？[上手路径走查记录](onboarding-walkthrough.md)是 2026-10-29 在全新隔离沙箱里按本节（配合 README 快速开始）逐步实测的实录——含每步预期输出与三条易踩的运行态注意事项。
+
 ### 方式 A：一条命令向导
 
 ```bash
