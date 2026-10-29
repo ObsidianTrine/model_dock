@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-autospawn-echo",
+  "title": "托盘自动弹控制台守卫 _autoOpened 是进程内标志——v1.3.0 安装链 [Run] 托盘→守护→补拉托盘把控制台弹两份，进程内标志管不住跨进程 spawn 链",
+  "reviewRef": "cc38c6b^",
+  "fixedBy": "cc38c6b",
+  "files": ["src/tray.ts", "scripts/tray/ModelDockTray.cs"],
+  "expect": ["autospawn"],
+  "note": "修复 = spawnTrayIfPresent 注入 MODELRDOCK_TRAY_AUTOSPAWN=1，托盘按标记全进程跳过自动弹窗。审查侧教训：跨进程的 spawn 链路契约要显式传递（环境变量/参数），进程内变量守不住多跳；审查 spawn 链时沿「谁拉谁、每跳的自动行为」走一遍"
+}
