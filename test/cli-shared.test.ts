@@ -159,7 +159,11 @@ describe('DUP-01 拉起守护进程（注入 fake spawn + 探活，绝不真起 
       fakeSpawn
     )
     expect(res).toEqual(expect.objectContaining({ port: 9999 }))
-    expect(fakeSpawn).toHaveBeenCalledWith('node', ['--sea-gateway', '--port', '9999'], expect.objectContaining({ detached: true, stdio: ['ignore', 'ignore', 'pipe'] }))
+    // stderr 走 fd 重定向（daemon 直写日志文件）：stdio[2] 是数字 fd 而非 'pipe'——
+    // pipe 读端会把父 CLI 事件循环钉到 daemon 退出（评测集 2026-10-crlf-proc-parse 问题 2）
+    const spawnOpts = fakeSpawn.mock.calls[0][2] as { stdio: unknown[] }
+    expect(spawnOpts).toEqual(expect.objectContaining({ detached: true }))
+    expect(typeof spawnOpts.stdio[2]).toBe('number')
   })
 })
 
