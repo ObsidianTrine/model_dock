@@ -67,16 +67,23 @@ export function generateUiMin() {
   const sharedSrc = fs.readFileSync(path.join(ROOT, 'src', 'gateway', 'console-shared.ts'), 'utf8').replace(/\r\n/g, '\n')
   const sharedValue = evalFragment(extractConst(sharedSrc, 'CONSOLE_SHARED_JS'), '')
   const discovered = new Set()
+  // 目录内容循环外读一次建 Map（插入序 = readdir 序，ORDER 命中语义不变）：原先 ORDER 每条目
+  // readdir + 全目录逐文件读是 O(n²)，且本脚本在每次 npm test 的 freshness 对拍里跑
+  const moduleSrc = new Map(
+    fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.ts'))
+      .map((f) => [f, fs.readFileSync(path.join(dir, f), 'utf8').replace(/\r\n/g, '\n')])
+  )
   let script = ''
   for (const name of ORDER) {
-    const candidates = fs.readdirSync(dir).filter((f) => f.endsWith('.ts'))
-    const hit = candidates.map((f) => ({ f, src: fs.readFileSync(path.join(dir, f), 'utf8').replace(/\r\n/g, '\n') })).find((x) => x.src.includes(`export const ${name} = \``))
+    const hit = [...moduleSrc].find(([, src]) => src.includes(`export const ${name} = \``))
     if (!hit) throw new Error(`gen-ui-min: 常量 ${name} 不在 ui/ 任何模块中`)
     discovered.add(name)
-    script += evalFragment(extractConst(hit.src, name), sharedValue)
+    script += evalFragment(extractConst(hit[1], name), sharedValue)
   }
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.ts'))) {
-    for (const m of fs.readFileSync(path.join(dir, f), 'utf8').matchAll(/export const (UI_JS_[A-Z0-9_]+) = `/g)) {
+  for (const [f, src] of moduleSrc) {
+    for (const m of src.matchAll(/export const (UI_JS_[A-Z0-9_]+) = `/g)) {
       if (!discovered.has(m[1])) throw new Error(`gen-ui-min: ui/${f} 的 ${m[1]} 未登记进 ORDER——请补进顺序表，否则该片段不会进服务页面`)
     }
   }
