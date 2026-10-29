@@ -384,7 +384,7 @@
 - 影响：脚本/CI/终端里跑 `gateway start --daemon` 会被钉住等待，用户视角「命令卡死」；自启链（--autostart 直起 daemon，不经本路径）与 run_dev（tsx watch）不受影响。
 - 修复方向（未动手）：stderr 改落 daemon 侧自写日志（daemon 自己 appendLine，父进程 stdio 全 ignore）；或读端 `child.stderr.unref()`（注意与 'close' 收尾写的时序）；或转写改经 `child.stderr.pipe(writable)` 且 writable 侧 unref。改动后须回归 `gateway start --daemon` 就绪即返回 + daemon 崩溃日志仍可追。
 
-**CORRECT-08（P2，2026-10-30 噪音对照实验发现，tsx 实测复现）jsonpath 两处健壮性缺陷**
+**CORRECT-08（P2，2026-10-30 噪音对照实验发现，tsx 实测复现）jsonpath 三处健壮性缺陷**
 - 背景：`src/util/jsonpath.ts` 自 2026-10-09 init 后零改动、历轮全仓审查未点名，本次作为「已知干净对照」进噪音测量（中性 prompt，GLM-5.3-Flash）——审查者报 2 个问题，**逐条实证均为真**，非误报（详见 runs 噪音报告）。该文件被 `src/adapters/packs.ts:47,57` 的 L2 pack JSON 写路径直接消费（`k` 来自用户手写的 `[adapter_packs.*]` 路径表达式）。
 - 缺陷 ①（静默吞字/改写）：tokenize 正则 `/([^[.\]]+)|\[(\d+)\]/g` 只消费匹配段、不校验完整覆盖——`$.a['b']` 产出键 `"'b'"`（实测 `setPath({}, "$.a['b']", 1)` → `{"a":{"'b'":1}}`，写错位置且无任何报错）；`$.a[-1]` 成字符串键 `'-1'`（数组上写非索引属性，序列化即丢）；未闭合 `$.a[0` 成键 `'0'`，绕过稀疏数组越界守卫。
 - 缺陷 ②（star 中段裸崩）：`setPath({a:{b:1}, c:'str'}, '$.*.b', 2)` 实测抛 `TypeError: Cannot create property 'b' on string 'str'`——同函数其余分支对非 object 子节点均有兜底，唯 star 递归裸崩，且报错未经 t() 双语化。
