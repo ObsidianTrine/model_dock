@@ -87,9 +87,9 @@ describe('buildProgram 注册面', () => {
     expect(longOpts(uninstall).sort()).toEqual(['--purge', '--yes'])
   })
 
-  it('update：--check / --yes / --token / --clean 齐备', () => {
+  it('update：--check / --json / --yes / --token / --clean 齐备', () => {
     const update = prog.commands.find((c) => c.name() === 'update')!
-    expect(longOpts(update).sort()).toEqual(['--check', '--clean', '--token', '--yes'])
+    expect(longOpts(update).sort()).toEqual(['--check', '--clean', '--json', '--token', '--yes'])
   })
 
   it('config export/import：-o 与 --stdin-pass 齐备', () => {
