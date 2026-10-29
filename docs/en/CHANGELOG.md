@@ -19,6 +19,7 @@ Root-cause fix for the stuck Windows one-click update, plus multi-machine sync a
 - **The English UI no longer shows leftover Chinese**: a bilingual audit of CLI and gateway messages fixed 8 messages that were hardcoded in Chinese (dsh attach status notes, MiMo desktop leftovers, protocol options when adding a custom service, cloud pairing failure errors, etc.).
 - **`modeldock env` shows the right port**: with an instance running on a non-default port, the displayed environment variables still pointed at the default 8687; they now follow the actually running gateway.
 - **Multi-machine sync no longer misjudges conflicts**: pull-apply, baseline re-collection, and conflict detection ran outside a single atomic window, so concurrent timing could misjudge conflicts or drop local pending changes; they now share one config-write-lock atomic section.
+- **The 413 explanation for oversized requests always arrives**: when a request body exceeded the limit, the gateway used to reset the connection while the client was still uploading — clients could see a connection reset and retry automatically (a large-body retry loop) instead of receiving the 413 and the raise-the-limit hint; the body is now drained before replying, so the explanation always arrives.
 
 ## [1.5.0] - 2026-10-28
 
