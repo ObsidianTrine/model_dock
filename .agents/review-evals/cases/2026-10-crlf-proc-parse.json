@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-crlf-proc-parse",
+  "title": "parsePidCommandLines 不剥 CRLF 行尾——Windows PowerShell CIM 重定向输出为 CRLF（PS 5.1 实态），正则 (.*)$ 全行失配 → 进程枚举恒为空（托盘停不掉连环事故的真根因）",
+  "reviewRef": "e4ac854^",
+  "fixedBy": "e4ac854",
+  "files": ["src/cli/shared.ts"],
+  "expect": ["crlf", "\\r"],
+  "note": "e4ac854（22f20fd 之后补的真正根因修复）。修复 = match 前先 line.replace(/\\r$/, '')。审查侧教训：AGENTS/REVIEW 都写了「文本比较/正则前归一化换行 \\r\\n → \\n」，但落在具体解析函数里就是没人查——Windows 外部命令输出（PowerShell/CIM 重定向）默认 CRLF 是高频事故源，凡「跑外部命令拿文本再正则解析」的路径都要问一句「行尾是什么」"
+}

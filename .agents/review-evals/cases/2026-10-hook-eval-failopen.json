@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-hook-eval-failopen",
+  "title": "守卫 hook 的 evaluateCommand 裸调用无 try/catch——workflow.json 损坏等会让 hook 崩溃退出，而 PreToolUse hook 崩溃 = 放行，红线引擎从此静默失效（文件自己声明的 fail-open 语义没有贯彻到每一处可抛点）",
+  "reviewRef": "8c524ec^",
+  "fixedBy": "8c524ec",
+  "files": [".agents/hooks/policy-dispatch.mjs"],
+  "expect": ["fail-open", "evaluatecommand"],
+  "note": "8c524ec。修复 = evaluateCommand 包 try/catch，异常按 fail-open 放行 + stderr 指向检查配置（与文件顶部声明的语义一致：hook 崩溃退出只会让红线引擎静默失效，比放行更糟）。审查侧教训：声明了失败语义（fail-open/fail-closed）的组件，要把「每一处可抛点」都纳入该语义——顶层声明了、中层裸调用等于没声明；安全 hook 的失效模式本身就是审查对象"
+}
