@@ -89,15 +89,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 跑分之外，审查者顺带挖出的**当前版本仍存活**的问题（每条都有文件+行号证据，详见对应 runs/ 报告）：
 
 - **已修（本仓库同一提交）**：claude-review.yml 的 `[dependabot-fix]` 防回环守卫是死代码（merge 检出的 `git log -1` 永远匹配不上前缀）——两处 guard 改读 `github.event.pull_request.head.sha` 的提交 subject。
-- **待修清单（留给后续任务，未动产品代码）**：
-  - `.agents/scripts/orchestrator.mjs`：drain `--max`<`--workers` 时超发（烧钱面）；run 对 awaiting-human 卡烧完一轮必崩；resume「沿用上次后端」取的是第一个会话的后端；changedFiles/gateScopePurity 未传 baseBranch；installWorkspaceDeps 的 spawnSync('npm') 在 Windows ENOENT。
-  - `src/gateway/lan.ts`：stopLan 后空 Bearer 可过鉴权（keep-alive 保温 + `safeEqual('','')`）；buildLanStatus 忽略绑定 host，二维码列不可达地址。
-  - `src/update/webupdate.ts`：applyUpdate 的 updating 门闩无同步异常回滚（永久卡死一键更新）。
-  - `scripts/tray/ModelDockTray.cs`：CheckViaCli 按中文子串分类输出（英文环境把成功当失败）；注释承诺的 40s 看门狗不存在；TrayActions `_port`/`_token` 静态字段多线程无同步读写。
-  - `docs/bench-baseline.md:56`：「首字节」定义（响应头起算）与 :34 自称的端到端实测口径矛盾（clean-docs-bench 题审出，出题人误标干净的「误报」实为真问题）。
-  - `src/gateway/server.ts`：/_modeldock/model-catalog 视图缓存永不命中（fullKnownTable 每次 spread 新对象，注释宣称的缓存优化不存在）；probe() 对 responses 协议服务必失败且报错误导（server-reexport-drop 题审出）。
-  - `src/gateway/relay.ts`：多值响应头被 String() 拍平，多张 Set-Cookie 折叠成非法单值头（relay-client-abort 题审出）。
-  - `src/cli/providers.ts`：cmdProviderAdd「共 N 个」取过期快照必错；cmdProviderRm 先不可逆删密钥后做可失败的配置写，失败即丢凭据（filemode-route-guard 题审出）。
-  - `src/cli/shared.ts`：spawnDaemonAndWait 的 daemon stderr 管道钉住父 CLI 事件循环——daemon 启动成功后父进程永不退出（`gateway start --daemon` 不回提示符、SEA 双击窗口关不掉；评分 agent 本机实验坐实）；stderr 多字节 UTF-8 跨 chunk 乱码（crlf-proc-parse 题审出）。
-  - `.agents/hooks/policy-dispatch.mjs`：dispatcher 从事件 cwd import policy.mjs 且不校验文件写入——被守护对象覆写 policy.mjs 可让红线守卫静默自杀（audit 记 allowed）；JSON.parse('null') 绕过容错声明（hook-eval-failopen 题审出）。
+- **修复清账（2026-10-30，21 条全部落成编号任务卡并修复合并）**：
+  - 已修：orchestrator 五项（06/09 号卡，54b0602/6fa7775）；lan 空 Bearer 过鉴权 + buildLanStatus host（01 号卡）；webupdate updating 门闩（04 号卡，b7b91ad）；托盘 C# 三项（10 号卡，b338cb1，含 CLI 侧 update --json 配套）；bench 文档定义矛盾（11 号卡，0445dbf）；providers 三项（05 号卡，06a5940）；shared.ts stderr 管道钉死 + 乱码（03 号卡，7d21df0）；policy-dispatch 自杀面 + null 崩溃（02 号卡，c32451c）；relay Set-Cookie 折叠（07 号卡，035f99b）。
+  - **待修（唯一剩余，08 号卡 pending）**：`src/gateway/server.ts`——/_modeldock/model-catalog 视图缓存永不命中（fullKnownTable 每次 spread 新对象，注释宣称的缓存优化不存在）；probe() 对 responses 协议服务必失败且报错误导（server-reexport-drop 题审出）。
 - **方法论收获**：审出率 100% 说明「给足 REVIEW.md 纪律 + 干净单文件考题」的组合对这类历史 bug 召回充分；出题的瓶颈在**选题**（批次修复提交一文件多 bug 归因不清、需部署上下文的题、超 120KB 的巨型文件都要避开）。
