@@ -164,8 +164,15 @@ async function deadPort(): Promise<number> {
   return port
 }
 
+/** 打包结果 memo：同 (version, withTray) 的包内容与 staging 目录无关，多次调用只打一次——
+ *  8 个用例原先各 spawn 一次 tar / PowerShell Compress-Archive（win 侧明显更慢）。 */
+const archiveMemo = new Map<string, { name: string; buf: Buffer }>()
+
 /** 打一个平台相关的裸二进制更新包（unix=tar.gz 含 modeldock；win=zip 含 modeldock.exe） */
 function makeBareArchive(dir: string, version: string, opts: { withTray?: boolean } = {}): { name: string; buf: Buffer } {
+  const memoKey = `bare:${version}:${!!opts.withTray}`
+  const hit = archiveMemo.get(memoKey)
+  if (hit) return hit
   const staging = path.join(dir, 'pkg')
   fs.mkdirSync(staging, { recursive: true })
   if (process.platform === 'win32') {
@@ -178,11 +185,13 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
       fs.writeFileSync(tray, 'NEW-TRAY')
       parts.push(`'${tray}'`)
     }
-    const archive = path.join(dir, name)
-    const r = spawnSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path @(${parts.join(',')}) -DestinationPath '${archive}' -Force; if (!$?) { exit 1 }`], { stdio: 'ignore' })
-    if (r.status !== 0) throw new Error('Compress-Archive failed')
-    return { name, buf: fs.readFileSync(archive) }
-  }
+  const archive = path.join(dir, name)
+  const r = spawnSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path @(${parts.join(',')}) -DestinationPath '${archive}' -Force; if (!$?) { exit 1 }`], { stdio: 'ignore' })
+  if (r.status !== 0) throw new Error('Compress-Archive failed')
+  const result = { name, buf: fs.readFileSync(archive) }
+  archiveMemo.set(memoKey, result)
+  return result
+}
   const plat = process.platform === 'darwin' ? 'darwin' : 'linux'
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   const name = `modeldock-${version}-${plat}-${arch}.tar.gz`
@@ -196,11 +205,16 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
   const archive = path.join(dir, name)
   const r = spawnSync('tar', ['czf', archive, '-C', staging, ...files])
   if (r.status !== 0) throw new Error('tar failed')
-  return { name, buf: fs.readFileSync(archive) }
+  const result = { name, buf: fs.readFileSync(archive) }
+  archiveMemo.set(memoKey, result)
+  return result
 }
 
 /** mac-app 整包（tar.gz 内顶层 ModelDock.app/Contents/MacOS/ModelDock） */
 function makeAppArchive(dir: string, version: string): { name: string; buf: Buffer } {
+  const memoKey = `app:${version}`
+  const hit = archiveMemo.get(memoKey)
+  if (hit) return hit
   const staging = path.join(dir, 'pkg')
   const binDir = path.join(staging, 'ModelDock.app', 'Contents', 'MacOS')
   fs.mkdirSync(binDir, { recursive: true })
@@ -210,7 +224,9 @@ function makeAppArchive(dir: string, version: string): { name: string; buf: Buff
   const archive = path.join(dir, name)
   const r = spawnSync('tar', ['czf', archive, '-C', staging, 'ModelDock.app'])
   if (r.status !== 0) throw new Error('tar failed')
-  return { name, buf: fs.readFileSync(archive) }
+  const result = { name, buf: fs.readFileSync(archive) }
+  archiveMemo.set(memoKey, result)
+  return result
 }
 
 function mockDeps() {
