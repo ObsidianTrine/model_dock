@@ -80,7 +80,7 @@
 | `src/adapters/` | Harness 适配器（L1 内置 + L2 声明式 pack） |
 | `src/backup/` | 写盘前自动快照 |
 | `src/import/` | 从 cc-switch / Claude Code / dsh / ZCode 导入存量配置 |
-| `src/mcp/` | MCP 服务器盘点（只读扫描各客户端 MCP 配置，供 CLI / 控制台 / 后续下发共用） |
+| `src/mcp/` | MCP 配置只读盘点（CLI `mcp list` 与 doctor 安检的数据源；不做控制台页面与下发，见「判定边界」） |
 | `src/presets/` | 内置 provider 预设库 |
 | `src/providers/` | 上游模型目录拉取 |
 | `src/util/` | 路径、原子写、终端颜色、diff、JSONPath |
@@ -227,6 +227,7 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 - 改坏 `src/cli.ts` 三路分发、或改用 `import.meta.url` 做 SEA 检测。
 - **以任何形式测试、访问或改动 8687 生产实例**（起实例 / stop / kill / 重启 / 改配置 / 打接口 / 开页面 / 当验证目标）；**占用或改动 8890 用户 dev 沙箱**（启动 / stop / 删 `~/.modeldock-dev` 数据）；或让单测与临时实例监听写死端口（手测沙箱端口规则详见「端口与实例约定」⛔ 禁令）。
 - 绕过 feature-branch 工作流直接在 develop/main 上 Edit/Write 代码（hook 会拦截；例外与规程见「多 Agent 并行开发约定」）。
+- **新增 MCP 配置下发 / 统一管理、skill 管理 / 分发类功能**（2026-10-29 产品决策：MCP 走 stdio 无网关咽喉、配置低频变动，客户端原生管理已是标配——ModelDock 只做只读诊断（`mcp list` + doctor 安检），配置不下发、不进控制台；skills 跨机器用 sync assets 白名单覆盖，不建管理子系统）。
 
 > 其余如"不提交 `dist/`、`release/`、`.cache/`"由 `.gitignore` 强制，不在此重复。
 

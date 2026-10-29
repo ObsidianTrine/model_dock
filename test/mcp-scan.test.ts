@@ -1,14 +1,8 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import http from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { scanMcpServers, findDuplicateNames, type McpScanResult } from '../src/mcp/scan.js'
-import { emptyConfig } from '../src/config/types.js'
-import { saveConfig } from '../src/config/store.js'
-import { buildRuntime } from '../src/gateway/state.js'
-import { createGatewayServer } from '../src/gateway/server.js'
 
 // 只读盘点：不触网、不起真实上游。日历/目录拉取禁掉（与 gateway.test.ts 同口径防意外出站）
 process.env.MODELRDOCK_DISABLE_HOLIDAY_FETCH = '1'
@@ -179,33 +173,5 @@ describe('MCP 盘点扫描（scanMcpServers）', () => {
     })
     expect(findDuplicateNames([mk('b', 'codex'), mk('a', 'zcode'), mk('a', 'codex')])).toEqual(['a'])
     expect(findDuplicateNames([mk('a', 'codex')])).toEqual([])
-  })
-})
-
-describe('GET /_modeldock/mcp（控制台盘点端点）', () => {
-  it('未鉴权 401；鉴权后返回聚合清单', async () => {
-    const h = mkHome()
-    writeJson(h, ['.claude.json'], { mcpServers: { fs: { command: 'npx', args: ['-y', 'fs'] } } })
-    await saveConfig(emptyConfig())
-    const rt = buildRuntime(emptyConfig(), 'admin-token-x')
-    const server = createGatewayServer(rt, { port: 0 })
-    const port = await new Promise<number>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
-    })
-    try {
-      const base = `http://127.0.0.1:${port}/_modeldock`
-      expect((await fetch(base + '/mcp')).status).toBe(401)
-      const res = await fetch(base + '/mcp', { headers: { 'x-modeldock-admin': 'admin-token-x' } })
-      expect(res.status).toBe(200)
-      const j = (await res.json()) as { ok: boolean; servers: Array<{ name: string; harness: string }>; errors: unknown[] }
-      expect(j.ok).toBe(true)
-      expect(j.errors).toEqual([])
-      expect(j.servers.map((s) => s.name)).toEqual(['fs'])
-      expect(j.servers[0].harness).toBe('claude-code')
-    } finally {
-      server.closeAllConnections?.()
-      server.close()
-    }
   })
 })

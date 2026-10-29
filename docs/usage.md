@@ -226,7 +226,7 @@ modeldock mcp list --json                # 机器可读
 
 - 同一个名字在多个客户端重复出现会**点名提醒**——换命令或换 token 时最容易漏一处。
 - 覆盖用户级配置：Claude Code（`~/.claude.json`）、Codex（`~/.codex/config.toml`）、ZCode（`~/.zcode/cli/config.json`，缺省回退 `~/.agents/mcp.json`）、OpenCode（`~/.config/opencode/opencode.json`）；**各仓库工作区配置**（`<repo>/.mcp.json`、`<repo>/.zcode/config.json`）不在盘点范围。
-- **环境变量只记名字、绝不收集值**——清单可以放心贴出去排查。Web 控制台首页有同一份「MCP 服务器」卡片（自动刷新），文件损坏的来源会就地提示。
+- **环境变量只记名字、绝不收集值**——清单可以放心贴出去排查；配置文件损坏的来源会在清单开头点名提示（不影响其他来源）。
 
 ### 多机同步与云端管理（进阶）
 
