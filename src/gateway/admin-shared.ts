@@ -23,26 +23,46 @@ export async function readBody(req: http.IncomingMessage, max: number): Promise<
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
+    let over = false
+    let settled = false
+    let guard: NodeJS.Timeout | undefined
+    const settle = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      if (guard) clearTimeout(guard)
+      fn()
+    }
+    const overflow = () =>
+      new UpstreamError(
+        413,
+        t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max }),
+        t('模型改写需完整缓冲请求体；确需更大包体，在 config.toml 的 [gateway] 下设置 max_body_mb 后重启网关', 'Model rewriting buffers the full body; to allow larger bodies set max_body_mb under [gateway] in config.toml and restart the gateway')
+      )
     const onData = (chunk: Buffer) => {
       size += chunk.length
       if (size > max) {
+        over = true
         req.removeListener('data', onData)
+        // 不在 data 回调里 destroy；也不能立即 413 + close——客户端大概率仍在写入，
+        // 提前关闭会让其下一段写入撞 ECONNRESET（SDK 还会自动重试，形成超大包重传循环），
+        // 413 与修复提示永远到不了，负载越重越必现（实测 CI 门禁间歇红）。先排空到 end
+        // （客户端写完）再应答，413 必达；异常客户端迟迟不结束则限时毁连接兜底。
+        guard = setTimeout(() => {
+          req.destroy()
+          settle(() => reject(overflow()))
+        }, 10_000)
         req.resume()
-        reject(new UpstreamError(
-          413,
-          t('请求体超过 {max} 字节上限', 'Request body exceeds the {max}-byte limit', { max }),
-          t('模型改写需完整缓冲请求体；确需更大包体，在 config.toml 的 [gateway] 下设置 max_body_mb 后重启网关', 'Model rewriting buffers the full body; to allow larger bodies set max_body_mb under [gateway] in config.toml and restart the gateway')
-        ))
-        // 不在 data 回调里 destroy：先毁 socket 客户端只收到 ECONNRESET（SDK 还会自动重试，
-        // 形成超大包重传循环），413 与修复提示永远到不了。摘掉监听 + resume 排空剩余数据，
-        // 让 413 响应正常发出（sendError 对 413 补 Connection: close）。
         return
       }
       chunks.push(chunk)
     }
     req.on('data', onData)
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
+    // 单一 end 处理器按超限标志分流——若在这里再挂第二个 end 监听，先挂的 resolve 会
+    // 抢先 settle，超限请求被当正常处理返回 200（实测踩中）
+    req.on('end', () =>
+      settle(() => (over ? reject(overflow()) : resolve(Buffer.concat(chunks))))
+    )
+    req.on('error', (e) => settle(() => reject(e)))
   })
 }
 export function sendError(res: http.ServerResponse, status: number, message: string, hint?: string): void {
