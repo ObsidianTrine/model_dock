@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-orchestrator-backend-default",
+  "title": "orchestrator intent/spec 裸跑（不带 --backend）炸「未知后端 undefined」——读配置的路径缺缺省回落，undefined 直接流进后端解析",
+  "reviewRef": "27da5b8^",
+  "fixedBy": "27da5b8",
+  "files": [".agents/scripts/orchestrator.mjs"],
+  "expect": ["undefined", "backend"],
+  "note": "审查侧教训：CLI 参数/配置读取后要查「未传时的回落」——undefined 不该流进下游解析器；审查工具链脚本与产品代码同一标准（AGENTS.md 错误信息可操作约定同样适用）"
+}
