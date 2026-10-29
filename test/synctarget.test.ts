@@ -2,9 +2,9 @@ import http from 'node:http'
 import net from 'node:net'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { TEST_TMP, gotoHome, newHome, restoreHomes, waitFor } from './helpers.js'
 import { loadConfig, saveConfig, mutateConfig } from '../src/config/store.js'
 import { getSecret, makeKeyRef, setSecret } from '../src/config/secrets.js'
 import { backupsDir } from '../src/util/paths.js'
@@ -21,43 +21,21 @@ import { readSyncState, updateSyncState } from '../src/sync/state.js'
 import type { Config } from '../src/config/types.js'
 
 /**
- * 双机/多轮沙箱：fakeHome 的 restore 会删目录、且是全局 env——这里用持久临时目录 + 手动切换 env，
- * 支持「A 改 → 切 B → B 改 → 切回 A」的交错（冲突语义必须有真交错才能触发）。
- * 本仓库 vitest 是 singleFork+isolate:false（全文件共用一个进程与 process.env）——
- * 文件收尾必须把 env 恢复到进场前的原值（不能 delete 留空），否则后续文件会写到真实 home。
+ * 双机/多轮沙箱：多 home 交错切换用 helpers 的 newHome/gotoHome/restoreHomes（为何不用
+ * fakeHome.restore 见 helpers 注释）——支持「A 改 → 切 B → B 改 → 切回 A」的交错，
+ * 冲突语义必须有真交错才能触发。
  */
-const PREV_FAKE_HOME = process.env.MODELRDOCK_FAKE_HOME
-const PREV_MD_HOME = process.env.MODELRDOCK_HOME
-// os.tmpdir() 在部分 Windows 机器返回 8.3 短名路径（如 ZHOUQI~1）：fs.watch 该目录时
-// 文件事件会踩 libuv fs-event 断言（assert !_wcsnicmp(filename, dir, dirlen)）原生崩溃、
-// 拖死整个测试 fork（SyncLoop 用例必崩，2026-10-21 本机实测）。native realpath 走
-// GetFinalPathNameByHandle 把短名展开为长路径；普通 realpathSync 不展开。测试沙箱一律用它打底。
-const TMP = fsSync.realpathSync.native(os.tmpdir())
-const homes: string[] = []
 const targetDirs: string[] = []
-function newHome(): string {
-  const h = fsSync.mkdtempSync(path.join(TMP, 'modeldock-test-'))
-  homes.push(h)
-  gotoHome(h)
-  return h
-}
-function gotoHome(h: string): void {
-  process.env.MODELRDOCK_FAKE_HOME = h
-  delete process.env.MODELRDOCK_HOME
-}
 /** 每个用例独立的同步目标目录（防用例间 manifest/blob 串场） */
 async function newTargetDir(): Promise<string> {
-  const d = await fs.mkdtemp(path.join(TMP, 'modeldock-sync-target-'))
+  const d = await fs.mkdtemp(path.join(TEST_TMP, 'modeldock-sync-target-'))
   targetDirs.push(d)
   return d
 }
 afterAll(async () => {
-  if (PREV_FAKE_HOME === undefined) delete process.env.MODELRDOCK_FAKE_HOME
-  else process.env.MODELRDOCK_FAKE_HOME = PREV_FAKE_HOME
-  if (PREV_MD_HOME === undefined) delete process.env.MODELRDOCK_HOME
-  else process.env.MODELRDOCK_HOME = PREV_MD_HOME
-  for (const h of [...homes, ...targetDirs]) {
-    await fs.rm(h, { recursive: true, force: true }).catch(() => {})
+  await restoreHomes()
+  for (const d of targetDirs) {
+    await fs.rm(d, { recursive: true, force: true }).catch(() => {})
   }
 })
 
@@ -80,14 +58,6 @@ async function seedBase(): Promise<void> {
 
 async function readCfg(): Promise<Config> {
   return loadConfig()
-}
-
-async function waitFor(fn: () => Promise<boolean> | boolean, timeoutMs = 5000, stepMs = 25): Promise<void> {  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    if (await fn()) return
-    await new Promise((r) => setTimeout(r, stepMs))
-  }
-  throw new Error('waitFor timeout')
 }
 
 /** 内存 WebDAV 假件：GET/PUT/MKCOL + Basic 鉴权，listen(0) 随机端口（红线：绝不碰 8687/8890） */

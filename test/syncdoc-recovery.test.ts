@@ -16,8 +16,6 @@
  * 红线遵守：零 vi.mock；全真实模块直调；fakeHome 隔离（applySyncdoc 显式 backend:'file'，
  * 不触碰真实钥匙串）；不碰 8687/8890。
  */
-import fsSync from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { fakeHome } from './helpers.js'
@@ -36,8 +34,6 @@ import { readSyncState } from '../src/sync/state.js'
 import { SYNCDOC_FMT, type Syncdoc } from '../src/sync/types.js'
 import { buildRuntime, displayRouteProvider, pickTarget, resolveByProfile } from '../src/gateway/state.js'
 import type { Config } from '../src/config/types.js'
-
-const TMP = fsSync.realpathSync.native(os.tmpdir())
 
 /** 远端下发的标准文档：2 服务（1 明文 key + 1 env 引用）、2 路由、1 条定时规则、1 条自定义预设 */
 function makeDoc(): Syncdoc {

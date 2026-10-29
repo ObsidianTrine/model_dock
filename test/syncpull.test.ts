@@ -2,7 +2,7 @@ import { describe, expect, it, afterEach, vi } from 'vitest'
 import http from 'node:http'
 import os from 'node:os'
 import type { AddressInfo } from 'node:net'
-import { fakeHome } from './helpers.js'
+import { fakeHome, waitFor } from './helpers.js'
 import { loadConfig, saveConfig } from '../src/config/store.js'
 import { buildRuntime, reloadRuntime, type GatewayRuntime } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -442,35 +442,41 @@ describe('sync-nearby 附近电脑确认式直拉', () => {
     const { requestId } = (await reqRes.json()) as { requestId: string }
 
     // A 的 overview 出现待确认请求（含请求方主机名）。敲门是后台异步任务且 overview 有 2s TTL 缓存：
-    // 轮询等待（最多 ~5s），不在单次 GET 上赌时序
+    // waitFor 轮询（200ms 步进、条件一真即返回），不在单次 GET 上赌时序
     let overview: { syncRequest: { nonce: string; from: string } | null } | null = null
-    for (let i = 0; i < 25 && !(overview && overview.syncRequest); i++) {
-      await new Promise((r) => setTimeout(r, 200))
+    await waitFor(async () => {
       const ovRes = await fetch(`http://127.0.0.1:${a.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': ADMIN_A } })
       overview = (await ovRes.json()) as { syncRequest: { nonce: string; from: string } | null }
-    }
+      return !!(overview && overview.syncRequest)
+    }, 5000, 200)
     expect(overview && overview.syncRequest).toBeTruthy()
     expect(overview!.syncRequest!.from).toBe(osHostname())
 
     // A 允许 → B 轮询 remote-status 直到 granted（信封已自动拉回、验签、出票据）
-    // createSyncOffer→collectSyncdoc 走进程级全局路径：approve 期间临时切回 A home（生产单机单进程无此问题）
+    // createSyncOffer→collectSyncdoc 走进程级全局路径：approve 期间临时切回 A home（生产单机单进程无此问题）。
+    // 中途抛错也必须恢复——isolate:false 单 worker 下 env 泄漏给同 fork 后续所有文件（「单独绿、全量红」典型源头）
     const bHome = process.env.MODELRDOCK_FAKE_HOME
     process.env.MODELRDOCK_FAKE_HOME = a.home
-    const approve = await fetch(`http://127.0.0.1:${a.gwPort}/_modeldock/sync/offer-approve`, {
-      method: 'POST',
-      headers: { 'x-modeldock-admin': ADMIN_A, 'content-type': 'application/json' },
-      body: JSON.stringify({ nonce: overview.syncRequest!.nonce, approve: true }),
-    })
-    process.env.MODELRDOCK_FAKE_HOME = bHome
-    expect(approve.status).toBe(200)
+    try {
+      const approve = await fetch(`http://127.0.0.1:${a.gwPort}/_modeldock/sync/offer-approve`, {
+        method: 'POST',
+        headers: { 'x-modeldock-admin': ADMIN_A, 'content-type': 'application/json' },
+        body: JSON.stringify({ nonce: overview.syncRequest!.nonce, approve: true }),
+      })
+      expect(approve.status).toBe(200)
+    } finally {
+      process.env.MODELRDOCK_FAKE_HOME = bHome
+    }
     let granted: { status: string; ticket: string; report: { providers: string[] }; meta: { createdBy: string } } | null = null
-    for (let i = 0; i < 20 && !granted; i++) {
-      await new Promise((r) => setTimeout(r, 1000))
+    // 原为 20 次 × 1000ms（上限 20s 正好撞 testTimeout，worst-case 必红）：改 waitFor 250ms 步进、
+    // 条件一真即返回；18s + ~72 次 localhost fetch（<0.5s）仍低于 20s——净超时失败而非 harness 击杀
+    await waitFor(async () => {
       const st = (await (await fetch(`http://127.0.0.1:${b.gwPort}/_modeldock/sync/remote-status?id=${requestId}`, { headers: { 'x-modeldock-admin': ADMIN_B } })).json()) as { status: string; ticket?: string; report?: { providers: string[] }; meta?: { createdBy: string } }
       if (st.status === 'granted') granted = st as typeof granted
       expect(st.status).not.toBe('denied')
       expect(st.status).not.toBe('failed')
-    }
+      return granted !== null
+    }, 18_000, 250)
     expect(granted).toBeTruthy()
     expect(granted!.report.providers.sort()).toEqual(['ark', 'envprov'])
     expect(JSON.stringify(granted)).not.toContain('sk-ark-pull-plaintext')

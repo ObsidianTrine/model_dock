@@ -1,9 +1,8 @@
-import fsSync from 'node:fs'
 import fsp from 'node:fs/promises'
 import net from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { TEST_TMP, gotoHome, newHome, restoreHomes } from './helpers.js'
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
 import { CloudStore } from '../src/cloud/store.js'
@@ -14,22 +13,11 @@ import { readSyncState, updateSyncState, type SyncState } from '../src/sync/stat
 import { switchToService } from '../src/ops.js'
 import type { Config } from '../src/config/types.js'
 
-/** 双沙箱 + 单云端进程（listen(0)，红线：绝不碰 8687/8890） */
-const homes: string[] = []
-function newHome(): string {
-  const h = fsSync.mkdtempSync(path.join(os.tmpdir(), 'modeldock-test-'))
-  homes.push(h)
-  gotoHome(h)
-  return h
-}
-function gotoHome(h: string): void {
-  process.env.MODELRDOCK_FAKE_HOME = h
-  delete process.env.MODELRDOCK_HOME
-}
+/** 双沙箱 + 单云端进程（listen(0)，红线：绝不碰 8687/8890）；多 home 切换走 helpers 三件套 */
 const dataDirs: string[] = []
 afterAll(async () => {
-  delete process.env.MODELRDOCK_FAKE_HOME
-  for (const d of [...homes, ...dataDirs]) await fsp.rm(d, { recursive: true, force: true }).catch(() => {})
+  await restoreHomes()
+  for (const d of dataDirs) await fsp.rm(d, { recursive: true, force: true }).catch(() => {})
 })
 
 async function seedBase(): Promise<void> {
@@ -49,7 +37,7 @@ async function seedBase(): Promise<void> {
 }
 
 async function startCloud(): Promise<{ port: number; store: CloudStore; consoleToken: string; url: string; close: () => Promise<void> }> {
-  const dataDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'md-cloud-agent-'))
+  const dataDir = await fsp.mkdtemp(path.join(TEST_TMP, 'md-cloud-agent-'))
   dataDirs.push(dataDir)
   const store = new CloudStore(dataDir)
   const consoleToken = 'mdkcloud_' + 'b'.repeat(32)

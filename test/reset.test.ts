@@ -1,10 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { fakeHome } from './helpers.js'
+import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import {
   backupsDir,
   configPath,
@@ -20,10 +18,7 @@ import {
 //   cmdReset 会踩雷**——它经 basic.ts 触达网关/钥匙环/适配器等被别的测试文件 mock 的模块，实测会让
 //   uninstall.test 的模块 mock 调用记录随机丢失（假失败）。所以这里改走 CLI 子进程（项目对沙箱手测
 //   已是同一套配方）：真实现 + 独立沙箱，进程内零 mock，天然与别的测试文件互不干扰。
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
-/** tsx 的 ESM loader：经 node --import 直跑 .ts 源码，免 shell、三平台一致 */
-const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
 /** 在独立沙箱里同步跑一次真实 CLI，返回 { status, output } */
 function runResetCli(sandbox: string, args: string[]): { status: number; output: string } {
