@@ -19,7 +19,7 @@ export interface TestRepo {
 }
 
 /** 建一个最小可跑 orchestrator 的临时仓库：develop 分支 + 初始 commit。 */
-export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string }): TestRepo {
+export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBackend?: string }): TestRepo {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'))
   const g = (args: string) => git(root, args)
   // git init -b 需要 git ≥2.28（本机 2.23）；symbolic-ref 全版本可用
@@ -36,6 +36,7 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string }): TestRe
   fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
   const workflow: Record<string, unknown> = { baseBranch: 'develop', testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"' }
   if (opts?.uiCheckCmd) workflow.uiCheckCmd = opts.uiCheckCmd
+  if (opts?.workerBackend) workflow.worker = { backend: opts.workerBackend }
   fs.writeFileSync(path.join(root, '.agents', 'workflow.json'), JSON.stringify(workflow))
   fs.writeFileSync(path.join(root, '.agents', 'workflows', 'feature-branch.md'), '# feature-branch（stub）\n\n测试占位。')
   fs.writeFileSync(

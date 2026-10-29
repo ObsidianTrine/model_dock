@@ -221,6 +221,15 @@ async function cmdRun(repoRoot, taskId, opts) {
     opts.backend = cfg.worker.backend;
     log(`执行引擎（workflow.json worker 默认）：${opts.backend}`);
   }
+  // 后端切换人工闸门：最终 worker 引擎 ≠ workflow.json worker.backend（配置默认）即视为「切换 CLI」，
+  // 必须显式批准才放行——自治跑在引擎起不来时静默换引擎，会把任务烧到非预期的模型与账单上
+  // （2026-10-29 夜跑事故：ORCH_ZCODE_CLI 未设 → zcode ENOENT/GLM 429 → 全量静默切 claude-headless 直连 DeepSeek）。
+  if (cfg.worker?.backend && opts.backend !== cfg.worker.backend
+      && !opts.flags?.has('--approve-backend-switch') && process.env.ORCH_APPROVE_BACKEND_SWITCH !== '1') {
+    die(`执行引擎 ${opts.backend} ≠ workflow.json worker.backend（${cfg.worker.backend}）：切换 CLI 需人工审核。\n`
+      + `确认切换：本命令追加 --approve-backend-switch（或设环境 ORCH_APPROVE_BACKEND_SWITCH=1）；\n`
+      + `不切换：修复原引擎的启动环境（如设 ORCH_ZCODE_CLI、GLM 429 退避并降并发）后重跑；任务卡未动。`);
+  }
   const workerModel = opts.workerModel ?? cfg.worker?.model ?? undefined; // 仅 claude 系 CLI 生效（--model）
 
   // 审查后端（异构审查）：执行与审查分体。显式 --review-backend / workflow.json review >
@@ -1484,6 +1493,7 @@ function usage() {
   logs <task-id>                          打印事件时间线
 
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
+闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
 审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
 红线：发布动作永远人工；端口红线按 workflow.json protectedPorts（配置即生效）；熔断不可关闭。`);
 }
