@@ -3928,3 +3928,56 @@ describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 
     expect(autoRouteInfo(rt)).toMatchObject({ routeNext: 'pa', next: 'pb', nextPinnedSkipped: true })
   })
 })
+
+describe('转发多值响应头（set-cookie 折叠回归）', () => {
+  it('上游两条 Set-Cookie → 客户端 raw headers 收到两条独立 Set-Cookie（不得折叠为 a,b）', async () => {
+    // RFC 6265：Set-Cookie 的 Expires 含逗号，折叠为 'a,b' 客户端解析必错；
+    // undici 对重复头返回 string[]，转发层必须保数组语义、由 node 逐条写出
+    const cookieUp = http.createServer((_req, res) => {
+      res.setHeader('set-cookie', ['a=1; Expires=Wed, 21 Oct 2027 07:28:00 GMT', 'b=2; Path=/'])
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ id: 'msg_1', role: 'assistant', content: [] }))
+    })
+    const upPort = await new Promise<number>((resolve) => cookieUp.listen(0, '127.0.0.1', () => resolve((cookieUp.address() as AddressInfo).port)))
+    const h = fakeHome()
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      providers: {
+        A: { name: 'cookieUp', base_url: `http://127.0.0.1:${upPort}`, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'sk-a' },
+      },
+      profiles: { demo: { provider: 'A', default_model: 'preset-model' } },
+      harness: { 'claude-code': { mode: 'gateway', route: 'default', token: TOKEN } },
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const raw = await new Promise<http.IncomingMessage>((resolve, reject) => {
+        const r = http.request(`http://127.0.0.1:${gwPort}/v1/messages`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        }, resolve)
+        r.on('error', reject)
+        r.end(JSON.stringify({ model: 'preset-model', max_tokens: 10, messages: [] }))
+      })
+      const setCookies: string[] = []
+      for (let i = 0; i < raw.rawHeaders.length - 1; i += 2) {
+        if (raw.rawHeaders[i].toLowerCase() === 'set-cookie') setCookies.push(raw.rawHeaders[i + 1])
+      }
+      expect(setCookies).toEqual(['a=1; Expires=Wed, 21 Oct 2027 07:28:00 GMT', 'b=2; Path=/'])
+      // 普通单值头行为不变
+      expect(raw.rawHeaders).toContain('application/json')
+      // 消费掉响应体再收尾，避免 close 撞上在途流
+      await new Promise<void>((resolve) => {
+        raw.resume()
+        raw.on('end', () => resolve())
+      })
+    } finally {
+      server.close()
+      cookieUp.close()
+      h.restore()
+    }
+  })
+})
