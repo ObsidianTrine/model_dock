@@ -319,9 +319,11 @@ export function pickTarget(
   const pinEligible = base.viaHarnessPin === true && eligible(base.profile.provider)
   const forcedEligible = !pinEligible && !!forcedId && eligible(forcedId)
   const winEligible = !forcedEligible && !!(winParsed && rt.config.providers[winParsed.providerId] && eligible(winParsed.providerId))
-  const primaryId = pinEligible ? base.profile.provider : forcedEligible ? forcedId! : winEligible ? winParsed!.providerId : base.profile.provider
+  // winPrimary：winEligible 已含 winParsed 非空与可用性判定——if-local 提取代替散落的 winParsed! 非空断言
+  const winPrimary = winEligible && winParsed ? winParsed : null
+  const primaryId = pinEligible ? base.profile.provider : forcedEligible ? forcedId! : winPrimary ? winPrimary.providerId : base.profile.provider
   // 钉住即该服务自己的口径：窗口条目携带的模型改写不参与（与全局钉定同规，见「钉定为服务级」用例）
-  const primaryOverride = !pinEligible && winEligible ? winParsed!.model : undefined
+  const primaryOverride = !pinEligible && winPrimary ? winPrimary.model : undefined
   const preferredKind: 'pinned' | 'schedule' | 'default' = pinEligible || forcedEligible ? 'pinned' : winEligible ? 'schedule' : 'default'
   // 包一层统一出口：首候选被避开/首选不可用时如实标记来源与降级来源，供「正在使用」显示
   const choose = (list: OrderedCandidate[]): PickResult => {
