@@ -15,13 +15,39 @@ concurrency:
 
 jobs:
   # ─── 发布前预检：CHANGELOG 必须已有该版本段，缺失时秒级失败，不烧五平台构建 ──
+  # tested 输出：tag 指向 commit 的 test workflow（同 sha 的三平台全量）是否已验全绿——
+  # 发布流程本就要求「先等 main test 全绿再推 tag」，已验时 build 腿不再重复跑全量
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # gh api 查 test workflow 结论所需
+    outputs:
+      tested: ${{ steps.tested.outputs.tested }}
     steps:
       - uses: actions/checkout@v7
       - name: CHANGELOG 版本段预检
         run: node scripts/extract-release-notes.mjs --check "$GITHUB_REF_NAME"
+      - name: 核验 tag commit 的 test workflow 结论
+        id: tested
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # annotated tag 的 github.sha 可能是 tag 对象而非 commit：从 ref 解析 commit sha，
+          # 解析失败回退 github.sha（保守——查不到结论时 build 腿自测）
+          SHA=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}" 2>/dev/null || echo "$GITHUB_SHA")
+          echo "tag commit: $SHA"
+          # 同 sha 的 test.yml run：completed+success 才算已验；在跑/无记录/失败一律按未验证处理
+          RESULT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SHA" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/test.yml")] | sort_by(.created_at) | last | "\(.status // "none") \(.conclusion // "none")"' \
+            2>/dev/null || echo "none none")
+          echo "test workflow 状态: $RESULT"
+          if [ "$RESULT" = "completed success" ]; then
+            echo "tested=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tested=false" >> "$GITHUB_OUTPUT"
+          fi
 
   # ─── 每个平台一个构建 job ─────────────────────────────────
   build:
@@ -56,9 +82,37 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - run: npm ci
+      # 交叉编译腿要下载目标平台 Node 二进制（~25-45MB/腿）入 .cache/node-binaries，
+      # runner 临时盘跨 run 不复用——actions/cache 落一份；当前平台腿直接复制
+      # process.execPath 不下载，故只给交叉腿挂缓存。build-sea 的 SHASUMS 复核
+      # 缓存命中仍在线比对（防缓存污染），供应链门禁不降
+      - id: nodever
+        if: matrix.target == 'linux-arm64' || matrix.target == 'darwin-x64'
+        shell: bash
+        run: echo "ver=$(grep -oE 'node-v[0-9]+\.[0-9]+\.[0-9]+' scripts/build-sea.mjs | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Cache cross-compiled Node binaries
+        if: matrix.target == 'linux-arm64' || matrix.target == 'darwin-x64'
+        uses: actions/cache@v5
+        with:
+          path: .cache/node-binaries
+          key: node-binaries-${{ steps.nodever.outputs.ver }}-${{ matrix.target }}
+          restore-keys: node-binaries-${{ steps.nodever.outputs.ver }}-
+
+      - run: npm ci --no-audit --no-fund
+
+      # 门禁溯源说明：tested=true 时下面的 Test 步骤被跳过——tag commit 的三平台全量已在
+      # test workflow 验过（preflight 核验），五腿不必各付一遍；未验得全绿则照旧腿内自测
+      - name: Test gate decision
+        shell: bash
+        run: |
+          if [ "${{ needs.preflight.outputs.tested }}" = "true" ]; then
+            echo "Test: SKIP — tag commit 的 test workflow 已核验全绿（preflight tested=true），不重复腿内全量"
+          else
+            echo "Test: RUN — tag commit 未能验得全绿（在跑/无记录/失败），本腿自跑全量兜底"
+          fi
 
       - name: Test
+        if: needs.preflight.outputs.tested != 'true'
         run: npm test
 
       # setup.exe 由 build-sea 内部调 Inno Setup 编译（windows-latest 预装 ISCC 6）；
