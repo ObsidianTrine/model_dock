@@ -47,6 +47,7 @@ import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from 
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, nightlyWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
+import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -56,17 +57,27 @@ const SCRIPT_VERSION = 'phase1';
 // ---------------------------------------------------------------------------
 
 function findRepoRoot() {
-  // 与 feature-branch.mjs 同款：git 优先（兼容从 worktree 内调用），回退向上找 .git
+  // 与 feature-branch.mjs 同款（--git-common-dir）：linked worktree 内它指向主仓库的
+  // .git，据此推出主仓库根——--show-toplevel 会返回 worktree 自身，把 queue/ 锚进
+  // worktree，与「finish 需主仓库检出」矛盾（两处实现曾语义相反，统一到前者）。
+  // git 不可用时回退向上找 .git。
   try {
-    return execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', cwd: process.cwd() }).trim();
-  } catch {
-    let dir = process.cwd();
-    for (;;) {
-      if (fs.existsSync(path.join(dir, '.git'))) return dir;
-      const parent = path.dirname(dir);
-      if (parent === dir) die('无法定位仓库根（当前目录不在 git 仓库内）。请从主仓库根目录运行 orchestrator。');
-      dir = parent;
+    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    if (common) {
+      const dotGit = path.resolve(process.cwd(), common);
+      if (fs.existsSync(dotGit)) return path.dirname(dotGit);
     }
+  } catch { /* not inside a repo (or git missing) — fall through to the walk-up */ }
+  let dir = process.cwd();
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.git'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) die('无法定位仓库根（当前目录不在 git 仓库内）。请从主仓库根目录运行 orchestrator。');
+    dir = parent;
   }
 }
 
@@ -181,7 +192,8 @@ function installWorkspaceDeps(worktree, taskId) {
   const modules = path.join(worktree, 'node_modules');
   if (!fs.existsSync(pkg) || !fs.existsSync(lock) || fs.existsSync(modules)) return;
   log(`worktree ${taskId} 缺少 node_modules，先安装依赖（package-lock.json 锁定）……`);
-  const r = spawnSync('npm', ['ci', '--no-fund', '--no-audit'], { cwd: worktree, stdio: 'inherit' });
+  // Windows 的 npm 是 .cmd 包装，spawnSync 直调必 ENOENT——win32 走 shell（见 spawn-shell.mjs）
+  const r = spawnSync('npm', ['ci', '--no-fund', '--no-audit'], shellSpawnOptions(process.platform, { cwd: worktree, stdio: 'inherit' }));
   if (r.status !== 0) die(`worktree 依赖安装失败（exit ${r.status}）。请在该 worktree 内手动 npm ci 后重跑 run/resume。`, r.status ?? 1);
 }
 
