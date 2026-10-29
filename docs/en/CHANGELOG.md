@@ -5,11 +5,20 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.5.1] - 2026-10-29
+
+Root-cause fix for the stuck Windows one-click update, plus multi-machine sync atomicity and a lighter console page.
+
+### Improved
+
+- **A lighter console page**: the embedded scripts are properly minified, shrinking the page 27% (314 KB → 229 KB) for faster loads with zero behavior change.
 
 ### Fixed
 
-- **One-click update no longer sticks at "cannot close applications"**: the pre-update step that stops the tray used to fail silently, leaving the tray running with a file lock so the install wizard stalled at an "unable to close all applications" prompt (needing a manual retry or quitting the tray by hand); the tray is now stopped with kill-verify-retry, every step is written to the update log, and the wizard force-closes any remaining lockers instead of waiting 30 seconds for a confirmation prompt.
+- **One-click update no longer sticks at "cannot close applications"**: the pre-update step that stops the tray used to fail silently — the process list was parsed as empty due to a line-ending defect, so the tray kept its file lock all the way into the install wizard and the install stalled at an "unable to close all applications" prompt (needing a manual retry or quitting the tray by hand); the tray is now stopped with kill-verify-retry, every step is written to the update log, and the wizard force-closes any remaining lockers instead of waiting 30 seconds for a confirmation prompt.
+- **The English UI no longer shows leftover Chinese**: a bilingual audit of CLI and gateway messages fixed 8 messages that were hardcoded in Chinese (dsh attach status notes, MiMo desktop leftovers, protocol options when adding a custom service, cloud pairing failure errors, etc.).
+- **`modeldock env` shows the right port**: with an instance running on a non-default port, the displayed environment variables still pointed at the default 8687; they now follow the actually running gateway.
+- **Multi-machine sync no longer misjudges conflicts**: pull-apply, baseline re-collection, and conflict detection ran outside a single atomic window, so concurrent timing could misjudge conflicts or drop local pending changes; they now share one config-write-lock atomic section.
 
 ## [1.5.0] - 2026-10-28
 
@@ -408,6 +417,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.5.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.3...v1.5.0
 [1.4.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.1...v1.4.2
