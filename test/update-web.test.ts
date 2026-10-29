@@ -22,6 +22,7 @@ import {
   watchApplyChild,
 } from '../src/update/webupdate.js'
 import { writeUpdateProgress, updateProgressPath } from '../src/update/progress.js'
+import { logsDir, modeldockDir } from '../src/util/paths.js'
 import type { ReleaseManifest } from '../src/update/check.js'
 import { updateDaemonArgs } from '../src/autostart.js'
 
@@ -334,6 +335,35 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       const r2 = applyUpdate(rt, { argv, latest: '999.0.0', spawner: () => spawned.push({ argv: [], logFile: '' }) })
       expect(r2.started).toBe(false)
       expect(r2.reason).toBe('in_progress')
+      expect(spawned).toHaveLength(1)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('applyUpdate 门闩后的同步失败复位 updating 并返回 failed——不再永久卡 in_progress', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      const argv = updateDaemonArgs()
+      // 失败注入：logsDir() 路径被普通文件占用 → mkdirSync(recursive) 抛 EEXIST（三平台一致），
+      // 不用 mock fs 就能命中门闩之后的第一个同步失败点
+      fs.mkdirSync(modeldockDir(), { recursive: true })
+      fs.writeFileSync(logsDir(), 'not a directory')
+      const r = applyUpdate(rt, {
+        argv,
+        latest: '999.0.0',
+        spawner: () => {
+          throw new Error('should not reach spawner when mkdir failed')
+        },
+      })
+      expect(r).toEqual({ started: false, reason: 'failed' })
+      expect((await getUpdateStatus(rt)).applyError).toBeTruthy()
+      // 复位后可重试：移除占位文件，同一 rt 再试成功（证明 updating 没有永久卡死）
+      fs.rmSync(logsDir())
+      const spawned: string[][] = []
+      const r2 = applyUpdate(rt, { argv, latest: '999.0.0', spawner: (a, lf) => spawned.push(a) || void lf })
+      expect(r2.started).toBe(true)
       expect(spawned).toHaveLength(1)
     } finally {
       h.restore()

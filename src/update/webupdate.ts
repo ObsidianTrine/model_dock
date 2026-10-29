@@ -221,8 +221,8 @@ export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusP
 
 export interface ApplyResult {
   started: boolean
-  /** no_update = 没有可安装的新版本；in_progress = 更新已在进行 */
-  reason?: 'no_update' | 'in_progress'
+  /** no_update = 没有可安装的新版本；in_progress = 更新已在进行；failed = 启动阶段同步失败（updating 已复位，可重试） */
+  reason?: 'no_update' | 'in_progress' | 'failed'
   latest?: string
 }
 
@@ -239,26 +239,34 @@ export function applyUpdate(
   if (state.updating) return { started: false, reason: 'in_progress' }
   state.updating = true
   state.applyError = null
-  const argv = opts.argv
-  // 子进程输出落日志：更新过程跨网关死亡，页面看不到的错误要能从文件里查
-  fs.mkdirSync(logsDir(), { recursive: true })
-  const logFile = path.join(logsDir(), `update-${localDateStr()}.log`)
-  if (opts.spawner) {
-    opts.spawner(argv, logFile)
-  } else {
-    const fd = fs.openSync(logFile, 'a')
-    try {
-      const child = spawn(argv[0], argv.slice(1), {
-        detached: true,
-        stdio: ['ignore', fd, fd],
-        env: process.env,
-        windowsHide: true,
-      })
-      watchApplyChild(child, logFile, { delayMs: opts.watchDelayMs })
-      child.unref()
-    } finally {
-      fs.closeSync(fd)
+  try {
+    const argv = opts.argv
+    // 子进程输出落日志：更新过程跨网关死亡，页面看不到的错误要能从文件里查
+    fs.mkdirSync(logsDir(), { recursive: true })
+    const logFile = path.join(logsDir(), `update-${localDateStr()}.log`)
+    if (opts.spawner) {
+      opts.spawner(argv, logFile)
+    } else {
+      const fd = fs.openSync(logFile, 'a')
+      try {
+        const child = spawn(argv[0], argv.slice(1), {
+          detached: true,
+          stdio: ['ignore', fd, fd],
+          env: process.env,
+          windowsHide: true,
+        })
+        watchApplyChild(child, logFile, { delayMs: opts.watchDelayMs })
+        child.unref()
+      } finally {
+        fs.closeSync(fd)
+      }
     }
+  } catch (e) {
+    // 门闩后的同步失败（日志目录建不出/日志文件被占 EBUSY/spawn 同步抛）必须复位 updating——
+    // 否则 state.updating 永久卡 true，之后所有一键更新都返回 in_progress，只能重启网关（评测集审出）
+    state.updating = false
+    state.applyError = (e as Error).message
+    return { started: false, reason: 'failed' }
   }
   return { started: true, latest }
 }
