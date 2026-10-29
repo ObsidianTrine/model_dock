@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-filemode-route-guard",
+  "title": "file 模式（独立直连）客户端自管路由、不沿网关转发，但钉定保护守卫不区分形态——删除其登记 route 的 profile 被错误拦截，或留下指向已删 profile 的悬空 route",
+  "reviewRef": "77fa6b8^",
+  "fixedBy": "77fa6b8",
+  "files": ["src/cli/profiles.ts", "src/cli/providers.ts"],
+  "expect": ["file", "悬空"],
+  "note": "修复 = 守卫对 he.mode !== 'file' 才拦截，file 模式 route 随删除复位 default。审查侧教训：同一字段（harness.route）在不同客户端形态下语义不同（网关转发 vs 自管登记痕迹）——守卫/校验逻辑要按形态分流，不能一视同仁；「独立直连」模式是早期形态，评审新守卫时别忘了它"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-relay-client-abort",
+  "title": "客户端断开连接后网关继续向上游转发——转发链路不监听 res close、无 AbortController 取消传播，非流式长推理客户端走人后上游 token 白烧到推理结束",
+  "reviewRef": "d41f847^",
+  "fixedBy": "d41f847",
+  "files": ["src/gateway/relay.ts"],
+  "expect": ["abort", "close", "取消"],
+  "note": "d41f847①。修复 = res close → AbortController 经 ForwardOptions.signal 进 undici request，failover 对 aborted 短路不记熔断。审查侧教训：代理/转发链路的取消要端到端传播（客户端断开 → 中止上游请求），否则「白烧钱」类缺陷不可见无报错；failover 循环还要区分「用户取消」与「上游失败」，别把前者记成熔断"
+}

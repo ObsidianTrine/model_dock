@@ -75,8 +75,11 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 | 2026-10-clean-chore-rm-debug | 噪声对照：纯删除 43 行调试壳（干净改动） | fe53330 | ✅ 无误报（10-30，GLM subagent）——核实后零报告 |
 | 2026-10-clean-docs-bench | 噪声对照：新增 bench 基线文档（出题人误标干净） | 6fc99b7 | ❌ 机械口径误报，人工复核=真问题（:34/:56 首字节定义自相矛盾，「它撒谎」命中）——ground truth 标注错误的正例，保留作歧义样本 |
 | 2026-10-server-reexport-drop | server.ts 拆分后原导入面 7 个符号未 re-export，外部测试全断 | d039010 | ✅（10-30，GLM subagent）穷尽式核对 13→6 导出 + 逐条对上快照树测试导入；+2 个活缺陷（catalog 缓存永不命中、probe 对 responses 必失败） |
+| 2026-10-autoroute-doclink-xss | 控制台 docLinkA href 只做 HTML 转义没做协议白名单，presets.json docs_url 可注入 javascript: | d41f847 | ✅（10-30，GLM subagent）信任边界沿到渲染端 + CSP 拦不住的论证 |
+| 2026-10-relay-client-abort | 客户端断开后网关继续向上游转发，非流式长推理白烧 token | d41f847 | ✅（10-30，GLM subagent）同批 ①⑤⑧ 三片全找齐 + Set-Cookie 折叠活缺陷 |
+| 2026-10-filemode-route-guard | 删除守卫不区分 harness mode，file 模式误拦 + 悬空 route 残留 | 77fa6b8 | ✅（10-30，GLM subagent）两处守卫 + 3 个活缺陷（providers 统计过期快照/先删密钥后写/ensureProfile 重名） |
 
-**基线：召回 21/21 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 13/13）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+**基线：召回 24/24 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 16/16）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 评测循环产出（2026-10-30 夜训）
 
@@ -90,4 +93,6 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
   - `scripts/tray/ModelDockTray.cs`：CheckViaCli 按中文子串分类输出（英文环境把成功当失败）；注释承诺的 40s 看门狗不存在；TrayActions `_port`/`_token` 静态字段多线程无同步读写。
   - `docs/bench-baseline.md:56`：「首字节」定义（响应头起算）与 :34 自称的端到端实测口径矛盾（clean-docs-bench 题审出，出题人误标干净的「误报」实为真问题）。
   - `src/gateway/server.ts`：/_modeldock/model-catalog 视图缓存永不命中（fullKnownTable 每次 spread 新对象，注释宣称的缓存优化不存在）；probe() 对 responses 协议服务必失败且报错误导（server-reexport-drop 题审出）。
+  - `src/gateway/relay.ts`：多值响应头被 String() 拍平，多张 Set-Cookie 折叠成非法单值头（relay-client-abort 题审出）。
+  - `src/cli/providers.ts`：cmdProviderAdd「共 N 个」取过期快照必错；cmdProviderRm 先不可逆删密钥后做可失败的配置写，失败即丢凭据（filemode-route-guard 题审出）。
 - **方法论收获**：审出率 100% 说明「给足 REVIEW.md 纪律 + 干净单文件考题」的组合对这类历史 bug 召回充分；出题的瓶颈在**选题**（批次修复提交一文件多 bug 归因不清、需部署上下文的题、超 120KB 的巨型文件都要避开）。
