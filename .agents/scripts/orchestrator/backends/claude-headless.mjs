@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
+import { quoteArgsForShell } from '../spawn-shell.mjs';
 import { zcodeAvailable } from './zcode-headless.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -107,6 +108,28 @@ export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
   return args;
 }
 
+/**
+ * spawn 实参/选项组装（纯函数，platform 注入供任意 OS 断言双分支；调用处只做
+ * spawn(inv.cmd, inv.args, inv.options)）。
+ * Windows 上 claude 是 .cmd 包装，spawn 必须走 shell 才能命中——可用性探测
+ * （claudeAvailable）已带 win32 shell，spawn 必须同语义，否则「探测说可用、
+ * 实际起不来」，worker/审查全挂落 blocked/。prompt 走 stdin，不受 shell 命令行
+ * 长度限制；含空格的 args（--allowedTools 白名单族、--settings 临时路径）由
+ * quoteArgsForShell 包引号。unix 不加 shell（sh -c 包装改变进程组/信号语义，
+ * detached 独立进程组 + 熔断杀树依赖它）。
+ */
+export function claudeSpawnInvocation(platform, args, { cwd, envPatch }) {
+  const useShell = platform === 'win32';
+  const options = {
+    cwd,
+    detached: !useShell, // win32 无 detached（shell 包装层无进程组意义）；unix 独立进程组，熔断时可整组 kill（kill-tree.mjs）
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(useShell ? { shell: true } : {}),
+  };
+  if (envPatch && Object.keys(envPatch).length) options.env = { ...process.env, ...envPatch };
+  return { cmd: 'claude', args: quoteArgsForShell(args, useShell), options };
+}
+
 export const claudeHeadlessBackend = {
   name: 'claude-headless',
 
@@ -115,13 +138,10 @@ export const claudeHeadlessBackend = {
       const prompt = fs.readFileSync(promptFile, 'utf8');
       const args = buildClaudeArgs({ maxTurns, readonly, model, settingsFile });
 
-      // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）
-      const child = spawn('claude', args, {
-        cwd,
-        detached: process.platform !== 'win32',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        ...(envPatch && Object.keys(envPatch).length ? { env: { ...process.env, ...envPatch } } : {}),
-      });
+      // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）——组装细节见
+      // claudeSpawnInvocation（win32 shell 同语义探测纪律）
+      const inv = claudeSpawnInvocation(process.platform, args, { cwd, envPatch });
+      const child = spawn(inv.cmd, inv.args, inv.options);
       onEvent({ type: 'worker_spawned', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
 
       let tokensIn = 0;

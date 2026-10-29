@@ -10,6 +10,7 @@ import path from 'node:path';
 import { runCmd } from './gates.mjs';
 import { cardPath, findCard } from './queue.mjs';
 import { toIsoLocal } from './events.mjs';
+import { shellSpawnOptions } from './spawn-shell.mjs';
 
 /** sha256 前 8 位：卡 id 稳定性用（内容不变 → 同 id → 重复巡检自然去重）。 */
 export function sha8(s) {
@@ -85,7 +86,9 @@ export function scanTodo(repoRoot) {
 
 /** 信号源 2：npm audit 漏洞（汇总为一张卡）。 */
 export function scanAudit(repoRoot) {
-  const r = spawnSync('npm', ['audit', '--json'], { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 });
+  // Windows 的 npm 是 .cmd 包装，spawnSync 直调必 ENOENT——win32 走 shell（见 spawn-shell.mjs）；
+  // 失败由下方 catch 归一为 skipped，但静默失效会掐断 nightly audit 信号源，这里必须能真跑起来
+  const r = spawnSync('npm', ['audit', '--json'], shellSpawnOptions(process.platform, { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 }));
   let json;
   try {
     json = JSON.parse(r.stdout ?? '');
