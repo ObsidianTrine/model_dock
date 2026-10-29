@@ -418,16 +418,30 @@ async function ensureWinTray() {
   }
 }
 
-/** macOS 托盘编译到 release/ModelDockTray（按 target 架构；失败返回 null）。 */
+/** macOS 托盘编译到 release/ModelDockTray-<target>（按 target 区分架构，杜绝「同名产物靠
+ *  重编覆盖」的隐患；已存在则复用；失败返回 null 优雅降级）。packageDistributions（入 tar.gz）
+ *  与 buildMacApp（入 .app）都取这份产物，不再各自编译。
+ *  编译先落 dist/tray-<target>/ModelDockTray（固定 basename）再改名——链接器自动签名与
+ *  codesign 的 identifier 均由输出 basename 派生（实测 ModelDockTray-<hash>），固定名保证
+ *  发布物字节与既有构建一致；tar.gz / .app 内的托盘仍叫 ModelDockTray。 */
 async function ensureMacTray(target) {
-  const trayOut = path.join(RELEASE, 'ModelDockTray')
+  const trayOut = path.join(RELEASE, `ModelDockTray-${target}`)
+  if (fs.existsSync(trayOut)) return trayOut
   try {
     const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.swift')
+    const trayBuild = path.join(DIST, `tray-${target}`)
+    const trayTmp = path.join(trayBuild, 'ModelDockTray')
+    await fsp.mkdir(trayBuild, { recursive: true }) // swiftc 不自建输出目录
     const swiftTarget = PLATFORMS[target].arch === 'arm64' ? 'arm64-apple-macos13.0' : 'x86_64-apple-macos13.0'
-    run(`swiftc -O -target ${swiftTarget} "${traySrc}" -o "${trayOut}"`)
-    await fsp.chmod(trayOut, 0o755)
-    run(`codesign --force --sign - "${trayOut}"`)
-    log('  ✓ macOS 托盘已编译')
+    run(`swiftc -O -target ${swiftTarget} "${traySrc}" -o "${trayTmp}"`)
+    await fsp.chmod(trayTmp, 0o755)
+    // 嵌套二进制必须先单独签名（x86_64 无链接器自动签名的机器上，未签名的托盘
+    // 会让整包 codesign 失败且被调用方 catch 吞掉——DMG 装机后被判「已损坏」，v1.1.0 Intel 机实测）
+    run(`codesign --force --sign - "${trayTmp}"`)
+    await fsp.mkdir(RELEASE, { recursive: true })
+    await fsp.rename(trayTmp, trayOut)
+    await fsp.rm(trayBuild, { recursive: true, force: true })
+    log(`  ✓ macOS 托盘已编译（${target}）`)
     return trayOut
   } catch (e) {
     warn(`    ! 托盘编译失败（${String(e.message).split('\n')[0]}），本包不含托盘`)
@@ -503,8 +517,9 @@ function sdRoundRect(px, py, cx, cy, hw, hh, r) {
 }
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x))
-// 4096² 超采样主图渲染一次，各尺寸盒式降采样（16/32/…/1024 均整除 4096）
-const ICON_MASTER = 4096
+// 2048² 超采样主图渲染一次，各尺寸盒式降采样（16/32/…/1024 均整除 2048）；
+// iconset 最大尺寸 1024px，2× 超采样抗锯齿已足够（4096→2048 渲染纯计算降 4×，质量损失可忽略）
+const ICON_MASTER = 2048
 // 覆盖度：d 为归一化 SDF 距离，乘渲染分辨率换算成像素后取 1px 抗锯齿带（深 interiors 饱和为 1）
 const cover = (d, res = ICON_MASTER) => clamp01(0.5 - d * res)
 function blendOver(dst, src) {
@@ -572,8 +587,12 @@ function iconSample(u, v, res = ICON_MASTER) {
   return col
 }
 
-// 主图渲染：归一化坐标逐像素取样（cover() 负责像素级抗锯齿）
+// 主图渲染：归一化坐标逐像素取样（cover() 负责像素级抗锯齿）。
+// 模块级缓存：图标与 target 架构完全无关，--target all 的多个 darwin target 原本各渲一整套
+// （每套约 10-40s 纯 JS），同进程内第二次起直接复用
+let iconMasterBuf = null
 function renderIconMaster() {
+  if (iconMasterBuf) return iconMasterBuf
   const buf = Buffer.alloc(ICON_MASTER * ICON_MASTER * 4)
   for (let y = 0; y < ICON_MASTER; y++) {
     const v = (y + 0.5) / ICON_MASTER
@@ -584,41 +603,53 @@ function renderIconMaster() {
       buf[o] = r; buf[o + 1] = g; buf[o + 2] = b; buf[o + 3] = a
     }
   }
+  iconMasterBuf = buf
   return buf
 }
 
+// iconset 各尺寸 PNG 编码结果缓存：与主图一同只算一次，命中时仅重写目标目录
+let iconsetPngs = null
+
 async function generateIconset(dir) {
-  const master = renderIconMaster()
-  await fsp.mkdir(dir, { recursive: true })
-  const sizes = [16, 32, 64, 128, 256, 512, 1024]
-  for (const size of sizes) {
-    const ss = ICON_MASTER / size
-    const out = Buffer.alloc(size * size * 4)
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        let r = 0, g = 0, b = 0, a = 0
-        for (let sy = 0; sy < ss; sy++) {
-          for (let sx = 0; sx < ss; sx++) {
-            const o = ((y * ss + sy) * ICON_MASTER + (x * ss + sx)) * 4
-            r += master[o]; g += master[o + 1]; b += master[o + 2]; a += master[o + 3]
+  if (!iconsetPngs) {
+    const t0 = Date.now()
+    const master = renderIconMaster()
+    iconsetPngs = []
+    const sizes = [16, 32, 64, 128, 256, 512, 1024]
+    for (const size of sizes) {
+      const ss = ICON_MASTER / size
+      const out = Buffer.alloc(size * size * 4)
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          let r = 0, g = 0, b = 0, a = 0
+          for (let sy = 0; sy < ss; sy++) {
+            for (let sx = 0; sx < ss; sx++) {
+              const o = ((y * ss + sy) * ICON_MASTER + (x * ss + sx)) * 4
+              r += master[o]; g += master[o + 1]; b += master[o + 2]; a += master[o + 3]
+            }
           }
+          const n = ss * ss
+          const oo = (y * size + x) * 4
+          out[oo] = r / n; out[oo + 1] = g / n; out[oo + 2] = b / n; out[oo + 3] = a / n
         }
-        const n = ss * ss
-        const oo = (y * size + x) * 4
-        out[oo] = r / n; out[oo + 1] = g / n; out[oo + 2] = b / n; out[oo + 3] = a / n
       }
+      // iconset 命名：16/32/128/256/512 各配 @2x；64 即 32@2x、1024 即 512@2x
+      const file =
+        size === 16 ? 'icon_16x16.png' :
+        size === 32 ? 'icon_16x16@2x.png' :
+        size === 64 ? 'icon_32x32.png' :
+        size === 128 ? 'icon_32x32@2x.png' :
+        size === 256 ? 'icon_128x128.png' :
+        size === 512 ? 'icon_128x128@2x.png' :
+        'icon_512x512@2x.png'
+      iconsetPngs.push({ file, png: encodePng(size, size, out) })
     }
-    // iconset 命名：16/32/128/256/512 各配 @2x；64 即 32@2x、1024 即 512@2x
-    const file =
-      size === 16 ? 'icon_16x16.png' :
-      size === 32 ? 'icon_16x16@2x.png' :
-      size === 64 ? 'icon_32x32.png' :
-      size === 128 ? 'icon_32x32@2x.png' :
-      size === 256 ? 'icon_128x128.png' :
-      size === 512 ? 'icon_128x128@2x.png' :
-      'icon_512x512@2x.png'
-    await fsp.writeFile(path.join(dir, file), encodePng(size, size, out))
+    log(`  ✓ 图标主图渲染 + 7 尺寸编码完成 (${((Date.now() - t0) / 1000).toFixed(1)}s, 主图 ${ICON_MASTER}²)`)
+  } else {
+    log('  ✓ 图标 iconset 复用本次进程缓存（跳过重渲染）')
   }
+  await fsp.mkdir(dir, { recursive: true })
+  for (const { file, png } of iconsetPngs) await fsp.writeFile(path.join(dir, file), png)
 }
 
 function macInfoPlist(version) {
@@ -678,21 +709,19 @@ async function buildMacApp(target) {
     warn(`    ! 图标生成失败（${String(e.message).split('\n')[0]}），app 将使用系统默认图标`)
   }
 
-  // 菜单栏托盘（swiftc 编译，仅 macOS 主机；CI runner 自带 Xcode）。失败优雅降级：
-  // 没有 tray 不影响主程序，launchGui 侧按「托盘文件是否存在」决定是否拉起。
-  // 目标架构随 target（intel 机型装 x64 包，托盘二进制必须同架构）
+  // 菜单栏托盘：复用 ensureMacTray 的产物（packageDistributions 阶段已按 target 编译并签名，
+  // 落点 release/ModelDockTray-<target>）——托盘与 target 架构相关、与 .app 无关，重编是纯浪费。
+  // ad-hoc 签名内嵌在 Mach-O 里，复制即保留。失败优雅降级：没有 tray 不影响主程序，
+  // launchGui 侧按「托盘文件是否存在」决定是否拉起。
   try {
-    const traySrc = path.join(ROOT, 'scripts', 'tray', 'ModelDockTray.swift')
+    const traySrc = await ensureMacTray(target)
+    if (!traySrc) throw new Error('托盘产物不可用（编译已失败，见上方警告）')
     const trayOut = path.join(contents, 'MacOS', 'ModelDockTray')
-    const swiftTarget = PLATFORMS[target].arch === 'arm64' ? 'arm64-apple-macos13.0' : 'x86_64-apple-macos13.0'
-    run(`swiftc -O -target ${swiftTarget} "${traySrc}" -o "${trayOut}"`)
+    await fsp.copyFile(traySrc, trayOut)
     await fsp.chmod(trayOut, 0o755)
-    // 嵌套二进制必须先单独签名：x86_64 无链接器自动签名（arm64 有），未签名的托盘
-    // 会让整包 codesign 失败且被下方 catch 吞掉——DMG 装机后被判「已损坏」（v1.1.0 Intel 机实测）
-    run(`codesign --force --sign - "${trayOut}"`)
-    log(`  ✓ 菜单栏托盘已编译并签名`)
+    log(`  ✓ 菜单栏托盘已就位（复用 ${path.basename(traySrc)}）`)
   } catch (e) {
-    warn(`    ! 托盘编译/签名失败（${String(e.message).split('\n')[0]}），本包不含菜单栏托盘`)
+    warn(`    ! 托盘不可用（${String(e.message).split('\n')[0]}），本包不含菜单栏托盘`)
   }
 
   // ad-hoc 整体重签：嵌套二进制已各自签名，包结构组装完需整体重签（Apple Silicon 必需）。
@@ -1026,8 +1055,16 @@ function runInnoSetup(iscc) {
   }
 }
 
-/** ICO 打包：PNG 位图条目（Windows Vista+ 支持），各尺寸直接按目标分辨率采样渲染 */
+/** ICO 打包：PNG 位图条目（Windows Vista+ 支持），各尺寸直接按目标分辨率采样渲染。
+ *  按输出路径 memo：ico 尺寸集固定、与版本/架构无关，win 流程同一路径会先后经
+ *  buildExecutables / ensureWinTray / packageWinSetup 调到，第二次起直接复用首次产物。 */
+const icoMemo = new Set()
 async function generateIco(outPath) {
+  if (icoMemo.has(outPath)) {
+    log(`  ✓ ico 复用首次产物（${outPath}）`)
+    return
+  }
+  icoMemo.add(outPath)
   const sizes = [16, 32, 48, 64, 256]
   const pngs = []
   for (const size of sizes) {
