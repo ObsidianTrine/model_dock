@@ -46,15 +46,41 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 
 ## 现有考题
 
-| id | bug | fixedBy | 首跑（2026-10-29，claude CLI 2.1.214） |
-|----|-----|---------|------|
-| 2026-10-update-stoptray | win 更新停托盘「尽力而为」零验证，托盘带锁活到安装向导，RM 30s 超时安装卡死 | 22f20fd | ✅ 审出（P0 定位到根因 + 顺带挖出 HEAD 仍在的 e4ac854 相关问题，见 runs/2026-10-29-first-run.md） |
-| 2026-10-diag-darwin-cipher | 跨机密文检测缺 darwin / 无加密形态分支，macOS secrets 表条目漏报 | 53da3e2 | ✅ 审出（证据链完整复现 53da3e2 修复逻辑 + 1 个 [存量] 建议 + 3 条存疑） |
-| 2026-10-tray-mutex-gc | win 托盘单实例 Mutex 局部变量被 GC 回收，双击叠出多个图标 | cbb9265 | ✅ 审出（[P0] 精确定位 GC.KeepAlive 在 Application.Run 之前无效，机制+行号齐全，报告见 runs/2026-10-29-tray-mutex-gc.md） |
-| 2026-10-update-shape-customdir | 安装器装到自定义目录被 detectInstallShape 误判 win-bare，托盘永不更新 | d1d3eab | ✅ 审出（[核心] 即修复目标，交叉引用 installer.iss DefaultDirName 可改目录 + 占位默认值同险，报告见 runs/2026-10-29-update-shape-customdir.md） |
-| 2026-10-cloud-null-body | 请求体 JSON 字面量 null 穿透 parseBody，500 外泄 V8 原文（REVIEW-27 残留） | 78cf650 | ✅ 审出（P1 定位主根因并扫出 5 端点同型点 + 1 个 5MB 请求体额外问题，报告见 runs/2026-10-29-cloud-null-body.md） |
-| 2026-10-fsx-idle-flush | appendLine 常驻流池无空闲刷盘，Windows 硬杀丢日志尾 | 0ba0d65 | ✅ 审出（[高] 直接点名硬杀丢日志尾 + Windows 无信号语义，报告见 runs/2026-10-29-fsx-idle-flush.md） |
-| 2026-10-backup-prune-race | 快照孤儿清理误删他进程半成品 + recursive mkdir 死代码重试 | a494d81 | ✅ 审出（3 连中：prune 竞争 / restore 自删保护快照 / 死代码重试，报告见 runs/2026-10-29-backup-prune-race.md） |
-| 2026-10-route-pin-precedence | 客户端钉住路由被定时窗口/全局当前槽接管，模型发错上游 404 | baa820c | ✅ 审出（[高] 钉定被优先级覆盖，定位 state.ts:483+499-505，报告见 runs/2026-10-29-route-pin-precedence.md） |
+**评分器说明**：2026-10-29 基线跑分用本地 claude CLI（deepseek-v4-pro）；2026-10-30 夜训时该 CLI 的 DeepSeek key 401 失效，当日 12 题改用 **ZCode 会话模型 subagent（GLM-5.3-Flash）** 评分——两段分数来自不同评分器，跨段对比仅供参考；DeepSeek key 修好后可用 runner 重跑全量对齐。Runner 已加 120KB 考题文件护栏（历史上的 289KB ui.ts 会撑爆 prompt，选题时避开整文件巨物）。
 
-全量 8/8 审出（两批首跑合计）：当前 REVIEW.md + 红线组合对「真实逃过审查的 bug」召回足够——这批题作为回归基线保留，此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于 8/8 即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+| id | bug | fixedBy | 首跑 |
+|----|-----|---------|------|
+| 2026-10-update-stoptray | win 更新停托盘「尽力而为」零验证，托盘带锁活到安装向导，RM 30s 超时安装卡死 | 22f20fd | ✅（10-29，claude CLI）P0 定位根因 + 挖出 e4ac854 CRLF 真根因相关问题 |
+| 2026-10-diag-darwin-cipher | 跨机密文检测缺 darwin / 无加密形态分支，macOS secrets 表条目漏报 | 53da3e2 | ✅（10-29，claude CLI）证据链完整复现修复逻辑 + 1 [存量] + 3 存疑 |
+| 2026-10-tray-mutex-gc | win 托盘单实例 Mutex 局部变量被 GC 回收，双击叠出多个图标 | cbb9265 | ✅（10-29，claude CLI）[P0] 机制+行号齐全 |
+| 2026-10-update-shape-customdir | 安装器装到自定义目录被 detectInstallShape 误判 win-bare，托盘永不更新 | d1d3eab | ✅（10-29，claude CLI）交叉引用 installer.iss 可改目录 |
+| 2026-10-cloud-null-body | 请求体 JSON 字面量 null 穿透 parseBody，500 外泄 V8 原文（REVIEW-27 残留） | 78cf650 | ✅（10-29，claude CLI）扫出 5 端点同型点 |
+| 2026-10-fsx-idle-flush | appendLine 常驻流池无空闲刷盘，Windows 硬杀丢日志尾 | 0ba0d65 | ✅（10-29，claude CLI）点名硬杀 + 无信号语义 |
+| 2026-10-backup-prune-race | 快照孤儿清理误删他进程半成品 + recursive mkdir 死代码重试 | a494d81 | ✅（10-29，claude CLI）3 连中 |
+| 2026-10-route-pin-precedence | 客户端钉住路由被定时窗口/全局当前槽接管，模型发错上游 404 | baa820c | ✅（10-29，claude CLI）定位 state.ts:483+499-505 |
+| 2026-10-tray-autospawn-echo | 托盘自动弹控制台守卫是进程内标志，安装链弹两份控制台 | cc38c6b | ✅（10-30，GLM subagent）给出修复形态（AUTOSPAWN 注入）+ 2 个额外问题 |
+| 2026-10-autostart-tray-gap | 开机自启只登记 daemon，重启后托盘永远缺席 | 9a93008 | ✅（10-30，GLM subagent）穷尽性 grep 证明无覆盖 + 指出须等就绪再拉；一道题带出 7a9107e/7b86522 两个修复点 |
+| 2026-10-update-silent-blackhole | 静默安装三连败零提示 + && 链跳过托盘拉起致整机失联 | 9aa3066 | ✅（10-30，GLM subagent）完整失败链 + 独立推出 stoptray CRLF 根因 |
+| 2026-10-tray-menu-flicker | 托盘菜单展开期间每 5s 整份 Clear 重建，悬停/子菜单被重置 | 1dd6b1c | ✅（10-30，GLM subagent）+ 新发现 CheckViaCli 中文子串分类的 i18n bug |
+| 2026-10-review-concurrency-cancel | 审查 run 被自身评论触发的空 run 并发取消 | 628fbec | ✅（10-30，GLM subagent）带 Actions run 佐证；**并实证防回环守卫是死代码（已修）** |
+| 2026-10-cloud-token-timing | 云端控制台令牌普通字符串比较，时序侧信道可爆破 | 85558ca | ✅（10-30，GLM subagent）两处比较点全找到（登录 + 统一鉴权） |
+| 2026-10-orchestrator-backend-default | intent/spec 裸跑炸「未知后端 undefined」 | 27da5b8 | ✅（10-30，GLM subagent）+ 5 个当前版仍活的工具链 bug（见下清单） |
+| 2026-10-secrets-cache-invalidation | 另一进程改 key 后缓存不失效，转发持续 401（CORRECT-01） | cf724eb | ✅（10-30，GLM subagent）连中 8 个历史确认缺陷（锁/损坏空表/负缓存/argv 泄漏/EPIPE 等） |
+| 2026-10-update-spawn-error | spawn 无 error 监听：更新链失败崩网关 + updating 永久卡死 | 3a79e86 | ✅（10-30，GLM subagent）3 个修复面全中 + 同类第 4 处 |
+| 2026-10-update-reminder-once | 常驻网关只在启动时查一次更新，常驻期间永远漏报 | db6354d | ✅（10-30，GLM subagent）+ 失败占成功 TTL 同源问题 + updating 门闩活 bug |
+| 2026-10-lan-ratelimit-leak | LAN 限频表按 IP 只增不删，扫描一遍永久驻留（泄漏） | 9366fdc | ✅（10-30，GLM subagent）「邻居先例没跟上」抓手命中 + 空 Bearer 过鉴权活 bug |
+| 2026-10-engine-quiet-ignore | 引擎接了 quiet 选项但 diff 预览照常输出（它撒谎） | b9c859a | ✅（10-30，GLM subagent）沿全部调用方核实影响链；同文件 3 个历史修复全中 |
+
+**基线：20/20 审出**（10-29 claude CLI 8/8 + 10-30 GLM subagent 12/12），零漏报——REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（20/20，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+
+## 评测循环产出（2026-10-30 夜训）
+
+跑分之外，审查者顺带挖出的**当前版本仍存活**的问题（每条都有文件+行号证据，详见对应 runs/ 报告）：
+
+- **已修（本仓库同一提交）**：claude-review.yml 的 `[dependabot-fix]` 防回环守卫是死代码（merge 检出的 `git log -1` 永远匹配不上前缀）——两处 guard 改读 `github.event.pull_request.head.sha` 的提交 subject。
+- **待修清单（留给后续任务，未动产品代码）**：
+  - `.agents/scripts/orchestrator.mjs`：drain `--max`<`--workers` 时超发（烧钱面）；run 对 awaiting-human 卡烧完一轮必崩；resume「沿用上次后端」取的是第一个会话的后端；changedFiles/gateScopePurity 未传 baseBranch；installWorkspaceDeps 的 spawnSync('npm') 在 Windows ENOENT。
+  - `src/gateway/lan.ts`：stopLan 后空 Bearer 可过鉴权（keep-alive 保温 + `safeEqual('','')`）；buildLanStatus 忽略绑定 host，二维码列不可达地址。
+  - `src/update/webupdate.ts`：applyUpdate 的 updating 门闩无同步异常回滚（永久卡死一键更新）。
+  - `scripts/tray/ModelDockTray.cs`：CheckViaCli 按中文子串分类输出（英文环境把成功当失败）；注释承诺的 40s 看门狗不存在；TrayActions `_port`/`_token` 静态字段多线程无同步读写。
+- **方法论收获**：审出率 100% 说明「给足 REVIEW.md 纪律 + 干净单文件考题」的组合对这类历史 bug 召回充分；出题的瓶颈在**选题**（批次修复提交一文件多 bug 归因不清、需部署上下文的题、超 120KB 的巨型文件都要避开）。
