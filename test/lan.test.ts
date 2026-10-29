@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
 import { loadConfig, saveConfig } from '../src/config/store.js'
 import { buildRuntime } from '../src/gateway/state.js'
-import { detectDefaultRouteAddress, lanAddresses, lanPrimaryUrl, lanQrSvg, putSyncRequest, rankLanAddresses, resolveLanToken, startLanServer, stopLan, sweepRequestRateByIp } from '../src/gateway/lan.js'
+import { detectDefaultRouteAddress, buildLanStatus, lanAddresses, lanAuthorized, lanPrimaryUrl, lanQrSvg, putSyncRequest, rankLanAddresses, resolveLanToken, startLanServer, stopLan, sweepRequestRateByIp } from '../src/gateway/lan.js'
 import { ensureDir } from '../src/util/fsx.js'
 import { modeldockDir } from '../src/util/paths.js'
 import type { Config } from '../src/config/types.js'
@@ -389,5 +389,62 @@ describe('lan 局域网地址优选', () => {
     if (preferred !== null) expect(preferred).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
     const url = lanPrimaryUrl(8787)
     if (url !== null) expect(url).toMatch(/^http:\/\/\d{1,3}(\.\d{1,3}){3}:8787\/m$/)
+  })
+})
+
+describe('lan 鉴权与广告口径（2026-10-30 评测集审出）', () => {
+  // lanAuthorized 直测：LAN 关闭（rt.lan=undefined）/令牌为空一律拒绝——
+  // 旧实现 `token ?? ''` 让空串对空串通过 safeEqual 的常数时间比较，等于无凭据放行
+  const reqWith = (headers: Record<string, string>) => ({ headers }) as unknown as import('node:http').IncomingMessage
+
+  it('LAN 关闭（rt.lan=undefined）时 Bearer 一律拒绝（含空 Bearer）', () => {
+    const rt = { lan: undefined } as any
+    expect(lanAuthorized(reqWith({ authorization: 'Bearer ' }), rt)).toBe(false)
+    expect(lanAuthorized(reqWith({ authorization: 'Bearer whatever' }), rt)).toBe(false)
+    expect(lanAuthorized(reqWith({}), rt)).toBe(false)
+  })
+
+  it('令牌为空串时一律拒绝（即便请求也带空凭据）', () => {
+    const rt = { lan: { server: {}, port: 18999, token: '', host: '0.0.0.0' } } as any
+    expect(lanAuthorized(reqWith({ authorization: 'Bearer ' }), rt)).toBe(false)
+    expect(lanAuthorized(reqWith({ cookie: `mdk_lan_18999=` }), rt)).toBe(false)
+  })
+
+  it('正常令牌：Bearer 与 cookie 两通道仍放行，错令牌拒绝', () => {
+    const rt = { lan: { server: {}, port: 18999, token: 'tok123', host: '0.0.0.0' } } as any
+    expect(lanAuthorized(reqWith({ authorization: 'Bearer tok123' }), rt)).toBe(true)
+    expect(lanAuthorized(reqWith({ authorization: 'Bearer wrong' }), rt)).toBe(false)
+    expect(lanAuthorized(reqWith({ cookie: 'mdk_lan_18999=tok123' }), rt)).toBe(true)
+    expect(lanAuthorized(reqWith({}), rt)).toBe(false)
+  })
+
+  it('stopLan 会断光 keep-alive 连接（closeAllConnections），不只是停新连接', () => {
+    const calls: string[] = []
+    const fakeServer = {
+      close: () => {
+        calls.push('close')
+        return fakeServer
+      },
+      closeAllConnections: () => calls.push('closeAllConnections'),
+    } as any
+    const rt = { config: {} as Config, lan: { server: fakeServer, port: 18999, token: 't', host: '0.0.0.0' } } as any
+    stopLan(rt)
+    expect(calls).toEqual(['close', 'closeAllConnections'])
+    expect(rt.lan).toBeUndefined()
+  })
+
+  it('buildLanStatus 尊重绑定 host：只列可达地址（不列全部网卡）', () => {
+    const rt = { config: { lan: { enabled: true, port: 45678 } } as Config, lan: { server: {}, port: 45678, token: 't', host: '127.0.0.1' } } as any
+    const st = buildLanStatus(rt)
+    expect(st.enabled).toBe(true)
+    expect(st.urls).toEqual(['http://127.0.0.1:45678/m'])
+    expect(st.qrcode).toBeTruthy()
+  })
+
+  it('buildLanStatus 默认 0.0.0.0 仍列全部网卡地址（原口径不回退）', () => {
+    const rt = { config: { lan: { enabled: true, port: 45678 } } as Config, lan: { server: {}, port: 45678, token: 't', host: '0.0.0.0' } } as any
+    const st = buildLanStatus(rt)
+    expect(st.urls.length).toBeGreaterThan(0)
+    expect(st.urls.every((u) => u.startsWith('http://') && u.endsWith(':45678/m'))).toBe(true)
   })
 })
