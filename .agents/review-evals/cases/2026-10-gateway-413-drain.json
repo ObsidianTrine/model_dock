@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-gateway-413-drain",
+  "title": "readBody 超限立即 reject 413 并 resume 排空——响应与客户端在途写入相撞，SDK 收 ECONNRESET 自动重试成超大包重传循环，413 永远到不了客户端",
+  "reviewRef": "87549d8^",
+  "fixedBy": "87549d8",
+  "files": ["src/gateway/admin-shared.ts"],
+  "expect": ["413", "econnreset"],
+  "note": "2026-10-29 实测踩中（CI 门禁间歇红）。修复 = 排空到 end 再按超限标志分流应答 + 10s 兜底毁连；且 end 必须单一处理器（双 end 监听先挂的 resolve 抢先 settle，超限请求返回 200）。审查侧教训：流上「提前应答」与「对端仍在写」是竞态——看见 overflow 路径里 resume()/reject() 与响应写入并存就要问「对端写完了吗」"
+}

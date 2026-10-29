@@ -77,6 +77,9 @@
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
+| CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ☐ 未修（2026-10-30 夜巡发现并沙箱实测复现，见 §三） |
+| CORRECT-08 | P2 | `src/util/jsonpath.ts` | 两处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语） | ☐ 未修（2026-10-30 噪音对照实验发现，tsx 实测复现，见 §三） |
+| CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☐ 未修（2026-10-30 夜巡发现，逐条读码核实，见 §三） |
 
 ---
 
@@ -374,6 +377,27 @@
 - 竞态：另一调用方（CLI mutateConfig、控制台写路径等）的本地改动若恰好落在「apply 落盘」与「post-apply collect 读盘」之间，会被计入 lastSyncedHash 基线——该本地改动此后 tick 判 idle，**既不推送也不产生冲突快照**，静默丢失（直到下一次无关改动捎带出去）。窗口毫秒级，天然触发概率极低；perf-residual 批的 loadConfig memo 首版（外借共享对象）曾让测试轮询在 apply 落盘前放行、把它确定性钉进窗口，memo 改 clone 后恢复原概率，但窗口本身仍在。
 - 修复方向：apply+post-collect 对 config 写锁原子化（同一 `withFileLock` 域内完成）；注意 applySyncdoc 内部自身会 mutateConfig——withFileLock 若非同进程重入式会自锁死，动手前先核 `src/util/fsx.ts` 的实现语义。stash 方向（post-collect 前记录 mtime、变化则重试）也可评估。
 - ☑ **已修（2026-10-29 @b917687）**：`withFileLock` 增加 AsyncLocalStorage 同路径重入识别（promise 队列无线程式属主，嵌套申请曾会排在自身后面死锁；现持有者调用树内同路径申请内联执行，文件锁与队列仍归外层，跨路径嵌套照常排队）+ store 导出 `configLockPath`；engine 拉取分支与 setup 加入收敛的「applySyncdoc → post-apply collectSyncdoc」包进同一把 config 锁——并发本地写只能排在锁后，重收集基线只含远端应用态，本地改动照常走下个 tick 推送。代价：持锁窗口包含重收集的密钥解析（keychain 后端可能 spawn），极端时延后并发 config 写毫秒级，tick 分钟级一次可接受。回归守卫 test/sync-race.test.ts（重入不死锁 / 排队语义保留 / 原子性）。
+
+**CORRECT-07（P1，2026-10-30 夜巡发现并实测复现）`gateway start --daemon` 就绪后 CLI 不返回**
+- 位置：`src/cli/shared.ts:59-90`（spawnDaemonAndWait）：daemon 以 `stdio: ['ignore','ignore','pipe']` 拉起后，父 CLI 给 `child.stderr` 挂 `'data'`/`'close'` 监听做 daemon 日志转写；`child.unref()` 只把**子进程句柄**移出引用计数，不移除 stderr 管道读端对事件循环的引用——daemon 常驻、其 fd 2 永不关闭（main.ts 无任何 stderr 重定向/自关），父 CLI 的 read 流挂着 `'data'` 监听处于 flowing 态且被引用 → 就绪探测返回后事件循环排不空，CLI 挂住。
+- 实测（2026-10-30 凌晨，macOS + tsx 直跑源码，沙箱实例）：`gateway start --daemon` 在端口已 LISTEN 后 ≥45s 不返回（人工终止）；另一例约 13min 后才自行退出（退出机制未查，推测与 tsx 子进程链的 fd 2 传递有关；SEA 单文件形态未测）。`gateway stop` 等不 spawn daemon 的命令不受影响。review-eval 审查者（GLM-5.3-Flash）在同一代码上的「存疑」发现指同一点，经复现坐实。
+- 影响：脚本/CI/终端里跑 `gateway start --daemon` 会被钉住等待，用户视角「命令卡死」；自启链（--autostart 直起 daemon，不经本路径）与 run_dev（tsx watch）不受影响。
+- 修复方向（未动手）：stderr 改落 daemon 侧自写日志（daemon 自己 appendLine，父进程 stdio 全 ignore）；或读端 `child.stderr.unref()`（注意与 'close' 收尾写的时序）；或转写改经 `child.stderr.pipe(writable)` 且 writable 侧 unref。改动后须回归 `gateway start --daemon` 就绪即返回 + daemon 崩溃日志仍可追。
+
+**CORRECT-08（P2，2026-10-30 噪音对照实验发现，tsx 实测复现）jsonpath 两处健壮性缺陷**
+- 背景：`src/util/jsonpath.ts` 自 2026-10-09 init 后零改动、历轮全仓审查未点名，本次作为「已知干净对照」进噪音测量（中性 prompt，GLM-5.3-Flash）——审查者报 2 个问题，**逐条实证均为真**，非误报（详见 runs 噪音报告）。该文件被 `src/adapters/packs.ts:47,57` 的 L2 pack JSON 写路径直接消费（`k` 来自用户手写的 `[adapter_packs.*]` 路径表达式）。
+- 缺陷 ①（静默吞字/改写）：tokenize 正则 `/([^[.\]]+)|\[(\d+)\]/g` 只消费匹配段、不校验完整覆盖——`$.a['b']` 产出键 `"'b'"`（实测 `setPath({}, "$.a['b']", 1)` → `{"a":{"'b'":1}}`，写错位置且无任何报错）；`$.a[-1]` 成字符串键 `'-1'`（数组上写非索引属性，序列化即丢）；未闭合 `$.a[0` 成键 `'0'`，绕过稀疏数组越界守卫。
+- 缺陷 ②（star 中段裸崩）：`setPath({a:{b:1}, c:'str'}, '$.*.b', 2)` 实测抛 `TypeError: Cannot create property 'b' on string 'str'`——同函数其余分支对非 object 子节点均有兜底，唯 star 递归裸崩，且报错未经 t() 双语化。
+- 影响：① pack 作者按标准 JSONPath 习惯写括号句式时**静默写坏客户端配置**（适配器区红线邻接面，无报错最难排查）；② 带 `*` 的 pack 写路径撞上异构容器直接崩 attach/plan。正常点句式（项目文档口径）不受影响——两处都是「宽容解析不报错」的输入面问题。
+- 修复方向（未动手）：tokenize 校验匹配段拼回后与输入等长（不等长按 `toSegments` 对 star 的先例抛可操作双语报错）；star 递归前补与 `:62`/`:95-98` 同款类型守卫。修复后两处均具备转为审查评测考题的资格（真实逃过历轮审查、实证复现、修复提交可回溯）。
+
+**CORRECT-09（P2，2026-10-30 夜巡发现，逐条读码核实）relay failover 链可观测性三项**
+- 发现者：审查者（GLM-5.3-Flash）对 relay.ts @ HEAD 的夜巡挖洞（报告 runs/2026-10-30-hunt-relay.md），本侧逐条读码核实机制成立。
+- ① `injectModel`（relay.ts:325-336）与调用点（:365）的守卫 `!json || typeof json !== 'object'` 拦不住数组（`typeof [] === 'object'`）：顶层数组请求体 + 需改写模型时，`json.model = final` 设数组 expando、`JSON.stringify` 丢弃之——返回的 body **未注入 model** 但 `modelAfter: final` 谎报已改写，日志/usage 记录与实际发出 body 不一致（可观测性 lie；对非法数组上游本会 400，非功能损坏）。修法：两处补 `Array.isArray(json)`。
+- ② failover 链尾出口（relay.ts:630-633）：候选耗尽统一包 `new UpstreamError(502, '所有候选服务连接失败（msg）')`，不传 hint、不透传 lastErr 的 status。全链候选都是 candidateSkip（key 缺失 / 协议端点缺失 / **钥匙环锁定 503+「检查系统钥匙环是否已解锁」hint**）时，客户端收到的是 502「连接失败」——status、hint、routeReason（down_all，实则从未连接）三重失真。修法：耗尽时 lastErr 是 UpstreamError 则透传其 status/hint（candidateSkip 类原样上抛亦可）。
+- ③ `replayedFrom`（relay.ts:589,608,628）单变量反复覆盖：A→B→C 连续重放只留下 `replayed_from:B`，A 丢失——与该字段自述用途「日志对账」相悖。修法：改数组累积 join。
+- 存疑（不下结论，待作者确认）：a) ECONNRESET/EPIPE 在 promise 阶段即重试/failover，请求可能已送达甚至计费，与 ：115-116 注释的自述边界相抵——是取舍还是疏漏未见记录；b) `QUOTA_BODY_RE = /quota|insufficient/i` 不含中文（额度/配额/余额/欠费），国内上游中文 429 额度体不会触发恒可切换——同文件 MODEL_MISSING_RE 已覆盖中文，口径不一致。
+- 修复后 ①② 均可回流为审查评测考题。
 
 ---
 

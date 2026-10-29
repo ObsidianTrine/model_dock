@@ -64,7 +64,7 @@ function buildPrompt(c, blocks) {
     .join('\n')
 }
 
-function runClaude(prompt, model) {
+function runClaude(prompt, model, timeoutMin = 15) {
   const args = ['-p']
   if (model) args.push('--model', model)
   // Windows 上 claude 是 .cmd 包装，直调 spawn 会 ENOENT（项目硬约定），走 shell；prompt 从 stdin 进
@@ -72,7 +72,7 @@ function runClaude(prompt, model) {
     cwd: ROOT,
     input: prompt,
     encoding: 'utf8',
-    timeout: 15 * 60 * 1000,
+    timeout: timeoutMin * 60 * 1000,
     maxBuffer: 32 * 1024 * 1024,
     shell: process.platform === 'win32'
   })
@@ -101,10 +101,11 @@ function main() {
   if (argv.includes('--help') || argv.includes('-h')) {
     console.log(
       [
-        '用法：node scripts/review-eval.mjs [--dry] [--case <id>] [--model <m>] [--out <file>]',
+        '用法：node scripts/review-eval.mjs [--dry] [--case <id>] [--model <m>] [--out <file>] [--timeout-min <n>]',
         '',
         '  考题在 .agents/review-evals/cases/*.json，加题与判读见同目录 README.md。',
-        '  退出码恒为 0（评测是信息不是门禁）；--strict 时有未审出的题则退出码 1。'
+        '  退出码恒为 0（评测是信息不是门禁）；--strict 时有未审出的题则退出码 1。',
+        '  单题超时/报错记「运行失败」并继续其余题（--timeout-min 调整，默认 15 分钟）。'
       ].join('\n')
     )
     return 0
@@ -124,6 +125,8 @@ function main() {
   const tmp = mkdtempSync(join(tmpdir(), 'modeldock-review-eval-'))
   const report = []
   let missed = 0
+  let failed = 0
+  const timeoutMin = Number(flag('--timeout-min')) || 15
   try {
     for (const c of cases) {
       const blocks = materialize(c, tmp)
@@ -133,7 +136,18 @@ function main() {
         continue
       }
       process.stderr.write(`跑 ${c.id} …\n`)
-      const output = runClaude(prompt, model)
+      let output
+      try {
+        output = runClaude(prompt, model, timeoutMin)
+      } catch (e) {
+        // 逐题容错：单题超时/CLI 报错只记失败不炸整轮——全量跑分常在夜里无人值守，
+        // 一题卡死不应该丢掉其余题的分数与报告
+        failed++
+        report.push(
+          `## ${c.id} — ⚠️ 运行失败\n\n- 考题：${c.title}\n- 错误：${String(e && e.message || e).slice(0, 400)}\n`
+        )
+        continue
+      }
       const s = score(output, c)
       if (!s.caught) missed++
       const outputFile = join(tmp, `${c.id}.output.txt`)
@@ -166,7 +180,7 @@ function main() {
 
   const head = dry
     ? `# 审查评测 prompt 预览（--dry，共 ${cases.length} 题）`
-    : `# 审查评测报告\n\n- 考题：${cases.length}，审出：${cases.length - missed}，未审出：${missed}${model ? `\n- 模型：${model}` : ''}\n- 评分口径：expect 关键词命中（启发式），精确判定看原文`
+    : `# 审查评测报告\n\n- 考题：${cases.length}，审出：${cases.length - missed - failed}，未审出：${missed}${failed ? `，运行失败：${failed}` : ''}${model ? `\n- 模型：${model}` : ''}\n- 评分口径：expect 关键词命中（启发式），精确判定看原文`
   const full = `${head}\n\n${report.join('\n\n')}`
   if (out) {
     mkdirSync(dirname(out), { recursive: true })
