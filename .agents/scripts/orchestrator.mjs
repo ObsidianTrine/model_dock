@@ -417,7 +417,13 @@ async function cmdRun(repoRoot, taskId, opts) {
       // ---- 静态门禁 ----
       try {
         const testResult = gateNpmTest(worktree, cfg.testCmd.join(' && '));
-        appendEvent(qdir, 'gate_result', { gate: 'npm_test', result: 'pass', duration_ms: testResult.durationMs });
+        // 记 worktree HEAD：approve 的 finish 快捷路径（--skip-test）靠它判断
+        // 「gate 验证的就是当前树」——develop 未前进且 HEAD 一致才允许锁内跳过重跑
+        let gateHead;
+        try {
+          gateHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+        } catch { /* 取不到 HEAD 就不记：approve 回落全量测试，语义安全 */ }
+        appendEvent(qdir, 'gate_result', { gate: 'npm_test', result: 'pass', duration_ms: testResult.durationMs, ...(gateHead ? { head: gateHead } : {}) });
       } catch (e) {
         if (!(e instanceof GateError)) throw e;
         appendEvent(qdir, 'gate_result', { gate: 'npm_test', result: 'fail' });
@@ -735,12 +741,53 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
   if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
   else appendEvent(qdir, 'human_gate', { decision: 'approved' });
-  // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree
-  const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs'), 'finish', taskId], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-  });
+  // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
+  // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
+  // approve 给 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD——finish 内部校验
+  // 「develop 未前进 且 HEAD 与 gate 一致」成立才跳过锁内重跑，否则自动回落全量
+  // （merge-verify-once：全量测试只跑一次，且不因跳过降低门禁强度）。
+  const gateHead = (() => {
+    const evts = readEvents(qdir);
+    for (let i = evts.length - 1; i >= 0; i--) {
+      const e = evts[i];
+      if (e.type === 'gate_result' && e.gate === 'npm_test' && e.result === 'pass' && typeof e.head === 'string' && e.head) return e.head;
+    }
+    return null;
+  })();
+  const finishArgs = ['finish', taskId];
+  const finishEnv = { ...process.env };
+  if (gateHead) {
+    finishArgs.push('--skip-test');
+    finishEnv.ORCHESTRATOR_GATE_HEAD = gateHead;
+  }
+  // 撞锁有界重试：finish 对 .finish.lock 自带有界等待（FINISH_LOCK_WAIT_SECONDS），
+  // 这里兜底等待超时/显式 cap=0 的情形——并发 drain 合并把「立即失败→任务卡滞留
+  // awaiting-human 等人工重跑」收敛为自动排队。参数可环境收缩（测试用）：
+  // ORCH_FINISH_RETRY_ATTEMPTS（额外重试次数，默认 2）、ORCH_FINISH_RETRY_DELAY_MS（默认 60000）。
+  const extraAttempts = Number.parseInt(process.env.ORCH_FINISH_RETRY_ATTEMPTS ?? '', 10);
+  const retryDelayRaw = Number.parseInt(process.env.ORCH_FINISH_RETRY_DELAY_MS ?? '', 10);
+  const maxAttempts = (Number.isInteger(extraAttempts) && extraAttempts >= 0 ? extraAttempts : 2) + 1;
+  const retryDelayMs = Number.isInteger(retryDelayRaw) && retryDelayRaw >= 0 ? retryDelayRaw : 60_000;
+  const fbScript = path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs');
+  let r = null;
+  let lockConflict = false;
+  for (let attempt = 1; ; attempt++) {
+    r = spawnSync('node', [fbScript, ...finishArgs], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: finishEnv,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    // 透传 finish 输出（保持现场可见性）；撞锁凭 stderr 文案识别
+    if (r.stdout) process.stdout.write(r.stdout);
+    if (r.stderr) process.stderr.write(r.stderr);
+    lockConflict = r.status !== 0 && /another finish is (already running|still running after waiting)/.test(r.stderr ?? '');
+    if (r.status === 0 || !lockConflict || attempt >= maxAttempts) break;
+    log(`finish 撞合并锁（第 ${attempt}/${maxAttempts} 次尝试），${Math.round(retryDelayMs / 1000)}s 后重试……`);
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
   if (r.status !== 0) {
+    if (lockConflict) appendEvent(qdir, 'merge_lock_wait', { attempts: maxAttempts });
     die(`feature-branch finish 失败（exit ${r.status}）。任务留在 awaiting-human/，处理后重新 approve。`, r.status ?? 1);
   }
   moveCard(root, taskId, 'awaiting-human', 'merged');

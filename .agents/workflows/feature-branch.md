@@ -41,12 +41,12 @@ node .agents/scripts/feature-branch.mjs finish <task-id>
 
 finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。
 
-- **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者会收到「另一 finish 进行中」的提示，等它结束后重跑即可；若上次 finish 崩溃留下陈锁（属主进程已死），下次 finish 自动接管，无需手动清理。
+- **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者**有界等待**持锁者（轮询 2.5s，默认上限 300s，`FINISH_LOCK_WAIT_SECONDS` 可调、设 0 恢复立即失败），等待期间持锁者退出则自动接管；超时才提示重跑。陈锁（属主进程已死）同样自动接管，无需手动清理。
 
 - rebase 冲突：在 worktree 内解决 → `git add -A && git rebase --continue` → 重新跑 finish。
 - finish 里的验证失败：回 worktree 修复 → 提交 → 重跑 finish。
 - 运行 finish 前先把终端/会话的工作目录退回主仓库（不要停在 worktree 里）：Windows 下被进程占用的目录删不掉，会让清理留下空壳。脚本启动时会自动把自身 cwd 退回主仓库、清理时也会重试扫尾，但提前退出最稳妥。
-- 纯文档等不影响行为的改动可用 `--skip-test` 跳过验证步骤。
+- 纯文档等不影响行为的改动可用 `--skip-test` 跳过验证步骤。orchestrator 自动合并（approve）会带 `--skip-test` + `ORCHESTRATOR_GATE_HEAD` 走**门禁快捷路径**：仅当基准分支未前进且 worktree HEAD 与 gate 记录一致时才真的跳过（gate 验证的就是当前树），否则 finish 内部自动回落全量验证——门禁强度不降。
 
 ### 5. 查看在跑任务
 
