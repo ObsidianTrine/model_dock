@@ -88,27 +88,20 @@ export const UI_JS_SERVICES = `  function visibleServices() {
     document.querySelectorAll('[data-use]').forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute('data-use')
-        var affected = view.clients.filter(function (c) { return c.attached && c.followsActive })
-        var pinnedN = view.clients.filter(function (c) { return c.attached && !c.followsActive }).length
-        var doSwitch = function () {
-          b.disabled = true
-          api('/switch', { method: 'POST', body: JSON.stringify({ service: id }) })
-            .then(function (r) {
-              var extra = (r && r.refreshed && r.refreshed.length)
-                ? t('（dsh 等客户端的模型列表已同步重写，重启对应客户端生效）', ' (model lists of dsh-like clients rewritten; restart them to take effect)')
-                : ''
-              toast('✓ ' + t('已切换，新请求立即生效', 'Switched; new requests take effect immediately') + extra, true)
-              return load()
-            })
-            .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false); b.disabled = false })
-        }
-        if (affected.length) {
-          var lines = [t('以下已接入的客户端会随之改用这个新服务：', 'These attached clients will switch to the new service as well:')].concat(affected.map(function (c) { return c.label }))
-          if (pinnedN) lines.push(t('另有 ', 'Plus ') + pinnedN + t(' 个客户端已钉定固定路由，不受影响', ' pinned client(s) keep their fixed route'))
-          confirmModal(t('切换当前服务', 'Switch current service'), lines, t('切换', 'Switch'), doSwitch)
-        } else {
-          doSwitch()
-        }
+        // 点击即切换，不再弹确认：跟随全局的客户端随之改用新服务（服务卡上「被 N 个客户端使用」本就可见），
+        // 受影响客户端数并入成功 toast
+        var affectedN = view.clients.filter(function (c) { return c.attached && c.followsActive }).length
+        b.disabled = true
+        api('/switch', { method: 'POST', body: JSON.stringify({ service: id }) })
+          .then(function (r) {
+            var extra = (r && r.refreshed && r.refreshed.length)
+              ? t('（dsh 等客户端的模型列表已同步重写，重启对应客户端生效）', ' (model lists of dsh-like clients rewritten; restart them to take effect)')
+              : ''
+            if (affectedN) extra += (extra ? '；' : '') + affectedN + t(' 个跟随全局的客户端已随之切换', ' client(s) following the global route switched along')
+            toast('✓ ' + t('已切换，新请求立即生效', 'Switched; new requests take effect immediately') + extra, true)
+            return load()
+          })
+          .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false); b.disabled = false })
       }
     })
     // 探测失败文案瘦身：api() 抛的「HTTP 5xx: {json}」里若有结构化 err/hint 就只取用这两段，

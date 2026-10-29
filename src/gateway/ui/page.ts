@@ -159,6 +159,13 @@ export const UI_BODY_HTML = `<div class="wrap">
 </div>
 
 <div class="card">
+  <h2><span data-i18n="MCP 服务器||MCP servers">MCP 服务器</span> <span class="pill ok" id="mcpCount" hidden></span></h2>
+  <p class="desc" data-i18n="各 AI 客户端本机配置的 MCP 服务器一览（只读盘点，来自各客户端的配置文件；环境变量只记名字、不收集值）。||All MCP servers configured in your AI clients' local configs (read-only inventory; env vars are listed by name only, values are never collected).">各 AI 客户端本机配置的 MCP 服务器一览（只读盘点，来自各客户端的配置文件；环境变量只记名字、不收集值）。</p>
+  <div class="tablescroll"><table id="mcpTable"></table></div>
+  <p class="note" id="mcpNote" hidden></p>
+</div>
+
+<div class="card">
   <h2><span data-i18n="请求日志||Request log">请求日志</span></h2>
   <p class="desc" data-i18n="仅展示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，不在这里刷屏。||Only error requests (4xx/5xx) and console operations are shown; normal requests are written to the logs/ files only.">仅展示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，不在这里刷屏。</p>
   <div class="tablescroll"><table id="logTable"></table></div>

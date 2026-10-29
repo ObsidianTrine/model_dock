@@ -160,6 +160,19 @@ export function evaluateCommand(cmd) {
       }
     }
   }
+  // 缺省端口盲区：项目 CLI 的启动型子命令不带 --port 时落到代码默认端口——命令文本里
+  // 没有端口号，上面的 includes 检查罩不住（`gateway start` 默认监听生产端口，恰是最易
+  // 踩的坑）。listenCommandNames 的 start/restart/serve/ui/daemon 形态缺 --port 一律拦；
+  // 带 --port 已显式落到测试端口，放行。
+  if (ports.length) {
+    const names = listenCommandNames().map(escapeRegExp);
+    if (names.length) {
+      const defaultPortStart = new RegExp(`\\b(?:${names.join('|')})\\s+(?:start|restart|serve|ui|daemon)\\b`, 'i');
+      if (defaultPortStart.test(command) && !/--port(?:=|\s)/.test(command) && !/(^|\s)-{1,2}h(?:elp)?\b/.test(command)) {
+        return { allowed: false, rule: 'port', reason: `启动命令未带 --port（缺省落到受保护的生产端口，见 workflow.json protectedPorts）。测试实例必须显式 --port <高位端口> 并与独立沙箱成对使用` };
+      }
+    }
+  }
   return { allowed: true };
 }
 

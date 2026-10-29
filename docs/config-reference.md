@@ -313,3 +313,18 @@ mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
 # dismissed = ["https://api.example.com"]  # 程序维护，无需手改
 ```
 
+## 14. 文本资产同步（sync_assets）
+
+多机同步时随包收敛的白名单目录清单（每台机器自选，清单本身不随包同步）。
+
+| 键 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `dirs` | `string[]` | 否 | 无（不随包同步文本资产） | 文本资产同步白名单：这些目录（home 相对路径）里的文本文件随同步包跨机收敛——远端有则写入、相同则跳过、本机多出的绝不删除，改动前自动快照。~/.modeldock 与 node_modules 永不入包，二进制自动跳过（单文件 ≤512KB、总量 ≤4MB、≤200 个文件）。管理命令：modeldock sync assets add / list / rm。 |
+
+示例：
+
+```toml
+[sync_assets]
+dirs = ["skills"]
+```
+

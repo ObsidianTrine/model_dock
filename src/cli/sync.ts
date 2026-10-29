@@ -1,11 +1,14 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { confirm, input, password, select } from '@inquirer/prompts'
 import { c, t } from '../util/index.js'
-import { displayPath } from '../util/paths.js'
+import { displayPath, homeDir } from '../util/paths.js'
+import { loadConfig, mutateConfig } from '../config/store.js'
 import { exportFileName, exportSyncdoc, previewImport, applyImportedDoc } from '../sync/exportImport.js'
 import { enrollCloud, setupSyncTarget } from '../sync/setup.js'
 import { syncStatus } from '../sync/engine.js'
 import { readSyncState, updateSyncState, type SyncTargetConfig } from '../sync/state.js'
+import { collectAssetFiles, normalizeAssetDir } from '../sync/assets.js'
 import type { SyncdocReport } from '../sync/collect.js'
 
 /** --stdin-pass：口令从 stdin 整读（脚本/CI 用；不进 argv、不进 shell history） */
@@ -254,4 +257,81 @@ export async function cmdSyncEnroll(o: { server?: string; code?: string; name?: 
     )
   )
   console.log(c.gray(t('  同步口令请妥善保管——遗忘后云端密文无法恢复。暂停/恢复：modeldock sync pause | resume', '  Keep the sync passphrase safe — if forgotten, the cloud ciphertext cannot be recovered. Pause/resume: modeldock sync pause | resume')))
+}
+
+// ── 文本资产白名单（自建 skills / 全局记忆等目录随同步包跨机收敛，见 src/sync/assets.ts）────────
+
+export async function cmdSyncAssetsList(): Promise<void> {
+  const cfg = await loadConfig()
+  const dirs = cfg.sync_assets?.dirs ?? []
+  if (dirs.length === 0) {
+    console.log(t('未配置文本资产白名单。添加：modeldock sync assets add <目录>', 'No text-asset whitelist configured. Add one: modeldock sync assets add <dir>'))
+    return
+  }
+  for (const dir of dirs) {
+    const a = collectAssetFiles([dir])
+    const files = Object.keys(a.files)
+    const bytes = files.reduce((s, k) => s + Buffer.byteLength(a.files[k], 'utf8'), 0)
+    const skipped = a.skipped.length
+      ? t('（跳过 {n} 个二进制/超限文件）', ' ({n} binary/oversized file(s) skipped)', { n: a.skipped.length })
+      : ''
+    console.log(t('{d} · 文本 {n} 个 / {b}KB{skipped}', '{d} · {n} text file(s) / {b}KB{skipped}', { d: dir, n: files.length, b: Math.max(1, Math.round(bytes / 1024)), skipped }))
+  }
+  console.log(
+    c.gray(
+      t(
+        '白名单目录内的文本文件随多机同步自动收敛：只写入与更新，不删除本机多出的文件；~/.modeldock 与 node_modules 永不入包。改动随下一次同步生效',
+        'Text files inside whitelisted dirs converge via multi-machine sync: writes and updates only, extra local files are never deleted; ~/.modeldock and node_modules are never packaged. Changes apply with the next sync tick'
+      )
+    )
+  )
+}
+
+export async function cmdSyncAssetsAdd(dir: string): Promise<void> {
+  const rel = normalizeAssetDir(dir)
+  const abs = path.join(path.resolve(homeDir()), ...rel.split('/'))
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+    console.error(c.red(t('✗ 目录不存在：{d}（先创建目录再 add，或确认路径拼写）', '✗ Directory does not exist: {d} (create it first, or check the path)', { d: displayPath(abs) })))
+    process.exit(1)
+  }
+  let duplicate = false
+  await mutateConfig((c2) => {
+    const cur = c2.sync_assets?.dirs ?? []
+    if (cur.includes(rel)) {
+      duplicate = true
+      return
+    }
+    c2.sync_assets = { ...(c2.sync_assets ?? {}), dirs: [...cur, rel] }
+  })
+  if (duplicate) {
+    console.log(t('已在白名单中：{d}', 'Already whitelisted: {d}', { d: rel }))
+    return
+  }
+  console.log(
+    c.green(
+      t(
+        '✓ 已加入文本资产白名单：{d}（目录内文本文件随多机同步收敛，改动前自动快照）',
+        '✓ Whitelisted for text-asset sync: {d} (text files inside converge via multi-machine sync; snapshotted before changes)',
+        { d: rel }
+      )
+    )
+  )
+}
+
+export async function cmdSyncAssetsRm(dir: string): Promise<void> {
+  const rel = normalizeAssetDir(dir)
+  let removed = false
+  await mutateConfig((c2) => {
+    const cur = c2.sync_assets?.dirs ?? []
+    const next = cur.filter((d) => d !== rel)
+    if (next.length === cur.length) return
+    removed = true
+    if (next.length > 0) c2.sync_assets = { ...(c2.sync_assets ?? {}), dirs: next }
+    else delete c2.sync_assets
+  })
+  if (!removed) {
+    console.log(t('不在白名单中：{d}', 'Not whitelisted: {d}', { d: rel }))
+    return
+  }
+  console.log(c.green(t('✓ 已移出白名单：{d}（磁盘文件不动，本机已有副本保留）', '✓ Removed from the whitelist: {d} (files on disk are untouched; the local copy is kept)', { d: rel })))
 }

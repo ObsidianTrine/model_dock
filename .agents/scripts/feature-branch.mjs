@@ -184,8 +184,10 @@ function baseBranch() {
 
 function sanitizeTaskId(raw) {
   const id = String(raw || '').trim();
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(id)) {
-    die(`invalid task-id "${id}". Use a short slug: letters/digits/dot/dash/underscore, e.g. fix-presets-merge`);
+  // 小写字母/数字/短横线（与 spec id 同规则）：点会产生 git 非法分支名（a..b、x.lock）；
+  // 大写在大小写不敏感文件系统上会让不同 id 落进同一 worktree 目录互撞。
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+    die(`invalid task-id "${id}". Use a short slug: lowercase letters/digits/dash, e.g. fix-presets-merge`);
   }
   return id;
 }
@@ -407,6 +409,13 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
   if (currentBranch() !== base) {
     die(`main repo is on branch "${currentBranch()}", but merge target is "${base}". ` +
       `Switch the main repo first: git checkout ${base} (commit or stash local changes).`);
+  }
+  // main checkout must be clean too: a dirty base branch makes the merge fail midway
+  // (or entangle unrelated local edits in the conflict resolution). 只看已跟踪改动
+  //（-uno）：未跟踪文件不参与合并、不会纠缠冲突（编排器测试的临时仓库里 worktrees/
+  // 目录必然存在，真机仓库也常有本地未跟踪文件），把它们算脏是误伤。
+  if (git(['status', '--porcelain', '--untracked-files=no'])) {
+    die(`main repo (${base}) has uncommitted changes. Commit or stash them first:\n  git status --short`);
   }
   const message = mergeMsg || `Merge branch '${branch}'`;
   git(['merge', '--no-ff', branch, '-m', message]);

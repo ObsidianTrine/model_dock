@@ -246,6 +246,9 @@ export const METAS = {
 
   // ---- import
   'import.dismissed': M('一键导入里「暂不导入」过的候选地址：不再重复弹卡提醒；「添加服务 → 勾选导入」的手动入口不受影响。', 'Import candidates you dismissed: they stop re-appearing; the manual "add service → import" path is unaffected.', ['无（程序维护）', 'none (program-managed)'], '["https://api.example.com"]', { managed: true }),
+
+  // ---- sync_assets
+  'sync_assets.dirs': M('文本资产同步白名单：这些目录（home 相对路径）里的文本文件随同步包跨机收敛——远端有则写入、相同则跳过、本机多出的绝不删除，改动前自动快照。~/.modeldock 与 node_modules 永不入包，二进制自动跳过（单文件 ≤512KB、总量 ≤4MB、≤200 个文件）。管理命令：modeldock sync assets add / list / rm。', 'Text-asset sync whitelist: text files inside these home-relative directories converge across machines via the sync package — written when missing, skipped when identical, extra local files never deleted; a snapshot is taken before changes. ~/.modeldock and node_modules are never packaged; binaries are skipped (≤512KB per file, ≤4MB total, ≤200 files). Manage with modeldock sync assets add / list / rm.', ['无（不随包同步文本资产）', 'none (no text assets synced)'], '["skills"]'),
 }
 
 // ---------------------------------------------------------------- 分节（与 types.ts 结构对应）
@@ -265,6 +268,7 @@ const SECTIONS = [
   { id: 'backup', title: ['快照（backup）', 'Snapshots (backup)'], cut: () => 'backup.'.length, intro: ['每次改动配置或接入 / 断开客户端前，ModelDock 会自动留一份快照供还原。', 'Before every config change or attach / detach, ModelDock keeps an automatic snapshot for restoring.'], pick: (p) => p.startsWith('backup.') },
   { id: 'update', title: ['自动更新（update）', 'Auto-update (update)'], cut: () => 'update.'.length, intro: ['新版本检查与下载安装的来源。', 'Where new releases are checked, downloaded and installed from.'], pick: (p) => p.startsWith('update.') },
   { id: 'import', title: ['导入状态（import）', 'Import state (import)'], cut: () => 'import.'.length, intro: ['一键导入（存量配置收编）的记忆数据，由程序维护。', 'Bookkeeping for one-click import of existing configs; program-managed.'], pick: (p) => p.startsWith('import.') },
+  { id: 'sync_assets', title: ['文本资产同步（sync_assets）', 'Text-asset sync (sync_assets)'], cut: () => 'sync_assets.'.length, intro: ['多机同步时随包收敛的白名单目录清单（每台机器自选，清单本身不随包同步）。', 'Whitelisted directories converged via multi-machine sync (chosen per machine; the list itself does not sync).'], pick: (p) => p.startsWith('sync_assets.') },
 ]
 
 // ---------------------------------------------------------------- 文档渲染

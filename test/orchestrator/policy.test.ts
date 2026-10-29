@@ -83,6 +83,20 @@ describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
     expect(evaluateCommand('modeldock gateway status 8687').allowed).toBe(true)
   })
 
+  it('缺省端口盲区：启动型子命令不带 --port 拦（缺省落生产端口），带 --port 放行', () => {
+    expect(evaluateCommand('npx tsx src/cli.ts gateway start')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('modeldock ui')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('npm run dev -- gateway start')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('gateway restart')).toMatchObject({ allowed: false, rule: 'port' })
+    // 显式 --port 已落到测试端口 → 放行
+    expect(evaluateCommand('MODELRDOCK_FAKE_HOME=/tmp/sb npx tsx src/cli.ts gateway start --port 18901').allowed).toBe(true)
+    expect(evaluateCommand('gateway restart --port 18990').allowed).toBe(true)
+    // 查询类与未配置命令名不受影响
+    expect(evaluateCommand('gateway status').allowed).toBe(true)
+    expect(evaluateCommand('gateway start --help').allowed).toBe(true)
+    expect(evaluateCommand('foo-server start').allowed).toBe(true)
+  })
+
   it('只读探查与普通测试端口放行', () => {
     expect(evaluateCommand('lsof -nP -iTCP:8687 -sTCP:LISTEN').allowed).toBe(true)
     expect(evaluateCommand('gateway status').allowed).toBe(true)

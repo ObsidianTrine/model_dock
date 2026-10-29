@@ -59,6 +59,7 @@ export function generateUiMin() {
     'UI_JS_CONFIGPACK',
     'UI_JS_SCHEDULE',
     'UI_JS_CLIENTS',
+    'UI_JS_MCP',
     'UI_JS_EDIT',
     'UI_JS_LOGS',
     'UI_JS_BOOT',

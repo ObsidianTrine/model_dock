@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { homeDir, modeldockDir, sandboxNpmBinDir } from './paths.js'
 import { t } from './i18n.js'
 
@@ -152,13 +153,19 @@ export async function atomicWrite(file: string, content: string | Buffer, mode =
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${Math.random().toString(36).slice(2, 8)}`
   )
-  const fh = await fsp.open(tmp, 'w', mode)
   try {
-    await fh.writeFile(content)
-    await fh.chmod(mode)
-    await fh.sync()
-  } finally {
-    await fh.close()
+    const fh = await fsp.open(tmp, 'w', mode)
+    try {
+      await fh.writeFile(content)
+      await fh.chmod(mode)
+      await fh.sync()
+    } finally {
+      await fh.close()
+    }
+  } catch (e) {
+    // 写入阶段失败（磁盘满/权限）：与 rename 失败路径同规清掉残留 tmp，不在目标目录留垃圾
+    await fsp.rm(tmp, { force: true }).catch(() => {})
+    throw e
   }
   // Windows：rename 覆盖已有文件时，若目标正被其他进程短暂打开（网关热加载读配置、杀毒扫描）
   // 会抛 EPERM/EACCES（libuv 的 REPLACE_EXISTING 不重试）。小步退避重试数次，unix 语义不变。
@@ -290,17 +297,27 @@ function enqueueLocked<T>(lockFile: string, job: () => Promise<T>): Promise<T> {
   return next
 }
 
+/** 锁持有者识别（withFileLock 同路径重入）：AsyncLocalStorage 让「持有者调用树内」的嵌套申请
+ *  可被精确识别——promise 队列没有线程式的属主概念，嵌套若也走队列会排在自身后面形成死锁
+ *  （engine 的 apply+post-collect 原子化正是这个形态：外层持 config 锁，applySyncdoc 内部又
+ *  mutateConfig 同一把锁）。跨路径嵌套照常各自排队，不引入跨路径死锁。 */
+const lockOwnerStore = new AsyncLocalStorage<{ lockFile: string }>()
+
 /** 读-改-写 便捷封装（同进程串行 + 跨进程互斥锁）。config 的 mutateConfig 与 secrets 写路径共用。
- *  fn 内不要做慢 I/O，避免长期占锁。@param{timeoutError} 覆盖默认超时报错（store 用它装成 ConfigError）。 */
+ *  fn 内不要做慢 I/O，避免长期占锁。同路径重入（持有者调用树内再申请同一路径）直接内联执行，
+ *  不再排队也不再拿文件锁——文件锁与队列都归外层持有。@param{timeoutError} 覆盖默认超时报错
+ *  （store 用它装成 ConfigError）。 */
 export async function withFileLock<T>(
   lockFile: string,
   opts: { timeoutError?: (lp: string) => Error } | undefined,
   job: () => Promise<T>
 ): Promise<T> {
+  const owner = lockOwnerStore.getStore()
+  if (owner && owner.lockFile === lockFile) return job()
   return enqueueLocked(lockFile, async () => {
     const release = await acquireFileLock(lockFile, opts)
     try {
-      return await job()
+      return await lockOwnerStore.run({ lockFile }, job)
     } finally {
       release()
     }

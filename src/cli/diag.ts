@@ -6,6 +6,7 @@ import { loadConfig, mutateConfig } from '../config/store.js'
 import type { Config } from '../config/types.js'
 import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
+import { collectClientSecurityFindings } from '../mcp/security.js'
 import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
   autostartStatus,
   gatewayDaemonArgs,
@@ -153,12 +154,12 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
       const parsed: unknown = JSON.parse(text)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
-          // nativePrefix 为空（本平台 file 后端无加密，如 darwin keychain 形态）时，任何 enc: 密文都
-          // 不是本机产出的——统一按异机密文报（否则 !v.startsWith('') 恒假，darwin 永不触发）
-          if (typeof v === 'string' && v.startsWith('enc:') && (nativePrefix === '' || !v.startsWith(nativePrefix))) {
-            foreignIds.add(k)
-            hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
-          }
+          if (typeof v !== 'string' || !v.startsWith('enc:')) continue
+          // 本机明文后端（plainCipher，prefix=''）下任何 enc: 密文都非本机产物——
+          // startsWith('') 恒真会让异平台密文整类漏报（macOS 实证），前缀为空时 enc: 即异源
+          if (nativePrefix && v.startsWith(nativePrefix)) continue
+          foreignIds.add(k)
+          hits.push(`${k}(${v.slice(0, v.indexOf(':', 4) + 1)})`)
         }
       }
     }
@@ -457,6 +458,18 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     else if (st.attached) warn('harness.pointing', t('{l}：已接管但未检测到指向（file 模式或待重启）', '{l}: attached but no pointing detected (file mode, or restart pending)', { l: a.label }))
     else if (st.installed) warn('harness.detached', t('{l}：已安装未接管（不影响使用）', '{l}: installed but not attached (no impact on use)', { l: a.label }), `modeldock attach ${a.id}`)
     else if (a.id !== 'generic-env') info('harness.absent', t('{l}：未安装，跳过', '{l}: not installed, skipped', { l: a.label }))
+  }
+
+  // Agent 配置安全体检（只读，见 mcp/security.ts）：MCP 危险命令 / env 明文凭据 / 同名重复 / 直连明文 key。
+  // 发现本身不带 --fix（都是用户的显式选择，体检只把泄漏面说清）；安检自身异常不击穿整条体检
+  try {
+    const sec = await collectClientSecurityFindings(cfg)
+    for (const f of sec) {
+      if (f.level === 'warn') warn(f.id, f.msg, f.hint)
+      else info(f.id, f.msg, f.hint)
+    }
+  } catch {
+    /* MCP 配置损坏等已在 scan 侧带错误返回，这里不重复报告 */
   }
 
   return F

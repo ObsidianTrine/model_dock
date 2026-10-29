@@ -127,12 +127,14 @@ modeldock gateway install         # ★ 开机自启（常驻）：注册系统�
 modeldock status                  # 总览：网关 / active profile / 各 harness 指向
 modeldock test [profile]          # 连通性自测：key、模型名、流式、延迟一次说清
 modeldock doctor                  # 全面体检；--fix 自动修复（敏感项逐项确认），--json 机器可读
+modeldock mcp list                # MCP 服务器盘点：各客户端本机配置聚合一览（只读，--json 机器可读）
 modeldock gateway log -f          # 实时请求日志（只有元数据，不落 prompt）
 modeldock gateway log --harness claude-code
 modeldock config export           # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）；默认写到 modeldock-config-<日期>-<时间>.msync，用 -o 指定路径
 modeldock config import <file>    # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup              # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
 modeldock sync status             # 同步状态：目标/最近推拉/冲突（sync pause / resume 暂停恢复）
+modeldock sync assets             # 文本资产白名单：自建 skills / 全局记忆等目录随同步收敛（assets add <目录> / rm 管理清单）
 modeldock update                  # 一键升级：下载 → SHA256 校验 → 替换 → 自动重启网关
 ```
 
@@ -211,6 +213,19 @@ modeldock model set <provider> <model> --cap reasoning,vision         # 手动�
 modeldock provider set-key <id>          # 隐藏输入；或 --key-env MY_VAR
 ```
 
+### MCP 服务器盘点（只读）
+
+各 AI 客户端的 MCP（Model Context Protocol）服务器配置散在各自的配置文件里，ModelDock 聚合成一份清单——回答「我到底配了哪些 MCP、各客户端之间是否一致」：
+
+```bash
+modeldock mcp list                       # 名称 / 来源客户端 / 类型 / 命令或地址 / 范围
+modeldock mcp list --json                # 机器可读
+```
+
+- 同一个名字在多个客户端重复出现会**点名提醒**——换命令或换 token 时最容易漏一处。
+- 覆盖用户级配置：Claude Code（`~/.claude.json`）、Codex（`~/.codex/config.toml`）、ZCode（`~/.zcode/cli/config.json`，缺省回退 `~/.agents/mcp.json`）、OpenCode（`~/.config/opencode/opencode.json`）；**各仓库工作区配置**（`<repo>/.mcp.json`、`<repo>/.zcode/config.json`）不在盘点范围。
+- **环境变量只记名字、绝不收集值**——清单可以放心贴出去排查。Web 控制台首页有同一份「MCP 服务器」卡片（自动刷新），文件损坏的来源会就地提示。
+
 ### 多机同步与云端管理（进阶）
 
 多台电脑保持同一份配置：
@@ -221,6 +236,7 @@ modeldock sync status            # 目标 / 版本 / 最近推拉 / 错误与冲
 ```
 
 - 改动自动双向收敛：新加服务、换 Key、改路由，别的电脑自动跟上；冲突自动保留双方快照，不丢数据。目标已有配置时，新入网的电脑自动收敛到最新；同步状态显示为控制台顶栏的小徽标（正常为「配置同步 · 已开启」，冲突 / 错误 / 暂停会变色提醒，冲突提醒在本机改动成功推送回去后自动消失，鼠标悬浮可看同步目标、版本与最近推拉详情；配置与管理在电脑端命令行）。
+- **文本资产同步（可选）**：把自建 skills、全局记忆、AGENTS.md 这类「一个目录」加入白名单，目录内的**文本文件**随同步包跨机收敛——远端有则写入、内容相同则跳过、本机多出的**绝不删除**（改动前自动快照）。`modeldock sync assets add <目录>` 加入（目录须在 home 内）、`sync assets` 查看清单、`sync assets rm <目录>` 移出（不动磁盘文件）。安全边界：`~/.modeldock`（含密钥）与 `node_modules` 永不入包，二进制自动跳过，单文件 ≤512KB、总量 ≤4MB、最多 200 个文件；白名单是每台机器自己的选择，不随包同步。
 - 同步口令请妥善保管——遗忘则密文不可恢复。
 - **换新电脑**：网盘客户端把文件同步过来只是"运输"，新电脑还需手动跑一次 `modeldock sync setup`（选同一目标、输同一口令）才会接入并自动收敛。完整步骤（前置检查与排错对照表）见 [multi-machine-sync.md](multi-machine-sync.md)。
 
@@ -316,6 +332,12 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 | 网关挂了 harness 全断 | 已装自启服务（`gateway install`）会自动拉起；否则 `modeldock gateway start --daemon`，应急 `modeldock detach <harness>` 立即回到直连 |
 | ZCode 没走网关 | attach 只注册了 provider，还需在 ZCode 设置里选择它（一次性） |
 | 配置改坏了 | `modeldock config edit` 或 `modeldock restore` |
+
+`modeldock doctor` 的体检里含 **Agent 配置安检**（只读、不自动改动，是否调整由你决定）：
+
+- MCP 启动命令是「下载内容管道进 shell/解释器」（`curl … | bash`、`irm … | iex`、`bash -c "$(curl …)"`）→ **警告点名**——这类命令每次启动都在执行远端内容，源头被篡改就会直接进本机；建议固定版本安装。
+- MCP 环境变量带**明文凭据**、客户端以**独立直连**运行（上游 key 明文写在其配置文件）→ 提示泄漏面：只点名服务器与变量名，**值绝不显示**；泄露或换机时先 `modeldock provider set-key` 轮换。
+- 同名 MCP 服务器在多处重复配置 → 提醒换 key / 改命令时容易漏一处（对照 `modeldock mcp list`）。
 
 ## 10. 当前实现状态（2026-10-27 基线；发版时随版本号刷新）
 

@@ -1,5 +1,6 @@
 import type { ProfileConfig, Protocol, ProviderConfig, ScheduleWindow } from '../config/types.js'
 import { t } from '../util/i18n.js'
+import { ASSET_MAX_FILE_BYTES, ASSET_MAX_FILES, ASSET_MAX_TOTAL_BYTES, isSafeAssetKey } from './assets.js'
 
 /**
  * syncdoc v1 —— 可同步态的传输/存储逻辑格式（加密前的明文形态），详见 docs/design-cloud-sync.md §4.2。
@@ -24,6 +25,9 @@ export interface SyncdocData {
   userPresets: unknown[] | { presets: unknown[] }
   /** 定时切换规则（config.toml gateway.schedule.windows）；每机「启用」开关属机器态不随包 */
   scheduleRules: ScheduleWindow[]
+  /** 文本资产（白名单目录内的文件：家目录相对 POSIX 路径 → 内容）；缺省/空 = 无。
+   *  SCHEMA_VERSION 不升级：老客户端校验忽略未知字段、新客户端遇缺省跳过，双向兼容（src/sync/assets.ts） */
+  assets?: { files: Record<string, string> }
 }
 
 export interface Syncdoc {
@@ -123,6 +127,28 @@ export function validateSyncdoc(input: unknown): Syncdoc {
       if (w.dayFilter !== undefined && !(DAY_FILTERS as string[]).includes(String(w.dayFilter)))
         fail(t('定时规则第 {n} 条 dayFilter={v} 不受支持', 'Schedule rule #{n} has unsupported dayFilter={v}', { n: i + 1, v: String(w.dayFilter) }))
     }
+  }
+
+  // assets（可选）：files = 家目录相对 POSIX 路径 → 文本内容。路径安全与上限在打包侧（collect）与应用侧
+  // （applyAssets）之外、校验期就把关：恶意包在此拒绝，绝不进文件系统
+  if (data.assets !== undefined && data.assets !== null) {
+    if (!isPlainObject(data.assets)) fail(t('同步包 assets 段格式错误（应为对象）', 'Invalid assets section (must be an object)'))
+    const assets = data.assets as Record<string, unknown>
+    if (!isPlainObject(assets.files)) fail(t('同步包 assets.files 格式错误（应为路径到内容的对象）', 'Invalid assets.files section (must be an object of path → content)'))
+    const assetEntries = Object.entries(assets.files)
+    if (assetEntries.length > ASSET_MAX_FILES)
+      fail(t('同步包含 {n} 个资产文件，超过上限 {max}', 'The sync package has {n} asset files, over the {max} limit', { n: assetEntries.length, max: ASSET_MAX_FILES }))
+    let assetTotal = 0
+    for (const [k, v] of assetEntries) {
+      if (!isSafeAssetKey(k)) fail(t('同步包含不安全的资产路径「{k}」，已拒绝', 'The sync package contains an unsafe asset path "{k}"; refused', { k }))
+      if (typeof v !== 'string') fail(t('资产文件「{k}」内容应为字符串', 'Asset file "{k}" content must be a string', { k }))
+      const bytes = Buffer.byteLength(v, 'utf8')
+      if (bytes > ASSET_MAX_FILE_BYTES)
+        fail(t('资产文件「{k}」超过单文件上限 {n}KB', 'Asset file "{k}" exceeds the {n}KB per-file limit', { k, n: Math.round(ASSET_MAX_FILE_BYTES / 1024) }))
+      assetTotal += bytes
+    }
+    if (assetTotal > ASSET_MAX_TOTAL_BYTES)
+      fail(t('同步包资产总量超过上限 {max}MB', 'The sync package assets exceed the {max}MB total limit', { max: ASSET_MAX_TOTAL_BYTES / (1024 * 1024) }))
   }
   return input as unknown as Syncdoc
 }

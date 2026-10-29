@@ -26,7 +26,8 @@ $EDITOR my-task.md
 # 2. 提交（校验 schema，转 pending/）
 node .agents/scripts/orchestrator.mjs submit my-task.md
 
-# 3. 启动闭环（默认 claude-headless 后端；--backend mock 用假 worker，秒级不烧钱）
+# 3. 启动闭环（后端缺省读 workflow.json worker.backend，本仓库为 zcode-headless；
+#    --backend mock 用假 worker，秒级不烧钱）
 node .agents/scripts/orchestrator.mjs run <task-id>
 
 # 4. 看进度（任意时刻）

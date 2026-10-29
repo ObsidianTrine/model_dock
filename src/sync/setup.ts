@@ -13,7 +13,8 @@ import { blobRefOf, type SyncManifest, type SyncTarget } from './targets/types.j
 import { emptySyncState, writeSyncState, type SyncState, type SyncTargetConfig } from './state.js'
 import { validateSyncdoc, type Syncdoc } from './types.js'
 import type { SecretBackend } from '../config/secrets.js'
-import { randomToken } from '../util/fsx.js'
+import { configLockPath } from '../config/store.js'
+import { randomToken, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 
 export { createTarget } from './runtime.js'
@@ -53,9 +54,16 @@ async function joinExistingTarget(o: {
   } catch {
     throw new Error(o.msgs.badPass)
   }
-  const report = await applySyncdoc(validateSyncdoc(remoteDoc), { backend: o.backend })
-  const { doc: after } = await collectSyncdoc()
-  return { keys, report, afterHash: hashDoc(after) }
+  // apply + post-apply 重收集对 config 写锁原子化（CORRECT-06，与 engine 拉取分支同型）：
+  // 入网收敛后立刻有一笔本地写落进窗口的话，会被计入 afterHash 基线并静默吞掉
+  let report: SyncdocReport | null = null
+  let afterHash = ''
+  await withFileLock(configLockPath(), undefined, async () => {
+    report = await applySyncdoc(validateSyncdoc(remoteDoc), { backend: o.backend })
+    const { doc: after } = await collectSyncdoc()
+    afterHash = hashDoc(after)
+  })
+  return { keys, report, afterHash }
 }
 
 /** 全新同步目标首推（target/cloud 共用）：随机生成 salt/hkdfSalt（成为该同步目标的口令身份，

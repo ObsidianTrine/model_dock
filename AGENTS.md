@@ -80,6 +80,7 @@
 | `src/adapters/` | Harness 适配器（L1 内置 + L2 声明式 pack） |
 | `src/backup/` | 写盘前自动快照 |
 | `src/import/` | 从 cc-switch / Claude Code / dsh / ZCode 导入存量配置 |
+| `src/mcp/` | MCP 服务器盘点（只读扫描各客户端 MCP 配置，供 CLI / 控制台 / 后续下发共用） |
 | `src/presets/` | 内置 provider 预设库 |
 | `src/providers/` | 上游模型目录拉取 |
 | `src/util/` | 路径、原子写、终端颜色、diff、JSONPath |

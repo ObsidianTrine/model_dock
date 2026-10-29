@@ -23,7 +23,7 @@ describe('buildProgram 注册面', () => {
     expect(names).toEqual(
       [
         'adapter', 'attach', 'config', 'detach', 'doctor', 'env', 'gateway', 'harness',
-        'import', 'init', 'model', 'presets', 'profile', 'provider', 'reset', 'restore',
+        'import', 'init', 'mcp', 'model', 'presets', 'profile', 'provider', 'reset', 'restore',
         'status', 'sync', 'test', 'token', 'ui', 'uninstall', 'update', 'usage',
       ].sort()
     )
@@ -46,13 +46,14 @@ describe('buildProgram 注册面', () => {
     expect(model.commands.find((c) => c.name() === 'catalog')!.commands.map((c) => c.name())).toEqual(['refresh'])
   })
 
-  it('profile / gateway / harness / config / sync 子命令齐备', () => {
+  it('profile / gateway / harness / config / sync / mcp 子命令齐备', () => {
     const subs: Record<string, string[]> = {
       profile: ['add', 'list', 'rm', 'use'],
       gateway: ['install', 'log', 'rotate-token', 'start', 'status', 'stop', 'uninstall'],
       harness: ['direct', 'gateway', 'route'],
       config: ['edit', 'export', 'import'],
-      sync: ['enroll', 'pause', 'resume', 'setup', 'status'],
+      mcp: ['list'],
+      sync: ['assets', 'enroll', 'pause', 'resume', 'setup', 'status'],
     }
     for (const [top, children] of Object.entries(subs)) {
       const cmd = prog.commands.find((c) => c.name() === top)!

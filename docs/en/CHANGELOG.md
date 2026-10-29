@@ -11,6 +11,32 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 - **One-click update no longer sticks at "cannot close applications"**: the pre-update step that stops the tray used to fail silently, leaving the tray running with a file lock so the install wizard stalled at an "unable to close all applications" prompt (needing a manual retry or quitting the tray by hand); the tray is now stopped with kill-verify-retry, every step is written to the update log, and the wizard force-closes any remaining lockers instead of waiting 30 seconds for a confirmation prompt.
 
+## [1.5.0] - 2026-10-28
+
+Gateway observability, Windows autostart and doctor hardening, plus a batch of reliability fixes around disconnected clients, keyrings, and snapshots.
+
+### Added
+
+- **Gateway observability**: crash traces land in the log directory automatically; a new unauthenticated `/v1/health` data-plane self-check (same view as the management health endpoint) and an admin-gated `/_modeldock/metrics` endpoint (per-service latency quantiles, event-loop lag); request logs and response headers carry a request correlation ID for easier cross-log reconciliation.
+- **Windows autostart no longer flashes a black window**: autostart registration moved from a VBS script to the registry Run key, launching the gateway silently at login (self-detached hidden start); reinstall / uninstall cleans up symmetrically and migrates the old registration; the doctor autostart check adapts to it.
+- **Three new doctor checks**: sandbox autostart leftovers (cleanable with `--fix`), distinguishing keyring read failures from "no key configured" (with an unlock hint), and cross-machine cipher-reference detection naming the affected services (the whole-class false-negative on macOS's unencrypted backend is fixed).
+- **New bilingual config.toml reference**: 62 configuration keys generated from source with a freshness test, cross-linked from the usage docs.
+
+### Improved
+
+- **Direct connect and detach no longer stack confirmations**: redundant confirmation dialogs removed for attaching direct connect, switching back to gateway, detaching, and switching the active service — one click each.
+- **Pre-migration snapshot before version-migration writes**: when config.toml's on-disk version lags the tool version, it is snapshotted to the backup directory first (a bad write can be undone with `modeldock restore config`); snapshot failure does not block the upgrade.
+
+### Fixed
+
+- **Client disconnect aborts upstream forwarding**: when a client of a long non-streaming inference walks away mid-request, the gateway stops waiting on the upstream instead of burning tokens; aborted requests are logged as 499 instead of posing as 500.
+- **Keyring failures no longer break the failover chain**: a locked or transiently failing keyring skips to the next candidate service (previously the whole chain answered 500); a failed keyring deletion no longer lets the old key "revive".
+- **claude-* model names for relay services pass through untouched**: when the service catalog really offers claude-* models, a client's explicitly named model is forwarded as-is; services without a managed catalog behave as before.
+- **Console doc links restricted to http(s)**: injecting `javascript:` through a custom preset's docs URL is closed off; sync-packet verification now uses constant-time comparison.
+- **Concurrent snapshot writers no longer delete each other's work**: a snapshot directory that has started writing but not yet written its manifest is no longer pruned as an orphan (10-minute marker grace; crashed leftovers are still cleaned up as before).
+- **Windows force-stops no longer lose the last log lines**: log streams flush automatically after 3 idle seconds, shrinking the worst loss window from "until the next restart" to seconds.
+- **The cloud control plane reports errors honestly**: malformed request bodies (null / arrays / scalars) fall back to 4xx instead of leaking internals; a heartbeat hitting a reverse-proxy error page reports it explicitly instead of crashing on a bare exception.
+
 ## [1.4.3] - 2026-10-27
 
 Windows tray menu stability fix: the menu no longer repaints itself periodically while open.
@@ -382,6 +408,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.5.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.3...v1.5.0
 [1.4.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.2...v1.4.3
 [1.4.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.0...v1.4.1

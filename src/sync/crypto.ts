@@ -10,6 +10,7 @@ import {
 } from 'node:crypto'
 import { ENVELOPE_FMT, SCHEMA_VERSION, SYNCDOC_FMT, type SyncEnvelope, type Syncdoc } from './types.js'
 import { t } from '../util/i18n.js'
+import { safeEqual } from '../util/safe-equal.js'
 
 /** 信封加密（docs/design-cloud-sync.md §4.3）：
  *  master = PBKDF2-HMAC-SHA256(口令, salt, 600000, 32B)
@@ -68,7 +69,7 @@ export function openWithKeys(env: unknown, keys: SyncKeys): Syncdoc {
     throw new Error(t('同步包缺少加密封装字段，文件不完整', 'The sync package is missing envelope fields; the file is incomplete'))
   }
   const expectVerifier = createHmac('sha256', keys.macKey).update(VERIFIER_INFO, 'utf8').digest('base64')
-  if (e.verifier !== expectVerifier) {
+  if (!safeEqual(e.verifier, expectVerifier)) {
     throw new Error(t('同步密钥不一致：该包不是用本同步目标当前的口令密封的', 'Key mismatch: this package was not sealed with the current passphrase of this sync target'))
   }
   let plain: Buffer
@@ -148,9 +149,9 @@ export function openEnvelope(env: unknown, passphrase: string): Syncdoc {
     throw new Error(t('同步包缺少加密封装字段，文件不完整', 'The sync package is missing envelope fields; the file is incomplete'))
   }
   const { encKey, macKey } = deriveKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'))
-  // 先验 verifier 再解密：「口令不正确」与「包被篡改」才报得出两种错
+  // 先验 verifier 再解密：「口令不正确」与「包被篡改」才报得出两种错（恒时比较，防时序侧信道辅助离线爆破）
   const expectVerifier = createHmac('sha256', macKey).update(VERIFIER_INFO, 'utf8').digest('base64')
-  if (typeof env.verifier !== 'string' || env.verifier !== expectVerifier) {
+  if (typeof env.verifier !== 'string' || !safeEqual(env.verifier, expectVerifier)) {
     throw new Error(t('口令不正确。若遗忘口令，包内容无法恢复，请向导出方重新获取', 'Incorrect passphrase. If forgotten, the package contents cannot be recovered; ask the exporter for a new package'))
   }
   let plain: Buffer
