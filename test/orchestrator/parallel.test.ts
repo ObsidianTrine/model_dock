@@ -76,3 +76,41 @@ describe('orchestrator parallel > drain --workers 并发调度', () => {
     }
   })
 })
+
+describe('orchestrator parallel > drain --max 烧钱上限', () => {
+  it('--workers 3 --max 1 且 3 张可跑卡：实际发射数 = 1（其余留 pending）', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'm1', { gate: 'L1', files_hint: ['docs/**'] })
+      submitCard(repo.root, 'm2', { gate: 'L1', files_hint: ['test/**'] })
+      submitCard(repo.root, 'm3', { gate: 'L1', files_hint: ['src/**'] })
+      const out = runOrch(repo.root, 'drain --workers 3 --max 1 --backend mock')
+      // pump() 首轮在同步循环里逐个 launch：内层只受 workers 约束的话会一口气发满 3 个
+      // （child exit 异步事件插不进同步 for 循环），--max 形同虚设。发射数以 drain 头计数。
+      expect((out.stdout.match(/═══ drain /g) ?? []).length).toBe(1)
+      expect(out.stdout).toContain('已达 --max 1 轮上限')
+      const pendingDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending')
+      expect(fs.existsSync(path.join(pendingDir, 'm2.md'))).toBe(true)
+      expect(fs.existsSync(path.join(pendingDir, 'm3.md'))).toBe(true)
+      expect(eventsOf(repo.root, 'm1').some((e) => e.type === 'worktree_ready')).toBe(true)
+      expect(eventsOf(repo.root, 'm2')).toHaveLength(0)
+      expect(eventsOf(repo.root, 'm3')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('串行路径 --max 语义不回退（--workers 缺省仍逐次发射前检查）', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'sm1', { gate: 'L1', files_hint: ['docs/**'] })
+      submitCard(repo.root, 'sm2', { gate: 'L1', files_hint: ['test/**'] })
+      const out = runOrch(repo.root, 'drain --max 1 --backend mock')
+      expect((out.stdout.match(/═══ drain /g) ?? []).length).toBe(1)
+      expect(out.stdout).toContain('已达 --max 1 轮上限')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'sm2.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+})

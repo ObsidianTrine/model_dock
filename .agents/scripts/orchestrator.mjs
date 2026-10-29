@@ -38,6 +38,7 @@ import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
+import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { gatewayLogsDir, reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
@@ -169,20 +170,10 @@ function ensureWorktree(repoRoot, taskId) {
 }
 
 /**
- * worktree 依赖准备：全新 checkout 没有 node_modules，worker 的 npm test/build
- * 门禁第一步就会失败，而 npm install 不在 worker 白名单里——环境准备是
- * orchestrator 的职责，不是 worker 的。仅当存在 package-lock.json（可复现的
- * 真实 npm 项目）且缺 node_modules 时才安装；集成测试的轻量临时仓库无 lock，
- * 自动跳过、保持秒级。
+ * worktree 依赖准备：见 orchestrator/deps.mjs（可注入 spawnFn 供单测）。
  */
 function installWorkspaceDeps(worktree, taskId) {
-  const pkg = path.join(worktree, 'package.json');
-  const lock = path.join(worktree, 'package-lock.json');
-  const modules = path.join(worktree, 'node_modules');
-  if (!fs.existsSync(pkg) || !fs.existsSync(lock) || fs.existsSync(modules)) return;
-  log(`worktree ${taskId} 缺少 node_modules，先安装依赖（package-lock.json 锁定）……`);
-  const r = spawnSync('npm', ['ci', '--no-fund', '--no-audit'], { cwd: worktree, stdio: 'inherit' });
-  if (r.status !== 0) die(`worktree 依赖安装失败（exit ${r.status}）。请在该 worktree 内手动 npm ci 后重跑 run/resume。`, r.status ?? 1);
+  return installWorkspaceDepsImpl(worktree, taskId, { log, die });
 }
 
 // ---------------------------------------------------------------------------
@@ -945,13 +936,16 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   };
 
   const pump = () => {
-    if (launched >= max) {
-      if (active.size === 0) log(`已达 --max ${max} 轮上限，停止调度。`);
-      return;
-    }
     // 从 pending 找一个与所有在跑任务分区不相交的卡
     for (;;) {
       if (active.size >= workers) return;
+      // --max 是烧钱上限：内层循环每次发射前必须同查（串行路径逐次发射前都查 done >= max，
+      // 并发路径漏了同款）——只查 pump 入口挡不住首轮 workers > max 的连发（launch 是同步
+      // 循环，child exit 异步事件插不进来）。有活跃子进程时先返回，等 exit 回调收尾再打日志。
+      if (launched >= max) {
+        if (active.size === 0) log(`已达 --max ${max} 轮上限，停止调度。`);
+        return;
+      }
       const candidates = listCards(root, 'pending').filter((id) => !blacklisted.has(id));
       let picked = null;
       for (const id of candidates) {
