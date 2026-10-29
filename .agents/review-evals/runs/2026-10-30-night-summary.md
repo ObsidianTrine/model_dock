@@ -54,4 +54,11 @@
 1. CORRECT-07/08/09 是否立卡修复（修后回流考题）；
 2. Volces ark key 放错 provider（coding-plan vs claude-direct）是否要在生产/dev 配置更正——本沙箱已本地归位，未动 dev/生产任何数据；
 3. bigmodel 主号 Coding Plan 到期是否续订（bigmodel-2 副号可用但模型旧）；
-4. `.agents/` 工具链的 e61b8ea（release-propose 文件错位）可作批三考题候选，未入库。
+4. `.agents/` 工具链的 e61b8ea（release-propose 文件错位）可作批三考题候选——**03:20 复核排除**：该 bug 是开发中实测踩中、修复随同一提交落地，历史中不存在 bug 在场状态（reviewRef 无物化对象），不符合考题 schema。
+
+## 追加验证波（03:15–03:30）
+
+- **波动题第三次采样**：cloud-null-body ✅、env-port-live ✅（单题复跑，runs/resample-*.md）——两题各累计 2/3 命中，「边界题轮次方差」定性成立，非系统性漏报；基线口径（单轮 ≥10/12）维持。
+- **噪音复跑（jsonpath.ts）**：前两条精确复现 CORRECT-08 ①②（审查者自行读到 known-issues 登记并标注「已登记」——工具化复读行为首见），另报第 ③ 处同族缺陷（对象上下文下标写入静默落键 `"0"`，tsx 实测坐实，已并入 CORRECT-08）。
+- e61b8ea 批三候选复核排除（见遗留 4）。
+
