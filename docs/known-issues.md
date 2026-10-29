@@ -78,6 +78,7 @@
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
 | CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ☐ 未修（2026-10-30 夜巡发现并沙箱实测复现，见 §三） |
+| CORRECT-08 | P2 | `src/util/jsonpath.ts` | 两处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语） | ☐ 未修（2026-10-30 噪音对照实验发现，tsx 实测复现，见 §三） |
 
 ---
 
@@ -381,6 +382,13 @@
 - 实测（2026-10-30 凌晨，macOS + tsx 直跑源码，沙箱实例）：`gateway start --daemon` 在端口已 LISTEN 后 ≥45s 不返回（人工终止）；另一例约 13min 后才自行退出（退出机制未查，推测与 tsx 子进程链的 fd 2 传递有关；SEA 单文件形态未测）。`gateway stop` 等不 spawn daemon 的命令不受影响。review-eval 审查者（GLM-5.3-Flash）在同一代码上的「存疑」发现指同一点，经复现坐实。
 - 影响：脚本/CI/终端里跑 `gateway start --daemon` 会被钉住等待，用户视角「命令卡死」；自启链（--autostart 直起 daemon，不经本路径）与 run_dev（tsx watch）不受影响。
 - 修复方向（未动手）：stderr 改落 daemon 侧自写日志（daemon 自己 appendLine，父进程 stdio 全 ignore）；或读端 `child.stderr.unref()`（注意与 'close' 收尾写的时序）；或转写改经 `child.stderr.pipe(writable)` 且 writable 侧 unref。改动后须回归 `gateway start --daemon` 就绪即返回 + daemon 崩溃日志仍可追。
+
+**CORRECT-08（P2，2026-10-30 噪音对照实验发现，tsx 实测复现）jsonpath 两处健壮性缺陷**
+- 背景：`src/util/jsonpath.ts` 自 2026-10-09 init 后零改动、历轮全仓审查未点名，本次作为「已知干净对照」进噪音测量（中性 prompt，GLM-5.3-Flash）——审查者报 2 个问题，**逐条实证均为真**，非误报（详见 runs 噪音报告）。该文件被 `src/adapters/packs.ts:47,57` 的 L2 pack JSON 写路径直接消费（`k` 来自用户手写的 `[adapter_packs.*]` 路径表达式）。
+- 缺陷 ①（静默吞字/改写）：tokenize 正则 `/([^[.\]]+)|\[(\d+)\]/g` 只消费匹配段、不校验完整覆盖——`$.a['b']` 产出键 `"'b'"`（实测 `setPath({}, "$.a['b']", 1)` → `{"a":{"'b'":1}}`，写错位置且无任何报错）；`$.a[-1]` 成字符串键 `'-1'`（数组上写非索引属性，序列化即丢）；未闭合 `$.a[0` 成键 `'0'`，绕过稀疏数组越界守卫。
+- 缺陷 ②（star 中段裸崩）：`setPath({a:{b:1}, c:'str'}, '$.*.b', 2)` 实测抛 `TypeError: Cannot create property 'b' on string 'str'`——同函数其余分支对非 object 子节点均有兜底，唯 star 递归裸崩，且报错未经 t() 双语化。
+- 影响：① pack 作者按标准 JSONPath 习惯写括号句式时**静默写坏客户端配置**（适配器区红线邻接面，无报错最难排查）；② 带 `*` 的 pack 写路径撞上异构容器直接崩 attach/plan。正常点句式（项目文档口径）不受影响——两处都是「宽容解析不报错」的输入面问题。
+- 修复方向（未动手）：tokenize 校验匹配段拼回后与输入等长（不等长按 `toSegments` 对 star 的先例抛可操作双语报错）；star 递归前补与 `:62`/`:95-98` 同款类型守卫。修复后两处均具备转为审查评测考题的资格（真实逃过历轮审查、实证复现、修复提交可回溯）。
 
 ---
 
