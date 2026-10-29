@@ -494,7 +494,7 @@ async function handleRequest(
       providerId,
       model,
     })
-    const errHeaders: Record<string, string> = {}
+    const errHeaders: Record<string, string | string[]> = {}
     for (const [k, v] of Object.entries(resHeaders)) {
       if (k.toLowerCase() === 'content-encoding') continue
       errHeaders[k] = v
@@ -508,7 +508,9 @@ async function handleRequest(
   res.writeHead(result.status, resHeaders)
   res.flushHeaders()
   // usage 旁路解析：tap 字节原样透传（转发行为零改变），SSE/JSON 尽力而为提取 token 用量
-  const usageTap = createUsageTap(result.headers['content-type'])
+  // content-type 单值头，防御性取首值（上游异常重复时不致类型崩）
+  const resCt = result.headers['content-type']
+  const usageTap = createUsageTap(Array.isArray(resCt) ? resCt[0] : resCt)
   try {
     await pipeline(result.body as any, usageTap, res)
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage: usageTap.getUsage() })

@@ -144,7 +144,10 @@ export interface UpstreamBody {
 
 export interface UpstreamResult {
   status: number
-  headers: Record<string, string>
+  /** undici 原样透传：重复头（典型 set-cookie）的值是 string[]。折叠成 'a,b' 会破坏
+   *  Set-Cookie（RFC 6265：Expires 含逗号，禁止折叠），客户端解析必错——保数组语义，
+   *  由 node writeHead/setHeader 逐条写出。单值头仍是 string。 */
+  headers: Record<string, string | string[]>
   body: UpstreamBody
   modelAfter?: string
   ms: number
@@ -422,7 +425,8 @@ export async function forwardToUpstream(
       })
       return {
         status: up.statusCode,
-        headers: Object.fromEntries(Object.entries(up.headers).map(([k, v]) => [k, String(v)])),
+        // 保数组语义原样透传（折叠为 'a,b' 对 set-cookie 是有损转换，见 UpstreamResult 注释）
+        headers: up.headers as Record<string, string | string[]>,
         body: up.body as unknown as UpstreamBody,
         modelAfter: rewritten.modelAfter,
         ms: Date.now() - t0,
@@ -488,9 +492,9 @@ export function translateUpstreamError(
   })
 }
 
-/** 响应头过滤：hop-by-hop 与 content-length 交给 node 重新计算 */
-export function filterResponseHeaders(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {}
+/** 响应头过滤：hop-by-hop 与 content-length 交给 node 重新计算（值原样透传，数组语义保留） */
+export function filterResponseHeaders(headers: Record<string, string | string[]>): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {}
   for (const [k, v] of Object.entries(headers)) {
     if (HOP_BY_HOP.has(k.toLowerCase()) || k.toLowerCase() === 'content-length') continue
     out[k] = v
@@ -511,7 +515,7 @@ const zstdDecoder: ZstdDecoder | null =
  *  解压失败 / 无压缩头回落原始字节按 utf8 解码，不向上抛。
  *  zstd（上游新出现的压缩算法）同样按此规则处理。 */
 export async function readUpstreamErrorText(
-  headers: Record<string, string>,
+  headers: Record<string, string | string[]>,
   body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }
 ): Promise<string> {
   let buf: Buffer
@@ -522,7 +526,8 @@ export async function readUpstreamErrorText(
   } catch {
     return ''
   }
-  const enc = (headers['content-encoding'] ?? headers['Content-Encoding'] ?? '').toLowerCase().trim()
+  const rawEnc = headers['content-encoding'] ?? headers['Content-Encoding'] ?? ''
+  const enc = (Array.isArray(rawEnc) ? rawEnc.join(',') : String(rawEnc)).toLowerCase().trim()
   try {
     if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf).toString('utf8')
     if (enc === 'deflate') {
@@ -556,8 +561,8 @@ function isQuotaError(status: number, bodyText: string): boolean {
 }
 
 /** 摘掉 content-encoding 头（大小写不敏感）：体被解压/重包为明文后不得再声明压缩 */
-function withoutContentEncoding(headers: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {}
+function withoutContentEncoding(headers: Record<string, string | string[]>): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {}
   for (const [k, v] of Object.entries(headers)) {
     if (k.toLowerCase() === 'content-encoding') continue
     out[k] = v
