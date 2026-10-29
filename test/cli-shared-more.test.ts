@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { fakeHome } from './helpers.js'
 import { exitWithThrown, killByPid, openUrlInBrowser, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
@@ -126,24 +127,44 @@ describe('killByPid 失败分支', () => {
   })
 })
 
-describe('spawnDaemonAndWait 超时与 stderr 收集', () => {
-  it('全轮探活失败：返回 null；stderr 跨 chunk 半行缓冲、close 补写尾行', async () => {
+describe('spawnDaemonAndWait 超时与 stderr 重定向', () => {
+  it('daemon stderr 走 fd 重定向（stdio[2]=数字 fd 而非 pipe），父进程副本 spawn 后立即关闭', async () => {
     const h = fakeHome()
     captureConsole()
     try {
       const child = fakeChild()
       const fakeSpawn = vi.fn(() => child)
-      const res = await spawnDaemonAndWait(['node', '--sea-gateway', '--port', '18977'], async () => null, fakeSpawn, 1)
-      expect(res).toBeNull()
+      const openSpy = vi.spyOn(fs, 'openSync')
+      const closeSpy = vi.spyOn(fs, 'closeSync')
+      try {
+        const res = await spawnDaemonAndWait(['node', '--sea-gateway', '--port', '18977'], async () => null, fakeSpawn, 1)
+        expect(res).toBeNull()
 
-      child.stderr.emit('data', Buffer.from('first half'))
-      child.stderr.emit('data', Buffer.from(' and rest\nno-newline-tail'))
-      child.stderr.emit('close')
+        const opts = fakeSpawn.mock.calls[0][2] as { stdio: unknown[] }
+        expect(typeof opts.stdio[2]).toBe('number') // fd 而非 'pipe'：父进程零管道、零钉死
+        const fd = opts.stdio[2] as number
+        expect(openSpy).toHaveBeenCalledWith(expect.stringContaining(`daemon-${localDateStr()}.log`), 'a')
+        expect(closeSpy).toHaveBeenCalledWith(fd) // 父副本即关：子进程已继承 fd
+      } finally {
+        openSpy.mockRestore()
+        closeSpy.mockRestore()
+      }
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('真实子进程：父副本关闭后写 stderr 仍落日志（fd 继承，无 EPIPE、诊断不丢）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      // 假 daemon：150ms 后往 stderr 写一行再退出——父进程此刻早已关闭自己的 fd 副本
+      const argv = [process.execPath, '-e', 'setTimeout(() => { console.error("late-stderr-line"); process.exit(0) }, 150)']
+      const res = await spawnDaemonAndWait(argv, async () => null, spawn, 1)
+      expect(res).toBeNull()
       const daemonLog = path.join(logsDir(), `daemon-${localDateStr()}.log`)
       await vi.waitFor(() => {
-        const text = fs.readFileSync(daemonLog, 'utf8')
-        expect(text).toContain('first half and rest')
-        expect(text).toContain('no-newline-tail')
+        expect(fs.readFileSync(daemonLog, 'utf8')).toContain('late-stderr-line')
       })
     } finally {
       h.restore()
