@@ -32,8 +32,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
-      - run: npm run build
+      # --no-audit --no-fund：CI 审计门禁由 release-check 的 npm audit --omit=dev 承担，这里不重复付安装耗时
+      - run: npm ci --no-audit --no-fund
+      # noEmit：类型门禁；产物由发布链生成（build-sea.mjs 自带 tsc emit），本 job 无人消费
+      - run: npx tsc -p tsconfig.json --noEmit
       - run: npm test
       # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
       # 悬死排查调试模式：正常不需要。再出现测试悬死时，把上一行临时改为
@@ -70,5 +72,5 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --no-audit --no-fund
       - run: npm run test:workflow

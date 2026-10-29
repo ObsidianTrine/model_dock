@@ -18,7 +18,7 @@
 // 退出码恒为 0（分级是信息不是门禁；门禁由 CI 与分支保护承担）。
 
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
@@ -185,6 +185,8 @@ async function main() {
   else console.log(text(result))
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// main 判定两侧 path.resolve：Windows 下大小写/分隔符不一致时未归一化会判 false、退出码 0，
+// CI 调用方拿到空 tier 而非报错（静默失败面）——gen-ui-min.mjs 同款写法
+if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1])) {
   await main()
 }
