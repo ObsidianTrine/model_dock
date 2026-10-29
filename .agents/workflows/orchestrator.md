@@ -261,8 +261,9 @@ node .agents/scripts/orchestrator.mjs release-propose 1.4.0
 ```
 
 - 提案含：建议版本与依据、盘点清单（含「待人工归类」的无前缀提交）、CHANGELOG 版本段草稿、版本链接表行、下一步指引。
+- **产品/基建分类（用户决策 2026-10-29）**：CHANGELOG 草稿与 semver 档位只认产品侧提交（触碰 `src/**` / `scripts/tray/**` / `scripts/installer.iss` / `package.json` / `package-lock.json` / `sea-config.json` 之一）；仓库基建（agent 工具链 / CI / 开发者文档 / 测试基建 / 开发脚本）单独列「备查」节、不计档位、不写草稿。空提交看不了路径从产品（宁多勿漏，人工收口兜底）。
 - **版本号是建议，决定权在人**（发布是不可逆公开动作）：确认后对 agent 说「发布 vX.Y.Z」，走 release.md「代理发布」执行序；本命令不写 CHANGELOG、不提交、不打 tag。
-- 无 feat/fix（纯文档/杂务）会提示人工裁决是否值得发版。
+- 产品侧无 feat/fix（其余为基建/文档/杂务）会提示人工裁决是否值得发版；仅基建改动如实报「没有可发布内容」。
 
 
 ## 质量漂移监控（Phase 3）

@@ -1427,14 +1427,14 @@ async function cmdNightly(repoRoot, opts) {
 function cmdReleasePropose(repoRoot, versionHint) {
   const p = proposeRelease(repoRoot, versionHint ? { versionHint } : {});
   if (p.nothingToRelease) {
-    log(`上个 tag ${p.base} 以来无内容提交、CHANGELOG 也无「未发布」段——没有可发布内容。`);
+    log(`上个 tag ${p.base} 以来无产品侧内容提交（基建不计）、CHANGELOG 也无「未发布」段——没有可发布内容。`);
     return;
   }
   log(`════════ 发版提案 v${p.suggested} ════════`);
   log(`上个已发布 tag: ${p.base}    建议档位: ${p.level}`);
-  log(`信号: feat ${p.counts.feat} / fix ${p.counts.fix} / breaking ${p.counts.breaking}    盘点提交: ${p.commits.length} 条`);
+  log(`产品侧信号: feat ${p.counts.feat} / fix ${p.counts.fix} / breaking ${p.counts.breaking}    盘点提交: ${p.product.length + p.infra.length} 条（产品 ${p.product.length} + 基建 ${p.infra.length}）`);
   if (p.counts.breaking > 0 && p.level === 'minor') log('⚠ 存在 breaking 提交，0.x 惯例走 minor——升 1.0 前请人工确认');
-  if (p.counts.feat + p.counts.fix === 0) log('⚠ 无 feat/fix 提交（内容偏文档/杂务），是否值得发版请人工裁决');
+  if (p.counts.feat + p.counts.fix === 0) log('⚠ 产品侧无 feat/fix 提交（其余为基建/文档/杂务），是否值得发版请人工裁决');
   if (p.localTaken) log(`✗ v${p.suggested} 本地 tag 已占用——请换版本号`);
   else if (p.remoteTaken === true) log(`✗ v${p.suggested} 远端 tag 已占用——请换版本号`);
   else if (p.remoteTaken === null) log('⚠ 远端 tag 查询失败（离线？）——release-check 会复核');
