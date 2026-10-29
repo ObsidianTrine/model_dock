@@ -79,6 +79,7 @@
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
 | CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ☐ 未修（2026-10-30 夜巡发现并沙箱实测复现，见 §三） |
 | CORRECT-08 | P2 | `src/util/jsonpath.ts` | 两处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语） | ☐ 未修（2026-10-30 噪音对照实验发现，tsx 实测复现，见 §三） |
+| CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☐ 未修（2026-10-30 夜巡发现，逐条读码核实，见 §三） |
 
 ---
 
@@ -389,6 +390,14 @@
 - 缺陷 ②（star 中段裸崩）：`setPath({a:{b:1}, c:'str'}, '$.*.b', 2)` 实测抛 `TypeError: Cannot create property 'b' on string 'str'`——同函数其余分支对非 object 子节点均有兜底，唯 star 递归裸崩，且报错未经 t() 双语化。
 - 影响：① pack 作者按标准 JSONPath 习惯写括号句式时**静默写坏客户端配置**（适配器区红线邻接面，无报错最难排查）；② 带 `*` 的 pack 写路径撞上异构容器直接崩 attach/plan。正常点句式（项目文档口径）不受影响——两处都是「宽容解析不报错」的输入面问题。
 - 修复方向（未动手）：tokenize 校验匹配段拼回后与输入等长（不等长按 `toSegments` 对 star 的先例抛可操作双语报错）；star 递归前补与 `:62`/`:95-98` 同款类型守卫。修复后两处均具备转为审查评测考题的资格（真实逃过历轮审查、实证复现、修复提交可回溯）。
+
+**CORRECT-09（P2，2026-10-30 夜巡发现，逐条读码核实）relay failover 链可观测性三项**
+- 发现者：审查者（GLM-5.3-Flash）对 relay.ts @ HEAD 的夜巡挖洞（报告 runs/2026-10-30-hunt-relay.md），本侧逐条读码核实机制成立。
+- ① `injectModel`（relay.ts:325-336）与调用点（:365）的守卫 `!json || typeof json !== 'object'` 拦不住数组（`typeof [] === 'object'`）：顶层数组请求体 + 需改写模型时，`json.model = final` 设数组 expando、`JSON.stringify` 丢弃之——返回的 body **未注入 model** 但 `modelAfter: final` 谎报已改写，日志/usage 记录与实际发出 body 不一致（可观测性 lie；对非法数组上游本会 400，非功能损坏）。修法：两处补 `Array.isArray(json)`。
+- ② failover 链尾出口（relay.ts:630-633）：候选耗尽统一包 `new UpstreamError(502, '所有候选服务连接失败（msg）')`，不传 hint、不透传 lastErr 的 status。全链候选都是 candidateSkip（key 缺失 / 协议端点缺失 / **钥匙环锁定 503+「检查系统钥匙环是否已解锁」hint**）时，客户端收到的是 502「连接失败」——status、hint、routeReason（down_all，实则从未连接）三重失真。修法：耗尽时 lastErr 是 UpstreamError 则透传其 status/hint（candidateSkip 类原样上抛亦可）。
+- ③ `replayedFrom`（relay.ts:589,608,628）单变量反复覆盖：A→B→C 连续重放只留下 `replayed_from:B`，A 丢失——与该字段自述用途「日志对账」相悖。修法：改数组累积 join。
+- 存疑（不下结论，待作者确认）：a) ECONNRESET/EPIPE 在 promise 阶段即重试/failover，请求可能已送达甚至计费，与 ：115-116 注释的自述边界相抵——是取舍还是疏漏未见记录；b) `QUOTA_BODY_RE = /quota|insufficient/i` 不含中文（额度/配额/余额/欠费），国内上游中文 429 额度体不会触发恒可切换——同文件 MODEL_MISSING_RE 已覆盖中文，口径不一致。
+- 修复后 ①② 均可回流为审查评测考题。
 
 ---
 
