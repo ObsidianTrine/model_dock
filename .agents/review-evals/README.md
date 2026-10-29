@@ -61,15 +61,15 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 | 2026-10-gateway-413-drain | readBody 超限立即 reject 413 + resume 排空，与客户端在途写入相撞，SDK 重试成超大包重传循环，413 永远到不了 | 87549d8 | ✅ 审出（首跑撞旧版跑分器 15min 超时一次，补丁后 full-12 中 ✅，见 runs/2026-10-30-full12-glm53flash.md） |
 | 2026-10-cim-crlf-parse | parsePidCommandLines 不剥 \r 行尾，PowerShell CIM 输出（CRLF）全行失配，进程枚举恒空，stopTray 静默空转 | e4ac854 | ✅ 审出（证据链复现修复逻辑 + 正则语义分析；附带存疑发现 daemon stderr 管道钉住 CLI 事件循环，经复现坐实为 CORRECT-07，见 runs/2026-10-30-batch2-2026-10-cim-crlf-parse.md） |
 | 2026-10-config-memo-alias | loadConfig memo 外借共享 Config 对象，调用方原地改污染缓存，把同步引擎轮询钉进竞态窗口 | 688f98b | ✅ 审出（批二单题与 full-12 双中，报告见 runs/2026-10-30-batch2-2026-10-config-memo-alias.md） |
-| 2026-10-env-port-live | cmdEnv 复用写入链的 resolveClientGatewayPort（生产默认端口存活优先），非默认端口实例 env 恒输出 8687 | 87b2106 | ⚠️ 波动（批二单题 ✅ / full-12 ❌ 未命中目标——但其输出另带 diag.ts 3 个自启残留误报类真发现；关键词启发式局限的实录，两轮原文都见 runs/） |
+| 2026-10-env-port-live | cmdEnv 复用写入链的 resolveClientGatewayPort（生产默认端口存活优先），非默认端口实例 env 恒输出 8687 | 87b2106 | ⚠️ 波动（批二单题 ✅ / full-12 ❌ 未命中目标——但其输出另带 diag.ts 3 个自启残留误报类真发现；03:15 第三次采样 ✅，累计 2/3。关键词启发式局限的实录，各轮原文都见 runs/） |
 
 ### 基线记录
 
 - **2026-10-29（claude CLI 2.1.214，Windows 端）**：全量 8/8 审出。
-- **2026-10-30（claude CLI 2.1.310 + GLM-5.3-Flash，经沙箱网关 claude-direct→Volces plan）**：全量 12 题单轮 **10/12**（原 8 题 7/8，批二 4 题 3/4）；两题未命中目标但模型输出均含同文件真发现（详见上表 ⚠️ 行）；全部 12 题在跨轮中至少审出一次（cloud-null-body 2026-10-29 ✅；env-port-live 批二单题 ✅）。同模型同考题跨轮波动实测存在，单轮未审出 ≠ 召回失效。
+- **2026-10-30（claude CLI 2.1.310 + GLM-5.3-Flash，经沙箱网关 claude-direct→Volces plan）**：全量 12 题单轮 **10/12**（原 8 题 7/8，批二 4 题 3/4）；两题未命中目标但模型输出均含同文件真发现（详见上表 ⚠️ 行）；全部 12 题在跨轮中至少审出一次（cloud-null-body 2026-10-29 ✅；env-port-live 批二单题 ✅）。同模型同考题跨轮波动实测存在，单轮未审出 ≠ 召回失效。**03:15 第三次采样**：两道波动题单题复跑均 ✅（runs/resample-*.md）——cloud-null-body 与 env-port-live 各累计 2/3 命中，波动定性成立（边界题的轮次方差，非系统性漏报）。
 - **基线口径（自 2026-10-30 起）**：审查者任何改动（REVIEW.md / prompt / lint / 模型）全量重跑，**单轮 ≥10/12 且原 8 题 ≥7/8** 视为基线保持；跌破则改动不保留，且必须读原文判读是「目标未命中」还是「启发式未命中」。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
-参照原论文的第二个评测维度（在已知干净代码上跑审查者、数误报）：选历史稳定文件（如 init 后零改动、扛过多轮全仓审查的 `src/util/diff.ts`、`src/util/jsonpath.ts`），用**中性 prompt**（不断言存在 bug，只要求「确证才报，没有就明说通过」）跑同一审查者。注意与考题 prompt 的差别：考题断言「之后补了一个修复」会诱导找茬，测噪音必须去掉该断言。首测：diff.ts **0 误报**；jsonpath.ts 报 2 个问题——**逐条实证均为真缺陷**（CORRECT-08），不是误报——「干净对照」的挑选本身要经得起审查，被审出的对照文件按其价值转为缺陷记录。噪音报告见 runs/noise-*.md。
+参照原论文的第二个评测维度（在已知干净代码上跑审查者、数误报）：选历史稳定文件（如 init 后零改动、扛过多轮全仓审查的 `src/util/diff.ts`、`src/util/jsonpath.ts`），用**中性 prompt**（不断言存在 bug，只要求「确证才报，没有就明说通过」）跑同一审查者。注意与考题 prompt 的差别：考题断言「之后补了一个修复」会诱导找茬，测噪音必须去掉该断言。首测：diff.ts **0 误报**；jsonpath.ts 报 2 个问题——**逐条实证均为真缺陷**（CORRECT-08），不是误报——「干净对照」的挑选本身要经得起审查，被审出的对照文件按其价值转为缺陷记录。**03:20 复跑（runs/noise-jsonpath-rerun.md）**：前两条精确复现（审查者自行读到 known-issues 的 CORRECT-08 登记并标注「已登记」），另报第 3 处同族缺陷（对象上下文用下标写入静默产键 `"0"`，tsx 实测坐实，已并入 CORRECT-08）。噪音报告见 runs/noise-*.md。
