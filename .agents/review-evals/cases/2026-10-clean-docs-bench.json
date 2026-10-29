@@ -1,0 +1,8 @@
+{
+  "id": "2026-10-clean-docs-bench",
+  "title": "纯文档：新增 docs/bench-baseline.md 记录转发热路径基准数据（57 行 markdown，实测数据回填）——干净改动，不应报任何问题",
+  "cleanSha": "6fc99b7",
+  "files": ["docs/bench-baseline.md"],
+  "expect": [],
+  "note": "噪声对照题（cleanSha 模式）：57 行纯文档新增，数据来自实测（提交说明可查）。审查者应回答「未发现问题」；对文档数字/措辞的吹毛求疵报成「发现 N 个问题」即记误报"
+}

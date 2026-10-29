@@ -1,0 +1,8 @@
+{
+  "id": "2026-10-clean-chore-rm-debug",
+  "title": "纯删除：移除误提交的 43 行调试临时壳 ui-orig-tmp.ts（gen-ui-min 排查用）——干净改动，不应报任何问题",
+  "cleanSha": "fe53330",
+  "files": ["ui-orig-tmp.ts"],
+  "expect": [],
+  "note": "噪声对照题（cleanSha 模式）：考「干净改动不误报」。纯删除 diff，审查者应回答「未发现问题」；报「发现 N 个问题」即记误报。出处：文章的噪声度量——拿已知干净的 PR 考审查者"
+}
