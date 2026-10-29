@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-server-reexport-drop",
+  "title": "server.ts 拆分迁移后原导入面符号未 re-export——外部引用 OVERVIEW_TTL_MS/overviewCacheHit/overviewServeDecision/warmupOverview/runClientInstall/runClientUninstall/maxBodyBytes 全部断（test/gateway、test/install、test/perf-fixes 波及）",
+  "reviewRef": "d039010^",
+  "fixedBy": "d039010",
+  "files": ["src/gateway/server.ts"],
+  "expect": ["re-export", "导入面"],
+  "note": "修复 = server.ts 补 re-export 原导入面符号（d039010），测试零改动。审查侧教训：模块拆分/迁移时「原 import 面」是公开契约——审查拆分类 PR 时对照拆分前的导出清单逐个核对去向（留原处 / re-export / 迁移调用方）；可 grep 仓库内 import 该模块的文件核实"
+}
