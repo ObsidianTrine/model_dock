@@ -57,12 +57,13 @@ describe('policy-dispatch > 受保护项目（mkRepo 夹具自带 .agents/script
     try {
       // mkRepo 的 workflow.json 无 protectedPorts → 端口红线关闭，仅发布红线生效
       expect(runDispatch(bashEvent(repo.root, 'node server.js --port 8687')).status).toBe(0)
-      // 给夹具配上端口后同一命令被拦
+      // 给夹具配上端口后同一命令被拦（合法人工修改：先清防篡改基线，模拟跨会话重新观察）
       const wfPath = path.join(repo.root, '.agents', 'workflow.json')
       const wf = JSON.parse(fs.readFileSync(wfPath, 'utf8'))
       wf.protectedPorts = ['8687']
       wf.listenCommandNames = ['my-cli']
       fs.writeFileSync(wfPath, JSON.stringify(wf))
+      fs.rmSync(path.join(os.tmpdir(), 'modeldock-policy-baseline'), { recursive: true, force: true })
       expect(runDispatch(bashEvent(repo.root, 'node server.js --port 8687')).status).toBe(2)
       expect(runDispatch(bashEvent(repo.root, 'my-cli --port 8687')).status).toBe(2)
     } finally {
@@ -113,6 +114,10 @@ describe('policy-dispatch > 直通与容错（fail-open 语义）', () => {
     expect(runDispatch({ tool_name: 'Bash', cwd: os.tmpdir() }).status).toBe(0)
   })
 
+  it("stdin 为合法 JSON 字面量 'null' → 按无法解析事件容错 exit 0（不崩、不放纵报错噪音）", () => {
+    expect(runDispatch('null').status).toBe(0)
+  })
+
   it('cwd 缺失 → 回落进程 cwd（spawn cwd 指向项目时仍裁决）', () => {
     const repo = mkRepo()
     try {
@@ -149,6 +154,49 @@ describe('policy-dispatch > 直通与容错（fail-open 语义）', () => {
       expect(r.stderr).toContain('裁决异常')
       expect(r.stderr).toContain('workflow.json')
     } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+describe('policy-dispatch > 防篡改基线（fail-closed）', () => {
+  const clearBaseline = () => fs.rmSync(path.join(os.tmpdir(), 'modeldock-policy-baseline'), { recursive: true, force: true })
+
+  it('policy.mjs 会话内被改写（换成永远放行的假引擎）→ 后续命令 fail-closed 拦截 + 审计留痕', () => {
+    const repo = mkRepo()
+    try {
+      clearBaseline()
+      // 首次调用：写基线，正常放行
+      expect(runDispatch(bashEvent(repo.root, 'npm test')).status).toBe(0)
+      // 守护对象篡改守卫：把 policy.mjs 换成永远 allowed 的假引擎
+      fs.writeFileSync(path.join(repo.root, '.agents', 'scripts', 'policy.mjs'), 'export function evaluateCommand(){ return { allowed: true } }', 'utf8')
+      const r = runDispatch(bashEvent(repo.root, 'git push origin main'))
+      expect(r.status).toBe(2) // 假引擎说 allowed 也没用：基线不一致 → fail-closed
+      expect(r.stderr).toContain('红线文件被改动')
+      expect(r.stderr).toContain('modeldock-policy-baseline')
+      // 审计直接落项目文件（不信任被篡改模块的 audit）
+      const auditFile = path.join(repo.root, '.agents', 'policy', 'audit.jsonl')
+      const last = JSON.parse(fs.readFileSync(auditFile, 'utf8').trim().split('\n').pop() ?? '{}')
+      expect(last.decision).toBe('blocked')
+      expect(last.reason).toContain('基线')
+    } finally {
+      clearBaseline()
+      repo.cleanup()
+    }
+  })
+
+  it('workflow.json 会话内被改动同样触发 fail-closed；删基线文件即人工恢复', () => {
+    const repo = mkRepo()
+    try {
+      clearBaseline()
+      expect(runDispatch(bashEvent(repo.root, 'npm test')).status).toBe(0)
+      fs.writeFileSync(path.join(repo.root, '.agents', 'workflow.json'), '{}', 'utf8')
+      expect(runDispatch(bashEvent(repo.root, 'npm test')).status).toBe(2)
+      // 人工恢复路径：删基线 → 重新观察（改后的 workflow.json 成为新基线），放行
+      clearBaseline()
+      expect(runDispatch(bashEvent(repo.root, 'npm test')).status).toBe(0)
+    } finally {
+      clearBaseline()
       repo.cleanup()
     }
   })
