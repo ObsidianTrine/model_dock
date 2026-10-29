@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { githubRepoBase, parseCommit, bumpLevel, incVersion, extractUnreleased } from '../../.agents/scripts/orchestrator/release-propose.mjs'
+import { githubRepoBase, parseCommit, bumpLevel, incVersion, extractUnreleased, isProductCommit, commitFiles } from '../../.agents/scripts/orchestrator/release-propose.mjs'
 import { mkRepo, git, runOrch, tryOrch } from './helpers.js'
 
 describe('orchestrator release-propose > 纯函数', () => {
@@ -40,6 +40,20 @@ describe('orchestrator release-propose > 纯函数', () => {
     const md = '# Changelog\n\n## [未发布]\n\n### 新增\n\n- **条目**：内容。\n\n## [1.0.0] - 2026-01-01\n\n首版。\n'
     expect(extractUnreleased(md)).toBe('### 新增\n\n- **条目**：内容。')
     expect(extractUnreleased('# Changelog\n\n## [1.0.0]\n\n首版。\n')).toBeNull()
+  })
+
+  it('isProductCommit：产品路径白名单；空提交从产品（宁多勿漏）；scripts 整体是基建但 tray 与 installer.iss 是产品', () => {
+    const c = { hash: 'abc', subject: 'x', type: 'fix', desc: 'x', breaking: false }
+    expect(isProductCommit(c, ['src/gateway/server.ts'])).toBe(true)
+    expect(isProductCommit(c, ['scripts/tray/ModelDockTray.cs'])).toBe(true)
+    expect(isProductCommit(c, ['scripts/installer.iss'])).toBe(true) // cd09641 实证：只动安装器脚本也是产品修复
+    expect(isProductCommit(c, ['package.json', 'package-lock.json'])).toBe(true) // undici 先例：生产依赖随 SEA 分发
+    expect(isProductCommit(c, [])).toBe(true) // 空提交看不了路径，宁多勿漏
+    expect(isProductCommit(c, undefined)).toBe(true)
+    expect(isProductCommit(c, ['.agents/scripts/orchestrator.mjs'])).toBe(false)
+    expect(isProductCommit(c, ['.github/workflows/test.yml', 'docs/usage.md', 'test/a.test.ts'])).toBe(false)
+    expect(isProductCommit(c, ['scripts/soak.mjs', 'scripts/release-check.mjs'])).toBe(false) // scripts/ 其余是开发工具
+    expect(isProductCommit(c, ['.agents/x.md', 'src/util/fsx.ts'])).toBe(true) // 混合提交：src 决定产品侧
   })
 })
 
@@ -181,6 +195,78 @@ describe('orchestrator release-propose > CLI 端到端', () => {
       expect(out.stdout).toContain('没有可发布内容')
     } finally {
       clean.cleanup()
+    }
+  })
+})
+
+describe('orchestrator release-propose > 产品/基建分类（用户决策 2026-10-29：CHANGELOG 只留产品内容）', () => {
+  const SKIP_REMOTE = { ORCH_SKIP_REMOTE_CHECK: '1' }
+  /** 有 tag、无未发布段的干净基线：盘点结果完全由新提交决定。 */
+  function seedClean(): { root: string; cleanup: () => void } {
+    const repo = mkRepo()
+    const g = (args: string) => git(repo.root, args)
+    g('remote add origin https://github.com/ObsidianTrine/model_dock.git')
+    fs.writeFileSync(path.join(repo.root, 'CHANGELOG.md'), '# Changelog\n\n## [1.0.0] - 2026-01-01\n\n首版。\n')
+    g('add -A')
+    g('commit -m "docs: 去掉未发布段"')
+    g('tag -a v1.0.0 -m v1.0.0')
+    return repo
+  }
+
+  it('产品+基建混合：产品进「产品侧」节并计档位，基建单独备查节不进 CHANGELOG', () => {
+    const repo = seedClean()
+    try {
+      fs.mkdirSync(path.join(repo.root, 'src'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, 'src', 'a.ts'), 'export {}\n')
+      git(repo.root, 'add -A')
+      git(repo.root, 'commit -m "feat(ui): 产品新功能"')
+      fs.mkdirSync(path.join(repo.root, '.agents'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, '.agents', 'notes.md'), 'note\n')
+      git(repo.root, 'add -A')
+      git(repo.root, 'commit -m "feat(orch): 基建能力"')
+      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      expect(out.stdout).toContain('发版提案 v1.1.0') // 产品 feat 计档位 → minor（基建 feat 不计）
+      expect(out.stdout).toContain('产品侧信号: feat 1 / fix 0 / breaking 0')
+      expect(out.stdout).toContain('产品 1 + 基建 1')
+      const dir = path.join(repo.root, '.agents', 'orchestrator', 'release-proposals')
+      const files = fs.readdirSync(dir).filter((f) => f.startsWith('v1.1.0-'))
+      const text = fs.readFileSync(path.join(dir, files[0]), 'utf8')
+      expect(text).toContain('### 产品侧（进 CHANGELOG 草稿）')
+      expect(text).toContain('feat(ui): 产品新功能')
+      expect(text).toContain('### 仓库基建（不进 CHANGELOG，仅备查）')
+      expect(text).toContain('feat(orch): 基建能力')
+      // 基建提交只出现在备查节：产品侧节不含它（节标题顺序约束下，基建行只在基建节出现一次）
+      expect(text.indexOf('基建能力')).toBe(text.lastIndexOf('基建能力'))
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('仅基建改动 → 没有可发布内容（基建不计，空态如实）', () => {
+    const repo = seedClean()
+    try {
+      fs.mkdirSync(path.join(repo.root, '.agents'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, '.agents', 'notes.md'), 'note\n')
+      git(repo.root, 'add -A')
+      git(repo.root, 'commit -m "chore(agents): 纯基建改动"')
+      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('没有可发布内容')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('只动 scripts/installer.iss 的修复 = 产品侧（patch 档；scripts/ 整体当基建会漏掉它）', () => {
+    const repo = seedClean()
+    try {
+      fs.mkdirSync(path.join(repo.root, 'scripts'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, 'scripts', 'installer.iss'), '; installer\n')
+      git(repo.root, 'add -A')
+      git(repo.root, 'commit -m "fix: 安装强关兜底"')
+      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      expect(out.stdout).toContain('发版提案 v1.0.1')
+      expect(out.stdout).toContain('产品侧信号: feat 0 / fix 1 / breaking 0')
+    } finally {
+      repo.cleanup()
     }
   })
 })

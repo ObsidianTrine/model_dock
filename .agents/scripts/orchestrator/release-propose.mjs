@@ -113,6 +113,35 @@ function mentionedInUnreleased(desc, unreleased) {
   return norm(unreleased).includes(norm(desc).slice(0, 12));
 }
 
+/** 产品面判定（2026-10-29 用户决策）：CHANGELOG 只写 ModelDock 产品功能——仓库基建
+ *  （agent 工具链 / CI / 开发者文档 / 测试基建 / 开发脚本）不进 CHANGELOG 草稿、不计 semver 档位。
+ *  按触碰文件白名单分类：触碰任一产品路径 = 产品侧；只动基建路径 = 基建；空提交看不了路径，从产品（宁多勿漏，人工收口兜底）。
+ *  产品路径 = 随程序分发的面：src/**、托盘源码 scripts/tray/**、Windows 安装器脚本
+ *  scripts/installer.iss、生产依赖清单 package.json / package-lock.json / sea-config.json。
+ *  （scripts/ 其余是开发工具——实测踩中：cd09641 只动 installer.iss，把 scripts/ 整体当基建
+ *  会把「Windows 安装强关」修复错判成基建踢出 CHANGELOG。） */
+const PRODUCT_PATH_RE = /^(?:src\/|scripts\/tray\/|scripts\/installer\.iss$|package\.json$|package-lock\.json$|sea-config\.json$)/;
+
+/** hash → 触碰文件列表。分隔符放行首（%x1e%h）：--name-only 的文件列表跟在 hash 行之后、
+ *  与下一条 hash 之间无分隔——若把分隔符放行尾（%h%x1e），本提交的文件会错位配给下一提交
+ *  （实测踩中：基建提交全部被当产品）。分块后首行 = hash，其余行 = 文件。 */
+export function commitFiles(repoRoot, range) {
+  const out = git(repoRoot, ['log', range, '--no-merges', '--name-only', '--format=%x1e%h']);
+  const map = new Map();
+  for (const chunk of out.split('\x1e')) {
+    const lines = chunk.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) continue;
+    map.set(lines[0], lines.slice(1));
+  }
+  return map;
+}
+
+/** 单提交产品侧判定：触碰产品路径 = true；无文件信息（空提交/解析缺） = true（宁多勿漏）；仅基建路径 = false。 */
+export function isProductCommit(commit, files) {
+  if (!files || files.length === 0) return true;
+  return files.some((f) => PRODUCT_PATH_RE.test(f));
+}
+
 /**
  * 生成发版提案。opts.versionHint：用户口述版本（校验合法性与递增，跳过自动定档）。
  * 返回结构化结果（CLI 打印用）；throw = 可操作错误（无 tag / 无可发内容等）。
@@ -138,14 +167,23 @@ export function proposeRelease(repoRoot, opts = {}) {
   const changelog = fs.existsSync(changelogPath) ? fs.readFileSync(changelogPath, 'utf8') : '';
   const unreleased = extractUnreleased(changelog);
 
-  if (!commits.length && !unreleased) {
+  // 产品/基建分类：semver 信号与 CHANGELOG 草稿只认产品侧（用户决策 2026-10-29）；
+  // 基建提交仍进盘点清单备查（查漏查杂需要全量），但标明不进 CHANGELOG。
+  const files = commitFiles(repoRoot, `${base}..develop`);
+  const product = [];
+  const infra = [];
+  for (const c of commits) {
+    (isProductCommit(c, files.get(c.hash) ?? []) ? product : infra).push(c);
+  }
+
+  if (!product.length && !unreleased) {
     return { nothingToRelease: true, base };
   }
 
   const counts = {
-    feat: commits.filter((c) => c.type === 'feat').length,
-    fix: commits.filter((c) => c.type === 'fix').length,
-    breaking: commits.filter((c) => c.breaking).length,
+    feat: product.filter((c) => c.type === 'feat').length,
+    fix: product.filter((c) => c.type === 'fix').length,
+    breaking: product.filter((c) => c.breaking).length,
   };
 
   let suggested;
@@ -186,14 +224,15 @@ export function proposeRelease(repoRoot, opts = {}) {
   const stamp = toIsoLocal().replace(/[-:T]/g, '').slice(0, 12); // YYYYMMDDHHmm
   const proposalPath = path.join(dir, `${tag}-proposal-${stamp}.md`);
   const repoBase = githubRepoBase(repoRoot);
-  fs.writeFileSync(proposalPath, renderProposal({ base, tag, suggested, level, counts, commits, unreleased, localTaken, remoteTaken, repoBase }));
+  fs.writeFileSync(proposalPath, renderProposal({ base, tag, suggested, level, counts, product, infra, unreleased, localTaken, remoteTaken, repoBase }));
 
   return {
     base,
     suggested,
     level,
     counts,
-    commits,
+    product,
+    infra,
     unreleased,
     localTaken,
     remoteTaken,
@@ -211,7 +250,7 @@ function renderProposal(p) {
   lines.push('## 建议与依据');
   lines.push('');
   lines.push(`- 建议版本：${p.suggested}（${p.level}）——上个已发布 tag：${p.base}`);
-  lines.push(`- 信号：feat ${p.counts.feat} 条、fix ${p.counts.fix} 条、breaking ${p.counts.breaking} 条`);
+  lines.push(`- 产品侧信号：feat ${p.counts.feat} 条、fix ${p.counts.fix} 条、breaking ${p.counts.breaking} 条${p.infra.length ? `；仓库基建 ${p.infra.length} 条不计档位、不进 CHANGELOG（2026-10-29 用户决策）` : ''}`);
   if (p.counts.breaking > 0 && p.level === 'minor') lines.push('- ⚠ 存在 breaking 提交，但当前处于 0.x（惯例走 minor；升 1.0 前请人工确认）');
   const featFix = p.counts.feat + p.counts.fix;
   if (featFix === 0) lines.push('- ⚠ 无 feat/fix 提交（内容偏文档/杂务），是否值得发版请人工裁决');
@@ -219,25 +258,37 @@ function renderProposal(p) {
   lines.push('');
   lines.push('## 盘点清单');
   lines.push('');
-  if (p.commits.length) {
-    lines.push(`（${p.base}..develop 共 ${p.commits.length} 条内容提交，merge 节点不算）`);
+  if (p.product.length || p.infra.length) {
+    lines.push(`（${p.base}..develop 共 ${p.product.length + p.infra.length} 条内容提交，merge 节点不算）`);
     lines.push('');
-    const groups = new Map();
-    for (const c of p.commits) {
-      const label = c.type ? TYPE_LABELS[c.type] : '待人工归类';
-      groups.set(label, [...(groups.get(label) ?? []), c]);
+    if (p.product.length) {
+      lines.push('### 产品侧（进 CHANGELOG 草稿）');
+      lines.push('');
+      const groups = new Map();
+      for (const c of p.product) {
+        const label = c.type ? TYPE_LABELS[c.type] : '待人工归类';
+        groups.set(label, [...(groups.get(label) ?? []), c]);
+      }
+      for (const [label, items] of groups) {
+        lines.push(`#### ${label}`);
+        lines.push('');
+        for (const c of items) lines.push(`- ${c.hash} ${c.subject}${c.breaking ? ' **[breaking]**' : ''}`);
+        lines.push('');
+      }
+      const misses = p.product.filter((c) => (c.type === 'feat' || c.type === 'fix') && !mentionedInUnreleased(c.desc, p.unreleased));
+      if (p.unreleased && misses.length) {
+        lines.push('#### 疑似漏记（未发布段粗匹配未命中，人工核对后并入草稿）');
+        lines.push('');
+        for (const c of misses) lines.push(`- ${c.hash} ${c.desc}`);
+        lines.push('');
+      }
     }
-    for (const [label, items] of groups) {
-      lines.push(`### ${label}`);
+    if (p.infra.length) {
+      lines.push('### 仓库基建（不进 CHANGELOG，仅备查）');
       lines.push('');
-      for (const c of items) lines.push(`- ${c.hash} ${c.subject}${c.breaking ? ' **[breaking]**' : ''}`);
+      lines.push('agent 工具链 / CI / 开发者文档 / 测试基建 / 开发脚本——用户决策（2026-10-29）：发布与 CHANGELOG 只保留产品功能，本节不计档位、不写草稿。');
       lines.push('');
-    }
-    const misses = p.commits.filter((c) => (c.type === 'feat' || c.type === 'fix') && !mentionedInUnreleased(c.desc, p.unreleased));
-    if (p.unreleased && misses.length) {
-      lines.push('### 疑似漏记（未发布段粗匹配未命中，人工核对后并入草稿）');
-      lines.push('');
-      for (const c of misses) lines.push(`- ${c.hash} ${c.desc}`);
+      for (const c of p.infra) lines.push(`- ${c.hash} ${c.subject}`);
       lines.push('');
     }
   } else {
