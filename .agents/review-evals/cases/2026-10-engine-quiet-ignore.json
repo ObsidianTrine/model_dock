@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-engine-quiet-ignore",
+  "title": "适配器引擎接了 quiet 选项（Web 控制台/托盘等非终端场景）但输出路径没贯彻——diff 预览等 console.log 照常打，托盘清理弹窗混进整段引擎输出",
+  "reviewRef": "b9c859a^",
+  "fixedBy": "b9c859a",
+  "files": ["src/adapters/engine.ts"],
+  "expect": ["quiet"],
+  "note": "审查侧教训：选项语义要全链路贯彻——接了 quiet 却有输出路径绕过它，就是「它撒谎」；审查输出函数时沿调用方场景（终端 vs 编程消费）核对每条输出是否受开关约束"
+}

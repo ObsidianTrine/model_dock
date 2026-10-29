@@ -59,8 +59,8 @@
 ### 事故 → 考题（评测集）
 
 - 位置：`.agents/review-evals/cases/*.json`，schema 与加题步骤见同目录 README.md。
-- 跑分：`node scripts/review-eval.mjs [--case <id>] [--dry] [--out <md>]`——物化修复前代码 → 按 REVIEW.md 组装审查 prompt → 本地 claude CLI 跑 → expect 关键词打分（启发式）。
-- **基线（2026-10-29 首跑，claude CLI 2.1.214）：2/2 全中**，且都给出可用的证据链（darwin 题完整复现修复逻辑，stoptray 题定位 P0 根因并顺带挖出一个 HEAD 仍在的问题）；报告存 `.agents/review-evals/runs/2026-10-29-first-run.md`。此后改审查者跑分低于 2/2 即不保留改动。
+- 跑分：`node scripts/review-eval.mjs [--case <id>] [--dry] [--out <md>]`——物化修复前代码 → 按 REVIEW.md 组装审查 prompt → 本地 claude CLI 跑 → expect 关键词打分（启发式）；单文件超 120KB 会拒跑（巨物撑爆 prompt，选题避开）。
+- **基线：20/20 审出**（2026-10-29 claude CLI/deepseek-v4-pro 8 题 + 2026-10-30 夜训 ZCode 会话模型/GLM-5.3-Flash subagent 12 题，两段评分器不同、跨段对比仅供参考；本地 claude CLI 的 DeepSeek key 401 失效期间用 subagent 顶替）。零漏报 → REVIEW.md 未因漏报补强；评测循环同时产出一份「当前版仍存活」的 bug 清单（见 README「评测循环产出」），其中防回环守卫死代码已随夜训修复。此后改审查者全量跑分低于基线即不保留改动。
 - **时机**：每次 revert / 事故修复合并后加题；改 REVIEW.md、workflow prompt、换模型之后全量重跑一次，分数升了才保留改动。
 
 ### 噪声度量

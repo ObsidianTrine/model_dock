@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-menu-flicker",
+  "title": "win 托盘菜单展开期间每 5s 轮询整份 Clear 重建——悬停高亮被重置、展开中的子菜单被收起、观感一闪一闪（2026-10-27 用户报障）",
+  "reviewRef": "1dd6b1c^",
+  "fixedBy": "1dd6b1c",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["clear", "重建"],
+  "note": "修复 = 骨架常驻 + 按需 diff（固定项建一次、状态项原地改、集合按 Id 增删对齐）。审查侧教训：轮询刷新 UI 时「全量重建」在用户交互进行中会重置交互态（悬停/展开/焦点）——刷新策略要区分骨架与状态、按 Id 做最小 diff"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-autostart-tray-gap",
+  "title": "开机自启只登记 --sea-gateway daemon（src/autostart.ts），托盘拉起点只在 daemon/交互路径（src/cli.ts 内联 spawn）——重启后网关活着但托盘永远缺席",
+  "reviewRef": "9a93008^",
+  "fixedBy": "9a93008",
+  "files": ["src/cli.ts", "src/autostart.ts"],
+  "expect": ["自启", "托盘"],
+  "note": "2026-10-21 报障类。修复 = 托盘拉起逻辑独立成 tray.ts、daemon 就绪（gatewayLive 通过）后补拉。审查侧教训：每条启动路径（双击/自启/手动 daemon）分别走一遍「谁拉起托盘」——组件在 A 路径被拉起不代表 B 路径也有人管；自愈拉起要等就绪信号，否则竞态抢端口"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-lan-ratelimit-leak",
+  "title": "LAN 敲门限频表 requestRateByIp 只 set 不 delete——扫一遍 254 个 IP 的内网扫描就永久驻留 254 条，无任何清扫路径（内存泄漏）",
+  "reviewRef": "9366fdc^",
+  "fixedBy": "9366fdc",
+  "files": ["src/gateway/lan.ts"],
+  "expect": ["泄漏", "驻留", "清扫", "delete"],
+  "note": "BUG-05。修复 = 写入前按限频窗口清扫过期键（抽纯函数 sweepRequestRateByIp 便于单测）。审查侧教训：有界内存里的无界增长 Map（按外部输入 IP/ID 做 key）必须有过期/清扫策略；同文件既有 putSyncGrant 的清扫先例可对照——「同文件已有正确先例的邻居代码没跟」是审查抓手"
+}

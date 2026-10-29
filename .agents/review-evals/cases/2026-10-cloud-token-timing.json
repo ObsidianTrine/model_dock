@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-cloud-token-timing",
+  "title": "云端控制台登录令牌用普通字符串 !== 比较——时序侧信道可逐字节爆破最高价值凭据（consoleToken）",
+  "reviewRef": "85558ca^",
+  "fixedBy": "85558ca",
+  "files": ["src/cloud/server.ts"],
+  "expect": ["timing", "时序", "常数", "侧信道", "safeequal"],
+  "note": "修复 = 改 util/safe-equal.js 的 safeEqual 常数时间比较 + 类型守卫。审查侧教训：凭据比较一律常数时间（项目已有 util/safe-equal.js 可用）——审查鉴权/登录路径时把「比较怎么做的」当成必查项"
+}

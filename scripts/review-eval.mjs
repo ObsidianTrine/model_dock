@@ -38,6 +38,13 @@ function materialize(c, dir) {
     if (show.status !== 0) {
       throw new Error(`git show ${c.reviewRef}:${rel} 失败（reviewRef 写错？）：${show.stderr.trim()}`)
     }
+    // 体积护栏：整文件进 prompt，超大文件（如历史上的巨型 ui.ts）会撑爆上下文/烧钱——提前拦下换更小的考题文件
+    if (Buffer.byteLength(show.stdout) > 120_000) {
+      throw new Error(
+        `考题文件 ${rel}@${c.reviewRef} 有 ${Math.round(Buffer.byteLength(show.stdout) / 1024)}KB（>120KB 上限），` +
+          `整文件进 prompt 会撑爆上下文。换根因所在的更小文件，或拆分考题。`
+      )
+    }
     const lines = show.stdout.split('\n').map((l, i) => `${String(i + 1).padStart(4)} | ${l}`)
     const dest = join(dir, basename(rel))
     writeFileSync(dest, lines.join('\n'))
@@ -80,7 +87,8 @@ function runClaude(prompt, model) {
     throw new Error('本机未找到 claude CLI：请安装并登录后重跑（或先用 --dry 检查 prompt 组装）。')
   }
   if (r.status !== 0) {
-    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 500)}`)
+    // claude CLI 的认证/配额错误打在 stdout（如 401 key invalid），stderr 常为空——两头都带上
+    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 300) || String(r.stdout || '').slice(0, 300)}`)
   }
   return String(r.stdout || '')
 }
