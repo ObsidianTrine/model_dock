@@ -30,6 +30,23 @@ describe('backend 缺省回落（resolveBackendName）', () => {
     }
   })
 
+  it('append-only 下沿用最后一次 worker_spawned（两次运行后 resume 不静默切回最初引擎）', () => {
+    const repo = mkRepo()
+    try {
+      const qdir = path.join(repo.root, '.agents', 'orchestrator', 'logs', 't2')
+      fs.mkdirSync(qdir, { recursive: true })
+      // 模拟两次运行：第一次 mock，第二次 claude-headless——resume 必须沿用最后者
+      fs.writeFileSync(
+        path.join(qdir, 'events.jsonl'),
+        JSON.stringify({ type: 'worker_spawned', backend: 'mock' }) + '\n' +
+          JSON.stringify({ type: 'worker_spawned', backend: 'claude-headless' }) + '\n',
+      )
+      expect(resolveBackendName({}, qdir, readEvents)).toEqual({ name: 'claude-headless', inherited: true })
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('回落产物始终能被 getBackend 接受（不再出现未知后端）', async () => {
     const { name } = resolveBackendName({}, null)
     await expect(getBackend(name)).resolves.toBeTruthy()

@@ -262,12 +262,17 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
 /**
  * 后端名解析：显式 --backend 优先；run 场景（qdir 非空）沿用任务上次会话的后端
  * （retry/resume 续跑不换引擎）；否则缺省 claude-headless。
+ * 沿用取**最后一条** worker_spawned：events.jsonl append-only，.find 命中首次运行——
+ * 多引擎切换过的任务 resume 会静默切回最初引擎（正是后端切换人工闸门要防的事），
+ * 与 cleanupOrphanWorker 的 reverse().find 口径对齐。
  * intent/spec 的规划会话不记账（qdir 传 null），首次即缺省——此前它们直接把
  * opts.backend（undefined）喂给 getBackend 炸「未知后端 "undefined"」（裸跑
  * `spec "..."` 实测踩中；历史测试全带 --backend mock 所以从未暴露）。
  */
 export function resolveBackendName(opts, qdir, readEventsFn) {
   if (opts?.backend) return { name: opts.backend, inherited: false };
-  const prior = qdir && readEventsFn ? readEventsFn(qdir).find((e) => e.type === 'worker_spawned')?.backend : undefined;
+  const prior = qdir && readEventsFn
+    ? [...readEventsFn(qdir)].reverse().find((e) => e.type === 'worker_spawned')?.backend
+    : undefined;
   return { name: prior ?? 'claude-headless', inherited: prior !== undefined };
 }
