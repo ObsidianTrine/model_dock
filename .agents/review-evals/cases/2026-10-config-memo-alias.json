@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-config-memo-alias",
+  "title": "loadConfig memo 直接复用共享 Config 对象——调用方原地修改即污染缓存，别名把同步引擎的等待轮询钉进 apply→collect 竞态窗口，lastSyncedHash 吞掉本地改动、rev3 永不推送",
+  "reviewRef": "688f98b^",
+  "fixedBy": "688f98b",
+  "files": ["src/config/store.ts"],
+  "expect": ["memo", "clone"],
+  "note": "同步引擎端到端用例确定性打回后修复。修复 = 每次调用返回 structuredClone（等值且非同一对象）。审查侧教训：memoize 的返回值绝不能外借可变引用——「缓存命中返回共享对象」是隐性别名源；连带暴露的引擎既有竞态登记 known-issues CORRECT-06"
+}
