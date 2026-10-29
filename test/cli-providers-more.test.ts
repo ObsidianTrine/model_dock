@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
+import { once } from 'node:events'
 import { fakeHome } from './helpers.js'
 import {
   cmdModelCatalogRefresh,
@@ -79,6 +81,62 @@ describe('cmdProviderAdd 未知预设', () => {
       await expect(cmdProviderAdd('nope', { key: 'k', yes: true, noFetch: true })).rejects.toBeInstanceOf(ExitError)
       expect(errs.join('\n')).toContain('未知预设')
       expect(errs.join('\n')).toContain('可用预设')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('cmdProviderAdd 拉取统计与 profile 复用', () => {
+  it('拉取统计 = 重读配置的实际条数（不得用拉取前旧快照报「共 0 个」）', async () => {
+    const h = fakeHome()
+    // 本地 mock 上游（listen(0) 随机端口，同 fetch.test.ts 配方）：返回 2 个模型
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'ma' }, { id: 'mb' }] }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const port = (server.address() as { port: number }).port
+    captureConsole()
+    try {
+      await mutateConfig((c) => {
+        c.security = { store: 'file' }
+      })
+      await cmdProviderAdd(undefined, { baseUrl: `http://127.0.0.1:${port}/v1`, protocol: 'openai', auth: 'bearer', key: 'sk-add', yes: true })
+      const cfg = await loadConfig()
+      const pid = Object.keys(cfg.providers).find((k) => cfg.providers[k]!.base_url.includes(String(port)))
+      expect(pid).toBeDefined()
+      const actual = Object.keys(cfg.providers[pid!]!.models ?? {}).length
+      expect(actual).toBe(2)
+      const out = logs.join('\n')
+      expect(out).toContain(`共 ${actual} 个`)
+      expect(out).not.toContain('共 0 个')
+    } finally {
+      server.closeAllConnections?.()
+      server.close()
+      h.restore()
+    }
+  })
+
+  it('auto-<id> 路由已存在：复用不劫持，active_profile 不被改写，无误报「已创建」', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await mutateConfig((c) => {
+        c.security = { store: 'file' }
+        c.providers['other'] = { name: 'Other', base_url: 'https://other.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 'plain:' }
+        c.profiles['auto-custom'] = { name: 'auto-custom', provider: 'other' }
+        c.active_profile = 'auto-custom'
+      })
+      await cmdProviderAdd(undefined, { baseUrl: 'https://add.example.com/v1', protocol: 'openai', auth: 'bearer', key: 'sk-x', yes: true, noFetch: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['custom']).toBeDefined()
+      expect(cfg.profiles['auto-custom']!.provider).toBe('other') // 复用而非重建指向
+      expect(cfg.active_profile).toBe('auto-custom') // active 非空时不切换
+      const out = logs.join('\n')
+      expect(out).toContain('已添加')
+      expect(out).not.toContain('已创建并设为默认路由')
     } finally {
       h.restore()
     }
@@ -165,6 +223,34 @@ describe('cmdProviderRm', () => {
       // secrets.json 里的条目随 deleteSecret 清除（Windows DPAPI 批量形态同样只是 JSON 表）
       const store = JSON.parse(fs.readFileSync(secretsPath(), 'utf8')) as Record<string, string>
       expect(store).not.toHaveProperty('pv')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('配置写失败：key 不被先行删除（提交序必须先配置后密钥）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      await setSecret('pv', 'sk-order-guard', 'file')
+      await mutateConfig((c) => {
+        c.providers['pv']!.key_ref = 'file:pv'
+      })
+      // 诱发 mutateConfig 失败：不经 vi.mock（uninstall.test 持有 secrets 模块 mock，跨文件雷区）、
+      // 不等 10s 锁超时——seed 一个 fallback 为字符串的 profile，让 removeProviderCascade 的
+      // prof.fallback?.some 自然抛 TypeError。失败发生在「配置写」阶段：正确提交序是先配置写，
+      // 失败即整体中止，key 必须原样保留；若实现先删密钥后写配置，本用例的 key 断言即红。
+      await mutateConfig((c) => {
+        c.profiles['pX'] = { name: 'pX', provider: 'other' }
+        ;(c.profiles['pX'] as { fallback?: unknown }).fallback = 'bogus'
+      })
+      await expect(cmdProviderRm('pv')).rejects.toThrow()
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']).toBeDefined() // 配置写失败 = 原子回滚，provider 还在
+      expect(await getSecret('file:pv')).toBe('sk-order-guard') // 密钥未被先行删除
+      const store = JSON.parse(fs.readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+      expect(store).toHaveProperty('pv')
     } finally {
       h.restore()
     }
