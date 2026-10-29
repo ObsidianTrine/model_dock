@@ -1,8 +1,8 @@
 // run-lock.mjs — 调度器互斥锁：同一时刻最多一个调度器（drain / nightly / scan --run）
 // 在跑。防两类真实撞车：① nightly 定时与白天手动 drain 并发，pickNextCard 窗口期
 // 同时选中同一张卡 → 两个 worker 写同一个 worktree；② 上一晚 --auto drain 未跑完，
-// 次日定时又拉起一个 nightly。手动单卡 run 不加锁（人工明确意图，由状态机拒绝
-// 非法启动兜底）。
+// 次日定时又拉起一个 nightly。手动单卡 run 不抢调度器锁（人工明确意图）——同一
+// 任务的串行由任务级锁保证（task-lock.mjs：同任务同时只允许一个 run 闭环进程）。
 //
 // 语义（与 feature-branch 的 .finish.lock 同款哲学）：
 //   - 锁文件 .agents/orchestrator/.scheduler-lock.json 记 { pid, cmd, acquired_at }

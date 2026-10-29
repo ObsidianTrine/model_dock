@@ -547,6 +547,7 @@ Phase 1 每次都要人工 `run <task-id>`；自动调度补上「队列自己�
 `drain [--workers N]`（默认 1 = 串行）并发调度：最多 N 个 run 子进程同时跑，每个任务独立 worktree / 独立会话 / 独立熔断（测试本身走随机端口，符合 AGENTS.md 约定）。
 
 - **按文件归属分区互斥**（AGENTS.md「派发并行任务时按文件归属分区」约定的自动化）：新任务与任一在跑任务的 files_hint 经 `hintsOverlap`（policy.mjs）判定相交则跳过、等占位释放再试。判定规则保守优先：提取 glob 的固定前缀段（`docs/**` → docs，`src/cli.ts` → src，首段即通配的裸 `**` → 完全通配），前缀不同才可并行——`docs/**` 与 `test/**` 可并行，`src/cli.ts` 与 `src/gateway/x.ts` 保守串行。
+- **任务级互斥锁（task-lock.mjs，双层互斥的内层）**：调度器锁只防"调度器双开"，防不住手动 `run <id>` 撞上在跑的 drain——任务锁（`.agents/orchestrator/.run-<task-id>.lock`，记 pid）在 cmdRun 入口、worker spawn 之前持有：同任务后来者拿到明确报错退出，而不是旧实现那样悄悄杀掉前者的 worker（旧接管语义在 worker_spawned 事件落盘前有杀不掉的窄窗口，锁让该窗口从根上消失）。持锁进程死亡 = 陈锁自动接管，崩溃恢复语义不变（cleanupOrphanWorker 只在接管后才会遇到活孤儿）；闭环落位（merged/awaiting-human/blocked/failed）即释放；abandon 在闭环存活时拒绝（防误杀）。并行 drain 的不同任务各持各的任务锁，互不影响。
 - **死循环防护改造**：串行版的"连续两轮同任务"在并发下不再等价（同任务可能被不同 worker 交替选中），改为**每任务独立计数**——同一任务被调度 2 次仍在 pending 即拉黑跳过并告警（人工 resume 前先修执行环境）。
 - **结束条件**：无活跃子进程 且 无可调度任务；`--max` 仍限制总启动数。
 - 质量安全网（10.5）与本特性正交：降级只影响合并闸门，不影响并行调度。
@@ -594,3 +595,4 @@ worker 的 token 用量从此有两本账：
 | 版本 | 日期 | 说明 |
 |---|---|---|
 | v1.0 | 2026-10-11 | 初版（随公开仓库 v1.0.0 发布）：调研结论 + 五层架构 + Phase 1 详细设计 + 实施/测试计划 + 决策点；实施状态——策略守护（policy.mjs 命令红线/分级/审计）、L0/L1 自动合并、队列调度（run --next / drain）、nightly 巡检（scan + sanitize）、质量漂移监控（drift 降级/恢复）、多 worker 并行（hintsOverlap 分区互斥）、狗粮对账（reconcile + 网关 usage 旁路解析）、Planner 环节（intent 编译任务卡）均已交付（§10 各节），Phase 2 推进中 |
+| v1.1 | 2026-10-29 | 任务级互斥锁（§10.6，task-lock.mjs）：同任务同时只允许一个 run 闭环进程，堵住"手动 run 撞 drain / 双重手动操作 → 两个 worker 写同一个 worktree"的全部路径与旧孤儿接管的杀竞窗口；abandon 增加闭环存活守卫；锁文件 .run-\<task-id\>.lock 入 gitignore |
