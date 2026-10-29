@@ -313,3 +313,43 @@ describe('orchestrator 集成 > 守门与边界', () => {
     }
   })
 })
+
+describe('orchestrator 集成 > 状态/语义回归（任务卡 09）', () => {
+  it('awaiting-human 卡直跑 run 不崩：先迁移 running，正常走完状态机回到 awaiting-human', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'reah')
+      runOrch(repo.root, 'run reah --backend mock')
+      expect(readCard(repo.root, 'awaiting-human', 'reah')).toBeTruthy()
+      // 修复前：卡留在 awaiting-human/ 进整轮 worker，审查后 moveCard('running',…)
+      // 抛 QueueError，兜底 failTaskToBlocked 只认 running/reviewing → 裸栈崩出
+      const again = tryOrch(repo.root, 'run reah --backend mock')
+      expect(again.status).toBe(0)
+      expect(again.stderr).not.toMatch(/QueueError|任务卡不存在/)
+      expect(readCard(repo.root, 'awaiting-human', 'reah')).toBeTruthy()
+      const accepted = eventsOf(repo.root, 'reah').filter((e) => e.type === 'task_accepted')
+      expect(accepted).toHaveLength(2)
+      expect(accepted[1].from_state).toBe('awaiting-human')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('baseBranch 非 develop：changedFiles/gateScopePurity 按配置基准取 diff，闭环照常走到 awaiting-human', () => {
+    const repo = mkRepo({ baseBranch: 'main' })
+    try {
+      submitCard(repo.root, 'brmb')
+      // 修复前：purity/分级用默认 'develop' 取 diff，仓库无 develop 分支 → git diff fatal → 卡落 blocked
+      const run = tryOrch(repo.root, 'run brmb --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
+      expect(run.status).toBe(0)
+      expect(readCard(repo.root, 'awaiting-human', 'brmb')).toBeTruthy()
+      const gates = GATE_EVENTS(repo.root, 'brmb').map((e) => `${e.gate}:${e.result}`)
+      expect(gates).toContain('scope_purity:pass')
+      // change_classification 由 changedFiles(baseBranch) 驱动：能产出分级即证明 diff 基准正确
+      const classification = eventsOf(repo.root, 'brmb').find((e) => e.type === 'gate_result' && e.gate === 'change_classification')
+      expect(classification?.result).toBe('L0')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})

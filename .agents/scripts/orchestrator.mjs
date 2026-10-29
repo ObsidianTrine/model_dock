@@ -311,6 +311,13 @@ async function cmdRun(repoRoot, taskId, opts) {
   if (found.state === 'pending') {
     moveCard(root, taskId, 'pending', 'running');
     appendEvent(qdir, 'task_accepted', { backend: opts.backend });
+  } else if (found.state === 'awaiting-human') {
+    // CLI 直跑形态：状态检查放行 awaiting-human，但卡不先迁移就进闭环的话，第一个
+    // 终态迁移 moveCard('running', …) 会因源目录无卡抛 QueueError——兜底 failTaskToBlocked
+    // 只认 running/reviewing，异常裸栈崩出。走 retry 同款合法迁移先进 running/，再进状态机。
+    moveCard(root, taskId, 'awaiting-human', 'running');
+    appendEvent(qdir, 'task_accepted', { backend: opts.backend, from_state: 'awaiting-human' });
+    log('awaiting-human 卡直跑：先迁移回 running/（无 retry 补充指令，仅重启闭环）');
   }
 
   const worktree = ensureWorktree(repoRoot, taskId);
@@ -507,7 +514,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         }
       }
 
-      const purity = gateScopePurity(worktree, meta.files_hint);
+      const purity = gateScopePurity(worktree, meta.files_hint, baseBranch);
       appendEvent(qdir, 'gate_result', {
         gate: 'scope_purity',
         result: 'pass',
@@ -571,7 +578,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
 
       // ---- 合并闸门：L0/L1 自动合并（Phase 2），L2/L3 人工 ----
-      const classification = classifyChange(changedFiles(worktree), cfg);
+      const classification = classifyChange(changedFiles(worktree, baseBranch), cfg);
       appendEvent(qdir, 'gate_result', { gate: 'change_classification', result: classification.level, detail: classification.reasons.join('; ') });
       const rankOf = (l) => ['L0', 'L1', 'L2', 'L3'].indexOf(l);
       // 漂移降级（Phase 3）：自动合并回溯失败率超阈值期间，一切自动合并回人工——
@@ -601,7 +608,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       moveCard(root, taskId, 'reviewing', 'awaiting-human');
       appendEvent(qdir, 'awaiting_human', { reason: degraded ? 'drift_degraded' : purity.outside.length ? 'scope_outside' : `level ${classification.level} 超出 gate ${meta.gate} 上限或 gate=L3` });
       const summary = {
-        files: changedFiles(worktree).length,
+        files: changedFiles(worktree, baseBranch).length,
         debugIter,
         reviewIter,
         tokens: budget.tokens,
