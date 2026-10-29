@@ -78,8 +78,11 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 | 2026-10-autoroute-doclink-xss | 控制台 docLinkA href 只做 HTML 转义没做协议白名单，presets.json docs_url 可注入 javascript: | d41f847 | ✅（10-30，GLM subagent）信任边界沿到渲染端 + CSP 拦不住的论证 |
 | 2026-10-relay-client-abort | 客户端断开后网关继续向上游转发，非流式长推理白烧 token | d41f847 | ✅（10-30，GLM subagent）同批 ①⑤⑧ 三片全找齐 + Set-Cookie 折叠活缺陷 |
 | 2026-10-filemode-route-guard | 删除守卫不区分 harness mode，file 模式误拦 + 悬空 route 残留 | 77fa6b8 | ✅（10-30，GLM subagent）两处守卫 + 3 个活缺陷（providers 统计过期快照/先删密钥后写/ensureProfile 重名） |
+| 2026-10-crlf-proc-parse | parsePidCommandLines 不剥 CRLF，Windows 进程枚举恒空（托盘事故真根因） | e4ac854 | ✅（10-30，GLM subagent）同文件换行处理双标也点到；+ stderr 管道钉住父进程活 bug（本机实验坐实） |
+| 2026-10-atomicwrite-tmp-leftover | atomicWrite 写入阶段失败不清残留 tmp，受保护目录漏半截文件 | d41f847 | ✅（10-30，GLM subagent）+ withFileLock 重入自死锁（b917687 修复）与孤儿锁 |
+| 2026-10-hook-eval-failopen | 守卫 hook evaluateCommand 裸调用，配置损坏即静默失效 | 8c524ec | ✅（10-30，GLM subagent）+ 设计级发现：被守护对象可覆写 policy.mjs 让守卫自杀 |
 
-**基线：召回 24/24 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 16/16）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+**基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 评测循环产出（2026-10-30 夜训）
 
@@ -95,4 +98,6 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
   - `src/gateway/server.ts`：/_modeldock/model-catalog 视图缓存永不命中（fullKnownTable 每次 spread 新对象，注释宣称的缓存优化不存在）；probe() 对 responses 协议服务必失败且报错误导（server-reexport-drop 题审出）。
   - `src/gateway/relay.ts`：多值响应头被 String() 拍平，多张 Set-Cookie 折叠成非法单值头（relay-client-abort 题审出）。
   - `src/cli/providers.ts`：cmdProviderAdd「共 N 个」取过期快照必错；cmdProviderRm 先不可逆删密钥后做可失败的配置写，失败即丢凭据（filemode-route-guard 题审出）。
+  - `src/cli/shared.ts`：spawnDaemonAndWait 的 daemon stderr 管道钉住父 CLI 事件循环——daemon 启动成功后父进程永不退出（`gateway start --daemon` 不回提示符、SEA 双击窗口关不掉；评分 agent 本机实验坐实）；stderr 多字节 UTF-8 跨 chunk 乱码（crlf-proc-parse 题审出）。
+  - `.agents/hooks/policy-dispatch.mjs`：dispatcher 从事件 cwd import policy.mjs 且不校验文件写入——被守护对象覆写 policy.mjs 可让红线守卫静默自杀（audit 记 allowed）；JSON.parse('null') 绕过容错声明（hook-eval-failopen 题审出）。
 - **方法论收获**：审出率 100% 说明「给足 REVIEW.md 纪律 + 干净单文件考题」的组合对这类历史 bug 召回充分；出题的瓶颈在**选题**（批次修复提交一文件多 bug 归因不清、需部署上下文的题、超 120KB 的巨型文件都要避开）。
