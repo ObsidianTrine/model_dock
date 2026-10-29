@@ -1,20 +1,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { parse } from 'smol-toml'
 import { describe, expect, it } from 'vitest'
-import { fakeHome } from './helpers.js'
+import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 
 // ⚠ 与 test/reset.test.ts 同一配方：CLI 行为测试走子进程 + 独立沙箱（isolate:false + singleFork 下
 //   同进程执行 CLI 会触达被其他文件 mock 的模块）。profile rm 的钉定保护 / file 模式 route 复位 /
 //   别名解析容错是 503 回归的关键防线，值得端到端钉住。
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
-/** tsx 的 ESM loader：经 node --import 直跑 .ts 源码，免 shell、三平台一致 */
-const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
 const SEED_TOML = [
   'version = 1',

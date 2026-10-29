@@ -20,10 +20,8 @@
  * 临时目录 os.tmpdir()+path.join；不碰 8687/8890。
  */
 import http from 'node:http'
-import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import net from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { fakeHome } from './helpers.js'
@@ -35,8 +33,6 @@ import { readSyncState } from '../src/sync/state.js'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
 import type { Config } from '../config/types.js'
 
-// os.tmpdir() 短名陷阱与清理：见 test/helpers.ts 与 test/synctarget.test.ts 头注释（native realpath 打底）
-const TMP = fsSync.realpathSync.native(os.tmpdir())
 const targetDirs: string[] = []
 afterAll(async () => {
   for (const d of targetDirs) await fs.rm(d, { recursive: true, force: true }).catch(() => {})

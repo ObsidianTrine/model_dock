@@ -1,11 +1,9 @@
 import http from 'node:http'
-import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import net from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { fakeHome } from './helpers.js'
+import { fakeHome, TEST_TMP } from './helpers.js'
 import { setupSyncTarget, enrollCloud } from '../src/sync/setup.js'
 import { readSyncState, noteLocalSwitch, emptySyncState, updateSyncState, type SyncState } from '../src/sync/state.js'
 import { targetFromState } from '../src/sync/runtime.js'
@@ -22,10 +20,9 @@ import { atomicWrite } from '../src/util/fsx.js'
  * runtime：targetFromState 无目标报错；targets/types：parseManifest 字段不完整。
  */
 
-const TMP = fsSync.realpathSync.native(os.tmpdir())
 const targetDirs: string[] = []
 async function newTargetDir(): Promise<string> {
-  const d = await fs.mkdtemp(path.join(TMP, 'modeldock-sync-target-'))
+  const d = await fs.mkdtemp(path.join(TEST_TMP, 'modeldock-sync-target-'))
   targetDirs.push(d)
   return d
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Agent, ProxyAgent } from 'undici'
-import { fakeHome } from './helpers.js'
+import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import { rewriteModel, topLevelModel, forwardToUpstream, UpstreamError } from '../src/gateway/relay.js'
 import { buildDispatcher } from '../src/gateway/proxy.js'
 import { createUsageTap, type UsageStats } from '../src/gateway/usage.js'
@@ -11,14 +11,9 @@ import { drainAppendStreams, appendLine } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import type { Transform } from 'node:stream'
-
-// 子进程端到端配方（同 test/reset.test.ts）：tsx 的 ESM loader 经 node --import 直跑 .ts 源码
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
 // 公共小工具
 
