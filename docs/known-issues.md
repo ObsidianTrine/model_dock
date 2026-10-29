@@ -77,6 +77,7 @@
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
+| CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ☐ 未修（2026-10-30 夜巡发现并沙箱实测复现，见 §三） |
 
 ---
 
@@ -374,6 +375,12 @@
 - 竞态：另一调用方（CLI mutateConfig、控制台写路径等）的本地改动若恰好落在「apply 落盘」与「post-apply collect 读盘」之间，会被计入 lastSyncedHash 基线——该本地改动此后 tick 判 idle，**既不推送也不产生冲突快照**，静默丢失（直到下一次无关改动捎带出去）。窗口毫秒级，天然触发概率极低；perf-residual 批的 loadConfig memo 首版（外借共享对象）曾让测试轮询在 apply 落盘前放行、把它确定性钉进窗口，memo 改 clone 后恢复原概率，但窗口本身仍在。
 - 修复方向：apply+post-collect 对 config 写锁原子化（同一 `withFileLock` 域内完成）；注意 applySyncdoc 内部自身会 mutateConfig——withFileLock 若非同进程重入式会自锁死，动手前先核 `src/util/fsx.ts` 的实现语义。stash 方向（post-collect 前记录 mtime、变化则重试）也可评估。
 - ☑ **已修（2026-10-29 @b917687）**：`withFileLock` 增加 AsyncLocalStorage 同路径重入识别（promise 队列无线程式属主，嵌套申请曾会排在自身后面死锁；现持有者调用树内同路径申请内联执行，文件锁与队列仍归外层，跨路径嵌套照常排队）+ store 导出 `configLockPath`；engine 拉取分支与 setup 加入收敛的「applySyncdoc → post-apply collectSyncdoc」包进同一把 config 锁——并发本地写只能排在锁后，重收集基线只含远端应用态，本地改动照常走下个 tick 推送。代价：持锁窗口包含重收集的密钥解析（keychain 后端可能 spawn），极端时延后并发 config 写毫秒级，tick 分钟级一次可接受。回归守卫 test/sync-race.test.ts（重入不死锁 / 排队语义保留 / 原子性）。
+
+**CORRECT-07（P1，2026-10-30 夜巡发现并实测复现）`gateway start --daemon` 就绪后 CLI 不返回**
+- 位置：`src/cli/shared.ts:59-90`（spawnDaemonAndWait）：daemon 以 `stdio: ['ignore','ignore','pipe']` 拉起后，父 CLI 给 `child.stderr` 挂 `'data'`/`'close'` 监听做 daemon 日志转写；`child.unref()` 只把**子进程句柄**移出引用计数，不移除 stderr 管道读端对事件循环的引用——daemon 常驻、其 fd 2 永不关闭（main.ts 无任何 stderr 重定向/自关），父 CLI 的 read 流挂着 `'data'` 监听处于 flowing 态且被引用 → 就绪探测返回后事件循环排不空，CLI 挂住。
+- 实测（2026-10-30 凌晨，macOS + tsx 直跑源码，沙箱实例）：`gateway start --daemon` 在端口已 LISTEN 后 ≥45s 不返回（人工终止）；另一例约 13min 后才自行退出（退出机制未查，推测与 tsx 子进程链的 fd 2 传递有关；SEA 单文件形态未测）。`gateway stop` 等不 spawn daemon 的命令不受影响。review-eval 审查者（GLM-5.3-Flash）在同一代码上的「存疑」发现指同一点，经复现坐实。
+- 影响：脚本/CI/终端里跑 `gateway start --daemon` 会被钉住等待，用户视角「命令卡死」；自启链（--autostart 直起 daemon，不经本路径）与 run_dev（tsx watch）不受影响。
+- 修复方向（未动手）：stderr 改落 daemon 侧自写日志（daemon 自己 appendLine，父进程 stdio 全 ignore）；或读端 `child.stderr.unref()`（注意与 'close' 收尾写的时序）；或转写改经 `child.stderr.pipe(writable)` 且 writable 侧 unref。改动后须回归 `gateway start --daemon` 就绪即返回 + daemon 崩溃日志仍可追。
 
 ---
 
