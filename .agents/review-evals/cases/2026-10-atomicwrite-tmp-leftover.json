@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-atomicwrite-tmp-leftover",
+  "title": "atomicWrite 写入阶段失败（磁盘满/权限错）不清残留 tmp——只有 rename 失败路径清理，每次重试都在目标目录漏一份 .tmp 垃圾",
+  "reviewRef": "d41f847^",
+  "fixedBy": "d41f847",
+  "files": ["src/util/fsx.ts"],
+  "expect": ["tmp", "残留", "清理"],
+  "note": "d41f847②。修复 = open/write 阶段失败同样 fsp.rm(tmp, force)。审查侧教训：「失败清理」要覆盖每个可失败的阶段，而不是只护最显眼的那个（rename）；写一半崩掉的 tmp 文件落在受保护目录里还会被误当数据"
+}
