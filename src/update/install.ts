@@ -76,7 +76,9 @@ export function trayPidsFromProcessLines(lines: string): number[] {
   for (const { pid, cmd } of parsePidCommandLines(lines)) {
     const exe = cmd.startsWith('"') ? cmd.slice(1, cmd.indexOf('"', 1)) : cmd.split(/\s/)[0]
     if (!exe) continue
-    if (!/^ModelDockTray(\.exe)?$/i.test(path.basename(exe.replace(/"/g, '')))) continue
+    // 输入固定是 Windows CIM 输出（反斜杠路径）——basename 必须 win32 语义：POSIX 的
+    // path.basename 不切反斜杠，非 Windows 机器（跨平台测试 / CI）上整类托盘行永不命中
+    if (!/^ModelDockTray(\.exe)?$/i.test(path.win32.basename(exe.replace(/"/g, '')))) continue
     pids.push(pid)
   }
   return pids

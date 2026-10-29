@@ -160,6 +160,7 @@ git push origin develop
 | 托管 Node 钉版落后新 patch（v1.2.2 警告） | 门禁 ⚠ 即当版 bump `MANAGED_NODE_VERSION`；不当版 bump 须能说明非安全补丁 |
 | 本地深夜测试三连挂、清晨复跑全绿（v1.1.5：scan.test spawnSync 240s 超时） | 环境性偶发的判定口径：同提交 CI 绿 + 本地复跑绿；悬死诊断开 `VITEST_WATCHDOG=1`（观测器判读见 test/vitest-watchdog.mjs）。注意 vitest 单进程串行下同步 exec 阻塞事件循环，testTimeout 打不断 execSync |
 | 构建产物 / API 网络抖动（curl 56、gh API 502，大陆网络常态） | 命令一律带 `--retry`；关键比对（SHA256SUMS 对账、CI 结论）缺输出就单独补跑闭合，不留「应该没问题」 |
+| 平台特定输入用平台相关解析（v1.5.1 前：托盘 CIM 反斜杠路径过 `path.basename`，非 Windows 整类不命中、9 例红恰逢 runner 短缺漏进 develop） | 解析固定平台的输出用显式 `path.win32/posix.*`，不吃运行平台；新测试合入前至少本地跑一次非 Windows 侧（macOS 本机即可拦住） |
 
 ---
 
