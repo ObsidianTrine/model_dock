@@ -46,7 +46,9 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBac
   fs.writeFileSync(path.join(root, 'README.md'), '# 测试仓库\n')
   // tsc_build 门禁跑 npm run build：给个空脚本
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'orch-it', version: '0.0.0', scripts: { build: 'node -e "process.exit(0)"' } }))
-  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n.agents/orchestrator/queue/\n.agents/orchestrator/logs/\n')
+  // .agents/worktrees/ 与真实仓库的 .gitignore 对齐：漏了它，任何对主仓库的 add -A
+  // 都会把 task worktree 当 embedded git repo 收进提交（gitlink），finish 的脏检查随即误报
+  fs.writeFileSync(path.join(root, '.gitignore'), 'node_modules/\n.agents/worktrees/\n.agents/orchestrator/queue/\n.agents/orchestrator/logs/\n')
   g('add -A')
   g('commit -m init')
   return { root, cleanup: () => rmRfRetry(root) }
