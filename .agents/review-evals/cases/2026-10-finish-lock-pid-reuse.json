@@ -1,9 +1,14 @@
 {
   "id": "2026-10-finish-lock-pid-reuse",
-  "title": "feature-branch finish 锁判活用 process.kill(pid,0)：Windows 上属主退出后 pid 被复用 → 死锁被误判为活，排队者永远拿不到锁；僵尸 finish（主流程完成、事件循环被泄漏句柄钉住）也永久持锁",
-  "reviewRef": "88aa417",
-  "fixedBy": "acf3953",
-  "files": [".agents/scripts/feature-branch.mjs"],
-  "expect": ["复用", "reuse", "心跳", "heartbeat"],
-  "note": "2026-10-30 多 agent 并行 finish 实证踩中：排队者反复被「another finish is already running」拒绝，属主早已合并落盘（僵尸进程存活 40+ 分钟后才自然消亡）。教训：跨平台进程判活别依赖 pid 存在性——Windows pid 复用极快；锁类语义要心跳/租约（beat 停更即陈锁可接管），且 exit handler 只清属主是自己的锁（迟到僵尸不得删接管者的新锁）"
+  "title": "finish 锁判活用 process.kill(pid, 0)——Windows 上 PID 被复用时属主早已退出仍误判存活，多 agent 排队 finish 永远拿不到锁；僵尸 finish（main() 已完成但事件循环被泄漏句柄钉住）也永久持锁",
+  "reviewRef": "a804fd9^",
+  "fixedBy": "a804fd9",
+  "files": [
+    ".agents/scripts/feature-branch.mjs"
+  ],
+  "expect": [
+    "pid",
+    "复用"
+  ],
+  "note": "2026-10-30 本机实证踩中（多 agent 排队 finish，属主早已退出）。修法 = 心跳判活（beat 15s、陈旧 60s；旧版无 beat 锁按 time 30min 兜底滚动升级）+ exit handler 只清属主是自己的锁。审查侧教训：**kill(pid,0) 只回答「pid 存在」不回答「还是原来那个进程吗」**——跨进程判活必须带身份（心跳/启动时间），PID 复用与未 reap 僵尸都会骗过它"
 }

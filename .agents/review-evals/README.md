@@ -49,6 +49,10 @@
 | 2026-10-relay-multi-value-header-fold | 转发把重复头（set-cookie）折叠为逗号单值，RFC 6265 禁止折叠，客户端解析必错 | 035f99b | ⏳ 待首跑（2026-10-30 任务卡 07 修复对回灌；首跑前不计入基线分母） |
 | 2026-10-catalog-view-cache-never-hit | model-catalog 视图缓存键=表对象引用，但 fullKnownTable 每次 spread 新对象，缓存恒 miss 每请求全量 stringify | 9bfed39 | ⏳ 待首跑（2026-10-30 任务卡 08 修复对回灌；首跑前不计入基线分母） |
 | 2026-10-probe-responses-protocol-miss | probe() 探针二分法漏 responses 协议，responses-only 服务连接测试恒失败且报错误导 | 9bfed39 | ⏳ 待首跑（同上） |
+| 2026-10-daemon-stderr-pipe-pin | spawnDaemonAndWait pipe 转写 daemon stderr，读端钉死 CLI 事件循环，--daemon 就绪后提示符永不返回 | b542d8e | ⏳ 待首跑（2026-10-30 合并窗口回灌，CORRECT-07；首跑前不计入基线分母） |
+| 2026-10-finish-lock-pid-reuse | finish 锁判活 process.kill(pid,0) 被 Windows PID 复用骗过，排队者永远拿不到锁；僵尸 finish 永久持锁 | a804fd9 | ⏳ 待首跑（同上） |
+| 2026-10-claude-powershell-whitelist | claude worker 白名单按 Bash(...) 前缀写死，Windows shell 工具是 PowerShell——写类命令全拒「能读不能验」，hook matcher 同失明 | e5fa84d | ⏳ 待首跑（同上） |
+| 2026-10-budget-cross-session-max | Budget 跨会话 Math.max 聚合会话累计值，fixup 多会话漏计，token 熔断形同虚设 | a755671 | ⏳ 待首跑（同上） |
 | 2026-10-orch-awaiting-human-crash | run 放行 awaiting-human 卡但不迁移，烧完整轮 worker 后首个终态迁移必炸裸栈 | 5e4dcfe | ✅（10-30，GLM subagent）P1 全证据链（白名单/迁移/兜底三层）+ 3 条新发现（npm spawn 无 shell EINVAL、reviewing 无恢复路径、reviewer 临时目录泄漏→立卡 19） |
 | 2026-10-orch-resume-backend-first-hit | resume 沿用后端 .find 取首条 worker_spawned，多引擎任务静默切回最初引擎 | 5e4dcfe | ✅（10-30，GLM subagent）P1 命中 + 4 条当前版活缺陷（TMPDIR /tmp、spawn 无 shell 与探测矛盾、mock prior 漏防、settings 0600→立卡 17） |
 | 2026-10-finish-lock-pid-reuse | finish 锁判活 process.kill(pid,0) 被 Windows PID 复用骗过，陈锁永拒排队者 | acf3953 | ✅（10-30，GLM subagent）主缺陷命中 + merge 冲突裸崩新发现（立卡 18）；exit handler 无属主校验已随 acf3953 一并修复 |
@@ -75,6 +79,7 @@
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 - **2026-10-30 增补 6 题**（编号任务卡 05/06/07/08 修复对回灌，评测循环挖出的活 bug 修复后按标准 schema 成题）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 06a5940（×2）/ 54b0602 / 035f99b / 9bfed39（×2）。
+- **2026-10-30 增补 4 题**（合并窗口修复对回灌：CORRECT-07 daemon stderr / finish 锁 PID 复用 / claude PowerShell 白名单 / Budget 跨会话漏计）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 b542d8e / a804fd9 / e5fa84d / a755671。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 

@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-claude-powershell-whitelist",
+  "title": "claude-headless worker 的权限白名单按 Bash(...) 前缀写死——Windows 上 claude CLI 的 shell 工具是 PowerShell：Bash(git add:*) 匹配不到 PowerShell 调用，git add/commit/npm test 全被 headless 自动拒（只读 git status 反而走内置启发式放行），即夜跑「能读不能验」权限墙；hook matcher 只写 Bash 还使 PowerShell 调用绕过 policy-worker，红线层失明",
+  "reviewRef": "e5fa84d^",
+  "fixedBy": "e5fa84d",
+  "files": [
+    ".agents/scripts/orchestrator/backends/claude-headless.mjs"
+  ],
+  "expect": [
+    "powershell",
+    "白名单"
+  ],
+  "note": "2026-10-30 沙箱实验实证（补 PowerShell(git add:*) 后即放行）。与 2026-10-agents-win-spawn-shell（spawnSync .cmd 直调 ENOENT）相邻但不同层：那是 spawn 层、这是权限/拦截匹配层。审查侧教训：**按工具名前缀匹配的白名单与 hook matcher，工具名集合是平台函数**——双形态（Bash+PowerShell）必须双发，否则防线对一半调用面失明"
+}
