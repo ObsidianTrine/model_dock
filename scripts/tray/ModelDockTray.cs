@@ -669,9 +669,11 @@ namespace ModelDockTray
             string latest = JsonString(json, "latest");
             string lastError = JsonString(json, "lastError");
             string htmlUrl = JsonString(json, "htmlUrl");
-            string notes = JsonUnescape(JsonString(json, "notes"));
+            // JsonString 内部已做一次 JsonUnescape，这里不再包一层（双重解码会把已解码文本里的
+            // 字面 \t、\\ 再解码一次，如路径 C:\temp 变 C:<TAB>emp）
+            string notes = JsonString(json, "notes");
             // summary = 服务端摘要收口（首段+要点，与命令行检查输出同形）；旧版网关没有该字段时回落全文
-            string summary = JsonUnescape(JsonString(json, "summary"));
+            string summary = JsonString(json, "summary");
             if (available)
             {
                 string title = NewVersionTitle(latest, JsonString(json, "current"));
@@ -719,10 +721,15 @@ namespace ModelDockTray
             return JsonUnescape(m.Groups[1].Value);
         }
 
+        /// JSON 转义反转义：占位符换控——先把 \\ 换成 \u0001 占位，防止被后续 \n 等替换误吃
+        /// （JSON 源文 "\\n" = 字面反斜杠 + n，不是换行）；链尾回填占位符为【一个】字面反斜杠
+        /// （JSON 源文 "\\" 的语义值就是一个 \）。曾回填成两个（"\\\\"），错误消息里的
+        /// Windows 路径展示成 C:\\Users\\…（2026-10 任务卡 20）。入参须是未解码的 JSON 源文
+        /// （走 JsonString 的正则捕获组），已解码文本勿再过本函数（二次解码会误伤 \t 等字面序列）。
         internal static string JsonUnescape(string v)
         {
             if (v == null) return null;
-            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\\"", "\"").Replace("\u0001", "\\\\");
+            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\\"", "\"").Replace("\u0001", "\\");
         }
 
         internal static long JsonLong(string json, string field)
@@ -1448,7 +1455,8 @@ namespace ModelDockTray
                 if (stage == "failed")
                 {
                     _timer.Stop();
-                    string err = TrayActions.JsonUnescape(TrayActions.JsonString(text, "error"));
+                    // JsonString 内部已反转义一次，勿再包 JsonUnescape（双重解码误伤字面 \ 序列）
+                    string err = TrayActions.JsonString(text, "error");
                     MessageBox.Show(string.IsNullOrEmpty(err) ? I18n.L("更新失败，可重试 modeldock update。", "Update failed; retry with `modeldock update`.") : err, I18n.L("ModelDock 更新失败", "ModelDock Update Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     Close();
                     return;
