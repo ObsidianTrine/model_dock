@@ -64,14 +64,14 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 | 2026-10-env-port-live | cmdEnv 复用写入链的 resolveClientGatewayPort（生产默认端口存活优先），非默认端口实例 env 恒输出 8687 | 87b2106 | ⚠️ 波动（批二单题 ✅ / full-12 ❌ 未命中目标——但其输出另带 diag.ts 3 个自启残留误报类真发现；03:15 第三次采样 ✅，累计 2/3。关键词启发式局限的实录，各轮原文都见 runs/） |
 | 2026-10-agents-win-spawn-shell | .agents 编排器 Windows spawn 未带 shell（.cmd 包装直调必 ENOENT）：claude worker 探测带/spawn 不带（探测说可用、起必挂，worker/审查全落 blocked/），orchestrator npm ci 装不上、nightly audit 静默失效 | c99f326 | ⏳ 待首跑（2026-10-30 效能审查回灌；本机 shell 故障未跑，首跑前不计入基线分母） |
 | 2026-10-orchestrator-repo-root | findRepoRoot 双实现语义相反（--git-common-dir vs --show-toplevel）且注释自称「同款」：worktree 内跑 orchestrator 把 queue/ 锚进 worktree | c99f326 | ⏳ 待首跑（同上） |
-| 2026-10-review-concurrency-group | claude-review 的 auto-review 与 interactive（@claude）共用并发组 + cancel-in-progress：一条评论取消进行中的 auto-review，token 白费 | （T19 回填） | ⏳ 待首跑（同上；fixedBy 待 T19 合入回填） |
+| 2026-10-review-concurrency-group | claude-review 的 auto-review 与 interactive（@claude）共用并发组 + cancel-in-progress：一条评论取消进行中的 auto-review，token 白费 | cc6d832 | ⏳ 待首跑（同上） |
 
 ### 基线记录
 
 - **2026-10-29（claude CLI 2.1.214，Windows 端）**：全量 8/8 审出。
 - **2026-10-30（claude CLI 2.1.310 + GLM-5.3-Flash，经沙箱网关 claude-direct→Volces plan）**：全量 12 题单轮 **10/12**（原 8 题 7/8，批二 4 题 3/4）；两题未命中目标但模型输出均含同文件真发现（详见上表 ⚠️ 行）；全部 12 题在跨轮中至少审出一次（cloud-null-body 2026-10-29 ✅；env-port-live 批二单题 ✅）。同模型同考题跨轮波动实测存在，单轮未审出 ≠ 召回失效。**03:15 第三次采样**：两道波动题单题复跑均 ✅（runs/resample-*.md）——cloud-null-body 与 env-port-live 各累计 2/3 命中，波动定性成立（边界题的轮次方差，非系统性漏报）。**04:35 原 8 题第二次采样：8/8 全部审出**（runs/sample2-*.md，约 46 分钟）——核心基线回归满分；cloud-null-body 跨四轮累计 3/4，是全集波动最大的一道题。
 - **基线口径（自 2026-10-30 起）**：审查者任何改动（REVIEW.md / prompt / lint / 模型）全量重跑，**单轮 ≥10/12 且原 8 题 ≥7/8** 视为基线保持；跌破则改动不保留，且必须读原文判读是「目标未命中」还是「启发式未命中」。
-- **2026-10-30 增补 3 题**（2026-10-29 效能审查回灌：T14 修复对 ×2 + T19 待回填 ×1，见上表末三行）：首跑未做（执行会话本机 shell 故障），**首跑记录前不计入基线口径分母**；fixedBy 标「待回填」的题在对应卡合入后回填。
+- **2026-10-30 增补 3 题**（2026-10-29 效能审查回灌：T14 修复对 ×2 + T19 修复对 ×1，见上表末三行）：首跑未做（执行会话本机 shell 故障），**首跑记录前不计入基线口径分母**；第三题 fixedBy 已随 T19 合入（cc6d832）回填。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
