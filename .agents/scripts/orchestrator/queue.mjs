@@ -234,6 +234,12 @@ export function validateCard(meta) {
   if (meta.tier !== undefined && (typeof meta.tier !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(meta.tier))) {
     fail(`任务卡 tier "${JSON.stringify(meta.tier)}" 不合法：只允许小写字母/数字/短横线（如 heavy，对应 workflow.json tiers 键名）`);
   }
+  // spec 归属（可选）：spec build 拆出的卡记录所属规格，进度锚 specs/<id>/progress.json 按它寻址
+  if (meta.spec !== undefined && meta.spec !== null && meta.spec !== '') {
+    if (typeof meta.spec !== 'string' || !TASK_ID_RE.test(meta.spec)) {
+      fail(`任务卡 spec "${JSON.stringify(meta.spec)}" 不合法：只允许小写字母/数字/短横线（所属规格 id）`);
+    }
+  }
   const budget = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
   for (const k of Object.keys(DEFAULT_BUDGET)) requirePositiveInt(budget, k);
   meta.budget = budget;
@@ -275,6 +281,32 @@ export function findCard(root, id) {
   return null;
 }
 
+/**
+ * spec 归属卡（frontmatter 带 spec: <id>）的全局进度锚同步：spec 拆多卡后的完成态
+ * 散在 queue 七目录里，progress.json（.agents/orchestrator/specs/<spec>/progress.json）
+ * 是跨夜 drain / 断点续跑的机器可读全局视图——卡片迁移时同步对应任务状态。
+ * specs/ 与 queue/ 同级，从队列根 ../specs 推导。尽力而为：无 spec 字段 / 进度文件
+ * 缺失（旧规格）静默跳过；写失败仅告警，绝不阻断状态机。
+ */
+function syncSpecProgress(root, id, state) {
+  try {
+    const card = fs.readFileSync(cardPath(root, state, id), 'utf8');
+    const spec = /^spec:\s*([a-z0-9][a-z0-9-]*)\s*$/m.exec(card)?.[1];
+    if (!spec) return;
+    const file = path.join(root, '..', 'specs', spec, 'progress.json');
+    if (!fs.existsSync(file)) return;
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const t = (j.tasks ?? []).find((x) => x && x.card_id === id);
+    if (t && t.status !== state) {
+      t.status = state;
+      j.updated_at = new Date().toISOString();
+      fs.writeFileSync(file, `${JSON.stringify(j, null, 2)}\n`);
+    }
+  } catch (e) {
+    console.warn(`[orchestrator] progress.json 同步失败（${id} → ${state}）：${e?.message ?? e}`);
+  }
+}
+
 /** 迁移任务卡到目标状态目录（校验白名单 + 原子 rename）。 */
 export function moveCard(root, id, from, to) {
   if (!STATES.includes(to)) fail(`未知的目标队列状态 "${to}"（允许：${STATES.join(' ')}）`);
@@ -285,6 +317,7 @@ export function moveCard(root, id, from, to) {
   const src = cardPath(root, from, id);
   if (!fs.existsSync(src)) fail(`任务卡不存在：${src}`);
   fs.renameSync(src, cardPath(root, to, id));
+  syncSpecProgress(root, id, to);
 }
 
 /** 列出某状态下全部任务卡的 id（按文件名排序）。 */

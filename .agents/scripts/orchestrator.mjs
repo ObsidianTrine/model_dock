@@ -45,10 +45,10 @@ import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift
 import { gatewayLogsDir, reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
-import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc } from './orchestrator/spec.mjs';
+import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
-import { notify, buildNightlySummary, nightlyWebhookEnvs } from './orchestrator/notify.mjs';
+import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 
@@ -93,6 +93,21 @@ function die(msg, code = 1) {
 }
 
 const log = (msg) => console.log(msg);
+
+/**
+ * 卡片落位通知（awaiting-human/blocked/failed）：夜跑无人值守时手机可收。
+ * 尽力而为——webhook 未配置时零开销，通道失败静默，绝不影响编排本身。
+ */
+async function settleNotify(repoRoot, taskId, state, reason) {
+  try {
+    const cfg = loadWorkflowConfig(repoRoot);
+    await notify({
+      title: `${displayProjectName(cfg.projectName ?? '')} 编排任务`,
+      body: buildSettleSummary({ taskId, state, reason }),
+      webhookEnvs: orchWebhookEnvs(repoRoot),
+    });
+  } catch { /* 通知失败不阻断编排 */ }
+}
 
 // ---------------------------------------------------------------------------
 // 事件与预算
@@ -425,6 +440,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
             moveCard(root, taskId, 'running', 'blocked');
             appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
+            await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
             die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
           }
         }
@@ -449,6 +465,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       if (!claimed || claimed.status !== 'done') {
         appendEvent(qdir, 'blocked', { reason: claimed?.status === 'stuck' ? 'worker 自报 stuck' : '未产出结果块（worker 异常结束）' });
         moveCard(root, taskId, 'running', 'blocked');
+        await settleNotify(repoRoot, taskId, 'blocked', claimed?.status === 'stuck' ? 'worker 自报 stuck' : 'worker 异常结束（无结果块）');
         log(`worker 未报告完成（${claimed?.status ?? '无结果块'}）。任务转 blocked/，NOTES.md 已留现场，人工决策：`);
         log(`  node .agents/scripts/orchestrator.mjs resume ${taskId}   # 带恢复上下文续做`);
         log(`  node .agents/scripts/orchestrator.mjs abandon ${taskId}   # 按 Rescue 流程清理`);
@@ -474,6 +491,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         if (debugIter > meta.budget.max_test_iterations) {
           appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
           moveCard(root, taskId, 'running', 'blocked');
+          await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次，测试不过）`);
           die(`调试子循环超限（${debugIter} 次）。任务转 blocked/——测试仍不绿，人工接手。`);
         }
         promptText = buildFixupPrompt(card, ctx, 'test_failure', e.output, debugIter);
@@ -491,6 +509,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         if (debugIter > meta.budget.max_test_iterations) {
           appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
           moveCard(root, taskId, 'running', 'blocked');
+          await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次，build 不过）`);
           die(`调试子循环超限（${debugIter} 次，build 不过）。任务转 blocked/，人工接手。`);
         }
         promptText = buildFixupPrompt(card, ctx, 'build_failure', e.output, debugIter);
@@ -515,6 +534,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           if (debugIter > meta.budget.max_test_iterations) {
             appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
             moveCard(root, taskId, 'running', 'blocked');
+            await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次，${gateName} 不过）`);
             die(`调试子循环超限（${debugIter} 次，${gateName} 不过）。任务转 blocked/，人工接手。`);
           }
           promptText = buildFixupPrompt(card, ctx, trigger, e.output, debugIter);
@@ -533,6 +553,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'gate_result', { gate: 'port_scan', result: 'fail', detail: e.message });
         moveCard(root, taskId, 'running', 'failed');
         appendEvent(qdir, 'failed', { reason: `红线门禁 port_scan：${e.message}` });
+        await settleNotify(repoRoot, taskId, 'failed', '红线门禁 port_scan 未通过（不可调试）');
         die(`红线门禁 port_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
       try {
@@ -543,6 +564,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'gate_result', { gate: 'native_scan', result: 'fail', detail: e.message });
         moveCard(root, taskId, 'running', 'failed');
         appendEvent(qdir, 'failed', { reason: `红线门禁 native_scan：${e.message}` });
+        await settleNotify(repoRoot, taskId, 'failed', '红线门禁 native_scan 未通过（不可调试）');
         die(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
 
@@ -560,6 +582,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           if (debugIter > meta.budget.max_test_iterations) {
             appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
             moveCard(root, taskId, 'running', 'blocked');
+            await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次，ui_check 不过）`);
             die(`调试子循环超限（${debugIter} 次，ui_check 不过）。任务转 blocked/，人工接手。`);
           }
           promptText = buildFixupPrompt(card, ctx, 'ui_check_failure', e.output, debugIter);
@@ -623,6 +646,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         if (reviewIter > meta.budget.max_review_iterations) {
           appendEvent(qdir, 'circuit_breaker', { reason: 'max_review_iterations', detail: `${reviewIter}/${meta.budget.max_review_iterations}` });
           moveCard(root, taskId, 'reviewing', 'blocked');
+          await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
           die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
         }
         promptText = buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter);
@@ -659,7 +683,9 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
 
       moveCard(root, taskId, 'reviewing', 'awaiting-human');
-      appendEvent(qdir, 'awaiting_human', { reason: degraded ? 'drift_degraded' : purity.outside.length ? 'scope_outside' : `level ${classification.level} 超出 gate ${meta.gate} 上限或 gate=L3` });
+      const awaitReason = degraded ? 'drift_degraded' : purity.outside.length ? 'scope_outside' : `level ${classification.level} 超出 gate ${meta.gate} 上限或 gate=L3`;
+      appendEvent(qdir, 'awaiting_human', { reason: awaitReason });
+      await settleNotify(repoRoot, taskId, 'awaiting-human', awaitReason);
       const summary = {
         files: changedFiles(worktree, baseBranch).length,
         debugIter,
@@ -681,7 +707,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     }
   } catch (e) {
     // 异步异常兜底：backend spawn 失败等——卡不得悬在 running/（见 failTaskToBlocked 注释）
-    const reason = failTaskToBlocked(root, qdir, taskId, e);
+    const reason = await failTaskToBlocked(repoRoot, root, qdir, taskId, e);
     if (reason) die(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
     throw e;
   } finally {
@@ -700,12 +726,13 @@ async function cmdRun(repoRoot, taskId, opts) {
  * 实际无进程，只能人工发现后 resume。这里统一落 blocked/ 附原因，resume 可续。
  * （业务性失败各环节已自行 die/迁移，不经过这里。）
  */
-function failTaskToBlocked(root, qdir, taskId, err) {
+async function failTaskToBlocked(repoRoot, root, qdir, taskId, err) {
   const found = findCard(root, taskId);
   if (found && ['running', 'reviewing'].includes(found.state)) {
     const reason = `异常中断：${String(err?.message ?? err).slice(0, 300)}`;
     appendEvent(qdir, 'failed', { reason });
     moveCard(root, taskId, found.state, 'blocked');
+    await settleNotify(repoRoot, taskId, 'blocked', reason);
     return reason;
   }
   return null;
@@ -971,6 +998,19 @@ function drainTallyLine(tally) {
   return Object.entries(tally).map(([s, n]) => `${s} ${n}`).join('、') || '无';
 }
 
+/** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」。 */
+async function drainSummaryNotify(repoRoot, done, tally, note) {
+  if (!done) return; // 零消费不吵
+  try {
+    const cfg = loadWorkflowConfig(repoRoot);
+    await notify({
+      title: `${displayProjectName(cfg.projectName ?? '')} drain 收官`,
+      body: `共 ${done} 卡（${drainTallyLine(tally)}）——${note}`,
+      webhookEnvs: orchWebhookEnvs(repoRoot),
+    });
+  } catch { /* 通知失败不阻断编排 */ }
+}
+
 async function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -993,6 +1033,7 @@ async function cmdDrain(repoRoot, opts) {
     for (;;) {
       if (done >= max) {
         log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。本轮落位：${drainTallyLine(tally)}。`);
+        await drainSummaryNotify(repoRoot, done, tally, `已达 --max ${max} 轮上限`);
         return;
       }
       const next = pickNextCard(root);
@@ -1000,6 +1041,7 @@ async function cmdDrain(repoRoot, opts) {
         const stuck = listCards(root, 'pending');
         if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
         else log(`队列已清空：本次 drain 共跑完 ${done} 个任务（${drainTallyLine(tally)}）。`);
+        await drainSummaryNotify(repoRoot, done, tally, stuck.length ? '有解析失败的卡待人工修' : '队列已清空');
         return;
       }
       // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
@@ -1038,9 +1080,11 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   const active = new Map(); // pid -> { id, hint }
   const retryCount = new Map(); // id -> 调度次数
   const blacklisted = new Set();
+  const tally = {};
   let launched = 0;
   let finished = 0;
   let warnedStuck = false;
+  let summarySent = false;
 
   const launch = (card) => {
     retryCount.set(card.id, (retryCount.get(card.id) ?? 0) + 1);
@@ -1055,7 +1099,15 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
     child.on('exit', (code) => {
       active.delete(child.pid);
       finished += 1;
+      const settled = findCard(root, card.id)?.state;
+      if (settled) tally[settled] = (tally[settled] ?? 0) + 1;
       if (code !== 0) log(`任务 ${card.id} 退出码 ${code}（已落 blocked/failed/或等待人工，继续调度）。`);
+      // 终局摘要（尽力而为）：全部发射的子进程已收尾且无后续可调度（或已达 --max 上限）
+      const noMore = launched >= max || !listCards(root, 'pending').some((id) => !blacklisted.has(id));
+      if (!summarySent && active.size === 0 && finished === launched && noMore) {
+        summarySent = true;
+        void drainSummaryNotify(repoRoot, finished, tally, launched >= max ? `已达 --max ${max} 轮上限` : '队列已清空');
+      }
       pump();
     });
   };
@@ -1433,6 +1485,24 @@ function cmdSpecShow(repoRoot, id) {
   log(`拆卡进队列：node .agents/scripts/orchestrator.mjs spec build ${id}`);
 }
 
+/** spec status <id>：全局进度锚（progress.json）——跨夜 drain / 断点续跑的全局完成度视图。 */
+function cmdSpecStatus(repoRoot, id) {
+  if (!listSpecs(repoRoot).includes(id)) die(`规格 "${id}" 不存在。spec list 查看。`);
+  let progress;
+  try {
+    progress = readProgress(queueRoot(repoRoot), id);
+  } catch {
+    die(`规格 "${id}" 尚无 progress.json（早于进度锚机制的规格或未 build 过）。\n重跑 spec build ${id} 即可生成（幂等，不重复拆卡）。`);
+  }
+  const counts = {};
+  for (const t of progress.tasks ?? []) counts[t.status] = (counts[t.status] ?? 0) + 1;
+  log(`════════ 规格 ${id} 进度：${progress.title} ════════`);
+  for (const t of progress.tasks ?? []) {
+    log(`  [${String(t.status).padEnd(14)}] 任务 ${t.n}: ${t.title}（卡 ${t.card_id}）`);
+  }
+  log(`落位：${Object.entries(counts).map(([s, n]) => `${s} ${n}`).join('、') || '无'}（更新于 ${progress.updated_at}）`);
+}
+
 // ---------------------------------------------------------------------------
 // nightly / schedule —— 定时巡检编排与三平台调度（release-please 式触发层，Phase 2 展望项落地）
 // ---------------------------------------------------------------------------
@@ -1626,6 +1696,7 @@ function usage() {
   spec "<一句话描述特性>" [--backend mock]      规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
+  spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
   scan [--todo] [--audit] [--tests] [--issues] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
   nightly [--tests] [--auto N] [--backend …] [--review-backend …]
                                           一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
@@ -1714,6 +1785,10 @@ async function main() {
       if (sub === 'show') {
         if (!args[1]) die('用法：spec show <spec-id>');
         return cmdSpecShow(repoRoot, args[1]);
+      }
+      if (sub === 'status') {
+        if (!args[1]) die('用法：spec status <spec-id>');
+        return cmdSpecStatus(repoRoot, args[1]);
       }
       opts.intent = args;
       return cmdSpecStart(repoRoot, opts);

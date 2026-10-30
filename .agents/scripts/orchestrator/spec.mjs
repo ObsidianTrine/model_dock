@@ -102,6 +102,7 @@ export function renderTaskCard(spec, task, total) {
     'priority: normal',
     `created_at: ${bumpMinutes(spec.meta.created_at, task.n)}`,
     'created_by: planner',
+    `spec: ${spec.meta.id}`, // 进度锚寻址键：卡片状态迁移时同步 specs/<id>/progress.json（queue.mjs moveCard）
     'files_hint:',
     ...task.files.map((f) => `  - ${f}`),
     'workflows:',
@@ -141,6 +142,38 @@ function bumpMinutes(iso, minutes) {
 }
 
 /**
+ * 全局进度锚（Anthropic 长时程 harness 的 JSON feature-list 模式对应物）：
+ * spec 拆出的多张卡完成态散在 queue 七目录里，progress.json 给跨夜 drain /
+ * 断点续跑一个机器可读的全局视图。build 幂等重跑时按各卡当前状态刷新；
+ * 后续迁移由 queue.mjs moveCard 按卡的 spec 字段同步。
+ */
+export function progressPath(queueRootDir, specId) {
+  return path.join(queueRootDir, '..', 'specs', specId, 'progress.json');
+}
+
+export function writeProgress(queueRootDir, spec, tasks) {
+  const id = spec.meta.id;
+  const progress = {
+    id,
+    title: spec.meta.title,
+    updated_at: toIsoLocal(),
+    tasks: tasks.map((t) => ({
+      n: t.n,
+      title: t.title,
+      card_id: `${id}-t${t.n}`,
+      files: t.files,
+      status: findCard(queueRootDir, `${id}-t${t.n}`)?.state ?? 'pending',
+    })),
+  };
+  fs.writeFileSync(progressPath(queueRootDir, id), `${JSON.stringify(progress, null, 2)}\n`);
+  return progressPath(queueRootDir, id);
+}
+
+export function readProgress(queueRootDir, specId) {
+  return JSON.parse(fs.readFileSync(progressPath(queueRootDir, specId), 'utf8'));
+}
+
+/**
  * 拆卡进 pending/（幂等：同 id 已存在于任何状态目录则跳过）。
  * 返回 { created: string[], skipped: string[], warnings: string[] }。
  */
@@ -161,5 +194,6 @@ export function buildSpecCards(repoRoot, queueRootDir, id) {
     fs.writeFileSync(cardPath(queueRootDir, 'pending', cardId), renderTaskCard(spec, t, tasks.length));
     created.push(cardId);
   }
+  writeProgress(queueRootDir, spec, tasks);
   return { created, skipped, warnings };
 }
