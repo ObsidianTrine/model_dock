@@ -45,6 +45,45 @@ describe('jsonpath', () => {
     expect(root.p1.kind).toBe('y')
     expect(root.p2.kind).toBe('y')
   })
+
+  // ── CORRECT-08 三处复现原文（坏输入 → 可操作双语报错，不再静默写坏数据）──
+
+  it('缺陷①：引号键 / 负数下标 / 未闭合括号不再静默吞字改写，报可操作错误', () => {
+    // 修复前：setPath({}, "$.a['b']", 1) → {"a":{"'b'":1}}（引号进键名，写错位置无报错）
+    const root: any = {}
+    expect(() => setPath(root, "$.a['b']", 1)).toThrow(/无法解析/)
+    expect(root).toEqual({}) // 未静默写坏
+    expect(() => setPath({}, '$.a[-1]', 1)).toThrow(/无法解析/)
+    expect(() => setPath({}, '$.a[0', 1)).toThrow(/无法解析/) // 修复前：键 '0'，绕过越界守卫
+    expect(() => toSegments("$.a['b']")).toThrow(/无法解析/) // 读/segments 共用同一守卫
+  })
+
+  it('缺陷②：star 中段遇标量子节点 skip 不裸崩（与 leaf 分支不覆盖 object 同口径）', () => {
+    const root: any = { a: { b: 1 }, c: 'str' }
+    expect(() => setPath(root, '$.*.b', 2)).not.toThrow() // 修复前：TypeError on 'str'
+    expect(root.a.b).toBe(2)
+    expect(root.c).toBe('str') // 标量不被改写、不报错中断其他键
+  })
+
+  it('缺陷③：对象容器遇下标段显式报错，不再静默落字符串键 "0"', () => {
+    const root: any = { a: { existing: 1 } }
+    // 修复前：setPath(root, '$.a[0]', 'x') → {"a":{"0":"x","existing":1}}
+    expect(() => setPath(root, '$.a[0]', 'x')).toThrow(/下标段只能用于数组/)
+    expect(root.a).toEqual({ existing: 1 }) // 未静默写入
+    const leaf: any = { list: [{ v: 1 }] }
+    expect(() => setPath(leaf, '$.list[0].sub[0]', 1)).toThrow(/下标段只能用于数组/) // 中段同守卫
+  })
+
+  it('数组点句式行为零变化（点/下标合法句式回归锚点）', () => {
+    const root: any = {}
+    setPath(root, '$.a.b.c', 1) // 点句式
+    setPath(root, '$.a.list[2]', 'append') // idx === length 追加合法
+    expect(root.a.list).toEqual([undefined, undefined, 'append'])
+    setPath(root, '$.a.list[1]', 'y') // 改写已有元素合法
+    expect(root.a.list[1]).toBe('y')
+    expect(() => setPath(root, '$.a.list[9]', 'x')).toThrow(/路径越界/) // 稀疏守卫原样
+    expect(getPath({ a: { list: ['x'] } }, '$.a.list[0]')).toBe('x') // 读路径合法句式
+  })
 })
 
 describe('diff', () => {
