@@ -126,7 +126,7 @@ export function renderTaskCard(spec, task, total) {
     '## 技术设计（随 worktree 携带，开工前必读）',
     '',
     `design.md 与 requirements.md 全文已随 worktree 准备拷贝到 worktree 内 .agents/orchestrator/specs/${spec.meta.id}/。`,
-    `**开工前先读 worktree 内的 design.md**（实现以本设计为纲；与其冲突时以已审阅的 design 为准并在 NOTES.md 说明）；`,
+    `**开工前先读 worktree 内的 .agents/orchestrator/specs/${spec.meta.id}/design.md**（实现以本设计为纲；与其冲突时以已审阅的 design 为准并在 NOTES.md 说明）；`,
     `需求验收标准对照同目录 requirements.md。specs 目录在 .gitignore 内，不要改动、不要 git add 它。`,
     '',
   ];
