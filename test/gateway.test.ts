@@ -15,6 +15,7 @@ import { getSecret } from '../src/config/secrets.js'
 import { configPath, displayPath, gatewayStatePath, holidaysCachePath, logsDir } from '../src/util/paths.js'
 import { parse as tomlParse } from 'smol-toml'
 import { findPreset, presetModels } from '../src/presets/data.js'
+import { clearKnownTable } from '../src/providers/known.js'
 
 // autostart 是唯一改系统层状态（不写 config.toml）的网关端点依赖：mock 成纯内存开关，
 // 让 overview 即时性回归测试可跨平台跑（真实 install 在 Linux/Windows CI 会触碰
@@ -3977,6 +3978,96 @@ describe('转发多值响应头（set-cookie 折叠回归）', () => {
     } finally {
       server.close()
       cookieUp.close()
+      h.restore()
+    }
+  })
+})
+
+describe('模型目录视图缓存（catalogView 引用键回归）', () => {
+  it('同一目录状态连续两次 GET：第二次命中缓存（不再全量 stringify）', async () => {
+    const h = fakeHome()
+    const cfg: Config = { version: 1, active_profile: 'demo', providers: {}, profiles: {}, harness: {} }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      // 计数大对象 stringify（目录 payload 数千条）：vi.spyOn 对全局对象方法默认透传原实现，
+      // 仅计数，finally 还原（非模块 mock，无跨文件注册表问题）。
+      // catalogViewCache 是模块级变量且本文件单进程共享——前面用例可能已把缓存焐热，
+      // 故先空 GET 一次对齐状态，再经 clearKnownTable()（预设热加载的同款失效路径）强制
+      // 表引用重建：GET#1 必然 miss 重序列化，判别器是 GET#2 是否零序列化
+      // （buggy 版每次调用 spread 新表对象，引用恒变 → GET#2 也 miss，即被本用例抓住）
+      await fetch(`http://127.0.0.1:${gwPort}/_modeldock/model-catalog`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
+      const origStringify = JSON.stringify
+      const bigCalls: number[] = []
+      const spy = vi.spyOn(JSON, 'stringify').mockImplementation(((v: unknown, ...rest: unknown[]) => {
+        const m = (v as { models?: Record<string, unknown> }).models
+        if (m && typeof m === 'object' && Object.keys(m).length > 1000) bigCalls.push(1)
+        return origStringify(v as never, ...(rest as []))
+      }) as typeof JSON.stringify)
+      const get = async () =>
+        (await fetch(`http://127.0.0.1:${gwPort}/_modeldock/model-catalog`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).status
+      try {
+        clearKnownTable() // 强制失效：knownMetaTable/fullKnownTable 引用重建
+        expect(await get()).toBe(200)
+        const afterFirst = bigCalls.length
+        expect(afterFirst).toBeGreaterThanOrEqual(1) // 失效后首次必须重序列化
+        expect(await get()).toBe(200)
+        expect(bigCalls.length).toBe(afterFirst) // 第二次命中缓存：不再全量 stringify
+      } finally {
+        spy.mockRestore()
+      }
+    } finally {
+      server.close()
+      h.restore()
+    }
+  })
+})
+
+describe('probe responses 协议（探针拼错协议回归）', () => {
+  it('responses-only 服务的连接测试成功且打 /v1/responses（不再报「未配置 openai 协议端点」）', async () => {
+    const seen: { url: string; body: string }[] = []
+    const respUp = http.createServer((req, res) => {
+      let b = ''
+      req.on('data', (c: Buffer) => { b += c.toString('utf8') })
+      req.on('end', () => {
+        seen.push({ url: req.url ?? '', body: b })
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ id: 'resp_1', object: 'response', status: 'completed', usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } }))
+      })
+    })
+    const upPort = await new Promise<number>((resolve) => respUp.listen(0, '127.0.0.1', () => resolve((respUp.address() as AddressInfo).port)))
+    const h = fakeHome()
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      providers: { A: { name: 'respOnly', base_url: `http://127.0.0.1:${upPort}`, protocol: 'responses', auth_style: 'bearer', key_ref: 'sk-a' } },
+      profiles: { demo: { provider: 'A', default_model: 'm-resp' } },
+      harness: { 'claude-code': { mode: 'gateway', route: 'default', token: TOKEN } },
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      // 控制台「连接测试」的真实路径：POST /_modeldock/test { provider, model }
+      const res = await fetch(`http://127.0.0.1:${gwPort}/_modeldock/test`, {
+        method: 'POST',
+        headers: { 'x-modeldock-admin': 'admin-token-x', 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'A', model: 'm-resp' }),
+      })
+      const out = await res.json()
+      expect(out.ok).toBe(true) // 修复前：probe 拼成 /v1/chat/completions → openai 端点 400 → ok:false
+      expect(out.status).toBe(200)
+      expect(seen).toHaveLength(1)
+      expect(seen[0].url).toBe('/v1/responses')
+      expect(JSON.parse(seen[0].body).input).toBe('ping') // responses 形态 body（input/max_output_tokens）
+      expect(JSON.parse(seen[0].body).max_output_tokens).toBe(16)
+      expect(out.usage?.input_tokens).toBe(3)
+    } finally {
+      server.close()
+      respUp.close()
       h.restore()
     }
   })
