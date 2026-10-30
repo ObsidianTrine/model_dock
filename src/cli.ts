@@ -20,6 +20,11 @@ function isSEA(): boolean {
 // SEA 网关模式：独立可执行文件自身作为 daemon 子进程时，直接启动网关
 if (process.argv.includes('--sea-gateway')) {
   void (async () => {
+    // daemon（--daemon 拉起 / 自启重拉）启动早期接管 fd 2 → logs/daemon-<date>.log：崩溃与启动
+    // 报错自写日志，父 CLI 才能 stdio 全 ignore 拉起而不被 stderr 读端钉住（CORRECT-07）。
+    // 必须先于本分支任何 stderr 消费执行；前台 gateway start 不走本分支，stderr 留在终端
+    const { redirectDaemonStderrToLog } = await import('./cli/shared.js')
+    redirectDaemonStderrToLog()
     // Windows 注册表 Run 键自启：Explorer 直启控制台程序会常驻黑窗，先分离重拉隐藏 daemon
     // （Run 键登记的命令带 --autostart 标记；重拉失败或手动运行时照常前台启动）
     const { relaunchHiddenIfAutostart } = await import('./autostart.js')
@@ -30,8 +35,7 @@ if (process.argv.includes('--sea-gateway')) {
     const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
     // 自启（Run 键 / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
     // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
-    // fire-and-forget 补 catch：CLI 侧无 daemon.log 可依赖，失败走 stderr（daemon 形态由
-    // spawnDaemonAndWait 的 stderr 收集顺带落盘）
+    // fire-and-forget 补 catch：失败走 stderr（daemon 形态已由 fd 2 接管落进 daemon 日志）
     void spawnTrayWhenGatewayReady().catch((e) => {
       console.error(t('[modeldock] 托盘拉起失败：{msg}', '[modeldock] Failed to start the tray: {msg}', { msg: (e as Error).message }))
     })

@@ -159,7 +159,7 @@ describe('DUP-01 拉起守护进程（注入 fake spawn + 探活，绝不真起 
       fakeSpawn
     )
     expect(res).toEqual(expect.objectContaining({ port: 9999 }))
-    expect(fakeSpawn).toHaveBeenCalledWith('node', ['--sea-gateway', '--port', '9999'], expect.objectContaining({ detached: true, stdio: ['ignore', 'ignore', 'pipe'] }))
+    expect(fakeSpawn).toHaveBeenCalledWith('node', ['--sea-gateway', '--port', '9999'], expect.objectContaining({ detached: true, stdio: ['ignore', 'ignore', 'ignore'] }))
   })
 })
 
