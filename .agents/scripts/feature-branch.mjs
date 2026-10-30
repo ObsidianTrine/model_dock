@@ -93,6 +93,32 @@ function die(msg) {
   process.exit(1);
 }
 
+// Path of MERGE_HEAD in the MAIN checkout's git dir. Its mere existence means an
+// unfinished merge is pending there (a conflicted `git pull`/merge left dangling).
+// --git-path resolves every git layout (linked worktrees, .git-file checkouts) with
+// cwd pinned to REPO_ROOT; the fallback covers git being unusable at all.
+function mergeHeadPath() {
+  try {
+    return path.resolve(REPO_ROOT, git(['rev-parse', '--git-path', 'MERGE_HEAD']));
+  } catch {
+    return path.join(REPO_ROOT, '.git', 'MERGE_HEAD');
+  }
+}
+
+// start/finish must not run on top of a pending merge on the main checkout: finish
+// merges the task branch INTO the main checkout (it would entangle with the pending
+// merge, or die mid-merge with misleading advice), and start reads the main checkout
+// as the base. Fail fast with the two ways out instead of carrying the wound
+// (2026-10-30: a merge-style pull hung the main checkout in merge state and every
+// start/finish then crashed on top of it).
+function dieIfMidMerge(action) {
+  if (!fs.existsSync(mergeHeadPath())) return;
+  die(`main checkout is mid-merge (MERGE_HEAD exists) — ${action} would run on top of a pending merge. Deal with the pending merge first:
+  complete it:  resolve the conflicts, then git commit
+  abandon it:   git merge --abort
+then re-run: node .agents/scripts/feature-branch.mjs ${action}`);
+}
+
 // Finish is the only step that mutates the base branch (the merge runs on the main
 // checkout), so two agents finishing at once would collide on git's index.lock. An
 // exclusive lock file serializes them. Liveness is decided by a heartbeat (the owner
@@ -344,6 +370,7 @@ function writeNotesStub(taskId, wtPath, base) {
 }
 
 function cmdStart(taskId) {
+  dieIfMidMerge(`start ${taskId}`);
   const branch = `feature/${taskId}`;
   const wtPath = path.join(WORKTREES_DIR, taskId);
 
@@ -400,6 +427,7 @@ function cmdFinish(taskId, args) {
   const wtPath = path.join(WORKTREES_DIR, taskId);
 
   acquireFinishLock(taskId);
+  dieIfMidMerge(`finish ${taskId}`);
 
   const trees = listWorktrees();
   const wt = trees.find((t) => path.resolve(t.path) === path.resolve(wtPath));
