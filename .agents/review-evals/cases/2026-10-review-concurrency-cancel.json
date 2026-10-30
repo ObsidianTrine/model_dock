@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-review-concurrency-cancel",
+  "title": "审查 run 被自身评论触发的空 run 并发取消——并发组在 workflow 级，bot 发完评论触发 issue_comment 空 run（所有 job 条件都不满足）也计入并发组，把进行中的审查取消掉，inline 标注被跳过",
+  "reviewRef": "628fbec^",
+  "fixedBy": "628fbec",
+  "files": [".github/workflows/claude-review.yml"],
+  "expect": ["concurrency", "并发"],
+  "note": "2026-10-27 实测（bot 发完评论自取消）。修复 = 并发组从 workflow 级移到 job 级 + interactive 排除 claude[bot] 自触发。审查侧教训：CI 并发组按「组内成员都有谁」想清楚——空 run / bot 自触发的事件也会入组；审查 CI yml 时沿每条触发事件逐 job 推演会不会取消别人"
+}

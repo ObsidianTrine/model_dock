@@ -95,13 +95,21 @@ function die(msg) {
 
 // Finish is the only step that mutates the base branch (the merge runs on the main
 // checkout), so two agents finishing at once would collide on git's index.lock. An
-// exclusive lock file serializes them. The owner pid lets a later finish tell a
-// crashed predecessor (lock left behind by SIGKILL / power loss) from a live one:
-// stale locks are taken over automatically; live ones are bounded-waited for
-// (poll 2.5s, progress line every 30s, cap FINISH_LOCK_WAIT_SECONDS default 300s,
-// 0 = legacy fail-fast die) so concurrent auto-merges queue instead of dying and
-// leaving their task cards stuck in awaiting-human/ for a manual re-run.
+// exclusive lock file serializes them. Liveness is decided by a heartbeat (the owner
+// rewrites `beat` every 15s): a lock whose beat went quiet is taken over automatically;
+// a fresh one is bounded-waited for (poll 2.5s, progress line every 30s, cap
+// FINISH_LOCK_WAIT_SECONDS default 300s, 0 = legacy fail-fast die) so concurrent
+// auto-merges queue instead of dying and leaving their task cards stuck in
+// awaiting-human/ for a manual re-run. The owner pid is recorded for diagnostics only —
+// pid-based liveness (process.kill(pid, 0)) misreads recycled pids on Windows as alive
+// (2026-10-30 实证：属主早已退出，pid 被新进程顶掉，排队者永远拿不到锁), and a zombie
+// finish (main() done but event loop pinned by a leaked handle) kept its lock forever.
 const FINISH_LOCK = path.join(WORKTREES_DIR, '.finish.lock');
+const FINISH_LOCK_BEAT_MS = 15_000; // 持有期间心跳间隔
+const FINISH_LOCK_STALE_MS = 60_000; // 连续 ~3 个心跳未续 = 陈锁（留足 GC/磁盘卡顿余量）
+// 旧版锁没有 beat 字段（心跳改造前的进程写的）：按 time 判陈旧，阈值放大到 30min——
+// 覆盖最长的合法 finish（testCmd 门禁 + 大仓库），又不让旧版崩溃残留的锁永久拒人
+const FINISH_LOCK_LEGACY_STALE_MS = 30 * 60_000;
 const FINISH_LOCK_POLL_MS = 2500;
 const FINISH_LOCK_PROGRESS_MS = 30_000;
 
@@ -118,13 +126,12 @@ function sleepSyncMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, ms);
 }
 
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === 'EPERM'; // exists but owned by another user — still alive
-  }
+function lockLooksLive(info) {
+  if (!info || !Number.isInteger(info.pid)) return false; // 损坏锁 = 陈锁，可接管
+  const last = Number.isFinite(info.beat) ? info.beat : Date.parse(info.time);
+  if (!Number.isFinite(last)) return true; // 时间解析不出：保守当活锁
+  const staleMs = Number.isFinite(info.beat) ? FINISH_LOCK_STALE_MS : FINISH_LOCK_LEGACY_STALE_MS;
+  return Date.now() - last < staleMs;
 }
 
 function acquireFinishLock(taskId) {
@@ -135,17 +142,17 @@ function acquireFinishLock(taskId) {
   let takeovers = 0; // counts stale-lock removal attempts only — waiting on a live holder must not consume them
   for (;;) {
     try {
-      fs.writeFileSync(FINISH_LOCK, JSON.stringify({ pid: process.pid, task: taskId, time: new Date().toISOString() }), { flag: 'wx' });
+      fs.writeFileSync(FINISH_LOCK, JSON.stringify({ pid: process.pid, task: taskId, time: new Date().toISOString(), beat: Date.now() }), { flag: 'wx' });
     } catch (e) {
       if (e.code !== 'EEXIST') die(`could not create finish lock ${FINISH_LOCK}: ${e.message}`);
       let info = null;
       try { info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8')); } catch { /* corrupt lock — treat as stale */ }
-      if (info && Number.isInteger(info.pid) && pidAlive(info.pid)) {
-        const who = `pid ${info.pid}${info.task ? `, task "${info.task}"` : ''}${info.time ? `, started ${info.time}` : ''}`;
+      if (lockLooksLive(info)) {
+        const who = `pid ${info?.pid}${info?.task ? `, task "${info.task}"` : ''}${info?.time ? `, started ${info.time}` : ''}`;
         if (capSeconds === 0) {
           die(`another finish is already running (${who}).` + CRLF_N +
             `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
-            `  If you are certain no finish is in progress, delete ${FINISH_LOCK} and retry.`);
+            `  If you are certain no finish is in progress (stale lock), it is taken over automatically once the heartbeat goes quiet (${FINISH_LOCK_STALE_MS / 1000}s).`);
         }
         const now = Date.now();
         if (waitStartMs === null) {
@@ -157,7 +164,7 @@ function acquireFinishLock(taskId) {
         if (elapsedS >= capSeconds) {
           die(`another finish is still running after waiting ${elapsedS}s (${who}).` + CRLF_N +
             `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
-            `  If you are certain no finish is in progress, delete ${FINISH_LOCK} and retry.`);
+            `  If you are certain no finish is in progress (stale lock), it is taken over automatically once the heartbeat goes quiet (${FINISH_LOCK_STALE_MS / 1000}s).`);
         }
         if (now - lastProgressMs >= FINISH_LOCK_PROGRESS_MS) {
           lastProgressMs = now;
@@ -171,7 +178,24 @@ function acquireFinishLock(taskId) {
       try { fs.rmSync(FINISH_LOCK, { force: true }); } catch { /* next iteration re-checks */ }
       continue;
     }
-    process.on('exit', () => { try { fs.rmSync(FINISH_LOCK, { force: true }); } catch { /* best effort */ } });
+    // 心跳：持有期间每 15s 续写 beat（写前校验属主仍是自己，防覆盖接管者的新锁）。
+    // unref：不拖住进程退出——主流程结束后若事件循环被泄漏句柄钉住（实测有此形态），
+    // 心跳停更，下一位等待者 60s 内即可安全接管，而不是等到僵尸进程自然消亡。
+    const beat = setInterval(() => {
+      try {
+        const info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8'));
+        if (info.pid !== process.pid) { clearInterval(beat); return; } // 锁已易主（防御，理论不可达）
+        fs.writeFileSync(FINISH_LOCK, JSON.stringify({ ...info, beat: Date.now() }));
+      } catch { /* 下一个 tick 重试 */ }
+    }, FINISH_LOCK_BEAT_MS);
+    beat.unref();
+    process.on('exit', () => {
+      // 只清自己的锁：陈旧僵尸进程迟到退出时，不得删掉接管者的新锁
+      try {
+        const info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8'));
+        if (info.pid === process.pid) fs.rmSync(FINISH_LOCK, { force: true });
+      } catch { /* 锁已不在：无需清理 */ }
+    });
     return;
   }
 }

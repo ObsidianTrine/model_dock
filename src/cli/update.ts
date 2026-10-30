@@ -11,7 +11,7 @@ export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 
 /** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
  *  公开仓库匿名即可更新；--token 可选——私有仓库兼容模式或提升匿名限流（60 次/时 → 5000 次/时） */
-export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean }): Promise<void> {
+export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean; json?: boolean }): Promise<void> {
   // --clean 纯本地清理，不需要令牌与网络；但必须持更新锁——恰逢另一 update 在 rename dance
   // （旧 exe 已改名 .old、新 exe 未落位）或 mac 回滚窗口时，裸删 .old 会让失败回滚无从执行
   if (opts.clean) {
@@ -49,7 +49,8 @@ export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: 
 
   try {
     if (opts.check) {
-      await checkUpdate(repo, token)
+      // --json：吞人类文案、末行单行 JSON（win 托盘 CheckViaCli 解析，语言无关）
+      await checkUpdate(repo, token, { json: opts.json === true })
       return
     }
     await runUpdate({ repo, token, yes: opts.yes === true, confirm: confirmFn })

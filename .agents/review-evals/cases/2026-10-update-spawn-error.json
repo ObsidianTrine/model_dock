@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-spawn-error",
+  "title": "更新链 spawn 子进程（安装器/托盘拉起）未挂 error 监听——spawn ENOENT/EACCES 时抛 uncaughtException 把 daemon/更新器整个带崩（BUG-02/11/14）",
+  "reviewRef": "3a79e86^",
+  "fixedBy": "3a79e86",
+  "files": ["src/update/webupdate.ts", "src/cli.ts"],
+  "expect": ["spawn", "监听"],
+  "note": "修复 = 补 spawn error 监听与 kick 防重入占位。审查侧教训：Node 的 child_process.spawn 的失败走 error 事件而不是抛异常——所有 spawn 调用点检查 error/close 监听在位；关键路径上的「非关键 spawn」也要兜底"
+}

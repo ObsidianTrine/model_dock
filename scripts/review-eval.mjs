@@ -30,24 +30,56 @@ function listCases() {
     .sort((a, b) => String(a.id).localeCompare(String(b.id)))
 }
 
-/** 从 reviewRef 物化考题文件（带行号），返回 {dir, blocks} */
+/** 从 reviewRef 物化考题文件（带行号），返回 {dir, blocks}。
+ *  cleanSha 存在时（噪声对照题）物化该提交对 files 的 diff——干净题考的是「改动该不该报」。 */
 function materialize(c, dir) {
   const blocks = []
   for (const rel of c.files) {
-    const show = spawnSync('git', ['show', `${c.reviewRef}:${rel}`], { cwd: ROOT, encoding: 'utf8' })
+    const args = c.cleanSha
+      ? ['show', `${c.cleanSha}`, '--', rel]
+      : ['show', `${c.reviewRef}:${rel}`]
+    const show = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' })
     if (show.status !== 0) {
-      throw new Error(`git show ${c.reviewRef}:${rel} 失败（reviewRef 写错？）：${show.stderr.trim()}`)
+      throw new Error(`git show ${args.slice(1).join(' ')} 失败（reviewRef/cleanSha 写错？）：${show.stderr.trim()}`)
     }
-    const lines = show.stdout.split('\n').map((l, i) => `${String(i + 1).padStart(4)} | ${l}`)
-    const dest = join(dir, basename(rel))
-    writeFileSync(dest, lines.join('\n'))
-    blocks.push(`### 文件 ${rel}（${c.reviewRef} 版本，行号已标）\n\n\`\`\`\n${show.stdout.split('\n').length > 0 ? lines.join('\n') : ''}\n\`\`\``)
+    // 体积护栏：整文件进 prompt，超大文件（如历史上的巨型 ui.ts）会撑爆上下文/烧钱——提前拦下换更小的考题文件
+    if (Buffer.byteLength(show.stdout) > 120_000) {
+      throw new Error(
+        `考题文件 ${rel}@${c.cleanSha ?? c.reviewRef} 有 ${Math.round(Buffer.byteLength(show.stdout) / 1024)}KB（>120KB 上限），` +
+          `整文件进 prompt 会撑爆上下文。换根因所在的更小文件，或拆分考题。`
+      )
+    }
+    if (c.cleanSha) {
+      writeFileSync(join(dir, `${basename(rel)}.diff`), show.stdout)
+      blocks.push(`### 改动 diff：${rel}（提交 ${c.cleanSha}）\n\n\`\`\`diff\n${show.stdout}\n\`\`\``)
+    } else {
+      const lines = show.stdout.split('\n').map((l, i) => `${String(i + 1).padStart(4)} | ${l}`)
+      const dest = join(dir, basename(rel))
+      writeFileSync(dest, lines.join('\n'))
+      blocks.push(`### 文件 ${rel}（${c.reviewRef} 版本，行号已标）\n\n\`\`\`\n${show.stdout.split('\n').length > 0 ? lines.join('\n') : ''}\n\`\`\``)
+    }
   }
   return blocks
 }
 
 function buildPrompt(c, blocks) {
   const reviewMd = existsSync(join(ROOT, 'REVIEW.md')) ? readFileSync(join(ROOT, 'REVIEW.md'), 'utf8') : ''
+  if (c.cleanSha) {
+    return [
+      `下面是一个真实仓库里的维护性改动（提交 ${c.cleanSha}，已确认为干净改动）。你的任务：`,
+      '只读审查这个 diff，判断它有没有需要报告的真问题。',
+      '',
+      reviewMd ? `== 审查纪律（REVIEW.md）==\n${reviewMd}\n` : '',
+      '== 待审改动 ==',
+      ...blocks,
+      '',
+      '== 输出要求 ==',
+      '- 确证没有真问题时，顶层结论只写「未发现问题」，不要为了凑数报告风格/诊断/清理类。',
+      '- 若确有真问题，顶层结论以「发现 N 个问题」开头，每条给文件+行号与证据。'
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
   return [
     '以下是某仓库在某一历史版本的源码片段。这个版本之后补了一个真实 bug 的修复——你的任务：',
     '只读审查下面的代码，找出潜伏的缺陷（就是后来要发修复的那个，以及其它你能确证的问题）。',
@@ -80,13 +112,20 @@ function runClaude(prompt, model, timeoutMin = 15) {
     throw new Error('本机未找到 claude CLI：请安装并登录后重跑（或先用 --dry 检查 prompt 组装）。')
   }
   if (r.status !== 0) {
-    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 500)}`)
+    // claude CLI 的认证/配额错误打在 stdout（如 401 key invalid），stderr 常为空——两头都带上
+    throw new Error(`claude CLI 退出码 ${r.status}：${String(r.stderr || '').slice(0, 300) || String(r.stdout || '').slice(0, 300)}`)
   }
   return String(r.stdout || '')
 }
 
 function score(output, c) {
-  const hay = String(output).toLowerCase()
+  const text = String(output)
+  if (c.cleanSha) {
+    // 噪声对照题：干净改动报了「发现 N 个问题」即误报；只留存疑不算
+    const falsePositive = /发现 [1-9]\d* 个问题/.test(text)
+    return { hits: [], caught: !falsePositive, clean: true }
+  }
+  const hay = text.toLowerCase()
   const keywords = c.expect.map((k) => String(k).toLowerCase())
   const hits = keywords.map((k) => ({ keyword: k, hit: hay.includes(k) }))
   return { hits, caught: hits.some((h) => h.hit) }
@@ -154,10 +193,10 @@ function main() {
       writeFileSync(outputFile, output)
       report.push(
         [
-          `## ${c.id} — ${s.caught ? '✅ 审出' : '❌ 未审出'}`,
+          `## ${c.id} — ${c.cleanSha ? (s.caught ? '✅ 无误报' : '❌ 误报（干净改动被报问题）') : s.caught ? '✅ 审出' : '❌ 未审出'}`,
           '',
           `- 考题：${c.title}`,
-          `- 关键词：${s.hits.map((h) => `${h.keyword}=${h.hit ? '中' : '未中'}`).join('，')}`,
+          s.clean ? '- 口径：已知干净改动，报「发现 N 个问题」即误报' : `- 关键词：${s.hits.map((h) => `${h.keyword}=${h.hit ? '中' : '未中'}`).join('，')}`,
           `- 完整输出：${outputFile}`,
           '',
           '<details><summary>模型原文</summary>',

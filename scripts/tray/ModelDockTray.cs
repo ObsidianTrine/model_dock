@@ -261,9 +261,23 @@ namespace ModelDockTray
     /// 托盘与启动入口共用的无状态动作（静态，供双线程上下文调用）
     internal static class TrayActions
     {
-        private static string _port, _token;
+        /// gateway.json 解析结果快照：不可变对象一次构造、整体发布（引用赋值原子），读侧单次取引用。
+        /// 旧实现「先置 null 再赋值」两步写在多线程下有窗口：HealthOk / FetchStateAsync / PostAdmin 等
+        /// 并发读到 null 拼出 http://127.0.0.1:/...（HealthOk 误 false → QuitClicked 跳过 gateway stop），
+        /// 或 port/token 各取一半新旧错配。失败路径不清快照：端口探测失败语义不变，URL 不再瞬态成坏串。
+        private sealed class GatewayInfo
+        {
+            public readonly string Port;
+            public readonly string Token;
+            public GatewayInfo(string port, string token) { Port = port; Token = token; }
+        }
 
-        public static string CurrentPort { get { return _port ?? "0"; } }
+        private static volatile GatewayInfo _gw;
+
+        public static string CurrentPort
+        {
+            get { var s = _gw; return s != null ? s.Port : "0"; }
+        }
 
         public static string Home()
         {
@@ -272,10 +286,9 @@ namespace ModelDockTray
             return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "\\.modeldock";
         }
 
-        /// 读 gateway.json 并验证 pid 存活；成功后 Port/Token 可用
+        /// 读 gateway.json 并验证 pid 存活；成功后发布新快照（Port/Token 经 _gw 单次读取）
         public static bool ReadState()
         {
-            _port = _token = null;
             try
             {
                 var file = Home() + "\\gateway.json";
@@ -287,8 +300,7 @@ namespace ModelDockTray
                 if (!pid.Success || !port.Success || !token.Success) return false;
                 try { Process.GetProcessById(int.Parse(pid.Groups[1].Value)); }
                 catch { return false; }
-                _port = port.Groups[1].Value;
-                _token = token.Groups[1].Value;
+                _gw = new GatewayInfo(port.Groups[1].Value, token.Groups[1].Value);
                 return true;
             }
             catch { return false; }
@@ -297,9 +309,11 @@ namespace ModelDockTray
         public static bool HealthOk()
         {
             if (!ReadState()) return false;
+            var s = _gw;
+            if (s == null) return false;
             try
             {
-                var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + _port + "/_modeldock/health");
+                var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + s.Port + "/_modeldock/health");
                 req.Timeout = 2000;
                 req.Method = "GET";
                 using (var resp = (HttpWebResponse)req.GetResponse())
@@ -312,7 +326,8 @@ namespace ModelDockTray
 
         public static string ConsoleUrl()
         {
-            return "http://127.0.0.1:" + _port + "/_modeldock/ui?token=" + Uri.EscapeDataString(_token ?? "");
+            var s = _gw;
+            return "http://127.0.0.1:" + (s != null ? s.Port : "0") + "/_modeldock/ui?token=" + Uri.EscapeDataString(s != null ? s.Token : "");
         }
 
         public static string GatewayBinaryPath()
@@ -403,9 +418,11 @@ namespace ModelDockTray
             ThreadPool.QueueUserWorkItem(delegate
             {
                 if (!ReadState()) { State = null; return; }
+                var s = _gw;
+                if (s == null) { State = null; return; }
                 try
                 {
-                    State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + _port + "/_modeldock/tray-state", _token));
+                    State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + s.Port + "/_modeldock/tray-state", s.Token));
                 }
                 catch { State = null; }
             });
@@ -423,13 +440,15 @@ namespace ModelDockTray
         public static string PostAdmin(string path, string json)
         {
             if (!ReadState()) return I18n.L("网关未运行", "Gateway not running");
+            var st = _gw;
+            if (st == null) return I18n.L("网关未运行", "Gateway not running");
             try
             {
-                var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + _port + path);
+                var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + st.Port + path);
                 req.Timeout = 30000;
                 req.Method = "POST";
                 req.ContentType = "application/json";
-                req.Headers["x-modeldock-admin"] = _token;
+                req.Headers["x-modeldock-admin"] = st.Token;
                 req.Headers["x-modeldock-source"] = "tray";
                 var body = System.Text.Encoding.UTF8.GetBytes(json);
                 req.ContentLength = body.Length;
@@ -468,8 +487,12 @@ namespace ModelDockTray
                 {
                     if (ReadState())
                     {
-                        try { State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + _port + "/_modeldock/tray-state", _token)); }
-                        catch { }
+                        var s = _gw;
+                        if (s != null)
+                        {
+                            try { State = TrayStateData.Parse(HttpGet("http://127.0.0.1:" + s.Port + "/_modeldock/tray-state", s.Token)); }
+                            catch { }
+                        }
                     }
                 }
                 else
@@ -520,10 +543,11 @@ namespace ModelDockTray
         /// checking=true 轮询至 false 取结果；HTTP 不通退回 CLI 现查
         private static void CheckViaGateway()
         {
+            var gw = _gw;
             for (int attempt = 0; attempt < 60; attempt++)
             {
                 string json;
-                try { json = HttpGet("http://127.0.0.1:" + _port + "/_modeldock/admin/update/status", _token); }
+                try { json = HttpGet("http://127.0.0.1:" + (gw != null ? gw.Port : "") + "/_modeldock/admin/update/status", gw != null ? gw.Token : ""); }
                 catch { CheckViaCli(); return; }
                 if (!JsonBool(json, "checking"))
                 {
@@ -537,59 +561,106 @@ namespace ModelDockTray
             MessageBox.Show(I18n.L("检查更新超过 30 秒仍未返回（网络异常？）。可稍后重试，或用命令行 modeldock update --check 查看。", "No result after 30 seconds (network issue?). Retry later, or run `modeldock update --check` for details."), I18n.L("ModelDock 检查更新超时", "ModelDock Update Check Timed Out"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
-        /// CLI 现查兜底：工作线程跑 CLI（不卡托盘），按输出弹窗；40s 看门狗防 CLI 真挂住后永久沉默
+        /// CLI 现查兜底：工作线程跑 CLI --json（不卡托盘），解析单行 JSON 复用 ShowStatusResult——
+        /// 旧实现按中文子串（「已是最新」/「有新版本」）分类，英文环境 CLI 输出走 t() 双语全部落空：
+        /// exit==0 被当失败弹窗、有新版也不弹更新窗。40s 看门狗防 CLI 挂住后 _checkingUpdate 永久
+        /// true、更新菜单永久置灰（旧注释承诺看门狗但实现没有，实际是 ReadToEnd+WaitForExit 裸等）。
         private static void CheckViaCli()
         {
             var bin = GatewayBinaryPath();
             if (bin == null) { FinishCheck(); return; }
-            string output = "";
-            int exit = 1;
+            string output;
+            int exit;
+            bool completed = RunCliWithWatchdog(bin, "update --check --json", 40000, out output, out exit);
+            FinishCheck();
+            if (!completed)
+            {
+                MessageBox.Show(I18n.L("检查更新超过 40 秒仍未返回（已强制结束 CLI）。可稍后重试。", "No result after 40 seconds (CLI forcibly terminated). Try again later."), I18n.L("ModelDock 检查更新超时", "ModelDock Update Check Timed Out"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (exit != 0)
+            {
+                var text = output.Trim();
+                MessageBox.Show(text.Length > 0 ? text : I18n.L("未知错误，请稍后重试。", "Unknown error; try again later."), I18n.L("ModelDock 检查更新失败", "ModelDock Update Check Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string json = LastJsonLine(output);
+            if (json == null)
+            {
+                // CLI 与托盘同包发版：拿不到 --json 收口行说明版本错位（CLI 过旧），给可操作提示
+                MessageBox.Show(I18n.L("CLI 未返回机器可读结果（版本过旧？）。请手动执行 modeldock update 升级后重试。", "CLI returned no machine-readable result (too old?). Run `modeldock update` manually, then retry."), I18n.L("ModelDock 检查更新失败", "ModelDock Update Check Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            ShowStatusResult(json);
+        }
+
+        /// 跑 CLI 子进程收割输出：stdout/stderr 异步并行排空——顺序 ReadToEnd 是经典死锁
+        /// （stderr 写满 4KB 管道缓冲后子进程卡在 stderr 写、父进程还在等 stdout 关闭，互等）；
+        /// timeoutMs 看门狗到点强杀并返回 false（调用方负责 UI 复位与提示）。workingDir 非空时子进程落该目录。
+        private static bool RunCliWithWatchdog(string bin, string args, int timeoutMs, out string output, out int exit, string workingDir = null)
+        {
+            output = "";
+            exit = 1;
+            var psi = new ProcessStartInfo
+            {
+                FileName = bin,
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true, // CLI 子进程不弹黑窗
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+            };
+            if (workingDir != null) psi.WorkingDirectory = workingDir;
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = bin,
-                    Arguments = "update --check",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    StandardOutputEncoding = System.Text.Encoding.UTF8,
-                    StandardErrorEncoding = System.Text.Encoding.UTF8,
-                };
                 using (var p = Process.Start(psi))
                 {
-                    if (p != null)
+                    if (p == null) return true; // 启动失败：output 空、exit 1，走调用方失败弹窗
+                    var so = new System.Text.StringBuilder();
+                    var se = new System.Text.StringBuilder();
+                    p.OutputDataReceived += delegate(object s, System.Diagnostics.DataReceivedEventArgs e) { if (e.Data != null) { lock (so) so.AppendLine(e.Data); } };
+                    p.ErrorDataReceived += delegate(object s, System.Diagnostics.DataReceivedEventArgs e) { if (e.Data != null) { lock (se) se.AppendLine(e.Data); } };
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+                    if (!p.WaitForExit(timeoutMs))
                     {
-                        output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                        p.WaitForExit();
-                        exit = p.ExitCode;
+                        try { p.Kill(); } catch { }
+                        p.WaitForExit(); // 杀掉后仍等异步读排空再释放
+                        return false;
                     }
+                    p.WaitForExit(); // 无参重载：等异步读回调排空再取 ExitCode（MSDN 约定）
+                    exit = p.ExitCode;
+                    lock (so) output = so.ToString();
+                    lock (se) output = output + se.ToString();
+                    return true;
                 }
             }
-            catch (Exception ex) { output = ex.Message; }
-            string text = output.Trim();
-            if (exit == 0 && text.Contains("已是最新"))
+            catch (Exception ex)
             {
-                FinishCheck();
-                MessageBox.Show(UpToDateText(FirstVersion(text)), "ModelDock", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                output = ex.Message;
+                return true;
             }
-            else if (exit == 0 && text.Contains("有新版本"))
+        }
+
+        /// 取输出末尾的单行 JSON（CLI --check --json 收口行）；无/解析失败返回 null
+        private static string LastJsonLine(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            var lines = text.Replace("\r\n", "\n").Split('\n');
+            for (int i = lines.Length - 1; i >= 0; i--)
             {
-                string ver = FirstVersion(text);
-                string title = NewVersionTitle(ver, CurrentVersion(text));
-                DialogResult r = ShowUpdateDialog(title, text, LastUrl(text));
-                FinishCheck();
-                if (r == DialogResult.OK)
+                var line = lines[i].Trim();
+                if (line.Length < 2 || line[0] != '{' || line[line.Length - 1] != '}') continue;
+                try
                 {
-                    if (StartUpdate()) ShowProgressForm(I18n.L("正在更新到 v", "Updating to v") + (ver.Length > 0 ? ver : ""));
+                    var obj = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(line) as Dictionary<string, object>;
+                    if (obj != null) return line;
                 }
+                catch { }
             }
-            else
-            {
-                FinishCheck();
-                MessageBox.Show(text.Length > 0 ? text : I18n.L("未知错误，请稍后重试。", "Unknown error; try again later."), I18n.L("ModelDock 检查更新失败", "ModelDock Update Check Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
+            return null;
         }
 
         private static void ShowStatusResult(string json)
@@ -756,53 +827,32 @@ namespace ModelDockTray
             MessageBox.Show(I18n.L("正在清理：会先还原被接管的客户端，再删除配置、密钥与日志，完成后自动提示。", "Resetting: taken-over clients are restored first, then config, keys and logs are deleted; you will be notified when done."), "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        /// 管理线程跑 CLI（清理耗时数秒，不能卡住托盘消息循环）
+        /// 管理线程跑 CLI（清理耗时数秒，不能卡住托盘消息循环）；120s 看门狗——reset --deep
+        /// 要还原客户端再删数据，挂住也不能让完成弹窗永久沉默（stdout/stderr 并行排空同上）
         private static bool StartCleanCli()
         {
             var bin = GatewayBinaryPath();
             if (bin == null) return false;
-            var psi = new ProcessStartInfo
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                FileName = bin,
-                Arguments = "reset --yes --deep",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8,
+                string output;
+                int exit;
                 // cwd 绝不落在 %USERPROFILE%\.modeldock 内：清理要删的就是它，被占用会删不掉
-                WorkingDirectory = Application.StartupPath,
-            };
-            try
-            {
-                var p = new Process();
-                p.StartInfo = psi;
-                p.Start();
-                ThreadPool.QueueUserWorkItem(delegate
-                {
-                    string text = "";
-                    int exit = 1;
-                    try
-                    {
-                        text = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                        p.WaitForExit();
-                        exit = p.ExitCode;
-                    }
-                    catch (Exception ex) { text = ex.Message; }
-                    try { p.Dispose(); } catch { }
-                    string trimmed = text.Trim();
-                    string body = trimmed.Length > 0
-                        ? trimmed
-                        : (exit == 0
-                            ? I18n.L("数据已清理。重新配置请运行 modeldock init。", "Data reset. Run `modeldock init` to set up again.")
-                            : I18n.L("清理未完成，请改用命令行：modeldock reset --deep", "Reset incomplete; run `modeldock reset --deep` to see the error."));
-                    MessageBox.Show(body, "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK,
-                        exit == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-                });
-                return true;
-            }
-            catch { return false; }
+                bool completed = RunCliWithWatchdog(bin, "reset --yes --deep", 120000, out output, out exit, Application.StartupPath);
+                string trimmed = output.Trim();
+                string body;
+                if (!completed)
+                    body = I18n.L("清理超过 120 秒仍未完成（已强制结束）。请改用命令行：modeldock reset --deep", "Reset did not finish within 120 seconds (forcibly terminated). Run `modeldock reset --deep` instead.");
+                else if (trimmed.Length > 0)
+                    body = trimmed;
+                else
+                    body = exit == 0
+                        ? I18n.L("数据已清理。重新配置请运行 modeldock init。", "Data reset. Run `modeldock init` to set up again.")
+                        : I18n.L("清理未完成，请改用命令行：modeldock reset --deep", "Reset incomplete; run `modeldock reset --deep` to see the error.");
+                MessageBox.Show(body, "ModelDock " + I18n.L("清理数据", "Reset Data"), MessageBoxButtons.OK,
+                    completed && exit == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            });
+            return true;
         }
 
         /// 说明窗跑在专用 STA 线程上：ThreadPool 线程是 MTA，而只读文本框的复制走 OLE 剪贴板，
@@ -831,22 +881,7 @@ namespace ModelDockTray
             return result;
         }
 
-        /// 从 CLI 输出里取版本号（「有新版本：v1.2.2（当前 v1.2.1）」）
-        private static string FirstVersion(string text)
-        {
-            var m = System.Text.RegularExpressions.Regex.Match(text, @"v([0-9]+\.[0-9]+\.[0-9]+)");
-            return m.Success ? m.Groups[1].Value : "";
-        }
-
-        /// 从 CLI 输出取「当前 vX.Y.Z」括注里的版本（「有新版本：v1.2.2（当前 v1.2.1）」）；
-        /// 「已是最新版本（v1.2.3）」没有该括注，当前版本直接用 FirstVersion 取（全文唯一版本号）
-        private static string CurrentVersion(string text)
-        {
-            var m = Regex.Match(text, @"当前 v([0-9]+\.[0-9]+\.[0-9]+)");
-            return m.Success ? m.Groups[1].Value : "";
-        }
-
-        /// 「已是最新版本 vX.Y.Z。」：当前版本取得到就带上（CLI 输出 / 网关 status 自带），取不到回落旧文案
+        /// 「已是最新版本 vX.Y.Z。」：当前版本取得到就带上（CLI --json / 网关 status 自带），取不到回落旧文案
         private static string UpToDateText(string current)
         {
             return string.IsNullOrEmpty(current)
@@ -861,15 +896,6 @@ namespace ModelDockTray
                 ? I18n.L("ModelDock 有新版本", "ModelDock update available")
                 : I18n.L("ModelDock 有新版本 v" + latest, "ModelDock update available: v" + latest);
             return string.IsNullOrEmpty(current) ? title : title + I18n.L("（当前 v" + current + "）", " (current v" + current + ")");
-        }
-
-        /// 从 CLI 输出里取发布页地址（「完整说明：https://github.com/.../releases/tag/v1.2.3」）。
-        /// 取最后一个匹配：说明正文里可能带别的链接（降级后的行内链接写作「文字 (url)」），
-        /// 而发布页那行是输出末尾的固定收尾（按位置而非中文前缀取，英文界面下同样成立）
-        private static string LastUrl(string text)
-        {
-            var ms = System.Text.RegularExpressions.Regex.Matches(text, @"https?://\S+");
-            return ms.Count > 0 ? ms[ms.Count - 1].Value : "";
         }
 
         /// 用系统默认浏览器打开外链

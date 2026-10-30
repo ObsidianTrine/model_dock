@@ -115,12 +115,19 @@ jobs:
         if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 1
-      - name: 跳过 bot 自身修复提交（防审查回环）
+      - name: 跳过 bot 自身修复提交（防审查回环；按 PR head 提交判定）
         id: guard
         if: steps.keyguard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          msg="$(git log -1 --pretty=%s)"
-          echo "last commit subject: $msg"
+          # actions/checkout 检出的是 refs/pull/N/merge 测试合并提交，git log -1 读到的是
+          # "Merge <sha> into <sha>"，永远匹配不上 [dependabot-fix] 前缀——防回环曾是死代码
+          #（评测集 2026-10-review-concurrency-cancel 实证）。改读 PR head 提交的 subject；
+          # 查询失败按不跳过处理（宁可复审也不放过真修复不审）。
+          sha="${{ github.event.pull_request.head.sha }}"
+          msg="$(gh api "repos/${{ github.repository }}/commits/$sha" --jq '.commit.message' 2>/dev/null | head -1)"
+          echo "pr head commit subject: $msg"
           case "$msg" in
             "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
@@ -202,11 +209,16 @@ jobs:
         if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 1
-      - name: 跳过 bot 自身修复提交（防审查回环）
+      - name: 跳过 bot 自身修复提交（防审查回环；按 PR head 提交判定）
         id: guard
         if: steps.keyguard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          msg="$(git log -1 --pretty=%s)"
+          # 同 auto-review 的 guard：merge 检出的 git log -1 永远匹配不上前缀（评测集实证），改读 PR head 提交
+          sha="${{ github.event.pull_request.head.sha }}"
+          msg="$(gh api "repos/${{ github.repository }}/commits/$sha" --jq '.commit.message' 2>/dev/null | head -1)"
+          echo "pr head commit subject: $msg"
           case "$msg" in
             "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac

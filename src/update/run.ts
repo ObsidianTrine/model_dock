@@ -317,17 +317,36 @@ export async function sweepStaleUpdateStaging(): Promise<void> {
   }
 }
 
-/** --check：只看不装（不下载大文件，不发确认） */
-export async function checkUpdate(repo: string, token: string | null, opts: { apiBase?: string; log?: (m: string) => void } = {}): Promise<UpdateRunResult> {
-  const log = opts.log ?? ((m: string) => console.log(m))
+/** --check --json 的单行 JSON 收口（win 托盘 CheckViaCli 解析）。字段与 GET /admin/update/status
+ *  同形（available/latest/current/htmlUrl/summary/notes），托盘两条检查路径共用一套解析与弹窗，
+ *  语言无关（旧实现按中文子串分类 CLI 输出，英文环境全落空）。version 无 v 前缀（check.ts 剥离）。 */
+export function updateCheckJsonPayload(m: ReleaseManifest, current: string, available: boolean): string {
+  return JSON.stringify({
+    available,
+    latest: m.version,
+    current,
+    htmlUrl: m.htmlUrl ?? '',
+    summary: notesSummaryText(m.notes),
+    notes: m.notes ?? '',
+  })
+}
+
+/** --check：只看不装（不下载大文件，不发确认）；--json 模式吞掉人类文案、末行输出单行 JSON */
+export async function checkUpdate(repo: string, token: string | null, opts: { apiBase?: string; log?: (m: string) => void; json?: boolean } = {}): Promise<UpdateRunResult> {
+  const jsonMode = opts.json === true
+  const log = jsonMode ? () => {} : (opts.log ?? ((m: string) => console.log(m)))
   const proxyUrl = opts.apiBase ? null : await resolveUpdateProxyUrl()
   if (proxyUrl) log(c.gray(t('已检测到系统代理 {u}，检查将经由它', 'System proxy detected at {u}; the check goes through it', { u: proxyUrl })))
   const m = await fetchLatestRelease(repo, token, opts.apiBase, { proxyUrl })
   const already = logAlreadyUpToDate(m, log)
-  if (already) return already
+  if (already) {
+    if (jsonMode) console.log(updateCheckJsonPayload(m, VERSION, false))
+    return already
+  }
   log(c.bold(t('有新版本：v{a}（当前 v{b}）', 'New version available: v{a} (current v{b})', { a: m.version, b: VERSION })))
   logReleaseNotes(m, log)
   log(t('执行 modeldock update 安装', 'Run modeldock update to install'))
+  if (jsonMode) console.log(updateCheckJsonPayload(m, VERSION, true))
   return { updated: false, currentVersion: VERSION, latestVersion: m.version, checkedOnly: true }
 }
 

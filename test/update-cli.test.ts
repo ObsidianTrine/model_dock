@@ -91,6 +91,19 @@ describe('cmdUpdate CLI 编排', () => {
     }
   })
 
+  it('--check --json：json 透传 checkUpdate（win 托盘机器可读路径）', async () => {
+    const h = fakeHome()
+    try {
+      await cmdUpdate({ check: true, json: true })
+      expect(mockCheck).toHaveBeenCalledTimes(1)
+      const arg = mockCheck.mock.calls[0][2] as { json: boolean }
+      expect(arg.json).toBe(true)
+      expect(mockRun).not.toHaveBeenCalled()
+    } finally {
+      h.restore()
+    }
+  })
+
   it('UPDATE_TOKEN_SECRET_ID 是稳定的 secrets 键（跨升级读取既有令牌）', () => {
     expect(UPDATE_TOKEN_SECRET_ID).toBe('update-token')
     // 空配置不含 update 段（向后兼容旧 config.toml）

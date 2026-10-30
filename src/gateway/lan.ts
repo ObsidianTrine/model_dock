@@ -56,8 +56,11 @@ function cookieValue(req: http.IncomingMessage, name: string): string | null {
 /** 令牌三通道：?token=（扫码首访）、LAN cookie、Bearer 头（API 均收）。
  *  cookie 名内嵌端口：RFC 6265 cookie 不按端口隔离，同机双实例（生产+dev 的 LAN 端口）
  *  固定名会互顶手机端会话。 */
-function lanAuthorized(req: http.IncomingMessage, rt: GatewayRuntime): boolean {
-  const token = rt.lan?.token ?? ''
+export function lanAuthorized(req: http.IncomingMessage, rt: GatewayRuntime): boolean {
+  // LAN 未启用/已关闭（stopLan 后 rt.lan=undefined，keep-alive 已建连仍可能送达请求）或令牌为空
+  // 一律拒绝：空串对空串会通过 safeEqual 的常数时间比较，等于无凭据放行（2026-10-30 评测集审出）
+  const token = rt.lan?.token
+  if (!token) return false
   const auth = req.headers.authorization
   if (typeof auth === 'string' && auth.startsWith('Bearer ')) return safeEqual(auth.slice(7), token)
   const ck = cookieValue(req, lanCookieName(rt.lan?.port ?? DEFAULT_LAN_PORT))
@@ -682,6 +685,9 @@ export async function startLanServer(rt: GatewayRuntime, opts: { port?: number; 
 export function stopLan(rt: GatewayRuntime): void {
   stopSyncBeacon()
   rt.lan?.server.close()
+  // close 只停新连接，keep-alive 已建连仍会被伺服——显式断光（lanAuthorized 的 rt.lan=undefined
+  // 拒绝是第一道防线，这里是彻底切断保温连接，防「关闭手机远程后旧连接打穿管理面」）
+  rt.lan?.server.closeAllConnections()
   rt.lan = undefined
 }
 
@@ -691,7 +697,9 @@ export function stopLan(rt: GatewayRuntime): void {
 export function buildLanStatus(rt: GatewayRuntime): { enabled: boolean; port: number; urls: string[]; qrcode: string | null; platform: string } {
   const enabled = !!rt.config.lan?.enabled && !!rt.lan
   const port = rt.lan?.port ?? rt.config.lan?.port ?? DEFAULT_LAN_PORT
-  const urls = rt.lan ? lanAddresses().map((ip) => `http://${ip}:${rt.lan!.port}/m`) : []
+  // 广告口径与直拉链接/发现应答同源（lanAdvertiseIps）：绑定具体 host 时只列该地址，
+  // 不再列全部网卡——否则二维码 [0] 大概率指向监听之外的地址，手机必然连不上
+  const urls = rt.lan ? lanAdvertiseIps(rt.lan.host).map((ip) => `http://${ip}:${rt.lan!.port}/m`) : []
   const primary = rt.lan ? `${urls[0] ?? `http://127.0.0.1:${rt.lan.port}/m`}?token=${rt.lan.token}` : null
   return { enabled, port, urls, qrcode: primary ? lanQrSvg(primary) : null, platform: process.platform }
 }

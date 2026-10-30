@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-silent-blackhole",
+  "title": "win 一键更新静默安装三连败于中途且零提示——unins000 重写而主程序未换、/SUPPRESSMSGBOXES 吞错、&& 链失败跳过托盘拉起致整机失联（2026-10-27 用户实证）",
+  "reviewRef": "9aa3066^",
+  "fixedBy": "9aa3066",
+  "files": ["src/update/install.ts", "src/update/run.ts"],
+  "expect": ["静默", "verysilent"],
+  "note": "修复 = 改弹与首次安装一致的向导 + /LOG 落 update-setup.log + 失败/取消由 || 拉回旧托盘兜底。审查侧教训：静默/无人值守路径的失败必须可见可查（日志+兜底拉回），&& 链中段失败的「半更新态」是比失败本身更糟的终态"
+}

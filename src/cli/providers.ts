@@ -174,9 +174,11 @@ export async function cmdProviderAdd(
 
   if (!opts.noFetch) {
     try {
-      const cfgNow = await loadConfig()
-      const { added: nAdded } = await refreshModelsInto(id, cfgNow)
-      const total = Object.keys(cfgNow.providers[id].models ?? {}).length
+      const { added: nAdded } = await refreshModelsInto(id)
+      // 统计口径：refreshModelsInto 内部经 mutateConfig 重新读盘合并，必须拉取后重新 loadConfig
+      // 再数（对齐 cmdModelRefresh）——用拉取前的旧快照会把无预设服务报成「共 0 个」
+      const cfgAfter = await loadConfig()
+      const total = Object.keys(cfgAfter.providers[id]?.models ?? {}).length
       console.log(c.green(t('✓ 自动拉取模型：新增 {a} 个，共 {n} 个', '✓ Fetched models automatically: {a} new, {n} total', { a: nAdded, n: total })))
     } catch (e) {
       console.log(c.yellow(t('提示: {m}', 'Hint: {m}', { m: (e as Error).message })))
@@ -230,11 +232,19 @@ export async function cmdProviderRm(id: string): Promise<void> {
     process.exit(1)
   }
   if (usedBy.length > 0 && !(await confirm({ message: t('profile {list} 引用了它，仍要删除？', 'Profiles {list} reference it. Delete anyway?', { list: usedBy.join(', ') }) }))) return
-  await deleteSecret(p.key_ref)
+  // 提交序：先配置写（可失败、原子回滚），成功后才删密钥（不可逆）——顺序反了的话，配置写
+  // 失败会把 key 永久删掉而 provider 还留在配置里，无从回滚（与 add 路径「先存后写」对称）
   await mutateConfig((c) => {
     // 与 Web 控制台 /service/delete 共用：连带清理自动路由强制服务、备用链与定时切换窗口
     removeProviderCascade(c, id)
   })
+  try {
+    await deleteSecret(p.key_ref)
+  } catch (e) {
+    console.error(c.yellow(t('⚠ provider「{id}」已从配置删除，但密钥清理失败：{m}', '⚠ Provider "{id}" removed from config, but key cleanup failed: {m}', { id, m: (e as Error).message })))
+    console.error(c.gray(t('提示: 可检查 {f} 后手动清理该条目', 'Hint: inspect {f} and clean the entry manually', { f: displayPath(secretsPath()) })))
+    return
+  }
   console.log(c.green(t('✓ provider「{id}」及 key 已删除', '✓ provider "{id}" and its key deleted', { id })))
 }
 

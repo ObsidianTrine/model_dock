@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-autoroute-doclink-xss",
+  "title": "控制台 docLinkA 的 href 只做了 HTML 转义没做协议白名单——用户 presets.json 的 docs_url 可携带 javascript: 协议，控制台点外链即 XSS",
+  "reviewRef": "d41f847^",
+  "fixedBy": "d41f847",
+  "files": ["src/gateway/ui/autoroute.ts"],
+  "expect": ["javascript", "href", "协议"],
+  "note": "d41f847⑦。修复 = href 只放行 http(s)://。审查侧教训：esc() 是 HTML 转义不是协议校验——任何拼进 href/src 的用户可控值都要过协议白名单；「数据来自用户 presets.json」的信任边界要沿到渲染端"
+}

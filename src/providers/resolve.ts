@@ -54,7 +54,16 @@ export function resolvedModelView(id: string, meta: ModelMeta | undefined, baseU
   }
 }
 
-/** 内置表 ∪ 目录（内置优先）。overview.knownModels 用：前端「填模型名→自动补上下文/输出」覆盖到长尾模型 */
+/** 内置表 ∪ 目录（内置优先）。overview.knownModels 用：前端「填模型名→自动补上下文/输出」覆盖到长尾模型。
+ *  引用稳定化 memo：按两路来源的引用判缓存（catalogFlatTable 在 mtime 变化/clearCatalogMemo 时
+ *  重建引用、knownMetaTable 在 clearKnownTable 时重建）——此前每次调用 spread 新对象，server 的
+ *  目录视图缓存按表对象引用判键恒 miss（每请求全量 stringify 8000+ 条）。返回共享只读对象，调用方不得修改。 */
+let fullKnownMemo: { flat: object; known: object; table: Record<string, KnownMeta> } | undefined
 export function fullKnownTable(): Record<string, KnownMeta> {
-  return { ...catalogFlatTable(), ...knownMetaTable() }
+  const flat = catalogFlatTable()
+  const known = knownMetaTable()
+  if (fullKnownMemo && fullKnownMemo.flat === flat && fullKnownMemo.known === known) return fullKnownMemo.table
+  const table = { ...flat, ...known }
+  fullKnownMemo = { flat, known, table }
+  return table
 }

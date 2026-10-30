@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-reminder-once",
+  "title": "新版本提醒只在网关启动时查一次——常驻网关成年累月不重启就永远漏报新版本；persistCheckTime 记录的「上次检查时间」没有任何重查调度在读",
+  "reviewRef": "db6354d^",
+  "fixedBy": "db6354d",
+  "files": ["src/update/webupdate.ts"],
+  "expect": ["周期", "interval", "漏报"],
+  "note": "修复 = 常驻网关惰性周期重查 + 失败 30min 退避。审查侧教训：常驻进程的「启动时做一次」假设会随运行时长失效——初始化语义要配生命周期（周期/事件触发）；写了没人读的状态（lastCheck 只写不读）是强代码味"
+}

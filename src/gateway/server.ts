@@ -94,9 +94,10 @@ function getRenderedUI(): { html: string; etag: string; gzip: Buffer; gzipEtag: 
 
 
 /** 模型目录端点视图缓存（backlog C3）：fullKnownTable() 的 8000+ 条序列化一次几百 KB，此前每次
- *  请求都全量 stringify。缓存键 = 表对象引用——catalog.ts 的 baseMemo 在目录刷新（mtime 变化/
- *  clearCatalogMemo）时重建对象，引用变化自然失效，无需额外接线。ETag 供 If-None-Match 命中
- *  304，连 stringify 都省掉。 */
+ *  请求都全量 stringify。缓存键 = 表对象引用——引用稳定化在 providers 侧：resolve.ts 的
+ *  fullKnownTable 按两路来源（catalogFlatTable 的 baseMemo 引用、knownMetaTable 的 memo 引用）
+ *  复用同一表对象，目录刷新（mtime 变化/clearCatalogMemo）与预设热加载（clearKnownTable）时
+ *  引用变化自然失效，无需额外接线。ETag 供 If-None-Match 命中 304，连 stringify 都省掉。 */
 let catalogViewCache: { table: object; data: string; etag: string } | null = null
 function catalogView(): { data: string; etag: string } {
   const table = fullKnownTable()
@@ -494,7 +495,7 @@ async function handleRequest(
       providerId,
       model,
     })
-    const errHeaders: Record<string, string> = {}
+    const errHeaders: Record<string, string | string[]> = {}
     for (const [k, v] of Object.entries(resHeaders)) {
       if (k.toLowerCase() === 'content-encoding') continue
       errHeaders[k] = v
@@ -508,7 +509,9 @@ async function handleRequest(
   res.writeHead(result.status, resHeaders)
   res.flushHeaders()
   // usage 旁路解析：tap 字节原样透传（转发行为零改变），SSE/JSON 尽力而为提取 token 用量
-  const usageTap = createUsageTap(result.headers['content-type'])
+  // content-type 单值头，防御性取首值（上游异常重复时不致类型崩）
+  const resCt = result.headers['content-type']
+  const usageTap = createUsageTap(Array.isArray(resCt) ? resCt[0] : resCt)
   try {
     await pipeline(result.body as any, usageTap, res)
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage: usageTap.getUsage() })
@@ -1987,15 +1990,20 @@ export async function probe(
   if (!model) {
     return { ok: false, status: 0, ms: 0, err: t('该 profile 未设置 default_model，请用 -m 指定或 modeldock profile 修改', 'This profile has no default_model; pass -m or change it with modeldock profile') }
   }
-  const isAnthropic = target.provider.protocol === 'anthropic'
-  const path = isAnthropic ? '/v1/messages' : '/v1/chat/completions'
+  // 按服务协议拼探针路径与 body：responses 是一等协议（hServiceAdd/hFetchModels 均接受），
+  // 此前二分法只认 anthropic/其他——responses 服务被拼成 /v1/chat/completions，经
+  // clientProtocolFromPath 判成 openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，
+  // 报错还把责任推给「客户端走 openai 协议」（实际探针拼错了协议）
+  const proto = target.provider.protocol
+  const isAnthropic = proto === 'anthropic'
+  const isResponses = proto === 'responses'
+  const path = isAnthropic ? '/v1/messages' : isResponses ? '/v1/responses' : '/v1/chat/completions'
   const body = Buffer.from(
-    JSON.stringify({
-      model,
-      max_tokens: 16,
-      stream,
-      messages: [{ role: 'user', content: 'ping' }],
-    })
+    JSON.stringify(
+      isResponses
+        ? { model, max_output_tokens: 16, stream, input: 'ping' }
+        : { model, max_tokens: 16, stream, messages: [{ role: 'user', content: 'ping' }] }
+    )
   )
   try {
     const up = await forwardToUpstream(rt, target, {
