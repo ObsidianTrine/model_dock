@@ -2442,7 +2442,9 @@ describe('自动备用链（auto fallback）', () => {
       ).json()
       const last = (logs.logs || []).filter((l: any) => l.harness === 'claude-code').at(-1)
       expect(last.provider).toBe('C')
-      expect(last.reason).toContain('replayed_from:B') // key 缺失候选记入重放对账
+      // CORRECT-09 ③：replayed_from 累积全部被跳候选（A 连不上 + B key 缺失），
+      // 原单变量实现只剩最后一跳（replayed_from:B）——本断言更新为累积形态
+      expect(last.reason).toContain('replayed_from:A,B')
     } finally {
       server.close()
       up.close()

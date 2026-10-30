@@ -164,6 +164,18 @@ describe('rewriteModel：纯透传快路径与原实现逐字段等价', () => {
     expect(r5.body).toBe(body)
   })
 
+  it('顶层数组 + default_model：按契约原样透传不谎报 modelAfter（CORRECT-09 ①）', () => {
+    // typeof [] === 'object' 曾穿透 injectModel 守卫：expando 写入被 stringify 丢弃、
+    // modelAfter 却谎报已改写——修复后数组按「顶层非对象」契约返回 null 原样透传
+    const body = Buffer.from('[{"model":"arr"}]')
+    const r1 = rewriteModel(target({ default_model: 'dm' }), body, ROUTED)
+    expect(r1.body).toBe(body)
+    expect(r1.modelAfter).toBeUndefined()
+    const r2 = rewriteModel(target({ default_model: 'dm' }), Buffer.from('[1,2,3]'), ROUTED)
+    expect(r2.body.toString('utf8')).toBe('[1,2,3]')
+    expect(r2.modelAfter).toBeUndefined()
+  })
+
   it('claude 内置模型名无别名时兜底改写为 default_model（网关模式客户端不带模型 env）', () => {
     const dm = target({ default_model: 'glm-5-3-flash-260828' })
     for (const m of ['claude-sonnet-4-5-20250929', 'claude-opus-4-1', 'claude-haiku-4-5', 'claude-fable-5-1', 'claude-3-5-haiku-20241022']) {

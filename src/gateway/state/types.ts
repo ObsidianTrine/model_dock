@@ -14,7 +14,7 @@ export interface LogEntry {
   status?: number
   ms?: number
   err?: string
-  /** 路由事件标记：仅在偏离主选直连成功时设置（failover_to:<id>、replayed_from:<id>、down_all）；缺席=普通成功，日志过滤依赖「非空即事件」 */
+  /** 路由事件标记：仅在偏离主选直连成功时设置（failover_to:<id>、replayed_from:<id>、down_all、skip_all）；缺席=普通成功，日志过滤依赖「非空即事件」 */
   reason?: string
   /** 请求关联 ID（8 字节 hex）：handleRequest 入口生成，与响应头 x-modeldock-request-id、错误响应体
    *  modeldock.requestId 三处一致，供用户拿 id 在日志里检索一次失败请求的全链路。 */
