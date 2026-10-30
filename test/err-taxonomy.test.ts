@@ -1,10 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { fakeHome } from './helpers.js'
+import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import { errorReply } from '../src/gateway/server.js'
 import { ConfigError } from '../src/config/store.js'
 import { SecretsError } from '../src/config/secrets.js'
@@ -88,10 +86,7 @@ describe('errorReply：业务错误类 → status/hint 映射', () => {
 })
 
 describe('CLI 顶层出口：带 hint 的业务错误输出两行（真实子进程）', () => {
-  const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
-  /** tsx 的 ESM loader：经 node --import 直跑 .ts 源码，免 shell、三平台一致 */
-  const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
   it('config.toml 解析失败（ConfigError 带 hint）：✗ message 与 提示: hint 分行透出，退出码 1', () => {
     const h = fakeHome()

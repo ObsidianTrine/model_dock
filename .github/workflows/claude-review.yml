@@ -36,7 +36,8 @@ on:
 
 # 同一 PR 的旧审查自动取消，省排队时间——并发组在 job 级（见各 job 的 concurrency），
 # 因为 workflow 级并发会把「所有 job 都不满足条件的空 run」（如 bot 自己评论触发的 issue_comment）
-# 也计入并发组，把进行中的审查取消掉。
+# 也计入并发组，把进行中的审查取消掉。auto-review 与 interactive（@claude 追问）各用独立组名：
+# 共用组名时，@claude 评论会把进行中的 auto-review 取消掉，已烧掉的 token 白费。
 permissions:
   contents: read
   pull-requests: write
@@ -283,7 +284,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
-      group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: claude-review-interactive-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     permissions:
       contents: write

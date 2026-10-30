@@ -2,17 +2,14 @@ import net from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
-import { fakeHome } from './helpers.js'
+import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import { gatewayStatePath } from '../src/util/paths.js'
+import { localDateStr } from '../src/util/index.js'
 
 // 网关守护进程生命周期端到端：真 CLI 子进程 + 独立沙箱 + listen(0) 随机端口（绝不写死端口，
 // 更不碰 8687/8890）。覆盖此前零测试的单实例锁、陈旧锁复核接管、stop 复核与 status 输出。
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
-const TSX_LOADER = pathToFileURL(createRequire(path.join(REPO_ROOT, 'package.json')).resolve('tsx/esm')).href
 
 /** 取一个当前空闲的 TCP 端口（listen(0) 由内核分配，关闭后瞬时占用窗口可接受，lan.test.ts 同款） */
 function freePort(): Promise<number> {
@@ -245,4 +242,80 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       h.restore()
     }
   }, 120_000)
+
+  /** --daemon 真链路 CLI 子进程（内部 spawnDaemonAndWait 拉起 daemon 孙进程）。
+   *  必须异步 spawn + 逐段收集输出：就绪后 CLI 是否退出正是本组用例的被测行为。 */
+  function spawnDaemonCli(h: { home: string }, port: number): { child: ChildProcess; output: () => string; exit: Promise<{ code: number | null; at: number }> } {
+    const cli = spawn(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, 'gateway', 'start', '--port', String(port), '--daemon'], {
+      cwd: h.home,
+      env: childEnv(h.home),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    cli.stdout?.on('data', (d: Buffer) => { out += d.toString() })
+    cli.stderr?.on('data', (d: Buffer) => { out += d.toString() })
+    const exit = new Promise<{ code: number | null; at: number }>((resolve) => {
+      cli.on('error', () => resolve({ code: -1, at: Date.now() }))
+      cli.on('close', (code) => resolve({ code, at: Date.now() }))
+    })
+    return { child: cli, output: () => out, exit }
+  }
+
+  it('CORRECT-07：--daemon 就绪后 CLI 秒级退出（不挂住），daemon 脱离 CLI 独立存活', async () => {
+    const h = fakeHome()
+    try {
+      const port = await freePort()
+      const { output, exit } = spawnDaemonCli(h, port)
+      // readiness 时刻为基准：修复后 CLI 应立刻退出（原 bug 在此钉住 ≥45s 不返回）
+      await waitHealthy(port)
+      const readyAt = Date.now()
+      const exitRes = await Promise.race([
+        exit,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('CORRECT-07 复现：CLI 就绪后 5s 未退出')), 5_000)),
+      ])
+      expect(exitRes.code).toBe(0)
+      expect(exitRes.at - readyAt).toBeLessThan(5_000)
+      expect(output()).toContain('网关已后台启动')
+
+      // daemon 脱离 CLI 独立存活：CLI 退出后 health 仍可达、登记 pid 活着（detached 语义）
+      await waitHealthy(port, 5_000)
+      await waitStateFile()
+      const state = readStateSafe()
+      expect(state).toBeTruthy()
+      expect(() => process.kill(state!.pid, 0)).not.toThrow()
+
+      // fd 2 接管产物：daemon 日志文件存在（启动期无报错时可为空）
+      expect(fs.existsSync(path.join(h.home, '.modeldock', 'logs', `daemon-${localDateStr()}.log`))).toBe(true)
+
+      // 清理自拉进程并核实端口释放
+      const stopped = await runCli(h.home, ['gateway', 'stop'])
+      expect(stopped.output).toContain('网关已停止')
+      await waitGone(port)
+    } finally {
+      h.restore()
+    }
+  }, 60_000)
+
+  it('启动失败场景：坏 argv（--port 非数字）时 CLI 限时退出并报错，daemon 日志收到崩溃输出（fd 2 接管）', async () => {
+    const h = fakeHome()
+    try {
+      // 端口占用不适用：网关对 EADDRINUSE 有顺延换端口语义（listenWithRetry），不构成 daemon 崩溃；
+      // 坏 argv 让 listen 校验抛 RangeError（非 EADDRINUSE 不重试）→ daemon 走崩溃路径
+      const { output, exit } = spawnDaemonCli(h, 'notanumber' as unknown as number)
+      const exitRes = await Promise.race([
+        exit,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('坏 argv 场景 CLI 15s 未退出')), 15_000)),
+      ])
+      expect(exitRes.code).toBe(1)
+      // 报错不蒸发：超时文案 + daemon 日志路径提示都到用户眼前
+      expect(output()).toContain('网关启动超时')
+      expect(output()).toContain('daemon 启动报错见日志')
+      // daemon 崩溃输出落日志（fd 2 接管）：IIFE catch 的「网关启动失败」可追
+      const log = path.join(h.home, '.modeldock', 'logs', `daemon-${localDateStr()}.log`)
+      expect(fs.existsSync(log)).toBe(true)
+      expect(fs.readFileSync(log, 'utf8')).toContain('网关启动失败')
+    } finally {
+      h.restore()
+    }
+  }, 60_000)
 })

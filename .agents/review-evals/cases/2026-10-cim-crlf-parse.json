@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-cim-crlf-parse",
+  "title": "parsePidCommandLines 不剥行尾 \\r——Windows PowerShell CIM 重定向输出为 CRLF，正则 (.*)$ 全行失配→进程枚举恒空→stopTray 静默空转，托盘杀不掉且无痕",
+  "reviewRef": "e4ac854^",
+  "fixedBy": "e4ac854",
+  "files": ["src/cli/shared.ts"],
+  "expect": ["crlf", "parsepidcommandlines"],
+  "note": "2026-10-28 用户实证，三次更新托盘全存活（元凶，与 22f20fd stoptray 同一事故的第二层根因）。修复 = split('\\n') 后先 replace(/\\r$/, '') 再匹配。审查侧教训：文本解析先问「行尾是什么」——$ 锚点对 \\r 敏感；Windows 上任何进程/命令输出默认按 CRLF 处理（AGENTS.md 已有归一化约定，审查者没拿它对照本段）"
+}

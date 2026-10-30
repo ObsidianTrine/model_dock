@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { c, sleep, localDateStr, t } from '../util/index.js'
 import { randomToken } from '../util/fsx.js'
-import { logsDir } from '../util/paths.js'
+import { logsDir, displayPath } from '../util/paths.js'
 import { readGatewayState, writeGatewayState } from '../gateway/state.js'
 import {
   autostartStatus,
@@ -38,6 +38,16 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean })
     return
   }
   console.error(c.red(t('✗ 网关启动超时。可在命令行运行 modeldock gateway start 查看详细错误。', '✗ Gateway start timed out. Run "modeldock gateway start" in a terminal for details.')))
+  // daemon 的崩溃/启动报错自写日志（fd 2 接管，CORRECT-07）：超时时把日志路径递给用户，报错不蒸发
+  console.error(
+    c.yellow(
+      t(
+        '提示: daemon 启动报错见日志 {log}',
+        'Hint: daemon startup errors are logged to {log}',
+        { log: displayPath(path.join(logsDir(), `daemon-${localDateStr()}.log`)) }
+      )
+    )
+  )
   process.exit(1)
 }
 

@@ -1,0 +1,12 @@
+{
+  "id": "2026-10-orchestrator-repo-root",
+  "title": "findRepoRoot 双实现语义相反（--git-common-dir vs --show-toplevel）且注释自称「同款」：从 linked worktree 内跑 orchestrator 会把 queue/ 锚进 worktree，与 finish 需主仓库检出矛盾",
+  "reviewRef": "c99f326^",
+  "fixedBy": "c99f326",
+  "files": [
+    ".agents/scripts/orchestrator.mjs",
+    ".agents/scripts/feature-branch.mjs"
+  ],
+  "expect": ["git-common-dir", "show-toplevel"],
+  "note": "2026-10-29 效能审查发现（T14 卡），修复 c99f326 统一到 --git-common-dir。根因：feature-branch.mjs:32 用 --git-common-dir（linked worktree 内指向主仓库 .git，推出主仓库根），orchestrator.mjs:61 用 --show-toplevel（worktree 内返回 worktree 自身）——两处语义相反，orchestrator 侧 :59 注释却写「与 feature-branch.mjs 同款」。后果：从 worktree 内调 orchestrator 会把 queue/ 锚进 worktree。漏过层：注释宣称「同款」让审查者免核对——宣称等价/同款的注释是审查盲区，实际两实现各自演化后语义分叉。堵法：统一实现消除双份；审查侧：对「注释声称 X 与 Y 同款/等价」必须点开两边比对（本例 grep 两文件 findRepoRoot 即现形）"
+}

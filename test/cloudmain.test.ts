@@ -1,8 +1,8 @@
 import fsSync from 'node:fs'
 import fsp from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
+import { TEST_TMP } from './helpers.js'
 import { parseArgs, resolveConsoleToken } from '../src/cloud/main.js'
 
 const dirs: string[] = []
@@ -11,7 +11,7 @@ afterAll(async () => {
 })
 
 function tmpDir(prefix: string): string {
-  const d = fsSync.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const d = fsSync.mkdtempSync(path.join(TEST_TMP, prefix))
   dirs.push(d)
   return d
 }

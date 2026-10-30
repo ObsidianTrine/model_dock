@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-env-port-live",
+  "title": "cmdEnv 用 resolveClientGatewayPort 取端口——该链为写客户端文件固定「生产默认端口存活优先」，非默认端口实例运行时 env 恒输出 8687，与 gateway status / test 口径不一致",
+  "reviewRef": "87b2106^",
+  "fixedBy": "87b2106",
+  "files": ["src/cli/diag.ts"],
+  "expect": ["resolveclientgatewayport", "gatewaylive"],
+  "note": "2026-10-29 实测 env 恒输出 8687。修复 = 改 gatewayLive() 优先，无 live 回落 config.gateway.port 再回落默认端口（与 cmdStatus 同款链）。审查侧教训：同一个「当前端口」概念在不同命令里有两条解析链——看到展示/查询路径复用「写入路径专用」的解析函数要核对优先级语义是否被带歪"
+}

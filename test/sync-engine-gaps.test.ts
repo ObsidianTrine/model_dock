@@ -2,11 +2,11 @@ import http from 'node:http'
 import fsSync from 'node:fs'
 import fs from 'node:fs/promises'
 import net from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
+import { TEST_TMP, newHome, restoreHomes, waitFor } from './helpers.js'
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
 import { setupSyncTarget } from '../src/sync/setup.js'
@@ -29,32 +29,18 @@ import type { Config } from '../src/config/types.js'
  * 引擎模块内单例 loop 在文件收尾必须摘除（paused 重挂 + stopSyncEngine），防止长尾 tick 写盘串场。
  */
 
-// 与 synctarget.test.ts 同口径：持久临时目录 + 手动切 env，收尾恢复进程级原值
-const PREV_FAKE_HOME = process.env.MODELRDOCK_FAKE_HOME
-const PREV_MD_HOME = process.env.MODELRDOCK_HOME
-const TMP = fsSync.realpathSync.native(os.tmpdir())
-const homes: string[] = []
+// 与 synctarget.test.ts 同口径：多 home 交错切换走 helpers 三件套（收尾恢复进程级原值）
 const targetDirs: string[] = []
-function newHome(): string {
-  const h = fsSync.mkdtempSync(path.join(TMP, 'modeldock-test-'))
-  homes.push(h)
-  process.env.MODELRDOCK_FAKE_HOME = h
-  delete process.env.MODELRDOCK_HOME
-  return h
-}
 async function newTargetDir(): Promise<string> {
-  const d = await fs.mkdtemp(path.join(TMP, 'modeldock-sync-target-'))
+  const d = await fs.mkdtemp(path.join(TEST_TMP, 'modeldock-sync-target-'))
   targetDirs.push(d)
   return d
 }
 afterAll(async () => {
   // 引擎单例必须已摘除：paused 重挂在下方用例收尾完成，这里再兜一次
   stopSyncEngine()
-  if (PREV_FAKE_HOME === undefined) delete process.env.MODELRDOCK_FAKE_HOME
-  else process.env.MODELRDOCK_FAKE_HOME = PREV_FAKE_HOME
-  if (PREV_MD_HOME === undefined) delete process.env.MODELRDOCK_HOME
-  else process.env.MODELRDOCK_HOME = PREV_MD_HOME
-  for (const d of [...homes, ...targetDirs]) await fs.rm(d, { recursive: true, force: true }).catch(() => {})
+  await restoreHomes()
+  for (const d of targetDirs) await fs.rm(d, { recursive: true, force: true }).catch(() => {})
 })
 
 async function seedBase(): Promise<void> {
@@ -76,15 +62,6 @@ async function localEdit(marker: string): Promise<void> {
   await mutateConfig((c) => {
     c.profiles!.main!.default_model = marker
   })
-}
-
-async function waitFor(fn: () => Promise<boolean> | boolean, timeoutMs = 15000, stepMs = 25): Promise<void> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    if (await fn()) return
-    await new Promise((r) => setTimeout(r, stepMs))
-  }
-  throw new Error('waitFor timeout')
 }
 
 function listen0(srv: http.Server): Promise<number> {
@@ -343,7 +320,7 @@ describe('SyncLoop 缺口分支', () => {
     loop.start()
     try {
       await localEdit('debounced-push')
-      await waitFor(async () => (await target.readManifest())?.rev === 2)
+      await waitFor(async () => (await target.readManifest())?.rev === 2, 15000)
       expect((await loadConfig()).profiles?.main?.default_model).toBe('debounced-push')
     } finally {
       await loop.stop()

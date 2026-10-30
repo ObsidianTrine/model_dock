@@ -1,12 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import fs from 'node:fs'
-import path from 'node:path'
-import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { fakeHome } from './helpers.js'
 import { exitWithThrown, killByPid, openUrlInBrowser, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
-import { localDateStr } from '../src/util/index.js'
-import { logsDir } from '../src/util/paths.js'
 
 // cli/shared.ts 原语补测（cli-shared.test.ts 已覆盖拼装主干）：错误出口 exitWithThrown、
 // requireGateway 未运行分支、win32 浏览器 opener、kill 失败分支、daemon stderr 半行缓冲与
@@ -127,45 +122,24 @@ describe('killByPid 失败分支', () => {
   })
 })
 
-describe('spawnDaemonAndWait 超时与 stderr 重定向', () => {
-  it('daemon stderr 走 fd 重定向（stdio[2]=数字 fd 而非 pipe），父进程副本 spawn 后立即关闭', async () => {
+describe('spawnDaemonAndWait 超时与 spawn 契约', () => {
+  it('全轮探活失败：返回 null；stdio 全 ignore、不挂任何子进程流读端（CORRECT-07：pipe 读端会让 CLI 就绪后无法退出）', async () => {
     const h = fakeHome()
     captureConsole()
     try {
       const child = fakeChild()
+      const stderrOn = vi.spyOn(child.stderr, 'on')
       const fakeSpawn = vi.fn(() => child)
-      const openSpy = vi.spyOn(fs, 'openSync')
-      const closeSpy = vi.spyOn(fs, 'closeSync')
-      try {
-        const res = await spawnDaemonAndWait(['node', '--sea-gateway', '--port', '18977'], async () => null, fakeSpawn, 1)
-        expect(res).toBeNull()
-
-        const opts = fakeSpawn.mock.calls[0][2] as { stdio: unknown[] }
-        expect(typeof opts.stdio[2]).toBe('number') // fd 而非 'pipe'：父进程零管道、零钉死
-        const fd = opts.stdio[2] as number
-        expect(openSpy).toHaveBeenCalledWith(expect.stringContaining(`daemon-${localDateStr()}.log`), 'a')
-        expect(closeSpy).toHaveBeenCalledWith(fd) // 父副本即关：子进程已继承 fd
-      } finally {
-        openSpy.mockRestore()
-        closeSpy.mockRestore()
-      }
-    } finally {
-      h.restore()
-    }
-  })
-
-  it('真实子进程：父副本关闭后写 stderr 仍落日志（fd 继承，无 EPIPE、诊断不丢）', async () => {
-    const h = fakeHome()
-    captureConsole()
-    try {
-      // 假 daemon：150ms 后往 stderr 写一行再退出——父进程此刻早已关闭自己的 fd 副本
-      const argv = [process.execPath, '-e', 'setTimeout(() => { console.error("late-stderr-line"); process.exit(0) }, 150)']
-      const res = await spawnDaemonAndWait(argv, async () => null, spawn, 1)
+      const res = await spawnDaemonAndWait(['node', '--sea-gateway', '--port', '18977'], async () => null, fakeSpawn, 1)
       expect(res).toBeNull()
-      const daemonLog = path.join(logsDir(), `daemon-${localDateStr()}.log`)
-      await vi.waitFor(() => {
-        expect(fs.readFileSync(daemonLog, 'utf8')).toContain('late-stderr-line')
-      })
+      // CORRECT-07 契约：daemon 崩溃/启动报错由 daemon 侧 fd 2 接管自写日志（cli.ts --sea-gateway 分支），
+      // 父进程 stdio 全 ignore 且不给 child.stderr 挂任何监听——否则读端 flowing 态把事件循环钉住
+      expect(fakeSpawn).toHaveBeenCalledWith(
+        'node',
+        ['--sea-gateway', '--port', '18977'],
+        expect.objectContaining({ detached: true, stdio: ['ignore', 'ignore', 'ignore'] })
+      )
+      expect(stderrOn).not.toHaveBeenCalled()
     } finally {
       h.restore()
     }

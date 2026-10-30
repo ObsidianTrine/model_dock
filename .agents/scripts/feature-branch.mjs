@@ -11,8 +11,15 @@
 // Worktrees live under .agents/worktrees/<task-id> (gitignored). Each agent
 // edits only inside its own worktree, so parallel agents never clobber each
 // other's files. Integration happens on the shared main checkout, so finish
-// serializes on a lock file (.finish.lock): concurrent finishes queue safely
-// instead of colliding on git's index.lock.
+// serializes on a lock file (.finish.lock): a later finish bounded-waits for a
+// live holder (FINISH_LOCK_WAIT_SECONDS, default 300s; 0 = legacy fail-fast)
+// instead of colliding on git's index.lock. Stale locks (holder dead) are
+// taken over automatically.
+//
+// approve（orchestrator）路径的门禁快捷方式：finish 接收 --skip-test +
+// ORCHESTRATOR_GATE_HEAD 时，仅当「develop 未前进 且 worktree HEAD 与 gate 记录
+// 一致」才真的跳过全量测试，否则打印原因回落全量——gate 验证过哪棵树，合并的
+// 就是哪棵树；人工 --skip-test（纯文档改动）不带该环境变量，语义不变。
 
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -71,6 +78,16 @@ function gitInDir(dir, args) {
   return git(args, { cwd: dir });
 }
 
+// Tree equality excluding NOTES.md. exit 0 = identical; anything else (1 = differs,
+// 128 = bad ref etc.) counts as changed — declining the skip is the safe side.
+function treeSameExceptNotes(fromSha, toSha) {
+  const r = spawnSync('git', ['diff', '--quiet', fromSha, toSha, '--', '.', ':(exclude)NOTES.md'], {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return r.status === 0;
+}
+
 function die(msg) {
   console.error(`ERROR: ${msg}`);
   process.exit(1);
@@ -79,8 +96,11 @@ function die(msg) {
 // Finish is the only step that mutates the base branch (the merge runs on the main
 // checkout), so two agents finishing at once would collide on git's index.lock. An
 // exclusive lock file serializes them. Liveness is decided by a heartbeat (the owner
-// rewrites `beat` every 15s): a lock whose beat went quiet is taken over automatically,
-// a fresh one refuses with a retry hint. The owner pid is recorded for diagnostics only —
+// rewrites `beat` every 15s): a lock whose beat went quiet is taken over automatically;
+// a fresh one is bounded-waited for (poll 2.5s, progress line every 30s, cap
+// FINISH_LOCK_WAIT_SECONDS default 300s, 0 = legacy fail-fast die) so concurrent
+// auto-merges queue instead of dying and leaving their task cards stuck in
+// awaiting-human/ for a manual re-run. The owner pid is recorded for diagnostics only —
 // pid-based liveness (process.kill(pid, 0)) misreads recycled pids on Windows as alive
 // (2026-10-30 实证：属主早已退出，pid 被新进程顶掉，排队者永远拿不到锁), and a zombie
 // finish (main() done but event loop pinned by a leaked handle) kept its lock forever.
@@ -90,6 +110,21 @@ const FINISH_LOCK_STALE_MS = 60_000; // 连续 ~3 个心跳未续 = 陈锁（留
 // 旧版锁没有 beat 字段（心跳改造前的进程写的）：按 time 判陈旧，阈值放大到 30min——
 // 覆盖最长的合法 finish（testCmd 门禁 + 大仓库），又不让旧版崩溃残留的锁永久拒人
 const FINISH_LOCK_LEGACY_STALE_MS = 30 * 60_000;
+const FINISH_LOCK_POLL_MS = 2500;
+const FINISH_LOCK_PROGRESS_MS = 30_000;
+
+function finishLockWaitCapSeconds() {
+  const raw = process.env.FINISH_LOCK_WAIT_SECONDS;
+  if (raw === undefined || raw.trim() === '') return 300;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 300;
+}
+
+// Atomics.wait keeps libuv's thread pool (async log flushes etc.) running while
+// the main thread blocks — same pattern removeWorktreeDir uses below.
+function sleepSyncMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, ms);
+}
 
 function lockLooksLive(info) {
   if (!info || !Number.isInteger(info.pid)) return false; // 损坏锁 = 陈锁，可接管
@@ -101,7 +136,11 @@ function lockLooksLive(info) {
 
 function acquireFinishLock(taskId) {
   fs.mkdirSync(WORKTREES_DIR, { recursive: true });
-  for (let takeovers = 0; ; takeovers++) {
+  const capSeconds = finishLockWaitCapSeconds();
+  let waitStartMs = null;
+  let lastProgressMs = 0;
+  let takeovers = 0; // counts stale-lock removal attempts only — waiting on a live holder must not consume them
+  for (;;) {
     try {
       fs.writeFileSync(FINISH_LOCK, JSON.stringify({ pid: process.pid, task: taskId, time: new Date().toISOString(), beat: Date.now() }), { flag: 'wx' });
     } catch (e) {
@@ -109,11 +148,33 @@ function acquireFinishLock(taskId) {
       let info = null;
       try { info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8')); } catch { /* corrupt lock — treat as stale */ }
       if (lockLooksLive(info)) {
-        die(`another finish is already running (pid ${info?.pid}${info?.task ? `, task "${info.task}"` : ''}${info?.time ? `, started ${info.time}` : ''}).` + CRLF_N +
-          `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
-          `  If you are certain no finish is in progress (stale lock), it is taken over automatically once the heartbeat goes quiet (${FINISH_LOCK_STALE_MS / 1000}s).`);
+        const who = `pid ${info?.pid}${info?.task ? `, task "${info.task}"` : ''}${info?.time ? `, started ${info.time}` : ''}`;
+        if (capSeconds === 0) {
+          die(`another finish is already running (${who}).` + CRLF_N +
+            `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
+            `  If you are certain no finish is in progress (stale lock), it is taken over automatically once the heartbeat goes quiet (${FINISH_LOCK_STALE_MS / 1000}s).`);
+        }
+        const now = Date.now();
+        if (waitStartMs === null) {
+          waitStartMs = now;
+          lastProgressMs = now;
+          console.log(`another finish is running (${who}) — waiting up to ${capSeconds}s for the lock (FINISH_LOCK_WAIT_SECONDS=0 disables waiting).`);
+        }
+        const elapsedS = Math.floor((now - waitStartMs) / 1000);
+        if (elapsedS >= capSeconds) {
+          die(`another finish is still running after waiting ${elapsedS}s (${who}).` + CRLF_N +
+            `  Wait for it to complete, then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}` + CRLF_N +
+            `  If you are certain no finish is in progress (stale lock), it is taken over automatically once the heartbeat goes quiet (${FINISH_LOCK_STALE_MS / 1000}s).`);
+        }
+        if (now - lastProgressMs >= FINISH_LOCK_PROGRESS_MS) {
+          lastProgressMs = now;
+          console.log(`  [finish-lock] still waiting (${who}) — elapsed ${elapsedS}s / cap ${capSeconds}s`);
+        }
+        sleepSyncMs(FINISH_LOCK_POLL_MS);
+        continue;
       }
       if (takeovers >= 2) die(`finish lock ${FINISH_LOCK} is stale but could not be removed. Delete it manually and re-run.`);
+      takeovers += 1;
       try { fs.rmSync(FINISH_LOCK, { force: true }); } catch { /* next iteration re-checks */ }
       continue;
     }
@@ -332,7 +393,7 @@ Next steps:
 }
 
 function cmdFinish(taskId, args) {
-  const skipTest = args.includes('--skip-test');
+  let skipTest = args.includes('--skip-test');
   const msgIdx = args.indexOf('--message');
   const mergeMsg = msgIdx >= 0 ? args[msgIdx + 1] : undefined;
   const branch = `feature/${taskId}`;
@@ -376,10 +437,34 @@ function cmdFinish(taskId, args) {
   }
 
   const base = baseBranch();
+  const behind = Number(git(['rev-list', '--count', `${branch}..${base}`])) || 0;
+
+  // Gate 快捷路径（merge-verify-once）：orchestrator 的 npm_test 门禁已对当前树全量
+  // 跑过一遍时，approve 调 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD，锁内不再
+  // 重跑一遍。跳过必须两条同时成立，任一不满足打印原因并回落全量（门禁强度不降）：
+  //   a) 基准分支未前进（behind == 0）——rebase 是 no-op，合并树就是 gate 验证过的那棵；
+  //   b) worktree HEAD 与 gate 记录一致——gate 到 approve 之间分支上没有新提交。
+  // 人工 --skip-test（纯文档改动等既有用途）不带该环境变量，保持原语义原样跳过。
+  if (skipTest && process.env.ORCHESTRATOR_GATE_HEAD) {
+    const gateHead = process.env.ORCHESTRATOR_GATE_HEAD.trim();
+    const wtHead = gitInDir(wtPath, ['rev-parse', 'HEAD']).trim();
+    // HEAD 直接相等是常见情形；不等时排除 NOTES.md 再比一次树——worker 常用 git add -A
+    // 把 NOTES.md 一起提交进分支，finish 又在 gate 之后把它移除（上方专用提交），
+    // HEAD 因此前进一提交，但除 NOTES.md 外的树与 gate 验证时完全一致，不应回落全量。
+    const sameTree = wtHead === gateHead || treeSameExceptNotes(gateHead, wtHead);
+    if (behind === 0 && sameTree) {
+      console.log(`Gate already verified this exact tree (head ${gateHead.slice(0, 7)}, ${base} not advanced) — skipping the duplicate full test run.`);
+    } else {
+      skipTest = false;
+      const why = behind > 0
+        ? `${base} advanced by ${behind} commit(s) since the gate run`
+        : `worktree tree changed since the gate run (${gateHead.slice(0, 7)} -> ${wtHead.slice(0, 7)})`;
+      console.log(`--skip-test declined (${why}) — running the full verification instead.`);
+    }
+  }
 
   // 1) rebase onto latest develop so integration conflicts surface HERE, not on develop
-  const behind = git(['rev-list', '--count', `${branch}..${base}`]);
-  if (Number(behind) > 0) {
+  if (behind > 0) {
     console.log(`Rebasing ${branch} onto ${base} (${behind} new commit(s))...`);
     const r = spawnSync('git', ['rebase', base], { cwd: wtPath, stdio: 'inherit' });
     if (r.status !== 0) {
