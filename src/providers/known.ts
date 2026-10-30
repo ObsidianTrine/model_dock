@@ -109,6 +109,7 @@ let byIdTable: Record<string, KnownMeta> | undefined
  *  长驻网关进程内不失效的话 resolveModelMeta/knownMetaTable 一直用旧值直到重启 */
 export function clearKnownTable(): void {
   byIdTable = undefined
+  knownMetaMemo = undefined
 }
 /** 预设库模型索引（预设已内置各厂商权威值，按 id 建表）。懒构建：首次查询时确保预设已加载（BUG-12）再建表，与 EXTRA 一起合并成完整已知表 */
 export function knownByIdTable(): Record<string, KnownMeta> {
@@ -174,11 +175,17 @@ export function knownModelMeta(id: string): KnownMeta | undefined {
   return undefined
 }
 
-/** 合并后的完整已知表（预设库 id 优先，与 knownModelMeta 同一优先级）。用于前端"填模型名→自动补上下文/输出"。 */
+/** 合并后的完整已知表（预设库 id 优先，与 knownModelMeta 同一优先级）。用于前端"填模型名→自动补上下文/输出"。
+ *  懒构建 memo：EXTRA 与 byIdTable 都是进程内稳定对象，本函数此前每次调用 spread 新对象——
+ *  server 的目录视图缓存按「表对象引用」判缓存键，引用不稳导致每请求都 miss。失效点在
+ *  clearKnownTable（reloadPresets 后调用），与 byIdTable 同步清。返回共享只读对象，调用方不得修改。 */
+let knownMetaMemo: Record<string, KnownMeta> | undefined
 export function knownMetaTable(): Record<string, KnownMeta> {
+  if (knownMetaMemo) return knownMetaMemo
   const out: Record<string, KnownMeta> = { ...EXTRA, ...knownByIdTable() }
   for (const [id, m] of Object.entries(out)) {
     if (VISION_PREFIXES.some((pre) => id.startsWith(pre)) && !m.capabilities) out[id] = { ...m, capabilities: ['vision'] }
   }
+  knownMetaMemo = out
   return out
 }
