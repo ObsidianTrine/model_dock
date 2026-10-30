@@ -19,10 +19,11 @@ function tokenize(expr: string): Seg[] {
   let m: RegExpExecArray | null
   let consumed = 0
   while ((m = re.exec(body))) {
-    // 匹配段必须首尾相接：exec 会跳过无法解析的字符（引号键/负数下标/未闭合括号等），
-    // 靠「消费位置不连续」检测，不满足即抛错（CORRECT-08 缺陷①：原实现静默吞字/改写）
-    if (m.index !== consumed) break
-    consumed += m[0].length
+    // 段必须首尾相接，段间允许且仅允许一个 `.` 分隔符（`.` 不被任何匹配消费，是段间分隔符；
+    // 下标段可紧跟前段，如 $.a[0][1]）——间距更大即 exec 跳过了无法解析的字符
+    // （引号键/负数下标/连续点号等），不满足即抛错（CORRECT-08 缺陷①：原实现静默吞字/改写）
+    if (m.index !== consumed && !(m.index === consumed + 1 && body[consumed] === '.')) break
+    consumed = m.index + m[0].length
     if (m[1] !== undefined) {
       if (m[1] === '*') segs.push({ star: true })
       else segs.push({ key: m[1] })
