@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { isAlive } from './kill-tree.mjs';
+import { invalidateSeqCache, logDir } from './events.mjs';
 import { TASK_ID_RE } from './queue.mjs';
 
 export function taskLockPath(repoRoot, taskId) {
@@ -69,7 +70,11 @@ export function acquireTaskLock(repoRoot, taskId, name = 'run') {
       if (takeovers >= 2) return { held: false, owner: cur ?? { pid: null, task: taskId }, unremovable: true };
       let tookOver = false;
       try { fs.rmSync(p, { force: true }); tookOver = true; } catch { /* 下一轮重查 */ }
-      if (tookOver) console.log(`[orchestrator] 接管陈旧任务锁（task=${taskId}，pid=${cur?.pid ?? '?'} 已退出）`);
+      if (tookOver) {
+        console.log(`[orchestrator] 接管陈旧任务锁（task=${taskId}，pid=${cur?.pid ?? '?'} 已退出）`);
+        // 接管者的下一次 appendEvent 重新从盘上对齐 seq——防同任务跨进程双写 seq 冲突（events.mjs 缓存配套）
+        invalidateSeqCache(logDir(repoRoot, taskId));
+      }
       continue;
     }
     process.on('exit', () => { try { fs.rmSync(p, { force: true }); } catch { /* best effort */ } });

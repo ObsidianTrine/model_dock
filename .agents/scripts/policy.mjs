@@ -15,9 +15,10 @@ import { loadWorkflowConfig, releaseHatches } from './workflow-config.mjs';
 // 规则数据（配置驱动；hook 场景脚本锚定，orchestrator 场景经参数注入 repoRoot 配置）
 // ---------------------------------------------------------------------------
 
-/** 受保护端口（workflow.json protectedPorts，缺省空 = 不做端口红线）。 */
-export function protectedPorts() {
-  return loadWorkflowConfig().protectedPorts;
+/** 受保护端口（workflow.json protectedPorts，缺省空 = 不做端口红线）。cfg 可显式注入
+ *  （evaluateCommand 单次评估读一次配置后透传），缺省读脚本锚定配置。 */
+export function protectedPorts(cfg) {
+  return (cfg ?? loadWorkflowConfig()).protectedPorts;
 }
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -99,7 +100,10 @@ const RELEASE_ALLOW = [
 export function evaluateCommand(cmd) {
   const command = String(cmd ?? '');
   if (!command) return { allowed: true };
-  const HATCHES = releaseHatches(loadWorkflowConfig().envPrefix);
+  // 单次评估只读一次 workflow.json（此前 releaseHatches/protectedPorts/listenCommandNames 各自
+  // 缺省重读，最多 4 次——agents-hygiene-batch 收敛；行为不变，见下方各调用点显式传 cfg）
+  const cfg = loadWorkflowConfig();
+  const HATCHES = releaseHatches(cfg.envPrefix);
 
   // 前缀环境变量赋值是命令的一部分：剥离后既修 `VAR=x git push` 的漏拦洞，也识别发版授权 hatch。
   // 复合命令按 shell 分隔符切段逐段检查——`git commit && git push` 的 push 藏在第二段，
@@ -141,11 +145,11 @@ export function evaluateCommand(cmd) {
   if (/\bnpm\s+publish\b/.test(command)) return { allowed: false, rule: 'publish', reason: 'npm publish（对外发布，永远人工）' };
 
   // 红线 2：workflow.json protectedPorts 的进程与监听（缺省空 = 不启用端口红线）
-  const ports = protectedPorts();
+  const ports = protectedPorts(cfg);
   const port = ports.find((p) => command.includes(p));
   if (port) {
     const destructive = /\b(kill|killall|pkill|taskkill|fuser|lsof\s+-t)\b/i;
-    const names = listenCommandNames().map(escapeRegExp);
+    const names = listenCommandNames(cfg).map(escapeRegExp);
     const listenCmd = new RegExp(`\\b(node|tsx|npx|npm\\s+run(\\s+\\S+)?${names.length ? `|${names.join('|')}` : ''})\\b`, 'i');
     if (destructive.test(command)) {
       return { allowed: false, rule: 'port', reason: `对端口 ${port} 相关进程执行 kill/stop（受保护端口见 workflow.json protectedPorts，永远人工处置）` };
@@ -165,7 +169,7 @@ export function evaluateCommand(cmd) {
   // 踩的坑）。listenCommandNames 的 start/restart/serve/ui/daemon 形态缺 --port 一律拦；
   // 带 --port 已显式落到测试端口，放行。
   if (ports.length) {
-    const names = listenCommandNames().map(escapeRegExp);
+    const names = listenCommandNames(cfg).map(escapeRegExp);
     if (names.length) {
       const defaultPortStart = new RegExp(`\\b(?:${names.join('|')})\\s+(?:start|restart|serve|ui|daemon)\\b`, 'i');
       if (defaultPortStart.test(command) && !/--port(?:=|\s)/.test(command) && !/(^|\s)-{1,2}h(?:elp)?\b/.test(command)) {
@@ -266,10 +270,19 @@ export function setAuditFile(p) {
   auditFileOverride = p;
 }
 
+// audit.jsonl 每次 Edit/Write/Bash 都追加、无界增长（2026-10-29 已 638KB/2531 行）——按大小
+// 轮转，先例：orchestrator.mjs 的 nightly.log 5MB（NIGHTLY_LOG_MAX）。只留一代、不引入配置项。
+const AUDIT_ROTATE_BYTES = 5 * 1024 * 1024;
+
 export function audit({ hook, tool, decision, reason, target }) {
   const file = auditFileOverride ?? path.join(process.cwd(), '.agents', 'policy', 'audit.jsonl');
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    try {
+      if (fs.statSync(file).size > AUDIT_ROTATE_BYTES) fs.renameSync(file, `${file}.1`);
+    } catch {
+      /* 首次不存在（尚无审计）/ Windows 目标被句柄占用：跳过轮转，不阻断本次审计 */
+    }
     fs.appendFileSync(file, JSON.stringify({ ts: toIsoLocal(), hook, tool, decision, reason, target }) + '\n');
   } catch {
     /* 审计失败不影响裁决 */

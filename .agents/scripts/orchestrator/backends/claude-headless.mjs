@@ -71,14 +71,6 @@ export function writeWorkerSettings(settingsPath, envPatch = {}) {
   return settingsPath;
 }
 
-/**
- * 生成 policy hook 注入所需的临时 settings 路径（放在 orchestrator logs 外的
- * 系统临时目录，随任务结束可删）。
- */
-export function newWorkerSettingsPath() {
-  return path.join(fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'orch-settings-')), 'worker-settings.json');
-}
-
 /** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。 */
 export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
   const args = [

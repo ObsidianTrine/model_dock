@@ -326,7 +326,7 @@ function removeWorktreeDir(wtPath) {
   }
 }
 
-function writeNotesStub(taskId, wtPath, base) {
+function writeNotesStub(taskId, wtPath) {
   fs.writeFileSync(notesPathFor(wtPath), `# 任务交接 NOTES — ${taskId}
 
 > 本文件是 worktree 本地的交接文档，**不会被合并进主干**（finish 时自动清除）。
@@ -356,7 +356,7 @@ function cmdStart(taskId) {
 
   const base = baseBranch();
   git(['worktree', 'add', wtPath, '-b', branch, base]);
-  writeNotesStub(taskId, wtPath, base);
+  writeNotesStub(taskId, wtPath);
 
   // One-time environment setup (e.g. dependency install) so the worktree is immediately
   // testable — the top friction point for parallel agents: a fresh worktree has no
