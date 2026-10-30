@@ -15,7 +15,9 @@ interface Seg {
 function tokenize(expr: string): Seg[] {
   const body = expr.replace(/^\$\.?/, '')
   const segs: Seg[] = []
-  const re = /([^[.\]]+)|\[(\d+)\]/g
+  // 前缀 \.? 把段间分隔符一并连续消费：首版把「.」排除出可匹配字符却不消费它，m.index 永远停在
+  // 点号上、多段点句式（$.a.b.c）全部被「不连续」误判——worktree 全量实测 12 例红的回归修复
+  const re = /\.?([^[.\]]+)|\[(\d+)\]/g
   let m: RegExpExecArray | null
   let consumed = 0
   while ((m = re.exec(body))) {
