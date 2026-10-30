@@ -365,6 +365,7 @@ async function cmdRun(repoRoot, taskId, opts) {
 
   const worktree = ensureWorktree(repoRoot, taskId);
   installWorkspaceDeps(worktree, taskId);
+  copySpecArtifacts(repoRoot, worktree, meta);
   appendEvent(qdir, 'worktree_ready', { path: worktree, branch: `feature/${taskId}` });
 
   const backend = await getBackend(opts.backend);
@@ -607,7 +608,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
       }
       const reviewPromptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-')), 'review-prompt.md');
-      fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes));
+      fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
       // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
       // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
       // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
@@ -743,6 +744,38 @@ function safeRead(p) {
     return fs.readFileSync(p, 'utf8');
   } catch {
     return '';
+  }
+}
+
+/**
+ * 审查纪律文本（REVIEW.md 摘要注入 reviewer prompt）：与人工/PR 审查同一套
+ * 失败形态与红线标准——异构引擎 + 同一纪律才是完整去相关。截 8000 字符防
+ * prompt 膨胀；文件缺失（可移植场景）返回空串不注入。
+ */
+function reviewDiscipline(repoRoot) {
+  const text = safeRead(path.join(repoRoot, 'REVIEW.md'));
+  if (!text.trim()) return '';
+  const cap = 8000;
+  return text.length > cap ? `${text.slice(0, cap)}\n…（REVIEW.md 超 ${cap} 字符已截断，全文见仓库根）` : text;
+}
+
+/**
+ * spec 卡的设计/需求随 worktree 携带：specs/ 不入库（.gitignore 整目录忽略），
+ * worktree checkout 看不到主仓库的 specs，而卡正文只写文件引用（防 zcode headless
+ * 30k argv 上限被 design 全文爆掉）——prepare 阶段把 design.md / requirements.md
+ * 拷进 worktree 同路径。目标路径在 .gitignore 内，不污染改动面与门禁。
+ */
+function copySpecArtifacts(repoRoot, worktree, meta) {
+  if (!meta.spec) return;
+  const src = path.join(repoRoot, '.agents', 'orchestrator', 'specs', meta.spec);
+  const dst = path.join(worktree, '.agents', 'orchestrator', 'specs', meta.spec);
+  if (!fs.existsSync(path.join(src, 'design.md'))) {
+    log(`⚠ 规格 ${meta.spec} 的 design.md 缺失（${src}）——卡内文件引用将落空，worker 会自报 stuck；请补齐后 resume。`);
+    return;
+  }
+  fs.mkdirSync(dst, { recursive: true });
+  for (const f of ['design.md', 'requirements.md']) {
+    if (fs.existsSync(path.join(src, f))) fs.copyFileSync(path.join(src, f), path.join(dst, f));
   }
 }
 

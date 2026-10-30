@@ -85,7 +85,7 @@ describe('orchestrator spec > tasks 文档解析与拆卡渲染', () => {
     expect(parseTasksDoc('# 没有任务段')).toEqual([])
   })
 
-  it('renderTaskCard：复合 id、gate=L3、created_by=planner、design 全文注入背景', () => {
+  it('renderTaskCard：复合 id、gate=L3、created_by=planner、spec 字段 + design 文件引用（30k argv 防爆）', () => {
     const spec = {
       dir: '/x',
       meta: { id: 'add-export', title: '导出配置', created_at: '2026-10-25T10:00:00+08:00' },
@@ -99,8 +99,11 @@ describe('orchestrator spec > tasks 文档解析与拆卡渲染', () => {
     expect(meta.gate).toBe('L3')
     expect(meta.created_by).toBe('planner')
     expect(meta.files_hint).toEqual(['src/**'])
-    expect(card).toContain('新增 src/export.ts。') // design 全文
-    expect(card).toContain('当 export 运行') // requirements 验收标准
+    expect(meta.spec).toBe('add-export') // 进度锚寻址键
+    expect(card).toContain(`specs/${spec.meta.id}/`) // design 改文件引用（全文由 copySpecArtifacts 随 worktree 携带）
+    expect(card).toContain('design.md')
+    expect(card).toContain('requirements.md')
+    expect(card).not.toContain('新增 src/export.ts。') // 全文不再随卡注入
     expect(card).toContain('任务 1/2')
   })
 })
@@ -131,7 +134,9 @@ describe('orchestrator spec > CLI 端到端（mock 后端）', () => {
       expect(pending).toEqual([`${SPEC_ID}-t1`, `${SPEC_ID}-t2`])
       const card1 = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', `${SPEC_ID}-t1.md`), 'utf8')
       expect(() => loadCard(card1, 't.md')).not.toThrow()
-      expect(card1).toContain('mock 设计方案') // design 注入
+      expect(card1).toContain(`specs/${SPEC_ID}/design.md`) // design 文件引用（全文随 worktree 拷贝，不随卡）
+      expect(card1).not.toContain('mock 设计方案')
+      expect(JSON.parse(fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', SPEC_ID, 'progress.json'), 'utf8')).tasks).toHaveLength(2) // 全局进度锚落盘
       expect(card1).toContain('依赖：无')
       const card2 = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', `${SPEC_ID}-t2.md`), 'utf8')
       expect(card2).toContain('依赖：任务 1')

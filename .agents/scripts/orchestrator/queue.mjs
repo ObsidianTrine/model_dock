@@ -224,6 +224,14 @@ export function validateCard(meta) {
   if (!Array.isArray(meta.files_hint) || meta.files_hint.length === 0) {
     fail('任务卡 files_hint 必须是非空数组（glob 列表，供门禁做纯度检查）');
   }
+  // 卫生清洗：planner/spec 产出曾把反引号包进 glob（tray-only-mode-t1 实测
+  // `- \`src/gateway/presence.ts\``），破坏门禁的 glob 匹配——剥掉包装符再入库
+  meta.files_hint = meta.files_hint
+    .map((h) => String(h).trim().replace(/^[`'"]+/, '').replace(/[`'"]+$/, '').trim())
+    .filter(Boolean);
+  if (!meta.files_hint.length) {
+    fail('任务卡 files_hint 清洗后为空（原值全是反引号/引号/空白）——请写裸 glob，如 src/presets/**');
+  }
   if (!Array.isArray(meta.workflows) || meta.workflows.length === 0) {
     fail('任务卡 workflows 必须是非空数组（至少注入 feature-branch）');
   }

@@ -209,7 +209,7 @@ export function buildPlannerPrompt(intentText, repoRoot) {
     `1. gate 固定写 L3（合并级别由系统按实际改动分级裁决，不由你决定）；\n` +
     `2. 验收标准必须可机器检查：除测试全绿（workflow.json testCmd）外，给出**具体行为断言**（哪个函数/端点/文案应当怎样），\n` +
     `   禁止空洞标准；\n` +
-    `3. files_hint 写真实范围（你确认过的路径），越准越好；\n` +
+    `3. files_hint 写真实范围（你确认过的路径），越准越好；写裸 glob（如 src/presets/**），不要用反引号或引号包住；\n` +
     `4. created_by 固定写 planner；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
@@ -297,7 +297,7 @@ export function buildSpecPrompt(intentText, repoRoot, redlines = '') {
     `${fence}\n\n` +
     `硬性要求：\n` +
     `1. 验收标准与完成条件必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止空洞标准；\n` +
-    `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；\n` +
+    `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；写裸 glob（如 src/api/**），不要用反引号或引号包住；\n` +
     `3. 任务间依赖显式写「依赖: 任务 N」，无依赖写「依赖: 无」；\n` +
     `4. 设计不得违反 AGENTS.md 红线${redlines ? `（${redlines}）` : ''}；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
