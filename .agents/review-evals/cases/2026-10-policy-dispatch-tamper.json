@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-policy-dispatch-tamper",
+  "title": "红线守卫 dispatcher 从事件 cwd 直接 import policy.mjs 且 evaluateCommand 不检查文件写入目标——被守护的 agent 一条 echo 覆写 policy.mjs 就能让守卫整体放行（连硬编码发布红线一并拆除），audit 还记成 allowed",
+  "reviewRef": "c32451c^",
+  "fixedBy": "c32451c",
+  "files": [".agents/hooks/policy-dispatch.mjs"],
+  "expect": ["evaluatecommand", "完整性"],
+  "note": "任务卡 02 修复（c32451c；同批还修了 stdin 合法 JSON 字面量 null 绕过容错崩溃放行——与 cloud-null-body 同类，不另立题）。修复 = 会话基线（policy.mjs/workflow.json sha256 落 tmp，cwd+session 键 12h 重建）不一致即 fail-closed + 直写审计 + 给人工恢复路径；篡改检查前移到 import 之前。审查侧教训：安全组件的自身失效模式（可被守护对象静默关闭）本身就是审查对象——「dispatcher 对被审查代码有无完整性校验」要成为守卫类组件的固定自查项"
+}
