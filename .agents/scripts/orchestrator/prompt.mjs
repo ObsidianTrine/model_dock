@@ -44,7 +44,8 @@ export function buildWorkerPrompt(card, ctx) {
       `你的工作目录（worktree）是：${ctx.worktreePath}\n` +
       `所有编辑必须使用此目录下的绝对路径，禁止改动主仓库或任何其他 worktree 的文件。\n` +
       `shell 命令一律以当前目录执行：git 直接写 \`git add / git commit / git diff / git status\`，**禁止 \`git -C <路径> <子命令>\` 形态**\n` +
-      `（headless 权限白名单按命令前缀匹配，-C 形态会被自动拒绝）。未列入白名单的命令（如 node/powershell 直调）同样会被拒。`
+      `（headless 权限白名单按命令前缀匹配，-C 形态会被自动拒绝）。未列入白名单的命令（如 node/powershell 直调）同样会被拒。\n` +
+      `**一次工具调用只发一条 shell 命令**：不要用 ; / && / | 把多条命令拼在一起——复合命令会被权限系统按「multiple operations」整体拒绝。`
   );
 
   // [纪律层] 长时自治运行的结束纪律（Anthropic 长时程 harness 结论 + 实跑教训：
