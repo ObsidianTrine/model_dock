@@ -10,6 +10,8 @@ workflows:
 gate: L3
 ---
 
+> ✅ **已完成（2026-10-30）**：Install dependencies（npm ci --no-audit --no-fund）+ Build 确定性前置两步落地，prompt 第 2/6 步同步（回合止损纪律 fcfb235 原样保留），头注流程描述更新。执行会话收尾合并。
+
 # 目标
 dependabot-fix 的 npm ci 与 npm run build 从 Claude 会话回合里移出，改为 workflow 确定性步骤——每个 Dependabot PR 省 2-4 个 Claude 回合（token + 墙钟），安装/构建结果从「模型可能出错的操作」变为确定性产物。
 
