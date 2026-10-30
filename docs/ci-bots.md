@@ -40,6 +40,42 @@ keyguard/guard 会校验三件套齐全，缺任一项打 warning 指明缺哪�
 - **切回 Anthropic 官方**：恢复各步 `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` 输入、删三处 env 块（官方 API 密钥走 action 输入而非 env）。
 - 参考示例（DeepSeek，值配在 GitHub 侧而非代码里）：`CLAUDE_BASE_URL=https://api.deepseek.com/anthropic`、`CLAUDE_MODEL=deepseek-flash`（快/省）或 `deepseek-v4-pro`（强/贵）。
 
+### 事故记录：2026-10-30 供应商 key 401 失效（bot 同源失效）
+
+**现象与根因**：2026-10-30 起，本地 claude CLI 所用的供应商 key（尾号 17eb）返回 401 失效；GitHub bot 三件套与本地 CLI **同源共用一把 key**，随之一起失效。**教训：key 是单点，本地 CLI 与 bot 共用时，轮换必须两边同步改。**
+
+**bot 实际状态（2026-10-31 `gh` 只读核查）**：红 / 绿但空转 / 跳过**都不是——事故后零触发、零 run，处于「三件套已轮换、尚未验证」的休眠**：
+
+- claude-review：近 7 天 18 次 run，**10-30 之后 0 次**。事故前 15 次 skipped 全部是 Dependabot PR 触发（设计上排除 dependabot，交给 dependabot-fix 专职处理），不构成故障证据；2 次 failure + 1 次 cancelled 是 10-27 test/bot-smoke 冒烟测试期（当时 Claude Code GitHub App 未装、App 级 401，当天已修复）。
+- dependabot-fix：近 7 天 15 次 run，**最后一次真实成功 2026-10-29 05:00Z**（PR #8 undici / #9 qrcode-generator，各一次 2–4 分钟完整验证会话）；唯一 failure（10-27，vitest 5.0.5）是会话轮次耗尽（`Reached maximum number of turns (50)`），与 401 无关、同 PR 重触发即绿；另有数条秒级 run（抽样核查为 guard 通过、fix 跳过，非真实会话）。**10-30 之后 0 次**（无新 Dependabot PR）。
+- 因此 **Actions 日志里没有 401 证据**：key 失效后 bot 一次都没被触发，401 证据只在本地 CLI 侧。
+- 三件套已于 **2026-10-30 22:53–22:54（UTC+8）被轮换过一次**（`gh secret list` / `gh variable list` 更新时间戳为证）：`CLAUDE_AUTH_TOKEN` 换新，`CLAUDE_BASE_URL=https://ark.cn-beijing.volces.com/api/coding`（火山方舟端点）、`CLAUDE_MODEL=glm-5.3-flash[1m]`。**换后零 run，这组组合未经任何真实 run 验证**；且与本地已实测可用的 GLM 官方组合（见下路径 b）端点不同，能否用通待验证。
+
+**事故复核命令**（今后排查同源失效照此走）：
+
+```bash
+gh run list --workflow claude-review.yml --limit 15   # 结论分布；skipped 先看触发事件（Dependabot PR 属设计性跳过）
+gh run list --workflow dependabot-fix.yml --limit 15  # 时长分钟级 + fix success 才算「真实验证过」
+gh run view <run-id> --log-failed                     # 抽样看报错：认证类（401 / invalid key）还是测试失败
+gh variable list && gh secret list                    # 三件套存在性与最近更新时间（值不可读）
+```
+
+**切换路径**（改 repo Settings 的 secrets/variables 属敏感操作，**须用户拍板后执行**，两条任选其一）：
+
+- **路径 a：换新 DeepSeek key（供应商不变，只动 secret）**
+  1. `gh secret set CLAUDE_AUTH_TOKEN`（回车后粘贴新 key，避免 key 进 shell 历史）；
+  2. **同步写 Dependabot 页签**：`gh secret set CLAUDE_AUTH_TOKEN --app dependabot`（同值）——Dependabot PR 的 run 读不到 Actions 页签 secret，漏了这步 dependabot-fix 会静默跳过（见「启用步骤」关键坑）；
+  3. Variables 不动（`CLAUDE_BASE_URL` 仍指 DeepSeek 兼容端点即可）。
+- **路径 b：切 GLM Anthropic 兼容端点（本地已实测可用）**
+  1. `gh variable set CLAUDE_BASE_URL --body "https://open.bigmodel.cn/api/anthropic"`；
+  2. `gh variable set CLAUDE_MODEL --body "glm-5.3-flash"`；
+  3. `gh secret set CLAUDE_AUTH_TOKEN` 粘 GLM key，并 `gh secret set CLAUDE_AUTH_TOKEN --app dependabot` 再写一份；
+  4. 认证形态注意：GLM 官方走 Bearer；bot env 块默认 `ANTHROPIC_API_KEY`（x-api-key 型）。若换后 run 报认证失败，按上节「换供应商」的 Bearer 例外给三处 env 块补一行 `ANTHROPIC_AUTH_TOKEN`（改 yml 走 worktree 流程）。
+
+**操作途径**：上述 gh 命令即可，也可走 **Settings → Secrets and variables → Actions**：Secrets 页签 Update `CLAUDE_AUTH_TOKEN`、Variables 页签改 `CLAUDE_BASE_URL` / `CLAUDE_MODEL`、**Dependabot 页签同步 Update 同名 secret**（最易漏的一步）。
+
+**换完必须真实验证一次**（不验证等于没换），任选其一：在任意 PR/issue 评论 `@claude` 触发 interactive；或开一个人类 PR 触发 claude-review；或在仍 open 的 Dependabot PR（#8 / #9）评论 `@dependabot recreate` 触发 dependabot-fix；或等每周六 09:00（Asia/Shanghai）Dependabot 自动开 PR。run 时长分钟级、PR 上出现验证评论，即为新端点可用。
+
 ## 启用步骤（后续开启时做）
 
 1. **三件套**：Settings → Secrets and variables → Actions → **Secrets** 建 `CLAUDE_AUTH_TOKEN`（API key）；**Variables** tab 建 `CLAUDE_BASE_URL`（兼容端点 URL）与 `CLAUDE_MODEL`（模型名）。三件套缺一 bot 不启动（Actions 日志告警指明缺哪项）；换供应商只改这三个值，见上节「模型接入」。
