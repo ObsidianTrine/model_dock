@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-relay-multi-value-header-fold",
+  "title": "转发响应头经 Object.fromEntries(...map(([k,v]) => [k, String(v)])) 把 undici 返回的 string[]（重复头，典型 set-cookie）折叠成逗号连接单值——Set-Cookie 的 Expires 含逗号，RFC 6265 明确禁止折叠，客户端解析必错",
+  "reviewRef": "035f99b^",
+  "fixedBy": "035f99b",
+  "files": [
+    "src/gateway/relay.ts"
+  ],
+  "expect": [
+    "set-cookie",
+    "折叠"
+  ],
+  "note": "2026-10-30 评测循环自 relay-client-abort 题挖出（07 号卡，问题 4）。修法 = 保数组语义原样透传，由 node writeHead/setHeader 逐条发送（OutgoingHttpHeaders 原生支持 string[]）。审查侧教训：**转发/代理层的「归一化」对多值头是有损转换**——看见 String(v)/join(\",\") 拍平 headers 就要问「哪些头合法重复（set-cookie/via/warning）」"
+}

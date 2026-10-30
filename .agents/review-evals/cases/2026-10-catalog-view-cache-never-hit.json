@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-catalog-view-cache-never-hit",
+  "title": "/_modeldock/model-catalog 视图缓存永不命中——注释宣称「缓存键 = 表对象引用」，但 fullKnownTable() 每次调用 spread 出新对象，catalogViewCache.table === table 恒 false：每请求全量 stringify 8000+ 条 + SHA-256 照算，注释与行为相悖",
+  "reviewRef": "9bfed39^",
+  "fixedBy": "9bfed39",
+  "files": [
+    "src/gateway/server.ts"
+  ],
+  "expect": [
+    "fullknowntable",
+    "spread"
+  ],
+  "note": "2026-10-30 评测循环自 server-reexport-drop 题挖出（08 号卡）。修法 = providers 侧引用稳定化（knownMetaTable 懒构建 memo 且 clearKnownTable 联动失效；fullKnownTable 按两路来源引用复用同一表对象）。审查侧教训：**「对象引用作缓存键」的前提是工厂函数返回稳定引用**——看到 cache.key === freshCall() 形态就追一下 freshCall 是不是每次 return 新对象；注释宣称的优化要按代码路径验证而非采信"
+}

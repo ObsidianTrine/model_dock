@@ -1,3 +1,8 @@
+13. **同一缺陷两机并行各自实现**（2026-10-30 develop 合并：daemon stderr 本地 fd 继承 7d21df0 vs 远程 daemon 侧接管 b542d8e；finish 锁心跳判活 vs 有界等待系互补需并集）：双头开发撞同一文件，合并成本高于双修收益——按文件分区派工（AGENTS.md 既有约定）；冲突解决先判「互补还是互斥」，互补取并集、互斥取验证更强的一侧。
+14. **任务卡断言不作数**（05 卡声称 ensureProfile 缺陷「对照当前 HEAD 确认仍在」，实际已被 addService 重构消除，误报文案全仓无残留）：动手前亲自 grep 核实卡面每一条缺陷断言；评测循环产出的「活 bug 清单」同样会过期。
+15. **顶层执行 main() 的脚本无法被测试 import**（orchestrator.mjs）：可测纯逻辑抽子模块 + 依赖注入（deps.mjs 的 spawnFn/log/die 注入模式），单测落子模块文件而不是硬啃入口脚本。
+16. **模块级缓存在 isolate:false 单进程套件里被早前用例焐热**（catalogViewCache）：「冷启动必须序列化一次」断言因此恒红——先空跑一次对齐状态，再经公开失效点（clearKnownTable）强制重建；判别器设计成「第二次零成本」（buggy 版第二次也 miss）比「第一次有成本」更稳。
+17. **全局 spy 计数法**（vi.spyOn(JSON,"stringify") 透传原实现 + payload 特征过滤 + finally mockRestore）：非模块 mock 不进跨文件注册表，isolate:false 下安全——给「全量序列化是否发生」类断言做判别器的实用手法。
 **评分器说明**：2026-10-29 基线跑分用本地 claude CLI（deepseek-v4-pro）；2026-10-30 夜训时该 CLI 的 DeepSeek key 401 失效，当日 12 题改用 **ZCode 会话模型 subagent（GLM-5.3-Flash）** 评分——两段分数来自不同评分器，跨段对比仅供参考；DeepSeek key 修好后可用 runner 重跑全量对齐。Runner 已加 120KB 考题文件护栏（历史上的 289KB ui.ts 会撑爆 prompt，选题时避开整文件巨物）。
 
 | id | bug | fixedBy | 首跑 |
@@ -38,6 +43,12 @@
 | 2026-10-agents-win-spawn-shell | .agents 编排器 Windows spawn 未带 shell（.cmd 包装直调必 ENOENT）：claude worker 探测带/spawn 不带（探测说可用、起必挂，worker/审查全落 blocked/），orchestrator npm ci 装不上、nightly audit 静默失效 | c99f326 | ⏳ 待首跑（2026-10-30 效能审查回灌；本机 shell 故障未跑，首跑前不计入基线分母） |
 | 2026-10-orchestrator-repo-root | findRepoRoot 双实现语义相反（--git-common-dir vs --show-toplevel）且注释自称「同款」：worktree 内跑 orchestrator 把 queue/ 锚进 worktree | c99f326 | ⏳ 待首跑（同上） |
 | 2026-10-review-concurrency-group | claude-review 的 auto-review 与 interactive（@claude）共用并发组 + cancel-in-progress：一条评论取消进行中的 auto-review，token 白费 | cc6d832 | ⏳ 待首跑（同上） |
+| 2026-10-providers-rm-key-before-config | cmdProviderRm 先不可逆删密钥、后做可失败的配置写，失败即丢 key 无回滚 | 06a5940 | ⏳ 待首跑（2026-10-30 任务卡 05 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-providers-add-stale-count | cmdProviderAdd 拉取统计用拉取前旧快照，无预设服务报「共 0 个」 | 06a5940 | ⏳ 待首跑（同上） |
+| 2026-10-orchestrator-drain-max-overshoot | drain 并发路径 pump() 只在入口查 --max，首轮同步连发 workers 个 run 子进程，烧钱上限失效 | 54b0602 | ⏳ 待首跑（2026-10-30 任务卡 06 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-relay-multi-value-header-fold | 转发把重复头（set-cookie）折叠为逗号单值，RFC 6265 禁止折叠，客户端解析必错 | 035f99b | ⏳ 待首跑（2026-10-30 任务卡 07 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-catalog-view-cache-never-hit | model-catalog 视图缓存键=表对象引用，但 fullKnownTable 每次 spread 新对象，缓存恒 miss 每请求全量 stringify | 9bfed39 | ⏳ 待首跑（2026-10-30 任务卡 08 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-probe-responses-protocol-miss | probe() 探针二分法漏 responses 协议，responses-only 服务连接测试恒失败且报错误导 | 9bfed39 | ⏳ 待首跑（同上） |
 | 2026-10-orch-awaiting-human-crash | run 放行 awaiting-human 卡但不迁移，烧完整轮 worker 后首个终态迁移必炸裸栈 | 5e4dcfe | ✅（10-30，GLM subagent）P1 全证据链（白名单/迁移/兜底三层）+ 3 条新发现（npm spawn 无 shell EINVAL、reviewing 无恢复路径、reviewer 临时目录泄漏→立卡 19） |
 | 2026-10-orch-resume-backend-first-hit | resume 沿用后端 .find 取首条 worker_spawned，多引擎任务静默切回最初引擎 | 5e4dcfe | ✅（10-30，GLM subagent）P1 命中 + 4 条当前版活缺陷（TMPDIR /tmp、spawn 无 shell 与探测矛盾、mock prior 漏防、settings 0600→立卡 17） |
 | 2026-10-finish-lock-pid-reuse | finish 锁判活 process.kill(pid,0) 被 Windows PID 复用骗过，陈锁永拒排队者 | acf3953 | ✅（10-30，GLM subagent）主缺陷命中 + merge 冲突裸崩新发现（立卡 18）；exit handler 无属主校验已随 acf3953 一并修复 |
@@ -62,6 +73,8 @@
 - **基线口径（自 2026-10-30 起）**：审查者任何改动（REVIEW.md / prompt / lint / 模型）全量重跑，**单轮 ≥10/12 且原 8 题 ≥7/8** 视为基线保持；跌破则改动不保留，且必须读原文判读是「目标未命中」还是「启发式未命中」。
 - **2026-10-30 增补 3 题**（2026-10-29 效能审查回灌：T14 修复对 ×2 + T19 修复对 ×1，见上表末三行）：首跑未做（执行会话本机 shell 故障），**首跑记录前不计入基线口径分母**；第三题 fixedBy 已随 T19 合入（cc6d832）回填。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+
+- **2026-10-30 增补 6 题**（编号任务卡 05/06/07/08 修复对回灌，评测循环挖出的活 bug 修复后按标准 schema 成题）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 06a5940（×2）/ 54b0602 / 035f99b / 9bfed39（×2）。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
