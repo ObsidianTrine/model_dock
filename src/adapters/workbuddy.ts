@@ -4,7 +4,6 @@ import type { Config } from '../config/types.js'
 import {
   AdapterError,
   gatewayBaseOpenAI,
-  isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
   type DetectResult,
@@ -14,7 +13,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, residueNote } from './presence.js'
-import { changeIfChanged, directAttachNote, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, noChangeResult, oursEntryUrl, resolveRoute, routeModelNote } from './shared.js'
 
 /**
  * WorkBuddy AI（腾讯 AI 办公客户端）的自定义模型走本地 models.json：应用只读该文件并
@@ -87,7 +86,7 @@ function gatewayEndpointUrl(port: number): string {
 
 function isOursEntry(e: WorkbuddyModelEntry, cfg: Config): boolean {
   // 网关条目按 gateway_base 匹配；独立直连条目按登记的 direct_base 精确匹配（换直连目标/切回网关时幂等摘除）
-  if (isOursGatewayUrl(typeof e.url === 'string' ? e.url : undefined, 'workbuddy', cfg)) return true
+  if (oursEntryUrl(e.url, 'workbuddy', cfg)) return true
   const directBase = cfg.harness['workbuddy']?.direct_base
   return !!directBase && typeof e.url === 'string' && e.url === directBase
 }
@@ -332,7 +331,7 @@ export const workbuddyAdapter: HarnessAdapter = {
 
   async planDetach(cfg: Config): Promise<PlanResult> {
     const p = await activeFile()
-    if (p === null) return { changes: [], notes: [t('WorkBuddy 未指向 ModelDock 网关，无需改动', 'WorkBuddy is not pointing at the ModelDock gateway; nothing to change')] }
+    if (p === null) return noChangeResult([t('WorkBuddy 未指向 ModelDock 网关，无需改动', 'WorkBuddy is not pointing at the ModelDock gateway; nothing to change')])
     const text = await readTextIfExists(p)
     let root: unknown
     try {
@@ -351,7 +350,7 @@ export const workbuddyAdapter: HarnessAdapter = {
 
     const ours = entries.filter((e) => isOursEntry(e, cfg))
     if (ours.length === 0) {
-      return { changes: [], notes: [t('WorkBuddy 未指向 ModelDock 网关，无需改动', 'WorkBuddy is not pointing at the ModelDock gateway; nothing to change')] }
+      return noChangeResult([t('WorkBuddy 未指向 ModelDock 网关，无需改动', 'WorkBuddy is not pointing at the ModelDock gateway; nothing to change')])
     }
     const remaining = entries.filter((e) => !isOursEntry(e, cfg))
     const removedIds = new Set(ours.map((e) => e.id).filter((x): x is string => typeof x === 'string'))

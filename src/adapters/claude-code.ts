@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { changeIfChanged, stripContextSuffix } from './shared.js'
+import { changeIfChanged, noChangeResult, stripContextSuffix } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 const TIER_ENV_KEYS = [
@@ -399,7 +399,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
         ],
       }
     }
-    return { changes: [], notes: [t('当前未指向 ModelDock 网关，无需改动', 'Not pointing at the ModelDock gateway; nothing to change')] }
+    return noChangeResult([t('当前未指向 ModelDock 网关，无需改动', 'Not pointing at the ModelDock gateway; nothing to change')])
   },
 
   async status(cfg: Config, port: number): Promise<AdapterStatus> {

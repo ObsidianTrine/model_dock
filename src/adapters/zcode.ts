@@ -5,7 +5,6 @@ import {
   AdapterError,
   gatewayBase,
   gatewayBaseOpenAI,
-  isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
   type DetectResult,
@@ -15,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
-import { directAttachNote, directResponsesEndpointNote, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesEndpointNote, noChangeResult, oursEntryUrl, pointingStatus, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -460,17 +459,16 @@ export const zcodeAdapter: HarnessAdapter = {
       personalText !== null ? detectJsonIndent(personalText) : '  ',
       personalText !== null ? personalText.endsWith('\n') : true
     )
-    if (personalText !== afterPersonal) {
-      changes.push({
-        path: personalPath,
-        before: personalText,
-        after: afterPersonal,
-        note: t(
-          '新增/更新 modeldock 个人供应商（含模型列表与模型定义）',
-          'Add/update the modeldock personal provider (with model list and model definitions)'
-        ),
-      })
-    }
+    const personalChange = changeIfChanged(
+      personalPath,
+      personalText,
+      afterPersonal,
+      t(
+        '新增/更新 modeldock 个人供应商（含模型列表与模型定义）',
+        'Add/update the modeldock personal provider (with model list and model definitions)'
+      )
+    )
+    if (personalChange) changes.push(personalChange)
 
     // 旧版存储：清理本工具历史版本写入的 builtin:modeldock（新版 ZCode 一律忽略）
     if (legacyText !== null) {
@@ -512,22 +510,29 @@ export const zcodeAdapter: HarnessAdapter = {
         const root = JSON.parse(personalText) as ZcodePersonalConfig
         const rule = findPersonalRule(root)
         const base = rule?.config?.api?.baseUrl
-        if (rule && isOursGatewayUrl(typeof base === 'string' ? base : undefined, 'zcode', cfg)) {
-          const rules = root.config!.providerConfigRules!.providerRules!
-          root.config!.providerConfigRules!.providerRules = rules.filter((r) => r?.providerId !== PROVIDER_ID)
-          const manual = root.config?.modelConfigRules?.manualProviderModelRules
-          if (Array.isArray(manual)) {
-            root.config!.modelConfigRules!.manualProviderModelRules = manual.filter((r) => r?.providerId !== PROVIDER_ID)
+        if (rule && oursEntryUrl(base, 'zcode', cfg)) {
+          // rule 从 root.config.providerConfigRules.providerRules 找出 ⇒ config 与 providerConfigRules
+          // 必在（T25-⑥ 显式化：链式非空断言收敛为局部提取，不再散落）
+          const config = root.config!
+          const providerConfigRules = config.providerConfigRules!
+          providerConfigRules.providerRules = providerConfigRules.providerRules!.filter((r) => r?.providerId !== PROVIDER_ID)
+          const modelConfigRules = config.modelConfigRules
+          if (modelConfigRules !== undefined) {
+            const manual = modelConfigRules.manualProviderModelRules
+            if (Array.isArray(manual)) {
+              modelConfigRules.manualProviderModelRules = manual.filter((r) => r?.providerId !== PROVIDER_ID)
+            }
+            // 手工/旧版在 ZCode 里给 modeldock 模型留的智能规则一并清掉，避免下次接入时与手动规则撞车
+            const smart = modelConfigRules.providerModelRules
+            if (Array.isArray(smart)) {
+              modelConfigRules.providerModelRules = smart.filter(
+                (r) => (r as { providerId?: string } | undefined)?.providerId !== PROVIDER_ID
+              )
+            }
           }
-          // 手工/旧版在 ZCode 里给 modeldock 模型留的智能规则一并清掉，避免下次接入时与手动规则撞车
-          const smart = root.config?.modelConfigRules?.providerModelRules
-          if (Array.isArray(smart)) {
-            root.config!.modelConfigRules!.providerModelRules = smart.filter(
-              (r) => (r as { providerId?: string } | undefined)?.providerId !== PROVIDER_ID
-            )
-          }
-          if (Array.isArray(root.config?.providerOrder)) {
-            root.config!.providerOrder = root.config!.providerOrder!.filter((id) => id !== PROVIDER_ID)
+          const providerOrder = config.providerOrder
+          if (Array.isArray(providerOrder)) {
+            config.providerOrder = providerOrder.filter((id) => id !== PROVIDER_ID)
           }
           changes.push({
             path: personalPath,
@@ -551,7 +556,7 @@ export const zcodeAdapter: HarnessAdapter = {
         const legacy = JSON.parse(legacyText) as { provider?: Record<string, unknown> }
         const entry = legacy.provider?.[LEGACY_ENTRY_ID] as { options?: { baseURL?: string } } | undefined
         const base = entry?.options?.baseURL
-        if (entry && isOursGatewayUrl(typeof base === 'string' ? base : undefined, 'zcode', cfg)) {
+        if (entry && oursEntryUrl(base, 'zcode', cfg)) {
           delete legacy.provider![LEGACY_ENTRY_ID]
           changes.push({
             path: legacyPath,
@@ -566,10 +571,9 @@ export const zcodeAdapter: HarnessAdapter = {
     }
 
     if (changes.length === 0) {
-      return {
-        changes: [],
-        notes: notes.length > 0 ? notes : [t('ZCode 未指向 ModelDock 网关，无需改动', 'ZCode is not pointing at the ModelDock gateway; nothing to change')],
-      }
+      return noChangeResult(
+        notes.length > 0 ? notes : [t('ZCode 未指向 ModelDock 网关，无需改动', 'ZCode is not pointing at the ModelDock gateway; nothing to change')]
+      )
     }
     notes.push(
       t(
@@ -651,10 +655,7 @@ export const zcodeAdapter: HarnessAdapter = {
     return {
       installed: true,
       attached: !!cfg.harness['zcode'],
-      pointing: isGatewayBase(base, port) ? 'gateway' : base ? 'other' : 'unknown',
-      detail:
-        (base ?? t('(未注册 modeldock 供应商)', '(no modeldock provider registered)')) +
-        (models > 0 ? t(' · {count} 个模型', ' · {count} models', { count: models }) : ''),
+      ...pointingStatus(base, models, port, '(未注册 modeldock 供应商)', '(no modeldock provider registered)'),
     }
   },
 }

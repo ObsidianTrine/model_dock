@@ -414,13 +414,15 @@ export async function syncStatus(): Promise<SyncStatusView> {
   if (!st || st.mode === 'off' || (st.mode === 'target' && !st.target) || (st.mode === 'cloud' && !st.cloud)) {
     return { mode: 'off', paused: false, running: false, targetKind: null, targetLabel: null, devid: null, lastAppliedRev: null, lastPushTs: null, lastPullTs: null, lastError: corrupt ?? st?.lastError ?? null, lastConflictTs: null }
   }
-  const kind = st.mode === 'cloud' ? 'cloud' : st.target!.kind
+  // 守卫已保证：mode=target ⇒ target 必在（T25-⑥：此前连续 5 处 st.target! 收敛为一次局部提取）
+  const target = st.mode === 'target' ? st.target : undefined
+  const kind = st.mode === 'cloud' ? 'cloud' : target?.kind ?? null
   const label =
     st.mode === 'cloud'
       ? st.cloud!.url
-      : st.target!.kind === 'webdav'
-        ? `${st.target!.url}${st.target!.dir ? '/' + st.target!.dir : ''}`
-        : displayPath(st.target!.dir)
+      : target?.kind === 'webdav'
+        ? `${target.url}${target.dir ? '/' + target.dir : ''}`
+        : displayPath(target!.dir)
   return {
     mode: st.mode,
     paused: st.paused,

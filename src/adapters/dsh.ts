@@ -5,7 +5,6 @@ import { biJoin, dshHomeDir, isFile, readTextIfExists, t } from '../util/index.j
 import type { Config, ModelMeta } from '../config/types.js'
 import {
   AdapterError,
-  isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
   type DetectResult,
@@ -14,7 +13,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { parseDocument } from './format.js'
-import { directAttachNote, directResponsesNote, directWire, gatewayWire, isGatewayBase, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesNote, directWire, gatewayWire, noChangeResult, oursEntryUrl, pointingStatus, resolveRoute, routeModelNote } from './shared.js'
 import { catalogForRoute, catalogLookupById, loadDshCatalog, type CatalogModel } from '../providers/dshcatalog.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
@@ -419,14 +418,13 @@ export const dshAdapter: HarnessAdapter = {
       }
       const legacyAfter = doc.toString()
       // 等值过滤：内容无变化不产生 change，稳态重接（周期 refresh/重复 attach）零快照零写盘
-      if (legacyAfter !== text) {
-        changes.push({
-          path: layout.legacyFile,
-          before: text,
-          after: legacyAfter,
-          note: t('新增/更新 modeldock provider（含模型列表，settings.yaml 旧布局）', 'Add/update the modeldock provider (with model list, legacy settings.yaml layout)'),
-        })
-      }
+      const legacyChange = changeIfChanged(
+        layout.legacyFile,
+        text,
+        legacyAfter,
+        t('新增/更新 modeldock provider（含模型列表，settings.yaml 旧布局）', 'Add/update the modeldock provider (with model list, legacy settings.yaml layout)')
+      )
+      if (legacyChange) changes.push(legacyChange)
     }
 
     // 新布局：profiles/*/cordis.patch.yml
@@ -457,14 +455,13 @@ export const dshAdapter: HarnessAdapter = {
       }
       const patchAfter = doc.toString()
       // 等值过滤：与 legacy 分支同理，稳态不产生 change
-      if (patchAfter !== text) {
-        changes.push({
-          path: patchFile,
-          before: text,
-          after: patchAfter,
-          note: t('新增/更新 modeldock provider（含模型列表，cordis.patch.yml 新布局）', 'Add/update the modeldock provider (with model list, cordis.patch.yml layout)'),
-        })
-      }
+      const patchChange = changeIfChanged(
+        patchFile,
+        text,
+        patchAfter,
+        t('新增/更新 modeldock provider（含模型列表，cordis.patch.yml 新布局）', 'Add/update the modeldock provider (with model list, cordis.patch.yml layout)')
+      )
+      if (patchChange) changes.push(patchChange)
     }
 
     // 两者皆无（legacy 不存在且无 patch 目标）才走新建；等值过滤跳过的稳态不算「皆无」
@@ -571,7 +568,7 @@ export const dshAdapter: HarnessAdapter = {
       const doc = parseDocument(text)
       const js = doc.toJS() as Record<string, any>
       const entry = js?.[PROVIDERS_ROOT]?.providers?.modeldock
-      if (entry && isOursGatewayUrl(typeof entry.baseURL === 'string' ? entry.baseURL : undefined, 'dsh', cfg)) {
+      if (entry && oursEntryUrl(entry.baseURL, 'dsh', cfg)) {
         doc.deleteIn([PROVIDERS_ROOT, 'providers', 'modeldock'])
         if (js?.[AGENT_DEFAULT]?.provider === 'modeldock') {
           doc.deleteIn([AGENT_DEFAULT])
@@ -592,43 +589,40 @@ export const dshAdapter: HarnessAdapter = {
       const js = doc.toJS()
       if (!Array.isArray(js)) continue
       const seq = ensureSeq(doc, patchFile)
-      let changed = false
 
       const idx = js.findIndex((e: any) => e?.id === PROVIDERS_ROOT)
       let delIndex = -1
       if (idx >= 0) {
         const entry = js[idx]?.config?.providers?.modeldock
-        if (entry && isOursGatewayUrl(typeof entry.baseURL === 'string' ? entry.baseURL : undefined, 'dsh', cfg)) {
+        if (entry && oursEntryUrl(entry.baseURL, 'dsh', cfg)) {
           doc.deleteIn([idx, 'config', 'providers', 'modeldock'])
           const providers = doc.getIn([idx, 'config', 'providers'])
           if (isMap(providers) && providers.items.length === 0) doc.deleteIn([idx, 'config', 'providers'])
           const cfgNode = doc.getIn([idx, 'config'])
           if (isMap(cfgNode) && cfgNode.items.length === 0) delIndex = idx
-          changed = true
         }
       }
       const j = js.findIndex((e: any) => e?.id === AGENT_DEFAULT)
       let delJ = -1
       if (j >= 0 && js[j]?.config?.provider === 'modeldock') {
         delJ = j
-        changed = true
       }
       // 两个下标都取自对象快照 js；先删高下标再删低下标，避免第一次删除改动活序列后第二处下标错位
       for (const k of [delIndex, delJ].filter((x) => x >= 0).sort((a, b) => b - a)) {
         seq.delete(k)
       }
-      if (changed) {
-        changes.push({
-          path: patchFile,
-          before: text,
-          after: doc.toString(),
-          note: t('移除 modeldock provider（cordis.patch.yml）', 'Remove the modeldock provider (cordis.patch.yml)'),
-        })
-      }
+      // changed 标志收敛为等值过滤（T25-④）：有删除动作 ⟺ 序列化结果与原文不同
+      const detachChange = changeIfChanged(
+        patchFile,
+        text,
+        doc.toString(),
+        t('移除 modeldock provider（cordis.patch.yml）', 'Remove the modeldock provider (cordis.patch.yml)')
+      )
+      if (detachChange) changes.push(detachChange)
     }
 
     if (changes.length === 0) {
-      return { changes: [], notes: [t('dsh 当前未指向 ModelDock 网关，无需改动', 'dsh is not pointing at the ModelDock gateway; nothing to change')] }
+      return noChangeResult([t('dsh 当前未指向 ModelDock 网关，无需改动', 'dsh is not pointing at the ModelDock gateway; nothing to change')])
     }
     // 凭据文件不存在时不要凭空创建一个空的 .credentials.yaml
     const ctext = await readTextIfExists(credFile())
@@ -672,10 +666,7 @@ export const dshAdapter: HarnessAdapter = {
       return {
         installed: true,
         attached: !!cfg.harness['dsh'],
-        pointing: isGatewayBase(base, port) ? 'gateway' : base ? 'other' : 'unknown',
-        detail:
-          (base ?? t('(无 modeldock provider)', '(no modeldock provider)')) +
-          (models > 0 ? t(' · {count} 个模型', ' · {count} models', { count: models }) : ''),
+        ...pointingStatus(base, models, port, '(无 modeldock provider)', '(no modeldock provider)'),
       }
     } catch {
       return { installed: true, attached: false, pointing: 'unknown', detail: t('dsh 配置解析失败', 'Failed to parse the dsh config') }
