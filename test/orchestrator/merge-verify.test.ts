@@ -221,19 +221,22 @@ describe('feature-branch finish 锁行为（T13）', () => {
     }
   }, 60_000)
 
-  it('⑤ 陈锁（属主进程已死）→ 自动接管语义不变，正常合并', async () => {
+  it('⑤ 陈锁（心跳停跳）→ 自动接管语义不变，正常合并', async () => {
     const c = mkCounter()
     const repo = mkRepo({ testCmd: COUNTER_CMD })
     try {
       fb(repo.root, 'start lk-stale')
       commitInWorktree(repo.root, 'lk-stale', 'note')
-      // 造「属主已死」的陈锁：让占位进程自然退出并 await exit 事件——node 在 exit 前完成
-      // reap，此后 kill(pid,0) 才可靠地报 ESRCH。（SIGKILL 后立刻查会撞上僵尸态：父进程
-      // 阻塞在 execSync 期间不 reap，僵尸对 kill(pid,0) 恒报存活，等待方会白等 300s。）
-      const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 80)'], { stdio: 'ignore' })
-      const deadPid = victim.pid!
-      await new Promise<void>((resolve) => victim.on('exit', () => resolve()))
-      fs.writeFileSync(lockPath(repo.root), JSON.stringify({ pid: deadPid, task: 'crashed', time: new Date().toISOString() }))
+      // 造「属主已死」的陈锁：锁判活自心跳改造（beat 每 15s 续期）后按 beat 新鲜度裁决，
+      // pid 不再参与判活（Windows pid 复用 + 僵尸态都会让 kill(pid,0) 误报存活——
+      // 本用例首版造「已退出 pid」就撞上：无 beat 的锁按 legacy 30min 阈值判活，等待方
+      // 白等）。直接写「beat 停跳 2 分钟」的锁：心跳语义下的属主已死，接管应立即发生。
+      fs.writeFileSync(lockPath(repo.root), JSON.stringify({
+        pid: process.pid,
+        task: 'crashed',
+        time: new Date().toISOString(),
+        beat: Date.now() - 120_000,
+      }))
       const r = fb(repo.root, 'finish lk-stale', { MV_COUNTER: c.file })
       expect(r.status).toBe(0)
       expect(git(repo.root, 'log --oneline -1')).toContain("Merge branch 'feature/lk-stale'")
