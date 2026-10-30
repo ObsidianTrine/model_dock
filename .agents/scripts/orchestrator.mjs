@@ -33,7 +33,9 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
-import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs';
+import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
+import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
+import { isTransientWorkerFailure } from './orchestrator/transient.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
@@ -52,6 +54,9 @@ import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
+
+/** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避 60s×attempt（与 orchestrate 技能「429 退避 60s」口径一致）。 */
+const MAX_WORKER_RETRIES = 3;
 
 // ---------------------------------------------------------------------------
 // 基础设施
@@ -98,15 +103,26 @@ class Budget {
     this.maxTokens = card.meta.budget.max_tokens;
     this.maxWallMs = card.meta.budget.max_wall_minutes * 60_000;
     this.emit = emit;
-    this.tokens = 0;
+    this.committed = 0; // 已完结 worker 会话的用量合计
+    this.sessionMax = 0; // 当前会话内峰值（stream-json 的 usage 是会话累计值）
+    this.tokens = 0; // committed + sessionMax，只读视图
     this.started = Date.now();
     this.tripReason = null;
     this.wallTimer = setTimeout(() => this.trip('max_wall_minutes', `${card.meta.budget.max_wall_minutes} 分钟 wall-clock 到期`), this.maxWallMs);
     this.wallTimer.unref?.();
   }
 
+  /** 新 worker 会话开始：上一会话用量入账 committed（原实现用全局 Math.max，
+   *  fixup 多会话互相覆盖漏计——实测 300k+100k 两会话只记 300k）。 */
+  beginSession() {
+    this.committed += this.sessionMax;
+    this.sessionMax = 0;
+    this.tokens = this.committed;
+  }
+
   account(tokensIn, tokensOut) {
-    this.tokens = Math.max(this.tokens, tokensIn + tokensOut);
+    this.sessionMax = Math.max(this.sessionMax, tokensIn + tokensOut);
+    this.tokens = this.committed + this.sessionMax;
     if (this.tokens > this.maxTokens) this.trip('max_tokens', `累计 ${this.tokens} / 上限 ${this.maxTokens} tokens`);
   }
 
@@ -249,6 +265,16 @@ async function cmdRun(repoRoot, taskId, opts) {
   }
   const workerModel = opts.workerModel ?? cfg.worker?.model ?? undefined; // 仅 claude 系 CLI 生效（--model）
 
+  // 按引擎校准预算（workflow.json budgetProfiles，调大不关闭，不破「熔断不可关闭」红线）：
+  // zcode headless 无逐 turn usage（会话结束才回填）+ GLM 缓存读口径失真，默认 token
+  // 预算对 zcode 形同虚设（夜跑 8 次 max_tokens 误熔断实证）——放宽后 wall-clock 才是真熔断。
+  const budgetProfile = cfg.budgetProfiles?.[opts.backend];
+  if (budgetProfile && Object.keys(budgetProfile).length) {
+    Object.assign(meta.budget, budgetProfile);
+    appendEvent(qdir, 'budget_profile', { backend: opts.backend, overrides: budgetProfile });
+    log(`预算按引擎校准（${opts.backend}）：${Object.entries(budgetProfile).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  }
+
   // 审查后端（异构审查）：执行与审查分体。显式 --review-backend / workflow.json review >
   // 上次会话 > 自动异构（真实后端互审，mock 永不异构）> 回落同源。未知名字在这里快速失败。
   const resolvedReview = resolveReviewBackendName({
@@ -367,36 +393,55 @@ async function cmdRun(repoRoot, taskId, opts) {
     }
 
     for (;;) {
-      // ---- worker 会话（含 fixup 返工循环）----
+      // ---- worker 会话（含 fixup 返工循环；瞬时故障原地退避重试，见 retry 处注释）----
       let result;
       let workerOutput = '';
-      {
-        fs.writeFileSync(promptFile, promptText);
-        if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
-        appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
-        result = await backend.spawn({
-          promptFile,
-          cwd: worktree,
-          maxTurns: meta.budget.max_turns,
-          onEvent: (e) => {
-            appendEvent(qdir, e.type, e);
-            trackPid(e);
-            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
-          },
-          settingsFile,
-          model: effWorkerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
-          envPatch: tierEnv, // tier 凭据注入（claude：settings.env + 子进程 env；zcode：子进程 env）
-        });
-        livePid = null;
-        workerOutput = result.output ?? '';
-        if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
-        if (budget.tripped) {
-          killTree(result.pid);
-          appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
-          moveCard(root, taskId, 'running', 'blocked');
-          appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
-          die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+      let transientAttempt = 0;
+      for (;;) {
+        budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
+        appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens });
+        {
+          fs.writeFileSync(promptFile, promptText);
+          if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
+          appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
+          result = await backend.spawn({
+            promptFile,
+            cwd: worktree,
+            maxTurns: meta.budget.max_turns,
+            onEvent: (e) => {
+              appendEvent(qdir, e.type, e);
+              trackPid(e);
+              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
+            },
+            settingsFile,
+            model: effWorkerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
+            envPatch: tierEnv, // tier 凭据注入（claude：settings.env + 子进程 env；zcode：子进程 env）
+          });
+          livePid = null;
+          workerOutput = result.output ?? '';
+          if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
+          if (budget.tripped) {
+            killTree(result.pid);
+            appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
+            moveCard(root, taskId, 'running', 'blocked');
+            appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
+            die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+          }
         }
+        // 自报不可信：先解析契约块。异常结束（无结果块）且输出带瞬时故障签名
+        // （429 限流/网络抖动——headless 引擎与交互会话共享配额，夜跑 16 次「未产出
+        // 结果块」大头是它）→ 原地退避重试同一 prompt（60s×attempt，≤3 次，事件留痕），
+        // worktree 半成品改动就地续用；签名不匹配或自报 stuck → 走既有 blocked 路径。
+        const preClaimed = parseResultBlock(workerOutput);
+        if (!preClaimed && isTransientWorkerFailure(workerOutput, result.stderrTail) && transientAttempt < MAX_WORKER_RETRIES) {
+          transientAttempt += 1;
+          const waitS = 60 * transientAttempt;
+          appendEvent(qdir, 'worker_retry', { attempt: transientAttempt, max: MAX_WORKER_RETRIES, wait_s: waitS });
+          log(`⚠ worker 疑似瞬时故障（限流/网络）——${waitS}s 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
+          await new Promise((r) => setTimeout(r, waitS * 1000));
+          continue;
+        }
+        break;
       }
 
       // ---- 自报不可信：先解析契约块，再亲自跑门禁 ----
@@ -909,9 +954,27 @@ function engineArgs(opts) {
  * 同进程循环会整批退出；子进程隔离后单任务 blocked/failed 不阻塞后续。
  * 队列空 / 只剩损坏卡 / 达到 --max 轮数即停。
  */
-function cmdDrain(repoRoot, opts) {
+/** drain 预检：worker 引擎起不来时逐卡 spawn 失败烧成 blocked（2026-10-29 夜跑 8 卡
+ *  ENOENT 实证）——起跑前探测一次，不可用直接拒绝启动（给可操作修复指引，卡零消费）。 */
+function preflightWorkerBackend(backend) {
+  if (backend === 'zcode-headless' && !zcodeAvailable()) {
+    die('预检失败：zcode CLI 不可用（ORCH_ZCODE_CLI 未设 / PATH 无 zcode / --version 探测失败）。\n'
+      + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径> 或安装 PATH 版 zcode）后重跑。', 1);
+  }
+  if (backend === 'claude-headless' && !claudeAvailable()) {
+    die('预检失败：claude CLI 不可用（PATH 无 claude / 未登录 / --version 探测失败）。\n'
+      + 'drain 拒绝启动。修复后重跑；切换引擎须过人工闸门（--approve-backend-switch）。', 1);
+  }
+}
+
+function drainTallyLine(tally) {
+  return Object.entries(tally).map(([s, n]) => `${s} ${n}`).join('、') || '无';
+}
+
+async function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
+  const cfg = runConfig(repoRoot);
   // 调度器互斥：drain / nightly / scan --run 同刻只允许一个在跑（run-lock.mjs）。
   // 子进程经 childEnvForHeldLock 豁免（run 不抢锁；被 spawn 的 drain 继承父锁语义）。
   const lock = acquireSchedulerLock(repoRoot, 'drain');
@@ -921,20 +984,22 @@ function cmdDrain(repoRoot, opts) {
   }
   try {
     const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
-    if (workers > 1) return cmdDrainParallel(repoRoot, root, opts, workers);
+    preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
+    if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
     let lastTried = null;
+    const tally = {};
     for (;;) {
       if (done >= max) {
-        log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。`);
+        log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。本轮落位：${drainTallyLine(tally)}。`);
         return;
       }
       const next = pickNextCard(root);
       if (!next) {
         const stuck = listCards(root, 'pending');
         if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
-        else log(`队列已清空：本次 drain 共跑完 ${done} 个任务。`);
+        else log(`队列已清空：本次 drain 共跑完 ${done} 个任务（${drainTallyLine(tally)}）。`);
         return;
       }
       // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
@@ -952,6 +1017,8 @@ function cmdDrain(repoRoot, opts) {
       });
       done += 1;
       if (r.status !== 0) log(`任务 ${next.id} 退出码 ${r.status}（已落 blocked/failed/，继续调度下一个）。`);
+      const settled = findCard(root, next.id)?.state;
+      if (settled) tally[settled] = (tally[settled] ?? 0) + 1;
     }
   } finally {
     releaseSchedulerLock(repoRoot);
