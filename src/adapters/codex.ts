@@ -4,7 +4,6 @@ import type { Config } from '../config/types.js'
 import {
   AdapterError,
   gatewayBaseOpenAI,
-  isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
   type DetectResult,
@@ -14,7 +13,7 @@ import {
 } from './types.js'
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { changeIfChanged, directAttachNote, directResponsesEndpointNote } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesEndpointNote, noChangeResult, oursEntryUrl } from './shared.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -198,7 +197,7 @@ export const codexAdapter: HarnessAdapter = {
         return { changes: [], notes: [t('config.toml 无法解析，跳过', 'config.toml cannot be parsed; skipped')] }
       }
       const entry = root.model_providers?.modeldock
-      if (entry && isOursGatewayUrl(typeof entry.base_url === 'string' ? entry.base_url : undefined, 'codex', cfg)) {
+      if (entry && oursEntryUrl(entry.base_url, 'codex', cfg)) {
         delete root.model_providers!.modeldock
         if (root.model_provider === 'modeldock') delete root.model_provider
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
@@ -218,7 +217,7 @@ export const codexAdapter: HarnessAdapter = {
         if (c3) changes.push(c3)
       }
     }
-    if (changes.length === 0) return { changes: [], notes: [t('Codex 未指向 ModelDock 网关，无需改动', 'Codex is not pointing at the ModelDock gateway; nothing to change')] }
+    if (changes.length === 0) return noChangeResult([t('Codex 未指向 ModelDock 网关，无需改动', 'Codex is not pointing at the ModelDock gateway; nothing to change')])
     return { changes, notes: [] }
   },
 

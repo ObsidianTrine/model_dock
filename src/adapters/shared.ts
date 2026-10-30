@@ -1,7 +1,7 @@
 import { t } from '../util/i18n.js'
 import type { Config, ModelMeta, Protocol } from '../config/types.js'
-import type { AttachOptions, FileChange } from './types.js'
-import { gatewayBase, gatewayBaseOpenAI } from './types.js'
+import type { AttachOptions, FileChange, PlanResult } from './types.js'
+import { gatewayBase, gatewayBaseOpenAI, isOursGatewayUrl } from './types.js'
 
 /** 等值过滤帮手：内容无变化返回 null（稳态重接/周期 refresh 零快照零写盘），有变化才产出 FileChange。
  *  dsh/zcode 内联了同款判定；其余适配器统一走这里（known-issues P2：此前 5 处稳态重接也整包
@@ -13,6 +13,35 @@ export function changeIfChanged(
   note?: string
 ): FileChange | null {
   return after === before ? null : { path, before, after, note }
+}
+
+/** 「string 才透传」三元防抖收敛（T25，七处同款）：entry 里的 URL 字段来自任意 JSON 形态，
+ *  只有 string 才参与 isOursGatewayUrl 判定。 */
+export function oursEntryUrl(x: unknown, harnessId: string, cfg: Config): boolean {
+  return isOursGatewayUrl(typeof x === 'string' ? x : undefined, harnessId, cfg)
+}
+
+/** planDetach 空结果尾收敛（T25，七处手抄 { changes: [], notes: [...] }）：notes 由调用方
+ *  给定（t() 实参原样上移，各现场的措辞差异——label 前缀/「当前」——逐字节保留）。 */
+export function noChangeResult(notes: string[]): PlanResult {
+  return { changes: [], notes }
+}
+
+/** status() pointing 三态收敛（T25）：dsh/zcode 逐字相同的 isGatewayBase 三元 + detail 拼接，
+ *  仅「无 provider 占位文案」不同（参数化）。 */
+export function pointingStatus(
+  base: string | undefined,
+  models: number,
+  port: number,
+  noProviderZh: string,
+  noProviderEn: string
+): { pointing: 'gateway' | 'other' | 'unknown'; detail: string } {
+  return {
+    pointing: isGatewayBase(base, port) ? 'gateway' : base ? 'other' : 'unknown',
+    detail:
+      (base ?? t(noProviderZh, noProviderEn)) +
+      (models > 0 ? t(' · {count} 个模型', ' · {count} models', { count: models }) : ''),
+  }
 }
 
 /** 上下文变体后缀（[1m]/[128k] 等）：是请求参数标记，不是独立模型 id；NAME 显示与清洗时剥掉 */

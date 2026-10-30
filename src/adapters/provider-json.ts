@@ -3,7 +3,6 @@ import type { Config } from '../config/types.js'
 import {
   AdapterError,
   gatewayBaseOpenAI,
-  isOursGatewayUrl,
   type AdapterStatus,
   type AttachOptions,
   type DetectResult,
@@ -12,7 +11,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonTolerant, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { changeIfChanged, directAttachNote, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, noChangeResult, oursEntryUrl, resolveRoute, routeModelNote } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 /** mimocode schema 的单模型条目（$schema https://mimo.xiaomi.com/mimocode/config.json 的 provider.<id>.models 值） */
@@ -268,7 +267,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
       const root = parsed.value as JsonConfig
       const entry = root.provider?.modeldock
       const base = entry?.options?.baseURL
-      if (entry && isOursGatewayUrl(typeof base === 'string' ? base : undefined, factory.id, cfg)) {
+      if (entry && oursEntryUrl(base, factory.id, cfg)) {
         delete root.provider!.modeldock
         if (root.model?.startsWith('modeldock/')) delete root.model
         if (root.provider && Object.keys(root.provider).length === 0) delete root.provider
@@ -288,7 +287,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
           notes,
         }
       }
-      return { changes: [], notes: [t('{label} 未指向 ModelDock 网关，无需改动', '{label} is not pointing at the ModelDock gateway; nothing to change', { label: factory.label })] }
+      return noChangeResult([t('{label} 未指向 ModelDock 网关，无需改动', '{label} is not pointing at the ModelDock gateway; nothing to change', { label: factory.label })])
     },
 
     async status(cfg: Config, port: number): Promise<AdapterStatus> {

@@ -15,7 +15,6 @@ export const secretsPath = () => path.join(modeldockDir(), 'secrets.json')
 export const presetsJsonPath = () => path.join(modeldockDir(), 'presets.json')
 export const backupsDir = () => path.join(modeldockDir(), 'backups')
 export const logsDir = () => path.join(modeldockDir(), 'logs')
-export const adaptersDir = () => path.join(modeldockDir(), 'adapters')
 export const gatewayStatePath = () => path.join(modeldockDir(), 'gateway.json')
 /** 多机同步本机凭据（docs/design-cloud-sync.md §4.4）：与被同步的 config.toml 分文件，凭据不随包同步 */
 export const syncJsonPath = () => path.join(modeldockDir(), 'sync.json')
