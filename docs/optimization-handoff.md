@@ -24,7 +24,7 @@
 | T15 | agents-hygiene-batch | 编排器与 hook 六项卫生批 | refactor | 小 | 一（串行，T14 后） |
 | T16 | release-test-dedup | release 五腿去重复测试 + node 二进制缓存 | refactor | 小 | 二（可并行） |
 | T17 | sea-icon-and-dup | SDF 图标渲染降本 + 托盘/ico 去重 | refactor | 小 | 二（可并行） |
-| T18 | dependabot-preflight | dependabot-fix 装/构建移出 Claude 会话 | refactor | 微 | 二（可并行） |
+| T18 | dependabot-preflight | dependabot-fix 装/构建移出 Claude 会话 | refactor | 微 | 二（可并行）✅ 已合并 |
 | T19 | ci-micro-opts | CI 与生成脚本六项微优化批 | refactor | 小 | 二（可并行） |
 | T20 | test-sync-fixes-helpers | 同步域测试修复 + helper 四类收敛 | refactor | 中 | 三（串行，先做） |
 | T21 | test-infra-guards | vitest 同构门禁 + mock 工厂 + 耦合留痕 | refactor | 小 | 三（串行，T20 后） |
@@ -40,7 +40,7 @@
 - **批次三（测试域，串行 T20 → T21）**：T20 建 helpers.waitFor 等，T21 的 syncpull 改造要用；且两卡都动 syncpull.test.ts。T20 的 helper 收敛触达 13 个测试文件，动面前先 grep 确认没有别的文件 vi.mock 它们 import 的模块。
 - **批次四（src 结构域，四卡文件互斥可并行）**：T22 lan.ts / T23 state.ts / T24 ops.ts / T25 adapters+paths+sync-engine。T23、T24 建议排最后或单独做（体量大、importer 多，合并窗口要干净）。
 
-> **2026-10-30 收口盘点**：T13（68dbef9）/ T14（bf937bd）/ T16（9b1a891）/ T17（9ccf9b8）/ T19（f66edeb）/ T20（939ee25）/ T22（07562d5）/ T23（25b42a2）/ T24（cc5fe52）已合并 develop（对应卡文件正文已加 ✅ 状态行）；剩余 **T15、T18、T21、T25** 四张未开工（T21 前置 T20 已解除，T15/T21 预研已定稿）。另立缺陷卡 T26–T28（CORRECT-07/08/09）未派发。
+> **2026-10-30 收口盘点**：T13（68dbef9）/ T14（bf937bd）/ T16（9b1a891）/ T17（9ccf9b8）/ T18（dependabot-preflight，2026-10-30 晚收尾合并）/ T19（f66edeb）/ T20（939ee25）/ T22（07562d5）/ T23（25b42a2）/ T24（cc5fe52）已合并 develop（对应卡文件正文已加 ✅ 状态行）；剩余 **T15（其他 agent 开工中）、T21、T25**（T21 前置 T20 已解除，T15/T21 预研已定稿）。缺陷卡 T26（CORRECT-07）已修（6129ac0），T27/T28 未派发。
 
 ## 2. 明确不立项（维持现状，勿翻案）
 
