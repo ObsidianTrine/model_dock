@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-jsonpath-lenient-parse",
+  "title": "L2 pack 写 JSON 配置时 jsonpath 宽容解析静默写坏数据：引号键写错位置、下标落对象成 \"0\" 字符串键、star 中段裸崩",
+  "reviewRef": "fd235ea^",
+  "fixedBy": "fd235ea",
+  "files": ["src/util/jsonpath.ts"],
+  "expect": ["tokenize", "setpath", "path"],
+  "note": "2026-10-30 噪音对照实验发现（CORRECT-08，P2）：jsonpath.ts 作为「已知干净对照」进噪音测量，审查者报 2-3 个问题逐条实证为真。根因：tokenize 正则只消费匹配段不校验完整覆盖（引号键/负数下标/未闭合括号被静默吞字），star 递归无类型守卫，下标段×对象容器静默落 \"0\" 键——被 src/adapters/packs.ts 的 L2 pack 写路径消费，用户手写表达式踩中即静默写坏客户端配置。审查侧教训：「宽容解析不报错」在写路径上是坏数据制造机，表达式解析器必须校验完整覆盖。"
+}
