@@ -152,12 +152,26 @@ function sleepSyncMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, ms);
 }
 
+// 旧版锁（无 beat 字段）专用：pid 存在性探测。心跳判活落地后 pid 复用只影响旧版
+// 锁的过渡窗口（30min 兜底封顶），新锁一律走 beat——两套机制并存见 acquireFinishLock 注释。
+function legacyLockPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM'; // exists but owned by another user — still alive
+  }
+}
+
 function lockLooksLive(info) {
   if (!info || !Number.isInteger(info.pid)) return false; // 损坏锁 = 陈锁，可接管
-  const last = Number.isFinite(info.beat) ? info.beat : Date.parse(info.time);
-  if (!Number.isFinite(last)) return true; // 时间解析不出：保守当活锁
-  const staleMs = Number.isFinite(info.beat) ? FINISH_LOCK_STALE_MS : FINISH_LOCK_LEGACY_STALE_MS;
-  return Date.now() - last < staleMs;
+  if (!Number.isFinite(info.beat)) {
+    // 旧版锁：pid 存在性优先——死属主立即接管（merge-verify ⑤ 的语义，也覆盖 SIGKILL/
+    // 断电残留），活属主（含 pid 复用误判形态）按 time 30min 兜底陈旧，不让滚动升级
+    // 期间的旧版活进程被误接管，也不让旧版崩溃残留的锁永久拒人。
+    return legacyLockPidAlive(info.pid) && Date.now() - Date.parse(info.time) < FINISH_LOCK_LEGACY_STALE_MS;
+  }
+  return Date.now() - info.beat < FINISH_LOCK_STALE_MS;
 }
 
 function acquireFinishLock(taskId) {
