@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-daemon-stderr-pipe-pin",
+  "title": "gateway start --daemon 就绪后 CLI 不返回：父进程 stderr 转写读端把事件循环钉住，脚本/终端被钉死（实测 ≥45s）",
+  "reviewRef": "07cfca4^",
+  "fixedBy": "07cfca4",
+  "files": ["src/cli/shared.ts"],
+  "expect": ["stderr", "unref", "pipe"],
+  "note": "2026-10-30 夜巡发现并沙箱实测复现（CORRECT-07，P1）。根因：spawnDaemonAndWait 以 stdio pipe 拉起常驻 daemon 并挂 'data'/'close' 监听转写 daemon 日志，child.unref() 只把子进程句柄移出引用计数、不移除 stderr 管道读端对事件循环的引用——daemon 常驻、其 fd 2 永不关闭，CLI 就绪探测返回后事件循环排不空。修复 = daemon 侧 fd 2 接管自写 logs/daemon-<date>.log + 父侧 stdio 全 ignore。审查侧教训：unref 只管句柄不管流读端；「为收日志而 pipe 常驻进程的 stderr」必然钉住自身，日志应让常驻方自写。"
+}
