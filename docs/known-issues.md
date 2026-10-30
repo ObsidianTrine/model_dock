@@ -77,7 +77,7 @@
 | CORRECT-04 | P2 | `src/gateway/state.ts`（activeScheduleWindow） | 定时窗口在每日 00:00:00 前后数秒疑似被误判不活跃（实测一次全量 5 例红，根因未查） | ☑ 已修（2026-10-12 @85558ca）——根因非午夜边界，是 end 排他在 23:59:00–23:59:59 的「死亡分钟」，见 docs/archive/release-review-2026-10-12.md §五 |
 | CORRECT-05 | **P1** | `src/config/secrets.ts` 等 6 处 | dev/测试沙箱（FAKE_HOME）操作外溢生产：reset 删真钥匙环条目、sweep 杀生产网关、自启/CLI 入口被动 | ☑ 已修（2026-10-13 @d6e3a59） |
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
-| CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ☐ 未修（2026-10-30 夜巡发现并沙箱实测复现，见 §三） |
+| CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ✅ 已修（2026-10-30，daemon 侧 fd 2 接管自写日志，commit 99fa3a5，见 §三） |
 | CORRECT-08 | P2 | `src/util/jsonpath.ts` | 三处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语）；③ 对象上下文用下标写入静默落字符串键 `"0"` 而非报错（tsx 实测） | ☐ 未修（2026-10-30 噪音对照实验发现，tsx 实测复现，见 §三） |
 | CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☐ 未修（2026-10-30 夜巡发现，逐条读码核实，见 §三） |
 
@@ -383,6 +383,7 @@
 - 实测（2026-10-30 凌晨，macOS + tsx 直跑源码，沙箱实例）：`gateway start --daemon` 在端口已 LISTEN 后 ≥45s 不返回（人工终止）；另一例约 13min 后才自行退出（退出机制未查，推测与 tsx 子进程链的 fd 2 传递有关；SEA 单文件形态未测）。`gateway stop` 等不 spawn daemon 的命令不受影响。review-eval 审查者（GLM-5.3-Flash）在同一代码上的「存疑」发现指同一点，经复现坐实。
 - 影响：脚本/CI/终端里跑 `gateway start --daemon` 会被钉住等待，用户视角「命令卡死」；自启链（--autostart 直起 daemon，不经本路径）与 run_dev（tsx watch）不受影响。
 - 修复方向（未动手）：stderr 改落 daemon 侧自写日志（daemon 自己 appendLine，父进程 stdio 全 ignore）；或读端 `child.stderr.unref()`（注意与 'close' 收尾写的时序）；或转写改经 `child.stderr.pipe(writable)` 且 writable 侧 unref。改动后须回归 `gateway start --daemon` 就绪即返回 + daemon 崩溃日志仍可追。
+- 已修（2026-10-30，commit 99fa3a5）：采用主修方向的 fd 级实现——shared.ts 新增 `redirectDaemonStderrToLog()`，`--sea-gateway` 分支（daemon/自启唯一入口）启动早期 `closeSync(2)`+`openSync` 接管 fd 2 → `logs/daemon-<date>.log`（进程级 stderr 全量含 Node 原生崩溃输出；fd 直写无半行缓冲/丢行问题，原父侧逐行转写随 stdio 全 ignore 整段移除，Windows 换行以 \r\n 原样落盘属观感差异）；`spawnDaemonAndWait` stdio 改全 ignore；pruneExpiredLogs 保留期正则纳入 `daemon-*.log`；启动超时报错补 daemon 日志路径提示。回归：daemon-lifecycle 新增 2 用例（就绪→CLI 退出 <5s + daemon 存活 + 日志存在；坏 argv 崩溃场景 exit 1 报错可见 + 日志收到「网关启动失败」）；实测 dev 形态 3.7s、SEA dist 形态 1.1s 返回（修复前 ≥45s）。detached 语义实测生效：daemon 于 CLI 退出后 reparent 至 launchd 存活、杀 tsx 包装进程网关仍可达——此前「杀 CLI 连带 daemon 死」的观察归因为进程组级击杀场景，CLI 秒退后不复存在。
 
 **CORRECT-08（P2，2026-10-30 噪音对照实验发现，tsx 实测复现）jsonpath 三处健壮性缺陷**
 - 背景：`src/util/jsonpath.ts` 自 2026-10-09 init 后零改动、历轮全仓审查未点名，本次作为「已知干净对照」进噪音测量（中性 prompt，GLM-5.3-Flash）——审查者报 2 个问题，**逐条实证均为真**，非误报（详见 runs 噪音报告）。该文件被 `src/adapters/packs.ts:47,57` 的 L2 pack JSON 写路径直接消费（`k` 来自用户手写的 `[adapter_packs.*]` 路径表达式）。
