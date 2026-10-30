@@ -42,8 +42,9 @@
 | 2026-10-jsonpath-tokenizer-regression | CORRECT-08 修复自带回归：tokenize 正则不消费段间「.」，多段点句式全部误判无法解析（develop HEAD 实测 12 例红含 2 例期望矛盾） | f77dc02 | ⏳ 待首跑（2026-10-30 回归回流；首跑前不计入基线分母） |
 | 2026-10-finish-lock-wait-contract | 锁心跳改造合入未跑套件：finish-lock 夹具假设 fail-fast 默认，与 T13「默认有界等待 300s」契约冲突——develop test:workflow 3 例红，回归信号被红噪声淹没 | 92a78ac | ⏳ 待首跑（2026-10-30 T15 执行会话回灌；首跑前不计入基线分母） |
 | 2026-10-relay-failover-observability | failover 链三处可观测性 lie：数组体改写谎报 modelAfter、全候选 skip 耗尽降级 502 吞 status/hint、replayed_from 只记最后一跳（CORRECT-09） | bf730c6 | ⏳ 待首跑（2026-10-30 T28 修复回流；首跑前不计入基线分母） |
-| 2026-10-tray-win32-basename | trayPidsFromProcessLines 用平台相关 path.basename 切 Windows CIM 反斜杠命令行，非 Windows 宿主整类托盘行不命中：9 例单测红恰逢 runner 短缺漏进 develop（生产行为恰因 win32 上两 basename 同义而未坏、更隐蔽） | d6c0a9f | ⏳ 待首跑（2026-10-30 v1.5.1 周期回流；首跑前不计入基线分母） |
-| 2026-10-daemon-gatewayjson-tamper-race | daemon 篡改纵深用例与常驻网关查更新回写 gateway.json（真实 started_at）竞态，慢速 arm64 断言偶发红、发版腿才炸（linux-arm64 删 tag 重打） | 815a65d | ⏳ 待首跑（2026-10-30 v1.5.1 周期回流；首跑前不计入基线分母） |
+| 2026-10-tray-win32-basename | trayPidsFromProcessLines 用平台相关 path.basename 切 Windows CIM 反斜杠命令行，非 Windows 宿主整类托盘行不命中：9 例单测红恰逢 runner 短缺漏进 develop（生产行为恰因 win32 上两 basename 同义而未坏、更隐蔽） | d6c0a9f | ❌ 首跑未审出（10-30，GLM subagent）——4 个真发现全在别处（:77 未闭引号截尾 / :277、:298 静默回滚 / :362 幻影清理 / unix 枚举失败即弃），path.basename 平台语义没进视野：审查者抠了紧邻目标行的引号解析却没问「输入什么平台格式、解析端跑在哪」。首道平台解析题漏报实录，REVIEW.md 平台解析堵法待下次全量跑分一并评估；原文见 runs/2026-10-30-batch3-2026-10-tray-win32-basename.md |
+| 2026-10-daemon-gatewayjson-tamper-race | daemon 篡改纵深用例与常驻网关查更新回写 gateway.json（真实 started_at）竞态，慢速 arm64 断言偶发红、发版腿才炸（linux-arm64 删 tag 重打） | 815a65d | ✅ 审出（10-30，GLM subagent）——存疑区命中机制：「活网关存在 state 重写路径，篡改值可能被治愈，exit 1 断言偶发翻车」（写入者猜「心跳」，实为查更新；启发式 started_at 命中）；另带 exitCode/signalCode、error 监听缺失等 4 真发现；原文见 runs/2026-10-30-batch3-2026-10-daemon-gatewayjson-tamper-race.md |
+
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
@@ -89,6 +90,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-30 增补 3 题**（2026-10-29 效能审查回灌：T14 修复对 ×2 + T19 修复对 ×1，见上表末三行）：首跑未做（执行会话本机 shell 故障），**首跑记录前不计入基线口径分母**；第三题 fixedBy 已随 T19 合入（cc6d832）回填。
 - **2026-10-30 增补 1 题**（finish-lock-wait-contract，T15 执行会话回灌）：锁心跳改造合入时 test:workflow 3 例红未跑直接合入的逃逸——bug 在场 cb958be、修复 92a78ac 成对完整；首跑待补，不计入基线分母。
 - **2026-10-30 增补事故考题**（realhome-write-through）：用户生产 ~/.modeldock 被测试写穿（config/secrets 被测试夹具整包覆盖）的真实 P0 事故回流，fixedBy=f77dc02（真实 home 写入门禁 + sync 引擎 home 钉扎）。题目只收 engine.ts 单文件（fsx 漏斗第二层门禁不在文件清单内）；首跑待补，跑前不计入基线分母。
+- **2026-10-30 增补 2 题 · 首跑已补**（v1.5.1 发布周期事故回流，batch3，GLM subagent tool-free）：daemon-gatewayjson-tamper-race ✅ 存疑区命中 / tray-win32-basename ❌ 未审出（1/2）——**首次漏报**，暴露平台解析盲区：REVIEW.md 平台条目只覆盖测试侧（NTFS 权限/写死 /tmp），没有「解析 Windows 专属文本须用 win32 语义 path API」口径；堵法待下次全量跑分一并落地评估（零散改 REVIEW.md 会触发全量重跑纪律）。同周期实测踩中的 release-propose commitFiles 解析串位（`--format=%h%x1e` 文件列表跟在下一条 hash 前）不成题——坏版本未上过树（同提交内自纠），已立为「怎么加新考题」第 5 条。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
