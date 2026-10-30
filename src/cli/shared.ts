@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { Console } from 'node:console'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Config } from '../config/types.js'
@@ -42,24 +43,89 @@ export function exitWithThrown(e: unknown): never {
 
 // ── CLI/进程原语（去重，DUP-01）────────────────────────────────────────────
 
+/** 同步直写流的最小形状（console.error / process.emitWarning / 崩溃处理器只消费 write） */
+type SyncWriteLike = { write(chunk: string): boolean }
+
+/** Windows 降级路径（2026-10-30 probe，Node 24 实测）：stdio ignore 下 closeSync(2) 返回成功但
+ *  std fd 槽位不真正释放（fstatSync(2) 前后同 inode、writeSync(2) 仍可写），openSync(log) 永落
+ *  fd 3 —— fd 2 接管天然不可行。降级为「换流不换 fd」：把 process.stderr 与全局 console 重绑到
+ *  直写日志 fd 的同步流，JS 可见的 stderr 输出（console.*、emitWarning、崩溃处理器）照常落日志；
+ *  Node 原生崩溃输出仍进 NUL（fd 级无解，纯 JS 上限如此）。两步都尽力而为，失败静默降级。 */
+function rebindStderrToLogFd(fd: number): void {
+  let fresh: SyncWriteLike | null = null
+  try {
+    // SyncWriteStream 与 Node stdio FILE 流同类；公开导出已在 Node 24 移除，从 memoize 实例取
+    // 内部类。访问 process.stderr 会触发懒初始化（绑 fd 2 = NUL，无输出副作用），随后被覆盖。
+    const stale = process.stderr as unknown as {
+      constructor?: new (fd: number, opts?: { autoClose?: boolean }) => SyncWriteLike
+    }
+    if (stale?.constructor) fresh = new stale.constructor(fd, { autoClose: false })
+  } catch {
+    /* 构造失败退化为鸭子流 */
+  }
+  if (!fresh) {
+    fresh = {
+      write: (chunk) => {
+        try {
+          fs.writeSync(fd, chunk)
+          return true
+        } catch {
+          return false
+        }
+      },
+    }
+  }
+  try {
+    const stderrDesc = Object.getOwnPropertyDescriptor(process, 'stderr')
+    if (stderrDesc?.configurable) {
+      Object.defineProperty(process, 'stderr', { value: fresh, configurable: true, enumerable: true })
+    }
+  } catch {
+    /* 极端环境：放弃 stderr 重绑，继续尝试 console 替换 */
+  }
+  // 全局 console 在首次使用时缓存了流对象（预热后只换 process.stderr 不生效），须整体替换；
+  // 公开 API new Console，stdout 传原对象保持 banner 等行为不变
+  try {
+    const consoleDesc = Object.getOwnPropertyDescriptor(globalThis, 'console')
+    if (consoleDesc?.configurable) {
+      Object.defineProperty(globalThis, 'console', {
+        value: new Console({
+          stdout: process.stdout as NodeJS.WritableStream,
+          stderr: fresh as unknown as NodeJS.WritableStream,
+        }),
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      })
+    }
+  } catch {
+    /* 极端环境：放弃 console 替换，stderr 重绑已尽力 */
+  }
+}
+
 /** daemon 形态启动早期接管 fd 2 → logs/daemon-<date>.log：daemon 的崩溃/启动报错自写日志
  *  （进程级 stderr 全量落盘，含 Node 原生崩溃输出），父 CLI 才能用 stdio 全 ignore 拉起而不把
  *  自己钉住（CORRECT-07：pipe 读端 flowing 态被事件循环引用，daemon 常驻 fd 2 永不关闭）。
  *  fd 级重定向无半行缓冲/丢行问题（原父侧逐行转写随 stdio ignore 整段移除，日志保真由 fd 直写
  *  继承；Windows 换行以 \r\n 原样落盘）。必须在 daemon 进程消费 process.stderr 之前调用——
  *  stdio ignore 下 stderr 句柄懒初始化，先腾 fd 再写即全部落进日志。保留期随 pruneExpiredLogs。
- *  返回日志路径；fd 2 接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。 */
+ *  返回日志路径；接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。 */
 export function redirectDaemonStderrToLog(): string | null {
   const logPath = path.join(logsDir(), `daemon-${localDateStr()}.log`)
   fs.mkdirSync(logsDir(), { recursive: true })
   try {
     try {
-      fs.closeSync(2) // 腾出 fd 2（stdio ignore 下它指向 /dev/null）
+      fs.closeSync(2) // 腾出 fd 2（stdio ignore 下 unix 指向 /dev/null；Windows 上不真正释放槽位，见 rebindStderrToLogFd）
     } catch {
       /* 已关闭 */
     }
-    const fd = fs.openSync(logPath, 'a') // 单线程启动期最低可用 fd 必为 2
-    if (fd !== 2) {
+    const fd = fs.openSync(logPath, 'a') // unix：单线程启动期最低可用 fd 必为 2
+    if (fd === 2) return logPath // unix fd 级接管成功（含 Node 原生崩溃输出）
+    // Windows（probe 实测 fd 恒落 3）：fd 2 接管不可行 → 换流不换 fd，JS 可见 stderr 输出落日志
+    try {
+      rebindStderrToLogFd(fd)
+      return logPath
+    } catch {
       try {
         fs.closeSync(fd)
       } catch {
@@ -67,7 +133,6 @@ export function redirectDaemonStderrToLog(): string | null {
       }
       return null
     }
-    return logPath
   } catch {
     return null // 日志文件打不开：stderr 保持原状，功能不受影响
   }
