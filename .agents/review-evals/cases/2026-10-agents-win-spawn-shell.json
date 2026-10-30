@@ -1,0 +1,13 @@
+{
+  "id": "2026-10-agents-win-spawn-shell",
+  "title": ".agents 编排器在 Windows 上 spawn 全局命令未带 shell（.cmd 包装直调必 ENOENT）：claude worker 探测带 shell 说可用、spawn 不带起必挂（worker/审查全落 blocked/），orchestrator npm ci 依赖装不上，nightly audit 信号源静默失效",
+  "reviewRef": "c99f326^",
+  "fixedBy": "c99f326",
+  "files": [
+    ".agents/scripts/orchestrator/backends/claude-headless.mjs",
+    ".agents/scripts/orchestrator.mjs",
+    ".agents/scripts/orchestrator/scan.mjs"
+  ],
+  "expect": ["shell", "enoent"],
+  "note": "2026-10-29 效能审查发现（T14 卡，跨平台审查线），修复 c99f326。根因：Windows 全局命令是 .cmd 包装，spawnSync 直调必 ENOENT（AGENTS.md 工程硬性约定明文）；claude-headless.mjs 的可用性探测带 shell: process.platform === 'win32' 而真实 spawn 不带——探测说可用、实际起不来（该文件头注自写「探测必须与 spawn 同语义」却违例），2026-10-29 夜跑 worker/审查全挂落 blocked/ 的成因之一。漏过层：backends 自写自审，「探测与 spawn 同语义」纪律只存在于头注、未机器化；unix 上一切正常使 Windows 分支从未被真机验证。堵法：spawn-shell.mjs 纯函数（platform 注入、双分支可在任意 OS 断言）+ zcode-headless 保持探测/spawn 均不带 shell（同语义宁可误报不可用）。审查侧：凡「探测/预检 A 与真实执行 B」成对出现的代码，先核对两者选项语义一致"
+}
