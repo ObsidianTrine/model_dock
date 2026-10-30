@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-realhome-write-through",
+  "title": "测试收尾 restoreHomes 后同步引擎长尾 tick 把测试配置整包写进真实 home：stopSyncEngine 不等在飞 tick、单例无 home 钉扎、tick 中途写盘路径随 env 漂移",
+  "reviewRef": "f77dc02^",
+  "fixedBy": "f77dc02",
+  "files": ["src/sync/engine.ts"],
+  "expect": ["stopSyncEngine", "restoreHomes", "FAKE_HOME", "长尾", "钉扎"],
+  "note": "2026-10-30 生产事故（P0）：本机测试/评测夜收尾 restoreHomes() 恢复 MODELRDOCK_FAKE_HOME 后，单例 SyncLoop 的长尾/在飞 tick 按真实 home 解析路径落盘——被测试夹具污染的 sync.json（cloud 凭据 mdksync_hb/tok/x 与 test/sync-engine-gaps.test.ts 逐字吻合）让生产网关挂上同步引擎，apply 把测试配置+假密钥整包写进生产 config.toml/secrets.json，用户服务全空、密钥只剩钥匙串可救。2026-10-05 同型事故复发：beginTick 注释已写明不变式但只靠纪律——stopSyncEngine 是 void stopLoop() fire-and-forget（afterAll 无法等它）、SyncLoop 无 pinnedHome 钉扎、syncTickOnce 的 apply/簿记在写盘时才按当前 env 解析路径。审查者应指出：①停止契约须可等待（测试先 await 再恢复 env）②挂载时钉扎 home、env 切走后 tick 整体跳过 ③在飞 tick 写盘前 home 稳定性校验。修复 f77dc02 另含第二层 fsx 漏斗门禁（assertNotRealHomeWrite：测试上下文拒写真实 home，不在本题文件内）。"
+}
