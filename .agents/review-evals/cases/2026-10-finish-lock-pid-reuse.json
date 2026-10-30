@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-finish-lock-pid-reuse",
+  "title": "feature-branch finish 锁判活用 process.kill(pid,0)：Windows 上属主退出后 pid 被复用 → 死锁被误判为活，排队者永远拿不到锁；僵尸 finish（主流程完成、事件循环被泄漏句柄钉住）也永久持锁",
+  "reviewRef": "88aa417",
+  "fixedBy": "acf3953",
+  "files": [".agents/scripts/feature-branch.mjs"],
+  "expect": ["复用", "reuse", "心跳", "heartbeat"],
+  "note": "2026-10-30 多 agent 并行 finish 实证踩中：排队者反复被「another finish is already running」拒绝，属主早已合并落盘（僵尸进程存活 40+ 分钟后才自然消亡）。教训：跨平台进程判活别依赖 pid 存在性——Windows pid 复用极快；锁类语义要心跳/租约（beat 停更即陈锁可接管），且 exit handler 只清属主是自己的锁（迟到僵尸不得删接管者的新锁）"
+}

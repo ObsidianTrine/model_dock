@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-orch-resume-backend-first-hit",
+  "title": "orchestrator resume「沿用上次会话后端」用 .find 取第一条 worker_spawned：events.jsonl append-only，多引擎切换过的任务 resume 静默切回最初引擎——恰是后端切换人工闸门要防的事",
+  "reviewRef": "5e4dcfe^1",
+  "fixedBy": "5e4dcfe",
+  "files": [".agents/scripts/orchestrator/backends/claude-headless.mjs"],
+  "expect": ["worker_spawned", "append", "追加"],
+  "note": "2026-10-30 审查产出（任务卡 09-2）。同仓库 cleanupOrphanWorker 用 reverse().find 取最新、这里用 .find 取最旧——两种口径并存本身即坏味道。教训：append-only 日志取「当前值」必须显式选方向（取末条），.find 命中首条是最省事的错法"
+}

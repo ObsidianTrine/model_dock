@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-orch-awaiting-human-crash",
+  "title": "orchestrator run 放行 awaiting-human 卡但不做目录迁移：卡留在 awaiting-human/ 进整轮 worker，首个终态迁移 moveCard('running',…) 源目录无卡必抛 QueueError，兜底 failTaskToBlocked 只认 running/reviewing → 裸栈崩溃",
+  "reviewRef": "5e4dcfe^1",
+  "fixedBy": "5e4dcfe",
+  "files": [".agents/scripts/orchestrator.mjs"],
+  "expect": ["awaiting-human", "movecard"],
+  "note": "2026-10-30 审查产出（任务卡 09-1）。状态检查的白名单与目录迁移必须成对：放行一个入口状态就要保证它有到 running 的迁移路径，否则第一处终态迁移 moveCard('running',…) 就是炸弹。同 file 还藏着 baseBranch 硬编码 'develop'（gateScopePurity/changedFiles 未传参，09-3 一并修复）——同源次要缺陷，审出算加分不进 expect"
+}
