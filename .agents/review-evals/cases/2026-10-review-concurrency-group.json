@@ -11,5 +11,5 @@
     "cancel-in-progress",
     "group"
   ],
-  "note": "2026-10-29 效能审查发现（T19 卡 item3），修复待 T19 合入后回填 fixedBy（reviewRef 已冻结在 bug 在场的 d8d6d3d）。根因：.github/workflows/claude-review.yml 的 auto-review（pull_request 触发）与 interactive（@claude 评论触发）两 job 的 concurrency.group 同为 claude-review-<PR号> 且 cancel-in-progress: true——组粒度是 PR 而不是「PR×通道」，交互评论天然与进行中的自动审查撞组。文件头注释只解释了 job 级并发的动机，未说明两 job 共组是否有意。漏过层：workflow 级并发组设计从未被审查视角过一遍（review bot 自身的 yml 不在审查范围内——自己审查不了自己）；堵法：拆独立组名；审查侧：凡 cancel-in-progress 的并发组，列出同组全部触发源，确认「互相取消」是否为有意语义"
+  "note": "2026-10-29 效能审查发现（T19 卡 item3），修复 cc6d832（T19 ci-micro-opts，2026-10-30 合入）；reviewRef 冻结在 bug 在场的 d8d6d3d。根因：.github/workflows/claude-review.yml 的 auto-review（pull_request 触发）与 interactive（@claude 评论触发）两 job 的 concurrency.group 同为 claude-review-<PR号> 且 cancel-in-progress: true——组粒度是 PR 而不是「PR×通道」，交互评论天然与进行中的自动审查撞组。文件头注释只解释了 job 级并发的动机，未说明两 job 共组是否有意。漏过层：workflow 级并发组设计从未被审查视角过一遍（review bot 自身的 yml 不在审查范围内——自己审查不了自己）；堵法：拆独立组名；审查侧：凡 cancel-in-progress 的并发组，列出同组全部触发源，确认「互相取消」是否为有意语义"
 }
