@@ -168,11 +168,11 @@ export function eventLoopLagMs(): number | null {
   return loopLagMs
 }
 
-/** JSONL 日志保留期清理（PERF-16）：gateway-/audit- 按天日文件无界累积，超保留天数的在
- *  网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻流池持有句柄的
- *  日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），删除失败跳过、
- *  次日定时重试。返回删除数；retentionDays 非正数视为禁用。 */
-const LOG_DAY_FILE_RE = /^(gateway|audit)-(\d{4})-(\d{2})-(\d{2})\.jsonl$/
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-（.jsonl）与 daemon-（.log）按天日文件无界
+ *  累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻
+ *  流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），
+ *  删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。 */
+const LOG_DAY_FILE_RE = /^(gateway|audit|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
 
 export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
   const days = Math.floor(Number(retentionDays))

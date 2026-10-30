@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import type { Config } from '../config/types.js'
 import { DEFAULT_GATEWAY_PORT } from '../config/types.js'
 import { loadConfig } from '../config/store.js'
 import { gatewayLive, type GatewayStateFile } from '../gateway/state.js'
-import { c, t, ensureDir, sleep, getLang, appendLine, localDateStr } from '../util/index.js'
+import { c, t, ensureDir, sleep, getLang, localDateStr } from '../util/index.js'
 import { logsDir, modeldockDir } from '../util/paths.js'
 
 export { gatewayLive, DEFAULT_GATEWAY_PORT }
@@ -41,9 +42,42 @@ export function exitWithThrown(e: unknown): never {
 
 // ── CLI/进程原语（去重，DUP-01）────────────────────────────────────────────
 
+/** daemon 形态启动早期接管 fd 2 → logs/daemon-<date>.log：daemon 的崩溃/启动报错自写日志
+ *  （进程级 stderr 全量落盘，含 Node 原生崩溃输出），父 CLI 才能用 stdio 全 ignore 拉起而不把
+ *  自己钉住（CORRECT-07：pipe 读端 flowing 态被事件循环引用，daemon 常驻 fd 2 永不关闭）。
+ *  fd 级重定向无半行缓冲/丢行问题（原父侧逐行转写随 stdio ignore 整段移除，日志保真由 fd 直写
+ *  继承；Windows 换行以 \r\n 原样落盘）。必须在 daemon 进程消费 process.stderr 之前调用——
+ *  stdio ignore 下 stderr 句柄懒初始化，先腾 fd 再写即全部落进日志。保留期随 pruneExpiredLogs。
+ *  返回日志路径；fd 2 接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。 */
+export function redirectDaemonStderrToLog(): string | null {
+  const logPath = path.join(logsDir(), `daemon-${localDateStr()}.log`)
+  fs.mkdirSync(logsDir(), { recursive: true })
+  try {
+    try {
+      fs.closeSync(2) // 腾出 fd 2（stdio ignore 下它指向 /dev/null）
+    } catch {
+      /* 已关闭 */
+    }
+    const fd = fs.openSync(logPath, 'a') // 单线程启动期最低可用 fd 必为 2
+    if (fd !== 2) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* 尽力清理 */
+      }
+      return null
+    }
+    return logPath
+  } catch {
+    return null // 日志文件打不开：stderr 保持原状，功能不受影响
+  }
+}
+
 /** 分离拉起网关守护进程并轮询就绪（默认 20×250ms=5s；rounds 可调）。返回活网关状态；超时返回 null。
  *  probe 探活函数、spawnFn 执行器均可注入（单测传 fake，避免真实探测网关/起 daemon）。
- *  SEA 双击冷启逢 Defender/SmartScreen 扫描可能 >5s，GUI 路径（cli.ts launchGui）传更大 rounds。 */
+ *  SEA 双击冷启逢 Defender/SmartScreen 扫描可能 >5s，GUI 路径（cli.ts launchGui）传更大 rounds。
+ *  daemon 侧经 redirectDaemonStderrToLog() 自写 logs/daemon-<date>.log（cli.ts --sea-gateway 分支），
+ *  本函数 stdio 全 ignore——pipe 转写会让父 CLI 就绪后仍被读端钉住不退出（CORRECT-07）。 */
 export async function spawnDaemonAndWait(
   argv: string[],
   probe: () => Promise<GatewayStateFile | null> = gatewayLive,
@@ -51,13 +85,11 @@ export async function spawnDaemonAndWait(
   rounds = 20
 ): Promise<GatewayStateFile | null> {
   await ensureDir(modeldockDir())
-  await ensureDir(logsDir()) // daemon 日志目录：appendLine 只追加不建目录
-  const daemonLog = path.join(logsDir(), `daemon-${localDateStr()}.log`)
   const child = spawnFn(argv[0], argv.slice(1), {
     detached: true,
-    // stderr 收进 logs/daemon-<date>.log（保留期随 pruneExpiredLogs 按天清理）：此前 stdio 全
-    // ignore，daemon 崩溃/启动报错凭空蒸发，用户只见「启动超时」无从排查。stdout 无诊断价值保持 ignore
-    stdio: ['ignore', 'ignore', 'pipe'],
+    // 全 ignore：daemon 崩溃/启动报错由 daemon 侧 fd 2 接管自写日志（见上），父进程不再持
+    // 任何子进程流——否则读端引用让 CLI 在就绪探测返回后仍无法退出
+    stdio: ['ignore', 'ignore', 'ignore'],
     // daemon 与 CLI 语言一致：config.toml 尚无 language 时 CLI 的 --lang/环境变量选择也要传下去
     env: { ...process.env, MODELRDOCK_LANG: getLang() },
     cwd: modeldockDir(),
@@ -65,36 +97,9 @@ export async function spawnDaemonAndWait(
   })
   child.unref()
   // 异步 spawn 失败（ENOENT/权限）必须挂 error 监听：不接则成 uncaught exception 杀 CLI。
-  // 拉起失败时轮询会自然超时返回 null，这里只留可见报错
+  // 拉起失败时轮询会自然超时返回 null，这里只留可见报错（打到用户自己的终端 stderr）
   child.on('error', (err) => {
     console.error(t('[modeldock] daemon 进程拉起失败：{msg}', '[modeldock] Failed to spawn the daemon process: {msg}', { msg: err.message }))
-  })
-  // stderr 按行追加进 daemon 日志（常驻流池）；跨 chunk 的半行先缓冲，流关时补写尾行
-  let pending = ''
-  const writeLine = (line: string): void => {
-    const cleaned = line.replace(/\r$/, '') // Windows 文本换行归一
-    if (cleaned) {
-      try {
-        appendLine(daemonLog, cleaned + '\n')
-      } catch {
-        /* 日志失败不影响拉起 */
-      }
-    }
-  }
-  child.stderr?.on('data', (chunk: Buffer | string) => {
-    pending += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-    for (;;) {
-      const i = pending.indexOf('\n')
-      if (i < 0) break
-      writeLine(pending.slice(0, i))
-      pending = pending.slice(i + 1)
-    }
-  })
-  child.stderr?.on('close', () => {
-    if (pending) {
-      writeLine(pending)
-      pending = ''
-    }
   })
 
   for (let i = 0; i < rounds; i++) {
