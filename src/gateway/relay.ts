@@ -117,7 +117,7 @@ export class UpstreamError extends Error {
   transport?: boolean
   /** true = 候选本身不可用（key 缺失 / 协议端点缺失等配置级问题，请求未发出）：跳到下一候选而不是中止整条链 */
   candidateSkip?: boolean
-  /** 自动路由结果标记（down_all / failover 等），用于日志 reason */
+  /** 自动路由结果标记（down_all / failover / skip_all 等），用于日志 reason */
   routeReason?: string
   constructor(status: number, message: string, hint?: string) {
     super(message)
@@ -322,8 +322,9 @@ function resolveModelFinal(target: ResolvedTarget, wire: string | undefined): st
   return target.modelOverride ?? alias ?? tierFallback ?? requested ?? target.profile.default_model
 }
 
-/** 确需改写时的模型注入 + 重序列化。解析失败 / 顶层非对象时返回 null，调用方原样透传（不进解析时
- *  已判模型，此处仅做改写所需的完整 parse，失败只能透传）。 */
+/** 确需改写时的模型注入 + 重序列化。解析失败 / 顶层非对象（含数组——typeof [] === 'object'
+ *  拦不住，expando 写入会被 stringify 丢弃而 modelAfter 谎报已改写，CORRECT-09 ①）时返回 null，
+ *  调用方原样透传（不进解析时已判模型，此处仅做改写所需的完整 parse，失败只能透传）。 */
 function injectModel(body: Buffer, final: string): { body: Buffer; modelAfter: string } | null {
   let json: any
   try {
@@ -331,7 +332,7 @@ function injectModel(body: Buffer, final: string): { body: Buffer; modelAfter: s
   } catch {
     return null
   }
-  if (!json || typeof json !== 'object') return null
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null
   json.model = final
   return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter: final }
 }
@@ -591,7 +592,12 @@ export async function forwardWithFailover(
   const codes = rt.config.gateway?.failover_status_codes
   const switchable = Array.isArray(codes) && codes.length ? new Set(codes) : null
   let lastErr: unknown
-  let replayedFrom: string | undefined // 记录因重放而跳过的候选（传输层失败/限流切换/候选不可用），便于日志对账
+  // 记录因重放而跳过的候选（传输层失败/限流切换/候选不可用），便于日志对账——
+  // 数组累积去重：A→B→C 连续重放时单变量会反复覆盖，最终 reason 只剩最后一跳（CORRECT-09 ③）
+  const replayedFrom: string[] = []
+  const markReplay = (id: string) => {
+    if (!replayedFrom.includes(id)) replayedFrom.push(id)
+  }
   for (let i = 0; i < picked.ordered.length; i++) {
     const c = picked.ordered[i]
     const t0 = Date.now()
@@ -610,12 +616,12 @@ export async function forwardWithFailover(
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < picked.ordered.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
-        replayedFrom = c.providerId
+        markReplay(c.providerId)
         continue
       }
       const marks: string[] = []
       if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
-      if (replayedFrom) marks.push(`replayed_from:${replayedFrom}`)
+      if (replayedFrom.length) marks.push(`replayed_from:${replayedFrom.join(',')}`)
       // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
       // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
       const drained = bodyText
@@ -630,9 +636,16 @@ export async function forwardWithFailover(
       const ms = Date.now() - t0
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
       recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
-      if (skip) replayedFrom = c.providerId
+      if (skip) markReplay(c.providerId)
       else throw e // 非传输层错误：不重放，原样上抛
     }
+  }
+  // 链尾出口（CORRECT-09 ②）：候选全部 candidateSkip 耗尽时从未发生真实连接——透传最后一个
+  // skip 错误的 status 与 hint（如钥匙环锁定的 503 + 解锁指引），routeReason 用 skip_all
+  // （不能谎报 down_all）；transport 类耗尽保持既有 502 包装 + down_all 语义不变。
+  if (lastErr instanceof UpstreamError && lastErr.candidateSkip === true) {
+    lastErr.routeReason = 'skip_all'
+    throw lastErr
   }
   const e = new UpstreamError(502, t('自动路由：所有候选服务连接失败（{msg}）', 'Auto route: all candidate services failed to connect ({msg})', { msg: (lastErr as Error)?.message }))
   e.routeReason = 'down_all'

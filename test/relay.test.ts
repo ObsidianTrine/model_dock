@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { UpstreamError, clientProtocolFromPath, isConnectTimeoutError, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
-import type { ProviderConfig } from '../src/config/types.js'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { UpstreamError, clientProtocolFromPath, forwardWithFailover, isConnectTimeoutError, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
+import { buildRuntime, type ResolvedTarget } from '../src/gateway/state.js'
+import { setSecret } from '../src/config/secrets.js'
+import { fakeHome } from './helpers.js'
+import type { Config, ProviderConfig } from '../src/config/types.js'
 
 /** 只测 relay.ts 里真实导出的纯函数。
  *  不要在这里「复刻」实现里的正则（如 ROUTED_PATH_RE / CLAUDE_BUILTIN_RE）再断言它自己——
@@ -121,5 +126,131 @@ describe('relay · isConnectTimeoutError（B2 重试分类：超时类不重试�
     }
     expect(isConnectTimeoutError(new Error('no code'))).toBe(false)
     expect(isConnectTimeoutError(undefined)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// forwardWithFailover（CORRECT-09 可观测性）：真实 rt + 真实 forwardToUpstream。
+// 失败候选用「listen(0) 后关闭」的确认关闭端口造 transport 失败，成功候选用本地 mock；
+// keys 走 fakeHome file 后端。不 mock forwardToUpstream——候选级错误分类必须走真实入口。
+describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
+  const body = Buffer.from(JSON.stringify({ model: 'm', messages: [] }))
+  const ROUTED = '/v1/messages'
+
+  async function closedPort(): Promise<number> {
+    const s = http.createServer()
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const port = (s.address() as AddressInfo).port
+    await new Promise<void>((r) => s.close(() => r()))
+    return port
+  }
+
+  async function startMock(): Promise<{ url: string; close: () => Promise<void> }> {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const url = `http://127.0.0.1:${(s.address() as AddressInfo).port}`
+    return { url, close: () => new Promise((r) => s.close(() => r())) }
+  }
+
+  function providerCfg(id: string, over: Partial<ProviderConfig> = {}): ProviderConfig {
+    return { name: id, base_url: 'http://127.0.0.1:1', protocol: 'anthropic', auth_style: 'bearer', key_ref: `file:${id}`, priority: 0, ...over }
+  }
+
+  function buildRt(providers: Record<string, ProviderConfig>) {
+    const cfg = { providers, profiles: {}, harness: {}, gateway: { auto_fallback: false } } as unknown as Config
+    return buildRuntime(cfg, 'tok')
+  }
+
+  function baseOn(cfg: Config, id: string): ResolvedTarget {
+    return {
+      harness: 'test',
+      profileName: 'p',
+      profile: { name: 'p', provider: id },
+      provider: cfg.providers[id],
+    }
+  }
+
+  it('② 全候选 candidateSkip 耗尽：透传最后一个 skip 错误的 status/hint，routeReason=skip_all（不再谎报 down_all）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { key_ref: 'file:ghost-a' }),
+          b: providerCfg('b', { key_ref: 'file:ghost-b' }),
+          c: providerCfg('c', { key_ref: 'file:ghost-c' }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] }).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      const e = err as UpstreamError
+      expect(e.status).toBe(503) // 原 skip 错误的 status 原样透传（而非包装 502）
+      expect(e.candidateSkip).toBe(true)
+      expect(e.routeReason).toBe('skip_all')
+      expect(e.hint).toContain('set-key') // 可操作指引保留（如「provider set-key 更新 key」）
+      expect(e.message).toContain('p→c') // 最后一个候选（c）的错误原样透传
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('③ A→B→C 连续重放：replayed_from 累积全部被跳候选（原实现单变量覆盖只剩最后一跳）', async () => {
+    const h = fakeHome()
+    const mock = await startMock()
+    try {
+      const p1 = await closedPort()
+      const p2 = await closedPort()
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: `http://127.0.0.1:${p1}` }),
+          b: providerCfg('b', { base_url: `http://127.0.0.1:${p2}` }),
+          c: providerCfg('c', { base_url: mock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      for (const id of ['a', 'b', 'c']) await setSecret(id, `sk-${id}`, 'file')
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] })
+      expect(result.usedProviderId).toBe('c')
+      expect(result.status).toBe(200)
+      expect(result.reason).toBe('failover_to:c,replayed_from:a,b')
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('④ 正常 failover（transport 失败→次选成功）语义不变', async () => {
+    const h = fakeHome()
+    const mock = await startMock()
+    try {
+      const p1 = await closedPort()
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: `http://127.0.0.1:${p1}` }),
+          b: providerCfg('b', { base_url: mock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      expect(result.usedProviderId).toBe('b')
+      expect(result.status).toBe(200)
+      expect(result.reason).toBe('failover_to:b,replayed_from:a')
+    } finally {
+      await mock.close()
+      h.restore()
+    }
   })
 })
