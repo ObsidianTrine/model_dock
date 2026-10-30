@@ -1,10 +1,49 @@
 import fsp from 'node:fs/promises'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { homeDir, modeldockDir, sandboxNpmBinDir } from './paths.js'
 import { t } from './i18n.js'
+
+// ===== 真实 home 写入门禁（2026-10-05 / 2026-10-30 两次生产覆盖事故防线）=====
+
+/** 测试/agent 上下文判定：vitest worker（VITEST/VITEST_WORKER_ID 注入）或显式标记
+ *  MODELRDOCK_TEST=1（tsx 种子脚本等非 vitest 进程，AGENTS.md 配方要求设置）。 */
+export function inTestContext(): boolean {
+  return process.env.VITEST === 'true' || !!process.env.VITEST_WORKER_ID || process.env.MODELRDOCK_TEST === '1'
+}
+
+/** 测试上下文进程眼中的「真实 home」落点：全部重定向 env 都未设时 home 的位置。 */
+function realModeldockDir(): string {
+  return process.env.MODELRDOCK_HOME || path.join(os.homedir(), '.modeldock')
+}
+
+/** 测试/agent 上下文的进程拒写真实 home：atomicWrite / acquireFileLock 统一漏斗前置校验。
+ *  两次事故同根——测试进程的异步长尾（sync 引擎在飞 tick、缓冲写盘）在 MODELRDOCK_FAKE_HOME
+ *  被恢复后仍按真实 home 解析路径落盘。判定**只看写入目标**、不看 FAKE_HOME 是否已设：
+ *  目标落在真实 home 下就拦，覆盖「沙箱配了但调用方传了字面量真实路径」的旁路。
+ *  生产进程（无测试标记）零影响；只拦写不拦读。确属有意写真实 home 的场景（当前无）设
+ *  MODELRDOCK_ALLOW_REAL_HOME_WRITE=1 显式豁免。非漏斗写入（appendLine 追加日志、catalog
+ *  缓存等）不在此防线内——日志类污染不破坏数据，不值得给高频路径加校验。 */
+export function assertNotRealHomeWrite(file: string): void {
+  if (!inTestContext()) return
+  if (process.env.MODELRDOCK_ALLOW_REAL_HOME_WRITE === '1') return
+  // darwin/win32 文件系统默认大小写不敏感：小写归一后比较防大小写绕过；linux 保持原样
+  const fold = (p: string): string => (process.platform === 'linux' ? p : p.toLowerCase())
+  const realDir = fold(path.resolve(realModeldockDir()))
+  const target = fold(path.resolve(file))
+  if (target === realDir || target.startsWith(realDir + path.sep)) {
+    throw new Error(
+      t(
+        '测试/agent 进程正在写真实 home（{file}），已拒绝：请设置 MODELRDOCK_FAKE_HOME=<独立目录> 用隔离沙箱测试；确属有意操作设 MODELRDOCK_ALLOW_REAL_HOME_WRITE=1 豁免',
+        'A test/agent process attempted to write the real home ({file}); blocked. Set MODELRDOCK_FAKE_HOME=<dir> to test in an isolated sandbox; set MODELRDOCK_ALLOW_REAL_HOME_WRITE=1 to override deliberately',
+        { file }
+      )
+    )
+  }
+}
 
 export async function ensureDir(dir: string, mode = 0o700): Promise<void> {
   await fsp.mkdir(dir, { recursive: true, mode })
@@ -148,6 +187,7 @@ export async function fileSha256(p: string): Promise<string> {
 
 /** tmp + rename 原子写，显式设置权限位；rename 前 fsync，断电场景不留半截文件 */
 export async function atomicWrite(file: string, content: string | Buffer, mode = 0o600): Promise<void> {
+  assertNotRealHomeWrite(file) // 在 ensureDir 之前：连目录创建都不许发生
   await ensureDir(path.dirname(file))
   const tmp = path.join(
     path.dirname(file),
@@ -235,6 +275,7 @@ export async function acquireFileLock(
   lockFile: string,
   opts?: { timeoutError?: (lp: string) => Error }
 ): Promise<() => void> {
+  assertNotRealHomeWrite(lockFile) // 锁文件与被保护文件同目录（<file>.lock），同受门禁约束
   fs.mkdirSync(path.dirname(lockFile), { recursive: true }) // 首次运行时 ~/.modeldock 可能还不存在
   const t0 = Date.now()
   const err = opts?.timeoutError ?? lockTimeoutError

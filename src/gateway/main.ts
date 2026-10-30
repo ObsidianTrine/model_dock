@@ -231,7 +231,7 @@ export async function startForeground(portOverride?: number): Promise<void> {
     if (stopping) return
     stopping = true
     watcher?.close()
-    stopSyncEngine()
+    await stopSyncEngine() // 收尾等在飞 tick 结束再退出：钉扎跳过/停止后不再有写盘
     server.close()
     rt.lan?.server.close()
     // 排空常驻日志追加流的缓冲：进程退出会丢弃未刷盘的行，这是常驻流相对逐条 appendFile

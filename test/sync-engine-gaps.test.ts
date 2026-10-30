@@ -6,11 +6,11 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { TEST_TMP, newHome, restoreHomes, waitFor } from './helpers.js'
+import { TEST_TMP, newHome, gotoHome, restoreHomes, waitFor } from './helpers.js'
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
 import { setupSyncTarget } from '../src/sync/setup.js'
-import { DEFAULT_DEBOUNCE_MS, safeSyncTick, syncTickOnce, SyncLoop, syncStatus, remountSyncEngine, stopSyncEngine } from '../src/sync/engine.js'
+import { DEFAULT_DEBOUNCE_MS, safeSyncTick, syncTickOnce, SyncLoop, syncStatus, remountSyncEngine, stopSyncEngine, __testTickActiveSyncLoop } from '../src/sync/engine.js'
 import { readSyncState, updateSyncState, emptySyncState, type SyncState } from '../src/sync/state.js'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
 import { keysToCache } from '../src/sync/runtime.js'
@@ -37,8 +37,10 @@ async function newTargetDir(): Promise<string> {
   return d
 }
 afterAll(async () => {
-  // 引擎单例必须已摘除：paused 重挂在下方用例收尾完成，这里再兜一次
-  stopSyncEngine()
+  // 引擎单例必须已摘除：paused 重挂在下方用例收尾完成，这里再兜一次。
+  // 必须先 await 停净再 restoreHomes——在飞 tick 的后续写盘按「当时的」home 解析路径
+  // （2026-10-05 / 2026-10-30 两次写穿事故根因）
+  await stopSyncEngine()
   await restoreHomes()
   for (const d of targetDirs) await fs.rm(d, { recursive: true, force: true }).catch(() => {})
 })
@@ -340,7 +342,7 @@ describe('remountSyncEngine / stopSyncEngine / syncStatus 缺口分支', () => {
     // —— 无 sync.json：remount 无操作 ——
     newHome()
     await seedBase()
-    stopSyncEngine()
+    await stopSyncEngine()
     await remountSyncEngine()
     expect((await syncStatus()).running).toBe(false)
 
@@ -419,7 +421,37 @@ describe('remountSyncEngine / stopSyncEngine / syncStatus 缺口分支', () => {
     // 收尾：paused 重挂摘除单例，杜绝长尾 tick 串场
     await updateSyncState({ paused: true })
     await remountSyncEngine()
-    stopSyncEngine()
+    await stopSyncEngine()
+    expect((await syncStatus()).running).toBe(false)
+  }, 30_000)
+
+  it('home 钉扎：env 切走后单例 loop 跳过一切 tick 零写盘，切回恢复（2026-10-30 写穿事故不变式）', async () => {
+    const homeA = newHome()
+    await seedBase()
+    const dirA = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir: dirA }, 'pw-pin', { backend: 'file' })
+    await remountSyncEngine() // 钉扎 homeA
+    expect((await syncStatus()).running).toBe(true)
+
+    // 切到 home B：B 有完整可同步态 + 待推改动，tick 仍必须整体跳过、零写入
+    const homeB = newHome()
+    await seedBase()
+    const dirB = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir: dirB }, 'pw-pin-b', { backend: 'file' })
+    await localEdit('pin-should-not-push')
+    const bookkeepingBefore = fsSync.readFileSync(syncJsonPath(), 'utf8')
+    expect(await __testTickActiveSyncLoop()).toBe('skipped')
+    expect((await createLocaldirTarget(dirB).readManifest())?.rev).toBe(1) // 待推改动未被推出
+    expect(fsSync.readFileSync(syncJsonPath(), 'utf8')).toBe(bookkeepingBefore) // 簿记零写入
+
+    // 切回 home A：钉扎放行，tick 恢复正常（无待推改动 → idle）
+    gotoHome(homeA)
+    expect(await __testTickActiveSyncLoop()).toBe('idle')
+
+    // 收尾：摘除单例（文件收尾 afterAll 再兜一次）
+    await updateSyncState({ paused: true })
+    await remountSyncEngine()
+    await stopSyncEngine()
     expect((await syncStatus()).running).toBe(false)
   }, 30_000)
 })

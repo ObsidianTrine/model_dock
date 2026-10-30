@@ -42,8 +42,23 @@ function syncModeReady(state: SyncState | null): boolean {
   return false
 }
 
+/** tick 期间 home 稳定性校验：env 被切走（测试收尾 restoreHomes）后，在飞 tick 的后续写盘
+ *  （apply 改 config、updateSyncState 簿记）会按「当时的」home 解析路径——入口钉扎检查管不住
+ *  已开始的 tick，写盘前再校验一次才闭环。抛错走 safeSyncTick 的记账/跳过路径。 */
+function assertStableHome(homeAtStart: string): void {
+  if (modeldockDir() === homeAtStart) return
+  throw new Error(
+    t(
+      '[modeldock] 同步 tick 期间 home 已变化（{a} → {b}）：中止本 tick，防止配置与簿记写错 home',
+      '[modeldock] Home changed mid-tick ({a} → {b}): aborting this tick to avoid writing the wrong home',
+      { a: displayPath(homeAtStart), b: displayPath(modeldockDir()) }
+    )
+  )
+}
+
 /** 单次 tick（读 sync.json → 比对 manifest → 拉取或推送；cloud 模式附带心跳与 desired 应用）。状态不满足返回 'skipped' */
 export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
+  const homeAtStart = modeldockDir()
   const state = await readSyncState()
   if (!syncModeReady(state) || !state) return 'skipped'
   const keys = keysFromState(state)
@@ -77,6 +92,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
     // （file 后端读盘 / keychain 后端可能 spawn）也在锁内，极端时延后并发 config 写毫秒级——
     // tick 分钟级一次可接受。withFileLock 同路径重入内联（AsyncLocalStorage 识别持有者调用树）：
     // applySyncdoc 内部的 mutateConfig 不会自锁死。
+    assertStableHome(homeAtStart)
     let conflict = false
     let afterHash = ''
     await withFileLock(configLockPath(), undefined, async () => {
@@ -106,6 +122,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
   }
 
   if (localHash !== state.lastSyncedHash) {
+    assertStableHome(homeAtStart) // 推送写盘（blob/manifest 本身 home 无关，但随后的簿记 updateSyncState 按当前 home 落盘）
     const baseRev = manifest?.rev ?? 0
     const rev = baseRev + 1
     const sealed = sealWithKeys(localDoc, keys)
@@ -182,9 +199,16 @@ async function cloudHeartbeat(state: SyncState, opts?: SyncHooks): Promise<void>
 
 /** 带兜底的 tick：任何错误记入 sync.json.lastError（状态行可见），绝不向上抛——同步永远不影响网关本职 */
 export async function safeSyncTick(opts?: SyncHooks): Promise<TickOutcome> {
+  const homeAtEntry = modeldockDir()
   try {
     return await syncTickOnce(opts)
   } catch (e) {
+    // home 在 tick 期间被切走：簿记 updateSyncState 会按「当时的」home 落盘，写进另一个 home 的
+    // sync.json（串场）——直接放弃记账。真实 home 写穿另由 fsx 门禁兜底。
+    if (modeldockDir() !== homeAtEntry) {
+      opts?.log?.(t('[modeldock] 同步 tick 期间 home 已变化，跳过错误记账', '[modeldock] Home changed mid-tick; error bookkeeping skipped'))
+      return 'skipped'
+    }
     const msg = (e as Error).message
     try {
       await updateSyncState({ lastError: msg, lastErrorTs: new Date().toISOString() })
@@ -200,6 +224,11 @@ export interface SyncLoopOpts extends SyncHooks {
   pollMs?: number
   jitterRatio?: number
   debounceMs?: number
+  /** 挂载时钉扎的 home（remountSyncEngine 注入）：每次 tick 前校验 modeldockDir() 仍是它，
+   *  否则整体跳过——测试进程恢复 env 后的长尾 tick 不再把簿记/apply 写进真实 home
+   *  （2026-10-05 / 2026-10-30 两次事故不变式，与 stopSyncEngine 可等待互为双保险）。
+   *  直连 new SyncLoop 不带钉扎（测试自建实例，生命周期自己负责）。 */
+  pinnedHome?: string
   /** 测试注入：替换 fs.watch 以触发异步 error（默认 = fs.watch）。返回值的 .on('error') 订阅必须可用 */
   watchFn?: (watchPath: string, listener: fs.WatchListener<string>) => fs.FSWatcher
 }
@@ -214,12 +243,27 @@ export class SyncLoop {
    *  否则这批改动要等下轮轮询（60/120s±抖动）才推出——上游慢时单 tick 可拖 15s，感知明显 */
   private trailing = false
   private stopped = false
+  private homeMismatchLogged = false
 
   constructor(private opts: SyncLoopOpts = {}) {}
 
   /** 单飞：在飞期间所有触发源共用同一 promise。跟踪在飞是为了 stop() 能等它收尾——
-   *  否则测试进程切换/清除 MODELRDOCK_FAKE_HOME 后，长尾 tick 会把簿记写进真实 home（2026-10-05 事故根因） */
+   *  否则测试进程切换/清除 MODELRDOCK_FAKE_HOME 后，长尾 tick 会把簿记写进真实 home（2026-10-05 事故根因）。
+   *  双保险第二层：挂载时钉扎的 home 与当前不符（env 已被切走）→ 本 tick 直接跳过，绝不写盘 */
   private beginTick(mode: 'safe' | 'raw'): Promise<TickOutcome> {
+    if (this.opts.pinnedHome && modeldockDir() !== this.opts.pinnedHome) {
+      if (!this.homeMismatchLogged) {
+        this.homeMismatchLogged = true
+        const msg = t(
+          '[modeldock] 配置同步引擎的 home 已变化（挂载于 {mounted}，当前 {current}）：跳过同步防止写穿真实 home；如为本机数据目录迁移请重启网关',
+          '[modeldock] Sync engine home changed (mounted at {mounted}, now {current}): sync is skipped to prevent writing into the real home; restart the gateway if you migrated the data directory',
+          { mounted: displayPath(this.opts.pinnedHome), current: displayPath(modeldockDir()) }
+        )
+        this.opts.log?.(msg)
+        console.error(msg)
+      }
+      return Promise.resolve('skipped')
+    }
     if (this.inflight) {
       this.trailing = true
       return this.inflight
@@ -326,14 +370,22 @@ export async function remountSyncEngine(opts?: SyncLoopOpts): Promise<void> {
   // cloud 模式 60s±20%（D4 心跳节奏）；target 模式 120s±30%
   const pollMs = st?.mode === 'cloud' ? (opts?.pollMs ?? CLOUD_POLL_MS) : (opts?.pollMs ?? DEFAULT_POLL_MS)
   const jitterRatio = st?.mode === 'cloud' ? (opts?.jitterRatio ?? 0.2) : (opts?.jitterRatio ?? 0.3)
-  active = new SyncLoop({ ...opts, pollMs, jitterRatio })
+  active = new SyncLoop({ ...opts, pollMs, jitterRatio, pinnedHome: modeldockDir() })
   activeSig = sig
   active.start()
 }
 
-/** 网关退出时调用（进程将退，在飞 tick 等待不阻塞语义，仅尽力收尾） */
-export function stopSyncEngine(): void {
-  void stopLoop()
+/** 网关退出与测试收尾调用。返回可等待的停止 promise：**测试必须在 restoreHomes/清 env 前
+ *  await 它**——在飞 tick 的后续步骤按「当时的」home 解析路径，env 已切走就会写穿真实 home
+ *  （2026-10-05 / 2026-10-30 两次事故根因；与 SyncLoop home 钉扎互为双保险）。
+ *  网关退出路径维持 fire-and-forget（进程将退，钉扎层兜底）。 */
+export function stopSyncEngine(): Promise<void> {
+  return stopLoop().catch(() => {})
+}
+
+/** 测试专用：触发单例 loop 的一轮 raw tick（home 钉扎等用例观察用）；无挂载 loop 返回 null */
+export function __testTickActiveSyncLoop(): Promise<TickOutcome> | null {
+  return active ? active.tick() : null
 }
 
 export interface SyncStatusView {
