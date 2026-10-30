@@ -16,6 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
@@ -91,7 +92,9 @@ export function writeWorkerSettings(settingsPath, envPatch = {}) {
     },
   };
   if (envPatch && Object.keys(envPatch).length) settings.env = { ...envPatch };
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  // 文件可能携带 tier 凭据（settings.env 注入 token）：按仓库写盘惯例 0600
+  // （NTFS 不认权限位，mode 在 Windows 上无害忽略）；清理由调用方 finally 负责。
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
   return settingsPath;
 }
 
@@ -100,7 +103,9 @@ export function writeWorkerSettings(settingsPath, envPatch = {}) {
  * 系统临时目录，随任务结束可删）。
  */
 export function newWorkerSettingsPath() {
-  return path.join(fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'orch-settings-')), 'worker-settings.json');
+  // os.tmpdir()：Windows 无 TMPDIR，回落 '/tmp' 经 path.join 落「当前盘根\tmp」
+  //（通常不存在）→ mkdtempSync ENOENT（2026-10-31 卡 17）
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'worker-settings.json');
 }
 
 /** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。 */
@@ -294,9 +299,15 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
       return true; // mock 等非 CLI 后端视为可用
     });
   if (explicit) return { name: explicit === 'same' ? worker : explicit, mode: 'explicit' };
-  // prior 沿用有个例外：prior 是 mock 而 worker 已换真实后端时忽略——mock reviewer
-  // 固定输出「无阻塞」，把它当真实审查结果喂门禁等于跳过审查（且无任何日志）
-  if (prior && !(prior === 'mock' && worker !== 'mock')) return { name: prior, mode: 'prior' };
+  // prior 沿用有两个例外（双向防御，2026-10-31 卡 17）：
+  //   a) prior 是 mock 而 worker 已换真实后端——mock reviewer 固定输出「无阻塞」，
+  //      把它当真实审查结果喂门禁等于跳过审查（且无任何日志）；
+  //   b) worker 是 mock 而 prior 是真实后端——mock 会话是测试路径，「零外部调用、
+  //      永不异构」是不变量，给它派真实 CLI 审查后端会烧真钱（2026-10-31 卡 17）。
+  // 两个方向都不沿用，让解析走后面的自动异构/fallback 分支。
+  if (prior && !(prior === 'mock' && worker !== 'mock') && !(worker === 'mock' && prior !== 'mock')) {
+    return { name: prior, mode: 'prior' };
+  }
   const OTHER = { 'claude-headless': 'zcode-headless', 'zcode-headless': 'claude-headless' };
   const other = OTHER[worker];
   if (other && probeFn(other)) return { name: other, mode: 'heterogeneous' };
