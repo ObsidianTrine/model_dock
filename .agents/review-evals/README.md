@@ -38,6 +38,10 @@
 | 2026-10-agents-win-spawn-shell | .agents 编排器 Windows spawn 未带 shell（.cmd 包装直调必 ENOENT）：claude worker 探测带/spawn 不带（探测说可用、起必挂，worker/审查全落 blocked/），orchestrator npm ci 装不上、nightly audit 静默失效 | c99f326 | ⏳ 待首跑（2026-10-30 效能审查回灌；本机 shell 故障未跑，首跑前不计入基线分母） |
 | 2026-10-orchestrator-repo-root | findRepoRoot 双实现语义相反（--git-common-dir vs --show-toplevel）且注释自称「同款」：worktree 内跑 orchestrator 把 queue/ 锚进 worktree | c99f326 | ⏳ 待首跑（同上） |
 | 2026-10-review-concurrency-group | claude-review 的 auto-review 与 interactive（@claude）共用并发组 + cancel-in-progress：一条评论取消进行中的 auto-review，token 白费 | cc6d832 | ⏳ 待首跑（同上） |
+| 2026-10-orch-awaiting-human-crash | run 放行 awaiting-human 卡但不迁移，烧完整轮 worker 后首个终态迁移必炸裸栈 | 5e4dcfe | ✅（10-30，GLM subagent）P1 全证据链（白名单/迁移/兜底三层）+ 3 条新发现（npm spawn 无 shell EINVAL、reviewing 无恢复路径、reviewer 临时目录泄漏→立卡 19） |
+| 2026-10-orch-resume-backend-first-hit | resume 沿用后端 .find 取首条 worker_spawned，多引擎任务静默切回最初引擎 | 5e4dcfe | ✅（10-30，GLM subagent）P1 命中 + 4 条当前版活缺陷（TMPDIR /tmp、spawn 无 shell 与探测矛盾、mock prior 漏防、settings 0600→立卡 17） |
+| 2026-10-finish-lock-pid-reuse | finish 锁判活 process.kill(pid,0) 被 Windows PID 复用骗过，陈锁永拒排队者 | acf3953 | ✅（10-30，GLM subagent）主缺陷命中 + merge 冲突裸崩新发现（立卡 18）；exit handler 无属主校验已随 acf3953 一并修复 |
+| 2026-10-tray-cli-lang-substring | 托盘 CheckViaCli 按中文子串分类 CLI 输出，英文环境 exit==0 误报失败、有新版不弹窗 | 88aa417 | ✅（10-30，GLM subagent）主缺陷命中（连 spawn 未钉 --lang 也点到）+ JsonUnescape 反斜杠翻倍新发现（立卡 20）；看门狗/_port 竞态两条对旧版报的已被 88aa417 修复 |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
