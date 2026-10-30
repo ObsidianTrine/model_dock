@@ -555,7 +555,36 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     die(`main repo (${base}) has uncommitted changes. Commit or stash them first:\n  git status --short`);
   }
   const message = mergeMsg || `Merge branch '${branch}'`;
-  git(['merge', '--no-ff', branch, '-m', message]);
+  try {
+    git(['merge', '--no-ff', branch, '-m', message]);
+  } catch (e) {
+    // A conflicted merge leaves the main checkout dangling in merging state (MERGE_HEAD):
+    // a plain re-run would then die on the dirty check with advice ("Commit or stash")
+    // that is wrong for a pending merge. Abort to restore the pre-merge commit so the
+    // main checkout is clean for the retry, then surface the conflict with the same
+    // guidance as the rebase path above (resolve inside the worktree — conflicts are
+    // never auto-resolved here). Any other failure keeps the raw git error.
+    let midMerge = false;
+    try {
+      midMerge = fs.existsSync(path.resolve(REPO_ROOT, git(['rev-parse', '--git-path', 'MERGE_HEAD'])));
+    } catch { /* git unusable — fall through to the raw error below */ }
+    if (midMerge) {
+      let abortErr = null;
+      try { git(['merge', '--abort']); } catch (aErr) { abortErr = aErr; }
+      if (abortErr) {
+        console.warn(`WARNING: could not abort the pending merge — run "git merge --abort" manually in ${REPO_ROOT}, then re-run finish:` + CRLF_N +
+          `  ${String(abortErr.message).trim()}`);
+      } else {
+        console.log(`Pending merge aborted — main checkout restored to a clean ${base}.`);
+      }
+      die(`merge of ${branch} into ${base} has conflicts. Resolve them inside ${wtPath}:
+  cd "${wtPath}"   # fix conflicted files
+  git -C "${wtPath}" add -A && git -C "${wtPath}" rebase ${base}
+then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
+    }
+    die(`merge of ${branch} into ${base} failed (no merging state left behind — not a conflict):` + CRLF_N +
+      `  ${[String(e.message).trim(), String(e.stderr ?? '').trim()].filter(Boolean).join(CRLF_N + '  ')}`);
+  }
   console.log(`Merged ${branch} into ${base} (--no-ff).`);
 
   // 5) cleanup — the merge already succeeded, so a cleanup failure must be reported as
