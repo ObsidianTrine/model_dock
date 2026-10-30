@@ -17,7 +17,11 @@ const SRC_UI = [
   path.join(ROOT, 'src', 'gateway', 'ui.ts'),
   ...readdirSync(path.join(ROOT, 'src', 'gateway', 'ui')).filter((f) => f.endsWith('.ts')).sort().map((f) => path.join(ROOT, 'src', 'gateway', 'ui', f)),
 ].map((p) => readFileSync(p, 'utf8')).join('\n')
-const SRC_LAN = readFileSync(path.join(ROOT, 'src', 'gateway', 'lan.ts'), 'utf8')
+// T04/T22 拆分后页面源码 = 拼装壳 + 域模块：门禁扫描全部源拼接（规则语义不变；同款先例见上方 SRC_UI）
+const SRC_LAN = [
+  path.join(ROOT, 'src', 'gateway', 'lan.ts'),
+  path.join(ROOT, 'src', 'gateway', 'lan-mobile-page.ts'),
+].map((p) => readFileSync(p, 'utf8')).join('\n')
 const SRC_CLOUD = readFileSync(path.join(ROOT, 'src', 'cloud', 'console.ts'), 'utf8')
 
 /** 提取全部 `:root…{…}` 块（含 [data-theme] 与 :not() 变体；括号配平），并返回置空这些块后的文本（保留换行以稳住行号） */
