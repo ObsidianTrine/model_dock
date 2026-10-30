@@ -1,8 +1,9 @@
 name: dependabot-fix
 
 # Dependabot 依赖升级 PR 的自动验证/修复层：
-#   Dependabot 开 PR（actor=dependabot[bot]）→ Claude 接手：
-#   npm ci + 全量 npm test → 全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
+#   Dependabot 开 PR（actor=dependabot[bot]）→ workflow 先确定性 npm ci + npm run build
+#   （任一失败 job 直接红，结论明确且零 token 消耗）→ Claude 接手跑全量 npm test：
+#   全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置三件套（供应商无关，yml 零默认值）
 #   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL（含义见 docs/ci-bots.md「模型接入」）
@@ -77,6 +78,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # 确定性前置：安装与构建不进 Claude 会话——省 2-4 个会话回合（token + 墙钟），
+      # 失败 job 直接红 = 升级破坏安装/构建，结论明确零 token 消耗。会话只负责全量
+      # test 与（必要时）最小修复；工具白名单仍允许其重跑 npm 命令做修复验证
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
       - uses: anthropics/claude-code-action@v1
         env:
           # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
@@ -96,7 +104,8 @@ jobs:
             完整约定见仓库根目录 AGENTS.md。请按以下步骤完成验证：
 
             1. 先 gh pr view / gh pr diff 弄清升级了哪些包、是否跨 major。
-            2. npm ci 后跑 npm run build 与完整 npm test。
+            2. 依赖已由 workflow 预先安装、npm run build 已通过（任一失败本 job 在此前就红了，
+               不会进本会话）——直接跑完整 npm test 验证。
             3. 全绿：不改任何代码，用 gh pr comment 发一条顶层评论（中文）：测试通过结论 + 升级要点
                （涉及包、大版本跨度、有无值得注意的行为变化），明确"可合并"。
             4. 有失败：判断是否本次升级引入。若不是（main 上就有的既有失败），按第 3 步评论说明，不要修码。
@@ -105,7 +114,8 @@ jobs:
                git push 回当前 PR 分支，然后评论：失败原因、修复内容、测试结果。
             5. 无法自动修复（major 语义破坏需要大改 / 触碰 native addon / 修复超过几处文件）：
                不硬改代码，评论说明破坏点、影响面与建议方案（例如走本地 feature-branch 流程人工升级）。
-            6. **回合预算纪律（最重要）**：本会话上限 50 回合，npm ci/build/test 每轮都很贵。
+            6. **回合预算纪律（最重要）**：本会话上限 50 回合，全量 npm test 每轮都很贵
+               （npm ci / build 已由 workflow 确定性完成，不占回合）。
                若判定修复面会超过几处文件、或已用到约 30 回合仍未接近完成，立即止损：
                用 gh pr comment 发「无法自动修复」结论（破坏点、影响面、人工升级建议），然后直接结束会话。
                任何情况下都必须留下一评论再结束——宁可结论简短，也不可让会话因耗尽回合而无声失败。
