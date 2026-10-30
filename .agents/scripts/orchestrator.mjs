@@ -229,8 +229,8 @@ async function cmdRun(repoRoot, taskId, opts) {
   const baseBranch = cfg.baseBranch || 'develop';
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中（任何状态目录都没找到）。先用 submit 提交任务卡。`);
-  if (!['pending', 'running', 'awaiting-human'].includes(found.state)) {
-    die(`任务 "${taskId}" 当前状态为 ${found.state}，只能从 pending/running/awaiting-human(retry) 启动。`);
+  if (!['pending', 'running', 'awaiting-human', 'reviewing'].includes(found.state)) {
+    die(`任务 "${taskId}" 当前状态为 ${found.state}，只能从 pending/running/awaiting-human(retry)/reviewing 启动。`);
   }
   const { meta, body } = parseCard(fs.readFileSync(found.path, 'utf8'), found.path);
   validateCard(meta); // budget 缺失字段回落默认值（熔断不可关闭）
@@ -349,7 +349,10 @@ async function cmdRun(repoRoot, taskId, opts) {
   }
   const tierEnv = tierEnvPatch(tier);
 
-  const resuming = found.state === 'running';
+  // reviewing 也算恢复场景（2026-10-31 卡 19）：审查阶段硬崩的卡，此前唯一程序化
+  // 出口是 abandon 强制落 failed；TRANSITIONS 本就允许 reviewing→running，run/resume
+  // 白名单放行后归位 running，复用下方 resuming 分支注入恢复上下文。
+  const resuming = ['running', 'reviewing'].includes(found.state);
   if (resuming) cleanupOrphanWorker(repoRoot, taskId);
   if (found.state === 'pending') {
     moveCard(root, taskId, 'pending', 'running');
@@ -361,6 +364,10 @@ async function cmdRun(repoRoot, taskId, opts) {
     moveCard(root, taskId, 'awaiting-human', 'running');
     appendEvent(qdir, 'task_accepted', { backend: opts.backend, from_state: 'awaiting-human' });
     log('awaiting-human 卡直跑：先迁移回 running/（无 retry 补充指令，仅重启闭环）');
+  } else if (found.state === 'reviewing') {
+    moveCard(root, taskId, 'reviewing', 'running');
+    appendEvent(qdir, 'task_accepted', { backend: opts.backend, from_state: 'reviewing' });
+    log('reviewing 卡直跑：先迁移回 running/（审查中断恢复，注入恢复上下文）');
   }
 
   const worktree = ensureWorktree(repoRoot, taskId);
@@ -393,6 +400,9 @@ async function cmdRun(repoRoot, taskId, opts) {
   };
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-prompt-')), 'prompt.md');
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'settings.json');
+  // reviewer 临时目录（orch-review-* / orch-review-settings-*）：审查阶段每轮新建一个，
+  // 旧实现从不清理（每轮泄漏 1-2 个）——统一登记，finally 清单兜底（2026-10-31 卡 19）
+  const reviewTempDirs = [];
 
   const runStarted = Date.now();
 
@@ -607,7 +617,9 @@ async function cmdRun(repoRoot, taskId, opts) {
       if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
         appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
       }
-      const reviewPromptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-')), 'review-prompt.md');
+      const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
+      reviewTempDirs.push(reviewPromptDir);
+      const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
       fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
       // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
       // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
@@ -615,7 +627,9 @@ async function cmdRun(repoRoot, taskId, opts) {
       const reviewWantsSettings = opts.reviewBackend === 'claude-headless' && Object.keys(tierEnv).length > 0;
       let reviewSettingsFile;
       if (reviewWantsSettings) {
-        reviewSettingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-')), 'review-settings.json');
+        const reviewSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-'));
+        reviewTempDirs.push(reviewSettingsDir);
+        reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
         writeWorkerSettings(reviewSettingsFile, tierEnv);
       }
       const review = await reviewBackend.spawn({
@@ -717,6 +731,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     try {
       fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
       fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+      for (const d of reviewTempDirs) fs.rmSync(d, { recursive: true, force: true }); // reviewer 各轮临时目录
     } catch {}
   }
 }
@@ -959,8 +974,10 @@ function cmdResume(repoRoot, taskId, opts) {
   const root = queueRoot(repoRoot);
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中。`);
-  if (found.state !== 'running' && found.state !== 'blocked') {
-    die(`任务 "${taskId}" 状态为 ${found.state}，只有 running/blocked 可 resume。`);
+  // reviewing 也放行（2026-10-31 卡 19）：审查中硬崩的卡直接在这里续做，
+  // 归位 running 与恢复上下文注入由 cmdRun 的 reviewing 分支统一处理
+  if (!['running', 'blocked', 'reviewing'].includes(found.state)) {
+    die(`任务 "${taskId}" 状态为 ${found.state}，只有 running/blocked/reviewing 可 resume。`);
   }
   if (found.state === 'blocked') moveCard(root, taskId, 'blocked', 'running');
   appendEvent(logDir(repoRoot, taskId), 'resumed', { by: 'human' });
