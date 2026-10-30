@@ -411,73 +411,80 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
       appendEvent(qdir, 'worker_done', { summary: String(claimed.summary ?? '').slice(0, 200) });
 
-      // ---- 静态门禁 ----
-      try {
-        const testResult = gateNpmTest(worktree, cfg.testCmd.join(' && '));
-        // 记 worktree HEAD：approve 的 finish 快捷路径（--skip-test）靠它判断
-        // 「gate 验证的就是当前树」——develop 未前进且 HEAD 一致才允许锁内跳过重跑
-        let gateHead;
-        try {
-          gateHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-        } catch { /* 取不到 HEAD 就不记：approve 回落全量测试，语义安全 */ }
-        appendEvent(qdir, 'gate_result', { gate: 'npm_test', result: 'pass', duration_ms: testResult.durationMs, ...(gateHead ? { head: gateHead } : {}) });
-      } catch (e) {
-        if (!(e instanceof GateError)) throw e;
-        appendEvent(qdir, 'gate_result', { gate: 'npm_test', result: 'fail' });
-        debugIter += 1;
-        appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: 'test_failure', max: meta.budget.max_test_iterations });
-        if (debugIter > meta.budget.max_test_iterations) {
-          appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
-          moveCard(root, taskId, 'running', 'blocked');
-          die(`调试子循环超限（${debugIter} 次）。任务转 blocked/——测试仍不绿，人工接手。`);
-        }
-        promptText = buildFixupPrompt(card, ctx, 'test_failure', e.output, debugIter);
-        continue;
-      }
-
-      try {
-        const buildResult = gateTscBuild(worktree, cfg.buildCmd); // buildCmd 未配置 → 直接 skipped 返回，不进调试循环
-        appendEvent(qdir, 'gate_result', { gate: 'tsc_build', result: 'pass', ...(buildResult.skipped ? { skipped: true } : {}) });
-      } catch (e) {
-        if (!(e instanceof GateError)) throw e;
-        appendEvent(qdir, 'gate_result', { gate: 'tsc_build', result: 'fail' });
-        debugIter += 1;
-        appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: 'build_failure', max: meta.budget.max_test_iterations });
-        if (debugIter > meta.budget.max_test_iterations) {
-          appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
-          moveCard(root, taskId, 'running', 'blocked');
-          die(`调试子循环超限（${debugIter} 次，build 不过）。任务转 blocked/，人工接手。`);
-        }
-        promptText = buildFixupPrompt(card, ctx, 'build_failure', e.output, debugIter);
-        continue;
-      }
-
-      // lint / typecheck 门禁（workflow.json lintCmd/typecheckCmd，未配置 → skipped）：
-      // 确定性检查打底（业界共识：LLM 互审不可靠，细粒度静态检查独立跑）。失败进调试子循环。
-      let staticGateFailed = false;
-      for (const [gateName, gateFn, cmd, trigger] of [
-        ['lint', gateLint, cfg.lintCmd, 'lint_failure'],
-        ['typecheck', gateTypecheck, cfg.typecheckCmd, 'typecheck_failure'],
-      ]) {
-        try {
-          const r = gateFn(worktree, cmd); // cmd 未配置 → 直接 skipped 返回
-          appendEvent(qdir, 'gate_result', { gate: gateName, result: 'pass', ...(r.skipped ? { skipped: true } : {}) });
-        } catch (e) {
-          if (!(e instanceof GateError)) throw e;
-          appendEvent(qdir, 'gate_result', { gate: gateName, result: 'fail' });
-          debugIter += 1;
-          appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger, max: meta.budget.max_test_iterations });
-          if (debugIter > meta.budget.max_test_iterations) {
-            appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
-            moveCard(root, taskId, 'running', 'blocked');
-            die(`调试子循环超限（${debugIter} 次，${gateName} 不过）。任务转 blocked/，人工接手。`);
+      // ---- 静态门禁（数据表驱动，agents-hygiene-batch）----
+      // 五段同构 try/catch（npm_test/tsc_build/lint/typecheck/ui_check）收敛为数据表 +
+      // 单个执行函数 runGates：run → pass 记 gate_result → GateError 时 debug_iteration 计数、
+      // 超限熔断、否则返回 fixup 由调用方返工。ui_check 在红线段之后执行（事件顺序与原实现
+      // 一致），故分 STATIC_GATES / UI_GATES 两批经同一 runGates 执行。数据差异全在表：
+      // passExtra 定制 pass 事件附加字段（npm_test 的 duration_ms/head 供 approve 的 finish
+      // 快捷路径，其余的 skipped）。红线段（port_scan/native_scan）直接 failed 不可调试，不在此表。
+      const runGates = (gates) => {
+        for (const g of gates) {
+          try {
+            const r = g.run();
+            appendEvent(qdir, 'gate_result', { gate: g.gate, result: 'pass', ...(g.passExtra ? g.passExtra(r) : {}) });
+          } catch (e) {
+            if (!(e instanceof GateError)) throw e;
+            appendEvent(qdir, 'gate_result', { gate: g.gate, result: 'fail' });
+            debugIter += 1;
+            appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: g.trigger, max: meta.budget.max_test_iterations });
+            if (debugIter > meta.budget.max_test_iterations) {
+              appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
+              moveCard(root, taskId, 'running', 'blocked');
+              die(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）。${g.dieTail}`);
+            }
+            return { trigger: g.trigger, output: e.output };
           }
-          promptText = buildFixupPrompt(card, ctx, trigger, e.output, debugIter);
-          staticGateFailed = true;
-          break; // 与 build/ui_check 同级：失败即返工，不再跑后续门禁
         }
+        return null;
+      };
+      const STATIC_GATES = [
+        {
+          gate: 'npm_test',
+          run: () => gateNpmTest(worktree, cfg.testCmd.join(' && ')),
+          trigger: 'test_failure',
+          dieLabel: '',
+          dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
+          passExtra: (r) => {
+            // 记 worktree HEAD：approve 的 finish 快捷路径（--skip-test）靠它判断
+            // 「gate 验证的就是当前树」——develop 未前进且 HEAD 一致才允许锁内跳过重跑
+            let gateHead;
+            try {
+              gateHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+            } catch { /* 取不到 HEAD 就不记：approve 回落全量测试，语义安全 */ }
+            return { duration_ms: r.durationMs, ...(gateHead ? { head: gateHead } : {}) };
+          },
+        },
+        {
+          gate: 'tsc_build',
+          run: () => gateTscBuild(worktree, cfg.buildCmd), // buildCmd 未配置 → 直接 skipped 返回，不进调试循环
+          trigger: 'build_failure',
+          dieLabel: 'build 不过',
+          dieTail: '任务转 blocked/，人工接手。',
+          passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+        },
+        {
+          gate: 'lint',
+          run: () => gateLint(worktree, cfg.lintCmd), // cmd 未配置 → 直接 skipped 返回
+          trigger: 'lint_failure',
+          dieLabel: 'lint 不过',
+          dieTail: '任务转 blocked/，人工接手。',
+          passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+        },
+        {
+          gate: 'typecheck',
+          run: () => gateTypecheck(worktree, cfg.typecheckCmd),
+          trigger: 'typecheck_failure',
+          dieLabel: 'typecheck 不过',
+          dieTail: '任务转 blocked/，人工接手。',
+          passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+        },
+      ];
+      const fixup = runGates(STATIC_GATES);
+      if (fixup) {
+        promptText = buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter);
+        continue;
       }
-      if (staticGateFailed) continue; // promptText 是循环携带变量，必须用专用标志位判断（不能判 promptText 本身）
 
       // 红线门禁：直接 failed，不可调试（未配置的红线在门禁内 skipped 返回，仍记 pass 事件）
       try {
@@ -501,23 +508,21 @@ async function cmdRun(repoRoot, taskId, opts) {
         die(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
 
-      // UI 冒烟门禁（任务卡 ui_check: true 才跑）：跑 workflow.json uiCheckCmd
-      // （脚本自备沙箱/端口/清理，orchestrator 不感知细节）。失败进调试子循环（与 build 同级），不是红线。
+      // UI 冒烟门禁（任务卡 ui_check: true 才跑）：与静态段同经 runGates 执行（UI_GATES 单段表，
+      // 位置在红线段之后——事件顺序与原实现一致）。失败进调试子循环（与 build 同级），不是红线。
       if (meta.ui_check) {
-        try {
-          const uiResult = gateUiCheck(worktree, cfg.uiCheckCmd);
-          appendEvent(qdir, 'gate_result', { gate: 'ui_check', result: 'pass', ...(uiResult.skipped ? { skipped: true } : {}) });
-        } catch (e) {
-          if (!(e instanceof GateError)) throw e;
-          appendEvent(qdir, 'gate_result', { gate: 'ui_check', result: 'fail' });
-          debugIter += 1;
-          appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: 'ui_check_failure', max: meta.budget.max_test_iterations });
-          if (debugIter > meta.budget.max_test_iterations) {
-            appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
-            moveCard(root, taskId, 'running', 'blocked');
-            die(`调试子循环超限（${debugIter} 次，ui_check 不过）。任务转 blocked/，人工接手。`);
-          }
-          promptText = buildFixupPrompt(card, ctx, 'ui_check_failure', e.output, debugIter);
+        const uiFixup = runGates([
+          {
+            gate: 'ui_check',
+            run: () => gateUiCheck(worktree, cfg.uiCheckCmd),
+            trigger: 'ui_check_failure',
+            dieLabel: 'ui_check 不过',
+            dieTail: '任务转 blocked/，人工接手。',
+            passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+          },
+        ]);
+        if (uiFixup) {
+          promptText = buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter);
           continue;
         }
       }
@@ -905,9 +910,9 @@ function engineArgs(opts) {
 
 /**
  * drain——队列自动调度（Phase 2，docs 10.3）：循环把 pending/ 跑到空。
- * 每个任务用**子进程**跑 `run --next`：cmdRun 的熔断走 process.exit，
- * 同进程循环会整批退出；子进程隔离后单任务 blocked/failed 不阻塞后续。
- * 队列空 / 只剩损坏卡 / 达到 --max 轮数即停。
+ * 父进程 pickNextCard 选好 id 后**显式传给子进程**跑 `run <id>`（子进程内再调 --next
+ * 反而有窗口期竞态）：cmdRun 的熔断走 process.exit，同进程循环会整批退出；子进程
+ * 隔离后单任务 blocked/failed 不阻塞后续。队列空 / 只剩损坏卡 / 达到 --max 轮数即停。
  */
 function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
@@ -985,12 +990,20 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
     });
     launched += 1;
     active.set(child.pid, { id: card.id, hint: card.meta.files_hint });
-    child.on('exit', (code) => {
+    // settled 防双触发：spawn 'error'（ENOENT 等）时 exit 永不触发，不挂 error 处理则
+    // active 条目永不清除 → pump 停摆、drain 挂起不退出（agents-hygiene-batch）
+    let settled = false;
+    const onDone = (code, errNote) => {
+      if (settled) return;
+      settled = true;
       active.delete(child.pid);
       finished += 1;
-      if (code !== 0) log(`任务 ${card.id} 退出码 ${code}（已落 blocked/failed/或等待人工，继续调度）。`);
+      if (errNote) log(`任务 ${card.id} 的 run 子进程启动失败（${errNote}）——继续调度。`);
+      else if (code !== 0) log(`任务 ${card.id} 退出码 ${code}（已落 blocked/failed/或等待人工，继续调度）。`);
       pump();
-    });
+    };
+    child.on('exit', (code) => onDone(code));
+    child.on('error', (e) => onDone(undefined, e.message));
   };
 
   const pump = () => {

@@ -49,10 +49,24 @@ export function lastSeq(dir) {
   return evts.length ? evts[evts.length - 1].seq : 0;
 }
 
+// appendEvent 的 seq 缓存（agents-hygiene-batch）：worker 每 turn 两条事件、长任务累计数百条，
+// 逐条经 lastSeq 全文件重读重解析是 O(n²) 写放大。进程内缓存自增，未命中才落盘对齐——
+// 读侧 lastSeq/readEvents 保持全量读（崩溃恢复语义不变）；task-lock 接管陈锁时经
+// invalidateSeqCache 清一次对应目录的缓存，防同任务跨进程双写 seq 冲突。
+const seqCache = new Map();
+
+/** 清除目录的 seq 缓存：下一次 appendEvent 重新从盘上对齐真实 seq（task-lock 接管陈锁时调用）。 */
+export function invalidateSeqCache(dir) {
+  seqCache.delete(dir);
+}
+
 /** 追加一个事件（seq 自动单调递增；同步 append 一整行，避免交错）。 */
 export function appendEvent(dir, type, fields = {}) {
   fs.mkdirSync(dir, { recursive: true });
-  const seq = lastSeq(dir) + 1;
+  let seq = seqCache.get(dir);
+  if (seq === undefined) seq = lastSeq(dir);
+  seq += 1;
+  seqCache.set(dir, seq);
   const event = { ts: toIsoLocal(), seq, type, ...fields };
   fs.appendFileSync(eventsFile(dir), JSON.stringify(event) + '\n');
   return event;

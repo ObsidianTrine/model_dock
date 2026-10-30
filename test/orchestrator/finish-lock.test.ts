@@ -12,13 +12,17 @@ import { mkRepo } from './helpers.js'
 
 const LOCK_REL = path.join('.agents', 'worktrees', '.finish.lock')
 
-/** 在临时仓库里跑一次 finish（无 worktree 的任务名 = 锁后探针），返回结果与锁状态。 */
+/** 在临时仓库里跑一次 finish（无 worktree 的任务名 = 锁后探针），返回结果与锁状态。
+ *  FINISH_LOCK_WAIT_SECONDS=0：本套件钉的是**判活分类**语义（心跳新鲜度），不是等待
+ *  行为——finish 锁自 T13 起默认有界等待 300s（FINISH_LOCK_WAIT_SECONDS 可调），不关掉
+ *  等待的话「新鲜锁拒绝」用例会白等 300s 撞测试超时（实跑踩中）。 */
 function runFinish(repo: string, task: string) {
   const script = path.join(repo, '.agents', 'scripts', 'feature-branch.mjs')
   const r = spawnSync(process.execPath, [script, 'finish', task], {
     cwd: repo,
     encoding: 'utf8',
     timeout: 60_000,
+    env: { ...process.env, FINISH_LOCK_WAIT_SECONDS: '0' },
   })
   const out = `${r.stdout ?? ''}\n${r.stderr ?? ''}`
   return { status: r.status, out, lockExists: fs.existsSync(path.join(repo, LOCK_REL)) }

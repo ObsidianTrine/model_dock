@@ -25,7 +25,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { evaluateBranchEdit, audit, isDocFile } from '../scripts/policy.mjs';
+import { evaluateBranchEdit, audit, isDocFile, BASE_BRANCHES } from '../scripts/policy.mjs';
 
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
@@ -78,15 +78,21 @@ function nearestExistingDir(p) {
   }
 }
 
-const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-const root = git(['rev-parse', '--show-toplevel']);
-const fileRoot = filePath ? git(['-C', nearestExistingDir(path.dirname(filePath)), 'rev-parse', '--show-toplevel']) : '';
-
-// escape hatch：AGENTS_ALLOW_BASE_EDIT=1（可移植名）；旧项目名 MODELRDOCK_ALLOW_DEVELOP_EDIT 永远兼容。
+// escape hatch（廉价，先查——放行时省掉下面全部 git 取证）：
+// AGENTS_ALLOW_BASE_EDIT=1（可移植名）；旧项目名 MODELRDOCK_ALLOW_DEVELOP_EDIT 永远兼容。
 if (process.env.AGENTS_ALLOW_BASE_EDIT === '1' || process.env.MODELRDOCK_ALLOW_DEVELOP_EDIT === '1') {
   audit({ hook: 'guard-develop', tool, decision: 'allowed', reason: 'escape hatch AGENTS_ALLOW_BASE_EDIT=1 (legacy MODELRDOCK_ALLOW_DEVELOP_EDIT also accepted)', target: filePath });
   process.exit(0);
 }
+
+const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+// 热路径重排（agents-hygiene-batch）：evaluateBranchEdit 的第一条判定就是「非基准分支放行」，
+// 不消费 repoRoot/fileRoot——branch 已确定不在基准集合时（feature worktree 干活是工作流常态），
+// 下面两个 git 子进程取证纯浪费（实测单次编辑省 ~25ms），跳过之；裁决仍 100% 走 policy
+//（拦截判定零复制），audit 事件字段与每次放行/拦截各一条的语义不变。
+const skipForensics = !BASE_BRANCHES().includes(branch);
+const root = skipForensics ? '' : git(['rev-parse', '--show-toplevel']);
+const fileRoot = !skipForensics && filePath ? git(['-C', nearestExistingDir(path.dirname(filePath)), 'rev-parse', '--show-toplevel']) : '';
 
 const verdict = evaluateBranchEdit({
   branch,
