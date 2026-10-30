@@ -163,6 +163,16 @@ pending → running → reviewing → awaiting-human → merged
 - **worker 起不来（claude CLI 缺失/未登录）会怎样**：任务卡自动落 `blocked/`（failed 事件附原因），不会悬在 running/ 冒充在跑；修好环境后 `resume <task-id>` 续做。
 - **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `${envPrefix}_NIGHTLY_WEBHOOK=<url>`（envPrefix 缺省 AGENTS，旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 兼容识别）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
 
+## 长跑加固（2026-10-30，feature/orch-autonomy-hardening）
+
+自治长跑（夜里 drain 数小时）的工程补强，实验依据与设计细节见 `docs/design-orchestrator.md` v1.2：
+
+- **Windows 权限墙已根修**：claude CLI 在 Windows 的 shell 工具是 **PowerShell**——`Bash(...)` 前缀白名单匹配不到 PowerShell 工具调用，git add/commit/npm test 全被 headless 自动拒（只读 git status 反而走内置启发式放行，即夜跑「能读不能验」形态）。现白名单/红线一律 **Bash+PowerShell 双形态双发**，worker settings hook matcher 为 `Bash|PowerShell`。zcode 侧 yolo 在 CLI 0.17.0 已恢复全自动（沙箱实验实证）。**zcode worker 红线前置条件**：`cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/` 并在用户级 `~/.zcode/cli/config.json` 注册 PreToolUse（matcher `Bash|PowerShell`）指向它——缺失时 zcode worker 的红线无人把守（2026-10-30 发现本机注册缺失，已补并验证 git push 拦/git status 放）。
+- **预算按引擎校准**：workflow.json `budgetProfiles.<backend>` 覆盖任意 `max_*` 正整数键（本仓库 zcode-headless `max_tokens: 5000000`——GLM 缓存读口径失真 + zcode 会话结束才回填 usage，默认 500k 形同虚设，夜跑 8 次误熔断；调大不关闭，wall-clock 才是真熔断）。Budget 记账改会话级 committed+sessionMax（跨 fixup 会话不再互相覆盖漏计），每次 worker_spawned 落 `budget_baseline` 事件。
+- **瞬时故障退避**：worker 异常结束（无结果块）且输出带 429 限流/网络签名（transient.mjs）→ 原地重试同一 prompt，60s×attempt，≤3 次（`worker_retry` 事件留痕，不静默）；签名不匹配或自报 stuck 仍走 blocked。drain 起跑前**引擎预检**（zcodeAvailable/claudeAvailable）——CLI 不可用直接拒绝启动，不再逐卡 spawn 失败烧成 blocked（夜跑 8 卡 ENOENT 实证）。
+- **无人值守观测**：卡片落 awaiting-human/blocked/failed（含异常兜底）即发 webhook（环境变量 `${envPrefix}_ORCH_WEBHOOK`，如 `AGENTS_ORCH_WEBHOOK`；未配置零开销，失败静默）；drain 收官发落位 tally 摘要。spec 全局进度锚 `specs/<id>/progress.json`（build 幂等生成，卡片状态迁移经 moveCard 自动同步），`spec status <id>` 看跨夜断点全局视图。
+- **prompt 纪律**（对齐 Anthropic 长时程 harness）：worker prompt 新增结束纪律层——done 前自验测试、干净提交、不越界、**同一条命令被权限拒绝满 2 次即 stuck 熔断**（实测一次任务白烧 15+ 次重试+子代理）；环境层禁 `git -C` 形态（headless 白名单按前缀匹配）与 `;`/`&&` 复合命令（被按 multiple operations 整体拒绝）。spec 卡 design/requirements 改 **worktree 文件引用**（防 zcode headless 30k argv 上限），prepare 时由 orchestrator 拷贝进 worktree（specs/ 在 gitignore 内不污染改动面）。reviewer prompt 注入 REVIEW.md 纪律摘要（截 8000 字符，异构引擎+同一纪律）。files_hint 解析时自动剥反引号/引号（tray-only-mode-t1 实测污染）。
+
 ## UI 冒烟门禁（ui_check）
 
 改 Web 控制台 / 网关页面的任务卡，frontmatter 加 `ui_check: true`：门禁链会在 build 之后跑 `workflow.json` 的 `uiCheckCmd`（本仓库为 `node scripts/ui-smoke.mjs`——自备 189xx 端口 + `MODELRDOCK_FAKE_HOME` 沙箱、健康端点 + token 登录 302 + 控制台页标记断言、结束杀进程树并核实清理）。失败进调试子循环（与 build 同级，不是红线）；卡声明了 `ui_check` 但仓库未配置 `uiCheckCmd` 时快速失败、卡留 pending。

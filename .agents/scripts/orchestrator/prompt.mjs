@@ -36,11 +36,27 @@ export function buildWorkerPrompt(card, ctx) {
       (body.background ? `## 背景\n${body.background}\n\n` : '')
   );
 
-  // [环境层] worktree 绝对路径
+  // [环境层] worktree 绝对路径 + headless 权限形态约定（2026-10 实跑教训：
+  // worker 惯用 `git -C <绝对路径>` 而 headless 白名单按命令前缀匹配，-C 形态
+  // 不在白名单内被自动拒绝，白白烧预算——禁用 -C，shell 一律以当前目录执行）
   parts.push(
     `# 环境层：工作目录\n\n` +
       `你的工作目录（worktree）是：${ctx.worktreePath}\n` +
-      `所有编辑必须使用此目录下的绝对路径，禁止改动主仓库或任何其他 worktree 的文件。`
+      `所有编辑必须使用此目录下的绝对路径，禁止改动主仓库或任何其他 worktree 的文件。\n` +
+      `shell 命令一律以当前目录执行：git 直接写 \`git add / git commit / git diff / git status\`，**禁止 \`git -C <路径> <子命令>\` 形态**\n` +
+      `（headless 权限白名单按命令前缀匹配，-C 形态会被自动拒绝）。未列入白名单的命令（如 node/powershell 直调）同样会被拒。\n` +
+      `**一次工具调用只发一条 shell 命令**：不要用 ; / && / | 把多条命令拼在一起——复合命令会被权限系统按「multiple operations」整体拒绝。`
+  );
+
+  // [纪律层] 长时自治运行的结束纪律（Anthropic 长时程 harness 结论 + 实跑教训：
+  // worker 被权限拒绝后换形态重试 15+ 次并派子代理同拒，烧穿预算零产出）
+  parts.push(
+    `# 结束纪律（必须遵守）\n\n` +
+      `1. 报告 done 之前，亲自跑一遍测试命令（见验收标准）确认全绿——orchestrator 会机器复核，自报与实测不符时以实测为准。\n` +
+      `2. 收尾现场干净：本卡全部改动已在 worktree 内 git add + git commit，NOTES.md 已更新。\n` +
+      `3. 只做本卡范围内的事（对照验收标准与预期改动范围）：不顺手重构、不修无关问题——越界改动会被门禁打回。\n` +
+      `4. 权限拒绝熔断：同一条 shell 命令被权限系统拒绝满 2 次，立即停止重试（不要换写法绕过、不要派子代理），\n` +
+      `   在 NOTES.md 列出被拒命令原文，然后按契约层输出 status: stuck 的结果块——拒绝通常是环境缺配置，重试只烧预算。`
   );
 
   // [契约层] 输出契约
@@ -67,14 +83,19 @@ export function buildWorkerPrompt(card, ctx) {
  * @param {object} card 任务卡
  * @param {string} diff `git diff <base>...HEAD` 全文
  * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 不列具体红线）
+ * @param {string} discipline 审查纪律文本（如 REVIEW.md 摘要；缺省 = 不注入——
+ *   与人工/PR 审查同一套失败形态与红线标准，异构引擎 + 同一纪律）
  */
-export function buildReviewerPrompt(card, diff, redlines = '') {
+export function buildReviewerPrompt(card, diff, redlines = '', discipline = '') {
   const { meta, body } = card;
   const plannerNote =
     meta.created_by === 'planner'
       ? `\n5. **本任务卡由 Planner 自动生成**：请额外评估「验收标准」本身的完备性——是否空洞（如只有"测试全绿"而无具体行为断言）、是否真正覆盖了意图、是否存在 Planner 幻觉（引用不存在的文件/端点）。验收标准不合格同样计阻塞项。\n`
       : '';
   const redlineNote = redlines ? `（${redlines}）` : '';
+  const disciplineNote = discipline
+    ? `\n# 审查纪律（与人工/PR 审查同一标准）\n\n${discipline}\n`
+    : '';
   return (
     `请审查这个 diff。任务目标是：${body.goal}\n\n` +
     `请检查：\n` +
@@ -82,6 +103,7 @@ export function buildReviewerPrompt(card, diff, redlines = '') {
     `2. 有没有引入明显 bug、安全问题、或破坏项目红线${redlineNote}？\n` +
     `3. 测试是否覆盖了改动路径？\n` +
     `4. 有没有不必要的改动混入（顺手重构、无关格式化、超出预期范围：${meta.files_hint.join(', ')}）？\n${plannerNote}\n` +
+    disciplineNote +
     `只报告问题，不修改代码。每个问题给出严重级别（阻塞/建议/提示）。输出末尾用一行汇总：\n` +
     `REVIEW_SUMMARY: blockers=<n> suggestions=<n> notes=<n>\n\n` +
     `# 待审查 diff（git diff <base>...HEAD）\n\n\`\`\`diff\n${diff}\n\`\`\`\n`
@@ -187,7 +209,7 @@ export function buildPlannerPrompt(intentText, repoRoot) {
     `1. gate 固定写 L3（合并级别由系统按实际改动分级裁决，不由你决定）；\n` +
     `2. 验收标准必须可机器检查：除测试全绿（workflow.json testCmd）外，给出**具体行为断言**（哪个函数/端点/文案应当怎样），\n` +
     `   禁止空洞标准；\n` +
-    `3. files_hint 写真实范围（你确认过的路径），越准越好；\n` +
+    `3. files_hint 写真实范围（你确认过的路径），越准越好；写裸 glob（如 src/presets/**），不要用反引号或引号包住；\n` +
     `4. created_by 固定写 planner；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
@@ -275,7 +297,7 @@ export function buildSpecPrompt(intentText, repoRoot, redlines = '') {
     `${fence}\n\n` +
     `硬性要求：\n` +
     `1. 验收标准与完成条件必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止空洞标准；\n` +
-    `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；\n` +
+    `2. 「文件」行写真实路径 glob（你确认过的），越准越好——它直接成为任务卡的 files_hint；写裸 glob（如 src/api/**），不要用反引号或引号包住；\n` +
     `3. 任务间依赖显式写「依赖: 任务 N」，无依赖写「依赖: 无」；\n` +
     `4. 设计不得违反 AGENTS.md 红线${redlines ? `（${redlines}）` : ''}；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
