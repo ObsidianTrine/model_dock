@@ -70,7 +70,7 @@ describe('orchestrator parallel > drain --workers 并发调度', () => {
       submitCard(repo.root, 'w1')
       submitCard(repo.root, 'w2')
       const out = runOrch(repo.root, 'drain --backend mock')
-      expect(out.stdout).toContain('队列已清空：本次 drain 共跑完 2 个任务（merged 2）。') // 串行版结尾无"（并发 N）"，带落位 tally
+      expect(out.stdout).toContain('队列已清空：本次 drain 共跑完 2 个任务（awaiting-human 2）。') // 串行版结尾无"（并发 N）"，带落位 tally
     } finally {
       repo.cleanup()
     }
