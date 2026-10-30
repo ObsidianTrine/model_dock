@@ -20,24 +20,11 @@ import { clearKnownTable } from '../src/providers/known.js'
 // autostart 是唯一改系统层状态（不写 config.toml）的网关端点依赖：mock 成纯内存开关，
 // 让 overview 即时性回归测试可跨平台跑（真实 install 在 Linux/Windows CI 会触碰
 // systemctl / 真实启动文件夹）。本文件其他用例不依赖 autostart 模块行为。
-// spread importOriginal 保留纯函数（gatewayDaemonArgs/updateDaemonArgs 等）——
-// isolate:false 共享模块注册表下整模块替换会击穿其他文件经 webupdate 等新链路的静态绑定。
-vi.mock('../src/autostart.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/autostart.js')>()
-  let installed = false
-  return {
-    ...original,
-    autostartOverview: () => ({ installed, kind: 'launchd' as const }),
-    installAutostart: async () => {
-      installed = true
-      return { kind: 'launchd' as const, file: '/fake/com.modeldock.gateway.plist', argv: ['modeldock', '--sea-gateway'], started: false }
-    },
-    uninstallAutostart: async () => {
-      const was = installed
-      installed = false
-      return { removed: '/fake/com.modeldock.gateway.plist', wasInstalled: was }
-    },
-  }
+// spread 型 mock（importOriginal 保留纯函数——isolate:false 共享模块注册表下整模块替换
+// 会击穿其他文件经 webupdate 等新链路的静态绑定）；形状单源于 test/mocks/autostart.ts（T21）。
+vi.mock('../src/autostart.js', async () => {
+  const { spreadAutostartMock } = await import('./mocks/autostart.js')
+  return spreadAutostartMock()
 })
 
 // 桌面客户端（workbuddy / zcode / mimo-desktop）的 presence 探测在 Windows 上要跑

@@ -1,7 +1,7 @@
 // 回归测试：写客户端文件的目标端口解析（docs 无、2026-10-01 用户实测 bug）。
-// 现场：生产(8687) + dev(8890) 双实例共用单一网关状态文件，dev 后启动劫持状态；
-// 旧代码 planAttach/refreshBakedModelClients 采信状态文件，把真实客户端文件
-// 重写到 8890（生产控制台接入后 detail 恒为 http://127.0.0.1:8890）。
+// 现场：生产 + dev 双实例（本测试用 28687/28890 非保留端口替身）共用单一网关状态文件，
+// dev 后启动劫持状态；旧代码 planAttach/refreshBakedModelClients 采信状态文件，把真实
+// 客户端文件重写到 dev 端口（生产控制台接入后 detail 恒为 dev 端口）。
 // 修复：实例侧操作显式传 rt.port；CLI 启发式改为生产默认端口优先。
 
 import { describe, expect, it, afterEach } from 'vitest'
@@ -75,9 +75,9 @@ describe('客户端写入端口解析 > 显式端口压过被劫持的状态文�
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     try {
       await saveConfig(baseCfg())
-      const plan = await planAttach('claude-code', { gatewayPort: 8687 })
-      expect(plan.port).toBe(8687)
-      expect(JSON.stringify(plan.plan.changes)).toContain(gatewayBase(8687))
+      const plan = await planAttach('claude-code', { gatewayPort: 28687 })
+      expect(plan.port).toBe(28687)
+      expect(JSON.stringify(plan.plan.changes)).toContain(gatewayBase(28687))
       expect(JSON.stringify(plan.plan.changes)).not.toContain(gatewayBase(fake.port))
     } finally {
       fake.close()
@@ -92,9 +92,9 @@ describe('客户端写入端口解析 > 显式端口压过被劫持的状态文�
     try {
       await saveConfig(baseCfg())
       // 2026-10 复审收口：沙箱（FAKE_HOME）是「独立机器」，不探测生产默认端口——
-      // 沙箱内的 harness token 生产网关并不认识，把客户端文件指到 8687 只会 401。
-      // 即使真机 8687 存活也按状态文件（沙箱自己的）端口走；生产机器上的「8687 存活优先」
-      // 启发式仅非沙箱路径生效，测试无法安全覆盖（绝不监听生产端口）
+      // 沙箱内的 harness token 生产网关并不认识，把客户端文件指到生产默认端口只会 401。
+      // 即使真机生产默认端口存活也按状态文件（沙箱自己的）端口走；生产机器上的「生产默认
+      // 端口存活优先」启发式仅非沙箱路径生效，测试无法安全覆盖（绝不监听生产端口）
       const plan = await planAttach('claude-code', {})
       expect(plan.port).toBe(fake.port)
     } finally {
@@ -117,13 +117,13 @@ describe('客户端写入端口解析 > 全局切换重写烙模型客户端', (
       cfg.harness['zcode'] = { mode: 'gateway', route: 'default', token: 'mdk_zcode_t' }
       await saveConfig(cfg)
 
-      const r = await refreshBakedModelClients({ port: 8687 })
+      const r = await refreshBakedModelClients({ port: 28687 })
       expect(r.warnings).toEqual([])
       expect(r.refreshed).toContain('zcode')
 
       const pp = path.join(h.home, '.zcode', 'v2', 'provider_config.json')
       const text = fs.readFileSync(pp, 'utf8')
-      expect(text).toContain(gatewayBase(8687))
+      expect(text).toContain(gatewayBase(28687))
       expect(text).not.toContain(gatewayBase(fake.port))
     } finally {
       fake.close()

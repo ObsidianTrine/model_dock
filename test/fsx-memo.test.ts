@@ -11,7 +11,8 @@ import {
 import { regQueryAny } from '../src/adapters/presence.js'
 
 // PERF-07（fsx PATH memo）+ XPLAT-01（EBUSY 重试）+ PERF-08（注册表三视图并行）三件套的
-// 定点测试，全部走独立文件避免与既有 adapters/store 文件的 vi.mock 相互污染（singleFork）。
+// 定点测试，独立成文件（T21 复核：adapters/store 现已零 vi.mock——仅 adapters.test.ts 有
+// console spy——「避免 mock 污染」的旧理由已不存在，独立文件保留为低耦合组织方式）。
 
 describe('fsx PATH memo（PERF-07）', () => {
   it('非 FAKE_HOME 下同一 cmd 二次调用 memo 命中，不再触达 fs', () => {

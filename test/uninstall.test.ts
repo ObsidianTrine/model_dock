@@ -21,10 +21,10 @@ vi.mock('../src/config/secrets.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/config/secrets.js')>()),
   deleteSecret: vi.fn(async () => {}),
 }))
-vi.mock('../src/autostart.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/autostart.js')>()),
-  uninstallAutostart: vi.fn(async () => ({ wasInstalled: false, removed: '' })),
-}))
+vi.mock('../src/autostart.js', async () => {
+  const { viFnAutostartMock } = await import('./mocks/autostart.js')
+  return viFnAutostartMock()
+})
 vi.mock('../src/cliinstall.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/cliinstall.js')>()),
   removeCliLink: vi.fn(async () => ({ removed: false })),
