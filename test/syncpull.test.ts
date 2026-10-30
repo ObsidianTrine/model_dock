@@ -15,23 +15,11 @@ import type { Config } from '../src/config/types.js'
 
 // 本文件先于 gateway.test.ts 加载 server.js 时（vitest isolate:false 共享模块注册表），
 // 必须同样 mock autostart——否则 gateway.test.ts 后挂的 mock 绑不回已实例化的 server.js
-// 静态绑定，其 autostart 用例会走到真实 launchctl（10s 超时失败）。mock 形状与 gateway.test.ts 一致。
-vi.mock('../src/autostart.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/autostart.js')>()
-  let installed = false
-  return {
-    ...original,
-    autostartOverview: () => ({ installed, kind: 'launchd' as const }),
-    installAutostart: async () => {
-      installed = true
-      return { kind: 'launchd' as const, file: '/fake/com.modeldock.gateway.plist', argv: ['modeldock', '--sea-gateway'], started: false }
-    },
-    uninstallAutostart: async () => {
-      const was = installed
-      installed = false
-      return { removed: '/fake/com.modeldock.gateway.plist', wasInstalled: was }
-    },
-  }
+// 静态绑定，其 autostart 用例会走到真实 launchctl（10s 超时失败）。
+// spread 型 mock 与 gateway.test.ts 同形状，单源于 test/mocks/autostart.ts（T21 收敛漂移）。
+vi.mock('../src/autostart.js', async () => {
+  const { spreadAutostartMock } = await import('./mocks/autostart.js')
+  return spreadAutostartMock()
 })
 
 const osHostname = (): string => os.hostname()

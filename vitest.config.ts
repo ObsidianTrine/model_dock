@@ -9,6 +9,11 @@ const watchdog = process.env.VITEST_WATCHDOG === '1'
 
 export default defineConfig({
   test: {
+    // 顺序耦合对（T21 门禁：test-suite-couplings.test.ts）——singleFork 串行 + vitest
+    // 按历史运行时长缓存排序（慢者先行，非字母序）：uninstall.test.ts 体量最大、几乎
+    // 恒先于 zz-quickwins / update-tray 运行，后两者依赖此前提（前者惰性 import basic.ts
+    // 防 registry 污染；后者因 uninstall 已 mock gatewaycmd 而不重复 mock）。若
+    // uninstall.test 大幅变小或 vitest 改排序策略，先重审两处耦合再动代码。
     // 产品套件 = test/ 顶层。agent 工作流套件（test/orchestrator/**，测 .agents/ 编排器与
     // 守卫 hook）拆到 vitest.workflow.config.ts，经 `npm run test:workflow` 单独运行——
     // 产品门禁不再为其支付 ~40s（方案 A）；池策略等防死锁设置两处必须保持同构。

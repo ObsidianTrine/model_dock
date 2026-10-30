@@ -7,8 +7,9 @@ import { loadCalendar, loadCalendarFull, loadHolidayDays } from '../src/gateway/
 import { holidaysCachePath } from '../src/util/paths.js'
 import type { Config } from '../src/config/types.js'
 
-// 性能收口改动的定点测试（请求体上限换算 / 日历合并加载）：独立文件，避免与既有大文件
-// （gateway / daytype）共享 vi.mock 注册表（singleFork 约定，见 fsx-memo.test.ts 的先例）
+// 性能收口改动的定点测试（请求体上限换算 / 日历合并加载）：独立成文件（T21 复核：本文件
+// 与 gateway / daytype 均零 vi.mock，「避免共享 mock 注册表」的旧理由已不存在，独立文件
+// 保留为低耦合组织方式）
 
 describe('maxBodyBytes（请求体上限：默认 16MB，gateway.max_body_mb 可调）', () => {
   const MB = 1024 * 1024
