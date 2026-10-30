@@ -1,0 +1,16 @@
+{
+  "id": "2026-10-finish-lock-wait-contract",
+  "title": "锁心跳改造合入未跑套件：finish-lock 测试夹具假设 fail-fast 默认，与 T13 既定的「默认有界等待 300s」契约冲突——develop test:workflow 3 例红，后续所有改动的回归信号被红噪声淹没",
+  "reviewRef": "cb958be",
+  "fixedBy": "92a78ac（T15 agents-hygiene-batch 验收面补齐，合并 eae8e0a）",
+  "files": [
+    "test/orchestrator/finish-lock.test.ts",
+    ".agents/scripts/feature-branch.mjs"
+  ],
+  "expect": [
+    "finish_lock_wait_seconds",
+    "300s",
+    "fail-fast"
+  ],
+  "note": "2026-10-30 实锤逃逸（T15 接手会话发现，reviewRef=cb958be 为 T15 修复前最后一个 bug 在场状态，reflog 实证）。根因：锁判活心跳化（beat 每 15s 续期替代 kill(pid,0)——修 T13 执行坑 #9 的 Windows pid 复用/僵尸误报，方向正确）改了 feature-branch.mjs 的等待默认值语境，但新增的 finish-lock.test.ts 的 runFinish 夹具不设 FINISH_LOCK_WAIT_SECONDS——按 T13 默认 300s 有界等待，「新鲜锁拒绝」用例白等 60s 撞测试超时；同时 T13 自己的 merge-verify ⑤「死 pid 造锁」在心跳语义下失效（无 beat 锁按 legacy 30min 阈值判活，等待方白等）。3 例红合入 develop 后，test:workflow 对后续改动的回归信号被红噪声淹没。逃逸层：合入库未跑 test:workflow（评测跑分是启发式不是门禁，红着也能合）。修复（92a78ac）：测试侧对齐契约——runFinish 显式 WAIT_SECONDS=0（钉判活分类语义、不测等待行为）；merge-verify ⑤ 改「beat 停跳 2 分钟」造锁（pid 不再参与判活后，死 pid 形态已不可区分）。审查侧教训：改共享基础设施契约（默认值/判活机制/超时）的 PR 必须核对其既有调用方与测试的假设是否仍成立；套件红未被当合入否决项时，至少要在提交信息里声明理由与余波"
+}
