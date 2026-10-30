@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-daemon-gatewayjson-tamper-race",
+  "title": "daemon 篡改纵深用例在真实网关子进程存活期间改写 gateway.json——db6354d 起常驻网关会定期查更新并回写真实 started_at，周期写手闯进篡改窗口：快机恒绿、慢速 arm64 上二次 start 走 CLI 优雅分支拿到 exit 0，断言偶发红（linux-arm64 发版腿才炸，删 tag 重打）",
+  "reviewRef": "815a65d^",
+  "fixedBy": "815a65d",
+  "files": ["test/daemon-lifecycle.test.ts"],
+  "expect": ["started_at", "更新检查", "回写", "竞态"],
+  "note": "v1.2.1 发版实测踩中。篡改用例伪造 started_at 骗 CLI 层三重校验，但同一沙箱里活着的网关自身也在写这份文件（查更新回写），两个写手无隔离、时序未定。修复 = 子进程 env 加 MODELRDOCK_DISABLE_UPDATE_CHECK 掐掉写手。审查侧教训（测试类 PR）：测试改「被测进程自己也在写」的共享状态文件前，先问还有谁在写——活进程的周期性写手（心跳 / 更新检查 / 同步引擎）不隔离就是竞态；与 realhome-write-through（f77dc02）同族：写手身份与写盘路径都会随 env / 生命周期漂移"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-win32-basename",
+  "title": "trayPidsFromProcessLines 用平台相关的 path.basename 切 Windows CIM 命令行——CIM 输入固定反斜杠路径（C:\\...\\ModelDockTray.exe），POSIX basename 不切反斜杠，非 Windows 宿主上整类托盘行不命中、枚举恒空；生产行为恰因 win32 上两 basename 同义而未坏，反而更隐蔽，但跨平台可测性已破：9 例单测红恰逢 runner 短缺漏进 develop",
+  "reviewRef": "d6c0a9f^",
+  "fixedBy": "d6c0a9f",
+  "files": ["src/update/install.ts"],
+  "expect": ["win32", "反斜杠", "posix"],
+  "note": "v1.5.1 发布周期实测踩中。解析器的输入源是 Windows 专属的 PowerShell CIM 输出，路径格式恒为反斜杠——修复 = path.win32.basename（语义恒定，不随宿主平台漂移）。审查侧教训：AGENTS 三平台约定要求平台差异显式分支，此处失守的形态是「解析 Windows 专属文本却用宿主平台的 path API」——审查解析类 diff 先问两个问题：输入是什么平台的格式？解析端会跑在哪些平台？两者不一致就是缺陷，哪怕生产路径暂时踩不到（测试与未来调用方会踩）"
+}

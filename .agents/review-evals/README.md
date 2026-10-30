@@ -42,8 +42,34 @@
 | 2026-10-jsonpath-tokenizer-regression | CORRECT-08 修复自带回归：tokenize 正则不消费段间「.」，多段点句式全部误判无法解析（develop HEAD 实测 12 例红含 2 例期望矛盾） | f77dc02 | ⏳ 待首跑（2026-10-30 回归回流；首跑前不计入基线分母） |
 | 2026-10-finish-lock-wait-contract | 锁心跳改造合入未跑套件：finish-lock 夹具假设 fail-fast 默认，与 T13「默认有界等待 300s」契约冲突——develop test:workflow 3 例红，回归信号被红噪声淹没 | 92a78ac | ⏳ 待首跑（2026-10-30 T15 执行会话回灌；首跑前不计入基线分母） |
 | 2026-10-relay-failover-observability | failover 链三处可观测性 lie：数组体改写谎报 modelAfter、全候选 skip 耗尽降级 502 吞 status/hint、replayed_from 只记最后一跳（CORRECT-09） | bf730c6 | ⏳ 待首跑（2026-10-30 T28 修复回流；首跑前不计入基线分母） |
+| 2026-10-tray-win32-basename | trayPidsFromProcessLines 用平台相关 path.basename 切 Windows CIM 反斜杠命令行，非 Windows 宿主整类托盘行不命中：9 例单测红恰逢 runner 短缺漏进 develop（生产行为恰因 win32 上两 basename 同义而未坏、更隐蔽） | d6c0a9f | ⏳ 待首跑（2026-10-30 v1.5.1 周期回流；首跑前不计入基线分母） |
+| 2026-10-daemon-gatewayjson-tamper-race | daemon 篡改纵深用例与常驻网关查更新回写 gateway.json（真实 started_at）竞态，慢速 arm64 断言偶发红、发版腿才炸（linux-arm64 删 tag 重打） | 815a65d | ⏳ 待首跑（2026-10-30 v1.5.1 周期回流；首跑前不计入基线分母） |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+
+## 怎么加新考题（事故 / 回滚之后必做）
+
+1. 找到修复提交 `<fix>`，`reviewRef` 填 `<fix>^`（bug 在场的最后一个状态）；`files` 填根因所在文件。
+2. `expect` 填根因关键词（函数名 / 特征串），宽松一点没关系——打分是启发式，精确判定看模型原文。
+3. `note` 写清为什么当时的流程没拦住（哪一层的洞），对应的堵法落进 REVIEW.md / lint / prompt。
+4. 跑一次确认能复现「审出」或「没审出」，如实记录——没审出的题才是最有价值的题。
+5. 成题前提是「bug 在场 + 修复提交」都在树上；同提交内自纠（坏版本从未进树）的坑进「执行坑复盘」，不成题。
+
+## 怎么跑
+
+```bash
+node scripts/review-eval.mjs --dry                 # 只打印组装好的 prompt，不调模型
+node scripts/review-eval.mjs                       # 全量跑（走本地 claude CLI 与其已配端点）
+node scripts/review-eval.mjs --case 2026-10-update-stoptray
+node scripts/review-eval.mjs --model deepseek-v4-pro   # 透传给 claude --model
+node scripts/review-eval.mjs --timeout-min 25      # 单题超时（默认 15 分钟；超时/报错记「运行失败」继续其余题）
+node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打印 stdout）
+```
+
+- 前置：本机装有 `claude` CLI 并已登录 / 配好端点（脚本只透传环境，不自带 key）；CLI 不可用时可用 ZCode 会话模型 subagent 评分（2026-10-30 起的既有口径，报告照落 runs/）。
+- 打分是**启发式**（关键词命中），只作趋势参考；是否真审出，看报告里附的模型原文。
+- 频率：事故后随手跑；改了审查者（REVIEW.md / prompt / 模型）之后必跑一次全量。
+- 历次报告落 `runs/`（含模型原文；报告里引用的临时目录路径已随清理失效，以原文内嵌为准）。
 
 ## 评测循环产出（2026-10-30 夜训）
 
