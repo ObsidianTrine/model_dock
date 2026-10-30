@@ -79,7 +79,7 @@
 | CORRECT-06 | P2 | `src/sync/engine.ts:77-78` | 拉取应用后重收集 lastSyncedHash 与并发本地写存在竞态窗口：写落在「apply 落盘→post-apply collect」之间会被计入基线，本地改动被静默吞掉（不推送也不冲突） | ☑ 已修（2026-10-29 @b917687，withFileLock 同路径重入 + apply/collect 原子化，见 §三） |
 | CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ✅ 已修（2026-10-30，daemon 侧 fd 2 接管自写日志，commit 99fa3a5，见 §三） |
 | CORRECT-08 | P2 | `src/util/jsonpath.ts` | 三处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语）；③ 对象上下文用下标写入静默落字符串键 `"0"` 而非报错（tsx 实测） | ✅ 已修（2026-10-30，tokenize 完整覆盖校验 + star 守卫 + 下标×对象显式报错，见 §三） |
-| CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☐ 未修（2026-10-30 夜巡发现，逐条读码核实，见 §三） |
+| CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☑ 已修（2026-10-30 @bf730c6，T28 卡） |
 
 ---
 
@@ -395,6 +395,8 @@
 - 修复方向（未动手）：tokenize 校验匹配段拼回后与输入等长（不等长按 `toSegments` 对 star 的先例抛可操作双语报错）；star 递归前补与 `:62`/`:95-98` 同款类型守卫；下标段在对象容器上显式报错（或按路径语义建数组）。修复后三处均具备转为审查评测考题的资格（真实逃过历轮审查、实证复现、修复提交可回溯）。
 
 **CORRECT-09（P2，2026-10-30 夜巡发现，逐条读码核实）relay failover 链可观测性三项**
+
+> ☑ **已修 2026-10-30（@bf730c6，T28 卡）**：① injectModel 守卫补 Array.isArray（数组按「顶层非对象」契约透传，不谎报 modelAfter）；② 全候选 candidateSkip 耗尽时透传最后一个 skip 错误的 status/hint、routeReason 引入 skip_all（transport 耗尽保持 502+down_all）；③ replayedFrom 改数组累积去重，reason 输出 replayed_from:A,B。定向回归：hotpath 数组不谎报 + relay.test.ts forwardWithFailover 三例（全 skip 透传 / 三跳累积 / 正常 failover 不变）+ gateway.test.ts 端到端断言更新为累积形态。卡点外的两条存疑（ECONNRESET promise 阶段重放边界、QUOTA_BODY_RE 中文额度词）维持留档未动。
 - 发现者：审查者（GLM-5.3-Flash）对 relay.ts @ HEAD 的夜巡挖洞（报告 runs/2026-10-30-hunt-relay.md），本侧逐条读码核实机制成立。
 - ① `injectModel`（relay.ts:325-336）与调用点（:365）的守卫 `!json || typeof json !== 'object'` 拦不住数组（`typeof [] === 'object'`）：顶层数组请求体 + 需改写模型时，`json.model = final` 设数组 expando、`JSON.stringify` 丢弃之——返回的 body **未注入 model** 但 `modelAfter: final` 谎报已改写，日志/usage 记录与实际发出 body 不一致（可观测性 lie；对非法数组上游本会 400，非功能损坏）。修法：两处补 `Array.isArray(json)`。
 - ② failover 链尾出口（relay.ts:630-633）：候选耗尽统一包 `new UpstreamError(502, '所有候选服务连接失败（msg）')`，不传 hint、不透传 lastErr 的 status。全链候选都是 candidateSkip（key 缺失 / 协议端点缺失 / **钥匙环锁定 503+「检查系统钥匙环是否已解锁」hint**）时，客户端收到的是 502「连接失败」——status、hint、routeReason（down_all，实则从未连接）三重失真。修法：耗尽时 lastErr 是 UpstreamError 则透传其 status/hint（candidateSkip 类原样上抛亦可）。
