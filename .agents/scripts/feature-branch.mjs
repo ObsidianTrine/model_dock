@@ -447,6 +447,18 @@ function cmdFinish(taskId, args) {
   if (!wt) die(`no worktree for task "${taskId}" (expected ${wtPath}). Run "start ${taskId}" first, or check "list".`);
   if (wt.branch !== branch) die(`worktree ${wtPath} is on branch "${wt.branch}", expected "${branch}". Aborting.`);
 
+  // Soft gate (non-blocking): a NOTES.md still carrying the start template's placeholder
+  // means the handoff doc was never filled in — if this session dies mid-task, the next
+  // agent can only reverse-engineer the intent from the diff. Warn loudly but never
+  // block: NOTES.md never merges into the mainline, so it is not a code risk.
+  let notesStillTemplate = false;
+  try {
+    notesStillTemplate = fs.readFileSync(notesPathFor(wtPath), 'utf8').includes('<一句话说明本任务要达成什么>');
+  } catch { /* no NOTES.md (or unreadable) — nothing to warn about */ }
+  if (notesStillTemplate) {
+    console.warn(`WARNING: NOTES.md is still the unfilled start template — if this task is interrupted, the next agent can only reverse-engineer the handoff from the diff. Fill it in (goals/plan now, progress as you go): ${notesPathFor(wtPath)}`);
+  }
+
   // NOTES.md is a worktree-local handoff doc — never merged into the branch. Drop the
   // file, and if an earlier `git add -A` committed it, remove it from the branch with a
   // dedicated commit BEFORE the dirty check (deleting a tracked file is itself dirty).
