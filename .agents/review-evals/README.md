@@ -41,6 +41,7 @@
 | 2026-10-realhome-write-through | 测试收尾 restoreHomes 后同步引擎长尾 tick 把测试配置整包写进真实 home：stopSyncEngine 不等在飞 tick、单例无 home 钉扎、tick 中途写盘路径随 env 漂移（2026-10-30 生产配置覆盖事故，P0） | f77dc02 | ⏳ 待首跑（2026-10-30 事故回流；首跑前不计入基线分母） |
 | 2026-10-jsonpath-tokenizer-regression | CORRECT-08 修复自带回归：tokenize 正则不消费段间「.」，多段点句式全部误判无法解析（develop HEAD 实测 12 例红含 2 例期望矛盾） | f77dc02 | ⏳ 待首跑（2026-10-30 回归回流；首跑前不计入基线分母） |
 | 2026-10-finish-lock-wait-contract | 锁心跳改造合入未跑套件：finish-lock 夹具假设 fail-fast 默认，与 T13「默认有界等待 300s」契约冲突——develop test:workflow 3 例红，回归信号被红噪声淹没 | 92a78ac | ⏳ 待首跑（2026-10-30 T15 执行会话回灌；首跑前不计入基线分母） |
+| 2026-10-relay-failover-observability | failover 链三处可观测性 lie：数组体改写谎报 modelAfter、全候选 skip 耗尽降级 502 吞 status/hint、replayed_from 只记最后一跳（CORRECT-09） | bf730c6 | ⏳ 待首跑（2026-10-30 T28 修复回流；首跑前不计入基线分母） |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 

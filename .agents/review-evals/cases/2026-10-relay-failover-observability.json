@@ -1,0 +1,15 @@
+{
+  "id": "2026-10-relay-failover-observability",
+  "title": "failover 链三处可观测性 lie：数组体改写谎报 modelAfter、全候选 skip 耗尽降级成 502「连接失败」吞真实 status/hint、replayed_from 单变量覆盖只剩最后一跳",
+  "reviewRef": "bf730c6^",
+  "fixedBy": "bf730c6",
+  "files": [
+    "src/gateway/relay.ts"
+  ],
+  "expect": [
+    "array.isarray",
+    "candidateskip",
+    "replayed_from"
+  ],
+  "note": "来源 CORRECT-09（2026-10-30 夜巡挖洞 runs/2026-10-30-hunt-relay.md，T28 卡逐条读码核实）。三缺陷：① injectModel 守卫 typeof [] === 'object' 拦不住数组——expando 写入被 stringify 丢弃但 modelAfter 谎报已改写（违反自述「顶层非对象返回 null」契约，日志/usage 的 model 与实际发出 body 不一致）；② 全候选 candidateSkip 耗尽（key 缺失/协议端点缺失/钥匙环锁定——从未发生真实连接）被统一包装 502「所有候选服务连接失败」，真实 status/hint（如钥匙环 503+解锁指引）被吞、routeReason 谎报 down_all；③ replayedFrom 单变量反复覆盖，A→B→C 连续重放 reason 只剩 replayed_from:B。修复（bf730c6）：①守卫补 Array.isArray；②链尾透传最后一个 skip 错误的 status/hint + routeReason=skip_all（transport 耗尽保持 502+down_all）；③改数组累积去重输出 replayed_from:A,B。漏过层：forwardWithFailover 此前没有任何直接单测（错误路径分类全靠端到端隐式覆盖），observability lie 类缺陷（日志与实际不符）不在功能断言覆盖面。堵法：forwardWithFailover 直测就位（skip/重放/成功三形态）；「可观测性契约一致性」（modelAfter/reason/status 与实际行为）应作为网关区审查点。卡外两条存疑（ECONNRESET promise 阶段重放边界、QUOTA_BODY_RE 中文额度词）维持留档"
+}
