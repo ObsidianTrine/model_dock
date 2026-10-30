@@ -39,6 +39,7 @@
 | 2026-10-orchestrator-repo-root | findRepoRoot 双实现语义相反（--git-common-dir vs --show-toplevel）且注释自称「同款」：worktree 内跑 orchestrator 把 queue/ 锚进 worktree | c99f326 | ⏳ 待首跑（同上） |
 | 2026-10-review-concurrency-group | claude-review 的 auto-review 与 interactive（@claude）共用并发组 + cancel-in-progress：一条评论取消进行中的 auto-review，token 白费 | cc6d832 | ⏳ 待首跑（同上） |
 | 2026-10-realhome-write-through | 测试收尾 restoreHomes 后同步引擎长尾 tick 把测试配置整包写进真实 home：stopSyncEngine 不等在飞 tick、单例无 home 钉扎、tick 中途写盘路径随 env 漂移（2026-10-30 生产配置覆盖事故，P0） | f77dc02 | ⏳ 待首跑（2026-10-30 事故回流；首跑前不计入基线分母） |
+| 2026-10-jsonpath-tokenizer-regression | CORRECT-08 修复自带回归：tokenize 正则不消费段间「.」，多段点句式全部误判无法解析（develop HEAD 实测 12 例红含 2 例期望矛盾） | f77dc02 | ⏳ 待首跑（2026-10-30 回归回流；首跑前不计入基线分母） |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 

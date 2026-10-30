@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-jsonpath-tokenizer-regression",
+  "title": "CORRECT-08 修复自带回归：tokenize 正则把「.」排除出可匹配字符却不消费分隔符，多段点句式（$.a.b.c）全部被「不连续」误判，L2 pack 读写全废；两新用例期望与实现自相矛盾带红合并",
+  "reviewRef": "f77dc02^",
+  "fixedBy": "f77dc02",
+  "files": ["src/util/jsonpath.ts"],
+  "expect": ["consumed", "分隔符", "正则"],
+  "note": "2026-10-30 发现（fix-realhome-write-guard 分支全量跑分挡门禁）：fd235ea（CORRECT-08）重写 tokenize 时正则 /([^[.\\]]+)|\\[(\\d+)\\]/g 不消费段间「.」，exec 跳过点号后 m.index 恒停在分隔符上，`$.providers.modeldock.baseURL` 这类多段点句式全部误判无法解析——develop HEAD 实测 12 例红，且含作者同提交新增的 2 例期望与实现自相矛盾（稀疏追加/中段守卫写反，未实跑），说明该修复合并时全量门禁未真正跑绿。修复（f77dc02，与写入门禁同提交）：正则前缀 \\.? 连续消费分隔符（引号键/负数下标/未闭合括号照拒）；两用例按 fd235ea^ 语义修正。审查侧教训：①解析器改动的回归面是「既有合法句式」——改 tokenize 必须带多段/混合句式的逐字回归锚点；②新用例期望与实现矛盾 = 作者没跑过，合入门禁必须真跑全量而不是口头全绿。"
+}
