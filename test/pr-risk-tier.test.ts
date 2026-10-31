@@ -39,8 +39,8 @@ describe('classifyRisk', () => {
   it('命中 corePaths / releasePaths → 高风险，且给出规则与命中文件', () => {
     const r = classifyRisk(['src/config/secrets.ts', 'README.md'], rules)
     expect(r.tier).toBe('high')
-    const high = r.hits.filter((h) => h.tier === 'high')
-    expect(high.some((h) => h.files.includes('src/config/secrets.ts'))).toBe(true)
+    const high = r.hits.filter((h: { tier: string; files: string[] }) => h.tier === 'high')
+    expect(high.some((h: { files: string[] }) => h.files.includes('src/config/secrets.ts'))).toBe(true)
     expect(r.unmatched).toEqual([])
   })
 

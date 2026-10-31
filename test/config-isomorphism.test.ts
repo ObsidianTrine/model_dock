@@ -8,12 +8,12 @@ import workflowConfig from '../vitest.workflow.config.ts'
 
 describe('vitest 双 config 同构（T21 门禁）', () => {
   it('workflow config 的 test 段除 include 外与 base deep-equal', () => {
-    const { include: _baseInclude, ...baseRest } = baseConfig.test
-    const { include: _wfInclude, ...wfRest } = workflowConfig.test
+    const { include: _baseInclude, ...baseRest } = baseConfig.test!
+    const { include: _wfInclude, ...wfRest } = workflowConfig.test!
     expect(wfRest).toEqual(baseRest)
   })
 
   it('workflow include 仅指向 test/orchestrator（套件分工本身也钉住）', () => {
-    expect(workflowConfig.test.include).toEqual(['test/orchestrator/**/*.test.ts'])
+    expect(workflowConfig.test!.include).toEqual(['test/orchestrator/**/*.test.ts'])
   })
 })

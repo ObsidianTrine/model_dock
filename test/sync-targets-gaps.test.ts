@@ -1,4 +1,5 @@
 import http from 'node:http'
+import type net from 'node:net'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createWebdavTarget } from '../src/sync/targets/webdav.js'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
@@ -106,6 +107,7 @@ describe('createWebdavTarget 缺口分支', () => {
 describe('createCloudTarget 缺口分支', () => {
   it('readBlob 未拉取 / writeManifest 未暂存信封：内部状态守卫各自报错', async () => {
     const target = createCloudTarget({ url: 'http://127.0.0.1:1', token: 'tok', devid: 'd1' })
+    // @ts-expect-error 无参调用是本用例的守卫触发面（未拉取即读）
     await expect(target.readBlob()).rejects.toThrow(/尚未拉取|has not been fetched/)
     await expect(
       target.writeManifest({ rev: 1, ts: '2026-10-29T00:00:00.000Z', byDevid: 'd1', blobRef: 'blobs/1-d1.msync' }, 0)
@@ -193,6 +195,7 @@ describe('createCloudTarget 缺口分支', () => {
     const env = JSON.stringify({ fmt: 'modeldock-syncenv', v: 1 })
     await target.writeBlob(6, 'd1', env)
     expect(await target.writeManifest({ rev: 6, ts: '2026-10-29T00:00:01.000Z', byDevid: 'd1', blobRef: 'blobs/6-d1.msync' }, 5)).toBe('ok')
+    // @ts-expect-error 无参读返回暂存信封（blobRef 取内部状态）
     expect(await target.readBlob()).toBe(env)
   })
 })

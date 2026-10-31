@@ -57,7 +57,7 @@ async function seedBase(): Promise<void> {
     },
     profiles: { main: { provider: 'ark', default_model: 'auto' } },
     gateway: { port: 12345 },
-  } as Config)
+  } as unknown as Config)
 }
 
 async function localEdit(marker: string): Promise<void> {

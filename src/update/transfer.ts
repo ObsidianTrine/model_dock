@@ -79,7 +79,10 @@ export async function downloadToFile(url: string, dest: string, opts: DownloadTo
   const fh = await fsp.open(dest, 'w', 0o600)
   try {
     for await (const chunk of res.body) {
-      const buf = Buffer.from(chunk as ArrayBuffer)
+      // undici 的 body chunk 标注为 Uint8Array<ArrayBufferLike>；Buffer.from 接受任意 TypedArray，
+      // 经 unknown 双跳只是类型层面的收窄，运行时零变化（T30：DOM lib 下 Uint8Array<ArrayBuffer>
+      // 直接 as ArrayBuffer 会被判不充分重叠）
+      const buf = Buffer.from(chunk as unknown as ArrayBuffer)
       received += buf.length
       await fh.write(buf)
       opts.onProgress?.(received, total)

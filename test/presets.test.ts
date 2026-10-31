@@ -90,6 +90,7 @@ describe('懒加载（BUG-12：模块载入不碰 user presets，格式错误推
       const fp = path.join(dir, 'presets.json')
       fs.writeFileSync(fp, '{ not json ')
       // query 参数强制独立模块实例：fresh 的懒加载态（presetsLoaded=false），避免吃到本文件顶部 import 已加载的真实模块状态
+      // @ts-expect-error 带查询串的模块 specifier 无类型声明（运行时合法：查询串强制独立实例）
       const mod = await import('../src/presets/data.js?lazyerror')
       // 顶层的 findPreset 若在读文件的懒加载路径上抛错，就证明 import 本身没抛、错误在查询时到达：
       // 这里能走到 import 成功 + 查询抛错两步，分别对应「import 不抛」与「首次查询抛可操作报错」

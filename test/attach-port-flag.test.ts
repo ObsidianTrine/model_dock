@@ -25,7 +25,7 @@ async function seedAttachable(home: string): Promise<void> {
     protocol: 'openai',
     auth_style: 'bearer',
     key_ref: 'file:pv',
-    models: { m1: { context_window: 8192, max_output: 4096 } },
+    models: { m1: { source: 'manual', context_window: 8192, max_output: 4096 } },
   }
   cfg.profiles['p1'] = { name: 'p1', provider: 'pv', default_model: 'm1' }
   cfg.active_profile = 'p1'

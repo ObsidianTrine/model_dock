@@ -31,7 +31,7 @@ import { enrollCloud, setupSyncTarget } from '../src/sync/setup.js'
 import { safeSyncTick } from '../src/sync/engine.js'
 import { readSyncState } from '../src/sync/state.js'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
-import type { Config } from '../config/types.js'
+import type { Config } from '../src/config/types.js'
 
 const targetDirs: string[] = []
 afterAll(async () => {
