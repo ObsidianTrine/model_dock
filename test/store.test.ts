@@ -8,6 +8,7 @@ import { removeProviderCascade } from '../src/ops.js'
 import {
   getSecret,
   parseKeyRef,
+  SecretsError,
   setSecret,
   deleteSecret,
   setSecretsBatch,
@@ -152,6 +153,38 @@ describe('secrets', () => {
       expect(parseKeyRef('keychain:foo')).toEqual({ scheme: 'keychain', id: 'foo' })
     } finally {
       delete process.env.MD_TEST_KEY
+    }
+  })
+
+  it('异常 key_ref 抛可操作 SecretsError 而非崩栈（provider 条目缺 key_ref 字段场景）', async () => {
+    const h = fakeHome()
+    try {
+      // undefined/null（config.toml 条目缺 key_ref 字段时 provider.key_ref 的真实形态）：
+      // 此前在 parseKeyRef 的 ref.startsWith 崩 TypeError 栈——转发热路径（relay）与
+      // 控制台 overview keyPresence 都把 provider.key_ref 原样喂进来
+      for (const bad of [undefined, null]) {
+        let err: unknown
+        try {
+          await getSecret(bad as unknown as string)
+        } catch (e) {
+          err = e
+        }
+        expect(err).toBeInstanceOf(SecretsError)
+        expect((err as Error).message).toContain('key_ref')
+        expect((err as Error).message).not.toContain('startsWith')
+      }
+      // 空 plain（手编空 key_ref）：同样可操作拒绝
+      let empty: unknown
+      try {
+        await getSecret('')
+      } catch (e) {
+        empty = e
+      }
+      expect(empty).toBeInstanceOf(SecretsError)
+      // 空串哨兵兼容：maintenance/collect 的 parseKeyRef(p.key_ref ?? '') 解析 .scheme 不受影响
+      expect(parseKeyRef('')).toEqual({ scheme: 'plain', id: '' })
+    } finally {
+      h.restore()
     }
   })
 

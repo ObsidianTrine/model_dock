@@ -30,6 +30,17 @@ export interface KeyRef {
 }
 
 export function parseKeyRef(ref: string): KeyRef {
+  // 非 string（undefined/null：config.toml 条目缺 key_ref 字段、手编坏值）此前直接崩
+  // `ref.startsWith` 的 TypeError 栈——转发热路径（relay）与控制台 overview 都会把
+  // provider.key_ref 原样喂进来。改可操作报错（CORRECT 口径：宽容解析只会推迟暴露）。
+  // 空串不在此抛：maintenance/collect 以 `parseKeyRef(p.key_ref ?? '')` 当「无 ref」哨兵
+  // 解析 .scheme，空串落 plain 才是既有语义；空 plain 的拒绝在 getSecret 层。
+  if (typeof ref !== 'string') {
+    throw new SecretsError(
+      t('key_ref 非法（收到 {got}）：provider 条目缺 key_ref 字段', 'key_ref is invalid (got {got}): a provider entry is missing its key_ref field', { got: ref === undefined ? 'undefined' : ref === null ? 'null' : typeof ref }),
+      t('检查 config.toml 对应 [providers.*] 条目补上 key_ref（modeldock provider set-key <服务ID> 重设），或修正手编的坏值', 'Check the [providers.*] entry in config.toml and set key_ref (modeldock provider set-key <serviceId> to re-set it), or fix the hand-edited value')
+    )
+  }
   if (ref.startsWith('env:')) return { scheme: 'env', id: ref.slice(4) }
   if (ref.startsWith('keychain:')) return { scheme: 'keychain', id: ref.slice('keychain:'.length) }
   if (ref.startsWith('secret-service:')) return { scheme: 'secret-service', id: ref.slice('secret-service:'.length) }
@@ -565,7 +576,17 @@ export async function verifySecretsStore(): Promise<{ ok: true } | { ok: false; 
 /** 读取 key；plain 代表明文内嵌在 config 里（不推荐，直接返回） */
 export async function getSecret(ref: string): Promise<string | null> {
   const { scheme, id } = parseKeyRef(ref)
-  if (scheme === 'plain') return id
+  if (scheme === 'plain') {
+    // 空 plain = 条目缺 key_ref（或手编空值）：明文空 key 等于没配，拒绝并给可操作建议
+    //（relay 转发 / overview keyPresence 都经这里，此前 undefined/空串会在 parseKeyRef 崩 TypeError 栈）
+    if (id === '') {
+      throw new SecretsError(
+        t('key_ref 缺失或为空：provider 条目没有可用的 key 引用', 'key_ref is missing or empty: the provider entry has no usable key reference'),
+        t('在「编辑服务」里填入 key（或 modeldock provider set-key <服务ID>），config.toml 的 key_ref 不能为空', 'Fill in the key in "Edit Service" (or modeldock provider set-key <serviceId>); key_ref in config.toml must not be empty')
+      )
+    }
+    return id
+  }
   if (scheme === 'env') return process.env[id] ?? null
   if (scheme === 'keychain' || scheme === 'secret-service') {
     try {
