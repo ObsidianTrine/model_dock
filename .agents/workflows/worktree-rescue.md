@@ -14,6 +14,8 @@ node .agents/scripts/feature-branch.mjs list
 输出含义：
 - `[NOTES.md]` → 有交接文档，**接手前必读**。
 - `[dirty]` → 有未提交改动。
+- `[claimed]` → 队列里同 id 任务卡在 `running/`（认领机制，见 feature-branch.md「start 即认领」）——**有 agent 在岗或认领后中断**：先查 `.agents/orchestrator/.run-<task-id>.lock` 的持有者 pid 是否存活，存活勿接手；已死再按本文流程接管，接管后续做的 finish 会把卡自动落 `merged/`。
+- `[card:<状态>]` → 卡处于 blocked 等其他状态，走 orchestrator resume/abandon，不要手工接手 worktree。
 - 两者都没有 → 可能是刚 start 就中断的空任务。
 
 ## 接管流程

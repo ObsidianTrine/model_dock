@@ -27,7 +27,11 @@ export const TASK_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 /** 状态迁移白名单（语义由 orchestrator 驱动，这里只防非法跳变）。 */
 const TRANSITIONS = {
   'pending': ['running'],
-  'running': ['reviewing', 'blocked', 'failed'],
+  // running→merged：人工 finish 落卡（feature-branch start 认领的卡，工作已合并即终态）；
+  // running→pending：认领回滚（start 的 worktree add 失败时把卡放回队列）。
+  // 编排器闭环自身永不发出这两个迁移（闭环走 reviewing→awaiting-human→merged），
+  // 仅 feature-branch 认领路径使用。
+  'running': ['reviewing', 'blocked', 'failed', 'merged', 'pending'],
   'reviewing': ['awaiting-human', 'running', 'blocked'],
   'awaiting-human': ['merged', 'failed', 'running'],
   'blocked': ['running', 'pending', 'failed'],

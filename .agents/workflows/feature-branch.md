@@ -14,6 +14,7 @@ node .agents/scripts/feature-branch.mjs start <task-id>
 - 成功后输出 worktree 路径（`.agents/worktrees/<task-id>`）和分支名（`feature/<task-id>`，基于基准分支，见 `.agents/workflow.json` 的 `baseBranch`）。
 - start 会在建好 worktree 后自动执行 `.agents/workflow.json` 的 `setupCmd`（本仓库为 `npm ci --prefer-offline`，装好 node_modules），**worktree 产出即可直接跑测试**，无需手工补装依赖。setup 失败只告警不中断——worktree 本身没问题，按提示手动重跑该命令即可。
 - 每个 agent 一个独立 worktree，互不干扰；主目录基准分支检出保持不动。
+- **start 即认领（claim-before-execute）**：项目启用了 orchestrator 队列（`.agents/orchestrator/queue/` 存在）且队列里有同 id 任务卡在 `pending/` 时，start 自动认领它——抢任务锁并把卡迁到 `running/`、写 `manual_claimed` 事件。卡一离开 `pending/`，orchestrator drain 与其他 agent 都不会再调度它（双 agent 撞同一张卡从机制上收口，2026-10-30 卡 22 实证）。认领后的持久记录就是「卡在 `running/`」；任务锁只守「两个 start 并发认领」的窄窗口（start 进程退出即自动释放）。同一张卡已被认领（锁被存活进程持有，典型是 orchestrator 闭环正在跑它）时 start 明确拒绝并报锁持有者 pid——不提供强夺活锁的开关，确认持有者卡死先终止该进程再重跑（陈锁自动接管）。worktree 建失败时认领自动回滚（卡回 `pending/`、锁释放）。项目没跑 orchestrator（无队列目录）或队列里没有同 id 卡时，start 行为与从前完全一致。
 
 ### 2. 在 worktree 内修改
 
@@ -39,7 +40,7 @@ cd .agents/worktrees/<task-id> && <testCmd>    # testCmd 来自 .agents/workflow
 node .agents/scripts/feature-branch.mjs finish <task-id>
 ```
 
-finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。
+finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。**认领的卡随之归位**：finish 成功后若队列里该任务的卡在 `running/`，自动落 `merged/`（写 `manual_merged` 事件）——工作已合并进主干，与编排器闭环的同一终态；卡在其他状态（如 `awaiting-human/`）则不动，归编排器状态机处理。orchestrator 自己的 approve 路径（带 `ORCHESTRATOR_GATE_HEAD` 标记）不受影响，卡仍由闭环状态机落位。
 
 - **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者**有界等待**持锁者（轮询 2.5s，默认上限 300s，`FINISH_LOCK_WAIT_SECONDS` 可调、设 0 恢复立即失败），等待期间持锁者退出则自动接管；超时才提示重跑。陈锁（属主进程已死）同样自动接管，无需手动清理。
 
@@ -54,7 +55,7 @@ finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你
 node .agents/scripts/feature-branch.mjs list
 ```
 
-- 输出中的 `[NOTES.md]` 表示该任务留有交接文档——**接手前必读**；`[dirty]` 表示有未提交改动。
+- 输出中的 `[NOTES.md]` 表示该任务留有交接文档——**接手前必读**；`[dirty]` 表示有未提交改动；`[claimed]` 表示队列里对应的任务卡在 `running/`（**有 agent 在岗，勿接手**）；`[card:<状态>]` 表示卡处于其他状态（如 `blocked`，走 orchestrator resume/abandon 处理）。
 
 ## 任务交接（NOTES.md，未完成任务必留痕）
 

@@ -20,6 +20,12 @@
 // ORCHESTRATOR_GATE_HEAD 时，仅当「develop 未前进 且 worktree HEAD 与 gate 记录
 // 一致」才真的跳过全量测试，否则打印原因回落全量——gate 验证过哪棵树，合并的
 // 就是哪棵树；人工 --skip-test（纯文档改动）不带该环境变量，语义不变。
+//
+// 任务卡认领（claim-before-execute）：队列里存在同 id 任务卡时，start 即把卡迁出
+// pending/（抢任务锁 + running/ + 事件留痕），finish 成功后落 merged/——人工 agent
+// 与 orchestrator 闭环共享卡状态，双 agent 撞同一张卡从机制上收口。编排器自身拉起
+// 的 start/finish（ensureWorktree / doApprove）分别带 ORCHESTRATOR_CLOSURE /
+// ORCHESTRATOR_GATE_HEAD 标记，认领与落卡整体跳过，卡的归属权留在闭环状态机。
 
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -28,6 +34,13 @@ const CRLF_N = '\n';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 任务卡认领（claim-before-execute）：start 即把队列里同 id 的卡迁出 pending/，
+// 人工指派的 agent 与 orchestrator 闭环共享同一份卡状态（双 agent 撞同一张卡的
+// 机制性收口）。三个子模块均为纯定义无顶层副作用；项目没跑 orchestrator 时
+// queueRoot 目录不存在，认领逻辑整体跳过（可移植性不破）。
+import { appendEvent, logDir } from './orchestrator/events.mjs';
+import { ensureQueue, findCard, moveCard, queueRoot } from './orchestrator/queue.mjs';
+import { acquireTaskLock, readTaskLock, releaseTaskLock } from './orchestrator/task-lock.mjs';
 
 // Repo root: ask git for the COMMON .git dir first — `git rev-parse --git-common-dir`
 // points at the main repo's .git even when this script is invoked from inside a linked
@@ -383,20 +396,98 @@ function writeNotesStub(taskId, wtPath, base) {
 `);
 }
 
+// —— 任务卡认领（claim-before-execute）——
+// 队列里存在同 id 任务卡时，start 即认领：抢任务锁 + 卡 pending→running + 事件留痕。
+// 持久的认领记录 = 卡在 running/（锁随 start 进程退出由 exit handler 自动释放，
+// 只守「两个 start 并发认领」的窄窗口）；持久防双写 = 分支/worktree 存在性检查。
+// 编排器闭环自己已持锁并迁移过卡（cmdRun），它拉起的 start 见 ORCHESTRATOR_CLOSURE
+// 即整体跳过——否则闭环会被自己的 start 拒在门外。
+function queueCardOf(taskId) {
+  const qRoot = queueRoot(REPO_ROOT);
+  if (!fs.existsSync(qRoot)) return null; // 项目未启用 orchestrator 队列：纯 feature 工作流，零假设不破
+  return findCard(qRoot, taskId);
+}
+
+// start 被拒（分支/worktree 已存在）时附上队列卡状态：接手者一眼分清
+// 「历史残留」还是「另一个 agent 正在做同一张卡」。
+function claimHintFor(taskId) {
+  try {
+    const card = queueCardOf(taskId);
+    if (!card) return '';
+    if (card.state === 'running') {
+      const lock = readTaskLock(REPO_ROOT, taskId);
+      const who = lock?.pid ? ` (lock holder pid ${lock.pid}${lock.cmd ? `, ${lock.cmd}` : ''})` : '';
+      return `${CRLF_N}  queue card "${taskId}" is in running/ — likely being worked by another agent${who}.`;
+    }
+    return `${CRLF_N}  queue card "${taskId}" is in ${card.state}/.`;
+  } catch { return ''; }
+}
+
+// 返回认领结果：'closure-skip'（编排器上下文）| 'no-card' | 'claimed' |
+// 'already-running'（卡已被认领，不重复认领）| 'other-state'（非 pending 卡不动）。
+function claimCardFor(taskId) {
+  if (process.env.ORCHESTRATOR_CLOSURE === '1') return 'closure-skip';
+  const card = queueCardOf(taskId);
+  if (!card) return 'no-card';
+  if (card.state === 'running') {
+    console.log(`Queue card "${taskId}" is already in running/ — someone claimed it; proceeding (branch/worktree checks below still guard double execution).`);
+    return 'already-running';
+  }
+  if (card.state !== 'pending') {
+    console.warn(`WARNING: queue card "${taskId}" is in ${card.state}/ — claim skipped. Use orchestrator resume/abandon for non-pending cards.`);
+    return 'other-state';
+  }
+  const lock = acquireTaskLock(REPO_ROOT, taskId, `feature-branch start ${taskId}`);
+  if (!lock.held) {
+    const owner = lock.owner ?? {};
+    die(`task "${taskId}" is already claimed (lock holder pid ${owner.pid}${owner.cmd ? `, ${owner.cmd}` : ''}${owner.acquired_at ? `, since ${owner.acquired_at}` : ''}) — two agents must not drive the same task.${CRLF_N}  If the holder is confirmed dead/stuck, kill pid ${owner.pid} and re-run (a stale lock is taken over automatically).`);
+  }
+  try {
+    ensureQueue(queueRoot(REPO_ROOT)); // moveCard 的 rename 需要目标状态目录存在（临时仓库/手建队列常缺 running/）
+    moveCard(queueRoot(REPO_ROOT), taskId, 'pending', 'running');
+  } catch (e) {
+    releaseTaskLock(REPO_ROOT, taskId);
+    die(`claim failed: could not move queue card "${taskId}" pending → running: ${String(e.message).trim()}`);
+  }
+  try {
+    appendEvent(logDir(REPO_ROOT, taskId), 'manual_claimed', { pid: process.pid, cmd: `feature-branch start ${taskId}` });
+  } catch { /* 事件留痕尽力而为 */ }
+  console.log(`Queue card "${taskId}" claimed: pending → running. Other agents and orchestrator drains will skip it.`);
+  return 'claimed';
+}
+
+// worktree add 失败时的认领回滚：卡回 pending/、锁释放（start 进程仍存活，
+// releaseTaskLock 按 pid 匹配放行）。回滚失败只告警不掩盖原始错误。
+function rollbackClaim(taskId) {
+  try {
+    moveCard(queueRoot(REPO_ROOT), taskId, 'running', 'pending');
+    releaseTaskLock(REPO_ROOT, taskId);
+    console.warn(`Claim rolled back: queue card "${taskId}" returned to pending/, task lock released.`);
+  } catch (e) {
+    console.warn(`WARNING: claim rollback failed — card "${taskId}" may be left in running/ (move it back manually, or just re-run start): ${String(e.message).trim()}`);
+  }
+}
+
 function cmdStart(taskId) {
   dieIfMidMerge(`start ${taskId}`);
   const branch = `feature/${taskId}`;
   const wtPath = path.join(WORKTREES_DIR, taskId);
 
   if (hasLocalBranch(branch)) {
-    die(`branch ${branch} already exists. Pick another task-id, or run "finish ${taskId}" to merge & clean it up.`);
+    die(`branch ${branch} already exists. Pick another task-id, or run "finish ${taskId}" to merge & clean it up.${claimHintFor(taskId)}`);
   }
   if (listWorktrees().some((t) => path.resolve(t.path) === path.resolve(wtPath))) {
-    die(`worktree ${wtPath} already registered. Pick another task-id or clean up first.`);
+    die(`worktree ${wtPath} already registered. Pick another task-id or clean up first.${claimHintFor(taskId)}`);
   }
 
+  const claimed = claimCardFor(taskId) === 'claimed';
   const base = baseBranch();
-  git(['worktree', 'add', wtPath, '-b', branch, base]);
+  try {
+    git(['worktree', 'add', wtPath, '-b', branch, base]);
+  } catch (e) {
+    if (claimed) rollbackClaim(taskId);
+    die(`git worktree add failed (${wtPath}):${CRLF_N}  ${String(e.message).trim()}`);
+  }
   writeNotesStub(taskId, wtPath, base);
 
   // One-time environment setup (e.g. dependency install) so the worktree is immediately
@@ -431,6 +522,32 @@ Next steps:
   2. Commit inside the worktree: git -C "${wtPath}" add -A && git -C "${wtPath}" commit -m "..."
   3. Self-test inside the worktree: run the testCmd from .agents/workflow.json (cwd = worktree path).
   4. Integrate back: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
+}
+
+// finish 成功后的卡归位（仅人工路径）：认领产生的 running/ 卡直接落 merged/——
+// 工作已合并进主干，与编排器闭环的 awaiting-human→merged 同一终态。
+// 编排器路径绝不在此动卡（approve 的 finish 带 ORCHESTRATOR_GATE_HEAD；闭环
+// 状态机 running→reviewing→awaiting-human→merged 才是卡的归属方），否则
+// doApprove 之后的 awaiting-human→merged 迁移会因源目录无卡而炸。
+function settleCardAfterFinish(taskId) {
+  if (process.env.ORCHESTRATOR_GATE_HEAD || process.env.ORCHESTRATOR_CLOSURE === '1') return;
+  let card;
+  try {
+    card = queueCardOf(taskId);
+  } catch { return; }
+  if (!card) return;
+  if (card.state !== 'running') {
+    console.log(`Queue card "${taskId}" is in ${card.state}/ — left for the orchestrator state machine.`);
+    return;
+  }
+  try {
+    ensureQueue(queueRoot(REPO_ROOT)); // rename 目标目录 merged/ 可能尚未建（同认领路径）
+    moveCard(queueRoot(REPO_ROOT), taskId, 'running', 'merged');
+    try { appendEvent(logDir(REPO_ROOT, taskId), 'manual_merged', { pid: process.pid }); } catch { /* 尽力而为 */ }
+    console.log(`Queue card "${taskId}" settled: running → merged.`);
+  } catch (e) {
+    console.warn(`WARNING: could not settle queue card "${taskId}" (running → merged) — move it manually: ${String(e.message).trim()}`);
+  }
 }
 
 function cmdFinish(taskId, args) {
@@ -547,6 +664,8 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     if (cleanupFails.length) {
       console.warn(`WARNING: cleanup incomplete:` + CRLF_N + cleanupFails.map((m) => '  - ' + m).join(CRLF_N) + CRLF_N + lockHint(wtPath) + CRLF_N + `Re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}   (idempotent, finishes the cleanup)`);
       process.exitCode = 1;
+    } else {
+      settleCardAfterFinish(taskId);
     }
     return;
   }
@@ -633,7 +752,19 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     process.exitCode = 1;
   } else {
     console.log(`Cleaned up worktree ${wtPath} and branch ${branch}.`);
+    settleCardAfterFinish(taskId);
   }
+}
+
+// list 行附队列卡状态：claimed（卡在 running/）= 有 agent 在岗，勿接手；
+// card:<state> = 其他状态（blocked 等需 orchestrator resume/abandon 处理）。
+function cardFlagFor(branchName) {
+  const m = /^feature\/([a-z0-9][a-z0-9-]*)$/.exec(branchName || '');
+  if (!m) return null;
+  try {
+    const card = queueCardOf(m[1]);
+    return card ? (card.state === 'running' ? 'claimed' : `card:${card.state}`) : null;
+  } catch { return null; }
 }
 
 function cmdList() {
@@ -646,6 +777,8 @@ function cmdList() {
     const flags = [];
     if (fs.existsSync(notesPathFor(t.path))) flags.push('NOTES.md'); // task left a handoff doc — read it before taking over
     if (gitInDir(t.path, ['status', '--porcelain'])) flags.push('dirty');
+    const cardFlag = cardFlagFor(t.branch);
+    if (cardFlag) flags.push(cardFlag);
     console.log(`${t.branch || '(detached)'}  ->  ${t.path}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
   }
 }
