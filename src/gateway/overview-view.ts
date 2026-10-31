@@ -157,7 +157,15 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
   // key 是否已配置并行预取：串行 await 在 keychain 后端下是逐 provider spawn 外部进程（overview
   // 稳态约每几秒重建一次，串行 N 次造成周期性延迟尖峰），结果与逐个 await 完全一致
   const providerEntries = Object.entries(cfg.providers)
-  const keyPresence = new Map(await Promise.all(providerEntries.map(async ([id, p]) => [id, !!(await getSecret(p.key_ref))] as const)))
+  // 单个坏条目（key_ref 缺失/非法 → getSecret 抛可操作 SecretsError）降级为「未配置 key」
+  // 展示，不炸整个 overview——一个手编坏 provider 不该把控制台首页打 500
+  const keyPresence = new Map(await Promise.all(providerEntries.map(async ([id, p]) => {
+    try {
+      return [id, !!(await getSecret(p.key_ref))] as const
+    } catch {
+      return [id, false] as const
+    }
+  })))
   for (const [id, p] of providerEntries) {
     // 引用该 provider 的 profile：active_profile 优先（与 /service/update 写 default_model/候选链的选择逻辑一致）
     const profileRef = profileRefForProvider(cfg, id)
