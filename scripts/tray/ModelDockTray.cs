@@ -1003,6 +1003,9 @@ namespace ModelDockTray
         private readonly System.Windows.Forms.Timer _poll = new System.Windows.Forms.Timer();
         private bool _running;
         private int _port;
+        // UI 线程同步上下文（首次 tick 在 UI 线程捕获）：健康探测改后台线程后，结果经它回传 UI
+        private System.Threading.SynchronizationContext _ui;
+        private bool _pollBusy;
 
         public TrayContext()
         {
@@ -1038,18 +1041,45 @@ namespace ModelDockTray
 
         private void PollHealth()
         {
-            _running = TrayActions.HealthOk();
-            if (_running) TrayActions.ReadState();
-            _port = _running ? int.Parse(TrayActions.CurrentPort) : 0;
-            try
+            // 健康探测（2s 超时 HTTP + 磁盘读）曾在 UI 线程同步执行：网关「半挂」（监听不响应）时
+            // 托盘每 5s 冻结最长 2s，与「工作线程跑，不卡托盘消息循环」的自身约定矛盾（评测集
+            // tray-actions-static-race 问题 5）。改后台线程探测，结果经 UI 同步上下文回传；
+            // 首次 tick 在 UI 线程捕获同步上下文（Application.Run 后即 WindowsFormsSynchronizationContext）。
+            if (_ui == null) _ui = System.Threading.SynchronizationContext.Current;
+            if (_pollBusy) return; // 上一轮未回传不重叠（探测 2s 超时 < 5s tick，仅半挂拖长时防堆积）
+            _pollBusy = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                _icon.Text = _running
-                    ? I18n.L("ModelDock 网关运行中（端口 " + _port + "）", "ModelDock gateway running (port " + _port + ")")
-                    : I18n.L("ModelDock 网关未运行", "ModelDock gateway not running");
-            }
-            catch { }
-            if (_running) TrayActions.FetchStateAsync();
-            UpdateMenu(); // 菜单开着也只做 diff（原地改属性），不再整份重建——5s 轮询不再闪烁
+                bool ok = false;
+                int port = 0;
+                try
+                {
+                    ok = TrayActions.HealthOk();
+                    if (ok)
+                    {
+                        TrayActions.ReadState();
+                        port = int.Parse(TrayActions.CurrentPort);
+                    }
+                }
+                catch { }
+                Action apply = delegate
+                {
+                    _pollBusy = false;
+                    _running = ok;
+                    _port = ok ? port : 0;
+                    try
+                    {
+                        _icon.Text = ok
+                            ? I18n.L("ModelDock 网关运行中（端口 " + _port + "）", "ModelDock gateway running (port " + _port + ")")
+                            : I18n.L("ModelDock 网关未运行", "ModelDock gateway not running");
+                    }
+                    catch { }
+                    if (ok) TrayActions.FetchStateAsync();
+                    UpdateMenu(); // 菜单开着也只做 diff（原地改属性），不再整份重建——5s 轮询不再闪烁
+                };
+                if (_ui != null) _ui.Post(delegate { apply(); }, null);
+                else apply(); // 无同步上下文（理论不可达）：退化为就地执行
+            });
         }
 
         // ---------- 菜单（骨架常驻 + 按需 diff） ----------
