@@ -12,6 +12,17 @@
 | src/sync | 81.21 | 73.49 | 84.79 | engine.ts（remount/syncStatus/cloudHeartbeat 分支）、collect.ts、crypto.ts |
 | src/sync/targets | 84.55 | 74.44 | 89.28 | webdav.ts / cloud.ts 错误分支 |
 
+## 补测后（2026-10-31，develop 全量 coverage 实测，全量绿）
+
+| 域 | %Stmts | %Branch | %Lines | 说明 |
+|----|--------|---------|--------|------|
+| src/presets | 99.23 | 97.67 | 100 | data.ts 主缺口收口；余量 = 死分支（见下方 followups ①②，已回流 known-issues CORRECT-11） |
+| src/sync | 96.92 | 97.96 | 97.84 | engine/collect/crypto/setup/types 缺口收口；余量 = 有意不补与不可稳定注入项 |
+| src/sync/targets | 95.58 | 94.44 | 98.38 | webdav/cloud 错误分支收口；余量 = 不可稳定注入项（cloud.ts:36 死守卫见 followups ③） |
+
+测量口径：全量 112 文件 1306 passed / 13 skipped（Windows，0ec18fc 修 fd 2 接管后首次全量绿）；基线为 2026-10-29 worktree 全量（合并前代码态），两态间 presets/sync 源码零改动，数字可直接对比。
+施工发现回流：followups ①②③ → known-issues CORRECT-11（死代码三处）、④（HH:mm 只验形状）→ CORRECT-10（2026-10-31）。
+
 ## 新增测试文件
 
 | 文件 | 用例数 | 覆盖对象 |

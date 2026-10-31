@@ -80,6 +80,8 @@
 | CORRECT-07 | **P1** | `src/cli/shared.ts:59-90`（spawnDaemonAndWait） | `gateway start --daemon` 在 daemon 就绪后不返回：CLI 挂住（实测 ≥45s，另一例约 13min 后才退出），脚本/终端被钉住 | ✅ 已修（2026-10-30，daemon 侧 fd 2 接管自写日志，commit 99fa3a5，见 §三） |
 | CORRECT-08 | P2 | `src/util/jsonpath.ts` | 三处健壮性缺陷（L2 pack 写 JSON 配置经 setPath 触达）：① 括号/引号句式被静默吞改写——`$.a['b']` 落成字面键 `'b'`（含引号）写错位置、`[-1]`/未闭合 `[0` 变字符串键绕过数组越界守卫；② star 路径中段遇原始类型子节点裸抛 TypeError（报错未走 t() 双语）；③ 对象上下文用下标写入静默落字符串键 `"0"` 而非报错（tsx 实测） | ✅ 已修（2026-10-30，tokenize 完整覆盖校验 + star 守卫 + 下标×对象显式报错，见 §三） |
 | CORRECT-09 | P2 | `src/gateway/relay.ts` | failover 链可观测性三项：① injectModel 对顶层数组 JSON 误当对象，expando 被 stringify 丢弃但 modelAfter 谎报改写成功（违反自述「顶层非对象返回 null」契约）；② 全候选 candidateSkip 耗尽后真实 status/hint 被统一 502 down_all 吞掉（keychain 锁定 503+hint 降级成 502「连接失败」）；③ replayedFrom 单变量只记最后一跳，连续重放丢首跳（日志对账字段自述用途受损） | ☐ 未修（2026-10-30 夜巡发现，逐条读码核实，见 §三） |
+| CORRECT-10 | P2 | `src/sync/types.ts:59,124` | syncdoc 定时规则 HH:mm 仅验形状（`/^\d{2}:\d{2}$/`），`25:99` 等非法时刻可过 validateSyncdoc 入库；下游调度归一化行为未审计 | ☐ 未修（2026-10-31 test-gap-presets-sync 施工发现，读码核实，见 §三） |
+| CORRECT-11 | P3 | `src/presets/data.ts:471-472,544`＋`src/sync/targets/cloud.ts:36` | 死代码三处（清理类，无行为影响）：`!Number.isNaN` 臂不可达（NaN 过不了前置 `> 0`，context_window/max_output 两行同构）、`presetModels(p) ?? {}` 不可达（上方 continue 已保证非空）、manifestOf `if (!cached) throw` 不可达（两调用点均先保证 cached） | ☐ 未修（2026-10-31 施工发现，逐条读码核实，见 §三） |
 
 ---
 
@@ -401,6 +403,18 @@
 - ③ `replayedFrom`（relay.ts:589,608,628）单变量反复覆盖：A→B→C 连续重放只留下 `replayed_from:B`，A 丢失——与该字段自述用途「日志对账」相悖。修法：改数组累积 join。
 - 存疑（不下结论，待作者确认）：a) ECONNRESET/EPIPE 在 promise 阶段即重试/failover，请求可能已送达甚至计费，与 ：115-116 注释的自述边界相抵——是取舍还是疏漏未见记录；b) `QUOTA_BODY_RE = /quota|insufficient/i` 不含中文（额度/配额/余额/欠费），国内上游中文 429 额度体不会触发恒可切换——同文件 MODEL_MISSING_RE 已覆盖中文，口径不一致。
 - 修复后 ①② 均可回流为审查评测考题。
+
+**CORRECT-10（P2，2026-10-31 test-gap-presets-sync 施工发现，读码核实）syncdoc 定时规则 HH:mm 只验形状**
+- 位置：`src/sync/types.ts:59`（`const HHMM = /^\d{2}:\d{2}$/`）、`:124`（schedule window start/end 校验）
+- 现状：只验「两位数字:两位数字」形状，`25:99`、`99:00` 等非法时刻能通过 validateSyncdoc 入库；下游（config 侧调度归一化）如何消费未展开验证。
+- 影响：跨机同步的定时规则可携带非法时刻且无报错；下游不归一化时表现为规则静默失效（永不触发）。
+- 修复方向（未动手）：改形状+范围一体校验（如 `/^([01]\d|2[0-3]):[0-5]\d$/`）；注意存量同步包兼容（已含非法值的宽松迁移）。修复后可回流审查评测考题（校验边界类）。
+
+**CORRECT-11（P3，2026-10-31 test-gap-presets-sync 施工发现，逐条读码核实）死代码三处（清理类，无行为影响）**
+- ① `src/presets/data.ts:471-472`：`!Number.isNaN(...)` 臂不可达——NaN 不满足前置 `> 0`（短路），数值 `> 0` 者必非 NaN（context_window / max_output 两行同构）。若本意拦 NaN，应前置 `Number.isFinite(...)` 替代 `> 0 && !Number.isNaN(...)`。
+- ② `src/presets/data.ts:544`：`Object.assign(out, presetModels(p) ?? {})` 的 `?? {}` 不可达——同函数上方 542 行 `!p.models?.length` 已 continue，非空 models 下 presetModels 恒返回非空数组（truthy）。可删。
+- ③ `src/sync/targets/cloud.ts:36`：`manifestOf()` 的 `if (!cached) throw` 不可达——两个调用点（readManifest :43 的 304 分支带 `cached` 判定、:50 成功分支刚完成赋值）均保证非空。防御性代码可留（删则需保证未来无新调用点绕过判定）。
+- 备注：纯可读性/覆盖率清理，随手批处理即可。来源：test/coverage-gaps-presets-sync.md 施工发现（「补测后」分支余量即此处）。
 
 ---
 
