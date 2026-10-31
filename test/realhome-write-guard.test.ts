@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { TEST_TMP } from './helpers.js'
-import { atomicWrite, withFileLock } from '../src/util/fsx.js'
+import { __testSetTrustedRealHomeWriter, atomicWrite, withFileLock } from '../src/util/fsx.js'
 
 /**
  * 真实 home 写入门禁（2026-10-05 / 2026-10-30 两次生产覆盖事故防线）：
@@ -17,7 +17,29 @@ import { atomicWrite, withFileLock } from '../src/util/fsx.js'
 // 改名让全部用例空转成假绿
 if (process.env.VITEST !== 'true') throw new Error('realhome-write-guard 测试要求 VITEST env（vitest worker 注入）')
 
-const ENV_KEYS = ['MODELRDOCK_FAKE_HOME', 'MODELRDOCK_HOME', 'MODELRDOCK_TEST', 'MODELRDOCK_ALLOW_REAL_HOME_WRITE', 'VITEST'] as const
+/** 上下文标记（门禁判「是不是测试/agent 进程」的依据）：clearContextEnv 只清这些——
+ *  绝不能碰 MODELRDOCK_FAKE_HOME/MODELRDOCK_HOME，否则「真实 home 替身」失效、门禁的
+ *  保护目标跟着漂移，用例假绿（实测踩中）。 */
+const CONTEXT_MARKERS = [
+  'VITEST',
+  'VITEST_WORKER_ID',
+  'MODELRDOCK_TEST',
+  'ZCODE_APP_VERSION',
+  'ZCODE_ENV',
+  'ZCODE_RUNTIME_ENV',
+  'ZCODE_PROCESS_LABEL',
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+] as const
+
+/** 上下文判定相关的全部 env（含 T29 的 agent CLI 标记——本套件自身可能跑在 ZCode 会话里，
+ *  「模拟生产进程」的用例必须把这些一并清掉才成立）。 */
+const ENV_KEYS = [
+  ...CONTEXT_MARKERS,
+  'MODELRDOCK_FAKE_HOME',
+  'MODELRDOCK_HOME',
+  'MODELRDOCK_ALLOW_REAL_HOME_WRITE',
+] as const
 const savedEnv: Record<string, string | undefined> = {}
 
 function stashEnv(): void {
@@ -29,6 +51,11 @@ function restoreEnv(): void {
     if (savedEnv[k] === undefined) delete process.env[k]
     else process.env[k] = savedEnv[k]
   }
+}
+
+/** 清掉上下文标记，模拟「无任何标记的生产进程」（home 重定向变量保留：替身不失效） */
+function clearContextEnv(): void {
+  for (const k of CONTEXT_MARKERS) delete process.env[k]
 }
 
 /** 建一个「真实 home 替身」：MODELRDOCK_HOME 指向临时目录（门禁据此判真实 home），返回替身下
@@ -77,14 +104,56 @@ describe('真实 home 写入门禁（fsx 漏斗）', () => {
     }
   })
 
-  it('非测试上下文（生产网关进程）：一切照旧可写', async () => {
+  it('非测试上下文（生产网关进程）：清掉全部上下文标记后一切照旧可写', async () => {
     stashEnv()
     try {
       const md = makeFakeRealHome()
-      delete process.env.VITEST
-      delete process.env.VITEST_WORKER_ID
-      delete process.env.MODELRDOCK_TEST
+      clearContextEnv() // 本套件可能跑在 ZCode 会话里：连 agent 标记一并清掉才是真·生产现场
       await expect(atomicWrite(path.join(md, 'config.toml'), 'x')).resolves.toBeUndefined()
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('agent CLI 环境标记（ZCode，本会话子进程实测）：即便无 vitest 标记也触发门禁（T29）', async () => {
+    stashEnv()
+    try {
+      const md = makeFakeRealHome()
+      clearContextEnv()
+      process.env.ZCODE_APP_VERSION = '3.16.3'
+      await expect(atomicWrite(path.join(md, 'config.toml'), 'x')).rejects.toThrow(/MODELRDOCK_FAKE_HOME/)
+      expect(fs.existsSync(md)).toBe(false)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('agent CLI 环境标记（Claude Code 文档口径）：CLAUDECODE=1 触发门禁（T29）', async () => {
+    stashEnv()
+    try {
+      const md = makeFakeRealHome()
+      clearContextEnv()
+      process.env.CLAUDECODE = '1'
+      await expect(atomicWrite(path.join(md, 'config.toml'), 'x')).rejects.toThrow(/MODELRDOCK_FAKE_HOME/)
+    } finally {
+      restoreEnv()
+    }
+  })
+
+  it('受信写者（ModelDock 自家入口进程）：带 agent 标记也放行；复位后恢复拦截（T29）', async () => {
+    stashEnv()
+    try {
+      const md = makeFakeRealHome()
+      clearContextEnv()
+      process.env.ZCODE_ENV = 'production' // 用户从 agent 集成终端手起网关的现场
+      __testSetTrustedRealHomeWriter(true)
+      try {
+        await expect(atomicWrite(path.join(md, 'config.toml'), 'x')).resolves.toBeUndefined()
+        expect(fs.existsSync(path.join(md, 'config.toml'))).toBe(true)
+      } finally {
+        __testSetTrustedRealHomeWriter(false)
+      }
+      await expect(atomicWrite(path.join(md, 'config.toml'), 'x')).rejects.toThrow(/MODELRDOCK_FAKE_HOME/)
     } finally {
       restoreEnv()
     }

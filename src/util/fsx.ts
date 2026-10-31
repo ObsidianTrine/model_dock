@@ -9,10 +9,40 @@ import { t } from './i18n.js'
 
 // ===== 真实 home 写入门禁（2026-10-05 / 2026-10-30 两次生产覆盖事故防线）=====
 
-/** 测试/agent 上下文判定：vitest worker（VITEST/VITEST_WORKER_ID 注入）或显式标记
- *  MODELRDOCK_TEST=1（tsx 种子脚本等非 vitest 进程，AGENTS.md 配方要求设置）。 */
+/** 受信写者标记：ModelDock 自家入口进程（cli.ts 三路分发：网关守护/SEA GUI/CLI 命令）启动时
+ *  调 markTrustedRealHomeWriter() 置位——这些进程写自己的 home 永远合法。必须先于 agent
+ *  标记判定：用户从 agent 集成终端手起网关时进程带着 agent 标记，不能因此被门禁废掉写盘。 */
+let trustedRealHomeWriter = false
+
+export function markTrustedRealHomeWriter(): void {
+  trustedRealHomeWriter = true
+}
+
+/** 测试注入：复位受信标记（trusted-writer 用例的正反两向都要能摆） */
+export function __testSetTrustedRealHomeWriter(v: boolean): void {
+  trustedRealHomeWriter = v
+}
+
+/** agent CLI 会话注入到子进程的环境标记：并入测试上下文判定，堵「agent 直跑脚本」写穿向量
+ *  （2026-10-30 事故残留口令与仓库全部测试口令不匹配 → 污染源即此类无 VITEST 标记进程）。
+ *  来源：ZCODE_* 为本会话子进程实测（2026-10-30，ZCode 3.16.3）；CLAUDECODE /
+ *  CLAUDE_CODE_ENTRYPOINT 为 Claude Code 官方文档口径（本机 claude 无登录态未实测；误拦
+ *  方向安全——豁免开关与受信标记都可放行）。新增标记先实测再入列。 */
+const AGENT_ENV_MARKERS = [
+  'ZCODE_APP_VERSION',
+  'ZCODE_ENV',
+  'ZCODE_RUNTIME_ENV',
+  'ZCODE_PROCESS_LABEL',
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+] as const
+
+/** 测试/agent 上下文判定：受信写者（自家入口进程）恒否；vitest worker（VITEST/
+ *  VITEST_WORKER_ID 注入）、显式标记 MODELRDOCK_TEST=1、或 agent CLI 环境标记命中。 */
 export function inTestContext(): boolean {
-  return process.env.VITEST === 'true' || !!process.env.VITEST_WORKER_ID || process.env.MODELRDOCK_TEST === '1'
+  if (trustedRealHomeWriter) return false
+  if (process.env.VITEST === 'true' || !!process.env.VITEST_WORKER_ID || process.env.MODELRDOCK_TEST === '1') return true
+  return AGENT_ENV_MARKERS.some((k) => process.env[k] !== undefined)
 }
 
 /** 测试上下文进程眼中的「真实 home」落点：全部重定向 env 都未设时 home 的位置。 */

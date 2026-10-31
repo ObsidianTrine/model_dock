@@ -7,10 +7,14 @@ import { exitWithThrown, openUrlInBrowser } from './cli/shared.js'
 import { spawnTrayIfPresent, spawnTrayWhenGatewayReady } from './tray.js'
 import { t } from './util/i18n.js'
 import { installCrashHandlers } from './util/crash.js'
+import { markTrustedRealHomeWriter } from './util/fsx.js'
 
 // 崩溃痕迹兜底：三路分发（--sea-gateway / SEA GUI / commander CLI）都先经这里，未处理异常与
 // rejection 落 logs/crash-YYYYMMDD.log。幂等，gateway/main.ts 已装也不重复。
 installCrashHandlers()
+// 自家入口进程（网关守护/SEA GUI/CLI 命令）写自己的 home 永远合法：置受信写者标记，
+// 使用户从 agent 集成终端手起的实例不被写入门禁的 agent 环境标记判定误伤（T29）
+markTrustedRealHomeWriter()
 
 function isSEA(): boolean {
   const exe = path.basename(process.execPath).toLowerCase()
