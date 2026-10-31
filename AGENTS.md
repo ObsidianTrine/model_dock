@@ -37,7 +37,7 @@
 > **任何形式的测试/验证/改动都不许打到 8687**，包括但不限于：
 > 起实例（`gateway start` 不带 `--port`）、`gateway stop` / kill / 重启、改它的配置或密钥、curl/浏览器打它的接口与页面（`127.0.0.1:8687/_modeldock/*`）、
 > 「顺便验证一下」的只读探测、以及把 8687 写进任何测试脚本或示例。**8687 只读诊断（用户报障时的 `lsof` / 日志查看）除外，且不得附带任何写操作。**
-> **测试只允许在 agent 自己的沙箱进行**：唯一配方 `MODELRDOCK_FAKE_HOME=<独立目录> npx tsx src/cli.ts gateway start --port 189xx`（沙箱与端口成对指定）。**8890 是用户专属 dev 沙箱，agent 一律不得占用**（不启动、不 stop、不删数据）——需要数据时自造或从 dev 拷一份，见硬规则 2。
+> **测试只允许在 agent 自己的沙箱进行**：唯一配方 `MODELRDOCK_FAKE_HOME=<独立目录> MODELRDOCK_TEST=1 npx tsx src/cli.ts gateway start --port 189xx`（沙箱、端口与测试标记成对指定——写入门禁认 agent 环境标记，见「测试指南」）。**8890 是用户专属 dev 沙箱，agent 一律不得占用**（不启动、不 stop、不删数据）——需要数据时自造或从 dev 拷一份，见硬规则 2。
 >
 > **为什么 agent 容易误用 8687（读到这段就别再踩）**：① 代码默认端口就是它（`DEFAULT_GATEWAY_PORT`）——`gateway start` 不带 `--port`、`modeldock ui`、托盘 / `ModelDock.app` 全都指向 8687；
 > ② 文档与历史记录里 8687 出现频次最高（架构图、curl 诊断配方、健康检查示例），检索命中最"显眼"，顺手就用了；
@@ -46,7 +46,7 @@
 **改功能做测试时的硬规则：**
 
 1. **8687 全面禁止（不止"不得关闭"）**：agent 不得对 8687 实例做任何写操作或测试性访问——stop / kill / 重启、改配置、打接口、开页面、拿它当验证目标，全部禁止；测试期间 8687 必须始终在线且零打扰。
-2. **测试一律在沙箱进行（端口 + 沙箱成对指定）**：单测用 `listen(0)`（`listenEphemeral` 随机端口）；手测 / 临时实例首选隔离配方 **`MODELRDOCK_FAKE_HOME=<独立目录> npx tsx src/cli.ts gateway start --port 189xx`**（配置放 `$FAKE_HOME/.modeldock/config.toml`）。
+2. **测试一律在沙箱进行（端口 + 沙箱成对指定）**：单测用 `listen(0)`（`listenEphemeral` 随机端口）；手测 / 临时实例首选隔离配方 **`MODELRDOCK_FAKE_HOME=<独立目录> MODELRDOCK_TEST=1 npx tsx src/cli.ts gateway start --port 189xx`**（配置放 `$FAKE_HOME/.modeldock/config.toml`；`MODELRDOCK_TEST=1` 让写入门禁在 agent 会话外也能识别测试进程）。
    - **端口红线**：**8687（生产）绝对禁止**；**8890 是用户专属 dev 沙箱，agent 一律不得占用**（不启动、不 stop、不抹它的数据）。**agent 只用 189xx**，且必须与 `MODELRDOCK_FAKE_HOME` **成对指定**：只换端口不换沙箱会落进 `~/.modeldock-dev`，与用户 dev 实例同壳互撞单实例保护——表现为一方静默拒绝启动、页面连接被拒却无报错（一个沙箱只有一份 `gateway.json`，`gateway stop`/令牌/设备记忆都按它寻址）。
    - **测试数据怎么来（两个合法来源）**：
      1）**自造**（推荐，状态可控）：先 `export MODELRDOCK_FAKE_HOME=<沙箱>`，再用种子脚本调 `mutateConfig()` + `setSecret(id, key, 'file')` 造服务/路由；`npx tsx <脚本>` 时脚本内先 `process.env.MODELRDOCK_FAKE_HOME = '<沙箱>'` 再动态 import 源码模块。
@@ -121,7 +121,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 ## 测试指南
 
 - 套件：test/ 下 75+ 个文件（store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，随演进增删——以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
-- **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入的 `VITEST`，或 tsx 种子脚本按配方显式 `MODELRDOCK_TEST=1`）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；确属有意写真实 home 的场景（当前无）设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
+- **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入的 `VITEST`、tsx 种子脚本按配方显式 `MODELRDOCK_TEST=1`，或 **agent CLI 环境标记**——ZCode 的 `ZCODE_*`、Claude Code 的 `CLAUDECODE` 等，见 `src/util/fsx.ts` 的 AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受 agent 标记误伤；确属有意写真实 home 的场景（当前无）设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687（生产）/ 8890（用户 dev）/ 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
 - 新增 / 改动测试必须三大 OS 都能过：临时目录用 `os.tmpdir()` + `path.join()`，**不写死 `/tmp` 或盘符**；断言权限、进程行为、换行等平台差异前先想 Windows 会怎样（Windows CI 红多来自测试而非实现）。
