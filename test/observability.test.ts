@@ -12,6 +12,7 @@ import {
   reportEvent,
   setEventRingSink,
 } from '../src/gateway/state.js'
+import type { EventEntry } from '../src/gateway/state.js'
 import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
 import { appendLineErrorCount, drainAppendStreams } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'

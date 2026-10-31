@@ -33,7 +33,7 @@
     "build:sea": "node scripts/build-sea.mjs",
     "dev": "tsx src/cli.ts",
     "dev:watch": "tsx watch src/cli.ts",
-    "test": "vitest run",
+    "test": "tsc -p tsconfig.test.json --noEmit && vitest run",
     "test:workflow": "vitest run -c vitest.workflow.config.ts",
     "test:coverage": "vitest run --coverage",
     "prepack": "npm run build",

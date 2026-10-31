@@ -126,7 +126,7 @@ describe('adapter pack（L2 声明式）', () => {
       const list = allAdapters(cfg)
       const bad = list.find((a) => a.id === 'bad')!
       expect(bad.label).toContain('pack 配置错误')
-      const st = await bad.status(cfg)
+      const st = await bad.status(cfg, 28687)
       expect(st.installed).toBe(false)
       expect(st.detail).toBeTruthy()
       await expect(bad.planAttach(GW_OPTS(), cfg)).rejects.toBeInstanceOf(AdapterError)
@@ -270,10 +270,10 @@ describe('generic-env 兜底适配器', () => {
       expect(plan.changes).toHaveLength(0)
       expect(plan.notes.join()).toContain('环境变量')
 
-      const st0 = await genericAdapter.status(cfg)
+      const st0 = await genericAdapter.status(cfg, 28687)
       expect(st0.attached).toBe(false)
       cfg.harness['generic-env'] = { mode: 'gateway', token: 'tok' }
-      const st1 = await genericAdapter.status(cfg)
+      const st1 = await genericAdapter.status(cfg, 28687)
       expect(st1.attached).toBe(true)
       expect(st1.pointing).toBe('gateway')
     } finally {

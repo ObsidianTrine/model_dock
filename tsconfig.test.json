@@ -1,0 +1,45 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // vitest.workflow.config.ts 等 import 带 .ts 后缀（noEmit 下安全启用）
+    "allowImportingTsExtensions": true,
+    // webui-dom.test 断言生成的内联页体，需要 DOM 类型
+    "lib": ["ES2023", "DOM"],
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["test", "vitest.config.ts", "vitest.workflow.config.ts"],
+  // 存量豁免清单（T30 白名单渐进，2026-10-30 首测 225 → 84 后的剩余）：测试书写宽松一类
+  // （mock 形状不完整 / 部分 Config 字面量 as 断言 / 模板字面量端口类型 / typed-env 缺键），
+  // 非运行时缺陷。新文件默认受检；扩清单必须有理由并同步 test/test-typecheck-gate.test.ts
+  // 的登记断言，清完一个删一行。test/orchestrator 整目录豁免：直接 import .agents 的 .mjs
+  // 工具链（无声明文件），类型化边界需独立 d.ts 项目（后续卡）。
+  "exclude": [
+    "test/orchestrator",
+    "test/adapters.test.ts",
+    "test/cli-index-cmds.test.ts",
+    "test/cli-shared-more.test.ts",
+    "test/cli-shared.test.ts",
+    "test/cloud-target.test.ts",
+    "test/daemon-lifecycle.test.ts",
+    "test/err-taxonomy.test.ts",
+    "test/gateway.test.ts",
+    "test/holidays.test.ts",
+    "test/noderuntime.test.ts",
+    "test/observability.test.ts",
+    "test/profile-cli.test.ts",
+    "test/relay.test.ts",
+    "test/reset.test.ts",
+    "test/sandbox-migrate.test.ts",
+    "test/startup-lazy.test.ts",
+    "test/sync-types-gaps.test.ts",
+    "test/syncagent.test.ts",
+    "test/syncdoc-recovery.test.ts",
+    "test/syncdoc.test.ts",
+    "test/syncpull.test.ts",
+    "test/transfer.test.ts",
+    "test/uninstall.test.ts",
+    "test/update-cli.test.ts"
+  ]
+}
