@@ -44,7 +44,7 @@
 | 2026-10-relay-failover-observability | failover 链三处可观测性 lie：数组体改写谎报 modelAfter、全候选 skip 耗尽降级 502 吞 status/hint、replayed_from 只记最后一跳（CORRECT-09） | bf730c6 | ⏳ 待首跑（2026-10-30 T28 修复回流；首跑前不计入基线分母） |
 | 2026-10-tray-win32-basename | trayPidsFromProcessLines 用平台相关 path.basename 切 Windows CIM 反斜杠命令行，非 Windows 宿主整类托盘行不命中：9 例单测红恰逢 runner 短缺漏进 develop（生产行为恰因 win32 上两 basename 同义而未坏、更隐蔽） | d6c0a9f | ❌ 首跑未审出（10-30，GLM subagent）——4 个真发现全在别处（:77 未闭引号截尾 / :277、:298 静默回滚 / :362 幻影清理 / unix 枚举失败即弃），path.basename 平台语义没进视野：审查者抠了紧邻目标行的引号解析却没问「输入什么平台格式、解析端跑在哪」。首道平台解析题漏报实录，REVIEW.md 平台解析堵法待下次全量跑分一并评估；原文见 runs/2026-10-30-batch3-2026-10-tray-win32-basename.md |
 | 2026-10-daemon-gatewayjson-tamper-race | daemon 篡改纵深用例与常驻网关查更新回写 gateway.json（真实 started_at）竞态，慢速 arm64 断言偶发红、发版腿才炸（linux-arm64 删 tag 重打） | 815a65d | ✅ 审出（10-30，GLM subagent）——存疑区命中机制：「活网关存在 state 重写路径，篡改值可能被治愈，exit 1 断言偶发翻车」（写入者猜「心跳」，实为查更新；启发式 started_at 命中）；另带 exitCode/signalCode、error 监听缺失等 4 真发现；原文见 runs/2026-10-30-batch3-2026-10-daemon-gatewayjson-tamper-race.md |
-
+| 2026-10-test-type-blindspot | test/ 类型盲区：import type 坏路径（../config/types.js，esbuild 剥类型不解析模块路径）+ status(cfg) 缺必填实参静默上树，vitest/npm test 双门禁零信号（05dd0a6 引入）；T30 建 tsconfig.test.json 后存量 225 错暴露，含 1 真 bug | 2217949 | ⏳ 待首跑（2026-10-31 T30 回流；本轮 sweep 池已快照，首跑归下一轮；首跑前不计入基线分母） |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 

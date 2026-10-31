@@ -1,0 +1,17 @@
+{
+  "id": "2026-10-test-type-blindspot",
+  "title": "test/ 类型盲区：import type 坏路径（../config/types.js）与 status(cfg) 缺必填实参静默上树——esbuild 剥类型不解析模块路径，vitest/npm test 双门禁零信号",
+  "reviewRef": "2217949^",
+  "fixedBy": "2217949",
+  "files": [
+    "test/sync-push-partial.test.ts",
+    "test/adapter-packs.test.ts"
+  ],
+  "expect": [
+    "import type",
+    "types.js",
+    "sync-push-partial",
+    "adapter-packs"
+  ],
+  "note": "T30 test-typecheck-gate 回流（2026-10-31）。tsc 纳入 test/ 后存量 225 错中两类真缺陷：① sync-push-partial.test.ts import type { Config } from ../config/types.js 路径错写（应为 ../src/config/types.js，05dd0a6 上树）——esbuild/tsx 转译剥掉 import type 语句、从不解析模块路径，vitest 照跑全绿，类型引用实际从不成立；② adapter-packs.test.ts 三处 status(cfg) 缺第二实参（接口签名 status(cfg, gatewayPort) 必填，types.ts:137）——实现恰好只用 cfg 才运行时无炸，纯类型违规同样零信号。漏过层：npm test 门禁 = vitest（esbuild 转译语义，非类型检查），test/ 此前不在任何 tsc 工程内——测试代码上的类型级缺陷零检测面；审查者同样不跑 tsc，对「不报错的坏路径/缺实参」diff 审查天然盲。堵法：T30 建 tsconfig.test.json 并把 tsc --noEmit 前置进 npm test（25 文件宽松书写白名单 + 登记断言防白名单生长）；REVIEW.md 测试区可补「类型级正确性不在 vitest 覆盖内」口径。expect 打分：审出任一（坏 import 路径 / 缺实参 / tsc 门禁缺失）即算"
+}
