@@ -14,7 +14,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fetch as undiciFetch, type Dispatcher } from 'undici'
-import { ensureDir } from '../util/fsx.js'
+import { ensureDir, sleep } from '../util/fsx.js'
 import { buildDispatcher } from '../util/net.js'
 import { t } from '../util/i18n.js'
 
@@ -120,18 +120,55 @@ export function parseSums(text: string): Record<string, string> {
 /** 注入用命令执行器：跑解压命令并断言成功，失败抛错（供单测桩拼装命令，不真跑系统工具） */
 export type SpawnRunner = (cmd: string, args: string[]) => Promise<void>
 
-/** 默认解压执行：spawn 子进程，stdout 忽略、stderr 收集进错误信息，exit 0 即成功 */
-export const defaultSpawnRunner: SpawnRunner = (cmd, args) =>
-  new Promise((resolve, reject) => {
+/** 零诊断瞬态死亡的重试次数与退避：Windows 高负载 / 杀软活跃窗口里，解压子进程（PowerShell /
+ *  tar）偶发「非零退出且 stderr 为空」的瞬态死亡（0xC0000142 / 0xC000013A 一类，无任何诊断输出；
+ *  2026-10-31 多套件并发跑测试时 update.test.ts 全链路 Expand-Archive 实测中招）。带退避重试一次；
+ *  带 stderr 的真实失败（损坏包、参数错、文件被占）绝不重试——不掩盖真回归。 */
+const SPAWN_TRANSIENT_RETRIES = 1
+const SPAWN_RETRY_BACKOFF_MS = 150
+/** spawn 创建失败里属于「资源暂时耗尽、稍后重试可成」的错误码（ENOENT/EACCES 等确定性失败不在此列） */
+const TRANSIENT_SPAWN_ERROR_CODES = new Set(['EAGAIN', 'EMFILE', 'ENFILE', 'ETIMEDOUT'])
+
+/** 单次尝试的失败标记：zeroDiagnostic = 失败未携带任何诊断信息（瞬态死亡的判据），仅这类允许重试 */
+interface SpawnAttemptFailure extends Error {
+  zeroDiagnostic?: boolean
+}
+
+function spawnAttempt(cmd: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
     let err = ''
     child.stderr?.on('data', (d) => { err += String(d) })
-    child.on('error', reject)
+    child.on('error', (e) => {
+      const f = e as SpawnAttemptFailure
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code && TRANSIENT_SPAWN_ERROR_CODES.has((e as NodeJS.ErrnoException).code!)) f.zeroDiagnostic = true
+      reject(f)
+    })
     child.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(err.trim() || t('进程退出码 {code}', 'process exited with code {code}', { code: code ?? -1 })))
+      if (code === 0) {
+        resolve()
+        return
+      }
+      const f = new Error(err.trim() || t('进程退出码 {code}', 'process exited with code {code}', { code: code ?? -1 })) as SpawnAttemptFailure
+      if (!err.trim()) f.zeroDiagnostic = true
+      reject(f)
     })
   })
+}
+
+/** 默认解压执行：spawn 子进程，stdout 忽略、stderr 收集进错误信息，exit 0 即成功；
+ *  零诊断瞬态死亡（非零退出且无 stderr / 瞬态创建失败）带退避重试一次。 */
+export const defaultSpawnRunner: SpawnRunner = async (cmd, args) => {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await spawnAttempt(cmd, args)
+      return
+    } catch (e) {
+      if (attempt >= SPAWN_TRANSIENT_RETRIES || !(e as SpawnAttemptFailure)?.zeroDiagnostic) throw e
+      await sleep(SPAWN_RETRY_BACKOFF_MS)
+    }
+  }
+}
 
 /**
  * 解压归档到目录：zip 走 PowerShell Expand-Archive，其余（tar.gz 等）走系统 tar
