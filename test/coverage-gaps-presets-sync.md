@@ -146,6 +146,8 @@
 
 ## 施工中发现、未修的疑似问题（进 followups）
 
+> 2026-10-31 终态：四条已全部处置——①②③ 回流 known-issues CORRECT-11 并修讫（①升级为 Infinity 放行真缺陷、②已删、③守卫留档=TS 收窄职责）；④ 回流 CORRECT-10 并修讫（parseHHmm 上移 util/time 与引擎求值同源，越界显式拒绝）。下文为发现时原文，留档。
+
 1. **src/presets/data.ts:471-472 死条件**：`typeof mo.context_window === 'number' && mo.context_window > 0 && !Number.isNaN(mo.context_window)`——`!Number.isNaN` 排在 `> 0` 之后，NaN 走不到第三臂，该检查永不生效（max_output 同）。若本意是拦 NaN，应把 `Number.isFinite` 前置或替代 `> 0` 判定。
 2. **src/presets/data.ts:544 不可达回退**：`Object.assign(out, presetModels(p) ?? {})` 的 `?? {}` 不可达（同函数上方 543 行已 `!p.models?.length → continue`），可删。
 3. **src/sync/targets/cloud.ts:36 不可达守卫**：`manifestOf()` 内 `if (!cached) throw` 不可达——唯一调用点（readManifest 的 304 分支）已先判 `cached`；writeManifest 不经它。防御性代码可留，但覆盖率上恒为死分支。

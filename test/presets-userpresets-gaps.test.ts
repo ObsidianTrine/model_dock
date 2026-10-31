@@ -119,6 +119,14 @@ describe('validateUserPresetEntries 逐条归一化（缺口补齐）', () => {
     expect(p!.models![1]).toEqual({ id: 'b' })
     // 非法数值与非字符串 display_name 一律丢弃
     expect(p!.models![2]).toEqual({ id: 'c' })
+
+    // CORRECT-11 ①：Infinity 曾穿透旧守卫（typeof number 且 >0，!Number.isNaN 又是不可达死臂）——
+    // 改 Number.isFinite 后与 NaN/±Infinity 一并拒收
+    const [inf] = validateUserPresetEntries(
+      [{ id: 'q', models: [{ id: 'inf', context_window: Infinity, max_output: -Infinity }] }],
+      'q.json'
+    )
+    expect(inf!.models![0]).toEqual({ id: 'inf' })
   })
 })
 

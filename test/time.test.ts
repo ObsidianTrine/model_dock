@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { localDateStr, localIsoTs } from '../src/util/time.js'
+import { localDateStr, localIsoTs, parseHHmm } from '../src/util/time.js'
 
 /** 契约（见 src/util/time.ts 头注释）：输出本机时区墙钟时间（不是 UTC），字符布局与 ISO 一致——
  *  调用方靠 slice(0, 10) 取日期、slice(11, 19) 取时分秒。
@@ -54,6 +54,23 @@ describe('time · localIsoTs 字符布局', () => {
     const after = Date.now()
     expect(parsed).toBeGreaterThanOrEqual(before)
     expect(parsed).toBeLessThanOrEqual(after)
+  })
+})
+
+describe('parseHHmm（网关调度窗口与 syncdoc 校验共用，CORRECT-10）', () => {
+  it('合法形状 → 当日分钟数；小时 1-2 位等价（9:05 = 09:05）', () => {
+    expect(parseHHmm('00:00')).toBe(0)
+    expect(parseHHmm('09:30')).toBe(570)
+    expect(parseHHmm('9:05')).toBe(545)
+    expect(parseHHmm('23:59')).toBe(1439)
+    expect(parseHHmm(' 08:15 ')).toBe(495) // 引擎同款 trim 宽容
+  })
+
+  it('形状不符或越界（时>23 / 分>59）→ null；空值/非字符串安全', () => {
+    for (const bad of ['25:99', '24:00', '12:60', '12:3', '9', 'aa:bb', '-1:00', '', '  ']) {
+      expect(parseHHmm(bad), bad).toBeNull()
+    }
+    expect(parseHHmm(undefined as never)).toBeNull()
   })
 })
 
