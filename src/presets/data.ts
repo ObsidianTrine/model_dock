@@ -468,8 +468,12 @@ export function validateUserPresetEntries(arr: unknown[], fp: string): ProviderP
             }
             const pm: PresetModel = { id: mid }
             if (typeof mo.display_name === 'string') pm.display_name = mo.display_name
-            if (typeof mo.context_window === 'number' && mo.context_window > 0 && !Number.isNaN(mo.context_window)) pm.context_window = mo.context_window
-            if (typeof mo.max_output === 'number' && mo.max_output > 0 && !Number.isNaN(mo.max_output)) pm.max_output = mo.max_output
+            // Number.isFinite 一并拦 NaN 与 ±Infinity——旧写法的 !Number.isNaN 是不可达死臂（NaN 过不了前置 >0），
+            // 真正能穿透的是 Infinity（typeof number 且 >0），会带着 Inf 元数据进模型目录（CORRECT-11 ①）
+            const cw = mo.context_window
+            if (typeof cw === 'number' && Number.isFinite(cw) && cw > 0) pm.context_window = cw
+            const maxOut = mo.max_output
+            if (typeof maxOut === 'number' && Number.isFinite(maxOut) && maxOut > 0) pm.max_output = maxOut
             if (Array.isArray(mo.capabilities)) pm.capabilities = mo.capabilities.map(String)
             return pm
           })
@@ -541,7 +545,9 @@ export function knownModelsForBaseUrl(baseUrl: string): Record<string, ModelMeta
     let ph = ''
     try { ph = new URL(p.base_url).host } catch { continue }
     if (ph.toLowerCase() !== host.toLowerCase() || !p.models?.length) continue
-    Object.assign(out, presetModels(p) ?? {})
+    // presetModels 的 undefined 臂在 !p.models?.length 已 continue 的前提下不可达（CORRECT-11 ②）；
+    // Object.assign 对 undefined 源是合法空操作，无需 ?? {} 兜底
+    Object.assign(out, presetModels(p))
   }
   return out
 }

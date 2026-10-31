@@ -1,5 +1,6 @@
 import type { ProfileConfig, Protocol, ProviderConfig, ScheduleWindow } from '../config/types.js'
 import { t } from '../util/i18n.js'
+import { parseHHmm } from '../util/time.js'
 import { ASSET_MAX_FILE_BYTES, ASSET_MAX_FILES, ASSET_MAX_TOTAL_BYTES, isSafeAssetKey } from './assets.js'
 
 /**
@@ -56,7 +57,6 @@ export interface SyncEnvelope {
 const PROTOCOLS: Protocol[] = ['anthropic', 'openai', 'responses']
 const AUTH_STYLES = ['bearer', 'x-api-key']
 const DAY_FILTERS = ['workday', 'weekend', 'holiday']
-const HHMM = /^\d{2}:\d{2}$/
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -121,8 +121,10 @@ export function validateSyncdoc(input: unknown): Syncdoc {
     for (const [i, raw] of (data.scheduleRules as unknown[]).entries()) {
       if (!isPlainObject(raw)) fail(t('定时规则第 {n} 条格式错误', 'Schedule rule #{n} is malformed', { n: i + 1 }))
       const w = raw as Record<string, unknown>
-      if (typeof w.start !== 'string' || !HHMM.test(w.start) || typeof w.end !== 'string' || !HHMM.test(w.end))
-        fail(t('定时规则第 {n} 条 start/end 应为 HH:mm', 'Schedule rule #{n}: start/end must be HH:mm', { n: i + 1 }))
+      // 与网关调度求值共用 parseHHmm 同一口径：形状 + 数值范围（时 0-23 / 分 0-59，小时 1-2 位）。
+      // 引擎对越界窗口本来就静默跳过——这里收口为显式拒绝，垃圾规则不再静默进包（CORRECT-10）
+      if (typeof w.start !== 'string' || parseHHmm(w.start) === null || typeof w.end !== 'string' || parseHHmm(w.end) === null)
+        fail(t('定时规则第 {n} 条 start/end 应为 HH:mm（时 0-23、分 0-59，如 09:30）', 'Schedule rule #{n}: start/end must be HH:mm (hour 0-23, minute 0-59, e.g. 09:30)', { n: i + 1 }))
       if (typeof w.target !== 'string' || !w.target) fail(t('定时规则第 {n} 条缺少 target', 'Schedule rule #{n} is missing target', { n: i + 1 }))
       if (w.dayFilter !== undefined && !(DAY_FILTERS as string[]).includes(String(w.dayFilter)))
         fail(t('定时规则第 {n} 条 dayFilter={v} 不受支持', 'Schedule rule #{n} has unsupported dayFilter={v}', { n: i + 1, v: String(w.dayFilter) }))

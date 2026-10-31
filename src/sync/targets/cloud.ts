@@ -33,6 +33,8 @@ export function createCloudTarget(opts: CloudTargetOptions): SyncTarget {
   }
 
   function manifestOf(): SyncManifest {
+    // 守卫在两调用点（readManifest 的 304 分支已判 cached / 成功分支刚赋值）下不可达（CORRECT-11 ③ 留档）：
+    // 但它是 cached 闭包变量的 TS 收窄手段，删掉后 cached.rev 报 possibly-null——保留并注明，不算死代码
     if (!cached) throw new Error(t('云端文档尚未拉取', 'Cloud document has not been fetched yet'))
     return { rev: cached.rev, ts: cached.ts, byDevid: cached.byDevid, blobRef: blobRefOf(cached.rev, opts.devid) }
   }

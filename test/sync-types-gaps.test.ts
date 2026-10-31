@@ -110,13 +110,17 @@ describe('validateSyncdoc userPresets / scheduleRules 形状（缺口补齐）',
     ).toThrow(/第 1 条格式错误|Schedule rule #1 is malformed/)
   })
 
-  it('start/end 非 HH:mm 拒绝（正则只验形状：两位数字:两位数字，不验数值范围）', () => {
-    expect(() =>
-      validateSyncdoc(field((d) => { d.data.scheduleRules[0]!.start = '9:00' }))
-    ).toThrow(/start\/end 应为 HH:mm|start\/end must be HH:mm/)
-    expect(() =>
-      validateSyncdoc(field((d) => { d.data.scheduleRules[0]!.end = '12:3' }))
-    ).toThrow(/HH:mm/)
+  it('start/end 与网关求值同口径（parseHHmm）：越界时刻拒绝、合法形状放行（含单数字小时）', () => {
+    // CORRECT-10：旧形状正则 `\d{2}:\d{2}` 拦不住 25:99 一类越界值（引擎侧 parseHHmm 本就静默跳过），
+    // 现改与 state/routing.ts 共用 util/time 的 parseHHmm——形状 + 数值范围一体，垃圾规则显式拒绝
+    for (const bad of ['25:99', '24:00', '12:60', '12:3', '-1:00'])
+      expect(() =>
+        validateSyncdoc(field((d) => { d.data.scheduleRules[0]!.start = bad }))
+      ).toThrow(/start\/end 应为 HH:mm|start\/end must be HH:mm/)
+    for (const good of ['9:00', '09:00', '00:00', '23:59'])
+      expect(() =>
+        validateSyncdoc(field((d) => { d.data.scheduleRules[0]!.start = good; d.data.scheduleRules[0]!.end = '23:59' }))
+      ).not.toThrow()
   })
 
   it('dayFilter 非法值拒绝（三种合法值放行）', () => {
