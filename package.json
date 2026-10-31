@@ -44,7 +44,7 @@
     "commander": "^15.0.0",
     "qrcode-generator": "^1.5.2",
     "smol-toml": "^1.9.1",
-    "undici": "^7.10.0",
+    "undici": "^8.12.3",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
