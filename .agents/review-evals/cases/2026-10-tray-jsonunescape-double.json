@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-jsonunescape-double",
+  "title": "win 托盘 JsonUnescape 链尾回填两个字面反斜杠（C# \"\\\\\" 才是一个），含反斜杠的值（错误消息里的 Windows 路径）展示成 C:\\\\Users\\…，波及 notes/summary/lastError/更新失败 error 四处；另 notes/summary/error 在 JsonString 已反转义一次后又包一层 JsonUnescape，双重解码会把字面 \\t 误伤成 TAB（C:\\temp → C:<TAB>emp）",
+  "reviewRef": "3d5ec5f^1",
+  "fixedBy": "3d5ec5f",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["反斜杠", "双重", "jsonunescape"],
+  "note": "任务卡 20（评测考题 2026-10-tray-cli-lang-substring 的加分发现落地修复）。教训：手写 JSON 反转义链是雷区——每个 Replace 的入参/回填都要按「C# 字面量 vs JSON 转义语义」两层核对；包裹式辅助函数（内层已解码）外层再包一层是双重解码的经典形态，修一处回填时必须全文核对其调用方"
+}
