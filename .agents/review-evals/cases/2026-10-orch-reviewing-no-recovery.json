@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-orch-reviewing-no-recovery",
+  "title": "orchestrator reviewing/ 卡硬崩后无恢复路径：run/resume 白名单都不含 reviewing，唯一程序化出口是 abandon 强制落 failed（TRANSITIONS 本就允许 reviewing→running）；reviewer 临时目录（orch-review-*/orch-review-settings-*）每轮 mkdtemp 从不清理，finally 只清 worker 的两个，die() 走 process.exit 连 worker 的也泄漏",
+  "reviewRef": "c7455d0^1",
+  "fixedBy": "c7455d0",
+  "files": [".agents/scripts/orchestrator.mjs"],
+  "expect": ["reviewing", "abandon"],
+  "note": "任务卡 19（评测考题 2026-10-orch-awaiting-human-crash 的加分发现落地修复）。教训：状态机定义了合法迁移（TRANSITIONS）不等于入口白名单放行了它——「能迁移」与「有入口」要分开核对；临时资源登记进 finally 清单要覆盖每个 mkdtemp 点，die 快速失败路径也要能清"
+}
