@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-actions-static-race",
+  "title": "TrayActions 的 _port/_token 静态字段被多线程无同步读写——ReadState 开头先置 null 再赋值，竞态窗口内其他线程拿到 null 拼出 http://127.0.0.1:/…，HealthOk 误报 false → QuitClicked 跳过 gateway stop（点了「退出并停止网关」网关却留下）",
+  "reviewRef": "b338cb1^",
+  "fixedBy": "b338cb1",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["静态", "竞态"],
+  "note": "任务卡 10 修复（b338cb1，三处之一，与 tray-cli-watchdog-missing 同文件同 reviewRef）。修复 = 改不可变 GatewayInfo 快照（volatile 引用整体发布、读侧单次取用），失败路径保留上次快照。审查侧教训：WinForms Timer / ThreadPool / 后台线程多调用方共写的静态可变字段，先置 null 再赋值的「清空-重建」模式必然有竞态窗口——读者拿到的可以是 null；跨线程共享状态用不可变快照整体替换，不做逐字段清写"
+}

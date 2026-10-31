@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-lan-bearer-empty-token",
+  "title": "lanAuthorized 对令牌取值 `rt.lan?.token ?? ''`——LAN 关闭后 keep-alive 保温连接送达请求时 token 为空串，与空 Bearer 双双为空串通过 safeEqual 的常数时间比较，等于无凭据放行管理面",
+  "reviewRef": "bc135c2^",
+  "fixedBy": "bc135c2",
+  "files": ["src/gateway/lan.ts"],
+  "expect": ["safeequal", "空串"],
+  "note": "任务卡 01 修复（bc135c2）。修复 = rt.lan 缺失/令牌为空一律 return false + stopLan 补 closeAllConnections 断保温连接 + buildLanStatus 广告口径 lanAdvertiseIps(host)。审查侧教训：safeEqual 只保证「比较本身不泄漏时序」，不保证「空对空比较的结果合理」——凭据校验入口必须先显式拒绝空值；同文件的 close() 只停新连接、keep-alive 已建连仍会被伺服"
+}

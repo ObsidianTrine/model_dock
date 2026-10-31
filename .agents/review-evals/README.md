@@ -1,8 +1,3 @@
-13. **同一缺陷两机并行各自实现**（2026-10-30 develop 合并：daemon stderr 本地 fd 继承 7d21df0 vs 远程 daemon 侧接管 b542d8e；finish 锁心跳判活 vs 有界等待系互补需并集）：双头开发撞同一文件，合并成本高于双修收益——按文件分区派工（AGENTS.md 既有约定）；冲突解决先判「互补还是互斥」，互补取并集、互斥取验证更强的一侧。
-14. **任务卡断言不作数**（05 卡声称 ensureProfile 缺陷「对照当前 HEAD 确认仍在」，实际已被 addService 重构消除，误报文案全仓无残留）：动手前亲自 grep 核实卡面每一条缺陷断言；评测循环产出的「活 bug 清单」同样会过期。
-15. **顶层执行 main() 的脚本无法被测试 import**（orchestrator.mjs）：可测纯逻辑抽子模块 + 依赖注入（deps.mjs 的 spawnFn/log/die 注入模式），单测落子模块文件而不是硬啃入口脚本。
-16. **模块级缓存在 isolate:false 单进程套件里被早前用例焐热**（catalogViewCache）：「冷启动必须序列化一次」断言因此恒红——先空跑一次对齐状态，再经公开失效点（clearKnownTable）强制重建；判别器设计成「第二次零成本」（buggy 版第二次也 miss）比「第一次有成本」更稳。
-17. **全局 spy 计数法**（vi.spyOn(JSON,"stringify") 透传原实现 + payload 特征过滤 + finally mockRestore）：非模块 mock 不进跨文件注册表，isolate:false 下安全——给「全量序列化是否发生」类断言做判别器的实用手法。
 **评分器说明**：2026-10-29 基线跑分用本地 claude CLI（deepseek-v4-pro）；2026-10-30 夜训时该 CLI 的 DeepSeek key 401 失效，当日 12 题改用 **ZCode 会话模型 subagent（GLM-5.3-Flash）** 评分——两段分数来自不同评分器，跨段对比仅供参考；DeepSeek key 修好后可用 runner 重跑全量对齐。Runner 已加 120KB 考题文件护栏（历史上的 289KB ui.ts 会撑爆 prompt，选题时避开整文件巨物）。
 
 | id | bug | fixedBy | 首跑 |
@@ -61,6 +56,15 @@
 | 2026-10-finish-merge-conflict-bare | finish 合并段无冲突处理，冲突裸崩留 merging 状态且重跑指引错误 | 4c161a5 | ⏳ 待首跑（2026-10-31 卡 18 修复回灌，dry 过；同上） |
 | 2026-10-orch-reviewing-no-recovery | reviewing/ 卡硬崩无恢复路径（白名单不含）+ reviewer 临时目录每轮泄漏 | c7455d0 | ⏳ 待首跑（2026-10-31 卡 19 修复回灌，dry 过；同上） |
 | 2026-10-tray-jsonunescape-double | JsonUnescape 回填两个字面反斜杠 + notes/summary/error 双重解码误伤 \t | 3d5ec5f | ⏳ 待首跑（2026-10-31 卡 20 修复回灌，dry 过；同上） |
+| 2026-10-lan-bearer-empty-token | lanAuthorized 令牌取 `?? ''`：LAN 关闭后保温连接送达空令牌，与空 Bearer 双双通过 safeEqual 空对空比较，等于无凭据放行管理面 | bc135c2 | ✅（10-30，GLM subagent）目标命中且超预期：三通道守卫不对称 + 保温连接攻击链，见 runs/2026-10-30-lan-bearer-empty-token.md |
+| 2026-10-policy-dispatch-tamper | 红线守卫 dispatcher 从事件 cwd 直接 import policy.mjs 且不校验文件写入目标——被守护 agent 可覆写/塞坏 fail-open/删除守卫，红线静默关闭零留痕 | c32451c | ✅（10-30，GLM subagent）四条篡改路实测全 allowed + worktree 摘端口红线、null 崩溃放行加深发现，见 runs/2026-10-30-policy-dispatch-tamper.md |
+| 2026-10-spawndaemon-stderr-pipe-pin | spawnDaemonAndWait 用 pipe 收 daemon stderr 且只 unref 子进程不解流——读端活动句柄把 CLI 事件循环钉到 daemon 退出，--daemon 就绪后不返回 | 7d21df0 | ✅（10-30，GLM subagent）机制链完整 + 对齐 CORRECT-07/99fa3a5 演进，见 runs/2026-10-30-spawndaemon-stderr-pipe-pin.md |
+| 2026-10-tray-cli-watchdog-missing | CheckViaCli 注释承诺 40s 看门狗，实现是无超时 ReadToEnd+WaitForExit——CLI 挂住则更新检查永久沉默 | b338cb1 | ⏳ 待首跑（2026-10-30 卡 10 修复对回灌，dry 过；首跑前不计入基线分母） |
+| 2026-10-tray-actions-static-race | TrayActions _port/_token 静态字段无同步读写：先置 null 再赋值窗口内并发读拼出 http://127.0.0.1:/ → HealthOk 误 false | b338cb1 | ⏳ 待首跑（同上） |
+| 2026-10-webupdate-latch-no-rollback | applyUpdate 置 state.updating 后依次做可同步抛出的步骤且无 try/catch——任一失败门闩卡死 updating，后续更新全拒 | b7b91ad | ⏳ 待首跑（2026-10-30 卡 04 修复对回灌，dry 过；同上） |
+| 2026-10-review-loop-guard-dead-code | claude-review.yml [dependabot-fix] 防回环守卫读 merge 检出的 git log -1 尾提交——永远匹配不上 PR head 前缀，守卫是死代码 | 567d379 | ⏳ 待首跑（2026-10-30 评测循环产出修复对回灌，dry 过；同上） |
+| 2026-10-update-staging-sweep-age | update 暂存清扫无年龄过滤全删共享 %TEMP% 的 modeldock-{update,setup,app,bin,sums}-*——多形态/并发测试进程互不知晓，一方 runUpdate 删掉另一方在途下载/解压目录；解压子进程高负载/杀软窗口零诊断瞬态死亡无重试 | b6b90ce | ⏳ 待首跑（2026-10-31 卡 16 修复对回灌，dry 过；同上） |
+| 2026-10-jsonpath-multiseg-overreject | jsonpath tokenize 完整覆盖校验漏算段间 `.` 分隔符：fd235ea 连续性判定把所有多段点路径（$.a.b）误抛「无法解析」——CORRECT-08 修复引入的回归，多段读写全废 | f0ec635 | ⏳ 待首跑（2026-10-31 修复回归回灌，dry 过；同上） |
 
 **基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
@@ -84,6 +88,8 @@
 
 - **2026-10-30 增补 6 题**（编号任务卡 05/06/07/08 修复对回灌，评测循环挖出的活 bug 修复后按标准 schema 成题）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 06a5940（×2）/ 54b0602 / 035f99b / 9bfed39（×2）。
 - **2026-10-30 增补 4 题**（合并窗口修复对回灌：CORRECT-07 daemon stderr / finish 锁 PID 复用 / claude PowerShell 白名单 / Budget 跨会话漏计）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 b542d8e / a804fd9 / e5fa84d / a755671。
+- **2026-10-30 增补 7 题**（第三轮：卡 01-04、10 与防回环守卫修复对回灌，commit 2964ff4，dry 全过）：3 题已首跑 ✅（runs/2026-10-30-{lan-bearer-empty-token,policy-dispatch-tamper,spawndaemon-stderr-pipe-pin}.md），4 题 ⏳ 待首跑。
+- **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：dry 过、⏳ 待首跑。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
@@ -105,3 +111,12 @@
 10. **临时仓库夹具 .gitignore 与真实仓库不对齐**（T13）：mkRepo 漏了 `.agents/worktrees/` 忽略，主仓库一次 `git add -A` 把任务 worktree 收成 embedded repo（gitlink），finish 的基准分支清洁检查误报退出 1。堵法：夹具 ignore 清单与真实仓库对齐；主仓库 `add -A` 前先看 status 是否混入意外路径。
 11. **负向场景夹具先自检前置状态**（T13 ③c）：造了「定时删锁的持有者」却没先创建锁文件，等待方首轮即拿到锁，「等待日志」断言必红。教训：造「X 中途发生」的夹具，先断言 X 前的状态真实存在。
 12. **排序类前提未查证框架机制**（T21 预研）：审查报告断言 zz-quickwins「押文件名字典序」在 uninstall.test 之后跑，实际 vitest 按历史运行时长缓存排序（慢者先行，非字母序）——照卡实现的守卫会在排序漂移时误报/漏报。堵法：守卫写成与排序无关的不变量（mock 属主关系、不重复 mock）；「押某种顺序」类前提动手前查框架文档或实测。
+13. **同一缺陷两机并行各自实现**（2026-10-30 develop 合并：daemon stderr 本地 fd 继承 7d21df0 vs 远程 daemon 侧接管 b542d8e；finish 锁心跳判活 vs 有界等待系互补需并集）：双头开发撞同一文件，合并成本高于双修收益——按文件分区派工（AGENTS.md 既有约定）；冲突解决先判「互补还是互斥」，互补取并集、互斥取验证更强的一侧。
+14. **任务卡断言不作数**（05 卡声称 ensureProfile 缺陷「对照当前 HEAD 确认仍在」，实际已被 addService 重构消除，误报文案全仓无残留）：动手前亲自 grep 核实卡面每一条缺陷断言；评测循环产出的「活 bug 清单」同样会过期。
+15. **顶层执行 main() 的脚本无法被测试 import**（orchestrator.mjs）：可测纯逻辑抽子模块 + 依赖注入（deps.mjs 的 spawnFn/log/die 注入模式），单测落子模块文件而不是硬啃入口脚本。
+16. **模块级缓存在 isolate:false 单进程套件里被早前用例焐热**（catalogViewCache）：「冷启动必须序列化一次」断言因此恒红——先空跑一次对齐状态，再经公开失效点（clearKnownTable）强制重建；判别器设计成「第二次零成本」（buggy 版第二次也 miss）比「第一次有成本」更稳。
+17. **全局 spy 计数法**（vi.spyOn(JSON,"stringify") 透传原实现 + payload 特征过滤 + finally mockRestore）：非模块 mock 不进跨文件注册表，isolate:false 下安全——给「全量序列化是否发生」类断言做判别器的实用手法。
+18. **UTC 时间戳误判陈锁、手删活锁**（2026-10-29 合并接管会话）：finish 锁 time 是 ISO UTC，接管者把 `00:55Z` 读成本地 00:55 判「8 小时前陈锁」直接删——持有者实际活着（几分钟前刚起），并发 finish 侥幸双双落地无损坏。堵法：判陈锁先换算时区再验活（新锁看 beat 心跳）；非本人持有的 git 状态（MERGE_HEAD / 锁 / 他人暂存区）一律不动，删锁前必须核实属主 pid 已死。
+19. **交接数字失真**（2026-10-29 test-gap-presets-sync 接管）：NOTES 与提交信息写「60 用例」，接手后实测 73——worker 中断前数字是草稿态，直接引用即失真。堵法：交接文档的计数/状态「写时实测」；接手者把卡面数字当线索不当事实（同 14）。
+20. **管道尾退出码误判**（2026-10-30 coverage 取数）：`npm test | tail` 后 `$?` 是 tail 的 0——测试红了却判成功；且 vitest 失败跑不产 coverage 报告，双重误导连烧三次全量。堵法：退出码不经管道取（`set -o pipefail` 或命令与查看分开）；「该产出的报告没产出」本身就是失败信号。
+    （结构注：13–17 曾被误追加到本文件顶部无节标题处，2026-10-31 接管时移回本节按序续排。）

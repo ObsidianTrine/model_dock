@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-review-loop-guard-dead-code",
+  "title": "claude-review.yml 的 [dependabot-fix] 防回环守卫用 git log -1 读尾提交 subject——actions/checkout 在 PR 事件检出的是 refs/pull/N/merge 测试合并提交（subject 形如 Merge <sha> into <sha>），case 匹配永不命中，防回环自上线以来从未生效",
+  "reviewRef": "567d379^",
+  "fixedBy": "567d379",
+  "files": [".github/workflows/claude-review.yml"],
+  "expect": ["dependabot-fix", "合并提交"],
+  "note": "夜训防回环守卫修复（567d379，两处 guard 同改）。修复 = 改读 github.event.pull_request.head.sha 的提交 subject（gh api commits），查询失败按不跳过处理（宁可复审不漏审）。审查侧教训：CI 里「读当前提交」要先问检出的是什么 ref——pull_request 事件的 checkout 是 GitHub 拼的 merge 提交而非 PR 头提交；判定逻辑依赖提交 message 时必须显式取 head.sha。佐证口径：历史 Dependabot PR 无一命中该前缀 = 守卫从未生效"
+}

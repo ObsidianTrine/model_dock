@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-webupdate-latch-no-rollback",
+  "title": "applyUpdate 把 state.updating 置位后依次做 mkdirSync/openSync/spawn 等可同步抛出的步骤且无 try/catch——任一失败（日志目录建不出/日志文件被占 EBUSY）updating 永久卡 true，之后所有一键更新返回 in_progress，只能重启网关",
+  "reviewRef": "b7b91ad^",
+  "fixedBy": "b7b91ad",
+  "files": ["src/update/webupdate.ts"],
+  "expect": ["updating", "永久"],
+  "note": "任务卡 04 修复（b7b91ad）。修复 = 门闩后整段 try/catch，失败复位 updating + applyError 记原因 + 返回 reason:'failed'（可重试）。审查侧教训：状态门闩（先置位防重入）必须与「之后每个可失败步骤」同事务——置位后的同步失败路径没有回滚就等于把单次失败放大成永久功能锁死；同函数内 watchApplyChild 对 error 事件的防御（settled 防双触发）覆盖不到门闩自身的同步失败，两层防御要拼全"
+}
