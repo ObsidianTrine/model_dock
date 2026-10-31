@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import net, { type AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { downloadText, downloadToFile, extractArchive, parseSums, type SpawnRunner } from '../src/update/transfer.js'
+import { defaultSpawnRunner, downloadText, downloadToFile, extractArchive, parseSums, type SpawnRunner } from '../src/update/transfer.js'
 import { UpdateError, validateAssetName, downloadAsset, verifyChecksum, type ReleaseAsset } from '../src/update/check.js'
 
 // 本文件零 vi.mock：下载用本地 mock 服务器桩测，命令拼装用注入执行器桩——尊重 vitest singleFork
@@ -152,6 +152,38 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
       await expect(fsp.access(badDir).then(() => true, () => false)).resolves.toBe(false)
       expect(calls).toHaveLength(0)
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
+  })
+})
+
+// defaultSpawnRunner 的零诊断瞬态重试：用 node -e 造确定性退出码（不真跑 tar/powershell，三平台一致）。
+// 背景（2026-10-31 实测）：Windows 高负载/杀软活跃窗口里解压子进程偶发「非零退出且 stderr 为空」的
+// 瞬态死亡（0xC0000142 一类），update.test.ts 全链路 Expand-Archive 中招——有 stderr 的真实失败绝不重试。
+describe('defaultSpawnRunner 零诊断瞬态重试', () => {
+  let root = ''
+  beforeEach(async () => { root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-spawn-')) })
+  afterEach(async () => { await fsp.rm(root, { recursive: true, force: true }).catch(() => {}) })
+
+  /** node -e 脚本执行器：进程本身就是跨平台确定性的退出码发生器 */
+  const node = (script: string) => defaultSpawnRunner(process.execPath, ['-e', script])
+  /** 每次被尝试都往计数文件追加一个字符（数尝试次数用） */
+  const countEachAttempt = (marker: string, tail: string) =>
+    `require('fs').appendFileSync(${JSON.stringify(marker)},'x');${tail}`
+
+  it('零诊断死亡重试一次后成功：首跑静默非零退出 → 重试跑通（解压瞬态死亡自愈）', async () => {
+    const marker = path.join(root, 'marker')
+    // 首跑写标记后静默 exit 3（模拟瞬态死亡）；重试看到标记即 exit 0
+    await node(`const fs=require('fs');fs.existsSync(${JSON.stringify(marker)})?process.exit(0):(fs.writeFileSync(${JSON.stringify(marker)},'1'),process.exit(3))`)
+    expect(fs.existsSync(marker)).toBe(true)
+  })
+
+  it('重试耗尽仍零诊断死亡：报「进程退出码 N」而非吞错', async () => {
+    await expect(node('process.exit(3)')).rejects.toThrow(/进程退出码 3|process exited with code 3/)
+  })
+
+  it('有 stderr 的失败绝不重试（损坏包类真实失败不掩盖）', async () => {
+    const marker = path.join(root, 'attempts')
+    await expect(node(countEachAttempt(marker, `console.error('expand boom');process.exit(1)`))).rejects.toThrow('expand boom')
+    expect(fs.readFileSync(marker, 'utf8')).toBe('x') // 只尝试了一次
   })
 })
 

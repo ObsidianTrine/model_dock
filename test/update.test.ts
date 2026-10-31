@@ -34,6 +34,19 @@ import { VERSION } from '../src/version.js'
 
 // 本文件绝不触达真实网络与真实实例：GitHub API 用本地 http server 伪造，
 // 停网关/停托盘/open/spawn 全部注入 mock（AGENTS 红线：单测禁跑 sweepGatewayProcesses 等）。
+//
+// 已知偶发与根治（2026-10-30/31 实测；bare 全链路用例真实跑 PowerShell Expand-Archive，win 每用例一次 spawn）：
+// ① 主因——系统临时目录全机共享，runUpdate 开头的 sweepStaleUpdateStaging 曾无年龄过滤地全删
+//    modeldock-{update,setup,app,bin,sums}-*：并存的另一实例（dev 沙箱）或并发测试进程（多 agent
+//    并发跑测试）会把本进程「正在下载/解压」的在途目录删掉，Expand-Archive 报「路径不存在」。
+//    现清扫带 1h mtime 门槛（run.ts；> 下载总超时 10min，到龄即真残留），在途暂存不再被误删。
+// ② 次因——高负载/杀软活跃窗口下解压子进程偶发「非零退出且 stderr 为空」的瞬态死亡，表现为
+//    「进程退出码 {code}」（src/update/transfer.ts defaultSpawnRunner 的 close 回调）。该层现已对
+//    零诊断死亡带退避重试一次；有 stderr 的真实失败（损坏包等）绝不重试，不掩盖回归。
+// 若同签名失败仍频发：先看报错是「路径不存在」（清扫竞态回潮）还是「进程退出码」（负载/杀软），
+// 分别查 sweep 年龄门槛与机器负载，不要放宽断言。
+// （另一同类面：makeBareArchive 的 Compress-Archive spawnSync，失败文案 'Compress-Archive failed'，
+// 8b73fec memoize 后每形态只打一次，至今未观测到失败。）
 
 const TOKEN = 'ghp_test-token'
 const REPO = 'owner/repo'
@@ -736,11 +749,31 @@ describe('安装原语', () => {
     const mk = (n: string) => { const d = path.join(os.tmpdir(), n); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, 'x'), '1'); return d }
     const made = ['modeldock-app-sweeptest', 'modeldock-bin-sweeptest', 'modeldock-sums-sweeptest', 'modeldock-setup-sweeptest', 'modeldock-unrelated-sweeptest'].map(mk)
     try {
+      // 回拨 mtime 模拟「到龄残留」再走默认清扫——共享 %TEMP% 上绝不全量清扫
+      // （无年龄门槛的删除会打掉并发测试进程/另一实例的在途暂存，本文件头注 ① 的根因）
+      const stale = new Date(0)
+      for (const d of made) await fsp.utimes(d, stale, stale)
       await sweepStaleUpdateStaging()
       for (const d of made.slice(0, 4)) expect(fs.existsSync(d)).toBe(false)
       expect(fs.existsSync(made[4])).toBe(true) // 其他前缀不误伤
     } finally {
       await fsp.rm(made[4], { recursive: true, force: true }).catch(() => {})
+    }
+  })
+
+  it('sweepStaleUpdateStaging 年龄门槛：在途暂存（mtime 新）不被清扫误删，到龄残留照收', async () => {
+    // 系统临时目录全机共享：并存的另一 ModelDock 实例（dev 沙箱）或并发测试进程的清扫
+    // 曾把本进程「正在下载/解压」的在途目录删掉（2026-10-30/31 update.test.ts 偶发元凶）。
+    const d = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-update-'))
+    try {
+      fs.writeFileSync(path.join(d, 'modeldock-999.0.0-win32-x64.zip'), 'in-flight')
+      await sweepStaleUpdateStaging() // 1h 门槛：新目录保留
+      expect(fs.existsSync(d)).toBe(true)
+      await fsp.utimes(d, new Date(0), new Date(0)) // 自己到龄
+      await sweepStaleUpdateStaging() // 到龄残留照收
+      expect(fs.existsSync(d)).toBe(false)
+    } finally {
+      await fsp.rm(d, { recursive: true, force: true }).catch(() => {})
     }
   })
 })
@@ -835,6 +868,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
     const h = fakeHome()
     const prevLocalAppData = process.env.LOCALAPPDATA
+    let keptTmpDir: string | null = null
     try {
       // 形态识别按 %LOCALAPPDATA%\Programs\ModelDock 前缀判定（runUpdate 显式读环境变量）
       process.env.LOCALAPPDATA = root
@@ -867,11 +901,14 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       const setupArg = calls.detached[0].args.join(' ').match(/"([^"]*modeldock-999\.0\.0-win32-x64-setup\.exe)"/i)
       expect(setupArg?.[1]).toBeTruthy()
       expect(fs.existsSync(setupArg![1]!)).toBe(true)
+      // 记下 runUpdate 刻意保留的下载 tmpDir（setup.exe 本体所在），收尾只清自己这一份
+      keptTmpDir = path.dirname(setupArg![1]!)
       // 安装器成败异步发生、更新器无人能替它收尾：进度必须停在 restarting，绝不谎报 done
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
     } finally {
-      await sweepStaleUpdateStaging()
+      // 只清自己保留的 tmpDir，绝不对共享 %TEMP% 全量清扫（会删掉并发测试进程的在途暂存，头注 ①）
+      if (keptTmpDir) await fsp.rm(keptTmpDir, { recursive: true, force: true }).catch(() => {})
       if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA
       else process.env.LOCALAPPDATA = prevLocalAppData
       h.restore()
@@ -884,6 +921,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
   it.skipIf(process.platform !== 'win32')('win-setup 自定义目录：unins000.exe 指纹兜底，仍走安装向导链路', async () => {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
     const h = fakeHome()
+    let keptTmpDir: string | null = null
     try {
       // 故意不动 LOCALAPPDATA：自定义目录与它无关，指纹是唯一判定依据
       const execPath = path.join(root, 'CustomDir', 'ModelDock', 'modeldock.exe')
@@ -910,10 +948,13 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(cmdLine).toContain(path.join(path.dirname(execPath), 'ModelDockTray.exe'))
       // /DIR 钉死自定义目录：更新原位落袋，绝不落回默认目录制造重复安装
       expect(cmdLine).toContain(`/DIR="${path.dirname(execPath)}"`)
+      // 记下 runUpdate 刻意保留的下载 tmpDir，收尾只清自己这一份（共享 %TEMP% 上绝不全量清扫）
+      const setupArg = calls.detached[0].args.join(' ').match(/"([^"]*modeldock-999\.0\.0-win32-x64-setup\.exe)"/i)
+      keptTmpDir = setupArg?.[1] ? path.dirname(setupArg[1]) : null
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
     } finally {
-      await sweepStaleUpdateStaging()
+      if (keptTmpDir) await fsp.rm(keptTmpDir, { recursive: true, force: true }).catch(() => {})
       h.restore()
       await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
     }

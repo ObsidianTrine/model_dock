@@ -236,7 +236,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
         // 安装器成败异步发生，更新器必须立即退出释放自身 exe 锁，无人能替它收尾：
         // 进度停在 restarting（托盘对 10 分钟未刷新的进度文件按残留过期自动收起），不谎报 done
         await writeUpdateProgress('restarting', asset.size, asset.size)
-        // tmpDir 里就是 setup.exe 本体，交给下次 runUpdate 清扫
+        // tmpDir 里就是 setup.exe 本体，交给清扫收尾（到龄后由下次 runUpdate 收走）
         keepTmpDir = true
         return { updated: true, currentVersion: VERSION, latestVersion: m.version }
       } else {
@@ -300,17 +300,32 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   }
 }
 
+/** 暂存目录「在途」判定门槛：mtime 晚于该值（默认 1h）的目录不动。系统临时目录是全机共享的，
+ *  本机可并存多个 ModelDock 形态（正式安装 + dev 沙箱）与多个并发测试进程，各持各自的更新锁、
+ *  互不知晓——无年龄过滤的全量清扫会把别的实例/进程「正在下载/解压」的在途暂存删掉
+ *  （2026-10-30 多 agent 并发跑测试时 update.test.ts 偶发 Expand-Archive 找不到下载包；
+ *  2026-10-31 并发压测双向复现实锤）。1h > 下载总超时 DOWNLOAD_TIMEOUT_MS（10min），到龄即真残留。 */
+const STALE_STAGING_MS = 60 * 60_000
+
 /** 清扫上次更新残留的暂存：下载目录 modeldock-update-*（win-setup 成功路径刻意留下的 setup.exe）
  *  与孤儿 modeldock-setup-*。调用方须已持有更新锁；被 Inno 占用的文件删不掉就留给再下一次。
  *  前缀覆盖本域全部 mkdtemp 形态：app（mac .app staging）/ bin（裸二进制，单份可达上百 MB）/
  *  sums（校验和下载）——这些只靠正常路径的 finally 清理，更新器进程被杀/崩溃时残留，
- *  下次更新必须收掉，否则孤儿 staging 永久占盘。 */
+ *  下次更新必须收掉，否则孤儿 staging 永久占盘。只清 mtime 早于 STALE_STAGING_MS 的目录
+ *  （测试夹具回拨 mtime 模拟到龄；绝不提供跳过年龄门槛的全量清扫）。 */
 export async function sweepStaleUpdateStaging(): Promise<void> {
   try {
     const tmp = os.tmpdir()
+    const cutoff = Date.now() - STALE_STAGING_MS
     for (const name of await fsp.readdir(tmp)) {
       if (!/^modeldock-(update|setup|app|bin|sums)-/.test(name)) continue
-      await fsp.rm(path.join(tmp, name), { recursive: true, force: true }).catch(() => {})
+      const full = path.join(tmp, name)
+      try {
+        if ((await fsp.stat(full)).mtimeMs > cutoff) continue // 在途（别的实例/进程正在用）：本轮不动
+      } catch {
+        continue // 拿不到 mtime（已被属主收走等竞态）：留给下轮
+      }
+      await fsp.rm(full, { recursive: true, force: true }).catch(() => {})
     }
   } catch {
     /* 目录枚举失败不影响主流程 */
