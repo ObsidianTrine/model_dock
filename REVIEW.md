@@ -9,7 +9,7 @@
 - **配置与密钥**（src/config/）：静默丢用户数据；绕过 atomicWrite 直接写盘；secrets 明文外泄或权限过宽。
 - **适配器**（src/adapters/）：写坏客户端配置文件（丢注释/丢格式）；detach 冲掉用户自己的改动。
 - **更新与安装**（src/update/、scripts/installer.iss）：更新中途留残留进程或半成品文件；强杀误伤无辜进程。
-- **测试**（test/）：踩 vitest 隔离雷（跨文件 vi.mock / clearAllMocks）；监听 8687/8890；NTFS 权限断言无平台分支；写死 /tmp 或盘符。
+- **测试**（test/）：踩 vitest 隔离雷（跨文件 vi.mock / clearAllMocks）；监听 8687/8890；NTFS 权限断言无平台分支；写死 /tmp 或盘符；收尾在后台任务（同步引擎 tick 等长尾）仍在飞时恢复 env/关闭资源——配置整包写穿真实 home（2026-10-30 realhome 事故，stopSyncEngine 不等在飞 tick）。
 - **拆分/搬移类 refactor**（目录+shim、模板抽纯模块——T04/T05/T22/T23/T24 同款）：
   静态门禁与生成脚本按**文件路径**读源（ui-lint 令牌扫描、gen-ui-min 等），文件搬家后扫描面没跟着走——表现为门禁必红（令牌缺失/白名单陈旧）或更糟的静默漏检；
   搬移函数被跨模块引用时的**接线**遗漏（原非 export 的函数被 import、re-export 没保住旧 import 路径，调用点零改动是验收项）；

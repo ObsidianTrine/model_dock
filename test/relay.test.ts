@@ -33,9 +33,12 @@ describe('relay · clientProtocolFromPath（入站 path → 出站协议）', ()
     expect(clientProtocolFromPath('/v1/responses?stream=true')).toBe('responses')
   })
 
-  it('messages 端点与 count_tokens 走 anthropic', () => {
+  it('messages 端点与 count_tokens 走 anthropic——显式签名，不受 provider 自身协议回退带偏（openai 多协议 provider 的 endpoints.anthropic 由此可达）', () => {
     expect(clientProtocolFromPath('/v1/messages')).toBe('anthropic')
     expect(clientProtocolFromPath('/v1/messages/count_tokens')).toBe('anthropic')
+    expect(clientProtocolFromPath('/v1/messages', 'openai')).toBe('anthropic')
+    expect(clientProtocolFromPath('/v1/messages/count_tokens', 'openai')).toBe('anthropic')
+    expect(clientProtocolFromPath('/v1/messages?beta=true', 'openai')).toBe('anthropic')
   })
 
   it('非对话端点回退「provider 自身协议」而不是硬编码 anthropic', () => {
@@ -250,6 +253,39 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
       expect(result.reason).toBe('failover_to:b,replayed_from:a')
     } finally {
       await mock.close()
+      h.restore()
+    }
+  })
+
+  it('⑤ 上游 429 中文额度体识别为 quota 类：不受 failover_status_codes 白名单限制恒可切换', async () => {
+    const h = fakeHome()
+    const ok = await startMock()
+    const quota = http.createServer((req, res) => {
+      res.writeHead(429, { 'content-type': 'application/json' })
+      res.end('{"error":{"message":"该模型当前额度已耗尽，请充值后重试"}}')
+    })
+    await new Promise<void>((r) => quota.listen(0, '127.0.0.1', () => r()))
+    const quotaUrl = `http://127.0.0.1:${(quota.address() as AddressInfo).port}`
+    try {
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: quotaUrl }),
+          b: providerCfg('b', { base_url: ok.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+      // 无 failover_status_codes 配置（switchable=null）：429 本不在白名单，唯有 quota 识别可切换——
+      // 修复前 QUOTA_BODY_RE 只认英文（quota/insufficient），中文额度体不触发、429 原样返回
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      expect(result.usedProviderId).toBe('b')
+      expect(result.status).toBe(200)
+      expect(result.reason).toBe('failover_to:b,replayed_from:a')
+    } finally {
+      await ok.close()
+      quota.close()
       h.restore()
     }
   })

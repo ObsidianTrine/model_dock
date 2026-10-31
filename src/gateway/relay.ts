@@ -19,12 +19,16 @@ const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions
 const CLAUDE_BUILTIN_RE = /^claude-/
 
 /** 从客户端入站 path 推断其协议（出站据此选 Provider 对应协议端点，同协议直连）。
- *  embeddings 归 openai（OpenAI SDK 生态）；未知路径（/v1/models、/v1/files 等非对话端点）
- *  回退 provider 自身协议原样转发，而不是硬编码 anthropic 造成误导性的协议不匹配报错。 */
+ *  embeddings 归 openai（OpenAI SDK 生态）；/v1/messages 与 count_tokens 是 anthropic 签名
+ *  路径，显式归 anthropic——多协议 provider（protocol=openai + endpoints.anthropic）由此才可达；
+ *  曾因回退 provider 自身协议，openai provider 配了 anthropic 端点也永远走不到（2026-11-01 实测）。
+ *  未知路径（/v1/models、/v1/files 等非对话端点）回退 provider 自身协议原样转发，而不是硬编码
+ *  anthropic 造成误导性的协议不匹配报错。 */
 export function clientProtocolFromPath(path: string, fallback: Protocol = 'anthropic'): Protocol {
   const p = path.split('?')[0]
   if (/\/chat\/completions$/.test(p) || /\/completions$/.test(p) || /\/embeddings$/.test(p)) return 'openai'
   if (/\/responses$/.test(p)) return 'responses'
+  if (/\/messages(\/count_tokens)?$/.test(p)) return 'anthropic'
   return fallback
 }
 
@@ -555,8 +559,10 @@ function isTransportFailure(e: unknown): boolean {
 
 /** 额度耗尽类错误：HTTP 402，或 429 且错误体带 quota/insufficient 特征
  *  （火山 AccountQuotaExceeded、DeepSeek Insufficient Balance、OpenAI insufficient_quota）。
- *  此类请求上游未产出内容，恒可安全切换（不依赖 failover_status_codes 白名单）；熔断归 'quota' 类，冷却比普通限流久。 */
-const QUOTA_BODY_RE = /quota|insufficient/i
+ *  中文特征（额度/配额/余额/欠费）必须保留：国内上游 429 额度体常为中文，只认英文会漏判、
+ *  致使该切换的不切（2026-11-01 T28 存疑项坐实转正）。此类请求上游未产出内容，恒可安全切换
+ *  （不依赖 failover_status_codes 白名单）；熔断归 'quota' 类，冷却比普通限流久。 */
+const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
 function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
 }
