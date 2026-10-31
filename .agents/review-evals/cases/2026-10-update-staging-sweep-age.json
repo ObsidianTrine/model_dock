@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-update-staging-sweep-age",
+  "title": "update 暂存清扫无年龄过滤：sweepStaleUpdateStaging 全删共享 %TEMP% 的 modeldock-{update,setup,app,bin,sums}-*，本机多形态（生产+dev 沙箱）与并发测试进程各持更新锁互不知晓，一方开跑 runUpdate 就删掉另一方在途下载/解压目录 → Expand-Archive「路径不存在」偶发红；解压子进程在高负载/杀软窗口偶发非零退出且 stderr 为空的零诊断瞬态死亡（0xC0000142 类）无重试",
+  "reviewRef": "b6b90ce^",
+  "fixedBy": "b6b90ce",
+  "files": ["src/update/run.ts", "src/update/transfer.ts"],
+  "expect": ["sweepStaleUpdateStaging", "在途", "并发"],
+  "note": "任务卡 16 修复（b6b90ce）。①清扫加 mtime 年龄门槛 STALE_STAGING_MS=1h（> 下载总超时 10min，到龄即真残留；测试夹具回拨 mtime 模拟到龄，绝不提供跳过门槛的全量清扫）；②解压子进程零诊断瞬态死亡带退避重试一次（150ms），带 stderr 的真实失败（损坏包/参数错/文件被占）绝不重试——不掩盖真回归。审查侧教训：**共享临时目录里的清扫必须带在途判定**——全机共享资源上无差别删除是并发炸弹；空 stderr 的非零退出与带诊断的失败要分流处理。2026-10-29~30 update.test.ts 约 4 跑 1 败曾被归因为「环境抖动」（ci-retry 护栏为此而建的同族症状），2026-10-31 并发压测双向实锤为该 bug"
+}
