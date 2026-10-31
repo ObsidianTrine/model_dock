@@ -1191,6 +1191,7 @@ namespace ModelDockTray
             _cliItem.Visible = quick;
             _liteItem.Visible = st != null; // 网关未运行时无从读写状态故不显示
             _liteItem.Checked = st != null && st.TrayLite;
+            _modelItem.Visible = false; // 网关未运行/无当前服务时随快捷区一并隐藏（曾漏：孤儿项点击弹「网关未运行」假错误，评测集 tray-actions-static-race 审出）；quick 分支内按当前服务重设
 
             if (st != null && st.CurrentId != null && st.CurrentLabel != null)
             {
