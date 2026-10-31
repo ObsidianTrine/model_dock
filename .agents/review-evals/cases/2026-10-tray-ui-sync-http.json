@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-ui-sync-http",
+  "title": "PollHealth 的 5s WinForms Timer 在 UI 线程同步调 HealthOk（2s 超时 HTTP）+ 磁盘读——网关「半挂」（监听不响应）时托盘每 5s 冻结最长 2s，与文件自身「工作线程跑，不卡托盘消息循环」约定矛盾",
+  "reviewRef": "3ba4d6e^",
+  "fixedBy": "3ba4d6e",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["冻结", "同步"],
+  "note": "任务卡 26 修复。修复 = 探测挪 ThreadPool，结果经 UI 同步上下文回传（首次 tick 捕获），_pollBusy 防半挂拖长时轮询堆积。审查侧教训：UI 线程（Timer tick/事件处理）里的同步网络/磁盘调用要按「最坏延迟」评估冻结面；与文件内既有线程约定的矛盾用 grep 约定词（不卡/异步/后台）逐处核对"
+}
