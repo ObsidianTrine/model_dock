@@ -92,24 +92,65 @@ const RELEASE_ALLOW = [
   new RegExp(`^git tag -d ${RELEASE_TAG}$`),
 ];
 
+/** shell 包装段（bash/sh/zsh [-lc] '载荷'，兼容 env 前缀与绝对路径）的 -c 载荷提取：非包装返回 null。
+ *  逐 token 解析（与 gitSubcommand 的 env 前缀剥离同款）：正则 `\S+=\s*` 形态会因值内含 '='
+ *  （env FOO=1 bash -c …）回溯吞掉分隔符而失配——token 化没有这个问题。
+ *  换行切段后载荷必落在单段内（换行本身也是切段符），token 重组后剥首尾引号交回递归评估。 */
+export function shellWrapperPayload(seg) {
+  const tokens = String(seg).trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length && (tokens[i] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i += 1;
+  // shell 名按 basename 判定（/bin/bash、/usr/local/bin/zsh、C:\tools\bash 等绝对路径同认）
+  if (!/^(ba|z|)sh$/.test(String(tokens[i] ?? '').split(/[\\/]/).pop() ?? '')) return null;
+  for (let j = i + 1; j < tokens.length; j++) {
+    if (tokens[j] === '-c') {
+      // 载荷保留 env 前缀 token（含 AGENTS_ALLOW_RELEASE 授权 hatch——白名单形态在包装内同样有效），
+      // 只剥掉 shell 本体与 -c；-c 首尾参数的引号会破坏后续 gitSubcommand 的 token 判定，分别剥掉
+      const args = tokens.slice(j + 1);
+      if (args.length) {
+        args[0] = args[0].replace(/^['"]/, '');
+        args[args.length - 1] = args[args.length - 1].replace(/['"]$/, '');
+      }
+      const payload = [...tokens.slice(0, i), ...args].join(' ').trim();
+      return payload || null;
+    }
+    if (!tokens[j].startsWith('-')) return null; // 无 -c 的交互式调用：无载荷
+  }
+  return null;
+}
+
 /**
  * Bash 命令红线裁决。返回 { allowed, rule?, reason? }。
  * 覆盖：发布动作（push/tag/publish，人工授权制）、受保护端口（workflow.json protectedPorts）。
  */
 export function evaluateCommand(cmd) {
-  const command = String(cmd ?? '');
+  return evaluateSegments(String(cmd ?? ''), 0);
+}
+
+function evaluateSegments(command, depth) {
   if (!command) return { allowed: true };
   const HATCHES = releaseHatches(loadWorkflowConfig().envPrefix);
 
   // 前缀环境变量赋值是命令的一部分：剥离后既修 `VAR=x git push` 的漏拦洞，也识别发版授权 hatch。
   // 复合命令按 shell 分隔符切段逐段检查——`git commit && git push` 的 push 藏在第二段，
   // 只看首子命令会漏拦；切段是保守近似（引号内分隔符会误报拦截，落在安全侧）。
-  const segments = command.split(/[;&|]+/).map((s) => s.trim()).filter(Boolean);
+  // 换行同样是分隔符：`echo hi\ngit push origin main` 的 push 藏在第二行，曾整体漏拦
+  // （评测集 runs/2026-10-30-policy-dispatch-tamper.md 问题 3 实测，2026-10-31 修复）。
+  const segments = command.replace(/\r\n?/g, '\n').split(/[;&|\n]+/).map((s) => s.trim()).filter(Boolean);
   const single = segments.length === 1;
   let pushSeen = false;
   let tagSeen = false;
   let releaseWhitelisted = false;
   for (const seg of segments) {
+    // shell 包装（bash/sh/zsh -c '载荷'）：递归评估载荷，被拦即整串被拦——
+    // 包装不改变载荷的裁决结果（`bash -c 'git push origin main'` 曾因 tokens[0]='bash' 漏拦）
+    if (depth < 3) {
+      const payload = shellWrapperPayload(seg);
+      if (payload) {
+        const subv = evaluateSegments(payload, depth + 1);
+        if (!subv.allowed) return subv;
+      }
+    }
     const t = seg.split(/\s+/);
     let i = 0;
     let auth = false;

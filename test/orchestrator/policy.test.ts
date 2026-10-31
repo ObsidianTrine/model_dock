@@ -57,6 +57,25 @@ describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
     expect(evaluateCommand('MODELRDOCK_ALLOW_RELEASE=0 git push origin main')).toMatchObject({ allowed: false })
   })
 
+  it('换行是切段分隔符：无害段 + 换行后的 git push 被拦（漏拦回归）', () => {
+    expect(evaluateCommand('echo hi\ngit push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('echo hi\r\ngit push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('git status\ngit diff\ngit push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+  })
+
+  it('shell 包装：bash/sh/zsh -c 载荷里的 git push 被拦（递归评估）', () => {
+    expect(evaluateCommand("bash -c 'git push origin main'")).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('sh -c "git push origin main"')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('/bin/bash -c "git push origin main"')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env FOO=1 bash -c "git push origin main"')).toMatchObject({ allowed: false, rule: 'publish' })
+  })
+
+  it('shell 包装无害载荷仍放行；包装白名单形态带 hatch 也放行', () => {
+    expect(evaluateCommand("bash -c 'echo hi'").allowed).toBe(true)
+    expect(evaluateCommand("bash -c 'npm test'").allowed).toBe(true)
+    expect(evaluateCommand('AGENTS_ALLOW_RELEASE=1 bash -c "git push origin develop"').allowed).toBe(true)
+  })
+
   it('git tag -l / --list 只读放行', () => {
     expect(evaluateCommand('git tag -l').allowed).toBe(true)
     expect(evaluateCommand('git tag --list "v*"').allowed).toBe(true)
