@@ -59,14 +59,14 @@
 | 2026-10-lan-bearer-empty-token | lanAuthorized 令牌取 `?? ''`：LAN 关闭后保温连接送达空令牌，与空 Bearer 双双通过 safeEqual 空对空比较，等于无凭据放行管理面 | bc135c2 | ✅（10-30，GLM subagent）目标命中且超预期：三通道守卫不对称 + 保温连接攻击链，见 runs/2026-10-30-lan-bearer-empty-token.md |
 | 2026-10-policy-dispatch-tamper | 红线守卫 dispatcher 从事件 cwd 直接 import policy.mjs 且不校验文件写入目标——被守护 agent 可覆写/塞坏 fail-open/删除守卫，红线静默关闭零留痕 | c32451c | ✅（10-30，GLM subagent）四条篡改路实测全 allowed + worktree 摘端口红线、null 崩溃放行加深发现，见 runs/2026-10-30-policy-dispatch-tamper.md |
 | 2026-10-spawndaemon-stderr-pipe-pin | spawnDaemonAndWait 用 pipe 收 daemon stderr 且只 unref 子进程不解流——读端活动句柄把 CLI 事件循环钉到 daemon 退出，--daemon 就绪后不返回 | 7d21df0 | ✅（10-30，GLM subagent）机制链完整 + 对齐 CORRECT-07/99fa3a5 演进，见 runs/2026-10-30-spawndaemon-stderr-pipe-pin.md |
-| 2026-10-tray-cli-watchdog-missing | CheckViaCli 注释承诺 40s 看门狗，实现是无超时 ReadToEnd+WaitForExit——CLI 挂住则更新检查永久沉默 | b338cb1 | ⏳ 待首跑（2026-10-30 卡 10 修复对回灌，dry 过；首跑前不计入基线分母） |
-| 2026-10-tray-actions-static-race | TrayActions _port/_token 静态字段无同步读写：先置 null 再赋值窗口内并发读拼出 http://127.0.0.1:/ → HealthOk 误 false | b338cb1 | ⏳ 待首跑（同上） |
-| 2026-10-webupdate-latch-no-rollback | applyUpdate 置 state.updating 后依次做可同步抛出的步骤且无 try/catch——任一失败门闩卡死 updating，后续更新全拒 | b7b91ad | ⏳ 待首跑（2026-10-30 卡 04 修复对回灌，dry 过；同上） |
+| 2026-10-tray-cli-watchdog-missing | CheckViaCli 注释承诺 40s 看门狗，实现是无超时 ReadToEnd+WaitForExit——CLI 挂住则更新检查永久沉默 | b338cb1 | ✅（10-30，GLM subagent）注释承诺不存在即「它撒谎」+ StartCleanCli 同模式死锁第二处；新活缺陷 _modelItem 漏隐藏，见 runs/2026-10-30-tray-cli-watchdog-missing.md |
+| 2026-10-tray-actions-static-race | TrayActions _port/_token 静态字段无同步读写：先置 null 再赋值窗口内并发读拼出 http://127.0.0.1:/ → HealthOk 误 false | b338cb1 | ✅（10-30，GLM subagent）后果链追到 QuitClicked 跳过 gateway stop（.NET 解析 :/ 为 80 端口已实测）；新活缺陷 UI 线程同步 HTTP + _modelItem 同源互证，见 runs/2026-10-30-tray-actions-static-race.md |
+| 2026-10-webupdate-latch-no-rollback | applyUpdate 置 state.updating 后依次做可同步抛出的步骤且无 try/catch——任一失败门闩卡死 updating，后续更新全拒 | b7b91ad | ✅（10-30，GLM subagent）三条同步失败路径逐一点名 + 新活缺陷 gateway.json 裸 RMW 丢字段（webupdate 未入 mutateGatewayState 队列），见 runs/2026-10-30-webupdate-latch-no-rollback.md |
 | 2026-10-review-loop-guard-dead-code | claude-review.yml [dependabot-fix] 防回环守卫读 merge 检出的 git log -1 尾提交——永远匹配不上 PR head 前缀，守卫是死代码 | 567d379 | ⏳ 待首跑（2026-10-30 评测循环产出修复对回灌，dry 过；同上） |
 | 2026-10-update-staging-sweep-age | update 暂存清扫无年龄过滤全删共享 %TEMP% 的 modeldock-{update,setup,app,bin,sums}-*——多形态/并发测试进程互不知晓，一方 runUpdate 删掉另一方在途下载/解压目录；解压子进程高负载/杀软窗口零诊断瞬态死亡无重试 | b6b90ce | ⏳ 待首跑（2026-10-31 卡 16 修复对回灌，dry 过；同上） |
 | 2026-10-jsonpath-multiseg-overreject | jsonpath tokenize 完整覆盖校验漏算段间 `.` 分隔符：fd235ea 连续性判定把所有多段点路径（$.a.b）误抛「无法解析」——CORRECT-08 修复引入的回归，多段读写全废 | f0ec635 | ⏳ 待首跑（2026-10-31 修复回归回灌，dry 过；同上） |
 
-**基线：召回 27/27 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+**基线：召回 30/30 审出、零漏报**（10-29 claude CLI 8/8 + 10-30/31 GLM subagent 22/22，其中 10-31 三题为卡 01-04 修复对回灌）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 评测循环产出（2026-10-30 夜训）
 
