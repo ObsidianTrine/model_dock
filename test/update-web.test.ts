@@ -6,7 +6,7 @@ import { fakeHome } from './helpers.js'
 import { saveConfig } from '../src/config/store.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 import { setSecret } from '../src/config/secrets.js'
-import { buildRuntime, readGatewayState, writeGatewayState, type GatewayRuntime } from '../src/gateway/state.js'
+import { buildRuntime, mutateGatewayState, readGatewayState, writeGatewayState, type GatewayRuntime, type GatewayStateFile } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { VERSION } from '../src/version.js'
 import fs from 'node:fs'
@@ -263,6 +263,35 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
       expect(st5?.update_check?.failedAt).toBeUndefined()
       expect(st5?.update_check?.at).toBe(s4.lastCheckedAt)
     } finally {
+      h.restore()
+    }
+  })
+
+  it('persistCheckTime 走 mutateGatewayState 串行队列：与并发 gateway.json 写方交错不丢 devices（旧裸 RMW 回归）', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt()
+      let releaseDevices!: () => void
+      const gate = new Promise<void>((r) => { releaseDevices = r })
+      // 占住串行队列：gate 释放后才落盘一份带 devices 的 gateway.json
+      const longWrite = mutateGatewayState(async (s) => {
+        await gate
+        return {
+          ...(s ?? { pid: process.pid, port: 18999, admin_token: 'x', started_at: new Date().toISOString() }),
+          devices: ['dev-cookie-1'],
+        } as GatewayStateFile
+      })
+      const manifest: ReleaseManifest = { version: '999.0.0', tagName: 'v999.0.0', notes: '', htmlUrl: '', assets: [] }
+      setUpdateFetchForTests(() => Promise.resolve(manifest))
+      // 更新检查成功 → persistCheckTime 必须排在 longWrite 之后（旧裸 RMW 不入队，读空文件直接返回）
+      const kickP = kickUpdateCheck(rt)
+      releaseDevices()
+      await Promise.all([longWrite, kickP])
+      const final = await readGatewayState()
+      expect(final?.devices).toEqual(['dev-cookie-1']) // 旧裸 RMW 下丢失
+      expect(final?.update_check?.at).not.toBeNull() // 新队列下两个写都落
+    } finally {
+      setUpdateFetchForTests(null)
       h.restore()
     }
   })

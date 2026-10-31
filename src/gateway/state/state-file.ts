@@ -57,10 +57,10 @@ export async function writeGatewayState(state: GatewayStateFile): Promise<void> 
  *  串行即可；fn 返回 null 表示无需写盘。 */
 let gatewayStateQueue: Promise<void> = Promise.resolve()
 export async function mutateGatewayState(
-  fn: (state: GatewayStateFile | null) => GatewayStateFile | null
+  fn: (state: GatewayStateFile | null) => GatewayStateFile | null | Promise<GatewayStateFile | null>
 ): Promise<void> {
   const run = gatewayStateQueue.then(async () => {
-    const next = fn(await readGatewayState())
+    const next = await fn(await readGatewayState())
     if (next) await writeGatewayState(next)
   })
   gatewayStateQueue = run.catch(() => {})
