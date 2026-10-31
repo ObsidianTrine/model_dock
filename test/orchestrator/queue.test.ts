@@ -101,6 +101,16 @@ describe('orchestrator queue > 状态机', () => {
       expect(() => moveCard(root, 't2', 'pending', 'awaiting-human')).toThrowError(/pending → \[running\]/)
       // 卡片不存在报错
       expect(() => moveCard(root, 'ghost', 'pending', 'running')).toThrowError(/不存在/)
+
+      // 认领路径专用的两条 running 出边（feature-branch start/finish 用，闭环自身不发）：
+      // running → merged（人工 finish 落卡）与 running → pending（认领回滚）
+      moveCard(root, 't2', 'pending', 'running')
+      moveCard(root, 't2', 'running', 'merged')
+      expect(findCard(root, 't2')?.state).toBe('merged')
+      fs.writeFileSync(cardPathOf(root, 'pending', 't3'), cardText({ id: 't3' }))
+      moveCard(root, 't3', 'pending', 'running')
+      moveCard(root, 't3', 'running', 'pending')
+      expect(findCard(root, 't3')?.state).toBe('pending')
     } finally {
       repo.cleanup()
     }

@@ -205,6 +205,9 @@ function ensureWorktree(repoRoot, taskId) {
   const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs'), 'start', taskId], {
     cwd: repoRoot,
     stdio: 'inherit',
+    // 闭环上下文标记：cmdRun 已抢任务锁并把卡迁 running/，start 的认领逻辑见到
+    // 它必须整体跳过——否则闭环会被自己拉起的 start 拒在门外（锁持有者就是闭环）。
+    env: { ...process.env, ORCHESTRATOR_CLOSURE: '1' },
   });
   if (r.status !== 0) die(`feature-branch start 失败（exit ${r.status}）`, r.status ?? 1);
   if (!fs.existsSync(wt)) die(`feature-branch start 声称成功但未找到 worktree：${wt}`);
