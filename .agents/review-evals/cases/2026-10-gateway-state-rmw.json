@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-gateway-state-rmw",
+  "title": "persistCheckTime 对 gateway.json 裸 read→modify→write——与 devices/lan_token 等并发写方整包互相覆盖（每 60s status 轮询 kick 放大，丢刚写入的设备记忆/手机凭据）",
+  "reviewRef": "7a3ba4a^",
+  "fixedBy": "7a3ba4a",
+  "files": ["src/update/webupdate.ts"],
+  "expect": ["裸", "串行", "覆盖"],
+  "note": "任务卡 24 修复。修复 = persistCheckTime 改走 mutateGatewayState 串行队列（fn 结果 await 化，异步构造 next 支持）。审查侧教训：同一状态文件的多个写方必须走同一条串行化通道——mutateGatewayState 队列已存在却仍有写方裸 RMW，审查「谁在写这个文件」要 grep 全部写点逐个核对通道"
+}

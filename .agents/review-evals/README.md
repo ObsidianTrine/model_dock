@@ -67,7 +67,12 @@
 | 2026-10-jsonpath-multiseg-overreject | jsonpath tokenize 完整覆盖校验漏算段间 `.` 分隔符：fd235ea 连续性判定把所有多段点路径（$.a.b）误抛「无法解析」——CORRECT-08 修复引入的回归，多段读写全废 | f0ec635 | ⏳ 待首跑（2026-10-31 修复回归回灌，dry 过；同上） |
 | 2026-10-soak-warmup-baseline | soak 长稳压测 RSS 判泄漏用「末值 vs 首值」口径——Node 网关冷启预热 134→220MB 后 2.5h 走平，4h 实测按首值误判 +79.1% FAIL，真实稳态被当泄漏；正解 = 基准取预热窗结束后首采样、平台判定仅辅助 | 01f906a | ⏳ 待首跑（2026-10-31 fix-soak-verdict 修复对回灌，dry 过；同上） |
 
-**基线：召回 30/30 审出、零漏报**（10-29 claude CLI 8/8 + 10-30/31 GLM subagent 22/22，其中 10-31 三题为卡 01-04 修复对回灌）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
+| 2026-10-policy-newline-shell-wrap | 发布红线两类包装绕过：切段分隔符不含换行 + bash/sh/zsh -c 包装 tokens[0] 判非 git | ba5f0b7 | ✅（10-31，GLM subagent）双目标命中 + 新挖 7 个当前版旁路面（env -i/子壳/xargs/npm 全局 flag/status 词豁免/Stop-Process/.agents L0），立卡 27 |
+| 2026-10-gateway-state-rmw | persistCheckTime 裸 RMW 绕过串行队列，与 devices/lan_token 并发写方整包互覆盖 | 7a3ba4a | ✅（10-31，GLM subagent）全写方通道核对表 + 新活缺陷：getUpdateStatus 未捕获 SecretsError 连带 60s 轮询崩、启动重写丢 update_check，立卡 28 |
+| 2026-10-tray-modelitem-orphan | RefreshMenu quick=false 漏隐藏「默认模型」孤儿项，点击弹假错误 | 302c01f | ✅（10-31，GLM subagent）成组 Visible 全集核对 + 唯一赋值点定位，与 tray-ui-sync-http 题交叉印证 |
+| 2026-10-tray-ui-sync-http | 5s Timer 在 UI 线程同步 HealthOk（2s 超时 HTTP）+ 磁盘读，半挂时每 5s 冻结最长 2s | 3ba4d6e | ✅（10-31，GLM subagent）真修归属核对到卡 26 + 新活缺陷 UpdateProgressForm Timer 错线程（立即更新主链路进度窗永不刷新），立卡 29 |
+
+**基线：召回 34/34 审出、零漏报**（10-29 claude CLI 8/8 + GLM subagent 26/26，含卡 01-04 与 23-26 两轮修复对回灌）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于基线（21/21，或分段对齐后的新基线）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 ## 评测循环产出（2026-10-30 夜训）
 

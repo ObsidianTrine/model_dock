@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-policy-newline-shell-wrap",
+  "title": "发布红线两类包装绕过：复合命令切段分隔符不含换行（echo hi\ngit push origin main 整体放行）；bash/sh/zsh -c 包装因 tokens[0]='bash' 被判非 git 而漏拦",
+  "reviewRef": "ba5f0b7^",
+  "fixedBy": "ba5f0b7",
+  "files": [".agents/scripts/policy.mjs"],
+  "expect": ["换行", "包装"],
+  "note": "任务卡 23 修复。修复 = 换行并入切段分隔符（\r\n 归一）+ shell 包装（bash/sh/zsh [-lc]，含 env 前缀与绝对路径）递归评估载荷（载荷保留 env 前缀使 hatch 白名单形态在包装内同样有效，-c 首尾参数剥引号，深度上限 3）。审查侧教训：切段「保守近似必须落在安全侧」要覆盖 shell 的全部分隔符（含换行）与全部包装形态（-c 载荷）；安全裁决器每支持一种包装就要递归评估一层"
+}

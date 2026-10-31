@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-modelitem-orphan",
+  "title": "RefreshMenu 在 quick=false（网关未运行/无当前服务）时隐藏 _sepQuick/_svcItem/_cliItem/_liteItem 唯独漏 _modelItem——网关停止后菜单残留「默认模型」孤儿项，点击弹「网关未运行」假错误",
+  "reviewRef": "302c01f^",
+  "fixedBy": "302c01f",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["modelitem", "孤儿"],
+  "note": "任务卡 25 修复。审查侧教训：成组隐藏/显示的 Visible 集合要「声明全集再逐个核对」，新增成员时两处同步——同组其余项都隐藏、唯它遗漏属机械可查的不对称；「邻居都做了、它没做」是审查抓手"
+}
