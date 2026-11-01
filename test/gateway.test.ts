@@ -1985,6 +1985,34 @@ describe('自动路由 Phase1', () => {
     expect((follow as { ok: true; ordered: { providerId: string }[] }).ordered.map((c) => c.providerId)).toEqual(['C', 'B'])
   })
 
+  it('pickTarget tier 隔离：自动补链只进同 tier 服务，手动 fallback 不受限', () => {
+    // A=heavy 主服务；B 无任何 profile 引用；C=light。请求 tier=heavy：
+    // 自动链补不进 B/C；heavy2 引用 B 后 B 可进；手动 fallback 显式配 C 照进（显式配置优先）。
+    const config: Config = {
+      version: 1,
+      active_profile: 'heavy',
+      providers: {
+        A: { name: 'A', base_url: 'http://a.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k1', priority: 2 },
+        B: { name: 'B', base_url: 'http://b.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k2', priority: 3 },
+        C: { name: 'C', base_url: 'http://c.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k3', priority: 1 },
+      },
+      profiles: { heavy: { provider: 'A', default_model: 'm', tier: 'heavy' }, light: { provider: 'C', default_model: 'm', tier: 'light' } },
+      harness: {},
+    }
+    const rt = buildRuntime(config, 't')
+    const base: ResolvedTarget = { harness: 'admin-test', profileName: 'heavy', profile: config.profiles.heavy, provider: config.providers.A }
+    const ids = (r: ReturnType<typeof pickTarget>) => ((r as { ok: true; ordered: { providerId: string }[] }).ordered.map((c) => c.providerId))
+
+    expect(ids(pickTarget(rt, base, undefined))).toEqual(['A']) // B/C tier 不相容，自动链空
+    expect(ids(pickTarget(rt, base, ['C']))).toEqual(['A', 'C']) // 手动 fallback 是显式配置，不受限（B 不相容也不进自动尾）
+    config.profiles.heavy2 = { provider: 'B', default_model: 'm', tier: 'heavy' }
+    expect(ids(pickTarget(rt, base, undefined))).toEqual(['A', 'B']) // 同 tier 引用使 B 相容；C 仍被隔
+    // 请求 profile 无 tier：完全不隔离（行为与历史版本一致）
+    config.profiles.plain = { provider: 'A', default_model: 'm' }
+    const plainBase: ResolvedTarget = { harness: 'admin-test', profileName: 'plain', profile: config.profiles.plain, provider: config.providers.A }
+    expect(ids(pickTarget(rt, plainBase, undefined))).toEqual(['A', 'B', 'C'])
+  })
+
   it('pickTarget：「下一个切换」人工钉定插到备用链首位；ignoreManual 忽略两处钉定', () => {
     const { rt } = makeRuntime()
     ;(rt.config.gateway as { auto_route_provider?: string }).auto_route_provider = 'C' // 主服务钉定

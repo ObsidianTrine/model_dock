@@ -100,6 +100,7 @@ A profile = which provider + default model + alias mapping. A client's route poi
 | `default_model` | `string` | no | none (upstream default) | Upstream model used when the requested model name matches no alias; if unset, the upstream default applies. |
 | `aliases` | `Record<string, string>` | no | none (no rewriting) | Mapping from requested model names to upstream model names; `*` wildcards supported (e.g. `"claude-sonnet-*"`). |
 | `fallback` | `string[]` | no | none (no manual chain) | Manual failover chain, tried in order when the primary is unreachable. Entries: `"<providerId>"` (pass the model through) or `"<providerId>:<modelId>"` (rewrite the model). |
+| `tier` | `string` | no | unset (no isolation) | Task tier tag (free-form short label, e.g. `heavy` / `light`): basis for failover isolation — the auto fallback chain and avoid-window extras only rotate among services referenced by profiles of the same tier, so heavy tasks never silently land on cheap providers (or vice versa). Unset = no isolation; the manual chain and the manual "next" pin are not restricted. |
 
 Example:
 
@@ -110,6 +111,7 @@ provider = "acme"
 default_model = "fast-model"
 aliases = { "claude-sonnet-*" = "fast-model" }
 fallback = ["backup", "backup:slow-model"]
+tier = "heavy"
 ```
 
 ## 5. Harness attachment (harness)

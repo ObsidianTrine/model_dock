@@ -268,6 +268,17 @@ export type PickResult =
 /** 自动备用链最多补进的候选数（手动 fallback 不计入）；防极端服务数下串联一长串上游 */
 const AUTO_FALLBACK_MAX = 3
 
+/** 服务与请求 tier 是否相容（tier 隔离）：请求 profile 无 tier → 一切服务相容（向后兼容）；
+ *  有 tier → 服务须被至少一个同 tier profile 引用。只约束自动行为（auto_fallback 补尾、
+ *  避开全灭补链）——手动 fallback 与「下一个切换」人工钉定是显式配置，不受限。 */
+function tierCompatible(cfg: Config, providerId: string, tier: string | undefined): boolean {
+  if (!tier) return true
+  for (const p of Object.values(cfg.profiles)) {
+    if (p.tier === tier && p.provider === providerId) return true
+  }
+  return false
+}
+
 /** 在 resolveByProfile 的静态基准之上做运行时选路：客户端钉住 > 人工钉定（当前槽）> 定时窗口 > 默认路由，备用链按 priority 排序；过滤 enabled/熔断态。全灭返回 down_all。
  *  客户端钉住（harness.route → viaHarnessPin）不受全局「正在使用」控制：当前槽与 prefer 窗口都不接管它，avoid 窗口也不剔除它（钉住服务可用时）；
  *  钉住服务不可用（下线/熔断）才顺延到下一级，不打死在坏服务上——与展示层口径一致（烤模型重写、overview 客户端卡均豁免钉住）。
@@ -281,6 +292,8 @@ export function pickTarget(
   opts?: { ignoreManual?: boolean; ignoreRouteNext?: boolean; now?: number }
 ): PickResult {
   const now = opts?.now ?? Date.now()
+  // 请求 tier（请求自身 profile 的标签）：自动补链的隔离依据，见 tierCompatible
+  const reqTier = rt.config.profiles[base.profileName]?.tier
   const eligible = (id: string): boolean => {
     const p = rt.config.providers[id]
     if (!p) return false
@@ -384,7 +397,7 @@ export function pickTarget(
       if (p) winHit.add(p.providerId)
     }
     const auto = Object.entries(rt.config.providers)
-      .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !isMeltdown(rt, id, now))
+      .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !isMeltdown(rt, id, now) && tierCompatible(rt.config, id, reqTier))
       .sort((a, b) => {
         const aw = winHit.has(a[0]) ? 1 : 0
         const bw = winHit.has(b[0]) ? 1 : 0
@@ -429,7 +442,7 @@ export function pickTarget(
   if (kept.length) return choose(kept)
   // 候选链全被避开（典型：主服务被避开且未配故障切换）——「避开 X，其他服务都行」：链外其余可用服务按 priority 降序补入候选
   const extras = Object.entries(rt.config.providers)
-    .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !avoid.includes(id) && !isMeltdown(rt, id, now))
+    .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !avoid.includes(id) && !isMeltdown(rt, id, now) && tierCompatible(rt.config, id, reqTier))
     .sort((a, b) => (b[1].priority ?? 0) - (a[1].priority ?? 0))
     .map(([id]) => ({ target: makeTarget(id), providerId: id, isPrimary: false }))
   if (extras.length) return choose(extras)

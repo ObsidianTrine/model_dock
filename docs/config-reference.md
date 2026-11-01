@@ -100,6 +100,7 @@ source = "preset"
 | `default_model` | `string` | 否 | 无（用上游默认） | 请求模型名未命中别名重写时使用的上游模型；不写则用上游自己的默认。 |
 | `aliases` | `Record<string, string>` | 否 | 无（不改写模型名） | 请求模型名 → 上游模型名的映射，支持 `*` 通配（如 `"claude-sonnet-*"`）；命中后按映射改写。 |
 | `fallback` | `string[]` | 否 | 无（不启用手动备用链） | 手动备用链：主服务不可达时依次尝试。条目为 `"<服务id>"`（透传原模型名）或 `"<服务id>:<模型id>"`（改写为该模型）。 |
+| `tier` | `string` | 否 | 未设（不隔离） | 任务等级标签（自由短标签，如 `heavy` / `light`）：故障切换隔离依据——自动备用链与避开补链只在「被同 tier 路由引用的服务」内倒换，防止重活静默落到便宜服务（反之亦然）。未设 = 不隔离；手动备用链与「下一个切换」人工钉定不受限。 |
 
 示例：
 
@@ -110,6 +111,7 @@ provider = "acme"
 default_model = "fast-model"
 aliases = { "claude-sonnet-*" = "fast-model" }
 fallback = ["backup", "backup:slow-model"]
+tier = "heavy"
 ```
 
 ## 5. 客户端接入（harness）
