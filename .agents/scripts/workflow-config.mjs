@@ -34,6 +34,12 @@
 //   watchdog        LLM 进展看门狗：{ mode?: 'observe'|'actuate', everyTurns?: 正整数 }。
 //                   缺省 observe（疑似空转只记 watchdog_suspect 事件，不动作）；actuate 下
 //                   连续 2 次 suspect 走熔断 kill→blocked。非法值回落缺省并 console.warn 告警
+//   autoResume      blocked 卡有限自动续跑：{ enabled?: boolean（缺省 true）, maxPerRun?: 正整数
+//                   （缺省 2）, cooldownHours?: 正整数（缺省 24） }。drain 选卡前对「transient 类
+//                   失败 blocked」的卡自动 resume（资格判定见 orchestrator/autoresume.mjs）：
+//                   只续 429 限流/网络类、每卡冷却期内最多 1 次、每次 drain ≤maxPerRun 张、
+//                   auto_resume 事件留痕；enabled=false 完全不扫 blocked/。非法值回落缺省并
+//                   console.warn 告警
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -106,6 +112,7 @@ export function loadWorkflowConfig(repoRoot) {
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
+    autoResume: resolveAutoResume(raw.autoResume),
   };
 }
 
@@ -129,6 +136,35 @@ function resolveWatchdog(raw) {
   if (raw.everyTurns !== undefined) {
     if (Number.isInteger(raw.everyTurns) && raw.everyTurns > 0) out.everyTurns = raw.everyTurns;
     else warn(`everyTurns ${JSON.stringify(raw.everyTurns)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** blocked 卡自动续跑配置解析：{ enabled: boolean, maxPerRun: 正整数, cooldownHours: 正整数 }，
+ *  缺省 true / 2 / 24（与 orchestrator/autoresume.mjs 的 DEFAULT_MAX_PER_RUN / DEFAULT_COOLDOWN_MS
+ *  同一口径，改动须两处同步）。非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：
+ *  stderr 输出可操作文案，不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，不告警。 */
+function resolveAutoResume(raw) {
+  const DEFAULTS = { enabled: true, maxPerRun: 2, cooldownHours: 24 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] autoResume 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoResume 键，enabled 允许 true|false、maxPerRun/cooldownHours 须为正整数）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, maxPerRun?, cooldownHours? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  if (raw.maxPerRun !== undefined) {
+    if (Number.isInteger(raw.maxPerRun) && raw.maxPerRun > 0) out.maxPerRun = raw.maxPerRun;
+    else warn(`maxPerRun ${JSON.stringify(raw.maxPerRun)} 不合法（须为正整数）`);
+  }
+  if (raw.cooldownHours !== undefined) {
+    if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
+    else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
   }
   return out;
 }
