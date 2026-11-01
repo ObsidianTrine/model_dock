@@ -41,6 +41,10 @@ export interface ProfileConfig {
   aliases?: Record<string, string>
   /** 故障切换候选（主服务不可达时依次尝试）。条目："<providerId>"（透传原模型名）或 "<providerId>:<modelId>"（改写为该模型） */
   fallback?: string[]
+  /** 任务等级标签（自由短标签，如 heavy/light）：故障切换隔离依据——自动备用链与避开补链
+   *  只在「被同 tier profile 引用的服务」内倒换，防止重活静默落到便宜服务（反之亦然）。
+   *  未设 = 不隔离；手动 fallback 与「下一个切换」人工钉定是显式配置，不受限 */
+  tier?: string
 }
 
 export interface HarnessEntry {
