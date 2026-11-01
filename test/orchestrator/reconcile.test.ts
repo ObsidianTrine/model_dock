@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createUsageTap } from '../../src/gateway/usage.js'
-import { gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
@@ -314,6 +314,90 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       expect(out3.stdout).toContain('已合并未落位：无')
     } finally {
       repo.cleanup()
+    }
+  })
+})
+
+describe('orchestrator reconcile > 上游海况（upstreamSeaState，VDR 投影）', () => {
+  /** 写一条海况测试请求（字段对齐 src/gateway LogEntry；日期按本地 ISO 前缀切文件）。 */
+  function writeEntry(dir: string, ts: string, entry: Record<string, unknown>) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(path.join(dir, `gateway-${ts.slice(0, 10)}.jsonl`), JSON.stringify({ ts, harness: 'zcode', profile: 'orch', provider: 'up', path: '/v1/messages', ...entry }) + '\n')
+  }
+
+  /** 合成事件流：与真实 events 同构的最小窗口（spawned → blocked）。 */
+  const syntheticEvents = (startMs: number, endMs: number) => [
+    { type: 'worker_spawned', ts: toIsoLocal(new Date(startMs)) },
+    { type: 'blocked', ts: toIsoLocal(new Date(endMs)) },
+  ]
+
+  it('窗口过滤 + 失败归并 + 时延分位 + 模型 tally + 用量只计成功 + 路由痕迹/最近失败', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      const end = Date.now()
+      const start = end - 120_000
+      const dir = gatewayLogsDir()!
+      writeEntry(dir, toIsoLocal(new Date(start + 10_000)), { status: 200, ms: 1200, model: 'glm-4.7', usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      writeEntry(dir, toIsoLocal(new Date(start + 20_000)), { status: 200, ms: 2400, model: 'glm-4.7', usage: { input_tokens: 300, output_tokens: 20, cache_read_tokens: 50, cache_creation_tokens: 5 } })
+      writeEntry(dir, toIsoLocal(new Date(start + 30_000)), { status: 429, ms: 30, model: 'glm-4.7' })
+      writeEntry(dir, toIsoLocal(new Date(start + 40_000)), { status: 500, ms: 40, reason: 'failover_to:up2', err: 'boom' })
+      // 窗口外前后各一笔（应排除）；无 status 条目归入失败 n/a
+      writeEntry(dir, toIsoLocal(new Date(start - 3600_000)), { status: 200, ms: 9999, model: 'other' })
+      writeEntry(dir, toIsoLocal(new Date(end + 3600_000)), { status: 200, ms: 9999, model: 'other' })
+      writeEntry(dir, toIsoLocal(new Date(start + 50_000)), { model: 'glm-4.7' })
+
+      const sea = upstreamSeaState(repo.root, syntheticEvents(start, end))
+      expect(sea.skipped).toBe(false)
+      expect(sea.requests).toBe(5)
+      expect(sea.ok).toBe(2)
+      expect(sea.failed).toBe(3)
+      expect(sea.failStatus).toEqual({ '429': 1, '500': 1, 'n/a': 1 })
+      expect(sea.providers).toEqual({ up: 5 })
+      expect(sea.models).toEqual({ 'glm-4.7': 4 })
+      expect(sea.latency.p50).toBe(2400)
+      expect(sea.latency.p95).toBe(2400)
+      expect(sea.tokens).toEqual({ in: 455, out: 30, cacheRead: 50, cacheCreate: 5 })
+      expect(sea.routeEvents).toEqual({ failover_to: 1 })
+      expect(sea.lastFailure).toMatchObject({ status: undefined, model: 'glm-4.7' }) // 无 status 条目是最后一条失败
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('窗口内零请求 → skipped 带可操作原因；无 worker 记录 → skipped', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      const end = Date.now()
+      const sea = upstreamSeaState(repo.root, syntheticEvents(end - 60_000, end))
+      expect(sea.skipped).toBe(true)
+      expect(sea.reason).toContain('无请求记录')
+      expect(upstreamSeaState(repo.root, [{ type: 'gate_result', ts: toIsoLocal(new Date()) }]).reason).toContain('无 worker 运行记录')
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('未配置 gatewayLogDir 且无 env 重定向 → skipped（与对账同口径）', () => {
+    const savedFake = process.env.MODELRDOCK_FAKE_HOME
+    const savedHome = process.env.MODELRDOCK_HOME
+    delete process.env.MODELRDOCK_FAKE_HOME
+    delete process.env.MODELRDOCK_HOME
+    const repo = mkRepo()
+    try {
+      const end = Date.now()
+      const sea = upstreamSeaState(repo.root, syntheticEvents(end - 60_000, end))
+      expect(sea.skipped).toBe(true)
+      expect(sea.reason).toContain('gatewayLogDir')
+    } finally {
+      repo.cleanup()
+      if (savedFake !== undefined) process.env.MODELRDOCK_FAKE_HOME = savedFake
+      else delete process.env.MODELRDOCK_FAKE_HOME
+      if (savedHome !== undefined) process.env.MODELRDOCK_HOME = savedHome
+      else delete process.env.MODELRDOCK_HOME
     }
   })
 })
