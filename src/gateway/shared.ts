@@ -50,10 +50,20 @@ export async function listenWithRetry(server: http.Server, port: number, host: s
       })
       break
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE' && attempt < 10) {
-        console.error(t('端口 {port} 被占用，尝试 {next}', 'Port {port} in use, trying {next}', { port: current, next: current + 1 }))
-        current++
-        continue
+      if ((e as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+        if (attempt < 10) {
+          console.error(t('端口 {port} 被占用，尝试 {next}', 'Port {port} in use, trying {next}', { port: current, next: current + 1 }))
+          current++
+          continue
+        }
+        // 顺延穷尽：裸 EADDRINUSE 无上下文（error-hints-audit ①）——报清尝试范围与排查口径
+        throw new Error(
+          t(
+            '端口 {from}–{to} 全部被占用（起始为配置端口）：确认是否已有 modeldock 实例在跑（modeldock status），或查占用后改 config.toml [gateway] 的 port',
+            'Ports {from}-{to} are all taken (starting from the configured port): check whether a modeldock instance is already running (modeldock status), find the occupier, or change the port key of [gateway] in config.toml',
+            { from: String(port), to: String(port + 10) }
+          )
+        )
       }
       throw e
     }

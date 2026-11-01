@@ -11,7 +11,7 @@ export function resolveTarget(rt: GatewayRuntime, token: string, profileOverride
       ok: false,
       status: 401,
       message: t('无效的 harness token', 'Invalid harness token'),
-      hint: t('token 见 modeldock status；token 丢失可重新 attach（会生成新 token）', 'Tokens are listed by modeldock status; if a token is lost, re-attach to generate a new one'),
+      hint: t('token 见 modeldock status；token 丢失可重新 attach 生成新 token：modeldock attach <harness>', 'Tokens are listed by modeldock status; if a token is lost, re-attach to generate a new one: modeldock attach <harness>'),
     }
   }
   return resolveByProfile(rt, profileOverride, harness)

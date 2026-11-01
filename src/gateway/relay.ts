@@ -442,10 +442,17 @@ export async function forwardToUpstream(
       // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
       // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
       if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
+      // 超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
+      // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
+      const timeoutLike = isConnectTimeoutError(e)
       const errNew = new UpstreamError(
         502,
-        t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
-        t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
+        timeoutLike
+          ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
+          : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
+        timeoutLike
+          ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
+          : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
       )
       errNew.transport = true
       throw errNew
@@ -653,7 +660,11 @@ export async function forwardWithFailover(
     lastErr.routeReason = 'skip_all'
     throw lastErr
   }
-  const e = new UpstreamError(502, t('自动路由：所有候选服务连接失败（{msg}）', 'Auto route: all candidate services failed to connect ({msg})', { msg: (lastErr as Error)?.message }))
+  const e = new UpstreamError(
+    502,
+    t('自动路由：所有候选服务连接失败（{msg}）', 'Auto route: all candidate services failed to connect ({msg})', { msg: (lastErr as Error)?.message }),
+    t('modeldock test 逐个验证候选服务；常见根因：key 失效（modeldock provider set-key）、网络/代理不通、上游宕机', 'Verify each candidate with modeldock test; common causes: a stale key (modeldock provider set-key), network/proxy down, or the upstream being down')
+  )
   e.routeReason = 'down_all'
   throw e
 }

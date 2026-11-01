@@ -134,6 +134,9 @@ export async function startForeground(portOverride?: number): Promise<void> {
       )
     } catch (e) {
       console.error(t('[modeldock] 手机控制台启动失败：{msg}', '[modeldock] Failed to start mobile console: {msg}', { msg: (e as Error).message }))
+      console.error(
+        t('  多为 LAN 端口被占用：改 config.toml [lan] 的 port，或暂关 lan.enabled（网关本身不受影响）', '  Usually the LAN port is taken: change the port key of [lan] in config.toml, or disable lan.enabled (the gateway itself is unaffected)')
+      )
     }
   }
   // 整包重写经 startupGatewayState 组装：devices 之外 update_check 也从既有状态保留——
