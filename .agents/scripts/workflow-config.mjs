@@ -41,9 +41,12 @@
 //                   授权语义见 autopilot.mjs：自动提交 ≠ 自动合并（gate 覆写 L1，
 //                   实际分级 L2/L3 照样回人工闸门）；deps/核心路径/人工草稿永不自动
 //   weatherHold     风暴闸（weather hold，可选键）：{ threshold?: 正整数（缺省 3），
-//                   windowMinutes?: 正整数（缺省 60） }。键存在才启用——drain/nightly --auto/
+//                   windowMinutes?: 正整数（缺省 60），upstream?: { threshold: 正整数,
+//                   windowMinutes?: 正整数（缺省 15） } }。键存在才启用——drain/nightly --auto/
 //                   watch 派发前统计窗口内各任务 worker_retry 合计，达阈值即停止派发
-//                   （无状态，窗口滑过自动恢复）；删掉该键 = 关闭风暴闸（行为与历史版本一致）
+//                   （无状态，窗口滑过自动恢复）；upstream 子键启用上游海况：网关日志
+//                   （gatewayLogDir，须已配）窗口内 429/402 合计达阈同样滞留（外部风暴）；
+//                   删掉该键 = 关闭风暴闸（行为与历史版本一致）
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -175,17 +178,18 @@ function resolveAutopilot(raw) {
   return out;
 }
 
-/** 风暴闸配置解析：{ threshold, windowMinutes }。与 resolveAutopilot 同风格：键缺失 =
- *  功能关闭（null，行为与历史版本一致）；键存在时缺省 threshold 3 / windowMinutes 60。
- *  非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）；键内字段缺失
- *  = 沿用该字段缺省，不告警。 */
+/** 风暴闸配置解析：{ threshold, windowMinutes, upstream? }。与 resolveAutopilot 同风格：
+ *  键缺失 = 功能关闭（null，行为与历史版本一致）；键存在时缺省 threshold 3 / windowMinutes 60。
+ *  upstream 子键（可选，presence 启用）：{ threshold: 正整数（必填）, windowMinutes?（缺省 15）}
+ *  ——上游海况（网关日志 429/402 实测）滞留阈值。非法值回落缺省并 console.warn 告警
+ *  （stderr，不污染 stdout 裁决通道）；键内字段缺失 = 沿用该字段缺省，不告警。 */
 function resolveWeatherHold(raw) {
   if (raw === undefined || raw === null) return null;
   const DEFAULTS = { threshold: 3, windowMinutes: 60 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] weatherHold 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 weatherHold 键：{ threshold?: 正整数, windowMinutes?: 正整数 }；删除该键 = 关闭风暴闸）`);
+    console.warn(`[workflow-config] weatherHold 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 weatherHold 键：{ threshold?: 正整数, windowMinutes?: 正整数, upstream?: { threshold: 正整数, windowMinutes?: 正整数 } }；删除该键 = 关闭风暴闸）`);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { threshold?, windowMinutes? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { threshold?, windowMinutes?, upstream? }，当前为 ${JSON.stringify(raw)}`);
     return { ...DEFAULTS };
   }
   const out = { ...DEFAULTS };
@@ -196,6 +200,19 @@ function resolveWeatherHold(raw) {
   if (raw.windowMinutes !== undefined) {
     if (Number.isInteger(raw.windowMinutes) && raw.windowMinutes > 0) out.windowMinutes = raw.windowMinutes;
     else warn(`windowMinutes ${JSON.stringify(raw.windowMinutes)} 不合法（须为正整数）`);
+  }
+  if (raw.upstream !== undefined && raw.upstream !== null) {
+    const u = raw.upstream;
+    const uBad = !u || typeof u !== 'object' || Array.isArray(u) || !Number.isInteger(u.threshold) || u.threshold <= 0;
+    if (uBad) {
+      warn(`upstream ${JSON.stringify(u)} 不合法（须为对象 { threshold: 正整数, windowMinutes?: 正整数 }）`);
+    } else {
+      out.upstream = { threshold: u.threshold, windowMinutes: 15 };
+      if (u.windowMinutes !== undefined) {
+        if (Number.isInteger(u.windowMinutes) && u.windowMinutes > 0) out.upstream.windowMinutes = u.windowMinutes;
+        else warn(`upstream.windowMinutes ${JSON.stringify(u.windowMinutes)} 不合法（须为正整数）`);
+      }
+    }
   }
   return out;
 }

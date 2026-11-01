@@ -277,7 +277,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - 停止：`touch .agents/orchestrator/.watch-stop`（下周期即停并清文件）或 Ctrl-C；**drift 降级自动退出**（保险丝不允许自己插回去，人工 `drift --clear` 后重启）。
 - 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启。`--interval 0 --max-cycles N` 为测试档（不休眠）。
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
-- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。workflow.json 可选键 `"weatherHold": {"threshold": 3, "windowMinutes": 60}`，**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
+- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 8, "windowMinutes": 15}`：网关日志（`gatewayLogDir`，须已配置）窗口内限流/额度类请求（429/402）合计达阈值同样滞留——网关先于 worker 看到上游限流（任何 harness 的流量都算），触发时点名为「上游风暴」。workflow.json 可选键 `"weatherHold": {"threshold": 3, "windowMinutes": 60, "upstream": {"threshold": 8, "windowMinutes": 15}}`，**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
 
 ### B6. 弃船演习（drill）
@@ -302,7 +302,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 4. 试运行一个周期后看 `stats --json` 的 `summary.merge_rate` 与 `summary.near_miss`，再逐步放宽 `autoSubmitTypes`（deps/核心路径/人工草稿永不自动；实际合并仍由分级裁决与 drift 保险丝兜底）。
 
 **风暴闸 weatherHold**（瞬时故障密集时自动停派发）：
-1. workflow.json 加 `"weatherHold": { "threshold": 3, "windowMinutes": 60 }`（阈值=窗口内 worker_retry 合计）；
+1. workflow.json 加 `"weatherHold": { "threshold": 3, "windowMinutes": 60 }`（阈值=窗口内 worker_retry 合计）；上游海况可选：加 `"upstream": { "threshold": 8, "windowMinutes": 15 }`（网关日志 429/402 合计，须同时配置 `gatewayLogDir`）；
 2. 验证：窗口内凑满阈值后，下次 drain / watch 周期应打「⛈ 风暴滞留」并停派发（fleet.jsonl 留 `weather_hold`），窗口滑过自动恢复、无需清理状态；
 3. 滞留通知走 `${envPrefix}_ORCH_WEBHOOK`；滞留期 announce 只发一次防刷屏。
 

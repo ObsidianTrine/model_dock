@@ -32,7 +32,7 @@ import {
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
-import { countRecentTransient, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
+import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -1456,13 +1456,14 @@ function drainTallyLine(tally) {
 }
 
 /**
- * 风暴闸（weather hold）计数——纯读无副作用：窗口内各任务 worker_retry 合计 vs 阈值。
- * 无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。workflow.json 未配
- * weatherHold 键 = 功能关闭（行为与历史版本一致）。
+ * 风暴闸（weather hold）计数——纯读无副作用：窗口内各任务 worker_retry 合计 vs 阈值；
+ * 可选上游海况（hold.upstream 配置）：网关日志窗口内 429/402 合计 vs upstream.threshold，
+ * 任一达阈值即滞留。无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。
+ * workflow.json 未配 weatherHold 键 = 功能关闭（行为与历史版本一致）。
  */
 function weatherHoldCount(repoRoot, cfg) {
   const hold = cfg?.weatherHold;
-  if (!hold) return { held: false, count: 0 };
+  if (!hold) return { held: false, count: 0, upstream: null };
   const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
   const allEvents = [];
   try {
@@ -1473,18 +1474,38 @@ function weatherHoldCount(repoRoot, cfg) {
     }
   } catch { /* logs/ 不存在 = 还没跑过任务 */ }
   const count = countRecentTransient(allEvents, { windowMs: hold.windowMinutes * 60_000, now: Date.now() });
-  return { held: shouldHold(count, hold.threshold), count };
+  const result = { held: shouldHold(count, hold.threshold), count, upstream: null };
+  // 上游海况（外部风暴）：网关实测先于 worker 重试浮现；未配 upstream 子键 = 关闭，
+  // 网关日志不可得（gatewayLogDir 未配）同样不滞留（观测缺席 ≠ 风暴）。
+  if (hold.upstream?.threshold != null) {
+    const gwDir = gatewayLogsDir(cfg);
+    const windowMinutes = hold.upstream.windowMinutes ?? 15;
+    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now: Date.now() });
+    result.upstream = { count: uCount, threshold: hold.upstream.threshold, windowMinutes, observed: gwDir != null };
+    if (shouldHold(uCount, hold.upstream.threshold)) result.held = true;
+  }
+  return result;
 }
 
-/** 风暴滞留宣布：log + fleet 级事件 + webhook 通知（通知尽力而为，不阻断调度）。 */
-function announceWeatherHold(repoRoot, cfg, count) {
-  log(`⛈ 风暴滞留（weather hold）：最近 ${cfg.weatherHold.windowMinutes} 分钟瞬时重试 ${count} 次 ≥ 阈值 ${cfg.weatherHold.threshold}——停止派发，窗口滑过后自动恢复（下次派发前重算）。`);
+/** 风暴滞留宣布：log + fleet 级事件 + webhook 通知（通知尽力而为，不阻断调度）。
+ *  触发源标注：只有上游海况达阈（worker 重试未达）时点名为「上游风暴」。 */
+function announceWeatherHold(repoRoot, cfg, w) {
+  const hold = cfg.weatherHold;
+  const upstreamTripped = w.upstream?.observed && shouldHold(w.upstream.count, w.upstream.threshold);
+  const reason = upstreamTripped && !shouldHold(w.count, hold.threshold)
+    ? `上游风暴：最近 ${w.upstream.windowMinutes} 分钟网关限流/额度类请求 ${w.upstream.count} 次 ≥ 阈值 ${w.upstream.threshold}`
+    : `最近 ${hold.windowMinutes} 分钟瞬时重试 ${w.count} 次 ≥ 阈值 ${hold.threshold}`;
+  log(`⛈ 风暴滞留（weather hold）：${reason}——停止派发，窗口滑过后自动恢复（下次派发前重算）。`);
   try {
-    appendFleetEvent(repoRoot, 'weather_hold', { count, windowMinutes: cfg.weatherHold.windowMinutes });
+    appendFleetEvent(repoRoot, 'weather_hold', {
+      count: w.count,
+      windowMinutes: hold.windowMinutes,
+      ...(w.upstream ? { upstream: { count: w.upstream.count, threshold: w.upstream.threshold, windowMinutes: w.upstream.windowMinutes } } : {}),
+    });
   } catch { /* 留痕失败不阻断调度 */ }
   void notify({
     title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 风暴滞留`,
-    body: `最近 ${cfg.weatherHold.windowMinutes} 分钟瞬时重试 ${count} 次（阈值 ${cfg.weatherHold.threshold}），已暂停派发任务；窗口滑过后自动恢复。`,
+    body: `${reason}，已暂停派发任务；窗口滑过后自动恢复。`,
     webhookEnvs: orchWebhookEnvs(repoRoot),
   }).catch(() => { /* 通知失败不阻断 */ });
 }
@@ -1535,7 +1556,7 @@ async function cmdDrain(repoRoot, opts) {
       if (cfg.weatherHold) {
         const w = weatherHoldCount(repoRoot, cfg);
         if (w.held) {
-          announceWeatherHold(repoRoot, cfg, w.count);
+          announceWeatherHold(repoRoot, cfg, w);
           await drainSummaryNotify(repoRoot, done, tally, '风暴滞留（weather hold），暂停派发');
           return;
         }
@@ -1661,7 +1682,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
         if (w.held) {
           if (!weatherAnnounced) {
             weatherAnnounced = true;
-            announceWeatherHold(repoRoot, cfg, w.count);
+            announceWeatherHold(repoRoot, cfg, w);
           }
           if (active.size === 0) {
             log('风暴滞留（weather hold）：无在跑任务，本次 drain 结束。');
@@ -2486,7 +2507,7 @@ async function cmdNightly(repoRoot, opts) {
         const w = weatherHoldCount(repoRoot, ncfg);
         if (w.held) {
           autoHeld = true;
-          announceWeatherHold(repoRoot, ncfg, w.count);
+          announceWeatherHold(repoRoot, ncfg, w);
           log('风暴滞留（weather hold）：nightly --auto 本轮跳过派发（high 卡与 drain 均不启动）。');
         }
       }
@@ -2630,7 +2651,7 @@ async function cmdWatch(repoRoot, opts) {
       if (weather.held) {
         if (!weatherAnnounced) {
           weatherAnnounced = true;
-          announceWeatherHold(repoRoot, cfg, weather.count);
+          announceWeatherHold(repoRoot, cfg, weather);
         }
         log('风暴滞留生效中：本周期跳过派发（窗口滑过后自动恢复）。');
       } else {

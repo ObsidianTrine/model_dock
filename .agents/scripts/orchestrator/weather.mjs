@@ -5,11 +5,14 @@
 //     不存在「标记忘了清」的次生故障。
 //   - fleet 级事件（logs/fleet.jsonl）：跨任务的调度层留痕与任务 events.jsonl
 //     分文件（任务线保持单任务语义），格式与任务事件同构（ts/seq/type）。
+// 上游海况（countUpstreamStorm）：网关先于 worker 看到上游限流（任何 harness 的流量
+// 都经它转发）——窗口内 429/402 合计达阈值同样滞留，风暴中比 worker 重试信号更早收帆。
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { toIsoLocal } from './events.mjs';
+import { readGatewayLog } from './reconcile.mjs';
 
 /**
  * 统计各任务 events 里窗口期内的 worker_retry 事件数合计。
@@ -37,6 +40,30 @@ export function countRecentTransient(allEvents, { windowMs, now = Date.now() } =
 /** 滞留判定：窗口内计数达阈值即 true（≥ 语义：恰好等于阈值也算风暴）。 */
 export function shouldHold(count, threshold) {
   return Number.isFinite(count) && Number.isFinite(threshold) && count >= threshold;
+}
+
+/**
+ * 上游海况计数：网关日志窗口期内的限流/额度类请求（status 429/402）合计。
+ * 与 countRecentTransient（worker_retry 自报信号）互补——网关侧是实测面，任何 harness
+ * 的流量都算，且先于 worker 重试浮现。gwDir=null（未启用网关日志）恒 0：观测随
+ * gatewayLogDir 配置开关，缺席不滞留。日文件按本地日期切分，读取范围按窗口跨午夜补足。
+ */
+export function countUpstreamStorm(gwDir, { windowMs, now = Date.now() } = {}) {
+  if (!gwDir) return 0;
+  const dayMs = 86_400_000;
+  const dayCount = Math.ceil(windowMs / dayMs) + 1; // 跨本地午夜余量
+  let count = 0;
+  for (let i = 0; i < dayCount; i++) {
+    const date = toIsoLocal(new Date(now - i * dayMs)).slice(0, 10);
+    for (const entry of readGatewayLog(gwDir, date)) {
+      if (entry.status !== 429 && entry.status !== 402) continue;
+      const ts = Date.parse(entry.ts ?? '');
+      if (!Number.isFinite(ts)) continue;
+      const age = now - ts;
+      if (age >= 0 && age <= windowMs) count += 1;
+    }
+  }
+  return count;
 }
 
 /** fleet 级事件日志路径（跨任务调度层留痕，独立于任务 events.jsonl）。 */
