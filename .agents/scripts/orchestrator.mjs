@@ -54,6 +54,7 @@ import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './
 import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
+import { runDrill } from './orchestrator/drill.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -1094,10 +1095,17 @@ function cmdSubmit(repoRoot, cardFile) {
   const existing = findCard(root, meta.id);
   if (existing) die(`任务 id "${meta.id}" 已存在于 ${existing.state}/（同 id 不允许重复提交）。`);
   fs.copyFileSync(path.resolve(cardFile), cardPath(root, 'pending', meta.id));
-  // 提交的是 drafts/ 提案 → 草稿同步清掉（提案态终结：队列接管，drafts 只留未处理项）
-  if (path.resolve(cardFile).startsWith(draftsDir(repoRoot) + path.sep)) {
-    try { fs.rmSync(path.resolve(cardFile), { force: true }); } catch { /* 清理失败不阻断 */ }
-  }
+  // 提交的是 drafts/ 提案 → 草稿同步清掉（提案态终结：队列接管，drafts 只留未处理项）。
+  // 前缀比对必须走 realpath：macOS 的 tmpdir 是符号链接（/var/folders→/private/var/folders），
+  // argv 侧（调用方传入）与 cwd 侧（findRepoRoot 经 process.cwd()）解析不一致会误判前缀，
+  // 导致草稿清不掉（scan.test『提案提交』用例实证）。
+  try {
+    const cardReal = fs.realpathSync(path.resolve(cardFile));
+    const draftsReal = fs.realpathSync(draftsDir(repoRoot));
+    if (cardReal.startsWith(draftsReal + path.sep)) {
+      try { fs.rmSync(path.resolve(cardFile), { force: true }); } catch { /* 清理失败不阻断 */ }
+    }
+  } catch { /* realpath 失败（路径不存在等）跳过清理 */ }
   log(`任务卡已提交：pending/${meta.id}.md（type=${meta.type} priority=${meta.priority} gate=${meta.gate}）`);
   log(`启动闭环：node .agents/scripts/orchestrator.mjs run ${meta.id}`);
 }
@@ -2367,6 +2375,21 @@ function cmdSchedule(repoRoot, sub, opts) {
   die('用法：schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]');
 }
 
+/**
+ * drill——弃船演习（借鉴清单 B9）：临时港 mock 跑一张合成托运单走完全链，
+ * 验证港口闭环自身健康（worktree 创建→门禁→审查→闸门落位）。不烧真钱、不碰真队列。
+ * 引擎预检只探 CLI 在场；环境漂移（node 版本、权限墙、脚本残缺）夜里才炸不如演习先炸。
+ */
+function cmdDrill(repoRoot, opts) {
+  if (opts.backend && opts.backend !== 'mock') {
+    die('drill 仅用 mock（演习不烧真钱）；真实引擎的健康由 nightly 引擎预检与真实任务把守。');
+  }
+  log('════════ 弃船演习（drill）：mock 跑一张合成托运单，验证港口闭环自身健康 ════════');
+  const r = runDrill(repoRoot, { log });
+  log(r.ok ? '════════ 演习通过：港口闭环健康 ════════' : '════════ 演习未通过：闭环有环节失灵，见上方 ✗ 项 ════════');
+  if (!r.ok) die('演习未通过', 1);
+}
+
 // ---------------------------------------------------------------------------
 // CLI 分发
 // ---------------------------------------------------------------------------
@@ -2406,6 +2429,7 @@ function usage() {
   logs <task-id>                          打印事件时间线
   follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
   stats [--days N] [--json]               运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）
+  drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
 
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
@@ -2556,6 +2580,8 @@ async function main() {
       return cmdFollow(repoRoot, args[0], args.slice(1).join(' '));
     case 'stats':
       return cmdStats(repoRoot, opts);
+    case 'drill':
+      return cmdDrill(repoRoot, opts);
     default:
       usage();
       die(`未知命令 "${cmd}"`, 1);

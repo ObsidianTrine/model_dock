@@ -590,6 +590,16 @@ worker 的 token 用量从此有两本账：
 - 安全共识：策略守护（interceptor）模式、成本熔断（max_turns / token 预算 / 迭代上限 / wall-clock）、分支隔离底线
 - 仓内文档：`AGENTS.md`、`.agents/workflows/feature-branch.md`、`.agents/workflows/code-review.md`、`.agents/workflows/worktree-rescue.md`、`.agents/conventions/docs-writing.md`
 
+## 12. 设计公理：海事五原则（2026-11，体系定名 Dockmaster 时确立）
+
+海事行业几百年沉淀的本质，是「让一个船长安全指挥多船长期在海上」的制度。以下五条作为设计公理——未来每次扩展先过一遍这五问，防止效率改造悄悄侵蚀安全结构：
+
+1. **双罗经（关键判定不依赖单一来源）**：审查引擎异构互审（claude/zcode 分源，防同底座共因盲区）、worker 自报 vs 门禁实测、reconcile 自报账 vs 网关实测账。单一信号源只做 advisory，裁决必须有第二来源。
+2. **水密舱（单点破损不沉全船）**：drain 逐卡子进程隔离（单卡 blocked 不阻塞后续）、任务级互斥锁、队列运行态与代码仓分离。任何一舱进水，全队照航。
+3. **分道通航（并发靠确定性规则，不靠协商）**：files_hint 分区互斥、调度器锁、引水闸（pilotage_required）、端口红线。通行规则必须机器可判定，LLM 判断永远排在确定性规则之后（对齐 pr-risk-tier「确定性先行」哲学）。
+4. **领先指标优先（险情先于事故）**：watchdog_suspect / xte_alarm / worker_retry / fastlane_skipped 是近乎事故（near-miss）留痕，stats 安全晴雨表聚合为领先指标；drift 的 revert 统计是滞后指标。监控体系先看前者——近乎事故率上升早于真实失败出现。
+5. **责任不转移（引水登轮，船长不卸责）**：autopilot 自动提交、异构审查、ci-autofix 自动修复，都不改变合并权与发布权在人。自动化程度越高，人工闸门越要显式、留痕、可审计（gate 分级 / AGENTS_ALLOW_RELEASE 白名单 / awaiting-human 目录）。
+
 ---
 
 **版本历史**
