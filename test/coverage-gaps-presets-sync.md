@@ -12,6 +12,17 @@
 | src/sync | 81.21 | 73.49 | 84.79 | engine.ts（remount/syncStatus/cloudHeartbeat 分支）、collect.ts、crypto.ts |
 | src/sync/targets | 84.55 | 74.44 | 89.28 | webdav.ts / cloud.ts 错误分支 |
 
+## 补测后（2026-10-31，develop 全量 coverage 实测，全量绿）
+
+| 域 | %Stmts | %Branch | %Lines | 说明 |
+|----|--------|---------|--------|------|
+| src/presets | 99.23 | 97.67 | 100 | data.ts 主缺口收口；余量 = 死分支（见下方 followups ①②，已回流 known-issues CORRECT-11） |
+| src/sync | 96.92 | 97.96 | 97.84 | engine/collect/crypto/setup/types 缺口收口；余量 = 有意不补与不可稳定注入项 |
+| src/sync/targets | 95.58 | 94.44 | 98.38 | webdav/cloud 错误分支收口；余量 = 不可稳定注入项（cloud.ts:36 死守卫见 followups ③） |
+
+测量口径：全量 112 文件 1306 passed / 13 skipped（Windows，0ec18fc 修 fd 2 接管后首次全量绿）；基线为 2026-10-29 worktree 全量（合并前代码态），两态间 presets/sync 源码零改动，数字可直接对比。
+施工发现回流：followups ①②③ → known-issues CORRECT-11（死代码三处）、④（HH:mm 只验形状）→ CORRECT-10（2026-10-31）。
+
 ## 新增测试文件
 
 | 文件 | 用例数 | 覆盖对象 |
@@ -134,6 +145,8 @@
 | webdav.ts:31 / cloud.ts:31 `body.text().catch(() => '')` | 需响应中途掐断 socket 才触发 body 读取拒绝，undici 侧表现为请求级异常，不可稳定注入 |
 
 ## 施工中发现、未修的疑似问题（进 followups）
+
+> 2026-10-31 终态：四条已全部处置——①②③ 回流 known-issues CORRECT-11 并修讫（①升级为 Infinity 放行真缺陷、②已删、③守卫留档=TS 收窄职责）；④ 回流 CORRECT-10 并修讫（parseHHmm 上移 util/time 与引擎求值同源，越界显式拒绝）。下文为发现时原文，留档。
 
 1. **src/presets/data.ts:471-472 死条件**：`typeof mo.context_window === 'number' && mo.context_window > 0 && !Number.isNaN(mo.context_window)`——`!Number.isNaN` 排在 `> 0` 之后，NaN 走不到第三臂，该检查永不生效（max_output 同）。若本意是拦 NaN，应把 `Number.isFinite` 前置或替代 `> 0` 判定。
 2. **src/presets/data.ts:544 不可达回退**：`Object.assign(out, presetModels(p) ?? {})` 的 `?? {}` 不可达（同函数上方 543 行已 `!p.models?.length → continue`），可删。

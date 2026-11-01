@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-providers-add-stale-count",
+  "title": "cmdProviderAdd 拉取统计用拉取前的旧配置快照——refreshModelsInto 内部经 mutateConfig 重新读盘合并，外层 cfgNow 不反映结果，无预设服务报「新增 N 个，共 0 个」",
+  "reviewRef": "06a5940^",
+  "fixedBy": "06a5940",
+  "files": [
+    "src/cli/providers.ts"
+  ],
+  "expect": [
+    "loadconfig",
+    "0 个"
+  ],
+  "note": "同上题一卵双生（同提交 06a5940）。正确写法就在同文件 cmdModelRefresh：拉取后重新 loadConfig 再统计。审查侧教训：**包装了 mutateConfig/写盘的辅助函数返回后，调用方手里更早 load 的引用全部过期**——凡是「操作后用旧快照汇报数字」都要问「这份数据是操作前还是操作后的」"
+}

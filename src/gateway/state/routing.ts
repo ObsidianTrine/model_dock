@@ -1,5 +1,6 @@
 import type { Config, ProfileConfig, ScheduleWindow } from '../../config/types.js'
 import { t } from '../../util/i18n.js'
+import { parseHHmm } from '../../util/time.js'
 import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from '../daytype.js'
 import type { GatewayRuntime, ResolvedTarget, ResolveResult } from './types.js'
 
@@ -97,15 +98,7 @@ export function isMeltdown(rt: GatewayRuntime, providerId: string, now = Date.no
 }
 
 // 定时切换：时段求值（纯函数，每次选路实时计算，无定时器/无运行态）
-
-function parseHHmm(s: string): number | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s ?? '').trim())
-  if (!m) return null
-  const h = Number(m[1])
-  const min = Number(m[2])
-  if (h > 23 || min > 59) return null
-  return h * 60 + min
-}
+// parseHHmm 共享实现已上移 src/util/time.ts（syncdoc 校验同源，CORRECT-10）
 
 function dowOf(d: Date): number {
   return d.getDay() === 0 ? 7 : d.getDay()

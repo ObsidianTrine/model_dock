@@ -10,7 +10,7 @@
           ]
         },
         {
-          "matcher": "Bash",
+          "matcher": "Bash|PowerShell",
           "hooks": [
             { "type": "command", "command": "node .agents/hooks/policy-zcode.mjs" }
           ]

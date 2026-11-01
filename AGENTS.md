@@ -179,6 +179,7 @@ node .agents/scripts/feature-branch.mjs list                 # 查看在跑任�
 ```
 
 - `task-id` 用小写短横线短词（如 `fix-presets-merge`）。
+- **start 即认领（claim-before-execute）**：`.agents/orchestrator/queue/` 队列里有同 id 任务卡时，start 自动把卡从 `pending/` 迁到 `running/`（抢任务锁 + 事件留痕），finish 成功后落 `merged/`——人工 agent 与 orchestrator 闭环共享卡状态，同一张卡不会被两个 agent 或 drain 重复执行；接手前看 `feature-branch.mjs list`，`[claimed]` 标记 = 有 agent 在岗勿接手（详见 `.agents/workflows/feature-branch.md`「start 即认领」）。
 - **未完成的任务必须在 worktree 的 `NOTES.md` 里留交接**（start 自动生成模板；目标/已完成/剩余步骤/如何验证），接手 agent 从 `list` 与 NOTES.md 续起——详见 `.agents/workflows/feature-branch.md`「任务交接」。
 - start 建好 worktree 会自动跑 `.agents/workflow.json` 的 `setupCmd`（本仓库为 `npm ci --prefer-offline`，新 worktree 免手工装依赖；失败仅告警，可手动重跑）。
 - finish 会自动跑验证命令（`.agents/workflow.json` 的 `testCmd`，本仓库为 `npm test`；不影响行为的纯文档改动可 `--skip-test`）；finish 全程持锁串行，多 agent 同时合并会自动排队（崩溃残留的陈锁下次自动接管）。

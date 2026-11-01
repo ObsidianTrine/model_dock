@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-spawndaemon-stderr-pipe-pin",
+  "title": "spawnDaemonAndWait 用 pipe 收 daemon stderr 且父进程只 unref() 不解流——管道读端把 CLI 事件循环钉到 daemon 退出为止：gateway start --daemon 成功后提示符永不返回，SEA 双击窗口关不掉",
+  "reviewRef": "7d21df0^",
+  "fixedBy": "7d21df0",
+  "files": ["src/cli/shared.ts"],
+  "expect": ["钉", "管道"],
+  "note": "任务卡 03 修复（7d21df0）。修复 = stderr 改 fd 重定向直写日志文件（父副本 spawn 后即关，fd 继承三头兼顾：零钉死/诊断全程/无跨 chunk 截断）。审查侧教训：pipe 的 stdio 流不 unref、不 destroy 就会钉住父进程退出——child.unref() 只解子进程引用不解 stdio 流；且 pipe 是死结（父退出读端关 → daemon 写 stderr EPIPE）；成功路径「自然 return 无 process.exit」的调用方约定要与常驻流的存在互斥"
+}

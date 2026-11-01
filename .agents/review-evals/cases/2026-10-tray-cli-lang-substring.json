@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-cli-lang-substring",
+  "title": "win 托盘 CheckViaCli 按中文子串分类 CLI 输出（text.Contains(\"已是最新\")/Contains(\"有新版本\")）：CLI 输出走 t() 双语，英文环境全部落空——exit==0 被当失败弹窗、有新版不弹更新窗；CurrentVersion 正则只认中文「当前 v」同病",
+  "reviewRef": "88aa417^1",
+  "fixedBy": "88aa417",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["i18n", "双语", "英文", "language"],
+  "note": "2026-10-30 审查产出（任务卡 10-1）。教训：对经 t() 双语化的程序输出做分类，禁止按任何语言子串匹配——要么结构化协议（--json / 退出码+约定标记），要么语言无关标记；解析逻辑里出现裸中文文案字面量即红旗（本项目用户可见文案一律 t() 双语，CLI 输出语言随配置变）"
+}

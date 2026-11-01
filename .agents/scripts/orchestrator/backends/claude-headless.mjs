@@ -1,14 +1,22 @@
 // claude-headless.mjs — 真实后端：包装 `claude -p --output-format stream-json`。
 // 权限策略（docs 5.5，P0 评审项，缺一不可）：
 //   --permission-mode acceptEdits（自动放行编辑类，headless 无 TTY 无法确认权限）
-//   --allowedTools 白名单（命令执行 fail-closed，未列出的 Bash 自动拒绝）
+//   --allowedTools 白名单（命令执行 fail-closed，未列出的 shell 命令自动拒绝）
 //   --disallowedTools 红线（push/tag/publish 双保险）
-//   --settings <worker 专属 settings>（注入 policy-worker.mjs Bash 拦截 hook，
+//   --settings <worker 专属 settings>（注入 policy-worker.mjs 拦截 hook，
 //     只进 worker 会话，不污染项目级 .claude/settings.json）
 // 预算口径：tokensIn = input + cache_read + cache_creation（缓存读计入）。
+//
+// **Windows shell 工具是 PowerShell（2026-10-30 沙箱实验实证）**：白名单规则按
+// 工具名匹配——`Bash(git add:*)` 匹配不到 PowerShell 工具调用，写类命令
+// （git add/commit、npm test）全部「requires approval」被 headless 自动拒绝，
+// 只读 git status 反而走内置安全启发式放行——正是夜跑观测到的「能读不能验」
+// 权限墙。因此白名单/红线一律双形态（Bash + PowerShell）双发；hook matcher
+// 同理用 Bash|PowerShell。非 Windows 平台多出的 PowerShell 规则无害（无此工具）。
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
@@ -18,39 +26,56 @@ import { zcodeAvailable } from './zcode-headless.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 // 编辑/只读/git 白名单与项目无关；测试/构建命令从 workflow.json 生成（testCmd/buildCmd/packageManager），
-// 不再假设 npm。每条命令按 Bash(prefix:*) 形态放行前缀族。
-const BASE_TOOLS = [
-  'Edit',
-  'Write',
-  'Read',
-  'Glob',
-  'Grep',
-  'Bash(git add:*)',
-  'Bash(git commit:*)',
-  'Bash(git diff:*)',
-  'Bash(git status:*)',
-  'Bash(git log:*)',
-  'Bash(git show:*)',
+// 不再假设 npm。每条命令按 <Tool>(prefix:*) 形态放行前缀族，Bash 与 PowerShell 双形态双发
+// （Windows 上 claude CLI 的 shell 工具是 PowerShell，只写 Bash 形态 = 权限墙，见文件头注）。
+const BASE_TOOL_PATTERNS = [
+  'git add',
+  'git commit',
+  'git diff',
+  'git status',
+  'git log',
+  'git show',
 ];
+
+/** 单条命令 → [Bash(cmd:*) 形态, PowerShell(cmd:*) 形态]。 */
+function shellPatterns(cmd) {
+  return [`Bash(${cmd}:*)`, `PowerShell(${cmd}:*)`];
+}
+
+/** Set.add 只收单参——双形态逐个塞。 */
+function toolsAdd(set, patterns) {
+  for (const p of patterns) set.add(p);
+}
 
 /** worker 白名单 = 基础工具 + workflow.json 的 testCmd/buildCmd（缺省再补 npm 惯例形态）。 */
 export function allowedTools(cfg = loadWorkflowConfig()) {
-  const tools = new Set(BASE_TOOLS);
+  const tools = new Set(['Edit', 'Write', 'Read', 'Glob', 'Grep']);
+  for (const p of BASE_TOOL_PATTERNS) toolsAdd(tools, shellPatterns(p));
   const pm = cfg.packageManager || 'npm';
   // 惯例形态：`<pm> test:*` / `<pm> run *` 覆盖脚本化调用；显式 testCmd/buildCmd 再逐条放行
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(pm)) {
-    tools.add(`Bash(${pm} test:*)`);
-    tools.add(`Bash(${pm} run test:*)`);
-    tools.add(`Bash(${pm} run build:*)`);
+    toolsAdd(tools, shellPatterns(`${pm} test`));
+    toolsAdd(tools, shellPatterns(`${pm} run test`));
+    toolsAdd(tools, shellPatterns(`${pm} run build`));
   }
-  for (const cmd of cfg.testCmd ?? []) tools.add(`Bash(${cmd}:*)`);
-  if (cfg.buildCmd) tools.add(`Bash(${cfg.buildCmd}:*)`);
+  for (const cmd of cfg.testCmd ?? []) toolsAdd(tools, shellPatterns(cmd));
+  if (cfg.buildCmd) toolsAdd(tools, shellPatterns(cfg.buildCmd));
   return [...tools];
 }
 
-const DISALLOWED_TOOLS = ['Bash(git push:*)', 'Bash(git tag:*)', 'Bash(git -C * push:*)', 'Bash(npm publish:*)', 'Bash(pnpm publish:*)', 'Bash(yarn publish:*)'];
+const DISALLOWED_PATTERNS = [
+  'git push',
+  'git tag',
+  'git -C * push',
+  'npm publish',
+  'pnpm publish',
+  'yarn publish',
+];
+const DISALLOWED_TOOLS = DISALLOWED_PATTERNS.flatMap(shellPatterns);
 
-/** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 到 Bash matcher）。
+/** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 拦截 hook）。
+ *  matcher 用 Bash|PowerShell：Windows 上 claude CLI 的 shell 工具是 PowerShell，
+ *  只写 Bash = hook 对全部 shell 命令失明（红线层失效，2026-10-30 实验实证）。
  *  envPatch 非空时并入 settings.env（--settings 优先级高于用户级 settings.json，
  *  tier token 据此覆盖接入时写入的全局凭据）——子进程 env 同时补一份双保险，
  *  两层哪层生效都到得了网关。 */
@@ -60,17 +85,28 @@ export function writeWorkerSettings(settingsPath, envPatch = {}) {
     hooks: {
       PreToolUse: [
         {
-          matcher: 'Bash',
+          matcher: 'Bash|PowerShell',
           hooks: [{ type: 'command', command: 'node .agents/hooks/policy-worker.mjs' }],
         },
       ],
     },
   };
   if (envPatch && Object.keys(envPatch).length) settings.env = { ...envPatch };
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  // 文件可能携带 tier 凭据（settings.env 注入 token）：按仓库写盘惯例 0600
+  // （NTFS 不认权限位，mode 在 Windows 上无害忽略）；清理由调用方 finally 负责。
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
   return settingsPath;
 }
 
+/**
+ * 生成 policy hook 注入所需的临时 settings 路径（放在 orchestrator logs 外的
+ * 系统临时目录，随任务结束可删）。
+ */
+export function newWorkerSettingsPath() {
+  // os.tmpdir()：Windows 无 TMPDIR，回落 '/tmp' 经 path.join 落「当前盘根\tmp」
+  //（通常不存在）→ mkdtempSync ENOENT（2026-10-31 卡 17）
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'worker-settings.json');
+}
 /** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。 */
 export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
   const args = [
@@ -262,9 +298,15 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
       return true; // mock 等非 CLI 后端视为可用
     });
   if (explicit) return { name: explicit === 'same' ? worker : explicit, mode: 'explicit' };
-  // prior 沿用有个例外：prior 是 mock 而 worker 已换真实后端时忽略——mock reviewer
-  // 固定输出「无阻塞」，把它当真实审查结果喂门禁等于跳过审查（且无任何日志）
-  if (prior && !(prior === 'mock' && worker !== 'mock')) return { name: prior, mode: 'prior' };
+  // prior 沿用有两个例外（双向防御，2026-10-31 卡 17）：
+  //   a) prior 是 mock 而 worker 已换真实后端——mock reviewer 固定输出「无阻塞」，
+  //      把它当真实审查结果喂门禁等于跳过审查（且无任何日志）；
+  //   b) worker 是 mock 而 prior 是真实后端——mock 会话是测试路径，「零外部调用、
+  //      永不异构」是不变量，给它派真实 CLI 审查后端会烧真钱（2026-10-31 卡 17）。
+  // 两个方向都不沿用，让解析走后面的自动异构/fallback 分支。
+  if (prior && !(prior === 'mock' && worker !== 'mock') && !(worker === 'mock' && prior !== 'mock')) {
+    return { name: prior, mode: 'prior' };
+  }
   const OTHER = { 'claude-headless': 'zcode-headless', 'zcode-headless': 'claude-headless' };
   const other = OTHER[worker];
   if (other && probeFn(other)) return { name: other, mode: 'heterogeneous' };

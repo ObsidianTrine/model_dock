@@ -669,9 +669,11 @@ namespace ModelDockTray
             string latest = JsonString(json, "latest");
             string lastError = JsonString(json, "lastError");
             string htmlUrl = JsonString(json, "htmlUrl");
-            string notes = JsonUnescape(JsonString(json, "notes"));
+            // JsonString 内部已做一次 JsonUnescape，这里不再包一层（双重解码会把已解码文本里的
+            // 字面 \t、\\ 再解码一次，如路径 C:\temp 变 C:<TAB>emp）
+            string notes = JsonString(json, "notes");
             // summary = 服务端摘要收口（首段+要点，与命令行检查输出同形）；旧版网关没有该字段时回落全文
-            string summary = JsonUnescape(JsonString(json, "summary"));
+            string summary = JsonString(json, "summary");
             if (available)
             {
                 string title = NewVersionTitle(latest, JsonString(json, "current"));
@@ -719,10 +721,15 @@ namespace ModelDockTray
             return JsonUnescape(m.Groups[1].Value);
         }
 
+        /// JSON 转义反转义：占位符换控——先把 \\ 换成 \u0001 占位，防止被后续 \n 等替换误吃
+        /// （JSON 源文 "\\n" = 字面反斜杠 + n，不是换行）；链尾回填占位符为【一个】字面反斜杠
+        /// （JSON 源文 "\\" 的语义值就是一个 \）。曾回填成两个（"\\\\"），错误消息里的
+        /// Windows 路径展示成 C:\\Users\\…（2026-10 任务卡 20）。入参须是未解码的 JSON 源文
+        /// （走 JsonString 的正则捕获组），已解码文本勿再过本函数（二次解码会误伤 \t 等字面序列）。
         internal static string JsonUnescape(string v)
         {
             if (v == null) return null;
-            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\\"", "\"").Replace("\u0001", "\\\\");
+            return v.Replace("\\\\", "\u0001").Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\/", "/").Replace("\\\"", "\"").Replace("\u0001", "\\");
         }
 
         internal static long JsonLong(string json, string field)
@@ -996,6 +1003,9 @@ namespace ModelDockTray
         private readonly System.Windows.Forms.Timer _poll = new System.Windows.Forms.Timer();
         private bool _running;
         private int _port;
+        // UI 线程同步上下文（首次 tick 在 UI 线程捕获）：健康探测改后台线程后，结果经它回传 UI
+        private System.Threading.SynchronizationContext _ui;
+        private bool _pollBusy;
 
         public TrayContext()
         {
@@ -1031,18 +1041,45 @@ namespace ModelDockTray
 
         private void PollHealth()
         {
-            _running = TrayActions.HealthOk();
-            if (_running) TrayActions.ReadState();
-            _port = _running ? int.Parse(TrayActions.CurrentPort) : 0;
-            try
+            // 健康探测（2s 超时 HTTP + 磁盘读）曾在 UI 线程同步执行：网关「半挂」（监听不响应）时
+            // 托盘每 5s 冻结最长 2s，与「工作线程跑，不卡托盘消息循环」的自身约定矛盾（评测集
+            // tray-actions-static-race 问题 5）。改后台线程探测，结果经 UI 同步上下文回传；
+            // 首次 tick 在 UI 线程捕获同步上下文（Application.Run 后即 WindowsFormsSynchronizationContext）。
+            if (_ui == null) _ui = System.Threading.SynchronizationContext.Current;
+            if (_pollBusy) return; // 上一轮未回传不重叠（探测 2s 超时 < 5s tick，仅半挂拖长时防堆积）
+            _pollBusy = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                _icon.Text = _running
-                    ? I18n.L("ModelDock 网关运行中（端口 " + _port + "）", "ModelDock gateway running (port " + _port + ")")
-                    : I18n.L("ModelDock 网关未运行", "ModelDock gateway not running");
-            }
-            catch { }
-            if (_running) TrayActions.FetchStateAsync();
-            UpdateMenu(); // 菜单开着也只做 diff（原地改属性），不再整份重建——5s 轮询不再闪烁
+                bool ok = false;
+                int port = 0;
+                try
+                {
+                    ok = TrayActions.HealthOk();
+                    if (ok)
+                    {
+                        TrayActions.ReadState();
+                        port = int.Parse(TrayActions.CurrentPort);
+                    }
+                }
+                catch { }
+                Action apply = delegate
+                {
+                    _pollBusy = false;
+                    _running = ok;
+                    _port = ok ? port : 0;
+                    try
+                    {
+                        _icon.Text = ok
+                            ? I18n.L("ModelDock 网关运行中（端口 " + _port + "）", "ModelDock gateway running (port " + _port + ")")
+                            : I18n.L("ModelDock 网关未运行", "ModelDock gateway not running");
+                    }
+                    catch { }
+                    if (ok) TrayActions.FetchStateAsync();
+                    UpdateMenu(); // 菜单开着也只做 diff（原地改属性），不再整份重建——5s 轮询不再闪烁
+                };
+                if (_ui != null) _ui.Post(delegate { apply(); }, null);
+                else apply(); // 无同步上下文（理论不可达）：退化为就地执行
+            });
         }
 
         // ---------- 菜单（骨架常驻 + 按需 diff） ----------
@@ -1184,6 +1221,7 @@ namespace ModelDockTray
             _cliItem.Visible = quick;
             _liteItem.Visible = st != null; // 网关未运行时无从读写状态故不显示
             _liteItem.Checked = st != null && st.TrayLite;
+            _modelItem.Visible = false; // 网关未运行/无当前服务时随快捷区一并隐藏（曾漏：孤儿项点击弹「网关未运行」假错误，评测集 tray-actions-static-race 审出）；quick 分支内按当前服务重设
 
             if (st != null && st.CurrentId != null && st.CurrentLabel != null)
             {
@@ -1448,7 +1486,8 @@ namespace ModelDockTray
                 if (stage == "failed")
                 {
                     _timer.Stop();
-                    string err = TrayActions.JsonUnescape(TrayActions.JsonString(text, "error"));
+                    // JsonString 内部已反转义一次，勿再包 JsonUnescape（双重解码误伤字面 \ 序列）
+                    string err = TrayActions.JsonString(text, "error");
                     MessageBox.Show(string.IsNullOrEmpty(err) ? I18n.L("更新失败，可重试 modeldock update。", "Update failed; retry with `modeldock update`.") : err, I18n.L("ModelDock 更新失败", "ModelDock Update Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     Close();
                     return;

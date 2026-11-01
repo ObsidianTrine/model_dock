@@ -20,3 +20,16 @@ export function localIsoTs(d: Date = new Date()): string {
 export function localDateStr(d: Date = new Date()): string {
   return localIsoTs(d).slice(0, 10)
 }
+
+/** 解析 HH:mm 为当日分钟数（0-1439）：小时 1-2 位均可（9:05 与 09:05 等价），分钟两位；
+ *  形状不符或越界（时>23 / 分>59）返回 null。
+ *  网关调度窗口求值（state/routing.ts）与 syncdoc 校验（sync/types.ts）共用本实现——
+ *  两处口径必须同源，双实现各写一份正则迟早漂移（known-issues CORRECT-10 教训）。 */
+export function parseHHmm(s: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s ?? '').trim())
+  if (!m) return null
+  const h = Number(m[1])
+  const min = Number(m[2])
+  if (h > 23 || min > 59) return null
+  return h * 60 + min
+}

@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-probe-responses-protocol-miss",
+  "title": "probe() 探针路径二分法只认 anthropic/其他——responses 协议服务被拼成 /v1/chat/completions，clientProtocolFromPath 判成 openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，报错还把责任推给「客户端走 openai 协议」（实际探针拼错协议；responses 是一等协议，hServiceAdd/hFetchModels 均接受）",
+  "reviewRef": "9bfed39^",
+  "fixedBy": "9bfed39",
+  "files": [
+    "src/gateway/server.ts"
+  ],
+  "expect": [
+    "responses",
+    "探针"
+  ],
+  "note": "同上题一卵双生（同提交 9bfed39，08 号卡）。修法 = 补 responses 分支：/v1/responses + responses 形态 body（input/max_output_tokens）。审查侧教训：**协议/枚举新增值后，grep 所有 a ? x : y 二分法调用点**——「其他」分支会静默吞掉新值，且报错文案往往把锅甩给调用方（本例「客户端走的是 openai 协议」对 responses-only 服务是误导性诊断）"
+}

@@ -157,11 +157,21 @@ pending → running → reviewing → awaiting-human → merged
   - **逐项目绝对路径（旧行为）**：每个项目注册自己的 `<项目绝对路径>/.agents/hooks/policy-zcode.mjs`。
   两者都以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
-- **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。人工开发同一任务时不要与 orchestrator 混用同一个 task-id（orchestrator 侧已由任务锁强制单写者，见下一条 FAQ；人工侧仍是纪律——start 会因分支已存在拒绝重复认领）。
+- **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。**人工开发同一任务现已机制化互通（claim-before-execute）**：feature-branch start 见队列同 id 卡在 pending/ 即自动认领（抢任务锁 + 卡迁 running/ + manual_claimed 事件），finish 成功后落 merged/——人工侧与闭环共享卡状态，drain 不会再误派/误转 blocked（2026-10-30 卡 22 双 agent 撞车已机制性收口）；编排器自己拉起的 start/finish 分别带 ORCHESTRATOR_CLOSURE / ORCHESTRATOR_GATE_HEAD 标记跳过认领与落卡，卡的归属权留在闭环状态机。同 task-id 混用仍然不要：卡已被闭环持有（锁存活）时 start 会拒绝。
 - **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢调度器锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
-- **同一个任务能被两个进程同时跑吗**：不能。每个任务有任务级互斥锁（`.agents/orchestrator/.run-<task-id>.lock`）：run/resume/retry 进入闭环时抢锁，他人持锁且存活时后来者报错退出（手动 run 撞上 drain、双重手动操作都不会出现两个 worker 写同一个 worktree）；持有进程已死 = 陈锁自动接管（崩溃恢复：接管后仍会先清理孤儿 worker）。闭环落位（merged/awaiting-human/blocked/failed）即释放；`abandon` 在闭环存活时会被拒（防止误杀在跑 worker），确认卡死先终止该进程再 abandon。
+- **同一个任务能被两个进程同时跑吗**：不能。每个任务有任务级互斥锁（`.agents/orchestrator/.run-<task-id>.lock`）：run/resume/retry 进入闭环时抢锁，他人持锁且存活时后来者报错退出（手动 run 撞上 drain、双重手动操作都不会出现两个 worker 写同一个 worktree）；持有进程已死 = 陈锁自动接管（崩溃恢复：接管后仍会先清理孤儿 worker）。闭环落位（merged/awaiting-human/blocked/failed）即释放；`abandon` 在闭环存活时会被拒（防止误杀在跑 worker），确认卡死先终止该进程再 abandon。**人工指派的 agent 同样被挡**：feature-branch start 的认领逻辑会抢同一把锁（活锁持有者 = 闭环时拒绝，陈锁自动接管），且认领即把卡迁出 pending/——drain 不再把它当可调度卡误派（认领机制详见 feature-branch.md「start 即认领」）。
 - **worker 起不来（claude CLI 缺失/未登录）会怎样**：任务卡自动落 `blocked/`（failed 事件附原因），不会悬在 running/ 冒充在跑；修好环境后 `resume <task-id>` 续做。
 - **nightly 跑完怎么知道结果**：结束（含异常）发通知——macOS 本地通知（osascript，登录会话可见）；设环境变量 `${envPrefix}_NIGHTLY_WEBHOOK=<url>`（envPrefix 缺省 AGENTS，旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 兼容识别）追加 webhook POST `{title, body, ts}`（飞书/企业微信/Slack 的 incoming webhook 皆可接）。通知尽力而为：通道失败静默，摘要始终在 `logs/nightly.log`。
+
+## 长跑加固（2026-10-30，feature/orch-autonomy-hardening）
+
+自治长跑（夜里 drain 数小时）的工程补强，实验依据与设计细节见 `docs/design-orchestrator.md` v1.2：
+
+- **Windows 权限墙已根修**：claude CLI 在 Windows 的 shell 工具是 **PowerShell**——`Bash(...)` 前缀白名单匹配不到 PowerShell 工具调用，git add/commit/npm test 全被 headless 自动拒（只读 git status 反而走内置启发式放行，即夜跑「能读不能验」形态）。现白名单/红线一律 **Bash+PowerShell 双形态双发**，worker settings hook matcher 为 `Bash|PowerShell`。zcode 侧 yolo 在 CLI 0.17.0 已恢复全自动（沙箱实验实证）。**zcode worker 红线前置条件**：`cp .agents/hooks/policy-dispatch.mjs ~/.agents/hooks/` 并在用户级 `~/.zcode/cli/config.json` 注册 PreToolUse（matcher `Bash|PowerShell`）指向它——缺失时 zcode worker 的红线无人把守（2026-10-30 发现本机注册缺失，已补并验证 git push 拦/git status 放）。
+- **预算按引擎校准**：workflow.json `budgetProfiles.<backend>` 覆盖任意 `max_*` 正整数键（本仓库 zcode-headless `max_tokens: 5000000`——GLM 缓存读口径失真 + zcode 会话结束才回填 usage，默认 500k 形同虚设，夜跑 8 次误熔断；调大不关闭，wall-clock 才是真熔断）。Budget 记账改会话级 committed+sessionMax（跨 fixup 会话不再互相覆盖漏计），每次 worker_spawned 落 `budget_baseline` 事件。
+- **瞬时故障退避**：worker 异常结束（无结果块）且输出带 429 限流/网络签名（transient.mjs）→ 原地重试同一 prompt，60s×attempt，≤3 次（`worker_retry` 事件留痕，不静默）；签名不匹配或自报 stuck 仍走 blocked。drain 起跑前**引擎预检**（zcodeAvailable/claudeAvailable）——CLI 不可用直接拒绝启动，不再逐卡 spawn 失败烧成 blocked（夜跑 8 卡 ENOENT 实证）。
+- **无人值守观测**：卡片落 awaiting-human/blocked/failed（含异常兜底）即发 webhook（环境变量 `${envPrefix}_ORCH_WEBHOOK`，如 `AGENTS_ORCH_WEBHOOK`；未配置零开销，失败静默）；drain 收官发落位 tally 摘要。spec 全局进度锚 `specs/<id>/progress.json`（build 幂等生成，卡片状态迁移经 moveCard 自动同步），`spec status <id>` 看跨夜断点全局视图。
+- **prompt 纪律**（对齐 Anthropic 长时程 harness）：worker prompt 新增结束纪律层——done 前自验测试、干净提交、不越界、**同一条命令被权限拒绝满 2 次即 stuck 熔断**（实测一次任务白烧 15+ 次重试+子代理）；环境层禁 `git -C` 形态（headless 白名单按前缀匹配）与 `;`/`&&` 复合命令（被按 multiple operations 整体拒绝）。spec 卡 design/requirements 改 **worktree 文件引用**（防 zcode headless 30k argv 上限），prepare 时由 orchestrator 拷贝进 worktree（specs/ 在 gitignore 内不污染改动面）。reviewer prompt 注入 REVIEW.md 纪律摘要（截 8000 字符，异构引擎+同一纪律）。files_hint 解析时自动剥反引号/引号（tray-only-mode-t1 实测污染）。
 
 ## UI 冒烟门禁（ui_check）
 

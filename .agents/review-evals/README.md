@@ -47,7 +47,38 @@
 | 2026-10-tray-win32-basename | trayPidsFromProcessLines 用平台相关 path.basename 切 Windows CIM 反斜杠命令行，非 Windows 宿主整类托盘行不命中：9 例单测红恰逢 runner 短缺漏进 develop（生产行为恰因 win32 上两 basename 同义而未坏、更隐蔽） | d6c0a9f | ❌ 首跑未审出（10-30，GLM subagent）——4 个真发现全在别处（:77 未闭引号截尾 / :277、:298 静默回滚 / :362 幻影清理 / unix 枚举失败即弃），path.basename 平台语义没进视野：审查者抠了紧邻目标行的引号解析却没问「输入什么平台格式、解析端跑在哪」。首道平台解析题漏报实录，REVIEW.md 平台解析堵法待下次全量跑分一并评估；原文见 runs/2026-10-30-batch3-2026-10-tray-win32-basename.md |
 | 2026-10-daemon-gatewayjson-tamper-race | daemon 篡改纵深用例与常驻网关查更新回写 gateway.json（真实 started_at）竞态，慢速 arm64 断言偶发红、发版腿才炸（linux-arm64 删 tag 重打） | 815a65d | ✅ 审出（10-30，GLM subagent）——存疑区命中机制：「活网关存在 state 重写路径，篡改值可能被治愈，exit 1 断言偶发翻车」（写入者猜「心跳」，实为查更新；启发式 started_at 命中）；另带 exitCode/signalCode、error 监听缺失等 4 真发现；原文见 runs/2026-10-30-batch3-2026-10-daemon-gatewayjson-tamper-race.md |
 | 2026-10-test-type-blindspot | test/ 类型盲区：import type 坏路径（../config/types.js，esbuild 剥类型不解析模块路径）+ status(cfg) 缺必填实参静默上树，vitest/npm test 双门禁零信号（05dd0a6 引入）；T30 建 tsconfig.test.json 后存量 225 错暴露，含 1 真 bug | 2217949 | ✅ 审出（2026-11-01 首跑，GLM-5.3-Flash，原文 runs/2026-11-01-test-type-blindspot.md） |
+| 2026-10-providers-rm-key-before-config | cmdProviderRm 先不可逆删密钥、后做可失败的配置写，失败即丢 key 无回滚 | 06a5940 | ⏳ 待首跑（2026-10-30 任务卡 05 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-providers-add-stale-count | cmdProviderAdd 拉取统计用拉取前旧快照，无预设服务报「共 0 个」 | 06a5940 | ⏳ 待首跑（同上） |
+| 2026-10-orchestrator-drain-max-overshoot | drain 并发路径 pump() 只在入口查 --max，首轮同步连发 workers 个 run 子进程，烧钱上限失效 | 54b0602 | ⏳ 待首跑（2026-10-30 任务卡 06 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-relay-multi-value-header-fold | 转发把重复头（set-cookie）折叠为逗号单值，RFC 6265 禁止折叠，客户端解析必错 | 035f99b | ⏳ 待首跑（2026-10-30 任务卡 07 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-catalog-view-cache-never-hit | model-catalog 视图缓存键=表对象引用，但 fullKnownTable 每次 spread 新对象，缓存恒 miss 每请求全量 stringify | 9bfed39 | ⏳ 待首跑（2026-10-30 任务卡 08 修复对回灌；首跑前不计入基线分母） |
+| 2026-10-probe-responses-protocol-miss | probe() 探针二分法漏 responses 协议，responses-only 服务连接测试恒失败且报错误导 | 9bfed39 | ⏳ 待首跑（同上） |
+| 2026-10-claude-powershell-whitelist | claude worker 白名单按 Bash(...) 前缀写死，Windows shell 工具是 PowerShell——写类命令全拒「能读不能验」，hook matcher 同失明 | e5fa84d | ⏳ 待首跑（同上） |
+| 2026-10-budget-cross-session-max | Budget 跨会话 Math.max 聚合会话累计值，fixup 多会话漏计，token 熔断形同虚设 | a755671 | ⏳ 待首跑（同上） |
+| 2026-10-orch-awaiting-human-crash | run 放行 awaiting-human 卡但不迁移，烧完整轮 worker 后首个终态迁移必炸裸栈 | 5e4dcfe | ✅（10-30，GLM subagent）P1 全证据链（白名单/迁移/兜底三层）+ 3 条新发现（npm spawn 无 shell EINVAL、reviewing 无恢复路径、reviewer 临时目录泄漏→立卡 19） |
+| 2026-10-orch-resume-backend-first-hit | resume 沿用后端 .find 取首条 worker_spawned，多引擎任务静默切回最初引擎 | 5e4dcfe | ✅（10-30，GLM subagent）P1 命中 + 4 条当前版活缺陷（TMPDIR /tmp、spawn 无 shell 与探测矛盾、mock prior 漏防、settings 0600→立卡 17） |
+| 2026-10-finish-lock-pid-reuse | finish 锁判活 process.kill(pid,0) 被 Windows PID 复用骗过，陈锁永拒排队者 | acf3953 | ✅（10-30，GLM subagent）主缺陷命中 + merge 冲突裸崩新发现（立卡 18）；exit handler 无属主校验已随 acf3953 一并修复 |
+| 2026-10-tray-cli-lang-substring | 托盘 CheckViaCli 按中文子串分类 CLI 输出，英文环境 exit==0 误报失败、有新版不弹窗 | 88aa417 | ✅（10-30，GLM subagent）主缺陷命中（连 spawn 未钉 --lang 也点到）+ JsonUnescape 反斜杠翻倍新发现（立卡 20）；看门狗/_port 竞态两条对旧版报的已被 88aa417 修复 |
+| 2026-10-orch-worker-settings-tmpdir | claude-headless 三连：TMPDIR ?? '/tmp' 落盘根 / mock prior 缺反向防御 / 凭据 settings 0644 | 8c3372b | ⏳ 待首跑（2026-10-31 卡 17 修复回灌，dry 过；首跑前不计入基线分母） |
+| 2026-10-finish-merge-conflict-bare | finish 合并段无冲突处理，冲突裸崩留 merging 状态且重跑指引错误 | 4c161a5 | ⏳ 待首跑（2026-10-31 卡 18 修复回灌，dry 过；同上） |
+| 2026-10-orch-reviewing-no-recovery | reviewing/ 卡硬崩无恢复路径（白名单不含）+ reviewer 临时目录每轮泄漏 | c7455d0 | ⏳ 待首跑（2026-10-31 卡 19 修复回灌，dry 过；同上） |
+| 2026-10-tray-jsonunescape-double | JsonUnescape 回填两个字面反斜杠 + notes/summary/error 双重解码误伤 \t | 3d5ec5f | ⏳ 待首跑（2026-10-31 卡 20 修复回灌，dry 过；同上） |
+| 2026-10-lan-bearer-empty-token | lanAuthorized 令牌取 `?? ''`：LAN 关闭后保温连接送达空令牌，与空 Bearer 双双通过 safeEqual 空对空比较，等于无凭据放行管理面 | bc135c2 | ✅（10-30，GLM subagent）目标命中且超预期：三通道守卫不对称 + 保温连接攻击链，见 runs/2026-10-30-lan-bearer-empty-token.md |
+| 2026-10-policy-dispatch-tamper | 红线守卫 dispatcher 从事件 cwd 直接 import policy.mjs 且不校验文件写入目标——被守护 agent 可覆写/塞坏 fail-open/删除守卫，红线静默关闭零留痕 | c32451c | ✅（10-30，GLM subagent）四条篡改路实测全 allowed + worktree 摘端口红线、null 崩溃放行加深发现，见 runs/2026-10-30-policy-dispatch-tamper.md |
+| 2026-10-spawndaemon-stderr-pipe-pin | spawnDaemonAndWait 用 pipe 收 daemon stderr 且只 unref 子进程不解流——读端活动句柄把 CLI 事件循环钉到 daemon 退出，--daemon 就绪后不返回 | 7d21df0 | ✅（10-30，GLM subagent）机制链完整 + 对齐 CORRECT-07/99fa3a5 演进，见 runs/2026-10-30-spawndaemon-stderr-pipe-pin.md |
+| 2026-10-tray-cli-watchdog-missing | CheckViaCli 注释承诺 40s 看门狗，实现是无超时 ReadToEnd+WaitForExit——CLI 挂住则更新检查永久沉默 | b338cb1 | ✅（10-30，GLM subagent）注释承诺不存在即「它撒谎」+ StartCleanCli 同模式死锁第二处；新活缺陷 _modelItem 漏隐藏，见 runs/2026-10-30-tray-cli-watchdog-missing.md |
+| 2026-10-tray-actions-static-race | TrayActions _port/_token 静态字段无同步读写：先置 null 再赋值窗口内并发读拼出 http://127.0.0.1:/ → HealthOk 误 false | b338cb1 | ✅（10-30，GLM subagent）后果链追到 QuitClicked 跳过 gateway stop（.NET 解析 :/ 为 80 端口已实测）；新活缺陷 UI 线程同步 HTTP + _modelItem 同源互证，见 runs/2026-10-30-tray-actions-static-race.md |
+| 2026-10-webupdate-latch-no-rollback | applyUpdate 置 state.updating 后依次做可同步抛出的步骤且无 try/catch——任一失败门闩卡死 updating，后续更新全拒 | b7b91ad | ✅（10-30，GLM subagent）三条同步失败路径逐一点名 + 新活缺陷 gateway.json 裸 RMW 丢字段（webupdate 未入 mutateGatewayState 队列），见 runs/2026-10-30-webupdate-latch-no-rollback.md |
+| 2026-10-review-loop-guard-dead-code | claude-review.yml [dependabot-fix] 防回环守卫读 merge 检出的 git log -1 尾提交——永远匹配不上 PR head 前缀，守卫是死代码 | 567d379 | ⏳ 待首跑（2026-10-30 评测循环产出修复对回灌，dry 过；同上） |
+| 2026-10-update-staging-sweep-age | update 暂存清扫无年龄过滤全删共享 %TEMP% 的 modeldock-{update,setup,app,bin,sums}-*——多形态/并发测试进程互不知晓，一方 runUpdate 删掉另一方在途下载/解压目录；解压子进程高负载/杀软窗口零诊断瞬态死亡无重试 | b6b90ce | ⏳ 待首跑（2026-10-31 卡 16 修复对回灌，dry 过；同上） |
+| 2026-10-jsonpath-multiseg-overreject | jsonpath tokenize 完整覆盖校验漏算段间 `.` 分隔符：fd235ea 连续性判定把所有多段点路径（$.a.b）误抛「无法解析」——CORRECT-08 修复引入的回归，多段读写全废 | f0ec635 | ⏳ 待首跑（2026-10-31 修复回归回灌，dry 过；同上） |
+| 2026-10-soak-warmup-baseline | soak 长稳压测 RSS 判泄漏用「末值 vs 首值」口径——Node 网关冷启预热 134→220MB 后 2.5h 走平，4h 实测按首值误判 +79.1% FAIL，真实稳态被当泄漏；正解 = 基准取预热窗结束后首采样、平台判定仅辅助 | 01f906a | ⏳ 待首跑（2026-10-31 fix-soak-verdict 修复对回灌，dry 过；同上） |
+| 2026-10-policy-newline-shell-wrap | 发布红线两类包装绕过：切段分隔符不含换行 + bash/sh/zsh -c 包装 tokens[0] 判非 git | ba5f0b7 | ✅（10-31，GLM subagent）双目标命中 + 新挖 7 个当前版旁路面（env -i/子壳/xargs/npm 全局 flag/status 词豁免/Stop-Process/.agents L0），立卡 27 |
+| 2026-10-gateway-state-rmw | persistCheckTime 裸 RMW 绕过串行队列，与 devices/lan_token 并发写方整包互覆盖 | 7a3ba4a | ✅（10-31，GLM subagent）全写方通道核对表 + 新活缺陷：getUpdateStatus 未捕获 SecretsError 连带 60s 轮询崩、启动重写丢 update_check，立卡 28 |
+| 2026-10-tray-modelitem-orphan | RefreshMenu quick=false 漏隐藏「默认模型」孤儿项，点击弹假错误 | 302c01f | ✅（10-31，GLM subagent）成组 Visible 全集核对 + 唯一赋值点定位，与 tray-ui-sync-http 题交叉印证 |
+| 2026-10-tray-ui-sync-http | 5s Timer 在 UI 线程同步 HealthOk（2s 超时 HTTP）+ 磁盘读，半挂时每 5s 冻结最长 2s | 3ba4d6e | ✅（10-31，GLM subagent）真修归属核对到卡 26 + 新活缺陷 UpdateProgressForm Timer 错线程（立即更新主链路进度窗永不刷新），立卡 29 |
 
+**2026-10-31 合并 origin/develop 并账**：远端侧回灌批次 30 行考题并入上表——14 题已首跑全审出（10-30/31 GLM subagent 修复对回灌二/三/四轮，原文 runs/），16 题 ⏳ 待首跑、按既有口径不计入基线分母，下次全量跑分一并计入；远端侧原基线行（召回 34/34）由其上基线行（37/37）加本并账取代。
 **基线：召回 37/37 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19 + 10-31 强审查者 9/9——见下方 T31 强复跑行）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于新基线（36/36，或按模型分段对齐）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
 **T31 首跑清账（2026-10-31）**：上表 7 道 ⏳ 题全部完成首跑（原文归档 runs/），**但审查者被迫降级为 glm-4.5-air（bigmodel-2 副号）**——claude-direct 的 Volces plan 月配额耗尽（AccountQuotaExceeded，2026-11-07 重置）、bigmodel 主号 Coding Plan 到期，可用 anthropic 端点仅剩 bigmodel-2。结果 1/7（agents-win-spawn-shell ✅，其余 6 题弱模型真漏：只报表层项未触及目标根因）。**处置**：本轮 6 个 ❌ 记录的是「降级审查者」的召回，不代表强审查者（GLM-5.3-Flash）水平——7 题暂按 ⚠️ 处理、不计入 27/27 强基线分母；2026-11-07 配额恢复后应以 GLM-5.3-Flash 对 7 题复跑定性，再决定是否并入基线。同期运行时观察：T28 修复后 failover 链「首选 429→切换→备选空 key 全跳」的 skip_all 透传符合设计；openai 协议 provider 经 endpoints.anthropic 服务 claude 客户端受 clientProtocolFromPath 路径推断限制（/v1/messages 回退 provider 自身协议），该形态是否支持待产品定夺。
@@ -78,6 +109,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - 频率：事故后随手跑；改了审查者（REVIEW.md / prompt / 模型）之后必跑一次全量。
 - 历次报告落 `runs/`（含模型原文；报告里引用的临时目录路径已随清理失效，以原文内嵌为准）。
 
+
 ## 评测循环产出（2026-10-30 夜训）
 
 跑分之外，审查者顺带挖出的**当前版本仍存活**的问题（每条都有文件+行号证据，详见对应 runs/ 报告）：
@@ -99,6 +131,11 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-30 增补 2 题 · 首跑已补**（v1.5.1 发布周期事故回流，batch3，GLM subagent tool-free）：daemon-gatewayjson-tamper-race ✅ 存疑区命中 / tray-win32-basename ❌ 未审出（1/2）——**首次漏报**，暴露平台解析盲区：REVIEW.md 平台条目只覆盖测试侧（NTFS 权限/写死 /tmp），没有「解析 Windows 专属文本须用 win32 语义 path API」口径；堵法待下次全量跑分一并落地评估（零散改 REVIEW.md 会触发全量重跑纪律）。同周期实测踩中的 release-propose commitFiles 解析串位（`--format=%h%x1e` 文件列表跟在下一条 hash 前）不成题——坏版本未上过树（同提交内自纠），已立为「怎么加新考题」第 5 条。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
+- **2026-10-30 增补 6 题**（编号任务卡 05/06/07/08 修复对回灌，评测循环挖出的活 bug 修复后按标准 schema 成题）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 06a5940（×2）/ 54b0602 / 035f99b / 9bfed39（×2）。
+- **2026-10-30 增补 4 题**（合并窗口修复对回灌：CORRECT-07 daemon stderr / finish 锁 PID 复用 / claude PowerShell 白名单 / Budget 跨会话漏计）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 b542d8e / a804fd9 / e5fa84d / a755671。
+- **2026-10-30 增补 7 题**（第三轮：卡 01-04、10 与防回环守卫修复对回灌，commit 2964ff4，dry 全过）：3 题已首跑 ✅（runs/2026-10-30-{lan-bearer-empty-token,policy-dispatch-tamper,spawndaemon-stderr-pipe-pin}.md），4 题 ⏳ 待首跑。
+- **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：dry 过、⏳ 待首跑。
+
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
 参照原论文的第二个评测维度（在已知干净代码上跑审查者、数误报）：选历史稳定文件（如 init 后零改动、扛过多轮全仓审查的 `src/util/diff.ts`、`src/util/jsonpath.ts`），用**中性 prompt**（不断言存在 bug，只要求「确证才报，没有就明说通过」）跑同一审查者。注意与考题 prompt 的差别：考题断言「之后补了一个修复」会诱导找茬，测噪音必须去掉该断言。首测：diff.ts **0 误报**；jsonpath.ts 报 2 个问题——**逐条实证均为真缺陷**（CORRECT-08），不是误报——「干净对照」的挑选本身要经得起审查，被审出的对照文件按其价值转为缺陷记录。**03:20 复跑（runs/noise-jsonpath-rerun.md）**：前两条精确复现（审查者自行读到 known-issues 的 CORRECT-08 登记并标注「已登记」），另报第 3 处同族缺陷（对象上下文用下标写入静默产键 `"0"`，tsx 实测坐实，已并入 CORRECT-08）。噪音报告见 runs/noise-*.md。
@@ -119,3 +156,11 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 10. **临时仓库夹具 .gitignore 与真实仓库不对齐**（T13）：mkRepo 漏了 `.agents/worktrees/` 忽略，主仓库一次 `git add -A` 把任务 worktree 收成 embedded repo（gitlink），finish 的基准分支清洁检查误报退出 1。堵法：夹具 ignore 清单与真实仓库对齐；主仓库 `add -A` 前先看 status 是否混入意外路径。
 11. **负向场景夹具先自检前置状态**（T13 ③c）：造了「定时删锁的持有者」却没先创建锁文件，等待方首轮即拿到锁，「等待日志」断言必红。教训：造「X 中途发生」的夹具，先断言 X 前的状态真实存在。
 12. **排序类前提未查证框架机制**（T21 预研）：审查报告断言 zz-quickwins「押文件名字典序」在 uninstall.test 之后跑，实际 vitest 按历史运行时长缓存排序（慢者先行，非字母序）——照卡实现的守卫会在排序漂移时误报/漏报。堵法：守卫写成与排序无关的不变量（mock 属主关系、不重复 mock）；「押某种顺序」类前提动手前查框架文档或实测。
+13. **同一缺陷两机并行各自实现**（2026-10-30 develop 合并：daemon stderr 本地 fd 继承 7d21df0 vs 远程 daemon 侧接管 b542d8e；finish 锁心跳判活 vs 有界等待系互补需并集）：双头开发撞同一文件，合并成本高于双修收益——按文件分区派工（AGENTS.md 既有约定）；冲突解决先判「互补还是互斥」，互补取并集、互斥取验证更强的一侧。
+14. **任务卡断言不作数**（05 卡声称 ensureProfile 缺陷「对照当前 HEAD 确认仍在」，实际已被 addService 重构消除，误报文案全仓无残留）：动手前亲自 grep 核实卡面每一条缺陷断言；评测循环产出的「活 bug 清单」同样会过期。
+15. **顶层执行 main() 的脚本无法被测试 import**（orchestrator.mjs）：可测纯逻辑抽子模块 + 依赖注入（deps.mjs 的 spawnFn/log/die 注入模式），单测落子模块文件而不是硬啃入口脚本。
+16. **模块级缓存在 isolate:false 单进程套件里被早前用例焐热**（catalogViewCache）：「冷启动必须序列化一次」断言因此恒红——先空跑一次对齐状态，再经公开失效点（clearKnownTable）强制重建；判别器设计成「第二次零成本」（buggy 版第二次也 miss）比「第一次有成本」更稳。
+17. **全局 spy 计数法**（vi.spyOn(JSON,"stringify") 透传原实现 + payload 特征过滤 + finally mockRestore）：非模块 mock 不进跨文件注册表，isolate:false 下安全——给「全量序列化是否发生」类断言做判别器的实用手法。
+18. **UTC 时间戳误判陈锁、手删活锁**（2026-10-29 合并接管会话）：finish 锁 time 是 ISO UTC，接管者把 `00:55Z` 读成本地 00:55 判「8 小时前陈锁」直接删——持有者实际活着（几分钟前刚起），并发 finish 侥幸双双落地无损坏。堵法：判陈锁先换算时区再验活（新锁看 beat 心跳）；非本人持有的 git 状态（MERGE_HEAD / 锁 / 他人暂存区）一律不动，删锁前必须核实属主 pid 已死。
+19. **交接数字失真**（2026-10-29 test-gap-presets-sync 接管）：NOTES 与提交信息写「60 用例」，接手后实测 73——worker 中断前数字是草稿态，直接引用即失真。堵法：交接文档的计数/状态「写时实测」；接手者把卡面数字当线索不当事实（同 14）。
+20. **管道尾退出码误判**（2026-10-30 coverage 取数）：`npm test | tail` 后 `$?` 是 tail 的 0——测试红了却判成功；且 vitest 失败跑不产 coverage 报告，双重误导连烧三次全量。堵法：退出码不经管道取（`set -o pipefail` 或命令与查看分开）；「该产出的报告没产出」本身就是失败信号。

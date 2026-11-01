@@ -18,6 +18,19 @@ export function nightlyWebhookEnvs(repoRoot) {
   return [...new Set([`${prefix}_NIGHTLY_WEBHOOK`, NIGHTLY_WEBHOOK_ENV])];
 }
 
+/** 编排任务落位/收官通知的 webhook 变量：${envPrefix}_ORCH_WEBHOOK。
+ *  与 nightly 通道分开（语义不同：巡检日报 vs 单卡落位即时提醒），unset 时静默跳过。 */
+export function orchWebhookEnvs(repoRoot) {
+  const prefix = loadWorkflowConfig(repoRoot).envPrefix || 'AGENTS';
+  return [`${prefix}_ORCH_WEBHOOK`];
+}
+
+/** 组装卡片落位通知正文（awaiting-human/blocked/failed——夜里无人值守时可扫读）。 */
+export function buildSettleSummary({ taskId, state, reason } = {}) {
+  const icon = state === 'awaiting-human' ? '⏸' : state === 'failed' ? '✗' : '⚠';
+  return `${icon} ${taskId ?? '?'} → ${state ?? '?'}${reason ? `：${String(reason).slice(0, 120)}` : ''}`;
+}
+
 /** 组装单行多段的 nightly 摘要正文（通知场景：短、可扫读）。 */
 export function buildNightlySummary({ created, awaiting, pending, degraded, autoRan, error } = {}) {
   const parts = [];

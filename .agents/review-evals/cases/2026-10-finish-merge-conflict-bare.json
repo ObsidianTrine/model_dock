@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-finish-merge-conflict-bare",
+  "title": "feature-branch finish 合并段无冲突处理：git merge --no-ff 用 execFileSync，冲突即裸崩且主检出留 merging 状态；重跑 finish 死在脏检查且 die 文案「Commit or stash them first」对 merging 是错误指引（正确动作 git merge --abort）——对照 rebase 段有专门冲突检测+指引，证明是遗漏",
+  "reviewRef": "4c161a5^1",
+  "fixedBy": "4c161a5",
+  "files": [".agents/scripts/feature-branch.mjs"],
+  "expect": ["merge --abort", "merging", "冲突"],
+  "note": "任务卡 18（评测考题 2026-10-finish-lock-pid-reuse 的加分发现落地修复）。教训：同一脚本里 rebase 段有的冲突处理，merge 段必须有——「对照实现」是审出遗漏的最快抓手；失败恢复指引要按当前 git 状态给（merging 状态下 commit 根本做不了）"
+}

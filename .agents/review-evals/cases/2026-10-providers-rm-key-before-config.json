@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-providers-rm-key-before-config",
+  "title": "cmdProviderRm 先不可逆删密钥（deleteSecret）、后做可失败的配置写（mutateConfig）——配置写失败（mutator 抛错/落盘失败/锁超时）时 key 已永久删除而 provider 还在配置里，无从回滚",
+  "reviewRef": "06a5940^",
+  "fixedBy": "06a5940",
+  "files": [
+    "src/cli/providers.ts"
+  ],
+  "expect": [
+    "deleteSecret",
+    "mutateconfig"
+  ],
+  "note": "2026-10-30 评测循环自 filemode-route-guard 题挖出（05 号卡）。对称参考就在同文件：cmdProviderAdd 对 setSecret→mutateConfig 失败专门做了回滚，删除路径没有同款善后。审查侧教训：**不可逆操作（删密钥/删文件）必须排在全部可失败步骤之后**；看到「先删 A 再写 B」且 B 可失败就要问「B 失败后 A 回得来吗」"
+}

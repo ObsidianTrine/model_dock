@@ -82,7 +82,7 @@ export function parseTasksDoc(text) {
     if (!m) continue;
     const val = m[2].trim();
     if (m[1] === '目标') cur.goal = val;
-    else if (m[1] === '文件') cur.files = val.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+    else if (m[1] === '文件') cur.files = val.split(/[,，]/).map((s) => s.trim().replace(/^[`'"]+|[`'"]+$/g, '').trim()).filter(Boolean);
     else if (m[1] === '完成条件') cur.done = val;
     else if (m[1] === '依赖') cur.deps = val;
   }
@@ -102,6 +102,7 @@ export function renderTaskCard(spec, task, total) {
     'priority: normal',
     `created_at: ${bumpMinutes(spec.meta.created_at, task.n)}`,
     'created_by: planner',
+    `spec: ${spec.meta.id}`, // 进度锚寻址键：卡片状态迁移时同步 specs/<id>/progress.json（queue.mjs moveCard）
     'files_hint:',
     ...task.files.map((f) => `  - ${f}`),
     'workflows:',
@@ -122,13 +123,11 @@ export function renderTaskCard(spec, task, total) {
     `来源：spec build 拆解自 .agents/orchestrator/specs/${spec.meta.id}/tasks.md（人工已审阅）。`,
     task.deps && task.deps !== '无' ? `依赖：${task.deps}（先于本任务合并）。` : '依赖：无。',
     '',
-    '## 技术设计（design.md 全文，实现以本设计为纲；与其冲突时以已审阅的 design 为准并在 NOTES.md 说明）',
+    '## 技术设计（随 worktree 携带，开工前必读）',
     '',
-    spec.design.trim(),
-    '',
-    '## 需求验收标准（requirements.md）',
-    '',
-    spec.requirements.trim(),
+    `design.md 与 requirements.md 全文已随 worktree 准备拷贝到 worktree 内 .agents/orchestrator/specs/${spec.meta.id}/。`,
+    `**开工前先读 worktree 内的 .agents/orchestrator/specs/${spec.meta.id}/design.md**（实现以本设计为纲；与其冲突时以已审阅的 design 为准并在 NOTES.md 说明）；`,
+    `需求验收标准对照同目录 requirements.md。specs 目录在 .gitignore 内，不要改动、不要 git add 它。`,
     '',
   ];
   return [...fm, ...body].join('\n');
@@ -138,6 +137,38 @@ function bumpMinutes(iso, minutes) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return toIsoLocal();
   return toIsoLocal(new Date(d.getTime() + minutes * 60_000));
+}
+
+/**
+ * 全局进度锚（Anthropic 长时程 harness 的 JSON feature-list 模式对应物）：
+ * spec 拆出的多张卡完成态散在 queue 七目录里，progress.json 给跨夜 drain /
+ * 断点续跑一个机器可读的全局视图。build 幂等重跑时按各卡当前状态刷新；
+ * 后续迁移由 queue.mjs moveCard 按卡的 spec 字段同步。
+ */
+export function progressPath(queueRootDir, specId) {
+  return path.join(queueRootDir, '..', 'specs', specId, 'progress.json');
+}
+
+export function writeProgress(queueRootDir, spec, tasks) {
+  const id = spec.meta.id;
+  const progress = {
+    id,
+    title: spec.meta.title,
+    updated_at: toIsoLocal(),
+    tasks: tasks.map((t) => ({
+      n: t.n,
+      title: t.title,
+      card_id: `${id}-t${t.n}`,
+      files: t.files,
+      status: findCard(queueRootDir, `${id}-t${t.n}`)?.state ?? 'pending',
+    })),
+  };
+  fs.writeFileSync(progressPath(queueRootDir, id), `${JSON.stringify(progress, null, 2)}\n`);
+  return progressPath(queueRootDir, id);
+}
+
+export function readProgress(queueRootDir, specId) {
+  return JSON.parse(fs.readFileSync(progressPath(queueRootDir, specId), 'utf8'));
 }
 
 /**
@@ -161,5 +192,6 @@ export function buildSpecCards(repoRoot, queueRootDir, id) {
     fs.writeFileSync(cardPath(queueRootDir, 'pending', cardId), renderTaskCard(spec, t, tasks.length));
     created.push(cardId);
   }
+  writeProgress(queueRootDir, spec, tasks);
   return { created, skipped, warnings };
 }

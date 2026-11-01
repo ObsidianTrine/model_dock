@@ -55,6 +55,7 @@ describe('jsonpath', () => {
     expect(root).toEqual({}) // 未静默写坏
     expect(() => setPath({}, '$.a[-1]', 1)).toThrow(/无法解析/)
     expect(() => setPath({}, '$.a[0', 1)).toThrow(/无法解析/) // 修复前：键 '0'，绕过越界守卫
+    expect(() => setPath({}, '$.a..b', 1)).toThrow(/无法解析/) // 段间只允许一个 `.` 分隔符
     expect(() => toSegments("$.a['b']")).toThrow(/无法解析/) // 读/segments 共用同一守卫
   })
 
@@ -73,18 +74,23 @@ describe('jsonpath', () => {
     const leaf: any = { list: [{ v: 1 }] }
     expect(() => setPath(leaf, '$.list[0][0]', 1)).toThrow(/下标段只能用于数组/) // 中段同守卫：list[0] 是对象容器再遇下标段
     expect(leaf.list).toEqual([{ v: 1 }]) // 未静默写入
+    const sub: any = { list: [{ v: 1, sub: {} }] } // sub 须已存在为对象——缺失会走缺容器自动创建（建数组）而非报错
+    expect(() => setPath(sub, '$.list[0].sub[0]', 1)).toThrow(/下标段只能用于数组/) // 中段同守卫
     const ok: any = { list: [{ v: 1 }] }
     setPath(ok, '$.list[0].sub[0]', 1) // 缺失中段键按 next 形态自动建容器（fd235ea^ 原样合法）
     expect(ok.list[0]).toEqual({ v: 1, sub: [1] })
   })
 
   it('数组点句式行为零变化（点/下标合法句式回归锚点）', () => {
-    const root: any = {}
+    const root: any = { a: { list: ['x', 'z'] } } // 预填长度 2：稀疏守卫语义（merge-base 起既有）下「追加」只能写 idx === length
     setPath(root, '$.a.b.c', 1) // 点句式
-    setPath(root, '$.a.list[0]', 'append') // idx === length 追加合法（越界守卫语义与 fd235ea^ 一致）
-    expect(root.a.list).toEqual(['append'])
-    setPath(root, '$.a.list[0]', 'y') // 改写已有元素合法
-    expect(root.a.list[0]).toBe('y')
+    setPath(root, '$.a.list[2]', 'append') // idx === length 追加合法
+    expect(root.a.list).toEqual(['x', 'z', 'append'])
+    setPath(root, '$.a.list[1]', 'y') // 改写已有元素合法
+    expect(root.a.list[1]).toBe('y')
+    const empty: any = {}
+    setPath(empty, '$.a.list[0]', 'append') // 缺失中段键自动建数组容器再追加（越界守卫语义与 fd235ea^ 一致）
+    expect(empty.a.list).toEqual(['append'])
     expect(() => setPath(root, '$.a.list[9]', 'x')).toThrow(/路径越界/) // 稀疏守卫原样
     expect(getPath({ a: { list: ['x'] } }, '$.a.list[0]')).toBe('x') // 读路径合法句式
   })

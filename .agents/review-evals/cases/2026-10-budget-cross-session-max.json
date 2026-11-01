@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-budget-cross-session-max",
+  "title": "Budget 记账用全局 Math.max——stream-json 的 budget_snapshot 是「本会话全程累计」，跨 fixup/调试会话取 max 互相覆盖漏计：实测 300k+100k 两会话只记 300k，token 预算熔断形同虚设",
+  "reviewRef": "a755671^",
+  "fixedBy": "a755671",
+  "files": [
+    ".agents/scripts/orchestrator.mjs"
+  ],
+  "expect": [
+    "math.max",
+    "会话"
+  ],
+  "note": "自治长跑加固（a755671）。修法 = committed+sessionMax 两段记账（会话完结并入 committed）+ budget_baseline 事件留痕。审查侧教训：**上游累计值口径是「本会话」时，跨会话聚合用 max/首值都漏计——必须分段累加**；看到 Math.max 聚合 usage 就问「这个值的口径是全程还是本段」"
+}

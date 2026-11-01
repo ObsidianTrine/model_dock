@@ -20,6 +20,12 @@
 // ORCHESTRATOR_GATE_HEAD 时，仅当「develop 未前进 且 worktree HEAD 与 gate 记录
 // 一致」才真的跳过全量测试，否则打印原因回落全量——gate 验证过哪棵树，合并的
 // 就是哪棵树；人工 --skip-test（纯文档改动）不带该环境变量，语义不变。
+//
+// 任务卡认领（claim-before-execute）：队列里存在同 id 任务卡时，start 即把卡迁出
+// pending/（抢任务锁 + running/ + 事件留痕），finish 成功后落 merged/——人工 agent
+// 与 orchestrator 闭环共享卡状态，双 agent 撞同一张卡从机制上收口。编排器自身拉起
+// 的 start/finish（ensureWorktree / doApprove）分别带 ORCHESTRATOR_CLOSURE /
+// ORCHESTRATOR_GATE_HEAD 标记，认领与落卡整体跳过，卡的归属权留在闭环状态机。
 
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -28,6 +34,13 @@ const CRLF_N = '\n';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 任务卡认领（claim-before-execute）：start 即把队列里同 id 的卡迁出 pending/，
+// 人工指派的 agent 与 orchestrator 闭环共享同一份卡状态（双 agent 撞同一张卡的
+// 机制性收口）。三个子模块均为纯定义无顶层副作用；项目没跑 orchestrator 时
+// queueRoot 目录不存在，认领逻辑整体跳过（可移植性不破）。
+import { appendEvent, logDir } from './orchestrator/events.mjs';
+import { ensureQueue, findCard, moveCard, queueRoot } from './orchestrator/queue.mjs';
+import { acquireTaskLock, readTaskLock, releaseTaskLock } from './orchestrator/task-lock.mjs';
 
 // Repo root: ask git for the COMMON .git dir first — `git rev-parse --git-common-dir`
 // points at the main repo's .git even when this script is invoked from inside a linked
@@ -93,6 +106,32 @@ function die(msg) {
   process.exit(1);
 }
 
+// Path of MERGE_HEAD in the MAIN checkout's git dir. Its mere existence means an
+// unfinished merge is pending there (a conflicted `git pull`/merge left dangling).
+// --git-path resolves every git layout (linked worktrees, .git-file checkouts) with
+// cwd pinned to REPO_ROOT; the fallback covers git being unusable at all.
+function mergeHeadPath() {
+  try {
+    return path.resolve(REPO_ROOT, git(['rev-parse', '--git-path', 'MERGE_HEAD']));
+  } catch {
+    return path.join(REPO_ROOT, '.git', 'MERGE_HEAD');
+  }
+}
+
+// start/finish must not run on top of a pending merge on the main checkout: finish
+// merges the task branch INTO the main checkout (it would entangle with the pending
+// merge, or die mid-merge with misleading advice), and start reads the main checkout
+// as the base. Fail fast with the two ways out instead of carrying the wound
+// (2026-10-30: a merge-style pull hung the main checkout in merge state and every
+// start/finish then crashed on top of it).
+function dieIfMidMerge(action) {
+  if (!fs.existsSync(mergeHeadPath())) return;
+  die(`main checkout is mid-merge (MERGE_HEAD exists) — ${action} would run on top of a pending merge. Deal with the pending merge first:
+  complete it:  resolve the conflicts, then git commit
+  abandon it:   git merge --abort
+then re-run: node .agents/scripts/feature-branch.mjs ${action}`);
+}
+
 // Finish is the only step that mutates the base branch (the merge runs on the main
 // checkout), so two agents finishing at once would collide on git's index.lock. An
 // exclusive lock file serializes them. Liveness is decided by a heartbeat (the owner
@@ -126,12 +165,26 @@ function sleepSyncMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, ms);
 }
 
+// 旧版锁（无 beat 字段）专用：pid 存在性探测。心跳判活落地后 pid 复用只影响旧版
+// 锁的过渡窗口（30min 兜底封顶），新锁一律走 beat——两套机制并存见 acquireFinishLock 注释。
+function legacyLockPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM'; // exists but owned by another user — still alive
+  }
+}
+
 function lockLooksLive(info) {
   if (!info || !Number.isInteger(info.pid)) return false; // 损坏锁 = 陈锁，可接管
-  const last = Number.isFinite(info.beat) ? info.beat : Date.parse(info.time);
-  if (!Number.isFinite(last)) return true; // 时间解析不出：保守当活锁
-  const staleMs = Number.isFinite(info.beat) ? FINISH_LOCK_STALE_MS : FINISH_LOCK_LEGACY_STALE_MS;
-  return Date.now() - last < staleMs;
+  if (!Number.isFinite(info.beat)) {
+    // 旧版锁：pid 存在性优先——死属主立即接管（merge-verify ⑤ 的语义，也覆盖 SIGKILL/
+    // 断电残留），活属主（含 pid 复用误判形态）按 time 30min 兜底陈旧，不让滚动升级
+    // 期间的旧版活进程被误接管，也不让旧版崩溃残留的锁永久拒人。
+    return legacyLockPidAlive(info.pid) && Date.now() - Date.parse(info.time) < FINISH_LOCK_LEGACY_STALE_MS;
+  }
+  return Date.now() - info.beat < FINISH_LOCK_STALE_MS;
 }
 
 function acquireFinishLock(taskId) {
@@ -343,19 +396,98 @@ function writeNotesStub(taskId, wtPath) {
 `);
 }
 
+// —— 任务卡认领（claim-before-execute）——
+// 队列里存在同 id 任务卡时，start 即认领：抢任务锁 + 卡 pending→running + 事件留痕。
+// 持久的认领记录 = 卡在 running/（锁随 start 进程退出由 exit handler 自动释放，
+// 只守「两个 start 并发认领」的窄窗口）；持久防双写 = 分支/worktree 存在性检查。
+// 编排器闭环自己已持锁并迁移过卡（cmdRun），它拉起的 start 见 ORCHESTRATOR_CLOSURE
+// 即整体跳过——否则闭环会被自己的 start 拒在门外。
+function queueCardOf(taskId) {
+  const qRoot = queueRoot(REPO_ROOT);
+  if (!fs.existsSync(qRoot)) return null; // 项目未启用 orchestrator 队列：纯 feature 工作流，零假设不破
+  return findCard(qRoot, taskId);
+}
+
+// start 被拒（分支/worktree 已存在）时附上队列卡状态：接手者一眼分清
+// 「历史残留」还是「另一个 agent 正在做同一张卡」。
+function claimHintFor(taskId) {
+  try {
+    const card = queueCardOf(taskId);
+    if (!card) return '';
+    if (card.state === 'running') {
+      const lock = readTaskLock(REPO_ROOT, taskId);
+      const who = lock?.pid ? ` (lock holder pid ${lock.pid}${lock.cmd ? `, ${lock.cmd}` : ''})` : '';
+      return `${CRLF_N}  queue card "${taskId}" is in running/ — likely being worked by another agent${who}.`;
+    }
+    return `${CRLF_N}  queue card "${taskId}" is in ${card.state}/.`;
+  } catch { return ''; }
+}
+
+// 返回认领结果：'closure-skip'（编排器上下文）| 'no-card' | 'claimed' |
+// 'already-running'（卡已被认领，不重复认领）| 'other-state'（非 pending 卡不动）。
+function claimCardFor(taskId) {
+  if (process.env.ORCHESTRATOR_CLOSURE === '1') return 'closure-skip';
+  const card = queueCardOf(taskId);
+  if (!card) return 'no-card';
+  if (card.state === 'running') {
+    console.log(`Queue card "${taskId}" is already in running/ — someone claimed it; proceeding (branch/worktree checks below still guard double execution).`);
+    return 'already-running';
+  }
+  if (card.state !== 'pending') {
+    console.warn(`WARNING: queue card "${taskId}" is in ${card.state}/ — claim skipped. Use orchestrator resume/abandon for non-pending cards.`);
+    return 'other-state';
+  }
+  const lock = acquireTaskLock(REPO_ROOT, taskId, `feature-branch start ${taskId}`);
+  if (!lock.held) {
+    const owner = lock.owner ?? {};
+    die(`task "${taskId}" is already claimed (lock holder pid ${owner.pid}${owner.cmd ? `, ${owner.cmd}` : ''}${owner.acquired_at ? `, since ${owner.acquired_at}` : ''}) — two agents must not drive the same task.${CRLF_N}  If the holder is confirmed dead/stuck, kill pid ${owner.pid} and re-run (a stale lock is taken over automatically).`);
+  }
+  try {
+    ensureQueue(queueRoot(REPO_ROOT)); // moveCard 的 rename 需要目标状态目录存在（临时仓库/手建队列常缺 running/）
+    moveCard(queueRoot(REPO_ROOT), taskId, 'pending', 'running');
+  } catch (e) {
+    releaseTaskLock(REPO_ROOT, taskId);
+    die(`claim failed: could not move queue card "${taskId}" pending → running: ${String(e.message).trim()}`);
+  }
+  try {
+    appendEvent(logDir(REPO_ROOT, taskId), 'manual_claimed', { pid: process.pid, cmd: `feature-branch start ${taskId}` });
+  } catch { /* 事件留痕尽力而为 */ }
+  console.log(`Queue card "${taskId}" claimed: pending → running. Other agents and orchestrator drains will skip it.`);
+  return 'claimed';
+}
+
+// worktree add 失败时的认领回滚：卡回 pending/、锁释放（start 进程仍存活，
+// releaseTaskLock 按 pid 匹配放行）。回滚失败只告警不掩盖原始错误。
+function rollbackClaim(taskId) {
+  try {
+    moveCard(queueRoot(REPO_ROOT), taskId, 'running', 'pending');
+    releaseTaskLock(REPO_ROOT, taskId);
+    console.warn(`Claim rolled back: queue card "${taskId}" returned to pending/, task lock released.`);
+  } catch (e) {
+    console.warn(`WARNING: claim rollback failed — card "${taskId}" may be left in running/ (move it back manually, or just re-run start): ${String(e.message).trim()}`);
+  }
+}
+
 function cmdStart(taskId) {
+  dieIfMidMerge(`start ${taskId}`);
   const branch = `feature/${taskId}`;
   const wtPath = path.join(WORKTREES_DIR, taskId);
 
   if (hasLocalBranch(branch)) {
-    die(`branch ${branch} already exists. Pick another task-id, or run "finish ${taskId}" to merge & clean it up.`);
+    die(`branch ${branch} already exists. Pick another task-id, or run "finish ${taskId}" to merge & clean it up.${claimHintFor(taskId)}`);
   }
   if (listWorktrees().some((t) => path.resolve(t.path) === path.resolve(wtPath))) {
-    die(`worktree ${wtPath} already registered. Pick another task-id or clean up first.`);
+    die(`worktree ${wtPath} already registered. Pick another task-id or clean up first.${claimHintFor(taskId)}`);
   }
 
+  const claimed = claimCardFor(taskId) === 'claimed';
   const base = baseBranch();
-  git(['worktree', 'add', wtPath, '-b', branch, base]);
+  try {
+    git(['worktree', 'add', wtPath, '-b', branch, base]);
+  } catch (e) {
+    if (claimed) rollbackClaim(taskId);
+    die(`git worktree add failed (${wtPath}):${CRLF_N}  ${String(e.message).trim()}`);
+  }
   writeNotesStub(taskId, wtPath);
 
   // One-time environment setup (e.g. dependency install) so the worktree is immediately
@@ -392,6 +524,32 @@ Next steps:
   4. Integrate back: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
 }
 
+// finish 成功后的卡归位（仅人工路径）：认领产生的 running/ 卡直接落 merged/——
+// 工作已合并进主干，与编排器闭环的 awaiting-human→merged 同一终态。
+// 编排器路径绝不在此动卡（approve 的 finish 带 ORCHESTRATOR_GATE_HEAD；闭环
+// 状态机 running→reviewing→awaiting-human→merged 才是卡的归属方），否则
+// doApprove 之后的 awaiting-human→merged 迁移会因源目录无卡而炸。
+function settleCardAfterFinish(taskId) {
+  if (process.env.ORCHESTRATOR_GATE_HEAD || process.env.ORCHESTRATOR_CLOSURE === '1') return;
+  let card;
+  try {
+    card = queueCardOf(taskId);
+  } catch { return; }
+  if (!card) return;
+  if (card.state !== 'running') {
+    console.log(`Queue card "${taskId}" is in ${card.state}/ — left for the orchestrator state machine.`);
+    return;
+  }
+  try {
+    ensureQueue(queueRoot(REPO_ROOT)); // rename 目标目录 merged/ 可能尚未建（同认领路径）
+    moveCard(queueRoot(REPO_ROOT), taskId, 'running', 'merged');
+    try { appendEvent(logDir(REPO_ROOT, taskId), 'manual_merged', { pid: process.pid }); } catch { /* 尽力而为 */ }
+    console.log(`Queue card "${taskId}" settled: running → merged.`);
+  } catch (e) {
+    console.warn(`WARNING: could not settle queue card "${taskId}" (running → merged) — move it manually: ${String(e.message).trim()}`);
+  }
+}
+
 function cmdFinish(taskId, args) {
   let skipTest = args.includes('--skip-test');
   const msgIdx = args.indexOf('--message');
@@ -400,6 +558,7 @@ function cmdFinish(taskId, args) {
   const wtPath = path.join(WORKTREES_DIR, taskId);
 
   acquireFinishLock(taskId);
+  dieIfMidMerge(`finish ${taskId}`);
 
   const trees = listWorktrees();
   const wt = trees.find((t) => path.resolve(t.path) === path.resolve(wtPath));
@@ -418,6 +577,18 @@ function cmdFinish(taskId, args) {
   }
   if (!wt) die(`no worktree for task "${taskId}" (expected ${wtPath}). Run "start ${taskId}" first, or check "list".`);
   if (wt.branch !== branch) die(`worktree ${wtPath} is on branch "${wt.branch}", expected "${branch}". Aborting.`);
+
+  // Soft gate (non-blocking): a NOTES.md still carrying the start template's placeholder
+  // means the handoff doc was never filled in — if this session dies mid-task, the next
+  // agent can only reverse-engineer the intent from the diff. Warn loudly but never
+  // block: NOTES.md never merges into the mainline, so it is not a code risk.
+  let notesStillTemplate = false;
+  try {
+    notesStillTemplate = fs.readFileSync(notesPathFor(wtPath), 'utf8').includes('<一句话说明本任务要达成什么>');
+  } catch { /* no NOTES.md (or unreadable) — nothing to warn about */ }
+  if (notesStillTemplate) {
+    console.warn(`WARNING: NOTES.md is still the unfilled start template — if this task is interrupted, the next agent can only reverse-engineer the handoff from the diff. Fill it in (goals/plan now, progress as you go): ${notesPathFor(wtPath)}`);
+  }
 
   // NOTES.md is a worktree-local handoff doc — never merged into the branch. Drop the
   // file, and if an earlier `git add -A` committed it, remove it from the branch with a
@@ -493,6 +664,8 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     if (cleanupFails.length) {
       console.warn(`WARNING: cleanup incomplete:` + CRLF_N + cleanupFails.map((m) => '  - ' + m).join(CRLF_N) + CRLF_N + lockHint(wtPath) + CRLF_N + `Re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}   (idempotent, finishes the cleanup)`);
       process.exitCode = 1;
+    } else {
+      settleCardAfterFinish(taskId);
     }
     return;
   }
@@ -527,7 +700,36 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     die(`main repo (${base}) has uncommitted changes. Commit or stash them first:\n  git status --short`);
   }
   const message = mergeMsg || `Merge branch '${branch}'`;
-  git(['merge', '--no-ff', branch, '-m', message]);
+  try {
+    git(['merge', '--no-ff', branch, '-m', message]);
+  } catch (e) {
+    // A conflicted merge leaves the main checkout dangling in merging state (MERGE_HEAD):
+    // a plain re-run would then die on the dirty check with advice ("Commit or stash")
+    // that is wrong for a pending merge. Abort to restore the pre-merge commit so the
+    // main checkout is clean for the retry, then surface the conflict with the same
+    // guidance as the rebase path above (resolve inside the worktree — conflicts are
+    // never auto-resolved here). Any other failure keeps the raw git error.
+    let midMerge = false;
+    try {
+      midMerge = fs.existsSync(path.resolve(REPO_ROOT, git(['rev-parse', '--git-path', 'MERGE_HEAD'])));
+    } catch { /* git unusable — fall through to the raw error below */ }
+    if (midMerge) {
+      let abortErr = null;
+      try { git(['merge', '--abort']); } catch (aErr) { abortErr = aErr; }
+      if (abortErr) {
+        console.warn(`WARNING: could not abort the pending merge — run "git merge --abort" manually in ${REPO_ROOT}, then re-run finish:` + CRLF_N +
+          `  ${String(abortErr.message).trim()}`);
+      } else {
+        console.log(`Pending merge aborted — main checkout restored to a clean ${base}.`);
+      }
+      die(`merge of ${branch} into ${base} has conflicts. Resolve them inside ${wtPath}:
+  cd "${wtPath}"   # fix conflicted files
+  git -C "${wtPath}" add -A && git -C "${wtPath}" rebase ${base}
+then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
+    }
+    die(`merge of ${branch} into ${base} failed (no merging state left behind — not a conflict):` + CRLF_N +
+      `  ${[String(e.message).trim(), String(e.stderr ?? '').trim()].filter(Boolean).join(CRLF_N + '  ')}`);
+  }
   console.log(`Merged ${branch} into ${base} (--no-ff).`);
 
   // 5) cleanup — the merge already succeeded, so a cleanup failure must be reported as
@@ -550,7 +752,19 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     process.exitCode = 1;
   } else {
     console.log(`Cleaned up worktree ${wtPath} and branch ${branch}.`);
+    settleCardAfterFinish(taskId);
   }
+}
+
+// list 行附队列卡状态：claimed（卡在 running/）= 有 agent 在岗，勿接手；
+// card:<state> = 其他状态（blocked 等需 orchestrator resume/abandon 处理）。
+function cardFlagFor(branchName) {
+  const m = /^feature\/([a-z0-9][a-z0-9-]*)$/.exec(branchName || '');
+  if (!m) return null;
+  try {
+    const card = queueCardOf(m[1]);
+    return card ? (card.state === 'running' ? 'claimed' : `card:${card.state}`) : null;
+  } catch { return null; }
 }
 
 function cmdList() {
@@ -563,6 +777,8 @@ function cmdList() {
     const flags = [];
     if (fs.existsSync(notesPathFor(t.path))) flags.push('NOTES.md'); // task left a handoff doc — read it before taking over
     if (gitInDir(t.path, ['status', '--porcelain'])) flags.push('dirty');
+    const cardFlag = cardFlagFor(t.branch);
+    if (cardFlag) flags.push(cardFlag);
     console.log(`${t.branch || '(detached)'}  ->  ${t.path}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
   }
 }

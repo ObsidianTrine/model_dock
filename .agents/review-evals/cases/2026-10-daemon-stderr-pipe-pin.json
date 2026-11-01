@@ -1,9 +1,14 @@
 {
   "id": "2026-10-daemon-stderr-pipe-pin",
-  "title": "gateway start --daemon 就绪后 CLI 不返回：父进程 stderr 转写读端把事件循环钉住，脚本/终端被钉死（实测 ≥45s）",
-  "reviewRef": "07cfca4^",
-  "fixedBy": "07cfca4",
-  "files": ["src/cli/shared.ts"],
-  "expect": ["stderr", "unref", "pipe"],
-  "note": "2026-10-30 夜巡发现并沙箱实测复现（CORRECT-07，P1）。根因：spawnDaemonAndWait 以 stdio pipe 拉起常驻 daemon 并挂 'data'/'close' 监听转写 daemon 日志，child.unref() 只把子进程句柄移出引用计数、不移除 stderr 管道读端对事件循环的引用——daemon 常驻、其 fd 2 永不关闭，CLI 就绪探测返回后事件循环排不空。修复 = daemon 侧 fd 2 接管自写 logs/daemon-<date>.log + 父侧 stdio 全 ignore。审查侧教训：unref 只管句柄不管流读端；「为收日志而 pipe 常驻进程的 stderr」必然钉住自身，日志应让常驻方自写。"
+  "title": "spawnDaemonAndWait 以 stdio pipe 拉起 daemon 并挂 stderr 'data' 监听做日志转写——pipe 读端 flowing 态被事件循环引用、daemon 常驻 fd 2 永不关闭，就绪探测返回后 CLI 事件循环排不空：gateway start --daemon 成功后提示符永不返回（实测挂 ≥45s）",
+  "reviewRef": "b542d8e^",
+  "fixedBy": "b542d8e",
+  "files": [
+    "src/cli/shared.ts"
+  ],
+  "expect": [
+    "pipe",
+    "事件循环"
+  ],
+  "note": "CORRECT-07（2026-10-30 夜巡副产物）。两台机器同日各自修复（本地 fd 继承 7d21df0 vs 远端 daemon 侧 fd2 接管 b542d8e），合并取后者——覆盖 daemon/自启唯一入口，含 SEA 手测。审查侧教训：**unref() 只把子进程句柄移出引用计数、不移除流读端对事件循环的引用，别以为 unref 了就安全**；**长驻子进程 + pipe 读端 + data 监听 = 父进程事件循环被钉死**；诊断输出要么子进程自写文件，要么 stdio ignore，别在父进程转写"
 }

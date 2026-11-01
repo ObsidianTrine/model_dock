@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-orch-worker-settings-tmpdir",
+  "title": "claude-headless 后端三连：newWorkerSettingsPath 用 TMPDIR ?? '/tmp'（Windows 无 TMPDIR 回落盘根 \\tmp，mkdtempSync ENOENT）；resolveReviewBackendName prior 短路缺反向防御（worker=mock + prior=真实 仍给 mock 会话派真实审查，违反零外部调用不变量）；tier 凭据 settings 文件 writeFileSync 无 mode（默认 0644）且无强制清理",
+  "reviewRef": "8c3372b^1",
+  "fixedBy": "8c3372b",
+  "files": [".agents/scripts/orchestrator/backends/claude-headless.mjs"],
+  "expect": ["tmpdir", "0600", "mock"],
+  "note": "任务卡 17（评测考题 2026-10-orch-resume-backend-first-hit 的加分发现落地修复）。教训：① 临时目录一律 os.tmpdir()，TMPDIR 是 unix 变量、Windows 只有 TEMP/TMP；② mock 会话零外部调用是硬不变量，prior 沿用必须双向防御（mock↔真实两个方向）；③ 携带凭据的落盘文件 0600 起步"
+}

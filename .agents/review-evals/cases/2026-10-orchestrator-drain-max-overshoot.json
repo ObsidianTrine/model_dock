@@ -1,0 +1,14 @@
+{
+  "id": "2026-10-orchestrator-drain-max-overshoot",
+  "title": "drain --workers 并发调度 pump() 只在入口检查 launched >= max，内层同步 for 循环每次 launch 仅受 active.size >= workers 约束——--workers 3 --max 1 连发 3 个 run 子进程才停（--max 是烧钱上限语义；串行路径每次发射前都查，并发路径漏了同款）",
+  "reviewRef": "54b0602^",
+  "fixedBy": "54b0602",
+  "files": [
+    ".agents/scripts/orchestrator.mjs"
+  ],
+  "expect": [
+    "--max",
+    "launched"
+  ],
+  "note": "2026-10-30 评测循环自 orchestrator-backend-default 题挖出（06 号卡）。launch 是同步循环、child exit 异步事件插不进来——只查 pump 入口挡不住首轮 workers > max 的连发。同提交另修 installWorkspaceDeps 的 spawnSync(\"npm\") Windows ENOENT（.cmd 包装直调必挂），与 c99f326 的 spawn-shell 系列同根（见 2026-10-agents-win-spawn-shell 题）。审查侧教训：**「上限检查在循环外」+「循环体是同步发射」= 上限形同虚设**；预算/配额类语义的检查必须逐次发射前同查"
+}

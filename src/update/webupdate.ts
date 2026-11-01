@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process'
 import { VERSION } from '../version.js'
 import { DEFAULT_UPDATE_REPO, type Config } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
-import { readGatewayState, writeGatewayState, type GatewayRuntime } from '../gateway/state.js'
+import { readGatewayState, mutateGatewayState, type GatewayRuntime } from '../gateway/state.js'
 import { displayPath, logsDir } from '../util/paths.js'
 import { localDateStr, t } from '../util/index.js'
 import { compareVersions, fetchLatestRelease, findAsset, selectAssetName, type ReleaseManifest } from './check.js'
@@ -123,27 +123,27 @@ export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolea
   await p
 }
 
-/** 把检查时间落 gateway.json：成功写 at/version 并清 failedAt；失败只写 failedAt（保留此前成功时间） */
+/** 把检查时间落 gateway.json：成功写 at/version 并清 failedAt；失败只写 failedAt（保留此前成功时间）。
+ *  走 mutateGatewayState 串行队列：裸 read→modify→write 会与 devices/lan_token 等并发写方整包互相
+ *  覆盖——每 60s status 轮询 kick 一次检查，丢刚写入的设备记忆/手机凭据（评测集
+ *  runs/2026-10-30-webupdate-latch-no-rollback.md 问题 2，2026-10-31 修复）。 */
 function persistCheckTime(version?: string): Promise<void> {
-  return (async () => {
-    try {
-      const s = await readGatewayState()
-      if (!s) return
-      const prev = s.update_check
-      if (state.lastFailAt != null) {
-        await writeGatewayState({
-          ...s,
-          update_check: { ...(prev ? { at: prev.at, version: prev.version } : {}), failedAt: state.lastFailAt },
-        })
-        return
+  return mutateGatewayState((s) => {
+    if (!s) return null
+    const prev = s.update_check
+    if (state.lastFailAt != null) {
+      return {
+        ...s,
+        update_check: { ...(prev ? { at: prev.at, version: prev.version } : {}), failedAt: state.lastFailAt },
       }
-      if (state.lastCheckedAt != null) {
-        await writeGatewayState({ ...s, update_check: { at: state.lastCheckedAt, ...(version ? { version } : {}) } })
-      }
-    } catch {
-      /* 持久化失败不影响主流程（内存态仍在） */
     }
-  })()
+    if (state.lastCheckedAt != null) {
+      return { ...s, update_check: { at: state.lastCheckedAt, ...(version ? { version } : {}) } }
+    }
+    return null
+  }).catch(() => {
+    /* 持久化失败不影响主流程（内存态仍在） */
+  })
 }
 
 /** 网关启动钩子（main.ts 调用）：fire-and-forget，绝不阻塞启动；MODELRDOCK_DISABLE_UPDATE_CHECK=1 关闭 */

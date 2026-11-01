@@ -1,0 +1,9 @@
+{
+  "id": "2026-10-tray-cli-watchdog-missing",
+  "title": "CheckViaCli 注释承诺「40s 看门狗防 CLI 挂住后永久沉默」，实现是无超时的 ReadToEnd+WaitForExit——modeldock update --check 子进程挂住则 _checkingUpdate 永久为 true，更新菜单永久置灰「检查中…」，只能杀托盘进程",
+  "reviewRef": "b338cb1^",
+  "fixedBy": "b338cb1",
+  "files": ["scripts/tray/ModelDockTray.cs"],
+  "expect": ["看门狗", "40s"],
+  "note": "任务卡 10 修复（b338cb1，三处之一）。修复 = RunCliWithWatchdog（WaitForExit(timeout) 超时 kill + FinishCheck 复位 UI）并消除双管道顺序 ReadToEnd 死锁（异步并行排空），CheckViaCli/StartCleanCli 共用。审查侧教训：注释声称的防御机制不存在即「它撒谎」，与缺陷同罪；文档/注释承诺的超时、重试、兜底要逐个对到实现行——grep 注释里的承诺词（看门狗/超时/防）再找对应代码是机械可查的审查动作"
+}
