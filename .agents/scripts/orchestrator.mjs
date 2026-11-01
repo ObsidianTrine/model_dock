@@ -1840,7 +1840,11 @@ async function cmdNightly(repoRoot, opts) {
     } catch { /* 通知失败不阻断编排 */ }
   }
   const nightlyStartedAt = new Date().toISOString();
-  writeNightlyState(repoRoot, { startedAt: nightlyStartedAt, finishedAt: null });
+  // 人工触发（--manual / TTY）不参与调度器状态机：manual 完成态若覆盖 finishedAt，
+  // 当晚的 02:30 调度触发会因「距上次完成 <20h 且非人工」被双跑防护误挡——人工跑
+  // 不该占用调度的运行记录（副作用：若上次调度 run 被中断，manual 跑后下次调度会
+  // 多报一次 nightly_recovered，无害）。
+  if (!manual) writeNightlyState(repoRoot, { startedAt: nightlyStartedAt, finishedAt: null });
   log(`════════ nightly 巡检 ${new Date().toISOString()} ════════`);
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -1901,7 +1905,8 @@ async function cmdNightly(repoRoot, opts) {
   const pending = listCards(root, 'pending');
   // 正常结束才落 finishedAt：异常中断保持「未收尾」态——下次触发按 nightly_recovered
   // 接续重试，不会被 20h 双跑防护误挡（失败的那一晚不该被当成「已经跑过了」）。
-  if (!errMsg) {
+  // manual 同样不写（见上方 manual 状态机说明）。
+  if (!errMsg && !manual) {
     writeNightlyState(repoRoot, {
       startedAt: nightlyStartedAt,
       finishedAt: new Date().toISOString(),
