@@ -193,7 +193,19 @@ function matchedAssetSize(m: ReleaseManifest): number | null {
 }
 
 export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusPayload> {
-  const resolved = await resolveTokenAndRepo(rt.config)
+  // token_ref 读取失败（macOS launchd/SSH 会话外钥匙环锁定是现实场景；手编 config.toml
+  // 把 token_ref 写成非串亦然）不再陪葬状态端点：同链路的 kickUpdateCheck 有 try/catch，
+  // 这里此前裸调——SecretsError 在 200 writeHead 后上抛会把 60s 轮询的 current/checking/
+  // progress 等非密钥信息全部带走（评测集 runs/2026-10-31-gateway-state-rmw.md 问题 1）。
+  // 降级为 configured=false + lastError 透出；只读路径不改写内存态 state.lastError。
+  let configured = false
+  let statusError: string | null = null
+  try {
+    const resolved = await resolveTokenAndRepo(rt.config)
+    configured = !!resolved?.token
+  } catch (e) {
+    statusError = (e as Error).message
+  }
   const latest = state.manifest?.version ?? null
   const available = !!(latest && compareVersions(latest, VERSION) > 0)
   // 说明在这里降级一次：控制台的更新卡片是纯文本框（不引 markdown 渲染器），标记裸露会很难看。
@@ -202,10 +214,10 @@ export async function getUpdateStatus(rt: GatewayRuntime): Promise<UpdateStatusP
   const notes = available && state.manifest?.notes ? notesToPlain(state.manifest.notes).trim() : ''
   return {
     current: VERSION,
-    configured: !!resolved?.token,
+    configured,
     checking: state.checking,
     lastCheckedAt: state.lastCheckedAt,
-    lastError: state.lastError,
+    lastError: state.lastError ?? statusError,
     latest,
     available,
     notes: notes || null,

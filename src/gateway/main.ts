@@ -8,7 +8,7 @@ import { localIsoTs } from '../util/time.js'
 import { gatewayStatePath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
-import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, writeGatewayState } from './state.js'
+import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, startupGatewayState, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
 import { warmupOverview } from './overview-view.js'
 import { listenWithRetry } from './shared.js'
@@ -136,16 +136,21 @@ export async function startForeground(portOverride?: number): Promise<void> {
       console.error(t('[modeldock] 手机控制台启动失败：{msg}', '[modeldock] Failed to start mobile console: {msg}', { msg: (e as Error).message }))
     }
   }
-  await writeGatewayState({
-    pid: process.pid,
-    port: listenPort,
-    admin_token: adminToken,
-    ...(previousDevices?.length ? { devices: previousDevices } : {}),
-    ...(lanToken ? { lan_token: lanToken } : {}),
-    ...(rt.lan ? { lan_port: rt.lan.port } : {}),
-    // 与 health 端点同源（rt.startedAt）：gatewayLive 靠两者一致验证"这是真的网关"而非 pid 复用者
-    started_at: localIsoTs(new Date(rt.startedAt)),
-  })
+  // 整包重写经 startupGatewayState 组装：devices 之外 update_check 也从既有状态保留——
+  // 此前挑字段重写把它抹掉，下方 startBootUpdateCheck 的 restoreUpdateCheckState 读到的
+  // 永远是空（评测集 runs/2026-10-31-gateway-state-rmw.md 问题 2，2026-11-02 修复）
+  await writeGatewayState(
+    startupGatewayState({
+      existing,
+      pid: process.pid,
+      port: listenPort,
+      adminToken,
+      lanToken,
+      lanPort: rt.lan?.port,
+      // 与 health 端点同源（rt.startedAt）：gatewayLive 靠两者一致验证"这是真的网关"而非 pid 复用者
+      startedAt: localIsoTs(new Date(rt.startedAt)),
+    })
+  )
   if (listenPort !== requestedPort) {
     console.error(
       t(
