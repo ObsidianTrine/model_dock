@@ -11,7 +11,7 @@ import {
   schedulerLockPath,
   SCHED_LOCK_ENV,
 } from '../../.agents/scripts/orchestrator/run-lock.mjs'
-import { notify, buildNightlySummary, NIGHTLY_WEBHOOK_ENV } from '../../.agents/scripts/orchestrator/notify.mjs'
+import { notify, buildNightlySummary, webhookPayload, NIGHTLY_WEBHOOK_ENV } from '../../.agents/scripts/orchestrator/notify.mjs'
 import { cardText, mkRepo, runOrch, tryOrch } from './helpers.js'
 
 const savedEnv: Record<string, string | undefined> = {}
@@ -180,6 +180,26 @@ describe('hardening > nightly 通知（notify）', () => {
       expect(r.delivered.join('\n')).toContain('osascript')
       expect(r.delivered.join('\n')).not.toContain('"引号"') // 引号剥除，防 osascript 注入
     }
+  })
+
+  it('webhookPayload：飞书/企业微信/Slack 按 URL 域名适配各自消息格式，其余端点裸 JSON 兜底', () => {
+    const feishu = JSON.parse(webhookPayload('https://open.feishu.cn/open-apis/bot/v2/hook/xxx', 'T', 'B', 'ts'))
+    expect(feishu).toEqual({ msg_type: 'text', content: { text: 'T\nB' } })
+    const lark = JSON.parse(webhookPayload('https://open.larksuite.com/open-apis/bot/v2/hook/xxx', 'T', 'B', 'ts'))
+    expect(lark).toEqual({ msg_type: 'text', content: { text: 'T\nB' } })
+    const wecom = JSON.parse(webhookPayload('https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k', 'T', 'B', 'ts'))
+    expect(wecom).toEqual({ msgtype: 'text', text: { content: 'T\nB' } })
+    const slack = JSON.parse(webhookPayload('https://hooks.slack.com/services/a/b/c', 'T', 'B', 'ts'))
+    expect(slack).toEqual({ text: 'T\nB' })
+    const bare = JSON.parse(webhookPayload('https://example.com/hook', 'T', 'B', 'ts'))
+    expect(bare).toEqual({ title: 'T', body: 'B', ts: 'ts' })
+  })
+
+  it('notify dryRun：飞书 URL 走适配后的 payload（实际发送同形态，不再发裸 JSON）', async () => {
+    withEnv({ [NIGHTLY_WEBHOOK_ENV]: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' })
+    const r = await notify({ title: 'T', body: 'B', dryRun: true })
+    expect(r.delivered.join('\n')).toContain('"msg_type":"text"')
+    expect(r.delivered.join('\n')).toContain('open.feishu.cn')
   })
 
   it('notify 无任何配置时静默（delivered 为空或仅平台通道）', async () => {
