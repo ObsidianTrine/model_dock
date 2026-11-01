@@ -27,11 +27,16 @@ node .agents/scripts/feature-branch.mjs start <task-id>
 
 ### 3. 自测
 
+**只跑与改动相关的测试用例**（2026-11-02 分层规则：全量套件慢，日常交付不做全量回归）：
+
 ```bash
-cd .agents/worktrees/<task-id> && <testCmd>    # testCmd 来自 .agents/workflow.json（本仓库为 npm test）
+npx vitest run test/<相关测试文件>.test.ts                              # 产品套件（test/*.test.ts）
+npx vitest run -c vitest.workflow.config.ts test/orchestrator/<相关文件>.test.ts   # 编排器/工作流套件（test/orchestrator/**）
 ```
 
-- 必须全绿才能进入合并步骤（项目 AGENTS.md「判定边界」要求）。
+需要更窄时叠加 `-t "用例名关键词"`。相关用例全绿才能进入合并步骤（项目 AGENTS.md「判定边界」）；涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（见 AGENTS.md「vitest 隔离模型」——单独跑绿 ≠ 组合绿）。
+
+- **范围分层**：全量 `npm test` / `npm run test:workflow` 保留给版本发布、develop→main 合并等大节点与 CI 门禁；finish 的自动 `testCmd`（合并门禁，一次性）保持现状不动。
 - 测试期间遵守项目自身的红线约定（见项目 AGENTS.md，如端口/实例/环境限制）。
 
 ### 4. 合并回 develop（串行、保留完整信息）
