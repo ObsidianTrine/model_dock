@@ -304,6 +304,49 @@ describe('doctor 钥匙环故障 vs 条目缺失区分（REVIEW-19）', () => {
   })
 })
 
+describe('doctor 坏 key_ref 收口（卡 30：700e29f 同根残留，2026-11-02 复查）', () => {
+  it('active provider 的 key_ref 非串：报 bad + set-key hint，不落「解锁钥匙环」warn 口径', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 123 as unknown as string }
+        c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+        c.active_profile = 'main'
+      })
+      await cmdDoctor({ json: true }, noProbe) // 此前 detectForeignCipherRefs 与 provider.key 路径穿透 SecretsError
+      const f = jsonFindings().findings.find((x) => x.id === 'provider.key')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('key_ref 非法')
+      expect(f?.hint).toContain('set-key')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('active provider 的 key_ref 缺失（undefined）：不崩、报 bad；其余检查面照常产出', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: undefined as unknown as string }
+        c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+        c.active_profile = 'main'
+      })
+      await cmdDoctor({ json: true }, noProbe)
+      const findings = jsonFindings().findings
+      const f = findings.find((x) => x.id === 'provider.key')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('undefined')
+      expect(findings.some((x) => x.id === 'profile.active' && x.level === 'ok')).toBe(true) // 其余面照常
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('doctor 跨机密文引用（REVIEW-18）', () => {
   it('secrets.json 含异平台前缀密文 + key_ref 内嵌密文：报 bad 并点名服务', async () => {
     const h = fakeHome()

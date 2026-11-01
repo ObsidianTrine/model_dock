@@ -176,6 +176,28 @@ describe('cmdProviderList', () => {
   })
 })
 
+describe('cmdProviderList 坏 key_ref 降级（卡 30）', () => {
+  it('坏 key_ref 条目不炸整表：降级 (不可读)，其余条目照常', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      await mutateConfig((c) => {
+        c.providers['pv-bad'] = { name: 'BAD', base_url: 'https://bad.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 123 as unknown as string }
+        c.providers['pv-none'] = { name: 'NONE', base_url: 'https://none.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: undefined as unknown as string }
+      })
+      await cmdProviderList() // 此前单坏条目 getSecret 抛 SecretsError 穿透整条命令
+      const out = logs.join('\n')
+      expect(out).toContain('pv-bad')
+      expect(out).toContain('pv-none')
+      expect(out).toContain('(不可读)')
+      expect(out).toContain('pv ') // 好条目照常显示
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('cmdProviderRm', () => {
   it('不存在：exit(1)', async () => {
     const h = fakeHome()

@@ -29,12 +29,14 @@ export async function applyImport(
     existingByUrl.set(norm, arr)
   }
   const backend = cfg.security?.store ?? (await defaultStore())
-  /** 现有同 URL 服务里是否有同一 key？有则返回其 pid（视为重复）。 */
+  /** 现有同 URL 服务里是否有同一 key？有则返回其 pid（视为重复）。
+   *  坏 key_ref（缺字段/非串/解不开，700e29f 同根残留）降级为 ''：只跳过该条的 key 比对，
+   *  不让单条坏数据卡死整个 import/init（2026-11-02 复查）。 */
   const findByKey = async (list: { pid: string; key?: string }[], key: string): Promise<string | null> => {
     for (const e of list) {
       if (e.key === undefined) {
         const ref = cfg.providers[e.pid]?.key_ref
-        e.key = ref ? (await getSecret(ref)) ?? '' : ''
+        e.key = ref && typeof ref === 'string' ? ((await getSecret(ref).catch(() => null)) ?? '') : ''
       }
       if (e.key === key) return e.pid
     }
