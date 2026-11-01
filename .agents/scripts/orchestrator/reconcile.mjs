@@ -6,11 +6,18 @@
 //           响应旁路解析（src/gateway/usage.ts），网关只看得到经它转发的流量。
 // 对账 = 把任务事件时间窗（worker_spawned 首条 → merged/failed 尾条）投影到网关日志，
 // 汇总实测用量与自报用量对比。worker 走网关（吃狗粮）时两本账应该贴近；直连上游时实测账为 0。
+//
+// 状态对账（reconcileCardStates）：卡状态 vs git 现实。真实数据发现 running/ 里有卡
+// 实际已 git 合并但卡没落 merged/（状态机被人工旁路，如手工 git merge 后忘了 moveCard）——
+// 用 `git log --merges <baseBranch>` 解析「已合并分支」集合对照队列各状态目录：
+//   已合并未落位（分支已合并、卡不在 merged/）→ 默认只读列出；--fix-states 落位并写事件；
+//   账面合并但 git 无实证（卡在 merged/、无对应 merge 提交）→ 警告级（可能是 squash 或改史）。
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { listCards } from './queue.mjs';
-import { readEvents } from './events.mjs';
+import { STATES, cardPath, listCards, moveCard } from './queue.mjs';
+import { appendEvent, logDir, readEvents } from './events.mjs';
 import { loadWorkflowConfig } from '../workflow-config.mjs';
 
 /**
@@ -117,4 +124,82 @@ export function reconcileAll(repoRoot, queueRootDir) {
   }
   out.sort((a, b) => b.divergence - a.divergence);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// 状态对账：卡状态 vs git 现实（状态机被人工旁路的检测，见文件头注）
+// ---------------------------------------------------------------------------
+
+/**
+ * 从 git merge 提交标题解析已合并的 feature 分支任务 id 集合。
+ * 形态：`Merge branch 'feature/<id>'`（finish 的默认消息）；容忍单双引号、
+ * 分支分隔符差异（[\\/]）与 `into <branch>` 尾巴（合并进非默认分支时 git 会追加）。
+ * 非任务 id 字符集（小写字母/数字/短横线）的分支名不收——队列 id 本就受此约束。
+ */
+export function parseMergedBranchIds(subjects) {
+  const lines = Array.isArray(subjects) ? subjects : String(subjects ?? '').split('\n');
+  const ids = new Set();
+  const re = /^Merge branch ['"]feature[\\/]([a-z0-9][a-z0-9-]*)['"](?:\s|$)/;
+  for (const line of lines) {
+    const m = re.exec(line.trim());
+    if (m) ids.add(m[1]);
+  }
+  return ids;
+}
+
+/**
+ * 把「已合并未落位」的卡落位 merged/。白名单不允许的迁移（pending/blocked/failed →
+ * merged）走直接 rename——对账修复是状态机被旁路后的事后纠正，与 abandon 直落 failed/
+ * 同一兜底地位；git 已合并是比迁移白名单更高的事实。
+ */
+function forceSettleCard(root, id, from) {
+  const src = cardPath(root, from, id);
+  if (!fs.existsSync(src)) return false; // 并发变动：卡已不在原状态目录，跳过
+  try {
+    moveCard(root, id, from, 'merged');
+  } catch {
+    fs.renameSync(src, cardPath(root, 'merged', id));
+  }
+  return true;
+}
+
+/**
+ * 状态对账：git 合并现实 vs 队列卡落位。
+ *   - 分支已合并但卡不在 merged/ → mergedNotSettled [{id, state}]（含当前状态）；
+ *   - 卡在 merged/ 但 git 无对应 merge 提交 → settledNotMerged [{id}]（警告级，可能是
+ *     squash 或改史——squash 不产生 merge 提交，属已知盲区，只提示不强修）。
+ * opts.fix = true 时把「已合并未落位」的卡落位 merged/ 并写 state_reconciled 事件；
+ * opts.baseBranch 覆盖 workflow.json 的基准分支（测试注入用）。
+ */
+export function reconcileCardStates(repoRoot, queueRootDir, opts = {}) {
+  const baseBranch = opts.baseBranch ?? loadWorkflowConfig(repoRoot).baseBranch ?? 'develop';
+  let subjects;
+  try {
+    subjects = execFileSync('git', ['log', '--merges', '--pretty=%s', baseBranch], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (e) {
+    throw new Error(`git log --merges 读取失败（基准分支 ${baseBranch}）：${String(e?.message ?? e).trim()}`);
+  }
+  const mergedIds = parseMergedBranchIds(subjects);
+  const mergedNotSettled = [];
+  for (const state of STATES) {
+    if (state === 'merged') continue;
+    for (const id of listCards(queueRootDir, state)) {
+      if (mergedIds.has(id)) mergedNotSettled.push({ id, state });
+    }
+  }
+  const settledNotMerged = listCards(queueRootDir, 'merged')
+    .filter((id) => !mergedIds.has(id))
+    .map((id) => ({ id }));
+  const result = { baseBranch, mergedIds: [...mergedIds].sort(), mergedNotSettled, settledNotMerged, fixed: [] };
+  if (opts.fix) {
+    for (const c of mergedNotSettled) {
+      appendEvent(logDir(repoRoot, c.id), 'state_reconciled', { from: c.state, to: 'merged', base_branch: baseBranch });
+      if (forceSettleCard(queueRootDir, c.id, c.state)) result.fixed.push(c.id);
+    }
+  }
+  return result;
 }

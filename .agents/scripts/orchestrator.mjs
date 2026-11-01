@@ -42,7 +42,8 @@ import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
-import { gatewayLogsDir, reconcileTask, reconcileAll } from './orchestrator/reconcile.mjs';
+import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates } from './orchestrator/reconcile.mjs';
+import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
@@ -420,6 +421,59 @@ async function cmdRun(repoRoot, taskId, opts) {
   const trackPid = (e) => {
     if (e.type === 'worker_spawned') livePid = e.pid;
   };
+
+  // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
+  // 实质进展。observe（缺省）只记 watchdog_suspect 事件；actuate 连续 2 次 suspect 走既有
+  // stuck 熔断路径 kill→blocked。检查会话与 worker/reviewer 完全隔离（只读、不记账、无
+  // 事件）；防重入/次数上界/错误静默的纯逻辑在 createWatchdogState。mock 后端跳过（mock
+  // spawn 会写文件——判定无意义还污染 worktree 与门禁）。
+  const watchdogState = createWatchdogState(cfg.watchdog);
+  let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
+  let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
+  const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
+  const runWatchdogCheck = async (session) => {
+    try {
+      const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn });
+      if (session !== workerSessionSeq || !workerInFlight) return; // 会话已翻篇/已收尾：结论作废（任务落位后不再触发）
+      const live = findCard(root, taskId);
+      if (!live || live.state !== 'running') return; // 卡已落位：不动作
+      if (verdict.error) {
+        // 永不静默，但防刷屏：watchdog_error 每任务最多记 3 条，之后静默
+        if (watchdogState.recordError()) appendEvent(qdir, 'watchdog_error', { error: String(verdict.error).slice(0, 300) });
+        return;
+      }
+      const action = watchdogState.report(verdict.progressing, verdict.reason);
+      if (action === 'suspect') {
+        appendEvent(qdir, 'watchdog_suspect', { turn: watchdogState.snapshot().turns, reason: String(verdict.reason).slice(0, 300) });
+        log(`⚠ 进展看门狗（observe）：worker 疑似空转——${verdict.reason}`);
+      } else if (action === 'circuit_break') {
+        log(`⛔ 进展看门狗（actuate）：连续 2 次判定无实质进展——${verdict.reason}`);
+        appendEvent(qdir, 'circuit_breaker', { reason: 'watchdog', detail: String(verdict.reason).slice(0, 300) });
+        if (livePid) {
+          log(`⏱ 看门狗熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
+          killTree(livePid);
+        }
+        moveCard(root, taskId, 'running', 'blocked');
+        await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        die('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+      }
+    } catch {
+      // 看门狗自身异常绝不影响编排；「永不静默」由上面的 watchdog_error 事件承担
+    } finally {
+      watchdogState.endCheck();
+    }
+  };
+  const onWatchdogTurn = () => {
+    const action = watchdogState.onTurn();
+    if (action === 'disabled') {
+      appendEvent(qdir, 'watchdog_disabled', { checks: watchdogState.snapshot().checks });
+      return;
+    }
+    if (action !== 'check' || !watchdogSpawn) return;
+    watchdogState.beginCheck();
+    const session = workerSessionSeq;
+    void runWatchdogCheck(session); // fire-and-forget：流消费不等待 LLM 判断
+  };
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-prompt-')), 'prompt.md');
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'settings.json');
   // reviewer 临时目录（orch-review-* / orch-review-settings-*）：审查阶段每轮新建一个，
@@ -448,6 +502,8 @@ async function cmdRun(repoRoot, taskId, opts) {
       for (;;) {
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
         appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens });
+        workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
+        workerInFlight = true; // 看门狗：spawn 在跑标记
         {
           fs.writeFileSync(promptFile, promptText);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
@@ -461,12 +517,14 @@ async function cmdRun(repoRoot, taskId, opts) {
               appendEvent(qdir, e.type, e);
               trackPid(e);
               if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
+              if (e.type === 'worker_turn' && watchdogSpawn) onWatchdogTurn(); // 看门狗钩子行（observe/actuate 见 watchdog.mjs）
             },
             settingsFile,
             model: effWorkerModel, // 仅 claude 系生效（--model）；zcode-headless 忽略（模型跟随 ZCode 默认）
             envPatch: tierEnv, // tier 凭据注入（claude：settings.env + 子进程 env；zcode：子进程 env）
           });
           livePid = null;
+          workerInFlight = false; // 看门狗：worker 会话收尾（在途结论回报时作废）
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
           if (budget.tripped) {
@@ -1307,39 +1365,66 @@ function printDriftReport(repoRoot) {
  * reconcile——狗粮对账（Phase 2 展望项落地，docs 10.7）：worker 自报账（events
  * budget_snapshot）vs 网关实测账（转发日志 usage 字段）。worker 流量走本机网关时
  * 两本账应贴近；分歧大 = 上游漏报/网关漏解析/直连绕过网关。只读报告，不做任何动作。
+ * 状态对账（reconcileCardStates）：卡状态 vs git 现实——「已合并未落位」默认只读列出，
+ * --fix-states 落位 merged/（状态机被人工旁路的修复）。两节独立，用量对账未启用也照跑。
  */
-function cmdReconcile(repoRoot, taskId) {
+function cmdReconcile(repoRoot, taskId, opts = {}) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
-  // 对账未启用（workflow.json gatewayLogDir 未配置且无 env 重定向）→ 显式说明，不落到
+  const flags = opts.flags ?? new Set();
+  const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
+  // 用量对账未启用（workflow.json gatewayLogDir 未配置且无 env 重定向）→ 显式说明，不落到
   // 「尚无已合并任务可对账」的误导输出（任务明明有，是对账没开）
   if (!gatewayLogsDir(loadWorkflowConfig(repoRoot))) {
     log('未启用网关对账：.agents/workflow.json 未配置 gatewayLogDir（网关请求日志目录，支持 ~/ 展开）。配置后重新运行本命令。');
+  } else if (taskId) {
+    const found = findCard(root, taskId);
+    if (!found) die(`任务 "${taskId}" 不在队列中。`);
+    log(`任务 ${taskId} 对账（时间窗内经网关转发的成功请求）：`);
+    show(reconcileTask(repoRoot, taskId, root));
+  } else {
+    const all = reconcileAll(repoRoot, root);
+    if (!all.length) {
+      log('尚无已合并任务可对账。');
+    } else {
+      log(`已合并任务对账（${all.length} 个，按分歧降序；分母取两账中较大者）：`);
+      for (const r of all) show(r);
+    }
+  }
+  // ---- 状态对账（排在用量对账之后）：卡状态 vs git 现实 ----
+  let sr;
+  try {
+    sr = reconcileCardStates(repoRoot, root, { fix: flags.has('--fix-states') });
+  } catch (e) {
+    log(`⚠ 状态对账跳过：${e?.message ?? e}`);
     return;
   }
-  const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
-  const show = (r) => {
+  if (sr.mergedNotSettled.length) {
+    log(`状态对账 · 已合并未落位（分支已 git 合并但卡不在 merged/，共 ${sr.mergedNotSettled.length} 张）：`);
+    for (const c of sr.mergedNotSettled) log(`  ${c.id.padEnd(24)} 当前状态 ${c.state}`);
+    if (flags.has('--fix-states')) {
+      for (const id of sr.fixed) log(`  已落位：${id}（→ merged/，事件 state_reconciled）`);
+    } else {
+      log('  修复：node .agents/scripts/orchestrator.mjs reconcile --fix-states');
+    }
+  } else {
+    log('状态对账 · 已合并未落位：无');
+  }
+  if (sr.settledNotMerged.length) {
+    log(`⚠ 状态对账 · 账面合并但 git 无实证（可能是 squash 合并或改史，共 ${sr.settledNotMerged.length} 张）：`);
+    for (const c of sr.settledNotMerged) log(`  ${c.id}`);
+  } else {
+    log('状态对账 · 账面合并但 git 无实证：无');
+  }
+
+  function show(r) {
     if (r.skipped) return log(`  ${r.reason}`);
     log(
       `  ${r.taskId.padEnd(24)} 自报 ${fmtK(r.selfTotal)}（in ${fmtK(r.selfReported.tokensIn)} / out ${fmtK(r.selfReported.tokensOut)}）` +
         `  网关实测 ${fmtK(r.gateway.total)}（${r.gateway.requests} 次转发，缓存读 ${fmtK(r.gateway.cacheRead)}）` +
         `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}`
     );
-  };
-  if (taskId) {
-    const found = findCard(root, taskId);
-    if (!found) die(`任务 "${taskId}" 不在队列中。`);
-    log(`任务 ${taskId} 对账（时间窗内经网关转发的成功请求）：`);
-    show(reconcileTask(repoRoot, taskId, root));
-    return;
   }
-  const all = reconcileAll(repoRoot, root);
-  if (!all.length) {
-    log('尚无已合并任务可对账。');
-    return;
-  }
-  log(`已合并任务对账（${all.length} 个，按分歧降序；分母取两账中较大者）：`);
-  for (const r of all) show(r);
 }
 
 /**
@@ -1811,7 +1896,7 @@ function usage() {
                                           nightly 定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
-  reconcile [task-id]                      用量对账：worker 自报 token vs 网关实测（merged 任务，分歧降序；需项目网关支持）
+  reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
   resume <task-id> [--backend mock]       崩溃任务带恢复上下文续做
   abandon <task-id>                       放弃任务（worktree 清理按 Rescue 手册人工做）
   approve <task-id>                       人工闸门：批准合并（调 feature-branch finish）
@@ -1911,7 +1996,7 @@ async function main() {
     case 'drift':
       return cmdDrift(repoRoot, opts);
     case 'reconcile':
-      return cmdReconcile(repoRoot, args[0]);
+      return cmdReconcile(repoRoot, args[0], opts);
     case 'status':
       return cmdStatus(repoRoot, args[0]);
     case 'resume':
