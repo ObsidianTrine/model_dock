@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Agent, ProxyAgent } from 'undici'
 import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
+import http from 'node:http'
+import { sendError } from '../src/gateway/admin-shared.js'
 import { rewriteModel, topLevelModel, forwardToUpstream, UpstreamError } from '../src/gateway/relay.js'
 import { buildDispatcher } from '../src/gateway/proxy.js'
 import { createUsageTap, type UsageStats } from '../src/gateway/usage.js'
@@ -321,6 +323,56 @@ describe('createUsageTap：预过滤与多字节边界', () => {
     const head = Buffer.from('{"content":"模', 'utf8')
     const usage = await feedTap([buf.subarray(0, head.length), buf.subarray(head.length)], 'application/json')
     expect(usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 })
+  })
+
+  it('SSE 行缓冲封顶（卡 31）：超长无换行 chunk 触发封顶，后续 usage 不再解析（只透传）', async () => {
+    // 2MB chunk 远超 Transform highWaterMark：feedTap 不消费 readable 侧会背压卡死 finish，
+    // 这里自行接线并 resume() 排空
+    const tap = createUsageTap('text/event-stream') as Transform & { getUsage: () => UsageStats }
+    tap.resume()
+    tap.write(Buffer.from('data: ' + 'x'.repeat(1024 * 1024 + 16), 'utf8'))
+    tap.write(Buffer.from('data: {"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n', 'utf8'))
+    const usage = await new Promise<UsageStats>((resolve) => {
+      tap.on('finish', () => resolve(tap.getUsage()))
+      tap.end()
+    })
+    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+  })
+
+  it('封顶阈值内的正常 SSE 不受影响（对照）', async () => {
+    const usage = await feedTap([Buffer.from('data: {"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n', 'utf8')], 'text/event-stream')
+    expect(usage.input_tokens).toBe(5)
+    expect(usage.output_tokens).toBe(2)
+  })
+})
+
+describe('sendError：请求体未读完统一 connection: close（卡 31）', () => {
+  function stubRes(readableEnded: boolean) {
+    const headers: Record<string, string> = {}
+    const res = {
+      req: { readableEnded },
+      setHeader: (k: string, v: string) => {
+        headers[k] = v
+      },
+      getHeader: (k: string) => headers[k],
+      writeHead: () => {},
+      end: () => {},
+    } as unknown as http.ServerResponse
+    return { res, headers }
+  }
+
+  it('429/401/403/400 早退应答断开 keep-alive；读完的请求不断；413 特判保留', () => {
+    for (const status of [429, 401, 403, 400]) {
+      const { res, headers } = stubRes(false)
+      sendError(res, status, 'm')
+      expect(headers['connection']).toBe('close')
+    }
+    const done = stubRes(true)
+    sendError(done.res, 500, 'm')
+    expect(done.headers['connection']).toBeUndefined()
+    const over = stubRes(true)
+    sendError(over.res, 413, 'm')
+    expect(over.headers['connection']).toBe('close')
   })
 })
 

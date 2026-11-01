@@ -130,7 +130,8 @@ export interface ProviderLatencyRing {
 
 /** 单 harness 的数据面限额计数状态（内存态，rt 级；重启清零）。见 state/tokenlimits.ts。 */
 export interface TokenUsageState {
-  /** rpm 滑动窗口起点 */
+  /** rpm 固定窗口起点（实现为整窗清零：now - rpmStart > 60s 时 rpmCount 归零——窗口边界
+   *  附近存在 2× 突发空间，对「熔断丝」定位可接受；如需精确限流改双桶/真滑动窗口） */
   rpmStart: number
   /** 窗口内请求数（含失败/中止——它们同样是上游压力） */
   rpmCount: number

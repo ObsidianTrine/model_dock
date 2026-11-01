@@ -29,7 +29,11 @@ export function createUsageTap(contentType: string | undefined): Transform & { g
   let sseBuf = ''
   let jsonBuf = ''
   let jsonOverflow = false
+  let sseOverflow = false
   const JSON_LIMIT = 1024 * 1024
+  // SSE 行缓冲与 JSON 路径同款封顶：故障中转/异常代理发出不含换行的超长「行」时，
+  // 每个在途请求的缓冲曾无界增长直到流结束（2026-11-02 复查 P2-2）
+  const SSE_LIMIT = 1024 * 1024
   // 按 UTF-8 解码并持有跨 chunk 的不完整多字节序列：直接 chunk.toString('utf8') 会把被 chunk
   // 边界截断的多字节字符变成替换符，含中文 content 的 usage 行会因此解析失败、用量漏记
   const decoder = new StringDecoder('utf8')
@@ -76,12 +80,20 @@ export function createUsageTap(contentType: string | undefined): Transform & { g
     transform(chunk: Buffer, _enc: BufferEncoding, cb: TransformCallback) {
       try {
         if (isSse) {
-          sseBuf += decoder.write(chunk)
-          let idx: number
-          while ((idx = sseBuf.indexOf('\n')) >= 0) {
-            const line = sseBuf.slice(0, idx)
-            sseBuf = sseBuf.slice(idx + 1)
-            feedSseLine(line)
+          if (!sseOverflow) {
+            sseBuf += decoder.write(chunk)
+            if (sseBuf.length > SSE_LIMIT) {
+              // 封顶后丢弃缓冲只透传：该请求的 usage 统计缺失、转发不受影响
+              sseBuf = ''
+              sseOverflow = true
+            } else {
+              let idx: number
+              while ((idx = sseBuf.indexOf('\n')) >= 0) {
+                const line = sseBuf.slice(0, idx)
+                sseBuf = sseBuf.slice(idx + 1)
+                feedSseLine(line)
+              }
+            }
           }
         } else if (isJson) {
           if (!jsonOverflow) {
