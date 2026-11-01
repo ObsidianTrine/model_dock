@@ -131,6 +131,69 @@ describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
     expect(gitSubcommand('git -c a=b commit -m x')).toBe('commit')
     expect(gitSubcommand('npm test')).toBeNull()
   })
+
+  // ---- 卡 27（2026-10-31 评测集七类旁路收口，runs/2026-10-31-policy-newline-shell-wrap.md 审出）----
+
+  it('卡27-1：env 自身 flag 占住命令位（env -i / env -- / env -u X）不再漏拦', () => {
+    expect(gitSubcommand('env -i git push origin main')).toBe('push')
+    expect(evaluateCommand('env -i git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env -- git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env -u FOO git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('/usr/bin/env -i git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env -S "FOO=1 git push origin main"')).toMatchObject({ allowed: false, rule: 'publish' })
+    // env 包装的 shell -c 同步跟进；无害查询不误伤
+    expect(evaluateCommand("env -i bash -c 'git push origin main'")).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env -i git status').allowed).toBe(true)
+    expect(evaluateCommand('env FOO=1 npm test').allowed).toBe(true)
+  })
+
+  it('卡27-2：命令替换与子壳载荷递归评估', () => {
+    expect(evaluateCommand('echo $(git push origin main)')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('echo `git push origin main`')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('(git push origin main)')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('echo hi; (git push origin main)')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('(cd repo && git push origin main)')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('echo $(git status)').allowed).toBe(true)
+    expect(evaluateCommand('echo $(date) && npm test').allowed).toBe(true)
+  })
+
+  it('卡27-3：xargs / heredoc / here-string 外层包装', () => {
+    expect(evaluateCommand("find . -name '*.log' | xargs git push origin main")).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('xargs -n 1 git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(gitSubcommand('xargs -0 git push origin main')).toBe('push')
+    // heredoc 体逐行成段（换行切段既有语义），补回归
+    expect(evaluateCommand('bash -s <<EOF\ngit push origin main\nEOF')).toMatchObject({ allowed: false, rule: 'publish' })
+    // here-string 单行形态
+    expect(evaluateCommand("bash -s <<< 'git push origin main'")).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('echo hi | xargs echo hi').allowed).toBe(true)
+  })
+
+  it('卡27-4：npm publish 变体形态（flag 隔开 publish 不再漏拦）', () => {
+    expect(evaluateCommand('npm --registry=https://registry.npmmirror.com publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('npm -w pkg publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('npm --workspace=pkg publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('yarn publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('pnpm publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    // 保守近似：脚本名/包名恰为 publish 也拦（落安全侧）
+    expect(evaluateCommand('npm run publish').allowed).toBe(false)
+    expect(evaluateCommand('npm test').allowed).toBe(true)
+    expect(evaluateCommand('npm install left-pad').allowed).toBe(true)
+  })
+
+  it('卡27-5：status/logs/list 豁免段级判定——复合命令不再借光', () => {
+    expect(evaluateCommand('gateway start --port 8687 && curl http://127.0.0.1:8687/status')).toMatchObject({ allowed: false, rule: 'port' })
+    // 前段 --port 存在不再豁免后段的缺省端口启动
+    expect(evaluateCommand('node x.js --port 18901 && modeldock ui')).toMatchObject({ allowed: false, rule: 'port' })
+    // 单段查询类豁免不回退
+    expect(evaluateCommand('gateway status 8687').allowed).toBe(true)
+    expect(evaluateCommand('gateway logs 8687').allowed).toBe(true)
+  })
+
+  it('卡27-6：破坏性词表补 PowerShell Stop-Process；端口与 kill 跨段保留全文兜底', () => {
+    expect(evaluateCommand('powershell -Command "Stop-Process -Id (Get-NetTCPConnection -LocalPort 8687).OwningProcess"')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('lsof -i :8687 -t | xargs kill')).toMatchObject({ allowed: false, rule: 'port' })
+    expect(evaluateCommand('echo 8687 && gateway status').allowed).toBe(true)
+  })
 })
 
 describe('policy.mjs > 基准分支直改（evaluateBranchEdit）', () => {
@@ -236,6 +299,22 @@ describe('policy.mjs > 改动分级（classifyChange，Phase 2 自动合并裁�
 
   it('空改动 L0', () => {
     expect(classifyChange([]).level).toBe('L0')
+  })
+
+  it('卡27-7：守护器自身/评测题库不再 L0 自动合并（守卫自持性）', () => {
+    for (const f of [
+      '.agents/scripts/policy.mjs',
+      '.agents/hooks/policy-zcode.mjs',
+      '.agents/skills/dockmaster/SKILL.md',
+      '.agents/workflow.json',
+      '.agents/review-evals/cases/x.md',
+    ]) {
+      expect(classifyChange([f]).level).toBe('L2')
+    }
+    // 评测生成物与工作流/规范文档保持 L0
+    expect(classifyChange(['.agents/review-evals/runs/r1.md']).level).toBe('L0')
+    expect(classifyChange(['.agents/workflows/feature-branch.md']).level).toBe('L0')
+    expect(classifyChange(['.agents/conventions/ui-kit.md']).level).toBe('L0')
   })
 })
 

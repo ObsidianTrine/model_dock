@@ -17,6 +17,11 @@ export function isAlive(pid) {
 
 export function killTree(pid) {
   if (!pid || pid <= 0) return;
+  // 自杀护栏：mock 后端在进程内跑（worker_spawned 上报的 pid = orchestrator 自身），
+  // Windows taskkill /T /F 会把 orchestrator 连树杀掉——熔断现场静默消失（卡滞留
+  // running/、incident 不落盘，评测集 2026-11-02 复查实测）。真实后端的 pid 是真
+  // 子进程（claude/zcode CLI），不受此护栏影响
+  if (pid === process.pid) return;
   try {
     if (process.platform === 'win32') {
       execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
