@@ -4089,3 +4089,92 @@ describe('probe responses 协议（探针拼错协议回归）', () => {
     }
   })
 })
+
+describe('POST /_modeldock/tier-validate（编排侧权威校验数据源，admin 门内）', () => {
+  const TIER_TOKEN = 'mdk_tier_tok'
+  const LOOSE_TOKEN = 'mdk_loose_tok'
+
+  async function setup() {
+    const h = fakeHome()
+    const config: Config = {
+      version: 1,
+      active_profile: 'plain',
+      providers: {
+        A: { name: 'A', base_url: 'http://a.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k1', models: { m1: { source: 'preset' }, m2: { source: 'preset' } } },
+        C: { name: 'C', base_url: 'http://c.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k3' },
+      },
+      profiles: {
+        heavy: { provider: 'A', default_model: 'm1', tier: 'ahead-4' },
+        light: { provider: 'C', default_model: 'm', tier: 'light' },
+        plain: { provider: 'A', default_model: 'm1' },
+      },
+      harness: {
+        'tier-worker': { mode: 'gateway', route: 'heavy', token: TIER_TOKEN },
+        'loose-worker': { mode: 'gateway', route: 'default', token: LOOSE_TOKEN },
+      },
+    }
+    const rt = buildRuntime(config, 'admin-tok')
+    const server = createGatewayServer(rt, { port: 0 })
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
+    })
+    return {
+      port,
+      close: () => {
+        server.closeAllConnections?.()
+        server.close()
+        h.restore()
+      },
+    }
+  }
+
+  function post(port: number, body: unknown, admin = 'admin-tok') {
+    return fetch(`http://127.0.0.1:${port}/_modeldock/tier-validate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-modeldock-admin': admin },
+      body: JSON.stringify(body),
+    })
+  }
+
+  it('token→harness→profile 权威事实：tier 标签/模型目录/全库 tier_profiles 清单', async () => {
+    const t = await setup()
+    try {
+      const j = (await (await post(t.port, { token: TIER_TOKEN, tier: 'ahead-4' })).json()) as Record<string, any>
+      expect(j.ok).toBe(true)
+      expect(j).toMatchObject({ harness: 'tier-worker', profile: 'heavy', provider: 'A', tier: 'ahead-4', requested_tier: 'ahead-4' })
+      expect(j.models).toEqual(['m1', 'm2'])
+      expect(j.tier_profiles).toEqual({ 'ahead-4': ['heavy'], light: ['light'] }) // 无标签 profile 不进表
+    } finally {
+      t.close()
+    }
+  })
+
+  it('跟随默认路由的 token 回报当前生效 profile（无标签 → tier null）；未知 token → ok:false', async () => {
+    const t = await setup()
+    try {
+      const loose = (await (await post(t.port, { token: LOOSE_TOKEN })).json()) as Record<string, any>
+      expect(loose).toMatchObject({ ok: true, harness: 'loose-worker', profile: 'plain', tier: null }) // active_profile=plain
+      const unknown = (await (await post(t.port, { token: 'mdk_nope' })).json()) as Record<string, any>
+      expect(unknown).toEqual({ ok: false, reason: 'unknown_token' })
+    } finally {
+      t.close()
+    }
+  })
+
+  it('缺 token → 400；admin 门内（无凭据 401）', async () => {
+    const t = await setup()
+    try {
+      const noToken = await post(t.port, {})
+      expect(noToken.status).toBe(400)
+      const noAuth = await fetch(`http://127.0.0.1:${t.port}/_modeldock/tier-validate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ token: TIER_TOKEN }),
+      })
+      expect(noAuth.status).toBe(401)
+    } finally {
+      t.close()
+    }
+  })
+})

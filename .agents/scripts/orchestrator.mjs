@@ -58,7 +58,7 @@ import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProg
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
-import { resolveTier, tierEnvPatch, validateTierModel, tierDisplayName } from './orchestrator/tiers.mjs';
+import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
 
@@ -342,6 +342,30 @@ async function cmdRun(repoRoot, taskId, opts) {
   if (tier?.token && (effWorkerModel !== workerModel || effReviewModel !== reviewModel)) {
     log(`tier 模型：执行 ${effWorkerModel ?? '（默认）'} / 审查 ${effReviewModel ?? '（默认）'}`);
   }
+  // 网关权威校验（gatewayAdmin: true 开启，2026-11-02 船东授权 admin 面）：token 现在真实
+  // 解析到哪个 profile、带什么 tier 标签，网关说了算。分级处置：
+  //   tier 已打标（存在同标签 profile）但 token 指向别档/无标签 profile → 阻断（重活静默
+  //   落到别档服务正是 tier 隔离要防的事，派发前拦下；发生在任何状态迁移之前）；
+  //   token 网关解析失败（未注册/悬空路由）→ 阻断（tier 流量每一笔都会 401，派发必烧）；
+  //   tier 未打标（网关无同标签 profile）→ 告警不阻断（tier 标签未采纳，向后兼容）；
+  //   网关不可得（未开启/不可达/旧版无端点）→ 回落 advisory 目录校验，行为不变。
+  let gatewayVerdict = null;
+  if (tier?.token) {
+    gatewayVerdict = await validateTierViaGateway({ token: tier.token, tier: tier.name, base: tier.gatewayBase, optIn: tier.gatewayAdmin });
+    if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) {
+      const tagged = tierTagNames(tier.name).flatMap((n) => gatewayVerdict.tierProfiles?.[n] ?? []);
+      if (tagged.length && !tagged.includes(gatewayVerdict.profile)) {
+        die(`tier "${tier.name}" 权威校验失败：token（${tier.tokenEnv}）经网关解析到 profile "${gatewayVerdict.profile}"（tier=${gatewayVerdict.tierTag ?? '无标签'}），而 ${tierTagNames(tier.name).join('/')} 打标在 ${tagged.join(', ')}——重活会静默落到别档服务。\n修复：在 ModelDock 把该 token 所属 harness（${gatewayVerdict.harness}）钉定（route）到同 tier profile，或给当前 profile 补 tier 标签并热加载；确认无误可改卡去掉 tier 字段。`, 1);
+      }
+      log(`tier 网关校验：token → ${gatewayVerdict.harness} → profile "${gatewayVerdict.profile}"（provider=${gatewayVerdict.provider}，tier=${gatewayVerdict.tierTag ?? '无标签'}${tagged.length ? '' : '；该 tier 尚未在网关打标，跳过匹配判定'}）`);
+      if (gatewayVerdict.provider && (effWorkerModel || effReviewModel)) {
+        const missing = [effWorkerModel, effReviewModel].filter(Boolean).filter((m) => !gatewayVerdict.models.includes(m));
+        if (missing.length) log(`⚠ tier 模型校验：${missing.join(', ')} 不在服务 ${gatewayVerdict.provider} 目录——继续派发，留意网关模型报错`);
+      }
+    } else if (gatewayVerdict.mode === 'gateway') {
+      die(`tier "${tier.name}" 权威校验失败：tier token 未能在网关解析到路由（${gatewayVerdict.reason}）——tier 流量每笔请求都会 401，派发必烧。\n修复：核对 ${tier.tokenEnv} 指向的 token 是否仍存在于 ModelDock（harness 未删/未轮换），或改卡去掉 tier 字段走全局默认。`, 1);
+    }
+  }
   appendEvent(qdir, 'tier_resolved', {
     tier: tier?.name ?? (meta.tier ?? null),
     ...(tier?.auto ? { auto: true } : {}),
@@ -349,9 +373,12 @@ async function cmdRun(repoRoot, taskId, opts) {
     ...(tier?.token && tier.provider ? { provider: tier.provider } : {}),
     ...(effWorkerModel ? { worker_model: effWorkerModel } : {}),
     ...(effReviewModel ? { review_model: effReviewModel } : {}),
+    ...(gatewayVerdict?.mode === 'gateway' && gatewayVerdict.ok
+      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null }
+      : {}),
   });
-  // 目录校验（advisory）：模型名不在服务目录 → 告警不阻断，上游/网关报错为准
-  if (tier?.token && tier.provider && (effWorkerModel || effReviewModel)) {
+  // 目录校验（advisory）：网关权威校验不可得时的回落路径；模型名不在服务目录 → 告警不阻断
+  if (tier?.token && gatewayVerdict?.mode !== 'gateway' && tier.provider && (effWorkerModel || effReviewModel)) {
     const v = await validateTierModel({
       gatewayBase: tier.gatewayBase,
       token: tier.token,

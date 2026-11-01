@@ -10,6 +10,7 @@ import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { normalizeTierName, resolveTier, tierDisplayName, tierEnvPatch, validateTierModel } from '../../.agents/scripts/orchestrator/tiers.mjs'
 import { writeWorkerSettings } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
+import { spawn } from 'node:child_process'
 import { cardText, mkRepo, runOrch, tryOrch, eventsOf } from './helpers.js'
 
 const CFG = {
@@ -238,6 +239,212 @@ describe('tiers > run 端到端（mock）', () => {
       expect(resolved).toMatchObject({ tier: 'ahead-2', inactive: 'token' })
     } finally {
       repo.cleanup()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// 网关权威校验（gatewayAdmin；2026-11-02 admin 面授权 .agents 使用）
+// ---------------------------------------------------------------------------
+
+import { createGatewayServer } from '../../src/gateway/server.js'
+import { buildRuntime } from '../../src/gateway/state.js'
+import { discoverGatewayState, tierTagNames, validateTierViaGateway } from '../../.agents/scripts/orchestrator/tiers.mjs'
+import { readCard } from './helpers.js'
+import { fakeHome } from '../helpers.js'
+import type { AddressInfo } from 'node:net'
+
+describe('tiers > 网关权威校验（validateTierViaGateway）', () => {
+  function serveVerdict(status: number, body: unknown): Promise<{ url: string; hits: () => number; lastReq: () => { admin?: string; body?: unknown }; close: () => void }> {
+    let hits = 0
+    let lastReq: { admin?: string; body?: unknown } = {}
+    return new Promise((resolve) => {
+      const s = http.createServer((req, res) => {
+        hits++
+        let raw = ''
+        req.on('data', (c) => (raw += c))
+        req.on('end', () => {
+          // 回调内不做断言（脱离测试上下文的抛出会变成 Unhandled Error）：记录、事后核对
+          lastReq = { admin: req.headers['x-modeldock-admin'] as string | undefined, body: JSON.parse(raw || '{}') }
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        })
+      })
+      s.listen(0, '127.0.0.1', () => {
+        const { port } = s.address() as AddressInfo
+        resolve({ url: `http://127.0.0.1:${port}`, hits: () => hits, lastReq: () => lastReq, close: () => s.close() })
+      })
+    })
+  }
+
+  it('tierTagNames：别名归一同键（ahead-4 ≡ heavy）；显示名不收', () => {
+    expect(tierTagNames('ahead-4').sort()).toEqual(['ahead-4', 'heavy'])
+    expect(tierTagNames('heavy').sort()).toEqual(['ahead-4', 'heavy'])
+    expect(tierTagNames('custom-tier')).toEqual(['custom-tier'])
+  })
+
+  it('optIn=false 一律 unavailable 且零请求（可移植工具链不得默认读用户 ModelDock 状态）', async () => {
+    const s = await serveVerdict(200, {})
+    try {
+      const r = await validateTierViaGateway({ token: 'tok-1', tier: 'ahead-4', base: s.url, adminToken: 'adm-tok', optIn: false })
+      expect(r).toMatchObject({ mode: 'unavailable' })
+      expect(r.reason).toContain('gatewayAdmin')
+      expect(s.hits()).toBe(0)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('optIn + 显式 base/token：权威 ok 判定回传字段齐全（models/tierProfiles 映射）', async () => {
+    const s = await serveVerdict(200, {
+      ok: true, harness: 'tier-worker', profile: 'heavy', provider: 'A', tier: 'ahead-4',
+      models: ['m1'], tier_profiles: { 'ahead-4': ['heavy'], light: ['light'] },
+    })
+    try {
+      const r = await validateTierViaGateway({ token: 'tok-1', tier: 'ahead-4', base: s.url, adminToken: 'adm-tok', optIn: true })
+      expect(s.lastReq()).toEqual({ admin: 'adm-tok', body: { token: 'tok-1', tier: 'ahead-4' } }) // admin 凭据必带；token 只进请求体
+      expect(r).toMatchObject({ mode: 'gateway', ok: true, harness: 'tier-worker', profile: 'heavy', provider: 'A', tierTag: 'ahead-4' })
+      expect((r as { models: string[] }).models).toEqual(['m1'])
+      expect((r as { tierProfiles: Record<string, string[]> }).tierProfiles).toEqual({ 'ahead-4': ['heavy'], light: ['light'] })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('权威否定（token 未注册）≠ 观测缺席：mode=gateway ok=false；401/404/端口不通 = unavailable', async () => {
+    const s = await serveVerdict(200, { ok: false, reason: 'unknown_token' })
+    try {
+      expect(await validateTierViaGateway({ token: 'tok-1', tier: 'ahead-4', base: s.url, adminToken: 'adm-tok', optIn: true })).toMatchObject({ mode: 'gateway', ok: false, reason: 'unknown_token' })
+    } finally {
+      s.close()
+    }
+    const s401 = await serveVerdict(401, {})
+    try {
+      expect((await validateTierViaGateway({ token: 't', base: s401.url, adminToken: 'adm-tok', optIn: true })).mode).toBe('unavailable')
+    } finally {
+      s401.close()
+    }
+    const s404 = await serveVerdict(404, {})
+    try {
+      expect((await validateTierViaGateway({ token: 't', base: s404.url, adminToken: 'adm-tok', optIn: true })).mode).toBe('unavailable') // 旧版网关回落 advisory
+    } finally {
+      s404.close()
+    }
+    expect((await validateTierViaGateway({ token: 't', base: 'http://127.0.0.1:1', adminToken: 'adm-tok', optIn: true })).mode).toBe('unavailable')
+  })
+
+  it('discoverGatewayState：fakeHome 重定向优先；缺失/残缺 → null', () => {
+    const h = fakeHome()
+    try {
+      expect(discoverGatewayState()).toBeNull() // 空 fake home
+      const gw = path.join(h.home, '.modeldock', 'gateway.json')
+      fs.mkdirSync(path.dirname(gw), { recursive: true })
+      fs.writeFileSync(gw, JSON.stringify({ pid: 1, port: 18999, admin_token: 'gw-tok' }))
+      expect(discoverGatewayState()).toEqual({ port: 18999, adminToken: 'gw-tok' })
+      fs.writeFileSync(gw, '{"broken')
+      expect(discoverGatewayState()).toBeNull()
+      fs.writeFileSync(gw, JSON.stringify({ pid: 1, port: 18999 })) // 缺 admin_token
+      expect(discoverGatewayState()).toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('tiers > 网关权威校验端到端（gatewayAdmin: true，独立进程 stub 网关）', () => {
+  const TIER_TOKEN = 'mdk_tier_tok_e2e'
+  const ADMIN = 'orch-admin-tok'
+
+  // stub 网关必须是独立子进程：vitest 套件 isolate:false 单进程，runOrch 的同步 execSync
+  // 会阻塞事件循环，进程内 HTTP 服务器在 child fetch 期间无法应答（4s 超时，实测踩中）。
+  // 端点的真实行为已由 gateway.test.ts 的 tier-validate 用例覆盖，这里只供编排侧消费。
+  function startTierStub(verdict: Record<string, unknown>): Promise<{ base: string; kill: () => void }> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tier-stub-'))
+    const script = path.join(dir, 'gw.cjs')
+    fs.writeFileSync(
+      script,
+      `const http = require('node:http')\nconst verdict = ${JSON.stringify(verdict)}\n` +
+        `const s = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(verdict)) })\n` +
+        `s.listen(0, '127.0.0.1', () => { console.log('PORT=' + s.address().port); setInterval(() => {}, 1 << 30) })\n`,
+    )
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] })
+      let out = ''
+      child.stdout.on('data', (c) => {
+        out += String(c)
+        const m = /PORT=(\d+)/.exec(out)
+        if (m) resolve({ base: `http://127.0.0.1:${m[1]}`, kill: () => child.kill() })
+      })
+      child.on('error', reject)
+    })
+  }
+
+  function submitTierCard(repo: string) {
+    const cardFile = path.join(repo, 'c.md')
+    fs.writeFileSync(cardFile, cardText({ tier: 'heavy' }))
+    runOrch(repo, `submit "${cardFile}"`)
+  }
+
+  function tierWorkflow(gatewayAdmin: boolean) {
+    return JSON.stringify({
+      baseBranch: 'develop',
+      testCmd: 'node -e "process.exit(0)"',
+      ...(gatewayAdmin ? { gatewayAdmin: true } : {}),
+      tiers: { 'ahead-4': { tokenEnv: 'MDK_TEST_TIER_TOKEN' } },
+    })
+  }
+
+  const RUN_ENV = { MDK_TEST_TIER_TOKEN: TIER_TOKEN, ORCH_GATEWAY_ADMIN_TOKEN: ADMIN }
+
+  it('tier 已打标但 token 指向无标签 profile → 权威校验阻断（exit 1，卡留 pending 零事件）', async () => {
+    const gw = await startTierStub({ ok: true, harness: 'tier-worker', profile: 'plain', provider: 'A', tier: null, models: [], tier_profiles: { 'ahead-4': ['heavy'] } })
+    const repo = mkRepo()
+    try {
+      fs.writeFileSync(path.join(repo.root, '.agents', 'workflow.json'), tierWorkflow(true))
+      submitTierCard(repo.root)
+      const out = tryOrch(repo.root, 'run test-task --backend mock', { ...RUN_ENV, ORCH_GATEWAY_BASE: gw.base })
+      expect(out.status).toBe(1)
+      expect(out.stdout + out.stderr).toContain('权威校验失败')
+      expect(out.stdout + out.stderr).toContain('plain')
+      expect(readCard(repo.root, 'pending', 'test-task')).toBeTruthy() // 状态迁移前阻断
+      expect(eventsOf(repo.root, 'test-task')).toEqual([]) // die 先于任何事件
+    } finally {
+      repo.cleanup()
+      gw.kill()
+    }
+  }, 120_000)
+
+  it('token 钉定同 tier profile → 照常派发，tier_resolved 留 gateway 字段', async () => {
+    const gw = await startTierStub({ ok: true, harness: 'tier-worker', profile: 'heavy', provider: 'A', tier: 'ahead-4', models: ['flagship-x'], tier_profiles: { 'ahead-4': ['heavy'] } })
+    const repo = mkRepo()
+    try {
+      fs.writeFileSync(path.join(repo.root, '.agents', 'workflow.json'), tierWorkflow(true))
+      submitTierCard(repo.root)
+      const out = runOrch(repo.root, 'run test-task --backend mock', { ...RUN_ENV, ORCH_GATEWAY_BASE: gw.base })
+      expect(out.stdout).toContain('tier 网关校验')
+      const resolved = eventsOf(repo.root, 'test-task').find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
+      expect(resolved).toMatchObject({ tier: 'ahead-4', gateway_checked: true, gateway_profile: 'heavy', gateway_tier: 'ahead-4' })
+    } finally {
+      repo.cleanup()
+      gw.kill()
+    }
+  }, 120_000)
+
+  it('未开启 gatewayAdmin（缺省）→ 行为不变：不打网关、advisory only', async () => {
+    const gw = await startTierStub({ ok: true, harness: 'tier-worker', profile: 'plain', provider: 'A', tier: null, models: [], tier_profiles: { 'ahead-4': ['heavy'] } })
+    const repo = mkRepo()
+    try {
+      fs.writeFileSync(path.join(repo.root, '.agents', 'workflow.json'), tierWorkflow(false))
+      submitTierCard(repo.root)
+      const out = runOrch(repo.root, 'run test-task --backend mock', { ...RUN_ENV, ORCH_GATEWAY_BASE: gw.base }) // env 在，但 optIn 关 → 不发请求
+      expect(out.stdout + out.stderr).not.toContain('权威校验失败')
+      expect(out.stdout).not.toContain('tier 网关校验')
+      const resolved = eventsOf(repo.root, 'test-task').find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
+      expect(resolved).toMatchObject({ tier: 'ahead-4' })
+      expect(resolved?.gateway_checked).toBeUndefined()
+    } finally {
+      repo.cleanup()
+      gw.kill()
     }
   }, 120_000)
 })
