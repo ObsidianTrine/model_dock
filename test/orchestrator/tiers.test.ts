@@ -10,7 +10,7 @@ import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { normalizeTierName, resolveTier, tierDisplayName, tierEnvPatch, validateTierModel } from '../../.agents/scripts/orchestrator/tiers.mjs'
 import { writeWorkerSettings } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
-import { cardText, mkRepo, runOrch, eventsOf } from './helpers.js'
+import { cardText, mkRepo, runOrch, tryOrch, eventsOf } from './helpers.js'
 
 const CFG = {
   tiers: {
@@ -204,8 +204,11 @@ describe('tiers > run 端到端（mock）', () => {
       const cardFile = path.join(repo.root, 'c.md')
       fs.writeFileSync(cardFile, cardText({ tier: 'ahead-2' }))
       runOrch(repo.root, `submit "${cardFile}"`)
-      const out = runOrch(repo.root, 'run test-task --backend mock --approve-backend-switch', {})
-      expect(out.stdout).not.toContain('tier "ahead-2" 未生效')
+      // 不带 --backend：走 workflow.json 默认引擎 zcode-headless（静默场景）。
+      // ORCH_ZCODE_CLI 指向不存在的桩：tier_resolved 落盘后 worker spawn 即 ENOENT
+      // blocked——全机器确定性，不真调 zcode、不依赖本机 CLI。
+      const out = tryOrch(repo.root, 'run test-task', { ORCH_ZCODE_CLI: '/nonexistent/zcode-cli' })
+      expect(out.stdout + out.stderr).not.toContain('tier "ahead-2" 未生效')
       const resolved = eventsOf(repo.root, 'test-task').find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
       expect(resolved).toMatchObject({ tier: 'ahead-2', inactive: 'token' }) // 事件留痕照旧
     } finally {
