@@ -68,3 +68,8 @@
 | typescript / vitest / @vitest/coverage-v8 | 7.0.2 / 5.0.5 / 5.0.5 | 无需动作（已是 Latest） | 新 major 出现后单独立卡 |
 | undici | 7.30.1 | 本次不升（8.x） | 8.x 稳定后单独任务 + 热路径专项验证 |
 | qrcode-generator | 1.5.2 | 本次不升（2.x） | 低优先级，核实 CHANGELOG 后随 UI 需求走 |
+
+## 五、安全审计（npm audit 快照）
+
+- **2026-11-02**：`npm audit`（npm 11.16.0）实测 **0 vulnerabilities**——当日依赖树零已知漏洞。 Dependabot 周更（npm + GitHub Actions）在位，minor/patch 成组 PR、major 单独出；Claude 验证链（dependabot-fix）跑 `npm run build` + `npm test` 双门禁。
+- 复跑口径：fresh worktree `npm ci` 后执行 `npm audit`（现场依赖树为准，主仓 node_modules 未重装时结论可能滞后）；出现漏洞时按「非 breaking 修复优先（`npm audit fix`，绝不跨 major）+ 结论落本节」处置，undici/typescript/vitest 大版本仍按第二节评估纪律。
