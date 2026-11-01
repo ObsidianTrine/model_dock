@@ -276,3 +276,37 @@ describe('workflow-config > testCmd 三形态与工具函数', () => {
     expect(releaseHatches('')).toContain('AGENTS_ALLOW_RELEASE=1')
   })
 })
+
+describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况子键）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-wh-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('未配 = null；配置了基础键 = { threshold, windowMinutes }', () => {
+    expect(cfgOf({}).weatherHold).toBeNull()
+    expect(cfgOf({ weatherHold: { threshold: 5 } }).weatherHold).toEqual({ threshold: 5, windowMinutes: 60 })
+  })
+
+  it('upstream 子键：合法解析（windowMinutes 缺省 15）；非法/缺 threshold 回落不启用', () => {
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 8 } } }).weatherHold).toEqual({
+      threshold: 3,
+      windowMinutes: 60,
+      upstream: { threshold: 8, windowMinutes: 15 },
+    })
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 2, windowMinutes: 30 } } }).weatherHold.upstream).toEqual({
+      threshold: 2,
+      windowMinutes: 30,
+    })
+    // 缺 threshold / 非对象 / 非正整数 → 不启用 upstream（基础键照常）
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: {} } }).weatherHold.upstream).toBeUndefined()
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: 'storm' } }).weatherHold.upstream).toBeUndefined()
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: -1 } } }).weatherHold.upstream).toBeUndefined()
+  })
+})

@@ -1,12 +1,15 @@
 // B6 风暴闸（weather hold）测试：窗口计数/阈值判定单测（直接 import weather.mjs）+
 // 集成（预置窗口内 worker_retry + mock 瞬时故障凑满阈值 → drain 拒绝派发 + fleet 留痕）。
+// 上游海况（countUpstreamStorm）：网关日志 429/402 实测信号同样触发滞留（外部风暴）。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { appendEvent } from '../../.agents/scripts/orchestrator/events.mjs'
-import { appendFleetEvent, countRecentTransient, fleetLogPath, readFleetEvents, shouldHold } from '../../.agents/scripts/orchestrator/weather.mjs'
+import { appendEvent, toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
+import { appendFleetEvent, countRecentTransient, countUpstreamStorm, fleetLogPath, readFleetEvents, shouldHold } from '../../.agents/scripts/orchestrator/weather.mjs'
+import { gatewayLogsDir } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { cardText, eventsOf, mkRepo, readCard, runOrch } from './helpers.js'
+import { fakeHome } from '../helpers.js'
 
 const NOW = Date.parse('2026-11-01T12:00:00Z')
 
@@ -148,4 +151,79 @@ describe('weather > 集成（watch 瞭望模式同样受风暴闸约束）', () 
       repo.cleanup()
     }
   })
+})
+
+describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴）', () => {
+  /** 往 fakeHome 网关日志写一条请求（ts 用本地 ISO——日文件按本地日期切分）。 */
+  function writeGwEntry(ageMs: number, status: number) {
+    const dir = gatewayLogsDir()
+    if (!dir) throw new Error('fakeHome 未生效')
+    fs.mkdirSync(dir, { recursive: true })
+    const ts = toIsoLocal(new Date(Date.now() - ageMs))
+    fs.appendFileSync(path.join(dir, `gateway-${ts.slice(0, 10)}.jsonl`), JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', path: '/v1/messages', status }) + '\n')
+  }
+
+  it('窗口内 429/402 计数；500 与窗外不计；gwDir=null 恒 0（观测缺席 ≠ 风暴）', () => {
+    const h = fakeHome()
+    try {
+      writeGwEntry(0, 429)
+      writeGwEntry(60_000, 402)
+      writeGwEntry(120_000, 429)
+      writeGwEntry(60_000, 500) // 非限流/额度类：不计
+      writeGwEntry(20 * 60_000, 429) // 窗外（> 15 分钟）：不计
+      const dir = gatewayLogsDir()
+      expect(countUpstreamStorm(dir, { windowMs: 15 * 60_000 })).toBe(3)
+      expect(countUpstreamStorm(null, { windowMs: 15 * 60_000 })).toBe(0)
+      // 窗口放大到 30 分钟：窗外那条也入窗
+      expect(countUpstreamStorm(dir, { windowMs: 30 * 60_000 })).toBe(4)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('upstream 达阈（worker_retry 未达）→ drain 滞留点名为「上游风暴」，fleet 事件带上游字段', () => {
+    const h = fakeHome()
+    // worker_retry 阈值给大（0 条也永不触发），只让上游信号触发
+    const repo = mkRepo({ extra: { weatherHold: { threshold: 99, windowMinutes: 60, upstream: { threshold: 2, windowMinutes: 15 } } } })
+    try {
+      writeGwEntry(0, 429)
+      writeGwEntry(60_000, 429)
+      const card = path.join(repo.root, 'card-sea-x.md')
+      fs.writeFileSync(card, cardText({ id: 'sea-x' }))
+      runOrch(repo.root, `submit "${card}"`)
+      const out = runOrch(repo.root, 'drain --backend mock')
+      expect(out.stdout).toContain('风暴滞留')
+      expect(out.stdout).toContain('上游风暴')
+      expect(eventsOf(repo.root, 'sea-x')).toEqual([]) // 未派发
+      expect(readCard(repo.root, 'pending', 'sea-x')).toBeTruthy()
+      const hold = readFleetEvents(repo.root).find((e) => e.type === 'weather_hold')
+      expect(hold).toBeTruthy()
+      expect(hold.upstream).toEqual({ count: 2, threshold: 2, windowMinutes: 15 })
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('配置了 upstream 但网关日志不可得（无 gatewayLogDir）→ 不滞留照常派发', () => {
+    const savedFake = process.env.MODELRDOCK_FAKE_HOME
+    const savedHome = process.env.MODELRDOCK_HOME
+    delete process.env.MODELRDOCK_FAKE_HOME
+    delete process.env.MODELRDOCK_HOME
+    const repo = mkRepo({ extra: { weatherHold: { threshold: 99, windowMinutes: 60, upstream: { threshold: 1, windowMinutes: 15 } } } })
+    try {
+      const card = path.join(repo.root, 'card-sea-off.md')
+      fs.writeFileSync(card, cardText({ id: 'sea-off' }))
+      runOrch(repo.root, `submit "${card}"`)
+      const out = runOrch(repo.root, 'drain --backend mock')
+      expect(out.stdout).not.toContain('风暴滞留')
+      expect(eventsOf(repo.root, 'sea-off').some((e) => e.type === 'worker_spawned')).toBe(true)
+    } finally {
+      repo.cleanup()
+      if (savedFake !== undefined) process.env.MODELRDOCK_FAKE_HOME = savedFake
+      else delete process.env.MODELRDOCK_FAKE_HOME
+      if (savedHome !== undefined) process.env.MODELRDOCK_HOME = savedHome
+      else delete process.env.MODELRDOCK_HOME
+    }
+  }, 90_000)
 })
