@@ -10,7 +10,7 @@ import path from 'node:path';
 import { runCmd } from './gates.mjs';
 import { cardPath, findCard } from './queue.mjs';
 import { appendEvent, logDir, toIsoLocal } from './events.mjs';
-import { shellSpawnOptions } from './spawn-shell.mjs';
+import { shellSpawnOptions, shellCommandline } from './spawn-shell.mjs';
 import {
   SEMANTIC_MAX_SIGNALS,
   appendRelaySection,
@@ -97,9 +97,11 @@ export function scanTodo(repoRoot) {
 
 /** 信号源 2：npm audit 漏洞（汇总为一张卡）。 */
 export function scanAudit(repoRoot) {
-  // Windows 的 npm 是 .cmd 包装，spawnSync 直调必 ENOENT——win32 走 shell（见 spawn-shell.mjs）；
+  // Windows 的 npm 是 .cmd 包装，spawnSync 直调必 ENOENT——win32 走 shell（见 spawn-shell.mjs），
+  // 并经 shellCommandline 整串化消 DEP0190；unix 保持数组直调不变。
   // 失败由下方 catch 归一为 skipped，但静默失效会掐断 nightly audit 信号源，这里必须能真跑起来
-  const r = spawnSync('npm', ['audit', '--json'], shellSpawnOptions(process.platform, { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 }));
+  const [auditCmd, auditArgs] = shellCommandline('npm', ['audit', '--json'], process.platform === 'win32');
+  const r = spawnSync(auditCmd, auditArgs, shellSpawnOptions(process.platform, { cwd: repoRoot, encoding: 'utf8', timeout: 120_000 }));
   let json;
   try {
     json = JSON.parse(r.stdout ?? '');

@@ -20,7 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
-import { quoteArgsForShell } from '../spawn-shell.mjs';
+import { quoteArgsForShell, shellCommandline } from '../spawn-shell.mjs';
 import { zcodeAvailable } from './zcode-headless.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -155,7 +155,9 @@ export function claudeSpawnInvocation(platform, args, { cwd, envPatch }) {
     ...(useShell ? { shell: true } : {}),
   };
   if (envPatch && Object.keys(envPatch).length) options.env = { ...process.env, ...envPatch };
-  return { cmd: 'claude', args: quoteArgsForShell(args, useShell), options };
+  // win32 整串化消 DEP0190（Node 内部同款拼行，行为等价）；unix 原样数组
+  const [cmd, spawnArgs] = shellCommandline('claude', quoteArgsForShell(args, useShell), useShell);
+  return { cmd, args: spawnArgs, options };
 }
 
 export const claudeHeadlessBackend = {

@@ -8,8 +8,15 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildClaudeArgs, claudeSpawnInvocation } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
-import { quoteArgsForShell, shellSpawnOptions } from '../../.agents/scripts/orchestrator/spawn-shell.mjs'
+import { quoteArgsForShell, shellCommandline, shellSpawnOptions } from '../../.agents/scripts/orchestrator/spawn-shell.mjs'
 import { git, mkRepo } from './helpers.js'
+
+describe('spawn-shell > shellCommandline DEP0190 整串化', () => {
+  it('useShell（win32）把 cmd+args 拼整串、spawn argv 只剩命令（与 Node 内部 shell 拼行等价，消 DEP0190）；unix 原样', () => {
+    expect(shellCommandline('npm', ['audit', '--json'], true)).toEqual(['npm audit --json', []])
+    expect(shellCommandline('claude', ['-p', 'x y'], false)).toEqual(['claude', ['-p', 'x y']])
+  })
+})
 
 describe('spawn-shell > shellSpawnOptions 平台分支', () => {
   it('win32 补 shell: true；unix 不加（sh -c 会改变进程组/信号语义，杀树依赖进程组）', () => {
@@ -22,20 +29,20 @@ describe('spawn-shell > shellSpawnOptions 平台分支', () => {
 })
 
 describe('spawn-shell > claudeSpawnInvocation 双分支', () => {
-  it('win32：shell: true + detached 关 + 含空格参数包引号；unix：无 shell + detached + args 原样', () => {
+  it('win32：整串命令行（shell: true + 引号包装）+ detached 关；unix：无 shell + detached + args 原样', () => {
     const args = buildClaudeArgs({ maxTurns: 5, settingsFile: '/tmp/dir with space/settings.json' })
     const win = claudeSpawnInvocation('win32', args, { cwd: '/wt', envPatch: { TEST_TOKEN: 'tk' } })
-    expect(win.cmd).toBe('claude')
     expect(win.options.shell).toBe(true)
     expect(win.options.detached).toBe(false)
     expect(win.options.cwd).toBe('/wt')
     expect(win.options.stdio).toEqual(['pipe', 'pipe', 'pipe'])
     expect(win.options.env).toEqual(expect.objectContaining({ TEST_TOKEN: 'tk' }))
+    // DEP0190 整串化：spawn argv 只剩命令本身，引号包装后的参数并进整串
+    expect(win.args).toEqual([])
+    expect(win.cmd.startsWith('claude ')).toBe(true)
     // --allowedTools 的 "Bash(git add:*)" 族与 --settings 路径含空格 → 包引号（否则拼行被拆）
-    const settingsIdx = win.args.indexOf('--settings')
-    expect(settingsIdx).toBeGreaterThan(-1)
-    expect(win.args[settingsIdx + 1]).toBe('"/tmp/dir with space/settings.json"')
-    expect(win.args).toContain('"Bash(git add:*)"')
+    expect(win.cmd).toContain('--settings "/tmp/dir with space/settings.json"')
+    expect(win.cmd).toContain('"Bash(git add:*)"')
 
     const unix = claudeSpawnInvocation('darwin', args, { cwd: '/wt', envPatch: { TEST_TOKEN: 'tk' } })
     expect('shell' in unix.options).toBe(false)
