@@ -111,8 +111,11 @@ pending → running → reviewing → awaiting-human → merged
 | wall-clock 超 `max_wall_minutes` | kill → blocked |
 | 测试/build 修复超 `max_test_iterations` | blocked（附失败尾部 200 行） |
 | 审查返工超 `max_review_iterations` | blocked |
+| 进展看门狗（`watchdog.mode: actuate`）连续 2 次判定无实质进展 | kill worker → blocked |
 
 熔断全部记录 `circuit_breaker` 事件（`logs <task-id>` 可查），**永不静默重试**。
+
+进展看门狗（watchdog）缺省 **observe** 档：worker 每 N 个 turn（workflow.json `watchdog.everyTurns`，缺省 20）由一次性只读 LLM 会话判断是否有实质进展，疑似空转只记 `watchdog_suspect` 事件不动作；actuate 是显式配置（连续 2 次 suspect 才熔断）。每任务最多检查 5 次（超限记 `watchdog_disabled`），检查自身故障记 `watchdog_error`（每任务 ≤3 条后静默）。
 
 ## 任务等级（tier）：按难度选服务与模型
 
@@ -318,7 +321,11 @@ node .agents/scripts/orchestrator.mjs reconcile <task-id>
 - **两本账**：自报 = 任务 events 的 budget_snapshot（stream-json 回填）；实测 = 网关转发日志的 usage 字段（网关从上游响应旁路解析，worker 流量过网关才有实测账）
 - **分歧率** = |自报 − 实测| / max(两账)；口径含缓存读计入输入。网关零流量会标 ⚠——说明 worker 直连了上游
 - 纯只读报告。想让自己的任务可对账，保持 worker 走本机网关（默认即是）
-- **启用条件**：workflow.json `gatewayLogDir` 指向网关请求日志目录（支持 `~/` 展开）才启用；未配置 = 对账关闭（吃狗粮是走网关的项目才有的能力）。测试隔离沿用 `MODELRDOCK_FAKE_HOME`/`MODELRDOCK_HOME` 重定向，优先于配置值
+- **启用条件**：workflow.json `gatewayLogDir` 指向网关请求日志目录（支持 `~/` 展开）才启用；未配置 = 用量对账关闭（吃狗粮是走网关的项目才有的能力）。测试隔离沿用 `MODELRDOCK_FAKE_HOME`/`MODELRDOCK_HOME` 重定向，优先于配置值
+- **状态对账**（同一命令顺带跑，与用量对账独立）：卡状态 vs git 现实——用 `git log --merges <baseBranch>` 解析 `Merge branch 'feature/<id>'` 得「已合并分支」集合，对照队列各状态目录：
+  - 分支已合并但卡不在 merged/ → 列「已合并未落位」（含卡当前状态；状态机被人工旁路，如手工 git merge 后忘了落卡）
+  - 卡在 merged/ 但 git 无对应 merge 提交 → 列「账面合并但 git 无实证」（警告级，可能是 squash 合并或改史）
+  - 默认只读；`reconcile --fix-states` 把「已合并未落位」的卡落位 merged/ 并写 `state_reconciled` 事件（迁移白名单不允许的状态走直接落位——git 已合并是更高事实）
 
 ## 移植（把工具链带去其他项目）
 

@@ -1,14 +1,16 @@
 // 狗粮对账测试：自报账 vs 网关实测账（docs 10.7）。MODELRDOCK_FAKE_HOME 重定向网关日志目录。
+// 状态对账（卡状态 vs git 现实）用 mkRepo 的临时 git 仓造 merge 提交。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createUsageTap } from '../../src/gateway/usage.js'
-import { gatewayLogsDir, readGatewayLog, reconcileAll, reconcileTask } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
-import { cardText, mkRepo, runOrch } from './helpers.js'
+import { cardText, eventsOf, git, mkRepo, runOrch } from './helpers.js'
 import { fakeHome } from '../helpers.js'
 
 function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
@@ -207,6 +209,111 @@ describe('gateway log reader > 容错', () => {
     } finally {
       repo.cleanup()
       h.restore()
+    }
+  })
+})
+
+describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', () => {
+  /** 在临时仓库里造「分支已 git 合并」的现场：feature/<id> 各一笔提交后 --no-ff 合并回 develop。 */
+  function mergeFeatureBranch(repo: string, id: string, message?: string) {
+    const g = (args: string) => git(repo, args)
+    g(`checkout -b feature/${id}`)
+    fs.writeFileSync(path.join(repo, `f-${id}.txt`), id)
+    g('add -A')
+    g(`commit -m "wip ${id}"`)
+    g('checkout develop')
+    g(`merge --no-ff feature/${id} -m ${JSON.stringify(message ?? `Merge branch 'feature/${id}'`)}`)
+  }
+
+  it('parseMergedBranchIds：容忍单双引号 / into 尾巴 / 路径分隔符；非 feature 分支不收', () => {
+    const ids = parseMergedBranchIds([
+      "Merge branch 'feature/abc'", // finish 默认消息
+      'Merge branch "feature/def" into develop', // 双引号 + into 尾巴
+      "Merge branch 'feature/spec-x-1' into develop",
+      'Merge branch \'feature\\backslash-id\'', // 分隔符差异（防御性）
+      "Merge branch 'develop' into feature/abc", // 反向：合并目标不是 feature 开头 → 不收
+      'Merge branch ' + "'release/v1'", // 非 feature/ 前缀 → 不收
+      'chore: mock worker change', // 普通提交 → 不收
+      '',
+    ])
+    expect([...ids].sort()).toEqual(['abc', 'backslash-id', 'def', 'spec-x-1'])
+  })
+
+  it('已合并未落位（running/blocked）+ 账面合并但 git 无实证（squash/改史）双向对账', () => {
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      const put = (state: string, id: string) => fs.writeFileSync(path.join(root, state, `${id}.md`), cardText({ id }, '状态对账测试'))
+      put('running', 'st-merged') // 分支已合并、卡滞留 running/（状态机被人工旁路）
+      put('blocked', 'st-blocked') // 白名单不允许 blocked→merged，修复须走兜底 rename
+      put('merged', 'st-ghost') // merged/ 但 git 无 merge 提交（squash 或改史）
+      mergeFeatureBranch(repo.root, 'st-merged')
+      // 双引号/into 形态的解析容错已在 parseMergedBranchIds 单测覆盖；这里用单引号 into 形态
+      //（消息内嵌双引号经 cmd/sh 转义不可移植，git 沙箱只造真实会出现的形态）
+      mergeFeatureBranch(repo.root, 'st-blocked', `Merge branch 'feature/st-blocked' into develop`)
+
+      const sr = reconcileCardStates(repo.root, root)
+      expect(sr.baseBranch).toBe('develop')
+      expect(sr.mergedNotSettled).toHaveLength(2)
+      expect(sr.mergedNotSettled).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'st-merged', state: 'running' }),
+          expect.objectContaining({ id: 'st-blocked', state: 'blocked' }),
+        ]),
+      )
+      expect(sr.settledNotMerged.map((c: { id: string }) => c.id)).toContain('st-ghost')
+      // 默认只读：卡原地不动
+      expect(fs.existsSync(path.join(root, 'running', 'st-merged.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('--fix-states：落位 merged/ 并写 state_reconciled 事件；白名单外状态走兜底 rename', () => {
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      fs.writeFileSync(path.join(root, 'running', 'st-fix.md'), cardText({ id: 'st-fix' }, '落位测试'))
+      mergeFeatureBranch(repo.root, 'st-fix')
+
+      const sr = reconcileCardStates(repo.root, root, { fix: true })
+      expect(sr.fixed).toEqual(['st-fix'])
+      expect(fs.existsSync(path.join(root, 'merged', 'st-fix.md'))).toBe(true)
+      expect(fs.existsSync(path.join(root, 'running', 'st-fix.md'))).toBe(false)
+      const evts = eventsOf(repo.root, 'st-fix')
+      expect(evts.some((e) => e.type === 'state_reconciled' && e.from === 'running' && e.to === 'merged' && e.base_branch === 'develop')).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('CLI 端到端：状态对账排在用量对账之后；--fix-states 生效且幂等', () => {
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      fs.writeFileSync(path.join(root, 'running', 'st-cli.md'), cardText({ id: 'st-cli' }, 'CLI 端到端'))
+      mergeFeatureBranch(repo.root, 'st-cli')
+
+      const out1 = runOrch(repo.root, 'reconcile')
+      expect(out1.stdout).toContain('状态对账 · 已合并未落位')
+      expect(out1.stdout).toContain('st-cli')
+      expect(out1.stdout).toContain('当前状态 running')
+      expect(out1.stdout).toContain('--fix-states') // 只读报告给出修复指引
+      // 排序约束：状态对账在用量对账（未启用说明/对账正文）之后
+      expect(out1.stdout.indexOf('网关对账')).toBeLessThan(out1.stdout.indexOf('状态对账'))
+      expect(fs.existsSync(path.join(root, 'running', 'st-cli.md'))).toBe(true) // 只读：卡没动
+
+      const out2 = runOrch(repo.root, 'reconcile --fix-states')
+      expect(out2.stdout).toContain('已落位')
+      expect(fs.existsSync(path.join(root, 'merged', 'st-cli.md'))).toBe(true)
+
+      const out3 = runOrch(repo.root, 'reconcile')
+      expect(out3.stdout).toContain('已合并未落位：无')
+    } finally {
+      repo.cleanup()
     }
   })
 })
