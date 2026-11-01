@@ -1,0 +1,221 @@
+name: ci-autofix
+
+# 主干 test 失败的投机自动修复（speculative autofix）：
+#   main / develop 的 test run 失败（首次尝试）→ guard 校验三件套与防重入 →
+#   检出失败 run 的 head 提交、切出分支 ci-autofix/<run-id> → 确定性 npm ci + npm run build
+#   （任一失败 job 直接红，结论明确零 token）→ Claude 会话：复现失败 → 根因分析 →
+#   最小修复 + 补测试 → commit（[ci-autofix] 前缀）→ 推分支 → gh 开 PR（基分支 = 失败所在分支）。
+#   判定 flaky / 根因不明 / 修复面过大 → 不开 PR，会话结论写进本 run 的 Actions summary，
+#   job 红灯指路（任何结局都必须留痕，不允许无声结束——同 dependabot-fix 的评论纪律）。
+#
+# 启用前提：与 claude-review / dependabot-fix 共用同一三件套（供应商无关，yml 零默认值）：
+#   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL，缺一打 warning 跳过
+#   （零 token 消耗）。无需额外 PAT：本 workflow 由主干 push run 触发，GITHUB_TOKEN 自带
+#   contents/pull-requests 写权限（Dependabot 触发的 run 才被平台强制只读）。详见 docs/ci-bots.md。
+#   注意：workflow_run 触发的 run 按默认分支上的 workflow 文件执行——本文件合入 main 后才生效。
+#
+# 防回环（为什么天然收敛，不会无限循环）：
+#   - 触发面收窄：只认 main / develop 的 push 型 test run 且 run_attempt == 1。event == 'push'
+#     过滤不是冗余——fork PR 的 head 分支可以恰好叫 main / develop，仅凭分支名过滤可被仿冒；
+#     限定 push 事件从根上排除一切 PR 型 run（PR 上的失败本来就有作者与 AI 审查处理，
+#     不需要 autofix 插手）。
+#   - 每 run 仅 1 次尝试：run_attempt 过滤挡掉人工重跑的 attempt（ci-retry 的 rerun 产物
+#     是 attempt 2+，重跑只是 flaky 洗白通道，不该再烧一次会话）；guard 再查同 head 分支的
+#     既有 PR（含已关闭——关闭说明人工已裁决），存在即跳过。
+#   - 修复分支上的 test 失败不会触发 autofix：head_branch = ci-autofix/* 不满足分支过滤，
+#     PR 上的失败由人工与 AI 审查处理；人工合并修复 PR 产生的主干新 run 若再失败，那是
+#     一次新的、独立记账的修复机会（仍每 run 一次），不会自我复制。
+#   - 修复提交带 [ci-autofix] 前缀，claude-review.yml 的防回环 guard 据此跳过复审
+#     （bot 开的 PR 不被 bot 自己审）；PR 由 GITHUB_TOKEN 开出，其事件不触发新 workflow
+#     run（GitHub 平台行为），PR 上的 test 检查由 fix 收尾步骤显式补发（见尾步注释）。
+#   - 合并永远由人工完成；本 workflow 不是 required check，红灯不阻塞任何事。
+#
+# 成本上限：guard 通过时每次主干失败 run 恰好 1 次 Claude 会话，50 回合上限、约 30 止损；
+#   确定性前置（npm ci / build / 日志预取）不占会话回合。
+
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+
+# 按失败 run 记账：同一 run 的重复完成事件 / 并发重放收敛为一次执行，不取消在跑的修复
+concurrency:
+  group: ci-autofix-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # 推修复分支 ci-autofix/<run-id>
+  pull-requests: write   # 开修复 PR
+  actions: write         # 读失败 run 日志 + 给修复分支补发 test（workflow_dispatch）
+
+jobs:
+  guard:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1 &&
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'develop') &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - name: 三件套与防重入检查（不满足则静默跳过，零消耗）
+        id: check
+        env:
+          KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+          BASE: ${{ vars.CLAUDE_BASE_URL }}
+          MODEL: ${{ vars.CLAUDE_MODEL }}
+          GH_TOKEN: ${{ github.token }}
+          # job 无 checkout，gh 解析仓库只认 GH_REPO / git remote（不认 runner 自带的
+          # GITHUB_REPOSITORY）——缺它则第一条 gh 命令即报 failed to determine base repo
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          ok=true
+          miss=""
+          [ -z "$KEY" ] && miss="$miss secrets.CLAUDE_AUTH_TOKEN"
+          [ -z "$BASE" ] && miss="$miss vars.CLAUDE_BASE_URL"
+          [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
+          if [ -n "$miss" ]; then
+            ok=false
+            echo "::warning::Claude 配置不齐（缺:$miss），主干失败自动修复未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
+          fi
+          # 每 run 仅此 1 次：同 head 分支的 PR 已存在（含已关闭——关闭说明人工已裁决）即不再尝试。
+          # 用 --head 精确匹配分支名（REST 接口、无索引延迟），比 --search 文本匹配更准
+          dup=$(gh pr list --state all --head "ci-autofix/$RUN_ID" --json number --jq 'length')
+          if [ "$dup" != "0" ]; then
+            ok=false
+            echo "::warning::run $RUN_ID 已有 ci-autofix 修复 PR（每 run 仅尝试一次），跳过。"
+          fi
+          echo "ready=$ok" >> "$GITHUB_OUTPUT"
+
+  fix:
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # 检出失败 run 对应的提交（不是默认分支头）——修复基于出错的代码
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: 切出修复分支并配置 bot 提交身份
+        run: |
+          git checkout -b "ci-autofix/${{ github.event.workflow_run.id }}"
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      # 确定性前置：安装与构建不进 Claude 会话——省 2-4 个会话回合（token + 墙钟）。
+      # 主干 run 里的 build / tsc 型失败在这里就会红（同一次提交、同一步骤，结果可复现），
+      # 结论明确零 token 消耗；能进会话的只剩 test 型失败，由 Claude 跑测试复现
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      # 失败日志预取到 /tmp（仓库目录之外）：会话第一回合就有现场，不必花回合调 gh 拉日志；
+      # 放仓库外还顺带避免 git add -A 把日志带进修复提交。只留尾部 4000 行——失败堆栈在尾部，
+      # 巨日志直接进上下文会挤占预算
+      - name: 预取失败日志
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | .name' > /tmp/failed-jobs.txt || true
+          gh run view "$RUN_ID" --log-failed > /tmp/failed-logs-full.txt 2>/dev/null || true
+          tail -n 4000 /tmp/failed-logs-full.txt > /tmp/failed-logs.txt || true
+          echo "failed jobs:"; cat /tmp/failed-jobs.txt
+          echo "log lines kept: $(wc -l < /tmp/failed-logs.txt)"
+      - uses: anthropics/claude-code-action@v1
+        id: claude
+        env:
+          # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
+          ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
+        with:
+          prompt: |
+            REPO: ${{ github.repository }}
+            失败 RUN: ${{ github.event.workflow_run.html_url }}（id ${{ github.event.workflow_run.id }}，run_attempt 1）
+            基分支: ${{ github.event.workflow_run.head_branch }}（失败提交 ${{ github.event.workflow_run.head_sha }}）
+            修复分支（已切好、工作目录已在上面）: ci-autofix/${{ github.event.workflow_run.id }}
+            失败现场: /tmp/failed-jobs.txt（失败 job 名）与 /tmp/failed-logs.txt（失败腿日志尾部 4000 行）
+
+            这是主干 test 失败的自动修复会话。项目背景：ModelDock = 本地模型配置托管中心 + API 网关
+            （TypeScript ESM、Node ≥22、SEA 单文件打包、纯 JS 依赖禁止 native addon）。完整约定以仓库根
+            目录 AGENTS.md 为准。工作流已替你完成 npm ci 与 npm run build（任一失败进不了本会话）。
+
+            请按以下步骤执行：
+
+            1. 读 /tmp/failed-jobs.txt 与 /tmp/failed-logs.txt 定位失败 job 与报错；需要更多上下文可用
+               gh run view（只读）。注意三平台矩阵：失败可能在 windows-latest / macos-latest，报错是
+               Windows / macOS 专属行为时要按 process.platform 分支思路分析，不要套 unix 直觉。
+            2. 复现失败：先跑最小复现面（对应测试文件），确认可稳定复现；复现不了再跑全量 npm test。
+            3. 根因分析：真回归（代码或测试缺陷）还是 flaky / 环境问题。
+            4. flaky 或不可稳定复现：不要改代码、不要开 PR——把「flaky 判定 + 证据 + 建议」用 Write
+               工具写进 /tmp/autofix-conclusion.md，然后直接结束会话。
+            5. 真回归且修复面小（几处文件以内）：做最小修复（只修失败所必需的部分，补测试覆盖回归；
+               测试断言更新也算修复），遵守 AGENTS.md 硬约定（三平台兼容、用户可见文案 t() 双语同写、
+               写盘走 atomicWrite、不引入 native 依赖）。修复后跑全量 npm test 验证，然后：
+               - git add <相关文件> && git commit，提交信息以 "[ci-autofix] " 开头（一句话说明修了什么）；
+               - git push origin 修复分支（分支名见上）；
+               - gh pr create --base <基分支> --head <修复分支>，标题以 "[ci-autofix] " 开头，描述必含：
+                 失败 run 链接（上面给了）、根因分析、修复说明、验证结果（跑过哪些测试、结论）。
+               描述先用 Write 写到 /tmp/pr-body.md 再 gh pr create --body-file /tmp/pr-body.md。
+            6. 审查盲区回流（仅开 PR 时、且确属盲区才写）：若根因属于「测试门禁本应拦住却没拦住」——
+               测试缺口（缺用例 / 断言太弱）或既有审查纪律未覆盖的缺陷模式，在 PR 描述末尾追加一段
+               ```json 围栏代码块作为考题草稿，字段对齐 .agents/review-evals/cases/*.json：
+                 {"id": "YYYY-MM-<短横线短语>", "title": "<一句话 bug 描述>",
+                  "reviewRef": "<修复提交短sha>^", "files": ["<根因文件>"],
+                  "expect": ["<根因关键词>"], "note": "<为什么当时的测试/审查没拦住>"}
+               只写草稿供人工回流（人工按 .agents/review-evals/README.md 决定是否入库），
+               禁止自行改动 .agents/review-evals/ 下任何文件。根因纯属人为失误、既有门禁本可拦住的，不算盲区。
+            7. 无法自动修复（根因不明 / 修复面过大 / 需要产品决策）：不硬改、不开 PR，把「根因分析 +
+               影响面 + 人工处理建议」写进 /tmp/autofix-conclusion.md 后结束会话。
+            8. 回合预算纪律（最重要）：本会话上限 50 回合，全量 npm test 每轮都很贵（npm ci / build 已由
+               workflow 完成，不占回合）。若判定修复面会超过几处文件、或已用到约 30 回合仍未接近完成，
+               立即止损：按第 7 步写结论文件后结束。任何情况下都必须先写 /tmp/autofix-conclusion.md
+               （或开好 PR）再结束——宁可结论简短，也不可无声失败。
+            9. 红线：只做最小修复，不重构、不顺手改无关文件；不修改 .github/workflows/ 下任何文件
+               （改 CI 超出本次修复授权）；不 push 到 main / develop（只推修复分支）。
+
+            结论一律中文、结论先行、简洁。最终产出只有两种合法形态：修复 PR（gh pr create），或
+            /tmp/autofix-conclusion.md 结论文件。不要只把结论留在会话消息里。
+          claude_args: |
+            --model ${{ vars.CLAUDE_MODEL }}
+            --max-turns 50
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run view:*),WebFetch,WebSearch"
+      # 收尾判定（Claude 会话跑过才执行；install/build 阶段就红时不掺和，让真失败自己说话）：
+      # 1) 会话结论落 run summary——无 PR 的结局也能被读到（不允许无声结束）；
+      # 2) 开出了 PR → 给修复分支补发 test 检查。为什么需要补发：PR 由 GITHUB_TOKEN 开出，
+      #    GitHub 平台不为其触发 pull_request / push 事件（平台级防回环），检查不会自动跑；
+      #    显式 workflow_dispatch 一条 test run，检查挂在同一 head 提交上，合并门禁即可用到。
+      #    该 test run 的 head_branch 是 ci-autofix/*，被本 workflow 的分支过滤拦下，不构成回环；
+      # 3) 没开出 PR → 红灯 + 可操作报错（flaky / 无法修复 / 会话异常终止，都指向 summary 与日志）。
+      - name: 收尾判定（结论落 summary；补发 test；未产出 PR 即红灯）
+        if: always() && steps.claude.conclusion != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          BR: ci-autofix/${{ github.event.workflow_run.id }}
+        run: |
+          if [ -f /tmp/autofix-conclusion.md ]; then
+            {
+              echo "### ci-autofix 会话结论（失败 run [$RUN_ID]($RUN_URL)）"
+              cat /tmp/autofix-conclusion.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          count=$(gh pr list --state all --head "$BR" --json number --jq 'length')
+          if [ "$count" = "0" ]; then
+            echo "::error::ci-autofix 未产出修复 PR——会话判定无法自动修复（flaky / 根因不明 / 超回合预算）或会话异常终止。失败 run：$RUN_URL；会话结论见本 run 的 summary 与上方 Claude 会话日志，请人工处理。"
+            exit 1
+          fi
+          gh workflow run test.yml --ref "$BR" && echo "已为 $BR 补发 test 检查" \
+            || echo "::warning::test 补发失败（修复分支上的 test.yml 需含 workflow_dispatch 触发器）；可人工在 PR 分支推一次提交触发检查。"

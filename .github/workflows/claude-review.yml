@@ -22,8 +22,8 @@ name: claude-review
 # 边界：
 #   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论/label），
 #     由 dependabot-fix.yml 专职处理。
-#   - Claude 自己推的修复提交带 [dependabot-fix] 前缀，auto-review / security-review 检测到
-#     尾提交为该前缀时跳过，防审查回环。
+#   - bot 自己推的修复提交带 [dependabot-fix]（依赖升级）/ [ci-autofix]（主干失败修复）前缀，
+#     auto-review / security-review 检测到 PR head 提交为任一前缀时跳过，防审查回环。
 #   - fork PR 拿不到 secrets，本工作流不覆盖（本仓库 PR 均来自同仓库分支）。
 
 on:
@@ -122,14 +122,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # actions/checkout 检出的是 refs/pull/N/merge 测试合并提交，git log -1 读到的是
-          # "Merge <sha> into <sha>"，永远匹配不上 [dependabot-fix] 前缀——防回环曾是死代码
+          # "Merge <sha> into <sha>"，永远匹配不上 bot 修复前缀——防回环曾是死代码
           #（评测集 2026-10-review-concurrency-cancel 实证）。改读 PR head 提交的 subject；
           # 查询失败按不跳过处理（宁可复审也不放过真修复不审）。
           sha="${{ github.event.pull_request.head.sha }}"
           msg="$(gh api "repos/${{ github.repository }}/commits/$sha" --jq '.commit.message' 2>/dev/null | head -1)"
           echo "pr head commit subject: $msg"
           case "$msg" in
-            "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            "[dependabot-fix]"*|"[ci-autofix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
       - name: 本地复算风险分级（写入工作目录，prompt 引用）
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
@@ -220,7 +220,7 @@ jobs:
           msg="$(gh api "repos/${{ github.repository }}/commits/$sha" --jq '.commit.message' 2>/dev/null | head -1)"
           echo "pr head commit subject: $msg"
           case "$msg" in
-            "[dependabot-fix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            "[dependabot-fix]"*|"[ci-autofix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
       - uses: anthropics/claude-code-action@v1
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'

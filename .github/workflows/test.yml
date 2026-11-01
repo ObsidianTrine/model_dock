@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # 供 ci-autofix 给修复分支补发检查用：autofix PR 由 GITHUB_TOKEN 开出，平台不为它触发
+  # push/pull_request 事件（见 ci-autofix.yml 头注），收尾步骤用 workflow_dispatch 显式跑一条
+  workflow_dispatch:
 
 permissions:
   contents: read
