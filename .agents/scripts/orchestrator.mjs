@@ -40,6 +40,7 @@ import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateN
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { isTransientWorkerFailure } from './orchestrator/transient.mjs';
+import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
@@ -402,7 +403,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     fastlaneWanted = false;
   }
 
-  const backend = await getBackend(opts.backend);
+  let backend = await getBackend(opts.backend); // 升级链第 1 档可能自动换船（prompt 超限切 fallback）
   const ctx = {
     repoRoot,
     worktreePath: worktree,
@@ -453,6 +454,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   const watchdogState = createWatchdogState(cfg.watchdog);
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
+  let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
   const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
@@ -544,6 +546,17 @@ async function cmdRun(repoRoot, taskId, opts) {
         workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
         workerInFlight = true; // 看门狗：spawn 在跑标记
         {
+          // 升级链第 1 档（escalation.mjs）：zcode 船 prompt 超限自动切 fallback 船——
+          // escalation 配置即持久授权（同 autopilot），engine_escalated 事件留痕；
+          // 预算延续不重置（Budget 实例不变，已耗口径延续）；每 run 至多升档一次。
+          const esc = shouldEscalatePrompt({ backend: opts.backend, promptLen: promptText.length, cfg });
+          if (esc.escalate && !escalatedThisRun) {
+            escalatedThisRun = true;
+            appendEvent(qdir, 'engine_escalated', { reason: 'prompt_oversize', from: opts.backend, to: esc.to, prompt_chars: promptText.length });
+            log(`⏫ 升级链：${esc.reason}——自动切 fallback 船 ${esc.to}（engine_escalated 已留痕；预算延续不重置）`);
+            opts.backend = esc.to;
+            backend = await getBackend(esc.to);
+          }
           fs.writeFileSync(promptFile, promptText);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
           appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });

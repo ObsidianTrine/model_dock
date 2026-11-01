@@ -136,7 +136,29 @@ export function loadWorkflowConfig(repoRoot) {
     weatherHold: resolveWeatherHold(raw.weatherHold),
     autoResume: resolveAutoResume(raw.autoResume),
     trace: resolveTrace(raw.trace),
+    escalation: resolveEscalation(raw.escalation),
   };
+}
+
+/** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即
+ *  blocked，行为不变）, fallbackBackend?: string（缺省 claude-headless——prompt 超限自动
+ *  切换的船，写进配置即持久授权，运行时不再请示） }。非法值回落缺省并 console.warn。 */
+function resolveEscalation(raw) {
+  const DEFAULTS = { enabled: false, fallbackBackend: 'claude-headless' };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] escalation 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 escalation 键：{ enabled?: boolean, fallbackBackend?: 后端名 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, fallbackBackend? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) out.enabled = raw.enabled === true;
+  if (raw.fallbackBackend !== undefined) {
+    const b = typeof raw.fallbackBackend === 'string' && raw.fallbackBackend.trim() ? raw.fallbackBackend.trim() : '';
+    if (b) out.fallbackBackend = b;
+  }
+  return out;
 }
 
 /** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数 }，缺省 observe/20。

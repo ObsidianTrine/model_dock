@@ -315,6 +315,19 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 **不变的红线**：两者开启都不触碰合并分级（corePaths→L2 / releasePaths→L3）、发布人工授权与「永不静默重试」——自动的是「进队列」，不是「进主干」。
 
+### B8. 故障处置升级链（escalation，分级自动化审批）
+
+故障处置按 token 成本分级自动升级，人只出现在高成本档（船东 2026-11-02 定案）：
+
+| 档位 | 成本 | 机制 | 状态 |
+|---|---|---|---|
+| 第 0 档 | 零成本自动 | worker 瞬时故障原地重试（≤3）、调试/审查返工循环、blocked 卡自动续跑（autoresume：transient 才续、24h 冷却）、watch 有痕重探 | 已内置 |
+| 第 1 档 | 低成本计费自动 | **zcode 船 prompt 超限（>30k argv 上限）自动切 fallback 船**：`engine_escalated` 事件留痕，预算延续不重置，每 run 至多一次 | workflow.json `escalation.enabled`（缺省关） |
+| 第 2 档 | 高成本人工审批 | 旗舰档（ahead-4）/ 加大预算 / 换供应商 | 永不自动——调度台停下请示 |
+
+- `escalation: { enabled: true, fallbackBackend: "claude-headless" }`——**fallbackBackend 写进配置即持久授权**（同 autopilot 哲学），运行时不再为换船请示。
+- 红线不变：预算熔断永远硬顶（escalation 不重置不放宽预算）；所有升档事件留痕（永不静默）；第 0/1 档只救「装不下/瞬时限流」类故障，验收失败照走调试与人工闸门。
+
 ## C. 观测与对账详解
 
 ### C1. stats 与 follow（引水传令）
