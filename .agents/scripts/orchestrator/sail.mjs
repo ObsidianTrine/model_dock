@@ -166,8 +166,14 @@ export function buildSailReport(voyage) {
       lookup[p.id] = { type: p.type, goal: p.goal, fromSail: true };
     }
   }
+  // 「本航次编排的卡」：sail 派发离港（from pending）、本航次新增入队、本航次提案。
+  // changed 里 from ≠ pending 的（running→merged 等）是并行会话/人工操作所致——如实
+  // 单列，不计入本航次战果（实航实证：并行 finish 落位的卡曾被误标「已出港」）。
   const touched = (id) =>
-    (diff.changed ?? []).some((c) => c.id === id) || (diff.added ?? []).some((a) => a.id === id) || Boolean(lookup[id]);
+    (diff.changed ?? []).some((c) => c.id === id && c.from === 'pending') ||
+    (diff.added ?? []).some((a) => a.id === id) ||
+    Boolean(lookup[id]);
+  const foreignSettled = (diff.changed ?? []).filter((c) => c.from !== 'pending');
   const lines = [];
   lines.push(`# 自由航行航海报告${voyage.projectName ? ` · ${voyage.projectName}` : ''}`);
   lines.push('');
@@ -213,6 +219,13 @@ export function buildSailReport(voyage) {
     lines.push(`- ${p.id}（${p.type}，by ${p.createdBy}）${p.goal ? `：${p.goal}` : ''}${reason ? `——${reason}` : ''}`);
   }
   if (!untouched.length) lines.push('（无）');
+  if (foreignSettled.length) {
+    lines.push(`### 🔄 航期内由其他流程落位（非本航次编排，${foreignSettled.length} 张）`);
+    for (const c of foreignSettled) {
+      lines.push(`- ${c.id}（${c.from} → ${c.to}）——并行会话/人工操作所为，不计入本航次战果`);
+    }
+    lines.push('');
+  }
   lines.push('');
   lines.push('## 为什么这么编排');
   lines.push('');

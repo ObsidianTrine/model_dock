@@ -108,12 +108,17 @@ describe('orchestrator sail > 纯逻辑件', () => {
         { n: 4, kind: 'plan', at: '', dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin: 10 },
       ],
       baseline: { pending: ['old-card'], 'awaiting-human': [], merged: [], ...empty },
-      endState: { pending: ['old-card'], 'awaiting-human': [], merged: ['fix-a'], ...empty },
-      diff: { changed: [{ id: 'fix-a', from: 'pending', to: 'merged' }], added: [] },
+      endState: { pending: ['old-card'], 'awaiting-human': [], merged: ['fix-a', 'ext-card'], ...empty },
+      diff: { changed: [{ id: 'fix-a', from: 'pending', to: 'merged' }, { id: 'ext-card', from: 'running', to: 'merged' }], added: [] },
     }
     const report = buildSailReport(voyage)
     expect(report).toContain('已出港（merged，1 张）')
     expect(report).toContain('fix-a（bugfix）：修复合并去重')
+    // 外部落位（from ≠ pending，如并行会话 finish 合并）不混入战果，单列披露
+    expect(report).toContain('🔄 航期内由其他流程落位（非本航次编排，1 张）')
+    expect(report).toContain('ext-card（running → merged）——并行会话/人工操作所为，不计入本航次战果')
+    const mergedSection = report.split('### ⏸')[0]
+    expect(mergedSection).not.toContain('ext-card（?')
     expect(report).toContain('未提交（deps 类型永不自动提交（依赖升级人工裁决））')
     expect(report).toContain('开航基线：pending 1')
     expect(report).toContain('罗盘（goals.md）：有')
