@@ -9,13 +9,15 @@ import {
   latencyQuantiles,
   logEvent,
   logRequest,
+  recordOutcome,
   reportEvent,
   setEventRingSink,
 } from '../src/gateway/state.js'
-import type { EventEntry } from '../src/gateway/state.js'
+import type { EventEntry, LogEntry } from '../src/gateway/state.js'
 import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
 import { appendLineErrorCount, drainAppendStreams } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'
+import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
@@ -207,6 +209,140 @@ describe('请求关联 ID 与健康/指标端点（E2E，隔离沙箱 + 随机�
       }
     } finally {
       h.restore()
+    }
+  })
+})
+
+describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () => {
+  const ADMIN = { 'x-modeldock-admin': 'admin-token-obs' }
+
+  async function setup() {
+    const h = fakeHome()
+    const cfg = {
+      providers: { up: { base_url: 'https://up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k' } },
+      profiles: { default: { provider: 'up', default_model: 'm1' } },
+      harness: {},
+    } as never
+    const rt = buildRuntime(cfg, 'admin-token-obs')
+    const server = createGatewayServer(rt, { port: 0 })
+    const port = await listenEphemeral(server)
+    return {
+      rt,
+      port,
+      close: () => {
+        server.closeAllConnections?.()
+        server.close()
+        h.restore()
+      },
+    }
+  }
+
+  it('metrics.meltdown：quota×3 触发（class/remaining_ms），连续成功×3 解除（风暴闸外部海况数据源）', async () => {
+    const t = await setup()
+    try {
+      for (let i = 0; i < 3; i++) recordOutcome(t.rt, 'up', { ok: false, cls: 'quota' })
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.meltdown).toHaveLength(1)
+      expect(m1.meltdown[0]).toMatchObject({ provider: 'up', class: 'quota' })
+      expect(m1.meltdown[0].remaining_ms).toBeGreaterThan(0)
+      expect(typeof m1.meltdown[0].until).toBe('string')
+      for (let i = 0; i < 3; i++) recordOutcome(t.rt, 'up', { ok: true })
+      const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m2.meltdown).toEqual([])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('usage 聚合：成功/失败/无 status 分布、维度 tally、时延分位、用量口径（缓存计入输入）', async () => {
+    const t = await setup()
+    try {
+      const now = new Date()
+      const today = localIsoTs(now).slice(0, 10)
+      const entry = (over: Partial<LogEntry>): LogEntry => ({
+        ts: localIsoTs(now),
+        harness: 'zcode',
+        profile: 'p',
+        provider: 'up',
+        model: 'glm-4.7',
+        path: '/v1/messages',
+        ...over,
+      })
+      logRequest(t.rt, entry({ status: 200, ms: 1200, usage: { input_tokens: 1500, output_tokens: 200, cache_read_tokens: 900, cache_creation_tokens: 0 } }))
+      logRequest(t.rt, entry({ harness: 'claude-code', status: 200, ms: 2400, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 } }))
+      logRequest(t.rt, entry({ status: 429, ms: 30 }))
+      logRequest(t.rt, entry({ status: 500, ms: 40, reason: 'down_all' }))
+      logRequest(t.rt, entry({ model: undefined })) // 无 status（中止）：归入失败 n/a；无 model 不进模型 tally
+      await drainAppendStreams()
+
+      const noAuth = await request(t.port, `/_modeldock/usage?date=${today}`)
+      expect(noAuth.status).toBe(401) // admin 门内
+      const res = await request(t.port, `/_modeldock/usage?date=${today}`, ADMIN)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.days).toEqual([today])
+      expect(body.filter).toBeNull()
+      const u = body.usage
+      expect(u.requests).toBe(5)
+      expect(u.ok).toBe(2)
+      expect(u.failed).toBe(3)
+      expect(u.by_status).toEqual({ '429': 1, '500': 1, 'n/a': 1 })
+      expect(u.by_provider).toEqual({ up: 5 })
+      expect(u.by_model).toEqual({ 'glm-4.7': 4 })
+      expect(u.latency.p50).toBe(1800) // [1200,2400] 线性插值
+      expect(u.tokens.input).toBe(2500) // 1500+900（缓存读计入输入）+ 100
+      expect(u.tokens.output).toBe(210)
+      expect(u.tokens.cache_read).toBe(900)
+      expect(u.window.first).toBeTruthy()
+
+      // harness 精确过滤：滤掉 claude-code 一条
+      const f = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&harness=zcode`, ADMIN)).body)
+      expect(f.usage.requests).toBe(4)
+      expect(f.filter).toEqual({ harness: 'zcode' })
+    } finally {
+      t.close()
+    }
+  })
+
+  it('usage from/to 跨日：昨日+今日两笔都命中；days 列表按本地日展开', async () => {
+    const t = await setup()
+    try {
+      const now = new Date()
+      const today = localIsoTs(now).slice(0, 10)
+      const yesterdayTs = new Date(now.getTime() - 86_400_000)
+      const yesterday = localIsoTs(yesterdayTs).slice(0, 10)
+      const entry = (over: Partial<LogEntry>): LogEntry => ({
+        ts: localIsoTs(now),
+        harness: 'zcode',
+        profile: 'p',
+        provider: 'up',
+        path: '/v1/messages',
+        ...over,
+      })
+      logRequest(t.rt, entry({ ts: localIsoTs(yesterdayTs), status: 200, ms: 100 }))
+      logRequest(t.rt, entry({ status: 200, ms: 200 }))
+      await drainAppendStreams()
+      const body = JSON.parse((await request(t.port, `/_modeldock/usage?from=${yesterday}&to=${today}`, ADMIN)).body)
+      expect(body.days).toEqual([yesterday, today])
+      expect(body.usage.requests).toBe(2)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('usage 400：date 格式非法 / to 早于 from / 窗口超上限，均带双语报错与示例 hint', async () => {
+    const t = await setup()
+    try {
+      const badDate = await request(t.port, '/_modeldock/usage?date=20261101', ADMIN)
+      expect(badDate.status).toBe(400)
+      expect(JSON.parse(badDate.body).error.message).toContain('date')
+      const badRange = await request(t.port, '/_modeldock/usage?from=2026-11-10&to=2026-11-01', ADMIN)
+      expect(badRange.status).toBe(400)
+      const tooWide = await request(t.port, '/_modeldock/usage?from=2000-01-01&to=2030-01-01', ADMIN)
+      expect(tooWide.status).toBe(400)
+      expect(JSON.parse(tooWide.body).modeldock.hint).toContain('/_modeldock/usage')
+    } finally {
+      t.close()
     }
   })
 })

@@ -5,6 +5,7 @@ export type { LogEntry, AuditEntry, EventEntry, RingEntry, ResolvedTarget, Resol
 export { buildTokenIndex, buildRuntime, reloadRuntime } from './state/runtime.js'
 export type { OrderedCandidate, RouteSource, PickResult, ScheduleHit, RouteState, AutoRouteInfo } from './state/routing.js'
 export { resolveTarget, resolveByProfile, recordOutcome, isMeltdown, activeScheduleWindow, activeAvoidTargets, displayRouteProvider, parseFallbackEntry, pickTarget, routeState, autoRouteInfo } from './state/routing.js'
-export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs } from './state/logs.js'
+export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, readRequestLogDay, filterLogEntries, summarizeUsage, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs } from './state/logs.js'
+export type { UsageFilter, UsageSummary } from './state/logs.js'
 export type { GatewayStateFile } from './state/state-file.js'
 export { readGatewayState, gatewayLive, writeGatewayState, mutateGatewayState, clearGatewayState, pidAlive } from './state/state-file.js'

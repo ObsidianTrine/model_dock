@@ -132,6 +132,9 @@ export interface HealthState {
   errWindow: { t0: number; count: number }
   /** 熔断截止时间戳；未熔断则为 undefined */
   meltdown_until?: number
+  /** 触发本次熔断的错误类（connect/429/5xx/quota）；随熔断清零一并清除。观测面暴露用
+   *  （/_modeldock/metrics 熔断字段；编排侧风暴闸只对 quota/429 类外部风暴感兴趣）。 */
+  meltdown_cls?: 'connect' | '429' | '5xx' | 'quota'
   /** 连续成功次数（≥3 清零熔断） */
   okStreak: number
   /** 最近一次成功请求/探活的耗时 ms（供 overview 展示与备用链同优先级决胜；失败不写，见 recordOutcome） */
