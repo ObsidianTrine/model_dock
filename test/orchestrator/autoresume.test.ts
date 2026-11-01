@@ -34,7 +34,10 @@ describe('orchestrator autoresume > isTransientBlocked 资格定性', () => {
   it('case A：最后 settle 事件 reason/detail 带 429/网络签名 → transient', () => {
     expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: '未产出结果块：HTTP 429 too many requests' })])).toBe(true)
     expect(isTransientBlocked([ev('worker_spawned'), ev('failed', { reason: '异常中断：fetch failed (ECONNRESET)' })])).toBe(true) // failTaskToBlocked 形态
-    expect(isTransientBlocked([ev('worker_spawned'), ev('circuit_breaker', { reason: 'watchdog', detail: '上游 rate limit，判定无进展' })])).toBe(true)
+    // 2026-11 护栏修正（原断言为 true）：circuit_breaker(reason=watchdog) 是确定性熔断，
+    // detail 是 judge LLM 的自由文本，不再参与 transient 判定——防「误杀→自动续→再误杀」
+    // 循环烧钱，见文末「自恢复交互护栏」用例
+    expect(isTransientBlocked([ev('worker_spawned'), ev('circuit_breaker', { reason: 'watchdog', detail: '上游 rate limit，判定无进展' })])).toBe(false)
   })
 
   it('非 transient 一律拒：stuck 自报、预算熔断、空事件链、无 settle 事件', () => {
@@ -68,6 +71,64 @@ describe('orchestrator autoresume > isTransientBlocked 资格定性', () => {
 
   it('看门狗熔断（circuit_breaker 收尾、无 blocked 事件）→ 拒', () => {
     expect(isTransientBlocked([ev('worker_spawned'), ev('circuit_breaker', { reason: 'watchdog', detail: '连续 2 次无实质进展' })])).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 自恢复交互护栏：看门狗熔断卡（reason=watchdog）永不自动续（2026-11 决策留底任务追加）
+// 防「actuate 误杀 → 自动续 → 再误杀」循环烧钱：reason=watchdog 是程序写入的确定性标记，
+// detail 是 judge LLM 的自由文本——看门狗看到的时间线里本就有 worker_retry/429 等字样，
+// 它复述时会让 Path A 的签名匹配把确定性熔断误判成 transient。四种形态（blocked /
+// circuit_breaker × 含 / 不含 worker_retry 历史）都必须拒绝续跑。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator autoresume > 自恢复交互护栏：watchdog 熔断卡不自动续', () => {
+  it('circuit_breaker(reason=watchdog) 收尾：不含 worker_retry 历史 → 拒', () => {
+    const cards = [
+      bcard('wd1', [ev('worker_spawned'), ev('circuit_breaker', { reason: 'watchdog', detail: '连续 2 次判定无实质进展' })]),
+    ]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([])
+  })
+
+  it('circuit_breaker(reason=watchdog) 收尾：含 worker_retry 历史、detail 复述瞬时字样 → 拒（护栏主形态）', () => {
+    // detail 引用时间线（上游 429 限流后原地打转）——修复前 Path A 按自由文本签名误判 transient
+    const cards = [
+      bcard('wd2', [
+        ev('worker_spawned'),
+        ev('worker_retry', { attempt: 1, max: 3, wait_s: 60 }),
+        ev('worker_retry', { attempt: 2, max: 3, wait_s: 120 }),
+        ev('circuit_breaker', { reason: 'watchdog', detail: '时间线显示上游 429 rate limit 后原地打转，无实质进展' }),
+      ]),
+    ]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([])
+    expect(isTransientBlocked(cards[0].events)).toBe(false)
+  })
+
+  it('blocked(reason=watchdog) 收尾：不含 worker_retry 历史 → 拒', () => {
+    const cards = [bcard('wd3', [ev('worker_spawned'), ev('blocked', { reason: 'watchdog' })])]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([])
+  })
+
+  it('blocked(reason=watchdog) 收尾：含 worker_retry 历史（无后续熔断事件）→ 拒', () => {
+    // 修复前 Path B 按「retry 链 + blocked 收尾」放行——reason=watchdog 被链路定性淹没
+    const cards = [
+      bcard('wd4', [
+        ev('worker_spawned'),
+        ev('worker_retry', { attempt: 1, max: 3, wait_s: 60 }),
+        ev('blocked', { reason: 'watchdog' }),
+      ]),
+    ]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([])
+    expect(isTransientBlocked(cards[0].events)).toBe(false)
+  })
+
+  it('护栏不误伤：worker_retry 用尽后 blocked（transient 链路定性）照常可续', () => {
+    const cards = [bcard('tr1', [
+      ev('worker_spawned'),
+      ev('worker_retry', { attempt: 1, max: 3, wait_s: 60 }),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ])]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['tr1'])
   })
 })
 

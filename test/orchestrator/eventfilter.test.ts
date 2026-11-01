@@ -272,9 +272,11 @@ describe('orchestrator eventfilter > 配置与引擎解析', () => {
     try {
       fs.mkdirSync(path.join(dir, '.agents'))
       const write = (json: unknown) => fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(json))
-      expect(readScanConfig(dir)).toEqual({ smartFilter: false, smartModel: null, reviewBackend: null, reviewModel: null })
+      // trace 键随决策留底功能加入（2026-11）：缺省开启，上界/滚动走 workflow.json trace 键
+      const traceDefaults = { enabled: true, maxPerTask: 20, maxInputKB: 64 }
+      expect(readScanConfig(dir)).toEqual({ smartFilter: false, smartModel: null, reviewBackend: null, reviewModel: null, trace: traceDefaults })
       write({ scan: { smartFilter: true, smartModel: 'm-1' }, review: { backend: 'zcode-headless', model: 'm-2' } })
-      expect(readScanConfig(dir)).toEqual({ smartFilter: true, smartModel: 'm-1', reviewBackend: 'zcode-headless', reviewModel: 'm-2' })
+      expect(readScanConfig(dir)).toEqual({ smartFilter: true, smartModel: 'm-1', reviewBackend: 'zcode-headless', reviewModel: 'm-2', trace: traceDefaults })
       // scan.smartModel 缺省回落 review.model
       write({ scan: { smartFilter: true }, review: { backend: 'mock', model: 'm-2' } })
       expect(resolveSemanticEngine(dir)).toMatchObject({ engine: 'mock', model: 'm-2', available: true })

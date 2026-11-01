@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { writeDecisionTrace } from './trace.mjs';
 
 /** 看门狗单次检查的 worker 会话轮次上限（只读判断，1-2 轮足够；收紧防跑飞）。 */
 export const WATCHDOG_MAX_TURNS = 4;
@@ -91,16 +92,33 @@ export function buildWatchdogPrompt(goal, timelineText) {
  * 一次性 LLM 进展检查。spawnFn({prompt}) → Promise<string>（headless LLM 输出）；
  * 由调用方注入（orchestrator.mjs 用 makeWatchdogSpawnFn 复用现有 backend 基建，测试用假替身）。
  * 保守失败：进程失败/输出解析失败一律返回 {progressing: true, error}——不打扰正常任务。
+ * 决策留底：traceDir 有值时把本次判断落盘（kind=watchdog，input=时间线摘要全文、
+ * output=模型原始输出、parsed=verdict；写失败内部消化不影响判定，见 trace.mjs）。
+ * traceOpts 透传 workflow.json trace 键的上界/滚动参数（{maxInputKB, maxPerTask}）。
  */
-export async function watchdogCheck({ goal, timeline, spawnFn }) {
+export async function watchdogCheck({ goal, timeline, spawnFn, traceDir, traceOpts } = {}) {
+  const startedAt = Date.now();
   try {
     if (typeof spawnFn !== 'function') throw new Error('spawnFn 不是函数');
     const output = await spawnFn({ prompt: buildWatchdogPrompt(goal, timeline) });
     const verdict = parseWatchdogVerdict(output);
+    if (traceDir) {
+      writeDecisionTrace(
+        { root: traceDir, kind: 'watchdog', input: timeline, output: String(output ?? ''), parsed: verdict, meta: { durationMs: Date.now() - startedAt } },
+        traceOpts,
+      );
+    }
     if (!verdict) return { progressing: true, error: '输出无法解析为 {progressing, reason} JSON' };
     return verdict;
   } catch (e) {
-    return { progressing: true, error: `看门狗进程失败：${String(e?.message ?? e).slice(0, 300)}` };
+    const error = `看门狗进程失败：${String(e?.message ?? e).slice(0, 300)}`;
+    if (traceDir) {
+      writeDecisionTrace(
+        { root: traceDir, kind: 'watchdog', input: timeline, output: '', parsed: null, meta: { durationMs: Date.now() - startedAt, error } },
+        traceOpts,
+      );
+    }
+    return { progressing: true, error };
   }
 }
 
