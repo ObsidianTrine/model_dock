@@ -210,11 +210,12 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 | `.agents/review-evals/` | 审查评测集：事故 / revert 变考题（`scripts/review-eval.mjs` 给审查者跑分）——**出事故后必读加题**，改 REVIEW.md / prompt / 模型后全量重跑 | 无 |
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 合并成组 PR 降噪，major 单独出 | 无 |
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（`npm run build` + `npm test` 全绿评论可合并；升级引入的失败做最小修复推回；大破坏不硬修、给人工方案） | `CLAUDE_AUTH_TOKEN`（key） + `DEPENDABOT_GH_TOKEN`（PAT，Contents + Pull requests 读写） |
+| `workflows/ci-autofix.yml` | 主干 test 失败的投机自动修复（main/develop、首次失败才触发）：后台复现 → 最小修复 + 补测试 → 开 `[ci-autofix]` 修复 PR 待审；flaky/修不了给结论不开 PR；每 run 仅 1 次尝试 | `CLAUDE_AUTH_TOKEN`（key），无需 PAT |
 
 - **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**——secret `CLAUDE_AUTH_TOKEN`（key）+ Variables `CLAUDE_BASE_URL`（端点 URL）与 `CLAUDE_MODEL`（模型名），三件套缺一 bot 跳过并告警；换供应商只改这三个值。Bearer 型端点注意项与切回官方方法见 `docs/ci-bots.md`「模型接入」。
 
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（GitHub 平台行为）：Dependabot PR 的评论/推送必须经 `DEPENDABOT_GH_TOKEN`（PAT）；缺 PAT 时 dependabot-fix 打 warning 后跳过，PR 留给人工。
-- **防回环**：Claude 修复提交固定 `[dependabot-fix]` 前缀，review bot 检测到尾提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入）。
+- **防回环**：bot 修复提交固定前缀（dependabot-fix 用 `[dependabot-fix]`、ci-autofix 用 `[ci-autofix]`），review bot 检测到 PR head 提交为该前缀即跳过复审；dependabot-fix 仅 `actor=dependabot[bot]` 触发（PAT 推送触发的 synchronize 不会重入），ci-autofix 仅认 main/develop 的 push 型 run 且每 run 只尝试一次。
 - **合并权在人**：bot 只发评论与修复提交，不 approve、不 merge；发版仍走 release.md 人工授权流程。
 
 ## 判定边界（Boundaries）
