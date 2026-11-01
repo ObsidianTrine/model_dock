@@ -1,7 +1,7 @@
 // T15 agents-hygiene-batch 定向断言（卡验收五项）：
 //   ① guard-develop 热路径重排——escape hatch 0 次 git / feature 分支 1 次 / 基准分支 3 次
 //   ② events appendEvent seq 缓存——热路径零全文件读；invalidateSeqCache 后重新对齐
-//   ③ drain run 子进程 spawn 'error'（ENOENT）→ active 清空 + pump 继续 + exit 0（原缺口挂起不退）
+//   ③ drain run 子进程 spawn 'error'（ENOENT）→ 串行卡转 blocked / 并行 active 清空，pump 继续 + exit 0（原缺口挂起不退、串行 die 空转）
 //   ④ policy evaluateCommand 单次评估只读一次 workflow.json（原最多 4 次）
 //   ⑤ policy audit.jsonl 5MB 轮转（.1 只留一代，审计行内容不变）
 // 无 vi.mock（AGENTS vitest 隔离模型）：fs 用 vi.spyOn 作用域内打点，外部进程用真实脚本。
@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { cardText, mkRepo, runOrch } from './helpers.js'
+import { cardText, mkRepo, readCard, runDrainWithoutNode, runOrch } from './helpers.js'
 import { appendEvent, invalidateSeqCache, readEvents } from '../../.agents/scripts/orchestrator/events.mjs'
 import { audit, evaluateCommand, setAuditFile } from '../../.agents/scripts/policy.mjs'
 
@@ -118,47 +118,29 @@ describe('T15② events appendEvent seq 缓存', () => {
 })
 
 // ---------------------------------------------------------------------------
-// ③ drain：run 子进程 spawn 'error' 不再挂起
+// ③ drain：run 子进程 spawn 'error'（ENOENT）不挂起不 die
+//    （2026-11 根修：环境注入化——原写法从 PATH 剔除 node 目录，依赖真实 PATH 结构，
+//     Windows 上剔除可能失效 + 串行路径缺容错必红；现用 helpers.runDrainWithoutNode
+//     的 node 副本 + 空 PATH 目录，三平台确定性 ENOENT。测试意图不变。）
 // ---------------------------------------------------------------------------
 
 describe('T15③ drain 对 spawn ENOENT 的容错', () => {
-  it('node 不在 PATH 时 drain 仍退出 0（error → active 清空 → pump 继续）', () => {
+  it('run 子进程 node 无法解析时串行 drain 仍退出 0（spawn error → 卡转 blocked → 继续调度）', () => {
     const repo = mkRepo()
     try {
       const cardFile = path.join(repo.root, 'card-t15drain.md')
       fs.writeFileSync(cardFile, cardText({ id: 't15drain' }))
       runOrch(repo.root, `submit "${cardFile}"`)
 
-      // PATH 剔除 node 所在目录（nvm / setup-node / homebrew 链接目录普遍含 node 字样），
-      // git 保留——drain 父进程自身仍需 git/findRepoRoot；内层 spawn('node') 才会 ENOENT
-      const nodeDir = path.dirname(process.execPath)
-      const slimPath = (process.env.PATH ?? '')
-        .split(path.delimiter)
-        .filter((p) => p && path.resolve(p) !== nodeDir && !/node/i.test(p))
-        .join(path.delimiter)
-      // 探测：若这台机器 node 仍可解析（如 /usr/bin/node），ENOENT 场景造不出来——
-      // 退化为只断言不挂起 + 正常跑完（ Assertions 分支二）
-      const probe = spawnSync('node', ['--version'], { env: { ...process.env, PATH: slimPath }, encoding: 'utf8' })
-      const enoent = probe.status !== 0
-
-      const orch = path.join(REPO, '.agents', 'scripts', 'orchestrator.mjs')
-      const r = spawnSync(process.execPath, [orch, 'drain', '--backend', 'mock'], {
-        cwd: repo.root,
-        encoding: 'utf8',
-        timeout: 120_000,
-        maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, PATH: slimPath },
-      })
-      // 修复前：active 条目永不清除 → pump 停摆 → drain 挂死（这里会撞 timeout）
-      expect(r.error?.code).not.toBe('ABRT')
+      // 确定性注入：内层 spawnSync('node') 必然 ENOENT（不依赖真实 PATH 结构）
+      const r = runDrainWithoutNode(repo.root, ['drain', '--backend', 'mock'])
+      // 修复前：串行路径无 spawn 容错——卡留 pending → 死循环防护 die 退出 1
       expect(r.status).toBe(0)
-      const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
-      if (enoent) {
-        expect(out).toContain('run 子进程启动失败')
-        expect(out).toContain('继续调度')
-      } else {
-        expect(out).toContain('队列已清空')
-      }
+      expect(r.output).toContain('run 子进程启动失败')
+      expect(r.output).toContain('继续调度')
+      expect(r.output).toContain('队列已清空')
+      // 卡显式落位 blocked/（可 resume），不悬在 pending
+      expect(readCard(repo.root, 'blocked', 't15drain')).toContain('t15drain')
     } finally {
       repo.cleanup()
     }

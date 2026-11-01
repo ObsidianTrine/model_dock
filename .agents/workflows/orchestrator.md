@@ -272,6 +272,8 @@ node .agents/scripts/orchestrator.mjs schedule uninstall  # 卸载
 - wrapper（`.agents/orchestrator/nightly-runner.sh|cmd`）在 install 时刻固化仓库/node 的绝对路径——launchd、schtasks 的执行环境 PATH 极瘦，运行时一律不做环境发现；仓库挪位置后需重跑 `schedule install`。
 - 日志落在 `.agents/orchestrator/logs/nightly.log`（每次 nightly 自动轮转：超 5MB 转 `.old`）。
 - 默认档（不带 `--auto`）零烧钱：只生成任务卡与报告，等人工 `drain`；`--auto` 档夜里真跑 worker，合并闸门不变。
+- 中断恢复与双跑防护：nightly 启动时对账 `logs/nightly-state.json`——上次未正常收尾（崩溃/强制重启）则记 `nightly_recovered` + webhook 通知后照常执行（调度器没有的补跑语义由它补上）；距上次完成不足 20 小时且非人工触发判为补触发双跑，跳过本次。手动跑不受限（终端 TTY 自动识别，脚本场景加 `--manual`）。
+- 模板变更后需重跑 `schedule install`：wrapper 固化 install 时刻的参数与路径，orchestrator 侧的默认值/参数变更不会自动生效到已注册的调度。
 
 ## 发版提案（release-propose，release-please 形态的触发层）
 

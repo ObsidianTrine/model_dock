@@ -134,6 +134,8 @@ pending → running → reviewing → awaiting-human → merged
 
 运行态（`queue/`、`logs/`、`degraded.json`、审计 `audit.jsonl`）都不入 git，崩溃后按 `running/` + 事件日志恢复。
 
+例外：drain 的 run 子进程 spawn 起不来（如 node/引擎无法解析）时，pending 卡直接转 blocked 等人工 resume——`resume <task-id>` 可续。
+
 ## 6. 什么时候用 orchestrator、什么时候自己 feature-branch
 
 - **适合交给 orchestrator**：目标明确、验收标准可机器检查、改动范围清晰的任务——bug 修复、小功能、文档同步、测试补充、巡检卡处理。
