@@ -126,6 +126,9 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 | [换电脑与多机同步](docs/multi-machine-sync.md) | 同步盘接入新电脑的完整步骤与排错 |
 | [云端部署](docs/deploy-cloud.md) | 自建云端同步中枢 runbook，手机单页管理所有设备 |
 | [设计文档](docs/design.md) | 架构、ADR、威胁模型 |
+| [AI 自治流水线指南](docs/ai-pipeline-guide.md) | 从一句话意图到发版提案：任务卡进、合并出，贡献者派活的全部用法 |
+| [CI 机器人](docs/ci-bots.md) | GitHub Actions 分层 PR 审查与 Dependabot 的设置与用途（维护者） |
+| [AI 审查体系](docs/ai-review-system.md) | 分层代码审查的设计与运维：每层拦什么、如何持续改进 |
 | [更新日志](CHANGELOG.md) | 每个版本的用户可见变化 |
 | 英文文档 | [docs/en/](docs/en/)（README / 使用指南等英文镜像，随版本同步） |
 
@@ -134,6 +137,8 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 网关仅监听 `127.0.0.1`，不支持远程访问（设计如此）；上游 key 只存本机安全后端，客户端配置中只出现本地 token；请求日志只记元数据、不落 prompt。完整威胁模型与安全设计见[设计文档 §9](docs/design.md#9-安全设计)。发现安全漏洞？请按[安全政策](SECURITY.md)私密上报。
 
 ## 参与贡献
+
+仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)。
 
 欢迎提 [Issue](https://github.com/ObsidianTrine/model_dock/issues) 反馈问题与建议。提交 PR 前请先读[贡献指南](CONTRIBUTING.md)与 [AGENTS.md](AGENTS.md)（工程约定与硬性约束），并确保 `npm test` 全绿。
 
