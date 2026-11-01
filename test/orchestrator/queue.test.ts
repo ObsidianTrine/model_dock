@@ -96,9 +96,10 @@ describe('orchestrator queue > 状态机', () => {
 
       // 终态无出边
       expect(() => moveCard(root, 't1', 'merged', 'pending')).toThrowError(/非法状态迁移/)
-      // 跳变拒绝：pending → awaiting-human
+      // 跳变拒绝：pending → awaiting-human（pending 合法出边仅 running 与 blocked——
+      // blocked 是 drain spawn 失败容错的落位，见 queue.mjs TRANSITIONS 注释）
       fs.writeFileSync(cardPathOf(root, 'pending', 't2'), cardText({ id: 't2' }))
-      expect(() => moveCard(root, 't2', 'pending', 'awaiting-human')).toThrowError(/pending → \[running\]/)
+      expect(() => moveCard(root, 't2', 'pending', 'awaiting-human')).toThrowError(/pending → \[running, blocked\]/)
       // 卡片不存在报错
       expect(() => moveCard(root, 'ghost', 'pending', 'running')).toThrowError(/不存在/)
 

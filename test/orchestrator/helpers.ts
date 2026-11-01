@@ -2,7 +2,7 @@
 // 让真实 feature-branch.mjs + orchestrator.mjs（mock 后端）在里面跑完整闭环。
 // 注意文件名不是 *.test.ts：vitest 只收集 test/**/*.test.ts（docs 7 章评审项）。
 
-import { execSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -124,6 +124,46 @@ export function tryOrch(repo: string, args: string, env: Record<string, string> 
   } catch (e) {
     const err = e as { status?: number; stdout?: string; stderr?: string }
     return { status: err.status ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? '' }
+  }
+}
+
+export interface NoNodeRun {
+  status: number | null
+  output: string
+  /** spawnSync 顶层的 error.code（如 ETIMEDOUT）；正常退出为 undefined */
+  errorCode?: string
+}
+
+/**
+ * 确定性「node 不可解析」注入（T15③ 根修，2026-11）：不再从 PATH 剔除 node 所在目录——
+ * 那依赖真实 PATH 结构（Windows 的进程搜索会先看 node.exe 自身所在目录，剔除可能失效；
+ * Linux CI 的 node 又常在 /usr/local/bin 这类不含 "node" 字样的目录，剔除后仍可解析），
+ * 两端都造不出确定性 ENOENT。这里反向构造：drain 父进程换成 node 二进制的**临时副本**
+ * （改名，任何平台的「应用目录/父进程可执行文件目录」搜索都命中不了 node），PATH 指向
+ * os.tmpdir() 造的空目录——内层 spawnSync('node') 在三平台都必然 ENOENT，与机器无关。
+ * 副本与空 PATH 目录在返回前清理（spawnSync 同步等子进程退出，Windows 句柄已释放）。
+ */
+export function runDrainWithoutNode(repo: string, args: string[], timeoutMs = 120_000): NoNodeRun {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-nonode-'))
+  const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-nonode-path-'))
+  const copyPath = path.join(base, process.platform === 'win32' ? 'nbcopy.exe' : 'nbcopy')
+  fs.copyFileSync(process.execPath, copyPath)
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(copyPath, 0o755) } catch { /* copyFileSync 通常已保留 mode；失败也照样试跑 */ }
+  }
+  const orch = path.join(WORKTREE_ROOT, '.agents', 'scripts', 'orchestrator.mjs')
+  try {
+    const r = spawnSync(copyPath, [orch, ...args], {
+      cwd: repo,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 32 * 1024 * 1024,
+      env: { ...process.env, PATH: emptyPath },
+    })
+    return { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, errorCode: r.error?.code }
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true })
+    fs.rmSync(emptyPath, { recursive: true, force: true })
   }
 }
 

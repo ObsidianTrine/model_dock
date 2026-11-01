@@ -1,9 +1,11 @@
 // nightly 测试：巡检编排端到端——scan 落卡 + drift 报告 + 摘要；默认零烧钱（不跑 worker）。
+// 另覆盖幂等补跑（nightly-state）：中断恢复 + 双跑防护（Windows 强制重启后 nightly 静默缺失的防护）。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { readNightlyState, writeNightlyState } from '../../.agents/scripts/orchestrator/nightly-state.mjs'
 import { mkRepo, runOrch } from './helpers.js'
 
 describe('orchestrator nightly > 巡检编排端到端', () => {
@@ -29,14 +31,16 @@ describe('orchestrator nightly > 巡检编排端到端', () => {
     }
   })
 
-  it('重复跑同夜去重（内容不变 → 同 id → 已存在跳过）', () => {
+  it('重复跑同夜去重（内容不变 → 同 id → 已存在跳过；同刻二跑须 --manual 绕过双跑防护）', () => {
     const repo = mkRepo()
     try {
       const src = path.join(repo.root, 'src')
       fs.mkdirSync(src, { recursive: true })
       fs.writeFileSync(path.join(src, 'a.ts'), '// TODO: 同一条\nexport {}\n')
       runOrch(repo.root, 'nightly')
-      const again = runOrch(repo.root, 'nightly')
+      // 同刻第二次触发：调度器语境（非 TTY）被 20h 双跑防护跳过（见「幂等补跑」组）——
+      // 人工语境（--manual）才重跑巡检，去重靠内容哈希
+      const again = runOrch(repo.root, 'nightly --manual')
       expect(again.stdout).toContain('已存在，跳过')
       expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(1)
     } finally {
@@ -51,6 +55,60 @@ describe('orchestrator nightly > 巡检编排端到端', () => {
       expect(out.stdout).not.toContain('已生成任务卡')
       expect(out.stdout).toContain('待调度（pending）: 0')
       expect(out.stdout).toContain('nightly 摘要')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 幂等补跑（nightly-state）：runOrch 的子进程 stdin 非 TTY = 调度器语境
+// ---------------------------------------------------------------------------
+
+describe('orchestrator nightly > 幂等补跑（中断恢复 + 双跑防护）', () => {
+  it('距上次完成不足 20h 且非人工触发：跳过（exit 0、不巡检），--manual 强跑放行并落 finishedAt', () => {
+    const repo = mkRepo()
+    try {
+      const H = 3_600_000
+      writeNightlyState(repo.root, {
+        startedAt: new Date(Date.now() - 2 * H).toISOString(),
+        finishedAt: new Date(Date.now() - 1 * H).toISOString(),
+        result: {},
+      })
+      const out = runOrch(repo.root, 'nightly')
+      expect(out.stdout).toContain('nightly 跳过')
+      expect(out.stdout).toContain('双跑')
+      expect(out.stdout).not.toContain('nightly 巡检') // 未真正执行巡检
+      expect(out.stdout).toContain('--manual') // 给出强跑指引
+      // 状态未动：完成记录没有被改成「未收尾」（否则 20h 防护失明）
+      const st = readNightlyState(repo.root)
+      expect(st?.finishedAt).toBeTruthy()
+
+      // --manual 显式人工触发：不受限，正常执行并更新完成态
+      const m = runOrch(repo.root, 'nightly --manual')
+      expect(m.stdout).toContain('nightly 巡检')
+      expect(m.stdout).toContain('nightly 摘要')
+      const st2 = readNightlyState(repo.root)
+      expect(st2?.finishedAt).toBeTruthy()
+      expect(st2?.startedAt).toBeTruthy()
+      expect(st2?.result).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('上次未收尾（finishedAt 缺失）：记 nightly_recovered + 照常执行接续', () => {
+    const repo = mkRepo()
+    try {
+      const src = path.join(repo.root, 'src')
+      fs.mkdirSync(src, { recursive: true })
+      fs.writeFileSync(path.join(src, 'a.ts'), '// TODO: 中断恢复场景\nexport {}\n')
+      writeNightlyState(repo.root, { startedAt: new Date(Date.now() - 3_600_000).toISOString(), finishedAt: null })
+      const out = runOrch(repo.root, 'nightly')
+      expect(out.stdout).toContain('nightly_recovered')
+      expect(out.stdout).toContain('已生成任务卡') // 巡检照常执行
+      const st = readNightlyState(repo.root)
+      expect(st?.finishedAt).toBeTruthy() // 正常收尾落完成态
     } finally {
       repo.cleanup()
     }

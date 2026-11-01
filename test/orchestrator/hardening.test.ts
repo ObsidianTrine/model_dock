@@ -192,7 +192,8 @@ describe('hardening > nightly 通知（notify）', () => {
     try {
       runOrch(repo.root, 'nightly')
       expect(fs.existsSync(schedulerLockPath(repo.root))).toBe(false)
-      const again = runOrch(repo.root, 'nightly')
+      // --manual：同刻第二次触发会被 20h 双跑防护跳过（nightly-state），锁释放验证需真跑
+      const again = runOrch(repo.root, 'nightly --manual')
       expect(again.stdout).toContain('nightly 摘要') // 未被陈锁卡住
     } finally {
       repo.cleanup()
