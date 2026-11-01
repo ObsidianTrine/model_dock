@@ -5,6 +5,34 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [1.5.2] - 2026-11-01
+
+A batch of stability and security fixes: daemon and update-chain reliability, Windows tray interaction, forwarding and config error handling; the console MCP card is also retired per a product decision.
+
+### Changed
+
+- **The console "MCP Servers" card is retired**: MCP runs over stdio, never touches the gateway, changes rarely, and native client-side management is the norm — the read-only MCP inventory card and its endpoint are removed from the console; the `modeldock mcp list` command and the doctor check remain, so inventory capability is unaffected.
+
+### Improved
+
+- **Test and agent processes can no longer write through to the real config**: the write guard now covers agent CLI runs directly and distinguishes trusted writers, and the sync engine's write paths are pinned to their own sandbox — write requests targeting the real home from test/agent contexts are always rejected with an actionable error (the definitive fix for the 2026-10-30 production config overwrite incident).
+
+### Fixed
+
+- **`gateway start --daemon` no longer hangs the terminal**: the command returns as soon as the background gateway is ready — previously the parent process's pipe pinned the event loop and the CLI took over half a minute to return (the double-click-launched window also wouldn't close); daemon logs now land in the logs/ directory, startup failures point at the log path, and a bad-argv crash on Windows no longer leaves a 0-byte crash log.
+- **One-click update no longer sticks at "updating" forever**: failures that used to wedge the update permanently — log directory cannot be created, log file locked, update process failed to start — now reset the state and allow a retry.
+- **The update flow tolerates transient failures and coexisting instances**: occasional no-diagnosis extract subprocess failures are retried automatically; update staging in the shared temp directory is cleaned by age, so a coexisting production and dev instance no longer delete each other's in-flight download/extract directories.
+- **Update status polling no longer clobbers concurrently written data**: all writers to gateway.json go through one serial queue — the status poll could previously overwrite just-written device memory and phone credentials wholesale.
+- **Empty credentials no longer pass auth after phone remote is turned off**: LAN auth rejects missing/empty tokens outright (an empty string previously passed the comparison against an empty string), and turning remote off now also closes existing keep-alive connections.
+- **The Windows tray no longer stutters periodically**: health probing moved to a worker thread — while the gateway was "half-dead" the tray used to freeze up to 2 seconds every 5 seconds.
+- **Three Windows tray menu and display fixes**: no more orphaned "default model" menu item after the gateway stops (clicking it showed a fake error); model paths no longer get doubled backslashes or mojibake from double decoding; update checks now read structured output with a watchdog (no more false failures on English systems, no more missed update prompts).
+- **The Anthropic-compatible endpoint of multi-protocol providers is truly reachable**: `/v1/messages` (including count_tokens) requests are explicitly routed as Anthropic protocol instead of falling back to the provider's default; Chinese-language 429 quota messages from domestic upstreams are recognized and trigger automatic failover.
+- **Two forwarding and model-catalog fixes**: multi-value response headers (like Set-Cookie) are no longer collapsed into one line; the model-catalog view cache now hits correctly and probing works for responses-protocol providers.
+- **Bad config gives actionable errors instead of stack traces or silent miswrites**: a missing/invalid `key_ref` no longer throws a TypeError stack in forwarding or the console (one bad entry no longer breaks the whole page); invalid JSONPath expressions are rejected with the position named — no more silently swallowing characters and miswriting, no more bare crashes on scalar children, and the regression that rejected multi-segment dotted paths is fixed.
+- **Scheduled-window validation matches what actually runs**: HH:mm config validation and engine evaluation share one source, ending "validation passes but runtime behaves differently" splits.
+- **Two provider-management fixes**: deleting a provider clears the config before the key, so an interruption no longer leaves a half-deleted state; model statistics reflect the freshly fetched catalog immediately after adding a service.
+- **Failover logs tell the truth**: the failover chain's logs and error messages now match what actually happened (they used to under- or mis-report actual switches).
+
 ## [1.5.1] - 2026-10-29
 
 Root-cause fix for the stuck Windows one-click update, plus multi-machine sync atomicity and a lighter console page.
@@ -418,6 +446,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.3...v1.5.0
 [1.4.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.2...v1.4.3
