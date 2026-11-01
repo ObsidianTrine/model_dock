@@ -648,6 +648,9 @@ describe('doctor 第二轮（doctor-round2 卡）', () => {
       process.env.USERPROFILE = root
       expect(fakeHomeMisconfig(path.join(root, '.modeldock'), root)).toBe(path.join(root, '.modeldock'))
       expect(fakeHomeMisconfig(undefined, root)).toBeNull()
+      expect(fakeHomeMisconfig(root, root)).toBe(root) // 真正写穿形态：FAKE_HOME = 主目录本体
+      const info = diskUsageFinding(10 * 1024 * 1024, null, undefined)
+      expect(info.level).toBe('info') // statfs 失败是「无数据」，不谎报充足
       expect(fakeHomeMisconfig(path.join(root, 'elsewhere'), root)).toBeNull()
       // 全链路：FAKE_HOME 与 homedir 组合成「真实数据目录」形态 → collectDoctorFindings 报 bad
       process.env.MODELRDOCK_FAKE_HOME = path.join(root, '.modeldock')

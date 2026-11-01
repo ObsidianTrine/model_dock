@@ -147,6 +147,17 @@ describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
     expect(evaluateCommand('env FOO=1 npm test').allowed).toBe(true)
   })
 
+  it('卡35：env 与赋值前缀组合形态（VAR=x env …）不再漏拦；hatch 经 env 包裹不扩张白名单', () => {
+    expect(evaluateCommand('VAR=x env git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('VAR=x env npm publish')).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand("VAR=x env bash -c 'git push origin main'")).toMatchObject({ allowed: false, rule: 'publish' })
+    expect(evaluateCommand('env env git push origin main')).toMatchObject({ allowed: false, rule: 'publish' })
+    // hatch 经 env 包裹：白名单形态照常放行、非白名单形态不放行（授权不等于扩权）
+    expect(evaluateCommand('AGENTS_ALLOW_RELEASE=1 env git push origin main')).toMatchObject({ allowed: true, rule: 'release-hatch' })
+    expect(evaluateCommand('AGENTS_ALLOW_RELEASE=1 env git push origin feature-x').allowed).toBe(false)
+    expect(evaluateCommand('VAR=x env npm test').allowed).toBe(true)
+  })
+
   it('卡27-2：命令替换与子壳载荷递归评估', () => {
     expect(evaluateCommand('echo $(git push origin main)')).toMatchObject({ allowed: false, rule: 'publish' })
     expect(evaluateCommand('echo `git push origin main`')).toMatchObject({ allowed: false, rule: 'publish' })

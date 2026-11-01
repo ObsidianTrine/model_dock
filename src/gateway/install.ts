@@ -23,7 +23,10 @@ export const RUN_SHELL_TIMEOUT_MS = 10 * 60_000
 
 export function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessEnv, timeoutMs: number = RUN_SHELL_TIMEOUT_MS): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env })
+    // detached（unix）：建独立进程组，超时树杀才能整组清（复合命令 bash 不 exec 优化，
+    // 只杀 shell 层时孙进程持有 stdio，close 依旧不触发——夜间复审④）；win32 taskkill /T
+    // 本就走父子树，无需 detached
+    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env, detached: process.platform !== 'win32' })
     // setEncoding：多字节中文跨 chunk 边界不再撕裂成替换符（engineWarningHint 的正则匹配与日志展示都依赖）
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
@@ -45,14 +48,18 @@ export function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.P
     // hInstall/hUninstall 端点曾永久挂起、子进程留存。不用 spawn 原生 timeout——它只杀
     // 直接子进程（shell 包装层），孙进程持有 stdio 管道时 close 永不触发、runShell 依旧
     // 挂死（Windows cmd.exe 不 exec，`node -e setInterval` 实测）；故到点后按树清：
-    // win32 taskkill /T /F，unix 杀 shell（sh -c 单命令形态下 exec 直接命中目标进程）
+    // win32 taskkill /T /F，unix 杀独立进程组（spawn 已 detached，夜间复审④补整组）
     const timer = setTimeout(() => {
       if (settled || !child.pid) return
       try {
         if (process.platform === 'win32') {
           execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
         } else {
-          child.kill('SIGKILL')
+          try {
+            process.kill(-child.pid, 'SIGKILL')
+          } catch {
+            child.kill('SIGKILL')
+          }
         }
       } catch {
         /* 已退出（close 竞态）：忽略 */
