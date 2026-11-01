@@ -63,6 +63,9 @@ workflows:                       # 注入 worker 的 playbook（至少 feature-b
   - feature-branch
 ui_check: true                   # 可选：改 Web 控制台/网关页面的任务开启 UI 冒烟门禁（跑 workflow.json uiCheckCmd）
 tier: heavy                      # 可选：任务等级（按难度选服务/模型，见「任务等级（tier）」节）；缺省时 files_hint 命中核心/发布路径自动升 heavy
+fastlane: true                   # 可选布尔（缺省 false）：轻卡快速通道——跳过 LLM 审查子循环省最大开销，
+                                 # 门禁/调试子循环/分级闸门一个不省；实际分级 L2/L3、drift 降级、gate=L3
+                                 # 或 workflow.json fastlaneAllowed:false 时自动失效回常规链路（规则见「常见问题」）
 gate: L3                         # Phase 1 固定值
 ---
 
@@ -81,6 +84,8 @@ gate: L3                         # Phase 1 固定值
 ```
 
 **验收标准是 orchestrator 的灵魂**：worker 拿它当自查靶子，审查者拿它当评判基准，你看闸门时拿它当验收清单。写"做得好用一点"这种不可检查的句子等于没写。
+
+**`fastlane` 只省审查、不省任何闸门**：适合纯 docs/test 类小改动（分级判定仍然按实际改动面算，声明不兜底）。写 `fastlane: true` 即请求跳过 LLM 审查子循环，失效规则与失效条件见「常见问题」末条。
 
 ## 任务卡状态机（哪里找我的任务）
 
@@ -157,6 +162,7 @@ pending → running → reviewing → awaiting-human → merged
   - **逐项目绝对路径（旧行为）**：每个项目注册自己的 `<项目绝对路径>/.agents/hooks/policy-zcode.mjs`。
   两者都以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
+- **fastlane 卡跳过审查的规则与失效条件**：任务卡 frontmatter 写 `fastlane: true`（缺省 false；写了非法值按 false 处理并告警，不拒绝提交）→ 闭环变为 worker → 门禁/红线 → 调试子循环 → 直接进分级闸门：不进 reviewing 状态、不 spawn reviewer，事件留痕为 worker_spawned 后记 `fastlane_active`、`review_verdict` 记 `{verdict:"skipped", reason:"fastlane"}`。**只省审查，不降任何闸门**：自动合并四前提（无 drift 降级 + 声明与实际分级均为 L0/L1 + 实际≤声明 + scope 无越界）原样生效。三条失效规则（都记 `fastlane_skipped` 事件附 reason，失效后本次 run 不复活、照跑审查）：① worker 完成后按实际改动分级复判，L2/L3（核心路径/发布流水线/未识别文件）→ 回常规链路——核心路径恰恰最需要审查；② drift 降级标记存在 → 回常规链路（降级是保险丝期，不能省审查，自动合并也照旧关闭）；③ 卡 gate=L3（发布类/全人工）→ 跑前即失效（L3 本就永不自动合并）。另：workflow.json `fastlaneAllowed: false` 为团队级总开关，设 false 后声明一律被忽略（reason=`disabled_by_config`）。
 - **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。**人工开发同一任务现已机制化互通（claim-before-execute）**：feature-branch start 见队列同 id 卡在 pending/ 即自动认领（抢任务锁 + 卡迁 running/ + manual_claimed 事件），finish 成功后落 merged/——人工侧与闭环共享卡状态，drain 不会再误派/误转 blocked（2026-10-30 卡 22 双 agent 撞车已机制性收口）；编排器自己拉起的 start/finish 分别带 ORCHESTRATOR_CLOSURE / ORCHESTRATOR_GATE_HEAD 标记跳过认领与落卡，卡的归属权留在闭环状态机。同 task-id 混用仍然不要：卡已被闭环持有（锁存活）时 start 会拒绝。
 - **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢调度器锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
 - **同一个任务能被两个进程同时跑吗**：不能。每个任务有任务级互斥锁（`.agents/orchestrator/.run-<task-id>.lock`）：run/resume/retry 进入闭环时抢锁，他人持锁且存活时后来者报错退出（手动 run 撞上 drain、双重手动操作都不会出现两个 worker 写同一个 worktree）；持有进程已死 = 陈锁自动接管（崩溃恢复：接管后仍会先清理孤儿 worker）。闭环落位（merged/awaiting-human/blocked/failed）即释放；`abandon` 在闭环存活时会被拒（防止误杀在跑 worker），确认卡死先终止该进程再 abandon。**人工指派的 agent 同样被挡**：feature-branch start 的认领逻辑会抢同一把锁（活锁持有者 = 闭环时拒绝，陈锁自动接管），且认领即把卡迁出 pending/——drain 不再把它当可调度卡误派（认领机制详见 feature-branch.md「start 即认领」）。

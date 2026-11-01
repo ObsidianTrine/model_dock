@@ -378,6 +378,25 @@ async function cmdRun(repoRoot, taskId, opts) {
   copySpecArtifacts(repoRoot, worktree, meta);
   appendEvent(qdir, 'worktree_ready', { path: worktree, branch: `feature/${taskId}` });
 
+  // ---- fastlane（轻卡快速通道）：声明即请求跳过 LLM 审查子循环，门禁/红线/调试子循环/
+  // 分级闸门一个不省。跑前已知的前提在这里结清（fastlane_skipped 事件留痕，永不静默）；
+  // 跑后才知道的实际改动分级在门禁后的决策点再判。一旦失效本次 run 不复活——fixup 只会
+  // 让改动面更复杂，「同一张卡时快时慢」无法解释。
+  let fastlaneWanted = meta.fastlane === true;
+  if (fastlaneWanted && cfg.fastlaneAllowed === false) {
+    // 团队级总开关关闭（workflow.json fastlaneAllowed: false）：声明被忽略，照跑审查
+    appendEvent(qdir, 'fastlane_skipped', { reason: 'disabled_by_config' });
+    fastlaneWanted = false;
+  } else if (fastlaneWanted && meta.gate === 'L3') {
+    // gate=L3（发布类/全人工）：L3 本就永不自动合并，审查保护的仍是人审质量——不省
+    appendEvent(qdir, 'fastlane_skipped', { reason: 'gate_l3' });
+    fastlaneWanted = false;
+  } else if (fastlaneWanted && readDegraded(repoRoot)) {
+    // drift 降级期间：自动合并信任已被打破的保险丝期，恰恰不能省审查
+    appendEvent(qdir, 'fastlane_skipped', { reason: 'drift_degraded' });
+    fastlaneWanted = false;
+  }
+
   const backend = await getBackend(opts.backend);
   const ctx = {
     repoRoot,
@@ -433,6 +452,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           fs.writeFileSync(promptFile, promptText);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
           appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
+          if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
             promptFile,
             cwd: worktree,
@@ -614,70 +634,93 @@ async function cmdRun(repoRoot, taskId, opts) {
       });
       const cliTouched = gateCliEntry(worktree, baseBranch, cfg.corePaths); // 返回被触及的核心路径列表
 
-      // ---- LLM 独立审查（全新上下文；权限层强制只读，不靠 prompt 自觉）----
-      // 审查用独立后端（reviewBackend ≠ worker backend 时为异构互审）：review_spawned
-      // 记录审查引擎，retry/resume 沿用；fallback 回落同源时留痕供 drift 分析。
-      const diff = execFileSync('git', ['diff', `${baseBranch}...HEAD`], { cwd: worktree, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-      moveCard(root, taskId, 'running', 'reviewing');
-      if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
-        appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
-      }
-      const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
-      reviewTempDirs.push(reviewPromptDir);
-      const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
-      fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
-      // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
-      // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
-      // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
-      const reviewWantsSettings = opts.reviewBackend === 'claude-headless' && Object.keys(tierEnv).length > 0;
-      let reviewSettingsFile;
-      if (reviewWantsSettings) {
-        const reviewSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-'));
-        reviewTempDirs.push(reviewSettingsDir);
-        reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
-        writeWorkerSettings(reviewSettingsFile, tierEnv);
-      }
-      const review = await reviewBackend.spawn({
-        promptFile: reviewPromptFile,
-        cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
-        maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
-        onEvent: (e) => {
-          appendEvent(qdir, e.type, e);
-          trackPid(e);
-        },
-        readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
-        model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
-        settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
-        envPatch: tierEnv,
-      });
-      livePid = null;
-      appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
-      const verdict = parseReviewVerdict(review.output ?? '');
-      appendEvent(qdir, 'review_verdict', {
-        blockers: verdict?.blockers ?? -1,
-        suggestions: verdict?.suggestions ?? 0,
-        notes: verdict?.notes ?? 0,
-      });
-
-      const blockers = verdict?.blockers ?? 1; // 解析不到按有阻塞保守处理
-      if (blockers > 0) {
-        reviewIter += 1;
-        appendEvent(qdir, 'review_iteration', { attempt: reviewIter, max: meta.budget.max_review_iterations });
-        if (reviewIter > meta.budget.max_review_iterations) {
-          appendEvent(qdir, 'circuit_breaker', { reason: 'max_review_iterations', detail: `${reviewIter}/${meta.budget.max_review_iterations}` });
-          moveCard(root, taskId, 'reviewing', 'blocked');
-          await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
-          die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
-        }
-        promptText = buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter);
-        moveCard(root, taskId, 'reviewing', 'running');
-        continue;
-      }
-
-      // ---- 合并闸门：L0/L1 自动合并（Phase 2），L2/L3 人工 ----
+      // ---- fastlane 决策点：实际改动面说了算（跑前只看声明，这里按真实分级复判）----
+      // 分级计算自合并闸门段上移：fastlane 失效判定与合并决策共用同一份结论（reviewer
+      // 只读，审查前后改动面不变）。
       const classification = classifyChange(changedFiles(worktree, baseBranch), cfg);
       appendEvent(qdir, 'gate_result', { gate: 'change_classification', result: classification.level, detail: classification.reasons.join('; ') });
       const rankOf = (l) => ['L0', 'L1', 'L2', 'L3'].indexOf(l);
+      if (fastlaneWanted) {
+        const degradedNow = readDegraded(repoRoot);
+        if (degradedNow) {
+          // drift 降级标记在跑动期间出现（并发任务的自动合并触发评估）：同样失效回常规链路
+          appendEvent(qdir, 'fastlane_skipped', { reason: 'drift_degraded' });
+          fastlaneWanted = false;
+        } else if (['L2', 'L3'].includes(classification.level)) {
+          // 实际改动分级 L2/L3（核心路径/发布流水线/未识别文件）：恰恰最需要审查——失效回常规链路
+          appendEvent(qdir, 'fastlane_skipped', { reason: `actual_level_${classification.level.toLowerCase()}`, level: classification.level });
+          fastlaneWanted = false;
+        }
+      }
+
+      if (fastlaneWanted) {
+        // ---- fastlane：跳过 LLM 审查子循环（不 spawn reviewer、不进 reviewing 状态），
+        // review_verdict 记 skipped 留痕，直接进入合并闸门。自动合并四前提原样生效——
+        // fastlane 只是少了一个审查阻塞来源，不降任何闸门。
+        appendEvent(qdir, 'review_verdict', { verdict: 'skipped', reason: 'fastlane' });
+      } else {
+        // ---- LLM 独立审查（全新上下文；权限层强制只读，不靠 prompt 自觉）----
+        // 审查用独立后端（reviewBackend ≠ worker backend 时为异构互审）：review_spawned
+        // 记录审查引擎，retry/resume 沿用；fallback 回落同源时留痕供 drift 分析。
+        const diff = execFileSync('git', ['diff', `${baseBranch}...HEAD`], { cwd: worktree, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+        moveCard(root, taskId, 'running', 'reviewing');
+        if (resolvedReview.mode === 'fallback' && opts.backend !== 'mock') {
+          appendEvent(qdir, 'review_backend_fallback', { worker: opts.backend, detail: '异构候选 CLI 不可用，审查回落 worker 同源' });
+        }
+        const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
+        reviewTempDirs.push(reviewPromptDir);
+        const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
+        fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
+        // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
+        // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
+        // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
+        const reviewWantsSettings = opts.reviewBackend === 'claude-headless' && Object.keys(tierEnv).length > 0;
+        let reviewSettingsFile;
+        if (reviewWantsSettings) {
+          const reviewSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-'));
+          reviewTempDirs.push(reviewSettingsDir);
+          reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
+          writeWorkerSettings(reviewSettingsFile, tierEnv);
+        }
+        const review = await reviewBackend.spawn({
+          promptFile: reviewPromptFile,
+          cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
+          maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
+          onEvent: (e) => {
+            appendEvent(qdir, e.type, e);
+            trackPid(e);
+          },
+          readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
+          model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
+          settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
+          envPatch: tierEnv,
+        });
+        livePid = null;
+        appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
+        const verdict = parseReviewVerdict(review.output ?? '');
+        appendEvent(qdir, 'review_verdict', {
+          blockers: verdict?.blockers ?? -1,
+          suggestions: verdict?.suggestions ?? 0,
+          notes: verdict?.notes ?? 0,
+        });
+
+        const blockers = verdict?.blockers ?? 1; // 解析不到按有阻塞保守处理
+        if (blockers > 0) {
+          reviewIter += 1;
+          appendEvent(qdir, 'review_iteration', { attempt: reviewIter, max: meta.budget.max_review_iterations });
+          if (reviewIter > meta.budget.max_review_iterations) {
+            appendEvent(qdir, 'circuit_breaker', { reason: 'max_review_iterations', detail: `${reviewIter}/${meta.budget.max_review_iterations}` });
+            moveCard(root, taskId, 'reviewing', 'blocked');
+            await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
+            die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
+          }
+          promptText = buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter);
+          moveCard(root, taskId, 'reviewing', 'running');
+          continue;
+        }
+      }
+
+      // ---- 合并闸门：L0/L1 自动合并（Phase 2），L2/L3 人工 ----
       // 漂移降级（Phase 3）：自动合并回溯失败率超阈值期间，一切自动合并回人工——
       // 恢复只能人工 --clear，保险丝不自己插回去
       const degraded = readDegraded(repoRoot);
@@ -687,22 +730,23 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
       // 自动合并前提（缺一不可）：无降级标记、任务卡显式声明允许自动（gate=L0/L1；L3=全人工永不自动）、
       // 实际改动分级可自动（L0/L1）且不超声明上限、无范围越界（scope_purity 有 outside
-      // 一律回人工——范围失控不该静默合并）
+      // 一律回人工——范围失控不该静默合并）。fastlane 不参与判定：它只省审查，不降闸门。
       const autoEligible =
         !degraded &&
         ['L0', 'L1'].includes(meta.gate) &&
         ['L0', 'L1'].includes(classification.level) &&
         rankOf(classification.level) <= rankOf(meta.gate) &&
         purity.outside.length === 0;
+      const gateFrom = fastlaneWanted ? 'running' : 'reviewing'; // fastlane 跳过 reviewing 状态：卡仍在 running/
       if (autoEligible) {
         appendEvent(qdir, 'auto_merge', { level: classification.level, gate: meta.gate, debugIter, reviewIter });
-        moveCard(root, taskId, 'reviewing', 'awaiting-human'); // 落位到闸门目录（不写 awaiting_human 事件，不等人）
+        moveCard(root, taskId, gateFrom, 'awaiting-human'); // 落位到闸门目录（不写 awaiting_human 事件，不等人）
         await doApprove(repoRoot, taskId, root, qdir, 'auto');
         appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
         return;
       }
 
-      moveCard(root, taskId, 'reviewing', 'awaiting-human');
+      moveCard(root, taskId, gateFrom, 'awaiting-human');
       const awaitReason = degraded ? 'drift_degraded' : purity.outside.length ? 'scope_outside' : `level ${classification.level} 超出 gate ${meta.gate} 上限或 gate=L3`;
       appendEvent(qdir, 'awaiting_human', { reason: awaitReason });
       await settleNotify(repoRoot, taskId, 'awaiting-human', awaitReason);
@@ -718,7 +762,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       if (opts.interactive && process.stdin.isTTY) {
         await humanGateInteractive(repoRoot, taskId, root, qdir, summary, { backend: opts.backend, reviewBackend: opts.reviewBackend });
       } else {
-        log('审查通过，任务已进入 awaiting-human/（L3 人工合并闸门）。');
+        log(fastlaneWanted ? 'fastlane 轻卡（跳过 LLM 审查），任务已进入 awaiting-human/（人工合并闸门）。' : '审查通过，任务已进入 awaiting-human/（L3 人工合并闸门）。');
         printGateSummary(taskId, summary);
         log(`人工操作：node .agents/scripts/orchestrator.mjs approve|reject|retry ${taskId}`);
       }

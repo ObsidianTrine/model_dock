@@ -19,7 +19,7 @@ export interface TestRepo {
 }
 
 /** 建一个最小可跑 orchestrator 的临时仓库：develop 分支 + 初始 commit。 */
-export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBackend?: string; baseBranch?: string }): TestRepo {
+export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBackend?: string; baseBranch?: string; extra?: Record<string, unknown> }): TestRepo {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'))
   const g = (args: string) => git(root, args)
   const baseBranch = opts?.baseBranch ?? 'develop'
@@ -35,7 +35,7 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBac
   // pickNextCard 下轮再选中它 → 死循环（实测踩中）。
   fs.mkdirSync(path.join(root, '.agents', 'workflows'), { recursive: true })
   fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
-  const workflow: Record<string, unknown> = { baseBranch, testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"' }
+  const workflow: Record<string, unknown> = { baseBranch, testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"', ...opts?.extra }
   if (opts?.uiCheckCmd) workflow.uiCheckCmd = opts.uiCheckCmd
   if (opts?.workerBackend) workflow.worker = { backend: opts.workerBackend }
   fs.writeFileSync(path.join(root, '.agents', 'workflow.json'), JSON.stringify(workflow))
