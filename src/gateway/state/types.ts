@@ -101,6 +101,8 @@ export interface GatewayRuntime {
   dispatchers: Map<string, Dispatcher | undefined>
   /** providerId → 自动路由健康/熔断状态（仅 auto_failover 开启时使用） */
   health: Map<string, HealthState>
+  /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目） */
+  tokenUsage: Map<string, TokenUsageState>
   /** 实际监听端口（可能因占用与配置不同） */
   port?: number
   /** 手机简版控制台（LAN）第二监听器运行态；随网关生命周期启停。host=实际绑定地址（对外 URL 只列真正可达的地址） */
@@ -124,6 +126,18 @@ export interface ProviderLatencyRing {
   samples: number[]
   count: number
   lastMs?: number
+}
+
+/** 单 harness 的数据面限额计数状态（内存态，rt 级；重启清零）。见 state/tokenlimits.ts。 */
+export interface TokenUsageState {
+  /** rpm 滑动窗口起点 */
+  rpmStart: number
+  /** 窗口内请求数（含失败/中止——它们同样是上游压力） */
+  rpmCount: number
+  /** 本地日键（YYYY-MM-DD），跨日自动清零 */
+  dayKey: string
+  /** 当日累计 token（input 含缓存读/建 + output，与 reconcile 对账口径一致） */
+  dayTokens: number
 }
 
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */
