@@ -31,27 +31,35 @@ function listCases() {
 }
 
 /** 从 reviewRef 物化考题文件（带行号），返回 {dir, blocks}。
- *  cleanSha 存在时（噪声对照题）物化该提交对 files 的 diff——干净题考的是「改动该不该报」。 */
+ *  cleanSha 存在时（噪声对照题）物化该提交对 files 的 diff——干净题考的是「改动该不该报」。
+ *  diffRef 存在时（diff 题型）物化该提交对 files 的 diff——bug 随 diff 合入的场景。根因文件
+ *  超 120KB 整文件护栏（如 orchestrator.mjs）时改用此题型：考「引入提交的 diff」，贴近真实 PR 审查。 */
 function materialize(c, dir) {
+  if (c.cleanSha && c.diffRef) {
+    throw new Error(`考题 ${c.id}：cleanSha 与 diffRef 互斥（前者考「干净改动不该报」，后者考「diff 里埋着 bug」）。`)
+  }
   const blocks = []
   for (const rel of c.files) {
     const args = c.cleanSha
       ? ['show', `${c.cleanSha}`, '--', rel]
-      : ['show', `${c.reviewRef}:${rel}`]
+      : c.diffRef
+        ? ['show', `${c.diffRef}`, '--', rel]
+        : ['show', `${c.reviewRef}:${rel}`]
     const show = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' })
     if (show.status !== 0) {
-      throw new Error(`git show ${args.slice(1).join(' ')} 失败（reviewRef/cleanSha 写错？）：${show.stderr.trim()}`)
+      throw new Error(`git show ${args.slice(1).join(' ')} 失败（reviewRef/cleanSha/diffRef 写错？）：${show.stderr.trim()}`)
     }
-    // 体积护栏：整文件进 prompt，超大文件（如历史上的巨型 ui.ts）会撑爆上下文/烧钱——提前拦下换更小的考题文件
+    // 体积护栏：整文件/大 diff 进 prompt，超大（如历史上的巨型 ui.ts）会撑爆上下文/烧钱——提前拦下换更窄的材料
     if (Buffer.byteLength(show.stdout) > 120_000) {
       throw new Error(
-        `考题文件 ${rel}@${c.cleanSha ?? c.reviewRef} 有 ${Math.round(Buffer.byteLength(show.stdout) / 1024)}KB（>120KB 上限），` +
-          `整文件进 prompt 会撑爆上下文。换根因所在的更小文件，或拆分考题。`
+        `考题材料 ${rel}@${c.cleanSha ?? c.diffRef ?? c.reviewRef} 有 ${Math.round(Buffer.byteLength(show.stdout) / 1024)}KB（>120KB 上限），` +
+          `进 prompt 会撑爆上下文。换根因所在的更小文件/更窄的引入提交，或拆分考题。`
       )
     }
-    if (c.cleanSha) {
+    if (c.cleanSha || c.diffRef) {
+      const ref = c.cleanSha ?? c.diffRef
       writeFileSync(join(dir, `${basename(rel)}.diff`), show.stdout)
-      blocks.push(`### 改动 diff：${rel}（提交 ${c.cleanSha}）\n\n\`\`\`diff\n${show.stdout}\n\`\`\``)
+      blocks.push(`### 改动 diff：${rel}（提交 ${ref}）\n\n\`\`\`diff\n${show.stdout}\n\`\`\``)
     } else {
       const lines = show.stdout.split('\n').map((l, i) => `${String(i + 1).padStart(4)} | ${l}`)
       const dest = join(dir, basename(rel))
@@ -76,6 +84,22 @@ function buildPrompt(c, blocks) {
       '== 输出要求 ==',
       '- 确证没有真问题时，顶层结论只写「未发现问题」，不要为了凑数报告风格/诊断/清理类。',
       '- 若确有真问题，顶层结论以「发现 N 个问题」开头，每条给文件+行号与证据。'
+    ]
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (c.diffRef) {
+    return [
+      `下面是一个真实仓库里已合入的改动（提交 ${c.diffRef}）。这个 diff 之后补了一个真实 bug 的修复——你的任务：`,
+      '只读审查这个 diff，找出其中引入或暴露的缺陷（就是后来要发修复的那个，以及其它你能确证的问题）。',
+      '',
+      reviewMd ? `== 审查纪律（REVIEW.md）==\n${reviewMd}\n` : '',
+      '== 待审改动 ==',
+      ...blocks,
+      '',
+      '== 输出要求 ==',
+      '- 顶层结论以「发现 N 个问题」开头；每条给 文件+行号 与证据；没有把握不报。',
+      '- 不确定的问题单独放「存疑」一节，说明缺什么证据。'
     ]
       .filter(Boolean)
       .join('\n')
