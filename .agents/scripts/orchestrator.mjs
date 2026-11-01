@@ -650,10 +650,16 @@ async function cmdRun(repoRoot, taskId, opts) {
         }
         return null;
       };
+      // 改动分级前置（原在门禁后）：门禁按实际改动面自适应选测试面——L0 纯文档卡跑
+      // testCmdL0 轻量门禁（不烧全量回归），代码卡照旧全量；fastlane 与合并决策复用
+      // 同一份结论（审查只读，改动面前后不变）。
+      const changed = changedFiles(worktree, baseBranch);
+      const classification = classifyChange(changed, cfg);
+      const docsOnly = changed.length > 0 && changed.every((f) => /\.md$/i.test(f.replace(/\\/g, '/')));
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, cfg.testCmd.join(' && ')),
+          run: () => gateNpmTest(worktree, docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ')),
           trigger: 'test_failure',
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
@@ -664,16 +670,21 @@ async function cmdRun(repoRoot, taskId, opts) {
             try {
               gateHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
             } catch { /* 取不到 HEAD 就不记：approve 回落全量测试，语义安全 */ }
-            return { duration_ms: r.durationMs, ...(gateHead ? { head: gateHead } : {}) };
+            return {
+              duration_ms: r.durationMs,
+              ...(gateHead ? { head: gateHead } : {}),
+              ...(docsOnly && cfg.testCmdL0 ? { scoped: 'l0' } : {}),
+            };
           },
         },
         {
           gate: 'tsc_build',
-          run: () => gateTscBuild(worktree, cfg.buildCmd), // buildCmd 未配置 → 直接 skipped 返回，不进调试循环
+          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
+          run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
           dieLabel: 'build 不过',
           dieTail: '任务转 blocked/，人工接手。',
-          passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+          passExtra: (r) => (r.skipped ? { skipped: true, ...(r.reason ? { reason: r.reason } : {}) } : {}),
         },
         {
           gate: 'lint',
@@ -756,7 +767,6 @@ async function cmdRun(repoRoot, taskId, opts) {
       // ---- fastlane 决策点：实际改动面说了算（跑前只看声明，这里按真实分级复判）----
       // 分级计算自合并闸门段上移：fastlane 失效判定与合并决策共用同一份结论（reviewer
       // 只读，审查前后改动面不变）。
-      const classification = classifyChange(changedFiles(worktree, baseBranch), cfg);
       appendEvent(qdir, 'gate_result', { gate: 'change_classification', result: classification.level, detail: classification.reasons.join('; ') });
       const rankOf = (l) => ['L0', 'L1', 'L2', 'L3'].indexOf(l);
       if (fastlaneWanted) {
@@ -1289,6 +1299,8 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
   appendEvent(qdir, 'merged', { merge_commit: mergeCommit, ...(source === 'auto' ? { auto: true } : {}) });
   log(`已合并：${mergeCommit.slice(0, 7)}（任务转 merged/${source === 'auto' ? '，自动合并' : ''}）`);
+  // 成功出港同样通知（此前 merged 静默——失败人人皆知、成功无声，体验反了）
+  await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
 }
 
 async function doReject(repoRoot, taskId, root, qdir, reason) {

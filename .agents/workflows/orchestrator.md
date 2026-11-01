@@ -170,7 +170,7 @@ ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒
 现象、复现步骤、相关文件。
 ```
 
-**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。航次计划段（SOLAS V.34 计划先行）要求 3-6 个检查点、每个一句话「做什么 + 怎么验证」、末尾一行备选路线；planner / propose 产卡会自动补写该段。
+**门禁按实际改动面分级**：全部改动为 `.md`（纯文档卡，实际分级 L0）时，npm_test 门禁自动改跑 workflow.json `testCmdL0` 轻量命令（本仓库 = docs-lint 测试），tsc_build 跳过——不烧全量回归；含代码改动照旧全量（gate_result 事件带 `scoped: l0` 标记可审计）。**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。航次计划段（SOLAS V.34 计划先行）要求 3-6 个检查点、每个一句话「做什么 + 怎么验证」、末尾一行备选路线；planner / propose 产卡会自动补写该段。
 
 `run` 在 TTY 下会在人工闸门处交互（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；非 TTY 打印提示后退出，用 approve/reject/retry 异步处理。
 
@@ -215,7 +215,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
   | 前进4 | `ahead-4` | 核心/发布路径与复杂特性（旗舰全速） | `MDK_TIER_AHEAD4_TOKEN` |
 
   ① ModelDock 侧按档位建 profile + 钉定路由的 harness（`modeldock test <harness>` 验证连通）；② workflow.json `tiers` 各档配 `tokenEnv`（token 走环境变量不入库，可选 `workerModel`/`reviewModel`/`provider`/`gatewayBase`）；③ 任务卡写 `tier: ahead-3`（**旧 `heavy`/`light` 永远兼容**＝自动映射 前进4/前进2）。`files_hint` 命中核心/发布路径自动升 前进4。某档 tokenEnv 未设 → 该档回落全局默认（显式点名告警、自动升档静默）。模型优先级：CLI > tier > 全局默认。zcode-headless 不支持 tier。
-- **长跑加固速记**（详设见 design doc v1.2）：预算按引擎校准 `budgetProfiles.<backend>`（本仓库 claude-headless / zcode-headless 均 `max_tokens: 5000000`——GLM 网关缓存读口径失真，调大不关闭，wall-clock 才是真熔断）；drain 起跑前引擎预检（CLI 不可用拒绝启动，不再逐卡烧成 blocked）；落位即发 webhook（`${envPrefix}_ORCH_WEBHOOK`）+ macOS 通知；worker prompt 带结束纪律（done 前自验、同一条命令被权限拒满 2 次即 stuck、禁 `git -C` 与 `;`/`&&` 复合命令）。
+- **长跑加固速记**（详设见 design doc v1.2）：预算按引擎校准 `budgetProfiles.<backend>`（本仓库 claude-headless / zcode-headless 均 `max_tokens: 5000000`——GLM 网关缓存读口径失真，调大不关闭，wall-clock 才是真熔断）；drain 起跑前引擎预检（CLI 不可用拒绝启动，不再逐卡烧成 blocked）；成功出港（merged ✅）与落位（awaiting-human/blocked/failed）均发 webhook（`${envPrefix}_ORCH_WEBHOOK`）+ macOS 通知；worker prompt 带结束纪律（done 前自验、同一条命令被权限拒满 2 次即 stuck、禁 `git -C` 与 `;`/`&&` 复合命令）。
 - **Windows 权限墙已根修**：claude CLI 在 Windows 的 shell 工具是 **PowerShell**——白名单/红线一律 Bash+PowerShell 双形态双发，worker settings hook matcher 为 `Bash|PowerShell`。zcode 侧 yolo 在 CLI 0.17.0 已恢复全自动（沙箱实验实证）。
 - **prompt 纪律**（对齐 Anthropic 长时程 harness）：done 前自验测试、干净提交、不越界；**同一条命令被权限拒绝满 2 次即 stuck 熔断**；环境层禁 `git -C` 形态与 `;`/`&&` 复合命令。spec 卡 design/requirements 用 **worktree 文件引用**（防 zcode headless 30k argv 上限），prepare 时由 orchestrator 拷贝进 worktree。reviewer prompt 注入 REVIEW.md 纪律摘要（截 8000 字符）。files_hint 解析自动剥反引号/引号。
 - **Budget 会话级记账**：committed+sessionMax（跨 fixup 会话不再互相覆盖漏计），每次 worker_spawned 落 `budget_baseline` 事件。

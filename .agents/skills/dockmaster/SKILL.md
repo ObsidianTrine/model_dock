@@ -106,6 +106,8 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 轮询观测（不必密集）：`status` 队列全貌；`status <task-id>` / `logs <task-id>` 事件时间线（worker_spawned→worker_turn→gate_result→review_verdict…）；现场看 `.agents/worktrees/<task-id>/NOTES.md`（复诵 + 航次计划 + 进度）。用户中途补要求：`follow <task-id> "<补充指令>"`（会话边界送达，不必打回重跑）。
 
+**里程碑播报（调度台职责）**：后台跑期间，在三个节点主动向用户汇报（不必等用户问）——① worker 完成、进入门禁/审查；② 审查结论出来（阻塞/建议数）；③ 落位（merged / awaiting-human / blocked）。实现=节点处读一次 `status <task-id>` 摘要转述；让「人在窗口」全程有回声，而不是只在进程退出时响一次。
+
 落位处置：
 - **merged** → 完成（L1 自动合并进本地 develop）。
 - **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。
