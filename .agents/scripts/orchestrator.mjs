@@ -1095,10 +1095,17 @@ function cmdSubmit(repoRoot, cardFile) {
   const existing = findCard(root, meta.id);
   if (existing) die(`任务 id "${meta.id}" 已存在于 ${existing.state}/（同 id 不允许重复提交）。`);
   fs.copyFileSync(path.resolve(cardFile), cardPath(root, 'pending', meta.id));
-  // 提交的是 drafts/ 提案 → 草稿同步清掉（提案态终结：队列接管，drafts 只留未处理项）
-  if (path.resolve(cardFile).startsWith(draftsDir(repoRoot) + path.sep)) {
-    try { fs.rmSync(path.resolve(cardFile), { force: true }); } catch { /* 清理失败不阻断 */ }
-  }
+  // 提交的是 drafts/ 提案 → 草稿同步清掉（提案态终结：队列接管，drafts 只留未处理项）。
+  // 前缀比对必须走 realpath：macOS 的 tmpdir 是符号链接（/var/folders→/private/var/folders），
+  // argv 侧（调用方传入）与 cwd 侧（findRepoRoot 经 process.cwd()）解析不一致会误判前缀，
+  // 导致草稿清不掉（scan.test『提案提交』用例实证）。
+  try {
+    const cardReal = fs.realpathSync(path.resolve(cardFile));
+    const draftsReal = fs.realpathSync(draftsDir(repoRoot));
+    if (cardReal.startsWith(draftsReal + path.sep)) {
+      try { fs.rmSync(path.resolve(cardFile), { force: true }); } catch { /* 清理失败不阻断 */ }
+    }
+  } catch { /* realpath 失败（路径不存在等）跳过清理 */ }
   log(`任务卡已提交：pending/${meta.id}.md（type=${meta.type} priority=${meta.priority} gate=${meta.gate}）`);
   log(`启动闭环：node .agents/scripts/orchestrator.mjs run ${meta.id}`);
 }
