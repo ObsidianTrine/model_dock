@@ -1,5 +1,6 @@
 import path from 'node:path'
 import fs from 'node:fs'
+import { createInterface } from 'node:readline'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { logsDir } from '../../util/paths.js'
 import { appendLine, closeAppendStream } from '../../util/fsx.js'
@@ -172,17 +173,20 @@ export interface UsageFilter {
   toMs?: number
 }
 
+/** 单条是否命中过滤（全部条件 AND；未提供的维度不过滤）。filterLogEntries 与流式聚合共用。 */
+export function logEntryMatches(e: LogEntry, f: UsageFilter): boolean {
+  if (f.harness && e.harness !== f.harness) return false
+  if (f.profile && e.profile !== f.profile) return false
+  if (f.provider && e.provider !== f.provider) return false
+  const ts = new Date(String(e.ts)).getTime()
+  if (f.fromMs != null && !(ts >= f.fromMs)) return false
+  if (f.toMs != null && !(ts <= f.toMs)) return false
+  return true
+}
+
 /** 按维度过滤请求条目（全部条件 AND；未提供的维度不过滤）。纯函数，单测共用。 */
 export function filterLogEntries(entries: LogEntry[], f: UsageFilter): LogEntry[] {
-  return entries.filter((e) => {
-    if (f.harness && e.harness !== f.harness) return false
-    if (f.profile && e.profile !== f.profile) return false
-    if (f.provider && e.provider !== f.provider) return false
-    const ts = new Date(String(e.ts)).getTime()
-    if (f.fromMs != null && !(ts >= f.fromMs)) return false
-    if (f.toMs != null && !(ts <= f.toMs)) return false
-    return true
-  })
+  return entries.filter((e) => logEntryMatches(e, f))
 }
 
 export interface UsageSummary {
@@ -202,47 +206,87 @@ export interface UsageSummary {
 }
 
 /** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
-export function summarizeUsage(entries: LogEntry[]): UsageSummary {
+/** 聚合累加器：summarizeUsage（数组入参，单测/既有调用面）与 summarizeUsageDays（流式）
+ *  共用同一套累加口径，两边结果逐字段一致。 */
+export function createUsageAccumulator() {
   const byStatus: Record<string, number> = {}
   const byProvider: Record<string, number> = {}
   const byModel: Record<string, number> = {}
   const ms: number[] = []
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
   let ok = 0
+  let count = 0
   let first: string | null = null
   let last: string | null = null
-  for (const e of entries) {
-    first ??= e.ts
-    last = e.ts
-    if (e.provider) byProvider[e.provider] = (byProvider[e.provider] ?? 0) + 1
-    if (e.model) byModel[e.model] = (byModel[e.model] ?? 0) + 1
-    const isOk = e.status !== undefined && e.status < 400
-    if (isOk) {
-      ok++
-      if (e.ms != null) ms.push(e.ms)
-      const u = e.usage
-      if (u) {
-        tokens.input += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
-        tokens.output += u.output_tokens ?? 0
-        tokens.cache_read += u.cache_read_tokens ?? 0
-        tokens.cache_creation += u.cache_creation_tokens ?? 0
+  return {
+    add(e: LogEntry) {
+      count++
+      first ??= e.ts
+      last = e.ts
+      if (e.provider) byProvider[e.provider] = (byProvider[e.provider] ?? 0) + 1
+      if (e.model) byModel[e.model] = (byModel[e.model] ?? 0) + 1
+      const isOk = e.status !== undefined && e.status < 400
+      if (isOk) {
+        ok++
+        if (e.ms != null) ms.push(e.ms)
+        const u = e.usage
+        if (u) {
+          tokens.input += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
+          tokens.output += u.output_tokens ?? 0
+          tokens.cache_read += u.cache_read_tokens ?? 0
+          tokens.cache_creation += u.cache_creation_tokens ?? 0
+        }
+      } else {
+        const k = String(e.status ?? 'n/a')
+        byStatus[k] = (byStatus[k] ?? 0) + 1
       }
-    } else {
-      const k = String(e.status ?? 'n/a')
-      byStatus[k] = (byStatus[k] ?? 0) + 1
+    },
+    summary(): UsageSummary {
+      return {
+        requests: count,
+        ok,
+        failed: count - ok,
+        by_status: byStatus,
+        by_provider: byProvider,
+        by_model: byModel,
+        latency: latencyQuantiles(ms),
+        tokens,
+        window: { first, last },
+      }
+    },
+  }
+}
+
+/** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
+export function summarizeUsage(entries: LogEntry[]): UsageSummary {
+  const acc = createUsageAccumulator()
+  for (const e of entries) acc.add(e)
+  return acc.summary()
+}
+
+/** 流式聚合：逐行读各日期文件、边过滤边累加，不落全量条目数组——/usage 查 31 天曾用
+ *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
+ *  （2026-11-02 复查 P2-1；该端点是 Dockmaster 编排侧的轮询数据源）。聚合口径与
+ *  「readRequestLogDay + filterLogEntries + summarizeUsage」逐字段一致（共享累加器）。 */
+export async function summarizeUsageDays(days: string[], f: UsageFilter): Promise<UsageSummary> {
+  const acc = createUsageAccumulator()
+  for (const d of days) {
+    if (!USAGE_DAY_RE.test(d)) continue
+    const file = path.join(logsDir(), `gateway-${d}.jsonl`)
+    if (!fs.existsSync(file)) continue
+    const lines = createInterface({ input: fs.createReadStream(file, 'utf8'), crlfDelay: Infinity })
+    for await (const line of lines) {
+      if (!line.trim()) continue
+      let e: LogEntry
+      try {
+        e = JSON.parse(line) as LogEntry
+      } catch {
+        continue /* 崩溃半行 */
+      }
+      if (logEntryMatches(e, f)) acc.add(e)
     }
   }
-  return {
-    requests: entries.length,
-    ok,
-    failed: entries.length - ok,
-    by_status: byStatus,
-    by_provider: byProvider,
-    by_model: byModel,
-    latency: latencyQuantiles(ms),
-    tokens,
-    window: { first, last },
-  }
+  return acc.summary()
 }
 
 // 事件循环延迟采样：main.ts 启动处挂一次（懒初始化——单测直建 rt 不挂，metrics.eventLoopLagMs

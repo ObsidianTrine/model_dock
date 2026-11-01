@@ -6,12 +6,16 @@ import { describe, expect, it } from 'vitest'
 import { fakeHome } from './helpers.js'
 import {
   buildRuntime,
+  filterLogEntries,
   latencyQuantiles,
   logEvent,
   logRequest,
+  readRequestLogDay,
   recordOutcome,
   reportEvent,
   setEventRingSink,
+  summarizeUsage,
+  summarizeUsageDays,
 } from '../src/gateway/state.js'
 import type { EventEntry, LogEntry } from '../src/gateway/state.js'
 import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
@@ -343,6 +347,33 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       expect(JSON.parse(tooWide.body).modeldock.hint).toContain('/_modeldock/usage')
     } finally {
       t.close()
+    }
+  })
+})
+
+describe('summarizeUsageDays 流式聚合（卡 33：不落全量数组，口径与数组路径一致）', () => {
+  it('与 readRequestLogDay+filterLogEntries+summarizeUsage 同输入同输出；坏行容错', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = { providers: {}, profiles: {}, harness: {} } as never
+      const rt = buildRuntime(cfg, 't')
+      const now = new Date()
+      const today = localIsoTs(now).slice(0, 10)
+      const base = { ts: localIsoTs(now), harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages' }
+      logRequest(rt, { ...base, status: 200, ms: 100, usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      logRequest(rt, { ...base, harness: 'dsh', status: 500, ms: 10 })
+      logRequest(rt, { ...base, status: 200, ms: 200, usage: { input_tokens: 5, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      await drainAppendStreams()
+      fs.appendFileSync(path.join(logsDir(), `gateway-${today}.jsonl`), '{"broken\n') // 崩溃半行
+      const f = { harness: 'zcode' }
+      const streamed = await summarizeUsageDays([today], f)
+      const arrayed = summarizeUsage(filterLogEntries(readRequestLogDay(today), f))
+      expect(streamed).toEqual(arrayed)
+      expect(streamed.requests).toBe(2)
+      expect(streamed.ok).toBe(2)
+      expect(streamed.tokens.input).toBe(15)
+    } finally {
+      h.restore()
     }
   })
 })

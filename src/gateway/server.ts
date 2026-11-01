@@ -26,7 +26,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, filterLogEntries, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, readRequestLogDay, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsage, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsageDays, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
@@ -1853,18 +1853,18 @@ async function hUsage(c: AdminCtx): Promise<void> {
     sendError(res, 400, parsed.err, t('示例：/_modeldock/usage?date=2026-11-01&harness=zcode', 'Example: /_modeldock/usage?date=2026-11-01&harness=zcode'))
     return
   }
-  let entries: LogEntry[] = []
-  for (const d of parsed.days) entries = entries.concat(readRequestLogDay(d))
+  // 流式聚合：逐行读、边过滤边累加，不落全量数组——31 天查询曾把事件循环卡数秒、
+  // 在途 SSE 全冻结（本端点是编排侧的轮询数据源，见 summarizeUsageDays 注释）
   const harness = q.get('harness') ?? undefined
   const profile = q.get('profile') ?? undefined
   const provider = q.get('provider') ?? undefined
-  entries = filterLogEntries(entries, { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs })
+  const usage = await summarizeUsageDays(parsed.days, { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs })
   const filter: Record<string, string> = {}
   if (harness) filter.harness = harness
   if (profile) filter.profile = profile
   if (provider) filter.provider = provider
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, usage: summarizeUsage(entries) }))
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, usage }))
   return
 }
 
