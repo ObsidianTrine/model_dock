@@ -5,10 +5,11 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
-import { cmdDoctor, cmdEnv, cmdStatus, cmdTest, runFixes, type DoctorFinding } from '../src/cli/diag.js'
+import { cmdDoctor, cmdEnv, cmdStatus, cmdTest, collectDoctorFindings, diskUsageFinding, fakeHomeMisconfig, runFixes, type DoctorFinding } from '../src/cli/diag.js'
 import { __testSetExternalReader, invalidateSecretsCache, verifySecretsStore } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { DEFAULT_GATEWAY_PORT } from '../src/config/types.js'
+import { configPath, logsDir, modeldockDir } from '../src/util/paths.js'
 import { writeGatewayState } from '../src/gateway/state.js'
 import { AUTOSTART_LAUNCH_FLAG, autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsRunCommandLine, windowsRunValueMirrorFile } from '../src/autostart.js'
 
@@ -626,6 +627,86 @@ describe('loadConfig 兜底', () => {
       const cfg = await loadConfig()
       expect(cfg.version).toBeGreaterThan(0)
       expect(cfg.providers).toEqual({})
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('doctor 第二轮（doctor-round2 卡）', () => {
+  it('FAKE_HOME 误配：指向真实 ~/.modeldock 报 bad；正常沙箱与未设置不报（纯函数 + 全链路）', async () => {
+    const h = fakeHome()
+    const savedHome = process.env.HOME
+    const savedProfile = process.env.USERPROFILE
+    const savedFake = process.env.MODELRDOCK_FAKE_HOME
+    try {
+      // 正常沙箱（fakeHome 指临时目录）→ 不报
+      expect(fakeHomeMisconfig(process.env.MODELRDOCK_FAKE_HOME, os.homedir())).toBeNull()
+      // 纯函数：把 homedir 注入为临时根，FAKE_HOME 指向其 .modeldock → 命中
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doc2-'))
+      process.env.HOME = root
+      process.env.USERPROFILE = root
+      expect(fakeHomeMisconfig(path.join(root, '.modeldock'), root)).toBe(path.join(root, '.modeldock'))
+      expect(fakeHomeMisconfig(undefined, root)).toBeNull()
+      expect(fakeHomeMisconfig(path.join(root, 'elsewhere'), root)).toBeNull()
+      // 全链路：FAKE_HOME 与 homedir 组合成「真实数据目录」形态 → collectDoctorFindings 报 bad
+      process.env.MODELRDOCK_FAKE_HOME = path.join(root, '.modeldock')
+      const findings = await collectDoctorFindings()
+      const f = findings.find((x) => x.id === 'sandbox.misconfig')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('.modeldock')
+      expect(f?.hint).toContain('unset')
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedHome
+      if (savedProfile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = savedProfile
+      if (savedFake === undefined) delete process.env.MODELRDOCK_FAKE_HOME
+      else process.env.MODELRDOCK_FAKE_HOME = savedFake
+      h.restore()
+    }
+  })
+
+  it('config.toml 解析失败：报错带文件路径（可定位到具体文件）', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(modeldockDir(), { recursive: true })
+      fs.writeFileSync(configPath(), 'not [valid toml ===')
+      const findings = await collectDoctorFindings()
+      const f = findings.find((x) => x.id === 'config.parse')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('config.toml')
+      expect(f?.msg).toContain(configPath())
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('日志体积/磁盘余量分级（纯函数注入合成数字）：bad(<1GB) / warn(>512MB) / ok', () => {
+    const bad = diskUsageFinding(10 * 1024 * 1024, 0.5 * 1024 ** 3, 14)
+    expect(bad.level).toBe('bad')
+    expect(bad.msg).toContain('0.5GB')
+    expect(bad.hint).toContain('log_retention_days')
+    const warn = diskUsageFinding(600 * 1024 * 1024, 50 * 1024 ** 3, 7)
+    expect(warn.level).toBe('warn')
+    expect(warn.msg).toContain('600MB')
+    expect(warn.hint).toContain('7')
+    const ok = diskUsageFinding(10 * 1024 * 1024, 50 * 1024 ** 3, undefined)
+    expect(ok.level).toBe('ok')
+    expect(ok.msg).toContain('10MB')
+    expect(ok.msg).toContain('默认')
+  })
+
+  it('全链路磁盘检查：日志目录小、盘余充足 → logs.disk ok（真实 statfs 路径）', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(modeldockDir(), { recursive: true })
+      fs.mkdirSync(logsDir(), { recursive: true })
+      fs.writeFileSync(path.join(logsDir(), 'gateway-2026-11-02.jsonl'), '{"tiny":true}\n')
+      const findings = await collectDoctorFindings()
+      const f = findings.find((x) => x.id === 'logs.disk')
+      expect(f?.level).toBe('ok')
+      expect(f?.msg).toContain('0MB') // 12 字节文件取整为 0MB
     } finally {
       h.restore()
     }
