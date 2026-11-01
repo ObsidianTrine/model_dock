@@ -8,37 +8,50 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 > **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。对每艘出航的船它是船长，对整支船队它是坞长——harness 是船、大模型是发动机、船东（用户）递托运单等出港（完整灵魂叙事见 `.agents/workflows/orchestrator.md` 开头「Dockmaster 是什么」）。速查与分区详解见同文（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
 > 本技能原名 /orchestrate，2026-11 随体系定名 Dockmaster 改为 /dockmaster（命名缘由见 .agents/workflows/orchestrator.md 开头）。
 
-用户通过两种方式派活：斜杠 `/dockmaster <任务描述>`，或自然语言指名（「让 dockmaster 把 XPLAT-09 修了」「用前进3写个文档任务」「开船：审查换成 zcode」）。无描述则问一句要做什么。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、派作业船出航（headless worker——船型是 harness、发动机是大模型，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
+**一句话派活**：「帮我优化 README，前进1」「让 dockmaster 修 XPLAT-09，前进3」「开船：审查用 zcode」。你的职责：把这句话翻译成托运单（任务卡）、按档位派船、盯闸门、汇报结果——**自动做完所有决策，最多问一个问题**，其余在汇报里说明「选了什么、为什么、怎么说一声就改」。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。完整手册在 `.agents/workflows/orchestrator.md`，本技能只留调度台最小操作。
 
-## 第 0 步：触发识别、档位翻译与意图路由
+## 第 1 步：一句话翻译（任务 + 档位 + 船 + 卡）
 
-**触发识别**：用户指名 Dockmaster（/dockmaster、dockmaster、坞长、开船、派任务/派船等）即进入本技能；对话档位与引擎指示一并接收：
+**档位 = 船 + 油，一张表定死**（用户说「前进N」按此绑定；中文数字「前进四」与口语「慢车/全速/旗舰」同义）：
 
-**档位翻译表（船钟前进1-4 ↔ 接口键 ahead-1..4；中文数字「前进四」同「前进4」）**：
+| 档位 | 船（--worker-backend） | 油 | 适用 |
+|---|---|---|---|
+| 前进1 | zcode-headless（默认船） | 免费 | 纯文档/测试小改 |
+| 前进2 | zcode-headless（默认船） | 免费 | 常规轻活 |
+| 前进3 | claude-headless（ModelDock 网关供油） | 计费 | 常规重活 |
+| 前进4 | claude-headless + tier ahead-4 | 计费 | 核心/发布路径、复杂特性 |
 
-| 用户说 | 写进卡 frontmatter | 适用 |
-|---|---|---|
-| 前进1 / 慢车 / 最省 | `tier: ahead-1` | 纯文档/测试小改 |
-| 前进2 | `tier: ahead-2` | 常规轻活 |
-| 前进3 / 默认推荐 | `tier: ahead-3` | 常规重活 |
-| 前进4 / 全速 / 旗舰 | `tier: ahead-4` | 核心/发布路径、复杂特性 |
-| 没提档位 | 不写 tier（全局默认路由） | 行为与未配档位时一致 |
+- **没说档位就自动选**：文档/测试→前进1，代码小改→前进3，核心路径/复杂→前进4；**卡里写明所选档位，汇报第一句告知**，用户说「换前进N」即重派。
+- 船 ≠ workflow.json 默认（claude-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。
+- 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区）。档位与显式模型可叠加，显式优先。
+- 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；探索性/架构级改动 → 建议路径 B（先设计后施工，见文末）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 
-档位只决定「哪台发动机」（服务/模型路由），不改任何闸门；tier 键值约束见 `.agents/workflows/orchestrator.md` A4。
+**写卡**（放 `.agents/orchestrator/drafts/<id>.md`，不入库；多任务拆多卡按文件分区）：
 
-**意图路由**——先按意图特征分流（判断不了就问一句用户）：
+```markdown
+---
+id: <小写短横线，即 feature 分支名，全局唯一>
+type: docs                        # bugfix | feature | docs | deps | refactor
+priority: normal                  # high 先跑
+files_hint:                       # 预期改动范围——必须写准，越界挡自动合并
+  - docs/**
+workflows:
+  - feature-branch
+gate: L1                          # 审查 0 阻塞且实际改动 L0/L1 → 自动合并；核心路径自动被 L2 挡回人工
+tier: ahead-1                     # 第 1 步翻译出的档位；自动选档也显式写（观测与重派有据）
+---
 
-| 意图特征 | 走法 |
-|---|---|
-| 目标明确的小改动（bugfix / 小功能 / 文档 / 测试） | **主流程**（下方第 1–4 步） |
-| 特性级改动，用户要「先出设计/方案/spec」 | **路径 B**（spec 三件套，见文末） |
-| 巡检 / 夜间自动化 / 定时任务 / schedule / 审阅巡检提案 | **路径 C**（nightly / schedule / 提案审阅，见文末） |
-| 长时间无人值守自治（连续跑队列 + 自动巡检/提案） | **路径 E**（watch 连续自治，见文末） |
-| 发版 / 盘点可发内容 / 版本号 | **路径 D**（release-propose，见文末） |
+# 目标
+一句话：改什么、为什么。
 
-主流程的适用判定：验收标准可写成**可机器检查的断言**（测试命令、文件存在性、grep 模式）、改动范围清晰。不适合（拒绝并说明，建议手动走 feature-branch 工作流）：探索性/架构级改动（验收标准写不出来）、需要频繁人工决策、要动发布流水线的任务——特性级改动若用户接受「先设计」，转路径 B 而不是直接拒。
+# 验收标准
+- `npm test` 全绿；<再加具体行为/内容断言——可机器检查，这是 worker 自查靶子、验船师评判基准、船东验收清单>
 
-**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
+# 航次计划（可选；复杂卡填写：3-6 检查点 + 备选路线）
+# 背景（可选）
+```
+
+`gate` 固定 L1（不要写 L2——声明即拒；L3 会让每卡停等人，违背自动约定）。`budget` 省略即默认（50 轮/500k tokens/60 分钟）。任务模糊需探索仓库时用 Planner 代写：`node .agents/scripts/orchestrator.mjs intent "<一句话>"`——产卡 gate=L3，**submit 前改 L1**。
 
 ## 第 1 步：拆任务、写任务卡
 
@@ -81,100 +94,48 @@ tier: ahead-2                   # 可选：用户说「前进N」才写 ahead-N�
 ## 第 2 步：submit + 后台跑
 
 ```bash
-node .agents/scripts/orchestrator.mjs submit <卡文件路径>   # 校验 schema，转 pending/
-node .agents/scripts/orchestrator.mjs status               # 确认进了 pending
+node .agents/scripts/orchestrator.mjs submit <卡文件路径>    # 校验 schema，pending/ 待泊
+node .agents/scripts/orchestrator.mjs run <task-id> --worker-backend <船> --approve-backend-switch?   # 单卡闭环（档位对应的船，见第 1 步表）
+node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列（--workers N 并发，按 files_hint 分区互斥）
 ```
 
-**闭环耗时从几分钟到几十分钟，必须后台执行**（Bash `run_in_background`），绝不同步等待：
-
-- 单张卡：`node .agents/scripts/orchestrator.mjs run <task-id>`
-- 多张卡：`node .agents/scripts/orchestrator.mjs drain`（循环清空队列；确需并发再加 `--workers N`，按 files_hint 分区互斥）
-
-**引擎/服务商/模型对话翻译表**——用户口头指定时按下表翻译，附加在 run/drain 后；**用户没提就不传参**（默认取 workflow.json：执行 claude-headless——经 `~/.claude/settings.json` 指向本机 ModelDock 网关供油，审查 claude-headless+glm-5.3-flash）：
-
-| 用户说 | 调度台翻译 |
-|---|---|
-| 「用 claude / zcode 执行」 | `--worker-backend claude-headless` / `--worker-backend zcode-headless` |
-| 「用前进N（前进四）跑」 | 写卡时 frontmatter `tier: ahead-N`（档位翻译表见第 0 步；已提交的卡改卡后重提） |
-| 「用 <模型名> 执行」 | `--worker-model <模型名>`（ModelDock 网关按模型名路由服务商） |
-| 「审查用 <模型名>」 | `--review-model <模型名>` |
-| 「审查用 zcode」 | `--review-backend zcode-headless`（异构互审：执行与审查引擎异源防共因盲区） |
-| 「用 <服务商> 的 <模型>」 | `--worker-model <该服务商目录下的模型名>`——网关按模型路由到该服务商；报「模型不在目录」时提醒先在 ModelDock 给该服务商建路由（产品侧操作，不归编排） |
-
-注意：模型项只对 claude 系生效（zcode 无 `--model`，模型跟随 ZCode 默认，需用户在 App 内切换）；档位（tier）与服务商/模型参数可叠加——档位决定用哪套凭据与模型基线，显式 `--worker-model` 单次覆盖之。
-
-**引擎切换需人工审核（硬闸门，禁止自治绕过）**：orchestrator 对「worker 引擎 ≠ workflow.json worker.backend」的 run/drain 一律拒绝启动，只有 `--approve-backend-switch`（或 `ORCH_APPROVE_BACKEND_SWITCH=1`）能放行。自治跑中引擎起不来（zcode ENOENT、GLM 429 等）时**禁止自行换引擎续跑**：先修引擎自身——ORCH_ZCODE_CLI 已设为用户级环境变量（`D:\Programs\ZCode\resources\glm\zcode.cjs`，2026-10-29 起）；429 是 GLM 套餐限流（与交互会话共享配额，实测单发也会中），退避 60s 重试并把并发压到 1。连续 2 轮仍失败就停下向用户说明原因并申请批准，用户同意后才允许带批准参数切换；未获同意宁可让任务留在 pending/awaiting-human。
-
-run/drain 在非交互环境下不会停在人工闸门——到 awaiting-human 就打印提示退出；L1 自动合并的卡会一路跑到 merged。后台任务完成通知到达后继续第 3 步。
+**必须后台执行**（Bash `run_in_background`），绝不同步等待。闭环几分钟到几十分钟；引擎起不来（CLI 缺失/429）时**禁止自行换引擎**，退避重试，连续 2 轮失败停下向用户申请批准。后台完成通知到达后进入第 3 步。
 
 ## 第 3 步：盯进度、处理闸门
 
-等待期间可用 `status` / `logs <task-id>` 查看事件时间线（轮询即可，不必密集）。任务进行中用户补充了要求或约束（改方向、加验收点）时，用直通通道送达而**不必**打回重跑：`node .agents/scripts/orchestrator.mjs follow <task-id> "<补充指令>"`——指令会在下次会话边界（调试返工/审查返工/resume）注入 worker；只对 running 状态的卡可用，其他状态仍走 retry --note / 改卡。
+轮询观测（不必密集）：`status` 队列全貌；`status <task-id>` / `logs <task-id>` 事件时间线（worker_spawned→worker_turn→gate_result→review_verdict…）；现场看 `.agents/worktrees/<task-id>/NOTES.md`（复诵 + 航次计划 + 进度）。用户中途补要求：`follow <task-id> "<补充指令>"`（会话边界送达，不必打回重跑）。
 
-后台 run 结束后 `node .agents/scripts/orchestrator.mjs status` 看每张卡落在哪：
-
-- **merged/** → 已自动合并（或你 approve 后合并），完成。
-- **awaiting-human/** → 意味着实际分级超 L1 / scope 越界 / drift 降级。用户已授权合并到本地 develop：你亲自 `git -C <worktree> diff develop...HEAD` 审阅改动 + 看 `logs <task-id>` 的审查结论，自行决定：
-  - 无问题 → `approve <task-id>`（= feature-branch finish，rebase + 测试 + --no-ff 合并）；
-  - 小缺陷可修 → `retry <task-id> --note "<补充指令>"`（打回重跑）；
-  - 方向性错误 → `reject <task-id> --reason "<原因>"`（worktree 保留现场）。
-  - **拿不准 / 审查有阻塞项且你无法判断** → 停下向用户汇报摘要请示，不要硬闯。
-- **blocked/** / **failed/** → 按第 5 步异常处置。
+落位处置：
+- **merged** → 完成（L1 自动合并进本地 develop）。
+- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。
+- **blocked / failed** → 异常处置速查（文末）。
 
 ## 第 4 步：收尾汇报
 
 全部卡落定后逐任务汇报：改了什么（文件与要点）、测试与门禁结果、审查结论（阻塞/建议数）、合并 commit、耗时与 token 用量（可 `reconcile <task-id>` 对账）。**最后一行固定提示：已合并到本地 develop，未 push 远程，是否 push 由用户决定。**
 
-## 路径 B：特性先设计（spec，Spec Kit/Kiro 式三件套）
+## 其他路径（细节见手册对应节，这里只留闸门纪律）
 
-适合：特性级改动，值得「先设计后施工」。入口命令 `spec "<意图>"`，Planner 只读会话产出 requirements（用户故事 + EARS 验收）→ design（方案/取舍/风险）→ tasks（任务段）三件套。**设计与施工分离，人工闸门在「审设计」这一步。**
-
-1. `node .agents/scripts/orchestrator.mjs spec "<用户意图>"`（LLM 会话 1–5 分钟，后台跑）。
-2. 完成后**向用户呈现三件套摘要**：requirements 的验收标准、design 的方案要点、tasks 的任务清单（每任务的文件范围与依赖），并提醒可直接手改 `.agents/orchestrator/specs/<id>/` 下的 md。
-3. **停下等用户确认设计——你不能代审**。用户要求改就改完再确认。
-4. 确认后 `node .agents/scripts/orchestrator.mjs spec build <id>` 拆卡进 pending/。
-5. 卡默认 `gate: L3`（逐张等人 approve）。用户已在对话中明确授权自动合并时，可参照第 1 步对 intent 卡的同一处理：run 前把每张卡的 gate 改成 L1；分级裁决与 scope 纯度照常生效。
-6. 之后回到主流程第 2–4 步（run/drain 后台跑、闸门处理、汇报）。
-
-## 路径 C：巡检与定时调度（nightly / schedule / 提案审阅）
-
-1. **手动巡检**：`node .agents/scripts/orchestrator.mjs nightly`（后台；scan 出提案落 drafts + drift 报告 + 队列摘要，默认零烧钱不跑 worker）。`--plan` 加跑 planner 需求综合（烧钱，出对齐 goals.md 的高质量提案）。跑完向用户汇报：新提案（drafts/ 清单）、待审任务、漂移状态。
-2. **提案审阅（人出现在这里）**：巡检/planner 的产出都是提案（drafts/，`proposal: true`），不直接进队列。逐张读提案文件，向用户给出一句话采纳建议；用户点头后 `submit .agents/orchestrator/drafts/<id>.md` 提交并回主流程第 2 步跑。若 workflow.json 已开 `autopilot.enabled`，白名单类型（缺省仅 docs，deps/核心路径/人工草稿永不自动）的提案已被自动提交（gate 覆写 L1，实际合并仍由分级裁决）——汇报时说明哪些是自动提交的。汇总度量用 `stats --days 7`。
-3. **装定时**：先 `schedule status` 报现状；**用户明确要求才 install**——默认档零烧钱；`--auto N` 档夜间真跑 worker（烧钱），装前向用户说明并确认；`--mode watch` 注册常驻循环（转路径 E 语义）。装完报告：每日时刻、日志路径（`.agents/orchestrator/logs/nightly.log`）、卸载命令（`schedule uninstall`）。
-4. **卸载/查询**：`schedule uninstall` / `schedule status` 直接执行并回报。
-
-## 路径 E：连续自治运行（watch）
-
-用户要「长时间自己跑/无人值守自治」时：
-
-1. 先确认授权面：watch 本体只 drain 人工提交的卡 + 巡检出提案（零 planner 烧钱）；要让 watch 自主提案并自动提交，需 workflow.json `autopilot.enabled: true`（白名单语义见路径 C）——**代用户改配置前必须先确认**，这是持久授权行为。
-2. 后台启动：`node .agents/scripts/orchestrator.mjs watch --interval 30`（Bash `run_in_background`）。启动即汇报：周期时长、autopilot 开关状态、停止方式。
-3. 停止方式（告知用户）：`touch .agents/orchestrator/.watch-stop`（下周期即停）或终止进程；**drift 降级会自动退出**——收到退出通知后向用户说明漂移原因与 `drift --clear` 恢复步骤。
-4. 运行中巡检：`status` 看队列、`stats --json` 看每卡画像；watch 与手动 drain 共用调度器锁，watch 在跑时不要并发 drain。
-
-## 路径 D：发版提案（release-propose）
-
-1. `node .agents/scripts/orchestrator.mjs release-propose [X.Y.Z]`（版本号可带用户口述值；不带则自动定档）。
-2. 向用户汇报：建议版本与依据（feat/fix/breaking 计数、semver 档位）、疑似漏记清单、提案文件路径。
-3. **版本号决定权在用户，到此为止**：用户说「发布 vX.Y.Z」后才走 `.agents/workflows/release.md`「代理发布」执行序（`AGENTS_ALLOW_RELEASE=1` 白名单）——**那不在本技能范围**（本技能终点是本地 develop，永不 push）。
-4. 用户只采纳草稿时：可按提案在 develop 上收口 CHANGELOG（文档直改放行），同样不 push。
+- **先设计后施工（spec）**：特性级改动用 `spec "<意图>"` 出三件套——**设计必须用户亲自确认后才能 `spec build` 拆卡**（你不能代审）；拆出的卡 gate=L3，用户口头授权自动合并后可改 L1。
+- **巡检与提案（nightly / scan）**：`nightly` 零烧钱出提案落 drafts；逐张给用户一句话采纳建议，点头后 `submit`。`--plan` 烧钱跑 planner 需求综合。`autopilot.enabled` 开启后白名单提案自动提交（deps/核心路径/人工草稿永不自动）——开启属持久授权，**代改配置前必须先确认**。
+- **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
+- **发版提案（release-propose）**：只出建议与草稿；**版本号决定权在用户**——用户说「发布 vX.Y.Z」才走 release.md 代理发布（不在本技能，永不 push）。
 
 ## 红线（永不）
 
-- **禁止 push / tag 远程、禁止 npm publish**——本技能的合并终点是本地 develop；worker 会话已被 policy 硬拦，你自己也不得代为执行。
-- **8687 / 8890 端口永不触碰**（监听、stop、重启、改配置一律禁止）——policy 已硬拦，你的命令同样不得包含。
-- 不改 orchestrator 的门禁与熔断逻辑来"让任务通过"；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试重试。
-- 测试结束清理你拉起的全部临时进程（AGENTS.md 硬规则 4）。
+- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。
+- **8687 / 8890 端口永不触碰**（监听/stop/改配置一律禁止）。
+- 不改门禁与熔断逻辑来「让任务通过」；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试。
+- 自治跑中引擎故障**禁止自行换引擎**（切换=换计费方，必须用户批准）；测试结束清理你拉起的全部临时进程。
 
-## 异常处置速查（详表见 docs/orchestrator-usage.md §7）
+## 异常速查（详表 docs/orchestrator-usage.md §7）
 
 | 现象 | 处置 |
 |---|---|
-| `blocked: budget:*` | 预算熔断。改卡调大 budget 后 `submit` 重提，或 `resume <task-id>` 续做 |
-| 反复测试失败转 blocked | 调试迭代超限（默认 5 次）。`logs` 看失败尾部：能定位就 `retry` 带修复指令，否则报用户 |
-| worker 零产出烧完 turns | `logs` 看 worker_turn 工具是否全被拒；多半是验收标准不可执行——改卡重提 |
+| `blocked: budget:*` / 迭代超限 | 预算/迭代熔断（永不静默重试）：`resume` 续做或改卡 `submit` 重提 |
+| 反复测试失败 | `logs` 看失败尾部：能定位就 `retry --note` 带修复指令，否则报用户 |
 | 红线门禁 failed | 不可调试，`abandon <task-id>`，向用户说明设计问题 |
-| run 一直不动 | `status` 看是否解析失败卡 / 分区互斥排队；确认 Node ≥18、从仓库根目录运行 |
+| run 不动 | `status` 看解析失败卡/分区排队；确认 Node ≥18、从仓库根目录运行 |
 
 ## 深入文档
 
