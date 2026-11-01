@@ -1,20 +1,27 @@
 name: ci-retry
 
-# 非绿自动重跑（自限）：test / Release 两个 workflow 结论非 success 时，自动重跑失败腿。
+# 资源性取消自动重跑（自限）：test / Release 两个 workflow 结论为 cancelled 时，自动重跑失败腿。
 # 动机：macos arm64 hosted runner 容量短缺期间，腿在排队期 15m01s 被「未获分配」取消
 #（2026-10-28 夜实测连挂 7 次，每次都要人工 gh run rerun --failed）。
 #
+# 只认 cancelled 不认 failure：cancelled = 排队期腿从未启动（容量取消的签名），--failed
+# 可原样重排队；failure 是腿真跑过且失败——真回归重试只会白烧额度、延迟红信号，flaky
+# 也不该靠重跑洗绿，交人工判断（2026-11-01 实证：autostart×写入门禁真回归若被自动重试，
+# 要白烧 2 轮五平台构建）；startup_failure（workflow 文件坏）/ timed_out（腿挂死会复现）同理不重试。
+#
 # 为什么是独立 workflow 而不是原 workflow 里的收尾 job：rerun API 只接受「已完成」的 run，
 # 原 workflow 内的收尾 job 自己不结束 run 就永远 completed 不了（死锁）；workflow_run
-# 完成事件在 run 落定后触发，恰好是唯一合法的 rerun 时机。
+# 完成事件在 run 落定后触发，恰好是唯一合法的 rerun 时机。workflow_run 触发器不支持按
+# conclusion 过滤，成功 run 也会生成一条本 workflow 记录（job 被 if 跳过，零消耗）。
 #
 # 三重自限，防止无限循环与新旧 run 互踩：
-# - run_attempt < 3：最多 3 次尝试，真回归 / 烧额度不无限重放，超限交人工；
+# - run_attempt < 3：最多 3 次尝试，烧额度不无限重放，超限交人工；
 # - 只重跑「该 workflow 当前最新的 run」：concurrency 顶替产生的旧 run 不复活
 #   （新推送的 run 才是未来，旧 run 重跑只会烧额度）；
 # - --failed 只重跑失败 / 被取消的腿，已绿腿保留原结论不重复烧。
-# 结论为 cancelled 也重跑：runner 未获分配的取消正是要吸收的主要场景；
-# 人为取消属于罕见路径（取消后通常紧随修复推送，顶替守卫即生效）。
+# 已知取舍：人为取消同属 cancelled，会被再拉起至多 2 次——要么再取消到超限，要么紧随
+# 新推送 / 重推 tag 产生新 run 让顶替守卫拦下；不值得为此加「取消腿从未启动过 step」的
+# API 判定，罕见路径保持简单。
 
 on:
   workflow_run:
@@ -26,13 +33,16 @@ permissions:
 
 jobs:
   retry:
-    if: ${{ github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.run_attempt < 3 }}
+    if: ${{ github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.run_attempt < 3 }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: 重跑失败腿（自限）
         env:
           GH_TOKEN: ${{ github.token }}
+          # job 无 checkout，gh 解析仓库只认 GH_REPO / git remote（不认 runner 自带的
+          # GITHUB_REPOSITORY）——缺它则第一条 gh 命令即报 failed to determine base repo
+          GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
