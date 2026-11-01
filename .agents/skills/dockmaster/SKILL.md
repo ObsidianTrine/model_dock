@@ -22,7 +22,7 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 | 前进4 | claude-headless + tier ahead-4 | 计费 | 核心/发布路径、复杂特性 |
 
 - **没说档位就自动选**：文档/测试→前进1，代码小改→前进3，核心路径/复杂→前进4；**卡里写明所选档位，汇报第一句告知**，用户说「换前进N」即重派。
-- 船 ≠ workflow.json 默认（claude-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。
+- 船 ≠ workflow.json 默认（zcode-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。即：前进3/4（claude 网关船）带批准标志，前进1/2 零摩擦。
 - 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区）。档位与显式模型可叠加，显式优先。
 - 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；探索性/架构级改动 → 建议路径 B（先设计后施工，见文末）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 

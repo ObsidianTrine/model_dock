@@ -204,7 +204,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 
 ### A4. 后端与 tier（执行/审查各用什么引擎与模型）
 
-- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: claude-headless`——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687），即默认通过 ModelDock 供油接入**；zcode-headless 在本机 start plan 下不支持 headless（2026-10-29 实证），保留作未来解锁后的备选。zcode-headless 设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`；headless 无 `--max-turns`（轮次熔断不可用，wall-clock/token 熔断直接杀进程树），prompt 走 argv 超 30000 字符快速失败。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
+- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: zcode-headless`（默认船、免费；2026-11-01 冒烟实测 headless 可用，10-29 旧结论过时）**，审查 claude-headless+glm-5.3-flash 构成异构互审（zcode 干活 + claude 验船）；claude-headless 是前进3/4 的网关船——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687）供油，切换须口头批准（`--approve-backend-switch`）。zcode-headless 设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`；headless 无 `--max-turns`（轮次熔断不可用，wall-clock/token 熔断直接杀进程树），prompt 走 argv 超 30000 字符快速失败。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
 - **异构审查**：执行与审查是两个独立会话。审查引擎解析顺序：`--review-backend` 显式 > workflow.json `review.backend` > 上次 `review_spawned` 事件（retry/resume 不换审查引擎）> **自动异构**（自动选另一个可用的真实引擎，如 claude 干活 / zcode 审查；mock 永不异构）> 回落同源（记 `review_backend_fallback`）。**去相关的关键是引擎异源——只拆会话不换引擎仍有共同盲区**。
 - **tier 车钟档位（前进1-4，接口键 ahead-1..4）**：按航程难度选服务与模型——
   | 档位 | 接口键 | 适用 | tokenEnv |
