@@ -1,13 +1,14 @@
 ---
-name: orchestrate
-description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。
+name: dockmaster
+description: 显式斜杠技能——仅当用户输入 /dockmaster 时使用，不要因对话语义自动加载。Dockmaster（坞长）= 本仓库 .agents/ 自治编排体系；本技能驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。
 ---
 
-# orchestrate —— 把任务交给 Dockmaster 自治编排闭环
+# dockmaster —— Dockmaster 港务调度台
 
 > **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。速查与分区详解见 `.agents/workflows/orchestrator.md`（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
+> 本技能原名 /orchestrate，2026-11 随体系定名 Dockmaster 改为 /dockmaster（命名缘由见 .agents/workflows/orchestrator.md 开头）。
 
-用户输入 `/orchestrate <任务描述>`（无描述则问一句要做什么）。你的角色是**编排者**：把任务拆成任务卡、启动闭环、处理闸门、汇报结果。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
+用户输入 `/dockmaster <任务描述>`（无描述则问一句要做什么）。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、调度船坞工匠（headless worker，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
 
 ## 第 0 步：意图路由与适用判定
 

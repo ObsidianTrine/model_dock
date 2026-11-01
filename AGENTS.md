@@ -146,6 +146,8 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 
 ## 多 Agent 并行开发约定（feature-branch 工作流）
 
+本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`。
+
 多个 agent（或多会话）并行开发时，**禁止直接在 develop/main 上修改代码文件**（PreToolUse hook 会拦截 Edit/Write）；**main 上连文档也禁止直改**——hook 对 main 的 Edit/Write 一律拦截，对外文档（CHANGELOG/README/usage）一律在 develop 上改（develop 上非源代码类文档直改放行），main 只接受 develop / hotfix 合入。多机同步用 `git pull --rebase`，避免 merge 式 pull 制造编织历史。所有代码改动走 worktree 分支流程，完整规程（含分支卫生规则）见 **`.agents/workflows/feature-branch.md`**（动手前必读），由 `.agents/scripts/feature-branch.mjs` 支撑：
 
 ### 工作流索引（.agents/workflows/）

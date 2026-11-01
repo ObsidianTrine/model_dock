@@ -1,29 +1,57 @@
 # Dockmaster 操作手册（.agents 自治编排体系）
 
-> **Dockmaster（坞长）** 是本仓库 `.agents/` 自治编排体系的名字——ModelDock 的 Dock，管坞的人就是 dockmaster。**命令行名保持 `orchestrator.mjs` 不变**（改名零收益、破坏既有引用与肌肉记忆），Dockmaster 只用于文档与心智模型。
-> 目标读者：写任务卡、看闸门、处理 blocked 任务的 agent / 人类操作者。
+> **Dockmaster（坞长）** 是本仓库 `.agents/` 自治编排体系的名字——ModelDock 的 Dock，管坞的人就是 dockmaster。**命令行名保持 `orchestrator.mjs` 不变**（改名零收益、破坏既有引用与肌肉记忆）；文档用港口隐喻叙事（官方映射表见下），接口名保持 orchestrator 不变。
+> 目标读者：递交托运单（任务卡）、看闸门、处理搁浅（blocked）任务的 agent / 人类操作者。
 > 设计与原理：`docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
 
 ## 一张图看懂
 
 ```
-需求侧   intent / spec ─────────┐
-         巡检 scan ──→ drafts/ 提案 ── submit ──→ pending/ ─┐
-         autopilot 白名单自动提交（缺省关）─────────────────┤
-                                                            ▼
-执行侧   run / drain / watch ─→ worker 改码（worktree）→ 静态门禁 → LLM 独立审查
-                                                          │返工循环│
+需求侧（船东递交托运单）
+         intent / spec ─────────┐
+         巡检 scan ──→ drafts/（待审托运申请）── submit ──→ pending/（待泊）─┐
+         autopilot（自动舵）白名单自动提交（缺省关）─────────────────────────┤
+                                                                            ▼
+执行侧（泊位修船）
+         run / drain / watch ─→ worker（船坞工匠）在泊位（worktree）改码
+                                  → 坞检（静态门禁）→ 验船师（LLM 独立审查）
+                                                        │返工循环│
                                   L0/L1 自动合并 ←──── 合并闸门 ──┘
                                          │ 否则
                                          ▼
-                                  awaiting-human/（人工 approve / reject / retry）→ merged
+                                  awaiting-human/（等待船东放行：人工 approve / reject / retry）→ merged（出港）
 
-观测侧   status · logs · stats · follow · drift · reconcile      （全程 events.jsonl 留痕）
+观测侧（港务台）
+         status · logs · stats · follow · drift · reconcile      （全程 events.jsonl 留痕）
 ```
 
-一句话：**任务卡进、合并出**。人只出现在两处——审提案（drafts/）与审合并（awaiting-human/）；其余环节 worker→门禁→调试循环→审查→返工循环全自动，熔断兜底不烧钱。
+一句话：**任务卡进、合并出**（托运单进坞、验毕出港）。人（船东）只出现在两处——审提案（drafts/）与审合并（awaiting-human/）；其余环节 worker→门禁→调试循环→审查→返工循环全自动，熔断（紧急抛锚）兜底不烧钱。
+船东视角全景：递交托运单 → 坞长派船坞工匠（worker）在泊位（worktree）修船 → 坞检（静态门禁）+ 验船师（reviewer）双重检验 → 船东放行出港（merged）；搁浅（blocked）的船由坞长组织拖救（`resume`），紧急抛锚（熔断）永远要船东裁决。
+
+**官方映射表**——双层命名纪律：**比喻词只进文档层（首次出现括注原术语）；命令名 / 目录名 / frontmatter 字段 / 事件类型 / workflow.json 键名是接口契约，永不改名。**
+
+| 概念 | 隐喻词 | 接口名（不动） |
+|---|---|---|
+| 体系 | 坞长 / 港务 | Dockmaster / `orchestrator.mjs` |
+| 任务卡 | 托运单 | task card |
+| worktree | 泊位 | worktree |
+| pending | 待泊 | pending |
+| blocked | 搁浅 | blocked |
+| drafts 提案 | 待审托运申请 | drafts / proposal |
+| goals.md | 罗盘 | goals.md |
+| nightly | 夜航巡港 | nightly |
+| follow | 引水传令 | follow |
+| worker | 船坞工匠 | worker |
+| LLM 审查 | 验船师 | reviewer |
+| awaiting-human | 等待船东放行 | awaiting-human |
+| merged | 出港 | merged |
+| 熔断 | 紧急抛锚 | circuit breaker |
+| watch | 瞭望模式 | watch |
+| autopilot | 自动舵 | autopilot |
 
 ## 速查（日常就这几条）
+
+> 比喻词对照见上方官方映射表；本节命令与目录名是接口契约，照抄可用。
 
 **核心闭环——把一张卡跑到合并**
 
@@ -60,11 +88,11 @@
 
 | 现象 | 动作 |
 |---|---|
-| 卡在 blocked/ | `logs` 看原因 → `resume`（带现场续做）/ `abandon` / 改卡重提 |
-| 卡在 awaiting-human/ | 亲看 diff + 审查结论 → `approve` / `retry --note` / `reject` |
-| 卡在 failed/ | 红线门禁（端口/native）= 改设计不可调试；或人工驳回 |
+| 卡在 blocked/（搁浅） | `logs` 看原因 → `resume`（带现场续做）/ `abandon` / 改卡重提 |
+| 卡在 awaiting-human/（等待船东放行） | 亲看 diff + 审查结论 → `approve` / `retry --note` / `reject` |
+| 卡在 failed/（退关） | 红线门禁（端口/native）= 改设计不可调试；或人工驳回 |
 | worker 引擎起不来 | 预检直接拒绝启动（零消费）：修 ORCH_ZCODE_CLI / claude 登录后重跑 |
-| 熔断了（circuit_breaker 事件） | 预算/迭代/看门狗触发，**永不静默重试**——人工决策后再继续 |
+| 紧急抛锚了（熔断，circuit_breaker 事件） | 预算/迭代/看门狗触发，**永不静默重试**——人工决策后再继续 |
 
 详细机制按需查：**A 核心闭环 · B 自主模式 · C 观测对账 · D 周边**。
 
@@ -109,26 +137,27 @@ ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒
 现象、复现步骤、相关文件。
 ```
 
-**验收标准是灵魂**：worker 拿它当自查靶子、审查者当评判基准、人当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。
+**验收标准是灵魂**：worker（船坞工匠）拿它当自查靶子、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。
 
 `run` 在 TTY 下会在人工闸门处交互（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；非 TTY 打印提示后退出，用 approve/reject/retry 异步处理。
 
-### A2. 状态机（哪里找我的任务）
+### A2. 泊位状态机（哪里找我的任务）
 
 ```
-pending → running → reviewing → awaiting-human → merged
-             │          │             │
-             ↓          ↓             ├─ reject → failed/
-          blocked    （审查阻塞回 running）└─ retry  → running
-             │
-             └─ resume → running ／ abandon → failed/
+pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awaiting-human（等待船东放行）→ merged（出港）
+                  │           │                       │
+                  ↓           ↓ 审查阻塞回 running    ├─ reject → failed/（退关）
+               blocked                             └─ retry  → running
+              （搁浅）
+                  │
+                  └─ resume（拖救）→ running ／ abandon → failed/（退关）
 ```
 
-- **blocked/**：worker 自报 stuck、预算/迭代熔断、异常结束。人接手：`resume`（注入事件时间线 + NOTES.md 现场续做）或 `abandon`（转 failed/，worktree 按 `worktree-rescue.md` 清理）。
-- **failed/**：红线门禁或人工驳回。**红线失败不可调试——改设计，别改门禁**。
+- **blocked/（搁浅）**：worker 自报 stuck、预算/迭代熔断（紧急抛锚）、异常结束。人接手：`resume`（注入事件时间线 + NOTES.md 现场续做，坞长组织拖救）或 `abandon`（转 failed/，worktree 按 `worktree-rescue.md` 清理）。
+- **failed/（退关）**：红线门禁或人工驳回。**红线失败不可调试——改设计，别改门禁**。
 - 运行态（queue/、logs/）不入库；崩溃后重启即从 running/ + events.jsonl 恢复。
 
-### A3. 熔断与看门狗（自动停，不会烧钱）
+### A3. 紧急抛锚（熔断）与看门狗（自动停，不会烧钱）
 
 | 触发 | 行为 |
 |---|---|
@@ -157,17 +186,17 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 ### A7. 互斥与并行（谁在跑、能并行吗）
 
 - **调度器锁**：drain / nightly / scan --run / watch 共用一把（`.scheduler-lock.json`），后来者提示退出；持锁进程死 = 陈锁自动接管。手动 `run <id>` 不抢调度器锁。
-- **任务锁**：每卡 `.run-<task-id>.lock`——同一任务不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 D4）。
+- **任务锁**：每卡 `.run-<task-id>.lock`——同一泊位（worktree）不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 D4）。
 - **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。
 
 ## B. 自主模式详解
 
-需求侧生命周期：**出提案（drafts/）→ 人工批量 submit 或 autopilot 白名单自动提交（pending/）→ 常规闭环（闸门原样）**。人只审提案与合并两级。
+需求侧生命周期：**出提案（drafts/ 待审托运申请）→ 人工批量 submit 或 autopilot（自动舵）白名单自动提交（pending/ 待泊）→ 常规闭环（闸门原样）**。人（船东）只审提案与合并两级。
 
 ### B1. 提案与 autopilot（授权制）
 
 - 提案卡 `proposal: true`、`created_by: scanner|planner`、gate=L3，落 `.agents/orchestrator/drafts/`（不入库）。人工提交：`submit .agents/orchestrator/drafts/<id>.md`（提交后草稿自动清掉）。
-- **目标面 `.agents/orchestrator/goals.md`**（入库、用户手编、agent 只读）：核心目标（优先级排序）/当前主题/明确不做。propose 产出必须对齐它；缺失/留空 = 无目标面（只基于巡检信号提案）。
+- **目标面（罗盘）`.agents/orchestrator/goals.md`**（入库、用户手编、agent 只读）：核心目标（优先级排序）/当前主题/明确不做。propose 产出必须对齐它；缺失/留空 = 无目标面（只基于巡检信号提案）。
 - **autopilot 授权配置**（workflow.json，缺省全关 = 行为与历史版本一致）：
 
   ```json
@@ -186,11 +215,11 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 
 `propose`：goals.md + drafts 巡检信号 + 队列现状 → 一次只读 planner 会话产出至多 `maxProposalsPerCycle` 张高质量提案（验收标准带具体行为断言、files_hint 精确、目标对齐），落 drafts/；白名单卡立即自动提交。深化既有提案用**同 id**（落盘覆盖=升级）。烧钱动作；`nightly --plan` 与 watch（autopilot 开时）内部调用同一命令。
 
-### B4. nightly 与 schedule（每日波次）
+### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
 `nightly` = scan 出提案 + autopilot 白名单提交 + drift 报告 + 队列摘要（默认零烧钱；`--plan` 加跑 planner；`--auto N` 夜间对 high 提案提交并发起闭环再 drain N 个——worker 烧钱仅此档，gate=L3 兜底合并仍人工）。`schedule install --hour 2 --minute 30 [--auto 3] [--mode watch]` 注册定时（launchd/crontab/schtasks 经 wrapper 绝对路径启动，不依赖调度环境 PATH；仓库挪位置后重装）。日志 `logs/nightly.log`（超 5MB 轮转）。跑完发通知：macOS 本地通知 + `${envPrefix}_NIGHTLY_WEBHOOK`（如 `AGENTS_NIGHTLY_WEBHOOK`，旧名 MODELRDOCK_* 兼容）POST `{title, body, ts}`；通知尽力而为，摘要始终在日志。
 
-### B5. watch（连续自治）
+### B5. 瞭望模式（watch，连续自治）
 
 `watch --interval 30`：每周期 drain pending → 队列空时 scan 出提案 →（autopilot 开时）propose → 休眠循环。
 
@@ -201,7 +230,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 
 ## C. 观测与对账详解
 
-### C1. stats 与 follow
+### C1. stats 与 follow（引水传令）
 
 - `stats --days 7 [--json]`：每卡 wall/turns/调试与审查迭代/重试/watchdog suspect/follow-up/token 峰值（budget_snapshot 口径）+ 各状态卡数与合并率汇总。JSON 形态：顶层 `summary` 嵌套对象 + `rows`。跨引擎精确对账用 reconcile。
 - `follow <task-id> "<补充指令>"`：给 running/ 的卡递话，写 `logs/<id>/inbox.md` + `follow_up` 事件，在下一次会话边界（调试返工/审查返工/resume/新 spawn）注入 prompt 尾部（20 条/4000 字符截断，前缀缓存友好）。只对 running 卡开放；awaiting-human 用 `retry --note`，pending 直接改卡文件。`status <task-id>` 会显示待送达条数。
@@ -230,7 +259,7 @@ orchestrator 完全复用 feature-branch 工作流（start/finish/NOTES.md），
 
 ### D4. 移植到其他项目
 
-代码零项目专属假设，项目数据全在 `.agents/workflow.json`：
+代码零项目专属假设，项目数据全在 `.agents/workflow.json`；体系名 Dockmaster 随 `.agents/` 目录一起带走，无需改代码：
 
 ```bash
 cp -r <模板项目>/.agents .

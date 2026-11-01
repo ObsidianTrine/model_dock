@@ -218,5 +218,5 @@ node .agents/scripts/orchestrator.mjs schedule uninstall   # 卸载
 | [.agents/workflows/orchestrator.md](../.agents/workflows/orchestrator.md) | agent 操作手册：全部话题的简版速查与平台细节 | 给 agent 下指令、查调度器/通知的平台细节 |
 | [design-orchestrator.md](design-orchestrator.md) | 设计原理：架构、状态机与红线的设计依据 | 想改 orchestrator 本身 |
 
-- 会话中的 agent 入口是 `/orchestrate` 技能（[SKILL.md](../.agents/skills/orchestrate/SKILL.md)），按意图路由到本文描述的各条路径。
+- 会话中的 agent 入口是 `/dockmaster` 技能（体系名 **Dockmaster（坞长）**，原 `/orchestrate`；[SKILL.md](../.agents/skills/dockmaster/SKILL.md)），按意图路由到本文描述的各条路径。
 - 排障速查表见 [orchestrator-usage.md §7](orchestrator-usage.md)；中断任务的 worktree 清理见 [worktree-rescue.md](../.agents/workflows/worktree-rescue.md)。

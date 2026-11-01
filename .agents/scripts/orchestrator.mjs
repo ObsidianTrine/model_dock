@@ -58,7 +58,7 @@ import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
 
-/** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避 60s×attempt（与 orchestrate 技能「429 退避 60s」口径一致）。 */
+/** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避 60s×attempt（与 dockmaster 技能「429 退避 60s」口径一致）。 */
 const MAX_WORKER_RETRIES = 3;
 
 // ---------------------------------------------------------------------------
