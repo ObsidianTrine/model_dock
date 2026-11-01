@@ -53,10 +53,18 @@ export function nightlyLogPath(repoRoot) {
 }
 
 /**
- * nightly CLI 参数（nightly/schedule install 共用一份拼装，保证 wrapper 与手动跑行为一致）。
- * opts: { tests, auto, backend, reviewBackend }
+ * 调度 CLI 参数（nightly/watch/schedule install 共用一份拼装，保证 wrapper 与手动跑行为一致）。
+ * opts: { mode: 'nightly'|'watch', tests, auto, interval, backend, reviewBackend }
+ * mode=watch 注册常驻循环（interval 分钟/周期）而非每日一次的 nightly 波次。
  */
 export function nightlyArgs(opts = {}) {
+  if (opts.mode === 'watch') {
+    const args = ['watch'];
+    if (Number.isInteger(opts.interval) && opts.interval > 0) args.push('--interval', String(opts.interval));
+    if (opts.backend) args.push('--backend', opts.backend);
+    if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
+    return args;
+  }
   const args = ['nightly'];
   if (opts.tests) args.push('--tests');
   if (Number.isInteger(opts.auto) && opts.auto > 0) args.push('--auto', String(opts.auto));

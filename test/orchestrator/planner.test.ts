@@ -114,7 +114,7 @@ describe('orchestrator planner > scan --run（high 卡自动发起闭环）', ()
     const repo = mkRepo({ testCmd: 'node -e "process.exit(1)"' })
     try {
       const out = runOrch(repo.root, 'scan --tests --run --backend mock')
-      // scan 生成 testfail 卡 → --run 自动发起 → mock 不真修 → 调试熔断 blocked
+      // scan 生成 testfail 提案 → --run 提交进队列并自动发起 → mock 不真修 → 调试熔断 blocked
       expect(out.stdout).toContain('scan --run')
       const blocked = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked')
       expect(fs.readdirSync(blocked).some((f) => f.startsWith('scan-testfail-'))).toBe(true)
@@ -131,7 +131,9 @@ describe('orchestrator planner > scan --run（high 卡自动发起闭环）', ()
       fs.writeFileSync(path.join(src, 'a.ts'), '// TODO: someday\nexport {}\n')
       const out = runOrch(repo.root, 'scan --todo --run --backend mock')
       expect(out.stdout).not.toContain('scan --run →')
-      expect(listPendingOf(repo.root).some((f) => f.startsWith('scan-todo-'))).toBe(true) // 留在 pending
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      expect(fs.readdirSync(draftsDir).some((f) => f.startsWith('scan-todo-'))).toBe(true) // low 提案留在 drafts
+      expect(listPendingOf(repo.root)).toHaveLength(0)
     } finally {
       repo.cleanup()
     }

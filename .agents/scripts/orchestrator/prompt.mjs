@@ -249,6 +249,64 @@ export function parseCardBlock(text) {
 }
 
 // ---------------------------------------------------------------------------
+// Propose（autopilot 需求综合）：目标面 + 巡检信号 → 高质量任务卡提案
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装 propose prompt：只读会话探索仓库，把「目标面 + 巡检提案 + 队列现状」综合成
+ * 至多 maxCards 张高质量任务卡。与 intent 的分工：intent 是人给意图的单卡编译；
+ * propose 是无人值守下按目标面自主给出需求——产出只落 drafts 提案，进不进队列由
+ * 人工批量 submit 或 autopilot 白名单决定。
+ * @param {object} p { goals, signals, queueSummary, maxCards, repoRoot }
+ */
+export function buildProposePrompt({ goals, signals, queueSummary, maxCards, repoRoot }) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const fence = '```';
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：项目需求综合（autopilot 提案）\n\n` +
+    `你是这个仓库的需求规划者。下面给出项目目标面、当前巡检信号与队列现状；请先用 Read/Glob/Grep ` +
+    `探索本仓库（当前目录就是仓库根）确认现状，再产出**至多 ${maxCards} 张**高质量、可独立执行的任务卡。\n\n` +
+    `## 项目目标面（用户维护的核心目标；需求必须对齐它）\n${goals?.trim() || '（未提供 goals.md——只基于巡检信号与仓库现状提案，并在背景里说明价值依据）'}\n\n` +
+    `## 当前巡检信号（scan 已落 drafts 的提案：可深化、合并或否决，重复的不必再出）\n${signals?.trim() || '（本轮无巡检信号）'}\n\n` +
+    `## 队列现状（各状态卡数）\n${queueSummary || '（空）'}\n\n` +
+    `# 产出契约\n\n` +
+    `按优先级输出**零到多张**任务卡，每张放在独立 fenced block（最多 ${maxCards} 张；没有值得做的就一张都不出）：\n\n` +
+    `${fence}${CARD_MARKER}\n` +
+    `---\n` +
+    `id: <小写短横线，体现意图>\n` +
+    `type: <bugfix | feature | docs | deps | refactor>\n` +
+    `priority: <high | normal | low>\n` +
+    `created_at: <当前 ISO 时间>\n` +
+    `created_by: planner\n` +
+    `files_hint:\n` +
+    `  - <你探索后确认的实际预期范围，glob>\n` +
+    `workflows:\n` +
+    `  - feature-branch\n` +
+    `gate: L3\n` +
+    `proposal: true\n` +
+    `---\n` +
+    `\n# 目标\n<做什么、为什么；引用目标面条目或巡检信号来源>\n\n# 验收标准\n<必须可机器检查：具体行为断言>\n\n# 背景\n<探索到的现状与线索>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 验收标准必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止只有「测试全绿」这类空洞标准；\n` +
+    `2. files_hint 写真实范围（你确认过的路径），写裸 glob，不要用反引号或引号包住；\n` +
+    `3. created_by 固定 planner、gate 固定 L3、frontmatter 带 proposal: true；\n` +
+    `4. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +
+    `5. 价值说不清或验收写不具体 → 宁可不出这张卡；\n` +
+    `6. 围栏外只允许一句话概述，不要输出其他内容。\n`
+  );
+}
+
+/** 从 propose 输出提取全部任务卡块（parseCardBlock 的多卡版）。 */
+export function parseCardBlocks(text) {
+  const re = new RegExp('```' + CARD_MARKER + '\\s*\\n([\\s\\S]*?)\\n```', 'g');
+  const out = [];
+  for (const m of String(text ?? '').matchAll(re)) out.push(m[1]);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Spec Planner（spec 命令）：把一句话意图编译成 Spec Kit/Kiro 式三件套
 // （requirements → design → tasks，docs 10.9）。产出契约 = 四个 fenced block；
 // 三件套落盘 .agents/orchestrator/specs/<id>/，人工审阅后由 spec build 拆成任务卡。

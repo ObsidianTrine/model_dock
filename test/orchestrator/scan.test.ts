@@ -1,9 +1,9 @@
-// nightly 巡检测试：sanitize 消毒 + scan 四信号源生成/去重/容错（docs 10.4）
+// nightly 巡检测试：sanitize 消毒 + scan 六信号源生成/去重/容错（docs 10.4）+ 提案落 drafts
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { issuesToCards, runScan, sanitize, scanIssues, scanTodo, sha8 } from '../../.agents/scripts/orchestrator/scan.mjs'
+import { issuesToCards, runScan, sanitize, scanCI, scanIssues, scanKnownIssues, scanTodo, sha8 } from '../../.agents/scripts/orchestrator/scan.mjs'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { git, mkRepo, runOrch } from './helpers.js'
 
@@ -44,21 +44,24 @@ describe('orchestrator scan > TODO 信号', () => {
 })
 
 describe('orchestrator scan > scan 命令端到端', () => {
-  it('TODO 卡落 pending；重复 scan 去重；--dry-run 不写入', () => {
+  it('TODO 提案落 drafts（不直接进队列）；重复 scan 去重；--dry-run 不写入', () => {
     const repo = mkRepo()
     try {
       const src = path.join(repo.root, 'src')
       fs.mkdirSync(src, { recursive: true })
       fs.writeFileSync(path.join(src, 'a.ts'), '// FIXME: legacy hack\nexport {}\n')
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
       const out = runOrch(repo.root, 'scan --todo')
-      expect(out.stdout).toContain('已生成任务卡')
-      const pending = listCards(queueRoot(repo.root), 'pending')
-      expect(pending).toHaveLength(1)
-      expect(pending[0]).toMatch(/^scan-todo-/)
-      // 卡内 created_by: scanner 且不自动 run
-      const cardText = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', `${pending[0]}.md`), 'utf8')
+      expect(out.stdout).toContain('已生成提案')
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0) // 提案不直接进队列
+      let drafts = fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))
+      expect(drafts).toHaveLength(1)
+      expect(drafts[0]).toMatch(/^scan-todo-/)
+      // 提案内 created_by: scanner、gate: L3、proposal: true
+      const cardText = fs.readFileSync(path.join(draftsDir, drafts[0]), 'utf8')
       expect(cardText).toContain('created_by: scanner')
       expect(cardText).toContain('gate: L3')
+      expect(cardText).toContain('proposal: true')
 
       const again = runOrch(repo.root, 'scan --todo')
       expect(again.stdout).toContain('已存在，跳过')
@@ -67,7 +70,28 @@ describe('orchestrator scan > scan 命令端到端', () => {
       fs.writeFileSync(path.join(src, 'b.ts'), '// TODO: another\nexport {}\n')
       const dry = runOrch(repo.root, 'scan --todo --dry-run')
       expect(dry.stdout).toContain('dry-run 未写入')
-      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(1)
+      expect(fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))).toHaveLength(1)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('提案提交：submit drafts 文件进 pending（gate/proposal 原样）', () => {
+    const repo = mkRepo()
+    try {
+      const src = path.join(repo.root, 'src')
+      fs.mkdirSync(src, { recursive: true })
+      fs.writeFileSync(path.join(src, 'a.ts'), '// TODO: 提交链路\nexport {}\n')
+      runOrch(repo.root, 'scan --todo')
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      const draft = path.join(draftsDir, fs.readdirSync(draftsDir)[0])
+      runOrch(repo.root, `submit "${draft}"`)
+      const pending = listCards(queueRoot(repo.root), 'pending')
+      expect(pending).toHaveLength(1)
+      expect(fs.existsSync(draft)).toBe(false) // 提交后草稿清掉
+      // 队列已有同 id → 再 scan 不再出同 id 提案（findCard 去重）
+      const again = runOrch(repo.root, 'scan --todo')
+      expect(again.stdout).toContain('已存在，跳过')
     } finally {
       repo.cleanup()
     }
@@ -85,16 +109,70 @@ describe('orchestrator scan > scan 命令端到端', () => {
     }
   })
 
-  it('--tests 信号源：testCmd 失败时生成 testfail 卡', () => {
+  it('--tests 信号源：testCmd 失败时生成 testfail 提案', () => {
     const repo = mkRepo({ testCmd: 'node -e "process.exit(1)"' })
     try {
       const out = runOrch(repo.root, 'scan --tests')
-      expect(out.stdout).toContain('已生成任务卡')
-      const pending = listCards(queueRoot(repo.root), 'pending')
-      expect(pending[0]).toMatch(/^scan-testfail-\d{4}-\d{2}-\d{2}$/)
+      expect(out.stdout).toContain('已生成提案')
+      const drafts = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts')).filter((f) => f.endsWith('.md'))
+      expect(drafts[0]).toMatch(/^scan-testfail-\d{4}-\d{2}-\d{2}\.md$/)
       // 同日重复扫描去重（id 含日期）
       const again = runOrch(repo.root, 'scan --tests')
       expect(again.stdout).toContain('已存在，跳过')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+describe('orchestrator scan > 已知问题账本与 CI 信号源', () => {
+  const KI_TABLE = [
+    '# 已知问题清单',
+    '',
+    '| 编号 | 级别 | 位置 | 一句话 | 状态 |',
+    '|---|---|---|---|---|',
+    '| PERF-15 | P2 | `src/config/secrets.ts:310-313` | 改一个 key 全表重加密 | ☐ 未修 |',
+    '| PERF-16 | P2 | `src/gateway/state.ts:614` | 请求 JSONL 无轮转 | ☑ 已修（@x） |',
+    '| PERF-21 | P2 | `src/gateway/server.ts:540` | 请求体全量 buffer | ☐ 未修（复核暂缓，见 §一.F） |',
+  ].join('\n')
+
+  it('scanKnownIssues：未修条目出提案；已修/暂缓跳过；files_hint 从位置列提取；无账本静默', () => {
+    const repo = mkRepo()
+    try {
+      fs.mkdirSync(path.join(repo.root, 'docs'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, 'docs', 'known-issues.md'), KI_TABLE)
+      const cards = scanKnownIssues(repo.root)
+      expect(cards).toHaveLength(1) // PERF-16 已修、PERF-21 暂缓都被过滤
+      expect(cards[0].id).toBe('scan-ki-perf-15')
+      expect(cards[0].files_hint).toEqual(['src/config/secrets.ts'])
+      expect(cards[0].goal).toContain('PERF-15')
+      expect(cards[0].background).not.toContain('`') // 位置/一句话消毒
+    } finally {
+      repo.cleanup()
+    }
+    const empty = mkRepo()
+    try {
+      expect(scanKnownIssues(empty.root)).toEqual([]) // 无账本 = 无信号，不告警
+    } finally {
+      empty.cleanup()
+    }
+  })
+
+  it('scanCI：GitHub 远端 + 假 gh 失败 run → high 提案；非 GitHub / gh 失败 / 主干全绿 → skipped 或无卡', () => {
+    const repo = mkRepo()
+    try {
+      const failRun = () => ({ status: 0, stdout: JSON.stringify([{ databaseId: 99, headSha: 'abcdef1234567890', displayTitle: 'ci: x' }]), stderr: '' })
+      expect(scanCI(repo.root, { run: failRun }).skipped).toBe(true) // 无远端短路，gh 都不调
+      git(repo.root, 'remote add origin https://github.com/foo/bar.git')
+      const cards = scanCI(repo.root, { run: failRun, baseBranch: 'develop' })
+      expect(cards).toHaveLength(1)
+      expect(cards[0].id).toBe('scan-ci-abcdef12') // 同提交同 id 天然去重
+      expect(cards[0].goal).toContain('#99')
+      expect(cards[0].priority).toBe('high')
+      const ghFail = scanCI(repo.root, { run: () => ({ status: 1, stdout: '', stderr: 'gh: auth' }) })
+      expect(ghFail.skipped).toBe(true)
+      expect(ghFail.reason).toContain('gh')
+      expect(scanCI(repo.root, { run: () => ({ status: 0, stdout: '[]', stderr: '' }) })).toEqual([]) // 主干全绿
     } finally {
       repo.cleanup()
     }
