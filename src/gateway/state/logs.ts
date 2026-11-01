@@ -139,6 +139,112 @@ export function latencyQuantiles(
   return { p50: at(0.5), p95: at(0.95), p99: at(0.99) }
 }
 
+// ===== 请求日志聚合（/_modeldock/usage，admin 门内）=====
+// 数据源 = 日文件全量条目（内存 ring 只有错误与路由事件，查账要含成功流量）。
+// 消费方：Web 排查、Dockmaster 编排侧（燃油实测账 / 风暴闸外部海况的数据面）。
+
+const USAGE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/** 读某本地日期的请求日志（gateway-YYYY-MM-DD.jsonl，容错崩溃半行）。日期格式严格校验
+ *  （防拼接逃逸），文件缺失返回空数组。 */
+export function readRequestLogDay(date: string): LogEntry[] {
+  if (!USAGE_DAY_RE.test(date)) return []
+  const file = path.join(logsDir(), `gateway-${date}.jsonl`)
+  if (!fs.existsSync(file)) return []
+  const out: LogEntry[] = []
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      out.push(JSON.parse(line) as LogEntry)
+    } catch {
+      /* 崩溃半行 */
+    }
+  }
+  return out
+}
+
+export interface UsageFilter {
+  harness?: string
+  profile?: string
+  provider?: string
+  /** 毫秒时间窗（含边界）；未提供的边界不设限 */
+  fromMs?: number
+  toMs?: number
+}
+
+/** 按维度过滤请求条目（全部条件 AND；未提供的维度不过滤）。纯函数，单测共用。 */
+export function filterLogEntries(entries: LogEntry[], f: UsageFilter): LogEntry[] {
+  return entries.filter((e) => {
+    if (f.harness && e.harness !== f.harness) return false
+    if (f.profile && e.profile !== f.profile) return false
+    if (f.provider && e.provider !== f.provider) return false
+    const ts = new Date(String(e.ts)).getTime()
+    if (f.fromMs != null && !(ts >= f.fromMs)) return false
+    if (f.toMs != null && !(ts <= f.toMs)) return false
+    return true
+  })
+}
+
+export interface UsageSummary {
+  requests: number
+  ok: number
+  failed: number
+  /** 失败状态计数（status 缺失计 'n/a'）；成功不进表 */
+  by_status: Record<string, number>
+  by_provider: Record<string, number>
+  by_model: Record<string, number>
+  /** 成功请求的时延分位（线性插值，同 metrics 口径） */
+  latency: { p50: number | null; p95: number | null; p99: number | null }
+  /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
+  tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  /** 命中条目的首尾时间戳（原样 ISO 字符串；空集为 null） */
+  window: { first: string | null; last: string | null }
+}
+
+/** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
+export function summarizeUsage(entries: LogEntry[]): UsageSummary {
+  const byStatus: Record<string, number> = {}
+  const byProvider: Record<string, number> = {}
+  const byModel: Record<string, number> = {}
+  const ms: number[] = []
+  const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  let ok = 0
+  let first: string | null = null
+  let last: string | null = null
+  for (const e of entries) {
+    first ??= e.ts
+    last = e.ts
+    if (e.provider) byProvider[e.provider] = (byProvider[e.provider] ?? 0) + 1
+    if (e.model) byModel[e.model] = (byModel[e.model] ?? 0) + 1
+    const isOk = e.status !== undefined && e.status < 400
+    if (isOk) {
+      ok++
+      if (e.ms != null) ms.push(e.ms)
+      const u = e.usage
+      if (u) {
+        tokens.input += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
+        tokens.output += u.output_tokens ?? 0
+        tokens.cache_read += u.cache_read_tokens ?? 0
+        tokens.cache_creation += u.cache_creation_tokens ?? 0
+      }
+    } else {
+      const k = String(e.status ?? 'n/a')
+      byStatus[k] = (byStatus[k] ?? 0) + 1
+    }
+  }
+  return {
+    requests: entries.length,
+    ok,
+    failed: entries.length - ok,
+    by_status: byStatus,
+    by_provider: byProvider,
+    by_model: byModel,
+    latency: latencyQuantiles(ms),
+    tokens,
+    window: { first, last },
+  }
+}
+
 // 事件循环延迟采样：main.ts 启动处挂一次（懒初始化——单测直建 rt 不挂，metrics.eventLoopLagMs
 // 为 null，避免测试副作用）。monitorEventLoopDelay 直方图每 60s 取一次均值后 reset。
 let loopLagHist: import('node:perf_hooks').IntervalHistogram | null = null

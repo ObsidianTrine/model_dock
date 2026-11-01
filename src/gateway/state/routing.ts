@@ -75,7 +75,10 @@ export function recordOutcome(
   if (r.ok) {
     h.okStreak += 1
     h.errWindow = { t0: now, count: 0 }
-    if (h.okStreak >= 3) h.meltdown_until = undefined
+    if (h.okStreak >= 3) {
+      h.meltdown_until = undefined
+      h.meltdown_cls = undefined
+    }
     return
   }
   h.okStreak = 0
@@ -88,7 +91,10 @@ export function recordOutcome(
   w.count += 1
   const [thr, cool] =
     r.cls === 'connect' ? [3, 60_000] : r.cls === '429' ? [5, 120_000] : r.cls === 'quota' ? [3, 900_000] : [10, 60_000]
-  if (w.count >= thr) h.meltdown_until = now + cool
+  if (w.count >= thr) {
+    h.meltdown_until = now + cool
+    h.meltdown_cls = r.cls
+  }
 }
 
 /** 是否处于熔断期（不可选作路由目标） */

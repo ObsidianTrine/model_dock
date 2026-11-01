@@ -26,7 +26,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, reloadRuntime, resolveByProfile, resolveTarget, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, eventLoopLagMs, filterLogEntries, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, readRequestLogDay, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsage, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
@@ -209,6 +209,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
             const hh = rt.health.get(id)
             if (hh) {
               hh.meltdown_until = undefined
+              hh.meltdown_cls = undefined
               hh.errWindow = { t0: Date.now(), count: 0 }
               hh.lastMs = r.ms
             }
@@ -1754,22 +1755,107 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
   }
 }
 
-/** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟。
- *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。 */
+/** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
+ *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
+ *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类。 */
 async function hMetrics(c: AdminCtx): Promise<void> {
   const { rt, res } = c
   const providers: Record<string, unknown> = {}
   for (const [id, m] of rt.metricsLatency) {
     providers[id] = { count: m.count, last_ms: m.lastMs ?? null, ...latencyQuantiles(m.samples) }
   }
+  const now = Date.now()
+  const meltdown: Array<{ provider: string; class: string; until: string; remaining_ms: number }> = []
+  for (const [id, h] of rt.health) {
+    if (h.meltdown_until == null || h.meltdown_until <= now) continue
+    meltdown.push({
+      provider: id,
+      class: h.meltdown_cls ?? 'unknown',
+      until: new Date(h.meltdown_until).toISOString(),
+      remaining_ms: h.meltdown_until - now,
+    })
+  }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown }))
+}
+
+/** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
+ *  各自接受 YYYY-MM-DD 或 ISO 时间戳（日期形态按本地日界取起止）；跨天封顶 31 个日文件。
+ *  非法返回 err 文案（双语）。 */
+const USAGE_MAX_DAYS = 31
+function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs?: number; err?: string } {
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/
+  const from = q.get('from')
+  const to = q.get('to')
+  if (!from && !to) {
+    const date = q.get('date') ?? localIsoTs().slice(0, 10)
+    if (!dateRe.test(date)) return { days: [], err: t('usage 参数 date 非法：需为 YYYY-MM-DD（本地日期）', 'Invalid usage date parameter: must be YYYY-MM-DD (local date)') }
+    return { days: [date] }
+  }
+  const parseBound = (v: string, endOfDay: boolean): number | undefined => {
+    if (dateRe.test(v)) {
+      const [y, m, d] = v.split('-').map(Number)
+      return endOfDay ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime() : new Date(y, m - 1, d).getTime()
+    }
+    const ts = new Date(v).getTime()
+    return Number.isFinite(ts) ? ts : undefined
+  }
+  const fromMs = from ? parseBound(from, false) : undefined
+  const toMs = to ? parseBound(to, true) : undefined
+  if ((from && fromMs == null) || (to && toMs == null)) {
+    return { days: [], err: t('usage 参数 from/to 非法：需为 YYYY-MM-DD 或 ISO 时间戳', 'Invalid usage from/to parameters: must be YYYY-MM-DD or an ISO timestamp') }
+  }
+  if (fromMs != null && toMs != null && toMs < fromMs) {
+    return { days: [], err: t('usage 参数非法：to 早于 from', 'Invalid usage parameters: to is earlier than from') }
+  }
+  const lo = fromMs ?? toMs!
+  const hi = toMs ?? fromMs!
+  const dayStart = (ts: number) => new Date(new Date(ts).getFullYear(), new Date(ts).getMonth(), new Date(ts).getDate()).getTime()
+  const startDay = dayStart(lo)
+  const endDay = dayStart(hi)
+  if ((endDay - startDay) / 86_400_000 + 1 > USAGE_MAX_DAYS) {
+    return { days: [], err: t('usage 窗口过大：最多查询 {n} 天', 'Usage window too large: query at most {n} days', { n: USAGE_MAX_DAYS }) }
+  }
+  const days: string[] = []
+  const cur = new Date(startDay)
+  while (cur.getTime() <= endDay) {
+    days.push(localIsoTs(cur).slice(0, 10))
+    cur.setDate(cur.getDate() + 1)
+  }
+  return { days, fromMs, toMs }
+}
+
+/** /_modeldock/usage：请求日志聚合（admin 只读）。编排侧（Dockmaster 燃油实测/风暴闸）与
+ *  排查的数据面：date/from/to 选日（见 usageQuery），harness/profile/provider 精确过滤；
+ *  聚合口径见 summarizeUsage。 */
+async function hUsage(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const parsed = usageQuery(q)
+  if (parsed.err) {
+    sendError(res, 400, parsed.err, t('示例：/_modeldock/usage?date=2026-11-01&harness=zcode', 'Example: /_modeldock/usage?date=2026-11-01&harness=zcode'))
+    return
+  }
+  let entries: LogEntry[] = []
+  for (const d of parsed.days) entries = entries.concat(readRequestLogDay(d))
+  const harness = q.get('harness') ?? undefined
+  const profile = q.get('profile') ?? undefined
+  const provider = q.get('provider') ?? undefined
+  entries = filterLogEntries(entries, { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs })
+  const filter: Record<string, string> = {}
+  if (harness) filter.harness = harness
+  if (profile) filter.profile = profile
+  if (provider) filter.provider = provider
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, usage: summarizeUsage(entries) }))
+  return
 }
 
 /** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串） */
 const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/rotate': hRotate,
   'GET /_modeldock/metrics': hMetrics,
+  'GET /_modeldock/usage': hUsage,
   'GET /_modeldock/status': hStatus,
   'GET /_modeldock/admin/update/status': hUpdateStatus,
   'POST /_modeldock/admin/update/check': hUpdateCheck,
