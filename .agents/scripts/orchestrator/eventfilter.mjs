@@ -20,11 +20,12 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { workflowConfigPath } from '../workflow-config.mjs';
+import { resolveTrace, workflowConfigPath } from '../workflow-config.mjs';
 import { buildClaudeArgs, claudeSpawnInvocation, claudeAvailable } from './backends/claude-headless.mjs';
 import { buildZcodeArgs, parseHeadlessJson, zcodeCliSpec, zcodeAvailable } from './backends/zcode-headless.mjs';
 import { cardPath, listCards, parseCard } from './queue.mjs';
 import { toIsoLocal } from './events.mjs';
+import { writeDecisionTrace } from './trace.mjs';
 import { sanitize, sha8 } from './scan.mjs';
 
 /** LLM Slow Path 单次调用处理的候选上限（超出部分截断，不经 LLM 直接按落卡处理）。 */
@@ -246,8 +247,11 @@ export function parseSemanticVerdict(text) {
  * 保守原则：spawnFn 缺失/抛错/输出不可解析 → 全部按 card 回落（fallback 记原因）；
  * verdict 里未知 id / 非法 action / merge target 无效 / 未提及的信号 → 按 card。
  * merge 是简化实现：被合并信号内容稍后由调用方以「补充信号」追加进保留卡，不真删信号。
+ * 决策留底：traceDir 有值时把本次调用落盘（kind=smartfilter、taskId 固定 scan——
+ * input=候选批量 prompt 全文、output=原始 stdout、parsed=解析数组或 null，fallback
+ * 原因记 meta；写失败内部消化不影响过滤，见 trace.mjs）。traceOpts 透传上界/滚动参数。
  */
-export function semanticFilter(keep, { spawnFn, maxSignals = SEMANTIC_MAX_SIGNALS } = {}) {
+export function semanticFilter(keep, { spawnFn, maxSignals = SEMANTIC_MAX_SIGNALS, traceDir, traceOpts } = {}) {
   const signals = Array.isArray(keep) ? keep : [];
   const empty = { cards: [], drops: [], merges: [], overflow: 0, fallback: null, used_llm: false };
   if (!signals.length) return empty;
@@ -255,12 +259,29 @@ export function semanticFilter(keep, { spawnFn, maxSignals = SEMANTIC_MAX_SIGNAL
 
   const inScope = signals.slice(0, maxSignals);
   const overflowSignals = signals.slice(maxSignals);
+  const prompt = buildSemanticPrompt(inScope);
+  const startedAt = Date.now();
+  let raw = null;
   let verdict;
   try {
-    verdict = parseSemanticVerdict(spawnFn({ prompt: buildSemanticPrompt(inScope) }));
+    raw = spawnFn({ prompt });
+    verdict = parseSemanticVerdict(raw);
     if (!verdict) throw new Error('输出无法解析为 JSON 数组');
   } catch (e) {
-    return { ...empty, cards: signals, fallback: `LLM 调用失败，全部按 card 保守回落：${String(e?.message ?? e).slice(0, 200)}` };
+    const fallback = `LLM 调用失败，全部按 card 保守回落：${String(e?.message ?? e).slice(0, 200)}`;
+    if (traceDir) {
+      writeDecisionTrace(
+        { root: traceDir, taskId: 'scan', kind: 'smartfilter', input: prompt, output: String(raw ?? ''), parsed: null, meta: { durationMs: Date.now() - startedAt, fallback } },
+        traceOpts,
+      );
+    }
+    return { ...empty, cards: signals, fallback };
+  }
+  if (traceDir) {
+    writeDecisionTrace(
+      { root: traceDir, taskId: 'scan', kind: 'smartfilter', input: prompt, output: String(raw ?? ''), parsed: verdict, meta: { durationMs: Date.now() - startedAt } },
+      traceOpts,
+    );
   }
 
   const byId = new Map(inScope.map((s) => [s.id, s]));
@@ -323,6 +344,7 @@ export function readScanConfig(repoRoot) {
     smartModel: str(scan.smartModel),
     reviewBackend: str(review.backend),
     reviewModel: str(review.model),
+    trace: resolveTrace(raw.trace), // 决策留底开关与上界（缺省开启；与 orchestrator 主配置同解析）
   };
 }
 

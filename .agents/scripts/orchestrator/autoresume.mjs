@@ -55,6 +55,12 @@ export function isTransientBlocked(events) {
   if (!Array.isArray(events) || events.length === 0) return false;
   const settle = lastSettle(events);
   if (!settle) return false;
+  // 看门狗熔断卡永不自动续（2026-11 护栏）：reason=watchdog 是程序写入的确定性标记
+  // （actuate 连续 2 次判定无进展），而 detail 是 judge LLM 的自由文本——引用时间线时
+  // 可能偶然携带 429/rate limit 等瞬时字样，下方的签名匹配（Path A）会据此把确定性熔断
+  // 误判成 transient，形成「误杀→自动续→再误杀」循环烧钱。blocked 形态同理（未来写入
+  // 方统一 reason 口径后同样被此护栏拦住）。
+  if (String(settle.reason ?? '') === 'watchdog') return false;
   if (TRANSIENT_RE.test(`${settle.reason ?? ''}\n${settle.detail ?? ''}`)) return true;
   if (settle.type !== 'blocked') return false;
   let lastRetryIdx = -1;

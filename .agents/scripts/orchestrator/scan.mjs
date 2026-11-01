@@ -313,7 +313,8 @@ export function runScan(repoRoot, opts = {}) {
     } else {
       const spawnFn = opts.semanticSpawnFn ?? makeSemanticSpawnFn(engine.engine, { cwd: repoRoot, model: engine.model, timeoutMs: opts.semanticTimeoutMs });
       try {
-        const r = semanticFilter(keep, { spawnFn, maxSignals: SEMANTIC_MAX_SIGNALS });
+        // 决策留底：traceDir=logs/scan（taskId 固定 scan），开关/上界走 workflow.json trace 键
+        const r = semanticFilter(keep, { spawnFn, maxSignals: SEMANTIC_MAX_SIGNALS, traceDir: scanCfg.trace.enabled ? qdir : null, traceOpts: scanCfg.trace });
         sem.cards = r.cards;
         sem.merges = r.merges;
         sem.overflow = r.overflow;

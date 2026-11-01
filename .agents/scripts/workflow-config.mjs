@@ -40,6 +40,13 @@
 //                   只续 429 限流/网络类、每卡冷却期内最多 1 次、每次 drain ≤maxPerRun 张、
 //                   auto_resume 事件留痕；enabled=false 完全不扫 blocked/。非法值回落缺省并
 //                   console.warn 告警
+//   trace           LLM 决策留底：{ enabled?: boolean（缺省 true）, maxPerTask?: 正整数
+//                   （缺省 20）, maxInputKB?: 正整数（缺省 64） }。三类 LLM 决策点（看门狗
+//                   watchdog / scan 语义过滤 smartfilter / 独立审查 review）把模型输入与
+//                   原始输出落盘到 logs/<taskId>/decisions/<kind>-*.json 供复盘（见
+//                   orchestrator/trace.mjs）：input/output 超上界截前缀（{ truncated,
+//                   originalBytes } 标记）、每 kind 滚动保留 maxPerTask 份；enabled=false
+//                   完全不留底。非法值回落缺省并 console.warn 告警
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -113,6 +120,7 @@ export function loadWorkflowConfig(repoRoot) {
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
     autoResume: resolveAutoResume(raw.autoResume),
+    trace: resolveTrace(raw.trace),
   };
 }
 
@@ -165,6 +173,36 @@ function resolveAutoResume(raw) {
   if (raw.cooldownHours !== undefined) {
     if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
     else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** LLM 决策留底配置解析：{ enabled: boolean, maxPerTask: 正整数, maxInputKB: 正整数 }，
+ *  缺省 true / 20 / 64（与 orchestrator/trace.mjs 的 DEFAULT_MAX_PER_TASK / DEFAULT_MAX_INPUT_KB
+ *  同一口径，改动须两处同步）。非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：
+ *  stderr 输出可操作文案，不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，
+ *  不告警。导出供 eventfilter.mjs 的 readScanConfig 复用（scan 不经 loadWorkflowConfig 读配置）。 */
+export function resolveTrace(raw) {
+  const DEFAULTS = { enabled: true, maxPerTask: 20, maxInputKB: 64 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] trace 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 trace 键，enabled 允许 true|false、maxPerTask/maxInputKB 须为正整数）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, maxPerTask?, maxInputKB? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  if (raw.maxPerTask !== undefined) {
+    if (Number.isInteger(raw.maxPerTask) && raw.maxPerTask > 0) out.maxPerTask = raw.maxPerTask;
+    else warn(`maxPerTask ${JSON.stringify(raw.maxPerTask)} 不合法（须为正整数）`);
+  }
+  if (raw.maxInputKB !== undefined) {
+    if (Number.isInteger(raw.maxInputKB) && raw.maxInputKB > 0) out.maxInputKB = raw.maxInputKB;
+    else warn(`maxInputKB ${JSON.stringify(raw.maxInputKB)} 不合法（须为正整数）`);
   }
   return out;
 }

@@ -45,6 +45,7 @@ import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates } from './orchestrator/reconcile.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
@@ -428,13 +429,16 @@ async function cmdRun(repoRoot, taskId, opts) {
   // stuck 熔断路径 kill→blocked。检查会话与 worker/reviewer 完全隔离（只读、不记账、无
   // 事件）；防重入/次数上界/错误静默的纯逻辑在 createWatchdogState。mock 后端跳过（mock
   // spawn 会写文件——判定无意义还污染 worktree 与门禁）。
+  // LLM 决策留底（trace.mjs）：workflow.json trace 键控制（缺省开启），watchdog/reviewer
+  // 的模型输入与原始输出落盘 logs/<taskId>/decisions/ 供复盘；enabled=false 不传 traceDir。
+  const traceCfg = cfg.trace;
   const watchdogState = createWatchdogState(cfg.watchdog);
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
-      const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn });
+      const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn, traceDir: traceCfg.enabled ? qdir : null, traceOpts: traceCfg });
       if (session !== workerSessionSeq || !workerInFlight) return; // 会话已翻篇/已收尾：结论作废（任务落位后不再触发）
       const live = findCard(root, taskId);
       if (!live || live.state !== 'running') return; // 卡已落位：不动作
@@ -729,7 +733,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
         reviewTempDirs.push(reviewPromptDir);
         const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
-        fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
+        const reviewPromptText = buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot));
+        fs.writeFileSync(reviewPromptFile, reviewPromptText);
+        const reviewStartedAt = Date.now();
         // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
         // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
         // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
@@ -757,6 +763,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         livePid = null;
         appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
         const verdict = parseReviewVerdict(review.output ?? '');
+        // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
+        // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
+        writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
         appendEvent(qdir, 'review_verdict', {
           blockers: verdict?.blockers ?? -1,
           suggestions: verdict?.suggestions ?? 0,
