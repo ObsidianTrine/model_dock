@@ -43,14 +43,21 @@ describe('watchdog > parseWatchdogVerdict 解析容错', () => {
 })
 
 describe('watchdog > 输入截断与 prompt 组装', () => {
-  it('时间线尾部 ≤20 条、每条 ≤200 字符；ts/seq 噪音剥除', () => {
-    const events = Array.from({ length: 30 }, (_, i) => ({ ts: `t${i}`, seq: i + 1, type: 'worker_turn', turn: i }))
-    const text = watchdogTimelineSummary(events)
-    const lines = text.split('\n')
+  it('高频事件先折叠（×N 一行带末条字段），行数上限对折叠后视图生效；ts/seq 噪音剥除', () => {
+    // 30 条 worker_turn 塌缩成一行（×30，字段取末条）——同样的行数预算覆盖全窗口
+    const turns = Array.from({ length: 30 }, (_, i) => ({ ts: `t${i}`, seq: i + 1, type: 'worker_turn', turn: i }))
+    const coalesced = watchdogTimelineSummary(turns)
+    expect(coalesced.split('\n')).toHaveLength(1)
+    expect(coalesced).toContain('worker_turn ×30')
+    expect(coalesced).toContain('turn=29')
+    // ts/seq 噪音剥除（first_ts 是折叠语义的合法新增字段，用词边界区分）
+    expect(coalesced).not.toMatch(/(^|\s)ts=/)
+    expect(coalesced).not.toMatch(/(^|\s)seq=/)
+    // 行数上限用非白名单事件验：30 条 gate_result 互不折叠，截到尾部 20 行
+    const gates = Array.from({ length: 30 }, (_, i) => ({ ts: `t${i}`, seq: i + 1, type: 'gate_result', turn: i }))
+    const lines = watchdogTimelineSummary(gates).split('\n')
     expect(lines).toHaveLength(20)
     expect(lines[0]).toContain('turn=10') // 尾部 20 条：0-29 → 10..29
-    expect(text).not.toContain('ts=')
-    expect(text).not.toContain('seq=')
     const long = { type: 'gate_result', detail: 'x'.repeat(500) }
     const [line] = watchdogTimelineSummary([long]).split('\n')
     expect(line.length).toBe(200 + 1) // 200 字符 + 省略号
@@ -204,5 +211,30 @@ describe('watchdog > makeWatchdogSpawnFn（复用 backend.spawn 的只读一次�
     await expect(spawnFn({ prompt: 'p' })).rejects.toThrow('起不来')
     expect('model' in calls[0]).toBe(false)
     expect('envPatch' in calls[0]).toBe(false)
+  })
+})
+
+describe('watchdog > watchdogTimelineSummary 读侧折叠（coalesceEvents）', () => {
+  it('逐 turn 高频事件塌缩成 ×N 一行，行数预算覆盖更长窗口', () => {
+    const events: Array<Record<string, unknown>> = [{ ts: 't0', seq: 1, type: 'task_accepted' }]
+    for (let i = 0; i < 30; i++) events.push({ ts: `t${i}`, seq: i + 2, type: 'worker_turn', tool: 'bash' })
+    events.push({ ts: 't99', seq: 99, type: 'gate_result', gate: 'npm_test', result: 'fail' })
+    const text = watchdogTimelineSummary(events)
+    const lines = text.split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toContain('task_accepted')
+    expect(lines[1]).toContain('worker_turn ×30')
+    expect(lines[1]).toContain('tool=bash') // 末条字段保留
+    expect(lines[2]).toContain('gate_result')
+  })
+
+  it('无重复时不加 ×N 标记，行为与折叠前一致', () => {
+    const events = [
+      { ts: 't0', seq: 1, type: 'task_accepted' },
+      { ts: 't1', seq: 2, type: 'worker_spawned', backend: 'mock' },
+    ]
+    const text = watchdogTimelineSummary(events)
+    expect(text.split('\n')).toHaveLength(2)
+    expect(text).not.toContain('×')
   })
 })

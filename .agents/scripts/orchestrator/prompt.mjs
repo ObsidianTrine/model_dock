@@ -135,6 +135,22 @@ export function buildFixupPrompt(card, ctx, reasonTag, failureOutput, iteration)
 }
 
 /**
+ * 把 follow-up 条目追加到 prompt 尾部（订阅直通：任务进行中下达的补充指令在
+ * 会话边界送达 worker）。一律追加在尾部——任务层及之前的字节序列保持稳定，
+ * provider 前缀缓存不失效；条数/字符截断已在 readInbox 侧完成。
+ * @param {string} promptText 既有 prompt 全文
+ * @param {Array<{ts: string, text: string}>} entries readInbox 的返回值
+ */
+export function appendFollowUps(promptText, entries) {
+  if (!entries?.length) return promptText;
+  const body = entries.map((e) => `## ${e.ts || '（未注明时间）'}\n${e.text}`).join('\n\n');
+  return (
+    promptText +
+    `\n\n---\n\n# 补充指令（follow-up：任务进行中由编排者/用户中途下达，仍然有效；与本卡早期说明冲突时以这里为准）\n\n${body}\n`
+  );
+}
+
+/**
  * 从 worker 输出解析契约块。返回 null 表示未找到（视为 stuck 信号之一，
  * 由调用方连同 NOTES.md 检查一起决策）。
  */

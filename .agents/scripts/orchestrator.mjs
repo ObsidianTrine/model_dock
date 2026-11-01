@@ -30,8 +30,8 @@ import {
   listCards,
   pickNextCard,
 } from './orchestrator/queue.mjs';
-import { appendEvent, readEvents, logDir, formatTimeline } from './orchestrator/events.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
@@ -485,14 +485,19 @@ async function cmdRun(repoRoot, taskId, opts) {
   try {
     let promptText = buildWorkerPrompt(card, ctx);
     if (resuming) {
-      // 崩溃恢复：把 events 时间线摘要 + NOTES.md 现场注入，worker 从断点续起
+      // 崩溃恢复：把 events 时间线摘要 + NOTES.md 现场注入，worker 从断点续起。
+      // 时间线先折叠（coalesceEvents）：逐 turn 高频事件塌缩成 ×N 一行，同样 60 条
+      // 原始事件的预算能覆盖比裸截 12 条长得多的中断前窗口。
       const notes = safeRead(path.join(worktree, 'NOTES.md'));
       promptText +=
         `\n\n---\n\n# 恢复上下文（上次运行中断）\n\n` +
         `上次运行在中途被中断。以下是事件时间线与 worktree 现场笔记，请先核对已完成部分，再继续未完成的部分（不要重做已完成的工作）：\n\n` +
-        `## 事件时间线（尾部）\n${formatTimeline(events.slice(-12))}\n\n` +
+        `## 事件时间线（尾部）\n${formatTimeline(coalesceEvents(events.slice(-60)))}\n\n` +
         `## worktree NOTES.md 现场\n${notes || '（空——请先补全 NOTES.md 再继续）'}\n`;
     }
+    // 会话边界送达 follow-up（订阅直通，cmdFollow 写 inbox）：初始 spawn / fixup /
+    // 审查返工 / resume 是运行中会话唯一的注入窗口，一律追加在 prompt 尾部。
+    promptText = injectFollowUps(qdir, promptText);
 
     for (;;) {
       // ---- worker 会话（含 fixup 返工循环；瞬时故障原地退避重试，见 retry 处注释）----
@@ -637,7 +642,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       ];
       const fixup = await runGates(STATIC_GATES);
       if (fixup) {
-        promptText = buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter);
+        promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter));
         continue;
       }
 
@@ -679,7 +684,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           },
         ]);
         if (uiFixup) {
-          promptText = buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter);
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter));
           continue;
         }
       }
@@ -772,7 +777,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
-          promptText = buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter);
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter));
           moveCard(root, taskId, 'reviewing', 'running');
           continue;
         }
@@ -1042,6 +1047,42 @@ async function doRetry(repoRoot, taskId, root, qdir, note, opts) {
 // submit / status / resume / abandon / logs
 // ---------------------------------------------------------------------------
 
+/**
+ * follow——运行中任务的直通信息通道（订阅直通）：补充指令追加进 logs/<id>/inbox.md
+ * 并记 follow_up 事件。运行中的 worker 会话无法注入（claude stdin 已关闭 / zcode
+ * argv 单发），送达点在会话边界（injectFollowUps：初始 spawn / fixup / 审查返工 /
+ * resume）。只对 running/ 卡开放：pending 直接改卡，awaiting-human 用 retry --note
+ * （写回卡正文，重启闭环时生效）。
+ */
+function cmdFollow(repoRoot, taskId, text) {
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  const clean = String(text ?? '').trim();
+  if (!clean) die('用法：follow <task-id> <补充指令文本>');
+  const found = findCard(root, taskId);
+  if (!found) die(`任务 "${taskId}" 不在队列中。`);
+  if (found.state !== 'running') {
+    die(`任务 "${taskId}" 状态为 ${found.state}，只有 running/ 中的任务可 follow（只有运行中的闭环有注入点）。\n`
+      + `awaiting-human 的任务用 retry --note 把补充指令写回卡正文；blocked 的任务先 resume 再 follow。`);
+  }
+  const qdir = logDir(repoRoot, taskId);
+  appendInbox(qdir, clean);
+  appendEvent(qdir, 'follow_up', { chars: clean.length, preview: clean.slice(0, 120) });
+  const liveLock = readTaskLock(repoRoot, taskId);
+  const closureAlive = liveLock && Number.isInteger(liveLock.pid) && isAlive(liveLock.pid);
+  log(`补充指令已写入 ${taskId} 的 inbox（${clean.length} 字符），将在下次会话边界送达：fixup / 审查返工 / resume / 新 spawn。`);
+  if (!closureAlive) log('⚠ 未检测到存活的闭环进程——指令会在下次 run/resume 时随恢复上下文一起送达。');
+}
+
+/** 会话边界注入 follow-up：读 inbox → prompt 尾部追加 → 留痕。无条目时零改动
+ *  （不写事件、不动 prompt 字节序列——前缀缓存不受影响）。 */
+function injectFollowUps(qdir, promptText) {
+  const entries = readInbox(qdir);
+  if (!entries.length) return promptText;
+  appendEvent(qdir, 'follow_up_delivered', { count: entries.length });
+  return appendFollowUps(promptText, entries);
+}
+
 function cmdSubmit(repoRoot, cardFile) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -1071,6 +1112,8 @@ function cmdStatus(repoRoot, taskId) {
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中。`);
   log(`任务 ${taskId}：状态 ${found.state}（${found.path}）`);
+  const inbox = readInbox(logDir(repoRoot, taskId));
+  if (inbox.length) log(`待送达 follow-up：${inbox.length} 条（logs/${taskId}/inbox.md，下次会话边界送达 worker）`);
   const events = readEvents(logDir(repoRoot, taskId));
   if (events.length) log('事件时间线：');
   if (events.length) log(formatTimeline(events));
@@ -1425,6 +1468,111 @@ function cmdReconcile(repoRoot, taskId, opts = {}) {
         `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}`
     );
   }
+}
+
+/**
+ * stats——编排运行度量：从每卡 events.jsonl 聚合每卡与全局运行画像（wall / turns /
+ * 调试与审查迭代 / token / watchdog / follow-up），为预算校准与流程调优提供基线。
+ * 只读报告。token 口径 = budget_snapshot 的会话累计峰值（与 Budget.tokens 同源）；
+ * 跨引擎精确对账走 reconcile（网关实测账）。--json 输出机器可读全量。
+ */
+function cmdStats(repoRoot, opts = {}) {
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  const days = Number.isInteger(opts.days) && opts.days > 0 ? opts.days : 7;
+  const since = Date.now() - days * 86_400_000;
+  const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
+  let taskIds = [];
+  try {
+    taskIds = fs.readdirSync(logsRoot).filter((id) => fs.existsSync(path.join(logsRoot, id, 'events.jsonl')));
+  } catch { /* logs/ 不存在 = 还没跑过任何任务 */ }
+
+  const rows = [];
+  for (const id of taskIds) {
+    const events = readEvents(path.join(logsRoot, id));
+    if (!events.length) continue;
+    const accepted = events.find((e) => e.type === 'task_accepted');
+    const start = Date.parse(accepted?.ts ?? events[0].ts);
+    if (Number.isFinite(start) && start < since) continue; // 只统计最近 N 天启动的任务
+    const found = findCard(root, id);
+    let createdBy = '', type = '', gate = '';
+    if (found) {
+      try {
+        const { meta } = parseCard(fs.readFileSync(found.path, 'utf8'), found.path);
+        createdBy = meta.created_by ?? '';
+        type = meta.type ?? '';
+        gate = meta.gate ?? '';
+      } catch { /* 损坏卡：度量照出，元信息留空 */ }
+    }
+    const terminal = [...events].reverse().find((e) => ['merged', 'failed', 'blocked'].includes(e.type));
+    const end = Date.parse(terminal?.ts ?? events[events.length - 1].ts);
+    const peaks = events.filter((e) => e.type === 'budget_snapshot' && Number.isFinite(e.tokens_in)).map((e) => e.tokens_in);
+    const count = (t) => events.filter((e) => e.type === t).length;
+    rows.push({
+      id,
+      state: found?.state ?? '(日志残留)',
+      created_by: createdBy,
+      type,
+      gate,
+      outcome: terminal?.type ?? found?.state ?? 'unknown',
+      wall_min: Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.round((end - start) / 60000)) : null,
+      turns: count('worker_turn'),
+      debug_iter: debugIterations(events),
+      review_iter: reviewIterations(events),
+      retries: count('worker_retry'),
+      watchdog_suspect: count('watchdog_suspect'),
+      follow_ups: count('follow_up'),
+      tokens_peak: peaks.length ? Math.max(...peaks) : 0,
+    });
+  }
+
+  const settled = rows.filter((r) => ['merged', 'failed', 'blocked'].includes(r.outcome));
+  const mergedRows = rows.filter((r) => r.outcome === 'merged');
+  const sum = (f) => rows.reduce((n, r) => n + (f(r) ?? 0), 0);
+  const summary = {
+    window_days: days,
+    tasks_started: rows.length,
+    queue: Object.fromEntries(STATES.map((s) => [s, listCards(root, s).length])),
+    settled: settled.length,
+    merged: mergedRows.length,
+    merge_rate: settled.length ? Math.round((mergedRows.length / settled.length) * 100) / 100 : null,
+    avg_merged_wall_min: mergedRows.length ? Math.round(mergedRows.reduce((n, r) => n + (r.wall_min ?? 0), 0) / mergedRows.length) : null,
+    total_turns: sum((r) => r.turns),
+    total_debug_iter: sum((r) => r.debug_iter),
+    total_review_iter: sum((r) => r.review_iter),
+    total_retries: sum((r) => r.retries),
+    total_watchdog_suspect: sum((r) => r.watchdog_suspect),
+    total_follow_ups: sum((r) => r.follow_ups),
+    total_tokens_peak: sum((r) => r.tokens_peak),
+  };
+
+  if (opts.flags?.has('--json')) {
+    console.log(JSON.stringify({ generated_at: toIsoLocal(), summary, rows }, null, 2));
+    return;
+  }
+  if (!rows.length) {
+    log(`最近 ${days} 天没有任务启动（按 task_accepted 时间过滤；全量对账跑 reconcile，--days N 调窗口）。`);
+    return;
+  }
+  const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
+  log(`编排运行度量（最近 ${days} 天启动的 ${rows.length} 个任务；token=会话峰值口径，精确对账跑 reconcile）：`);
+  for (const r of rows) {
+    log(
+      `  ${r.id.padEnd(26)} ${r.state.padEnd(15)} wall=${r.wall_min ?? '-'}m turns=${r.turns} 调试=${r.debug_iter} 审查=${r.review_iter} ` +
+        `重试=${r.retries} wd=${r.watchdog_suspect} follow=${r.follow_ups} tokens=${fmtK(r.tokens_peak)}`
+    );
+  }
+  log('汇总：');
+  log(
+    `  终态 ${summary.settled}（merged ${summary.merged} / failed+blocked ${summary.settled - summary.merged}），合并率 ` +
+      `${summary.merge_rate === null ? '-' : Math.round(summary.merge_rate * 100) + '%'}；队列现况 pending ${summary.queue.pending} / running ${summary.queue.running}` +
+      ` / awaiting-human ${summary.queue['awaiting-human']} / blocked ${summary.queue.blocked}`
+  );
+  if (summary.avg_merged_wall_min !== null) log(`  merged 平均 wall ${summary.avg_merged_wall_min} 分钟`);
+  log(
+    `  累计 turns ${summary.total_turns}，调试 ${summary.total_debug_iter} / 审查 ${summary.total_review_iter} 轮，瞬时重试 ${summary.total_retries}，` +
+      `watchdog suspect ${summary.total_watchdog_suspect}，follow-up ${summary.total_follow_ups}，token 峰值合计 ${fmtK(summary.total_tokens_peak)}`
+  );
 }
 
 /**
@@ -1903,6 +2051,8 @@ function usage() {
   reject <task-id> --reason "..."         人工闸门：驳回（附原因，转 failed/）
   retry <task-id> --note "..."            人工闸门：打回重试（附补充指令）
   logs <task-id>                          打印事件时间线
+  follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
+  stats [--days N] [--json]               运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）
 
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
@@ -1933,6 +2083,7 @@ async function main() {
     else if (a === '--hour') opts.hour = parseInt(argv[++i], 10);
     else if (a === '--minute') opts.minute = parseInt(argv[++i], 10);
     else if (a === '--auto') opts.auto = parseInt(argv[++i], 10);
+    else if (a === '--days') opts.days = parseInt(argv[++i], 10);
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
   }
@@ -2040,6 +2191,11 @@ async function main() {
     case 'logs':
       if (!args[0]) die('用法：logs <task-id>');
       return cmdLogs(repoRoot, args[0]);
+    case 'follow':
+      if (!args[0]) die('用法：follow <task-id> <补充指令文本>');
+      return cmdFollow(repoRoot, args[0], args.slice(1).join(' '));
+    case 'stats':
+      return cmdStats(repoRoot, opts);
     default:
       usage();
       die(`未知命令 "${cmd}"`, 1);
