@@ -161,11 +161,16 @@ ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒
 # 红线（可选）
 - 不改动 src/cli.ts
 
+# 航次计划（可选；建议复杂卡填写）
+- 检查点 1：先做什么 + 怎么验证
+- 检查点 2：再做什么 + 怎么验证
+- 备选路线：若 X 不通则 Y
+
 # 背景（可选）
 现象、复现步骤、相关文件。
 ```
 
-**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。
+**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。航次计划段（SOLAS V.34 计划先行）要求 3-6 个检查点、每个一句话「做什么 + 怎么验证」、末尾一行备选路线；planner / propose 产卡会自动补写该段。
 
 `run` 在 TTY 下会在人工闸门处交互（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；非 TTY 打印提示后退出，用 approve/reject/retry 异步处理。
 
@@ -184,6 +189,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 - **blocked/（搁浅）**：worker 自报 stuck、预算/迭代熔断（紧急抛锚）、异常结束。人接手：`resume`（注入事件时间线 + NOTES.md 现场续做，坞长组织拖救）或 `abandon`（转 failed/，worktree 按 `worktree-rescue.md` 清理）。
 - **failed/（退关）**：红线门禁或人工驳回。**红线失败不可调试——改设计，别改门禁**。
 - 运行态（queue/、logs/）不入库；崩溃后重启即从 running/ + events.jsonl 恢复。
+- pending（待泊）的卡若属受限航道（`type: deps` 或 files_hint 命中核心/发布路径），开航前需人工引水确认：`run <id> --pilot-approved`（见 B0 引水闸）；未确认的卡在 drain 中被跳过并列入「待引水」清单，队列保留不动。
 
 ### A3. 紧急抛锚（熔断）与看门狗（自动停，不会烧钱）
 
@@ -220,6 +226,14 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 ## B. 自主模式详解
 
 需求侧生命周期：**出提案（drafts/ 待审托运申请）→ 人工批量 submit 或 autopilot（自动舵）白名单自动提交（pending/ 待泊）→ 常规闭环（闸门原样）**。人（船东）只审提案与合并两级。
+
+### B0. 引水闸（compulsory pilotage）
+
+受限航道 = `type: deps` 的卡（依赖变更牵一发动全身）或 files_hint 命中 workflow.json `corePaths` / `releasePaths` 的卡。这类卡**未经人工确认不得自动开航**：
+
+- **直接 `run <id>`**：拒绝启动（卡留 pending/ 不动），记 `pilotage_required` 事件（附命中原因）。
+- **怎么确认**：`run <id> --pilot-approved`——人工过目后逐张放行。
+- **drain 遇到引水卡**：跳过不派发（不烧预算、不 die），跑完打印「待引水」清单逐张给确认命令；串行与 `--workers` 并发同语义。队列顺序不因跳过改变，确认过的卡随时可显式 run。
 
 ### B1. 提案与 autopilot（授权制）
 

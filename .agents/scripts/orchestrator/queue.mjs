@@ -159,8 +159,9 @@ export function parseYamlSubset(text) {
 }
 
 /**
- * 解析完整任务卡：frontmatter（--- 对之间）+ 正文四个段落。
- * 返回 { meta, body: { goal, acceptance, redlines, background } }。
+ * 解析完整任务卡：frontmatter（--- 对之间）+ 正文五段（航次计划可选）。
+ * 返回 { meta, body: { goal, acceptance, redlines, plan, background } }。
+ * plan 缺省空串：旧四段卡完全兼容（SOLAS V.34 计划先行是建议段，不做硬校验）。
  */
 export function parseCard(text, sourceName = '') {
   const tag = sourceName ? `（${sourceName}）` : '';
@@ -169,7 +170,7 @@ export function parseCard(text, sourceName = '') {
   const meta = parseYamlSubset(m[1]);
 
   // 正文按 "# 标题" 分段；未识别的段落并入背景，避免内容丢失
-  const body = { goal: '', acceptance: '', redlines: '', background: '' };
+  const body = { goal: '', acceptance: '', redlines: '', plan: '', background: '' };
   const sections = {};
   let current = null;
   for (const line of m[2].split('\n')) {
@@ -185,7 +186,8 @@ export function parseCard(text, sourceName = '') {
   body.goal = join('目标');
   body.acceptance = join('验收标准');
   body.redlines = join('红线');
-  const known = ['目标', '验收标准', '红线'];
+  body.plan = join('航次计划');
+  const known = ['目标', '验收标准', '红线', '航次计划'];
   body.background = Object.entries(sections)
     .filter(([k]) => !known.includes(k))
     .map(([k, v]) => `# ${k}\n${v.join('\n').trim()}`)
@@ -359,11 +361,14 @@ const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
  * 自动调度：取 pending 中下一个该跑的任务（Phase 2，docs 10.3）。
  * 排序：priority（high > normal > low）→ 同优先级按 created_at 升序（先到先跑）。
  * 解析/校验失败的卡跳过（留在原地等人工修复，不阻塞队列——drain 靠它避免死循环）。
- * 返回 { id, meta } 或 null（队列空 / 无可解析卡）。
+ * opts.skipIds：调用方显式排除的 id 集合（drain 的引水闸跳过——待人工确认的卡
+ * 留在 pending/ 不派发，队列顺序不因跳过而改变）。返回 { id, meta } 或 null。
  */
-export function pickNextCard(root) {
+export function pickNextCard(root, opts = {}) {
+  const skip = opts.skipIds;
   let best = null;
   for (const id of listCards(root, 'pending')) {
+    if (skip?.has(id)) continue;
     try {
       const text = fs.readFileSync(cardPath(root, 'pending', id), 'utf8');
       const { meta } = loadCard(text, `${id}.md`);
