@@ -77,6 +77,8 @@
 | 2026-10-gateway-state-rmw | persistCheckTime 裸 RMW 绕过串行队列，与 devices/lan_token 并发写方整包互覆盖 | 7a3ba4a | ✅（10-31，GLM subagent）全写方通道核对表 + 新活缺陷：getUpdateStatus 未捕获 SecretsError 连带 60s 轮询崩、启动重写丢 update_check，立卡 28 |
 | 2026-10-tray-modelitem-orphan | RefreshMenu quick=false 漏隐藏「默认模型」孤儿项，点击弹假错误 | 302c01f | ✅（10-31，GLM subagent）成组 Visible 全集核对 + 唯一赋值点定位，与 tray-ui-sync-http 题交叉印证 |
 | 2026-10-tray-ui-sync-http | 5s Timer 在 UI 线程同步 HealthOk（2s 超时 HTTP）+ 磁盘读，半挂时每 5s 冻结最长 2s | 3ba4d6e | ✅（10-31，GLM subagent）真修归属核对到卡 26 + 新活缺陷 UpdateProgressForm Timer 错线程（立即更新主链路进度窗永不刷新），立卡 29 |
+| 2026-11-orch-drafts-realpath-skip | cmdSubmit 草稿清理裸前缀比对不做 realpath：macOS tmpdir 是符号链接（/var/folders→/private/var/folders），argv 侧与 git toplevel 侧前缀永不一致——drafts 提案提交后草稿清理永远静默跳过 | 9f62c37 | ⏳ 待首跑（2026-11-02 入库，四档实测会话回灌；首个 diffRef 题型——orchestrator.mjs 143KB 超整文件护栏，考引入提交 a58a313 的 diff；首跑前不计入基线分母） |
+| 2026-11-tier-silence-test-scenario-mismatch | zcode tier 静默回归用例场景与实现自相矛盾：用例名「默认引擎」却 --backend mock 起跑，tierWarnable 只对 zcode-headless 静默——not.toContain 断言必红，红用例随 d352822 溜过 finish 门禁 | c515b0e | ⏳ 待首跑（2026-11-02 入库，四档实测会话回灌；diffRef=d352822 双文件 diff 3.8KB；首跑前不计入基线分母） |
 
 **2026-10-31 合并 origin/develop 并账**：远端侧回灌批次 30 行考题并入上表——14 题已首跑全审出（10-30/31 GLM subagent 修复对回灌二/三/四轮，原文 runs/），16 题 ⏳ 待首跑、按既有口径不计入基线分母，下次全量跑分一并计入；远端侧原基线行（召回 34/34）由其上基线行（37/37）加本并账取代。
 **基线：召回 37/37 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19 + 10-31 强审查者 9/9——见下方 T31 强复跑行）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于新基线（36/36，或按模型分段对齐）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
@@ -87,7 +89,7 @@
 
 ## 怎么加新考题（事故 / 回滚之后必做）
 
-1. 找到修复提交 `<fix>`，`reviewRef` 填 `<fix>^`（bug 在场的最后一个状态）；`files` 填根因所在文件。
+1. 找到修复提交 `<fix>`，`reviewRef` 填 `<fix>^`（bug 在场的最后一个状态）；`files` 填根因所在文件。根因文件超 120KB 整文件护栏（如 orchestrator.mjs）时改用 **diffRef 题型**：`diffRef` 填 bug 的引入提交（物化改为该提交对 `files` 的 diff，贴近真实 PR 审查），`reviewRef` 仍照常填（留档 bug 在场状态）；`cleanSha`（干净对照）与 `diffRef` 互斥。
 2. `expect` 填根因关键词（函数名 / 特征串），宽松一点没关系——打分是启发式，精确判定看模型原文。
 3. `note` 写清为什么当时的流程没拦住（哪一层的洞），对应的堵法落进 REVIEW.md / lint / prompt。
 4. 跑一次确认能复现「审出」或「没审出」，如实记录——没审出的题才是最有价值的题。
@@ -128,6 +130,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-30 增补 3 题**（2026-10-29 效能审查回灌：T14 修复对 ×2 + T19 修复对 ×1，见上表末三行）：首跑已补（2026-10-31 T31，降级审查者 glm-4.5-air，见上 T31 清账行）；第三题 fixedBy 已随 T19 合入（cc6d832）回填。
 - **2026-10-30 增补 1 题**（finish-lock-wait-contract，T15 执行会话回灌）：锁心跳改造合入时 test:workflow 3 例红未跑直接合入的逃逸——bug 在场 cb958be、修复 92a78ac 成对完整；首跑已补（2026-10-31 T31，降级审查者，见上 T31 清账行）。
 - **2026-10-30 增补事故考题**（realhome-write-through）：用户生产 ~/.modeldock 被测试写穿（config/secrets 被测试夹具整包覆盖）的真实 P0 事故回流，fixedBy=f77dc02（真实 home 写入门禁 + sync 引擎 home 钉扎）。题目只收 engine.ts 单文件（fsx 漏斗第二层门禁不在文件清单内）；首跑已补（2026-10-31 T31，降级审查者，见上 T31 清账行）。
+- **2026-11-02 增补 2 题 + 跑分器 diffRef 题型**（四档实测会话回灌）：orch-drafts-realpath-skip（cmdSubmit 裸前缀比对，macOS 符号链接 tmpdir 下草稿清理静默失效——bug 随任务二 a58a313 进树、9f62c37 修）与 tier-silence-test-scenario-mismatch（新增测试场景与实现矛盾，红用例溜过 finish——d352822 进树、c515b0e 修）。同会话排查过的 hintsOverlap 空列表守卫、runGates 同步契约两坑系分支内自纠（坏版本从未进树），按加题规则第 5 条进执行坑复盘、不成题。orchestrator.mjs 已 143KB+ 超整文件护栏，跑分器随之新增 diffRef 物化模式（考引入提交的 diff，cleanSha 互斥）——此后巨型文件的 bug 也能成题。两题均 dry 过、⏳ 待首跑（claude CLI 配额 2026-11-07 恢复后随下次全量跑分一并计入）。
 - **2026-10-30 增补 2 题 · 首跑已补**（v1.5.1 发布周期事故回流，batch3，GLM subagent tool-free）：daemon-gatewayjson-tamper-race ✅ 存疑区命中 / tray-win32-basename ❌ 未审出（1/2）——**首次漏报**，暴露平台解析盲区：REVIEW.md 平台条目只覆盖测试侧（NTFS 权限/写死 /tmp），没有「解析 Windows 专属文本须用 win32 语义 path API」口径；堵法待下次全量跑分一并落地评估（零散改 REVIEW.md 会触发全量重跑纪律）。同周期实测踩中的 release-propose commitFiles 解析串位（`--format=%h%x1e` 文件列表跟在下一条 hash 前）不成题——坏版本未上过树（同提交内自纠），已立为「怎么加新考题」第 5 条。
 - 本批同期副产物（夜巡 + 噪音对照实验，详见 runs/2026-10-30-night-summary.md）：**CORRECT-07**（`gateway start --daemon` 就绪后 CLI 不返回，P1）、**CORRECT-08**（jsonpath 括号句式静默写歪键 / star 裸崩，P2）、**CORRECT-09**（relay failover 可观测性三项，P2）——均实测复现、未修；修复后可按「怎么加新考题」回流为考题。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
 
@@ -164,3 +167,5 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 18. **UTC 时间戳误判陈锁、手删活锁**（2026-10-29 合并接管会话）：finish 锁 time 是 ISO UTC，接管者把 `00:55Z` 读成本地 00:55 判「8 小时前陈锁」直接删——持有者实际活着（几分钟前刚起），并发 finish 侥幸双双落地无损坏。堵法：判陈锁先换算时区再验活（新锁看 beat 心跳）；非本人持有的 git 状态（MERGE_HEAD / 锁 / 他人暂存区）一律不动，删锁前必须核实属主 pid 已死。
 19. **交接数字失真**（2026-10-29 test-gap-presets-sync 接管）：NOTES 与提交信息写「60 用例」，接手后实测 73——worker 中断前数字是草稿态，直接引用即失真。堵法：交接文档的计数/状态「写时实测」；接手者把卡面数字当线索不当事实（同 14）。
 20. **管道尾退出码误判**（2026-10-30 coverage 取数）：`npm test | tail` 后 `$?` 是 tail 的 0——测试红了却判成功；且 vitest 失败跑不产 coverage 报告，双重误导连烧三次全量。堵法：退出码不经管道取（`set -o pipefail` 或命令与查看分开）；「该产出的报告没产出」本身就是失败信号。
+21. **空列表语义是守卫的隐形开关**（任务二 orch-autopilot-goals 分支内自纠）：autopilot 判定复用 hintsOverlap，而它对空列表按「重叠」保守返回 true——项目未配置 corePaths/releasePaths 时 guarded 列表为空，所有提案卡被「命中核心路径」全量拒绝，autopilot 静默瘫痪。堵法：复用判定原语前先核空输入语义（保守原语在守卫侧会反转成「全拦」），空列表要么短路（`guarded.length &&`）要么显式分支。
+22. **门禁 run 函数必须同步返回**（l0-gate-notify 分支内自纠）：runGates 消费 `const r = g.run()` 后直接把返回值透传给 passExtra——run 闭包写成 async 时拿到的是 Promise，skipped/reason 字段全部丢失，门禁静默降级。堵法：给 runGates 这类同步消费点加门禁时，先核消费侧的调用契约；async 诉求应在 run 外层 await，而不是把 async 闭包塞进同步槽位。
