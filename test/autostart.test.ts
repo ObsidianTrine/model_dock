@@ -425,6 +425,10 @@ describe.skipIf(process.platform !== 'win32')('autostart 真实生效 > Windows 
       return
     }
     try {
+      // 本用例是写入门禁豁免开关的首个合法场景（fsx「有意写真实 home」）：刻意脱离沙箱打真
+      // 注册表（CI runner 账号可弃、真实用户机器被上方守则 skip），installAutostart 会随之把
+      // Run 键镜像文件落真实 home——不豁免即被门禁拒写（v1.5.2 windows CI 首曝）
+      process.env.MODELRDOCK_ALLOW_REAL_HOME_WRITE = '1'
       const argv = ['C:\\Windows\\System32\\cmd.exe', '--sea-gateway']
       const result = await installAutostart({ argv })
       expect(result.started).toBe(false)
@@ -436,9 +440,15 @@ describe.skipIf(process.platform !== 'win32')('autostart 真实生效 > Windows 
       expect(un.wasInstalled).toBe(true)
       expect(realRunValue()).toBe(false)
     } finally {
-      // 兜底清理：本用例创建的 Run 键绝不残留
+      delete process.env.MODELRDOCK_ALLOW_REAL_HOME_WRITE
+      // 兜底清理：本用例创建的 Run 键与镜像文件绝不残留（uninstall 正常路径已删，此处兜崩溃中途）
       try {
         execFileSync('reg', ['delete', WINDOWS_RUN_KEY, '/v', WINDOWS_RUN_VALUE, '/f'], { stdio: 'ignore' })
+      } catch {
+        /* 本就不存在 */
+      }
+      try {
+        fs.rmSync(path.join(os.homedir(), '.modeldock', 'autostart-run-key.txt'), { force: true })
       } catch {
         /* 本就不存在 */
       }
