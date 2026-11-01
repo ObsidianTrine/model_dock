@@ -126,6 +126,8 @@ fallback = ["backup", "backup:slow-model"]
 | `files` | `string[]` | 否 | 接入时写入 | 程序维护。已接管的客户端配置文件列表（断开时据此还原）。 |
 | `client_profiles` | `string[]` | 否 | 接入时写入 | 程序维护。接入时选定的客户端自身配置档（如 dsh 的 desktop / web）；模式切换时按此范围重写。 |
 | `gateway_base` | `string` | 否 | 接入时写入 | 程序维护。接入时写入的网关地址；断开时据此精确还原，不误删你自己的其他本地代理配置。 |
+| `limits.rpm` | `number` | 否 | 不限 | 数据面限流：该客户端每分钟最大请求数，超过返回 429（防失控客户端打爆上游；计数在网关内存，重启清零）。 |
+| `limits.daily_tokens` | `number` | 否 | 不限 | 日花费上限：该客户端当日 token 用量（输入含缓存 + 输出）达到即返回 429，次日自动重置。 |
 
 示例：
 
@@ -139,6 +141,10 @@ token = "mdk_..."
 # files = ["~/.claude/settings.json"]  # 程序维护，无需手改
 # client_profiles = ["desktop"]  # 程序维护，无需手改
 # gateway_base = "http://127.0.0.1:8687"  # 程序维护，无需手改
+
+[harness.<client>.limits]
+rpm = 60
+daily_tokens = 5000000
 ```
 
 ## 6. 声明式接入包（adapter_packs）
