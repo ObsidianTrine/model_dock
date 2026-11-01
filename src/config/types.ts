@@ -57,6 +57,10 @@ export interface HarnessEntry {
   client_profiles?: string[]
   /** 接入时写入的网关地址（如 http://127.0.0.1:8687）；detach 据此做精确匹配，避免误删用户其他本地代理配置 */
   gateway_base?: string
+  /** 数据面限额（水密舱熔断丝，超限 429）：rpm = 每分钟请求数上限；daily_tokens = 本地日
+   *  token 花费上限（input 含缓存读/建 + output，与 reconcile 对账口径一致）。不设 = 不限。
+   *  计数在网关内存（重启清零）——定位是 runaway 熔断丝不是计费账本，计费事实在 usage 日志 */
+  limits?: { rpm?: number; daily_tokens?: number }
 }
 
 export interface AdapterPack {

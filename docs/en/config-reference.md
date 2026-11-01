@@ -126,6 +126,8 @@ One block per attached client (`<client>` is the client id, e.g. claude-code). A
 | `files` | `string[]` | no | written at attach | Program-managed. Client config files under management (restored on detach). |
 | `client_profiles` | `string[]` | no | written at attach | Program-managed. Client's own profiles selected at attach (e.g. dsh's desktop / web); mode switches rewrite within this scope. |
 | `gateway_base` | `string` | no | written at attach | Program-managed. The gateway URL written at attach; detach matches on it precisely so your other local proxy settings are not touched. |
+| `limits.rpm` | `number` | no | unlimited | Data-plane rate limit: max requests per minute for this client; excess requests get 429 (protects upstreams from a runaway client; counted in gateway memory, reset on restart). |
+| `limits.daily_tokens` | `number` | no | unlimited | Daily spend cap: once this client's token usage for the day (input incl. cache + output) reaches it, requests get 429 until the next day. |
 
 Example:
 
@@ -139,6 +141,10 @@ token = "mdk_..."
 # files = ["~/.claude/settings.json"]  # program-managed; no need to edit
 # client_profiles = ["desktop"]  # program-managed; no need to edit
 # gateway_base = "http://127.0.0.1:8687"  # program-managed; no need to edit
+
+[harness.<client>.limits]
+rpm = 60
+daily_tokens = 5000000
 ```
 
 ## 6. Declarative adapter packs (adapter_packs)

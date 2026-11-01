@@ -198,6 +198,8 @@ export const METAS = {
   'harness.<client>.files': M('已接管的客户端配置文件列表（断开时据此还原）。', 'Client config files under management (restored on detach).', ['接入时写入', 'written at attach'], '["~/.claude/settings.json"]', { managed: true }),
   'harness.<client>.client_profiles': M('接入时选定的客户端自身配置档（如 dsh 的 desktop / web）；模式切换时按此范围重写。', "Client's own profiles selected at attach (e.g. dsh's desktop / web); mode switches rewrite within this scope.", ['接入时写入', 'written at attach'], '["desktop"]', { managed: true }),
   'harness.<client>.gateway_base': M('接入时写入的网关地址；断开时据此精确还原，不误删你自己的其他本地代理配置。', 'The gateway URL written at attach; detach matches on it precisely so your other local proxy settings are not touched.', ['接入时写入', 'written at attach'], '"http://127.0.0.1:8687"', { managed: true }),
+  'harness.<client>.limits.rpm': M('数据面限流：该客户端每分钟最大请求数，超过返回 429（防失控客户端打爆上游；计数在网关内存，重启清零）。', 'Data-plane rate limit: max requests per minute for this client; excess requests get 429 (protects upstreams from a runaway client; counted in gateway memory, reset on restart).', ['不限', 'unlimited'], '60'),
+  'harness.<client>.limits.daily_tokens': M('日花费上限：该客户端当日 token 用量（输入含缓存 + 输出）达到即返回 429，次日自动重置。', 'Daily spend cap: once this client\'s token usage for the day (input incl. cache + output) reaches it, requests get 429 until the next day.', ['不限', 'unlimited'], '5000000'),
 
   // ---- adapter_packs.<pack>
   'adapter_packs.<pack>.format': M('客户端配置文件格式：`json` / `toml` / `yaml`。', 'Client config file format: `json` / `toml` / `yaml`.', ['—', '—'], '"json"'),

@@ -26,7 +26,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, eventLoopLagMs, filterLogEntries, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, readRequestLogDay, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsage, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, filterLogEntries, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, readRequestLogDay, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsage, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
@@ -432,6 +432,20 @@ async function handleRequest(
     return
   }
 
+  // 数据面限额（水密舱熔断丝）：检查放在 /v1/models 本地合成目录之后——它不耗上游，不该被限，
+  // 只守真正的转发路径。超限 429 不打上游；计数器在 rt 内存（重启清零），见 state/tokenlimits.ts。
+  const limitTrip = checkTokenLimits(rt, target.harness)
+  if (limitTrip) {
+    const limits = rt.config.harness[target.harness]?.limits
+    const msg =
+      limitTrip === 'rpm'
+        ? t('客户端「{h}」已触发限流：每分钟请求数超过上限 {n}', 'Client "{h}" hit the rate limit: more than {n} requests per minute', { h: target.harness, n: limits?.rpm ?? 0 })
+        : t('客户端「{h}」已触发日限额：今日 token 用量达到上限 {n}', 'Client "{h}" hit the daily token cap: today\'s usage reached the limit of {n}', { h: target.harness, n: limits?.daily_tokens ?? 0 })
+    const hint = t('限额配置在 config.toml [harness.{h}] 的 limits 键（rpm / daily_tokens，删除即不限），改后热加载生效', 'Limits live under the limits key of [harness.{h}] in config.toml (rpm / daily_tokens; remove to disable) and hot-reload', { h: target.harness })
+    log({ harness: target.harness, profile: target.profileName, provider: '-', path: url, status: 429, ms: Date.now() - started, err: msg })
+    return sendError(res, 429, msg, hint)
+  }
+
   const body = await readBody(req, maxBodyBytes(rt.config))
   const headers: Record<string, string> = {}
   for (const [k, v] of Object.entries(req.headers)) {
@@ -513,12 +527,15 @@ async function handleRequest(
   // content-type 单值头，防御性取首值（上游异常重复时不致类型崩）
   const resCt = result.headers['content-type']
   const usageTap = createUsageTap(Array.isArray(resCt) ? resCt[0] : resCt)
+  const usage = usageTap.getUsage()
   try {
     await pipeline(result.body as any, usageTap, res)
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage: usageTap.getUsage() })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage })
   } catch (e) {
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage: usageTap.getUsage() })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage })
   }
+  // 当日花费累计（水密舱熔断丝的用量侧）：成功与流中断都算已消耗；无 limits 配置时静默跳过
+  recordTokenUsage(rt, target.harness, usage)
 }
 
 // 管理面

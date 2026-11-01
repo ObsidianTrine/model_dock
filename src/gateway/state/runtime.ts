@@ -19,6 +19,7 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     reloads: 0,
     dispatchers: new Map(),
     health: new Map(),
+    tokenUsage: new Map(),
     metricsLatency: new Map(),
   }
 }

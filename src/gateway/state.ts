@@ -8,4 +8,7 @@ export { resolveTarget, resolveByProfile, recordOutcome, isMeltdown, activeSched
 export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, readRequestLogDay, filterLogEntries, summarizeUsage, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs } from './state/logs.js'
 export type { UsageFilter, UsageSummary } from './state/logs.js'
 export type { GatewayStateFile } from './state/state-file.js'
+export { checkTokenLimits, recordTokenUsage } from './state/tokenlimits.js'
+export type { TokenLimitTrip } from './state/tokenlimits.js'
+export type { TokenUsageState } from './state/types.js'
 export { readGatewayState, gatewayLive, writeGatewayState, mutateGatewayState, clearGatewayState, pidAlive } from './state/state-file.js'
