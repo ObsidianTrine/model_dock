@@ -283,6 +283,23 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 - **临时港**演习：mkdtemp 临时 git 仓 + 整目录拷贝 `.agents/scripts` + 最小 workflow.json，mock 跑一张合成托运单（id `drill-<日期>-<随机>`）走完全链，产物随临时港删除——不烧真钱、不碰真队列。
 - 判定：脚本完整 → 合成卡提交 → 闭环全链落 awaiting-human，任一环节 ✗ 即 exit 1（可用 schedule/cron 注册成每周演习）。
 
+### B7. 开启清单（自动舵 autopilot 与风暴闸 weatherHold）
+
+两个自主开关都**缺省关闭**；开启按本清单走（每步可机器验证，2026-11-01 沙箱演练实证）：
+
+**自动舵 autopilot**（白名单提案自动提交进队列）：
+1. 先填罗盘：`.agents/orchestrator/goals.md`（无目标面 = 提案只靠巡检信号）；
+2. workflow.json 加 `"autopilot": { "enabled": true, "autoSubmitTypes": ["docs"], "autoDrainPerCycle": 2 }`；
+3. 验证链路：`propose --backend mock` → 白名单卡应出现「🤖 autopilot 已提交提案」（gate=L1）；`drain --backend mock` 一路到 merged 即闭环健康（沙箱配方见 test/orchestrator/propose.test.ts）；
+4. 试运行一个周期后看 `stats --json` 的 `summary.merge_rate` 与 `summary.near_miss`，再逐步放宽 `autoSubmitTypes`（deps/核心路径/人工草稿永不自动；实际合并仍由分级裁决与 drift 保险丝兜底）。
+
+**风暴闸 weatherHold**（瞬时故障密集时自动停派发）：
+1. workflow.json 加 `"weatherHold": { "threshold": 3, "windowMinutes": 60 }`（阈值=窗口内 worker_retry 合计）；
+2. 验证：窗口内凑满阈值后，下次 drain / watch 周期应打「⛈ 风暴滞留」并停派发（fleet.jsonl 留 `weather_hold`），窗口滑过自动恢复、无需清理状态；
+3. 滞留通知走 `${envPrefix}_ORCH_WEBHOOK`；滞留期 announce 只发一次防刷屏。
+
+**不变的红线**：两者开启都不触碰合并分级（corePaths→L2 / releasePaths→L3）、发布人工授权与「永不静默重试」——自动的是「进队列」，不是「进主干」。
+
 ## C. 观测与对账详解
 
 ### C1. stats 与 follow（引水传令）

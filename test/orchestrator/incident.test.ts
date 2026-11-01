@@ -79,3 +79,38 @@ describe('orchestrator incident > 落位自动归档', () => {
     }
   }, 120_000)
 })
+
+describe('orchestrator incident > 人工终态也归档（VDR 全覆盖）', () => {
+  it('人工驳回（reject）落 failed → incident.md 归档驳回原因', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'vdr-reject')
+      runOrch(repo.root, 'run vdr-reject --backend mock') // gate L3 缺省 → awaiting-human
+      expect(readCard(repo.root, 'awaiting-human', 'vdr-reject')).toBeTruthy()
+      runOrch(repo.root, 'reject vdr-reject --reason "方向不对"')
+      expect(readCard(repo.root, 'failed', 'vdr-reject')).toBeTruthy()
+      const text = fs.readFileSync(incidentPath(repo.root, 'vdr-reject'), 'utf8')
+      expect(text).toContain('# 事故调查包（VDR）：vdr-reject')
+      expect(text).toContain('方向不对')
+      expect(text).toContain('## 事件时间线')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('abandon 落 failed → incident.md 归档（stuck 卡已有的包被 abandon 现场覆盖刷新）', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'vdr-abandon')
+      runOrch(repo.root, 'run vdr-abandon --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      expect(readCard(repo.root, 'blocked', 'vdr-abandon')).toBeTruthy()
+      runOrch(repo.root, 'abandon vdr-abandon')
+      expect(readCard(repo.root, 'failed', 'vdr-abandon')).toBeTruthy()
+      const text = fs.readFileSync(incidentPath(repo.root, 'vdr-abandon'), 'utf8')
+      expect(text).toContain('人工 abandon')
+      expect(text).toContain('## 考题草稿建议')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})

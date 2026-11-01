@@ -128,3 +128,24 @@ describe('weather > 集成（drain 风暴滞留）', () => {
     }
   })
 })
+
+describe('weather > 集成（watch 瞭望模式同样受风暴闸约束）', () => {
+  it('滞留期 watch 周期不派发：pending 卡零事件留原地，输出含风暴滞留', () => {
+    const repo = mkRepo({ extra: { weatherHold: { threshold: 2, windowMinutes: 60 } } })
+    try {
+      seedRetries(repo.root, 'watch-w', [0, 60_000]) // 窗口内 2 条 = 凑满阈值
+      const card = path.join(repo.root, 'card-watch-x.md')
+      fs.writeFileSync(card, cardText({ id: 'watch-x' }))
+      runOrch(repo.root, `submit "${card}"`)
+
+      const out = runOrch(repo.root, 'watch --max-cycles 1 --interval 0 --backend mock')
+      expect(out.status).toBe(0)
+      expect(out.stdout).toContain('风暴滞留')
+      expect(eventsOf(repo.root, 'watch-x')).toEqual([]) // 滞留期不派发 = 零事件
+      expect(readCard(repo.root, 'pending', 'watch-x')).toBeTruthy()
+      expect(readFleetEvents(repo.root).some((e) => e.type === 'weather_hold')).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
