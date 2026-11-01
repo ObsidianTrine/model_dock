@@ -9,8 +9,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runCmd } from './gates.mjs';
 import { cardPath, findCard } from './queue.mjs';
-import { toIsoLocal } from './events.mjs';
+import { appendEvent, logDir, toIsoLocal } from './events.mjs';
 import { shellSpawnOptions } from './spawn-shell.mjs';
+import {
+  SEMANTIC_MAX_SIGNALS,
+  appendRelaySection,
+  collectFilterContext,
+  makeSemanticSpawnFn,
+  programFilter,
+  readScanConfig,
+  resolveSemanticEngine,
+  semanticFilter,
+  signalHash,
+} from './eventfilter.mjs';
 
 /** sha256 前 8 位：卡 id 稳定性用（内容不变 → 同 id → 重复巡检自然去重）。 */
 export function sha8(s) {
@@ -188,6 +199,9 @@ function renderCard(c) {
     `priority: ${c.priority}`,
     `created_at: ${toIsoLocal()}`,
     'created_by: scanner',
+    // 信号哈希（eventfilter.signalHash）：程序过滤的数据基础——后续同源信号与它碰撞
+    // 决定直通/去重（issue 按号、其余按内容），frontmatter 校验容忍该字段缺省
+    ...(c.signal_hashes?.length ? [`signal_hashes: [${c.signal_hashes.join(', ')}]`] : []),
     'files_hint:',
     ...c.files_hint.map((f) => `  - ${f}`),
     'workflows:',
@@ -208,15 +222,24 @@ function renderCard(c) {
 }
 
 /**
- * 执行巡检并落卡。返回 { created: string[], skipped: string[], warnings: string[] }。
- * opts: { todo, audit, tests, issues, dryRun, testCmd, gh }
+ * 执行巡检并落卡。返回 { created, skipped, warnings, relayed, dropped, filter }。
+ * opts: { todo, audit, tests, issues, dryRun, testCmd, gh, ghRun, semanticSpawnFn, semanticTimeoutMs }
+ * 信号两级过滤（eventfilter.mjs，参考 DeepSeek《Super-agent 设计探索》3.1/3.2）：
+ *   第一级程序 Fast Path 永远启用（零成本）——同源信号直通在途卡（不重复开卡）、
+ *   与 14 天内 merged/failed 卡同信号的丢弃；第二级 LLM Slow Path 按 workflow.json
+ *   scan.smartFilter（缺省 false）批量一次调用，失败全部保守回落开卡。
+ *   每个直通/丢弃/跳过都落事件（logs/scan/events.jsonl），每轮一条 scan_filtered 总账。
  */
 export function runScan(repoRoot, opts = {}) {
   const root = path.join(repoRoot, '.agents', 'orchestrator', 'queue');
   fs.mkdirSync(path.join(root, 'pending'), { recursive: true });
+  const dry = opts.dryRun === true;
   const created = [];
   const skipped = [];
   const warnings = [];
+  const relayedOut = [];
+  const droppedOut = [];
+  const qdir = logDir(repoRoot, 'scan'); // scan 级事件（signal_relayed/dropped、scan_semantic、scan_filtered）
 
   const candidates = [];
   if (opts.todo) candidates.push(...scanTodo(repoRoot));
@@ -231,19 +254,154 @@ export function runScan(repoRoot, opts = {}) {
     if (r.skipped) warnings.push(r.reason);
     else candidates.push(...r);
   }
+  // 信号哈希（frontmatter signal_hashes + 程序过滤碰撞键）：issue 按号、其余按内容（id）
+  for (const c of candidates) c.signal_hashes = [signalHash(c)];
 
+  // 既有去重先行：同 id 卡在任何状态目录都已存在 → 原样跳过（不直通，防同一信号夜夜重复 append）
+  const fresh = [];
   for (const c of candidates) {
-    const existing = findCard(root, c.id);
-    if (existing) {
-      skipped.push(c.id);
+    if (findCard(root, c.id)) skipped.push(c.id);
+    else fresh.push(c);
+  }
+
+  // ---- 两级过滤 · 第一级：程序 Fast Path（零成本，永远启用）----
+  const { keep, relayed, dropped } = programFilter(
+    fresh,
+    collectFilterContext(root, { now: opts.now, recentWindowDays: opts.recentWindowDays }),
+  );
+
+  // 订阅直通：同源信号 append 进在途卡（pending 下次 run 被 prompt 带上；running 仅留痕）
+  for (const r of relayed) {
+    if (dry) {
+      created.push(`[dry-run] ${r.signal.id}（直通 → ${r.card}）`);
+      relayedOut.push(r);
       continue;
     }
-    if (opts.dryRun) {
+    try {
+      const section = appendRelaySection(cardPath(root, r.card_state, r.card), r.signal);
+      if (section == null) {
+        // 卡内已有同一信号的直通记录（幂等防重）：不再开卡也不再重复 append
+        droppedOut.push({ signal: r.signal, reason: 'already_relayed', card: r.card, card_state: r.card_state });
+        appendEvent(qdir, 'signal_dropped', { signal: r.signal.id, reason: 'already_relayed', card: r.card, card_state: r.card_state });
+        continue;
+      }
+      relayedOut.push(r);
+      appendEvent(qdir, 'signal_relayed', { signal: r.signal.id, card: r.card, card_state: r.card_state });
+    } catch (e) {
+      warnings.push(`补充信号追加失败（${r.card}）：${String(e?.message ?? e).slice(0, 120)}——回落为开卡`);
+      keep.push(r.signal); // 追加失败回落为开卡（宁多勿漏）
+    }
+  }
+  for (const d of dropped) {
+    droppedOut.push(d);
+    if (!dry) appendEvent(qdir, 'signal_dropped', { signal: d.signal.id, reason: d.reason, ...(d.card ? { card: d.card, card_state: d.card_state } : {}) });
+  }
+
+  // ---- 两级过滤 · 第二级：LLM Slow Path（批量一次调用，scan.smartFilter 开启才走）----
+  const sem = { cards: [...keep], drops: [], merges: [], overflow: 0, fallback: null, used_llm: false };
+  let smartState = 'off';
+  const scanCfg = readScanConfig(repoRoot);
+  if (scanCfg.smartFilter) smartState = 'on';
+  if (dry) {
+    if (scanCfg.smartFilter && keep.length) warnings.push('dry-run：LLM 语义过滤层未执行（预览按程序过滤结果直接计卡）');
+  } else if (scanCfg.smartFilter && keep.length) {
+    smartState = 'ran';
+    const engine = resolveSemanticEngine(repoRoot, scanCfg);
+    if (!engine.available) {
+      smartState = 'skipped';
+      appendEvent(qdir, 'scan_semantic', { skipped: engine.reason });
+    } else {
+      const spawnFn = opts.semanticSpawnFn ?? makeSemanticSpawnFn(engine.engine, { cwd: repoRoot, model: engine.model, timeoutMs: opts.semanticTimeoutMs });
+      try {
+        const r = semanticFilter(keep, { spawnFn, maxSignals: SEMANTIC_MAX_SIGNALS });
+        sem.cards = r.cards;
+        sem.merges = r.merges;
+        sem.overflow = r.overflow;
+        sem.used_llm = r.used_llm;
+        if (r.fallback) {
+          sem.fallback = r.fallback;
+          smartState = 'fallback';
+          appendEvent(qdir, 'scan_semantic', { fallback: r.fallback });
+        } else {
+          appendEvent(qdir, 'scan_semantic', { ran: true, candidates: keep.length, cards: r.cards.length, drops: r.drops.length, merges: r.merges.length, overflow: r.overflow });
+        }
+        for (const d of r.drops) {
+          sem.drops.push(d);
+          droppedOut.push(d);
+          appendEvent(qdir, 'signal_dropped', { signal: d.signal.id, reason: d.reason });
+        }
+      } catch (e) {
+        // semanticFilter 内部已保守回落，这里兜底防御（filter 层异常绝不阻断巡检）
+        sem.fallback = `semanticFilter 异常：${String(e?.message ?? e).slice(0, 200)}`;
+        smartState = 'fallback';
+        appendEvent(qdir, 'scan_semantic', { fallback: sem.fallback });
+      }
+    }
+    if (sem.fallback) warnings.push(`LLM 语义过滤回落全开卡：${sem.fallback}`);
+  }
+
+  // ---- 落卡（keep 全集；dry-run 只报告不写入）----
+  const writeCard = (c) => {
+    if (findCard(root, c.id)) {
+      skipped.push(c.id);
+      return;
+    }
+    if (dry) {
       created.push(`[dry-run] ${c.id}`);
-      continue;
+      return;
     }
     fs.writeFileSync(cardPath(root, 'pending', c.id), renderCard(c));
     created.push(c.id);
+  };
+  for (const c of sem.cards) writeCard(c);
+
+  // merge 归并（简化实现）：被合并信号以「补充信号」追加进保留卡，不真删信号；
+  // 保留卡不存在/追加失败 → 该信号按 card 保守回落（宁多勿漏）
+  for (const m of sem.merges) {
+    if (dry) {
+      created.push(`[dry-run] ${m.signal.id}（merge → ${m.target}）`);
+      continue;
+    }
+    const targetP = cardPath(root, 'pending', m.target);
+    if (!fs.existsSync(targetP)) {
+      writeCard(m.signal);
+      continue;
+    }
+    try {
+      const section = appendRelaySection(targetP, m.signal);
+      if (section == null) {
+        droppedOut.push({ signal: m.signal, reason: 'already_relayed', card: m.target, card_state: 'pending' });
+        appendEvent(qdir, 'signal_dropped', { signal: m.signal.id, reason: 'already_relayed', card: m.target, card_state: 'pending', via: 'merge' });
+        continue;
+      }
+      appendEvent(qdir, 'signal_relayed', { signal: m.signal.id, card: m.target, card_state: 'pending', via: 'merge' });
+    } catch (e) {
+      warnings.push(`归并信号追加失败（${m.target}）：${String(e?.message ?? e).slice(0, 120)}——回落为开卡`);
+      writeCard(m.signal);
+    }
   }
-  return { created, skipped, warnings };
+
+  // 每轮 scan 一条总账（永不静默）：raw=本轮信号总数（含既有卡去重跳过与直通回落）
+  if (!dry) {
+    appendEvent(qdir, 'scan_filtered', {
+      raw: candidates.length,
+      keep: sem.cards.length,
+      relayed: relayedOut.length,
+      dropped: droppedOut.length,
+      merged_away: sem.merges.length,
+      smart_filter: smartState, // off | on（配置了但无候选） | ran | skipped | fallback
+    });
+  }
+
+  if (relayedOut.length) warnings.push(`同源信号直通在途卡 ${relayedOut.length} 条（事件 signal_relayed，不重复开卡）`);
+  if (droppedOut.length) warnings.push(`信号去重丢弃 ${droppedOut.length} 条（事件 signal_dropped）`);
+  if (sem.merges.length) warnings.push(`同根因信号归并 ${sem.merges.length} 条进保留卡`);
+  return {
+    created,
+    skipped,
+    warnings,
+    relayed: relayedOut,
+    dropped: droppedOut,
+    filter: { raw: candidates.length, keep: sem.cards.length, relayed: relayedOut.length, dropped: droppedOut.length, merged_away: sem.merges.length },
+  };
 }

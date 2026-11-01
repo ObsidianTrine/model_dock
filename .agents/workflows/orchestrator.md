@@ -238,6 +238,10 @@ node .agents/scripts/orchestrator.mjs scan --dry-run
 - 生成卡 `created_by: scanner`、gate=L3——**是否 run 由人工决定**，扫描内容经消毒（无法携带指令结构进 worker prompt）
 - 卡 id 按内容哈希：信号不变重复扫描自动去重；cron 每晚调 `scan` 即为 nightly
 - **issues 信号源**（gh CLI，best-effort）：仅 origin 指向 GitHub 的仓库启用；gh 未安装/未登录 → 警告跳过。每个 open issue 一张卡，id 含 issue 号 + 标题哈希（标题改了会出新卡）；`ORCH_GH_CLI` 可指认 gh 路径（对齐 `ORCH_ZCODE_CLI` 惯例）
+- **信号两级过滤**（参考两级过滤设计：程序 Fast Path + LLM Slow Path）：
+  - **程序层（永远启用，零成本）**：落卡时把本卡信号哈希写进卡 frontmatter `signal_hashes`。同源信号**直通在途卡**（pending/running）——GitHub issue 按号匹配、TODO/audit 按内容哈希碰撞，信号以「补充信号」小节追加进在途卡文件并记 `signal_relayed` 事件，**不重复开卡**；与最近 14 天内 merged/failed 卡同信号的直接丢弃（修过/败过的不再开新卡，必败卡不再烧钱）并记 `signal_dropped` 事件
+  - **LLM 层（workflow.json `scan.smartFilter: true` 开启，缺省关闭）**：对剩余候选**批量一次**调用 headless LLM（≤50 条、每条 id+来源+摘要 ≤200 字符，超出的直接按落卡处理——成本上界写死）；判定 card/drop/merge，drop 仅限明显噪音，merge 把同根因信号并入保留卡；解析失败/引擎不可用/超时 → 全部按 card 保守回落（宁多勿漏）并记 `scan_semantic` 事件。引擎用 review.backend 同款，模型 `scan.smartModel`（缺省回落 review.model）
+  - 每轮 scan 落一条 `scan_filtered` 总账事件（raw/keep/relayed/dropped/merged_away，永不静默）
 - 巡检后用 `run --next` / `drain` 推进队列（见上节）
 
 ## nightly 编排与定时调度（schedule）
