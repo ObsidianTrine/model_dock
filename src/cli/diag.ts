@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import net from 'node:net'
 import path from 'node:path'
 import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
@@ -17,7 +18,7 @@ import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValue
 } from '../autostart.js'
 import { autostartLine } from './gatewaycmd.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, exitWithError, spawnDaemonAndWait } from './shared.js'
-import { modeldockDir, secretsPath } from '../util/paths.js'
+import { configPath, logsDir, modeldockDir, secretsPath } from '../util/paths.js'
 import { readTextIfExists } from '../util/fsx.js'
 
 export async function cmdStatus(): Promise<void> {
@@ -185,6 +186,43 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
   return hits
 }
 
+/** doctor 第二轮③：MODELRDOCK_FAKE_HOME 指向真实 ~/.modeldock 的误配检测（防测试写穿生产）。
+ *  纯函数：fakeHome 由调用方传 env 原值，realHomeDir 传 os.homedir()（测试注入临时目录）。
+ *  写入门禁只挡 agent 上下文进程，挡不住用户手动 export——误配下任何测试写盘都直穿生产。 */
+export function fakeHomeMisconfig(fakeHome: string | undefined, realHomeDir: string): string | null {
+  if (!fakeHome) return null
+  const norm = (p: string) => path.resolve(String(p)).replace(/[\\/]+$/, '').toLowerCase()
+  const real = norm(path.join(realHomeDir, '.modeldock'))
+  if (norm(fakeHome) === real) return path.join(realHomeDir, '.modeldock')
+  return null
+}
+
+/** doctor 第二轮①：日志体积与所在盘余量的裁决（纯函数，单测注入合成数字）。
+ *  请求日志全量落盘（成功流量也记），盘满会先于一切告警打死网关的日志/快照/备份链。
+ *  阈值：余量 < 1GB bad；目录 > 512MB warn（保留天数取 gateway.log_retention_days 展示）。 */
+export function diskUsageFinding(totalBytes: number, freeBytes: number | null, retentionDays?: number): DoctorFinding {
+  const mb = Math.round(totalBytes / (1024 * 1024))
+  const days = String(retentionDays ?? '默认')
+  if (freeBytes != null && freeBytes < 1 << 30) {
+    const gb = Math.round((freeBytes / 1024 ** 3) * 10) / 10
+    return {
+      id: 'logs.disk',
+      level: 'bad',
+      msg: t('日志所在盘仅剩 {g}GB：写满后请求日志/快照/备份会整体失败', 'The log drive has only {g}GB left: request logs/snapshots/backups will fail entirely once full', { g: String(gb) }),
+      hint: t('清理日志文件或换盘；保留天数在 config.toml [gateway] 的 log_retention_days（当前 {r}）', 'Clean up log files or move to a bigger drive; retention lives under the log_retention_days key of [gateway] in config.toml (currently {r})', { r: days }),
+    }
+  }
+  if (mb > 512) {
+    return {
+      id: 'logs.disk',
+      level: 'warn',
+      msg: t('日志目录已达 {mb}MB：请求日志逐日全量落盘，长期偏大占盘', 'The log directory has reached {mb}MB: request logs land on disk per day and add up over time', { mb: String(mb) }),
+      hint: t('调小 config.toml [gateway] 的 log_retention_days（当前 {r}）让过期日志自动清理', 'Lower the log_retention_days key of [gateway] in config.toml (currently {r}) so expired logs are pruned automatically', { r: days }),
+    }
+  }
+  return { id: 'logs.disk', level: 'ok', msg: t('日志目录 {mb}MB、所在盘余量充足（保留 {r} 天）', 'Log directory is {mb}MB and the drive has plenty of room (retention: {r} days)', { mb: String(mb), r: days }) }
+}
+
 export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<DoctorFinding[]> {
   const F: DoctorFinding[] = []
   const ok = (id: string, msg: string) => F.push({ id, level: 'ok', msg })
@@ -192,14 +230,42 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
   const bad = (id: string, msg: string, hint?: string, fix?: DoctorFix) => F.push({ id, level: 'bad', msg, hint, fix })
   const info = (id: string, msg: string, hint?: string) => F.push({ id, level: 'info', msg, hint })
 
+  // doctor 第二轮③：FAKE_HOME 指向真实 ~/.modeldock = 测试写穿生产——bad 点名 + 改法
+  const mis = fakeHomeMisconfig(process.env.MODELRDOCK_FAKE_HOME, os.homedir())
+  if (mis) {
+    bad(
+      'sandbox.misconfig',
+      t('MODELRDOCK_FAKE_HOME 指向真实数据目录（{d}）：测试/实验的任何写盘都会直穿生产配置与密钥', 'MODELRDOCK_FAKE_HOME points at the real data directory ({d}): any write from tests or experiments goes straight through to production config and keys', { d: mis }),
+      t('改指独立目录（如 ~/.modeldock-test）或 unset 后再跑测试实例；生产实例永远不要带该变量', 'Point it at a separate directory (e.g. ~/.modeldock-test) or unset it before running test instances; never set it for the production instance')
+    )
+  }
+
   let cfg
   try {
     cfg = await loadConfig()
   } catch (e) {
-    bad('config.parse', (e as Error).message, t('modeldock config edit 修复', 'Fix it with modeldock config edit'))
+    // doctor 第二轮②：报错带上文件路径——用户不用猜是哪个 config（多沙箱/多实例场景常见）
+    bad('config.parse', t('config.toml 解析失败（{f}）：{m}', 'config.toml failed to parse ({f}): {m}', { f: configPath(), m: (e as Error).message }), t('modeldock config edit 修复', 'Fix it with modeldock config edit'))
     return F
   }
   ok('config.parse', t('config.toml 可解析（version {v}）', 'config.toml parses (version {v})', { v: cfg.version }))
+
+  // doctor 第二轮①：日志体积与所在盘余量（请求日志全量落盘，盘满先于一切告警打死网关）
+  {
+    const dir = logsDir()
+    let total = 0
+    try {
+      if (fs.existsSync(dir)) {
+        for (const f of fs.readdirSync(dir)) {
+          const st = fs.statSync(path.join(dir, f))
+          if (st.isFile()) total += st.size
+        }
+      }
+    } catch { /* 读不了按 0 处理，余量仍可报 */ }
+    const s = await fs.promises.statfs(dir).catch(() => null)
+    const free = s ? Number(s.bsize) * Number(s.bavail) : null
+    F.push(diskUsageFinding(total, free, cfg.gateway?.log_retention_days))
+  }
 
   // 密钥库整表可读性：损坏时逐条 key 检查只会重复报同一根因，后续跳过
   let secretsOk = true
