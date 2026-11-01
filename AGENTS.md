@@ -162,7 +162,7 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 | `worktree-rescue.md` | 接管 / 清理中断的 worktree 任务 | `list` 显示残留任务时读 |
 | `add-adapter.md` | 新增 harness 客户端适配器 | 新增 adapter 时读 |
 | `add-preset.md` | 新增 provider 预设 | 新增供应商时读 |
-| `orchestrator.md` | 自治编排（任务卡进、合并出，单任务闭环） | 写任务卡 / 跑 orchestrator / 处理 blocked 任务时读 |
+| `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：任务卡进、合并出（速查 + A 核心闭环 / B 自主模式 / C 观测对账 / D 周边） | 写任务卡 / 跑编排 / 处理 blocked 任务时读 |
 
 ### feature-branch 核心命令
 

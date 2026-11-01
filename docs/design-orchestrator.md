@@ -1,5 +1,7 @@
 # Orchestrator（自治 Agent 编排服务）设计说明书
 
+> 体系名 **Dockmaster（坞长）**——ModelDock 的 Dock，管坞的人就是 dockmaster；命令行与代码内命名保持 orchestrator 不变，Dockmaster 只用于文档与心智模型（命名理由见 `.agents/workflows/orchestrator.md` 开头）。
+
 | 文档属性 | 内容 |
 |---|---|
 | 当前版本 | **v1.0 · 发布基线（Phase 1 全量交付 + Planner 环节）** |

@@ -3,7 +3,9 @@ name: orchestrate
 description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。
 ---
 
-# orchestrate —— 把任务交给自治编排闭环
+# orchestrate —— 把任务交给 Dockmaster 自治编排闭环
+
+> **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。速查与分区详解见 `.agents/workflows/orchestrator.md`（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
 
 用户输入 `/orchestrate <任务描述>`（无描述则问一句要做什么）。你的角色是**编排者**：把任务拆成任务卡、启动闭环、处理闸门、汇报结果。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
 

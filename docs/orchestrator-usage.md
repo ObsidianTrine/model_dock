@@ -1,5 +1,6 @@
-# Orchestrator 使用指南
+# Orchestrator 使用指南（Dockmaster，坞长）
 
+> **Dockmaster** 是本仓库 `.agents/` 自治编排体系的名字，命令行名仍是 `orchestrator.mjs`（命名缘由见 `.agents/workflows/orchestrator.md` 开头）。
 > 面向使用者（人或 agent）的实操手册。架构与设计决策见 `docs/design-orchestrator.md`；
 > 简版命令速查见 `.agents/workflows/orchestrator.md`。本文回答三件事：怎么用、和 feature-branch 是什么关系、agent 会不会自动触发。
 > spec 三件套 / nightly 巡检编排 / schedule 定时 / release-propose 发版提案的完整用法见 [AI 自治流水线使用指南](ai-pipeline-guide.md)。
