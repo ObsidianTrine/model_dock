@@ -77,25 +77,31 @@ const isEnvWord = (t) => /^env(\.exe)?$/i.test(basename(t));
  *  认 env 自身 flag：-i/-0/--ignore-environment/-- 等——flag 占住命令位时 `env -i git push`
  *  曾被判「首词非 git」漏拦（2026-10-31 评测集问题 1）；-u/--unset 连同无 '=' 的下一 token
  *  （变量名）一起跳；`--` 之后不再有 env 自身 flag（NAME=VALUE 仍可出现）。env 本体按
- *  basename 判定（/usr/bin/env 同认）。冷门形态（env -S 独立值吞后的二义）保守落安全侧。 */
+ *  basename 判定（/usr/bin/env 同认）。env 与赋值前缀**任意交错**都吞（`VAR=x env git push`
+ *  组合形态曾因两分支互斥漏拦、hatch 经 env 包裹绕白名单——2026-11-02 夜间复审回归，热修）。
+ *  冷门形态（env -S 独立值吞后的二义）保守落安全侧。 */
 export function envPrefixSpan(tokens, start, hatches = []) {
   let i = start;
   let auth = false;
-  const assignment = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
-  if (!isEnvWord(tokens[i])) {
-    while (i < tokens.length && assignment(tokens[i])) {
-      if (hatches.includes(tokens[i])) auth = true;
-      i += 1;
-    }
-    return { i, auth, sPayload: null };
-  }
-  i += 1;
   let sPayload = null;
+  const assignment = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
+  let inEnv = false;
   let optionsDone = false;
   while (i < tokens.length) {
     const t = tokens[i];
-    if (!optionsDone && t === '--') { optionsDone = true; i += 1; continue; }
-    if (!optionsDone && /^-/.test(t)) {
+    if (isEnvWord(t)) {
+      inEnv = true;
+      optionsDone = false; // 每个 env 自带一轮选项期
+      i += 1;
+      continue;
+    }
+    if (assignment(t)) {
+      if (hatches.includes(t)) auth = true;
+      i += 1;
+      continue;
+    }
+    if (inEnv && !optionsDone && t === '--') { optionsDone = true; i += 1; continue; }
+    if (inEnv && !optionsDone && /^-/.test(t)) {
       // -S/--split-string 的值是「拆分后即所执行命令」的一个 shell 词：值内空格会被 tokenizer
       // 切断（`env -S "FOO=1 git push"` 的值是一个引号词），按「词内剩余 + 行内余部」重组，
       // 交回调用方递归评估（重组是保守超集：真命令同时被主循环的命令位扫描覆盖）
@@ -104,11 +110,6 @@ export function envPrefixSpan(tokens, start, hatches = []) {
       else if (t === '-S' || t === '--split-string') sPayload = tokens.slice(i + 1).join(' ');
       i += 1;
       if ((t === '-u' || t === '--unset') && i < tokens.length && !tokens[i].includes('=')) i += 1;
-      continue;
-    }
-    if (assignment(t)) {
-      if (hatches.includes(t)) auth = true;
-      i += 1;
       continue;
     }
     break; // 命令位

@@ -347,10 +347,10 @@ describe('createUsageTap：预过滤与多字节边界', () => {
 })
 
 describe('sendError：请求体未读完统一 connection: close（卡 31）', () => {
-  function stubRes(readableEnded: boolean) {
+  function stubRes(readableEnded: boolean, withBody = true) {
     const headers: Record<string, string> = {}
     const res = {
-      req: { readableEnded },
+      req: { readableEnded, headers: withBody ? { 'content-length': '128' } : {} },
       setHeader: (k: string, v: string) => {
         headers[k] = v
       },
@@ -370,6 +370,9 @@ describe('sendError：请求体未读完统一 connection: close（卡 31）', (
     const done = stubRes(true)
     sendError(done.res, 500, 'm')
     expect(done.headers['connection']).toBeUndefined()
+    const bodyless = stubRes(false, false)
+    sendError(bodyless.res, 404, 'm')
+    expect(bodyless.headers['connection']).toBeUndefined() // 无 body 的 GET 错误不再断连（复审③）
     const over = stubRes(true)
     sendError(over.res, 413, 'm')
     expect(over.headers['connection']).toBe('close')

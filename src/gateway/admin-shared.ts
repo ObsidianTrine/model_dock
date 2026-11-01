@@ -65,12 +65,20 @@ export async function readBody(req: http.IncomingMessage, max: number): Promise<
     req.on('error', (e) => settle(() => reject(e)))
   })
 }
+/** 请求是否预期携带 body（content-length > 0 或 chunked）：sendError 的断连判据前置——
+ *  无 body 的 GET 在 handler 入口 readableEnded 恒为 false（complete 要等响应周期结束才翻转），
+ *  只看 readableEnded 会把所有 GET 错误应答的 keep-alive 无谓掐断（夜间复审③）。 */
+function expectsBody(req: http.IncomingMessage): boolean {
+  if (Number(req.headers['content-length'] ?? 0) > 0) return true
+  return String(req.headers['transfer-encoding'] ?? '').toLowerCase().includes('chunked')
+}
+
 export function sendError(res: http.ServerResponse, status: number, message: string, hint?: string): void {
   // 请求体未读完即应答 → 连接不可复用（Node 会销毁 socket，客户端每次断一次 keep-alive）。
   // 此前只特判 413；429 限额、401/403 鉴权失败与 admin 早退校验同样在 readBody 之前应答，
-  // 统一按「请求未读到 end」判定（2026-11-02 复查 P3-6）。res.req 是 Node 挂的请求回引；
-  // 错误响应本就低频，不影响正常路径的连接复用
-  if (status === 413 || (res.req && !res.req.readableEnded)) res.setHeader('connection', 'close')
+  // 按「预期有 body 且未读到 end」判定（2026-11-02 复查 P3-6；夜间复审③收窄：无 body 的
+  // GET 错误不再断连）。res.req 是 Node 挂的请求回引；错误响应本就低频，不影响正常路径的连接复用
+  if (status === 413 || (res.req && expectsBody(res.req) && !res.req.readableEnded)) res.setHeader('connection', 'close')
   // 请求关联 ID 回填错误体（handleRequest 入口已 set 到响应头，这里读回即可覆盖全部 sendError 调用点，
   // 包括 handleAdmin 内的管理面错误）：modeldock.requestId 与响应头 x-modeldock-request-id 同值
   const rid = res.getHeader('x-modeldock-request-id')

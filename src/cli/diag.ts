@@ -186,14 +186,18 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
   return hits
 }
 
-/** doctor 第二轮③：MODELRDOCK_FAKE_HOME 指向真实 ~/.modeldock 的误配检测（防测试写穿生产）。
+/** doctor 第二轮③：MODELRDOCK_FAKE_HOME 误配检测（防测试写穿生产）。
  *  纯函数：fakeHome 由调用方传 env 原值，realHomeDir 传 os.homedir()（测试注入临时目录）。
- *  写入门禁只挡 agent 上下文进程，挡不住用户手动 export——误配下任何测试写盘都直穿生产。 */
+ *  写入门禁只挡 agent 上下文进程，挡不住用户手动 export。两种误配都报：
+ *  - FAKE_HOME === 主目录本体（真正写穿：modeldockDir() 即生产 ~/.modeldock，测试写盘直穿 config/secrets）
+ *  - FAKE_HOME === ~/.modeldock（嵌套目录，污染但不覆写生产文件——仍是不该有的指向）
+ *  夜间复审修正（2026-11-02）：首版只报后者、漏掉真正危险的前者。 */
 export function fakeHomeMisconfig(fakeHome: string | undefined, realHomeDir: string): string | null {
   if (!fakeHome) return null
   const norm = (p: string) => path.resolve(String(p)).replace(/[\\/]+$/, '').toLowerCase()
-  const real = norm(path.join(realHomeDir, '.modeldock'))
-  if (norm(fakeHome) === real) return path.join(realHomeDir, '.modeldock')
+  if (norm(fakeHome) === norm(realHomeDir)) return realHomeDir
+  const nested = path.join(realHomeDir, '.modeldock')
+  if (norm(fakeHome) === norm(nested)) return nested
   return null
 }
 
@@ -203,7 +207,16 @@ export function fakeHomeMisconfig(fakeHome: string | undefined, realHomeDir: str
 export function diskUsageFinding(totalBytes: number, freeBytes: number | null, retentionDays?: number): DoctorFinding {
   const mb = Math.round(totalBytes / (1024 * 1024))
   const days = String(retentionDays ?? '默认')
-  if (freeBytes != null && freeBytes < 1 << 30) {
+  // statfs 失败（目录缺失/挂载点不支持）是「无数据」不是「充足」——不能落 ok 谎报（夜间复审⑤）
+  if (freeBytes == null) {
+    return {
+      id: 'logs.disk',
+      level: 'info',
+      msg: t('日志目录 {mb}MB；所在盘余量无法读取（目录缺失或文件系统不支持 statfs）', 'Log directory is {mb}MB; free disk space unavailable (directory missing or the filesystem does not support statfs)', { mb: String(mb) }),
+      hint: t('确认日志目录存在后重跑 modeldock doctor', 'Confirm the log directory exists and re-run modeldock doctor'),
+    }
+  }
+  if (freeBytes < 1 << 30) {
     const gb = Math.round((freeBytes / 1024 ** 3) * 10) / 10
     return {
       id: 'logs.disk',
