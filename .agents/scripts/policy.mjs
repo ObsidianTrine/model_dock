@@ -53,24 +53,91 @@ export function releasePaths(cfg) {
   return (cfg ?? loadWorkflowConfig()).releasePaths;
 }
 
-/** L0 白名单：纯文档/测试/杂项，全部命中才可 L0（与项目无关，硬编码）。 */
-const L0_ALLOW = [/\.md$/i, /^docs\//, /^test\//, /^CHANGELOG\.md$/i, /^LICENSE$/i, /^\.gitignore$/, /^\.agents\//];
+/** L0 白名单：纯文档/测试/杂项，全部命中才可 L0（与项目无关，硬编码）。
+ *  `.agents/` 不再整目录豁免（2026-10-31 评测集问题 7：守护器自身可被守护对象改写后走
+ *  自动合并，守卫自持性破口，与 02 号卡同根）——守护器与评测题库改走 GUARD_SELF 的 L2；
+ *  仅评测生成物 runs/ 保留窄 L0。queue/logs/worktrees/policy 等簿记目录本就 gitignore
+ *  不进 diff，无需白名单。 */
+const L0_ALLOW = [/\.md$/i, /^docs\//, /^test\//, /^CHANGELOG\.md$/i, /^LICENSE$/i, /^\.gitignore$/, /^\.agents\/review-evals\/runs\//];
+
+/** 守护器自身与评测题库：改动一律 L2（人工批准），自动合并永不放行。
+ *  workflow.json 是红线数据本体；scripts/hooks 是守卫代码；skills 是 agent 指令面；
+ *  review-evals/cases 改动即改审查评测口径。workflows/*.md 是流程文档，按 .md 走 L0。 */
+const GUARD_SELF = [/^\.agents\/scripts\//, /^\.agents\/hooks\//, /^\.agents\/skills\//, /^\.agents\/workflow\.json$/i, /^\.agents\/review-evals\/cases\//];
 
 // ---------------------------------------------------------------------------
 // Bash 命令红线（policy-worker 的裁决核心）
 // ---------------------------------------------------------------------------
 
-/** git 命令检测：git [flag 参数...] <子命令>，兼容 -C repo / -c a=b 等带值 flag，
- *  并跳过前缀环境变量赋值与 env 包装（`VAR=x git push` 曾被误判为非 git 命令而漏拦）。 */
+const basename = (t) => String(t ?? '').split(/[\\/]/).pop() ?? '';
+const isEnvWord = (t) => /^env(\.exe)?$/i.test(basename(t));
+
+/** env 前缀解析：`env [自身 flag...] [NAME=VALUE...] <command>`（无 env 时只吞 NAME=VALUE）。
+ *  返回命令位下标 i、前缀里是否带发版 hatch 赋值 auth、env -S 的命令串值 sPayload。
+ *  认 env 自身 flag：-i/-0/--ignore-environment/-- 等——flag 占住命令位时 `env -i git push`
+ *  曾被判「首词非 git」漏拦（2026-10-31 评测集问题 1）；-u/--unset 连同无 '=' 的下一 token
+ *  （变量名）一起跳；`--` 之后不再有 env 自身 flag（NAME=VALUE 仍可出现）。env 本体按
+ *  basename 判定（/usr/bin/env 同认）。冷门形态（env -S 独立值吞后的二义）保守落安全侧。 */
+export function envPrefixSpan(tokens, start, hatches = []) {
+  let i = start;
+  let auth = false;
+  const assignment = (t) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
+  if (!isEnvWord(tokens[i])) {
+    while (i < tokens.length && assignment(tokens[i])) {
+      if (hatches.includes(tokens[i])) auth = true;
+      i += 1;
+    }
+    return { i, auth, sPayload: null };
+  }
+  i += 1;
+  let sPayload = null;
+  let optionsDone = false;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (!optionsDone && t === '--') { optionsDone = true; i += 1; continue; }
+    if (!optionsDone && /^-/.test(t)) {
+      // -S/--split-string 的值是「拆分后即所执行命令」的一个 shell 词：值内空格会被 tokenizer
+      // 切断（`env -S "FOO=1 git push"` 的值是一个引号词），按「词内剩余 + 行内余部」重组，
+      // 交回调用方递归评估（重组是保守超集：真命令同时被主循环的命令位扫描覆盖）
+      const sAttached = /^-S(.+)$/.exec(t) ?? /^--split-string=(.+)$/.exec(t);
+      if (sAttached) sPayload = (sAttached[1] + ' ' + tokens.slice(i + 1).join(' ')).trim();
+      else if (t === '-S' || t === '--split-string') sPayload = tokens.slice(i + 1).join(' ');
+      i += 1;
+      if ((t === '-u' || t === '--unset') && i < tokens.length && !tokens[i].includes('=')) i += 1;
+      continue;
+    }
+    if (assignment(t)) {
+      if (hatches.includes(t)) auth = true;
+      i += 1;
+      continue;
+    }
+    break; // 命令位
+  }
+  return { i, auth, sPayload };
+}
+
+/** git 命令检测：env/赋值前缀剥离（envPrefixSpan）→ xargs 包装剥离 → git [flag 参数...]
+ *  <子命令>，兼容 -C repo / -c a=b 等带值 flag。`VAR=x git push`、`env -i git push`、
+ *  `… | xargs git push` 均曾被判「非 git 命令」漏拦（2026-10-31 评测集问题 1/3）。 */
 export function gitSubcommand(cmd) {
   const tokens = String(cmd).trim().split(/\s+/);
-  let start = 0;
-  while (start < tokens.length && (tokens[start] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[start]))) start += 1;
-  if (tokens[start] !== 'git') return null;
-  for (let i = start + 1; i < tokens.length; i++) {
-    const t = tokens[i];
+  const { i: start } = envPrefixSpan(tokens, 0);
+  let j = start;
+  // xargs 包装：跳过 xargs 本体与 flag；-n/-P/-s/-E/-L/-I/-a 带独立值时连值跳。
+  // 未知 flag 不吞值——把后续 'git' 当命令拦，落安全侧。
+  if (/^xargs(\.exe)?$/i.test(basename(tokens[j]))) {
+    j += 1;
+    while (j < tokens.length && tokens[j].startsWith('-')) {
+      const valueFlag = /^-(?:n|P|s|E|L|I|a)$/i.test(tokens[j]);
+      j += 1;
+      if (valueFlag && j < tokens.length && !tokens[j].startsWith('-')) j += 1;
+    }
+  }
+  if (tokens[j] !== 'git') return null;
+  for (let k = j + 1; k < tokens.length; k++) {
+    const t = tokens[k];
     if (t === '-C' || t === '--git-dir' || t === '--work-tree' || t === '-c') {
-      i += 1; // 带值 flag：跳过它的参数
+      k += 1; // 带值 flag：跳过它的参数
       continue;
     }
     if (t.startsWith('-')) continue; // --quiet 等无值 flag
@@ -93,21 +160,24 @@ const RELEASE_ALLOW = [
   new RegExp(`^git tag -d ${RELEASE_TAG}$`),
 ];
 
-/** shell 包装段（bash/sh/zsh [-lc] '载荷'，兼容 env 前缀与绝对路径）的 -c 载荷提取：非包装返回 null。
- *  逐 token 解析（与 gitSubcommand 的 env 前缀剥离同款）：正则 `\S+=\s*` 形态会因值内含 '='
- *  （env FOO=1 bash -c …）回溯吞掉分隔符而失配——token 化没有这个问题。
- *  换行切段后载荷必落在单段内（换行本身也是切段符），token 重组后剥首尾引号交回递归评估。 */
+/** shell 包装段（bash/sh/zsh [-lc] '载荷'，兼容 env 前缀与绝对路径）的载荷提取：非包装返回 null。
+ *  env 前缀经 envPrefixSpan 解析（认自身 flag：`env -i bash -c …` 曾因 -i 占位漏识别包装）；
+ *  here-string（`bash <<< '载荷'`）与 -c 同为「shell 执行一段文本」的包装形态，一并提取
+ *  （here-string 附着词 `<<<git …` 保守按整串载荷处理）。
+ *  换行切段后载荷必落在单段内（换行本身也是切段符，heredoc 体各行已各自成段），token
+ *  重组后剥首尾引号交回递归评估。 */
 export function shellWrapperPayload(seg) {
   const tokens = String(seg).trim().split(/\s+/);
-  let i = 0;
-  while (i < tokens.length && (tokens[i] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i += 1;
+  const { i } = envPrefixSpan(tokens, 0);
   // shell 名按 basename 判定（/bin/bash、/usr/local/bin/zsh、C:\tools\bash 等绝对路径同认）
-  if (!/^(ba|z|)sh$/.test(String(tokens[i] ?? '').split(/[\\/]/).pop() ?? '')) return null;
+  if (!/^(?:ba|z|)sh(\.exe)?$/i.test(basename(tokens[i]))) return null;
   for (let j = i + 1; j < tokens.length; j++) {
-    if (tokens[j] === '-c') {
+    const tok = tokens[j];
+    const hereString = /^<{3}/.test(tok);
+    if (tok === '-c' || hereString) {
       // 载荷保留 env 前缀 token（含 AGENTS_ALLOW_RELEASE 授权 hatch——白名单形态在包装内同样有效），
-      // 只剥掉 shell 本体与 -c；-c 首尾参数的引号会破坏后续 gitSubcommand 的 token 判定，分别剥掉
-      const args = tokens.slice(j + 1);
+      // 只剥掉 shell 本体与 -c；首尾参数的引号会破坏后续 gitSubcommand 的 token 判定，分别剥掉
+      const args = hereString ? [tok.slice(3), ...tokens.slice(j + 1)].filter(Boolean) : tokens.slice(j + 1);
       if (args.length) {
         args[0] = args[0].replace(/^['"]/, '');
         args[args.length - 1] = args[args.length - 1].replace(/['"]$/, '');
@@ -115,7 +185,90 @@ export function shellWrapperPayload(seg) {
       const payload = [...tokens.slice(0, i), ...args].join(' ').trim();
       return payload || null;
     }
-    if (!tokens[j].startsWith('-')) return null; // 无 -c 的交互式调用：无载荷
+    if (!tok.startsWith('-')) return null; // 无 -c 的交互式调用：无载荷
+  }
+  return null;
+}
+
+/** npm/yarn/pnpm publish 检测：首词（经 env 前缀剥离，按 basename 认 .cmd/.js 包装与
+ *  绝对路径）为 npm 家族，且其后任意裸词位出现 publish——`npm --registry=… publish` /
+ *  `npm -w pkg publish` 曾因「publish 紧跟 npm」的相邻正则漏拦（2026-10-31 评测集问题 4）。
+ *  保守近似：`npm run publish`、`npm install publish`（包名恰为 publish 的罕见形态）同样
+ *  拦，落安全侧。 */
+export function isPublishCommand(seg) {
+  const tokens = String(seg).trim().split(/\s+/);
+  const { i } = envPrefixSpan(tokens, 0);
+  if (!/^(?:npm|yarn|pnpm)(?:\.(?:cmd|js|exe))?$/i.test(basename(tokens[i]))) return false;
+  return tokens.slice(i + 1).includes('publish');
+}
+
+/** 段内嵌套载荷：命令替换 `$(…)`（括号深度配对）、反引号 `` `…` ``、子壳 `(…)`（段首 '('
+ *  剥壳、尾随 ')' 一并剥）——三者的首词不是 git/npm，整段 token 判定罩不住
+ *  （`echo $(git push origin main)`、`(git push origin main)` 曾漏拦，2026-10-31 评测集
+ *  问题 2）；提取出的载荷交回 evaluateSegments 递归评估。 */
+export function nestedCommandPayloads(seg) {
+  const s = String(seg);
+  const out = [];
+  const trimmed = s.trim();
+  const stripped = trimmed.replace(/^\(+/, '').replace(/\)+$/, '').trim();
+  if (stripped && stripped !== trimmed) out.push(stripped);
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '`') {
+      const end = s.indexOf('`', i + 1);
+      if (end > i + 1) { out.push(s.slice(i + 1, end)); i = end; }
+    } else if (s[i] === '$' && s[i + 1] === '(') {
+      let d = 1;
+      let j = i + 2;
+      while (j < s.length && d > 0) {
+        if (s[j] === '(') d += 1;
+        else if (s[j] === ')') d -= 1;
+        j += 1;
+      }
+      if (d === 0) { out.push(s.slice(i + 2, j - 1)); i = j - 1; }
+    }
+  }
+  return out;
+}
+
+/** 破坏性进程词表（受保护端口命中时的拦截依据）。stop-process 是 PowerShell 的
+ *  `Stop-Process -Id …`（2026-10-31 评测集问题 6 曾对 8687 放行）。 */
+const DESTRUCTIVE_RE = /\b(?:kill|killall|pkill|taskkill|fuser|stop-process|lsof\s+-t)\b/i;
+
+/** 段级端口红线（2026-10-31 评测集问题 5/6）：status/logs/list 查询豁免与 --port 存在性
+ *  都按段独立判定——`gateway start --port 8687 && curl …/status` 曾借后段的 status 全文
+ *  命中豁免漏拦、`echo x --port 18901 && modeldock ui` 曾借前段 --port 漏拦。破坏性命令
+ *  另有全文兜底（evaluateSegments 收尾处）：`lsof -i :8687 -t | xargs kill` 这类端口与
+ *  kill 跨段的形态段级罩不住，全文判定从严。 */
+function portViolation(seg, ports, cfg) {
+  const port = ports.find((p) => seg.includes(p));
+  if (port) {
+    if (DESTRUCTIVE_RE.test(seg)) {
+      return { allowed: false, rule: 'port', reason: `对端口 ${port} 相关进程执行 kill/stop（含 PowerShell Stop-Process；受保护端口见 workflow.json protectedPorts，永远人工处置）` };
+    }
+    const names = listenCommandNames(cfg).map(escapeRegExp);
+    const listenCmd = new RegExp(`\\b(?:node|tsx|npx|npm\\s+run(?:\\s+\\S+)?${names.length ? `|${names.join('|')}` : ''})\\b`, 'i');
+    // status/logs/list 查询类放行（read-only 诊断）——只看本段，复合命令的其他段借不到豁免
+    if (listenCmd.test(seg) && !/\b(?:status|logs|list)\b/.test(seg)) {
+      return { allowed: false, rule: 'port', reason: `启动/重启命令携带受保护端口 ${port}（受保护端口见 workflow.json protectedPorts，测试必须用随机/高位端口）` };
+    }
+    for (const p of ports) {
+      if (new RegExp(`listen\\s*\\(\\s*['"\`]?${p}\\b`).test(seg)) {
+        return { allowed: false, rule: 'port', reason: `代码中让服务监听受保护端口 ${p}（违反 workflow.json protectedPorts 红线）` };
+      }
+    }
+  }
+  // 缺省端口盲区：项目 CLI 的启动型子命令不带 --port 时落到代码默认端口——命令文本里
+  // 没有端口号，上面的 includes 检查罩不住（`gateway start` 默认监听生产端口，恰是最易
+  // 踩的坑）。listenCommandNames 的 start/restart/serve/ui/daemon 形态缺 --port 一律拦；
+  // 带 --port 已显式落到测试端口，放行。
+  if (ports.length) {
+    const names = listenCommandNames(cfg).map(escapeRegExp);
+    if (names.length) {
+      const defaultPortStart = new RegExp(`\\b(?:${names.join('|')})\\s+(?:start|restart|serve|ui|daemon)\\b`, 'i');
+      if (defaultPortStart.test(seg) && !/--port(?:=|\s)/.test(seg) && !/(^|\s)-{1,2}h(?:elp)?\b/.test(seg)) {
+        return { allowed: false, rule: 'port', reason: `启动命令未带 --port（缺省落到受保护的生产端口，见 workflow.json protectedPorts）。测试实例必须显式 --port <高位端口> 并与独立沙箱成对使用` };
+      }
+    }
   }
   return null;
 }
@@ -145,23 +298,29 @@ function evaluateSegments(command, depth) {
   let pushSeen = false;
   let tagSeen = false;
   let releaseWhitelisted = false;
+  const ports = protectedPorts(cfg);
+  let portBlock = null;
   for (const seg of segments) {
-    // shell 包装（bash/sh/zsh -c '载荷'）：递归评估载荷，被拦即整串被拦——
+    // 包装与嵌套载荷（bash -c '…'、env -S '…'、$(…)、反引号、子壳）：递归评估，被拦即整串被拦——
     // 包装不改变载荷的裁决结果（`bash -c 'git push origin main'` 曾因 tokens[0]='bash' 漏拦）
     if (depth < 3) {
-      const payload = shellWrapperPayload(seg);
-      if (payload) {
-        const subv = evaluateSegments(payload, depth + 1);
+      const wrapper = shellWrapperPayload(seg);
+      if (wrapper) {
+        const subv = evaluateSegments(wrapper, depth + 1);
+        if (!subv.allowed) return subv;
+      }
+      const { sPayload } = envPrefixSpan(seg.split(/\s+/), 0);
+      if (sPayload) {
+        const subv = evaluateSegments(sPayload.replace(/^['"]|['"]$/g, ''), depth + 1);
+        if (!subv.allowed) return subv;
+      }
+      for (const inner of nestedCommandPayloads(seg)) {
+        const subv = evaluateSegments(inner, depth + 1);
         if (!subv.allowed) return subv;
       }
     }
     const t = seg.split(/\s+/);
-    let i = 0;
-    let auth = false;
-    while (i < t.length && (t[i] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i]))) {
-      if (HATCHES.includes(t[i])) auth = true;
-      i += 1;
-    }
+    const { i, auth } = envPrefixSpan(t, 0, HATCHES);
     const bare = t.slice(i).join(' ');
     const sub = gitSubcommand(seg);
     if (sub === 'push') {
@@ -171,6 +330,12 @@ function evaluateSegments(command, depth) {
       tagSeen = true;
       if (single && auth && RELEASE_ALLOW.some((re) => re.test(bare))) releaseWhitelisted = true;
     }
+    // npm publish 红线段级判定（变体形态见 isPublishCommand 注释）
+    if (isPublishCommand(seg)) {
+      return { allowed: false, rule: 'publish', reason: 'npm publish（对外发布，永远人工）' };
+    }
+    // 端口红线逐段独立判定（豁免词/缺 --port 不再全文共享，见 portViolation 注释）
+    if (!portBlock && ports.length) portBlock = portViolation(seg, ports, cfg);
   }
 
   // 红线 1：发布动作人工授权制——默认拦截。用户明确授权发版（release.md「代理发布」）时，
@@ -183,41 +348,15 @@ function evaluateSegments(command, depth) {
     if (releaseWhitelisted) return { allowed: true, rule: 'release-hatch' };
     return { allowed: false, rule: 'publish', reason: 'git tag（打 tag 触发 Release，人工授权制：同 git push，见 release.md「代理发布」）' };
   }
-  if (/\bnpm\s+publish\b/.test(command)) return { allowed: false, rule: 'publish', reason: 'npm publish（对外发布，永远人工）' };
-
-  // 红线 2：workflow.json protectedPorts 的进程与监听（缺省空 = 不启用端口红线）
-  const ports = protectedPorts(cfg);
-  const port = ports.find((p) => command.includes(p));
-  if (port) {
-    const destructive = /\b(kill|killall|pkill|taskkill|fuser|lsof\s+-t)\b/i;
-    const names = listenCommandNames(cfg).map(escapeRegExp);
-    const listenCmd = new RegExp(`\\b(node|tsx|npx|npm\\s+run(\\s+\\S+)?${names.length ? `|${names.join('|')}` : ''})\\b`, 'i');
-    if (destructive.test(command)) {
-      return { allowed: false, rule: 'port', reason: `对端口 ${port} 相关进程执行 kill/stop（受保护端口见 workflow.json protectedPorts，永远人工处置）` };
-    }
-    // status/logs/list 查询类放行（read-only 诊断；项目命令的 status/logs 子命令同样被通用豁免覆盖）
-    if (listenCmd.test(command) && !/\b(status|logs|list)\b/.test(command)) {
-      return { allowed: false, rule: 'port', reason: `启动/重启命令携带受保护端口 ${port}（受保护端口见 workflow.json protectedPorts，测试必须用随机/高位端口）` };
-    }
-    for (const p of ports) {
-      if (new RegExp(`listen\\s*\\(\\s*['"\`]?${p}\\b`).test(command)) {
-        return { allowed: false, rule: 'port', reason: `代码中让服务监听受保护端口 ${p}（违反 workflow.json protectedPorts 红线）` };
-      }
+  // 破坏性命令全文兜底：端口与 kill 跨段（`lsof -i :8687 -t | xargs kill`）时段级各自
+  // 都不构成「带端口的破坏」，全文同现从严拦——豁免词/--port 的段级化只放宽查询类，不放宽破坏类
+  if (!portBlock && ports.length) {
+    const portAnywhere = ports.find((p) => command.includes(p));
+    if (portAnywhere && DESTRUCTIVE_RE.test(command)) {
+      return { allowed: false, rule: 'port', reason: `对端口 ${portAnywhere} 相关进程执行 kill/stop（含 PowerShell Stop-Process；受保护端口见 workflow.json protectedPorts，永远人工处置）` };
     }
   }
-  // 缺省端口盲区：项目 CLI 的启动型子命令不带 --port 时落到代码默认端口——命令文本里
-  // 没有端口号，上面的 includes 检查罩不住（`gateway start` 默认监听生产端口，恰是最易
-  // 踩的坑）。listenCommandNames 的 start/restart/serve/ui/daemon 形态缺 --port 一律拦；
-  // 带 --port 已显式落到测试端口，放行。
-  if (ports.length) {
-    const names = listenCommandNames(cfg).map(escapeRegExp);
-    if (names.length) {
-      const defaultPortStart = new RegExp(`\\b(?:${names.join('|')})\\s+(?:start|restart|serve|ui|daemon)\\b`, 'i');
-      if (defaultPortStart.test(command) && !/--port(?:=|\s)/.test(command) && !/(^|\s)-{1,2}h(?:elp)?\b/.test(command)) {
-        return { allowed: false, rule: 'port', reason: `启动命令未带 --port（缺省落到受保护的生产端口，见 workflow.json protectedPorts）。测试实例必须显式 --port <高位端口> 并与独立沙箱成对使用` };
-      }
-    }
-  }
+  if (portBlock) return portBlock;
   return { allowed: true };
 }
 
@@ -291,6 +430,7 @@ export function classifyChange(changedFiles, cfg) {
   };
   for (const f of files) {
     if (release.some((p) => f.startsWith(p) || f === p)) bump('L3', `${f}（发布流水线）`);
+    else if (GUARD_SELF.some((re) => re.test(f))) bump('L2', `${f}（守护器自身/评测题库，守卫自持性）`);
     else if (core.includes(f) || f === 'package.json') bump('L2', `${f}（核心路径）`);
     else if (L0_ALLOW.some((re) => re.test(f))) {
       /* L0 候选，保持当前级别 */
