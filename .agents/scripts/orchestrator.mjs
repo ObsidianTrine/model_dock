@@ -325,10 +325,14 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 凭据经 tokenEnv 环境变量注入（token 不入库）；显式点名但未配置 → 告警降级，
   // 自动升级但 token 未设 → 静默跳过（高频路径，告警会淹日志）。
   const tier = resolveTier(meta, cfg);
+  // zcode 船不支持 tier（不认 ANTHROPIC_* 注入，见 orchestrator.md A4）是文档化设计：
+  // 其卡上的 tier 只作档位留痕（tier_resolved 事件），未设 tokenEnv 不算异常——不告警
+  // （2026-11-02 四档实测发现：前进1/2 每卡一行 ⚠ 告警属噪音，已静默）。
+  const tierWarnable = opts.backend !== 'zcode-headless';
   if (meta.tier && tier?.inactive === 'unconfigured') {
-    log(`⚠ tier "${meta.tier}" 未生效：workflow.json 未配置该 tiers 键——按全局默认路由执行`);
+    if (tierWarnable) log(`⚠ tier "${meta.tier}" 未生效：workflow.json 未配置该 tiers 键——按全局默认路由执行`);
   } else if (meta.tier && tier?.inactive === 'token') {
-    log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
+    if (tierWarnable) log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
   } else if (tier?.token) {
     log(`任务等级：${tierDisplayName(tier.name)}（${tier.name}${tier.auto ? '，files_hint 命中核心/发布路径自动升档' : ''}，token 来自 ${tier.tokenEnv}）`);
   }

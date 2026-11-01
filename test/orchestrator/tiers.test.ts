@@ -189,6 +189,30 @@ describe('tiers > run 端到端（mock）', () => {
     }
   }, 120_000)
 
+  it('zcode 船（默认引擎）卡带 tier：不告警（档位纯留痕，zcode 不支持 tier 是设计）', () => {
+    const repo = mkRepo({ workerBackend: 'zcode-headless' })
+    try {
+      fs.writeFileSync(
+        path.join(repo.root, '.agents', 'workflow.json'),
+        JSON.stringify({
+          baseBranch: 'develop',
+          testCmd: 'node -e "process.exit(0)"',
+          worker: { backend: 'zcode-headless' },
+          tiers: { 'ahead-2': { tokenEnv: 'MDK_TEST_TIER_LIGHT_TOKEN' } },
+        }),
+      )
+      const cardFile = path.join(repo.root, 'c.md')
+      fs.writeFileSync(cardFile, cardText({ tier: 'ahead-2' }))
+      runOrch(repo.root, `submit "${cardFile}"`)
+      const out = runOrch(repo.root, 'run test-task --backend mock --approve-backend-switch', {})
+      expect(out.stdout).not.toContain('tier "ahead-2" 未生效')
+      const resolved = eventsOf(repo.root, 'test-task').find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
+      expect(resolved).toMatchObject({ tier: 'ahead-2', inactive: 'token' }) // 事件留痕照旧
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
   it('显式 tier 未配置 → 告警降级不阻断；tier_resolved 记 inactive', () => {
     const repo = mkRepo()
     try {
