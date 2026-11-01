@@ -1,6 +1,6 @@
 ---
 name: dockmaster
-description: 显式斜杠技能——仅当用户输入 /dockmaster 时使用，不要因对话语义自动加载。Dockmaster（坞长）= 本仓库 .agents/ 自治编排体系；本技能驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。
+description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或用自然语言指名派活（「让 dockmaster/坞长做 X」「派个任务给 dockmaster」「用前进2跑…」「开船：修一下 X」）时使用。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。支持对话指定档位（前进1-4）、引擎（harness）与服务商/模型。路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。仅当用户指名 Dockmaster 或明确要派自治任务时加载；只是提及 dockmaster 而非派活时先问一句，不要抢跑。
 ---
 
 # dockmaster —— Dockmaster 港务调度台
@@ -8,11 +8,25 @@ description: 显式斜杠技能——仅当用户输入 /dockmaster 时使用，
 > **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。对每艘出航的船它是船长，对整支船队它是坞长——harness 是船、大模型是发动机、船东（用户）递托运单等出港（完整灵魂叙事见 `.agents/workflows/orchestrator.md` 开头「Dockmaster 是什么」）。速查与分区详解见同文（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
 > 本技能原名 /orchestrate，2026-11 随体系定名 Dockmaster 改为 /dockmaster（命名缘由见 .agents/workflows/orchestrator.md 开头）。
 
-用户输入 `/dockmaster <任务描述>`（无描述则问一句要做什么）。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、派作业船出航（headless worker——船型是 harness、发动机是大模型，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
+用户通过两种方式派活：斜杠 `/dockmaster <任务描述>`，或自然语言指名（「让 dockmaster 把 XPLAT-09 修了」「用前进3写个文档任务」「开船：审查换成 zcode」）。无描述则问一句要做什么。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、派作业船出航（headless worker——船型是 harness、发动机是大模型，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
 
-## 第 0 步：意图路由与适用判定
+## 第 0 步：触发识别、档位翻译与意图路由
 
-先按意图特征分流（判断不了就问一句用户）：
+**触发识别**：用户指名 Dockmaster（/dockmaster、dockmaster、坞长、开船、派任务/派船等）即进入本技能；对话档位与引擎指示一并接收：
+
+**档位翻译表（船钟前进1-4 ↔ 接口键 ahead-1..4；中文数字「前进四」同「前进4」）**：
+
+| 用户说 | 写进卡 frontmatter | 适用 |
+|---|---|---|
+| 前进1 / 慢车 / 最省 | `tier: ahead-1` | 纯文档/测试小改 |
+| 前进2 | `tier: ahead-2` | 常规轻活 |
+| 前进3 / 默认推荐 | `tier: ahead-3` | 常规重活 |
+| 前进4 / 全速 / 旗舰 | `tier: ahead-4` | 核心/发布路径、复杂特性 |
+| 没提档位 | 不写 tier（全局默认路由） | 行为与未配档位时一致 |
+
+档位只决定「哪台发动机」（服务/模型路由），不改任何闸门；tier 键值约束见 `.agents/workflows/orchestrator.md` A4。
+
+**意图路由**——先按意图特征分流（判断不了就问一句用户）：
 
 | 意图特征 | 走法 |
 |---|---|
@@ -40,6 +54,7 @@ files_hint:                     # 预期改动范围——必须写准！
 workflows:
   - feature-branch
 gate: L1                        # 固定写 L1（见下）
+tier: ahead-2                   # 可选：用户说「前进N」才写 ahead-N；没提就整行省略（全局默认路由）
 ---
 
 # 目标
@@ -75,7 +90,18 @@ node .agents/scripts/orchestrator.mjs status               # 确认进了 pendin
 - 单张卡：`node .agents/scripts/orchestrator.mjs run <task-id>`
 - 多张卡：`node .agents/scripts/orchestrator.mjs drain`（循环清空队列；确需并发再加 `--workers N`，按 files_hint 分区互斥）
 
-**引擎指定（对话可直接说）**：用户口头指定「执行用 X+模型 / 审查用 Y+模型」时，翻译成参数附加在 run/drain 后——`--worker-backend <claude-headless|zcode-headless|mock> --worker-model <m> --review-backend <…> --review-model <m>`。默认取 workflow.json 的 `worker`/`review`（当前：执行 claude-headless——经 `~/.claude/settings.json` 指向本机 ModelDock 网关供油，审查 claude-headless+glm-5.3-flash）；用户没提就不传参。注意：zcode 无 `--model`（模型跟随 ZCode 默认，需用户在 App 内切换），模型项只对 claude 系生效。任务卡也可带 `tier: ahead-1..4`（车钟档位 前进1-4，旧 heavy/light 兼容）按难度自动换服务与模型（配置与环境变量见 `.agents/workflows/orchestrator.md`「任务等级（tier）」节；仅 claude 系生效）。
+**引擎/服务商/模型对话翻译表**——用户口头指定时按下表翻译，附加在 run/drain 后；**用户没提就不传参**（默认取 workflow.json：执行 claude-headless——经 `~/.claude/settings.json` 指向本机 ModelDock 网关供油，审查 claude-headless+glm-5.3-flash）：
+
+| 用户说 | 调度台翻译 |
+|---|---|
+| 「用 claude / zcode 执行」 | `--worker-backend claude-headless` / `--worker-backend zcode-headless` |
+| 「用前进N（前进四）跑」 | 写卡时 frontmatter `tier: ahead-N`（档位翻译表见第 0 步；已提交的卡改卡后重提） |
+| 「用 <模型名> 执行」 | `--worker-model <模型名>`（ModelDock 网关按模型名路由服务商） |
+| 「审查用 <模型名>」 | `--review-model <模型名>` |
+| 「审查用 zcode」 | `--review-backend zcode-headless`（异构互审：执行与审查引擎异源防共因盲区） |
+| 「用 <服务商> 的 <模型>」 | `--worker-model <该服务商目录下的模型名>`——网关按模型路由到该服务商；报「模型不在目录」时提醒先在 ModelDock 给该服务商建路由（产品侧操作，不归编排） |
+
+注意：模型项只对 claude 系生效（zcode 无 `--model`，模型跟随 ZCode 默认，需用户在 App 内切换）；档位（tier）与服务商/模型参数可叠加——档位决定用哪套凭据与模型基线，显式 `--worker-model` 单次覆盖之。
 
 **引擎切换需人工审核（硬闸门，禁止自治绕过）**：orchestrator 对「worker 引擎 ≠ workflow.json worker.backend」的 run/drain 一律拒绝启动，只有 `--approve-backend-switch`（或 `ORCH_APPROVE_BACKEND_SWITCH=1`）能放行。自治跑中引擎起不来（zcode ENOENT、GLM 429 等）时**禁止自行换引擎续跑**：先修引擎自身——ORCH_ZCODE_CLI 已设为用户级环境变量（`D:\Programs\ZCode\resources\glm\zcode.cjs`，2026-10-29 起）；429 是 GLM 套餐限流（与交互会话共享配额，实测单发也会中），退避 60s 重试并把并发压到 1。连续 2 轮仍失败就停下向用户说明原因并申请批准，用户同意后才允许带批准参数切换；未获同意宁可让任务留在 pending/awaiting-human。
 
