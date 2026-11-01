@@ -23,6 +23,7 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 
 - **没说档位就自动选**：文档/测试→前进1，代码小改→前进3，核心路径/复杂→前进4；**卡里写明所选档位，汇报第一句告知**，用户说「换前进N」即重派。
 - 船 ≠ workflow.json 默认（zcode-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。即：前进3/4（claude 网关船）带批准标志，前进1/2 零摩擦。
+- **自动升档不请示**：zcode 船 prompt 超限（AGENTS.md 等固定开销随仓库增长，>30k）且配置了 `escalation.enabled` 时，自动切 fallback 船完成本单（`engine_escalated` 留痕，预算延续），汇报时说明「已自动升档」即可；只有高成本选项（旗舰档/加大预算）才停下来问用户。
 - 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区）。档位与显式模型可叠加，显式优先。
 - 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；探索性/架构级改动 → 建议路径 B（先设计后施工，见文末）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 

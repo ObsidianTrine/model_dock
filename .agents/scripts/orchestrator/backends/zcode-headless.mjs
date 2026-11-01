@@ -18,6 +18,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
+/** zcode headless prompt 的 argv 长度上限（字符数）：Windows 命令行 ~32KB 防线，
+ *  escalation 升档判定与 buildZcodeArgs 校验共用同一口径。 */
+export const ZCODE_PROMPT_LIMIT = 30_000;
+
 /** reviewer 整工具禁用清单（只读会话，fail-closed——plan 模式之外的兜底）。 */
 const REVIEWER_DISALLOWED = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'WebFetch'];
 
@@ -114,10 +118,10 @@ export const zcodeHeadlessBackend = {
       const prompt = fs.readFileSync(promptFile, 'utf8');
       // zcode headless 只能经 argv 传 prompt（无 stdin 形态）：Windows 命令行上限
       // ~32KB，spec 卡会把 design 全文注入背景——超限快速失败并给可操作出路
-      if (prompt.length > 30_000) {
+      if (prompt.length > ZCODE_PROMPT_LIMIT) {
         reject(
           new Error(
-            `prompt 过大（${prompt.length} 字符 > 30000，zcode headless 经 argv 传递受命令行长度上限约束）。\n` +
+            `prompt 过大（${prompt.length} 字符 > ${ZCODE_PROMPT_LIMIT}，zcode headless 经 argv 传递受命令行长度上限约束）。\n` +
               `修复：收窄任务卡背景段（如去掉注入的 design 全文），或该任务改用 --backend claude-headless（stdin 传递无此限制）。`
           )
         );
