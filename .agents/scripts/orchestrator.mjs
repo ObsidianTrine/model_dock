@@ -54,7 +54,7 @@ import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProg
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
-import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
+import { resolveTier, tierEnvPatch, validateTierModel, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
 
@@ -316,7 +316,8 @@ async function cmdRun(repoRoot, taskId, opts) {
   }
 
   // ---- 任务等级（tier）：按难度选服务与模型 ----
-  // 卡显式 tier > files_hint 命中核心/发布路径自动升 heavy > 无（保持全局默认路由）。
+  // 车钟四档 ahead-1..4（显示「前进1-4」）；卡显式 tier（heavy/light 为兼容别名）
+  // > files_hint 命中核心/发布路径自动升 ahead-4 > 无（保持全局默认路由）。
   // 凭据经 tokenEnv 环境变量注入（token 不入库）；显式点名但未配置 → 告警降级，
   // 自动升级但 token 未设 → 静默跳过（高频路径，告警会淹日志）。
   const tier = resolveTier(meta, cfg);
@@ -325,7 +326,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   } else if (meta.tier && tier?.inactive === 'token') {
     log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
   } else if (tier?.token) {
-    log(`任务等级：${tier.name}${tier.auto ? '（files_hint 命中核心/发布路径自动升级）' : ''}（token 来自 ${tier.tokenEnv}）`);
+    log(`任务等级：${tierDisplayName(tier.name)}（${tier.name}${tier.auto ? '，files_hint 命中核心/发布路径自动升档' : ''}，token 来自 ${tier.tokenEnv}）`);
   }
   // 模型生效优先级：CLI 单次覆盖 > tier 配置 > workflow.json 全局默认
   const effWorkerModel = opts.workerModel ?? tier?.workerModel ?? workerModel;

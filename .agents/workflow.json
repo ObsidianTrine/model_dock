@@ -32,23 +32,32 @@
   "reviewNotes": "端口 8687/8890（8687=生产端口、8890=用户 dev 沙箱端口）、硬编码 ~/.modeldock 路径、绕过 atomicWrite() 直接写文件、使用 import.meta.url、新增 native addon、破坏 src/cli.ts 三路分发",
   "uiCheckCmd": "node scripts/ui-smoke.mjs",
   "worker": {
-    "backend": "zcode-headless"
+    "backend": "claude-headless"
   },
   "review": {
     "backend": "claude-headless",
     "model": "glm-5.3-flash"
   },
   "budgetProfiles": {
+    "claude-headless": {
+      "max_tokens": 5000000
+    },
     "zcode-headless": {
       "max_tokens": 5000000
     }
   },
   "tiers": {
-    "heavy": {
-      "tokenEnv": "MDK_TIER_HEAVY_TOKEN"
+    "ahead-1": {
+      "tokenEnv": "MDK_TIER_AHEAD1_TOKEN"
     },
-    "light": {
-      "tokenEnv": "MDK_TIER_LIGHT_TOKEN"
+    "ahead-2": {
+      "tokenEnv": "MDK_TIER_AHEAD2_TOKEN"
+    },
+    "ahead-3": {
+      "tokenEnv": "MDK_TIER_AHEAD3_TOKEN"
+    },
+    "ahead-4": {
+      "tokenEnv": "MDK_TIER_AHEAD4_TOKEN"
     }
   },
   "autopilot": {

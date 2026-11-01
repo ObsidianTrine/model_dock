@@ -8,14 +8,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
-import { resolveTier, tierEnvPatch, validateTierModel } from '../../.agents/scripts/orchestrator/tiers.mjs'
+import { normalizeTierName, resolveTier, tierDisplayName, tierEnvPatch, validateTierModel } from '../../.agents/scripts/orchestrator/tiers.mjs'
 import { writeWorkerSettings } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
 import { cardText, mkRepo, runOrch, eventsOf } from './helpers.js'
 
 const CFG = {
   tiers: {
-    heavy: { tokenEnv: 'T_HEAVY', workerModel: 'flagship-x', reviewModel: 'judge-x', provider: 'ark', gatewayBase: 'http://127.0.0.1:1' },
-    light: { tokenEnv: 'T_LIGHT' },
+    'ahead-1': { tokenEnv: 'T_A1' },
+    'ahead-2': { tokenEnv: 'T_A2' },
+    'ahead-3': { tokenEnv: 'T_A3' },
+    'ahead-4': { tokenEnv: 'T_A4', workerModel: 'flagship-x', reviewModel: 'judge-x', provider: 'ark', gatewayBase: 'http://127.0.0.1:1' },
   },
   corePaths: ['src/gateway/server.ts'],
   releasePaths: [],
@@ -28,19 +30,35 @@ describe('tiers > resolveTier', () => {
   })
 
   it('显式点名 + token 就位 → 全量生效；模型/服务字段透传', () => {
-    const t = resolveTier({ tier: 'heavy' }, CFG, { T_HEAVY: 'tok-1' })
-    expect(t).toMatchObject({ name: 'heavy', token: 'tok-1', tokenEnv: 'T_HEAVY', workerModel: 'flagship-x', reviewModel: 'judge-x', provider: 'ark', auto: false })
+    const t = resolveTier({ tier: 'ahead-4' }, CFG, { T_A4: 'tok-1' })
+    expect(t).toMatchObject({ name: 'ahead-4', token: 'tok-1', tokenEnv: 'T_A4', workerModel: 'flagship-x', reviewModel: 'judge-x', provider: 'ark', auto: false })
+  })
+
+  it('旧别名 heavy/light 永远兼容：自动映射 前进4/前进2（ahead-4/ahead-2）', () => {
+    expect(resolveTier({ tier: 'heavy' }, CFG, { T_A4: 'tok' })).toMatchObject({ name: 'ahead-4', token: 'tok' })
+    expect(resolveTier({ tier: 'light' }, CFG, { T_A2: 'tok' })).toMatchObject({ name: 'ahead-2', token: 'tok' })
+    expect(resolveTier({ tier: 'heavy' }, CFG, {})).toMatchObject({ inactive: 'token', name: 'ahead-4', tokenEnv: 'T_A4' })
+  })
+
+  it('车钟显示名：ahead-N → 前进N；别名一并映射；未知名字原样', () => {
+    expect(tierDisplayName('ahead-1')).toBe('前进1')
+    expect(tierDisplayName('ahead-4')).toBe('前进4')
+    expect(tierDisplayName('heavy')).toBe('前进4')
+    expect(tierDisplayName('light')).toBe('前进2')
+    expect(tierDisplayName('custom-tier')).toBe('custom-tier')
+    expect(normalizeTierName('heavy')).toBe('ahead-4')
+    expect(normalizeTierName('ahead-3')).toBe('ahead-3')
   })
 
   it('显式点名但键未配置 / token 环境变量未设 → inactive（不抛错，调用方决定告警口径）', () => {
     expect(resolveTier({ tier: 'nope' }, CFG, {})).toMatchObject({ inactive: 'unconfigured', name: 'nope' })
-    expect(resolveTier({ tier: 'heavy' }, CFG, {})).toMatchObject({ inactive: 'token', name: 'heavy', tokenEnv: 'T_HEAVY' })
+    expect(resolveTier({ tier: 'ahead-4' }, CFG, {})).toMatchObject({ inactive: 'token', name: 'ahead-4', tokenEnv: 'T_A4' })
   })
 
-  it('自动升级：files_hint 命中 corePaths → heavy/auto；未命中不升级；token 未设仍标 inactive', () => {
-    const hit = resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, { T_HEAVY: 'tok' })
-    expect(hit).toMatchObject({ name: 'heavy', auto: true, token: 'tok' })
-    expect(resolveTier({ files_hint: ['docs/a.md'] }, CFG, { T_HEAVY: 'tok' })).toBeNull()
+  it('自动升级：files_hint 命中 corePaths → ahead-4（前进4）/auto；未命中不升级；token 未设仍标 inactive', () => {
+    const hit = resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, { T_A4: 'tok' })
+    expect(hit).toMatchObject({ name: 'ahead-4', auto: true, token: 'tok' })
+    expect(resolveTier({ files_hint: ['docs/a.md'] }, CFG, { T_A4: 'tok' })).toBeNull()
     expect(resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, {})).toMatchObject({ inactive: 'token', auto: true })
   })
 })
@@ -153,16 +171,17 @@ describe('tiers > run 端到端（mock）', () => {
         JSON.stringify({
           baseBranch: 'develop',
           testCmd: 'node -e "process.exit(0)"',
-          tiers: { heavy: { tokenEnv: 'MDK_TEST_TIER_TOKEN', workerModel: 'flagship-x' } },
+          tiers: { 'ahead-4': { tokenEnv: 'MDK_TEST_TIER_TOKEN', workerModel: 'flagship-x' } },
         }),
       )
+      // 旧别名卡（tier: heavy）同样解析到 ahead-4——历史卡不返工
       const cardFile = path.join(repo.root, 'c.md')
       fs.writeFileSync(cardFile, cardText({ tier: 'heavy' }))
       runOrch(repo.root, `submit "${cardFile}"`)
       runOrch(repo.root, 'run test-task --backend mock', { MDK_TEST_TIER_TOKEN: 'tok-e2e' })
       const ev = eventsOf(repo.root, 'test-task')
       const resolved = ev.find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
-      expect(resolved).toMatchObject({ tier: 'heavy', worker_model: 'flagship-x' })
+      expect(resolved).toMatchObject({ tier: 'ahead-4', worker_model: 'flagship-x' })
       const spawned = ev.find((e) => e.type === 'worker_spawned') as Record<string, unknown> | undefined
       expect(spawned?.model).toBe('flagship-x')
     } finally {
@@ -178,18 +197,18 @@ describe('tiers > run 端到端（mock）', () => {
         JSON.stringify({
           baseBranch: 'develop',
           testCmd: 'node -e "process.exit(0)"',
-          tiers: { heavy: { tokenEnv: 'MDK_TEST_TIER_TOKEN' }, light: { tokenEnv: 'MDK_TEST_TIER_LIGHT_TOKEN' } },
+          tiers: { 'ahead-2': { tokenEnv: 'MDK_TEST_TIER_LIGHT_TOKEN' } },
         }),
       )
-      // 卡点名 light，token 环境变量未设 → inactive: token
+      // 卡点名 ahead-2，token 环境变量未设 → inactive: token
       const cardFile = path.join(repo.root, 'c.md')
-      fs.writeFileSync(cardFile, cardText({ tier: 'light' }))
+      fs.writeFileSync(cardFile, cardText({ tier: 'ahead-2' }))
       runOrch(repo.root, `submit "${cardFile}"`)
       const out = runOrch(repo.root, 'run test-task --backend mock', {})
-      expect(out.stdout).toContain('tier "light" 未生效')
+      expect(out.stdout).toContain('tier "ahead-2" 未生效')
       expect(out.stdout).toContain('MDK_TEST_TIER_LIGHT_TOKEN')
       const resolved = eventsOf(repo.root, 'test-task').find((e) => e.type === 'tier_resolved') as Record<string, unknown> | undefined
-      expect(resolved).toMatchObject({ tier: 'light', inactive: 'token' })
+      expect(resolved).toMatchObject({ tier: 'ahead-2', inactive: 'token' })
     } finally {
       repo.cleanup()
     }
