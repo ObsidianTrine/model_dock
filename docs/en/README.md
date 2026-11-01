@@ -126,6 +126,9 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 | [New computer & multi-machine sync](multi-machine-sync.md) | Complete steps & troubleshooting for sync-folder onboarding |
 | [Cloud deployment](deploy-cloud.md) | Self-hosted cloud sync hub runbook, manage all devices from one phone page |
 | [Design doc](../design.md) (Chinese) | Architecture, ADRs, threat model |
+| [AI pipeline guide](../ai-pipeline-guide.md) (Chinese) | End-to-end use of the autonomous pipeline: from a one-line intent to a release proposal — task in, merge out |
+| [CI bots](../ci-bots.md) (Chinese) | GitHub Actions layered PR review & Dependabot: setup and usage (maintainers) |
+| [AI review system](../ai-review-system.md) (Chinese) | Design & ops of layered code review: what each layer catches, how to keep improving |
 | [Changelog](CHANGELOG.md) | User-visible changes in every release |
 | 中文文档 | [简体中文版 README](../../README.md)（唯一事实来源） |
 
@@ -134,6 +137,8 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 The gateway listens on `127.0.0.1` only and is not remotely accessible (by design); upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
 
 ## Contributing
+
+The repo ships with a built-in **Dockmaster** autonomous orchestration deck: contributors can hand off a task with one line (`/dockmaster have an agent do X`) — the dockmaster breaks it down, runs it headlessly, enforces test gates and merges the result. See the [Dockmaster manual](../../.agents/workflows/orchestrator.md).
 
 Issues are welcome for bug reports and feature requests. Before submitting a PR, please read the [contributing guide](CONTRIBUTING.md) and [AGENTS.md](../../AGENTS.md) (engineering conventions and hard constraints, maintained in Chinese), and make sure `npm test` passes.
 
