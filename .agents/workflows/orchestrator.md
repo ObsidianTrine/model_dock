@@ -98,6 +98,7 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
 | `nightly [--plan] [--auto N]` | 一次完整巡检编排；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
+| `drill` | 弃船演习：临时港 mock 全链跑一张合成托运单，验证港口闭环自身健康（不烧真钱、不碰真队列） |
 | workflow.json `autopilot` | 白名单提案自动提交（**缺省关**；deps/核心路径/人工草稿永不自动） |
 
 **观测与对账**
@@ -254,6 +255,17 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启。`--interval 0 --max-cycles N` 为测试档（不休眠）。
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
+
+### B6. 弃船演习（drill）
+
+引擎预检只能证明 CLI 在场；闭环本身（worktree 创建→门禁→审查→闸门）只有真跑才检验——环境漂移（node 版本、权限墙、脚本残缺）夜里才炸不如演习先炸（SOLAS 救生艇演习条款的 Dockmaster 版）：
+
+```bash
+node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
+```
+
+- **临时港**演习：mkdtemp 临时 git 仓 + 整目录拷贝 `.agents/scripts` + 最小 workflow.json，mock 跑一张合成托运单（id `drill-<日期>-<随机>`）走完全链，产物随临时港删除——不烧真钱、不碰真队列。
+- 判定：脚本完整 → 合成卡提交 → 闭环全链落 awaiting-human，任一环节 ✗ 即 exit 1（可用 schedule/cron 注册成每周演习）。
 
 ## C. 观测与对账详解
 

@@ -54,6 +54,7 @@ import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './
 import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
+import { runDrill } from './orchestrator/drill.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -2367,6 +2368,21 @@ function cmdSchedule(repoRoot, sub, opts) {
   die('用法：schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]');
 }
 
+/**
+ * drill——弃船演习（借鉴清单 B9）：临时港 mock 跑一张合成托运单走完全链，
+ * 验证港口闭环自身健康（worktree 创建→门禁→审查→闸门落位）。不烧真钱、不碰真队列。
+ * 引擎预检只探 CLI 在场；环境漂移（node 版本、权限墙、脚本残缺）夜里才炸不如演习先炸。
+ */
+function cmdDrill(repoRoot, opts) {
+  if (opts.backend && opts.backend !== 'mock') {
+    die('drill 仅用 mock（演习不烧真钱）；真实引擎的健康由 nightly 引擎预检与真实任务把守。');
+  }
+  log('════════ 弃船演习（drill）：mock 跑一张合成托运单，验证港口闭环自身健康 ════════');
+  const r = runDrill(repoRoot, { log });
+  log(r.ok ? '════════ 演习通过：港口闭环健康 ════════' : '════════ 演习未通过：闭环有环节失灵，见上方 ✗ 项 ════════');
+  if (!r.ok) die('演习未通过', 1);
+}
+
 // ---------------------------------------------------------------------------
 // CLI 分发
 // ---------------------------------------------------------------------------
@@ -2406,6 +2422,7 @@ function usage() {
   logs <task-id>                          打印事件时间线
   follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
   stats [--days N] [--json]               运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）
+  drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
 
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
@@ -2556,6 +2573,8 @@ async function main() {
       return cmdFollow(repoRoot, args[0], args.slice(1).join(' '));
     case 'stats':
       return cmdStats(repoRoot, opts);
+    case 'drill':
+      return cmdDrill(repoRoot, opts);
     default:
       usage();
       die(`未知命令 "${cmd}"`, 1);
