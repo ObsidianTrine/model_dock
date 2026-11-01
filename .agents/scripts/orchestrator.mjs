@@ -31,6 +31,8 @@ import {
   pickNextCard,
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
+import { Budget } from './orchestrator/budget.mjs';
+import { countRecentTransient, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -59,8 +61,14 @@ import { runDrill } from './orchestrator/drill.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
 
-/** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避 60s×attempt（与 dockmaster 技能「429 退避 60s」口径一致）。 */
+/** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避基值×attempt（与 dockmaster
+ *  技能「429 退避 60s」口径一致）。基值可经 ORCH_RETRY_WAIT_MS 注入（测试收缩到 10ms
+ *  级，生产行为不变）， storm-gate 集成测试依赖毫秒级退避。 */
 const MAX_WORKER_RETRIES = 3;
+const RETRY_WAIT_BASE_MS = (() => {
+  const n = Number.parseInt(process.env.ORCH_RETRY_WAIT_MS ?? '', 10);
+  return Number.isInteger(n) && n >= 0 ? n : 60_000;
+})();
 
 // ---------------------------------------------------------------------------
 // 基础设施
@@ -117,49 +125,7 @@ async function settleNotify(repoRoot, taskId, state, reason) {
 // 事件与预算
 // ---------------------------------------------------------------------------
 
-class Budget {
-  constructor(card, emit) {
-    this.maxTokens = card.meta.budget.max_tokens;
-    this.maxWallMs = card.meta.budget.max_wall_minutes * 60_000;
-    this.emit = emit;
-    this.committed = 0; // 已完结 worker 会话的用量合计
-    this.sessionMax = 0; // 当前会话内峰值（stream-json 的 usage 是会话累计值）
-    this.tokens = 0; // committed + sessionMax，只读视图
-    this.started = Date.now();
-    this.tripReason = null;
-    this.wallTimer = setTimeout(() => this.trip('max_wall_minutes', `${card.meta.budget.max_wall_minutes} 分钟 wall-clock 到期`), this.maxWallMs);
-    this.wallTimer.unref?.();
-  }
-
-  /** 新 worker 会话开始：上一会话用量入账 committed（原实现用全局 Math.max，
-   *  fixup 多会话互相覆盖漏计——实测 300k+100k 两会话只记 300k）。 */
-  beginSession() {
-    this.committed += this.sessionMax;
-    this.sessionMax = 0;
-    this.tokens = this.committed;
-  }
-
-  account(tokensIn, tokensOut) {
-    this.sessionMax = Math.max(this.sessionMax, tokensIn + tokensOut);
-    this.tokens = this.committed + this.sessionMax;
-    if (this.tokens > this.maxTokens) this.trip('max_tokens', `累计 ${this.tokens} / 上限 ${this.maxTokens} tokens`);
-  }
-
-  trip(reason, detail) {
-    if (!this.tripReason) {
-      this.tripReason = { reason, detail };
-      clearTimeout(this.wallTimer);
-      // 看门狗：trip 即杀当前在跑的 worker/reviewer 进程树——熔断只在 spawn
-      // 返回后检查，而 spawn 只有进程退出才 resolve（zcode 无 max-turns、网络
-      // 挂死时 claude 也可能长时间不返回）；不主动杀，wall-clock 熔断形同虚设。
-      this.onTrip?.();
-    }
-  }
-
-  get tripped() {
-    return this.tripReason !== null;
-  }
-}
+// Budget 类已迁至 orchestrator/budget.mjs（含低油量软告警；单测直接 import 驱动）。
 
 function cleanupOrphanWorker(repoRoot, taskId) {
   // 崩溃恢复：running/ 卡片若记录的 worker PID 仍存活（孤儿），先杀整棵进程树
@@ -439,10 +405,26 @@ async function cmdRun(repoRoot, taskId, opts) {
     playbooksDir: path.join(repoRoot, '.agents', 'workflows'),
   };
 
+  // ---- 确定性偏航报警（xte = cross track error，observe-only）：纯规则检查，只留痕
+  // 不动作（kill/熔断仍归预算与看门狗）。三条规则：no_commit（连续 2 个 worker 会话零
+  // 新提交）、test_loop（npm_test 连续 2 轮 fail）、scope_drift（越界文件数达阈值）。
+  const xte = createXteAlarm(qdir, worktree);
+
   const events = readEvents(qdir);
   let debugIter = debugIterations(events);
   let reviewIter = reviewIterations(events);
-  const budget = new Budget(card, () => {});
+  // 燃油软告警接线（B5）：低油量事件留痕 + 引水传令注入船长收尾令。收尾令每 run 只注入
+  // 一次（tokens/wall 两路各触发一次事件，同一命令重复注入只会堆噪音）；硬熔断阈值不受
+  // 影响——软告警是「提醒收尾」，不是「提前停车」。
+  let lowFuelOrdered = false;
+  const budget = new Budget(card, (e) => {
+    appendEvent(qdir, 'budget_low_fuel', e);
+    if (!lowFuelOrdered) {
+      lowFuelOrdered = true;
+      appendInbox(qdir, '【船长收尾令】燃油余量不足 20%：完成手头工作、跑测试、在 worktree 提交，按契约层输出结果块；不要再开新战线、不要重构、不要修与验收无关的问题。');
+      log('⛽ 燃油低水位（80%）：budget_low_fuel 已留痕，收尾令已写 inbox（下次会话边界送达 worker；硬熔断阈值不变）');
+    }
+  });
   // 进程级看门狗接线：熔断触发时杀当前在跑的 spawn（worker 或 reviewer），
   // spawn 因 close 事件 resolve 后，下方 budget.tripped 检查接手落 blocked/
   let livePid = null;
@@ -488,6 +470,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           killTree(livePid);
         }
         moveCard(root, taskId, 'running', 'blocked');
+        archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
         await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
         die('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
       }
@@ -549,6 +532,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       let transientAttempt = 0;
       for (;;) {
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
+        xte.beforeWorkerSession(); // 偏航 no_commit：记会话起点 HEAD（连续 2 会话零提交报警）
         appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens });
         workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
         workerInFlight = true; // 看门狗：spawn 在跑标记
@@ -580,6 +564,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
             moveCard(root, taskId, 'running', 'blocked');
             appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
+            archiveIncident(repoRoot, taskId, root, qdir, `budget:${budget.tripReason.reason}`);
             await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
             die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
           }
@@ -591,21 +576,24 @@ async function cmdRun(repoRoot, taskId, opts) {
         const preClaimed = parseResultBlock(workerOutput);
         if (!preClaimed && isTransientWorkerFailure(workerOutput, result.stderrTail) && transientAttempt < MAX_WORKER_RETRIES) {
           transientAttempt += 1;
-          const waitS = 60 * transientAttempt;
-          appendEvent(qdir, 'worker_retry', { attempt: transientAttempt, max: MAX_WORKER_RETRIES, wait_s: waitS });
-          log(`⚠ worker 疑似瞬时故障（限流/网络）——${waitS}s 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
-          await new Promise((r) => setTimeout(r, waitS * 1000));
+          const waitMs = RETRY_WAIT_BASE_MS * transientAttempt;
+          appendEvent(qdir, 'worker_retry', { attempt: transientAttempt, max: MAX_WORKER_RETRIES, wait_ms: waitMs });
+          log(`⚠ worker 疑似瞬时故障（限流/网络）——${waitMs >= 1000 ? `${Math.round(waitMs / 1000)}s` : `${waitMs}ms`} 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
+          await new Promise((r) => setTimeout(r, waitMs));
           continue;
         }
         break;
       }
+      xte.afterWorkerSession(); // 偏航 no_commit：会话收尾对账 HEAD（observe-only，只留痕）
 
       // ---- 自报不可信：先解析契约块，再亲自跑门禁 ----
       const claimed = parseResultBlock(workerOutput);
       if (!claimed || claimed.status !== 'done') {
-        appendEvent(qdir, 'blocked', { reason: claimed?.status === 'stuck' ? 'worker 自报 stuck' : '未产出结果块（worker 异常结束）' });
+        const blockedReason = claimed?.status === 'stuck' ? 'worker 自报 stuck' : '未产出结果块（worker 异常结束）';
+        appendEvent(qdir, 'blocked', { reason: blockedReason });
         moveCard(root, taskId, 'running', 'blocked');
-        await settleNotify(repoRoot, taskId, 'blocked', claimed?.status === 'stuck' ? 'worker 自报 stuck' : 'worker 异常结束（无结果块）');
+        archiveIncident(repoRoot, taskId, root, qdir, blockedReason);
+        await settleNotify(repoRoot, taskId, 'blocked', blockedReason);
         log(`worker 未报告完成（${claimed?.status ?? '无结果块'}）。任务转 blocked/，NOTES.md 已留现场，人工决策：`);
         log(`  node .agents/scripts/orchestrator.mjs resume ${taskId}   # 带恢复上下文续做`);
         log(`  node .agents/scripts/orchestrator.mjs abandon ${taskId}   # 按 Rescue 流程清理`);
@@ -633,6 +621,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             if (debugIter > meta.budget.max_test_iterations) {
               appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
               moveCard(root, taskId, 'running', 'blocked');
+              archiveIncident(repoRoot, taskId, root, qdir, `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
               await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
               die(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）。${g.dieTail}`);
             }
@@ -684,6 +673,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         },
       ];
       const fixup = await runGates(STATIC_GATES);
+      xte.testLoop(); // 偏航 test_loop：npm_test 连续 2 轮 fail（从 gate_result 事件判定，observe-only）
       if (fixup) {
         promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter));
         continue;
@@ -698,6 +688,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'gate_result', { gate: 'port_scan', result: 'fail', detail: e.message });
         moveCard(root, taskId, 'running', 'failed');
         appendEvent(qdir, 'failed', { reason: `红线门禁 port_scan：${e.message}` });
+        archiveIncident(repoRoot, taskId, root, qdir, `红线门禁 port_scan：${e.message}`);
         await settleNotify(repoRoot, taskId, 'failed', '红线门禁 port_scan 未通过（不可调试）');
         die(`红线门禁 port_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
@@ -709,6 +700,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'gate_result', { gate: 'native_scan', result: 'fail', detail: e.message });
         moveCard(root, taskId, 'running', 'failed');
         appendEvent(qdir, 'failed', { reason: `红线门禁 native_scan：${e.message}` });
+        archiveIncident(repoRoot, taskId, root, qdir, `红线门禁 native_scan：${e.message}`);
         await settleNotify(repoRoot, taskId, 'failed', '红线门禁 native_scan 未通过（不可调试）');
         die(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
@@ -733,6 +725,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
 
       const purity = gateScopePurity(worktree, meta.files_hint, baseBranch);
+      xte.scopeDrift(purity.outside.length, (meta.files_hint ?? []).length); // 偏航 scope_drift（observe-only）
       appendEvent(qdir, 'gate_result', {
         gate: 'scope_purity',
         result: 'pass',
@@ -817,6 +810,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           if (reviewIter > meta.budget.max_review_iterations) {
             appendEvent(qdir, 'circuit_breaker', { reason: 'max_review_iterations', detail: `${reviewIter}/${meta.budget.max_review_iterations}` });
             moveCard(root, taskId, 'reviewing', 'blocked');
+            archiveIncident(repoRoot, taskId, root, qdir, `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
@@ -903,10 +897,168 @@ async function failTaskToBlocked(repoRoot, root, qdir, taskId, err) {
     const reason = `异常中断：${String(err?.message ?? err).slice(0, 300)}`;
     appendEvent(qdir, 'failed', { reason });
     moveCard(root, taskId, found.state, 'blocked');
+    archiveIncident(repoRoot, taskId, root, qdir, reason);
     await settleNotify(repoRoot, taskId, 'blocked', reason);
     return reason;
   }
   return null;
+}
+
+/**
+ * 偏航报警（xte = cross track error 航向偏差角，observe-only）：确定性规则检查，
+ * 与 LLM 看门狗互补——看门狗靠模型判断「有没有实质进展」，这里只认机器可复核的
+ * 硬信号。三条规则：
+ *   no_commit   连续 2 个 worker 会话零新提交（HEAD 计数会话首尾对账）
+ *   test_loop   npm_test 门禁连续 2 轮 fail（从 gate_result 事件判定）
+ *   scope_drift scope_purity 越界文件数 ≥ max(3, files_hint 长度)
+ * 每规则每任务至多报一次：内存 Set + 事件播种（resume 跨进程也不重报）。
+ * 只留痕不动作——kill/熔断仍归预算与看门狗，报警是给人和夜跑摘要看的信号。
+ */
+function createXteAlarm(qdir, worktree) {
+  const fired = new Set(readEvents(qdir).filter((e) => e.type === 'xte_alarm').map((e) => e.rule));
+  const report = (rule, detail) => {
+    if (fired.has(rule)) return;
+    fired.add(rule);
+    appendEvent(qdir, 'xte_alarm', { rule, detail });
+    log(`⚠ 偏航报警（${rule}，只留痕不动作）：${detail}`);
+  };
+  const headCount = () => {
+    try {
+      return Number.parseInt(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 10);
+    } catch {
+      return null; // git 异常不判（缺数据宁可漏报不误报）
+    }
+  };
+  let sessionStart = null; // 本会话起点的 HEAD 提交数
+  let zeroStreak = 0; // 连续零新提交的会话数
+  return {
+    beforeWorkerSession() {
+      sessionStart = headCount();
+    },
+    afterWorkerSession() {
+      if (sessionStart === null) return;
+      const end = headCount();
+      if (end === null) return;
+      zeroStreak = end === sessionStart ? zeroStreak + 1 : 0;
+      sessionStart = null;
+      if (zeroStreak >= 2) report('no_commit', `连续 ${zeroStreak} 个 worker 会话零新提交（HEAD 停在 ${end}）——worker 可能空转`);
+    },
+    testLoop() {
+      const results = readEvents(qdir).filter((e) => e.type === 'gate_result' && e.gate === 'npm_test').map((e) => e.result);
+      if (results.length >= 2 && results[results.length - 1] === 'fail' && results[results.length - 2] === 'fail') {
+        report('test_loop', 'npm_test 门禁连续 2 轮 fail——修复可能在同一处打转');
+      }
+    },
+    scopeDrift(outsideCount, hintLen) {
+      const threshold = Math.max(3, hintLen);
+      if (outsideCount >= threshold) {
+        report('scope_drift', `scope_purity 越界文件 ${outsideCount} 个 ≥ 阈值 ${threshold}——改动面可能失控`);
+      }
+    },
+  };
+}
+
+/**
+ * 事故调查包（VDR，voyage data recorder 航行数据记录仪）：任务落 blocked/failed
+ * 终态时刷新 logs/<id>/incident.md——概况/复诵现场/事件时间线/stderr 尾/改动概要/
+ * 审查结论 + 考题草稿建议。每次终态整文件覆盖（幂等，重复落位不堆文件）；只读现场
+ * 还原，绝不改动队列状态、worktree 与题库。生成失败只告警——调查包是附赠观测，
+ * 不能影响落位流程本身。
+ */
+function archiveIncident(repoRoot, taskId, root, qdir, reason) {
+  try {
+    const events = readEvents(qdir);
+    const found = findCard(root, taskId);
+    let goal = '';
+    let filesHint = [];
+    if (found) {
+      try {
+        const { meta, body } = parseCard(fs.readFileSync(found.path, 'utf8'), found.path);
+        goal = String(body.goal ?? '');
+        filesHint = meta.files_hint ?? [];
+      } catch { /* 损坏卡：调查包照出，字段留空 */ }
+    }
+    const state = found?.state ?? 'unknown';
+    const notes = safeRead(path.join(worktreePath(repoRoot, taskId), 'NOTES.md')).trim();
+    const stderrTail = [...events].reverse().find((e) => e.type === 'worker_stderr_tail')?.text ?? '';
+    let diffStat = '';
+    try {
+      const base = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
+      diffStat = execFileSync('git', ['diff', '--stat', `${base}...HEAD`], { cwd: worktreePath(repoRoot, taskId), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    } catch {
+      diffStat = '（无法获取：worktree 缺失或 git 异常）';
+    }
+    const verdicts = events.filter((e) => e.type === 'review_verdict');
+    const now = new Date();
+    const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    // 考题草稿：对齐 .agents/review-evals/cases/*.json schema；expect 留空由人工补——
+    // 草稿只冻结客观现场（goal/files/reason），审查考点是人的判断。
+    const exam = {
+      id: `${ym}-${taskId}`,
+      title: (goal || taskId).replace(/\s+/g, ' ').slice(0, 80),
+      files: filesHint,
+      expect: [],
+      note: String(reason ?? '').slice(0, 300),
+    };
+    const text = [
+      `# 事故调查包（VDR）：${taskId}`,
+      '',
+      `> 终态落位时自动生成（每次覆盖刷新，幂等）；只读现场还原，不改动队列状态。生成于 ${toIsoLocal(now)}。`,
+      '',
+      '## 任务概况',
+      '',
+      `- 目标: ${goal || '（未知）'}`,
+      `- 终态: ${state}`,
+      `- 原因: ${reason || '（未记录）'}`,
+      '',
+      '## 复诵现场（worktree NOTES.md，截 800 字）',
+      '',
+      notes ? notes.slice(0, 800) : '（worktree 无 NOTES.md）',
+      '',
+      '## 事件时间线（尾部 100 条，同型折叠）',
+      '',
+      '```',
+      formatTimeline(coalesceEvents(events, { maxEntries: 100 })) || '（无事件）',
+      '```',
+      '',
+      '## worker stderr 尾',
+      '',
+      '```',
+      stderrTail || '（无 stderr 留痕）',
+      '```',
+      '',
+      '## 改动概要（worktree git diff --stat，相对基准分支）',
+      '',
+      '```',
+      diffStat || '（无改动）',
+      '```',
+      '',
+      '## 审查结论（review_verdict 事件）',
+      '',
+      verdicts.length
+        ? verdicts
+            .map((v) => `- ${v.ts}  ${v.verdict ? `verdict=${v.verdict}` : `blockers=${v.blockers ?? '?'}`}${v.reason ? ` reason=${v.reason}` : ''}${v.verdict ? '' : ` suggestions=${v.suggestions ?? '-'} notes=${v.notes ?? '-'}`}`)
+            .join('\n')
+        : '（无审查记录）',
+      '',
+      '## 考题草稿建议',
+      '',
+      '```json',
+      JSON.stringify(exam, null, 2),
+      '```',
+      '',
+      '人工按 .agents/review-evals/README.md 决定是否入库，本包不改动题库。',
+      '',
+    ].join('\n');
+    const p = path.join(qdir, 'incident.md');
+    fs.writeFileSync(p, text);
+    appendEvent(qdir, 'incident_archived', { path: p });
+    log(`📋 事故调查包已归档：${p}`);
+    return p;
+  } catch (e) {
+    log(`⚠ 事故调查包生成失败（${taskId}）：${String(e?.message ?? e).slice(0, 160)}`);
+    return null;
+  }
 }
 
 function safeRead(p) {
@@ -1252,6 +1404,40 @@ function drainTallyLine(tally) {
   return Object.entries(tally).map(([s, n]) => `${s} ${n}`).join('、') || '无';
 }
 
+/**
+ * 风暴闸（weather hold）计数——纯读无副作用：窗口内各任务 worker_retry 合计 vs 阈值。
+ * 无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。workflow.json 未配
+ * weatherHold 键 = 功能关闭（行为与历史版本一致）。
+ */
+function weatherHoldCount(repoRoot, cfg) {
+  const hold = cfg?.weatherHold;
+  if (!hold) return { held: false, count: 0 };
+  const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
+  const allEvents = [];
+  try {
+    for (const id of fs.readdirSync(logsRoot)) {
+      if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
+      const events = readEvents(path.join(logsRoot, id));
+      if (events.length) allEvents.push({ id, events });
+    }
+  } catch { /* logs/ 不存在 = 还没跑过任务 */ }
+  const count = countRecentTransient(allEvents, { windowMs: hold.windowMinutes * 60_000, now: Date.now() });
+  return { held: shouldHold(count, hold.threshold), count };
+}
+
+/** 风暴滞留宣布：log + fleet 级事件 + webhook 通知（通知尽力而为，不阻断调度）。 */
+function announceWeatherHold(repoRoot, cfg, count) {
+  log(`⛈ 风暴滞留（weather hold）：最近 ${cfg.weatherHold.windowMinutes} 分钟瞬时重试 ${count} 次 ≥ 阈值 ${cfg.weatherHold.threshold}——停止派发，窗口滑过后自动恢复（下次派发前重算）。`);
+  try {
+    appendFleetEvent(repoRoot, 'weather_hold', { count, windowMinutes: cfg.weatherHold.windowMinutes });
+  } catch { /* 留痕失败不阻断调度 */ }
+  void notify({
+    title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 风暴滞留`,
+    body: `最近 ${cfg.weatherHold.windowMinutes} 分钟瞬时重试 ${count} 次（阈值 ${cfg.weatherHold.threshold}），已暂停派发任务；窗口滑过后自动恢复。`,
+    webhookEnvs: orchWebhookEnvs(repoRoot),
+  }).catch(() => { /* 通知失败不阻断 */ });
+}
+
 /** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」。 */
 async function drainSummaryNotify(repoRoot, done, tally, note) {
   if (!done) return; // 零消费不吵
@@ -1279,7 +1465,7 @@ async function cmdDrain(repoRoot, opts) {
   try {
     const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
-    if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers);
+    if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers, cfg);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
     let lastTried = null;
@@ -1294,7 +1480,17 @@ async function cmdDrain(repoRoot, opts) {
         await drainSummaryNotify(repoRoot, done, tally, `已达 --max ${max} 轮上限`);
         return;
       }
-      const next = pickNextCard(root, { skipIds });
+      // 风暴闸：每次派发前现算（无状态）——命中即停，下一次 drain 窗口滑过自动恢复
+      if (cfg.weatherHold) {
+        const w = weatherHoldCount(repoRoot, cfg);
+        if (w.held) {
+          announceWeatherHold(repoRoot, cfg, w.count);
+          await drainSummaryNotify(repoRoot, done, tally, '风暴滞留（weather hold），暂停派发');
+          return;
+        }
+      }
+      
+const next = pickNextCard(root, { skipIds });
       if (!next) {
         // 引水卡也在 pending/：从「解析失败」清单里排除（它们不是坏卡，是待确认）
         const stuck = listCards(root, 'pending').filter((id) => !skipIds.has(id));
@@ -1345,7 +1541,7 @@ async function cmdDrain(repoRoot, opts) {
  * （并发下"连续两轮"不再等价于上一次尝试）。
  * 结束条件：无活跃子进程 且 无可调度任务。
  */
-function cmdDrainParallel(repoRoot, root, opts, workers) {
+function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
   const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
   const active = new Map(); // pid -> { id, hint }
   const retryCount = new Map(); // id -> 调度次数
@@ -1360,6 +1556,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   let warnedStuck = false;
   let summarySent = false;
   let pilotageListed = false; // 待引水清单只打一次（pump 每轮收尾都会重入，防刷屏）
+  let weatherAnnounced = false; // 滞留宣布只一次（pump 会被 exit 回调反复进入）
 
   const launch = (card) => {
     retryCount.set(card.id, (retryCount.get(card.id) ?? 0) + 1);
@@ -1406,6 +1603,24 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
       if (launched >= max) {
         if (active.size === 0) log(`已达 --max ${max} 轮上限，停止调度。`);
         return;
+      }
+      // 风暴闸：发射前现算（无状态）——滞留期间不再发射，等 exit 回调收尾在跑任务
+      if (cfg?.weatherHold) {
+        const w = weatherHoldCount(repoRoot, cfg);
+        if (w.held) {
+          if (!weatherAnnounced) {
+            weatherAnnounced = true;
+            announceWeatherHold(repoRoot, cfg, w.count);
+          }
+          if (active.size === 0) {
+            log('风暴滞留（weather hold）：无在跑任务，本次 drain 结束。');
+            if (!summarySent && finished > 0) {
+              summarySent = true;
+              void drainSummaryNotify(repoRoot, finished, tally, '风暴滞留（weather hold），暂停派发');
+            }
+          }
+          return;
+        }
       }
       const candidates = listCards(root, 'pending').filter((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
       let picked = null;
@@ -1611,6 +1826,8 @@ function cmdStats(repoRoot, opts = {}) {
       watchdog_suspect: count('watchdog_suspect'),
       follow_ups: count('follow_up'),
       tokens_peak: peaks.length ? Math.max(...peaks) : 0,
+      xte_alarms: count('xte_alarm'),
+      incident: fs.existsSync(path.join(logsRoot, id, 'incident.md')) ? 1 : 0,
     });
   }
 
@@ -1632,6 +1849,14 @@ function cmdStats(repoRoot, opts = {}) {
     total_watchdog_suspect: sum((r) => r.watchdog_suspect),
     total_follow_ups: sum((r) => r.follow_ups),
     total_tokens_peak: sum((r) => r.tokens_peak),
+    // 安全晴雨表（near-miss）：险情比事故多——watchdog suspect / 瞬时重试 / 偏航报警 /
+    // 事故调查包四类「差点出事」信号单独成表，供流程调优先于事故发生。
+    near_miss: {
+      watchdog: sum((r) => r.watchdog_suspect),
+      retries: sum((r) => r.retries),
+      xte: sum((r) => r.xte_alarms),
+      incidents: sum((r) => r.incident),
+    },
   };
 
   if (opts.flags?.has('--json')) {
@@ -1661,6 +1886,8 @@ function cmdStats(repoRoot, opts = {}) {
     `  累计 turns ${summary.total_turns}，调试 ${summary.total_debug_iter} / 审查 ${summary.total_review_iter} 轮，瞬时重试 ${summary.total_retries}，` +
       `watchdog suspect ${summary.total_watchdog_suspect}，follow-up ${summary.total_follow_ups}，token 峰值合计 ${fmtK(summary.total_tokens_peak)}`
   );
+  const nm = summary.near_miss;
+  log(`  安全晴雨表：近乎事故 ${nm.watchdog + nm.retries + nm.xte + nm.incidents} 次（watchdog ${nm.watchdog} / 重试 ${nm.retries} / 偏航 ${nm.xte} / 调查包 ${nm.incidents}）`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2152,6 +2379,7 @@ async function cmdNightly(repoRoot, opts) {
   log(`════════ nightly 巡检 ${new Date().toISOString()} ════════`);
   const root = queueRoot(repoRoot);
   ensureQueue(root);
+  const ncfg = runConfig(repoRoot); // repoRoot 锚定（风暴闸/巡检信号共用；勿与收尾处的 loadWorkflowConfig 混名）
   const childEnv = { ...process.env, ...childEnvForHeldLock() };
   let created = [];
   let skipped = [];
@@ -2168,8 +2396,8 @@ async function cmdNightly(repoRoot, opts) {
       ki: true,
       ci: true,
       tests: flags.has('--tests'),
-      baseBranch: runConfig(repoRoot).baseBranch ?? 'main',
-      testCmd: runConfig(repoRoot).testCmd.join(' && '),
+      baseBranch: ncfg.baseBranch ?? 'main',
+      testCmd: ncfg.testCmd.join(' && '),
     }));
     for (const w of warnings) log(`⚠ ${w}`);
     for (const c of created) log(`已生成提案：drafts/${c}.md`);
@@ -2198,30 +2426,43 @@ async function cmdNightly(repoRoot, opts) {
 
     // 3) --auto N：high 优先级提案先提交再跑（gate=L3 兜底——合并仍人工，自动 run 的
     //    风险被分级闸门完整兜住），再 drain --max N 推进队列；
-    //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续
+    //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续。
+    //    风暴闸：派发前检查，滞留则整段跳过（high 卡不提交、drain 不启动）——风暴中出航
+    //    只会把 high 卡逐张烧成 blocked；窗口滑过后的下一轮 nightly 照常。
     if (opts.auto) {
-      const high = highPriorityDraftIds(repoRoot);
-      for (const id of high) {
-        const r = submitDraft(repoRoot, root, id);
-        if (!r.submitted) {
-          log(`提案 ${id} 未提交：${r.skipped}`);
-          continue;
+      let autoHeld = false;
+      if (ncfg.weatherHold) {
+        const w = weatherHoldCount(repoRoot, ncfg);
+        if (w.held) {
+          autoHeld = true;
+          announceWeatherHold(repoRoot, ncfg, w.count);
+          log('风暴滞留（weather hold）：nightly --auto 本轮跳过派发（high 卡与 drain 均不启动）。');
         }
-        log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
-        const rr = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+      }
+      if (!autoHeld) {
+        const high = highPriorityDraftIds(repoRoot);
+        for (const id of high) {
+          const r = submitDraft(repoRoot, root, id);
+          if (!r.submitted) {
+            log(`提案 ${id} 未提交：${r.skipped}`);
+            continue;
+          }
+          log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
+          const rr = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+            cwd: repoRoot,
+            stdio: 'inherit',
+            env: childEnv,
+          });
+          if (rr.status !== 0) log(`任务 ${id} 退出码 ${rr.status}（已落 blocked/failed/，继续）。`);
+        }
+        log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
+        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: childEnv,
         });
-        if (rr.status !== 0) log(`任务 ${id} 退出码 ${rr.status}（已落 blocked/failed/，继续）。`);
+        if (r.status !== 0) log(`drain 退出码 ${r.status}。`);
       }
-      log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
-      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
-        cwd: repoRoot,
-        stdio: 'inherit',
-        env: childEnv,
-      });
-      if (r.status !== 0) log(`drain 退出码 ${r.status}。`);
     }
   } catch (e) {
     errMsg = String(e?.message ?? e);
@@ -2310,6 +2551,7 @@ async function cmdWatch(repoRoot, opts) {
   const stopFile = path.join(repoRoot, '.agents', 'orchestrator', '.watch-stop');
   const childEnv = { ...process.env, ...childEnvForHeldLock() };
   const orch = path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs');
+  let weatherAnnounced = false; // 风暴滞留宣布去重（跨周期只 announce 一次，复位见周期内逻辑）
   log(`════════ watch 开始（interval ${intervalMin} 分钟/周期，max-cycles ${maxCycles === Infinity ? '∞' : maxCycles}）════════`);
   log(`停止：touch .agents/orchestrator/.watch-stop（或 Ctrl-C）；drift 降级自动退出；workflow.json 改动下周期即生效。`);
   let cycle = 0;
@@ -2331,14 +2573,28 @@ async function cmdWatch(repoRoot, opts) {
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读：改配置即时生效
       let pending = listCards(root, 'pending');
       const cap = Number.isInteger(cfg.autopilot?.autoDrainPerCycle) && cfg.autopilot.autoDrainPerCycle > 0 ? cfg.autopilot.autoDrainPerCycle : Infinity;
+      // 风暴闸（瞭望位先看天）：滞留则本周期不派发（drain/投机重探全跳过），scan/propose
+      // 照跑（它们不派 worker）。滞留宣布只一次；某周期窗口滑过即复位，再滞留会重新宣布。
+      const weather = cfg.weatherHold ? weatherHoldCount(repoRoot, cfg) : { held: false, count: 0 };
+      if (weather.held) {
+        if (!weatherAnnounced) {
+          weatherAnnounced = true;
+          announceWeatherHold(repoRoot, cfg, weather.count);
+        }
+        log('风暴滞留生效中：本周期跳过派发（窗口滑过后自动恢复）。');
+      } else {
+        weatherAnnounced = false;
+      }
       if (pending.length) {
-        const n = Math.min(pending.length, cap);
-        log(`pending ${pending.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
-        spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
-          cwd: repoRoot,
-          stdio: 'inherit',
-          env: childEnv,
-        });
+        if (!weather.held) {
+          const n = Math.min(pending.length, cap);
+          log(`pending ${pending.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
+          spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+            cwd: repoRoot,
+            stdio: 'inherit',
+            env: childEnv,
+          });
+        }
       } else {
         // 2) 队列空 → 巡检出提案；autopilot 开时再跑 planner 需求综合（白名单卡自动提交）
         spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
@@ -2347,7 +2603,7 @@ async function cmdWatch(repoRoot, opts) {
           spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
           // 提案被白名单自动提交后队列非空 → 本周期内立即推进，不等到下一周期
           const submitted = listCards(root, 'pending');
-          if (submitted.length) {
+          if (submitted.length && !weather.held) {
             const n = Math.min(submitted.length, cap);
             log(`autopilot 提交 ${submitted.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
             spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
@@ -2358,8 +2614,9 @@ async function cmdWatch(repoRoot, opts) {
           }
         }
       }
-      // 3) 瞬时故障 blocked 卡的一次性有痕重探（投机执行，资格判定见 speculativeResumes）
-      speculativeResumes(repoRoot, root, childEnv, opts);
+      // 3) 瞬时故障 blocked 卡的一次性有痕重探（投机执行，资格判定见 speculativeResumes）；
+      //    风暴滞留期间跳过——重探也是派发，风暴中重探只会再撞一次限流
+      if (!weather.held) speculativeResumes(repoRoot, root, childEnv, opts);
       if (cycle >= maxCycles) {
         log(`已达 --max-cycles ${maxCycles}，watch 退出。`);
         break;

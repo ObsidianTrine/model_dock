@@ -198,6 +198,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 | 轮次 / token / wall-clock 超预算 | kill 进程树 → blocked |
 | 测试修复超 `max_test_iterations` / 审查返工超 `max_review_iterations` | blocked（附失败尾部） |
 | 看门狗（`watchdog.mode: actuate`）连续 2 次判定无实质进展 | kill → blocked |
+| 燃油 80%（token/wall） | 软告警 `budget_low_fuel` + 引水传令自动注入收尾令（不熔断） |
 
 全部记 `circuit_breaker` 事件，**永不静默重试**。看门狗缺省 observe 档：每 20 个 worker turn（`watchdog.everyTurns`）由一次性只读 LLM 判断是否空转，疑似只记 `watchdog_suspect`；actuate 是显式配置。每任务最多查 5 次，自身故障记 `watchdog_error`（≤3 条后静默）。瞬时故障（429/网络签名）原地退避重试 60s×attempt ≤3 次（`worker_retry` 留痕），不算熔断。
 
@@ -268,6 +269,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - 停止：`touch .agents/orchestrator/.watch-stop`（下周期即停并清文件）或 Ctrl-C；**drift 降级自动退出**（保险丝不允许自己插回去，人工 `drift --clear` 后重启）。
 - 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启。`--interval 0 --max-cycles N` 为测试档（不休眠）。
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
+- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。workflow.json 可选键 `"weatherHold": {"threshold": 3, "windowMinutes": 60}`，**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
 
 ### B6. 弃船演习（drill）
@@ -285,7 +287,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 ### C1. stats 与 follow（引水传令）
 
-- `stats --days 7 [--json]`：每卡 wall/turns/调试与审查迭代/重试/watchdog suspect/follow-up/token 峰值（budget_snapshot 口径）+ 各状态卡数与合并率汇总。JSON 形态：顶层 `summary` 嵌套对象 + `rows`。跨引擎精确对账用 reconcile。
+- `stats --days 7 [--json]`：每卡 wall/turns/调试与审查迭代/重试/watchdog suspect/follow-up/token 峰值（budget_snapshot 口径）+ 各状态卡数与合并率汇总。JSON 形态：顶层 `summary` 嵌套对象 + `rows`。跨引擎精确对账用 reconcile。汇总含**安全晴雨表**（`summary.near_miss`，人类输出「安全晴雨表」行）：watchdog suspect / 瞬时重试 / 偏航报警（`xte_alarm`，确定性规则只留痕）/ 事故调查包（`incident.md`，VDR 终态自动归档）四类近乎事故计数——险情比事故多，先看晴雨表再定流程调优。
 - `follow <task-id> "<补充指令>"`：给 running/ 的卡递话，写 `logs/<id>/inbox.md` + `follow_up` 事件，在下一次会话边界（调试返工/审查返工/resume/新 spawn）注入 prompt 尾部（20 条/4000 字符截断，前缀缓存友好）。只对 running 卡开放；awaiting-human 用 `retry --note`，pending 直接改卡文件。`status <task-id>` 会显示待送达条数。
 
 ### C2. drift（质量漂移保险丝）

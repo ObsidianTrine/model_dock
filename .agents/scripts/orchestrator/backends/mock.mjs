@@ -5,7 +5,13 @@
 //   ORCH_MOCK_WORKER_STATUS=done|stuck   worker 结果块的状态（默认 done）
 //   ORCH_MOCK_REVIEW_BLOCKERS=<n>        reviewer 输出的阻塞项数（默认 0）
 //   ORCH_MOCK_SPAWN_ERROR=1              spawn 直接抛错（测 cmdRun 异常兜底落 blocked）
+//   ORCH_MOCK_TRANSIENT=1                worker 中途死亡：无结果块 + 瞬时签名 stderr
+//                                        （走 isTransientWorkerFailure 原地退避重试路径，
+//                                        配合 ORCH_RETRY_WAIT_MS 收缩等待）
+//   ORCH_MOCK_NO_COMMIT=1                worker 写文件但不 git commit（测 xte no_commit 偏航）
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
+// worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
+// usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -142,17 +148,29 @@ export const mockBackend = {
     // worker 模式：模拟真实改动（写一个文件让 diff/门禁有内容可看）+ git 提交。
     // ORCH_MOCK_FILE 可指定改动文件路径（供分级裁决测试：docs/x.md → L0 等）；
     // 并发场景（有 ORCH_MOCK_DELAY_MS）按任务 id 推导独立文件，否则多任务共享 env 会写同一个文件
+    // ORCH_MOCK_TRANSIENT=1：worker 中途死亡（放在文件写入前——瞬时死亡不留半成品），
+    // 无结果块 + 瞬时签名 stderr → cmdRun 走 isTransientWorkerFailure 原地退避重试路径
+    if (process.env.ORCH_MOCK_TRANSIENT === '1') {
+      return {
+        exitCode: 1,
+        output: 'mock worker 中途死亡（ORCH_MOCK_TRANSIENT=1 注入瞬时故障，无结果块）',
+        stderrTail: 'request failed: 429 too many requests (ECONNRESET)',
+        pid: process.pid,
+      };
+    }
     const idMatch = /本次任务（([a-z0-9][a-z0-9-]*)，/.exec(prompt);
     const relFile = process.env.ORCH_MOCK_FILE ?? (delay > 0 && idMatch ? `docs/notes-${idMatch[1]}.md` : 'mock-worker-output.txt');
     const markerFile = path.join(cwd, relFile);
     fs.mkdirSync(path.dirname(markerFile), { recursive: true });
     fs.writeFileSync(markerFile, `mock worker output @ ${new Date().toISOString()}\n`);
     const { execFileSync } = await import('node:child_process');
-    try {
-      execFileSync('git', ['add', '-A'], { cwd, stdio: 'ignore' });
-      execFileSync('git', ['-c', 'user.name=mock-worker', '-c', 'user.email=mock@local', 'commit', '-m', 'chore: mock worker change'], { cwd, stdio: 'ignore' });
-    } catch {
-      // 已提交过/无改动时忽略，测试只关心流程
+    if (process.env.ORCH_MOCK_NO_COMMIT !== '1') {
+      try {
+        execFileSync('git', ['add', '-A'], { cwd, stdio: 'ignore' });
+        execFileSync('git', ['-c', 'user.name=mock-worker', '-c', 'user.email=mock@local', 'commit', '-m', 'chore: mock worker change'], { cwd, stdio: 'ignore' });
+      } catch {
+        // 已提交过/无改动时忽略，测试只关心流程
+      }
     }
     onEvent({ type: 'worker_turn', turn: 1, tool: 'Write', file: relFile });
 
@@ -168,6 +186,7 @@ export const mockBackend = {
       'notes_updated: true',
       '```',
     ].join('\n');
+    onEvent({ type: 'budget_snapshot', tokens_in: 4200, tokens_out: 1800 });
     return { exitCode: 0, output, usage: { tokensIn: 4200, tokensOut: 1800 }, pid: process.pid };
   },
 };
