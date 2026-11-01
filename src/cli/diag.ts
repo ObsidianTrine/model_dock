@@ -166,11 +166,20 @@ async function detectForeignCipherRefs(cfg: Config): Promise<string[]> {
     /* 解析失败：secrets.json 损坏由 secrets.store 项报告，此处不重复 */
   }
   for (const [pid, p] of Object.entries(cfg.providers)) {
+    // 坏 key_ref（条目缺字段/手编非串/解析拒绝）不整条崩 doctor：parseKeyRef 收紧（700e29f）
+    // 后非串会 SecretsError 穿透、undefined 直接 TypeError。坏条目解析不出引用、构不成
+    // 他机密文证据，跳过（由 provider.key 检查与 provider list 面点名），其余条目照常
+    if (typeof p.key_ref !== 'string') continue
     if (p.key_ref.includes('enc:mach:') || p.key_ref.includes('enc:dpapi:')) {
       hits.push(`${pid}(key_ref)`)
       continue
     }
-    const ref = parseKeyRef(p.key_ref)
+    let ref: ReturnType<typeof parseKeyRef>
+    try {
+      ref = parseKeyRef(p.key_ref)
+    } catch {
+      continue
+    }
     if (ref.scheme === 'file' && foreignIds.has(ref.id)) hits.push(`${pid}(key_ref→${ref.id})`)
   }
   return hits
@@ -358,18 +367,28 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
       else {
         ok('profile.active', t('active_profile「{a}」→ {p}（{u}）', 'active_profile "{a}" → {p} ({u})', { a: ap, p: provider.name ?? profile.provider, u: provider.base_url }))
         if (secretsOk) {
-          try {
-            const key = await getSecret(provider.key_ref)
-            if (key) ok('provider.key', t('上游 key 可读取（{k}）', 'Upstream key is readable ({k})', { k: maskSecret(key) }))
-            else bad('provider.key', t('上游 key 不可用（key_ref={r}）', 'Upstream key is unavailable (key_ref={r})', { r: provider.key_ref }), `modeldock provider set-key ${profile.provider}`)
-          } catch (e) {
-            // 读取失败（钥匙环被锁/暂时不可用）≠ 未配置密钥：前者是瞬时故障、解锁即恢复，
-            // 报 warn + 解锁 hint，不与缺失条目（bad + set-key）混同（REVIEW-19 语义对齐）
-            warn(
+          // 坏 key_ref（缺字段/手编非串）≠ 读取故障：报 bad + set-key hint，不落「解锁钥匙环」
+          // 的 warn 口径（700e29f 后 parseKeyRef 抛 SecretsError 曾被下方 catch 当瞬时故障）
+          if (typeof provider.key_ref !== 'string') {
+            bad(
               'provider.key',
-              t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }),
-              t('这是读取故障（如钥匙环被锁定），与未配置密钥不同：解锁钥匙环后重跑 modeldock doctor 即可恢复；反复出现可改用 file 存储后重新 set-key', 'This is a read failure (e.g. a locked keyring), not a missing key: unlock the keyring and re-run modeldock doctor to recover; if it keeps happening, switch to file storage and re-set the key')
+              t('上游 key_ref 非法（收到 {got}）：provider 条目缺 key_ref 字段', 'Upstream key_ref is invalid (got {got}): the provider entry is missing its key_ref field', { got: provider.key_ref === undefined ? 'undefined' : typeof provider.key_ref }),
+              `modeldock provider set-key ${profile.provider}`
             )
+          } else {
+            try {
+              const key = await getSecret(provider.key_ref)
+              if (key) ok('provider.key', t('上游 key 可读取（{k}）', 'Upstream key is readable ({k})', { k: maskSecret(key) }))
+              else bad('provider.key', t('上游 key 不可用（key_ref={r}）', 'Upstream key is unavailable (key_ref={r})', { r: provider.key_ref }), `modeldock provider set-key ${profile.provider}`)
+            } catch (e) {
+              // 读取失败（钥匙环被锁/暂时不可用）≠ 未配置密钥：前者是瞬时故障、解锁即恢复，
+              // 报 warn + 解锁 hint，不与缺失条目（bad + set-key）混同（REVIEW-19 语义对齐）
+              warn(
+                'provider.key',
+                t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }),
+                t('这是读取故障（如钥匙环被锁定），与未配置密钥不同：解锁钥匙环后重跑 modeldock doctor 即可恢复；反复出现可改用 file 存储后重新 set-key', 'This is a read failure (e.g. a locked keyring), not a missing key: unlock the keyring and re-run modeldock doctor to recover; if it keeps happening, switch to file storage and re-set the key')
+              )
+            }
           }
         }
         const reach = await upstreamReachable(provider.base_url, provider.proxy)

@@ -597,6 +597,23 @@ describe('applyImport（候选 → provider/profile/secret）', () => {
     }
   })
 
+  it('已有服务坏 key_ref（缺失/非串）不卡死导入：该条跳过 key 比对、候选照常落地（卡 30）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = await loadConfig()
+      cfg.security = { store: 'file' }
+      cfg.providers['badnum'] = { name: 'BN', base_url: 'https://up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 123 as unknown as string }
+      cfg.providers['badmiss'] = { name: 'BM', base_url: 'https://up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: undefined as unknown as string }
+      const report = await applyImport(cfg, [cand({ suggest_id: 'up', name: 'UP', key: 'sk-a' })], { withProfiles: false })
+      // 坏条目 key 降级 ''（与候选 key 'sk-a' 不等）→ 不误判重复，候选照常落地
+      expect(report.providers).toContain('up')
+      expect(report.skipped).toHaveLength(0)
+      expect(cfg.providers['up']).toBeDefined()
+    } finally {
+      h.restore()
+    }
+  })
+
   it('与已有服务同址同 key 跳过（env 引用 key 也参与比对）；id 撞名自动加后缀', async () => {
     const h = fakeHome()
     const saved = process.env.MD_TEST_IMP_KEY

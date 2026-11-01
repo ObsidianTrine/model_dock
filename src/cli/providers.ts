@@ -198,13 +198,22 @@ export async function cmdProviderList(): Promise<void> {
   const rows = []
   for (const id of ids) {
     const p = cfg.providers[id]
-    const key = await getSecret(p.key_ref)
+    // 单坏 key_ref 条目不炸整表（700e29f 同根残留，2026-11-02 复查）：缺字段/非串/解不开
+    // 降级为「(不可读)」，行本身带 id 即点名；其余条目照常显示
+    let key: string | null = null
+    let unreadable = false
+    try {
+      if (typeof p.key_ref !== 'string') unreadable = true
+      else key = await getSecret(p.key_ref)
+    } catch {
+      unreadable = true
+    }
     rows.push({
       id: id === activeProvider ? `${id} *` : id,
       name: p.name ?? '',
       base_url: p.base_url,
       protocol: p.protocol,
-      key: maskSecret(key),
+      key: unreadable ? t('(不可读)', '(unreadable)') : maskSecret(key),
       models: String(Object.keys(p.models ?? {}).length),
     })
   }
