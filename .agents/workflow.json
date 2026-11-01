@@ -37,5 +37,6 @@
   "tiers": {
     "heavy": { "tokenEnv": "MDK_TIER_HEAVY_TOKEN" },
     "light": { "tokenEnv": "MDK_TIER_LIGHT_TOKEN" }
-  }
+  },
+  "autoResume": { "enabled": true }
 }

@@ -36,6 +36,7 @@ import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateN
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { isTransientWorkerFailure } from './orchestrator/transient.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
@@ -1087,7 +1088,8 @@ function cmdResume(repoRoot, taskId, opts) {
     die(`任务 "${taskId}" 状态为 ${found.state}，只有 running/blocked/reviewing 可 resume。`);
   }
   if (found.state === 'blocked') moveCard(root, taskId, 'blocked', 'running');
-  appendEvent(logDir(repoRoot, taskId), 'resumed', { by: 'human' });
+  // --auto-resume：drain 自动续通道专用标记（orchestrator.mjs autoResumePass），事件留痕区别于人工 resume
+  appendEvent(logDir(repoRoot, taskId), 'resumed', { by: opts.flags?.has('--auto-resume') ? 'auto' : 'human' });
   log(`恢复任务 ${taskId}（带事件时间线与 NOTES.md 现场）……`);
   return cmdRun(repoRoot, taskId, { ...opts, interactive: false });
 }
@@ -1168,6 +1170,59 @@ async function drainSummaryNotify(repoRoot, done, tally, note) {
   } catch { /* 通知失败不阻断编排 */ }
 }
 
+/**
+ * blocked 卡有限自动续跑（长跑自主的关键小件；资格判定纯逻辑在 orchestrator/autoresume.mjs）。
+ * drain 选卡前调用：扫 blocked/ → 挑「transient 类失败 + 冷却已过」的卡（≤maxPerRun 张，
+ * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记写进卡 frontmatter
+ * （自动续后再 blocked 时下轮靠它判冷却——连续自动续失败不重试）→ 记 auto_resume
+ * { card, attempts } 事件 → spawn 既有 resume 子命令（闭环复用不复制逻辑；子进程隔离，
+ * 熔断 process.exit 不伤 drain 主循环，与派 run 子进程同哲学，--auto-resume 让 resumed
+ * 事件标记 by=auto 区别于人工）。上界三重：只续 transient 类、每卡 24h（cooldownHours）
+ * 最多 1 次、每次 drain ≤2 张（maxPerRun）。drift 降级 = 全人工，整个通道暂停；
+ * autoResume.enabled=false 完全不扫。
+ * @returns {string[]} 本轮自动续的卡 id（drain 汇总口径）
+ */
+function autoResumePass(repoRoot, root, cfg, opts) {
+  const ar = cfg.autoResume;
+  if (!ar?.enabled) return [];
+  if (readDegraded(repoRoot)) {
+    log('⏸ drift 降级期间自动续暂停（降级 = 全人工）——blocked 卡等人工 resume。');
+    return [];
+  }
+  const { candidates, unreadable, total } = scanBlockedCards(repoRoot, root);
+  if (total === 0) return [];
+  if (unreadable.length) {
+    console.warn(`[orchestrator] 自动续资格判定：${unreadable.length} 张 blocked 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
+  }
+  const picked = pickAutoResumeCandidates(candidates, {
+    maxPerRun: ar.maxPerRun,
+    cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+  });
+  const resumed = [];
+  for (const c of picked) {
+    const card = candidates.find((x) => x.id === c.id);
+    try {
+      fs.writeFileSync(card.path, withAutoResumedAt(card.text, autoResumedAtNow()));
+    } catch (e) {
+      // Windows EBUSY 等写失败：卡可能被编辑器占用——宁可不续也不无冷却地续（防反复烧钱）
+      console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
+      continue;
+    }
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts });
+    log(`⟳ 自动续 blocked 卡 ${c.id}（transient 类失败，worker_retry ${c.attempts} 次用尽；冷却期内至多此一次）`);
+    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
+      ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: { ...process.env, ...childEnvForHeldLock() },
+    });
+    resumed.push(c.id);
+    if (r.status !== 0) log(`任务 ${c.id} 自动续退出码 ${r.status}（已落 blocked/failed/或等待人工——冷却期内不再自动续）。`);
+  }
+  log(`自动续检查：blocked ${total} 张，候选 ${picked.length} 张，已续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}。`);
+  return resumed;
+}
+
 async function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -1182,6 +1237,8 @@ async function cmdDrain(repoRoot, opts) {
   try {
     const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
+    // 选卡前先过一遍 blocked 自动续通道（串行/并发路径共用；引擎预检通过才续，防止坏引擎把卡反复烧）
+    autoResumePass(repoRoot, root, cfg, opts);
     if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
