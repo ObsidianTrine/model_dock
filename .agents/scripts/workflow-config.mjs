@@ -6,6 +6,7 @@
 //   baseBranches    guard 保护的分支显式清单（可选；缺省 = main + baseBranch）。
 //                   多基准分支仓库用：如 develop+master 双分支保护 ["develop","master"]
 //   testCmd         finish/门禁的验证命令（字符串 | 数组 | {win32,unix} 平台映射）
+//   testCmdL0       纯文档卡（全部改动为 .md，实际分级 L0）的轻量门禁命令；缺省 = 照跑 testCmd
 //   buildCmd        构建门禁命令（缺省 = 跳过 build 门禁）
 //   lintCmd         lint 门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
 //   typecheckCmd    类型检查门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
@@ -110,6 +111,7 @@ export function loadWorkflowConfig(repoRoot) {
     baseBranch: typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null,
     baseBranches: strArr(raw.baseBranches),
     testCmd: resolveTestCmd(raw.testCmd),
+    testCmdL0: resolveTestCmd(raw.testCmdL0), // 纯文档卡（L0）的轻量验证命令；缺省 = 照跑 testCmd（行为不变）
     buildCmd: typeof raw.buildCmd === 'string' && raw.buildCmd.trim() ? raw.buildCmd.trim() : null,
     lintCmd: typeof raw.lintCmd === 'string' && raw.lintCmd.trim() ? raw.lintCmd.trim() : null,
     typecheckCmd: typeof raw.typecheckCmd === 'string' && raw.typecheckCmd.trim() ? raw.typecheckCmd.trim() : null,

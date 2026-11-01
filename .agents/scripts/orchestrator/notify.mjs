@@ -47,7 +47,7 @@ export function webhookPayload(webhook, title, body, ts) {
 
 /** 组装卡片落位通知正文（awaiting-human/blocked/failed——夜里无人值守时可扫读）。 */
 export function buildSettleSummary({ taskId, state, reason } = {}) {
-  const icon = state === 'awaiting-human' ? '⏸' : state === 'failed' ? '✗' : '⚠';
+  const icon = state === 'merged' ? '✅' : state === 'awaiting-human' ? '⏸' : state === 'failed' ? '✗' : '⚠';
   return `${icon} ${taskId ?? '?'} → ${state ?? '?'}${reason ? `：${String(reason).slice(0, 120)}` : ''}`;
 }
 

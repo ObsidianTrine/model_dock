@@ -78,5 +78,6 @@
   "escalation": {
     "enabled": true,
     "fallbackBackend": "claude-headless"
-  }
+  },
+  "testCmdL0": "npx vitest run test/docs-lint.test.ts"
 }
