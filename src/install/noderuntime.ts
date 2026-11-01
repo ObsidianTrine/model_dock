@@ -16,7 +16,7 @@ import { downloadText, downloadToFile, extractArchive, parseSums } from '../upda
  * 版本依据（2026-10 评估）：claude-code 引擎要求 >=22，dsh 依赖链最苛刻项 commander 15
  * 要求 >=22.12；24 为 Active LTS 且与 SEA 内嵌运行时 / CI / 开发机同大版本。
  */
-export const MANAGED_NODE_VERSION = '24.22.1'
+export const MANAGED_NODE_VERSION = '24.22.2'
 
 /** 大陆网络实测 npm 官方源直连超时、nodejs.org 偶发缓慢：zh 用户默认走阿里镜像 */
 const DEFAULT_NODE_MIRROR = 'https://cdn.npmmirror.com/binaries/node'

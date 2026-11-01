@@ -121,7 +121,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 ## 测试指南
 
 - 套件：test/ 下 75+ 个文件（store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，随演进增删——以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
-- **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入的 `VITEST`、tsx 种子脚本按配方显式 `MODELRDOCK_TEST=1`，或 **agent CLI 环境标记**——ZCode 的 `ZCODE_*`、Claude Code 的 `CLAUDECODE` 等，见 `src/util/fsx.ts` 的 AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受 agent 标记误伤；确属有意写真实 home 的场景（当前无）设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
+- **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入的 `VITEST`、tsx 种子脚本按配方显式 `MODELRDOCK_TEST=1`，或 **agent CLI 环境标记**——ZCode 的 `ZCODE_*`、Claude Code 的 `CLAUDECODE` 等，见 `src/util/fsx.ts` 的 AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受 agent 标记误伤；确属有意写真实 home 的场景（当前仅一处：test/autostart.test.ts 的 win 真注册表用例，CI runner 账号可弃、真实用户机器被 skip 守则挡住）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687（生产）/ 8890（用户 dev）/ 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
 - 新增 / 改动测试必须三大 OS 都能过：临时目录用 `os.tmpdir()` + `path.join()`，**不写死 `/tmp` 或盘符**；断言权限、进程行为、换行等平台差异前先想 Windows 会怎样（Windows CI 红多来自测试而非实现）。
