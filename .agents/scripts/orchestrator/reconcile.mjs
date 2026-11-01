@@ -115,6 +115,92 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
   };
 }
 
+/**
+ * 上游海况摘要（VDR 事故调查包用）：把任务事件时间窗投影到网关请求日志的**全量**请求。
+ * 与 reconcileTask 同窗口（worker_spawned 首条 → 终态尾条，±60s 容差）、同日期文件切分，
+ * 但不过滤失败请求——调查包关心的是上游风暴本身：429/5xx 分布、路由事件痕迹（reason
+ * 标记 failover_to:/down_all/skip_all）、时延分位、实测用量、最近一次失败现场。
+ * events 复用调用方已读的事件流（archiveIncident 手里有一份，避免重复读盘）。
+ * skipped=true 时带可操作 reason；未启用网关日志（gatewayLogsDir null）与对账同口径。
+ */
+export function upstreamSeaState(repoRoot, events) {
+  const spawned = events.filter((e) => e.type === 'worker_spawned');
+  if (!spawned.length) return { skipped: true, reason: '无 worker 运行记录' };
+  const start = parseTs(spawned[0].ts);
+  const endEvts = events.filter((e) => ['merged', 'failed', 'blocked'].includes(e.type));
+  const end = endEvts.length ? parseTs(endEvts[endEvts.length - 1].ts) : Date.now();
+
+  const gwDir = gatewayLogsDir(loadWorkflowConfig(repoRoot));
+  if (!gwDir) return { skipped: true, reason: '未启用网关日志（workflow.json gatewayLogDir 未配置）' };
+
+  const entries = [];
+  for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
+    const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    for (const entry of readGatewayLog(gwDir, date)) {
+      const ts = parseTs(entry.ts);
+      if (ts >= start - 60_000 && ts <= end + 60_000) entries.push(entry);
+    }
+  }
+  if (!entries.length) {
+    return { skipped: true, reason: '任务时间窗内网关日志无请求记录（worker 可能直连上游，或日志已被清理）' };
+  }
+
+  const ok = entries.filter((e) => e.status !== undefined && e.status < 400);
+  const failed = entries.filter((e) => e.status === undefined || e.status >= 400);
+  const tally = (list, key) => {
+    const m = {};
+    for (const e of list) {
+      const k = String(e[key] ?? 'n/a');
+      m[k] = (m[k] ?? 0) + 1;
+    }
+    return m;
+  };
+  const topN = (m, n) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n);
+  const lat = ok.map((e) => e.ms).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  const quantile = (q) => (lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * q))] : undefined);
+  // 用量口径与 reconcileTask 一致（缓存读+缓存建计入输入），但只计成功转发
+  const tokens = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0 };
+  for (const e of ok) {
+    const u = e.usage;
+    if (!u) continue;
+    tokens.in += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0);
+    tokens.out += u.output_tokens ?? 0;
+    tokens.cacheRead += u.cache_read_tokens ?? 0;
+    tokens.cacheCreate += u.cache_creation_tokens ?? 0;
+  }
+  // reason 非空即路由事件（日志过滤依赖「非空即事件」），failover_to:<id> 按前缀归并
+  const routeEvents = {};
+  for (const e of entries) {
+    if (!e.reason) continue;
+    const k = e.reason.startsWith('failover_to:') ? 'failover_to' : e.reason;
+    routeEvents[k] = (routeEvents[k] ?? 0) + 1;
+  }
+  const lastFail = failed.length ? failed[failed.length - 1] : null;
+  return {
+    skipped: false,
+    window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
+    requests: entries.length,
+    ok: ok.length,
+    failed: failed.length,
+    failStatus: tally(failed, 'status'),
+    providers: tally(entries, 'provider'),
+    models: tally(entries.filter((e) => e.model), 'model'),
+    latency: { p50: quantile(0.5), p95: quantile(0.95) },
+    tokens,
+    routeEvents,
+    lastFailure: lastFail
+      ? {
+          ts: lastFail.ts,
+          status: lastFail.status,
+          provider: lastFail.provider,
+          model: lastFail.model,
+          reason: lastFail.reason,
+          err: lastFail.err ? String(lastFail.err).slice(0, 160) : undefined,
+        }
+      : null,
+  };
+}
+
 /** 全部 merged 任务的对账汇总（按 divergence 降序，最可疑的在前）。 */
 export function reconcileAll(repoRoot, queueRootDir) {
   const out = [];

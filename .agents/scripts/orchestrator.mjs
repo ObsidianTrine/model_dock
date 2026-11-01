@@ -46,7 +46,7 @@ import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
-import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates } from './orchestrator/reconcile.mjs';
+import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstreamSeaState } from './orchestrator/reconcile.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
@@ -959,12 +959,54 @@ function createXteAlarm(qdir, worktree) {
   };
 }
 
+/** 海况数字人性化：≥1e6 → M、≥1e3 → k；时延 ms → s。 */
+function fmtSeaNum(n) {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
+}
+function fmtSeaMs(ms) {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+function fmtSeaCounts(m, n = 3) {
+  return Object.entries(m)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([k, v]) => `${k}×${v}`)
+    .join(', ');
+}
+
+/**
+ * 「上游海况」段渲染（数据来自 reconcile.mjs upstreamSeaState）：时间窗内网关请求的
+ * 失败分布/路由痕迹/时延/实测用量 + 最近失败现场。跳过（未配置/无记录）时给可操作
+ * 原因——调查包是附赠观测，缺数据不影响其他段。
+ */
+function renderSeaState(sea) {
+  if (sea.skipped) return `- （跳过：${sea.reason}）`;
+  const lines = [`- 请求 ${sea.requests} 条（成功 ${sea.ok} / 失败 ${sea.failed}）`];
+  if (sea.failed) lines.push(`- 失败状态分布：${fmtSeaCounts(sea.failStatus)}`);
+  const prov = fmtSeaCounts(sea.providers);
+  if (prov) lines.push(`- 上游分布（前 3）：${prov}`);
+  const models = fmtSeaCounts(sea.models);
+  if (models) lines.push(`- 模型分布（前 3）：${models}`);
+  if (Object.keys(sea.routeEvents).length) lines.push(`- 路由事件痕迹：${fmtSeaCounts(sea.routeEvents)}`);
+  if (sea.latency.p50 !== undefined) lines.push(`- 时延 p50/p95：${fmtSeaMs(sea.latency.p50)} / ${fmtSeaMs(sea.latency.p95)}`);
+  if (sea.tokens.in || sea.tokens.out) {
+    lines.push(`- 实测用量：输入 ${fmtSeaNum(sea.tokens.in)}（缓存读 ${fmtSeaNum(sea.tokens.cacheRead)} / 缓存建 ${fmtSeaNum(sea.tokens.cacheCreate)}）/ 输出 ${fmtSeaNum(sea.tokens.out)}`);
+  }
+  if (sea.lastFailure) {
+    const f = sea.lastFailure;
+    lines.push(
+      `- 最近失败：${f.ts}  status=${f.status ?? 'n/a'}  provider=${f.provider ?? '-'}${f.model ? `  model=${f.model}` : ''}${f.reason ? `  reason=${f.reason}` : ''}${f.err ? `  err=${f.err}` : ''}`,
+    );
+  }
+  return lines.join('\n');
+}
+
 /**
  * 事故调查包（VDR，voyage data recorder 航行数据记录仪）：任务落 blocked/failed
- * 终态时刷新 logs/<id>/incident.md——概况/复诵现场/事件时间线/stderr 尾/改动概要/
- * 审查结论 + 考题草稿建议。每次终态整文件覆盖（幂等，重复落位不堆文件）；只读现场
- * 还原，绝不改动队列状态、worktree 与题库。生成失败只告警——调查包是附赠观测，
- * 不能影响落位流程本身。
+ * 终态时刷新 logs/<id>/incident.md——概况/复诵现场/事件时间线/stderr 尾/上游海况
+ * （网关请求日志投影）/改动概要/审查结论 + 考题草稿建议。每次终态整文件覆盖（幂等，
+ * 重复落位不堆文件）；只读现场还原，绝不改动队列状态、worktree 与题库。生成失败只
+ * 告警——调查包是附赠观测，不能影响落位流程本身。
  */
 function archiveIncident(repoRoot, taskId, root, qdir, reason) {
   try {
@@ -1027,6 +1069,10 @@ function archiveIncident(repoRoot, taskId, root, qdir, reason) {
       '```',
       stderrTail || '（无 stderr 留痕）',
       '```',
+      '',
+      '## 上游海况（网关请求日志投影）',
+      '',
+      renderSeaState(upstreamSeaState(repoRoot, events)),
       '',
       '## 改动概要（worktree git diff --stat，相对基准分支）',
       '',

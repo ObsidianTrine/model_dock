@@ -1,10 +1,14 @@
 // B10 事故调查包（VDR）测试：终态落位自动生成 logs/<id>/incident.md（幂等覆盖），
-// 含任务概况（reason）/事件时间线/考题草稿。两个落位路径：worker 自报 stuck、预算熔断。
+// 含任务概况（reason）/事件时间线/考题草稿/上游海况（网关日志投影）。两个落位路径：
+// worker 自报 stuck、预算熔断。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { cardText, eventsOf, mkRepo, readCard, runOrch, tryOrch } from './helpers.js'
+import { fakeHome } from '../helpers.js'
+import { gatewayLogsDir } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
 
 function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
   const cardFile = path.join(repo, `card-${id}.md`)
@@ -113,4 +117,71 @@ describe('orchestrator incident > 人工终态也归档（VDR 全覆盖）', () 
       repo.cleanup()
     }
   })
+})
+
+describe('orchestrator incident > 上游海况（网关请求日志投影）', () => {
+  /** 往 fakeHome 网关日志写一条请求（字段对齐 src/gateway LogEntry）。 */
+  function writeSeaEntry(ts: string, status: number, extra: Record<string, unknown> = {}) {
+    const dir = gatewayLogsDir()
+    if (!dir) throw new Error('fakeHome 未生效')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(
+      path.join(dir, `gateway-${ts.slice(0, 10)}.jsonl`),
+      JSON.stringify({ ts, harness: 'zcode', profile: 'orch', provider: 'up', model: 'glm-4.7', path: '/v1/messages', status, ...extra }) + '\n',
+    )
+  }
+
+  it('resume 再落位时覆盖出带数据的海况段：请求/失败分布/路由痕迹/时延/用量/最近失败', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'vdr-sea')
+      runOrch(repo.root, 'run vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      // 第一次归档时还没有网关日志；窗口从首个 worker_spawned 起算（±60s 容差），
+      // 落在窗口内的 3 笔在 resume 的第二次归档中被投影进 incident.md。
+      const evts = eventsOf(repo.root, 'vdr-sea') as Array<{ type: string; ts: string }>
+      const startMs = new Date(evts.find((e) => e.type === 'worker_spawned')!.ts).getTime()
+      writeSeaEntry(toIsoLocal(new Date(startMs)), 200, { ms: 1200, usage: { input_tokens: 1500, output_tokens: 200, cache_read_tokens: 900, cache_creation_tokens: 0 } })
+      writeSeaEntry(toIsoLocal(new Date(startMs + 1000)), 429, { ms: 30 })
+      writeSeaEntry(toIsoLocal(new Date(startMs + 2000)), 500, { ms: 40, reason: 'down_all' })
+      runOrch(repo.root, 'resume vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+
+      const text = fs.readFileSync(incidentPath(repo.root, 'vdr-sea'), 'utf8')
+      expect(text).toContain('## 上游海况（网关请求日志投影）')
+      expect(text).toContain('请求 3 条（成功 1 / 失败 2）')
+      expect(text).toContain('429×1')
+      expect(text).toContain('down_all×1')
+      expect(text).toContain('时延 p50/p95：1.2s / 1.2s')
+      expect(text).toContain('输入 2.4k（缓存读 900 / 缓存建 0）/ 输出 200')
+      expect(text).toContain('最近失败')
+      expect(text).toContain('reason=down_all')
+      // 未投影段不该出现在有数据的包里
+      expect(text).not.toContain('（跳过：')
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  }, 120_000)
+
+  it('未启用网关日志（无 gatewayLogDir 且无 env 重定向）→ 跳过并给可操作原因', () => {
+    const savedFake = process.env.MODELRDOCK_FAKE_HOME
+    const savedHome = process.env.MODELRDOCK_HOME
+    delete process.env.MODELRDOCK_FAKE_HOME
+    delete process.env.MODELRDOCK_HOME
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'vdr-nosea')
+      runOrch(repo.root, 'run vdr-nosea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      const text = fs.readFileSync(incidentPath(repo.root, 'vdr-nosea'), 'utf8')
+      expect(text).toContain('## 上游海况（网关请求日志投影）')
+      expect(text).toContain('未启用网关日志')
+      expect(text).toContain('gatewayLogDir')
+    } finally {
+      repo.cleanup()
+      if (savedFake !== undefined) process.env.MODELRDOCK_FAKE_HOME = savedFake
+      else delete process.env.MODELRDOCK_FAKE_HOME
+      if (savedHome !== undefined) process.env.MODELRDOCK_HOME = savedHome
+      else delete process.env.MODELRDOCK_HOME
+    }
+  }, 90_000)
 })

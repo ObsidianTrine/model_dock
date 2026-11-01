@@ -321,7 +321,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 ### C3. reconcile（狗粮对账）
 
-`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）。纯只读（除 --fix-states）。
+`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）。纯只读（除 --fix-states）。事故调查包（incident.md）的「上游海况」段复用同一投影（不过滤失败请求）：时间窗内请求/失败分布、路由事件痕迹（failover/down_all）、时延 p50/p95、实测用量与最近失败现场——回答「预算烧在哪」。
 
 ## D. 周边
 
