@@ -28,11 +28,12 @@ export function buildWorkerPrompt(card, ctx) {
     parts.push(`# 流程层：playbook「${name}」\n\n${fs.readFileSync(p, 'utf8')}`);
   }
 
-  // [任务层] 目标 / 验收标准 / 红线 / 背景
+  // [任务层] 目标 / 验收标准 / 红线 / 航次计划（可选）/ 背景
   parts.push(
     `# 任务层：本次任务（${meta.id}，类型 ${meta.type}）\n\n` +
       `## 目标\n${body.goal}\n\n## 验收标准（orchestrator 会机器验证，务必逐条满足）\n${body.acceptance}\n\n` +
       (body.redlines ? `## 红线（违反任一条任务直接失败）\n${body.redlines}\n\n` : '') +
+      (body.plan ? `## 航次计划（按检查点推进；偏离航线时在 NOTES.md 说明原因）\n${body.plan}\n\n` : '') +
       (body.background ? `## 背景\n${body.background}\n\n` : '')
   );
 
@@ -49,9 +50,12 @@ export function buildWorkerPrompt(card, ctx) {
   );
 
   // [纪律层] 长时自治运行的结束纪律（Anthropic 长时程 harness 结论 + 实跑教训：
-  // worker 被权限拒绝后换形态重试 15+ 次并派子代理同拒，烧穿预算零产出）
+  // worker 被权限拒绝后换形态重试 15+ 次并派子代理同拒，烧穿预算零产出）。
+  // 第 0 条复诵协议（closed-loop repeat-back）：接收方用自己的话复述指令，发送方
+  // 核对一致后放行——把「理解错方向」拦在开工前，而不是烧完预算才发现。
   parts.push(
     `# 结束纪律（必须遵守）\n\n` +
+      `0. 开工第一件事：把托运单**复诵**进 NOTES.md——目的地（目标）、交货标准（验收标准）、禁航区（红线）、航次计划各一行。船长（编排器）与验船师会核对复诵与执行是否一致；复诵即承诺。\n` +
       `1. 报告 done 之前，亲自跑一遍测试命令（见验收标准）确认全绿——orchestrator 会机器复核，自报与实测不符时以实测为准。\n` +
       `2. 收尾现场干净：本卡全部改动已在 worktree 内 git add + git commit，NOTES.md 已更新。\n` +
       `3. 只做本卡范围内的事（对照验收标准与预期改动范围）：不顺手重构、不修无关问题——越界改动会被门禁打回。\n` +
@@ -219,7 +223,7 @@ export function buildPlannerPrompt(intentText, repoRoot) {
     `  - feature-branch\n` +
     `gate: L3\n` +
     `---\n` +
-    `\n# 目标\n<意图的去歧义重述：改什么、为什么>\n\n# 验收标准\n<必须可机器检查>\n\n# 背景\n<探索到的现状与线索>\n` +
+    `\n# 目标\n<意图的去歧义重述：改什么、为什么>\n\n# 验收标准\n<必须可机器检查>\n\n# 航次计划\n<3-6 个检查点，每个检查点一句话「做什么 + 怎么验证」；末尾一行「备选路线：若 X 不通则 Y」>\n\n# 背景\n<探索到的现状与线索>\n` +
     `${fence}\n\n` +
     `硬性要求：\n` +
     `1. gate 固定写 L3（合并级别由系统按实际改动分级裁决，不由你决定）；\n` +
@@ -227,7 +231,8 @@ export function buildPlannerPrompt(intentText, repoRoot) {
     `   禁止空洞标准；\n` +
     `3. files_hint 写真实范围（你确认过的路径），越准越好；写裸 glob（如 src/presets/**），不要用反引号或引号包住；\n` +
     `4. created_by 固定写 planner；\n` +
-    `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `5. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
+    `6. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
 
@@ -286,7 +291,7 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `gate: L3\n` +
     `proposal: true\n` +
     `---\n` +
-    `\n# 目标\n<做什么、为什么；引用目标面条目或巡检信号来源>\n\n# 验收标准\n<必须可机器检查：具体行为断言>\n\n# 背景\n<探索到的现状与线索>\n` +
+    `\n# 目标\n<做什么、为什么；引用目标面条目或巡检信号来源>\n\n# 验收标准\n<必须可机器检查：具体行为断言>\n\n# 航次计划\n<3-6 个检查点，每个检查点一句话「做什么 + 怎么验证」；末尾一行「备选路线：若 X 不通则 Y」>\n\n# 背景\n<探索到的现状与线索>\n` +
     `${fence}\n\n` +
     `硬性要求：\n` +
     `1. 验收标准必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止只有「测试全绿」这类空洞标准；\n` +
@@ -294,7 +299,8 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `3. created_by 固定 planner、gate 固定 L3、frontmatter 带 proposal: true；\n` +
     `4. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +
     `5. 价值说不清或验收写不具体 → 宁可不出这张卡；\n` +
-    `6. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `6. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
+    `7. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
 

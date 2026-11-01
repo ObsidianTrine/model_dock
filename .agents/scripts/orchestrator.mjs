@@ -229,6 +229,25 @@ function installWorkspaceDeps(worktree, taskId) {
 // run 主流程
 // ---------------------------------------------------------------------------
 
+/**
+ * 引水闸判定（compulsory pilotage）：受限航道 = deps 类型卡，或 files_hint 与
+ * 核心/发布路径相交。这类改动影响面大、回归代价高，未经人工确认不得自动开航
+ * （cmdRun 开航前拦截；drain 侧跳过并列「待引水」清单）。
+ */
+function pilotageRequired(meta, cfg) {
+  return pilotageReason(meta, cfg) !== null;
+}
+
+/** 命中受限航道的具体原因；不在受限航道返回 null（cmdRun 报错与 drain 日志共用文案）。
+ *  核心/发布路径都未配置时 hintsOverlap 与空集相交恒真（「完全通配=独占」语义），
+ *  会把所有卡误判成引水卡——路径表为空 = 航道未设限，直接放行。 */
+function pilotageReason(meta, cfg) {
+  if (meta.type === 'deps') return 'type: deps（依赖变更）';
+  const restricted = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
+  if (restricted.length && hintsOverlap(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
+  return null;
+}
+
 async function cmdRun(repoRoot, taskId, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -256,6 +275,18 @@ async function cmdRun(repoRoot, taskId, opts) {
     const owner = taskLock.owner;
     die(`任务 "${taskId}" 已有进行中的闭环（pid ${owner.pid}${owner.cmd ? `，${owner.cmd}` : ''}${owner.acquired_at ? `，始于 ${owner.acquired_at}` : ''}）——同一任务不允许两个进程同时驱动（两个 worker 会写同一个 worktree）。\n`
       + `  等当前 run 结束后再操作；确认进程已卡死时，终止 pid ${owner.pid} 后重试（陈锁自动接管）。`);
+  }
+
+  // 引水闸（compulsory pilotage）：受限航道卡（deps 类型 / files_hint 命中核心·发布路径）
+  // 未经人工确认不得开航——这类改动影响面大、回归风险高，先由人过目再放行。卡留在
+  // pending/ 原地不动（die 在 moveCard 之前）；确认后带 --pilot-approved 重跑（未知
+  // --flag 由 main 收进 opts.flags，无需改参数解析）。锁的释放沿用陈锁自动接管语义，
+  // 与下方 ui_check die 路径一致。
+  if (found.state === 'pending' && pilotageRequired(meta, cfg) && !opts.flags?.has('--pilot-approved')) {
+    appendEvent(qdir, 'pilotage_required', { reason: pilotageReason(meta, cfg) });
+    die(`本卡属于受限航道（${pilotageReason(meta, cfg)}），开航前需人工引水确认。\n`
+      + `  确认后放行：node .agents/scripts/orchestrator.mjs run ${taskId} --pilot-approved\n`
+      + `  （drain 不会派发未确认的引水卡；确认过的卡请逐张显式 run。）`);
   }
 
   // ui_check 预校验：卡要求 UI 冒烟但仓库没配 uiCheckCmd → 快速失败，卡留 pending 不动
@@ -488,15 +519,24 @@ async function cmdRun(repoRoot, taskId, opts) {
   try {
     let promptText = buildWorkerPrompt(card, ctx);
     if (resuming) {
-      // 崩溃恢复：把 events 时间线摘要 + NOTES.md 现场注入，worker 从断点续起。
+      // 崩溃恢复 = 接班：现场重组成「交接班单」（值班交接四要素）注入——船位（事件
+      // 时间线折叠尾部）、航向与天气（NOTES.md 全文，start 模板已含四要素段）、油量
+      // （最后一条 budget_snapshot 对 max_tokens 的占比；接棒预算已重置须明说，防
+      // worker 误以为余量紧张提前收工）。worker 按单续航，不重做已完成的工作。
       // 时间线先折叠（coalesceEvents）：逐 turn 高频事件塌缩成 ×N 一行，同样 60 条
       // 原始事件的预算能覆盖比裸截 12 条长得多的中断前窗口。
       const notes = safeRead(path.join(worktree, 'NOTES.md'));
+      const snap = [...events].reverse().find((e) => e.type === 'budget_snapshot' && Number.isFinite(e.tokens_in));
+      const maxTokens = meta.budget?.max_tokens;
+      const oil = snap && maxTokens
+        ? `油量：已耗 ${Math.round((snap.tokens_in / maxTokens) * 100)}%（${snap.tokens_in} / ${maxTokens} tokens）；本次接棒预算已重置`
+        : '油量：尚无用量快照（上次中断在首次记账之前）；本次接棒预算已重置';
       promptText +=
-        `\n\n---\n\n# 恢复上下文（上次运行中断）\n\n` +
-        `上次运行在中途被中断。以下是事件时间线与 worktree 现场笔记，请先核对已完成部分，再继续未完成的部分（不要重做已完成的工作）：\n\n` +
-        `## 事件时间线（尾部）\n${formatTimeline(coalesceEvents(events.slice(-60)))}\n\n` +
-        `## worktree NOTES.md 现场\n${notes || '（空——请先补全 NOTES.md 再继续）'}\n`;
+        `\n\n---\n\n# 交接班单（上次值班留下的现场）\n\n` +
+        `上次值班在中途被中断。按四要素核对现场：先核对船位（已完成部分，不要重做），再沿航向继续未完成的部分；NOTES.md 里有上次值班自己留的四要素记录。\n\n` +
+        `## 船位（事件时间线尾部）\n${formatTimeline(coalesceEvents(events.slice(-60)))}\n\n` +
+        `## 航向与天气（worktree NOTES.md 全文）\n${notes || '（空——请先按模板补全 NOTES.md 的交接班四要素再继续）'}\n\n` +
+        `## 油量\n${oil}\n`;
     }
     // 会话边界送达 follow-up（订阅直通，cmdFollow 写 inbox）：初始 spawn / fixup /
     // 审查返工 / resume 是运行中会话唯一的注入窗口，一律追加在 prompt 尾部。
@@ -1244,19 +1284,35 @@ async function cmdDrain(repoRoot, opts) {
     let done = 0;
     let lastTried = null;
     const tally = {};
+    // 引水闸跳过清单：受限航道卡（deps/核心·发布路径）不派发，留在 pending/ 等人工
+    // 逐张确认——drain 不因引水卡 die，也不烧它的预算（skipIds 让 pickNextCard 绕开重选）。
+    const skipIds = new Set();
+    const awaitingPilotage = [];
     for (;;) {
       if (done >= max) {
         log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。本轮落位：${drainTallyLine(tally)}。`);
         await drainSummaryNotify(repoRoot, done, tally, `已达 --max ${max} 轮上限`);
         return;
       }
-      const next = pickNextCard(root);
+      const next = pickNextCard(root, { skipIds });
       if (!next) {
-        const stuck = listCards(root, 'pending');
+        // 引水卡也在 pending/：从「解析失败」清单里排除（它们不是坏卡，是待确认）
+        const stuck = listCards(root, 'pending').filter((id) => !skipIds.has(id));
+        if (awaitingPilotage.length) {
+          log(`⏸ 待引水清单：${awaitingPilotage.length} 张卡属受限航道，开航前需人工引水确认（队列保留不动）：`);
+          for (const id of awaitingPilotage) log(`  node .agents/scripts/orchestrator.mjs run ${id} --pilot-approved`);
+        }
         if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
-        else log(`队列已清空：本次 drain 共跑完 ${done} 个任务（${drainTallyLine(tally)}）。`);
-        await drainSummaryNotify(repoRoot, done, tally, stuck.length ? '有解析失败的卡待人工修' : '队列已清空');
+        else if (!awaitingPilotage.length) log(`队列已清空：本次 drain 共跑完 ${done} 个任务（${drainTallyLine(tally)}）。`);
+        await drainSummaryNotify(repoRoot, done, tally, stuck.length ? '有解析失败的卡待人工修' : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空');
         return;
+      }
+      // 引水闸：核心路径/deps 卡未经人工确认不派发——记入清单继续下一张（不改队列）
+      if (pilotageRequired(next.meta, cfg)) {
+        skipIds.add(next.id);
+        if (!awaitingPilotage.includes(next.id)) awaitingPilotage.push(next.id);
+        log(`⏸ 任务 ${next.id} 属受限航道（${pilotageReason(next.meta, cfg)}）——待引水确认，本轮跳过。`);
+        continue;
       }
       // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
       // 连续两轮选中同一任务 = 子进程根本没能处理它（执行环境损坏/脚本缺失），立即停止而不是烧下去。
@@ -1294,11 +1350,16 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
   const active = new Map(); // pid -> { id, hint }
   const retryCount = new Map(); // id -> 调度次数
   const blacklisted = new Set();
+  // 引水闸跳过清单（与串行 drain 同语义）：受限航道卡跳过不派发，留 pending/ 等人工确认
+  const pilotageSkip = new Set();
+  const awaitingPilotage = [];
+  const pilotCfg = loadWorkflowConfig(repoRoot);
   const tally = {};
   let launched = 0;
   let finished = 0;
   let warnedStuck = false;
   let summarySent = false;
+  let pilotageListed = false; // 待引水清单只打一次（pump 每轮收尾都会重入，防刷屏）
 
   const launch = (card) => {
     retryCount.set(card.id, (retryCount.get(card.id) ?? 0) + 1);
@@ -1322,11 +1383,12 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
       else if (code !== 0) log(`任务 ${card.id} 退出码 ${code}（已落 blocked/failed/或等待人工，继续调度）。`);
       const state = findCard(root, card.id)?.state;
       if (state) tally[state] = (tally[state] ?? 0) + 1;
-      // 终局摘要（尽力而为）：全部发射的子进程已收尾且无后续可调度（或已达 --max 上限）
-      const noMore = launched >= max || !listCards(root, 'pending').some((id) => !blacklisted.has(id));
+      // 终局摘要（尽力而为）：全部发射的子进程已收尾且无后续可调度（或已达 --max 上限）。
+      // 引水跳过卡与拉黑卡同等对待：不算「可调度」，否则摘要把它们误报成未跑任务。
+      const noMore = launched >= max || !listCards(root, 'pending').some((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
       if (!summarySent && active.size === 0 && finished === launched && noMore) {
         summarySent = true;
-        void drainSummaryNotify(repoRoot, finished, tally, launched >= max ? `已达 --max ${max} 轮上限` : '队列已清空');
+        void drainSummaryNotify(repoRoot, finished, tally, launched >= max ? `已达 --max ${max} 轮上限` : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空');
       }
       pump();
     };
@@ -1345,7 +1407,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
         if (active.size === 0) log(`已达 --max ${max} 轮上限，停止调度。`);
         return;
       }
-      const candidates = listCards(root, 'pending').filter((id) => !blacklisted.has(id));
+      const candidates = listCards(root, 'pending').filter((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
       let picked = null;
       for (const id of candidates) {
         if ((retryCount.get(id) ?? 0) >= 2) {
@@ -1355,6 +1417,13 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
         }
         try {
           const card = loadCard(fs.readFileSync(cardPath(root, 'pending', id), 'utf8'), `${id}.md`);
+          // 引水闸：受限航道卡不派发（记清单跳过，drain 不因引水卡中断）
+          if (pilotageRequired(card.meta, pilotCfg)) {
+            pilotageSkip.add(id);
+            if (!awaitingPilotage.includes(id)) awaitingPilotage.push(id);
+            log(`⏸ 任务 ${id} 属受限航道（${pilotageReason(card.meta, pilotCfg)}）——待引水确认，不派发。`);
+            continue;
+          }
           const conflicts = [...active.values()].some((a) => hintsOverlap(a.hint, card.meta.files_hint));
           if (!conflicts) {
             // loadCard 返回 {meta, body}，id 在 meta 里——调度内部统一为 {id, meta} 形状
@@ -1367,11 +1436,16 @@ function cmdDrainParallel(repoRoot, root, opts, workers) {
       }
       if (!picked) {
         if (active.size === 0) {
-          const stuck = listCards(root, 'pending');
+          const stuck = listCards(root, 'pending').filter((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
+          if (awaitingPilotage.length && !pilotageListed) {
+            pilotageListed = true;
+            log(`⏸ 待引水清单：${awaitingPilotage.length} 张卡属受限航道，开航前需人工引水确认（队列保留不动）：`);
+            for (const id of awaitingPilotage) log(`  node .agents/scripts/orchestrator.mjs run ${id} --pilot-approved`);
+          }
           if (stuck.length && !warnedStuck) {
             warnedStuck = true;
             log(`无可并行调度的任务（其余卡与在跑任务分区冲突、已拉黑或解析失败）。本次 drain 结束：完成 ${finished} 个。`);
-          } else if (!stuck.length) {
+          } else if (!stuck.length && !awaitingPilotage.length) {
             log(`队列已清空：本次 drain 共跑完 ${finished} 个任务（并发 ${workers}）。`);
           }
           if (active.size === 0) return;

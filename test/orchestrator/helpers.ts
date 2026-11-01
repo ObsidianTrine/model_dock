@@ -71,8 +71,8 @@ function rmRfRetry(p: string): void {
   }
 }
 
-/** 生成任务卡 markdown。 */
-export function cardText(overrides: Record<string, unknown> = {}, body = ''): string {
+/** 生成任务卡 markdown。plan 非空时追加「# 航次计划」段（缺省不带，兼容旧四段卡用例）。 */
+export function cardText(overrides: Record<string, unknown> = {}, body = '', plan = ''): string {
   const meta: Record<string, unknown> = {
     id: 'test-task',
     type: 'bugfix',
@@ -96,7 +96,10 @@ export function cardText(overrides: Record<string, unknown> = {}, body = ''): st
       for (const [bk, bv] of Object.entries(v as Record<string, unknown>)) fm.push(`  ${bk}: ${JSON.stringify(bv)}`)
     }
   }
-  return `---\n${fm.join('\n')}\n---\n\n# 目标\n${body || '测试任务目标。'}\n\n# 验收标准\n- 通过\n`
+  return (
+    `---\n${fm.join('\n')}\n---\n\n# 目标\n${body || '测试任务目标。'}\n\n# 验收标准\n- 通过\n` +
+    (plan ? `\n# 航次计划\n${plan}\n` : '')
+  )
 }
 
 /** 在临时仓库里跑 orchestrator CLI（子进程，行为由 env 注入）。 */
