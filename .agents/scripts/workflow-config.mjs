@@ -34,6 +34,12 @@
 //   watchdog        LLM 进展看门狗：{ mode?: 'observe'|'actuate', everyTurns?: 正整数 }。
 //                   缺省 observe（疑似空转只记 watchdog_suspect 事件，不动作）；actuate 下
 //                   连续 2 次 suspect 走熔断 kill→blocked。非法值回落缺省并 console.warn 告警
+//   autopilot       自主提案的授权配置：{ enabled?: bool（缺省 false=全人工），
+//                   autoSubmitTypes?: 卡类型白名单（缺省 ["docs"]），
+//                   autoDrainPerCycle?: 正整数（watch/nightly 每周期 drain 上限，缺省 0=不限），
+//                   maxProposalsPerCycle?: 正整数（propose 单轮提案上限，缺省 3） }。
+//                   授权语义见 autopilot.mjs：自动提交 ≠ 自动合并（gate 覆写 L1，
+//                   实际分级 L2/L3 照样回人工闸门）；deps/核心路径/人工草稿永不自动
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -106,6 +112,7 @@ export function loadWorkflowConfig(repoRoot) {
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
+    autopilot: resolveAutopilot(raw.autopilot),
   };
 }
 
@@ -129,6 +136,36 @@ function resolveWatchdog(raw) {
   if (raw.everyTurns !== undefined) {
     if (Number.isInteger(raw.everyTurns) && raw.everyTurns > 0) out.everyTurns = raw.everyTurns;
     else warn(`everyTurns ${JSON.stringify(raw.everyTurns)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** autopilot 授权配置解析：{ enabled, autoSubmitTypes, autoDrainPerCycle, maxProposalsPerCycle }。
+ *  缺省 = 全关闭（enabled: false，行为与历史版本一致）。非法值回落缺省并 console.warn 告警；
+ *  键缺失 = 沿用缺省，不告警。autoSubmitTypes 过滤到已知卡类型白名单。 */
+function resolveAutopilot(raw) {
+  const DEFAULTS = { enabled: false, autoSubmitTypes: ['docs'], autoDrainPerCycle: 0, maxProposalsPerCycle: 3 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] autopilot 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autopilot 键：{ enabled?: boolean, autoSubmitTypes?: 卡类型数组, autoDrainPerCycle?: 正整数, maxProposalsPerCycle?: 正整数 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, autoSubmitTypes?, autoDrainPerCycle?, maxProposalsPerCycle? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) out.enabled = raw.enabled === true;
+  if (raw.autoSubmitTypes !== undefined) {
+    const TYPES = ['bugfix', 'feature', 'docs', 'deps', 'refactor'];
+    const arr = Array.isArray(raw.autoSubmitTypes)
+      ? [...new Set(raw.autoSubmitTypes.map((x) => String(x).trim()).filter((x) => TYPES.includes(x)))]
+      : [];
+    out.autoSubmitTypes = arr;
+  }
+  if (raw.autoDrainPerCycle !== undefined) {
+    out.autoDrainPerCycle = Number.isInteger(raw.autoDrainPerCycle) && raw.autoDrainPerCycle > 0 ? raw.autoDrainPerCycle : 0;
+  }
+  if (raw.maxProposalsPerCycle !== undefined) {
+    out.maxProposalsPerCycle = Number.isInteger(raw.maxProposalsPerCycle) && raw.maxProposalsPerCycle > 0 ? raw.maxProposalsPerCycle : DEFAULTS.maxProposalsPerCycle;
   }
   return out;
 }

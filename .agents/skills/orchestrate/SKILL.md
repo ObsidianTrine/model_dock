@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含三条路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检、release-propose 发版提案。
+description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用，不要因对话语义自动加载。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。含路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。
 ---
 
 # orchestrate —— 把任务交给自治编排闭环
@@ -15,7 +15,8 @@ description: 显式斜杠技能——仅当用户输入 /orchestrate 时使用�
 |---|---|
 | 目标明确的小改动（bugfix / 小功能 / 文档 / 测试） | **主流程**（下方第 1–4 步） |
 | 特性级改动，用户要「先出设计/方案/spec」 | **路径 B**（spec 三件套，见文末） |
-| 巡检 / 夜间自动化 / 定时任务 / schedule | **路径 C**（nightly / schedule，见文末） |
+| 巡检 / 夜间自动化 / 定时任务 / schedule / 审阅巡检提案 | **路径 C**（nightly / schedule / 提案审阅，见文末） |
+| 长时间无人值守自治（连续跑队列 + 自动巡检/提案） | **路径 E**（watch 连续自治，见文末） |
 | 发版 / 盘点可发内容 / 版本号 | **路径 D**（release-propose，见文末） |
 
 主流程的适用判定：验收标准可写成**可机器检查的断言**（测试命令、文件存在性、grep 模式）、改动范围清晰。不适合（拒绝并说明，建议手动走 feature-branch 工作流）：探索性/架构级改动（验收标准写不出来）、需要频繁人工决策、要动发布流水线的任务——特性级改动若用户接受「先设计」，转路径 B 而不是直接拒。
@@ -75,7 +76,7 @@ run/drain 在非交互环境下不会停在人工闸门——到 awaiting-human 
 
 ## 第 3 步：盯进度、处理闸门
 
-等待期间可用 `status` / `logs <task-id>` 查看事件时间线（轮询即可，不必密集）。
+等待期间可用 `status` / `logs <task-id>` 查看事件时间线（轮询即可，不必密集）。任务进行中用户补充了要求或约束（改方向、加验收点）时，用直通通道送达而**不必**打回重跑：`node .agents/scripts/orchestrator.mjs follow <task-id> "<补充指令>"`——指令会在下次会话边界（调试返工/审查返工/resume）注入 worker；只对 running 状态的卡可用，其他状态仍走 retry --note / 改卡。
 
 后台 run 结束后 `node .agents/scripts/orchestrator.mjs status` 看每张卡落在哪：
 
@@ -102,11 +103,21 @@ run/drain 在非交互环境下不会停在人工闸门——到 awaiting-human 
 5. 卡默认 `gate: L3`（逐张等人 approve）。用户已在对话中明确授权自动合并时，可参照第 1 步对 intent 卡的同一处理：run 前把每张卡的 gate 改成 L1；分级裁决与 scope 纯度照常生效。
 6. 之后回到主流程第 2–4 步（run/drain 后台跑、闸门处理、汇报）。
 
-## 路径 C：巡检与定时调度（nightly / schedule）
+## 路径 C：巡检与定时调度（nightly / schedule / 提案审阅）
 
-1. **手动巡检**：`node .agents/scripts/orchestrator.mjs nightly`（后台；scan 落卡 + drift 报告 + 队列摘要，默认零烧钱不跑 worker）。跑完向用户汇报：新生成卡、待审任务、漂移状态；卡要不要 drain 由用户决定（要跑就回主流程第 2 步）。`--tests` 加慢信号源、`--auto N` 夜间档语义见 `.agents/workflows/orchestrator.md`。
-2. **装定时**：先 `schedule status` 报现状；**用户明确要求才 install**——默认档零烧钱；`--auto N` 档夜间真跑 worker（烧钱），装前向用户说明并确认。装完报告：每日时刻、日志路径（`.agents/orchestrator/logs/nightly.log`）、卸载命令（`schedule uninstall`）。
-3. **卸载/查询**：`schedule uninstall` / `schedule status` 直接执行并回报。
+1. **手动巡检**：`node .agents/scripts/orchestrator.mjs nightly`（后台；scan 出提案落 drafts + drift 报告 + 队列摘要，默认零烧钱不跑 worker）。`--plan` 加跑 planner 需求综合（烧钱，出对齐 goals.md 的高质量提案）。跑完向用户汇报：新提案（drafts/ 清单）、待审任务、漂移状态。
+2. **提案审阅（人出现在这里）**：巡检/planner 的产出都是提案（drafts/，`proposal: true`），不直接进队列。逐张读提案文件，向用户给出一句话采纳建议；用户点头后 `submit .agents/orchestrator/drafts/<id>.md` 提交并回主流程第 2 步跑。若 workflow.json 已开 `autopilot.enabled`，白名单类型（缺省仅 docs，deps/核心路径/人工草稿永不自动）的提案已被自动提交（gate 覆写 L1，实际合并仍由分级裁决）——汇报时说明哪些是自动提交的。汇总度量用 `stats --days 7`。
+3. **装定时**：先 `schedule status` 报现状；**用户明确要求才 install**——默认档零烧钱；`--auto N` 档夜间真跑 worker（烧钱），装前向用户说明并确认；`--mode watch` 注册常驻循环（转路径 E 语义）。装完报告：每日时刻、日志路径（`.agents/orchestrator/logs/nightly.log`）、卸载命令（`schedule uninstall`）。
+4. **卸载/查询**：`schedule uninstall` / `schedule status` 直接执行并回报。
+
+## 路径 E：连续自治运行（watch）
+
+用户要「长时间自己跑/无人值守自治」时：
+
+1. 先确认授权面：watch 本体只 drain 人工提交的卡 + 巡检出提案（零 planner 烧钱）；要让 watch 自主提案并自动提交，需 workflow.json `autopilot.enabled: true`（白名单语义见路径 C）——**代用户改配置前必须先确认**，这是持久授权行为。
+2. 后台启动：`node .agents/scripts/orchestrator.mjs watch --interval 30`（Bash `run_in_background`）。启动即汇报：周期时长、autopilot 开关状态、停止方式。
+3. 停止方式（告知用户）：`touch .agents/orchestrator/.watch-stop`（下周期即停）或终止进程；**drift 降级会自动退出**——收到退出通知后向用户说明漂移原因与 `drift --clear` 恢复步骤。
+4. 运行中巡检：`status` 看队列、`stats --json` 看每卡画像；watch 与手动 drain 共用调度器锁，watch 在跑时不要并发 drain。
 
 ## 路径 D：发版提案（release-propose）
 

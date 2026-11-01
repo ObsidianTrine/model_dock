@@ -31,7 +31,9 @@ import {
   pickNextCard,
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { readGoals } from './orchestrator/goals.mjs';
+import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
@@ -1092,6 +1094,10 @@ function cmdSubmit(repoRoot, cardFile) {
   const existing = findCard(root, meta.id);
   if (existing) die(`任务 id "${meta.id}" 已存在于 ${existing.state}/（同 id 不允许重复提交）。`);
   fs.copyFileSync(path.resolve(cardFile), cardPath(root, 'pending', meta.id));
+  // 提交的是 drafts/ 提案 → 草稿同步清掉（提案态终结：队列接管，drafts 只留未处理项）
+  if (path.resolve(cardFile).startsWith(draftsDir(repoRoot) + path.sep)) {
+    try { fs.rmSync(path.resolve(cardFile), { force: true }); } catch { /* 清理失败不阻断 */ }
+  }
   log(`任务卡已提交：pending/${meta.id}.md（type=${meta.type} priority=${meta.priority} gate=${meta.gate}）`);
   log(`启动闭环：node .agents/scripts/orchestrator.mjs run ${meta.id}`);
 }
@@ -1575,58 +1581,158 @@ function cmdStats(repoRoot, opts = {}) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 提案（drafts/）与 autopilot 自动提交
+// ---------------------------------------------------------------------------
+
+function draftsDir(repoRoot) {
+  return path.join(repoRoot, '.agents', 'orchestrator', 'drafts');
+}
+
+/** 提案卡 frontmatter 文本级归一：created_by / gate 覆写、proposal: true 补齐
+ *  （保留 planner/scanner 正文全部段落——与 intent 的文本覆写同款手法）。 */
+function normalizeProposalText(text, { createdBy, gate } = {}) {
+  let out = String(text ?? '');
+  if (createdBy) out = out.replace(/^created_by:.*$/m, `created_by: ${createdBy}`);
+  if (gate) out = out.replace(/^gate:.*$/m, `gate: ${gate}`);
+  if (!/^proposal:\s*true$/m.test(out)) out = out.replace(/^gate:.*$/m, (g) => `${g}\nproposal: true`);
+  return out;
+}
+
 /**
- * scan——nightly 巡检信号源（Phase 2，docs 10.4）：TODO/FIXME、npm audit、
- * 测试失败 → 消毒后生成任务卡进 pending/。**只生成卡、绝不自动 run**——
- * created_by: scanner 的卡等人工决定（人工闸门是扫描内容注入面的最后一道闸）。
- * nightly 触发由 cron/调度系统调用本命令，不引入常驻进程。
+ * 把 drafts/<id>.md 提交进 pending/（人工 submit 的单卡路径，autopilot 批量提交也走这里）。
+ * 去重：队列任一状态已有同 id → 视为已处理，清掉草稿；校验失败 → 留在 drafts 等人工修。
+ * opts.gate：autopilot 提交时覆写 L1（预授权，实际合并仍由改动分级裁决）。
+ */
+function submitDraft(repoRoot, root, id, { gate } = {}) {
+  const p = path.join(draftsDir(repoRoot), `${id}.md`);
+  const text = safeRead(p);
+  if (!text) return { skipped: `提案文件不存在：${id}` };
+  const existing = findCard(root, id);
+  if (existing) {
+    try { fs.rmSync(p, { force: true }); } catch { /* 清理失败不阻断 */ }
+    return { skipped: `${id} 已在队列（${existing.state}/），草稿已清` };
+  }
+  try {
+    const finalText = normalizeProposalText(text, { gate });
+    const { meta } = loadCard(finalText, `${id}.md`);
+    fs.writeFileSync(cardPath(root, 'pending', meta.id), finalText);
+    fs.rmSync(p, { force: true });
+    return { submitted: meta.id, gate: meta.gate };
+  } catch (e) {
+    return { skipped: `${id} 校验未过（${String(e.message).slice(0, 120)}），留在 drafts 等人工修` };
+  }
+}
+
+/** autopilot 批量自动提交：扫 drafts/ 全部提案，白名单卡提交进 pending（gate→L1）。
+ *  返回提交 id 列表。cfg.autopilot.enabled=false 时零动作（含不读目录）。 */
+function autoSubmitProposals(repoRoot, root) {
+  const cfg = loadWorkflowConfig(repoRoot);
+  if (!cfg.autopilot?.enabled) return [];
+  const submitted = [];
+  let files = [];
+  try {
+    files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
+  } catch { /* drafts/ 不存在 */ }
+  for (const f of files) {
+    const id = f.replace(/\.md$/, '');
+    const text = safeRead(path.join(draftsDir(repoRoot), f));
+    if (!text) continue;
+    let meta;
+    try {
+      meta = parseCard(text, f).meta;
+    } catch { continue; } // 损坏提案不碰，等人工修
+    const verdict = canAutoSubmit(meta, cfg);
+    if (!verdict.ok) {
+      log(`⏸ 提案 ${id} 不自动提交：${verdict.reason}`);
+      continue;
+    }
+    const r = submitDraft(repoRoot, root, id, { gate: AUTO_SUBMIT_GATE });
+    if (r.submitted) {
+      submitted.push(r.submitted);
+      log(`🤖 autopilot 已提交提案：pending/${r.submitted}.md（gate=${r.gate}，白名单类型 ${meta.type}；实际合并仍由门禁分级裁决）`);
+    } else if (r.skipped) {
+      log(`⏸ 提案 ${id} 未提交：${r.skipped}`);
+    }
+  }
+  return submitted;
+}
+
+/** drafts/ 里 high 优先级提案的 id 列表（scan --run / nightly --auto 的候选）。 */
+function highPriorityDraftIds(repoRoot) {
+  let files = [];
+  try {
+    files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
+  } catch { /* drafts/ 不存在 */ }
+  const high = [];
+  for (const f of files) {
+    const text = safeRead(path.join(draftsDir(repoRoot), f));
+    if (text && /priority:\s*high/.test(text)) high.push(f.replace(/\.md$/, ''));
+  }
+  return high;
+}
+
+/**
+ * scan——nightly 巡检信号源（Phase 2，docs 10.4）：TODO/FIXME、npm audit、测试失败、
+ * GitHub issues、已知问题账本、主干 CI 失败 → 消毒后生成**提案**落 drafts/（不直接进
+ * 队列）。注入面双闸：sanitize 消毒 + 人工批量 submit（或 autopilot 白名单，授权矩阵
+ * 见 autopilot.mjs——deps/核心路径/人工草稿永不自动）。
+ * --run：对本次 high 优先级提案立即提交并发起闭环（gate=L3 兜底——合并仍人工）。
+ * nightly 触发由 cron/调度系统调用本命令；watch 周期也调用它。
  */
 function cmdScan(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const flags = opts.flags ?? new Set();
-  const anySignal = ['--todo', '--audit', '--tests', '--issues'].some((f) => flags.has(f));
+  const anySignal = ['--todo', '--audit', '--tests', '--issues', '--ki', '--ci'].some((f) => flags.has(f));
   const runOpts = {
     todo: !anySignal || flags.has('--todo'),
     audit: !anySignal || flags.has('--audit'),
     tests: flags.has('--tests'), // 要跑测试套件，慢——显式开启
     issues: !anySignal || flags.has('--issues'), // gh best-effort：未安装/非 GitHub 远端 → 警告跳过
+    ki: !anySignal || flags.has('--ki'), // 已知问题账本：文件缺失静默跳过
+    ci: !anySignal || flags.has('--ci'), // 主干 CI 失败：gh best-effort
+    baseBranch: runConfig(repoRoot).baseBranch ?? 'main',
     dryRun: flags.has('--dry-run'),
     testCmd: runConfig(repoRoot).testCmd.join(' && '),
   };
   const { created, skipped, warnings } = runScan(repoRoot, runOpts);
   for (const w of warnings) log(`⚠ ${w}`);
   if (runOpts.dryRun) {
-    log(created.length ? `将生成 ${created.length} 张任务卡（dry-run 未写入）：` : '无新信号，不生成任务卡。');
+    log(created.length ? `将生成 ${created.length} 张提案（dry-run 未写入）：` : '无新信号，不生成提案。');
     for (const c of created) log(`  ${c}`);
     for (const s of skipped) log(`  [已存在，跳过] ${s}`);
     return;
   }
-  for (const c of created) log(`已生成任务卡：pending/${c}.md（等人工决定是否 run）`);
+  for (const c of created) log(`已生成提案：drafts/${c}.md（等人工 submit 或 autopilot 白名单自动提交）`);
   for (const s of skipped) log(`已存在，跳过：${s}`);
   if (!created.length && !skipped.length && !warnings.length) log('巡检完成：无新信号。');
+  // autopilot 白名单自动提交（enabled 才生效；提交的卡 gate→L1，实际合并仍由分级裁决）
+  const submitted = autoSubmitProposals(repoRoot, root);
 
-  // --run：对本次生成的 high 优先级卡立即发起闭环（gate=L3 兜底——合并仍人工，
-  // 自动 run 的风险被分级闸门完整兜住）。仅机器信号类（audit/testfail）是 high。
-  // 调度器互斥（run-lock.mjs）：抢不到锁只落卡不自动跑，提示人工推进。
+  // --run：本次生成的 high 优先级提案立即提交并逐卡发起闭环
   if (flags.has('--run') && created.length) {
     const lock = acquireSchedulerLock(repoRoot, 'scan --run');
     if (!lock.held) {
-      log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——卡已生成，本次不自动 run；稍后手动 run/drain。`);
+      log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——提案已生成，本次不自动 run；稍后手动 run/drain。`);
       return;
     }
     try {
-      const high = created.filter((c) => !c.startsWith('[dry-run]')).map((c) => c.replace(/^pending\//, ''));
+      const createdIds = created.map((c) => c.replace(/^\[dry-run\] /, ''));
+      const high = createdIds.filter((id) => highPriorityDraftIds(repoRoot).includes(id));
       for (const id of high) {
-        const text = safeRead(cardPath(root, 'pending', id));
-        if (!/priority:\s*high/.test(text)) continue;
+        const r = submitDraft(repoRoot, root, id);
+        if (!r.submitted) {
+          log(`提案 ${id} 未提交：${r.skipped}`);
+          continue;
+        }
         log(`\n═══ scan --run → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+        const rr = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: { ...process.env, ...childEnvForHeldLock() },
         });
-        if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+        if (rr.status !== 0) log(`任务 ${id} 退出码 ${rr.status}（已落 blocked/failed/，继续）。`);
       }
     } finally {
       releaseSchedulerLock(repoRoot);
@@ -1705,6 +1811,92 @@ async function cmdIntent(repoRoot, opts) {
         }
         die(`Planner ${MAX_ATTEMPTS} 次产出的任务卡均未通过校验（最后一次：${String(e.message).slice(0, 200)}）。请改用手写任务卡 + submit。`);
       }
+    }
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
+ * propose——autopilot 需求综合（DeepSeek Super-agent「主动给需求」的落地）：目标面
+ * （goals.md）+ drafts 巡检提案 + 队列现状 → planner 只读会话产出至多
+ * maxProposalsPerCycle 张高质量任务卡，落 drafts/ 提案（不直接进队列）。
+ * 进队列两条路：人工批量 submit，或 autopilot 白名单自动提交（本命令尾部即做——
+ * nightly --plan / watch 周期调用它时自动衔接）。烧钱动作（planner 会话）只在此发生。
+ */
+async function cmdPropose(repoRoot, opts) {
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  const cfg = loadWorkflowConfig(repoRoot);
+  const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : cfg.autopilot.maxProposalsPerCycle;
+  opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
+  const backend = await getBackend(opts.backend);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
+  try {
+    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶
+    let files = [];
+    try {
+      files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
+    } catch { /* drafts/ 不存在 */ }
+    const signals = files
+      .map((f) => {
+        try {
+          const { meta, body } = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8'), f);
+          return `- ${meta.id}（${meta.type}/${meta.priority ?? 'normal'}，by ${meta.created_by ?? '?'}）：${String(body.goal ?? '').replace(/\s+/g, ' ').slice(0, 120)}`;
+        } catch {
+          return null; // 损坏提案跳过，不进 prompt
+        }
+      })
+      .filter(Boolean)
+      .join('\n');
+    const queueSummary = STATES.map((s) => `${s}=${listCards(root, s).length}`).join(' ');
+    let promptText = buildProposePrompt({ goals: readGoals(repoRoot), signals, queueSummary, maxCards: max, repoRoot });
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
+        maxTurns: 25,
+        onEvent: () => {}, // 无任务事件线；planner 用量不记账
+        readonly: true,
+        settingsFile,
+      });
+      const blocks = parseCardBlocks(result.output ?? '');
+      if (!blocks.length) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请按产出契约重新输出：每张任务卡一个独立 fenced 契约块（没有值得做的就一张都不出）。`;
+          continue;
+        }
+        die(`Planner ${MAX_ATTEMPTS} 次均未产出提案契约块。`);
+      }
+      const created = [];
+      const rejected = [];
+      fs.mkdirSync(draftsDir(repoRoot), { recursive: true }); // 首轮提案前 drafts/ 可能还不存在
+      for (const block of blocks) {
+        try {
+          const { meta } = loadCard(block, 'propose-draft');
+          if (findCard(root, meta.id)) {
+            rejected.push(`${meta.id} 已在队列（不覆盖）`);
+            continue;
+          }
+          fs.writeFileSync(path.join(draftsDir(repoRoot), `${meta.id}.md`), normalizeProposalText(block, { createdBy: 'planner', gate: 'L3' }));
+          if (!created.includes(meta.id)) created.push(meta.id);
+        } catch (e) {
+          rejected.push(`一张卡校验未过（${String(e.message).slice(0, 120)}）`);
+        }
+      }
+      log(`propose：planner 产出 ${blocks.length} 张 → 落提案 ${created.length} 张${rejected.length ? `，否决 ${rejected.length} 张` : ''}（上限 ${max}）。`);
+      for (const c of created) log(`  提案：drafts/${c}.md`);
+      for (const r of rejected) log(`  ✗ ${r}`);
+      // autopilot 白名单自动提交（提交后纳入本周期/下一次 drain）
+      const submitted = autoSubmitProposals(repoRoot, root);
+      return { created, submitted };
     }
   } finally {
     try {
@@ -1882,38 +2074,64 @@ async function cmdNightly(repoRoot, opts) {
   let created = [];
   let skipped = [];
   let warnings = [];
+  let planned = 0;
   let errMsg = null;
 
   try {
-    // 1) 巡检落卡（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues 为 gh best-effort）
+    // 1) 巡检落提案（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues/ci 为 gh best-effort）
     ({ created, skipped, warnings } = runScan(repoRoot, {
       todo: true,
       audit: true,
       issues: true,
+      ki: true,
+      ci: true,
       tests: flags.has('--tests'),
+      baseBranch: runConfig(repoRoot).baseBranch ?? 'main',
       testCmd: runConfig(repoRoot).testCmd.join(' && '),
     }));
     for (const w of warnings) log(`⚠ ${w}`);
-    for (const c of created) log(`已生成任务卡：pending/${c}.md`);
+    for (const c of created) log(`已生成提案：drafts/${c}.md`);
     for (const s of skipped) log(`已存在，跳过：${s}`);
     if (!created.length && !skipped.length && !warnings.length) log('巡检完成：无新信号。');
+
+    // 1.1) autopilot 白名单自动提交（enabled 才生效；提交的卡进 pending，纳入下方 --auto 的 drain）
+    autoSubmitProposals(repoRoot, root);
+
+    // 1.2) --plan：planner 需求综合（autopilot 提案，烧钱动作——显式开启才跑）
+    if (flags.has('--plan')) {
+      log(`\n═══ nightly --plan → propose（autopilot 需求综合）═══`);
+      const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+        cwd: repoRoot,
+        stdio: 'inherit',
+        env: childEnv,
+      });
+      if (r.status !== 0) log(`propose 退出码 ${r.status}（继续巡检后续步骤）。`);
+      try {
+        planned = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md')).length;
+      } catch { /* drafts/ 不存在 */ }
+    }
 
     // 2) 质量漂移报告
     printDriftReport(repoRoot);
 
-    // 3) --auto N：high 卡先跑（安全信号类），再 drain --max N 推进队列；
+    // 3) --auto N：high 优先级提案先提交再跑（gate=L3 兜底——合并仍人工，自动 run 的
+    //    风险被分级闸门完整兜住），再 drain --max N 推进队列；
     //    worker 由子进程跑（熔断 process.exit 不影响编排进程），单任务 blocked 不阻塞后续
     if (opts.auto) {
-      for (const id of created) {
-        const text = safeRead(cardPath(root, 'pending', id));
-        if (!/priority:\s*high/.test(text)) continue;
+      const high = highPriorityDraftIds(repoRoot);
+      for (const id of high) {
+        const r = submitDraft(repoRoot, root, id);
+        if (!r.submitted) {
+          log(`提案 ${id} 未提交：${r.skipped}`);
+          continue;
+        }
         log(`\n═══ nightly --auto → ${id}（priority=high）═══`);
-        const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+        const rr = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
           env: childEnv,
         });
-        if (r.status !== 0) log(`任务 ${id} 退出码 ${r.status}（已落 blocked/failed/，继续）。`);
+        if (rr.status !== 0) log(`任务 ${id} 退出码 ${rr.status}（已落 blocked/failed/，继续）。`);
       }
       log(`\n═══ nightly --auto → drain --max ${opts.auto} ═══`);
       const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'drain', '--max', String(opts.auto), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
@@ -1934,9 +2152,10 @@ async function cmdNightly(repoRoot, opts) {
   const awaiting = listCards(root, 'awaiting-human');
   const pending = listCards(root, 'pending');
   log(`\n════════ nightly 摘要 ════════`);
-  log(`新生成任务卡: ${created.length}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
+  log(`新提案: ${created.length}${flags.has('--plan') ? `    规划后 drafts 存量: ${planned}` : ''}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
   if (awaiting.length) log(`人工放行：node .agents/scripts/orchestrator.mjs approve <task-id>`);
   if (pending.length && !opts.auto) log(`推进队列：node .agents/scripts/orchestrator.mjs drain（或下次 nightly --auto）`);
+  log(`人工审阅提案：drafts/ 下批量 submit——node .agents/scripts/orchestrator.mjs submit .agents/orchestrator/drafts/<id>.md`);
 
   // 通知先于退出投递（die 是 process.exit，会截断未决 promise）
   const cfg = loadWorkflowConfig(repoRoot);
@@ -1945,6 +2164,7 @@ async function cmdNightly(repoRoot, opts) {
     webhookEnvs: nightlyWebhookEnvs(repoRoot),
     body: buildNightlySummary({
       created: created.length,
+      proposals: flags.has('--plan') ? planned : 0,
       awaiting: awaiting.length,
       pending: pending.length,
       degraded: Boolean(readDegraded(repoRoot)),
@@ -1953,6 +2173,128 @@ async function cmdNightly(repoRoot, opts) {
     }),
   });
   if (errMsg) die(`nightly 异常中断：${errMsg}`, 1);
+}
+
+/**
+ * 瞬时故障 blocked 卡的一次性有痕重探（watch 周期内投机执行）。
+ * 资格（缺一不可，全部从事件流判定）：blocked 原因是「worker 异常结束/未产出结果块」型、
+ * 最后一条 worker_stderr_tail 命中瞬时故障签名（429/网络，transient.mjs）、本卡从未
+ * speculative_resume 过、无 circuit_breaker 事件（熔断卡永不静默重试——红线不变）。
+ * 重探是显式动作：speculative_resume 事件先落盘再 spawn resume 子进程。
+ */
+function speculativeResumes(repoRoot, root, childEnv, opts) {
+  const orch = path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs');
+  for (const id of listCards(root, 'blocked')) {
+    const qdir = logDir(repoRoot, id);
+    const events = readEvents(qdir);
+    if (!events.length) continue;
+    if (events.some((e) => e.type === 'speculative_resume')) continue; // 每卡终身一次
+    if (events.some((e) => e.type === 'circuit_breaker')) continue; // 熔断卡永不静默重试
+    const lastBlocked = [...events].reverse().find((e) => e.type === 'blocked');
+    if (!lastBlocked || !/worker 异常结束|未产出结果块/.test(String(lastBlocked.reason ?? ''))) continue;
+    const stderrTail = [...events].reverse().find((e) => e.type === 'worker_stderr_tail')?.text ?? '';
+    if (!isTransientWorkerFailure('', stderrTail)) continue; // 非瞬时签名（真 bug/环境缺配置）不碰
+    appendEvent(qdir, 'speculative_resume', { reason: 'blocked 疑似瞬时故障（限流/网络），watch 有痕重探一次' });
+    log(`↻ ${id}：blocked 疑似瞬时故障——有痕重探一次（speculative_resume 已留痕）。`);
+    const r = spawnSync('node', [orch, 'resume', id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: childEnv,
+    });
+    if (r.status !== 0) log(`重探 ${id} 退出码 ${r.status}（仍 blocked 则不再重探）。`);
+  }
+}
+
+/**
+ * watch——连续自治运行（DeepSeek Super-agent「连续/主动」的落地形态）：drain →
+ * 队列空时 scan +（autopilot 开时）propose → 休眠 interval → 循环。
+ * 停止条件（任一）：stop 文件（touch .agents/orchestrator/.watch-stop）、--max-cycles、
+ * drift 降级生效（保险丝不允许自己插回去，恢复后人工重启 watch）、SIGINT。
+ * 护栏：调度器锁互斥（与 drain/nightly 同一套）；每周期重读 workflow.json（改配置
+ * 即时生效，不用重启 watch）；autopilot 关闭时只 drain 人工提交的卡 + scan 出提案，
+ * 不跑 planner 会话、不自动提交——烧钱动作全部需要显式授权。
+ */
+async function cmdWatch(repoRoot, opts) {
+  rotateNightlyLog(repoRoot);
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  const lock = acquireSchedulerLock(repoRoot, 'watch');
+  if (!lock.held) {
+    log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——watch 不并发调度。`);
+    return;
+  }
+  const intervalMin = opts.interval === 0 ? 0 : Number.isInteger(opts.interval) && opts.interval > 0 ? opts.interval : 30; // 0 = 不休眠（仅测试/调试用）
+  const maxCycles = Number.isInteger(opts.maxCycles) && opts.maxCycles > 0 ? opts.maxCycles : Infinity;
+  const stopFile = path.join(repoRoot, '.agents', 'orchestrator', '.watch-stop');
+  const childEnv = { ...process.env, ...childEnvForHeldLock() };
+  const orch = path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs');
+  log(`════════ watch 开始（interval ${intervalMin} 分钟/周期，max-cycles ${maxCycles === Infinity ? '∞' : maxCycles}）════════`);
+  log(`停止：touch .agents/orchestrator/.watch-stop（或 Ctrl-C）；drift 降级自动退出；workflow.json 改动下周期即生效。`);
+  let cycle = 0;
+  try {
+    for (;;) {
+      cycle += 1;
+      log(`\n──── watch 周期 ${cycle}/${maxCycles === Infinity ? '∞' : maxCycles}  ${new Date().toISOString()} ────`);
+      if (fs.existsSync(stopFile)) {
+        fs.rmSync(stopFile, { force: true });
+        log('检测到 .watch-stop——watch 退出。');
+        break;
+      }
+      const degraded = readDegraded(repoRoot);
+      if (degraded) {
+        log(`⚠ drift 降级生效（${degraded.reason}）——watch 退出（人工确认后 drift --clear，再重启 watch）。`);
+        break;
+      }
+      // 1) pending 非空 → drain（autopilot.autoDrainPerCycle > 0 时按它设每周期上限）
+      const cfg = loadWorkflowConfig(repoRoot); // 每周期重读：改配置即时生效
+      let pending = listCards(root, 'pending');
+      const cap = Number.isInteger(cfg.autopilot?.autoDrainPerCycle) && cfg.autopilot.autoDrainPerCycle > 0 ? cfg.autopilot.autoDrainPerCycle : Infinity;
+      if (pending.length) {
+        const n = Math.min(pending.length, cap);
+        log(`pending ${pending.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
+        spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+          cwd: repoRoot,
+          stdio: 'inherit',
+          env: childEnv,
+        });
+      } else {
+        // 2) 队列空 → 巡检出提案；autopilot 开时再跑 planner 需求综合（白名单卡自动提交）
+        spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+        if (cfg.autopilot?.enabled) {
+          log(`\n──── watch 周期 ${cycle} → propose（autopilot 需求综合）────`);
+          spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+          // 提案被白名单自动提交后队列非空 → 本周期内立即推进，不等到下一周期
+          const submitted = listCards(root, 'pending');
+          if (submitted.length) {
+            const n = Math.min(submitted.length, cap);
+            log(`autopilot 提交 ${submitted.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
+            spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+              cwd: repoRoot,
+              stdio: 'inherit',
+              env: childEnv,
+            });
+          }
+        }
+      }
+      // 3) 瞬时故障 blocked 卡的一次性有痕重探（投机执行，资格判定见 speculativeResumes）
+      speculativeResumes(repoRoot, root, childEnv, opts);
+      if (cycle >= maxCycles) {
+        log(`已达 --max-cycles ${maxCycles}，watch 退出。`);
+        break;
+      }
+      // 4) 休眠（分片睡：stop 文件放下周期能及时响应，不必等满 interval；interval=0 跳过）
+      if (intervalMin > 0) {
+        const deadline = Date.now() + intervalMin * 60_000;
+        while (Date.now() < deadline) {
+          if (fs.existsSync(stopFile)) break;
+          await new Promise((r) => setTimeout(r, Math.min(5000, deadline - Date.now())));
+        }
+      }
+    }
+  } finally {
+    releaseSchedulerLock(repoRoot);
+    log('════════ watch 结束 ════════');
+  }
 }
 
 /**
@@ -1984,7 +2326,10 @@ function cmdReleasePropose(repoRoot, versionHint) {
  */
 function cmdSchedule(repoRoot, sub, opts) {
   if (sub === 'install') {
+    const mode = opts.mode === 'watch' ? 'watch' : 'nightly';
     const r = installSchedule(repoRoot, {
+      mode,
+      interval: opts.interval,
       hour: opts.hour,
       minute: opts.minute,
       tests: opts.flags?.has('--tests'),
@@ -1999,7 +2344,11 @@ function cmdSchedule(repoRoot, sub, opts) {
       log(`  wrapper 已写入: ${r.runner}`);
       return;
     }
-    log(`nightly 调度已安装（每天 ${r.when} 拉起 ${r.runner}）。`);
+    log(
+      mode === 'watch'
+        ? `watch 调度已安装（每天 ${r.when} 拉起 watch 常驻循环，interval 见 wrapper）。停止：touch .agents/orchestrator/.watch-stop；卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`
+        : `nightly 调度已安装（每天 ${r.when} 拉起 ${r.runner}）。`
+    );
     log(`日志: ${nightlyLogPath(repoRoot)}    卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`);
     return;
   }
@@ -2037,11 +2386,15 @@ function usage() {
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
-  scan [--todo] [--audit] [--tests] [--issues] [--dry-run] [--run]   巡检生成任务卡（--run 对 high 卡立即发起闭环，合并仍人工）
-  nightly [--tests] [--auto N] [--backend …] [--review-backend …]
-                                          一次完整巡检编排（scan + drift 报告；--auto N 顺带跑 high 卡并 drain——worker 烧钱仅在此档）
-  schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--backend …] [--review-backend …] [--dry-run]
-                                          nightly 定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动）
+  scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
+                                          巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
+  propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
+  nightly [--tests] [--plan] [--auto N] [--backend …] [--review-backend …]
+                                          一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）
+  watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
+                                          连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
+  schedule install|uninstall|status [--mode nightly|watch] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--dry-run]
+                                          定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
   reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
@@ -2084,6 +2437,9 @@ async function main() {
     else if (a === '--minute') opts.minute = parseInt(argv[++i], 10);
     else if (a === '--auto') opts.auto = parseInt(argv[++i], 10);
     else if (a === '--days') opts.days = parseInt(argv[++i], 10);
+    else if (a === '--interval') opts.interval = parseInt(argv[++i], 10);
+    else if (a === '--max-cycles') opts.maxCycles = parseInt(argv[++i], 10);
+    else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
   }
@@ -2136,10 +2492,14 @@ async function main() {
       opts.intent = args;
       return cmdSpecStart(repoRoot, opts);
     }
+    case 'propose':
+      return cmdPropose(repoRoot, opts);
     case 'scan':
       return cmdScan(repoRoot, opts);
     case 'nightly':
       return cmdNightly(repoRoot, opts);
+    case 'watch':
+      return cmdWatch(repoRoot, opts);
     case 'schedule':
       return cmdSchedule(repoRoot, args[0], opts);
     case 'release-propose':

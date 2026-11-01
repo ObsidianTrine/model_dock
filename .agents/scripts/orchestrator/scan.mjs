@@ -1,14 +1,15 @@
 // scan.mjs — nightly 巡检信号源（Phase 2，docs 10.4）。
-// 扫描 TODO/FIXME、npm audit、测试失败、GitHub issues 四类信号，**消毒后**生成任务卡进 pending/。
-// 巡检只生成卡、绝不自动 run（created_by: scanner 的卡等人工决定）——
-// 仓库内容进 worker prompt 的注入面，第一道闸就是这里的内容消毒 + 人工 approve。
+// 扫描 TODO/FIXME、npm audit、测试失败、GitHub issues、已知问题账本（known-issues.md）、
+// 主干 CI 失败六类信号，**消毒后**生成提案卡落 drafts/（proposal: true）——巡检只出提案、
+// 绝不直接进队列：仓库内容进 worker prompt 的注入面，第一道闸就是这里的内容消毒 +
+// 人工批量 submit（或 autopilot 白名单自动提交，见 autopilot.mjs 的授权矩阵）。
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runCmd } from './gates.mjs';
-import { cardPath, findCard } from './queue.mjs';
+import { findCard } from './queue.mjs';
 import { toIsoLocal } from './events.mjs';
 import { shellSpawnOptions } from './spawn-shell.mjs';
 
@@ -176,8 +177,85 @@ function defaultGhRun(gh, args, cwd) {
   return spawnSync(gh, args, { cwd, encoding: 'utf8', timeout: 30_000 });
 }
 
+/** 信号源 5：docs/known-issues.md 未修条目（已知问题账本 → 提案）。容错解析总览表
+ *  `| ID | 级别 | 位置 | 一句话 | 状态 |` 行：状态列含 ☑/已修/已闭环 跳过、含「暂缓」
+ *  跳过（人工已裁决维持，自主提案不得推翻）。文件缺失/损坏 = 无该信号源（多数仓库
+ *  没有这本账，静默跳过不告警）。 */
+export function scanKnownIssues(repoRoot) {
+  const file = path.join(repoRoot, 'docs', 'known-issues.md');
+  if (!fs.existsSync(file)) return [];
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return [];
+  }
+  const cards = [];
+  for (const line of text.split('\n')) {
+    const m = /^\|\s*([A-Za-z]+-\d+)\s*\|/.exec(line);
+    if (!m) continue;
+    if (/☑|已修|已闭环|已合并|暂缓/.test(line)) continue;
+    const cells = line.split('|').map((c) => c.trim()).filter(Boolean);
+    // cells：[ID, 级别, 位置, 一句话, 状态]（宽松取用——列数可能因条目而异）
+    const where = cells[2] ?? '';
+    const what = cells[3] ?? line;
+    const fileHint = /[\w./\\-]+\.(?:ts|mts|cts|js|mjs|cjs|jsx|tsx)/.exec(where)?.[0]?.replace(/\\/g, '/');
+    cards.push({
+      id: `scan-ki-${m[1].toLowerCase()}`,
+      type: 'refactor',
+      priority: 'normal',
+      files_hint: [fileHint ?? 'src/**'],
+      goal: `处理已知问题 ${m[1]}：${sanitize(what, 160)}`,
+      acceptance: `- ${m[1]} 项按账本维护约定闭环：修复后在 docs/known-issues.md 勾选该项并标注日期与 commit`,
+      background: `巡检发现已知问题账本未修条目：${sanitize(where, 120)} — ${sanitize(what, 300)}`,
+    });
+  }
+  return cards;
+}
+
+/**
+ * 信号源 6：主干 test 失败（gh run list，best-effort，模式同 scanIssues）。
+ * 只看最近一条失败 run——按 head sha 建 id（同提交同 id 天然去重；run 恢复绿后不再生成）。
+ */
+export function scanCI(repoRoot, opts = {}) {
+  let remote = '';
+  try {
+    remote = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: repoRoot, encoding: 'utf8', timeout: 10_000 }).stdout ?? '';
+  } catch {
+    /* 无 git/无远端 */
+  }
+  if (!/github\.com[:/]/i.test(remote.trim())) return { skipped: true, reason: 'origin 非 GitHub 远端，跳过 CI 信号源' };
+  const branch = opts.baseBranch ?? 'main';
+  const gh = opts.gh ?? process.env.ORCH_GH_CLI ?? 'gh';
+  const r = (opts.run ?? defaultGhRun)(gh, ['run', 'list', '--workflow', 'test', '--branch', branch, '--status', 'failure', '--limit', '1', '--json', 'databaseId,headSha,displayTitle'], repoRoot);
+  if (r.status !== 0) {
+    return { skipped: true, reason: `gh run list 不可用（未安装 gh 或未 gh auth login？）：${sanitize(r.stderr || '', 120) || `exit ${r.status}`}` };
+  }
+  let runs;
+  try {
+    runs = JSON.parse(r.stdout ?? '[]');
+  } catch {
+    return { skipped: true, reason: 'gh 输出不可解析，跳过 CI 信号源' };
+  }
+  const run = (Array.isArray(runs) ? runs : [])[0];
+  if (!run?.headSha) return [];
+  const shortSha = String(run.headSha).slice(0, 8);
+  return [
+    {
+      id: `scan-ci-${shortSha}`,
+      type: 'bugfix',
+      priority: 'high',
+      files_hint: ['src/**', 'test/**'],
+      goal: `修复主干（${branch}）test 失败 run #${run.databaseId}`,
+      acceptance: `- 失败测试修复；对应提交 ${shortSha} 上的 test workflow 全绿`,
+      background: `巡检发现主干 test 失败：run ${run.databaseId}（${sanitize(run.displayTitle ?? '', 160)}，head ${run.headSha}）`,
+    },
+  ];
+}
+
 // ---------------------------------------------------------------------------
-// 生成任务卡（写 pending/；id 已存在于任何状态目录则跳过）
+// 生成提案卡（写 drafts/，proposal: true；不直接进队列——id 已存在于队列任何状态
+// 目录或 drafts/ 则跳过）
 // ---------------------------------------------------------------------------
 
 function renderCard(c) {
@@ -193,6 +271,7 @@ function renderCard(c) {
     'workflows:',
     '  - feature-branch',
     'gate: L3',
+    'proposal: true',
     '---',
     '',
     `# 目标`,
@@ -208,12 +287,15 @@ function renderCard(c) {
 }
 
 /**
- * 执行巡检并落卡。返回 { created: string[], skipped: string[], warnings: string[] }。
- * opts: { todo, audit, tests, issues, dryRun, testCmd, gh }
+ * 执行巡检并落提案。返回 { created: string[], skipped: string[], warnings: string[] }。
+ * opts: { todo, audit, tests, issues, ki, ci, dryRun, testCmd, gh, ghRun, baseBranch }
+ * 产出一律落 drafts/（提案态）：submitDraft 进队列（人工 submit 或 autopilot 白名单）。
  */
 export function runScan(repoRoot, opts = {}) {
   const root = path.join(repoRoot, '.agents', 'orchestrator', 'queue');
+  const drafts = path.join(repoRoot, '.agents', 'orchestrator', 'drafts');
   fs.mkdirSync(path.join(root, 'pending'), { recursive: true });
+  fs.mkdirSync(drafts, { recursive: true });
   const created = [];
   const skipped = [];
   const warnings = [];
@@ -231,10 +313,15 @@ export function runScan(repoRoot, opts = {}) {
     if (r.skipped) warnings.push(r.reason);
     else candidates.push(...r);
   }
+  if (opts.ki) candidates.push(...scanKnownIssues(repoRoot));
+  if (opts.ci) {
+    const r = scanCI(repoRoot, { baseBranch: opts.baseBranch, gh: opts.gh, run: opts.ghRun });
+    if (r.skipped) warnings.push(r.reason);
+    else candidates.push(...r);
+  }
 
   for (const c of candidates) {
-    const existing = findCard(root, c.id);
-    if (existing) {
+    if (findCard(root, c.id) || fs.existsSync(path.join(drafts, `${c.id}.md`))) {
       skipped.push(c.id);
       continue;
     }
@@ -242,7 +329,7 @@ export function runScan(repoRoot, opts = {}) {
       created.push(`[dry-run] ${c.id}`);
       continue;
     }
-    fs.writeFileSync(cardPath(root, 'pending', c.id), renderCard(c));
+    fs.writeFileSync(path.join(drafts, `${c.id}.md`), renderCard(c));
     created.push(c.id);
   }
   return { created, skipped, warnings };

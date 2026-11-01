@@ -227,7 +227,8 @@ node .agents/scripts/orchestrator.mjs drain --max 5
 ## nightly 巡检（Phase 2）
 
 ```bash
-# 扫描 TODO/FIXME、npm audit 与 GitHub open issues（默认信号源），生成任务卡进 pending/（不自动 run）
+# 扫描 TODO/FIXME、npm audit、GitHub open issues、已知问题账本（docs/known-issues.md）、
+# 主干 CI 失败（默认信号源），生成提案卡落 drafts/（不直接进队列）
 node .agents/scripts/orchestrator.mjs scan
 
 # 全量巡检（含测试套件，慢）；先看会生成什么再落卡
@@ -235,26 +236,33 @@ node .agents/scripts/orchestrator.mjs scan --tests
 node .agents/scripts/orchestrator.mjs scan --dry-run
 ```
 
-- 生成卡 `created_by: scanner`、gate=L3——**是否 run 由人工决定**，扫描内容经消毒（无法携带指令结构进 worker prompt）
-- 卡 id 按内容哈希：信号不变重复扫描自动去重；cron 每晚调 `scan` 即为 nightly
-- **issues 信号源**（gh CLI，best-effort）：仅 origin 指向 GitHub 的仓库启用；gh 未安装/未登录 → 警告跳过。每个 open issue 一张卡，id 含 issue 号 + 标题哈希（标题改了会出新卡）；`ORCH_GH_CLI` 可指认 gh 路径（对齐 `ORCH_ZCODE_CLI` 惯例）
-- 巡检后用 `run --next` / `drain` 推进队列（见上节）
+- 生成**提案** `created_by: scanner`、gate=L3、`proposal: true`——落 `drafts/` 而非队列，**是否进队列由人工 submit 或 autopilot 白名单决定**（见「提案与 autopilot」节）；扫描内容经消毒（无法携带指令结构进 worker prompt）
+- 提案 id 按内容哈希：信号不变重复扫描自动去重；cron 每晚调 `scan` 即为 nightly
+- **issues / ci 信号源**（gh CLI，best-effort）：仅 origin 指向 GitHub 的仓库启用；gh 未安装/未登录 → 警告跳过。issues 每个 open issue 一张卡；ci 只看主干（baseBranch）最近一条失败 run，按 head sha 建 id（同提交同 id 去重）；`ORCH_GH_CLI` 可指认 gh 路径
+- **known-issues 账本信号源**：解析 docs/known-issues.md 总览表的未修条目（已修/暂缓的条目自动跳过——人工裁决不被自主提案推翻）；仓库没有这本账时静默跳过
+- 巡检后人工批量提交提案，或 `run --next` / `drain` 推进已提交的队列（见上节）
 
 ## nightly 编排与定时调度（schedule）
 
-`nightly` = 一次完整巡检编排（scan 落卡 + drift 报告 + 队列摘要）；`schedule` 把它注册成每日定时任务——「夜里自动巡检（可选自动优化）、早上人工放行」的完整形态：
+`nightly` = 一次完整巡检编排（scan 出提案 + autopilot 白名单提交 + drift 报告 + 队列摘要）；`schedule` 把它注册成每日定时任务——「夜里自动巡检（可选自动优化）、早上人工放行」的完整形态：
 
 ```bash
-# 手动跑一次编排（零烧钱：只巡检落卡，不跑 worker）
+# 手动跑一次编排（零烧钱：只巡检出提案，不跑 worker）
 node .agents/scripts/orchestrator.mjs nightly
 
 # 含慢信号源（跑测试套件）
 node .agents/scripts/orchestrator.mjs nightly --tests
 
+# 加跑 planner 需求综合（烧钱：一次 headless planner 会话，产出对齐 goals.md 的高质量提案）
+node .agents/scripts/orchestrator.mjs nightly --plan
+
 # 注册每日 02:30 定时（macOS launchd / Linux crontab / Windows schtasks，经 wrapper 绝对路径启动，
-# 不依赖调度器环境的 PATH）；--auto 3 = 夜间对 high 卡发起闭环并 drain 3 个任务（worker 烧钱仅在此档，
+# 不依赖调度器环境的 PATH）；--auto 3 = 夜间对 high 提案提交并发起闭环、再 drain 3 个任务（worker 烧钱仅在此档，
 # gate=L3 兜底：合并仍等人工 approve）
 node .agents/scripts/orchestrator.mjs schedule install --hour 2 --minute 30 --auto 3
+
+# 注册常驻 watch 循环（见「watch 连续自治运行」节）而非每日波次
+node .agents/scripts/orchestrator.mjs schedule install --mode watch --interval 30
 
 # 只看会做什么，不动系统调度（写 wrapper + 打印注册计划）
 node .agents/scripts/orchestrator.mjs schedule install --dry-run --hour 2
@@ -264,8 +272,62 @@ node .agents/scripts/orchestrator.mjs schedule uninstall  # 卸载
 ```
 
 - wrapper（`.agents/orchestrator/nightly-runner.sh|cmd`）在 install 时刻固化仓库/node 的绝对路径——launchd、schtasks 的执行环境 PATH 极瘦，运行时一律不做环境发现；仓库挪位置后需重跑 `schedule install`。
-- 日志落在 `.agents/orchestrator/logs/nightly.log`（每次 nightly 自动轮转：超 5MB 转 `.old`）。
-- 默认档（不带 `--auto`）零烧钱：只生成任务卡与报告，等人工 `drain`；`--auto` 档夜里真跑 worker，合并闸门不变。
+- 日志落在 `.agents/orchestrator/logs/nightly.log`（每次 nightly/watch 自动轮转：超 5MB 转 `.old`）。
+- 默认档（不带 `--auto`/`--plan`）零烧钱：只出提案与报告，等人工提交/`drain`；`--auto` 档夜里真跑 worker，合并闸门不变。
+
+## 提案与 autopilot（自主需求侧）
+
+需求侧生命周期：**巡检/规划出提案（drafts/）→ 人工批量 submit 或 autopilot 白名单自动提交（pending/）→ 常规闭环（门禁/审查/合并闸门原样）**。
+
+```bash
+# 人工审阅提案后逐张提交（提交后草稿自动清掉；队列已有同 id 会拒绝）
+node .agents/scripts/orchestrator.mjs submit .agents/orchestrator/drafts/<id>.md
+
+# autopilot 需求综合：goals.md + drafts 巡检提案 + 队列现状 → planner 产出高质量提案
+# （烧钱动作；产出的提案若命中 autopilot 白名单会立即自动提交）
+node .agents/scripts/orchestrator.mjs propose
+```
+
+**目标面 `​.agents/orchestrator/goals.md`**（入库、用户手编、agent 只读）：核心目标（优先级排序）/当前主题/明确不做三段。propose 的产出必须对齐它；文件缺失或留空 = 无目标面（只基于巡检信号提案）。
+
+**autopilot 授权配置**（workflow.json `autopilot` 键，缺省全关 = 行为与历史版本一致）：
+
+```json
+"autopilot": { "enabled": true, "autoSubmitTypes": ["docs"], "autoDrainPerCycle": 3, "maxProposalsPerCycle": 3 }
+```
+
+- 自动提交 ≠ 自动合并：白名单提交的卡 gate 覆写为 L1，**实际自动合并仍由门禁对真实改动的分级裁决**——drift 降级、scope 越界、实际 L2/L3 照样挡回人工闸门
+- 永不自动提交（即使 enabled）：`deps` 类型（依赖升级人工裁决）、`created_by: human` 的人工草稿、files_hint 命中 corePaths/releasePaths 的卡
+- 一次性授权沉淀为持久配置：开启即代表授权「该类型的提案自动进队列」，不再需要逐卡对话确认
+
+## watch 连续自治运行
+
+```bash
+# 前台常驻：每周期 drain pending → 队列空时 scan 出提案 →（autopilot 开时）propose → 休眠
+node .agents/scripts/orchestrator.mjs watch --interval 30
+
+# 测试/调试：不休眠 + 限制周期数
+node .agents/scripts/orchestrator.mjs watch --interval 0 --max-cycles 2 --backend mock
+```
+
+- 停止：`touch .agents/orchestrator/.watch-stop`（下周期即停，文件被消费删除）或 Ctrl-C；**drift 降级生效自动退出**（保险丝不允许自己插回去，人工 `drift --clear` 后重启）
+- 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启
+- **投机重探**：每周期检查 blocked 卡，worker 异常结束 + 瞬时故障签名（429/网络）且从未重探过的卡，一次性有痕 resume（`speculative_resume` 事件留痕）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）
+- 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 会提示退出而非并发调度
+
+## 运行度量与运行中信息通道
+
+```bash
+# 运行度量基线：每卡 wall/turns/调试与审查迭代/token 峰值/watchdog/follow-up + 合并率汇总
+node .agents/scripts/orchestrator.mjs stats --days 7
+node .agents/scripts/orchestrator.mjs stats --json   # 机器可读（summary 嵌套 + rows）
+
+# 运行中任务的直通信息通道（订阅直通）：补充指令写 inbox，会话边界（fixup/审查返工/resume/新 spawn）送达 worker
+node .agents/scripts/orchestrator.mjs follow <task-id> "优先改适配器层，测试放最后"
+```
+
+- stats 的 token 是**会话峰值口径**（budget_snapshot 累计），跨引擎精确对账跑 `reconcile`
+- follow 只对 `running/` 的卡开放（只有运行中的闭环有注入点）；awaiting-human 用 `retry --note` 写回卡正文，pending 直接改卡文件；注入一律追加在 prompt 尾部（前缀缓存友好，20 条/4000 字符截断）
 
 ## 发版提案（release-propose，release-please 形态的触发层）
 

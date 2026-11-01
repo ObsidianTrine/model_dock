@@ -166,7 +166,7 @@ describe('hardening > backend 异常不悬 running（落 blocked）', () => {
 describe('hardening > nightly 通知（notify）', () => {
   it('buildNightlySummary：正常/降级/异常三态', () => {
     expect(buildNightlySummary({ created: 2, awaiting: 1, pending: 0 })).toContain('✓ 巡检完成')
-    expect(buildNightlySummary({ created: 2, awaiting: 1, pending: 0 })).toContain('新卡 2、待审 1、待调度 0')
+    expect(buildNightlySummary({ created: 2, awaiting: 1, pending: 0 })).toContain('新提案 2、待审 1、待调度 0')
     expect(buildNightlySummary({ degraded: true })).toContain('漂移降级生效中')
     expect(buildNightlySummary({ autoRan: 3 })).toContain('夜间已自动跑 3')
     expect(buildNightlySummary({ error: 'claude CLI 不在 PATH' })).toContain('✗ 巡检异常：claude CLI 不在 PATH')

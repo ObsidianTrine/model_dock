@@ -32,11 +32,12 @@ export function buildSettleSummary({ taskId, state, reason } = {}) {
 }
 
 /** 组装单行多段的 nightly 摘要正文（通知场景：短、可扫读）。 */
-export function buildNightlySummary({ created, awaiting, pending, degraded, autoRan, error } = {}) {
+export function buildNightlySummary({ created, proposals, awaiting, pending, degraded, autoRan, error } = {}) {
   const parts = [];
   if (error) parts.push(`✗ 巡检异常：${error}`);
   else parts.push('✓ 巡检完成');
-  parts.push(`新卡 ${created ?? 0}、待审 ${awaiting ?? 0}、待调度 ${pending ?? 0}`);
+  const prop = proposals ? `、规划提案 ${proposals}` : '';
+  parts.push(`新提案 ${created ?? 0}${prop}、待审 ${awaiting ?? 0}、待调度 ${pending ?? 0}`);
   if (autoRan) parts.push(`夜间已自动跑 ${autoRan} 个任务`);
   if (degraded) parts.push('⚠ 漂移降级生效中');
   return parts.join('；');
