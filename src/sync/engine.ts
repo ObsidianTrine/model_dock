@@ -164,11 +164,17 @@ async function cloudHeartbeat(state: SyncState, opts?: SyncHooks): Promise<void>
       signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
     })
   } catch (e) {
-    throw new Error(t('云端心跳失败（{url}）：{err}', 'Cloud heartbeat failed ({url}): {err}', { url: cloud.url, err: (e as Error).message }))
+    throw new Error(t('云端心跳失败（{url}）：{err}。检查网络与云端地址；地址变更需重新 modeldock sync enroll', 'Cloud heartbeat failed ({url}): {err}. Check the network and the cloud URL; if the URL changed, run modeldock sync enroll again', { url: cloud.url, err: (e as Error).message }))
   }
   const text = await res.body.text().catch(() => '')
   if (res.statusCode !== 200) {
-    throw new Error(t('云端心跳被拒（HTTP {code}）', 'Cloud heartbeat rejected (HTTP {code})', { code: res.statusCode }))
+    throw new Error(
+      t(
+        '云端心跳被拒（HTTP {code}）。401/403 多为设备凭据过期：重新 modeldock sync enroll；其余对照云端服务日志',
+        'Cloud heartbeat rejected (HTTP {code}). 401/403 usually means expired device credentials: run modeldock sync enroll again; otherwise check the cloud service logs',
+        { code: res.statusCode }
+      )
+    )
   }
   let body: { desiredProfile?: string | null; desiredTs?: string | null }
   try {
