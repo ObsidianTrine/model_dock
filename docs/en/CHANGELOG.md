@@ -15,6 +15,7 @@ A batch of stability and security fixes: daemon and update-chain reliability, Wi
 
 ### Improved
 
+- **Managed Node runtime updated to 24.22.2**: follows the upstream security patch; installed and self-hosted runtimes pick it up with the new version.
 - **Test and agent processes can no longer write through to the real config**: the write guard now covers agent CLI runs directly and distinguishes trusted writers, and the sync engine's write paths are pinned to their own sandbox — write requests targeting the real home from test/agent contexts are always rejected with an actionable error (the definitive fix for the 2026-10-30 production config overwrite incident).
 
 ### Fixed
