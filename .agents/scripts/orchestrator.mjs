@@ -40,6 +40,7 @@ import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateN
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { isTransientWorkerFailure } from './orchestrator/transient.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
@@ -48,8 +49,10 @@ import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstreamSeaState } from './orchestrator/reconcile.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
+import { readNightlyState, writeNightlyState, decideNightlyStart } from './orchestrator/nightly-state.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
@@ -444,13 +447,16 @@ async function cmdRun(repoRoot, taskId, opts) {
   // stuck 熔断路径 kill→blocked。检查会话与 worker/reviewer 完全隔离（只读、不记账、无
   // 事件）；防重入/次数上界/错误静默的纯逻辑在 createWatchdogState。mock 后端跳过（mock
   // spawn 会写文件——判定无意义还污染 worktree 与门禁）。
+  // LLM 决策留底（trace.mjs）：workflow.json trace 键控制（缺省开启），watchdog/reviewer
+  // 的模型输入与原始输出落盘 logs/<taskId>/decisions/ 供复盘；enabled=false 不传 traceDir。
+  const traceCfg = cfg.trace;
   const watchdogState = createWatchdogState(cfg.watchdog);
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
-      const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn });
+      const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn, traceDir: traceCfg.enabled ? qdir : null, traceOpts: traceCfg });
       if (session !== workerSessionSeq || !workerInFlight) return; // 会话已翻篇/已收尾：结论作废（任务落位后不再触发）
       const live = findCard(root, taskId);
       if (!live || live.state !== 'running') return; // 卡已落位：不动作
@@ -770,7 +776,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
         reviewTempDirs.push(reviewPromptDir);
         const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
-        fs.writeFileSync(reviewPromptFile, buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot)));
+        const reviewPromptText = buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot));
+        fs.writeFileSync(reviewPromptFile, reviewPromptText);
+        const reviewStartedAt = Date.now();
         // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
         // resume 的 prior 解析就不会钉死在坏后端上（自动异构会重新选）
         // reviewer 仅在 tier 生效时才拿专属 settings（注入 token）；平时保持无 settings 文件的旧行为
@@ -798,6 +806,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         livePid = null;
         appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
         const verdict = parseReviewVerdict(review.output ?? '');
+        // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
+        // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
+        writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
         appendEvent(qdir, 'review_verdict', {
           blockers: verdict?.blockers ?? -1,
           suggestions: verdict?.suggestions ?? 0,
@@ -1385,7 +1396,8 @@ function cmdResume(repoRoot, taskId, opts) {
     die(`任务 "${taskId}" 状态为 ${found.state}，只有 running/blocked/reviewing 可 resume。`);
   }
   if (found.state === 'blocked') moveCard(root, taskId, 'blocked', 'running');
-  appendEvent(logDir(repoRoot, taskId), 'resumed', { by: 'human' });
+  // --auto-resume：drain 自动续通道专用标记（orchestrator.mjs autoResumePass），事件留痕区别于人工 resume
+  appendEvent(logDir(repoRoot, taskId), 'resumed', { by: opts.flags?.has('--auto-resume') ? 'auto' : 'human' });
   log(`恢复任务 ${taskId}（带事件时间线与 NOTES.md 现场）……`);
   return cmdRun(repoRoot, taskId, { ...opts, interactive: false });
 }
@@ -1523,6 +1535,59 @@ async function drainSummaryNotify(repoRoot, done, tally, note) {
   } catch { /* 通知失败不阻断编排 */ }
 }
 
+/**
+ * blocked 卡有限自动续跑（长跑自主的关键小件；资格判定纯逻辑在 orchestrator/autoresume.mjs）。
+ * drain 选卡前调用：扫 blocked/ → 挑「transient 类失败 + 冷却已过」的卡（≤maxPerRun 张，
+ * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记写进卡 frontmatter
+ * （自动续后再 blocked 时下轮靠它判冷却——连续自动续失败不重试）→ 记 auto_resume
+ * { card, attempts } 事件 → spawn 既有 resume 子命令（闭环复用不复制逻辑；子进程隔离，
+ * 熔断 process.exit 不伤 drain 主循环，与派 run 子进程同哲学，--auto-resume 让 resumed
+ * 事件标记 by=auto 区别于人工）。上界三重：只续 transient 类、每卡 24h（cooldownHours）
+ * 最多 1 次、每次 drain ≤2 张（maxPerRun）。drift 降级 = 全人工，整个通道暂停；
+ * autoResume.enabled=false 完全不扫。
+ * @returns {string[]} 本轮自动续的卡 id（drain 汇总口径）
+ */
+function autoResumePass(repoRoot, root, cfg, opts) {
+  const ar = cfg.autoResume;
+  if (!ar?.enabled) return [];
+  if (readDegraded(repoRoot)) {
+    log('⏸ drift 降级期间自动续暂停（降级 = 全人工）——blocked 卡等人工 resume。');
+    return [];
+  }
+  const { candidates, unreadable, total } = scanBlockedCards(repoRoot, root);
+  if (total === 0) return [];
+  if (unreadable.length) {
+    console.warn(`[orchestrator] 自动续资格判定：${unreadable.length} 张 blocked 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
+  }
+  const picked = pickAutoResumeCandidates(candidates, {
+    maxPerRun: ar.maxPerRun,
+    cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+  });
+  const resumed = [];
+  for (const c of picked) {
+    const card = candidates.find((x) => x.id === c.id);
+    try {
+      fs.writeFileSync(card.path, withAutoResumedAt(card.text, autoResumedAtNow()));
+    } catch (e) {
+      // Windows EBUSY 等写失败：卡可能被编辑器占用——宁可不续也不无冷却地续（防反复烧钱）
+      console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
+      continue;
+    }
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts });
+    log(`⟳ 自动续 blocked 卡 ${c.id}（transient 类失败，worker_retry ${c.attempts} 次用尽；冷却期内至多此一次）`);
+    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
+      ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: { ...process.env, ...childEnvForHeldLock() },
+    });
+    resumed.push(c.id);
+    if (r.status !== 0) log(`任务 ${c.id} 自动续退出码 ${r.status}（已落 blocked/failed/或等待人工——冷却期内不再自动续）。`);
+  }
+  log(`自动续检查：blocked ${total} 张，候选 ${picked.length} 张，已续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}。`);
+  return resumed;
+}
+
 async function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -1537,6 +1602,8 @@ async function cmdDrain(repoRoot, opts) {
   try {
     const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
+    // 选卡前先过一遍 blocked 自动续通道（串行/并发路径共用；引擎预检通过才续，防止坏引擎把卡反复烧）
+    autoResumePass(repoRoot, root, cfg, opts);
     if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers, cfg);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
@@ -1596,6 +1663,25 @@ const next = pickNextCard(root, { skipIds });
         env: { ...process.env, ...childEnvForHeldLock() },
       });
       done += 1;
+      // spawn 失败（ENOENT 等）容错——与并行路径（cmdDrainParallel 挂 error 处理）同款。
+      // 引擎预检只探 worker CLI，防不住「预检过后 run 子进程的 node 本身起不来」的窄窗口：
+      // spawnSync 失败时 status 为 null、卡留在 pending，按「退出码」走会误报已落
+      // blocked/failed/，下轮再选中同一卡 → 死循环防护 die 整批中断（2026-10-29 夜跑
+      // 8 卡烧毁事故的串行路径残留面，2026-11-01 Windows 本机实证）。这里识别 r.error：
+      // 卡显式转 blocked/ 附原因（可 resume，不悬 pending、不 die 空转），继续调度。
+      if (r.error) {
+        const note = String(r.error.code ?? r.error.message ?? r.error);
+        const reason = `run 子进程启动失败：${note}`;
+        log(`任务 ${next.id} 的 run 子进程启动失败（${note}）——卡转 blocked 待人工 resume，继续调度。`);
+        const cur = findCard(root, next.id);
+        if (cur?.state === 'pending') {
+          appendEvent(logDir(repoRoot, next.id), 'failed', { reason });
+          moveCard(root, next.id, 'pending', 'blocked');
+          tally.blocked = (tally.blocked ?? 0) + 1;
+          await settleNotify(repoRoot, next.id, 'blocked', reason);
+        }
+        continue;
+      }
       if (r.status !== 0) log(`任务 ${next.id} 退出码 ${r.status}（已落 blocked/failed/，继续调度下一个）。`);
       const settled = findCard(root, next.id)?.state;
       if (settled) tally[settled] = (tally[settled] ?? 0) + 1;
@@ -2439,6 +2525,9 @@ function rotateNightlyLog(repoRoot) {
  * drain --max N 清一部分队列。给 cron/launchd/schtasks 定时拉起用（schedule install），
  * 手动跑同效。烧钱动作（worker）只发生在 --auto 下，默认零成本巡检。
  * 结束（含异常）发通知（webhook / macOS，见 notify.mjs）——巡检无人看等于白跑。
+ * 幂等补跑（nightly-state.mjs）：启动时对账 logs/nightly-state.json——上次未正常收尾
+ * （崩溃/强制重启）记 nightly_recovered + webhook 后照常执行；距上次完成不足 20h 且
+ * 非人工触发判为调度器补触发双跑，跳过本次（人工 TTY / --manual 不受限）。
  */
 async function cmdNightly(repoRoot, opts) {
   rotateNightlyLog(repoRoot);
@@ -2448,6 +2537,36 @@ async function cmdNightly(repoRoot, opts) {
     return;
   }
   const flags = opts.flags ?? new Set();
+  // 人工 vs 调度器触发：launchd/cron/schtasks 语境 stdin 非 TTY；终端手动跑天然 TTY
+  //（与 opts.interactive 同款判定）。--manual 是脚本/agent 手动触发时的显式逃生口。
+  // 二者都不受 20h 双跑防护限制。
+  const manual = flags.has('--manual') || Boolean(process.stdin.isTTY && !process.env.CI);
+  // 幂等补跑自检（nightly-state.mjs）：先判定、后写 startedAt——skip 路径不得覆写
+  // 上次的完成态，否则完成记录会被改成「未收尾」，20h 双跑防护随即失明。
+  const prevState = readNightlyState(repoRoot);
+  const verdict = decideNightlyStart(prevState, Date.now(), { manual });
+  if (verdict.action === 'skip') {
+    log(`⏸ nightly 跳过：${verdict.reason}——本次退出（状态未动，下次触发照常）。手动强跑：node .agents/scripts/orchestrator.mjs nightly --manual`);
+    releaseSchedulerLock(repoRoot);
+    return;
+  }
+  if (verdict.action === 'recover') {
+    log(`⟳ nightly_recovered：${verdict.reason}——本次照常执行接续。`);
+    try {
+      const recCfg = loadWorkflowConfig(repoRoot);
+      await notify({
+        title: `${displayProjectName(recCfg.projectName)} nightly`,
+        body: 'nightly_recovered：上次巡检未正常收尾（崩溃/强制重启），本次已自动接续。',
+        webhookEnvs: nightlyWebhookEnvs(repoRoot),
+      });
+    } catch { /* 通知失败不阻断编排 */ }
+  }
+  const nightlyStartedAt = new Date().toISOString();
+  // 人工触发（--manual / TTY）不参与调度器状态机：manual 完成态若覆盖 finishedAt，
+  // 当晚的 02:30 调度触发会因「距上次完成 <20h 且非人工」被双跑防护误挡——人工跑
+  // 不该占用调度的运行记录（副作用：若上次调度 run 被中断，manual 跑后下次调度会
+  // 多报一次 nightly_recovered，无害）。
+  if (!manual) writeNightlyState(repoRoot, { startedAt: nightlyStartedAt, finishedAt: null });
   log(`════════ nightly 巡检 ${new Date().toISOString()} ════════`);
   const root = queueRoot(repoRoot);
   ensureQueue(root);
@@ -2546,6 +2665,16 @@ async function cmdNightly(repoRoot, opts) {
   // 4) 收尾摘要 + 早上的人工操作指引
   const awaiting = listCards(root, 'awaiting-human');
   const pending = listCards(root, 'pending');
+  // 正常结束才落 finishedAt：异常中断保持「未收尾」态——下次触发按 nightly_recovered
+  // 接续重试，不会被 20h 双跑防护误挡（失败的那一晚不该被当成「已经跑过了」）。
+  // manual 同样不写（见上方 manual 状态机说明）。
+  if (!errMsg && !manual) {
+    writeNightlyState(repoRoot, {
+      startedAt: nightlyStartedAt,
+      finishedAt: new Date().toISOString(),
+      result: { created: created.length, awaiting: awaiting.length, pending: pending.length, autoRan: opts.auto ?? 0 },
+    });
+  }
   log(`\n════════ nightly 摘要 ════════`);
   log(`新提案: ${created.length}${flags.has('--plan') ? `    规划后 drafts 存量: ${planned}` : ''}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
   if (awaiting.length) log(`人工放行：node .agents/scripts/orchestrator.mjs approve <task-id>`);
@@ -2815,8 +2944,8 @@ function usage() {
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
-  nightly [--tests] [--plan] [--auto N] [--backend …] [--review-backend …]
-                                          一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）
+  nightly [--tests] [--plan] [--auto N] [--backend …] [--review-backend …] [--manual]
+                                          一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
   schedule install|uninstall|status [--mode nightly|watch] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--dry-run]

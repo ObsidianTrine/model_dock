@@ -773,20 +773,59 @@ function cardFlagFor(branchName) {
   } catch { return null; }
 }
 
+// —— 残留目录检测（只读）——
+// Windows 上 finish 的清理可能半途而废：目录被占用（EPERM/EBUSY）时 git 已注销
+// worktree，目录壳却删不掉留在 .agents/worktrees/ 下——git worktree list 与上面的
+// 活跃任务列表都看不见它，无人发现（2026-11 实证：25-fix-tray-modelitem-hidden 壳
+// 目录）。这里对账目录现实与 git worktree list 的登记，把壳目录点名并给手工清理
+// 指引；只读不自动删（壳里可能有未合并的工作，删前必须人工确认）。
+
+function normalizeWorktreePath(p) {
+  const abs = path.resolve(p);
+  return process.platform === 'win32' ? abs.toLowerCase() : abs;
+}
+
+function leftoverWorktreeDirs() {
+  let entries;
+  try {
+    entries = fs.readdirSync(WORKTREES_DIR, { withFileTypes: true });
+  } catch {
+    return []; // .agents/worktrees 不存在（从未 start 过）——无残留
+  }
+  const registered = new Set(listWorktrees().map((t) => normalizeWorktreePath(t.path)));
+  const leftovers = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue; // .finish.lock 等锁/标记文件不是目录
+    const dir = path.join(WORKTREES_DIR, e.name);
+    if (registered.has(normalizeWorktreePath(dir))) continue;
+    leftovers.push(dir);
+  }
+  return leftovers;
+}
+
+function warnLeftoverWorktreeDirs() {
+  const leftovers = leftoverWorktreeDirs();
+  if (!leftovers.length) return;
+  console.warn(`\nWARNING: ${leftovers.length} 个残留目录：.agents/worktrees/ 下存在、但已不在 git worktree list（多为 Windows 清理失败留下的壳目录，无对应活跃任务）：`);
+  for (const d of leftovers) console.warn(`  - ${d}`);
+  console.warn('  手工清理（先确认壳内无未合并工作）：git worktree prune && rm -rf "<上面的目录>"。本检测只读，不自动删。');
+}
+
 function cmdList() {
   const trees = listWorktrees().filter((t) => t.path.includes('.agents' + path.sep + 'worktrees') || t.path.includes('.agents/worktrees'));
   if (trees.length === 0) {
     console.log('No active task worktrees. Start one: node .agents/scripts/feature-branch.mjs start <task-id>');
-    return;
+  } else {
+    for (const t of trees) {
+      const flags = [];
+      if (fs.existsSync(notesPathFor(t.path))) flags.push('NOTES.md'); // task left a handoff doc — read it before taking over
+      if (gitInDir(t.path, ['status', '--porcelain'])) flags.push('dirty');
+      const cardFlag = cardFlagFor(t.branch);
+      if (cardFlag) flags.push(cardFlag);
+      console.log(`${t.branch || '(detached)'}  ->  ${t.path}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
+    }
   }
-  for (const t of trees) {
-    const flags = [];
-    if (fs.existsSync(notesPathFor(t.path))) flags.push('NOTES.md'); // task left a handoff doc — read it before taking over
-    if (gitInDir(t.path, ['status', '--porcelain'])) flags.push('dirty');
-    const cardFlag = cardFlagFor(t.branch);
-    if (cardFlag) flags.push(cardFlag);
-    console.log(`${t.branch || '(detached)'}  ->  ${t.path}${flags.length ? `  [${flags.join(', ')}]` : ''}`);
-  }
+  warnLeftoverWorktreeDirs();
 }
 
 const [cmd, taskId, ...rest] = process.argv.slice(2);

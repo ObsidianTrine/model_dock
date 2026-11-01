@@ -25,6 +25,26 @@ export function orchWebhookEnvs(repoRoot) {
   return [`${prefix}_ORCH_WEBHOOK`];
 }
 
+/**
+ * 按端点特征适配 incoming webhook 请求体：飞书（msg_type/content）、企业微信
+ * （msgtype/text）、Slack（text）三家格式互不相同，裸 {title,body,ts} 只有自建
+ * 适配层能接。按 URL 域名识别主流三家直接适配，其余端点保持裸 JSON（已注册
+ * 自建适配层的老环境不断供）。纯函数：dryRun 描述与实际发送共用同一形态。
+ */
+export function webhookPayload(webhook, title, body, ts) {
+  const text = `${title}\n${body}`;
+  if (/open\.feishu\.cn|open\.larksuite\.com/i.test(webhook)) {
+    return JSON.stringify({ msg_type: 'text', content: { text } });
+  }
+  if (/qyapi\.weixin\.qq\.com/i.test(webhook)) {
+    return JSON.stringify({ msgtype: 'text', text: { content: text } });
+  }
+  if (/hooks\.slack\.com/i.test(webhook)) {
+    return JSON.stringify({ text });
+  }
+  return JSON.stringify({ title, body, ts });
+}
+
 /** 组装卡片落位通知正文（awaiting-human/blocked/failed——夜里无人值守时可扫读）。 */
 export function buildSettleSummary({ taskId, state, reason } = {}) {
   const icon = state === 'awaiting-human' ? '⏸' : state === 'failed' ? '✗' : '⚠';
@@ -53,7 +73,7 @@ export async function notify(opts = {}) {
   const delivered = [];
   const webhook = webhookEnvs.map((n) => process.env[n]).find(Boolean);
   if (webhook) {
-    const payload = JSON.stringify({ title, body, ts: new Date().toISOString() });
+    const payload = webhookPayload(webhook, title, body, new Date().toISOString());
     if (dryRun) {
       delivered.push(`webhook POST ${webhook} ${payload}`);
     } else {

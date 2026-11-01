@@ -216,6 +216,10 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 
   ① ModelDock 侧按档位建 profile + 钉定路由的 harness（`modeldock test <harness>` 验证连通）；② workflow.json `tiers` 各档配 `tokenEnv`（token 走环境变量不入库，可选 `workerModel`/`reviewModel`/`provider`/`gatewayBase`）；③ 任务卡写 `tier: ahead-3`（**旧 `heavy`/`light` 永远兼容**＝自动映射 前进4/前进2）。`files_hint` 命中核心/发布路径自动升 前进4。某档 tokenEnv 未设 → 该档回落全局默认（显式点名告警、自动升档静默）。模型优先级：CLI > tier > 全局默认。zcode-headless 不支持 tier。
 - **长跑加固速记**（详设见 design doc v1.2）：预算按引擎校准 `budgetProfiles.<backend>`（本仓库 claude-headless / zcode-headless 均 `max_tokens: 5000000`——GLM 网关缓存读口径失真，调大不关闭，wall-clock 才是真熔断）；drain 起跑前引擎预检（CLI 不可用拒绝启动，不再逐卡烧成 blocked）；落位即发 webhook（`${envPrefix}_ORCH_WEBHOOK`）+ macOS 通知；worker prompt 带结束纪律（done 前自验、同一条命令被权限拒满 2 次即 stuck、禁 `git -C` 与 `;`/`&&` 复合命令）。
+- **Windows 权限墙已根修**：claude CLI 在 Windows 的 shell 工具是 **PowerShell**——白名单/红线一律 Bash+PowerShell 双形态双发，worker settings hook matcher 为 `Bash|PowerShell`。zcode 侧 yolo 在 CLI 0.17.0 已恢复全自动（沙箱实验实证）。
+- **prompt 纪律**（对齐 Anthropic 长时程 harness）：done 前自验测试、干净提交、不越界；**同一条命令被权限拒绝满 2 次即 stuck 熔断**；环境层禁 `git -C` 形态与 `;`/`&&` 复合命令。spec 卡 design/requirements 用 **worktree 文件引用**（防 zcode headless 30k argv 上限），prepare 时由 orchestrator 拷贝进 worktree。reviewer prompt 注入 REVIEW.md 纪律摘要（截 8000 字符）。files_hint 解析自动剥反引号/引号。
+- **Budget 会话级记账**：committed+sessionMax（跨 fixup 会话不再互相覆盖漏计），每次 worker_spawned 落 `budget_baseline` 事件。
+- **LLM 决策留底（decision trace）**：看门狗（watchdog）/ scan 语义过滤（smartfilter）/ 独立审查（review）三类 LLM 决策点把**模型输入与原始输出全文**落盘 `.agents/orchestrator/logs/<任务id>/decisions/<类型>-*.json` 供复盘；超 64KB 截前缀、每类型滚动保留 20 份；workflow.json 可选键 `"trace": { "enabled": true, "maxPerTask": 20, "maxInputKB": 64 }`（缺省开启）。看门狗熔断卡不参与 blocked 卡自动续（防「误杀→续跑→再误杀」循环）。
 
 ### A5. 权限红线（worker 被什么拦了）
 
@@ -235,6 +239,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 ## B. 自主模式详解
 
 需求侧生命周期：**出提案（drafts/ 待审托运申请）→ 人工批量 submit 或 autopilot（自动舵）白名单自动提交（pending/ 待泊）→ 常规闭环（闸门原样）**。人（船东）只审提案与合并两级。
+- **blocked 卡什么时候会自动续跑**：drain（含 nightly `--auto` 拉起的 drain）在选卡前会扫一遍 `blocked/`，对**可安全自动续**的卡有限自动 resume——夜里被 429 限流/网络抖动打 blocked 的卡不再等到早上。资格三条：① 失败属 transient 类——最后一条 blocked/failed 事件的 reason 带 429 限流/网络签名，或事件链有 `worker_retry` 记录（worker 原地重试已发生）且最终落 blocked（预算/看门狗/调试迭代熔断是确定性失败，不续）；② 卡 frontmatter 无 `auto_resumed_at` 或距上次自动续 ≥24h（`autoResume.cooldownHours` 可调）——自动续后再 blocked 不立即重试，等人工或冷却过期；③ 每次 drain 最多 `autoResume.maxPerRun` 张（缺省 2），blocked 最早的先续。每次自动续记 `auto_resume { card, attempts }` 事件（人工 resume 的 `resumed by human` 与之区分）。drift 降级期间整个通道暂停（降级 = 全人工）。全局关闭：workflow.json 写 `"autoResume": { "enabled": false }`（其余键缺省即 true/2/24）。
 
 ### B0. 引水闸（compulsory pilotage）
 
@@ -261,6 +266,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 ### B2. 巡检（scan 的 6 类信号源）
 
 TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub open issues（gh best-effort）· **known-issues 账本**（docs/known-issues.md 未修条目，已修/暂缓自动跳过——人工裁决不被自主提案推翻）· **主干 CI 失败**（gh run list，按 head sha 建 id）。全部内容过 sanitize 消毒（无法携带指令结构进 worker prompt）；id 按内容哈希，信号不变自动去重；gh 类信号仅 GitHub 远端启用、失败警告跳过。
+- **信号两级过滤**（程序 Fast Path 永启 + LLM Slow Path 按 `scan.smartFilter: true` 开启，缺省关）：落卡写 frontmatter `signal_hashes`；同源信号**直通在途卡**（「补充信号」小节追加，记 `signal_relayed`，不重复开卡），与 14 天内 merged/failed 卡同信号的**丢弃**（记 `signal_dropped`）；LLM 层对剩余候选**批量一次**调用（≤50 条，成本上界写死），判定 card/drop/merge，失败全部保守回落开卡（宁多勿漏，`scan_semantic` 事件）；每轮落 `scan_filtered` 总账（raw/keep/relayed/dropped/merged_away）。引擎用 review.backend 同款，模型 `scan.smartModel`（缺省回落 review.model）。
 
 ### B3. propose（planner 需求综合）
 
@@ -269,6 +275,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 ### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
 `nightly` = scan 出提案 + autopilot 白名单提交 + drift 报告 + 队列摘要（默认零烧钱；`--plan` 加跑 planner；`--auto N` 夜间对 high 提案提交并发起闭环再 drain N 个——worker 烧钱仅此档，gate=L3 兜底合并仍人工）。`schedule install --hour 2 --minute 30 [--auto 3] [--mode watch]` 注册定时（launchd/crontab/schtasks 经 wrapper 绝对路径启动，不依赖调度环境 PATH；仓库挪位置后重装）。日志 `logs/nightly.log`（超 5MB 轮转）。跑完发通知：macOS 本地通知 + `${envPrefix}_NIGHTLY_WEBHOOK`（如 `AGENTS_NIGHTLY_WEBHOOK`，旧名 MODELRDOCK_* 兼容）POST `{title, body, ts}`；通知尽力而为，摘要始终在日志。
+中断恢复与双跑防护：nightly 启动时对账 `logs/nightly-state.json`——上次未正常收尾（崩溃/强制重启）则记 `nightly_recovered` + webhook 通知后照常执行；距上次完成不足 20 小时且非人工触发判为补触发双跑，跳过本次（终端 TTY 自动识别人工，脚本场景加 `--manual`）。webhook URL 直接填**飞书 / 企业微信 / Slack** 群机器人地址（按端点域名自动适配三家消息格式；飞书自定义关键词配 `nightly` 或 `ModelDock` 均可命中，签名校验暂不支持）。wrapper 固化 install 时刻的参数与路径——orchestrator 侧默认值/参数变更后需重跑 `schedule install`。
 
 ### B5. 瞭望模式（watch，连续自治）
 

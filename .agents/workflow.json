@@ -38,6 +38,7 @@
     "backend": "claude-headless",
     "model": "glm-5.3-flash"
   },
+  "scan": { "smartFilter": true },
   "budgetProfiles": {
     "claude-headless": {
       "max_tokens": 5000000
@@ -68,4 +69,6 @@
     "autoDrainPerCycle": 0,
     "maxProposalsPerCycle": 3
   }
+,
+  "autoResume": { "enabled": true }
 }
