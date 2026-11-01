@@ -1224,6 +1224,8 @@ async function doReject(repoRoot, taskId, root, qdir, reason) {
   appendEvent(qdir, 'human_gate', { decision: 'rejected', reason });
   moveCard(root, taskId, 'awaiting-human', 'failed');
   appendEvent(qdir, 'failed', { reason: reason || '人工驳回' });
+  // 人工驳回同样进调查包（VDR）：船东与验船师的分歧是最有价值的教训来源，回看与出题都要现场
+  archiveIncident(repoRoot, taskId, root, qdir, reason || '人工驳回');
   log(`已驳回：任务转 failed/（worktree 保留供人工查看现场：${worktreePath(repoRoot, taskId)}）`);
 }
 
@@ -1355,9 +1357,11 @@ function cmdAbandon(repoRoot, taskId) {
   cleanupOrphanWorker(repoRoot, taskId);
   const qdir = logDir(repoRoot, taskId);
   if (found.state !== 'failed' && found.state !== 'merged') {
-    appendEvent(qdir, 'failed', { reason: '人工 abandon（按 worktree-rescue 流程处理）' });
+    const reason = '人工 abandon（按 worktree-rescue 流程处理）';
+    appendEvent(qdir, 'failed', { reason });
     // abandon 是人工兜底动作：直接落 failed/，不走常规迁移白名单
     fs.renameSync(found.path, cardPath(root, 'failed', taskId));
+    archiveIncident(repoRoot, taskId, root, qdir, reason); // 兜底放弃也归档：现场值得回看与出题
   }
   log(`任务已放弃并转 failed/。worktree 与分支清理请按 .agents/workflows/worktree-rescue.md 人工执行：`);
   log(`  git -C ${repoRoot} worktree remove .agents/worktrees/${taskId}`);
