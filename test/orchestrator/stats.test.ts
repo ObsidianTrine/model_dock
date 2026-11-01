@@ -96,3 +96,34 @@ describe('orchestrator stats > 聚合口径', () => {
     }
   })
 })
+
+describe('orchestrator stats > 安全晴雨表（near_miss）', () => {
+  it('瞬时故障卡（重试 3 次 blocked + 调查包）：summary.near_miss 各字段计数正确', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'st-nm')
+      // mock 瞬时故障：原地重试 3 次（10ms 退避）→ blocked（未产出结果块）→ VDR 归档
+      runOrch(repo.root, 'run st-nm --backend mock', { ORCH_MOCK_TRANSIENT: '1', ORCH_RETRY_WAIT_MS: '10' })
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'st-nm', 'incident.md'))).toBe(true)
+
+      const r = runOrch(repo.root, 'stats --days 7 --json')
+      const parsed = JSON.parse(r.stdout)
+      expect(parsed.summary.near_miss).toMatchObject({
+        watchdog: 0, // mock 后端跳过进展看门狗
+        xte: 0, // 单会话零提交 streak=1，未达连续 2 会话阈值
+      })
+      expect(parsed.summary.near_miss.retries).toBeGreaterThanOrEqual(3)
+      expect(parsed.summary.near_miss.incidents).toBeGreaterThanOrEqual(1)
+      // 行级同步可查
+      const row = parsed.rows.find((x: { id: string }) => x.id === 'st-nm')
+      expect(row.retries).toBeGreaterThanOrEqual(3)
+      expect(row.incident).toBe(1)
+
+      const human = runOrch(repo.root, 'stats')
+      expect(human.stdout).toContain('安全晴雨表')
+      expect(human.stdout).toContain('近乎事故')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})

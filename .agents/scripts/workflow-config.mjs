@@ -40,6 +40,10 @@
 //                   maxProposalsPerCycle?: 正整数（propose 单轮提案上限，缺省 3） }。
 //                   授权语义见 autopilot.mjs：自动提交 ≠ 自动合并（gate 覆写 L1，
 //                   实际分级 L2/L3 照样回人工闸门）；deps/核心路径/人工草稿永不自动
+//   weatherHold     风暴闸（weather hold，可选键）：{ threshold?: 正整数（缺省 3），
+//                   windowMinutes?: 正整数（缺省 60） }。键存在才启用——drain/nightly --auto/
+//                   watch 派发前统计窗口内各任务 worker_retry 合计，达阈值即停止派发
+//                   （无状态，窗口滑过自动恢复）；删掉该键 = 关闭风暴闸（行为与历史版本一致）
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -113,6 +117,7 @@ export function loadWorkflowConfig(repoRoot) {
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
     autopilot: resolveAutopilot(raw.autopilot),
+    weatherHold: resolveWeatherHold(raw.weatherHold),
   };
 }
 
@@ -166,6 +171,31 @@ function resolveAutopilot(raw) {
   }
   if (raw.maxProposalsPerCycle !== undefined) {
     out.maxProposalsPerCycle = Number.isInteger(raw.maxProposalsPerCycle) && raw.maxProposalsPerCycle > 0 ? raw.maxProposalsPerCycle : DEFAULTS.maxProposalsPerCycle;
+  }
+  return out;
+}
+
+/** 风暴闸配置解析：{ threshold, windowMinutes }。与 resolveAutopilot 同风格：键缺失 =
+ *  功能关闭（null，行为与历史版本一致）；键存在时缺省 threshold 3 / windowMinutes 60。
+ *  非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）；键内字段缺失
+ *  = 沿用该字段缺省，不告警。 */
+function resolveWeatherHold(raw) {
+  if (raw === undefined || raw === null) return null;
+  const DEFAULTS = { threshold: 3, windowMinutes: 60 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] weatherHold 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 weatherHold 键：{ threshold?: 正整数, windowMinutes?: 正整数 }；删除该键 = 关闭风暴闸）`);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { threshold?, windowMinutes? }，当前为 ${JSON.stringify(raw)}`);
+    return { ...DEFAULTS };
+  }
+  const out = { ...DEFAULTS };
+  if (raw.threshold !== undefined) {
+    if (Number.isInteger(raw.threshold) && raw.threshold > 0) out.threshold = raw.threshold;
+    else warn(`threshold ${JSON.stringify(raw.threshold)} 不合法（须为正整数）`);
+  }
+  if (raw.windowMinutes !== undefined) {
+    if (Number.isInteger(raw.windowMinutes) && raw.windowMinutes > 0) out.windowMinutes = raw.windowMinutes;
+    else warn(`windowMinutes ${JSON.stringify(raw.windowMinutes)} 不合法（须为正整数）`);
   }
   return out;
 }
