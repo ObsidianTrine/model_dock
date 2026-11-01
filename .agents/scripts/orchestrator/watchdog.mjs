@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { coalesceEvents } from './events.mjs';
+
 /** 看门狗单次检查的 worker 会话轮次上限（只读判断，1-2 轮足够；收紧防跑飞）。 */
 export const WATCHDOG_MAX_TURNS = 4;
 /** 时间线截断：尾部 ≤20 条、每条 ≤200 字符。 */
@@ -51,18 +53,21 @@ export function parseWatchdogVerdict(text) {
   return null;
 }
 
-/** 事件时间线尾部摘要（喂给看门狗 judge 的输入）：尾部 ≤WATCHDOG_TIMELINE_MAX_ENTRIES 条、
- *  每条截断到 WATCHDOG_TIMELINE_ENTRY_MAX_CHARS 字符。只留 type + 业务字段（ts/seq 是
- *  噪音），格式与 formatTimeline 同风格但不带时间戳。 */
+/** 事件时间线尾部摘要（喂给看门狗 judge 的输入）：先折叠逐 turn 高频事件
+ *  （coalesceEvents，worker_turn ×N 一行带末条字段），再取尾部
+ *  ≤WATCHDOG_TIMELINE_MAX_ENTRIES 条、每条截断到 WATCHDOG_TIMELINE_ENTRY_MAX_CHARS
+ *  字符——同样 20 行的预算，覆盖的事件窗口比裸截断长一个量级。只留 type + 业务
+ *  字段（ts/seq 是噪音），格式与 formatTimeline 同风格但不带时间戳。 */
 export function watchdogTimelineSummary(events) {
-  const lines = (events ?? [])
+  const lines = coalesceEvents(events ?? [])
     .slice(-WATCHDOG_TIMELINE_MAX_ENTRIES)
     .map((e) => {
       const extra = Object.entries(e)
         .filter(([k]) => !['ts', 'seq', 'type'].includes(k))
         .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
         .join(' ');
-      const line = `${e?.type ?? 'unknown'}${extra ? '  ' + extra : ''}`;
+      const countTag = e.count > 1 ? ` ×${e.count}` : '';
+      const line = `${e?.type ?? 'unknown'}${countTag}${extra ? '  ' + extra : ''}`;
       return line.length > WATCHDOG_TIMELINE_ENTRY_MAX_CHARS ? `${line.slice(0, WATCHDOG_TIMELINE_ENTRY_MAX_CHARS)}…` : line;
     });
   return lines.join('\n');
