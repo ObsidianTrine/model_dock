@@ -18,9 +18,18 @@ import { localIsoTs } from '../util/time.js'
 /** 收集命令输出的上限（防止日志/响应被刷爆） */
 export const INSTALL_OUTPUT_MAX = 4000
 
-export function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessEnv): Promise<number> {
+/** runShell 命令超时（安装/卸载挂死时端点曾永久挂起）；测试可注入短值 */
+export const RUN_SHELL_TIMEOUT_MS = 10 * 60_000
+
+export function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessEnv, timeoutMs: number = RUN_SHELL_TIMEOUT_MS): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env })
+    // timeout：安装/卸载命令（npm 全局安装，网络依赖）挂死时 hInstall/hUninstall 端点曾
+    // 永久挂起、子进程留存（2026-11-02 复查 P2-4）。Node spawn 原生语义：超时发 killSignal
+    // （win32 SIGTERM 即硬杀）并照常触发 close
+    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env, timeout: timeoutMs })
+    // setEncoding：多字节中文跨 chunk 边界不再撕裂成替换符（engineWarningHint 的正则匹配与日志展示都依赖）
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
     child.stdout?.on('data', (d) => onOut(String(d)))
     child.stderr?.on('data', (d) => onOut(String(d)))
     child.on('error', (e) => {

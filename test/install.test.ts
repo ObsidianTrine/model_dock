@@ -10,6 +10,7 @@ import { emptyConfig } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer, runClientInstall, runClientUninstall } from '../src/gateway/server.js'
+import { runShell, RUN_SHELL_TIMEOUT_MS } from '../src/gateway/install.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { isNpmGlobalInstall } from '../src/adapters/types.js'
 import { commandOnPath, commandOnPathResolved, commandOnPathSandbox } from '../src/util/fsx.js'
@@ -776,3 +777,14 @@ function sandboxNpmBinDirPath(): string {
   const prefix = sandboxNpmPrefix()!
   return process.platform === 'win32' ? prefix : path.join(prefix, 'bin')
 }
+
+describe('runShell 超时（卡 31：安装命令挂死曾永久挂起端点）', () => {
+  it('挂死命令被超时击杀：resolve 非零码而非永久挂起', async () => {
+    const code = await runShell('node -e "setInterval(()=>{},1e3)"', () => {}, undefined, 800)
+    expect(code).not.toBe(0)
+  }, 20_000)
+
+  it('RUN_SHELL_TIMEOUT_MS 缺省 10 分钟', () => {
+    expect(RUN_SHELL_TIMEOUT_MS).toBe(600_000)
+  })
+})
