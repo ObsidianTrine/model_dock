@@ -2,7 +2,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import fsp from 'node:fs/promises'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { AdminCtx, jsonRequestBody, sendError } from './admin-shared.js'
 import { applyChanges } from '../adapters/engine.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
@@ -23,20 +23,41 @@ export const RUN_SHELL_TIMEOUT_MS = 10 * 60_000
 
 export function runShell(cmd: string, onOut: (c: string) => void, env?: NodeJS.ProcessEnv, timeoutMs: number = RUN_SHELL_TIMEOUT_MS): Promise<number> {
   return new Promise((resolve) => {
-    // timeout：安装/卸载命令（npm 全局安装，网络依赖）挂死时 hInstall/hUninstall 端点曾
-    // 永久挂起、子进程留存（2026-11-02 复查 P2-4）。Node spawn 原生语义：超时发 killSignal
-    // （win32 SIGTERM 即硬杀）并照常触发 close
-    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env, timeout: timeoutMs })
+    const child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env })
     // setEncoding：多字节中文跨 chunk 边界不再撕裂成替换符（engineWarningHint 的正则匹配与日志展示都依赖）
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
     child.stdout?.on('data', (d) => onOut(String(d)))
     child.stderr?.on('data', (d) => onOut(String(d)))
+    let settled = false
     child.on('error', (e) => {
       onOut(String(e.message))
+      settled = true
+      clearTimeout(timer)
       resolve(1)
     })
-    child.on('close', (code) => resolve(code ?? 1))
+    child.on('close', (code) => {
+      settled = true
+      clearTimeout(timer)
+      resolve(code ?? 1)
+    })
+    // 超时树杀（2026-11-02 复查 P2-4）：安装/卸载命令（npm 全局安装，网络依赖）挂死时
+    // hInstall/hUninstall 端点曾永久挂起、子进程留存。不用 spawn 原生 timeout——它只杀
+    // 直接子进程（shell 包装层），孙进程持有 stdio 管道时 close 永不触发、runShell 依旧
+    // 挂死（Windows cmd.exe 不 exec，`node -e setInterval` 实测）；故到点后按树清：
+    // win32 taskkill /T /F，unix 杀 shell（sh -c 单命令形态下 exec 直接命中目标进程）
+    const timer = setTimeout(() => {
+      if (settled || !child.pid) return
+      try {
+        if (process.platform === 'win32') {
+          execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+        } else {
+          child.kill('SIGKILL')
+        }
+      } catch {
+        /* 已退出（close 竞态）：忽略 */
+      }
+    }, timeoutMs)
   })
 }
 

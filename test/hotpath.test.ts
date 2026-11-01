@@ -326,11 +326,16 @@ describe('createUsageTap：预过滤与多字节边界', () => {
   })
 
   it('SSE 行缓冲封顶（卡 31）：超长无换行 chunk 触发封顶，后续 usage 不再解析（只透传）', async () => {
-    const huge = Buffer.from('data: ' + 'x'.repeat(1024 * 1024 + 16), 'utf8')
-    const usage = await feedTap(
-      [huge, Buffer.from('data: {"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n', 'utf8')],
-      'text/event-stream'
-    )
+    // 2MB chunk 远超 Transform highWaterMark：feedTap 不消费 readable 侧会背压卡死 finish，
+    // 这里自行接线并 resume() 排空
+    const tap = createUsageTap('text/event-stream') as Transform & { getUsage: () => UsageStats }
+    tap.resume()
+    tap.write(Buffer.from('data: ' + 'x'.repeat(1024 * 1024 + 16), 'utf8'))
+    tap.write(Buffer.from('data: {"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n', 'utf8'))
+    const usage = await new Promise<UsageStats>((resolve) => {
+      tap.on('finish', () => resolve(tap.getUsage()))
+      tap.end()
+    })
     expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
   })
 
