@@ -1,6 +1,6 @@
 ---
 name: dockmaster
-description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或用自然语言指名派活（「让 dockmaster/坞长做 X」「派个任务给 dockmaster」「用前进2跑…」「开船：修一下 X」）时使用。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。支持对话指定档位（前进1-4）、引擎（harness）与服务商/模型。路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、propose 需求综合（autopilot）、release-propose 发版提案。仅当用户指名 Dockmaster 或明确要派自治任务时加载；只是提及 dockmaster 而非派活时先问一句，不要抢跑。
+description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或用自然语言指名派活（「让 dockmaster/坞长做 X」「派个任务给 dockmaster」「用前进2跑…」「开船：修一下 X」）时使用。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。支持对话指定档位（前进1-4）、引擎（harness）与服务商/模型。路由路径：spec 三件套设计（先设计后施工）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、sail 自由航行（时间盒完全自治：自勘察自规划自执行，到点交航海报告）、propose 需求综合（autopilot）、release-propose 发版提案。仅当用户指名 Dockmaster 或明确要派自治任务时加载；只是提及 dockmaster 而非派活时先问一句，不要抢跑。
 ---
 
 # dockmaster —— Dockmaster 港务调度台
@@ -120,6 +120,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 - **先设计后施工（spec）**：特性级改动用 `spec "<意图>"` 出三件套——**设计必须用户亲自确认后才能 `spec build` 拆卡**（你不能代审）；拆出的卡 gate=L3，用户口头授权自动合并后可改 L1。
 - **巡检与提案（nightly / scan）**：`nightly` 零烧钱出提案落 drafts；逐张给用户一句话采纳建议，点头后 `submit`。`--plan` 烧钱跑 planner 需求综合。`autopilot.enabled` 开启后白名单提案自动提交（deps/核心路径/人工草稿永不自动）——开启属持久授权，**代改配置前必须先确认**。
 - **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
+- **自由航行（sail）**：用户要「让它自己给自己安排活干一段时间」时用：`sail --minutes 120`（或 `--duration 2h`）后台常驻——scan 勘察 → propose 规划+自动提交（开 sail 即本航次授权；deps/人工草稿/核心·发布路径永不自动）→ drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。启动前向用户复述时长与自动提交范围，结束后把报告要点汇报给用户。
 - **发版提案（release-propose）**：只出建议与草稿；**版本号决定权在用户**——用户说「发布 vX.Y.Z」才走 release.md 代理发布（不在本技能，永不 push）。
 
 ## 红线（永不）

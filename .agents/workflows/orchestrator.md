@@ -74,6 +74,7 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 | merged | 出港 | merged |
 | 熔断 | 紧急抛锚 | circuit breaker |
 | watch | 瞭望模式 | watch |
+| sail | 自由航行（时间盒完全自治，到点交航海报告） | sail |
 | autopilot | 自动舵 | autopilot |
 
 ## 速查（日常就这几条）
@@ -98,6 +99,7 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
 | `nightly [--plan] [--auto N]` | 一次完整巡检编排；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
+| `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+自动提交→执行循环），到点收帆交航海报告 |
 | `drill` | 弃船演习：临时港 mock 全链跑一张合成托运单，验证港口闭环自身健康（不烧真钱、不碰真队列） |
 | workflow.json `autopilot` | 白名单提案自动提交（**缺省关**；deps/核心路径/人工草稿永不自动） |
 
@@ -327,6 +329,15 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 - `escalation: { enabled: true, fallbackBackend: "claude-headless" }`——**fallbackBackend 写进配置即持久授权**（同 autopilot 哲学），运行时不再为换船请示。
 - 红线不变：预算熔断永远硬顶（escalation 不重置不放宽预算）；所有升档事件留痕（永不静默）；第 0/1 档只救「装不下/瞬时限流」类故障，验收失败照走调试与人工闸门。
+
+### B9. 自由航行（sail，时间盒完全自治）
+
+`node .agents/scripts/orchestrator.mjs sail --minutes 120`（或 `--duration 2h|90m|1h30m`）：船长自勘海况（scan 巡检）→ 自绘航线（propose 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交**航海报告**——完成了什么、为什么这么编排，落 `logs/sail/<ts>/report.md`（stdout 同文 + webhook 通知 + fleet 留痕，`sail_started`/`sail_finished`）。与 watch 的差别：有硬时长预算、报告收口、自动提交不依赖 autopilot 配置。
+
+- **授权模型**：人显式敲下带时长的 sail 命令 = 本航次自动提交授权。硬禁区不变（配置只收窄、永不放大）：`created_by: human` 人工草稿、`deps` 类型、files_hint 命中 corePaths/releasePaths 永不自动；类型白名单 workflow.json `freeSail.autoSubmitTypes`（缺省 `["docs","bugfix","refactor","feature"]`）；提交 gate 覆写 L1——实际合并仍由分级裁决 + drift 保险丝兜底。开航前已有的存量 drafts 永不自动提交。
+- **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + 自动提交 → 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效）。
+- **停止条件（任一）**：到达 `--minutes/--duration`、`.agents/orchestrator/.sail-stop` 文件（下周期即停并清文件）、drift 降级（人工 `drift --clear` 后再启）、`--max-tasks N` 派发上限、连续 3 轮派发无进展（队列卡在待引水/解析失败时触发）。**软截止**：跑着的任务让它跑完，不超时强杀；风暴闸滞留期跳过派发与规划（scan 照跑——不派 worker），窗口滑过自动恢复。
+- **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
 
 ## C. 观测与对账详解
 

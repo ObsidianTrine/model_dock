@@ -61,6 +61,7 @@ import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, or
 import { resolveTier, tierEnvPatch, validateTierModel, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
+import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -2850,6 +2851,224 @@ async function cmdWatch(repoRoot, opts) {
   }
 }
 
+/** 自由航行自动提交：对本航次产出的提案逐张过 canSailSubmit 白名单后提交（gate→L1，
+ *  实际合并仍由门禁分级裁决）。只碰本航次快照里的新提案——存量 drafts 等人工 submit。 */
+function sailAutoSubmit(repoRoot, root, cfg, ids) {
+  const submitted = [];
+  const skipped = [];
+  for (const id of ids) {
+    const text = safeRead(path.join(draftsDir(repoRoot), `${id}.md`));
+    if (!text) {
+      skipped.push({ id, reason: '提案文件不存在' });
+      continue;
+    }
+    let meta;
+    try {
+      meta = parseCard(text, `${id}.md`).meta;
+    } catch (e) {
+      skipped.push({ id, reason: `校验未过（${String(e.message).slice(0, 120)}）` });
+      continue;
+    }
+    const verdict = canSailSubmit(meta, cfg);
+    if (!verdict.ok) {
+      skipped.push({ id, reason: verdict.reason });
+      log(`⏸ 自由航行不自动提交 ${id}：${verdict.reason}`);
+      continue;
+    }
+    const r = submitDraft(repoRoot, root, id, { gate: AUTO_SUBMIT_GATE });
+    if (r.submitted) {
+      submitted.push(r.submitted);
+      log(`⛵ 自由航行已提交提案：pending/${r.submitted}.md（gate=${r.gate}，类型 ${meta.type}；实际合并仍由门禁分级裁决）`);
+    } else {
+      skipped.push({ id, reason: r.skipped ?? '提交失败' });
+    }
+  }
+  return { submitted, skipped };
+}
+
+/**
+ * sail——自由航行（时间盒完全自治）：船长自勘海况（scan 巡检）→ 自绘航线（propose
+ * 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交航海报告
+ * （logs/sail/<ts>/report.md：完成了什么、为什么这么编排）。与 watch 的差别：有硬时长
+ * 预算、报告收口、自动提交不依赖 autopilot 配置（开 sail 即本航次授权，硬禁区不变：
+ * deps/人工草稿/核心·发布路径永不自动；类型白名单 freeSail.autoSubmitTypes）。
+ * 停止条件（任一）：到达 --minutes/--duration、.sail-stop 文件、drift 降级、--max-tasks
+ * 上限、连续 3 轮派发无进展。软截止：跑着的任务让它跑完，不在剩余不足时开新派发。
+ */
+async function cmdSail(repoRoot, opts) {
+  const cfg0 = loadWorkflowConfig(repoRoot);
+  const minutes = parseDurationMinutes({ minutes: opts.minutes, duration: opts.duration });
+  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m）[--max-tasks N] [--interval 10]——自由航行时长必须显式指定（分钟，>0）。');
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  preflightWorkerBackend(opts.backend ?? cfg0.worker?.backend); // 起航前引擎预检：CLI 不在就别烧规划钱
+  const lock = acquireSchedulerLock(repoRoot, 'sail');
+  if (!lock.held) {
+    log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——sail 不并发调度。`);
+    return;
+  }
+  const startedAt = Date.now();
+  const deadline = startedAt + minutes * 60_000;
+  const maxTasks = Number.isInteger(opts.maxTasks) && opts.maxTasks > 0 ? opts.maxTasks : Infinity;
+  const intervalMin = Number.isInteger(opts.interval) && opts.interval >= 0 ? opts.interval : 10;
+  const orch = path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs');
+  const childEnv = { ...process.env, ...childEnvForHeldLock() };
+  const stopFile = path.join(repoRoot, '.agents', 'orchestrator', SAIL_STOP_FILE);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const d0 = new Date(startedAt);
+  const tsDir = `${d0.getFullYear()}${pad2(d0.getMonth() + 1)}${pad2(d0.getDate())}-${pad2(d0.getHours())}${pad2(d0.getMinutes())}${pad2(d0.getSeconds())}`;
+  const sailDir = path.join(repoRoot, '.agents', 'orchestrator', 'logs', 'sail', tsDir);
+  fs.mkdirSync(sailDir, { recursive: true });
+  const voyage = {
+    projectName: displayProjectName(cfg0.projectName ?? ''),
+    root: repoRoot,
+    startedAtISO: new Date(startedAt).toISOString(),
+    deadlineISO: new Date(deadline).toISOString(),
+    minutes,
+    maxTasks: maxTasks === Infinity ? null : maxTasks,
+    baseline: snapshotQueue(root),
+    cycles: [],
+    dispatchedTotal: 0,
+  };
+  let stopReason = null;
+  let noProgress = 0;
+  let weatherAnnounced = false;
+  let sigint = false;
+  const onSigint = () => { sigint = true; };
+  const writeVoyage = () => {
+    try { fs.writeFileSync(path.join(sailDir, 'voyage.json'), JSON.stringify(voyage, null, 2)); } catch { /* 留痕失败不阻断航行 */ }
+  };
+  const remainingMin = () => Math.max(0, Math.round((deadline - Date.now()) / 60_000));
+  log(`════════ 自由航行开始（计划 ${minutes} 分钟，至 ${voyage.deadlineISO}；max-tasks ${maxTasks === Infinity ? '∞' : maxTasks}）════════`);
+  log(`停止：touch .agents/orchestrator/.sail-stop（或 Ctrl-C）；drift 降级自动退出；报告在 logs/sail/ 下。`);
+  appendFleetEvent(repoRoot, 'sail_started', { minutes, deadline: voyage.deadlineISO, maxTasks: voyage.maxTasks });
+  process.on('SIGINT', onSigint);
+  try {
+    for (;;) {
+      const cycleNo = voyage.cycles.length + 1;
+      if (fs.existsSync(stopFile)) {
+        fs.rmSync(stopFile, { force: true });
+        stopReason = 'stop 文件（.sail-stop）';
+        log('检测到 .sail-stop——自由航行收帆。');
+        break;
+      }
+      if (sigint) {
+        stopReason = 'SIGINT（Ctrl-C）';
+        log('收到 Ctrl-C——自由航行收帆。');
+        break;
+      }
+      const degraded = readDegraded(repoRoot);
+      if (degraded) {
+        stopReason = `drift 降级（${degraded.reason}）`;
+        log('⚠ drift 降级生效——自由航行收帆（人工 drift --clear 后再启）。');
+        break;
+      }
+      if (Date.now() >= deadline) {
+        stopReason = '到达时长上限';
+        break;
+      }
+      if (voyage.dispatchedTotal >= maxTasks) {
+        stopReason = `已达 --max-tasks ${maxTasks}`;
+        break;
+      }
+      if (noProgress >= 3) {
+        stopReason = `连续 ${noProgress} 轮派发无进展`;
+        log(`✗ ${stopReason}（队列可能卡在待引水/解析失败）——收帆。`);
+        break;
+      }
+      const cfg = loadWorkflowConfig(repoRoot); // 每周期重读（watch 同款：改配置即时生效）
+      const weather = cfg.weatherHold ? weatherHoldCount(repoRoot, cfg) : { held: false, count: 0 };
+      if (weather.held && !weatherAnnounced) {
+        weatherAnnounced = true;
+        announceWeatherHold(repoRoot, cfg, weather);
+      }
+      if (!weather.held) weatherAnnounced = false;
+      const pending = listCards(root, 'pending');
+      const cycle = { n: cycleNo, at: new Date().toISOString(), kind: null, dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin: 0 };
+      if (pending.length && !weather.held) {
+        // 派发轮：一次只派一张——每张之间重新看表（截止/风暴/降级/stop 文件）
+        cycle.kind = 'dispatch';
+        log(`\n──── sail 周期 ${cycleNo} → drain --max 1（已派 ${voyage.dispatchedTotal}${maxTasks === Infinity ? '' : `/${maxTasks}`}，剩余 ${remainingMin()} 分钟）────`);
+        const r = spawnSync('node', [orch, 'drain', '--max', '1', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+          cwd: repoRoot,
+          stdio: 'inherit',
+          env: childEnv,
+        });
+        cycle.drainExit = r.status;
+        const after = listCards(root, 'pending');
+        cycle.dispatched = pending.filter((id) => !after.includes(id));
+        voyage.dispatchedTotal += cycle.dispatched.length;
+        noProgress = cycle.dispatched.length ? 0 : noProgress + 1;
+        voyage.cycles.push(cycle);
+        writeVoyage();
+        continue; // 不休眠：立即看表再决定
+      }
+      // 规划轮：队列空（或风暴滞留）→ 巡检出提案；propose 烧钱——风暴中跳过
+      cycle.kind = 'plan';
+      const draftsBefore = snapshotDrafts(repoRoot);
+      spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+      if (!weather.held) {
+        log(`\n──── sail 周期 ${cycleNo} → propose（自由航行规划，剩余 ${remainingMin()} 分钟）────`);
+        spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+        const draftsAfter = snapshotDrafts(repoRoot);
+        const known = new Set(draftsBefore.map((d) => d.id));
+        cycle.proposals = draftsAfter.filter((d) => !known.has(d.id));
+        const sub = sailAutoSubmit(repoRoot, root, cfg, cycle.proposals.map((p) => p.id));
+        cycle.submitted = sub.submitted;
+        cycle.skipped = sub.skipped;
+      } else {
+        log('风暴滞留生效中：本周期跳过规划与派发（窗口滑过后自动恢复）。');
+      }
+      voyage.cycles.push(cycle);
+      // 休眠：本轮无新卡可派才睡（有提交 → 下一轮直接派发）；分片睡，stop 文件/Ctrl-C/到点即醒
+      if (!cycle.submitted.length && Date.now() < deadline && intervalMin > 0) {
+        const sleepStart = Date.now();
+        const sliceEnd = Math.min(deadline, sleepStart + intervalMin * 60_000);
+        while (Date.now() < sliceEnd) {
+          if (fs.existsSync(stopFile) || sigint) break;
+          await new Promise((r) => setTimeout(r, Math.min(5000, sliceEnd - Date.now())));
+        }
+        cycle.sleepMin = Math.max(0, Math.round((Math.min(sliceEnd, Date.now()) - sleepStart) / 60_000));
+      }
+      writeVoyage();
+    }
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+    releaseSchedulerLock(repoRoot);
+    // 收帆：快照差分 → 航海报告（stdout + report.md）→ webhook 通知 → fleet 留痕
+    const finishedAt = Date.now();
+    voyage.finishedAtISO = new Date(finishedAt).toISOString();
+    voyage.actualMinutes = Math.max(0, Math.round((finishedAt - startedAt) / 60_000));
+    voyage.stopReason = stopReason;
+    voyage.endState = snapshotQueue(root);
+    voyage.diff = diffQueueStates(voyage.baseline, voyage.endState);
+    voyage.goalsText = readGoals(repoRoot);
+    const reportPath = path.join(sailDir, 'report.md');
+    voyage.reportPath = reportPath;
+    writeVoyage();
+    const report = buildSailReport(voyage);
+    try { fs.writeFileSync(reportPath, report); } catch { /* 报告写盘失败不影响 stdout 投递 */ }
+    log(`\n${report}`);
+    log(`════════ 自由航行结束（报告：${reportPath}）════════`);
+    appendFleetEvent(repoRoot, 'sail_finished', {
+      merged: voyage.endState.merged.length,
+      awaiting: voyage.endState['awaiting-human'].length,
+      blocked: voyage.endState.blocked.length + voyage.endState.failed.length,
+      pending: voyage.endState.pending.length,
+      dispatched: voyage.dispatchedTotal,
+      stopReason,
+      report: path.relative(repoRoot, reportPath),
+    });
+    try {
+      await notify({
+        title: `${voyage.projectName} 自由航行`,
+        body: buildSailSummary(voyage),
+        webhookEnvs: nightlyWebhookEnvs(repoRoot),
+      });
+    } catch { /* 通知失败不阻断收帆 */ }
+  }
+}
+
 /**
  * release-propose——发版提案（release-please 形态）：自动盘点上个 tag..develop、
  * conventional 前缀推 semver、核对 CHANGELOG 未发布段，产出提案文件。
@@ -2961,6 +3180,8 @@ function usage() {
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
+  sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--interval 10] [--backend …] [--review-backend …]
+                                          自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排）。停止：.sail-stop / drift 降级 / --max-tasks；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
   schedule install|uninstall|status [--mode nightly|watch] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--dry-run]
                                           定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
@@ -3008,6 +3229,9 @@ async function main() {
     else if (a === '--days') opts.days = parseInt(argv[++i], 10);
     else if (a === '--interval') opts.interval = parseInt(argv[++i], 10);
     else if (a === '--max-cycles') opts.maxCycles = parseInt(argv[++i], 10);
+    else if (a === '--minutes') opts.minutes = parseInt(argv[++i], 10);
+    else if (a === '--duration') opts.duration = argv[++i];
+    else if (a === '--max-tasks') opts.maxTasks = parseInt(argv[++i], 10);
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
@@ -3069,6 +3293,8 @@ async function main() {
       return cmdNightly(repoRoot, opts);
     case 'watch':
       return cmdWatch(repoRoot, opts);
+    case 'sail':
+      return cmdSail(repoRoot, opts);
     case 'schedule':
       return cmdSchedule(repoRoot, args[0], opts);
     case 'release-propose':
