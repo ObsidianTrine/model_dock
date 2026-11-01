@@ -8,7 +8,7 @@
 
 每一次编码任务，都是一次航行。
 
-**Harness 是航行在海上的船**——Claude Code、ZCode、dsh，是三家船厂造的不同船型；**大模型是船的发动机**——GLM、Claude、Kimi，可按航程换装功率不同的引擎（tier 就是发动机档位），燃油由 ModelDock 港统一供给与计量（网关路由，`reconcile` 对账 = 航海日志 vs 油耗表）；**Dockmaster 是船长**——接过船东（你）的托运单（任务卡），指挥发动机推船离泊，沿航道（门禁与审查关卡）驶向目的地（验收标准）：风暴中紧急抛锚自保（熔断），搁浅时组织拖救（`resume`），请验船师检验（reviewer），等船东签单放行（approve）才算出港（merged）。
+**Harness 是航行在海上的船**——Claude Code、ZCode、dsh，是三家船厂造的不同船型；**大模型是船的发动机**——GLM、Claude、Kimi，可按航程换装功率不同的引擎（tier 就是车钟档位：前进1-4），燃油由 ModelDock 港统一供给与计量（网关路由，`reconcile` 对账 = 航海日志 vs 油耗表）；**Dockmaster 是船长**——接过船东（你）的托运单（任务卡），指挥发动机推船离泊，沿航道（门禁与审查关卡）驶向目的地（验收标准）：风暴中紧急抛锚自保（熔断），搁浅时组织拖救（`resume`），请验船师检验（reviewer），等船东签单放行（approve）才算出港（merged）。
 
 对一艘船，Dockmaster 是**船长**；对整支船队，它是**坞长**——瞭望模式（watch）盯住每一条船，罗盘（goals.md）校准每一条航线，自动舵（autopilot）让放心的航线自主航行。船东不必出海：**递单、审提案、放行，三次出现足矣。**
 
@@ -59,7 +59,7 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 | 体系 | 船长兼坞长 / 港务 | Dockmaster / `orchestrator.mjs` |
 | 任务卡 | 托运单（目的地=目标，交货标准=验收标准） | task card |
 | harness | 船型（Claude Code 号 / ZCode 号 / dsh 号） | harness |
-| 大模型 | 发动机（tier = 发动机档位） | model |
+| 大模型 | 发动机（tier = 车钟档位：前进1-4，接口键 ahead-1..4） | model |
 | ModelDock 网关 | 燃油库（统一供油、按航次计量） | gateway |
 | worktree | 泊位 | worktree |
 | pending | 待泊 | pending |
@@ -147,7 +147,7 @@ workflows:                       # 注入 worker 的 playbook（至少 feature-b
   - feature-branch
 gate: L1                         # 允许自动合并的级别上限：L0 仅文档测试 / L1 常规 / L3 全人工
 fastlane: true                   # 可选：跳过 LLM 审查省最大开销（只省审查不省闸门，见 A8）
-tier: heavy                      # 可选：按难度选服务/模型（见 A4）；缺省命中核心路径自动升 heavy
+tier: ahead-3                    # 可选：车钟档位 前进1-4（接口键 ahead-1..4，旧 heavy/light 兼容；见 A4）；缺省命中核心路径自动升 前进4
 ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒烟门禁（见 A8）
 ---
 
@@ -204,10 +204,18 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 
 ### A4. 后端与 tier（执行/审查各用什么引擎与模型）
 
-- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。zcode-headless 设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`；headless 无 `--max-turns`（轮次熔断不可用，wall-clock/token 熔断直接杀进程树），prompt 走 argv 超 30000 字符快速失败。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
+- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: claude-headless`——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687），即默认通过 ModelDock 供油接入**；zcode-headless 在本机 start plan 下不支持 headless（2026-10-29 实证），保留作未来解锁后的备选。zcode-headless 设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`；headless 无 `--max-turns`（轮次熔断不可用，wall-clock/token 熔断直接杀进程树），prompt 走 argv 超 30000 字符快速失败。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
 - **异构审查**：执行与审查是两个独立会话。审查引擎解析顺序：`--review-backend` 显式 > workflow.json `review.backend` > 上次 `review_spawned` 事件（retry/resume 不换审查引擎）> **自动异构**（自动选另一个可用的真实引擎，如 claude 干活 / zcode 审查；mock 永不异构）> 回落同源（记 `review_backend_fallback`）。**去相关的关键是引擎异源——只拆会话不换引擎仍有共同盲区**。
-- **tier 按难度选服务**：① ModelDock 侧按等级建 profile + 钉定路由的 harness（如 `orch-heavy`/`orch-light`，`modeldock test orch-heavy` 验证连通）；② workflow.json `"tiers": { "heavy": { "tokenEnv": "MDK_TIER_HEAVY_TOKEN", "workerModel": "…", "provider": "服务ID", "gatewayBase": "http://127.0.0.1:8687" } }`（token 走环境变量，不入库）；③ 任务卡写 `tier: heavy`。模型优先级：CLI > tier > 全局默认。zcode-headless 不支持 tier（不认 ANTHROPIC_* 环境变量，模型跟随 ZCode 自身配置）。显式 tier 未配置 → 告警回落，不阻断。
-- **长跑加固速记**（详设见 design doc v1.2）：预算按引擎校准 `budgetProfiles.<backend>`（本仓库 zcode `max_tokens: 5000000`，调大不关闭，wall-clock 才是真熔断）；drain 起跑前引擎预检（CLI 不可用拒绝启动，不再逐卡烧成 blocked）；落位即发 webhook（`${envPrefix}_ORCH_WEBHOOK`）+ macOS 通知；worker prompt 带结束纪律（done 前自验、同一条命令被权限拒满 2 次即 stuck、禁 `git -C` 与 `;`/`&&` 复合命令）。
+- **tier 车钟档位（前进1-4，接口键 ahead-1..4）**：按航程难度选服务与模型——
+  | 档位 | 接口键 | 适用 | tokenEnv |
+  |---|---|---|---|
+  | 前进1 | `ahead-1` | 纯文档/测试小改（最省） | `MDK_TIER_AHEAD1_TOKEN` |
+  | 前进2 | `ahead-2` | 常规轻活 | `MDK_TIER_AHEAD2_TOKEN` |
+  | 前进3 | `ahead-3` | 常规重活（默认推荐） | `MDK_TIER_AHEAD3_TOKEN` |
+  | 前进4 | `ahead-4` | 核心/发布路径与复杂特性（旗舰全速） | `MDK_TIER_AHEAD4_TOKEN` |
+
+  ① ModelDock 侧按档位建 profile + 钉定路由的 harness（`modeldock test <harness>` 验证连通）；② workflow.json `tiers` 各档配 `tokenEnv`（token 走环境变量不入库，可选 `workerModel`/`reviewModel`/`provider`/`gatewayBase`）；③ 任务卡写 `tier: ahead-3`（**旧 `heavy`/`light` 永远兼容**＝自动映射 前进4/前进2）。`files_hint` 命中核心/发布路径自动升 前进4。某档 tokenEnv 未设 → 该档回落全局默认（显式点名告警、自动升档静默）。模型优先级：CLI > tier > 全局默认。zcode-headless 不支持 tier。
+- **长跑加固速记**（详设见 design doc v1.2）：预算按引擎校准 `budgetProfiles.<backend>`（本仓库 claude-headless / zcode-headless 均 `max_tokens: 5000000`——GLM 网关缓存读口径失真，调大不关闭，wall-clock 才是真熔断）；drain 起跑前引擎预检（CLI 不可用拒绝启动，不再逐卡烧成 blocked）；落位即发 webhook（`${envPrefix}_ORCH_WEBHOOK`）+ macOS 通知；worker prompt 带结束纪律（done 前自验、同一条命令被权限拒满 2 次即 stuck、禁 `git -C` 与 `;`/`&&` 复合命令）。
 
 ### A5. 权限红线（worker 被什么拦了）
 

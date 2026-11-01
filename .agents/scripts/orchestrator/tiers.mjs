@@ -12,6 +12,25 @@ import { hintsOverlap } from '../policy.mjs';
 /** files_hint（glob 列表）是否触及核心/发布路径：复用 policy.mjs 的段首相交判定
  *  （src/gateway/** 与 src/gateway/server.ts 首段同为 src → 命中）。 */
 
+// 车钟档位（2026-11-01 船东定名）：tier 四级制 ahead-1..4，文档与日志显示「前进1-4」
+// （船钟口径：前进1=慢车最省，前进4=旗舰全速）。旧两级制 heavy/light 是别名，
+// 永远兼容（历史卡不返工）：heavy→ahead-4、light→ahead-2。
+export const TIER_ALIASES = { heavy: 'ahead-4', light: 'ahead-2' };
+export const TIER_DISPLAY = { 'ahead-1': '前进1', 'ahead-2': '前进2', 'ahead-3': '前进3', 'ahead-4': '前进4' };
+export const TIER_AUTO_UPGRADE = 'ahead-4'; // 自动升档目标：files_hint 命中核心/发布路径 → 前进4
+
+/** tier 名归一：旧别名 → 车钟档位键；未知名字原样返回（validateCard 的键名规则不变）。 */
+export function normalizeTierName(name) {
+  const n = String(name ?? '').trim();
+  return TIER_ALIASES[n] ?? n;
+}
+
+/** tier 显示名（日志/文档用）：ahead-N → 前进N；别名与未知名字一并映射显示。 */
+export function tierDisplayName(name) {
+  const n = normalizeTierName(name);
+  return TIER_DISPLAY[n] ?? n;
+}
+
 /**
  * 解析任务的有效 tier。返回：
  *   null                          未配置 tiers / 无卡显式 tier 且不满足自动升级（常见静默路径）
@@ -21,14 +40,14 @@ import { hintsOverlap } from '../policy.mjs';
  */
 export function resolveTier(meta, cfg, env = process.env) {
   const tiers = cfg.tiers ?? {};
-  const explicit = typeof meta?.tier === 'string' && meta.tier.trim() ? meta.tier.trim() : '';
+  const explicit = typeof meta?.tier === 'string' && meta.tier.trim() ? normalizeTierName(meta.tier) : '';
   let name = explicit;
   let auto = false;
   if (!name) {
-    // 规则兜底：只做「升级」方向（files_hint 命中核心/发布路径 → heavy），
-    // 不隐式派 light——未声明的卡保持全局默认路由，行为不变。
-    if (!tiers.heavy || !hintsOverlap(meta?.files_hint, [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])])) return null;
-    name = 'heavy';
+    // 规则兜底：只做「升级」方向（files_hint 命中核心/发布路径 → ahead-4/前进4），
+    // 不隐式降档——未声明的卡保持全局默认路由，行为不变。
+    if (!tiers[TIER_AUTO_UPGRADE] || !hintsOverlap(meta?.files_hint, [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])])) return null;
+    name = TIER_AUTO_UPGRADE;
     auto = true;
   }
   const t = tiers[name];

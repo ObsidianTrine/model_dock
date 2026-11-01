@@ -75,7 +75,7 @@ node .agents/scripts/orchestrator.mjs status               # 确认进了 pendin
 - 单张卡：`node .agents/scripts/orchestrator.mjs run <task-id>`
 - 多张卡：`node .agents/scripts/orchestrator.mjs drain`（循环清空队列；确需并发再加 `--workers N`，按 files_hint 分区互斥）
 
-**引擎指定（对话可直接说）**：用户口头指定「执行用 X+模型 / 审查用 Y+模型」时，翻译成参数附加在 run/drain 后——`--worker-backend <claude-headless|zcode-headless|mock> --worker-model <m> --review-backend <…> --review-model <m>`。默认取 workflow.json 的 `worker`/`review`（当前：执行 zcode-headless、审查 claude-headless+opus）；用户没提就不传参。注意：zcode 无 `--model`（模型跟随 ZCode 默认，需用户在 App 内切换），模型项只对 claude 系生效。任务卡也可带 `tier: <名>` 按难度自动换服务与模型（配置与环境变量见 `.agents/workflows/orchestrator.md`「任务等级（tier）」节；仅 claude 系生效）。
+**引擎指定（对话可直接说）**：用户口头指定「执行用 X+模型 / 审查用 Y+模型」时，翻译成参数附加在 run/drain 后——`--worker-backend <claude-headless|zcode-headless|mock> --worker-model <m> --review-backend <…> --review-model <m>`。默认取 workflow.json 的 `worker`/`review`（当前：执行 claude-headless——经 `~/.claude/settings.json` 指向本机 ModelDock 网关供油，审查 claude-headless+glm-5.3-flash）；用户没提就不传参。注意：zcode 无 `--model`（模型跟随 ZCode 默认，需用户在 App 内切换），模型项只对 claude 系生效。任务卡也可带 `tier: ahead-1..4`（车钟档位 前进1-4，旧 heavy/light 兼容）按难度自动换服务与模型（配置与环境变量见 `.agents/workflows/orchestrator.md`「任务等级（tier）」节；仅 claude 系生效）。
 
 **引擎切换需人工审核（硬闸门，禁止自治绕过）**：orchestrator 对「worker 引擎 ≠ workflow.json worker.backend」的 run/drain 一律拒绝启动，只有 `--approve-backend-switch`（或 `ORCH_APPROVE_BACKEND_SWITCH=1`）能放行。自治跑中引擎起不来（zcode ENOENT、GLM 429 等）时**禁止自行换引擎续跑**：先修引擎自身——ORCH_ZCODE_CLI 已设为用户级环境变量（`D:\Programs\ZCode\resources\glm\zcode.cjs`，2026-10-29 起）；429 是 GLM 套餐限流（与交互会话共享配额，实测单发也会中），退避 60s 重试并把并发压到 1。连续 2 轮仍失败就停下向用户说明原因并申请批准，用户同意后才允许带批准参数切换；未获同意宁可让任务留在 pending/awaiting-human。
 
