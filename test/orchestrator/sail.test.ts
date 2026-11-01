@@ -217,4 +217,19 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
       repo.cleanup()
     }
   }, 180_000)
+
+  it('存量引水卡不触发无进展熔断：全引水队列走规划轮继续干活，引水卡原地保留', () => {
+    const repo = mkRepo({ extra: { corePaths: ['src/gateway/server.ts'] } })
+    try {
+      submitCard(repo.root, 'pilot-held', { files_hint: ['src/gateway/server.ts'] })
+      const out = runOrch(repo.root, 'sail --minutes 5 --interval 0 --max-tasks 1 --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
+      expect(out.stdout).not.toContain('连续 3 轮派发无进展')
+      expect(out.stdout).toContain('自由航行已提交提案')
+      expect(listCards(queueRoot(repo.root), 'merged')).toEqual(['planner-mock-task'])
+      expect(readCard(repo.root, 'pending', 'pilot-held')).toBeTruthy()
+      expect(latestReport(repo.root)).toContain('开航前已在队列')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
 })
