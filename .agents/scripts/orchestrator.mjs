@@ -2984,8 +2984,25 @@ async function cmdSail(repoRoot, opts) {
       }
       if (!weather.held) weatherAnnounced = false;
       const pending = listCards(root, 'pending');
+      // 派发资格：pending 里存在「真正可派发」的卡才进派发轮——引水卡（deps/核心·发布
+      // 路径，drain 会跳过等人工确认）与解析失败卡都不算可派发。全不可派时走规划轮，
+      // 否则每轮派发空转、触发「连续无进展」熔断提前收帆（首航 2026-11-02 实证：
+      // 存量引水卡让 30 分钟航程 12 秒收帆）。逐张判定而非只看最高优先级——drain
+      // 单轮内能跳过引水卡继续派后面的卡，混合队列仍有活可干。
+      let hasDispatchable = false;
+      for (const id of pending) {
+        const card = findCard(root, id);
+        if (!card) continue;
+        try {
+          const meta = parseCard(fs.readFileSync(card.path, 'utf8'), id).meta;
+          if (!pilotageRequired(meta, cfg)) {
+            hasDispatchable = true;
+            break;
+          }
+        } catch { continue; } // 解析失败卡不可派发（drain 同样跳过）
+      }
       const cycle = { n: cycleNo, at: new Date().toISOString(), kind: null, dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin: 0 };
-      if (pending.length && !weather.held) {
+      if (hasDispatchable && !weather.held) {
         // 派发轮：一次只派一张——每张之间重新看表（截止/风暴/降级/stop 文件）
         cycle.kind = 'dispatch';
         log(`\n──── sail 周期 ${cycleNo} → drain --max 1（已派 ${voyage.dispatchedTotal}${maxTasks === Infinity ? '' : `/${maxTasks}`}，剩余 ${remainingMin()} 分钟）────`);
