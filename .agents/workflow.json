@@ -30,6 +30,7 @@
   "uiCheckCmd": "node scripts/ui-smoke.mjs",
   "worker": { "backend": "zcode-headless" },
   "review": { "backend": "claude-headless", "model": "glm-5.3-flash" },
+  "scan": { "smartFilter": true },
   "budgetProfiles": {
     "zcode-headless": { "max_tokens": 5000000 }
   },
