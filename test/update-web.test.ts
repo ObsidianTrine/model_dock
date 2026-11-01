@@ -6,7 +6,7 @@ import { fakeHome } from './helpers.js'
 import { saveConfig } from '../src/config/store.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 import { setSecret } from '../src/config/secrets.js'
-import { buildRuntime, mutateGatewayState, readGatewayState, writeGatewayState, type GatewayRuntime, type GatewayStateFile } from '../src/gateway/state.js'
+import { buildRuntime, mutateGatewayState, readGatewayState, startupGatewayState, writeGatewayState, type GatewayRuntime, type GatewayStateFile } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { VERSION } from '../src/version.js'
 import fs from 'node:fs'
@@ -83,6 +83,59 @@ describe('updateDaemonArgs（纯函数，autostart 模块）', () => {
     expect(argv.slice(-2)).toEqual(['update', '--yes'])
     expect(argv).not.toContain('--sea-gateway')
     expect(argv[0].length).toBeGreaterThan(0)
+  })
+})
+
+describe('启动重写保留 update_check（卡 28：gateway-state-rmw 问题 2）', () => {
+  it('startupGatewayState 从既有状态保留 devices 与 update_check；无 lan 时不留空字段', () => {
+    const out = startupGatewayState({
+      existing: { pid: 1, port: 8687, admin_token: 'old', started_at: 't0', devices: ['mdk_device_a'], update_check: { at: 111, version: '1.2.3' } },
+      pid: 2,
+      port: 18999,
+      adminToken: 'new',
+      lanToken: null,
+      startedAt: 't1',
+    })
+    expect(out).toMatchObject({ pid: 2, port: 18999, admin_token: 'new', started_at: 't1', devices: ['mdk_device_a'] })
+    expect(out.update_check).toEqual({ at: 111, version: '1.2.3' })
+    expect('lan_token' in out).toBe(false)
+    expect('lan_port' in out).toBe(false)
+    // 既有状态无 update_check 时不凭空造字段
+    const bare = startupGatewayState({ existing: null, pid: 2, port: 18999, adminToken: 'new', lanToken: 'lan', lanPort: 8688, startedAt: 't1' })
+    expect('update_check' in bare).toBe(false)
+    expect(bare.lan_token).toBe('lan')
+  })
+
+  it('整包重写往返：update_check 跨写盘存活（restoreUpdateCheckState 从此有据可读）', async () => {
+    const h = fakeHome()
+    try {
+      await writeGatewayState({ pid: 1, port: 8687, admin_token: 'old', started_at: 't0', update_check: { at: 111, version: '1.2.3' } })
+      const existing = await readGatewayState()
+      await writeGatewayState(startupGatewayState({ existing, pid: process.pid, port: 18998, adminToken: 'new', lanToken: null, startedAt: 't1' }))
+      const next = await readGatewayState()
+      expect(next?.update_check).toEqual({ at: 111, version: '1.2.3' })
+      expect(next?.admin_token).toBe('new')
+      expect(next?.pid).toBe(process.pid)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('getUpdateStatus 坏 token_ref 降级（卡 28：gateway-state-rmw 问题 1）', () => {
+  it('token_ref 非串（手编 config.toml）：不抛、configured=false、lastError 透出、载荷完整', async () => {
+    const h = fakeHome()
+    try {
+      const rt = await mkRt({ update: { repo: REPO, token_ref: 123 as unknown as string } })
+      const s = await getUpdateStatus(rt)
+      expect(s.configured).toBe(false)
+      expect(s.lastError).toBeTruthy()
+      expect(s.current).toBe(VERSION)
+      expect(s.checking).toBe(false)
+      expect(s.available).toBe(false)
+    } finally {
+      h.restore()
+    }
   })
 })
 

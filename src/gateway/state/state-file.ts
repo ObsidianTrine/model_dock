@@ -51,6 +51,31 @@ export async function writeGatewayState(state: GatewayStateFile): Promise<void> 
   await atomicWrite(gatewayStatePath(), JSON.stringify(state, null, 2), 0o600)
 }
 
+/** 启动时整包重写 gateway.json 的字段组装（纯函数，main.ts 调用）：跨重启字段从既有状态
+ *  保留——devices 之外 update_check 也要保留，此前挑字段重写把它抹掉，「24h TTL 跨网关
+ *  重启有效」从不成立、restoreUpdateCheckState 实为死代码，每次重启立即重查 GitHub
+ *  （评测集 runs/2026-10-31-gateway-state-rmw.md 问题 2）。 */
+export function startupGatewayState(input: {
+  existing: GatewayStateFile | null
+  pid: number
+  port: number
+  adminToken: string
+  lanToken: string | null
+  lanPort?: number
+  startedAt: string
+}): GatewayStateFile {
+  return {
+    pid: input.pid,
+    port: input.port,
+    admin_token: input.adminToken,
+    ...(input.existing?.devices?.length ? { devices: input.existing.devices } : {}),
+    ...(input.existing?.update_check ? { update_check: input.existing.update_check } : {}),
+    ...(input.lanToken ? { lan_token: input.lanToken } : {}),
+    ...(input.lanPort != null ? { lan_port: input.lanPort } : {}),
+    started_at: input.startedAt,
+  }
+}
+
 /** gateway.json 读-改-写的进程内串行队列。登录种设备记忆、lan_token/lan_port 回写、admin_token
  *  轮换都是 read→modify→write：atomicWrite 只保证不写坏、不保证不丢字段，浏览器登录与托盘/
  *  手机端并发写会互相覆盖（丢 devices / lan_port）。单写者即本网关进程，进程内 promise 链
