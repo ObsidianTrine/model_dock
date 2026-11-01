@@ -797,12 +797,40 @@ namespace ModelDockTray
         }
 
         /// 进度小窗（自有 STA 线程 + 消息循环，跨线程 Close 走 BeginInvoke）：
-        /// 每秒自轮询 update-progress.json 刷新阶段与百分比；替换段托盘被更新流程停掉，窗随之消失属预期
+        /// 每秒自轮询 update-progress.json 刷新阶段与百分比；替换段托盘被更新流程停掉，窗随之消失属预期。
+        /// 窗体与其 WinForms Timer 必须在展示它的 STA 线程上创建——此前在调用线程 new（「立即更新」
+        /// 链路 :686 跑在 ThreadPool 工作线程），Timer 绑在无消息泵的池线程：Tick 一次不执行，进度窗
+        /// 永远停在「正在准备更新…」、failed 弹窗与 done 态不可达（评测集 2026-10-31-tray-ui-sync-http
+        /// 问题 3）；UI 线程路径则是跨线程写控件（调试器即抛）。照 ShowUpdateDialog 的范式：创建/
+        /// 展示/消息循环全在这条专用 STA 线程体内（2026-11-02 卡 29）。
+        private static int _progressOpening = 0;
+
         public static void ShowProgressForm(string title)
         {
-            if (_progressForm != null && !_progressForm.IsDisposed) { _progressForm.BringToFront(); return; }
-            _progressForm = new UpdateProgressForm(title);
-            var t = new Thread(delegate() { Application.Run(_progressForm); });
+            var f = _progressForm;
+            if (f != null && !f.IsDisposed)
+            {
+                // BringToFront 归属窗体线程（跨线程直调是旧实现遗留的违规写）
+                try { f.BeginInvoke(new Action(delegate { f.BringToFront(); })); } catch { }
+                return;
+            }
+            // 创建期短窗兜底（STA 线程体尚未把窗体发布到 _progressForm）：重复点击直接吞
+            if (Interlocked.CompareExchange(ref _progressOpening, 1, 0) != 0) return;
+            var t = new Thread(delegate()
+            {
+                try
+                {
+                    var form = new UpdateProgressForm(title);
+                    _progressForm = form;
+                    _progressOpening = 0;
+                    Application.Run(form);
+                }
+                catch (Exception)
+                {
+                    // 窗体异常不能带崩托盘进程（对齐 ShowUpdateDialog 的兜底口径）；复位创建标志允许重试
+                    _progressOpening = 0;
+                }
+            });
             t.SetApartmentState(ApartmentState.STA);
             t.IsBackground = true;
             t.Start();
