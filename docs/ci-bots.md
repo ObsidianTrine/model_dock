@@ -15,6 +15,7 @@
 | `workflows/claude-review.yml` | AI bot | PR 打开/更新；PR/issue 评论 `@claude` | risk-tier 风险分级（确定性）/ auto-review 自动审查（只读）/ security-review 安全审查（可阻塞）/ interactive 交互改码 | 分级**否**，其余**是** |
 | `dependabot.yml` | 依赖配置 | 每周六上午（Asia/Shanghai；仅默认分支 main 生效） | 自动开依赖升级 PR | 否 |
 | `workflows/dependabot-fix.yml` | AI bot | Dependabot PR 打开/更新 | 验证升级、失败做最小修复推回 | **是** |
+| `workflows/ci-autofix.yml` | AI bot | main / develop 的 test run 失败（首次尝试） | 主干失败投机修复：开 `[ci-autofix]` 修复 PR 供人工合并 | **是** |
 
 ## 模型接入（三件套全在 GitHub，供应商无关）
 
@@ -98,7 +99,7 @@ gh variable list && gh secret list                    # 三件套存在性与最
 - **auto-review（只读）**：PR 打开/更新时跑一次完整审查会话，只发评论与 inline 标注、不改码。先读 REVIEW.md 审查纪律；输出顶层评论 = 首行「风险等级」+「发现 N 个问题」，inline 按 [P0]/[P1]/[P2] 分级。降噪与收敛：每条发现先自证（文件+行号）、风格/清理类不报、非本 PR 引入标 [存量]、不重复既往评论、复查只看新增 diff、3 轮不收敛建议换方案。
 - **security-review（可阻塞）**：独立安全审查会话，只查注入 / 密钥泄漏 / 鉴权越权 / 路径穿越 / 供应链与安装器五类。顶层评论首行固定 `SECURITY-VERDICT: PASS|FAIL（N 项）`；job 尾的确定性门禁步骤抓该行，**FAIL 或没有 verdict（bot 静默失败）都判 job 失败**。**已是合并门禁**：2026-10-29 经 `gh api` 把 `security-review`（连同三 OS `test` / `test-workflow` / `risk-tier`）设为 main 与 develop 的 required check，并开启 required conversation resolution（审查线程必须 resolve 才能合并）；语义与改动注意项见 docs/ai-review-system.md「安全审查门禁」。
 - **interactive（可写）**：PR/issue 评论里 `@claude` 触发；可按评论指示修改代码并推送（该 job 才有 contents: write），新分支基于 develop。
-- **自动跳过**：Dependabot 的 PR（交给 dependabot-fix 专职处理）；尾提交带 `[dependabot-fix]` 前缀的 PR（防自己复审自己的修复）。
+- **自动跳过**：Dependabot 的 PR（交给 dependabot-fix 专职处理）；尾提交带 `[dependabot-fix]` / `[ci-autofix]` 前缀的 PR（bot 自己开的修复 PR 不自审，防审查回环）。
 
 ## dependabot.yml 详解
 
@@ -119,15 +120,38 @@ Dependabot PR 触发后 Claude 接手：
 
 合并权始终在人：bot 不 approve、不 merge；发版仍走 release.md 人工授权。
 
+## ci-autofix.yml 详解
+
+main / develop 的 test run 失败（首次尝试）时自动发起一次修复会话（分层设计背景见 docs/ai-review-system.md「主干失败自动修复」）：
+
+1. **guard**：校验三件套齐全 + 该 run 尚无修复 PR（每 run 仅 1 次尝试），不满足即静默跳过（零消耗）；
+2. **确定性前置**：检出失败提交、切分支 `ci-autofix/<run-id>`，`npm ci` + `npm run build`——任一失败 job 直接红，结论明确零 token；
+3. **修复会话**：Claude 复现失败 → 根因分析 → 最小修复 + 补测试，`[ci-autofix]` 前缀提交推分支，开 PR（基分支 = 失败所在分支），PR 描述必含失败 run 链接、根因分析、修复说明；
+4. **无法自动修复**（flaky / 根因不明 / 修复面过大）：不开 PR，会话结论落 Actions run summary，job 红灯指路——看到红灯按 summary 与会话日志人工处理。
+
+**需要哪些 secrets**：不新增——与 claude-review / dependabot-fix 共用三件套（`CLAUDE_AUTH_TOKEN` + `CLAUDE_BASE_URL` / `CLAUDE_MODEL`）。无需 PAT：触发 run 不在 Dependabot PR 上，GITHUB_TOKEN 自带写权限（推分支、开 PR 都够）。
+
+**如何禁用**：与其它 bot 一致——删三件套即静默跳过；或 Actions 页 Disable 本 workflow。修复 PR 可整单关闭，不影响主干；合并永远由人工完成。
+
+**与 dependabot-fix 的分工**：dependabot-fix 只管 Dependabot 开的依赖升级 PR；ci-autofix 只管主干（main / develop 的 push run）test 失败。两者共用 claude-review 的防回环前缀机制（`[dependabot-fix]` / `[ci-autofix]`），互不越界。
+
+**运维注意**：
+
+- **PR 检查是补发的**：修复 PR 由 GITHUB_TOKEN 开出，GitHub 平台不为它自动触发 push / pull_request 事件——workflow 收尾步骤用 workflow_dispatch 给修复分支补发一条 test run（test.yml 已含 `workflow_dispatch` 触发器）；补发失败时人工在 PR 分支推一次提交即可触发。
+- **无法修复的结局是红灯不是静默绿**：ci-autofix 不是 required check，红灯只作指路信号，不阻塞任何事。
+- **生效前提**：workflow_run 触发器按默认分支上的 workflow 文件执行——本文件合入 main 后才生效（develop 上先行合并不触发）。
+- claude-review 对尾提交带 `[ci-autofix]` 前缀的 PR 跳过 AI 审查（bot 不自审）；人工审查照常。
+
 ## 成本控制
 
 - **零消耗开关就是 secrets**：不配 / 删掉 secret 即全停，无需改 yml。
 - 已配置想临时停：仓库 Actions 页 → 左侧选中 workflow → `⋯` → **Disable workflow**（恢复同入口 Enable）。
-- 消耗点（每次 = 一次完整 agent 会话）：auto-review 与 security-review 在每次 PR 打开/更新各烧一次（即一个 PR 更新 = 两次会话）；`@claude`、dependabot-fix 各一次。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
-- 同 PR 并发互斥（concurrency 组），旧审查自动取消，不会叠加烧；auto-review 检测到尾提交是 `[dependabot-fix]` 也会跳过。
+- 消耗点（每次 = 一次完整 agent 会话）：auto-review 与 security-review 在每次 PR 打开/更新各烧一次（即一个 PR 更新 = 两次会话）；`@claude`、dependabot-fix 各一次；ci-autofix 在主干 test 失败时一次（每次失败 run 至多一次，50 回合上限、约 30 止损）。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
+- 同 PR 并发互斥（concurrency 组），旧审查自动取消，不会叠加烧；auto-review 检测到尾提交是 `[dependabot-fix]` 或 `[ci-autofix]` 也会跳过。
 
 ## 防回环设计
 
-- Claude 修复提交固定 `[dependabot-fix]` 前缀；auto-review 检测尾提交为该前缀即跳过复审。
+- bot 修复提交固定前缀：dependabot-fix 用 `[dependabot-fix]`、ci-autofix 用 `[ci-autofix]`；auto-review / security-review 检测 PR head 提交为任一前缀即跳过复审（读 head 提交 subject 而非 `git log -1`，评测集实证过后者是死代码）。
 - dependabot-fix 仅 `actor=dependabot[bot]` 时执行：Claude 用 PAT 推送触发的 synchronize，actor 是 PAT 属主，不会重入。
+- ci-autofix 只认 main / develop 的 push 型失败 run 且每 run 仅 1 次尝试；修复分支（`ci-autofix/*`）上的失败被分支过滤拦下、不再触发 autofix，完整推理见该文件头注。
 - interactive 不响应 `claude[bot]` 自己发的评论（actor 排除）；并发组在 **job 级**——bot 评论触发的空 run 不进并发组，不会把进行中的审查取消掉（2026-10-27 实测：bot 发完评论自取消，行内标注被跳过，遂改 job 级）。

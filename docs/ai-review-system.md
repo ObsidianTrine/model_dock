@@ -54,6 +54,15 @@
 
 启用「Require review from Code Owners」仅当出现第二位维护者时再做；`.github/CODEOWNERS` 已先行登记敏感路径归属。
 
+## 主干失败自动修复（ci-autofix，第 4 层的自动善后）
+
+test workflow 在 main / develop 上失败（首次尝试）时，ci-autofix.yml 自动发起一次修复会话：检出失败提交、确定性 `npm ci` + build 后由 Claude 复现失败、根因分析、给最小修复并补测试，推分支 `ci-autofix/<run-id>` 开 PR（基分支 = 失败所在分支）。判定无法自动修复（flaky / 根因不明 / 修复面过大）则不开 PR，会话结论落在 Actions run summary，job 红灯指路——任何结局都留痕，不允许无声结束。
+
+- **触发条件**：仅 main / develop 的 push 型 test run 且 run_attempt == 1。Dependabot PR 的失败由 dependabot-fix 专职处理；PR 分支失败由作者与 AI 审查处理——主干失败才触发，绝不碰他人分支（`event == 'push'` 过滤兼防 fork 分支仿冒 main / develop 名）。
+- **防回环**：每个失败 run 恰好 1 次尝试（run_attempt 过滤 + 既有 PR 检查）；修复分支上的 test 失败不再触发 autofix（分支过滤拦下）；修复提交带 `[ci-autofix]` 前缀，claude-review 的防回环 guard 据此跳过复审；合并永远由人工完成。
+- **PR 去向**：标题带 `[ci-autofix]` 前缀，描述必含失败 run 链接、根因分析、修复说明；若根因属于审查盲区（测试门禁本应拦住却没拦住），描述末尾附考题草稿 JSON（字段对齐 `.agents/review-evals/cases/*.json`），由人工按其 README 流程决定是否回流评测集——bot 不直接改评测集。PR 由 GITHUB_TOKEN 开出，test 检查由 workflow 收尾步骤显式补发（平台不为 GITHUB_TOKEN 开的 PR 自动触发事件）。
+- **成本上限**：每次主干失败 run 恰好 1 次会话（50 回合上限、约 30 止损）；确定性前置不占会话回合；重跑 run（run_attempt > 1）不触发。启用开关与 claude-review 相同（共用三件套，未配置时静默跳过零消耗）；生效前提是本文件已合入 main（workflow_run 触发器按默认分支上的 workflow 文件执行）。运维细节见 docs/ci-bots.md「ci-autofix.yml 详解」。
+
 ## 审查者改进闭环
 
 ### 事故 → 考题（评测集）
@@ -85,7 +94,7 @@ gh pr view <N> --json comments -q '[.comments[] | select(.author.login=="claude[
 
 ## 成本与开关
 
-- AI job 每次 PR 打开/更新各烧一次会话：auto-review + security-review 两次（量级见 docs/ci-bots.md「成本控制」）；risk-tier 是确定性脚本零消耗。
+- AI job 每次 PR 打开/更新各烧一次会话：auto-review + security-review 两次（量级见 docs/ci-bots.md「成本控制」）；risk-tier 是确定性脚本零消耗；ci-autofix 在主干（main / develop）test 失败时各烧一次（见「主干失败自动修复」）。
 - 总开关就是三件套 secrets：删掉即全停 AI job；risk-tier label 照常（无 API 依赖）。
 - Dependabot PR 不走本工作流（只读 token 发不了评论/label），仍由 dependabot-fix.yml 专职验证。
 
@@ -94,3 +103,4 @@ gh pr view <N> --json comments -q '[.comments[] | select(.author.login=="claude[
 - `risk-tier`：照常运行（不依赖 API）。
 - `auto-review` / `security-review`：静默跳过（Actions 日志 warning），PR 上不会出现失败的 AI 检查。
 - `security-review` 的门禁步骤也一并跳过——未启用状态不会红。
+- `ci-autofix`：guard 静默跳过（Actions 日志 warning），主干失败照常报警，只是没有自动修复 PR。
