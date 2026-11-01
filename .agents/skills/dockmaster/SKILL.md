@@ -5,10 +5,10 @@ description: 显式斜杠技能——仅当用户输入 /dockmaster 时使用，
 
 # dockmaster —— Dockmaster 港务调度台
 
-> **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。速查与分区详解见 `.agents/workflows/orchestrator.md`（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
+> **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。对每艘出航的船它是船长，对整支船队它是坞长——harness 是船、大模型是发动机、船东（用户）递托运单等出港（完整灵魂叙事见 `.agents/workflows/orchestrator.md` 开头「Dockmaster 是什么」）。速查与分区详解见同文（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
 > 本技能原名 /orchestrate，2026-11 随体系定名 Dockmaster 改为 /dockmaster（命名缘由见 .agents/workflows/orchestrator.md 开头）。
 
-用户输入 `/dockmaster <任务描述>`（无描述则问一句要做什么）。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、调度船坞工匠（headless worker，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
+用户输入 `/dockmaster <任务描述>`（无描述则问一句要做什么）。用户是「船东」，你是**坞长的调度台**（编排者）：拆托运单（任务卡）、派作业船出航（headless worker——船型是 harness、发动机是大模型，在泊位 worktree 里修船）、对接验船师（独立 LLM 审查）、处理闸门与汇报。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。
 
 ## 第 0 步：意图路由与适用判定
 

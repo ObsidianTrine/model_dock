@@ -4,6 +4,30 @@
 > 目标读者：递交托运单（任务卡）、看闸门、处理搁浅（blocked）任务的 agent / 人类操作者。
 > 设计与原理：`docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
 
+## Dockmaster 是什么（船 · 发动机 · 船长）
+
+每一次编码任务，都是一次航行。
+
+**Harness 是航行在海上的船**——Claude Code、ZCode、dsh，是三家船厂造的不同船型；**大模型是船的发动机**——GLM、Claude、Kimi，可按航程换装功率不同的引擎（tier 就是发动机档位），燃油由 ModelDock 港统一供给与计量（网关路由，`reconcile` 对账 = 航海日志 vs 油耗表）；**Dockmaster 是船长**——接过船东（你）的托运单（任务卡），指挥发动机推船离泊，沿航道（门禁与审查关卡）驶向目的地（验收标准）：风暴中紧急抛锚自保（熔断），搁浅时组织拖救（`resume`），请验船师检验（reviewer），等船东签单放行（approve）才算出港（merged）。
+
+对一艘船，Dockmaster 是**船长**；对整支船队，它是**坞长**——瞭望模式（watch）盯住每一条船，罗盘（goals.md）校准每一条航线，自动舵（autopilot）让放心的航线自主航行。船东不必出海：**递单、审提案、放行，三次出现足矣。**
+
+```
+船东（你）              递托运单 · 审提案 · 放行出港
+   ▲│
+   │▼
+Dockmaster（船长兼坞长）  接单派船 · 掌舵指挥 · 检验把关 · 航海日志（events / stats）
+   ▲│
+   │▼
+船（harness）            Claude Code 号 / ZCode 号 / dsh 号——海上执行者
+   ↕
+发动机（大模型）          GLM / Claude / Kimi——动力可换装（tier 档位）
+   ↕
+ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的实测账）
+```
+
+一句话定位：跑在本机的**自治编码代理编排系统**——它不造船（不用 agent 框架重写 agent），只指挥现成的 agent 船队自动完成从接单到交付的全航程。
+
 ## 一张图看懂
 
 ```
@@ -12,8 +36,8 @@
          巡检 scan ──→ drafts/（待审托运申请）── submit ──→ pending/（待泊）─┐
          autopilot（自动舵）白名单自动提交（缺省关）─────────────────────────┤
                                                                             ▼
-执行侧（泊位修船）
-         run / drain / watch ─→ worker（船坞工匠）在泊位（worktree）改码
+执行侧（出航作业）
+         run / drain / watch ─→ 派出作业船（worker）在泊位（worktree）修船
                                   → 坞检（静态门禁）→ 验船师（LLM 独立审查）
                                                         │返工循环│
                                   L0/L1 自动合并 ←──── 合并闸门 ──┘
@@ -26,22 +50,25 @@
 ```
 
 一句话：**任务卡进、合并出**（托运单进坞、验毕出港）。人（船东）只出现在两处——审提案（drafts/）与审合并（awaiting-human/）；其余环节 worker→门禁→调试循环→审查→返工循环全自动，熔断（紧急抛锚）兜底不烧钱。
-船东视角全景：递交托运单 → 坞长派船坞工匠（worker）在泊位（worktree）修船 → 坞检（静态门禁）+ 验船师（reviewer）双重检验 → 船东放行出港（merged）；搁浅（blocked）的船由坞长组织拖救（`resume`），紧急抛锚（熔断）永远要船东裁决。
+船东视角全景：递交托运单 → 船长派出作业船（worker）在泊位（worktree）修船 → 坞检（静态门禁）+ 验船师（reviewer）双重检验 → 船东放行出港（merged）；搁浅（blocked）的船由船长组织拖救（`resume`），紧急抛锚（熔断）永远要船东裁决。
 
 **官方映射表**——双层命名纪律：**比喻词只进文档层（首次出现括注原术语）；命令名 / 目录名 / frontmatter 字段 / 事件类型 / workflow.json 键名是接口契约，永不改名。**
 
 | 概念 | 隐喻词 | 接口名（不动） |
 |---|---|---|
-| 体系 | 坞长 / 港务 | Dockmaster / `orchestrator.mjs` |
-| 任务卡 | 托运单 | task card |
+| 体系 | 船长兼坞长 / 港务 | Dockmaster / `orchestrator.mjs` |
+| 任务卡 | 托运单（目的地=目标，交货标准=验收标准） | task card |
+| harness | 船型（Claude Code 号 / ZCode 号 / dsh 号） | harness |
+| 大模型 | 发动机（tier = 发动机档位） | model |
+| ModelDock 网关 | 燃油库（统一供油、按航次计量） | gateway |
 | worktree | 泊位 | worktree |
 | pending | 待泊 | pending |
-| blocked | 搁浅 | blocked |
+| blocked | 搁浅（resume = 拖救） | blocked |
 | drafts 提案 | 待审托运申请 | drafts / proposal |
 | goals.md | 罗盘 | goals.md |
 | nightly | 夜航巡港 | nightly |
 | follow | 引水传令 | follow |
-| worker | 船坞工匠 | worker |
+| worker | 派出作业的船（船上自带全套工匠工具） | worker |
 | LLM 审查 | 验船师 | reviewer |
 | awaiting-human | 等待船东放行 | awaiting-human |
 | merged | 出港 | merged |
@@ -137,7 +164,7 @@ ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒
 现象、复现步骤、相关文件。
 ```
 
-**验收标准是灵魂**：worker（船坞工匠）拿它当自查靶子、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。
+**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（含缓存读的 token、失败尾部 200 行都有据可查）。
 
 `run` 在 TTY 下会在人工闸门处交互（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；非 TTY 打印提示后退出，用 approve/reject/retry 异步处理。
 
