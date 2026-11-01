@@ -28,6 +28,7 @@ git log vX.Y.Z..develop --oneline --no-merges    # vX.Y.Z 替换为上一个已�
 ```
 
 > 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orchestrator.md`「发版提案」）。
+> 盘点是只读动作（git log + 提案文件），可与前置检查的机器门禁并行跑（见「并行执行羽翼」）；文档收口的采纳仍以门禁全绿为前提。
 
 - 上个 tag 打在 main 侧，develop 的 `git describe` 够不着它，这里必须显式写 tag 名。
 - 逐条归纳成「新增 / 变更 / 修复」清单：既查漏（开发中没记进 CHANGELOG 的改动），也查杂（不该进这个版本的内容）。
@@ -59,14 +60,15 @@ git push origin main
 
 ### 3. 等 test workflow 全绿
 
-- 推送后到 GitHub 仓库网页的 **Actions** 标签页看 `test.yml` 跑完且**全部 job 全绿**（三平台矩阵 + 工作流套件共 4 个 job；已装 gh CLI：`gh run watch` 盯进度；网页亦可）。
+- 推送后到 GitHub 仓库网页的 **Actions** 标签页看 `test.yml` 跑完且**全部 job 全绿**（三平台矩阵 + 工作流套件共 4 个 job；已装 gh CLI：`gh run watch` 盯进度，可挂后台任务等待；网页亦可）。
+- **等待窗口可并行**：`gh run watch` 挂后台（按 workflow 过滤并以 headSha 核对前置），同时把下一步骤的 tag 前快速复核提前跑掉——其检查项不依赖 CI 结论（见「并行执行羽翼」）。
 - **盯 run 必按 workflow 过滤并以提交核对**：`gh run list --branch main --workflow=test` + headSha 比对——同分支混着 Dependabot 等 run，裸 `--limit 1` 会盯错对象（v1.2.3 实证）。
 - CI 腿被「未获分配」取消（典型：macos arm64 runner 容量短缺，排队 15 分钟即取消）时，`gh run rerun <run-id> --failed` 补一脚即可，不必重推（原 ci-retry.yml 自动重跑已于 2026-11-03 移除：mac 腿退出 develop push 矩阵后触发面大幅收窄，剩余发布期场景人工补一脚的成本低于维护一个自动 workflow；连续多轮仍取消 = 平台故障，等恢复再跑）。
 - **不绿就停**：在 develop 修好后重新合入 main 并推送，回到本步。绝不带病打 tag。
 
 ### 4. 打 tag，只推这一个
 
-- tag 前把机器门禁再跑一遍：`node scripts/release-check.mjs vX.Y.Z --skip-test`（快速复核 CHANGELOG 段、链接表、版本号占用与递增）。此时在 main 上跑，「当前在 main 分支」warn 属预期，其余 ⚠ 仍须逐条过目。
+- 机器门禁快速复核（`node scripts/release-check.mjs vX.Y.Z --skip-test`，查 CHANGELOG 段、链接表、版本号占用与递增）**已提前到推完 main 时执行**，与等 CI 并行——其检查项不依赖 CI 结论（见「并行执行羽翼」）；tag 前确认其结果全绿即可。若当时漏跑，此刻在 main 上补跑也可接受（「当前在 main 分支」warn 属预期，其余 ⚠ 仍须逐条过目）。
 - 先确认版本号未被占用（两条都应无输出；撤回过的版本号不可复用）：
 
   ```bash
@@ -86,6 +88,7 @@ git push origin main
 
 ### 5. 验证 Release 产物
 
+- **机器化一键验证**：`node scripts/release-verify.mjs vX.Y.Z --spot darwin-arm64`——Release 存在性、11 资产清点、正文与 CHANGELOG 版本段对拍、SHA256SUMS 覆盖清点，`--spot` 再抽包（下载 → SHA256 对账 → 解压核对单文件布局；darwin 目标在本机直接跑 `--version` 核对版本号，其余平台只验布局）。以下人工清单为兜底（网络不佳时按平台再补抽）：
 - 到 GitHub Releases 页面确认 `release.yml` 构建完成，5 平台产物齐全（共 11 个资产，名字不带 v 前缀）：
   - 每平台一个压缩包：darwin/linux `.tar.gz`、win `.zip`（包内单一入口程序，unix 名 `modeldock`）——共 5 个
   - darwin 另有每平台一个自更新整包 `*-darwin-{x64,arm64}-app.tar.gz`（内含 ModelDock.app）——共 2 个
@@ -93,7 +96,7 @@ git push origin main
   - win 另有 Inno Setup `*-setup.exe` 安装向导——共 1 个
   - 一份合并的 `SHA256SUMS`（覆盖上述全部发布物）
 - **确认 Release 正文**是该版本在 CHANGELOG 里的完整段（首行版本概述 + 分节齐全），不是「ModelDock vX.Y.Z + 链接」占位——出现占位说明漏了版本段（正常应已被 release.yml 的 preflight 在构建前拦下，见「常见错误对照」）。
-- 抽查一个平台的压缩包：下载、解压、跑 `modeldock --version`，确认版本号 = 刚打的 tag。解压后目录里只有**单一可执行文件** `modeldock`（无子目录），直接 `./modeldock --version`。
+- 抽查一个平台的压缩包：下载、解压、跑 `modeldock --version`，确认版本号 = 刚打的 tag。解压后包内平铺、无子目录，核心入口是单一可执行文件 `modeldock`，直接 `./modeldock --version`（新版包内另有托盘辅助程序 `ModelDockTray` 等伴随文件，属预期）。
 
 ### 6. develop 对齐 main（发布收尾）
 
@@ -120,10 +123,25 @@ git push origin develop
 2. 盘点 + 文档收口（本文件「流程」步骤 1 的内容，含 CHANGELOG / README / usage 核对）
 3. `git checkout main && git merge develop`
 4. `AGENTS_ALLOW_RELEASE=1 git push origin main`
-5. `gh run watch`（test.yml 全部 job 全绿：三平台 + 工作流套件，按 `--workflow=test` 过滤并以 headSha 核对提交；gh 不可用时降级为网页查看，**不绿就停**；腿被基础设施取消时 `gh run rerun --failed` 补一脚，见步骤 3）
-6. `node scripts/release-check.mjs <X.Y.Z> --skip-test`（tag 前快速复核；此时在 main 上，「当前在 main 分支」warn 属预期）→ `AGENTS_ALLOW_RELEASE=1 git tag -a v<X.Y.Z> -m "v<X.Y.Z>"` → `AGENTS_ALLOW_RELEASE=1 git push origin v<X.Y.Z>`
-7. `gh run watch`（release.yml）→ `gh release view v<X.Y.Z>` 核对 11 资产与正文非占位 → 下载抽包跑 `--version`（即「流程」步骤 5）
+5. 推完 main 后并行两路：`node scripts/release-check.mjs <X.Y.Z> --skip-test`（tag 前快速复核；此时在 main 上，「当前在 main 分支」warn 属预期）＋ `gh run watch` 挂后台盯 test.yml（全部 job 全绿：三平台 + 工作流套件，按 `--workflow=test` 过滤并以 headSha 核对提交；gh 不可用时降级为网页查看，**不绿就停**；腿被基础设施取消时 `gh run rerun --failed` 补一脚，见步骤 3）
+6. CI 绿且步骤 5 复核全绿 → `AGENTS_ALLOW_RELEASE=1 git tag -a v<X.Y.Z> -m "v<X.Y.Z>"` → `AGENTS_ALLOW_RELEASE=1 git push origin v<X.Y.Z>`
+7. `gh run watch`（release.yml）挂后台 → 构建完成跑 `node scripts/release-verify.mjs <X.Y.Z> --spot darwin-<与主机架构一致，x64/arm64>`（11 资产清点 + 正文对拍 + SHA256SUMS + 抽包 `--version`，即「流程」步骤 5 的机器化；网络不佳时按「流程」步骤 5 逐项人工兜底）
 8. develop 对齐 main（「流程」步骤 6）：`git checkout develop && git merge --ff-only main` → `AGENTS_ALLOW_RELEASE=1 git push origin develop`（develop 有新提交时 ff 拒绝，改普通 merge）
+
+## 并行执行羽翼（多 agent / 后台任务）
+
+发布主链上一切**改变 git 状态的操作**（commit / merge / push / tag / checkout）与 **AGENTS_ALLOW_RELEASE 授权动作**只由主链单 agent 串行执行——工作区与分支状态是单例共享状态，并行 git 写是事故配方（cwd 漂移误提交、并行会话 rebase 冲突均有先例）。在此前提下，以下只读工作可并行或挂后台，压缩等待窗口：
+
+| 羽翼 | 时机 | 做法 |
+|---|---|---|
+| 盘点 / release-propose | 前置机器门禁跑的约 5 分钟里 | 只读（git log + 提案文件），不碰工作区；收口采纳仍在主链，以门禁全绿为前提 |
+| 文档收口按文件分区 | 步骤 1 | CHANGELOG / README / usage.md / 英文镜像互不重叠，可分 agent 并写；**commit 一律由主链统一做** |
+| tag 前快速复核提前 | 推完 main 后立即（与步骤 3 等 CI 并行） | `release-check --skip-test` 的检查项（CHANGELOG 段、链接表、tag 占用、版本递增）不依赖 CI 结论；在 main 上跑，「当前在 main 分支」warn 属预期 |
+| 盯 CI / 盯构建 | 步骤 3 / 5 | `gh run watch` 挂后台任务（headSha 核对前置），完成即回报，不占人等待 |
+| 产物验证 | 等 release.yml 构建期间（约 10-15 分钟） | `scripts/release-verify.mjs` 一键清点 + 对拍；SHA256 对账、资产清点、抽包互不依赖，可分 agent 并行 |
+| 大变更集分区审查 | 盘点清单出来后、收口采纳前 | 按区域（src/gateway / src/adapters / 文档）拆多个审查 agent 并行读 diff，结论汇回主链统一裁决 |
+
+**不可并行压缩的红线**：盘点 → 收口 → commit → merge → 推 main → **CI 绿** → tag → 推 tag → 构建完 → 验证闭合 → develop 对齐，顺序不可动；「不绿不 tag」由流程纪律与 release.yml preflight 双重保障。
 
 ## 出错回滚
 
