@@ -27,6 +27,10 @@
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
+//   fastlaneAllowed 轻卡快速通道总开关（缺省 true）：任务卡 frontmatter 可声明
+//                   fastlane: true 跳过 LLM 审查子循环（门禁/分级闸门不省）；设 false
+//                   后即使卡声明 fastlane 也按常规链路跑审查（fastlane_skipped 事件
+//                   reason=disabled_by_config 留痕）——团队级全局关闭开关
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -97,6 +101,7 @@ export function loadWorkflowConfig(repoRoot) {
     gatewayLogDir: typeof raw.gatewayLogDir === 'string' && raw.gatewayLogDir.trim() ? expandHome(raw.gatewayLogDir.trim()) : null,
     driftThreshold: typeof raw.driftThreshold === 'number' && Number.isFinite(raw.driftThreshold) && raw.driftThreshold > 0 && raw.driftThreshold <= 1 ? raw.driftThreshold : 0.2,
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
+    fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
   };
 }
 

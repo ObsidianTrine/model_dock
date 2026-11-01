@@ -31,7 +31,9 @@ const TRANSITIONS = {
   // running→pending：认领回滚（start 的 worktree add 失败时把卡放回队列）。
   // 编排器闭环自身永不发出这两个迁移（闭环走 reviewing→awaiting-human→merged），
   // 仅 feature-branch 认领路径使用。
-  'running': ['reviewing', 'blocked', 'failed', 'merged', 'pending'],
+  // running→awaiting-human：fastlane 轻卡跳过审查子循环时直落闸门目录（没有 reviewer
+  // 会话，卡不应在 reviewing/ 空转）——fastlane 生效前提与失效规则见 orchestrator.mjs。
+  'running': ['reviewing', 'blocked', 'failed', 'merged', 'pending', 'awaiting-human'],
   'reviewing': ['awaiting-human', 'running', 'blocked'],
   'awaiting-human': ['merged', 'failed', 'running'],
   'blocked': ['running', 'pending', 'failed'],
@@ -246,6 +248,14 @@ export function validateCard(meta) {
   if (meta.tier !== undefined && (typeof meta.tier !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(meta.tier))) {
     fail(`任务卡 tier "${JSON.stringify(meta.tier)}" 不合法：只允许小写字母/数字/短横线（如 heavy，对应 workflow.json tiers 键名）`);
   }
+  // fastlane（可选布尔，缺省 false）：轻卡快速通道——跳过 LLM 审查子循环省最大开销，
+  // 门禁与分级闸门一个不省（失效规则见 orchestrator.mjs cmdRun）。写了非法值按 false
+  // 处理并告警（不阻断：fastlane 只是提速档，写错值回常规链路最安全）
+  if (meta.fastlane !== undefined && meta.fastlane !== null && typeof meta.fastlane !== 'boolean') {
+    console.warn(`[orchestrator] 任务卡 ${meta.id} fastlane "${JSON.stringify(meta.fastlane)}" 不是布尔值——按 false 处理（合法写法：fastlane: true）`);
+    meta.fastlane = false;
+  }
+  meta.fastlane = meta.fastlane === true;
   // spec 归属（可选）：spec build 拆出的卡记录所属规格，进度锚 specs/<id>/progress.json 按它寻址
   if (meta.spec !== undefined && meta.spec !== null && meta.spec !== '') {
     if (typeof meta.spec !== 'string' || !TASK_ID_RE.test(meta.spec)) {
