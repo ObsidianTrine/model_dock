@@ -1,7 +1,7 @@
 // workflow-config.mjs 行为锁定：.agents 工具链的唯一项目配置入口。
 // 可移植性的关键不变量——配置缺省 = 红线关闭；hook 脚本锚定 / orchestrator repoRoot 锚定。
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -199,6 +199,58 @@ describe('workflow-config > 可移植性派生字段（projectName/listenCommand
     expect(expandHome('~/logs')).toBe(path.join(os.homedir(), 'logs'))
     expect(expandHome('/abs/path')).toBe('/abs/path')
     expect(expandHome('')).toBe('')
+  })
+})
+
+describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双档）', () => {
+  function fixture(workflow: Record<string, unknown>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-wd-'))
+    fs.mkdirSync(path.join(dir, '.agents'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(workflow))
+    return dir
+  }
+
+  it('缺省 observe / everyTurns 20；未配置 watchdog 键不告警', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const dir = fixture({})
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+      warn.mockRestore()
+    }
+  })
+
+  it('合法配置生效（actuate / 自定义 everyTurns）', () => {
+    const dir = fixture({ watchdog: { mode: 'actuate', everyTurns: 50 } })
+    try {
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'actuate', everyTurns: 50 })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('非法值回落缺省并 console.warn 告警（可操作文案）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const dir = fixture({ watchdog: 'banana' })
+    const wfPath = path.join(dir, '.agents', 'workflow.json')
+    try {
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(String(warn.mock.calls[0]?.[0])).toContain('watchdog')
+      warn.mockClear()
+      // 非法 mode / 非法 everyTurns / watchdog 数组：各自回落并告警
+      for (const bad of [{ mode: 'kill' }, { everyTurns: 0 }, { everyTurns: 2.5 }, ['observe']]) {
+        fs.writeFileSync(wfPath, JSON.stringify({ watchdog: bad }))
+        expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+        expect(warn.mock.calls.length).toBeGreaterThan(0)
+        warn.mockClear()
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+      warn.mockRestore()
+    }
   })
 })
 

@@ -63,6 +63,9 @@ workflows:                       # 注入 worker 的 playbook（至少 feature-b
   - feature-branch
 ui_check: true                   # 可选：改 Web 控制台/网关页面的任务开启 UI 冒烟门禁（跑 workflow.json uiCheckCmd）
 tier: heavy                      # 可选：任务等级（按难度选服务/模型，见「任务等级（tier）」节）；缺省时 files_hint 命中核心/发布路径自动升 heavy
+fastlane: true                   # 可选布尔（缺省 false）：轻卡快速通道——跳过 LLM 审查子循环省最大开销，
+                                 # 门禁/调试子循环/分级闸门一个不省；实际分级 L2/L3、drift 降级、gate=L3
+                                 # 或 workflow.json fastlaneAllowed:false 时自动失效回常规链路（规则见「常见问题」）
 gate: L3                         # Phase 1 固定值
 ---
 
@@ -81,6 +84,8 @@ gate: L3                         # Phase 1 固定值
 ```
 
 **验收标准是 orchestrator 的灵魂**：worker 拿它当自查靶子，审查者拿它当评判基准，你看闸门时拿它当验收清单。写"做得好用一点"这种不可检查的句子等于没写。
+
+**`fastlane` 只省审查、不省任何闸门**：适合纯 docs/test 类小改动（分级判定仍然按实际改动面算，声明不兜底）。写 `fastlane: true` 即请求跳过 LLM 审查子循环，失效规则与失效条件见「常见问题」末条。
 
 ## 任务卡状态机（哪里找我的任务）
 
@@ -106,8 +111,11 @@ pending → running → reviewing → awaiting-human → merged
 | wall-clock 超 `max_wall_minutes` | kill → blocked |
 | 测试/build 修复超 `max_test_iterations` | blocked（附失败尾部 200 行） |
 | 审查返工超 `max_review_iterations` | blocked |
+| 进展看门狗（`watchdog.mode: actuate`）连续 2 次判定无实质进展 | kill worker → blocked |
 
 熔断全部记录 `circuit_breaker` 事件（`logs <task-id>` 可查），**永不静默重试**。
+
+进展看门狗（watchdog）缺省 **observe** 档：worker 每 N 个 turn（workflow.json `watchdog.everyTurns`，缺省 20）由一次性只读 LLM 会话判断是否有实质进展，疑似空转只记 `watchdog_suspect` 事件不动作；actuate 是显式配置（连续 2 次 suspect 才熔断）。每任务最多检查 5 次（超限记 `watchdog_disabled`），检查自身故障记 `watchdog_error`（每任务 ≤3 条后静默）。
 
 ## 任务等级（tier）：按难度选服务与模型
 
@@ -157,6 +165,7 @@ pending → running → reviewing → awaiting-human → merged
   - **逐项目绝对路径（旧行为）**：每个项目注册自己的 `<项目绝对路径>/.agents/hooks/policy-zcode.mjs`。
   两者都以 `ORCH_POLICY_ENFORCE=1` 门控，日常 ZCode 会话直通零拦截；未注册时 zcode worker 的 Bash 红线无人把守——**用 zcode-headless 跑自治任务前先完成这一步注册**。
 - **验收标准之外我该信什么**：什么都不必信——orchestrator 亲自跑 `workflow.json` 的 testCmd 和 build，自报不可信（docs 5.5）。
+- **fastlane 卡跳过审查的规则与失效条件**：任务卡 frontmatter 写 `fastlane: true`（缺省 false；写了非法值按 false 处理并告警，不拒绝提交）→ 闭环变为 worker → 门禁/红线 → 调试子循环 → 直接进分级闸门：不进 reviewing 状态、不 spawn reviewer，事件留痕为 worker_spawned 后记 `fastlane_active`、`review_verdict` 记 `{verdict:"skipped", reason:"fastlane"}`。**只省审查，不降任何闸门**：自动合并四前提（无 drift 降级 + 声明与实际分级均为 L0/L1 + 实际≤声明 + scope 无越界）原样生效。三条失效规则（都记 `fastlane_skipped` 事件附 reason，失效后本次 run 不复活、照跑审查）：① worker 完成后按实际改动分级复判，L2/L3（核心路径/发布流水线/未识别文件）→ 回常规链路——核心路径恰恰最需要审查；② drift 降级标记存在 → 回常规链路（降级是保险丝期，不能省审查，自动合并也照旧关闭）；③ 卡 gate=L3（发布类/全人工）→ 跑前即失效（L3 本就永不自动合并）。另：workflow.json `fastlaneAllowed: false` 为团队级总开关，设 false 后声明一律被忽略（reason=`disabled_by_config`）。
 - **和 feature-branch 工作流什么关系**：orchestrator 完全复用它（start/finish/NOTES.md 交接），worker 的编辑被 guard-develop 挡在 worktree 内。**人工开发同一任务现已机制化互通（claim-before-execute）**：feature-branch start 见队列同 id 卡在 pending/ 即自动认领（抢任务锁 + 卡迁 running/ + manual_claimed 事件），finish 成功后落 merged/——人工侧与闭环共享卡状态，drain 不会再误派/误转 blocked（2026-10-30 卡 22 双 agent 撞车已机制性收口）；编排器自己拉起的 start/finish 分别带 ORCHESTRATOR_CLOSURE / ORCHESTRATOR_GATE_HEAD 标记跳过认领与落卡，卡的归属权留在闭环状态机。同 task-id 混用仍然不要：卡已被闭环持有（锁存活）时 start 会拒绝。
 - **多个调度器能同时跑吗**：不能。drain / nightly / scan --run 共用调度器互斥锁（`.agents/orchestrator/.scheduler-lock.json`）：他人持锁且存活时后来者打印提示直接退出（nightly 定时撞上白天手动 drain 不会双跑同一张卡）；持有进程已死 = 陈锁，自动接管不人工清理。手动 `run <id>` 单卡不抢调度器锁（人工明确意图）。被调度器 spawn 的子进程经环境标记豁免，不会自我死锁。
 - **同一个任务能被两个进程同时跑吗**：不能。每个任务有任务级互斥锁（`.agents/orchestrator/.run-<task-id>.lock`）：run/resume/retry 进入闭环时抢锁，他人持锁且存活时后来者报错退出（手动 run 撞上 drain、双重手动操作都不会出现两个 worker 写同一个 worktree）；持有进程已死 = 陈锁自动接管（崩溃恢复：接管后仍会先清理孤儿 worker）。闭环落位（merged/awaiting-human/blocked/failed）即释放；`abandon` 在闭环存活时会被拒（防止误杀在跑 worker），确认卡死先终止该进程再 abandon。**人工指派的 agent 同样被挡**：feature-branch start 的认领逻辑会抢同一把锁（活锁持有者 = 闭环时拒绝，陈锁自动接管），且认领即把卡迁出 pending/——drain 不再把它当可调度卡误派（认领机制详见 feature-branch.md「start 即认领」）。
@@ -312,7 +321,11 @@ node .agents/scripts/orchestrator.mjs reconcile <task-id>
 - **两本账**：自报 = 任务 events 的 budget_snapshot（stream-json 回填）；实测 = 网关转发日志的 usage 字段（网关从上游响应旁路解析，worker 流量过网关才有实测账）
 - **分歧率** = |自报 − 实测| / max(两账)；口径含缓存读计入输入。网关零流量会标 ⚠——说明 worker 直连了上游
 - 纯只读报告。想让自己的任务可对账，保持 worker 走本机网关（默认即是）
-- **启用条件**：workflow.json `gatewayLogDir` 指向网关请求日志目录（支持 `~/` 展开）才启用；未配置 = 对账关闭（吃狗粮是走网关的项目才有的能力）。测试隔离沿用 `MODELRDOCK_FAKE_HOME`/`MODELRDOCK_HOME` 重定向，优先于配置值
+- **启用条件**：workflow.json `gatewayLogDir` 指向网关请求日志目录（支持 `~/` 展开）才启用；未配置 = 用量对账关闭（吃狗粮是走网关的项目才有的能力）。测试隔离沿用 `MODELRDOCK_FAKE_HOME`/`MODELRDOCK_HOME` 重定向，优先于配置值
+- **状态对账**（同一命令顺带跑，与用量对账独立）：卡状态 vs git 现实——用 `git log --merges <baseBranch>` 解析 `Merge branch 'feature/<id>'` 得「已合并分支」集合，对照队列各状态目录：
+  - 分支已合并但卡不在 merged/ → 列「已合并未落位」（含卡当前状态；状态机被人工旁路，如手工 git merge 后忘了落卡）
+  - 卡在 merged/ 但 git 无对应 merge 提交 → 列「账面合并但 git 无实证」（警告级，可能是 squash 合并或改史）
+  - 默认只读；`reconcile --fix-states` 把「已合并未落位」的卡落位 merged/ 并写 `state_reconciled` 事件（迁移白名单不允许的状态走直接落位——git 已合并是更高事实）
 
 ## 移植（把工具链带去其他项目）
 

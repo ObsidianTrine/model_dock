@@ -27,6 +27,13 @@
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
+//   fastlaneAllowed 轻卡快速通道总开关（缺省 true）：任务卡 frontmatter 可声明
+//                   fastlane: true 跳过 LLM 审查子循环（门禁/分级闸门不省）；设 false
+//                   后即使卡声明 fastlane 也按常规链路跑审查（fastlane_skipped 事件
+//                   reason=disabled_by_config 留痕）——团队级全局关闭开关
+//   watchdog        LLM 进展看门狗：{ mode?: 'observe'|'actuate', everyTurns?: 正整数 }。
+//                   缺省 observe（疑似空转只记 watchdog_suspect 事件，不动作）；actuate 下
+//                   连续 2 次 suspect 走熔断 kill→blocked。非法值回落缺省并 console.warn 告警
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -97,7 +104,33 @@ export function loadWorkflowConfig(repoRoot) {
     gatewayLogDir: typeof raw.gatewayLogDir === 'string' && raw.gatewayLogDir.trim() ? expandHome(raw.gatewayLogDir.trim()) : null,
     driftThreshold: typeof raw.driftThreshold === 'number' && Number.isFinite(raw.driftThreshold) && raw.driftThreshold > 0 && raw.driftThreshold <= 1 ? raw.driftThreshold : 0.2,
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
+    fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
+    watchdog: resolveWatchdog(raw.watchdog),
   };
+}
+
+/** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数 }，缺省 observe/20。
+ *  非法值回落缺省并 console.warn 告警（可操作：指出哪个键、允许什么；stderr 输出，
+ *  不污染 hook 的 stdout 裁决通道）。键缺失 = 沿用缺省，不告警。 */
+function resolveWatchdog(raw) {
+  const DEFAULTS = { mode: 'observe', everyTurns: 20 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] watchdog 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 watchdog 键，mode 允许 observe|actuate、everyTurns 须为正整数）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { mode?, everyTurns? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.mode !== undefined) {
+    if (raw.mode === 'observe' || raw.mode === 'actuate') out.mode = raw.mode;
+    else warn(`mode ${JSON.stringify(raw.mode)} 不合法（允许 "observe" | "actuate"）`);
+  }
+  if (raw.everyTurns !== undefined) {
+    if (Number.isInteger(raw.everyTurns) && raw.everyTurns > 0) out.everyTurns = raw.everyTurns;
+    else warn(`everyTurns ${JSON.stringify(raw.everyTurns)} 不合法（须为正整数）`);
+  }
+  return out;
 }
 
 /** 项目名派生：workflow.json 显式 projectName > package.json name > 仓库目录名（可移植缺省链）。 */
