@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
+import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { fakeHome } from './helpers.js'
 import { atomicWrite, ensureDir } from '../src/util/fsx.js'
 import { modeldockDir, secretsPath } from '../src/util/paths.js'
 import {
+  armChildTimeout,
   defaultStore,
   deleteSecret,
   getSecret,
-  setSecret,
   invalidateSecretsCache,
   keychainArgValue,
+  pickFileCipher,
+  setSecret,
+  __testSetChildTimeoutMs,
+  __testSetDpapiBatch,
   __testSetExternalReader,
+  __testSetSecretsRawReader,
 } from '../src/config/secrets.js'
 import { migrateSandboxKeyRefsToLocal } from '../src/config/sandbox.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
@@ -224,6 +231,92 @@ describe('沙箱隔离：密钥不落 OS 钥匙环', () => {
       }
     } finally {
       h.restore()
+    }
+  })
+})
+
+describe('secrets 明文迁移竞态（迁移写持锁 + 重读比对）', () => {
+  it('迁移窗口内并发写进程落了新 key：跳过迁移写，不覆盖盘上新表', async () => {
+    const h = fakeHome()
+    try {
+      invalidateSecretsCache()
+      if (!pickFileCipher().enabled) return // 明文后端（无钥匙环 CI）无迁移语义
+      __testSetDpapiBatch(async (_script, b64In) => b64In) // base64 恒等：encryptTable 前缀拼接即往返
+      try {
+        // 盘上 =「并发写进程」刚写好的新表（两个 key）；注入的 raw 读取器模拟时序：
+        // 读进程先读到旧表（只有 demo）→ 写进程写盘（此刻盘上已是新表）→ 读进程持锁重读见新表。
+        // 只走读路径（getSecret）触发迁移判断：写路径（mutateFileSecrets）自己持锁重读整表，
+        // 不是本卡要修的竞态窗口。
+        await writeSecrets({ demo: 'sk-v1', other: 'sk-concurrent' })
+        const tables = [{ demo: 'sk-v1' }, { demo: 'sk-v1', other: 'sk-concurrent' }]
+        let n = 0
+        __testSetSecretsRawReader(async () => tables[Math.min(n++, tables.length - 1)])
+        expect(await getSecret('file:demo')).toBe('sk-v1')
+        // 盘上未被旧表迁移写覆盖：other key 仍在且保持并发写进程的值（未加密、未丢）
+        const onDisk = JSON.parse(readFileSync(secretsPath(), 'utf8'))
+        expect(onDisk.other).toBe('sk-concurrent')
+        expect(onDisk.demo).toBe('sk-v1')
+      } finally {
+        __testSetDpapiBatch()
+        __testSetSecretsRawReader()
+      }
+    } finally {
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+
+  it('无并发写时迁移照常发生：盘上明文变密文，读取往返一致', async () => {
+    const h = fakeHome()
+    try {
+      invalidateSecretsCache()
+      const cipher = pickFileCipher()
+      if (!cipher.enabled) return
+      if (cipher.prefix === 'enc:dpapi:') __testSetDpapiBatch(async (_script, b64In) => b64In)
+      try {
+        await writeSecrets({ demo: 'sk-plain' })
+        expect(await getSecret('file:demo')).toBe('sk-plain')
+        const onDisk = JSON.parse(readFileSync(secretsPath(), 'utf8'))
+        expect(Object.values(onDisk).every((v) => typeof v === 'string' && (v === '' || v.startsWith(cipher.prefix)))).toBe(true)
+        invalidateSecretsCache()
+        expect(await getSecret('file:demo')).toBe('sk-plain') // 重读：密文往返一致
+      } finally {
+        __testSetDpapiBatch()
+      }
+    } finally {
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+})
+
+describe('外部子进程超时守卫（armChildTimeout）', () => {
+  it('到点强杀长睡子进程并翻转 timedOut 标志', async () => {
+    __testSetChildTimeoutMs(200)
+    try {
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' })
+      const guard = armChildTimeout(child, 'test-tool')
+      let closed = false
+      child.on('close', () => { closed = true })
+      await new Promise((r) => setTimeout(r, 900))
+      expect(guard.timedOut()).toBe(true)
+      expect(closed).toBe(true)
+      guard.dispose()
+    } finally {
+      __testSetChildTimeoutMs() // 还原默认 10s，避免污染同进程其他用例（isolate:false 共享注册表）
+    }
+  })
+
+  it('未到点退出的子进程不误报超时', async () => {
+    __testSetChildTimeoutMs(5000)
+    try {
+      const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
+      const guard = armChildTimeout(child, 'test-tool')
+      await new Promise((r) => setTimeout(r, 400))
+      expect(guard.timedOut()).toBe(false)
+      guard.dispose()
+    } finally {
+      __testSetChildTimeoutMs()
     }
   })
 })
