@@ -49,6 +49,7 @@ import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstreamSeaState } from './orchestrator/reconcile.mjs';
+import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
@@ -1951,28 +1952,34 @@ function printDriftReport(repoRoot) {
  * reconcile——狗粮对账（Phase 2 展望项落地，docs 10.7）：worker 自报账（events
  * budget_snapshot）vs 网关实测账（转发日志 usage 字段）。worker 流量走本机网关时
  * 两本账应贴近；分歧大 = 上游漏报/网关漏解析/直连绕过网关。只读报告，不做任何动作。
+ * 成本账（cost.mjs）：实测 token × 模型单价 = USD（价目走网关 admin 面，gatewayAdmin
+ * 未开启或网关不可达时只出 token 账，不打断对账主体）。
  * 状态对账（reconcileCardStates）：卡状态 vs git 现实——「已合并未落位」默认只读列出，
  * --fix-states 落位 merged/（状态机被人工旁路的修复）。两节独立，用量对账未启用也照跑。
  */
-function cmdReconcile(repoRoot, taskId, opts = {}) {
+async function cmdReconcile(repoRoot, taskId, opts = {}) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const flags = opts.flags ?? new Set();
+  const cfg = loadWorkflowConfig(repoRoot);
   const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
   // 用量对账未启用（workflow.json gatewayLogDir 未配置且无 env 重定向）→ 显式说明，不落到
   // 「尚无已合并任务可对账」的误导输出（任务明明有，是对账没开）
-  if (!gatewayLogsDir(loadWorkflowConfig(repoRoot))) {
+  if (!gatewayLogsDir(cfg)) {
     log('未启用网关对账：.agents/workflow.json 未配置 gatewayLogDir（网关请求日志目录，支持 ~/ 展开）。配置后重新运行本命令。');
   } else if (taskId) {
     const found = findCard(root, taskId);
     if (!found) die(`任务 "${taskId}" 不在队列中。`);
+    const r = reconcileTask(repoRoot, taskId, root);
+    await attachCost(repoRoot, cfg, [r]);
     log(`任务 ${taskId} 对账（时间窗内经网关转发的成功请求）：`);
-    show(reconcileTask(repoRoot, taskId, root));
+    show(r);
   } else {
     const all = reconcileAll(repoRoot, root);
     if (!all.length) {
       log('尚无已合并任务可对账。');
     } else {
+      await attachCost(repoRoot, cfg, all); // 一张价目表服务全部任务（并集查一次）
       log(`已合并任务对账（${all.length} 个，按分歧降序；分母取两账中较大者）：`);
       for (const r of all) show(r);
     }
@@ -2005,10 +2012,17 @@ function cmdReconcile(repoRoot, taskId, opts = {}) {
 
   function show(r) {
     if (r.skipped) return log(`  ${r.reason}`);
+    let costPart = '';
+    if (r.cost) {
+      costPart = `  燃油 ${fmtUsd(r.cost.usd)}（${r.cost.source === 'cache' ? '陈价目' : '实测价目'}）`;
+      if (r.cost.unpriced?.length) costPart += `（${r.cost.unpriced.length} 模型未匹配单价按 $0 计：${r.cost.unpriced.slice(0, 3).join(', ')}${r.cost.unpriced.length > 3 ? '…' : ''}）`;
+    } else if (r.costReason) {
+      costPart = `  燃油账不可用（${r.costReason}）`;
+    }
     log(
       `  ${r.taskId.padEnd(24)} 自报 ${fmtK(r.selfTotal)}（in ${fmtK(r.selfReported.tokensIn)} / out ${fmtK(r.selfReported.tokensOut)}）` +
         `  网关实测 ${fmtK(r.gateway.total)}（${r.gateway.requests} 次转发，缓存读 ${fmtK(r.gateway.cacheRead)}）` +
-        `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}`
+        `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}${costPart}`
     );
   }
 }
@@ -2018,8 +2032,10 @@ function cmdReconcile(repoRoot, taskId, opts = {}) {
  * 调试与审查迭代 / token / watchdog / follow-up），为预算校准与流程调优提供基线。
  * 只读报告。token 口径 = budget_snapshot 的会话累计峰值（与 Budget.tokens 同源）；
  * 跨引擎精确对账走 reconcile（网关实测账）。--json 输出机器可读全量。
+ * --cost 加燃油账（网关实测 token × 价目 → USD；走 measureFuelBatch，一次日志扫描 +
+ * 一次价目请求服务全部任务；价目不可得时列原因不阻断主报告）。
  */
-function cmdStats(repoRoot, opts = {}) {
+async function cmdStats(repoRoot, opts = {}) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const days = Number.isInteger(opts.days) && opts.days > 0 ? opts.days : 7;
@@ -2031,6 +2047,7 @@ function cmdStats(repoRoot, opts = {}) {
   } catch { /* logs/ 不存在 = 还没跑过任何任务 */ }
 
   const rows = [];
+  const windowsById = new Map(); // id → {start, end}（--cost 燃油投影用；不进 --json 行）
   for (const id of taskIds) {
     const events = readEvents(path.join(logsRoot, id));
     if (!events.length) continue;
@@ -2069,6 +2086,26 @@ function cmdStats(repoRoot, opts = {}) {
       xte_alarms: count('xte_alarm'),
       incident: fs.existsSync(path.join(logsRoot, id, 'incident.md')) ? 1 : 0,
     });
+    if (Number.isFinite(start) && Number.isFinite(end)) windowsById.set(id, { start, end });
+  }
+
+  // 燃油账（--cost）：网关实测 token × 价目。放在 summary 前——summary.total_cost_usd 一并出。
+  let fuelReason = null;
+  if (opts.flags?.has('--cost') && windowsById.size) {
+    const cfg = loadWorkflowConfig(repoRoot);
+    const windows = [...windowsById.entries()].map(([key, w]) => ({ key, start: w.start, end: w.end }));
+    const batch = await measureFuelBatch(repoRoot, cfg, windows);
+    fuelReason = batch.reason ?? null;
+    for (const [id, r] of batch.results) {
+      const row = rows.find((x) => x.id === id);
+      if (!row) continue;
+      if (r.measured) {
+        row.cost_usd = r.usd;
+        if (r.unpriced?.length) row.cost_unpriced = r.unpriced;
+      } else if (r.reason) {
+        row.cost_unavailable = r.reason;
+      }
+    }
   }
 
   const settled = rows.filter((r) => ['merged', 'failed', 'blocked'].includes(r.outcome));
@@ -2098,6 +2135,11 @@ function cmdStats(repoRoot, opts = {}) {
       incidents: sum((r) => r.incident),
     },
   };
+  const costRows = rows.filter((r) => r.cost_usd != null);
+  if (opts.flags?.has('--cost')) {
+    summary.total_cost_usd = costRows.length ? costRows.reduce((n, r) => n + r.cost_usd, 0) : 0;
+    if (fuelReason) summary.cost_reason = fuelReason;
+  }
 
   if (opts.flags?.has('--json')) {
     console.log(JSON.stringify({ generated_at: toIsoLocal(), summary, rows }, null, 2));
@@ -2109,10 +2151,20 @@ function cmdStats(repoRoot, opts = {}) {
   }
   const fmtK = (n) => `${Math.round(n / 100) / 10}k`;
   log(`编排运行度量（最近 ${days} 天启动的 ${rows.length} 个任务；token=会话峰值口径，精确对账跑 reconcile）：`);
+  const withCost = opts.flags?.has('--cost');
   for (const r of rows) {
+    let costPart = '';
+    if (withCost) {
+      if (r.cost_usd != null) {
+        costPart = ` 燃油=${fmtUsd(r.cost_usd)}`;
+        if (r.cost_unpriced?.length) costPart += `（${r.cost_unpriced.length} 模型未配价）`;
+      } else if (r.cost_unavailable) {
+        costPart = ` 燃油=-`;
+      }
+    }
     log(
       `  ${r.id.padEnd(26)} ${r.state.padEnd(15)} wall=${r.wall_min ?? '-'}m turns=${r.turns} 调试=${r.debug_iter} 审查=${r.review_iter} ` +
-        `重试=${r.retries} wd=${r.watchdog_suspect} follow=${r.follow_ups} tokens=${fmtK(r.tokens_peak)}`
+        `重试=${r.retries} wd=${r.watchdog_suspect} follow=${r.follow_ups} tokens=${fmtK(r.tokens_peak)}${costPart}`
     );
   }
   log('汇总：');
@@ -2128,6 +2180,13 @@ function cmdStats(repoRoot, opts = {}) {
   );
   const nm = summary.near_miss;
   log(`  安全晴雨表：近乎事故 ${nm.watchdog + nm.retries + nm.xte + nm.incidents} 次（watchdog ${nm.watchdog} / 重试 ${nm.retries} / 偏航 ${nm.xte} / 调查包 ${nm.incidents}）`);
+  if (withCost) {
+    if (summary.total_cost_usd != null) {
+      log(`  燃油合计：${fmtUsd(summary.total_cost_usd)}（${costRows.length}/${rows.length} 任务可测；单价=网关价目，USD）${summary.cost_reason ? `——${summary.cost_reason}` : ''}`);
+    } else {
+      log('  燃油合计：-（无任务有可用时间窗或价目不可得）');
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2957,16 +3016,17 @@ function sailAutoSubmit(repoRoot, root, cfg, ids) {
 /**
  * sail——自由航行（时间盒完全自治）：船长自勘海况（scan 巡检）→ 自绘航线（propose
  * 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交航海报告
- * （logs/sail/<ts>/report.md：完成了什么、为什么这么编排）。与 watch 的差别：有硬时长
- * 预算、报告收口、自动提交不依赖 autopilot 配置（开 sail 即本航次授权，硬禁区不变：
+ * （logs/sail/<ts>/report.md：完成了什么、为什么这么编排、燃油账几何）。与 watch 的差别：
+ * 有硬时长预算、报告收口、自动提交不依赖 autopilot 配置（开 sail 即本航次授权，硬禁区不变：
  * deps/人工草稿/核心·发布路径永不自动；类型白名单 freeSail.autoSubmitTypes）。
  * 停止条件（任一）：到达 --minutes/--duration、.sail-stop 文件、drift 降级、--max-tasks
- * 上限、连续 3 轮派发无进展。软截止：跑着的任务让它跑完，不在剩余不足时开新派发。
+ * 上限、--max-cost-usd 燃油上限（网关实测价 ≥ 上限即收帆——只停不换引擎，换计费方必须人批）、
+ * 连续 3 轮派发无进展。软截止：跑着的任务让它跑完，不在剩余不足时开新派发。
  */
 async function cmdSail(repoRoot, opts) {
   const cfg0 = loadWorkflowConfig(repoRoot);
   const minutes = parseDurationMinutes({ minutes: opts.minutes, duration: opts.duration });
-  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m）[--max-tasks N] [--interval 10]——自由航行时长必须显式指定（分钟，>0）。');
+  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10]——自由航行时长必须显式指定（分钟，>0）。');
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   preflightWorkerBackend(opts.backend ?? cfg0.worker?.backend); // 起航前引擎预检：CLI 不在就别烧规划钱
@@ -2978,6 +3038,7 @@ async function cmdSail(repoRoot, opts) {
   const startedAt = Date.now();
   const deadline = startedAt + minutes * 60_000;
   const maxTasks = Number.isInteger(opts.maxTasks) && opts.maxTasks > 0 ? opts.maxTasks : Infinity;
+  const maxCostUsd = Number.isFinite(opts.maxCostUsd) && opts.maxCostUsd > 0 ? opts.maxCostUsd : null;
   const intervalMin = Number.isInteger(opts.interval) && opts.interval >= 0 ? opts.interval : 10;
   const orch = path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs');
   const childEnv = { ...process.env, ...childEnvForHeldLock() };
@@ -2994,6 +3055,7 @@ async function cmdSail(repoRoot, opts) {
     deadlineISO: new Date(deadline).toISOString(),
     minutes,
     maxTasks: maxTasks === Infinity ? null : maxTasks,
+    maxCostUsd: maxCostUsd ?? null,
     baseline: snapshotQueue(root),
     cycles: [],
     dispatchedTotal: 0,
@@ -3001,6 +3063,7 @@ async function cmdSail(repoRoot, opts) {
   let stopReason = null;
   let noProgress = 0;
   let weatherAnnounced = false;
+  let lastCostCheckAt = 0;
   let sigint = false;
   const onSigint = () => { sigint = true; };
   const writeVoyage = () => {
@@ -3051,6 +3114,22 @@ async function cmdSail(repoRoot, opts) {
         announceWeatherHold(repoRoot, cfg, weather);
       }
       if (!weather.held) weatherAnnounced = false;
+      // 燃油上限（--max-cost-usd）：网关实测价 ≥ 上限即收帆。只停不换引擎——换计费方必须人批
+      // （红线）。检查节流 60s（实测要扫网关日志，派发轮高频进圈不能每次全量读盘）。
+      if (maxCostUsd != null && Date.now() - lastCostCheckAt >= 60_000) {
+        lastCostCheckAt = Date.now();
+        const fuelNow = await measureFuel(repoRoot, cfg, { start: startedAt }).catch((e) => ({ measured: false, reason: String(e?.message ?? e) }));
+        voyage.fuel = fuelNow;
+        writeVoyage();
+        if (fuelNow.measured && fuelNow.usd >= maxCostUsd) {
+          stopReason = `成本上限 --max-cost-usd ${maxCostUsd}（实测 ${fmtUsd(fuelNow.usd)}）`;
+          log(`⛽ ${stopReason}——收帆（只停不换引擎；想继续请人工评估后重开或上调上限）。`);
+          try {
+            appendFleetEvent(repoRoot, 'sail_cost_cap', { limit_usd: maxCostUsd, usd: fuelNow.usd });
+          } catch { /* 留痕失败不阻断收帆 */ }
+          break;
+        }
+      }
       const pending = listCards(root, 'pending');
       // 派发资格：pending 里存在「真正可派发」的卡才进派发轮——引水卡（deps/核心·发布
       // 路径，drain 会跳过等人工确认）与解析失败卡都不算可派发。全不可派时走规划轮，
@@ -3128,6 +3207,14 @@ async function cmdSail(repoRoot, opts) {
     voyage.endState = snapshotQueue(root);
     voyage.diff = diffQueueStates(voyage.baseline, voyage.endState);
     voyage.goalsText = readGoals(repoRoot);
+    // 燃油账收口：本航次 [startedAt, finishedAt] 网关实测 × 价目（含逐卡拆账）。此前循环内
+    // 若成本上限已触发，voyage.fuel 是触达时刻的快照——此处按完整航程重算覆盖（报告口径）。
+    try {
+      const dispatchedIds = [...new Set((voyage.cycles ?? []).flatMap((c) => c.dispatched ?? []))];
+      voyage.fuel = await measureFuel(repoRoot, loadWorkflowConfig(repoRoot), { start: startedAt, end: finishedAt, cardIds: dispatchedIds });
+    } catch (e) {
+      voyage.fuel = { measured: false, reason: String(e?.message ?? e) };
+    }
     const reportPath = path.join(sailDir, 'report.md');
     voyage.reportPath = reportPath;
     writeVoyage();
@@ -3265,13 +3352,13 @@ function usage() {
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
-  sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--interval 10] [--backend …] [--review-backend …]
-                                          自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排）。停止：.sail-stop / drift 降级 / --max-tasks；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
+  sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
+                                          自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排、燃油账几何）。停止：.sail-stop / drift 降级 / --max-tasks / --max-cost-usd（网关实测价达上限即收帆，只停不换引擎）；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
   schedule install|uninstall|status [--mode nightly|watch] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--dry-run]
                                           定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
-  reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
+  reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 燃油账（实测 token × 价目 = USD，需 gatewayAdmin）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
   resume <task-id> [--backend mock]       崩溃任务带恢复上下文续做
   abandon <task-id>                       放弃任务（worktree 清理按 Rescue 手册人工做）
   approve <task-id>                       人工闸门：批准合并（调 feature-branch finish）
@@ -3279,7 +3366,7 @@ function usage() {
   retry <task-id> --note "..."            人工闸门：打回重试（附补充指令）
   logs <task-id>                          打印事件时间线
   follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
-  stats [--days N] [--json]               运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）
+  stats [--days N] [--json] [--cost]      运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）；--cost 加燃油账（网关实测 × 价目，USD）
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
 
 后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
@@ -3317,6 +3404,7 @@ async function main() {
     else if (a === '--minutes') opts.minutes = parseInt(argv[++i], 10);
     else if (a === '--duration') opts.duration = argv[++i];
     else if (a === '--max-tasks') opts.maxTasks = parseInt(argv[++i], 10);
+    else if (a === '--max-cost-usd') opts.maxCostUsd = parseFloat(argv[++i]);
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);

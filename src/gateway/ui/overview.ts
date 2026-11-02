@@ -162,10 +162,31 @@ export const UI_JS_APP = `  function load() {
       .catch(function () {})
   }
 
+  function fmtUsd(n) {
+    return '$' + (n >= 0.01 || n === 0 ? n.toFixed(2) : n.toFixed(4))
+  }
+  function fmtTok(n) {
+    return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
+  }
+  // 今日用量/成本徽标（overview.usageToday：内存累计器 + 重启回填当日日志；无流量不显示）
+  function usageHtml() {
+    var u = view && view.usageToday
+    if (!u || !u.requests) return ''
+    var cost = u.cost && u.cost.total > 0 ? ' · ' + fmtUsd(u.cost.total) : ''
+    var tip = t('输入 ', 'Input ') + fmtTok(u.tokens.input) + ' · ' + t('输出 ', 'Output ') + fmtTok(u.tokens.output) +
+      (u.tokens.cache_read ? ' · ' + t('缓存读 ', 'Cache read ') + fmtTok(u.tokens.cache_read) : '') +
+      ' · ' + t('成本按百万 token 牌价估算，实际以服务商账单为准', 'Cost is estimated from per-million-token list prices; vendor bills are authoritative')
+    if (u.unpriced_models && u.unpriced_models.length) {
+      tip += ' · ' + t('未匹配单价（按 $0 计）：', 'No price matched (counted as $0): ') + u.unpriced_models.join(', ')
+    }
+    return ' <span class="pill dim" title="' + esc(tip) + '">' + esc(t('今日 ', 'Today ') + u.requests + t(' 请求', ' req') + cost) + '</span>'
+  }
+
   function healthHtml() {
     var sandbox = view && view.gateway && view.gateway.sandbox
     return '<span class="dot"></span> ' + t('本地网关运行中 · 端口 ', 'Local gateway running · port ') + esc(location.port) +
-      (sandbox ? ' <span class="pill warn" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '')
+      (sandbox ? ' <span class="pill warn" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '') +
+      usageHtml()
   }
 
   function pollHealth() {

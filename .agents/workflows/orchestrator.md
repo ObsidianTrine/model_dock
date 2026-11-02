@@ -333,18 +333,19 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 ### B9. 自由航行（sail，时间盒完全自治）
 
-`node .agents/scripts/orchestrator.mjs sail --minutes 120`（或 `--duration 2h|90m|1h30m`）：船长自勘海况（scan 巡检）→ 自绘航线（propose 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交**航海报告**——完成了什么、为什么这么编排，落 `logs/sail/<ts>/report.md`（stdout 同文 + webhook 通知 + fleet 留痕，`sail_started`/`sail_finished`）。与 watch 的差别：有硬时长预算、报告收口、自动提交不依赖 autopilot 配置。
+`node .agents/scripts/orchestrator.mjs sail --minutes 120`（或 `--duration 2h|90m|1h30m`，可加 `--max-cost-usd N` 燃油上限）：船长自勘海况（scan 巡检）→ 自绘航线（propose 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交**航海报告**——完成了什么、为什么这么编排、燃油账几何，落 `logs/sail/<ts>/report.md`（stdout 同文 + webhook 通知 + fleet 留痕，`sail_started`/`sail_finished`）。与 watch 的差别：有硬时长预算、报告收口、自动提交不依赖 autopilot 配置。
 
 - **授权模型**：人显式敲下带时长的 sail 命令 = 本航次自动提交授权。硬禁区不变（配置只收窄、永不放大）：`created_by: human` 人工草稿、`deps` 类型、files_hint 命中 corePaths/releasePaths 永不自动；类型白名单 workflow.json `freeSail.autoSubmitTypes`（缺省 `["docs","bugfix","refactor","feature"]`）；提交 gate 覆写 L1——实际合并仍由分级裁决 + drift 保险丝兜底。开航前已有的存量 drafts 永不自动提交。
 - **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + 自动提交 → 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效）。
-- **停止条件（任一）**：到达 `--minutes/--duration`、`.agents/orchestrator/.sail-stop` 文件（下周期即停并清文件）、drift 降级（人工 `drift --clear` 后再启）、`--max-tasks N` 派发上限、连续 3 轮派发无进展（队列卡在待引水/解析失败时触发）。**软截止**：跑着的任务让它跑完，不超时强杀；风暴闸滞留期跳过派发与规划（scan 照跑——不派 worker），窗口滑过自动恢复。
+- **停止条件（任一）**：到达 `--minutes/--duration`、`.agents/orchestrator/.sail-stop` 文件（下周期即停并清文件）、drift 降级（人工 `drift --clear` 后再启）、`--max-tasks N` 派发上限、**`--max-cost-usd N` 燃油上限**（网关实测价 ≥ 上限即收帆并记 `sail_cost_cap`——**只停不换引擎**，换计费方必须人批；检查节流 60s）、连续 3 轮派发无进展（队列卡在待引水/解析失败时触发）。**软截止**：跑着的任务让它跑完，不超时强杀；风暴闸滞留期跳过派发与规划（scan 照跑——不派 worker），窗口滑过自动恢复。
+- **燃油账（报告「值不值得」的依据）**：本航次 [起航, 收帆] 网关实测 token × 价目 = USD（总账 + 逐卡拆账，逐卡按各自事件时间窗投影）；worker 直连上游时如实标「不可测」；收帆时若成本上限已触发，按完整航程重算覆盖触发时刻快照。
 - **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
 
 ## C. 观测与对账详解
 
 ### C1. stats 与 follow（引水传令）
 
-- `stats --days 7 [--json]`：每卡 wall/turns/调试与审查迭代/重试/watchdog suspect/follow-up/token 峰值（budget_snapshot 口径）+ 各状态卡数与合并率汇总。JSON 形态：顶层 `summary` 嵌套对象 + `rows`。跨引擎精确对账用 reconcile。汇总含**安全晴雨表**（`summary.near_miss`，人类输出「安全晴雨表」行）：watchdog suspect / 瞬时重试 / 偏航报警（`xte_alarm`，确定性规则只留痕）/ 事故调查包（`incident.md`，VDR 终态自动归档）四类近乎事故计数——险情比事故多，先看晴雨表再定流程调优。
+- `stats --days 7 [--json] [--cost]`：每卡 wall/turns/调试与审查迭代/重试/watchdog suspect/follow-up/token 峰值（budget_snapshot 口径）+ 各状态卡数与合并率汇总；`--cost` 加燃油账（网关实测 token × 价目 = USD，一次日志扫描 + 一次价目请求服务全部任务，可测任务数与不可测原因如实标注）。JSON 形态：顶层 `summary` 嵌套对象 + `rows`。跨引擎精确对账用 reconcile。汇总含**安全晴雨表**（`summary.near_miss`，人类输出「安全晴雨表」行）：watchdog suspect / 瞬时重试 / 偏航报警（`xte_alarm`，确定性规则只留痕）/ 事故调查包（`incident.md`，VDR 终态自动归档）四类近乎事故计数——险情比事故多，先看晴雨表再定流程调优。
 - `follow <task-id> "<补充指令>"`：给 running/ 的卡递话，写 `logs/<id>/inbox.md` + `follow_up` 事件，在下一次会话边界（调试返工/审查返工/resume/新 spawn）注入 prompt 尾部（20 条/4000 字符截断，前缀缓存友好）。只对 running 卡开放；awaiting-human 用 `retry --note`，pending 直接改卡文件。`status <task-id>` 会显示待送达条数。
 
 ### C2. drift（质量漂移保险丝）
@@ -353,7 +354,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 ### C3. reconcile（狗粮对账）
 
-`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）。纯只读（除 --fix-states）。事故调查包（incident.md）的「上游海况」段复用同一投影（不过滤失败请求）：时间窗内请求/失败分布、路由事件痕迹（failover/down_all）、时延 p50/p95、实测用量与最近失败现场——回答「预算烧在哪」。
+`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。**燃油账**（2026-11-02）：实测 token × 模型单价 = USD——价目经 `POST /_modeldock/pricing-lookup`（admin 面，需 `gatewayAdmin: true`）取网关权威价目（`~/.modeldock/pricing.json` 用户覆盖 > models.dev 目录牌价），取不到价按 $0 计并列 unpriced 清单；网关不可达回落陈价目缓存（logs/pricing-cache.json，标注「陈价目」），价目完全不可得时只出 token 账不打断对账主体。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）。纯只读（除 --fix-states）。事故调查包（incident.md）的「上游海况」段复用同一投影（不过滤失败请求）：时间窗内请求/失败分布、路由事件痕迹（failover/down_all）、时延 p50/p95、实测用量与最近失败现场——回答「预算烧在哪」。
 
 ## D. 周边
 

@@ -5,6 +5,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { logsDir } from '../../util/paths.js'
 import { appendLine, closeAppendStream } from '../../util/fsx.js'
 import { localIsoTs } from '../../util/time.js'
+import { costOfUsage, gatewayPriceResolver, type PriceResolver } from '../pricing.js'
 import type { AuditEntry, EventEntry, GatewayRuntime, LogEntry, RingEntry } from './types.js'
 
 const RING_MAX = 500
@@ -35,6 +36,12 @@ function appendLog(file: string, line: string): void {
 
 /** 请求日志：全量按天 JSONL 落盘（不含任何请求体）；仅错误请求（4xx/5xx/异常/自动改发）进内存环形缓冲供 Web 端展示 */
 export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
+  // 今日用量实况（overview 状态行的成本仪表）：先记账再落盘，观测失败绝不影响转发
+  try {
+    usageTodayAdd(entry)
+  } catch {
+    /* 观测失败不影响转发 */
+  }
   // 避免被高频正常请求刷屏
   if (entry.status === undefined || entry.status >= 400 || entry.err || entry.reason) {
     pushRing(rt, entry)
@@ -57,6 +64,70 @@ export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
   } catch {
     /* 日志失败不影响转发 */
   }
+}
+
+// ===== 今日用量实况（overview 状态行的成本仪表 / usageToday）=====
+// 内存累计器（gatewayPriceResolver 查价），网关重启后首次触达时回填扫当日日文件——
+// 「今日」语义跨重启不失忆。回填是同步单日扫描（一天一次的代价，本机个人量级可接受）；
+// 之后 logRequest 逐条增量，转发热路径零额外 IO。跨日 / 日志目录切换（fake home）自动重置。
+export interface UsageTodayView {
+  date: string
+  requests: number
+  ok: number
+  failed: number
+  tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  cost: UsageCost | null
+  unpriced_models: string[] | null
+}
+
+let todayTracker: { dir: string; date: string; acc: ReturnType<typeof createUsageAccumulator> } | null = null
+
+function ensureTodayTracker(): { dir: string; date: string; acc: ReturnType<typeof createUsageAccumulator> } {
+  const dir = logsDir()
+  const date = localIsoTs().slice(0, 10)
+  if (todayTracker && todayTracker.dir === dir && todayTracker.date === date) return todayTracker
+  const acc = createUsageAccumulator(gatewayPriceResolver)
+  for (const e of readRequestLogDay(date)) acc.add(e)
+  todayTracker = { dir, date, acc }
+  return todayTracker
+}
+
+/** logRequest 热路径记账（entry.ts 的日期即所属日——迟到条目也归对日）。 */
+function usageTodayAdd(entry: LogEntry): void {
+  const t = ensureTodayTracker()
+  if (entry.ts.slice(0, 10) === t.date) t.acc.add(entry)
+}
+
+/** 今日用量视图（overview 构建用；失败/空目录返回零值视图，不抛）。 */
+export function usageTodayView(): UsageTodayView {
+  try {
+    const { date, acc } = ensureTodayTracker()
+    const s = acc.summary()
+    return {
+      date,
+      requests: s.requests,
+      ok: s.ok,
+      failed: s.failed,
+      tokens: s.tokens,
+      cost: s.cost,
+      unpriced_models: s.unpriced_models,
+    }
+  } catch {
+    return {
+      date: localIsoTs().slice(0, 10),
+      requests: 0,
+      ok: 0,
+      failed: 0,
+      tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
+      cost: null,
+      unpriced_models: null,
+    }
+  }
+}
+
+/** 重置今日仪表（测试隔离：fakeHome 切换由 dir 键自愈，此钩子供显式清零）。 */
+export function resetUsageTodayForTest(): void {
+  todayTracker = null
 }
 
 /** 操作审计：环形缓冲（页面日志表可见）+ 按天 JSONL 落盘 audit-日期.jsonl（不含密钥明文） */
@@ -189,6 +260,13 @@ export function filterLogEntries(entries: LogEntry[], f: UsageFilter): LogEntry[
   return entries.filter((e) => logEntryMatches(e, f))
 }
 
+/** 成本聚合（USD）：仅注入 priceResolver 时产出；unpriced = 查不到单价的模型清单（按 $0 计）。 */
+export interface UsageCost {
+  total: number
+  by_provider: Record<string, number>
+  by_model: Record<string, number>
+}
+
 export interface UsageSummary {
   requests: number
   ok: number
@@ -201,19 +279,25 @@ export interface UsageSummary {
   latency: { p50: number | null; p95: number | null; p99: number | null }
   /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  /** 成本（USD / 百万 token 牌价口径）；未注入 priceResolver 时为 null */
+  cost: UsageCost | null
+  /** 注入 resolver 时：命中过但查不到单价的模型名（成本按 $0 计，提醒补 pricing.json） */
+  unpriced_models: string[] | null
   /** 命中条目的首尾时间戳（原样 ISO 字符串；空集为 null） */
   window: { first: string | null; last: string | null }
 }
 
 /** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
 /** 聚合累加器：summarizeUsage（数组入参，单测/既有调用面）与 summarizeUsageDays（流式）
- *  共用同一套累加口径，两边结果逐字段一致。 */
-export function createUsageAccumulator() {
+ *  共用同一套累加口径，两边结果逐字段一致。priceOf 注入时顺带累计成本（同一批成功条目）。 */
+export function createUsageAccumulator(priceOf?: PriceResolver) {
   const byStatus: Record<string, number> = {}
   const byProvider: Record<string, number> = {}
   const byModel: Record<string, number> = {}
   const ms: number[] = []
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  const cost: UsageCost | null = priceOf ? { total: 0, by_provider: {}, by_model: {} } : null
+  const unpriced = priceOf ? new Set<string>() : null
   let ok = 0
   let count = 0
   let first: string | null = null
@@ -235,6 +319,17 @@ export function createUsageAccumulator() {
           tokens.output += u.output_tokens ?? 0
           tokens.cache_read += u.cache_read_tokens ?? 0
           tokens.cache_creation += u.cache_creation_tokens ?? 0
+          if (priceOf && cost && unpriced) {
+            const price = priceOf(e.provider, e.model)
+            if (price) {
+              const c = costOfUsage(u, price)
+              cost.total += c
+              if (e.provider) cost.by_provider[e.provider] = (cost.by_provider[e.provider] ?? 0) + c
+              if (e.model) cost.by_model[e.model] = (cost.by_model[e.model] ?? 0) + c
+            } else {
+              unpriced.add(e.model || '(unknown)')
+            }
+          }
         }
       } else {
         const k = String(e.status ?? 'n/a')
@@ -251,6 +346,8 @@ export function createUsageAccumulator() {
         by_model: byModel,
         latency: latencyQuantiles(ms),
         tokens,
+        cost,
+        unpriced_models: unpriced ? [...unpriced].sort() : null,
         window: { first, last },
       }
     },
@@ -258,8 +355,8 @@ export function createUsageAccumulator() {
 }
 
 /** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
-export function summarizeUsage(entries: LogEntry[]): UsageSummary {
-  const acc = createUsageAccumulator()
+export function summarizeUsage(entries: LogEntry[], priceOf?: PriceResolver): UsageSummary {
+  const acc = createUsageAccumulator(priceOf)
   for (const e of entries) acc.add(e)
   return acc.summary()
 }
@@ -268,8 +365,8 @@ export function summarizeUsage(entries: LogEntry[]): UsageSummary {
  *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
  *  （2026-11-02 复查 P2-1；该端点是 Dockmaster 编排侧的轮询数据源）。聚合口径与
  *  「readRequestLogDay + filterLogEntries + summarizeUsage」逐字段一致（共享累加器）。 */
-export async function summarizeUsageDays(days: string[], f: UsageFilter): Promise<UsageSummary> {
-  const acc = createUsageAccumulator()
+export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf?: PriceResolver): Promise<UsageSummary> {
+  const acc = createUsageAccumulator(priceOf)
   for (const d of days) {
     if (!USAGE_DAY_RE.test(d)) continue
     const file = path.join(logsDir(), `gateway-${d}.jsonl`)

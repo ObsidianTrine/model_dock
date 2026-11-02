@@ -11,6 +11,7 @@ import { autostartOverview } from '../autostart.js'
 import { sandboxInstallCapability } from './install.js'
 import { PRESETS } from '../presets/data.js'
 import { autoRouteInfo, isMeltdown, parseFallbackEntry, type GatewayRuntime } from './state.js'
+import { usageTodayView } from './state/logs.js'
 import { ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
 import { markUiLeaving, markUiPing, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { peekSyncRequest } from './lan.js'
@@ -299,6 +300,8 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
     sync: await syncStatus(),
     // 附近电脑的待确认拉取请求（sync-nearby，单槽 120s）：确认卡据此显示
     syncRequest: peekSyncRequest(),
+    // 今日用量与成本实况（内存累计器 + 重启回填当日日志）：状态行燃油仪表的数据源
+    usageToday: usageTodayView(),
   }
 }
 

@@ -88,7 +88,8 @@ node .agents/scripts/orchestrator.mjs logs <task-id>       # 单任务完整事�
 真实 worker 的流量走你本机网关（吃狗粮），成本随时可查：
 
 ```bash
-node .agents/scripts/orchestrator.mjs reconcile [task-id]  # 自报 token vs 网关实测
+node .agents/scripts/orchestrator.mjs reconcile [task-id]  # 自报 token vs 网关实测 + 燃油账（USD）
+node .agents/scripts/orchestrator.mjs stats --cost           # 运行度量 + 每任务实测成本
 ```
 
 ### 4.3 批量推进（队列自动化）

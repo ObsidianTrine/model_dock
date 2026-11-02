@@ -14,6 +14,7 @@ import { parseCard, STATES, cardPath, listCards, queueRoot } from './queue.mjs';
 import { hintsOverlap } from '../policy.mjs';
 import { readGoals } from './goals.mjs';
 import { buildTaskRoster } from './notify.mjs';
+import { fmtUsd } from './cost.mjs';
 
 /** 自由航行 stop 文件名（.agents/orchestrator/ 下，与 .watch-stop 同款语义）。 */
 export const SAIL_STOP_FILE = '.sail-stop';
@@ -186,6 +187,23 @@ export function buildSailReport(voyage) {
   lines.push(`- 周期 ${voyage.cycles?.length ?? 0} 个，派发任务 ${voyage.dispatchedTotal ?? 0} 张`);
   lines.push(`- 罗盘（goals.md）：${voyage.goalsText ? `有——提案须对齐：${String(voyage.goalsText).replace(/\s+/g, ' ').slice(0, 200)}` : '无（仅凭巡检信号提案）'}`);
   lines.push('');
+  // 燃油账（确定性组装）：网关实测 token × 价目（cost.mjs measureFuel）；不可测时如实给原因
+  if (voyage.fuel) {
+    const f = voyage.fuel;
+    lines.push('## 燃油账');
+    lines.push('');
+    if (f.measured) {
+      lines.push(`- 本航次实测 ${fmtUsd(f.usd)}（${f.requests} 次经网关转发；单价 = 网关价目，USD）${f.source === 'cache' ? '——网关不可达，按陈价目估算' : ''}`);
+      for (const c of f.byCard ?? []) {
+        const info = cardReportInfo(qroot, c.id, lookup);
+        lines.push(`  - ${c.id}（${typeOf(info)}）：${fmtUsd(c.usd)}`);
+      }
+      if (f.unpriced?.length) lines.push(`- ⚠ ${f.unpriced.length} 个模型未匹配单价（按 $0 计）：${f.unpriced.slice(0, 5).join(', ')}${f.unpriced.length > 5 ? '…' : ''}——在 ~/.modeldock/pricing.json 补价后口径更准`);
+    } else {
+      lines.push(`- 不可测：${f.reason ?? '原因未知'}`);
+    }
+    lines.push('');
+  }
   lines.push('## 战果清单');
   lines.push('');
   const merged = (endState.merged ?? []).filter(touched);
@@ -276,6 +294,7 @@ export function buildSailSummary(voyage) {
   if (voyage.stopReason && voyage.stopReason !== '到达时长上限') parts.push(`⏸ ${voyage.stopReason}`);
   else parts.push('✓ 自由航行结束');
   parts.push(`实际 ${voyage.actualMinutes ?? '?'}/${voyage.minutes} 分钟、派发 ${voyage.dispatchedTotal ?? 0}`);
+  if (voyage.fuel?.measured) parts.push(`燃油 ${fmtUsd(voyage.fuel.usd)}`);
   parts.push(`出港 ${(s.merged ?? []).length}、待放行 ${(s['awaiting-human'] ?? []).length}、搁浅/退关 ${((s.blocked ?? []).length + (s.failed ?? []).length)}、待调度 ${(s.pending ?? []).length}`);
   if (voyage.reportPath) parts.push(`报告 ${voyage.reportPath}`);
   // 任务花名册：按任务号列本航次落位的卡与目标首行（「做了哪些任务、为什么」一眼可读；

@@ -35,6 +35,7 @@ import { discoverPeers } from './discover.js'
 import { markUiLeaving, markUiPing, markUiSeen, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
 import { createUsageTap } from './usage.js'
+import { gatewayPriceResolver, loadPricingOverrides, lookupPrice } from './pricing.js'
 import { refreshCalendar } from './holidays.js'
 import { syncStatus } from '../sync/engine.js'
 import { openEnvelope, sealEnvelope } from '../sync/crypto.js'
@@ -1858,13 +1859,56 @@ async function hUsage(c: AdminCtx): Promise<void> {
   const harness = q.get('harness') ?? undefined
   const profile = q.get('profile') ?? undefined
   const provider = q.get('provider') ?? undefined
-  const usage = await summarizeUsageDays(parsed.days, { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs })
+  const withCost = q.get('cost') !== '0' // 缺省带成本；cost=0 只算 token（编排侧风暴闸等免查价路径）
+  const usage = await summarizeUsageDays(
+    parsed.days,
+    { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs },
+    withCost ? gatewayPriceResolver : undefined
+  )
   const filter: Record<string, string> = {}
   if (harness) filter.harness = harness
   if (profile) filter.profile = profile
   if (provider) filter.provider = provider
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, usage }))
+  const pricingError = withCost ? loadPricingOverrides().error ?? null : null
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage }))
+  return
+}
+
+/** POST /_modeldock/pricing-lookup：批量查价（编排侧燃油账用，admin 门内）。
+ *  请求体 { models: Array<string | { provider?: string; model: string }> }（≤500 条）；
+ *  响应 { ok, currency:'usd', unit:'per_million_tokens', prices, missing, overrides_error }——
+ *  prices 键与请求条目一一对应（带 provider 的键为 "provider/model"），查不到的进 missing（不猜价）。 */
+async function hPricingLookup(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const b = await jsonRequestBody(req)
+  const raw = Array.isArray(b.models) ? b.models : []
+  const entries = raw
+    .map((m: unknown) => {
+      if (typeof m === 'string') return { provider: undefined, model: m.trim(), key: m.trim() }
+      if (typeof m === 'object' && m !== null) {
+        const o = m as Record<string, unknown>
+        const model = typeof o.model === 'string' ? o.model.trim() : ''
+        const provider = typeof o.provider === 'string' && o.provider.trim() ? o.provider.trim() : undefined
+        if (model) return { provider, model, key: provider ? `${provider}/${model}` : model }
+      }
+      return null
+    })
+    .filter((x: unknown): x is { provider: string | undefined; model: string; key: string } => x !== null)
+    .slice(0, 500)
+  if (!entries.length) {
+    return sendError(res, 400, t('缺少 models（模型名字符串或 {provider, model} 对象数组）', 'Missing models (array of model name strings or {provider, model} objects)'))
+  }
+  const { error } = loadPricingOverrides()
+  const prices: Record<string, unknown> = {}
+  const missing: string[] = []
+  for (const e of entries) {
+    const price = lookupPrice(e.provider, e.model)
+    if (price) prices[e.key] = { ...price, source: 'priced' }
+    else missing.push(e.key)
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, currency: 'usd', unit: 'per_million_tokens', prices, missing, overrides_error: error ?? null }))
   return
 }
 
@@ -1961,6 +2005,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/reload': hReload,
   'POST /_modeldock/test': hTest,
   'POST /_modeldock/tier-validate': hTierValidate,
+  'POST /_modeldock/pricing-lookup': hPricingLookup,
   'POST /_modeldock/reset': hReset,
 }
 
