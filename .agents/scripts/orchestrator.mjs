@@ -147,7 +147,9 @@ async function settleNotify(repoRoot, taskId, state, reason) {
 // Budget 类已迁至 orchestrator/budget.mjs（含低油量软告警；单测直接 import 驱动）。
 
 function cleanupOrphanWorker(repoRoot, taskId) {
-  // 崩溃恢复：running/ 卡片若记录的 worker PID 仍存活（孤儿），先杀整棵进程树
+  // 崩溃恢复：running/ 卡片若记录的 worker PID 仍存活（孤儿），先杀整棵进程树。
+  // 不做 role 过滤：最后一条 spawn 可能是 reviewer 的（崩溃在审查段），孤儿 reviewer 同样要杀——
+  // 与 resolveBackendName 只认 worker 侧的口径差异是有意的
   const events = readEvents(logDir(repoRoot, taskId));
   const spawned = [...events].reverse().find((e) => e.type === 'worker_spawned');
   if (spawned?.pid && isAlive(spawned.pid)) {
@@ -605,7 +607,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           }
           fs.writeFileSync(promptFile, promptText);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
-          appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
+          appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
             promptFile,

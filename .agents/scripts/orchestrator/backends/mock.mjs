@@ -19,7 +19,7 @@ import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESI
 
 export const mockBackend = {
   name: 'mock',
-  async spawn({ promptFile, cwd, onEvent }) {
+  async spawn({ promptFile, cwd, onEvent, readonly }) {
     // ORCH_MOCK_SPAWN_ERROR：模拟 claude CLI 缺失/启动失败（backend.spawn reject）
     if (process.env.ORCH_MOCK_SPAWN_ERROR === '1') {
       throw new Error('mock: spawn 注入失败（ORCH_MOCK_SPAWN_ERROR=1，模拟 claude CLI 不可用）');
@@ -31,7 +31,7 @@ export const mockBackend = {
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
-    onEvent({ type: 'worker_spawned', backend: 'mock', pid: process.pid });
+    onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isSpecPlanner) {
       // spec planner 模式：输出三件套契约块（两个任务、文件明确，供 spec build 端到端拆卡）；
