@@ -1,0 +1,10 @@
+{
+  "id": "2026-11-tier-silence-test-scenario-mismatch",
+  "title": "zcode tier 静默回归用例场景与被测实现自相矛盾：用例名声称「默认引擎」，起跑却带 --backend mock——tierWarnable 只对 zcode-headless 静默（opts.backend !== 'zcode-headless'），mock 下告警照发，not.toContain('未生效') 断言必红；红用例随 d352822 溜过 finish 门禁（finish 只跑产品套件，test:workflow 归 CI/手动守护，文档化已知边界）",
+  "reviewRef": "d352822",
+  "diffRef": "d352822",
+  "fixedBy": "c515b0e",
+  "files": [".agents/scripts/orchestrator.mjs", "test/orchestrator/tiers.test.ts"],
+  "expect": ["tierwarnable", "zcode-headless", "backend mock"],
+  "note": "c515b0e 修复：用例改确定性场景——去掉 --backend mock 走默认 zcode 引擎路径，ORCH_ZCODE_CLI 指向不存在桩让 worker spawn 确定性 ENOENT blocked（断言点在 spawn 之前，全机器可跑、不依赖本机 zcode）。本题考「新增测试的场景与实现断言一致性」：矛盾就写在同一 diff 的两侧（tierWarnable 排除条件 vs 用例 --backend mock），审查者复核新增测试时应在给定场景下把断言推演一遍（mock ≠ zcode-headless → 告警会发 → not.toContain 必红）。逃逸层与 finish-lock-wait-contract 同款（红噪声未被门禁拦），差异在根因：那边是夹具假设与契约漂移，这边是场景选错路径——修测试时先问「我到底在驱动哪条代码路径」。expect 首关键词 tierwarnable 指实现侧符号，命中即视为对上了静默条件与 mock 场景的矛盾"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "2026-11-orch-drafts-realpath-skip",
+  "title": "cmdSubmit 草稿清理用裸字符串前缀比对（path.resolve(cardFile).startsWith(draftsDir(repoRoot)+sep)）且双侧都不做 realpath 归一：macOS 的 tmpdir 是符号链接（/var/folders→/private/var/folders），argv 侧路径（path.resolve 不解析符号链接）与 findRepoRoot 侧（git toplevel，已解析真实路径）前缀永不一致——drafts 提案提交后草稿清理永远静默跳过（任务二合入即存在，scan.test『提案提交』用例实证）",
+  "reviewRef": "9f62c37^",
+  "diffRef": "a58a313",
+  "fixedBy": "9f62c37",
+  "files": [".agents/scripts/orchestrator.mjs"],
+  "expect": ["realpath", "符号链接", "symlink", "startsWith"],
+  "note": "9f62c37 修复；bug 随 a58a313（任务二 orch-autopilot-goals）合入进树。修法：双侧 fs.realpathSync 归一后再比对前缀（argv 输入与 repoRoot 派生路径是两套解析语境：path.resolve 只补全不解析符号链接，git toplevel 返回的是已解析路径）。本题是跑分器首个 diffRef 题型：orchestrator.mjs 已 143KB 超 120KB 整文件护栏，改考引入提交 a58a313 对该文件的 diff（36.9KB）——diff 题型同时更贴近真实 PR 审查场景（审查者看到的本来就是 diff）。审查侧教训：路径比对一律先归一（realpath）再比；「macOS tmpdir 是符号链接」与「Windows CIM 反斜杠」同属平台路径解析考区（参照 tray-win32-basename），REVIEW.md 平台解析堵法对 argv 路径同样适用"
+}

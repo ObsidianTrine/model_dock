@@ -1868,6 +1868,47 @@ async function hUsage(c: AdminCtx): Promise<void> {
   return
 }
 
+/** POST /_modeldock/tier-validate：token → harness → profile 权威事实回报（编排侧 tier 校验用，
+ *  admin 门内；2026-11-02 船东授权 .agents 使用 admin 面）。请求体 { token?, tier? }——tier 仅
+ *  回传对照，判定语义（别名归一等）在编排侧。响应：ok:false（token 未命中/无法解析，reason）
+ *  或 ok:true + harness/profile/provider/tier（profile.tier 标签，可 null）+ models（该 profile
+ *  当前 provider 的目录 id）+ tier_profiles（全库 tier 标签 → profile id 清单，供「tier 已打标
+ *  但 token 指向别档」判定）。token 不回显、不落日志。 */
+async function hTierValidate(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  const b = await jsonRequestBody(req)
+  const token = typeof b.token === 'string' ? b.token : ''
+  const wantedTier = typeof b.tier === 'string' ? b.tier.trim() : ''
+  if (!token) return sendError(res, 400, t('缺少 token', 'Missing token'))
+  const resolved = resolveTarget(rt, token)
+  if (!resolved.ok) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, reason: resolved.status === 401 ? 'unknown_token' : `resolve_${resolved.status}` }))
+    return
+  }
+  const { target } = resolved
+  const providerId = target.profile.provider
+  const tierProfiles: Record<string, string[]> = {}
+  for (const [id, p] of Object.entries(rt.config.profiles)) {
+    const tag = typeof p.tier === 'string' && p.tier.trim() ? p.tier.trim() : null
+    if (tag) (tierProfiles[tag] ??= []).push(id)
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      ok: true,
+      harness: target.harness,
+      profile: target.profileName,
+      provider: providerId,
+      tier: rt.config.profiles[target.profileName]?.tier ?? null,
+      ...(wantedTier ? { requested_tier: wantedTier } : {}),
+      models: Object.keys(rt.config.providers[providerId]?.models ?? {}),
+      tier_profiles: tierProfiles,
+    })
+  )
+  return
+}
+
 /** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串） */
 const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/rotate': hRotate,
@@ -1919,6 +1960,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/key': hKey,
   'POST /_modeldock/reload': hReload,
   'POST /_modeldock/test': hTest,
+  'POST /_modeldock/tier-validate': hTierValidate,
   'POST /_modeldock/reset': hReset,
 }
 

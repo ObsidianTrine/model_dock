@@ -58,7 +58,7 @@ import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProg
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
-import { resolveTier, tierEnvPatch, validateTierModel, tierDisplayName } from './orchestrator/tiers.mjs';
+import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
 import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
@@ -326,10 +326,14 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 凭据经 tokenEnv 环境变量注入（token 不入库）；显式点名但未配置 → 告警降级，
   // 自动升级但 token 未设 → 静默跳过（高频路径，告警会淹日志）。
   const tier = resolveTier(meta, cfg);
+  // zcode 船不支持 tier（不认 ANTHROPIC_* 注入，见 orchestrator.md A4）是文档化设计：
+  // 其卡上的 tier 只作档位留痕（tier_resolved 事件），未设 tokenEnv 不算异常——不告警
+  // （2026-11-02 四档实测发现：前进1/2 每卡一行 ⚠ 告警属噪音，已静默）。
+  const tierWarnable = opts.backend !== 'zcode-headless';
   if (meta.tier && tier?.inactive === 'unconfigured') {
-    log(`⚠ tier "${meta.tier}" 未生效：workflow.json 未配置该 tiers 键——按全局默认路由执行`);
+    if (tierWarnable) log(`⚠ tier "${meta.tier}" 未生效：workflow.json 未配置该 tiers 键——按全局默认路由执行`);
   } else if (meta.tier && tier?.inactive === 'token') {
-    log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
+    if (tierWarnable) log(`⚠ tier "${meta.tier}" 未生效：环境变量 ${tier.tokenEnv} 未设——按全局默认路由执行`);
   } else if (tier?.token) {
     log(`任务等级：${tierDisplayName(tier.name)}（${tier.name}${tier.auto ? '，files_hint 命中核心/发布路径自动升档' : ''}，token 来自 ${tier.tokenEnv}）`);
   }
@@ -339,6 +343,30 @@ async function cmdRun(repoRoot, taskId, opts) {
   if (tier?.token && (effWorkerModel !== workerModel || effReviewModel !== reviewModel)) {
     log(`tier 模型：执行 ${effWorkerModel ?? '（默认）'} / 审查 ${effReviewModel ?? '（默认）'}`);
   }
+  // 网关权威校验（gatewayAdmin: true 开启，2026-11-02 船东授权 admin 面）：token 现在真实
+  // 解析到哪个 profile、带什么 tier 标签，网关说了算。分级处置：
+  //   tier 已打标（存在同标签 profile）但 token 指向别档/无标签 profile → 阻断（重活静默
+  //   落到别档服务正是 tier 隔离要防的事，派发前拦下；发生在任何状态迁移之前）；
+  //   token 网关解析失败（未注册/悬空路由）→ 阻断（tier 流量每一笔都会 401，派发必烧）；
+  //   tier 未打标（网关无同标签 profile）→ 告警不阻断（tier 标签未采纳，向后兼容）；
+  //   网关不可得（未开启/不可达/旧版无端点）→ 回落 advisory 目录校验，行为不变。
+  let gatewayVerdict = null;
+  if (tier?.token) {
+    gatewayVerdict = await validateTierViaGateway({ token: tier.token, tier: tier.name, base: tier.gatewayBase, optIn: tier.gatewayAdmin });
+    if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) {
+      const tagged = tierTagNames(tier.name).flatMap((n) => gatewayVerdict.tierProfiles?.[n] ?? []);
+      if (tagged.length && !tagged.includes(gatewayVerdict.profile)) {
+        die(`tier "${tier.name}" 权威校验失败：token（${tier.tokenEnv}）经网关解析到 profile "${gatewayVerdict.profile}"（tier=${gatewayVerdict.tierTag ?? '无标签'}），而 ${tierTagNames(tier.name).join('/')} 打标在 ${tagged.join(', ')}——重活会静默落到别档服务。\n修复：在 ModelDock 把该 token 所属 harness（${gatewayVerdict.harness}）钉定（route）到同 tier profile，或给当前 profile 补 tier 标签并热加载；确认无误可改卡去掉 tier 字段。`, 1);
+      }
+      log(`tier 网关校验：token → ${gatewayVerdict.harness} → profile "${gatewayVerdict.profile}"（provider=${gatewayVerdict.provider}，tier=${gatewayVerdict.tierTag ?? '无标签'}${tagged.length ? '' : '；该 tier 尚未在网关打标，跳过匹配判定'}）`);
+      if (gatewayVerdict.provider && (effWorkerModel || effReviewModel)) {
+        const missing = [effWorkerModel, effReviewModel].filter(Boolean).filter((m) => !gatewayVerdict.models.includes(m));
+        if (missing.length) log(`⚠ tier 模型校验：${missing.join(', ')} 不在服务 ${gatewayVerdict.provider} 目录——继续派发，留意网关模型报错`);
+      }
+    } else if (gatewayVerdict.mode === 'gateway') {
+      die(`tier "${tier.name}" 权威校验失败：tier token 未能在网关解析到路由（${gatewayVerdict.reason}）——tier 流量每笔请求都会 401，派发必烧。\n修复：核对 ${tier.tokenEnv} 指向的 token 是否仍存在于 ModelDock（harness 未删/未轮换），或改卡去掉 tier 字段走全局默认。`, 1);
+    }
+  }
   appendEvent(qdir, 'tier_resolved', {
     tier: tier?.name ?? (meta.tier ?? null),
     ...(tier?.auto ? { auto: true } : {}),
@@ -346,9 +374,12 @@ async function cmdRun(repoRoot, taskId, opts) {
     ...(tier?.token && tier.provider ? { provider: tier.provider } : {}),
     ...(effWorkerModel ? { worker_model: effWorkerModel } : {}),
     ...(effReviewModel ? { review_model: effReviewModel } : {}),
+    ...(gatewayVerdict?.mode === 'gateway' && gatewayVerdict.ok
+      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null }
+      : {}),
   });
-  // 目录校验（advisory）：模型名不在服务目录 → 告警不阻断，上游/网关报错为准
-  if (tier?.token && tier.provider && (effWorkerModel || effReviewModel)) {
+  // 目录校验（advisory）：网关权威校验不可得时的回落路径；模型名不在服务目录 → 告警不阻断
+  if (tier?.token && gatewayVerdict?.mode !== 'gateway' && tier.provider && (effWorkerModel || effReviewModel)) {
     const v = await validateTierModel({
       gatewayBase: tier.gatewayBase,
       token: tier.token,
@@ -651,10 +682,16 @@ async function cmdRun(repoRoot, taskId, opts) {
         }
         return null;
       };
+      // 改动分级前置（原在门禁后）：门禁按实际改动面自适应选测试面——L0 纯文档卡跑
+      // testCmdL0 轻量门禁（不烧全量回归），代码卡照旧全量；fastlane 与合并决策复用
+      // 同一份结论（审查只读，改动面前后不变）。
+      const changed = changedFiles(worktree, baseBranch);
+      const classification = classifyChange(changed, cfg);
+      const docsOnly = changed.length > 0 && changed.every((f) => /\.md$/i.test(f.replace(/\\/g, '/')));
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, cfg.testCmd.join(' && ')),
+          run: () => gateNpmTest(worktree, docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ')),
           trigger: 'test_failure',
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
@@ -665,16 +702,21 @@ async function cmdRun(repoRoot, taskId, opts) {
             try {
               gateHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
             } catch { /* 取不到 HEAD 就不记：approve 回落全量测试，语义安全 */ }
-            return { duration_ms: r.durationMs, ...(gateHead ? { head: gateHead } : {}) };
+            return {
+              duration_ms: r.durationMs,
+              ...(gateHead ? { head: gateHead } : {}),
+              ...(docsOnly && cfg.testCmdL0 ? { scoped: 'l0' } : {}),
+            };
           },
         },
         {
           gate: 'tsc_build',
-          run: () => gateTscBuild(worktree, cfg.buildCmd), // buildCmd 未配置 → 直接 skipped 返回，不进调试循环
+          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
+          run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
           dieLabel: 'build 不过',
           dieTail: '任务转 blocked/，人工接手。',
-          passExtra: (r) => (r.skipped ? { skipped: true } : {}),
+          passExtra: (r) => (r.skipped ? { skipped: true, ...(r.reason ? { reason: r.reason } : {}) } : {}),
         },
         {
           gate: 'lint',
@@ -757,7 +799,6 @@ async function cmdRun(repoRoot, taskId, opts) {
       // ---- fastlane 决策点：实际改动面说了算（跑前只看声明，这里按真实分级复判）----
       // 分级计算自合并闸门段上移：fastlane 失效判定与合并决策共用同一份结论（reviewer
       // 只读，审查前后改动面不变）。
-      const classification = classifyChange(changedFiles(worktree, baseBranch), cfg);
       appendEvent(qdir, 'gate_result', { gate: 'change_classification', result: classification.level, detail: classification.reasons.join('; ') });
       const rankOf = (l) => ['L0', 'L1', 'L2', 'L3'].indexOf(l);
       if (fastlaneWanted) {
@@ -1290,6 +1331,8 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
   appendEvent(qdir, 'merged', { merge_commit: mergeCommit, ...(source === 'auto' ? { auto: true } : {}) });
   log(`已合并：${mergeCommit.slice(0, 7)}（任务转 merged/${source === 'auto' ? '，自动合并' : ''}）`);
+  // 成功出港同样通知（此前 merged 静默——失败人人皆知、成功无声，体验反了）
+  await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
 }
 
 async function doReject(repoRoot, taskId, root, qdir, reason) {

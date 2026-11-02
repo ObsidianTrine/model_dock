@@ -6,6 +6,7 @@
 //   baseBranches    guard 保护的分支显式清单（可选；缺省 = main + baseBranch）。
 //                   多基准分支仓库用：如 develop+master 双分支保护 ["develop","master"]
 //   testCmd         finish/门禁的验证命令（字符串 | 数组 | {win32,unix} 平台映射）
+//   testCmdL0       纯文档卡（全部改动为 .md，实际分级 L0）的轻量门禁命令；缺省 = 照跑 testCmd
 //   buildCmd        构建门禁命令（缺省 = 跳过 build 门禁）
 //   lintCmd         lint 门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
 //   typecheckCmd    类型检查门禁命令（缺省 = 跳过；失败进调试子循环，与 build 同级）
@@ -24,6 +25,9 @@
 //   scheduleId      nightly 调度标识（launchd label / crontab 标记段）；缺省 com.<slug(projectName)>.orchestrator-nightly
 //   gatewayLogDir   网关请求日志目录（支持 ~/ 展开）——配置了才启用 reconcile 对账；
 //                   缺省 = 对账关闭（吃狗粮是走网关的项目才有的能力）
+//   gatewayAdmin    网关权威 tier 校验开关（布尔，缺省 false）：true 才允许编排器用 admin 面
+//                   （读 gateway.json 的 port+admin_token 或 ORCH_GATEWAY_* env）调
+//                   /_modeldock/tier-validate 对账 token→profile→tier；未开 = advisory only
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
@@ -110,6 +114,7 @@ export function loadWorkflowConfig(repoRoot) {
     baseBranch: typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null,
     baseBranches: strArr(raw.baseBranches),
     testCmd: resolveTestCmd(raw.testCmd),
+    testCmdL0: resolveTestCmd(raw.testCmdL0), // 纯文档卡（L0）的轻量验证命令；缺省 = 照跑 testCmd（行为不变）
     buildCmd: typeof raw.buildCmd === 'string' && raw.buildCmd.trim() ? raw.buildCmd.trim() : null,
     lintCmd: typeof raw.lintCmd === 'string' && raw.lintCmd.trim() ? raw.lintCmd.trim() : null,
     typecheckCmd: typeof raw.typecheckCmd === 'string' && raw.typecheckCmd.trim() ? raw.typecheckCmd.trim() : null,
@@ -128,6 +133,9 @@ export function loadWorkflowConfig(repoRoot) {
     listenCommandNames: strArr(raw.listenCommandNames),
     scheduleId: typeof raw.scheduleId === 'string' && raw.scheduleId.trim() ? raw.scheduleId.trim() : null,
     gatewayLogDir: typeof raw.gatewayLogDir === 'string' && raw.gatewayLogDir.trim() ? expandHome(raw.gatewayLogDir.trim()) : null,
+    // 网关权威 tier 校验开关（admin 面）：显式 true 才允许编排器读 gateway.json / 调
+    // /_modeldock/tier-validate——可移植工具链不得默认读用户 home 下的 ModelDock 状态
+    gatewayAdmin: raw.gatewayAdmin === true,
     driftThreshold: typeof raw.driftThreshold === 'number' && Number.isFinite(raw.driftThreshold) && raw.driftThreshold > 0 && raw.driftThreshold <= 1 ? raw.driftThreshold : 0.2,
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
