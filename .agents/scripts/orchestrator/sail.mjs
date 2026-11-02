@@ -10,9 +10,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseCard, STATES, cardPath, listCards } from './queue.mjs';
+import { parseCard, STATES, cardPath, listCards, queueRoot } from './queue.mjs';
 import { hintsOverlap } from '../policy.mjs';
 import { readGoals } from './goals.mjs';
+import { buildTaskRoster } from './notify.mjs';
 
 /** 自由航行 stop 文件名（.agents/orchestrator/ 下，与 .watch-stop 同款语义）。 */
 export const SAIL_STOP_FILE = '.sail-stop';
@@ -159,6 +160,9 @@ function typeOf(info) {
  */
 export function buildSailReport(voyage) {
   const { baseline, endState, diff, root } = voyage;
+  // voyage.root 是仓库根，cardReportInfo 按队列根找卡——换算一次（缺失则手工卡目标全查不到，
+  // 报告里显示（?），2026-11-02 首航报告实证）。
+  const qroot = queueRoot(root);
   // 本航次提案的 id → 信息（含「由本航次产出」标记，用于区分存量与新增）
   const lookup = {};
   for (const c of voyage.cycles ?? []) {
@@ -187,21 +191,21 @@ export function buildSailReport(voyage) {
   const merged = (endState.merged ?? []).filter(touched);
   lines.push(`### ✅ 已出港（merged，${merged.length} 张）`);
   for (const id of merged) {
-    const info = cardReportInfo(root, id, lookup);
+    const info = cardReportInfo(qroot, id, lookup);
     lines.push(`- ${id}（${typeOf(info)}）${goalLine(info)}`);
   }
   if (!merged.length) lines.push('（无）');
   const awaiting = (endState['awaiting-human'] ?? []).filter(touched);
   lines.push(`### ⏸ 待船东放行（awaiting-human，${awaiting.length} 张）`);
   for (const id of awaiting) {
-    const info = cardReportInfo(root, id, lookup);
+    const info = cardReportInfo(qroot, id, lookup);
     lines.push(`- ${id}（${typeOf(info)}）${goalLine(info)}——合并闸门未自动放行（gate 声明 / 实际分级 / drift / scope 之一），人工审 diff 后 approve/retry/reject`);
   }
   if (!awaiting.length) lines.push('（无）');
   const troubled = [...(endState.blocked ?? []), ...(endState.failed ?? [])].filter(touched);
   lines.push(`### ⚠ 搁浅 / 退关（blocked+failed，${troubled.length} 张）`);
   for (const id of troubled) {
-    const info = cardReportInfo(root, id, lookup);
+    const info = cardReportInfo(qroot, id, lookup);
     lines.push(`- ${id}（${typeOf(info)}，现处 ${info?.state ?? '?'}）${goalLine(info)}——logs/<id>/ 事件时间线查原因，resume/abandon 人工处置`);
   }
   if (!troubled.length) lines.push('（无）');
@@ -209,7 +213,7 @@ export function buildSailReport(voyage) {
   lines.push(`### 📋 仍在队列（pending，${pendingNow.length} 张）`);
   for (const id of pendingNow) {
     const isNew = (diff.added ?? []).some((a) => a.id === id);
-    lines.push(`- ${id}${isNew ? '（本航次新增，未及派发）' : '（开航前已在队列）'}${goalLine(cardReportInfo(root, id, lookup))}`);
+    lines.push(`- ${id}${isNew ? '（本航次新增，未及派发）' : '（开航前已在队列）'}${goalLine(cardReportInfo(qroot, id, lookup))}`);
   }
   if (!pendingNow.length) lines.push('（无）');
   const untouched = (voyage.cycles ?? []).flatMap((c) => c.proposals ?? []).filter((p) => !c_submitted(voyage, p.id));
@@ -274,5 +278,21 @@ export function buildSailSummary(voyage) {
   parts.push(`实际 ${voyage.actualMinutes ?? '?'}/${voyage.minutes} 分钟、派发 ${voyage.dispatchedTotal ?? 0}`);
   parts.push(`出港 ${(s.merged ?? []).length}、待放行 ${(s['awaiting-human'] ?? []).length}、搁浅/退关 ${((s.blocked ?? []).length + (s.failed ?? []).length)}、待调度 ${(s.pending ?? []).length}`);
   if (voyage.reportPath) parts.push(`报告 ${voyage.reportPath}`);
-  return parts.join('；');
+  // 任务花名册：按任务号列本航次落位的卡与目标首行（「做了哪些任务、为什么」一眼可读；
+  // 卡读取失败只列 id 与状态，不影响摘要本身）。
+  const rosterTasks = [
+    ...(s.merged ?? []).map((id) => ({ id, state: 'merged' })),
+    ...(s['awaiting-human'] ?? []).map((id) => ({ id, state: 'awaiting-human' })),
+    ...(s.blocked ?? []).map((id) => ({ id, state: 'blocked' })),
+    ...(s.failed ?? []).map((id) => ({ id, state: 'failed' })),
+  ];
+  const roster = voyage.root
+    ? buildTaskRoster(rosterTasks, {
+        max: 8,
+        infoOf: (t) => {
+          try { return cardReportInfo(queueRoot(voyage.root), t.id); } catch { return null; }
+        },
+      })
+    : buildTaskRoster(rosterTasks, { max: 8 });
+  return roster ? `${parts.join('；')}\n${roster}` : parts.join('；');
 }
