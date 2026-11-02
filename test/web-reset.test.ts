@@ -49,7 +49,7 @@ describe('Web reset 语义（hReset 对齐 CLI cmdReset）', () => {
       await setSecret('up', 'sk-upstream', 'file')
       // 真实 attach 一个客户端（走 planAttach→applyChanges→registerAttach 全链，产出 attach 快照）
       process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1' // claude-code adapter 的 present() 探测豁免
-      const r = await applyAttach('claude-code', { yes: true })
+      const r = await applyAttach('claude-code', {}) // applyChanges 内部固定 yes:true+quiet
       expect(r.files.length).toBeGreaterThan(0)
       const clientFile = r.files[0]!
       const attached = fs.readFileSync(clientFile, 'utf8')
