@@ -57,7 +57,7 @@ import { readNightlyState, writeNightlyState, decideNightlyStart } from './orche
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
-import { notify, buildNightlySummary, buildSettleSummary, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
+import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
@@ -111,16 +111,30 @@ function die(msg, code = 1) {
 
 const log = (msg) => console.log(msg);
 
+/** 卡目标首行（任务通报/花名册的「为什么」原料）：查不到卡或解析失败返回空串。 */
+function cardGoalLine(repoRoot, taskId) {
+  try {
+    const card = findCard(queueRoot(repoRoot), taskId);
+    if (!card) return '';
+    const parsed = parseCard(fs.readFileSync(card.path, 'utf8'), taskId);
+    return String(parsed.body?.goal ?? '').replace(/\s+/g, ' ').trim();
+  } catch { return ''; }
+}
+
 /**
- * 卡片落位通知（awaiting-human/blocked/failed）：夜跑无人值守时手机可收。
- * 尽力而为——webhook 未配置时零开销，通道失败静默，绝不影响编排本身。
+ * 卡片落位通知（merged/awaiting-human/blocked/failed）：按任务号为话题的任务通报——
+ * 为什么（卡目标）/ 成果（worker 交付摘要）/ 过程（事件流阶段链）/ 结果（落位理由），
+ * 夜跑无人值守时手机可扫读。尽力而为——webhook 未配置时零开销，通道失败静默，
+ * 绝不影响编排本身。
  */
 async function settleNotify(repoRoot, taskId, state, reason) {
   try {
     const cfg = loadWorkflowConfig(repoRoot);
+    let events = [];
+    try { events = readEvents(logDir(repoRoot, taskId)); } catch { /* 无事件流照发（手工场景退化为一行） */ }
     await notify({
-      title: `${displayProjectName(cfg.projectName ?? '')} 编排任务`,
-      body: buildSettleSummary({ taskId, state, reason }),
+      title: `${displayProjectName(cfg.projectName ?? '')} 任务通报`,
+      body: buildTaskDigest({ taskId, state, reason, why: cardGoalLine(repoRoot, taskId), events }),
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
   } catch { /* 通知失败不阻断编排 */ }
@@ -1579,14 +1593,16 @@ function announceWeatherHold(repoRoot, cfg, w) {
   }).catch(() => { /* 通知失败不阻断 */ });
 }
 
-/** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」。 */
-async function drainSummaryNotify(repoRoot, done, tally, note) {
+/** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」
+ *  + 任务花名册（按任务号列本次做了什么、目标是什么）。 */
+async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
   if (!done) return; // 零消费不吵
   try {
     const cfg = loadWorkflowConfig(repoRoot);
+    const roster = buildTaskRoster(tasks, { max: 8, infoOf: (t) => ({ goal: cardGoalLine(repoRoot, t.id) }) });
     await notify({
       title: `${displayProjectName(cfg.projectName ?? '')} drain 收官`,
-      body: `共 ${done} 卡（${drainTallyLine(tally)}）——${note}`,
+      body: [`共 ${done} 卡（${drainTallyLine(tally)}）——${note}`, roster].filter(Boolean).join('\n'),
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
   } catch { /* 通知失败不阻断编排 */ }
@@ -1666,6 +1682,7 @@ async function cmdDrain(repoRoot, opts) {
     let done = 0;
     let lastTried = null;
     const tally = {};
+    const tasks = []; // 本轮落位花名册（收官摘要按任务号列「做了哪些任务」）
     // 引水闸跳过清单：受限航道卡（deps/核心·发布路径）不派发，留在 pending/ 等人工
     // 逐张确认——drain 不因引水卡 die，也不烧它的预算（skipIds 让 pickNextCard 绕开重选）。
     const skipIds = new Set();
@@ -1673,7 +1690,7 @@ async function cmdDrain(repoRoot, opts) {
     for (;;) {
       if (done >= max) {
         log(`已达 --max ${max} 轮上限，停止调度（队列中可能还有任务）。本轮落位：${drainTallyLine(tally)}。`);
-        await drainSummaryNotify(repoRoot, done, tally, `已达 --max ${max} 轮上限`);
+        await drainSummaryNotify(repoRoot, done, tally, `已达 --max ${max} 轮上限`, tasks);
         return;
       }
       // 风暴闸：每次派发前现算（无状态）——命中即停，下一次 drain 窗口滑过自动恢复
@@ -1681,7 +1698,7 @@ async function cmdDrain(repoRoot, opts) {
         const w = weatherHoldCount(repoRoot, cfg);
         if (w.held) {
           announceWeatherHold(repoRoot, cfg, w);
-          await drainSummaryNotify(repoRoot, done, tally, '风暴滞留（weather hold），暂停派发');
+          await drainSummaryNotify(repoRoot, done, tally, '风暴滞留（weather hold），暂停派发', tasks);
           return;
         }
       }
@@ -1696,7 +1713,7 @@ const next = pickNextCard(root, { skipIds });
         }
         if (stuck.length) log(`无可调度任务；pending/ 中还有解析失败的卡：${stuck.join(', ')}（请修复 frontmatter 或 abandon）。`);
         else if (!awaitingPilotage.length) log(`队列已清空：本次 drain 共跑完 ${done} 个任务（${drainTallyLine(tally)}）。`);
-        await drainSummaryNotify(repoRoot, done, tally, stuck.length ? '有解析失败的卡待人工修' : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空');
+        await drainSummaryNotify(repoRoot, done, tally, stuck.length ? '有解析失败的卡待人工修' : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空', tasks);
         return;
       }
       // 引水闸：核心路径/deps 卡未经人工确认不派发——记入清单继续下一张（不改队列）
@@ -1735,13 +1752,17 @@ const next = pickNextCard(root, { skipIds });
           appendEvent(logDir(repoRoot, next.id), 'failed', { reason });
           moveCard(root, next.id, 'pending', 'blocked');
           tally.blocked = (tally.blocked ?? 0) + 1;
+          tasks.push({ id: next.id, state: 'blocked' });
           await settleNotify(repoRoot, next.id, 'blocked', reason);
         }
         continue;
       }
       if (r.status !== 0) log(`任务 ${next.id} 退出码 ${r.status}（已落 blocked/failed/，继续调度下一个）。`);
       const settled = findCard(root, next.id)?.state;
-      if (settled) tally[settled] = (tally[settled] ?? 0) + 1;
+      if (settled) {
+        tally[settled] = (tally[settled] ?? 0) + 1;
+        tasks.push({ id: next.id, state: settled });
+      }
     }
   } finally {
     releaseSchedulerLock(repoRoot);
@@ -1766,6 +1787,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
   const awaitingPilotage = [];
   const pilotCfg = loadWorkflowConfig(repoRoot);
   const tally = {};
+  const tasks = []; // 本轮落位花名册（收官摘要按任务号列「做了哪些任务」）
   let launched = 0;
   let finished = 0;
   let warnedStuck = false;
@@ -1794,13 +1816,16 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
       if (errNote) log(`任务 ${card.id} 的 run 子进程启动失败（${errNote}）——继续调度。`);
       else if (code !== 0) log(`任务 ${card.id} 退出码 ${code}（已落 blocked/failed/或等待人工，继续调度）。`);
       const state = findCard(root, card.id)?.state;
-      if (state) tally[state] = (tally[state] ?? 0) + 1;
+      if (state) {
+        tally[state] = (tally[state] ?? 0) + 1;
+        tasks.push({ id: card.id, state });
+      }
       // 终局摘要（尽力而为）：全部发射的子进程已收尾且无后续可调度（或已达 --max 上限）。
       // 引水跳过卡与拉黑卡同等对待：不算「可调度」，否则摘要把它们误报成未跑任务。
       const noMore = launched >= max || !listCards(root, 'pending').some((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
       if (!summarySent && active.size === 0 && finished === launched && noMore) {
         summarySent = true;
-        void drainSummaryNotify(repoRoot, finished, tally, launched >= max ? `已达 --max ${max} 轮上限` : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空');
+        void drainSummaryNotify(repoRoot, finished, tally, launched >= max ? `已达 --max ${max} 轮上限` : awaitingPilotage.length ? '有待引水确认的卡' : '队列已清空', tasks);
       }
       pump();
     };

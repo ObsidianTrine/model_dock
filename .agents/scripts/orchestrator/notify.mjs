@@ -63,6 +63,102 @@ export function buildNightlySummary({ created, proposals, awaiting, pending, deg
   return parts.join('；');
 }
 
+// ---------------------------------------------------------------------------
+// 任务通报（按任务号为话题）：单卡落位详情 + 收官/收帆花名册。数据全部来自
+// 调用方（卡 events.jsonl + 卡目标），本文件保持纯字符串组装、零 IO 依赖。
+// ---------------------------------------------------------------------------
+
+/** 落位状态的图标与中文标签（单卡通报与花名册共用一套口径）。 */
+const TASK_STATE_TAGS = {
+  merged: '✅ 已出港',
+  'awaiting-human': '⏸ 待船东放行',
+  failed: '✗ 退关',
+  blocked: '⚠ 搁浅',
+};
+
+/** 状态 → 「icon 中文」标签；未知状态原样展示（STATES 扩展时通知不哑）。 */
+export function taskStateTag(state) {
+  return TASK_STATE_TAGS[state] ?? `⚠ ${state ?? '?'}`;
+}
+
+/** 令牌数人话化：2144339 → '2.1M'、360248 → '360k'；非正数返回空串（不占版面）。 */
+export function humanTokens(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '';
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (v >= 1000) return `${Math.round(v / 1000)}k`;
+  return String(v);
+}
+
+/**
+ * 从单卡事件流提炼「过程」阶段链一行：派发(引擎·档位[重试]) → 执行(时长/tokens) →
+ * 门禁 → 审查 → 落位(合并短哈希)。只认类型白名单，worker_turn/budget_snapshot 等高频
+ * 流忽略；blocked/failed 等中途落位天然缺后续段，缺哪段跳哪段。
+ */
+export function buildPhaseLine(events = []) {
+  const ev = Array.isArray(events) ? events : [];
+  let dispatch = '';
+  let exec = '';
+  let gates = '';
+  let review = '';
+  let merge = '';
+  let escalated = '';
+  for (const e of ev) {
+    if (e?.type === 'task_accepted' && e.backend) dispatch = String(e.backend).replace('-headless', '');
+    if (e?.type === 'tier_resolved' && e.tier) dispatch = `${dispatch}${dispatch ? '·' : ''}${e.tier}`;
+    if (e?.type === 'worker_spawned' && Number(e.attempt) > 0) dispatch = `${dispatch}${dispatch ? '·' : ''}重试${e.attempt}次`;
+    if (e?.type === 'engine_escalated' && e.to) escalated = `⏫切${String(e.to).replace('-headless', '')}`;
+    if (e?.type === 'budget_snapshot' && Number(e.elapsed_min) > 0) {
+      const tok = humanTokens(e.tokens_in);
+      exec = `${e.elapsed_min}m${tok ? `/${tok} tok` : ''}`;
+    }
+    if (e?.type === 'gate_result' && e.result === 'fail') gates = '门禁✗';
+    if (e?.type === 'review_verdict') {
+      review = `审查${Number(e.blockers) ? `${e.blockers}阻塞` : '通过'}${Number(e.suggestions) ? `/${e.suggestions}建议` : ''}`;
+    }
+    if (e?.type === 'merged' && e.merge_commit) {
+      merge = `${e.auto === false ? '人工' : '自动'}合并 ${String(e.merge_commit).slice(0, 7)}`;
+    }
+  }
+  if (!gates && ev.some((e) => e?.type === 'gate_result')) gates = '门禁过';
+  return [dispatch, escalated, exec, gates, review, merge].filter(Boolean).join(' → ');
+}
+
+/**
+ * 单卡任务通报正文（按任务号为话题）：为什么（卡目标首行）/ 成果（worker 交付摘要）/
+ * 过程（事件流阶段链）/ 结果（落位理由）。数据缺失的行整行省略——无事件流的调用退化为
+ * 「【id】状态 + 结果」，与旧 buildSettleSummary 等价（接口兼容）。
+ */
+export function buildTaskDigest({ taskId, state, reason, why, events } = {}) {
+  const lines = [`【${taskId ?? '?'}】${taskStateTag(state)}`];
+  if (why) lines.push(`为什么：${String(why).slice(0, 80)}`);
+  const ev = Array.isArray(events) ? events : [];
+  const done = [...ev].reverse().find((e) => e?.type === 'worker_done' && e.summary);
+  if (done) lines.push(`成果：${String(done.summary).slice(0, 100)}`);
+  const phase = buildPhaseLine(ev);
+  if (phase) lines.push(`过程：${phase}`);
+  if (reason) lines.push(`结果：${String(reason).slice(0, 120)}`);
+  return lines.join('\n');
+}
+
+/**
+ * 任务花名册（收官/收帆摘要用）：每张卡一行「【id】icon 状态：目标首行」，回答
+ * 「这次做了哪些任务」。超过 max 张截断并注总数；infoOf 查不到目标（卡已清理等）
+ * 只列 id 与状态，不影响整行。
+ */
+export function buildTaskRoster(tasks, { max = 8, infoOf } = {}) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  if (!list.length) return '';
+  const lines = [];
+  for (const t of list.slice(0, max)) {
+    const info = typeof infoOf === 'function' ? infoOf(t) : null;
+    const goal = info?.goal ? `：${String(info.goal).slice(0, 60)}` : '';
+    lines.push(`- 【${t.id}】${taskStateTag(t.state)}${goal}`);
+  }
+  if (list.length > max) lines.push(`…共 ${list.length} 张（余略）`);
+  return lines.join('\n');
+}
+
 /**
  * 发通知。opts: { title, body, dryRun, webhookEnvs }
  * webhookEnvs 缺省只查旧名（独立调用者兼容）；cmdNightly 传 nightlyWebhookEnvs(repoRoot) 全清单。
