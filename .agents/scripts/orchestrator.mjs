@@ -2291,6 +2291,58 @@ function cmdScan(repoRoot, opts) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// planner 会话决策留底（kind=planner，watchdog/smartfilter/review 三类之外新增）
+// ---------------------------------------------------------------------------
+
+/** 本次 planner 会话的留底主体 id（logs/planner-<时间戳>，sail 报告目录同款时间戳口径——
+ *  Windows 文件名安全、字典序即时间序；同秒并发撞名由 trace.mjs 的文件名存在性检查兜底）。 */
+function plannerTraceTaskId() {
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  return `planner-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+}
+
+/**
+ * propose/intent 每次 planner spawn 的结果落 decision trace（成功与重试失败都落）。
+ * 背景（2026-11-02 自由航行实证）：planner 会话「未产出契约块」时原始输出与 exitCode/
+ * stderrTail 全部丢弃——探针复现又正常，瞬时 429 还是格式漂移无法定位。留底后可复盘
+ * 「模型当时输出了什么」。复用 trace.mjs 滚动/截断（写失败内部消化，绝不影响主流程）；
+ * trace.enabled=false 整体关闭。parsed 传提取结果摘要（{ blocks: n } 或 null）。
+ */
+function tracePlannerSpawn({ repoRoot, session, traceCfg, command, backend, attempt, promptText, result, parsed, startedAt }) {
+  if (!traceCfg?.enabled) return;
+  const stderrTail = String(result?.stderrTail ?? '').trim();
+  writeDecisionTrace(
+    {
+      root: logDir(repoRoot, session),
+      taskId: session,
+      kind: 'planner',
+      input: promptText, // 本次尝试的 planner prompt 全文（重试追加的要求随之留痕）
+      output: String(result?.output ?? ''), // 模型原始输出全文（超上界截前缀，trace.mjs 兜底）
+      parsed: parsed ?? null,
+      meta: {
+        command,
+        backend,
+        attempt,
+        exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
+        ...(stderrTail ? { stderrTail: stderrTail.slice(-200) } : {}), // 尾部 ≤200 字符
+        durationMs: Date.now() - startedAt,
+        ...(result?.usage && typeof result.usage === 'object' && !Array.isArray(result.usage) ? { usage: result.usage } : {}),
+      },
+    },
+    traceCfg,
+  );
+}
+
+/** 重试失败日志的现场摘要：exitCode + stderrTail 尾部（≤200 字符），不再只有「N 次均未产出契约块」。 */
+function plannerSpawnDetail(result) {
+  const parts = [`exitCode=${Number.isInteger(result?.exitCode) ? result.exitCode : '?'}`];
+  const tail = String(result?.stderrTail ?? '').trim();
+  if (tail) parts.push(`stderrTail=${tail.slice(-200)}`);
+  return parts.join('，');
+}
+
 /**
  * intent——Planner 环节（Phase 2 展望项落地，docs 10.8）：人给一句话意图，
  * readonly planner 会话探索仓库并编译任务卡（验收标准可机器检查化），
@@ -2304,6 +2356,8 @@ async function cmdIntent(repoRoot, opts) {
   ensureQueue(root);
   opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
+  const traceCfg = loadWorkflowConfig(repoRoot).trace;
+  const session = plannerTraceTaskId();
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-planner-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-intent-')), 'planner-prompt.md');
 
@@ -2313,6 +2367,7 @@ async function cmdIntent(repoRoot, opts) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
@@ -2322,12 +2377,13 @@ async function cmdIntent(repoRoot, opts) {
         settingsFile,
       });
       const cardText = parseCardBlock(result.output ?? '');
+      tracePlannerSpawn({ repoRoot, session, traceCfg, command: 'intent', backend: opts.backend, attempt, promptText, result, parsed: cardText ? { blocks: 1 } : null, startedAt });
       if (!cardText) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请严格按产出契约重新输出：单个 fenced 契约块内含完整任务卡。`;
           continue;
         }
-        die(`Planner ${MAX_ATTEMPTS} 次均未产出任务卡契约块。请改用手写任务卡 + submit。`);
+        die(`Planner ${MAX_ATTEMPTS} 次均未产出任务卡契约块（最后一次：${plannerSpawnDetail(result)}）。请改用手写任务卡 + submit。`);
       }
       try {
         const { meta } = loadCard(cardText, 'planner-draft');
@@ -2385,6 +2441,7 @@ async function cmdPropose(repoRoot, opts) {
   const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : cfg.autopilot.maxProposalsPerCycle;
   opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
+  const session = plannerTraceTaskId();
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
   try {
@@ -2410,6 +2467,7 @@ async function cmdPropose(repoRoot, opts) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
@@ -2419,12 +2477,13 @@ async function cmdPropose(repoRoot, opts) {
         settingsFile,
       });
       const blocks = parseCardBlocks(result.output ?? '');
+      tracePlannerSpawn({ repoRoot, session, traceCfg: cfg.trace, command: 'propose', backend: opts.backend, attempt, promptText, result, parsed: blocks.length ? { blocks: blocks.length } : null, startedAt });
       if (!blocks.length) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请按产出契约重新输出：每张任务卡一个独立 fenced 契约块（没有值得做的就一张都不出）。`;
           continue;
         }
-        die(`Planner ${MAX_ATTEMPTS} 次均未产出提案契约块。`);
+        die(`Planner ${MAX_ATTEMPTS} 次均未产出提案契约块（最后一次：${plannerSpawnDetail(result)}）。`);
       }
       const created = [];
       const rejected = [];

@@ -9,7 +9,7 @@ import path from 'node:path'
 import { buildProposePrompt, parseCardBlocks } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { readGoals } from '../../.agents/scripts/orchestrator/goals.mjs'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
-import { mkRepo, runOrch } from './helpers.js'
+import { mkRepo, runOrch, tryOrch } from './helpers.js'
 
 describe('orchestrator propose > prompt 构建与解析', () => {
   it('buildProposePrompt：目标面/信号/队列现状/上限注入；无目标面降级提示', () => {
@@ -109,6 +109,38 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
       const out = runOrch(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       expect(fs.existsSync(path.join(ap, 'drafts', 'planner-mock-task.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('planner 会话留底：无效输出重试耗尽 → decisions/ 每次尝试一份 trace（含原始输出全文与 exitCode），失败日志附 exitCode', () => {
+    const repo = mkRepo()
+    try {
+      const r = tryOrch(repo.root, 'propose --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
+      expect(r.status).not.toBe(0)
+      expect(r.stderr).toContain('均未产出提案契约块')
+      expect(r.stderr).toContain('exitCode=0') // 失败日志不再只有「N 次均未产出契约块」
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
+      const sessions = fs.readdirSync(logsDir).filter((d) => d.startsWith('planner-')).sort()
+      expect(sessions).toHaveLength(1)
+      const decDir = path.join(logsDir, sessions[0], 'decisions')
+      const files = fs.readdirSync(decDir).filter((f) => f.startsWith('planner-') && f.endsWith('.json')).sort()
+      expect(files).toHaveLength(3) // 3 次尝试各留一份
+      const docs = files.map((f) => JSON.parse(fs.readFileSync(path.join(decDir, f), 'utf8')))
+      expect(docs.map((d) => d.meta.attempt)).toEqual([1, 2, 3])
+      for (const doc of docs) {
+        expect(doc.kind).toBe('planner')
+        expect(doc.taskId).toBe(sessions[0])
+        expect(doc.output).toContain('没有产出任务卡') // mock planner 原始输出全文（复盘现场）
+        expect(doc.meta.command).toBe('propose')
+        expect(doc.meta.exitCode).toBe(0)
+        expect(doc.meta.durationMs).toBeGreaterThanOrEqual(0)
+      }
+      expect(docs[0].parsed).toBeNull()
+      expect(docs[0].input).not.toContain('重试要求')
+      expect(docs[1].input).toContain('重试要求') // 重试追加的要求随 prompt 全文留痕，逐次增长
+      expect(docs[1].input.length).toBeGreaterThan(docs[0].input.length)
     } finally {
       repo.cleanup()
     }
