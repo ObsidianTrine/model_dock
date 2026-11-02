@@ -20,6 +20,20 @@ const data = JSON.parse(raw)
 
 const ctxOk = (v) => Number.isInteger(v) && v >= 1024 && v <= 16_777_216
 const outOk = (v) => Number.isInteger(v) && v >= 256 && v <= 16_777_216
+// cost 与 src/providers/catalog.ts saneCost 同规则：input/output 必为有限非负数，cache_* 合法才保留
+const costNum = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined)
+function costOk(raw) {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const input = costNum(raw.input)
+  const output = costNum(raw.output)
+  if (input === undefined || output === undefined) return undefined
+  const cost = { input, output }
+  const cr = costNum(raw.cache_read)
+  if (cr !== undefined) cost.cache_read = cr
+  const cw = costNum(raw.cache_write)
+  if (cw !== undefined) cost.cache_write = cw
+  return cost
+}
 
 const providers = {}
 for (const [pk, pv] of Object.entries(data)) {
@@ -31,7 +45,12 @@ for (const [pk, pv] of Object.entries(data)) {
     const c = ctxOk(limit.context) ? limit.context : undefined
     const o = outOk(limit.output) ? limit.output : undefined
     if (c === undefined && o === undefined) continue
-    models[id] = { ...(c !== undefined ? { context_window: c } : {}), ...(o !== undefined ? { max_output: o } : {}) }
+    const cost = costOk(mv.cost)
+    models[id] = {
+      ...(c !== undefined ? { context_window: c } : {}),
+      ...(o !== undefined ? { max_output: o } : {}),
+      ...(cost !== undefined ? { cost } : {}),
+    }
   }
   if (Object.keys(models).length === 0) continue
   providers[pk] = { api: typeof pv.api === 'string' && pv.api ? pv.api : null, models }

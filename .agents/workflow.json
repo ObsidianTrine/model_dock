@@ -11,6 +11,7 @@
     "gateway"
   ],
   "gatewayLogDir": "~/.modeldock/logs",
+  "gatewayAdmin": true,
   "protectedPorts": [
     "8687",
     "8890"

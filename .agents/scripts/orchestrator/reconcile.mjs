@@ -82,6 +82,9 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
   const gwDir = gatewayLogsDir(loadWorkflowConfig(repoRoot));
   if (!gwDir) return { skipped: true, reason: '未启用网关对账（workflow.json gatewayLogDir 未配置）' };
   const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0 };
+  // (provider, model) token 分桶：成本投影（cost.mjs computeCost）的原料——同一循环顺手聚合，
+  // 不再二次扫日志。键 = "provider/model"（无 provider 裸模型名）。
+  const pairsMap = new Map();
   for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
     const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
     for (const entry of readGatewayLog(gwDir, date)) {
@@ -95,6 +98,14 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
       observed.tokensOut += u.output_tokens ?? 0;
       observed.cacheRead += u.cache_read_tokens ?? 0;
       observed.cacheCreate += u.cache_creation_tokens ?? 0;
+      const pk = entry.provider ? `${entry.provider}/${entry.model}` : String(entry.model ?? '');
+      const p = pairsMap.get(pk) ?? { provider: entry.provider ?? null, model: entry.model ?? null, requests: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
+      p.requests += 1;
+      p.input += u.input_tokens ?? 0;
+      p.output += u.output_tokens ?? 0;
+      p.cacheRead += u.cache_read_tokens ?? 0;
+      p.cacheCreate += u.cache_creation_tokens ?? 0;
+      pairsMap.set(pk, p);
     }
   }
 
@@ -110,6 +121,8 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
     selfTotal,
     gateway: { ...observed, total: gwTotal },
     divergence,
+    /** (provider, model) token 分桶（成本投影原料；无成本核算时仅占位不烧价目请求） */
+    pairs: [...pairsMap.values()],
     /** worker 是否走网关（实测账非空）。直连上游时对账无意义。 */
     viaGateway: gwTotal > 0,
   };

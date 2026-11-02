@@ -5,6 +5,16 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+New cost accounting: model prices × measured usage converted to US dollars — "how much did it cost" is visible end to end, from forwarding logs to orchestrated voyages.
+
+### Added
+
+- **Per-model cost at the gateway**: token usage in forwarding logs is converted to US dollars at per-model prices — the console status line gains a today-usage badge (requests / tokens / estimated cost, hover for details); the `GET /_modeldock/usage` aggregation gains `cost` and `unpriced_models` fields; `POST /_modeldock/pricing-lookup` serves batch price lookups for the orchestrator (admin-authenticated).
+- **Two-level price sources**: bundled official list prices from models.dev (8,000+ models, refreshed with the catalog); when discounted/plan pricing differs, override in `~/.modeldock/pricing.json` (keys = model name or `provider/model`, unit = USD per million tokens). Models without a matched price are counted as $0 and listed as a reminder — prices are never guessed.
+- **Voyage fuel ledger**: `reconcile` and `stats --cost` report per-task measured cost alongside the token ledger; the sail report gains a fuel section (total + per-card breakdown), and `sail --max-cost-usd N` sets a fuel cap — measured cost at or above the cap hauls in the sail (stops only; never switches engines). Cost accounting requires `gatewayAdmin: true` in `.agents/workflow.json` (prices via the gateway admin face; enabled in this repo).
+
 ## [1.5.2] - 2026-11-01
 
 A batch of stability and security fixes: daemon and update-chain reliability, Windows tray interaction, forwarding and config error handling; the console MCP card is also retired per a product decision.

@@ -5,6 +5,16 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+新增成本核算：模型单价 × 实测用量折成美元，「花多少钱」从转发日志到编排航行全程可见。
+
+### 新增
+
+- **网关按模型折算成本**：转发日志里的 token 用量按模型单价折算成美元——控制台状态行新增今日用量徽标（请求数 / tokens / 估算成本，悬停看明细）；`GET /_modeldock/usage` 聚合结果新增 `cost` 与 `unpriced_models` 字段；`POST /_modeldock/pricing-lookup` 供编排侧批量查价（管理面鉴权）。
+- **模型单价两级来源**：内置 models.dev 官方牌价（八千余模型，随目录刷新）；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖（键 = 模型名或 `服务商/模型`，单位美元每百万 token）。查不到单价的模型按 $0 计并列名提醒，绝不猜价。
+- **编排航行燃油账**：`reconcile` 对账与 `stats --cost` 在 token 账之外给出每任务实测成本；自由航行（sail）报告新增「燃油账」段（总账 + 逐卡拆账），`sail --max-cost-usd N` 燃油上限——网关实测价达到上限即收帆（只停不换引擎）。成本核算需 `.agents/workflow.json` 配 `gatewayAdmin: true`（价目走网关管理面，本仓库已开启）。
+
 ## [1.5.2] - 2026-11-01
 
 一批稳定性与安全修复：守护进程与更新链可靠性、Windows 托盘交互、转发与配置容错；并按产品决策下架控制台 MCP 卡片。

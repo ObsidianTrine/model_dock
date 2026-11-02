@@ -26,6 +26,17 @@ export function catalogSnapshot(): CatalogData {
 export interface CatalogEntry {
   context_window?: number
   max_output?: number
+  /** 官方牌价（USD / 百万 token，models.dev cost 字段）；cache_read/cache_write 可缺省。
+   *  计费口径见 src/gateway/pricing.ts：实际单价以 pricing.json 用户覆盖为准，此处只是兜底。 */
+  cost?: ModelCost
+}
+
+/** 单价表（USD / 百万 token）。 */
+export interface ModelCost {
+  input: number
+  output: number
+  cache_read?: number
+  cache_write?: number
 }
 
 export interface CatalogData {
@@ -76,12 +87,31 @@ export function normalizeApiCatalog(raw: unknown, fetchedAt: string): CatalogDat
       const entry: CatalogEntry = {}
       if (ctx !== undefined) entry.context_window = ctx
       if (mo !== undefined) entry.max_output = mo
+      const cost = saneCost((mv as Record<string, unknown>).cost)
+      if (cost) entry.cost = cost
       models[id] = entry
     }
     if (Object.keys(models).length === 0) continue
     out.providers[pk] = { api: typeof pvRec.api === 'string' && pvRec.api ? pvRec.api : null, models }
   }
   return out
+}
+
+/** models.dev cost 字段边界校验：input/output 必为有限非负数；cache_read/cache_write 同规则、
+ *  合法才保留（models.dev 曾出现 0 价（免费/反射价）与畸形字符串——一律不猜，非法即丢）。 */
+function saneCost(raw: unknown): ModelCost | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const r = raw as Record<string, unknown>
+  const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined)
+  const input = num(r.input)
+  const output = num(r.output)
+  if (input === undefined || output === undefined) return undefined
+  const cost: ModelCost = { input, output }
+  const cacheRead = num(r.cache_read)
+  if (cacheRead !== undefined) cost.cache_read = cacheRead
+  const cacheWrite = num(r.cache_write)
+  if (cacheWrite !== undefined) cost.cache_write = cacheWrite
+  return cost
 }
 
 // 缓存读取按 mtime 做进程内 memo：解析一次 400KB+ 的目录 JSON 不便宜，
