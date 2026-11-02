@@ -172,7 +172,11 @@ export const claudeHeadlessBackend = {
       // claudeSpawnInvocation（win32 shell 同语义探测纪律）
       const inv = claudeSpawnInvocation(process.platform, args, { cwd, envPatch });
       const child = spawn(inv.cmd, inv.args, inv.options);
-      onEvent({ type: 'worker_spawned', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
+      // role 区分 worker/reviewer 会话：resolveBackendName 只认 worker 侧 spawn——
+      // 异构互审后事件流最后一条 spawn 是 reviewer 的引擎，不区分会让 retry/resume
+      // 静默换船（2026-10-29 夜跑「静默换引擎」事故同型）；trackPid/cleanupOrphanWorker
+      // 两类都要（孤儿 reviewer 也得能杀）
+      onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
 
       let tokensIn = 0;
       let tokensOut = 0;
@@ -318,9 +322,13 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
 /**
  * 后端名解析：显式 --backend 优先；run 场景（qdir 非空）沿用任务上次会话的后端
  * （retry/resume 续跑不换引擎）；否则缺省 claude-headless。
- * 沿用取**最后一条** worker_spawned：events.jsonl append-only，.find 命中首次运行——
- * 多引擎切换过的任务 resume 会静默切回最初引擎（正是后端切换人工闸门要防的事），
- * 与 cleanupOrphanWorker 的 reverse().find 口径对齐。
+ * 沿用取**最后一条 worker 侧** worker_spawned（role !== 'reviewer'）：events.jsonl
+ * append-only，.find 命中首次运行——多引擎切换过的任务 resume 会静默切回最初引擎
+ * （正是后端切换人工闸门要防的事）。reviewer 的 spawn 事件必须排除：异构互审后
+ * 事件流最后一条是 reviewer 的引擎，不排除则 retry/resume/reviewing 恢复全部
+ * 静默换船。无 role 的历史事件视为 worker（向后兼容旧队列）。
+ * 与 cleanupOrphanWorker 的 reverse().find 口径差异是有意的：孤儿清理要杀的
+ * 恰恰包括 reviewer 进程，不做 role 过滤。
  * intent/spec 的规划会话不记账（qdir 传 null），首次即缺省——此前它们直接把
  * opts.backend（undefined）喂给 getBackend 炸「未知后端 "undefined"」（裸跑
  * `spec "..."` 实测踩中；历史测试全带 --backend mock 所以从未暴露）。
@@ -328,7 +336,7 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
 export function resolveBackendName(opts, qdir, readEventsFn) {
   if (opts?.backend) return { name: opts.backend, inherited: false };
   const prior = qdir && readEventsFn
-    ? [...readEventsFn(qdir)].reverse().find((e) => e.type === 'worker_spawned')?.backend
+    ? [...readEventsFn(qdir)].reverse().find((e) => e.type === 'worker_spawned' && e.role !== 'reviewer')?.backend
     : undefined;
   return { name: prior ?? 'claude-headless', inherited: prior !== undefined };
 }

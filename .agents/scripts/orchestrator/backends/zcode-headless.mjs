@@ -151,7 +151,8 @@ export const zcodeHeadlessBackend = {
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, ORCH_POLICY_ENFORCE: '1', ...(envPatch && Object.keys(envPatch).length ? envPatch : {}) },
       });
-      onEvent({ type: 'worker_spawned', backend: 'zcode-headless', pid: child.pid });
+      // role 区分 worker/reviewer：resolveBackendName 只认 worker 侧（防异构互审后 retry 静默换船）
+      onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'zcode-headless', pid: child.pid });
 
       let output = '';
       let stderrTail = '';
