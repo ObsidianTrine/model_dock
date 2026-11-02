@@ -248,7 +248,7 @@ describe('secrets 明文迁移竞态（迁移写持锁 + 重读比对）', () =>
         // 只走读路径（getSecret）触发迁移判断：写路径（mutateFileSecrets）自己持锁重读整表，
         // 不是本卡要修的竞态窗口。
         await writeSecrets({ demo: 'sk-v1', other: 'sk-concurrent' })
-        const tables = [{ demo: 'sk-v1' }, { demo: 'sk-v1', other: 'sk-concurrent' }]
+        const tables: Array<Record<string, string>> = [{ demo: 'sk-v1' }, { demo: 'sk-v1', other: 'sk-concurrent' }]
         let n = 0
         __testSetSecretsRawReader(async () => tables[Math.min(n++, tables.length - 1)])
         expect(await getSecret('file:demo')).toBe('sk-v1')
