@@ -80,5 +80,8 @@
     "enabled": true,
     "fallbackBackend": "claude-headless"
   },
-  "testCmdL0": "npx vitest run test/docs-lint.test.ts"
+  "testCmdL0": "npx vitest run test/docs-lint.test.ts",
+  "notify": {
+    "keychainService": "modeldock-orch-feishu-webhook"
+  }
 }

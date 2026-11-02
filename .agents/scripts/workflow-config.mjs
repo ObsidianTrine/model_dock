@@ -145,7 +145,22 @@ export function loadWorkflowConfig(repoRoot) {
     autoResume: resolveAutoResume(raw.autoResume),
     trace: resolveTrace(raw.trace),
     escalation: resolveEscalation(raw.escalation),
+    notify: resolveNotify(raw.notify),
   };
+}
+
+/** notify 配置解析（通知通道扩展点）：{ keychainService?: string（darwin 钥匙串服务名，
+ *  承载 webhook URL——launchd/cron 环境极瘦读不到 env，runner 与 notify() 兜底都查它）。
+ *  缺省 null → 调用方派生 `${scheduleId}.webhook`，向后兼容（老 workflow.json 无此键一切照旧）。 */
+function resolveNotify(raw) {
+  const DEFAULTS = { keychainService: null };
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[workflow-config] notify 配置非法，已回落缺省：应为对象 { keychainService?: 服务名 }（.agents/workflow.json 的 notify 键）');
+    return DEFAULTS;
+  }
+  const keychainService = typeof raw.keychainService === 'string' && raw.keychainService.trim() ? raw.keychainService.trim() : null;
+  return { keychainService };
 }
 
 /** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即

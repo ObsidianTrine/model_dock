@@ -8,6 +8,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { loadWorkflowConfig } from '../workflow-config.mjs';
+import { keychainServiceName } from './schedule.mjs';
 
 /** 旧项目名的 webhook 变量（兼容识别，永不删除——已注册过通知的老环境不断供）。 */
 export const NIGHTLY_WEBHOOK_ENV = 'MODELRDOCK_NIGHTLY_WEBHOOK';
@@ -159,19 +160,44 @@ export function buildTaskRoster(tasks, { max = 8, infoOf } = {}) {
   return lines.join('\n');
 }
 
+/** darwin 钥匙串兜底（launchd/cron 环境变量极瘦的正解的第二道保险）：env 全空时按
+ *  notify.keychainService（缺省 `${scheduleId}.webhook`）直接查 `security find-generic-password`。
+ *  覆盖手动跑与 runner 两路（runner 的 export 是第一道；env 已设时不会走到这里）。
+ *  非 darwin / 无条目 / 任何异常一律返回 null——通知是尽力而为，绝不阻断编排。 */
+export function keychainWebhook(repoRoot) {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const service = keychainServiceName(repoRoot);
+    const r = spawnSync('security', ['find-generic-password', '-s', service, '-w'], { encoding: 'utf8', timeout: 5000 });
+    const v = (r.stdout || '').trim();
+    return r.status === 0 && /^https?:\/\//i.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 发通知。opts: { title, body, dryRun, webhookEnvs }
+ * 发通知。opts: { title, body, dryRun, webhookEnvs, repoRoot }
  * webhookEnvs 缺省只查旧名（独立调用者兼容）；cmdNightly 传 nightlyWebhookEnvs(repoRoot) 全清单。
+ * env 全空且 darwin 时查钥匙串兜底（repoRoot 缺省按 cwd 仓库解析——与 loadWorkflowConfig 同源）。
  * 返回 { delivered: string[] }（已投递通道描述；dryRun 时为「将执行」描述）。
  */
 export async function notify(opts = {}) {
-  const { title = 'nightly', body = '', dryRun = false, webhookEnvs = [NIGHTLY_WEBHOOK_ENV] } = opts;
+  const { title = 'nightly', body = '', dryRun = false, webhookEnvs = [NIGHTLY_WEBHOOK_ENV], repoRoot } = opts;
   const delivered = [];
-  const webhook = webhookEnvs.map((n) => process.env[n]).find(Boolean);
+  let webhook = webhookEnvs.map((n) => process.env[n]).find(Boolean);
+  let webhookSrc = 'env';
+  if (!webhook && process.platform === 'darwin') {
+    const viaKeychain = keychainWebhook(repoRoot);
+    if (viaKeychain) {
+      webhook = viaKeychain;
+      webhookSrc = 'keychain';
+    }
+  }
   if (webhook) {
     const payload = webhookPayload(webhook, title, body, new Date().toISOString());
     if (dryRun) {
-      delivered.push(`webhook POST ${webhook} ${payload}`);
+      delivered.push(webhookSrc === 'keychain' ? `webhook POST（钥匙串） ${payload}` : `webhook POST ${webhook} ${payload}`);
     } else {
       try {
         const res = await fetch(webhook, {

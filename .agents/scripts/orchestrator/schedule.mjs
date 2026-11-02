@@ -52,15 +52,71 @@ export function nightlyLogPath(repoRoot) {
   return path.join(repoRoot, '.agents', 'orchestrator', 'logs', 'nightly.log');
 }
 
+/** webhook 钥匙串服务名：workflow.json notify.keychainService 显式指定 >
+ *  `${scheduleId(repoRoot)}.webhook` 派生（零项目专属假设：拷到其他项目自动换名）。 */
+export function keychainServiceName(repoRoot) {
+  const notify = loadWorkflowConfig(repoRoot).notify;
+  const explicit = typeof notify?.keychainService === 'string' ? notify.keychainService.trim() : '';
+  return explicit || `${scheduleId(repoRoot)}.webhook`;
+}
+
+/** 服务名/envPrefix 进 wrapper 前的白名单：超集即放弃钥匙串解析（宁可缺通知，
+ *  不可把任意字符串带进 shell——wrapper 是生成时刻固化的字面量）。 */
+const KEYCHAIN_SAFE_RE = /^[A-Za-z0-9._-]+$/;
+
 /**
- * 调度 CLI 参数（nightly/watch/schedule install 共用一份拼装，保证 wrapper 与手动跑行为一致）。
- * opts: { mode: 'nightly'|'watch', tests, auto, interval, backend, reviewBackend }
- * mode=watch 注册常驻循环（interval 分钟/周期）而非每日一次的 nightly 波次。
+ * unix wrapper 的钥匙串解析块（\n，无尾换行；仅 darwin 实际生效）。
+ * launchd/cron 环境变量极瘦的正解：exec 前用 `security find-generic-password` 把
+ * webhook URL 从钥匙串读出并 export（env 已设时不覆盖；无条目/无 security 命令
+ * 静默跳过，绝不阻断调度）。Linux 上 security 不存在 → if 守卫空转，行为不变。
+ */
+export function buildKeychainSh(repoRoot) {
+  const cfg = loadWorkflowConfig(repoRoot);
+  const service = keychainServiceName(repoRoot);
+  const prefix = cfg.envPrefix || 'AGENTS';
+  if (!KEYCHAIN_SAFE_RE.test(service) || !KEYCHAIN_SAFE_RE.test(prefix)) return '';
+  return [
+    `# webhook 钥匙串解析（launchd/cron 环境极瘦；无条目静默跳过，不阻断调度）`,
+    `if command -v security >/dev/null 2>&1; then`,
+    `  _mdk_wh="$(security find-generic-password -s "${service}" -w 2>/dev/null)" || _mdk_wh=''`,
+    `  if [ -n "$_mdk_wh" ]; then`,
+    `    [ -n "$${prefix}_NIGHTLY_WEBHOOK" ] || export ${prefix}_NIGHTLY_WEBHOOK="$_mdk_wh"`,
+    `    [ -n "$${prefix}_ORCH_WEBHOOK" ] || export ${prefix}_ORCH_WEBHOOK="$_mdk_wh"`,
+    `  fi`,
+    `  unset _mdk_wh`,
+    `fi`,
+  ].join('\n');
+}
+
+/**
+ * sail 时长参数：--minutes N（正整数）优先，其次 --duration（如 2h / 90m / 1h30m）。
+ * duration 在此做格式白名单（sail 运行时还会再校验）——wrapper 生成时刻全部固化为
+ * 字面量，宽格式会把任意字符串带进 shell。
+ * @returns {string[]} ['--minutes', N] 或 ['--duration', s]；两者都缺/非法抛错。
+ */
+export function sailDurationArgs(opts = {}) {
+  if (Number.isInteger(opts.minutes) && opts.minutes > 0) return ['--minutes', String(opts.minutes)];
+  const dur = typeof opts.duration === 'string' ? opts.duration.trim() : '';
+  if (/^\d+h?(?:\d+m)?$|^\d+m$/i.test(dur) && /\d/.test(dur)) return ['--duration', dur];
+  throw new Error('sail 模式需要 --minutes N（正整数）或 --duration（如 2h / 90m / 1h30m）');
+}
+
+/**
+ * 调度 CLI 参数（nightly/watch/sail/schedule install 共用一份拼装，保证 wrapper 与手动跑行为一致）。
+ * opts: { mode: 'nightly'|'watch'|'sail', tests, auto, interval, minutes, duration, backend, reviewBackend }
+ * mode=watch 注册常驻循环（interval 分钟/周期）；mode=sail 注册每日定时自由航行
+ * （时长 --minutes/--duration 必填；不带 nightly 的 --tests/--auto——sail 无此参数）。
  */
 export function nightlyArgs(opts = {}) {
   if (opts.mode === 'watch') {
     const args = ['watch'];
     if (Number.isInteger(opts.interval) && opts.interval > 0) args.push('--interval', String(opts.interval));
+    if (opts.backend) args.push('--backend', opts.backend);
+    if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
+    return args;
+  }
+  if (opts.mode === 'sail') {
+    const args = ['sail', ...sailDurationArgs(opts)];
     if (opts.backend) args.push('--backend', opts.backend);
     if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
     return args;
@@ -73,16 +129,22 @@ export function nightlyArgs(opts = {}) {
   return args;
 }
 
-/** unix wrapper 内容（\n 换行）。exec 由调用方 /bin/sh 执行，无需依赖可执行位。 */
+/** unix wrapper 内容（\n 换行）。exec 由调用方 /bin/sh 执行，无需依赖可执行位。
+ *  exec 前嵌钥匙串 webhook 解析块（linux 无 security 命令时 if 守卫空转，行为不变）。 */
 export function buildRunnerUnix(repoRoot, nodePath, args) {
   const log = nightlyLogPath(repoRoot);
-  return [
+  const lines = [
     '#!/bin/sh',
     `# ${scheduleId(repoRoot)} wrapper（schedule install 生成；重装请跑 orchestrator.mjs schedule install）`,
     `cd "${repoRoot}" || exit 1`,
+  ];
+  const keychain = buildKeychainSh(repoRoot);
+  if (keychain) lines.push(keychain);
+  lines.push(
     `exec "${nodePath}" "${path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs')}" ${args.join(' ')} >> "${log}" 2>&1`,
     '',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 /** Windows wrapper 内容（\r\n 换行；cd /d 跨盘符）。 */
@@ -173,7 +235,8 @@ export function validHourMinute(hour, minute) {
 }
 
 /**
- * 安装 nightly 调度。opts: { hour, minute, tests, auto, backend, dryRun }
+ * 安装调度。opts: { mode: 'nightly'|'watch'|'sail', hour, minute, tests, auto, interval, minutes, duration, backend, dryRun }
+ * mode=sail 时 minutes/duration 必填其一（sailDurationArgs 校验，缺失/非法抛错、不写任何文件）。
  * dryRun：写 runner（仓库内无害产物）并打印将执行的注册命令，不触碰系统调度。
  */
 export function installSchedule(repoRoot, opts = {}) {
