@@ -33,6 +33,21 @@ ModelDock 网关（仅监听本机 127.0.0.1）
 上游 API (火山方舟 / DeepSeek / GLM / Kimi / OpenAI / ...)
 ```
 
+一个请求的完整旅程（含自动兜底）：
+
+```mermaid
+sequenceDiagram
+    participant C as AI 客户端
+    participant G as ModelDock 网关
+    participant U as 上游 API
+    C->>G: 请求（本地 token，模型用别名）
+    G->>G: 验 token → 选路由 → 重写模型别名
+    G->>U: 转发（注入真实 key）
+    U-->>G: 响应
+    G-->>C: 原样返回
+    Note over G,U: 主服务故障 / 限流 / 额度用完 → 自动兜底切换其他已启用服务
+```
+
 ## 核心能力
 
 | 领域 | 你能得到什么 |

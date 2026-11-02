@@ -33,6 +33,21 @@ ModelDock gateway (listens on 127.0.0.1 only)
 Upstream APIs (Volcano Ark / DeepSeek / GLM / Kimi / OpenAI / ...)
 ```
 
+The full journey of a single request (with automatic failover):
+
+```mermaid
+sequenceDiagram
+    participant C as AI client
+    participant G as ModelDock gateway
+    participant U as upstream API
+    C->>G: request (local token, model alias)
+    G->>G: verify token → pick route → rewrite alias
+    G->>U: forward (inject real key)
+    U-->>G: response
+    G-->>C: returned as-is
+    Note over G,U: primary provider down / rate-limited / out of quota → automatic failover to other enabled providers
+```
+
 ## Core capabilities
 
 | Area | What you get |
