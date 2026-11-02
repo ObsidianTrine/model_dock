@@ -136,6 +136,29 @@ export const mockBackend = {
     }
 
     if (isReviewer) {
+      // ORCH_MOCK_REVIEW_FAIL=1：审查引擎故障注入（exitCode=1、无契约块、错误文本进
+      // output——复刻真实 claude CLI 死法：result 事件携带 "Not logged in" 文本）
+      if (process.env.ORCH_MOCK_REVIEW_FAIL === '1') {
+        onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-fail' });
+        return {
+          exitCode: 1,
+          output: 'Not logged in · Please run /login',
+          stderrTail: '[claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"sdk"}\n',
+          usage: { tokensIn: 0, tokensOut: 0 },
+          pid: process.pid,
+        };
+      }
+      // ORCH_MOCK_REVIEW_NOVERDICT=1：引擎活着（exitCode=0）但输出无 REVIEW_SUMMARY
+      // 契约块——既有保守路径（blockers=1 进审查返工）的回归锚
+      if (process.env.ORCH_MOCK_REVIEW_NOVERDICT === '1') {
+        onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-noverdict' });
+        return {
+          exitCode: 0,
+          output: '审查者跑完了但没有输出 REVIEW_SUMMARY 汇总行（ORCH_MOCK_REVIEW_NOVERDICT=1 注入）。',
+          usage: { tokensIn: 100, tokensOut: 50 },
+          pid: process.pid,
+        };
+      }
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
       const output =
         blockers > 0

@@ -876,6 +876,19 @@ async function cmdRun(repoRoot, taskId, opts) {
         livePid = null;
         appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
         const verdict = parseReviewVerdict(review.output ?? '');
+        // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
+        // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
+        // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
+        // 处置：可操作报错 + 留痕 + 通知，修复引擎后 resume。
+        if (!verdict && (review.exitCode ?? 0) !== 0) {
+          const stderrTail = String(review.stderrTail ?? '').trim().slice(-400);
+          const detail = `审查引擎故障（${opts.reviewBackend} exit ${review.exitCode}）：${stderrTail || String(review.output ?? '').trim().slice(-200) || '无输出'}`;
+          appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: review.exitCode, stderr_tail: stderrTail.slice(-400) });
+          moveCard(root, taskId, 'reviewing', 'blocked');
+          archiveIncident(repoRoot, taskId, root, qdir, detail);
+          await settleNotify(repoRoot, taskId, 'blocked', detail);
+          die(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+        }
         // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
         // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
         writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
