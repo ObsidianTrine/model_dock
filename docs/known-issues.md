@@ -68,9 +68,9 @@
 | XPLAT-06 | P2 | `src/autostart.ts:36-39` | Windows VBS 自启长期弃用风险 | ☑ 已修（2026-10-28，注册表 Run 键 + 自分离隐藏启动，见 §三） |
 | XPLAT-07 | P2 | `src/adapters/codex.ts:69` | bootstrap.path 顶层求值，违反惰性约定 | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-08 | P2 | `src/adapters/dsh.ts:236` | label 写死中文未走 t() | ☑ 已修（2026-10-12 @0caad3a） |
-| XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☐ 未修 |
+| XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☑ 留档不修（2026-11-03，依据 docs/optimization-handoff.md §2 与本条 §二 详注） |
 | XPLAT-10 | P2 | `src/update/check.ts:224` | 更新资产名未校验（供应链纵深防御） | ☑ 已修（2026-10-12 @0caad3a） |
-| XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☐ 未修 |
+| XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☑ 留档不修（2026-11-03，依据本条 §二 详注：项目门槛 Win10+ 时无碍） |
 | CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
 | CORRECT-02 | P2 | `src/backup/snapshot.ts:154-158` | 孤儿清理删他进程半成品快照 → 偶发假失败 | ☑ 已修（2026-10-28，.incomplete 占位 + prune 宽限期，见 §三） |
 | CORRECT-03 | P2 | `src/config/store.ts`（saveConfig） | config.toml 无写前快照，与「写前自动快照」承诺有边界差 | ☑ 已修（2026-10-28，版本迁移写盘前快照，见 §三） |
@@ -179,6 +179,7 @@
 - 位置：`src/config/secrets.ts:310-313`（writeFileSecrets 对全部条目重新加密）；win32 每次 setSecret/deleteSecret spawn 一次 PowerShell 批处理（~1s 级，冷启动首请求延迟尖峰，之后有缓存）。
 - 另注意：`secrets.ts:287,298` 首次加载遇存量明文会在**读路径**自动改写 secrets.json（一次性迁移，行为正确但属"读触发写"）。
 - 修复方向：增量加密单条目；或至少注释说明成本模型。
+- 2026-11-03 重估（ledger-closeout-xplat 卡）：**维持暂缓**——win32 逐条 spawn 已被 DUP-07 批处理重构消除（`dpapiBatch` 单次 PowerShell 处理整批），剩余成本仅「改一个 key 全表重加密」；setSecret 是 CLI/控制台交互低频路径，本地单用户场景 N 为个位数到十位数，收益不抵改动。翻案重启条件：出现「单次改 key 可感知卡顿」的用户实测反馈，或密钥表规模进入百级（多机同步大库）。
 
 ### E. 内存与磁盘增长
 
@@ -213,6 +214,7 @@
 - 位置：`src/gateway/server.ts:540`（chunks 收集 → Buffer.concat，上限 64MB）
 - 现状：模型改写管线的设计前提（topLevelModel 浅扫描已把解析成本压到最低），非纯浪费；TTFB 含完整上传，大请求高并发内存峰值 = 64MB×N。修复方向：无改写需求的 GET/DELETE 跳过 buffer。
 - 2026-10-20 复核：**暂缓**——GET/DELETE 跳过 buffer 是请求管线的分支重构，涉及 body 消费路径约定；本地回环上大请求高并发场景罕见，收益不抵扰动。
+- 2026-11-03 重估（ledger-closeout-xplat 卡）：**维持暂缓**——理由不变；body 收集段现位于 `src/gateway/admin-shared.ts`（T24 拆分后行号漂移，64MB 上限 + 超限排空逻辑同址），GET/DELETE 跳过仍需动 body 消费约定。翻案重启条件：本地回环之外出现大请求高并发的真实部署形态（如云端部署场景扩容），或上游大请求 TTFB 实测可感知。
 
 **PERF-22（P2）pollOverview 双 stringify diff**
 - 位置：`src/gateway/ui.ts:1383`（`JSON.stringify(v) === JSON.stringify(view)`）
@@ -283,6 +285,7 @@
 - 位置：`src/ops.ts:830-843`（循环内每 key 一次 mutateConfig + setSecret + deleteSecret）
 - 现状：N 个存量明文 key = N 次全量配置写 + 2N 次密钥表写；fire-and-forget 不阻塞启动，仅迁移期发生。修复方向：key_ref 更新合并为一次 mutateConfig；补 deleteSecretsBatch 批量形态。
 - 2026-10-20 复核：**暂缓**——每个存量安装只跑一次且不阻塞启动；合并写需新增 deleteSecretsBatch 批量 API 并动密钥迁移正确性路径，改动面大于收益。
+- 2026-11-03 重估（ledger-closeout-xplat 卡）：**维持暂缓**——理由不变；实现现位于 `src/ops/maintenance.ts`（T24 拆分后自 ops.ts 迁出，逐 key setSecret + mutateConfig + deleteSecret 结构未变）。翻案重启条件：存量明文导入成为高频路径（如批量导入器默认全量明文），或密钥迁移出现正确性返工窗口（届时顺手合并写）。
 
 ---
 
@@ -326,12 +329,14 @@
 
 **XPLAT-09（P2，设计取舍）JSONC 剥注释不支持尾逗号**
 - 位置：`src/adapters/format.ts:52-61`：行注释剥离会连换行吃掉（对 JSON 合法性无害）；带尾逗号的 JSONC 会在 parseJsonTolerant 判负 → attach 中止并给可操作报错。比同类工具严格，行为可接受，注明留档。
+- 复核结论（2026-11-03，ledger-closeout-xplat 卡）：维持不修——现状源码与判定时一致，严格解析在 attach 时给可操作报错而非静默错配，行为可接受；翻案重启条件：用户实测反馈带尾逗号的客户端配置需要接入（届时改 stripJsonComments 容忍尾逗号并补 parseJsonTolerant 用例）。
 
 **XPLAT-10（P2）更新资产名未校验**
 - 位置：`src/update/check.ts:224`：`path.join(destDir, asset.name)`，`asset.name` 来自 GitHub Releases 元数据，未做 basename/`[\\/]`/`..` 校验。信任根是本仓库 release，属供应链纵深防御项：拒绝含分隔符与 `..` 的资产名。
 
 **XPLAT-11（P2，推测）老 conhost ANSI**
 - 位置：`src/util/color.ts`：NO_COLOR 与 isTTY 均支持，但未做 Windows 版本/conhost 的 ANSI 能力检测。Win10+ 与 Windows Terminal 正常；项目实际门槛 Win10+ 时无碍。
+- 复核结论（2026-11-03，ledger-closeout-xplat 卡）：维持不修——`src/util/color.ts` 现状与判定时一致（NO_COLOR/isTTY 门控已有），探测老 conhost 需引入 win32 版本探测分支，收益仅覆盖 Win8.1 及更早（低于项目门槛）；翻案重启条件：项目宣布支持 Win10 以下，或实测收到老 conhost 花屏反馈。
 
 **已核查无问题的跨平台项（勿重复审查）**：181 条相对 import 大小写逐一比对 0 错误；路径拼接全走 path.join、无手写分隔符拼文件路径；`taskkill /T /F`（update/install.ts:76）正确；进程枚举 PowerShell CIM 分支（gatewaycmd.ts listProcessLines 参考写法；2026-10-29 补记：其输出按行解析时行尾 `\r` 曾致 `(.*)$` 全行失配、枚举恒空——Windows 停托盘静默空转与游离清扫失效的共同根因，e4ac854 已在 parsePidCommandLines 统一剥 \r；行解析类正则务必容忍 `\r`）；reg 查询三视图（HKCU/HKLM/WOW6432）实现正确；三平台自启齐全（launchd KeepAlive / systemd Restart+linger / VBS）且卸载对称；dsh/zcode YAML 走 Document API 保注释；全 src 无 `import.meta`（SEA 约定未破坏）；同步 spawnSync 类调用严格限 CLI 进程，网关进程内无同步阻塞 spawn。
 
