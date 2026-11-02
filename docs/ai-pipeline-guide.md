@@ -187,7 +187,12 @@ node .agents/scripts/orchestrator.mjs nightly --tests      # 编排含慢信号�
 node .agents/scripts/orchestrator.mjs nightly --auto 3
 ```
 
-- 跑完必发通知（含异常中断）：macOS 本地通知（登录会话可见）；设环境变量 `MODELRDOCK_NIGHTLY_WEBHOOK=<url>` 可追加 webhook POST（飞书/企业微信/Slack 的 incoming webhook 皆可接）。摘要始终落 `.agents/orchestrator/logs/nightly.log`（超 5MB 自动轮转）。
+- 跑完必发通知（含异常中断）：macOS 本地通知（登录会话可见）；webhook 通道按变量名分两个（前缀来自 workflow.json 的 `envPrefix`，缺省 `AGENTS`；飞书/企业微信/Slack 的 incoming webhook 皆可接，报文按 URL 域名自动适配）：
+  - **`AGENTS_NIGHTLY_WEBHOOK=<url>`**：nightly 巡检摘要、sail 收帆摘要等日报类通知；旧名 `MODELRDOCK_NIGHTLY_WEBHOOK` 永远兼容，新环境优先用新名。
+  - **`AGENTS_ORCH_WEBHOOK=<url>`**：drain 收官、风暴滞留、卡片落位（awaiting-human/blocked/failed）等单卡/调度即时提醒；未配置时静默跳过。
+  - **飞书自定义机器人安全设置须选「自定义关键词」**，不要选「签名校验」——notify.mjs 不做签名校验，选签名校验会全部投递失败。
+  - webhook 地址含密钥，建议不写明文进 shell 配置文件：存 macOS 钥匙串 `security add-generic-password -a "$USER" -s modeldock-orch-feishu-webhook -w '<地址>' -U`，shell 启动时 `security find-generic-password -s modeldock-orch-feishu-webhook -w` 运行时解析。
+  摘要始终落 `.agents/orchestrator/logs/nightly.log`（超 5MB 自动轮转）。
 
 ## 9. schedule 定时：把 nightly 注册成每日任务
 
