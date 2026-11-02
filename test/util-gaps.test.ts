@@ -60,7 +60,13 @@ describe('util 缺口补测（卡 34：coverage 现场 crash 25% / fsx 75% / col
       process.env.MODELRDOCK_HOME = realHome
       const target = path.join(realHome, 'config.toml')
       expect(() => assertNotRealHomeWrite(target)).toThrow(/真实 home/)
-      expect(() => assertNotRealHomeWrite(target.toUpperCase())).toThrow(/真实 home/) // win32 大小写绕过同拦
+      // 大小写归一拦截面只在大小写不敏感 FS（darwin/win32）成立——实现侧 fold 同款平台
+      // 分支；linux 上大写路径是真实不同的路径，本就不该拦（2026-11-02 ubuntu CI 红根因）
+      if (process.platform === 'linux') {
+        expect(() => assertNotRealHomeWrite(target.toUpperCase())).not.toThrow()
+      } else {
+        expect(() => assertNotRealHomeWrite(target.toUpperCase())).toThrow(/真实 home/) // win32 大小写绕过同拦
+      }
       process.env.MODELRDOCK_ALLOW_REAL_HOME_WRITE = '1'
       expect(() => assertNotRealHomeWrite(target)).not.toThrow()
       delete process.env.MODELRDOCK_ALLOW_REAL_HOME_WRITE
