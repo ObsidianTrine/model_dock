@@ -91,6 +91,58 @@ describe('hardening > 调度器互斥锁（run-lock）', () => {
     }
   })
 
+  it('并发 acquire 只有一个人赢（wx 原子创建，封死 TOCTOU 双写）', async () => {
+    const repo = mkRepo()
+    try {
+      // 4 个独立子进程同时抢锁：旧实现「先判活再直写」会双写成功；wx 语义下
+      // EEXIST 输家重读锁文件见活 pid，必然 held:false 且 owner 一致
+      const runLockJs = path.resolve(import.meta.dirname, '../../.agents/scripts/orchestrator/run-lock.mjs')
+      const script = [
+        "import { pathToFileURL } from 'node:url'",
+        'const { acquireSchedulerLock } = await import(pathToFileURL(process.env.RUN_LOCK_JS).href)',
+        "const r = acquireSchedulerLock(process.env.ORCH_TEST_REPO, 'racer')",
+        "console.log('RESULT:' + JSON.stringify(r))",
+        // 赢家持锁 2s 再退：模拟真调度器存活期。立刻退出会让输家把锁当陈锁接管
+        // （那是正确的崩溃恢复语义，不是双开），断言就不成立了
+        'if (r.held) await new Promise((s) => setTimeout(s, 2000))',
+      ].join('\n')
+      const env = { ...process.env, RUN_LOCK_JS: runLockJs, ORCH_TEST_REPO: repo.root }
+      delete env[SCHED_LOCK_ENV] // 子进程不豁免，真抢
+      const N = 4
+      const outs = await Promise.all(
+        Array.from({ length: N }, () => new Promise<string>((resolve, reject) => {
+          const c = spawn(process.execPath, ['--input-type=module', '-e', script], { env })
+          let out = ''
+          c.stdout.on('data', (d) => { out += String(d) })
+          c.on('error', reject)
+          c.on('close', () => resolve(out))
+        })),
+      )
+      const parsed = outs.map((o) => JSON.parse(o.split('RESULT:')[1]?.trim() || '{}'))
+      const winners = parsed.filter((r) => r.held === true)
+      expect(winners).toHaveLength(1)
+      expect(winners[0].inherited).toBe(false)
+      const loserOwnerPids = new Set(parsed.filter((r) => r.held !== true).map((r) => r.owner?.pid))
+      expect(loserOwnerPids.size).toBe(1) // 输家看到的 owner 是同一个人（赢家）
+    } finally {
+      repo.cleanup()
+    }
+  }, 30_000)
+
+  it('损坏锁文件（非 JSON）自愈：EEXIST 后读不出属主即接管', () => {
+    const repo = mkRepo()
+    try {
+      const lockDir = path.dirname(schedulerLockPath(repo.root))
+      fs.mkdirSync(lockDir, { recursive: true })
+      fs.writeFileSync(schedulerLockPath(repo.root), 'garbage{{{')
+      const r = acquireSchedulerLock(repo.root, 'healer')
+      expect(r.held).toBe(true)
+      expect(JSON.parse(fs.readFileSync(schedulerLockPath(repo.root), 'utf8')).pid).toBe(process.pid)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('drain 撞活锁：提示退出且不跑任务；run 单卡不受锁影响', () => {
     const repo = mkRepo()
     try {
