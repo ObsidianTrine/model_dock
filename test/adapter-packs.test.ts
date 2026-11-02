@@ -280,4 +280,22 @@ describe('generic-env 兜底适配器', () => {
       h.restore()
     }
   })
+
+  it('加载期守卫：upsert 值非字符串（TOML 手编数字/布尔）→ 可读 AdapterError 而非 attach 时裸 TypeError', () => {
+    // registry.allAdapters 的 try/catch 会把该错误转 brokenPackAdapter；这里直测 packAdapter 抛点
+    expect(() =>
+      packAdapter('badpack', {
+        format: 'json',
+        config_file: '/tmp/whatever.json',
+        upsert: { 'provider.modeldock.timeout': 30 as unknown as string },
+      })
+    ).toThrow(/upsert\.provider\.modeldock\.timeout/)
+    expect(() =>
+      packAdapter('badpack', {
+        format: 'json',
+        config_file: '/tmp/whatever.json',
+        upsert: { 'provider.modeldock.timeout': '30' },
+      })
+    ).not.toThrow()
+  })
 })
