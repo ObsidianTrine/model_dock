@@ -154,13 +154,30 @@ describe('资产应用（applySyncdoc → applyAssets）', () => {
     // 本机多出的文件保留（绝不删除）
     expect(fs.readFileSync(path.join(home, '.agents', 'skills', 'keep.md'), 'utf8')).toBe('local only')
     if (process.platform !== 'win32') {
-      // NTFS 不认权限位：仅 POSIX 断言
-      expect(fs.statSync(path.join(home, '.claude', 'CLAUDE.md')).mode & 0o777).toBe(0o600)
+      // NTFS 不认权限位：仅 POSIX 断言。新文件缺省 0644（不再 0600 强制改写——
+      // 白名单资产含脚本，跨机同步不该丢可执行位/共享位）
+      expect(fs.statSync(path.join(home, '.claude', 'CLAUDE.md')).mode & 0o777).toBe(0o644)
     }
 
     // 内容一致：零写入
     const r2 = await applySyncdoc(fakeDoc({ '.agents/skills/demo/SKILL.md': 'demo', '.claude/CLAUDE.md': '# new content' }), { backend: 'file' })
     expect(r2.assetsWritten).toBe(0)
+  })
+
+  it('保留既有文件权限位：0755 脚本同步后仍可执行（对照 restoreSnapshot 保留 rec.mode 口径）', async () => {
+    const home = mkHome()
+    await saveConfig(emptyConfig())
+    const script = path.join(home, '.agents', 'skills', 'demo', 'run.sh')
+    write(home, ['.agents', 'skills', 'demo', 'run.sh'], '#!/bin/sh\necho v1\n')
+    if (process.platform !== 'win32') fs.chmodSync(script, 0o755)
+
+    const r = await applySyncdoc(fakeDoc({ '.agents/skills/demo/run.sh': '#!/bin/sh\necho v2\n' }), { backend: 'file' })
+    expect(r.assetsWritten).toBe(1)
+    if (process.platform !== 'win32') {
+      // 旧实现 0600 强制改写会把可执行位打掉；现在既有 mode 原样保留
+      expect(fs.statSync(script).mode & 0o777).toBe(0o755)
+      expect(fs.readFileSync(script, 'utf8')).toBe('#!/bin/sh\necho v2\n')
+    }
   })
 
   it('applyAssets 自身防线：不安全 key / 超限内容拒绝，不做任何写入', async () => {
