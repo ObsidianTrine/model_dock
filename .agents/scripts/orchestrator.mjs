@@ -583,6 +583,20 @@ async function cmdRun(repoRoot, taskId, opts) {
     promptText = injectFollowUps(qdir, promptText);
 
     for (;;) {
+      // ---- 熔断收敛闸（循环顶）：wall/token 熔断若在审查段触发，trip() 一次性清掉
+      // wallTimer 不再重挂，而既有 tripped 检查只在 worker spawn close 之后——审查返工
+      // continue 回到这里会 spawn 一个**完全无 wall 限制**的 worker 会话，跑到
+      // max_turns/token 上限才落 blocked（熔断后白烧一整轮）。任何 continue/重试路径
+      // 都先过这里，按既有 blocked 落位口径收敛（此时卡必在 running/：唯一 continue
+      // 是审查返工 moveCard('reviewing','running') 之后）。
+      if (budget.tripped) {
+        appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
+        moveCard(root, taskId, 'running', 'blocked');
+        appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
+        archiveIncident(repoRoot, taskId, root, qdir, `budget:${budget.tripReason.reason}`);
+        await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
+        die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+      }
       // ---- worker 会话（含 fixup 返工循环；瞬时故障原地退避重试，见 retry 处注释）----
       let result;
       let workerOutput = '';
@@ -861,6 +875,10 @@ async function cmdRun(repoRoot, taskId, opts) {
           reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
           writeWorkerSettings(reviewSettingsFile, tierEnv);
         }
+        // 审查会话独立记账：beginSession 把 worker 会话峰值入账 committed，审查用量从零峰值起算，
+        // 下一次 beginSession（下轮 worker）把审查峰值入账——reviewer 的 budget_snapshot 此前只落
+        // 盘不记账，max_tokens 硬熔断与低油量告警对审查段完全失明
+        budget.beginSession();
         const review = await reviewBackend.spawn({
           promptFile: reviewPromptFile,
           cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
@@ -868,6 +886,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           onEvent: (e) => {
             appendEvent(qdir, e.type, e);
             trackPid(e);
+            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out); // 审查计入同一预算口径
           },
           readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
           model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
