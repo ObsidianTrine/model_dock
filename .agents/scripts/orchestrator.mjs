@@ -693,7 +693,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       const runGates = async (gates) => {
         for (const g of gates) {
           try {
-            const r = g.run();
+            const r = await g.run(); // 门禁已异步化（runCmd 拿 pid 做超时树杀）
             appendEvent(qdir, 'gate_result', { gate: g.gate, result: 'pass', ...(g.passExtra ? g.passExtra(r) : {}) });
           } catch (e) {
             if (!(e instanceof GateError)) throw e;
@@ -1349,6 +1349,7 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
       encoding: 'utf8',
       env: finishEnv,
       maxBuffer: 32 * 1024 * 1024,
+      timeout: 30 * 60_000, // finish 挂死（含内部 testCmd）不能陪跑到底：超时按失败走（任务留 awaiting-human 可重试）
     });
     // 透传 finish 输出（保持现场可见性）；撞锁凭 stderr 文案识别
     if (r.stdout) process.stdout.write(r.stdout);
@@ -2250,7 +2251,7 @@ function highPriorityDraftIds(repoRoot) {
  * --run：对本次 high 优先级提案立即提交并发起闭环（gate=L3 兜底——合并仍人工）。
  * nightly 触发由 cron/调度系统调用本命令；watch 周期也调用它。
  */
-function cmdScan(repoRoot, opts) {
+async function cmdScan(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const flags = opts.flags ?? new Set();
@@ -2266,7 +2267,7 @@ function cmdScan(repoRoot, opts) {
     dryRun: flags.has('--dry-run'),
     testCmd: runConfig(repoRoot).testCmd.join(' && '),
   };
-  const { created, skipped, warnings } = runScan(repoRoot, runOpts);
+  const { created, skipped, warnings } = await runScan(repoRoot, runOpts);
   for (const w of warnings) log(`⚠ ${w}`);
   if (runOpts.dryRun) {
     log(created.length ? `将生成 ${created.length} 张提案（dry-run 未写入）：` : '无新信号，不生成提案。');
@@ -2742,7 +2743,7 @@ async function cmdNightly(repoRoot, opts) {
 
   try {
     // 1) 巡检落提案（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues/ci 为 gh best-effort）
-    ({ created, skipped, warnings } = runScan(repoRoot, {
+    ({ created, skipped, warnings } = await runScan(repoRoot, {
       todo: true,
       audit: true,
       issues: true,

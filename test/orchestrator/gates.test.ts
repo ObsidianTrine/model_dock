@@ -27,13 +27,22 @@ describe('orchestrator gates > glob 匹配', () => {
 })
 
 describe('orchestrator gates > runCmd', () => {
-  it('成功与失败各返回 ok/output', () => {
-    const ok = runCmd('node -e "process.stdout.write(\'hi\')"', process.cwd())
+  it('成功与失败各返回 ok/output', async () => {
+    const ok = await runCmd('node -e "process.stdout.write(\'hi\')"', process.cwd())
     expect(ok.ok).toBe(true)
     expect(ok.output).toContain('hi')
-    const bad = runCmd('node -e "process.exit(3)"', process.cwd())
+    const bad = await runCmd('node -e "process.exit(3)"', process.cwd())
     expect(bad.ok).toBe(false)
     expect(bad.exitCode).toBe(3)
+  })
+
+  it('超时：命令按进程树终止并带超时标记（runCmd 已异步化，spawnSync 杀不到孙进程树的回归）', async () => {
+    const t0 = Date.now()
+    const r = await runCmd('node -e "setTimeout(() => {}, 60000)"', process.cwd(), 1500)
+    expect(r.ok).toBe(false)
+    expect(r.exitCode).toBe(124)
+    expect(r.output).toContain('超时')
+    expect(Date.now() - t0).toBeLessThan(15000) // 及时返回，不等满 60s
   })
 })
 
@@ -145,23 +154,23 @@ describe('orchestrator gates > scope_purity / cli_entry', () => {
 })
 
 describe('orchestrator gates > lint / typecheck（未配置跳过、失败可调试）', () => {
-  it('未配置（null）→ skipped，不抛错', () => {
+  it('未配置（null）→ skipped，不抛错', async () => {
     const repo = mkRepo()
     try {
-      expect(gateLint(repo.root, null)).toMatchObject({ ok: true, skipped: true })
-      expect(gateTypecheck(repo.root, null)).toMatchObject({ ok: true, skipped: true })
+      await expect(gateLint(repo.root, null)).resolves.toMatchObject({ ok: true, skipped: true })
+      await expect(gateTypecheck(repo.root, null)).resolves.toMatchObject({ ok: true, skipped: true })
     } finally {
       repo.cleanup()
     }
   })
 
-  it('命令通过返回 ok；失败抛 GateError（gate 名对应、output 带命令输出）', () => {
+  it('命令通过返回 ok；失败抛 GateError（gate 名对应、output 带命令输出）', async () => {
     const repo = mkRepo()
     try {
-      expect(gateLint(repo.root, 'node -e "process.stdout.write(\'lint-ok\')"').ok).toBe(true)
-      expect(gateTypecheck(repo.root, 'node -e "process.exit(0)"').ok).toBe(true)
+      expect((await gateLint(repo.root, 'node -e "process.stdout.write(\'lint-ok\')"')).ok).toBe(true)
+      expect((await gateTypecheck(repo.root, 'node -e "process.exit(0)"')).ok).toBe(true)
       try {
-        gateTypecheck(repo.root, 'node -e "process.stderr.write(\'ts-error\'); process.exit(2)"')
+        await gateTypecheck(repo.root, 'node -e "process.stderr.write(\'ts-error\'); process.exit(2)"')
         expect.unreachable('应当抛出 GateError')
       } catch (e) {
         expect(e).toBeInstanceOf(GateError)
@@ -169,7 +178,7 @@ describe('orchestrator gates > lint / typecheck（未配置跳过、失败可调
         expect(e.output).toContain('ts-error')
       }
       try {
-        gateLint(repo.root, 'node -e "process.exit(1)"')
+        await gateLint(repo.root, 'node -e "process.exit(1)"')
         expect.unreachable('应当抛出 GateError')
       } catch (e) {
         expect(e).toBeInstanceOf(GateError)
