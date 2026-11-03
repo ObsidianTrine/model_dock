@@ -265,6 +265,13 @@ describe('orchestrator schedule > CLI dry-run（写 wrapper、不碰系统调度
       runOrch(repo.root, 'schedule install --mode sail --duration 1h30m --dry-run')
       expect(fs.readFileSync(runnerPath(repo.root), 'utf8')).toContain('sail --duration 1h30m')
 
+      // 燃油上限透传（计费船定时巡航的护栏）：>0 才带，非法值忽略
+      runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 2 --dry-run')
+      const capped = fs.readFileSync(runnerPath(repo.root), 'utf8')
+      expect(capped).toContain('sail --minutes 120 --max-cost-usd 2')
+      runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 0 --dry-run')
+      expect(fs.readFileSync(runnerPath(repo.root), 'utf8')).not.toContain('--max-cost-usd')
+
       const noDur = tryOrch(repo.root, 'schedule install --mode sail --dry-run')
       expect(noDur.status).toBe(1)
       expect(noDur.stderr).toContain('--minutes')
