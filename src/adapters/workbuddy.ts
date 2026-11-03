@@ -85,10 +85,13 @@ function gatewayEndpointUrl(port: number): string {
 }
 
 function isOursEntry(e: WorkbuddyModelEntry, cfg: Config): boolean {
+  // models 数组来自外部文件、元素可被手写坏（null/原始值/缺 url）：不是有效对象条目就
+  // 肯定不是我们的，返回 false 跳过（detach 宽容口径），不抛 TypeError
+  if (!e || typeof e !== 'object' || typeof e.url !== 'string') return false
   // 网关条目按 gateway_base 匹配；独立直连条目按登记的 direct_base 精确匹配（换直连目标/切回网关时幂等摘除）
   if (oursEntryUrl(e.url, 'workbuddy', cfg)) return true
   const directBase = cfg.harness['workbuddy']?.direct_base
-  return !!directBase && typeof e.url === 'string' && e.url === directBase
+  return !!directBase && e.url === directBase
 }
 
 function extractEntries(parsed: unknown): WorkbuddyModelEntry[] {

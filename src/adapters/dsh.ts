@@ -621,16 +621,20 @@ export const dshAdapter: HarnessAdapter = {
       if (detachChange) changes.push(detachChange)
     }
 
-    if (changes.length === 0) {
-      return noChangeResult([t('dsh 当前未指向 ModelDock 网关，无需改动', 'dsh is not pointing at the ModelDock gateway; nothing to change')])
-    }
-    // 凭据文件不存在时不要凭空创建一个空的 .credentials.yaml
+    // 凭据文件：等值过滤（与上面 patch 分支同款 T25-④）——重复 detach / 快照还原后
+    // refs 里已无 token 时不再产出 change（避免无谓快照+整文件重写）；且清理动作放在
+    // 提前返回**之前**：patch 全净但凭据 ref 单独残留（attach 写入的独立文件）也是指向
+    // ModelDock 的残留，同样该清，不该被「无改动」短路掉
     const ctext = await readTextIfExists(credFile())
     if (ctext !== null) {
       const cdoc = parseDocument(ctext)
       cdoc.deleteIn(['refs', 'MODELDOCK_TOKEN'])
       cdoc.deleteIn(['refs', 'MODELRDOCK_TOKEN']) // 旧拼写（<0.3.1）一并清理
-      changes.push({ path: credFile(), before: ctext, after: cdoc.toString(), note: t('移除本地 token', 'Remove the local token') })
+      const credChange = changeIfChanged(credFile(), ctext, cdoc.toString(), t('移除本地 token', 'Remove the local token'))
+      if (credChange) changes.push(credChange)
+    }
+    if (changes.length === 0) {
+      return noChangeResult([t('dsh 当前未指向 ModelDock 网关，无需改动', 'dsh is not pointing at the ModelDock gateway; nothing to change')])
     }
     return {
       changes,

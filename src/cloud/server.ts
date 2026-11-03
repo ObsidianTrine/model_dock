@@ -11,6 +11,7 @@ import { randomToken } from '../util/fsx.js'
 import { safeEqual } from '../util/safe-equal.js'
 import { CloudStore } from './store.js'
 import { renderConsolePage } from './console.js'
+import { CONSOLE_CSP } from '../gateway/console-shared.js'
 import { t } from '../util/i18n.js'
 
 export const DEVICE_ONLINE_WINDOW_MS = 180_000
@@ -139,7 +140,9 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
 
   function serveIndex(_h: EndpointCtx): void {
     const body = renderConsolePage()
-    _h.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    // 三块控制台面板里唯一常驻公网暴露面（--host 0.0.0.0 部署口径），此前是唯一没上
+    // CSP 的——页面全内联脚本靠 esc() 转义，漏一处就没有纵深防御。复用 gateway 同款串
+    _h.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': CONSOLE_CSP })
     _h.res.end(body)
   }
 

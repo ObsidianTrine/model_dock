@@ -13,7 +13,7 @@ import {
 } from './types.js'
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { changeIfChanged, directAttachNote, directResponsesEndpointNote, noChangeResult, oursEntryUrl } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesEndpointNote, ensurePlainObjectField, noChangeResult, oursEntryUrl } from './shared.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -131,6 +131,8 @@ export const codexAdapter: HarnessAdapter = {
         throw new AdapterError(t('{path} 解析失败，已中止：{err}', 'Failed to parse {path}; aborted: {err}', { path: p, err: (e as Error).message }))
       }
     }
+    // 字段级守卫：model_providers 被手编成字符串/数字时，下面赋值会以裸 TypeError 冒顶
+    ensurePlainObjectField(root.model_providers, 'model_providers', p)
     const providers = (root.model_providers ??= {})
     const d = opts.direct
     // codex 只讲 Responses 协议：直连时用上游的 responses 端点（未配置则回退默认地址并在 notes 提示）

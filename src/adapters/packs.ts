@@ -84,6 +84,17 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
   if (!pack.config_file?.trim()) {
     throw new AdapterError(t('adapter pack「{id}」缺少 config_file', 'Adapter pack "{id}" is missing config_file', { id }))
   }
+  // upsert 值类型守卫：类型声明是 Record<string, string>，但 config.toml 用户可直编
+  // （upsert = { timeout = 30 } 解析出 number）——expandVars 的 tpl.replace 炸裸 TypeError。
+  // 这里在加载期转可读 AdapterError（registry.allAdapters 的 try/catch 会转 brokenPackAdapter）。
+  for (const [k, v] of Object.entries(pack.upsert ?? {})) {
+    if (typeof v !== 'string') {
+      throw new AdapterError(
+        t('adapter pack「{id}」的 upsert.{k} 必须是字符串（当前是 {kind}）：config.toml 手编时数字/布尔要加引号（如 timeout = "30"）', 'Adapter pack "{id}" upsert.{k} must be a string (got {kind}): quote numbers/booleans in config.toml (e.g. timeout = "30")', { id, k, kind: typeof v }),
+        t('修正 [adapter_packs.{id}.upsert] 里该条目的类型后重试', 'Fix the entry type under [adapter_packs.{id}.upsert] and retry')
+      )
+    }
+  }
   // 防自我改写：pack 的目标文件不允许落在 ModelDock 自己的数据目录里
   const resolved = path.resolve(expandHome(pack.config_file))
   if (resolved.startsWith(path.resolve(modeldockDir()) + path.sep)) {
@@ -179,7 +190,9 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       return {
         installed: await readTextIfExists(file()).then((t) => t !== null),
         attached: !!cfg.harness[id],
-        pointing: cfg.harness[id] ? 'gateway' : 'unknown',
+        // planAttach 支持 direct（写上游地址+真实 Key），direct 模式下仍报 'gateway' 是假绿灯
+        // ——按登记 mode 判定，与其他 adapter 的 status 口径对齐
+        pointing: cfg.harness[id]?.mode === 'direct' ? 'other' : cfg.harness[id] ? 'gateway' : 'unknown',
       }
     },
   }

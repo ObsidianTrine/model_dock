@@ -45,10 +45,10 @@
   },
   "budgetProfiles": {
     "claude-headless": {
-      "max_tokens": 5000000
+      "max_tokens": 20000000
     },
     "zcode-headless": {
-      "max_tokens": 5000000
+      "max_tokens": 20000000
     }
   },
   "tiers": {

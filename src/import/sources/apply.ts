@@ -74,7 +74,9 @@ export async function applyImport(
     // 同名行很常见，CLI checkbox 还按 suggest_id 连选）会拿到同一 id，写入时后者静默覆盖前者。
     const base = id
     let n = 2
-    while (cfg.providers[id] || usedIds.has(id)) id = `${base}-${n++}`
+    // 同时让开 cfg.profiles：候选 id 与既有 profile 同名但无同名 provider 时，下方
+    // `!cfg.profiles[id]` 守卫会让 profile 静默漏建（报告无成功也无 skipped 条目）
+    while (cfg.providers[id] || cfg.profiles[id] || usedIds.has(id)) id = `${base}-${n++}`
     usedIds.add(id)
     addedByPair.set(pair, id)
     meta.push({ id, cand })

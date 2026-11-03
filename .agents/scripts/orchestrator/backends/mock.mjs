@@ -19,7 +19,7 @@ import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESI
 
 export const mockBackend = {
   name: 'mock',
-  async spawn({ promptFile, cwd, onEvent }) {
+  async spawn({ promptFile, cwd, onEvent, readonly }) {
     // ORCH_MOCK_SPAWN_ERROR：模拟 claude CLI 缺失/启动失败（backend.spawn reject）
     if (process.env.ORCH_MOCK_SPAWN_ERROR === '1') {
       throw new Error('mock: spawn 注入失败（ORCH_MOCK_SPAWN_ERROR=1，模拟 claude CLI 不可用）');
@@ -31,7 +31,7 @@ export const mockBackend = {
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
-    onEvent({ type: 'worker_spawned', backend: 'mock', pid: process.pid });
+    onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isSpecPlanner) {
       // spec planner 模式：输出三件套契约块（两个任务、文件明确，供 spec build 端到端拆卡）；
@@ -160,6 +160,9 @@ export const mockBackend = {
         };
       }
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      // 审查 token 上报注入：集成测试驱动「审查段熔断」路径（reviewer 记账 + 循环顶收敛）
+      const reviewTokens = parseInt(process.env.ORCH_MOCK_REVIEW_TOKENS ?? '0', 10) || 0;
+      if (reviewTokens > 0) onEvent({ type: 'budget_snapshot', tokens_in: reviewTokens, tokens_out: 0 });
       const output =
         blockers > 0
           ? `🔴 阻塞（1 个）\n- mock：验收标准第 ${blockers} 条未实现\nREVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`

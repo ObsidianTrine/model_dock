@@ -87,7 +87,7 @@
 - **路径**：所有文件系统路径经 `src/util/paths.ts`，**禁止硬编码** `~/.modeldock`。测试用 `MODELRDOCK_FAKE_HOME` 重定向临时目录。
 - **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照（边界：config.toml 自身由 .lock + 原子写保护；版本迁移类写盘与同步导入前快照到 backups/config/）。
 - **SEA 检测**：用 `process.execPath` 文件名（开头 `modeldock`）判断，**不要**依赖 `sea-config.json` 的 `env` 或 `import.meta.url`（postject 注入下失效）。
-- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。
+- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。各客户端 attach 触达的配置键清单（写入/清除口径，逐客户端分节）见 `docs/attach-env-vars.md`——改适配器的写入/清理行为时同步该文档。
 - **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、勿手改；dsh/ZCode 的 YAML 用 `yaml` Document API 保留注释。`mutateConfig` 是整包重序列化，用户手写注释会被抹除（已知取舍，见 docs/known-issues.md CORRECT-03）。
 - **预设扩展**：运行时预设 = 内置库 `src/presets/data.ts` 的 `BUILTIN_PRESETS` + 用户覆盖文件 **`~/.modeldock/presets.json`**（同名 `id` 覆盖、新 `id` 追加；缺失视为无自定义、格式错误阻断启动）。**新增 provider 不要只写内嵌，可复用的先落到 presets.json 机制。**
 - **错误信息**：必须可操作，附修复建议。

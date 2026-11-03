@@ -8,6 +8,44 @@ import { t } from '../util/i18n.js'
 
 const exec = promisify(execFile)
 
+// 外部子进程统一超时：钥匙环工具 / PowerShell 挂死（AV 扫描、DPAPI 故障、钥匙环守护僵死）
+// 不能让 getSecret 永久 pending——relay 在发上游请求**之前** await getSecret，挂着即请求悬挂、
+// pending 逐请求累积，failover 的 candidateSkip（key 读失败跳下一候选）也永远走不到。
+// 超时强杀 + 普通错误上抛：getSecret / loadFileSecrets 的既有包装会把错误转成可操作
+// SecretsError（relay 已把 SecretsError 转 candidateSkip，天然收敛）。
+// 10s 给 PowerShell 冷启动 + 批量条目留足余量；探测类调用（hasSecretTool）仍用各自的短超时。
+let childTimeoutMs = 10_000
+export function __testSetChildTimeoutMs(ms?: number): void {
+  childTimeoutMs = ms ?? 10_000
+}
+
+interface ChildTimeoutGuard {
+  timedOut: () => boolean
+  dispose: () => void
+  timeoutError: () => Error
+}
+
+/** 给 spawn 的子进程挂超时强杀守卫：到点 kill（SIGKILL；Windows 等价 TerminateProcess），
+ *  close/error 处必须调 dispose() 清定时器。导出仅供单测直驱（挂一个长睡子进程验 kill）。 */
+export function armChildTimeout(child: ReturnType<typeof spawn>, label: string): ChildTimeoutGuard {
+  let fired = false
+  const timer = setTimeout(() => {
+    fired = true
+    try { child.kill('SIGKILL') } catch { /* 已退出 */ }
+  }, childTimeoutMs)
+  timer.unref?.()
+  return {
+    timedOut: () => fired,
+    dispose: () => clearTimeout(timer),
+    timeoutError: () => new Error(t('{label} 超时（{ms}ms 无退出），已强制终止——外部工具可能挂死，重试或改用 file 存储', '{label} timed out after {ms}ms and was killed — the external tool may be hung; retry or switch to file storage', { label, ms: String(childTimeoutMs) })),
+  }
+}
+
+/** promisify(execFile) 的超时选项（keychain 的 exec 调用族用）：execFile 原生支持 timeout 到点杀。 */
+function execChildOpts(): { timeout: number; killSignal: 'SIGKILL' } {
+  return { timeout: childTimeoutMs, killSignal: 'SIGKILL' }
+}
+
 export type SecretBackend = 'file' | 'keychain' | 'secret-service'
 
 /** secrets.json 损坏 / 不可操作时的可操作报错（对照 store.ts 的 ConfigError） */
@@ -102,12 +140,15 @@ function secretToolOp(op: 'store' | 'lookup' | 'clear', account: string, secret?
           ? ['lookup', 'service', 'modeldock', 'account', account]
           : ['clear', 'service', 'modeldock', 'account', account]
     const child = spawn('secret-tool', args, { windowsHide: true })
+    const guard = armChildTimeout(child, 'secret-tool')
     let out = ''
     let err = ''
     child.stdout.on('data', (d) => (out += d))
     child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
+    child.on('error', (e) => { guard.dispose(); reject(e) })
     child.on('close', (code) => {
+      guard.dispose()
+      if (guard.timedOut()) return reject(guard.timeoutError())
       if (op === 'lookup') resolve(out.trim())
       else if (code === 0) resolve(out.trim())
       else reject(new Error(err.trim() || `secret-tool exited ${code}`))
@@ -141,7 +182,7 @@ type ExternalReader = (scheme: 'keychain' | 'secret-service', id: string) => Pro
 const realReadExternal: ExternalReader = async (scheme, id) => {
   if (scheme === 'keychain') {
     try {
-      const { stdout } = await exec('security', ['find-generic-password', '-s', 'modeldock', '-a', id, '-w'])
+      const { stdout } = await exec('security', ['find-generic-password', '-s', 'modeldock', '-a', id, '-w'], execChildOpts())
       return stdout.trim() || null
     } catch (e) {
       // 44 = errSecItemNotFound：条目确实不存在，按 null（可缓存）；其余退出码 = 瞬时故障，上抛
@@ -195,17 +236,20 @@ function setKeychain(id: string, value: string): Promise<void> {
   const quoted = keychainArgValue(value)
   if (account == null || quoted == null) {
     // 值含换行或无法安全转义：回落 argv 路径（原有形态），保功能不回归优先
-    return exec('security', ['add-generic-password', '-s', 'modeldock', '-a', id, '-w', value, '-U']).then(() => undefined)
+    return exec('security', ['add-generic-password', '-s', 'modeldock', '-a', id, '-w', value, '-U'], execChildOpts()).then(() => undefined)
   }
   return new Promise((resolve, reject) => {
     const child = spawn('security', ['-i'], { windowsHide: true })
+    const guard = armChildTimeout(child, 'security')
     let err = ''
     child.stderr.on('data', (d) => (err += d))
-    child.on('error', reject)
+    child.on('error', (e) => { guard.dispose(); reject(e) })
     // 子进程早退时 stdin EPIPE 不能崩整个进程（同 dpapiBatch 的 stdin 守卫）
     child.stdin.on('error', () => {})
     child.on('close', (code) => {
+      guard.dispose()
       // 交互模式 `-i`：逐行执行 stdin 的子命令直至 EOF；密钥在 stdin 而非 argv
+      if (guard.timedOut()) return reject(guard.timeoutError())
       if (code === 0) resolve()
       else reject(new Error(err.trim() || `security exited ${code}`))
     })
@@ -225,7 +269,7 @@ async function setExternal(scheme: 'keychain' | 'secret-service', id: string, va
 async function removeExternal(scheme: 'keychain' | 'secret-service', id: string): Promise<void> {
   try {
     if (scheme === 'keychain') {
-      await exec('security', ['delete-generic-password', '-s', 'modeldock', '-a', id])
+      await exec('security', ['delete-generic-password', '-s', 'modeldock', '-a', id], execChildOpts())
     } else {
       await secretToolOp('clear', id)
     }
@@ -317,14 +361,17 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
           const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
             windowsHide: true,
           })
+          const guard = armChildTimeout(child, 'powershell DPAPI')
           let out = ''
           let err = ''
           child.stdout.on('data', (d) => (out += d))
           child.stderr.on('data', (d) => (err += d))
-          child.on('error', reject)
+          child.on('error', (e) => { guard.dispose(); reject(e) })
           // 子进程早退/ spawn 失败时 stdin 可能发 EPIPE：未监听会以 uncaught exception 崩掉整个进程
           child.stdin.on('error', () => {})
           child.on('close', (code) => {
+            guard.dispose()
+            if (guard.timedOut()) return reject(guard.timeoutError())
             if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
             resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
           })
@@ -522,7 +569,24 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
       )
     }
     if (hasLegacyPlain) {
-      await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+      // 明文→加密迁移写必须持锁 + 持锁后重读盘比对：本函数是热读路径（getSecret/verify 都触发），
+      // 无锁整表写回会覆盖并发写进程（mutateFileSecrets 持锁「重读→改→整表写回」）刚写入的 key
+      // ——读进程拿旧表做迁移原子覆盖 = 丢更新竞态，用户刚设置的 key 静默丢失、引用悬空（转发 503）。
+      // DPAPI 解密要 spawn PowerShell（秒级），窗口不小。持锁后盘上内容已被改过（≠ 本次读到的 raw）
+      // 就跳过迁移写：本次会话仍返回 dec（读到的旧表），盘上以写进程的新表为准，下次冷读自然一致。
+      // withFileLock 有 AsyncLocalStorage 重入豁免：mutateFileSecrets 持锁内走到这里不会自死锁。
+      try {
+        await withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
+          const fresh = await readSecretsRaw()
+          if (JSON.stringify(fresh) === JSON.stringify(raw)) {
+            await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+          }
+        })
+      } catch (e) {
+        // 迁移是安全优化不是正确性前提：key 已解出、本次读取照常返回，不因迁移失败拖死读路径
+        //（锁被长期占用时宁可跳过也不等满超时）；留可观测告警，下次冷读自动重试迁移。
+        console.error(t('[modeldock] secrets.json 明文→加密迁移写跳过/失败（不影响本次读取，下次读取重试）：{msg}', '[modeldock] secrets.json plaintext-to-encrypted migration skipped/failed (this read is unaffected; retried on next read): {msg}', { msg: (e as Error).message }))
+      }
     }
     fileCache = { path, data: dec }
     return dec

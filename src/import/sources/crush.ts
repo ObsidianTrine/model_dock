@@ -31,7 +31,7 @@ export async function scanCrush(): Promise<ImportCandidate[]> {
         ...placeholder('crush', t('Crush 渠道「{id}」的上游类型 {type} 走非 OpenAI/Anthropic 兼容协议，暂不支持导入', 'The Crush provider "{id}" uses upstream type {type}, which is not OpenAI/Anthropic-compatible; import is not supported yet', { id, type })),
         suggest_id: `crush-${slugify(id)}`,
         name: `Crush · ${typeof prov.name === 'string' && prov.name ? prov.name : id}`,
-        skip_reason: t('协议不支持', 'unsupported protocol'),
+        // 不再盖短 skip_reason（「协议不支持」）：详情里带渠道 id 与具体 type，可操作
       })
       continue
     }

@@ -1,6 +1,6 @@
 import { t } from '../util/i18n.js'
 import type { Config, ModelMeta, Protocol } from '../config/types.js'
-import type { AttachOptions, FileChange, PlanResult } from './types.js'
+import { AdapterError, type AttachOptions, type FileChange, type PlanResult } from './types.js'
 import { gatewayBase, gatewayBaseOpenAI, isOursGatewayUrl } from './types.js'
 
 /** 等值过滤帮手：内容无变化返回 null（稳态重接/周期 refresh 零快照零写盘），有变化才产出 FileChange。
@@ -126,6 +126,21 @@ export function directResponsesEndpointNote(): string {
     '提示: 该服务未配置 Responses 协议端点，直连使用了默认地址；请确认上游支持 Responses API，或在「编辑服务」里补填',
     'Note: this service has no Responses protocol endpoint, so direct mode used the default URL; make sure the upstream supports the Responses API, or fill it in under Edit Service'
   )
+}
+
+/** 外部配置字段级守卫（provider-json/codex/zcode 的 attach 共用）：客户端配置文件用户可手编、
+ *  其他工具可写坏（provider: "x"、model_providers: 123），字段类型不对时对原始值赋属性会以裸
+ *  TypeError 冒到 CLI 顶层——转 AdapterError 带文件路径与当前类型，可操作。结构级畸形（整个
+ *  文件不是对象）各 adapter 已另有守卫，这里收敛**字段级**。undefined/null 视为「缺省」放行
+ *  （调用方随后 ??= 正常建表）；detach 侧不做此抛错（清理要宽容，类型不对就跳过对应清理）。 */
+export function ensurePlainObjectField(value: unknown, field: string, path: string): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new AdapterError(
+      t('{path} 的「{field}」不是对象（当前是 {kind}），已中止（未做任何改动）', '"{field}" in {path} is not an object (got {kind}); aborted (nothing changed)', { path, field, kind: Array.isArray(value) ? 'array' : typeof value }),
+      t('把该字段改成对象（或删掉让 ModelDock 重建）后重新接入', 'Make the field an object (or remove it and let ModelDock rebuild it), then attach again')
+    )
+  }
 }
 
 /** 「独立直连已写入明文 Key」note（codex/dsh/zcode/provider-json/packs/workbuddy 手抄收敛为同一文案）。

@@ -12,6 +12,7 @@ import { CONSOLE_CSP } from './console-shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
+import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
 import { defaultStore, deleteSecret, getSecret, setSecret, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
@@ -1683,7 +1684,27 @@ async function hReset(c: AdminCtx): Promise<void> {
   const { rt, res, audit } = c
   const { configPath, secretsPath } = await import('../util/paths.js')
   const fs = await import('node:fs')
-  // 先清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
+  // 与 CLI cmdReset（cli/basic.ts）同语义的三步序：先把已接管客户端逐个 detach 还原快照，
+  // 再清钥匙环、删 config/secrets。旧实现直接 unlink 的后果：客户端文件仍指向本网关但
+  // rt.tokens 已随空配置清空（全部客户端 401），且 config.harness 被删、attach 快照的
+  // 自动还原路径失效——只能人工翻 backups/。
+  // 1) 删前快照当前 config/secrets（unlink 绕过 atomicWrite 不触发自动快照，不补拍就没有「重置前」还原点）
+  let snapshotId: string | undefined
+  try {
+    snapshotId = (await snapshot('config', 'pre-reset', [configPath(), secretsPath()])).id
+  } catch { /* 快照失败不阻断重置（backups/ 通常已有历史快照） */ }
+  // 2) 逐个 detach 还原客户端文件（单个失败不中断，对齐 CLI：逐条记失败继续）
+  const restored: string[] = []
+  const restoreFailed: string[] = []
+  for (const id of Object.keys(rt.config.harness)) {
+    try {
+      await detachHarness(id)
+      restored.push(id)
+    } catch (e) {
+      restoreFailed.push(`${id}: ${(e as Error).message}`)
+    }
+  }
+  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
   let secretsCleared = 0
   for (const [id, p] of Object.entries(rt.config.providers)) {
     try {
@@ -1700,9 +1721,14 @@ async function hReset(c: AdminCtx): Promise<void> {
   }
   // 重载为空配置
   await reloadRuntime(rt)
-  audit(bi('重置配置', 'Reset config'), '-', bi('删除 {files}，清除 {n} 个密钥', 'Deleted {files}; cleared {n} keys', { files: deleted.length ? biJoin('、', ', ', deleted) : bi('无文件', 'no files'), n: secretsCleared }))
+  audit(
+    bi('重置配置', 'Reset config'),
+    '-',
+    bi('还原 {h} 个客户端接管，删除 {files}，清除 {n} 个密钥', 'Restored {h} client attaches; deleted {files}; cleared {n} keys', { h: restored.length, files: deleted.length ? biJoin('、', ', ', deleted) : bi('无文件', 'no files'), n: secretsCleared }),
+    restoreFailed.length ? bi('部分客户端还原失败：' + restoreFailed.join('；'), 'Some client restores failed: ' + restoreFailed.join('; ')) : undefined
+  )
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, deleted, hint: t('配置已清空（含钥匙环密钥）；快照和日志保留。运行 modeldock init 重新配置', 'Config cleared (including keychain keys); snapshots and logs are kept. Run modeldock init to set up again') }))
+  res.end(JSON.stringify({ ok: true, deleted, restored, restoreFailed, snapshotId, hint: t('配置已清空（含钥匙环密钥）；快照和日志保留。运行 modeldock init 重新配置', 'Config cleared (including keychain keys); snapshots and logs are kept. Run modeldock init to set up again') }))
   return
 }
 

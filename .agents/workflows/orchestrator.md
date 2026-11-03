@@ -223,7 +223,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 - **开航前海况观测（fleet observe，纯观测零决策，2026-11-03 船东定案阶段 1）**：每次派发（run 闭环入口）先拉网关 admin 面（`/_modeldock/config` + `/_modeldock/metrics`，`gatewayAdmin: true` 才启用），把「服务清单/熔断状态/各客户端指向」压缩成 `fleet_observed` 事件落任务时间线。告警三类（只照亮不拦截）：**dogfood_bypass**（本船对应客户端指向 ModelDock 之外的端点——船将直连上游，燃油实测与 reconcile 对账失效）、**not_attached**（客户端未经 ModelDock 接管）、**meltdown_active**（有服务在熔断）。船↔harness 映射：zcode-headless↔zcode、claude-headless↔claude-code。未开 gatewayAdmin 完全静默（行为不变）；开了但网关不可得 → 一行提示继续派发。选船仍走既有静态规则，引擎切换人工闸门不变。
 - **prompt 纪律**（对齐 Anthropic 长时程 harness）：done 前自验测试、干净提交、不越界；**同一条命令被权限拒绝满 2 次即 stuck 熔断**；环境层禁 `git -C` 形态与 `;`/`&&` 复合命令。spec 卡 design/requirements 用 **worktree 文件引用**（防 zcode headless 30k argv 上限），prepare 时由 orchestrator 拷贝进 worktree。reviewer prompt 注入 REVIEW.md 纪律摘要（截 8000 字符）。files_hint 解析自动剥反引号/引号。
 - **Budget 会话级记账**：committed+sessionMax（跨 fixup 会话不再互相覆盖漏计），每次 worker_spawned 落 `budget_baseline` 事件。
-- **LLM 决策留底（decision trace）**：看门狗（watchdog）/ scan 语义过滤（smartfilter）/ 独立审查（review）三类 LLM 决策点把**模型输入与原始输出全文**落盘 `.agents/orchestrator/logs/<任务id>/decisions/<类型>-*.json` 供复盘；超 64KB 截前缀、每类型滚动保留 20 份；workflow.json 可选键 `"trace": { "enabled": true, "maxPerTask": 20, "maxInputKB": 64 }`（缺省开启）。看门狗熔断卡不参与 blocked 卡自动续（防「误杀→续跑→再误杀」循环）。
+- **LLM 决策留底（decision trace）**：看门狗（watchdog）/ scan 语义过滤（smartfilter）/ 独立审查（review）/ planner 规划会话（propose/intent，落 `logs/planner-<时间戳>/`，成功与重试失败都留）四类 LLM 决策点把**模型输入与原始输出全文**落盘 `.agents/orchestrator/logs/<任务id>/decisions/<类型>-*.json` 供复盘（planner 重试失败日志同时附 exitCode 与 stderrTail 尾部 ≤200 字符）；超 64KB 截前缀、每类型滚动保留 20 份；workflow.json 可选键 `"trace": { "enabled": true, "maxPerTask": 20, "maxInputKB": 64 }`（缺省开启）。看门狗熔断卡不参与 blocked 卡自动续（防「误杀→续跑→再误杀」循环）。
 
 ### A5. 权限红线（worker 被什么拦了）
 

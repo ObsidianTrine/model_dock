@@ -231,17 +231,17 @@ describe('orchestrator scan > GitHub issues 信号源（gh best-effort）', () =
     }
   })
 
-  it('runScan 接线：issues 开启落卡；关闭不产卡不警告', () => {
+  it('runScan 接线：issues 开启落卡；关闭不产卡不警告', async () => {
     const repo = mkRepo()
     try {
       git(repo.root, 'remote add origin https://github.com/foo/bar.git')
-      const on = runScan(repo.root, { issues: true, ghRun: fakeRun })
+      const on = await runScan(repo.root, { issues: true, ghRun: fakeRun })
       expect(on.created).toHaveLength(2)
       expect(on.warnings).toHaveLength(0)
-      const again = runScan(repo.root, { issues: true, ghRun: fakeRun })
+      const again = await runScan(repo.root, { issues: true, ghRun: fakeRun })
       expect(again.created).toHaveLength(0)
       expect(again.skipped).toHaveLength(2) // 同 id 去重
-      const off = runScan(repo.root, { todo: true })
+      const off = await runScan(repo.root, { todo: true })
       expect(off.created).toHaveLength(0)
       expect(off.warnings).toHaveLength(0)
     } finally {

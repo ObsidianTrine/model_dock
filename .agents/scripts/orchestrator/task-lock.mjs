@@ -44,26 +44,53 @@ export function readTaskLock(repoRoot, taskId) {
 }
 
 export function releaseTaskLock(repoRoot, taskId) {
+  const p = taskLockPath(repoRoot, taskId);
+  // 重入深度>1：内层（同进程嵌套闭环）释放不动锁文件，只减计数——锁还归外层持有
+  const depth = reentrantDepth.get(p) ?? 0;
+  if (depth > 1) {
+    reentrantDepth.set(p, depth - 1);
+    return;
+  }
+  reentrantDepth.delete(p);
   const cur = readTaskLock(repoRoot, taskId);
   // 只释放自己持有的锁（陈锁已被别人接管时不误删）
-  if (cur?.pid === process.pid) fs.rmSync(taskLockPath(repoRoot, taskId), { force: true });
+  if (cur?.pid === process.pid) fs.rmSync(p, { force: true });
 }
+
+// 重入深度表（按锁文件路径）：同进程嵌套 acquire/release 的配对计数。
+// 场景：交互闸门 [b] 打回重试（humanGateInteractive → doRetry）在外层 cmdRun 仍持锁时
+// 再调 cmdRun——同一驱动者嵌套闭环，不是「双开」。此前无豁免：acquire 见到自己的 pid
+// 也按「他人持有」die 自指报错，卡滞留 running/、临时目录泄漏。
+const reentrantDepth = new Map();
+// exit handler 每路径只注册一次：重复注册只是无害累积，没必要堆
+const exitHooked = new Set();
 
 /**
  * 抢任务锁。返回 { held: true } 或 { held: false, owner, unremovable? }——
  * 调用方按 held 分流：false 即 die（带 owner pid 的可操作提示）。
+ * 本进程已持同把锁 → 重入豁免（held:true，深度计数保护锁文件生命周期）。
  * 陈锁最多重试接管 2 次（与 feature-branch 的 finish 锁同款防抖）；删不掉
  * 返回 unremovable 让调用方提示手动清理，不死循环。
  */
 export function acquireTaskLock(repoRoot, taskId, name = 'run') {
   const p = taskLockPath(repoRoot, taskId);
   fs.mkdirSync(path.dirname(p), { recursive: true });
+  const self = readLock(p);
+  if (self && Number.isInteger(self.pid) && self.pid === process.pid) {
+    reentrantDepth.set(p, (reentrantDepth.get(p) ?? 0) + 1);
+    return { held: true };
+  }
   for (let takeovers = 0; ; takeovers++) {
     try {
       fs.writeFileSync(p, JSON.stringify({ pid: process.pid, task: taskId, cmd: name, acquired_at: new Date().toISOString() }, null, 2), { flag: 'wx' });
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const cur = readLock(p);
+      if (cur && Number.isInteger(cur.pid) && cur.pid === process.pid) {
+        // wx 竞态窗口里的自锁（本进程刚 release 又立刻重抢）：同重入豁免
+        reentrantDepth.set(p, (reentrantDepth.get(p) ?? 0) + 1);
+        return { held: true };
+      }
       if (cur && Number.isInteger(cur.pid) && isAlive(cur.pid)) {
         return { held: false, owner: cur };
       }
@@ -77,7 +104,18 @@ export function acquireTaskLock(repoRoot, taskId, name = 'run') {
       }
       continue;
     }
-    process.on('exit', () => { try { fs.rmSync(p, { force: true }); } catch { /* best effort */ } });
+    if (!exitHooked.has(p)) {
+      exitHooked.add(p);
+      // 只删自己持有的锁：进程释放锁后到退出的毫秒窗口里锁可能已被他人接管，
+      // 无属主校验的 rmSync 会误删对方的活锁、放行第三者同任务双驱动
+      process.on('exit', () => {
+        try {
+          const cur = readLock(p);
+          if (cur?.pid === process.pid) fs.rmSync(p, { force: true });
+        } catch { /* best effort */ }
+      });
+    }
+    reentrantDepth.set(p, (reentrantDepth.get(p) ?? 0) + 1);
     return { held: true };
   }
 }

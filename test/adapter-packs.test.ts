@@ -280,4 +280,45 @@ describe('generic-env 兜底适配器', () => {
       h.restore()
     }
   })
+
+  it('pack status 直连模式不假报 gateway：按登记 mode 判 pointing', async () => {
+    const h = fakeHome()
+    try {
+      const target = path.join(h.home, 'fakeapp-dir', 'config.json')
+      await ensureDir(path.dirname(target))
+      await atomicWrite(target, '{}\n', 0o600)
+      const a = packAdapter('fakeapp-dir', {
+        format: 'json',
+        config_file: target,
+        upsert: { 'provider.modeldock.baseURL': 'http://127.0.0.1:{port}' },
+      })
+      const cfg = await loadConfig()
+      cfg.harness['fakeapp-dir'] = { mode: 'direct', token: 'tok' }
+      const st = await a.status(cfg, 28687)
+      expect(st.attached).toBe(true)
+      expect(st.pointing).toBe('other') // direct：旧实现假报 'gateway'
+      cfg.harness['fakeapp-dir'] = { mode: 'gateway', token: 'tok' }
+      expect((await a.status(cfg, 28687)).pointing).toBe('gateway')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('加载期守卫：upsert 值非字符串（TOML 手编数字/布尔）→ 可读 AdapterError 而非 attach 时裸 TypeError', () => {
+    // registry.allAdapters 的 try/catch 会把该错误转 brokenPackAdapter；这里直测 packAdapter 抛点
+    expect(() =>
+      packAdapter('badpack', {
+        format: 'json',
+        config_file: '/tmp/whatever.json',
+        upsert: { 'provider.modeldock.timeout': 30 as unknown as string },
+      })
+    ).toThrow(/upsert\.provider\.modeldock\.timeout/)
+    expect(() =>
+      packAdapter('badpack', {
+        format: 'json',
+        config_file: '/tmp/whatever.json',
+        upsert: { 'provider.modeldock.timeout': '30' },
+      })
+    ).not.toThrow()
+  })
 })

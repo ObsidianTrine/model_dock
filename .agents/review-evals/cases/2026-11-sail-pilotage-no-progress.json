@@ -1,0 +1,17 @@
+{
+  "id": "2026-11-sail-pilotage-no-progress",
+  "title": "sail 派发资格用 pending.length 判定「队列有活」，但 drain 的引水闸/解析失败跳过会让卡原地不动——队列里只剩这类卡时每轮派发空转，连续 3 轮「无进展」熔断把 30 分钟航程 12 秒收帆，规划轮从未执行",
+  "diffRef": "0ee1530",
+  "reviewRef": "2accc06^",
+  "fixedBy": "2accc06",
+  "files": [
+    ".agents/scripts/orchestrator.mjs"
+  ],
+  "expect": [
+    "引水",
+    "noProgress",
+    "pending.length",
+    "熔断"
+  ],
+  "note": "2026-11-03 自由航行首航实证：开航时 pending 仅有待引水卡（files_hint 命中 corePaths，drain 的引水闸逐张跳过且卡不迁移），sail 每周期进派发轮 → drain --max 1 空转返回 → noProgress +1 → 连续 3 轮触发「派发无进展」熔断收帆（计划 30 分钟实际 12 秒），scan+propose 规划轮一次都没跑。审查侧教训：**「资格判定」必须与「下游的跳过行为」一致**——上游用「队列非空」决定派发，下游却会因引水闸（pilotageRequired）/解析失败跳过卡而不动队列；「可派发」要按下游真实语义逐张判定（findCard+parseCard+pilotageRequired），全不可派时走规划轮。同根教训：无进展熔断器要把「合法的不动」（待引水是稳态不是卡死）与「真卡死」（run 子进程坏掉）区分开，否则合法稳态触发熔断。修复 2accc06 逐张过滤 + 全不可派走规划轮；回归用例 test/orchestrator/sail.test.ts「存量引水卡不触发无进展熔断」。另注：本次航行还暴露 budgetProfiles 5M 为 GLM 缓存读口径假阳性阈值（worker 14 分钟累计 12.1M 假熔断，273c523 放宽 20M、wall-clock 才是真熔断），与 2026-10-budget-cross-session-max 同域不同根因。"
+}

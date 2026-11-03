@@ -149,7 +149,9 @@ async function settleNotify(repoRoot, taskId, state, reason) {
 // Budget 类已迁至 orchestrator/budget.mjs（含低油量软告警；单测直接 import 驱动）。
 
 function cleanupOrphanWorker(repoRoot, taskId) {
-  // 崩溃恢复：running/ 卡片若记录的 worker PID 仍存活（孤儿），先杀整棵进程树
+  // 崩溃恢复：running/ 卡片若记录的 worker PID 仍存活（孤儿），先杀整棵进程树。
+  // 不做 role 过滤：最后一条 spawn 可能是 reviewer 的（崩溃在审查段），孤儿 reviewer 同样要杀——
+  // 与 resolveBackendName 只认 worker 侧的口径差异是有意的
   const events = readEvents(logDir(repoRoot, taskId));
   const spawned = [...events].reverse().find((e) => e.type === 'worker_spawned');
   if (spawned?.pid && isAlive(spawned.pid)) {
@@ -590,6 +592,20 @@ async function cmdRun(repoRoot, taskId, opts) {
     promptText = injectFollowUps(qdir, promptText);
 
     for (;;) {
+      // ---- 熔断收敛闸（循环顶）：wall/token 熔断若在审查段触发，trip() 一次性清掉
+      // wallTimer 不再重挂，而既有 tripped 检查只在 worker spawn close 之后——审查返工
+      // continue 回到这里会 spawn 一个**完全无 wall 限制**的 worker 会话，跑到
+      // max_turns/token 上限才落 blocked（熔断后白烧一整轮）。任何 continue/重试路径
+      // 都先过这里，按既有 blocked 落位口径收敛（此时卡必在 running/：唯一 continue
+      // 是审查返工 moveCard('reviewing','running') 之后）。
+      if (budget.tripped) {
+        appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
+        moveCard(root, taskId, 'running', 'blocked');
+        appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
+        archiveIncident(repoRoot, taskId, root, qdir, `budget:${budget.tripReason.reason}`);
+        await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
+        die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+      }
       // ---- worker 会话（含 fixup 返工循环；瞬时故障原地退避重试，见 retry 处注释）----
       let result;
       let workerOutput = '';
@@ -614,7 +630,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           }
           fs.writeFileSync(promptFile, promptText);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
-          appendEvent(qdir, 'worker_spawned', { backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
+          appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
             promptFile,
@@ -686,7 +702,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       const runGates = async (gates) => {
         for (const g of gates) {
           try {
-            const r = g.run();
+            const r = await g.run(); // 门禁已异步化（runCmd 拿 pid 做超时树杀）
             appendEvent(qdir, 'gate_result', { gate: g.gate, result: 'pass', ...(g.passExtra ? g.passExtra(r) : {}) });
           } catch (e) {
             if (!(e instanceof GateError)) throw e;
@@ -868,6 +884,10 @@ async function cmdRun(repoRoot, taskId, opts) {
           reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
           writeWorkerSettings(reviewSettingsFile, tierEnv);
         }
+        // 审查会话独立记账：beginSession 把 worker 会话峰值入账 committed，审查用量从零峰值起算，
+        // 下一次 beginSession（下轮 worker）把审查峰值入账——reviewer 的 budget_snapshot 此前只落
+        // 盘不记账，max_tokens 硬熔断与低油量告警对审查段完全失明
+        budget.beginSession();
         const review = await reviewBackend.spawn({
           promptFile: reviewPromptFile,
           cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
@@ -875,6 +895,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           onEvent: (e) => {
             appendEvent(qdir, e.type, e);
             trackPid(e);
+            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out); // 审查计入同一预算口径
           },
           readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
           model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
@@ -1350,6 +1371,7 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
       encoding: 'utf8',
       env: finishEnv,
       maxBuffer: 32 * 1024 * 1024,
+      timeout: 30 * 60_000, // finish 挂死（含内部 testCmd）不能陪跑到底：超时按失败走（任务留 awaiting-human 可重试）
     });
     // 透传 finish 输出（保持现场可见性）；撞锁凭 stderr 文案识别
     if (r.stdout) process.stdout.write(r.stdout);
@@ -1702,7 +1724,7 @@ async function cmdDrain(repoRoot, opts) {
     if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers, cfg);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
-    let lastTried = null;
+    const tryCount = new Map(); // id -> 被选中次数（死循环防护：对齐并行路径的每任务重试计数）
     const tally = {};
     const tasks = []; // 本轮落位花名册（收官摘要按任务号列「做了哪些任务」）
     // 引水闸跳过清单：受限航道卡（deps/核心·发布路径）不派发，留在 pending/ 等人工
@@ -1745,12 +1767,22 @@ const next = pickNextCard(root, { skipIds });
         log(`⏸ 任务 ${next.id} 属受限航道（${pilotageReason(next.meta, cfg)}）——待引水确认，本轮跳过。`);
         continue;
       }
-      // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
-      // 连续两轮选中同一任务 = 子进程根本没能处理它（执行环境损坏/脚本缺失），立即停止而不是烧下去。
-      if (next.id === lastTried) {
-        die(`任务 "${next.id}" 连续两轮仍在 pending——run 子进程未能处理它（检查 repoRoot/.agents/scripts 是否完整、node 是否可用）。已停止 drain 以防空转。`, 1);
+      // 死循环防护（每任务计数，对齐并行路径的拉黑语义）：run 子进程正常时任务必离开
+      // pending（merged/awaiting-human/blocked/failed）。同一任务第二次被选中且仍在 pending
+      // = 子进程确定性失败（ui_check 未配、引擎切换未批准、脚本损坏等）——转 blocked/ 附原因
+      // 后继续调度剩余卡。旧实现 die 整批：一张配错 ui_check 的卡让当晚 drain/nightly 整批
+      // 中断，剩余合法 pending 全部不跑，且 die 文案（「检查 scripts 是否完整」）误导排查方向。
+      tryCount.set(next.id, (tryCount.get(next.id) ?? 0) + 1);
+      if (tryCount.get(next.id) >= 2) {
+        const reason = 'drain 连续 2 轮选中仍在 pending——run 子进程未能处理它（常见：卡声明 ui_check 但 workflow.json 未配 uiCheckCmd、执行引擎切换未获批准；可用 resume 带上修复指令续做）';
+        log(`⛔ 任务 ${next.id} 拉黑：${reason.split('——')[0]}——转 blocked/，继续调度剩余卡。`);
+        appendEvent(logDir(repoRoot, next.id), 'failed', { reason });
+        moveCard(root, next.id, 'pending', 'blocked');
+        tally.blocked = (tally.blocked ?? 0) + 1;
+        tasks.push({ id: next.id, state: 'blocked' });
+        await settleNotify(repoRoot, next.id, 'blocked', reason);
+        continue;
       }
-      lastTried = next.id;
       log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
       // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
       const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
@@ -2309,7 +2341,7 @@ function highPriorityDraftIds(repoRoot) {
  * --run：对本次 high 优先级提案立即提交并发起闭环（gate=L3 兜底——合并仍人工）。
  * nightly 触发由 cron/调度系统调用本命令；watch 周期也调用它。
  */
-function cmdScan(repoRoot, opts) {
+async function cmdScan(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const flags = opts.flags ?? new Set();
@@ -2325,7 +2357,7 @@ function cmdScan(repoRoot, opts) {
     dryRun: flags.has('--dry-run'),
     testCmd: runConfig(repoRoot).testCmd.join(' && '),
   };
-  const { created, skipped, warnings } = runScan(repoRoot, runOpts);
+  const { created, skipped, warnings } = await runScan(repoRoot, runOpts);
   for (const w of warnings) log(`⚠ ${w}`);
   if (runOpts.dryRun) {
     log(created.length ? `将生成 ${created.length} 张提案（dry-run 未写入）：` : '无新信号，不生成提案。');
@@ -2369,6 +2401,58 @@ function cmdScan(repoRoot, opts) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// planner 会话决策留底（kind=planner，watchdog/smartfilter/review 三类之外新增）
+// ---------------------------------------------------------------------------
+
+/** 本次 planner 会话的留底主体 id（logs/planner-<时间戳>，sail 报告目录同款时间戳口径——
+ *  Windows 文件名安全、字典序即时间序；同秒并发撞名由 trace.mjs 的文件名存在性检查兜底）。 */
+function plannerTraceTaskId() {
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  return `planner-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+}
+
+/**
+ * propose/intent 每次 planner spawn 的结果落 decision trace（成功与重试失败都落）。
+ * 背景（2026-11-02 自由航行实证）：planner 会话「未产出契约块」时原始输出与 exitCode/
+ * stderrTail 全部丢弃——探针复现又正常，瞬时 429 还是格式漂移无法定位。留底后可复盘
+ * 「模型当时输出了什么」。复用 trace.mjs 滚动/截断（写失败内部消化，绝不影响主流程）；
+ * trace.enabled=false 整体关闭。parsed 传提取结果摘要（{ blocks: n } 或 null）。
+ */
+function tracePlannerSpawn({ repoRoot, session, traceCfg, command, backend, attempt, promptText, result, parsed, startedAt }) {
+  if (!traceCfg?.enabled) return;
+  const stderrTail = String(result?.stderrTail ?? '').trim();
+  writeDecisionTrace(
+    {
+      root: logDir(repoRoot, session),
+      taskId: session,
+      kind: 'planner',
+      input: promptText, // 本次尝试的 planner prompt 全文（重试追加的要求随之留痕）
+      output: String(result?.output ?? ''), // 模型原始输出全文（超上界截前缀，trace.mjs 兜底）
+      parsed: parsed ?? null,
+      meta: {
+        command,
+        backend,
+        attempt,
+        exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
+        ...(stderrTail ? { stderrTail: stderrTail.slice(-200) } : {}), // 尾部 ≤200 字符
+        durationMs: Date.now() - startedAt,
+        ...(result?.usage && typeof result.usage === 'object' && !Array.isArray(result.usage) ? { usage: result.usage } : {}),
+      },
+    },
+    traceCfg,
+  );
+}
+
+/** 重试失败日志的现场摘要：exitCode + stderrTail 尾部（≤200 字符），不再只有「N 次均未产出契约块」。 */
+function plannerSpawnDetail(result) {
+  const parts = [`exitCode=${Number.isInteger(result?.exitCode) ? result.exitCode : '?'}`];
+  const tail = String(result?.stderrTail ?? '').trim();
+  if (tail) parts.push(`stderrTail=${tail.slice(-200)}`);
+  return parts.join('，');
+}
+
 /**
  * intent——Planner 环节（Phase 2 展望项落地，docs 10.8）：人给一句话意图，
  * readonly planner 会话探索仓库并编译任务卡（验收标准可机器检查化），
@@ -2382,6 +2466,8 @@ async function cmdIntent(repoRoot, opts) {
   ensureQueue(root);
   opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
+  const traceCfg = loadWorkflowConfig(repoRoot).trace;
+  const session = plannerTraceTaskId();
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-planner-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-intent-')), 'planner-prompt.md');
 
@@ -2391,6 +2477,7 @@ async function cmdIntent(repoRoot, opts) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
@@ -2400,12 +2487,13 @@ async function cmdIntent(repoRoot, opts) {
         settingsFile,
       });
       const cardText = parseCardBlock(result.output ?? '');
+      tracePlannerSpawn({ repoRoot, session, traceCfg, command: 'intent', backend: opts.backend, attempt, promptText, result, parsed: cardText ? { blocks: 1 } : null, startedAt });
       if (!cardText) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请严格按产出契约重新输出：单个 fenced 契约块内含完整任务卡。`;
           continue;
         }
-        die(`Planner ${MAX_ATTEMPTS} 次均未产出任务卡契约块。请改用手写任务卡 + submit。`);
+        die(`Planner ${MAX_ATTEMPTS} 次均未产出任务卡契约块（最后一次：${plannerSpawnDetail(result)}）。请改用手写任务卡 + submit。`);
       }
       try {
         const { meta } = loadCard(cardText, 'planner-draft');
@@ -2463,6 +2551,7 @@ async function cmdPropose(repoRoot, opts) {
   const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : cfg.autopilot.maxProposalsPerCycle;
   opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
+  const session = plannerTraceTaskId();
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
   try {
@@ -2488,6 +2577,7 @@ async function cmdPropose(repoRoot, opts) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
@@ -2497,12 +2587,13 @@ async function cmdPropose(repoRoot, opts) {
         settingsFile,
       });
       const blocks = parseCardBlocks(result.output ?? '');
+      tracePlannerSpawn({ repoRoot, session, traceCfg: cfg.trace, command: 'propose', backend: opts.backend, attempt, promptText, result, parsed: blocks.length ? { blocks: blocks.length } : null, startedAt });
       if (!blocks.length) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请按产出契约重新输出：每张任务卡一个独立 fenced 契约块（没有值得做的就一张都不出）。`;
           continue;
         }
-        die(`Planner ${MAX_ATTEMPTS} 次均未产出提案契约块。`);
+        die(`Planner ${MAX_ATTEMPTS} 次均未产出提案契约块（最后一次：${plannerSpawnDetail(result)}）。`);
       }
       const created = [];
       const rejected = [];
@@ -2742,7 +2833,7 @@ async function cmdNightly(repoRoot, opts) {
 
   try {
     // 1) 巡检落提案（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues/ci 为 gh best-effort）
-    ({ created, skipped, warnings } = runScan(repoRoot, {
+    ({ created, skipped, warnings } = await runScan(repoRoot, {
       todo: true,
       audit: true,
       issues: true,

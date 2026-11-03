@@ -40,6 +40,40 @@ function execText(cmd: string, args: string[], timeoutMs: number): Promise<strin
   })
 }
 
+/** CLI 版本探测 memo（与 regMemo 同思路）：接入计划 / 路由切换重烙会反复调 planAttach，
+ *  每次都 spawn `--version` 没必要；版本只有升级才会变，60s 记忆足够新鲜。
+ *  FAKE_HOME（测试/沙箱）下绕过：沙箱内装/卸必须即时可见（与 dirMemo 同款豁免）。 */
+const VER_TTL = 60_000
+const verMemo = new Map<string, { at: number; ver: string | undefined }>()
+
+/** CLI 客户端版本探测：spawn `<cmd> --version`，从输出抽第一个 x.y.z。Windows 全局命令是
+ *  .cmd 包装，execFile 不认，需 shell: true（参数是固定字面量，无注入面）。探测失败 / 输出
+ *  不可解析返回 undefined，调用方按「功能门控不满足」处理（宁可降级到兼容路径，不假装新版）。
+ *
+ * 测试钩子：`MODELRDOCK_FAKE_<ID 大写下划线>_VERSION` 显式指定版本（置空串模拟探测失败）；
+ * 未显式指定但 fakePresence 置了在场时，默认视为现代版本（假在场 = 假一台装好新版的机器，
+ * 存量测试不必逐个补版本桩）。 */
+export async function cliVersion(cmd: string, id: string, timeoutMs = 5000): Promise<string | undefined> {
+  const fake = process.env[`MODELRDOCK_FAKE_${id.toUpperCase().replace(/-/g, '_')}_VERSION`]
+  if (fake !== undefined) return fake === '' ? undefined : fake
+  if (fakePresence(id) === true) return FAKE_PRESENT_VERSION
+  const useMemo = !process.env.MODELRDOCK_FAKE_HOME
+  const memo = verMemo.get(cmd)
+  if (useMemo && memo && Date.now() - memo.at < VER_TTL) return memo.ver
+  const out = await new Promise<string>((resolve) => {
+    execFile(cmd, ['--version'], { windowsHide: true, timeout: timeoutMs, shell: process.platform === 'win32' }, (err, stdout) =>
+      resolve(err ? '' : String(stdout))
+    )
+  })
+  const ver = /(\d+\.\d+\.\d+)/.exec(out)?.[1]
+  if (useMemo) verMemo.set(cmd, { at: Date.now(), ver })
+  return ver
+}
+
+/** 假在场（MODELRDOCK_FAKE_*_PRESENT=1）时的默认版本：取支持的现代版号——只用于测试钩子链，
+ *  生产探测走真实 --version */
+export const FAKE_PRESENT_VERSION = '2.1.316'
+
 /** Windows 卸载表三种视图：HKCU（per-user 安装，如 Xiaomi MiMo / WorkBuddy 实测登记处）、
  *  HKLM 64 位、HKLM WOW6432Node（32 位安装器） */
 const REG_UNINSTALL_KEYS = [

@@ -48,9 +48,11 @@ export async function scanCcSwitch(): Promise<ImportCandidate[]> {
     } catch (e) {
       const msg = (e as Error).message
       if (msg.includes('ENOENT')) {
-        return [{ ...placeholder('cc-switch', t('cc-switch.db 存在但系统无 sqlite3 命令，无法读取', 'cc-switch.db exists but the sqlite3 command is not installed; cannot read it')), skip_reason: t('无 sqlite3', 'sqlite3 missing') }]
+        // skip_reason 直接用详情（placeholder 的 note 即 skip_reason）：此前再盖一层短文案
+        //「无 sqlite3」把可操作信息（装 sqlite3 / 指明读什么文件）覆盖成死代码
+        return [placeholder('cc-switch', t('cc-switch.db 存在但系统无 sqlite3 命令，无法读取', 'cc-switch.db exists but the sqlite3 command is not installed; cannot read it'))]
       }
-      return [{ ...placeholder('cc-switch', t('读取 cc-switch.db 失败：{msg}', 'Failed to read cc-switch.db: {msg}', { msg })), skip_reason: t('读取失败', 'read error') }]
+      return [placeholder('cc-switch', t('读取 cc-switch.db 失败：{msg}', 'Failed to read cc-switch.db: {msg}', { msg }))]
     }
   }
   const out: ImportCandidate[] = []

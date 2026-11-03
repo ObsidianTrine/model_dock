@@ -1,0 +1,16 @@
+{
+  "id": "2026-11-sail-report-foreign-merge",
+  "title": "航海报告 touched() 把队列基线→终态的任何状态迁移都算「本航次战果」——并行会话在航行期间 finish 合并的卡（running→merged）被误标进「✅ 已出港」战果区，报告口径被并发活动污染",
+  "diffRef": "0ee1530",
+  "reviewRef": "6792700^",
+  "fixedBy": "6792700",
+  "files": [
+    ".agents/scripts/orchestrator/sail.mjs"
+  ],
+  "expect": [
+    "touched",
+    "并行",
+    "基线"
+  ],
+  "note": "2026-11-03 自由航行实跑实证：报告 merged 区出现 29-fix-tray-progressform-timer-thread（类型还显示 ?），实为并行会话在航期内 finish 合并（起航基线快照时该卡在 running/，收帆时已 merged）——差分捕获了迁移却无法区分「谁干的」。审查侧教训：**共享状态上的基线-终态差分必须区分「自己造成的迁移」与「并发迁移」**：本航次编排的卡只可能是 from==='pending'（sail 派发离港）、added（本航次新增入队）、本航次提案；from 为 running/awaiting-human 等的 changed 是外部流程（并行会话/人工 approve/finish）所为，应单列披露（修复 6792700 增「🔄 航期内由其他流程落位」节）而不计入战果。多 agent 共享同一队列（D3 claim-before-execute、人工 feature-branch 混用）是本仓库常态，任何「报告/审计/统计」类聚合都要过一遍「并发写者会往里塞什么」。另注：同批实跑还确诊 zcode worker 的 ERA_NEGOTIATION_FAILED 间歇崩溃不在 transient 签名表——worker_retry 不落、autoresume 不续、风暴闸不计数，4 张卡连续烧成 blocked（44d27b5 修）；正则教训：ERA 分支只能带前导 \\b——'ERA_NEGOTIATION_FAILED' 的尾随 _FAILED 会让 \\b(...)\\b 的尾部边界失配（下划线是 word 字符）。"
+}

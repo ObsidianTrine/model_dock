@@ -294,12 +294,12 @@ describe('orchestrator eventfilter > 配置与引擎解析', () => {
 describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn）', () => {
   const GH = (n: number, title: string) => JSON.stringify([{ number: n, title, body: '正文', url: `https://github.com/foo/bar/issues/${n}` }])
 
-  it('issue 卡落卡带 frontmatter signal_hashes；标题变更 → 同号直通在途卡（不重复开卡）', () => {
+  it('issue 卡落卡带 frontmatter signal_hashes；标题变更 → 同号直通在途卡（不重复开卡）', async () => {
     const repo = mkRepo()
     try {
       git(repo.root, 'remote add origin https://github.com/foo/bar.git')
       const root = queueRoot(repo.root)
-      const first = runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502'), stderr: '' }) })
+      const first = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502'), stderr: '' }) })
       expect(first.created).toHaveLength(1)
       expect(first.relayed).toHaveLength(0)
       const cardId = first.created[0]
@@ -311,7 +311,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
       // 提交进队列（模拟 submit）后标题变更 → 新卡 id，但同 issue 号 → 直通 pending 在途卡 + 事件留痕
       fs.mkdirSync(path.join(root, 'pending'), { recursive: true })
       fs.renameSync(path.join(draftsDir, `${cardId}.md`), path.join(root, 'pending', `${cardId}.md`))
-      const second = runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502（更新）'), stderr: '' }) })
+      const second = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502（更新）'), stderr: '' }) })
       expect(second.created).toHaveLength(0)
       expect(second.relayed).toHaveLength(1)
       expect(second.relayed[0]).toMatchObject({ card: cardId, card_state: 'pending' })
@@ -325,7 +325,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
       expect(() => loadCard(cardText2, 'x.md')).not.toThrow()
 
       // 同标题再扫 → 同 id 信号已直通过（幂等防重）→ already_relayed drop，不重复 append
-      const third = runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502（更新）'), stderr: '' }) })
+      const third = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502（更新）'), stderr: '' }) })
       expect(third.created).toHaveLength(0)
       expect(third.relayed).toHaveLength(0)
       expect(third.dropped.map((d) => d.reason)).toEqual(['already_relayed'])
@@ -338,18 +338,18 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
     }
   })
 
-  it('merged 卡 14 天窗口内同源信号（issue 号）→ drop 不开新卡，事件 reason=recent_card', () => {
+  it('merged 卡 14 天窗口内同源信号（issue 号）→ drop 不开新卡，事件 reason=recent_card', async () => {
     const repo = mkRepo()
     try {
       git(repo.root, 'remote add origin https://github.com/foo/bar.git')
       const root = queueRoot(repo.root)
-      const first = runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '原始标题'), stderr: '' }) })
+      const first = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '原始标题'), stderr: '' }) })
       const cardId = first.created[0]
       const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
       ensureQueue(root) // merged/ 目录
       fs.renameSync(path.join(draftsDir, `${cardId}.md`), path.join(root, 'merged', `${cardId}.md`)) // 提案提交合并后落 merged/
       // 标题变更 → 新 id；issue 号哈希与 merged 卡 signal_hashes 碰撞 → drop
-      const second = runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '重开后的新标题'), stderr: '' }) })
+      const second = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '重开后的新标题'), stderr: '' }) })
       expect(second.created).toHaveLength(0)
       expect(second.dropped).toHaveLength(1)
       expect(second.dropped[0].reason).toBe('recent_card')
@@ -366,13 +366,13 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
     }
   })
 
-  it('smartFilter 开启 + 引擎不可用 → 跳过 LLM 层全落卡 + scan_semantic skipped 事件，不阻断', () => {
+  it('smartFilter 开启 + 引擎不可用 → 跳过 LLM 层全落卡 + scan_semantic skipped 事件，不阻断', async () => {
     const repo = mkRepo({ extra: { scan: { smartFilter: true }, review: { backend: 'nonexistent-engine' } } })
     try {
       const src = path.join(repo.root, 'src')
       fs.mkdirSync(src, { recursive: true })
       fs.writeFileSync(path.join(src, 'a.ts'), '// TODO: 保留的待办\nexport {}\n')
-      const r = runScan(repo.root, { todo: true })
+      const r = await runScan(repo.root, { todo: true })
       expect(r.created).toHaveLength(1) // 全部 keep 落卡（保守）
       const scanEvents = eventsOf(repo.root, 'scan')
       expect(scanEvents.find((e) => e.type === 'scan_semantic')?.skipped).toContain('未知引擎')
@@ -383,7 +383,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
     }
   })
 
-  it('smartFilter 开启 + 注入 spawnFn：drop/merge 分流落账，merge 内容追加进保留卡', () => {
+  it('smartFilter 开启 + 注入 spawnFn：drop/merge 分流落账，merge 内容追加进保留卡', async () => {
     const repo = mkRepo({ extra: { scan: { smartFilter: true }, review: { backend: 'mock' } } })
     try {
       const src = path.join(repo.root, 'src')
@@ -397,7 +397,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
       const mainId = byText('主问题')
       const mergeId = byText('同根因')
       const noiseId = byText('纯噪音')
-      const r = runScan(repo.root, {
+      const r = await runScan(repo.root, {
         todo: true,
         semanticSpawnFn: ({ prompt }: { prompt: string }) => {
           expect(prompt).toContain(mainId) // 批量一次调用带上全部候选

@@ -45,10 +45,14 @@ export function collectMerges(repoRoot, queueRootDir) {
   return merges;
 }
 
-/** 回溯失败检测：合并提交在 develop 上有对应 revert commit（message 形如 Revert "Merge branch 'feature/<id>'"）。 */
-export function detectReverted(repoRoot, taskId) {
+/** 回溯失败检测：合并提交在 baseBranch（workflow.json baseBranch，缺省 develop）上有对应
+ *  revert commit（message 形如 Revert "Merge branch 'feature/<id>'"）。
+ *  baseBranch 必须透传：写死 develop 时，非 develop 主干的仓库（本工具链宣称零项目专属
+ *  假设）git log 直接报错 → catch 返回 false → 回溯率恒 0、永不降级，「漂移监控没有
+ *  不监控档」的红线在这类仓库形同虚设且无任何告警。 */
+export function detectReverted(repoRoot, taskId, baseBranch = 'develop') {
   try {
-    const out = execFileSync('git', ['log', 'develop', '--format=%s', '--grep', `^Revert .*feature/${taskId}'`], {
+    const out = execFileSync('git', ['log', baseBranch, '--format=%s', '--grep', `^Revert .*feature/${taskId}'`], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
@@ -61,14 +65,17 @@ export function detectReverted(repoRoot, taskId) {
 
 /**
  * 评估漂移：统计 + 超阈值自动写降级标记（幂等——已降级不覆盖原标记的降级时间）。
- * 阈值来自 workflow.json driftThreshold（缺省 DRIFT_THRESHOLD）。
+ * 阈值来自 workflow.json driftThreshold（缺省 DRIFT_THRESHOLD）；baseBranch 同源
+ * （workflow.json baseBranch ?? 'develop'）。
  * 返回 { autoTotal, autoReverted, humanTotal, rate, threshold, degraded }。
  */
 export function evaluateDrift(repoRoot, queueRootDir) {
-  const threshold = loadWorkflowConfig(repoRoot).driftThreshold ?? DRIFT_THRESHOLD;
+  const wf = loadWorkflowConfig(repoRoot);
+  const threshold = wf.driftThreshold ?? DRIFT_THRESHOLD;
+  const baseBranch = wf.baseBranch ?? 'develop';
   const merges = collectMerges(repoRoot, queueRootDir);
   const autoMerges = merges.filter((m) => m.auto);
-  const reverted = autoMerges.filter((m) => detectReverted(repoRoot, m.id));
+  const reverted = autoMerges.filter((m) => detectReverted(repoRoot, m.id, baseBranch));
   const rate = autoMerges.length ? reverted.length / autoMerges.length : 0;
   let degraded = readDegraded(repoRoot);
   if (autoMerges.length > 0 && rate > threshold && !degraded) {

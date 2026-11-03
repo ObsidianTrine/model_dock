@@ -32,21 +32,37 @@ function readLock(p) {
  * 抢调度器锁。返回 true（已持有，含接管陈锁）或 false（他人持有且存活）。
  * acquired 回调形式不采用——调用方需要「失败即退出」的同步语义，release 由
  * releaseSchedulerLock 显式调用（进程死亡时陈锁自动被下次接管，不强求 finally）。
+ *
+ * 获取必须原子（flag:'wx' + EEXIST 重读判活接管，对齐 task-lock.mjs 同款）：
+ * 旧实现「先 readLock 判活再直写」有 TOCTOU——两个调度器（定时 nightly 与手动
+ * drain 撞点、或陈锁接管窗口）同时判「无锁/陈锁」会都写入成功双双起跑，正是
+ * 本文件头注要防的「pickNextCard 窗口期同时选中同一张卡」。陈锁最多重试接管
+ * 2 次；删不掉返回 unremovable 让调用方提示手动清理，不死循环。
  */
 export function acquireSchedulerLock(repoRoot, name = 'scheduler') {
   // 父调度器已持锁的子进程（drain/run 被 nightly/scan spawn）：豁免
   if (process.env[SCHED_LOCK_ENV] === '1') return { held: true, inherited: true };
   const p = schedulerLockPath(repoRoot);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  const cur = readLock(p);
-  if (cur && Number.isInteger(cur.pid) && isAlive(cur.pid)) {
-    return { held: false, owner: cur };
+  for (let takeovers = 0; ; takeovers++) {
+    try {
+      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, cmd: name, acquired_at: new Date().toISOString() }, null, 2), { flag: 'wx' });
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const cur = readLock(p);
+      if (cur && Number.isInteger(cur.pid) && isAlive(cur.pid)) {
+        return { held: false, owner: cur };
+      }
+      if (takeovers >= 2) return { held: false, owner: cur ?? { pid: null, cmd: name }, unremovable: true };
+      let tookOver = false;
+      try { fs.rmSync(p, { force: true }); tookOver = true; } catch { /* 下一轮重查 */ }
+      if (tookOver) {
+        console.log(`[orchestrator] 接管陈旧调度器锁（pid=${cur?.pid ?? '?'} 已退出，${cur?.cmd ?? 'unknown'}）`);
+      }
+      continue;
+    }
+    return { held: true, inherited: false };
   }
-  if (cur) {
-    console.log(`[orchestrator] 接管陈旧调度器锁（pid=${cur.pid} 已退出，${cur.cmd ?? 'unknown'}）`);
-  }
-  fs.writeFileSync(p, JSON.stringify({ pid: process.pid, cmd: name, acquired_at: new Date().toISOString() }, null, 2));
-  return { held: true, inherited: false };
 }
 
 export function releaseSchedulerLock(repoRoot) {
