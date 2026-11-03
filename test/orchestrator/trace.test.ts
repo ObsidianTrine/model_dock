@@ -11,7 +11,7 @@ import { readDecisionTraces, writeDecisionTrace } from '../../.agents/scripts/or
 import { watchdogCheck } from '../../.agents/scripts/orchestrator/watchdog.mjs'
 import { semanticFilter } from '../../.agents/scripts/orchestrator/eventfilter.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
-import { cardText, eventsOf, mkRepo, readCard, runOrch } from './helpers.js'
+import { cardText, eventsOf, mkRepo, readCard, runOrch, tryOrch } from './helpers.js'
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -322,6 +322,56 @@ describe('orchestrator trace > reviewer 集成（mock 后端闭环）', () => {
       expect(doc.parsed).toEqual({ blockers: 0, suggestions: 1, notes: 0 })
       expect(doc.meta.backend).toBe('mock')
       expect(typeof doc.meta.durationMs).toBe('number')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+describe('orchestrator trace > planner 会话留底（propose/intent，kind=planner）', () => {
+  it('intent 失败路径（ORCH_MOCK_PLANNER_INVALID=1）：每次尝试留一份 trace 含原始输出全文，stderr 附 exitCode', () => {
+    const repo = mkRepo()
+    try {
+      const r = tryOrch(repo.root, 'intent "broken" --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
+      expect(r.status).not.toBe(0)
+      expect(r.stderr).toContain('均未产出任务卡契约块')
+      expect(r.stderr).toContain('exitCode=0') // 失败日志不再只有「N 次均未产出契约块」
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
+      const session = fs.readdirSync(logsDir).find((d) => d.startsWith('planner-'))
+      expect(session).toBeTruthy()
+      const traces = readDecisionTraces(repo.root, session!, { kind: 'planner' })
+      expect(traces).toHaveLength(3)
+      const docs = traces.map((t) => t.doc)
+      expect(docs.map((d) => d.meta.attempt)).toEqual([3, 2, 1]) // readDecisionTraces 新→旧
+      for (const doc of docs) {
+        expect(doc.kind).toBe('planner')
+        expect(doc.taskId).toBe(session)
+        expect(doc.meta.command).toBe('intent')
+        expect(doc.meta.exitCode).toBe(0)
+        expect(doc.output).toContain('没有产出任务卡') // mock planner 原始输出全文（复盘现场）
+        expect(doc.parsed).toBeNull()
+      }
+      expect(docs[1].input).toContain('重试要求') // 重试追加的要求随 prompt 全文留痕
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('intent 成功路径：spawn 结果同样留底（parsed.blocks=1、usage 留痕），落卡行为不变', () => {
+    const repo = mkRepo()
+    try {
+      runOrch(repo.root, 'intent "write the docs" --backend mock')
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
+      const session = fs.readdirSync(logsDir).find((d) => d.startsWith('planner-'))
+      expect(session).toBeTruthy()
+      const traces = readDecisionTraces(repo.root, session!, { kind: 'planner' })
+      expect(traces).toHaveLength(1)
+      const doc = traces[0].doc
+      expect(doc.parsed).toEqual({ blocks: 1 })
+      expect(doc.meta.exitCode).toBe(0)
+      expect(doc.meta.usage).toEqual({ tokensIn: 300, tokensOut: 200 })
+      expect(doc.output).toContain('agents-card') // 契约块标记（CARD_MARKER）原文在留底里
+      expect(readCard(repo.root, 'pending', 'write-the-docs')).toBeTruthy() // 主流程不受影响
     } finally {
       repo.cleanup()
     }

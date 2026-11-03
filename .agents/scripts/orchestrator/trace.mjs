@@ -1,6 +1,7 @@
 // trace.mjs — LLM 决策留底（decision trace）。
-// 背景：编排器的三类 LLM 决策点——进展看门狗（watchdog.mjs watchdogCheck）、scan 语义
-// 过滤（eventfilter.mjs semanticFilter）、独立审查（orchestrator.mjs reviewer 会话）——
+// 背景：编排器的四类 LLM 决策点——进展看门狗（watchdog.mjs watchdogCheck）、scan 语义
+// 过滤（eventfilter.mjs semanticFilter）、独立审查（orchestrator.mjs reviewer 会话）、
+// planner 规划会话（orchestrator.mjs propose/intent，kind=planner）——
 // 此前只留了截断的 reason/verdict 字符串（事件里 ≤300 字符），模型当时看到的输入与原始
 // 输出没有落盘：actuate 档看门狗误杀任务、smartFilter 误丢信号时无法复盘「模型为什么
 // 这么判」。参考 DeepSeek《Super-agent 设计探索》第 6 节 Watchdog 的可问询形态——留底
@@ -79,7 +80,7 @@ let seqCounter = 0;
  * @param {object} trace
  *   - root   决策主体的日志目录（logs/<taskId>，与 events.jsonl 同层）
  *   - taskId 主体 id（任务卡 id 或 scan/orchestrator 等固定名；记入 JSON 留痕，可省）
- *   - kind   决策类型（watchdog | smartfilter | review；也是文件名前缀与滚动单位）
+ *   - kind   决策类型（watchdog | smartfilter | review | planner；也是文件名前缀与滚动单位）
  *   - input  传给模型的输入全文（prompt / 时间线摘要；超限截前缀）
  *   - output 模型原始输出全文（超限截前缀）
  *   - parsed 解析后的结构化结果（verdict / 数组 / null）
