@@ -3075,3 +3075,89 @@ describe('定时 prefer 窗口接管：syncBakedClientsForDisplayRoute 跟随', 
     }
   })
 })
+
+describe('外部配置字段级守卫（手编坏值不冒裸 TypeError）', () => {
+  it('codex：model_providers 被手编成字符串 → attach 抛可操作 AdapterError（非 TypeError）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(baseCfg())
+      const dir = path.join(h.home, '.codex')
+      await ensureDir(dir)
+      await atomicWrite(path.join(dir, 'config.toml'), 'model_providers = "oops"\n', 0o600)
+      // AdapterError（带字段名与修法），而非裸 TypeError（startsWith is not a function 等）
+      await expect(
+        codexAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.toThrow(/model_providers/)
+      await expect(
+        codexAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.not.toThrow(/is not a function|Cannot create property/)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
+  it('zcode：config 不是对象 / providerRules 不是数组 → attach 抛可操作 AdapterError', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_ZCODE_PRESENT = '1'
+    try {
+      await saveConfig(baseCfg())
+      const pp = path.join(h.home, '.zcode', 'v2', 'provider_config.json')
+      await ensureDir(path.dirname(pp))
+      await atomicWrite(pp, JSON.stringify({ schemaVersion: 1, config: 'oops' }), 0o600)
+      await expect(
+        zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.toThrow(/「config」/)
+
+      await atomicWrite(
+        pp,
+        JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: 'oops' } } }),
+        0o600
+      )
+      await expect(
+        zcodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      ).rejects.toThrow(/providerRules/)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('mimo-code：detach 时 model 被手编成数字 → 不再 TypeError，网关条目照常清理', async () => {
+    const h = fakeHome()
+    try {
+      await saveConfig({ ...baseCfg(), gateway: { port: 8687 } })
+      const cfgFile = path.join(h.home, '.config', 'mimocode', 'mimocode.json')
+      await ensureDir(path.dirname(cfgFile))
+      // 模拟接入后用户把 model 手编成数字（旧代码 root.model?.startsWith 抛 TypeError）
+      await atomicWrite(
+        cfgFile,
+        JSON.stringify({
+          provider: { modeldock: { npm: '@ai-sdk/openai-compatible', name: 'ModelDock', options: { baseURL: 'http://127.0.0.1:8687/v1', apiKey: 'mdk_x' } } },
+          model: 123,
+        }),
+        0o600
+      )
+      const plan = await mimoCodeAdapter.planDetach(await loadConfig())
+      expect(plan.changes.length).toBeGreaterThan(0)
+      const after = JSON.parse(plan.changes[0]!.after)
+      expect(after.provider?.modeldock).toBeUndefined() // 网关条目已清
+      expect(after.model).toBe(123) // 非字符串 model 原样保留（不误删用户值）
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('ensurePlainObjectField：undefined/null 放行，原始值/数组抛带字段名与路径的 AdapterError', async () => {
+    const { ensurePlainObjectField } = await import('../src/adapters/shared.js')
+    const { AdapterError } = await import('../src/adapters/types.js')
+    expect(() => ensurePlainObjectField(undefined, 'x', '/p')).not.toThrow()
+    expect(() => ensurePlainObjectField(null, 'x', '/p')).not.toThrow()
+    expect(() => ensurePlainObjectField({}, 'x', '/p')).not.toThrow()
+    expect(() => ensurePlainObjectField('oops', 'provider', '/a/b.json')).toThrow(AdapterError)
+    expect(() => ensurePlainObjectField('oops', 'provider', '/a/b.json')).toThrow(/「provider」/)
+    expect(() => ensurePlainObjectField('oops', 'provider', '/a/b.json')).toThrow(/\/a\/b\.json/)
+    expect(() => ensurePlainObjectField([1], 'model_providers', '/a/b')).toThrow(/array/)
+  })
+})

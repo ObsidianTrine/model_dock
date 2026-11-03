@@ -14,7 +14,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, cliPresent, residueNote, type AppPresent } from './presence.js'
-import { changeIfChanged, directAttachNote, directResponsesEndpointNote, noChangeResult, oursEntryUrl, pointingStatus, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, directResponsesEndpointNote, ensurePlainObjectField, noChangeResult, oursEntryUrl, pointingStatus, resolveRoute, routeModelNote } from './shared.js'
 import { resolvedModelView } from '../providers/resolve.js'
 
 /**
@@ -406,8 +406,18 @@ export const zcodeAdapter: HarnessAdapter = {
         t('请修正或删除该文件后重新接入', 'Fix or delete the file and attach again')
       )
     }
+    // 字段级守卫：config / providerConfigRules 被手编成原始值、providerRules 不是数组时，
+    // 下面赋值/ filter 会以裸 TypeError 冒顶——转可操作 AdapterError（文件路径 + 当前类型）
+    ensurePlainObjectField(root.config, 'config', personalPath)
     const pconf = (root.config ??= {})
+    ensurePlainObjectField(pconf.providerConfigRules, 'config.providerConfigRules', personalPath)
     const rules = ((pconf.providerConfigRules ??= {}).providerRules ??= [])
+    if (!Array.isArray(rules)) {
+      throw new AdapterError(
+        t('{file} 的 config.providerConfigRules.providerRules 不是数组（当前是 {kind}），已中止（未做任何改动）', 'config.providerConfigRules.providerRules in {file} is not an array (got {kind}); aborted (nothing changed)', { file: personalPath, kind: typeof rules }),
+        t('把该字段改回数组（或删掉让 ZCode 重建）后重新接入', 'Make the field an array again (or remove it and let ZCode rebuild it), then attach again')
+      )
+    }
     pconf.providerConfigRules.providerRules = rules.filter((r) => r?.providerId !== PROVIDER_ID)
     pconf.providerConfigRules.providerRules.push({
       providerId: PROVIDER_ID,

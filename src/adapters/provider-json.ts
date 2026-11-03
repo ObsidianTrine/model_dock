@@ -11,7 +11,7 @@ import {
 } from './types.js'
 import { detectJsonIndent, parseJsonTolerant, serializeJson } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
-import { changeIfChanged, directAttachNote, noChangeResult, oursEntryUrl, resolveRoute, routeModelNote } from './shared.js'
+import { changeIfChanged, directAttachNote, ensurePlainObjectField, noChangeResult, oursEntryUrl, resolveRoute, routeModelNote } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
 /** mimocode schema 的单模型条目（$schema https://mimo.xiaomi.com/mimocode/config.json 的 provider.<id>.models 值） */
@@ -147,6 +147,9 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
         root = parsed.value as JsonConfig
         hadComments = parsed.comments
       }
+      // 字段级守卫：provider 被手编成字符串/数字时，下面 `providers.modeldock = …` 会以裸
+      // TypeError 冒顶（对原始值赋属性，严格模式直接炸）——转可操作 AdapterError
+      ensurePlainObjectField(root.provider, 'provider', p)
       const providers = (root.provider ??= {})
       // 直连：openai 兼容客户端用上游 openai 端点（缺省回退 base_url）+ 真实 Key
       const d = opts.direct
@@ -269,7 +272,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
       const base = entry?.options?.baseURL
       if (entry && oursEntryUrl(base, factory.id, cfg)) {
         delete root.provider!.modeldock
-        if (root.model?.startsWith('modeldock/')) delete root.model
+        if (typeof root.model === 'string' && root.model.startsWith('modeldock/')) delete root.model
         if (root.provider && Object.keys(root.provider).length === 0) delete root.provider
         const notes: string[] = []
         if (parsed.comments) {
