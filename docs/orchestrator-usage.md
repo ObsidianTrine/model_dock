@@ -123,6 +123,40 @@ node .agents/scripts/orchestrator.mjs abandon <task-id>            # 放弃（wo
 
 `run` 在交互终端会在闸门处直接问（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；脚本/CI 非交互时打印提示后退出，用上面的命令异步处理。
 
+### 4.6 双向批示（飞书卡片远程审批，可选）
+
+人不在电脑前时，闸门等待只能靠回工位处理。可选开启**双向批示**：闸门落位在飞书群里除文本通知外多发一张带按钮的交互卡片，点按钮即远程执行 approve / reject / retry（第 4.5 节同名命令，走完全相同的门禁）。**缺省完全不启用**——不发卡、不监听、不占端口。
+
+**workflow.json 开启发卡**（`.agents/workflow.json`）：
+
+```json
+{ "notify": { "cardWebhook": true } }
+```
+
+开启后 `awaiting-human` / `blocked`（含预算熔断、看门狗）落位与风暴滞留（weather hold）在原文本通知之外额外发一张飞书 interactive 卡；按钮点击回调本机监听器。仅飞书机器人端点（`open.feishu.cn` / `open.larksuite.com`）发卡，企业微信 / Slack 自动跳过。
+
+**飞书侧配置**（一次性）：
+
+1. 在目标群添加「自定义机器人」（群设置 → 群机器人 → 添加），拿到的 webhook 地址照旧填 `${envPrefix}_ORCH_WEBHOOK`（或 darwin 钥匙串 `security add-generic-password -s <scheduleId>.webhook -w <URL>`）。文本通知与卡片共用这个地址。
+2. 到[飞书开放平台](https://open.feishu.cn/)自建一个应用，开通「机器人」能力，在「事件与回调」页选择**使用长连接或回调地址**——本机监听器只能选**回调地址**模式（本机地址无法被飞书直连，需转发方案，见第 3 步），记下页面的 **Verification Token**。
+3. 让飞书能打到本机：回调地址必须是公网可达的 https。常用转发方案任选其一——frp / ngrok / cloudflared 隧道把公网域名转发到本机监听端口；或部署在有公网的主机上（监听器只绑 127.0.0.1，公网部署时在其前面加反代并自行加固）。把转发后的地址填进开放平台「卡片请求网址」，保存时飞书会发 `url_verification` 握手，监听器自动回显 challenge。
+4. 本机启动监听器：
+
+```bash
+export AGENTS_LARK_VERIFICATION_TOKEN=<开放平台的 Verification Token>
+export AGENTS_ORCH_WEBHOOK=<第 1 步的机器人 webhook 地址>   # 发卡用（或走钥匙串）
+node .agents/scripts/approval-listener.mjs --port 18991      # 缺省端口写进 workflow.json "notify": { "listenerPort": 18991 }
+```
+
+监听器**必须显式指定端口**（`--port` 或 `notify.listenerPort`），缺省不监听；只绑 `127.0.0.1`，永不对外网卡。批示结果以 toast 回复群里（✅ 已批准合并 / ❌ 已驳回：原因 / 🔁 已打回重跑），审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`。
+
+**安全边界**：
+
+- 验签强制：verification token 与 `AGENTS_LARK_VERIFICATION_TOKEN` 不一致一律 403；env 未配置则拒绝所有动作。token 是密钥，不写日志、不入库。
+- 监听器不新增权限：按钮映射的就是 orchestrator 既有 `approve / reject / retry` 命令，approve 仍要过 feature-branch finish 的完整门禁与 testCmd（合并不是按钮说了算）。
+- 动作白名单 approve / reject / retry；同任务同动作 60 秒内重复点击忽略（防手抖）。
+- 转发链路会暴露到公网，token 之外无其他凭据保护——不建议把高权限网络的转发长期开着；用完即关或限制来源 IP。
+
 ## 5. 状态地图（任务卡在哪、下一步是什么）
 
 ```

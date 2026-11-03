@@ -151,17 +151,30 @@ export function loadWorkflowConfig(repoRoot) {
 }
 
 /** notify 配置解析（通知通道扩展点）：{ keychainService?: string（darwin 钥匙串服务名，
- *  承载 webhook URL——launchd/cron 环境极瘦读不到 env，runner 与 notify() 兜底都查它）。
- *  缺省 null → 调用方派生 `${scheduleId}.webhook`，向后兼容（老 workflow.json 无此键一切照旧）。 */
+ *  承载 webhook URL——launchd/cron 环境极瘦读不到 env，runner 与 notify() 兜底都查它），
+ *  cardWebhook?: boolean（缺省 false——需要人工动作的落位事件额外发一张飞书交互卡片，
+ *  按钮批示经 approval-listener 回流；非飞书 webhook 端点自动跳过），
+ *  listenerPort?: 正整数（approval-listener 缺省监听端口；监听器必须显式配置才启动，
+ *  永不缺省监听）}。缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
 function resolveNotify(raw) {
-  const DEFAULTS = { keychainService: null };
+  const DEFAULTS = { keychainService: null, cardWebhook: false, listenerPort: null };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn('[workflow-config] notify 配置非法，已回落缺省：应为对象 { keychainService?: 服务名 }（.agents/workflow.json 的 notify 键）');
+    warn(`应为对象，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const keychainService = typeof raw.keychainService === 'string' && raw.keychainService.trim() ? raw.keychainService.trim() : null;
-  return { keychainService };
+  const cardWebhook = raw.cardWebhook === true;
+  if (raw.cardWebhook !== undefined && typeof raw.cardWebhook !== 'boolean') {
+    warn(`cardWebhook ${JSON.stringify(raw.cardWebhook)} 不合法（允许 true | false）`);
+  }
+  const listenerPort = Number.isInteger(raw.listenerPort) && raw.listenerPort > 0 && raw.listenerPort <= 65535 ? raw.listenerPort : null;
+  if (raw.listenerPort !== undefined && listenerPort === null) {
+    warn(`listenerPort ${JSON.stringify(raw.listenerPort)} 不合法（须为 1-65535 的正整数）`);
+  }
+  return { keychainService, cardWebhook, listenerPort };
 }
 
 /** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即
