@@ -277,6 +277,38 @@ describe('workflow-config > testCmd 三形态与工具函数', () => {
   })
 })
 
+describe('workflow-config > propose（舰队反馈开关，缺省关）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-propose-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('缺省 feedback false（行为与历史一致）；显式 true 生效；非 true 值视为 false', () => {
+    expect(cfgOf({}).propose).toEqual({ feedback: false })
+    expect(cfgOf({ propose: { feedback: true } }).propose).toEqual({ feedback: true })
+    expect(cfgOf({ propose: { feedback: 'yes' } }).propose).toEqual({ feedback: false })
+    expect(cfgOf({ propose: { other: 1 } }).propose).toEqual({ feedback: false })
+  })
+
+  it('非法 propose 值回落缺省并 console.warn 告警（可操作文案）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ propose: 'on' }).propose).toEqual({ feedback: false })
+      expect(cfgOf({ propose: ['feedback'] }).propose).toEqual({ feedback: false })
+      expect(String(warn.mock.calls[0]?.[0])).toContain('propose')
+      expect(String(warn.mock.calls[0]?.[0])).toContain('feedback')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
 describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况子键）', () => {
   function cfgOf(obj: Record<string, unknown>) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-wh-'))

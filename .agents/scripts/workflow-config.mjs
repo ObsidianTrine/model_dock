@@ -141,6 +141,7 @@ export function loadWorkflowConfig(repoRoot) {
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
     autopilot: resolveAutopilot(raw.autopilot),
+    propose: resolvePropose(raw.propose),
     weatherHold: resolveWeatherHold(raw.weatherHold),
     autoResume: resolveAutoResume(raw.autoResume),
     trace: resolveTrace(raw.trace),
@@ -181,6 +182,23 @@ function resolveEscalation(raw) {
     const b = typeof raw.fallbackBackend === 'string' && raw.fallbackBackend.trim() ? raw.fallbackBackend.trim() : '';
     if (b) out.fallbackBackend = b;
   }
+  return out;
+}
+
+/** propose 配置解析（需求综合）：{ feedback?: bool（缺省 false=planner prompt 不注入
+ *  舰队反馈段，行为与历史版本一致；true = 注入 stats 同源的运行度量数据事实段） }。
+ *  非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）。 */
+function resolvePropose(raw) {
+  const DEFAULTS = { feedback: false };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] propose 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 propose 键：{ feedback?: boolean }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { feedback? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.feedback !== undefined) out.feedback = raw.feedback === true;
   return out;
 }
 

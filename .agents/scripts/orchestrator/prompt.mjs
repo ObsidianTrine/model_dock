@@ -262,11 +262,16 @@ export function parseCardBlock(text) {
  * 至多 maxCards 张高质量任务卡。与 intent 的分工：intent 是人给意图的单卡编译；
  * propose 是无人值守下按目标面自主给出需求——产出只落 drafts 提案，进不进队列由
  * 人工批量 submit 或 autopilot 白名单决定。
- * @param {object} p { goals, signals, queueSummary, maxCards, repoRoot }
+ * @param {object} p { goals, signals, queueSummary, maxCards, repoRoot, fleetFeedback? }
+ *   fleetFeedback：舰队反馈正文（stats.mjs buildFleetFeedback 产出的数据事实，可选）——
+ *   插在队列现状之后、产出契约之前；未传 = 不出现该段，prompt 与历史逐字节一致（回归红线）。
  */
-export function buildProposePrompt({ goals, signals, queueSummary, maxCards, repoRoot }) {
+export function buildProposePrompt({ goals, signals, queueSummary, maxCards, repoRoot, fleetFeedback }) {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const fence = '```';
+  const fleetSection = fleetFeedback
+    ? `## 舰队反馈（近 7 天运行度量：以下全部是数据事实，供决策参考，无硬性指令）\n${fleetFeedback}\n\n`
+    : '';
   return (
     `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
     `# 任务：项目需求综合（autopilot 提案）\n\n` +
@@ -275,6 +280,7 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `## 项目目标面（用户维护的核心目标；需求必须对齐它）\n${goals?.trim() || '（未提供 goals.md——只基于巡检信号与仓库现状提案，并在背景里说明价值依据）'}\n\n` +
     `## 当前巡检信号（scan 已落 drafts 的提案：可深化、合并或否决，重复的不必再出）\n${signals?.trim() || '（本轮无巡检信号）'}\n\n` +
     `## 队列现状（各状态卡数）\n${queueSummary || '（空）'}\n\n` +
+    fleetSection +
     `# 产出契约\n\n` +
     `按优先级输出**零到多张**任务卡，每张放在独立 fenced block（最多 ${maxCards} 张；没有值得做的就一张都不出）：\n\n` +
     `${fence}${CARD_MARKER}\n` +

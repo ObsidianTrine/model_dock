@@ -7,9 +7,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { buildProposePrompt, parseCardBlocks } from '../../.agents/scripts/orchestrator/prompt.mjs'
+import { buildFleetFeedback, collectStatsSummary, extractGoalsThemes } from '../../.agents/scripts/orchestrator/stats.mjs'
 import { readGoals } from '../../.agents/scripts/orchestrator/goals.mjs'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
-import { mkRepo, runOrch, tryOrch } from './helpers.js'
+import { cardText, mkRepo, runOrch, tryOrch } from './helpers.js'
 
 describe('orchestrator propose > prompt 构建与解析', () => {
   it('buildProposePrompt：目标面/信号/队列现状/上限注入；无目标面降级提示', () => {
@@ -39,6 +40,73 @@ describe('orchestrator propose > prompt 构建与解析', () => {
       expect(readGoals(dir)).toBeNull()
       fs.writeFileSync(path.join(ap, 'goals.md'), '# 目标\n- 稳定全绿\n')
       expect(readGoals(dir)).toContain('稳定全绿')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('buildProposePrompt：传 fleetFeedback 才出现舰队反馈段（队列现状后、产出契约前）；不传 = 无该段且逐字节稳定', () => {
+    const base = { goals: 'g', signals: 's', queueSummary: 'pending=0', maxCards: 1, repoRoot: process.cwd() }
+    const fb = '- 运行画像：近 7 天启动任务 3 个，合并率 67%'
+    const withFb = buildProposePrompt({ ...base, fleetFeedback: fb })
+    expect(withFb).toContain('## 舰队反馈')
+    expect(withFb).toContain(fb)
+    expect(withFb.indexOf('舰队反馈')).toBeGreaterThan(withFb.indexOf('队列现状'))
+    expect(withFb.indexOf('舰队反馈')).toBeLessThan(withFb.indexOf('# 产出契约'))
+    const without = buildProposePrompt(base)
+    expect(without).not.toContain('舰队反馈')
+    expect(without).toBe(buildProposePrompt({ ...base, fleetFeedback: undefined })) // 关闭态逐字节稳定
+  })
+
+  it('buildFleetFeedback：数据事实行（画像/near-miss/各 type/drift/主题）；空数据与降级态降级输出', () => {
+    const fb = buildFleetFeedback({
+      summary: { window_days: 7, tasks_started: 4, settled: 3, merged: 2, merge_rate: 0.67, avg_merged_wall_min: 12, near_miss: { watchdog: 1, retries: 4, xte: 0, incidents: 1 } },
+      perType: [
+        { type: 'bugfix', started: 2, settled: 2, merged: 2, merge_rate: 1, avg_merged_wall_min: 12, avg_merged_tokens_peak: 52300 },
+        { type: 'refactor', started: 2, settled: 1, merged: 0, merge_rate: 0, avg_merged_wall_min: null, avg_merged_tokens_peak: null },
+      ],
+      drift: null,
+      goalsThemes: 'stats 反馈进规划',
+    })
+    expect(fb).toContain('启动任务 4 个')
+    expect(fb).toContain('合并率 67%')
+    expect(fb).toContain('watchdog suspect 1 / 瞬时重试 4 / 偏航报警 0 / 事故调查包 1')
+    expect(fb).toContain('bugfix 100%/12m/52.3k')
+    expect(fb).toContain('refactor 0%/-/-')
+    expect(fb).toContain('质量漂移：正常')
+    expect(fb).toContain('目标面当前主题：stats 反馈进规划')
+    const empty = buildFleetFeedback({
+      summary: { window_days: 7, tasks_started: 0, settled: 0, merged: 0, merge_rate: null, avg_merged_wall_min: null, near_miss: { watchdog: 0, retries: 0, xte: 0, incidents: 0 } },
+      perType: [],
+      drift: { reason: '自动合并回溯失败率 50% 超阈值 20%' },
+      goalsThemes: null,
+    })
+    expect(empty).toContain('无任务启动数据')
+    expect(empty).toContain('⚠ 降级中——自动合并回溯失败率 50%')
+    expect(empty).not.toContain('各类型消化数据')
+    expect(empty).not.toContain('目标面当前主题')
+  })
+
+  it('extractGoalsThemes：摘「当前主题」段到下一标题前；缺失/空 = null', () => {
+    const goals = '# 目标\n\n## 核心目标\n1. A\n\n## 当前主题\n- stats 反馈进规划\n- 修 known-issues\n\n## 明确不做\n- MCP 下发\n'
+    const themes = extractGoalsThemes(goals)
+    expect(themes).toContain('stats 反馈进规划')
+    expect(themes).toContain('修 known-issues')
+    expect(themes).not.toContain('MCP 下发')
+    expect(themes).not.toContain('核心目标')
+    expect(extractGoalsThemes('无段落标题的 goals')).toBeNull()
+    expect(extractGoalsThemes(null)).toBeNull()
+  })
+
+  it('collectStatsSummary：空仓库 rows 空、summary 全零、drift null（propose 舰队反馈安全降级）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-statsfb-'))
+    try {
+      const collected = collectStatsSummary(dir, { days: 7 })
+      expect(collected.rows).toEqual([])
+      expect(collected.summary.tasks_started).toBe(0)
+      expect(collected.summary.near_miss).toEqual({ watchdog: 0, retries: 0, xte: 0, incidents: 0 })
+      expect(collected.perType).toEqual([])
+      expect(collected.drift).toBeNull()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -145,4 +213,59 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
       repo.cleanup()
     }
   })
+})
+
+describe('orchestrator propose > 舰队反馈（propose.feedback，缺省关）', () => {
+  /** propose planner 会话 trace 里的 prompt 全文（decisions/planner-*.json 的 input）。 */
+  function plannerInputs(repo: string): string[] {
+    const logsDir = path.join(repo, '.agents', 'orchestrator', 'logs')
+    if (!fs.existsSync(logsDir)) return []
+    const out: string[] = []
+    for (const s of fs.readdirSync(logsDir).filter((d) => d.startsWith('planner-'))) {
+      const decDir = path.join(logsDir, s, 'decisions')
+      if (!fs.existsSync(decDir)) continue
+      for (const f of fs.readdirSync(decDir).filter((f) => f.startsWith('planner-') && f.endsWith('.json'))) {
+        out.push(String(JSON.parse(fs.readFileSync(path.join(decDir, f), 'utf8')).input ?? ''))
+      }
+    }
+    return out
+  }
+
+  function runOneTask(repo: string, id: string): void {
+    const cardFile = path.join(repo, `card-${id}.md`)
+    fs.writeFileSync(cardFile, cardText({ id }))
+    runOrch(repo, `submit "${cardFile}"`)
+    runOrch(repo, `run ${id} --backend mock`)
+  }
+
+  it('开启（propose.feedback: true）：planner 输入含舰队反馈段（stats 同源数据事实）', () => {
+    const repo = mkRepo({ extra: { propose: { feedback: true } } })
+    try {
+      runOneTask(repo.root, 'fb-on')
+      const out = runOrch(repo.root, 'propose --backend mock')
+      expect(out.status).toBe(0)
+      const inputs = plannerInputs(repo.root)
+      expect(inputs.length).toBeGreaterThan(0)
+      expect(inputs[0]).toContain('## 舰队反馈')
+      expect(inputs[0]).toContain('启动任务 1 个')
+      expect(inputs[0]).toContain('质量漂移')
+    } finally {
+      repo.cleanup()
+    }
+  }, 90_000)
+
+  it('缺省关闭：planner 输入无舰队反馈段（与历史一致）', () => {
+    const repo = mkRepo()
+    try {
+      runOneTask(repo.root, 'fb-off')
+      const out = runOrch(repo.root, 'propose --backend mock')
+      expect(out.status).toBe(0)
+      const inputs = plannerInputs(repo.root)
+      expect(inputs.length).toBeGreaterThan(0)
+      expect(inputs[0]).not.toContain('舰队反馈')
+      expect(inputs[0]).toContain('队列现状')
+    } finally {
+      repo.cleanup()
+    }
+  }, 90_000)
 })
