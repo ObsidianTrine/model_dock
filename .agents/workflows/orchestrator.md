@@ -393,3 +393,17 @@ node .agents/scripts/agent-init.mjs   # 交互生成 workflow.json + 注册 hook
 - 派生链：projectName 缺省取 package.json name（通知标题、调度标识、Windows 任务名都由它派生）。
 - 门禁命令：testCmd 必配；buildCmd/lintCmd/typecheckCmd/uiCheckCmd 配了才跑。
 - 领域 playbook（add-adapter/add-preset 等）是模板项目专属，移植时删除或重写；feature-branch/code-review/docs-sync/worktree-rescue/release/hotfix/orchestrator 通用可留用。
+
+### D5. 舰队控制台（fleet-console，跨仓聚合）
+
+一台机器上多个项目各自跑 Dockmaster 闭环时，健康度散落在各仓 `.agents/orchestrator/` 下；`fleet-console.mjs` 一条命令把整个「舰队」拉成一张只读看板（**纯只读，不改任何港口状态**，零第三方依赖，Node ≥18）：
+
+```bash
+node .agents/scripts/fleet-console.mjs [--project <目录>]... [--days 7] [--json]
+```
+
+- **项目清单**（合并去重）：CLI `--project`（可多次）+ 配置文件 `~/.agents/fleet-console.json`（`{ "projects": ["/abs/path", ...] }`，相对路径相对 `~/.agents` 解析；缺失视为无自定义，格式错误告警后忽略）+ 当前仓库（始终并入）。
+- **每港采集**：queue 七状态卡数；`logs/fleet.jsonl` 近 N 天事件按类型计数（weather_hold / sail_* 等）；`logs/nightly-state.json` 上次巡检时间（有 startedAt 无 finishedAt 标 ⚠未收尾）；`degraded.json` 漂移降级标记；并 spawn **该仓自带**的 `orchestrator.mjs stats --json --days N`（cwd=该项目根，30s 超时）取窗口汇总——合并率与安全晴雨表 near_miss。各港用各港的编排器版本出账，工具链自包含语义不破。
+- **容错**：无 `.agents/orchestrator/` 的项目标「非港口」跳过；stats 失败（脚本缺失/超时/退出非零/输出损坏）标「不可得」，该港其余指标照常出。
+- **输出**：人类可读对齐表格（待泊/在坞/搁浅/待放行/出港 N 天/合并率/险情/风暴/漂移/巡检 + 全队合计行）；`--json` 出机器可读结构（`projects[]` + `totals`），供脚本与 cron 消费。全队合计的窗口汇总只对「stats 可得」的港口求和（`totals.stats_ok_ports` 标明覆盖面）。
+- 典型用法：cron/nightly 拉一份 `--json` 存档；人工早上跑人类表格一眼看全队——哪港搁浅堆积、哪港风暴滞留、哪港漂移降级。
