@@ -51,6 +51,11 @@ describe('orchestrator sail > 纯逻辑件', () => {
     expect(parseDurationMinutes({ duration: 'abc' })).toBeNull()
     expect(parseDurationMinutes({ duration: '1h' })).toBe(60)
     expect(parseDurationMinutes({ duration: '0h' })).toBeNull()
+    // 秒级时长（冒烟/测试短航）：90s → 1.5 分钟；'1m30s' 组合同值；'0s' 非法
+    expect(parseDurationMinutes({ duration: '90s' })).toBe(1.5)
+    expect(parseDurationMinutes({ duration: '1m30s' })).toBe(1.5)
+    expect(parseDurationMinutes({ duration: ' 45SEC ' })).toBe(0.75)
+    expect(parseDurationMinutes({ duration: '0s' })).toBeNull()
   })
 
   it('canSailSubmit：白名单内通过；人工草稿/deps/核心路径/白名单外拒绝', () => {
@@ -215,13 +220,14 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
   it('到时收帆：不设 max-tasks 时只能靠 deadline 停（重复提案被队列去重，持续规划循环）', () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'sail --minutes 1 --interval 0 --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
+      // 秒级时长（90s 特性）压缩墙钟：deadline 机制与分钟航完全同一条路径，61s→~12s
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
       expect(out.stdout).toContain('到达时长上限')
       expect(latestReport(repo.root)).toContain('到达时长上限')
     } finally {
       repo.cleanup()
     }
-  }, 180_000)
+  }, 60_000)
 
   it('存量引水卡不触发无进展熔断：全引水队列走规划轮继续干活，引水卡原地保留', () => {
     const repo = mkRepo({ extra: { corePaths: ['src/gateway/server.ts'] } })

@@ -5,6 +5,12 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+### 新增
+
+- **自由航行秒级时长**：`sail --duration` 新增 `90s`、`1m30s` 形态——冒烟验证与定时短航不必再凑整分钟，`schedule --mode sail` 同步放行；既有 `45` / `90m` / `2h` / `1h30m` 行为不变。
+
 ## [1.6.0] - 2026-11-03
 
 成本核算上线：「花多少钱」全程可见；配套任务等级与数据面限额、doctor 新一轮检查、claude-code 接入打磨与一批修复。

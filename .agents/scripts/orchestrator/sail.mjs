@@ -1,5 +1,5 @@
 // sail.mjs — 自由航行（时间盒完全自治）的纯逻辑件，全部可单测：
-//   parseDurationMinutes  --minutes / --duration 的人话时长解析（45 | 90m | 2h | 1h30m）
+//   parseDurationMinutes  --minutes / --duration 的人话时长解析（45 | 90m | 2h | 1h30m | 90s）
 //   canSailSubmit         自由航行自动提交判定（开 sail 即本航次授权；硬禁区沿用 autopilot 哲学）
 //   snapshotQueue         队列状态快照（开航基线与收帆快照——战果清单的原料）
 //   snapshotDrafts        drafts/ 提案快照（每周期规划产出的 id/类型/目标句——「为什么这么编排」的原料）
@@ -24,7 +24,8 @@ export const DEFAULT_SAIL_SUBMIT_TYPES = ['docs', 'bugfix', 'refactor', 'feature
 
 /**
  * 解析自由航行时长。opts.minutes：正数分钟；opts.duration：人话规格
- * （'45' | '90m' | '2h' | '1h30m'，大小写不敏感、容忍空格）。两者都缺或非法 → null
+ * （'45' | '90m' | '2h' | '1h30m' | '90s' | '1m30s'，大小写不敏感、容忍空格；
+ * 秒级时长用于冒烟/测试短航——deadline 是分钟的小数表示）。两者都缺或非法 → null
  * （调用方 die 提示必须显式指定——自由航行烧钱，不允许静默默认时长）。
  */
 export function parseDurationMinutes(opts = {}) {
@@ -38,8 +39,12 @@ export function parseDurationMinutes(opts = {}) {
   if (combined) return (Number(combined[1]) * 60 + Number(combined[2])) || null;
   const hours = /^(\d+)\s*h$/.exec(spec);
   if (hours) return Number(hours[1]) * 60 || null;
+  const minSec = /^(\d+)\s*m\s*(\d+)\s*s(?:ec|econds?)?$/.exec(spec);
+  if (minSec) return (Number(minSec[1]) + Number(minSec[2]) / 60) || null;
   const mins = /^(\d+)\s*(?:m|min|minutes?)?$/.exec(spec);
   if (mins) return Number(mins[1]) || null;
+  const secs = /^(\d+)\s*s(?:ec|econds?)?$/.exec(spec);
+  if (secs) return Number(secs[1]) / 60 || null;
   return null;
 }
 
