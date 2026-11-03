@@ -51,6 +51,7 @@ One block per upstream provider; `<id>` is a name you choose (lowercase letters,
 | `enabled` | `boolean` | no | `true` | Set `false` to take the service offline manually: no probing, excluded from auto routing and failover. |
 | `priority` | `number` | no | `0` | Sorting weight for auto-routing candidates; higher wins. Only effective when "program picks the primary" is on. |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | no | none | Per-protocol base URL overrides: for vendors serving anthropic / openai / responses at different addresses; protocols without an entry fall back to `base_url`. |
+| `max_concurrency` | `number` | no | `0` (unlimited) | Concurrency cap for this service (queued at the gateway): when parallel agent workers trigger upstream 429 rate limits, set it to what the upstream tolerates — excess requests queue at the gateway instead of hammering the upstream; see `gateway.queue_wait_ms` for the queue wait. |
 
 Example:
 
@@ -66,6 +67,7 @@ proxy = "direct"
 enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
+max_concurrency = 2
 ```
 
 ## 3. Model metadata (models)
@@ -191,6 +193,7 @@ Gateway listening, timeouts, logs and failover behavior. Scheduled switching (`s
 | `auto_failover` | `boolean` | no | `false` (off) | Whether the program picks the primary automatically (time windows / priority / measured latency). Off (default) = the primary is whatever you pinned or the default route. Failing over when the primary is down always stays available regardless of this switch. |
 | `auto_route_provider` | `string` | no | empty (automatic) | Manually pinned primary provider id: routing prefers it (over program automation and time windows); empty = the program picks by window / default route. Same as the "Current" dropdown in the console. |
 | `failover_status_codes` | `number[]` | no | `[]` (no switch) | Upstream status codes that still allow switching to a backup after the response has started (e.g. `[429, 503]`); empty by default = a delivered response is passed through as-is, no switch. |
+| `queue_wait_ms` | `number` | no | `2000` | Queue wait cap (ms) when a service is at its `max_concurrency` limit: no free slot in time means the next candidate is tried / a 429 is returned. |
 | `route_next` | `string` | no | empty (automatic order) | Manually pinned "next in line": when the primary is down, this one is tried first (ahead of the backup chain); empty = ordered automatically by priority / measured latency. |
 | `auto_fallback` | `boolean` | no | `true` (on) | Automatic backup chain: beyond your manual chain, other enabled services are added as failover candidates automatically (ordered by window / priority / measured latency, models passed through); only an explicit `false` turns it off. |
 
@@ -207,6 +210,7 @@ log_retention_days = 30
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]
+queue_wait_ms = 5000
 route_next = "backup"
 auto_fallback = true
 ```
