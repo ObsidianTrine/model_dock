@@ -126,9 +126,10 @@ export function scanAudit(repoRoot) {
   ];
 }
 
-/** 信号源 3：测试失败（跑 testCmd，失败才生成；每天最多一张，同日重复去重）。 */
-export function scanTests(repoRoot, testCmdStr) {
-  const r = runCmd(testCmdStr, repoRoot);
+/** 信号源 3：测试失败（跑 testCmd，失败才生成；每天最多一张，同日重复去重）。
+ *  async：runCmd 已异步化（超时按进程树终止，不留 vitest 孤儿）。 */
+export async function scanTests(repoRoot, testCmdStr) {
+  const r = await runCmd(testCmdStr, repoRoot);
   if (r.ok) return [];
   const day = toIsoLocal().slice(0, 10);
   return [
@@ -313,7 +314,7 @@ function renderCard(c) {
  *   scan.smartFilter（缺省 false）批量一次调用，失败全部保守回落开卡。
  *   每个直通/丢弃/跳过都落事件（logs/scan/events.jsonl），每轮一条 scan_filtered 总账。
  */
-export function runScan(repoRoot, opts = {}) {
+export async function runScan(repoRoot, opts = {}) {
   const root = path.join(repoRoot, '.agents', 'orchestrator', 'queue');
   const drafts = path.join(repoRoot, '.agents', 'orchestrator', 'drafts');
   fs.mkdirSync(path.join(root, 'pending'), { recursive: true });
@@ -333,7 +334,7 @@ export function runScan(repoRoot, opts = {}) {
     if (r.skipped) warnings.push(r.reason);
     else candidates.push(...r);
   }
-  if (opts.tests) candidates.push(...scanTests(repoRoot, opts.testCmd));
+  if (opts.tests) candidates.push(...(await scanTests(repoRoot, opts.testCmd))); // scanTests 走异步 runCmd（超时树杀）
   if (opts.issues) {
     const r = scanIssues(repoRoot, { gh: opts.gh, run: opts.ghRun }); // ghRun：测试注入假执行器
     if (r.skipped) warnings.push(r.reason);

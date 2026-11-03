@@ -152,10 +152,10 @@ describe('异构审查集成（mock worker）> review_spawned 事件与显式后
 })
 
 describe('ui_check 门禁', () => {
-  it('gateUiCheck：未配置命令跳过；命令失败抛 GateError(gate=ui_check)', () => {
-    expect(gateUiCheck(process.cwd(), '')).toMatchObject({ ok: true, skipped: true })
+  it('gateUiCheck：未配置命令跳过；命令失败抛 GateError(gate=ui_check)', async () => {
+    await expect(gateUiCheck(process.cwd(), '')).resolves.toMatchObject({ ok: true, skipped: true })
     try {
-      gateUiCheck(process.cwd(), 'node -e "process.exit(3)"')
+      await gateUiCheck(process.cwd(), 'node -e "process.exit(3)"')
       expect.unreachable('应抛出 GateError')
     } catch (e) {
       expect((e as { gate?: string }).gate).toBe('ui_check')

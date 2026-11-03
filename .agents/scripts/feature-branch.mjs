@@ -684,9 +684,14 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     } else {
       for (const cmd of testCmds) {
         console.log(`Running verification inside the worktree: ${cmd}`);
-        const t = spawnSync(cmd, { cwd: wtPath, stdio: 'inherit', shell: true });
+        // timeout 必须有：本进程持有 .finish.lock 且心跳 setInterval 让锁永远「活」——
+        // 挂死的验证命令会无限期霸锁，后续所有 approve 的 bounded-wait 到点即 die、
+        // 任务逐张堆积 awaiting-human 且无告警指向根因。超时（对齐门禁 20min）即 die，
+        // exit handler 清锁，报错可操作
+        const t = spawnSync(cmd, { cwd: wtPath, stdio: 'inherit', shell: true, timeout: 20 * 60_000 });
         if (t.status !== 0) {
-          die(`verification failed on ${branch} ("${cmd}"). Fix inside ${wtPath}, commit, then re-run finish. ` +
+          const timedOut = t.error?.code === 'ETIMEDOUT' || t.signal === 'SIGTERM';
+          die(`verification failed on ${branch} ("${cmd}")${timedOut ? ' —— 超时（20min）被终止，检查是否有挂死的测试进程' : ''}. Fix inside ${wtPath}, commit, then re-run finish. ` +
             `(Use --skip-test only for changes that cannot affect behavior, e.g. pure docs.)`);
         }
       }

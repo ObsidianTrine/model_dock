@@ -5,10 +5,11 @@
 // .agents/workflow.json（见 workflow-config.mjs）；参数缺省时回落脚本锚定配置，
 // 配置缺省（空）= 对应门禁跳过（返回 skipped，调用方仍记 pass 事件），不再假设 npm/SEA/特定端口。
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadWorkflowConfig, isNpmFamily } from '../workflow-config.mjs';
+import { killTree } from './kill-tree.mjs';
 
 export class GateError extends Error {
   constructor(name, message, output = '') {
@@ -24,34 +25,53 @@ function git(cwd, args) {
 }
 
 /**
- * 跑 shell 命令（同步，捕获合并输出）。返回 { ok, output, durationMs, exitCode }。
- * 用 spawnSync shell 模式：testCmd 来自 workflow.json，是任意 shell 片段。
+ * 跑 shell 命令（异步，捕获合并输出）。返回 Promise<{ ok, output, durationMs, exitCode }>。
+ * 用 spawn shell 模式：testCmd 来自 workflow.json，是任意 shell 片段。
+ *
+ * 必须拿到子进程 pid 做超时树杀：spawnSync 的 timeout 只杀 shell 直接子进程，
+ * `npm test` 的 vitest/node 孙进程树全部成为孤儿——继续吃 CPU/句柄，还锁住 worktree
+ * 文件令后续 fixup/finish 的 rename 报 EBUSY/EPERM（AGENTS.md 点名的 Windows 高频坑）。
+ * 超时走 killTree（win32 taskkill /T /F；unix detached 进程组 kill(-pid)）。
+ * 输出上限沿用 64MB 量级（超限停止累积，防无界缓冲）。
  */
 export function runCmd(cmd, cwd, timeoutMs = 20 * 60_000) {
-  const started = Date.now();
-  const { status, stdout, stderr } = execSyncShim(cmd, cwd, timeoutMs);
-  return {
-    ok: status === 0,
-    exitCode: status,
-    output: `${stdout}\n${stderr}`.trim(),
-    durationMs: Date.now() - started,
-  };
-}
-
-// execSync 的 stderr 默认会打到父进程终端（stdio 继承），包一层收集
-function execSyncShim(cmd, cwd, timeoutMs) {
-  const r = spawnSync(cmd, {
-    cwd,
-    shell: true,
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    maxBuffer: 64 * 1024 * 1024,
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32', // unix 独立进程组：树杀 kill(-pid) 依赖它
+    });
+    const MAX_OUT = 64 * 1024 * 1024;
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child.pid);
+    }, timeoutMs);
+    timer.unref?.();
+    child.stdout.on('data', (d) => {
+      if (stdout.length < MAX_OUT) stdout += d;
+    });
+    child.stderr.on('data', (d) => {
+      if (stderr.length < MAX_OUT) stderr += d;
+    });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, exitCode: 1, output: `${cmd} 启动失败：${e.message}`, durationMs: Date.now() - started });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({
+        ok: !timedOut && code === 0,
+        exitCode: timedOut ? 124 : (code ?? 1),
+        output: `${stdout}\n${timedOut ? `[runCmd] 命令超时（${Math.round(timeoutMs / 1000)}s），已按进程树终止（含孙进程孤儿）` : stderr}`.trim(),
+        durationMs: Date.now() - started,
+      });
+    });
   });
-  return {
-    status: r.status ?? 1,
-    stdout: r.stdout ?? '',
-    stderr: r.stderr ?? '',
-  };
 }
 
 /** git diff develop...HEAD 的名称集合（A/M/D/R 全算改动面）。 */
@@ -93,9 +113,9 @@ function matchesAny(file, patterns) {
 // 六项门禁
 // ---------------------------------------------------------------------------
 
-/** npm_test：worktree 内跑 workflow.json 的 testCmd。 */
-export function gateNpmTest(cwd, testCmd) {
-  const r = runCmd(testCmd, cwd);
+/** npm_test：worktree 内跑 workflow.json 的 testCmd。（async：runCmd 拿 pid 做超时树杀） */
+export async function gateNpmTest(cwd, testCmd) {
+  const r = await runCmd(testCmd, cwd);
   if (!r.ok) throw new GateError('npm_test', `testCmd 退出码 ${r.exitCode}`, r.output);
   return r;
 }
@@ -104,9 +124,9 @@ export function gateNpmTest(cwd, testCmd) {
  * tsc_build：跑 workflow.json 的 buildCmd（产物不进仓库，只为验证构建/类型正确）。
  * buildCmd 未配置 → 跳过（skipped: true），调用方照常记 pass 事件。
  */
-export function gateTscBuild(cwd, buildCmd = loadWorkflowConfig().buildCmd) {
+export async function gateTscBuild(cwd, buildCmd = loadWorkflowConfig().buildCmd) {
   if (!buildCmd) return { ok: true, skipped: true };
-  const r = runCmd(buildCmd, cwd);
+  const r = await runCmd(buildCmd, cwd);
   if (!r.ok) throw new GateError('tsc_build', `${buildCmd} 退出码 ${r.exitCode}`, r.output);
   return r;
 }
@@ -115,17 +135,17 @@ export function gateTscBuild(cwd, buildCmd = loadWorkflowConfig().buildCmd) {
  * lint：跑 workflow.json 的 lintCmd（业界共识：lint/类型检查是独立确定性门禁，
  * 比 testCmd 粒度细、比 LLM 审查可靠）。未配置 → 跳过；失败进调试子循环（与 build 同级）。
  */
-export function gateLint(cwd, lintCmd = loadWorkflowConfig().lintCmd) {
+export async function gateLint(cwd, lintCmd = loadWorkflowConfig().lintCmd) {
   if (!lintCmd) return { ok: true, skipped: true };
-  const r = runCmd(lintCmd, cwd);
+  const r = await runCmd(lintCmd, cwd);
   if (!r.ok) throw new GateError('lint', `${lintCmd} 退出码 ${r.exitCode}`, r.output);
   return r;
 }
 
 /** typecheck：跑 workflow.json 的 typecheckCmd。语义与 lint 同（未配置跳过、失败可调试）。 */
-export function gateTypecheck(cwd, typecheckCmd = loadWorkflowConfig().typecheckCmd) {
+export async function gateTypecheck(cwd, typecheckCmd = loadWorkflowConfig().typecheckCmd) {
   if (!typecheckCmd) return { ok: true, skipped: true };
-  const r = runCmd(typecheckCmd, cwd);
+  const r = await runCmd(typecheckCmd, cwd);
   if (!r.ok) throw new GateError('typecheck', `${typecheckCmd} 退出码 ${r.exitCode}`, r.output);
   return r;
 }
@@ -136,9 +156,9 @@ export function gateTypecheck(cwd, typecheckCmd = loadWorkflowConfig().typecheck
  * 任务卡未声明 ui_check 时调用方根本不调这里；命令未配置 → 跳过。
  * 失败进调试子循环（与 build 同级），不是红线。
  */
-export function gateUiCheck(cwd, uiCheckCmd = loadWorkflowConfig().uiCheckCmd) {
+export async function gateUiCheck(cwd, uiCheckCmd = loadWorkflowConfig().uiCheckCmd) {
   if (!uiCheckCmd) return { ok: true, skipped: true };
-  const r = runCmd(uiCheckCmd, cwd);
+  const r = await runCmd(uiCheckCmd, cwd);
   if (!r.ok) throw new GateError('ui_check', `uiCheckCmd 退出码 ${r.exitCode}`, r.output);
   return r;
 }
