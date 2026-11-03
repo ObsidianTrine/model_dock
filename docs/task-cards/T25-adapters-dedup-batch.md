@@ -34,3 +34,9 @@ adapters 残留重复簇收敛 + 三处卫生项。**用户可见文案逐字节
 - oursEntryUrl / noChangeResult 的参数设计以七处调用点**最小改动**为准，不为未来扩展预留参数。
 - shared.ts 既有函数签名只增不改；不动 format.ts（XPLAT-09 JSONC 取舍留档，勿翻案）。
 - util/paths.ts 只删 adaptersDir 一行，不碰其他路径函数（硬规则：所有路径经 paths.ts 的约定不破）。
+
+---
+
+# 状态（2026-11-04 夜航核实）
+
+✅ 已合并 develop。

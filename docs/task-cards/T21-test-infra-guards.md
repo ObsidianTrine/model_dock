@@ -44,3 +44,9 @@ gate: L3
 - 不改任何 mock 的行为语义（只收敛形状来源）；不新增其他模块的 vi.mock。
 - **不做「双池并行」改造**（maintenance-handoff 在案不做清单）；不改 isolate:false + maxWorkers:1、不改 testTimeout、不改 watchdog。
 - attach-port 断言改动仅限端口字面量本身；不碰 hijackStateWithFakeGateway 的行为。
+
+---
+
+# 状态（2026-11-04 夜航核实）
+
+✅ 已合并 develop。

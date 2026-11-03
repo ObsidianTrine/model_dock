@@ -37,3 +37,9 @@ gate: L3
 - 不改 vitest 配置（isolate:false / singleFork / watchdog 纪律不动）。
 - 不动 `.agents/workflow.json` 的 testCmd 语义（仍是一条 `npm test`）。
 - 不把类型检查扩成「类型即测试」的过度工程（本卡只做 noEmit 门禁）。
+
+---
+
+# 状态（2026-11-04 夜航核实）
+
+✅ 已合并 develop。
