@@ -79,6 +79,8 @@
 | 2026-10-tray-ui-sync-http | 5s Timer 在 UI 线程同步 HealthOk（2s 超时 HTTP）+ 磁盘读，半挂时每 5s 冻结最长 2s | 3ba4d6e | ✅（10-31，GLM subagent）真修归属核对到卡 26 + 新活缺陷 UpdateProgressForm Timer 错线程（立即更新主链路进度窗永不刷新），立卡 29 |
 | 2026-11-orch-drafts-realpath-skip | cmdSubmit 草稿清理裸前缀比对不做 realpath：macOS tmpdir 是符号链接（/var/folders→/private/var/folders），argv 侧与 git toplevel 侧前缀永不一致——drafts 提案提交后草稿清理永远静默跳过 | 9f62c37 | ✅（11-02，GLM-5.3-Flash coding-plan）diffRef 题型首考即中——realpath/符号链接/startsWith 全中，机制+行号+修法齐全，另带 autopilot 人工草稿守卫失效 1 新发现；原文 runs/2026-11-02-firstrun-2026-11-orch-drafts-realpath-skip.md |
 | 2026-11-tier-silence-test-scenario-mismatch | zcode tier 静默回归用例场景与实现自相矛盾：用例名「默认引擎」却 --backend mock 起跑，tierWarnable 只对 zcode-headless 静默——not.toContain 断言必红，红用例随 d352822 溜过 finish 门禁 | c515b0e | ✅（11-02，GLM-5.3-Flash coding-plan）diffRef 双文件 diff 中——用例名「默认引擎」vs --backend mock 矛盾 + tierWarnable 证据链；原文 runs/2026-11-02-firstrun-2026-11-tier-silence-test-scenario-mismatch.md |
+| 2026-11-sail-pilotage-no-progress | sail 派发资格用 pending.length 判定「有活」，引水/解析失败卡 drain 跳过不动队列——每轮空转触发无进展熔断，30 分钟航程 12 秒收帆、规划轮零执行 | 2accc06 | —（2026-11-03 入库，待下次全量跑分） |
+| 2026-11-sail-report-foreign-merge | 航海报告 touched() 把基线→终态任何迁移都算本航次战果，并行会话航期内合并的卡（running→merged）误标进「已出港」 | 6792700 | —（2026-11-03 入库，待下次全量跑分） |
 
 **2026-10-31 合并 origin/develop 并账**：远端侧回灌批次 30 行考题并入上表——14 题已首跑全审出（10-30/31 GLM subagent 修复对回灌二/三/四轮，原文 runs/），16 题 ⏳ 待首跑、按既有口径不计入基线分母，下次全量跑分一并计入；远端侧原基线行（召回 34/34）由其上基线行（37/37）加本并账取代。
 **基线：召回 37/37 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19 + 10-31 强审查者 9/9——见下方 T31 强复跑行）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于新基线（36/36，或按模型分段对齐）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
@@ -171,3 +173,6 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 20. **管道尾退出码误判**（2026-10-30 coverage 取数）：`npm test | tail` 后 `$?` 是 tail 的 0——测试红了却判成功；且 vitest 失败跑不产 coverage 报告，双重误导连烧三次全量。堵法：退出码不经管道取（`set -o pipefail` 或命令与查看分开）；「该产出的报告没产出」本身就是失败信号。
 21. **空列表语义是守卫的隐形开关**（任务二 orch-autopilot-goals 分支内自纠）：autopilot 判定复用 hintsOverlap，而它对空列表按「重叠」保守返回 true——项目未配置 corePaths/releasePaths 时 guarded 列表为空，所有提案卡被「命中核心路径」全量拒绝，autopilot 静默瘫痪。堵法：复用判定原语前先核空输入语义（保守原语在守卫侧会反转成「全拦」），空列表要么短路（`guarded.length &&`）要么显式分支。
 22. **门禁 run 函数必须同步返回**（l0-gate-notify 分支内自纠）：runGates 消费 `const r = g.run()` 后直接把返回值透传给 passExtra——run 闭包写成 async 时拿到的是 Promise，skipped/reason 字段全部丢失，门禁静默降级。堵法：给 runGates 这类同步消费点加门禁时，先核消费侧的调用契约；async 诉求应在 run 外层 await，而不是把 async 闭包塞进同步槽位。
+23. **资格判定必须与下游跳过行为一致**（2026-11-03 sail 首航，30 分钟 12 秒收帆）：sail 用 pending.length 判「有活可派」，但 drain 的引水闸/解析失败跳过会让卡原地不动——每轮派发空转、无进展计数 +1，3 轮熔断把还没开跑的航程砍了。堵法：上游「可派发」判定按下游真实语义逐张核（pilotageRequired + 解析可过），全不可派时走规划轮；无进展熔断器要把「合法的不动」（待引水是稳态）与「真卡死」（子进程坏掉）分开。
+24. **共享状态上的差分观测要区分自因迁移与并发迁移**（2026-11-03 航海报告口径）：基线→终态 diff 把并行会话航期内合并的卡（running→merged）误标进本航次战果。堵法：多 agent 共享队列是常态，报告/审计/统计聚合先问「并发写者会往里塞什么」——只把自己造成的迁移（from pending / added / 本航次提案）计入，外部迁移单列披露。
+25. **正则新增分支入 \b(...)\b 组先核尾部边界**（2026-11-03 ERA 签名首写即红，测试抓住未上树）：给 transient 签名加 era[_-]?negotiation 进既有 \b(...)\b 组，'ERA_NEGOTIATION_FAILED' 的尾随 _FAILED 让尾部 \b 永不失配（下划线是 word 字符）。堵法：往带边界锚的正则组里加「下划线连接的标识符」分支时，边界只放前导（\bera[_-]?negotiation）或对真实故障原文逐字验证。
