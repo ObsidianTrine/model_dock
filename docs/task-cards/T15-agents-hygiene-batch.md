@@ -39,3 +39,9 @@ gate: L3
 - audit 事件字段与格式不变（消费方兼容）；events.jsonl 行格式不变；轮转只留一代，不引入新配置项。
 - 不做 pidAlive/isAlive、resolveCmds/resolveTestCmd 的跨文件去重——feature-branch 零内部依赖是刻意的可移植设计（cp -r .agents 移植约定）。
 - guard-develop 重排不得改变任何拦截判定结果。
+
+---
+
+# 状态（2026-11-04 夜航核实）
+
+✅ 已全部合并 develop：七项逐一对照现码核实——①guard-develop escape-hatch 先行（注释自证）；②events.mjs seqCache Map 已建；③policy.mjs AUDIT_ROTATE_BYTES 5MB 已设；④orchestrator.mjs:1944 child.on('error') 已挂；⑤newWorkerSettingsPath 已有专属测试（claude-backend-hardening.test.ts，原「死代码」前提失效，保留）；writeNotesStub base 参数已删；过时注释已改写；⑥evaluateSegments 单次读 cfg（注释明记 agents-hygiene-batch 收敛）；⑦门禁已抽 gates.mjs 模块 + orchestrator.mjs 数据表驱动（超额完成）。
