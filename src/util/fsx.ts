@@ -286,9 +286,44 @@ export async function readTextIfExists(p: string): Promise<string | null> {
 // 网关 daemon / Web 控制台是三个独立写者，无互斥会静默丢更新。两层防护：进程内 promise 串行
 // serialize（同进程并发调用）+ 跨进程 O_CREAT|O_EXCL 锁文件。
 
-const LOCK_TIMEOUT_MS = 10_000
-/** 持锁超过该时长视为持有者已死（临界区内不应有慢 I/O），允许抢占。语义即老 config 锁语义，勿改。 */
-export const lockStaleMs = 15_000
+let lockAcquireTimeoutMs = 10_000
+/** 持锁超过该时长视为持有者已死，允许抢占。死者判定语义即老 config 锁语义，勿改：崩溃/被杀的
+ *  持有者心跳（见下）随进程消失，超时后照旧可抢占；**活者**由心跳保活，不满足陈锁判定——
+ *  此前「临界区内不应有慢 I/O」只是约定，secrets 的 win32 DPAPI 批量加/解密在临界区内 spawn
+ *  PowerShell（解密+加密最坏 4 次 × 10s 超时 ≈ 40s ≫ 15s），另一进程按陈锁抢入临界区，
+ *  「读整表→改→整表写回」后写覆盖先写、静默丢刚设置的 key（2026-10-30 生产覆盖事故同型）。 */
+export let lockStaleMs = 15_000
+/** 持锁喂狗间隔：持锁期间周期刷新锁文件 mtime，让活持有者不满足陈锁判定（须 ≪ lockStaleMs）。 */
+let lockHeartbeatMs = 5_000
+
+/** 测试注入：缩短锁的心跳间隔 / 陈锁阈值 / 抢锁总超时（真实值 5s/15s/10s，用例等不起）。
+ *  无参调用还原默认。与 secrets/store 的 __testSet* 同套路（模块内 let 替换，不碰 vi.mock 雷区）。 */
+export function __testSetLockTiming(t?: {
+  heartbeatMs?: number
+  staleMs?: number
+  acquireTimeoutMs?: number
+}): void {
+  lockHeartbeatMs = t?.heartbeatMs ?? 5_000
+  lockStaleMs = t?.staleMs ?? 15_000
+  lockAcquireTimeoutMs = t?.acquireTimeoutMs ?? 10_000
+}
+
+/** 持锁喂狗：临界区内周期刷新锁文件 mtime，活持有者永不被陈锁误抢占。
+ *  喂狗只保活活者、不救挂死者：持锁进程崩溃/被杀时定时器随进程消失，陈锁抢占照旧生效；
+ *  真挂死但进程存活的持有者会让第二写者等到抢锁总超时拿**可操作报错**——显式报错优于
+ *  静默双写丢数据。喂狗失败（锁被外部删除等）静默：release 的 pid 归属校验兜底。 */
+function startLockHeartbeat(lockFile: string): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    try {
+      const now = new Date()
+      fs.utimesSync(lockFile, now, now)
+    } catch {
+      /* 锁被外部删除等：release 归属校验兜底，喂狗失败不放大 */
+    }
+  }, lockHeartbeatMs)
+  timer.unref?.() // 不阻止进程自然退出
+  return timer
+}
 
 function lockTimeoutError(lp: string): Error {
   return new Error(
@@ -298,9 +333,10 @@ function lockTimeoutError(lp: string): Error {
   )
 }
 
-/** 跨进程互斥：O_CREAT|O_EXCL 独占创建锁文件；陈旧锁抢占；超时给可操作报错。
- *  release 做 pid 归属校验——仅当锁文件仍写着本进程 pid 才删除。超时抢占后原持有者收尾不删
- *  **新持有者**的锁，第三个写者不会误入临界区。@returns 释放锁的函数。 */
+/** 跨进程互斥：O_CREAT|O_EXCL 独占创建锁文件；陈旧锁抢占（死者）；超时给可操作报错；
+ *  活持有者由喂狗保活（startLockHeartbeat）。release 做 pid 归属校验——仅当锁文件仍写着本进程
+ *  pid 才删除。超时抢占后原持有者收尾不删**新持有者**的锁，第三个写者不会误入临界区。
+ *  @returns 释放锁的函数。 */
 export async function acquireFileLock(
   lockFile: string,
   opts?: { timeoutError?: (lp: string) => Error }
@@ -317,7 +353,9 @@ export async function acquireFileLock(
       } finally {
         fs.closeSync(fd)
       }
+      const heartbeat = startLockHeartbeat(lockFile)
       return () => {
+        clearInterval(heartbeat)
         try {
           // 归属校验：仅当锁文件仍写着本进程 pid 才删（被抢占/删改则不动，留待新持有者收尾）
           if (fs.readFileSync(lockFile, 'utf8') === String(process.pid)) {
@@ -334,7 +372,8 @@ export async function acquireFileLock(
         if (Date.now() - st.mtimeMs > lockStaleMs) {
           // 抢占前复核身份（ino/mtime/size）：stat 与 unlink 之间锁可能已被他人删除重建，
           // 无条件 unlink 会误删新锁造成双持锁（正是本锁要防的丢更新）。复核把竞态窗口从
-          // 一次陈旧判定 IO 收窄到两次背靠背 stat 之间（µs 级；纯 JS 无 flock，这是无原生依赖下的务实上限）
+          // 一次陈旧判定 IO 收窄到两次背靠背 stat 之间（µs 级；纯 JS 无 flock，这是无原生依赖下的务实上限）。
+          // 持有者心跳若恰在两次 stat 之间刷新 mtime，比对失配走 continue 重试——不会误删活锁。
           const st2 = fs.statSync(lockFile)
           if (st2.ino === st.ino && st2.mtimeMs === st.mtimeMs && st2.size === st.size) {
             fs.unlinkSync(lockFile)
@@ -344,7 +383,7 @@ export async function acquireFileLock(
       } catch {
         /* 锁刚被释放，直接重试 */
       }
-      if (Date.now() - t0 > LOCK_TIMEOUT_MS) {
+      if (Date.now() - t0 > lockAcquireTimeoutMs) {
         throw err(lockFile)
       }
       await new Promise((r) => setTimeout(r, 50))
@@ -375,9 +414,10 @@ function enqueueLocked<T>(lockFile: string, job: () => Promise<T>): Promise<T> {
 const lockOwnerStore = new AsyncLocalStorage<{ lockFile: string }>()
 
 /** 读-改-写 便捷封装（同进程串行 + 跨进程互斥锁）。config 的 mutateConfig 与 secrets 写路径共用。
- *  fn 内不要做慢 I/O，避免长期占锁。同路径重入（持有者调用树内再申请同一路径）直接内联执行，
- *  不再排队也不再拿文件锁——文件锁与队列都归外层持有。@param{timeoutError} 覆盖默认超时报错
- *  （store 用它装成 ConfigError）。 */
+ *  fn 内应避免慢 I/O（长期占锁会让其他写者等到抢锁总超时才拿到可操作报错），但临界区内的
+ *  慢操作（如 secrets 的 win32 DPAPI spawn）由持有者心跳保活，不会再被陈锁误抢占造成双写者。
+ *  同路径重入（持有者调用树内再申请同一路径）直接内联执行，不再排队也不再拿文件锁——
+ *  文件锁与队列都归外层持有。@param{timeoutError} 覆盖默认超时报错（store 用它装成 ConfigError）。 */
 export async function withFileLock<T>(
   lockFile: string,
   opts: { timeoutError?: (lp: string) => Error } | undefined,

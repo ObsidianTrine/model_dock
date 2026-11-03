@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { UpstreamError, clientProtocolFromPath, forwardWithFailover, isConnectTimeoutError, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
+import { UpstreamError, clientProtocolFromPath, forwardWithFailover, isConnectTimeoutError, isHeadersTimeoutError, joinUpstreamUrl, upstreamEndpoint } from '../src/gateway/relay.js'
 import { buildRuntime, type ResolvedTarget } from '../src/gateway/state.js'
 import { setSecret } from '../src/config/secrets.js'
 import { fakeHome } from './helpers.js'
@@ -132,6 +132,22 @@ describe('relay · isConnectTimeoutError（B2 重试分类：超时类不重试�
   })
 })
 
+describe('relay · isHeadersTimeoutError（headers 超时单独分类：已送达≠可重放）', () => {
+  it('UND_ERR_HEADERS_TIMEOUT（含 cause 包装 / Error 子类）判 true', () => {
+    expect(isHeadersTimeoutError({ code: 'UND_ERR_HEADERS_TIMEOUT' })).toBe(true)
+    expect(isHeadersTimeoutError({ cause: { code: 'UND_ERR_HEADERS_TIMEOUT' } })).toBe(true)
+    expect(isHeadersTimeoutError(Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' }))).toBe(true)
+  })
+
+  it('连接类 / 连接超时类 / 体超时类均判 false（分类不重叠：连接超时走 transport=true，体超时不经过本分类）', () => {
+    for (const code of ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']) {
+      expect(isHeadersTimeoutError({ code })).toBe(false)
+    }
+    expect(isHeadersTimeoutError(new Error('no code'))).toBe(false)
+    expect(isHeadersTimeoutError(undefined)).toBe(false)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // forwardWithFailover（CORRECT-09 可观测性）：真实 rt + 真实 forwardToUpstream。
 // 失败候选用「listen(0) 后关闭」的确认关闭端口造 transport 失败，成功候选用本地 mock；
@@ -162,8 +178,8 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
     return { name: id, base_url: 'http://127.0.0.1:1', protocol: 'anthropic', auth_style: 'bearer', key_ref: `file:${id}`, priority: 0, ...over }
   }
 
-  function buildRt(providers: Record<string, ProviderConfig>) {
-    const cfg = { providers, profiles: {}, harness: {}, gateway: { auto_fallback: false } } as unknown as Config
+  function buildRt(providers: Record<string, ProviderConfig>, gatewayOver: Record<string, unknown> = {}) {
+    const cfg = { providers, profiles: {}, harness: {}, gateway: { auto_fallback: false, ...gatewayOver } } as unknown as Config
     return buildRuntime(cfg, 'tok')
   }
 
@@ -286,6 +302,75 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
     } finally {
       await ok.close()
       quota.close()
+      h.restore()
+    }
+  })
+
+  it('⑥ headers 超时（UND_ERR_HEADERS_TIMEOUT）：请求已送达上游——不改发第二候选、不计入 connect 熔断类', async () => {
+    const h = fakeHome()
+    const mock = await startMock()
+    // 上游收下请求但永不回响应头（模拟非流式长推理 > headers_timeout_ms）
+    const slow = http.createServer(() => {})
+    await new Promise<void>((r) => slow.listen(0, '127.0.0.1', () => r()))
+    const slowUrl = `http://127.0.0.1:${(slow.address() as AddressInfo).port}`
+    try {
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: slowUrl }),
+          b: providerCfg('b', { base_url: mock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers, { headers_timeout_ms: 200 })
+      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+      // 旧分类（transport=true）会改发第二候选并 resolve 200 结果；修复后原样上抛、不再重放
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] }).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      const e = err as UpstreamError
+      expect(e.transport).toBe('timeout') // 单独分类：非 transport=true（可安全重放）、非已送达应用层错误
+      expect(e.status).toBe(502)
+      expect(e.hint).toContain('headers_timeout_ms') // 修复建议指向配置项（键名语言中立）
+      // 不计入 connect 熔断类：cls=undefined 中性，熔断窗口计数保持 0（transport 失败会 +1）
+      expect(rt.health.get('a')?.errWindow.count ?? 0).toBe(0)
+    } finally {
+      slow.closeAllConnections()
+      await new Promise<void>((r) => slow.close(() => r()))
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('⑦ headers 超时 + failover_status_codes 显式含 502：白名单授权后照常改发下一候选', async () => {
+    const h = fakeHome()
+    const mock = await startMock()
+    const slow = http.createServer(() => {})
+    await new Promise<void>((r) => slow.listen(0, '127.0.0.1', () => r()))
+    const slowUrl = `http://127.0.0.1:${(slow.address() as AddressInfo).port}`
+    try {
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: slowUrl }),
+          b: providerCfg('b', { base_url: mock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers, { headers_timeout_ms: 200, failover_status_codes: [502] })
+      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      expect(result.usedProviderId).toBe('b')
+      expect(result.status).toBe(200)
+      expect(result.reason).toBe('failover_to:b,replayed_from:a')
+      // 白名单授权的切换同样不计 connect 熔断（该类恒为中性）
+      expect(rt.health.get('a')?.errWindow.count ?? 0).toBe(0)
+    } finally {
+      slow.closeAllConnections()
+      await new Promise<void>((r) => slow.close(() => r()))
+      await mock.close()
       h.restore()
     }
   })
