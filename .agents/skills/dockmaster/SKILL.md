@@ -16,15 +16,17 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 
 | 档位 | 船（--worker-backend） | 油 | 适用 |
 |---|---|---|---|
-| 前进1 | zcode-headless（默认船） | 免费 | 纯文档/测试小改 |
-| 前进2 | zcode-headless（默认船） | 免费 | 常规轻活 |
-| 前进3 | claude-headless（ModelDock 网关供油） | 计费 | 常规重活 |
+| 前进1 | claude-headless（ModelDock 网关供油） | 计费 | 纯文档/测试小改 |
+| 前进2 | claude-headless（ModelDock 网关供油） | 计费 | 常规轻活 |
+| 前进3 | claude-headless + tier ahead-3 | 计费 | 常规重活 |
 | 前进4 | claude-headless + tier ahead-4 | 计费 | 核心/发布路径、复杂特性 |
 
+> 2026-11-03 船东定：全部档位换 claude-code CLI（zcode 免费船可靠性不足，`workflow.json worker.backend: claude-headless`）；zcode-headless 仍可用（`--worker-backend zcode-headless` 显式点名，需修好 TUI `/model`），也是恢复异构互审的途径。
+
 - **没说档位就自动选**：文档/测试→前进1，代码小改→前进3，核心路径/复杂→前进4；**卡里写明所选档位，汇报第一句告知**，用户说「换前进N」即重派。
-- 船 ≠ workflow.json 默认（zcode-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。即：前进3/4（claude 网关船）带批准标志，前进1/2 零摩擦。
-- **自动升档不请示**：zcode 船 prompt 超限（AGENTS.md 等固定开销随仓库增长，>30k）且配置了 `escalation.enabled` 时，自动切 fallback 船完成本单（`engine_escalated` 留痕，预算延续），汇报时说明「已自动升档」即可；只有高成本选项（旗舰档/加大预算）才停下来问用户。
-- 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区）。档位与显式模型可叠加，显式优先。
+- 船 ≠ workflow.json 默认（claude-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。全档位同船后，只有显式点名其他引擎（如 zcode）才带批准标志。
+- **自动升档不请示**：zcode 船 prompt 超限（AGENTS.md 等固定开销随仓库增长，>30k）且配置了 `escalation.enabled` 时，自动切 fallback 船完成本单（`engine_escalated` 留痕，预算延续），汇报时说明「已自动升档」即可；只有高成本选项（旗舰档/加大预算）才停下来问用户。claude 船 prompt 走文件无 argv 上限，该升档链仅对显式点名的 zcode 船生效。
+- 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区——全 claude 编队下互审同源，zcode 修复后可点回）。档位与显式模型可叠加，显式优先。
 - 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；探索性/架构级改动 → 建议路径 B（先设计后施工，见文末）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 
 **写卡**（放 `.agents/orchestrator/drafts/<id>.md`，不入库；多任务拆多卡按文件分区）：
@@ -122,7 +124,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 - **先设计后施工（spec）**：特性级改动用 `spec "<意图>"` 出三件套——**设计必须用户亲自确认后才能 `spec build` 拆卡**（你不能代审）；拆出的卡 gate=L3，用户口头授权自动合并后可改 L1。
 - **巡检与提案（nightly / scan）**：`nightly` 零烧钱出提案落 drafts；逐张给用户一句话采纳建议，点头后 `submit`。`--plan` 烧钱跑 planner 需求综合。`autopilot.enabled` 开启后白名单提案自动提交（deps/核心路径/人工草稿永不自动）——开启属持久授权，**代改配置前必须先确认**。
 - **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
-- **自由航行（sail）**——**触发条件**：用户表达「让它自己给自己安排活干一段时间」类意图，典型话术：「自由航行」「自由航行 30 分钟」「自己给自己找活干 / 自己安排任务跑一会儿」「让它自主干一小时，完了给我报告」「开自由航行」。判定要点：① 没点名具体任务（有具体任务走第 1 步写卡派单）；② 强调「自己决定做什么」+「一段时间/到点报告」。**时长从话术里取（「30 分钟」「一小时」→ `--minutes`）；话术未给时长时反问一句「自由航行多久？」（本技能唯一允许的主动提问），禁止默认时长**。启动前向用户复述：时长、自动提交范围（docs/bugfix/refactor/feature，deps/人工草稿/核心·发布路径永不自动）、引擎档位；用户未指定引擎按缺省（zcode-headless 免费船）。执行：`sail --minutes N`（或 `--duration 2h`，可加 `--max-cost-usd N` 燃油上限——实测价达上限即收帆，报告带燃油账）后台常驻（Bash `run_in_background`）——scan 勘察 → propose 规划+自动提交 → drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。航行期间向用户通报中途状态（status/日志），结束后把报告要点完整汇报给用户。
+- **自由航行（sail）**——**触发条件**：用户表达「让它自己给自己安排活干一段时间」类意图，典型话术：「自由航行」「自由航行 30 分钟」「自己给自己找活干 / 自己安排任务跑一会儿」「让它自主干一小时，完了给我报告」「开自由航行」。判定要点：① 没点名具体任务（有具体任务走第 1 步写卡派单）；② 强调「自己决定做什么」+「一段时间/到点报告」。**时长从话术里取（「30 分钟」「一小时」→ `--minutes`）；话术未给时长时反问一句「自由航行多久？」（本技能唯一允许的主动提问），禁止默认时长**。启动前向用户复述：时长、自动提交范围（docs/bugfix/refactor/feature，deps/人工草稿/核心·发布路径永不自动）、引擎档位；用户未指定引擎按缺省（claude-headless 网关船，2026-11-03 起；zcode 修复后可显式点名）。执行：`sail --minutes N`（或 `--duration 2h`，可加 `--max-cost-usd N` 燃油上限——实测价达上限即收帆，报告带燃油账）后台常驻（Bash `run_in_background`）——scan 勘察 → propose 规划+自动提交 → drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。航行期间向用户通报中途状态（status/日志），结束后把报告要点完整汇报给用户。
 - **发版提案（release-propose）**：只出建议与草稿；**版本号决定权在用户**——用户说「发布 vX.Y.Z」才走 release.md 代理发布（不在本技能，永不 push）。
 
 ## 红线（永不）

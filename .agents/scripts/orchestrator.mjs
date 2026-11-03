@@ -3395,6 +3395,7 @@ function cmdSchedule(repoRoot, sub, opts) {
       minute: opts.minute,
       minutes: opts.minutes,
       duration: opts.duration,
+      maxCostUsd: opts.maxCostUsd,
       tests: opts.flags?.has('--tests'),
       auto: opts.auto,
       backend: opts.backend,

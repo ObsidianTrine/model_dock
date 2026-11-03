@@ -117,6 +117,8 @@ export function nightlyArgs(opts = {}) {
   }
   if (opts.mode === 'sail') {
     const args = ['sail', ...sailDurationArgs(opts)];
+    // 燃油上限透传（定时巡航计费船的必要护栏）：>0 才带上
+    if (Number(opts.maxCostUsd) > 0) args.push('--max-cost-usd', String(opts.maxCostUsd));
     if (opts.backend) args.push('--backend', opts.backend);
     if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
     return args;
