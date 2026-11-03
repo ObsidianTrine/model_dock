@@ -248,6 +248,7 @@ describe('claude-code adapter', () => {
               ANTHROPIC_AUTH_TOKEN: 'sk-old',
               ANTHROPIC_MODEL: 'deepseek-v4-pro[1M]',
               ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
+              ANTHROPIC_SMALL_FAST_MODEL: 'deepseek-v4-flash',
               CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
               CLAUDE_CODE_EFFORT_LEVEL: 'max',
             },
@@ -271,6 +272,7 @@ describe('claude-code adapter', () => {
       expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
       expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
       // 迁移不管的钉死项照清
+      expect(after.env.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined()
       expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
       expect(after.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
       expect(after.model).toBeUndefined()
