@@ -19,8 +19,9 @@ name: ci-autofix
 #     过滤不是冗余——fork PR 的 head 分支可以恰好叫 main / develop，仅凭分支名过滤可被仿冒；
 #     限定 push 事件从根上排除一切 PR 型 run（PR 上的失败本来就有作者与 AI 审查处理，
 #     不需要 autofix 插手）。
-#   - 每 run 仅 1 次尝试：run_attempt 过滤挡掉人工重跑的 attempt（ci-retry 的 rerun 产物
-#     是 attempt 2+，重跑只是 flaky 洗白通道，不该再烧一次会话）；guard 再查同 head 分支的
+#   - 每 run 仅 1 次尝试：run_attempt 过滤挡掉人工 / 脚本重跑产生的 attempt 2+（原
+#     ci-retry.yml 的 rerun 产物同理，2026-11-03 已移除该 workflow——重跑只是 flaky
+#     洗白通道，不该再烧一次会话）；guard 再查同 head 分支的
 #     既有 PR（含已关闭——关闭说明人工已裁决），存在即跳过。
 #   - 修复分支上的 test 失败不会触发 autofix：head_branch = ci-autofix/* 不满足分支过滤，
 #     PR 上的失败由人工与 AI 审查处理；人工合并修复 PR 产生的主干新 run 若再失败，那是

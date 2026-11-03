@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # 每日巡检（全矩阵含 mac 腿 + 工作流套件）：兜底捕捉 CI 环境漂移与 mac 专属回归——
+  # mac 腿已退出 develop push 矩阵（见 test job 的 if），不巡检就没人盯它了。
+  # 注意：schedule 只认默认分支（main）上的 workflow 文件，本文件合入 main 后才生效。
+  schedule:
+    - cron: '0 18 * * *' # 18:00 UTC = 北京时间次日 02:00
   # 供 ci-autofix 给修复分支补发检查用：autofix PR 由 GITHUB_TOKEN 开出，平台不为它触发
   # push/pull_request 事件（见 ci-autofix.yml 头注），收尾步骤用 workflow_dispatch 显式跑一条
   workflow_dispatch:
@@ -26,6 +31,16 @@ jobs:
         node: [24]
     runs-on: ${{ matrix.os }}
     name: test (${{ matrix.os }}, node${{ matrix.node }})
+    # mac 腿分级（2026-11-03）：只在 PR / push main（发布门禁）/ 每日巡检 / 手动时运行，
+    # develop push 不跑。依据：macos arm64 hosted runner 排队严重（v1.5.0 曾连挂 7 次、
+    # 2026-11-02 一次 run 排队 8h15m 才起跑），是 CI 最大的时间浪费源；而开发机就是 mac，
+    # develop 高频直推上 mac 腿是重复支付。required check 不受影响：PR 上 mac 腿照常报告。
+    if: >-
+      matrix.os != 'macos-latest' ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     # 正常全程 1~5 分钟；卡死（曾出现 Linux 上 vitest 收尾悬挂）20 分钟内强制失败，
     # 而不是悬死 6 小时。配合下方 always() 诊断步骤留下进程现场。
     timeout-minutes: 20
@@ -65,15 +80,39 @@ jobs:
 
   # agent 工作流套件（.agents/ 编排器脚本与分支守卫 hook）：与产品测试拆分（npm test 只跑
   # 产品套件，方案 A）。纯 Node + git，无平台差异，只在 ubuntu 跑，与上方三平台矩阵并行。
+  # 触发分级（2026-11-03）：job 常驻——test-workflow 是 main/develop 的 required check，
+  # PR 合并需要它报告，整 job 跳过会让 PR 永远 pending；但仅当变更触达 .agents/** 或
+  # test/orchestrator/** 才安装依赖跑套件，改 src/ 的日常推送只付 paths-filter 的 ~15s
+  # 占位，不再每次白付 ~3min。
   workflow-suite:
     runs-on: ubuntu-latest
     name: test-workflow (orchestrator + guard hooks)
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # pull_request 事件经 API 列变更文件所需
     steps:
+      # fetch-depth: 0：workflow_dispatch / schedule 事件下 paths-filter 需要完整历史算 diff
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            agents:
+              - '.agents/**'
+              - 'test/orchestrator/**'
+      # 无关变更必须 exit 0 占位（见上头注），setup-node / npm ci 一概不付
+      - name: 变更未触达 .agents/**，跳过套件（占位绿）
+        if: steps.filter.outputs.agents != 'true'
+        run: echo '本次变更不涉及 .agents/** 或 test/orchestrator/**，工作流套件跳过'
       - uses: actions/setup-node@v7
+        if: steps.filter.outputs.agents == 'true'
         with:
           node-version: 24
           cache: npm
       - run: npm ci --no-audit --no-fund
+        if: steps.filter.outputs.agents == 'true'
       - run: npm run test:workflow
+        if: steps.filter.outputs.agents == 'true'
