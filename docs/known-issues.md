@@ -435,6 +435,11 @@
   - 同族先例：2026-10-02 修过**写侧**同族 bug（网关日志条目用 UTC 日期落文件、读侧按本地日找 → 本地午夜后写错文件，reconcile.test.ts:79 注记在案）；本次是**读侧**扫描循环的补齐，写读口径自此两侧闭合。
 - ☑ **已修 2026-11-04（本卡 flake-context-and-hunt）**：三处循环改为按**日历日**扫 `[date(start) .. date(end)]`（top-break 判 `date > endKey`，endKey 按本地日切分），条目仍按 ts ±60s 容差过滤——不引入多余读面。回归：cost.test.ts 两例（双笔全在 end 日 → 旧读法整窗误判零；跨双日条目 → 旧读法少算燃油）+ reconcile.test.ts 一例（任务窗口跨午夜，端到端读侧断言），全部本地午夜锚定、任意时区/平台等价。
 
+**CORRECT-13（P2，2026-11-04 夜航冒烟实锤当场踩中）schedule install --dry-run 覆写在线 wrapper——「预演」静默改掉真实调度行为**
+- 现象：`--dry-run` 输出「未触碰系统调度」，但 `installSchedule` 的 `writeRunner` 在 dry-run 判定**之前**无条件执行——任何已装 launchd/cron/schtasks 的机器上跑 dry-run（哪怕只是换个参数冒烟），都会把**在线 wrapper** 的 exec 行改写成 dry-run 的参数：真实调度在下次触发时静默执行完全不同的命令。本仓当夜实锤：冒烟 `--duration 1m30s` 覆写了真 wrapper（原 exec 行不可恢复——文件被 `.gitignore:40` 按机排除，无 git 历史/快照），当晚已人工断引止损。
+- 根因：`schedule.mjs installSchedule` 结构问题 + 注释误判 runner 为「仓库内无害产物」——它实为 plist/cron 直接引用的在线文件；机器本地生成物（gitignore 文件）也是在线状态，dry-run 语义必须零副作用。
+- ☑ **已修（本卡 schedule-dryrun-no-write）**：`writeRunner` 移到 dry-run 分支之后——dry-run **零落盘**（runner 不写、日志目录不建），wrapper 内容改走 stdout 预览（`| ` 前缀逐行打印，参数与绝对路径固化仍可核对）。回归：schedule.test.ts 两条 dry-run 用例改写为「runner 不存在 + 预览含参数」断言（旧契约「wrapper 落盘」即缺陷本体）；本仓 wrapper 已断引待船东凭原参数重装。
+
 ---
 
 ## 四、已核查无问题项汇总（后续审查可跳过）

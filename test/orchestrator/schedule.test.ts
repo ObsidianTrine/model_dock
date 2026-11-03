@@ -213,18 +213,19 @@ describe('orchestrator schedule > 三平台注册内容纯函数', () => {
   })
 })
 
-describe('orchestrator schedule > CLI dry-run（写 wrapper、不碰系统调度）', () => {
-  it('schedule install --dry-run：stdout 计划 + wrapper 落盘；--auto 参数透传进 wrapper', () => {
+describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 wrapper 预览）', () => {
+  it('schedule install --dry-run：stdout 计划 + wrapper 预览，不写 runner、不建日志目录（CORRECT-13）', () => {
     const repo = mkRepo()
     try {
       const out = runOrch(repo.root, 'schedule install --dry-run --hour 2 --auto 3 --tests')
-      expect(out.stdout).toContain('[dry-run] 未触碰系统调度')
-      expect(out.stdout).toContain('wrapper 已写入')
-      const runner = fs.readFileSync(runnerPath(repo.root), 'utf8')
-      expect(runner).toContain('nightly --tests --auto 3')
-      expect(runner).toContain(repo.root) // 仓库绝对路径固化
-      // 日志目录随 wrapper 一起就位
-      expect(fs.existsSync(path.dirname(nightlyLogPath(repo.root)))).toBe(true)
+      expect(out.stdout).toContain('[dry-run] 未触碰系统调度、未写任何文件')
+      expect(out.stdout).toContain('wrapper 将写入（dry-run 未落盘）')
+      // 预览进 stdout：参数与仓库绝对路径固化可见（此前从落盘文件断言）
+      expect(out.stdout).toContain('nightly --tests --auto 3')
+      expect(out.stdout).toContain(repo.root)
+      // 关键契约：dry-run 零落盘——runner 不存在、日志目录不创建
+      expect(fs.existsSync(runnerPath(repo.root))).toBe(false)
+      expect(fs.existsSync(path.dirname(nightlyLogPath(repo.root)))).toBe(false)
     } finally {
       repo.cleanup()
     }
@@ -241,19 +242,20 @@ describe('orchestrator schedule > CLI dry-run（写 wrapper、不碰系统调度
     }
   })
 
-  it('schedule install --mode sail --dry-run：计划文本 + wrapper 含 sail 参数；sail 不带 --tests', () => {
+  it('schedule install --mode sail --dry-run：预览含 sail 参数；sail 不带 --tests；零落盘', () => {
     const repo = mkRepo()
     try {
       const out = runOrch(repo.root, 'schedule install --mode sail --minutes 30 --hour 23 --dry-run')
-      expect(out.stdout).toContain('[dry-run] 未触碰系统调度')
-      const runner = fs.readFileSync(runnerPath(repo.root), 'utf8')
-      expect(runner).toContain('sail --minutes 30')
-      expect(runner).not.toContain('--tests')
-      expect(runner).not.toContain('--auto')
-      // 钥匙串解析块随 wrapper 生成（darwin 实际生效；其他平台 if 守卫空转）
-      expect(runner).toContain('command -v security')
+      expect(out.stdout).toContain('[dry-run] 未触碰系统调度、未写任何文件')
+      expect(out.stdout).toContain('sail --minutes 30')
+      expect(out.stdout).not.toContain(' --tests')
+      expect(out.stdout).not.toContain(' --auto')
+      // 钥匙串解析块随预览生成（darwin 实际生效；其他平台 if 守卫空转）
+      expect(out.stdout).toContain('command -v security')
       const win = process.platform === 'win32'
-      if (win) expect(runner).not.toContain('security find-generic-password')
+      if (win) expect(out.stdout).not.toContain('security find-generic-password')
+      // 零落盘
+      expect(fs.existsSync(runnerPath(repo.root))).toBe(false)
     } finally {
       repo.cleanup()
     }
@@ -262,15 +264,16 @@ describe('orchestrator schedule > CLI dry-run（写 wrapper、不碰系统调度
   it('sail --duration 透传；--mode sail 缺时长 → exit 1；未知 --mode → exit 1', () => {
     const repo = mkRepo()
     try {
-      runOrch(repo.root, 'schedule install --mode sail --duration 1h30m --dry-run')
-      expect(fs.readFileSync(runnerPath(repo.root), 'utf8')).toContain('sail --duration 1h30m')
+      const out = runOrch(repo.root, 'schedule install --mode sail --duration 1h30m --dry-run')
+      expect(out.stdout).toContain('sail --duration 1h30m')
 
       // 燃油上限透传（计费船定时巡航的护栏）：>0 才带，非法值忽略
-      runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 2 --dry-run')
-      const capped = fs.readFileSync(runnerPath(repo.root), 'utf8')
-      expect(capped).toContain('sail --minutes 120 --max-cost-usd 2')
-      runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 0 --dry-run')
-      expect(fs.readFileSync(runnerPath(repo.root), 'utf8')).not.toContain('--max-cost-usd')
+      const capped = runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 2 --dry-run')
+      expect(capped.stdout).toContain('sail --minutes 120 --max-cost-usd 2')
+      const uncapped = runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 0 --dry-run')
+      expect(uncapped.stdout).not.toContain('--max-cost-usd')
+      // dry-run 零落盘（CORRECT-13）：以上三轮预演均不产生 runner 文件
+      expect(fs.existsSync(runnerPath(repo.root))).toBe(false)
 
       const noDur = tryOrch(repo.root, 'schedule install --mode sail --dry-run')
       expect(noDur.status).toBe(1)
