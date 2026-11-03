@@ -15,9 +15,9 @@ describe('budget > 低油量单测（tokens 路径）', () => {
   it('account 恰好 80% 触发一次；继续涨到 85% 不重复触发', () => {
     const emit = vi.fn()
     const b = new Budget(mkCard(), emit)
-    b.account(4200, 1800) // 6000/7500 = 80%（mock 会话 usage 的同款数字）
+    b.account(4200, 1800) // 6000/7500 = 80%（mock 会话 usage 的同款数字；无缓存拆分 → billable 退化为旧口径 6000）
     expect(emit).toHaveBeenCalledTimes(1)
-    expect(emit).toHaveBeenCalledWith({ kind: 'tokens', pct: 80, tokens_in: 6000 })
+    expect(emit).toHaveBeenCalledWith({ kind: 'tokens', pct: 80, tokens_in: 6000, tokens_billable: 6000 })
     b.account(1500, 375) // 6375/7500 = 85%——低水位标志位已置，不再触发
     expect(emit).toHaveBeenCalledTimes(1)
     expect(b.tripped).toBe(false) // 软告警不是熔断

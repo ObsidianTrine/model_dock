@@ -11,12 +11,15 @@
 // zcode.cjs，用 node 直跑）；未设则用 PATH 里的 `zcode`。
 // 输出：--json 单对象 { response, usage: { inputTokens, outputTokens,
 //   cacheReadTokens, cacheWriteTokens }, … }。预算口径与 claude-headless 对齐：
-// tokensIn = input + cacheRead + cacheWrite（缓存读计入）。
+// tokensIn = input + cacheRead + cacheWrite（缓存读计入，旧口径字段保留）；budget_snapshot
+// 另发 tokens_cache_read（缓存读单列）与 tokens_billable = (tokensIn − 缓存读) + tokensOut
+// （可计费口径，max_tokens 熔断用——GLM 网关缓存读占大头，旧口径预算虚胖）。
 // 与 claude-headless 的差异（记录在 orchestrator.md）：无 --max-turns（轮次熔断
 // 不可用，wall-clock/token 兜底）；无逐 turn 流式事件，预算在结束时一次性回填。
 
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { billableTokens } from '../budget.mjs';
 
 /** zcode headless prompt 的 argv 长度上限（字符数）：Windows 命令行 ~32KB 防线，
  *  escalation 升档判定与 buildZcodeArgs 校验共用同一口径。 */
@@ -183,9 +186,10 @@ export const zcodeHeadlessBackend = {
         let tokensIn = 0;
         let tokensOut = 0;
         if (j?.usage) {
-          tokensIn = (j.usage.inputTokens ?? 0) + (j.usage.cacheReadTokens ?? 0) + (j.usage.cacheWriteTokens ?? 0);
+          const cacheRead = j.usage.cacheReadTokens ?? 0;
+          tokensIn = (j.usage.inputTokens ?? 0) + cacheRead + (j.usage.cacheWriteTokens ?? 0);
           tokensOut = j.usage.outputTokens ?? 0;
-          onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut });
+          onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: cacheRead, tokens_billable: billableTokens(tokensIn, tokensOut, cacheRead) });
         }
         resolve({ exitCode: code ?? 1, output, stderrTail, usage: { tokensIn, tokensOut }, pid: child.pid });
       });

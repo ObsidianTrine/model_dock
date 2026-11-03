@@ -60,7 +60,7 @@ workflows:
   - feature-branch
 gate: L3                          # 合并闸门：L3=人工（缺省，最保守）；L1=普通改动可自动合并；L0=纯文档可自动
 budget:                           # 可整体省略（回落默认 50轮/500k tok/60分钟/调试5次/审查3次）
-  max_wall_minutes: 40
+  max_wall_minutes: 40            # max_tokens 按可计费口径计（剔除缓存读，2026-11 起）
 ---
 
 # 目标
@@ -183,7 +183,7 @@ pending → running → reviewing → awaiting-human → merged
 | 现象 | 处置 |
 |---|---|
 | worker 起步就没产出、烧完 turns | 检查任务卡验收标准是否可执行；`status <id>` 看 worker_turn 里工具是否全被拒（权限白名单问题） |
-| `blocked: budget:*` | 预算熔断（第三方上游流式 usage 全 0 时 token 熔断不可依赖，靠 wall-clock/turns）。`resume` 续做或调大 budget |
+| `blocked: budget:*` | 预算熔断（max_tokens 按可计费口径：剔除缓存读；第三方上游流式 usage 全 0 时 token 熔断不可依赖，靠 wall-clock/turns）。`resume` 续做或调大 budget |
 | 反复测试失败转 blocked | 调试迭代超限（默认 5 次）。`logs` 看失败尾部，人工接手或改卡重提 |
 | 红线门禁 failed | port_scan/native_scan 不可调试——改设计不改门禁 |
 | drain 停住不动 | `status` 看是否解析失败卡/分区互斥排队；执行环境损坏时同任务两次调度会被拉黑并告警 |

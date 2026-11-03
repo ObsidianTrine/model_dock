@@ -1,15 +1,26 @@
 import { StringDecoder } from 'node:string_decoder'
 import { Transform, type TransformCallback } from 'node:stream'
 
-/** 网关侧观测到的单请求 token 用量（对账口径与 orchestrator budget 一致：缓存读计入输入）。 */
+/**
+ * 网关侧观测到的单请求 token 用量。双口径（2026-11 usage-cache-read-scope）：
+ *  - 旧四字段 = 总口径（缓存读计入输入），燃油账与历史日志沿用，语义不变；
+ *  - billable_tokens = 可计费口径（剔除缓存读）：orchestrator token 熔断与 reconcile
+ *    分歧率用它。公式按协议形态厘清——anthropic 语义下 input_tokens 不含缓存读/写
+ *    （cache_*_input_tokens 是独立字段，总输入 = 三者之和），billable = input +
+ *    cache_creation + output；openai 口径 prompt_tokens 已含 cached_tokens（子集），
+ *    billable = prompt − cached + completion；responses 形态缓存未解析（cacheRead=0），
+ *    自然退化为 input + output。解析失败/无 usage 时为 0。
+ */
 export interface UsageStats {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens: number
+  /** 可计费口径：总输入 − 缓存读 + 输出（分协议公式见接口注释） */
+  billable_tokens: number
 }
 
-const EMPTY_USAGE: UsageStats = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 }
+const EMPTY_USAGE: UsageStats = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 0 }
 
 /**
  * 从上游响应中提取 token usage 的"旁听"流：字节原样透传（转发行为零改变），
@@ -40,9 +51,22 @@ export function createUsageTap(contentType: string | undefined): Transform & { g
 
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 
+  // 形态标记：usage 携带 anthropic 专属字段名（cache_*_input_tokens）→ input_tokens 不含
+  // 缓存（总输入 = 三字段之和，见 UsageStats 注释）；否则按 openai 语义处理。anthropic
+  // SSE 的输出在 message_delta 才补齐，故每次 absorb 后从累计字段整体重算 billable——
+  // 不能在 absorb 内单点算（message_delta 单独携带 output 会漏加输入侧）。
+  let anthropicShape = false
+  const recalcBillable = () => {
+    const totalIn = anthropicShape
+      ? usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens
+      : usage.input_tokens
+    usage.billable_tokens = Math.max(0, totalIn - usage.cache_read_tokens) + usage.output_tokens
+  }
+
   /** 归一化吸收：anthropic 口径与 openai 口径字段名都认（后者用于非流式 JSON） */
   const absorb = (u: Record<string, unknown> | undefined) => {
     if (!u || typeof u !== 'object') return
+    if (u.cache_read_input_tokens !== undefined || u.cache_creation_input_tokens !== undefined) anthropicShape = true
     const input = num(u.input_tokens) + num(u.prompt_tokens)
     const output = num(u.output_tokens) + num(u.completion_tokens)
     const cacheRead = num(u.cache_read_input_tokens) + num((u.prompt_tokens_details as any)?.cached_tokens)
@@ -51,6 +75,7 @@ export function createUsageTap(contentType: string | undefined): Transform & { g
     if (output) usage.output_tokens = Math.max(usage.output_tokens, output)
     if (cacheRead) usage.cache_read_tokens = Math.max(usage.cache_read_tokens, cacheRead)
     if (cacheCreate) usage.cache_creation_tokens = Math.max(usage.cache_creation_tokens, cacheCreate)
+    recalcBillable()
   }
 
   const feedSseLine = (line: string) => {

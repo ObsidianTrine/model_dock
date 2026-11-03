@@ -21,13 +21,16 @@ export interface LogEntry {
   requestId?: string
   /** 401 归因线索：无效 token 的前 8 字符（绝不写完整 token）；err 文案按此前缀反查已知 harness 点名归属 */
   tokenHint?: string
-  /** 上游响应观测到的 token 用量（狗粮对账口径：缓存读计入输入成本）。
-   *  从响应流旁路解析（SSE 逐行 / 小体积 JSON），尽力而为——旧日志与解析失败时缺省。 */
+  /** 上游响应观测到的 token 用量（总口径：缓存读计入输入成本）。
+   *  从响应流旁路解析（SSE 逐行 / 小体积 JSON），尽力而为——旧日志与解析失败时缺省。
+   *  billable_tokens 为可计费口径（剔除缓存读，公式见 src/gateway/usage.ts）：
+   *  orchestrator token 熔断与 reconcile 分歧率用；旧日志无此字段。 */
   usage?: {
     input_tokens: number
     output_tokens: number
     cache_read_tokens: number
     cache_creation_tokens: number
+    billable_tokens?: number
   }
 }
 
