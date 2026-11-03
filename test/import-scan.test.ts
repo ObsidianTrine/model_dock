@@ -569,6 +569,28 @@ describe('applyImport（候选 → provider/profile/secret）', () => {
     ...over,
   })
 
+  it('候选 id 与既有 profile 同名（无同名 provider）→ id 让位，profile 照常创建不静默漏建', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = await loadConfig()
+      cfg.security = { store: 'file' }
+      cfg.profiles['taken'] = { name: '既有 profile', provider: 'other-p', default_model: 'm0' }
+      const report = await applyImport(
+        cfg,
+        [cand({ suggest_id: 'taken', name: 'TAKEN', key: 'sk-t', models: ['m1'] })],
+        { withProfiles: true }
+      )
+      // 旧实现：id 不避让 → !cfg.profiles['taken'] 守卫令 profile 静默漏建（报告无成功也无 skipped）
+      expect(report.providers).toEqual(['taken-2'])
+      expect(report.profiles).toEqual(['taken-2'])
+      expect(cfg.providers['taken-2']).toBeTruthy()
+      expect(cfg.profiles['taken-2']?.provider).toBe('taken-2')
+      expect(cfg.profiles['taken']?.provider).toBe('other-p') // 既有 profile 原样
+    } finally {
+      h.restore()
+    }
+  })
+
   it('落地 provider+profile、key 批量入 file store、is_current 设 active_profile；本批同址同 key 去重、占位跳过', async () => {
     const h = fakeHome()
     try {
