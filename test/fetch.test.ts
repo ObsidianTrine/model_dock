@@ -97,6 +97,26 @@ describe('fetch · fetchModelIds 失败语义', () => {
       h.restore()
     }
   })
+
+  it('chunked 超大响应（无 content-length）→ 流式计数超限跳过，不无界缓冲（回归）', async () => {
+    const h = fakeHome()
+    const mock = await startMock((_req, res) => {
+      // 不设 content-length → Node 自动 chunked。8MB/块 × 4 块 = 32MB > 20MB 上限；
+      // 内存内 mock 同步连写可接受（真客户端侧 readBodyCapped 在 20MB 处停消费）
+      res.writeHead(200, { 'content-type': 'application/json' })
+      const big = Buffer.alloc(8 * 1024 * 1024, 0x78) // 'x' × 8MB
+      for (let i = 0; i < 4; i++) res.write(big)
+      res.end()
+    })
+    try {
+      const ref = await setSecret('fetch-chunked-big', 'sk-test', 'file')
+      await expect(fetchModelIds(provider({ base_url: mock.base, key_ref: ref })))
+        .rejects.toThrow(/异常偏大|没有模型列表/)
+    } finally {
+      mock.close()
+      h.restore()
+    }
+  })
 })
 
 describe('fetch · 鉴权头随协议与 auth_style 变化', () => {

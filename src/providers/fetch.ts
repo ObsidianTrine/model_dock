@@ -88,6 +88,19 @@ function pickNumber(rec: Record<string, unknown>, keys: string[]): number | unde
   return undefined
 }
 
+/** 流式读取响应体并设上限：chunked（无 content-length）响应用——累计超 max 立即停止
+ *  消费（返回 over:true，调用方 dump 排空），不再把整份无界缓冲进内存。 */
+async function readBodyCapped(body: AsyncIterable<Uint8Array>, max: number): Promise<{ text: string; over: boolean }> {
+  let size = 0
+  const chunks: Buffer[] = []
+  for await (const chunk of body) {
+    size += chunk.byteLength
+    if (size > max) return { text: '', over: true }
+    chunks.push(Buffer.from(chunk))
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), over: false }
+}
+
 /**
  * 自动拉取上游可用模型列表：从 base_url 派生「原样 + 剥协议后缀」多条候选（/v1/models、/models），
  * 逐个试到返回 200 且 data[].id 非空；都不行则抛可执行提示（上层可走厂商已知兜底）。
@@ -129,7 +142,22 @@ export async function fetchModelIds(provider: ProviderConfig): Promise<FetchedMo
           await up.body.dump().catch(() => {})
           continue
         }
-        const j = JSON.parse(await up.body.text())
+        // chunked 响应（无 content-length）此前 body.text() 无界缓冲：上游是任意用户配置
+        // 的地址，异常大响应会把整份缓冲进内存。流式累计、超限即断（有 content-length 的
+        // 已在上方校验，仍走 text() 保持原语义）
+        let text: string
+        if (Number.isFinite(len) && len > 0) {
+          text = await up.body.text()
+        } else {
+          const capped = await readBodyCapped(up.body, MAX_BODY_BYTES)
+          if (capped.over) {
+            attempts.push(t('{endpoint} 响应体异常偏大（超 {max}MB，chunked 无 content-length），跳过', '{endpoint}: response body abnormally large (over {max}MB, chunked without content-length), skipped', { endpoint, max: Math.round(MAX_BODY_BYTES / (1024 * 1024)) }))
+            await up.body.dump().catch(() => {})
+            continue
+          }
+          text = capped.text
+        }
+        const j = JSON.parse(text)
         const arr = Array.isArray(j?.data) ? j.data : Array.isArray(j) ? j : []
         const ids: string[] = []
         const display: Record<string, string> = {}
