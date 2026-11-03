@@ -3141,7 +3141,7 @@ function sailAutoSubmit(repoRoot, root, cfg, ids) {
 async function cmdSail(repoRoot, opts) {
   const cfg0 = loadWorkflowConfig(repoRoot);
   const minutes = parseDurationMinutes({ minutes: opts.minutes, duration: opts.duration });
-  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10]——自由航行时长必须显式指定（分钟，>0）。');
+  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m|90s）[--max-tasks N] [--max-cost-usd N] [--interval 10]——自由航行时长必须显式指定（分钟或秒级如 90s，>0）。');
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   preflightWorkerBackend(opts.backend ?? cfg0.worker?.backend); // 起航前引擎预检：CLI 不在就别烧规划钱
@@ -3473,7 +3473,7 @@ function usage() {
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
-  sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
+  sail --minutes N（或 --duration 2h|90m|1h30m|90s）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
                                           自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排、燃油账几何）。停止：.sail-stop / drift 降级 / --max-tasks / --max-cost-usd（网关实测价达上限即收帆，只停不换引擎）；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
   schedule install|uninstall|status [--mode nightly|watch|sail] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--minutes N|--duration 2h] [--dry-run]
                                           定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环，--mode sail 注册每日定时自由航行）

@@ -89,16 +89,17 @@ export function buildKeychainSh(repoRoot) {
 }
 
 /**
- * sail 时长参数：--minutes N（正整数）优先，其次 --duration（如 2h / 90m / 1h30m）。
+ * sail 时长参数：--minutes N（正整数）优先，其次 --duration（如 2h / 90m / 1h30m / 90s）。
  * duration 在此做格式白名单（sail 运行时还会再校验）——wrapper 生成时刻全部固化为
- * 字面量，宽格式会把任意字符串带进 shell。
+ * 字面量，宽格式会把任意字符串带进 shell。白名单与 parseDurationMinutes 可解析形态
+ * 逐一对应（h+m、m+s 可组合；h+m+s 运行时不可解析，同样拒收）。
  * @returns {string[]} ['--minutes', N] 或 ['--duration', s]；两者都缺/非法抛错。
  */
 export function sailDurationArgs(opts = {}) {
   if (Number.isInteger(opts.minutes) && opts.minutes > 0) return ['--minutes', String(opts.minutes)];
   const dur = typeof opts.duration === 'string' ? opts.duration.trim() : '';
-  if (/^\d+h?(?:\d+m)?$|^\d+m$/i.test(dur) && /\d/.test(dur)) return ['--duration', dur];
-  throw new Error('sail 模式需要 --minutes N（正整数）或 --duration（如 2h / 90m / 1h30m）');
+  if (/^\d+h(?:\d+m)?$|^\d+m(?:\d+s)?$|^\d+$|^\d+s$/i.test(dur) && /\d/.test(dur)) return ['--duration', dur];
+  throw new Error('sail 模式需要 --minutes N（正整数）或 --duration（如 2h / 90m / 1h30m / 90s）');
 }
 
 /**

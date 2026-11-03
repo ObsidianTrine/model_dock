@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Second-granularity sail duration**: `sail --duration` accepts `90s` and `1m30s` forms — smoke tests and scheduled short sails no longer need to round up to a whole minute; `schedule --mode sail` allows the same. Existing `45` / `90m` / `2h` / `1h30m` behavior unchanged.
+
 ## [1.6.0] - 2026-11-03
 
 Cost accounting ships: "how much did it cost" is visible end to end, backed by task tiers with data-plane limits, a new round of doctor checks, claude-code onboarding polish, and a batch of fixes.
