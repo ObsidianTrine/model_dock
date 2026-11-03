@@ -103,6 +103,24 @@ describe('orchestrator drift > 回溯失败率统计与自动降级', () => {
       repo.cleanup()
     }
   }, 60_000)
+
+  it('baseBranch=main 的仓库回溯检测正常（写死 develop 时 git log 报错被 catch 吞掉 → 恒 0、永不降级）', () => {
+    const repo = mkRepo({ baseBranch: 'main' })
+    try {
+      autoMergeTask(repo.root, 'm1')
+      autoMergeTask(repo.root, 'm2')
+      // revert 落在 main（该仓库的合并目标）：baseBranch 透传后必须能检出
+      const bad = git(repo.root, 'log main --format=%H --grep="Merge branch \'feature/m1\'"')
+      git(repo.root, `revert -m 1 --no-edit ${bad.split('\n')[0]}`)
+      const r = evaluateDrift(repo.root, `${repo.root}/.agents/orchestrator/queue`)
+      expect(r.autoTotal).toBe(2)
+      expect(r.autoReverted).toBe(1) // 旧实现恒 0（detectReverted 查不存在的 develop 分支报错→false）
+      expect(r.rate).toBe(0.5)
+      expect(r.degraded).not.toBeNull() // 50% > 20% 阈值 → 降级生效
+    } finally {
+      repo.cleanup()
+    }
+  }, 90_000)
 })
 
 describe('orchestrator drift > 降级期间自动合并回人工', () => {
