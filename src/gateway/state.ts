@@ -1,6 +1,7 @@
 /** 薄 re-export：gateway/state.ts 已按域拆至 ./state/（types 共享类型层 + runtime/routing/logs/
- *  state-file 四域模块；依赖单向 types ← 四模块，模块间互不引用）。对外导入面与拆分前
- *  完全一致——既有 `from '.../gateway/state.js'` 的全部调用点（ops/cli/tray/update/测试等）零改动。 */
+ *  state-file/sea 五域模块；依赖单向 types ← 各域模块，域间互不引用——唯一例外 routing 引
+ *  sea 的记账入口 recordSeaOutcome（同源事件流，见 sea.ts 头注）。对外导入面与拆分前完全一致
+ *  ——既有 `from '.../gateway/state.js'` 的全部调用点（ops/cli/tray/update/测试等）零改动。 */
 export type { LogEntry, AuditEntry, EventEntry, RingEntry, ResolvedTarget, ResolveResult, GatewayRuntime, ProviderLatencyRing, HealthState } from './state/types.js'
 export { buildTokenIndex, buildRuntime, reloadRuntime } from './state/runtime.js'
 export type { OrderedCandidate, RouteSource, PickResult, ScheduleHit, RouteState, AutoRouteInfo } from './state/routing.js'
@@ -12,3 +13,5 @@ export { checkTokenLimits, recordTokenUsage } from './state/tokenlimits.js'
 export type { TokenLimitTrip } from './state/tokenlimits.js'
 export type { TokenUsageState } from './state/types.js'
 export { readGatewayState, gatewayLive, writeGatewayState, mutateGatewayState, clearGatewayState, pidAlive, startupGatewayState } from './state/state-file.js'
+export { recordSeaOutcome, seaWindowView, seaStateSnapshot, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, SEA_STORM_MELTDOWN_RATIO, SEA_STORM_429_RATE, SEA_STORM_429_MIN_TOTAL, SEA_STORM_REASON_MELTDOWN_MAJORITY, SEA_STORM_REASON_429_RATE } from './state/sea.js'
+export type { SeaMinuteBucket, SeaWindowView, SeaProviderErrors, SeaState, ProviderAvailability, ModelProbeState } from './state/types.js'

@@ -21,6 +21,8 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     health: new Map(),
     tokenUsage: new Map(),
     metricsLatency: new Map(),
+    seaErrors: new Map(),
+    modelProbe: { results: new Map(), inflight: new Set() },
   }
 }
 
@@ -43,5 +45,12 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   // 已删除的 provider 健康条目一并清掉：长生命周期进程反复增删服务不残留（recordOutcome 只增不删）
   for (const id of rt.health.keys()) {
     if (!rt.config.providers[id]) rt.health.delete(id)
+  }
+  // 海况分桶与模型探测缓存同口径清理：recordOutcome / 周期探测同样只增不删
+  for (const id of rt.seaErrors?.keys() ?? []) {
+    if (!rt.config.providers[id]) rt.seaErrors?.delete(id)
+  }
+  for (const id of rt.modelProbe?.results.keys() ?? []) {
+    if (!rt.config.providers[id]) rt.modelProbe?.results.delete(id)
   }
 }

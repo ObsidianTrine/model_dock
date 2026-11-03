@@ -27,7 +27,8 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, summarizeUsageDays, type GatewayRuntime, type LogEntry, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
+import { startModelProbeLoop } from './modelprobe.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
@@ -69,6 +70,11 @@ export interface GatewayStartOptions {
   autoHolidayRefresh?: boolean
   /** 模型元数据目录（models.dev）自动刷新；默认开启，测试传 false 避免出站请求 */
   autoCatalogRefresh?: boolean
+  /** 上游模型可用性周期探测（modelprobe.ts，v1 纯观测）；默认开启，测试传 false 避免出站请求
+   *  （或用 modelProbeIntervals 注入短首查 + mock 上游） */
+  autoModelProbe?: boolean
+  /** 注入探测调度节奏（测试用）：不传用 modelprobe.ts 的 MODEL_PROBE_* 默认（启动 90s / 每 24h） */
+  modelProbeIntervals?: { initialDelayMs?: number; intervalMs?: number }
 }
 
 /** 锁屏提示展示的 gateway.json 路径：随实例实际 home 走（沙箱/自定义 home 时不是 ~/.modeldock），
@@ -297,6 +303,13 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
     catalogTimers.push(catFirst, catLoop)
   }
   server.on('close', () => catalogTimers.forEach((t2) => { clearTimeout(t2); clearInterval(t2) }))
+
+  // 上游模型可用性周期探测（v1 纯观测，modelprobe.ts）：启动 90s 错峰首查、之后每 24h 一轮；
+  // 结果（含失败负缓存）只存内存，GET /_modeldock/model-availability 消费。不影响转发路由；
+  // 测试传 autoModelProbe:false 停用，或 modelProbeIntervals 注入短首查（配 mock 上游）
+  if (opts.autoModelProbe !== false) {
+    startModelProbeLoop(rt, server, opts.modelProbeIntervals)
+  }
 
   // JSONL 日志保留期清理：启动即清一次、之后每 24h；保留天数读 rt.config（随 reloadRuntime
   // 跟随配置变化），log_retention_days=0 禁用。删除为尽力而为，失败静默不影响网关服务
@@ -1801,12 +1814,30 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
 
 /** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
  *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
- *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类。 */
+ *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类。
+ *  海况扩展（只增不改，state/sea.ts）：providers[].errors 滑窗错误分桶（last_5m/last_60m 的
+ *  分错误类计数与错误率）+ sea_state 聚合海况信号——同为编排侧风暴闸数据源。 */
 async function hMetrics(c: AdminCtx): Promise<void> {
   const { rt, res } = c
   const providers: Record<string, unknown> = {}
-  for (const [id, m] of rt.metricsLatency) {
-    providers[id] = { count: m.count, last_ms: m.lastMs ?? null, ...latencyQuantiles(m.samples) }
+  // 键并集：只有耗时采样（logRequest）或只有海况分桶（recordOutcome）之一的 provider 都要露出。
+  // 正常转发两者同来；测试直灌 recordOutcome 时只有 errors 侧（count 等耗时字段缺席）
+  const ids = new Set<string>(rt.metricsLatency.keys())
+  for (const id of rt.seaErrors?.keys() ?? []) ids.add(id)
+  for (const id of ids) {
+    const m = rt.metricsLatency.get(id)
+    const sp = rt.seaErrors?.get(id)
+    providers[id] = {
+      ...(m ? { count: m.count, last_ms: m.lastMs ?? null, ...latencyQuantiles(m.samples) } : {}),
+      ...(sp
+        ? {
+            errors: {
+              last_5m: seaWindowView(sp, SEA_WINDOW_5M_MS),
+              last_60m: seaWindowView(sp, SEA_WINDOW_60M_MS),
+            },
+          }
+        : {}),
+    }
   }
   const now = Date.now()
   const meltdown: Array<{ provider: string; class: string; until: string; remaining_ms: number }> = []
@@ -1820,7 +1851,37 @@ async function hMetrics(c: AdminCtx): Promise<void> {
     })
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now) }))
+}
+
+/** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。
+ *  数据源 = rt.tokenUsage（数据面限额计数，state/tokenlimits.ts；只统计配了 limits 的 harness，
+ *  未配置者无条目、不出现在结果里）。rpm 是固定窗口计数：rpm_started_at 距今超 60s 即窗口已
+ *  过期、要等下一个请求经过 checkTokenLimits 才清零——消费方按时间戳自行判陈旧，本端点只读不翻窗。 */
+async function hHarnessUsage(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number }> = {}
+  for (const [id, s] of rt.tokenUsage) {
+    usage[id] = {
+      rpm: s.rpmCount,
+      rpm_started_at: new Date(s.rpmStart).toISOString(),
+      day: s.dayKey,
+      day_tokens: s.dayTokens,
+    }
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, usage }))
+}
+
+/** GET /_modeldock/model-availability：per-provider 上游模型目录探测结果（admin 门内只读，纯内存读）。
+ *  数据源 = 周期探测（modelprobe.ts：启动 90s + 每 24h，失败负缓存）。从未探测到的 provider
+ *  （未到首查点 / 无 key / 已禁用）不出现在结果里——缺席 ≠ 不可用，消费方勿把缺席当故障。 */
+async function hModelAvailability(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const availability: Record<string, ProviderAvailability> = {}
+  for (const [id, a] of rt.modelProbe?.results ?? []) availability[id] = a
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, availability }))
 }
 
 /** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
@@ -1983,6 +2044,8 @@ async function hTierValidate(c: AdminCtx): Promise<void> {
 const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/rotate': hRotate,
   'GET /_modeldock/metrics': hMetrics,
+  'GET /_modeldock/harness-usage': hHarnessUsage,
+  'GET /_modeldock/model-availability': hModelAvailability,
   'GET /_modeldock/usage': hUsage,
   'GET /_modeldock/status': hStatus,
   'GET /_modeldock/admin/update/status': hUpdateStatus,
