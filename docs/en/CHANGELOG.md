@@ -5,15 +5,38 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.6.0] - 2026-11-03
 
-New cost accounting: model prices × measured usage converted to US dollars — "how much did it cost" is visible end to end, from forwarding logs to orchestrated voyages.
+Cost accounting ships: "how much did it cost" is visible end to end, backed by task tiers with data-plane limits, a new round of doctor checks, claude-code onboarding polish, and a batch of fixes.
 
 ### Added
 
 - **Per-model cost at the gateway**: token usage in forwarding logs is converted to US dollars at per-model prices — the console status line gains a today-usage badge (requests / tokens / estimated cost, hover for details); the `GET /_modeldock/usage` aggregation gains `cost` and `unpriced_models` fields; `POST /_modeldock/pricing-lookup` serves batch price lookups for the orchestrator (admin-authenticated).
 - **Two-level price sources**: bundled official list prices from models.dev (8,000+ models, refreshed with the catalog); when discounted/plan pricing differs, override in `~/.modeldock/pricing.json` (keys = model name or `provider/model`, unit = USD per million tokens). Models without a matched price are counted as $0 and listed as a reminder — prices are never guessed.
 - **Voyage fuel ledger**: `reconcile` and `stats --cost` report per-task measured cost alongside the token ledger; the sail report gains a fuel section (total + per-card breakdown), and `sail --max-cost-usd N` sets a fuel cap — measured cost at or above the cap hauls in the sail (stops only; never switches engines). Cost accounting requires `gatewayAdmin: true` in `.agents/workflow.json` (prices via the gateway admin face; enabled in this repo).
+- **Task tiers and data-plane limits**: profiles can carry a tier label, and failover only switches within the same tier (traffic of a high-priority service never falls to a lower-tier upstream); per-client limits — a requests-per-minute cap and a daily token-spend cap, with rejections that say exactly which limit was hit.
+- **New doctor checks**: log size and free disk space, config.toml parse errors naming the file, and detection of a misconfigured FAKE_HOME test environment.
+- **claude-code onboarding polish**: gateway mode disables telemetry and non-essential side-channel requests by default; legacy-client fallback lays out four tiered slots in the service directory (pick by name, not by number); modelPicker is version-gated (below 2.1.243 it automatically falls back to pinning via the `ANTHROPIC_MODEL` env var).
+
+### Improved
+
+- **Actionable errors on high-frequency failure paths**: port exhaustion, 401 with the correct command shape, timeout triage, all-candidates-failed and cloud heartbeat failures each name the next step.
+- **Large lists no longer stall the UI**: edit dialogs and the fetch panel render at most 200 rows, with a one-click "show all" at the tail.
+- **The fetch panel search box sticks under the header**: it stays visible while scrolling long model lists.
+
+### Fixed
+
+- **claude-code takeover no longer leaves stale model pins**: gateway takeover clears old upstream model-mapping env vars; SMALL_FAST_MODEL migration no longer picks them up either.
+- **Console reset matches the CLI semantics**: snapshot first, restore clients one by one, then clear the keyring and data.
+- **Secrets migration no longer drops keys**: writes take the lock and re-read to verify, closing the race; keyring/DPAPI subprocesses get a uniform 10-second timeout kill so they can no longer hang.
+- **The Windows tray progress window no longer drags the UI down**: window and timers moved to a dedicated thread.
+- **A batch of gateway robustness fixes**: shell-execution timeouts kill the whole process tree (grandchildren holding output pipes can no longer hang it); SSE line buffers are capped; error replies uniformly close keep-alive; model-catalog fetching no longer buffers without bound when content-length is missing.
+- **A bad key_ref no longer breaks whole surfaces**: one bad entry no longer crashes doctor / provider list / import / the update status poll — it becomes an actionable error.
+- **Guardrails for hand-edited external config**: bad values (provider not an object, rules not an array, etc.) become actionable errors; detach skips non-string model values gracefully.
+- **Detach fallback**: plan/apply failures downgrade to warnings and still unregister; dsh credential cleanup no longer blocked by an early return; direct-connect status no longer misreports as gateway.
+- **Import keeps the details**: cc-switch / crush preserve actionable skip reasons; name-collision avoidance also checks profiles to prevent silent skips.
+- **Cross-machine sync preserves the executable bit**: 0755 scripts stay directly runnable after syncing.
+- **The console page now ships a Content-Security-Policy**: the same guard string as the gateway, closing the public-surface defense gap.
 
 ## [1.5.2] - 2026-11-01
 
@@ -458,6 +481,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.3...v1.5.0

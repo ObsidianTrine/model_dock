@@ -5,15 +5,38 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.6.0] - 2026-11-03
 
-新增成本核算：模型单价 × 实测用量折成美元，「花多少钱」从转发日志到编排航行全程可见。
+成本核算上线：「花多少钱」全程可见；配套任务等级与数据面限额、doctor 新一轮检查、claude-code 接入打磨与一批修复。
 
 ### 新增
 
 - **网关按模型折算成本**：转发日志里的 token 用量按模型单价折算成美元——控制台状态行新增今日用量徽标（请求数 / tokens / 估算成本，悬停看明细）；`GET /_modeldock/usage` 聚合结果新增 `cost` 与 `unpriced_models` 字段；`POST /_modeldock/pricing-lookup` 供编排侧批量查价（管理面鉴权）。
 - **模型单价两级来源**：内置 models.dev 官方牌价（八千余模型，随目录刷新）；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖（键 = 模型名或 `服务商/模型`，单位美元每百万 token）。查不到单价的模型按 $0 计并列名提醒，绝不猜价。
 - **编排航行燃油账**：`reconcile` 对账与 `stats --cost` 在 token 账之外给出每任务实测成本；自由航行（sail）报告新增「燃油账」段（总账 + 逐卡拆账），`sail --max-cost-usd N` 燃油上限——网关实测价达到上限即收帆（只停不换引擎）。成本核算需 `.agents/workflow.json` 配 `gatewayAdmin: true`（价目走网关管理面，本仓库已开启）。
+- **任务等级（tier）与数据面限额**：profile 可打任务等级标签，故障切换只在同等级之间切换（高优先级服务的流量不会被切到低等级上游）；按客户端限速——每分钟请求数上限与每日 token 花费上限，超限即拒绝并明说。
+- **doctor 新一轮检查项**：日志体积与磁盘余量、config.toml 解析错误带文件路径、FAKE_HOME 测试环境误配检测。
+- **claude-code 接入打磨**：网关模式默认关闭遥测与非必要旁路请求；旧版客户端回退时服务目录按档位铺四层槽位（按名字选用，不用数序号）；modelPicker 按版本门控（低于 2.1.243 自动回退 `ANTHROPIC_MODEL` 环境变量钉定）。
+
+### 改进
+
+- **高频失败路径报错可操作**：端口穷尽、401 时给出正确命令形态、超时分流提示、全候选失败与云端心跳失败各给下一步。
+- **大列表不卡界面**：编辑弹层与拉取面板行渲染上限 200 行，尾部「显示全部」一键放开。
+- **拉取模型面板搜索框随表头吸附滚动**：长列表里搜索框始终可见。
+
+### 修复
+
+- **claude-code 接管不再残留旧模型钉死**：网关接管清掉旧上游模型映射环境变量；SMALL_FAST_MODEL 迁移也不误收。
+- **Web 控制台 reset 对齐 CLI 语义**：先补拍快照、逐客户端还原配置，再清钥匙环与数据。
+- **secrets 迁移不再丢 key**：写入持锁并重读比对封住竞态；钥匙环 / DPAPI 子进程统一 10 秒超时强杀，不再挂死。
+- **Windows 托盘进度小窗不再拖累界面**：窗体与定时器挪进专用线程。
+- **网关健壮性一批**：shell 执行超时改进程树杀（孙进程占用输出管道不再挂死）；SSE 行缓冲封顶；错误应答统一断开长连接；模型目录拉取在无 content-length 时不再无界缓冲。
+- **坏 key_ref 不再炸整面**：单个坏条目不再让 doctor / provider list / 导入 / 更新状态轮询崩掉，转为可操作报错。
+- **外部配置坏值守卫**：手编坏值（provider 非对象、规则非数组等）转可操作报错；detach 对非字符串 model 宽容跳过。
+- **detach 兜底**：计划或应用失败转警告仍注销登记；dsh 凭据清理不再被提前返回挡住；直连形态状态不再假报网关。
+- **导入不再丢详情**：cc-switch / crush 保留可操作的跳过原因；撞名避让同时查 profile，防静默漏建。
+- **跨机同步保留可执行权限位**：0755 脚本同步后仍可直接执行。
+- **控制台页补 Content-Security-Policy**：与网关同款防护串，公网暴露面纵深防御补齐。
 
 ## [1.5.2] - 2026-11-01
 
@@ -458,6 +481,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.4.3...v1.5.0
