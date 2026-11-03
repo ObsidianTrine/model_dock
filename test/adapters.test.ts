@@ -3161,3 +3161,56 @@ describe('外部配置字段级守卫（手编坏值不冒裸 TypeError）', () 
     expect(() => ensurePlainObjectField([1], 'model_providers', '/a/b')).toThrow(/array/)
   })
 })
+
+describe('detach 链路加固', () => {
+  it('detachHarness：planDetach 抛错不再卡半态——转警告 notes、仍注销 harness 登记', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers:\n    ark:\n      api: anthropic-messages\n', 0o600)
+      await withConfig(baseCfg())
+      // 真实 attach（产出 attach 快照 + 凭据文件），随后在 profiles 下放一个 package.json
+      // **目录**：readTextIfExists 只吞 ENOENT，读目录得 EISDIR → planDetach（dshLayout）确定性
+      // 抛错（三平台一致，且该路径不在 attach 快照里、不碰还原链）。旧实现 detachHarness 整体
+      // 失败、harness 登记残留，重试走同一 planDetach 永远同错（半态卡死）
+      const { applyAttach } = await import('../src/ops.js')
+      const r = await applyAttach('dsh', {})
+      expect(r.files.length).toBeGreaterThan(0)
+      await ensureDir(path.join(h.home, '.dsh', 'profiles', 'badprofile', 'package.json'))
+      const { detachHarness } = await import('../src/ops.js')
+      const outcome = await detachHarness('dsh') // 不抛：兜底生效
+      expect(outcome.restored).toBe(true) // 快照还原已完成
+      expect(outcome.notes.join()).toContain('残留清理失败')
+      expect((await loadConfig()).harness['dsh']).toBeUndefined() // 登记已移除
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('dsh detach 幂等：凭据 ref 单独残留也清理（不再被「无改动」提前返回挡住）；重跑零改动', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers:\n    ark:\n      api: anthropic-messages\n', 0o600)
+      const cred = path.join(h.home, '.dsh', '.credentials.yaml')
+      await atomicWrite(cred, 'version: 1\nrefs:\n  MODELDOCK_TOKEN: mdk_x\n', 0o600)
+      await withConfig(baseCfg())
+
+      // patch 全净但凭据 ref 残留：旧实现被 changes.length===0 提前返回挡住，ref 永不清理
+      const plan1 = await dshAdapter.planDetach(await loadConfig())
+      expect(plan1.changes).toHaveLength(1)
+      expect(plan1.changes[0]!.path).toBe(cred)
+      await applyChanges('dsh', 'detach', plan1.changes, { yes: true })
+
+      // 重跑：refs 已无 token → 等值过滤零改动（旧实现即使走到这里也会无谓重写整文件）
+      const plan2 = await dshAdapter.planDetach(await loadConfig())
+      expect(plan2.changes).toHaveLength(0)
+      const credAfter = fs.readFileSync(cred, 'utf8')
+      expect(credAfter).not.toContain('MODELDOCK_TOKEN')
+    } finally {
+      h.restore()
+    }
+  })
+})
