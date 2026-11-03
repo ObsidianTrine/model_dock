@@ -405,19 +405,31 @@ function resolveAutoResume(raw) {
 
 /** 风暴闸配置解析：{ threshold, windowMinutes, upstream? }。与 resolveAutopilot 同风格：
  *  键缺失 = 功能关闭（null，行为与历史版本一致）；键存在时缺省 threshold 3 / windowMinutes 60。
- *  upstream 子键（可选，presence 启用）：{ threshold: 正整数（必填）, windowMinutes?（缺省 15）}
- *  ——上游海况（网关日志 429/402 实测）滞留阈值。非法值回落缺省并 console.warn 告警
- *  （stderr，不污染 stdout 裁决通道）；键内字段缺失 = 沿用该字段缺省，不告警。 */
+ *  enabled 子键（2026-11-04 海况数据面，可选）：缺省 true（键存在即启用，与历史「删键 = 关闭」
+ *  兼容）；显式 false = 关闭风暴闸。
+ *  upstream 子键（可选，presence 启用）：{ threshold: 正整数（必填）, windowMinutes?（缺省 15）,
+ *  source?: "metrics" | "log"（缺省 "metrics"）}——上游海况滞留阈值。source="metrics"（缺省）
+ *  = 优先 /_modeldock/metrics 海况数据面（sea_state 风暴 + 错误分桶计数，失败自动落回网关
+ *  日志扫描）；source="log" = 显式降级：派发决策面只看网关日志 429/402 实测，不发起 metrics
+ *  探测。非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）；键内字段
+ *  缺失 = 沿用该字段缺省，不告警。 */
 function resolveWeatherHold(raw) {
   if (raw === undefined || raw === null) return null;
   const DEFAULTS = { threshold: 3, windowMinutes: 60 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] weatherHold 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 weatherHold 键：{ threshold?: 正整数, windowMinutes?: 正整数, upstream?: { threshold: 正整数, windowMinutes?: 正整数 } }；删除该键 = 关闭风暴闸）`);
+    console.warn(`[workflow-config] weatherHold 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 weatherHold 键：{ enabled?: boolean, threshold?: 正整数, windowMinutes?: 正整数, upstream?: { threshold: 正整数, windowMinutes?: 正整数, source?: "metrics" | "log" } }；删除该键 = 关闭风暴闸）`);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { threshold?, windowMinutes?, upstream? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { enabled?, threshold?, windowMinutes?, upstream? }，当前为 ${JSON.stringify(raw)}`);
     return { ...DEFAULTS };
   }
   const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') {
+      if (raw.enabled === false) return null; // 显式关闭（键存在但 enabled:false）
+    } else {
+      warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+    }
+  }
   if (raw.threshold !== undefined) {
     if (Number.isInteger(raw.threshold) && raw.threshold > 0) out.threshold = raw.threshold;
     else warn(`threshold ${JSON.stringify(raw.threshold)} 不合法（须为正整数）`);
@@ -430,12 +442,16 @@ function resolveWeatherHold(raw) {
     const u = raw.upstream;
     const uBad = !u || typeof u !== 'object' || Array.isArray(u) || !Number.isInteger(u.threshold) || u.threshold <= 0;
     if (uBad) {
-      warn(`upstream ${JSON.stringify(u)} 不合法（须为对象 { threshold: 正整数, windowMinutes?: 正整数 }）`);
+      warn(`upstream ${JSON.stringify(u)} 不合法（须为对象 { threshold: 正整数, windowMinutes?: 正整数, source?: "metrics" | "log" }）`);
     } else {
-      out.upstream = { threshold: u.threshold, windowMinutes: 15 };
+      out.upstream = { threshold: u.threshold, windowMinutes: 15, source: 'metrics' };
       if (u.windowMinutes !== undefined) {
         if (Number.isInteger(u.windowMinutes) && u.windowMinutes > 0) out.upstream.windowMinutes = u.windowMinutes;
         else warn(`upstream.windowMinutes ${JSON.stringify(u.windowMinutes)} 不合法（须为正整数）`);
+      }
+      if (u.source !== undefined) {
+        if (u.source === 'metrics' || u.source === 'log') out.upstream.source = u.source;
+        else warn(`upstream.source ${JSON.stringify(u.source)} 不合法（允许 "metrics" | "log"）`);
       }
     }
   }

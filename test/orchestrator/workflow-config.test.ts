@@ -326,20 +326,31 @@ describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况�
     expect(cfgOf({ weatherHold: { threshold: 5 } }).weatherHold).toEqual({ threshold: 5, windowMinutes: 60 })
   })
 
-  it('upstream 子键：合法解析（windowMinutes 缺省 15）；非法/缺 threshold 回落不启用', () => {
+  it('upstream 子键：合法解析（windowMinutes 缺省 15，source 缺省 metrics）；非法/缺 threshold 回落不启用', () => {
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 8 } } }).weatherHold).toEqual({
       threshold: 3,
       windowMinutes: 60,
-      upstream: { threshold: 8, windowMinutes: 15 },
+      upstream: { threshold: 8, windowMinutes: 15, source: 'metrics' },
     })
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 2, windowMinutes: 30 } } }).weatherHold.upstream).toEqual({
       threshold: 2,
       windowMinutes: 30,
+      source: 'metrics',
     })
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 2, source: 'log' } } }).weatherHold.upstream.source).toBe('log')
+    // 非法 source 回落缺省 metrics（告警走 stderr，不影响解析）
+    expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: 2, source: 'rss' } } }).weatherHold.upstream.source).toBe('metrics')
     // 缺 threshold / 非对象 / 非正整数 → 不启用 upstream（基础键照常）
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: {} } }).weatherHold.upstream).toBeUndefined()
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: 'storm' } }).weatherHold.upstream).toBeUndefined()
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: -1 } } }).weatherHold.upstream).toBeUndefined()
+  })
+
+  it('enabled 子键（2026-11-04 海况数据面）：缺省 true；显式 false = 关闭（null）；非法值忽略', () => {
+    expect(cfgOf({ weatherHold: { enabled: true, threshold: 5 } }).weatherHold).toEqual({ threshold: 5, windowMinutes: 60 })
+    expect(cfgOf({ weatherHold: { enabled: false, threshold: 5 } }).weatherHold).toBeNull()
+    // 非法 enabled（非布尔）→ 忽略该键，风暴闸照常启用
+    expect(cfgOf({ weatherHold: { enabled: 'yes', threshold: 5 } }).weatherHold).toEqual({ threshold: 5, windowMinutes: 60 })
   })
 })
 

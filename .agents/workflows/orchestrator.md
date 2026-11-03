@@ -290,7 +290,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - 停止：`touch .agents/orchestrator/.watch-stop`（下周期即停并清文件）或 Ctrl-C；**drift 降级自动退出**（保险丝不允许自己插回去，人工 `drift --clear` 后重启）。
 - 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启。`--interval 0 --max-cycles N` 为测试档（不休眠）。
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
-- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 8, "windowMinutes": 15}`：网关日志（`gatewayLogDir`，须已配置）窗口内限流/额度类请求（429/402）合计达阈值同样滞留——网关先于 worker 看到上游限流（任何 harness 的流量都算），触发时点名为「上游风暴」。workflow.json 可选键 `"weatherHold": {"threshold": 3, "windowMinutes": 60, "upstream": {"threshold": 8, "windowMinutes": 15}}`，**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
+- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 5, "windowMinutes": 60, "source": "metrics"}`：**metrics 数据面**（2026-11-04 起缺省）优先消费网关 `/_modeldock/metrics` 的权威海况——`sea_state.storm` 直通滞留 + 60 分钟窗限流/额度类请求（429+quota）真实计数达阈值同样滞留（网关先于 worker 看到上游限流，触发时点名为「上游风暴」；阈值 ≤5 可保证网关判风暴时计数闸必触发，因网关 60m 风暴规则最低 6 次 429）；admin 不可达/端点失败自动落回**网关日志扫描**（`gatewayLogDir`，须已配置；429/402 计数，fail-open——观测失败绝不阻断派发）。`source: "log"` 显式降级为仅日志扫描（不发起 metrics 探测）。workflow.json 可选键 `"weatherHold": {"enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": {...}}`（`enabled` 缺省 true，显式 false = 关闭），**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
 
 ### B6. 弃船演习（drill）
@@ -314,8 +314,8 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 3. 验证链路：`propose --backend mock` → 白名单卡应出现「🤖 autopilot 已提交提案」（gate=L1）；`drain --backend mock` 一路到 merged 即闭环健康（沙箱配方见 test/orchestrator/propose.test.ts）；
 4. 试运行一个周期后看 `stats --json` 的 `summary.merge_rate` 与 `summary.near_miss`，再逐步放宽 `autoSubmitTypes`（deps/核心路径/人工草稿永不自动；实际合并仍由分级裁决与 drift 保险丝兜底）。
 
-**风暴闸 weatherHold**（瞬时故障密集时自动停派发）：
-1. workflow.json 加 `"weatherHold": { "threshold": 3, "windowMinutes": 60 }`（阈值=窗口内 worker_retry 合计）；上游海况可选：加 `"upstream": { "threshold": 8, "windowMinutes": 15 }`（网关日志 429/402 合计，须同时配置 `gatewayLogDir`）；
+**风暴闸 weatherHold**（瞬时故障密集时自动停派发；**本仓已开启**，纯安全闸无计费影响）：
+1. workflow.json 加 `"weatherHold": { "enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": { "source": "metrics", "threshold": 5, "windowMinutes": 60 } }`（阈值=窗口内 worker_retry 合计；上游海况 metrics 数据面优先——`sea_state.storm` 直通 + 60 分钟 429+quota 计数，admin 不可得自动落回网关日志 429/402 扫描，须同时配置 `gatewayLogDir`；`source: "log"` 可显式降级为仅日志）；
 2. 验证：窗口内凑满阈值后，下次 drain / watch 周期应打「⛈ 风暴滞留」并停派发（fleet.jsonl 留 `weather_hold`），窗口滑过自动恢复、无需清理状态；
 3. 滞留通知走 `${envPrefix}_ORCH_WEBHOOK`；滞留期 announce 只发一次防刷屏。
 
@@ -364,7 +364,8 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 }
 ```
 
-- **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴（服务熔断 / 上游限流 / worker 重试密集 / weatherHold 滞留）→ 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。
+- **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴 → 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。风暴判定**权威海况优先**（2026-11-04 A2）：优先消费网关 `/_modeldock/metrics` 的 `sea_state.storm`（reason 带 `[storm_sea_state]`）与 meltdown 清单，服务熔断（fleet 观测）/ 上游限流（日志扫描）/ worker 重试密集保留为海况快照缺席时的回落。
+- **派发预检（model-availability，2026-11-04 A5）**：派发决策后核对 worker 模型（`tier.workerModel` > `worker.model`）是否还在上游服务目录里——tier token 经 `/_modeldock/tier-validate` 权威解析到 provider（ship→provider 推断不做：无 tier token 即不预检），再查 `/_modeldock/model-availability` 条目：**条目存在且新鲜（<25h，探测周期 24h+1h 余量）且 `ok:true` 且 `model_ids` 非空且不含该模型** → 滞留派发：卡 pending→blocked（队列保留不丢，模型恢复后 resume）+ `dispatch_held {reason:"model_unavailable", provider, model}` 事件；条目缺席（从未探测 ≠ 不可用）/ 陈旧 / `ok:false`（探测失败 ≠ 模型不可用）/ admin 不可达 → 一律照常派发（fail-open）。快照 5 分钟节流缓存。
 - **不越权三律**：显式 CLI `--worker-backend` / `--backend` 最高优先（动态选船直接让位，不留痕）；resume/retry 沿用上次会话（会话连续性优先，中途不换船）；mock 永不参与自动选船（测试链路照常可用，mock 也不进 envelope）。
 - **留痕**：所有非常规选择记 `dispatch_selected { from, to, switched, reason }` 事件（永不静默红线）；决策链任何一步失败自动回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
 - **与 fleet observe 的关系**：阶段 1 观测（`fleet_observed`）只照亮不决策，本节是它的决策消费者。难度路由不需要网关（纯卡面信号）；逐船海况判读需要 `gatewayAdmin: true` 的观测快照，观测缺席不判恶劣（观测缺席 ≠ 风暴）。

@@ -223,6 +223,82 @@ describe('dynamic dispatch > seaWeather（海况装配）', () => {
   })
 })
 
+describe('dynamic dispatch > 权威海况（sea_state 数据面，A2）', () => {
+  const base = { cfg: DD_ON, defaultBackend: 'claude-headless' } // 与上方 decideDispatch describe 的 base 同构
+  // 模拟 /_modeldock/metrics 提取出的海况快照（weather.mjs seaSnapshotFromMetricsJson 的产物形状）
+  const snap = (over: Record<string, unknown> = {}) => ({
+    mode: 'ok' as const,
+    at: Date.now(),
+    storm: true,
+    reasons: ['meltdown_majority'],
+    meltdown: ['p9'],
+    rate429_5m: 0.1,
+    total5m: 40,
+    count429_5m: 4,
+    countQuota_5m: 0,
+    count429_60m: 8,
+    countQuota_60m: 1,
+    ...over,
+  })
+
+  it('seaWeather 注入快照：upstream 改走 metrics（60m 429+quota 真实计数），storm 直通滞留', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dd-sea2-'))
+    try {
+      const cfg = { weatherHold: { threshold: 9, windowMinutes: 60, upstream: { threshold: 8, windowMinutes: 60 } } }
+      const w = seaWeather(root, cfg, { seaSnap: snap() })
+      expect(w.sea).toMatchObject({ observed: true, storm: true, meltdown: ['p9'], count429_60m: 8, countQuota_60m: 1 })
+      expect(w.upstream).toEqual({ source: 'metrics', count: 9, threshold: 8, windowMinutes: 60, observed: true, storm: true })
+      expect(w.held).toBe(true) // storm 直通（count 9 ≥ 8 也独立达阈）
+      const calm = seaWeather(root, cfg, { seaSnap: snap({ storm: false, count429_60m: 1, countQuota_60m: 0 }) })
+      expect(calm.held).toBe(false)
+      expect(calm.upstream).toMatchObject({ source: 'metrics', count: 1 })
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('5m 429 率补充信号：率 ≥ 50% 且样本 ≥ 10 → 提前滞留；样本不足视为噪声不判', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dd-sea3-'))
+    try {
+      const cfg = { weatherHold: { threshold: 9, windowMinutes: 60, upstream: { threshold: 50, windowMinutes: 60 } } }
+      const w = seaWeather(root, cfg, { seaSnap: snap({ storm: false, count429_60m: 2, countQuota_60m: 0, rate429_5m: 0.6, total5m: 20 }) })
+      expect(w.sea.rate429Breach).toBe(true)
+      expect(w.held).toBe(true)
+      const noisy = seaWeather(root, cfg, { seaSnap: snap({ storm: false, count429_60m: 0, countQuota_60m: 0, rate429_5m: 0.9, total5m: 4 }) })
+      expect(noisy.sea.rate429Breach).toBe(false)
+      expect(noisy.held).toBe(false)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('decideDispatch：sea_state.storm 优先 → dispatch_selected reason 带 storm_sea_state；熔断位取 sea 清单（覆盖 fleetState 旧观测）', () => {
+    const weather = {
+      held: true,
+      retryCount: 0,
+      retryThreshold: 3,
+      windowMinutes: 60,
+      upstream: null,
+      sea: { observed: true, at: 1, storm: true, reasons: ['meltdown_majority'], meltdown: ['p9'], rate429_5m: 0.1, total5m: 40, count429_60m: 0, countQuota_60m: 0, rate429Breach: false },
+    }
+    const fleetWithMelt = { ...HEALTHY, meltdown: [{ provider: 'p1', class: 'quota' }] }
+    const r = decideDispatch({ ...base, meta: { tier: 'ahead-1' }, fleetState: fleetWithMelt, weather })
+    expect(r.switched).toBe(false)
+    expect(r.events[0].type).toBe('dispatch_selected')
+    expect(r.events[0].reason).toContain('storm_sea_state')
+    expect(r.events[0].reason).toContain('p9') // 熔断清单来自权威海况
+    expect(r.events[0].reason).not.toContain('p1')
+  })
+
+  it('sea 缺席 → 熔断回落 fleetState 观测；worker_retry 回落照常计位（无网关时行为不变）', () => {
+    const weather = { held: true, retryCount: 5, retryThreshold: 3, windowMinutes: 60, upstream: null, sea: null }
+    const storm = { ...HEALTHY, meltdown: [{ provider: 'p1', class: 'quota' }] }
+    const r = decideDispatch({ ...base, meta: { tier: 'ahead-1' }, fleetState: storm, weather })
+    expect(r.events[0].reason).toContain('服务熔断中')
+    expect(r.events[0].reason).toContain('worker_retry')
+  })
+})
+
 describe('dynamic dispatch > workflow.json 配置解析', () => {
   function tmpCfg(raw: unknown): ReturnType<typeof loadWorkflowConfig> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dd-cfg-'))
