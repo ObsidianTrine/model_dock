@@ -1,0 +1,15 @@
+{
+  "id": "2026-11-cost-midnight-dayloop",
+  "title": "网关日志日循环以 start 时刻整日推进、条件 day<=end——跨本地午夜窗口永远读不到 end 日文件，燃油账/对账静默漏记（测试侧 cost.test 偶发红同根）",
+  "reviewRef": "8d50bde^",
+  "fixedBy": "8d50bde",
+  "files": [
+    ".agents/scripts/orchestrator/cost.mjs",
+    ".agents/scripts/orchestrator/reconcile.mjs"
+  ],
+  "expect": [
+    "午夜",
+    "setdate"
+  ],
+  "note": "来源 CORRECT-12（2026-11-04 夜航基线跑分 cost.test.ts:214 偶发红，当晚定位真因——与 env 泄漏无关）。机制：readWindowEntries（cost.mjs）与 reconcileTask/reconcileFleet（reconcile.mjs）三处同构循环 for (day = new Date(start); day.getTime() <= end; day.setDate(day.getDate()+1)) 以 start 的时刻按整日推进——end 的时刻早于 start 的时刻（窗口跨本地午夜，如 23:56→00:08）时循环永远推进不到 end 日，end 日日志文件整日漏读：燃油账/对账漏记午夜后用量，轻则数字偏小、重则整窗「时间窗内网关零请求」误判 measured:false。漏过层：①三处循环对长窗口（>24h）也漏收尾日，既有测试全部用 Date.now() 相对短窗、恰好不跨午夜，时间边界类缺陷无用例触碰；②写读两侧日切分口径本就微妙（2026-10-02 修过写侧 UTC/本地错位，同文件注释在案——审查者容易看到注释以为口径已闭合而停手）。堵法：回归用例以本地午夜锚定构造跨午夜窗口（cost.test.ts 两例 + reconcile.test.ts 一例，8d50bde 修复对）；「时间窗按日历日扫描」应作为日志扫描类代码的审查点。修复：循环改 top-break 按 [date(start)..date(end)] 日历日推进（endKey 本地日切分）。"
+}
