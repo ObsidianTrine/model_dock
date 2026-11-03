@@ -170,12 +170,18 @@ export function cardWindowFromEvents(repoRoot, taskId) {
 
 function readWindowEntries(gwDir, start, end) {
   const entries = [];
-  for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
+  // 按日历日扫 [date(start) .. date(end)]：旧写法以 start 的时刻整日推进、条件 `day <= end`，
+  // 跨午夜窗口（end 时刻早于 start 时刻，如 23:56→00:08）永远推进不到 end 日——结束日文件
+  // 整日漏读，用量漏记甚至整窗「零请求」（CORRECT-12，2026-11-04 夜航定位）。
+  const endKey = new Date(end - new Date(end).getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  for (let day = new Date(start); ; ) {
     const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    if (date > endKey) break;
     for (const entry of readGatewayLog(gwDir, date)) {
       const ts = Date.parse(String(entry.ts));
       if (ts >= start - 60_000 && ts <= end + 60_000) entries.push(entry); // 1 分钟容差（reconcile 同款）
     }
+    day.setDate(day.getDate() + 1);
   }
   return entries;
 }

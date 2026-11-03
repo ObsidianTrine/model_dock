@@ -11,6 +11,10 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 - **Second-granularity sail duration**: `sail --duration` accepts `90s` and `1m30s` forms — smoke tests and scheduled short sails no longer need to round up to a whole minute; `schedule --mode sail` allows the same. Existing `45` / `90m` / `2h` / `1h30m` behavior unchanged.
 
+### Fixed
+
+- **Fuel ledger drops usage across local midnight**: the sail report fuel section, `reconcile`, and `stats --cost` scan gateway logs split by local calendar day; windows crossing local midnight never reached the end-day log file, silently dropping post-midnight usage or misreporting the whole window as "zero requests". Day iteration now covers every calendar day from start to end (the read side now matches the write-side date convention fixed on 2026-10-02).
+
 ## [1.6.0] - 2026-11-03
 
 Cost accounting ships: "how much did it cost" is visible end to end, backed by task tiers with data-plane limits, a new round of doctor checks, claude-code onboarding polish, and a batch of fixes.

@@ -111,6 +111,41 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     }
   })
 
+  it('跨午夜任务窗口：end 日网关日志不漏读（CORRECT-12，读侧本地日切分）', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      // 本地午夜锚定（任意时区等价）：窗口 [前一日 23:56, 当日 00:08]，两笔网关流量全在
+      // 午夜后——旧读法按 start 的时刻整日推进，永远读不到 end 日文件 → 整窗漏记为
+      // 「无请求记录」（与 2026-10-02 写侧 UTC/本地日期 bug 同族，读侧补齐）。
+      const midnight = new Date()
+      midnight.setHours(0, 0, 0, 0)
+      const start = midnight.getTime() - 4 * 60_000
+      const end = midnight.getTime() + 8 * 60_000
+      const dir = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'mid-r1')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(
+        path.join(dir, 'events.jsonl'),
+        [
+          { type: 'worker_spawned', ts: toIsoLocal(new Date(start)) },
+          { type: 'merged', ts: toIsoLocal(new Date(end)) },
+        ]
+          .map((e) => JSON.stringify(e))
+          .join('\n') + '\n',
+      )
+      writeGatewayEntry(toIsoLocal(new Date(midnight.getTime() + 60_000)), { input_tokens: 1000, output_tokens: 100 })
+      writeGatewayEntry(toIsoLocal(new Date(midnight.getTime() + 360_000)), { input_tokens: 2000, output_tokens: 200 })
+      const r = reconcileTask(repo.root, 'mid-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.skipped).toBe(false)
+      expect(r.gateway.requests, JSON.stringify(r.gateway)).toBe(2)
+      expect(r.gateway.tokensIn).toBe(3000)
+      expect(r.viaGateway).toBe(true)
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
   it('reconcile 命令端到端：分歧降序输出；无任务提示', () => {
     const h = fakeHome()
     const repo = mkRepo()
