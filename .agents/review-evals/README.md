@@ -81,6 +81,8 @@
 | 2026-11-tier-silence-test-scenario-mismatch | zcode tier 静默回归用例场景与实现自相矛盾：用例名「默认引擎」却 --backend mock 起跑，tierWarnable 只对 zcode-headless 静默——not.toContain 断言必红，红用例随 d352822 溜过 finish 门禁 | c515b0e | ✅（11-02，GLM-5.3-Flash coding-plan）diffRef 双文件 diff 中——用例名「默认引擎」vs --backend mock 矛盾 + tierWarnable 证据链；原文 runs/2026-11-02-firstrun-2026-11-tier-silence-test-scenario-mismatch.md |
 | 2026-11-sail-pilotage-no-progress | sail 派发资格用 pending.length 判定「有活」，引水/解析失败卡 drain 跳过不动队列——每轮空转触发无进展熔断，30 分钟航程 12 秒收帆、规划轮零执行 | 2accc06 | —（2026-11-03 入库，待下次全量跑分） |
 | 2026-11-sail-report-foreign-merge | 航海报告 touched() 把基线→终态任何迁移都算本航次战果，并行会话航期内合并的卡（running→merged）误标进「已出港」 | 6792700 | —（2026-11-03 入库，待下次全量跑分） |
+| 2026-11-cost-midnight-dayloop | 网关日志日循环以 start 时刻整日推进、条件 day<=end——跨本地午夜窗口永远读不到 end 日文件，燃油账/对账静默漏记（cost.test 偶发红同根，CORRECT-12） | 8d50bde | —（2026-11-04 入库，待下次全量跑分） |
+| 2026-11-schedule-dryrun-writes | schedule install --dry-run 在判定前无条件 writeRunner——「预演」静默覆写已装调度的在线 wrapper，换参数冒烟即改掉真实调度下次触发行为（CORRECT-13，当夜本仓实锤） | 4510b57 | —（2026-11-04 入库，待下次全量跑分） |
 
 **2026-10-31 合并 origin/develop 并账**：远端侧回灌批次 30 行考题并入上表——14 题已首跑全审出（10-30/31 GLM subagent 修复对回灌二/三/四轮，原文 runs/），16 题 ⏳ 待首跑、按既有口径不计入基线分母，下次全量跑分一并计入；远端侧原基线行（召回 34/34）由其上基线行（37/37）加本并账取代。
 **基线：召回 37/37 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19 + 10-31 强审查者 9/9——见下方 T31 强复跑行）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于新基线（36/36，或按模型分段对齐）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
@@ -142,6 +144,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-30 增补 4 题**（合并窗口修复对回灌：CORRECT-07 daemon stderr / finish 锁 PID 复用 / claude PowerShell 白名单 / Budget 跨会话漏计）：首跑未做，**首跑记录前不计入基线口径分母**；fixedBy 分别为 b542d8e / a804fd9 / e5fa84d / a755671。
 - **2026-10-30 增补 7 题**（第三轮：卡 01-04、10 与防回环守卫修复对回灌，commit 2964ff4，dry 全过）：3 题已首跑 ✅（runs/2026-10-30-{lan-bearer-empty-token,policy-dispatch-tamper,spawndaemon-stderr-pipe-pin}.md），4 题 ⏳ 待首跑。
 - **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：首跑已补（2026-11-02 双 ✅，见上表）。
+- **2026-11-04 增补 2 题**（夜航修复对回灌：CORRECT-12 跨午夜日循环漏读 8d50bde + CORRECT-13 dry-run 覆写在线 wrapper 4510b57，dry 全过）：2 题 ⏳ 待首跑，不计入基线分母。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
