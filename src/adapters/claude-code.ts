@@ -192,6 +192,11 @@ export const claudeCodeAdapter: HarnessAdapter = {
           delete env[`${envKey}_NAME`]
         }
         delete env.CLAUDE_CODE_SUBAGENT_MODEL
+        // 上一目标（网关或用户手配的上游）遗留的 ANTHROPIC_MODEL / SMALL_FAST_MODEL 一并清：
+        // env 优先级高于根 model，残留会把模型钉死在旧 ID 上、压掉下方写入的根 model；
+        // takeoverModels 显式开启时 ANTHROPIC_MODEL 交给下方迁入 profile，不在此删
+        if (!opts.takeoverModels) delete env.ANTHROPIC_MODEL
+        delete env.ANTHROPIC_SMALL_FAST_MODEL
         let restored = 0
         for (const [envKey, glob] of TIER_ENV_KEYS) {
           const star = glob.indexOf('*')
@@ -280,18 +285,34 @@ export const claudeCodeAdapter: HarnessAdapter = {
       // ——两凭据并存时客户端可能仍带旧 x-api-key 请求（网关按 token 解析必 401，且难排查）；
       // attach 前有快照，detach 可还原
       delete env.ANTHROPIC_API_KEY
-      // 从直连切回：清掉 direct 分支写入的模型映射 env 与根 model——网关侧有别名重写，残留会钉死模型
-      if (opts.fromMode === 'direct') {
-        delete env.ANTHROPIC_MODEL
-        for (const [envKey] of TIER_ENV_KEYS) {
-          delete env[envKey]
-          delete env[`${envKey}_NAME`]
+      // 此前指向别的上游时清掉模型钉死 env 与根 model：直连切回（direct 写入的映射）与
+      // 用户手配第三方服务首次接管都算——后者 fromMode 未登记，按 prevBase 非网关地址判定
+      // （isOursGatewayUrl：有登记按 gateway_base 精确比对，未登记回退回环启发式，重复接入
+      // 已指向本网关则不动，用户手动加的映射视为有意）。残留会钉死模型：env 优先级高于根
+      // model、压掉 /model 的会话级选择，表现为「切了路由但模型不变」（启动仍用旧上游模型）。
+      // takeoverModels 显式开启时 ANTHROPIC_MODEL / DEFAULT_*_MODEL 由下方迁入 profile，
+      // 不在此删；其余钉死项照清
+      if (opts.fromMode === 'direct' || (prevBase && !isOursGatewayUrl(prevBase, 'claude-code', _cfg))) {
+        if (!opts.takeoverModels) {
+          delete env.ANTHROPIC_MODEL
+          delete env.ANTHROPIC_SMALL_FAST_MODEL
+          for (const [envKey] of TIER_ENV_KEYS) {
+            delete env[envKey]
+            delete env[`${envKey}_NAME`]
+          }
         }
         delete env.CLAUDE_CODE_SUBAGENT_MODEL
         delete env.CLAUDE_CODE_EFFORT_LEVEL
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
-        // 根 model 可能是真实 ID（现行直连）或 sonnet 别名（旧版直连），都是直连写入的——无条件清
+        // 根 model 是直连写入或用户手配（旧上游的真实 ID / 内置分层别名）——都为旧上游而设，无条件清
         delete root.model
+        notes.push(
+          t(
+            '已清掉旧上游「{url}」遗留的模型映射与调优环境变量（ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL / CLAUDE_CODE_SUBAGENT_MODEL 等）——残留会钉死模型，默认模型由网关按当前路由解析；如需保留旧映射，CLI 接入可加 --takeover-models 迁入 profile',
+            'Removed stale model mapping and tuning env vars left over from the previous upstream "{url}" (ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL / CLAUDE_CODE_SUBAGENT_MODEL etc.) — they would pin the model; the default model now resolves via the gateway route. To keep the old mappings, attach via CLI with --takeover-models to migrate them into the profile',
+            { url: prevBase ?? '-' }
+          )
+        )
       }
       // 网关本地实现 /v1/models（返回当前服务目录）；discovery env 是早期方案（v2.1.296 的
       // discovery 硬过滤只认含 claude/anthropic 的 ID），已被下方 modelPicker 全量策划取代，清除

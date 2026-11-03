@@ -174,6 +174,142 @@ describe('claude-code adapter', () => {
     }
   })
 
+  it('手配第三方上游首次接入网关（无 fromMode）：旧上游模型映射/调优 env 与根 model 清掉，模型选择交给网关路由', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            env: {
+              ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+              ANTHROPIC_AUTH_TOKEN: 'sk-old',
+              ANTHROPIC_MODEL: 'deepseek-v4-pro[1M]',
+              ANTHROPIC_SMALL_FAST_MODEL: 'deepseek-v4-flash',
+              ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-pro',
+              ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
+              ANTHROPIC_DEFAULT_SONNET_MODEL_NAME: 'deepseek-v4-pro',
+              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
+              CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
+              CLAUDE_CODE_EFFORT_LEVEL: 'max',
+              CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+            },
+            permissions: { allow: [], deny: [], defaultMode: 'acceptEdits' },
+            model: 'haiku',
+            theme: 'dark',
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      // 模型钉死 env 全清（env 优先级高于根 model，残留会钉死在旧上游模型上）
+      expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined()
+      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+      expect(after.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
+      expect(after.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined()
+      expect(after.model).toBeUndefined()
+      // 凭据替换 + 非模型字段原样保留
+      expect(after.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:8687')
+      expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe(TOKEN)
+      expect(after.permissions).toEqual({ allow: [], deny: [], defaultMode: 'acceptEdits' })
+      expect(after.theme).toBe('dark')
+      expect(plan.notes.some((n) => n.includes('--takeover-models'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('手配第三方上游 + --takeover-models：映射迁入 profileUpdates，SUBAGENT/调优 env 与根 model 照清', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            env: {
+              ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+              ANTHROPIC_AUTH_TOKEN: 'sk-old',
+              ANTHROPIC_MODEL: 'deepseek-v4-pro[1M]',
+              ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
+              CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
+              CLAUDE_CODE_EFFORT_LEVEL: 'max',
+            },
+            model: 'deepseek-v4-pro',
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, takeoverModels: true },
+        await loadConfig()
+      )
+      // 迁移不受影响：映射进 profileUpdates（网关按别名/默认模型改写）
+      expect(plan.profileUpdates?.aliases).toEqual({ 'claude-sonnet-*': 'deepseek-v4-pro' })
+      expect(plan.profileUpdates?.default_model).toBe('deepseek-v4-pro[1M]')
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
+      // 迁移不管的钉死项照清
+      expect(after.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+      expect(after.env.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined()
+      expect(after.model).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
+  it('重复接入（已指向本网关）：不清理手动配置的模型 env（视为有意）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x', ANTHROPIC_MODEL: 'glm-5-3-flash' },
+            model: 'haiku',
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_MODEL).toBe('glm-5-3-flash')
+      expect(after.model).toBe('haiku')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('settings.json 残留但 claude 命令缺席：判为未安装（卸载残留），接入拒绝', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '0'
@@ -2424,7 +2560,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
       await ensureDir(path.dirname(p))
       await atomicWrite(
         p,
-        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x' } }, null, 2) + '\n',
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8687', ANTHROPIC_AUTH_TOKEN: 'mdk_x', ANTHROPIC_MODEL: 'stale-old-model', ANTHROPIC_SMALL_FAST_MODEL: 'stale-fast' } }, null, 2) + '\n',
         0o600
       )
       await withConfig(directCfg())
@@ -2444,9 +2580,11 @@ describe('claude-code 独立直连（direct 模式）', () => {
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
-      // 根 model 直写 default_model（真实 ID，未声明上下文不加 [1m]）；不写 env.ANTHROPIC_MODEL
+      // 根 model 直写 default_model（真实 ID，未声明上下文不加 [1m]）；上一目标遗留的
+      // ANTHROPIC_MODEL / SMALL_FAST_MODEL 清掉（env 优先级高于根 model，残留会钉死旧 ID）
       expect(after.model).toBe('demo-model')
       expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined()
       // 显式 sonnet 别名仍走映射 env：'sonnet-real'；NAME = 去后缀 ID
       expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('sonnet-real')
       expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe('sonnet-real')
