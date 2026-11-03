@@ -3,7 +3,9 @@
  *  sea 的记账入口 recordSeaOutcome（同源事件流，见 sea.ts 头注）。对外导入面与拆分前完全一致
  *  ——既有 `from '.../gateway/state.js'` 的全部调用点（ops/cli/tray/update/测试等）零改动。 */
 export type { LogEntry, AuditEntry, EventEntry, RingEntry, ResolvedTarget, ResolveResult, GatewayRuntime, ProviderLatencyRing, HealthState } from './state/types.js'
-export { buildTokenIndex, buildRuntime, reloadRuntime } from './state/runtime.js'
+export type { EphemeralHarnessState } from './state/types.js'
+export { buildTokenIndex, buildRuntime, reloadRuntime, registerEphemeralHarness, unregisterEphemeralHarness, sweepEphemeralHarnesses, reapplyEphemeralHarnesses, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, EPHEMERAL_SWEEP_INTERVAL_MS } from './state/runtime.js'
+export type { EphemeralHarnessInput } from './state/runtime.js'
 export type { OrderedCandidate, RouteSource, PickResult, ScheduleHit, RouteState, AutoRouteInfo } from './state/routing.js'
 export { resolveTarget, resolveByProfile, recordOutcome, isMeltdown, activeScheduleWindow, activeAvoidTargets, displayRouteProvider, parseFallbackEntry, pickTarget, routeState, autoRouteInfo } from './state/routing.js'
 export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, readRequestLogDay, filterLogEntries, logEntryMatches, summarizeUsage, summarizeUsageDays, createUsageAccumulator, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs, usageTodayView, resetUsageTodayForTest } from './state/logs.js'

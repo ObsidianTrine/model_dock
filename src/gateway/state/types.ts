@@ -106,6 +106,10 @@ export interface GatewayRuntime {
   health: Map<string, HealthState>
   /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目） */
   tokenUsage: Map<string, TokenUsageState>
+  /** runtime-only 临时 harness 注册表（id → 状态；provision/revoke/TTL sweeper 维护，
+   *  逻辑见 state/runtime.ts）。内存态：进程重启即全部失效（设计如此——用完即焚凭据），
+   *  config 热加载经 reapplyEphemeralHarnesses 重登记幸存条目。 */
+  ephemeral: Map<string, EphemeralHarnessState>
   /** 实际监听端口（可能因占用与配置不同） */
   port?: number
   /** 手机简版控制台（LAN）第二监听器运行态；随网关生命周期启停。host=实际绑定地址（对外 URL 只列真正可达的地址） */
@@ -163,9 +167,26 @@ export interface TokenUsageState {
   dayBillableTokens: number
 }
 
+/** runtime-only 临时 harness（C14）：POST /_modeldock/harness/provision 签发的「用完即焚」
+ *  worker 凭据。只活在网关内存（重启清零 = 全部临时凭据即刻失效，设计如此，短命凭据不值得
+ *  持久化）；config.toml / secrets.json 永不落盘——mutateConfig 每次从盘上重读（loadConfig
+ *  structuredClone），rt.config 里注入的临时条目没有任何写回路径。 */
+export interface EphemeralHarnessState {
+  id: string
+  /** 随机 token（mdk_eph_ 前缀）；明文只在 provision 响应出现一次，任何列示端点与审计日志绝不回显 */
+  token: string
+  /** 钉定 profile 名；缺省 = 跟随 active_profile（与持久 harness 的 route 字段同语义） */
+  route?: string
+  /** 签发时刻（epoch ms） */
+  createdAt: number
+  /** 到期时刻（epoch ms）：TTL sweeper 过点即摘（60s 节奏，分钟级精度足够） */
+  expiresAt: number
+  /** 配了就挂进 tokenlimits per-harness 日限额（超限 429 与现有 daily_tokens 行为一致） */
+  maxDailyTokens?: number
+}
+
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */
-export interface HealthState {
-  /** 60s 滑动错误窗口（t0 起算点，count 错误次数） */
+export interface HealthState {  /** 60s 滑动错误窗口（t0 起算点，count 错误次数） */
   errWindow: { t0: number; count: number }
   /** 熔断截止时间戳；未熔断则为 undefined */
   meltdown_until?: number

@@ -27,7 +27,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
@@ -75,6 +75,8 @@ export interface GatewayStartOptions {
   autoModelProbe?: boolean
   /** 注入探测调度节奏（测试用）：不传用 modelprobe.ts 的 MODEL_PROBE_* 默认（启动 90s / 每 24h） */
   modelProbeIntervals?: { initialDelayMs?: number; intervalMs?: number }
+  /** 临时 harness TTL 清扫间隔（C14，测试注入用）：不传用 EPHEMERAL_SWEEP_INTERVAL_MS（60s） */
+  ephemeralSweepIntervalMs?: number
 }
 
 /** 锁屏提示展示的 gateway.json 路径：随实例实际 home 走（沙箱/自定义 home 时不是 ~/.modeldock），
@@ -228,6 +230,15 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   }, 60_000)
   sweeper.unref?.()
   server.on('close', () => clearInterval(sweeper))
+
+  // 临时 harness TTL 清扫（C14）：「用完即焚」凭据到期即摘（纯内存态，重启本就清零）。
+  // 间隔缺省 60s（与上方探活 sweeper 同频，worker 凭据分钟级精度足够）；测试经
+  // opts.ephemeralSweepIntervalMs 注入短间隔。过期条目最多多活一个间隔，无其他副作用。
+  const ephSweeper = setInterval(() => {
+    sweepEphemeralHarnesses(rt)
+  }, opts.ephemeralSweepIntervalMs ?? EPHEMERAL_SWEEP_INTERVAL_MS)
+  ephSweeper.unref?.()
+  server.on('close', () => clearInterval(ephSweeper))
 
   // 定时 prefer 窗口接管主候选的展示路由跟随：窗口边界没有事件（请求级时间函数），周期对比
   // 「展示路由」（人工当前 > prefer 窗口 > active_profile，不含熔断等瞬态），变化才把烤模型
@@ -1322,6 +1333,24 @@ async function hRevealKey(c: AdminCtx): Promise<void> {
   return
 }
 
+/** generic-env 四键 env 组的唯一拼装点（C14 抽取）：harness/env 与 harness/provision 共用，
+ *  不复制粘贴。ANTHROPIC 面 = 根路径，OPENAI 面 = /v1（OpenAI 兼容路径），与既有下发口径一致。 */
+function gatewayEnvGroup(
+  port: number,
+  token: string
+): { base_url: string; vars: { ANTHROPIC_BASE_URL: string; ANTHROPIC_AUTH_TOKEN: string; OPENAI_BASE_URL: string; OPENAI_API_KEY: string } } {
+  const base = `http://127.0.0.1:${port}`
+  return {
+    base_url: base,
+    vars: {
+      ANTHROPIC_BASE_URL: base,
+      ANTHROPIC_AUTH_TOKEN: token,
+      OPENAI_BASE_URL: `${base}/v1`,
+      OPENAI_API_KEY: token,
+    },
+  }
+}
+
 async function hHarnessEnv(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   // 按需取某客户端经网关接入用的环境变量（generic-env 的「复制环境变量」按钮调用）。
@@ -1333,23 +1362,96 @@ async function hHarnessEnv(c: AdminCtx): Promise<void> {
   const token = he.token ?? ''
   if (!token) return sendError(res, 400, t('客户端「{id}」没有网关令牌（该客户端不经本网关转发）', 'Client "{id}" has no gateway token (it does not route through this gateway)', { id: hid }))
   const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  const base = `http://127.0.0.1:${port}`
+  const env = gatewayEnvGroup(port, token)
   audit(bi('查看环境变量', 'View env vars'), hid)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(
     JSON.stringify({
       ok: true,
       harness: hid,
-      base_url: base,
+      base_url: env.base_url,
       token,
       lines: [
-        `export ANTHROPIC_BASE_URL=${base}`,
-        `export ANTHROPIC_AUTH_TOKEN=${token}`,
-        `export OPENAI_BASE_URL=${base}/v1`,
-        `export OPENAI_API_KEY=${token}`,
+        `export ANTHROPIC_BASE_URL=${env.vars.ANTHROPIC_BASE_URL}`,
+        `export ANTHROPIC_AUTH_TOKEN=${env.vars.ANTHROPIC_AUTH_TOKEN}`,
+        `export OPENAI_BASE_URL=${env.vars.OPENAI_BASE_URL}`,
+        `export OPENAI_API_KEY=${env.vars.OPENAI_API_KEY}`,
       ],
     })
   )
+  return
+}
+
+/** POST /_modeldock/harness/provision：签发 runtime-only 临时 harness（C14 / P2⑧，admin 门内）。
+ *  headless worker 的「用完即焚」凭据：不写 config.toml / secrets.json，只注入网关内存
+ *  （进程重启全部失效，设计如此——短命凭据不值得持久化）；TTL 到点被 sweeper 摘除（60s 节奏），
+ *  也可随时经 harness/revoke 单独吊销。路由语义复用现有 harness.route：钉 profile 或跟随
+ *  active_profile；max_daily_tokens 挂进 tokenlimits per-harness 日限额（超限 429 与
+ *  daily_tokens 一致）。请求 {id?, profile|route?, ttl_minutes?, max_daily_tokens?}；响应
+ *  {ok, id, token, expires_at, env}——token 明文只在本响应出现一次，任何列示端点与审计日志
+ *  绝不回显（审计只记 id/路由/TTL）。 */
+async function hProvisionHarness(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  // 路由目标：profile / route 二字段等价（兼容两种叫法，harness/route 用 profile、编排侧惯用 route）；
+  // 'default' = 显式跟随全局。钉定目标必须是存在的 profile
+  const routeRaw = typeof b.profile === 'string' && b.profile.trim() ? b.profile.trim() : typeof b.route === 'string' && b.route.trim() ? b.route.trim() : ''
+  const route = routeRaw && routeRaw !== 'default' ? routeRaw : undefined
+  if (route && !rt.config.profiles[route]) {
+    return sendError(res, 400, t('profile「{name}」不存在', 'Profile "{name}" not found', { name: route }), t('modeldock profile list 查看，或在 Web 控制台「服务」页确认', 'Run modeldock profile list, or check the Services page of the web console'))
+  }
+  // id：缺省自动 eph-<随机>；显式给定须不与既有 harness（含在册临时条目）冲突，且限安全字符集
+  // （harness id 会成为 config.harness 对象键，拒绝原型链/路径类花名）
+  let id = typeof b.id === 'string' ? b.id.trim() : ''
+  if (id && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id)) {
+    return sendError(res, 400, t('id 非法：仅限字母/数字开头，可含 . _ -，最长 64 字符', 'Invalid id: must start with a letter/digit, may contain . _ -, max 64 chars'), t('省略 id 可自动生成（eph-<随机>）', 'Omit id to auto-generate one (eph-<random>)'))
+  }
+  if (id && (rt.config.harness[id] || rt.ephemeral.has(id))) {
+    return sendError(res, 400, t('harness id「{id}」已存在，换一个或省略 id 自动生成', 'Harness id "{id}" already exists; pick another or omit id to auto-generate', { id }))
+  }
+  if (!id) id = `eph-${randomBytes(6).toString('hex')}`
+  // TTL：缺省 480 分钟（8h，覆盖一个无人值守工作日）、上限 1440（24h 硬顶——「临时」凭据
+  // 不得事实永久化，泄漏收敛靠短命）；非法 400 + 可操作报错
+  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes != null ? Number(b.ttl_minutes) : EPHEMERAL_TTL_DEFAULT_MINUTES
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    return sendError(res, 400, t('ttl_minutes 非法：需为正数（分钟），缺省 {d}，上限 {m}', 'Invalid ttl_minutes: must be a positive number (minutes), default {d}, max {m}', { d: EPHEMERAL_TTL_DEFAULT_MINUTES, m: EPHEMERAL_TTL_MAX_MINUTES }))
+  }
+  if (ttl > EPHEMERAL_TTL_MAX_MINUTES) {
+    return sendError(res, 400, t('ttl_minutes 超上限：最多 {m} 分钟（24 小时）。临时凭据的泄漏收敛靠短命，确需长期用请走持久 harness 接入', 'ttl_minutes exceeds the cap: at most {m} minutes (24 hours). Leak containment for ephemeral credentials relies on short lifetimes; use a persistent harness for long-term access', { m: EPHEMERAL_TTL_MAX_MINUTES }))
+  }
+  // 日限额：配了就挂进 tokenlimits per-harness 日限额体系（超限 429 与现有 daily_tokens 一致）
+  const maxDailyRaw = b.max_daily_tokens != null ? Number(b.max_daily_tokens) : undefined
+  if (maxDailyRaw != null && (!Number.isFinite(maxDailyRaw) || maxDailyRaw <= 0)) {
+    return sendError(res, 400, t('max_daily_tokens 非法：需为正数（本地日 token 上限），不配即不限', 'Invalid max_daily_tokens: must be a positive number (local-day token cap); omit for unlimited'))
+  }
+  const maxDaily = maxDailyRaw != null ? Math.floor(maxDailyRaw) : undefined
+  const state = registerEphemeralHarness(rt, { id, ...(route ? { route } : {}), ttlMinutes: ttl, ...(maxDaily != null ? { maxDailyTokens: maxDaily } : {}) })
+  const port = rt.port ?? rt.config.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  const env = gatewayEnvGroup(port, state.token)
+  // 审计不含 token 明文：凭据身份 = id + 路由 + TTL（+ 日限额）
+  const detail = biCat(
+    route ? bi(`路由 ${route}`, `Route ${route}`) : bi('跟随全局', 'Follow global'),
+    bi(`TTL ${ttl} 分钟`, `TTL ${ttl} min`),
+    ...(maxDaily != null ? [bi(`日限额 ${maxDaily} tokens`, `Daily cap ${maxDaily} tokens`)] : [])
+  )
+  audit(bi('颁发临时凭据', 'Provision ephemeral credential'), id, detail)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, id, token: state.token, expires_at: new Date(state.expiresAt).toISOString(), env: env.vars }))
+  return
+}
+
+/** POST /_modeldock/harness/revoke：吊销临时 harness（admin 门内）。幂等：条目不存在
+ *  （已过期 / 已吊销 / 从未存在）也返回 ok —— 编排侧重试无需区分。只作用于在册临时条目：
+ *  持久 harness id 传进来原样放行（revoked:false），不会误删真实客户端。 */
+async function hRevokeHarness(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const id = typeof b.id === 'string' ? b.id.trim() : ''
+  if (!id) return sendError(res, 400, t('缺少 id（provision 响应返回的临时 harness id）', 'Missing id (the ephemeral harness id returned by provision)'))
+  const existed = unregisterEphemeralHarness(rt, id)
+  audit(bi('吊销临时凭据', 'Revoke ephemeral credential'), id, existed ? bi('已吊销', 'Revoked') : bi('条目不在册（幂等放行）', 'Entry not registered (idempotent)'))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, revoked: existed }))
   return
 }
 
@@ -1447,6 +1549,12 @@ async function hAttachApply(c: AdminCtx): Promise<void> {
 async function hDetach(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   const b = await jsonRequestBody(req)
+  // 临时 harness（C14）不支持 detach：它不是客户端接入（无文件触达、不落盘），到期即焚或
+  // revoke 吊销；走 detach 会误报「尚未接入」（ops 只看盘上配置）
+  const detachId = String(b.harness ?? '')
+  if (rt.ephemeral.has(detachId)) {
+    return sendError(res, 400, t('「{id}」是临时凭据（用完即焚）：不支持 detach，等待 TTL 到期或调 harness/revoke 吊销', '"{id}" is an ephemeral credential (burn-after-use): detach does not apply; let the TTL expire or revoke it via harness/revoke', { id: detachId }))
+  }
   try {
     const r = await detachHarness(String(b.harness ?? ''))
     await reloadRuntime(rt)
@@ -1469,6 +1577,11 @@ async function hHarnessRoute(c: AdminCtx): Promise<void> {
   const hid = String(b.harness ?? '')
   try {
     if (!rt.config.harness[hid]) return sendError(res, 400, t('客户端「{id}」未接入，先接入再设置路由', 'Client "{id}" is not attached; attach it first to set a route', { id: hid }))
+    // 临时 harness（C14）：路由在 provision 时钉定，运行中不支持改钉（写盘链路里它不存在，
+    // 会误报「刚刚断开」）；要换路由重新 provision 一条即可
+    if (rt.ephemeral.has(hid)) {
+      return sendError(res, 400, t('「{id}」是临时凭据：路由在 provision 时钉定，不支持改钉；换路由请重新 provision 一条', '"{id}" is an ephemeral credential: its route is pinned at provision time and cannot be re-pinned; provision a new one to change routes', { id: hid }))
+    }
     if (rt.config.harness[hid].mode === 'direct') {
       return sendError(res, 400, t('客户端「{id}」是独立直连模式：更换直连目标请用 /harness/mode（需要重写客户端配置文件）', 'Client "{id}" is in standalone direct mode: use /harness/mode to change the direct target (client config files get rewritten)', { id: hid }))
     }
@@ -1880,7 +1993,7 @@ async function hMetrics(c: AdminCtx): Promise<void> {
  *  字段时该值为 0 起步（内存态，重启清零）。 */
 async function hHarnessUsage(c: AdminCtx): Promise<void> {
   const { rt, res } = c
-  const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number; day_billable_tokens: number }> = {}
+  const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number; day_billable_tokens: number; ephemeral?: boolean; expires_at?: string }> = {}
   for (const [id, s] of rt.tokenUsage) {
     usage[id] = {
       rpm: s.rpmCount,
@@ -1888,6 +2001,21 @@ async function hHarnessUsage(c: AdminCtx): Promise<void> {
       day: s.dayKey,
       day_tokens: s.dayTokens,
       day_billable_tokens: s.dayBillableTokens,
+    }
+  }
+  // 临时 harness（C14）观测：带 ephemeral:true + expires_at 标记；未配日限额、无 tokenUsage
+  // 计数的临时条目也列出（零计数），供编排侧盯 TTL。token 明文任何列示端点绝不回显——
+  // 它只在 provision 响应里出现一次（见 hProvisionHarness）。
+  for (const [id, e] of rt.ephemeral) {
+    const s = rt.tokenUsage.get(id)
+    usage[id] = {
+      rpm: s?.rpmCount ?? 0,
+      rpm_started_at: new Date(s?.rpmStart ?? Date.now()).toISOString(),
+      day: s?.dayKey ?? localIsoTs().slice(0, 10),
+      day_tokens: s?.dayTokens ?? 0,
+      day_billable_tokens: s?.dayBillableTokens ?? 0,
+      ephemeral: true,
+      expires_at: new Date(e.expiresAt).toISOString(),
     }
   }
   res.writeHead(200, { 'content-type': 'application/json' })
@@ -2109,6 +2237,8 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/detach': hDetach,
   'POST /_modeldock/harness/route': hHarnessRoute,
   'POST /_modeldock/harness/mode': hHarnessMode,
+  'POST /_modeldock/harness/provision': hProvisionHarness,
+  'POST /_modeldock/harness/revoke': hRevokeHarness,
   'POST /_modeldock/use': hUse,
   'POST /_modeldock/profile': hProfile,
   'POST /_modeldock/key': hKey,
