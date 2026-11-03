@@ -22,6 +22,11 @@ export interface ProviderConfig {
   auth_style: AuthStyle
   /** file:<id> | keychain:<id> | env:<VAR> | 明文值（不推荐） */
   key_ref: string
+  /** 多 key 池（可选）：每个元素与 key_ref 同格式（file:<id> | keychain:<id> | env:<VAR> | 明文）。
+   *  网关在 key 间 round-robin 轮转（多客户端 worker 不再挤同一把 key 撞 429），上游 401/403
+   *  自动把失效 key 打入冷却并轮转到下一把（见 src/gateway/state/keypool.ts）。
+   *  向后兼容：缺省（或空数组/全非串条目）回落 [key_ref]，key_ref 字段保留不删；两处都不配 = 既有「无 key」行为。 */
+  keys?: string[]
   /** direct | env | http://host:port */
   proxy?: 'direct' | 'env' | string
   /** 是否参与自动路由（默认 true；设 false = 手动下线，不探测也不作候选） */

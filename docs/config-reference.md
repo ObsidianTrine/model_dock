@@ -46,6 +46,7 @@ active_profile = "ark-coding"
 | `protocol` | `'anthropic' \| 'openai' \| 'responses'` | 是 | — | 上游接口协议：`anthropic`（Anthropic 兼容）、`openai`（OpenAI 兼容对话接口）、`responses`（OpenAI Responses）。 |
 | `auth_style` | `'bearer' \| 'x-api-key'` | 是 | — | 鉴权头风格：`bearer`（`Authorization: Bearer …`）或 `x-api-key`（`x-api-key: …`）。 |
 | `key_ref` | `string` | 是 | — | 上游 API Key 的引用：`file:<id>`（本地密钥文件）、`keychain:<id>`（系统钥匙环）、`env:<VAR>`（环境变量）；也可直接写明文，但强烈不建议。 |
+| `keys` | `string[]` | 否 | 无（回落 `[key_ref]`） | 多 Key 池（可选）：元素格式与 `key_ref` 相同。网关在池内各 key 间自动轮转（多个客户端不再挤同一把 key 撞限流），上游 401/403 时自动把失效 key 冷却 15 分钟并轮转到其余 key，全部失效时切备用服务。配置后以池为准（`key_ref` 仅作缺省回落基准）；追加新 key 用 `modeldock provider set-key <服务id> --add`。 |
 | `proxy` | `'direct' \| 'env' \| string` | 否 | `direct` | 出站代理：`direct` 直连；`env` 跟随系统环境变量代理；或写 `http://host:port` 指定代理。 |
 | `enabled` | `boolean` | 否 | `true` | 设 `false` 手动下线该服务：不再探测，也不参与自动路由与故障切换。 |
 | `priority` | `number` | 否 | `0` | 自动路由候选排序权重，数值大者优先；仅在「程序自动选主」开启时生效。 |
@@ -60,6 +61,7 @@ base_url = "https://api.acme.com/v1"
 protocol = "anthropic"
 auth_style = "bearer"
 key_ref = "file:acme"
+keys = ["file:acme-2", "file:acme-3"]
 proxy = "direct"
 enabled = true
 priority = 10

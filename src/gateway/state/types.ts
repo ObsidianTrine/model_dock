@@ -126,6 +126,16 @@ export interface GatewayRuntime {
   seaErrors?: Map<string, SeaProviderErrors>
   /** 上游模型可用性探测运行态（modelprobe.ts 周期探测写入；GET /_modeldock/model-availability 消费） */
   modelProbe?: ModelProbeState
+  /** provider 多 key 池运行态（内存态，重启清零；配置热加载全清——key 可能已被替换，
+   *  按索引记的失效冷却对换上的新 key 不成立）。逻辑见 state/keypool.ts。 */
+  keyPool: KeyPoolState
+}
+
+/** 多 key 池运行态：cooldown = providerId → key 池索引（providerKeyRefs 下标）→ 冷却截止 ms 时间戳；
+ *  rr = providerId → round-robin 轮转游标（把并发 worker 的请求均摊到池内各 key，避免集中撞 429）。 */
+export interface KeyPoolState {
+  cooldown: Map<string, Map<number, number>>
+  rr: Map<string, number>
 }
 
 /** per-provider 耗时采样的有界结构：samples 是环形窗口（超出裁最旧），count 是进程生命周期

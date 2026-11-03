@@ -14,7 +14,7 @@ import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getSecret, setSecret, verifySecretsStore } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, getSecret, providerKeyRefs, setSecret, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -27,7 +27,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
@@ -727,7 +727,8 @@ async function hFetchModels(c: AdminCtx): Promise<void> {
   if (!key && refId) {
     const ref = rt.config.providers[refId]
     if (!ref) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: refId }))
-    key = (await getSecret(ref.key_ref)) ?? ''
+    // 多 key 池按序取第一把可读的（单 key 配置即 key_ref，行为不变）
+    key = (await getFirstProviderSecret(ref)) ?? ''
     if (!key) return sendError(res, 400, t('已保存的 Key 不可读（未设置或系统安全后端拒绝访问），请手动粘贴 Key 后拉取', 'Saved key unreadable (not set or the OS keychain refused access); paste the key manually and fetch again'))
   }
   const proto = (b.protocol === 'openai' || b.protocol === 'responses') ? b.protocol : 'anthropic'
@@ -1308,7 +1309,9 @@ async function hRevealKey(c: AdminCtx): Promise<void> {
   const id = typeof b.id === 'string' ? b.id : ''
   const p = rt.config.providers[id]
   if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
-  const key = await getSecret(p.key_ref)
+  // 多 key 池取第一把可读（编辑弹窗 👁 场景）；全不可读/未配返回 null 走既有「Key 不可读」口径，
+  // 不因空 key_ref（池-only 手编配置）抛 SecretsError 打 500
+  const key = await getFirstProviderSecret(p)
   audit(bi('查看 Key', 'View key'), id, key ? bi('读取成功', 'Read ok') : bi('Key 不可读（未设置或安全后端拒绝）', 'Key unreadable (not set or the OS keychain refused)'))
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, key: key ?? null }))
@@ -1850,8 +1853,17 @@ async function hMetrics(c: AdminCtx): Promise<void> {
       remaining_ms: h.meltdown_until - now,
     })
   }
+  // key 池健康（P1⑥ 观测面）：per-provider 配置的 key 数量与失效冷却中的索引（含剩余 ms）。
+  // 只有数量/索引/时间，绝无 key 明文或引用原文（ref 可能内嵌明文 key，一律不出域）。
+  // 不实际读 key（无 IO，metrics 是轻量端点）：total=配置引用数；healthy=total-冷却数——
+  // 个别引用读取失败时会高估 healthy（读取失败不进冷却，见 state/keypool.ts）
+  const keypool: Record<string, { total: number; healthy: number; cooldown: Array<{ index: number; remaining_ms: number }> }> = {}
+  for (const [id, p] of Object.entries(rt.config.providers)) {
+    const total = providerKeyRefs(p).length
+    keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
+  }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now) }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now), keypool }))
 }
 
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。

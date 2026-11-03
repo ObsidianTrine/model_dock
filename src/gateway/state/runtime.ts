@@ -23,6 +23,7 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     metricsLatency: new Map(),
     seaErrors: new Map(),
     modelProbe: { results: new Map(), inflight: new Set() },
+    keyPool: { cooldown: new Map(), rr: new Map() },
   }
 }
 
@@ -53,4 +54,9 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   for (const id of rt.modelProbe?.results.keys() ?? []) {
     if (!rt.config.providers[id]) rt.modelProbe?.results.delete(id)
   }
+  // key 池运行态（失效冷却/轮转游标）全清：keys 配置可能已被改（换 key / 增删条目），
+  // 按索引记账的冷却对新 key 不成立——人工换 key 后立即恢复轮转，无须等满 15min 冷却。
+  // 内联清空而非引 state/keypool：state/ 四域模块互不引用（见本文件头拆分说明），types ← 四模块单向
+  rt.keyPool.cooldown.clear()
+  rt.keyPool.rr.clear()
 }

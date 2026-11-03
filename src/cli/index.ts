@@ -60,6 +60,7 @@ export function buildProgram(): Command {
     .description(t('更新 key（热生效）', 'Update key (takes effect immediately)'))
     .option('--key <key>')
     .option('--key-env <var>')
+    .option('--add', t('追加进多 key 池而不是覆盖（池在 key 间自动轮转，401/403 自动跳失效 key）', 'Append to the multi-key pool instead of overwriting (the gateway rotates across pool keys and skips keys rejected with 401/403)'))
     .action(async (id, o) => (await import('./providers.js')).cmdProviderSetKey(id, o))
 
   const model = prog.command('model').description(t('模型目录（自动拉取 + 手动编辑上下文/输出上限）', 'Model catalog (auto-fetched + manual context/output limit editing)'))

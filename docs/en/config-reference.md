@@ -46,6 +46,7 @@ One block per upstream provider; `<id>` is a name you choose (lowercase letters,
 | `protocol` | `'anthropic' \| 'openai' \| 'responses'` | yes | — | Upstream protocol: `anthropic` (Anthropic-compatible), `openai` (OpenAI-compatible chat), `responses` (OpenAI Responses). |
 | `auth_style` | `'bearer' \| 'x-api-key'` | yes | — | Auth header style: `bearer` (`Authorization: Bearer …`) or `x-api-key` (`x-api-key: …`). |
 | `key_ref` | `string` | yes | — | Reference to the upstream API key: `file:<id>` (local secret file), `keychain:<id>` (OS keychain), `env:<VAR>` (environment variable); plaintext works but is strongly discouraged. |
+| `keys` | `string[]` | no | none (falls back to `[key_ref]`) | Optional multi-key pool; entries use the same format as `key_ref`. The gateway rotates across pool keys automatically (concurrent clients no longer pile onto one key and trip rate limits), cools a key down for 15 minutes on upstream 401/403 and rotates to the rest, and moves on to fallback services once every key is rejected. When set, the pool takes precedence (`key_ref` only serves as the fallback); append a new key with `modeldock provider set-key <providerId> --add`. |
 | `proxy` | `'direct' \| 'env' \| string` | no | `direct` | Outbound proxy: `direct` (no proxy), `env` (follow proxy environment variables), or an explicit `http://host:port`. |
 | `enabled` | `boolean` | no | `true` | Set `false` to take the service offline manually: no probing, excluded from auto routing and failover. |
 | `priority` | `number` | no | `0` | Sorting weight for auto-routing candidates; higher wins. Only effective when "program picks the primary" is on. |
@@ -60,6 +61,7 @@ base_url = "https://api.acme.com/v1"
 protocol = "anthropic"
 auth_style = "bearer"
 key_ref = "file:acme"
+keys = ["file:acme-2", "file:acme-3"]
 proxy = "direct"
 enabled = true
 priority = 10
