@@ -2,7 +2,7 @@
 
 > 用途：一览 ModelDock 接入（attach/切模式/detach）会**读、写、删**客户端配置文件里的哪些键——排查「接入后行为不对」时先对照本页，也作为后续新增客户端适配器时的清单模板。
 > 维护约定：
-> 1. **以代码为准**：本文按 2026-11-03 develop（bac930b + 同日 SMALL_FAST 同规修正）整理；适配器实现调整后请同步本页，行号不写（会漂移），写分支/条件名。
+> 1. **以代码为准**：本文按 2026-11-03 develop（bac930b 接管清理 + 301b66c modelPicker 版本门控）整理；适配器实现调整后请同步本页，行号不写（会漂移），写分支/条件名。
 > 2. 每个客户端一节；新接入客户端按 Claude Code 节的表式模板补节（zcode / dsh / codex / opencode / mimo-code / workbuddy … 逐个补齐）。
 > 3. 「清除」列的条件口径务必写清（无条件 / 旧上游接管时 / takeoverModels 让位），这是最容易踩坑的部分。
 
@@ -27,7 +27,14 @@
 |---|---|---|
 | `env.ANTHROPIC_BASE_URL` | `http://127.0.0.1:<端口>` | 网关地址（生产 8687 / 实例实际端口） |
 | `env.ANTHROPIC_AUTH_TOKEN` | `mdk_claude_code_*` | 网关 token（接入时生成，登记进 config.toml） |
-| `modelPicker` | `{ replaceBuiltInOptions: true, options: 当前路由服务目录 }` | 非 env 根级键：/model 选择器全量策划，raw ID 直列；全局切服务由 refreshBakedModelClients 自动重烙 |
+| `modelPicker` | `{ replaceBuiltInOptions: true, options: 当前路由服务目录 }` | **仅 claude ≥ 2.1.243**（官方 changelog：modelPicker 设置 2.1.243 引入）：/model 选择器全量策划，raw ID 直列；全局切服务由 refreshBakedModelClients 自动重烙 |
+
+**版本门控（2026-11-03 起，301b66c）**：attach 时探测 `claude --version`（60s memo）——
+
+- **≥ 2.1.243**：上表 modelPicker 照写。
+- **< 2.1.243 或探测失败**：**不写 modelPicker**（升级后重接会清掉此前烙的死键），改写 `env.ANTHROPIC_MODEL` = profile `default_model`（无则服务目录首个模型，≥1M 上下文带 `[1m]` 后缀），raw ID 经网关透传；note 注明版本与升级指引。此模式下 `env.ANTHROPIC_MODEL` 是 ModelDock 管理的**烙定值**：重复接入 / 路由切换重烙（refreshBakedModelClients 复用 planAttach，门控自然生效）会按新路由重写。
+- 探测失败（`--version` 不可得 / 输出不可解析）一律按旧版回退：宁可降级兼容，不假装新版。
+- 测试钩子：`MODELRDOCK_FAKE_CLAUDE_CODE_VERSION`（空串 = 模拟探测失败）；`MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT=1` 未指定版本时默认视为现代版本。
 
 **无条件清除（网关模式）：**
 
@@ -62,6 +69,7 @@
 | `model`（根级） | profile.default_model（无则回落服务目录首个模型；再无则撤掉） |
 | `env.CLAUDE_CODE_EFFORT_LEVEL` | `'max'`（直连调优默认值） |
 | `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `'786432'` |
+| `modelPicker` | 同网关模式同款版本门控（≥ 2.1.243 才写；旧版靠上方根 model + env 映射，行为不变） |
 
 无条件清除：`ANTHROPIC_MODEL`（takeoverModels 时让位迁移）、`ANTHROPIC_SMALL_FAST_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`、discovery 开关、网关 lineup（自家 modelPicker）、历史白名单。
 
