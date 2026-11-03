@@ -23,8 +23,24 @@ const PBKDF2_ITER = 600_000
 const HKDF_INFO = 'modeldock/syncdoc/v1'
 const VERIFIER_INFO = 'modeldock/syncenv/verifier/v1'
 
-function deriveKeys(passphrase: string, salt: Buffer, hkdfSalt: Buffer): { encKey: Buffer; macKey: Buffer } {
-  const master = pbkdf2Sync(passphrase, salt, PBKDF2_ITER, 32, 'sha256')
+/** 当前生效迭代数：生产恒 PBKDF2_ITER；测试经 setPbkdf2IterForTests 降值提速。 */
+let pbkdf2Iter = PBKDF2_ITER
+
+/** 测试专用：降 PBKDF2 迭代数。600k 单次约 270ms，sync 全链路测试每次 collect/apply/导入导出
+ *  都真派生——是本机产品套件最大单一慢源（注入 1000 轮，5 个最慢 sync 文件 63s→18s，2026-11-03 实测）。
+ *  null = 还原生产值。正确性不依赖调用方记得还原：seal 经 SyncKeys.iter、open 经信封 kdf.iter
+ *  各自携带派生时的真实迭代数，注入值只影响「当场派生」的成本，不影响 seal/open 配对。 */
+export function setPbkdf2IterForTests(n: number | null): void {
+  pbkdf2Iter = n ?? PBKDF2_ITER
+}
+
+/** 测试读取当前生效迭代数（用例内临时切值后按原值精确还原，避免依赖 setup 具体配置） */
+export function pbkdf2IterCurrent(): number {
+  return pbkdf2Iter
+}
+
+function deriveKeys(passphrase: string, salt: Buffer, hkdfSalt: Buffer, iter = pbkdf2Iter): { encKey: Buffer; macKey: Buffer } {
+  const master = pbkdf2Sync(passphrase, salt, iter, 32, 'sha256')
   const okm = Buffer.from(hkdfSync('sha256', master, hkdfSalt, HKDF_INFO, 64))
   return { encKey: okm.subarray(0, 32), macKey: okm.subarray(32, 64) }
 }
@@ -34,12 +50,15 @@ function hmacOverCt(macKey: Buffer, ts: string, ctB64: string): Buffer {
 }
 
 /** M2 自动同步用的密钥材料（sync.json 缓存的派生密钥 + 生成它的 salt/hkdfSalt）。
- *  信封必须内嵌 salt/hkdfSalt：任何机器凭口令都能独立解包（自包含）；缓存密钥只是免掉本机重复 PBKDF2。 */
+ *  信封必须内嵌 salt/hkdfSalt：任何机器凭口令都能独立解包（自包含）；缓存密钥只是免掉本机重复 PBKDF2。
+ *  iter = 派生这组密钥所用的 PBKDF2 迭代数（deriveSyncKeys 记录；keysFromState 缓存重建不携带，
+ *  缺失时 seal 回退当前值——同进程注入场景与生产恒定值下两者一致）。 */
 export interface SyncKeys {
   encKey: Buffer
   macKey: Buffer
   salt: Buffer
   hkdfSalt: Buffer
+  iter?: number
 }
 
 /** 密封 syncdoc → 加密信封。iv 每次密封独立随机；salt/hkdfSalt 随 keys 固定（同步目标的口令身份）。 */
@@ -51,7 +70,7 @@ export function sealWithKeys(doc: Syncdoc, keys: SyncKeys): SyncEnvelope {
   return {
     fmt: ENVELOPE_FMT,
     v: SCHEMA_VERSION,
-    kdf: { alg: 'PBKDF2-HMAC-SHA256', iter: PBKDF2_ITER, salt: keys.salt.toString('base64'), hkdfSalt: keys.hkdfSalt.toString('base64') },
+    kdf: { alg: 'PBKDF2-HMAC-SHA256', iter: keys.iter ?? pbkdf2Iter, salt: keys.salt.toString('base64'), hkdfSalt: keys.hkdfSalt.toString('base64') },
     iv: iv.toString('base64'),
     ct: ctB64,
     hmac: hmacOverCt(keys.macKey, doc.ts, ctB64).toString('base64'),
@@ -97,7 +116,7 @@ export function openWithKeys(env: unknown, keys: SyncKeys): Syncdoc {
 
 /** M2 setup：从口令派生同步密钥（salt/hkdfSalt 由调用方随机生成并随 sync.json 缓存） */
 export function deriveSyncKeys(passphrase: string, salt: Buffer, hkdfSalt: Buffer): SyncKeys {
-  return { ...deriveKeys(passphrase, salt, hkdfSalt), salt, hkdfSalt }
+  return { ...deriveKeys(passphrase, salt, hkdfSalt), salt, hkdfSalt, iter: pbkdf2Iter }
 }
 
 /** 口令一致性校验值：sync.json 缓存、openWithKeys 以同式校验 */
@@ -109,8 +128,7 @@ export function syncVerifier(macKey: Buffer): string {
 export function sealEnvelope(doc: Syncdoc, passphrase: string): SyncEnvelope {
   const salt = randomBytes(16)
   const hkdfSalt = randomBytes(32)
-  const { encKey, macKey } = deriveKeys(passphrase, salt, hkdfSalt)
-  return sealWithKeys(doc, { encKey, macKey, salt, hkdfSalt })
+  return sealWithKeys(doc, deriveSyncKeys(passphrase, salt, hkdfSalt))
 }
 
 /** HMAC 兜底校验（密钥直用）：覆盖 (ts || ct)，防存储端改内容不改时间轴 */
@@ -124,8 +142,15 @@ export function verifyHmacWithKeys(doc: Syncdoc, env: SyncEnvelope, macKey: Buff
 
 /** HMAC 兜底校验：与 openEnvelope 内部逻辑同源，供测试/审计独立调用 */
 export function verifyEnvelopeHmac(doc: Syncdoc, env: SyncEnvelope, passphrase: string): void {
-  const { macKey } = deriveKeys(passphrase, Buffer.from(env.kdf.salt, 'base64'), Buffer.from(env.kdf.hkdfSalt, 'base64'))
+  const { macKey } = deriveKeys(passphrase, Buffer.from(env.kdf.salt, 'base64'), Buffer.from(env.kdf.hkdfSalt, 'base64'), envelopeIter(env))
   verifyHmacWithKeys(doc, env, macKey)
+}
+
+/** 拆封迭代数以信封自带 kdf.iter 为准（跨版本解旧包的关键：全局迭代数将来上调后，
+ *  旧包按旧值派生仍可解）；信封缺字段/非法值回退当前值（与历史信封恒写 600k 对齐）。 */
+function envelopeIter(env: SyncEnvelope): number {
+  const n = (env as { kdf?: { iter?: unknown } }).kdf?.iter
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : pbkdf2Iter
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -148,7 +173,7 @@ export function openEnvelope(env: unknown, passphrase: string): Syncdoc {
   if (!isPlainObject(kdf) || typeof kdf.salt !== 'string' || typeof kdf.hkdfSalt !== 'string' || typeof env.iv !== 'string' || typeof env.ct !== 'string') {
     throw new Error(t('同步包缺少加密封装字段，文件不完整', 'The sync package is missing envelope fields; the file is incomplete'))
   }
-  const { encKey, macKey } = deriveKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'))
+  const { encKey, macKey } = deriveKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'), envelopeIter(env as unknown as SyncEnvelope))
   // 先验 verifier 再解密：「口令不正确」与「包被篡改」才报得出两种错（恒时比较，防时序侧信道辅助离线爆破）
   const expectVerifier = createHmac('sha256', macKey).update(VERIFIER_INFO, 'utf8').digest('base64')
   if (typeof env.verifier !== 'string' || !safeEqual(env.verifier, expectVerifier)) {
