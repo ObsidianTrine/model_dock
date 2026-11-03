@@ -46,7 +46,7 @@
 | PERF-20 | P2 | `src/gateway/state.ts:125-141` | reloadRuntime 不清 rt.health，已删服务的健康条目永久残留 | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-21 | P2 | `src/gateway/server.ts:540` | 请求体全量 buffer 后才转发（改写管线设计前提；GET/DELETE 可跳过） | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
 | PERF-22 | P2 | `src/gateway/ui.ts:1383` | pollOverview 双 JSON.stringify diff，overview 几百 KB 时每 5s 两次 O(n) 序列化 | ☑ 已修（2026-10-20 @ff407bd） |
-| PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☐ 未修（2026-10-20 复核暂缓，见 §一.F） |
+| PERF-23 | P2 | `src/gateway/ui.ts:3919,4046` | 编辑弹层/拉取模型一次性渲染全部行，数百模型时数千节点+勾选全表扫描 | ☑ 已修（2026-11-03 @654f59b，渲染上限 200 + 显示全部 + 尾部透传，详见 §一.F） |
 | PERF-24 | P2 | `src/gateway/lan.ts:780` | 手机页 30s 轮询无 document.hidden 门控；页面每请求重拼无 ETag | ☑ 已修（2026-10-20 @ff407bd） |
 | PERF-25 | P2 | `src/gateway/ui.ts:8` | 控制台页 304KB 无压缩（内联 JS 含约 29KB 注释）；server.ts:1087 注释「236KB」已过时 | ☑ 已修（2026-10-28 esbuild 正规最小化 + gen 对拍链，页体 -27%；2026-10-29 @60163fe serve 侧 gzip 预压缩 + 形态 ETag/Vary，两项正交叠加，见 §一.F） |
 | PERF-26 | P2 | `src/sync/collect.ts:72-73` | 每次 collect 把 presets.json 读+解析两遍 | ☑ 已修（2026-10-20 @ff407bd） |
@@ -224,6 +224,7 @@
 - 位置：`src/gateway/ui.ts:3919,4046`（`innerHTML = rows.map(...).join('')`；服务端 fetch-models 不截断）
 - 现状：数百模型的供应商一次插数千节点，勾选时全表 querySelectorAll。修复方向：拉取结果截断前 N 条 +「显示全部」；勾选改事件委托（:4153 已有基础）。
 - 2026-10-20 复核：**暂缓**——截断/分页涉及编辑弹层与拉取面板的交互改版，按仓库 UI 规约组件改动先过原型评审；仅数百模型以上的供应商可感知。
+- 2026-11-03 已修（perf23-edit-modal-cap 卡，船东弹窗批示开工）：`src/gateway/ui/edit.ts` ModelRows/FetchRows 初始渲染截断前 RENDER_CAP=200 条 +「显示全部」展开（搜索/全选按全表语义自动展开）；未渲染尾部在 rowsArray/collect 按载入值透传（截断态保存不丢模型，DOM 测试断言 500 条全量提交）；「已选 N」计数 + 勾选容器级委托（T04 已有基础）补计数联动。DOM 用例 test/ui-edit-cap.test.ts（happy-dom 500 行夹具）+ ui-lint/webui-dom/ui-edit-backfill/ui-min-fresh 全绿。
 
 **PERF-24（P2）手机页轮询无可见性门控、页面无 ETag**
 - 位置：`src/gateway/lan.ts:780`（`setInterval(load, 30000)` 无 `document.hidden` 判断）；`server.ts:804,809`（每请求重拼 ~63KB HTML）
