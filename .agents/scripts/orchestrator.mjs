@@ -1803,8 +1803,7 @@ async function cmdDrain(repoRoot, opts) {
           return;
         }
       }
-      
-const next = pickNextCard(root, { skipIds });
+      const next = pickNextCard(root, { skipIds });
       if (!next) {
         // 引水卡也在 pending/：从「解析失败」清单里排除（它们不是坏卡，是待确认）
         const stuck = listCards(root, 'pending').filter((id) => !skipIds.has(id));
