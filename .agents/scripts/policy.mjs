@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { toIsoLocal } from './orchestrator/events.mjs';
 import { loadWorkflowConfig, releaseHatches } from './workflow-config.mjs';
 
@@ -201,6 +202,141 @@ export function isPublishCommand(seg) {
   const { i } = envPrefixSpan(tokens, 0);
   if (!/^(?:npm|yarn|pnpm)(?:\.(?:cmd|js|exe))?$/i.test(basename(tokens[i]))) return false;
   return tokens.slice(i + 1).includes('publish');
+}
+
+// ---------------------------------------------------------------------------
+// 间接旁路校验（P0：headless worker 红线旁路收敛，2026-11）
+// ---------------------------------------------------------------------------
+// 威胁模型：worker 有 worktree 内 Edit/Write 权限，命令白名单（npm test/run、testCmd）
+// 与 hook 都只看命令文本——worker 可把 git push 夹进 package.json 的 scripts 再跑白名单
+// `npm test`（脚本载荷对两层防线不可见），也可篡改 worktree 内 hook/policy 副本使拦截失效。
+// 收敛分两层：
+//   ① 结构层（claude-headless.writeWorkerSettings）：hook 命令锚定主仓绝对路径——worker
+//      写不到主仓，执行的 hook 永远是干净副本；
+//   ② 环境层（本节，policy-worker 在放行脚本执行类命令前调用）：
+//      - scriptsTamperVerdict：会话仓库 package.json 相对 git HEAD 有未提交改动即拒（提交
+//        后的 package.json 改动由 classifyChange 的 L2 人工门禁兜底）；
+//      - hookIntegrityVerdict：hook 以 worktree 相对路径运行（回退形态）时，对 hook 自身与
+//        policy.mjs 相对 git HEAD 做完整性校验，被改即拒。
+// 会话不在 git 仓库（无 HEAD 基线）时整体跳过——无基线即无可篡改的锚，生产 worker 会话
+// 恒在 worktree 内，不受影响；测试临时目录也靠这条保持零回归。
+
+const NPM_FAMILY_RE = /^(?:npm|pnpm|yarn|bun)(?:\.(?:cmd|js|exe))?$/i;
+
+/**
+ * 判定命令是否落在「会执行 package.json scripts 或配置的 test/build 命令」的放行面
+ * （policy-worker 环境校验的触发器）。npm 家族首词（经 env 前缀剥离、按 basename 认
+ * 包装与绝对路径）全认——install/rebuild 同样跑生命周期脚本，一并从严；npx 等非家族
+ * 首词靠 testCmd/buildCmd 前缀匹配兜住（testCmd 本身来自 workflow.json，worker 篡改
+ * 也只影响 hook 读到的配置，CLI 侧 --allowedTools 在 spawn 时已固化，双保险）。
+ */
+export function triggersScriptExecGuard(cmd, cfg = loadWorkflowConfig()) {
+  const c = String(cmd ?? '').trim();
+  if (!c) return false;
+  const tokens = c.split(/\s+/);
+  const { i } = envPrefixSpan(tokens, 0);
+  if (NPM_FAMILY_RE.test(basename(tokens[i]))) return true;
+  const entries = [...(cfg.testCmd ?? []), cfg.buildCmd, cfg.lintCmd, cfg.typecheckCmd].filter(Boolean);
+  return entries.some((e) => c === e || c.startsWith(`${e} `));
+}
+
+/** git 工作树相对 HEAD 的指定路径是否有未提交改动（含已暂存）。
+ *  返回 'clean' | 'dirty' | 'no-baseline'（非仓库/未出生 HEAD）| 'error'。 */
+function headDiffState(repoDir, pathspecs) {
+  const probe = spawnSync('git', ['-C', repoDir, 'rev-parse', '--verify', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (probe.status !== 0) return 'no-baseline';
+  const r = spawnSync('git', ['-C', repoDir, 'diff', '--quiet', 'HEAD', '--', ...pathspecs], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (r.status === 0) return 'clean';
+  if (r.status === 1) return 'dirty';
+  return 'error';
+}
+
+/** 会话 cwd 所属仓库的 toplevel；不在 git 仓库返回 null。 */
+function gitToplevel(cwd) {
+  try {
+    const r = spawnSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const top = (r.stdout ?? '').trim();
+    return r.status === 0 && top ? top : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 会话 cwd 所在仓库的「主仓根」：linked worktree 经 --git-common-dir 解析到主 .git；
+ *  普通仓库/主仓会话返回仓库自身。git 不可用返回 null。 */
+export function mainRepoRootOf(cwd) {
+  try {
+    const r = spawnSync('git', ['-C', cwd, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const common = (r.stdout ?? '').trim();
+    if (r.status === 0 && common) {
+      const dotGit = path.resolve(cwd, common);
+      if (fs.existsSync(dotGit)) return path.dirname(dotGit);
+    }
+  } catch { /* git 不可用 */ }
+  return null;
+}
+
+const sameDir = (a, b) => {
+  const norm = (p) => path.resolve(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b) && norm(a) !== '';
+};
+
+/**
+ * package.json scripts 篡改校验：会话仓库的 package.json 相对 git HEAD 有未提交改动
+ * （含已暂存）→ 拒绝脚本执行类命令（fail-closed）。clean / 无基线 → null（放行）。
+ */
+export function scriptsTamperVerdict(sessionCwd) {
+  if (!sessionCwd) return null;
+  const top = gitToplevel(sessionCwd);
+  if (!top) return null; // 非仓库会话（测试临时目录等）：无基线可校验，跳过
+  const state = headDiffState(top, ['package.json']);
+  if (state === 'clean' || state === 'no-baseline') return null;
+  const advice = state === 'error'
+    ? 'git 校验异常（index/暂存区可能损坏），稍后重试，或手动 git status 确认 package.json 状态。'
+    : '恢复办法：改动确属本任务 → 先提交（git add package.json && git commit）再重跑；非本意改动 → git checkout -- package.json 还原。';
+  return {
+    rule: 'scripts-tamper',
+    reason: 'package.json 相对 git HEAD 有未提交改动——npm test/run 会执行其中的 scripts，未提交的 scripts 改动一律先拦（防把 git push 等红线夹带进脚本载荷）',
+    advice,
+  };
+}
+
+/**
+ * policy hook 自身完整性校验（结构层的兜底）：hook 命令已锚定主仓时（writeWorkerSettings
+ * 的正常路径）hook 副本 worker 写不到，直接放行；当 hook 以 worktree 相对路径运行（回退
+ * 形态/旧版 settings）时，对 hook 文件与其 import 的 policy.mjs 相对 git HEAD 做完整性
+ * 校验，未提交改动即拒。已提交的守护器改动由 classifyChange 的 GUARD_SELF L2 人工门禁兜底。
+ */
+export function hookIntegrityVerdict(hookFile, sessionCwd) {
+  if (!hookFile || !sessionCwd) return null;
+  const hookDir = path.dirname(path.resolve(hookFile));
+  const hookRepo = path.resolve(hookDir, '..', '..'); // <repo>/.agents/hooks/x.mjs → <repo>
+  const sessionMain = mainRepoRootOf(sessionCwd);
+  if (!sessionMain) return null; // 会话不在 git 仓库：无锚点（测试临时目录），跳过
+  if (sameDir(hookRepo, sessionMain)) return null; // hook 已是主仓锚定副本（worker 写不到），无需自检
+  const rel = (p) => {
+    const r = path.relative(hookRepo, path.resolve(p));
+    return r.split(path.sep).join('/');
+  };
+  const state = headDiffState(hookRepo, [rel(hookFile), rel(path.join(hookDir, '..', 'scripts', 'policy.mjs'))]);
+  if (state === 'clean' || state === 'no-baseline') return null;
+  return {
+    rule: 'hook-tamper',
+    reason: 'policy hook 自身或其策略文件（.agents/hooks/policy-worker.mjs / .agents/scripts/policy.mjs）相对 git HEAD 有未提交改动——hook 可能被篡改，脚本执行类命令先拦（fail-closed）',
+    advice: '恢复办法：改动确属本任务 → 先提交（git add -A && git commit）再重跑；非本意改动 → git checkout -- .agents/hooks/policy-worker.mjs .agents/scripts/policy.mjs 还原。',
+  };
 }
 
 /** 段内嵌套载荷：命令替换 `$(…)`（括号深度配对）、反引号 `` `…` ``、子壳 `(…)`（段首 '('
