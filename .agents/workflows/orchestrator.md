@@ -365,6 +365,8 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 }
 ```
 
+**本仓现状（2026-11-04）**：workflow.json 已按上例开启双船互切 `envelope: ["zcode-headless", "claude-headless"]`——zcode 默认船 + claude 前进3/4 船，包络内互切不再逐卡请示；429 风险由网关多 key 池 + worker 并发闸 + failover 兜底。
+
 - **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴 → 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。风暴判定**权威海况优先**（2026-11-04 A2）：优先消费网关 `/_modeldock/metrics` 的 `sea_state.storm`（reason 带 `[storm_sea_state]`）与 meltdown 清单，服务熔断（fleet 观测）/ 上游限流（日志扫描）/ worker 重试密集保留为海况快照缺席时的回落。
 - **派发预检（model-availability，2026-11-04 A5）**：派发决策后核对 worker 模型（`tier.workerModel` > `worker.model`）是否还在上游服务目录里——tier token 经 `/_modeldock/tier-validate` 权威解析到 provider（ship→provider 推断不做：无 tier token 即不预检），再查 `/_modeldock/model-availability` 条目：**条目存在且新鲜（<25h，探测周期 24h+1h 余量）且 `ok:true` 且 `model_ids` 非空且不含该模型** → 滞留派发：卡 pending→blocked（队列保留不丢，模型恢复后 resume）+ `dispatch_held {reason:"model_unavailable", provider, model}` 事件；条目缺席（从未探测 ≠ 不可用）/ 陈旧 / `ok:false`（探测失败 ≠ 模型不可用）/ admin 不可达 → 一律照常派发（fail-open）。快照 5 分钟节流缓存。
 - **不越权三律**：显式 CLI `--worker-backend` / `--backend` 最高优先（动态选船直接让位，不留痕）；resume/retry 沿用上次会话（会话连续性优先，中途不换船）；mock 永不参与自动选船（测试链路照常可用，mock 也不进 envelope）。
