@@ -1,6 +1,6 @@
 # ModelDock 发布前检查清单（Release Checklist）
 
-> **用途**：每次版本发布前的质量门禁。机器可查项由 `scripts/release-check.mjs` 一键执行，人工判断项逐条过目——**发布内容盘点前跑一遍，打 tag 前再跑一遍**。
+> **用途**：每次版本发布前的质量门禁。机器可查项由 `scripts/release-check.mjs` 一键执行，人工判断项逐条过目——**发布内容盘点前跑一遍，推 main 后再跑一遍（`--skip-test`，与等 CI 并行）**。
 > **与 release.md 的分工**：[release.md](../.agents/workflows/release.md) 是发布**流程**（步骤顺序与命令）；本文件是**门禁清单**（质量标准与执行器）。
 > **维护**：流程或策略变更后，同步更新本文件与 release.md / [AGENTS.md](../AGENTS.md)。基线数字（用例数等）**不写死在本文件**——脚本实测并提示与 usage.md 的漂移。
 
@@ -60,7 +60,7 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 
 ## 3. 发布执行
 
-按 [release.md](../.agents/workflows/release.md) 步骤 2-5：develop 合入 main 并推送 → 等 test.yml 三平台全绿 → **tag 前把 §1 脚本再跑一遍**（`--skip-test` 即可）→ 打 annotated tag 只推这一个 → 验证 11 资产与 Release 正文。回滚与「撤回版本号永不复用」规则见 release.md「出错回滚」。
+按 [release.md](../.agents/workflows/release.md) 步骤 2-5：develop 合入 main 并推送 → **推完即把 §1 脚本再跑一遍**（`--skip-test`，与等 CI 并行——其检查项不依赖 CI 结论）→ 等 test.yml 三平台全绿 → 打 annotated tag 只推这一个 → 验证 11 资产与 Release 正文（`scripts/release-verify.mjs` 一键执行，人工核对兜底）。回滚与「撤回版本号永不复用」规则见 release.md「出错回滚」。
 
 ## 4. 发布后验证（24 小时内）
 
