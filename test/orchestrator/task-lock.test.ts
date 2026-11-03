@@ -4,7 +4,7 @@
 // （mock 后端），与 integration.test.ts 同配方。
 
 import { describe, expect, it } from 'vitest'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,6 +22,13 @@ function deadPid(): number {
   return r.pid ?? 0
 }
 
+/** 拿一个确定存活的外部 pid（长睡子进程）：活锁构造用——不能再用本进程 pid，
+ *  acquire 对本进程已持有同把锁走重入豁免（held:true），不再按「他人持有」拒绝。 */
+function livePid(): number {
+  const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], { stdio: 'ignore' })
+  return c.pid ?? 0
+}
+
 /** 测试播种锁文件（acquireTaskLock 自带建目录，直写需要先建父目录）。 */
 function seedLock(dir: string, id: string, lock: Record<string, unknown>): void {
   fs.mkdirSync(path.dirname(taskLockPath(dir, id)), { recursive: true })
@@ -35,19 +42,70 @@ function submitCard(repo: string, id: string) {
 }
 
 describe('task-lock > 锁语义（库级）', () => {
-  it('活锁拒绝：持锁进程存活时 acquire 返回 held:false + owner', () => {
+  it('活锁拒绝：持锁进程（他人）存活时 acquire 返回 held:false + owner', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-lib-'))
+    const sleeper = livePid()
     try {
-      seedLock(dir, 't-live', { pid: process.pid, task: 't-live', cmd: 'run' })
+      seedLock(dir, 't-live', { pid: sleeper, task: 't-live', cmd: 'run' })
       const r = acquireTaskLock(dir, 't-live')
       expect(r.held).toBe(false)
       if (!r.held) {
-        expect(r.owner.pid).toBe(process.pid)
+        expect(r.owner.pid).toBe(sleeper)
         expect(r.unremovable).toBeUndefined()
       }
       // 拒绝时不该动别人的锁
-      expect(readTaskLock(dir, 't-live')?.pid).toBe(process.pid)
+      expect(readTaskLock(dir, 't-live')?.pid).toBe(sleeper)
     } finally {
+      try { process.kill(sleeper) } catch { /* 已退 */ }
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('重入豁免：同进程二次 acquire held:true；内层 release 不删锁，外层 release 才删', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-lib-'))
+    try {
+      expect(acquireTaskLock(dir, 't-reent').held).toBe(true) // 外层
+      expect(acquireTaskLock(dir, 't-reent').held).toBe(true) // 内层（嵌套闭环）：旧实现这里 die 自指报错
+      releaseTaskLock(dir, 't-reent') // 内层释放：锁文件还在（外层仍持有）
+      expect(fs.existsSync(taskLockPath(dir, 't-reent'))).toBe(true)
+      releaseTaskLock(dir, 't-reent') // 外层释放：删锁
+      expect(fs.existsSync(taskLockPath(dir, 't-reent'))).toBe(false)
+      // 全部释放后再 acquire 走正常路径
+      expect(acquireTaskLock(dir, 't-reent').held).toBe(true)
+      releaseTaskLock(dir, 't-reent')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('exit handler 属主校验：进程退出时锁已易主（他人活锁）则不误删', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-exit-'))
+    const sleeper = livePid()
+    try {
+      // 子进程：acquire（注册 exit hook、写自己的 pid）→ 把锁内容换成他人活锁 → 退出。
+      // 旧实现 exit handler 无属主校验直接 rmSync——会删掉他人活锁、放行第三者双驱动
+      const script = [
+        "import fs from 'node:fs'",
+        "import path from 'node:path'",
+        "import { pathToFileURL } from 'node:url'",
+        'const { acquireTaskLock } = await import(pathToFileURL(process.env.TL_MJS).href)',
+        "acquireTaskLock(process.env.TL_DIR, 't-exit')",
+        "fs.writeFileSync(path.join(process.env.TL_DIR, '.agents', 'orchestrator', '.run-t-exit.lock'), process.env.TL_LOCK)",
+      ].join('\n')
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+        env: {
+          ...process.env,
+          TL_DIR: dir,
+          TL_MJS: path.resolve(import.meta.dirname, '../../.agents/scripts/orchestrator/task-lock.mjs'),
+          TL_LOCK: JSON.stringify({ pid: sleeper, task: 't-exit', cmd: 'other' }),
+        },
+        encoding: 'utf8',
+        timeout: 30_000,
+      })
+      expect(r.status).toBe(0)
+      expect(readTaskLock(dir, 't-exit')?.pid).toBe(sleeper) // 他人活锁原样保留
+    } finally {
+      try { process.kill(sleeper) } catch { /* 已退 */ }
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
