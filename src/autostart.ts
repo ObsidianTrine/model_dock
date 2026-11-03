@@ -352,7 +352,8 @@ function windowsStatus(): AutostartStatus {
     return { kind: 'windows', installed: false, loaded: false, stale: false, file: display, argv: gatewayDaemonArgs() }
   }
   const argv = (data ? parseRunCommandLine(data) : legacyArgv) ?? gatewayDaemonArgs()
-  const stale = !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
+  // 失效判定复用 recordedArgvStale（launchd/systemd 分支同款）：此前手抄一份，改判定规则只改一处必漂移
+  const stale = recordedArgvStale(argv)
   return { kind: 'windows', installed: true, loaded: true, stale, file: data ? display : legacyPath, argv }
 }
 
