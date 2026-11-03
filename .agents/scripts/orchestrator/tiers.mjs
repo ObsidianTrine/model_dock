@@ -134,6 +134,25 @@ export function discoverGatewayState() {
   return null;
 }
 
+/** 管理面地址解析（cost/fleet 共用）：ORCH_GATEWAY_BASE / ORCH_GATEWAY_ADMIN_TOKEN env >
+ *  gateway.json 同机发现（env 重定向优先，测试隔离）。cfg.gatewayAdmin !== true 一律 null
+ *  不触达——可移植工具链不默认读 ModelDock 状态。返回 { base, adminToken }（base 无尾斜杠）。
+ */
+export function resolveGatewayAdmin(cfg) {
+  if (cfg?.gatewayAdmin !== true) return null;
+  let base = process.env.ORCH_GATEWAY_BASE ?? '';
+  let adminToken = process.env.ORCH_GATEWAY_ADMIN_TOKEN ?? '';
+  if (!base || !adminToken) {
+    const d = discoverGatewayState();
+    if (d) {
+      base = base || `http://127.0.0.1:${d.port}`;
+      adminToken = adminToken || d.adminToken;
+    }
+  }
+  if (!base || !/^https?:\/\//.test(base) || !adminToken) return null;
+  return { base: base.replace(/\/+$/, ''), adminToken };
+}
+
 /**
  * 网关权威校验：POST <base>/_modeldock/tier-validate（x-modeldock-admin），问网关
  * 「这个 token 现在真实解析到哪个 profile、带什么 tier 标签、全库哪些 profile 已打标」。
