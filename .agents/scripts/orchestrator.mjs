@@ -3283,12 +3283,15 @@ function cmdReleasePropose(repoRoot, versionHint) {
  */
 function cmdSchedule(repoRoot, sub, opts) {
   if (sub === 'install') {
-    const mode = opts.mode === 'watch' ? 'watch' : 'nightly';
+    const mode = opts.mode === 'watch' ? 'watch' : opts.mode === 'sail' ? 'sail' : 'nightly';
+    if (opts.mode && opts.mode !== mode) die(`未知调度模式：--mode ${opts.mode}（可选 nightly | watch | sail）`);
     const r = installSchedule(repoRoot, {
       mode,
       interval: opts.interval,
       hour: opts.hour,
       minute: opts.minute,
+      minutes: opts.minutes,
+      duration: opts.duration,
       tests: opts.flags?.has('--tests'),
       auto: opts.auto,
       backend: opts.backend,
@@ -3304,7 +3307,9 @@ function cmdSchedule(repoRoot, sub, opts) {
     log(
       mode === 'watch'
         ? `watch 调度已安装（每天 ${r.when} 拉起 watch 常驻循环，interval 见 wrapper）。停止：touch .agents/orchestrator/.watch-stop；卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`
-        : `nightly 调度已安装（每天 ${r.when} 拉起 ${r.runner}）。`
+        : mode === 'sail'
+          ? `sail 调度已安装（每天 ${r.when} 拉起定时自由航行，时长见 wrapper）。停止：touch .agents/orchestrator/.sail-stop；卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`
+          : `nightly 调度已安装（每天 ${r.when} 拉起 ${r.runner}）。`
     );
     log(`日志: ${nightlyLogPath(repoRoot)}    卸载: node .agents/scripts/orchestrator.mjs schedule uninstall`);
     return;
@@ -3321,7 +3326,7 @@ function cmdSchedule(repoRoot, sub, opts) {
     if (!s.installed) log('安装: node .agents/scripts/orchestrator.mjs schedule install [--hour 2] [--auto 3]');
     return;
   }
-  die('用法：schedule install|uninstall|status [--hour 0-23] [--minute 0-59] [--tests] [--auto N] [--dry-run]');
+  die('用法：schedule install|uninstall|status [--mode nightly|watch|sail] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--minutes N|--duration 2h] [--dry-run]');
 }
 
 /**
@@ -3367,8 +3372,8 @@ function usage() {
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
   sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
                                           自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排、燃油账几何）。停止：.sail-stop / drift 降级 / --max-tasks / --max-cost-usd（网关实测价达上限即收帆，只停不换引擎）；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
-  schedule install|uninstall|status [--mode nightly|watch] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--dry-run]
-                                          定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环）
+  schedule install|uninstall|status [--mode nightly|watch|sail] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--minutes N|--duration 2h] [--dry-run]
+                                          定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环，--mode sail 注册每日定时自由航行）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
   reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 燃油账（实测 token × 价目 = USD，需 gatewayAdmin）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
