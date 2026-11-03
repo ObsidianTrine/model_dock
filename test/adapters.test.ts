@@ -312,6 +312,150 @@ describe('claude-code adapter', () => {
     }
   })
 
+  it('旧版 claude（< 2.1.243）网关接入：不写 modelPicker，改用 ANTHROPIC_MODEL 环境变量钉定默认模型', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic', ANTHROPIC_MODEL: 'deepseek-v4-pro[1M]' } }, null, 2) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.modelPicker).toBeUndefined()
+      // 旧版不认 modelPicker：profile default_model 接管（环境变量覆盖，网关透传 raw ID）
+      expect(after.env.ANTHROPIC_MODEL).toBe('demo-model')
+      expect(plan.notes.some((n) => n.includes('2.1.243'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
+  it('版本门控边界：2.1.242 走 env 回退，2.1.243 起写 modelPicker', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      const fixture = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com' } }, null, 2) + '\n'
+      await withConfig(baseCfg())
+      // 版本探测带 60s memo，但 FAKE_HOME 下绕过——同一 fakeHome 内连续两次 planAttach 读各 env 桩
+
+      process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.242'
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, fixture, 0o600)
+      const oldPlan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      expect(JSON.parse(oldPlan.changes[0].after).modelPicker).toBeUndefined()
+      expect(JSON.parse(oldPlan.changes[0].after).env.ANTHROPIC_MODEL).toBe('demo-model')
+
+      process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.243'
+      await atomicWrite(p, fixture, 0o600)
+      const newPlan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const afterNew = JSON.parse(newPlan.changes[0].after)
+      expect(afterNew.modelPicker).toBeUndefined() // baseCfg 无服务目录：新版写 picker 的前提是有目录
+      expect(afterNew.env.ANTHROPIC_MODEL).toBeUndefined() // 新版路径不写 env 钉定
+
+      // 有目录的配置：2.1.243 写出 lineup
+      const catalogCfg: Config = {
+        ...baseCfg(),
+        providers: { p: { base_url: 'https://api.up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k', models: { 'glm-5-3-flash-260828': { display_name: 'glm-5-3-flash' } } } },
+      }
+      await withConfig(catalogCfg)
+      await atomicWrite(p, fixture, 0o600)
+      const pickerPlan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const afterPicker = JSON.parse(pickerPlan.changes[0].after)
+      expect(afterPicker.modelPicker?.replaceBuiltInOptions).toBe(true)
+      expect(afterPicker.env.ANTHROPIC_MODEL).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
+  it('版本探测失败（--version 不可得）：按旧版回退并在 note 标注', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '' // 空串 = 模拟探测失败
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com' } }, null, 2) + '\n', 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.modelPicker).toBeUndefined()
+      expect(after.env.ANTHROPIC_MODEL).toBe('demo-model')
+      expect(plan.notes.some((n) => n.includes('未能探测'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
+  it('旧版 + --takeover-models：env 钉定被迁移进 profileUpdates（settings 不留 env，靠网关改写）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com', ANTHROPIC_MODEL: 'old-model' } }, null, 2) + '\n', 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, takeoverModels: true },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
+      expect(plan.profileUpdates?.default_model).toBe('demo-model')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
+  it('直连：旧版 claude（< 2.1.243）不写 modelPicker，根 model 与 env 映射照常', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com' } }, null, 2) + '\n', 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: TOKEN,
+          profile: 'demo',
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-x', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.modelPicker).toBeUndefined()
+      expect(after.model).toBe('demo-model')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
   it('settings.json 残留但 claude 命令缺席：判为未安装（卸载残留），接入拒绝', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '0'
