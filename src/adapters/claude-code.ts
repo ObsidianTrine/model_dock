@@ -13,7 +13,7 @@ import {
   type AdapterStatus,
 } from './types.js'
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
-import { cliPresent, residueNote } from './presence.js'
+import { cliPresent, cliVersion, residueNote } from './presence.js'
 import { changeIfChanged, noChangeResult, stripContextSuffix } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 
@@ -23,6 +23,23 @@ const TIER_ENV_KEYS = [
   ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'claude-haiku-*'],
   ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'claude-fable-*'],
 ] as const
+
+/** /model 全量选择器（官方 modelPicker settings 键）的最低支持版本：claude-code CHANGELOG
+ *  在 2.1.243 加入（"Added modelPicker setting: curate the /model picker..."）。更旧的版本
+ *  不认这个键（静默忽略），/model 只剩内置档位——对这些版本回退为 ANTHROPIC_MODEL 环境变量
+ *  钉定默认模型（网关透传 raw ID，全版本可用） */
+const MODEL_PICKER_MIN_VERSION = '2.1.243'
+
+/** 三段数字版本比较：探测失败（undefined）视为不满足，走兼容回退路径 */
+function versionAtLeast(v: string | undefined, min: string): boolean {
+  if (!v) return false
+  const p = v.split('.').map((n) => parseInt(n, 10) || 0)
+  const q = min.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    if ((p[i] ?? 0) !== (q[i] ?? 0)) return (p[i] ?? 0) > (q[i] ?? 0)
+  }
+  return true
+}
 
 /** 直连模式：profile 无 default_model 但配置了 sonnet 别名时，根 model 回落 sonnet 别名
  *  （经别名循环写入的 ANTHROPIC_DEFAULT_SONNET_MODEL 解析）；有 default_model 时根 model 直写真实 ID */
@@ -239,25 +256,28 @@ export const claudeCodeAdapter: HarnessAdapter = {
         }
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW
-        // /model 选择器同样全量策划（官方 modelPicker 键，v2.1.242+，与网关模式同构）：它是纯客户端
+        // /model 选择器同样全量策划（官方 modelPicker settings 键，claude-code v2.1.243 起支持，
+        // 与网关模式同版本门控——旧版不认该键，回退下方根 model + env 映射即可）：它是纯客户端
         // 静态配置（选项烙进 settings.json、不查询 /v1/models），网关挂掉不影响直连可用性；模型 ID
         // 与上方 env 映射同规则带 [1m] 上下文后缀，label 用显示名，description 换直连措辞、保留
         // ModelDock 标记供 isOurModelPicker 识别
-        const pickerOptions = Object.entries(provider?.models ?? {}).map(([id, m]) => ({
-          model: suffixed(id),
-          label: m.display_name || stripContextSuffix(id),
-          description: `${provider?.name ?? opts.profile ?? ''} · ${t('由 ModelDock 直连配置', 'direct via ModelDock')}`,
-        }))
-        if (pickerOptions.length > 0) {
-          root.modelPicker = { replaceBuiltInOptions: true, options: pickerOptions }
-          notes.push(
-            t(
-              '直连模式：/model 选择器已列出当前服务的完整模型目录（纯客户端静态配置，不依赖网关存活）；Default 项按 profile 默认模型解析',
-              'Direct mode: /model now lists the full model catalog of the current service (pure client-side static config, no gateway dependency); the Default row resolves via the profile default model'
+        if (versionAtLeast(await cliVersion('claude', 'claude-code'), MODEL_PICKER_MIN_VERSION)) {
+          const pickerOptions = Object.entries(provider?.models ?? {}).map(([id, m]) => ({
+            model: suffixed(id),
+            label: m.display_name || stripContextSuffix(id),
+            description: `${provider?.name ?? opts.profile ?? ''} · ${t('由 ModelDock 直连配置', 'direct via ModelDock')}`,
+          }))
+          if (pickerOptions.length > 0) {
+            root.modelPicker = { replaceBuiltInOptions: true, options: pickerOptions }
+            notes.push(
+              t(
+                '直连模式：/model 选择器已列出当前服务的完整模型目录（纯客户端静态配置，不依赖网关存活）；Default 项按 profile 默认模型解析',
+                'Direct mode: /model now lists the full model catalog of the current service (pure client-side static config, no gateway dependency); the Default row resolves via the profile default model'
+              )
             )
-          )
-        } else if (isOurModelPicker(root.modelPicker)) {
-          delete root.modelPicker // 目录为空：撤掉我们的策划表，回退内置 lineup
+          } else if (isOurModelPicker(root.modelPicker)) {
+            delete root.modelPicker // 目录为空：撤掉我们的策划表，回退内置 lineup
+          }
         }
         notes.push(
           t(
@@ -320,29 +340,57 @@ export const claudeCodeAdapter: HarnessAdapter = {
       // discovery 硬过滤只认含 claude/anthropic 的 ID），已被下方 modelPicker 全量策划取代，清除
       delete env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
       if (isOurAvailableModels(root.availableModels)) delete root.availableModels
-      // /model 选择器全量策划（官方 modelPicker 键，user settings 即生效，v2.1.242+）：
+      // /model 选择器全量策划（官方 modelPicker settings 键，claude-code v2.1.243 起支持）：
       // replaceBuiltInOptions 隐藏内置 Opus/Sonnet 等档位，options 直接列当前服务的目录
       // （raw ID，无前缀；label 用显示名，description 带服务名与 ModelDock 标记供 detach 识别）。
-      // 全局切换 / 钉定路由后由 refreshBakedModelClients / resyncHarnessToRoute 按新路由重写。
+      // 全局切换 / 钉定路由后由 refreshBakedModelClients / resyncHarnessToRoute 按新路由重写
+      // （重烙复用 planAttach，版本门控在重烙时自然生效）。
+      // 版本门控：低于 2.1.243 的客户端不认 modelPicker（静默忽略——/model 只剩内置档位，
+      // 且上方清掉的模型 env 无人兜底）；回退为 ANTHROPIC_MODEL 环境变量钉定默认模型（raw ID
+      // 经网关透传，全版本可用）。探测失败（--version 不可得 / 输出不可解析）同样回退：
+      // 宁可降级到兼容路径，不假装新版。
       const pickerProfile = opts.profile ?? _cfg.active_profile
       const pickerProf = pickerProfile ? _cfg.profiles[pickerProfile] : undefined
       const pickerProvider = pickerProf?.provider ? _cfg.providers[pickerProf.provider] : undefined
-      const pickerOptions = Object.entries(pickerProvider?.models ?? {}).map(([id, m]) => ({
-        model: id,
-        label: m.display_name || id,
-        description: `${pickerProvider?.name ?? pickerProfile ?? ''} · ${t('由 ModelDock 网关提供', 'via ModelDock')}`,
-      }))
-      if (pickerOptions.length > 0) {
-        root.modelPicker = { replaceBuiltInOptions: true, options: pickerOptions }
-      } else if (isOurModelPicker(root.modelPicker)) {
-        delete root.modelPicker // 目标服务目录为空：撤掉策划表，回退内置 lineup
-      }
-      notes.push(
-        t(
-          '网关模式：/model 选择器只列出当前服务的真实模型（内置 Opus/Sonnet 等档位已隐藏，Default 项为选择器固定行），切换服务后重开会话即见新列表；未选具体模型时，claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端',
-          'Gateway mode: /model lists only the current service real models (built-in tiers like Opus/Sonnet are hidden; Default is a fixed picker row) — restart a session after switching services to see the new list; until a specific model is picked, built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart'
+      const cliVer = await cliVersion('claude', 'claude-code')
+      if (versionAtLeast(cliVer, MODEL_PICKER_MIN_VERSION)) {
+        const pickerOptions = Object.entries(pickerProvider?.models ?? {}).map(([id, m]) => ({
+          model: id,
+          label: m.display_name || id,
+          description: `${pickerProvider?.name ?? pickerProfile ?? ''} · ${t('由 ModelDock 网关提供', 'via ModelDock')}`,
+        }))
+        if (pickerOptions.length > 0) {
+          root.modelPicker = { replaceBuiltInOptions: true, options: pickerOptions }
+        } else if (isOurModelPicker(root.modelPicker)) {
+          delete root.modelPicker // 目标服务目录为空：撤掉策划表，回退内置 lineup
+        }
+        notes.push(
+          t(
+            '网关模式：/model 选择器只列出当前服务的真实模型（内置 Opus/Sonnet 等档位已隐藏，Default 项为选择器固定行），切换服务后重开会话即见新列表；未选具体模型时，claude 内置分层名（claude-sonnet-* 等）由网关按当前服务的默认模型改写，服务切换 / 故障切换即时跟随、无需重启客户端',
+            'Gateway mode: /model lists only the current service real models (built-in tiers like Opus/Sonnet are hidden; Default is a fixed picker row) — restart a session after switching services to see the new list; until a specific model is picked, built-in claude tier names (claude-sonnet-* etc.) are rewritten by the gateway to the current service default model, following service switches and failover instantly with no client restart'
+          )
         )
-      )
+      } else {
+        // 旧版回退：模型选择经 env 覆盖。升级 claude 后重接时清掉此前烙的 lineup（旧版不认的死键）
+        if (isOurModelPicker(root.modelPicker)) delete root.modelPicker
+        const suffixed = (target: string): string => {
+          const ctx = resolveModelMeta(target, pickerProvider?.models?.[target], { baseUrl: pickerProvider?.base_url })?.context_window
+          return ctx !== undefined && ctx >= ONE_M_TOKEN ? `${target}[1m]` : target
+        }
+        const legacyModel = pickerProf?.default_model ?? Object.keys(pickerProvider?.models ?? {})[0]
+        if (legacyModel !== undefined) env.ANTHROPIC_MODEL = suffixed(legacyModel)
+        notes.push(
+          t(
+            'claude 版本 {ver} 低于 {min}（或未能探测）：不支持 /model 全量选择器（modelPicker），已改用 ANTHROPIC_MODEL 环境变量钉定默认模型{model}，网关透传该 ID；升级 claude 到 {min}+ 后重新接入即切换为选择器模式',
+            'claude version {ver} is below {min} (or could not be probed): the curated /model picker (modelPicker) is not supported; the default model is pinned via the ANTHROPIC_MODEL env var{model} and passed through by the gateway; upgrade claude to {min}+ and re-attach to switch to the curated picker',
+            {
+              ver: cliVer ?? t('未知', 'unknown'),
+              min: MODEL_PICKER_MIN_VERSION,
+              model: legacyModel !== undefined ? t('（{model}）', ' ({model})', { model: String(env.ANTHROPIC_MODEL) }) : '',
+            }
+          )
+        )
+      }
     }
 
     if (prevBase && !isGatewayUrl(prevBase)) {
