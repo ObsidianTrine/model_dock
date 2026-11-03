@@ -110,7 +110,8 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ## 测试指南
 
-- **测试范围分层（2026-11-02 定）**：日常代码修改**只跑与改动相关的测试用例**，全绿即交付——按文件过滤（`npx vitest run test/<文件>.test.ts`；编排器改动用 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`），更窄再叠加 `-t "用例名关键词"`。**全量** `npm test` / `npm run test:workflow` 只在版本发布、develop→main 合并等大节点与 CI 门禁跑。注意下方 vitest 隔离模型：涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（如 `uninstall.test` / `store.test`），避免「单独跑绿、组合跑红」。
+- **测试范围分层（2026-11-02 定）**：日常代码修改**只跑与改动相关的测试用例**，全绿即交付——按文件过滤（`npx vitest run test/<文件>.test.ts`；编排器改动用 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`），更窄再叠加 `-t "用例名关键词"`。**全量** `npm test` / `npm run test:workflow` 只在版本发布、develop→main 合并等大节点跑。注意下方 vitest 隔离模型：涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（如 `uninstall.test` / `store.test`），避免「单独跑绿、组合跑红」。
+- **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
 - 套件：test/ 下 75+ 个文件（store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
 - **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入 `VITEST`、种子脚本显式 `MODELRDOCK_TEST=1`、**agent CLI 环境标记**——`ZCODE_*`/`CLAUDECODE` 等，见 `src/util/fsx.ts` AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受误伤；有意写真实 home 的场景（当前仅 test/autostart.test.ts 的 win 真注册表用例）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687 / 8890 / 任何写死端口**；手测沙箱配方见「端口与实例约定」。
@@ -190,6 +191,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
+| `workflows/test.yml` | 产品三平台矩阵 + 工作流套件；触发分级（2026-11-03）：mac 腿仅 PR / push main / 每日 schedule，workflow-suite 仅 `.agents/**`、`test/orchestrator/**` 变更才真跑（否则占位绿保 required check） | 无 |
 | `workflows/claude-review.yml` | 分层 PR 审查：`risk-tier` 确定性打 `risk:*` label（零消耗）+ `auto-review` 只读审查（REVIEW.md 纪律，[P0]/[P1]/[P2] + inline，3 轮收敛）+ `security-review`（`SECURITY-VERDICT` 门禁，FAIL 即失败）；`@claude` 评论可交互追问 | `CLAUDE_AUTH_TOKEN`（key；risk-tier 不需要） |
 | `REVIEW.md` + `.github/CODEOWNERS` | 审查纪律 + 敏感路径归属；审查者动手前必读 | 无 |
 | `scripts/pr-risk-tier.mjs` | PR 风险分级脚本（规则对齐 workflow.json corePaths/releasePaths；测试 `test/pr-risk-tier.test.ts`） | 无 |

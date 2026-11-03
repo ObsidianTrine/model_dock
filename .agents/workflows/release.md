@@ -61,7 +61,7 @@ git push origin main
 
 - 推送后到 GitHub 仓库网页的 **Actions** 标签页看 `test.yml` 跑完且**全部 job 全绿**（三平台矩阵 + 工作流套件共 4 个 job；已装 gh CLI：`gh run watch` 盯进度；网页亦可）。
 - **盯 run 必按 workflow 过滤并以提交核对**：`gh run list --branch main --workflow=test` + headSha 比对——同分支混着 Dependabot 等 run，裸 `--limit 1` 会盯错对象（v1.2.3 实证）。
-- CI 腿被「未获分配」取消（典型：macos arm64 runner 容量短缺，排队 15 分钟即取消）时，**ci-retry.yml 自动重跑失败腿**（只认 cancelled 资源性取消——腿从未启动；真回归 failure / timed_out / startup_failure 不自动重试，交人工判断；≤3 次尝试，只重跑最新 run）；连续多轮仍取消 = 平台故障，等恢复后 `gh run rerun <run-id> --failed` 补一脚即可，不必重推。
+- CI 腿被「未获分配」取消（典型：macos arm64 runner 容量短缺，排队 15 分钟即取消）时，`gh run rerun <run-id> --failed` 补一脚即可，不必重推（原 ci-retry.yml 自动重跑已于 2026-11-03 移除：mac 腿退出 develop push 矩阵后触发面大幅收窄，剩余发布期场景人工补一脚的成本低于维护一个自动 workflow；连续多轮仍取消 = 平台故障，等恢复再跑）。
 - **不绿就停**：在 develop 修好后重新合入 main 并推送，回到本步。绝不带病打 tag。
 
 ### 4. 打 tag，只推这一个
@@ -120,7 +120,7 @@ git push origin develop
 2. 盘点 + 文档收口（本文件「流程」步骤 1 的内容，含 CHANGELOG / README / usage 核对）
 3. `git checkout main && git merge develop`
 4. `AGENTS_ALLOW_RELEASE=1 git push origin main`
-5. `gh run watch`（test.yml 全部 job 全绿：三平台 + 工作流套件，按 `--workflow=test` 过滤并以 headSha 核对提交；gh 不可用时降级为网页查看，**不绿就停**；腿被基础设施取消时 ci-retry 自动重跑，见步骤 3）
+5. `gh run watch`（test.yml 全部 job 全绿：三平台 + 工作流套件，按 `--workflow=test` 过滤并以 headSha 核对提交；gh 不可用时降级为网页查看，**不绿就停**；腿被基础设施取消时 `gh run rerun --failed` 补一脚，见步骤 3）
 6. `node scripts/release-check.mjs <X.Y.Z> --skip-test`（tag 前快速复核；此时在 main 上，「当前在 main 分支」warn 属预期）→ `AGENTS_ALLOW_RELEASE=1 git tag -a v<X.Y.Z> -m "v<X.Y.Z>"` → `AGENTS_ALLOW_RELEASE=1 git push origin v<X.Y.Z>`
 7. `gh run watch`（release.yml）→ `gh release view v<X.Y.Z>` 核对 11 资产与正文非占位 → 下载抽包跑 `--version`（即「流程」步骤 5）
 8. develop 对齐 main（「流程」步骤 6）：`git checkout develop && git merge --ff-only main` → `AGENTS_ALLOW_RELEASE=1 git push origin develop`（develop 有新提交时 ff 拒绝，改普通 merge）
@@ -149,7 +149,7 @@ git push origin develop
 
 | 事故 | 对策（✅ = 已自动化） |
 |---|---|
-| macos 腿排队期 15m01s 被「未获分配」取消（GitHub arm64 runner 容量短缺，v1.5.0 连挂 7 次） | ✅ ci-retry.yml 自动重跑失败腿（只认 cancelled 资源性取消、≤3 次尝试、只重跑最新 run；真回归 failure 不自动重试）；连续多轮仍取消 = 平台故障，等恢复后 `gh run rerun <run-id> --failed`，不必重推 |
+| macos 腿排队期 15m01s 被「未获分配」取消（GitHub arm64 runner 容量短缺，v1.5.0 连挂 7 次） | 曾由 ci-retry.yml 自动重跑兜底（2026-11-03 移除）；根治 = mac 腿退出 develop push 矩阵（test.yml 分级，见 job if 注释），发布期腿被取消则 `gh run rerun <run-id> --failed` 补一脚，不必重推 |
 | CHANGELOG 漏记（v1.1.5 补 4 条、v1.2.3 补 2 条、v1.5.0 无未发布段需整段归纳） | ✅ release-propose 自动盘点 + 疑似漏记清单；收口仍以 `git log v上一版..develop --no-merges` 逐条对账，「提交里有而日志没有 = 对外失真」 |
 | 本地 npm test 绿、CI 工作流套件红（v1.5.0：feature-branch finish 把未跟踪文件算脏，编排器套件成组挂） | ✅ release-check 补跑 `npm run test:workflow`，发布前本地拦住两套件；修法教训：把「未跟踪」当「脏」会误伤临时仓库与本地杂物，校验用 `--porcelain --untracked-files=no` |
 | release 构建在 test.yml 不覆盖的平台红、tag 已推（v1.2.1 linux-arm64：测试与网关后台写状态文件竞态） | 测试侧去竞态（用环境开关隔离后台写）；按「出错回滚」删 tag 重打，版本号不消耗。教训：与被测进程有共享状态的测试，先把后台写隔离再断言 |
