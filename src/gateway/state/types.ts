@@ -121,6 +121,11 @@ export interface GatewayRuntime {
   /** providerId → 轻量耗时 ring（最近 500 条 ms 采样 + 累计请求数；/_modeldock/metrics 消费）。
    *  logRequest 顺手累计，reload 不清空（跨热加载保留观测连续性）。 */
   metricsLatency: Map<string, ProviderLatencyRing>
+  /** providerId → 海况滑窗错误分桶（/_modeldock/metrics 的 providers[].errors 与 sea_state 数据源）。
+   *  recordOutcome 顺手记账（与熔断判定同源不同构，见 state/sea.ts）；reload 随服务删除清理。 */
+  seaErrors?: Map<string, SeaProviderErrors>
+  /** 上游模型可用性探测运行态（modelprobe.ts 周期探测写入；GET /_modeldock/model-availability 消费） */
+  modelProbe?: ModelProbeState
 }
 
 /** per-provider 耗时采样的有界结构：samples 是环形窗口（超出裁最旧），count 是进程生命周期
@@ -157,4 +162,68 @@ export interface HealthState {
   okStreak: number
   /** 最近一次成功请求/探活的耗时 ms（供 overview 展示与备用链同优先级决胜；失败不写，见 recordOutcome） */
   lastMs?: number
+}
+
+// ===== 海况观测（state/sea.ts 维护；全部内存态，重启清零）=====
+
+/** 海况滑窗单分钟分桶：错误类与 HealthState.meltdown_cls 同枚举。total 含成功与中性 4xx
+ *  （作错误率分母）；429 不含 quota——relay 分类互斥（429+quota 体归 quota），quota 单列。 */
+export interface SeaMinuteBucket {
+  /** epoch 分钟数（floor(ms / 60000)）：环形槽位与新鲜度判定键 */
+  minute: number
+  total: number
+  connect: number
+  '429': number
+  '5xx': number
+  quota: number
+}
+
+/** 窗口聚合视图（metrics providers[].errors 的 last_5m/last_60m 暴露形状）：
+ *  error_rate = 四类错误合计 / total（中性 4xx 只摊分母），四位小数。 */
+export interface SeaWindowView {
+  total: number
+  connect: number
+  '429': number
+  '5xx': number
+  quota: number
+  error_rate: number
+}
+
+/** providerId → 海况分桶运行态。slots 固定 60 槽环形（槽位 = minute % 60，槽内 minute 不匹配
+ *  即陈旧数据、按需清零重用免裁剪）；lastError* 供排查定位最近一次错误（经 recordOutcome 记账）。 */
+export interface SeaProviderErrors {
+  slots: (SeaMinuteBucket | undefined)[]
+  lastErrorAt?: number
+  lastErrorCls?: 'connect' | '429' | '5xx' | 'quota'
+}
+
+/** 聚合海况信号（metrics 的 sea_state 字段形状）：storm 判定常量见 state/sea.ts 顶部。 */
+export interface SeaState {
+  storm: boolean
+  /** 命中的风暴规则短码（meltdown_majority / rate_429_60m），storm=false 时为空数组 */
+  reasons: string[]
+  /** 当前处于熔断期的 enabled 服务数 */
+  meltdown_count: number
+  updated_at: string
+}
+
+// ===== 上游模型可用性探测（modelprobe.ts 维护；内存态，重启清零）=====
+
+/** 单个 provider 的上游模型目录探测结果（GET /_modeldock/model-availability 的条目形状） */
+export interface ProviderAvailability {
+  ok: boolean
+  /** ISO 时间戳：本次探测完成时刻（成功失败都刷新） */
+  fetched_at: string
+  /** ok=true：上游 /models 返回的模型 id（保持上游顺序） */
+  model_ids?: string[]
+  /** ok=false：失败原因（fetchModelIds 聚合报错，含逐候选端点尝试明细） */
+  error?: string
+}
+
+/** 上游模型可用性探测运行态 */
+export interface ModelProbeState {
+  /** providerId → 最近一次探测结果（含失败负缓存：端点只读缓存，不触发补打失败上游） */
+  results: Map<string, ProviderAvailability>
+  /** 探测中的 providerId：调度 tick 与在飞请求去重，不重复打上游 */
+  inflight: Set<string>
 }

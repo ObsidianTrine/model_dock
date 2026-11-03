@@ -2,6 +2,7 @@ import type { Config, ProfileConfig, ScheduleWindow } from '../../config/types.j
 import { t } from '../../util/i18n.js'
 import { parseHHmm } from '../../util/time.js'
 import { dayTypeFor, loadCalendarFull, upcomingHolidays, type DayType, type HolidayCalendar, type HolidayDayNamed, type HolidayRange } from '../daytype.js'
+import { recordSeaOutcome } from './sea.js'
 import type { GatewayRuntime, ResolvedTarget, ResolveResult } from './types.js'
 
 export function resolveTarget(rt: GatewayRuntime, token: string, profileOverride?: string): ResolveResult {
@@ -64,6 +65,9 @@ export function recordOutcome(
   r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number }
 ): void {
   const now = Date.now()
+  // 海况分桶与下方熔断判定同源不同构（state/sea.ts）：只随同一事件流记账、供
+  // /_modeldock/metrics 观测面消费，对熔断逻辑零影响；同传 now 保持时间基点一致
+  recordSeaOutcome(rt, providerId, r, now)
   let h = rt.health.get(providerId)
   if (!h) {
     h = { errWindow: { t0: now, count: 0 }, okStreak: 0 }
