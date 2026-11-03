@@ -146,8 +146,45 @@ export function loadWorkflowConfig(repoRoot) {
     autoResume: resolveAutoResume(raw.autoResume),
     trace: resolveTrace(raw.trace),
     escalation: resolveEscalation(raw.escalation),
+    dynamicDispatch: resolveDynamicDispatch(raw.dynamicDispatch),
     notify: resolveNotify(raw.notify),
   };
+}
+
+/** 动态选船配置解析（阶段 3）：{ enabled?: bool（缺省 false=决策完全不参与，行为与历史
+ *  一致）, envelope?: 船型数组（允许自动切换的船白名单——写进配置即持久授权，包络外永不
+ *  自动切）, models?: { <backend>: 模型名 }（可选：换到该船时注入的 --model，仅 claude 系
+ *  生效） }。非法值回落缺省并 console.warn（与 resolveEscalation 同风格）。 */
+function resolveDynamicDispatch(raw) {
+  const DEFAULTS = { enabled: false, envelope: [], models: {} };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] dynamicDispatch 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 dynamicDispatch 键：{ enabled?: boolean, envelope?: ["claude-headless","zcode-headless"] 之类船型数组, models?: { <backend>: 模型名 } }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, envelope?, models? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS, models: { ...DEFAULTS.models } };
+  if (raw.enabled !== undefined) out.enabled = raw.enabled === true;
+  if (raw.envelope !== undefined) {
+    if (Array.isArray(raw.envelope)) {
+      out.envelope = raw.envelope.map((x) => String(x).trim()).filter(Boolean);
+    } else {
+      warn(`envelope ${JSON.stringify(raw.envelope)} 不合法（须为船型字符串数组）`);
+    }
+  }
+  if (raw.models !== undefined) {
+    if (raw.models && typeof raw.models === 'object' && !Array.isArray(raw.models)) {
+      const models = {};
+      for (const [k, v] of Object.entries(raw.models)) {
+        if (k.trim() && typeof v === 'string' && v.trim()) models[k.trim()] = v.trim();
+      }
+      out.models = models;
+    } else {
+      warn(`models ${JSON.stringify(raw.models)} 不合法（须为 { <backend>: 模型名 } 对象）`);
+    }
+  }
+  return out;
 }
 
 /** notify 配置解析（通知通道扩展点）：{ keychainService?: string（darwin 钥匙串服务名，

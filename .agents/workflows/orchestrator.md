@@ -352,6 +352,24 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 - **回流侧（批示）**：`node .agents/scripts/approval-listener.mjs [--port N] [--root <仓库根>]` 显式启动（缺省端口只认 workflow.json `notify.listenerPort`，都没配报错退出——**永不缺省监听**；只绑 `127.0.0.1`）。飞书卡片回调打过来：`url_verification` 握手直接回显 challenge；动作回调验签（verification token 须与 env `AGENTS_LARK_VERIFICATION_TOKEN` 一致，不一致 403，env 未配拒绝所有动作）后映射为 orchestrator 既有命令 `approve/reject/retry <task-id>`（reject 无原因用默认文案），结果以 toast 回复群里。同 task 同 action 60s 内重复点击忽略（防手抖）；审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`（ts/task/action/来源 IP/结果）。
 - **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../../../docs/orchestrator-usage.md)。
 
+### B11. 动态选船（dynamic dispatch，阶段 3）
+
+派发时用「海况信号 + 卡难度」在**预授权包络**内自动选执行船（backend）。授权哲学与 escalation.fallbackBackend / autopilot 一致：**envelope 显式写进 workflow.json = 持久授权**，包络内换船运行时不再请示（引擎切换人工闸门保留，只加包络豁免分支——起止两船都在 envelope 内即放行）；包络外永不自动切。**缺省关**——workflow.json 无 `dynamicDispatch` 键 = 决策完全不参与，行为与历史一致。
+
+```json
+"dynamicDispatch": {
+  "enabled": true,
+  "envelope": ["zcode-headless", "claude-headless"],
+  "models": { "claude-headless": "<可选模型名>" }
+}
+```
+
+- **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴（服务熔断 / 上游限流 / worker 重试密集 / weatherHold 滞留）→ 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。
+- **不越权三律**：显式 CLI `--worker-backend` / `--backend` 最高优先（动态选船直接让位，不留痕）；resume/retry 沿用上次会话（会话连续性优先，中途不换船）；mock 永不参与自动选船（测试链路照常可用，mock 也不进 envelope）。
+- **留痕**：所有非常规选择记 `dispatch_selected { from, to, switched, reason }` 事件（永不静默红线）；决策链任何一步失败自动回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
+- **与 fleet observe 的关系**：阶段 1 观测（`fleet_observed`）只照亮不决策，本节是它的决策消费者。难度路由不需要网关（纯卡面信号）；逐船海况判读需要 `gatewayAdmin: true` 的观测快照，观测缺席不判恶劣（观测缺席 ≠ 风暴）。
+- **与 escalation 的关系**：escalation（B8，zcode 30k 自动升档）在动态选船之后作外层兜底，逻辑不动；预算熔断不受动态选船影响（换船不重置预算）。
+
 ## C. 观测与对账详解
 
 ### C1. stats 与 follow（引水传令）

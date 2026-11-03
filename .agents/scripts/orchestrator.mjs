@@ -52,6 +52,7 @@ import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift
 import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstreamSeaState } from './orchestrator/reconcile.mjs';
 import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
 import { observeFleetForRun } from './orchestrator/fleet.mjs';
+import { decideDispatchForRun, normalizeEnvelope } from './orchestrator/dispatch.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
@@ -313,12 +314,48 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 后端切换人工闸门：最终 worker 引擎 ≠ workflow.json worker.backend（配置默认）即视为「切换 CLI」，
   // 必须显式批准才放行——自治跑在引擎起不来时静默换引擎，会把任务烧到非预期的模型与账单上
   // （2026-10-29 夜跑事故：ORCH_ZCODE_CLI 未设 → zcode ENOENT/GLM 429 → 全量静默切 claude-headless 直连 DeepSeek）。
-  if (cfg.worker?.backend && opts.backend !== cfg.worker.backend
+  // 包络豁免（动态选船，阶段 3）：dynamicDispatch.enabled = 船东对「包络内互切」的持久批准
+  // （写进配置即授权，同 escalation.fallbackBackend 哲学）——起止两船都在 envelope 内的切换
+  // 不再要求每卡 --approve-backend-switch；包络外照旧拒绝（envelope 规范化把 mock/未知船剔除）。
+  const ddEnvelope = cfg.dynamicDispatch?.enabled ? normalizeEnvelope(cfg.dynamicDispatch.envelope).envelope : [];
+  const envelopeAuthorized = ddEnvelope.includes(opts.backend) && ddEnvelope.includes(cfg.worker?.backend);
+  if (cfg.worker?.backend && opts.backend !== cfg.worker.backend && !envelopeAuthorized
       && !opts.flags?.has('--approve-backend-switch') && process.env.ORCH_APPROVE_BACKEND_SWITCH !== '1') {
     die(`执行引擎 ${opts.backend} ≠ workflow.json worker.backend（${cfg.worker.backend}）：切换 CLI 需人工审核。\n`
       + `确认切换：本命令追加 --approve-backend-switch（或设环境 ORCH_APPROVE_BACKEND_SWITCH=1）；\n`
       + `不切换：修复原引擎的启动环境（如设 ORCH_ZCODE_CLI、GLM 429 退避并降并发）后重跑；任务卡未动。`);
   }
+
+  // ---- 开航前海况观测（fleet observe，纯观测零决策，2026-11-03 船东定案阶段 1）----
+  // 拉网关接入态/熔断写事件线并告警（船绕狗粮、服务熔断在起跑前可见）。只观测不决策：
+  // 观测缺席绝不阻断派发（gatewayAdmin 未开 = 完全静默，行为不变）。位置在引擎闸门之后、
+  // 预算校准之前：阶段 3 动态选船可能据此换船，换船后的 budget profile / 审查异构解析 /
+  // tier 告警口径都按最终船计算（事件时间线上 fleet_observed 因此先于 budget_profile/tier_resolved）。
+  const fleet = await observeFleetForRun(cfg, { backend: opts.backend });
+  for (const line of fleet.lines) log(line);
+  if (fleet.event) appendEvent(qdir, 'fleet_observed', fleet.event);
+
+  // ---- 动态选船（dynamic dispatch，阶段 3）：海况 + 卡难度在预授权包络内自动选船 ----
+  // 缺省关（workflow.json 无 dynamicDispatch 键 = 决策完全不参与，行为与历史一致）；
+  // 显式 CLI 引擎与 resume 沿用不越权；换船记 dispatch_selected 事件（永不静默红线）。
+  // 决策纯逻辑在 orchestrator/dispatch.mjs（难度路由不需要网关；逐船海况判读用上面的观测快照）。
+  const dispatch = await decideDispatchForRun({
+    repoRoot,
+    cfg,
+    meta,
+    defaultBackend: opts.backend,
+    explicit: Boolean(backendExplicit || opts.workerBackend),
+    inherited: resolved.inherited,
+    tier: resolveTier(meta, cfg), // 与下方 tier 段同源重算（纯函数）：难度信号在这里就要用
+    fleetState: fleet.state,
+  });
+  for (const line of dispatch.lines) log(line);
+  for (const ev of dispatch.events) appendEvent(qdir, ev.type, ev);
+  if (dispatch.switched) {
+    log(`动态选船生效：执行引擎 ${opts.backend} → ${dispatch.backend}（envelope 持久授权）`);
+    opts.backend = dispatch.backend;
+  }
+  const dispatchModel = dispatch.switched ? dispatch.model : null; // 换船按船注入的可选模型（优先级低于 CLI/tier）
   const workerModel = opts.workerModel ?? cfg.worker?.model ?? undefined; // 仅 claude 系 CLI 生效（--model）
 
   // 按引擎校准预算（workflow.json budgetProfiles，调大不关闭，不破「熔断不可关闭」红线）：
@@ -369,8 +406,8 @@ async function cmdRun(repoRoot, taskId, opts) {
   } else if (tier?.token) {
     log(`任务等级：${tierDisplayName(tier.name)}（${tier.name}${tier.auto ? '，files_hint 命中核心/发布路径自动升档' : ''}，token 来自 ${tier.tokenEnv}）`);
   }
-  // 模型生效优先级：CLI 单次覆盖 > tier 配置 > workflow.json 全局默认
-  const effWorkerModel = opts.workerModel ?? tier?.workerModel ?? workerModel;
+  // 模型生效优先级：CLI 单次覆盖 > tier 配置 > 动态选船按船注入（仅换船时）> workflow.json 全局默认
+  const effWorkerModel = opts.workerModel ?? tier?.workerModel ?? dispatchModel ?? workerModel;
   const effReviewModel = opts.reviewModel ?? tier?.reviewModel ?? reviewModel;
   if (tier?.token && (effWorkerModel !== workerModel || effReviewModel !== reviewModel)) {
     log(`tier 模型：执行 ${effWorkerModel ?? '（默认）'} / 审查 ${effReviewModel ?? '（默认）'}`);
@@ -421,13 +458,6 @@ async function cmdRun(repoRoot, taskId, opts) {
     if (!v.ok) log(`⚠ tier 目录校验：${v.reason}${v.missing?.length ? `（${v.missing.join(', ')}）` : ''}——继续派发，留意网关模型报错`);
   }
   const tierEnv = tierEnvPatch(tier);
-
-  // ---- 开航前海况观测（fleet observe，纯观测零决策，2026-11-03 船东定案阶段 1）----
-  // 拉网关接入态/熔断写事件线并告警（船绕狗粮、服务熔断在起跑前可见）。只观测不决策：
-  // 选船仍走既有静态规则，观测缺席绝不阻断派发（gatewayAdmin 未开 = 完全静默，行为不变）。
-  const fleet = await observeFleetForRun(cfg, { backend: opts.backend });
-  for (const line of fleet.lines) log(line);
-  if (fleet.event) appendEvent(qdir, 'fleet_observed', fleet.event);
 
   // reviewing 也算恢复场景（2026-10-31 卡 19）：审查阶段硬崩的卡，此前唯一程序化
   // 出口是 abandon 强制落 failed；TRANSITIONS 本就允许 reviewing→running，run/resume

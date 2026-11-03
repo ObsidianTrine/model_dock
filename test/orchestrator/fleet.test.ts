@@ -156,7 +156,7 @@ describe('assessFleet（船↔harness 判读）', () => {
 describe('observeFleetForRun（cmdRun 装配）', () => {
   it('gatewayAdmin 未开 → 完全静默（行为与历史一致）', async () => {
     const r = await observeFleetForRun({}, { backend: 'zcode-headless' })
-    expect(r).toEqual({ lines: [], event: null })
+    expect(r).toEqual({ lines: [], event: null, state: null }) // state 供动态选船逐船判读（阶段 3）
   })
 
   it('开了但网关不可得 → 一行提示不阻断；观测成功 → 摘要 + 告警行 + 紧凑事件', async () => {
