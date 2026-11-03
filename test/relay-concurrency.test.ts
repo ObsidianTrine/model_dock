@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { UpstreamError, forwardWithFailover, parseRetryAfterMs } from '../src/gateway/relay.js'
+import { UpstreamError, forwardWithFailover, parseRetryAfterMs, type ForwardOptions } from '../src/gateway/relay.js'
 import { providerConcurrencyStats } from '../src/gateway/concurrency.js'
 import { buildRuntime, type GatewayRuntime, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -26,6 +26,11 @@ function buildRt(providers: Record<string, ProviderConfig>, gateway?: Config['ga
 
 function baseOn(cfg: Config, id: string): ResolvedTarget {
   return { harness: 'test', profileName: 'p', profile: { name: 'p', provider: id }, provider: cfg.providers[id] }
+}
+
+/** 完整 ForwardOptions（本文件在 tsconfig.test.json 受检名单内）：统一补齐必填字段 */
+function fwd(over: { fallbackIds?: string[] } = {}): ForwardOptions & { fallbackIds?: string[] } {
+  return { method: 'POST', path: ROUTED, headers: {}, body, idleTimeoutMs: 60_000, retries: 1, ...over }
 }
 
 async function listen(server: http.Server): Promise<string> {
@@ -102,7 +107,7 @@ describe('relay · forwardWithFailover 并发闸（max_concurrency / queue_wait_
       const cfg = { providers: { a: providerCfg('a', { base_url: await mock.url }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(result.status).toBe(200)
       expect(result.release).toBeUndefined()
       expect(result.reason).toBeUndefined()
@@ -121,7 +126,7 @@ describe('relay · forwardWithFailover 并发闸（max_concurrency / queue_wait_
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
       const target = baseOn(cfg, 'a')
-      const opts = { body, path: ROUTED, headers: {} } as const
+      const opts = fwd()
       // R1 取槽（上游 80ms 后响应）；R2 在 R1 响应未消费完（未 release）时到达 → 排队
       const p1 = forwardWithFailover(rt, target, opts)
       const r1 = await p1
@@ -159,16 +164,16 @@ describe('relay · forwardWithFailover 并发闸（max_concurrency / queue_wait_
       await setSecret('a', 'sk-a', 'file')
       await setSecret('b', 'sk-b', 'file')
       // R1 拿走 a 的唯一槽位并持有（模拟在途流式响应）
-      const r1 = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const r1 = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(providerConcurrencyStats(rt, 'a').inFlight).toBe(1)
       // R2 在 a 上排队超时 → 跳候选到 b 成功
-      const r2 = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const r2 = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd({ fallbackIds: ['b'] }))
       expect(r2.usedProviderId).toBe('b')
       expect(r2.status).toBe(200)
       expect(r2.reason).toBe('failover_to:b,queue_full:a,replayed_from:a')
       // R1 释放后 a 恢复可用
       r1.release!()
-      const r3 = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const r3 = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(r3.usedProviderId).toBe('a')
       r3.release?.()
       expect(providerConcurrencyStats(rt, 'a')).toEqual({ inFlight: 0, queued: 0 })
@@ -186,8 +191,8 @@ describe('relay · forwardWithFailover 并发闸（max_concurrency / queue_wait_
       const cfg = { providers: { a: providerCfg('a', { base_url: await a.url, max_concurrency: 1 }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers, { queue_wait_ms: 80 })
       await setSecret('a', 'sk-a', 'file')
-      const r1 = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
-      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} }).then(
+      const r1 = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd()).then(
         () => null,
         (e) => e,
       )
@@ -198,7 +203,7 @@ describe('relay · forwardWithFailover 并发闸（max_concurrency / queue_wait_
       expect(e.message).toContain('a') // 点名满了的服务
       expect(e.hint).toContain('max_concurrency') // 可操作：调大上限或降低客户端并发
       r1.release!()
-      const r3 = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const r3 = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(r3.status).toBe(200)
       r3.release?.()
     } finally {
@@ -219,7 +224,7 @@ describe('relay · forwardWithFailover 429 Retry-After 退避（≤5s 原地重�
       const cfg = { providers: { a: providerCfg('a', { base_url: await a.url }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(result.status).toBe(200)
       expect(a.hits()).toBe(2) // 同候选重试了一次
       expect(result.reason).toBe('retried_429:a')
@@ -240,7 +245,7 @@ describe('relay · forwardWithFailover 429 Retry-After 退避（≤5s 原地重�
       const cfg = { providers: { a: providerCfg('a', { base_url: await a.url }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(result.status).toBe(200)
       expect(a.hits()).toBe(2)
       expect(result.reason).toBe('retried_429:a')
@@ -260,7 +265,7 @@ describe('relay · forwardWithFailover 429 Retry-After 退避（≤5s 原地重�
       const cfg = { providers: { a: providerCfg('a', { base_url: await a.url }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd())
       expect(result.status).toBe(429)
       expect(a.hits()).toBe(2) // 只重试一次，不无限退避
       expect(result.reason).toBe('retried_429:a')
@@ -286,7 +291,7 @@ describe('relay · forwardWithFailover 429 Retry-After 退避（≤5s 原地重�
       const rt = buildRt(cfg.providers, { failover_status_codes: [429] })
       await setSecret('a', 'sk-a', 'file')
       await setSecret('b', 'sk-b', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd({ fallbackIds: ['b'] }))
       expect(result.usedProviderId).toBe('b')
       expect(a.hits()).toBe(1) // 长等待不重试，直接换候选
       expect(result.reason).toBe('failover_to:b,replayed_from:a')
@@ -313,7 +318,7 @@ describe('relay · forwardWithFailover 429 Retry-After 退避（≤5s 原地重�
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
       await setSecret('b', 'sk-b', 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), fwd({ fallbackIds: ['b'] }))
       expect(result.usedProviderId).toBe('b')
       expect(a.hits()).toBe(1) // quota 类不进退避重试
       expect(result.reason).toBe('failover_to:b,replayed_from:a')
@@ -329,15 +334,16 @@ describe('gateway e2e · 流式响应占满并发槽直到响应结束（server.
   const TOKEN = 'mdk_conc_test_token'
   it('流未结束期间第二请求排队超时回 429；流结束后新请求正常取槽', async () => {
     const h = fakeHome()
-    // 上游 SSE：首个请求发一段后挂起（由测试显式放行结束），后续请求立即回完整流
-    let finish: (() => void) | null = null
+    // 上游 SSE：首个请求发一段后挂起（由测试显式放行结束），后续请求立即回完整流。
+    // 用对象持有句柄而非 let 闭包变量：TS 对回调内赋值的 let 会收窄成 null，finish?.() 报 never 不可调用
+    const held: { end?: () => void } = {}
     let first = true
     const upstream = http.createServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.write('data: {"type":"message_start"}\n\n')
       if (first) {
         first = false
-        finish = () => res.end('data: [DONE]\n\n')
+        held.end = () => res.end('data: [DONE]\n\n')
       } else {
         res.end('data: [DONE]\n\n')
       }
@@ -379,7 +385,7 @@ describe('gateway e2e · 流式响应占满并发槽直到响应结束（server.
       const j2 = (await r2.json()) as { error?: { message?: string }; modeldock?: { hint?: string } }
       expect(j2.modeldock?.hint ?? '').toContain('max_concurrency')
       // 流结束后 R1 的槽位释放（网关 finally 先于/晚于客户端收尾皆有可能，轮询等归零），R3 正常取槽成功
-      finish?.()
+      held.end?.()
       expect(await r1.text()).toContain('message_start')
       for (let waited = 0; waited < 5_000 && providerConcurrencyStats(rt, 'a').inFlight > 0; waited += 20) {
         await new Promise((r) => setTimeout(r, 20))
