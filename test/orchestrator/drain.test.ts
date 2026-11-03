@@ -113,4 +113,33 @@ describe('orchestrator drain > run 子进程 spawn 失败容错', () => {
       repo.cleanup()
     }
   })
+
+  it('串行死循环防护拉黑化：确定性失败卡（ui_check 未配）转 blocked，其余 pending 照常跑完、drain 退出 0', () => {
+    // 回归：旧实现「连续两轮选中同一卡即 die 整批」——一张配错 ui_check 的卡烧掉
+    // 当晚整个 drain/nightly（剩余合法 pending 全部不跑）。对齐并行路径：每任务计数，
+    // 第 2 次选中且仍在 pending 即拉黑转 blocked（附原因，可 resume），继续调度。
+    const repo = mkRepo() // 不配 uiCheckCmd
+    try {
+      // 走正式 submit（建 pending/ 目录 + schema 校验），直写 pending/ 会 ENOENT
+      for (const overrides of [{ id: 'bad-ui', ui_check: true }, { id: 'good-one' }]) {
+        const f = path.join(repo.root, `card-${overrides.id}.md`)
+        fs.writeFileSync(f, cardText(overrides))
+        runOrch(repo.root, `submit "${f}"`)
+      }
+      const r = runOrch(repo.root, 'drain --backend mock')
+      expect(r.status).toBe(0) // 不再 die 整批
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'bad-ui.md'))).toBe(true)
+      // 坏卡原因可 resume：failed 事件留痕带 resume 提示语义
+      const failed = eventsOf(repo.root, 'bad-ui').find((e) => e.type === 'failed') as Record<string, unknown> | undefined
+      expect(String(failed?.reason)).toContain('pending')
+      // 好卡照常闭环（mock 全流程 → awaiting-human / merged）
+      const settled = [
+        ...fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'awaiting-human')),
+        ...fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'merged')),
+      ]
+      expect(settled).toContain('good-one.md')
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
 })
