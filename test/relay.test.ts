@@ -257,35 +257,42 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
     }
   })
 
-  it('⑤ 上游 429 中文额度体识别为 quota 类：不受 failover_status_codes 白名单限制恒可切换', async () => {
+  it('⑤ 上游 429 中文额度体识别为 quota 类：四个中文特征词逐一覆盖，不受 failover_status_codes 白名单限制恒可切换', async () => {
     const h = fakeHome()
     const ok = await startMock()
-    const quota = http.createServer((req, res) => {
-      res.writeHead(429, { 'content-type': 'application/json' })
-      res.end('{"error":{"message":"该模型当前额度已耗尽，请充值后重试"}}')
-    })
-    await new Promise<void>((r) => quota.listen(0, '127.0.0.1', () => r()))
-    const quotaUrl = `http://127.0.0.1:${(quota.address() as AddressInfo).port}`
     try {
-      const cfg = {
-        providers: {
-          a: providerCfg('a', { base_url: quotaUrl }),
-          b: providerCfg('b', { base_url: ok.url }),
-        },
-        profiles: {},
-        harness: {},
-      } as unknown as Config
-      const rt = buildRt(cfg.providers)
-      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
-      // 无 failover_status_codes 配置（switchable=null）：429 本不在白名单，唯有 quota 识别可切换——
-      // 修复前 QUOTA_BODY_RE 只认英文（quota/insufficient），中文额度体不触发、429 原样返回
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
-      expect(result.usedProviderId).toBe('b')
-      expect(result.status).toBe(200)
-      expect(result.reason).toBe('failover_to:b,replayed_from:a')
+      // CORRECT-09 存疑 b（2026-11-03 核实）：QUOTA_BODY_RE 已含中文（额度/配额/余额/欠费，
+      // 2026-11-01 v1.5.2 随 T28 转正一并修复），此处用真实 forwardWithFailover 逐词锁定——
+      // 修复前只认英文（quota/insufficient）会漏判、致使该切换的不切
+      for (const word of ['额度', '配额', '余额', '欠费']) {
+        const quota = http.createServer((req, res) => {
+          res.writeHead(429, { 'content-type': 'application/json' })
+          res.end(`{"error":{"message":"该模型当前${word}已耗尽，请充值后重试"}}`)
+        })
+        await new Promise<void>((r) => quota.listen(0, '127.0.0.1', () => r()))
+        const quotaUrl = `http://127.0.0.1:${(quota.address() as AddressInfo).port}`
+        try {
+          const cfg = {
+            providers: {
+              a: providerCfg('a', { base_url: quotaUrl }),
+              b: providerCfg('b', { base_url: ok.url }),
+            },
+            profiles: {},
+            harness: {},
+          } as unknown as Config
+          const rt = buildRt(cfg.providers)
+          for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+          // 无 failover_status_codes 配置（switchable=null）：429 本不在白名单，唯有 quota 识别可切换
+          const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+          expect(result.usedProviderId).toBe('b')
+          expect(result.status).toBe(200)
+          expect(result.reason).toBe('failover_to:b,replayed_from:a')
+        } finally {
+          quota.close()
+        }
+      }
     } finally {
       await ok.close()
-      quota.close()
       h.restore()
     }
   })

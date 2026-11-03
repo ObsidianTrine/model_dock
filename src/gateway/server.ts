@@ -475,7 +475,7 @@ async function handleRequest(
   res.on('close', () => {
     if (!res.writableEnded) fwdAbort.abort()
   })
-  let result: UpstreamResult & { usedProviderId?: string; reason?: string }
+  let result: UpstreamResult & { usedProviderId?: string; reason?: string; release?: () => void }
   try {
     // 故障切换常开：主候选不可达时按 pickTarget 候选链自动改发（备用链/「下一个切换」钉定），不与「程序自动选主」开关绑定；
     // pickTarget 内部再按 auto_failover 决定定时窗口是否参与选主。候选链只有主服务时行为与直连等价（循环一次）。
@@ -533,6 +533,7 @@ async function handleRequest(
     res.writeHead(result.status, { ...errHeaders, 'content-type': 'application/json' })
     res.end(wrapped)
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: wrapped.slice(0, 200), reason })
+    result.release?.() // 错误回包已发出，释放该候选的并发槽
     return
   }
 
@@ -548,6 +549,9 @@ async function handleRequest(
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage })
   } catch (e) {
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage })
+  } finally {
+    // 流式响应等响应结束（读完/中断）才释放并发槽——响应头到了就放会让 max_concurrency 少算在途流量
+    result.release?.()
   }
   // 当日花费累计（水密舱熔断丝的用量侧）：成功与流中断都算已消耗；无 limits 配置时静默跳过
   recordTokenUsage(rt, target.harness, usage)
