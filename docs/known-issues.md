@@ -427,6 +427,13 @@
 - 备注：纯可读性/覆盖率清理，随手批处理即可。来源：test/coverage-gaps-presets-sync.md 施工发现（「补测后」分支余量即此处）。
 - 已修（2026-10-31）：①升级为真缺陷修复——死臂背后 `±Infinity` 实际能穿透旧守卫（typeof number 且 >0）带着 Inf 元数据进模型目录，改 `typeof === 'number' && Number.isFinite(...) && > 0` 一并拒收（测试补 Infinity 用例）；②已删（Object.assign 对 undefined 源本就是合法空操作）；③留档——守卫承担 cached 闭包变量的 TS 收窄职责，删掉即 possibly-null 编译错，注明后不算死代码。
 
+**CORRECT-12（P3，2026-11-04 夜航基线跑分发现，单次复现未再命中）工作流套件偶发红：cost.test.ts「总账 + byCard」fuel.measured**
+- 现象：test/orchestrator/cost.test.ts:214 `expect(fuel.measured).toBe(true)` 在全量跑分中失败一次（760/761）；同分支单独复跑 13/13 绿、第二次全量 761/761 绿——非确定性，疑似跨文件干扰或负载敏感。
+- 机制排查（2026-11-04 夜航预研时逐路排除）：价目为 opts.table 注入（getPricingTable 首行即返回，不走网络）；写读两侧日切分一致（writeGatewayLog 与 readWindowEntries 同款本地日换算）；能到 `measured:false` 的唯一路径是「时间窗内网关零请求」——即 `gatewayLogsDir` 的 env 优先解析（`MODELRDOCK_FAKE_HOME || MODELRDOCK_HOME` 先于 cfg.gatewayLogDir）在某文件泄漏 env 时读到空日志目录。fakeHome restore 本身对称，泄漏源未锁定。
+- 复现配方：全量 `npx vitest run -c vitest.workflow.config.ts`（串行池，顺序耦合依赖历史时长排序）；失败时从 vitest 报错上下文拿不到 reason，需在用例 finally 前临时打印 `fuel.reason` 或断言 message 定位分支。
+- 影响：CI 与全量门禁偶发假红（`npm run test:workflow`），重跑即绿；不涉产品行为。
+- 处置建议：立卡复现（连续全量跑分采样 + reason 采集），倾向给 measureFuel 测试加 reason 断言或隔离 env 注入路径；修复后回流审查评测考题（测试隔离类）。
+
 ---
 
 ## 四、已核查无问题项汇总（后续审查可跳过）
