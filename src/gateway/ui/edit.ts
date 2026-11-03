@@ -6,6 +6,10 @@
 export const UI_JS_EDIT = `  var editing = null
   var knownModels = {} // 填模型名时自动补上下文/输出的兜底总表（内置小表 ∪ models.dev 目录懒加载）
   var catalogTable = {} // models.dev 目录大表（/_modeldock/model-catalog 懒加载一次，不进 overview 轮询）
+  // PERF-23：弹层行渲染上限——数百模型的供应商一次性 innerHTML 数千节点 + 勾选全表扫。
+  // 初始只渲染前 RENDER_CAP 行，「显示全部」展开；未渲染尾部在 rowsArray/collect 按载入值
+  // 透传（用户看不到的行不丢数据）；搜索 / 全选时自动展开（语义=全表）。
+  var RENDER_CAP = 200
 
   function bindKeyToggle(inputId, btnId, revealSaved) {
     var input = document.getElementById(inputId)
@@ -125,7 +129,8 @@ export const UI_JS_EDIT = `  var editing = null
     var root = document.getElementById(hostId)
     // dirty=用户动过模型目录（增删/改数/拉取填入）；defaultDirty=点过 ★ 或默认行被删。
     // 编辑保存只认 defaultDirty（旧行为）；添加保存认 dirty（未动过就不带 models，保留服务端预设合并+在线拉取）。
-    var st = { defaultModel: '', defaultDirty: false, dirty: false }
+    // modelAll/fetchModels = 渲染上限（RENDER_CAP）下的全量数据；*Expanded=「显示全部」是否已展开。
+    var st = { defaultModel: '', defaultDirty: false, dirty: false, modelAll: [], modelExpanded: false, fetchModels: [], fetchExpanded: false }
     var gid = function (s) { return prefix + s }
     function rowsHost() { return document.getElementById(gid('ModelRows')) }
     function rowHtml(m) {
@@ -140,18 +145,39 @@ export const UI_JS_EDIT = `  var editing = null
         '<input type="checkbox" class="vpick" data-f="vision"' + (vision ? ' checked' : '') + ' title="' + t('该模型支持图片输入（接入客户端会据此声明）', 'This model accepts image input (attached clients are told so)') + '">' +
         '<button class="del" type="button" title="' + t('删除该模型', 'Delete this model') + '">' + icon('close', 12) + '</button></div>'
     }
-    function renderRows(models) {
+    // PERF-23：「显示全部」条同步（零新样式：btn.small + 计数 span；expanded 或总量
+    // 不超上限时隐藏）。span 文案动态置 t()（带总数），语言切换后下一次 sync 刷新。
+    function syncMore(wrapId, nId, expanded, total) {
+      var wrap = document.getElementById(gid(wrapId))
+      if (!wrap) return
+      var need = !expanded && total > RENDER_CAP
+      wrap.hidden = !need
+      if (need) {
+        var n = document.getElementById(gid(nId))
+        if (n) n.textContent = t('已渲染前 ', 'Showing first ') + RENDER_CAP + ' / ' + total + t(' 条', '')
+      }
+    }
+    function renderRows(models, forceAll) {
       var el = rowsHost()
-      if (!models.length) {
+      st.modelAll = models || []
+      if (forceAll) st.modelExpanded = true
+      var total = st.modelAll.length
+      var expanded = st.modelExpanded || total <= RENDER_CAP
+      st.modelExpanded = expanded
+      if (!total) {
         el.innerHTML = '<div class="mempty">' + t('暂无模型。在下方输入模型 ID 添加；保存后即可在「测速」和新建路由时使用。', 'No models yet. Add a model ID below; saved models appear in speed tests and new routes.') + '</div>'
+        syncMore('ModelMoreWrap', 'ModelMoreN', true, 0)
         return
       }
-      el.innerHTML = models.map(rowHtml).join('')
+      el.innerHTML = (expanded ? st.modelAll : st.modelAll.slice(0, RENDER_CAP)).map(rowHtml).join('')
+      syncMore('ModelMoreWrap', 'ModelMoreN', expanded, total)
     }
     function load(models, defaultModel) {
       st.defaultModel = defaultModel || ''
       st.defaultDirty = false
       st.dirty = false
+      st.modelExpanded = false
+      st.fetchExpanded = false
       root.innerHTML = html()
       renderRows(models || [])
       applyI18nTree(root)
@@ -163,16 +189,35 @@ export const UI_JS_EDIT = `  var editing = null
         if (!mid) return
         // 上下文/输出保留输入框原文（可为空字符串），回显原样、保存时才统一解析校验
         // 显示名随行携带：拉取填入等重绘路径把 arr 回传 rowHtml 时副行不丢
-        // row 一并带出：拉取面板比差异时要读同行的视觉勾选态
+        // capabilities 随行带出：差异比较与展开重绘不再回头读 DOM 行（未渲染行无 DOM）
+        var vp = row.querySelector('[data-f="vision"]')
         var sub = row.querySelector('.msub')
         arr.push({
           id: mid,
           context_window: row.querySelector('[data-f="context_window"]').value.trim(),
           max_output: row.querySelector('[data-f="max_output"]').value.trim(),
           display_name: sub ? sub.textContent.trim() : '',
-          row: row,
+          capabilities: vp && vp.checked ? ['vision'] : [],
         })
       })
+      // PERF-23 渲染上限下的未渲染尾部按载入值透传：用户看不到的行不参与编辑、
+      // 不因截断在保存/差异比较时丢数据；展开后回归 DOM 权威
+      if (!st.modelExpanded) {
+        var seen = {}
+        arr.forEach(function (m) { seen[m.id] = true })
+        st.modelAll.forEach(function (m) {
+          if (!seen[m.id]) {
+            seen[m.id] = true
+            arr.push({
+              id: m.id,
+              context_window: m.context_window == null ? '' : m.context_window,
+              max_output: m.max_output == null ? '' : m.max_output,
+              display_name: m.display_name || '',
+              capabilities: m.capabilities || [],
+            })
+          }
+        })
+      }
       return arr
     }
     function collect() {
@@ -195,6 +240,19 @@ export const UI_JS_EDIT = `  var editing = null
         if (dnEl && dnEl.textContent.trim()) rec.display_name = dnEl.textContent.trim()
         out[mid] = rec
       })
+      // PERF-23 渲染上限：未渲染尾部按载入值透传（与 rowsArray 同口径），保存不丢模型；
+      // 尾行用户不可编辑，载入原值即权威
+      if (!st.modelExpanded) {
+        st.modelAll.forEach(function (m) {
+          if (out[m.id]) return
+          var rec = {}
+          if (m.context_window != null) rec.context_window = m.context_window
+          if (m.max_output != null) rec.max_output = m.max_output
+          rec.capabilities = m.capabilities || []
+          if (m.display_name) rec.display_name = m.display_name
+          out[m.id] = rec
+        })
+      }
       // 新增行：仅当输入框里的 id 尚未在列表中时才算新增；
       // 若已存在（含刚点“添加”后输入框残留同一 id 的情况）则跳过，避免误判重复
       var nid = $('#' + gid('NewId')).value.trim()
@@ -226,8 +284,13 @@ export const UI_JS_EDIT = `  var editing = null
       var rows = visibleFetchRows().filter(function (row) { return !row.querySelector('.fpick').disabled })
       var checked = rows.filter(function (row) { return row.querySelector('.fpick').checked })
       document.getElementById(gid('FetchAll')).checked = rows.length > 0 && checked.length === rows.length
+      // PERF-23：已选计数（数百行时勾选状态在滚动区外不可见，给一行可扫读的反馈）
+      var sel = document.getElementById(gid('FetchSel'))
+      if (sel) sel.textContent = checked.length ? t('已选 ', 'Selected ') + checked.length : ''
     }
     function applyFetchFilter() {
+      // 搜索 = 全表语义：截断态下先自动展开再过滤（否则搜不到未渲染尾部的模型）
+      if (!st.fetchExpanded && st.fetchModels.length > RENDER_CAP) renderFetch(st.fetchModels, true)
       var q = document.getElementById(gid('FetchQ')).value.trim().toLowerCase()
       var visible = 0
       Array.prototype.forEach.call(root.querySelectorAll('#' + gid('FetchRows') + ' .frow'), function (row) {
@@ -243,18 +306,24 @@ export const UI_JS_EDIT = `  var editing = null
     }
     // 拉取行与列表已有行的差异判定（口径）：上下文 / 最大输出按值比（都空算相同），
     // 视觉只在「拉取侧有、列表侧没勾」时算差异——上游多数不报能力，不能反推要清空用户已勾的。
+    // （capabilities 读自 rowsArray 富化行：未渲染尾部无 DOM 行，状态随数据走）
     function diffRow(ex, m, vision) {
       var cw = m.context_window == null ? '' : String(m.context_window)
       var mo = m.max_output == null ? '' : String(m.max_output)
       if (String(ex.context_window || '') !== cw || String(ex.max_output || '') !== mo) return true
-      var vp = ex.row.querySelector('[data-f="vision"]')
-      return !!vision && !(vp && vp.checked)
+      return !!vision && (ex.capabilities || []).indexOf('vision') < 0
     }
-    function renderFetch(models) {
+    function renderFetch(models, forceAll) {
       var have = {}
       rowsArray().forEach(function (m) { have[m.id] = m })
+      var all = models || []
+      st.fetchModels = all
+      if (forceAll) st.fetchExpanded = true
+      var expanded = st.fetchExpanded || all.length <= RENDER_CAP
+      st.fetchExpanded = expanded
+      var shown = expanded ? all : all.slice(0, RENDER_CAP)
       var pickable = 0
-      var rows = (models || []).map(function (m) {
+      var rows = shown.map(function (m) {
         var ex = have[m.id]
         // 三态：新条目=默认勾选；已有且参数一致=「已有」禁用；已有但参数不同=「可更新」默认勾选
         var diff = ex ? diffRow(ex, m) : false
@@ -274,7 +343,8 @@ export const UI_JS_EDIT = `  var editing = null
           '<span class="ftag">' + (same ? t('已有', 'exists') : diff ? t('可更新', 'update') : '') + '</span></div>'
       }).join('')
       document.getElementById(gid('FetchRows')).innerHTML = rows || '<div class="mempty">' + t('未拉取到模型', 'No models fetched') + '</div>'
-      document.getElementById(gid('FetchAll')).checked = pickable > 0 && pickable === (models || []).length
+      document.getElementById(gid('FetchAll')).checked = pickable > 0 && pickable === shown.length
+      syncMore('FetchMoreWrap', 'FetchMoreN', expanded, all.length)
     }
     // 填入语义：列表里没有的模型追加；已有的按拉取到的参数就地更新（勾选行即权威值，
     // 视觉列在行内可改；留空表示不覆盖，避免上游没给值时清掉用户手填的数字）
@@ -357,6 +427,7 @@ export const UI_JS_EDIT = `  var editing = null
         '<div class="mtable">' +
         '<div class="mhead"><span class="defcol" title="设为默认">' + icon('star', 11) + '</span><span data-i18n="模型 ID||Model ID">模型 ID</span><span data-i18n="上下文||Context">上下文</span><span data-i18n="最大输出||Max output">最大输出</span><span class="vcol" data-i18n="视觉||Vision">视觉</span><span></span></div>' +
         '<div id="' + gid('ModelRows') + '"></div>' +
+        '<div id="' + gid('ModelMoreWrap') + '" hidden><button class="btn small" type="button" id="' + gid('ModelMore') + '" data-i18n="显示全部||Show all">显示全部</button> <span id="' + gid('ModelMoreN') + '"></span></div>' +
         '<div class="addrow">' +
         '<span class="def-slot"></span>' +
         '<input type="text" id="' + gid('NewId') + '" data-i18n-ph="新模型 ID，如 deepseek-flash||new model ID, e.g. deepseek-flash" placeholder="新模型 ID，如 deepseek-flash">' +
@@ -369,10 +440,12 @@ export const UI_JS_EDIT = `  var editing = null
         '<div class="fetchpanel" id="' + gid('FetchPanel') + '" hidden>' +
         '<div class="fsearch">' +
         '<input type="text" class="fetchq" id="' + gid('FetchQ') + '" data-i18n-ph="搜索模型 ID，如 claude / deepseek…||Search model ID, e.g. claude / deepseek…" placeholder="搜索模型 ID，如 claude / deepseek…">' +
-        '<span class="fetchcount" id="' + gid('FetchCount') + '"></span></div>' +
+        '<span class="fetchcount" id="' + gid('FetchCount') + '"></span>' +
+        '<span class="fetchcount" id="' + gid('FetchSel') + '"></span></div>' +
         '<div class="mhead"><input type="checkbox" id="' + gid('FetchAll') + '" data-i18n-title="全选 / 全不选（仅作用于当前可见行）||Select all / none (visible rows only)" title="全选 / 全不选（仅作用于当前可见行）"><span data-i18n="拉取到的模型（勾选后填入）||Fetched models (tick to fill in)">拉取到的模型（勾选后填入）</span><span data-i18n="上下文||Context">上下文</span><span data-i18n="最大输出||Max output">最大输出</span><span class="vcol" data-i18n="视觉||Vision">视觉</span><span></span></div>' +
         '<div id="' + gid('FetchRows') + '"></div>' +
         '<div class="mempty" id="' + gid('FetchEmpty') + '" data-i18n="没有匹配的模型||No matching models" hidden>没有匹配的模型</div>' +
+        '<div id="' + gid('FetchMoreWrap') + '" hidden><button class="btn small" type="button" id="' + gid('FetchMore') + '" data-i18n="显示全部||Show all">显示全部</button> <span id="' + gid('FetchMoreN') + '"></span></div>' +
         '<div class="factions">' +
         '<span class="fetchmsg" id="' + gid('FetchMsg') + '"></span>' +
         '<button class="btn small" type="button" id="' + gid('FetchHide') + '" data-i18n="收起||Hide">收起</button>' +
@@ -395,6 +468,14 @@ export const UI_JS_EDIT = `  var editing = null
         var r = delBtn.closest('.mrow'); if (!r) return
         // 删除的是默认模型 → 默认自动改为剩余第一行
         var wasDefault = !!st.defaultModel && r.querySelector('.def') && r.querySelector('.def').getAttribute('data-mid') === st.defaultModel
+        // PERF-23：同步清 st.modelAll，防未渲染尾部透传时把已删行复活
+        var delMid = r.querySelector('.mid')
+        if (delMid) {
+          var delId = delMid.textContent.trim()
+          for (var di = st.modelAll.length - 1; di >= 0; di--) {
+            if (st.modelAll[di].id === delId) { st.modelAll.splice(di, 1); break }
+          }
+        }
         r.remove()
         if (wasDefault) {
           var firstMid = rowsHost().querySelector('.mrow .mid')
@@ -432,6 +513,10 @@ export const UI_JS_EDIT = `  var editing = null
       if (tg.id === gid('Fetch')) { doFetch(tg); return }
       if (tg.id === gid('FetchHide')) { document.getElementById(gid('FetchPanel')).hidden = true; return }
       if (tg.id === gid('FetchFill')) { fillSelected(); return }
+      // PERF-23「显示全部」：展开前先收割 DOM 当前编辑态（rowsArray 已含未渲染尾部），
+      // 全量重绘不丢用户已改的数字/勾选
+      if (tg.id === gid('ModelMore')) { renderRows(rowsArray(), true); return }
+      if (tg.id === gid('FetchMore')) { renderFetch(st.fetchModels, true); return }
     })
     // 输模型名：从已知模型表自动补上下文 / 输出（仅在对应框为空时填充，不覆盖手输）
     root.addEventListener('input', function (e) {
@@ -460,6 +545,8 @@ export const UI_JS_EDIT = `  var editing = null
       //（否则搜索后点全选会把藏在过滤外的模型一并选进去），行勾选变化时回写表头状态
       if (tg.classList.contains('fpick')) { syncFetchAll(); return }
       if (tg.id === gid('FetchAll')) {
+        // 全选 = 全表语义：截断态下先自动展开（否则「全选」只作用于渲染出来的前 N 行）
+        if (!st.fetchExpanded && st.fetchModels.length > RENDER_CAP) renderFetch(st.fetchModels, true)
         var on = tg.checked
         visibleFetchRows().forEach(function (row) {
           var cb = row.querySelector('.fpick')
