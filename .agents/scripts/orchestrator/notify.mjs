@@ -1,9 +1,12 @@
 // notify.mjs — nightly 结果通知（可观测性补口）：巡检跑完/跑挂只有日志文件等于没跑。
-// 两个通道，全部尽力而为（失败静默，通知绝不影响编排本身）：
+// 通道清单，全部尽力而为（失败静默，通知绝不影响编排本身）：
 //   1. webhook 环境变量：fetch POST JSON（企业微信/飞书/Slack 的 incoming webhook
 //      均可接一层适配；本层只管发 {title, body, ts}）。变量名 ${envPrefix}_NIGHTLY_WEBHOOK
 //      （envPrefix 来自 workflow.json，默认 AGENTS）；旧项目名 MODELRDOCK_NIGHTLY_WEBHOOK 永远兼容
 //   2. macOS 本地通知：osascript display notification（无依赖，登录会话可见）
+//   3. 双向批示卡片（可选，notify.cardWebhook 开启才发）：需要人工动作的落位事件在
+//      文本通知之外额外 POST 一张飞书交互卡片（approve/reject 按钮回调 approval-listener），
+//      见 buildInteractiveCard / notifyActionCard
 // dryRun 模式返回将执行的命令/payload 不发送（测试用）。
 
 import { spawnSync } from 'node:child_process';
@@ -228,4 +231,90 @@ export async function notify(opts = {}) {
     }
   }
   return { delivered };
+}
+
+// ---------------------------------------------------------------------------
+// 双向批示卡片（notify.cardWebhook 开启才发；飞书 interactive 卡 + approval-listener 回流）。
+// 文本通知（上方 notify()）永远是主通道——卡片是叠加层，只给「能点按钮」的飞书群。
+// ---------------------------------------------------------------------------
+
+/** 批示动作的按钮文案与飞书配色（approve/reject 按钮进卡；retry 由监听器白名单支持，卡面按需带出）。 */
+const CARD_ACTION_BUTTONS = {
+  approve: { text: '✅ 批准合并', type: 'primary' },
+  reject: { text: '❌ 驳回', type: 'danger' },
+  retry: { text: '🔁 打回重跑', type: 'default' },
+};
+
+/**
+ * 构造飞书交互卡片（纯函数，不发网）：header 标题 + lark_md 摘要 + 按钮行。
+ * actions 为白名单子集（approve/reject/retry），按钮 value 携带 { task, action }——
+ * 飞书回调原样回传，approval-listener 靠它路由到 orchestrator approve/reject/retry。
+ * taskId 为空（fleet 级事件如 weather_hold，没有可批示的单卡）不出按钮行，纯信息卡。
+ * 返回 JSON 字符串（msg_type: interactive），调用方直接作 POST body。
+ */
+export function buildInteractiveCard({ title, taskId, reason, actions = ['approve', 'reject'] } = {}) {
+  const mdLines = [];
+  if (taskId) mdLines.push(`**任务：${taskId}**`);
+  if (reason) mdLines.push(String(reason).slice(0, 300));
+  const elements = [];
+  if (mdLines.length) {
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: mdLines.join('\n') } });
+  }
+  const buttons = (Array.isArray(actions) ? actions : []).filter((a) => CARD_ACTION_BUTTONS[a] && taskId);
+  if (buttons.length) {
+    elements.push({ tag: 'hr' });
+    elements.push({
+      tag: 'action',
+      actions: buttons.map((a) => ({
+        tag: 'button',
+        text: { tag: 'plain_text', content: CARD_ACTION_BUTTONS[a].text },
+        type: CARD_ACTION_BUTTONS[a].type,
+        value: { task: String(taskId), action: a },
+      })),
+    });
+  }
+  return JSON.stringify({
+    msg_type: 'interactive',
+    card: {
+      config: { wide_screen_mode: true },
+      header: { template: 'orange', title: { tag: 'plain_text', content: String(title ?? '任务通报') } },
+      elements,
+    },
+  });
+}
+
+/** 飞书 incoming webhook 域名判定（与 webhookPayload 的三家识别同口径）：交互卡片只有
+ *  飞书格式实现了回流闭环，企业微信/Slack 端点跳过发卡（文本通知照旧，不发废格式）。 */
+export function isFeishuWebhook(webhook) {
+  return /open\.feishu\.cn|open\.larksuite\.com/i.test(String(webhook ?? ''));
+}
+
+/**
+ * 双向批示卡片通道：对需要人工动作的落位/滞留事件，在 notify() 文本通知之外**额外**
+ * POST 一张飞书交互卡片。前置三道闸：notify.cardWebhook 显式开启（缺省 false =
+ * 完全不发，缺省行为零变化）→ webhook URL 经既有解析链可得（env 优先，darwin 钥匙串
+ * 兜底，与 notify() 同源）→ 端点是飞书。三道任一不过即静默返回 { sent: false }，
+ * 通知绝不影响编排。dryRun 不发网，返回将发送的 payload（测试用）。
+ */
+export async function notifyActionCard({ repoRoot, webhookEnvs, taskId, reason, title, dryRun = false } = {}) {
+  const cardWebhook = loadWorkflowConfig(repoRoot)?.notify?.cardWebhook === true;
+  if (!cardWebhook) return { sent: false };
+  let webhook = (Array.isArray(webhookEnvs) ? webhookEnvs : []).map((n) => process.env[n]).find(Boolean);
+  if (!webhook && process.platform === 'darwin') webhook = keychainWebhook(repoRoot);
+  if (!webhook || !isFeishuWebhook(webhook)) return { sent: false };
+  const payload = buildInteractiveCard({ title, taskId, reason });
+  if (dryRun) return { sent: false, dryRun: true, payload, webhook };
+  try {
+    const res = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return { sent: true };
+  } catch {
+    // 通道故障不阻断编排（与 notify() 同哲学）：文本通知已在，卡片尽力而为
+    return { sent: false };
+  }
 }

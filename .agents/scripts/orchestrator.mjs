@@ -59,7 +59,7 @@ import { readNightlyState, writeNightlyState, decideNightlyStart } from './orche
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
-import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs } from './orchestrator/notify.mjs';
+import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
@@ -128,6 +128,10 @@ function cardGoalLine(repoRoot, taskId) {
  * 为什么（卡目标）/ 成果（worker 交付摘要）/ 过程（事件流阶段链）/ 结果（落位理由），
  * 夜跑无人值守时手机可扫读。尽力而为——webhook 未配置时零开销，通道失败静默，
  * 绝不影响编排本身。
+ * 双向批示：需要人工动作的落位（awaiting-human=人工合并闸门；blocked 含预算熔断/
+ * 看门狗等 circuit_breaker 落位）在文本通知外叠加一张飞书交互卡片（approve/reject
+ * 按钮，回调 approval-listener）——notify.cardWebhook 未开启（缺省）时 notifyActionCard
+ * 内部直接短路，零开销零行为变化。
  */
 async function settleNotify(repoRoot, taskId, state, reason) {
   try {
@@ -139,6 +143,15 @@ async function settleNotify(repoRoot, taskId, state, reason) {
       body: buildTaskDigest({ taskId, state, reason, why: cardGoalLine(repoRoot, taskId), events }),
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
+    if (state === 'awaiting-human' || state === 'blocked') {
+      await notifyActionCard({
+        repoRoot,
+        webhookEnvs: orchWebhookEnvs(repoRoot),
+        taskId,
+        title: `${displayProjectName(cfg.projectName ?? '')} 待批示`,
+        reason: `${taskStateTag(state)}${reason ? `：${String(reason).slice(0, 200)}` : ''}`,
+      });
+    }
   } catch { /* 通知失败不阻断编排 */ }
 }
 
@@ -1635,6 +1648,15 @@ function announceWeatherHold(repoRoot, cfg, w) {
     body: `${reason}，已暂停派发任务；窗口滑过后自动恢复。`,
     webhookEnvs: orchWebhookEnvs(repoRoot),
   }).catch(() => { /* 通知失败不阻断 */ });
+  // 双向批示叠加卡：weather_hold 是 fleet 级事件，没有可批示的单卡 → 纯信息卡
+  // （不出按钮行）；notify.cardWebhook 未开启（缺省）时内部短路，零开销。
+  void notifyActionCard({
+    repoRoot,
+    webhookEnvs: orchWebhookEnvs(repoRoot),
+    taskId: null,
+    title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 风暴滞留`,
+    reason: `${reason}，已暂停派发任务；窗口滑过后自动恢复。`,
+  }).catch(() => { /* 卡片失败不阻断 */ });
 }
 
 /** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」
