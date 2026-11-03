@@ -83,6 +83,22 @@
     "enabled": true,
     "fallbackBackend": "claude-headless"
   },
+  "weatherHold": {
+    "enabled": true,
+    "threshold": 3,
+    "windowMinutes": 60,
+    "upstream": {
+      "source": "metrics",
+      "threshold": 5,
+      "windowMinutes": 60
+    }
+  },
+  "dynamicDispatch": {
+    "enabled": true,
+    "envelope": [
+      "zcode-headless"
+    ]
+  },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",
   "notify": {
     "keychainService": "modeldock-orch-feishu-webhook"
