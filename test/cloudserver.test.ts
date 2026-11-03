@@ -294,3 +294,19 @@ describe('云端畸形输入面（2026-10 复审 P2）', () => {
     }
   })
 })
+
+describe('云端控制台页安全头', () => {
+  it('GET / 页面带 content-security-policy，与 gateway 控制台同款（公网暴露面的纵深防御）', async () => {
+    const s = await startServer()
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.port}/`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toContain('text/html')
+      const csp = res.headers.get('content-security-policy')
+      expect(csp).toBeTruthy()
+      expect(csp).toBe((await import('../src/gateway/console-shared.js')).CONSOLE_CSP)
+    } finally {
+      await s.close()
+    }
+  })
+})
