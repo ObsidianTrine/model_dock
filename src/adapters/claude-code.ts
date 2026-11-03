@@ -295,12 +295,14 @@ export const claudeCodeAdapter: HarnessAdapter = {
       if (opts.fromMode === 'direct' || (prevBase && !isOursGatewayUrl(prevBase, 'claude-code', _cfg))) {
         if (!opts.takeoverModels) {
           delete env.ANTHROPIC_MODEL
-          delete env.ANTHROPIC_SMALL_FAST_MODEL
           for (const [envKey] of TIER_ENV_KEYS) {
             delete env[envKey]
             delete env[`${envKey}_NAME`]
           }
         }
+        // SMALL_FAST_MODEL 不在迁移范围内（迁移块只收 ANTHROPIC_MODEL / DEFAULT_*），守卫外清，
+        // 与直连分支同规——否则 --takeover-models 路径残留旧钉死键
+        delete env.ANTHROPIC_SMALL_FAST_MODEL
         delete env.CLAUDE_CODE_SUBAGENT_MODEL
         delete env.CLAUDE_CODE_EFFORT_LEVEL
         delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
