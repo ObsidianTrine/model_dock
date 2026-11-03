@@ -1702,7 +1702,7 @@ async function cmdDrain(repoRoot, opts) {
     if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers, cfg);
     const max = Number.isInteger(opts.max) && opts.max > 0 ? opts.max : Infinity;
     let done = 0;
-    let lastTried = null;
+    const tryCount = new Map(); // id -> 被选中次数（死循环防护：对齐并行路径的每任务重试计数）
     const tally = {};
     const tasks = []; // 本轮落位花名册（收官摘要按任务号列「做了哪些任务」）
     // 引水闸跳过清单：受限航道卡（deps/核心·发布路径）不派发，留在 pending/ 等人工
@@ -1745,12 +1745,22 @@ const next = pickNextCard(root, { skipIds });
         log(`⏸ 任务 ${next.id} 属受限航道（${pilotageReason(next.meta, cfg)}）——待引水确认，本轮跳过。`);
         continue;
       }
-      // 死循环防护：run 子进程正常时任务必离开 pending（merged/awaiting-human/blocked/failed）。
-      // 连续两轮选中同一任务 = 子进程根本没能处理它（执行环境损坏/脚本缺失），立即停止而不是烧下去。
-      if (next.id === lastTried) {
-        die(`任务 "${next.id}" 连续两轮仍在 pending——run 子进程未能处理它（检查 repoRoot/.agents/scripts 是否完整、node 是否可用）。已停止 drain 以防空转。`, 1);
+      // 死循环防护（每任务计数，对齐并行路径的拉黑语义）：run 子进程正常时任务必离开
+      // pending（merged/awaiting-human/blocked/failed）。同一任务第二次被选中且仍在 pending
+      // = 子进程确定性失败（ui_check 未配、引擎切换未批准、脚本损坏等）——转 blocked/ 附原因
+      // 后继续调度剩余卡。旧实现 die 整批：一张配错 ui_check 的卡让当晚 drain/nightly 整批
+      // 中断，剩余合法 pending 全部不跑，且 die 文案（「检查 scripts 是否完整」）误导排查方向。
+      tryCount.set(next.id, (tryCount.get(next.id) ?? 0) + 1);
+      if (tryCount.get(next.id) >= 2) {
+        const reason = 'drain 连续 2 轮选中仍在 pending——run 子进程未能处理它（常见：卡声明 ui_check 但 workflow.json 未配 uiCheckCmd、执行引擎切换未获批准；可用 resume 带上修复指令续做）';
+        log(`⛔ 任务 ${next.id} 拉黑：${reason.split('——')[0]}——转 blocked/，继续调度剩余卡。`);
+        appendEvent(logDir(repoRoot, next.id), 'failed', { reason });
+        moveCard(root, next.id, 'pending', 'blocked');
+        tally.blocked = (tally.blocked ?? 0) + 1;
+        tasks.push({ id: next.id, state: 'blocked' });
+        await settleNotify(repoRoot, next.id, 'blocked', reason);
+        continue;
       }
-      lastTried = next.id;
       log(`\n═══ drain [${done + 1}] → ${next.id}（priority=${next.meta.priority}）═══`);
       // 父进程选好 id 显式传给子进程（确定性）；子进程内再调 --next 反而有窗口期竞态
       const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'run', next.id, ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
