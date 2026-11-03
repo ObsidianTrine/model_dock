@@ -5,9 +5,12 @@
 // blocked。识别签名取自上游 429 限流体与 Node 网络错误码。
 // 仅在「worker 异常结束（无结果块）」时参与判定——正常产出的结果块不做二次猜测。
 
-/** 瞬时故障签名：限流（429/rate limit/overloaded）与网络层错误（连接重置/超时/挂起）。 */
+/** 瞬时故障签名：限流（429/rate limit/overloaded）与网络层错误（连接重置/超时/挂起）、
+ *  zcode CLI 的 ERA 连接协商失败（2026-11-03 航行实证：negotiateEra 崩溃间歇性发生、
+ *  同环境随后会话可正常连接——重试可自愈，不进签名则重试/自动续/风暴闸全部失明）。
+ *  ERA 两分支只带前导 \b：ERA_NEGOTIATION_FAILED 的尾随 _FAILED 会让尾部 \b 失配。 */
 export const TRANSIENT_RE =
-  /\b(429|rate.?limit|too many requests|overloaded|overloaded_error|capacity|service unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|UND_ERR|socket hang up|fetch failed)\b/i;
+  /\b(429|rate.?limit|too many requests|overloaded|overloaded_error|capacity|service unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|UND_ERR|socket hang up|fetch failed)\b|\bera[_-]?negotiation|\bnegotiate[_-]?era/i;
 
 /**
  * 判定 worker 异常结束是否疑似瞬时故障（可退避重试自愈）。
