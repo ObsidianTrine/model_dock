@@ -3402,9 +3402,10 @@ function cmdSchedule(repoRoot, sub, opts) {
       dryRun: opts.flags?.has('--dry-run'),
     });
     if (r.dryRun) {
-      log(`[dry-run] 未触碰系统调度。计划：`);
+      log(`[dry-run] 未触碰系统调度、未写任何文件。计划：`);
       log(`  ${r.plan}`);
-      log(`  wrapper 已写入: ${r.runner}`);
+      log(`  wrapper 将写入（dry-run 未落盘）: ${r.runner}`);
+      for (const line of (r.wrapper ?? '').split('\n')) log(`  | ${line}`);
       return;
     }
     log(

@@ -240,14 +240,14 @@ export function validHourMinute(hour, minute) {
 /**
  * 安装调度。opts: { mode: 'nightly'|'watch'|'sail', hour, minute, tests, auto, interval, minutes, duration, backend, dryRun }
  * mode=sail 时 minutes/duration 必填其一（sailDurationArgs 校验，缺失/非法抛错、不写任何文件）。
- * dryRun：写 runner（仓库内无害产物）并打印将执行的注册命令，不触碰系统调度。
+ * dryRun：零落盘——只打印注册计划与 wrapper 预览（wrapper 是已装调度的在线文件，dry-run
+ * 覆写它=静默改真实行为，CORRECT-13，2026-11-04 夜航实锤），不触碰系统调度。
  */
 export function installSchedule(repoRoot, opts = {}) {
   const hour = opts.hour ?? 2;
   const minute = opts.minute ?? 30;
   if (!validHourMinute(hour, minute)) throw new Error(`调度时刻不合法：hour=${hour} minute=${minute}（hour 0-23、minute 0-59）`);
   const args = nightlyArgs(opts);
-  writeRunner(repoRoot, args);
 
   const plat = process.platform;
   const when = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -258,8 +258,10 @@ export function installSchedule(repoRoot, opts = {}) {
         : plat === 'win32'
           ? `schtasks ${buildSchtasksCreateArgs(repoRoot, { hour, minute }).join(' ')}`
           : `crontab 追加标记段（每天 ${when}）：\n${buildCronBlock(repoRoot, { hour, minute })}`;
-    return { dryRun: true, runner: runnerPath(repoRoot), plan };
+    const wrapper = plat === 'win32' ? buildRunnerWin(repoRoot, process.execPath, args) : buildRunnerUnix(repoRoot, process.execPath, args);
+    return { dryRun: true, runner: runnerPath(repoRoot), plan, wrapper };
   }
+  writeRunner(repoRoot, args);
 
   if (plat === 'darwin') {
     fs.mkdirSync(path.dirname(plistPath(repoRoot)), { recursive: true });
