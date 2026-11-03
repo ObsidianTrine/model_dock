@@ -477,8 +477,12 @@ describe('approval listener > HTTP 层', () => {
       expect(ok.status).toBe(200)
       expect(JSON.stringify(await ok.json())).toContain('✅ 已批准合并 real-task')
       const audit = readAudit(h.auditPath)
-      expect(audit).toHaveLength(1)
-      expect(audit[0]).toMatchObject({ task: 'real-task', action: 'approve', result: 'ok' })
+      // C13：token 不匹配的未授权访问尝试也落审计（只记事实不记 token 值）——
+      // 403 那笔在前（rejected/mismatch），合法批准在后
+      expect(audit).toHaveLength(2)
+      expect(audit[0]).toMatchObject({ result: 'rejected', detail: 'verification_token_mismatch' })
+      expect(JSON.stringify(audit[0])).not.toContain('nope')
+      expect(audit[1]).toMatchObject({ task: 'real-task', action: 'approve', result: 'ok' })
     } finally {
       delete process.env.AGENTS_LARK_VERIFICATION_TOKEN
       await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -512,9 +516,9 @@ describe('approval listener > resolveNotify 扩展', () => {
     const bad = mkRepo({ notify: { cardWebhook: 'yes', listenerPort: -1 } })
     try {
       const cfg = loadWorkflowConfig(repo.root)
-      expect(cfg.notify).toEqual({ keychainService: 'svc', cardWebhook: true, listenerPort: 18990 })
+      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990 })
       const cfgBad = loadWorkflowConfig(bad.root)
-      expect(cfgBad.notify).toEqual({ keychainService: null, cardWebhook: false, listenerPort: null })
+      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null })
       expect(warnings.some((w) => w.includes('notify'))).toBe(true)
     } finally {
       console.warn = warn

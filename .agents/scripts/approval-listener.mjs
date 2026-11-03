@@ -111,7 +111,7 @@ export function successReply(action, task, reason) {
  * 生成回调处理器（依赖注入便于单测：spawnFn/now 可替换，auditPath 指向临时目录）。
  * 返回 async (body, ip) => { status, body }。处理序：
  *   url_verification 直接回显 challenge（仅回显无副作用，无动作风险）
- *   → 验签（失败 403，不审计不记日志——token 不落任何盘）
+ *   → 验签（失败 403；token 不匹配的尝试落审计只记事实不记 token 值——token 本身不落任何盘）
  *   → 提取动作 → 白名单 → 幂等窗口 → spawn orchestrator → 审计 → toast 回复。
  */
 export function makeHandler({ repoRoot, scriptPath, spawnFn, auditPath, now = Date.now } = {}) {
