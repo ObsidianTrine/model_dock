@@ -106,7 +106,8 @@
   "dynamicDispatch": {
     "enabled": true,
     "envelope": [
-      "zcode-headless"
+      "zcode-headless",
+      "claude-headless"
     ]
   },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",
