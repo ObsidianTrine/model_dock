@@ -55,7 +55,8 @@ export default defineConfig({
     isolate: false,
     maxWorkers: 1,
     reporters: ['default', './test/vitest-watchdog.mjs'],
-    ...(watchdog ? { setupFiles: ['./test/watchdog-heartbeat.mjs'] } : {}),
+    // 常开 setup：sync 域 PBKDF2 测试降迭代（test/setup-fast-kdf.ts 头注有依据与还原方式）
+    setupFiles: ['./test/setup-fast-kdf.ts', ...(watchdog ? (['./test/watchdog-heartbeat.mjs'] as string[]) : [])],
     silent: 'passed-only',
     teardownTimeout: 5000
   }

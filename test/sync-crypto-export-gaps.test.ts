@@ -6,8 +6,10 @@ import {
   deriveSyncKeys,
   openEnvelope,
   openWithKeys,
+  pbkdf2IterCurrent,
   sealEnvelope,
   sealWithKeys,
+  setPbkdf2IterForTests,
   verifyHmacWithKeys,
   type SyncKeys,
 } from '../src/sync/crypto.js'
@@ -108,6 +110,27 @@ describe('openEnvelope 错误分支（缺口补齐）', () => {
     const env = sealWithKeys(doc, keys)
     expect(() => verifyHmacWithKeys(doc, { ...env, hmac: 'AAAA' }, keys.macKey)).toThrow(/完整性校验失败|integrity check failed/)
     expect(() => verifyHmacWithKeys(doc, env, keys.macKey)).not.toThrow()
+  })
+})
+
+describe('信封 kdf.iter 回读（openEnvelope 按信封值派生）', () => {
+  it('跨全局值解包：seal 用 2000 轮，open 时全局已切走仍成功——open 读信封 iter 而非当前全局值', () => {
+    const prev = pbkdf2IterCurrent()
+    try {
+      setPbkdf2IterForTests(2000)
+      const env = sealEnvelope(sampleDoc(), 'pw-iter')
+      setPbkdf2IterForTests(1000)
+      expect(openEnvelope(env, 'pw-iter').fmt).toBe(SYNCDOC_FMT)
+    } finally {
+      setPbkdf2IterForTests(prev)
+    }
+  })
+
+  it('信封 kdf.iter 被篡改：按篡改值派生 → verifier 不匹配 → 报「口令不正确」（iter 真实参与派生）', () => {
+    const env = sealEnvelope(sampleDoc(), 'pw-iter')
+    const other = env.kdf.iter === 1000 ? 999 : 1000
+    const tampered = { ...env, kdf: { ...env.kdf, iter: other } }
+    expect(() => openEnvelope(tampered, 'pw-iter')).toThrow(/口令不正确|Incorrect passphrase/)
   })
 })
 
