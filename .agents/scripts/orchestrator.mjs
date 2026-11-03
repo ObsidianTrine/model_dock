@@ -50,6 +50,7 @@ import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
 import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstreamSeaState } from './orchestrator/reconcile.mjs';
 import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
+import { observeFleetForRun } from './orchestrator/fleet.mjs';
 import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
@@ -404,6 +405,13 @@ async function cmdRun(repoRoot, taskId, opts) {
     if (!v.ok) log(`⚠ tier 目录校验：${v.reason}${v.missing?.length ? `（${v.missing.join(', ')}）` : ''}——继续派发，留意网关模型报错`);
   }
   const tierEnv = tierEnvPatch(tier);
+
+  // ---- 开航前海况观测（fleet observe，纯观测零决策，2026-11-03 船东定案阶段 1）----
+  // 拉网关接入态/熔断写事件线并告警（船绕狗粮、服务熔断在起跑前可见）。只观测不决策：
+  // 选船仍走既有静态规则，观测缺席绝不阻断派发（gatewayAdmin 未开 = 完全静默，行为不变）。
+  const fleet = await observeFleetForRun(cfg, { backend: opts.backend });
+  for (const line of fleet.lines) log(line);
+  if (fleet.event) appendEvent(qdir, 'fleet_observed', fleet.event);
 
   // reviewing 也算恢复场景（2026-10-31 卡 19）：审查阶段硬崩的卡，此前唯一程序化
   // 出口是 abandon 强制落 failed；TRANSITIONS 本就允许 reviewing→running，run/resume

@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { gatewayLogsDir, readGatewayLog } from './reconcile.mjs';
 import { logDir, readEvents } from './events.mjs';
-import { discoverGatewayState } from './tiers.mjs';
+import { resolveGatewayAdmin } from './tiers.mjs';
 
 /** 单价 × 单请求 token 分桶 → USD。price 单位 USD/百万 token；usage 为网关日志四桶原始计数。 */
 export function costOfUsage(u, price) {
@@ -103,24 +103,16 @@ export async function getPricingTable(repoRoot, cfg, pairs, opts = {}) {
   if (cfg?.gatewayAdmin !== true) {
     return { mode: 'unavailable', reason: 'workflow.json 未开启 gatewayAdmin（价目走网关 admin 面），成本核算不可用', table: new Map() };
   }
-  let gwBase = process.env.ORCH_GATEWAY_BASE ?? '';
-  let gwAdmin = process.env.ORCH_GATEWAY_ADMIN_TOKEN ?? '';
-  if (!gwBase || !gwAdmin) {
-    const d = discoverGatewayState();
-    if (d) {
-      gwBase = gwBase || `http://127.0.0.1:${d.port}`;
-      gwAdmin = gwAdmin || d.adminToken;
-    }
-  }
-  if (!gwBase || !/^https?:\/\//.test(gwBase) || !gwAdmin) {
+  const adm = resolveGatewayAdmin(cfg);
+  if (!adm) {
     const cached = readPricingCache(repoRoot);
     if (cached) return { mode: 'cache', table: new Map(Object.entries(cached.prices)), fetchedAt: cached.fetchedAt };
     return { mode: 'unavailable', reason: '未发现网关（gateway.json 缺失或 ORCH_GATEWAY_* 未配置），且无本地价目缓存', table: new Map() };
   }
   try {
-    const res = await fetch(`${gwBase.replace(/\/+$/, '')}/_modeldock/pricing-lookup`, {
+    const res = await fetch(`${adm.base}/_modeldock/pricing-lookup`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-modeldock-admin': gwAdmin },
+      headers: { 'content-type': 'application/json', 'x-modeldock-admin': adm.adminToken },
       body: JSON.stringify({ models: wanted }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 4000),
     });
