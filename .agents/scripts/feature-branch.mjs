@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { appendEvent, logDir } from './orchestrator/events.mjs';
 import { ensureQueue, findCard, moveCard, queueRoot } from './orchestrator/queue.mjs';
 import { acquireTaskLock, readTaskLock, releaseTaskLock } from './orchestrator/task-lock.mjs';
+import { runCmd } from './orchestrator/gates.mjs';
 
 // Repo root: ask git for the COMMON .git dir first — `git rev-parse --git-common-dir`
 // points at the main repo's .git even when this script is invoked from inside a linked
@@ -157,6 +158,17 @@ function finishLockWaitCapSeconds() {
   if (raw === undefined || raw.trim() === '') return 300;
   const n = Number.parseInt(raw, 10);
   return Number.isInteger(n) && n >= 0 ? n : 300;
+}
+
+// 单条验证命令的超时上限（对齐 orchestrator 门禁的 runCmd 20min 口径）。测试可经环境
+// 收缩；超时按进程树终止（runCmd：unix detached 进程组 kill(-pid)，win32 taskkill /T /F）
+// ——旧实现 spawnSync timeout 只杀 shell 直接子进程，vitest/node 孙进程树全部孤儿化，
+// Windows 上锁住 worktree 句柄令随后的清理 rename 报 EBUSY/EPERM（P0 修复，2026-11）。
+function finishTestTimeoutMs() {
+  const raw = process.env.FINISH_TESTCMD_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '') return 20 * 60_000;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : 20 * 60_000;
 }
 
 // Atomics.wait keeps libuv's thread pool (async log flushes etc.) running while
@@ -446,7 +458,7 @@ function claimCardFor(taskId) {
   const lock = acquireTaskLock(REPO_ROOT, taskId, `feature-branch start ${taskId}`);
   if (!lock.held) {
     const owner = lock.owner ?? {};
-    die(`task "${taskId}" is already claimed (lock holder pid ${owner.pid}${owner.cmd ? `, ${owner.cmd}` : ''}${owner.acquired_at ? `, since ${owner.acquired_at}` : ''}) — two agents must not drive the same task.${CRLF_N}  If the holder is confirmed dead/stuck, kill pid ${owner.pid} and re-run (a stale lock is taken over automatically).`);
+    die(`task "${taskId}" is already claimed (lock holder pid ${owner.pid}${owner.cmd ? `, ${owner.cmd}` : ''}${owner.acquired_at ? `, since ${owner.acquired_at}` : ''}) — two agents must not drive the same task.${CRLF_N}  Wait for the holder to finish; a stale lock (holder dead or heartbeat quiet for 60s) is taken over automatically — no manual cleanup needed.`); // 锁判活带心跳/属主校验，不提供「终止 pid X」的误杀指引
   }
   try {
     ensureQueue(queueRoot(REPO_ROOT)); // moveCard 的 rename 需要目标状态目录存在（临时仓库/手建队列常缺 running/）
@@ -556,7 +568,7 @@ function settleCardAfterFinish(taskId) {
   }
 }
 
-function cmdFinish(taskId, args) {
+async function cmdFinish(taskId, args) {
   let skipTest = args.includes('--skip-test');
   const msgIdx = args.indexOf('--message');
   const mergeMsg = msgIdx >= 0 ? args[msgIdx + 1] : undefined;
@@ -684,14 +696,16 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     } else {
       for (const cmd of testCmds) {
         console.log(`Running verification inside the worktree: ${cmd}`);
-        // timeout 必须有：本进程持有 .finish.lock 且心跳 setInterval 让锁永远「活」——
-        // 挂死的验证命令会无限期霸锁，后续所有 approve 的 bounded-wait 到点即 die、
-        // 任务逐张堆积 awaiting-human 且无告警指向根因。超时（对齐门禁 20min）即 die，
-        // exit handler 清锁，报错可操作
-        const t = spawnSync(cmd, { cwd: wtPath, stdio: 'inherit', shell: true, timeout: 20 * 60_000 });
-        if (t.status !== 0) {
-          const timedOut = t.error?.code === 'ETIMEDOUT' || t.signal === 'SIGTERM';
-          die(`verification failed on ${branch} ("${cmd}")${timedOut ? ' —— 超时（20min）被终止，检查是否有挂死的测试进程' : ''}. Fix inside ${wtPath}, commit, then re-run finish. ` +
+        // 超时必须有（本进程持有 .finish.lock，挂死的验证命令会无限期霸锁），且超时按
+        // 进程树收割：runCmd 用 detached（unix 进程组）spawn + killTree（win32 taskkill
+        // /T /F）——旧实现 spawnSync timeout 只杀 shell 直接子进程，vitest/node 孙进程树
+        // 全部孤儿化，Windows 上锁住 worktree 句柄令清理 rename 报 EBUSY/EPERM。stdio
+        // 直通保持 live 输出（人工 finish 可见进度；approve 路径本就整段捕获回放）。
+        const timeoutMs = finishTestTimeoutMs();
+        const t = await runCmd(cmd, wtPath, timeoutMs, { inherit: true });
+        if (!t.ok) {
+          const timedOut = t.timedOut === true;
+          die(`verification failed on ${branch} ("${cmd}")${timedOut ? ` —— 超时（${Math.round(timeoutMs / 60000)}min）被终止，已按进程树收割（含孙进程孤儿），检查是否有挂死的测试进程` : ''}. Fix inside ${wtPath}, commit, then re-run finish. ` +
             `(Use --skip-test only for changes that cannot affect behavior, e.g. pure docs.)`);
         }
       }
@@ -835,7 +849,7 @@ function cmdList() {
 
 const [cmd, taskId, ...rest] = process.argv.slice(2);
 if (cmd === 'start' && taskId) cmdStart(sanitizeTaskId(taskId));
-else if (cmd === 'finish' && taskId) cmdFinish(sanitizeTaskId(taskId), rest);
+else if (cmd === 'finish' && taskId) await cmdFinish(sanitizeTaskId(taskId), rest); // 顶层 await：验证步骤走异步 runCmd（超时树杀）
 else if (cmd === 'list') cmdList();
 else {
   console.log(`Usage:

@@ -77,20 +77,55 @@ const DISALLOWED_PATTERNS = [
 ];
 const DISALLOWED_TOOLS = DISALLOWED_PATTERNS.flatMap(shellPatterns);
 
+/** 会话 cwd 所属仓库的主仓根（linked worktree → 主仓；普通仓库 → 自身；git 不可用 → null）。 */
+export function mainRepoRootOf(cwd) {
+  if (!cwd) return null;
+  try {
+    const r = spawnSync('git', ['-C', cwd, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const common = (r.stdout ?? '').trim();
+    if (r.status === 0 && common) {
+      const dotGit = path.resolve(cwd, common);
+      if (fs.existsSync(dotGit)) return path.dirname(dotGit);
+    }
+  } catch { /* git 不可用 */ }
+  return null;
+}
+
+/**
+ * worker hook 命令：默认锚定主仓绝对路径（P0 间接旁路收敛，2026-11）——worker 只有
+ * worktree 内写权限，主仓副本篡改不到；hook 命令若用相对路径（随仓库 checkout 进
+ * worktree），被篡改的 worktree 副本会顶替真正执行的 hook，红线层整体失效。主仓
+ * 解析失败（git 不可用等）才回退相对路径——此时 policy-worker 自身的
+ * hookIntegrityVerdict（相对 git HEAD 的完整性校验）兜底拦未提交篡改。
+ * 路径用正斜杠 + 双引号包路径：Windows（cmd）与 unix shell 同形合法。
+ */
+export function workerHookCommand(sessionCwd = null) {
+  const main = mainRepoRootOf(sessionCwd);
+  if (main) {
+    const hook = path.join(main, '.agents', 'hooks', 'policy-worker.mjs');
+    if (fs.existsSync(hook)) return `node "${hook.replace(/\\/g, '/')}"`;
+  }
+  return 'node .agents/hooks/policy-worker.mjs';
+}
+
 /** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 拦截 hook）。
  *  matcher 用 Bash|PowerShell：Windows 上 claude CLI 的 shell 工具是 PowerShell，
  *  只写 Bash = hook 对全部 shell 命令失明（红线层失效，2026-10-30 实验实证）。
+ *  sessionCwd = worker 会话工作目录（worktree）——hook 命令据此锚定主仓绝对路径
+ *  （workerHookCommand；缺省回退相对路径）。
  *  envPatch 非空时并入 settings.env（--settings 优先级高于用户级 settings.json，
  *  tier token 据此覆盖接入时写入的全局凭据）——子进程 env 同时补一份双保险，
  *  两层哪层生效都到得了网关。 */
-export function writeWorkerSettings(settingsPath, envPatch = {}) {
-  // hook 命令的 cwd 是 worktree；.agents/hooks/policy-worker.mjs 随仓库 checkout 到 worktree 内
+export function writeWorkerSettings(settingsPath, envPatch = {}, sessionCwd = null) {
   const settings = {
     hooks: {
       PreToolUse: [
         {
           matcher: 'Bash|PowerShell',
-          hooks: [{ type: 'command', command: 'node .agents/hooks/policy-worker.mjs' }],
+          hooks: [{ type: 'command', command: workerHookCommand(sessionCwd) }],
         },
       ],
     },
