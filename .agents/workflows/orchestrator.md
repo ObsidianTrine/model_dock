@@ -407,3 +407,7 @@ node .agents/scripts/fleet-console.mjs [--project <目录>]... [--days 7] [--jso
 - **容错**：无 `.agents/orchestrator/` 的项目标「非港口」跳过；stats 失败（脚本缺失/超时/退出非零/输出损坏）标「不可得」，该港其余指标照常出。
 - **输出**：人类可读对齐表格（待泊/在坞/搁浅/待放行/出港 N 天/合并率/险情/风暴/漂移/巡检 + 全队合计行）；`--json` 出机器可读结构（`projects[]` + `totals`），供脚本与 cron 消费。全队合计的窗口汇总只对「stats 可得」的港口求和（`totals.stats_ok_ports` 标明覆盖面）。
 - 典型用法：cron/nightly 拉一份 `--json` 存档；人工早上跑人类表格一眼看全队——哪港搁浅堆积、哪港风暴滞留、哪港漂移降级。
+
+### D6. 验船师评测集（reviewer-evals）
+
+reviewer 的回归评测集在 `.agents/review-evals/reviewer/cases/`（合成 diff + 期望判定成对，覆盖端口/路径/atomicWrite/import.meta 红线、越界、Windows、i18n、断言假绿 + 1 个干净负样本）。跑分器 `node .agents/scripts/reviewer-eval.mjs`：默认 dry-run 零消耗；`--run --backend …` 真跑（烧钱，人工发起）；`--grade <目录>` 静态重放评分（CI 可用）。改 REVIEW.md / reviewer prompt / 审查模型后必跑一轮，分数低于基线不保留；出题纪律与评分口径见 `.agents/review-evals/reviewer/README.md`。
