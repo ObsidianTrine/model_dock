@@ -83,7 +83,10 @@ export async function cmdPresetsUpdate(): Promise<void> {
 }
 
 export async function cmdUsage(): Promise<void> {
-  console.log(c.gray(t('用量统计在 M2 提供；当前可在 {d}/gateway-*.jsonl 查看原始请求记录（不含内容）', 'Usage stats are not available yet; for now, view raw request records (no content) in {d}/gateway-*.jsonl', { d: displayPath(logsDir()) })))
+  console.log(c.gray(t(
+    '用量统计已上线：Web 控制台状态行实时显示今日请求数 / token / 估算成本（modeldock ui 打开）；聚合查询用管理端点 GET /_modeldock/usage，支持日期区间与客户端 / 服务 / 模型过滤（详见 docs/usage.md）',
+    'Usage stats are live: the Web console status line shows today\'s requests / tokens / estimated cost in real time (open it with modeldock ui); for aggregated queries use the admin endpoint GET /_modeldock/usage, which supports date ranges and per-client / per-service / per-model filters (see docs/usage.md)'
+  )))
 }
 
 /** 卸载共用的程序本体清理：停网关 + 游离清扫 + 移除自启/命令行入口；不动 ~/.modeldock 与客户端接管状态 */
