@@ -173,7 +173,7 @@ export function openEnvelope(env: unknown, passphrase: string): Syncdoc {
   if (!isPlainObject(kdf) || typeof kdf.salt !== 'string' || typeof kdf.hkdfSalt !== 'string' || typeof env.iv !== 'string' || typeof env.ct !== 'string') {
     throw new Error(t('同步包缺少加密封装字段，文件不完整', 'The sync package is missing envelope fields; the file is incomplete'))
   }
-  const { encKey, macKey } = deriveKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'), envelopeIter(env as SyncEnvelope))
+  const { encKey, macKey } = deriveKeys(passphrase, Buffer.from(kdf.salt, 'base64'), Buffer.from(kdf.hkdfSalt, 'base64'), envelopeIter(env as unknown as SyncEnvelope))
   // 先验 verifier 再解密：「口令不正确」与「包被篡改」才报得出两种错（恒时比较，防时序侧信道辅助离线爆破）
   const expectVerifier = createHmac('sha256', macKey).update(VERIFIER_INFO, 'utf8').digest('base64')
   if (typeof env.verifier !== 'string' || !safeEqual(env.verifier, expectVerifier)) {
