@@ -175,7 +175,15 @@ export async function applyAssets(files: Record<string, string>): Promise<AssetA
       continue
     }
     fs.mkdirSync(path.dirname(p), { recursive: true })
-    await atomicWrite(p, files[key], 0o600)
+    // 保留目标文件既有权限位：白名单资产常含脚本（skills 下 .sh 等），此前一律 0600
+    // 强制改写——0755 脚本跨机同步后丢可执行位、0644 共享文件变 owner-only。对照
+    // restoreSnapshot 专门保留 rec.mode 的口径；缺失时文本资产缺省 0644（NTFS 忽略
+    // 权限位，Windows 上无副作用）
+    let mode = 0o644
+    try {
+      mode = fs.statSync(p).mode & 0o777
+    } catch { /* 新文件用缺省 */ }
+    await atomicWrite(p, files[key], mode)
     written.push(key)
   }
   return { written, unchanged }
