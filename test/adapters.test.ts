@@ -339,6 +339,120 @@ describe('claude-code adapter', () => {
     }
   })
 
+  it('旧版网关接入（服务有目录）：目录序机械铺四个档位槽，_MODEL 接线 + _NAME 显示名，Default 行 = profile 默认模型', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com' } }, null, 2) + '\n', 0o600)
+      const cfg: Config = {
+        ...emptyConfig(),
+        providers: {
+          p: {
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            // 不透明 ID：避开内置 known 表（真实模型 ID 会命中 1M 上下文元数据追加 [1m]，
+            // 该行为由 direct 用例覆盖），本用例只验证铺槽机制本身
+            models: {
+              'mdl-slot-a': { display_name: 'Alpha' },
+              'mdl-slot-b': { display_name: 'Beta' },
+              'mdl-slot-c': {},
+            },
+          },
+        },
+        profiles: { demo: { provider: 'p', default_model: 'mdl-slot-b' } },
+        active_profile: 'demo',
+      }
+      await withConfig(cfg)
+
+      const plan = await claudeCodeAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' },
+        await loadConfig()
+      )
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.modelPicker).toBeUndefined()
+      // 目录序铺槽：opus/sonnet/haiku = 前 3 个，fable 复用末位；_NAME = 显示名（缺则原 ID）
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('mdl-slot-a')
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe('Alpha')
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('mdl-slot-b')
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe('Beta')
+      expect(after.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('mdl-slot-c')
+      expect(after.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('mdl-slot-c')
+      expect(after.env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME).toBe('mdl-slot-c')
+      // Default 行 = profile 默认模型（独立于铺槽）
+      expect(after.env.ANTHROPIC_MODEL).toBe('mdl-slot-b')
+      expect(plan.notes.some((n) => n.includes('按内置档位列出'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
+  it('旧版网关接入：单模型四槽同值；超 4 个不铺第 5 个；同输入同输出（重烙幂等）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      const fixture = JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com' } }, null, 2) + '\n'
+      await atomicWrite(p, fixture, 0o600)
+      const mkCfg = (ids: string[]): Config => ({
+        ...emptyConfig(),
+        providers: {
+          p: {
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: Object.fromEntries(ids.map((id) => [id, { display_name: id }])),
+          },
+        },
+        profiles: { demo: { provider: 'p' } },
+        active_profile: 'demo',
+      })
+
+      // 单模型：四槽同值
+      await withConfig(mkCfg(['solo-model']))
+      let plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      let after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('solo-model')
+      expect(after.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('solo-model')
+      expect(after.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('solo-model')
+
+      // 两模型：haiku/fable 复用末位
+      await withConfig(mkCfg(['m-a', 'm-b']))
+      await atomicWrite(p, fixture, 0o600)
+      plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('m-b')
+      expect(after.env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('m-b')
+      expect(after.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('m-b')
+
+      // 五模型：只铺前 4（第 5 个旧版 /model 无行可选）
+      await withConfig(mkCfg(['m-1', 'm-2', 'm-3', 'm-4', 'm-5']))
+      await atomicWrite(p, fixture, 0o600)
+      plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      after = JSON.parse(plan.changes[0].after)
+      expect(after.env.ANTHROPIC_DEFAULT_FABLE_MODEL).toBe('m-4')
+      expect(JSON.stringify(after)).not.toContain('m-5')
+
+      // 确定性：同输入重跑 after 逐字节一致（重烙等值过滤的前提）
+      await atomicWrite(p, fixture, 0o600)
+      const plan2 = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, await loadConfig())
+      expect(plan2.changes[0].after).toBe(plan.changes[0].after)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
+      h.restore()
+    }
+  })
+
   it('版本门控边界：2.1.242 走 env 回退，2.1.243 起写 modelPicker', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
