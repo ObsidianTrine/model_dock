@@ -123,8 +123,103 @@ describe('orchestrator reconcile > 狗粮对账', () => {
       expect(out.stdout).toContain('已合并任务对账')
       expect(out.stdout).toContain('r3')
       expect(out.stdout).toContain('分歧')
+      // mock 任务事件无 tokens_billable、手写日志无 billable_tokens → 旧口径回落并标注
+      expect(out.stdout).toContain('旧口径')
       const one = runOrch(repo.root, 'reconcile r3')
       expect(one.stdout).toContain('r3')
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+})
+
+describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens 熔断同口径）', () => {
+  /** 手写任务事件流（reconcileTask 只读 logs/<id>/events.jsonl；writeFileSync 覆盖整文件）。 */
+  function writeEvents(repo: string, id: string, evts: Array<Record<string, unknown>>) {
+    const dir = path.join(repo, '.agents', 'orchestrator', 'logs', id)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), evts.map((e) => JSON.stringify({ ts: toIsoLocal(new Date()), seq: 0, ...e })).join('\n') + '\n')
+  }
+
+  it('两本账都有可计费字段：分歧按 billable 对 billable（总口径会被缓存读摊薄失真）', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      writeEvents(repo.root, 'bill-r1', [
+        { type: 'worker_spawned' },
+        { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
+      ])
+      writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 900_000, output_tokens: 40_000, cache_read_tokens: 850_000, cache_creation_tokens: 10_000, billable_tokens: 100_000 })
+      const r = reconcileTask(repo.root, 'bill-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.scope).toBe('billable')
+      expect(r.selfBillable).toBe(500_000)
+      expect(r.gatewayBillable).toBe(100_000)
+      // 分歧 = |500k − 100k| / 500k = 80%（总口径两边都 ≈1M，分歧仅 ~5%——失真对照）
+      expect(r.divergence).toBeCloseTo(0.8, 5)
+      // 旧口径字段原样保留（燃油账与历史消费方不动）：gateway 总账 = (900k+850k+10k) + 40k
+      expect(r.selfTotal).toBe(1_000_000)
+      expect(r.gateway.total).toBe(1_800_000)
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('旧日志无新字段：整体回落旧口径（scope=legacy）不炸，分歧走总账', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      writeEvents(repo.root, 'bill-r2', [
+        { type: 'worker_spawned' },
+        { type: 'budget_snapshot', tokens_in: 900_000, tokens_out: 100_000 },
+      ])
+      writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 800_000, output_tokens: 100_000, cache_read_tokens: 100_000, cache_creation_tokens: 0 })
+      const r = reconcileTask(repo.root, 'bill-r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.scope).toBe('legacy')
+      expect(r.selfBillable).toBeNull()
+      expect(r.gatewayBillable).toBeNull()
+      expect(r.divergence).toBeCloseTo(0, 5) // 总口径两边都是 1M
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('混合口径（部分 snapshot 有新字段）→ 保守回落 legacy，绝不混口径相减', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      writeEvents(repo.root, 'bill-r3', [
+        { type: 'worker_spawned' },
+        { type: 'budget_snapshot', tokens_in: 100_000, tokens_out: 10_000 }, // 旧会话：无 tokens_billable
+        { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
+      ])
+      writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 100, output_tokens: 100, billable_tokens: 150 })
+      const r = reconcileTask(repo.root, 'bill-r3', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.scope).toBe('legacy')
+      expect(r.selfBillable).toBeNull()
+      expect(r.gatewayBillable).toBeNull()
+    } finally {
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('CLI 输出按口径标注：billable 行带「可计费」两本账数值', () => {
+    const h = fakeHome()
+    const repo = mkRepo()
+    try {
+      // CLI 单任务路径要求卡在队列中：submit 真卡后覆盖其事件流（fabricate billable 快照）
+      submitCard(repo.root, 'bill-r4')
+      writeEvents(repo.root, 'bill-r4', [
+        { type: 'worker_spawned' },
+        { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
+      ])
+      writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 100, output_tokens: 100, billable_tokens: 150 })
+      const out = runOrch(repo.root, `reconcile bill-r4`)
+      expect(out.stdout).toContain('可计费')
+      expect(out.stdout).toContain('分歧')
     } finally {
       repo.cleanup()
       h.restore()

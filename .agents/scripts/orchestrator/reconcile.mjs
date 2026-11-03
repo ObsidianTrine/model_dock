@@ -6,6 +6,8 @@
 //           响应旁路解析（src/gateway/usage.ts），网关只看得到经它转发的流量。
 // 对账 = 把任务事件时间窗（worker_spawned 首条 → merged/failed 尾条）投影到网关日志，
 // 汇总实测用量与自报用量对比。worker 走网关（吃狗粮）时两本账应该贴近；直连上游时实测账为 0。
+// 口径（2026-11 usage-cache-read-scope）：分歧率优先「可计费口径」（剔除缓存读，与 max_tokens
+// 熔断同口径）；任一侧缺新字段（旧 events / 旧网关日志）整体回落旧口径（缓存读计入）并标注。
 //
 // 状态对账（reconcileCardStates）：卡状态 vs git 现实。真实数据发现 running/ 里有卡
 // 实际已 git 合并但卡没落 merged/（状态机被人工旁路，如手工 git merge 后忘了 moveCard）——
@@ -73,15 +75,20 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
   const end = endEvts.length ? parseTs(endEvts[endEvts.length - 1].ts) : Date.now();
 
   const snapshots = events.filter((e) => e.type === 'budget_snapshot');
+  const billableSnaps = snapshots.map((e) => e.tokens_billable).filter(Number.isFinite);
   const selfReported = {
     tokensIn: Math.max(0, ...snapshots.map((e) => e.tokens_in ?? 0)),
     tokensOut: Math.max(0, ...snapshots.map((e) => e.tokens_out ?? 0)),
+    // 可计费口径（剔除缓存读）：全部快照都带 tokens_billable 才可用（部分新部分旧 =
+    // 混口径，宁可保守回落 legacy），否则 null
+    billable: snapshots.length > 0 && billableSnaps.length === snapshots.length ? Math.max(0, ...billableSnaps) : null,
   };
 
   // 锚定 repoRoot 的配置（临时仓库/测试才有正确归属；env 重定向仍优先——测试隔离通道）
   const gwDir = gatewayLogsDir(loadWorkflowConfig(repoRoot));
   if (!gwDir) return { skipped: true, reason: '未启用网关对账（workflow.json gatewayLogDir 未配置）' };
-  const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0 };
+  const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0, billable: 0 };
+  let billableEntries = 0; // 带 usage.billable_tokens 的条数（旧网关日志无此字段 → 回落旧口径）
   // (provider, model) token 分桶：成本投影（cost.mjs computeCost）的原料——同一循环顺手聚合，
   // 不再二次扫日志。键 = "provider/model"（无 provider 裸模型名）。
   const pairsMap = new Map();
@@ -98,6 +105,10 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
       observed.tokensOut += u.output_tokens ?? 0;
       observed.cacheRead += u.cache_read_tokens ?? 0;
       observed.cacheCreate += u.cache_creation_tokens ?? 0;
+      if (Number.isFinite(u.billable_tokens)) {
+        observed.billable += u.billable_tokens;
+        billableEntries += 1;
+      }
       const pk = entry.provider ? `${entry.provider}/${entry.model}` : String(entry.model ?? '');
       const p = pairsMap.get(pk) ?? { provider: entry.provider ?? null, model: entry.model ?? null, requests: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
       p.requests += 1;
@@ -111,15 +122,29 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
 
   const selfTotal = selfReported.tokensIn + selfReported.tokensOut;
   const gwTotal = observed.tokensIn + observed.tokensOut;
-  // 偏差率：以较大的一边为分母（衡量两本账的相对分歧，避免零分母）
-  const divergence = selfTotal + gwTotal > 0 ? Math.abs(selfTotal - gwTotal) / Math.max(selfTotal, gwTotal) : 0;
+  // 口径选择（2026-11 usage-cache-read-scope）：两本账都有可计费字段才走 billable 对
+  // billable（与 max_tokens 熔断同口径——GLM 网关缓存读占大头，总口径分歧被摊薄失真）；
+  // 任一侧缺新字段（旧 events / 旧网关日志）整体回落旧口径并标 scope='legacy'——绝不混
+  // 口径相减，混了分歧率无意义。
+  const billableMode = selfReported.billable !== null && observed.requests > 0 && billableEntries === observed.requests;
+  const divergence = billableMode
+    ? Math.abs(selfReported.billable - observed.billable) / Math.max(selfReported.billable, observed.billable)
+    : selfTotal + gwTotal > 0
+      ? Math.abs(selfTotal - gwTotal) / Math.max(selfTotal, gwTotal)
+      : 0; // 偏差率分母取两账中较大者（衡量相对分歧，避免零分母）
   return {
     skipped: false,
     taskId,
     window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
     selfReported,
     selfTotal,
+    /** 可计费口径自报值；scope='legacy'（缺新字段回落）时为 null */
+    selfBillable: billableMode ? selfReported.billable : null,
     gateway: { ...observed, total: gwTotal },
+    /** 可计费口径网关实测值；scope='legacy' 时为 null */
+    gatewayBillable: billableMode ? observed.billable : null,
+    /** 对账口径：'billable'（两本账都有可计费字段）| 'legacy'（旧事件/旧网关日志回落，缓存读计入） */
+    scope: billableMode ? 'billable' : 'legacy',
     divergence,
     /** (provider, model) token 分桶（成本投影原料；无成本核算时仅占位不烧价目请求） */
     pairs: [...pairsMap.values()],
@@ -171,7 +196,8 @@ export function upstreamSeaState(repoRoot, events) {
   const topN = (m, n) => Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, n);
   const lat = ok.map((e) => e.ms).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
   const quantile = (q) => (lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * q))] : undefined);
-  // 用量口径与 reconcileTask 一致（缓存读+缓存建计入输入），但只计成功转发
+  // 用量口径：总口径（缓存读+缓存建计入输入），只计成功转发；reconcileTask 的分歧率
+  // 已优先可计费口径（billable），海况调查包保持总口径不变（与燃油账同源）
   const tokens = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0 };
   for (const e of ok) {
     const u = e.usage;

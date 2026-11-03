@@ -937,7 +937,7 @@ describe('网关', () => {
       const logFile = fs.readdirSync(dir).filter((f) => f.startsWith('gateway-')).sort().at(-1)!
       const entries = fs.readFileSync(path.join(dir, logFile), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
       const sseEntry = entries.filter((e) => e.path?.includes('/v1/messages')).at(-1)
-      expect(sseEntry.usage).toEqual({ input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5 })
+      expect(sseEntry.usage).toEqual({ input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5, billable_tokens: 147 })
     } finally {
       t.closeAll()
     }
@@ -957,7 +957,7 @@ describe('网关', () => {
       const logFile2 = fs.readdirSync(dir2).filter((f) => f.startsWith('gateway-')).sort().at(-1)!
       const entries2 = fs.readFileSync(path.join(dir2, logFile2), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
       const jsonEntry = entries2.filter((e) => e.path?.includes('/v1/chat/completions')).at(-1)
-      expect(jsonEntry.usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 })
+      expect(jsonEntry.usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 7 })
     } finally {
       t2.closeAll()
     }

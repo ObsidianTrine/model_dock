@@ -432,8 +432,9 @@ function resolveTiers(raw) {
 /** 按引擎的预算校准表 budgetProfiles.<backend> → 部分预算覆盖（只认 max_* 正整数键，其余丢弃）。
  *  背景（2026-10-29 夜跑实证）：zcode headless 无逐 turn usage（会话结束才回填）+ GLM
  *  缓存读口径失真，默认 token 预算对 zcode 形同虚设——按引擎放宽（调大而非关闭，
- *  不破「熔断不可关闭」红线）；wall-clock / 迭代熔断不受影响。条目不合法整条丢弃
- *  （与 resolveTiers 同哲学：配置错不阻断启动，无效条目静默失效）。 */
+ *  不破「熔断不可关闭」红线）；wall-clock / 迭代熔断不受影响。2026-11 起 max_tokens
+ *  按可计费口径（剔除缓存读，见 budget.mjs）比较，数值可按真实消耗回调。条目不合法
+ *  整条丢弃（与 resolveTiers 同哲学：配置错不阻断启动，无效条目静默失效）。 */
 function resolveBudgetProfiles(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const BUDGET_KEYS = ['max_turns', 'max_tokens', 'max_wall_minutes', 'max_test_iterations', 'max_review_iterations'];

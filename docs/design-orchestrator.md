@@ -164,7 +164,7 @@ created_at: 2026-10-01T10:00:00+08:00
 created_by: human             # human | scanner（Phase 2）
 budget:
   max_turns: 50               # worker agent 最大轮次（防死循环）
-  max_tokens: 500000          # 单任务 token 预算上限（含缓存读，见 5.10 口径）
+  max_tokens: 500000          # 单任务 token 预算上限（可计费口径：剔除缓存读，见 5.10）
   max_wall_minutes: 60        # wall-clock 超时（分钟）
   max_test_iterations: 5      # 调试子循环上限（测试失败→修→重跑）
   max_review_iterations: 3    # 审查修复子循环上限（审查阻塞→修→重审；独立于调试计数）
@@ -362,14 +362,14 @@ worker 报告 done
 | 维度 | 机制 | 超限动作 |
 |---|---|---|
 | 轮次 | 后端 `--max-turns`（任务卡 budget.max_turns 传入） | kill worker → blocked |
-| token | onEvent 解析 usage 累计，超 max_tokens | kill → blocked |
+| token | onEvent 解析 usage 累计（可计费口径，剔除缓存读，见下），超 max_tokens | kill → blocked |
 | wall-clock | orchestrator 定时器 max_wall_minutes | kill → blocked |
 | 调试迭代 | debug_iteration 计数 > max_test_iterations | blocked |
 | 审查返工 | review_iteration 计数 > max_review_iterations | blocked |
 
 所有熔断写 `circuit_breaker` 事件，任务卡转 `blocked/` 并附原因，**永不静默重试烧钱**。
 
-**token 口径**：stream-json 的 usage 含 `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `output_tokens`。预算累计 = `tokensIn`（前三者之和，**缓存读计入**——长上下文任务靠缓存复用看着便宜，钱和上下文占用是真实发生的）+ `tokensOut`（output_tokens）。
+**token 口径（双轨，2026-11 usage-cache-read-scope）**：stream-json 的 usage 含 `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `output_tokens`（anthropic 语义：三字段不相交，总输入 = 前三者之和）。**旧口径** `tokensIn` = 前三者之和（缓存读计入）+ `tokensOut`，字段与历史事件兼容、继续落盘（stats / 交接油量回落路径仍用）。**可计费口径** `billable` = (tokensIn − 缓存读) + `tokensOut`：max_tokens 熔断与低油量告警改用它——GLM 网关缓存读占大头，旧口径下预算虚胖（budgetProfiles 被迫放到 2000 万，熔断形同虚设）；缓存写与输出是真实成本、保留在 billable 内。budget_snapshot 事件另发 `tokens_billable` 与 `tokens_cache_read`（缓存读单列观测）；旧事件无拆分字段时 billable 退化为旧口径（熔断不放松也不误伤）。`budgetProfiles.max_tokens` 的语义随之变为可计费口径，数值可按真实消耗回调。
 
 **运行中 usage 依赖上游回传（实测结论，2026-10-01 真实冒烟）**：第三方上游（如经网关代理的非官方模型）在 assistant 流式事件里 usage 可能为全 0，完整用量只在会话结束的 `result` 事件里。此时运行中的 token 熔断自然无法触发（0 永不超限），实际用量在结束时由 result 回填（`budget_snapshot` 最终值准确）。此降级属预期行为，wall-clock / 轮次 / 迭代上限三类熔断不受影响；对成本敏感的任务卡应同时收紧 `max_wall_minutes` 与 `max_turns`。
 
@@ -563,9 +563,9 @@ worker 的 token 用量从此有两本账：
 | 自报账 | 任务 events.jsonl 的 budget_snapshot | stream-json result 回填；第三方上游流式 usage 全 0 时运行中不可信（5.10） |
 | 实测账 | 网关请求日志 gateway-*.jsonl 的 usage 字段 | **网关转发层旁路解析**（src/gateway/usage.ts），只看得到经网关转发的流量 |
 
-**网关侧（产品功能，src/gateway/usage.ts）**：`createUsageTap(contentType)` Transform 流——字节**原样透传**（转发行为零改变），旁路尽力而为解析：anthropic SSE（message_start 的输入/缓存 + message_delta 的输出累计）、openai/responses SSE chunk usage、非流式 JSON 顶层 usage（≤1MB 缓冲，anthropic/openai 两种字段名口径都认）。解析失败静默，永不影响转发。server.ts 成功转发路径在 pipeline 中插入 tap，LogEntry 新增 usage 字段落盘。
+**网关侧（产品功能，src/gateway/usage.ts）**：`createUsageTap(contentType)` Transform 流——字节**原样透传**（转发行为零改变），旁路尽力而为解析：anthropic SSE（message_start 的输入/缓存 + message_delta 的输出累计）、openai/responses SSE chunk usage、非流式 JSON 顶层 usage（≤1MB 缓冲，anthropic/openai 两种字段名口径都认）。解析失败静默，永不影响转发。server.ts 成功转发路径在 pipeline 中插入 tap，LogEntry 新增 usage 字段落盘；usage 另含 `billable_tokens`（可计费口径 = 总输入 − 缓存读 + 输出，按协议形态厘清公式，见 src/gateway/usage.ts 头注释；旧日志无此字段）。
 
-**orchestrator 侧（reconcile 命令）**：把任务事件时间窗（worker_spawned 首条 → merged/failed 尾条，1 分钟容差）投影到网关日志，跨日期文件自动合并，只计成功转发；`reconcile [task-id]` 单任务 / 无参全部 merged 任务按分歧降序。分歧率 = |自报 − 实测| / max(两账)；**网关零流量时标 ⚠（worker 直连上游，对账无意义）**。口径与预算一致：缓存读计入输入。命令只读报告，不做任何动作。
+**orchestrator 侧（reconcile 命令）**：把任务事件时间窗（worker_spawned 首条 → merged/failed 尾条，1 分钟容差）投影到网关日志，跨日期文件自动合并，只计成功转发；`reconcile [task-id]` 单任务 / 无参全部 merged 任务按分歧降序。分歧率 = |自报 − 实测| / max(两账)；**网关零流量时标 ⚠（worker 直连上游，对账无意义）**。口径（2026-11 usage-cache-read-scope）：两本账都有可计费字段（events 的 `tokens_billable` + 网关日志的 `usage.billable_tokens`）时分歧率按 **billable 对 billable**（与 max_tokens 熔断同口径，缓存读不再摊薄分歧）；任一侧缺新字段整体回落旧口径（缓存读计入）并在输出标注「旧口径」，绝不混口径相减。燃油账（--cost 美元）始终总口径。命令只读报告，不做任何动作。
 
 ### 10.8 Planner 环节（意图 → 任务卡自动化，已交付）
 
@@ -609,3 +609,4 @@ worker 的 token 用量从此有两本账：
 | v1.0 | 2026-10-11 | 初版（随公开仓库 v1.0.0 发布）：调研结论 + 五层架构 + Phase 1 详细设计 + 实施/测试计划 + 决策点；实施状态——策略守护（policy.mjs 命令红线/分级/审计）、L0/L1 自动合并、队列调度（run --next / drain）、nightly 巡检（scan + sanitize）、质量漂移监控（drift 降级/恢复）、多 worker 并行（hintsOverlap 分区互斥）、狗粮对账（reconcile + 网关 usage 旁路解析）、Planner 环节（intent 编译任务卡）均已交付（§10 各节），Phase 2 推进中 |
 | v1.1 | 2026-10-29 | 任务级互斥锁（§10.6，task-lock.mjs）：同任务同时只允许一个 run 闭环进程，堵住"手动 run 撞 drain / 双重手动操作 → 两个 worker 写同一个 worktree"的全部路径与旧孤儿接管的杀竞窗口；abandon 增加闭环存活守卫；锁文件 .run-\<task-id\>.lock 入 gitignore |
 | v1.2 | 2026-10-30 | 自治长跑加固（feature/orch-autonomy-hardening）：**Windows 权限墙根修**——claude CLI 在 Windows 的 shell 工具是 PowerShell，Bash(...) 白名单匹配不到 PowerShell 调用（沙箱实验实证），白名单/红线/hook matcher 一律 Bash+PowerShell 双形态；zcode 0.17.0 yolo 已恢复全自动。**budgetProfiles** 按引擎校准预算（zcode max_tokens 5M——GLM 缓存读口径失真+结束才回填 usage）+ Budget 会话级记账（committed+sessionMax，修跨 fixup 会话 Math.max 漏计）+ budget_baseline 事件。**瞬时故障退避**：无结果块且带 429/网络签名原地重试 60s×attempt ≤3 次；drain 引擎预检（不可用拒绝启动，杜绝逐卡烧成 blocked）。**无人值守观测**：落位（awaiting-human/blocked/failed）与 drain 收官 webhook 通知（\${envPrefix}_ORCH_WEBHOOK）；spec progress.json 全局进度锚（moveCard 自动同步）+ spec status。**prompt 纪律**：结束纪律层（done 前自验/干净提交/权限拒绝满 2 次 stuck 熔断——实测一次任务白烧 15+ 次重试）、git -C 与复合命令禁用、spec design/requirements 改 worktree 文件引用（防 zcode 30k argv 上限）、reviewer 注入 REVIEW.md 纪律、files_hint 剥反引号（tray-only-mode-t1 实测污染） |
+| v1.3 | 2026-11-03 | **token 计量口径修正（usage-cache-read-scope）**：新增**可计费口径** billable = (tokens_in − 缓存读) + tokens_out，max_tokens 熔断与低油量告警改用它（GLM 网关缓存读占大头，总口径预算虚胖、熔断形同虚设）；缓存读单列（budget_snapshot.tokens_cache_read）。网关 usage tap 落 `usage.billable_tokens`（按 anthropic/openai 协议形态厘清公式）；reconcile 分歧率改 billable 对 billable，任一侧缺新字段回落旧口径并标注「旧口径」。旧口径字段（tokens/sessionMax/总账）全部保留向后兼容；燃油账（美元）不动。budgetProfiles.max_tokens 语义变为可计费口径，数值可按真实消耗回调（§5.10） |

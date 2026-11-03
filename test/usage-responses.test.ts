@@ -24,14 +24,15 @@ describe('createUsageTap：responses SSE', () => {
       'data: {"type":"response.completed","response":{"usage":{"input_tokens":120,"output_tokens":30}}}',
     ].join('\n\n') + '\n\n'
     const { usage, passed } = await feedTap([Buffer.from(sse, 'utf8')], 'text/event-stream')
-    expect(usage).toEqual({ input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    // responses 形态缓存未解析（cacheRead=0）：billable 退化为 input + output
+    expect(usage).toEqual({ input_tokens: 120, output_tokens: 30, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 150 })
     expect(passed.toString('utf8')).toBe(sse) // 旁听流：字节原样透传
   })
 
   it('末行无换行收尾：flush 兜底解析不丢 usage', async () => {
     const tail = 'data: {"type":"response.completed","response":{"usage":{"input_tokens":8,"output_tokens":2}}}'
     const { usage } = await feedTap([Buffer.from(tail, 'utf8')], 'text/event-stream')
-    expect(usage).toEqual({ input_tokens: 8, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    expect(usage).toEqual({ input_tokens: 8, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 10 })
   })
 
   it('responses 与 openai 形态混流：各自提取、字段取最大', async () => {
@@ -40,7 +41,8 @@ describe('createUsageTap：responses SSE', () => {
       'data: {"type":"response.completed","response":{"usage":{"input_tokens":60,"output_tokens":4}}}',
     ].join('\n\n') + '\n\n'
     const { usage } = await feedTap([Buffer.from(sse, 'utf8')], 'text/event-stream')
-    expect(usage).toEqual({ input_tokens: 60, output_tokens: 9, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    // 混流非 anthropic 形态：billable = input(60) − cacheRead(0) + output(9)
+    expect(usage).toEqual({ input_tokens: 60, output_tokens: 9, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 69 })
   })
 })
 
@@ -48,7 +50,7 @@ describe('createUsageTap：非 SSE / 超大 JSON', () => {
   it('非 SSE 非 JSON 的 content-type：不解析、纯透传、usage 全零', async () => {
     const body = 'data: {"usage":{"prompt_tokens":5,"completion_tokens":6}}\n\n'
     const { usage, passed } = await feedTap([Buffer.from(body, 'utf8')], 'text/plain')
-    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 0 })
     expect(passed.toString('utf8')).toBe(body)
   })
 

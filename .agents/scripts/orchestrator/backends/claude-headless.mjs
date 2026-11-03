@@ -5,7 +5,10 @@
 //   --disallowedTools 红线（push/tag/publish 双保险）
 //   --settings <worker 专属 settings>（注入 policy-worker.mjs 拦截 hook，
 //     只进 worker 会话，不污染项目级 .claude/settings.json）
-// 预算口径：tokensIn = input + cache_read + cache_creation（缓存读计入）。
+// 预算口径（双轨，2026-11 usage-cache-read-scope）：tokensIn = input + cache_read +
+// cache_creation（缓存读计入，旧口径字段保留）；budget_snapshot 另发 tokens_cache_read
+// （缓存读单列）与 tokens_billable = (tokensIn − 缓存读) + tokensOut（可计费口径，
+// max_tokens 熔断用它——GLM 网关缓存读占大头，旧口径预算虚胖）。
 //
 // **Windows shell 工具是 PowerShell（2026-10-30 沙箱实验实证）**：白名单规则按
 // 工具名匹配——`Bash(git add:*)` 匹配不到 PowerShell 工具调用，写类命令
@@ -21,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadWorkflowConfig } from '../../workflow-config.mjs';
 import { quoteArgsForShell, shellCommandline } from '../spawn-shell.mjs';
+import { billableTokens } from '../budget.mjs';
 import { zcodeAvailable } from './zcode-headless.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -180,6 +184,7 @@ export const claudeHeadlessBackend = {
 
       let tokensIn = 0;
       let tokensOut = 0;
+      let cacheReadIn = 0; // 缓存读单列（billable 口径的剔除项，与会话累计同口径）
       let output = '';
       let stderrTail = '';
       let settled = false;
@@ -210,9 +215,10 @@ export const claudeHeadlessBackend = {
             const u = usageFrom(evt.message.usage);
             tokensIn += u.input + u.cacheRead + u.cacheCreate;
             tokensOut += u.output;
+            cacheReadIn += u.cacheRead;
             const turn = (evt.message.id ?? '').slice(-8) || undefined;
             onEvent({ type: 'worker_turn', turn: turn ?? undefined, tool: lastToolName(evt) });
-            onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut });
+            onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: cacheReadIn, tokens_billable: billableTokens(tokensIn, tokensOut, cacheReadIn) });
           } else if (evt.type === 'result') {
             output = evt.result ?? '';
             if (evt.usage) {
@@ -220,7 +226,8 @@ export const claudeHeadlessBackend = {
               const u = usageFrom(evt.usage);
               tokensIn = Math.max(tokensIn, u.input + u.cacheRead + u.cacheCreate);
               tokensOut = Math.max(tokensOut, u.output);
-              onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut });
+              cacheReadIn = Math.max(cacheReadIn, u.cacheRead);
+              onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: cacheReadIn, tokens_billable: billableTokens(tokensIn, tokensOut, cacheReadIn) });
             }
           }
         }

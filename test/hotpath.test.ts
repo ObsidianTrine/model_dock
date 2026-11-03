@@ -303,7 +303,8 @@ describe('createUsageTap：预过滤与多字节边界', () => {
     // 「模」是 3 字节 UTF-8，从其首字节后 1 字节处切开
     const head = Buffer.from('data: {"choices":[{"delta":{"content":"模', 'utf8')
     const usage = await feedTap([buf.subarray(0, head.length), buf.subarray(head.length)], 'text/event-stream')
-    expect(usage).toEqual({ input_tokens: 11, output_tokens: 7, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    // openai 口径：prompt_tokens 已含缓存读（此处无），billable = prompt + completion
+    expect(usage).toEqual({ input_tokens: 11, output_tokens: 7, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 18 })
   })
 
   it('anthropic 形态：message_start/message_delta 提取不变，无 usage 的 delta 行跳过解析', async () => {
@@ -314,7 +315,8 @@ describe('createUsageTap：预过滤与多字节边界', () => {
       'data: [DONE]',
     ].join('\n\n') + '\n\n'
     const usage = await feedTap([Buffer.from(sse, 'utf8')], 'text/event-stream')
-    expect(usage).toEqual({ input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5 })
+    // anthropic 口径：input_tokens 不含缓存读/写，billable = input + cache_creation + output
+    expect(usage).toEqual({ input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5, billable_tokens: 147 })
   })
 
   it('非流式 JSON：中文跨 chunk 切开，顶层 usage 照常提取', async () => {
@@ -322,7 +324,7 @@ describe('createUsageTap：预过滤与多字节边界', () => {
     const buf = Buffer.from(json, 'utf8')
     const head = Buffer.from('{"content":"模', 'utf8')
     const usage = await feedTap([buf.subarray(0, head.length), buf.subarray(head.length)], 'application/json')
-    expect(usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    expect(usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 7 })
   })
 
   it('SSE 行缓冲封顶（卡 31）：超长无换行 chunk 触发封顶，后续 usage 不再解析（只透传）', async () => {
@@ -336,7 +338,7 @@ describe('createUsageTap：预过滤与多字节边界', () => {
       tap.on('finish', () => resolve(tap.getUsage()))
       tap.end()
     })
-    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    expect(usage).toEqual({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 0 })
   })
 
   it('封顶阈值内的正常 SSE 不受影响（对照）', async () => {

@@ -591,8 +591,12 @@ async function cmdRun(repoRoot, taskId, opts) {
       const notes = safeRead(path.join(worktree, 'NOTES.md'));
       const snap = [...events].reverse().find((e) => e.type === 'budget_snapshot' && Number.isFinite(e.tokens_in));
       const maxTokens = meta.budget?.max_tokens;
+      // 油量口径与 max_tokens 熔断一致（可计费，剔除缓存读）：新事件带 tokens_billable
+      // 用之；旧事件回落 tokens_in（缓存读计入，读数偏保守）并如实标注口径
+      const oilVal = snap ? (Number.isFinite(snap.tokens_billable) ? snap.tokens_billable : snap.tokens_in) : 0;
+      const oilScope = snap && Number.isFinite(snap.tokens_billable) ? '可计费口径' : '旧口径（含缓存读）';
       const oil = snap && maxTokens
-        ? `油量：已耗 ${Math.round((snap.tokens_in / maxTokens) * 100)}%（${snap.tokens_in} / ${maxTokens} tokens）；本次接棒预算已重置`
+        ? `油量：已耗 ${Math.round((oilVal / maxTokens) * 100)}%（${oilVal} / ${maxTokens} tokens，${oilScope}）；本次接棒预算已重置`
         : '油量：尚无用量快照（上次中断在首次记账之前）；本次接棒预算已重置';
       promptText +=
         `\n\n---\n\n# 交接班单（上次值班留下的现场）\n\n` +
@@ -627,7 +631,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       for (;;) {
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
         xte.beforeWorkerSession(); // 偏航 no_commit：记会话起点 HEAD（连续 2 会话零提交报警）
-        appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens });
+        appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens, tokens_billable: budget.billable });
         workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
         workerInFlight = true; // 看门狗：spawn 在跑标记
         {
@@ -653,7 +657,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             onEvent: (e) => {
               appendEvent(qdir, e.type, e);
               trackPid(e);
-              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out);
+              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 第三参缺省（旧事件/mock）= 旧口径
               if (e.type === 'worker_turn' && watchdogSpawn) onWatchdogTurn(); // 看门狗钩子行（observe/actuate 见 watchdog.mjs）
             },
             settingsFile,
@@ -909,7 +913,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           onEvent: (e) => {
             appendEvent(qdir, e.type, e);
             trackPid(e);
-            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out); // 审查计入同一预算口径
+            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 审查计入同一预算口径（第三参缺省 = 旧口径）
           },
           readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
           model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
@@ -980,7 +984,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'auto_merge', { level: classification.level, gate: meta.gate, debugIter, reviewIter });
         moveCard(root, taskId, gateFrom, 'awaiting-human'); // 落位到闸门目录（不写 awaiting_human 事件，不等人）
         await doApprove(repoRoot, taskId, root, qdir, 'auto');
-        appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
+        appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, tokens_billable: budget.billable, tokens_cache_read: budget.cacheRead, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
         return;
       }
 
@@ -1004,7 +1008,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         printGateSummary(taskId, summary);
         log(`人工操作：node .agents/scripts/orchestrator.mjs approve|reject|retry ${taskId}`);
       }
-      appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
+      appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, tokens_billable: budget.billable, tokens_cache_read: budget.cacheRead, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
       return;
     }
   } catch (e) {
@@ -2095,10 +2099,20 @@ async function cmdReconcile(repoRoot, taskId, opts = {}) {
     } else if (r.costReason) {
       costPart = `  燃油账不可用（${r.costReason}）`;
     }
+    // 分歧率口径（2026-11 usage-cache-read-scope）：两本账都有可计费字段按 billable 对
+    // billable（与 max_tokens 熔断同口径）；缺新字段回落旧口径并标注。燃油账始终总口径（美元）。
+    const billable = r.scope === 'billable';
+    const selfPart = billable
+      ? `自报 ${fmtK(r.selfBillable)}（可计费；总 ${fmtK(r.selfTotal)}，in ${fmtK(r.selfReported.tokensIn)} / out ${fmtK(r.selfReported.tokensOut)}）`
+      : `自报 ${fmtK(r.selfTotal)}（in ${fmtK(r.selfReported.tokensIn)} / out ${fmtK(r.selfReported.tokensOut)}）`;
+    const gwPart = billable
+      ? `网关实测 ${fmtK(r.gatewayBillable)}（可计费；总 ${fmtK(r.gateway.total)}，${r.gateway.requests} 次转发，缓存读 ${fmtK(r.gateway.cacheRead)}）`
+      : `网关实测 ${fmtK(r.gateway.total)}（${r.gateway.requests} 次转发，缓存读 ${fmtK(r.gateway.cacheRead)}）`;
+    const scopeTag = billable ? '' : '  旧口径（事件/日志缺可计费字段，缓存读计入）';
     log(
-      `  ${r.taskId.padEnd(24)} 自报 ${fmtK(r.selfTotal)}（in ${fmtK(r.selfReported.tokensIn)} / out ${fmtK(r.selfReported.tokensOut)}）` +
-        `  网关实测 ${fmtK(r.gateway.total)}（${r.gateway.requests} 次转发，缓存读 ${fmtK(r.gateway.cacheRead)}）` +
-        `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}${costPart}`
+      `  ${r.taskId.padEnd(24)} ${selfPart}` +
+        `  ${gwPart}` +
+        `  分歧 ${(r.divergence * 100).toFixed(0)}%${r.viaGateway ? '' : '  ⚠ 网关零流量——worker 未走狗粮'}${scopeTag}${costPart}`
     );
   }
 }
