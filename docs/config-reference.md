@@ -51,6 +51,7 @@ active_profile = "ark-coding"
 | `enabled` | `boolean` | 否 | `true` | 设 `false` 手动下线该服务：不再探测，也不参与自动路由与故障切换。 |
 | `priority` | `number` | 否 | `0` | 自动路由候选排序权重，数值大者优先；仅在「程序自动选主」开启时生效。 |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | 否 | 无 | 按协议覆盖基地址：同一服务商同时提供 anthropic / openai / responses 多协议端点、供不同客户端直连时使用；未写的协议回落 `base_url`。 |
+| `max_concurrency` | `number` | 否 | `0`（不限） | 该服务的并发请求数上限（网关侧排队）：多 agent worker 并发打上游容易触发上游限流（429）时，设为上游可承受的并发数，超额请求在网关内排队等待而不是压垮上游；排队时长见 `gateway.queue_wait_ms`。 |
 
 示例：
 
@@ -66,6 +67,7 @@ proxy = "direct"
 enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
+max_concurrency = 2
 ```
 
 ## 3. 模型元数据（models）
@@ -191,6 +193,7 @@ key_path = "$.modeldock"
 | `auto_failover` | `boolean` | 否 | `false`（关） | 「程序自动选主」开关：开启后按时段 / 优先级 / 实测耗时自动挑选主服务；关闭（默认）= 主服务由人工钉定或默认路由决定。主服务不可达时切备用始终可用，不受此开关影响。 |
 | `auto_route_provider` | `string` | 否 | 空（自动） | 人工钉定的主服务 id：设置后路由优先走它（优先于程序自动与定时时段）；留空 = 程序按时段 / 默认路由选主。与控制台「当前」下拉同款。 |
 | `failover_status_codes` | `number[]` | 否 | `[]`（不切换） | 响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。 |
+| `queue_wait_ms` | `number` | 否 | `2000` | 服务并发满载（`max_concurrency`）时的排队等待上限（ms）：等不到空位就跳下一候选 / 回 429。 |
 | `route_next` | `string` | 否 | 空（自动排序） | 人工钉定的「下一个切换」：主服务不可达时优先切到它（排到备用链首位）；留空按优先级 / 实测耗时自动排序。 |
 | `auto_fallback` | `boolean` | 否 | `true`（开） | 「自动备用链」开关：手动备用链之外，自动把其他已启用服务补进切换候选（按定时窗口 / 优先级 / 实测耗时排序，模型名透传）；仅显式 `false` 关闭。 |
 
@@ -207,6 +210,7 @@ log_retention_days = 30
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]
+queue_wait_ms = 5000
 route_next = "backup"
 auto_fallback = true
 ```

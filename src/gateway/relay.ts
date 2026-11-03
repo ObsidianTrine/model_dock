@@ -6,6 +6,7 @@ import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type ResolvedTarget } from './state.js'
 import { dispatcherFor } from './proxy.js'
+import { acquireProviderSlot, ProviderQueueTimeoutError, providerConcurrencyLimit, queueWaitMs, type ProviderSlot } from './concurrency.js'
 
 /** 需要模型名改写的业务端点（其余路径纯透传） */
 const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions|completions|responses|embeddings)$/
@@ -609,6 +610,9 @@ export interface FailoverResult extends UpstreamResult {
   usedProviderId: string
   /** 改发/重放事件标记（failover_to:<id>、replayed_from:<id>）；主选直连成功不设——日志过滤与 Web 展示依赖「非空即事件」约定 */
   reason?: string
+  /** 并发闸槽位释放句柄（该候选配了 max_concurrency 时非空）：响应结束（错误回包发出 / 流式读完）后必须调用，
+   *  流式响应要等客户端收完才释放。转发失败路径由 forwardWithFailover 内部就地释放，不经此字段 */
+  release?: () => void
 }
 
 function isTransportFailure(e: unknown): boolean {
@@ -623,6 +627,52 @@ function isTransportFailure(e: unknown): boolean {
 const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
 function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
+}
+
+/** 上游 429 Retry-After 退避重试的等待上限：交互请求不宜长等——上游要 5s 以上才让重试时，
+ *  原地干等不如维持既有 failover 语义换候选（或把 429 交还客户端自行退避） */
+const RETRY_AFTER_MAX_WAIT_MS = 5_000
+
+/** 解析 Retry-After 头（RFC 7231：delta-seconds 或 HTTP-date 两种格式）→ 距今应等待的 ms。
+ *  无头 / 无法解析返回 null（不重试，维持既有语义）；HTTP-date 已过期（负差值）钳为 0（立即重试）。 */
+export function parseRetryAfterMs(v: string | string[] | undefined, now = Date.now()): number | null {
+  if (v == null) return null
+  const raw = (Array.isArray(v) ? v[0] : String(v)).trim()
+  if (!raw) return null
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000
+  const at = Date.parse(raw)
+  if (Number.isNaN(at)) return null
+  return Math.max(0, at - now)
+}
+
+/** 可中断 sleep：signal 触发（客户端断开）时立刻 reject，不为已离开的客户端占着并发槽等退避 */
+function sleepInterruptible(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error('aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** 并发闸排队超时 → 429 + 可操作 hint：点名哪个服务满了、建议调大 max_concurrency 或降低客户端并发 */
+function queueTimeoutError(e: ProviderQueueTimeoutError, p: ProviderConfig | undefined): UpstreamError {
+  const err = new UpstreamError(
+    429,
+    t('服务「{name}」并发已达上限 {n}，排队等待 {ms}ms 仍无空闲槽位', 'Provider "{name}" is at its concurrency limit of {n}; no free slot after queuing for {ms}ms', { name: p?.name ?? e.providerId, n: e.limit, ms: e.waitMs }),
+    t('调大 config.toml 中该服务的 max_concurrency（Web 控制台「编辑服务」可改），或降低客户端并发数', 'Raise max_concurrency for this provider in config.toml (editable under "Edit Service" in the web console), or reduce client concurrency')
+  )
+  err.routeReason = 'queue_full'
+  return err
 }
 
 /** 摘掉 content-encoding 头（大小写不敏感）：体被解压/重包为明文后不得再声明压缩 */
@@ -641,6 +691,9 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
  * 任何其他已送达的真实 status（含 5xx）就地返回、不重放，避免重复计费。
  * 例外：gateway.failover_status_codes 显式列出的状态码（如 429/503，上游未产出内容）在还有剩余候选时切换，切换前排空响应体释放连接。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
+ * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
+ * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
+ * 429 退避（P0③）：上游 429 带 Retry-After 且 ≤ 5s 时同候选原地等待重试一次（额度体除外），留痕 retried_429:。
  */
 export async function forwardWithFailover(
   rt: GatewayRuntime,
@@ -655,6 +708,8 @@ export async function forwardWithFailover(
   }
   const codes = rt.config.gateway?.failover_status_codes
   const switchable = Array.isArray(codes) && codes.length ? new Set(codes) : null
+  // 并发闸排队等待上限（每次请求读实时配置：热加载 queue_wait_ms 即时生效）
+  const waitMs = queueWaitMs(rt.config.gateway)
   let lastErr: unknown
   // 记录因重放而跳过的候选（传输层失败/限流切换/候选不可用），便于日志对账——
   // 数组累积去重：A→B→C 连续重放时单变量会反复覆盖，最终 reason 只剩最后一跳（CORRECT-09 ③）
@@ -662,15 +717,54 @@ export async function forwardWithFailover(
   const markReplay = (id: string) => {
     if (!replayedFrom.includes(id)) replayedFrom.push(id)
   }
+  // 并发闸排队超时被跳过的候选与做了 429 退避重试的候选（reason 留痕，同 replayed_from 风格）
+  const queueFull: string[] = []
+  const retried429: string[] = []
   for (let i = 0; i < picked.ordered.length; i++) {
     const c = picked.ordered[i]
     const t0 = Date.now()
+    // 并发闸（P0②）：转发前对实际选中候选的 provider 取槽；满载排队 ≤ queue_wait_ms。
+    // 槽位生命周期到响应结束（成功路径挂在返回值上由 server.ts 释放）；失败路径就地释放
+    let slot: ProviderSlot | undefined
+    const limit = providerConcurrencyLimit(c.target.provider)
+    if (limit > 0) {
+      try {
+        slot = await acquireProviderSlot(rt, c.providerId, limit, waitMs, opts.signal)
+      } catch (e) {
+        // 排队超时 ≠ 上游故障（不记熔断）：链中还有候选就跳过去换一家，链尾才回 429+hint
+        if (e instanceof ProviderQueueTimeoutError) {
+          if (i < picked.ordered.length - 1) {
+            if (!queueFull.includes(c.providerId)) queueFull.push(c.providerId)
+            markReplay(c.providerId)
+            continue
+          }
+          throw queueTimeoutError(e, rt.config.providers[c.providerId])
+        }
+        throw e // 客户端断开（aborted）：原样上抛，handleRequest 落 499
+      }
+    }
     try {
-      const up = await forwardToUpstream(rt, c.target, opts)
+      let up = await forwardToUpstream(rt, c.target, opts)
+      // 429 退避（P0③）：上游带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次
+      // （429 = 请求未被上游处理，重放无重复计费风险）。无头 / 超过 5s / 额度耗尽体（几秒内不会
+      // 恢复）维持既有 failover 语义不变。重试留痕 retried_429:<id>。
+      let drained: string | undefined
+      if (up.status === 429) {
+        const raMs = parseRetryAfterMs(up.headers['retry-after'])
+        if (raMs !== null && raMs <= RETRY_AFTER_MAX_WAIT_MS) {
+          drained = await readUpstreamErrorText(up.headers, up.body) // 排空释放连接后再等待/重试
+          if (!isQuotaError(up.status, drained)) {
+            if (raMs > 0) await sleepInterruptible(raMs, opts.signal)
+            if (!retried429.includes(c.providerId)) retried429.push(c.providerId)
+            up = await forwardToUpstream(rt, c.target, opts)
+            drained = undefined // 重试产生的是新响应，体未读
+          }
+        }
+      }
       const ms = Date.now() - t0
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
-      if (up.status === 429 || up.status === 402) bodyText = await readUpstreamErrorText(up.headers, up.body)
+      if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
@@ -680,20 +774,33 @@ export async function forwardWithFailover(
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < picked.ordered.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
+        slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
+        slot = undefined
         markReplay(c.providerId)
         continue
       }
       const marks: string[] = []
       if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
+      if (queueFull.length) marks.push(`queue_full:${queueFull.join(',')}`)
+      if (retried429.length) marks.push(`retried_429:${retried429.join(',')}`)
       if (replayedFrom.length) marks.push(`replayed_from:${replayedFrom.join(',')}`)
       // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
       // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
-      const drained = bodyText
-      const out: UpstreamResult = drained !== undefined
-        ? { ...up, headers: withoutContentEncoding(up.headers), body: { text: async () => drained } }
+      const outDrained = bodyText
+      const out: UpstreamResult = outDrained !== undefined
+        ? { ...up, headers: withoutContentEncoding(up.headers), body: { text: async () => outDrained } }
         : up
-      return { ...out, usedProviderId: c.providerId, reason: marks.length ? marks.join(',') : undefined }
+      // 成功路径不在此释放：流式响应要等客户端收完才释放槽（server.ts 于响应结束后调用 release）
+      const held = slot
+      return {
+        ...out,
+        usedProviderId: c.providerId,
+        reason: marks.length ? marks.join(',') : undefined,
+        ...(held ? { release: () => held.release() } : {}),
+      }
     } catch (e) {
+      slot?.release() // 异常路径必须释放槽，否则该 provider 永久少一个并发额度
+      slot = undefined
       // 客户端已断开：中止错误不记熔断、不迭代下一候选，直接终止整条链
       if (opts.signal?.aborted) throw e
       lastErr = e
