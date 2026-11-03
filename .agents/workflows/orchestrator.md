@@ -276,6 +276,8 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 
 `propose`：goals.md + drafts 巡检信号 + 队列现状 → 一次只读 planner 会话产出至多 `maxProposalsPerCycle` 张高质量提案（验收标准带具体行为断言、files_hint 精确、目标对齐），落 drafts/；白名单卡立即自动提交。深化既有提案用**同 id**（落盘覆盖=升级）。烧钱动作；`nightly --plan` 与 watch（autopilot 开时）内部调用同一命令。
 
+- **舰队反馈（可选，workflow.json `"propose": { "feedback": true }`，缺省关 = prompt 与历史逐字节一致）**：开启后 planner prompt 在「队列现状」之后追加**舰队反馈**段——只放数据事实、不写硬指令，让 planner 按数据自行定 priority 取舍：近 7 天 near-miss 四类分布（watchdog suspect / 瞬时重试 / 偏航报警 / 事故调查包）、各 type 卡消化数据（merged 率 / merged 平均 wall / merged 平均 token 峰值）、质量漂移降级状态、goals.md「当前主题」摘录。数据与 `stats` 命令同源同口径（`orchestrator/stats.mjs` 的 `collectStatsSummary`，数据窗口固定近 7 天 = stats `--days` 缺省）；`nightly --plan` / watch / sail 内部走同一 propose 命令自动受益。
+
 ### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
 `nightly` = scan 出提案 + autopilot 白名单提交 + drift 报告 + 队列摘要（默认零烧钱；`--plan` 加跑 planner；`--auto N` 夜间对 high 提案提交并发起闭环再 drain N 个——worker 烧钱仅此档，gate=L3 兜底合并仍人工）。`schedule install --hour 2 --minute 30 [--auto 3] [--mode watch]` 注册定时（launchd/crontab/schtasks 经 wrapper 绝对路径启动，不依赖调度环境 PATH；仓库挪位置后重装）。日志 `logs/nightly.log`（超 5MB 轮转）。跑完发通知：macOS 本地通知 + `${envPrefix}_NIGHTLY_WEBHOOK`（如 `AGENTS_NIGHTLY_WEBHOOK`，旧名 MODELRDOCK_* 兼容）POST `{title, body, ts}`；通知尽力而为，摘要始终在日志。

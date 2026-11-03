@@ -35,6 +35,7 @@ import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
+import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
@@ -2092,55 +2093,9 @@ async function cmdStats(repoRoot, opts = {}) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const days = Number.isInteger(opts.days) && opts.days > 0 ? opts.days : 7;
-  const since = Date.now() - days * 86_400_000;
-  const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
-  let taskIds = [];
-  try {
-    taskIds = fs.readdirSync(logsRoot).filter((id) => fs.existsSync(path.join(logsRoot, id, 'events.jsonl')));
-  } catch { /* logs/ 不存在 = 还没跑过任何任务 */ }
-
-  const rows = [];
-  const windowsById = new Map(); // id → {start, end}（--cost 燃油投影用；不进 --json 行）
-  for (const id of taskIds) {
-    const events = readEvents(path.join(logsRoot, id));
-    if (!events.length) continue;
-    const accepted = events.find((e) => e.type === 'task_accepted');
-    const start = Date.parse(accepted?.ts ?? events[0].ts);
-    if (Number.isFinite(start) && start < since) continue; // 只统计最近 N 天启动的任务
-    const found = findCard(root, id);
-    let createdBy = '', type = '', gate = '';
-    if (found) {
-      try {
-        const { meta } = parseCard(fs.readFileSync(found.path, 'utf8'), found.path);
-        createdBy = meta.created_by ?? '';
-        type = meta.type ?? '';
-        gate = meta.gate ?? '';
-      } catch { /* 损坏卡：度量照出，元信息留空 */ }
-    }
-    const terminal = [...events].reverse().find((e) => ['merged', 'failed', 'blocked'].includes(e.type));
-    const end = Date.parse(terminal?.ts ?? events[events.length - 1].ts);
-    const peaks = events.filter((e) => e.type === 'budget_snapshot' && Number.isFinite(e.tokens_in)).map((e) => e.tokens_in);
-    const count = (t) => events.filter((e) => e.type === t).length;
-    rows.push({
-      id,
-      state: found?.state ?? '(日志残留)',
-      created_by: createdBy,
-      type,
-      gate,
-      outcome: terminal?.type ?? found?.state ?? 'unknown',
-      wall_min: Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.round((end - start) / 60000)) : null,
-      turns: count('worker_turn'),
-      debug_iter: debugIterations(events),
-      review_iter: reviewIterations(events),
-      retries: count('worker_retry'),
-      watchdog_suspect: count('watchdog_suspect'),
-      follow_ups: count('follow_up'),
-      tokens_peak: peaks.length ? Math.max(...peaks) : 0,
-      xte_alarms: count('xte_alarm'),
-      incident: fs.existsSync(path.join(logsRoot, id, 'incident.md')) ? 1 : 0,
-    });
-    if (Number.isFinite(start) && Number.isFinite(end)) windowsById.set(id, { start, end });
-  }
+  // 行收集与基础 summary 聚合抽至 orchestrator/stats.mjs（propose 舰队反馈共用同一数据层）；
+  // 输出形态与历史逐字节一致——rows/summary 口径原样保留，--cost 附加字段仍在此追加。
+  const { rows, windowsById, summary } = collectStatsSummary(repoRoot, { days });
 
   // 燃油账（--cost）：网关实测 token × 价目。放在 summary 前——summary.total_cost_usd 一并出。
   let fuelReason = null;
@@ -2161,33 +2116,6 @@ async function cmdStats(repoRoot, opts = {}) {
     }
   }
 
-  const settled = rows.filter((r) => ['merged', 'failed', 'blocked'].includes(r.outcome));
-  const mergedRows = rows.filter((r) => r.outcome === 'merged');
-  const sum = (f) => rows.reduce((n, r) => n + (f(r) ?? 0), 0);
-  const summary = {
-    window_days: days,
-    tasks_started: rows.length,
-    queue: Object.fromEntries(STATES.map((s) => [s, listCards(root, s).length])),
-    settled: settled.length,
-    merged: mergedRows.length,
-    merge_rate: settled.length ? Math.round((mergedRows.length / settled.length) * 100) / 100 : null,
-    avg_merged_wall_min: mergedRows.length ? Math.round(mergedRows.reduce((n, r) => n + (r.wall_min ?? 0), 0) / mergedRows.length) : null,
-    total_turns: sum((r) => r.turns),
-    total_debug_iter: sum((r) => r.debug_iter),
-    total_review_iter: sum((r) => r.review_iter),
-    total_retries: sum((r) => r.retries),
-    total_watchdog_suspect: sum((r) => r.watchdog_suspect),
-    total_follow_ups: sum((r) => r.follow_ups),
-    total_tokens_peak: sum((r) => r.tokens_peak),
-    // 安全晴雨表（near-miss）：险情比事故多——watchdog suspect / 瞬时重试 / 偏航报警 /
-    // 事故调查包四类「差点出事」信号单独成表，供流程调优先于事故发生。
-    near_miss: {
-      watchdog: sum((r) => r.watchdog_suspect),
-      retries: sum((r) => r.retries),
-      xte: sum((r) => r.xte_alarms),
-      incidents: sum((r) => r.incident),
-    },
-  };
   const costRows = rows.filter((r) => r.cost_usd != null);
   if (opts.flags?.has('--cost')) {
     summary.total_cost_usd = costRows.length ? costRows.reduce((n, r) => n + r.cost_usd, 0) : 0;
@@ -2572,7 +2500,17 @@ async function cmdPropose(repoRoot, opts) {
       .filter(Boolean)
       .join('\n');
     const queueSummary = STATES.map((s) => `${s}=${listCards(root, s).length}`).join(' ');
-    let promptText = buildProposePrompt({ goals: readGoals(repoRoot), signals, queueSummary, maxCards: max, repoRoot });
+    // 舰队反馈（可选，workflow.json propose.feedback 缺省关）：stats 同源的运行度量数据事实
+    // 注入 planner prompt（近 7 天 near-miss 分布 / 各 type 消化数据 / drift 状态 / goals 当前
+    // 主题摘录）。只放数据不写硬指令——priority 取舍由 planner 按数据自行判断。
+    // 关闭时 fleetFeedback 为 null，prompt 与历史逐字节一致（回归红线）。
+    const goals = readGoals(repoRoot);
+    let fleetFeedback = null;
+    if (cfg.propose?.feedback) {
+      const fb = collectStatsSummary(repoRoot, { days: 7 }); // 数据窗口与 stats --days 缺省一致（近 7 天）
+      fleetFeedback = buildFleetFeedback({ summary: fb.summary, perType: fb.perType, drift: fb.drift, goalsThemes: extractGoalsThemes(goals) });
+    }
+    let promptText = buildProposePrompt({ goals, signals, queueSummary, maxCards: max, repoRoot, fleetFeedback });
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);

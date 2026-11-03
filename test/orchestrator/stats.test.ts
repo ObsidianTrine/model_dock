@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { cardText, mkRepo, runOrch } from './helpers.js'
+import { collectStatsSummary } from '../../.agents/scripts/orchestrator/stats.mjs'
 
 function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
   const cardFile = path.join(repo, `card-${id}.md`)
@@ -122,6 +123,30 @@ describe('orchestrator stats > 安全晴雨表（near_miss）', () => {
       const human = runOrch(repo.root, 'stats')
       expect(human.stdout).toContain('安全晴雨表')
       expect(human.stdout).toContain('近乎事故')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+describe('orchestrator stats > collectStatsSummary（propose 舰队反馈共用数据层）', () => {
+  it('summary/rows 与 stats --json 输出完全一致；perType/drift 为附加产出不污染 summary', () => {
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'st-cs') // gate L3 → awaiting-human（未合并样本）
+      runOrch(repo.root, 'run st-cs --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' }) // blocked 样本（带 worker_retry）
+      const r = runOrch(repo.root, 'stats --days 7 --json')
+      const parsed = JSON.parse(r.stdout)
+      const collected = collectStatsSummary(repo.root, { days: 7 })
+      // 回归红线：cmdStats 输出形态不变 ←→ 收集函数与命令输出逐字段一致
+      expect(collected.summary).toEqual(parsed.summary)
+      expect(collected.rows).toEqual(parsed.rows)
+      // 附加产出：perType 分类型消化数据 + drift 状态（只读）
+      expect(collected.perType).toHaveLength(1)
+      expect(collected.perType[0]).toMatchObject({ type: 'bugfix', started: 1, settled: 1, merged: 0, merge_rate: 0, avg_merged_wall_min: null, avg_merged_tokens_peak: null })
+      expect(collected.drift).toBeNull()
+      expect(parsed.summary).not.toHaveProperty('perType')
+      expect(parsed.summary).not.toHaveProperty('drift')
     } finally {
       repo.cleanup()
     }
