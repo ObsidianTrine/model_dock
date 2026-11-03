@@ -16,7 +16,7 @@ export function checkTokenLimits(rt: GatewayRuntime, harnessId: string, now = Da
   if (!limits || (limits.rpm == null && limits.daily_tokens == null)) return null
   let st = rt.tokenUsage.get(harnessId)
   if (!st) {
-    st = { rpmStart: now, rpmCount: 0, dayKey: dayKeyOf(now), dayTokens: 0 }
+    st = { rpmStart: now, rpmCount: 0, dayKey: dayKeyOf(now), dayTokens: 0, dayBillableTokens: 0 }
     rt.tokenUsage.set(harnessId, st)
   }
   if (now - st.rpmStart > 60_000) {
@@ -34,11 +34,15 @@ export function checkTokenLimits(rt: GatewayRuntime, harnessId: string, now = Da
 }
 
 /** 响应后累计当日 token（usage 缺省/解析失败记 0——尽力而为，与 usage tap 同语义）。
- *  未经过 checkTokenLimits（无 limits 配置，无状态条目）时不建状态、静默跳过。 */
+ *  未经过 checkTokenLimits（无 limits 配置，无状态条目）时不建状态、静默跳过。
+ *  双口径：dayTokens = 总口径（缓存读计入，daily_tokens 限额判定沿用）；dayBillableTokens =
+ *  可计费口径（usage.billable_tokens，usage tap 按协议算好）——供 /_modeldock/harness-usage
+ *  消费方（编排器预算实测账）做剔除缓存读的判定。旧 usage 无 billable_tokens 字段（旧网关
+ *  内存态/直灌调用）按 0 累加，计数自然从 0 起步（内存态重启清零，无跨版本迁移问题）。 */
 export function recordTokenUsage(
   rt: GatewayRuntime,
   harnessId: string,
-  usage: { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cache_creation_tokens?: number } | undefined,
+  usage: { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cache_creation_tokens?: number; billable_tokens?: number } | undefined,
   now = Date.now()
 ): void {
   if (!usage) return
@@ -47,8 +51,10 @@ export function recordTokenUsage(
   if (st.dayKey !== dayKeyOf(now)) {
     st.dayKey = dayKeyOf(now)
     st.dayTokens = 0
+    st.dayBillableTokens = 0
   }
   st.dayTokens += (usage.input_tokens ?? 0) + (usage.cache_read_tokens ?? 0) + (usage.cache_creation_tokens ?? 0) + (usage.output_tokens ?? 0)
+  st.dayBillableTokens += Math.max(0, usage.billable_tokens ?? 0)
 }
 
 function dayKeyOf(now: number): string {

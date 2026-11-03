@@ -64,6 +64,16 @@
 //                   orchestrator/trace.mjs）：input/output 超上界截前缀（{ truncated,
 //                   originalBytes } 标记）、每 kind 滚动保留 maxPerTask 份；enabled=false
 //                   完全不留底。非法值回落缺省并 console.warn 告警
+//   gateTimeoutMinutes  门禁单命令超时分钟数（正整数，缺省 20）——gates.mjs runCmd 的默认
+//                   超时，超时按进程树终止（win32 taskkill /T /F；unix 进程组 kill）
+//   retryWaitBaseMs worker 瞬时故障原地重试的退避基值 ms（非负整数，缺省 60000）；
+//                   env ORCH_RETRY_WAIT_MS 优先级更高（测试收缩到 ms 级用），两者都缺
+//                   = 60s×attempt（与 dockmaster 技能「429 退避 60s」口径一致）
+//   scheduling      worker 并发供给闸：{ maxWorkers?: 正整数（缺省 1 = 现状不变） }。
+//                   drain 的有效并发 = min(请求并发（--workers 或本键）, provider 容量)；
+//                   容量经网关 admin 面观测（tier-validate → provider → config 的
+//                   max_concurrency + metrics 的 keypool 健康，见 orchestrator/supply.mjs）。
+//                   观测面未开启（gatewayAdmin 缺省 false）不设闸，行为与历史版本一致
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -136,8 +146,13 @@ export function loadWorkflowConfig(repoRoot) {
     // 网关权威 tier 校验开关（admin 面）：显式 true 才允许编排器读 gateway.json / 调
     // /_modeldock/tier-validate——可移植工具链不得默认读用户 home 下的 ModelDock 状态
     gatewayAdmin: raw.gatewayAdmin === true,
-    driftThreshold: typeof raw.driftThreshold === 'number' && Number.isFinite(raw.driftThreshold) && raw.driftThreshold > 0 && raw.driftThreshold <= 1 ? raw.driftThreshold : 0.2,
+    // drift 阈值可调不可关（design doc §10.5）：0 / false / 超界等非法值拒绝生效（回落缺省 0.2）
+    // 且显式告警——键缺失不告警（沿用缺省），显式写错必须让人看见（2026-11 B11 常量收口）
+    driftThreshold: resolveDriftThreshold(raw.driftThreshold),
     reviewMaxTurns: Number.isInteger(raw.reviewMaxTurns) && raw.reviewMaxTurns > 0 ? raw.reviewMaxTurns : 30,
+    gateTimeoutMinutes: resolvePositiveInt(raw.gateTimeoutMinutes, 20, 'gateTimeoutMinutes'),
+    retryWaitBaseMs: resolveNonNegativeInt(raw.retryWaitBaseMs, 60_000, 'retryWaitBaseMs'),
+    scheduling: resolveScheduling(raw.scheduling),
     fastlaneAllowed: raw.fastlaneAllowed !== false, // 缺省 true；仅显式 false 关闭（其他值视为未配置）
     watchdog: resolveWatchdog(raw.watchdog),
     autopilot: resolveAutopilot(raw.autopilot),
@@ -150,6 +165,59 @@ export function loadWorkflowConfig(repoRoot) {
     notify: resolveNotify(raw.notify),
   };
 }
+
+/** drift 降级阈值：0 < v ≤ 1，缺省 0.2。可调不可关（design doc §10.5）——显式给出的
+ *  非法值（0 / false / 负数 / >1 / 字符串）拒绝生效并 console.warn 报错（回落缺省 0.2，
+ *  漂移监控没有「不监控」档）；键缺失 = 沿用缺省，不告警。 */
+function resolveDriftThreshold(raw) {
+  if (raw === undefined) return 0.2;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0 && raw <= 1) return raw;
+  console.warn(`[workflow-config] driftThreshold ${JSON.stringify(raw)} 不合法（须为 0 < v ≤ 1 的数值；漂移监控可调不可关）——回落缺省 0.2`);
+  return 0.2;
+}
+
+/** 正整数键解析（B11 常量收口共用）：键缺失 = 沿用缺省不告警；显式非法值回落缺省并
+ *  console.warn 报错（与 resolveWatchdog 同风格，可操作文案点名键名）。 */
+function resolvePositiveInt(raw, fallback, name) {
+  if (raw === undefined) return fallback;
+  if (Number.isInteger(raw) && raw > 0) return raw;
+  console.warn(`[workflow-config] ${name} ${JSON.stringify(raw)} 不合法（须为正整数）——回落缺省 ${fallback}`);
+  return fallback;
+}
+
+/** 非负整数键解析（retryWaitBaseMs：0 = 立即重试，合法）。 */
+function resolveNonNegativeInt(raw, fallback, name) {
+  if (raw === undefined) return fallback;
+  if (Number.isInteger(raw) && raw >= 0) return raw;
+  console.warn(`[workflow-config] ${name} ${JSON.stringify(raw)} 不合法（须为非负整数）——回落缺省 ${fallback}`);
+  return fallback;
+}
+
+/** worker 并发供给闸配置解析：{ maxWorkers: 正整数 }，缺省 1 = 现状不变（单 worker）。
+ *  drain 的有效并发 = min(请求并发, provider 容量)——容量观测见 orchestrator/supply.mjs；
+ *  非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格）。键缺失 = 沿用缺省，不告警。 */
+function resolveScheduling(raw) {
+  const DEFAULTS = { maxWorkers: 1 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] scheduling 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 scheduling 键：{ maxWorkers?: 正整数 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { maxWorkers? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.maxWorkers !== undefined) {
+    if (Number.isInteger(raw.maxWorkers) && raw.maxWorkers > 0) out.maxWorkers = raw.maxWorkers;
+    else warn(`maxWorkers ${JSON.stringify(raw.maxWorkers)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** 大 prompt 落文件阈值（D17，字符数）：worker prompt 超过它默认把全文落 logs/<taskId>/
+ *  prompt-full.md、正文收缩为「文件引用 + 要点摘要」——不再依赖 zcode argv 30k 超限后的
+ *  escalation 换船（escalation 保留为最后兜底）。取 20k：低于 zcode argv 上限 30k，给
+ *  收缩体（目标/验收/契约块）留足余量。常量集中在本模块（B11），无 workflow.json 键。 */
+export const PROMPT_FILE_THRESHOLD_CHARS = 20_000;
 
 /** 动态选船配置解析（阶段 3）：{ enabled?: bool（缺省 false=决策完全不参与，行为与历史
  *  一致）, envelope?: 船型数组（允许自动切换的船白名单——写进配置即持久授权，包络外永不

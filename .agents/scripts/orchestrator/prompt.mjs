@@ -83,6 +83,41 @@ export function buildWorkerPrompt(card, ctx) {
 }
 
 /**
+ * 大 prompt 落文件（D17）后的收缩正文：全文文件引用 + 要点摘要（worktree 路径 / 目标 /
+ * 验收标准 / 红线）+ 契约块模板。完整简报（AGENTS.md 系统层 / playbook 流程层 / 结束纪律 /
+ * 交接班单 / follow-up 全文）在 promptPath，worker 开工前必须先读它——正文只保留「开工即需」
+ * 的最小面，体量恒小于 zcode argv 上限（30k），escalation 换船退为最后兜底。
+ * 简报文件是编排器落的只读输入（logs/<taskId>/prompt-full.md，.agents/orchestrator/logs 已
+ * gitignore，不进 worktree、不污染 diff/审查面）；本摘要与全文冲突时以全文为准。
+ * @param {object} p { promptPath, card, ctx?, originalChars }
+ */
+export function buildPromptFileRefBody({ promptPath, card, ctx, originalChars = 0 }) {
+  const { meta, body } = card;
+  const contractFence = '```';
+  return (
+    `# 任务层：本次任务（${meta.id}，类型 ${meta.type}）\n\n` +
+    `你的完整任务简报已由编排器写入文件（${originalChars} 字符）：\n${promptPath}\n\n` +
+    `**开工第一件事：先用 Read 工具读完该文件全文并逐条遵守**——它包含仓库约定（AGENTS.md）、\n` +
+    `playbook 流程层、结束纪律与本契约的完整版；该文件是只读输入，不要修改它。与本摘要冲突时以全文为准。\n\n` +
+    (ctx?.worktreePath
+      ? `你的工作目录（worktree）是：${ctx.worktreePath}\n` +
+        `所有编辑必须使用此目录下的绝对路径，禁止改动主仓库或任何其他 worktree 的文件。\n\n`
+      : '') +
+    `## 目标（摘要）\n${body.goal}\n\n## 验收标准（orchestrator 会机器验证，务必逐条满足）\n${body.acceptance}\n\n` +
+    (body.redlines ? `## 红线（违反任一条任务直接失败）\n${body.redlines}\n\n` : '') +
+    `# 契约层：结束前必须输出结果块\n\n` +
+    `任务收尾时（提交完成之后），在回复的**最末尾**输出一个 fenced block（字段说明见简报文件）：\n\n` +
+    `${contractFence}${RESULT_MARKER}\n` +
+    `status: done | stuck\n` +
+    `summary: 一句话说明做了什么\n` +
+    `files_changed: ["相对 worktree 的路径", ...]\n` +
+    `tests: pass | fail\n` +
+    `notes_updated: true | false\n` +
+    `${contractFence}\n`
+  );
+}
+
+/**
  * 组装 reviewer prompt（全新上下文只读审查，复用 code-review.md 模板骨架）。
  * @param {object} card 任务卡
  * @param {string} diff `git diff <base>...HEAD` 全文

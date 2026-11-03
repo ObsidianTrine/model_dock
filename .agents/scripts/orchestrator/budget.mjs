@@ -10,6 +10,11 @@
 // 改用它；旧口径字段（tokens/sessionMax）保留不动（stats/交接油量等历史消费方兼容）；
 // 缓存读单列仅观测。旧事件无拆分字段时 cacheRead 按 0，billable 退化为旧口径——熔断
 // 不放松也不误伤。
+//
+// 实测账（2026-11 A4）：zcode 无逐 turn 自报（会话结束才一次性回填），自报账对运行中的
+// token 预算近乎失效。supply.mjs 每 60s 轮询 /_modeldock/harness-usage 的
+// day_billable_tokens（网关实测可计费口径）经 accountMeasured 入账：判定基线取
+// max(自报, 实测增量)——实测只让熔断更准（更早/更真实），字段缺失（旧网关）时自报账照旧兜底。
 
 /**
  * 任务预算账本。card.meta.budget: { max_tokens, max_wall_minutes }（queue.validateCard
@@ -29,6 +34,8 @@ export class Budget {
     this.sessionCacheRead = 0; // 当前会话内缓存读峰值
     this.tokens = 0; // committed + sessionMax，旧口径只读视图
     this.billable = 0; // committedBillable + sessionBillableMax，熔断与快照用它
+    this.measuredBillable = 0; // 网关实测口径（harness-usage day_billable_tokens 的会话增量，A4）
+    this.measuredBaseline = null; // 首次实测采样值（本任务起点基线；null = 尚无有效采样）
     this.started = Date.now();
     this.tripReason = null;
     this.lowFuel = { tokens: false, wall: false }; // 低水位标志位：各触发一次，防重复
@@ -78,13 +85,34 @@ export class Budget {
 
   /** token 低水位检查：过 80% 触发一次（与熔断同用可计费口径）。用交叉相乘整数比较
    *  （billable*5 ≥ max*4），规避 0.8 二进制浮点误差——6000/7500 恰好 80% 时
-   *  `tokens >= max*0.8` 会因 6000 >= 6000.0000000001 为假而漏报。 */
-  checkLowFuel() {
+   *  `tokens >= max*0.8` 会因 6000 >= 6000.0000000001 为假而漏报。
+   *  effective：判定基线（缺省自报账 billable；实测账路径传实测增量）。 */
+  checkLowFuel(effective = this.billable) {
     if (this.lowFuel.tokens || !(this.maxTokens > 0)) return;
-    if (this.billable * 5 >= this.maxTokens * 4) {
+    if (effective * 5 >= this.maxTokens * 4) {
       this.lowFuel.tokens = true;
-      this.emit({ kind: 'tokens', pct: Math.round((this.billable / this.maxTokens) * 100), tokens_in: this.tokens, tokens_billable: this.billable });
+      this.emit({ kind: 'tokens', pct: Math.round((effective / this.maxTokens) * 100), tokens_in: this.tokens, tokens_billable: effective });
     }
+  }
+
+  /**
+   * 网关实测账入账（A4 harness-usage 轮询，supply.mjs 喂入）：tokensBillable 是该 harness
+   * 当日 day_billable_tokens 原值；本任务消耗 = 当前值 − 起始基线（首次成功采样固化基线，
+   * 跨任务/跨来源的同 harness 流量不落入本任务预算——防 12.1M 式假阳性反向下沉到逐任务）。
+   * 判定基线 = max(自报账, 实测增量)：实测只抬高熔断/低油量基线（同 harness 兄弟流量只多
+   * 不少，保守方向安全），绝不回写 committed/session——自报账与 stats/reconcile 口径不动。
+   * 返回 true = 已入账；false = 非法值（调用方保持自报账兜底）。
+   */
+  accountMeasured(tokensBillable) {
+    if (!Number.isFinite(tokensBillable) || tokensBillable < 0) return false;
+    if (this.measuredBaseline == null) this.measuredBaseline = tokensBillable; // 首次采样 = 本任务起点
+    this.measuredBillable = Math.max(this.measuredBillable, Math.max(0, tokensBillable - this.measuredBaseline));
+    const eff = Math.max(this.billable, this.measuredBillable);
+    this.checkLowFuel(eff);
+    if (eff > this.maxTokens) {
+      this.trip('max_tokens', `累计 ${eff} / 上限 ${this.maxTokens} tokens（网关实测口径 harness-usage 可计费，剔除缓存读）`);
+    }
+    return true;
   }
 
   trip(reason, detail) {
