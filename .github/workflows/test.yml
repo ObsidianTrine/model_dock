@@ -35,26 +35,31 @@ jobs:
     # develop push 不跑。依据：macos arm64 hosted runner 排队严重（v1.5.0 曾连挂 7 次、
     # 2026-11-02 一次 run 排队 8h15m 才起跑），是 CI 最大的时间浪费源；而开发机就是 mac，
     # develop 高频直推上 mac 腿是重复支付。required check 不受影响：PR 上 mac 腿照常报告。
-    if: >-
-      matrix.os != 'macos-latest' ||
-      github.event_name == 'pull_request' ||
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # ⚠ 条件必须写在 step 级：job 级 if 没有 matrix 上下文（GitHub 解析直接拒绝整个
+    # workflow——push 静默不跑、dispatch 报 422，2026-11-03 v1.6.0 发布门禁实测踩中，
+    # d774182 上 check-runs 为 0）。拆独立 job 会改 check 名破坏 required check，不可取。
     # 正常全程 1~5 分钟；卡死（曾出现 Linux 上 vitest 收尾悬挂）20 分钟内强制失败，
     # 而不是悬死 6 小时。配合下方 always() 诊断步骤留下进程现场。
     timeout-minutes: 20
+    # step 级分级（= 非(mac && push && 非main)）：develop push 上 mac 腿只付 checkout + 占位
     steps:
       - uses: actions/checkout@v7
+      - name: mac 腿占位（develop push 分级跳过，PR / push main / 巡检 / 手动才真跑）
+        if: matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref != 'refs/heads/main'
+        run: echo 'mac 腿按触发分级跳过（见 job 头注）；占位保 required check 报告'
       - uses: actions/setup-node@v7
+        if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
         with:
           node-version: ${{ matrix.node }}
           cache: npm
       # --no-audit --no-fund：CI 审计门禁由 release-check 的 npm audit --omit=dev 承担，这里不重复付安装耗时
       - run: npm ci --no-audit --no-fund
+        if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       # noEmit：类型门禁；产物由发布链生成（build-sea.mjs 自带 tsc emit），本 job 无人消费
       - run: npx tsc -p tsconfig.json --noEmit
+        if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       - run: npm test
+        if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
       # 悬死排查调试模式：正常不需要。再出现测试悬死时，把上一行临时改为
       #   VITEST_WATCHDOG=1 npm test
