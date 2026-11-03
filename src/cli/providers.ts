@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { c, maskSecret, printTable, slugify, t } from '../util/index.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { addService, removeProviderCascade } from '../ops.js'
-import { defaultStore, deleteSecret, getSecret, setSecret, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getSecret, makeKeyRef, setSecret, type SecretBackend } from '../config/secrets.js'
 import { PRESETS, findPreset, ensurePresetsLoaded } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
@@ -259,7 +259,7 @@ export async function cmdProviderRm(id: string): Promise<void> {
 
 export async function cmdProviderSetKey(
   id: string,
-  opts: { key?: string; keyEnv?: string }
+  opts: { key?: string; keyEnv?: string; add?: boolean }
 ): Promise<void> {
   const cfg = await loadCfg()
   const p = cfg.providers[id]
@@ -269,10 +269,39 @@ export async function cmdProviderSetKey(
   }
   const key = await askKey(opts)
   const backend: SecretBackend = cfg.security?.store ?? (await defaultStore())
+  if (opts.add) {
+    // 多 key 池追加（--add）：新 key 落 keys[] 池尾。密钥 id 不能直接复用 provider id（那会把
+    // 上一把覆盖掉），用 <id>-k<序号> 并与池内既有引用去重；移除单把 key 在 config.toml 的
+    // keys 数组里手删对应条目（secrets 条目残留无害，不会被读取）
+    // 沙箱守卫与 setSecret 内部同规：FAKE_HOME 下外部后端强制落 file，预演的 slot 引用必须一致
+    const effBackend: SecretBackend =
+      process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
+    const taken = new Set([...(p.keys ?? []), p.key_ref])
+    let slot = (p.keys?.length ?? 0) + 1
+    let slotRef = makeKeyRef(effBackend, `${id}-k${slot}`)
+    while (taken.has(slotRef)) {
+      slot++
+      slotRef = makeKeyRef(effBackend, `${id}-k${slot}`)
+    }
+    const keyRef = await setSecret(`${id}-k${slot}`, key, backend)
+    let n = 0
+    await mutateConfig((c) => {
+      const pool = c.providers[id].keys ??= []
+      pool.push(keyRef)
+      n = pool.length
+    })
+    console.log(c.green(t('✓ key 已追加进 key 池（第 {n} 把，{b}）；网关热加载后自动轮转', '✓ Key appended to the pool ({n} keys total, {b}); the gateway rotates across them after hot-reload', { n, b: backendLabel(backend) })))
+    return
+  }
   const keyRef = await setSecret(id, key, backend)
   await mutateConfig((c) => {
     c.providers[id].key_ref = keyRef
   })
+  if ((p.keys?.length ?? 0) > 0) {
+    // keys 池存在时转发以池为准（key_ref 只是缺省回落基准）：不提醒用户会以为「更新了 key 却没生效」
+    console.log(c.yellow(t('⚠ 该服务配置了多 key 池（keys），转发以池为准，本次更新的 key_ref 不会参与轮转', '⚠ This provider has a multi-key pool (keys); forwarding uses the pool, so the key_ref just updated does not take part in rotation')))
+    console.log(c.gray(t('提示: 用 --add 把新 key 追加进池，或在 config.toml [providers.{id}] 的 keys 数组里调整', 'Hint: append with --add, or edit the keys array under [providers.{id}] in config.toml', { id })))
+  }
   console.log(c.green(t('✓ key 已更新（{b}）；网关热加载后立即生效', '✓ Key updated ({b}); the gateway hot-reloads it immediately', { b: backendLabel(backend) })))
 }
 

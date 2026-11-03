@@ -637,6 +637,49 @@ export async function verifySecretsStore(): Promise<{ ok: true } | { ok: false; 
   }
 }
 
+/** provider 的 key 引用清单（多 key 池兼容口径）：keys 非空（过滤非串条目后）以其为准，
+ *  否则回落 [key_ref]——向后兼容单 key 配置；两处都缺 = ['']（空 plain 哨兵），
+ *  getSecret 层按既有语义给「key_ref 缺失/为空」可操作报错。key_ref 与 keys 同时配置时
+ *  以 keys 为准（key_ref 仅为向后兼容保留，不并入池，避免同 key 重复占位）。 */
+export function providerKeyRefs(p: { key_ref?: string; keys?: string[] }): string[] {
+  const keys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
+  if (keys.length > 0) return keys
+  return [p.key_ref ?? '']
+}
+
+/** 解析 provider 的整个 key 池：逐 ref 复用既有 scheme 解析（getSecret），单个 ref 解析失败
+ *  （ SecretsError / 条目缺失 / env 未设 / 空 plain）只跳过该 key、不致命——池内其余 key 照常用。
+ *  返回条目带 index（在 refs 数组中的原始位置）：key 级冷却态（state/keypool.ts）按该索引记账，
+ *  与配置重载清零配合，保证索引语义稳定。绝不抛出：全部失败 = 空数组，由调用方决定兜底。 */
+export async function resolveProviderKeys(
+  refs: string[]
+): Promise<Array<{ index: number; ref: string; key: string }>> {
+  const out: Array<{ index: number; ref: string; key: string }> = []
+  for (let i = 0; i < refs.length; i++) {
+    try {
+      const key = await getSecret(refs[i])
+      if (key) out.push({ index: i, ref: refs[i], key })
+    } catch {
+      // 单个 ref 解析失败（key 缺失/钥匙环锁定/坏引用）：跳过该 key 不标记失效——
+      // 失效标记只由上游 401/403 触发（401 = key 被上游拒绝；读不到 ≠ 无效）
+    }
+  }
+  return out
+}
+
+/** 读取 provider key 池里第一把可读的 key（keys 池按序尝试，单 key 配置即 key_ref；全不可读/未配返回 null）。
+ *  供「只关心有没有一把能用」的非转发场景：overview hasKey 展示、编辑弹窗用已保存 Key 拉模型等。
+ *  不做冷却过滤——那是转发热路径的事（relay + state/keypool.ts）。绝不抛出。 */
+export async function getFirstProviderSecret(p: { key_ref?: string; keys?: string[] }): Promise<string | null> {
+  for (const ref of providerKeyRefs(p)) {
+    try {
+      const v = await getSecret(ref)
+      if (v) return v
+    } catch { /* 单把读不到（钥匙环锁定/坏引用）尝试下一把 */ }
+  }
+  return null
+}
+
 /** 读取 key；plain 代表明文内嵌在 config 里（不推荐，直接返回） */
 export async function getSecret(ref: string): Promise<string | null> {
   const { scheme, id } = parseKeyRef(ref)

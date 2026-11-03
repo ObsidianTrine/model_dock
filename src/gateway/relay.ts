@@ -1,10 +1,10 @@
 import { request } from 'undici'
 import zlib from 'node:zlib'
-import { getSecret } from '../config/secrets.js'
+import { providerKeyRefs, resolveProviderKeys } from '../config/secrets.js'
 import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
-import { recordOutcome, pickTarget, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type ResolvedTarget } from './state.js'
 import { dispatcherFor } from './proxy.js'
 
 /** 需要模型名改写的业务端点（其余路径纯透传） */
@@ -385,79 +385,130 @@ export async function forwardToUpstream(
   opts: ForwardOptions
 ): Promise<UpstreamResult> {
   const { provider } = target
-  let key: string | null
-  try {
-    key = await getSecret(provider.key_ref)
-  } catch (e) {
-    // 钥匙环锁定/瞬时故障与「key 缺失」同规：跳下一候选而非打断整条 failover 链；
-    // 包成 503+hint——非 UpstreamError 会被 errorReply 落成 500「内部错误」
-    const e2 = new UpstreamError(
-      503,
-      t('provider「{profile}→{name}」的 key 读取失败：{msg}', 'Failed to read the API key for provider "{profile}→{name}": {msg}', { profile: target.profileName, name: provider.name ?? target.profile.provider, msg: (e as Error).message }),
-      (e as { hint?: string }).hint ?? t('检查系统钥匙环是否已解锁，解锁后重试', 'Check that the system keyring is unlocked and retry')
-    )
-    e2.candidateSkip = true
-    throw e2
-  }
-  if (!key) {
+  const providerId = target.profile.provider
+  // ---- key 池解析（P0① 多 key 池）：keys 缺省回落 [key_ref]（向后兼容，单 key 行为不变）。
+  // 逐 ref 复用既有 scheme 解析（file/keychain/env/plain）；单个 ref 解析失败/缺失只跳过该 key、
+  // 不致命，也**不标记失效**（读不到 ≠ 无效——失效冷却只由上游 401/403 触发，见 state/keypool.ts）
+  const pool = await resolveProviderKeys(providerKeyRefs(provider))
+  if (pool.length === 0) {
+    // 池内 0 把可用 key（全部读取失败或未配置）：与单 key 时代「key 读取失败/不可用」同规——
+    // 包成 503+hint 的 candidateSkip（非 UpstreamError 会被 errorReply 落成 500「内部错误」），
+    // 把机会让给链上其余候选，不中止整条 failover 链
     const e = new UpstreamError(
       503,
-      t('provider「{profile}→{name}」的 key 不可用（key_ref={ref}）', 'API key unavailable for provider "{profile}→{name}" (key_ref={ref})', { profile: target.profileName, name: provider.name ?? target.profile.provider, ref: provider.key_ref }),
-      t('modeldock provider set-key {id} 更新 key', 'Run modeldock provider set-key {id} to update the key', { id: target.profile.provider })
+      t('provider「{profile}→{name}」没有可用的 key（key 池 {n} 个引用全部不可读或未配置）', 'Provider "{profile}→{name}" has no usable key (all {n} references in the key pool are unreadable or unset)', { profile: target.profileName, name: provider.name ?? providerId, n: String(providerKeyRefs(provider).length) }),
+      t('检查系统钥匙环是否已解锁（解锁后重试）；或 modeldock provider set-key {id} 重新设置 key', 'Check that the system keyring is unlocked and retry; or run modeldock provider set-key {id} to set the key again', { id: providerId })
     )
-    e.candidateSkip = true // 把机会让给链上其余候选（自动备用链的健壮性前提）
+    e.candidateSkip = true
+    throw e
+  }
+  // key 级健康过滤（P1⑥）：处于失效冷却期（上游 401/403 标记）的 key 直接跳过；全部在冷却
+  // → 本候选本轮不可用，candidateSkip 换 provider 候选。冷却 15min 后自动解封重试（key 被
+  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复
+  const now = Date.now()
+  const healthy = pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
+  if (healthy.length === 0) {
+    const e = new UpstreamError(
+      503,
+      t('provider「{profile}→{name}」的全部 key（{n} 把）都因上游 401/403 失效，冷却中', 'All {n} keys of provider "{profile}→{name}" were rejected by the upstream (HTTP 401/403) and are cooling down', { profile: target.profileName, name: provider.name ?? providerId, n: String(pool.length) }),
+      t('冷却 15 分钟后自动重试；已换新 key 可在 config.toml 保存 keys（热加载立即恢复），或 modeldock provider set-key {id} 更新', 'Cooldown ends in 15 minutes and retries automatically; after replacing a key, save the keys array in config.toml (hot-reload restores it immediately) or run modeldock provider set-key {id}', { id: providerId })
+    )
+    e.candidateSkip = true
     throw e
   }
 
   const rewritten = rewriteModel(target, opts.body, opts.path)
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
-  const headers = await buildUpstreamHeaders(target, opts.headers, key, proto)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
 
-  for (let attempt = 0; ; attempt++) {
-    const t0 = Date.now()
-    try {
-      const up = await request(url, {
-        method: opts.method as any,
-        headers,
-        body: rewritten.body.length > 0 ? rewritten.body : undefined,
-        dispatcher,
-        signal: opts.signal,
-        // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
-        headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
-        bodyTimeout: opts.idleTimeoutMs,
-      })
-      return {
-        status: up.statusCode,
-        // 保数组语义原样透传（折叠为 'a,b' 对 set-cookie 是有损转换，见 UpstreamResult 注释）
-        headers: up.headers as Record<string, string | string[]>,
-        body: up.body as unknown as UpstreamBody,
-        modelAfter: rewritten.modelAfter,
-        ms: Date.now() - t0,
+  // 用指定 key 发一轮：headers 含 key，换 key 必须重建。连接错误的立即重试循环原样保留
+  //（transport 失败与 key 无关，不在 key 间轮转），只按 key 维度包了一层
+  const sendWithKey = async (key: string): Promise<UpstreamResult> => {
+    const headers = await buildUpstreamHeaders(target, opts.headers, key, proto)
+    for (let attempt = 0; ; attempt++) {
+      const t0 = Date.now()
+      try {
+        const up = await request(url, {
+          method: opts.method as any,
+          headers,
+          body: rewritten.body.length > 0 ? rewritten.body : undefined,
+          dispatcher,
+          signal: opts.signal,
+          // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
+          headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
+          bodyTimeout: opts.idleTimeoutMs,
+        })
+        return {
+          status: up.statusCode,
+          // 保数组语义原样透传（折叠为 'a,b' 对 set-cookie 是有损转换，见 UpstreamResult 注释）
+          headers: up.headers as Record<string, string | string[]>,
+          body: up.body as unknown as UpstreamBody,
+          modelAfter: rewritten.modelAfter,
+          ms: Date.now() - t0,
+        }
+      } catch (e) {
+        // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
+        if (opts.signal?.aborted) throw e
+        // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
+        // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
+        if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
+        // 超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
+        // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
+        const timeoutLike = isConnectTimeoutError(e)
+        const errNew = new UpstreamError(
+          502,
+          timeoutLike
+            ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
+            : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
+          timeoutLike
+            ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
+            : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
+        )
+        errNew.transport = true
+        throw errNew
       }
-    } catch (e) {
-      // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
-      if (opts.signal?.aborted) throw e
-      // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
-      // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
-      if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
-      // 超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
-      // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
-      const timeoutLike = isConnectTimeoutError(e)
-      const errNew = new UpstreamError(
-        502,
-        timeoutLike
-          ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
-          : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
-        timeoutLike
-          ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
-          : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
-      )
-      errNew.transport = true
-      throw errNew
     }
   }
+
+  // round-robin 起始 key：并发 worker 的请求被均摊到池内各把（单 key 池恒取唯一一把，
+  // 行为与既有单 key 完全一致），不再全体挤同一把 key 撞 429。healthy 非空已在上游保证
+  //（length===0 已 candidateSkip 短路），轮转必有所得
+  const first = nextRotation(rt, providerId, healthy)!
+  let up = await sendWithKey(first.key)
+  // 401/403 的 key 级失效处理只认模型 API 端点（ROUTED_PATH_RE，与模型改写同口径）：非对话
+  // 端点的 401 可能是路径级权限/资源问题（不代表 key 失效），据此把 key 冷却 15 分钟会误伤——
+  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试
+  const routedApi = ROUTED_PATH_RE.test(opts.path.split('?')[0])
+  if (routedApi && (up.status === 401 || up.status === 403)) {
+    // 上游 401/403 = 鉴权层明确拒绝该 key，请求未进入业务处理（未产出内容、未计费）——
+    // 该 key 打入冷却；换池内下一把 healthy key 重试一次是安全的，与「transport 未送达才重放」
+    // 边界一致且更早：鉴权拒绝发生在请求体被消费之前，不存在重复处理/重复计费
+    markKeyCooldown(rt, providerId, first.index)
+    const rest = healthy.filter((k) => k.index !== first.index)
+    if (rest.length > 0) {
+      // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）
+      try { await up.body.text() } catch { /* 排空失败不影响换 key 重试 */ }
+      const second = nextRotation(rt, providerId, rest)!
+      up = await sendWithKey(second.key)
+      if (up.status === 401 || up.status === 403) {
+        // 换 key 仍被拒：本轮可用 key 全部失效（已逐把标记冷却）——candidateSkip 进入 failover
+        // 链换下一个 provider 候选。仅多 key 池（≥2 把可用）会走到这里；单 key 池没有「换 key
+        // 重试」，401 保持既有透传行为（客户端看得到上游错误体），失效跳过从下一次请求生效
+        //（本次已标记冷却 → 下次 healthy 为空 → candidateSkip）
+        markKeyCooldown(rt, providerId, second.index)
+        try { await up.body.text() } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
+        const e = new UpstreamError(
+          503,
+          t('provider「{profile}→{name}」的 key 池被上游整体拒绝（HTTP 401/403，换 key 重试后仍失败，共 {n} 把）', 'The key pool of provider "{profile}→{name}" was rejected by the upstream (HTTP 401/403; still rejected after retrying with another key, {n} keys in total)', { profile: target.profileName, name: provider.name ?? providerId, n: String(pool.length) }),
+          t('key 已自动冷却并切换备用服务；更换 key 后热加载立即恢复：modeldock provider set-key {id}', 'Keys were cooled down automatically and traffic moved to the fallback; replacing a key restores it immediately via hot-reload: modeldock provider set-key {id}', { id: providerId })
+        )
+        e.candidateSkip = true
+        throw e
+      }
+    }
+  }
+  return up
 }
 
 /** 模型不匹配类错误特征：上游 400 体里点名模型不存在 / 不支持 / 无效（正反两种语序都算：
