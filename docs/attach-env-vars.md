@@ -29,12 +29,13 @@
 | `env.ANTHROPIC_AUTH_TOKEN` | `mdk_claude_code_*` | 网关 token（接入时生成，登记进 config.toml） |
 | `modelPicker` | `{ replaceBuiltInOptions: true, options: 当前路由服务目录 }` | **仅 claude ≥ 2.1.243**（官方 changelog：modelPicker 设置 2.1.243 引入）：/model 选择器全量策划，raw ID 直列；全局切服务由 refreshBakedModelClients 自动重烙 |
 
-**版本门控（2026-11-03 起，301b66c）**：attach 时探测 `claude --version`（60s memo）——
+**版本门控（2026-11-03 起，301b66c + a7ee357）**：attach 时探测 `claude --version`（60s memo）——
 
 - **≥ 2.1.243**：上表 modelPicker 照写。
-- **< 2.1.243 或探测失败**：**不写 modelPicker**（升级后重接会清掉此前烙的死键），改写 `env.ANTHROPIC_MODEL` = profile `default_model`（无则服务目录首个模型，≥1M 上下文带 `[1m]` 后缀），raw ID 经网关透传；note 注明版本与升级指引。此模式下 `env.ANTHROPIC_MODEL` 是 ModelDock 管理的**烙定值**：重复接入 / 路由切换重烙（refreshBakedModelClients 复用 planAttach，门控自然生效）会按新路由重写。
+- **< 2.1.243 或探测失败**：**不写 modelPicker**（升级后重接会清掉此前烙的死键），改用**档位槽机械铺排**（不做能力排序）：服务目录按目录序（Web 端添加/拉取顺序）填 `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_` / `_HAIKU_` / `_FABLE_` 四槽——每槽 `_MODEL` = 真实 ID（≥1M 上下文带 `[1m]` 后缀）、`_NAME` = display_name（缺则原 ID）作行标签；槽位不足按末位复用（1 个模型四槽同值），超过 4 个第 5 个起旧版 /model 无行可选。**行上显示的就是真实模型名，用户按名字选用，无需理解档位含义**；Default 行 = profile `default_model`（`env.ANTHROPIC_MODEL`）。这些 env 是 ModelDock 管理的**烙定值**：重复接入 / 路由切换重烙（refreshBakedModelClients 复用 planAttach，门控自然生效）按新路由重铺。note 注明版本与升级指引。
 - 探测失败（`--version` 不可得 / 输出不可解析）一律按旧版回退：宁可降级兼容，不假装新版。
 - 测试钩子：`MODELRDOCK_FAKE_CLAUDE_CODE_VERSION`（空串 = 模拟探测失败）；`MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT=1` 未指定版本时默认视为现代版本。
+- 设计取舍（2026-11-03 讨论）：能力排序（哪个模型配 Opus 档）是人工判断，元数据区分不了 pro 与 flash，故不做排序、不引入优先级字段——档位只是槽位外壳，行名即选用依据（与 Claude Code 自身 `DEFAULT_*_MODEL` 显式映射设计、claude-code-router 角色显式映射同类；LiteLLM/OpenRouter 的元数据也只用于展示排序，不用于推断能力）。
 
 **无条件清除（网关模式）：**
 
