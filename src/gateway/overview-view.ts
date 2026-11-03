@@ -47,6 +47,8 @@ export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string
       auth_style: p.auth_style,
       key_ref: p.key_ref,
       proxy: p.proxy ?? 'direct',
+      // 并发闸配置只读透出（编排器供给闸判定用：max_concurrency>=2 才允许 worker 扩容到 2）
+      max_concurrency: p.max_concurrency ?? null,
       models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true, includeSource: true })),
     })),
     profiles: Object.entries(cfg.profiles).map(([name, p]) => ({

@@ -1873,16 +1873,21 @@ async function hMetrics(c: AdminCtx): Promise<void> {
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。
  *  数据源 = rt.tokenUsage（数据面限额计数，state/tokenlimits.ts；只统计配了 limits 的 harness，
  *  未配置者无条目、不出现在结果里）。rpm 是固定窗口计数：rpm_started_at 距今超 60s 即窗口已
- *  过期、要等下一个请求经过 checkTokenLimits 才清零——消费方按时间戳自行判陈旧，本端点只读不翻窗。 */
+ *  过期、要等下一个请求经过 checkTokenLimits 才清零——消费方按时间戳自行判陈旧，本端点只读不翻窗。
+ *  双口径（2026-11 预算实测账）：day_tokens = 总口径（缓存读计入，daily_tokens 限额判定沿用）；
+ *  day_billable_tokens = 可计费口径（剔除缓存读，usage tap 按协议算好）——编排器 worker 预算
+ *  判定用后者（总口径会把 GLM 大额缓存读当消耗，重蹈 12.1M 假阳性）。旧 usage 无 billable
+ *  字段时该值为 0 起步（内存态，重启清零）。 */
 async function hHarnessUsage(c: AdminCtx): Promise<void> {
   const { rt, res } = c
-  const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number }> = {}
+  const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number; day_billable_tokens: number }> = {}
   for (const [id, s] of rt.tokenUsage) {
     usage[id] = {
       rpm: s.rpmCount,
       rpm_started_at: new Date(s.rpmStart).toISOString(),
       day: s.dayKey,
       day_tokens: s.dayTokens,
+      day_billable_tokens: s.dayBillableTokens,
     }
   }
   res.writeHead(200, { 'content-type': 'application/json' })

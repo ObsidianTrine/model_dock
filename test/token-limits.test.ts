@@ -8,6 +8,7 @@ import { fakeHome } from './helpers.js'
 import { buildRuntime, checkTokenLimits, recordTokenUsage } from '../src/gateway/state.js'
 import type { Config } from '../src/config/types.js'
 import { createGatewayServer } from '../src/gateway/server.js'
+import { localIsoTs } from '../src/util/time.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -70,6 +71,27 @@ describe('token limits > 纯逻辑单测（checkTokenLimits / recordTokenUsage�
     const rt = rtWith(undefined)
     expect(() => recordTokenUsage(rt, 'worker', { input_tokens: 5, output_tokens: 5 })).not.toThrow()
     expect(rt.tokenUsage.size).toBe(0)
+  })
+
+  it('day_billable_tokens（可计费口径）：按 usage.billable_tokens 累计；旧 usage 无字段从 0 起；跨日清零', () => {
+    const rt = rtWith({ daily_tokens: 999_999 })
+    const t0 = Date.parse('2026-11-01T10:00:00+08:00')
+    checkTokenLimits(rt, 'worker', t0) // 建状态
+    // 口径：billable 147（总口径 167 = input 100 + 缓存读 20 + 缓存建 5 + output 42）
+    recordTokenUsage(rt, 'worker', { input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5, billable_tokens: 147 }, t0 + 100)
+    recordTokenUsage(rt, 'worker', { input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, cache_creation_tokens: 5, billable_tokens: 147 }, t0 + 200)
+    expect(rt.tokenUsage.get('worker')?.dayTokens).toBe(334) // 总口径不变
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(294) // 可计费口径
+    // 旧 usage 无 billable_tokens 字段（旧网关内存态）：按 0 累加，计数自然从 0 起步
+    recordTokenUsage(rt, 'worker', { input_tokens: 10, output_tokens: 1 }, t0 + 300)
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(294)
+    expect(rt.tokenUsage.get('worker')?.dayTokens).toBe(345)
+    // 负数防御归零；跨本地日清零（两口径同翻）
+    recordTokenUsage(rt, 'worker', { input_tokens: 1, output_tokens: 1, billable_tokens: -50 }, t0 + 400)
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(294)
+    recordTokenUsage(rt, 'worker', { input_tokens: 1, output_tokens: 1, billable_tokens: 7 }, t0 + 86_400_000)
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(7)
+    expect(rt.tokenUsage.get('worker')?.dayTokens).toBe(2)
   })
 })
 
@@ -164,6 +186,27 @@ describe('token limits > E2E（隔离沙箱 + 随机端口 + mock 上游）', ()
         expect((await request(t.port, '/v1/messages', AUTH, MSG_BODY)).status).toBe(200)
       }
       expect(t.rt.tokenUsage.size).toBe(0)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('GET /_modeldock/harness-usage：day_tokens（总口径）与 day_billable_tokens（可计费口径）并存', async () => {
+    const t = await setup({ limits: { daily_tokens: 999_999 } })
+    try {
+      await request(t.port, '/v1/messages', AUTH, MSG_BODY)
+      await request(t.port, '/v1/messages', AUTH, MSG_BODY)
+      // mock 上游单笔：总口径 167（缓存读计入）；可计费口径 147（剔除缓存读 20）
+      expect(t.rt.tokenUsage.get('worker')?.dayTokens).toBe(334)
+      expect(t.rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(294)
+      const res = await request(t.port, '/_modeldock/harness-usage', { 'x-modeldock-admin': 'admin-token-x' })
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      const u = body.usage.worker
+      expect(u.day_tokens).toBe(334)
+      expect(u.day_billable_tokens).toBe(294)
+      expect(u.day).toBe(localIsoTs().slice(0, 10))
     } finally {
       t.close()
     }

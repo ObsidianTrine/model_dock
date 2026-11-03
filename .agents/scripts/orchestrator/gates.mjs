@@ -33,8 +33,9 @@ function git(cwd, args) {
  * 文件令后续 fixup/finish 的 rename 报 EBUSY/EPERM（AGENTS.md 点名的 Windows 高频坑）。
  * 超时走 killTree（win32 taskkill /T /F；unix detached 进程组 kill(-pid)）。
  * 输出上限沿用 64MB 量级（超限停止累积，防无界缓冲）。
+ * 缺省超时来自 workflow.json gateTimeoutMinutes（B11 常量收口，缺省 20 分钟）。
  */
-export function runCmd(cmd, cwd, timeoutMs = 20 * 60_000) {
+export function runCmd(cmd, cwd, timeoutMs = loadWorkflowConfig().gateTimeoutMinutes * 60_000) {
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(cmd, {

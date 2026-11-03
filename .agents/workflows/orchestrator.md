@@ -238,7 +238,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 
 - **调度器锁**：drain / nightly / scan --run / watch 共用一把（`.scheduler-lock.json`），后来者提示退出；持锁进程死 = 陈锁自动接管。手动 `run <id>` 不抢调度器锁。
 - **任务锁**：每卡 `.run-<task-id>.lock`——同一泊位（worktree）不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 D4）。
-- **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。
+- **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。`gatewayAdmin: true` 的仓库并发还受 **供给闸**（B12）约束：有效并发 = min(请求并发, provider 容量)——上游没解锁 `max_concurrency>=2` 时请求多档也只跑单 worker（fail-safe，防 429 烧上游）。
 
 ## B. 自主模式详解
 
@@ -369,6 +369,20 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 - **留痕**：所有非常规选择记 `dispatch_selected { from, to, switched, reason }` 事件（永不静默红线）；决策链任何一步失败自动回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
 - **与 fleet observe 的关系**：阶段 1 观测（`fleet_observed`）只照亮不决策，本节是它的决策消费者。难度路由不需要网关（纯卡面信号）；逐船海况判读需要 `gatewayAdmin: true` 的观测快照，观测缺席不判恶劣（观测缺席 ≠ 风暴）。
 - **与 escalation 的关系**：escalation（B8，zcode 30k 自动升档）在动态选船之后作外层兜底，逻辑不动；预算熔断不受动态选船影响（换船不重置预算）。
+
+### B12. worker 并发供给闸（scheduling.maxWorkers，如何解锁 workers=2）
+
+drain 的有效并发 = **min(请求并发, provider 容量)**——请求并发 = CLI `--workers N`（显式单次意图，最高优先）> workflow.json `scheduling.maxWorkers`（缺省 1 = 现状不变）。容量经网关 admin 面观测（`gatewayAdmin: true` 才触达）：worker tier token → `/_modeldock/tier-validate` 解析到 provider → 查该 provider 的 `max_concurrency`（`/_modeldock/config`）与 key 池健康（`/_modeldock/metrics` 的 `keypool[provider]`）。
+
+- **解锁 workers=2 的完整步骤**（船东操作，编排器绝不自行触碰生产配置）：
+  1. 在 ModelDock（生产实例）给 worker 用的 provider 配 `max_concurrency >= 2`（Web 控制台「编辑服务」或 config.toml）——网关侧信号量 + 排队由此生效，上游不再被并发打 429；可选配多 key 池（`keys` >= 2）进一步扩容；
+  2. 给 worker 卡配 tier（token 指向该 provider 的 harness）——供给闸靠 tier token 定位 provider；
+  3. workflow.json 设 `"scheduling": { "maxWorkers": 2 }`（自动化常态）或单次 `drain --workers 2`。
+- **判定**：`max_concurrency>=2` 且（key 池 `healthy>=2` 或 `total>=2`）→ 容量 = min(max_concurrency, healthy/total)；否则容量 = 1。自动扩容生效（无显式 `--workers` 时）记 fleet 级 `workers_scaled { from, to, provider, reason }` 事件；请求被容量压低同样留痕（`观测缺席`/`未解锁`/`key 池不足` 等原因写在 reason）。
+- **fail-open 口径**：`gatewayAdmin` 未开 → 完全不设闸不触达（行为与历史一致）；观测面已开但网关不可达/字段缺失 → 容量按 1（回落单 worker 现状，只是不扩容，派发照常，绝不因观测失败中断 drain）；所有观测请求超时 ≤3s，每 drain 只探一次。
+- **与预算实测账的配合**：多 worker 同跑时各自卡独立计账；同 tier 并发 worker 共享同一 harness 实测账（实测增量互相可见——预算判定偏保守方向，只早熔断不漏熔断）。
+
+**预算实测账（A4，配合 B12）**：worker 运行中每 60s 轮询 `/_modeldock/harness-usage` 的 `day_billable_tokens`（网关实测**可计费**口径，剔除缓存读）做低油量/熔断判定——zcode 无逐 turn 自报（会话结束才一次性回填），此前 token 预算对它近乎失效；实测账补上真实逐时段预算。harness↔task 映射由 tier token 经 tier-validate 解析，记在 `tier_resolved` 事件的 `gateway_harness` 字段；实测以「本任务起点基线」取增量（同 harness 其他流量不计入本任务，防跨任务假阳性）；字段缺失（旧网关）或观测不可达 → 自报账照旧兜底。reconcile 离线对账逻辑不变。大 prompt（>2 万字符，D17）自动落 `logs/<taskId>/prompt-full.md` 全文、worker prompt 收缩为文件引用 + 要点摘要——不再依赖 zcode argv 30k 超限后的换船兜底（escalation 保留为最后防线）。
 
 ## C. 观测与对账详解
 

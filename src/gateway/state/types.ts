@@ -157,6 +157,10 @@ export interface TokenUsageState {
   dayKey: string
   /** 当日累计 token（input 含缓存读/建 + output，与 reconcile 对账口径一致） */
   dayTokens: number
+  /** 当日累计可计费 token（usage.billable_tokens：剔除缓存读；旧 usage 无该字段按 0 起步）。
+   *  不参与 daily_tokens 限额判定（那是 runaway 熔断丝，总口径正确），仅供
+   *  /_modeldock/harness-usage 消费方（编排器预算实测账）读用。 */
+  dayBillableTokens: number
 }
 
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */

@@ -12,6 +12,9 @@
   ],
   "gatewayLogDir": "~/.modeldock/logs",
   "gatewayAdmin": true,
+  "scheduling": {
+    "maxWorkers": 1
+  },
   "protectedPorts": [
     "8687",
     "8890"

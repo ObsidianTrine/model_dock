@@ -342,3 +342,108 @@ describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况�
     expect(cfgOf({ weatherHold: { threshold: 3, upstream: { threshold: -1 } } }).weatherHold.upstream).toBeUndefined()
   })
 })
+
+describe('workflow-config > B11 常量收口新键（gateTimeoutMinutes/retryWaitBaseMs/scheduling/drift 告警）', () => {
+  function fixture(workflow: Record<string, unknown>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-b11-'))
+    fs.mkdirSync(path.join(dir, '.agents'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(workflow))
+    return dir
+  }
+
+  it('缺省值 = 现状行为零变化：gateTimeoutMinutes 20 / retryWaitBaseMs 60000 / scheduling.maxWorkers 1', () => {
+    const dir = fixture({})
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.gateTimeoutMinutes).toBe(20)
+      expect(cfg.retryWaitBaseMs).toBe(60_000)
+      expect(cfg.scheduling).toEqual({ maxWorkers: 1 })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('显式值生效：门禁超时 / 重试基值 / 并发上限', () => {
+    const dir = fixture({ gateTimeoutMinutes: 45, retryWaitBaseMs: 5000, scheduling: { maxWorkers: 2 } })
+    try {
+      const cfg = loadWorkflowConfig(dir)
+      expect(cfg.gateTimeoutMinutes).toBe(45)
+      expect(cfg.retryWaitBaseMs).toBe(5000)
+      expect(cfg.scheduling).toEqual({ maxWorkers: 2 })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('非法值回落缺省并 console.warn（键缺失不告警）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      // 键缺失：零告警
+      const dir = fixture({})
+      loadWorkflowConfig(dir)
+      fs.rmSync(dir, { recursive: true, force: true })
+      expect(warn).not.toHaveBeenCalled()
+      // 显式非法：回落 + 告警（可操作文案点名键名）
+      for (const patch of [
+        { gateTimeoutMinutes: 0 },
+        { gateTimeoutMinutes: -3 },
+        { gateTimeoutMinutes: 2.5 },
+        { retryWaitBaseMs: -1 },
+        { retryWaitBaseMs: 1.5 },
+        { scheduling: { maxWorkers: 0 } },
+        { scheduling: { maxWorkers: 'many' } },
+        { scheduling: 'parallel' },
+      ]) {
+        const d = fixture(patch)
+        try {
+          loadWorkflowConfig(d)
+        } finally {
+          fs.rmSync(d, { recursive: true, force: true })
+        }
+      }
+      const warned = warn.mock.calls.map((c) => String(c[0]))
+      expect(warned.some((w) => w.includes('gateTimeoutMinutes'))).toBe(true)
+      expect(warned.some((w) => w.includes('retryWaitBaseMs'))).toBe(true)
+      expect(warned.some((w) => w.includes('scheduling'))).toBe(true)
+      // 每次非法配置后缺省值兜底
+      const d2 = fixture({ scheduling: { maxWorkers: 0 } })
+      try {
+        expect(loadWorkflowConfig(d2).scheduling).toEqual({ maxWorkers: 1 })
+        expect(loadWorkflowConfig(d2).gateTimeoutMinutes).toBe(20)
+        expect(loadWorkflowConfig(d2).retryWaitBaseMs).toBe(60_000)
+      } finally {
+        fs.rmSync(d2, { recursive: true, force: true })
+      }
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('driftThreshold 显式非法（0/false）→ 拒绝生效回落 0.2 且 console.warn 报错（可调不可关）；键缺失不告警', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const d = fixture({ driftThreshold: false })
+      try {
+        expect(loadWorkflowConfig(d).driftThreshold).toBe(0.2)
+      } finally {
+        fs.rmSync(d, { recursive: true, force: true })
+      }
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('driftThreshold'))).toBe(true)
+      warn.mockClear()
+      const d2 = fixture({})
+      try {
+        expect(loadWorkflowConfig(d2).driftThreshold).toBe(0.2)
+      } finally {
+        fs.rmSync(d2, { recursive: true, force: true })
+      }
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('PROMPT_FILE_THRESHOLD_CHARS = 20000（D17 大 prompt 落文件阈值，低于 zcode argv 30k 上限）', async () => {
+    const mod = await import('../../.agents/scripts/workflow-config.mjs')
+    expect(mod.PROMPT_FILE_THRESHOLD_CHARS).toBe(20_000)
+  })
+})

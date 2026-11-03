@@ -33,7 +33,7 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -45,7 +45,8 @@ import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
 import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
-import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
+import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
+import { probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
@@ -71,13 +72,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
 
 /** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避基值×attempt（与 dockmaster
- *  技能「429 退避 60s」口径一致）。基值可经 ORCH_RETRY_WAIT_MS 注入（测试收缩到 10ms
- *  级，生产行为不变）， storm-gate 集成测试依赖毫秒级退避。 */
+ *  技能「429 退避 60s」口径一致）。基值解析序：ORCH_RETRY_WAIT_MS env（测试收缩到 10ms
+ *  级，生产行为不变；storm-gate 集成测试依赖毫秒级退避）> workflow.json retryWaitBaseMs
+ *  （B11 常量收口）> 缺省 60s。 */
 const MAX_WORKER_RETRIES = 3;
-const RETRY_WAIT_BASE_MS = (() => {
+function retryWaitBaseMs(cfg) {
   const n = Number.parseInt(process.env.ORCH_RETRY_WAIT_MS ?? '', 10);
-  return Number.isInteger(n) && n >= 0 ? n : 60_000;
-})();
+  if (Number.isInteger(n) && n >= 0) return n;
+  return cfg?.retryWaitBaseMs ?? 60_000;
+}
 
 // ---------------------------------------------------------------------------
 // 基础设施
@@ -420,8 +423,12 @@ async function cmdRun(repoRoot, taskId, opts) {
   //   tier 未打标（网关无同标签 profile）→ 告警不阻断（tier 标签未采纳，向后兼容）；
   //   网关不可得（未开启/不可达/旧版无端点）→ 回落 advisory 目录校验，行为不变。
   let gatewayVerdict = null;
+  // A4 预算实测账的 harness↔task 映射：tier token 经网关解析到的 harness id（无 tier 卡为
+  // null——实测轮询不启动，自报账兜底）。实测油量与离线对账靠它定位「这个 worker 的实测账」。
+  let measuredHarness = null;
   if (tier?.token) {
     gatewayVerdict = await validateTierViaGateway({ token: tier.token, tier: tier.name, base: tier.gatewayBase, optIn: tier.gatewayAdmin });
+    if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) measuredHarness = gatewayVerdict.harness ?? null;
     if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) {
       const tagged = tierTagNames(tier.name).flatMap((n) => gatewayVerdict.tierProfiles?.[n] ?? []);
       if (tagged.length && !tagged.includes(gatewayVerdict.profile)) {
@@ -444,7 +451,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     ...(effWorkerModel ? { worker_model: effWorkerModel } : {}),
     ...(effReviewModel ? { review_model: effReviewModel } : {}),
     ...(gatewayVerdict?.mode === 'gateway' && gatewayVerdict.ok
-      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null }
+      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null, gateway_harness: gatewayVerdict.harness ?? null }
       : {}),
   });
   // 目录校验（advisory）：网关权威校验不可得时的回落路径；模型名不在服务目录 → 告警不阻断
@@ -543,6 +550,12 @@ async function cmdRun(repoRoot, taskId, opts) {
   const trackPid = (e) => {
     if (e.type === 'worker_spawned') livePid = e.pid;
   };
+
+  // ---- 预算实测账（A4，supply.mjs）：worker 运行中每 60s 轮询 harness-usage 的
+  // day_billable_tokens（网关实测可计费口径）喂 budget.accountMeasured——zcode 无逐 turn
+  // 自报（结束才一次性回填），实测账让它获得真实逐时段 token 预算；字段缺失（旧网关）/
+  // 观测不可达 → null → 自报账兜底，行为不回退。reconcile 离线对账逻辑不动。
+  const measuredFuel = startMeasuredFuelPoller({ budget, cfg, harness: measuredHarness, log });
 
   // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
   // 实质进展。observe（缺省）只记 watchdog_suspect 事件；actuate 连续 2 次 suspect 走既有
@@ -658,6 +671,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       let result;
       let workerOutput = '';
       let transientAttempt = 0;
+      let promptFileRefLogged = false; // D17 留痕防刷屏：每 run 记一次 prompt_file_ref
       for (;;) {
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
         xte.beforeWorkerSession(); // 偏航 no_commit：记会话起点 HEAD（连续 2 会话零提交报警）
@@ -665,18 +679,36 @@ async function cmdRun(repoRoot, taskId, opts) {
         workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
         workerInFlight = true; // 看门狗：spawn 在跑标记
         {
+          // 大 prompt 落文件（D17）：超过阈值先把全文落 logs/<taskId>/prompt-full.md
+          // （.agents/orchestrator/logs 已 gitignore——不进 worktree、不污染 diff/审查面），
+          // 正文收缩为「文件引用 + 要点摘要」，worker 开工先读全文。zcode argv 30k 上限
+          // 因此在常规路径不再触达；escalation 换船保留为最后兜底（阈值 20k < 30k，
+          // 正常不再触发；fixup/resume 追加的交接班单/失败输出同样被本收缩覆盖）。
+          let spawnPrompt = promptText;
+          if (promptText.length > PROMPT_FILE_THRESHOLD_CHARS) {
+            const full = path.join(logDir(repoRoot, taskId), 'prompt-full.md');
+            fs.mkdirSync(path.dirname(full), { recursive: true });
+            fs.writeFileSync(full, promptText);
+            spawnPrompt = buildPromptFileRefBody({ promptPath: full, card, ctx, originalChars: promptText.length });
+            if (!promptFileRefLogged) {
+              promptFileRefLogged = true;
+              appendEvent(qdir, 'prompt_file_ref', { chars: promptText.length, threshold: PROMPT_FILE_THRESHOLD_CHARS, path: full });
+              log(`📄 prompt 过大（${promptText.length} > ${PROMPT_FILE_THRESHOLD_CHARS} 字符）：全文已落 ${full}，worker prompt 收缩为文件引用 + 要点摘要（escalation 兜底保留）`);
+            }
+          }
           // 升级链第 1 档（escalation.mjs）：zcode 船 prompt 超限自动切 fallback 船——
           // escalation 配置即持久授权（同 autopilot），engine_escalated 事件留痕；
           // 预算延续不重置（Budget 实例不变，已耗口径延续）；每 run 至多升档一次。
-          const esc = shouldEscalatePrompt({ backend: opts.backend, promptLen: promptText.length, cfg });
+          // D17 落文件后 spawnPrompt 恒小于阈值，此分支仅为兜底（如阈值被调大过 30k）。
+          const esc = shouldEscalatePrompt({ backend: opts.backend, promptLen: spawnPrompt.length, cfg });
           if (esc.escalate && !escalatedThisRun) {
             escalatedThisRun = true;
-            appendEvent(qdir, 'engine_escalated', { reason: 'prompt_oversize', from: opts.backend, to: esc.to, prompt_chars: promptText.length });
+            appendEvent(qdir, 'engine_escalated', { reason: 'prompt_oversize', from: opts.backend, to: esc.to, prompt_chars: spawnPrompt.length });
             log(`⏫ 升级链：${esc.reason}——自动切 fallback 船 ${esc.to}（engine_escalated 已留痕；预算延续不重置）`);
             opts.backend = esc.to;
             backend = await getBackend(esc.to);
           }
-          fs.writeFileSync(promptFile, promptText);
+          fs.writeFileSync(promptFile, spawnPrompt);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
           appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
@@ -715,7 +747,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         const preClaimed = parseResultBlock(workerOutput);
         if (!preClaimed && isTransientWorkerFailure(workerOutput, result.stderrTail) && transientAttempt < MAX_WORKER_RETRIES) {
           transientAttempt += 1;
-          const waitMs = RETRY_WAIT_BASE_MS * transientAttempt;
+          const waitMs = retryWaitBaseMs(cfg) * transientAttempt;
           appendEvent(qdir, 'worker_retry', { attempt: transientAttempt, max: MAX_WORKER_RETRIES, wait_ms: waitMs });
           log(`⚠ worker 疑似瞬时故障（限流/网络）——${waitMs >= 1000 ? `${Math.round(waitMs / 1000)}s` : `${waitMs}ms`} 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
           await new Promise((r) => setTimeout(r, waitMs));
@@ -1047,6 +1079,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     if (reason) die(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
     throw e;
   } finally {
+    measuredFuel.stop(); // 实测油量轮询（A4）：任务收尾即停，不留跨任务定时器
     clearTimeout(budget.wallTimer);
     releaseTaskLock(repoRoot, taskId);
     try {
@@ -1774,7 +1807,27 @@ async function cmdDrain(repoRoot, opts) {
     return;
   }
   try {
-    const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
+    // 有效并发 = min(请求并发, 供给闸)（A3 有闸门的扩容）：请求并发 = CLI --workers（显式
+    // 单次意图，最高优先）> workflow.json scheduling.maxWorkers（缺省 1 = 现状不变）。
+    // 供给闸只在请求并发 > 1 时探测（默认单 worker 路径零网络开销）：gatewayAdmin 未开
+    // → 完全不设闸不触达（可移植红线）；已开则经 tier token → provider 容量（config 的
+    // max_concurrency + metrics 的 keypool，见 supply.mjs），任一环节不可达/字段缺失 →
+    // 容量 1——回落单 worker 现状（只是不扩容，派发照常，绝不因观测失败中断 drain）。
+    const requested = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : (cfg.scheduling?.maxWorkers ?? 1);
+    let workers = requested;
+    if (requested > 1) {
+      const supply = await drainSupplyProbe(repoRoot, root, cfg);
+      workers = Math.min(requested, supply.capacity);
+      if (workers < requested) {
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: requested, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        log(`⚠ 供给闸：请求并发 ${requested}，provider 容量 ${supply.capacity === Infinity ? '∞（观测缺席）' : supply.capacity}（${supply.reason}）——按 ${workers} 并发执行`);
+      } else if (!opts.workers) {
+        // 配置驱动的自动扩容（无显式 --workers）：留痕解锁链（网关 max_concurrency/key 池
+        // 解锁 → workflow.json scheduling.maxWorkers → drain 自动生效），永不静默红线
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: 1, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        log(`⛵ 供给闸：provider 容量 ${workers}（${supply.reason}）——按 scheduling.maxWorkers=${requested} 并发执行`);
+      }
+    }
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
     // 选卡前先过一遍 blocked 自动续通道（串行/并发路径共用；引擎预检通过才续，防止坏引擎把卡反复烧）
     autoResumePass(repoRoot, root, cfg, opts);
@@ -1878,6 +1931,29 @@ const next = pickNextCard(root, { skipIds });
   } finally {
     releaseSchedulerLock(repoRoot);
   }
+}
+
+/**
+ * drain 供给闸探测（A3，supply.mjs）：扫 pending 卡取第一张带有效 tier token 的卡，以其
+ * tier token 作为 worker 流量的代表路由做容量观测（同 tier 的卡共享同一 provider 容量池；
+ * 全部卡无 tier token → probe 内按「字段缺失」回落单 worker，fail-open 口径见 supply.mjs）。
+ * 解析失败卡跳过（由调度循环另行处理）；每 drain 只探一次，不随 pump 重复触达网关。
+ */
+async function drainSupplyProbe(repoRoot, root, cfg) {
+  let token = null;
+  let tierName = null;
+  for (const id of listCards(root, 'pending')) {
+    try {
+      const card = loadCard(fs.readFileSync(cardPath(root, 'pending', id), 'utf8'), `${id}.md`);
+      const t = resolveTier(card.meta, cfg);
+      if (t?.token) {
+        token = t.token;
+        tierName = t.name;
+        break;
+      }
+    } catch { /* 解析失败卡由调度循环处理 */ }
+  }
+  return probeProviderCapacity({ token, tier: tierName, optIn: cfg.gatewayAdmin === true });
 }
 
 /**
