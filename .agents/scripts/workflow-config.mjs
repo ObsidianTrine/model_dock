@@ -74,6 +74,20 @@
 //                   容量经网关 admin 面观测（tier-validate → provider → config 的
 //                   max_concurrency + metrics 的 keypool 健康，见 orchestrator/supply.mjs）。
 //                   观测面未开启（gatewayAdmin 缺省 false）不设闸，行为与历史版本一致
+//   configGuard     workflow.json 自改守卫：{ enabled?: boolean（缺省 true） }。run/drain/
+//                   watch/sail 启动时记 workflow.json 的 sha256 基线，每次派发前校验；不匹配
+//                   → 落 fleet 事件 config_drift_detected（含前后 hash）+ 暂停新派发（在途
+//                   任务继续），恢复 = 基线重新匹配（文件改回）或编排器自己 merge 后重置。
+//                   2026-11 实证动机：sail 派发的卡自改 workflow.json 默认引擎后合并——
+//                   授权配置被被调度方改写而编排器无感。enabled=false 关闭守卫（不推荐）
+//   draftsGc        drafts/ 提案生命周期：{ autoSupersede?: boolean（缺省 true——卡落 merged/
+//                   时 files_hint 重叠的提案自动迁入 drafts/superseded/ 并标注合并卡 id），
+//                   archiveDays?: 正整数（缺省 30——drafts gc 时超龄提案迁入 drafts/archived/，
+//                   永不删除只迁移） }
+//   scanAutoFix     scan 型卡 failed 后自动转修复卡：{ enabled?: boolean（缺省 true） }。
+//                   drain 处理到 failed/ 的 scan-* 卡时自动创建 pending 修复卡（id
+//                   fix-<原名>，引用 incident.md 与失败摘要，files_hint/门禁继承原卡）；
+//                   修复卡自身 failed 不再繁殖新卡（防循环），同名卡已存在任一状态即跳过
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -160,6 +174,9 @@ export function loadWorkflowConfig(repoRoot) {
     weatherHold: resolveWeatherHold(raw.weatherHold),
     autoResume: resolveAutoResume(raw.autoResume),
     trace: resolveTrace(raw.trace),
+    configGuard: resolveConfigGuard(raw.configGuard),
+    draftsGc: resolveDraftsGc(raw.draftsGc),
+    scanAutoFix: resolveScanAutoFix(raw.scanAutoFix),
     escalation: resolveEscalation(raw.escalation),
     dynamicDispatch: resolveDynamicDispatch(raw.dynamicDispatch),
     notify: resolveNotify(raw.notify),
@@ -257,20 +274,23 @@ function resolveDynamicDispatch(raw) {
 
 /** notify 配置解析（通知通道扩展点）：{ keychainService?: string（darwin 钥匙串服务名，
  *  承载 webhook URL——launchd/cron 环境极瘦读不到 env，runner 与 notify() 兜底都查它），
+ *  signSecretService?: string（钥匙串服务名，承载飞书自定义机器人的签名密钥——配置后
+ *  飞书端点出站消息按官方规范附 timestamp+sign；env AGENTS_LARK_SIGN_SECRET 优先），
  *  cardWebhook?: boolean（缺省 false——需要人工动作的落位事件额外发一张飞书交互卡片，
  *  按钮批示经 approval-listener 回流；非飞书 webhook 端点自动跳过），
  *  listenerPort?: 正整数（approval-listener 缺省监听端口；监听器必须显式配置才启动，
  *  永不缺省监听）}。缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
 function resolveNotify(raw) {
-  const DEFAULTS = { keychainService: null, cardWebhook: false, listenerPort: null };
+  const DEFAULTS = { keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null };
   const warn = (detail) =>
-    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数 }）`);
+    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, signSecretService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     warn(`应为对象，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const keychainService = typeof raw.keychainService === 'string' && raw.keychainService.trim() ? raw.keychainService.trim() : null;
+  const signSecretService = typeof raw.signSecretService === 'string' && raw.signSecretService.trim() ? raw.signSecretService.trim() : null;
   const cardWebhook = raw.cardWebhook === true;
   if (raw.cardWebhook !== undefined && typeof raw.cardWebhook !== 'boolean') {
     warn(`cardWebhook ${JSON.stringify(raw.cardWebhook)} 不合法（允许 true | false）`);
@@ -279,7 +299,7 @@ function resolveNotify(raw) {
   if (raw.listenerPort !== undefined && listenerPort === null) {
     warn(`listenerPort ${JSON.stringify(raw.listenerPort)} 不合法（须为 1-65535 的正整数）`);
   }
-  return { keychainService, cardWebhook, listenerPort };
+  return { keychainService, signSecretService, cardWebhook, listenerPort };
 }
 
 /** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即
@@ -484,6 +504,71 @@ export function resolveTrace(raw) {
   if (raw.maxInputKB !== undefined) {
     if (Number.isInteger(raw.maxInputKB) && raw.maxInputKB > 0) out.maxInputKB = raw.maxInputKB;
     else warn(`maxInputKB ${JSON.stringify(raw.maxInputKB)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** workflow.json 自改守卫配置解析：{ enabled: boolean }，缺省 true（守卫开启是安全缺省——
+ *  授权配置被被调度方改写必须停派待查；确认合法变更后重启编排器即接受新基线）。非法值
+ *  回落缺省并 console.warn 告警（与 resolveAutoResume 同风格）。 */
+function resolveConfigGuard(raw) {
+  const DEFAULTS = { enabled: true };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] configGuard 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 configGuard 键，enabled 允许 true|false）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  return out;
+}
+
+/** drafts/ 提案生命周期配置解析：{ autoSupersede: boolean, archiveDays: 正整数 }，
+ *  缺省 true / 30。autoSupersede=false 关闭「卡落 merged/ 时 files_hint 重叠提案自动
+ *  迁 superseded/」（drafts gc 手动档不受影响）；archiveDays 非法回落 30。非法值回落
+ *  缺省并 console.warn 告警。 */
+function resolveDraftsGc(raw) {
+  const DEFAULTS = { autoSupersede: true, archiveDays: 30 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] draftsGc 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 draftsGc 键：{ autoSupersede?: boolean, archiveDays?: 正整数 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { autoSupersede?, archiveDays? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.autoSupersede !== undefined) {
+    if (typeof raw.autoSupersede === 'boolean') out.autoSupersede = raw.autoSupersede;
+    else warn(`autoSupersede ${JSON.stringify(raw.autoSupersede)} 不合法（允许 true | false）`);
+  }
+  if (raw.archiveDays !== undefined) {
+    if (Number.isInteger(raw.archiveDays) && raw.archiveDays > 0) out.archiveDays = raw.archiveDays;
+    else warn(`archiveDays ${JSON.stringify(raw.archiveDays)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/** scan 型卡自动转修复卡配置解析：{ enabled: boolean }，缺省 true。修复卡照走既有全部
+ *  闸门（引水闸/L2L3 人审不绕过）；enabled=false 恢复旧行为（failed scan 卡只能人工 abandon）。
+ *  非法值回落缺省并 console.warn 告警。 */
+function resolveScanAutoFix(raw) {
+  const DEFAULTS = { enabled: true };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] scanAutoFix 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 scanAutoFix 键，enabled 允许 true|false）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
   }
   return out;
 }

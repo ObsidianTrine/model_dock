@@ -79,6 +79,16 @@
   "autoResume": {
     "enabled": true
   },
+  "configGuard": {
+    "enabled": true
+  },
+  "draftsGc": {
+    "autoSupersede": true,
+    "archiveDays": 30
+  },
+  "scanAutoFix": {
+    "enabled": true
+  },
   "escalation": {
     "enabled": true,
     "fallbackBackend": "claude-headless"

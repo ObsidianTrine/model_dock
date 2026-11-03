@@ -9,12 +9,48 @@
 //      见 buildInteractiveCard / notifyActionCard
 // dryRun 模式返回将执行的命令/payload 不发送（测试用）。
 
+import { createHmac } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { loadWorkflowConfig } from '../workflow-config.mjs';
 import { keychainServiceName } from './schedule.mjs';
 
 /** 旧项目名的 webhook 变量（兼容识别，永不删除——已注册过通知的老环境不断供）。 */
 export const NIGHTLY_WEBHOOK_ENV = 'MODELRDOCK_NIGHTLY_WEBHOOK';
+
+/** 飞书自定义机器人签名密钥的 env 名（与 approval-listener 的 VERIFICATION_TOKEN 命名
+ *  同族；config notify.signSecretService 指向的钥匙串条目是第二来源）。 */
+export const LARK_SIGN_SECRET_ENV = 'AGENTS_LARK_SIGN_SECRET';
+
+/**
+ * 飞书自定义机器人签名（官方规范）：把 `timestamp + "\n" + secret` 当作 HMAC-SHA256 的
+ * **密钥**、空串当作消息，取 base64 摘要。密钥本身绝不进 payload/日志——出站 body 只附
+ * timestamp 与 sign 两个字段。
+ * @param {string|number} timestamp 秒级时间戳（十进制字符串）
+ * @param {string} secret 机器人签名密钥
+ */
+export function feishuSign(timestamp, secret) {
+  return createHmac('sha256', `${String(timestamp)}\n${String(secret)}`).update('').digest('base64');
+}
+
+/**
+ * 签名密钥解析：env（AGENTS_LARK_SIGN_SECRET）优先 → darwin 钥匙串兜底（服务名
+ * notify.signSecretService，与 webhook URL 的钥匙串兜底同模式）。取不到返回 null =
+ * 不签名（未配置 = 现状不变）。密钥属密钥——只返回值，绝不打日志。
+ */
+export function resolveSignSecret(repoRoot) {
+  const env = process.env[LARK_SIGN_SECRET_ENV];
+  if (typeof env === 'string' && env.trim()) return { secret: env.trim(), source: 'env' };
+  if (process.platform === 'darwin') {
+    const service = loadWorkflowConfig(repoRoot)?.notify?.signSecretService;
+    if (!service) return null;
+    try {
+      const r = spawnSync('security', ['find-generic-password', '-s', service, '-w'], { encoding: 'utf8', timeout: 5000 });
+      const v = (r.stdout || '').trim();
+      if (r.status === 0 && v) return { secret: v, source: 'keychain' };
+    } catch { /* 钥匙串不可得：不签名，通知照发（尽力而为） */ }
+  }
+  return null;
+}
 
 /** webhook 环境变量名清单（按优先序）：${envPrefix}_NIGHTLY_WEBHOOK + 旧名兼容。 */
 export function nightlyWebhookEnvs(repoRoot) {
@@ -34,11 +70,15 @@ export function orchWebhookEnvs(repoRoot) {
  * （msgtype/text）、Slack（text）三家格式互不相同，裸 {title,body,ts} 只有自建
  * 适配层能接。按 URL 域名识别主流三家直接适配，其余端点保持裸 JSON（已注册
  * 自建适配层的老环境不断供）。纯函数：dryRun 描述与实际发送共用同一形态。
+ * sign = { timestamp, sign }（飞书自定义机器人签名，C13）：提供且端点为飞书时
+ * body 附 timestamp+sign 两字段（签名算法见 feishuSign）；缺省 null = 不签名，
+ * 老调用方（4 参）行为逐字节不变。
  */
-export function webhookPayload(webhook, title, body, ts) {
+export function webhookPayload(webhook, title, body, ts, sign = null) {
   const text = `${title}\n${body}`;
   if (/open\.feishu\.cn|open\.larksuite\.com/i.test(webhook)) {
-    return JSON.stringify({ msg_type: 'text', content: { text } });
+    const base = { msg_type: 'text', content: { text } };
+    return JSON.stringify(sign ? { timestamp: String(sign.timestamp), sign: sign.sign, ...base } : base);
   }
   if (/qyapi\.weixin\.qq\.com/i.test(webhook)) {
     return JSON.stringify({ msgtype: 'text', text: { content: text } });
@@ -198,7 +238,17 @@ export async function notify(opts = {}) {
     }
   }
   if (webhook) {
-    const payload = webhookPayload(webhook, title, body, new Date().toISOString());
+    // 飞书端点 + 已配置签名密钥 → 出站签名（C13）：timestamp 秒级字符串 + HMAC 摘要。
+    // 未配置 = 现状不变（不签名）；密钥解析失败不阻断（通知尽力而为）。
+    let sign = null;
+    if (isFeishuWebhook(webhook)) {
+      const sec = resolveSignSecret(repoRoot);
+      if (sec) {
+        const tsSec = String(Math.floor(Date.now() / 1000));
+        sign = { timestamp: tsSec, sign: feishuSign(tsSec, sec.secret) };
+      }
+    }
+    const payload = webhookPayload(webhook, title, body, new Date().toISOString(), sign);
     if (dryRun) {
       delivered.push(webhookSrc === 'keychain' ? `webhook POST（钥匙串） ${payload}` : `webhook POST ${webhook} ${payload}`);
     } else {
@@ -303,12 +353,31 @@ export async function notifyActionCard({ repoRoot, webhookEnvs, taskId, reason, 
   if (!webhook && process.platform === 'darwin') webhook = keychainWebhook(repoRoot);
   if (!webhook || !isFeishuWebhook(webhook)) return { sent: false };
   const payload = buildInteractiveCard({ title, taskId, reason });
-  if (dryRun) return { sent: false, dryRun: true, payload, webhook };
+  if (dryRun) {
+    // dryRun 同样带签名（配置了密钥时）——dryRun 描述与实际发送共用同一形态（测试据此断言）
+    let sign = null;
+    const sec = resolveSignSecret(repoRoot);
+    if (sec) {
+      const tsSec = String(Math.floor(Date.now() / 1000));
+      sign = { timestamp: tsSec, sign: feishuSign(tsSec, sec.secret) };
+    }
+    const signedPayload = sign
+      ? JSON.stringify({ timestamp: sign.timestamp, sign: sign.sign, ...JSON.parse(payload) })
+      : payload;
+    return { sent: false, dryRun: true, payload: signedPayload, webhook };
+  }
   try {
+    // 交互卡片出站同样签名（C13）：飞书端点 + 已配置密钥才附；未配置 = 现状不变
+    let bodyOut = payload;
+    const sec = resolveSignSecret(repoRoot);
+    if (sec) {
+      const tsSec = String(Math.floor(Date.now() / 1000));
+      bodyOut = JSON.stringify({ timestamp: tsSec, sign: feishuSign(tsSec, sec.secret), ...JSON.parse(payload) });
+    }
     const res = await fetch(webhook, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: payload,
+      body: bodyOut,
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -458,3 +458,53 @@ describe('workflow-config > B11 常量收口新键（gateTimeoutMinutes/retryWai
     expect(mod.PROMPT_FILE_THRESHOLD_CHARS).toBe(20_000)
   })
 })
+
+describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新键，缺省安全）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-guard-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('缺省全开：configGuard.enabled=true / draftsGc={autoSupersede:true,archiveDays:30} / scanAutoFix.enabled=true', () => {
+    expect(cfgOf({}).configGuard).toEqual({ enabled: true })
+    expect(cfgOf({}).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+    expect(cfgOf({}).scanAutoFix).toEqual({ enabled: true })
+  })
+
+  it('显式值生效（enabled=false 关闭 / archiveDays 自定义）', () => {
+    expect(cfgOf({ configGuard: { enabled: false } }).configGuard).toEqual({ enabled: false })
+    expect(cfgOf({ draftsGc: { autoSupersede: false, archiveDays: 7 } }).draftsGc).toEqual({ autoSupersede: false, archiveDays: 7 })
+    expect(cfgOf({ scanAutoFix: { enabled: false } }).scanAutoFix).toEqual({ enabled: false })
+  })
+
+  it('非法值回落缺省并 console.warn（键缺失不告警）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ configGuard: 'on' }).configGuard).toEqual({ enabled: true })
+      expect(cfgOf({ configGuard: { enabled: 'yes' } }).configGuard).toEqual({ enabled: true })
+      expect(cfgOf({ draftsGc: 'x' }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+      expect(cfgOf({ draftsGc: { archiveDays: 0 } }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+      expect(cfgOf({ scanAutoFix: { enabled: 1 } }).scanAutoFix).toEqual({ enabled: true })
+      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(5)
+      expect(String(warn.mock.calls[0]?.[0])).toContain('configGuard')
+      warn.mockClear()
+      // 键缺失 = 沿用缺省且不告警
+      expect(cfgOf({ configGuard: {}, draftsGc: { archiveDays: 14 }, scanAutoFix: {} }).draftsGc.archiveDays).toBe(14)
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('notify.signSecretService：显式服务名生效，缺省 null（C13 出站签名可选配置）', () => {
+    expect(cfgOf({}).notify.signSecretService).toBeNull()
+    expect(cfgOf({ notify: { signSecretService: 'modeldock-orch-feishu-sign' } }).notify.signSecretService).toBe('modeldock-orch-feishu-sign')
+    expect(cfgOf({ notify: { signSecretService: '   ' } }).notify.signSecretService).toBeNull()
+  })
+})
