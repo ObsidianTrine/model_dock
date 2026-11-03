@@ -39,15 +39,25 @@ function lastSettle(events) {
   return null;
 }
 
+/** 「未产出结果块」族签名（B8 扩展，2026-11）：worker 异常结束的 blocked reason 两种
+ *  写法——现行「未产出结果块（worker 异常结束）」与旧「未产出结果块」。这类卡本质是
+ *  zcode 崩溃族（与 ERA 协商失败同源，同环境随后会话可正常连接），纳入可续跑签名；
+ *  沿用既有 24h 冷却与 ≤maxPerRun/drain 上界（冷却内烧不起第二轮）。注意只认 blocked
+ *  事件的 reason 字段：failTaskToBlocked 写的 failed 事件（reason=异常中断：<err>）不在此列，
+ *  budget/watchdog 熔断的 reason 前缀天然不匹配——确定性失败仍交人工。 */
+export const NO_RESULT_BLOCK_RE = /未产出结果块|no result block|worker 异常结束/i;
+
 /**
  * 判定一张 blocked 卡是否「transient 类失败」（自动续资格之一）。
- * 两条路径满足其一即可：
+ * 三条路径满足其一即可：
  *  A. 最后一条 settle 事件的 reason/detail 带 transient 签名（429 限流/网络类，
  *     复用 transient.mjs 的 TRANSIENT_RE——与 worker 原地重试同一口径）；
  *  B. 事件链存在 worker_retry 记录（worker 原地重试发生过 = 瞬时故障已被认定）
  *     且最终以 blocked 事件收尾、其后无 circuit_breaker——典型形态是 429 重试
  *     3 次用尽后「未产出结果块」落 blocked（reason 本身不带签名，靠链路定性）。
  *     最后一次重试之后出现熔断（budget/看门狗/调试迭代超限）= 确定性失败，不续。
+ *  C. 最后一条 settle 事件是 blocked 且 reason 是「未产出结果块」族（worker 异常
+ *     结束、无 transient 文案可依）——worker 崩溃族按可自愈处理（B8 扩展）。
  * @param {Array<object>} events readEvents 的输出
  * @returns {boolean}
  */
@@ -61,6 +71,10 @@ export function isTransientBlocked(events) {
   // 误判成 transient，形成「误杀→自动续→再误杀」循环烧钱。blocked 形态同理（未来写入
   // 方统一 reason 口径后同样被此护栏拦住）。
   if (String(settle.reason ?? '') === 'watchdog') return false;
+  // Path C（B8）：未产出结果块族——worker 异常结束，即使事件链没有 worker_retry 也按
+  // 可自愈崩溃族处理（冷却与每 drain 上界兜住烧钱风险）。只认 blocked 收尾：failed
+  // 收尾的异常中断（failTaskToBlocked）原因各异，交人工定性。
+  if (settle.type === 'blocked' && NO_RESULT_BLOCK_RE.test(String(settle.reason ?? ''))) return true;
   if (TRANSIENT_RE.test(`${settle.reason ?? ''}\n${settle.detail ?? ''}`)) return true;
   if (settle.type !== 'blocked') return false;
   let lastRetryIdx = -1;

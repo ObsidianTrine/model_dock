@@ -158,6 +158,18 @@ describe('approval listener > parseCardAction / extractToken / verifyToken', () 
   })
 })
 
+describe('approval listener > safeEqual（常数时间比较，C13）', () => {
+  it('等值 true（含空串对空串）；不等值 false；长度不等不短路也不抛错', async () => {
+    const { safeEqual } = await import('../../.agents/scripts/approval-listener.mjs')
+    expect(safeEqual('abc', 'abc')).toBe(true)
+    expect(safeEqual('', '')).toBe(true)
+    expect(safeEqual('abc', 'abd')).toBe(false)
+    expect(safeEqual('abc', 'abcd')).toBe(false) // 长度泄漏面已由 sha256 归一化消除
+    expect(safeEqual('abc', '')).toBe(false)
+    expect(safeEqual(undefined as any, 'x')).toBe(false)
+  })
+})
+
 describe('approval listener > buildActionArgs', () => {
   it('reject 带 --reason（无 reason 用默认文案）；approve/retry 不带文案参数', () => {
     expect(buildActionArgs('approve', 't')).toEqual(['approve', 't'])
@@ -210,7 +222,7 @@ describe('approval listener > makeHandler（回调处理）', () => {
     }
   })
 
-  it('token 不一致：403 且不审计不 spawn（token 不落任何盘）', async () => {
+  it('token 不一致：403 + 审计留痕（只记事实不记 token 值）+ 不 spawn', async () => {
     const repo = mkRepo()
     let spawned = 0
     const h = mkHandler(repo.root, { spawnFn: () => { spawned++; return { status: 0 } } })
@@ -219,7 +231,13 @@ describe('approval listener > makeHandler（回调处理）', () => {
       const r = await h.handle(v2Body({ task: 't', action: 'approve' }, 'wrong-token'))
       expect(r.status).toBe(403)
       expect(spawned).toBe(0)
-      expect(readAudit(h.auditPath)).toEqual([])
+      // C13：不匹配拒绝并落审计（审计事实：来源 IP + rejected + 原因），token 值不落盘
+      const audit = readAudit(h.auditPath)
+      expect(audit).toHaveLength(1)
+      expect(audit[0].result).toBe('rejected')
+      expect(audit[0].detail).toBe('verification_token_mismatch')
+      expect(JSON.stringify(audit)).not.toContain('wrong-token')
+      expect(JSON.stringify(audit)).not.toContain(TOKEN)
       // 且回复里绝不回显收到的 token
       expect(JSON.stringify(r.body)).not.toContain('wrong-token')
     } finally {
