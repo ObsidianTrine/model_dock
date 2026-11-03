@@ -73,8 +73,19 @@ export function isTransientBlocked(events) {
   if (String(settle.reason ?? '') === 'watchdog') return false;
   // Path C（B8）：未产出结果块族——worker 异常结束，即使事件链没有 worker_retry 也按
   // 可自愈崩溃族处理（冷却与每 drain 上界兜住烧钱风险）。只认 blocked 收尾：failed
-  // 收尾的异常中断（failTaskToBlocked）原因各异，交人工定性。
-  if (settle.type === 'blocked' && NO_RESULT_BLOCK_RE.test(String(settle.reason ?? ''))) return true;
+  // 收尾的异常中断（failTaskToBlocked）原因各异，交人工定性。护栏与 Path B 同构：
+  // 最后一条 worker_spawned 之后（无 spawn 记录则全链）出现过 circuit_breaker = 该卡
+  // 至少熔断过一次（确定性失败），不续——防「熔断→崩溃收尾→自动续→再熔断」循环。
+  if (settle.type === 'blocked' && NO_RESULT_BLOCK_RE.test(String(settle.reason ?? ''))) {
+    let lastSpawnIdx = -1;
+    for (let i = 0; i < events.length; i++) {
+      if (events[i]?.type === 'worker_spawned') lastSpawnIdx = i;
+    }
+    for (let i = lastSpawnIdx + 1; i < events.length; i++) {
+      if (events[i]?.type === 'circuit_breaker') return false;
+    }
+    return true;
+  }
   if (TRANSIENT_RE.test(`${settle.reason ?? ''}\n${settle.detail ?? ''}`)) return true;
   if (settle.type !== 'blocked') return false;
   let lastRetryIdx = -1;

@@ -161,6 +161,24 @@ describe('orchestrator autoresume > Path C（B8）：未产出结果块族纳入
     expect(isTransientBlocked([ev('worker_spawned'), ev('failed', { reason: '异常中断：无法定位 CLI 配置' })])).toBe(false)
   })
 
+  it('Path C 护栏（与 Path B 同构）：最后一条 worker_spawned 之后有 circuit_breaker → 不续', () => {
+    // watch.test 同款合成现场：曾熔断（调试迭代超限）+ 崩溃收尾 = 确定性失败
+    expect(isTransientBlocked([
+      ev('task_accepted'),
+      ev('worker_stderr_tail', { text: 'ECONNRESET 429' }),
+      ev('circuit_breaker', { reason: 'max_test_iterations', detail: '6/5' }),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ])).toBe(false)
+    // 无 spawn 记录的链：任一熔断即算
+    expect(isTransientBlocked([ev('circuit_breaker', { reason: 'budget:max_tokens' }), ev('blocked', { reason: '未产出结果块' })])).toBe(false)
+    // 熔断发生在上个会话（更早的 spawn 之前不算——spawn 重新开桌）：可续
+    expect(isTransientBlocked([
+      ev('circuit_breaker', { reason: 'max_test_iterations', detail: '6/5' }, '2026-10-31T00:00:00.000+08:00'),
+      ev('worker_spawned', { backend: 'mock', pid: 1 }, '2026-11-01T00:00:00.000+08:00'),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ])).toBe(true)
+  })
+
   it('Path C 不越护栏：watchdog / budget 熔断的 reason 天然不匹配，仍交人工', () => {
     expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: 'watchdog' })])).toBe(false)
     expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: 'budget:max_tokens' })])).toBe(false)
