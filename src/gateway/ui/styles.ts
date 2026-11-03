@@ -240,6 +240,10 @@ select.chip{padding-right:24px}
 .svcform .ftag{font-size:var(--fs-xs);color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden}
 .svcform .frow.dis .mid,.svcform .frow.dis .ftag{opacity:.55}
 .svcform .fetchpanel{margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--r-md)}
+/* 拉取面板浮头组：搜索框+列头包成单个 sticky 块整体吸顶（背景必须不透明，行从组下滑过不透出）；
+   组内 .mhead 改 static——嵌套 sticky 与组共用同一吸附基准会向上叠压盖住搜索框，吸附职责移交组 */
+.svcform .fetchpanel .fpstick{position:sticky;top:0;z-index:2;background:var(--card)}
+.svcform .fetchpanel .fpstick .mhead{position:static}
 .svcform .fetchpanel .fsearch{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .svcform .fetchq{flex:1;min-width:0;padding:5px 10px;font-size:var(--fs-sm)}
 .svcform .fetchcount{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}

@@ -438,11 +438,15 @@ export const UI_JS_EDIT = `  var editing = null
         '</div>' +
         '</div>' +
         '<div class="fetchpanel" id="' + gid('FetchPanel') + '" hidden>' +
+        // 浮头组：搜索框与列头包成单个 sticky 块整体吸顶（滚动长列表时搜索/全选/列头常驻）；
+        // 组内行不得再各自挂 sticky（嵌套 sticky 同基准会叠压盖住搜索框），契约见 ui-kit「浮头表格」
+        '<div class="fpstick">' +
         '<div class="fsearch">' +
         '<input type="text" class="fetchq" id="' + gid('FetchQ') + '" data-i18n-ph="搜索模型 ID，如 claude / deepseek…||Search model ID, e.g. claude / deepseek…" placeholder="搜索模型 ID，如 claude / deepseek…">' +
         '<span class="fetchcount" id="' + gid('FetchCount') + '"></span>' +
         '<span class="fetchcount" id="' + gid('FetchSel') + '"></span></div>' +
         '<div class="mhead"><input type="checkbox" id="' + gid('FetchAll') + '" data-i18n-title="全选 / 全不选（仅作用于当前可见行）||Select all / none (visible rows only)" title="全选 / 全不选（仅作用于当前可见行）"><span data-i18n="拉取到的模型（勾选后填入）||Fetched models (tick to fill in)">拉取到的模型（勾选后填入）</span><span data-i18n="上下文||Context">上下文</span><span data-i18n="最大输出||Max output">最大输出</span><span class="vcol" data-i18n="视觉||Vision">视觉</span><span></span></div>' +
+        '</div>' +
         '<div id="' + gid('FetchRows') + '"></div>' +
         '<div class="mempty" id="' + gid('FetchEmpty') + '" data-i18n="没有匹配的模型||No matching models" hidden>没有匹配的模型</div>' +
         '<div id="' + gid('FetchMoreWrap') + '" hidden><button class="btn small" type="button" id="' + gid('FetchMore') + '" data-i18n="显示全部||Show all">显示全部</button> <span id="' + gid('FetchMoreN') + '"></span></div>' +
