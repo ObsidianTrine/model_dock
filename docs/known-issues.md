@@ -427,12 +427,13 @@
 - 备注：纯可读性/覆盖率清理，随手批处理即可。来源：test/coverage-gaps-presets-sync.md 施工发现（「补测后」分支余量即此处）。
 - 已修（2026-10-31）：①升级为真缺陷修复——死臂背后 `±Infinity` 实际能穿透旧守卫（typeof number 且 >0）带着 Inf 元数据进模型目录，改 `typeof === 'number' && Number.isFinite(...) && > 0` 一并拒收（测试补 Infinity 用例）；②已删（Object.assign 对 undefined 源本就是合法空操作）；③留档——守卫承担 cached 闭包变量的 TS 收窄职责，删掉即 possibly-null 编译错，注明后不算死代码。
 
-**CORRECT-12（P3，2026-11-04 夜航基线跑分发现，单次复现未再命中）工作流套件偶发红：cost.test.ts「总账 + byCard」fuel.measured**
-- 现象：test/orchestrator/cost.test.ts:214 `expect(fuel.measured).toBe(true)` 在全量跑分中失败一次（760/761）；同分支单独复跑 13/13 绿、第二次全量 761/761 绿——非确定性，疑似跨文件干扰或负载敏感。
-- 机制排查（2026-11-04 夜航预研时逐路排除）：价目为 opts.table 注入（getPricingTable 首行即返回，不走网络）；写读两侧日切分一致（writeGatewayLog 与 readWindowEntries 同款本地日换算）；能到 `measured:false` 的唯一路径是「时间窗内网关零请求」——即 `gatewayLogsDir` 的 env 优先解析（`MODELRDOCK_FAKE_HOME || MODELRDOCK_HOME` 先于 cfg.gatewayLogDir）在某文件泄漏 env 时读到空日志目录。fakeHome restore 本身对称，泄漏源未锁定。
-- 复现配方：全量 `npx vitest run -c vitest.workflow.config.ts`（串行池，顺序耦合依赖历史时长排序）；失败时从 vitest 报错上下文拿不到 reason，需在用例 finally 前临时打印 `fuel.reason` 或断言 message 定位分支。
-- 影响：CI 与全量门禁偶发假红（`npm run test:workflow`），重跑即绿；不涉产品行为。
-- 处置建议：立卡复现（连续全量跑分采样 + reason 采集），倾向给 measureFuel 测试加 reason 断言或隔离 env 注入路径；修复后回流审查评测考题（测试隔离类）。
+**CORRECT-12（P2 升级：2026-11-04 夜航基线跑分发现，当晚定位根因并修复）跨午夜窗口的网关日志按本地日扫描漏读 end 日文件——燃油账/对账静默漏记，测试侧表现为 cost.test 偶发红**
+- 现象（表层）：test/orchestrator/cost.test.ts:214 `expect(fuel.measured).toBe(true)` 在全量跑分中失败一次（760/761）；同分支单独复跑 13/13 绿、第二次全量 761/761 绿。失败断言随后已补自定义消息（`expect(x, JSON.stringify(fuel))`，复现即见 reason）。
+- 真根因（2026-11-04 夜航逐路排除后定位，与 env 泄漏无关）：`cost.mjs readWindowEntries` 与 `reconcile.mjs` 两处的日文件循环 `for (day = new Date(start); day.getTime() <= end; day += 1天)` 以 **start 的时刻**整日推进——当窗口跨本地午夜（end 的时刻早于 start 的时刻，如 23:56→00:08）时永远推进不到 end 日，**end 日的日志文件整日漏读**。用量漏记（轻则燃油少算，重则整窗「时间窗内网关零请求」→ measured:false / viaGateway 误判）。长窗口同理漏收尾日（start 23:58、end 次日 10:00 只扫到前一日）。
+  - 测试偶发红的机制：用例条目按 `Date.now()` 相对生成，全量跑分恰在**午夜后 00:07:30–00:10**（两笔条目均已落当日文件、窗口起点仍在前一日）抵达 cost.test → 整窗判零 → 红。陷阱窗仅 2.5 分钟/天，故复现困难；单独跑与第二次全量都在窗外。
+  - 影响面（产品侧，不止测试）：sail 航海报告燃油段、`stats --cost`、`reconcile` 对账、`measureFuelBatch` 全部经这三处循环——**任何跨过本地午夜的航行/任务都漏记午夜后的用量**（用户可感：燃油账与对账数字偏小甚至「不可测」）。
+  - 同族先例：2026-10-02 修过**写侧**同族 bug（网关日志条目用 UTC 日期落文件、读侧按本地日找 → 本地午夜后写错文件，reconcile.test.ts:79 注记在案）；本次是**读侧**扫描循环的补齐，写读口径自此两侧闭合。
+- ☑ **已修 2026-11-04（本卡 flake-context-and-hunt）**：三处循环改为按**日历日**扫 `[date(start) .. date(end)]`（top-break 判 `date > endKey`，endKey 按本地日切分），条目仍按 ts ±60s 容差过滤——不引入多余读面。回归：cost.test.ts 两例（双笔全在 end 日 → 旧读法整窗误判零；跨双日条目 → 旧读法少算燃油）+ reconcile.test.ts 一例（任务窗口跨午夜，端到端读侧断言），全部本地午夜锚定、任意时区/平台等价。
 
 ---
 

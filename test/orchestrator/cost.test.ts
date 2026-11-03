@@ -211,10 +211,11 @@ describe('measureFuel（窗口实测 + 逐卡拆账）', () => {
         cardIds: ['card-1'],
         table: new Map([['up/m1', { input: 1, output: 2 }]]),
       })
-      expect(fuel.measured).toBe(true)
-      expect(fuel.usd).toBeCloseTo(1.2 + 0.24, 10) // 总窗：1.2M in + 0.12M out
-      expect(fuel.byCard).toHaveLength(1)
-      expect(fuel.byCard[0].usd).toBeCloseTo(1.2, 10) // 卡窗只盖第一笔
+      // 自定义失败消息（CORRECT-12：偶发红复现时 reason 直接可见，免插桩）——正常通过时零开销
+      expect(fuel.measured, `fuel=${JSON.stringify(fuel)}`).toBe(true)
+      expect(fuel.usd, `fuel=${JSON.stringify(fuel)}`).toBeCloseTo(1.2 + 0.24, 10) // 总窗：1.2M in + 0.12M out
+      expect(fuel.byCard, `fuel=${JSON.stringify(fuel)}`).toHaveLength(1)
+      expect(fuel.byCard[0].usd, `byCard0=${JSON.stringify(fuel.byCard?.[0])}`).toBeCloseTo(1.2, 10) // 卡窗只盖第一笔
     } finally {
       h.restore()
       repo.cleanup()
@@ -232,6 +233,57 @@ describe('measureFuel（窗口实测 + 逐卡拆账）', () => {
       expect(fuel.measured).toBe(false)
       expect(fuel.viaGateway).toBe(false)
       expect(fuel.reason).toContain('零请求')
+    } finally {
+      h.restore()
+      repo.cleanup()
+    }
+  })
+
+  it('跨午夜窗口：end 日文件不漏读——双笔都在 end 日，旧读法整窗「零请求」误判（CORRECT-12）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    try {
+      // 本地午夜锚定（任意时区等价）：窗口 [前一日 23:56, 当日 00:08]，条目全部落在午夜后
+      // ——旧读法按 start 的时刻整日推进，永远读不到 end 日文件 → 整窗「零请求」。
+      // 夜航基线跑分 2026-11-04 00:08 左右实测命中（known-issues CORRECT-12）。
+      const midnight = new Date()
+      midnight.setHours(0, 0, 0, 0)
+      const iso = (t: number) => new Date(t).toISOString()
+      writeGatewayLog(h.home, [
+        { ts: iso(midnight.getTime() + 60_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+        { ts: iso(midnight.getTime() + 360_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 200_000, output_tokens: 20_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+      ])
+      const fuel = await measureFuel(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, {
+        start: midnight.getTime() - 4 * 60_000,
+        end: midnight.getTime() + 8 * 60_000,
+        table: new Map([['up/m1', { input: 1, output: 2 }]]),
+      })
+      expect(fuel.measured, `fuel=${JSON.stringify(fuel)}`).toBe(true)
+      expect(fuel.usd).toBeCloseTo(1.2 + 0.24, 10)
+    } finally {
+      h.restore()
+      repo.cleanup()
+    }
+  })
+
+  it('跨午夜窗口：start 日与 end 日条目都计入——旧读法漏 end 日文件 → 燃油少算（CORRECT-12）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    try {
+      const midnight = new Date()
+      midnight.setHours(0, 0, 0, 0)
+      const iso = (t: number) => new Date(t).toISOString()
+      writeGatewayLog(h.home, [
+        { ts: iso(midnight.getTime() - 3 * 60_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+        { ts: iso(midnight.getTime() + 120_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+      ])
+      const fuel = await measureFuel(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, {
+        start: midnight.getTime() - 4 * 60_000,
+        end: midnight.getTime() + 8 * 60_000,
+        table: new Map([['up/m1', { input: 1, output: 2 }]]),
+      })
+      expect(fuel.measured, `fuel=${JSON.stringify(fuel)}`).toBe(true)
+      expect(fuel.usd, `fuel=${JSON.stringify(fuel)}`).toBeCloseTo(2.4, 10) // 两日各 1.2，旧读法只算 1.2
     } finally {
       h.restore()
       repo.cleanup()
