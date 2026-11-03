@@ -137,6 +137,9 @@ export const mockBackend = {
 
     if (isReviewer) {
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      // 审查 token 上报注入：集成测试驱动「审查段熔断」路径（reviewer 记账 + 循环顶收敛）
+      const reviewTokens = parseInt(process.env.ORCH_MOCK_REVIEW_TOKENS ?? '0', 10) || 0;
+      if (reviewTokens > 0) onEvent({ type: 'budget_snapshot', tokens_in: reviewTokens, tokens_out: 0 });
       const output =
         blockers > 0
           ? `🔴 阻塞（1 个）\n- mock：验收标准第 ${blockers} 条未实现\nREVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`
