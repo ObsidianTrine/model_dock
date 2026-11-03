@@ -190,7 +190,9 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       return {
         installed: await readTextIfExists(file()).then((t) => t !== null),
         attached: !!cfg.harness[id],
-        pointing: cfg.harness[id] ? 'gateway' : 'unknown',
+        // planAttach 支持 direct（写上游地址+真实 Key），direct 模式下仍报 'gateway' 是假绿灯
+        // ——按登记 mode 判定，与其他 adapter 的 status 口径对齐
+        pointing: cfg.harness[id]?.mode === 'direct' ? 'other' : cfg.harness[id] ? 'gateway' : 'unknown',
       }
     },
   }

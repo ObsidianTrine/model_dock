@@ -330,14 +330,24 @@ export async function detachHarness(id: string): Promise<DetachOutcome> {
   }
 
   // 兜底清理：连续多次接入没断开时，本次接入前的快照里仍带着上一轮写入的 modeldock 条目
-  // （或还原后文件又被外部改过），把仍指向网关的条目清掉
+  // （或还原后文件又被外部改过），把仍指向网关的条目清掉。
+  // planDetach/applyChanges 失败只转警告，**仍然**注销 harness 登记：上面快照还原已完成，
+  // 若登记残留，重试 detach 会走同一 planDetach 再抛同一错——永久卡在「已还原、未注销」
+  // 半态（除非用户手改客户端配置）。容错口径与 refreshBakedModelClients 对齐（逐客户端
+  // catch 成 warning 不中断）；文件侧已有快照与 undo 机制兜底。
   const cfg2 = await loadConfig()
   const adapter = await getAdapter(id, cfg2)
   if (adapter) {
-    const plan = await adapter.planDetach(cfg2)
-    if (plan.changes.length > 0) {
-      await applyChanges(id, 'detach', plan.changes, { yes: true, quiet: true })
-      notes.push(t('已清除指向网关的残留配置', 'Removed leftover config that still pointed to the gateway'))
+    try {
+      const plan = await adapter.planDetach(cfg2)
+      if (plan.changes.length > 0) {
+        await applyChanges(id, 'detach', plan.changes, { yes: true, quiet: true })
+        notes.push(t('已清除指向网关的残留配置', 'Removed leftover config that still pointed to the gateway'))
+      }
+    } catch (e) {
+      notes.push(
+        t('残留清理失败（已还原的快照不受影响，接管登记已移除）：{msg}', 'Leftover cleanup failed (the restored snapshot is unaffected; the attach registration has been removed): {msg}', { msg: (e as Error).message })
+      )
     }
   }
 
