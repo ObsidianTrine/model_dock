@@ -157,6 +157,20 @@ node .agents/scripts/approval-listener.mjs --port 18991      # 缺省端口写�
 - 动作白名单 approve / reject / retry；同任务同动作 60 秒内重复点击忽略（防手抖）。
 - 转发链路会暴露到公网，token 之外无其他凭据保护——不建议把高权限网络的转发长期开着；用完即关或限制来源 IP。
 
+### 4.7 动态选船（dynamic dispatch，可选）
+
+默认关闭，开了之后派发时按「海况 + 卡难度」在白名单（envelope）内自动选执行船：
+
+```json
+"dynamicDispatch": { "enabled": true, "envelope": ["zcode-headless", "claude-headless"] }
+```
+
+- envelope 写进配置 = 持久授权：包络内换船不再要求每卡 `--approve-backend-switch`；包络外永不自动切。
+- 难度路由：ahead-1/2 轻卡 → zcode（免费船）；ahead-3/4 重卡 / files_hint 命中核心路径 → claude。
+- 海况防护：所选船绕开狗粮（dogfood_bypass）/ 未接管 / CLI 不可用 → 换包络内下一个健康船；全港风暴（熔断/限流/重试密集）沿用默认并留痕。
+- 显式 `--worker-backend` 与 resume 沿用永远优先，动态选船不越权；所有换船记 `dispatch_selected` 事件。
+- 规则全表见 `.agents/workflows/orchestrator.md` B11。
+
 ## 5. 状态地图（任务卡在哪、下一步是什么）
 
 ```

@@ -407,7 +407,10 @@ describe('tiers > 网关权威校验端到端（gatewayAdmin: true，独立进�
       expect(out.stdout + out.stderr).toContain('权威校验失败')
       expect(out.stdout + out.stderr).toContain('plain')
       expect(readCard(repo.root, 'pending', 'test-task')).toBeTruthy() // 状态迁移前阻断
-      expect(eventsOf(repo.root, 'test-task')).toEqual([]) // die 先于任何事件
+      // 阶段 3 起 fleet_observed（纯观测）先于 tier 校验落盘；「零消费」不变量 =
+      // 无 tier 解析 / 无预算 / 无 worker 事件（卡零消费、状态未动）
+      const evts = eventsOf(repo.root, 'test-task')
+      expect(evts.some((e) => ['tier_resolved', 'budget_profile', 'worker_spawned', 'task_accepted'].includes(e.type))).toBe(false)
     } finally {
       repo.cleanup()
       gw.kill()

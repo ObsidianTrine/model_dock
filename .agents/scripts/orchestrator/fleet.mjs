@@ -121,23 +121,25 @@ export function renderFleetLine(state) {
 }
 
 /**
- * 派发前观测入口（cmdRun 调用）：返回 { lines, event }。
- *   gatewayAdmin 未开 → 完全静默（{ lines: [], event: null }，行为与历史版本一致）；
+ * 派发前观测入口（cmdRun 调用）：返回 { lines, event, state }。
+ *   gatewayAdmin 未开 → 完全静默（{ lines: [], event: null, state: null }，行为与历史版本一致）；
  *   开了但不可得 → 一行可操作提示，不落事件不阻断；
- *   观测成功 → 摘要行 + 告警行，event = fleet_observed 载荷（紧凑，供事件时间线留痕）。
+ *   观测成功 → 摘要行 + 告警行，event = fleet_observed 载荷（紧凑，供事件时间线留痕），
+ *   state = 原始快照（动态选船逐船判读用——event 压缩掉了 attached 位，判 not_attached 需要它）。
  */
 export async function observeFleetForRun(cfg, { backend } = {}) {
   const state = await fetchFleetState(cfg);
   if (state.mode !== 'ok') {
     if (cfg?.gatewayAdmin === true) {
-      return { lines: [`⚓ 海况观测不可得：${state.reason}——继续按既有规则派发`], event: null };
+      return { lines: [`⚓ 海况观测不可得：${state.reason}——继续按既有规则派发`], event: null, state: null };
     }
-    return { lines: [], event: null };
+    return { lines: [], event: null, state: null };
   }
   const warnings = assessFleet(state, { backend });
   const lines = [renderFleetLine(state), ...warnings.map((w) => `⚠ ${w.message}`)];
   return {
     lines,
+    state,
     event: {
       mode: 'ok',
       providers: Object.fromEntries((state.providers ?? []).map((p) => [p.id, { down: p.down, lastMs: p.lastMs }])),
