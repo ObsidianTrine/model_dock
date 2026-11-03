@@ -305,6 +305,15 @@ export const claudeCodeAdapter: HarnessAdapter = {
       // ——两凭据并存时客户端可能仍带旧 x-api-key 请求（网关按 token 解析必 401，且难排查）；
       // attach 前有快照，detach 可还原
       delete env.ANTHROPIC_API_KEY
+      // 网关模式默认注入（??= 语义：用户已显式设置时不动）：
+      // ① DISABLE_NONESSENTIAL_TRAFFIC=1 关自动更新/遥测/错误上报/feature-flag 拉取——网关托管
+      //    客户端不需要这些旁路流量（官方文档：置 0/false 也视为禁用，须 unset 才恢复，故只在
+      //    缺失时补，已有值一律尊重）
+      // ② DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 关「未知模型按假定窗口强制压实」——claude
+      //    code 对不认识的模型 ID 会按内置假定（200k）提前 compact，网关路由的第三方大上下文
+      //    模型因此被过早截断；识别交给网关侧（[1m] 等已识别变体不受此开关影响）
+      env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1'
+      env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT ??= '1'
       // 此前指向别的上游时清掉模型钉死 env 与根 model：直连切回（direct 写入的映射）与
       // 用户手配第三方服务首次接管都算——后者 fromMode 未登记，按 prevBase 非网关地址判定
       // （isOursGatewayUrl：有登记按 gateway_base 精确比对，未登记回退回环启发式，重复接入

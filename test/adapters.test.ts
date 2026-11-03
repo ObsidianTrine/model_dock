@@ -312,6 +312,35 @@ describe('claude-code adapter', () => {
     }
   })
 
+  it('网关模式默认注入：UNKNOWN_MODEL_WINDOW_ENFORCEMENT 补 1，用户已有的 DISABLE_NONESSENTIAL_TRAFFIC 不覆盖', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
+    try {
+      const p = path.join(h.home, '.claude', 'settings.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          { env: { ANTHROPIC_BASE_URL: 'https://up.example.com', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '0' } },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      await withConfig(baseCfg())
+
+      const plan = await claudeCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      // 用户已显式设置（哪怕 '0'）：尊重不覆盖——官方语义置 0/false 也视为禁用，unset 才恢复
+      expect(after.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe('0')
+      // 缺失的补默认：未知模型不做假定窗口强制压实（避免网关路由的大上下文模型被 200k 假定截断）
+      expect(after.env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT).toBe('1')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('旧版 claude（< 2.1.243）网关接入：不写 modelPicker，改用 ANTHROPIC_MODEL 环境变量钉定默认模型', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
