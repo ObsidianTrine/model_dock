@@ -44,7 +44,7 @@ Platform note: CI runs the same suite on Linux / macOS / Windows. For changes to
 
 ## AI autonomous pipeline
 
-Tasks with clear goals and machine-checkable acceptance criteria can be handed to the local autonomous pipeline (task cards in, merged code out): give a one-line intent or write a task card → code, tests and independent review run automatically → you approve the merge. For the quick start and full usage (spec trio, nightly inspection, scheduled runs, release proposals), see [docs/ai-pipeline-guide.md](../ai-pipeline-guide.md) (Chinese).
+Tasks with clear goals and machine-checkable acceptance criteria can be handed to the local autonomous pipeline (task cards in, merged code out): give a one-line intent or write a task card → code, tests and independent review run automatically → you approve the merge. For the quick start and full usage (spec trio, nightly inspection, scheduled runs, release proposals), see [.agents/docs/ai-pipeline-guide.md](../../.agents/docs/ai-pipeline-guide.md) (Chinese).
 
 ## Submitting PRs
 

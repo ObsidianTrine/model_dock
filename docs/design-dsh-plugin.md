@@ -319,4 +319,4 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 - npm 公开包：`@deepseek-ai/cordis-plugin-loader@1.0.6`（"Plugin loader for cordis"）、`@deepseek-ai/dsh-tools@0.0.1-rc.1`（"Tool registry and execution pipeline for the DeepSeek Harness"）。
 - npm 名占用：`modeldock@0.1.2` → nimjal/ModelDock（"A unified AI workspace"），与本仓库无关。
 - 本仓库锚点：`src/adapters/dsh.ts`（接入写入逻辑）、`src/cli/index.ts`（`attach/detach/token`、`gateway start/install` 选项面）、`src/gateway/server.ts`（`/_modeldock/health` 无鉴权豁免）、`scripts/build-sea.mjs`（发布资产命名）、`src/util/paths.ts`（`dshHomeDir()` 的 `$DSH_HOME` > `~/.dsh` 解析与沙箱覆盖）。
-- 相关文档：`docs/design-orchestrator.md`（体例参照）、`AGENTS.md`（端口红线、三平台清单、i18n 约定）。
+- 相关文档：`.agents/docs/design-orchestrator.md`（体例参照）、`AGENTS.md`（端口红线、三平台清单、i18n 约定）。

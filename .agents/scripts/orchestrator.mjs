@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // orchestrator.mjs — 自治编排服务（Phase 1：单任务闭环）。
 // "任务卡进、合并出"：submit 任务卡 → run 自动跑 worker→静态门禁→调试子循环
-// →LLM 独立审查→审查返工子循环→人工合并闸门。设计文档：docs/design-orchestrator.md。
+// →LLM 独立审查→审查返工子循环→人工合并闸门。设计文档：.agents/docs/design-orchestrator.md。
 //
 // 零第三方依赖（.agents/ 工具链红线）；复用 feature-branch.mjs 做隔离与合并，
 // 不另起分支体系。从主仓库根目录运行（队列/日志落在 <repoRoot>/.agents/orchestrator/）。

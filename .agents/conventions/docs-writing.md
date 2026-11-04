@@ -79,6 +79,7 @@
 | docs/multi-machine-sync.md、deploy-cloud.md | how-to（runbook） | 特定任务照着做就能成 |
 | CHANGELOG.md | 发布记录 | 每个版本的用户可见变化 |
 | AGENTS.md、.agents/ 约定 | agent 约定 | **不是用户文档**，勿混入用户内容 |
+| .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
 
 ## 代码中的用户可见文案（报错 / 界面）
 
@@ -89,7 +90,7 @@
 
 ## 多语言文档结构（docs/en/）
 
-- **中文是唯一事实来源**；英文版是翻译镜像，放在 `docs/en/`，文件与目录结构和中文一一对应（`README.md` / `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` / `usage.md` / `multi-machine-sync.md` / `deploy-cloud.md`）。纯内部文档（docs/design*、known-issues、backlog、RELEASE_CHECKLIST、orchestrator*、AGENTS.md 等）**不做翻译**。
+- **中文是唯一事实来源**；英文版是翻译镜像，放在 `docs/en/`，文件与目录结构和中文一一对应（`README.md` / `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` / `usage.md` / `multi-machine-sync.md` / `deploy-cloud.md`）。纯内部文档（docs/design*、known-issues、backlog、RELEASE_CHECKLIST、AGENTS.md、.agents/ 全部含 docs/ 子目录等）**不做翻译**。
 - **语言切换行**：每篇对外文档 H1 标题下第一行是切换行——当前语言加粗、其他语言是相对链接；其下紧跟一行 `<!-- i18n-slot：… -->` 注释，是**新增语言的预留插入位**（在该行上方追加链接即可，对读者不可见）。
 - **新增语言 = 三步**：① 新建 `docs/<lang>/` 镜像目录，结构对齐 `docs/en/`；② 在所有已有语言的切换行追加链接；③ 在本节登记该语言。
 - **同步规则**：改动任何对外文档（中文）时，同一交付里更新 `docs/en/` 对应镜像；英文版里指向仅中文存在的文档（design.md 等）时直接链中文原文件并标注 "(Chinese)"。

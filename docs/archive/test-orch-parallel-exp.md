@@ -1,6 +1,6 @@
 # 工作流套件并行化实验报告（B3 · test-orch-parallel-exp）
 
-> 预研报告 docs/test-orch-inproc-presearch.md §六 B3 的实验落地：工作流套件（test/orchestrator/**）从
+> 预研报告 docs/archive/test-orch-inproc-presearch.md §六 B3 的实验落地：工作流套件（test/orchestrator/**）从
 > 串行池（isolate:false + maxWorkers:1）改多 worker 并行的可行性实测。**本卡只交证据，不并配置**——
 > 串行池是 2026-10-01 CI 卡死事故的结构性防线（产品套件 policy.test.ts worker 生命周期），解冻需 CI 复证。
 > 实验日期：2026-11-04 夜航。机器：mac darwin 22.1.0 x64，8C/8G。

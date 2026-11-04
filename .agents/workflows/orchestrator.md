@@ -2,7 +2,7 @@
 
 > **Dockmaster（坞长）** 是本仓库 `.agents/` 自治编排体系的名字——ModelDock 的 Dock，管坞的人就是 dockmaster。**命令行名保持 `orchestrator.mjs` 不变**（改名零收益、破坏既有引用与肌肉记忆）；文档用港口隐喻叙事（官方映射表见下），接口名保持 orchestrator 不变。
 > 目标读者：递交托运单（任务卡）、看闸门、处理搁浅（blocked）任务的 agent / 人类操作者。
-> 设计与原理：`docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
+> 设计与原理：`.agents/docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
 
 ## Dockmaster 是什么（船 · 发动机 · 船长）
 
@@ -351,7 +351,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 - **通知侧（发卡）**：workflow.json 可选键 `"notify": { "cardWebhook": true }`（缺省 false）。开启后，`awaiting-human` / `blocked`（含预算熔断、看门狗等 circuit_breaker 落位）与风暴闸 `weather_hold` 会在原文本通知（`${envPrefix}_ORCH_WEBHOOK`，一字节不改）之外**额外** POST 一张飞书 interactive 卡：approve（批准合并）/ reject（驳回）按钮 value 携带 `{ task, action }`，weather_hold 为 fleet 级事件没有可批示单卡 → 纯信息卡不带按钮。webhook URL 复用既有解析链（env 优先 + darwin 钥匙串兜底）；**仅飞书端点发卡**（企业微信/Slack 自动跳过，只收文本）。
 - **回流侧（批示）**：`node .agents/scripts/approval-listener.mjs [--port N] [--root <仓库根>]` 显式启动（缺省端口只认 workflow.json `notify.listenerPort`，都没配报错退出——**永不缺省监听**；只绑 `127.0.0.1`）。飞书卡片回调打过来：`url_verification` 握手直接回显 challenge；动作回调验签（verification token 须与 env `AGENTS_LARK_VERIFICATION_TOKEN` **常数时间一致**——sha256 归一化后 `timingSafeEqual`，防时序侧信道逐字节猜测，2026-11 起；不一致 403 并落审计 `approvals.jsonl`（只记 `rejected` 事实与来源 IP，**绝不记 token 值**）；env 未配拒绝所有动作）后映射为 orchestrator 既有命令 `approve/reject/retry <task-id>`（reject 无原因用默认文案），结果以 toast 回复群里。同 task 同 action 60s 内重复点击忽略（防手抖）；审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`（ts/task/action/来源 IP/结果）。
-- **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../../docs/orchestrator-usage.md)。
+- **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../docs/orchestrator-usage.md)。
 
 ### B11. 动态选船（dynamic dispatch，阶段 3）
 

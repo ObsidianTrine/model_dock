@@ -1,4 +1,4 @@
-// 任务级互斥锁测试（task-lock.mjs，docs design-orchestrator 10.6）：
+// 任务级互斥锁测试（task-lock.mjs，.agents/docs design-orchestrator 10.6）：
 // 同任务双驱动被拒、陈锁自动接管、正常闭环释放、abandon 存活守卫。
 // 库级用例直接驱动模块（普通临时目录即可）；端到端走 CLI 子进程 + 临时仓库
 // （mock 后端），与 integration.test.ts 同配方。
