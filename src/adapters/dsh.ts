@@ -13,6 +13,7 @@ import {
   type PlanResult,
 } from './types.js'
 import { parseDocument } from './format.js'
+import { textEqualsIgnoreEol } from '../util/diff.js'
 import { changeIfChanged, directAttachNote, directResponsesNote, directWire, gatewayWire, noChangeResult, oursEntryUrl, pointingStatus, resolveRoute, routeModelNote } from './shared.js'
 import { catalogForRoute, catalogLookupById, loadDshCatalog, type CatalogModel } from '../providers/dshcatalog.js'
 import { resolveModelMeta } from '../providers/resolve.js'
@@ -538,7 +539,9 @@ export const dshAdapter: HarnessAdapter = {
     if (cdoc.get('version') === undefined) cdoc.set('version', 1)
     cdoc.setIn(['refs', 'MODELDOCK_TOKEN'], d ? d.key : opts.token)
     const credAfter = cdoc.toString()
-    if (credAfter !== ctext) {
+    // 等值过滤（CRLF 归一化口径，与 changeIfChanged 同规）：credentials 文件被 Windows 编辑器
+    // 存成 CRLF 而 yaml 序列化恒 LF，逐字节比较会让稳态重接每次都整写盘+快照（2026-11-04 审查 P2）
+    if (!textEqualsIgnoreEol(credAfter, ctext)) {
       changes.push({
         path: credFile(),
         before: ctext === '' ? null : ctext,

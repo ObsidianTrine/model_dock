@@ -1,18 +1,21 @@
 import { t } from '../util/i18n.js'
+import { textEqualsIgnoreEol } from '../util/diff.js'
 import type { Config, ModelMeta, Protocol } from '../config/types.js'
 import { AdapterError, type AttachOptions, type FileChange, type PlanResult } from './types.js'
 import { gatewayBase, gatewayBaseOpenAI, isOursGatewayUrl } from './types.js'
 
 /** 等值过滤帮手：内容无变化返回 null（稳态重接/周期 refresh 零快照零写盘），有变化才产出 FileChange。
  *  dsh/zcode 内联了同款判定；其余适配器统一走这里（known-issues P2：此前 5 处稳态重接也整包
- *  快照+写盘，与 dsh 声明的设计意图不一致）。 */
+ *  快照+写盘，与 dsh 声明的设计意图不一致）。
+ *  比较走 textEqualsIgnoreEol（CRLF 归一化）：Windows 编辑器保存的客户端配置是 CRLF 而
+ *  序列化输出恒 LF，逐字节比较会把仅行尾差异的稳态误判为有变化、每次整写盘+快照。 */
 export function changeIfChanged(
   path: string,
   before: string | null,
   after: string,
   note?: string
 ): FileChange | null {
-  return after === before ? null : { path, before, after, note }
+  return textEqualsIgnoreEol(after, before) ? null : { path, before, after, note }
 }
 
 /** 「string 才透传」三元防抖收敛（T25，七处同款）：entry 里的 URL 字段来自任意 JSON 形态，

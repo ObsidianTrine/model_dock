@@ -4,6 +4,7 @@ import { noteLocalSwitch } from '../sync/state.js'
 import { getAdapter } from '../adapters/registry.js'
 import { applyChanges } from '../adapters/engine.js'
 import { readTextIfExists } from '../util/fsx.js'
+import { textEqualsIgnoreEol } from '../util/diff.js'
 import { displayRouteProvider, type GatewayRuntime } from '../gateway/state.js'
 import { planAttach } from './attach.js'
 import { resolveClientGatewayPort } from './gateway-port.js'
@@ -119,10 +120,12 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
         refreshed.push(id)
         continue
       }
-      // 内容一致守卫：目标文件与计划逐字节相同（重接 / 周期自愈 / 重启场景）则不写不快照，
-      // 让「基线失效 → 强制校准」类调用在稳态下零副作用
+      // 内容一致守卫：目标文件与计划相同（重接 / 周期自愈 / 重启场景）则不写不快照，
+      // 让「基线失效 → 强制校准」类调用在稳态下零副作用。比较走 CRLF 归一化口径
+      // （textEqualsIgnoreEol）：客户端文件被 Windows 编辑器存成 CRLF 而序列化输出恒 LF 时，
+      // 逐字节比较会把稳态误判为有变化、每次整写盘+快照（2026-11-04 审查 P2）
       const before = target !== undefined ? (await readTextIfExists(target)) ?? null : null
-      if (target !== undefined && before !== null && plan.changes.length === 1 && plan.changes[0].before !== null && plan.changes[0].after === before) {
+      if (target !== undefined && before !== null && plan.changes.length === 1 && plan.changes[0].before !== null && textEqualsIgnoreEol(plan.changes[0].after, before)) {
         refreshed.push(id)
         continue
       }
