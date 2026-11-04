@@ -307,16 +307,39 @@ export async function getBackend(name) {
   throw new Error(`未知后端 "${name}"（允许：claude-headless | zcode-headless | mock）`);
 }
 
-/** claude CLI 可用性探测（spawnSync --version；Windows 走 shell 以命中 .cmd 包装；按进程缓存）。 */
+/**
+ * claude CLI 定位（探测/诊断面）：ORCH_CLAUDE_CLI 环境变量优先——与 ORCH_ZCODE_CLI
+ * 同款 seam，CI/沙箱没有 PATH claude 时指向桩脚本，动态选船的可用性探测才可确定
+ * （否则「CLI 不可用」会抢在海况口径前面留痕）。脚本型目标（.cjs/.mjs/.js）用当前
+ * node 直跑，其余按可执行直跑；未设则用 PATH 里的 `claude`。
+ * 仅作用可用性探测与诊断（drill）：worker 实际拉起仍走 PATH 的 claude
+ * （claudeSpawnInvocation 的 stream-json 输出契约依赖真实 CLI，不随此变量改道）。
+ */
+export function claudeCliSpec() {
+  const custom = process.env.ORCH_CLAUDE_CLI?.trim();
+  if (!custom) return { ok: true, cmd: 'claude', baseArgs: [] };
+  if (!fs.existsSync(custom)) {
+    return { ok: false, reason: `ORCH_CLAUDE_CLI 指向的文件不存在：${custom}` };
+  }
+  if (/\.(cjs|mjs|js)$/i.test(custom)) return { ok: true, cmd: process.execPath, baseArgs: [custom] };
+  return { ok: true, cmd: custom, baseArgs: [] };
+}
+
+/** claude CLI 可用性探测（spawnSync --version；PATH 探测在 Windows 走 shell 以命中 .cmd 包装；按进程缓存）。 */
 let claudeProbeCache;
 export function claudeAvailable() {
   if (claudeProbeCache === undefined) {
     try {
-      const r = spawnSync('claude', ['--version'], {
-        encoding: 'utf8',
-        timeout: 30_000,
-        shell: process.platform === 'win32',
-      });
+      const spec = claudeCliSpec();
+      const r = spec.ok
+        ? spawnSync(spec.cmd, [...spec.baseArgs, '--version'], {
+            encoding: 'utf8',
+            timeout: 30_000,
+            // 绝对路径直 exec（node 直跑/自定义可执行）不需要 shell——shell 反而引入
+            // 空格路径解析坑；仅 PATH 探测的 'claude' 在 Windows 需要 shell 命中 .cmd
+            shell: spec.cmd === 'claude' && process.platform === 'win32',
+          })
+        : { status: 1 };
       claudeProbeCache = r.status === 0;
     } catch {
       claudeProbeCache = false;
