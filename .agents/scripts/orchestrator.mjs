@@ -582,6 +582,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
+  let watchdogHalted = false; // 看门狗 actuate 已落位：主循环收敛标志（见 runWatchdogCheck circuit_break 分支）
   const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
@@ -608,7 +609,12 @@ async function cmdRun(repoRoot, taskId, opts) {
         moveCard(root, taskId, 'running', 'blocked');
         archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
         await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
-        die('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+        // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
+        // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
+        // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
+        // spawn close 收敛，主循环见标志即正常 return 走 finally（临时目录清理/任务锁释放/
+        // 油量轮询停止）；落位语义（blocked + circuit_breaker 事件 + 事故归档 + 通报）不变。
+        watchdogHalted = true;
       }
     } catch {
       // 看门狗自身异常绝不影响编排；「永不静默」由上面的 watchdog_error 事件承担
@@ -764,6 +770,13 @@ async function cmdRun(repoRoot, taskId, opts) {
           workerInFlight = false; // 看门狗：worker 会话收尾（在途结论回报时作废）
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
+          if (watchdogHalted) {
+            // 看门狗 actuate 已完成落位（blocked/ + circuit_breaker 事件 + 事故归档 + 通报）：
+            // 主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重试判定之前——
+            // killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试再派新会话。
+            log('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+            return;
+          }
           if (budget.tripped) {
             killTree(result.pid);
             appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
