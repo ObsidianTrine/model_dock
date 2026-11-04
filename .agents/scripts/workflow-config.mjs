@@ -112,9 +112,39 @@ export function workflowConfigPath(repoRoot) {
 }
 
 /**
+ * workflow.json 合法顶层键清单（2026-11-05 审查项）：各 resolveXxx 只校验自己的键，
+ * 顶层键拼写错误会被静默忽略、对应功能悄悄关闭。这里收口「全量合法键」用于 load 时
+ * 未知键告警——主配置消费方（loadWorkflowConfig 直读 + 各 resolveXxx）之外，还有两个
+ * 外部消费者直读的键：setupCmd（feature-branch.mjs 自带 loader）、scan（eventfilter.mjs
+ * readScanConfig；review/trace 主配置也是它的数据源，已在主清单内）。
+ */
+const KNOWN_TOP_LEVEL_KEYS = new Set([
+  // loadWorkflowConfig 直读
+  'version', 'baseBranch', 'baseBranches', 'testCmd', 'testCmdL0', 'buildCmd', 'lintCmd', 'typecheckCmd',
+  'packageManager', 'protectedPorts', 'corePaths', 'releasePaths', 'reviewNotes', 'uiCheckCmd',
+  'envPrefix', 'projectName', 'listenCommandNames', 'scheduleId', 'gatewayLogDir', 'gatewayAdmin',
+  'driftThreshold', 'reviewMaxTurns', 'gateTimeoutMinutes', 'retryWaitBaseMs', 'fastlaneAllowed',
+  // resolveXxx 子配置
+  'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
+  'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
+  'dynamicDispatch', 'notify',
+  // 外部消费者直读
+  'setupCmd', 'scan',
+]);
+
+/** 未知顶层键一次性告警（单次 load 一行、列出全部未知键）：拼写错误防线——不阻断，
+ *  与各 resolveXxx 的告警同风格走 stderr。 */
+function warnUnknownTopLevelKeys(raw, cfgPath) {
+  const unknown = Object.keys(raw ?? {}).filter((k) => !KNOWN_TOP_LEVEL_KEYS.has(k));
+  if (unknown.length) {
+    console.warn(`[workflow-config] ${cfgPath} 存在未知顶层键：${unknown.join(', ')}——可能是拼写错误，对应功能会静默关闭（合法键清单见 .agents/scripts/workflow-config.mjs 的 KNOWN_TOP_LEVEL_KEYS）`);
+  }
+}
+
+/**
  * 读取并规整 workflow.json。文件缺失/字段缺省 → 全部回落「关闭」缺省值，
  * 只有 baseBranch/testCmd 沿用 feature-branch.mjs 的既有回落（develop→当前分支 / 无验证）。
- * JSON 损坏抛错（阻断启动，错误可操作）。
+ * JSON 损坏抛错（阻断启动，错误可操作）。未知顶层键 console.warn 告警（拼写错误防线）。
  */
 export function loadWorkflowConfig(repoRoot) {
   const cfgPath = workflowConfigPath(repoRoot);
@@ -131,6 +161,7 @@ export function loadWorkflowConfig(repoRoot) {
     } catch (e) {
       throw new Error(`${cfgPath} 不是合法 JSON：${e.message}`);
     }
+    warnUnknownTopLevelKeys(raw, cfgPath);
   }
   const strArr = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
   return {
