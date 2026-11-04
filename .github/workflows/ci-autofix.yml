@@ -198,10 +198,16 @@ jobs:
 
             结论一律中文、结论先行、简洁。最终产出只有两种合法形态：修复 PR（gh pr create），或
             /tmp/autofix-conclusion.md 结论文件。不要只把结论留在会话消息里。
+          # git push 白名单收窄到修复分支前缀（分支名 ci-autofix/<run-id> 在上方 checkout 步切出）：
+          # Claude Code 权限规则支持中间通配符（官方文档「A * can go anywhere in the rule」，
+          # https://code.claude.com/docs/en/permissions/），Bash(git push:*) 等于放行任意分支推送。
+          # 残余风险：refspec 写法 git push origin ci-autofix/<id>:develop 同样匹配本规则，由
+          # main / develop 分支保护兜底（bot 的 GITHUB_TOKEN 不在允许推送名单，直接推主干被拒）；
+          # prompt 第 9 步红线（不 push 到 main / develop）只是行为约束，不是机制约束。
           claude_args: |
             --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 50
-            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run view:*),WebFetch,WebSearch"
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin ci-autofix/*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run view:*),WebFetch,WebSearch"
       # 收尾判定（Claude 会话跑过才执行；install/build 阶段就红时不掺和，让真失败自己说话）：
       # 1) 会话结论落 run summary——无 PR 的结局也能被读到（不允许无声结束）；
       # 2) 开出了 PR → 给修复分支补发 test 检查。为什么需要补发：PR 由 GITHUB_TOKEN 开出，

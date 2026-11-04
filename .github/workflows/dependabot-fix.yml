@@ -121,7 +121,13 @@ jobs:
                任何情况下都必须留下一评论再结束——宁可结论简短，也不可让会话因耗尽回合而无声失败。
 
             评论一律中文、结论先行、简洁。最终输出一律走 gh pr comment，不要只把结论留在会话消息里。
+          # git push 白名单收窄回 Dependabot 分支前缀 dependabot/*（Dependabot 分支命名恒为
+          # dependabot/<ecosystem>/<pkg>-<ver>；HEAD:dependabot/* 容忍 refspec 写法）：
+          # Claude Code 权限规则支持中间通配符（官方文档「A * can go anywhere in the rule」，
+          # https://code.claude.com/docs/en/permissions/），Bash(git push:*) 等于放行任意分支推送。
+          # 残余风险：refspec 写法 git push origin dependabot/x:develop 同样匹配本规则，由
+          # main / develop 分支保护兜底（bot 的 PAT 不在允许推送名单，直接推主干被拒）。
           claude_args: |
             --model ${{ vars.CLAUDE_MODEL }}
             --max-turns 50
-            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),WebFetch,WebSearch"
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin dependabot/*),Bash(git push origin HEAD:dependabot/*),Bash(gh pr comment:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),WebFetch,WebSearch"
