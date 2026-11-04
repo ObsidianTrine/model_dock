@@ -141,7 +141,7 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 | [New computer & multi-machine sync](multi-machine-sync.md) | Complete steps & troubleshooting for sync-folder onboarding |
 | [Cloud deployment](deploy-cloud.md) | Self-hosted cloud sync hub runbook, manage all devices from one phone page |
 | [Design doc](../design.md) (Chinese) | Architecture, ADRs, threat model |
-| [AI pipeline guide](../ai-pipeline-guide.md) (Chinese) | End-to-end use of the autonomous pipeline: from a one-line intent to a release proposal — task in, merge out |
+| [AI pipeline guide](../../.agents/docs/ai-pipeline-guide.md) (Chinese) | End-to-end use of the autonomous pipeline: from a one-line intent to a release proposal — task in, merge out |
 | [CI bots](../ci-bots.md) (Chinese) | GitHub Actions layered PR review & Dependabot: setup and usage (maintainers) |
 | [AI review system](../ai-review-system.md) (Chinese) | Design & ops of layered code review: what each layer catches, how to keep improving |
 | [Changelog](CHANGELOG.md) | User-visible changes in every release |

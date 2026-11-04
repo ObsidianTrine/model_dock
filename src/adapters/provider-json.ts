@@ -54,6 +54,12 @@ export interface ProviderJsonFactoryOptions {
    * 不声明时 mimo models 不会列出该 provider 的模型。按当前路由的模型目录写入。
    */
   declareModels?: boolean
+  /**
+   * declareModels 时是否附带 only_configured_models=true（默认 true，MiMoCode 官方样例键）。
+   * OpenCode 不认该键（MiMoCode 私有扩展）：自定义 provider 的 config schema 未收录时整份配置
+   * 可能被拒，显式传 false 跳过——模型列表仍由 models 声明接管，行为不受影响。
+   */
+  onlyConfigured?: boolean
 }
 
 /**
@@ -189,7 +195,8 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
               return [id, entry]
             })
           )
-          providers.modeldock.only_configured_models = true
+          // onlyConfigured=false（OpenCode）跳过该键：MiMoCode 私有扩展，opencode schema 不收录
+          if (factory.onlyConfigured !== false) providers.modeldock.only_configured_models = true
           modelsNote = routeModelNote(String(routeName), String(provider?.name ?? providerId), ids.length)
         }
       }

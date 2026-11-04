@@ -5,6 +5,23 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Second-granularity sail duration**: `sail --duration` accepts `90s` and `1m30s` forms — smoke tests and scheduled short sails no longer need to round up to a whole minute; `schedule --mode sail` allows the same. Existing `45` / `90m` / `2h` / `1h30m` behavior unchanged.
+
+### Improved
+
+- **Sectioned release-note summaries**: `update --check`, native tray dialogs, and the console summary now report per-section item counts with highlights (Added / Improved / Fixed) — every kind of change gets exposure on big releases instead of only the first few entries.
+
+### Fixed
+
+- **macOS tray update dialog no longer hard-truncates**: the body now shows the condensed summary instead of the full release notes, with a scrollbar whenever it runs long — buttons can no longer be pushed off screen, and the "content truncated" cut-off is gone.
+
+- **Fuel ledger drops usage across local midnight**: the sail report fuel section, `reconcile`, and `stats --cost` scan gateway logs split by local calendar day; windows crossing local midnight never reached the end-day log file, silently dropping post-midnight usage or misreporting the whole window as "zero requests". Day iteration now covers every calendar day from start to end (the read side now matches the write-side date convention fixed on 2026-10-02).
+- **`schedule install --dry-run` no longer writes any file**: dry-run used to generate the runner wrapper too — the very script an installed schedule (launchd/cron/scheduled task) executes, so a dry-run with different arguments silently changed what the real schedule would run at its next trigger. Dry-run now prints the registration plan and a full wrapper preview, touching nothing on disk.
+
 ## [1.6.0] - 2026-11-03
 
 Cost accounting ships: "how much did it cost" is visible end to end, backed by task tiers with data-plane limits, a new round of doctor checks, claude-code onboarding polish, and a batch of fixes.

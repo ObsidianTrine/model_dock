@@ -609,7 +609,12 @@ async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
 }
 
 /** 写路径统一入口：跨进程锁（与 config 同语义）+ 持锁内重读盘拼新鲜的解密表，改后整表写回。
- *  锁内强制跳过内存缓存，避免另一进程刚写入的 key 被本进程旧缓存覆盖（丢更新）。 */
+ *  锁内强制跳过内存缓存，避免另一进程刚写入的 key 被本进程旧缓存覆盖（丢更新）。
+ *  锁内的 DPAPI 解密/加密（win32 spawn PowerShell，最坏 4 次 × 10s 超时 ≈ 40s）**有意留在临界区**，
+ *  依赖 fsx 的持锁喂狗保活（acquireFileLock 心跳刷新锁 mtime，陈锁判定对活者永不满足）：
+ *  解密移不出锁——锁外解密的快照持锁时可能已被他人改写（丢更新窗口本质），重检失败又回到
+ *  锁内慢操作或引入放锁重抢的活锁循环；加密更移不出——改后整表只有锁内才知道，而整表原子写
+ *  必须发生在锁内。竞态防线见 test/secrets-lock.test.ts。 */
 function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise<T>): Promise<T> {
   return withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
     const store = await loadFileSecrets(false)

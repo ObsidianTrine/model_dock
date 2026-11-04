@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // orchestrator.mjs — 自治编排服务（Phase 1：单任务闭环）。
 // "任务卡进、合并出"：submit 任务卡 → run 自动跑 worker→静态门禁→调试子循环
-// →LLM 独立审查→审查返工子循环→人工合并闸门。设计文档：docs/design-orchestrator.md。
+// →LLM 独立审查→审查返工子循环→人工合并闸门。设计文档：.agents/docs/design-orchestrator.md。
 //
 // 零第三方依赖（.agents/ 工具链红线）；复用 feature-branch.mjs 做隔离与合并，
 // 不另起分支体系。从主仓库根目录运行（队列/日志落在 <repoRoot>/.agents/orchestrator/）。
@@ -37,7 +37,7 @@ import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFi
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
-import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, GateError } from './orchestrator/gates.mjs';
+import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, runArgvTreeSafe, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
@@ -46,7 +46,7 @@ import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResu
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
 import { listDrafts, planGc, applyGc, supersedeForMerged, draftsRoot, DEFAULT_ARCHIVE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
-import { isAlive, killTree } from './orchestrator/kill-tree.mjs';
+import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
 import { probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
@@ -64,7 +64,7 @@ import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } fr
 import { readNightlyState, writeNightlyState, decideNightlyStart } from './orchestrator/nightly-state.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
-import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath } from './orchestrator/task-lock.mjs';
+import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
@@ -175,12 +175,19 @@ function cleanupOrphanWorker(repoRoot, taskId) {
   // 与 resolveBackendName 只认 worker 侧的口径差异是有意的
   const events = readEvents(logDir(repoRoot, taskId));
   const spawned = [...events].reverse().find((e) => e.type === 'worker_spawned');
-  if (spawned?.pid && isAlive(spawned.pid)) {
-    log(`发现孤儿 worker（pid=${spawned.pid}）仍在运行，先终止进程树再恢复。`);
-    killTree(spawned.pid);
-    return true;
+  if (!spawned?.pid || !isAlive(spawned.pid)) return false;
+  // 杀树前校验属主（P0）：isAlive 会被 pid 复用骗过——陈锁属主早已退出、pid 被无辜新进程
+  // 顶掉时，旧实现直接 taskkill /T /F 误杀。worker 是先 spawn 后落事件，真实孤儿的运行
+  // 时长 ≈ 事件距今；进程显著比事件「年轻」= pid 已被复用，跳过。elapsed 不可测（ps/
+  // PowerShell 失败等）保持旧语义照杀——孤儿泄漏比误杀可自愈性更差的方向维持原样。
+  const ownership = orphanOwnership(spawned.ts, processElapsedMs(spawned.pid));
+  if (ownership === 'recycled') {
+    log(`pid=${spawned.pid} 已被其他进程复用（启动时间晚于 spawn 事件，非本任务 worker），跳过终止。`);
+    return false;
   }
-  return false;
+  log(`发现孤儿 worker（pid=${spawned.pid}）仍在运行，先终止进程树再恢复。`);
+  killTree(spawned.pid);
+  return true;
 }
 
 function debugIterations(events) {
@@ -287,7 +294,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     }
     const owner = taskLock.owner;
     die(`任务 "${taskId}" 已有进行中的闭环（pid ${owner.pid}${owner.cmd ? `，${owner.cmd}` : ''}${owner.acquired_at ? `，始于 ${owner.acquired_at}` : ''}）——同一任务不允许两个进程同时驱动（两个 worker 会写同一个 worktree）。\n`
-      + `  等当前 run 结束后再操作；确认进程已卡死时，终止 pid ${owner.pid} 后重试（陈锁自动接管）。`);
+      + `  等当前 run 结束后再操作；持锁进程心跳停止 ${TASK_LOCK_STALE_MS / 1000}s 后陈锁自动接管（无需手动清理或终止进程，陈锁接管与孤儿清理各自带属主校验）。`);
   }
 
   // 引水闸（compulsory pilotage）：受限航道卡（deps 类型 / files_hint 命中核心·发布路径）
@@ -736,7 +743,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             backend = await getBackend(esc.to);
           }
           fs.writeFileSync(promptFile, spawnPrompt);
-          if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv);
+          if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv, worktree);
           appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
@@ -1007,7 +1014,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           const reviewSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-settings-'));
           reviewTempDirs.push(reviewSettingsDir);
           reviewSettingsFile = path.join(reviewSettingsDir, 'review-settings.json');
-          writeWorkerSettings(reviewSettingsFile, tierEnv);
+          writeWorkerSettings(reviewSettingsFile, tierEnv, worktree);
         }
         // 审查会话独立记账：beginSession 把 worker 会话峰值入账 committed，审查用量从零峰值起算，
         // 下一次 beginSession（下轮 worker）把审查峰值入账——reviewer 的 budget_snapshot 此前只落
@@ -1489,15 +1496,21 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   const maxAttempts = (Number.isInteger(extraAttempts) && extraAttempts >= 0 ? extraAttempts : 2) + 1;
   const retryDelayMs = Number.isInteger(retryDelayRaw) && retryDelayRaw >= 0 ? retryDelayRaw : 60_000;
   const fbScript = path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs');
+  // 外层超时按 testCmd 数量动态放宽（P0 修复，2026-11）：finish 内每条验证命令上限
+  // 20min（runCmd），数组多条时旧外层 30min 固定值先到——整树被杀、任务误判失败。
+  // 预算 = N×20min + rebase/merge 余量 15min，下限保留旧 30min。
+  const testCmdCount = loadWorkflowConfig(repoRoot).testCmd?.length ?? 0;
+  const finishTimeoutMs = Math.max(30 * 60_000, testCmdCount * 20 * 60_000 + 15 * 60_000);
   let r = null;
   let lockConflict = false;
   for (let attempt = 1; ; attempt++) {
-    r = spawnSync('node', [fbScript, ...finishArgs], {
+    // runArgvTreeSafe：detached（unix 进程组）+ 超时 killTree——spawnSync timeout 只杀
+    // 直接子进程，finish 挂死时其内部 testCmd 进程树全部孤儿化（Windows 锁 worktree
+    // 句柄致 EBUSY）。finish 挂死（含内部 testCmd）不能陪跑到底：超时按失败走（任务留 awaiting-human 可重试）
+    r = await runArgvTreeSafe(['node', fbScript, ...finishArgs], {
       cwd: repoRoot,
-      encoding: 'utf8',
       env: finishEnv,
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: 30 * 60_000, // finish 挂死（含内部 testCmd）不能陪跑到底：超时按失败走（任务留 awaiting-human 可重试）
+      timeoutMs: finishTimeoutMs,
     });
     // 透传 finish 输出（保持现场可见性）；撞锁凭 stderr 文案识别
     if (r.stdout) process.stdout.write(r.stdout);
@@ -1509,7 +1522,7 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   }
   if (r.status !== 0) {
     if (lockConflict) appendEvent(qdir, 'merge_lock_wait', { attempts: maxAttempts });
-    die(`feature-branch finish 失败（exit ${r.status}）。任务留在 awaiting-human/，处理后重新 approve。`, r.status ?? 1);
+    die(`feature-branch finish 失败（exit ${r.status ?? '?'}${r.timedOut ? '，超时已按进程树收割' : ''}）。任务留在 awaiting-human/，处理后重新 approve。`, r.status ?? 1);
   }
   moveCard(root, taskId, 'awaiting-human', 'merged');
   const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -1584,7 +1597,7 @@ function cmdFollow(repoRoot, taskId, text) {
   appendInbox(qdir, clean);
   appendEvent(qdir, 'follow_up', { chars: clean.length, preview: clean.slice(0, 120) });
   const liveLock = readTaskLock(repoRoot, taskId);
-  const closureAlive = liveLock && Number.isInteger(liveLock.pid) && isAlive(liveLock.pid);
+  const closureAlive = liveLock && taskLockLooksLive(liveLock);
   log(`补充指令已写入 ${taskId} 的 inbox（${clean.length} 字符），将在下次会话边界送达：fixup / 审查返工 / resume / 新 spawn。`);
   if (!closureAlive) log('⚠ 未检测到存活的闭环进程——指令会在下次 run/resume 时随恢复上下文一起送达。');
 }
@@ -1667,11 +1680,12 @@ function cmdAbandon(repoRoot, taskId) {
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中。`);
   // 闭环进程还活着时不许 abandon：它会杀掉在跑的 worker 并把卡落 failed/。
-  // 确认卡死时先终止该进程再 abandon（陈锁自动接管，下方的孤儿清理照常生效）。
+  // 判活按锁心跳（taskLockLooksLive）：心跳静默即视为陈锁自动放行——pid 复用的
+  // 假活锁不再拦人，也不再给「终止 pid X」的误杀指引（陈锁接管与孤儿清理各自带属主校验）。
   const liveLock = readTaskLock(repoRoot, taskId);
-  if (liveLock && Number.isInteger(liveLock.pid) && isAlive(liveLock.pid)) {
+  if (liveLock && taskLockLooksLive(liveLock)) {
     die(`任务 "${taskId}" 的闭环仍在运行（pid ${liveLock.pid}${liveLock.cmd ? `，${liveLock.cmd}` : ''}）——abandon 会终止在跑的 worker，先确认它真的卡死。\n`
-      + `  终止 pid ${liveLock.pid} 后再 abandon（陈锁自动接管，孤儿 worker 会被清理）。`);
+      + `  持锁进程心跳停止 ${TASK_LOCK_STALE_MS / 1000}s 后陈锁自动接管（无需手动清理），届时可直接 abandon；孤儿 worker 清理自带属主校验。`);
   }
   cleanupOrphanWorker(repoRoot, taskId);
   const qdir = logDir(repoRoot, taskId);
@@ -1989,8 +2003,8 @@ async function cmdDrain(repoRoot, opts) {
         await drainSummaryNotify(repoRoot, done, tally, '配置守卫：workflow.json 漂移，暂停派发', tasks);
         return;
       }
-      
-const next = pickNextCard(root, { skipIds });
+
+      const next = pickNextCard(root, { skipIds });
       if (!next) {
         // 引水卡也在 pending/：从「解析失败」清单里排除（它们不是坏卡，是待确认）
         const stuck = listCards(root, 'pending').filter((id) => !skipIds.has(id));
@@ -2737,7 +2751,7 @@ async function cmdIntent(repoRoot, opts) {
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
-      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
@@ -2847,7 +2861,7 @@ async function cmdPropose(repoRoot, opts) {
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
-      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
         promptFile,
@@ -2919,7 +2933,7 @@ async function cmdSpecStart(repoRoot, opts) {
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
-      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile);
+      if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
         promptFile,
         cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
@@ -3414,7 +3428,7 @@ function sailAutoSubmit(repoRoot, root, cfg, ids) {
 async function cmdSail(repoRoot, opts) {
   const cfg0 = loadWorkflowConfig(repoRoot);
   const minutes = parseDurationMinutes({ minutes: opts.minutes, duration: opts.duration });
-  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10]——自由航行时长必须显式指定（分钟，>0）。');
+  if (!minutes) die('用法：sail --minutes <N>（或 --duration 2h|90m|1h30m|90s）[--max-tasks N] [--max-cost-usd N] [--interval 10]——自由航行时长必须显式指定（分钟或秒级如 90s，>0）。');
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   preflightWorkerBackend(opts.backend ?? cfg0.worker?.backend); // 起航前引擎预检：CLI 不在就别烧规划钱
@@ -3675,6 +3689,7 @@ function cmdSchedule(repoRoot, sub, opts) {
       minute: opts.minute,
       minutes: opts.minutes,
       duration: opts.duration,
+      maxCostUsd: opts.maxCostUsd,
       tests: opts.flags?.has('--tests'),
       auto: opts.auto,
       backend: opts.backend,
@@ -3682,9 +3697,10 @@ function cmdSchedule(repoRoot, sub, opts) {
       dryRun: opts.flags?.has('--dry-run'),
     });
     if (r.dryRun) {
-      log(`[dry-run] 未触碰系统调度。计划：`);
+      log(`[dry-run] 未触碰系统调度、未写任何文件。计划：`);
       log(`  ${r.plan}`);
-      log(`  wrapper 已写入: ${r.runner}`);
+      log(`  wrapper 将写入（dry-run 未落盘）: ${r.runner}`);
+      for (const line of (r.wrapper ?? '').split('\n')) log(`  | ${line}`);
       return;
     }
     log(
@@ -3754,7 +3770,7 @@ function usage() {
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
                                           连续自治运行：drain → 队列空时 scan+propose → 休眠循环；stop 文件 .agents/orchestrator/.watch-stop；drift 降级自动退出
-  sail --minutes N（或 --duration 2h|90m|1h30m）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
+  sail --minutes N（或 --duration 2h|90m|1h30m|90s）[--max-tasks N] [--max-cost-usd N] [--interval 10] [--backend …] [--review-backend …]
                                           自由航行：时间盒完全自治——scan 勘察 → propose 规划+自动提交 → drain 执行循环，到点收帆交航海报告（logs/sail/<ts>/report.md：完成了什么、为什么这么编排、燃油账几何）。停止：.sail-stop / drift 降级 / --max-tasks / --max-cost-usd（网关实测价达上限即收帆，只停不换引擎）；开 sail 即本航次自动提交授权（deps/人工草稿/核心·发布路径永不自动）
   schedule install|uninstall|status [--mode nightly|watch|sail] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--minutes N|--duration 2h] [--dry-run]
                                           定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环，--mode sail 注册每日定时自由航行）

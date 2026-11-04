@@ -77,6 +77,9 @@ function freshPersonalConfig(): ZcodePersonalConfig {
  * （缺任一必填布尔/对象会导致整份个人配置加载失败，见运行日志 ZodError）：
  * properties 需能力布尔位 + inputFormat，optionSpecs 需 reasoningLevel；上下文/输出未知时
  * 不写该条规则——ZCode 对没有手动规则的模型按「推荐配置」兜底，仍会正常显示。
+ * 视觉随控制台「视觉」勾选（capabilities 含 vision）声明 supportsImage（与 dsh 的
+ * input=['text','image'] 同源）；能力未知时仍写 false——inputFormat 必填且无「留空走默认」
+ * 出路，false 是唯一中性值，用户在控制台补勾视觉后重新接入即生效。
  */
 function modelRuleConfig(meta: ModelMeta | undefined): Record<string, unknown> | undefined {
   if (!meta?.context_window || !meta.max_output) return undefined
@@ -84,7 +87,7 @@ function modelRuleConfig(meta: ModelMeta | undefined): Record<string, unknown> |
     enabled: true,
     properties: {
       contextWindow: meta.context_window,
-      inputFormat: { supportsImage: false, supportsVideo: false, supportsPdf: false },
+      inputFormat: { supportsImage: !!meta.capabilities?.includes('vision'), supportsVideo: false, supportsPdf: false },
       supportsJsonSchemaOutput: false,
       supportsNativeWebSearch: false,
       supportsMidConversationSystem: false,

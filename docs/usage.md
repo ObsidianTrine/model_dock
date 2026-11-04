@@ -5,7 +5,7 @@
 
 > 一句话：把所有 AI harness（Claude Code / ZCode / dsh / Codex / …）的 base_url + key 收进 ModelDock 统一保管，harness 只需指向本地网关一次，此后换供应商、换模型映射都是一条命令、即时生效。
 
-**目录**：[核心概念](#1-三分钟理解核心概念) · [安装与构建](#2-安装与构建) · [首次上手](#3-首次上手推荐路径) · [接管各 harness](#4-接管各-harness-的具体行为) · [日常使用](#5-日常使用) · [Web 控制台](#55-web-控制台) · [还原与卸载](#6-还原与卸载全部可逆) · [配置文件速查](#7-配置文件速查modeldock) · [网关与端口](#8-网关与端口) · [故障排查](#9-故障排查) · [实现状态](#10-当前实现状态2026-10-27-基线发版时随版本号刷新)
+**目录**：[核心概念](#1-三分钟理解核心概念) · [安装与构建](#2-安装与构建) · [首次上手](#3-首次上手推荐路径) · [接管各 harness](#4-接管各-harness-的具体行为) · [日常使用](#5-日常使用) · [Web 控制台](#55-web-控制台) · [还原与卸载](#6-还原与卸载全部可逆) · [配置文件速查](#7-配置文件速查modeldock) · [网关与端口](#8-网关与端口) · [故障排查](#9-故障排查) · [实现状态](#10-当前实现状态2026-11-04-基线发版时随版本号刷新)
 
 ## 1. 三分钟理解核心概念
 
@@ -62,7 +62,7 @@ npm run build:sea -- --target darwin-arm64
 
 ## 3. 首次上手（推荐路径）
 
-> 想先看完整走一遍？[上手路径走查记录](onboarding-walkthrough.md)是 2026-10-29 在全新隔离沙箱里按本节（配合 README 快速开始）逐步实测的实录——含每步预期输出与三条易踩的运行态注意事项。
+> 想先看完整走一遍？[上手路径走查记录](archive/onboarding-walkthrough.md)是 2026-10-29 在全新隔离沙箱里按本节（配合 README 快速开始）逐步实测的实录——含每步预期输出与三条易踩的运行态注意事项。
 
 ### 方式 A：一条命令向导
 
@@ -112,7 +112,7 @@ modeldock attach claude-code
 | Claude Code | `modeldock attach claude-code [--takeover-models]` | 改 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 两个值，其余字段不动；`--takeover-models` 可选：把 `DEFAULT_*_MODEL` 映射迁进 profile 并从文件删除 | 重启 Claude Code |
 | ZCode | `modeldock attach zcode` | 在 `~/.zcode/v2/provider_config.json` **新增** modeldock provider 条目（热加载，立即生效），不动既有条目；旧版写入 `config.json` 的 `builtin:modeldock` 条目会在接入时自动清理 | 在 ZCode 设置里手动选择一次 ModelDock provider |
 | dsh | `modeldock attach dsh [--set-default]` | `~/.dsh/settings.yaml` 新增 modeldock provider（apiKeyEnv 间接引用），token 写进 `.credentials.yaml`；`--set-default` 顺带切 agent-default-model | 重启 dsh |
-| Codex | `modeldock attach codex [--set-default]` | 创建/修改 `~/.codex/config.toml` 注册 modeldock provider（wire_api=chat） | `export MODELRDOCK_CODEX_TOKEN=$(modeldock token codex)` 写进 `~/.zshrc`（一次） |
+| Codex | `modeldock attach codex [--set-default]` | 创建/修改 `~/.codex/config.toml` 注册 modeldock provider（wire_api=responses，令牌内联请求头、无需环境变量） | 加 `--set-default` 切默认 provider（或在 Codex 配置里选 modeldock） |
 | OpenCode | `modeldock attach opencode` | 在 `~/.config/opencode/opencode.json` 新增 `provider.modeldock`（OpenAI 兼容 `/v1`） | 重启 OpenCode |
 | MiMo Code | `modeldock attach mimo-code` | 在 `~/.config/mimocode/mimocode.jsonc`（或 `.json`，`MIMOCODE_HOME` 可覆盖）注册 modeldock provider 并按当前路由写入模型声明；支持自动安装（npm `@mimo-ai/cli`） | 重启 MiMo Code，`mimo models` 可验证 |
 | WorkBuddy | `modeldock attach workbuddy` | 在 `~/.workbuddy-ai/models.json`（多候选探测）写入当前路由的模型条目数组（UI「添加模型」同款格式），你已有的自定义条目原样保留 | WorkBuddy 运行中会热加载；模型列表未刷新就重启 |
@@ -166,6 +166,8 @@ modeldock ui
 ![ModelDock Web 控制台](images/console.png)
 
 **打开页面会自动探测旧配置**：如果本机的 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 里已有 provider 配置，顶部会出现「🧲 检测到旧配置，一键搬进来」横幅——点一下即全部导入（Key 一并安全搬入、原软件不受影响、已导入的自动去重不再提示；点「暂不导入」可隐藏）。
+
+**今日用量徽标**：状态行网关状态旁实时显示「今日 N 请求 · $X.XX」——今天经网关发出的请求数与按模型单价折算的估算成本（美元），悬停看输入 / 输出 / 缓存读 token 明细与未匹配单价的模型清单（这类模型按 $0 计并列名提醒）；当天没有流量就不显示。成本按公开牌价估算，实际以服务商账单为准。
 
 界面就是三步，**没有任何需要理解的新概念**：
 
@@ -341,10 +343,10 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 - MCP 环境变量带**明文凭据**、客户端以**独立直连**运行（上游 key 明文写在其配置文件）→ 提示泄漏面：只点名服务器与变量名，**值绝不显示**；泄露或换机时先 `modeldock provider set-key` 轮换。
 - 同名 MCP 服务器在多处重复配置 → 提醒换 key / 改命令时容易漏一处（对照 `modeldock mcp list`）。
 
-## 10. 当前实现状态（2026-10-27 基线；发版时随版本号刷新）
+## 10. 当前实现状态（2026-11-04 基线；发版时随版本号刷新）
 
-已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
+已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；**用量统计与成本折算（`GET /_modeldock/usage` 聚合端点：按日期区间与客户端 / 服务 / 模型过滤，汇总请求数、token 明细与估算成本，管理面鉴权；控制台状态行今日用量徽标见 §5.5）**；**模型单价覆盖（内置 models.dev 官方牌价随目录刷新；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖，键 = 模型名或 `服务商/模型`，单位美元每百万 token；查不到单价的模型按 $0 计并列名提醒，绝不猜价）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
 
 验证状态：TypeScript 编译通过；产品测试全绿——套件覆盖 store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / update 等（含 Web 端点、手机控制台与云端控制面），用例数与文件数以 `npm test` 输出为准（个别用例按平台跳过）；agent 工作流套件（.agents/ 编排器与守卫 hook）拆分单独运行：`npm run test:workflow`；CLI 二进制冒烟通过；Windows / Linux / macOS 跨平台测试通过。真实 harness 的 attach 联调待你在本机执行——首次使用建议保留 diff 确认，并先跑 `modeldock test` / `modeldock doctor`。
 
-计划中（M2/M3）：L3 外部插件、预设库远程更新、管理面「严格模式」（只读端点也要求 token）、anthropic↔openai 协议转换；用量统计经评估不做；云同步 M4 完善项（恢复码 / 吊销设备 / 口令缓存可选开关）与云端控制面 VPS 真机验收按详设（Phase 2）推进。
+计划中：L3 外部插件、预设库远程更新、管理面「严格模式」（只读端点也要求 token）、anthropic↔openai 协议转换；云同步完善项（恢复码 / 吊销设备 / 口令缓存可选开关）与云端控制面 VPS 真机验收按详设推进。

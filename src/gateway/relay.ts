@@ -117,9 +117,12 @@ const HOP_BY_HOP = new Set([
 export class UpstreamError extends Error {
   status: number
   hint?: string
-  /** true = 传输层失败（请求未送达上游，可安全改发重试）；false/undefined = 已送达的应用层错误（禁止重放）。
+  /** 传输层失败分类：true = 连接层失败（请求未送达上游，可安全改发重试）；'timeout' = 请求已送达
+   *  上游但等响应头超时（非流式长推理 > headers_timeout_ms 即触发）——上游可能已处理（甚至已计费）
+   *  该请求，禁止自动改发重放（重复计费面），也不计入 connect 熔断（上游没挂，只是慢）；是否切换
+   *  候选由 failover_status_codes 白名单显式授权。false/undefined = 已送达的应用层错误（禁止重放）。
    *  边界：ECONNRESET 若发生在响应读取阶段，上游可能已处理（甚至已计费）该请求——此处不据此判定重放安全性。 */
-  transport?: boolean
+  transport?: boolean | 'timeout'
   /** true = 候选本身不可用（key 缺失 / 协议端点缺失等配置级问题，请求未发出）：跳到下一候选而不是中止整条链 */
   candidateSkip?: boolean
   /** 自动路由结果标记（down_all / failover / skip_all 等），用于日志 reason */
@@ -176,11 +179,23 @@ function isConnectError(e: unknown): boolean {
  *  毫秒级，保留立即重试一次应对瞬时抖动。导出供单测断言分类口径。
  *  注意 ETIMEDOUT 也可能是「请求已送达、等响应超时」——但 undici 的 bodyTimeout/headersTimeout
  *  走的是另外的错误形态（UND_ERR_HEADERS_TIMEOUT / UND_ERR_BODY_TIMEOUT），不在此列，
- *  那类错误本就不重试（isConnectError 不含它们）。 */
+ *  那类错误本就不重试（isConnectError 不含它们）；headers 超时另有单独分类（isHeadersTimeoutError）。 */
 export function isConnectTimeoutError(e: unknown): boolean {
   const err = e as { code?: string; cause?: { code?: string } }
   const code = err?.code ?? err?.cause?.code
   return code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT'
+}
+
+/** 响应头超时（undici UND_ERR_HEADERS_TIMEOUT）：请求体已送达上游，等响应头超过
+ *  headers_timeout_ms（非流式长推理 >60s 默认即触发）。与连接层失败（transport=true，
+ *  请求未送达、可安全重放）本质不同：请求已送达，上游可能正在处理甚至已计费——
+ *  重放=重复计费面，也不计入 connect 熔断（上游没挂，只是慢）。
+ *  bodyTimeout 不在此列：响应头已返回，体超时错误在调用方读流阶段才浮出，不经过本分类。
+ *  导出供单测断言分类口径。 */
+export function isHeadersTimeoutError(e: unknown): boolean {
+  const err = e as { code?: string; cause?: { code?: string } }
+  const code = err?.code ?? err?.cause?.code
+  return code === 'UND_ERR_HEADERS_TIMEOUT'
 }
 
 /** 组装上游请求头：剥离 hop-by-hop 与客户端凭据，按 provider 协议注入真实 key。
@@ -454,19 +469,26 @@ export async function forwardToUpstream(
         // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
         // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
         if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
-        // 超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
+        // 响应头超时单独分类（transport='timeout'）：请求已送达上游（非流式长推理 > headers_timeout_ms
+        // 即触发），不与「未送达可安全重放」的连接失败混类——重放有重复计费面，也不计 connect 熔断
+        const headersTimeout = isHeadersTimeoutError(e)
+        // 连接超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
         // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
         const timeoutLike = isConnectTimeoutError(e)
         const errNew = new UpstreamError(
           502,
-          timeoutLike
-            ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
-            : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
-          timeoutLike
-            ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
-            : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
+          headersTimeout
+            ? t('上游响应头超时：{url}（请求已送达上游，等待响应头超时——非流式长推理常见）', 'Upstream response headers timed out: {url} (the request was delivered; waiting for response headers timed out — common with non-streaming long inference)', { url })
+            : timeoutLike
+              ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
+              : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
+          headersTimeout
+            ? t('上游还在处理但响应慢：非流式长推理可调大 [gateway] headers_timeout_ms（modeldock config edit）；已送达的请求网关不自动重放，避免重复计费', 'The upstream is still processing but slow: raise [gateway] headers_timeout_ms for non-streaming long inference (modeldock config edit); delivered requests are never auto-replayed to avoid double billing')
+            : timeoutLike
+              ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
+              : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
         )
-        errNew.transport = true
+        errNew.transport = headersTimeout ? 'timeout' : true
         throw errNew
       }
     }
@@ -690,6 +712,8 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
  * 安全边界：仅「传输层失败」（transport=true，请求未送达）与「额度耗尽类错误」（未产出内容）才改发下一个候选；
  * 任何其他已送达的真实 status（含 5xx）就地返回、不重放，避免重复计费。
  * 例外：gateway.failover_status_codes 显式列出的状态码（如 429/503，上游未产出内容）在还有剩余候选时切换，切换前排空响应体释放连接。
+ * 响应头超时（transport='timeout'，请求已送达上游）：默认不切换也不计 connect 熔断，仅当
+ * failover_status_codes 白名单显式含其包装 status（502）且还有剩余候选时才切换（用户显式授权的重放）。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
  * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
  * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
@@ -805,15 +829,22 @@ export async function forwardWithFailover(
       if (opts.signal?.aborted) throw e
       lastErr = e
       const ms = Date.now() - t0
+      // 响应头超时（transport='timeout'）：请求已送达上游，禁止按「未送达传输层失败」自动改发
+      // （重复计费面），也不计 connect 熔断（cls=undefined 中性）；是否切换交由
+      // failover_status_codes 白名单显式授权（错误包装 status=502，还有剩余候选才切）
+      const timeoutTransport = e instanceof UpstreamError && e.transport === 'timeout'
+      const whitelistSwitch =
+        timeoutTransport && i < picked.ordered.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
       recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
-      if (skip) markReplay(c.providerId)
+      if (skip || whitelistSwitch) markReplay(c.providerId)
       else throw e // 非传输层错误：不重放，原样上抛
     }
   }
   // 链尾出口（CORRECT-09 ②）：候选全部 candidateSkip 耗尽时从未发生真实连接——透传最后一个
   // skip 错误的 status 与 hint（如钥匙环锁定的 503 + 解锁指引），routeReason 用 skip_all
-  // （不能谎报 down_all）；transport 类耗尽保持既有 502 包装 + down_all 语义不变。
+  // （不能谎报 down_all）；transport 类耗尽（含白名单授权切换后的 headers 超时耗尽）保持
+  // 既有 502 包装 + down_all 语义不变。
   if (lastErr instanceof UpstreamError && lastErr.candidateSkip === true) {
     lastErr.routeReason = 'skip_all'
     throw lastErr

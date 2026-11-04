@@ -25,7 +25,7 @@ function git(cwd, args) {
 }
 
 /**
- * 跑 shell 命令（异步，捕获合并输出）。返回 Promise<{ ok, output, durationMs, exitCode }>。
+ * 跑 shell 命令（异步，捕获合并输出）。返回 Promise<{ ok, output, durationMs, exitCode, timedOut }>。
  * 用 spawn shell 模式：testCmd 来自 workflow.json，是任意 shell 片段。
  *
  * 必须拿到子进程 pid 做超时树杀：spawnSync 的 timeout 只杀 shell 直接子进程，
@@ -33,15 +33,17 @@ function git(cwd, args) {
  * 文件令后续 fixup/finish 的 rename 报 EBUSY/EPERM（AGENTS.md 点名的 Windows 高频坑）。
  * 超时走 killTree（win32 taskkill /T /F；unix detached 进程组 kill(-pid)）。
  * 输出上限沿用 64MB 量级（超限停止累积，防无界缓冲）。
+ * opts.inherit = stdio 直通（finish 的验证步骤要 live 输出；此时不捕获，output 为空）。
  * 缺省超时来自 workflow.json gateTimeoutMinutes（B11 常量收口，缺省 20 分钟）。
  */
-export function runCmd(cmd, cwd, timeoutMs = loadWorkflowConfig().gateTimeoutMinutes * 60_000) {
+export function runCmd(cmd, cwd, timeoutMs = loadWorkflowConfig().gateTimeoutMinutes * 60_000, opts = {}) {
+  const inherit = opts.inherit === true;
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(cmd, {
       cwd,
       shell: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: inherit ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32', // unix 独立进程组：树杀 kill(-pid) 依赖它
     });
     const MAX_OUT = 64 * 1024 * 1024;
@@ -53,24 +55,65 @@ export function runCmd(cmd, cwd, timeoutMs = loadWorkflowConfig().gateTimeoutMin
       killTree(child.pid);
     }, timeoutMs);
     timer.unref?.();
-    child.stdout.on('data', (d) => {
-      if (stdout.length < MAX_OUT) stdout += d;
-    });
-    child.stderr.on('data', (d) => {
-      if (stderr.length < MAX_OUT) stderr += d;
-    });
+    if (!inherit) {
+      child.stdout.on('data', (d) => {
+        if (stdout.length < MAX_OUT) stdout += d;
+      });
+      child.stderr.on('data', (d) => {
+        if (stderr.length < MAX_OUT) stderr += d;
+      });
+    }
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ ok: false, exitCode: 1, output: `${cmd} 启动失败：${e.message}`, durationMs: Date.now() - started });
+      resolve({ ok: false, exitCode: 1, output: `${cmd} 启动失败：${e.message}`, durationMs: Date.now() - started, timedOut: false });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       resolve({
         ok: !timedOut && code === 0,
         exitCode: timedOut ? 124 : (code ?? 1),
-        output: `${stdout}\n${timedOut ? `[runCmd] 命令超时（${Math.round(timeoutMs / 1000)}s），已按进程树终止（含孙进程孤儿）` : stderr}`.trim(),
+        output: inherit ? '' : `${stdout}\n${timedOut ? `[runCmd] 命令超时（${Math.round(timeoutMs / 1000)}s），已按进程树终止（含孙进程孤儿）` : stderr}`.trim(),
         durationMs: Date.now() - started,
+        timedOut,
       });
+    });
+  });
+}
+
+/**
+ * argv 形态的树安全子进程运行（spawnSync 的超时只杀直接子进程，finish 这类长任务
+ * 被外层超时终止时其 testCmd 进程树会成为孤儿——Windows 锁 worktree 句柄致 EBUSY）。
+ * detached（unix 进程组）+ 超时 killTree，输出按 maxBuffer 截断累积。
+ * 返回 Promise<{ status, stdout, stderr, timedOut }>（status 在超时/信号终止时为 null）。
+ */
+export function runArgvTreeSafe(argv, { cwd, env, timeoutMs = 30 * 60_000, maxBuffer = 32 * 1024 * 1024 }) {
+  return new Promise((resolve) => {
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd,
+      ...(env ? { env } : {}),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const cap = (s, chunk) => (s.length < maxBuffer ? s + chunk : s);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d) => { stdout = cap(stdout, d); });
+    child.stderr.on('data', (d) => { stderr = cap(stderr, d); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child.pid);
+    }, timeoutMs);
+    timer.unref?.();
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr: `${stderr}\n${argv[0]} 启动失败：${e.message}`.trim(), timedOut: false });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ status: timedOut ? null : code, stdout, stderr, timedOut });
     });
   });
 }

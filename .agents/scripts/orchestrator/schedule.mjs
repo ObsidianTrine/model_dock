@@ -89,16 +89,17 @@ export function buildKeychainSh(repoRoot) {
 }
 
 /**
- * sail 时长参数：--minutes N（正整数）优先，其次 --duration（如 2h / 90m / 1h30m）。
+ * sail 时长参数：--minutes N（正整数）优先，其次 --duration（如 2h / 90m / 1h30m / 90s）。
  * duration 在此做格式白名单（sail 运行时还会再校验）——wrapper 生成时刻全部固化为
- * 字面量，宽格式会把任意字符串带进 shell。
+ * 字面量，宽格式会把任意字符串带进 shell。白名单与 parseDurationMinutes 可解析形态
+ * 逐一对应（h+m、m+s 可组合；h+m+s 运行时不可解析，同样拒收）。
  * @returns {string[]} ['--minutes', N] 或 ['--duration', s]；两者都缺/非法抛错。
  */
 export function sailDurationArgs(opts = {}) {
   if (Number.isInteger(opts.minutes) && opts.minutes > 0) return ['--minutes', String(opts.minutes)];
   const dur = typeof opts.duration === 'string' ? opts.duration.trim() : '';
-  if (/^\d+h?(?:\d+m)?$|^\d+m$/i.test(dur) && /\d/.test(dur)) return ['--duration', dur];
-  throw new Error('sail 模式需要 --minutes N（正整数）或 --duration（如 2h / 90m / 1h30m）');
+  if (/^\d+h(?:\d+m)?$|^\d+m(?:\d+s)?$|^\d+$|^\d+s$/i.test(dur) && /\d/.test(dur)) return ['--duration', dur];
+  throw new Error('sail 模式需要 --minutes N（正整数）或 --duration（如 2h / 90m / 1h30m / 90s）');
 }
 
 /**
@@ -117,6 +118,8 @@ export function nightlyArgs(opts = {}) {
   }
   if (opts.mode === 'sail') {
     const args = ['sail', ...sailDurationArgs(opts)];
+    // 燃油上限透传（定时巡航计费船的必要护栏）：>0 才带上
+    if (Number(opts.maxCostUsd) > 0) args.push('--max-cost-usd', String(opts.maxCostUsd));
     if (opts.backend) args.push('--backend', opts.backend);
     if (opts.reviewBackend) args.push('--review-backend', opts.reviewBackend);
     return args;
@@ -237,14 +240,14 @@ export function validHourMinute(hour, minute) {
 /**
  * 安装调度。opts: { mode: 'nightly'|'watch'|'sail', hour, minute, tests, auto, interval, minutes, duration, backend, dryRun }
  * mode=sail 时 minutes/duration 必填其一（sailDurationArgs 校验，缺失/非法抛错、不写任何文件）。
- * dryRun：写 runner（仓库内无害产物）并打印将执行的注册命令，不触碰系统调度。
+ * dryRun：零落盘——只打印注册计划与 wrapper 预览（wrapper 是已装调度的在线文件，dry-run
+ * 覆写它=静默改真实行为，CORRECT-13，2026-11-04 夜航实锤），不触碰系统调度。
  */
 export function installSchedule(repoRoot, opts = {}) {
   const hour = opts.hour ?? 2;
   const minute = opts.minute ?? 30;
   if (!validHourMinute(hour, minute)) throw new Error(`调度时刻不合法：hour=${hour} minute=${minute}（hour 0-23、minute 0-59）`);
   const args = nightlyArgs(opts);
-  writeRunner(repoRoot, args);
 
   const plat = process.platform;
   const when = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
@@ -255,8 +258,10 @@ export function installSchedule(repoRoot, opts = {}) {
         : plat === 'win32'
           ? `schtasks ${buildSchtasksCreateArgs(repoRoot, { hour, minute }).join(' ')}`
           : `crontab 追加标记段（每天 ${when}）：\n${buildCronBlock(repoRoot, { hour, minute })}`;
-    return { dryRun: true, runner: runnerPath(repoRoot), plan };
+    const wrapper = plat === 'win32' ? buildRunnerWin(repoRoot, process.execPath, args) : buildRunnerUnix(repoRoot, process.execPath, args);
+    return { dryRun: true, runner: runnerPath(repoRoot), plan, wrapper };
   }
+  writeRunner(repoRoot, args);
 
   if (plat === 'darwin') {
     fs.mkdirSync(path.dirname(plistPath(repoRoot)), { recursive: true });

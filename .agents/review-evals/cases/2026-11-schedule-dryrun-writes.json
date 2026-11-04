@@ -1,0 +1,14 @@
+{
+  "id": "2026-11-schedule-dryrun-writes",
+  "title": "schedule install --dry-run 在 dry-run 判定前无条件 writeRunner——「预演」静默覆写已装调度的在线 wrapper，换个参数冒烟即改掉真实调度下次触发的行为",
+  "reviewRef": "4510b57^",
+  "fixedBy": "4510b57",
+  "files": [
+    ".agents/scripts/orchestrator/schedule.mjs"
+  ],
+  "expect": [
+    "writerunner",
+    "dry"
+  ],
+  "note": "来源 CORRECT-13（2026-11-04 夜航冒烟当场踩中：本机真 wrapper 被覆写成调试参数 sail --duration 1m30s，.gitignore 按机文件无 git 历史不可恢复，人工断引止损——plist 23:00 触发前发现，避免误起计费船）。机制：installSchedule 把 writeRunner 放在 opts.dryRun 分支之前无条件执行，函数注释自辩 runner 是「仓库内无害产物」——实为 launchd/cron/schtasks 直接引用的在线启动脚本；dry-run 输出「未触碰系统调度」给了假安全感，实际每次预演都改写真实调度的行为。漏过层：①「dry-run 无害」的自洽注释是迷惑面（真实逃逸 bug 带自洽理由的同型）；②机器本地生成物（.gitignore 按机文件）没有 git 门禁兜底，写坏了既无 diff 也无恢复路径；③schedule.test.ts 旧契约恰好断言「dry-run wrapper 落盘」——测试把缺陷钉成了契约。堵法：dry-run 零副作用语义应作为任何 install/apply 命令的审查点；回归断言 runner 不存在 + 预览进 stdout（4510b57 修复对）。修复：writeRunner 移到 dry-run 分支之后，wrapper 全文经 stdout 预览（| 前缀逐行）。"
+}

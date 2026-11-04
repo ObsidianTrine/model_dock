@@ -11,6 +11,8 @@ workflows:
 gate: L3
 ---
 
+> **状态**：✅ 已完成——merged aea6a2c（2026-11-04 首跑清零：强审查者 9/9 全审出并入强基线 36/36，卡使命完成留档，见 8b99cc1）
+
 # 目标
 评测集现存 ⏳ 待首跑考题批量清账：逐题跑分（`node scripts/review-eval.mjs --case <id>`）、原文归档 runs/、README 考题表回填首跑结果、基线口径随新题计入更新。当前待首跑池（2026-10-31 盘点）：agents-win-spawn-shell、orchestrator-repo-root、review-concurrency-group（效能会话回灌三题）+ finish-lock-wait-contract、realhome-write-through、relay-failover-observability、daemon-stderr-pipe-pin、jsonpath-lenient-parse 等事故回流题——以 README 表内实标 ⏳ 者为准。
 

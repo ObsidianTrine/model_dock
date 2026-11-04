@@ -4,17 +4,22 @@
  * 发布说明的来源是 GitHub Release 正文 = CHANGELOG 段落原文（markdown），而消费它的界面
  * 全是纯文本：菜单栏 / 托盘的原生弹窗（NSAlert / WinForms）没有渲染器，Web 控制台是手写 DOM
  * 不引 markdown 库。因此三面共用这里的一份实现：先「去标记」，再「摘要收口」——
- * 弹窗只留首段 + 几条点题，逐条细节交给发布页链接（业界同类工具即此形态）。
+ * 弹窗只留首段 + 分节点题计数（「· 新增 6 项：… 等」，无标题正文回落平铺点题），
+ * 逐条细节交给发布页链接（业界同类工具即此形态）。
  */
 
 import { t } from '../util/i18n.js'
 
-/** 弹窗里最多列几条点题（其余用「另有 N 项」带过，细节看发布页） */
+/** 弹窗里最多列几条点题（其余用「另有 N 项」带过，细节看发布页）——平铺形态用 */
 const MAX_ITEMS = 4
 /** 没有加粗点题时，整句截断到这里长度 */
 const MAX_ITEM_CHARS = 48
 /** 首段摘要上限 */
 const MAX_SUMMARY_CHARS = 110
+/** 分节形态：每节最多露几条点题（超出用「等」带过，计数仍报全量） */
+const MAX_LEADS = 3
+/** 分节点题单条截断上限（一行一节要紧凑，比平铺形态收得更短） */
+const MAX_LEAD_CHARS = 28
 
 const HEADING_RE = /^ {0,3}#{1,6}\s+(.*)$/
 const BULLET_RE = /^ {0,3}[-*+]\s+(.*)$/
@@ -133,20 +138,33 @@ function clamp(text: string, max: number): string {
 export interface NotesSummary {
   /** 首段摘要（正文以条目开头时为空串） */
   summary: string
-  /** 至多 maxItems 条点题，按原文顺序 */
+  /** 至多 maxItems 条点题，按原文顺序（平铺形态渲染用；分节形态下仍在，供调用方兜底） */
   items: string[]
   /** 原文条目总数：大于 items.length 时调用方可提示「另有 N 项」 */
   total: number
+  /** 分节形态：全部条目都归属标题之下时逐节给出；标题前就有条目（混合形态）或缺标题时缺省 */
+  sections?: NotesSection[]
 }
 
-/** 摘要收口：首段 + 最多 maxItems 条点题（原生弹窗、终端检查输出用） */
+export interface NotesSection {
+  /** 分节标题原文（「新增」「改进」「修复」…） */
+  title: string
+  /** 该节条目总数 */
+  count: number
+  /** 点题（粗体导语优先，已摘网址与截断），至多 maxLeads 条 */
+  leads: string[]
+}
+
+/** 摘要收口：首段 + 最多 maxItems 条点题 / 分节计数（原生弹窗、终端检查输出用） */
 export function notesSummary(
   md: string,
-  opts: { maxItems?: number; maxItemChars?: number; maxSummaryChars?: number } = {}
+  opts: { maxItems?: number; maxItemChars?: number; maxSummaryChars?: number; maxLeads?: number; maxLeadChars?: number } = {}
 ): NotesSummary {
   const maxItems = opts.maxItems ?? MAX_ITEMS
   const maxItemChars = opts.maxItemChars ?? MAX_ITEM_CHARS
   const maxSummaryChars = opts.maxSummaryChars ?? MAX_SUMMARY_CHARS
+  const maxLeads = opts.maxLeads ?? MAX_LEADS
+  const maxLeadChars = opts.maxLeadChars ?? MAX_LEAD_CHARS
   const blocks = parseNotes(md)
 
   // 首段摘要只认第一条条目之前的那一段（正文若以列表开头，就没有摘要段）
@@ -159,6 +177,31 @@ export function notesSummary(
     }
   }
   const bullets = blocks.filter((b) => b.kind === 'bullet')
+
+  // 分节收集：标题开启新节、条目归属最近的标题；标题前就有条目（混合形态）时整体放弃分节，
+  // 回落平铺——否则「前言条目」会无处安放，两类形态混排反而难读
+  const groups: { title: string; count: number; leads: string[] }[] = []
+  let cur: { title: string; count: number; leads: string[] } | null = null
+  let untitled = false
+  for (const b of blocks) {
+    if (b.kind === 'heading') {
+      cur = { title: b.text, count: 0, leads: [] }
+      groups.push(cur)
+    } else if (b.kind === 'bullet') {
+      if (!cur) {
+        untitled = true
+        continue
+      }
+      cur.count += 1
+      cur.leads.push(clamp(stripLinks(b.lead ?? b.text), maxLeadChars))
+    }
+  }
+  const sections: NotesSection[] | undefined = untitled
+    ? undefined
+    : groups
+        .filter((g) => g.title && g.count > 0)
+        .map((g) => ({ title: g.title, count: g.count, leads: g.leads.filter((l) => l.length > 0).slice(0, maxLeads) }))
+
   return {
     summary: clamp(stripLinks(summaryText), maxSummaryChars),
     // 摘掉网址后条目可能空掉（如整条就是一个链接）：丢弃空条目，并用后面的条目补位，
@@ -168,22 +211,35 @@ export function notesSummary(
       .filter((t) => t.length > 0)
       .slice(0, maxItems),
     total: bullets.length,
+    ...(sections && sections.length > 0 ? { sections } : {}),
   }
 }
 
 /** 摘要收口的整段纯文本：与 run.ts 的 CLI 检查输出（logReleaseNotes）同源同形，
- *  供 /admin/update/status 的 summary 字段给 Windows 托盘小窗——原生弹窗放全文会变成
- *  一面墙的长段落，这里只给首段 + 点题，细节交给弹窗上的发布页链接 */
+ *  供 /admin/update/status 的 summary 字段给原生托盘小窗——原生弹窗放全文会变成
+ *  一面墙的长段落，这里只给首段 + 分节点题计数，细节交给弹窗上的发布页链接 */
 export function notesSummaryText(
   md: string,
-  opts: { maxItems?: number; maxItemChars?: number; maxSummaryChars?: number } = {}
+  opts: { maxItems?: number; maxItemChars?: number; maxSummaryChars?: number; maxLeads?: number; maxLeadChars?: number } = {}
 ): string {
   const s = notesSummary(md, opts)
   const lines: string[] = []
   if (s.summary) lines.push(s.summary)
-  for (const item of s.items) lines.push(`· ${item}`)
-  if (s.total > s.items.length) {
-    lines.push(t('（共 {n} 项改动，其余见发布页）', '({n} changes in total — see the release page for the rest)', { n: s.total }))
+  if (s.sections) {
+    // 分节形态：每节一行「· 新增 6 项：点题、点题 等」——计数自带总量，不再补总数行
+    for (const sec of s.sections) {
+      if (sec.leads.length === 0) {
+        lines.push(t('· {t} {n} 项', '· {t} ({n} items)', { t: sec.title, n: sec.count }))
+        continue
+      }
+      const more = sec.count > sec.leads.length ? t(' 等', ' and more') : ''
+      lines.push(t('· {t} {n} 项：{l}{m}', '· {t} ({n} items): {l}{m}', { t: sec.title, n: sec.count, l: sec.leads.join(t('、', ', ')), m: more }))
+    }
+  } else {
+    for (const item of s.items) lines.push(`· ${item}`)
+    if (s.total > s.items.length) {
+      lines.push(t('（共 {n} 项改动，其余见发布页）', '({n} changes in total — see the release page for the rest)', { n: s.total }))
+    }
   }
   return lines.join('\n')
 }

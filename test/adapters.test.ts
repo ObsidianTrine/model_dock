@@ -1874,6 +1874,7 @@ describe('zcode adapter', () => {
             key_ref: 'k',
             models: {
               'model-x': { source: 'manual', display_name: 'Model X', context_window: 1048576, max_output: 131072 },
+              'v-model': { source: 'manual', display_name: 'Vision M', context_window: 200000, max_output: 32000, capabilities: ['vision'] },
               'b-model': { source: 'manual' },
             },
           },
@@ -1885,11 +1886,11 @@ describe('zcode adapter', () => {
       await applyChanges('zcode', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
       const after = JSON.parse(fs.readFileSync(pp, 'utf8'))
       const rule = after.config.providerConfigRules.providerRules.find((r: any) => r.providerId === 'modeldock')
-      expect(rule.config.personalModelIds).toEqual(['model-x', 'b-model'])
-      expect(rule.config.modelOrder).toEqual(['model-x', 'b-model'])
+      expect(rule.config.personalModelIds).toEqual(['model-x', 'v-model', 'b-model'])
+      expect(rule.config.modelOrder).toEqual(['model-x', 'v-model', 'b-model'])
       // 手动规则只写元数据齐全的模型（ZCode 全字段校验）；b-model 无元数据 → 走 ZCode「推荐配置」兜底
       const manual = after.config.modelConfigRules.manualProviderModelRules
-      expect(manual).toHaveLength(1)
+      expect(manual).toHaveLength(2)
       expect(manual[0]).toEqual({
         providerId: 'modeldock',
         modelId: 'model-x',
@@ -1897,6 +1898,7 @@ describe('zcode adapter', () => {
           enabled: true,
           properties: {
             contextWindow: 1048576,
+            // 未勾视觉：supportsImage 显式 false（ZCode 的 inputFormat 必填，无「留空走默认」出路）
             inputFormat: { supportsImage: false, supportsVideo: false, supportsPdf: false },
             supportsJsonSchemaOutput: false,
             supportsNativeWebSearch: false,
@@ -1908,11 +1910,30 @@ describe('zcode adapter', () => {
           },
         },
       })
-      expect(plan.notes.some((n) => n.includes('2 个模型'))).toBe(true)
+      // 勾选视觉（capabilities 含 vision）→ supportsImage: true，ZCode 据此放行图片输入
+      expect(manual[1]).toEqual({
+        providerId: 'modeldock',
+        modelId: 'v-model',
+        config: {
+          enabled: true,
+          properties: {
+            contextWindow: 200000,
+            inputFormat: { supportsImage: true, supportsVideo: false, supportsPdf: false },
+            supportsJsonSchemaOutput: false,
+            supportsNativeWebSearch: false,
+            supportsMidConversationSystem: false,
+          },
+          optionSpecs: {
+            reasoningLevel: { values: ['disabled', 'enabled'], map: '{}' },
+            maxOutputTokens: { max: 32000 },
+          },
+        },
+      })
+      expect(plan.notes.some((n) => n.includes('3 个模型'))).toBe(true)
 
       const st = await zcodeAdapter.status(await loadConfig(), 8687)
       expect(st.pointing).toBe('gateway')
-      expect(st.detail).toContain('2 个模型')
+      expect(st.detail).toContain('3 个模型')
     } finally {
       delete process.env.MODELRDOCK_FAKE_ZCODE_PRESENT
       h.restore()
@@ -2011,6 +2032,9 @@ describe('codex adapter', () => {
       const root = tomlParse(fs.readFileSync(path.join(h.home, '.codex', 'config.toml'), 'utf8')) as any
       expect(root.model_provider).toBe('modeldock')
       expect(root.model).toBe('demo-model')
+      // baseCfg 无 provider 模型目录（元数据缺失）：不写窗口/输出上限，Codex 走内置默认
+      expect(root.model_context_window).toBeUndefined()
+      expect(root.model_max_output_tokens).toBeUndefined()
       expect(root.model_providers.modeldock.base_url).toBe('http://127.0.0.1:8687/v1')
       expect(root.model_providers.modeldock.http_headers.Authorization).toBe('Bearer ' + TOKEN)
       expect(root.model_providers.modeldock.wire_api).toBe('responses')
@@ -2033,6 +2057,49 @@ describe('codex adapter', () => {
       expect(rcAfterDet).not.toContain('MODELRDOCK_CODEX_TOKEN')
       expect(rcAfterDet).not.toContain('modeldock codex env')
       expect(rcAfterDet).toContain('export FOO=keep_me')
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
+  it('setDefault：随默认模型写 model_context_window / model_max_output_tokens，detach 一并收回', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            base_url: 'https://x.example.com',
+            protocol: 'responses',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: {
+              'demo-model': { source: 'manual', context_window: 1048576, max_output: 65536 },
+            },
+          },
+        },
+      })
+      const plan = await codexAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
+        await loadConfig()
+      )
+      await applyChanges('codex', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const { tomlParse } = await import('../src/adapters/format.js')
+      const root = tomlParse(fs.readFileSync(path.join(h.home, '.codex', 'config.toml'), 'utf8')) as any
+      expect(root.model).toBe('demo-model')
+      expect(root.model_context_window).toBe(1048576)
+      expect(root.model_max_output_tokens).toBe(65536)
+
+      const det = await codexAdapter.planDetach(await loadConfig())
+      await applyChanges('codex', 'detach', det.changes, { yes: true })
+      const root2 = tomlParse(fs.readFileSync(path.join(h.home, '.codex', 'config.toml'), 'utf8')) as any
+      expect(root2.model_providers?.modeldock).toBeUndefined()
+      expect(root2.model_provider).toBeUndefined()
+      // 随路由接管写入的窗口/输出上限一并收回
+      expect(root2.model_context_window).toBeUndefined()
+      expect(root2.model_max_output_tokens).toBeUndefined()
     } finally {
       delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
       h.restore()
@@ -2406,6 +2473,43 @@ describe('opencode adapter', () => {
     }
   })
 
+  it('declareModels：写入模型列表与 limit/modalities；不写 only_configured_models（MiMoCode 私有键）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_OPENCODE_PRESENT = '1'
+    try {
+      await withConfig({
+        ...baseCfg(),
+        providers: {
+          p: {
+            base_url: 'https://x.example.com',
+            protocol: 'openai',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: {
+              'm-a': { source: 'manual', display_name: 'Model A', context_window: 200000, max_output: 64000, capabilities: ['vision'] },
+              'm-b': { source: 'manual' },
+            },
+          },
+        },
+      })
+      const plan = await openCodeAdapter.planAttach({ mode: 'gateway', gatewayPort: 8687, token: TOKEN }, await loadConfig())
+      const after = JSON.parse(plan.changes[0].after)
+      expect(after.provider.modeldock.only_configured_models).toBeUndefined()
+      expect(after.provider.modeldock.models).toEqual({
+        'm-a': {
+          name: 'Model A',
+          limit: { context: 200000, output: 64000 },
+          attachment: true,
+          modalities: { input: ['text', 'image'], output: ['text'] },
+        },
+        'm-b': { name: 'm-b' },
+      })
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_OPENCODE_PRESENT
+      h.restore()
+    }
+  })
+
   it('既有条目保留；detach 移除 modeldock 并还原', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_OPENCODE_PRESENT = '1'
@@ -2518,7 +2622,7 @@ describe('workbuddy adapter', () => {
         auth_style: 'bearer',
         key_ref: 'k',
         models: {
-          m1: { source: 'manual', display_name: 'M One' },
+          m1: { source: 'manual', display_name: 'M One', capabilities: ['vision'] },
           m2: { source: 'manual' },
         },
       },
@@ -2689,6 +2793,9 @@ describe('workbuddy adapter', () => {
       const after = JSON.parse(plan.changes[0].after)
       expect(after.models.map((e: { id: string }) => e.id).sort()).toEqual(['m1', 'm2', 'u1'])
       expect(after.availableModels.sort()).toEqual(['m1', 'm2', 'u1'])
+      // 视觉能力位（UI 同款字段）：勾选 vision → true；能力未知留空走应用默认
+      expect(after.models.find((e: { id: string }) => e.id === 'm1').supportsImages).toBe(true)
+      expect(after.models.find((e: { id: string }) => e.id === 'm2').supportsImages).toBeUndefined()
 
       await applyChanges('workbuddy', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
       const planDetach = await workbuddyAdapter.planDetach(await loadConfig())

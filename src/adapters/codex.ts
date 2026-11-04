@@ -14,6 +14,7 @@ import {
 import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
 import { changeIfChanged, directAttachNote, directResponsesEndpointNote, ensurePlainObjectField, noChangeResult, oursEntryUrl } from './shared.js'
+import { resolveModelMeta } from '../providers/resolve.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -47,6 +48,9 @@ function stripEnvBlock(before: string): string {
 interface CodexConfig {
   model_provider?: string
   model_providers?: Record<string, Record<string, unknown>>
+  /** 根级窗口/输出上限（作用于当前激活模型；接入随默认模型写入，detach 随路由接管收回） */
+  model_context_window?: number
+  model_max_output_tokens?: number
   [k: string]: unknown
 }
 
@@ -151,7 +155,17 @@ export const codexAdapter: HarnessAdapter = {
     if (opts.setDefault) {
       root.model_provider = 'modeldock'
       const def = opts.profile && cfg.profiles[opts.profile] ? cfg.profiles[opts.profile].default_model : undefined
-      if (def) root.model = def
+      if (def) {
+        root.model = def
+        // Codex 对不在其内置表的模型按假定窗口处理（上下文余量显示与压实时机失真）：
+        // 随默认模型一并写入窗口与最大输出（解析链与 dsh/zcode 一致：配置 > 内置表 > 目录）。
+        // 根级键作用于当前激活模型，refreshBakedModelClients 重烙时随路由切换同步更新。
+        const prof = cfg.profiles[opts.profile!]!
+        const provider = prof.provider ? cfg.providers[prof.provider] : undefined
+        const meta = resolveModelMeta(def, provider?.models?.[def], { baseUrl: provider?.base_url })
+        if (meta?.context_window) root.model_context_window = meta.context_window
+        if (meta?.max_output) root.model_max_output_tokens = meta.max_output
+      }
     }
 
     const body = tomlStringify(reorderTomlRoot(root) as Record<string, unknown>)
@@ -201,7 +215,13 @@ export const codexAdapter: HarnessAdapter = {
       const entry = root.model_providers?.modeldock
       if (entry && oursEntryUrl(entry.base_url, 'codex', cfg)) {
         delete root.model_providers!.modeldock
-        if (root.model_provider === 'modeldock') delete root.model_provider
+        if (root.model_provider === 'modeldock') {
+          delete root.model_provider
+          // 接入随默认模型写入的窗口/输出上限一并收回（仅路由由我们接管时）；接入前的
+          // 用户手设值有 attach 快照兜底，可 restore 找回
+          delete root.model_context_window
+          delete root.model_max_output_tokens
+        }
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
         if (c2) changes.push(c2)
       }

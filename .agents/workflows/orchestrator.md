@@ -2,7 +2,7 @@
 
 > **Dockmaster（坞长）** 是本仓库 `.agents/` 自治编排体系的名字——ModelDock 的 Dock，管坞的人就是 dockmaster。**命令行名保持 `orchestrator.mjs` 不变**（改名零收益、破坏既有引用与肌肉记忆）；文档用港口隐喻叙事（官方映射表见下），接口名保持 orchestrator 不变。
 > 目标读者：递交托运单（任务卡）、看闸门、处理搁浅（blocked）任务的 agent / 人类操作者。
-> 设计与原理：`docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
+> 设计与原理：`.agents/docs/design-orchestrator.md`（本文只讲怎么用）。运行前提：主仓库根目录运行；Node ≥18；零第三方依赖。
 
 ## Dockmaster 是什么（船 · 发动机 · 船长）
 
@@ -207,7 +207,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 
 ### A4. 后端与 tier（执行/审查各用什么引擎与模型）
 
-- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: zcode-headless`（默认船、免费；2026-11-01 冒烟实测 headless 可用，10-29 旧结论过时）**，审查 claude-headless+glm-5.3-flash 构成异构互审（zcode 干活 + claude 验船）；claude-headless 是前进3/4 的网关船——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687）供油，切换须口头批准（`--approve-backend-switch`）。zcode-headless 设 `ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>`；headless 无 `--max-turns`（轮次熔断不可用，wall-clock/token 熔断直接杀进程树），prompt 走 argv 超 30000 字符快速失败。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
+- **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: claude-headless`（2026-11-03 船东定：全档位换 claude-code CLI——zcode 免费船可靠性不足；模型仍 glm-5.3-flash 经网关）**——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687）供油（`modeldock test claude-code` 验连通）。zcode-headless 仍可用（`--worker-backend zcode-headless` 显式点名须批准；ORCH_ZCODE_CLI 指向 zcode.cjs；prompt 走 argv 超 30000 字符快速失败；headless 无 `--max-turns`，wall-clock/token 熔断直接杀进程树），修复 TUI `/model` 后可点回。claude 侧对等的 `ORCH_CLAUDE_CLI` 仅覆盖可用性探测/诊断定位（.cjs/.mjs/.js 用 node 直跑；worker 拉起仍走 PATH claude，不随它改道）。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
 - **异构审查**：执行与审查是两个独立会话。审查引擎解析顺序：`--review-backend` 显式 > workflow.json `review.backend` > 上次 `review_spawned` 事件（retry/resume 不换审查引擎）> **自动异构**（自动选另一个可用的真实引擎，如 claude 干活 / zcode 审查；mock 永不异构）> 回落同源（记 `review_backend_fallback`）。**去相关的关键是引擎异源——只拆会话不换引擎仍有共同盲区**。
 - **tier 车钟档位（前进1-4，接口键 ahead-1..4）**：按航程难度选服务与模型——
   | 档位 | 接口键 | 适用 | tokenEnv |
@@ -351,7 +351,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 - **通知侧（发卡）**：workflow.json 可选键 `"notify": { "cardWebhook": true }`（缺省 false）。开启后，`awaiting-human` / `blocked`（含预算熔断、看门狗等 circuit_breaker 落位）与风暴闸 `weather_hold` 会在原文本通知（`${envPrefix}_ORCH_WEBHOOK`，一字节不改）之外**额外** POST 一张飞书 interactive 卡：approve（批准合并）/ reject（驳回）按钮 value 携带 `{ task, action }`，weather_hold 为 fleet 级事件没有可批示单卡 → 纯信息卡不带按钮。webhook URL 复用既有解析链（env 优先 + darwin 钥匙串兜底）；**仅飞书端点发卡**（企业微信/Slack 自动跳过，只收文本）。
 - **回流侧（批示）**：`node .agents/scripts/approval-listener.mjs [--port N] [--root <仓库根>]` 显式启动（缺省端口只认 workflow.json `notify.listenerPort`，都没配报错退出——**永不缺省监听**；只绑 `127.0.0.1`）。飞书卡片回调打过来：`url_verification` 握手直接回显 challenge；动作回调验签（verification token 须与 env `AGENTS_LARK_VERIFICATION_TOKEN` **常数时间一致**——sha256 归一化后 `timingSafeEqual`，防时序侧信道逐字节猜测，2026-11 起；不一致 403 并落审计 `approvals.jsonl`（只记 `rejected` 事实与来源 IP，**绝不记 token 值**）；env 未配拒绝所有动作）后映射为 orchestrator 既有命令 `approve/reject/retry <task-id>`（reject 无原因用默认文案），结果以 toast 回复群里。同 task 同 action 60s 内重复点击忽略（防手抖）；审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`（ts/task/action/来源 IP/结果）。
-- **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../../../docs/orchestrator-usage.md)。
+- **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../docs/orchestrator-usage.md)。
 
 ### B11. 动态选船（dynamic dispatch，阶段 3）
 

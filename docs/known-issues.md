@@ -428,6 +428,19 @@
 - 备注：纯可读性/覆盖率清理，随手批处理即可。来源：test/coverage-gaps-presets-sync.md 施工发现（「补测后」分支余量即此处）。
 - 已修（2026-10-31）：①升级为真缺陷修复——死臂背后 `±Infinity` 实际能穿透旧守卫（typeof number 且 >0）带着 Inf 元数据进模型目录，改 `typeof === 'number' && Number.isFinite(...) && > 0` 一并拒收（测试补 Infinity 用例）；②已删（Object.assign 对 undefined 源本就是合法空操作）；③留档——守卫承担 cached 闭包变量的 TS 收窄职责，删掉即 possibly-null 编译错，注明后不算死代码。
 
+**CORRECT-12（P2 升级：2026-11-04 夜航基线跑分发现，当晚定位根因并修复）跨午夜窗口的网关日志按本地日扫描漏读 end 日文件——燃油账/对账静默漏记，测试侧表现为 cost.test 偶发红**
+- 现象（表层）：test/orchestrator/cost.test.ts:214 `expect(fuel.measured).toBe(true)` 在全量跑分中失败一次（760/761）；同分支单独复跑 13/13 绿、第二次全量 761/761 绿。失败断言随后已补自定义消息（`expect(x, JSON.stringify(fuel))`，复现即见 reason）。
+- 真根因（2026-11-04 夜航逐路排除后定位，与 env 泄漏无关）：`cost.mjs readWindowEntries` 与 `reconcile.mjs` 两处的日文件循环 `for (day = new Date(start); day.getTime() <= end; day += 1天)` 以 **start 的时刻**整日推进——当窗口跨本地午夜（end 的时刻早于 start 的时刻，如 23:56→00:08）时永远推进不到 end 日，**end 日的日志文件整日漏读**。用量漏记（轻则燃油少算，重则整窗「时间窗内网关零请求」→ measured:false / viaGateway 误判）。长窗口同理漏收尾日（start 23:58、end 次日 10:00 只扫到前一日）。
+  - 测试偶发红的机制：用例条目按 `Date.now()` 相对生成，全量跑分恰在**午夜后 00:07:30–00:10**（两笔条目均已落当日文件、窗口起点仍在前一日）抵达 cost.test → 整窗判零 → 红。陷阱窗仅 2.5 分钟/天，故复现困难；单独跑与第二次全量都在窗外。
+  - 影响面（产品侧，不止测试）：sail 航海报告燃油段、`stats --cost`、`reconcile` 对账、`measureFuelBatch` 全部经这三处循环——**任何跨过本地午夜的航行/任务都漏记午夜后的用量**（用户可感：燃油账与对账数字偏小甚至「不可测」）。
+  - 同族先例：2026-10-02 修过**写侧**同族 bug（网关日志条目用 UTC 日期落文件、读侧按本地日找 → 本地午夜后写错文件，reconcile.test.ts:79 注记在案）；本次是**读侧**扫描循环的补齐，写读口径自此两侧闭合。
+- ☑ **已修 2026-11-04（本卡 flake-context-and-hunt）**：三处循环改为按**日历日**扫 `[date(start) .. date(end)]`（top-break 判 `date > endKey`，endKey 按本地日切分），条目仍按 ts ±60s 容差过滤——不引入多余读面。回归：cost.test.ts 两例（双笔全在 end 日 → 旧读法整窗误判零；跨双日条目 → 旧读法少算燃油）+ reconcile.test.ts 一例（任务窗口跨午夜，端到端读侧断言），全部本地午夜锚定、任意时区/平台等价。
+
+**CORRECT-13（P2，2026-11-04 夜航冒烟实锤当场踩中）schedule install --dry-run 覆写在线 wrapper——「预演」静默改掉真实调度行为**
+- 现象：`--dry-run` 输出「未触碰系统调度」，但 `installSchedule` 的 `writeRunner` 在 dry-run 判定**之前**无条件执行——任何已装 launchd/cron/schtasks 的机器上跑 dry-run（哪怕只是换个参数冒烟），都会把**在线 wrapper** 的 exec 行改写成 dry-run 的参数：真实调度在下次触发时静默执行完全不同的命令。本仓当夜实锤：冒烟 `--duration 1m30s` 覆写了真 wrapper（原 exec 行不可恢复——文件被 `.gitignore:40` 按机排除，无 git 历史/快照），当晚已人工断引止损。
+- 根因：`schedule.mjs installSchedule` 结构问题 + 注释误判 runner 为「仓库内无害产物」——它实为 plist/cron 直接引用的在线文件；机器本地生成物（gitignore 文件）也是在线状态，dry-run 语义必须零副作用。
+- ☑ **已修（本卡 schedule-dryrun-no-write）**：`writeRunner` 移到 dry-run 分支之后——dry-run **零落盘**（runner 不写、日志目录不建），wrapper 内容改走 stdout 预览（`| ` 前缀逐行打印，参数与绝对路径固化仍可核对）。回归：schedule.test.ts 两条 dry-run 用例改写为「runner 不存在 + 预览含参数」断言（旧契约「wrapper 落盘」即缺陷本体）；本仓 wrapper 已断引待船东凭原参数重装。
+
 ---
 
 ## 四、已核查无问题项汇总（后续审查可跳过）

@@ -9,8 +9,12 @@
 // 锁，互不影响。
 //
 // 语义（与 run-lock.mjs / feature-branch 的 .finish.lock 同款哲学）：
-//   - 锁文件 .agents/orchestrator/.run-<task-id>.lock 记 { pid, task, cmd, acquired_at }
-//   - 持有进程已死（isAlive 假）= 陈锁，自动接管——崩溃不死锁，无需人工清理
+//   - 锁文件 .agents/orchestrator/.run-<task-id>.lock 记 { pid, task, cmd, acquired_at, beat }
+//   - 判活按心跳 beat（持有进程每 15s 续写）：beat 静默超 60s = 陈锁，自动接管——
+//     崩溃不死锁，无需人工清理。pid 仅作诊断记录：纯 isAlive(pid) 判活会被 pid 复用
+//     骗过（陈锁属主早已退出、pid 被新进程顶掉 = 假活锁，后来者永远拿不到锁，还会
+//     把无辜进程当属主误杀；与 feature-branch finish 锁 2026-10-30 实证同型，故取同款
+//     心跳方案）。旧版锁（无 beat 字段）滚动兼容：isAlive + acquired_at 30min 兜底。
 //   - 释放只删自己持有的锁；进程退出（含 die/process.exit、SIGKILL 之外的一切
 //     正常退出路径）经 exit handler 兜底；SIGKILL/断电残留的陈锁由下次进入接管
 //   - 闭环正常落位（merged/awaiting-human/blocked/failed）由 cmdRun finally 显式释放
@@ -21,6 +25,25 @@ import path from 'node:path';
 import { isAlive } from './kill-tree.mjs';
 import { invalidateSeqCache, logDir } from './events.mjs';
 import { TASK_ID_RE } from './queue.mjs';
+
+/** 持有期间心跳间隔 / 心跳静默判陈阈值（连续 ~3 个心跳未续；与 finish 锁同数值）。 */
+export const TASK_LOCK_BEAT_MS = 15_000;
+export const TASK_LOCK_STALE_MS = 60_000;
+/** 旧版锁（无 beat 字段，心跳改造前的进程写的）：按 acquired_at 判陈旧，阈值放大到
+ *  30min——覆盖最长的合法闭环（worker 会话 + 门禁），又不让旧版崩溃残留的锁永久拒人。 */
+const LEGACY_STALE_MS = 30 * 60_000;
+
+/**
+ * 锁判活（acquire 与 follow/abandon 守卫共用）：beat 新鲜 = 活；无 beat 的旧版锁按
+ * isAlive + acquired_at 30min 兜底；损坏锁 = 陈锁，可接管。
+ */
+export function taskLockLooksLive(info) {
+  if (!info || !Number.isInteger(info.pid)) return false;
+  if (Number.isFinite(info.beat)) return Date.now() - info.beat < TASK_LOCK_STALE_MS;
+  const at = Date.parse(info.acquired_at ?? '');
+  const age = Number.isFinite(at) ? Date.now() - at : 0;
+  return isAlive(info.pid) && age < LEGACY_STALE_MS;
+}
 
 export function taskLockPath(repoRoot, taskId) {
   if (!TASK_ID_RE.test(String(taskId))) {
@@ -43,6 +66,34 @@ export function readTaskLock(repoRoot, taskId) {
   return readLock(taskLockPath(repoRoot, taskId));
 }
 
+// 心跳定时器（按锁路径）：持有期间每 15s 续写 beat。unref 不拖进程退出——主流程
+// 结束后事件循环若被泄漏句柄钉住，心跳停更，下一位等待者 60s 内即可安全接管。
+const beatTimers = new Map();
+
+function stopBeat(p) {
+  const t = beatTimers.get(p);
+  if (t) {
+    clearInterval(t);
+    beatTimers.delete(p);
+  }
+}
+
+function startBeat(p) {
+  if (beatTimers.has(p)) return; // 重入：外层已在跳
+  const t = setInterval(() => {
+    try {
+      const info = readLock(p);
+      if (info?.pid !== process.pid) {
+        stopBeat(p); // 锁已易主（防御，理论不可达）
+        return;
+      }
+      fs.writeFileSync(p, JSON.stringify({ ...info, beat: Date.now() }));
+    } catch { /* 下一个 tick 重试 */ }
+  }, TASK_LOCK_BEAT_MS);
+  t.unref();
+  beatTimers.set(p, t);
+}
+
 export function releaseTaskLock(repoRoot, taskId) {
   const p = taskLockPath(repoRoot, taskId);
   // 重入深度>1：内层（同进程嵌套闭环）释放不动锁文件，只减计数——锁还归外层持有
@@ -52,6 +103,7 @@ export function releaseTaskLock(repoRoot, taskId) {
     return;
   }
   reentrantDepth.delete(p);
+  stopBeat(p); // 最外层释放：心跳一并停（unref 定时器不删也会随进程退出消亡，显式删防泄漏）
   const cur = readTaskLock(repoRoot, taskId);
   // 只释放自己持有的锁（陈锁已被别人接管时不误删）
   if (cur?.pid === process.pid) fs.rmSync(p, { force: true });
@@ -69,8 +121,9 @@ const exitHooked = new Set();
  * 抢任务锁。返回 { held: true } 或 { held: false, owner, unremovable? }——
  * 调用方按 held 分流：false 即 die（带 owner pid 的可操作提示）。
  * 本进程已持同把锁 → 重入豁免（held:true，深度计数保护锁文件生命周期）。
- * 陈锁最多重试接管 2 次（与 feature-branch 的 finish 锁同款防抖）；删不掉
- * 返回 unremovable 让调用方提示手动清理，不死循环。
+ * 陈锁（属主已死，或心跳静默——含 pid 被复用的假活锁）最多重试接管 2 次（与
+ * feature-branch 的 finish 锁同款防抖）；删不掉返回 unremovable 让调用方提示
+ * 手动清理，不死循环。
  */
 export function acquireTaskLock(repoRoot, taskId, name = 'run') {
   const p = taskLockPath(repoRoot, taskId);
@@ -82,7 +135,7 @@ export function acquireTaskLock(repoRoot, taskId, name = 'run') {
   }
   for (let takeovers = 0; ; takeovers++) {
     try {
-      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, task: taskId, cmd: name, acquired_at: new Date().toISOString() }, null, 2), { flag: 'wx' });
+      fs.writeFileSync(p, JSON.stringify({ pid: process.pid, task: taskId, cmd: name, acquired_at: new Date().toISOString(), beat: Date.now() }, null, 2), { flag: 'wx' });
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const cur = readLock(p);
@@ -91,19 +144,21 @@ export function acquireTaskLock(repoRoot, taskId, name = 'run') {
         reentrantDepth.set(p, (reentrantDepth.get(p) ?? 0) + 1);
         return { held: true };
       }
-      if (cur && Number.isInteger(cur.pid) && isAlive(cur.pid)) {
+      if (taskLockLooksLive(cur)) {
         return { held: false, owner: cur };
       }
       if (takeovers >= 2) return { held: false, owner: cur ?? { pid: null, task: taskId }, unremovable: true };
       let tookOver = false;
       try { fs.rmSync(p, { force: true }); tookOver = true; } catch { /* 下一轮重查 */ }
       if (tookOver) {
-        console.log(`[orchestrator] 接管陈旧任务锁（task=${taskId}，pid=${cur?.pid ?? '?'} 已退出）`);
+        const why = cur && Number.isFinite(cur.beat) ? '心跳已静默' : '属主已退出';
+        console.log(`[orchestrator] 接管陈旧任务锁（task=${taskId}，pid=${cur?.pid ?? '?'} ${why}）`);
         // 接管者的下一次 appendEvent 重新从盘上对齐 seq——防同任务跨进程双写 seq 冲突（events.mjs 缓存配套）
         invalidateSeqCache(logDir(repoRoot, taskId));
       }
       continue;
     }
+    startBeat(p);
     if (!exitHooked.has(p)) {
       exitHooked.add(p);
       // 只删自己持有的锁：进程释放锁后到退出的毫秒窗口里锁可能已被他人接管，

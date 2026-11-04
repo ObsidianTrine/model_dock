@@ -22,7 +22,7 @@ function realVoyageEvents() {
     { seq: 2, ts: 't2', type: 'tier_resolved', tier: null, worker_model: 'glm-5.3-flash', review_model: 'glm-5.3-flash' },
     { seq: 3, ts: 't3', type: 'task_accepted', backend: 'zcode-headless' },
     { seq: 6, ts: 't6', type: 'worker_spawned', backend: 'zcode-headless', attempt: 0 },
-    { seq: 9, ts: 't9', type: 'worker_done', summary: 'docs/ai-pipeline-guide.md 通知段落补齐 AGENTS_NIGHTLY_WEBHOOK / AGENTS_ORCH_WEBHOOK 双变量、旧名兼容说明、飞书自定义关键词提醒与钥匙串防明文命令示例，docs-lint 全绿' },
+    { seq: 9, ts: 't9', type: 'worker_done', summary: '.agents/docs/ai-pipeline-guide.md 通知段落补齐 AGENTS_NIGHTLY_WEBHOOK / AGENTS_ORCH_WEBHOOK 双变量、旧名兼容说明、飞书自定义关键词提醒与钥匙串防明文命令示例，docs-lint 全绿' },
     { seq: 10, ts: 't10', type: 'gate_result', gate: 'npm_test', result: 'pass', scoped: 'l0' },
     { seq: 11, ts: 't11', type: 'gate_result', gate: 'port_scan', result: 'pass' },
     { seq: 12, ts: 't12', type: 'review_verdict', blockers: 0, suggestions: 1, notes: 0 },
@@ -87,13 +87,13 @@ describe('orchestrator notify digest > buildTaskDigest', () => {
       taskId: 'docs-nightly-webhook-envs',
       state: 'merged',
       reason: '审查通过，自动出港',
-      why: '更新 docs/ai-pipeline-guide.md「通知」段落，补齐双 webhook 变量',
+      why: '更新 .agents/docs/ai-pipeline-guide.md「通知」段落，补齐双 webhook 变量',
       events: realVoyageEvents(),
     })
     const lines = digest.split('\n')
     expect(lines[0]).toBe('【docs-nightly-webhook-envs】✅ 已出港')
-    expect(digest).toContain('为什么：更新 docs/ai-pipeline-guide.md「通知」段落')
-    expect(digest).toContain('成果：docs/ai-pipeline-guide.md 通知段落补齐')
+    expect(digest).toContain('为什么：更新 .agents/docs/ai-pipeline-guide.md「通知」段落')
+    expect(digest).toContain('成果：.agents/docs/ai-pipeline-guide.md 通知段落补齐')
     expect(digest).toContain('过程：zcode → 6m/2.1M tok')
     expect(lines[lines.length - 1]).toBe('结果：审查通过，自动出港')
   })

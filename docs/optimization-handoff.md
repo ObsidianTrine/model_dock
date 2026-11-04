@@ -2,7 +2,7 @@
 
 > 来源：2026-10-29 四分区只读效能审查（.agents 工作流工具链 / CI 与构建脚本 / 测试基建 / src 结构与可维护性），关键结论经人工到源码复核（含 spot-check）。
 > 边界声明：**全部为优化 / 重构 / 测试 / CI 类任务，不新增产品功能**；不复报 docs/known-issues.md 既有条目（PERF/XPLAT/CORRECT/REVIEW 系列），与 docs/backlog.md、docs/maintenance-handoff.md（T1–T12，已全部闭环）零重叠。
-> 用法：与 maintenance-handoff 同款——13 张卡已抽为独立文件 `docs/task-cards/T13-*.md` ~ `T25-*.md`，orchestrator 派发直接 `node .agents/scripts/orchestrator.mjs submit docs/task-cards/T<NN>-<id>.md`，交互 agent 派发直接把卡文件交给它。修改任务内容以卡文件为准并回同步本页总览。
+> 用法：与 maintenance-handoff 同款——13 张卡已抽为独立文件 `docs/task-cards/T13-*.md` ~ `T25-*.md`，orchestrator 派发直接 `node .agents/scripts/orchestrator.mjs submit docs/task-cards/T<NN>-<id>.md`，交互 agent 派发直接把卡文件交给它。修改任务内容以卡文件为准并回同步本页总览。（2026-11-04 清理：已闭环卡 T01–T30 文件已删，git 历史 `git log -- docs/task-cards/` 可查；在办卡 T31/T32 仍以卡文件为准。）
 > 注意：文中行号基于审查当日代码（develop @d8d6d3d），**动手前先读对应源码确认仍成立**（known-issues.md 同款纪律）。
 
 ## 0. 全局纪律（所有任务通用，执行 agent 必读）
@@ -41,6 +41,8 @@
 - **批次四（src 结构域，四卡文件互斥可并行）**：T22 lan.ts / T23 state.ts / T24 ops.ts / T25 adapters+paths+sync-engine。T23、T24 建议排最后或单独做（体量大、importer 多，合并窗口要干净）。
 
 > **2026-10-30 收口盘点**：T13（68dbef9）/ T14（bf937bd）/ T16（9b1a891）/ T17（9ccf9b8）/ T18（dependabot-preflight，2026-10-30 晚收尾合并）/ T19（f66edeb）/ T20（939ee25）/ T22（07562d5）/ T23（25b42a2）/ T24（cc5fe52）已合并 develop（对应卡文件正文已加 ✅ 状态行）；剩余 **T15（其他 agent 开工中）、T21、T25**（T21 前置 T20 已解除，T15/T21 预研已定稿）。缺陷卡 T26（CORRECT-07）已修（6129ac0），T27/T28 未派发。
+
+> **2026-11-04 夜航对账（桌面会话逐项核实，证据见各卡 ✅ 状态行）**：T15（七项全落地：seqCache/audit 轮转/error handler/policy cfg 收敛/门禁表驱动，①之 newWorkerSettingsPath 已有专属测试改判定保留）、T21（test-suite-couplings.test.ts 门禁在位）、T25（oursEntryUrl/noChangeResult/changeIfChanged 收敛 + adaptersDir 已删）、T27（CORRECT-08 @fd235ea 已修）、T28（CORRECT-09 @bf730c6 已修）、T30（package.json test 脚本已带 tsc -p tsconfig.test.json --noEmit 前置 + 豁免白名单，typecheck 1.5s 绿）——**T13–T30 全批闭环**。仅 T31（review-evals 首跑清零）当时未做，同日晚间已执行完毕关闭：强审查者 9/9 全审出并入强基线 36/36，卡留档（8b99cc1，merge aea6a2c）；T32（workflow-parallel）待 CI 灰度定档。同日：test-orch-inproc 预研报告落 docs/archive/test-orch-inproc-presearch.md（方案 B 收益 40–55s，三阶段方案备批），CORRECT-12 登记工作流套件偶发红（当晚升级为真缺陷并修复：跨午夜窗口网关日志日文件漏读，见 known-issues CORRECT-12）。另立 **T32 workflow-parallel**（docs/task-cards/T32-workflow-parallel.md）：B3 并行实验 docs/archive/test-orch-parallel-exp.md（maxWorkers:4 两点复证 190.8s/211.9s = 串行 528s 的 2.5–2.8×，764 绿零超时），待日间 CI 灰度后定档。
 
 ## 2. 明确不立项（维持现状，勿翻案）
 

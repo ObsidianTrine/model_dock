@@ -77,20 +77,55 @@ const DISALLOWED_PATTERNS = [
 ];
 const DISALLOWED_TOOLS = DISALLOWED_PATTERNS.flatMap(shellPatterns);
 
+/** 会话 cwd 所属仓库的主仓根（linked worktree → 主仓；普通仓库 → 自身；git 不可用 → null）。 */
+export function mainRepoRootOf(cwd) {
+  if (!cwd) return null;
+  try {
+    const r = spawnSync('git', ['-C', cwd, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const common = (r.stdout ?? '').trim();
+    if (r.status === 0 && common) {
+      const dotGit = path.resolve(cwd, common);
+      if (fs.existsSync(dotGit)) return path.dirname(dotGit);
+    }
+  } catch { /* git 不可用 */ }
+  return null;
+}
+
+/**
+ * worker hook 命令：默认锚定主仓绝对路径（P0 间接旁路收敛，2026-11）——worker 只有
+ * worktree 内写权限，主仓副本篡改不到；hook 命令若用相对路径（随仓库 checkout 进
+ * worktree），被篡改的 worktree 副本会顶替真正执行的 hook，红线层整体失效。主仓
+ * 解析失败（git 不可用等）才回退相对路径——此时 policy-worker 自身的
+ * hookIntegrityVerdict（相对 git HEAD 的完整性校验）兜底拦未提交篡改。
+ * 路径用正斜杠 + 双引号包路径：Windows（cmd）与 unix shell 同形合法。
+ */
+export function workerHookCommand(sessionCwd = null) {
+  const main = mainRepoRootOf(sessionCwd);
+  if (main) {
+    const hook = path.join(main, '.agents', 'hooks', 'policy-worker.mjs');
+    if (fs.existsSync(hook)) return `node "${hook.replace(/\\/g, '/')}"`;
+  }
+  return 'node .agents/hooks/policy-worker.mjs';
+}
+
 /** 生成 worker 专属 settings 文件（注册 policy-worker.mjs 拦截 hook）。
  *  matcher 用 Bash|PowerShell：Windows 上 claude CLI 的 shell 工具是 PowerShell，
  *  只写 Bash = hook 对全部 shell 命令失明（红线层失效，2026-10-30 实验实证）。
+ *  sessionCwd = worker 会话工作目录（worktree）——hook 命令据此锚定主仓绝对路径
+ *  （workerHookCommand；缺省回退相对路径）。
  *  envPatch 非空时并入 settings.env（--settings 优先级高于用户级 settings.json，
  *  tier token 据此覆盖接入时写入的全局凭据）——子进程 env 同时补一份双保险，
  *  两层哪层生效都到得了网关。 */
-export function writeWorkerSettings(settingsPath, envPatch = {}) {
-  // hook 命令的 cwd 是 worktree；.agents/hooks/policy-worker.mjs 随仓库 checkout 到 worktree 内
+export function writeWorkerSettings(settingsPath, envPatch = {}, sessionCwd = null) {
   const settings = {
     hooks: {
       PreToolUse: [
         {
           matcher: 'Bash|PowerShell',
-          hooks: [{ type: 'command', command: 'node .agents/hooks/policy-worker.mjs' }],
+          hooks: [{ type: 'command', command: workerHookCommand(sessionCwd) }],
         },
       ],
     },
@@ -272,16 +307,39 @@ export async function getBackend(name) {
   throw new Error(`未知后端 "${name}"（允许：claude-headless | zcode-headless | mock）`);
 }
 
-/** claude CLI 可用性探测（spawnSync --version；Windows 走 shell 以命中 .cmd 包装；按进程缓存）。 */
+/**
+ * claude CLI 定位（探测/诊断面）：ORCH_CLAUDE_CLI 环境变量优先——与 ORCH_ZCODE_CLI
+ * 同款 seam，CI/沙箱没有 PATH claude 时指向桩脚本，动态选船的可用性探测才可确定
+ * （否则「CLI 不可用」会抢在海况口径前面留痕）。脚本型目标（.cjs/.mjs/.js）用当前
+ * node 直跑，其余按可执行直跑；未设则用 PATH 里的 `claude`。
+ * 仅作用可用性探测与诊断（drill）：worker 实际拉起仍走 PATH 的 claude
+ * （claudeSpawnInvocation 的 stream-json 输出契约依赖真实 CLI，不随此变量改道）。
+ */
+export function claudeCliSpec() {
+  const custom = process.env.ORCH_CLAUDE_CLI?.trim();
+  if (!custom) return { ok: true, cmd: 'claude', baseArgs: [] };
+  if (!fs.existsSync(custom)) {
+    return { ok: false, reason: `ORCH_CLAUDE_CLI 指向的文件不存在：${custom}` };
+  }
+  if (/\.(cjs|mjs|js)$/i.test(custom)) return { ok: true, cmd: process.execPath, baseArgs: [custom] };
+  return { ok: true, cmd: custom, baseArgs: [] };
+}
+
+/** claude CLI 可用性探测（spawnSync --version；PATH 探测在 Windows 走 shell 以命中 .cmd 包装；按进程缓存）。 */
 let claudeProbeCache;
 export function claudeAvailable() {
   if (claudeProbeCache === undefined) {
     try {
-      const r = spawnSync('claude', ['--version'], {
-        encoding: 'utf8',
-        timeout: 30_000,
-        shell: process.platform === 'win32',
-      });
+      const spec = claudeCliSpec();
+      const r = spec.ok
+        ? spawnSync(spec.cmd, [...spec.baseArgs, '--version'], {
+            encoding: 'utf8',
+            timeout: 30_000,
+            // 绝对路径直 exec（node 直跑/自定义可执行）不需要 shell——shell 反而引入
+            // 空格路径解析坑；仅 PATH 探测的 'claude' 在 Windows 需要 shell 命中 .cmd
+            shell: spec.cmd === 'claude' && process.platform === 'win32',
+          })
+        : { status: 1 };
       claudeProbeCache = r.status === 0;
     } catch {
       claudeProbeCache = false;

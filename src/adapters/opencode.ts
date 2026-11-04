@@ -23,4 +23,9 @@ export const openCodeAdapter = craftProviderJsonAdapter({
     homepage: 'https://npmmirror.com/package/opencode-ai',
     bootstrap: { path: () => path.join(homeDir(), '.config', 'opencode', 'opencode.json'), content: '{}\n' },
   },
+  // 声明模型列表（name/limit/attachment/modalities，models.dev 同构）：不声明时 opencode 靠运行时
+  // 拉 /v1/models 发现模型，上下文/输出/视觉在客户端侧全未知（未知模型按默认窗口、纯文本处理）。
+  // onlyConfigured:false 跳过 only_configured_models（MiMoCode 私有键，opencode schema 未收录）。
+  declareModels: true,
+  onlyConfigured: false,
 })

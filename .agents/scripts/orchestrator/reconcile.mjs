@@ -92,8 +92,11 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
   // (provider, model) token 分桶：成本投影（cost.mjs computeCost）的原料——同一循环顺手聚合，
   // 不再二次扫日志。键 = "provider/model"（无 provider 裸模型名）。
   const pairsMap = new Map();
-  for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
+  // 按日历日扫 [date(start) .. date(end)]：旧写法跨午夜窗口读不到 end 日文件（CORRECT-12 同款，见 cost.mjs readWindowEntries 注记）
+  const endKey = new Date(end - new Date(end).getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  for (let day = new Date(start); ; ) {
     const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    if (date > endKey) break;
     for (const entry of readGatewayLog(gwDir, date)) {
       const ts = parseTs(entry.ts);
       if (!(ts >= start - 60_000 && ts <= end + 60_000)) continue; // 1 分钟容差
@@ -118,6 +121,7 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
       p.cacheCreate += u.cache_creation_tokens ?? 0;
       pairsMap.set(pk, p);
     }
+    day.setDate(day.getDate() + 1);
   }
 
   const selfTotal = selfReported.tokensIn + selfReported.tokensOut;
@@ -172,12 +176,16 @@ export function upstreamSeaState(repoRoot, events) {
   if (!gwDir) return { skipped: true, reason: '未启用网关日志（workflow.json gatewayLogDir 未配置）' };
 
   const entries = [];
-  for (let day = new Date(start); day.getTime() <= end; day.setDate(day.getDate() + 1)) {
+  // 按日历日扫 [date(start) .. date(end)]：旧写法跨午夜窗口读不到 end 日文件（CORRECT-12 同款，见 cost.mjs readWindowEntries 注记）
+  const endKey = new Date(end - new Date(end).getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  for (let day = new Date(start); ; ) {
     const date = new Date(day.getTime() - day.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    if (date > endKey) break;
     for (const entry of readGatewayLog(gwDir, date)) {
       const ts = parseTs(entry.ts);
       if (ts >= start - 60_000 && ts <= end + 60_000) entries.push(entry);
     }
+    day.setDate(day.getDate() + 1);
   }
   if (!entries.length) {
     return { skipped: true, reason: '任务时间窗内网关日志无请求记录（worker 可能直连上游，或日志已被清理）' };

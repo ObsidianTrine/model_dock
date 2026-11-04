@@ -141,7 +141,7 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 | [换电脑与多机同步](docs/multi-machine-sync.md) | 同步盘接入新电脑的完整步骤与排错 |
 | [云端部署](docs/deploy-cloud.md) | 自建云端同步中枢 runbook，手机单页管理所有设备 |
 | [设计文档](docs/design.md) | 架构、ADR、威胁模型 |
-| [AI 自治流水线指南](docs/ai-pipeline-guide.md) | 从一句话意图到发版提案：任务卡进、合并出，贡献者派活的全部用法 |
+| [AI 自治流水线指南](.agents/docs/ai-pipeline-guide.md) | 从一句话意图到发版提案：任务卡进、合并出，贡献者派活的全部用法 |
 | [CI 机器人](docs/ci-bots.md) | GitHub Actions 分层 PR 审查与 Dependabot 的设置与用途（维护者） |
 | [AI 审查体系](docs/ai-review-system.md) | 分层代码审查的设计与运维：每层拦什么、如何持续改进 |
 | [更新日志](CHANGELOG.md) | 每个版本的用户可见变化 |

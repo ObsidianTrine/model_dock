@@ -1,7 +1,7 @@
 // queue.mjs — orchestrator 任务卡解析 + 文件系统队列状态机。
 // 零第三方依赖（.agents/ 工具链红线）：frontmatter 用手写 YAML 子集解析，
 // 状态迁移 = 任务卡文件在 7 个状态目录间的 fs.rename（原子、崩溃安全）。
-// 设计见 docs/design-orchestrator.md 5.2 / 5.3。
+// 设计见 .agents/docs/design-orchestrator.md 5.2 / 5.3。
 
 import fs from 'node:fs';
 import path from 'node:path';

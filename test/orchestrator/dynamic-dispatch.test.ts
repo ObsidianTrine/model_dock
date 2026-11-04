@@ -1,9 +1,7 @@
 // 动态选船（dynamic dispatch，阶段 3）测试：海况信号 + 卡难度在预授权包络内自动选船。
 // 纯函数矩阵（decideDispatch / difficultyPref / normalizeEnvelope / shipSeaBad / seaWeather）
-// + 配置解析（缺省关）+ E2E（mock / zcode+claude stub CLI，不烧真钱——换船方向一律
-// 「默认 claude-headless → 切到 zcode-headless(stub)」；claude 只被 --version 探测，
-// 探测走 PATH 桩——CI runner 无真 claude、真机有，不桩则两环境「CLI 不可用」reason 分叉
-// （2026-11-04 test-workflow CI 红根因）。
+// + 配置解析（缺省关）+ E2E（mock / zcode stub CLI，不烧真钱——换船方向一律
+// 「默认 claude-headless → 切到 zcode-headless(stub)」，反向会拉起真 claude CLI）。
 
 import { afterAll, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
@@ -328,6 +326,13 @@ describe('dynamic dispatch > workflow.json 配置解析', () => {
 // E2E（mock / zcode stub CLI，不烧真钱）
 // ---------------------------------------------------------------------------
 
+/** claude CLI 探测桩：--version exit 0（经 ORCH_CLAUDE_CLI 注入；CI 无 claude CLI，探测桩让海况口径可确定——否则「CLI 不可用」抢在 dogfood_bypass 前留痕）。 */
+function writeClaudeProbeStub(dir: string): string {
+  const stub = path.join(dir, 'claude-probe-stub.cjs')
+  fs.writeFileSync(stub, "if (process.argv.slice(2).includes('--version')) process.exit(0);\n")
+  return stub
+}
+
 /** zcode CLI 桩：--version 探测 exit 0；-p 会话输出合法契约块（无文件改动 → L0 → L3 卡落 awaiting-human）。 */
 function writeZcodeStub(dir: string): string {
   const stub = path.join(dir, 'zcode-stub.cjs')
@@ -351,42 +356,6 @@ function writeZcodeStub(dir: string): string {
     ].join('\n'),
   )
   return stub
-}
-
-/**
- * claude CLI 桩（跨平台双形态）：claudeAvailable() 用 spawnSync('claude', ['--version'])
- * 探测 PATH——CI runner 无真 claude，探测 false 会抢在 dogfood 判定前给出另一个 reason
- * （dispatch.mjs badOf 的可用性短路）。只应答 --version exit 0；其余调用大声 exit 1：
- * 误拉真会话立刻炸断言，绝不烧钱。
- */
-function writeClaudeStub(dir: string): void {
-  fs.writeFileSync(
-    path.join(dir, 'claude.cmd'), // win：spawnSync shell:true → cmd 按 PATH 搜 claude.cmd
-    [
-      '@echo off',
-      'if "%~1"=="--version" exit /b 0',
-      'echo claude stub: unexpected session invocation >&2',
-      'exit /b 1',
-      '',
-    ].join('\r\n'),
-  )
-  fs.writeFileSync(
-    path.join(dir, 'claude'), // unix：无 shell 直接 exec，需 shebang + 可执行位
-    [
-      '#!/bin/sh',
-      'if [ "$1" = "--version" ]; then exit 0; fi',
-      'echo "claude stub: unexpected session invocation" >&2',
-      'exit 1',
-      '',
-    ].join('\n'),
-    { mode: 0o755 },
-  )
-}
-
-/** PATH 前置注入：桩目录排最前保证命中桩。沿用宿主 PATH 键的原名（win 可能是 Path）——避免 env 块同名双键歧义。 */
-function claudeStubEnv(dir: string): Record<string, string> {
-  const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH'
-  return { [key]: `${dir}${path.delimiter}${process.env[key] ?? ''}` }
 }
 
 /**
@@ -524,10 +493,7 @@ describe('dynamic dispatch > E2E（tier 路由换船）', () => {
     try {
       const stub = writeZcodeStub(stubDir)
       submitCard(repo.root, 'dd-tier-light', { tier: 'ahead-1' })
-      const out = runOrch(repo.root, 'run dd-tier-light --review-backend mock', {
-        ORCH_ZCODE_CLI: stub,
-        ...claudeStubEnv(stubDir), // claude 探测走桩：三平台 reason 一致（CI 无真 claude）
-      })
+      const out = runOrch(repo.root, 'run dd-tier-light --review-backend mock', { ORCH_ZCODE_CLI: stub })
       expect(out.stdout).toContain('动态选船')
       const ev = eventsOf(repo.root, 'dd-tier-light')
       const sel = ev.find((e) => e.type === 'dispatch_selected')
@@ -559,11 +525,11 @@ describe('dynamic dispatch > E2E（海况恶劣换包络内船）', () => {
     })
     try {
       const stub = writeZcodeStub(stubDir)
-      writeClaudeStub(stubDir)
+      const claudeStub = writeClaudeProbeStub(stubDir)
       submitCard(repo.root, 'dd-sea-bypass')
       const out = runOrch(repo.root, 'run dd-sea-bypass --review-backend mock', {
         ORCH_ZCODE_CLI: stub,
-        ...claudeStubEnv(stubDir), // claude 探测走桩：CI 上 CLI 可用性探测不再抢在 dogfood 判定前
+        ORCH_CLAUDE_CLI: claudeStub,
         ORCH_GATEWAY_BASE: gw.url,
         ORCH_GATEWAY_ADMIN_TOKEN: 'mock-admin',
         MODELRDOCK_FAKE_HOME: fakeHome, // 防误发现真实 gateway.json（端口红线）
