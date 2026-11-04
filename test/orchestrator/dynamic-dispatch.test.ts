@@ -326,6 +326,13 @@ describe('dynamic dispatch > workflow.json 配置解析', () => {
 // E2E（mock / zcode stub CLI，不烧真钱）
 // ---------------------------------------------------------------------------
 
+/** claude CLI 探测桩：--version exit 0（经 ORCH_CLAUDE_CLI 注入；CI 无 claude CLI，探测桩让海况口径可确定——否则「CLI 不可用」抢在 dogfood_bypass 前留痕）。 */
+function writeClaudeProbeStub(dir: string): string {
+  const stub = path.join(dir, 'claude-probe-stub.cjs')
+  fs.writeFileSync(stub, "if (process.argv.slice(2).includes('--version')) process.exit(0);\n")
+  return stub
+}
+
 /** zcode CLI 桩：--version 探测 exit 0；-p 会话输出合法契约块（无文件改动 → L0 → L3 卡落 awaiting-human）。 */
 function writeZcodeStub(dir: string): string {
   const stub = path.join(dir, 'zcode-stub.cjs')
@@ -518,9 +525,11 @@ describe('dynamic dispatch > E2E（海况恶劣换包络内船）', () => {
     })
     try {
       const stub = writeZcodeStub(stubDir)
+      const claudeStub = writeClaudeProbeStub(stubDir)
       submitCard(repo.root, 'dd-sea-bypass')
       const out = runOrch(repo.root, 'run dd-sea-bypass --review-backend mock', {
         ORCH_ZCODE_CLI: stub,
+        ORCH_CLAUDE_CLI: claudeStub,
         ORCH_GATEWAY_BASE: gw.url,
         ORCH_GATEWAY_ADMIN_TOKEN: 'mock-admin',
         MODELRDOCK_FAKE_HOME: fakeHome, // 防误发现真实 gateway.json（端口红线）
