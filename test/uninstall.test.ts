@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { fakeHome } from './helpers.js'
+import { recordTestFile } from './helpers/run-order.js'
 import { cmdUninstall } from '../src/cli/basic.js'
 import { saveConfig } from '../src/config/store.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
@@ -9,6 +10,10 @@ import { cmdGatewayStop, sweepGatewayProcesses } from '../src/cli/gatewaycmd.js'
 import { deleteSecret } from '../src/config/secrets.js'
 import { uninstallAutostart } from '../src/autostart.js'
 import { removeCliLink } from '../src/cliinstall.js'
+
+// 收集序登记：test-suite-couplings 门禁经共享观测器断言 uninstall 恒先于 zz-quickwins /
+// update-tray 收集（helper 零依赖，顶层 import 不触碰 basic.js，无 registry 污染）
+recordTestFile('uninstall.test.ts')
 
 // 卸载流程会停真实网关、清扫真实进程、动系统钥匙环与命令行入口（/usr/local/bin）：
 // 四组依赖一律 mock，单测只验证 cmdUninstall 自身的编排与保留/清除边界。
