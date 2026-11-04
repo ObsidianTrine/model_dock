@@ -7,3 +7,13 @@
 import { setPbkdf2IterForTests } from '../src/sync/crypto.js'
 
 setPbkdf2IterForTests(1000)
+
+// 测试进程全局禁 models.dev 目录网络刷新（refreshCatalog 首行短路，任何 timer 触发都 no-op）。
+// 依据（2026-11-04 v1.6.0 release 五腿实测踩中）：网关 server 默认注册 90s 后的目录刷新
+// timer（createGatewayServer autoCatalogRefresh），close 挂起时 timer 跨用例存活到点真跑——
+// 网络成功回写缓存后 catalogBaseMemo 按 mtime 重建、flat 表被缓存覆盖快照，价目中途漂移，
+// usage-cost E2E 同用例内「开头查价命中 / 聚合查价 miss」分裂（win32/darwin-arm64 红、
+// ubuntu/darwin-x64 绿，纯网络竞速 flaky，同提交 test.yml 同平台也时绿时红）。
+// 测试进程从不出网；个别用例要验证刷新提示语时（cli-providers-more）用例内 set/restore
+// 同名 env，与全局 '1' 语义兼容，无泄漏。
+process.env.MODELRDOCK_DISABLE_CATALOG_FETCH = '1'

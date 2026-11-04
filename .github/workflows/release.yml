@@ -38,9 +38,12 @@ jobs:
           # 解析失败回退 github.sha（保守——查不到结论时 build 腿自测）
           SHA=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}" 2>/dev/null || echo "$GITHUB_SHA")
           echo "tag commit: $SHA"
-          # 同 sha 的 test.yml run：completed+success 才算已验；在跑/无记录/失败一律按未验证处理
+          # 同 sha 的 test.yml run：存在任一条 completed+success 即算已验——
+          # 不取「最新一条的结论」：schedule 每日巡检在深夜容量差时 mac 腿被取消 → run failure，
+          # 会把白天发布门禁的全绿压掉（2026-11-04 v1.6.0 实测：tested 误判 false → 五腿重复
+          # 全量 → 网络竞态 flaky 被放大成发布红）。只认「有成功记录」；全取消/全失败/在跑按未验处理。
           RESULT=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$SHA" \
-            --jq '[.workflow_runs[] | select(.path == ".github/workflows/test.yml")] | sort_by(.created_at) | last | "\(.status // "none") \(.conclusion // "none")"' \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/test.yml" and .status == "completed")] | if any(.conclusion == "success") then "completed success" else "completed failure" end' \
             2>/dev/null || echo "none none")
           echo "test workflow 状态: $RESULT"
           if [ "$RESULT" = "completed success" ]; then
