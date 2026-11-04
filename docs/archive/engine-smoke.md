@@ -1,6 +1,6 @@
 # 双引擎：执行 / 审查分体
 
-orchestrator 的**执行（worker）**与**审查（reviewer）**是两个独立会话，可分别指定后端与模型家族。命令全貌见 `.agents/workflows/orchestrator.md` 与 `docs/orchestrator-usage.md`。
+orchestrator 的**执行（worker）**与**审查（reviewer）**是两个独立会话，可分别指定后端与模型家族。命令全貌见 `.agents/workflows/orchestrator.md` 与 `.agents/docs/orchestrator-usage.md`。
 
 ## 执行（worker）
 

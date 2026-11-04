@@ -10,7 +10,7 @@
 
 - **适合交给流水线**：目标明确、验收标准可机器检查、改动范围清晰——bug 修复、小功能、文档同步、测试补充、巡检卡处理。
 - **不适合**：探索性 / 架构级改动（验收标准写不出来）、需要频繁人工决策的任务、要动发布流水线的工作。
-- **混合节奏**：大任务自己走 [feature-branch 工作流](../.agents/workflows/feature-branch.md)，顺手把可独立验收的小活写成任务卡丢进队列 `drain` 消化。同一 task-id 不要两种方式混用（worktree 会撞）。
+- **混合节奏**：大任务自己走 [feature-branch 工作流](../workflows/feature-branch.md)，顺手把可独立验收的小活写成任务卡丢进队列 `drain` 消化。同一 task-id 不要两种方式混用（worktree 会撞）。
 
 红线事实：worker 会话被 policy hook 硬编码拦截 `git push` / `git tag` / `npm publish`，以及对生产、dev 两个网关端口的任何触碰——任务卡里写了也没用；发布永远人工（见 §7）。
 
@@ -63,7 +63,7 @@ node .agents/scripts/orchestrator.mjs drain
 
 ## 4. 任务卡与队列：手写卡、gate 选择、看进度
 
-手写任务卡是完全有效的路径（想精确控制验收标准时用）。frontmatter 要点（完整 schema 与字段说明见 [.agents/workflows/orchestrator.md](../.agents/workflows/orchestrator.md)）：
+手写任务卡是完全有效的路径（想精确控制验收标准时用）。frontmatter 要点（完整 schema 与字段说明见 [.agents/workflows/orchestrator.md](../workflows/orchestrator.md)）：
 
 ```markdown
 ---
@@ -166,7 +166,7 @@ node .agents/scripts/orchestrator.mjs release-propose 1.4.0    # 指定版本（
 
 - 自动解析上个 tag 以来的内容提交（conventional 前缀），推 semver 档位（breaking 提交在 0.x 按惯例走 minor）；核对 CHANGELOG「未发布」段找疑似漏记。
 - 提案文件落 `.agents/orchestrator/release-proposals/`：建议版本与依据、盘点清单（无前缀提交标「待人工归类」）、CHANGELOG 版本段草稿、版本链接表行、下一步指引。
-- **版本号是建议，决定权在人**（发布是不可逆公开动作）：确认后对 agent 说「发布 vX.Y.Z」，走 [release.md「代理发布」](../.agents/workflows/release.md)执行序。无 feat/fix（纯文档/杂务）会提示人工裁决是否值得发版。
+- **版本号是建议，决定权在人**（发布是不可逆公开动作）：确认后对 agent 说「发布 vX.Y.Z」，走 [release.md「代理发布」](../workflows/release.md)执行序。无 feat/fix（纯文档/杂务）会提示人工裁决是否值得发版。
 
 ## 8. nightly 巡检：一次完整巡检编排
 
@@ -210,7 +210,7 @@ node .agents/scripts/orchestrator.mjs schedule uninstall   # 卸载
 ```
 
 - 默认档（不带 `--auto`）零烧钱：只生成任务卡与报告，等人工 drain。
-- **wrapper 固化绝对路径**：定时器经 `.agents/orchestrator/nightly-runner.sh|cmd` 以绝对路径启动，运行时不做环境发现——**仓库挪位置 / node 换路径后需重跑 `schedule install`**。launchd / crontab / schtasks 的平台细节以 [.agents/workflows/orchestrator.md](../.agents/workflows/orchestrator.md) 为准，此处不转写。
+- **wrapper 固化绝对路径**：定时器经 `.agents/orchestrator/nightly-runner.sh|cmd` 以绝对路径启动，运行时不做环境发现——**仓库挪位置 / node 换路径后需重跑 `schedule install`**。launchd / crontab / schtasks 的平台细节以 [.agents/workflows/orchestrator.md](../workflows/orchestrator.md) 为准，此处不转写。
 
 ## 10. 与既有文档的分工
 
@@ -218,10 +218,10 @@ node .agents/scripts/orchestrator.mjs schedule uninstall   # 卸载
 
 | 文档 | 定位 | 什么时候读 |
 |---|---|---|
-| 本文（`docs/ai-pipeline-guide.md`） | 贡献者端到端指南：从给意图到发版提案的全流程 | 第一次上手、想知道「整条流水线能做什么」 |
+| 本文（`.agents/docs/ai-pipeline-guide.md`） | 贡献者端到端指南：从给意图到发版提案的全流程 | 第一次上手、想知道「整条流水线能做什么」 |
 | [orchestrator-usage.md](orchestrator-usage.md) | 使用者手册：状态机、熔断、排障 | 命令行为不符预期、任务卡在奇怪的状态 |
-| [.agents/workflows/orchestrator.md](../.agents/workflows/orchestrator.md) | agent 操作手册：全部话题的简版速查与平台细节 | 给 agent 下指令、查调度器/通知的平台细节 |
+| [.agents/workflows/orchestrator.md](../workflows/orchestrator.md) | agent 操作手册：全部话题的简版速查与平台细节 | 给 agent 下指令、查调度器/通知的平台细节 |
 | [design-orchestrator.md](design-orchestrator.md) | 设计原理：架构、状态机与红线的设计依据 | 想改 orchestrator 本身 |
 
-- 会话中的 agent 入口是 `/dockmaster` 技能（体系名 **Dockmaster（坞长）**，原 `/orchestrate`；[SKILL.md](../.agents/skills/dockmaster/SKILL.md)），按意图路由到本文描述的各条路径。
-- 排障速查表见 [orchestrator-usage.md §7](orchestrator-usage.md)；中断任务的 worktree 清理见 [worktree-rescue.md](../.agents/workflows/worktree-rescue.md)。
+- 会话中的 agent 入口是 `/dockmaster` 技能（体系名 **Dockmaster（坞长）**，原 `/orchestrate`；[SKILL.md](../skills/dockmaster/SKILL.md)），按意图路由到本文描述的各条路径。
+- 排障速查表见 [orchestrator-usage.md §7](orchestrator-usage.md)；中断任务的 worktree 清理见 [worktree-rescue.md](../workflows/worktree-rescue.md)。

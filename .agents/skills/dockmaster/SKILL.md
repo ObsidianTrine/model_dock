@@ -134,7 +134,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 - 不改门禁与熔断逻辑来「让任务通过」；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试。
 - 自治跑中引擎故障**禁止自行换引擎**（切换=换计费方，必须用户批准）；测试结束清理你拉起的全部临时进程。
 
-## 异常速查（详表 docs/orchestrator-usage.md §7）
+## 异常速查（详表 .agents/docs/orchestrator-usage.md §7）
 
 | 现象 | 处置 |
 |---|---|
@@ -145,6 +145,6 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 ## 深入文档
 
-- 使用指南（状态机、闸门交互、混合节奏）：`docs/orchestrator-usage.md`
+- 使用指南（状态机、闸门交互、混合节奏）：`.agents/docs/orchestrator-usage.md`
 - 操作手册（任务卡字段细节）：`.agents/workflows/orchestrator.md`
-- 设计与原理：`docs/design-orchestrator.md`
+- 设计与原理：`.agents/docs/design-orchestrator.md`
