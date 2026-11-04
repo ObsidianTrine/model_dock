@@ -11,17 +11,6 @@ import { logsDir, modeldockDir } from '../util/paths.js'
 
 export { gatewayLive, DEFAULT_GATEWAY_PORT }
 
-/** 解析 --port 参数（--sea-gateway 守护路径）：缺值/非数字时 Number() 产出 NaN，直穿 listen 会
- *  监听到随机端口并落进状态文件——返回 undefined 让调用方按 config.gateway.port ??
- *  DEFAULT_GATEWAY_PORT 兜底回落（2026-11-04 审查 P2）。导出仅为单测：cli.ts 顶层有三路分发
- *  副作用，测试不可 import。 */
-export function parsePortArg(argv: string[]): number | undefined {
-  const idx = argv.indexOf('--port')
-  if (idx < 0) return undefined
-  const n = Number(argv[idx + 1])
-  return Number.isFinite(n) ? n : undefined
-}
-
 export async function loadCfg(): Promise<Config> {
   return loadConfig()
 }

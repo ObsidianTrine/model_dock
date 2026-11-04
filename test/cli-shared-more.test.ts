@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { fakeHome } from './helpers.js'
-import { exitWithThrown, killByPid, openUrlInBrowser, parsePortArg, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
+import { exitWithThrown, killByPid, openUrlInBrowser, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
 
 // cli/shared.ts 原语补测（cli-shared.test.ts 已覆盖拼装主干）：错误出口 exitWithThrown、
 // requireGateway 未运行分支、win32 浏览器 opener、kill 失败分支、daemon stderr 半行缓冲与
@@ -163,12 +163,3 @@ describe('spawnDaemonAndWait 超时与 spawn 契约', () => {
   })
 })
 
-describe('parsePortArg（--sea-gateway --port 解析，2026-11-04 审查 P2）', () => {
-  it('合法端口原样返回；无 --port / 缺值 / 非数字 NaN 一律回落 undefined', () => {
-    expect(parsePortArg(['modeldock', '--sea-gateway', '--port', '18999'])).toBe(18999)
-    expect(parsePortArg(['modeldock', '--sea-gateway'])).toBeUndefined()
-    expect(parsePortArg(['modeldock', '--sea-gateway', '--port'])).toBeUndefined() // 缺值 → NaN
-    expect(parsePortArg(['modeldock', '--sea-gateway', '--port', 'abc'])).toBeUndefined() // 非数字 → NaN
-    expect(parsePortArg(['modeldock', '--sea-gateway', '--port', '8687x'])).toBeUndefined()
-  })
-})
