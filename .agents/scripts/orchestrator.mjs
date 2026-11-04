@@ -2108,8 +2108,9 @@ async function drainSupplyProbe(repoRoot, root, cfg) {
  * 并发调度（Phase 3，docs 10.6）：--workers N 时最多 N 个 run 子进程同时跑。
  * 分区互斥：新任务与任一在跑任务的 files_hint 相交（hintsOverlap）则跳过，
  * 等占位释放后再试——按文件归属分区派任务的自动化（AGENTS.md 已有人工约定）。
- * 死循环防护改为**每任务重试计数**：同一任务被调度 2 次仍留在 pending 即拉黑并告警
- * （并发下"连续两轮"不再等价于上一次尝试）。
+ * 死循环防护改为**每任务重试计数**：同一任务被调度 2 次仍留在 pending 即拉黑转 blocked/
+ * 并告警（并发下"连续两轮"不再等价于上一次尝试；落位语义与串行路径同款——failed 事件 +
+ * moveCard + tally/tasks 记账 + settleNotify）。
  * 结束条件：无活跃子进程 且 无可调度任务。
  */
 function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
@@ -2208,8 +2209,18 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
       let picked = null;
       for (const id of candidates) {
         if ((retryCount.get(id) ?? 0) >= 2) {
-          blacklisted.add(id);
-          log(`⚠ 任务 ${id} 两次被调度仍在 pending——run 子进程未能处理它，已跳过（人工检查执行环境后 resume）。`);
+          // 拉黑对齐串行 drain 完整语义（2026-11-05 审查项）：旧实现只 blacklisted.add——
+          // 卡悬在 pending/、无 failed 事件、无通报、tally/tasks 不记账，与串行路径
+          // （appendEvent failed + moveCard blocked + 记账 + settleNotify）分叉。这里补齐：
+          // 卡显式转 blocked/（可 resume，不悬 pending），reason 与串行同款可操作口径。
+          const reason = 'drain 两次调度仍在 pending——run 子进程未能处理它（常见：卡声明 ui_check 但 workflow.json 未配 uiCheckCmd、执行引擎切换未获批准；可用 resume 带上修复指令续做）';
+          log(`⛔ 任务 ${id} 拉黑：${reason.split('——')[0]}——转 blocked/，继续调度剩余卡。`);
+          appendEvent(logDir(repoRoot, id), 'failed', { reason });
+          moveCard(root, id, 'pending', 'blocked');
+          blacklisted.add(id); // 搬离 pending 后本不会再入选，双保险防 moveCard 异常时旧选路复现
+          tally.blocked = (tally.blocked ?? 0) + 1;
+          tasks.push({ id, state: 'blocked' });
+          void settleNotify(repoRoot, id, 'blocked', reason); // 尽力而为通报（与收官摘要同款 fire-and-forget）
           continue;
         }
         try {

@@ -106,9 +106,13 @@ describe('orchestrator drain > run 子进程 spawn 失败容错', () => {
       const r = runDrainWithoutNode(repo.root, ['drain', '--workers', '2', '--backend', 'mock'])
       expect(r.status).toBe(0)
       expect(r.output).toContain('run 子进程启动失败')
-      // 并行路径语义：卡留 pending、两次调度后拉黑告警（人工检查执行环境后 resume）
-      expect(r.output).toContain('两次被调度仍在 pending')
-      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'enoent-parallel.md'))).toBe(true)
+      // 并行拉黑与串行语义对齐（2026-11-05 审查项）：两次调度仍 pending → 转 blocked/ +
+      // failed 事件留痕（可 resume），不再只告警后留 pending
+      expect(r.output).toContain('两次调度仍在 pending')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'enoent-parallel.md'))).toBe(true)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'enoent-parallel.md'))).toBe(false)
+      const failedP = eventsOf(repo.root, 'enoent-parallel').find((e) => e.type === 'failed')
+      expect(String(failedP?.reason)).toContain('pending')
     } finally {
       repo.cleanup()
     }
