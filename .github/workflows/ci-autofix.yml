@@ -11,7 +11,11 @@ name: ci-autofix
 # 启用前提：与 claude-review / dependabot-fix 共用同一三件套（供应商无关，yml 零默认值）：
 #   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL，缺一打 warning 跳过
 #   （零 token 消耗）。无需额外 PAT：本 workflow 由主干 push run 触发，GITHUB_TOKEN 自带
-#   contents/pull-requests 写权限（Dependabot 触发的 run 才被平台强制只读）。详见 docs/ci-bots.md。
+#   contents/pull-requests 写权限（Dependabot 触发的 run 才被平台强制只读），且以 github_token
+#   显式传给 claude-code-action——缺省未传时 action 改走 OIDC 换 app token（需 id-token: write，
+#   且 app token 的推送会触发新 workflow run，破坏本文件依赖的「GITHUB_TOKEN 事件不触发
+#   workflow」防回环设计；2026-11-04 事故：autofix 每次 fix 阶段死于 OIDC 三连重试，
+#   Claude 会话零启动，与 key 无关）。详见 docs/ci-bots.md。
 #   注意：workflow_run 触发的 run 按默认分支上的 workflow 文件执行——本文件合入 main 后才生效。
 #
 # 防回环（为什么天然收敛，不会无限循环）：
@@ -140,6 +144,10 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_AUTH_TOKEN }}
         with:
+          # 显式传 GITHUB_TOKEN（dependabot-fix 同款）：缺省未传时 claude-code-action v1 走
+          # OIDC 换 app token（需 id-token: write），2026-11-04 实证三次重试全灭、会话零启动。
+          # 传 GITHUB_TOKEN 还保住防回环语义：GITHUB_TOKEN 开的 PR 不触发新 workflow run。
+          github_token: ${{ github.token }}
           prompt: |
             REPO: ${{ github.repository }}
             失败 RUN: ${{ github.event.workflow_run.html_url }}（id ${{ github.event.workflow_run.id }}，run_attempt 1）
