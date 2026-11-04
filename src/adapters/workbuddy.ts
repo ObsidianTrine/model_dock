@@ -14,6 +14,7 @@ import {
 import { detectJsonIndent, parseJsonStrict, serializeJson } from './format.js'
 import { desktopPresent, residueNote } from './presence.js'
 import { changeIfChanged, directAttachNote, noChangeResult, oursEntryUrl, resolveRoute, routeModelNote } from './shared.js'
+import { resolveModelMeta } from '../providers/resolve.js'
 
 /**
  * WorkBuddy AI（腾讯 AI 办公客户端）的自定义模型走本地 models.json：应用只读该文件并
@@ -22,12 +23,16 @@ import { changeIfChanged, directAttachNote, noChangeResult, oursEntryUrl, resolv
  * UI 写的是 https://api.deepseek.com/chat/completions 这类 full URL），请求发出的 model
  * 名即条目 id（custom-local: 前缀由应用按产品开关自行处理并把原 id 收进条目 aliases）。
  * apiKey 明文合法：应用侧编解码器只处理其自有密文格式。
+ * 能力位实测（UI「添加模型」保存的条目）：supportsToolCall / supportsImages / supportsReasoning +
+ * reasoning{defaultEffort,supportedEfforts}——本适配器只写视觉（supportsImages，控制台「视觉」勾选
+ * 同源），工具调用/推理 ModelDock 未建模，留空交应用默认。
  */
 interface WorkbuddyModelEntry {
   id?: unknown
   name?: unknown
   url?: unknown
   apiKey?: unknown
+  supportsImages?: unknown
   [k: string]: unknown
 }
 
@@ -222,12 +227,19 @@ export const workbuddyAdapter: HarnessAdapter = {
     const d = opts.direct
     const directBase = d ? ((d.base_url_openai ?? d.base_url).replace(/\/+$/, '') + '/chat/completions') : undefined
     const base = directBase ?? gatewayEndpointUrl(opts.gatewayPort)
-    const mine: WorkbuddyModelEntry[] = modelIds.map((mid) => ({
-      id: mid,
-      name: provider?.models?.[mid]?.display_name || mid,
-      url: base,
-      apiKey: d ? d.key : opts.token,
-    }))
+    const mine: WorkbuddyModelEntry[] = modelIds.map((mid) => {
+      const entry: WorkbuddyModelEntry = {
+        id: mid,
+        name: provider?.models?.[mid]?.display_name || mid,
+        url: base,
+        apiKey: d ? d.key : opts.token,
+      }
+      // 视觉能力位（UI 同款字段）：能力已知才写（勾选 vision → true，明确非视觉 → false），
+      // 未知留空走应用默认——不编造能力；解析链与 dsh/zcode 一致（配置 > 内置表）
+      const caps = resolveModelMeta(mid, provider?.models?.[mid], { baseUrl: provider?.base_url })?.capabilities
+      if (caps !== undefined) entry.supportsImages = caps.includes('vision')
+      return entry
+    })
     const directNotes: string[] = []
     if (d) {
       directNotes.push(directAttachNote(base))
