@@ -1747,26 +1747,44 @@ function drainTallyLine(tally) {
  * 任一达阈值即滞留。无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。
  * workflow.json 未配 weatherHold 键 = 功能关闭（行为与历史版本一致）。
  */
+// 事件快照缓存（perf，2026-11-05 审查项）：每次派发前全量 readdir + 逐任务解析
+// events.jsonl，drain 每轮 pump / watch 每周期都重复同一 IO。按 repoRoot 分键的模块级
+// 60s TTL 缓存（{allEvents, at}）——命中即复用快照，窗口过滤仍按调用时刻的 now 现算
+// （出窗事件即时失效，滞留判定语义不变）；仅「60s 内新落盘的 worker_retry」延迟可见，
+// 风暴是分钟级信号，该粒度无判据影响。按 repoRoot 分键：多仓库（测试/多实例）互不污染。
+const WEATHER_SNAPSHOT_TTL_MS = 60_000;
+const _weatherSnapshots = new Map(); // repoRoot -> { allEvents, at }
+/** 测试清场：清空风暴闸事件快照缓存（vitest 单 fork 共享注册表，用例收尾可调用）。 */
+export function resetWeatherSnapshotCache() {
+  _weatherSnapshots.clear();
+}
+
 function weatherHoldCount(repoRoot, cfg) {
   const hold = cfg?.weatherHold;
   if (!hold) return { held: false, count: 0, upstream: null };
+  const now = Date.now();
   const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
-  const allEvents = [];
-  try {
-    for (const id of fs.readdirSync(logsRoot)) {
-      if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
-      const events = readEvents(path.join(logsRoot, id));
-      if (events.length) allEvents.push({ id, events });
-    }
-  } catch { /* logs/ 不存在 = 还没跑过任务 */ }
-  const count = countRecentTransient(allEvents, { windowMs: hold.windowMinutes * 60_000, now: Date.now() });
+  let snap = _weatherSnapshots.get(repoRoot);
+  if (!snap || now - snap.at > WEATHER_SNAPSHOT_TTL_MS) {
+    const allEvents = [];
+    try {
+      for (const id of fs.readdirSync(logsRoot)) {
+        if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
+        const events = readEvents(path.join(logsRoot, id));
+        if (events.length) allEvents.push({ id, events });
+      }
+    } catch { /* logs/ 不存在 = 还没跑过任务 */ }
+    snap = { allEvents, at: now };
+    _weatherSnapshots.set(repoRoot, snap);
+  }
+  const count = countRecentTransient(snap.allEvents, { windowMs: hold.windowMinutes * 60_000, now });
   const result = { held: shouldHold(count, hold.threshold), count, upstream: null };
   // 上游海况（外部风暴）：网关实测先于 worker 重试浮现；未配 upstream 子键 = 关闭，
   // 网关日志不可得（gatewayLogDir 未配）同样不滞留（观测缺席 ≠ 风暴）。
   if (hold.upstream?.threshold != null) {
     const gwDir = gatewayLogsDir(cfg);
     const windowMinutes = hold.upstream.windowMinutes ?? 15;
-    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now: Date.now() });
+    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now });
     result.upstream = { count: uCount, threshold: hold.upstream.threshold, windowMinutes, observed: gwDir != null };
     if (shouldHold(uCount, hold.upstream.threshold)) result.held = true;
   }
