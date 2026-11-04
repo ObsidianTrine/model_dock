@@ -283,7 +283,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          verdict=$(gh pr view "$PR" --json comments -q '.comments[].body' | grep -E '^SECURITY-VERDICT:' | tail -1 || true)
+          # 门禁信号只认 claude[bot]（官方 Claude Code GitHub App 的 bot login；三个 AI job 未传
+          # github_token、走 App OIDC 鉴权，评论作者恒为 claude[bot]，见本文件头注）——任意用户
+          # 评论 SECURITY-VERDICT 不再能覆盖/伪造门禁信号。注意：若某 AI job 改传 github_token
+          #（评论作者随之改变），此处作者过滤须同步修改。
+          verdict=$(gh pr view "$PR" --json comments \
+            -q '.comments[] | select(.author.login == "claude[bot]") | .body' \
+            | grep -E '^SECURITY-VERDICT:' | tail -1 || true)
           echo "verdict: ${verdict:-<none>}"
           case "$verdict" in
             "SECURITY-VERDICT: PASS")
