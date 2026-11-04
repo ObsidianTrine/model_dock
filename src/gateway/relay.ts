@@ -1,11 +1,12 @@
 import { request } from 'undici'
 import zlib from 'node:zlib'
-import { getSecret } from '../config/secrets.js'
+import { providerKeyRefs, resolveProviderKeys } from '../config/secrets.js'
 import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
-import { recordOutcome, pickTarget, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type ResolvedTarget } from './state.js'
 import { dispatcherFor } from './proxy.js'
+import { acquireProviderSlot, ProviderQueueTimeoutError, providerConcurrencyLimit, queueWaitMs, type ProviderSlot } from './concurrency.js'
 
 /** 需要模型名改写的业务端点（其余路径纯透传） */
 const ROUTED_PATH_RE = /\/v1\/(messages|messages\/count_tokens|chat\/completions|completions|responses|embeddings)$/
@@ -400,86 +401,137 @@ export async function forwardToUpstream(
   opts: ForwardOptions
 ): Promise<UpstreamResult> {
   const { provider } = target
-  let key: string | null
-  try {
-    key = await getSecret(provider.key_ref)
-  } catch (e) {
-    // 钥匙环锁定/瞬时故障与「key 缺失」同规：跳下一候选而非打断整条 failover 链；
-    // 包成 503+hint——非 UpstreamError 会被 errorReply 落成 500「内部错误」
-    const e2 = new UpstreamError(
-      503,
-      t('provider「{profile}→{name}」的 key 读取失败：{msg}', 'Failed to read the API key for provider "{profile}→{name}": {msg}', { profile: target.profileName, name: provider.name ?? target.profile.provider, msg: (e as Error).message }),
-      (e as { hint?: string }).hint ?? t('检查系统钥匙环是否已解锁，解锁后重试', 'Check that the system keyring is unlocked and retry')
-    )
-    e2.candidateSkip = true
-    throw e2
-  }
-  if (!key) {
+  const providerId = target.profile.provider
+  // ---- key 池解析（P0① 多 key 池）：keys 缺省回落 [key_ref]（向后兼容，单 key 行为不变）。
+  // 逐 ref 复用既有 scheme 解析（file/keychain/env/plain）；单个 ref 解析失败/缺失只跳过该 key、
+  // 不致命，也**不标记失效**（读不到 ≠ 无效——失效冷却只由上游 401/403 触发，见 state/keypool.ts）
+  const pool = await resolveProviderKeys(providerKeyRefs(provider))
+  if (pool.length === 0) {
+    // 池内 0 把可用 key（全部读取失败或未配置）：与单 key 时代「key 读取失败/不可用」同规——
+    // 包成 503+hint 的 candidateSkip（非 UpstreamError 会被 errorReply 落成 500「内部错误」），
+    // 把机会让给链上其余候选，不中止整条 failover 链
     const e = new UpstreamError(
       503,
-      t('provider「{profile}→{name}」的 key 不可用（key_ref={ref}）', 'API key unavailable for provider "{profile}→{name}" (key_ref={ref})', { profile: target.profileName, name: provider.name ?? target.profile.provider, ref: provider.key_ref }),
-      t('modeldock provider set-key {id} 更新 key', 'Run modeldock provider set-key {id} to update the key', { id: target.profile.provider })
+      t('provider「{profile}→{name}」没有可用的 key（key 池 {n} 个引用全部不可读或未配置）', 'Provider "{profile}→{name}" has no usable key (all {n} references in the key pool are unreadable or unset)', { profile: target.profileName, name: provider.name ?? providerId, n: String(providerKeyRefs(provider).length) }),
+      t('检查系统钥匙环是否已解锁（解锁后重试）；或 modeldock provider set-key {id} 重新设置 key', 'Check that the system keyring is unlocked and retry; or run modeldock provider set-key {id} to set the key again', { id: providerId })
     )
-    e.candidateSkip = true // 把机会让给链上其余候选（自动备用链的健壮性前提）
+    e.candidateSkip = true
+    throw e
+  }
+  // key 级健康过滤（P1⑥）：处于失效冷却期（上游 401/403 标记）的 key 直接跳过；全部在冷却
+  // → 本候选本轮不可用，candidateSkip 换 provider 候选。冷却 15min 后自动解封重试（key 被
+  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复
+  const now = Date.now()
+  const healthy = pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
+  if (healthy.length === 0) {
+    const e = new UpstreamError(
+      503,
+      t('provider「{profile}→{name}」的全部 key（{n} 把）都因上游 401/403 失效，冷却中', 'All {n} keys of provider "{profile}→{name}" were rejected by the upstream (HTTP 401/403) and are cooling down', { profile: target.profileName, name: provider.name ?? providerId, n: String(pool.length) }),
+      t('冷却 15 分钟后自动重试；已换新 key 可在 config.toml 保存 keys（热加载立即恢复），或 modeldock provider set-key {id} 更新', 'Cooldown ends in 15 minutes and retries automatically; after replacing a key, save the keys array in config.toml (hot-reload restores it immediately) or run modeldock provider set-key {id}', { id: providerId })
+    )
+    e.candidateSkip = true
     throw e
   }
 
   const rewritten = rewriteModel(target, opts.body, opts.path)
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
-  const headers = await buildUpstreamHeaders(target, opts.headers, key, proto)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
 
-  for (let attempt = 0; ; attempt++) {
-    const t0 = Date.now()
-    try {
-      const up = await request(url, {
-        method: opts.method as any,
-        headers,
-        body: rewritten.body.length > 0 ? rewritten.body : undefined,
-        dispatcher,
-        signal: opts.signal,
-        // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
-        headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
-        bodyTimeout: opts.idleTimeoutMs,
-      })
-      return {
-        status: up.statusCode,
-        // 保数组语义原样透传（折叠为 'a,b' 对 set-cookie 是有损转换，见 UpstreamResult 注释）
-        headers: up.headers as Record<string, string | string[]>,
-        body: up.body as unknown as UpstreamBody,
-        modelAfter: rewritten.modelAfter,
-        ms: Date.now() - t0,
+  // 用指定 key 发一轮：headers 含 key，换 key 必须重建。连接错误的立即重试循环原样保留
+  //（transport 失败与 key 无关，不在 key 间轮转），只按 key 维度包了一层
+  const sendWithKey = async (key: string): Promise<UpstreamResult> => {
+    const headers = await buildUpstreamHeaders(target, opts.headers, key, proto)
+    for (let attempt = 0; ; attempt++) {
+      const t0 = Date.now()
+      try {
+        const up = await request(url, {
+          method: opts.method as any,
+          headers,
+          body: rewritten.body.length > 0 ? rewritten.body : undefined,
+          dispatcher,
+          signal: opts.signal,
+          // 响应头到达时限：非流式长推理的上游可能数分钟才回头，可用 gateway.headers_timeout_ms 放宽
+          headersTimeout: rt.config.gateway?.headers_timeout_ms ?? 60_000,
+          bodyTimeout: opts.idleTimeoutMs,
+        })
+        return {
+          status: up.statusCode,
+          // 保数组语义原样透传（折叠为 'a,b' 对 set-cookie 是有损转换，见 UpstreamResult 注释）
+          headers: up.headers as Record<string, string | string[]>,
+          body: up.body as unknown as UpstreamBody,
+          modelAfter: rewritten.modelAfter,
+          ms: Date.now() - t0,
+        }
+      } catch (e) {
+        // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
+        if (opts.signal?.aborted) throw e
+        // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
+        // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
+        if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
+        // 响应头超时单独分类（transport='timeout'）：请求已送达上游（非流式长推理 > headers_timeout_ms
+        // 即触发），不与「未送达可安全重放」的连接失败混类——重放有重复计费面，也不计 connect 熔断
+        const headersTimeout = isHeadersTimeoutError(e)
+        // 连接超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
+        // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
+        const timeoutLike = isConnectTimeoutError(e)
+        const errNew = new UpstreamError(
+          502,
+          headersTimeout
+            ? t('上游响应头超时：{url}（请求已送达上游，等待响应头超时——非流式长推理常见）', 'Upstream response headers timed out: {url} (the request was delivered; waiting for response headers timed out — common with non-streaming long inference)', { url })
+            : timeoutLike
+              ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
+              : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
+          headersTimeout
+            ? t('上游还在处理但响应慢：非流式长推理可调大 [gateway] headers_timeout_ms（modeldock config edit）；已送达的请求网关不自动重放，避免重复计费', 'The upstream is still processing but slow: raise [gateway] headers_timeout_ms for non-streaming long inference (modeldock config edit); delivered requests are never auto-replayed to avoid double billing')
+            : timeoutLike
+              ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
+              : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
+        )
+        errNew.transport = headersTimeout ? 'timeout' : true
+        throw errNew
       }
-    } catch (e) {
-      // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
-      if (opts.signal?.aborted) throw e
-      // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
-      // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
-      if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
-      // 响应头超时单独分类（transport='timeout'）：请求已送达上游（非流式长推理 > headers_timeout_ms
-      // 即触发），不与「未送达可安全重放」的连接失败混类——重放有重复计费面，也不计 connect 熔断
-      const headersTimeout = isHeadersTimeoutError(e)
-      // 连接超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
-      // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
-      const timeoutLike = isConnectTimeoutError(e)
-      const errNew = new UpstreamError(
-        502,
-        headersTimeout
-          ? t('上游响应头超时：{url}（请求已送达上游，等待响应头超时——非流式长推理常见）', 'Upstream response headers timed out: {url} (the request was delivered; waiting for response headers timed out — common with non-streaming long inference)', { url })
-          : timeoutLike
-            ? t('上游连接超时：{url}（已等满超时窗口仍无响应）', 'Upstream connection timed out: {url} (no response after the full timeout window)', { url })
-            : t('上游连接失败：{msg}（{url}）', 'Upstream connection failed: {msg} ({url})', { msg: (e as Error).message, url }),
-        headersTimeout
-          ? t('上游还在处理但响应慢：非流式长推理可调大 [gateway] headers_timeout_ms（modeldock config edit）；已送达的请求网关不自动重放，避免重复计费', 'The upstream is still processing but slow: raise [gateway] headers_timeout_ms for non-streaming long inference (modeldock config edit); delivered requests are never auto-replayed to avoid double billing')
-          : timeoutLike
-            ? t('上游过慢或代理黑洞：modeldock test 验证；慢上游可在 modeldock config edit 调大 [gateway] 超时与 retries', 'The upstream is slow or the proxy swallows traffic: verify with modeldock test; for slow upstreams raise the [gateway] timeouts and retries in modeldock config edit')
-            : t('检查网络/代理（modeldock config edit 里 provider.proxy），或 modeldock test 直接验证', 'Check network/proxy (provider.proxy in modeldock config edit), or verify directly with modeldock test')
-      )
-      errNew.transport = headersTimeout ? 'timeout' : true
-      throw errNew
     }
   }
+
+  // round-robin 起始 key：并发 worker 的请求被均摊到池内各把（单 key 池恒取唯一一把，
+  // 行为与既有单 key 完全一致），不再全体挤同一把 key 撞 429。healthy 非空已在上游保证
+  //（length===0 已 candidateSkip 短路），轮转必有所得
+  const first = nextRotation(rt, providerId, healthy)!
+  let up = await sendWithKey(first.key)
+  // 401/403 的 key 级失效处理只认模型 API 端点（ROUTED_PATH_RE，与模型改写同口径）：非对话
+  // 端点的 401 可能是路径级权限/资源问题（不代表 key 失效），据此把 key 冷却 15 分钟会误伤——
+  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试
+  const routedApi = ROUTED_PATH_RE.test(opts.path.split('?')[0])
+  if (routedApi && (up.status === 401 || up.status === 403)) {
+    // 上游 401/403 = 鉴权层明确拒绝该 key，请求未进入业务处理（未产出内容、未计费）——
+    // 该 key 打入冷却；换池内下一把 healthy key 重试一次是安全的，与「transport 未送达才重放」
+    // 边界一致且更早：鉴权拒绝发生在请求体被消费之前，不存在重复处理/重复计费
+    markKeyCooldown(rt, providerId, first.index)
+    const rest = healthy.filter((k) => k.index !== first.index)
+    if (rest.length > 0) {
+      // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）
+      try { await up.body.text() } catch { /* 排空失败不影响换 key 重试 */ }
+      const second = nextRotation(rt, providerId, rest)!
+      up = await sendWithKey(second.key)
+      if (up.status === 401 || up.status === 403) {
+        // 换 key 仍被拒：本轮可用 key 全部失效（已逐把标记冷却）——candidateSkip 进入 failover
+        // 链换下一个 provider 候选。仅多 key 池（≥2 把可用）会走到这里；单 key 池没有「换 key
+        // 重试」，401 保持既有透传行为（客户端看得到上游错误体），失效跳过从下一次请求生效
+        //（本次已标记冷却 → 下次 healthy 为空 → candidateSkip）
+        markKeyCooldown(rt, providerId, second.index)
+        try { await up.body.text() } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
+        const e = new UpstreamError(
+          503,
+          t('provider「{profile}→{name}」的 key 池被上游整体拒绝（HTTP 401/403，换 key 重试后仍失败，共 {n} 把）', 'The key pool of provider "{profile}→{name}" was rejected by the upstream (HTTP 401/403; still rejected after retrying with another key, {n} keys in total)', { profile: target.profileName, name: provider.name ?? providerId, n: String(pool.length) }),
+          t('key 已自动冷却并切换备用服务；更换 key 后热加载立即恢复：modeldock provider set-key {id}', 'Keys were cooled down automatically and traffic moved to the fallback; replacing a key restores it immediately via hot-reload: modeldock provider set-key {id}', { id: providerId })
+        )
+        e.candidateSkip = true
+        throw e
+      }
+    }
+  }
+  return up
 }
 
 /** 模型不匹配类错误特征：上游 400 体里点名模型不存在 / 不支持 / 无效（正反两种语序都算：
@@ -580,6 +632,9 @@ export interface FailoverResult extends UpstreamResult {
   usedProviderId: string
   /** 改发/重放事件标记（failover_to:<id>、replayed_from:<id>）；主选直连成功不设——日志过滤与 Web 展示依赖「非空即事件」约定 */
   reason?: string
+  /** 并发闸槽位释放句柄（该候选配了 max_concurrency 时非空）：响应结束（错误回包发出 / 流式读完）后必须调用，
+   *  流式响应要等客户端收完才释放。转发失败路径由 forwardWithFailover 内部就地释放，不经此字段 */
+  release?: () => void
 }
 
 function isTransportFailure(e: unknown): boolean {
@@ -594,6 +649,52 @@ function isTransportFailure(e: unknown): boolean {
 const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
 function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
+}
+
+/** 上游 429 Retry-After 退避重试的等待上限：交互请求不宜长等——上游要 5s 以上才让重试时，
+ *  原地干等不如维持既有 failover 语义换候选（或把 429 交还客户端自行退避） */
+const RETRY_AFTER_MAX_WAIT_MS = 5_000
+
+/** 解析 Retry-After 头（RFC 7231：delta-seconds 或 HTTP-date 两种格式）→ 距今应等待的 ms。
+ *  无头 / 无法解析返回 null（不重试，维持既有语义）；HTTP-date 已过期（负差值）钳为 0（立即重试）。 */
+export function parseRetryAfterMs(v: string | string[] | undefined, now = Date.now()): number | null {
+  if (v == null) return null
+  const raw = (Array.isArray(v) ? v[0] : String(v)).trim()
+  if (!raw) return null
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000
+  const at = Date.parse(raw)
+  if (Number.isNaN(at)) return null
+  return Math.max(0, at - now)
+}
+
+/** 可中断 sleep：signal 触发（客户端断开）时立刻 reject，不为已离开的客户端占着并发槽等退避 */
+function sleepInterruptible(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error('aborted'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** 并发闸排队超时 → 429 + 可操作 hint：点名哪个服务满了、建议调大 max_concurrency 或降低客户端并发 */
+function queueTimeoutError(e: ProviderQueueTimeoutError, p: ProviderConfig | undefined): UpstreamError {
+  const err = new UpstreamError(
+    429,
+    t('服务「{name}」并发已达上限 {n}，排队等待 {ms}ms 仍无空闲槽位', 'Provider "{name}" is at its concurrency limit of {n}; no free slot after queuing for {ms}ms', { name: p?.name ?? e.providerId, n: e.limit, ms: e.waitMs }),
+    t('调大 config.toml 中该服务的 max_concurrency（Web 控制台「编辑服务」可改），或降低客户端并发数', 'Raise max_concurrency for this provider in config.toml (editable under "Edit Service" in the web console), or reduce client concurrency')
+  )
+  err.routeReason = 'queue_full'
+  return err
 }
 
 /** 摘掉 content-encoding 头（大小写不敏感）：体被解压/重包为明文后不得再声明压缩 */
@@ -614,6 +715,9 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
  * 响应头超时（transport='timeout'，请求已送达上游）：默认不切换也不计 connect 熔断，仅当
  * failover_status_codes 白名单显式含其包装 status（502）且还有剩余候选时才切换（用户显式授权的重放）。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
+ * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
+ * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
+ * 429 退避（P0③）：上游 429 带 Retry-After 且 ≤ 5s 时同候选原地等待重试一次（额度体除外），留痕 retried_429:。
  */
 export async function forwardWithFailover(
   rt: GatewayRuntime,
@@ -628,6 +732,8 @@ export async function forwardWithFailover(
   }
   const codes = rt.config.gateway?.failover_status_codes
   const switchable = Array.isArray(codes) && codes.length ? new Set(codes) : null
+  // 并发闸排队等待上限（每次请求读实时配置：热加载 queue_wait_ms 即时生效）
+  const waitMs = queueWaitMs(rt.config.gateway)
   let lastErr: unknown
   // 记录因重放而跳过的候选（传输层失败/限流切换/候选不可用），便于日志对账——
   // 数组累积去重：A→B→C 连续重放时单变量会反复覆盖，最终 reason 只剩最后一跳（CORRECT-09 ③）
@@ -635,15 +741,54 @@ export async function forwardWithFailover(
   const markReplay = (id: string) => {
     if (!replayedFrom.includes(id)) replayedFrom.push(id)
   }
+  // 并发闸排队超时被跳过的候选与做了 429 退避重试的候选（reason 留痕，同 replayed_from 风格）
+  const queueFull: string[] = []
+  const retried429: string[] = []
   for (let i = 0; i < picked.ordered.length; i++) {
     const c = picked.ordered[i]
     const t0 = Date.now()
+    // 并发闸（P0②）：转发前对实际选中候选的 provider 取槽；满载排队 ≤ queue_wait_ms。
+    // 槽位生命周期到响应结束（成功路径挂在返回值上由 server.ts 释放）；失败路径就地释放
+    let slot: ProviderSlot | undefined
+    const limit = providerConcurrencyLimit(c.target.provider)
+    if (limit > 0) {
+      try {
+        slot = await acquireProviderSlot(rt, c.providerId, limit, waitMs, opts.signal)
+      } catch (e) {
+        // 排队超时 ≠ 上游故障（不记熔断）：链中还有候选就跳过去换一家，链尾才回 429+hint
+        if (e instanceof ProviderQueueTimeoutError) {
+          if (i < picked.ordered.length - 1) {
+            if (!queueFull.includes(c.providerId)) queueFull.push(c.providerId)
+            markReplay(c.providerId)
+            continue
+          }
+          throw queueTimeoutError(e, rt.config.providers[c.providerId])
+        }
+        throw e // 客户端断开（aborted）：原样上抛，handleRequest 落 499
+      }
+    }
     try {
-      const up = await forwardToUpstream(rt, c.target, opts)
+      let up = await forwardToUpstream(rt, c.target, opts)
+      // 429 退避（P0③）：上游带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次
+      // （429 = 请求未被上游处理，重放无重复计费风险）。无头 / 超过 5s / 额度耗尽体（几秒内不会
+      // 恢复）维持既有 failover 语义不变。重试留痕 retried_429:<id>。
+      let drained: string | undefined
+      if (up.status === 429) {
+        const raMs = parseRetryAfterMs(up.headers['retry-after'])
+        if (raMs !== null && raMs <= RETRY_AFTER_MAX_WAIT_MS) {
+          drained = await readUpstreamErrorText(up.headers, up.body) // 排空释放连接后再等待/重试
+          if (!isQuotaError(up.status, drained)) {
+            if (raMs > 0) await sleepInterruptible(raMs, opts.signal)
+            if (!retried429.includes(c.providerId)) retried429.push(c.providerId)
+            up = await forwardToUpstream(rt, c.target, opts)
+            drained = undefined // 重试产生的是新响应，体未读
+          }
+        }
+      }
       const ms = Date.now() - t0
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
-      if (up.status === 429 || up.status === 402) bodyText = await readUpstreamErrorText(up.headers, up.body)
+      if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
@@ -653,20 +798,33 @@ export async function forwardWithFailover(
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < picked.ordered.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
+        slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
+        slot = undefined
         markReplay(c.providerId)
         continue
       }
       const marks: string[] = []
       if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
+      if (queueFull.length) marks.push(`queue_full:${queueFull.join(',')}`)
+      if (retried429.length) marks.push(`retried_429:${retried429.join(',')}`)
       if (replayedFrom.length) marks.push(`replayed_from:${replayedFrom.join(',')}`)
       // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
       // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
-      const drained = bodyText
-      const out: UpstreamResult = drained !== undefined
-        ? { ...up, headers: withoutContentEncoding(up.headers), body: { text: async () => drained } }
+      const outDrained = bodyText
+      const out: UpstreamResult = outDrained !== undefined
+        ? { ...up, headers: withoutContentEncoding(up.headers), body: { text: async () => outDrained } }
         : up
-      return { ...out, usedProviderId: c.providerId, reason: marks.length ? marks.join(',') : undefined }
+      // 成功路径不在此释放：流式响应要等客户端收完才释放槽（server.ts 于响应结束后调用 release）
+      const held = slot
+      return {
+        ...out,
+        usedProviderId: c.providerId,
+        reason: marks.length ? marks.join(',') : undefined,
+        ...(held ? { release: () => held.release() } : {}),
+      }
     } catch (e) {
+      slot?.release() // 异常路径必须释放槽，否则该 provider 永久少一个并发额度
+      slot = undefined
       // 客户端已断开：中止错误不记熔断、不迭代下一候选，直接终止整条链
       if (opts.signal?.aborted) throw e
       lastErr = e

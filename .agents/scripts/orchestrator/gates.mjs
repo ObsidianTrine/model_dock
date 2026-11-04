@@ -34,8 +34,9 @@ function git(cwd, args) {
  * 超时走 killTree（win32 taskkill /T /F；unix detached 进程组 kill(-pid)）。
  * 输出上限沿用 64MB 量级（超限停止累积，防无界缓冲）。
  * opts.inherit = stdio 直通（finish 的验证步骤要 live 输出；此时不捕获，output 为空）。
+ * 缺省超时来自 workflow.json gateTimeoutMinutes（B11 常量收口，缺省 20 分钟）。
  */
-export function runCmd(cmd, cwd, timeoutMs = 20 * 60_000, opts = {}) {
+export function runCmd(cmd, cwd, timeoutMs = loadWorkflowConfig().gateTimeoutMinutes * 60_000, opts = {}) {
   const inherit = opts.inherit === true;
   return new Promise((resolve) => {
     const started = Date.now();

@@ -158,6 +158,18 @@ describe('approval listener > parseCardAction / extractToken / verifyToken', () 
   })
 })
 
+describe('approval listener > safeEqual（常数时间比较，C13）', () => {
+  it('等值 true（含空串对空串）；不等值 false；长度不等不短路也不抛错', async () => {
+    const { safeEqual } = await import('../../.agents/scripts/approval-listener.mjs')
+    expect(safeEqual('abc', 'abc')).toBe(true)
+    expect(safeEqual('', '')).toBe(true)
+    expect(safeEqual('abc', 'abd')).toBe(false)
+    expect(safeEqual('abc', 'abcd')).toBe(false) // 长度泄漏面已由 sha256 归一化消除
+    expect(safeEqual('abc', '')).toBe(false)
+    expect(safeEqual(undefined as any, 'x')).toBe(false)
+  })
+})
+
 describe('approval listener > buildActionArgs', () => {
   it('reject 带 --reason（无 reason 用默认文案）；approve/retry 不带文案参数', () => {
     expect(buildActionArgs('approve', 't')).toEqual(['approve', 't'])
@@ -210,7 +222,7 @@ describe('approval listener > makeHandler（回调处理）', () => {
     }
   })
 
-  it('token 不一致：403 且不审计不 spawn（token 不落任何盘）', async () => {
+  it('token 不一致：403 + 审计留痕（只记事实不记 token 值）+ 不 spawn', async () => {
     const repo = mkRepo()
     let spawned = 0
     const h = mkHandler(repo.root, { spawnFn: () => { spawned++; return { status: 0 } } })
@@ -219,7 +231,13 @@ describe('approval listener > makeHandler（回调处理）', () => {
       const r = await h.handle(v2Body({ task: 't', action: 'approve' }, 'wrong-token'))
       expect(r.status).toBe(403)
       expect(spawned).toBe(0)
-      expect(readAudit(h.auditPath)).toEqual([])
+      // C13：不匹配拒绝并落审计（审计事实：来源 IP + rejected + 原因），token 值不落盘
+      const audit = readAudit(h.auditPath)
+      expect(audit).toHaveLength(1)
+      expect(audit[0].result).toBe('rejected')
+      expect(audit[0].detail).toBe('verification_token_mismatch')
+      expect(JSON.stringify(audit)).not.toContain('wrong-token')
+      expect(JSON.stringify(audit)).not.toContain(TOKEN)
       // 且回复里绝不回显收到的 token
       expect(JSON.stringify(r.body)).not.toContain('wrong-token')
     } finally {
@@ -459,8 +477,12 @@ describe('approval listener > HTTP 层', () => {
       expect(ok.status).toBe(200)
       expect(JSON.stringify(await ok.json())).toContain('✅ 已批准合并 real-task')
       const audit = readAudit(h.auditPath)
-      expect(audit).toHaveLength(1)
-      expect(audit[0]).toMatchObject({ task: 'real-task', action: 'approve', result: 'ok' })
+      // C13：token 不匹配的未授权访问尝试也落审计（只记事实不记 token 值）——
+      // 403 那笔在前（rejected/mismatch），合法批准在后
+      expect(audit).toHaveLength(2)
+      expect(audit[0]).toMatchObject({ result: 'rejected', detail: 'verification_token_mismatch' })
+      expect(JSON.stringify(audit[0])).not.toContain('nope')
+      expect(audit[1]).toMatchObject({ task: 'real-task', action: 'approve', result: 'ok' })
     } finally {
       delete process.env.AGENTS_LARK_VERIFICATION_TOKEN
       await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -494,9 +516,9 @@ describe('approval listener > resolveNotify 扩展', () => {
     const bad = mkRepo({ notify: { cardWebhook: 'yes', listenerPort: -1 } })
     try {
       const cfg = loadWorkflowConfig(repo.root)
-      expect(cfg.notify).toEqual({ keychainService: 'svc', cardWebhook: true, listenerPort: 18990 })
+      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990 })
       const cfgBad = loadWorkflowConfig(bad.root)
-      expect(cfgBad.notify).toEqual({ keychainService: null, cardWebhook: false, listenerPort: null })
+      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null })
       expect(warnings.some((w) => w.includes('notify'))).toBe(true)
     } finally {
       console.warn = warn

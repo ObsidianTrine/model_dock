@@ -1,5 +1,6 @@
 // escalation 升级链测试（借鉴清单分级审批落地）：shouldEscalatePrompt 纯函数矩阵 +
-// resolveEscalation 配置解析 + 集成（zcode 船 prompt 超限自动切 fallback 船，留痕）。
+// resolveEscalation 配置解析 + 集成（2026-11 D17 起：大 prompt 先落文件收缩，escalation
+// 换船退为「收缩体仍超限」的最后兜底——常规路径不再触发，见集成 describe 头注）。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
@@ -56,11 +57,14 @@ describe('escalation > workflow.json 配置解析', () => {
   })
 })
 
-describe('escalation > 集成（zcode 船 prompt 超限自动换 fallback 船）', () => {
+describe('escalation > 集成（D17 大 prompt 落文件后，escalation 退为兜底）', () => {
+  // 2026-11 D17：worker prompt 超 20k 先落 logs/<id>/prompt-full.md、正文收缩为文件引用
+  // + 摘要——30k argv 上限在常规路径不再触达，escalation 换船只在「收缩体仍超限」的异常
+  // 配置下兜底。下列集成测试按新语义断言；换船判定逻辑本身由上方纯函数矩阵锁定。
   function bigCard(repo: string, id: string): string {
-    // 背景段 ~28k 字符：把装配后的 prompt 顶过 30000（mkRepo 的 AGENTS/playbook 很小）
+    // 背景段 ~28k 字符：把装配后的 prompt 顶过 20000（mkRepo 的 AGENTS/playbook 很小）
     const cardFile = path.join(repo, `card-${id}.md`)
-    const filler = '历史背景填充段，用于把 prompt 顶过 zcode argv 上限。'.repeat(1200)
+    const filler = '历史背景填充段，用于把 prompt 顶过落文件阈值。'.repeat(1200)
     fs.writeFileSync(
       cardFile,
       cardText({ id, files_hint: ['docs/**'] }, `测试目标。`) + `\n\n# 背景\n${filler}\n`,
@@ -68,31 +72,42 @@ describe('escalation > 集成（zcode 船 prompt 超限自动换 fallback 船）
     return cardFile
   }
 
-  it('开启 escalation：engine_escalated 留痕 + 任务照常跑完（fallback 船交付）', () => {
-    const repo = mkRepo({ workerBackend: 'zcode-headless', extra: { escalation: { enabled: true, fallbackBackend: 'mock' } } })
+  it('大卡照常交付（D17）：prompt_file_ref 留痕 + 全文落 logs/<id>/prompt-full.md + 不再触发换船', () => {
+    const repo = mkRepo({ extra: { escalation: { enabled: true, fallbackBackend: 'mock' } } })
     try {
       const cardFile = bigCard(repo.root, 'esc-a')
       runOrch(repo.root, `submit "${cardFile}"`)
-      runOrch(repo.root, 'run esc-a --review-backend mock')
+      runOrch(repo.root, 'run esc-a --backend mock --review-backend mock')
       const ev = eventsOf(repo.root, 'esc-a')
-      const esc = ev.find((e) => e.type === 'engine_escalated')
-      expect(esc).toMatchObject({ reason: 'prompt_oversize', from: 'zcode-headless', to: 'mock' })
-      expect(readCard(repo.root, 'awaiting-human', 'esc-a')).toBeTruthy() // fallback 船交付，任务没死
+      const ref = ev.find((e) => e.type === 'prompt_file_ref')
+      expect(ref).toBeTruthy()
+      expect(Number(ref!.chars)).toBeGreaterThan(20_000)
+      expect(Number(ref!.threshold)).toBe(20_000)
+      const fullPath = String(ref!.path)
+      expect(fs.existsSync(fullPath)).toBe(true)
+      expect(fs.readFileSync(fullPath, 'utf8')).toContain('历史背景填充段') // 全文（含背景段）在文件里
+      expect(ev.some((e) => e.type === 'engine_escalated')).toBe(false) // 收缩体远小于 30k，换船兜底不触发
+      expect(readCard(repo.root, 'awaiting-human', 'esc-a')).toBeTruthy() // 任务照常交付
     } finally {
       repo.cleanup()
     }
   }, 120_000)
 
-  it('未开 escalation：同样的大卡直接 blocked（prompt 过大，行为回归不变）', () => {
-    const repo = mkRepo({ workerBackend: 'zcode-headless' })
+  it('zcode 船大卡：不再因 prompt 过大被拒（D17 抢在换船/硬失败之前；CLI 不可用才 blocked）', () => {
+    const repo = mkRepo({ workerBackend: 'zcode-headless', extra: { escalation: { enabled: true, fallbackBackend: 'mock' } } })
     try {
-      const cardFile = bigCard(repo.root, 'esc-off')
+      const cardFile = bigCard(repo.root, 'esc-z')
       runOrch(repo.root, `submit "${cardFile}"`)
-      const out = tryOrch(repo.root, 'run esc-off --review-backend mock')
+      // ORCH_ZCODE_CLI 指向不存在文件：spawn 必拒（确定性，且与机器是否装 zcode 无关）——
+      // 旧语义这里会先撞「prompt 过大」；D17 后 prompt 已收缩，spawn 真正走到 CLI 定位
+      const out = tryOrch(repo.root, 'run esc-z --review-backend mock', { ORCH_ZCODE_CLI: path.join(repo.root, 'no-such-zcode.cjs') })
       expect(out.status).not.toBe(0) // die = 卡已安全落 blocked，零浪费
-      expect(out.stderr).toContain('prompt 过大')
-      expect(readCard(repo.root, 'blocked', 'esc-off')).toBeTruthy()
-      expect(eventsOf(repo.root, 'esc-off').some((e) => e.type === 'engine_escalated')).toBe(false)
+      expect(out.stderr).toContain('ZCode CLI 不可用')
+      expect(out.stderr).not.toContain('prompt 过大') // D17：30k 硬失败不再是常规路径
+      expect(readCard(repo.root, 'blocked', 'esc-z')).toBeTruthy()
+      const ev = eventsOf(repo.root, 'esc-z')
+      expect(ev.some((e) => e.type === 'engine_escalated')).toBe(false) // 收缩后未超限，不换船
+      expect(ev.some((e) => e.type === 'prompt_file_ref')).toBe(true)
     } finally {
       repo.cleanup()
     }

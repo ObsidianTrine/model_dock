@@ -46,10 +46,12 @@ One block per upstream provider; `<id>` is a name you choose (lowercase letters,
 | `protocol` | `'anthropic' \| 'openai' \| 'responses'` | yes | — | Upstream protocol: `anthropic` (Anthropic-compatible), `openai` (OpenAI-compatible chat), `responses` (OpenAI Responses). |
 | `auth_style` | `'bearer' \| 'x-api-key'` | yes | — | Auth header style: `bearer` (`Authorization: Bearer …`) or `x-api-key` (`x-api-key: …`). |
 | `key_ref` | `string` | yes | — | Reference to the upstream API key: `file:<id>` (local secret file), `keychain:<id>` (OS keychain), `env:<VAR>` (environment variable); plaintext works but is strongly discouraged. |
+| `keys` | `string[]` | no | none (falls back to `[key_ref]`) | Optional multi-key pool; entries use the same format as `key_ref`. The gateway rotates across pool keys automatically (concurrent clients no longer pile onto one key and trip rate limits), cools a key down for 15 minutes on upstream 401/403 and rotates to the rest, and moves on to fallback services once every key is rejected. When set, the pool takes precedence (`key_ref` only serves as the fallback); append a new key with `modeldock provider set-key <providerId> --add`. |
 | `proxy` | `'direct' \| 'env' \| string` | no | `direct` | Outbound proxy: `direct` (no proxy), `env` (follow proxy environment variables), or an explicit `http://host:port`. |
 | `enabled` | `boolean` | no | `true` | Set `false` to take the service offline manually: no probing, excluded from auto routing and failover. |
 | `priority` | `number` | no | `0` | Sorting weight for auto-routing candidates; higher wins. Only effective when "program picks the primary" is on. |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | no | none | Per-protocol base URL overrides: for vendors serving anthropic / openai / responses at different addresses; protocols without an entry fall back to `base_url`. |
+| `max_concurrency` | `number` | no | `0` (unlimited) | Concurrency cap for this service (queued at the gateway): when parallel agent workers trigger upstream 429 rate limits, set it to what the upstream tolerates — excess requests queue at the gateway instead of hammering the upstream; see `gateway.queue_wait_ms` for the queue wait. |
 
 Example:
 
@@ -60,10 +62,12 @@ base_url = "https://api.acme.com/v1"
 protocol = "anthropic"
 auth_style = "bearer"
 key_ref = "file:acme"
+keys = ["file:acme-2", "file:acme-3"]
 proxy = "direct"
 enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
+max_concurrency = 2
 ```
 
 ## 3. Model metadata (models)
@@ -189,6 +193,7 @@ Gateway listening, timeouts, logs and failover behavior. Scheduled switching (`s
 | `auto_failover` | `boolean` | no | `false` (off) | Whether the program picks the primary automatically (time windows / priority / measured latency). Off (default) = the primary is whatever you pinned or the default route. Failing over when the primary is down always stays available regardless of this switch. |
 | `auto_route_provider` | `string` | no | empty (automatic) | Manually pinned primary provider id: routing prefers it (over program automation and time windows); empty = the program picks by window / default route. Same as the "Current" dropdown in the console. |
 | `failover_status_codes` | `number[]` | no | `[]` (no switch) | Upstream status codes that still allow switching to a backup after the response has started (e.g. `[429, 503]`); empty by default = a delivered response is passed through as-is, no switch. |
+| `queue_wait_ms` | `number` | no | `2000` | Queue wait cap (ms) when a service is at its `max_concurrency` limit: no free slot in time means the next candidate is tried / a 429 is returned. |
 | `route_next` | `string` | no | empty (automatic order) | Manually pinned "next in line": when the primary is down, this one is tried first (ahead of the backup chain); empty = ordered automatically by priority / measured latency. |
 | `auto_fallback` | `boolean` | no | `true` (on) | Automatic backup chain: beyond your manual chain, other enabled services are added as failover candidates automatically (ordered by window / priority / measured latency, models passed through); only an explicit `false` turns it off. |
 
@@ -205,6 +210,7 @@ log_retention_days = 30
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]
+queue_wait_ms = 5000
 route_next = "backup"
 auto_fallback = true
 ```

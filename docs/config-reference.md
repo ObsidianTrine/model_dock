@@ -46,10 +46,12 @@ active_profile = "ark-coding"
 | `protocol` | `'anthropic' \| 'openai' \| 'responses'` | 是 | — | 上游接口协议：`anthropic`（Anthropic 兼容）、`openai`（OpenAI 兼容对话接口）、`responses`（OpenAI Responses）。 |
 | `auth_style` | `'bearer' \| 'x-api-key'` | 是 | — | 鉴权头风格：`bearer`（`Authorization: Bearer …`）或 `x-api-key`（`x-api-key: …`）。 |
 | `key_ref` | `string` | 是 | — | 上游 API Key 的引用：`file:<id>`（本地密钥文件）、`keychain:<id>`（系统钥匙环）、`env:<VAR>`（环境变量）；也可直接写明文，但强烈不建议。 |
+| `keys` | `string[]` | 否 | 无（回落 `[key_ref]`） | 多 Key 池（可选）：元素格式与 `key_ref` 相同。网关在池内各 key 间自动轮转（多个客户端不再挤同一把 key 撞限流），上游 401/403 时自动把失效 key 冷却 15 分钟并轮转到其余 key，全部失效时切备用服务。配置后以池为准（`key_ref` 仅作缺省回落基准）；追加新 key 用 `modeldock provider set-key <服务id> --add`。 |
 | `proxy` | `'direct' \| 'env' \| string` | 否 | `direct` | 出站代理：`direct` 直连；`env` 跟随系统环境变量代理；或写 `http://host:port` 指定代理。 |
 | `enabled` | `boolean` | 否 | `true` | 设 `false` 手动下线该服务：不再探测，也不参与自动路由与故障切换。 |
 | `priority` | `number` | 否 | `0` | 自动路由候选排序权重，数值大者优先；仅在「程序自动选主」开启时生效。 |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | 否 | 无 | 按协议覆盖基地址：同一服务商同时提供 anthropic / openai / responses 多协议端点、供不同客户端直连时使用；未写的协议回落 `base_url`。 |
+| `max_concurrency` | `number` | 否 | `0`（不限） | 该服务的并发请求数上限（网关侧排队）：多 agent worker 并发打上游容易触发上游限流（429）时，设为上游可承受的并发数，超额请求在网关内排队等待而不是压垮上游；排队时长见 `gateway.queue_wait_ms`。 |
 
 示例：
 
@@ -60,10 +62,12 @@ base_url = "https://api.acme.com/v1"
 protocol = "anthropic"
 auth_style = "bearer"
 key_ref = "file:acme"
+keys = ["file:acme-2", "file:acme-3"]
 proxy = "direct"
 enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
+max_concurrency = 2
 ```
 
 ## 3. 模型元数据（models）
@@ -189,6 +193,7 @@ key_path = "$.modeldock"
 | `auto_failover` | `boolean` | 否 | `false`（关） | 「程序自动选主」开关：开启后按时段 / 优先级 / 实测耗时自动挑选主服务；关闭（默认）= 主服务由人工钉定或默认路由决定。主服务不可达时切备用始终可用，不受此开关影响。 |
 | `auto_route_provider` | `string` | 否 | 空（自动） | 人工钉定的主服务 id：设置后路由优先走它（优先于程序自动与定时时段）；留空 = 程序按时段 / 默认路由选主。与控制台「当前」下拉同款。 |
 | `failover_status_codes` | `number[]` | 否 | `[]`（不切换） | 响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。 |
+| `queue_wait_ms` | `number` | 否 | `2000` | 服务并发满载（`max_concurrency`）时的排队等待上限（ms）：等不到空位就跳下一候选 / 回 429。 |
 | `route_next` | `string` | 否 | 空（自动排序） | 人工钉定的「下一个切换」：主服务不可达时优先切到它（排到备用链首位）；留空按优先级 / 实测耗时自动排序。 |
 | `auto_fallback` | `boolean` | 否 | `true`（开） | 「自动备用链」开关：手动备用链之外，自动把其他已启用服务补进切换候选（按定时窗口 / 优先级 / 实测耗时排序，模型名透传）；仅显式 `false` 关闭。 |
 
@@ -205,6 +210,7 @@ log_retention_days = 30
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]
+queue_wait_ms = 5000
 route_next = "backup"
 auto_fallback = true
 ```

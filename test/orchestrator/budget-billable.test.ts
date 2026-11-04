@@ -61,3 +61,55 @@ describe('budget > 可计费口径（billable，剔除缓存读）', () => {
     expect(billableTokens(1000, 100, 2000)).toBe(100) // 拆分异常（缓存读>输入）不为负
   })
 })
+
+describe('budget > 实测账（accountMeasured，A4 harness-usage 轮询）', () => {
+  it('首次采样固化基线：同 harness 既有流量不落入本任务预算（防跨任务假阳性）', () => {
+    const b = new Budget(mkCard(100_000))
+    expect(b.accountMeasured(3_000_000)).toBe(true) // harness 当日已有 3M（此前任务/其他流量）→ 基线
+    expect(b.tripped).toBe(false) // 直接拿 day 总额判定会瞬间熔断——基线增量口径不误杀
+    expect(b.accountMeasured(3_050_000)).toBe(true) // 本任务消耗 50k
+    expect(b.measuredBillable).toBe(50_000)
+    expect(b.tripped).toBe(false)
+    expect(b.accountMeasured(3_200_000)).toBe(true) // 本任务消耗 200k > 100k → 熔断
+    expect(b.tripped).toBe(true)
+    expect(b.tripReason?.reason).toBe('max_tokens') // 归因口径不变（blocked 事件兼容）
+    expect(b.tripReason?.detail).toContain('网关实测口径')
+  })
+
+  it('判定基线取 max(自报, 实测增量)：实测只抬高不回写自报账（stats/reconcile 口径不动）', () => {
+    const b = new Budget(mkCard(100_000))
+    b.account(10_000, 5_000) // 自报 billable 15k
+    b.accountMeasured(500_000) // 基线 500k（起点），实测增量 0
+    expect(b.billable).toBe(15_000) // 自报账不被实测覆盖
+    b.accountMeasured(620_000) // 实测增量 120k > 自报 15k → 熔断按实测
+    expect(b.tripped).toBe(true)
+    // 自报账字段原样（budget_snapshot 消费方兼容）
+    const b2 = new Budget(mkCard(100_000))
+    b2.accountMeasured(400_000)
+    b2.account(50_000, 0, 0) // 自报 50k
+    expect(b2.billable).toBe(50_000)
+    expect(b2.tokens).toBe(50_000)
+  })
+
+  it('非法值（负数/NaN）拒绝入账返回 false，行为不回退（自报账兜底）', () => {
+    const b = new Budget(mkCard(100_000))
+    expect(b.accountMeasured(-5)).toBe(false)
+    expect(b.accountMeasured(Number.NaN)).toBe(false)
+    expect(b.measuredBaseline).toBeNull()
+    expect(b.tripped).toBe(false)
+    // 拒绝后自报账仍正常熔断
+    b.account(200_000, 0)
+    expect(b.tripped).toBe(true)
+  })
+
+  it('实测增量驱动低油量软告警（80%，只触发一次）', () => {
+    const emit = vi.fn()
+    const b = new Budget(mkCard(100_000), emit)
+    b.accountMeasured(1_000_000) // 基线
+    b.accountMeasured(1_085_000) // 实测增量 85k = 85% → 告警一次
+    expect(emit).toHaveBeenCalledTimes(1)
+    expect(emit.mock.calls[0][0]).toMatchObject({ kind: 'tokens', pct: 85, tokens_billable: 85_000 })
+    b.accountMeasured(1_090_000) // 90%：不再重复告警（软告警一次红线不变）
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
+})

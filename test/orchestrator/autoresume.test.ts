@@ -132,6 +132,69 @@ describe('orchestrator autoresume > 自恢复交互护栏：watchdog 熔断卡�
   })
 })
 
+// ---------------------------------------------------------------------------
+// Path C（B8 扩展）：「未产出结果块」族 blocked 纳入可续跑签名——worker 异常结束本质是
+// zcode 崩溃族（与 ERA 同源，同环境随后会话可正常连接）。2026-11-02 实证：现存唯一
+// blocked 卡 test-gap-gateway-util（reason=未产出结果块（worker 异常结束）、无 worker_retry
+// 链）覆盖不到，至今人工未救。冷却与每 drain 上界不变。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator autoresume > Path C（B8）：未产出结果块族纳入可续跑', () => {
+  it('现行文案「未产出结果块（worker 异常结束）」无 worker_retry 链 → 可续（此前覆盖不到的形态）', () => {
+    // 与真实卡 test-gap-gateway-util 的事件形态一致
+    const events = [
+      ev('task_accepted', { backend: 'zcode-headless' }),
+      ev('worker_spawned', { backend: 'zcode-headless', pid: 15212 }),
+      ev('worker_stderr_tail', { text: '无法定位 CLI ZCode Built-in Provider Config' }),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ]
+    expect(isTransientBlocked(events)).toBe(true)
+    expect(pickAutoResumeCandidates([bcard('gap1', events)], { now: NOW }).map((c) => c.id)).toEqual(['gap1'])
+  })
+
+  it('旧文案「未产出结果块」同样命中；英文形态 no result block 兼容', () => {
+    expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: '未产出结果块' })])).toBe(true)
+    expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: 'no result block (worker died)' })])).toBe(true)
+  })
+
+  it('Path C 只认 blocked 收尾：failed 收尾的异常中断（failTaskToBlocked 形态）不续', () => {
+    expect(isTransientBlocked([ev('worker_spawned'), ev('failed', { reason: '异常中断：无法定位 CLI 配置' })])).toBe(false)
+  })
+
+  it('Path C 护栏（与 Path B 同构）：最后一条 worker_spawned 之后有 circuit_breaker → 不续', () => {
+    // watch.test 同款合成现场：曾熔断（调试迭代超限）+ 崩溃收尾 = 确定性失败
+    expect(isTransientBlocked([
+      ev('task_accepted'),
+      ev('worker_stderr_tail', { text: 'ECONNRESET 429' }),
+      ev('circuit_breaker', { reason: 'max_test_iterations', detail: '6/5' }),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ])).toBe(false)
+    // 无 spawn 记录的链：任一熔断即算
+    expect(isTransientBlocked([ev('circuit_breaker', { reason: 'budget:max_tokens' }), ev('blocked', { reason: '未产出结果块' })])).toBe(false)
+    // 熔断发生在上个会话（更早的 spawn 之前不算——spawn 重新开桌）：可续
+    expect(isTransientBlocked([
+      ev('circuit_breaker', { reason: 'max_test_iterations', detail: '6/5' }, '2026-10-31T00:00:00.000+08:00'),
+      ev('worker_spawned', { backend: 'mock', pid: 1 }, '2026-11-01T00:00:00.000+08:00'),
+      ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
+    ])).toBe(true)
+  })
+
+  it('Path C 不越护栏：watchdog / budget 熔断的 reason 天然不匹配，仍交人工', () => {
+    expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: 'watchdog' })])).toBe(false)
+    expect(isTransientBlocked([ev('worker_spawned'), ev('blocked', { reason: 'budget:max_tokens' })])).toBe(false)
+  })
+
+  it('混合队列：Path C 卡与 Path A/B 卡同池竞争，仍受 maxPerRun 截断与冷却约束', () => {
+    const cards = [
+      bcard('c1', [ev('blocked', { reason: '未产出结果块（worker 异常结束）' })]),
+      bcard('c2', [ev('blocked', { reason: 'HTTP 429' })]),
+      bcard('c3', [ev('blocked', { reason: 'worker 自报 stuck' })]),
+    ]
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 1 }).map((c) => c.id)).toEqual(['c1'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['c1', 'c2'])
+  })
+})
+
 describe('orchestrator autoresume > cooldownPassed 冷却判定', () => {
   it('无 auto_resumed_at → 合格；24h 内 → 拒；超 24h → 合格；脏值保守拒', () => {
     expect(cooldownPassed({}, NOW, 24 * HOUR)).toBe(true)

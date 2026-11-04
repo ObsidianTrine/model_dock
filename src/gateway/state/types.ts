@@ -106,6 +106,10 @@ export interface GatewayRuntime {
   health: Map<string, HealthState>
   /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目） */
   tokenUsage: Map<string, TokenUsageState>
+  /** runtime-only 临时 harness 注册表（id → 状态；provision/revoke/TTL sweeper 维护，
+   *  逻辑见 state/runtime.ts）。内存态：进程重启即全部失效（设计如此——用完即焚凭据），
+   *  config 热加载经 reapplyEphemeralHarnesses 重登记幸存条目。 */
+  ephemeral: Map<string, EphemeralHarnessState>
   /** 实际监听端口（可能因占用与配置不同） */
   port?: number
   /** 手机简版控制台（LAN）第二监听器运行态；随网关生命周期启停。host=实际绑定地址（对外 URL 只列真正可达的地址） */
@@ -121,6 +125,21 @@ export interface GatewayRuntime {
   /** providerId → 轻量耗时 ring（最近 500 条 ms 采样 + 累计请求数；/_modeldock/metrics 消费）。
    *  logRequest 顺手累计，reload 不清空（跨热加载保留观测连续性）。 */
   metricsLatency: Map<string, ProviderLatencyRing>
+  /** providerId → 海况滑窗错误分桶（/_modeldock/metrics 的 providers[].errors 与 sea_state 数据源）。
+   *  recordOutcome 顺手记账（与熔断判定同源不同构，见 state/sea.ts）；reload 随服务删除清理。 */
+  seaErrors?: Map<string, SeaProviderErrors>
+  /** 上游模型可用性探测运行态（modelprobe.ts 周期探测写入；GET /_modeldock/model-availability 消费） */
+  modelProbe?: ModelProbeState
+  /** provider 多 key 池运行态（内存态，重启清零；配置热加载全清——key 可能已被替换，
+   *  按索引记的失效冷却对换上的新 key 不成立）。逻辑见 state/keypool.ts。 */
+  keyPool: KeyPoolState
+}
+
+/** 多 key 池运行态：cooldown = providerId → key 池索引（providerKeyRefs 下标）→ 冷却截止 ms 时间戳；
+ *  rr = providerId → round-robin 轮转游标（把并发 worker 的请求均摊到池内各 key，避免集中撞 429）。 */
+export interface KeyPoolState {
+  cooldown: Map<string, Map<number, number>>
+  rr: Map<string, number>
 }
 
 /** per-provider 耗时采样的有界结构：samples 是环形窗口（超出裁最旧），count 是进程生命周期
@@ -142,11 +161,32 @@ export interface TokenUsageState {
   dayKey: string
   /** 当日累计 token（input 含缓存读/建 + output，与 reconcile 对账口径一致） */
   dayTokens: number
+  /** 当日累计可计费 token（usage.billable_tokens：剔除缓存读；旧 usage 无该字段按 0 起步）。
+   *  不参与 daily_tokens 限额判定（那是 runaway 熔断丝，总口径正确），仅供
+   *  /_modeldock/harness-usage 消费方（编排器预算实测账）读用。 */
+  dayBillableTokens: number
+}
+
+/** runtime-only 临时 harness（C14）：POST /_modeldock/harness/provision 签发的「用完即焚」
+ *  worker 凭据。只活在网关内存（重启清零 = 全部临时凭据即刻失效，设计如此，短命凭据不值得
+ *  持久化）；config.toml / secrets.json 永不落盘——mutateConfig 每次从盘上重读（loadConfig
+ *  structuredClone），rt.config 里注入的临时条目没有任何写回路径。 */
+export interface EphemeralHarnessState {
+  id: string
+  /** 随机 token（mdk_eph_ 前缀）；明文只在 provision 响应出现一次，任何列示端点与审计日志绝不回显 */
+  token: string
+  /** 钉定 profile 名；缺省 = 跟随 active_profile（与持久 harness 的 route 字段同语义） */
+  route?: string
+  /** 签发时刻（epoch ms） */
+  createdAt: number
+  /** 到期时刻（epoch ms）：TTL sweeper 过点即摘（60s 节奏，分钟级精度足够） */
+  expiresAt: number
+  /** 配了就挂进 tokenlimits per-harness 日限额（超限 429 与现有 daily_tokens 行为一致） */
+  maxDailyTokens?: number
 }
 
 /** 健康状态：滑动窗口错误计数 + 熔断截止时间。窗口内错误数达阈值即熔断，冷却后探活恢复。 */
-export interface HealthState {
-  /** 60s 滑动错误窗口（t0 起算点，count 错误次数） */
+export interface HealthState {  /** 60s 滑动错误窗口（t0 起算点，count 错误次数） */
   errWindow: { t0: number; count: number }
   /** 熔断截止时间戳；未熔断则为 undefined */
   meltdown_until?: number
@@ -157,4 +197,68 @@ export interface HealthState {
   okStreak: number
   /** 最近一次成功请求/探活的耗时 ms（供 overview 展示与备用链同优先级决胜；失败不写，见 recordOutcome） */
   lastMs?: number
+}
+
+// ===== 海况观测（state/sea.ts 维护；全部内存态，重启清零）=====
+
+/** 海况滑窗单分钟分桶：错误类与 HealthState.meltdown_cls 同枚举。total 含成功与中性 4xx
+ *  （作错误率分母）；429 不含 quota——relay 分类互斥（429+quota 体归 quota），quota 单列。 */
+export interface SeaMinuteBucket {
+  /** epoch 分钟数（floor(ms / 60000)）：环形槽位与新鲜度判定键 */
+  minute: number
+  total: number
+  connect: number
+  '429': number
+  '5xx': number
+  quota: number
+}
+
+/** 窗口聚合视图（metrics providers[].errors 的 last_5m/last_60m 暴露形状）：
+ *  error_rate = 四类错误合计 / total（中性 4xx 只摊分母），四位小数。 */
+export interface SeaWindowView {
+  total: number
+  connect: number
+  '429': number
+  '5xx': number
+  quota: number
+  error_rate: number
+}
+
+/** providerId → 海况分桶运行态。slots 固定 60 槽环形（槽位 = minute % 60，槽内 minute 不匹配
+ *  即陈旧数据、按需清零重用免裁剪）；lastError* 供排查定位最近一次错误（经 recordOutcome 记账）。 */
+export interface SeaProviderErrors {
+  slots: (SeaMinuteBucket | undefined)[]
+  lastErrorAt?: number
+  lastErrorCls?: 'connect' | '429' | '5xx' | 'quota'
+}
+
+/** 聚合海况信号（metrics 的 sea_state 字段形状）：storm 判定常量见 state/sea.ts 顶部。 */
+export interface SeaState {
+  storm: boolean
+  /** 命中的风暴规则短码（meltdown_majority / rate_429_60m），storm=false 时为空数组 */
+  reasons: string[]
+  /** 当前处于熔断期的 enabled 服务数 */
+  meltdown_count: number
+  updated_at: string
+}
+
+// ===== 上游模型可用性探测（modelprobe.ts 维护；内存态，重启清零）=====
+
+/** 单个 provider 的上游模型目录探测结果（GET /_modeldock/model-availability 的条目形状） */
+export interface ProviderAvailability {
+  ok: boolean
+  /** ISO 时间戳：本次探测完成时刻（成功失败都刷新） */
+  fetched_at: string
+  /** ok=true：上游 /models 返回的模型 id（保持上游顺序） */
+  model_ids?: string[]
+  /** ok=false：失败原因（fetchModelIds 聚合报错，含逐候选端点尝试明细） */
+  error?: string
+}
+
+/** 上游模型可用性探测运行态 */
+export interface ModelProbeState {
+  /** providerId → 最近一次探测结果（含失败负缓存：端点只读缓存，不触发补打失败上游） */
+  results: Map<string, ProviderAvailability>
+  /** 探测中的 providerId：调度 tick 与在飞请求去重，不重复打上游 */
+  inflight: Set<string>
 }

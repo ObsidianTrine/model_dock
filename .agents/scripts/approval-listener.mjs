@@ -12,7 +12,8 @@
 //     缺省端口只认 workflow.json 的 notify.listenerPort，都没配就报错退出——**永不缺省监听**。
 //   - 只绑 127.0.0.1（本机回环），永不开 0.0.0.0；外网触达须用户自行架转发并自行评估风险。
 //   - 验签：请求体/头的 verification token 必须与 env AGENTS_LARK_VERIFICATION_TOKEN 一致
-//     （不一致 403）；env 未配则拒绝所有动作并提示配置。token 属密钥——不写日志、不入库。
+//     （常数时间比较，C13；不一致 403 并落审计——只记事实不记 token 值）；env 未配则
+//     拒绝所有动作并提示配置。token 属密钥——不写日志、不入库。
 //   - 动作白名单 approve/reject/retry，映射到的都是 orchestrator 既有的人工闸门命令
 //     （合并权仍在 feature-branch finish 的门禁与 testCmd），监听器自身不引入新权限。
 //   - 幂等：同 task 同 action 60s 内重复请求忽略（防手抖双击连点）。
@@ -22,11 +23,23 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadWorkflowConfig } from './workflow-config.mjs';
 
 /** 动作白名单：映射目标都是 orchestrator 既有 CLI 命令（approve/reject/retry）。 */
 export const ACTION_WHITELIST = ['approve', 'reject', 'retry'];
+
+/**
+ * 常数时间字符串比较（C13）：先 sha256 归一化到定长再 timingSafeEqual，避免对长度不等
+ * 输入提前短路（长度泄漏）。与 src/util/safe-equal.ts 同款实现——监听器是零依赖独立
+ * 进程，自实现同算法而非跨目录引 src。
+ */
+export function safeEqual(a, b) {
+  const ha = createHash('sha256').update(String(a ?? ''), 'utf8').digest();
+  const hb = createHash('sha256').update(String(b ?? ''), 'utf8').digest();
+  return timingSafeEqual(ha, hb);
+}
 
 /** 幂等窗口：同 task 同 action 在窗口内的重复回调直接忽略（防双击连点）。 */
 export const IDEMPOTENCY_WINDOW_MS = 60_000;
@@ -68,14 +81,14 @@ export function extractToken(body) {
 }
 
 /**
- * 验签：请求 token 必须与 env 配置完全一致。
+ * 验签：请求 token 必须与 env 配置**常数时间**一致（C13：防时序侧信道逐字节猜测）。
  * 返回 { ok: true } | { ok: false, code: 'missing_env' | 'mismatch' }——
  * env 未配（missing_env）拒绝所有动作并提示配置，绝不静默放行。
  */
 export function verifyToken(body, envToken) {
   const configured = typeof envToken === 'string' ? envToken : process.env.AGENTS_LARK_VERIFICATION_TOKEN;
   if (!configured) return { ok: false, code: 'missing_env' };
-  if (extractToken(body) !== configured) return { ok: false, code: 'mismatch' };
+  if (!safeEqual(extractToken(body), configured)) return { ok: false, code: 'mismatch' };
   return { ok: true };
 }
 
@@ -98,7 +111,7 @@ export function successReply(action, task, reason) {
  * 生成回调处理器（依赖注入便于单测：spawnFn/now 可替换，auditPath 指向临时目录）。
  * 返回 async (body, ip) => { status, body }。处理序：
  *   url_verification 直接回显 challenge（仅回显无副作用，无动作风险）
- *   → 验签（失败 403，不审计不记日志——token 不落任何盘）
+ *   → 验签（失败 403；token 不匹配的尝试落审计只记事实不记 token 值——token 本身不落任何盘）
  *   → 提取动作 → 白名单 → 幂等窗口 → spawn orchestrator → 审计 → toast 回复。
  */
 export function makeHandler({ repoRoot, scriptPath, spawnFn, auditPath, now = Date.now } = {}) {
@@ -119,7 +132,9 @@ export function makeHandler({ repoRoot, scriptPath, spawnFn, auditPath, now = Da
       return { status: 200, body: { challenge: String(body.challenge ?? '') } };
     }
 
-    // 2) 验签：不一致 403；env 未配拒绝所有动作（错误可操作：附修复建议）
+    // 2) 验签：不一致 403；env 未配拒绝所有动作（错误可操作：附修复建议）。
+    //    token 不匹配（已配置 state 下的未授权访问尝试）落审计留痕（C13）——只记事实
+    //    不记 token 值（密钥不落盘红线不变）。
     const v = verifyToken(body);
     if (!v.ok) {
       if (v.code === 'missing_env') {
@@ -128,6 +143,7 @@ export function makeHandler({ repoRoot, scriptPath, spawnFn, auditPath, now = Da
           body: { toast: { type: 'error', content: '监听器未配置 AGENTS_LARK_VERIFICATION_TOKEN，已拒绝该动作。修复：启动前 export AGENTS_LARK_VERIFICATION_TOKEN=<飞书开放平台「事件与回调」页的 Verification Token>' } },
         };
       }
+      appendAudit({ ts: new Date().toISOString(), ip, result: 'rejected', detail: 'verification_token_mismatch' });
       return {
         status: 403,
         body: { toast: { type: 'error', content: 'verification token 校验失败（请求与监听器配置不一致）——核对飞书开放平台回调配置与 AGENTS_LARK_VERIFICATION_TOKEN 是否同值' } },

@@ -1,7 +1,7 @@
 /** 总览/视图域：buildConfigView、overview 缓存簇（TTL/单飞/SWR 决策）与 buildOverview、overview/tray/presence 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import { AdminCtx, persistConfig, jsonRequestBody, profileRefForProvider, sendError } from './admin-shared.js'
 import { allAdapters } from '../adapters/registry.js'
-import { getSecret } from '../config/secrets.js'
+import { getFirstProviderSecret } from '../config/secrets.js'
 import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
 import { knownMetaTable } from '../providers/known.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
@@ -47,6 +47,8 @@ export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string
       auth_style: p.auth_style,
       key_ref: p.key_ref,
       proxy: p.proxy ?? 'direct',
+      // 并发闸配置只读透出（编排器供给闸判定用：max_concurrency>=2 才允许 worker 扩容到 2）
+      max_concurrency: p.max_concurrency ?? null,
       models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true, includeSource: true })),
     })),
     profiles: Object.entries(cfg.profiles).map(([name, p]) => ({
@@ -159,10 +161,11 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
   // 稳态约每几秒重建一次，串行 N 次造成周期性延迟尖峰），结果与逐个 await 完全一致
   const providerEntries = Object.entries(cfg.providers)
   // 单个坏条目（key_ref 缺失/非法 → getSecret 抛可操作 SecretsError）降级为「未配置 key」
-  // 展示，不炸整个 overview——一个手编坏 provider 不该把控制台首页打 500
+  // 展示，不炸整个 overview——一个手编坏 provider 不该把控制台首页打 500。
+  // 多 key 池按序尝试（getFirstProviderSecret），池内有一把可读即视为已配置 key
   const keyPresence = new Map(await Promise.all(providerEntries.map(async ([id, p]) => {
     try {
-      return [id, !!(await getSecret(p.key_ref))] as const
+      return [id, !!(await getFirstProviderSecret(p))] as const
     } catch {
       return [id, false] as const
     }

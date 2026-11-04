@@ -7,12 +7,17 @@
 //     分文件（任务线保持单任务语义），格式与任务事件同构（ts/seq/type）。
 // 上游海况（countUpstreamStorm）：网关先于 worker 看到上游限流（任何 harness 的流量
 // 都经它转发）——窗口内 429/402 合计达阈值同样滞留，风暴中比 worker 重试信号更早收帆。
+// 上游海况数据面（2026-11-04，A1）：优先消费 /_modeldock/metrics 的权威海况
+// （sea_state.storm + per-provider 滑窗错误分桶，5min 节流缓存）；admin 不可达/端点失败
+// 自动落回现有网关日志 429/402 扫描——观测失败绝不阻断派发（fail-open）。
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { toIsoLocal } from './events.mjs';
 import { readGatewayLog } from './reconcile.mjs';
+import { resolveGatewayAdmin } from './tiers.mjs';
 
 /**
  * 统计各任务 events 里窗口期内的 worker_retry 事件数合计。
@@ -42,14 +47,181 @@ export function shouldHold(count, threshold) {
   return Number.isFinite(count) && Number.isFinite(threshold) && count >= threshold;
 }
 
+// ---------------------------------------------------------------------------
+// 上游海况数据面（2026-11-04，A1）：/_modeldock/metrics 消费
+// 数据源：sea_state（网关聚合风暴信号：meltdown_majority / rate_429_60m，判定常量见
+// src/gateway/state/sea.ts）+ providers[].errors 滑窗错误分桶（last_5m/last_60m）。
+// 与 countUpstreamStorm 的日志扫描同一滞留语义：metrics 优先，缺席/失败自动落回日志
+// 扫描（fail-open——观测失败绝不阻断派发）。两条取数路径共享一个模块级节流缓存：
+//   fetchSeaSnapshot  异步（cfg 门控走 resolveGatewayAdmin，decideDispatchForRun 用）
+//   seaSnapshotSync   同步桥（countUpstreamStorm 专用，见函数注）
+// ---------------------------------------------------------------------------
+
+/** metrics 快照节流缓存 TTL：ok 结果 5min（海况是分钟桶粒度，高频拉取无增益）；
+ *  不可达负结果 60s（不至于每次派发都撞超时，又能在网关恢复后较快跟进）。 */
+export const SEA_SNAPSHOT_TTL_MS = 5 * 60_000;
+export const SEA_SNAPSHOT_NEG_TTL_MS = 60_000;
+
+/** 补充信号：providers[].errors.last_5m 的 429 率阈值与最小样本（仅 dispatch 层消费，
+ *  作为 sea_state.storm 的更早预警）。比网关自身风暴规则（60m、率 0.3、样本 20）更严：
+ *  短窗样本少、噪声大，只取「5 分钟内过半请求被限流」这种明确信号。 */
+export const SEA_429_RATE_5M_THRESHOLD = 0.5;
+export const SEA_429_RATE_5M_MIN_TOTAL = 10;
+
+/** 同步桥子进程内 fetch 的 AbortSignal 时限；spawnSync 外层多留 1.5s node 启动余量。 */
+const SEA_SYNC_TIMEOUT_MS = 3000;
+
+/** 模块级快照缓存：键 = 管理面 base（异步/同步两路共享）；条目数封顶防泄漏。 */
+const _seaCache = new Map();
+const _seaCacheMax = 8;
+
+function seaCacheGet(key, now, okTtlMs, negTtlMs) {
+  const hit = _seaCache.get(key);
+  if (!hit) return null;
+  const ttl = hit.snap?.mode === 'ok' ? okTtlMs : negTtlMs;
+  if (now - hit.at > ttl) return null;
+  return hit.snap;
+}
+
+function seaCachePut(key, snap, now) {
+  if (_seaCache.size >= _seaCacheMax && !_seaCache.has(key)) {
+    _seaCache.delete(_seaCache.keys().next().value); // 淘汰最早写入的键
+  }
+  _seaCache.set(key, { at: now, snap });
+}
+
+/** 测试清场：清空海况快照节流缓存（vitest 单 fork 共享注册表，用例收尾必须调用）。 */
+export function resetSeaSnapshotCache() {
+  _seaCache.clear();
+}
+
+const _num = (v) => (Number.isFinite(v) ? v : 0);
+
 /**
- * 上游海况计数：网关日志窗口期内的限流/额度类请求（status 429/402）合计。
- * 与 countRecentTransient（worker_retry 自报信号）互补——网关侧是实测面，任何 harness
- * 的流量都算，且先于 worker 重试浮现。gwDir=null（未启用网关日志）恒 0：观测随
- * gatewayLogDir 配置开关，缺席不滞留。日文件按本地日期切分，读取范围按窗口跨午夜补足。
+ * 从 /_modeldock/metrics 响应提取海况快照（纯函数，字段缺失容错——旧版网关无 sea_state
+ * 或 errors 分桶时各字段按「无数据」处理，不抛错）。
+ * @returns {{ mode:'ok', at:number, storm:boolean, reasons:string[], meltdown:string[],
+ *   meltdownCount:number, rate429_5m:number, total5m:number, count429_5m:number,
+ *   countQuota_5m:number, count429_60m:number, countQuota_60m:number }}
+ */
+export function seaSnapshotFromMetricsJson(j, now = Date.now()) {
+  const sea = j?.sea_state ?? {};
+  const meltdown = (Array.isArray(j?.meltdown) ? j.meltdown : [])
+    .map((m) => (m && m.provider ? String(m.provider) : null))
+    .filter(Boolean);
+  const providers = j?.providers && typeof j.providers === 'object' && !Array.isArray(j.providers) ? j.providers : {};
+  let c429a = 0; let qa = 0; let ta = 0; let c429b = 0; let qb = 0;
+  for (const p of Object.values(providers)) {
+    const w5 = p?.errors?.last_5m;
+    const w60 = p?.errors?.last_60m;
+    if (w5) {
+      c429a += _num(w5['429']);
+      qa += _num(w5.quota);
+      ta += _num(w5.total);
+    }
+    if (w60) {
+      c429b += _num(w60['429']);
+      qb += _num(w60.quota);
+    }
+  }
+  return {
+    mode: 'ok',
+    at: now,
+    storm: sea.storm === true,
+    reasons: Array.isArray(sea.reasons) ? sea.reasons.map(String) : [],
+    meltdownCount: Number.isFinite(sea.meltdown_count) ? sea.meltdown_count : meltdown.length,
+    meltdown,
+    rate429_5m: ta > 0 ? c429a / ta : 0,
+    total5m: ta,
+    count429_5m: c429a,
+    countQuota_5m: qa,
+    count429_60m: c429b,
+    countQuota_60m: qb,
+  };
+}
+
+/**
+ * 异步拉取海况快照。cfg 门控走 resolveGatewayAdmin（gatewayAdmin !== true 一律
+ * unavailable 不触达）；网络失败/超时/非 200/响应损坏 → unavailable（负缓存 60s），
+ * 绝不抛出——调用方（seaWeather / dispatch 预检）落回既有行为。
+ */
+export async function fetchSeaSnapshot(cfg, { now = Date.now(), timeoutMs = 3000, okTtlMs = SEA_SNAPSHOT_TTL_MS, negTtlMs = SEA_SNAPSHOT_NEG_TTL_MS } = {}) {
+  const adm = resolveGatewayAdmin(cfg);
+  if (!adm) {
+    return {
+      mode: 'unavailable',
+      reason: cfg?.gatewayAdmin === true
+        ? '未发现网关（gateway.json 缺失或 ORCH_GATEWAY_* 未配置）'
+        : 'workflow.json 未开启 gatewayAdmin',
+    };
+  }
+  const key = adm.base;
+  const cached = seaCacheGet(key, now, okTtlMs, negTtlMs);
+  if (cached) return cached;
+  let snap;
+  try {
+    const res = await fetch(`${adm.base}/_modeldock/metrics`, {
+      headers: { 'x-modeldock-admin': adm.adminToken },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) throw new Error(`网关返回 ${res.status}`);
+    snap = seaSnapshotFromMetricsJson(await res.json(), now);
+  } catch (e) {
+    snap = { mode: 'unavailable', reason: `metrics 查询失败：${String(e?.message ?? e).slice(0, 120)}` };
+  }
+  seaCachePut(key, snap, now);
+  return snap;
+}
+
+/**
+ * 同步桥（countUpstreamStorm 专用，因调度闸调用点为同步函数）：以 gwDir 同目录的
+ * gateway.json 为唯一信任域与发现源——它就是网关日志所在的同一 ModelDock 安装
+ * （<.modeldock>/logs ↔ <.modeldock>/gateway.json），测试 fixture 不放该文件即零网络。
+ * 有意不读 ORCH_GATEWAY_* env：无 cfg 的同步路径里 env 发现锚不住信任域。
+ * 取数用 spawnSync node -e（Node ≥22 内置 fetch；admin token 经子进程 env 传递，不进
+ * argv）。失败/超时/解析失败 → null（调用方落回日志扫描），并把负结果写共享缓存。
+ */
+function seaSnapshotSync(gwDir, { now = Date.now(), timeoutMs = SEA_SYNC_TIMEOUT_MS, okTtlMs = SEA_SNAPSHOT_TTL_MS, negTtlMs = SEA_SNAPSHOT_NEG_TTL_MS } = {}) {
+  let base = null;
+  let adminToken = '';
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(path.dirname(gwDir), 'gateway.json'), 'utf8'));
+    if (Number.isInteger(j?.port) && j.port > 0 && typeof j?.admin_token === 'string' && j.admin_token) {
+      base = `http://127.0.0.1:${j.port}`;
+      adminToken = j.admin_token;
+    }
+  } catch { /* 缺失/损坏 = 未发现 → 日志扫描 */ }
+  if (!base) return null;
+  const cached = seaCacheGet(base, now, okTtlMs, negTtlMs);
+  if (cached) return cached.mode === 'ok' ? cached : null;
+  let snap = null;
+  try {
+    const script = `fetch(${JSON.stringify(`${base}/_modeldock/metrics`)},{headers:{'x-modeldock-admin':process.env.ORCH_SEA_ADMIN_TOKEN||''},signal:AbortSignal.timeout(${timeoutMs})})`
+      + `.then(r=>{if(!r.ok)throw new Error('status '+r.status);return r.json()})`
+      + `.then(j=>process.stdout.write(JSON.stringify(j))).catch(()=>process.exit(1))`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: timeoutMs + 1500,
+      windowsHide: true,
+      env: { ...process.env, ORCH_SEA_ADMIN_TOKEN: adminToken },
+    });
+    if (r.status === 0 && r.stdout) snap = seaSnapshotFromMetricsJson(JSON.parse(r.stdout), now);
+  } catch { /* 任何失败 → null → 日志扫描 */ }
+  seaCachePut(base, snap ?? { mode: 'unavailable', reason: '海况同步桥不可得' }, now);
+  return snap;
+}
+
+/**
+ * 上游海况计数：优先 metrics 数据面（60 分钟窗口 429+quota 真实请求数——与日志扫描的
+ * status 429/402 计数同语义，阈值可共用；sea_state.storm 的 60m 429 规则最低 6 次 429，
+ * 阈值 ≤5 即可保证「网关判风暴 → 计数闸必触发」）；同步桥不可得（无 gateway.json /
+ * 网关挂了 / 超时）→ 落回网关日志窗口扫描（windowMs 生效，行为与历史版本一致）。
+ * gwDir=null（未启用网关日志）恒 0。日文件按本地日期切分，读取范围按窗口跨午夜补足。
  */
 export function countUpstreamStorm(gwDir, { windowMs, now = Date.now() } = {}) {
   if (!gwDir) return 0;
+  const snap = seaSnapshotSync(gwDir, { now });
+  if (snap?.mode === 'ok') return snap.count429_60m + snap.countQuota_60m;
   const dayMs = 86_400_000;
   const dayCount = Math.ceil(windowMs / dayMs) + 1; // 跨本地午夜余量
   let count = 0;

@@ -22,6 +22,11 @@ export interface ProviderConfig {
   auth_style: AuthStyle
   /** file:<id> | keychain:<id> | env:<VAR> | 明文值（不推荐） */
   key_ref: string
+  /** 多 key 池（可选）：每个元素与 key_ref 同格式（file:<id> | keychain:<id> | env:<VAR> | 明文）。
+   *  网关在 key 间 round-robin 轮转（多客户端 worker 不再挤同一把 key 撞 429），上游 401/403
+   *  自动把失效 key 打入冷却并轮转到下一把（见 src/gateway/state/keypool.ts）。
+   *  向后兼容：缺省（或空数组/全非串条目）回落 [key_ref]，key_ref 字段保留不删；两处都不配 = 既有「无 key」行为。 */
+  keys?: string[]
   /** direct | env | http://host:port */
   proxy?: 'direct' | 'env' | string
   /** 是否参与自动路由（默认 true；设 false = 手动下线，不探测也不作候选） */
@@ -30,6 +35,10 @@ export interface ProviderConfig {
   priority?: number
   /** 每协议的 base_url（如同时支持 anthropic/openai/responses 供不同客户端直连）；base_url 作缺省/默认协议端点 */
   endpoints?: Partial<Record<Protocol, string>>
+  /** 该服务的并发请求数上限（网关侧内存信号量，含排队中请求；0 或缺省 = 不限）。
+   *  多 agent worker 并发打上游易触发上游 429（如 GLM 并发≈2 即限流），设为上游实测可承受的
+   *  并发数可让超额请求在网关内排队等待（等待时长见 gateway.queue_wait_ms）而非压垮上游 */
+  max_concurrency?: number
   models?: Record<string, ModelMeta>
 }
 
@@ -91,6 +100,8 @@ export interface GatewayConfig {
   auto_route_provider?: string
   /** 已送达状态下允许切换备用服务的上游状态码（如 [429,503]）；缺省空 = 不切换（安全边界：已送达的响应原样返回） */
   failover_status_codes?: number[]
+  /** provider 并发闸（max_concurrency）满载时的排队等待上限 ms（默认 2000）；超时按并发满载处理（跳下一候选或回 429） */
+  queue_wait_ms?: number
   /** 「下一个切换」槽人工钉定：主服务不可达时优先切到它（插到备用链首位；它也不可用时按备用链自动顺延）；留空=按 priority/实测耗时自动排序 */
   route_next?: string
   /** 自动备用链：手动 fallback 之外，自动把已启用服务补进切换候选（按定时窗口/优先级/实测耗时排序，模型名原样透传）；缺省开，仅显式 false 关闭 */

@@ -12,6 +12,9 @@
   ],
   "gatewayLogDir": "~/.modeldock/logs",
   "gatewayAdmin": true,
+  "scheduling": {
+    "maxWorkers": 1
+  },
   "protectedPorts": [
     "8687",
     "8890"
@@ -76,9 +79,36 @@
   "autoResume": {
     "enabled": true
   },
+  "configGuard": {
+    "enabled": true
+  },
+  "draftsGc": {
+    "autoSupersede": true,
+    "archiveDays": 30
+  },
+  "scanAutoFix": {
+    "enabled": true
+  },
   "escalation": {
     "enabled": true,
     "fallbackBackend": "claude-headless"
+  },
+  "weatherHold": {
+    "enabled": true,
+    "threshold": 3,
+    "windowMinutes": 60,
+    "upstream": {
+      "source": "metrics",
+      "threshold": 5,
+      "windowMinutes": 60
+    }
+  },
+  "dynamicDispatch": {
+    "enabled": true,
+    "envelope": [
+      "zcode-headless",
+      "claude-headless"
+    ]
   },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",
   "notify": {

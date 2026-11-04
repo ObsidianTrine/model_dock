@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildFixupPrompt, buildReviewerPrompt, buildWorkerPrompt, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
+import { buildFixupPrompt, buildPromptFileRefBody, buildReviewerPrompt, buildWorkerPrompt, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { loadCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { cardText } from './helpers.js'
 
@@ -87,5 +87,31 @@ describe('orchestrator prompt > fixup prompt', () => {
     expect(p).toContain('test_failure')
     expect(p).not.toContain('line-100\n') // 前 300 行被截掉
     expect(p).toContain('line-499') // 尾部保留
+  })
+})
+
+describe('orchestrator prompt > 大 prompt 落文件收缩体（D17）', () => {
+  it('引用全文路径 + worktree 路径 + 目标/验收/红线摘要 + 契约块模板；体量远小于阈值', () => {
+    const c = ctx(os.tmpdir())
+    const full = '/repo/.agents/orchestrator/logs/t1/prompt-full.md'
+    const body = buildPromptFileRefBody({ promptPath: full, card: card(), ctx: c, originalChars: 42_000 })
+    expect(body).toContain(full)
+    expect(body).toContain('42000') // 原始字符数如实标注
+    expect(body).toContain(c.worktreePath)
+    expect(body).toContain('测试任务目标') // 目标摘要
+    expect(body).toContain('验收标准') // 验收摘要
+    expect(body).toContain('```' + RESULT_MARKER) // 契约块模板内联（worker 不读全文也能正确收尾）
+    expect(body).toContain('status: done | stuck')
+    expect(body.length).toBeLessThan(4000) // 收缩体恒远小于 zcode argv 30k 上限
+  })
+
+  it('红线段可选注入；无 ctx 时省略 worktree 段', () => {
+    const c = ctx(os.tmpdir())
+    const cardWithRedlines = loadCard(cardText({}, '目标内容。\n\n# 红线\n- 禁止动 8687'), 'card.md')
+    const body = buildPromptFileRefBody({ promptPath: '/p.md', card: cardWithRedlines, ctx: c, originalChars: 21_000 })
+    expect(body).toContain('禁止动 8687')
+    const noCtx = buildPromptFileRefBody({ promptPath: '/p.md', card: card(), originalChars: 21_000 })
+    expect(noCtx).not.toContain('工作目录（worktree）')
+    expect(noCtx).toContain('/p.md')
   })
 })

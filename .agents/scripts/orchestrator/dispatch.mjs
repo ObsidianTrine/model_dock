@@ -12,19 +12,28 @@
 //      视作高难度 → claude；
 //   3. 所选船海况恶劣（该船 harness 绕开狗粮 / 未接管——燃油实测与对账失效；或 CLI
 //      不可用）→ 换包络内下一个健康船；
-//   4. 全港风暴（服务熔断 / 上游限流 / worker 重试密集 / weatherHold 滞留）：包络内换船
-//      无益（同一网关同一批上游，熔断由网关自动路由避开），全部恶劣 → 沿用默认并留痕。
+//   4. 全港风暴（权威海况 sea_state.storm / 服务熔断 / 上游限流 / worker 重试密集 /
+//      weatherHold 滞留）：包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），
+//      全部恶劣 → 沿用默认并留痕。
 // 所有非常规选择记 dispatch_selected { from, to, reason } 事件——永不静默红线。
 // 难度路由不需要网关（纯卡面信号）；逐船海况判读需要 gatewayAdmin 开启的观测快照，
 // 观测缺席不判恶劣（观测缺席 ≠ 风暴，与 fleet observe 同哲学）。
+// 权威海况（2026-11-04，A2）：全港风暴判定优先消费 /_modeldock/metrics 的 sea_state.storm
+// + meltdown 清单（网关权威、比 worker 重试更早）；worker_retry 集中度与网关日志扫描
+// 保留为观测缺席时的回落。决策依据进 dispatch_selected reason（storm_sea_state）。
+// 派发预检（2026-11-04，A5）：worker 模型在上游服务目录缺席（model-availability 数据面，
+// tier-validate 解析 provider）→ 滞留派发：卡转 blocked + dispatch_held 事件，不烧一程
+// 注定失败的 worker；判定模糊（条目缺席/陈旧/ok=false/观测不可达）一律照常派发（fail-open）。
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { readEvents } from './events.mjs';
-import { countRecentTransient, countUpstreamStorm, shouldHold } from './weather.mjs';
+import { readEvents, appendEvent, logDir } from './events.mjs';
+import { countRecentTransient, countUpstreamStorm, shouldHold, fetchSeaSnapshot, SEA_429_RATE_5M_THRESHOLD, SEA_429_RATE_5M_MIN_TOTAL } from './weather.mjs';
 import { gatewayLogsDir } from './reconcile.mjs';
 import { normalizeTierName } from './tiers.mjs';
+import { queueRoot, moveCard } from './queue.mjs';
+import { precheckModelAvailability } from './availability.mjs';
 import { SHIP_HARNESS } from './fleet.mjs';
 import { hintsOverlap } from '../policy.mjs';
 import { claudeAvailable } from './backends/claude-headless.mjs';
@@ -97,13 +106,17 @@ export function shipSeaBad(state, backend) {
 }
 
 /**
- * 派发海况装配（weather 输入）：窗口内各任务 worker_retry 合计 + 可选上游海况（网关
- * 日志 429/402）+ weatherHold 滞留判定。与 orchestrator.mjs 的 weatherHoldCount 同构件
- * （weather.mjs 纯函数；那份在 CLI 入口文件内不可安全 import——带启动副作用）。
+ * 派发海况装配（weather 输入）：窗口内各任务 worker_retry 合计 + 可选上游海况 + weatherHold
+ * 滞留判定。与 orchestrator.mjs 的 weatherHoldCount 同构件（weather.mjs 纯函数；那份在
+ * CLI 入口文件内不可安全 import——带启动副作用）。
  * weatherHold 未配置时窗口取缺省 60 分钟、重试阈值取缺省 3（与 resolveWeatherHold 同
  * 缺省口径）——海况信号独立于风暴闸开关存在，风暴闸管「停派发」，这里管「别换船」。
+ * 权威海况（A2）：seaSnap = fetchSeaSnapshot 结果由调用方注入（weatherHold.upstream.source
+ * 为 "log" 时调用方不取数）；快照 ok → sea 视图随结果返回（storm/meltdown/5m 429 率位），
+ * upstream.count 改用 metrics 60m 429+quota 真实计数（与日志扫描同语义）；快照缺席或
+ * 不可得 → 原网关日志扫描路径原样保留（fail-open，行为与历史版本一致）。
  */
-export function seaWeather(repoRoot, cfg, { now = Date.now() } = {}) {
+export function seaWeather(repoRoot, cfg, { now = Date.now(), seaSnap = null } = {}) {
   const hold = cfg?.weatherHold ?? null;
   const windowMinutes = Number.isInteger(hold?.windowMinutes) && hold.windowMinutes > 0 ? hold.windowMinutes : 60;
   const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
@@ -116,20 +129,50 @@ export function seaWeather(repoRoot, cfg, { now = Date.now() } = {}) {
     }
   } catch { /* logs/ 不存在 = 还没跑过任务 */ }
   const retryCount = countRecentTransient(allEvents, { windowMs: windowMinutes * 60_000, now });
+  const sea = seaSnap?.mode === 'ok'
+    ? {
+        observed: true,
+        at: seaSnap.at,
+        storm: seaSnap.storm === true,
+        reasons: seaSnap.reasons ?? [],
+        meltdown: seaSnap.meltdown ?? [],
+        rate429_5m: seaSnap.rate429_5m ?? 0,
+        total5m: seaSnap.total5m ?? 0,
+        count429_60m: seaSnap.count429_60m ?? 0,
+        countQuota_60m: seaSnap.countQuota_60m ?? 0,
+      }
+    : null;
+  if (sea) sea.rate429Breach = sea.rate429_5m >= SEA_429_RATE_5M_THRESHOLD && sea.total5m >= SEA_429_RATE_5M_MIN_TOTAL;
   let upstream = null;
   if (hold?.upstream?.threshold != null) {
-    const gwDir = gatewayLogsDir(cfg);
-    const uWindow = Number.isInteger(hold.upstream.windowMinutes) && hold.upstream.windowMinutes > 0 ? hold.upstream.windowMinutes : 15;
-    upstream = {
-      count: countUpstreamStorm(gwDir, { windowMs: uWindow * 60_000, now }),
-      threshold: hold.upstream.threshold,
-      windowMinutes: uWindow,
-      observed: gwDir != null,
-    };
+    if (sea?.observed) {
+      // metrics 数据面：60 分钟 429+quota 真实请求数（网关 sea_state 的 rate_429_60m
+      // 规则最低 6 次 429，阈值 ≤5 时网关判风暴必触发本闸）。
+      upstream = {
+        source: 'metrics',
+        count: sea.count429_60m + sea.countQuota_60m,
+        threshold: hold.upstream.threshold,
+        windowMinutes,
+        observed: true,
+        storm: sea.storm,
+      };
+    } else {
+      const gwDir = gatewayLogsDir(cfg);
+      const uWindow = Number.isInteger(hold.upstream.windowMinutes) && hold.upstream.windowMinutes > 0 ? hold.upstream.windowMinutes : 15;
+      upstream = {
+        count: countUpstreamStorm(gwDir, { windowMs: uWindow * 60_000, now }),
+        threshold: hold.upstream.threshold,
+        windowMinutes: uWindow,
+        observed: gwDir != null,
+      };
+    }
   }
   const retryThreshold = Number.isInteger(hold?.threshold) && hold.threshold > 0 ? hold.threshold : 3;
-  const held = hold != null && (shouldHold(retryCount, hold.threshold) || (upstream?.observed === true && shouldHold(upstream.count, upstream.threshold)));
-  return { held, retryCount, retryThreshold, windowMinutes, upstream };
+  const held = hold != null && (shouldHold(retryCount, hold.threshold)
+    || (upstream?.observed === true && shouldHold(upstream.count, upstream.threshold))
+    || sea?.storm === true
+    || sea?.rate429Breach === true);
+  return { held, retryCount, retryThreshold, windowMinutes, upstream, sea };
 }
 
 /**
@@ -166,10 +209,22 @@ export function decideDispatch({ cfg, defaultBackend, explicit = false, inherite
   if (pref && pref !== defaultBackend && !envelope.includes(pref)) {
     lines.push(`ℹ 动态选船：卡难度偏好 ${pref} 不在 envelope 内——不自动切（包络外永不自动切），沿用默认船 ${defaultBackend}`);
   }
-  // 全港风暴：熔断 / 上游限流 / 重试密集 / weatherHold 滞留。包络内换船无益（同一网关
-  // 同一批上游，熔断由网关自动路由避开）——全部恶劣 → 沿用默认并留痕。
+  // 全港风暴（A2 权威海况优先）：sea_state.storm + meltdown 清单是网关权威判定（更早、
+  // 更全）；服务熔断（fleetState 观测）/ 上游限流（日志扫描）/ 重试密集（worker_retry）
+  // 保留为海况快照缺席时的回落。包络内换船无益（同一网关同一批上游，熔断由网关自动
+  // 路由避开）——全部恶劣 → 沿用默认并留痕。
   const stormBits = [];
-  if (fleetState?.mode === 'ok' && (fleetState.meltdown ?? []).length) {
+  if (weather?.sea?.observed) {
+    if (weather.sea.storm) {
+      stormBits.push(`权威海况风暴（sea_state：${weather.sea.reasons.join('、') || 'storm'}）[storm_sea_state]`);
+    }
+    if (weather.sea.rate429Breach) {
+      stormBits.push(`上游 5 分钟 429 率 ${Math.round(weather.sea.rate429_5m * 100)}%（样本 ${weather.sea.total5m}）≥ 阈值 ${SEA_429_RATE_5M_THRESHOLD * 100}%`);
+    }
+    if ((weather.sea.meltdown ?? []).length) {
+      stormBits.push(`服务熔断中（${weather.sea.meltdown.join(', ')}）`);
+    }
+  } else if (fleetState?.mode === 'ok' && (fleetState.meltdown ?? []).length) {
     stormBits.push(`服务熔断中（${fleetState.meltdown.join(', ')}）`);
   }
   if (weather?.held) stormBits.push('weatherHold 风暴滞留');
@@ -226,17 +281,36 @@ export function decideDispatch({ cfg, defaultBackend, explicit = false, inherite
 }
 
 /**
- * cmdRun 派发装配（单点调用）：seaWeather 现算 + CLI 可用性探测 + decideDispatch。
+ * cmdRun 派发装配（单点调用）：海况快照现取（A1/A2 数据面，source:"log" 显式降级时不取）
+ * + seaWeather 现算 + CLI 可用性探测 + decideDispatch + 派发预检（A5，模型可用性）。
  * 任何一步失败都回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
+ * 预检唯一的阻断出口：worker 模型确认不在上游服务目录（availabilityVerdict hold）→
+ * holdCardForPrecheck 落位后干净退出 run 子进程（holdExit 可注入，测试传 stub）。
  */
-export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend, explicit, inherited, tier, fleetState }) {
+export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend, explicit, inherited, tier, fleetState, holdExit } = {}) {
   try {
-    const weather = seaWeather(repoRoot, cfg);
+    const wantSea = cfg?.weatherHold?.upstream?.source !== 'log';
+    const seaSnap = wantSea ? await fetchSeaSnapshot(cfg) : null;
+    const weather = seaWeather(repoRoot, cfg, { seaSnap });
     const availability = {
       'claude-headless': claudeAvailable(),
       'zcode-headless': zcodeAvailable(),
     };
-    return decideDispatch({ cfg, defaultBackend, explicit, inherited, meta, tier, fleetState, weather, availability });
+    const decision = decideDispatch({ cfg, defaultBackend, explicit, inherited, meta, tier, fleetState, weather, availability });
+    // A5 派发预检（独立于动态选船开关）：tier token 经 tier-validate 解析 provider 后核对
+    // model-availability——确认缺席才滞留，其余判定模糊一律照常派发（fail-open）。
+    const pre = await precheckModelAvailability({ cfg, tier, model: tier?.workerModel ?? cfg?.worker?.model ?? null });
+    if (pre?.hold && meta?.id) {
+      holdCardForPrecheck({
+        repoRoot,
+        taskId: meta.id,
+        provider: pre.provider,
+        model: pre.model,
+        fetchedAt: pre.fetchedAt,
+        holdExit,
+      });
+    }
+    return decision;
   } catch (e) {
     return {
       backend: defaultBackend,
@@ -245,5 +319,27 @@ export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend
       lines: [`⚠ 动态选船决策失败（${String(e?.message ?? e).slice(0, 160)}）——按既有规则派发`],
       events: [],
     };
+  }
+}
+
+/**
+ * 预检滞留落位（A5 终点）：dispatch_held 事件 + failed 留痕（与 drain 拉黑同款事件对）
+ * + 卡 pending→blocked（TRANSITIONS 合法迁移，队列保留不丢），随后 exit 0 干净退出
+ * run 子进程——不退 pending：drain 死循环防护会对留 pending 的卡二次选中后拉黑，两次
+ * 白烧；直接 blocked 一次到位，事件与原因具体（模型恢复后 resume 即可）。
+ * 落位本身失败（卡不在 pending 等）→ 不退出，照常返回决策（预检绝不放大成派发故障）。
+ */
+function holdCardForPrecheck({ repoRoot, taskId, provider, model, fetchedAt, holdExit } = {}) {
+  const exit = holdExit ?? ((code) => process.exit(code));
+  console.log(`⛔ 派发预检滞留（model_unavailable）：worker 模型 "${model}" 不在 provider "${provider}" 的上游服务目录（快照 ${fetchedAt ?? 'n/a'}）——跳过派发。`);
+  console.log(`  卡转 blocked（队列保留）：模型恢复 / 目录刷新后 node .agents/scripts/orchestrator.mjs resume ${taskId}`);
+  try {
+    const qdir = logDir(repoRoot, taskId);
+    appendEvent(qdir, 'dispatch_held', { reason: 'model_unavailable', provider, model, ...(fetchedAt ? { fetched_at: fetchedAt } : {}) });
+    appendEvent(qdir, 'failed', { reason: `派发预检滞留：worker 模型 ${model} 不在 ${provider} 上游服务目录（model_unavailable）——模型恢复后 resume` });
+    moveCard(queueRoot(repoRoot), taskId, 'pending', 'blocked');
+    exit(0);
+  } catch (e) {
+    console.log(`⚠ 派发预检滞留落位失败（${String(e?.message ?? e).slice(0, 160)}）——照常派发`);
   }
 }

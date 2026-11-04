@@ -33,19 +33,23 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, runArgvTreeSafe, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
-import { isTransientWorkerFailure } from './orchestrator/transient.mjs';
+import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
+import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
+import { listDrafts, planGc, applyGc, supersedeForMerged, draftsRoot, DEFAULT_ARCHIVE_DAYS } from './orchestrator/drafts-gc.mjs';
+import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
-import { loadWorkflowConfig, displayProjectName } from './workflow-config.mjs';
+import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
+import { probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
@@ -71,13 +75,15 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
 
 /** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避基值×attempt（与 dockmaster
- *  技能「429 退避 60s」口径一致）。基值可经 ORCH_RETRY_WAIT_MS 注入（测试收缩到 10ms
- *  级，生产行为不变）， storm-gate 集成测试依赖毫秒级退避。 */
+ *  技能「429 退避 60s」口径一致）。基值解析序：ORCH_RETRY_WAIT_MS env（测试收缩到 10ms
+ *  级，生产行为不变；storm-gate 集成测试依赖毫秒级退避）> workflow.json retryWaitBaseMs
+ *  （B11 常量收口）> 缺省 60s。 */
 const MAX_WORKER_RETRIES = 3;
-const RETRY_WAIT_BASE_MS = (() => {
+function retryWaitBaseMs(cfg) {
   const n = Number.parseInt(process.env.ORCH_RETRY_WAIT_MS ?? '', 10);
-  return Number.isInteger(n) && n >= 0 ? n : 60_000;
-})();
+  if (Number.isInteger(n) && n >= 0) return n;
+  return cfg?.retryWaitBaseMs ?? 60_000;
+}
 
 // ---------------------------------------------------------------------------
 // 基础设施
@@ -264,6 +270,9 @@ async function cmdRun(repoRoot, taskId, opts) {
   ensureQueue(root);
   const cfg = runConfig(repoRoot); // repoRoot 锚定：临时仓库（集成测试）用它们自己的 workflow.json
   const baseBranch = cfg.baseBranch || 'develop';
+  // 配置守卫（B7）：run 启动即记 workflow.json 基线；此后每个 worker 会话派发前校验
+  // （漂移 = 授权配置被外部改写 → 停止派发新会话，在途会话照常收尾）。
+  if (cfg.configGuard?.enabled !== false) captureConfigBaseline(repoRoot);
   const found = findCard(root, taskId);
   if (!found) die(`任务 "${taskId}" 不在队列中（任何状态目录都没找到）。先用 submit 提交任务卡。`);
   if (!['pending', 'running', 'awaiting-human', 'reviewing'].includes(found.state)) {
@@ -427,8 +436,12 @@ async function cmdRun(repoRoot, taskId, opts) {
   //   tier 未打标（网关无同标签 profile）→ 告警不阻断（tier 标签未采纳，向后兼容）；
   //   网关不可得（未开启/不可达/旧版无端点）→ 回落 advisory 目录校验，行为不变。
   let gatewayVerdict = null;
+  // A4 预算实测账的 harness↔task 映射：tier token 经网关解析到的 harness id（无 tier 卡为
+  // null——实测轮询不启动，自报账兜底）。实测油量与离线对账靠它定位「这个 worker 的实测账」。
+  let measuredHarness = null;
   if (tier?.token) {
     gatewayVerdict = await validateTierViaGateway({ token: tier.token, tier: tier.name, base: tier.gatewayBase, optIn: tier.gatewayAdmin });
+    if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) measuredHarness = gatewayVerdict.harness ?? null;
     if (gatewayVerdict.mode === 'gateway' && gatewayVerdict.ok) {
       const tagged = tierTagNames(tier.name).flatMap((n) => gatewayVerdict.tierProfiles?.[n] ?? []);
       if (tagged.length && !tagged.includes(gatewayVerdict.profile)) {
@@ -451,7 +464,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     ...(effWorkerModel ? { worker_model: effWorkerModel } : {}),
     ...(effReviewModel ? { review_model: effReviewModel } : {}),
     ...(gatewayVerdict?.mode === 'gateway' && gatewayVerdict.ok
-      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null }
+      ? { gateway_checked: true, gateway_profile: gatewayVerdict.profile, gateway_provider: gatewayVerdict.provider, gateway_tier: gatewayVerdict.tierTag ?? null, gateway_harness: gatewayVerdict.harness ?? null }
       : {}),
   });
   // 目录校验（advisory）：网关权威校验不可得时的回落路径；模型名不在服务目录 → 告警不阻断
@@ -550,6 +563,12 @@ async function cmdRun(repoRoot, taskId, opts) {
   const trackPid = (e) => {
     if (e.type === 'worker_spawned') livePid = e.pid;
   };
+
+  // ---- 预算实测账（A4，supply.mjs）：worker 运行中每 60s 轮询 harness-usage 的
+  // day_billable_tokens（网关实测可计费口径）喂 budget.accountMeasured——zcode 无逐 turn
+  // 自报（结束才一次性回填），实测账让它获得真实逐时段 token 预算；字段缺失（旧网关）/
+  // 观测不可达 → null → 自报账兜底，行为不回退。reconcile 离线对账逻辑不动。
+  const measuredFuel = startMeasuredFuelPoller({ budget, cfg, harness: measuredHarness, log });
 
   // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
   // 实质进展。observe（缺省）只记 watchdog_suspect 事件；actuate 连续 2 次 suspect 走既有
@@ -661,29 +680,69 @@ async function cmdRun(repoRoot, taskId, opts) {
         await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
         die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
       }
+      // ---- 配置守卫派发闸（B7）：workflow.json 漂移即停止派发新 worker 会话 ----
+      // 在途会话已收尾、下一个会话（初始/fixup 返工）尚未开始 = 派发点。漂移说明授权
+      // 配置被外部改写（被调度方自改合并、人工误改、另一 agent 的合并）——继续用被改
+      // 的授权面派发等于盲飞。卡转 blocked 交人工核实（改回基线自动恢复派发是 drain/
+      // watch 侧语义；run 进程内直接落 blocked 最收敛），编排器自己的合并会在 doApprove
+      // 重置基线，不会走到这里。
+      if (cfg.configGuard?.enabled !== false) {
+        const drift = checkConfigDrift(repoRoot);
+        if (!drift.ok) {
+          const detail = `workflow.json 配置漂移（基线 ${String(drift.drift.from).slice(0, 12)} → 当前 ${String(drift.drift.to).slice(0, 12)}）`;
+          appendEvent(qdir, 'config_drift_detected', { from: drift.drift.from, to: drift.drift.to });
+          try { appendFleetEvent(repoRoot, 'config_drift_detected', { task: taskId, from: drift.drift.from, to: drift.drift.to }); } catch { /* 留痕失败不阻断 */ }
+          moveCard(root, taskId, 'running', 'blocked');
+          appendEvent(qdir, 'blocked', { reason: 'config_drift' });
+          archiveIncident(repoRoot, taskId, root, qdir, detail);
+          await settleNotify(repoRoot, taskId, 'blocked', detail);
+          die(`⛔ ${detail}——配置守卫停止派发（授权配置被外部改写，继续派发 = 盲飞）。任务转 blocked/。\n`
+            + `  人工核实改动：合法变更直接改回或重启编排器接受新基线；来历不明按事故处理。`);
+        }
+      }
       // ---- worker 会话（含 fixup 返工循环；瞬时故障原地退避重试，见 retry 处注释）----
       let result;
       let workerOutput = '';
       let transientAttempt = 0;
+      let promptFileRefLogged = false; // D17 留痕防刷屏：每 run 记一次 prompt_file_ref
       for (;;) {
+        const sessionStartMs = Date.now(); // 本会话起点：结构化故障识别（B6）的日志查询窗口左界
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
         xte.beforeWorkerSession(); // 偏航 no_commit：记会话起点 HEAD（连续 2 会话零提交报警）
         appendEvent(qdir, 'budget_baseline', { tokens_in: budget.tokens, tokens_billable: budget.billable });
         workerSessionSeq += 1; // 看门狗：会话代次（重试/fixup 均翻篇，在途结论随之作废）
         workerInFlight = true; // 看门狗：spawn 在跑标记
         {
+          // 大 prompt 落文件（D17）：超过阈值先把全文落 logs/<taskId>/prompt-full.md
+          // （.agents/orchestrator/logs 已 gitignore——不进 worktree、不污染 diff/审查面），
+          // 正文收缩为「文件引用 + 要点摘要」，worker 开工先读全文。zcode argv 30k 上限
+          // 因此在常规路径不再触达；escalation 换船保留为最后兜底（阈值 20k < 30k，
+          // 正常不再触发；fixup/resume 追加的交接班单/失败输出同样被本收缩覆盖）。
+          let spawnPrompt = promptText;
+          if (promptText.length > PROMPT_FILE_THRESHOLD_CHARS) {
+            const full = path.join(logDir(repoRoot, taskId), 'prompt-full.md');
+            fs.mkdirSync(path.dirname(full), { recursive: true });
+            fs.writeFileSync(full, promptText);
+            spawnPrompt = buildPromptFileRefBody({ promptPath: full, card, ctx, originalChars: promptText.length });
+            if (!promptFileRefLogged) {
+              promptFileRefLogged = true;
+              appendEvent(qdir, 'prompt_file_ref', { chars: promptText.length, threshold: PROMPT_FILE_THRESHOLD_CHARS, path: full });
+              log(`📄 prompt 过大（${promptText.length} > ${PROMPT_FILE_THRESHOLD_CHARS} 字符）：全文已落 ${full}，worker prompt 收缩为文件引用 + 要点摘要（escalation 兜底保留）`);
+            }
+          }
           // 升级链第 1 档（escalation.mjs）：zcode 船 prompt 超限自动切 fallback 船——
           // escalation 配置即持久授权（同 autopilot），engine_escalated 事件留痕；
           // 预算延续不重置（Budget 实例不变，已耗口径延续）；每 run 至多升档一次。
-          const esc = shouldEscalatePrompt({ backend: opts.backend, promptLen: promptText.length, cfg });
+          // D17 落文件后 spawnPrompt 恒小于阈值，此分支仅为兜底（如阈值被调大过 30k）。
+          const esc = shouldEscalatePrompt({ backend: opts.backend, promptLen: spawnPrompt.length, cfg });
           if (esc.escalate && !escalatedThisRun) {
             escalatedThisRun = true;
-            appendEvent(qdir, 'engine_escalated', { reason: 'prompt_oversize', from: opts.backend, to: esc.to, prompt_chars: promptText.length });
+            appendEvent(qdir, 'engine_escalated', { reason: 'prompt_oversize', from: opts.backend, to: esc.to, prompt_chars: spawnPrompt.length });
             log(`⏫ 升级链：${esc.reason}——自动切 fallback 船 ${esc.to}（engine_escalated 已留痕；预算延续不重置）`);
             opts.backend = esc.to;
             backend = await getBackend(esc.to);
           }
-          fs.writeFileSync(promptFile, promptText);
+          fs.writeFileSync(promptFile, spawnPrompt);
           if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, tierEnv, worktree);
           appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
@@ -715,18 +774,36 @@ async function cmdRun(repoRoot, taskId, opts) {
             die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
           }
         }
-        // 自报不可信：先解析契约块。异常结束（无结果块）且输出带瞬时故障签名
-        // （429 限流/网络抖动——headless 引擎与交互会话共享配额，夜跑 16 次「未产出
-        // 结果块」大头是它）→ 原地退避重试同一 prompt（60s×attempt，≤3 次，事件留痕），
-        // worktree 半成品改动就地续用；签名不匹配或自报 stuck → 走既有 blocked 路径。
+        // 自报不可信：先解析契约块。异常结束（无结果块）→ 结构化信号优先定性（B6）：
+        // 查网关日志会话窗口内本 harness 的 429/5xx/quota 记录，命中 = 结构化 transient
+        // （上游改错误文案不再致盲）；未命中/无网关数据（gatewayLogDir 未配、读取失败
+        // fail-open、worker 绕行网关）→ 落回既有 stderr 正则兜底。定性为 transient →
+        // 原地退避重试同一 prompt（60s×attempt，≤3 次，事件留痕带识别来源），worktree
+        // 半成品改动就地续用；否则或自报 stuck → 走既有 blocked 路径。
         const preClaimed = parseResultBlock(workerOutput);
-        if (!preClaimed && isTransientWorkerFailure(workerOutput, result.stderrTail) && transientAttempt < MAX_WORKER_RETRIES) {
-          transientAttempt += 1;
-          const waitMs = RETRY_WAIT_BASE_MS * transientAttempt;
-          appendEvent(qdir, 'worker_retry', { attempt: transientAttempt, max: MAX_WORKER_RETRIES, wait_ms: waitMs });
-          log(`⚠ worker 疑似瞬时故障（限流/网络）——${waitMs >= 1000 ? `${Math.round(waitMs / 1000)}s` : `${waitMs}ms`} 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
-          await new Promise((r) => setTimeout(r, waitMs));
-          continue;
+        if (!preClaimed && transientAttempt < MAX_WORKER_RETRIES) {
+          const crash = classifyWorkerCrashFromDisk({
+            gwDir: gatewayLogsDir(cfg),
+            output: workerOutput,
+            stderrTail: result.stderrTail,
+            window: { startMs: sessionStartMs, endMs: Date.now() },
+            backend: opts.backend,
+          });
+          if (crash.transient) {
+            transientAttempt += 1;
+            const waitMs = retryWaitBaseMs(cfg) * transientAttempt;
+            appendEvent(qdir, 'worker_retry', {
+              attempt: transientAttempt,
+              max: MAX_WORKER_RETRIES,
+              wait_ms: waitMs,
+              source: crash.source,
+              ...(crash.source === 'gateway' ? { gateway_hits: crash.hits, signature: crash.reason } : {}),
+            });
+            const how = crash.source === 'gateway' ? `网关日志 ${crash.hits} 条崩溃记录（${crash.reason}）` : 'stderr 瞬时签名';
+            log(`⚠ worker 疑似瞬时故障（${how}）——${waitMs >= 1000 ? `${Math.round(waitMs / 1000)}s` : `${waitMs}ms`} 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
+            await new Promise((r) => setTimeout(r, waitMs));
+            continue;
+          }
         }
         break;
       }
@@ -1054,6 +1131,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     if (reason) die(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
     throw e;
   } finally {
+    measuredFuel.stop(); // 实测油量轮询（A4）：任务收尾即停，不留跨任务定时器
     clearTimeout(budget.wallTimer);
     releaseTaskLock(repoRoot, taskId);
     try {
@@ -1450,6 +1528,25 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
   appendEvent(qdir, 'merged', { merge_commit: mergeCommit, ...(source === 'auto' ? { auto: true } : {}) });
   log(`已合并：${mergeCommit.slice(0, 7)}（任务转 merged/${source === 'auto' ? '，自动合并' : ''}）`);
+  // 配置守卫（B7）：编排器自己 finish 合并带来的 workflow.json 变更（合并卡改了授权配置、
+  // 已过门禁与人审）= 合法变更——merge 动作完成后重置基线，下次派发校验按新基线放行。
+  resetConfigBaseline(repoRoot);
+  // 提案清退（B9，闭环内动作）：与刚合并卡 files_hint 重叠的 drafts/ 提案自动迁入
+  // drafts/superseded/ 并标注合并卡 id——现场已被真实实现覆盖，提案留着会误导 planner
+  // 与人工。仅标题相似的不迁（防误杀）。尽力而为，任何失败不影响合并结果。
+  if (loadWorkflowConfig(repoRoot).draftsGc?.autoSupersede !== false) {
+    let mergedMeta = null;
+    try {
+      mergedMeta = parseCard(fs.readFileSync(cardPath(root, 'merged', taskId), 'utf8'), taskId).meta;
+    } catch { /* 损坏卡：清退跳过，提案留原地 */ }
+    if (mergedMeta) {
+      const moved = supersedeForMerged(repoRoot, { mergedId: taskId, filesHint: mergedMeta.files_hint });
+      if (moved.length) {
+        log(`🧹 提案清退：${moved.join(', ')} → drafts/superseded/（改动面与 ${taskId} 重叠）。`);
+        try { appendFleetEvent(repoRoot, 'drafts_superseded', { task: taskId, drafts: moved }); } catch { /* 留痕失败不阻断 */ }
+      }
+    }
+  }
   // 成功出港同样通知（此前 merged 静默——失败人人皆知、成功无声，体验反了）
   await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
 }
@@ -1708,6 +1805,49 @@ function announceWeatherHold(repoRoot, cfg, w) {
   }).catch(() => { /* 卡片失败不阻断 */ });
 }
 
+/**
+ * 配置守卫派发闸（B7）——drain/watch/sail 共用的「派发前校验」步进：
+ * workflow.json 当前 hash ≠ 启动基线 → 宣布（log + fleet 级事件 config_drift_detected
+ * 含前后 hash + webhook 通知，通知尽力而为）并返回 false（调用方暂停新派发，在途任务继续）。
+ * 恢复 = 文件改回基线（hash 复合）或编排器自己 merge 后的 resetConfigBaseline；
+ * 人工/外部改配置要生效须重启编排器（重启即重新记基线）。
+ * configGuard.enabled=false（不推荐）→ 恒放行，行为与无守卫版本一致。
+ */
+function configGuardPass(repoRoot, cfg) {
+  if (cfg.configGuard?.enabled === false) return true;
+  const v = checkConfigDrift(repoRoot);
+  if (v.ok) {
+    configDriftAnnouncedKey = null; // 漂移解除（文件改回基线 / merge 后重置）：复位宣布去重
+    return true;
+  }
+  const detail = `workflow.json 配置漂移（基线 ${String(v.drift.from).slice(0, 12)} → 当前 ${String(v.drift.to).slice(0, 12)}）`;
+  // 宣布去重：并发 pump/循环轮会反复进闸——同一漂移 episode（前后 hash 相同）只宣布一次
+  const key = `${v.drift.from}->${v.drift.to}`;
+  if (configDriftAnnouncedKey !== key) {
+    configDriftAnnouncedKey = key;
+    log(`⛔ 配置守卫：${detail}——暂停新派发（在途任务继续）。恢复：文件改回基线，或核实合法后重启编排器接受新配置。`);
+    try {
+      appendFleetEvent(repoRoot, 'config_drift_detected', { from: v.drift.from, to: v.drift.to });
+    } catch { /* 留痕失败不阻断调度 */ }
+    void notify({
+      title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 配置守卫`,
+      body: `${detail}——已暂停新派发（在途任务继续）。核实改动：合法则重启编排器接受新基线；来历不明按事故处理。`,
+      webhookEnvs: orchWebhookEnvs(repoRoot),
+    }).catch(() => { /* 通知失败不阻断 */ });
+    void notifyActionCard({
+      repoRoot,
+      webhookEnvs: orchWebhookEnvs(repoRoot),
+      taskId: null,
+      title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 配置守卫`,
+      reason: `${detail}——已暂停新派发。核实后重启编排器接受新基线，或按事故处理。`,
+    }).catch(() => { /* 卡片失败不阻断 */ });
+  }
+  return false;
+}
+
+/** 配置守卫宣布去重键（同一漂移 episode 只 announce 一次；复位见 configGuardPass）。 */
+let configDriftAnnouncedKey = null;
+
 /** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」
  *  + 任务花名册（按任务号列本次做了什么、目标是什么）。 */
 async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
@@ -1776,10 +1916,30 @@ function autoResumePass(repoRoot, root, cfg, opts) {
   return resumed;
 }
 
+/**
+ * scan 卡自动转修复卡（B10）：drain 落位点调用——failed 的是 scan 型卡（id scan- 前缀，
+ * 见 scanfix.mjs）且 scanAutoFix.enabled（缺省 true）时，自动补一张 pending 修复卡
+ * （id fix-<原名>，正文引用 incident.md 与失败摘要，files_hint/门禁继承原卡）。修复卡
+ * 是普通卡照走全部门禁（引水闸/L2L3 人审不绕过）；同名修复卡任一状态已存在即跳过；
+ * 修复卡自身 failed 不再繁殖新卡（id 无 scan- 前缀，防循环）。尽力而为，不阻断调度。
+ */
+function scanAutoFixPass(repoRoot, root, scanId, cfg) {
+  if (cfg?.scanAutoFix?.enabled === false) return;
+  const r = scanAutoFixAfterFailure(repoRoot, root, scanId, { enabled: true });
+  if (!r) return; // 非 scan 卡：静默（判定在 scanfix.mjs，id 前缀不匹配）
+  if (r.created) {
+    log(`🛠 scan 卡 ${scanId} 已 failed——自动生成修复卡 pending/${r.id}.md（引用 incident.md 与失败摘要；普通卡照走全部门禁）。`);
+  } else {
+    console.warn(`[orchestrator] scan 卡 ${scanId} 自动转修复卡未执行：${r.reason}`);
+  }
+}
+
 async function cmdDrain(repoRoot, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const cfg = runConfig(repoRoot);
+  // 配置守卫（B7）：调度进程启动即记 workflow.json 基线（run 子进程各自记自己的，跨进程不共享）
+  if (cfg.configGuard?.enabled !== false) captureConfigBaseline(repoRoot);
   // 调度器互斥：drain / nightly / scan --run 同刻只允许一个在跑（run-lock.mjs）。
   // 子进程经 childEnvForHeldLock 豁免（run 不抢锁；被 spawn 的 drain 继承父锁语义）。
   const lock = acquireSchedulerLock(repoRoot, 'drain');
@@ -1788,7 +1948,27 @@ async function cmdDrain(repoRoot, opts) {
     return;
   }
   try {
-    const workers = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : 1;
+    // 有效并发 = min(请求并发, 供给闸)（A3 有闸门的扩容）：请求并发 = CLI --workers（显式
+    // 单次意图，最高优先）> workflow.json scheduling.maxWorkers（缺省 1 = 现状不变）。
+    // 供给闸只在请求并发 > 1 时探测（默认单 worker 路径零网络开销）：gatewayAdmin 未开
+    // → 完全不设闸不触达（可移植红线）；已开则经 tier token → provider 容量（config 的
+    // max_concurrency + metrics 的 keypool，见 supply.mjs），任一环节不可达/字段缺失 →
+    // 容量 1——回落单 worker 现状（只是不扩容，派发照常，绝不因观测失败中断 drain）。
+    const requested = Number.isInteger(opts.workers) && opts.workers > 1 ? opts.workers : (cfg.scheduling?.maxWorkers ?? 1);
+    let workers = requested;
+    if (requested > 1) {
+      const supply = await drainSupplyProbe(repoRoot, root, cfg);
+      workers = Math.min(requested, supply.capacity);
+      if (workers < requested) {
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: requested, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        log(`⚠ 供给闸：请求并发 ${requested}，provider 容量 ${supply.capacity === Infinity ? '∞（观测缺席）' : supply.capacity}（${supply.reason}）——按 ${workers} 并发执行`);
+      } else if (!opts.workers) {
+        // 配置驱动的自动扩容（无显式 --workers）：留痕解锁链（网关 max_concurrency/key 池
+        // 解锁 → workflow.json scheduling.maxWorkers → drain 自动生效），永不静默红线
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: 1, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        log(`⛵ 供给闸：provider 容量 ${workers}（${supply.reason}）——按 scheduling.maxWorkers=${requested} 并发执行`);
+      }
+    }
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
     // 选卡前先过一遍 blocked 自动续通道（串行/并发路径共用；引擎预检通过才续，防止坏引擎把卡反复烧）
     autoResumePass(repoRoot, root, cfg, opts);
@@ -1817,6 +1997,13 @@ async function cmdDrain(repoRoot, opts) {
           return;
         }
       }
+      // 配置守卫（B7）：派发前校验——workflow.json 漂移即停止本轮派发（在途 run 子进程
+      // 天然继续）；文件改回基线后下一轮 drain 自动恢复。
+      if (!configGuardPass(repoRoot, cfg)) {
+        await drainSummaryNotify(repoRoot, done, tally, '配置守卫：workflow.json 漂移，暂停派发', tasks);
+        return;
+      }
+
       const next = pickNextCard(root, { skipIds });
       if (!next) {
         // 引水卡也在 pending/：从「解析失败」清单里排除（它们不是坏卡，是待确认）
@@ -1886,11 +2073,35 @@ async function cmdDrain(repoRoot, opts) {
       if (settled) {
         tally[settled] = (tally[settled] ?? 0) + 1;
         tasks.push({ id: next.id, state: settled });
+        if (settled === 'failed') scanAutoFixPass(repoRoot, root, next.id, cfg); // scan 卡断链自愈（B10）
       }
     }
   } finally {
     releaseSchedulerLock(repoRoot);
   }
+}
+
+/**
+ * drain 供给闸探测（A3，supply.mjs）：扫 pending 卡取第一张带有效 tier token 的卡，以其
+ * tier token 作为 worker 流量的代表路由做容量观测（同 tier 的卡共享同一 provider 容量池；
+ * 全部卡无 tier token → probe 内按「字段缺失」回落单 worker，fail-open 口径见 supply.mjs）。
+ * 解析失败卡跳过（由调度循环另行处理）；每 drain 只探一次，不随 pump 重复触达网关。
+ */
+async function drainSupplyProbe(repoRoot, root, cfg) {
+  let token = null;
+  let tierName = null;
+  for (const id of listCards(root, 'pending')) {
+    try {
+      const card = loadCard(fs.readFileSync(cardPath(root, 'pending', id), 'utf8'), `${id}.md`);
+      const t = resolveTier(card.meta, cfg);
+      if (t?.token) {
+        token = t.token;
+        tierName = t.name;
+        break;
+      }
+    } catch { /* 解析失败卡由调度循环处理 */ }
+  }
+  return probeProviderCapacity({ token, tier: tierName, optIn: cfg.gatewayAdmin === true });
 }
 
 /**
@@ -1943,6 +2154,7 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
       if (state) {
         tally[state] = (tally[state] ?? 0) + 1;
         tasks.push({ id: card.id, state });
+        if (state === 'failed') scanAutoFixPass(repoRoot, root, card.id, pilotCfg); // scan 卡断链自愈（B10）
       }
       // 终局摘要（尽力而为）：全部发射的子进程已收尾且无后续可调度（或已达 --max 上限）。
       // 引水跳过卡与拉黑卡同等对待：不算「可调度」，否则摘要把它们误报成未跑任务。
@@ -1985,6 +2197,12 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
           }
           return;
         }
+      }
+      // 配置守卫（B7）：发射前校验——漂移即停止调度新任务（在途子进程照常收尾，exit
+      // 回调里的收官摘要照发）；同一漂移 episode 只宣布一次（configGuardPass 内去重）。
+      if (!configGuardPass(repoRoot, cfg)) {
+        if (active.size === 0) log('配置守卫：workflow.json 漂移，无在跑任务，本次 drain 结束。');
+        return;
       }
       const candidates = listCards(root, 'pending').filter((id) => !blacklisted.has(id) && !pilotageSkip.has(id));
       let picked = null;
@@ -2338,6 +2556,56 @@ function highPriorityDraftIds(repoRoot) {
     if (text && /priority:\s*high/.test(text)) high.push(f.replace(/\.md$/, ''));
   }
   return high;
+}
+
+/**
+ * drafts gc——提案生命周期清退（B9）：扫 drafts/ 顶层提案，产出两份迁移清单——
+ *   superseded：files_hint 与 merged/ 卡重叠（真实实现已覆盖提案现场）；
+ *   aged：超 draftsGc.archiveDays（缺省 30 天，created_at 优先、mtime 兜底）。
+ * 缺省 dry-run 只列清单；--apply 才迁移（superseded/ 带标注、archived/ 原文）。
+ * 永不删除文件；仅标题相似（goal Jaccard ≥ 0.6）的不迁，只在报告中提示（防误杀）。
+ */
+function cmdDraftsGc(repoRoot, opts) {
+  const cfg = loadWorkflowConfig(repoRoot);
+  const apply = opts.flags?.has('--apply') ?? false;
+  const archiveDays = cfg.draftsGc?.archiveDays ?? DEFAULT_ARCHIVE_DAYS;
+  const { drafts, unreadable } = listDrafts(repoRoot);
+  // merged/ 卡摘要（清退对照面）：损坏卡跳过
+  const root = queueRoot(repoRoot);
+  const mergedCards = [];
+  for (const id of listCards(root, 'merged')) {
+    try {
+      const { meta, body } = parseCard(fs.readFileSync(cardPath(root, 'merged', id), 'utf8'), `${id}.md`);
+      mergedCards.push({ id, filesHint: meta.files_hint ?? [], goal: body.goal ?? '' });
+    } catch { /* 损坏卡不进对照面 */ }
+  }
+  const plan = planGc(drafts, mergedCards, { now: Date.now(), archiveDays });
+  log(`drafts gc${apply ? '（--apply 执行迁移）' : '（dry-run，加 --apply 才动文件）'}：提案 ${drafts.length} 张、merged 对照 ${mergedCards.length} 张${unreadable.length ? `、解析失败 ${unreadable.length} 张（${unreadable.join(', ')}）` : ''}。`);
+  if (plan.superseded.length) {
+    log(`\n【superseded 候选】改动面已被 merged 卡覆盖（${plan.superseded.length} 张）：`);
+    for (const { draft, mergedId } of plan.superseded) log(`  - ${draft.file} ← ${mergedId}`);
+  } else {
+    log('\n【superseded 候选】无（没有与 merged 卡改动面重叠的提案）。');
+  }
+  if (plan.aged.length) {
+    log(`\n【aged 候选】超 ${archiveDays} 天（${plan.aged.length} 张）：`);
+    for (const { draft, ageDays } of plan.aged) log(`  - ${draft.file}（${ageDays} 天）`);
+  } else {
+    log(`\n【aged 候选】无（没有超 ${archiveDays} 天的提案）。`);
+  }
+  if (plan.titleSimilar.length) {
+    log(`\n【仅标题相似，不迁（防误杀）】${plan.titleSimilar.length} 张：`);
+    for (const { draft, mergedId } of plan.titleSimilar) log(`  - ${draft.file} ≈ ${mergedId}（目标相似但 files_hint 不重叠——人工判断是否废弃）`);
+  }
+  if (!apply) {
+    if (plan.superseded.length || plan.aged.length) log(`\ndry-run 结束：加 --apply 迁移 ${plan.superseded.length + plan.aged.length} 张（superseded/ ${plan.superseded.length}、archived/ ${plan.aged.length}）。`);
+    return;
+  }
+  const r = applyGc(repoRoot, plan, { now: Date.now() });
+  for (const m of r.movedSuperseded) log(`  迁移 ${m.file} → drafts/superseded/`);
+  for (const m of r.movedAged) log(`  迁移 ${m.file} → drafts/archived/`);
+  for (const f of r.failed) console.warn(`[orchestrator] 迁移失败 ${f.file}：${f.reason}（留原地，绝不删除）`);
+  log(`\n--apply 完成：superseded ${r.movedSuperseded.length} 张、archived ${r.movedAged.length} 张${r.failed.length ? `、失败 ${r.failed.length} 张` : ''}。`);
 }
 
 /**
@@ -3017,6 +3285,8 @@ async function cmdWatch(repoRoot, opts) {
     log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——watch 不并发调度。`);
     return;
   }
+  // 配置守卫（B7）：瞭望进程启动即记 workflow.json 基线（每周期派发前校验，见下）
+  if (loadWorkflowConfig(repoRoot).configGuard?.enabled !== false) captureConfigBaseline(repoRoot);
   const intervalMin = opts.interval === 0 ? 0 : Number.isInteger(opts.interval) && opts.interval > 0 ? opts.interval : 30; // 0 = 不休眠（仅测试/调试用）
   const maxCycles = Number.isInteger(opts.maxCycles) && opts.maxCycles > 0 ? opts.maxCycles : Infinity;
   const stopFile = path.join(repoRoot, '.agents', 'orchestrator', '.watch-stop');
@@ -3042,6 +3312,9 @@ async function cmdWatch(repoRoot, opts) {
       }
       // 1) pending 非空 → drain（autopilot.autoDrainPerCycle > 0 时按它设每周期上限）
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读：改配置即时生效
+      // 配置守卫（B7）：workflow.json 漂移期间跳过派发/重探（改配置即时生效的老语义让位
+      // 给守卫——被改的授权面不再静默生效；文件改回基线或重启编排器后恢复）
+      const configPaused = !configGuardPass(repoRoot, cfg);
       let pending = listCards(root, 'pending');
       const cap = Number.isInteger(cfg.autopilot?.autoDrainPerCycle) && cfg.autopilot.autoDrainPerCycle > 0 ? cfg.autopilot.autoDrainPerCycle : Infinity;
       // 风暴闸（瞭望位先看天）：滞留则本周期不派发（drain/投机重探全跳过），scan/propose
@@ -3057,7 +3330,7 @@ async function cmdWatch(repoRoot, opts) {
         weatherAnnounced = false;
       }
       if (pending.length) {
-        if (!weather.held) {
+        if (!weather.held && !configPaused) {
           const n = Math.min(pending.length, cap);
           log(`pending ${pending.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
           spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
@@ -3074,7 +3347,7 @@ async function cmdWatch(repoRoot, opts) {
           spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
           // 提案被白名单自动提交后队列非空 → 本周期内立即推进，不等到下一周期
           const submitted = listCards(root, 'pending');
-          if (submitted.length && !weather.held) {
+          if (submitted.length && !weather.held && !configPaused) {
             const n = Math.min(submitted.length, cap);
             log(`autopilot 提交 ${submitted.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
             spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
@@ -3086,8 +3359,8 @@ async function cmdWatch(repoRoot, opts) {
         }
       }
       // 3) 瞬时故障 blocked 卡的一次性有痕重探（投机执行，资格判定见 speculativeResumes）；
-      //    风暴滞留期间跳过——重探也是派发，风暴中重探只会再撞一次限流
-      if (!weather.held) speculativeResumes(repoRoot, root, childEnv, opts);
+      //    风暴滞留 / 配置守卫漂移期间跳过——重探也是派发
+      if (!weather.held && !configPaused) speculativeResumes(repoRoot, root, childEnv, opts);
       if (cycle >= maxCycles) {
         log(`已达 --max-cycles ${maxCycles}，watch 退出。`);
         break;
@@ -3164,6 +3437,9 @@ async function cmdSail(repoRoot, opts) {
     log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——sail 不并发调度。`);
     return;
   }
+  // 配置守卫（B7）：航程启动即记 workflow.json 基线（每周期派发前校验，见下）。
+  // 2026-11 实证动机：sail 派发的卡自改 workflow.json 默认引擎——授权面被被调度方改写。
+  if (cfg0.configGuard?.enabled !== false) captureConfigBaseline(repoRoot);
   const startedAt = Date.now();
   const deadline = startedAt + minutes * 60_000;
   const maxTasks = Number.isInteger(opts.maxTasks) && opts.maxTasks > 0 ? opts.maxTasks : Infinity;
@@ -3238,6 +3514,9 @@ async function cmdSail(repoRoot, opts) {
       }
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读（watch 同款：改配置即时生效）
       const weather = cfg.weatherHold ? weatherHoldCount(repoRoot, cfg) : { held: false, count: 0 };
+      // 配置守卫（B7）：workflow.json 漂移期间跳过派发与规划（同风暴闸语义；改回基线或
+      // 重启后恢复）
+      const configPaused = !configGuardPass(repoRoot, cfg);
       if (weather.held && !weatherAnnounced) {
         weatherAnnounced = true;
         announceWeatherHold(repoRoot, cfg, weather);
@@ -3278,7 +3557,7 @@ async function cmdSail(repoRoot, opts) {
         } catch { continue; } // 解析失败卡不可派发（drain 同样跳过）
       }
       const cycle = { n: cycleNo, at: new Date().toISOString(), kind: null, dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin: 0 };
-      if (hasDispatchable && !weather.held) {
+      if (hasDispatchable && !weather.held && !configPaused) {
         // 派发轮：一次只派一张——每张之间重新看表（截止/风暴/降级/stop 文件）
         cycle.kind = 'dispatch';
         log(`\n──── sail 周期 ${cycleNo} → drain --max 1（已派 ${voyage.dispatchedTotal}${maxTasks === Infinity ? '' : `/${maxTasks}`}，剩余 ${remainingMin()} 分钟）────`);
@@ -3296,11 +3575,11 @@ async function cmdSail(repoRoot, opts) {
         writeVoyage();
         continue; // 不休眠：立即看表再决定
       }
-      // 规划轮：队列空（或风暴滞留）→ 巡检出提案；propose 烧钱——风暴中跳过
+      // 规划轮：队列空（或风暴滞留/配置守卫漂移）→ 巡检出提案；propose 烧钱——风暴中跳过
       cycle.kind = 'plan';
       const draftsBefore = snapshotDrafts(repoRoot);
       spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
-      if (!weather.held) {
+      if (!weather.held && !configPaused) {
         log(`\n──── sail 周期 ${cycleNo} → propose（自由航行规划，剩余 ${remainingMin()} 分钟）────`);
         spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
         const draftsAfter = snapshotDrafts(repoRoot);
@@ -3310,7 +3589,9 @@ async function cmdSail(repoRoot, opts) {
         cycle.submitted = sub.submitted;
         cycle.skipped = sub.skipped;
       } else {
-        log('风暴滞留生效中：本周期跳过规划与派发（窗口滑过后自动恢复）。');
+        log(weather.held
+          ? '风暴滞留生效中：本周期跳过规划与派发（窗口滑过后自动恢复）。'
+          : '配置守卫生效中：本周期跳过规划与派发（文件改回基线或重启编排器后恢复）。');
       }
       voyage.cycles.push(cycle);
       // 休眠：本轮无新卡可派才睡（有提交 → 下一轮直接派发）；分片睡，stop 文件/Ctrl-C/到点即醒
@@ -3484,6 +3765,7 @@ function usage() {
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
+  drafts gc [--apply]                     提案生命周期清退（dry-run 只列清单；--apply 迁移文件，永不删除）：与 merged 卡 files_hint 重叠的提案迁 drafts/superseded/（带标注），超 draftsGc.archiveDays（缺省 30 天）迁 drafts/archived/
   nightly [--tests] [--plan] [--auto N] [--backend …] [--review-backend …] [--manual]
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]
@@ -3596,6 +3878,9 @@ async function main() {
     }
     case 'propose':
       return cmdPropose(repoRoot, opts);
+    case 'drafts':
+      if (args[0] !== 'gc') die('用法：drafts gc [--apply]（dry-run 缺省只列清单）');
+      return cmdDraftsGc(repoRoot, opts);
     case 'scan':
       return cmdScan(repoRoot, opts);
     case 'nightly':

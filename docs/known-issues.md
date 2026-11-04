@@ -404,12 +404,13 @@
 
 **CORRECT-09（P2，2026-10-30 夜巡发现，逐条读码核实）relay failover 链可观测性三项**
 
-> ☑ **已修 2026-10-30（@bf730c6，T28 卡）**：① injectModel 守卫补 Array.isArray（数组按「顶层非对象」契约透传，不谎报 modelAfter）；② 全候选 candidateSkip 耗尽时透传最后一个 skip 错误的 status/hint、routeReason 引入 skip_all（transport 耗尽保持 502+down_all）；③ replayedFrom 改数组累积去重，reason 输出 replayed_from:A,B。定向回归：hotpath 数组不谎报 + relay.test.ts forwardWithFailover 三例（全 skip 透传 / 三跳累积 / 正常 failover 不变）+ gateway.test.ts 端到端断言更新为累积形态。卡点外的两条存疑（ECONNRESET promise 阶段重放边界、QUOTA_BODY_RE 中文额度词）维持留档未动。
+> ☑ **已修 2026-10-30（@bf730c6，T28 卡）**：① injectModel 守卫补 Array.isArray（数组按「顶层非对象」契约透传，不谎报 modelAfter）；② 全候选 candidateSkip 耗尽时透传最后一个 skip 错误的 status/hint、routeReason 引入 skip_all（transport 耗尽保持 502+down_all）；③ replayedFrom 改数组累积去重，reason 输出 replayed_from:A,B。定向回归：hotpath 数组不谎报 + relay.test.ts forwardWithFailover 三例（全 skip 透传 / 三跳累积 / 正常 failover 不变）+ gateway.test.ts 端到端断言更新为累积形态。卡点外的两条存疑（ECONNRESET promise 阶段重放边界、QUOTA_BODY_RE 中文额度词）维持留档未动；其中存疑 b 已于 2026-11-03 读码核实为「已含中文」（2026-11-01 v1.5.2 转正时一并修复，见下）。
 - 发现者：审查者（GLM-5.3-Flash）对 relay.ts @ HEAD 的夜巡挖洞（报告 runs/2026-10-30-hunt-relay.md），本侧逐条读码核实机制成立。
 - ① `injectModel`（relay.ts:325-336）与调用点（:365）的守卫 `!json || typeof json !== 'object'` 拦不住数组（`typeof [] === 'object'`）：顶层数组请求体 + 需改写模型时，`json.model = final` 设数组 expando、`JSON.stringify` 丢弃之——返回的 body **未注入 model** 但 `modelAfter: final` 谎报已改写，日志/usage 记录与实际发出 body 不一致（可观测性 lie；对非法数组上游本会 400，非功能损坏）。修法：两处补 `Array.isArray(json)`。
 - ② failover 链尾出口（relay.ts:630-633）：候选耗尽统一包 `new UpstreamError(502, '所有候选服务连接失败（msg）')`，不传 hint、不透传 lastErr 的 status。全链候选都是 candidateSkip（key 缺失 / 协议端点缺失 / **钥匙环锁定 503+「检查系统钥匙环是否已解锁」hint**）时，客户端收到的是 502「连接失败」——status、hint、routeReason（down_all，实则从未连接）三重失真。修法：耗尽时 lastErr 是 UpstreamError 则透传其 status/hint（candidateSkip 类原样上抛亦可）。
 - ③ `replayedFrom`（relay.ts:589,608,628）单变量反复覆盖：A→B→C 连续重放只留下 `replayed_from:B`，A 丢失——与该字段自述用途「日志对账」相悖。修法：改数组累积 join。
-- 存疑（不下结论，待作者确认）：a) ECONNRESET/EPIPE 在 promise 阶段即重试/failover，请求可能已送达甚至计费，与 ：115-116 注释的自述边界相抵——是取舍还是疏漏未见记录；b) `QUOTA_BODY_RE = /quota|insufficient/i` 不含中文（额度/配额/余额/欠费），国内上游中文 429 额度体不会触发恒可切换——同文件 MODEL_MISSING_RE 已覆盖中文，口径不一致。
+- 存疑（不下结论，待作者确认）：a) ECONNRESET/EPIPE 在 promise 阶段即重试/failover，请求可能已送达甚至计费，与 ：115-116 注释的自述边界相抵——是取舍还是疏漏未见记录。
+- ☑ **存疑 b 已核实（2026-11-03，读码核实 + 回归测试坐实）**：`QUOTA_BODY_RE` 现为 `/quota|insufficient|额度|配额|余额|欠费/i`（`src/gateway/relay.ts`，isQuotaError 上方常量）——四个中文特征词（额度/配额/余额/欠费）已全部在列，2026-11-01 v1.5.2 随 T28 存疑项坐实转正一并修复（CHANGELOG 当期已记「国内上游 429 额度提示（中文）可识别并触发自动切换」），只是本档当时未同步。回归：test/relay.test.ts「上游 429 中文额度体识别为 quota 类」走真实 forwardWithFailover 断言中文额度体不受 failover_status_codes 白名单限制恒可切换，四个中文词逐一覆盖。
 - 修复后 ①② 均可回流为审查评测考题。
 
 **CORRECT-10（P2，2026-10-31 test-gap-presets-sync 施工发现，读码核实）syncdoc 定时规则 HH:mm 只验形状**

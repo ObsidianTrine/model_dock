@@ -97,6 +97,7 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 |---|---|
 | `scan` | 巡检 6 类信号出提案，落 drafts/（**不进队列**） |
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
+| `drafts gc [--apply]` | 提案清退（B13）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除） |
 | `nightly [--plan] [--auto N]` | 一次完整巡检编排；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
 | `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+自动提交→执行循环），到点收帆交航海报告 |
@@ -238,12 +239,12 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 
 - **调度器锁**：drain / nightly / scan --run / watch 共用一把（`.scheduler-lock.json`），后来者提示退出；持锁进程死 = 陈锁自动接管。手动 `run <id>` 不抢调度器锁。
 - **任务锁**：每卡 `.run-<task-id>.lock`——同一泊位（worktree）不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 D4）。
-- **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。
+- **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。`gatewayAdmin: true` 的仓库并发还受 **供给闸**（B12）约束：有效并发 = min(请求并发, provider 容量)——上游没解锁 `max_concurrency>=2` 时请求多档也只跑单 worker（fail-safe，防 429 烧上游）。
 
 ## B. 自主模式详解
 
 需求侧生命周期：**出提案（drafts/ 待审托运申请）→ 人工批量 submit 或 autopilot（自动舵）白名单自动提交（pending/ 待泊）→ 常规闭环（闸门原样）**。人（船东）只审提案与合并两级。
-- **blocked 卡什么时候会自动续跑**：drain（含 nightly `--auto` 拉起的 drain）在选卡前会扫一遍 `blocked/`，对**可安全自动续**的卡有限自动 resume——夜里被 429 限流/网络抖动打 blocked 的卡不再等到早上。资格三条：① 失败属 transient 类——最后一条 blocked/failed 事件的 reason 带 429 限流/网络签名，或事件链有 `worker_retry` 记录（worker 原地重试已发生）且最终落 blocked（预算/看门狗/调试迭代熔断是确定性失败，不续）；② 卡 frontmatter 无 `auto_resumed_at` 或距上次自动续 ≥24h（`autoResume.cooldownHours` 可调）——自动续后再 blocked 不立即重试，等人工或冷却过期；③ 每次 drain 最多 `autoResume.maxPerRun` 张（缺省 2），blocked 最早的先续。每次自动续记 `auto_resume { card, attempts }` 事件（人工 resume 的 `resumed by human` 与之区分）。drift 降级期间整个通道暂停（降级 = 全人工）。全局关闭：workflow.json 写 `"autoResume": { "enabled": false }`（其余键缺省即 true/2/24）。
+- **blocked 卡什么时候会自动续跑**：drain（含 nightly `--auto` 拉起的 drain）在选卡前会扫一遍 `blocked/`，对**可安全自动续**的卡有限自动 resume——夜里被 429 限流/网络抖动打 blocked 的卡不再等到早上。资格三条：① 失败属 transient 类——最后一条 blocked/failed 事件的 reason 带 429 限流/网络签名，或事件链有 `worker_retry` 记录（worker 原地重试已发生）且最终落 blocked，或 reason 是「未产出结果块」族（worker 异常结束，2026-11 起纳入——本质是 zcode 崩溃族，与 ERA 同源；现存 `未产出结果块（worker 异常结束）` 与旧写法 `未产出结果块` 都认）；预算/看门狗/调试迭代熔断是确定性失败，不续；② 卡 frontmatter 无 `auto_resumed_at` 或距上次自动续 ≥24h（`autoResume.cooldownHours` 可调）——自动续后再 blocked 不立即重试，等人工或冷却过期；③ 每次 drain 最多 `autoResume.maxPerRun` 张（缺省 2），blocked 最早的先续。每次自动续记 `auto_resume { card, attempts }` 事件（人工 resume 的 `resumed by human` 与之区分）。drift 降级期间整个通道暂停（降级 = 全人工）。全局关闭：workflow.json 写 `"autoResume": { "enabled": false }`（其余键缺省即 true/2/24）。
 
 ### B0. 引水闸（compulsory pilotage）
 
@@ -281,16 +282,16 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 ### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
 `nightly` = scan 出提案 + autopilot 白名单提交 + drift 报告 + 队列摘要（默认零烧钱；`--plan` 加跑 planner；`--auto N` 夜间对 high 提案提交并发起闭环再 drain N 个——worker 烧钱仅此档，gate=L3 兜底合并仍人工）。`schedule install --hour 2 --minute 30 [--auto 3] [--mode watch]` 注册定时（launchd/crontab/schtasks 经 wrapper 绝对路径启动，不依赖调度环境 PATH；仓库挪位置后重装）。日志 `logs/nightly.log`（超 5MB 轮转）。跑完发通知：macOS 本地通知 + `${envPrefix}_NIGHTLY_WEBHOOK`（如 `AGENTS_NIGHTLY_WEBHOOK`，旧名 MODELRDOCK_* 兼容）POST `{title, body, ts}`；通知尽力而为，摘要始终在日志。
-中断恢复与双跑防护：nightly 启动时对账 `logs/nightly-state.json`——上次未正常收尾（崩溃/强制重启）则记 `nightly_recovered` + webhook 通知后照常执行；距上次完成不足 20 小时且非人工触发判为补触发双跑，跳过本次（终端 TTY 自动识别人工，脚本场景加 `--manual`）。webhook URL 直接填**飞书 / 企业微信 / Slack** 群机器人地址（按端点域名自动适配三家消息格式；飞书自定义关键词配 `nightly` 或 `ModelDock` 均可命中，签名校验暂不支持）。wrapper 固化 install 时刻的参数与路径——orchestrator 侧默认值/参数变更后需重跑 `schedule install`。
+中断恢复与双跑防护：nightly 启动时对账 `logs/nightly-state.json`——上次未正常收尾（崩溃/强制重启）则记 `nightly_recovered` + webhook 通知后照常执行；距上次完成不足 20 小时且非人工触发判为补触发双跑，跳过本次（终端 TTY 自动识别人工，脚本场景加 `--manual`）。webhook URL 直接填**飞书 / 企业微信 / Slack** 群机器人地址（按端点域名自动适配三家消息格式；飞书自定义关键词配 `nightly` 或 `ModelDock` 均可命中）。**飞书签名校验（2026-11 起）**：机器人开启「签名校验」后，出站消息自动附 `timestamp`+`sign`（HMAC-SHA256，官方规范）——签名密钥二选一配置：env `AGENTS_LARK_SIGN_SECRET`，或 darwin 钥匙串（workflow.json `"notify": { "signSecretService": "<服务名>" }`，密钥经 `security find-generic-password` 存取，参照 webhook URL 的钥匙串模式）；**未配置 = 现状不变**（不签名，机器人需关闭签名校验或改用自定义关键词）。wrapper 固化 install 时刻的参数与路径——orchestrator 侧默认值/参数变更后需重跑 `schedule install`。
 
 ### B5. 瞭望模式（watch，连续自治）
 
 `watch --interval 30`：每周期 drain pending → 队列空时 scan 出提案 →（autopilot 开时）propose → 休眠循环。
 
 - 停止：`touch .agents/orchestrator/.watch-stop`（下周期即停并清文件）或 Ctrl-C；**drift 降级自动退出**（保险丝不允许自己插回去，人工 `drift --clear` 后重启）。
-- 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启。`--interval 0 --max-cycles N` 为测试档（不休眠）。
+- 每周期重读 workflow.json——改 autopilot 配置下周期即生效，无需重启（**配置守卫例外**：workflow.json 被外部改写期间派发暂停待人工核实，见 B12）。`--interval 0 --max-cycles N` 为测试档（不休眠）。
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
-- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 8, "windowMinutes": 15}`：网关日志（`gatewayLogDir`，须已配置）窗口内限流/额度类请求（429/402）合计达阈值同样滞留——网关先于 worker 看到上游限流（任何 harness 的流量都算），触发时点名为「上游风暴」。workflow.json 可选键 `"weatherHold": {"threshold": 3, "windowMinutes": 60, "upstream": {"threshold": 8, "windowMinutes": 15}}`，**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
+- **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 5, "windowMinutes": 60, "source": "metrics"}`：**metrics 数据面**（2026-11-04 起缺省）优先消费网关 `/_modeldock/metrics` 的权威海况——`sea_state.storm` 直通滞留 + 60 分钟窗限流/额度类请求（429+quota）真实计数达阈值同样滞留（网关先于 worker 看到上游限流，触发时点名为「上游风暴」；阈值 ≤5 可保证网关判风暴时计数闸必触发，因网关 60m 风暴规则最低 6 次 429）；admin 不可达/端点失败自动落回**网关日志扫描**（`gatewayLogDir`，须已配置；429/402 计数，fail-open——观测失败绝不阻断派发）。`source: "log"` 显式降级为仅日志扫描（不发起 metrics 探测）。workflow.json 可选键 `"weatherHold": {"enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": {...}}`（`enabled` 缺省 true，显式 false = 关闭），**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
 
 ### B6. 弃船演习（drill）
@@ -314,8 +315,8 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 3. 验证链路：`propose --backend mock` → 白名单卡应出现「🤖 autopilot 已提交提案」（gate=L1）；`drain --backend mock` 一路到 merged 即闭环健康（沙箱配方见 test/orchestrator/propose.test.ts）；
 4. 试运行一个周期后看 `stats --json` 的 `summary.merge_rate` 与 `summary.near_miss`，再逐步放宽 `autoSubmitTypes`（deps/核心路径/人工草稿永不自动；实际合并仍由分级裁决与 drift 保险丝兜底）。
 
-**风暴闸 weatherHold**（瞬时故障密集时自动停派发）：
-1. workflow.json 加 `"weatherHold": { "threshold": 3, "windowMinutes": 60 }`（阈值=窗口内 worker_retry 合计）；上游海况可选：加 `"upstream": { "threshold": 8, "windowMinutes": 15 }`（网关日志 429/402 合计，须同时配置 `gatewayLogDir`）；
+**风暴闸 weatherHold**（瞬时故障密集时自动停派发；**本仓已开启**，纯安全闸无计费影响）：
+1. workflow.json 加 `"weatherHold": { "enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": { "source": "metrics", "threshold": 5, "windowMinutes": 60 } }`（阈值=窗口内 worker_retry 合计；上游海况 metrics 数据面优先——`sea_state.storm` 直通 + 60 分钟 429+quota 计数，admin 不可得自动落回网关日志 429/402 扫描，须同时配置 `gatewayLogDir`；`source: "log"` 可显式降级为仅日志）；
 2. 验证：窗口内凑满阈值后，下次 drain / watch 周期应打「⛈ 风暴滞留」并停派发（fleet.jsonl 留 `weather_hold`），窗口滑过自动恢复、无需清理状态；
 3. 滞留通知走 `${envPrefix}_ORCH_WEBHOOK`；滞留期 announce 只发一次防刷屏。
 
@@ -327,7 +328,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 | 档位 | 成本 | 机制 | 状态 |
 |---|---|---|---|
-| 第 0 档 | 零成本自动 | worker 瞬时故障原地重试（≤3）、调试/审查返工循环、blocked 卡自动续跑（autoresume：transient 才续、24h 冷却）、watch 有痕重探 | 已内置 |
+| 第 0 档 | 零成本自动 | worker 瞬时故障原地重试（≤3，**结构化信号优先**：网关日志会话窗口内本 harness 的 429/5xx/quota 记录命中即定性 `worker_retry source=gateway`——上游改错误文案不再致盲；无网关数据/未命中/读取失败 fail-open 落回 stderr 正则兜底）、调试/审查返工循环、blocked 卡自动续跑（autoresume：transient 或「未产出结果块」族才续、24h 冷却）、watch 有痕重探 | 已内置 |
 | 第 1 档 | 低成本计费自动 | **zcode 船 prompt 超限（>30k argv 上限）自动切 fallback 船**：`engine_escalated` 事件留痕，预算延续不重置，每 run 至多一次 | workflow.json `escalation.enabled`（缺省关） |
 | 第 2 档 | 高成本人工审批 | 旗舰档（ahead-4）/ 加大预算 / 换供应商 | 永不自动——调度台停下请示 |
 
@@ -339,7 +340,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 `node .agents/scripts/orchestrator.mjs sail --minutes 120`（或 `--duration 2h|90m|1h30m`，可加 `--max-cost-usd N` 燃油上限）：船长自勘海况（scan 巡检）→ 自绘航线（propose 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交**航海报告**——完成了什么、为什么这么编排、燃油账几何，落 `logs/sail/<ts>/report.md`（stdout 同文 + webhook 通知 + fleet 留痕，`sail_started`/`sail_finished`）。与 watch 的差别：有硬时长预算、报告收口、自动提交不依赖 autopilot 配置。
 
 - **授权模型**：人显式敲下带时长的 sail 命令 = 本航次自动提交授权。硬禁区不变（配置只收窄、永不放大）：`created_by: human` 人工草稿、`deps` 类型、files_hint 命中 corePaths/releasePaths 永不自动；类型白名单 workflow.json `freeSail.autoSubmitTypes`（缺省 `["docs","bugfix","refactor","feature"]`）；提交 gate 覆写 L1——实际合并仍由分级裁决 + drift 保险丝兜底。开航前已有的存量 drafts 永不自动提交。
-- **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + 自动提交 → 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效）。
+- **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + 自动提交 → 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效；**配置守卫例外**见 B12——workflow.json 被外部改写期间跳过派发与规划）。
 - **停止条件（任一）**：到达 `--minutes/--duration`、`.agents/orchestrator/.sail-stop` 文件（下周期即停并清文件）、drift 降级（人工 `drift --clear` 后再启）、`--max-tasks N` 派发上限、**`--max-cost-usd N` 燃油上限**（网关实测价 ≥ 上限即收帆并记 `sail_cost_cap`——**只停不换引擎**，换计费方必须人批；检查节流 60s）、连续 3 轮派发无进展（队列卡在待引水/解析失败时触发）。**软截止**：跑着的任务让它跑完，不超时强杀；风暴闸滞留期跳过派发与规划（scan 照跑——不派 worker），窗口滑过自动恢复。
 - **燃油账（报告「值不值得」的依据）**：本航次 [起航, 收帆] 网关实测 token × 价目 = USD（总账 + 逐卡拆账，逐卡按各自事件时间窗投影）；worker 直连上游时如实标「不可测」；收帆时若成本上限已触发，按完整航程重算覆盖触发时刻快照。
 - **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
@@ -349,7 +350,7 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 闸门通知原来只有单行文本（B4 webhook）——人不在电脑前就得等回工位再批。双向批示把回路补上：**需要人工动作的落位事件在文本通知之外多发一张飞书交互卡片，群里点按钮即可远程批示 approve / reject / retry**。缺省完全不启用：卡片开关不开不发卡、监听器不启动不占端口，行为与历史版本零差异。
 
 - **通知侧（发卡）**：workflow.json 可选键 `"notify": { "cardWebhook": true }`（缺省 false）。开启后，`awaiting-human` / `blocked`（含预算熔断、看门狗等 circuit_breaker 落位）与风暴闸 `weather_hold` 会在原文本通知（`${envPrefix}_ORCH_WEBHOOK`，一字节不改）之外**额外** POST 一张飞书 interactive 卡：approve（批准合并）/ reject（驳回）按钮 value 携带 `{ task, action }`，weather_hold 为 fleet 级事件没有可批示单卡 → 纯信息卡不带按钮。webhook URL 复用既有解析链（env 优先 + darwin 钥匙串兜底）；**仅飞书端点发卡**（企业微信/Slack 自动跳过，只收文本）。
-- **回流侧（批示）**：`node .agents/scripts/approval-listener.mjs [--port N] [--root <仓库根>]` 显式启动（缺省端口只认 workflow.json `notify.listenerPort`，都没配报错退出——**永不缺省监听**；只绑 `127.0.0.1`）。飞书卡片回调打过来：`url_verification` 握手直接回显 challenge；动作回调验签（verification token 须与 env `AGENTS_LARK_VERIFICATION_TOKEN` 一致，不一致 403，env 未配拒绝所有动作）后映射为 orchestrator 既有命令 `approve/reject/retry <task-id>`（reject 无原因用默认文案），结果以 toast 回复群里。同 task 同 action 60s 内重复点击忽略（防手抖）；审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`（ts/task/action/来源 IP/结果）。
+- **回流侧（批示）**：`node .agents/scripts/approval-listener.mjs [--port N] [--root <仓库根>]` 显式启动（缺省端口只认 workflow.json `notify.listenerPort`，都没配报错退出——**永不缺省监听**；只绑 `127.0.0.1`）。飞书卡片回调打过来：`url_verification` 握手直接回显 challenge；动作回调验签（verification token 须与 env `AGENTS_LARK_VERIFICATION_TOKEN` **常数时间一致**——sha256 归一化后 `timingSafeEqual`，防时序侧信道逐字节猜测，2026-11 起；不一致 403 并落审计 `approvals.jsonl`（只记 `rejected` 事实与来源 IP，**绝不记 token 值**）；env 未配拒绝所有动作）后映射为 orchestrator 既有命令 `approve/reject/retry <task-id>`（reject 无原因用默认文案），结果以 toast 回复群里。同 task 同 action 60s 内重复点击忽略（防手抖）；审计逐行落 `.agents/orchestrator/logs/approvals.jsonl`（ts/task/action/来源 IP/结果）。
 - **安全边界**：监听器自身不引入新权限——映射目标全是 orchestrator 既有闸门命令，approve 仍走 feature-branch finish 的完整门禁与 testCmd，合并权实质在门禁与人；token 属密钥，不写日志不入库；监听器只收 POST、请求体上限 1MB、外网触达须自行架转发（frp / 云主机反代 / Tailscale Funnel 等）并自行评估暴露面。飞书侧配置步骤见 [orchestrator-usage.md](../../docs/orchestrator-usage.md)。
 
 ### B11. 动态选船（dynamic dispatch，阶段 3）
@@ -364,11 +365,53 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 }
 ```
 
-- **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴（服务熔断 / 上游限流 / worker 重试密集 / weatherHold 滞留）→ 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。
+**本仓现状（2026-11-04）**：workflow.json 已按上例开启双船互切 `envelope: ["zcode-headless", "claude-headless"]`——zcode 默认船 + claude 前进3/4 船，包络内互切不再逐卡请示；429 风险由网关多 key 池 + worker 并发闸 + failover 兜底。
+
+- **规则**：① 海况健康 + 无难度信号 → 沿用 workflow.json `worker.backend`；② 卡难度偏好：tier 生效（token 已解析）→ claude（zcode 不支持 tier，不给它派 tier model）；ahead-1/2（含旧 `light`）→ zcode（免费默认船）、ahead-3/4（含旧 `heavy`）→ claude；files_hint 命中 corePaths/releasePaths 视作高难度 → claude；③ 所选船海况恶劣（该船 harness 绕开狗粮 dogfood_bypass / 未经接管 not_attached / CLI 不可用）→ 换包络内下一个健康船；④ 全港风暴 → 包络内换船无益（同一网关同一批上游，熔断由网关自动路由避开），沿用默认并留痕。风暴判定**权威海况优先**（2026-11-04 A2）：优先消费网关 `/_modeldock/metrics` 的 `sea_state.storm`（reason 带 `[storm_sea_state]`）与 meltdown 清单，服务熔断（fleet 观测）/ 上游限流（日志扫描）/ worker 重试密集保留为海况快照缺席时的回落。
+- **派发预检（model-availability，2026-11-04 A5）**：派发决策后核对 worker 模型（`tier.workerModel` > `worker.model`）是否还在上游服务目录里——tier token 经 `/_modeldock/tier-validate` 权威解析到 provider（ship→provider 推断不做：无 tier token 即不预检），再查 `/_modeldock/model-availability` 条目：**条目存在且新鲜（<25h，探测周期 24h+1h 余量）且 `ok:true` 且 `model_ids` 非空且不含该模型** → 滞留派发：卡 pending→blocked（队列保留不丢，模型恢复后 resume）+ `dispatch_held {reason:"model_unavailable", provider, model}` 事件；条目缺席（从未探测 ≠ 不可用）/ 陈旧 / `ok:false`（探测失败 ≠ 模型不可用）/ admin 不可达 → 一律照常派发（fail-open）。快照 5 分钟节流缓存。
 - **不越权三律**：显式 CLI `--worker-backend` / `--backend` 最高优先（动态选船直接让位，不留痕）；resume/retry 沿用上次会话（会话连续性优先，中途不换船）；mock 永不参与自动选船（测试链路照常可用，mock 也不进 envelope）。
 - **留痕**：所有非常规选择记 `dispatch_selected { from, to, switched, reason }` 事件（永不静默红线）；决策链任何一步失败自动回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
 - **与 fleet observe 的关系**：阶段 1 观测（`fleet_observed`）只照亮不决策，本节是它的决策消费者。难度路由不需要网关（纯卡面信号）；逐船海况判读需要 `gatewayAdmin: true` 的观测快照，观测缺席不判恶劣（观测缺席 ≠ 风暴）。
 - **与 escalation 的关系**：escalation（B8，zcode 30k 自动升档）在动态选船之后作外层兜底，逻辑不动；预算熔断不受动态选船影响（换船不重置预算）。
+
+### B12. worker 并发供给闸（scheduling.maxWorkers，如何解锁 workers=2）
+
+drain 的有效并发 = **min(请求并发, provider 容量)**——请求并发 = CLI `--workers N`（显式单次意图，最高优先）> workflow.json `scheduling.maxWorkers`（缺省 1 = 现状不变）。容量经网关 admin 面观测（`gatewayAdmin: true` 才触达）：worker tier token → `/_modeldock/tier-validate` 解析到 provider → 查该 provider 的 `max_concurrency`（`/_modeldock/config`）与 key 池健康（`/_modeldock/metrics` 的 `keypool[provider]`）。
+
+- **解锁 workers=2 的完整步骤**（船东操作，编排器绝不自行触碰生产配置）：
+  1. 在 ModelDock（生产实例）给 worker 用的 provider 配 `max_concurrency >= 2`（Web 控制台「编辑服务」或 config.toml）——网关侧信号量 + 排队由此生效，上游不再被并发打 429；可选配多 key 池（`keys` >= 2）进一步扩容；
+  2. 给 worker 卡配 tier（token 指向该 provider 的 harness）——供给闸靠 tier token 定位 provider；
+  3. workflow.json 设 `"scheduling": { "maxWorkers": 2 }`（自动化常态）或单次 `drain --workers 2`。
+- **判定**：`max_concurrency>=2` 且（key 池 `healthy>=2` 或 `total>=2`）→ 容量 = min(max_concurrency, healthy/total)；否则容量 = 1。自动扩容生效（无显式 `--workers` 时）记 fleet 级 `workers_scaled { from, to, provider, reason }` 事件；请求被容量压低同样留痕（`观测缺席`/`未解锁`/`key 池不足` 等原因写在 reason）。
+- **fail-open 口径**：`gatewayAdmin` 未开 → 完全不设闸不触达（行为与历史一致）；观测面已开但网关不可达/字段缺失 → 容量按 1（回落单 worker 现状，只是不扩容，派发照常，绝不因观测失败中断 drain）；所有观测请求超时 ≤3s，每 drain 只探一次。
+- **与预算实测账的配合**：多 worker 同跑时各自卡独立计账；同 tier 并发 worker 共享同一 harness 实测账（实测增量互相可见——预算判定偏保守方向，只早熔断不漏熔断）。
+
+**预算实测账（A4，配合 B12）**：worker 运行中每 60s 轮询 `/_modeldock/harness-usage` 的 `day_billable_tokens`（网关实测**可计费**口径，剔除缓存读）做低油量/熔断判定——zcode 无逐 turn 自报（会话结束才一次性回填），此前 token 预算对它近乎失效；实测账补上真实逐时段预算。harness↔task 映射由 tier token 经 tier-validate 解析，记在 `tier_resolved` 事件的 `gateway_harness` 字段；实测以「本任务起点基线」取增量（同 harness 其他流量不计入本任务，防跨任务假阳性）；字段缺失（旧网关）或观测不可达 → 自报账照旧兜底。reconcile 离线对账逻辑不变。大 prompt（>2 万字符，D17）自动落 `logs/<taskId>/prompt-full.md` 全文、worker prompt 收缩为文件引用 + 要点摘要——不再依赖 zcode argv 30k 超限后的换船兜底（escalation 保留为最后防线）。
+### B13. 配置守卫（configGuard，workflow.json 自改防护）
+
+workflow.json 是编排器的**授权面**（autopilot 白名单、escalation fallback 船、dynamicDispatch 包络、budgetProfiles 全住这里）——2026-11 实证事故：sail 派发的卡在 worktree 里自改 workflow.json 的默认引擎并合并，授权配置被**被调度方**改写而编排器无感。守卫语义（缺省开，`"configGuard": { "enabled": false }` 关闭，不推荐）：
+
+- run/drain/watch/sail 启动时记 workflow.json 的 **sha256 基线**；每次派发前校验（drain 逐卡发射前、watch/sail 每周期、run 每个 worker 会话边界）。
+- 不匹配 → fleet 级事件 `config_drift_detected`（含前后 hash）+ webhook 通知 + **暂停新派发**（在途任务继续）。同一漂移 episode 只宣布一次。
+- **恢复 = 重新校验通过**：文件改回基线内容（hash 复合）自动恢复；编排器**自己** finish 合并导致的合法变更（合并卡已过门禁与人审）在 doApprove 完成后自动重置基线。人工/外部改 workflow.json 要生效：核实后**重启编排器**（重启即重新记基线）——老语义「watch 每周期重读配置即时生效」在守卫生效期间让位。
+- 进程边界说明：drain 派的 run 是子进程，子进程 merge 后重置的是子进程自己的基线——父 drain 会在下次派发前发现漂移并暂停，操作者核实（正是「卡改了授权配置」这类变更需要人过目）后重启即可。这是有意从严：合并进主干的 workflow.json 变更一律要求一次人工确认。
+- run 进程内漂移（外部改写发生在闭环中途）：当前会话照常收尾，下一个会话派发前守卫拦停，卡转 `blocked/`（reason=config_drift）附调查包，人工核实后 resume。
+
+### B14. 提案生命周期（drafts gc，B9 清退机制）
+
+drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 merged 工作覆盖）。两条生命周期（**永不删除文件，只迁移目录**）：
+
+- **自动 superseded（闭环内动作，merge 即触发）**：卡落 merged/ 时，drafts/ 里 `files_hint` 与刚合并卡**路径重叠**（前缀精确口径：同文件/同目录/互为路径前缀；完全通配 `**` 独占；仅标题相似**不迁**——防误杀，只在 gc 报告提示）的提案自动迁入 `drafts/superseded/`，文件头标注 `superseded_by: <合并卡 id>`。关闭：`"draftsGc": { "autoSupersede": false }`。fleet 留痕 `drafts_superseded`。
+- **老化（手动档）**：`orchestrator drafts gc [--apply]`——缺省 dry-run 只列清单（superseded 候选 / 超 `draftsGc.archiveDays`（缺省 30 天）的 aged 候选 / 仅标题相似的提示）；`--apply` 才迁移（superseded 带标注、aged 原文迁入 `drafts/archived/`）。年龄口径：frontmatter `created_at` 优先、mtime 兜底、都缺不老化（宁少勿滥）。
+- 已在 superseded/ 或 archived/ 的提案不回锅（`drafts gc` 只扫顶层 .md）；同名目标文件已存在跳过不覆盖（Windows rename 语义安全），失败留原地等人工。
+
+### B15. scan 卡自动转修复卡（scanAutoFix，B10 断链自愈）
+
+主干巡检卡（id `scan-*` 前缀，scanner 产出）failed 是终态，此前只能人工 abandon——scan→修复的自动链断路。现在 drain 处理到**本轮落位 failed 的 scan 卡**时自动补一张 pending 修复卡：
+
+- 修复卡 id `fix-<原名>`（如 `scan-ci-414aba6c` → `fix-scan-ci-414aba6c`），正文引用原卡路径、`incident.md` 调查包与失败摘要（最后一条 failed/blocked 事件的 reason）；`files_hint`/type/priority/gate 继承原卡。**它是普通任务卡，照走既有全部门禁**（引水闸/L2L3 人审不绕过）。
+- 防循环双保险：① 修复卡 id 无 `scan-` 前缀，自身 failed 不再繁殖新卡；② 同名修复卡在**任一队列状态**已存在即跳过（merged/failed 也算——scan 卡永驻 failed/，按状态白名单去重会跨 drain 打环）。
+- 事件留痕：原卡日志记 `scan_autofix { fix, reason }`。关闭：`"scanAutoFix": { "enabled": false }`（恢复旧行为）。
 
 ## C. 观测与对账详解
 
