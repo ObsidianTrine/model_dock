@@ -603,7 +603,7 @@ describe('checkUpdate 输出：说明降级 + 摘要收口 + 发布页链接', (
     '- **第六条点题**：细节。',
   ].join('\n')
 
-  it('输出首段 + 至多 4 条点题 + 总数 + 发布页地址；markdown 标记与「截 12 行」都不再出现', async () => {
+  it('输出首段 + 分节点题计数 + 发布页地址；markdown 标记与「截 12 行」都不再出现', async () => {
     const api = await startMockApi({ tag: 'v999.0.0', assets: {}, body: BODY })
     cleanup = api.close
     const lines: string[] = []
@@ -612,10 +612,11 @@ describe('checkUpdate 输出：说明降级 + 摘要收口 + 发布页链接', (
 
     expect(out).toContain('有新版本：v999.0.0')
     expect(out).toContain('一个「测试版」的版本：三件小事。')
-    // 点题逐条一行（点题后的长细节不进弹窗）
-    expect(out).toContain('· 第一条点题\n· 第二条点题\n· 第三条点题\n· 第四条点题')
+    // 分节摘要：每节一行计数 + 点题（点题后的长细节不进弹窗）
+    expect(out).toContain('· 新增 2 项：第一条点题、第二条点题')
+    expect(out).toContain('· 改进 2 项：第三条点题、第四条点题')
+    expect(out).toContain('· 修复 2 项：第五条点题、第六条点题')
     expect(out).not.toContain('第一条点题：这条很长')
-    expect(out).toContain('共 6 项改动')
     // 链接单独成行：托盘按 http(s) 正则取出，加「打开发布页」按钮
     expect(out).toContain(`完整说明：https://github.com/${REPO}/releases/tag/v999.0.0`)
     expect(out).toContain('执行 modeldock update 安装')

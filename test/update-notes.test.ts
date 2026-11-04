@@ -75,6 +75,24 @@ describe('notesSummary：摘要收口', () => {
     expect(s.summary).toBe('')
     expect(s.items).toEqual(['只有条目', '第二条'])
     expect(s.total).toBe(2)
+    expect(s.sections).toBeUndefined()
+  })
+
+  it('分节正文：sections 逐节给计数与点题（每节至多 maxLeads 条，超出截断但计数不减）', () => {
+    const s = notesSummary(RELEASE_BODY)
+    expect(s.sections).toEqual([
+      { title: '新增', count: 1, leads: ['菜单栏 / 托盘可以一键清理数据'] },
+      { title: '改进', count: 5, leads: ['导出的配置包文件名带上时间', '导出配置包只输一次口令', '模型的「视觉」能力可勾选'] },
+      { title: '修复', count: 1, leads: ['手机远程不再容易被误关'] },
+    ])
+    expect(notesSummary(RELEASE_BODY, { maxLeads: 1 }).sections?.[1].leads).toEqual(['导出的配置包文件名带上时间'])
+  })
+
+  it('标题前就有条目（混合形态）：整体回落平铺，sections 缺省', () => {
+    const s = notesSummary('- **前言条目**：细节\n\n### 新增\n\n- **正文条目**：细节')
+    expect(s.sections).toBeUndefined()
+    expect(s.items).toEqual(['前言条目', '正文条目'])
+    expect(s.total).toBe(2)
   })
 
   it('摘要与点题里不放网址：发布页链接只由调用方单独给（托盘按「最后一个网址」取链接）', () => {
@@ -136,15 +154,22 @@ describe('notesSummary：摘要收口', () => {
 })
 
 describe('notesSummaryText：摘要整段纯文本（CLI 检查输出与 /admin/update/status 的 summary 字段同源同形）', () => {
-  it('首段 + 「· 」条目；原文条目多于收录数时补「（共 N 项改动，其余见发布页）」', () => {
+  it('分节正文：每节一行「· 标题 N 项：点题 等」，细节不进摘要', () => {
     const out = notesSummaryText(RELEASE_BODY)
     expect(out.startsWith('一个「日常维护更省心」的版本：')).toBe(true)
-    expect(out).toContain('\n· 菜单栏 / 托盘可以一键清理数据')
-    expect(out).toContain('（共 7 项改动，其余见发布页）')
-    // 只收 maxItems 条
-    expect(out.split('\n').filter((l) => l.startsWith('· '))).toHaveLength(4)
+    expect(out).toContain('· 新增 1 项：菜单栏 / 托盘可以一键清理数据')
+    expect(out).toContain('· 改进 5 项：导出的配置包文件名带上时间、导出配置包只输一次口令、模型的「视觉」能力可勾选 等')
+    expect(out).toContain('· 修复 1 项：手机远程不再容易被误关')
+    expect(out.split('\n').filter((l) => l.startsWith('· '))).toHaveLength(3)
+    // 细节文本与 markdown 标记都不进摘要
+    expect(out).not.toContain('确认后自动')
     expect(out).not.toContain('###')
     expect(out).not.toContain('**')
+  })
+
+  it('无标题正文回落平铺：首段 + 点题 + 总数行（形态与分节前一致）', () => {
+    const body = '首段摘要。\n\n- **甲**：细节\n- **乙**：细节\n- **丙**：细节\n- **丁**：细节\n- **戊**：细节'
+    expect(notesSummaryText(body)).toBe('首段摘要。\n· 甲\n· 乙\n· 丙\n· 丁\n（共 5 项改动，其余见发布页）')
   })
 
   it('条目未超量不补总数行；全空输入 → 空串', () => {

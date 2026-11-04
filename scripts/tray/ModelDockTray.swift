@@ -129,6 +129,37 @@ func cappedInfo(_ text: String, logHint: String?) -> String {
     return out
 }
 
+/// 弹窗正文放可滚动文本区：NSAlert 正文按文本撑高且无滚动，长文会把按钮顶出屏幕——
+/// 短文本按内容自适应收高（无滚动条），超过 maxHeight 封顶出滚动条，按钮永远在屏内。
+/// 文本不可编辑、透明底融入弹窗；返回值直接挂 NSAlert.accessoryView
+func scrollableInfo(_ text: String, width: CGFloat = 400, maxHeight: CGFloat = 240) -> NSScrollView {
+    let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+    tv.isEditable = false
+    tv.isRichText = false
+    tv.drawsBackground = false
+    tv.textColor = .labelColor
+    tv.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+    tv.textContainerInset = .zero
+    tv.textContainer?.widthTracksTextView = false
+    tv.textContainer?.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+    tv.string = text
+    tv.isVerticallyResizable = true
+    tv.isHorizontallyResizable = false
+    tv.autoresizingMask = [.width]
+    var height = maxHeight
+    if let lm = tv.layoutManager { // 实测排版高度：短正文不摆大面积空白
+        lm.ensureLayout(for: tv.textContainer!)
+        height = ceil(lm.usedRect(for: tv.textContainer!).height + tv.textContainerInset.height * 2)
+    }
+    let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: max(24, min(height, maxHeight))))
+    sv.documentView = tv
+    sv.hasVerticalScroller = true
+    sv.autohidesScrollers = true
+    sv.drawsBackground = false
+    sv.borderType = .noBorder
+    return sv
+}
+
 /// 网关 /admin/update/status 载荷（只取托盘关心的字段；多余字段 Decodable 自动忽略）
 struct UpdateStatusPayload: Decodable {
     let current: String
@@ -137,6 +168,8 @@ struct UpdateStatusPayload: Decodable {
     let latest: String?
     let available: Bool
     let notes: String?
+    /// 摘要收口（首段 + 分节点题计数，服务端已降好纯文本）；旧版网关无此字段，弹窗回落 notes 全文
+    let summary: String?
     let htmlUrl: String?
 }
 
@@ -851,9 +884,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func showUpdateCheckResultPayload(_ st: UpdateStatusPayload) {
         if st.available {
             let hint = L("点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray icon will restart when done.")
+            // 正文优先用网关摘要收口（首段 + 分节点题计数）；旧版网关无 summary 字段回落全文，
+            // 两者都进可滚动文本区——短则自适应收高，长则封顶出滚动条，按钮永远在屏内
+            let body = (st.summary ?? st.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let a = NSAlert()
             a.messageText = newVersionTitle(latest: st.latest ?? "", current: st.current)
-            a.informativeText = cappedInfo((st.notes ?? "") + "\n\n" + hint, logHint: nil)
+            a.accessoryView = scrollableInfo(body.isEmpty ? hint : body + "\n\n" + hint)
             a.addButton(withTitle: L("立即更新", "Update Now"))
             if st.htmlUrl != nil { a.addButton(withTitle: L("打开发布页", "Open Release Page")) } // 无链接就不摆无用按钮
             a.addButton(withTitle: L("稍后", "Later"))
@@ -919,7 +955,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 检查结果弹窗：正文直接用 CLI 的检查输出——那边已去 markdown 标记 + 摘要收口
-    /// （首段 + 几条点题 + 发布页地址），细节留在发布页，故另给「打开发布页」按钮。
+    /// （首段 + 分节点题计数 + 发布页地址），细节留在发布页，故另给「打开发布页」按钮。
     /// contains 判据对的是 CLI 自身语言的输出（随 MODELRDOCK_LANG），不随托盘语言翻译
     private func showUpdateCheckResult(text: String, exit: Int32) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -936,7 +972,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let hint = L("点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray icon will restart when done.")
             let a = NSAlert()
             a.messageText = newVersionTitle(latest: version, current: currentVersion(in: trimmed))
-            a.informativeText = cappedInfo(trimmed.isEmpty ? hint : trimmed + "\n\n" + hint, logHint: nil)
+            // 正文进可滚动文本区：短则自适应收高，长则封顶出滚动条，按钮永远在屏内
+            a.accessoryView = scrollableInfo(trimmed.isEmpty ? hint : trimmed + "\n\n" + hint)
             a.addButton(withTitle: L("立即更新", "Update Now"))
             if releaseUrl != nil { a.addButton(withTitle: L("打开发布页", "Open Release Page")) } // 无链接就不摆无用按钮
             a.addButton(withTitle: L("稍后", "Later"))
