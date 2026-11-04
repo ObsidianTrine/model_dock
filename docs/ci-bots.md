@@ -17,6 +17,8 @@
 | `workflows/dependabot-fix.yml` | AI bot | Dependabot PR 打开/更新 | 验证升级、失败做最小修复推回 | **是** |
 | `workflows/ci-autofix.yml` | AI bot | main / develop 的 test run 失败（首次尝试） | 主干失败投机修复：开 `[ci-autofix]` 修复 PR 供人工合并 | **是** |
 
+> **运维注意（2026-11-04 事故）**：ci-autofix 是唯一 workflow_run 触发的 AI workflow——该事件下 claude-code-action 自动进 agent 模式，**workflow 必须带 `id-token: write`**（OIDC 换 App token），缺它 15 秒内 3 连败 exit 1、Claude 会话零启动（上线初期 5 次 failure 全部同因、0 PR 产出）。另注意：workflow_run 的 run 按**默认分支 main 上的 workflow 文件**执行——改 ci-autofix.yml 只合 develop 不生效，须进 main。
+
 ## 模型接入（三件套全在 GitHub，供应商无关）
 
 bot 走任意 **Anthropic 兼容端点**，端点 / 模型 / key 三件套**全部在 GitHub 配置，yml 零默认值**——换供应商只改这三个值，不动代码：

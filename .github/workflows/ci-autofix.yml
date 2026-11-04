@@ -48,6 +48,9 @@ permissions:
   contents: write        # 推修复分支 ci-autofix/<run-id>
   pull-requests: write   # 开修复 PR
   actions: write         # 读失败 run 日志 + 给修复分支补发 test（workflow_dispatch）
+  id-token: write        # workflow_run 事件下 action 自动进 agent 模式，OIDC token 硬需求——
+                         # 缺它 3 连败 15s 即 exit 1、Claude 会话零启动（2026-11-04 排查：上线
+                         # 以来 5 次 failure 全部同因、0 PR 产出；同 claude-review.yml 配置）
 
 jobs:
   guard:
