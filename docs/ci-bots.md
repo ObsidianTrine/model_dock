@@ -129,7 +129,7 @@ main / develop 的 test run 失败（首次尝试）时自动发起一次修复�
 3. **修复会话**：Claude 复现失败 → 根因分析 → 最小修复 + 补测试，`[ci-autofix]` 前缀提交推分支，开 PR（基分支 = 失败所在分支），PR 描述必含失败 run 链接、根因分析、修复说明；
 4. **无法自动修复**（flaky / 根因不明 / 修复面过大）：不开 PR，会话结论落 Actions run summary，job 红灯指路——看到红灯按 summary 与会话日志人工处理。
 
-**需要哪些 secrets**：不新增——与 claude-review / dependabot-fix 共用三件套（`CLAUDE_AUTH_TOKEN` + `CLAUDE_BASE_URL` / `CLAUDE_MODEL`）。无需 PAT：触发 run 不在 Dependabot PR 上，GITHUB_TOKEN 自带写权限（推分支、开 PR 都够）。
+**需要哪些 secrets**：不新增——与 claude-review / dependabot-fix 共用三件套（`CLAUDE_AUTH_TOKEN` + `CLAUDE_BASE_URL` / `CLAUDE_MODEL`）。无需 PAT：触发 run 不在 Dependabot PR 上，GITHUB_TOKEN 自带写权限（推分支、开 PR 都够），并以 `github_token` 输入**显式**传给 claude-code-action——缺省未传时 action 改走 OIDC 换 app token（需 `id-token: write`），2026-11-04 曾因此每次 fix 阶段死于 OIDC 三连重试、会话零启动（与 key 无关），显式传 GITHUB_TOKEN 同时保住「其开的 PR 不触发新 workflow run」的防回环语义。
 
 **如何禁用**：与其它 bot 一致——删三件套即静默跳过；或 Actions 页 Disable 本 workflow。修复 PR 可整单关闭，不影响主干；合并永远由人工完成。
 
