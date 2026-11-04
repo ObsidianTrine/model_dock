@@ -16,6 +16,8 @@ import { mimoDesktopAdapter } from '../src/adapters/mimo-desktop.js'
 import { openCodeAdapter } from '../src/adapters/opencode.js'
 import { workbuddyAdapter } from '../src/adapters/workbuddy.js'
 import { listSnapshots, matchesSnapshot } from '../src/backup/snapshot.js'
+import { changeIfChanged } from '../src/adapters/shared.js'
+import { textEqualsIgnoreEol } from '../src/util/diff.js'
 import { configPath } from '../src/util/paths.js'
 
 afterEach(() => {})
@@ -834,6 +836,30 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('credentials 稳态：文件被 Windows 编辑器存成 CRLF（仅行尾差异）不触发重写（2026-11-04 审查 P2）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      const cp = path.join(h.home, '.dsh', '.credentials.yaml')
+      await atomicWrite(cp, 'refs:\n  OTHER_REF: keep-me\n', 0o600)
+      await withConfig(baseCfg())
+
+      const opts = { mode: 'gateway' as const, gatewayPort: 8687, token: TOKEN, profile: 'demo' }
+      const plan = await dshAdapter.planAttach(opts, await loadConfig())
+      await applyChanges('dsh', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      // 用户随后用 Windows 编辑器保存 credentials：同内容 CRLF（yaml 序列化恒 LF），
+      // 内联等值判定归一化后必须仍为零改动（否则稳态重接每次都写 credentials + 快照）
+      const lf = fs.readFileSync(cp, 'utf8')
+      await atomicWrite(cp, lf.replace(/\n/g, '\r\n'), 0o600)
+      const plan2 = await dshAdapter.planAttach(opts, await loadConfig())
+      expect(plan2.changes.filter((c) => c.path === cp)).toEqual([])
+    } finally {
+      h.restore()
+    }
+  })
+
   it('attach 稳态等值过滤：重接同一 token 无内容变化时计划零改动（不重复写盘/快照）', async () => {
     const h = fakeHome()
     try {
@@ -852,6 +878,43 @@ describe('dsh adapter', () => {
     } finally {
       h.restore()
     }
+  })
+
+  it('attach 稳态：客户端文件被 Windows 编辑器存成 CRLF（仅行尾差异）不触发重写/快照（2026-11-04 审查 P2）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig(baseCfg())
+
+      const opts = { mode: 'gateway' as const, gatewayPort: 8687, token: TOKEN, profile: 'demo' }
+      const plan1 = await dshAdapter.planAttach(opts, await loadConfig())
+      expect(plan1.changes.length).toBeGreaterThan(0)
+      await applyChanges('dsh', 'attach', plan1.changes, { yes: true, redactions: [TOKEN] })
+
+      // 用户随后用 Windows 编辑器保存：同内容 CRLF（yaml doc.toString() 恒输出 LF）。
+      // 逐字节比较会把稳态误判为有变化、每次整写盘+快照；归一化后必须仍为零改动
+      const lf = fs.readFileSync(p, 'utf8')
+      await atomicWrite(p, lf.replace(/\n/g, '\r\n'), 0o600)
+      const plan2 = await dshAdapter.planAttach(opts, await loadConfig())
+      expect(plan2.changes).toEqual([])
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('CRLF 等值判定口径：仅行尾差异视为无变化，写入内容不受影响', () => {
+    expect(textEqualsIgnoreEol('a\r\nb\r\n', 'a\nb\n')).toBe(true)
+    expect(textEqualsIgnoreEol('a\nb\n', 'a\nb\n')).toBe(true)
+    expect(textEqualsIgnoreEol(null, 'x')).toBe(false)
+    expect(textEqualsIgnoreEol('x', null)).toBe(false)
+    expect(textEqualsIgnoreEol('a\nb\n', 'a\nc\n')).toBe(false)
+    // changeIfChanged 走同一口径：产出 FileChange 时 before/after 仍为原始内容（判定归一化不改写入）
+    expect(changeIfChanged('p', 'a\r\nb\r\n', 'a\nb\n')).toBeNull()
+    const ch = changeIfChanged('p', 'a\r\nb\r\n', 'a\nb\nx\n')
+    expect(ch?.before).toBe('a\r\nb\r\n')
+    expect(ch?.after).toBe('a\nb\nx\n')
   })
 
   it('网关模式 wire 跟随服务协议：openai 服务下发 openai-completions 且 base 带 /v1', async () => {

@@ -6,10 +6,10 @@ import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, mutateGatewayState, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
-import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision } from '../src/gateway/server.js'
+import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision, probePing } from '../src/gateway/server.js'
 import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
-import type { Config } from '../src/config/types.js'
+import { emptyConfig, type Config } from '../src/config/types.js'
 import { saveConfig } from '../src/config/store.js'
 import { getSecret } from '../src/config/secrets.js'
 import { configPath, displayPath, gatewayStatePath, holidaysCachePath, logsDir } from '../src/util/paths.js'
@@ -4175,6 +4175,41 @@ describe('POST /_modeldock/tier-validate（编排侧权威校验数据源，admi
       expect(noAuth.status).toBe(401)
     } finally {
       t.close()
+    }
+  })
+})
+
+describe('probePing keepalive（2026-11-04 审查 P2）', () => {
+  it('排空响应体回连接池：两次探活复用同一条连接（旧实现 destroy 每次烧一条）', async () => {
+    const h = fakeHome()
+    let server: http.Server | undefined
+    try {
+      let connections = 0
+      server = http.createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('pong')
+      })
+      server.on('connection', () => { connections++ })
+      const port = await new Promise<number>((resolve, reject) => {
+        server!.once('error', reject)
+        server!.listen(0, '127.0.0.1', () => resolve((server!.address() as AddressInfo).port))
+      })
+      const rt = buildRuntime(emptyConfig(), 't')
+      const provider = { base_url: `http://127.0.0.1:${port}`, proxy: 'direct' }
+      const r1 = await probePing(rt, provider as never)
+      expect(r1.ok).toBe(true)
+      // 连接池回收在 dump resolve 后还有调度尾巴：等一拍再发第二次（destroy 语义下无论如何都是新连接）
+      await new Promise((r) => setTimeout(r, 100))
+      const r2 = await probePing(rt, provider as never)
+      expect(r2.ok).toBe(true)
+      // 连接复用：两次请求共用一条 TCP 连接（destroy 语义下第二次必须新建，connections 会是 2）
+      expect(connections).toBe(1)
+    } finally {
+      if (server) {
+        server.closeAllConnections?.()
+        server.close()
+      }
+      h.restore()
     }
   })
 })
