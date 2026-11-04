@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildProgram } from './cli/index.js'
-import { exitWithThrown, openUrlInBrowser } from './cli/shared.js'
+import { exitWithThrown, openUrlInBrowser, parsePortArg } from './cli/shared.js'
 import { spawnTrayIfPresent, spawnTrayWhenGatewayReady } from './tray.js'
 import { t } from './util/i18n.js'
 import { installCrashHandlers } from './util/crash.js'
@@ -35,8 +35,8 @@ if (process.argv.includes('--sea-gateway')) {
     if (await relaunchHiddenIfAutostart()) return
     const [{ startForeground }, { initLang }] = await Promise.all([import('./gateway/main.js'), import('./config/lang.js')])
     await initLang()
-    const idx = process.argv.indexOf('--port')
-    const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
+    // --port 缺值/非数字时回落 undefined → startForeground 按 config.gateway.port ?? 默认端口兜底
+    const port = parsePortArg(process.argv)
     // 自启（Run 键 / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
     // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
     // fire-and-forget 补 catch：失败走 stderr（daemon 形态已由 fd 2 接管落进 daemon 日志）
