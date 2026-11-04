@@ -32,6 +32,9 @@ describe('orchestrator nightly > 巡检编排端到端', () => {
     }
   })
 
+  // 串行跑 2 个 nightly 子进程（内部含 npm audit / git remote / gh 探测），可能超出两套 vitest
+  // 配置共用的全局 20s（vitest.config.ts testTimeout，workflow 配置 spread 继承同值）——
+  // 用例级第三参单独放宽到 60s，只覆盖本用例不动全局
   it('重复跑同夜去重（内容不变 → 同 id → 已存在跳过；同刻二跑须 --manual 绕过双跑防护）', () => {
     const repo = mkRepo()
     try {
@@ -48,7 +51,7 @@ describe('orchestrator nightly > 巡检编排端到端', () => {
     } finally {
       repo.cleanup()
     }
-  })
+  }, 60_000)
 
   it('无信号仓库：不落提案 + 空队列摘要（audit 无 lock 的容错警告属预期）', () => {
     const repo = mkRepo()

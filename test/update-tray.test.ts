@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { stopTrayProcesses, type TrayStopDeps } from '../src/update/install.js'
+import { recordTestFile } from './helpers/run-order.js'
+
+// 收集序登记（观测器零依赖，见 test/helpers/run-order.ts 头注）：本文件不重复 mock
+// gatewaycmd 的前提是 uninstall.test 先收集注册其 mock，门禁运行期断言该顺序
+recordTestFile('update-tray.test.ts')
 
 // 本文件只测停托盘的编排（枚举 → 按 PID 杀 → 复查 → 补刀 → 兜底强杀 → 终验）：
 // 进程枚举与 kill 一律注入 mock，绝不触达真实 ModelDockTray 进程（AGENTS 红线：

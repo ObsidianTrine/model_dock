@@ -10,10 +10,13 @@ const watchdog = process.env.VITEST_WATCHDOG === '1'
 export default defineConfig({
   test: {
     // 顺序耦合对（T21 门禁：test-suite-couplings.test.ts）——singleFork 串行 + vitest
-    // 按历史运行时长缓存排序（慢者先行，非字母序）：uninstall.test.ts 体量最大、几乎
-    // 恒先于 zz-quickwins / update-tray 运行，后两者依赖此前提（前者惰性 import basic.ts
-    // 防 registry 污染；后者因 uninstall 已 mock gatewaycmd 而不重复 mock）。若
-    // uninstall.test 大幅变小或 vitest 改排序策略，先重审两处耦合再动代码。
+    // 按缓存混合排序（failed 先行 → 历史时长降序 → 无缓存按文件字节大小降序），文件
+    // 顺序随缓存状态漂移、不可作前提（2026-11-05 实测三种语境三种顺序，详见该门禁
+    // 文件头注）。安全靠静态不变量：uninstall.test.ts 唯一静态 import basic.js、唯一
+    // vi.mock gatewaycmd（其 mock 经 hoist 先于自身 import 注册，自洽）；zz-quickwins /
+    // update-tray 惰性 import 或依赖注入、顺序无关——均由 test-suite-couplings.test.ts
+    // 门禁断言（vitest 5 collectTests 先收集全部文件、后跑用例，vi.mock 注册先于一切
+    // 测试期动态 import）。动这三个文件前先重审耦合。
     // 产品套件 = test/ 顶层。agent 工作流套件（test/orchestrator/**，测 .agents/ 编排器与
     // 守卫 hook）拆到 vitest.workflow.config.ts，经 `npm run test:workflow` 单独运行——
     // 产品门禁不再为其支付 ~40s（方案 A）；池策略等防死锁设置两处必须保持同构。
