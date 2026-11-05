@@ -14,7 +14,7 @@ import { localIsoTs } from '../util/time.js'
 import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, getSecret, providerKeyRefs, setSecret, verifySecretsStore } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, getSecret, invalidateSecretsCacheIfExternal, providerKeyRefs, setSecret, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -1173,9 +1173,12 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // 同地址不同 Key 是「同一厂商多个账号分别登记」的合法场景，允许共存。
   // 仅当本次提交真正改动了地址或 Key 时才校验，避免历史同对数据在改名等无关编辑时被误拦。
   const hasNewKey = typeof b.key === 'string' && !!b.key
-  const oldKey = p.key_ref ? (await getSecret(p.key_ref)) ?? '' : ''
-  const effectiveKey = hasNewKey ? (b.key as string) : oldKey
+  // 旧 key 只在去重校验真正需要时才读（keychain 后端每次读取要 spawn security 子进程，
+  // 实测 40ms+）：纯改名/改模型目录/改端点等无关编辑（地址未变且未提交新 key）不再无谓
+  // 付一次钥匙环读取——每次保存都慢一截的最稳定成分
   const urlChanged = !!baseUrl && normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(p.base_url)
+  const oldKey = (hasNewKey || urlChanged) && p.key_ref ? (await getSecret(p.key_ref)) ?? '' : ''
+  const effectiveKey = hasNewKey ? (b.key as string) : oldKey
   const keyChanged = hasNewKey && (b.key as string) !== oldKey
   if (urlChanged || keyChanged) {
     const norm = normalizeBaseUrl(baseUrl || p.base_url)
@@ -1756,6 +1759,9 @@ async function hReload(c: AdminCtx): Promise<void> {
   const { rt, res, audit } = c
   try {
     await reloadRuntime(rt)
+    // 手动兜底语义补全：watcher 失效（health 提示走这里）时外部改的 key 也一并即刻生效——
+    // invalidateSecretsCacheIfExternal 按盘上指纹区分自家/外部写，自家刚写的不误失效
+    await invalidateSecretsCacheIfExternal()
     audit(bi('重载配置', 'Reload config'), '-', bi('第 {n} 次热重载', 'Hot reload #{n}', { n: rt.reloads }))
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, reloads: rt.reloads }))

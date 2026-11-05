@@ -1,5 +1,6 @@
 import fs from 'node:fs'
-import { loadConfig } from '../config/store.js'
+import { configStatKey, loadConfig } from '../config/store.js'
+import { invalidateSecretsCacheIfExternal } from '../config/secrets.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config } from '../config/types.js'
 import { migrateSecretsToSecure } from '../ops.js'
 import { ensureDir, randomToken, drainAppendStreams } from '../util/fsx.js'
@@ -199,17 +200,25 @@ export async function startForeground(portOverride?: number): Promise<void> {
   const scheduleReload = (): void => {
     clearTimeout(reloadTimer)
     reloadTimer = setTimeout(() => {
-      reloadRuntime(rt)
-        .then(() => {
-          console.log(t('[modeldock] 配置已热加载（第 {n} 次）', '[modeldock] Config hot-reloaded (reload #{n})', { n: rt.reloads }))
-          logEndpointRisks(rt.config)
-        })
-        .catch((e: Error) => console.error(t('[modeldock] 配置重载失败：{msg}', '[modeldock] Config reload failed: {msg}', { msg: e.message })))
+      void (async () => {
+        // 自家写盘去重：persistConfig 已随写热加载并记录盘上指纹（rt.lastConfigKey），防抖到期
+        // 指纹未变 = 本进程刚写完 config.toml 的 rename 事件，跳过第二次整包 reload——旧实现
+        // 每次保存都双次 reload（dispatcher 连接池销毁重建 + key 池轮转态清零 + reloads 虚增一倍）
+        if (rt.lastConfigKey !== undefined && (await configStatKey()) === rt.lastConfigKey) return
+        await reloadRuntime(rt)
+        console.log(t('[modeldock] 配置已热加载（第 {n} 次）', '[modeldock] Config hot-reloaded (reload #{n})', { n: rt.reloads }))
+        logEndpointRisks(rt.config)
+      })().catch((e: Error) => console.error(t('[modeldock] 配置重载失败：{msg}', '[modeldock] Config reload failed: {msg}', { msg: e.message })))
     }, 250)
   }
   try {
     watcher = fs.watch(modeldockDir(), (_event, filename) => {
-      if (!filename || filename === 'config.toml' || filename === 'secrets.json') scheduleReload()
+      // config.toml → 热加载（自家写盘的 rename 由 scheduleReload 内的指纹去重）；未知文件名保守处理
+      if (!filename || filename === 'config.toml') scheduleReload()
+      // secrets.json → 即刻失效密钥缓存（另一进程改 key 即刻生效），不再搭车整包 reload——
+      // config.toml 没变，reload 是纯浪费；自家刚写的跳过（invalidateSecretsCacheIfExternal
+      // 内部比对写后指纹与宽限窗），失效收口后 config 写不再清密钥缓存
+      if (!filename || filename === 'secrets.json') void invalidateSecretsCacheIfExternal().catch(() => {})
       // 只认精确文件名：引擎自己写 sync.json（lastAppliedRev 等簿记）签名未变，remount 幂等空转
       if (filename === 'sync.json') scheduleSyncRemount()
     })

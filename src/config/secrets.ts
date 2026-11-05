@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { stat as fsStat } from 'node:fs/promises'
 import { secretsPath } from '../util/paths.js'
 import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
@@ -489,7 +490,25 @@ export function pickFileCipher(): FileCipher {
 // file 后端的解密缓存：扩展转发每请求读 key，缓存避免每请求 spawn 子进程。
 // 缓存按 secrets.json 路径归属（path + data）：切换 MODELRDOCK_FAKE_HOME（测试多沙箱）或换数据源时，
 // 路径不同自然失效，避免拿上一份数据（home）的缓存污染当前读取。单 home 生产下路径恒定，行为同旧缓存。
-let fileCache: { path: string; data: Record<string, string> } | null = null
+// key = 填缓存**前**取的盘上指纹（mtimeMs:size；stat 先于读——读之后才落盘的并发写会使盘上
+// mtime 变化，下次回验必然 miss，不会把新指纹配旧数据）。指纹回验两用：
+// ① 写路径锁内「新鲜读」凭指纹相等直接复用解密表——file 后端全部写路径过同一把锁，持锁期间
+//   无并发写者，指纹相等即缓存必然反映盘上当前内容（win32 省一次 PowerShell 解密 spawn，
+//   写路径锁内从此通常只剩加密一次）；
+// ② 读路径周期回验兜底 watcher 漏事件：另一进程改 key 最迟一个回验周期生效；窗口内转发热路径
+//   零 I/O（旧实现是纯内存时间戳比较直到显式失效，此处保持每窗口至多一次 stat 的回验节奏）。
+const FILE_RECHECK_MS = 5_000
+let fileCache: { path: string; key: string; data: Record<string, string>; checkedAt: number } | null = null
+
+/** secrets.json 盘上指纹；stat 失败（文件不存在）返回 null。 */
+async function secretsStatKey(): Promise<string | null> {
+  try {
+    const st = await fsStat(secretsPath())
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return null
+  }
+}
 
 /** 读 secrets.json 原始明文表；损坏抛可操作 SecretsError（不再静默当「无密钥」） */
 /** 测试注入的整表原始读取（数读盘次数用）；undefined=真实实现。与 __testSetDpapiBatch 同套路：
@@ -527,70 +546,93 @@ async function readSecretsRaw(): Promise<Record<string, string>> {
 // 读盘+解密；写路径（useCache=false，锁内强制重读）不参与合并，保持锁内新鲜语义。
 let fileLoadInflight: Promise<Record<string, string>> | null = null
 
-/** 读取 file 后端解密表；win32/linux 首次加载会把存量明文自动加密迁移（整表一次进程）。
- *  @param useCache 默认读内存缓存（转发热路径）；写路径传 false 强制重读盘，避免跨进程改 key 丢更新。 */
-async function loadFileSecrets(useCache = true): Promise<Record<string, string>> {
-  if (useCache && fileCache && fileCache.path === secretsPath()) return fileCache.data
-  if (useCache && fileLoadInflight) return fileLoadInflight
-  const job = (async () => {
-    const path = secretsPath()
-    const raw = await readSecretsRaw()
-    const cipher = pickFileCipher()
-    if (!cipher.enabled) {
-      warnPlainFileOnce()
-      fileCache = { path, data: raw }
-      return raw
-    }
-    // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
-    // 时，异源密文不带本平台 prefix，会被下方 hasLegacyPlain 当「存量明文」再包一层加密——
-    // 原值永久丢失，解出来的还是密文串（发上游 401）。检测到异源前缀即抛可操作错误，绝不重加密。
-    const foreign = Object.entries(raw).find(
-      ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(cipher.prefix)
+/** 读盘 → 异源密文守卫 → 解密 → 存量明文迁移写；成功后以「读取前指纹」回填解密缓存。
+ *  指纹在 stat 先于读的时序下取：读完成后才落盘的并发写会使盘上 mtime 变化，下次回验必然
+ *  miss 重读，不会把新指纹配旧数据。 */
+async function readAndDecryptSecrets(): Promise<Record<string, string>> {
+  const path = secretsPath()
+  let key = await secretsStatKey()
+  const raw = await readSecretsRaw()
+  const cipher = pickFileCipher()
+  if (!cipher.enabled) {
+    warnPlainFileOnce()
+    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now() }
+    return raw
+  }
+  // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
+  // 时，异源密文不带本平台 prefix，会被下方 hasLegacyPlain 当「存量明文」再包一层加密——
+  // 原值永久丢失，解出来的还是密文串（发上游 401）。检测到异源前缀即抛可操作错误，绝不重加密。
+  const foreign = Object.entries(raw).find(
+    ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(cipher.prefix)
+  )
+  if (foreign) {
+    const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
+    throw new SecretsError(
+      t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密', '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here', { k: foreign[0], p: fp }),
+      t('请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json', 'Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json')
     )
-    if (foreign) {
-      const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
-      throw new SecretsError(
-        t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密', '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here', { k: foreign[0], p: fp }),
-        t('请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json', 'Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json')
-      )
-    }
-    const hasLegacyPlain = Object.values(raw).some(
-      (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
+  }
+  const hasLegacyPlain = Object.values(raw).some(
+    (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
+  )
+  let dec: Record<string, string>
+  try {
+    dec = await cipher.decryptTable(raw)
+  } catch (e) {
+    if (e instanceof SecretsError) throw e
+    // 解不开（换 Windows 账号/换机器/文件损坏）：给可操作错误，不透传 PowerShell stderr / GCM 英文原文
+    throw new SecretsError(
+      t('secrets.json 解密失败（{msg}）：密文可能来自其他 Windows 账号或机器', 'Failed to decrypt secrets.json ({msg}): the ciphertext may come from another Windows account or machine', { msg: (e as Error).message }),
+      t('请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建', 'Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild')
     )
-    let dec: Record<string, string>
+  }
+  if (hasLegacyPlain) {
+    // 明文→加密迁移写必须持锁 + 持锁后重读盘比对：本函数是热读路径（getSecret/verify 都触发），
+    // 无锁整表写回会覆盖并发写进程（mutateFileSecrets 持锁「新鲜读→改→整表写回」）刚写入的 key
+    // ——读进程拿旧表做迁移原子覆盖 = 丢更新竞态，用户刚设置的 key 静默丢失、引用悬空（转发 503）。
+    // DPAPI 解密要 spawn PowerShell（秒级），窗口不小。持锁后盘上内容已被改过（≠ 本次读到的 raw）
+    // 就跳过迁移写：本次会话仍返回 dec（读到的旧表），盘上以写进程的新表为准，下次冷读自然一致。
+    // withFileLock 有 AsyncLocalStorage 重入豁免：mutateFileSecrets 持锁内走到这里不会自死锁。
     try {
-      dec = await cipher.decryptTable(raw)
+      await withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
+        const fresh = await readSecretsRaw()
+        if (JSON.stringify(fresh) === JSON.stringify(raw)) {
+          // 迁移写也是自家写：宽限窗与写后指纹一并记上，watcher 的 secrets.json 事件不误失效缓存
+          selfWriteAt = Date.now()
+          await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+          key = await secretsStatKey()
+          selfWriteKey = key
+        }
+      })
     } catch (e) {
-      if (e instanceof SecretsError) throw e
-      // 解不开（换 Windows 账号/换机器/文件损坏）：给可操作错误，不透传 PowerShell stderr / GCM 英文原文
-      throw new SecretsError(
-        t('secrets.json 解密失败（{msg}）：密文可能来自其他 Windows 账号或机器', 'Failed to decrypt secrets.json ({msg}): the ciphertext may come from another Windows account or machine', { msg: (e as Error).message }),
-        t('请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建', 'Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild')
-      )
+      // 迁移是安全优化不是正确性前提：key 已解出、本次读取照常返回，不因迁移失败拖死读路径
+      //（锁被长期占用时宁可跳过也不等满超时）；留可观测告警，下次冷读自动重试迁移。
+      console.error(t('[modeldock] secrets.json 明文→加密迁移写跳过/失败（不影响本次读取，下次读取重试）：{msg}', '[modeldock] secrets.json plaintext-to-encrypted migration skipped/failed (this read is unaffected; retried on next read): {msg}', { msg: (e as Error).message }))
     }
-    if (hasLegacyPlain) {
-      // 明文→加密迁移写必须持锁 + 持锁后重读盘比对：本函数是热读路径（getSecret/verify 都触发），
-      // 无锁整表写回会覆盖并发写进程（mutateFileSecrets 持锁「重读→改→整表写回」）刚写入的 key
-      // ——读进程拿旧表做迁移原子覆盖 = 丢更新竞态，用户刚设置的 key 静默丢失、引用悬空（转发 503）。
-      // DPAPI 解密要 spawn PowerShell（秒级），窗口不小。持锁后盘上内容已被改过（≠ 本次读到的 raw）
-      // 就跳过迁移写：本次会话仍返回 dec（读到的旧表），盘上以写进程的新表为准，下次冷读自然一致。
-      // withFileLock 有 AsyncLocalStorage 重入豁免：mutateFileSecrets 持锁内走到这里不会自死锁。
-      try {
-        await withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
-          const fresh = await readSecretsRaw()
-          if (JSON.stringify(fresh) === JSON.stringify(raw)) {
-            await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
-          }
-        })
-      } catch (e) {
-        // 迁移是安全优化不是正确性前提：key 已解出、本次读取照常返回，不因迁移失败拖死读路径
-        //（锁被长期占用时宁可跳过也不等满超时）；留可观测告警，下次冷读自动重试迁移。
-        console.error(t('[modeldock] secrets.json 明文→加密迁移写跳过/失败（不影响本次读取，下次读取重试）：{msg}', '[modeldock] secrets.json plaintext-to-encrypted migration skipped/failed (this read is unaffected; retried on next read): {msg}', { msg: (e as Error).message }))
-      }
+  }
+  fileCache = { path, key: key ?? '', data: dec, checkedAt: Date.now() }
+  return dec
+}
+
+/** 读取 file 后端解密表；win32/linux 首次加载会把存量明文自动加密迁移（整表一次进程）。
+ *  @param useCache 默认读内存缓存（转发热路径：FILE_RECHECK_MS 窗口内零 I/O，窗口到 stat 回验
+ *  一次，盘未变续期复用、变了重读）。写路径传 false：跳过节流窗直接回验——file 后端全部写路径
+ *  过同一把锁，持锁期间无并发写者，指纹相等即缓存必然反映盘上当前内容，可安全复用解密表
+ *  （不再无条件重读盘：跨进程丢更新防线不变，win32 锁内通常省掉解密一次 PowerShell spawn）。 */
+async function loadFileSecrets(useCache = true): Promise<Record<string, string>> {
+  const cached = fileCache && fileCache.path === secretsPath() ? fileCache : null
+  if (cached) {
+    if (useCache && Date.now() - cached.checkedAt < FILE_RECHECK_MS) {
+      return cached.data // 回验窗口内：纯内存命中（转发热路径零 I/O）
     }
-    fileCache = { path, data: dec }
-    return dec
-  })()
+    const k = await secretsStatKey()
+    if (k !== null && k === cached.key) {
+      cached.checkedAt = Date.now()
+      return cached.data // 盘未变：续期复用（写路径锁内免一次解密 spawn；读路径免一次重读）
+    }
+  }
+  if (useCache && fileLoadInflight) return fileLoadInflight
+  const job = readAndDecryptSecrets()
   if (!useCache) return job
   fileLoadInflight = job
   try {
@@ -600,21 +642,33 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
   }
 }
 
+// 自家写盘指纹与宽限窗：watcher 收到 secrets.json 事件时区分自家写与外部写。自家写已随写
+// 更新 fileCache，再失效只会让下一次读取白付一次解密（win32 是一次 PowerShell spawn）；
+// 宽限窗兜底 atomicWrite rename 事件与写后 stat 的竞速——事件先到时指纹还没记上，窗口内的
+// secrets.json 事件都当自家写处理；外部极近的连续写由 loadFileSecrets 的回验周期兜底。
+let selfWriteKey: string | null = null
+let selfWriteAt = 0
+
 /** 解密表整体加密写回文件（file 后端；整表一次进程，而非逐条） */
 async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
   const cipher = pickFileCipher()
   const raw = await cipher.encryptTable(dec)
+  selfWriteAt = Date.now()
   await atomicWrite(secretsPath(), JSON.stringify(raw, null, 2) + '\n', 0o600)
-  fileCache = { path: secretsPath(), data: dec }
+  // 写后回填缓存与自家写指纹：缓存让本进程后续读零 I/O；指纹供 watcher 的事件回调区分自家写
+  const key = await secretsStatKey()
+  selfWriteKey = key
+  fileCache = { path: secretsPath(), key: key ?? '', data: dec, checkedAt: Date.now() }
 }
 
-/** 写路径统一入口：跨进程锁（与 config 同语义）+ 持锁内重读盘拼新鲜的解密表，改后整表写回。
- *  锁内强制跳过内存缓存，避免另一进程刚写入的 key 被本进程旧缓存覆盖（丢更新）。
- *  锁内的 DPAPI 解密/加密（win32 spawn PowerShell，最坏 4 次 × 10s 超时 ≈ 40s）**有意留在临界区**，
+/** 写路径统一入口：跨进程锁（与 config 同语义）+ 锁内新鲜读拼最新的解密表，改后整表写回。
+ *  锁内新鲜读按盘上指纹复用缓存解密表（loadFileSecrets(false)：持锁期间无并发写者，指纹相等
+ *  即缓存必然反映盘上当前内容；另一进程刚写入时指纹必然不等，自动整表重读）——跨进程丢更新
+ *  防线不变，win32 锁内从「解密+加密各一次 PowerShell spawn」收敛为通常只剩加密一次。
+ *  锁内的 DPAPI 加密（win32 spawn PowerShell，最坏 2 次 × 10s 超时 ≈ 20s）**有意留在临界区**，
  *  依赖 fsx 的持锁喂狗保活（acquireFileLock 心跳刷新锁 mtime，陈锁判定对活者永不满足）：
- *  解密移不出锁——锁外解密的快照持锁时可能已被他人改写（丢更新窗口本质），重检失败又回到
- *  锁内慢操作或引入放锁重抢的活锁循环；加密更移不出——改后整表只有锁内才知道，而整表原子写
- *  必须发生在锁内。竞态防线见 test/secrets-lock.test.ts。 */
+ *  解密已可凭指纹跳过；加密移不出锁——改后整表只有锁内才知道，而整表原子写必须发生在锁内。
+ *  竞态防线见 test/secrets-lock.test.ts。 */
 function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise<T>): Promise<T> {
   return withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
     const store = await loadFileSecrets(false)
@@ -624,11 +678,23 @@ function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise
   })
 }
 
-/** 清除全部密钥缓存（file 后端整表解密缓存 + 外部后端 TTL 缓存）：
- *  文件 watcher 触发的 reload 调用此后，另一进程 / 控制台改的 key 即刻（file）或最迟 1 分钟（keychain）生效。 */
+/** 清除全部密钥缓存（file 后端整表解密缓存 + 外部后端 TTL 缓存）：测试与「确认要强制重读」的
+ *  场景用。网关热加载路径不再走这里——config.toml 写不清密钥缓存（写者自带更新），失效收口为：
+ *  watcher 收 secrets.json 事件走 {@link invalidateSecretsCacheIfExternal}（外部写即刻生效、自家写
+ *  跳过），外加 fileCache 回验周期兜底 watcher 漏事件。 */
 export function invalidateSecretsCache(): void {
   fileCache = null
   externalCache.clear()
+}
+
+/** watcher / 手动热加载口径的密钥缓存失效：secrets.json 事件到达时，自家刚写的按写后指纹与
+ *  宽限窗跳过（缓存已随写更新），外部写才清——另一进程改 key 即刻（file）生效，不再牵连本进程
+ *  白付一次解密。watcher 漏事件时由 loadFileSecrets 的回验周期兜底，最迟一个周期生效。 */
+export async function invalidateSecretsCacheIfExternal(): Promise<void> {
+  if (Date.now() - selfWriteAt < 1500) return
+  const k = await secretsStatKey()
+  if (k !== null && k === selfWriteKey) return
+  invalidateSecretsCache()
 }
 
 /** doctor 体检用：验证 file 后端密钥表可读（解析/解密失败给可操作错误而不是抛出）。
@@ -743,10 +809,14 @@ export async function setSecretsBatch(
     backend = 'file'
   }
   if (backend === 'keychain' || backend === 'secret-service') {
-    for (const [id, val] of Object.entries(entries)) {
-      await setExternal(backend, id, val)
-      refs[id] = makeKeyRef(backend, id)
-    }
+    // 各条目互不相依，并发写入——原串行 for-await 下 N 把 key = N 次 security/secret-tool spawn
+    // 逐个等（每次几十 ms～秒级），多机同步 pull 在 config 锁内的持锁时长随条目数线性放大
+    await Promise.all(
+      Object.entries(entries).map(async ([id, val]) => {
+        await setExternal(backend, id, val)
+        refs[id] = makeKeyRef(backend, id)
+      })
+    )
     return refs
   }
   return mutateFileSecrets((store) => {
