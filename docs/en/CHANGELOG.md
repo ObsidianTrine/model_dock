@@ -14,6 +14,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 ### Improved
 
 - **Sectioned release-note summaries**: `update --check`, native tray dialogs, and the console summary now report per-section item counts with highlights (Added / Improved / Fixed) — every kind of change gets exposure on big releases instead of only the first few entries.
+- **Saving configuration changes is noticeably faster**: a save no longer hot-reloads the gateway state twice and no longer invalidates the API-key cache — previously every save (even a name-only edit) triggered a double reload and threw away all cached keys, forcing the next read back to the system keyring (tens of milliseconds each on macOS); editing a service also no longer reads the old key needlessly. On Windows, saving an API key drops from "decrypt + encrypt, one PowerShell start each" to usually just the encryption.
+- **Client resync after service switch / default-model change is faster**: attach plans for "model-baking" clients (Claude Code, dsh, ZCode, Codex, …) are now generated in one concurrent pass before writing serially — the more clients, the bigger the win; a shared config file is still written only once. Bulk key writes (import, multi-machine sync pull) also write to the system keyring concurrently now.
 
 ### Fixed
 

@@ -125,11 +125,12 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
 }
 
 export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
-  const { loadConfig } = await import('../../config/store.js')
-  const { invalidateSecretsCache } = await import('../../config/secrets.js')
-  // 文件 watcher 触发的 reload 会经过这里：清 file/外部后端密钥缓存，另一进程改的 key 即刻（再读盘）生效
-  invalidateSecretsCache()
+  const { loadConfig, configStatKey } = await import('../../config/store.js')
   rt.config = await loadConfig()
+  // 记录本次加载对应的盘上指纹：main.ts 的 watcher 收到 config.toml 事件后按此去重——
+  // persistConfig 自家写盘的 rename 事件不再触发第二次整包 reload（旧实现每次保存双次 reload：
+  // dispatcher 连接池销毁重建 + key 池轮转态清零 + reloads 虚增一倍）
+  rt.lastConfigKey = await configStatKey()
   rt.tokens = buildTokenIndex(rt.config)
   rt.reloads++
   // 释放旧的代理 dispatcher（ProxyAgent 连接）；direct 共享 Agent 是模块级单例、跨重载复用，不关

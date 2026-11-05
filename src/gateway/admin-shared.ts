@@ -1,6 +1,6 @@
 /** admin 门共享底座：请求上下文类型与跨域小帮手（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import http from 'node:http'
-import { ConfigError, mutateConfig } from '../config/store.js'
+import { ConfigError, configStatKey, mutateConfig } from '../config/store.js'
 import { SecretsError } from '../config/secrets.js'
 import { AdapterError } from '../adapters/types.js'
 import { UpdateError } from '../update/check.js'
@@ -122,9 +122,14 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
   }
 }
 
-/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态 */
+/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
+ *  fn 零改动（mutateConfig 内部同值跳写，盘上指纹不变）时跳过热加载——空转保存（控制台
+ *  同值重写等）不再白付整包 reload：dispatcher 连接池销毁重建、key 池轮转态清零、reloads
+ *  虚增与 overview 缓存连带失效（下一次轮询被迫同步重建）全免。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
+  const before = await configStatKey()
   await mutateConfig(fn)
+  if ((await configStatKey()) === before) return
   await reloadRuntime(rt)
 }
 

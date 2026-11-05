@@ -100,6 +100,10 @@ export interface GatewayRuntime {
   startedAt: number
   adminToken: string
   reloads: number
+  /** 最近一次 reloadRuntime 加载对应的 config.toml 盘上指纹（store.configStatKey，mtimeMs:size）。
+   *  watcher 收到 config.toml 事件后按此去重：persistConfig 自家写盘已随写热加载，防抖到期
+   *  指纹未变即跳过第二次整包 reload。undefined = 本进程尚未加载过（首个事件保守重载）。 */
+  lastConfigKey?: string
   /** proxy 配置值 → dispatcher（undefined = 直连） */
   dispatchers: Map<string, Dispatcher | undefined>
   /** providerId → 自动路由健康/熔断状态（仅 auto_failover 开启时使用） */
