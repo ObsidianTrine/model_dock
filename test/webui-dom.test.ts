@@ -46,6 +46,18 @@ const OVERVIEW_FIXTURE = {
   syncRequest: null,
 }
 
+// /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新）
+const USAGE_LIVE_FIXTURE = {
+  ok: true,
+  usageToday: {
+    date: '2026-11-06', requests: 3, ok: 3, err: 0,
+    tokens: { input: 1200, output: 340, cache_read: 0, cache_write: 0 },
+    cost: { total: 0.0042 },
+    unpriced_models: [],
+  },
+  ms: { alpha: 120 },
+}
+
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
   const routes: Record<string, () => { body: unknown; raw?: string }> = {
@@ -53,6 +65,7 @@ function stubFetch(): void {
     '/_modeldock/health': () => ({ body: { ok: true } }),
     '/_modeldock/admin/update/status': () => ({ body: { current: '1.0.0', available: false } }),
     '/_modeldock/model-catalog': () => ({ body: { ok: true, models: {} } }),
+    '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
     '/_modeldock/logs': () => ({ body: { logs: [], total: 0, page: 1, pages: 1 } }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
   }
@@ -114,6 +127,14 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(cards[0].querySelector('.name')?.textContent).toContain('Alpha 服务')
     expect(cards[0].textContent).toContain('正在使用')
     expect(cards[1].textContent).not.toContain('正在使用')
+  })
+
+  it('usage-live 定向更新：用量徽标与服务卡延迟 span 来自 /usage-live（主载荷不再携带易变字段）', async () => {
+    mountPage()
+    await flush(60) // pollLive 挂在 load() 链尾（多一跳 fetch），比常规断言多冲几轮微任务
+    expect(document.getElementById('health')?.textContent ?? '').toContain('今日 3 请求')
+    const ms = document.querySelector('[data-svcms="alpha"]')
+    expect(ms?.textContent).toContain('延迟 120ms')
   })
 
   it('语言切换重渲染：点 EN 后静态 data-i18n 节点与服务卡文案随语言变化', async () => {
