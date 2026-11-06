@@ -125,12 +125,12 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
 /** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
  *  fn 零改动（mutateConfig 内部同值跳写，盘上指纹不变）时跳过热加载——空转保存（控制台
  *  同值重写等）不再白付整包 reload：dispatcher 连接池销毁重建、key 池轮转态清零、reloads
- *  虚增与 overview 缓存连带失效（下一次轮询被迫同步重建）全免。 */
+ *  虚增与 overview 缓存连带失效全免。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
   const before = await configStatKey()
   await mutateConfig(fn)
   if ((await configStatKey()) === before) return
-  await reloadRuntime(rt)
+  await reloadRuntime(rt) // reloadRuntime 内统一触发保存后 overview 预热（perf-p2-polish）
 }
 
 /** 服务 → profile 解析（UI 按「服务」操作、底层路由单元是 profile）：

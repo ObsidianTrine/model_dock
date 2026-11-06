@@ -9,8 +9,9 @@ import { localIsoTs } from '../util/time.js'
 import { gatewayStatePath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
-import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, startupGatewayState, writeGatewayState } from './state.js'
+import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
+import { gatewayPriceResolver } from './pricing.js'
 import { warmupOverview } from './overview-view.js'
 import { listenWithRetry } from './shared.js'
 import { startBootUpdateCheck } from '../update/webupdate.js'
@@ -104,6 +105,9 @@ export async function startForeground(portOverride?: number): Promise<void> {
   }
   const adminToken = resolveAdminToken(previousToken)
   const rt = buildRuntime(cfg, adminToken)
+  // 今日用量仪表/记账的查价器注入（perf-p2-polish）：logs 域不再静态依赖 pricing→catalog 大模块，
+  // CLI 命令启动闭包不拖 catalog-snapshot；daemon 侧在此一次性接上
+  setUsagePriceResolver(gatewayPriceResolver)
   // ops 层（switchToService 等，无 rt 上下文）的后台事件经此转发进本网关运行时 ring，页面日志表可见
   setEventRingSink((entry) => pushRing(rt, entry))
   // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动，但不再无声吞掉——

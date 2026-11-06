@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { gatewayLive } from './gateway/state.js'
+import { gatewayLive } from './gateway/state/state-file.js' // 直取叶子（perf-p2-polish）：不拖 state.js 聚合层
 
 /** 托盘拉起。打包形态托盘二进制随 app 分发在主程序旁（mac `ModelDockTray` / win `ModelDockTray.exe`），
  *  npm / dev 形态没有，按「文件是否存在」决定是否拉起。

@@ -10,7 +10,6 @@ export const UI_JS_APP = `  function load() {
     // 见 presence.ts），默认 15s 在低内存/慢盘机器上会误超时，放宽到 45s
     return api('/overview', { timeoutMs: 45000 }).then(function (v) {
       view = v
-      knownModels = Object.assign({}, catalogTable, (v && v.knownModels) || {})
       // 首屏同感知轻量模式广播（正常应为 0：服务端在 /ui 加载时已清广播并失效缓存；留守防护真并发）
       var tor = (v && v.gateway && v.gateway.trayLiteRequest) || 0
       if (tor > lastTrayLiteRequestSeen) { lastTrayLiteRequestSeen = tor; enterTrayLite() }
@@ -24,14 +23,15 @@ export const UI_JS_APP = `  function load() {
     })
   }
 
-  // models.dev 目录大表懒加载（只拉一次）：失败静默，自动补值仍有 overview 内置小表兜底
+  // models.dev 目录大表懒加载（只拉一次）：失败静默，自动补值表保持空（perf-p2-polish 起
+  // overview 不再携带 knownModels 内置小表，大表是唯一补值源）
   function loadCatalog() {
     if (loadCatalog.done) return
     loadCatalog.done = true
     fetch('/_modeldock/model-catalog', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (v) {
       if (!v || !v.models) return
       catalogTable = v.models
-      knownModels = Object.assign({}, catalogTable, (view && view.knownModels) || {})
+      knownModels = catalogTable
     }).catch(function () {})
   }
 
@@ -260,7 +260,6 @@ export const UI_JS_OVERVIEW = `  var lastTrayLiteRequestSeen = 0
       // 轻量模式广播：请求时间戳新于上次所见即自关（陈旧值靠严格大于去重，不重复触发）
       var tor = (v.gateway && v.gateway.trayLiteRequest) || 0
       if (tor > lastTrayLiteRequestSeen) { lastTrayLiteRequestSeen = tor; enterTrayLite() }
-      knownModels = Object.assign({}, catalogTable, v.knownModels || {})
       render()
       // 沙箱徽标挂在健康横幅上：view 就绪后（含首次 load）补一次，避免徽标晚到下一个轮询周期
       $('#health').innerHTML = healthHtml()

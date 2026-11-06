@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
-import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, mutateGatewayState, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
+import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, mutateGatewayState, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, reloadRuntime, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision } from '../src/gateway/server.js'
 import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
@@ -349,15 +349,55 @@ describe('autostart 与 overview 缓存', () => {
     expect(OVERVIEW_TTL_MS).toBeGreaterThan(5_000)
   })
 
-  it('overview 响应决策：TTL 内直发、键匹配过期走 SWR（旧快照先行）、键不匹配同步重建', () => {
+  it('overview 响应决策：TTL 内直发、过期与配置代数前进走 SWR（旧快照先行）、换代/异语言 miss', () => {
     const fakeRt = {} as any
     const cached = { at: 1_000, rt: fakeRt, reloads: 0, lang: 'zh', data: '{}' }
     expect(overviewServeDecision(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS - 1)).toBe('hit')
     expect(overviewServeDecision(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS)).toBe('stale')
-    // SWR 只在键匹配时给旧快照：配置写（reloads 递增）/语言切换/换 runtime 一律 miss（同步重建，写后立即可见）
-    expect(overviewServeDecision(cached, fakeRt, 1, 'zh', 1_000 + 100)).toBe('miss')
+    // SWR 也覆盖配置写（reloads 递增）：旧串先行 + 写后预热/单飞追新（perf-p2-polish），
+    // Windows 冷探测不再挡请求线程；语言切换/换 runtime 仍 miss（旧串不可借，同步重建）
+    expect(overviewServeDecision(cached, fakeRt, 1, 'zh', 1_000 + 100)).toBe('stale')
     expect(overviewServeDecision(cached, fakeRt, 0, 'en', 1_000 + 100)).toBe('miss')
     expect(overviewServeDecision(cached, { ...fakeRt, n: 1 } as any, 0, 'zh', 1_000 + 100)).toBe('miss')
+  })
+
+  it('写后读契约：reloadRuntime 后紧跟的 overview 读取拿新数据（join 写后预热，不吃旧串）', async () => {
+    const t = await setup()
+    try {
+      const H = { 'x-modeldock-admin': 'admin-token-x' }
+      const url = `http://127.0.0.1:${t.gwPort}/_modeldock/overview`
+      const ov = async () => (await (await fetch(url, { headers: H })).json()) as any
+      await ov() // 首次读取：填 6s TTL 缓存（旧代数基线）
+      // 直改盘上配置再热加载（attach/detach/persistConfig 同款链路）：紧跟的读取必须反映
+      // 新代数——预热被 reloadRuntime 同步 kick，读取 join 在飞重建或命中已建好的新缓存
+      await saveConfig({ ...t.rt.config, active_profile: 'other' } as Config)
+      await reloadRuntime(t.rt)
+      const after = await ov()
+      expect(after.defaultRoute).toMatchObject({ id: 'up', model: 'other-model' }) // active_profile → 'other'
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('GET /_modeldock/presets：预设目录独立端点（ETag/304），overview 载荷不再携带 presets/knownModels', async () => {
+    const t = await setup()
+    try {
+      const H = { 'x-modeldock-admin': 'admin-token-x' }
+      const url = `http://127.0.0.1:${t.gwPort}/_modeldock/presets`
+      const r1 = await fetch(url, { headers: H })
+      const j1: any = await r1.json()
+      expect(j1.ok).toBe(true)
+      expect(Array.isArray(j1.presets)).toBe(true)
+      expect(j1.presets.length).toBeGreaterThan(0)
+      expect(r1.headers.get('etag')).toBeTruthy()
+      const r2 = await fetch(url, { headers: { ...H, 'if-none-match': r1.headers.get('etag')! } })
+      expect(r2.status).toBe(304)
+      const ov: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: H })).json()
+      expect(ov.presets).toBeUndefined()
+      expect(ov.knownModels).toBeUndefined()
+    } finally {
+      t.closeAll()
+    }
   })
 
   it('TTL 缓存不互借语言：缓存命中后请求级语言切换仍拿到完整响应（命中逐字节一致性归 console-cache 套件）', async () => {
@@ -1131,7 +1171,10 @@ describe('网关', () => {
       expect(view.current.label).toBeTruthy()
       expect(view.services[0].isCurrent).toBe(true)
       expect(view.clients.length).toBeGreaterThanOrEqual(5)
-      expect(view.presets.length).toBeGreaterThan(10)
+      // 预设目录拆独立端点（perf-p2-polish）：overview 不再携带，懒加载端点照常可拉
+      expect(view.presets).toBeUndefined()
+      const presetsView: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/presets`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
+      expect(presetsView.presets.length).toBeGreaterThan(10)
 
       // 添加服务（fetch:false 避免真实网络）
       const svc = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/service`, {
@@ -1176,9 +1219,9 @@ describe('网关', () => {
     try {
       const origin = `http://127.0.0.1:${t.gwPort}`
       const ADMIN = { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' }
-      // overview.presets 携带模型目录（添加页首屏直显预设模型）
-      const view: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
-      const ds = view.presets.find((p: any) => p.id === 'deepseek-anthropic')
+      // 预设模型目录从 /_modeldock/presets 拉取（perf-p2-polish：拆出 overview 轮询载荷，添加浮层懒加载）
+      const presetsView: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/presets`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
+      const ds = presetsView.presets.find((p: any) => p.id === 'deepseek-anthropic')
       expect(Object.keys(ds.models || {})).toContain('deepseek-flash')
       expect(ds.models['deepseek-flash'].context_window).toBeGreaterThan(0)
       // 添加：在预设目录上精修上下文 + 指定默认模型 + 备用链（自身条目应被跳过）

@@ -5,7 +5,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { logsDir } from '../../util/paths.js'
 import { appendLine, closeAppendStream } from '../../util/fsx.js'
 import { localIsoTs } from '../../util/time.js'
-import { costOfUsage, gatewayPriceResolver, type PriceResolver } from '../pricing.js'
+import { costOfUsage, type PriceResolver } from '../../providers/pricing-core.js'
 import type { AuditEntry, EventEntry, GatewayRuntime, LogEntry, RingEntry } from './types.js'
 
 const RING_MAX = 500
@@ -67,9 +67,17 @@ export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
 }
 
 // ===== 今日用量实况（overview 状态行的成本仪表 / usageToday）=====
-// 内存累计器（gatewayPriceResolver 查价），网关重启后首次触达时回填扫当日日文件——
+// 内存累计器（usagePriceResolver 查价），网关重启后首次触达时回填扫当日日文件——
 // 「今日」语义跨重启不失忆。回填是同步单日扫描（一天一次的代价，本机个人量级可接受）；
 // 之后 logRequest 逐条增量，转发热路径零额外 IO。跨日 / 日志目录切换（fake home）自动重置。
+// 查价器由 daemon 启动注入（perf-p2-polish）：logs 域不再静态依赖 pricing → catalog →
+// catalog-snapshot（1.18MB），CLI 命令启动闭包不再拖入；未注入（CLI 直用累计器等场景）
+// 时不计成本，与 createUsageAccumulator 的 priceOf 缺省行为一致。
+let usagePriceResolver: PriceResolver | undefined
+/** 注入今日仪表/记账查价器（daemon 启动时传 gatewayPriceResolver；测试按需注入）。 */
+export function setUsagePriceResolver(r: PriceResolver | undefined): void {
+  usagePriceResolver = r
+}
 export interface UsageTodayView {
   date: string
   requests: number
@@ -86,7 +94,7 @@ function ensureTodayTracker(): { dir: string; date: string; acc: ReturnType<type
   const dir = logsDir()
   const date = localIsoTs().slice(0, 10)
   if (todayTracker && todayTracker.dir === dir && todayTracker.date === date) return todayTracker
-  const acc = createUsageAccumulator(gatewayPriceResolver)
+  const acc = createUsageAccumulator(usagePriceResolver)
   for (const e of readRequestLogDay(date)) acc.add(e)
   todayTracker = { dir, date, acc }
   return todayTracker

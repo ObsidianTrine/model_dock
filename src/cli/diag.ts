@@ -239,9 +239,7 @@ export function diskUsageFinding(totalBytes: number, freeBytes: number | null, r
 export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<DoctorFinding[]> {
   const F: DoctorFinding[] = []
   const ok = (id: string, msg: string) => F.push({ id, level: 'ok', msg })
-  const warn = (id: string, msg: string, hint?: string, fix?: DoctorFix) => F.push({ id, level: 'warn', msg, hint, fix })
   const bad = (id: string, msg: string, hint?: string, fix?: DoctorFix) => F.push({ id, level: 'bad', msg, hint, fix })
-  const info = (id: string, msg: string, hint?: string) => F.push({ id, level: 'info', msg, hint })
 
   // doctor 第二轮③：FAKE_HOME 指向真实 ~/.modeldock = 测试写穿生产——bad 点名 + 改法
   const mis = fakeHomeMisconfig(process.env.MODELRDOCK_FAKE_HOME, os.homedir())
@@ -280,295 +278,336 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     F.push(diskUsageFinding(total, free, cfg.gateway?.log_retention_days))
   }
 
-  // 密钥库整表可读性：损坏时逐条 key 检查只会重复报同一根因，后续跳过
-  let secretsOk = true
-  try {
-    const sv = await verifySecretsStore()
-    if (!sv.ok) {
-      secretsOk = false
-      bad('secrets.store', sv.error, t('各密钥重新设置：modeldock provider set-key <id>', 'Re-set your keys: modeldock provider set-key <id>'))
+  // ── 分组并行段（perf-p2-polish）：密钥库验证、跨机密文、网关存活/端口/watch/自启/悬空、
+  // active_profile 链、适配器探测、安检扫描六组互不依赖，此前串行 await——上游不可达时白等
+  // 3s 才轮到适配器与安检段，Windows 冷路径（DPAPI spawn + reg query 全树）叠串行可到 10s+。
+  // 分组 Promise.all 后总时延 = 最慢组而非各段之和；各组分桶收集、按原块序归并，--json 的
+  // 稳定 id 序不变。真实依赖只有两处，都在组内 await 共享 promise 解决：
+  // ① provider.key 子项依赖密钥库验证结果（secretsVerifyP）；② harness 段的探活端口依赖 gatewayLive()。
+  const cfgPort = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  const bSecrets: DoctorFinding[] = []
+  const bForeign: DoctorFinding[] = []
+  const bGateway: DoctorFinding[] = []
+  const bChain: DoctorFinding[] = []
+  const bHarness: DoctorFinding[] = []
+  const bSec: DoctorFinding[] = []
+  // 分桶版 ok/warn/bad/info（与 F 直推同款形状），各组先落自己的桶、最后按块序归并
+  const H = (arr: DoctorFinding[]) => ({
+    ok: (id: string, msg: string) => arr.push({ id, level: 'ok' as const, msg }),
+    warn: (id: string, msg: string, hint?: string, fix?: DoctorFix) => arr.push({ id, level: 'warn' as const, msg, hint, fix }),
+    bad: (id: string, msg: string, hint?: string, fix?: DoctorFix) => arr.push({ id, level: 'bad' as const, msg, hint, fix }),
+    info: (id: string, msg: string, hint?: string) => arr.push({ id, level: 'info' as const, msg, hint }),
+  })
+
+  const liveP = gatewayLive()
+
+  // 密钥库整表可读性：损坏时逐条 key 检查只会重复报同一根因，后续跳过（结果经 secretsVerifyP 供链路组共享）
+  const secretsVerifyP = (async (): Promise<boolean> => {
+    const b = H(bSecrets)
+    try {
+      const sv = await verifySecretsStore()
+      if (!sv.ok) {
+        b.bad('secrets.store', sv.error, t('各密钥重新设置：modeldock provider set-key <id>', 'Re-set your keys: modeldock provider set-key <id>'))
+        return false
+      }
+    } catch {
+      /* 验证自身异常不拦截：交由逐条 key 检查暴露 */
     }
-  } catch {
-    /* 验证自身异常不拦截：交由逐条 key 检查暴露 */
-  }
+    return true
+  })()
 
   // 跨机密文引用（REVIEW-18）：file 后端密文绑定原机器/平台（win DPAPI / linux machine-id），
   // 跨机拷贝 home 后本机解不开、发上游必 401。在通用 secrets.store 报错之上点名受影响引用与服务，
   // 提示对相应服务重新 set-key（--json 消费方按 id=secrets.foreign_cipher 识别）
-  const foreignRefs = await detectForeignCipherRefs(cfg)
-  if (foreignRefs.length) {
-    bad(
-      'secrets.foreign_cipher',
-      t('此配置含他机密文引用（{list}）：密文绑定其他机器/平台，本机无法解密', 'This config contains cross-machine ciphertext references ({list}): the ciphertext is bound to another machine or platform and cannot be decrypted here', { list: foreignRefs.join(', ') }),
-      t('对相应服务重新设置密钥：modeldock provider set-key <服务 id>；不要直接把别机的 secrets.json 拷到本机', "Re-set the key for each affected service: modeldock provider set-key <provider id>; do not copy another machine's secrets.json here")
-    )
-  }
-
-  const live = await gatewayLive()
-  const cfgPort = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
-  if (live) {
-    ok('gateway.up', t('网关运行中 127.0.0.1:{port}（pid {pid}）', 'Gateway running on 127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid }))
-    if (live.port !== cfgPort) {
-      warn(
-        'gateway.port_drift',
-        t('网关实际监听 {actual}，与配置端口 {configured} 不一致（配置端口被占用时启动会漂移）', 'The gateway listens on {actual}, not the configured port {configured} (start drifts when the configured port is taken)', { actual: live.port, configured: cfgPort }),
-        t('解除端口占用后 modeldock gateway stop 再启动，即回到配置端口', 'Free the port, then modeldock gateway stop and start again to return to the configured port')
+  const foreignP = (async (): Promise<void> => {
+    const b = H(bForeign)
+    const foreignRefs = await detectForeignCipherRefs(cfg)
+    if (foreignRefs.length) {
+      b.bad(
+        'secrets.foreign_cipher',
+        t('此配置含他机密文引用（{list}）：密文绑定其他机器/平台，本机无法解密', 'This config contains cross-machine ciphertext references ({list}): the ciphertext is bound to another machine or platform and cannot be decrypted here', { list: foreignRefs.join(', ') }),
+        t('对相应服务重新设置密钥：modeldock provider set-key <服务 id>；不要直接把别机的 secrets.json 拷到本机', "Re-set the key for each affected service: modeldock provider set-key <provider id>; do not copy another machine's secrets.json here")
       )
     }
-  } else {
-    warn(
-      'gateway.down',
-      t('网关未运行', 'The gateway is not running'),
-      'modeldock gateway start --daemon',
-      {
-        kind: 'start-gateway',
-        confirm: false,
-        label: t('启动网关（后台）', 'Start the gateway (background)'),
-        run:
-          deps.startGateway ??
-          (async () => {
-            const state = await spawnDaemonAndWait([...gatewayDaemonArgs(), '--port', String(cfgPort)])
-            if (!state) throw new Error(t('后台启动超时；前台运行 modeldock gateway start 查看错误', 'Background start timed out; run "modeldock gateway start" in the foreground for details'))
-            return `http://127.0.0.1:${state.port}`
-          }),
+  })()
+
+  // 网关存活/端口漂移 + watch + 自启登记 + 悬空 profile（本地快速检查合一段，段内保持原相对次序）
+  const gatewayP = (async (): Promise<void> => {
+    const b = H(bGateway)
+    const live = await liveP
+    if (live) {
+      b.ok('gateway.up', t('网关运行中 127.0.0.1:{port}（pid {pid}）', 'Gateway running on 127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid }))
+      if (live.port !== cfgPort) {
+        b.warn(
+          'gateway.port_drift',
+          t('网关实际监听 {actual}，与配置端口 {configured} 不一致（配置端口被占用时启动会漂移）', 'The gateway listens on {actual}, not the configured port {configured} (start drifts when the configured port is taken)', { actual: live.port, configured: cfgPort }),
+          t('解除端口占用后 modeldock gateway stop 再启动，即回到配置端口', 'Free the port, then modeldock gateway stop and start again to return to the configured port')
+        )
       }
-    )
-    const busy = deps.portProbe ? await deps.portProbe(cfgPort) : await portInUse(cfgPort)
-    if (busy) {
-      warn(
-        'gateway.port_busy',
-        t('配置端口 {port} 已被其他进程占用：网关启动后将改用其他端口', 'Configured port {port} is taken by another process: the gateway will fall back to another port on start', { port: cfgPort }),
-        t('查看占用者：lsof -nP -iTCP:{port} -sTCP:LISTEN（Windows：netstat -ano | findstr {port}）', 'Find the occupier: lsof -nP -iTCP:{port} -sTCP:LISTEN (Windows: netstat -ano | findstr {port})', { port: cfgPort })
-      )
-    }
-  }
-
-  if (!probeFsWatch()) {
-    warn(
-      'gateway.watch',
-      t('配置目录监听不可用（fs.watch 异常）：网关热加载失效，改配置不会自动生效', 'Config-dir watching is unavailable (fs.watch error): gateway hot-reload is broken; config changes will not apply automatically'),
-      t('先重启网关试试；仍不行就改配置后手动热加载（POST /_modeldock/reload）或重启网关', 'Restart the gateway first; if it persists, reload manually after changes (POST /_modeldock/reload) or restart the gateway')
-    )
-  }
-
-  // 自启登记核查（known-issues CORRECT-05 遗留清理）：只读服务文件内容判定，不 spawn launchctl/systemctl。
-  // 登记指向沙箱路径 = 旧版沙箱曾把自启写进真机的残留；指向已不存在的文件 = nvm 升级/二进制移动后
-  // 自启静默失败。沙箱上下文（FAKE_HOME）下 serviceFilePath 已重定向，只核沙箱自身登记，且豁免自引用
-  // （dev 沙箱自己的服务文件引用自家路径属正常）；--fix 走 uninstallAutostart，confirm 把关 + 删前
-  // 由本项 msg/hint 打印将删内容（登记文件与指向），不自动删任何数据。
-  // Windows 注册表形态（XPLAT-06）没有服务文件：读 Run 键镜像文件（生产 reg add 同步落盘，沙箱下即键值本体）；
-  // 仅剩旧 VBS（升级未重装）回读 VBS 内容（ARGV_MARK）——与 windowsStatus 的双源判定同口径
-  const svcFile = autostartKind() === 'windows'
-    ? (fs.existsSync(windowsRunValueMirrorFile())
-        ? windowsRunValueMirrorFile()
-        : fs.existsSync(windowsStartupPath()) ? windowsStartupPath() : null)
-    : serviceFilePath()
-  if (svcFile && fs.existsSync(svcFile)) {
-    let text = ''
-    try {
-      text = fs.readFileSync(svcFile, 'utf8')
-    } catch {
-      /* 读不了按无登记内容处理，退当前运行时 argv */
-    }
-    const argv = (autostartKind() === 'windows' ? parseRunCommandLine(text) : readRecordedArgv(text)) ?? gatewayDaemonArgs()
-    const fakeHomeRoot = process.env.MODELRDOCK_FAKE_HOME ? path.resolve(process.env.MODELRDOCK_FAKE_HOME) : null
-    const sandboxHit = fakeHomeRoot
-      ? argv.find((a) => SANDBOX_REF_RE.test(a) && !a.startsWith(fakeHomeRoot))
-      : SANDBOX_REF_RE.exec(text)?.[0]
-    const autostartCleanup: DoctorFix = {
-      kind: 'autostart-cleanup',
-      confirm: true,
-      label: t('移除开机自启登记（{f}）', 'Remove the autostart entry ({f})', { f: svcFile }),
-      run: async () => (await uninstallAutostart()).removed,
-    }
-    if (sandboxHit) {
-      warn(
-        'autostart.residue',
-        t('开机自启登记指向沙箱路径（{a}）：多为旧版沙箱自启残留，下次登录会拉起失效实例', 'The autostart entry points into a sandbox path ({a}): likely residue from an old sandbox install; it will launch a broken instance at next login', { a: sandboxHit }),
-        t('确认是残留后用 --fix 移除（删除登记文件并卸载服务），或手动 modeldock gateway uninstall', 'Remove it with --fix after confirming it is residue (deletes the entry file and unloads the service), or run modeldock gateway uninstall manually'),
-        autostartCleanup
-      )
-    } else if (recordedArgvStale(argv)) {
-      const staleArg = fs.existsSync(argv[0]) ? (argv.slice(1).find((a) => !a.startsWith('--') && !fs.existsSync(a)) ?? argv[0]) : argv[0]
-      warn(
-        'autostart.residue',
-        t('开机自启登记的启动命令指向不存在的文件（{a}）：下次登录自启将静默失败', 'The autostart start command points at missing files ({a}): autostart will silently fail at next login', { a: staleArg }),
-        t('重装自启：modeldock gateway uninstall 后再 modeldock gateway install；不再需要可用 --fix 移除登记', 'Reinstall it: modeldock gateway uninstall then modeldock gateway install; or remove the entry with --fix if no longer needed'),
-        autostartCleanup
-      )
     } else {
-      ok('autostart.entry', t('开机自启登记有效（{f}）', 'Autostart entry is healthy ({f})', { f: svcFile }))
+      b.warn(
+        'gateway.down',
+        t('网关未运行', 'The gateway is not running'),
+        'modeldock gateway start --daemon',
+        {
+          kind: 'start-gateway',
+          confirm: false,
+          label: t('启动网关（后台）', 'Start the gateway (background)'),
+          run:
+            deps.startGateway ??
+            (async () => {
+              const state = await spawnDaemonAndWait([...gatewayDaemonArgs(), '--port', String(cfgPort)])
+              if (!state) throw new Error(t('后台启动超时；前台运行 modeldock gateway start 查看错误', 'Background start timed out; run "modeldock gateway start" in the foreground for details'))
+              return `http://127.0.0.1:${state.port}`
+            }),
+        }
+      )
+      const busy = deps.portProbe ? await deps.portProbe(cfgPort) : await portInUse(cfgPort)
+      if (busy) {
+        b.warn(
+          'gateway.port_busy',
+          t('配置端口 {port} 已被其他进程占用：网关启动后将改用其他端口', 'Configured port {port} is taken by another process: the gateway will fall back to another port on start', { port: cfgPort }),
+          t('查看占用者：lsof -nP -iTCP:{port} -sTCP:LISTEN（Windows：netstat -ano | findstr {port}）', 'Find the occupier: lsof -nP -iTCP:{port} -sTCP:LISTEN (Windows: netstat -ano | findstr {port})', { port: cfgPort })
+        )
+      }
     }
-  }
 
-  // 悬空 profile：引用的 provider 不存在（active_profile 的在下方链路体检里报告，这里只收其余）。
-  // 可移除 = 未被任何 harness 钉定引用；被钉定的只提示，不自动删
-  const pinnedRoutes = new Set(
-    Object.values(cfg.harness)
-      .map((h) => h.route)
-      .filter((r): r is string => !!r && r !== 'default')
-  )
-  const dangling = Object.keys(cfg.profiles).filter((n) => n !== cfg.active_profile && !cfg.providers[cfg.profiles[n].provider])
-  if (dangling.length) {
-    const removable = dangling.filter((n) => !pinnedRoutes.has(n))
-    const pinnedList = dangling.filter((n) => pinnedRoutes.has(n))
-    bad(
-      'profile.dangling',
-      t('{n} 个 profile 引用的 provider 不存在：{list}', '{n} profile(s) reference a missing provider: {list}', { n: dangling.length, list: dangling.join(', ') }),
-      pinnedList.length
-        ? t('「{list}」被 harness 钉定引用，先 modeldock harness route <id> default 解钉', '"{list}" is pinned by a harness; unpin with modeldock harness route <id> default first', { list: pinnedList.join(', ') })
-        : undefined,
-      removable.length
-        ? {
-            kind: 'remove-dangling-profiles',
-            target: removable.join(','),
-            confirm: false,
-            label: t('清理悬空 profile', 'Remove dangling profiles'),
-            run: async () => {
-              await mutateConfig((c2) => {
-                for (const n of removable) delete c2.profiles[n]
-              })
-              return t('已移除 {n} 个', 'Removed {n}', { n: removable.length })
-            },
-          }
-        : undefined
+    if (!probeFsWatch()) {
+      b.warn(
+        'gateway.watch',
+        t('配置目录监听不可用（fs.watch 异常）：网关热加载失效，改配置不会自动生效', 'Config-dir watching is unavailable (fs.watch error): gateway hot-reload is broken; config changes will not apply automatically'),
+        t('先重启网关试试；仍不行就改配置后手动热加载（POST /_modeldock/reload）或重启网关', 'Restart the gateway first; if it persists, reload manually after changes (POST /_modeldock/reload) or restart the gateway')
+      )
+    }
+
+    // 自启登记核查（known-issues CORRECT-05 遗留清理）：只读服务文件内容判定，不 spawn launchctl/systemctl。
+    // 登记指向沙箱路径 = 旧版沙箱曾把自启写进真机的残留；指向已不存在的文件 = nvm 升级/二进制移动后
+    // 自启静默失败。沙箱上下文（FAKE_HOME）下 serviceFilePath 已重定向，只核沙箱自身登记，且豁免自引用
+    // （dev 沙箱自己的服务文件引用自家路径属正常）；--fix 走 uninstallAutostart，confirm 把关 + 删前
+    // 由本项 msg/hint 打印将删内容（登记文件与指向），不自动删任何数据。
+    // Windows 注册表形态（XPLAT-06）没有服务文件：读 Run 键镜像文件（生产 reg add 同步落盘，沙箱下即键值本体）；
+    // 仅剩旧 VBS（升级未重装）回读 VBS 内容（ARGV_MARK）——与 windowsStatus 的双源判定同口径
+    const svcFile = autostartKind() === 'windows'
+      ? (fs.existsSync(windowsRunValueMirrorFile())
+          ? windowsRunValueMirrorFile()
+          : fs.existsSync(windowsStartupPath()) ? windowsStartupPath() : null)
+      : serviceFilePath()
+    if (svcFile && fs.existsSync(svcFile)) {
+      let text = ''
+      try {
+        text = fs.readFileSync(svcFile, 'utf8')
+      } catch {
+        /* 读不了按无登记内容处理，退当前运行时 argv */
+      }
+      const argv = (autostartKind() === 'windows' ? parseRunCommandLine(text) : readRecordedArgv(text)) ?? gatewayDaemonArgs()
+      const fakeHomeRoot = process.env.MODELRDOCK_FAKE_HOME ? path.resolve(process.env.MODELRDOCK_FAKE_HOME) : null
+      const sandboxHit = fakeHomeRoot
+        ? argv.find((a) => SANDBOX_REF_RE.test(a) && !a.startsWith(fakeHomeRoot))
+        : SANDBOX_REF_RE.exec(text)?.[0]
+      const autostartCleanup: DoctorFix = {
+        kind: 'autostart-cleanup',
+        confirm: true,
+        label: t('移除开机自启登记（{f}）', 'Remove the autostart entry ({f})', { f: svcFile }),
+        run: async () => (await uninstallAutostart()).removed,
+      }
+      if (sandboxHit) {
+        b.warn(
+          'autostart.residue',
+          t('开机自启登记指向沙箱路径（{a}）：多为旧版沙箱自启残留，下次登录会拉起失效实例', 'The autostart entry points into a sandbox path ({a}): likely residue from an old sandbox install; it will launch a broken instance at next login', { a: sandboxHit }),
+          t('确认是残留后用 --fix 移除（删除登记文件并卸载服务），或手动 modeldock gateway uninstall', 'Remove it with --fix after confirming it is residue (deletes the entry file and unloads the service), or run modeldock gateway uninstall manually'),
+          autostartCleanup
+        )
+      } else if (recordedArgvStale(argv)) {
+        const staleArg = fs.existsSync(argv[0]) ? (argv.slice(1).find((a) => !a.startsWith('--') && !fs.existsSync(a)) ?? argv[0]) : argv[0]
+        b.warn(
+          'autostart.residue',
+          t('开机自启登记的启动命令指向不存在的文件（{a}）：下次登录自启将静默失败', 'The autostart start command points at missing files ({a}): autostart will silently fail at next login', { a: staleArg }),
+          t('重装自启：modeldock gateway uninstall 后再 modeldock gateway install；不再需要可用 --fix 移除登记', 'Reinstall it: modeldock gateway uninstall then modeldock gateway install; or remove the entry with --fix if no longer needed'),
+          autostartCleanup
+        )
+      } else {
+        b.ok('autostart.entry', t('开机自启登记有效（{f}）', 'Autostart entry is healthy ({f})', { f: svcFile }))
+      }
+    }
+
+    // 悬空 profile：引用的 provider 不存在（active_profile 的在链路组里报告，这里只收其余）。
+    // 可移除 = 未被任何 harness 钉定引用；被钉定的只提示，不自动删
+    const pinnedRoutes = new Set(
+      Object.values(cfg.harness)
+        .map((h) => h.route)
+        .filter((r): r is string => !!r && r !== 'default')
     )
-  }
-
-  const ap = cfg.active_profile
-  if (!ap) warn('profile.active', t('未设置 active_profile', 'active_profile is not set'), 'modeldock profile use <name>')
-  else {
-    const profile = cfg.profiles[ap]
-    if (!profile) bad('profile.active', t('active_profile「{a}」不存在', 'active_profile "{a}" does not exist', { a: ap }), 'modeldock profile list')
-    else {
-      const provider = cfg.providers[profile.provider]
-      if (!provider) bad('profile.active', t('profile「{a}」的 provider「{p}」不存在', 'provider "{p}" of profile "{a}" does not exist', { a: ap, p: profile.provider }))
-      else {
-        ok('profile.active', t('active_profile「{a}」→ {p}（{u}）', 'active_profile "{a}" → {p} ({u})', { a: ap, p: provider.name ?? profile.provider, u: provider.base_url }))
-        if (secretsOk) {
-          // 坏 key_ref（缺字段/手编非串）≠ 读取故障：报 bad + set-key hint，不落「解锁钥匙环」
-          // 的 warn 口径（700e29f 后 parseKeyRef 抛 SecretsError 曾被下方 catch 当瞬时故障）
-          if (typeof provider.key_ref !== 'string') {
-            bad(
-              'provider.key',
-              t('上游 key_ref 非法（收到 {got}）：provider 条目缺 key_ref 字段', 'Upstream key_ref is invalid (got {got}): the provider entry is missing its key_ref field', { got: provider.key_ref === undefined ? 'undefined' : typeof provider.key_ref }),
-              `modeldock provider set-key ${profile.provider}`
-            )
-          } else {
-            try {
-              const key = await getSecret(provider.key_ref)
-              if (key) ok('provider.key', t('上游 key 可读取（{k}）', 'Upstream key is readable ({k})', { k: maskSecret(key) }))
-              else bad('provider.key', t('上游 key 不可用（key_ref={r}）', 'Upstream key is unavailable (key_ref={r})', { r: provider.key_ref }), `modeldock provider set-key ${profile.provider}`)
-            } catch (e) {
-              // 读取失败（钥匙环被锁/暂时不可用）≠ 未配置密钥：前者是瞬时故障、解锁即恢复，
-              // 报 warn + 解锁 hint，不与缺失条目（bad + set-key）混同（REVIEW-19 语义对齐）
-              warn(
-                'provider.key',
-                t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }),
-                t('这是读取故障（如钥匙环被锁定），与未配置密钥不同：解锁钥匙环后重跑 modeldock doctor 即可恢复；反复出现可改用 file 存储后重新 set-key', 'This is a read failure (e.g. a locked keyring), not a missing key: unlock the keyring and re-run modeldock doctor to recover; if it keeps happening, switch to file storage and re-set the key')
-              )
-            }
-          }
-        }
-        const reach = await upstreamReachable(provider.base_url, provider.proxy)
-        if (reach.ok) ok('upstream.reach', t('上游可达：{d}', 'Upstream is reachable: {d}', { d: reach.detail }))
-        else {
-          const proxyEnv = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'].some((k) => process.env[k])
-          const canProxyFix = !provider.proxy && proxyEnv
-          bad(
-            'upstream.reach',
-            t('上游不可达：{d}', 'Upstream is unreachable: {d}', { d: reach.detail }),
-            canProxyFix
-              ? t('检测到代理环境变量：可设 provider.proxy="env" 走代理', 'Proxy env vars detected: set provider.proxy="env" to route through it')
-              : t('检查网络；国外上游可设 provider.proxy="env" 走代理', 'Check the network. For overseas upstreams, set provider.proxy="env" to go through a proxy'),
-            canProxyFix
-              ? {
-                  kind: 'set-proxy',
-                  target: profile.provider,
-                  confirm: true,
-                  label: t('为「{p}」设置 proxy=env', 'Set proxy=env for "{p}"', { p: provider.name ?? profile.provider }),
-                  run: async () => {
-                    await mutateConfig((c2) => {
-                      const p = c2.providers[profile.provider]
-                      if (p) p.proxy = 'env'
-                    })
-                  },
-                }
-              : undefined
-          )
-        }
-        const modelCount = Object.keys(provider.models ?? {}).length
-        if (modelCount === 0) {
-          warn(
-            'models.empty',
-            t('该 provider 模型目录为空', 'This provider has an empty model catalog'),
-            `modeldock model refresh ${profile.provider}`,
-            {
-              kind: 'model-refresh',
-              target: profile.provider,
+    const dangling = Object.keys(cfg.profiles).filter((n) => n !== cfg.active_profile && !cfg.providers[cfg.profiles[n].provider])
+    if (dangling.length) {
+      const removable = dangling.filter((n) => !pinnedRoutes.has(n))
+      const pinnedList = dangling.filter((n) => pinnedRoutes.has(n))
+      b.bad(
+        'profile.dangling',
+        t('{n} 个 profile 引用的 provider 不存在：{list}', '{n} profile(s) reference a missing provider: {list}', { n: dangling.length, list: dangling.join(', ') }),
+        pinnedList.length
+          ? t('「{list}」被 harness 钉定引用，先 modeldock harness route <id> default 解钉', '"{list}" is pinned by a harness; unpin with modeldock harness route <id> default first', { list: pinnedList.join(', ') })
+          : undefined,
+        removable.length
+          ? {
+              kind: 'remove-dangling-profiles',
+              target: removable.join(','),
               confirm: false,
-              label: t('拉取模型目录（{p}）', 'Fetch the model catalog ({p})', { p: profile.provider }),
+              label: t('清理悬空 profile', 'Remove dangling profiles'),
               run: async () => {
-                // 惰性加载：providers 链上挂着 789KB catalog snapshot，status/doctor 只读路径不付这个成本
-                const { refreshModelsInto } = await import('./providers.js')
-                const r = await refreshModelsInto(profile.provider)
-                return t('新增 {a} 个', '{a} added', { a: r.added })
+                await mutateConfig((c2) => {
+                  for (const n of removable) delete c2.profiles[n]
+                })
+                return t('已移除 {n} 个', 'Removed {n}', { n: removable.length })
               },
             }
+          : undefined
+      )
+    }
+  })()
+
+  // active_profile 链（组内保持串行：profile→provider→key→上游探测是真实依赖链）；
+  // key 检查与密钥库验证组并行（await secretsVerifyP——验证通常早已完成，不付串行等待）
+  const chainP = (async (): Promise<void> => {
+    const b = H(bChain)
+    const ap = cfg.active_profile
+    if (!ap) { b.warn('profile.active', t('未设置 active_profile', 'active_profile is not set'), 'modeldock profile use <name>'); return }
+    const profile = cfg.profiles[ap]
+    if (!profile) { b.bad('profile.active', t('active_profile「{a}」不存在', 'active_profile "{a}" does not exist', { a: ap }), 'modeldock profile list'); return }
+    const provider = cfg.providers[profile.provider]
+    if (!provider) { b.bad('profile.active', t('profile「{a}」的 provider「{p}」不存在', 'provider "{p}" of profile "{a}" does not exist', { a: ap, p: profile.provider })); return }
+    b.ok('profile.active', t('active_profile「{a}」→ {p}（{u}）', 'active_profile "{a}" → {p} ({u})', { a: ap, p: provider.name ?? profile.provider, u: provider.base_url }))
+    if (await secretsVerifyP) {
+      // 坏 key_ref（缺字段/手编非串）≠ 读取故障：报 bad + set-key hint，不落「解锁钥匙环」
+      // 的 warn 口径（700e29f 后 parseKeyRef 抛 SecretsError 曾被下方 catch 当瞬时故障）
+      if (typeof provider.key_ref !== 'string') {
+        b.bad(
+          'provider.key',
+          t('上游 key_ref 非法（收到 {got}）：provider 条目缺 key_ref 字段', 'Upstream key_ref is invalid (got {got}): the provider entry is missing its key_ref field', { got: provider.key_ref === undefined ? 'undefined' : typeof provider.key_ref }),
+          `modeldock provider set-key ${profile.provider}`
+        )
+      } else {
+        try {
+          const key = await getSecret(provider.key_ref)
+          if (key) b.ok('provider.key', t('上游 key 可读取（{k}）', 'Upstream key is readable ({k})', { k: maskSecret(key) }))
+          else b.bad('provider.key', t('上游 key 不可用（key_ref={r}）', 'Upstream key is unavailable (key_ref={r})', { r: provider.key_ref }), `modeldock provider set-key ${profile.provider}`)
+        } catch (e) {
+          // 读取失败（钥匙环被锁/暂时不可用）≠ 未配置密钥：前者是瞬时故障、解锁即恢复，
+          // 报 warn + 解锁 hint，不与缺失条目（bad + set-key）混同（REVIEW-19 语义对齐）
+          b.warn(
+            'provider.key',
+            t('上游 key 读取失败：{m}', 'Failed to read the upstream key: {m}', { m: (e as Error).message }),
+            t('这是读取故障（如钥匙环被锁定），与未配置密钥不同：解锁钥匙环后重跑 modeldock doctor 即可恢复；反复出现可改用 file 存储后重新 set-key', 'This is a read failure (e.g. a locked keyring), not a missing key: unlock the keyring and re-run modeldock doctor to recover; if it keeps happening, switch to file storage and re-set the key')
           )
-        } else if (profile.default_model && !(provider.models?.[profile.default_model]?.context_window)) {
-          warn('model.meta', t('默认模型 {m} 缺上下文元数据', 'Default model {m} is missing context metadata', { m: profile.default_model }), `modeldock model set ${profile.provider} ${profile.default_model} --ctx <n>`)
         }
       }
     }
-  }
-
-  const port = live?.port ?? cfgPort
-  // 并行探测（status 各自独立只读）；单个 adapter 异常（如 pack 目标文件损坏）不应击穿整条体检——
-  // 错误随 adapter 带回，按原顺序逐个输出
-  const doctorAdapters = allAdapters(cfg)
-  const doctorStatuses = await Promise.all(
-    doctorAdapters.map(async (a) => [a, await a.status(cfg, port).catch((e: Error) => e)] as const)
-  )
-  for (const [a, st] of doctorStatuses) {
-    if (st instanceof Error) {
-      bad('harness.status_error', t('{l}：状态检查失败（{m}）', '{l}: status check failed ({m})', { l: a.label, m: st.message }), t('modeldock adapter list 查看；若配置了 adapter pack 请检查目标文件', 'Run modeldock adapter list to inspect; if an adapter pack is configured, check its target files'))
-      continue
+    const reach = await upstreamReachable(provider.base_url, provider.proxy)
+    if (reach.ok) b.ok('upstream.reach', t('上游可达：{d}', 'Upstream is reachable: {d}', { d: reach.detail }))
+    else {
+      const proxyEnv = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'].some((k) => process.env[k])
+      const canProxyFix = !provider.proxy && proxyEnv
+      b.bad(
+        'upstream.reach',
+        t('上游不可达：{d}', 'Upstream is unreachable: {d}', { d: reach.detail }),
+        canProxyFix
+          ? t('检测到代理环境变量：可设 provider.proxy="env" 走代理', 'Proxy env vars detected: set provider.proxy="env" to route through it')
+          : t('检查网络；国外上游可设 provider.proxy="env" 走代理', 'Check the network. For overseas upstreams, set provider.proxy="env" to go through a proxy'),
+        canProxyFix
+          ? {
+              kind: 'set-proxy',
+              target: profile.provider,
+              confirm: true,
+              label: t('为「{p}」设置 proxy=env', 'Set proxy=env for "{p}"', { p: provider.name ?? profile.provider }),
+              run: async () => {
+                await mutateConfig((c2) => {
+                  const p = c2.providers[profile.provider]
+                  if (p) p.proxy = 'env'
+                })
+              },
+            }
+          : undefined
+      )
     }
-    if (st.attached && st.pointing === 'gateway') ok('harness.pointing', t('{l}：已接管且指向网关', '{l}: attached and pointing at the gateway', { l: a.label }))
-    else if (st.attached && st.pointing === 'other')
-      bad(
-        'harness.pointing',
-        t('{l}：已接管但配置指向别处', '{l}: attached but its config points elsewhere', { l: a.label }),
-        t('modeldock attach {id} 重新写入', 'Rewrite it with modeldock attach {id}', { id: a.id }),
+    const modelCount = Object.keys(provider.models ?? {}).length
+    if (modelCount === 0) {
+      b.warn(
+        'models.empty',
+        t('该 provider 模型目录为空', 'This provider has an empty model catalog'),
+        `modeldock model refresh ${profile.provider}`,
         {
-          kind: 'attach',
-          target: a.id,
-          confirm: false, // attach 自带 diff + 确认流程把关，doctor 不再叠加一层询问
-          label: t('重新写入 {l} 的网关指向', "Rewrite {l}'s gateway target", { l: a.label }),
+          kind: 'model-refresh',
+          target: profile.provider,
+          confirm: false,
+          label: t('拉取模型目录（{p}）', 'Fetch the model catalog ({p})', { p: profile.provider }),
           run: async () => {
-            const { cmdAttach } = await import('./harness.js')
-            await cmdAttach(a.id, { yes: deps.fixYes })
+            // 惰性加载：providers 链上挂着 catalog snapshot，status/doctor 只读路径不付这个成本
+            const { refreshModelsInto } = await import('./providers.js')
+            const r = await refreshModelsInto(profile.provider)
+            return t('新增 {a} 个', '{a} added', { a: r.added })
           },
         }
       )
-    else if (st.attached) warn('harness.pointing', t('{l}：已接管但未检测到指向（file 模式或待重启）', '{l}: attached but no pointing detected (file mode, or restart pending)', { l: a.label }))
-    else if (st.installed) warn('harness.detached', t('{l}：已安装未接管（不影响使用）', '{l}: installed but not attached (no impact on use)', { l: a.label }), `modeldock attach ${a.id}`)
-    else if (a.id !== 'generic-env') info('harness.absent', t('{l}：未安装，跳过', '{l}: not installed, skipped', { l: a.label }))
-  }
+    } else if (profile.default_model && !(provider.models?.[profile.default_model]?.context_window)) {
+      b.warn('model.meta', t('默认模型 {m} 缺上下文元数据', 'Default model {m} is missing context metadata', { m: profile.default_model }), `modeldock model set ${profile.provider} ${profile.default_model} --ctx <n>`)
+    }
+  })()
+
+  const port = (await liveP)?.port ?? cfgPort
+  // 适配器状态：组内已并行（各自独立只读）；单个 adapter 异常（如 pack 目标文件损坏）不应击穿
+  // 整条体检——错误随 adapter 带回，按原顺序逐个输出
+  const harnessP = (async (): Promise<void> => {
+    const b = H(bHarness)
+    const doctorAdapters = allAdapters(cfg)
+    const doctorStatuses = await Promise.all(
+      doctorAdapters.map(async (a) => [a, await a.status(cfg, port).catch((e: Error) => e)] as const)
+    )
+    for (const [a, st] of doctorStatuses) {
+      if (st instanceof Error) {
+        b.bad('harness.status_error', t('{l}：状态检查失败（{m}）', '{l}: status check failed ({m})', { l: a.label, m: st.message }), t('modeldock adapter list 查看；若配置了 adapter pack 请检查目标文件', 'Run modeldock adapter list to inspect; if an adapter pack is configured, check its target files'))
+        continue
+      }
+      if (st.attached && st.pointing === 'gateway') b.ok('harness.pointing', t('{l}：已接管且指向网关', '{l}: attached and pointing at the gateway', { l: a.label }))
+      else if (st.attached && st.pointing === 'other')
+        b.bad(
+          'harness.pointing',
+          t('{l}：已接管但配置指向别处', '{l}: attached but its config points elsewhere', { l: a.label }),
+          t('modeldock attach {id} 重新写入', 'Rewrite it with modeldock attach {id}', { id: a.id }),
+          {
+            kind: 'attach',
+            target: a.id,
+            confirm: false, // attach 自带 diff + 确认流程把关，doctor 不再叠加一层询问
+            label: t('重新写入 {l} 的网关指向', "Rewrite {l}'s gateway target", { l: a.label }),
+            run: async () => {
+              const { cmdAttach } = await import('./harness.js')
+              await cmdAttach(a.id, { yes: deps.fixYes })
+            },
+          }
+        )
+      else if (st.attached) b.warn('harness.pointing', t('{l}：已接管但未检测到指向（file 模式或待重启）', '{l}: attached but no pointing detected (file mode, or restart pending)', { l: a.label }))
+      else if (st.installed) b.warn('harness.detached', t('{l}：已安装未接管（不影响使用）', '{l}: installed but not attached (no impact on use)', { l: a.label }), `modeldock attach ${a.id}`)
+      else if (a.id !== 'generic-env') b.info('harness.absent', t('{l}：未安装，跳过', '{l}: not installed, skipped', { l: a.label }))
+    }
+  })()
 
   // Agent 配置安全体检（只读，见 mcp/security.ts）：MCP 危险命令 / env 明文凭据 / 同名重复 / 直连明文 key。
   // 发现本身不带 --fix（都是用户的显式选择，体检只把泄漏面说清）；安检自身异常不击穿整条体检
-  try {
-    const sec = await collectClientSecurityFindings(cfg)
-    for (const f of sec) {
-      if (f.level === 'warn') warn(f.id, f.msg, f.hint)
-      else info(f.id, f.msg, f.hint)
+  const secP = (async (): Promise<void> => {
+    const b = H(bSec)
+    try {
+      const sec = await collectClientSecurityFindings(cfg)
+      for (const f of sec) {
+        if (f.level === 'warn') b.warn(f.id, f.msg, f.hint)
+        else b.info(f.id, f.msg, f.hint)
+      }
+    } catch {
+      /* MCP 配置损坏等已在 scan 侧带错误返回，这里不重复报告 */
     }
-  } catch {
-    /* MCP 配置损坏等已在 scan 侧带错误返回，这里不重复报告 */
-  }
+  })()
 
+  await Promise.all([secretsVerifyP, foreignP, gatewayP, chainP, harnessP, secP])
+
+  // 按原块序归并（--json 消费方依赖稳定 id 序；组内次序 = 原串行次序）
+  F.push(...bSecrets, ...bForeign, ...bGateway, ...bChain, ...bHarness, ...bSec)
   return F
 }
 
