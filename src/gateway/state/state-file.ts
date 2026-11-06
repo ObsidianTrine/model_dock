@@ -7,6 +7,9 @@ export interface GatewayStateFile {
   port: number
   admin_token: string
   started_at: string
+  /** 写入该状态文件的网关进程版本（启动时记）：doctor 比对 CLI 版本检出「升级后未重启、
+   *  daemon 仍跑旧代码」（本项目无热重载）。旧版状态文件无此字段（undefined），读取方须容忍。 */
+  version?: string
   /** 「设备记忆」凭据（锁屏一键重登用）：mdk_device cookie 的值，与令牌同文件同生命周期。
    *  上限 20 个（FIFO），多实例共享此文件故天然跨端口生效。 */
   devices?: string[]
@@ -63,11 +66,14 @@ export function startupGatewayState(input: {
   lanToken: string | null
   lanPort?: number
   startedAt: string
+  /** 本网关进程的版本号（main.ts 传 VERSION；缺省不写字段，兼容既有测试与旧调用方） */
+  version?: string
 }): GatewayStateFile {
   return {
     pid: input.pid,
     port: input.port,
     admin_token: input.adminToken,
+    ...(input.version ? { version: input.version } : {}),
     ...(input.existing?.devices?.length ? { devices: input.existing.devices } : {}),
     ...(input.existing?.update_check ? { update_check: input.existing.update_check } : {}),
     ...(input.lanToken ? { lan_token: input.lanToken } : {}),

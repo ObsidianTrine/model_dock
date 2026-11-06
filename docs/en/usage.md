@@ -126,7 +126,7 @@ modeldock profile use <name>      # ★ switch provider: in gateway mode new req
 modeldock gateway install         # ★ auto-start on boot (resident): registers a system service, launches on login, restarts on crash
 modeldock status                  # overview: gateway / active profile / where each harness points
 modeldock test [profile]          # connectivity self-test: key, model names, streaming, latency in one go
-modeldock doctor                  # full checkup; --fix applies fixes (sensitive ones confirm per item), --json for machines
+modeldock doctor                  # full checkup; --deep sends real requests, --fix applies fixes and re-checks (sensitive ones confirm per item), --json for machines (exit code 1 on issues)
 modeldock gateway log -f          # live request logs (metadata only, prompts never logged)
 modeldock gateway log --harness claude-code
 modeldock config export           # move computers: export a passphrase-encrypted package (services/routes/presets/schedules, keys included); defaults to modeldock-config-<date>-<time>.msync, -o for a custom path

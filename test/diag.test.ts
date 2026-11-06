@@ -5,12 +5,13 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
-import { cmdDoctor, cmdEnv, cmdStatus, cmdTest, collectDoctorFindings, diskUsageFinding, fakeHomeMisconfig, runFixes, type DoctorFinding } from '../src/cli/diag.js'
+import { cmdDoctor, cmdEnv, cmdStatus, cmdTest, collectDoctorFindings, diffFindings, diskUsageFinding, fakeHomeMisconfig, logsPruneFix, runFixes, upstreamAuthProbe, withPruneFix, type DoctorFinding } from '../src/cli/diag.js'
 import { __testSetExternalReader, invalidateSecretsCache, verifySecretsStore } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
-import { DEFAULT_GATEWAY_PORT } from '../src/config/types.js'
+import { DEFAULT_GATEWAY_PORT, type ProviderConfig } from '../src/config/types.js'
 import { configPath, logsDir, modeldockDir } from '../src/util/paths.js'
 import { writeGatewayState } from '../src/gateway/state.js'
+import { VERSION } from '../src/version.js'
 import { AUTOSTART_LAUNCH_FLAG, autostartKind, launchdPlistXml, serviceFilePath, systemdUnitIni, windowsRunCommandLine, windowsRunValueMirrorFile } from '../src/autostart.js'
 
 // cmdDoctor/cmdStatus 是只读体检壳：无网络路径（上游可达性探测指向本地拒绝端口，瞬时失败）。
@@ -43,6 +44,8 @@ afterEach(() => {
   vi.mocked(console.log).mockRestore?.()
   vi.mocked(console.error).mockRestore?.()
   vi.mocked(process.exit).mockRestore?.()
+  // doctor 现在以 process.exitCode 表达「存在 bad 项」（singleFork 共进程，必须每用例还原）
+  process.exitCode = 0
 })
 
 describe('cmdStatus', () => {
@@ -218,7 +221,7 @@ describe('doctor 沙箱自启残留核查（CORRECT-05）', () => {
     }
   })
 
-  it('登记指向失效路径：warn；--fix 经确认移除登记文件', async () => {
+  it('登记指向失效路径：warn + 重装修复；--fix 经注入执行重装（不真动 launchctl/systemd）', async () => {
     const h = fakeHome()
     capture()
     try {
@@ -230,10 +233,18 @@ describe('doctor 沙箱自启残留核查（CORRECT-05）', () => {
       const f = jsonFindings().findings.find((x) => x.id === 'autostart.residue')
       expect(f?.level).toBe('warn')
       expect(f?.msg).toContain('不存在的文件')
-      // startGateway 必须注入：gateway.down 修复 confirm=false 会自动执行，真跑会 spawn daemon
-      await cmdDoctor({ fix: true }, { ...noProbe, startGateway: async () => 'http://127.0.0.1:18941', confirm: async () => true })
-      expect(fs.existsSync(file)).toBe(false) // 确认通过 → 登记文件已删（删前内容已由 msg/hint 打印）
-      expect(logs.join('\n')).toContain('移除开机自启登记')
+      expect(f?.fix?.kind).toBe('reinstall-autostart')
+      expect(f?.fix?.confirm).toBe(true)
+      // startGateway/reinstallAutostart 必须注入：gateway.down 修复 confirm=false 会自动执行；
+      // 重装真跑会 spawn launchctl/systemd 并可能拉起网关进程——测试一律 fake
+      let reinstalled = 0
+      await cmdDoctor(
+        { fix: true },
+        { ...noProbe, startGateway: async () => 'http://127.0.0.1:18941', confirm: async () => true, reinstallAutostart: async () => { reinstalled++; return file } }
+      )
+      expect(reinstalled).toBe(1)
+      expect(logs.join('\n')).toContain('重装开机自启')
+      expect(fs.existsSync(file)).toBe(true) // 重装 ≠ 移除：登记文件仍在
     } finally {
       h.restore()
     }
@@ -710,6 +721,273 @@ describe('doctor 第二轮（doctor-round2 卡）', () => {
       const f = findings.find((x) => x.id === 'logs.disk')
       expect(f?.level).toBe('ok')
       expect(f?.msg).toContain('0MB') // 12 字节文件取整为 0MB
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('doctor 版本漂移（gateway.version_drift）', () => {
+  const liveBase = { pid: process.pid, port: 18941, admin_token: 't', started_at: '2026-11-06T00:00:00Z' }
+
+  it('网关版本 ≠ CLI 版本：warn + restart-gateway 修复元数据（confirm 级）', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => { c.gateway = { port: 18941 } })
+      await cmdDoctor({ json: true }, { ...noProbe, gatewayLive: async () => ({ ...liveBase, version: '0.0.9' }) })
+      const f = jsonFindings().findings.find((x) => x.id === 'gateway.version_drift')
+      expect(f?.level).toBe('warn')
+      expect(f?.msg).toContain('0.0.9')
+      expect(f?.fix?.kind).toBe('restart-gateway')
+      expect(f?.fix?.confirm).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('版本一致或旧版状态文件无 version 字段：不报（向后兼容）', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => { c.gateway = { port: 18941 } })
+      await cmdDoctor({ json: true }, { ...noProbe, gatewayLive: async () => ({ ...liveBase, version: VERSION }) })
+      expect(jsonFindings().findings.some((x) => x.id === 'gateway.version_drift')).toBe(false)
+      capture()
+      await cmdDoctor({ json: true }, { ...noProbe, gatewayLive: async () => ({ ...liveBase }) })
+      expect(jsonFindings().findings.some((x) => x.id === 'gateway.version_drift')).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--fix 重启修复经注入执行；复核显示版本漂移已解决', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => { c.gateway = { port: 18941 } })
+      let v: string | undefined = '0.0.9'
+      await cmdDoctor(
+        { fix: true, yes: true },
+        {
+          ...noProbe,
+          gatewayLive: async () => (v ? { ...liveBase, version: v } : null),
+          restartGateway: async () => { v = VERSION; return 'http://127.0.0.1:18941' },
+        }
+      )
+      const out = logs.join('\n')
+      expect(out).toContain('重启网关')
+      expect(out).toContain('复核')
+      expect(out).toContain('已解决')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('doctor --deep：端到端真请求', () => {
+  function seedProfile(): Promise<void> {
+    return mutateConfig((c) => {
+      c.gateway = { port: 18941 }
+      c.providers['pv'] = { name: 'PV', base_url: 'http://127.0.0.1:18999', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'env:MD_DOC_KEY' }
+      c.profiles['main'] = { name: 'main', provider: 'pv', default_model: 'm1' }
+      c.active_profile = 'main'
+    })
+  }
+  const saveEnv = (name: string): { saved: string | undefined } => ({ saved: process.env[name] })
+
+  it('网关在线：经网关 e2e（注入）成功 ok / 失败 bad 带 hint', async () => {
+    const h = fakeHome()
+    const { saved } = saveEnv('MD_DOC_KEY')
+    process.env.MD_DOC_KEY = 'sk-x'
+    const live = async () => ({ pid: process.pid, port: 18941, admin_token: 't', started_at: 'x' })
+    capture()
+    try {
+      await seedProfile()
+      await cmdDoctor({ json: true, deep: true }, { ...noProbe, gatewayLive: live, gatewayE2E: async () => ({ ok: true, model: 'm1', ms: 42 }) })
+      let f = jsonFindings().findings.find((x) => x.id === 'upstream.e2e')
+      expect(f?.level).toBe('ok')
+      expect(f?.msg).toContain('m1')
+      capture()
+      await cmdDoctor({ json: true, deep: true }, { ...noProbe, gatewayLive: live, gatewayE2E: async () => ({ ok: false, status: 502, err: 'bad gateway', hint: 'check upstream' }) })
+      f = jsonFindings().findings.find((x) => x.id === 'upstream.e2e')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('bad gateway')
+      expect(f?.hint).toContain('check upstream')
+    } finally {
+      if (saved === undefined) delete process.env.MD_DOC_KEY
+      else process.env.MD_DOC_KEY = saved
+      h.restore()
+    }
+  })
+
+  it('网关不在线：探针 auth 失败 → bad + set-key hint；ok 但模型不在目录 → model.missing warn；skip → info', async () => {
+    const h = fakeHome()
+    const { saved } = saveEnv('MD_DOC_KEY')
+    process.env.MD_DOC_KEY = 'sk-x'
+    capture()
+    try {
+      await seedProfile()
+      await cmdDoctor({ json: true, deep: true }, { ...noProbe, upstreamProbe: async () => ({ kind: 'auth', detail: 'HTTP 401 @ http://x/v1/models' }) })
+      let f = jsonFindings().findings.find((x) => x.id === 'upstream.auth')
+      expect(f?.level).toBe('bad')
+      expect(f?.msg).toContain('401')
+      expect(f?.hint).toContain('set-key')
+      capture()
+      await cmdDoctor({ json: true, deep: true }, { ...noProbe, upstreamProbe: async () => ({ kind: 'ok', detail: 'http://x/v1/models', modelIds: ['other-1', 'other-2'] }) })
+      f = jsonFindings().findings.find((x) => x.id === 'upstream.auth')
+      expect(f?.level).toBe('ok')
+      const miss = jsonFindings().findings.find((x) => x.id === 'model.missing')
+      expect(miss?.level).toBe('warn')
+      expect(miss?.msg).toContain('m1')
+      capture()
+      await cmdDoctor({ json: true, deep: true }, { ...noProbe, upstreamProbe: async () => ({ kind: 'skip', detail: 'HTTP 404 @ http://x/models' }) })
+      f = jsonFindings().findings.find((x) => x.id === 'upstream.auth')
+      expect(f?.level).toBe('info')
+      expect(jsonFindings().findings.some((x) => x.id === 'model.missing')).toBe(false)
+    } finally {
+      if (saved === undefined) delete process.env.MD_DOC_KEY
+      else process.env.MD_DOC_KEY = saved
+      h.restore()
+    }
+  })
+
+  it('upstreamAuthProbe 对本地假上游分类：401→auth / 200+data→ok / 全 404→skip（listen(0) 随机端口）', async () => {
+    const h = fakeHome()
+    const { saved } = saveEnv('MD_DEEP_KEY')
+    process.env.MD_DEEP_KEY = 'sk-deep'
+    const servers: http.Server[] = []
+    try {
+      const start = (handler: (res: http.ServerResponse) => void): Promise<number> =>
+        new Promise((resolve) => {
+          const s = http.createServer((_q, res) => handler(res))
+          servers.push(s)
+          s.listen(0, '127.0.0.1', () => resolve((s.address() as AddressInfo).port))
+        })
+      const p401 = await start((res) => { res.writeHead(401); res.end() })
+      const p200 = await start((res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ data: [{ id: 'm1' }, { id: 'm2' }] })) })
+      const p404 = await start((res) => { res.writeHead(404); res.end() })
+      const mk = (port: number): ProviderConfig => ({ name: 'X', base_url: `http://127.0.0.1:${port}`, protocol: 'openai', auth_style: 'bearer', key_ref: 'env:MD_DEEP_KEY' })
+      const r401 = await upstreamAuthProbe(mk(p401))
+      expect(r401.kind).toBe('auth')
+      expect(r401.detail).toContain('401')
+      const r200 = await upstreamAuthProbe(mk(p200))
+      expect(r200.kind).toBe('ok')
+      expect(r200.modelIds).toEqual(['m1', 'm2'])
+      const r404 = await upstreamAuthProbe(mk(p404))
+      expect(r404.kind).toBe('skip')
+    } finally {
+      for (const s of servers) { s.closeAllConnections?.(); s.close() }
+      if (saved === undefined) delete process.env.MD_DEEP_KEY
+      else process.env.MD_DEEP_KEY = saved
+      h.restore()
+    }
+  })
+})
+
+describe('doctor 日志清理修复（prune-logs）', () => {
+  it('logsPruneFix 注入：按保留天数执行并回显删除数；confirm 把关', async () => {
+    const ran: number[] = []
+    const fix = logsPruneFix(30, { pruneLogs: async (d) => { ran.push(d); return 2 } })
+    expect(fix.kind).toBe('prune-logs')
+    expect(fix.confirm).toBe(true)
+    const detail = await fix.run()
+    expect(ran).toEqual([30])
+    expect(String(detail)).toContain('2')
+  })
+
+  it('真实链路：按保留期删过期日文件，今天的不动（落点全在沙箱 logsDir）', async () => {
+    const h = fakeHome()
+    try {
+      const dir = logsDir()
+      fs.mkdirSync(dir, { recursive: true })
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const todayName = `gateway-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.jsonl`
+      fs.writeFileSync(path.join(dir, 'gateway-2020-01-01.jsonl'), '{}\n', 'utf8')
+      fs.writeFileSync(path.join(dir, todayName), '{}\n', 'utf8')
+      const detail = await logsPruneFix(30).run()
+      expect(String(detail)).toContain('1')
+      expect(fs.existsSync(path.join(dir, 'gateway-2020-01-01.jsonl'))).toBe(false)
+      expect(fs.existsSync(path.join(dir, todayName))).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('withPruneFix：warn/bad 且保留期>0 挂修复；ok/info 或 0（禁用清理）不挂', () => {
+    const base = { id: 'logs.disk', msg: 'x' }
+    expect(withPruneFix({ ...base, level: 'warn' } as DoctorFinding, 7).fix?.kind).toBe('prune-logs')
+    expect(withPruneFix({ ...base, level: 'bad' } as DoctorFinding, undefined).fix?.kind).toBe('prune-logs') // 缺省取默认保留期
+    expect(withPruneFix({ ...base, level: 'ok' } as DoctorFinding, 7).fix).toBeUndefined()
+    expect(withPruneFix({ ...base, level: 'info' } as DoctorFinding, 7).fix).toBeUndefined()
+    expect(withPruneFix({ ...base, level: 'warn' } as DoctorFinding, 0).fix).toBeUndefined()
+  })
+})
+
+describe('doctor 修复后复核与退出码', () => {
+  it('diffFindings 纯函数：resolved/remaining/introduced 按 id+msg 对账', () => {
+    const before: DoctorFinding[] = [
+      { id: 'a', level: 'warn', msg: 'a1' },
+      { id: 'b', level: 'bad', msg: 'b1' },
+      { id: 'c', level: 'ok', msg: 'c1' },
+    ]
+    const after: DoctorFinding[] = [
+      { id: 'b', level: 'bad', msg: 'b1' },
+      { id: 'd', level: 'warn', msg: 'd1' },
+      { id: 'a', level: 'ok', msg: 'a1' },
+    ]
+    const d = diffFindings(before, after)
+    expect(d.resolved.map((f) => f.id)).toEqual(['a'])
+    expect(d.remaining.map((f) => f.id)).toEqual(['b', 'd'])
+    expect(d.introduced.map((f) => f.id)).toEqual(['d'])
+  })
+
+  it('fix 全部解决可解决项：打印复核与已解决；无 bad 后退出码不置 1', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.gateway = { port: 18941 }
+        c.profiles['ghost'] = { name: 'ghost', provider: 'gone' }
+      })
+      await cmdDoctor({ fix: true }, { ...noProbe, startGateway: async () => 'http://127.0.0.1:18941' })
+      const out = logs.join('\n')
+      expect(out).toContain('清理悬空 profile')
+      expect(out).toContain('已解决')
+      expect(process.exitCode).not.toBe(1) // ghost（bad）已清，剩余仅 warn
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('存在 bad：退出码置 1（--json 同口径；summary 字段随 JSON 输出）', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => {
+        c.profiles['ghost'] = { name: 'ghost', provider: 'gone' }
+      })
+      await cmdDoctor({ json: true }, noProbe)
+      expect(process.exitCode).toBe(1)
+      const j = jsonFindings() as unknown as { ok: boolean; summary: { total: number; bad: number; fixable: number } }
+      expect(j.ok).toBe(false)
+      expect(j.summary.bad).toBeGreaterThan(0)
+      expect(j.summary.fixable).toBeGreaterThan(0) // 悬空 profile 可自动清理
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('port_busy 注入占用者身份：msg 带 pid 标识；未注入时保持原口径', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await mutateConfig((c) => { c.gateway = { port: 18941 } })
+      await cmdDoctor({ json: true }, { portProbe: async () => true, portOccupier: async () => 'pid 4321（node）' })
+      const f = jsonFindings().findings.find((x) => x.id === 'gateway.port_busy')
+      expect(f?.level).toBe('warn')
+      expect(f?.msg).toContain('pid 4321（node）')
     } finally {
       h.restore()
     }
