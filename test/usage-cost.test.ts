@@ -14,6 +14,7 @@ import {
   createUsageAccumulator,
   logRequest,
   resetUsageTodayForTest,
+  setUsagePriceResolver,
   summarizeUsage,
   usageTodayView,
   type LogEntry,
@@ -23,6 +24,7 @@ import { clearCatalogMemo } from '../src/providers/catalog.js'
 import {
   clearPricingMemo,
   costOfUsage,
+  gatewayPriceResolver,
   loadPricingOverrides,
   lookupPrice,
   saneModelCost,
@@ -190,6 +192,8 @@ describe('usage 聚合 cost 维度（createUsageAccumulator）', () => {
 describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）', () => {
   it('回填当日日文件 + logRequest 增量记账，跨 fakeHome 重置', () => {
     const h = fakeHome()
+    // 查价器由 daemon 启动注入（perf-p2-polish 前置拆叶）：测试里等价接上，收尾复位防泄漏
+    setUsagePriceResolver(gatewayPriceResolver)
     try {
       const base = lookupPrice(undefined, 'glm-4.6')! // 快照目录价（flat 首见，不硬编码）
       const today = localIsoTs().slice(0, 10)
@@ -235,6 +239,7 @@ describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）',
       expect(v2.requests).toBe(3)
       expect(v2.cost!.total).toBeCloseTo(base.input * 1.5 + base.output * 0.15, 10)
     } finally {
+      setUsagePriceResolver(undefined)
       h.restore()
     }
   })

@@ -58,7 +58,7 @@ export { errorReply, maxBodyBytes } from './admin-shared.js'
 import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
 import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
 import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
-import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hTrayLite, hTrayState, hUiPresence, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
+import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
 
@@ -2209,6 +2209,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'GET /_modeldock/logs': hLogs,
   'GET /_modeldock/config': hConfig,
   'GET /_modeldock/model-catalog': hModelCatalog,
+  'GET /_modeldock/presets': hPresetsCatalog,
   'GET /_modeldock/overview': hOverview,
   'GET /_modeldock/tray-state': hTrayState,
   'POST /_modeldock/tray-lite': hTrayLite,

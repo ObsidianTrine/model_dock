@@ -133,6 +133,13 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   rt.lastConfigKey = await configStatKey()
   rt.tokens = buildTokenIndex(rt.config)
   rt.reloads++
+  // 写后预热新代数 overview（perf-p2-polish）：reloads 前进在 serve 决策已降级 SWR（不挡请求
+  // 线程），这里把重建提前开跑——紧随写操作的 overview 读取（UI 保存后立即 load()）join 在飞
+  // 重建即拿新数据，旧串可见窗口从下一轮轮询缩到毫秒级。无缓存（页面没开过）不动作，冷启动由
+  // warmupOverview 兜。动态 import 断开 state ↔ overview-view 的循环依赖。
+  void import('../overview-view.js')
+    .then((ov) => ov.prewarmOverviewAfterWrite(rt))
+    .catch(() => {})
   // 释放旧的代理 dispatcher（ProxyAgent 连接）；direct 共享 Agent 是模块级单例、跨重载复用，不关
   const keep = rt.dispatchers.get('direct')
   for (const d of rt.dispatchers.values()) {

@@ -4,7 +4,8 @@ import path from 'node:path'
 import { c, sleep, localDateStr, t } from '../util/index.js'
 import { randomToken } from '../util/fsx.js'
 import { logsDir, displayPath } from '../util/paths.js'
-import { readGatewayState, writeGatewayState } from '../gateway/state.js'
+// 直取 state-file 单模块（perf-p2-polish）：CLI 命令启动闭包不拖 gateway/state.js 聚合层
+import { readGatewayState, writeGatewayState } from '../gateway/state/state-file.js'
 import {
   autostartStatus,
   gatewayDaemonArgs,

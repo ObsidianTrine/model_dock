@@ -153,6 +153,22 @@ export const UI_JS_AUTOROUTE = `  function renderAutoRoute() {
   // 添加模型服务：已有服务时收起为右下角 + 号，点击浮层展示
   var addOpen = false
 
+  // 预设目录懒加载（perf-p2-polish）：presets 进程内恒定，从 overview 5s 轮询载荷拆到
+  // /_modeldock/presets 独立端点，「添加服务」浮层首次打开才拉，此后复用。失败按空表降级
+  // （chips 只剩「自定义」，手填 base_url 仍可添加；刷新页面重试）。
+  var presetsCache = null
+  var presetsPending = null
+  function ensurePresets(cb) {
+    if (presetsCache !== null) return cb()
+    if (!presetsPending) {
+      presetsPending = fetch('/_modeldock/presets', { headers: { 'x-modeldock-lang': LANG } })
+        .then(function (r) { return r.ok ? r.json() : null })
+        .then(function (v) { presetsCache = (v && v.presets) || [] })
+        .catch(function () { presetsCache = [] })
+    }
+    presetsPending.then(function () { cb() })
+  }
+
   function layoutAddSection() {
     var has = view.services.length > 0
     $('#fabAdd').hidden = !has || addOpen
@@ -211,8 +227,11 @@ export const UI_JS_AUTOROUTE = `  function renderAutoRoute() {
   }
 
   function renderChips() {
+    // 首帧（首用内联引导含 chips）由全局 render() 直调到这里：预设未拉时先触发懒加载再渲染，
+    // presetsCache 为 null 不得往下走（render() 链会被 TypeError 打断，页面半渲染）
+    if (presetsCache === null) { ensurePresets(function () { renderChips() }); return }
     var byId = {}
-    view.presets.forEach(function (p) { byId[p.id] = p })
+    presetsCache.forEach(function (p) { byId[p.id] = p })
     var ids = COMMON.filter(function (id) { return byId[id] })
     var moreIds = MORE_TOP.filter(function (id) { return byId[id] && ids.indexOf(id) < 0 })
 
@@ -237,7 +256,7 @@ export const UI_JS_AUTOROUTE = `  function renderAutoRoute() {
   function pickPreset(id) {
     picked = id
     var p = null
-    view.presets.forEach(function (x) { if (x.id === id) p = x })
+    presetsCache.forEach(function (x) { if (x.id === id) p = x })
     if (!p) return
     document.querySelectorAll('.chip[data-preset]').forEach(function (b) {
       b.className = 'chip' + (b.getAttribute('data-preset') === id ? ' active' : '')
@@ -326,7 +345,7 @@ export const UI_JS_AUTOROUTE = `  function renderAutoRoute() {
     // 动过模型目录就整表提交（含删光 = 空对象）：服务端按提交全量落盘，删掉的行不再由预设目录猜回；
     // 未动才留给服务端做预设合并+在线拉取。新模型框手填的行（没点「添加」也在 collect 里）一并提交，用户输入不丢
     var presetCatalog = {}
-    ;(view.presets || []).forEach(function (p) { if (p.id === picked) { var pm = p.models || {}; for (var k in pm) presetCatalog[k] = 1 } })
+    presetsCache.forEach(function (p) { if (p.id === picked) { var pm = p.models || {}; for (var k in pm) presetCatalog[k] = 1 } })
     var hasExtra = Object.keys(collected.models).some(function (k) { return !presetCatalog[k] })
     if (afModelB.isDirty() || hasExtra) {
       body.models = collected.models
