@@ -9,12 +9,12 @@ import { gzipSync } from 'node:zlib'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
-import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists } from '../util/fsx.js'
+import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
-import { ConfigError, loadConfig, mutateConfig } from '../config/store.js'
+import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, getSecret, invalidateSecretsCacheIfExternal, providerKeyRefs, setSecret, verifySecretsStore } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -1018,8 +1018,11 @@ async function hLanPost(c: AdminCtx): Promise<void> {
     }
   } catch (e) {
     audit(bi('手机远程', 'Mobile console'), '-', undefined, (e as Error).message)
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: false, error: (e as Error).message }))
+    // 失败走 sendError（经 errorReply 还原业务错误状态码与 hint），不再 200+{ok:false}：
+    // 控制台 api() 封装按 !res.ok 抛错并取 error.message，200 包体会被当成功静默吞掉
+    // （2026-11-04 审查 P2）。前端两处调用（pillSwitch 开关 / configpack 导出面板）均有 catch 展示
+    const r = errorReply(e)
+    sendError(res, r.status, r.message, r.hint)
   }
   return
 }
@@ -1172,21 +1175,24 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // 去重口径与 addService 一致：同地址且同 Key 才算重复；
   // 同地址不同 Key 是「同一厂商多个账号分别登记」的合法场景，允许共存。
   // 仅当本次提交真正改动了地址或 Key 时才校验，避免历史同对数据在改名等无关编辑时被误拦。
+  // Key 比对走 providerKeyRefs 全量解析（keys 池优先、key_ref 回落，与转发取 key 同口径）：
+  // 池 provider 只比 key_ref 会漏掉池内其他 key 的重复（2026-11-04 审查 P1）
   const hasNewKey = typeof b.key === 'string' && !!b.key
   // 旧 key 只在去重校验真正需要时才读（keychain 后端每次读取要 spawn security 子进程，
-  // 实测 40ms+）：纯改名/改模型目录/改端点等无关编辑（地址未变且未提交新 key）不再无谓
-  // 付一次钥匙环读取——每次保存都慢一截的最稳定成分
+  // 实测 40ms+）：纯改名/改模型目录等无关编辑（地址未变且未提交新 key）不再无谓付一次
+  // 钥匙环读取——每次保存都慢一截的最稳定成分。比对走 providerKeyRefs 全量解析（keys 池
+  // 优先、key_ref 回落，与转发取 key 同口径），单 key 配置等价于单元素池
   const urlChanged = !!baseUrl && normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(p.base_url)
-  const oldKey = (hasNewKey || urlChanged) && p.key_ref ? (await getSecret(p.key_ref)) ?? '' : ''
-  const effectiveKey = hasNewKey ? (b.key as string) : oldKey
-  const keyChanged = hasNewKey && (b.key as string) !== oldKey
-  if (urlChanged || keyChanged) {
+  const currentKeys = hasNewKey || urlChanged ? (await resolveProviderKeys(providerKeyRefs(p))).map((e) => e.key) : []
+  const effectiveKey = hasNewKey ? (b.key as string) : (currentKeys[0] ?? '')
+  const keyChanged = hasNewKey && !currentKeys.includes(b.key as string)
+  if ((urlChanged || keyChanged) && effectiveKey) {
     const norm = normalizeBaseUrl(baseUrl || p.base_url)
     for (const [pid, other] of Object.entries(rt.config.providers)) {
       if (pid === id) continue
       if (normalizeBaseUrl(other.base_url) !== norm) continue
-      const otherKey = other.key_ref ? (await getSecret(other.key_ref)) ?? '' : ''
-      if (otherKey === effectiveKey) {
+      const otherKeys = (await resolveProviderKeys(providerKeyRefs(other))).map((e) => e.key)
+      if (otherKeys.includes(effectiveKey)) {
         return sendError(res, 400, t('该地址与已有服务「{id}」重复（同地址同 Key）；同地址不同 API Key 可分别保存', 'This URL duplicates existing service "{id}" (same URL and key); the same URL with different API keys can coexist', { id: pid }))
       }
     }
@@ -1204,9 +1210,32 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     }
     if (Object.keys(e).length) newEndpoints = e
   }
-  let newKeyRef: string | undefined
-  if (typeof b.key === 'string' && b.key) {
-    newKeyRef = await setSecret(id, b.key, rt.config.security?.store ?? (await defaultStore()))
+  // Key 写入计划：池 provider（keys 非空）转发恒走 keys 池（providerKeyRefs），只写 key_ref
+  // 会「静默无效」——对齐 CLI provider set-key --add：新 key 追加进池（槽位 <id>-k<序号>，
+  // 与既有引用去重）；提交的 key 已在池内时零改动（keyChanged=false 走不到这里，幂等）。
+  // 单 key 配置保持覆盖 key_ref。ref 在 persist 前按实际后端确定性预生成（makeKeyRef 与
+  // setSecret 返回同构），persistConfig 落配置成功后才 setSecret 补密文本（先配置后密钥，
+  // REVIEW-10 同序：persist 失败时密钥未动、配置由 mutateConfig 原子性保持原状，无半套状态——
+  // 反序会在配置写失败时留孤儿密钥条目，2026-11-04 审查 P2）。
+  let keyWrite: { secretId: string; ref: string; pool: boolean; backend: SecretBackend } | undefined
+  if (hasNewKey && keyChanged) {
+    const backend = rt.config.security?.store ?? (await defaultStore())
+    // 与 setSecret 内部同规：FAKE_HOME 沙箱下外部后端强制落 file，ref 必须按实际后端预生成
+    const effBackend: SecretBackend =
+      process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
+    const poolKeys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
+    if (poolKeys.length > 0) {
+      const taken = new Set([...poolKeys, p.key_ref])
+      let slot = poolKeys.length + 1
+      let ref = makeKeyRef(effBackend, `${id}-k${slot}`)
+      while (taken.has(ref)) {
+        slot++
+        ref = makeKeyRef(effBackend, `${id}-k${slot}`)
+      }
+      keyWrite = { secretId: `${id}-k${slot}`, ref, pool: true, backend: effBackend }
+    } else {
+      keyWrite = { secretId: id, ref: makeKeyRef(effBackend, id), pool: false, backend: effBackend }
+    }
   }
   // 模型目录：完整列表替换语义（UI 传全量）。校验：id 非空去重、ctx/out 为正整数；
   // 显示名随模型提交（编辑浮层在 ID 下以副行回显，仅回显与 ID 不同者）
@@ -1266,7 +1295,15 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     if (name) t.name = name
     if (baseUrl) t.base_url = baseUrl
     if (newProtocol) t.protocol = newProtocol
-    if (newKeyRef) t.key_ref = newKeyRef
+    if (keyWrite) {
+      if (keyWrite.pool) {
+        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）
+        const pool = (t.keys ??= [])
+        pool.push(keyWrite.ref)
+      } else {
+        t.key_ref = keyWrite.ref
+      }
+    }
     if (newModels) t.models = newModels
     // 协议端点：替换/清空
     if (newEndpoints) {
@@ -1290,6 +1327,8 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
   })
+  // 配置已落盘，锁外补写密钥文本（先配置后密钥，见 keyWrite 处注释）
+  if (keyWrite) await setSecret(keyWrite.secretId, b.key as string, keyWrite.backend)
   // 默认模型真变了才同步烤模型客户端（dsh/workbuddy/zcode 模型列表烙在客户端文件里，
   // 与全局切换 hSwitch 同口径）；钉定路由的客户端不在其职责内，不受影响
   const bakedParts: Array<Bilingual | ''> = []
@@ -1306,7 +1345,7 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   const changes = [
     name ? bi('名称 → {name}', 'Name → {name}', { name }) : '',
     baseUrl ? bi('地址 → {url}', 'URL → {url}', { url: baseUrl }) : '',
-    newKeyRef ? bi('Key 已更新', 'Key updated') : '',
+    keyWrite ? (keyWrite.pool ? bi('Key 已追加进池', 'Key appended to the key pool') : bi('Key 已更新', 'Key updated')) : '',
     newModels ? bi('模型目录 {n} 个', '{n} models', { n: Object.keys(newModels).length }) : '',
     newEndpoints ? bi('端点 {list} 已更新', 'Endpoints {list} updated', { list: Object.keys(newEndpoints).join('/') }) : '',
     typeof b.default_model === 'string' ? bi('默认模型 → {model}', 'Default model → {model}', { model: b.default_model || bi('(清除)', '(cleared)') }) : '',
@@ -1738,20 +1777,67 @@ async function hKey(c: AdminCtx): Promise<void> {
   const b = await jsonRequestBody(req)
   const provider = typeof b.provider === 'string' ? b.provider : ''
   const key = typeof b.key === 'string' ? b.key : ''
-  if (!provider || !rt.config.providers[provider]) {
+  const p = rt.config.providers[provider]
+  if (!provider || !p) {
     return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
   }
   if (!key) {
     return sendError(res, 400, t('key 不能为空', 'Key must not be empty'))
   }
   const backend = rt.config.security?.store ?? (await defaultStore())
-  const keyRef = await setSecret(provider, key, backend)
-  await persistConfig(rt, (c) => {
-    if (c.providers[provider]) c.providers[provider].key_ref = keyRef
+  // 与 setSecret 内部同规：FAKE_HOME 沙箱下外部后端强制落 file，ref 按实际后端预生成
+  const effBackend: SecretBackend =
+    process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
+  // 池 provider（keys 非空）转发恒走 keys 池（providerKeyRefs），只写 key_ref 会「静默无效」——
+  // 对齐 CLI provider set-key --add：新 key 追加进池（槽位 <id>-k<序号>，与既有引用去重）；
+  // 提交的 key 已在池内时零改动直接返回（幂等）。单 key 配置保持覆盖 key_ref。
+  const poolKeys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
+  const isPool = poolKeys.length > 0
+  if (isPool) {
+    const currentKeys = (await resolveProviderKeys(providerKeyRefs(p))).map((e) => e.key)
+    if (currentKeys.includes(key)) {
+      audit(bi('更新密钥', 'Update key'), provider, bi('Key 已在池中，未重复追加', 'Key already in the pool; not appended again'))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, pool: true, appended: false }))
+      return
+    }
+  }
+  let keyWrite: { secretId: string; ref: string; pool: boolean }
+  if (isPool) {
+    const taken = new Set([...poolKeys, p.key_ref])
+    let slot = poolKeys.length + 1
+    let ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
+    while (taken.has(ref)) {
+      slot++
+      ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
+    }
+    keyWrite = { secretId: `${provider}-k${slot}`, ref, pool: true }
+  } else {
+    keyWrite = { secretId: provider, ref: makeKeyRef(effBackend, provider), pool: false }
+  }
+  // 先落配置后动密钥（REVIEW-10 / hServiceDelete 同序）：persistConfig 失败时密钥未动、
+  // 配置由 mutateConfig 原子性保持原状，无半套状态；反序会在配置写失败时留孤儿密钥条目
+  // （2026-11-04 审查 P2）。ref 在 persist 前确定性预生成，锁外 setSecret 只补密文本。
+  await persistConfig(rt, (cfg) => {
+    const t = cfg.providers[provider]
+    if (!t) return
+    if (keyWrite.pool) {
+      const pool = (t.keys ??= [])
+      pool.push(keyWrite.ref)
+    } else {
+      t.key_ref = keyWrite.ref
+    }
   })
-  audit(bi('更新密钥', 'Update key'), provider, bi('存入 {backend}', 'Stored in {backend}', { backend }))
+  await setSecret(keyWrite.secretId, key, effBackend)
+  audit(
+    bi('更新密钥', 'Update key'),
+    provider,
+    keyWrite.pool
+      ? bi('已追加进 key 池（存入 {backend}）', 'Appended to the key pool (stored in {backend})', { backend })
+      : bi('存入 {backend}', 'Stored in {backend}', { backend })
+  )
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true }))
+  res.end(JSON.stringify({ ok: true, ...(keyWrite.pool ? { pool: true, appended: true } : {}) }))
   return
 }
 
@@ -1851,13 +1937,26 @@ async function hReset(c: AdminCtx): Promise<void> {
       secretsCleared++
     } catch { /* 单项失败不影响其余 */ }
   }
+  // 删文件前包同一把 config 写锁（CORRECT-06 同法）：Web reset 与 CLI / 另一实例的 mutateConfig
+  // 是独立写者，裸 unlink 会在他人「读文件→改→写回」的窗口里删掉目标、随后被整包写回归活——
+  // reset 表面成功配置却还在。锁内删除让并发写者要么先完成再被删、要么等删除后才拿到锁
+  // （读到空配置），不再复活（2026-11-04 审查 P2）
   const files = [configPath(), secretsPath()]
   const deleted: string[] = []
-  for (const f of files) {
-    try {
-      if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
-    } catch { /* 忽略 */ }
-  }
+  await withFileLock(configLockPath(), {
+    // 超时报错与 mutateConfig 同口径（ConfigError → 400 + 可操作 hint），裸锁错误会落 500
+    timeoutError: (lp) =>
+      new ConfigError(
+        t('重置失败：{lp} 被其他进程长期占用（可能是异常退出的残留锁）', 'Reset failed: {lp} has been held by another process for too long (possibly a stale lock from a crashed process)', { lp }),
+        t('确认没有其他 modeldock 进程在写配置后，可删除该 .lock 文件重试', 'After confirming no other modeldock process is writing the config, delete the .lock file and retry')
+      ),
+  }, async () => {
+    for (const f of files) {
+      try {
+        if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
+      } catch { /* 忽略 */ }
+    }
+  })
   // 重载为空配置
   await reloadRuntime(rt)
   audit(
@@ -2524,11 +2623,16 @@ export async function probePing(
       bodyTimeout: 10_000,
     })
     const ms = Date.now() - t0
-    // 释放连接（抑制 aborted 错误事件）
+    // 排空响应体让连接回 keepalive 池（旧实现 destroy 每次烧掉一条复用连接——探活一多就把
+    // per-provider 连接池打穿，后续真实请求被迫重建 TCP/TLS）。error 抑制保留：排空中连接
+    // 中止不上抛；dump 失败（慢上游/断连）best-effort 吞掉，不影响探测结论（ms 在首字节
+    // 到达时已记下，2026-11-04 审查 P2）
     if (typeof (res.body as unknown as { on?: Function }).on === 'function') {
       ;(res.body as unknown as NodeJS.EventEmitter).on('error', () => {})
     }
-    ;(res.body as unknown as { destroy?: () => void })?.destroy?.()
+    try {
+      await res.body.dump()
+    } catch { /* 排空失败（超时/断连）不影响探测结果 */ }
     return { ok: true, ms }
   } catch (e) {
     return {

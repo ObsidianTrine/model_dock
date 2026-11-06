@@ -582,6 +582,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
+  let watchdogHalted = false; // 看门狗 actuate 已落位：主循环收敛标志（见 runWatchdogCheck circuit_break 分支）
   const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
@@ -608,7 +609,12 @@ async function cmdRun(repoRoot, taskId, opts) {
         moveCard(root, taskId, 'running', 'blocked');
         archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
         await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
-        die('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+        // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
+        // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
+        // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
+        // spawn close 收敛，主循环见标志即正常 return 走 finally（临时目录清理/任务锁释放/
+        // 油量轮询停止）；落位语义（blocked + circuit_breaker 事件 + 事故归档 + 通报）不变。
+        watchdogHalted = true;
       }
     } catch {
       // 看门狗自身异常绝不影响编排；「永不静默」由上面的 watchdog_error 事件承担
@@ -764,6 +770,13 @@ async function cmdRun(repoRoot, taskId, opts) {
           workerInFlight = false; // 看门狗：worker 会话收尾（在途结论回报时作废）
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
+          if (watchdogHalted) {
+            // 看门狗 actuate 已完成落位（blocked/ + circuit_breaker 事件 + 事故归档 + 通报）：
+            // 主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重试判定之前——
+            // killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试再派新会话。
+            log('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+            return;
+          }
           if (budget.tripped) {
             killTree(result.pid);
             appendEvent(qdir, 'circuit_breaker', { reason: budget.tripReason.reason, detail: budget.tripReason.detail });
@@ -1747,26 +1760,44 @@ function drainTallyLine(tally) {
  * 任一达阈值即滞留。无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。
  * workflow.json 未配 weatherHold 键 = 功能关闭（行为与历史版本一致）。
  */
+// 事件快照缓存（perf，2026-11-05 审查项）：每次派发前全量 readdir + 逐任务解析
+// events.jsonl，drain 每轮 pump / watch 每周期都重复同一 IO。按 repoRoot 分键的模块级
+// 60s TTL 缓存（{allEvents, at}）——命中即复用快照，窗口过滤仍按调用时刻的 now 现算
+// （出窗事件即时失效，滞留判定语义不变）；仅「60s 内新落盘的 worker_retry」延迟可见，
+// 风暴是分钟级信号，该粒度无判据影响。按 repoRoot 分键：多仓库（测试/多实例）互不污染。
+const WEATHER_SNAPSHOT_TTL_MS = 60_000;
+const _weatherSnapshots = new Map(); // repoRoot -> { allEvents, at }
+/** 测试清场：清空风暴闸事件快照缓存（vitest 单 fork 共享注册表，用例收尾可调用）。 */
+export function resetWeatherSnapshotCache() {
+  _weatherSnapshots.clear();
+}
+
 function weatherHoldCount(repoRoot, cfg) {
   const hold = cfg?.weatherHold;
   if (!hold) return { held: false, count: 0, upstream: null };
+  const now = Date.now();
   const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
-  const allEvents = [];
-  try {
-    for (const id of fs.readdirSync(logsRoot)) {
-      if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
-      const events = readEvents(path.join(logsRoot, id));
-      if (events.length) allEvents.push({ id, events });
-    }
-  } catch { /* logs/ 不存在 = 还没跑过任务 */ }
-  const count = countRecentTransient(allEvents, { windowMs: hold.windowMinutes * 60_000, now: Date.now() });
+  let snap = _weatherSnapshots.get(repoRoot);
+  if (!snap || now - snap.at > WEATHER_SNAPSHOT_TTL_MS) {
+    const allEvents = [];
+    try {
+      for (const id of fs.readdirSync(logsRoot)) {
+        if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
+        const events = readEvents(path.join(logsRoot, id));
+        if (events.length) allEvents.push({ id, events });
+      }
+    } catch { /* logs/ 不存在 = 还没跑过任务 */ }
+    snap = { allEvents, at: now };
+    _weatherSnapshots.set(repoRoot, snap);
+  }
+  const count = countRecentTransient(snap.allEvents, { windowMs: hold.windowMinutes * 60_000, now });
   const result = { held: shouldHold(count, hold.threshold), count, upstream: null };
   // 上游海况（外部风暴）：网关实测先于 worker 重试浮现；未配 upstream 子键 = 关闭，
   // 网关日志不可得（gatewayLogDir 未配）同样不滞留（观测缺席 ≠ 风暴）。
   if (hold.upstream?.threshold != null) {
     const gwDir = gatewayLogsDir(cfg);
     const windowMinutes = hold.upstream.windowMinutes ?? 15;
-    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now: Date.now() });
+    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now });
     result.upstream = { count: uCount, threshold: hold.upstream.threshold, windowMinutes, observed: gwDir != null };
     if (shouldHold(uCount, hold.upstream.threshold)) result.held = true;
   }
@@ -2108,8 +2139,9 @@ async function drainSupplyProbe(repoRoot, root, cfg) {
  * 并发调度（Phase 3，docs 10.6）：--workers N 时最多 N 个 run 子进程同时跑。
  * 分区互斥：新任务与任一在跑任务的 files_hint 相交（hintsOverlap）则跳过，
  * 等占位释放后再试——按文件归属分区派任务的自动化（AGENTS.md 已有人工约定）。
- * 死循环防护改为**每任务重试计数**：同一任务被调度 2 次仍留在 pending 即拉黑并告警
- * （并发下"连续两轮"不再等价于上一次尝试）。
+ * 死循环防护改为**每任务重试计数**：同一任务被调度 2 次仍留在 pending 即拉黑转 blocked/
+ * 并告警（并发下"连续两轮"不再等价于上一次尝试；落位语义与串行路径同款——failed 事件 +
+ * moveCard + tally/tasks 记账 + settleNotify）。
  * 结束条件：无活跃子进程 且 无可调度任务。
  */
 function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
@@ -2208,8 +2240,18 @@ function cmdDrainParallel(repoRoot, root, opts, workers, cfg) {
       let picked = null;
       for (const id of candidates) {
         if ((retryCount.get(id) ?? 0) >= 2) {
-          blacklisted.add(id);
-          log(`⚠ 任务 ${id} 两次被调度仍在 pending——run 子进程未能处理它，已跳过（人工检查执行环境后 resume）。`);
+          // 拉黑对齐串行 drain 完整语义（2026-11-05 审查项）：旧实现只 blacklisted.add——
+          // 卡悬在 pending/、无 failed 事件、无通报、tally/tasks 不记账，与串行路径
+          // （appendEvent failed + moveCard blocked + 记账 + settleNotify）分叉。这里补齐：
+          // 卡显式转 blocked/（可 resume，不悬 pending），reason 与串行同款可操作口径。
+          const reason = 'drain 两次调度仍在 pending——run 子进程未能处理它（常见：卡声明 ui_check 但 workflow.json 未配 uiCheckCmd、执行引擎切换未获批准；可用 resume 带上修复指令续做）';
+          log(`⛔ 任务 ${id} 拉黑：${reason.split('——')[0]}——转 blocked/，继续调度剩余卡。`);
+          appendEvent(logDir(repoRoot, id), 'failed', { reason });
+          moveCard(root, id, 'pending', 'blocked');
+          blacklisted.add(id); // 搬离 pending 后本不会再入选，双保险防 moveCard 异常时旧选路复现
+          tally.blocked = (tally.blocked ?? 0) + 1;
+          tasks.push({ id, state: 'blocked' });
+          void settleNotify(repoRoot, id, 'blocked', reason); // 尽力而为通报（与收官摘要同款 fire-and-forget）
           continue;
         }
         try {

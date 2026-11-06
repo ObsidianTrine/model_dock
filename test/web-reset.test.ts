@@ -6,14 +6,16 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import fs from 'node:fs'
+import path from 'node:path'
 import { fakeHome } from './helpers.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { applyAttach } from '../src/ops.js'
-import { loadConfig, saveConfig } from '../src/config/store.js'
+import { configLockPath, loadConfig, saveConfig } from '../src/config/store.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 import { configPath, secretsPath, modeldockDir } from '../src/util/paths.js'
 import { setSecret } from '../src/config/secrets.js'
+import { __testSetLockTiming } from '../src/util/fsx.js'
 
 afterEach(() => {
   delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
@@ -129,6 +131,46 @@ describe('Web reset 语义（hReset 对齐 CLI cmdReset）', () => {
       expect(j.restoreFailed).toEqual([])
       expect(fs.existsSync(configPath())).toBe(false)
     } finally {
+      close()
+      h.restore()
+    }
+  })
+
+  it('unlink 在 config 写锁内执行：另一写者持锁时 reset 报错且文件不动（2026-11-04 审查 P2）', async () => {
+    const h = fakeHome()
+    let close: () => void = () => {}
+    __testSetLockTiming({ acquireTimeoutMs: 500 })
+    try {
+      await saveConfig(baseCfg())
+      const cfg = await loadConfig()
+      const rt = buildRuntime(JSON.parse(JSON.stringify(cfg)), 'admin-tok')
+      const server = createGatewayServer(rt, { port: 0 })
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
+      })
+      close = () => {
+        server.closeAllConnections?.()
+        server.close()
+      }
+      // 手工造锁文件模拟另一进程占用（同进程 withFileLock 走串行队列，测不出文件锁竞争）
+      fs.mkdirSync(path.dirname(configLockPath()), { recursive: true })
+      fs.writeFileSync(configLockPath(), String(process.pid), 'utf8')
+
+      const resp = await fetch(`http://127.0.0.1:${port}/_modeldock/reset`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-tok' },
+        body: '{}',
+      })
+      expect(resp.status).toBe(400)
+      const j = (await resp.json()) as Record<string, any>
+      expect(String(j.error?.message ?? '')).toContain('重置失败')
+      // 文件未被删除（裸 unlink 会在他人写窗口里删掉后又被整包写回——锁内删除防复活）
+      expect(fs.existsSync(configPath())).toBe(true)
+      expect(fs.existsSync(secretsPath())).toBe(true)
+    } finally {
+      try { fs.rmSync(configLockPath(), { force: true }) } catch { /* 收尾尽力 */ }
+      __testSetLockTiming()
       close()
       h.restore()
     }

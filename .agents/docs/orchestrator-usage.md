@@ -200,6 +200,6 @@ pending → running → reviewing → awaiting-human → merged
 | `blocked: budget:*` | 预算熔断（max_tokens 按可计费口径：剔除缓存读；第三方上游流式 usage 全 0 时 token 熔断不可依赖，靠 wall-clock/turns）。`resume` 续做或调大 budget |
 | 反复测试失败转 blocked | 调试迭代超限（默认 5 次）。`logs` 看失败尾部，人工接手或改卡重提 |
 | 红线门禁 failed | port_scan/native_scan 不可调试——改设计不改门禁 |
-| drain 停住不动 | `status` 看是否解析失败卡/分区互斥排队；执行环境损坏时同任务两次调度会被拉黑并告警 |
+| drain 停住不动 | `status` 看是否解析失败卡/分区互斥排队；执行环境损坏时同任务两次调度会被拉黑转 blocked/ 并通报（可 resume） |
 | 自动合并没有发生 | `logs` 查 `change_classification` 与 `awaiting_human` 的 reason（超 gate 上限/scope 越界/drift 降级），确认 `drift` 状态 |
 | 审查卡住 | reviewer 是只读会话（Read/Glob/Grep 白名单），若 verdict 解析不到按有阻塞保守处理 |

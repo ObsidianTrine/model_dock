@@ -508,3 +508,68 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     expect(cfgOf({ notify: { signSecretService: '   ' } }).notify.signSecretService).toBeNull()
   })
 })
+
+describe('workflow-config > 未知顶层键告警（拼写错误防线，2026-11-05 审查项）', () => {
+  function writeCfg(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-unknown-'))
+    fs.mkdirSync(path.join(dir, '.agents'))
+    fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+    return dir
+  }
+
+  it('未知顶层键：单次 load 恰好一条 console.warn，列出全部未知键名', () => {
+    const dir = writeCfg({ baseBranch: 'main', workerBakend: 'claude-headless', AutoPilot: { enabled: true } })
+    try {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const cfg = loadWorkflowConfig(dir)
+        expect(cfg.baseBranch).toBe('main') // 合法键照常生效，告警不阻断
+        const msgs = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('未知顶层键'))
+        expect(msgs).toHaveLength(1)
+        expect(msgs[0]).toContain('workerBakend')
+        expect(msgs[0]).toContain('AutoPilot')
+      } finally {
+        warn.mockRestore()
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('合法顶层键（含外部消费者 setupCmd/scan）：零告警', () => {
+    const dir = writeCfg({
+      baseBranch: 'main',
+      testCmd: 'make test',
+      setupCmd: 'make deps', // feature-branch.mjs 消费（loadWorkflowConfig 不读，但属合法键）
+      scan: { smartFilter: true }, // eventfilter.mjs readScanConfig 消费
+      worker: { backend: 'claude-headless' },
+      weatherHold: { threshold: 3, windowMinutes: 60 },
+    })
+    try {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        loadWorkflowConfig(dir)
+        expect(warn).not.toHaveBeenCalled()
+      } finally {
+        warn.mockRestore()
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('文件缺失：raw 为空，不告警', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-missing-'))
+    try {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        loadWorkflowConfig(dir)
+        expect(warn).not.toHaveBeenCalled()
+      } finally {
+        warn.mockRestore()
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

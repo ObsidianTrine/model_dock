@@ -1,4 +1,14 @@
 import { t } from './i18n.js'
+/** 等值判定口径（与下方 unifiedDiff 的行切分同规）：归一化 \r\n → \n 后比较。
+ *  仅用于「内容是否变化」的判定，不改变任何写入内容——Windows 编辑器保存的客户端配置常是
+ *  CRLF，而本程序（yaml/toml 序列化）输出恒 LF，逐字节比较会把「仅行尾差异」误判为有变化，
+ *  击穿稳态守卫（changeIfChanged / refreshBakedModelClients 的内容一致守卫），
+ *  让周期 refresh / 稳态重接每次都整写盘 + 拍快照（2026-11-04 审查 P2）。 */
+export function textEqualsIgnoreEol(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  return a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n')
+}
 /** 行级 unified diff（LCS），用于写入前预览；文件超大时降级为摘要 */
 export function unifiedDiff(a: string, b: string, context = 3): string {
   // 统一 CRLF → LF 再比对：Windows 编辑器保存的配置是 CRLF，本程序序列化输出是 LF，

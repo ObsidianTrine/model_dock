@@ -162,3 +162,4 @@ describe('spawnDaemonAndWait 超时与 spawn 契约', () => {
     }
   })
 })
+

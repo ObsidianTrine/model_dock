@@ -38,11 +38,17 @@ on:
 # 因为 workflow 级并发会把「所有 job 都不满足条件的空 run」（如 bot 自己评论触发的 issue_comment）
 # 也计入并发组，把进行中的审查取消掉。auto-review 与 interactive（@claude 追问）各用独立组名：
 # 共用组名时，@claude 评论会把进行中的 auto-review 取消掉，已烧掉的 token 白费。
+# id-token 不在 workflow 级整包发放（2026-11-05 最小化收敛）：三个 AI job 的 claude-code-action
+# 未传 github_token 输入，走官方 Claude Code GitHub App 的默认鉴权路径——该路径用 OIDC 换
+# app token，id-token: write 是硬需求（action 官方文档 docs/setup.md：「The default GitHub App
+# authentication path already requires this permission」）。ANTHROPIC_API_KEY 只覆盖模型端点、
+# 不覆盖 GitHub API，删 id-token 会复刻 ci-autofix.yml 2026-11-04 事故（15s 内 3 连败、会话零
+# 启动）。因此收敛方式：各 AI job 在 job 级 permissions 自持 id-token，确定性脚本 job
+# （risk-tier）不再持有；注意 job 级 permissions 是整包覆盖（非合并），各块须写全所需权限。
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   risk-tier:
@@ -50,6 +56,11 @@ jobs:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      # 不持 id-token：纯脚本 job 无 OIDC 消费点（id-token 收敛见文件头注）
     concurrency:
       group: claude-review-tier-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -92,6 +103,11 @@ jobs:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write   # claude-code-action 未传 github_token → GitHub App OIDC 鉴权硬需求（见文件头注）
     concurrency:
       group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -186,6 +202,11 @@ jobs:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write   # claude-code-action 未传 github_token → GitHub App OIDC 鉴权硬需求（见文件头注）
     concurrency:
       group: claude-review-sec-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -262,7 +283,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          verdict=$(gh pr view "$PR" --json comments -q '.comments[].body' | grep -E '^SECURITY-VERDICT:' | tail -1 || true)
+          # 门禁信号只认 claude[bot]（官方 Claude Code GitHub App 的 bot login；三个 AI job 未传
+          # github_token、走 App OIDC 鉴权，评论作者恒为 claude[bot]，见本文件头注）——任意用户
+          # 评论 SECURITY-VERDICT 不再能覆盖/伪造门禁信号。注意：若某 AI job 改传 github_token
+          #（评论作者随之改变），此处作者过滤须同步修改。
+          verdict=$(gh pr view "$PR" --json comments \
+            -q '.comments[] | select(.author.login == "claude[bot]") | .body' \
+            | grep -E '^SECURITY-VERDICT:' | tail -1 || true)
           echo "verdict: ${verdict:-<none>}"
           case "$verdict" in
             "SECURITY-VERDICT: PASS")
@@ -290,7 +317,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      id-token: write
+      id-token: write   # 同 auto-review：GitHub App OIDC 鉴权硬需求（未传 github_token，见文件头注）
     steps:
       - name: 配置三件套不齐时静默跳过（未启用状态零消耗）
         id: keyguard

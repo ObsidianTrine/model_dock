@@ -243,6 +243,21 @@ export async function atomicWrite(file: string, content: string | Buffer, mode =
   for (;;) {
     try {
       await fsp.rename(tmp, file)
+      // unix：rename 成功后再 fsync 父目录，把目录项变更也刷盘——ext4 等文件系统上
+      // 「fsync(文件) + rename」不保证目录项持久，断电后文件可能整体丢失（2026-11-04 审查 P2）。
+      // 仅 unix 分支：Windows 无目录 fsync 语义（打开目录句柄 fsync 会失败），且 NTFS 为日志型
+      // 文件系统、元数据保护机制不同，保持原行为零额外开销。best-effort 吞错：部分平台/文件系统
+      // 对目录 fd fsync 报 EINVAL，目录 fsync 失败不应让一次成功的写入报错。
+      if (process.platform !== 'win32') {
+        try {
+          const dir = await fsp.open(path.dirname(file), 'r')
+          try {
+            await dir.sync()
+          } finally {
+            await dir.close()
+          }
+        } catch { /* 目录 fsync 非所有平台/文件系统都支持（EINVAL 等），best-effort */ }
+      }
       return
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code

@@ -75,6 +75,37 @@ describe('orchestrator parallel > drain --workers 并发调度', () => {
       repo.cleanup()
     }
   })
+
+  it('并行拉黑对齐串行语义：两次调度仍 pending 的卡转 blocked/ + failed 事件 + 不再被选中', () => {
+    // 2026-11-05 审查项：旧并行路径拉黑只 blacklisted.add——卡悬 pending/、无事件无通报，
+    // 与串行路径（appendEvent failed + moveCard blocked + 记账 + settleNotify）分叉。
+    // 确定性失败现场：卡声明 ui_check 但 workflow.json 未配 uiCheckCmd（mkRepo 缺省不配），
+    // 每次 run 子进程都立即 die、卡留 pending——两次调度后并行 pump 必拉黑。
+    const repo = mkRepo()
+    try {
+      submitCard(repo.root, 'bad-ui-p', { ui_check: true })
+      submitCard(repo.root, 'good-p', { files_hint: ['docs/**'] }) // 异分区：与坏卡可并发
+      const out = runOrch(repo.root, 'drain --workers 2 --backend mock')
+      expect(out.status).toBe(0)
+      // 卡显式落位 blocked/（不悬 pending——否则每轮 pump 重复拉黑）
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'bad-ui-p.md'))).toBe(true)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'bad-ui-p.md'))).toBe(false)
+      // failed 事件留痕，reason 与串行同款可操作口径（可 resume）
+      const failed = eventsOf(repo.root, 'bad-ui-p').find((e) => e.type === 'failed') as Record<string, unknown> | undefined
+      expect(String(failed?.reason)).toContain('pending')
+      expect(String(failed?.reason)).toContain('resume')
+      // 拉黑留痕 + 收官不再把该卡当可调度任务
+      expect(out.stdout).toContain('拉黑')
+      // 异分区好卡照常闭环（mock 全流程 → awaiting-human / merged）
+      const settled = [
+        ...fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'awaiting-human')),
+        ...fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'merged')),
+      ]
+      expect(settled).toContain('good-p.md')
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
 })
 
 describe('orchestrator parallel > drain --max 烧钱上限', () => {

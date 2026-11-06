@@ -2,11 +2,16 @@ import path from 'node:path'
 import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeHome } from './helpers.js'
+import { recordTestFile } from './helpers/run-order.js'
 import { displayPath } from '../src/util/paths.js'
 import { codexAdapter } from '../src/adapters/codex.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { runWithLang, setLang } from '../src/util/i18n.js'
 import { UpdateError, validateAssetName } from '../src/update/check.js'
+
+// 收集序登记（观测器零依赖，顶层 import 不触碰 basic.js，见 test/helpers/run-order.ts 头注）：
+// 本文件靠惰性 import basic.js 自保，门禁断言的是 uninstall 恒先于本文件收集
+recordTestFile('zz-quickwins.test.ts')
 
 // 信封 seal/open 往返与错口令断言归 syncdoc.test.ts（曾在此重复，2026-10-21 去重删除）。
 
