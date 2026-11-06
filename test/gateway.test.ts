@@ -582,6 +582,24 @@ describe('网关', () => {
     }
   })
 
+  it('usage-live 轻端点：每请求易变字段（usageToday/lastMs）从 overview 主载荷拆出', async () => {
+    const t = await setup()
+    try {
+      // 契约：overview 串在有流量时保持稳定（UI 文本 diff 才能命中，不再每轮询全量重传+全页重绘）
+      const ov: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
+      expect('usageToday' in ov).toBe(false)
+      expect(ov.services.length).toBeGreaterThan(0)
+      expect('lastMs' in ov.services[0]).toBe(false)
+      const live: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/usage-live`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
+      expect(live.ok).toBe(true)
+      expect(live.usageToday).toBeTruthy()
+      expect(typeof live.usageToday.requests).toBe('number')
+      expect(typeof live.ms).toBe('object')
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('上游 gzip 压缩错误体：中继给客户端的是解压后的可读 JSON，且不再声明 content-encoding', async () => {
     const t = await setup()
     try {

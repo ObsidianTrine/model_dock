@@ -242,6 +242,10 @@ export const UI_JS_WIRING = `  document.querySelectorAll('.close-btn').forEach(f
   var MORE_TOP = ['bigmodel-openai', 'kimi-anthropic-cn', 'ark-coding-plan', 'ark-agent-plan', 'zai-anthropic', 'kimi-anthropic-global', 'mimo-token-plan-cn', 'dashscope-openai', 'openrouter', 'gemini-openai']
   var view = null
   var overviewLastText = '' // 上次 overview 原始响应串：pollOverview 文本级 diff 用
+  // /usage-live 实时字段（usageToday + 各服务 lastMs，从 overview 主载荷拆出）与上次响应签名：
+  // 每请求易变的字段放主载荷会击穿文本 diff（有流量时串恒变 → 每轮询全量重传 + 全页重绘）
+  var liveUsage = null
+  var lastLiveSig = ''
   var svcQ = '', svcSort = 'default', svcFilter = 'all'
   // 长列表防撑高：服务默认只渲染前 N 个（一键展开/收起，不用分页——切换服务不该翻页找）；客户端未安装项默认折叠
   var SVC_COLLAPSE_N = 8
