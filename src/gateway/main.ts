@@ -66,6 +66,28 @@ function logEndpointRisks(cfg: Config): void {
   }
 }
 
+/** watcher 防抖窗口的 secrets 变更累积器：reloadRuntime 按它决定是否失效 secrets 缓存（精准失效）。
+ *  规则：secrets.json 事件 = 可能动了密钥；filename 为空（Windows 递归 watcher 的 filename 可能为
+ *  null/空）**保守视为可能动了密钥**——宁多失效不可漏失效（漏失效 = 转发读到旧 key，是安全问题）；
+ *  其余文件（config.toml / sync.json / gateway.json / backups/…）不影响判定。reload 真正执行时
+ *  takeSecretsChanged() 取走并复位，窗口内多事件取「或」。导出供单测钉语义。 */
+export function createSecretsChangeTracker(): {
+  onFileEvent: (filename: string | null | undefined) => void
+  takeSecretsChanged: () => boolean
+} {
+  let secrets = false
+  return {
+    onFileEvent: (filename) => {
+      if (!filename || filename === 'secrets.json') secrets = true
+    },
+    takeSecretsChanged: () => {
+      const v = secrets
+      secrets = false
+      return v
+    },
+  }
+}
+
 /** 前台启动网关（CLI `gateway start` 与守护进程入口共用） */
 export async function startForeground(portOverride?: number): Promise<void> {
   const cfg = await loadConfig()
@@ -190,6 +212,8 @@ export async function startForeground(portOverride?: number): Promise<void> {
   let reloadTimer: NodeJS.Timeout | undefined
   let watcher: fs.FSWatcher | undefined
   let syncRemountTimer: NodeJS.Timeout | undefined
+  // 防抖窗口内是否可能动过 secrets.json：精准失效的判定源（见 createSecretsChangeTracker 注）
+  const secretsTracker = createSecretsChangeTracker()
   const scheduleSyncRemount = (): void => {
     clearTimeout(syncRemountTimer)
     syncRemountTimer = setTimeout(() => {
@@ -199,7 +223,8 @@ export async function startForeground(portOverride?: number): Promise<void> {
   const scheduleReload = (): void => {
     clearTimeout(reloadTimer)
     reloadTimer = setTimeout(() => {
-      reloadRuntime(rt)
+      const secretsChanged = secretsTracker.takeSecretsChanged()
+      reloadRuntime(rt, { secretsChanged })
         .then(() => {
           console.log(t('[modeldock] 配置已热加载（第 {n} 次）', '[modeldock] Config hot-reloaded (reload #{n})', { n: rt.reloads }))
           logEndpointRisks(rt.config)
@@ -209,6 +234,7 @@ export async function startForeground(portOverride?: number): Promise<void> {
   }
   try {
     watcher = fs.watch(modeldockDir(), (_event, filename) => {
+      secretsTracker.onFileEvent(filename)
       if (!filename || filename === 'config.toml' || filename === 'secrets.json') scheduleReload()
       // 只认精确文件名：引擎自己写 sync.json（lastAppliedRev 等簿记）签名未变，remount 幂等空转
       if (filename === 'sync.json') scheduleSyncRemount()

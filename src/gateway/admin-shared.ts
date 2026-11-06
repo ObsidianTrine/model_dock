@@ -122,10 +122,13 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
   }
 }
 
-/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态 */
+/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
+ *  mutateConfig 只写 config.toml、不触 secrets.json：传 secretsChanged:false 跳过 secrets 缓存
+ *  失效（精准失效），控制台每次保存不再打掉 DPAPI 解密缓存（win32 下一次读 key 免 360~400ms
+ *  spawn PowerShell）。经由本函数落盘的回调只许改 config——要动密钥走 setSecret（写后自回填缓存）。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
   await mutateConfig(fn)
-  await reloadRuntime(rt)
+  await reloadRuntime(rt, { secretsChanged: false })
 }
 
 /** 服务 → profile 解析（UI 按「服务」操作、底层路由单元是 profile）：

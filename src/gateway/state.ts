@@ -5,7 +5,7 @@
 export type { LogEntry, AuditEntry, EventEntry, RingEntry, ResolvedTarget, ResolveResult, GatewayRuntime, ProviderLatencyRing, HealthState } from './state/types.js'
 export type { EphemeralHarnessState } from './state/types.js'
 export { buildTokenIndex, buildRuntime, reloadRuntime, registerEphemeralHarness, unregisterEphemeralHarness, sweepEphemeralHarnesses, reapplyEphemeralHarnesses, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, EPHEMERAL_SWEEP_INTERVAL_MS } from './state/runtime.js'
-export type { EphemeralHarnessInput } from './state/runtime.js'
+export type { EphemeralHarnessInput, ReloadOptions } from './state/runtime.js'
 export type { OrderedCandidate, RouteSource, PickResult, ScheduleHit, RouteState, AutoRouteInfo } from './state/routing.js'
 export { resolveTarget, resolveByProfile, recordOutcome, isMeltdown, activeScheduleWindow, activeAvoidTargets, displayRouteProvider, parseFallbackEntry, pickTarget, routeState, autoRouteInfo } from './state/routing.js'
 export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, readRequestLogDay, filterLogEntries, logEntryMatches, summarizeUsage, summarizeUsageDays, createUsageAccumulator, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs, usageTodayView, resetUsageTodayForTest } from './state/logs.js'

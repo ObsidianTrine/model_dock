@@ -21,6 +21,7 @@ import {
 import { migrateSandboxKeyRefsToLocal } from '../src/config/sandbox.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { reloadRuntime, buildRuntime } from '../src/gateway/state.js'
+import { createSecretsChangeTracker } from '../src/gateway/main.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 
 const cfg: Config = {
@@ -62,6 +63,125 @@ describe('secrets cache 失效', () => {
       expect(await getSecret(ref)).toBe('sk-r1') // 未 reload：旧缓存
       await reloadRuntime(rt) // 文件 watcher 触发 reload 会清 secrets 缓存
       expect(await getSecret(ref)).toBe('sk-r2')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('reloadRuntime 精准失效（perf-secrets-cache）', () => {
+  it('config-only 变更（secretsChanged:false）不清 secrets 缓存：解密缓存保留，缺省 reload 才失效', async () => {
+    const h = fakeHome()
+    try {
+      const ref = await setSecret('demo', 'sk-p1', 'file')
+      const rt = buildRuntime(emptyConfig(), 'tok')
+      await reloadRuntime(rt, { secretsChanged: false }) // persistConfig / watcher 见 config.toml 事件的口径
+      expect(await getSecret(ref)).toBe('sk-p1')
+      await writeSecrets({ demo: 'sk-p2' }) // 外部改写 secrets.json（模拟另一进程改 key）
+      await reloadRuntime(rt, { secretsChanged: false })
+      expect(await getSecret(ref)).toBe('sk-p1') // 缓存未清：DPAPI 解密缓存跨 config-only reload 存活
+      await reloadRuntime(rt) // 缺省保守失效：外部改写即刻生效
+      expect(await getSecret(ref)).toBe('sk-p2')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('secretsChanged:true 显式清缓存（watcher 确认 secrets.json 变更的口径）', async () => {
+    const h = fakeHome()
+    try {
+      const ref = await setSecret('demo', 'sk-t1', 'file')
+      const rt = buildRuntime(emptyConfig(), 'tok')
+      await reloadRuntime(rt)
+      expect(await getSecret(ref)).toBe('sk-t1')
+      await writeSecrets({ demo: 'sk-t2' })
+      await reloadRuntime(rt, { secretsChanged: true })
+      expect(await getSecret(ref)).toBe('sk-t2')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('watcher 防抖窗口累积器：secrets.json/未知文件名 → true，config.toml 等其余 → false，take 取走并复位', () => {
+    const tr = createSecretsChangeTracker()
+    tr.onFileEvent('config.toml')
+    tr.onFileEvent('gateway.json')
+    tr.onFileEvent('sync.json')
+    expect(tr.takeSecretsChanged()).toBe(false) // config-only 窗口：不清缓存
+    expect(tr.takeSecretsChanged()).toBe(false) // 取走即复位
+    tr.onFileEvent('secrets.json')
+    expect(tr.takeSecretsChanged()).toBe(true)
+    tr.onFileEvent(null) // Windows 递归 watcher 的 filename 可能为 null：保守视为可能动过密钥
+    tr.onFileEvent(undefined)
+    expect(tr.takeSecretsChanged()).toBe(true)
+    tr.onFileEvent('config.toml')
+    tr.onFileEvent('secrets.json') // 窗口内多事件取「或」
+    expect(tr.takeSecretsChanged()).toBe(true)
+    expect(tr.takeSecretsChanged()).toBe(false)
+  })
+})
+
+describe('secrets 写路径免重复解密（perf-secrets-cache）', () => {
+  it('缓存命中时 set-key/delete 全程 0 次解密 spawn；未变更条目密文逐字节保留；新值可读回', async () => {
+    const h = fakeHome()
+    try {
+      invalidateSecretsCache()
+      const cipher = pickFileCipher()
+      let protect = 0
+      let unprotect = 0
+      // DPAPI 后端注入恒等批量（base64 往返）并数 spawn 次数；明文/mach 后端天然无 PowerShell spawn，
+      // 断言「0 次解密 spawn」「未变更条目密文保留」三平台同语义（mach 的 AES 密文也非确定性）
+      __testSetDpapiBatch(async (script, b64In) => {
+        if (script.includes('Protect')) protect++
+        else if (script.includes('Unprotect')) unprotect++
+        return b64In
+      })
+      try {
+        const refA = await setSecret('wa', 'sk-wa1', 'file') // 冷缓存：空表无解密，加密仅 wa 一条
+        const diskAfterA = JSON.parse(readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+        const refB = await setSecret('wb', 'sk-wb1', 'file') // 缓存命中：指纹复用明文，0 解密；只加密 wb
+        expect(unprotect).toBe(0) // 全程 0 次解密 spawn（指纹命中，未触发整表解密）
+        if (cipher.prefix === 'enc:dpapi:') expect(protect).toBe(2) // 仅两次「新增条目」加密，无整表重加密
+        const diskAfterB = JSON.parse(readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+        expect(diskAfterB['wa']).toBe(diskAfterA['wa']) // 未变更条目密文逐字节保留（重加密必然变样）
+        expect(await getSecret(refA)).toBe('sk-wa1')
+        expect(await getSecret(refB)).toBe('sk-wb1')
+        const protectBefore = protect
+        await deleteSecret(refB) // 删 key：其余条目全部未变 → 复用原密文，0 加密 spawn
+        const diskAfterDel = JSON.parse(readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+        expect(diskAfterDel['wa']).toBe(diskAfterA['wa'])
+        expect(diskAfterDel['wb']).toBeUndefined()
+        if (cipher.prefix === 'enc:dpapi:') expect(protect).toBe(protectBefore)
+        expect(await getSecret(refA)).toBe('sk-wa1')
+      } finally {
+        __testSetDpapiBatch()
+        invalidateSecretsCache()
+      }
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('盘上密文被外部改动后指纹失配：写路径强制重读正确重解密，外部条目不丢、新值生效', async () => {
+    const h = fakeHome()
+    try {
+      invalidateSecretsCache()
+      const cipher = pickFileCipher()
+      if (cipher.prefix === 'enc:dpapi:') __testSetDpapiBatch(async (_script, b64In) => b64In)
+      try {
+        const ref = await setSecret('fx', 'sk-f1', 'file')
+        expect(await getSecret(ref)).toBe('sk-f1')
+        // 外部直接改写 secrets.json（另一进程/手编）：明文表（解密对非前缀值原样透传）
+        await writeSecrets({ fx: 'sk-f2', extra: 'sk-e' })
+        expect(await getSecret(ref)).toBe('sk-f1') // 普通读仍指旧缓存（既有失效语义，未变）
+        // 写路径强制重读：指纹失配 → 完整重解密 → 盘上新表为准（绝不复用旧明文覆盖外部改动）
+        await setSecret('fx', 'sk-f3', 'file')
+        expect(await getSecret(ref)).toBe('sk-f3')
+        expect(await getSecret('file:extra')).toBe('sk-e') // 外部条目保留（未被旧缓存整表覆盖丢失）
+      } finally {
+        __testSetDpapiBatch()
+        invalidateSecretsCache()
+      }
     } finally {
       h.restore()
     }
