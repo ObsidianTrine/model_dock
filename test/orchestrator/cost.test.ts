@@ -146,6 +146,10 @@ describe('getPricingTable（admin 面 + 缓存回落）', () => {
   })
 
   it('无网关无缓存 → unavailable（带可操作 reason）', async () => {
+    // 隔离：不设 ORCH_GATEWAY_* 时 resolveGatewayAdmin 会做 gateway.json 同机发现——
+    // 必须 fakeHome 重定向，否则开发机上有在跑的生产网关（8687）时「无网关」前提被击穿，
+    // 用例实际打到生产实例且返回 fetched（2026-11-07 v1.7.1 全量门禁实测踩中）。
+    const h = fakeHome()
     const repo = mkRepo({ extra: { gatewayAdmin: true } })
     try {
       const pt = await getPricingTable(repo.root, { gatewayAdmin: true }, [{ provider: 'up', model: 'm1' }])
@@ -153,6 +157,7 @@ describe('getPricingTable（admin 面 + 缓存回落）', () => {
       expect(pt.reason).toBeTruthy()
     } finally {
       repo.cleanup()
+      h.restore()
     }
   })
 })
