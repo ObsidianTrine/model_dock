@@ -68,7 +68,9 @@ export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string
  *  TTL 必须**大于** UI 轮询间隔（5000ms）才会在两次轮询之间有命中——曾为 2000ms，下次 5s 轮询前必过期，
  *  稳态每次轮询全量重跑 buildOverview（每 provider 一次 keychain getSecret + 适配器 status 探测），缓存形同虚设。 */
 export const OVERVIEW_TTL_MS = 6_000
-export let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string } | null = null
+// parsed：与 data 同一次 buildOverview 产出的对象（可选，旧字面量/测试可不带）——hTrayState 投影
+// 用它免掉每 5s 对几十-几百 KB 缓存串的重复 JSON.parse
+export let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string; parsed?: unknown } | null = null
 
 /** 立即失效 overview 缓存（轻量模式广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
 export function invalidateOverviewCache(): void {
@@ -117,8 +119,17 @@ export async function rebuildOverview(rt: GatewayRuntime): Promise<string> {
   const langAtStart = getLang()
   const view = await buildOverview(rt)
   const data = JSON.stringify(view)
-  overviewCache = { at: Date.now(), rt, reloads: reloadsAtStart, lang: langAtStart, data }
+  overviewCache = { at: Date.now(), rt, reloads: reloadsAtStart, lang: langAtStart, data, parsed: view }
   return data
+}
+
+/** overview 视图对象（hTrayState 投影用）：返回串与缓存串一致时直接复用缓存里 parse 好的对象，
+ *  只有拿不到（无缓存/字面量没带 parsed）才真正 JSON.parse——托盘 5s 轮询不再每次付大串解析。 */
+export async function overviewViewParsed(rt: GatewayRuntime): Promise<unknown> {
+  const data = await overviewViewData(rt)
+  const cached = overviewCache
+  if (cached && cached.data === data && cached.parsed !== undefined) return cached.parsed
+  return JSON.parse(data)
 }
 
 /** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；过期或配置代数前进
@@ -231,7 +242,8 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
       priority: p.priority ?? 0,
       down: melted,
       meltdown_until: melted ? (h?.meltdown_until ?? null) : null,
-      lastMs: h?.lastMs ?? null,
+      // lastMs 不进 overview：每请求都变的字段会击穿 UI 文本 diff（有流量时串恒变 → 每轮询全量
+      // 重传 + 全页重绘），与 usageToday 一并拆到 /usage-live 轻端点（hUsageLive）按需更新
       models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true })),
     })
   }
@@ -326,9 +338,22 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
     sync: await syncStatus(),
     // 附近电脑的待确认拉取请求（sync-nearby，单槽 120s）：确认卡据此显示
     syncRequest: peekSyncRequest(),
-    // 今日用量与成本实况（内存累计器 + 重启回填当日日志）：状态行燃油仪表的数据源
-    usageToday: usageTodayView(),
+    // usageToday 不进 overview（每请求易变，会击穿 UI 文本 diff），拆到 /usage-live 轻端点，
+    // 同 model-catalog「不进 overview」的先例
   }
+}
+
+/** 实时字段轻端点：今日用量（内存累计器 + 重启回填当日日志）与各服务最近一次成功延迟。
+ *  全内存读零 IO；UI 每 5s 轮询本端点做定向 DOM 更新，overview 主载荷因此保持稳定。 */
+export async function hUsageLive(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const ms: Record<string, number | null> = {}
+  for (const [id, h] of rt.health) {
+    if (rt.config.providers[id]) ms[id] = h.lastMs ?? null
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, usageToday: usageTodayView(), ms }))
+  return
 }
 
 export async function hOverview(c: AdminCtx): Promise<void> {
@@ -382,7 +407,7 @@ export async function hPresetsCatalog(c: AdminCtx): Promise<void> {
  *  两平台托盘共用本端点（C# 侧无 Decodable，正则解析吃不动嵌套数组，载荷必须小） */
 export async function hTrayState(c: AdminCtx): Promise<void> {
   const { rt, res } = c
-  const view = JSON.parse(await overviewViewData(rt)) as {
+  const view = await overviewViewParsed(rt) as {
     gateway?: { autoRoute?: { forced?: string | null; schedule?: { applied?: boolean } } }
     current?: { id: string; label: string; model?: string | null } | null
     services?: Array<{ id: string; label: string; inUse?: boolean; enabled?: boolean; down?: boolean; defaultModel?: string | null; models?: Array<{ id: string; display_name?: string | null }> }>

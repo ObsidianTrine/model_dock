@@ -17,6 +17,7 @@ export const UI_JS_APP = `  function load() {
       render()
       // 首次加载即刷新沙箱徽标与配置路径显示（pollOverview 只管后续轮询）
       $('#health').innerHTML = healthHtml()
+      pollLive() // 首屏即拉一次实时字段（用量徽标/服务延迟不必等下一轮 5s）
       var cp = document.getElementById('cfgPath')
       if (cp && v.gateway && v.gateway.home) cp.textContent = v.gateway.home
       return checkMigrate()
@@ -168,9 +169,10 @@ export const UI_JS_APP = `  function load() {
   function fmtTok(n) {
     return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
   }
-  // 今日用量/成本徽标（overview.usageToday：内存累计器 + 重启回填当日日志；无流量不显示）
+  // 今日用量/成本徽标（/usage-live 实时字段：内存累计器 + 重启回填当日日志；无流量不显示）。
+  // usageToday 每请求都变，放 overview 主载荷会击穿 pollOverview 文本 diff——已拆到轻端点
   function usageHtml() {
-    var u = view && view.usageToday
+    var u = liveUsage && liveUsage.usageToday
     if (!u || !u.requests) return ''
     var cost = u.cost && u.cost.total > 0 ? ' · ' + fmtUsd(u.cost.total) : ''
     var tip = t('输入 ', 'Input ') + fmtTok(u.tokens.input) + ' · ' + t('输出 ', 'Output ') + fmtTok(u.tokens.output) +
@@ -195,6 +197,29 @@ export const UI_JS_APP = `  function load() {
     }).catch(function () {
       $('#health').innerHTML = t('网关未响应', 'Gateway not responding')
     })
+  }
+
+  // 服务卡延迟文本定向更新（span[data-svcms]，renderServices 重建后也补一次）：只改 textContent，
+  // 不动整页 DOM——lastMs 同 usageToday 属每请求易变字段，已从 overview 主载荷拆出
+  function updateSvcLatency() {
+    var ms = (liveUsage && liveUsage.ms) || {}
+    Array.prototype.forEach.call(document.querySelectorAll('[data-svcms]'), function (el) {
+      var v = ms[el.getAttribute('data-svcms')]
+      el.textContent = v != null ? t(' · 延迟 ', ' · latency ') + v + 'ms' : ''
+    })
+  }
+  function pollLive() {
+    fetch('/_modeldock/usage-live', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
+      return r.ok ? r.json() : null
+    }).then(function (j) {
+      if (!j) return
+      liveUsage = j
+      var sig = JSON.stringify(j)
+      if (sig === lastLiveSig) return // 实时字段没变就不动 DOM
+      lastLiveSig = sig
+      $('#health').innerHTML = healthHtml()
+      updateSvcLatency()
+    }).catch(function () {})
   }
 
   // 轻量模式（Clash Verge 式「只留托盘」）：进入动作在托盘发起，服务端把广播时间戳放在
@@ -277,9 +302,10 @@ export const UI_JS_BOOT = `  setInterval(function () { if (!document.hidden) ref
   // 后台标签页暂停轮询（visibilitychange 恢复时立即刷一次），省掉无谓请求与 DOM 重建
   setInterval(function () { if (!document.hidden) pollHealth() }, 5000)
   setInterval(function () { if (!document.hidden) pollOverview() }, 5000)
+  setInterval(function () { if (!document.hidden) pollLive() }, 5000)
   setInterval(function () { if (!document.hidden) loadLogs() }, 5000)
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) { pollHealth(); pollOverview(); loadLogs() }
+    if (!document.hidden) { pollHealth(); pollOverview(); pollLive(); loadLogs() }
   })
   // 轻量模式在场心跳：加载即报一次 + 15s 一次（不看 document.hidden）；离场走 pagehide 信标
   uiPresence(false)

@@ -396,8 +396,12 @@ interface FileCipher {
   enabled: boolean
   /** 整表解密：raw（带 prefix 的密文表）→ 明文表；未带 prefix 的值原样透传（存量明文/普通值） */
   decryptTable: (raw: Record<string, string>) => Promise<Record<string, string>>
-  /** 整表加密：dec（明文表）→ 带 prefix 的密文表；空值/已带 prefix 原样保留 */
-  encryptTable: (dec: Record<string, string>) => Promise<Record<string, string>>
+  /** 整表加密：dec（明文表）→ 带 prefix 的密文表；空值/已带 prefix 原样保留。
+   *  reuse（可选，perf-secrets-cache）：写路径的「未变更条目复用原密文」凭据——raw[k] 是上一版
+   *  盘上密文、plain[k] 是与之配对的明文（fileCache 的 raw↔snapshot 对）；dec[k] === plain[k]
+   *  且 raw[k] 带本方案 prefix 的条目直接沿用 raw[k]，不送加密（密文非确定性，重加密纯浪费）。
+   *  传了 reuse 也只信「带 prefix 的密文」：明文残留（迁移中盘表）不会被当密文复用。 */
+  encryptTable: (dec: Record<string, string>, reuse?: { raw: Record<string, string>; plain: Record<string, string> }) => Promise<Record<string, string>>
 }
 
 /** secrets.json 写路径锁超时的可操作报错（对照 config 的 ConfigError 用 SecretsError 分流） */
@@ -411,11 +415,20 @@ function secretsLockTimeoutError(lp: string): SecretsError {
 export const dpapiCipher: FileCipher = {
   prefix: DPAPI_PREFIX,
   enabled: CAN_DPAPI,
-  async encryptTable(dec) {
-    const entries = Object.entries(dec).filter(
+  async encryptTable(dec, reuse) {
+    const raw: Record<string, string> = { ...dec }
+    if (reuse) {
+      // 未变更条目回填原密文：带 prefix 才可信（见 FileCipher.encryptTable 注）
+      for (const [k, v] of Object.entries(dec)) {
+        const prevC = reuse.raw[k]
+        if (typeof v === 'string' && v !== '' && typeof prevC === 'string' && prevC.startsWith(DPAPI_PREFIX) && reuse.plain[k] === v) {
+          raw[k] = prevC
+        }
+      }
+    }
+    const entries = Object.entries(raw).filter(
       ([, v]) => typeof v === 'string' && v !== '' && !v.startsWith(DPAPI_PREFIX)
     )
-    const raw: Record<string, string> = { ...dec }
     if (entries.length === 0) return raw
     const outs = await dpapiBatch(DPAPI_ENC, entries.map(([, v]) => Buffer.from(v, 'utf8').toString('base64')))
     if (outs.length < entries.length) {
@@ -451,9 +464,17 @@ export const dpapiCipher: FileCipher = {
 export const machCipher: FileCipher = {
   prefix: MACH_PREFIX,
   enabled: CAN_MACH,
-  async encryptTable(dec) {
+  async encryptTable(dec, reuse) {
     const raw: Record<string, string> = {}
     for (const [k, v] of Object.entries(dec)) {
+      const prevC = reuse?.raw[k]
+      if (
+        typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX) &&
+        typeof prevC === 'string' && prevC.startsWith(MACH_PREFIX) && reuse?.plain[k] === v
+      ) {
+        raw[k] = prevC // 未变更条目复用原密文（nonce 随机，重加密产出不同密文，纯浪费）
+        continue
+      }
       raw[k] = typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX) ? await encMach(v) : v
     }
     return raw
@@ -472,7 +493,7 @@ const plainCipher: FileCipher = {
   // enabled=false：明文后端「无加密保护」——正是 loadFileSecrets 触发 warnPlainFileOnce 的分支。
   // 设为 true 会让 `!cipher.enabled` 恒假、警告永不触发（安全提示回归，2026-10-12 review 复现）。
   enabled: false,
-  async encryptTable(dec) {
+  async encryptTable(dec, _reuse) {
     return { ...dec }
   },
   async decryptTable(raw) {
@@ -497,8 +518,22 @@ export function pickFileCipher(): FileCipher {
 //   写路径锁内从此通常只剩加密一次）；
 // ② 读路径周期回验兜底 watcher 漏事件：另一进程改 key 最迟一个回验周期生效；窗口内转发热路径
 //   零 I/O（旧实现是纯内存时间戳比较直到显式失效，此处保持每窗口至多一次 stat 的回验节奏）。
+// raw/snapshot 配对（perf-secrets-cache）：raw 是生成 data 时的盘上密文表（raw[k] 解密必得
+// snapshot[k]）、snapshot 是与之配对的明文快照——writeFileSecrets 写回时「明文 == snapshot」的
+// 条目沿用 raw 原密文不再重加密（密文非确定性，重加密纯浪费 + 整文件 churn）；缺失 = 无法按条
+// 复用，整表加密（保守）。mutateFileSecrets 会原地改 data 返回值，写路径判「条目未变更」必须比对
+// snapshot 而非 data 本身。
 const FILE_RECHECK_MS = 5_000
-let fileCache: { path: string; key: string; data: Record<string, string>; checkedAt: number } | null = null
+let fileCache: {
+  path: string
+  key: string
+  data: Record<string, string>
+  checkedAt: number
+  /** 生成 data 时的盘上原始密文表（明文后端 = 原表拷贝）；缺失 = 写路径无法按条复用原密文 */
+  raw?: Record<string, string>
+  /** 与 raw 配对的明文快照（缓存写入时刻的 data 拷贝），见上方配对说明 */
+  snapshot?: Record<string, string>
+} | null = null
 
 /** secrets.json 盘上指纹；stat 失败（文件不存在）返回 null。 */
 async function secretsStatKey(): Promise<string | null> {
@@ -556,7 +591,7 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
   const cipher = pickFileCipher()
   if (!cipher.enabled) {
     warnPlainFileOnce()
-    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now() }
+    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now(), raw: { ...raw }, snapshot: { ...raw } }
     return raw
   }
   // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
@@ -586,6 +621,9 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
       t('请重新设置各密钥（modeldock provider set-key / Web 控制台「服务」页），或备份后删除 secrets.json 重建', 'Re-set your keys (modeldock provider set-key or the Services page in the web console), or back up and delete secrets.json to rebuild')
     )
   }
+  // 迁移写成功则盘上已是 encTable（缓存 raw 跟着换成新密文表，写路径的按条复用凭据才与盘配对）；
+  // 跳过/失败则维持本次读到的 raw（盘上不是它 → 下次指纹失配走完整解密，保守正确）。
+  let cacheRaw: Record<string, string> = raw
   if (hasLegacyPlain) {
     // 明文→加密迁移写必须持锁 + 持锁后重读盘比对：本函数是热读路径（getSecret/verify 都触发），
     // 无锁整表写回会覆盖并发写进程（mutateFileSecrets 持锁「新鲜读→改→整表写回」）刚写入的 key
@@ -599,7 +637,9 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
         if (JSON.stringify(fresh) === JSON.stringify(raw)) {
           // 迁移写也是自家写：宽限窗与写后指纹一并记上，watcher 的 secrets.json 事件不误失效缓存
           selfWriteAt = Date.now()
-          await atomicWrite(secretsPath(), JSON.stringify(await cipher.encryptTable(dec), null, 2) + '\n', 0o600)
+          const encTable = await cipher.encryptTable(dec)
+          await atomicWrite(secretsPath(), JSON.stringify(encTable, null, 2) + '\n', 0o600)
+          cacheRaw = encTable
           key = await secretsStatKey()
           selfWriteKey = key
         }
@@ -610,7 +650,7 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
       console.error(t('[modeldock] secrets.json 明文→加密迁移写跳过/失败（不影响本次读取，下次读取重试）：{msg}', '[modeldock] secrets.json plaintext-to-encrypted migration skipped/failed (this read is unaffected; retried on next read): {msg}', { msg: (e as Error).message }))
     }
   }
-  fileCache = { path, key: key ?? '', data: dec, checkedAt: Date.now() }
+  fileCache = { path, key: key ?? '', data: dec, checkedAt: Date.now(), raw: { ...cacheRaw }, snapshot: { ...dec } }
   return dec
 }
 
@@ -649,22 +689,31 @@ async function loadFileSecrets(useCache = true): Promise<Record<string, string>>
 let selfWriteKey: string | null = null
 let selfWriteAt = 0
 
-/** 解密表整体加密写回文件（file 后端；整表一次进程，而非逐条） */
+/** 解密表整体加密写回文件（file 后端；整表一次进程，而非逐条）。
+ *  未变更条目复用原密文（perf-secrets-cache）：以缓存 raw↔snapshot 配对为凭，明文未变的条目
+ *  沿用旧密文，只对新增/变更条目出加密调用——全部未变时整次写 0 spawn（删 key、重设同值即此形态）；
+ *  常规 set-key 只加密 1 条（一次 spawn），不再整表重加密。写后回填缓存（含新密文表与快照）
+ *  与自家写指纹，下一次锁内新鲜读的指纹比对因此能命中。 */
 async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
   const cipher = pickFileCipher()
-  const raw = await cipher.encryptTable(dec)
+  const path = secretsPath()
+  const prev = fileCache && fileCache.path === path && fileCache.raw && fileCache.snapshot
+    ? { raw: fileCache.raw, plain: fileCache.snapshot }
+    : undefined
+  const raw = await cipher.encryptTable(dec, prev)
   selfWriteAt = Date.now()
-  await atomicWrite(secretsPath(), JSON.stringify(raw, null, 2) + '\n', 0o600)
+  await atomicWrite(path, JSON.stringify(raw, null, 2) + '\n', 0o600)
   // 写后回填缓存与自家写指纹：缓存让本进程后续读零 I/O；指纹供 watcher 的事件回调区分自家写
   const key = await secretsStatKey()
   selfWriteKey = key
-  fileCache = { path: secretsPath(), key: key ?? '', data: dec, checkedAt: Date.now() }
+  fileCache = { path, key: key ?? '', data: dec, checkedAt: Date.now(), raw, snapshot: { ...dec } }
 }
 
 /** 写路径统一入口：跨进程锁（与 config 同语义）+ 锁内新鲜读拼最新的解密表，改后整表写回。
  *  锁内新鲜读按盘上指纹复用缓存解密表（loadFileSecrets(false)：持锁期间无并发写者，指纹相等
  *  即缓存必然反映盘上当前内容；另一进程刚写入时指纹必然不等，自动整表重读）——跨进程丢更新
- *  防线不变，win32 锁内从「解密+加密各一次 PowerShell spawn」收敛为通常只剩加密一次。
+ *  防线不变，win32 锁内从「解密+加密各一次 PowerShell spawn」收敛为通常只剩加密一次，且加密
+ *  只对变更条目出（未变更条目复用原密文，全部未变 0 次）。
  *  锁内的 DPAPI 加密（win32 spawn PowerShell，最坏 2 次 × 10s 超时 ≈ 20s）**有意留在临界区**，
  *  依赖 fsx 的持锁喂狗保活（acquireFileLock 心跳刷新锁 mtime，陈锁判定对活者永不满足）：
  *  解密已可凭指纹跳过；加密移不出锁——改后整表只有锁内才知道，而整表原子写必须发生在锁内。

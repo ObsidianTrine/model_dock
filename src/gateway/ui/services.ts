@@ -71,7 +71,8 @@ export const UI_JS_SERVICES = `  function visibleServices() {
       return '<div class="service' + (s.inUse ? ' cur' : '') + '">' +
         '<div class="info"><span class="name" title="' + esc(s.base_url) + '">' + esc(s.label) + '</span><br>' +
         '<span class="meta">' + t('默认 ', 'Default ') + esc(s.defaultModel || t('未设置', 'not set')) +
-        (s.lastMs != null ? t(' · 延迟 ', ' · latency ') + s.lastMs + 'ms' : '') + ' · ' + s.modelsCount + t(' 个模型', ' models') +
+        // 延迟文本由 pollLive 定向填充（lastMs 每请求易变，不进 overview 主载荷），render 后补一次当前值
+        '<span data-svcms="' + esc(s.id) + '"></span> · ' + s.modelsCount + t(' 个模型', ' models') +
         (s.hasKey ? '' : ' · <b class="hint-warn">' + t('Key 未设置', 'key not set') + '</b>') + (s.usedBy && s.usedBy.length ? t(' · 被 <b>', ' · used by <b>') + s.usedBy.length + t('</b> 个客户端使用', '</b> clients') : '') +
         (s.down && arOn ? ' <span class="pill err" title="' + t('故障熔断中，自动路由会避开该服务，探活恢复后自动回归', 'Down (circuit open); auto route avoids it and brings it back once probes recover') + '">' + t('熔断中', 'down') + '</span>' : '') +
         (s.enabled === false ? ' <span class="pill dim" title="' + t('手动下线，不参与自动路由', 'Manually disabled; excluded from auto route') + '">' + t('已下线', 'offline') + '</span>' : '') +
@@ -82,6 +83,8 @@ export const UI_JS_SERVICES = `  function visibleServices() {
         '<button class="btn small ghost-danger" data-del="' + esc(s.id) + '">' + t('删除', 'Delete') + '</button>' +
         '<span class="rt">' + useBtn + '</span></div>'
     }).join('') + moreHtml
+
+    if (liveUsage) updateSvcLatency() // 重绘重建了延迟 span，用当前实时值立即回填（不等下一轮 pollLive）
 
     var moreBtn = document.getElementById('svcMore')
     if (moreBtn) moreBtn.onclick = function () { svcExpanded = !svcExpanded; renderServices() }

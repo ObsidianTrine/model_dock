@@ -125,7 +125,8 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
 /** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
  *  fn 零改动（mutateConfig 内部同值跳写，盘上指纹不变）时跳过热加载——空转保存（控制台
  *  同值重写等）不再白付整包 reload：dispatcher 连接池销毁重建、key 池轮转态清零、reloads
- *  虚增与 overview 缓存连带失效全免。 */
+ *  虚增与 overview 缓存连带失效全免。secrets 缓存与 reload 完全解耦（失效收口在 watcher 的
+ *  invalidateSecretsCacheIfExternal），config.toml 写不清密钥缓存。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
   const before = await configStatKey()
   await mutateConfig(fn)

@@ -233,13 +233,24 @@ async function buildUpstreamHeaders(
   return h
 }
 
-/** 从 JSON 请求体顶层对象浅扫描 "model" 字段值（不解码整个文档、零大对象分配）。
- *  仅用于纯透传场景读取日志用的 modelAfter，不参与改写决策。返回值：
- *  - string / undefined：顶层 model 的字符串值（与 JSON.parse 语义一致，重复键取最后一个）
+/** 顶层浅扫描的单次结果。value：顶层 model 字段值（JSON 解码语义，重复键取最后一个；
+ *  无 model 键或末次出现为非字符串值时 undefined）。qStart/qEnd：value 为字符串时该值的
+ *  字节区间（含两侧引号，qEnd 独占），供改写热路径做字节级原位替换；否则恒为 -1。 */
+interface TopModelScan {
+  value: string | undefined
+  qStart: number
+  qEnd: number
+}
+
+/** 从 JSON 请求体顶层对象浅扫描 "model" 字段（不解码整个文档、零大对象分配）。
+ *  懒解析快路径的改写判定与日志 modelAfter 的数据源。返回值：
  *  - null：无法安全判定（非顶层对象 / 扫描器遇到不支持的结构），调用方退回完整 JSON.parse
+ *  - TopModelScan：value 与模型值的字节区间（含引号），见接口注释
  *  安全性：UTF-8 多字节序列不会与 ASCII 结构字节混淆（自身同步编码），按键名逐一比较，
- *  任何含转义的键直接放弃（退回完整解析），值经 JSON.parse 单独解码保证与全量解析等价。 */
-export function topLevelModel(body: Buffer): string | undefined | null {
+ *  任何含转义的键直接放弃（退回完整解析），值经 JSON.parse 单独解码保证与全量解析等价。
+ *  区间追踪：qStart/qEnd 随最后一次命中的 model 字符串值更新——重复键取最后一个的语义
+ *  在区间上同样成立；末次出现为非字符串值时区间作废（-1），改写回落全量路径。 */
+function scanTopLevelModel(body: Buffer): TopModelScan | null {
   const n = body.length
   let i = 0
   const isWs = (c: number) => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d
@@ -248,10 +259,12 @@ export function topLevelModel(body: Buffer): string | undefined | null {
   i++
   let last: string | undefined
   let sawModel = false
+  let qStart = -1 // 最后命中的 model 字符串值字节区间（含引号）；无字符串值时保持 -1
+  let qEnd = -1
   for (;;) {
     while (i < n && isWs(body[i])) i++
     if (i >= n) return null
-    if (body[i] === 0x7d /* } */) return sawModel ? last : undefined
+    if (body[i] === 0x7d /* } */) return sawModel ? { value: last, qStart, qEnd } : { value: undefined, qStart: -1, qEnd: -1 }
     if (body[i] !== 0x22 /* " */) return null
     // 读键名：含转义一律放弃（解码键名对比不值得为它保留扫描器复杂度）
     const keyStart = ++i
@@ -277,6 +290,8 @@ export function topLevelModel(body: Buffer): string | undefined | null {
       if (i >= n) return null
       if (isModelKey) {
         sawModel = true
+        qStart = vStart - 1 // 值字节区间含两侧引号，原位替换时整段换掉
+        qEnd = i + 1
         try {
           last = JSON.parse(body.toString('utf8', vStart - 1, i + 1)) as string // 含引号整体解码
         } catch {
@@ -290,6 +305,8 @@ export function topLevelModel(body: Buffer): string | undefined | null {
       if (isModelKey) {
         sawModel = true
         last = undefined
+        qStart = -1 // 末次 model 值不是字符串：无可原位替换的引号区间，改写走全量路径
+        qEnd = -1
       }
       if (c === 0x7b || c === 0x5b /* { [ */) {
         let depth = 0
@@ -316,13 +333,19 @@ export function topLevelModel(body: Buffer): string | undefined | null {
     }
     while (i < n && isWs(body[i])) i++
     if (body[i] === 0x2c /* , */) { i++; continue }
-    if (body[i] === 0x7d /* } */) return sawModel ? last : undefined
+    if (body[i] === 0x7d /* } */) return sawModel ? { value: last, qStart, qEnd } : { value: undefined, qStart: -1, qEnd: -1 }
     return null
   }
 }
 
-/** 纯模型名改写判定：仅输入字符串，输出最终改写目标。供「浅扫描快路径」（pre 非 null）与
- *  「全量解析路径」（pre === null）共用，避免两套判定逻辑漂移。语义与既有实现逐字段等价。 */
+/** 只取值的浅扫描包装（原导出，语义不变）：不需要字节区间的调用方用这个。 */
+export function topLevelModel(body: Buffer): string | undefined | null {
+  const scan = scanTopLevelModel(body)
+  return scan === null ? null : scan.value
+}
+
+/** 纯模型名改写判定：仅输入字符串，输出最终改写目标。供「浅扫描快路径」（scan 非 null）与
+ *  「全量解析路径」（scan === null）共用，避免两套判定逻辑漂移。语义与既有实现逐字段等价。 */
 function resolveModelFinal(target: ResolvedTarget, wire: string | undefined): string | undefined {
   let requested = wire
   // discovery 别名剥壳：anthropic.<id> 仅当真实 ID 在服务目录里时还原——上游真有 anthropic. 开头
@@ -357,29 +380,60 @@ function injectModel(body: Buffer, final: string): { body: Buffer; modelAfter: s
   return { body: Buffer.from(JSON.stringify(json), 'utf8'), modelAfter: final }
 }
 
+/** JSON 字符串安全字符白名单（模型 ID 常见字符集）：全部 ASCII 且不含 JSON 特殊字符
+ *  （引号 / 反斜杠 / 控制字符），字节拼接注入无需任何转义，与 stringify 的结果语义一致。
+ *  刻意收窄为白名单而非「排除法」：`/` 与 `:` 覆盖 glm-4.6:deepseek 式复合命名与路径风格
+ *  ID；白名单外的名字（unicode / 引号 / 空格等）一律回落全量 parse/stringify——结果正确
+ *  只是慢，宁慢勿错。 */
+const SAFE_MODEL_NAME_RE = /^[A-Za-z0-9._:@\/+-]+$/
+
+/** 字节级原位替换顶层 model 值：[qStart, qEnd) 是浅扫描产出的旧值字节区间（含两侧引号），
+ *  三段拼接「前缀原样 + 带引号新值 + 后缀原样」。除 model 值外其余字节原样保留（空白 /
+ *  键序 / 重复键 / 转义序列都不动），不做全量 parse/stringify——大上下文体（数百 KB ~ MB 级）
+ *  下那是 5~15ms 的纯 CPU 同步开销，Node 单线程下会串行化同实例所有并发 SSE 流。
+ *  三段拼接天然处理新旧值不等长（新体长度即三段之和）；下游 content-length 无需关心：客户端
+ *  头在 buildUpstreamHeaders 已剥离，undici 按新 Buffer 长度自动补。
+ *  调用方保证：qStart ≥ 0（旧值是字符串）且 final 通过 SAFE_MODEL_NAME_RE（无需转义）。 */
+function spliceModelValue(body: Buffer, qStart: number, qEnd: number, final: string): Buffer {
+  return Buffer.concat([
+    body.subarray(0, qStart),
+    Buffer.from('"' + final + '"', 'utf8'),
+    body.subarray(qEnd),
+  ])
+}
+
 /** 请求体中的模型重写：aliases 精确/通配 → default_model 兜底；未命中透传。
- *  懒解析快路径：改写判定的全部输入就是模型名字符串，无需完整文档。pre 非 null 时先用顶层浅扫描
- *  拿到模型字符串独立完成判定（default_model / aliases / tierFallback / anthropic. 剥壳全在此步），
- *  仅当确需改写（final !== wire）才 parse+重序列化——大上下文请求体（数百 KB ~ MB 级）下，JSON.parse
- *  阻塞事件循环并串行化同实例并发流，这是热路径最大的一块纯 CPU 开销。final === wire 时不 parse、
- *  不重序列化，直接返回入参的同一个 Buffer 引用（body === body）。扫描器拿不准（pre === null：
- *  含转义键 / 非顶层对象 / 非 JSON）时退回完整解析路径，行为与原实现逐字节等价。 */
+ *  三层路径（改写判定的全部输入就是模型名字符串，无需完整文档）：
+ *  ① 不需改写（final === wire）：返回入参同一个 Buffer 引用（body === body），零解析零分配。
+ *  ② 确需改写且浅扫描已锁定顶层 model 字符串值的字节区间（qStart ≥ 0）、新名仅含 JSON 安全
+ *     字符（SAFE_MODEL_NAME_RE，无需转义）：字节级三段拼接原位替换（spliceModelValue），
+ *     其余字节原样保留——大上下文体下免掉全量 JSON.parse + stringify 的纯 CPU 同步开销
+ *     （数百 KB ~ MB 级 5~15ms），不再阻塞事件循环串行化同实例并发 SSE 流。
+ *  ③ 其余回落全量解析路径（injectModel），行为与原实现逐字节等价：扫描器拿不准（含转义键 /
+ *     非顶层对象 / 非 JSON）、顶层 model 值非字符串（需整字段替换或新增注入）、新名需转义。 */
 export function rewriteModel(
   target: ResolvedTarget,
   body: Buffer,
   path: string
 ): { body: Buffer; modelAfter?: string } {
   if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
-  const pre = topLevelModel(body)
-  if (pre !== null) {
-    // 快路径：全部改写判定只用 pre 字符串完成，不再全量 parse
-    const final = resolveModelFinal(target, pre)
-    let modelAfter = pre
-    if (final !== undefined && final !== pre) return injectModel(body, final) ?? { body }
+  const scan = scanTopLevelModel(body)
+  if (scan !== null) {
+    // 快路径：全部改写判定只用顶层 model 值字符串完成，不再全量 parse
+    const final = resolveModelFinal(target, scan.value)
+    let modelAfter = scan.value
+    if (final !== undefined && final !== scan.value) {
+      // 字节级原位替换：旧值是字符串（有引号区间）且新名无需转义 → 三段拼接；
+      // 其余（值非字符串 / 新名需转义）走全量 parse+stringify 兜底，行为逐字节等价
+      if (scan.qStart >= 0 && SAFE_MODEL_NAME_RE.test(final)) {
+        return { body: spliceModelValue(body, scan.qStart, scan.qEnd, final), modelAfter: final }
+      }
+      return injectModel(body, final) ?? { body }
+    }
     if (final !== undefined) modelAfter = final
     return { body, modelAfter }
   }
-  // pre === null：退回全量解析路径（行为与原实现逐字节等价）
+  // scan === null：退回全量解析路径（行为与原实现逐字节等价）
   let json: any
   try {
     json = JSON.parse(body.toString('utf8'))
