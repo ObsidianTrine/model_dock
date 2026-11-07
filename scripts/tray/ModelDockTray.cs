@@ -87,13 +87,28 @@ namespace ModelDockTray
             if (bin == null) return;
             try
             {
-                Process.Start(new ProcessStartInfo
+                // 显式重定向并丢弃子进程 stdio（2026-11-07 生产事故）：托盘是 GUI 进程（无控制台），
+                // 不重定向时控制台子进程继承托盘自身的无效 stdio 句柄，daemon 侧 fd 2 接管与 stdio
+                // 错误兜底都可能失效——曾表现为一键接入 Claude Code 时网关零痕迹静默退出。重定向到
+                // 管道并异步排空（不读会塞满缓冲阻塞 daemon），行为与 CLI --daemon 拉起（stdio ignore）
+                // 对齐；daemon 自身仍经 redirectDaemonStderrToLog 把 stderr 落 logs/daemon-<date>.log。
+                var psi = new ProcessStartInfo
                 {
                     FileName = bin,
                     Arguments = "--sea-gateway",
                     UseShellExecute = false,
                     CreateNoWindow = true, // 守护进程不弹黑窗
-                });
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                var p = Process.Start(psi);
+                if (p != null)
+                {
+                    p.OutputDataReceived += delegate { };
+                    p.ErrorDataReceived += delegate { };
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+                }
             }
             catch { }
         }

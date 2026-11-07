@@ -50,6 +50,11 @@ const verMemo = new Map<string, { at: number; ver: string | undefined }>()
  *  .cmd 包装，execFile 不认，需 shell: true（参数是固定字面量，无注入面）。探测失败 / 输出
  *  不可解析返回 undefined，调用方按「功能门控不满足」处理（宁可降级到兼容路径，不假装新版）。
  *
+ *  2026-11-07 生产事故：Windows 下不得用 args 数组 + shell 组合（DEP0190）——该组合触发 Node
+ *  向 stderr 写弃用警告，托盘拉起的 daemon 在 stdio 句柄损坏形态下这条写入即进程死亡点（接入
+ *  计划全链路唯一 spawn，死亡零痕迹，见 crash.ts 与 shared.defuseStdioErrors）。改为无 args 的
+ *  单串命令行：DEP0190 只拦 args+shell 组合，解析语义不变（仍经 shell 查 PATH/PATHEXT）。
+ *
  * 测试钩子：`MODELRDOCK_FAKE_<ID 大写下划线>_VERSION` 显式指定版本（置空串模拟探测失败）；
  * 未显式指定但 fakePresence 置了在场时，默认视为现代版本（假在场 = 假一台装好新版的机器，
  * 存量测试不必逐个补版本桩）。 */
@@ -61,7 +66,8 @@ export async function cliVersion(cmd: string, id: string, timeoutMs = 5000): Pro
   const memo = verMemo.get(cmd)
   if (useMemo && memo && Date.now() - memo.at < VER_TTL) return memo.ver
   const out = await new Promise<string>((resolve) => {
-    execFile(cmd, ['--version'], { windowsHide: true, timeout: timeoutMs, shell: process.platform === 'win32' }, (err, stdout) =>
+    const winShell = process.platform === 'win32'
+    execFile(winShell ? `${cmd} --version` : cmd, winShell ? [] : ['--version'], { windowsHide: true, timeout: timeoutMs, shell: winShell }, (err, stdout) =>
       resolve(err ? '' : String(stdout))
     )
   })

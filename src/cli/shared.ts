@@ -105,14 +105,35 @@ function rebindStderrToLogFd(fd: number): void {
   }
 }
 
+const STDIO_DEFUSED = Symbol('modeldock-stdio-error-defused')
+
+/** stdio 写错误降级为非致命（2026-11-07 生产事故防线）：托盘/GUI 父进程拉起的 daemon 会继承
+ *  无效的 stdio 句柄，任何 stdio 写错误（EBADF 等）默认以「流上无人监听的 error 事件」形式
+ *  炸掉整个进程——接入计划里 DEP0190 弃用警告的那次 stderr 写入即实证（进程零痕迹死亡）。
+ *  常驻守护丢几行日志远好过整进程陪葬。幂等：同一流只挂一次（Symbol 标记防重复堆监听）。 */
+export function defuseStdioErrors(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    try {
+      const s = stream as unknown as Record<symbol, unknown> & { on?: (ev: string, cb: (...a: unknown[]) => void) => unknown }
+      if (!s || s[STDIO_DEFUSED] === true) continue
+      s[STDIO_DEFUSED] = true
+      s.on?.('error', () => {})
+    } catch {
+      /* 鸭子流（无 on 方法）或懒初始化失败：无可挂，忽略 */
+    }
+  }
+}
+
 /** daemon 形态启动早期接管 fd 2 → logs/daemon-<date>.log：daemon 的崩溃/启动报错自写日志
  *  （进程级 stderr 全量落盘，含 Node 原生崩溃输出），父 CLI 才能用 stdio 全 ignore 拉起而不把
  *  自己钉住（CORRECT-07：pipe 读端 flowing 态被事件循环引用，daemon 常驻 fd 2 永不关闭）。
  *  fd 级重定向无半行缓冲/丢行问题（原父侧逐行转写随 stdio ignore 整段移除，日志保真由 fd 直写
  *  继承；Windows 换行以 \r\n 原样落盘）。必须在 daemon 进程消费 process.stderr 之前调用——
  *  stdio ignore 下 stderr 句柄懒初始化，先腾 fd 再写即全部落进日志。保留期随 pruneExpiredLogs。
- *  返回日志路径；接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。 */
+ *  返回日志路径；接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。
+ *  进入即先 defuseStdioErrors()：接管成功与否未知，stdio 写错误都必须先变成非致命。 */
 export function redirectDaemonStderrToLog(): string | null {
+  defuseStdioErrors()
   const logPath = path.join(logsDir(), `daemon-${localDateStr()}.log`)
   fs.mkdirSync(logsDir(), { recursive: true })
   try {
@@ -126,6 +147,7 @@ export function redirectDaemonStderrToLog(): string | null {
     // Windows（probe 实测 fd 恒落 3）：fd 2 接管不可行 → 换流不换 fd，JS 可见 stderr 输出落日志
     try {
       rebindStderrToLogFd(fd)
+      defuseStdioErrors() // process.stderr 已被换成新流：新流也要挂上 error 兜底
       return logPath
     } catch {
       try {
