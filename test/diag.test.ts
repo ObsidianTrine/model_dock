@@ -40,12 +40,15 @@ function capture(): void {
   })
 }
 
+// doctor 以 process.exitCode 表达「存在 bad 项」；singleFork 共进程下必须逐用例还原——
+// 恢复到本文件加载时的原值（undefined）而非写死 0：写死 0 会污染后续文件里
+// expect(process.exitCode).toBeUndefined() 的断言（update-cli 全量跑红实证）
+const savedExitCode = process.exitCode
 afterEach(() => {
   vi.mocked(console.log).mockRestore?.()
   vi.mocked(console.error).mockRestore?.()
   vi.mocked(process.exit).mockRestore?.()
-  // doctor 现在以 process.exitCode 表达「存在 bad 项」（singleFork 共进程，必须每用例还原）
-  process.exitCode = 0
+  process.exitCode = savedExitCode
 })
 
 describe('cmdStatus', () => {
