@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { biJoin, commandOnPath, commandOnPathSandbox, homeDir, t } from '../util/index.js'
+import { debugLog, debugOn } from '../gateway/state/debuglog.js'
 import type { BiValue } from '../util/i18n.js'
 
 export type AppPresent = boolean | 'unknown'
@@ -36,7 +37,20 @@ export function cliPresent(cmd: string, id: string, opts: { sandboxIsolated?: bo
 
 function execText(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { windowsHide: true, timeout: timeoutMs }, (err, stdout) => resolve(err ? '' : String(stdout)))
+    const t0 = Date.now()
+    execFile(cmd, args, { windowsHide: true, timeout: timeoutMs }, (err, stdout) => {
+      // debug 探针（2026-11-07 事故补课）：探测失败此前完全静默，排障无线索。args 无敏感值
+      //（--version / reg query 搜索词），err 只留尾部防刷屏
+      if (debugOn()) {
+        debugLog('spawn', 'exec', {
+          cmd: args.length ? `${cmd} ${args.join(' ')}` : cmd,
+          ms: Date.now() - t0,
+          ok: !err,
+          ...(err ? { err: String((err as Error).message ?? err).slice(0, 200) } : {}),
+        })
+      }
+      resolve(err ? '' : String(stdout))
+    })
   })
 }
 
@@ -67,9 +81,20 @@ export async function cliVersion(cmd: string, id: string, timeoutMs = 5000): Pro
   if (useMemo && memo && Date.now() - memo.at < VER_TTL) return memo.ver
   const out = await new Promise<string>((resolve) => {
     const winShell = process.platform === 'win32'
-    execFile(winShell ? `${cmd} --version` : cmd, winShell ? [] : ['--version'], { windowsHide: true, timeout: timeoutMs, shell: winShell }, (err, stdout) =>
+    const t0 = Date.now()
+    execFile(winShell ? `${cmd} --version` : cmd, winShell ? [] : ['--version'], { windowsHide: true, timeout: timeoutMs, shell: winShell }, (err, stdout) => {
+      // debug 探针：版本门控降级（如 claude < 2.1.243 回退档位槽）排障常需要知道「探测到了什么」
+      if (debugOn()) {
+        debugLog('spawn', 'cli_version', {
+          cmd: winShell ? `${cmd} --version` : cmd,
+          ms: Date.now() - t0,
+          ok: !err,
+          ver: /(\d+\.\d+\.\d+)/.exec(String(stdout))?.[1] ?? null,
+          ...(err ? { err: String((err as Error).message ?? err).slice(0, 200) } : {}),
+        })
+      }
       resolve(err ? '' : String(stdout))
-    )
+    })
   })
   const ver = /(\d+\.\d+\.\d+)/.exec(out)?.[1]
   if (useMemo) verMemo.set(cmd, { at: Date.now(), ver })

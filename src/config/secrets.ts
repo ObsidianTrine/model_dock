@@ -6,6 +6,7 @@ import { stat as fsStat } from 'node:fs/promises'
 import { secretsPath } from '../util/paths.js'
 import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
+import { debugLog, debugOn } from '../gateway/state/debuglog.js'
 
 const exec = promisify(execFile)
 
@@ -381,6 +382,11 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
       } catch (e) {
         lastErr = e
       }
+    }
+    // debug 探针：DPAPI 是 Windows daemon 读写密钥的必经 spawn，失败此前只在上抛链可见，
+    // 上层吞掉时（如导入路径）完全无痕。明文绝不入日志（密钥走 stdin，err 是 PowerShell 报错）
+    if (debugOn()) {
+      debugLog('spawn', 'dpapi', { ok: false, attempts: 2, err: String((lastErr as Error)?.message ?? lastErr).slice(0, 200) })
     }
     throw lastErr
   })()

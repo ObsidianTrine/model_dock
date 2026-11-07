@@ -19,6 +19,7 @@
 | 测试 | `npx vitest run <相关测试文件>`；**日常改动只跑与改动相关的用例，全绿即交付**（分层规则见「测试指南」） |
 | 全量回归 | `npm test`（产品套件 test/*.test.ts）/ `npm run test:workflow`（编排器套件 test/orchestrator/**）——仅版本发布、develop→main 合并等大节点跑 |
 | 覆盖率 | `npm run test:coverage` |
+| 排障 debug 日志 | `gateway start --debug` / env `MODELRDOCK_DEBUG=1` / config `[gateway] debug = true`（热加载即效，后台 daemon 也可开）；落 `logs/debug-<date>.jsonl`（管理面访问 + 子进程明细），`doctor` 可查开关状态 |
 | 开发热跑 | `npm run dev -- <cmd>`（tsx 直跑源码，**无热重载**，改码后重启实例再验证） |
 | 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口）。完全沙箱化：配置/密钥/日志全在 `~/.modeldock-dev`（密钥本地 file，不写系统钥匙环；npm 全局安装重定向进沙箱；脚本类安装拒绝并提示手动），与生产互不影响。**用户本人日常验证专用——agent 一律不得占用其沙箱与 8890 端口**，测试走硬规则 2 的隔离配方 |
 | SEA 可执行包 | `npm run build:sea`（产出 `release/` 下各平台**对外发布物**：压缩包（包内单一入口程序，unix 名 `modeldock`）+ `SHA256SUMS`；darwin 另产 `ModelDock.app` + `.dmg`；win 另产 Inno Setup `*-setup.exe`；裸二进制只作构建中间产物，不外发） |

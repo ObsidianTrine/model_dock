@@ -7,6 +7,10 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- **Debug logging mode**: off by default, enabled for troubleshooting via the `gateway start --debug` flag, the `MODELRDOCK_DEBUG=1` env var, or `config.toml [gateway] debug = true` (hot-applied on config save, so tray/autostart-launched background gateways can turn it on too). When on, `logs/debug-<date>.jsonl` records per-request access details for the admin API (method/path/status/duration) and child-process invocations (version probes, key encryption, etc.) with outcome and timing; admin 4xx/5xx responses are always logged to the event log regardless of the switch. `modeldock doctor` shows the current switch state and the latest log file. Debug logs never contain key material.
+
 ### Fixed
 
 - **Fixed the Windows background gateway silently exiting on "Attach Claude Code"**: the version probe's child-process invocation made Node write a deprecation warning to stderr; when the tray-launched gateway had broken stdio handles, that write killed the process without any trace (crash log included — the console just showed "cannot reach the local gateway" and the gateway was gone). Now hardened on four layers: the probe uses an equivalent invocation that no longer emits that warning; the crash log is written before any console output (a broken stderr no longer swallows the crash file); the daemon downgrades stdio write errors to non-fatal at boot; and the tray explicitly redirects the gateway child's stdio. Foreground `modeldock gateway start` was never affected.

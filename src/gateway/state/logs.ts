@@ -27,8 +27,9 @@ function ensureLogDir(dir: string): void {
 }
 
 /** 高频 JSONL 落盘走 fsx 的常驻追加流池（appendFile 每条 open+write+close 走线程池，热路径
- *  上与转发争 IO）；目录仍在此按路径记忆只建一次，fake home 等目录切换时路径不同会自动重建。 */
-function appendLog(file: string, line: string): void {
+ *  上与转发争 IO）；目录仍在此按路径记忆只建一次，fake home 等目录切换时路径不同会自动重建。
+ *  导出给 debuglog 复用（同一目录、同一流池、同一 health 计数）。 */
+export function appendLog(file: string, line: string): void {
   const dir = logsDir()
   ensureLogDir(dir)
   appendLine(path.join(dir, file), line)
@@ -423,11 +424,12 @@ export function eventLoopLagMs(): number | null {
   return loopLagMs
 }
 
-/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-（.jsonl）与 daemon-（.log）按天日文件无界
- *  累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-（.jsonl）与 daemon-（.log）按天日文件
+ *  无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻
  *  流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），
- *  删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。 */
-const LOG_DAY_FILE_RE = /^(gateway|audit|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
+ *  删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
+ *  （events.jsonl 单文件与 crash-*.log 不匹配本正则、不参与清理——前者量小、后者事故痕迹保贵。） */
+const LOG_DAY_FILE_RE = /^(gateway|audit|debug|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
 
 export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
   const days = Math.floor(Number(retentionDays))

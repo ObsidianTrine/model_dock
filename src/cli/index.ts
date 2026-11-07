@@ -142,6 +142,7 @@ export function buildProgram(): Command {
     .description(t('启动网关（前台；--daemon 后台）', 'Start the gateway (foreground; --daemon for background)'))
     .option('--port <n>', t('覆盖端口', 'Override port'))
     .option('--daemon', t('后台运行', 'Run in background'))
+    .option('--debug', t('开启 debug 日志（logs/debug-<date>.jsonl；也可 config.toml [gateway] debug 或 MODELRDOCK_DEBUG=1）', 'Enable debug logging (logs/debug-<date>.jsonl; also via config.toml [gateway] debug or MODELRDOCK_DEBUG=1)'))
     .action(async (o) => (await import('./gatewaycmd.js')).cmdGatewayStart(o))
   gw.command('stop').description(t('停止网关', 'Stop the gateway')).action(async () => (await import('./gatewaycmd.js')).cmdGatewayStop())
   gw.command('rotate-token').description(t('轮换管理令牌（旧令牌/cookie 立即失效）', 'Rotate the admin token (old tokens/cookies expire immediately)')).action(async () => (await import('./gatewaycmd.js')).cmdGatewayRotateToken())
