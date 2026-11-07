@@ -30,6 +30,7 @@ import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
+import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
@@ -2366,6 +2367,24 @@ async function handleAdmin(
   started: number
 ): Promise<void> {
   const url = (req.url ?? '').split('?')[0]
+  const method = req.method ?? '-'
+  // 管理面访问日志（debug 级，2026-11-07 事故补课：此前管理面零访问日志，attach/plan 请求
+  // 到没到、成没成全无线索）。res finish 时记 {method, path, status, ms}；非 2xx 另无条件记
+  // events.jsonl warn（排障不依赖 debug 开关）。
+  if (debugOn()) {
+    res.on('finish', () => {
+      debugLog('admin', 'http', { method, path: url, status: res.statusCode, ms: Date.now() - started })
+    })
+  }
+  res.on('finish', () => {
+    if (res.statusCode >= 400) {
+      try {
+        logEvent(rt, { level: 'warn', op: 'admin_http_error', err: `${method} ${url} → ${res.statusCode}（${Date.now() - started}ms）` })
+      } catch {
+        /* 观测失败不影响响应 */
+      }
+    }
+  })
 
   if (!hostAllowed(req)) {
     return sendError(res, 403, t('管理接口仅限本机访问（Host 必须是 127.0.0.1/localhost）', 'Admin API is local-only (Host must be 127.0.0.1/localhost)'))

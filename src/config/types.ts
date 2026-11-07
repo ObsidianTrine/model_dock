@@ -94,6 +94,8 @@ export interface GatewayConfig {
   max_body_mb?: number
   /** JSONL 日志（gateway-*.jsonl / audit-*.jsonl）按天文件保留天数：早于该天数的日文件在网关启动与每日定时自动删除（默认 30）；0 = 禁用清理、全部保留 */
   log_retention_days?: number
+  /** debug 日志开关：开启后向 logs/debug-<date>.jsonl 记录管理面访问、子进程调用等诊断明细（默认关）。与 `MODELRDOCK_DEBUG=1` 环境变量、`gateway start --debug` 旗标任一为真即生效；本键随热加载即时生效，适合排障时临时开启、定位后关闭 */
+  debug?: boolean
   /** 开启「程序自动选主」（定时窗口按时间接管主服务；默认关=主服务完全由人工/默认路由决定）。故障切换（主服务不可达时切备用）不受此开关影响，始终可用 */
   auto_failover?: boolean
   /** 「当前」槽人工钉定的主服务 id：设置后实际路由优先走它（人为修改优先于程序自动，含定时窗口；它不可达时自动落回窗口/默认路由再故障切换）；留空=自动态，程序按窗口/默认路由选主 */

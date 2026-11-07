@@ -18,6 +18,7 @@ import { startBootUpdateCheck } from '../update/webupdate.js'
 import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
 import { switchToService } from '../ops.js'
 import { appendCrashLog, installCrashHandlers } from '../util/crash.js'
+import { debugOn } from './state/debuglog.js'
 import { startEventLoopDelaySampler } from './state.js'
 import { VERSION } from '../version.js'
 
@@ -69,10 +70,15 @@ function logEndpointRisks(cfg: Config): void {
   }
 }
 
-/** 前台启动网关（CLI `gateway start` 与守护进程入口共用） */
-export async function startForeground(portOverride?: number): Promise<void> {
+/** 前台启动网关（CLI `gateway start` 与守护进程入口共用）。debugFlag = `--debug` 旗标
+ *  （会话态；持久开关走 config [gateway] debug / MODELRDOCK_DEBUG，随热加载生效）。 */
+export async function startForeground(portOverride?: number, debugFlag?: boolean): Promise<void> {
   const cfg = await loadConfig()
   const requestedPort = portOverride ?? (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
+  // debug 开关初始化：旗标 + env + config 三源合并（后续热加载经 reloadRuntime → refreshDebugOn 重算）
+  const { setDebugFlag, refreshDebugOn } = await import('./state/debuglog.js')
+  setDebugFlag(debugFlag === true)
+  refreshDebugOn(cfg.gateway)
 
   // 单实例保护
   const existing = await readGatewayState()
@@ -249,6 +255,9 @@ export async function startForeground(portOverride?: number): Promise<void> {
   console.log(t('[modeldock] active_profile={profile} providers={providers} harness={harnesses}', '[modeldock] active_profile={profile} providers={providers} harness={harnesses}', { profile: rt.config.active_profile ?? t('（未设置）', '(not set)'), providers, harnesses }))
   console.log(consoleBanner(listenPort, adminToken, !!process.stdout.isTTY))
   console.log(t('[modeldock] Ctrl+C 停止；改配置自动热加载', '[modeldock] Ctrl+C to stop; config changes hot-reload automatically'))
+  if (debugOn()) {
+    console.log(t('[modeldock] debug 日志已开启：logs/debug-<date>.jsonl（config [gateway] debug 或 MODELRDOCK_DEBUG=1 亦可开关）', '[modeldock] debug logging on: logs/debug-<date>.jsonl (also toggleable via config [gateway] debug or MODELRDOCK_DEBUG=1)'))
+  }
 
   let stopping = false
   const cleanup = async (): Promise<void> => {

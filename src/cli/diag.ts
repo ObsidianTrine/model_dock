@@ -6,6 +6,7 @@ import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
 import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
+import { debugEnabled } from '../gateway/state/debuglog.js'
 import { allAdapters } from '../adapters/registry.js'
 import { collectClientSecurityFindings } from '../mcp/security.js'
 import { autostartKind, installAutostart, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
@@ -464,6 +465,41 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}, opts: { deep?
     const s = await fs.promises.statfs(dir).catch(() => null)
     const free = s ? Number(s.bsize) * Number(s.bavail) : null
     F.push(withPruneFix(diskUsageFinding(total, free, cfg.gateway?.log_retention_days), cfg.gateway?.log_retention_days, deps))
+  }
+
+  // debug 日志开关自描述（logs.debug）：排障入口——开没开、文件在哪。纯 config/env 推导
+  //（--debug 旗标只存在于网关进程，doctor 进程看不到，hint 里写明三通道）
+  {
+    const on = debugEnabled({ config: cfg.gateway })
+    let latest: { name: string; size: number } | null = null
+    try {
+      const dir = logsDir()
+      for (const f of fs.readdirSync(dir)) {
+        if (!/^debug-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)) continue
+        const st = fs.statSync(path.join(dir, f))
+        if (!latest || f > latest.name) latest = { name: f, size: st.size } // 文件名即日期，字典序=时间序
+      }
+    } catch { /* 目录缺失按无文件 */ }
+    if (on) {
+      ok(
+        'logs.debug',
+        t(
+          'debug 日志已开启（logs/debug-<date>.jsonl{latest}）',
+          'debug logging is on (logs/debug-<date>.jsonl{latest})',
+          { latest: latest ? t('，最近 {f}（{n} KB）', ', latest {f} ({n} KB)', { f: latest.name, n: Math.max(1, Math.round(latest.size / 1024)) }) : '' }
+        )
+      )
+    } else {
+      F.push({
+        id: 'logs.debug',
+        level: 'info',
+        msg: t('debug 日志未开启（默认关）', 'debug logging is off (default)'),
+        hint: t(
+          '排障时开启（任一）：config.toml [gateway] debug = true（热加载即时生效）／MODELRDOCK_DEBUG=1／gateway start --debug；日志落 logs/debug-<date>.jsonl，含管理面访问与子进程调用明细',
+          'To debug (any of): config.toml [gateway] debug = true (hot-applied) / MODELRDOCK_DEBUG=1 / gateway start --debug; logs go to logs/debug-<date>.jsonl with admin access and child-process details'
+        ),
+      })
+    }
   }
 
   // ── 分组并行段（perf-p2-polish）：密钥库验证、跨机密文、网关存活/端口/watch/自启/悬空、

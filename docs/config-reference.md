@@ -190,6 +190,7 @@ key_path = "$.modeldock"
 | `headers_timeout_ms` | `number` | 否 | `60000` | 等待上游响应头的时限（毫秒）：非流式长推理可能超过 60 秒才回头，报超时时调大。 |
 | `max_body_mb` | `number` | 否 | `16` | 网关缓冲请求体的上限（MB）：模型别名改写需要完整读入请求体，超限返回 413；要发大 PDF / 多附件时上调。 |
 | `log_retention_days` | `number` | 否 | `30` | 请求日志按天文件保留的天数：更早的日志文件在网关启动时与每日定时自动删除；`0` = 永不清理。 |
+| `debug` | `boolean` | 否 | `false`（关） | debug 日志开关：开启后向 `logs/debug-<日期>.jsonl` 记录管理面访问与子进程调用等诊断明细（默认关）。与 `MODELRDOCK_DEBUG=1` 环境变量、`gateway start --debug` 旗标任一为真即生效；本键随热加载即时生效，排障时临时开启、定位后关闭。 |
 | `auto_failover` | `boolean` | 否 | `false`（关） | 「程序自动选主」开关：开启后按时段 / 优先级 / 实测耗时自动挑选主服务；关闭（默认）= 主服务由人工钉定或默认路由决定。主服务不可达时切备用始终可用，不受此开关影响。 |
 | `auto_route_provider` | `string` | 否 | 空（自动） | 人工钉定的主服务 id：设置后路由优先走它（优先于程序自动与定时时段）；留空 = 程序按时段 / 默认路由选主。与控制台「当前」下拉同款。 |
 | `failover_status_codes` | `number[]` | 否 | `[]`（不切换） | 响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。 |
@@ -207,6 +208,7 @@ retries = 1
 headers_timeout_ms = 60000
 max_body_mb = 16
 log_retention_days = 30
+debug = true
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]
