@@ -141,6 +141,7 @@ const VISION_PREFIXES = [
   'doubao-seed-2-1-turbo', 'doubao-seed-2.1-turbo',
   'doubao-seed-evolving',
   'deepseek-v4-flash-vision',
+  'deepseek-v4.1-flash', 'deepseek-v4-1-flash', // V4.1-Flash 多模态（=预设 deepseek-flash 同款；官方点号 id 与连字符变体；pro 系不带）
 ]
 /** id 自带视觉语义（vision/vl）：表未收录的新变体也能识别。
  *  只匹配词边界整段（-vision / _vision / .vision / 开头 vision），避免裸 /vision/i 把 envisign/revision 等误判为视觉模型 */
