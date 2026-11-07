@@ -4,7 +4,7 @@
  */
 export const UI_BODY_HTML = `<div class="wrap">
 <header>
-  <a class="codelink tip" href="https://github.com/ObsidianTrine/model_dock/" target="_blank" rel="noopener" data-i18n-tip="打开 GitHub 项目页||Open the GitHub project page" data-tip="打开 GitHub 项目页"><span class="logo"><svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="hlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d7cff"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#hlg)"/><path d="M14 46V20l18 15 18-15V46" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand">ModelDock</span></a>
+  <a class="codelink tipb" href="https://github.com/ObsidianTrine/model_dock/" target="_blank" rel="noopener" data-i18n-tip="打开 GitHub 项目页||Open the GitHub project page" data-tip="打开 GitHub 项目页"><span class="logo"><svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="hlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d7cff"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#hlg)"/><path d="M14 46V20l18 15 18-15V46" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand">ModelDock</span></a>
   <span id="health">连接中…</span>
   <span id="syncBadge" class="pill" hidden></span>
   <span id="updBadge" class="pill" hidden></span>

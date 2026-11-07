@@ -520,6 +520,10 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
    定位锚点：data-tip 元素自身需为 positioned——fixed/absolute/sticky 元素直接用；
    静态元素补 .tip 类（不得给 [data-tip] 全局加 position:relative，会把 .fab/.snav 的 fixed 顶掉） */
 .tip{position:relative}
+/* .tipb 变体：贴视口顶的头部元素（logo 外链先例）上方放不下 tooltip，翻到宿主下方、箭头朝上 */
+.tipb{position:relative}
+[data-tip].tipb:hover::after{bottom:auto;top:calc(100% + 7px)}
+[data-tip].tipb:hover::before{bottom:auto;top:calc(100% + 3px);transform:translateX(-50%) rotate(225deg)}
 [data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);background:#111827;color:#f5f5f5;border:1px solid rgba(255,255,255,.12);font-size:var(--fs-xs);line-height:1.4;padding:4px 9px;border-radius:var(--r-sm);white-space:nowrap;pointer-events:none;z-index:calc(var(--z-pop) + 1);animation:tipIn .12s ease-out .3s backwards;box-shadow:var(--shadow-md)}
 [data-tip]:hover::before{content:'';position:absolute;bottom:calc(100% + 3px);left:50%;transform:translateX(-50%) rotate(45deg);width:7px;height:7px;background:#111827;border-right:1px solid rgba(255,255,255,.12);border-bottom:1px solid rgba(255,255,255,.12);z-index:calc(var(--z-pop) + 1);animation:tipIn .12s ease-out .3s backwards}
 @keyframes tipIn{from{opacity:0}}
