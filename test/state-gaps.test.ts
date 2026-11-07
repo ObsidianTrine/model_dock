@@ -212,7 +212,7 @@ describe('state-gaps · reloadRuntime 清理已删 provider 的三域运行态',
       await mutateConfig((c) => {
         delete c.providers.ghost
       })
-      await reloadRuntime(r, { secretsChanged: false })
+      await reloadRuntime(r)
       expect(r.health.has('ghost')).toBe(false)
       expect(r.health.has('keep')).toBe(true)
       expect(r.seaErrors?.has('ghost')).toBe(false)
