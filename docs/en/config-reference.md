@@ -190,6 +190,7 @@ Gateway listening, timeouts, logs and failover behavior. Scheduled switching (`s
 | `headers_timeout_ms` | `number` | no | `60000` | How long to wait for upstream response headers (ms). Non-streaming long generations can exceed 60s — raise this if you hit header timeouts. |
 | `max_body_mb` | `number` | no | `16` | Request body buffering limit (MB): model alias rewriting needs the full body, oversize gets 413. Raise it for large PDFs / many attachments. |
 | `log_retention_days` | `number` | no | `30` | How many days of daily request-log files to keep: older files are deleted at gateway startup and by a daily sweep; `0` = keep everything. |
+| `debug` | `boolean` | no | `false` (off) | Debug logging switch: when on, admin-API access and child-process details are written to `logs/debug-<date>.jsonl` (off by default). Takes effect if any of this key, the `MODELRDOCK_DEBUG=1` env var, or the `gateway start --debug` flag is set; this key hot-applies — flip it while troubleshooting, flip it back when done. |
 | `auto_failover` | `boolean` | no | `false` (off) | Whether the program picks the primary automatically (time windows / priority / measured latency). Off (default) = the primary is whatever you pinned or the default route. Failing over when the primary is down always stays available regardless of this switch. |
 | `auto_route_provider` | `string` | no | empty (automatic) | Manually pinned primary provider id: routing prefers it (over program automation and time windows); empty = the program picks by window / default route. Same as the "Current" dropdown in the console. |
 | `failover_status_codes` | `number[]` | no | `[]` (no switch) | Upstream status codes that still allow switching to a backup after the response has started (e.g. `[429, 503]`); empty by default = a delivered response is passed through as-is, no switch. |
@@ -207,6 +208,7 @@ retries = 1
 headers_timeout_ms = 60000
 max_body_mb = 16
 log_retention_days = 30
+debug = true
 auto_failover = false
 auto_route_provider = "acme"
 failover_status_codes = [429, 503]

@@ -37,13 +37,16 @@ if (process.argv.includes('--sea-gateway')) {
     await initLang()
     const idx = process.argv.indexOf('--port')
     const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
+    // --debug 与 --port 同款手工解析（本分支不经 commander）；自启/托盘拉起 argv 不带旗标，
+    // 持久开关走 config [gateway] debug / MODELRDOCK_DEBUG 环境变量
+    const debugFlag = process.argv.includes('--debug')
     // 自启（Run 键 / LaunchAgent / systemd）只登记 daemon，托盘在此等网关就绪后补拉——
     // 不拉的话重启后托盘永远缺席（npm/dev 形态 execPath 旁无托盘二进制，自动跳过）
     // fire-and-forget 补 catch：失败走 stderr（daemon 形态已由 fd 2 接管落进 daemon 日志）
     void spawnTrayWhenGatewayReady().catch((e) => {
       console.error(t('[modeldock] 托盘拉起失败：{msg}', '[modeldock] Failed to start the tray: {msg}', { msg: (e as Error).message }))
     })
-    return startForeground(port)
+    return startForeground(port, debugFlag)
   })().catch((e) => {
     console.error(t('✗ 网关启动失败: {msg}', '✗ Failed to start gateway: {msg}', { msg: (e as Error).message }))
     process.exit(1)

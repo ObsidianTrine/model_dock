@@ -127,6 +127,8 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
 export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   const { loadConfig, configStatKey } = await import('../../config/store.js')
   rt.config = await loadConfig()
+  // debug 开关随热加载重算（config [gateway] debug 排障时改配置即时生效，旗标/env 由模块态保留）
+  ;(await import('./debuglog.js')).refreshDebugOn(rt.config.gateway)
   // 记录本次加载对应的盘上指纹：main.ts 的 watcher 收到 config.toml 事件后按此去重——
   // persistConfig 自家写盘的 rename 事件不再触发第二次整包 reload（旧实现每次保存双次 reload：
   // dispatcher 连接池销毁重建 + key 池轮转态清零 + reloads 虚增一倍）

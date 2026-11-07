@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { biJoin, commandOnPath, commandOnPathSandbox, homeDir, t } from '../util/index.js'
+import { debugLog, debugOn } from '../gateway/state/debuglog.js'
 import type { BiValue } from '../util/i18n.js'
 
 export type AppPresent = boolean | 'unknown'
@@ -36,7 +37,20 @@ export function cliPresent(cmd: string, id: string, opts: { sandboxIsolated?: bo
 
 function execText(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { windowsHide: true, timeout: timeoutMs }, (err, stdout) => resolve(err ? '' : String(stdout)))
+    const t0 = Date.now()
+    execFile(cmd, args, { windowsHide: true, timeout: timeoutMs }, (err, stdout) => {
+      // debug 探针（2026-11-07 事故补课）：探测失败此前完全静默，排障无线索。args 无敏感值
+      //（--version / reg query 搜索词），err 只留尾部防刷屏
+      if (debugOn()) {
+        debugLog('spawn', 'exec', {
+          cmd: args.length ? `${cmd} ${args.join(' ')}` : cmd,
+          ms: Date.now() - t0,
+          ok: !err,
+          ...(err ? { err: String((err as Error).message ?? err).slice(0, 200) } : {}),
+        })
+      }
+      resolve(err ? '' : String(stdout))
+    })
   })
 }
 
@@ -50,6 +64,11 @@ const verMemo = new Map<string, { at: number; ver: string | undefined }>()
  *  .cmd 包装，execFile 不认，需 shell: true（参数是固定字面量，无注入面）。探测失败 / 输出
  *  不可解析返回 undefined，调用方按「功能门控不满足」处理（宁可降级到兼容路径，不假装新版）。
  *
+ *  2026-11-07 生产事故：Windows 下不得用 args 数组 + shell 组合（DEP0190）——该组合触发 Node
+ *  向 stderr 写弃用警告，托盘拉起的 daemon 在 stdio 句柄损坏形态下这条写入即进程死亡点（接入
+ *  计划全链路唯一 spawn，死亡零痕迹，见 crash.ts 与 shared.defuseStdioErrors）。改为无 args 的
+ *  单串命令行：DEP0190 只拦 args+shell 组合，解析语义不变（仍经 shell 查 PATH/PATHEXT）。
+ *
  * 测试钩子：`MODELRDOCK_FAKE_<ID 大写下划线>_VERSION` 显式指定版本（置空串模拟探测失败）；
  * 未显式指定但 fakePresence 置了在场时，默认视为现代版本（假在场 = 假一台装好新版的机器，
  * 存量测试不必逐个补版本桩）。 */
@@ -61,9 +80,21 @@ export async function cliVersion(cmd: string, id: string, timeoutMs = 5000): Pro
   const memo = verMemo.get(cmd)
   if (useMemo && memo && Date.now() - memo.at < VER_TTL) return memo.ver
   const out = await new Promise<string>((resolve) => {
-    execFile(cmd, ['--version'], { windowsHide: true, timeout: timeoutMs, shell: process.platform === 'win32' }, (err, stdout) =>
+    const winShell = process.platform === 'win32'
+    const t0 = Date.now()
+    execFile(winShell ? `${cmd} --version` : cmd, winShell ? [] : ['--version'], { windowsHide: true, timeout: timeoutMs, shell: winShell }, (err, stdout) => {
+      // debug 探针：版本门控降级（如 claude < 2.1.243 回退档位槽）排障常需要知道「探测到了什么」
+      if (debugOn()) {
+        debugLog('spawn', 'cli_version', {
+          cmd: winShell ? `${cmd} --version` : cmd,
+          ms: Date.now() - t0,
+          ok: !err,
+          ver: /(\d+\.\d+\.\d+)/.exec(String(stdout))?.[1] ?? null,
+          ...(err ? { err: String((err as Error).message ?? err).slice(0, 200) } : {}),
+        })
+      }
       resolve(err ? '' : String(stdout))
-    )
+    })
   })
   const ver = /(\d+\.\d+\.\d+)/.exec(out)?.[1]
   if (useMemo) verMemo.set(cmd, { at: Date.now(), ver })

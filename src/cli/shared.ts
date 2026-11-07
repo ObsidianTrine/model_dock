@@ -9,7 +9,8 @@ import { loadConfig } from '../config/store.js'
 // logs→pricing-core 之外的整条 state 域；CLI 探活只需要 state-file 这 3.5KB 零重依赖叶子
 import { gatewayLive, type GatewayStateFile } from '../gateway/state/state-file.js'
 import { c, t, ensureDir, sleep, getLang, localDateStr } from '../util/index.js'
-import { logsDir, modeldockDir } from '../util/paths.js'
+import { displayPath, logsDir, modeldockDir } from '../util/paths.js'
+import { debugLog } from '../gateway/state/debuglog.js'
 
 export { gatewayLive, DEFAULT_GATEWAY_PORT }
 
@@ -53,8 +54,13 @@ type SyncWriteLike = { write(chunk: string): boolean }
  *  fd 3 —— fd 2 接管天然不可行。降级为「换流不换 fd」：把 process.stderr 与全局 console 重绑到
  *  直写日志 fd 的同步流，JS 可见的 stderr 输出（console.*、emitWarning、崩溃处理器）照常落日志；
  *  Node 原生崩溃输出仍进 NUL（fd 级无解，纯 JS 上限如此）。两步都尽力而为，失败静默降级。 */
-function rebindStderrToLogFd(fd: number): void {
+/** stderr 重绑。返回最终形态：'stream'=SyncWriteStream 绑 fd 成功且属性已换；'duck'=构造失败
+ *  退化鸭子流（写入安全但 fs.writeSync 每次现做）；'none'=属性替换失败（原 stderr 原样保留）；
+ *  '-console' 后缀=属性替换失败但全局 console 已整体换新（console.error 仍有健康落点）。
+ *  返回值供启动诊断留痕（2026-11-07 事故：托盘拉起形态接管失效曾零痕迹）。 */
+function rebindStderrToLogFd(fd: number): 'stream' | 'duck' | 'none' | 'stream-console' | 'duck-console' {
   let fresh: SyncWriteLike | null = null
+  let duck = false
   try {
     // SyncWriteStream 与 Node stdio FILE 流同类；公开导出已在 Node 24 移除，从 memoize 实例取
     // 内部类。访问 process.stderr 会触发懒初始化（绑 fd 2 = NUL，无输出副作用），随后被覆盖。
@@ -66,6 +72,7 @@ function rebindStderrToLogFd(fd: number): void {
     /* 构造失败退化为鸭子流 */
   }
   if (!fresh) {
+    duck = true
     fresh = {
       write: (chunk) => {
         try {
@@ -81,6 +88,7 @@ function rebindStderrToLogFd(fd: number): void {
     const stderrDesc = Object.getOwnPropertyDescriptor(process, 'stderr')
     if (stderrDesc?.configurable) {
       Object.defineProperty(process, 'stderr', { value: fresh, configurable: true, enumerable: true })
+      return duck ? 'duck' : 'stream'
     }
   } catch {
     /* 极端环境：放弃 stderr 重绑，继续尝试 console 替换 */
@@ -99,9 +107,43 @@ function rebindStderrToLogFd(fd: number): void {
         enumerable: true,
         writable: true,
       })
+      return duck ? 'duck-console' : 'stream-console'
     }
   } catch {
     /* 极端环境：放弃 console 替换，stderr 重绑已尽力 */
+  }
+  return 'none'
+}
+
+const STDIO_DEFUSED = Symbol('modeldock-stdio-error-defused')
+
+/** stdio 写错误降级为非致命（2026-11-07 生产事故防线）：托盘/GUI 父进程拉起的 daemon 会继承
+ *  无效的 stdio 句柄，任何 stdio 写错误（EBADF 等）默认以「流上无人监听的 error 事件」形式
+ *  炸掉整个进程——接入计划里 DEP0190 弃用警告的那次 stderr 写入即实证（进程零痕迹死亡）。
+ *  常驻守护丢几行日志远好过整进程陪葬。幂等：同一流只挂一次（Symbol 标记防重复堆监听）。 */
+export function defuseStdioErrors(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    try {
+      const s = stream as unknown as Record<symbol, unknown> & { on?: (ev: string, cb: (...a: unknown[]) => void) => unknown }
+      if (!s || s[STDIO_DEFUSED] === true) continue
+      s[STDIO_DEFUSED] = true
+      s.on?.('error', () => {})
+    } catch {
+      /* 鸭子流（无 on 方法）或懒初始化失败：无可挂，忽略 */
+    }
+  }
+}
+
+/** 启动诊断（无条件落盘，不挂 debug 门）：daemon stderr 接管的形态与落点是 2026-11-07 事故的
+ *  直接指纹（托盘拉起形态接管失效 → 任何 stderr 写入都可能致死且零痕迹，当时无法从任何日志
+ *  看出接管状态）。debug 文件行不经 stderr、必定落盘；console.error 走接管后的 stderr，健康时
+ *  额外落 daemon-<date>.log。文案用稳定英文技术行（诊断机器行，不走 i18n）。 */
+function bootDiag(data: Record<string, unknown>): void {
+  debugLog('boot', 'stderr_takeover', data)
+  try {
+    console.error(`[modeldock] stderr takeover: ${JSON.stringify(data)}`)
+  } catch {
+    /* 坏流已 defuse（error 事件非致命），同步抛也兜住 */
   }
 }
 
@@ -111,8 +153,10 @@ function rebindStderrToLogFd(fd: number): void {
  *  fd 级重定向无半行缓冲/丢行问题（原父侧逐行转写随 stdio ignore 整段移除，日志保真由 fd 直写
  *  继承；Windows 换行以 \r\n 原样落盘）。必须在 daemon 进程消费 process.stderr 之前调用——
  *  stdio ignore 下 stderr 句柄懒初始化，先腾 fd 再写即全部落进日志。保留期随 pruneExpiredLogs。
- *  返回日志路径；接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。 */
+ *  返回日志路径；接管失败（极端环境）返回 null，stderr 保持原状仅降级不阻断。
+ *  进入即先 defuseStdioErrors()：接管成功与否未知，stdio 写错误都必须先变成非致命。 */
 export function redirectDaemonStderrToLog(): string | null {
+  defuseStdioErrors()
   const logPath = path.join(logsDir(), `daemon-${localDateStr()}.log`)
   fs.mkdirSync(logsDir(), { recursive: true })
   try {
@@ -122,12 +166,18 @@ export function redirectDaemonStderrToLog(): string | null {
       /* 已关闭 */
     }
     const fd = fs.openSync(logPath, 'a') // unix：单线程启动期最低可用 fd 必为 2
-    if (fd === 2) return logPath // unix fd 级接管成功（含 Node 原生崩溃输出）
+    if (fd === 2) {
+      bootDiag({ takeover: 'fd2', fd, log: displayPath(logPath) })
+      return logPath // unix fd 级接管成功（含 Node 原生崩溃输出）
+    }
     // Windows（probe 实测 fd 恒落 3）：fd 2 接管不可行 → 换流不换 fd，JS 可见 stderr 输出落日志
     try {
-      rebindStderrToLogFd(fd)
+      const mode = rebindStderrToLogFd(fd)
+      defuseStdioErrors() // process.stderr 已被换成新流：新流也要挂上 error 兜底
+      bootDiag({ takeover: 'rebind', fd, mode, log: displayPath(logPath) })
       return logPath
-    } catch {
+    } catch (e) {
+      bootDiag({ takeover: 'failed', fd, err: (e as Error).message?.slice(0, 200) })
       try {
         fs.closeSync(fd)
       } catch {
@@ -135,8 +185,10 @@ export function redirectDaemonStderrToLog(): string | null {
       }
       return null
     }
-  } catch {
-    return null // 日志文件打不开：stderr 保持原状，功能不受影响
+  } catch (e) {
+    // 日志文件打不开：stderr 保持原状，功能不受影响——但必须留痕（诊断指纹）
+    bootDiag({ takeover: 'log-open-failed', err: (e as Error).message?.slice(0, 200) })
+    return null
   }
 }
 

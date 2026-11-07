@@ -17,7 +17,7 @@ import {
 } from '../autostart.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
 
-export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean }): Promise<void> {
+export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; debug?: boolean }): Promise<void> {
   const cfg = await loadCfg()
   const live = await gatewayLive()
   if (live) {
@@ -28,11 +28,13 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean })
 
   if (!opts.daemon) {
     const { startForeground } = await import('../gateway/main.js')
-    await startForeground(port)
+    await startForeground(port, opts.debug === true)
     return
   }
 
   const daemonArgv = [...gatewayDaemonArgs(), '--port', String(port)]
+  // --debug 透传 daemon（旗标是会话态：自启/托盘拉起的 daemon 不带它，持久开关走 config [gateway] debug）
+  if (opts.debug === true) daemonArgv.push('--debug')
   const state = await spawnDaemonAndWait(daemonArgv)
   if (state) {
     console.log(c.green(t('✓ 网关已后台启动：http://127.0.0.1:{port}（pid {pid}）', '✓ Gateway started in the background: http://127.0.0.1:{port} (pid {pid})', { port: state.port, pid: state.pid })))
