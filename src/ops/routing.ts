@@ -99,51 +99,92 @@ export interface RefreshBakedResult {
  *  这类客户端 attach 时把当时路由的模型列表与默认模型写死在配置里，仅改服务端 active_profile 不会跟随；
  *  这里按新 active_profile（或显式 profile，见定时窗口接管）重写一遍（复用 planAttach 管线：快照 + 原子写 +
  *  回读校验，非侵入、只动自己的条目）。只处理网关模式且跟随全局的客户端：钉定路由的没变、direct/file 模式的
- *  目标都是显式的，均不重写。 */
+ *  目标都是显式的，均不重写。
+ *  两段式（保存/切换链路 PERF 收口）：阶段一并发出各客户端的接入计划——planAttach 只读客户端配置文件、
+ *  互不相依，串行时每个客户端几十 ms 的读取段收敛为一轮并发；阶段二串行落盘（快照 + 原子写 + 回读校验
+ *  持 harnessWriteLock），同一文件只写一次——共用文件的 harness 身份（mimo-code/mimo-desktop 同用
+ *  mimocode.jsonc）首个成功写入者覆盖，其余只登记 refreshed；前者写失败时后者照常依次尝试（与串行版语义一致）。 */
 export async function refreshBakedModelClients(opts: { port?: number; profile?: string } = {}): Promise<RefreshBakedResult> {
   const cfg = await loadConfig()
   const port = await resolveClientGatewayPort(opts.port, cfg.gateway?.port)
   const refreshed: string[] = []
   const warnings: string[] = []
-  const done = new Set<string>() // 已重写的配置文件路径：共用同一文件的 harness 身份（mimo-code / mimo-desktop 同用 mimocode.jsonc）只写一次
-  const fileRegs: { id: string; files: string[] }[] = [] // files 登记循环内只收集，循环外一次批量落盘（known-issues PERF-14 写放大）
+  const fileRegs: { id: string; files: string[] }[] = [] // files 登记只收集，循环外一次批量落盘（known-issues PERF-14 写放大）
+
+  // 候选清单：网关模式且跟随全局（route 缺省 / 'default'）的 bakesModels 客户端
+  const candidates: Array<{ id: string; adapter: NonNullable<Awaited<ReturnType<typeof getAdapter>>> }> = []
   for (const [id, he] of Object.entries(cfg.harness)) {
     if (he.mode !== 'gateway') continue
     if (he.route && he.route !== 'default') continue // 钉定路由不随全局切换
     const adapter = await getAdapter(id, cfg)
     if (!adapter?.bakesModels) continue
+    candidates.push({ id, adapter })
+  }
+
+  type Outcome =
+    | { kind: 'refreshed'; id: string }
+    | { kind: 'write'; id: string; adapter: typeof candidates[number]['adapter']; changes: import('../adapters/types.js').FileChange[]; token: string }
+    | { kind: 'failed'; warning: string }
+
+  // 阶段一（并发）：逐客户端出计划 + 一致性守卫判定；结果按候选顺序装配（并发完成序不抖动断言）
+  const outcomes = await Promise.all(
+    candidates.map(async ({ id, adapter }): Promise<Outcome> => {
+      try {
+        const { plan, token } = await planAttach(id, { mode: 'gateway', setDefault: true, gatewayPort: port, profile: opts.profile }, cfg)
+        const target = plan.changes[0]?.path
+        // 内容一致守卫：目标文件与计划相同（重接 / 周期自愈 / 重启场景）则不写不快照，
+        // 让「基线失效 → 强制校准」类调用在稳态下零副作用。比较走 CRLF 归一化口径
+        // （textEqualsIgnoreEol）：客户端文件被 Windows 编辑器存成 CRLF 而序列化输出恒 LF 时，
+        // 逐字节比较会把稳态误判为有变化、每次整写盘+快照（2026-11-04 审查 P2）
+        if (target !== undefined) {
+          const before = (await readTextIfExists(target)) ?? null
+          if (before !== null && plan.changes.length === 1 && plan.changes[0].before !== null && textEqualsIgnoreEol(plan.changes[0].after, before)) {
+            return { kind: 'refreshed', id }
+          }
+        }
+        // 计划零改动（如 dsh 等值过滤后的稳态）：无需写盘，也不得用空列表清掉登记的 files
+        if (plan.changes.length === 0) return { kind: 'refreshed', id }
+        if (target === undefined) return { kind: 'refreshed', id } // changes 非空必有 path，守卫式兜底
+        return { kind: 'write', id, adapter, changes: plan.changes, token }
+      } catch (e) {
+        return {
+          kind: 'failed',
+          warning: t('{label}（{id}）刷新失败：{err}', 'Failed to refresh {label} ({id}): {err}', {
+            label: adapter.label,
+            id,
+            err: (e as Error).message,
+          }),
+        }
+      }
+    })
+  )
+  const toWrite: Extract<Outcome, { kind: 'write' }>[] = []
+  for (const o of outcomes) {
+    if (o.kind === 'refreshed') refreshed.push(o.id)
+    else if (o.kind === 'write') toWrite.push(o)
+    else warnings.push(o.warning)
+  }
+
+  // 阶段二（串行）：逐个落盘（applyChanges 内部持 harnessWriteLock：快照 + 原子写 + 回读校验）。
+  // 已写路径集合对齐串行版的 done 集（计划可能触达多个文件，逐路径登记）：任一文件已被本次
+  // 刷新写过即视为该客户端已被覆盖，只登记 refreshed 不重复写（也不重复快照/审计）。
+  const wrote = new Set<string>()
+  for (const p of toWrite) {
+    if (p.changes.some((ch) => wrote.has(ch.path))) {
+      refreshed.push(p.id)
+      continue
+    }
     try {
-      const { plan, token } = await planAttach(id, { mode: 'gateway', setDefault: true, gatewayPort: port, profile: opts.profile }, cfg)
-      const target = plan.changes[0]?.path
-      if (target !== undefined && done.has(target)) {
-        // 同一文件刚被另一个 harness 身份刷新过，内容已是新路由，不重复写（也不重复快照/审计）
-        refreshed.push(id)
-        continue
-      }
-      // 内容一致守卫：目标文件与计划相同（重接 / 周期自愈 / 重启场景）则不写不快照，
-      // 让「基线失效 → 强制校准」类调用在稳态下零副作用。比较走 CRLF 归一化口径
-      // （textEqualsIgnoreEol）：客户端文件被 Windows 编辑器存成 CRLF 而序列化输出恒 LF 时，
-      // 逐字节比较会把稳态误判为有变化、每次整写盘+快照（2026-11-04 审查 P2）
-      const before = target !== undefined ? (await readTextIfExists(target)) ?? null : null
-      if (target !== undefined && before !== null && plan.changes.length === 1 && plan.changes[0].before !== null && textEqualsIgnoreEol(plan.changes[0].after, before)) {
-        refreshed.push(id)
-        continue
-      }
-      // 计划零改动（如 dsh 等值过滤后的稳态）：无需写盘，也不得用空列表清掉登记的 files
-      if (plan.changes.length === 0) {
-        refreshed.push(id)
-        continue
-      }
-      const ok = await applyChanges(id, 'attach', plan.changes, { yes: true, quiet: true, redactions: [token] })
+      const ok = await applyChanges(p.id, 'attach', p.changes, { yes: true, quiet: true, redactions: [p.token] })
       if (!ok) throw new Error(t('写入被取消', 'Write cancelled'))
-      fileRegs.push({ id, files: plan.changes.map((ch) => ch.path) })
-      plan.changes.forEach((ch) => done.add(ch.path))
-      refreshed.push(id)
+      fileRegs.push({ id: p.id, files: p.changes.map((ch) => ch.path) })
+      for (const ch of p.changes) wrote.add(ch.path)
+      refreshed.push(p.id)
     } catch (e) {
       warnings.push(
         t('{label}（{id}）刷新失败：{err}', 'Failed to refresh {label} ({id}): {err}', {
-          label: adapter.label,
-          id,
+          label: p.adapter.label,
+          id: p.id,
           err: (e as Error).message,
         })
       )

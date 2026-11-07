@@ -31,13 +31,9 @@ export interface CatalogEntry {
   cost?: ModelCost
 }
 
-/** 单价表（USD / 百万 token）。 */
-export interface ModelCost {
-  input: number
-  output: number
-  cache_read?: number
-  cache_write?: number
-}
+/** 单价表形状在零依赖叶子 ./pricing-core.ts（CLI 记账闭包不拖目录大模块）；此处类型转发保持既有导入面 */
+import type { ModelCost } from './pricing-core.js'
+export type { ModelCost }
 
 export interface CatalogData {
   fetchedAt: string
@@ -147,28 +143,43 @@ export function clearCatalogMemo(): void {
   baseMemo = undefined
 }
 
-// 合并视图 memo：键 = 缓存文件 path+mtime（snapshot 为构建期常量，catalogSnapshot() 进程内
+// 合并视图 memo：键 = 缓存文件 path+mtime+size（snapshot 为构建期常量，catalogSnapshot() 进程内
 // 同一对象）。catalogModelMeta 在展示/编辑/适配器写配置的多条路径上被高频调用，此前每次调用
-// 都重建 226 家合并对象并重新 sort；memo 后稳态零 statSync（mtime 变化或 clearCatalogMemo 时重建）。
-// data/sortedKeys/flat 共享同一份，返回的是共享只读对象，调用方不得修改。
+// 都重建 226 家合并对象并重新 sort；memo 后重建只在指纹变化或 clearCatalogMemo 时发生。
+// 回验窗（perf-p2-polish）：仅窗外付一次 statSync——memo 命中也要 stat 的旧形态让查价热路径
+// （lookupPrice → catalogFlatTable）每成功请求两次同步 stat，窗内纯内存命中后归零；外部
+// refreshCatalog 改写缓存最迟一个窗口生效。data/sortedKeys/flat 共享同一份，返回的是共享
+// 只读对象，调用方不得修改。
 interface CatalogBaseMemo {
   path: string
   mtimeMs: number
+  size: number
   data: CatalogData
   sortedKeys: string[]
   flat: Record<string, CatalogEntry>
+  checkedAt: number
 }
 let baseMemo: CatalogBaseMemo | undefined
 
+const CATALOG_RECHECK_MS = 5_000
+
 function catalogBaseMemo(): CatalogBaseMemo {
   const p = modelCatalogCachePath()
+  const now = Date.now()
+  if (baseMemo && now - baseMemo.checkedAt < CATALOG_RECHECK_MS) return baseMemo
   let mtimeMs = -1
+  let size = 0
   try {
-    mtimeMs = fs.statSync(p).mtimeMs
+    const st = fs.statSync(p)
+    mtimeMs = st.mtimeMs
+    size = st.size
   } catch {
     /* 无缓存文件：mtime 记 -1，纯 snapshot 态 */
   }
-  if (baseMemo && baseMemo.path === p && baseMemo.mtimeMs === mtimeMs) return baseMemo
+  if (baseMemo && baseMemo.path === p && baseMemo.mtimeMs === mtimeMs && baseMemo.size === size) {
+    baseMemo.checkedAt = now
+    return baseMemo
+  }
   const cache = readCatalogCache()
   const snapshot = catalogSnapshot()
   const data =
@@ -182,7 +193,7 @@ function catalogBaseMemo(): CatalogBaseMemo {
       if (!flat[id]) flat[id] = e
     }
   }
-  baseMemo = { path: p, mtimeMs, data, sortedKeys, flat }
+  baseMemo = { path: p, mtimeMs, size, data, sortedKeys, flat, checkedAt: now }
   return baseMemo
 }
 

@@ -1,9 +1,9 @@
 /** 总览/视图域：buildConfigView、overview 缓存簇（TTL/单飞/SWR 决策）与 buildOverview、overview/tray/presence 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
+import { createHash } from 'node:crypto'
 import { AdminCtx, persistConfig, jsonRequestBody, profileRefForProvider, sendError } from './admin-shared.js'
 import { allAdapters } from '../adapters/registry.js'
 import { getFirstProviderSecret } from '../config/secrets.js'
 import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
-import { knownMetaTable } from '../providers/known.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { resolveInstallCommand } from '../adapters/types.js'
 import { sandboxNpmPrefix } from '../util/paths.js'
@@ -12,7 +12,7 @@ import { sandboxInstallCapability } from './install.js'
 import { PRESETS } from '../presets/data.js'
 import { autoRouteInfo, isMeltdown, parseFallbackEntry, type GatewayRuntime } from './state.js'
 import { usageTodayView } from './state/logs.js'
-import { ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
+import { ensurePresetsLoaded, presetModels } from '../presets/data.js'
 import { markUiLeaving, markUiPing, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { peekSyncRequest } from './lan.js'
 import { syncStatus } from '../sync/engine.js'
@@ -91,10 +91,12 @@ export function overviewCacheHit(
 
 /** overview 响应决策（`now` 可注入便于单测）：
  *  - hit：键匹配且 TTL 内——直发缓存串；
- *  - stale：键匹配但过 TTL——先回旧快照（零等待），后台单飞重建，UI 下一轮轮询（≤5s）拿到新数据。
- *    Windows 冷探测（桌面客户端 reg query 全树、DPAPI 解密 spawn PowerShell、PATH 同步全扫）只发生在
- *    后台，不再挡在用户打开页面的关键路径上；
- *  - miss：键不匹配（配置写经 reloads 递增、语言切换、冷启动）——同步重建，保证写后立即可见新配置。 */
+ *  - stale：键匹配但过 TTL，或配置重载代数已前进（reloads 不等）——先回旧快照（零等待），
+ *    后台单飞重建，UI 下一轮轮询（≤5s）拿到新数据。Windows 冷探测（桌面客户端 reg query
+ *    全树、DPAPI 解密 spawn PowerShell、PATH 同步全扫）只发生在后台，不再挡在用户打开页面
+ *    的关键路径上；保存后的刷新同理（perf-p2-polish）：旧版 reloads 不等走 miss 同步重建，
+ *    Windows 冷探测 memo 叠加时挡请求线程秒级，现降级 SWR + persistConfig 后预热追新；
+ *  - miss：runtime 实例或请求语言不匹配——同步重建（旧串完全不可借：换代/异语言）。 */
 export function overviewServeDecision(
   cached: NonNullable<typeof overviewCache>,
   rt: GatewayRuntime,
@@ -102,16 +104,22 @@ export function overviewServeDecision(
   lang: string,
   now: number
 ): 'hit' | 'stale' | 'miss' {
-  if (cached.rt !== rt || cached.reloads !== reloads || cached.lang !== lang) return 'miss'
+  if (cached.rt !== rt || cached.lang !== lang) return 'miss'
+  if (cached.reloads !== reloads) return 'stale' // 保存后的旧串仍可先回：预热/SWR 单飞已在后台追新
   return now - cached.at < OVERVIEW_TTL_MS ? 'hit' : 'stale'
 }
 
 export let overviewRebuilding: Promise<unknown> | null = null
 
 export async function rebuildOverview(rt: GatewayRuntime): Promise<string> {
+  // 构建前快照代数/语言：构建期间恰有保存落盘（reloads++）时，完成后若盖新代数，旧数据会被
+  // 当新鲜命中最多一个 TTL（用户「保存了页面不变」）；盖旧代数则下一轮决策自然判 stale 触发
+  // 重建，不谎报新鲜。
+  const reloadsAtStart = rt.reloads
+  const langAtStart = getLang()
   const view = await buildOverview(rt)
   const data = JSON.stringify(view)
-  overviewCache = { at: Date.now(), rt, reloads: rt.reloads, lang: getLang(), data, parsed: view }
+  overviewCache = { at: Date.now(), rt, reloads: reloadsAtStart, lang: langAtStart, data, parsed: view }
   return data
 }
 
@@ -124,18 +132,20 @@ export async function overviewViewParsed(rt: GatewayRuntime): Promise<unknown> {
   return JSON.parse(data)
 }
 
-/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；键匹配但过期走 SWR
- * （旧串先行 + 后台单飞重建）；键不匹配同步重建。缓存键含请求语言：view 里的客户端卡片描述等
- * 文案随请求语言生成，语言不同不能互借缓存。 */
+/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；过期或配置代数前进
+ * 走 SWR（旧串先行 + 后台单飞重建）；runtime 换代/异语言同步重建。写后读契约：stale 因
+ * reloads 前进且重建已在飞（写后预热刚开跑）时 join 它拿新数据——UI 保存后立即 load() 不吃
+ * 旧串；TTL 过期的常规轮询保持零等待先回旧串（Windows 冷探测不挡请求线程）。缓存键含请求
+ * 语言：view 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存。 */
 export async function overviewViewData(rt: GatewayRuntime): Promise<string> {
   const cached = overviewCache
   if (!cached) return rebuildOverview(rt)
   const decision = overviewServeDecision(cached, rt, rt.reloads, getLang(), Date.now())
   if (decision === 'hit') return cached.data
   if (decision === 'stale') {
-    if (!overviewRebuilding) {
-      overviewRebuilding = rebuildOverview(rt).catch(() => {}).finally(() => { overviewRebuilding = null })
-    }
+    const written = cached.reloads !== rt.reloads
+    if (written && overviewRebuilding) return overviewRebuilding.then(() => overviewViewData(rt))
+    startOverviewRebuild(rt)
     return cached.data
   }
   return rebuildOverview(rt)
@@ -149,6 +159,30 @@ export function warmupOverview(rt: GatewayRuntime, delayMs = 2_000): void {
     overviewViewData(rt).catch(() => {})
   }, delayMs)
   timer.unref?.()
+}
+
+/** 配置写后预热（reloadRuntime 调用，perf-p2-polish）：reloads 前进已降级 SWR 不挡请求线程，
+ *  这里把新代数重建提前开跑——紧随写操作的 overview 读取经 join 在飞重建（见 overviewViewData）
+ *  拿到新数据，旧串可见窗口从下一轮轮询缩到毫秒级。仅当已有缓存（页面打开过）才预热——冷启动
+ *  由 warmupOverview 兜，守护启动不为此空转；重建期间又落下保存时由完成回调补排，追到新鲜为止
+ *  （失败不追：等下一次请求/轮询按既有路径再试，防持续异常空转）。 */
+export function prewarmOverviewAfterWrite(rt: GatewayRuntime): void {
+  const cached = overviewCache
+  if (!cached || cached.rt !== rt) return
+  if (cached.reloads === rt.reloads && cached.lang === getLang()) return
+  startOverviewRebuild(rt)
+}
+
+/** 后台单飞重建：SWR 追新与写后预热共用同一在飞 promise；完成时若期间又有保存落下则再排一轮。 */
+function startOverviewRebuild(rt: GatewayRuntime): Promise<unknown> {
+  if (overviewRebuilding) return overviewRebuilding
+  overviewRebuilding = rebuildOverview(rt)
+    .catch(() => null)
+    .then((ok) => {
+      overviewRebuilding = null
+      if (ok !== null) prewarmOverviewAfterWrite(rt)
+    })
+  return overviewRebuilding
 }
 
 /** 控制台 v2 总览：全部用用户语言（服务/客户端），不含 provider/profile 等内部概念 */
@@ -276,7 +310,6 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
   }
   // 每个服务被哪些客户端使用
   services.forEach((s: any) => { s.usedBy = usedByMap[s.id] ?? [] })
-  ensurePresetsLoaded() // 懒加载预设（BUG-12）：presets.json 格式错误在此抛可操作报错，而不是把网关启动都卡死
   return {
     ok: true,
     gateway: {
@@ -301,16 +334,6 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
     defaultRoute,
     services,
     clients,
-    // 预设附带模型目录（添加页首屏直显预设模型；只带用户可见的三个字段，source 等内部字段不出域）
-    presets: PRESETS.map((p) => {
-      const pm = presetModels(p)
-      return {
-        id: p.id, label: p.label, vendor: p.vendor, base_url: p.base_url, protocol: p.protocol,
-        endpoints: p.endpoints ?? undefined, docs_url: p.docs_url ?? null,
-        models: pm ? Object.fromEntries(Object.entries(pm).map(([mid, m]) => [mid, { display_name: m.display_name, context_window: m.context_window, max_output: m.max_output, capabilities: m.capabilities ?? [] }])) : undefined,
-      }
-    }),
-    knownModels: knownMetaTable(),
     // 多机同步状态行（M2）：只读展示，控制台不做同步配置（去电脑端命令行）
     sync: await syncStatus(),
     // 附近电脑的待确认拉取请求（sync-nearby，单槽 120s）：确认卡据此显示
@@ -338,6 +361,44 @@ export async function hOverview(c: AdminCtx): Promise<void> {
   markUiPing(Date.now()) // 控制台页面的 5s overview 轮询即在场心跳（免新端点高频调用）
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
+  return
+}
+
+/** 预设目录端点（perf-p2-polish）：预设附带模型目录从 overview 轮询载荷拆出——presets 在进程内
+ *  恒定（ensurePresetsLoaded 幂等，用户 presets.json 改动经重启/reloadPresets 生效），旧形态每 5s
+ *  轮询重复携带 ~30KB 静态数据。「添加服务」浮层打开时才拉。序列化缓存 + ETag（hModelCatalog
+ *  同款）：重复打开命中 304，连 stringify 都省。presets.json 格式错误在此首次触达时抛出
+ *  （原 buildOverview 首屏报错点移到这里，BUG-12 的可操作报错不丢）。 */
+let presetsViewCache: { data: string; etag: string } | null = null
+export function presetsView(): { data: string; etag: string } {
+  if (presetsViewCache) return presetsViewCache
+  ensurePresetsLoaded()
+  const data = JSON.stringify({
+    ok: true,
+    presets: PRESETS.map((p) => {
+      const pm = presetModels(p)
+      return {
+        id: p.id, label: p.label, vendor: p.vendor, base_url: p.base_url, protocol: p.protocol,
+        endpoints: p.endpoints ?? undefined, docs_url: p.docs_url ?? null,
+        models: pm ? Object.fromEntries(Object.entries(pm).map(([mid, m]) => [mid, { display_name: m.display_name, context_window: m.context_window, max_output: m.max_output, capabilities: m.capabilities ?? [] }])) : undefined,
+      }
+    }),
+  })
+  const etag = '"' + createHash('sha256').update(data).digest('base64url').slice(0, 22) + '"'
+  presetsViewCache = { data, etag }
+  return presetsViewCache
+}
+
+export async function hPresetsCatalog(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const { data, etag } = presetsView()
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { etag, 'cache-control': 'no-cache' })
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json', etag, 'cache-control': 'no-cache' })
+  res.end(data)
   return
 }
 

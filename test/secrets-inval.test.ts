@@ -10,6 +10,7 @@ import {
   deleteSecret,
   getSecret,
   invalidateSecretsCache,
+  invalidateSecretsCacheIfExternal,
   keychainArgValue,
   pickFileCipher,
   setSecret,
@@ -21,7 +22,6 @@ import {
 import { migrateSandboxKeyRefsToLocal } from '../src/config/sandbox.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { reloadRuntime, buildRuntime } from '../src/gateway/state.js'
-import { createSecretsChangeTracker } from '../src/gateway/main.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
 
 const cfg: Config = {
@@ -52,72 +52,81 @@ describe('secrets cache 失效', () => {
     }
   })
 
-  it('reloadRuntime 清 secrets 缓存：外部改写后 getSecret 随文件变化', async () => {
+  it('reloadRuntime 不再清 secrets 缓存：config 热加载与密钥缓存解耦（保存慢收口：写 config 不再牵连钥匙环重读）', async () => {
     const h = fakeHome()
     try {
       const ref = await setSecret('demo', 'sk-r1', 'file')
       const rt = buildRuntime(emptyConfig(), 'tok')
-      await reloadRuntime(rt) // 首次 reload 建立缓存
+      await reloadRuntime(rt) // config 热加载：密钥缓存不受牵连
       expect(await getSecret(ref)).toBe('sk-r1')
-      await writeSecrets({ demo: 'sk-r2' })
-      expect(await getSecret(ref)).toBe('sk-r1') // 未 reload：旧缓存
-      await reloadRuntime(rt) // 文件 watcher 触发 reload 会清 secrets 缓存
-      expect(await getSecret(ref)).toBe('sk-r2')
+      await reloadRuntime(rt)
+      expect(await getSecret(ref)).toBe('sk-r1') // 旧实现每次 reload 全清缓存 → 下次读取重付解密
     } finally {
       h.restore()
     }
   })
-})
 
-describe('reloadRuntime 精准失效（perf-secrets-cache）', () => {
-  it('config-only 变更（secretsChanged:false）不清 secrets 缓存：解密缓存保留，缺省 reload 才失效', async () => {
+  it('外部改写 secrets.json：watcher 口径 invalidateSecretsCacheIfExternal 失效；自家写不误失效', async () => {
     const h = fakeHome()
     try {
-      const ref = await setSecret('demo', 'sk-p1', 'file')
-      const rt = buildRuntime(emptyConfig(), 'tok')
-      await reloadRuntime(rt, { secretsChanged: false }) // persistConfig / watcher 见 config.toml 事件的口径
-      expect(await getSecret(ref)).toBe('sk-p1')
-      await writeSecrets({ demo: 'sk-p2' }) // 外部改写 secrets.json（模拟另一进程改 key）
-      await reloadRuntime(rt, { secretsChanged: false })
-      expect(await getSecret(ref)).toBe('sk-p1') // 缓存未清：DPAPI 解密缓存跨 config-only reload 存活
-      await reloadRuntime(rt) // 缺省保守失效：外部改写即刻生效
-      expect(await getSecret(ref)).toBe('sk-p2')
+      const ref = await setSecret('demo', 'sk-e1', 'file') // 自家写：缓存与写后指纹都已记录
+      expect(await getSecret(ref)).toBe('sk-e1')
+      // 自家写的 rename 事件：宽限窗内跳过失效，缓存保持温暖（重读盘注入的读取器不被触达）
+      __testSetSecretsRawReader(async () => {
+        throw new Error('must not re-read secrets.json after self write')
+      })
+      try {
+        await invalidateSecretsCacheIfExternal()
+        expect(await getSecret(ref)).toBe('sk-e1')
+      } finally {
+        __testSetSecretsRawReader()
+      }
+      // 宽限窗外指纹仍然命中（盘上没动过）：同样跳过
+      const base = Date.now()
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => base + 2000)
+      try {
+        __testSetSecretsRawReader(async () => {
+          throw new Error('must not re-read secrets.json after self write')
+        })
+        await invalidateSecretsCacheIfExternal()
+        expect(await getSecret(ref)).toBe('sk-e1')
+      } finally {
+        spy.mockRestore()
+        __testSetSecretsRawReader()
+      }
+      // 外部写（另一进程口径）：指纹不符 → 失效 → 重读拿到新值。
+      // 时钟前推跳出自家写宽限窗（1.5s）：真实测试节奏跑不到宽限窗之外，会被当自家写跳过
+      const base2 = Date.now()
+      const spy2 = vi.spyOn(Date, 'now').mockImplementation(() => base2 + 3000)
+      try {
+        await writeSecrets({ demo: 'sk-e2' })
+        await invalidateSecretsCacheIfExternal()
+      } finally {
+        spy2.mockRestore()
+      }
+      expect(await getSecret(ref)).toBe('sk-e2')
     } finally {
       h.restore()
     }
   })
 
-  it('secretsChanged:true 显式清缓存（watcher 确认 secrets.json 变更的口径）', async () => {
+  it('外部改写后回验窗口到期（FILE_RECHECK_MS=5s）：getSecret 自动重读拿新值，无需显式失效', async () => {
     const h = fakeHome()
     try {
       const ref = await setSecret('demo', 'sk-t1', 'file')
-      const rt = buildRuntime(emptyConfig(), 'tok')
-      await reloadRuntime(rt)
       expect(await getSecret(ref)).toBe('sk-t1')
       await writeSecrets({ demo: 'sk-t2' })
-      await reloadRuntime(rt, { secretsChanged: true })
-      expect(await getSecret(ref)).toBe('sk-t2')
+      expect(await getSecret(ref)).toBe('sk-t1') // 回验窗口内：旧缓存（转发热路径零 I/O 设计）
+      const base = Date.now()
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => base + 6000)
+      try {
+        expect(await getSecret(ref)).toBe('sk-t2') // 窗口到期：stat 回验发现盘已变，重读
+      } finally {
+        spy.mockRestore()
+      }
     } finally {
       h.restore()
     }
-  })
-
-  it('watcher 防抖窗口累积器：secrets.json/未知文件名 → true，config.toml 等其余 → false，take 取走并复位', () => {
-    const tr = createSecretsChangeTracker()
-    tr.onFileEvent('config.toml')
-    tr.onFileEvent('gateway.json')
-    tr.onFileEvent('sync.json')
-    expect(tr.takeSecretsChanged()).toBe(false) // config-only 窗口：不清缓存
-    expect(tr.takeSecretsChanged()).toBe(false) // 取走即复位
-    tr.onFileEvent('secrets.json')
-    expect(tr.takeSecretsChanged()).toBe(true)
-    tr.onFileEvent(null) // Windows 递归 watcher 的 filename 可能为 null：保守视为可能动过密钥
-    tr.onFileEvent(undefined)
-    expect(tr.takeSecretsChanged()).toBe(true)
-    tr.onFileEvent('config.toml')
-    tr.onFileEvent('secrets.json') // 窗口内多事件取「或」
-    expect(tr.takeSecretsChanged()).toBe(true)
-    expect(tr.takeSecretsChanged()).toBe(false)
   })
 })
 

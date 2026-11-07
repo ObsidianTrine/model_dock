@@ -1,5 +1,6 @@
 import fs from 'node:fs'
-import { loadConfig } from '../config/store.js'
+import { configStatKey, loadConfig } from '../config/store.js'
+import { invalidateSecretsCacheIfExternal } from '../config/secrets.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config } from '../config/types.js'
 import { migrateSecretsToSecure } from '../ops.js'
 import { ensureDir, randomToken, drainAppendStreams } from '../util/fsx.js'
@@ -8,8 +9,9 @@ import { localIsoTs } from '../util/time.js'
 import { gatewayStatePath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
-import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, startupGatewayState, writeGatewayState } from './state.js'
+import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
+import { gatewayPriceResolver } from './pricing.js'
 import { warmupOverview } from './overview-view.js'
 import { listenWithRetry } from './shared.js'
 import { startBootUpdateCheck } from '../update/webupdate.js'
@@ -17,6 +19,7 @@ import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
 import { switchToService } from '../ops.js'
 import { appendCrashLog, installCrashHandlers } from '../util/crash.js'
 import { startEventLoopDelaySampler } from './state.js'
+import { VERSION } from '../version.js'
 
 // 崩溃痕迹兜底：本模块是 --sea-gateway 守护进程入口，daemon 由 stdio 收敛拉起，未处理异常/
 // rejection 此前凭空蒸发（无任何落盘）。幂等，cli.ts 已装也不重复。
@@ -66,28 +69,6 @@ function logEndpointRisks(cfg: Config): void {
   }
 }
 
-/** watcher 防抖窗口的 secrets 变更累积器：reloadRuntime 按它决定是否失效 secrets 缓存（精准失效）。
- *  规则：secrets.json 事件 = 可能动了密钥；filename 为空（Windows 递归 watcher 的 filename 可能为
- *  null/空）**保守视为可能动了密钥**——宁多失效不可漏失效（漏失效 = 转发读到旧 key，是安全问题）；
- *  其余文件（config.toml / sync.json / gateway.json / backups/…）不影响判定。reload 真正执行时
- *  takeSecretsChanged() 取走并复位，窗口内多事件取「或」。导出供单测钉语义。 */
-export function createSecretsChangeTracker(): {
-  onFileEvent: (filename: string | null | undefined) => void
-  takeSecretsChanged: () => boolean
-} {
-  let secrets = false
-  return {
-    onFileEvent: (filename) => {
-      if (!filename || filename === 'secrets.json') secrets = true
-    },
-    takeSecretsChanged: () => {
-      const v = secrets
-      secrets = false
-      return v
-    },
-  }
-}
-
 /** 前台启动网关（CLI `gateway start` 与守护进程入口共用） */
 export async function startForeground(portOverride?: number): Promise<void> {
   const cfg = await loadConfig()
@@ -125,6 +106,9 @@ export async function startForeground(portOverride?: number): Promise<void> {
   }
   const adminToken = resolveAdminToken(previousToken)
   const rt = buildRuntime(cfg, adminToken)
+  // 今日用量仪表/记账的查价器注入（perf-p2-polish）：logs 域不再静态依赖 pricing→catalog 大模块，
+  // CLI 命令启动闭包不拖 catalog-snapshot；daemon 侧在此一次性接上
+  setUsagePriceResolver(gatewayPriceResolver)
   // ops 层（switchToService 等，无 rt 上下文）的后台事件经此转发进本网关运行时 ring，页面日志表可见
   setEventRingSink((entry) => pushRing(rt, entry))
   // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动，但不再无声吞掉——
@@ -172,6 +156,8 @@ export async function startForeground(portOverride?: number): Promise<void> {
       adminToken,
       lanToken,
       lanPort: rt.lan?.port,
+      // 版本随状态文件落盘：doctor 比对 CLI 版本检出「升级后未重启」的版本漂移
+      version: VERSION,
       // 与 health 端点同源（rt.startedAt）：gatewayLive 靠两者一致验证"这是真的网关"而非 pid 复用者
       startedAt: localIsoTs(new Date(rt.startedAt)),
     })
@@ -212,8 +198,6 @@ export async function startForeground(portOverride?: number): Promise<void> {
   let reloadTimer: NodeJS.Timeout | undefined
   let watcher: fs.FSWatcher | undefined
   let syncRemountTimer: NodeJS.Timeout | undefined
-  // 防抖窗口内是否可能动过 secrets.json：精准失效的判定源（见 createSecretsChangeTracker 注）
-  const secretsTracker = createSecretsChangeTracker()
   const scheduleSyncRemount = (): void => {
     clearTimeout(syncRemountTimer)
     syncRemountTimer = setTimeout(() => {
@@ -223,19 +207,25 @@ export async function startForeground(portOverride?: number): Promise<void> {
   const scheduleReload = (): void => {
     clearTimeout(reloadTimer)
     reloadTimer = setTimeout(() => {
-      const secretsChanged = secretsTracker.takeSecretsChanged()
-      reloadRuntime(rt, { secretsChanged })
-        .then(() => {
-          console.log(t('[modeldock] 配置已热加载（第 {n} 次）', '[modeldock] Config hot-reloaded (reload #{n})', { n: rt.reloads }))
-          logEndpointRisks(rt.config)
-        })
-        .catch((e: Error) => console.error(t('[modeldock] 配置重载失败：{msg}', '[modeldock] Config reload failed: {msg}', { msg: e.message })))
+      void (async () => {
+        // 自家写盘去重：persistConfig 已随写热加载并记录盘上指纹（rt.lastConfigKey），防抖到期
+        // 指纹未变 = 本进程刚写完 config.toml 的 rename 事件，跳过第二次整包 reload——旧实现
+        // 每次保存都双次 reload（dispatcher 连接池销毁重建 + key 池轮转态清零 + reloads 虚增一倍）
+        if (rt.lastConfigKey !== undefined && (await configStatKey()) === rt.lastConfigKey) return
+        await reloadRuntime(rt)
+        console.log(t('[modeldock] 配置已热加载（第 {n} 次）', '[modeldock] Config hot-reloaded (reload #{n})', { n: rt.reloads }))
+        logEndpointRisks(rt.config)
+      })().catch((e: Error) => console.error(t('[modeldock] 配置重载失败：{msg}', '[modeldock] Config reload failed: {msg}', { msg: e.message })))
     }, 250)
   }
   try {
     watcher = fs.watch(modeldockDir(), (_event, filename) => {
-      secretsTracker.onFileEvent(filename)
-      if (!filename || filename === 'config.toml' || filename === 'secrets.json') scheduleReload()
+      // config.toml → 热加载（自家写盘的 rename 由 scheduleReload 内的指纹去重）；未知文件名保守处理
+      if (!filename || filename === 'config.toml') scheduleReload()
+      // secrets.json → 即刻失效密钥缓存（另一进程改 key 即刻生效），不再搭车整包 reload——
+      // config.toml 没变，reload 是纯浪费；自家刚写的跳过（invalidateSecretsCacheIfExternal
+      // 内部比对写后指纹与宽限窗），失效收口后 config 写不再清密钥缓存
+      if (!filename || filename === 'secrets.json') void invalidateSecretsCacheIfExternal().catch(() => {})
       // 只认精确文件名：引擎自己写 sync.json（lastAppliedRev 等簿记）签名未变，remount 幂等空转
       if (filename === 'sync.json') scheduleSyncRemount()
     })

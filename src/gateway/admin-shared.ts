@@ -1,6 +1,6 @@
 /** admin 门共享底座：请求上下文类型与跨域小帮手（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import http from 'node:http'
-import { ConfigError, mutateConfig } from '../config/store.js'
+import { ConfigError, configStatKey, mutateConfig } from '../config/store.js'
 import { SecretsError } from '../config/secrets.js'
 import { AdapterError } from '../adapters/types.js'
 import { UpdateError } from '../update/check.js'
@@ -123,12 +123,15 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
 }
 
 /** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
- *  mutateConfig 只写 config.toml、不触 secrets.json：传 secretsChanged:false 跳过 secrets 缓存
- *  失效（精准失效），控制台每次保存不再打掉 DPAPI 解密缓存（win32 下一次读 key 免 360~400ms
- *  spawn PowerShell）。经由本函数落盘的回调只许改 config——要动密钥走 setSecret（写后自回填缓存）。 */
+ *  fn 零改动（mutateConfig 内部同值跳写，盘上指纹不变）时跳过热加载——空转保存（控制台
+ *  同值重写等）不再白付整包 reload：dispatcher 连接池销毁重建、key 池轮转态清零、reloads
+ *  虚增与 overview 缓存连带失效全免。secrets 缓存与 reload 完全解耦（失效收口在 watcher 的
+ *  invalidateSecretsCacheIfExternal），config.toml 写不清密钥缓存。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
+  const before = await configStatKey()
   await mutateConfig(fn)
-  await reloadRuntime(rt, { secretsChanged: false })
+  if ((await configStatKey()) === before) return
+  await reloadRuntime(rt) // reloadRuntime 内统一触发保存后 overview 预热（perf-p2-polish）
 }
 
 /** 服务 → profile 解析（UI 按「服务」操作、底层路由单元是 profile）：

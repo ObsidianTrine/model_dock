@@ -117,7 +117,10 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
 // 保持每次现取（其自身已有 TTL 缓存吸收 spawn 成本）。
 let loadMemo: { key: string; cfg: Config } | null = null
 
-async function configStatKey(): Promise<string> {
+/** config.toml 盘上指纹（mtimeMs:size，与 loadConfig memo 同键）：供网关 watcher 对自家写盘的
+ *  rename 事件去重（persistConfig 已随写热加载并记录指纹，防抖到期指纹未变即跳过第二次 reload）、
+ *  persistConfig 对同值跳写短路 reload。stat 失败（文件不存在）返回 'missing'。 */
+export async function configStatKey(): Promise<string> {
   try {
     const st = await stat(configPath())
     return `${st.mtimeMs}:${st.size}`

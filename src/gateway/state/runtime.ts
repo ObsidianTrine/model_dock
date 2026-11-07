@@ -124,24 +124,22 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
   }
 }
 
-export interface ReloadOptions {
-  /** 本次 reload 是否可能动过 secrets.json（是否需要失效 secrets 缓存）。
-   *  **缺省 true（保守失效，与精准化之前行为一致）**；调用方能确认只写了 config.toml 时传 false——
-   *  保住 file 后端解密缓存（win32 DPAPI 下一次读 key 免一次 spawn PowerShell 整表解密，实测 360~400ms）。
-   *  拿不准就缺省 / 传 true：漏失效 = 转发读到旧 key，是安全问题——宁多失效不可漏失效。 */
-  secretsChanged?: boolean
-}
-
-export async function reloadRuntime(rt: GatewayRuntime, opts?: ReloadOptions): Promise<void> {
-  const { loadConfig } = await import('../../config/store.js')
-  const { invalidateSecretsCache } = await import('../../config/secrets.js')
-  // 文件 watcher 触发的 reload 会经过这里：清 file/外部后端密钥缓存，另一进程改的 key 即刻（再读盘）生效。
-  // 精准失效（perf-secrets-cache）：只有确认（或无法排除）secrets.json 变更才清缓存；调用方明确本次
-  // 只写 config.toml（persistConfig、watcher 只见 config.toml 事件）时跳过，解密缓存跨 reload 存活。
-  if (opts?.secretsChanged !== false) invalidateSecretsCache()
+export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
+  const { loadConfig, configStatKey } = await import('../../config/store.js')
   rt.config = await loadConfig()
+  // 记录本次加载对应的盘上指纹：main.ts 的 watcher 收到 config.toml 事件后按此去重——
+  // persistConfig 自家写盘的 rename 事件不再触发第二次整包 reload（旧实现每次保存双次 reload：
+  // dispatcher 连接池销毁重建 + key 池轮转态清零 + reloads 虚增一倍）
+  rt.lastConfigKey = await configStatKey()
   rt.tokens = buildTokenIndex(rt.config)
   rt.reloads++
+  // 写后预热新代数 overview（perf-p2-polish）：reloads 前进在 serve 决策已降级 SWR（不挡请求
+  // 线程），这里把重建提前开跑——紧随写操作的 overview 读取（UI 保存后立即 load()）join 在飞
+  // 重建即拿新数据，旧串可见窗口从下一轮轮询缩到毫秒级。无缓存（页面没开过）不动作，冷启动由
+  // warmupOverview 兜。动态 import 断开 state ↔ overview-view 的循环依赖。
+  void import('../overview-view.js')
+    .then((ov) => ov.prewarmOverviewAfterWrite(rt))
+    .catch(() => {})
   // 释放旧的代理 dispatcher（ProxyAgent 连接）；direct 共享 Agent 是模块级单例、跨重载复用，不关
   const keep = rt.dispatchers.get('direct')
   for (const d of rt.dispatchers.values()) {

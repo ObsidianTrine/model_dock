@@ -6,7 +6,8 @@ import { UI_HTML } from '../src/gateway/ui.js'
 // （纯 JS，无 native，不违反 SEA 依赖约束），stub fetch 返回 /overview 契约夹具，断言渲染与
 // 语言切换行为。伪定时器冻结 5s/60s 轮询（singleFork 共享进程：afterAll 必须还原全部桩）。
 //
-// 夹具形状 = buildOverview 的对外契约（gateway/services/clients/presets/knownModels/sync）；
+// 夹具形状 = buildOverview 的对外契约（gateway/services/clients/sync；presets/knownModels 已拆
+// /_modeldock/presets 与 model-catalog 独立端点，perf-p2-polish）；
 // 该契约同时被 L0 的端点审计钉住，前端渲染回归（键改名静默白屏类）在此红灯。
 
 function scriptBlocks(html: string): string[] {
@@ -40,8 +41,6 @@ const OVERVIEW_FIXTURE = {
     { id: 'beta', label: 'Beta 服务', base_url: 'https://b.example.com', protocol: 'openai', hasKey: true, modelsCount: 1, defaultModel: null, fallback: [], inUse: false, isCurrent: false, enabled: true, priority: 0, down: false, usedBy: [], models: [] },
   ],
   clients: [],
-  presets: [],
-  knownModels: {},
   sync: null,
   syncRequest: null,
 }
@@ -65,6 +64,7 @@ function stubFetch(): void {
     '/_modeldock/health': () => ({ body: { ok: true } }),
     '/_modeldock/admin/update/status': () => ({ body: { current: '1.0.0', available: false } }),
     '/_modeldock/model-catalog': () => ({ body: { ok: true, models: {} } }),
+    '/_modeldock/presets': () => ({ body: { ok: true, presets: [] } }),
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
     '/_modeldock/logs': () => ({ body: { logs: [], total: 0, page: 1, pages: 1 } }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),

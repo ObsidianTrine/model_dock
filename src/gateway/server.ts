@@ -11,10 +11,11 @@ import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
+import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, getSecret, makeKeyRef, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -58,7 +59,7 @@ export { errorReply, maxBodyBytes } from './admin-shared.js'
 import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
 import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
 import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
-import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
+import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
 
@@ -1178,9 +1179,13 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // Key 比对走 providerKeyRefs 全量解析（keys 池优先、key_ref 回落，与转发取 key 同口径）：
   // 池 provider 只比 key_ref 会漏掉池内其他 key 的重复（2026-11-04 审查 P1）
   const hasNewKey = typeof b.key === 'string' && !!b.key
-  const currentKeys = (await resolveProviderKeys(providerKeyRefs(p))).map((e) => e.key)
-  const effectiveKey = hasNewKey ? (b.key as string) : (currentKeys[0] ?? '')
+  // 旧 key 只在去重校验真正需要时才读（keychain 后端每次读取要 spawn security 子进程，
+  // 实测 40ms+）：纯改名/改模型目录等无关编辑（地址未变且未提交新 key）不再无谓付一次
+  // 钥匙环读取——每次保存都慢一截的最稳定成分。比对走 providerKeyRefs 全量解析（keys 池
+  // 优先、key_ref 回落，与转发取 key 同口径），单 key 配置等价于单元素池
   const urlChanged = !!baseUrl && normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(p.base_url)
+  const currentKeys = hasNewKey || urlChanged ? (await resolveProviderKeys(providerKeyRefs(p))).map((e) => e.key) : []
+  const effectiveKey = hasNewKey ? (b.key as string) : (currentKeys[0] ?? '')
   const keyChanged = hasNewKey && !currentKeys.includes(b.key as string)
   if ((urlChanged || keyChanged) && effectiveKey) {
     const norm = normalizeBaseUrl(baseUrl || p.base_url)
@@ -1841,6 +1846,9 @@ async function hReload(c: AdminCtx): Promise<void> {
   const { rt, res, audit } = c
   try {
     await reloadRuntime(rt)
+    // 手动兜底语义补全：watcher 失效（health 提示走这里）时外部改的 key 也一并即刻生效——
+    // invalidateSecretsCacheIfExternal 按盘上指纹区分自家/外部写，自家刚写的不误失效
+    await invalidateSecretsCacheIfExternal()
     audit(bi('重载配置', 'Reload config'), '-', bi('第 {n} 次热重载', 'Hot reload #{n}', { n: rt.reloads }))
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ ok: true, reloads: rt.reloads }))
@@ -2301,6 +2309,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'GET /_modeldock/logs': hLogs,
   'GET /_modeldock/config': hConfig,
   'GET /_modeldock/model-catalog': hModelCatalog,
+  'GET /_modeldock/presets': hPresetsCatalog,
   'GET /_modeldock/overview': hOverview,
   'GET /_modeldock/usage-live': hUsageLive,
   'GET /_modeldock/tray-state': hTrayState,
@@ -2396,6 +2405,8 @@ async function handleAdmin(
     res.end(
       JSON.stringify({
         ok: true,
+        // 网关版本：无鉴权端点但仅监听 127.0.0.1/LAN 控制台自用；dsh 插件的 modeldock_health 消费（design-dsh-plugin.md 5.A4）
+        version: VERSION,
         started_at: localIsoTs(new Date(rt.startedAt)),
         uptime_ms: Date.now() - rt.startedAt,
         reloads: rt.reloads,

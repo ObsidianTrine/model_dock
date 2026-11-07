@@ -5,7 +5,9 @@ import path from 'node:path'
 import type { Config } from '../config/types.js'
 import { DEFAULT_GATEWAY_PORT } from '../config/types.js'
 import { loadConfig } from '../config/store.js'
-import { gatewayLive, type GatewayStateFile } from '../gateway/state.js'
+// 直取 state-file 单模块（perf-p2-polish）：绕开 gateway/state.js 聚合层——那会静态拖入
+// logs→pricing-core 之外的整条 state 域；CLI 探活只需要 state-file 这 3.5KB 零重依赖叶子
+import { gatewayLive, type GatewayStateFile } from '../gateway/state/state-file.js'
 import { c, t, ensureDir, sleep, getLang, localDateStr } from '../util/index.js'
 import { logsDir, modeldockDir } from '../util/paths.js'
 

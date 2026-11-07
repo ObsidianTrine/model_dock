@@ -123,9 +123,9 @@ describe('buildProgram 注册面', () => {
     )
   })
 
-  it('doctor：--fix / --yes / --json 齐备', () => {
+  it('doctor：--deep / --fix / --yes / --json 齐备', () => {
     const doctor = prog.commands.find((c) => c.name() === 'doctor')!
-    expect(longOpts(doctor).sort()).toEqual(['--fix', '--json', '--yes'])
+    expect(longOpts(doctor).sort()).toEqual(['--deep', '--fix', '--json', '--yes'])
   })
 
   it('test：-m/--model 与 -t/--timeout（默认 90s）齐备', () => {

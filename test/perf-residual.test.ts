@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from 'vitest'
+import { describe, expect, it, afterEach, vi } from 'vitest'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
@@ -11,6 +11,8 @@ import { createWebdavTarget } from '../src/sync/targets/webdav.js'
 import type { SyncManifest } from '../src/sync/targets/types.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
+import { clearPricingMemo, loadPricingOverrides } from '../src/gateway/pricing.js'
+import { catalogFlatTable, clearCatalogMemo } from '../src/providers/catalog.js'
 
 process.env.MODELRDOCK_DISABLE_HOLIDAY_FETCH = '1'
 process.env.MODELRDOCK_DISABLE_CATALOG_FETCH = '1'
@@ -199,6 +201,64 @@ describe('控制台页 gzip（PERF-25）', () => {
     } finally {
       server.closeAllConnections?.()
       server.close()
+    }
+  })
+})
+
+describe('pricing/catalog 指纹回验窗（perf-p2-polish：查价热路径每请求 statSync 归零）', () => {
+  afterEach(() => {
+    clearPricingMemo()
+    clearCatalogMemo()
+  })
+
+  it('pricing.json：回验窗内零 statSync；窗外回验（仍缺失续窗、新建文件生效）', () => {
+    mkHome()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-06T10:00:00Z'))
+    const statSpy = vi.spyOn(fs, 'statSync')
+    try {
+      clearPricingMemo()
+      expect(loadPricingOverrides().data).toEqual({}) // 缺失 = 无覆盖（首次 stat 入 memo）
+      const afterFirst = statSpy.mock.calls.length
+      loadPricingOverrides()
+      loadPricingOverrides()
+      expect(statSpy.mock.calls.length).toBe(afterFirst) // 窗内纯内存命中
+      vi.setSystemTime(new Date('2026-11-06T10:00:06Z'))
+      loadPricingOverrides()
+      expect(statSpy.mock.calls.length).toBe(afterFirst + 1) // 窗外恰好一次回验 stat
+      // 窗内新建 pricing.json 不可见（窗口语义：外部改动最迟一个窗生效），窗外回验读到
+      const p = path.join(process.env.MODELRDOCK_FAKE_HOME!, '.modeldock', 'pricing.json')
+      fs.mkdirSync(path.dirname(p), { recursive: true })
+      fs.writeFileSync(p, JSON.stringify({ 'glm-4.6': { input: 1, output: 2 } }))
+      vi.setSystemTime(new Date('2026-11-06T10:00:12Z'))
+      const ov = loadPricingOverrides()
+      expect(ov.data['glm-4.6']).toEqual({ input: 1, output: 2 })
+    } finally {
+      vi.useRealTimers()
+      statSpy.mockRestore()
+    }
+  })
+
+  it('catalog：回验窗内零 statSync；窗外一次回验、指纹未变续用同一 memo（共享只读对象）', () => {
+    mkHome()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-06T10:00:00Z'))
+    const statSpy = vi.spyOn(fs, 'statSync')
+    try {
+      clearCatalogMemo()
+      const t1 = catalogFlatTable()
+      expect(Object.keys(t1).length).toBeGreaterThan(0) // snapshot 兜底，无缓存文件也有全量表
+      const afterFirst = statSpy.mock.calls.length
+      catalogFlatTable()
+      catalogFlatTable()
+      expect(statSpy.mock.calls.length).toBe(afterFirst) // 窗内零 stat
+      vi.setSystemTime(new Date('2026-11-06T10:00:06Z'))
+      catalogFlatTable()
+      expect(statSpy.mock.calls.length).toBe(afterFirst + 1) // 窗外恰好一次回验 stat
+      expect(catalogFlatTable()).toBe(t1) // 指纹未变：重建不发生，返回共享 memo
+    } finally {
+      vi.useRealTimers()
+      statSpy.mockRestore()
     }
   })
 })
