@@ -773,7 +773,8 @@ async function hFetchModels(c: AdminCtx): Promise<void> {
     }
     const f = await fetchModelIds(provider)
     let arr: { id: string; display: string; context_window: number | null; max_output: number | null; capabilities: string[] }[] = f.ids.map((id: string) => {
-      // 填充链：上游响应自带值 > 内置表 > models.dev 目录（按 base_url host 精确匹配优先）；能力只看内置表（上游不报此项）
+      // 填充链：上游响应自带值 > 内置表 > models.dev 目录（按 base_url host 精确匹配优先）；
+      // 能力=上游已表态（含 []=明确无视觉）优先，未表态落内置表
       const km = resolveModelMeta(id, null, { upstream: f.meta?.[id], baseUrl })
       return { id, display: f.display[id] ?? id, context_window: km?.context_window ?? null, max_output: km?.max_output ?? null, capabilities: km?.capabilities ?? [] }
     })

@@ -66,6 +66,8 @@ export async function refreshModelsInto(providerId: string, cfg?: Config): Promi
     const models = { ...(p.models ?? {}) }
     for (const id of fetched.ids) {
       const ex = models[id]
+      // 上游自带能力（含 []=明确无视觉）只补空落盘；内置表推断的能力不落盘——保持读时解析，表更新即时生效
+      const upCaps = fetched.meta[id]?.capabilities
       // 填充链（只补空、不覆盖）：配置已有值 > 上游响应自带 > 内置表 > models.dev 目录
       const r = resolveModelMeta(id, ex ?? null, { upstream: fetched.meta[id], baseUrl: provider.base_url })
       if (!ex) {
@@ -74,13 +76,15 @@ export async function refreshModelsInto(providerId: string, cfg?: Config): Promi
           source: 'fetched',
           ...(r?.context_window != null ? { context_window: r.context_window } : {}),
           ...(r?.max_output != null ? { max_output: r.max_output } : {}),
+          ...(upCaps !== undefined ? { capabilities: [...upCaps] } : {}),
         }
         added++
-      } else if (r && (ex.context_window == null || ex.max_output == null)) {
-        const patch: { context_window?: number; max_output?: number } = {}
+      } else if (r && (ex.context_window == null || ex.max_output == null || (ex.capabilities == null && upCaps !== undefined))) {
+        const patch: { context_window?: number; max_output?: number; capabilities?: string[] } = {}
         if (ex.context_window == null && r.context_window != null) patch.context_window = r.context_window
         if (ex.max_output == null && r.max_output != null) patch.max_output = r.max_output
-        if (patch.context_window !== undefined || patch.max_output !== undefined) {
+        if (ex.capabilities == null && upCaps !== undefined) patch.capabilities = [...upCaps]
+        if (patch.context_window !== undefined || patch.max_output !== undefined || patch.capabilities !== undefined) {
           models[id] = { ...ex, ...patch }
           filled++
         }
