@@ -5,14 +5,22 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.7.0] - 2026-11-07
+
+Gateway supply capabilities ship: multiple API keys per service, per-service concurrency caps with queuing, upstream health observation, and one-shot client credentials; deep doctor checks with post-fix re-verification; faster config saves and a lighter console; a batch of reliability fixes.
 
 ### Added
 
+- **Multiple API keys per service**: append extra keys to one service (CLI `provider set-key --add` or the console); the gateway rotates them to spread load, and when a key is rejected by the upstream (401/403) it cools down and the next key retries — one dead key no longer breaks the whole route.
+- **Per-service concurrency cap with queuing**: each service can set a max concurrency; excess requests queue (wait limit configurable) instead of hammering the upstream. When the upstream rate-limits (429) with a retry-after hint, the gateway waits once and retries; when every service on a route is saturated, the error names the service and suggests tuning.
 - **Deep doctor check (`--deep`)**: sends real requests for the active service to verify auth and the end-to-end path — problems that used to pass a checkup while the client still failed, such as "endpoint reachable but the key is rejected" or a mistyped model name, are now caught directly; when the gateway is running, the full gateway path is verified.
 - **Second-granularity sail duration**: `sail --duration` accepts `90s` and `1m30s` forms — smoke tests and scheduled short sails no longer need to round up to a whole minute; `schedule --mode sail` allows the same. Existing `45` / `90m` / `2h` / `1h30m` behavior unchanged.
+- **Upstream health observation**: the gateway tracks per-service error-rate sliding windows (last 5 minutes / 1 hour, bucketed by rate-limit / 5xx / connect failure / quota rejection) and aggregates them into a health state; new per-client usage endpoint, upstream model availability endpoint with periodic probing — data for manual troubleshooting and automated orchestration alike.
+- **One-shot client credentials**: admin endpoints to mint and revoke ephemeral client credentials for automated tasks (time-limited, usage-capped; the token appears in plain text only once in the minting response) — expired ones are reaped automatically, and revoking never touches persistent config.
 
 ### Improved
+
+- **Billable token accounting**: usage stats gain a billable token count (excluding non-billed cache reads); cost conversion, task budget circuit-breaking, and reconcile discrepancy rates now use the billable figures — heavy cache users' ledgers no longer overstate.
 
 - **doctor re-checks after fixing**: `modeldock doctor --fix` now re-runs the health check immediately after applying fixes, marking each item resolved / still present / new — no need to re-run manually; a totals line ends every checkup, and the exit code is 1 when issues exist so scripts and CI can branch on it.
 - **doctor finds more and fixes more**: a new gateway version-drift check (upgraded but not restarted, so the gateway still runs stale code — restart with one step); the port occupier is shown by pid and process name when the configured port is taken; oversized logs can be pruned to the retention window in one step; a broken autostart entry can be reinstalled in one step; port drift and a broken hot-reload watcher can be fixed by restarting the gateway.
@@ -25,7 +33,13 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Fixed
 
+- **A batch of client capability-metadata fixes**: ZCode manual model rules hard-coded "no vision" — ticking vision in the console still left the client text-only; it is now written from the service's capability declaration. Codex attach writes the context window / max output limit with the default model (and retracts it on detach); OpenCode now declares the model list so context/vision capabilities are visible client-side; WorkBuddy gains the image-support flag.
 - **macOS tray update dialog no longer hard-truncates**: the body now shows the condensed summary instead of the full release notes, with a scrollbar whenever it runs long — buttons can no longer be pushed off screen, and the "content truncated" cut-off is gone.
+- **Console key edits now work for multi-key services**: with a key pool configured, editing the key from the console silently wrote the wrong field (forwarding always uses the pool, so the edit did nothing). Also fixed: console reset takes the config write lock before deleting (concurrent writers can no longer "resurrect" deleted config), LAN onboarding failures are no longer swallowed as success, and probe requests stop burning keepalive connections.
+- **Concurrent secrets writes no longer drop keys**: when Windows decryption ran slow, a second process could misjudge the lock as stale, barge into the write critical section, and its read-modify-write-back dropped keys — the lock now heartbeats while held; takeover after a dead holder is unchanged.
+- **Upstream header timeouts no longer trigger failover**: when a request reached the upstream but response headers timed out, the gateway no longer auto-retries on the next candidate (replays risk double billing) nor counts it toward connect-failure meltdown; only explicitly whitelisted upstream status codes still switch.
+- **Windows client configs are no longer rewritten over and over**: existing CRLF files compared byte-for-byte against LF output were misjudged as "changed", rewriting the whole file and snapshotting on every steady-state refresh; equality checks now ignore line-ending differences (written content unaffected).
+- **Power-cut-safe persistence**: after an atomic-write rename, the parent directory is fsynced on Unix, closing the window on some filesystems where a "successful" write could vanish entirely after a power cut (Windows behavior unchanged).
 
 - **Fuel ledger drops usage across local midnight**: the sail report fuel section, `reconcile`, and `stats --cost` scan gateway logs split by local calendar day; windows crossing local midnight never reached the end-day log file, silently dropping post-midnight usage or misreporting the whole window as "zero requests". Day iteration now covers every calendar day from start to end (the read side now matches the write-side date convention fixed on 2026-10-02).
 - **`schedule install --dry-run` no longer writes any file**: dry-run used to generate the runner wrapper too — the very script an installed schedule (launchd/cron/scheduled task) executes, so a dry-run with different arguments silently changed what the real schedule would run at its next trigger. Dry-run now prints the registration plan and a full wrapper preview, touching nothing on disk.
@@ -506,6 +520,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.0...v1.5.1

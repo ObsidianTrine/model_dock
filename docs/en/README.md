@@ -53,7 +53,7 @@ sequenceDiagram
 | Area | What you get |
 |------|--------------|
 | **Switch in one place** | `modeldock profile use <name>` or one click in the console — every attached client switches instantly, zero config changes |
-| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over to other enabled services; change services by time of day (statutory holidays recognized automatically); pin a per-client service / model, or go "direct" past the gateway |
+| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over to other enabled services; a service can carry multiple API keys — a rejected one cools down and the next takes over; change services by time of day (statutory holidays recognized automatically); pin a per-client service / model, or go "direct" past the gateway |
 | **Key security** | Upstream keys live only in the local secure backend (macOS Keychain / Windows DPAPI / Linux Secret Service, with machine-bound-encryption fallback when no keyring exists); client configs contain only a local token; existing plaintext keys migrate automatically |
 | **Non-invasive & revertible** | Before `attach`, your existing configs are read-only; every write to a client config is auto-snapshotted, `detach` / `restore` revert in one command |
 | **Always-on** | `gateway install` registers auto-start with crash restart; a permanent macOS menu bar / Windows tray entry keeps the gateway running when the console window closes; "Lightweight mode" collapses everything to the tray |
