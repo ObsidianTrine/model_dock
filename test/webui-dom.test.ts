@@ -181,4 +181,90 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(msg?.textContent ?? '').toContain('请至少填写一个协议接口地址')
     expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
   })
+
+  // 清空模型（草稿两段式确认）：夹具需带模型目录，局部重桩 fetch（finally 还原 beforeAll 桩）
+  function stubOverviewWithModels(ms: Array<Record<string, unknown>>, defaultModel: string): () => void {
+    const prev = globalThis.fetch
+    const fix = JSON.parse(JSON.stringify(OVERVIEW_FIXTURE)) // any：夹具深拷贝后放宽 models 形状
+    fix.services[0].models = ms
+    fix.services[0].defaultModel = defaultModel
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/overview') {
+        const raw = JSON.stringify(fix)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(fix), text: () => Promise.resolve(raw) })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    return () => vi.stubGlobal('fetch', prev)
+  }
+
+  it('清空模型两段式确认：一击武装、再击清空草稿、空态禁用、保存载荷为空目录且不发 default_model', async () => {
+    const cap: { body: Record<string, unknown> | null } = { body: null }
+    const restore = stubOverviewWithModels([
+      { id: 'm1', context_window: 100, max_output: 10, capabilities: [] },
+      { id: 'm2', context_window: 200, max_output: 20, capabilities: ['vision'] },
+    ], 'm1')
+    const stubbed = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/service/update' && init?.method === 'POST') {
+        cap.body = JSON.parse(String(init.body)) as Record<string, unknown>
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }), text: () => Promise.resolve('{"ok":true}') })
+      }
+      return (stubbed as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-edit="alpha"]') as HTMLElement)!.click()
+      await flush()
+      const btn = document.getElementById('efClearAll') as HTMLButtonElement
+      expect(btn).not.toBeNull()
+      expect(btn.disabled).toBe(false)
+      expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(2)
+      // 一击武装：文案翻转、不清行
+      btn.click()
+      expect(btn.textContent).toContain('再点一次确认清空')
+      expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(2)
+      // 再击执行：清空草稿（含空态提示）、按钮禁用、反馈写弹层底栏 msg 槽
+      btn.click()
+      expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(0)
+      expect(document.querySelector('#efModelRows .mempty')).not.toBeNull()
+      expect(btn.disabled).toBe(true)
+      expect(document.getElementById('efMsg')?.textContent ?? '').toContain('已清空全部模型')
+      // 保存：models 全量替换为空目录；默认模型已随清空回落 → 不发 default_model
+      ;(document.getElementById('efSave') as HTMLElement)!.click()
+      await flush()
+      expect(cap.body).not.toBeNull()
+      expect(cap.body!.models).toEqual({})
+      expect('default_model' in cap.body!).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('清空模型 3s 未再击自动还原（假定时器推进），还原后再击=重新武装而非执行', async () => {
+    const restore = stubOverviewWithModels([
+      { id: 'm1', context_window: 100, max_output: 10, capabilities: [] },
+      { id: 'm2', context_window: 200, max_output: 20, capabilities: [] },
+    ], 'm1')
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-edit="alpha"]') as HTMLElement)!.click()
+      await flush()
+      const btn = document.getElementById('efClearAll') as HTMLButtonElement
+      btn.click()
+      expect(btn.textContent).toContain('再点一次确认清空')
+      vi.advanceTimersByTime(3000)
+      expect(btn.textContent).not.toContain('再点一次')
+      // 还原后再击 = 重新武装而非执行
+      btn.click()
+      expect(btn.textContent).toContain('再点一次确认清空')
+      expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(2)
+    } finally {
+      restore()
+    }
+  })
 })
