@@ -5,15 +5,24 @@
 
 本文件记录 ModelDock 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]
+## [1.7.1] - 2026-11-07
+
+一批打磨与修复：网关 debug 日志模式、弹层「清空模型」按钮、视觉能力判定更准；托盘拉起网关静默退出等修复。
 
 ### 新增
 
 - **debug 日志模式**：默认关闭，排障时按需开启——`gateway start --debug` 旗标、`MODELRDOCK_DEBUG=1` 环境变量，或 config.toml `[gateway] debug = true`（改配置热加载即时生效，托盘/自启拉起的后台网关也能开）。开启后向 `logs/debug-<日期>.jsonl` 记录管理面每个请求的访问明细（方法/路径/状态码/耗时）与子进程调用（版本探测、密钥加解密等）的成败与耗时；管理面 4xx/5xx 无论开关都会在事件日志留痕。`modeldock doctor` 会显示当前开关状态与最近日志文件。诊断日志不含任何 Key 明文。
+- **「清空模型」一键按钮**：编辑 / 添加服务弹层的模型区新增一键清空（替代逐行删除），两段式确认防误碰——第一击按钮翻转为「再点一次确认清空」，3 秒内未再点自动还原。
+
+### 改进
+
+- **视觉能力判定更准**：服务 / 模型的视觉能力优先采用上游自带声明（上游明说支持或不支持都以它为准，不再被内置表覆盖）；DeepSeek 等表外变体型号（带档位 / 日期后缀）按前缀兜底识别；修正 o1-mini / o3-mini 被误标视觉的问题（OpenAI 官方确认为纯文本）。
 
 ### 修复
 
 - **修复 Windows 后台网关点「一键接入 Claude Code」时静默退出**：版本探测用的子进程调用方式会触发 Node 向 stderr 写一条弃用警告；由托盘拉起的网关在 stdio 句柄异常时，这条写入会让进程无痕迹退出（崩溃日志也写不出，表现为控制台报「无法连接本地网关」且网关不再运行）。现四层加固：版本探测改用不产生该警告的等价调用；崩溃日志落盘提前到控制台输出之前（坏 stderr 不再连崩溃文件一起吞掉）；daemon 启动时把 stdio 写错误降级为非致命；托盘拉起网关时显式接管子进程 stdio。前台 `modeldock gateway start` 不受此问题影响。
+- **DeepSeek V4.1-Flash 补视觉能力标记**：裸型号（`deepseek-v4-1-flash` / `deepseek-v4.1-flash` 及日期后缀变体）此前未标视觉，接入端输入模态与控制台预勾选缺失；pro 系维持纯文本口径。
+- **模型编辑弹层三项收口**：取消勾选「视觉」后保存不再被内置表回填（显式记录「明确无」）；「清空 / 拉取」按钮成组右对齐；拉取模型面板吸顶时滚动行不再从缝隙透出。
 
 ## [1.7.0] - 2026-11-07
 
@@ -530,6 +539,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
+[1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2

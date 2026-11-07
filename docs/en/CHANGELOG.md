@@ -5,15 +5,24 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.7.1] - 2026-11-07
+
+A round of polish and fixes: gateway debug logging mode, a "Clear models" button in the edit dialogs, sharper vision-capability detection; plus a fix for the tray-launched gateway exiting silently.
 
 ### Added
 
 - **Debug logging mode**: off by default, enabled for troubleshooting via the `gateway start --debug` flag, the `MODELRDOCK_DEBUG=1` env var, or `config.toml [gateway] debug = true` (hot-applied on config save, so tray/autostart-launched background gateways can turn it on too). When on, `logs/debug-<date>.jsonl` records per-request access details for the admin API (method/path/status/duration) and child-process invocations (version probes, key encryption, etc.) with outcome and timing; admin 4xx/5xx responses are always logged to the event log regardless of the switch. `modeldock doctor` shows the current switch state and the latest log file. Debug logs never contain key material.
+- **"Clear models" button**: the model section of the edit / add-service dialogs gains one-click clearing (instead of deleting rows one by one), with a two-step confirmation against stray clicks — the first click flips the button to "click again to confirm", and it reverts automatically after 3 seconds.
+
+### Improved
+
+- **Sharper vision-capability detection**: vision capability now prefers the upstream's own declaration (when the upstream explicitly says supported or not, that wins over the built-in table); out-of-table DeepSeek variants (tier / date suffixes) are recognized by prefix fallback; o1-mini / o3-mini are no longer mis-flagged as vision-capable (confirmed text-only per OpenAI's official docs).
 
 ### Fixed
 
 - **Fixed the Windows background gateway silently exiting on "Attach Claude Code"**: the version probe's child-process invocation made Node write a deprecation warning to stderr; when the tray-launched gateway had broken stdio handles, that write killed the process without any trace (crash log included — the console just showed "cannot reach the local gateway" and the gateway was gone). Now hardened on four layers: the probe uses an equivalent invocation that no longer emits that warning; the crash log is written before any console output (a broken stderr no longer swallows the crash file); the daemon downgrades stdio write errors to non-fatal at boot; and the tray explicitly redirects the gateway child's stdio. Foreground `modeldock gateway start` was never affected.
+- **DeepSeek V4.1-Flash vision flag added**: the bare ids (`deepseek-v4-1-flash` / `deepseek-v4.1-flash` and date-suffixed variants) carried no vision flag, so the attach input modality and the console pre-check were missing; the pro line stays text-only.
+- **Model edit dialog, three polish fixes**: unticking "vision" now sticks on save instead of being backfilled by the built-in table (recorded explicitly as "none"); the "Clear / Fetch" buttons sit grouped right-aligned; the fetch-models panel no longer leaks scrolling rows through a gap while stuck to the top.
 
 ## [1.7.0] - 2026-11-07
 
@@ -530,6 +539,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2
