@@ -133,6 +133,7 @@ export const UI_JS_EDIT = `  var editing = null
     var st = { defaultModel: '', defaultDirty: false, dirty: false, modelAll: [], modelExpanded: false, fetchModels: [], fetchExpanded: false }
     var gid = function (s) { return prefix + s }
     var clearArmT = null
+    var fpIO = null
     function rowsHost() { return document.getElementById(gid('ModelRows')) }
     function rowHtml(m) {
       var vision = (m.capabilities || []).indexOf('vision') >= 0
@@ -176,6 +177,20 @@ export const UI_JS_EDIT = `  var editing = null
       el.innerHTML = (expanded ? st.modelAll : st.modelAll.slice(0, RENDER_CAP)).map(rowHtml).join('')
       syncMore('ModelMoreWrap', 'ModelMoreN', expanded, total)
     }
+    // 拉取面板吸头的吸附态哨兵（补条开关）：哨兵滚出视口顶 = 吸头已贴住滚动容器顶，
+    // 切 .stuck 让 CSS 向上画不透明补条盖缝；滚回视口即摘除。环境无 IntersectionObserver
+    // （旧内核/happy-dom）静默跳过，仅少「补条」不减功能
+    function watchFetchSticky() {
+      if (fpIO) { fpIO.disconnect(); fpIO = null }
+      var sent = root.querySelector('.fsent')
+      var stick = root.querySelector('.fpstick')
+      if (!sent || !stick || typeof IntersectionObserver === 'undefined') return
+      fpIO = new IntersectionObserver(function (entries) {
+        var e = entries[entries.length - 1]
+        if (e) stick.classList.toggle('stuck', !e.isIntersecting)
+      })
+      fpIO.observe(sent)
+    }
     function load(models, defaultModel) {
       disarmClear()
       st.defaultModel = defaultModel || ''
@@ -186,6 +201,7 @@ export const UI_JS_EDIT = `  var editing = null
       root.innerHTML = html()
       renderRows(models || [])
       applyI18nTree(root)
+      watchFetchSticky()
     }
     function rowsArray() {
       var arr = []
@@ -453,8 +469,11 @@ export const UI_JS_EDIT = `  var editing = null
     function html() {
       return '<div class="fsec-row">' +
         '<label class="fsec" data-i18n="模型（上下文 / 最大输出，单位 tokens，可留空）||Models (context / max output in tokens; optional)">模型（上下文 / 最大输出，单位 tokens，可留空）</label>' +
+        // 两按钮包一组右对齐：fsec-row 是 space-between，裸放会被等距撑开、清空与拉取分居中右
+        '<div class="fsec-btns">' +
         '<button class="btn small ghost-danger" type="button" id="' + gid('ClearAll') + '" data-i18n="清空模型||Clear models" data-i18n-title="清空下方全部模型（草稿操作，点「保存」后才落盘）||Clear every model below (draft; only applies on Save)" title="清空下方全部模型（草稿操作，点「保存」后才落盘）">清空模型</button>' +
         '<button class="btn small" type="button" id="' + gid('Fetch') + '" data-i18n-title="从上游拉取模型列表，勾选需要的填入下方||Fetch the model list from upstream, then tick the ones to add below" title="从上游拉取模型列表，勾选需要的填入下方" data-i18n="拉取模型||Fetch models">拉取模型</button>' +
+        '</div>' +
         '</div>' +
         '<div class="mtable">' +
         '<div class="mhead"><span class="defcol" title="设为默认">' + icon('star', 11) + '</span><span data-i18n="模型 ID||Model ID">模型 ID</span><span data-i18n="上下文||Context">上下文</span><span data-i18n="最大输出||Max output">最大输出</span><span class="vcol" data-i18n="视觉||Vision">视觉</span><span></span></div>' +
@@ -470,6 +489,9 @@ export const UI_JS_EDIT = `  var editing = null
         '</div>' +
         '</div>' +
         '<div class="fetchpanel" id="' + gid('FetchPanel') + '" hidden>' +
+        // 吸附态哨兵：滚出视口顶=吸头进入吸附位，IO 切 .stuck 供 CSS 向上补不透明条（盖住
+        // 面板上沿与弹层滚动容器 padding 之间滚动内容透出的缝，见 styles .fpstick.stuck::before）
+        '<div class="fsent" aria-hidden="true"></div>' +
         // 浮头组：搜索框与列头包成单个 sticky 块整体吸顶（滚动长列表时搜索/全选/列头常驻）；
         // 组内行不得再各自挂 sticky（嵌套 sticky 同基准会叠压盖住搜索框），契约见 ui-kit「浮头表格」
         '<div class="fpstick">' +

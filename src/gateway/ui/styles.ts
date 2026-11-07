@@ -122,6 +122,8 @@ select.chip{padding-right:24px}
 .svcform .mhead .defcol{color:var(--star);opacity:.55;font-size:var(--fs-xs)}
 .svcform .egrid{display:grid;grid-template-columns:1fr 1fr;column-gap:12px;row-gap:6px}
 .svcform .fsec-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);padding-top:12px;margin-top:10px}
+/* fsec-row 是 space-between：多按钮裸放会被等距撑开（清空/拉取分居中右），包一组右对齐才挨着 */
+.svcform .fsec-btns{display:flex;align-items:center;gap:8px}
 .svcform .fsec{font-size:var(--fs-sm);color:var(--text);font-weight:600}
 .svcform label.fsec{margin:0}
 .svcform label{display:block;font-size:var(--fs-sm);color:var(--muted);margin:8px 0 0}
@@ -239,11 +241,18 @@ select.chip{padding-right:24px}
 .svcform .frow .msub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .svcform .ftag{font-size:var(--fs-xs);color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden}
 .svcform .frow.dis .mid,.svcform .frow.dis .ftag{opacity:.55}
-.svcform .fetchpanel{margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--r-md)}
+.svcform .fetchpanel{margin-top:8px;padding:0 10px 8px;border:1px dashed var(--border);border-radius:var(--r-md)}
+.svcform .fetchpanel .fsent{height:1px}
 /* 拉取面板浮头组：搜索框+列头包成单个 sticky 块整体吸顶（背景必须不透明，行从组下滑过不透出）；
-   组内 .mhead 改 static——嵌套 sticky 与组共用同一吸附基准会向上叠压盖住搜索框，吸附职责移交组 */
-.svcform .fetchpanel .fpstick{position:sticky;top:0;z-index:2;background:var(--card)}
+   组内 .mhead 改 static——嵌套 sticky 与组共用同一吸附基准会向上叠压盖住搜索框，吸附职责移交组。
+   面板原 padding-top 8px 挪进吸头自带（不透明底随组走）：吸头最高只能贴到面板内容盒顶，
+   padding 留在外面会成一条滚动内容透出的常驻缝 */
+.svcform .fetchpanel .fpstick{position:sticky;top:0;z-index:2;background:var(--card);padding-top:8px}
 .svcform .fetchpanel .fpstick .mhead{position:static}
+/* 吸附态补条（哨兵切 .stuck，见 edit.ts watchFetchSticky）：吸头受「不越出面板盒」约束，
+   面板上沿与滚动容器 padding 之间（面板 margin/边框 + .editform padding-top）在过渡带会透出
+   滚动行——吸附时向上画一条面板同色不透明条盖住；超出滚动口的部分被裁剪，画宽无副作用 */
+.svcform .fetchpanel .fpstick.stuck::before{content:'';position:absolute;left:-11px;right:-11px;top:-40px;height:40px;background:var(--card)}
 .svcform .fetchpanel .fsearch{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .svcform .fetchq{flex:1;min-width:0;padding:5px 10px;font-size:var(--fs-sm)}
 .svcform .fetchcount{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}

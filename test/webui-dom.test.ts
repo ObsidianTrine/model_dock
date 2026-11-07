@@ -222,6 +222,9 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       const btn = document.getElementById('efClearAll') as HTMLButtonElement
       expect(btn).not.toBeNull()
       expect(btn.disabled).toBe(false)
+      // 清空/拉取成组右对齐（fsec-btns）：fsec-row 是 space-between，裸放会被撑开分居
+      expect(btn.parentElement?.classList.contains('fsec-btns')).toBe(true)
+      expect(btn.nextElementSibling?.id).toBe('efFetch')
       expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(2)
       // 一击武装：文案翻转、不清行
       btn.click()

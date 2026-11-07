@@ -1262,10 +1262,14 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       const k = resolveModelMeta(mid)
       if (rec.context_window == null && k?.context_window != null) rec.context_window = k.context_window
       if (rec.max_output == null && k?.max_output != null) rec.max_output = k.max_output
-      // 能力：显式提交 > 保留既有 > 内置表推断（如 kimi-k3 自动带 vision）；空数组=清空
+      // 能力：显式提交 > 保留既有 > 内置表推断（如 kimi-k3 自动带 vision）；空数组=清空。
+      // 显式空数组且「挡得住东西」（既有值或内置表会给出非空能力）时落盘为 capabilities=[]——
+      // 读侧（resolveModelMeta/适配器）把 [] 视为明确无视觉、短路内置表：远程或用户明确说没有，
+      // 内部表不得回填（2026-11 用户定则）。挡不住东西（各来源本就为空）时不写，避免目录堆空数组噪音
       const caps = saneCapabilities(meta?.capabilities)
       const nextCaps = caps ?? prev?.capabilities ?? saneCapabilities(k?.capabilities)
       if (nextCaps?.length) rec.capabilities = nextCaps
+      else if (caps !== undefined && (prev?.capabilities?.length || k?.capabilities?.length)) rec.capabilities = []
       newModels[mid] = rec
     }
   }
