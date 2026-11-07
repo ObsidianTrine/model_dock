@@ -69,6 +69,10 @@ header{position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);displa
 .logo{display:flex;align-items:center}
 .logo svg{display:block;border-radius:7px;box-shadow:0 1px 4px rgba(79,70,229,.35)}
 .brand{font-size:var(--fs-xl);font-weight:700;letter-spacing:.01em}
+/* 头部 logo+品牌名整体是 GitHub 项目页外链：外观与原 span 版一致（内间距复刻 header 的 10px gap），hover 才亮 accent */
+.codelink{display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none;border-radius:var(--r-sm);transition:color var(--dur)}
+.codelink:hover{color:var(--accent)}
+.codelink:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #health{margin-left:8px;font-size:var(--fs-sm);color:var(--muted)}
 #health .dot{display:inline-block;width:8px;height:8px;border-radius:var(--r-full);background:var(--ok);margin-right:5px}
 /* 语言切换 = .seg 分段控件（选中蓝底白字，见 kit 组件段）；这里只补头部专属定位与紧凑尺寸 */
