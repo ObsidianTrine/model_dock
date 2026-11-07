@@ -11,6 +11,7 @@ import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
 import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
+import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
@@ -2403,6 +2404,8 @@ async function handleAdmin(
     res.end(
       JSON.stringify({
         ok: true,
+        // 网关版本：无鉴权端点但仅监听 127.0.0.1/LAN 控制台自用；dsh 插件的 modeldock_health 消费（design-dsh-plugin.md 5.A4）
+        version: VERSION,
         started_at: localIsoTs(new Date(rt.startedAt)),
         uptime_ms: Date.now() - rt.startedAt,
         reloads: rt.reloads,

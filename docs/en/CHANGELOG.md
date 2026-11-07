@@ -9,10 +9,13 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Added
 
+- **Deep doctor check (`--deep`)**: sends real requests for the active service to verify auth and the end-to-end path — problems that used to pass a checkup while the client still failed, such as "endpoint reachable but the key is rejected" or a mistyped model name, are now caught directly; when the gateway is running, the full gateway path is verified.
 - **Second-granularity sail duration**: `sail --duration` accepts `90s` and `1m30s` forms — smoke tests and scheduled short sails no longer need to round up to a whole minute; `schedule --mode sail` allows the same. Existing `45` / `90m` / `2h` / `1h30m` behavior unchanged.
 
 ### Improved
 
+- **doctor re-checks after fixing**: `modeldock doctor --fix` now re-runs the health check immediately after applying fixes, marking each item resolved / still present / new — no need to re-run manually; a totals line ends every checkup, and the exit code is 1 when issues exist so scripts and CI can branch on it.
+- **doctor finds more and fixes more**: a new gateway version-drift check (upgraded but not restarted, so the gateway still runs stale code — restart with one step); the port occupier is shown by pid and process name when the configured port is taken; oversized logs can be pruned to the retention window in one step; a broken autostart entry can be reinstalled in one step; port drift and a broken hot-reload watcher can be fixed by restarting the gateway.
 - **Sectioned release-note summaries**: `update --check`, native tray dialogs, and the console summary now report per-section item counts with highlights (Added / Improved / Fixed) — every kind of change gets exposure on big releases instead of only the first few entries.
 - **Saving configuration changes is noticeably faster**: a save no longer hot-reloads the gateway state twice and no longer invalidates the API-key cache — previously every save (even a name-only edit) triggered a double reload and threw away all cached keys, forcing the next read back to the system keyring (tens of milliseconds each on macOS); editing a service also no longer reads the old key needlessly. On Windows, saving an API key drops from "decrypt + encrypt, one PowerShell start each" to usually just the encryption.
 - **Client resync after service switch / default-model change is faster**: attach plans for "model-baking" clients (Claude Code, dsh, ZCode, Codex, …) are now generated in one concurrent pass before writing serially — the more clients, the bigger the win; a shared config file is still written only once. Bulk key writes (import, multi-machine sync pull) also write to the system keyring concurrently now.

@@ -19,6 +19,7 @@ import { remountSyncEngine, stopSyncEngine } from '../sync/engine.js'
 import { switchToService } from '../ops.js'
 import { appendCrashLog, installCrashHandlers } from '../util/crash.js'
 import { startEventLoopDelaySampler } from './state.js'
+import { VERSION } from '../version.js'
 
 // 崩溃痕迹兜底：本模块是 --sea-gateway 守护进程入口，daemon 由 stdio 收敛拉起，未处理异常/
 // rejection 此前凭空蒸发（无任何落盘）。幂等，cli.ts 已装也不重复。
@@ -155,6 +156,8 @@ export async function startForeground(portOverride?: number): Promise<void> {
       adminToken,
       lanToken,
       lanPort: rt.lan?.port,
+      // 版本随状态文件落盘：doctor 比对 CLI 版本检出「升级后未重启」的版本漂移
+      version: VERSION,
       // 与 health 端点同源（rt.startedAt）：gatewayLive 靠两者一致验证"这是真的网关"而非 pid 复用者
       startedAt: localIsoTs(new Date(rt.startedAt)),
     })

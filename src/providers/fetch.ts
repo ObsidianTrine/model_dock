@@ -18,7 +18,8 @@ export interface FetchedModels {
   meta: Record<string, UpstreamMeta>
 }
 
-function authHeaders(provider: ProviderConfig, key: string): Record<string, string> {
+/** 按协议/鉴权风格构造上游请求头。导出供 doctor --deep 的直连认证探测复用（同一鉴权口径）。 */
+export function authHeaders(provider: ProviderConfig, key: string): Record<string, string> {
   if (provider.protocol === 'anthropic') {
     const h: Record<string, string> = { 'anthropic-version': '2023-06-01' }
     if (provider.auth_style === 'x-api-key') h['x-api-key'] = key
@@ -35,8 +36,9 @@ function stripProtocolPath(u: string): string {
   return seg.join('/') || u
 }
 
-/** 从 base_url 生成 models 候选端点多条（base 原样 + 逐层剥协议后缀的各根变体，各配 /v1/models 与 /models） */
-function modelEndpoints(base: string): string[] {
+/** 从 base_url 生成 models 候选端点多条（base 原样 + 逐层剥协议后缀的各根变体，各配 /v1/models 与 /models）。
+ *  导出供 doctor --deep 的直连认证探测复用（同一多候选口径，避免两处口径漂移）。 */
+export function modelEndpoints(base: string): string[] {
   const out: string[] = []
   const push = (u: string) => { if (u && out.indexOf(u) < 0) out.push(u) }
   let cur = base.replace(/\/+$/, '')

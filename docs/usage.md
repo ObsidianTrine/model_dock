@@ -128,7 +128,7 @@ modeldock profile use <name>      # ★ 切换供应商：网关模式下新请�
 modeldock gateway install         # ★ 开机自启（常驻）：注册系统服务，登录自动拉起、崩溃自动重启
 modeldock status                  # 总览：网关 / active profile / 各 harness 指向
 modeldock test [profile]          # 连通性自测：key、模型名、流式、延迟一次说清
-modeldock doctor                  # 全面体检；--fix 自动修复（敏感项逐项确认），--json 机器可读
+modeldock doctor                  # 全面体检；--deep 真实请求深检，--fix 自动修复并复核（敏感项逐项确认），--json 机器可读（有异常退出码 1）
 modeldock mcp list                # MCP 服务器盘点：各客户端本机配置聚合一览（只读，--json 机器可读）
 modeldock gateway log -f          # 实时请求日志（只有元数据，不落 prompt）
 modeldock gateway log --harness claude-code

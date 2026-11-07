@@ -4,11 +4,11 @@ import net from 'node:net'
 import path from 'node:path'
 import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
-import type { Config } from '../config/types.js'
+import { DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
 import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
 import { allAdapters } from '../adapters/registry.js'
 import { collectClientSecurityFindings } from '../mcp/security.js'
-import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
+import { autostartKind, installAutostart, parseRunCommandLine, windowsStartupPath, windowsRunValueMirrorFile,
   autostartStatus,
   gatewayDaemonArgs,
   readRecordedArgv,
@@ -16,6 +16,8 @@ import { autostartKind, parseRunCommandLine, windowsStartupPath, windowsRunValue
   serviceFilePath,
   uninstallAutostart,
 } from '../autostart.js'
+import { VERSION } from '../version.js'
+import type { GatewayStateFile } from '../gateway/state.js'
 import { autostartLine } from './gatewaycmd.js'
 import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, exitWithError, spawnDaemonAndWait } from './shared.js'
 import { configPath, logsDir, modeldockDir, secretsPath } from '../util/paths.js'
@@ -77,7 +79,8 @@ export type DoctorLevel = 'ok' | 'warn' | 'bad' | 'info'
 
 export interface DoctorFix {
   /** 稳定 kind（--json 消费方按它识别修复动作） */
-  kind: 'start-gateway' | 'model-refresh' | 'attach' | 'set-proxy' | 'remove-dangling-profiles' | 'autostart-cleanup'
+  kind: 'start-gateway' | 'restart-gateway' | 'model-refresh' | 'attach' | 'set-proxy'
+    | 'remove-dangling-profiles' | 'autostart-cleanup' | 'reinstall-autostart' | 'prune-logs'
   /** 修复对象（provider/harness id 或 profile 名单） */
   target?: string
   /** 需用户把关的修复（依赖外部环境/动第三方状态）：无 --yes 时先确认。attach 例外——自身 diff 确认流程已把关 */
@@ -100,10 +103,24 @@ export interface DoctorFinding {
 export interface DoctorDeps {
   /** 注入 start-gateway 修复的执行器（单测传 fake，绝不真起 daemon） */
   startGateway?: () => Promise<string | void>
+  /** 注入 restart-gateway 修复的执行器（单测传 fake，绝不真停/真起 daemon） */
+  restartGateway?: () => Promise<string | void>
+  /** 注入网关存活探测（单测免真实状态文件；默认 gatewayLive()） */
+  gatewayLive?: () => Promise<GatewayStateFile | null>
   /** 注入端口占用探测（单测免真实 socket） */
   portProbe?: (port: number) => Promise<boolean>
+  /** 注入端口占用者身份查询（单测免真实 lsof/netstat；默认 findPortOccupier） */
+  portOccupier?: (port: number) => Promise<string | null>
   /** 注入修复确认（单测免 TTY） */
   confirm?: (message: string) => Promise<boolean>
+  /** 注入自启重装（单测免真实 launchctl/systemd；默认 uninstall+install） */
+  reinstallAutostart?: () => Promise<string | void>
+  /** 注入过期日志清理（单测免真实删盘；默认 pruneExpiredLogs） */
+  pruneLogs?: (retentionDays: number) => Promise<number>
+  /** 注入 --deep 直连认证探测（单测免真实网络；默认 upstreamAuthProbe） */
+  upstreamProbe?: (provider: ProviderConfig) => Promise<DeepProbeResult>
+  /** 注入 --deep 经网关端到端测试（单测免真实请求；默认 gatewayE2ETest） */
+  gatewayE2E?: (profile: string) => Promise<GatewayE2EResult>
   /** --yes 透传给需要知道是否静默的 fix 闭包（attach 写盘用） */
   fixYes?: boolean
 }
@@ -236,7 +253,178 @@ export function diskUsageFinding(totalBytes: number, freeBytes: number | null, r
   return { id: 'logs.disk', level: 'ok', msg: t('日志目录 {mb}MB、所在盘余量充足（保留 {r} 天）', 'Log directory is {mb}MB and the drive has plenty of room (retention: {r} days)', { mb: String(mb), r: days }) }
 }
 
-export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<DoctorFinding[]> {
+// ── doctor 修复执行器（start/restart 网关、日志清理）与深检探针（--deep）──────────
+
+/** 按配置端口后台启动网关守护进程，返回端点串；超时抛可操作错误。start/restart 两个 fix 共用。 */
+async function startGatewayDaemon(cfgPort: number): Promise<string> {
+  const state = await spawnDaemonAndWait([...gatewayDaemonArgs(), '--port', String(cfgPort)])
+  if (!state) throw new Error(t('后台启动超时；前台运行 modeldock gateway start 查看错误', 'Background start timed out; run "modeldock gateway start" in the foreground for details'))
+  return `http://127.0.0.1:${state.port}`
+}
+
+/** 重启网关修复（版本漂移 / 端口漂移 / fs.watch 失效共用）：confirm 级——会打断在途请求。
+ *  停复用 cmdGatewayStop（launchd 托管卸载语义别重写），起走 startGatewayDaemon。 */
+function restartGatewayFix(cfgPort: number, deps: DoctorDeps = {}): DoctorFix {
+  return {
+    kind: 'restart-gateway',
+    confirm: true,
+    label: t('重启网关（停旧实例并按配置端口后台重启）', 'Restart the gateway (stop the old instance, then start in background on the configured port)'),
+    run:
+      deps.restartGateway ??
+      (async () => {
+        const { cmdGatewayStop } = await import('./gatewaycmd.js')
+        await cmdGatewayStop()
+        return await startGatewayDaemon(cfgPort)
+      }),
+  }
+}
+
+/** 日志清理修复：按保留期删过期日文件（复用网关侧 pruneExpiredLogs 同一实现与口径）。
+ *  保留期 0 = 清理禁用，调用方（withPruneFix）不得挂此修复。confirm 级——删的是用户数据。 */
+export function logsPruneFix(retentionDays: number, deps: DoctorDeps = {}): DoctorFix {
+  return {
+    kind: 'prune-logs',
+    confirm: true,
+    label: t('清理过期日志（按保留期 {d} 天）', 'Prune expired logs ({d}-day retention)', { d: retentionDays }),
+    run: async () => {
+      const n = deps.pruneLogs
+        ? await deps.pruneLogs(retentionDays)
+        : await (await import('../gateway/state/logs.js')).pruneExpiredLogs(retentionDays)
+      return n > 0
+        ? t('已删除 {n} 个过期日志文件', 'Deleted {n} expired log file(s)', { n })
+        : t('没有过期日志文件', 'No expired log files')
+    },
+  }
+}
+
+/** 把日志清理修复挂到 logs.disk 的 warn/bad 结果上（保留期 > 0 才有可删的东西）。 */
+export function withPruneFix(f: DoctorFinding, retentionDays: number | undefined, deps: DoctorDeps = {}): DoctorFinding {
+  const days = retentionDays ?? DEFAULT_LOG_RETENTION_DAYS
+  if ((f.level === 'warn' || f.level === 'bad') && days > 0) f.fix = logsPruneFix(days, deps)
+  return f
+}
+
+/** 端口占用者身份（pid + 进程名），尽力而为：探测失败/平台工具缺失一律返回 null，
+ *  调用方回落到不带身份的原始提示。只读、不杀进程。
+ *  - macOS/Linux：lsof -sTCP:LISTEN 第二行取 COMMAND + PID（无 root 也可见监听者）。
+ *  - Windows：netstat -ano 找 LISTENING 行取 PID，进程名经 PowerShell Get-Process
+ *    （本仓库 win32 进程枚举既有分支用 CIM 全表，这里按 pid 单查更省；netstat/powershell
+ *    都是 System32 内不需 shell 的 .exe，输出只解析 ASCII token 与数字 pid，不受区域设置影响）。 */
+async function findPortOccupier(port: number): Promise<string | null> {
+  try {
+    const { spawnSync } = await import('node:child_process')
+    if (process.platform === 'win32') {
+      const out = spawnSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 5000 })
+      const line = (out.stdout ?? '').split(/\r?\n/).find((l) => l.includes(`:${port} `) && /LISTENING/i.test(l))
+      const pid = line?.trim().split(/\s+/).pop()
+      if (!pid || !/^\d+$/.test(pid)) return null
+      const ps = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).ProcessName`], { encoding: 'utf8', timeout: 8000 })
+      const name = (ps.stdout ?? '').trim().split(/\r?\n/)[0] ?? ''
+      return name ? `pid ${pid}（${name}）` : `pid ${pid}`
+    }
+    const out = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 5000 })
+    const line = (out.stdout ?? '').split('\n').slice(1).find((l) => l.trim())
+    if (!line) return null
+    const cols = line.trim().split(/\s+/)
+    return cols.length >= 2 ? `pid ${cols[1]}（${cols[0]}）` : null
+  } catch {
+    return null
+  }
+}
+
+// ── doctor --deep：真实请求验证 ──
+// 浅检 upstream.reach 只做 GET /（404/401 都算「可达」），密钥被拒、模型名写错全绿。
+// deep 补两层：网关在线走 /_modeldock/test（token→profile→provider→上游全链）；
+// 不在线直连上游 /models 探认证（多候选端点与鉴权头复用 providers/fetch.ts，改出导出）。
+
+export interface DeepProbeResult {
+  kind: 'ok' | 'auth' | 'skip' | 'fail'
+  /** ok=命中的端点；auth=HTTP 状态与端点；skip/fail=候选拒绝原因摘要 */
+  detail: string
+  /** ok 时上游 /models 的模型 id 列表（供默认模型名核对） */
+  modelIds?: string[]
+}
+
+/** 直连上游认证探测：GET /models 多候选，按 protocol/auth_style 带鉴权头。
+ *  任一候选 401/403 = 密钥被拒（auth）；200 = 有效（顺带收模型 id）；全 404/不支持 = 无法验证（skip）；
+ *  网络层失败 = fail（上游可达性已由 upstream.reach 报告，此处不重复 bad）。 */
+export async function upstreamAuthProbe(provider: ProviderConfig): Promise<DeepProbeResult> {
+  const key = await getSecret(provider.key_ref).catch(() => null)
+  if (!key) return { kind: 'skip', detail: t('key 不可读，跳过认证验证（见上方 key 检查）', 'Key unreadable; auth check skipped (see the key check above)') }
+  const { modelEndpoints, authHeaders } = await import('../providers/fetch.js')
+  const { request } = await import('undici')
+  const { buildDispatcher } = await import('../util/net.js')
+  const details: string[] = []
+  let sawHttpResponse = false
+  for (const endpoint of modelEndpoints(provider.base_url).slice(0, 4)) {
+    let up
+    try {
+      up = await request(endpoint, {
+        method: 'GET',
+        headers: authHeaders(provider, key),
+        dispatcher: buildDispatcher(provider.proxy),
+        headersTimeout: 5000,
+        bodyTimeout: 5000,
+      })
+    } catch (e) {
+      details.push(`${endpoint} → ${(e as Error).message}`)
+      continue
+    }
+    sawHttpResponse = true
+    if (up.statusCode === 200) {
+      let ids: string[] = []
+      try {
+        const len = Number(up.headers['content-length'] ?? 0)
+        if (Number.isFinite(len) && len > 20 * 1024 * 1024) throw new Error('oversized')
+        const j: unknown = JSON.parse(await up.body.text())
+        const arr = Array.isArray((j as { data?: unknown[] })?.data) ? (j as { data: unknown[] }).data : Array.isArray(j) ? j : []
+        ids = arr.map((x) => (x as { id?: unknown })?.id).filter((x): x is string => typeof x === 'string')
+      } catch {
+        await up.body.dump().catch(() => {})
+      }
+      return { kind: 'ok', detail: endpoint, modelIds: ids }
+    }
+    await up.body.dump().catch(() => {})
+    if (up.statusCode === 401 || up.statusCode === 403) return { kind: 'auth', detail: `HTTP ${up.statusCode} @ ${endpoint}` }
+    details.push(`${endpoint} → HTTP ${up.statusCode}`)
+  }
+  // 全部候选都拿到过 HTTP 应答（非 401/403/200）= 上游不支持模型列表端点，无法验证认证；
+  // 一个应答都没有 = 传输层失败（网络可达性由 upstream.reach 项报告，此处降级 info 不重复告警）
+  if (sawHttpResponse) return { kind: 'skip', detail: details.slice(0, 2).join(t('；', '; ')) }
+  return { kind: 'fail', detail: details.slice(0, 2).join(t('；', '; ')) || t('所有候选端点均不可用', 'All candidate endpoints failed') }
+}
+
+export interface GatewayE2EResult {
+  ok: boolean
+  status?: number
+  ms?: number
+  model?: string
+  err?: string
+  hint?: string
+}
+
+/** 经网关端到端最小请求（与 cmdTest 同端点同契约；超时 90s 与 cmdTest 默认一致）。 */
+async function gatewayE2ETest(live: GatewayStateFile, profileName: string): Promise<GatewayE2EResult> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${live.port}/_modeldock/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-modeldock-admin': live.admin_token },
+      body: JSON.stringify({ profile: profileName, stream: true }),
+      signal: AbortSignal.timeout(90_000),
+    })
+    const text = await res.text()
+    try {
+      return JSON.parse(text) as GatewayE2EResult
+    } catch {
+      return { ok: false, status: res.status, err: text.slice(0, 200) }
+    }
+  } catch (e) {
+    return { ok: false, err: (e as Error).message, hint: (e as Error).name === 'TimeoutError' ? t('上游响应超时；可先用 modeldock test 加大超时定位', 'The upstream timed out; narrow it down with modeldock test and a larger timeout') : undefined }
+  }
+}
+
+export async function collectDoctorFindings(deps: DoctorDeps = {}, opts: { deep?: boolean } = {}): Promise<DoctorFinding[]> {
   const F: DoctorFinding[] = []
   const ok = (id: string, msg: string) => F.push({ id, level: 'ok', msg })
   const bad = (id: string, msg: string, hint?: string, fix?: DoctorFix) => F.push({ id, level: 'bad', msg, hint, fix })
@@ -275,7 +463,7 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     } catch { /* 读不了按 0 处理，余量仍可报 */ }
     const s = await fs.promises.statfs(dir).catch(() => null)
     const free = s ? Number(s.bsize) * Number(s.bavail) : null
-    F.push(diskUsageFinding(total, free, cfg.gateway?.log_retention_days))
+    F.push(withPruneFix(diskUsageFinding(total, free, cfg.gateway?.log_retention_days), cfg.gateway?.log_retention_days, deps))
   }
 
   // ── 分组并行段（perf-p2-polish）：密钥库验证、跨机密文、网关存活/端口/watch/自启/悬空、
@@ -299,7 +487,8 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     info: (id: string, msg: string, hint?: string) => arr.push({ id, level: 'info' as const, msg, hint }),
   })
 
-  const liveP = gatewayLive()
+  // liveP 是六组共享的探活 promise；gatewayLive 注入口（单测）替换整条来源
+  const liveP = deps.gatewayLive ? deps.gatewayLive() : gatewayLive()
 
   // 密钥库整表可读性：损坏时逐条 key 检查只会重复报同一根因，后续跳过（结果经 secretsVerifyP 供链路组共享）
   const secretsVerifyP = (async (): Promise<boolean> => {
@@ -337,11 +526,22 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     const live = await liveP
     if (live) {
       b.ok('gateway.up', t('网关运行中 127.0.0.1:{port}（pid {pid}）', 'Gateway running on 127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid }))
+      // 版本漂移：升级/改码后 daemon 未重启仍在跑旧代码（本项目无热重载，属高频故障）。
+      // 旧版状态文件无 version 字段（undefined）→ 跳过不报，向后兼容。
+      if (live.version && live.version !== VERSION) {
+        b.warn(
+          'gateway.version_drift',
+          t('网关进程为 v{gv}，当前 CLI 为 v{cv}：升级或改码后未重启，网关仍在跑旧代码', 'The gateway process is v{gv} but this CLI is v{cv}: the gateway was not restarted after an upgrade or code change and is running stale code', { gv: live.version, cv: VERSION }),
+          t('重启网关加载新代码：modeldock gateway stop 后 modeldock gateway start --daemon（或 --fix 重启）', 'Restart the gateway to load the new code: modeldock gateway stop, then modeldock gateway start --daemon (or restart with --fix)'),
+          restartGatewayFix(cfgPort, deps)
+        )
+      }
       if (live.port !== cfgPort) {
         b.warn(
           'gateway.port_drift',
           t('网关实际监听 {actual}，与配置端口 {configured} 不一致（配置端口被占用时启动会漂移）', 'The gateway listens on {actual}, not the configured port {configured} (start drifts when the configured port is taken)', { actual: live.port, configured: cfgPort }),
-          t('解除端口占用后 modeldock gateway stop 再启动，即回到配置端口', 'Free the port, then modeldock gateway stop and start again to return to the configured port')
+          t('解除端口占用后 modeldock gateway stop 再启动，即回到配置端口', 'Free the port, then modeldock gateway stop and start again to return to the configured port'),
+          restartGatewayFix(cfgPort, deps)
         )
       }
     } else {
@@ -353,20 +553,17 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
           kind: 'start-gateway',
           confirm: false,
           label: t('启动网关（后台）', 'Start the gateway (background)'),
-          run:
-            deps.startGateway ??
-            (async () => {
-              const state = await spawnDaemonAndWait([...gatewayDaemonArgs(), '--port', String(cfgPort)])
-              if (!state) throw new Error(t('后台启动超时；前台运行 modeldock gateway start 查看错误', 'Background start timed out; run "modeldock gateway start" in the foreground for details'))
-              return `http://127.0.0.1:${state.port}`
-            }),
+          run: deps.startGateway ?? (async () => startGatewayDaemon(cfgPort)),
         }
       )
       const busy = deps.portProbe ? await deps.portProbe(cfgPort) : await portInUse(cfgPort)
       if (busy) {
+        const occ = deps.portOccupier ? await deps.portOccupier(cfgPort) : await findPortOccupier(cfgPort)
         b.warn(
           'gateway.port_busy',
-          t('配置端口 {port} 已被其他进程占用：网关启动后将改用其他端口', 'Configured port {port} is taken by another process: the gateway will fall back to another port on start', { port: cfgPort }),
+          occ
+            ? t('配置端口 {port} 已被 {o} 占用：网关启动后将改用其他端口', 'Configured port {port} is taken by {o}: the gateway will fall back to another port on start', { port: cfgPort, o: occ })
+            : t('配置端口 {port} 已被其他进程占用：网关启动后将改用其他端口', 'Configured port {port} is taken by another process: the gateway will fall back to another port on start', { port: cfgPort }),
           t('查看占用者：lsof -nP -iTCP:{port} -sTCP:LISTEN（Windows：netstat -ano | findstr {port}）', 'Find the occupier: lsof -nP -iTCP:{port} -sTCP:LISTEN (Windows: netstat -ano | findstr {port})', { port: cfgPort })
         )
       }
@@ -376,7 +573,9 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
       b.warn(
         'gateway.watch',
         t('配置目录监听不可用（fs.watch 异常）：网关热加载失效，改配置不会自动生效', 'Config-dir watching is unavailable (fs.watch error): gateway hot-reload is broken; config changes will not apply automatically'),
-        t('先重启网关试试；仍不行就改配置后手动热加载（POST /_modeldock/reload）或重启网关', 'Restart the gateway first; if it persists, reload manually after changes (POST /_modeldock/reload) or restart the gateway')
+        t('先重启网关试试；仍不行就改配置后手动热加载（POST /_modeldock/reload）或重启网关', 'Restart the gateway first; if it persists, reload manually after changes (POST /_modeldock/reload) or restart the gateway'),
+        // 重启只对「daemon 探测同样失效」的瞬时场景有效；网关不在运行时无从重启，保持纯提示
+        live ? restartGatewayFix(cfgPort, deps) : undefined
       )
     }
 
@@ -410,6 +609,20 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
         label: t('移除开机自启登记（{f}）', 'Remove the autostart entry ({f})', { f: svcFile }),
         run: async () => (await uninstallAutostart()).removed,
       }
+      // 启动命令失效的主修复是重装（nvm 升级/二进制移动后原登记已死，用户本意是「要自启」）；
+      // 沙箱残留指向的是不该存在的实例，主修复仍是移除
+      const autostartReinstall: DoctorFix = {
+        kind: 'reinstall-autostart',
+        confirm: true,
+        label: t('重装开机自启（卸载后按当前程序重新登记）', 'Reinstall the autostart entry (uninstall, then re-register from the current program)'),
+        run:
+          deps.reinstallAutostart ??
+          (async () => {
+            await uninstallAutostart()
+            const r = await installAutostart()
+            return r.file
+          }),
+      }
       if (sandboxHit) {
         b.warn(
           'autostart.residue',
@@ -422,8 +635,8 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
         b.warn(
           'autostart.residue',
           t('开机自启登记的启动命令指向不存在的文件（{a}）：下次登录自启将静默失败', 'The autostart start command points at missing files ({a}): autostart will silently fail at next login', { a: staleArg }),
-          t('重装自启：modeldock gateway uninstall 后再 modeldock gateway install；不再需要可用 --fix 移除登记', 'Reinstall it: modeldock gateway uninstall then modeldock gateway install; or remove the entry with --fix if no longer needed'),
-          autostartCleanup
+          t('--fix 可重装（卸载后按当前程序重新登记）；不再需要自启则 modeldock gateway uninstall 移除', '--fix reinstalls it (uninstalls, then re-registers from the current program); or remove it with modeldock gateway uninstall if no longer needed'),
+          autostartReinstall
         )
       } else {
         b.ok('autostart.entry', t('开机自启登记有效（{f}）', 'Autostart entry is healthy ({f})', { f: svcFile }))
@@ -550,6 +763,49 @@ export async function collectDoctorFindings(deps: DoctorDeps = {}): Promise<Doct
     } else if (profile.default_model && !(provider.models?.[profile.default_model]?.context_window)) {
       b.warn('model.meta', t('默认模型 {m} 缺上下文元数据', 'Default model {m} is missing context metadata', { m: profile.default_model }), `modeldock model set ${profile.provider} ${profile.default_model} --ctx <n>`)
     }
+
+    // --deep：真实请求验证（显式开启——日常体检保持秒级不发真请求）。
+    // 网关在线走 /_modeldock/test：token→profile→provider→上游全链一次验证；
+    // 不在线直连上游探认证：把「可达但 401」「模型名写错」从浅检的假绿里抓出来。
+    // 置于链路组末尾：认证/模型名结论引用「上游可达」项，输出序须在其后；探活走共享 liveP。
+    if (opts.deep) {
+      const gw = await liveP
+      if (gw) {
+        const e2e = deps.gatewayE2E ? await deps.gatewayE2E(ap) : await gatewayE2ETest(gw, ap)
+        if (e2e.ok) {
+          b.ok('upstream.e2e', t('端到端请求成功：经网关 →「{p}」（{m}，{ms}ms）', 'End-to-end request succeeded: via gateway → "{p}" ({m}, {ms}ms)', { p: ap, m: e2e.model ?? '-', ms: e2e.ms ?? 0 }))
+        } else {
+          b.bad(
+            'upstream.e2e',
+            t('端到端请求失败：{d}', 'End-to-end request failed: {d}', { d: e2e.err ?? `HTTP ${e2e.status ?? '?'}` }),
+            e2e.hint
+          )
+        }
+      } else {
+        const probe = deps.upstreamProbe ? await deps.upstreamProbe(provider) : await upstreamAuthProbe(provider)
+        if (probe.kind === 'ok') {
+          b.ok('upstream.auth', t('上游认证有效（{e}）', 'Upstream auth is valid ({e})', { e: probe.detail }))
+          const dm = profile.default_model
+          if (dm && probe.modelIds?.length && !probe.modelIds.includes(dm)) {
+            b.warn(
+              'model.missing',
+              t('默认模型 {m} 不在上游模型目录（共 {n} 个）：可能仍可用（上游目录未必全），但更可能是名称有误', 'Default model {m} is not in the upstream model catalog ({n} models): it may still work (catalogs can be incomplete), but more likely the name is wrong', { m: dm, n: probe.modelIds.length }),
+              t('核对模型名（modeldock profile show）；或 modeldock model refresh {p} 拉取最新目录', 'Verify the model name (modeldock profile show); or run modeldock model refresh {p} to fetch the latest catalog', { p: profile.provider })
+            )
+          }
+        } else if (probe.kind === 'auth') {
+          b.bad(
+            'upstream.auth',
+            t('上游认证失败：{d}——地址可达但密钥被拒', 'Upstream auth failed: {d} — the endpoint is reachable but the key is rejected', { d: probe.detail }),
+            t('重新设置密钥：modeldock provider set-key {p}', 'Re-set the key: modeldock provider set-key {p}', { p: profile.provider })
+          )
+        } else if (probe.kind === 'skip') {
+          b.info('upstream.auth', t('无法自动验证认证（上游未提供可用的模型列表端点）：{d}', 'Auth could not be verified automatically (the upstream offers no working model-list endpoint): {d}', { d: probe.detail }))
+        } else {
+          b.info('upstream.auth', t('认证验证请求失败：{d}（网络可达性已由上方「上游可达」项报告）', 'Auth verification request failed: {d} (network reachability is reported by the "Upstream is reachable" check above)', { d: probe.detail }))
+        }
+      }
+    }
   })()
 
   const port = (await liveP)?.port ?? cfgPort
@@ -620,18 +876,73 @@ function printDoctor(findings: DoctorFinding[]): void {
   }
 }
 
+/** 体检合计行：一眼看清总量与可自动修复面。 */
+function printSummary(findings: DoctorFinding[]): void {
+  const n = (lv: DoctorLevel) => findings.filter((f) => f.level === lv).length
+  console.log(
+    c.gray(
+      t(
+        '合计 {n} 项检查：✓ {ok} · ! {warn} · ✗ {bad} · ○ {info}；可自动修复 {fix} 项',
+        'Total {n} checks: ✓ {ok} · ! {warn} · ✗ {bad} · ○ {info}; {fix} auto-fixable',
+        { n: findings.length, ok: n('ok'), warn: n('warn'), bad: n('bad'), info: n('info'), fix: findings.filter((f) => f.fix).length }
+      )
+    )
+  )
+}
+
+export interface FixRecheckResult {
+  /** 修复前有问题、修复后消失的项（按 id+msg 对账） */
+  resolved: DoctorFinding[]
+  /** 修复后仍 warn/bad 的项 */
+  remaining: DoctorFinding[]
+  /** 修复后新出现的问题项（随 remaining 一起打印，标记区分） */
+  introduced: DoctorFinding[]
+}
+
+/** 修复前后两轮 findings 对账（纯函数）。键 = id + msg：同一 id 会因 adapter/provider 不同
+ *  出现多条（harness.pointing），msg 参与键才不误并。 */
+export function diffFindings(before: DoctorFinding[], after: DoctorFinding[]): FixRecheckResult {
+  const key = (f: DoctorFinding): string => `${f.id}\u0000${f.msg}`
+  const problematic = (f: DoctorFinding): boolean => f.level === 'bad' || f.level === 'warn'
+  // 只对 after 的问题项建键：warn→ok 的转变才算「已解决」（ok 项占键会把转变误判成仍存在）
+  const afterKeys = new Set(after.filter(problematic).map(key))
+  const beforeKeys = new Set(before.map(key))
+  return {
+    resolved: before.filter((f) => problematic(f) && !afterKeys.has(key(f))),
+    remaining: after.filter(problematic),
+    introduced: after.filter((f) => problematic(f) && !beforeKeys.has(key(f))),
+  }
+}
+
+/** 修复后复核展示（flutter doctor 的 validate→fix→re-run 闭环）。 */
+function printRecheck(d: FixRecheckResult): void {
+  console.log()
+  console.log(c.bold(t('── 复核 ──', '── Recheck ──')))
+  for (const f of d.resolved) console.log(c.green(`✓ ${t('已解决：{m}', 'Resolved: {m}', { m: f.msg })}`))
+  for (const f of d.remaining) {
+    const isNew = d.introduced.includes(f)
+    console.log(isNew
+      ? c.yellow(`⚠ ${t('新出现：{m}', 'New: {m}', { m: f.msg })}`)
+      : c.red(`✗ ${t('仍存在：{m}', 'Still present: {m}', { m: f.msg })}`))
+    if (f.hint) console.log(c.gray(`  → ${f.hint}`))
+  }
+  if (d.resolved.length === 0 && d.remaining.length === 0) console.log(c.green(t('✓ 无遗留问题', '✓ No issues remain')))
+  else console.log(c.gray(t('复核：解决 {a} 项 / 仍余 {b} 项', 'Recheck: {a} resolved / {b} remaining', { a: d.resolved.length, b: d.remaining.length })))
+}
+
 async function defaultConfirm(message: string): Promise<boolean> {
   const { confirm } = await import('@inquirer/prompts')
   return confirm({ message })
 }
 
 /** 执行体检发现的修复：confirm=false 直接执行；confirm=true 无 --yes 时逐项确认。
- *  单个修复失败不中断后续；确认失败（非 TTY 等）按跳过处理。导出供单测直测。 */
-export async function runFixes(findings: DoctorFinding[], opts: { yes?: boolean }, deps: DoctorDeps = {}): Promise<void> {
+ *  单个修复失败不中断后续；确认失败（非 TTY 等）按跳过处理。
+ *  返回执行计数——cmdDoctor 凭 done>0 决定是否自动复核。导出供单测直测。 */
+export async function runFixes(findings: DoctorFinding[], opts: { yes?: boolean }, deps: DoctorDeps = {}): Promise<{ done: number; failed: number; skipped: number }> {
   const fixable = findings.filter((f) => f.fix)
   if (fixable.length === 0) {
     console.log(c.gray(t('没有可自动执行的修复项', 'Nothing to auto-fix')))
-    return
+    return { done: 0, failed: 0, skipped: 0 }
   }
   console.log()
   console.log(c.bold(t('── 修复 ──', '── Fixes ──')))
@@ -662,13 +973,23 @@ export async function runFixes(findings: DoctorFinding[], opts: { yes?: boolean 
     }
   }
   if (skipped) console.log(c.gray(t('已跳过 {n} 项待确认的修复（--yes 可跳过确认）', 'Skipped {n} fix(es) pending confirmation (--yes to skip prompts)', { n: skipped })))
-  console.log(c.gray(t('修复结束（成功 {d} / 失败 {f}）；重跑 modeldock doctor 验证', 'Fixes finished ({d} ok / {f} failed); re-run modeldock doctor to verify', { d: done, f: failed })))
+  console.log(c.gray(t('修复结束（成功 {d} / 失败 {f}）', 'Fixes finished ({d} ok / {f} failed)', { d: done, f: failed })))
+  return { done, failed, skipped }
 }
 
 function findingsToJson(findings: DoctorFinding[]): unknown {
+  const n = (lv: DoctorLevel) => findings.filter((f) => f.level === lv).length
   return {
     version: 1,
     ok: findings.every((f) => f.level !== 'bad'),
+    summary: {
+      total: findings.length,
+      ok: n('ok'),
+      warn: n('warn'),
+      bad: n('bad'),
+      info: n('info'),
+      fixable: findings.filter((f) => f.fix).length,
+    },
     findings: findings.map((f) => ({
       id: f.id,
       level: f.level,
@@ -680,16 +1001,30 @@ function findingsToJson(findings: DoctorFinding[]): unknown {
 }
 
 export async function cmdDoctor(
-  opts: { fix?: boolean; yes?: boolean; json?: boolean } = {},
+  opts: { fix?: boolean; yes?: boolean; json?: boolean; deep?: boolean } = {},
   deps: DoctorDeps = {}
 ): Promise<void> {
-  const findings = await collectDoctorFindings({ ...deps, fixYes: opts.yes ?? deps.fixYes })
+  const dOpts = { deep: opts.deep ?? false }
+  const findings = await collectDoctorFindings({ ...deps, fixYes: opts.yes ?? deps.fixYes }, dOpts)
   if (opts.json) {
     console.log(JSON.stringify(findingsToJson(findings), null, 2))
+    // 退出码语义（npm/flutter doctor 同款）：存在 bad 即 1，脚本/CI 可据此分支
+    if (findings.some((f) => f.level === 'bad')) process.exitCode = 1
     return
   }
   printDoctor(findings)
-  if (opts.fix) await runFixes(findings, { yes: opts.yes }, deps)
+  printSummary(findings)
+  let fixResult: { done: number; failed: number; skipped: number } | null = null
+  if (opts.fix) fixResult = await runFixes(findings, { yes: opts.yes }, deps)
+  let finalBad = findings.some((f) => f.level === 'bad')
+  // 修复后自动复核：至少执行过一个修复才值得重跑；与首轮同 deep 口径——deep 项虽不带修复，
+  // 检查集不同会把「深检 bad」误判成「已解决」（浅检没有该 id）
+  if (fixResult && fixResult.done > 0) {
+    const after = await collectDoctorFindings({ ...deps, fixYes: opts.yes ?? deps.fixYes }, dOpts)
+    printRecheck(diffFindings(findings, after))
+    finalBad = after.some((f) => f.level === 'bad')
+  }
+  if (finalBad) process.exitCode = 1
 }
 
 export async function cmdTest(
