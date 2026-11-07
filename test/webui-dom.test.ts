@@ -194,13 +194,13 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
         const raw = JSON.stringify(fix)
         return Promise.resolve({ ok: true, json: () => Promise.resolve(fix), text: () => Promise.resolve(raw) })
       }
-      return (prev as (u: string) => Promise<unknown>)(String(url), init)
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
     })
     return () => vi.stubGlobal('fetch', prev)
   }
 
   it('清空模型两段式确认：一击武装、再击清空草稿、空态禁用、保存载荷为空目录且不发 default_model', async () => {
-    let saved: Record<string, unknown> | null = null
+    const cap: { body: Record<string, unknown> | null } = { body: null }
     const restore = stubOverviewWithModels([
       { id: 'm1', context_window: 100, max_output: 10, capabilities: [] },
       { id: 'm2', context_window: 200, max_output: 20, capabilities: ['vision'] },
@@ -209,10 +209,10 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
       const p = String(url).split('?')[0]
       if (p === '/_modeldock/service/update' && init?.method === 'POST') {
-        saved = JSON.parse(String(init.body)) as Record<string, unknown>
+        cap.body = JSON.parse(String(init.body)) as Record<string, unknown>
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }), text: () => Promise.resolve('{"ok":true}') })
       }
-      return (stubbed as (u: string, i?: RequestInit) => Promise<unknown>)(String(url), init)
+      return (stubbed as (u: string, i?: RequestInit) => unknown)(String(url), init)
     })
     try {
       mountPage()
@@ -236,9 +236,9 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       // 保存：models 全量替换为空目录；默认模型已随清空回落 → 不发 default_model
       ;(document.getElementById('efSave') as HTMLElement)!.click()
       await flush()
-      expect(saved).not.toBeNull()
-      expect((saved as Record<string, unknown>).models).toEqual({})
-      expect('default_model' in (saved as Record<string, unknown>)).toBe(false)
+      expect(cap.body).not.toBeNull()
+      expect(cap.body!.models).toEqual({})
+      expect('default_model' in cap.body!).toBe(false)
     } finally {
       restore()
     }
