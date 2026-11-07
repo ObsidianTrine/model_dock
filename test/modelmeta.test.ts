@@ -351,6 +351,12 @@ describe('能力标记与基名兜底（视觉可选能力）', () => {
       expect(resolveModelMeta('kimi-k3-260701')?.capabilities).toContain('vision')
       expect(resolveModelMeta('glm-5-3-flash-260828')?.capabilities).toContain('vision') // 预设自带 TOOLS_REASON_VISION，基名继承
       expect(resolveModelMeta('qwen3-32b-20250429')?.capabilities ?? []).not.toContain('vision') // 纯文本模型不带
+      // V4.1-Flash 多模态（2026-11 用户核对）：连字符/点号两种 id 形态与日期后缀变体都带视觉；pro 系不带
+      expect(knownModelMeta('deepseek-v4-1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4.1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4-1-flash-261231')?.capabilities).toContain('vision')
+      expect(resolveModelMeta('deepseek-v4-1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4-1-pro')?.capabilities ?? []).not.toContain('vision')
     } finally {
       h.restore()
       clearCatalogMemo()
