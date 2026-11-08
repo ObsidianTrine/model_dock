@@ -16,7 +16,7 @@
 | `scores.coverage` | int\|null | 已核承重结论 / 总承重结论（%）。unverifiable 拖它不拖 coherence |
 | `scores.citation` | int\|null | L0 引用面（当日引用率/深链比/快照成功率 等权） |
 | `scores.overall` | int\|null | 加权（0.4/0.35/0.15/0.10，缺维重归一）。**任一决策关键维 null → null**。仅用于排序与 L3 台账 |
-| `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话） |
+| `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话）。note 自认无快照/无直据的 supported 自动降级 unsupported（带 `downgraded: true` 留痕） |
 | `claims[].status` | enum | `supported / partial / unsupported / contradicted / unverifiable` |
 | `blockers[]` | array | 复核会话给出的硬伤（一句话一条） |
 | `fabricated_claims` | int | 非逐字摘录被丢弃的 claim 数（**编造红旗**，>0 时 decision 封顶 needs_review） |
@@ -29,7 +29,7 @@
 |---|---|---|
 | `browse` | 恒 `ok` | 入库阅读无害 |
 | `internal_decision` | `ok` | coverage ≥50（硬底线，不可配）且 coherence ≥阈值（缺省 60）且 evidence ≠ fail（<40）且 fabricated=0 且无否决 |
-| | `needs_review` | 未达 ok 但无否决；或 fabricated>0 |
+| | `needs_review` | 未达 ok 但无否决；或 fabricated>0（含 claims 全灭——复核契约被违反是红旗，不是「没测」） |
 | | `unsafe` | **任一 claim contradicted（一票否决，不可配置）** |
 | | `undetermined` | evidence/coverage/coherence 任一 null（数据不足以判定） |
 | `external_doc` | `ok` | internal_decision=ok 且 coherence ≥75 且 coverage ≥70（阈值可配，硬底线同样适用） |
@@ -42,7 +42,7 @@
 1. 读 `usage.internal_decision`：`ok` → 可直接引用其 `claims[].status=supported` 的条目做决策；`needs_review` → 只引用 supported 条目并人工核 `blockers`；`unsafe` → 禁用该 brief（可在 `research-void/` 归档）；`undetermined` → 先补 `research verify` 或重跑调研。
 2. 引用具体数字前看对应 claim 的 `status` 与 `note`——**只采信 supported；partial 需注明依赖转述**。
 3. `fabricated_claims > 0` 或 `blockers` 非空：逐条人工复核后再用。
-4. L3 趋势：`research stats` 按调研船模型看核实率——低分模型的产物默认 needs_review。
+4. L3 趋势：`research stats` 按调研船模型看核实率——低分模型的产物默认 needs_review。台账条目以 `researcher_model` 记调研船（L2 条目的 `model` 是复核船）；旧条目无该字段时回退 `model` 分组。
 
 ## 判级与分数的对应（供人读）
 

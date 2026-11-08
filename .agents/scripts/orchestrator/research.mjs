@@ -284,6 +284,22 @@ export function verifyClaimVerbatim(claims, briefBody) {
   return { valid, fabricated };
 }
 
+/**
+ * L2 note-status 一致性降级（2026-11-08 三跑事故）：模型判 supported 却在 note 里自认
+ * 「无快照/无直据/无法对账」——自相矛盾即不可信，按 note 关键词降级为 unsupported
+ * （note 保留、downgraded: true 留痕）。放在 L1 自动标注之前：L1 确定性回查仍可凭
+ * 快照证据把真 supported 判回来。
+ */
+const CLAIM_NOTE_DOWNGRADE_RE = /(无快照|快照缺失|快照仅|快照只|未提供|无任何直据|无直据|不可见|截断|无法对账|无出处|查无)/;
+export function normalizeClaimStatuses(claims) {
+  if (!Array.isArray(claims)) return [];
+  return claims.map((c) =>
+    c?.status === 'supported' && CLAIM_NOTE_DOWNGRADE_RE.test(String(c?.note ?? ''))
+      ? { ...c, status: 'unsupported', downgraded: true }
+      : c,
+  );
+}
+
 /** L0 引用面分（0-100 或 null）：当日引用率 / 深链比 / 快照成功率 三分量等权，缺项重归一。 */
 export function scoreCitation({ datedCount, totalCitations, deep, totalUrls, snapOk, snapTotal }) {
   const parts = [];
@@ -336,6 +352,7 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
 
   let decision;
   if (veto) decision = 'unsafe';
+  else if (fabricatedCount > 0 && total === 0) decision = 'needs_review'; // claims 全灭 + 编造红旗：复核契约被违反，不是「没测」
   else if (evidence == null || coverage == null || coherence == null) decision = 'undetermined';
   else if (coverage >= Math.max(dCov, COVERAGE_FLOOR) && coherence >= dCoh && !evidenceFail) decision = 'ok';
   else decision = 'needs_review';
@@ -420,7 +437,7 @@ export function appendResearchLedger(repoRoot, entry) {
   return file;
 }
 
-/** L3 读台账 → 按模型聚合：n / L1 平均核实率 / 判级分布。 */
+/** L3 读台账 → 按调研船模型聚合：n / L1 平均核实率 / 判级分布。L2 条目的调研船在 researcher_model（model 是复核船）；旧条目无 researcher_model 回退 model。 */
 export function readLedgerStats(repoRoot) {
   const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
   if (!fs.existsSync(file)) return [];
@@ -428,7 +445,7 @@ export function readLedgerStats(repoRoot) {
   for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
     try {
       const e = JSON.parse(line);
-      const key = `${e.model ?? '?'}`;
+      const key = `${e.researcher_model ?? e.model ?? '?'}`;
       const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [] };
       agg.runs++;
       agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;

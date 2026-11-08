@@ -19,6 +19,7 @@ import {
   assessBrief,
   crossCheckClaims,
   verifyClaimVerbatim,
+  normalizeClaimStatuses,
   scoreVerdict,
   parseVerdictBlock,
   appendResearchLedger,
@@ -269,6 +270,25 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     expect(para.fabricated).toHaveLength(1)
   })
 
+  it('normalizeClaimStatuses：note 自认无快照/无直据的 supported 降级 unsupported（downgraded 留痕、note 保留）；真 supported 与非 supported 不误伤', () => {
+    const out = normalizeClaimStatuses([
+      { claim: 'a', status: 'supported', note: '快照缺失，无法对账' }, // 命中：自相矛盾
+      { claim: 'b', status: 'supported', note: '快照命中，数字一致' }, // 真 supported：不误伤
+      { claim: 'c', status: 'supported', note: '' }, // 无 note：不动
+      { claim: 'd', status: 'partial', note: '无直据' }, // 非 supported：不动
+      { claim: 'e', status: 'unsupported', note: '查无出处' }, // 本就 unsupported：不动、不加标记
+    ])
+    expect(out[0]).toEqual({ claim: 'a', status: 'unsupported', note: '快照缺失，无法对账', downgraded: true })
+    expect(out[1]).toEqual({ claim: 'b', status: 'supported', note: '快照命中，数字一致' })
+    expect(out[2]).toEqual({ claim: 'c', status: 'supported', note: '' })
+    expect(out[3]).toEqual({ claim: 'd', status: 'partial', note: '无直据' })
+    expect(out[4]).toEqual({ claim: 'e', status: 'unsupported', note: '查无出处' })
+    // 降级词面覆盖：各关键词都命中（快照仅/未提供/截断/不可见/无任何直据）
+    for (const note of ['快照仅部分可对', '来源未提供', '页面截断', '原文不可见', '无任何直据', '无出处']) {
+      expect(normalizeClaimStatuses([{ claim: 'x', status: 'supported', note }])[0].status).toBe('unsupported')
+    }
+  })
+
   it('scoreVerdict：null 传染 / contradicted 一票否决 / fabricated 封顶 / coverage 门槛 / overall 重归一', () => {
     const claimsOk = [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'supported' }]
     // 维度齐全 + 高分 → decision ok
@@ -305,6 +325,19 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     const partialUnv = scoreVerdict({ claims: [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'unverifiable' }], citation: 90, evidence: 80 })
     expect(partialUnv.scores.coherence).toBe(100)
     expect(partialUnv.scores.coverage).toBe(50)
+  })
+
+  it('scoreVerdict：claims 全灭 + fabricated>0 → needs_review 升格（复核契约被违反是红旗，不是「没测」）；browse 恒 ok', () => {
+    // 全灭 + 编造：在 null→undetermined 之前判 needs_review（null 维不再传染成 undetermined）
+    const wiped = scoreVerdict({ claims: [], fabricatedCount: 10, citation: 90, evidence: 80 })
+    expect(wiped.usage.internal_decision).toBe('needs_review')
+    expect(wiped.usage.browse).toBe('ok')
+    expect(wiped.usage.external_doc).toBe('undetermined')
+    expect(wiped.scores.overall).toBeNull()
+    expect(wiped.level).toBe('unknown')
+    // 对照：全灭但无 fabricated → 仍 undetermined（数据不足以判定）
+    const plain = scoreVerdict({ claims: [], fabricatedCount: 0, citation: 90, evidence: 80 })
+    expect(plain.usage.internal_decision).toBe('undetermined')
   })
 
   it('parseVerdictBlock：JSON 契约（claims 枚举/上限校验）；非法返回 null', () => {
@@ -354,6 +387,28 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('readLedgerStats：L2 条目按 researcher_model 分组（model 是复核船）；旧条目无 researcher_model 回退 model', () => {
+    const root = tmpRoot()
+    try {
+      // 新口径 L2 条目：model=复核船（verifier-x），researcher_model=调研船
+      appendResearchLedger(root, { kind: 'l2', brief_id: 'a', model: 'verifier-x', researcher_model: 'glm-5.3-flash', level: 'pass', hit_rate: 0.9 })
+      // 新口径 L1 条目：model=researcher_model=调研船
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'b', model: 'glm-5.3-flash', researcher_model: 'glm-5.3-flash', level: 'warn', hit_rate: 0.5 })
+      // 旧条目：无 researcher_model → 回退按 model 分组（向后兼容）
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'c', model: 'glm-4.5-air', level: 'fail', hit_rate: 0.1 })
+      const stats = readLedgerStats(root)
+      expect(stats).toHaveLength(2) // 复核船 verifier-x 不单独成档——按调研船归并
+      const m53 = stats.find((s) => s.model === 'glm-5.3-flash')
+      const air = stats.find((s) => s.model === 'glm-4.5-air')
+      expect(m53?.runs).toBe(2)
+      expect(m53?.avg_hit_rate).toBeCloseTo(0.7)
+      expect(air?.runs).toBe(1)
+      expect(air?.levels.fail).toBe(1)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('orchestrator research > verify e2e（mock）', () => {
@@ -372,12 +427,16 @@ describe('orchestrator research > verify e2e（mock）', () => {
       expect(verdict.claims[0].status).toBe('supported')
       expect(verdict.claims[0].by).toBe('l1') // L1 数字回查自动标注优先（确定性优先于 LLM 意见）
       expect(verdict.fabricated_claims).toBe(0)
+      // verdict.model=调研船（L1 verdict 写入者，此处回落 brief.backend）；复核船在 verifier
+      expect(verdict.model).toBe('mock')
+      expect(verdict.verifier.model).toBeNull()
       expect(verdict.scores.coverage).toBe(100)
       expect(verdict.usage.internal_decision).toBe('ok')
       expect(verdict.usage.external_doc).toBe('ok')
       const ledger = fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'ledger.jsonl'), 'utf8')
       expect(ledger).toContain('"kind":"l2"')
       expect(ledger).toContain('"decision":"ok"')
+      expect(ledger).toContain('"researcher_model":"mock"') // L3 台账带调研船口径（model 是复核船，未指定 → null）
       const out = runOrch(repo.root, 'research stats')
       expect(out.stdout).toContain('次判定')
       // 否决链路：blockers>0 → mock 判 contradicted → 一票否决
