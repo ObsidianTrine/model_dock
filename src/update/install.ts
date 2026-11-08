@@ -338,11 +338,6 @@ export function buildWinInstallerCommand(
   return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${inner}"`] }
 }
 
-// 解压
-
-// 注：解压原语已收敛到 transfer.ts 的 extractArchive（tar / Expand-Archive 平台分支、可注入执行器），
-// 本域 run.ts 经 src/update/run.ts 从 transfer 引入，install.ts 不再各自维护一份。
-
 // 收尾
 
 /** 清理上一版残留（.old）：mac-app = <appRoot>.old；裸二进制 = <bin>.old + 托盘

@@ -195,8 +195,7 @@ export function redirectDaemonStderrToLog(): string | null {
 /** 分离拉起网关守护进程并轮询就绪（默认 20×250ms=5s；rounds 可调）。返回活网关状态；超时返回 null。
  *  probe 探活函数、spawnFn 执行器均可注入（单测传 fake，避免真实探测网关/起 daemon）。
  *  SEA 双击冷启逢 Defender/SmartScreen 扫描可能 >5s，GUI 路径（cli.ts launchGui）传更大 rounds。
- *  daemon 侧经 redirectDaemonStderrToLog() 自写 logs/daemon-<date>.log（cli.ts --sea-gateway 分支），
- *  本函数 stdio 全 ignore——pipe 转写会让父 CLI 就绪后仍被读端钉住不退出（CORRECT-07）。 */
+ *  daemon 侧经 redirectDaemonStderrToLog() 自写 logs/daemon-<date>.log（cli.ts --sea-gateway 分支）。 */
 export async function spawnDaemonAndWait(
   argv: string[],
   probe: () => Promise<GatewayStateFile | null> = gatewayLive,
@@ -206,8 +205,7 @@ export async function spawnDaemonAndWait(
   await ensureDir(modeldockDir())
   const child = spawnFn(argv[0], argv.slice(1), {
     detached: true,
-    // 全 ignore：daemon 崩溃/启动报错由 daemon 侧 fd 2 接管自写日志（见上），父进程不再持
-    // 任何子进程流——否则读端引用让 CLI 在就绪探测返回后仍无法退出
+    // 全 ignore：报错由 daemon 侧 fd 2 接管自写日志（见 redirectDaemonStderrToLog 注）；持流会被读端钉住不退出（CORRECT-07）
     stdio: ['ignore', 'ignore', 'ignore'],
     // daemon 与 CLI 语言一致：config.toml 尚无 language 时 CLI 的 --lang/环境变量选择也要传下去
     env: { ...process.env, MODELRDOCK_LANG: getLang() },
@@ -239,7 +237,6 @@ export function openUrlInBrowser(url: string, spawnFn: typeof spawn = spawn): Pr
   // start 把第一个带引号的参数当窗口标题：给空标题占位，URL 才不会被吞掉/被 shell 元字符截断
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url]
   return new Promise<boolean>((resolve) => {
-    // 异步 error 事件必须挂监听：Linux 无 xdg-open 时 spawn 失败不监听会让整个进程崩掉
     const child = spawnFn(opener, args, { detached: true, stdio: 'ignore', windowsHide: true })
     child.on('error', () => resolve(false))
     child.on('spawn', () => { child.unref(); resolve(true) })

@@ -296,7 +296,6 @@ export interface UsageSummary {
   window: { first: string | null; last: string | null }
 }
 
-/** 请求日志聚合（纯函数，单测共用）。成功 = status < 400；时延与用量只计成功请求。 */
 /** 聚合累加器：summarizeUsage（数组入参，单测/既有调用面）与 summarizeUsageDays（流式）
  *  共用同一套累加口径，两边结果逐字段一致。priceOf 注入时顺带累计成本（同一批成功条目）。 */
 export function createUsageAccumulator(priceOf?: PriceResolver) {

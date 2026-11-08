@@ -45,7 +45,7 @@ import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
 export interface UpdateRunOptions {
   repo: string
-  /** GitHub 访问令牌；null = 匿名（公开仓库默认；PAT 可选——私有仓库必需/提升限流） */
+  /** GitHub 访问令牌；null = 匿名（匿名/PAT 取舍口径见 config UpdateConfig.token_ref 注） */
   token: string | null
   yes: boolean
   /** 确认交互（CLI 默认 @inquirer/prompts；--yes / Web 端点传 () => true） */
@@ -122,10 +122,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   await sweepStaging()
 
   log(c.gray(t('正在检查新版本…', 'Checking for a new version…')))
-  // 第三参必须显式传 LOCALAPPDATA：漏传时 win-setup 判定回落占位用户目录（C:\Users\u\…），
-  // 真机路径永远不匹配 → 安装器用户被误判 win-bare，自更新退化成裸 zip 替换（跳过安装器登记、托盘不随更）。
-  // 第四参带卸载器指纹（仅 win 探测）：安装器装在自定义目录（可自选，非 LOCALAPPDATA 前缀）时
-  // 同样要认出 win-setup，否则该人群自更新永远走裸 zip、托盘停旧版（2026-10 用户实证 D:\Programs\ModelDock）
+  // 第三参必须显式传 LOCALAPPDATA、第四参带卸载器指纹（误判 win-bare 的踩坑语义见 detectInstallShape 注）
   const shape: InstallShape = detectInstallShape(
     execPath,
     platform,
@@ -220,7 +217,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
     const wasLive = await deps.gatewayWasLive()
     log(t('停止网关与托盘…', 'Stopping the gateway and tray…'))
     await deps.stopGateway()
-    await deps.stopTray(log) // 托盘停没停必须写进日志——静默失败会让托盘带锁活到向导（2026-10-28 实证）
+    await deps.stopTray(log) // 托盘停没停必须写进日志（无痕旧账见 install.ts stopTrayProcesses 注）
 
     try {
       if (shape === 'mac-app') {
@@ -236,11 +233,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
         log(c.green(t('✓ 已更新到 v{v}，正在重新启动 ModelDock…', '✓ Updated to v{v}; restarting ModelDock…', { v: m.version })))
         deps.openApp(appRootFromExecPath(execPath)!)
       } else if (shape === 'win-setup') {
-        // setup.exe 不能在更新器还持有自身 exe 锁时等待它跑完：分离拉起 cmd 串联
-        // （弹出与首次安装一致的向导，装完由 Inno [Run] 勾选拉起新托盘；失败/被取消时 `||`
-        // 拉回旧托盘兜底，不再整机失联），更新器随即退出释放锁。
-        // /DIR 钉死当前运行安装目录：更新原位落袋（用户当初选的路径），不依赖注册表记忆。
-        // /LOG 落 logs 目录：静默更新曾三连败于安装中途且无任何提示（2026-10-27 用户实证）。
+        // /DIR /LOG 旗标语义与 || 兜底：见 buildWinInstallerCommand 注（install.ts）
         const cmd = buildWinInstallerCommand(
           file,
           path.join(path.dirname(execPath), 'ModelDockTray.exe'),

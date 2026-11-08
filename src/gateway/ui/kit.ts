@@ -37,9 +37,8 @@ export const UI_JS_KIT = `(function () {
   function iconInline(name, size) {
     return '<span class="ic">' + icon(name, size) + '</span>'
   }
-  // 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / Esc+遮罩关闭 / aria / 底栏槽位。
-  // 此前 6 份手写壳两种背景、Esc 与遮罩关闭各有各的写法；底栏=可配置槽位（msg 槽 + 按钮序列），
-  // 谁有取消、谁是主按钮仍由调用方定（评审定稿语义不变）。scrim 沿用既有 overlay id——
+  // 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / Esc+遮罩关闭 / aria / 底栏槽位
+  // （msg 槽 + 按钮序列，谁有取消、谁是主按钮仍由调用方定——评审定稿语义不变）。scrim 沿用既有 overlay id——
   // id 作用域的 CSS/JS 引用全部保持有效；壳逐期迁入（未迁壳走原静态 HTML，互不影响）。
   var modalStack = []
   function createModal(opts) {

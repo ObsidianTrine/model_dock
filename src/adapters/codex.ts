@@ -158,7 +158,7 @@ export const codexAdapter: HarnessAdapter = {
       if (def) {
         root.model = def
         // Codex 对不在其内置表的模型按假定窗口处理（上下文余量显示与压实时机失真）：
-        // 随默认模型一并写入窗口与最大输出（解析链与 dsh/zcode 一致：配置 > 内置表 > 目录）。
+        // 随默认模型一并写入窗口与最大输出（解析链见 providers/resolve.ts，只补空）。
         // 根级键作用于当前激活模型，refreshBakedModelClients 重烙时随路由切换同步更新。
         const prof = cfg.profiles[opts.profile!]!
         const provider = prof.provider ? cfg.providers[prof.provider] : undefined

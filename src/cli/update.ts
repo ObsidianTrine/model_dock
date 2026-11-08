@@ -10,7 +10,7 @@ import { acquireUpdateLock } from '../update/lock.js'
 export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 
 /** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
- *  公开仓库匿名即可更新；--token 可选——私有仓库兼容模式或提升匿名限流（60 次/时 → 5000 次/时） */
+ *  匿名更新/PAT 取舍口径见 config UpdateConfig.token_ref 注（types.ts） */
 export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean; json?: boolean }): Promise<void> {
   // --clean 纯本地清理，不需要令牌与网络；但必须持更新锁——恰逢另一 update 在 rename dance
   // （旧 exe 已改名 .old、新 exe 未落位）或 mac 回滚窗口时，裸删 .old 会让失败回滚无从执行

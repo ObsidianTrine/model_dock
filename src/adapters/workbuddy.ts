@@ -235,7 +235,7 @@ export const workbuddyAdapter: HarnessAdapter = {
         apiKey: d ? d.key : opts.token,
       }
       // 视觉能力位（UI 同款字段）：能力已知才写（勾选 vision → true，明确非视觉 → false），
-      // 未知留空走应用默认——不编造能力；解析链与 dsh/zcode 一致（配置 > 内置表）
+      // 未知留空走应用默认——不编造能力；解析链见 providers/resolve.ts（只补空）
       const caps = resolveModelMeta(mid, provider?.models?.[mid], { baseUrl: provider?.base_url })?.capabilities
       if (caps !== undefined) entry.supportsImages = caps.includes('vision')
       return entry

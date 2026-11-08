@@ -156,7 +156,7 @@ export interface ImportStateConfig {
 /** 手机简版控制台（LAN）配置 */
 export interface LanConfig {
   enabled?: boolean
-  /** LAN 监听端口（默认 8787，避开主端口 8687 的 +1 顺延链；冲突自动 +1） */
+  /** LAN 监听端口（默认 8787，主端口顺延链 8687+10 之外避免撞车；冲突自动 +1） */
   port?: number
 }
 

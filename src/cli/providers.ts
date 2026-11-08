@@ -68,7 +68,7 @@ export async function refreshModelsInto(providerId: string, cfg?: Config): Promi
       const ex = models[id]
       // 上游自带能力（含 []=明确无视觉）只补空落盘；内置表推断的能力不落盘——保持读时解析，表更新即时生效
       const upCaps = fetched.meta[id]?.capabilities
-      // 填充链（只补空、不覆盖）：配置已有值 > 上游响应自带 > 内置表 > models.dev 目录
+      // 填充链走 resolveModelMeta 分层解析（只补空；见 providers/resolve.ts）
       const r = resolveModelMeta(id, ex ?? null, { upstream: fetched.meta[id], baseUrl: provider.base_url })
       if (!ex) {
         models[id] = {

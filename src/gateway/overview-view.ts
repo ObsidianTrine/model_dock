@@ -1,4 +1,4 @@
-/** 总览/视图域：buildConfigView、overview 缓存簇（TTL/单飞/SWR 决策）与 buildOverview、overview/tray/presence 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
+/** 总览/视图域：buildConfigView、overview 缓存簇（TTL/单飞/SWR 决策）与 buildOverview、overview/tray/presence 端点。 */
 import { createHash } from 'node:crypto'
 import { AdminCtx, persistConfig, jsonRequestBody, profileRefForProvider, sendError } from './admin-shared.js'
 import { allAdapters } from '../adapters/registry.js'
@@ -132,11 +132,9 @@ export async function overviewViewParsed(rt: GatewayRuntime): Promise<unknown> {
   return JSON.parse(data)
 }
 
-/** overview 视图串（hOverview 与 hTrayState 共用）：TTL 内命中缓存串；过期或配置代数前进
- * 走 SWR（旧串先行 + 后台单飞重建）；runtime 换代/异语言同步重建。写后读契约：stale 因
- * reloads 前进且重建已在飞（写后预热刚开跑）时 join 它拿新数据——UI 保存后立即 load() 不吃
- * 旧串；TTL 过期的常规轮询保持零等待先回旧串（Windows 冷探测不挡请求线程）。缓存键含请求
- * 语言：view 里的客户端卡片描述等文案随请求语言生成，语言不同不能互借缓存。 */
+/** overview 视图串（hOverview 与 hTrayState 共用）。hit/stale/miss 决策见 overviewServeDecision 注；
+ *  写后读契约：stale 因 reloads 前进且重建已在飞（写后预热刚开跑）时 join 它拿新数据——UI 保存后
+ *  立即 load() 不吃旧串。缓存键含请求语言：文案随请求语言生成，语言不同不能互借缓存。 */
 export async function overviewViewData(rt: GatewayRuntime): Promise<string> {
   const cached = overviewCache
   if (!cached) return rebuildOverview(rt)
@@ -151,9 +149,8 @@ export async function overviewViewData(rt: GatewayRuntime): Promise<string> {
   return rebuildOverview(rt)
 }
 
-/** 启动预热：后台构建一次 overview（顺带焐热适配器探测 memo、secrets 解密缓存与缓存串本身）。
- *  daemon 起来 2s 后用户大概率还没打开控制台——把 Windows 冷探测的数秒成本在无人等待时提前付掉，
- *  用户随后打开页面首屏直接命中或走 SWR 秒回。失败静默（下次请求/轮询照常重建）。 */
+/** 启动预热：后台构建一次 overview（顺带焐热适配器探测 memo、secrets 解密缓存与缓存串本身），
+ *  把 Windows 冷探测的数秒成本（见 overviewServeDecision 注）付在无人等待时；失败静默（下次请求/轮询照常重建）。 */
 export function warmupOverview(rt: GatewayRuntime, delayMs = 2_000): void {
   const timer = setTimeout(() => {
     overviewViewData(rt).catch(() => {})
@@ -161,11 +158,10 @@ export function warmupOverview(rt: GatewayRuntime, delayMs = 2_000): void {
   timer.unref?.()
 }
 
-/** 配置写后预热（reloadRuntime 调用，perf-p2-polish）：reloads 前进已降级 SWR 不挡请求线程，
- *  这里把新代数重建提前开跑——紧随写操作的 overview 读取经 join 在飞重建（见 overviewViewData）
- *  拿到新数据，旧串可见窗口从下一轮轮询缩到毫秒级。仅当已有缓存（页面打开过）才预热——冷启动
- *  由 warmupOverview 兜，守护启动不为此空转；重建期间又落下保存时由完成回调补排，追到新鲜为止
- *  （失败不追：等下一次请求/轮询按既有路径再试，防持续异常空转）。 */
+/** 配置写后预热（reloadRuntime 调用，perf-p2-polish）：SWR 降级后紧随写操作的 overview 读取
+ *  经 join 在飞重建拿到新数据（见 overviewViewData 注），旧串可见窗口从下一轮轮询缩到毫秒级。
+ *  仅当已有缓存（页面打开过）才预热——冷启动由 warmupOverview 兜；保存落在重建期间由完成回调补排；
+ *  失败不追（等下一次请求/轮询按既有路径再试），防持续异常空转。 */
 export function prewarmOverviewAfterWrite(rt: GatewayRuntime): void {
   const cached = overviewCache
   if (!cached || cached.rt !== rt) return
