@@ -59,7 +59,7 @@ sequenceDiagram
 | **常驻可靠** | `gateway install` 开机自启 + 崩溃自动拉起；macOS 菜单栏 / Windows 托盘常驻，关掉控制台窗口网关照跑，「轻量模式」一键只留托盘 |
 | **Web 与手机控制台** | 切路由、定时切换、换 key、装新客户端全都有图形界面；状态行实时显示今日请求数 / tokens / 估算成本（单价内置 models.dev 牌价，折扣 / 套餐价在 `~/.modeldock/pricing.json` 覆盖）；局域网内手机扫码开简版控制台，远程看状态、切服务（默认关闭，一键开启） |
 | **搬家与多机同步** | 加密配置包导出 / 导入 / 10 分钟一次性分享链接；`modeldock sync setup` 走 WebDAV 网盘或本地同步盘，多台电脑双向自动收敛，冲突不丢数据 |
-| **升级与扩展** | `modeldock update` 一条命令完成下载 → 校验 → 替换 → 自动重启；内置适配器（Claude Code / ZCode / dsh / Codex / OpenCode / MiMo / WorkBuddy / 通用 env），新客户端零代码声明式接入；存量配置可从 cc-switch、claude-code-router、one-api / new-api 等来源一键导入 |
+| **升级与扩展** | `modeldock update` 一条命令完成下载 → 校验 → 替换 → 自动重启，发现新版本即后台预下载、一键秒装；内置适配器（Claude Code / ZCode / dsh / Codex / OpenCode / MiMo / WorkBuddy / 通用 env），新客户端零代码声明式接入；存量配置可从 cc-switch、claude-code-router、one-api / new-api 等来源一键导入 |
 
 ## 快速开始
 
