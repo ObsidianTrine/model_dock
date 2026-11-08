@@ -123,6 +123,9 @@ attach can be re-run safely (idempotent update). View a harness's token: `modeld
 ```bash
 modeldock ui                      # ★ open the local Web console (browser logs in automatically)
 modeldock profile use <name>      # ★ switch provider: in gateway mode new requests go through the new route immediately, harness untouched
+modeldock gateway start --daemon  # start the gateway in the background (plain `gateway start` runs in the foreground; --debug for debug logs)
+modeldock gateway stop            # stop the gateway process only: the menu bar / tray icon stays; with auto-start installed it relaunches on next login
+modeldock gateway status          # gateway running & auto-start service state (detects a stale launch path registered in the service)
 modeldock gateway install         # ★ auto-start on boot (resident): registers a system service, launches on login, restarts on crash
 modeldock status                  # overview: gateway / active profile / where each harness points
 modeldock test [profile]          # connectivity self-test: key, model names, streaming, latency in one go

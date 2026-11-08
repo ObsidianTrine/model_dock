@@ -125,6 +125,9 @@ attach 可重复执行（幂等更新）。查看某个 harness 的 token：`mod
 ```bash
 modeldock ui                      # ★ 打开本地 Web 控制台（浏览器自动登录）
 modeldock profile use <name>      # ★ 切换供应商：网关模式下新请求立即走新路由，harness 不用动
+modeldock gateway start --daemon  # 后台启动网关（前台 gateway start 直接跑；--debug 开排障日志）
+modeldock gateway stop            # 只停网关进程：托盘图标保留；装过自启则下次登录自动再拉起
+modeldock gateway status          # 网关运行与自启服务状态（能检出服务里登记的失效启动路径）
 modeldock gateway install         # ★ 开机自启（常驻）：注册系统服务，登录自动拉起、崩溃自动重启
 modeldock status                  # 总览：网关 / active profile / 各 harness 指向
 modeldock test [profile]          # 连通性自测：key、模型名、流式、延迟一次说清

@@ -53,13 +53,13 @@ sequenceDiagram
 | Area | What you get |
 |------|--------------|
 | **Switch in one place** | `modeldock profile use <name>` or one click in the console — every attached client switches instantly, zero config changes |
-| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over to other enabled services; a service can carry multiple API keys — a rejected one cools down and the next takes over; change services by time of day (statutory holidays recognized automatically); pin a per-client service / model, or go "direct" past the gateway |
+| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over; multiple API keys rotate on cooldown; switch services by time of day (statutory holidays included); pin a per-client service or go "direct" |
 | **Key security** | Upstream keys live only in the local secure backend (macOS Keychain / Windows DPAPI / Linux Secret Service, with machine-bound-encryption fallback when no keyring exists); client configs contain only a local token; existing plaintext keys migrate automatically |
 | **Non-invasive & revertible** | Before `attach`, your existing configs are read-only; every write to a client config is auto-snapshotted, `detach` / `restore` revert in one command |
 | **Always-on** | `gateway install` registers auto-start with crash restart; a permanent macOS menu bar / Windows tray entry keeps the gateway running when the console window closes; "Lightweight mode" collapses everything to the tray |
-| **Web & phone console** | Switching routes, scheduled switching, key replacement and onboarding new clients all have a GUI; the status line shows today's requests / tokens / estimated cost in real time (prices ship from the models.dev list, discounted/plan pricing overridable in `~/.modeldock/pricing.json`); on the same LAN, scan a QR code to open the compact phone console (off by default, one-click enable) |
+| **Web & phone console** | Switching routes, scheduled switching, key replacement and client onboarding all have a GUI; the status line shows today's requests and estimated cost in real time; scan a QR code to open the compact phone console on your LAN (off by default, one-click enable) |
 | **Portability & multi-machine sync** | Export / import passphrase-encrypted config packages, or a 10-minute one-time share link; `modeldock sync setup` targets a WebDAV drive or a local sync folder — changes across your computers converge both ways, conflicts never lose data |
-| **Upgrades & extensibility** | `modeldock update` downloads → verifies → replaces → restarts the gateway in one command, with new versions prefetched in the background so one click installs in seconds; built-in adapters (Claude Code / ZCode / dsh / Codex / OpenCode / MiMo / WorkBuddy / generic env) plus declarative adapter packs for zero-code onboarding; existing configs import from cc-switch, claude-code-router, one-api / new-api and more |
+| **Upgrades & extensibility** | `modeldock update` upgrades in one command: new versions are prefetched in the background so one click installs in seconds; built-in adapters (Claude Code / ZCode / Codex and more, 8 kinds) plus declarative packs for zero-code onboarding; existing configs import from cc-switch / claude-code-router / one-api and more |
 
 ## Quick start
 
@@ -120,12 +120,16 @@ modeldock doctor                # per-client health check; --fix applies fixes (
 modeldock gateway log -f        # gateway request logs (prompts are never logged)
 modeldock profile use <name>    # switch provider — instant in gateway mode, zero client changes
 modeldock gateway install       # auto-start on boot (resident): launches on login, restarts on crash
+modeldock gateway stop          # stop the gateway: only the gateway process — the menu bar / tray icon stays (with auto-start installed, it relaunches on next login)
+modeldock gateway status        # gateway running & auto-start service state
+modeldock gateway rotate-token  # rotate the admin token; all existing logins expire
 modeldock update                # one-command upgrade: download → verify → replace → auto-restart gateway (--check to look only)
 modeldock model refresh <id>    # fetch the upstream model list automatically
 modeldock config export         # move to a new computer: export a passphrase-encrypted package (services/routes/presets/schedules, keys included)
 modeldock config import <file>  # import on the new computer: preview what will be replaced → confirm → auto-backup then apply
 modeldock sync setup            # multi-machine auto-sync: target = WebDAV drive / local sync folder, changes converge both ways
 modeldock detach <harness>      # restore the pre-attach original config
+modeldock restore <harness>     # revert to any snapshot (--list to show); detach is a full revert
 modeldock reset                 # reset config (snapshots kept, re-init later); --deep also clears logs, sync state and caches
 modeldock uninstall             # uninstall the program (config & keys kept); --purge wipes everything including config
 ```

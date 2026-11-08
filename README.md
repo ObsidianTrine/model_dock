@@ -53,13 +53,13 @@ sequenceDiagram
 | 领域 | 你能得到什么 |
 |------|--------------|
 | **一处切换** | `modeldock profile use <name>` 或控制台点一下，所有已接入客户端即时生效，配置文件零改动 |
-| **自动兜底与定时路由** | 主服务连不上 / 限流 / 额度用完，自动切到其他已启用服务；单个服务可配多把 API Key，被拒的那把自动冷却换下一把；可按时段自动换服务（法定节假日自动识别）；单个客户端可钉定专属服务 / 模型，或切「直连」不经网关 |
+| **自动兜底与定时路由** | 主服务连不上 / 限流 / 额度用完，自动切备用；多把 API Key 自动冷却轮换；按时段自动换服务（含法定节假日）；单个客户端可钉定专属服务或「直连」 |
 | **密钥安全** | 上游 key 只存本机安全后端（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环时回退机器绑定加密）；客户端配置里只有本地 token，明文存量自动迁移 |
 | **非侵入可回退** | 未 `attach` 前对你现有配置只读不写；写入客户端配置前自动快照，`detach` / `restore` 一键还原 |
 | **常驻可靠** | `gateway install` 开机自启 + 崩溃自动拉起；macOS 菜单栏 / Windows 托盘常驻，关掉控制台窗口网关照跑，「轻量模式」一键只留托盘 |
-| **Web 与手机控制台** | 切路由、定时切换、换 key、装新客户端全都有图形界面；状态行实时显示今日请求数 / tokens / 估算成本（单价内置 models.dev 牌价，折扣 / 套餐价在 `~/.modeldock/pricing.json` 覆盖）；局域网内手机扫码开简版控制台，远程看状态、切服务（默认关闭，一键开启） |
+| **Web 与手机控制台** | 切路由、定时切换、换 key、接入客户端全有图形界面；状态行实时显示今日请求与估算成本；手机扫码开局域网简版控制台，看状态、切服务（默认关，一键开） |
 | **搬家与多机同步** | 加密配置包导出 / 导入 / 10 分钟一次性分享链接；`modeldock sync setup` 走 WebDAV 网盘或本地同步盘，多台电脑双向自动收敛，冲突不丢数据 |
-| **升级与扩展** | `modeldock update` 一条命令完成下载 → 校验 → 替换 → 自动重启，发现新版本即后台预下载、一键秒装；内置适配器（Claude Code / ZCode / dsh / Codex / OpenCode / MiMo / WorkBuddy / 通用 env），新客户端零代码声明式接入；存量配置可从 cc-switch、claude-code-router、one-api / new-api 等来源一键导入 |
+| **升级与扩展** | `modeldock update` 一键升级：发现新版本后台预下载、一键秒装；内置适配器（Claude Code / ZCode / Codex 等 8 类）+ 新客户端零代码声明式接入；存量配置从 cc-switch / claude-code-router / one-api 等一键导入 |
 
 ## 快速开始
 
@@ -120,12 +120,16 @@ modeldock doctor                # 逐客户端体检；--fix 自动修复（敏�
 modeldock gateway log -f        # 网关请求日志（不落 prompt）
 modeldock profile use <name>    # 切换 provider，网关模式即时生效，零改动客户端
 modeldock gateway install       # 开机自启（常驻）：登录自动拉起、崩溃自动重启
+modeldock gateway stop          # 停止网关：只停网关进程，托盘图标保留（装过自启，下次登录仍自动拉起）
+modeldock gateway status        # 网关运行与自启服务状态
+modeldock gateway rotate-token  # 轮换管理令牌，旧登录全部失效
 modeldock update                # 一键升级：下载 → 校验 → 替换 → 自动重启网关（--check 只看不安）
 modeldock model refresh <id>    # 自动拉取上游可用模型列表
 modeldock config export         # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）
 modeldock config import <file>  # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup            # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
 modeldock detach <harness>      # 还原接入前的原始配置
+modeldock restore <harness>     # 还原到任意快照（--list 列出）；detach 是整体还原
 modeldock reset                 # 重置配置（快照保留，可重新 init）；--deep 连日志、同步状态与缓存一起清
 modeldock uninstall             # 卸载程序（配置与密钥保留）；--purge 连配置一起彻底清除
 ```
