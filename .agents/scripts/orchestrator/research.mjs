@@ -3,6 +3,7 @@
 //   extractCitations   正文引用行提取（URL 列表，去重保序）
 //   validateBriefBody  brief 正文校验：五段齐全 + 引用数达标（无引用即拒收——可对账底线）
 //   writeBrief         落盘 research/<id>/（meta.json + brief.md）
+//   writeBriefAuto     同 writeBrief，id 冲突自动派生 <id>-2…-9 落盘（同题重跑不裸崩）
 //   readBrief/listBriefs
 //   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
 // 设计：调研不是任务卡——没有 diff，不走施工队列/合并管线（queue.mjs 校验、classifyChange、
@@ -130,6 +131,26 @@ export function writeBrief(repoRoot, { id, title, question, backend, body }) {
   fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
   fs.writeFileSync(path.join(dir, 'brief.md'), `${body.trim()}\n`);
   return dir;
+}
+
+/**
+ * brief 落盘（id 冲突自动派生，2026-11-08 P1-④）：args 同 writeBrief。id 已存在时不抛错，
+ * 自动派生 `<id>-2`…`<id>-9` 逐个找空位落盘——同一问题短间隔重跑是常态（网关抖动重试、
+ * 人工复跑），id 派生比裸崩或人肉改名都便宜。返回 { dir, id }（id = 实际落盘 id，
+ * 调用方的回执/引用/快照一律用它，绝不能用模型自报的原 id）；9 个候选全占用抛可操作报错。
+ */
+export function writeBriefAuto(repoRoot, args) {
+  const candidates = [args.id, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${args.id}-${n}`)];
+  for (const id of candidates) {
+    if (!fs.existsSync(briefDir(repoRoot, id))) {
+      const dir = writeBrief(repoRoot, { ...args, id }); // 校验与落盘复用 writeBrief（id 格式、原子目录、meta 契约同源）
+      return { dir, id };
+    }
+  }
+  throw new Error(
+    `brief id "${args.id}" 及派生位 -2…-9 已全部占用（${researchDir(repoRoot)}）——同一问题已连跑 9 次。` +
+    `先 research list 清点旧 brief，人工归档（移出 research/ 目录）或删除不再需要的后再跑；或换更具体的问题表述让模型生成新 id。`,
+  );
 }
 
 /** 读单个 brief：{ dir, meta, body, citations }；不存在返回 null。 */
