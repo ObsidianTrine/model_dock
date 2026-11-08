@@ -9,7 +9,7 @@ export const UI_BODY_HTML = `<div class="wrap">
   <span id="syncBadge" class="pill" hidden></span>
   <span id="updBadge" class="pill" hidden></span>
   <span id="langSwitch" class="seg"><button type="button" data-lang="zh">中文</button><button type="button" data-lang="en">EN</button></span>
-  <span id="themeSwitch"><button type="button" id="themeBtn" class="tip" data-i18n-tip="主题：自动跟随系统 / 暗色 / 亮色||Theme: auto (follow system) / dark / light" data-tip="主题：自动跟随系统 / 暗色 / 亮色">🎨 自动</button></span>
+  <span id="themeSwitch"><button type="button" id="themeBtn">🎨 自动</button></span>
 </header>
 
 <div class="card migrate" id="migrateCard" hidden>
