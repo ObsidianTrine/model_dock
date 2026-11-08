@@ -149,7 +149,7 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 
 ## Security
 
-The gateway listens on `127.0.0.1` only and is not remotely accessible (by design); upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
+The main gateway listens on `127.0.0.1` only and is not remotely accessible (by design); the optional LAN mobile console is off by default and adds a second listener on the LAN when enabled (see the [security policy](SECURITY.md)). Upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
 
 ## Contributing
 
