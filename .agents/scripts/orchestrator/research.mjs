@@ -63,21 +63,53 @@ export function extractCitations(body) {
 }
 
 /**
- * brief 正文校验：五段标题齐全 + 引用段 URL 数 ≥ minCitations。
- * 无引用即拒收（调研的可对账底线——结论必须可溯源，AGENTS.md 错误信息风格：附修复建议）。
+ * 带访问日期的引用行提取（gate 计数口径，2026-11 编造引用防线）：
+ * 契约格式 `- YYYY-MM-DD <URL> — 来源名：一句话依据`。裸 URL 行不计入——
+ * 「引用日期」是本次会话访问证据的时刻，缺失/陈旧/未来都是编造信号（真实首跑实证：
+ * 模型曾把 2023 年训练先验写进 2026 年的「当前流行度」调研且引用日期全编成 2023）。
  */
-export function validateBriefBody(body, { minCitations = 1 } = {}) {
+export function extractDatedCitations(body) {
+  const out = [];
+  for (const m of String(body ?? '').matchAll(/^-\s*(\d{4}-\d{2}-\d{2})\s+(https?:\/\/[^\s)）\]。，、；！？;,!?]+)/gm)) {
+    const url = m[2].replace(/[.,;、。]+$/, '');
+    if (!out.some((c) => c.url === url)) out.push({ date: m[1], url });
+  }
+  return out;
+}
+
+/**
+ * brief 正文校验：五段标题齐全 + 带当日访问日期的引用 ≥ minCitations + 日期合理性。
+ * 无引用即拒收（调研的可对账底线）；引用行必须以访问日期开头（`- YYYY-MM-DD <URL> …`）：
+ *   - 未来日期 → 拒收（编造信号）；
+ *   - 距 today 超过 7 天（跨午夜容忍窗）→ 拒收（陈旧日期 = 拿旧数据冒充本次核查，
+ *     2026-11-08 首跑实证：引用日期全部编成 2023 年）。
+ * opts.today 注入 'YYYY-MM-DD' 供测试固定时钟；缺省取当前本地日期。
+ */
+export function validateBriefBody(body, { minCitations = 1, today = toIsoLocal().slice(0, 10) } = {}) {
   const text = String(body ?? '');
   for (const s of BRIEF_SECTIONS) {
     if (!new RegExp(`^#\\s*${s}\\s*$`, 'm').test(text)) {
       throw new Error(`brief 缺少「# ${s}」段——产出契约五段齐全（${BRIEF_SECTIONS.join('/')}），请补段后重试。`);
     }
   }
-  const citations = extractCitations(text);
-  if (citations.length < minCitations) {
-    throw new Error(`brief 引用数不足：找到 ${citations.length} 条，要求 ≥${minCitations}——结论必须带来源（# 引用 段每行一条 URL + 日期 + 一句话依据），无引用的调研不可对账，一律拒收。`);
+  const dated = extractDatedCitations(text);
+  if (dated.length < minCitations) {
+    throw new Error(`brief 引用数不足：带访问日期的引用 ${dated.length} 条，要求 ≥${minCitations}——# 引用 段每行必须以本次访问日期开头（"- ${today} <URL> — 来源名：依据"，裸 URL 行不计入），无引用的调研不可对账，一律拒收。`);
   }
-  return { citations };
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  for (const c of dated) {
+    const dMs = Date.parse(`${c.date}T00:00:00Z`);
+    if (!Number.isFinite(dMs)) {
+      throw new Error(`引用日期不合法："${c.date}"（${c.url}）——访问日期必须是 YYYY-MM-DD 格式，请修正后重试。`);
+    }
+    if (dMs > todayMs + 86_400_000) {
+      throw new Error(`引用日期在未来："${c.date}"（${c.url}）——今天才 ${today}，未来日期是编造信号，一律拒收。`);
+    }
+    if (todayMs - dMs > 7 * 86_400_000) {
+      throw new Error(`引用访问日期陈旧："${c.date}"（${c.url}）——今天是 ${today}，访问日期必须 ≈本次会话当日（容忍跨午夜 7 天）；陈旧日期 = 拿旧数据冒充本次核查，拒收后请重新检索并如实填当日日期。`);
+    }
+  }
+  return { citations: dated.map((c) => c.url) };
 }
 
 /**

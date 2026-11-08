@@ -44,14 +44,17 @@ describe('discovery-eval > 案例与评分', () => {
       '# 罗盘对齐',
       '对齐舰队可调研目标。',
     ].join('\n')
-    expect(gradeCase(c, good).pass).toBe(true)
-    expect(gradeCase(c, good).citations).toBe(1)
+    expect(gradeCase(c, good, { today: '2026-11-08' }).pass).toBe(true)
+    expect(gradeCase(c, good, { today: '2026-11-08' }).citations).toBe(1)
     const noCite = good.replace(/^- 2026-11-08 .+$/m, '')
-    expect(gradeCase(c, noCite).pass).toBe(false)
-    expect(gradeCase(c, noCite).reasons[0]).toMatch(/引用|段/)
+    expect(gradeCase(c, noCite, { today: '2026-11-08' }).pass).toBe(false)
+    expect(gradeCase(c, noCite, { today: '2026-11-08' }).reasons[0]).toMatch(/引用|段/)
+    // 陈旧日期 = 编造防线（gate 与 validateBriefBody 同口径）
+    expect(gradeCase(c, good, { today: '2027-01-01' }).pass).toBe(false)
+    expect(gradeCase(c, good, { today: '2027-01-01' }).reasons[0]).toMatch(/引用访问日期陈旧/)
     const missKey = good.replace('WebSearch 与 WebFetch 的取舍 [1]。', '别的结论。').replace('说明 websearch 与 webfetch', '依据')
-    expect(gradeCase(c, missKey).pass).toBe(false)
-    expect(gradeCase(c, missKey).reasons[0]).toMatch(/关键词命中/)
+    expect(gradeCase(c, missKey, { today: '2026-11-08' }).pass).toBe(false)
+    expect(gradeCase(c, missKey, { today: '2026-11-08' }).reasons[0]).toMatch(/关键词命中/)
     expect(gradeCase(c, null).pass).toBe(false)
   })
 
