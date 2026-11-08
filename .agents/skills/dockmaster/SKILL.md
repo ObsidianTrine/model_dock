@@ -1,6 +1,6 @@
 ---
 name: dockmaster
-description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或用自然语言指名派活（「让 dockmaster/坞长做 X」「派个任务给 dockmaster」「用前进2跑…」「开船：修一下 X」）时使用；用户说「自由航行」「自己给自己找活干/自己安排任务跑一段时间」「让它自主干一小时完了报告」时也路由到此（sail 模式）。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。支持对话指定档位（前进1-4）、引擎（harness）与服务商/模型。路由路径：research 上游调研（带引用 brief）、spec 三件套设计（先设计后施工，--from-brief 接调研结论）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、sail 自由航行（时间盒完全自治：自勘察自规划自执行，feature 提案自动跑到 spec 待人审为止，到点交航海报告）、propose 需求综合（autopilot）、release-propose 发版提案。仅当用户指名 Dockmaster 或明确要派自治任务时加载；只是提及 dockmaster 而非派活时先问一句，不要抢跑。
+description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或用自然语言指名派活（「让 dockmaster/坞长做 X」「派个任务给 dockmaster」「用前进2跑…」「开船：修一下 X」）时使用；用户说「自由航行」「自己给自己找活干/自己安排任务跑一段时间」「让它自主干一小时完了报告」时也路由到此（sail 模式）；说「调研一下 X」「先查查 X 再做」路由到 research；说「验证全链路」「跑个冒烟」路由到全链路冒烟配方（mock 沙箱零真钱）。驱动 .agents/scripts/orchestrator.mjs 自治闭环：拆任务卡、后台跑 headless worker、自动门禁与审查、合并到本地 develop（不 push 远程）。支持对话指定档位（前进1-4）、引擎（harness）与服务商/模型。路由路径：research 上游调研（带引用 brief）、spec 三件套设计（先设计后施工，--from-brief 接调研结论）、nightly/schedule 定时巡检与提案审阅、watch 连续自治运行、sail 自由航行（时间盒完全自治：自勘察自规划自执行，feature 提案自动跑到 spec 待人审为止，到点交航海报告）、propose 需求综合（autopilot）、release-propose 发版提案。仅当用户指名 Dockmaster 或明确要派自治任务时加载；只是提及 dockmaster 而非派活时先问一句，不要抢跑。
 ---
 
 # dockmaster —— Dockmaster 港务调度台
@@ -27,7 +27,7 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 - 船 ≠ workflow.json 默认（claude-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。全档位同船后，只有显式点名其他引擎（如 zcode）才带批准标志。
 - **自动升档不请示**：zcode 船 prompt 超限（AGENTS.md 等固定开销随仓库增长，>30k）且配置了 `escalation.enabled` 时，自动切 fallback 船完成本单（`engine_escalated` 留痕，预算延续），汇报时说明「已自动升档」即可；只有高成本选项（旗舰档/加大预算）才停下来问用户。claude 船 prompt 走文件无 argv 上限，该升档链仅对显式点名的 zcode 船生效。
 - 用户另指定模型/服务商：`--worker-model <模型名>`（ModelDock 网关按模型名路由服务商）；「审查用 zcode / 某模型」→ `--review-backend zcode-headless` / `--review-model <m>`（异构互审防共因盲区——全 claude 编队下互审同源，zcode 修复后可点回）。档位与显式模型可叠加，显式优先。
-- 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；探索性/架构级改动 → 建议路径 B（先设计后施工，见文末）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
+- 适用判定（不合适就拒绝并说理由）：验收标准写得出**可机器检查的断言**才收单；feature 级/探索性/架构级改动 → 走**上游管线**：research 调研 → spec 三件套 → 用户审设计 → spec build 拆卡 → 照常闭环（见文末「其他路径」前两条）。**同一个 task-id 不得与手动 feature-branch 混用**（worktree 会撞）。
 
 **写卡**（放 `.agents/orchestrator/drafts/<id>.md`，不入库；多任务拆多卡按文件分区）：
 
@@ -121,7 +121,21 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 ## 其他路径（细节见手册对应节，这里只留闸门纪律）
 
-- **上游调研（research）**：`research "<问题>"` 派只读+联网会话产出带引用的调研 brief（无引用即拒收）；feature 提案靠 `research: <brief id>` 关联它，`spec "<意图>" --from-brief <id>` 把结论带进设计。换网关/换源后先跑 `research --selftest` 实测 WebFetch/WebSearch 可用性（烧少量 token，须向用户说明）。
+- **上游调研（research）**：**触发**：用户说「调研一下 X」「先查查 X 再做」「X 现在业界怎么做」且未点名具体改码任务。`research "<问题>"` 派只读+联网会话产出带引用的调研 brief（`research/<id>/brief.md`，五段契约，**无引用即拒收**）+ `sources/` 引用快照；产出后向用户转述结论要点并给两条去路：只当调研看（到此为止），或接 `spec "<意图>" --from-brief <id>` 进设计。`research --selftest` 实测 WebFetch/WebSearch 可用性（烧少量 token，须向用户说明；换网关/换源后先跑）。
+- **全链路冒烟（mock 沙箱，零真钱）**：用户要「验证全链路 / 跑个冒烟 / 小测试」时按此配方——**必须在临时克隆里跑**（mock 会写 drafts/briefs/specs/queue，直接在真仓跑会污染真队列）：
+  ```bash
+  SB="$(mktemp -d)/upstream-smoke" && git clone -q --local "$(git rev-parse --show-toplevel)" "$SB" && cd "$SB"
+  # 轻量门禁（沙箱无 node_modules：testCmd/buildCmd 换成秒级空命令；worker/review 船换 mock 免引擎闸门）
+  node -e "const fs=require('fs'),f='.agents/workflow.json',j=JSON.parse(fs.readFileSync(f));j.testCmd='node -e \"process.exit(0)\"';j.buildCmd='node -e \"process.exit(0)\"';j.worker={backend:'mock'};j.review={backend:'mock'};fs.writeFileSync(f,JSON.stringify(j,null,2))"
+  orch() { node .agents/scripts/orchestrator.mjs "$@"; }   # zsh 不做变量分词，用函数别用 $O
+  orch research "mock websearch fallback" --backend mock            # ① 调研 → research/mock-websearch-fallback/brief.md（含引用）
+  orch spec "add research notes to readme" --from-brief mock-websearch-fallback --backend mock   # ② 规格 → specs/<spec-id>/ 三件套（brief 已注入）
+  orch spec build <spec-id>                                          # ③ 人审设计后拆卡 → pending/<spec-id>-t1,t2
+  ORCH_MOCK_FILE=docs/notes.md orch drain --backend mock             # ④ 闭环（mock 改 docs/notes.md 落在 files_hint 内）→ awaiting-human（gate=L3），orch approve <spec-id>-t1 合并
+  # 航次型一键验证（可选）：ORCH_MOCK_PLANNER_FEATURE=1 $O sail --duration 12s --interval 1 --backend mock
+  #   报告 logs/sail/<ts>/report.md 应含「上游管线：调研 brief … 已产出」「spec … 已落盘待人审」
+  ```
+  通过判据：① brief 五段齐全且引用 ≥1；② design.md 存在且含调研引用注入；③ 拆卡 id 与 spec 同源；④ drain 后 awaiting-human、approve 后 merged。**真链路验证**（去掉 `--backend mock` 用缺省 claude 船）烧真钱且经网关，必须用户显式授权后才能跑；跑前先 `research --selftest`。
 - **先设计后施工（spec）**：特性级改动用 `spec "<意图>" [--from-brief <brief-id>]` 出三件套——**设计必须用户亲自确认后才能 `spec build` 拆卡**（你不能代审）；拆出的卡 gate=L3，用户口头授权自动合并后可改 L1。
 - **巡检与提案（nightly / scan）**：`nightly` 零烧钱出提案落 drafts；逐张给用户一句话采纳建议，点头后 `submit`。`--plan` 烧钱跑 planner 需求综合。`autopilot.enabled` 开启后白名单提案自动提交（deps/feature/核心路径/人工草稿永不自动——feature 走上游管线）——开启属持久授权，**代改配置前必须先确认**。
 - **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
