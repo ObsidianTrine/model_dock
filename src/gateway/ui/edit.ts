@@ -748,6 +748,105 @@ export const UI_JS_EDIT = `  var editing = null
     return { load: load, collect: collect, el: root }
   }
 
+  // 模型级容灾块（同服务内 主模型→备用模型）：与 createFallbackBlock 同构（行列表 + 增删行，
+  // 保存收集成 { [from]: to } 整体替换）。行内双下拉选项 = 该服务的模型目录（两侧同源，同服务内映射）。
+  // 宿主 div 由工厂自挂：editM 的 bodyHtml 静态定义在 modals.ts（块宿主域，这里不动它），
+  // 启动期在 efFbHost 之后补插一次 <div id="efMfHost">（createModal 在启动期已建好弹层 DOM），
+  // 之后 beginLoad 只重写块内容。loaded=该服务的映射回填已成功返回；false 时保存不带
+  // model_fallback（服务端「字段缺省=不动」），回填失败绝不整表清空既有映射。
+  function createModelFallbackBlock(hostId, prefix, opts) {
+    var root = document.getElementById(hostId)
+    if (!root) {
+      root = document.createElement('div')
+      root.id = hostId
+      var anchor = document.getElementById('efFbHost')
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(root, anchor.nextSibling)
+    }
+    var gid = function (s) { return prefix + s }
+    var st = { loaded: false, models: [] }
+    function mfOpts(side, val) {
+      var out = '<option value="">' + (side === 'from' ? t('源模型…', 'Source model…') : t('备用模型…', 'Backup model…')) + '</option>'
+      ;(st.models || []).forEach(function (m) {
+        out += '<option value="' + esc(m.id) + '"' + (m.id === val ? ' selected' : '') + '>' + esc(m.id) + '</option>'
+      })
+      return out
+    }
+    function mfRowHtml(from, to) {
+      return '<div class="mrow fbrow">' +
+        '<select data-mf-from>' + mfOpts('from', from) + '</select>' +
+        '<select data-mf-to>' + mfOpts('to', to) + '</select>' +
+        '<span class="fbops"><button type="button" class="del" title="' + t('移除', 'Remove') + '">' + icon('close', 12) + '</button></span></div>'
+    }
+    function html() {
+      return '<div class="fsec-row">' +
+        '<label class="fsec" data-i18n="模型容灾（主模型额度耗尽时改发备用模型重试）||Model failover (retries with a backup model when the primary runs out of quota)">模型容灾（主模型额度耗尽时改发备用模型重试）</label>' +
+        '<button class="btn small" type="button" id="' + gid('MfAdd') + '" data-i18n="添加||Add">添加</button>' +
+        '</div>' +
+        '<div class="mtable fbtable">' +
+        '<div class="mhead"><span data-i18n="源模型||Source model">源模型</span><span data-i18n="备用模型||Backup model">备用模型</span><span></span></div>' +
+        '<div id="' + gid('MfRows') + '"></div>' +
+        '</div>'
+    }
+    function renderRows(map) {
+      var host = document.getElementById(gid('MfRows'))
+      if (!host) return
+      host.innerHTML = Object.keys(map || {}).map(function (from) { return mfRowHtml(from, map[from]) }).join('') ||
+        '<div class="mempty">' + t('暂无映射——未映射的模型永不触发容灾。', 'No mappings yet — unmapped models never trigger failover.') + '</div>'
+    }
+    function beginLoad(models) {
+      st.models = models || []
+      st.loaded = false
+      root.innerHTML = html()
+      renderRows(null)
+      applyI18nTree(root)
+    }
+    function applyMap(map) {
+      st.loaded = true
+      renderRows(map)
+    }
+    function collect() {
+      var out = {}
+      var err = ''
+      var dup = false
+      Array.prototype.forEach.call(root.querySelectorAll('#' + gid('MfRows') + ' .fbrow'), function (r) {
+        var from = (r.querySelector('[data-mf-from]').value || '').trim()
+        var to = (r.querySelector('[data-mf-to]').value || '').trim()
+        if (!from && !to) return // 误点「添加」的空行：忽略不提交
+        if (!from || !to) { err = t('模型容灾有未选完的行：源模型与备用模型都要选', 'Model failover has incomplete rows: pick both the source and the backup model'); return }
+        if (from === to) { err = t('模型容灾映射不能指向自身（{model}）', 'Model failover mapping cannot point to itself ({model})', { model: from }); return }
+        if (out[from]) dup = true
+        out[from] = to
+      })
+      if (dup) err = t('模型容灾有重复的源模型：同一个源模型只能有一条映射', 'Model failover has duplicate source models: one mapping per source model')
+      return { map: out, err: err }
+    }
+    root.addEventListener('click', function (e) {
+      var tg = e.target
+      if (!tg || !tg.closest) return
+      if (tg.id === gid('MfAdd')) {
+        if (!(st.models || []).length) {
+          opts.msg(t('该服务模型目录为空：先在「模型」块添加模型，或留空目录后用 config.toml 手编映射', 'The model catalog of this service is empty: add models in the "Models" block first, or leave the catalog empty and edit mappings in config.toml'), 'err')
+          return
+        }
+        var host = document.getElementById(gid('MfRows'))
+        if (host.querySelector('.mempty')) host.innerHTML = ''
+        var wrap = document.createElement('div')
+        wrap.innerHTML = mfRowHtml('', '')
+        host.appendChild(wrap.firstChild)
+        opts.msg('', '')
+        return
+      }
+      var r = tg.closest('.fbrow')
+      if (!r) return
+      if (tg.closest('.del')) r.remove()
+    })
+    return {
+      beginLoad: beginLoad, applyMap: applyMap, collect: collect,
+      isLoaded: function () { return st.loaded },
+      el: root,
+    }
+  }
+
   // 两壳的块实例：编辑（ef*）在此创建；添加（af*）在添加表单区创建
   // msg(text, cls)：写弹层左下角提示槽；cls 走 .testline.err / .testline.ok 语义色
   function testlineWriter(elId) {
@@ -771,6 +870,9 @@ export const UI_JS_EDIT = `  var editing = null
     msg: testlineWriter('efMsg'),
     getServices: function () { return view.services || [] },
     getSelfId: function () { return editing },
+  })
+  var efMfB = createModelFallbackBlock('efMfHost', 'ef', {
+    msg: testlineWriter('efMsg'),
   })
   // 模型目录保存前统一校验：NaN 字段标红该行输入框并提示；重复 id 提示。返回错误文案，无错返回 ''
   function validateModelCollect(collected, blockRoot) {
@@ -823,6 +925,15 @@ export const UI_JS_EDIT = `  var editing = null
     if (kt) { kt.innerHTML = icon('eye', 14); kt.title = t('显示明文', 'Show plaintext') }
     efModelB.load(s.models || [], s.defaultModel ?? '')
     efFbB.load(s.fallback || [])
+    // 模型容灾块：先按该服务模型目录出空态，再按需拉取已存映射回填（reveal-key 同款不进
+    // overview 轮询）。回填失败保持未载入态——保存不带 model_fallback，服务端缺省=不动，
+    // 绝不因回填失败整表清空既有映射；响应按 id 守卫（快速关开切服务时旧响应不串位）
+    efMfB.beginLoad(s.models || [])
+    api('/service/model-fallback', { method: 'POST', body: JSON.stringify({ id: editing }) })
+      .then(function (r) {
+        if (editing === r.id) efMfB.applyMap(r.model_fallback || {})
+      })
+      .catch(function () { /* 未载入态：保存不带该字段（服务端缺省=不动） */ })
     $('#efMsg').textContent = ''
     $('#efMsg').className = 'testline'
     editM.open()
@@ -855,6 +966,13 @@ export const UI_JS_EDIT = `  var editing = null
     if (key) body.key = key
     body.models = collected.models
     body.fallback = efFbB.collect()
+    // 模型容灾：只在回填成功后随保存提交（整体替换语义，空表=服务端删除字段）；
+    // 未载入（回填失败/在途）不带字段，服务端缺省=不动
+    if (efMfB.isLoaded()) {
+      var mf = efMfB.collect()
+      if (mf.err) { $('#efMsg').textContent = mf.err; $('#efMsg').className = 'testline err'; return }
+      body.model_fallback = mf.map
+    }
     // 全量替换语义（空串=清该协议端点）；默认协议那行落在 base_url，不重复存
     body.endpoints = {
       anthropic: ep.protocol !== 'anthropic' ? ep.urls.anthropic : '',

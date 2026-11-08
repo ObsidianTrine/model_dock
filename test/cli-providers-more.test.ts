@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import http from 'node:http'
+import path from 'node:path'
 import { once } from 'node:events'
 import { fakeHome } from './helpers.js'
 import {
   cmdModelCatalogRefresh,
+  cmdModelFallback,
   cmdModelList,
   cmdModelRefresh,
   cmdModelSet,
@@ -15,7 +17,8 @@ import {
 } from '../src/cli/providers.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { getSecret, setSecret } from '../src/config/secrets.js'
-import { secretsPath } from '../src/util/paths.js'
+import { clearPricingMemo } from '../src/gateway/pricing.js'
+import { configPath, pricingJsonPath, secretsPath } from '../src/util/paths.js'
 
 // cli/providers.ts 命令壳补测（cmdProviderAdd 已由 ops-addservice.test.ts 覆盖两条委托路径）：
 // 这里补 list/rm/set-key/model 系列与 add 的未知预设分支。纪律：
@@ -425,6 +428,145 @@ describe('cmdModelCatalogRefresh', () => {
     } finally {
       if (saved === undefined) delete process.env.MODELRDOCK_DISABLE_CATALOG_FETCH
       else process.env.MODELRDOCK_DISABLE_CATALOG_FETCH = saved
+      h.restore()
+    }
+  })
+})
+
+describe('cmdModelFallback', () => {
+  // 价格数据走手写 pricing.json（lookupPrice 会查 models.dev 目录兜底，手写保证确定性）；
+  // 写后必须 clearPricingMemo——5s 指纹回验窗内 memo 命中会吞掉新文件（含 missing→存在）
+  function seedPrices(entries: Record<string, { input: number; output: number }>): void {
+    fs.mkdirSync(path.dirname(pricingJsonPath()), { recursive: true })
+    fs.writeFileSync(pricingJsonPath(), JSON.stringify(entries), 'utf8')
+    clearPricingMemo()
+  }
+
+  async function seedFbProvider(): Promise<void> {
+    await mutateConfig((c) => {
+      c.security = { store: 'file' }
+      c.providers['fb'] = {
+        name: 'FB',
+        base_url: 'https://api.example.com',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'plain:sk-fb',
+        models: { m1: { source: 'manual' }, m2: { source: 'manual' }, m3: { source: 'manual' } },
+      }
+    })
+  }
+
+  it('配置一条合法映射：model_fallback 落盘，成功输出含触发条件说明', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, m2: { input: 1, output: 2 } })
+      await seedFbProvider()
+      await cmdModelFallback('fb', 'm1', 'm2', {})
+      const cfg = await loadConfig()
+      expect(cfg.providers['fb']!.model_fallback).toEqual({ m1: 'm2' })
+      const out = logs.join('\n')
+      expect(out).toContain('已配置模型容灾：m1 → m2')
+      expect(out).toContain('额度耗尽')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('价格差超限：exit(1)，报错含「超限」与提示行，且不落盘', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, m3: { input: 10, output: 20 } })
+      await seedFbProvider()
+      await expect(cmdModelFallback('fb', 'm1', 'm3', {})).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('超限')
+      expect(errs.join('\n')).toContain('提示')
+      const cfg = await loadConfig()
+      expect(cfg.providers['fb']!.model_fallback).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('目录成员校验：模型目录非空时源模型不在目录 → exit(1)', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, nope: { input: 1, output: 2 } })
+      await seedFbProvider()
+      await expect(cmdModelFallback('fb', 'nope', 'm2', {})).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('不在')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--rm 删空：整字段从 config.toml 移除', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, m2: { input: 1, output: 2 } })
+      await seedFbProvider()
+      await cmdModelFallback('fb', 'm1', 'm2', {})
+      await cmdModelFallback('fb', undefined, undefined, { rm: 'm1' })
+      const cfg = await loadConfig()
+      expect(cfg.providers['fb']!.model_fallback).toBeUndefined()
+      // 整字段移除：config.toml 文本不再出现 model_fallback（换行归一化后比对）
+      const text = fs.readFileSync(configPath(), 'utf8').replace(/\r\n/g, '\n')
+      expect(text).not.toContain('model_fallback')
+      expect(logs.join('\n')).toContain('已删除模型容灾映射')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--rm 删一条留多条：剩余映射保留', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, m2: { input: 1, output: 2 }, m3: { input: 1, output: 2 } })
+      await seedFbProvider()
+      await cmdModelFallback('fb', 'm1', 'm2', {})
+      await cmdModelFallback('fb', 'm3', 'm2', {})
+      await cmdModelFallback('fb', undefined, undefined, { rm: 'm1' })
+      const cfg = await loadConfig()
+      expect(cfg.providers['fb']!.model_fallback).toEqual({ m3: 'm2' })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--list：无映射给可操作提示；有映射逐条输出', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      seedPrices({ m1: { input: 1, output: 2 }, m2: { input: 1, output: 2 } })
+      await seedFbProvider()
+      await cmdModelFallback('fb', undefined, undefined, { list: true })
+      expect(logs.join('\n')).toContain('暂无模型容灾映射')
+      await cmdModelFallback('fb', 'm1', 'm2', {})
+      logs = []
+      await cmdModelFallback('fb', undefined, undefined, { list: true })
+      const out = logs.join('\n')
+      expect(out).toContain('m1 → m2')
+      expect(out).toContain('额度耗尽')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('provider 不存在：exit(1) 可操作报错（提示 provider list）', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      await expect(cmdModelFallback('ghost', 'm1', 'm2', {})).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('不存在')
+      expect(errs.join('\n')).toContain('provider list')
+    } finally {
       h.restore()
     }
   })
