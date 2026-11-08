@@ -9,7 +9,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Added
 
-- **Model-level failover**: when the primary model inside one provider runs out of quota, the gateway retries on a backup model of the same provider instead of switching the whole route to another provider. Only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the provider's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (enforced by the CLI/console write paths); **unmapped models never trigger**, so quality-sensitive roles such as reviewers and planners are never silently swapped. Enable with `model_fallback = { "primary" = "backup" }` in the service section of config.toml; changes hot-apply immediately.
+- **Model-level failover**: when the primary model inside one provider runs out of quota, the gateway retries on a backup model of the same provider instead of surfacing the quota error to the client. Only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the provider's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (enforced by the CLI/console write paths); **unmapped models never trigger**, so quality-sensitive roles such as reviewers and planners are never silently swapped. Configure with `modeldock model fallback <service-id> <primary> <backup>` or the "Model failover" block in the console edit dialog; `model_fallback = { "primary" = "backup" }` in the service section of config.toml is equivalent, and changes hot-apply immediately.
 
 ## [1.7.2] - 2026-11-08
 

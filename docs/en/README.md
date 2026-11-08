@@ -134,14 +134,14 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 
 ### Model-level failover (backup model within the same provider)
 
-**When the primary model runs out of quota, retry on a backup model of the same provider**: instead of switching the whole route to another provider, the gateway retries on the backup model you mapped inside the same service. Boundaries and protections: only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the service's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (the CLI/console write paths enforce the price gate; hand-edited config.toml only gets a shape check); **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Config example (changes hot-apply immediately):
+**When the primary model runs out of quota, retry on a backup model of the same provider**: the gateway retries on the backup model you mapped inside the same service, keeping quota exhaustion resolved within the provider. Boundaries and protections: only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the service's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (the CLI/console write paths enforce the price gate; hand-edited config.toml only gets a shape check); **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Config example (changes hot-apply immediately):
 
 ```toml
 [providers.acme]
 model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # primary model → backup model of the same service
 ```
 
-Model IDs come from the service catalog: run `modeldock model list <service-id>` to inspect; see the [config reference](config-reference.md) for the field details.
+Configure from the CLI or console: `modeldock model fallback <service-id> <primary> <backup>` (`--list` shows existing mappings, `--rm <primary>` removes one); in the console use the "Model failover" block of the edit-service dialog. Model IDs come from the service catalog: run `modeldock model list <service-id>` to inspect; see the [config reference](config-reference.md) for the field details.
 
 ## Documentation
 
