@@ -74,13 +74,14 @@ export function loadCases(repoRoot, onlyIds = null) {
   return cases.sort((a, b) => a.id.localeCompare(b.id))
 }
 
-/** 确定性评分：引用数达标 + 期望关键词命中率达标。 */
-export function gradeCase(c, briefBody) {
+/** 确定性评分：带当日访问日期的引用数达标 + 期望关键词命中率达标。
+ *  opts.today 注入固定时钟供测试（缺省真实今天——真跑时 researcher 被要求以当日日期引用）。 */
+export function gradeCase(c, briefBody, { today } = {}) {
   if (!briefBody) return { pass: false, reasons: ['无 brief 产出'] }
   const reasons = []
   let citations = 0
   try {
-    citations = validateBriefBody(briefBody, { minCitations: c.minCitations }).citations.length
+    citations = validateBriefBody(briefBody, { minCitations: c.minCitations, today }).citations.length
   } catch (e) {
     return { pass: false, reasons: [String(e.message).slice(0, 200)] }
   }

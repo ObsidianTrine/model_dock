@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { toIsoLocal } from './events.mjs';
 
 /** worker 结束前必须产出的契约块标记（fenced code block 的语言名）。 */
 export const RESULT_MARKER = 'agents-result';
@@ -471,17 +472,21 @@ export { BRIEF_MARKER };
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
  * 硬性要求）。goalsText：goals.md 罗盘全文（可选）——注入「罗盘对齐」段的判定依据。
  * minCitations 透传 research.mjs validateBriefBody（缺省 1）。
+ * 2026-11 编造引用防线：显式注入今天的日期（headless 会话对「当前日期」不可靠，真实
+ * 首跑曾把 2023 训练先验当 2026 现状且引用日期全编成 2023）+ gate 强校验引用日期
+ * ≈今天（未来/陈旧拒收）+ 一手来源优先、关键结论双源交叉。
  */
-export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', minCitations = 1 } = {}) {
+export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', minCitations = 1, today = toIsoLocal().slice(0, 10) } = {}) {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const clean = sanitizeIntent(questionText);
   const fence = '```';
   return (
     `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
     `# 任务：把下面的问题调研清楚，产出一份带引用的调研结论（research brief）\n\n` +
+    `今天是 ${today}——你输出的一切「当前/最新」都以它为准；你的训练知识可能过时，现状问题必须以本次检索结果为准。\n\n` +
     `调研问题：${clean}\n\n` +
     `你可以用 WebSearch / WebFetch 检索与阅读外部资料，用 Read/Glob/Grep 查看本仓库现状。\n` +
-    `你没有 Bash 也没有任何写文件工具——只调研，不改仓库。外部结论必须溯源，禁止编造来源。\n\n` +
+    `你没有 Bash 也没有任何写文件工具——只调研，不改仓库。\n\n` +
     (goalsText ? `## 项目罗盘（goals.md——「罗盘对齐」段对照它写）\n${String(goalsText).trim().slice(0, 2000)}\n\n` : '') +
     `# 产出契约\n\n` +
     `调研完成后，输出一个 fenced block（id 用小写短横线、体现问题主题）：\n\n` +
@@ -490,13 +495,15 @@ export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', mi
     `title: <一句话标题>\n` +
     `# 结论\n<直接回答调研问题；每条关键结论标注来源编号 [1] [2]…>\n\n` +
     `# 选项对比\n<有可比项时列表对比（方案/库/竞品/做法 × 优劣）；无则写「单结论问题，无选项对比」>\n\n` +
-    `# 引用\n<每行一条：- <访问日期 YYYY-MM-DD> <URL> — <一句话说明这条来源支撑什么>>\n\n` +
+    `# 引用\n<每行一条，必须以今天的访问日期开头：- ${today} <URL> — <来源名>：<一句话说明这条来源支撑什么>>\n\n` +
     `# 建议\n<落到本项目可执行的下一步建议（做/不做/先做什么）>\n\n` +
     `# 罗盘对齐\n<该结论与项目罗盘/现状的关系：对齐哪条、或说明为何值得偏离>\n` +
     `${fence}\n\n` +
     `硬性要求：\n` +
-    `1. 「# 引用」段至少 ${minCitations} 条真实可访问的 URL（带访问日期与一句话依据）——少于 ${minCitations} 条的产出会被直接拒收重做；\n` +
-    `2. 结论必须有来源支撑（[n] 标注），不确定的地方明说「未证实」，禁止编造；\n` +
-    `3. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `1. 「# 引用」段至少 ${minCitations} 条，且**每行必须以今天的访问日期 ${today} 开头**（格式：- ${today} <URL> — 来源名：依据）——无日期/旧日期/未来日期/裸 URL 行不计入，产出会被 gate 直接拒收重做（未来或陈旧日期视为编造）；\n` +
+    `2. 来源可信核查：**优先一手来源**（官方文档/官方公告/榜单原始页，如 OpenRouter Rankings、LMArena、HuggingFace、GitHub 官方仓库）；关键结论至少 2 个独立来源交叉；检索结果与你的训练知识冲突时以检索为准；\n` +
+    `3. 禁止编造：URL、日期、数据、型号名一律以本次检索所见为准；查不到就如实写「未证实」并减少结论，**不要为了凑引用数编造来源**；\n` +
+    `4. 结论必须有来源支撑（[n] 标注）；\n` +
+    `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
