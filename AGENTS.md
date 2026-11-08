@@ -113,7 +113,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 - **测试范围分层（2026-11-02 定）**：日常代码修改**只跑与改动相关的测试用例**，全绿即交付——按文件过滤（`npx vitest run test/<文件>.test.ts`；编排器改动用 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`），更窄再叠加 `-t "用例名关键词"`。**全量** `npm test` / `npm run test:workflow` 只在版本发布、develop→main 合并等大节点跑。注意下方 vitest 隔离模型：涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（如 `uninstall.test` / `store.test`），避免「单独跑绿、组合跑红」。
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
-- 套件：test/ 下 75+ 个文件（store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- 套件：test/ 下 223 个测试文件（产品套件 140 + 编排器套件 83；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
 - **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入 `VITEST`、种子脚本显式 `MODELRDOCK_TEST=1`、**agent CLI 环境标记**——`ZCODE_*`/`CLAUDECODE` 等，见 `src/util/fsx.ts` AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受误伤；有意写真实 home 的场景（当前仅 test/autostart.test.ts 的 win 真注册表用例）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687 / 8890 / 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
