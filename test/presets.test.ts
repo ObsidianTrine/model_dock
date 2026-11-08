@@ -205,4 +205,12 @@ describe('预设目录 2026-10-11 刷新（官方文档核对）', () => {
     expect(knownModelMeta('kimi-k2.7-code-highspeed')?.context_window).toBe(262144)
     expect(knownModelMeta('mimo-v2.6-flash')?.capabilities).toContain('vision')
   })
+
+  it('bigmodel 预设双协议：anthropic 兼容端点随预设下发（2026-11-08 官方文档核实，Claude Code 可直接钉）', () => {
+    const p = findPreset('bigmodel-openai')
+    expect(p).toBeTruthy()
+    // base_url 保持 OpenAI 兼容（paas/v4），anthropic 走独立兼容端点——双协议单条目（与 zai-anthropic 同形态）
+    expect(p!.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
+    expect(p!.endpoints?.anthropic).toBe('https://open.bigmodel.cn/api/anthropic')
+  })
 })
