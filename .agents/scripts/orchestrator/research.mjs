@@ -394,7 +394,28 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
   };
 }
 
-/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text }]。 */
+/**
+ * 快照骨架识别（2026-11-09，四组实验实测偏差源）：客户端渲染/被拦页面抓回来只有
+ * HTML 骨架（meta 有点、正文零字）——剥掉 script/style/标签后的可见文本长度低于
+ * SNAPSHOT_MIN_VISIBLE 即判骨架页。**只做标注与可观测，不改 claim 判级与 evidence
+ * 口径**：骨架页的 meta 描述也可能承载真实排名信息（top10 实测「Claude Code 落在
+ * 第二」即出自 meta），一刀切剔除会误杀合法 supported。
+ */
+export const SNAPSHOT_MIN_VISIBLE = 400;
+
+export function assessSnapshotUsability(text) {
+  const body = String(text ?? '').replace(/^url:.*$/m, '').replace(/^fetched_at:.*$/m, '');
+  const visible = body
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&amp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { usable: visible.length >= SNAPSHOT_MIN_VISIBLE, visibleChars: visible.length };
+}
+
+/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text, usable, visibleChars }]。 */
 export function loadSnapshots(repoRoot, id) {
   const dir = path.join(briefDir(repoRoot, id), 'sources');
   if (!fs.existsSync(dir)) return [];
@@ -402,7 +423,7 @@ export function loadSnapshots(repoRoot, id) {
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort()) {
     const raw = fs.readFileSync(path.join(dir, f), 'utf8');
     const url = /^url:\s*(.+)$/m.exec(raw)?.[1]?.trim() ?? f;
-    out.push({ url, text: raw });
+    out.push({ url, text: raw, ...assessSnapshotUsability(raw) });
   }
   return out;
 }
@@ -424,6 +445,7 @@ export function assessBrief(repoRoot, id, { model } = {}) {
   });
   const evidence = claimCheck.checked ? Math.round(claimCheck.hit_rate * 100) : null;
   const { scores, usage, level } = scoreVerdict({ claims: [], fabricatedCount: 0, citation, evidence });
+  const skeleton = snapshots.filter((s) => s.usable === false).length;
   const reasons = [];
   if (!snapshots.length) reasons.push('快照 0 份成功——L1 无法回查（网络/拦截原因，不计为编造）');
   else if (!claimCheck.checked) reasons.push('结论中无可回查的数字/型号 token——L1 不适用');
@@ -431,6 +453,7 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）`);
     if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
   }
+  if (skeleton) reasons.push(`⚠ ${skeleton}/${snapshots.length} 份快照为骨架页（正文未渲染/被拦）——meta 描述仍可佐证排名类结论，但数字类结论的可核性受限`);
   reasons.push('未跑 L2 复核（research verify <brief-id>）——claim 级覆盖与一致性未判定，internal_decision=undetermined');
   const verdict = {
     schema: VERDICT_SCHEMA,
@@ -439,6 +462,7 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     model: model ?? brief.meta.backend ?? null,
     created_at: toIsoLocal(),
     scores,
+    snapshots: { total: snapshots.length, usable: snapshots.length - skeleton, skeleton },
     claims: [],
     blockers: [],
     fabricated_claims: 0,
@@ -448,6 +472,21 @@ export function assessBrief(repoRoot, id, { model } = {}) {
   };
   fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
   return verdict;
+}
+
+/** research/verify 完成事件的飞书通知正文（纯函数）：判级 + usage 三字段 + 前 3 条理由。 */
+export function buildResearchNotifyBody(verdict) {
+  const u = verdict?.usage ?? {};
+  const icon = verdict?.level === 'pass' ? '✅' : verdict?.level === 'warn' ? '⚠️' : verdict?.level === 'fail' ? '⛔' : '❔';
+  const overall = verdict?.scores?.overall != null ? `（overall ${verdict.scores.overall}）` : '';
+  const lines = [
+    `${icon} ${verdict?.brief_id ?? '?'}——${verdict?.level ?? '?'}${overall}`,
+    `usage: browse=${u.browse ?? '?'} / decision=${u.internal_decision ?? '?'} / external=${u.external_doc ?? '?'}`,
+    ...(verdict?.claims?.length ? [`claims: ${verdict.claims.filter((c) => c.status === 'contradicted').length} contradicted / ${verdict.claims.filter((c) => c.status === 'unsupported').length} unsupported / 共 ${verdict.claims.length} 条`] : []),
+    ...(verdict?.reasons ?? []).slice(0, 3).map((r) => `· ${String(r).slice(0, 120)}`),
+    ...(verdict?.blockers?.length ? [`blockers: ${verdict.blockers.slice(0, 2).join('；')}`] : []),
+  ];
+  return lines.join('\n');
 }
 
 /** L3 台账：每次判定（L1/L2）追加一行——信任按 模型×引擎 攒统计量（drift 保险丝同哲学）。 */
