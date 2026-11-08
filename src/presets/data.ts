@@ -151,8 +151,10 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     ],
   },
   {
-    // 2026-10：bigmodel 的 anthropic 兼容端点已下线（用户实测不支持），只保留 OpenAI 兼容预设；
-    // 历史 id bigmodel-anthropic 不再内置，需要时走 presets.json 自定义
+    // 2026-11-08 按官方文档核实（docs.bigmodel.cn Claude API 兼容章节 / Claude Code 指南）：
+    // anthropic 兼容端点 https://open.bigmodel.cn/api/anthropic 在线可用，推翻下方 2026-10
+    // 「已下线」的旧结论——补成双协议单条目（与 zai-anthropic 同形态），Claude Code 可直接钉。
+    // 历史 id bigmodel-anthropic 不再恢复（单条目双端点即可，无需重复条目）。
     id: 'bigmodel-openai',
     slug: 'bigmodel',
     get label() { return t('智谱 GLM · bigmodel', 'Zhipu GLM · bigmodel') },
@@ -161,6 +163,7 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
     protocol: 'openai',
     auth_style: 'bearer',
     docs_url: 'https://docs.bigmodel.cn',
+    endpoints: { anthropic: 'https://open.bigmodel.cn/api/anthropic' },
     models: [
       m('glm-5.3', 1048576, 131072, TOOLS_REASON, { zh: 'GLM-5.3（旗舰）', en: 'GLM-5.3 (flagship)' }),
       m('glm-5.3-flash', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-Flash'),
