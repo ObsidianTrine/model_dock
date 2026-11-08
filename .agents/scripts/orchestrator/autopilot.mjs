@@ -3,6 +3,7 @@
 //   - workflow.json autopilot.enabled 总开关（缺省 false = 全人工，行为与历史版本一致）；
 //   - created_by: human 的人工草稿永不自动提交（drafts/ 里混着 intent --draft 的人工产物）；
 //   - deps 类型永不自动（依赖升级一律人工裁决）；
+//   - feature 类型永不直接自动（上游管线：research → spec → 人工审设计 → spec build）；
 //   - autoSubmitTypes 白名单圈定可自动提交的卡类型（缺省 ["docs"]，最保守）；
 //   - files_hint 命中 corePaths/releasePaths 永不自动（hintsOverlap 全通配判重叠——
 //     核心路径/发布流水线由 classifyChange 的 L2/L3 分级闸门兜底，这里提前挡掉省一轮
@@ -26,6 +27,7 @@ export function canAutoSubmit(meta, cfg) {
   if (!ap?.enabled) return { ok: false, reason: 'autopilot 未启用（workflow.json autopilot.enabled）' };
   if (meta.created_by === 'human') return { ok: false, reason: '人工草稿（created_by: human）永不自动提交' };
   if (meta.type === 'deps') return { ok: false, reason: 'deps 类型永不 autoSubmit（依赖升级人工裁决）' };
+  if (meta.type === 'feature') return { ok: false, reason: 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），永不直接 autoSubmit——与 canSailSubmit 同规则' };
   if (!Array.isArray(ap.autoSubmitTypes) || !ap.autoSubmitTypes.includes(meta.type)) {
     return { ok: false, reason: `type "${meta.type}" 不在 autopilot.autoSubmitTypes [${(ap.autoSubmitTypes ?? []).join(', ')}]` };
   }

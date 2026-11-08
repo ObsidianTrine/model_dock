@@ -46,6 +46,9 @@
   "scan": {
     "smartFilter": true
   },
+  "propose": {
+    "feedback": true
+  },
   "budgetProfiles": {
     "claude-headless": {
       "max_tokens": 20000000

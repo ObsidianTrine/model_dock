@@ -97,10 +97,11 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 |---|---|
 | `scan` | 巡检 6 类信号出提案，落 drafts/（**不进队列**） |
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
+| `research "<问题>"` | 上游调研（B3.5）：researcher 只读+联网会话产出带引用 brief；`--selftest` 实测联网工具可用性 |
 | `drafts gc [--apply]` | 提案清退（B13）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除） |
 | `nightly [--plan] [--auto N]` | 一次完整巡检编排；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
-| `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+自动提交→执行循环），到点收帆交航海报告 |
+| `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+上游管线/自动提交→执行循环），到点收帆交航海报告 |
 | `drill` | 弃船演习：临时港 mock 全链跑一张合成托运单，验证港口闭环自身健康（不烧真钱、不碰真队列） |
 | workflow.json `autopilot` | 白名单提案自动提交（**缺省关**；deps/核心路径/人工草稿永不自动） |
 
@@ -152,6 +153,14 @@ gate: L1                         # 允许自动合并的级别上限：L0 仅文
 fastlane: true                   # 可选：跳过 LLM 审查省最大开销（只省审查不省闸门，见 A8）
 tier: ahead-3                    # 可选：车钟档位 前进1-4（接口键 ahead-1..4，旧 heavy/light 兼容；见 A4）；缺省命中核心路径自动升 前进4
 ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒烟门禁（见 A8）
+research: websearch-fallback     # 可选（feature 提案必填）：调研 brief id 或 todo（上游管线，见 B3.5）
+score:                           # 可选：量化评分四因子 1-3 档（纯规则定序用，见 B3）
+  value: 2
+  effort: 1
+  confidence: 2
+  risk: 1
+evidence:                        # 可选：证据清单，一句话一条（与 score 配套）
+  - 巡检信号：docs/known-issues.md 未修条目
 ---
 
 # 目标
@@ -265,7 +274,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
   ```
 
   - **自动提交 ≠ 自动合并**：白名单提交的卡 gate 覆写 L1，实际自动合并仍由门禁对真实改动分级裁决——drift 降级、scope 越界、实际 L2/L3 照样挡回人工闸门。
-  - 永不自动提交（即使 enabled）：`deps` 类型、`created_by: human` 的人工草稿、files_hint 命中 corePaths/releasePaths 的卡。
+  - 永不自动提交（即使 enabled）：`deps` 类型、`feature` 类型（走上游管线 B3.5，2026-11 起）、`created_by: human` 的人工草稿、files_hint 命中 corePaths/releasePaths 的卡。
   - 开启即代表持久授权「该类型提案自动进队列」，替代逐卡对话确认。
 
 ### B2. 巡检（scan 的 6 类信号源）
@@ -277,7 +286,20 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 
 `propose`：goals.md + drafts 巡检信号 + 队列现状 → 一次只读 planner 会话产出至多 `maxProposalsPerCycle` 张高质量提案（验收标准带具体行为断言、files_hint 精确、目标对齐），落 drafts/；白名单卡立即自动提交。深化既有提案用**同 id**（落盘覆盖=升级）。烧钱动作；`nightly --plan` 与 watch（autopilot 开时）内部调用同一命令。
 
+- **feature 提案必带 research 行（2026-11）**：产出契约要求 feature 卡 frontmatter 写 `research: <brief id>`（无既有 brief 写 `todo`）——feature 不直接进队列，走上游管线（B3.5）。
+- **量化评分（可选，2026-11）**：frontmatter `score` 四因子 value/effort/confidence/risk 各 1-3 档 + `evidence` 证据数组（一句话一条）。纯规则消费（`orchestrator/score.mjs`，零 LLM）：只用于 drain **同优先级内定序**（带分先于无分、复合分降序），不越权改 gate/分级；证据不足就整体省略（宁缺毋滥）。
 - **舰队反馈（可选，workflow.json `"propose": { "feedback": true }`，缺省关 = prompt 与历史逐字节一致）**：开启后 planner prompt 在「队列现状」之后追加**舰队反馈**段——只放数据事实、不写硬指令，让 planner 按数据自行定 priority 取舍：近 7 天 near-miss 四类分布（watchdog suspect / 瞬时重试 / 偏航报警 / 事故调查包）、各 type 卡消化数据（merged 率 / merged 平均 wall / merged 平均 token 峰值）、质量漂移降级状态、goals.md「当前主题」摘录。数据与 `stats` 命令同源同口径（`orchestrator/stats.mjs` 的 `collectStatsSummary`，数据窗口固定近 7 天 = stats `--days` 缺省）；`nightly --plan` / watch / sail 内部走同一 propose 命令自动受益。
+
+### B3.5 上游管线（research → spec → 人工审设计 → spec build）
+
+**feature 类提案不直接进队列**（2026-11 Plan A：canSailSubmit / canAutoSubmit 双侧硬拒，白名单配置加回 feature 也不放大授权面），走四步管线——自动化的是「调研与设计稿」，**设计审批权永远在人**：
+
+1. **调研**：`research "<问题>"` 派 researcher 会话（工具面 = Read/Glob/Grep + WebFetch/WebSearch，无 Bash 无写，fail-closed 同 reviewer；maxTurns 25），产出 `research/<id>/brief.md` 五段契约（结论/选项对比/引用/建议/罗盘对齐）+ `sources/` 引用快照（尽力而为，单条失败不阻断）。**无引用即拒收**（引用 ≥ `--min-citations` 缺省 1）——结论必须可溯源，`research list` 查看。`research --selftest` 实测当前后端联网工具可用性（非 Anthropic 网关上 WebSearch 常不可用，此时退化 WebFetch-only、引用不足的 brief 被拒收重试；烧少量 token，换网关/换源后手动跑一次）。
+2. **提案关联**：propose 产 feature 卡 frontmatter 写 `research: <brief id | todo>`（queue.mjs 校验：brief id 语法或 `todo`；brief 存在性在消费侧查）。
+3. **spec 升级（sail 规划轮自动补齐）**：feature 提案缺 brief 则派调研（每周期上限 `freeSail.researchPerCycle` 缺省 2），brief 到手后 `specFromDraft` 以**提案同 id** 落 spec 三件套（每周期上限 `freeSail.specPerCycle` 缺省 1）；未完成下周期重试（提案同 id 覆盖=升级，不重复烧）。交互场景手动 `spec "<意图>" --from-brief <id>` 等价。
+4. **人审 + 拆卡**：spec 落盘即停——**等人审设计**；审完 `spec build <id>` 拆卡进队列（gate=L3），开发→测试→审查照走闭环。
+
+航海报告「为什么这么编排」如实收录上游管线去向（brief 产出 / spec 落盘待人审 / 失败原因与重试提示）。调研产出质量的回归评测见 D7（discovery-evals）。
 
 ### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
@@ -339,8 +361,8 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 
 `node .agents/scripts/orchestrator.mjs sail --minutes 120`（或 `--duration 2h|90m|1h30m`，可加 `--max-cost-usd N` 燃油上限）：船长自勘海况（scan 巡检）→ 自绘航线（propose 产卡，编排理由写在卡上）→ 自航自泊（drain 全门禁闭环）→ 到点收帆交**航海报告**——完成了什么、为什么这么编排、燃油账几何，落 `logs/sail/<ts>/report.md`（stdout 同文 + webhook 通知 + fleet 留痕，`sail_started`/`sail_finished`）。与 watch 的差别：有硬时长预算、报告收口、自动提交不依赖 autopilot 配置。
 
-- **授权模型**：人显式敲下带时长的 sail 命令 = 本航次自动提交授权。硬禁区不变（配置只收窄、永不放大）：`created_by: human` 人工草稿、`deps` 类型、files_hint 命中 corePaths/releasePaths 永不自动；类型白名单 workflow.json `freeSail.autoSubmitTypes`（缺省 `["docs","bugfix","refactor","feature"]`）；提交 gate 覆写 L1——实际合并仍由分级裁决 + drift 保险丝兜底。开航前已有的存量 drafts 永不自动提交。
-- **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + 自动提交 → 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效；**配置守卫例外**见 B12——workflow.json 被外部改写期间跳过派发与规划）。
+- **授权模型**：人显式敲下带时长的 sail 命令 = 本航次自动提交授权。硬禁区不变（配置只收窄、永不放大）：`created_by: human` 人工草稿、`deps` 类型、`feature` 类型（走上游管线 B3.5，2026-11 起——此前 feature 提案直接进队列，设计无人看过）、files_hint 命中 corePaths/releasePaths 永不自动；类型白名单 workflow.json `freeSail.autoSubmitTypes`（缺省 `["docs","bugfix","refactor"]`）；提交 gate 覆写 L1——实际合并仍由分级裁决 + drift 保险丝兜底。开航前已有的存量 drafts 永不自动提交。
+- **循环**：pending 非空 → `drain --max 1`（一次只派一张，每张之间重新看表）；队列空 → scan + propose + **上游管线（feature 提案派调研、升级 spec 落盘待人审，B3.5）** + 自动提交（非 feature）→ 立即派发；仍空 → 休眠 `--interval`（缺省 10 分钟）再看海况——planner 空手轮由休眠挡住，不会连环烧钱。每周期重读 workflow.json（改配置即时生效；**配置守卫例外**见 B12——workflow.json 被外部改写期间跳过派发与规划）。
 - **停止条件（任一）**：到达 `--minutes/--duration`、`.agents/orchestrator/.sail-stop` 文件（下周期即停并清文件）、drift 降级（人工 `drift --clear` 后再启）、`--max-tasks N` 派发上限、**`--max-cost-usd N` 燃油上限**（网关实测价 ≥ 上限即收帆并记 `sail_cost_cap`——**只停不换引擎**，换计费方必须人批；检查节流 60s）、连续 3 轮派发无进展（队列卡在待引水/解析失败时触发）。**软截止**：跑着的任务让它跑完，不超时强杀；风暴闸滞留期跳过派发与规划（scan 照跑——不派 worker），窗口滑过自动恢复。
 - **燃油账（报告「值不值得」的依据）**：本航次 [起航, 收帆] 网关实测 token × 价目 = USD（总账 + 逐卡拆账，逐卡按各自事件时间窗投影）；worker 直连上游时如实标「不可测」；收帆时若成本上限已触发，按完整航程重算覆盖触发时刻快照。
 - **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
@@ -432,7 +454,7 @@ drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 me
 
 ### D1. spec（特性级先设计后施工）
 
-`spec "<意图>"` → Planner 产出 requirements（用户故事 + EARS 验收）→ design（现状/方案/取舍/风险）→ tasks（可独立合并的任务段）三件套，落 `specs/<id>/` 人工审阅/手改 → `spec build <id>` 拆卡进队列（幂等；design 全文注入卡背景；tasks 的「文件」行直接成为 files_hint）。**人工闸门在「审设计」这一步**；拆出的卡 gate=L3，开发→测试→审查照走闭环。`spec status <id>` 看跨夜进度锚（progress.json）。
+`spec "<意图>" [--from-brief <brief-id>]` → Planner 产出 requirements（用户故事 + EARS 验收）→ design（现状/方案/取舍/风险）→ tasks（可独立合并的任务段）三件套，落 `specs/<id>/` 人工审阅/手改 → `spec build <id>` 拆卡进队列（幂等；design 全文注入卡背景；tasks 的「文件」行直接成为 files_hint）。**人工闸门在「审设计」这一步**；拆出的卡 gate=L3，开发→测试→审查照走闭环。`spec status <id>` 看跨夜进度锚（progress.json）。`--from-brief <id>` 把调研 brief 结论注入设计（上游管线 glue，B3.5；brief 缺失报错指路）。
 
 ### D2. release-propose（发版提案）
 
@@ -472,3 +494,7 @@ node .agents/scripts/fleet-console.mjs [--project <目录>]... [--days 7] [--jso
 ### D6. 验船师评测集（reviewer-evals）
 
 reviewer 的回归评测集在 `.agents/review-evals/reviewer/cases/`（合成 diff + 期望判定成对，覆盖端口/路径/atomicWrite/import.meta 红线、越界、Windows、i18n、断言假绿 + 1 个干净负样本）。跑分器 `node .agents/scripts/reviewer-eval.mjs`：默认 dry-run 零消耗；`--run --backend …` 真跑（烧钱，人工发起）；`--grade <目录>` 静态重放评分（CI 可用）。改 REVIEW.md / reviewer prompt / 审查模型后必跑一轮，分数低于基线不保留；出题纪律与评分口径见 `.agents/review-evals/reviewer/README.md`。
+
+### D7. 调研评测集（discovery-evals）
+
+researcher（B3.5）的回归评测集在 `.agents/discovery-evals/cases/`（`<id>.json`：question + goals + minCitations + 期望关键词 mustFind/mustFindAny）。跑分器 `node .agents/scripts/discovery-eval.mjs`：默认 dry-run 零消耗（顺带校验案例 schema）；`--run --backend …` 真跑（烧钱，人工发起）。评分是确定性规则——无引用即拒收（引用数达标）+ 关键词命中率；引用真伪以输出留档与 brief sources/ 快照人工复核为准。改 researcher prompt / 模型 / 换网关后必跑一轮；出题纪律见 `.agents/discovery-evals/README.md`。

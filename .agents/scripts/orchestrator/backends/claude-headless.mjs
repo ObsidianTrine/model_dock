@@ -146,8 +146,14 @@ export function newWorkerSettingsPath() {
   //（通常不存在）→ mkdtempSync ENOENT（2026-10-31 卡 17）
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-settings-')), 'worker-settings.json');
 }
-/** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。 */
-export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
+/** researcher 会话工具白名单（只读文件 + 联网检索；无 Bash 无写，fail-closed 同 reviewer）。
+ *  WebSearch 在非 Anthropic 后端可能不可用（不可用时会话内自然退化，产出引用不足即被
+ *  validateBriefBody 拒收）——research --selftest 供船东实测两条工具的可用性。 */
+export const RESEARCH_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+
+/** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。
+ *  web: true = researcher 会话（只读 + 联网白名单）；与 readonly 互斥时 web 优先。 */
+export function buildClaudeArgs({ maxTurns, readonly, web, model, settingsFile }) {
   const args = [
     '-p',
     '--output-format',
@@ -157,7 +163,11 @@ export function buildClaudeArgs({ maxTurns, readonly, model, settingsFile }) {
     String(maxTurns),
   ];
   if (model) args.push('--model', model);
-  if (readonly) {
+  if (web) {
+    // 调研会话：只读文件 + WebFetch/WebSearch，无 acceptEdits——headless 下未列入
+    // 白名单的工具调用被自动拒绝（fail-closed），编辑/命令不可能发生
+    args.push('--allowedTools', ...RESEARCH_TOOLS);
+  } else if (readonly) {
     // 只读会话（reviewer）：白名单收敛为只读工具，无 acceptEdits——headless 下
     // 未列入白名单的工具调用被自动拒绝（fail-closed），编辑/命令不可能发生
     args.push('--allowedTools', 'Read', 'Glob', 'Grep');
@@ -202,20 +212,20 @@ export function claudeSpawnInvocation(platform, args, { cwd, envPatch }) {
 export const claudeHeadlessBackend = {
   name: 'claude-headless',
 
-  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly, model, envPatch }) {
+  spawn({ promptFile, cwd, maxTurns, onEvent, settingsFile, readonly, web, model, envPatch }) {
     return new Promise((resolve, reject) => {
       const prompt = fs.readFileSync(promptFile, 'utf8');
-      const args = buildClaudeArgs({ maxTurns, readonly, model, settingsFile });
+      const args = buildClaudeArgs({ maxTurns, readonly, web, model, settingsFile });
 
       // detached：独立进程组，熔断时可整组 kill（kill-tree.mjs）——组装细节见
       // claudeSpawnInvocation（win32 shell 同语义探测纪律）
       const inv = claudeSpawnInvocation(process.platform, args, { cwd, envPatch });
       const child = spawn(inv.cmd, inv.args, inv.options);
-      // role 区分 worker/reviewer 会话：resolveBackendName 只认 worker 侧 spawn——
+      // role 区分 worker/reviewer/researcher 会话：resolveBackendName 只认 worker 侧 spawn——
       // 异构互审后事件流最后一条 spawn 是 reviewer 的引擎，不区分会让 retry/resume
       // 静默换船（2026-10-29 夜跑「静默换引擎」事故同型）；trackPid/cleanupOrphanWorker
-      // 两类都要（孤儿 reviewer 也得能杀）
-      onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
+      // 两类都要（孤儿 reviewer/researcher 也得能杀）
+      onEvent({ type: 'worker_spawned', role: web ? 'researcher' : readonly ? 'reviewer' : 'worker', backend: 'claude-headless', pid: child.pid, ...(model ? { model } : {}) });
 
       let tokensIn = 0;
       let tokensOut = 0;

@@ -29,11 +29,13 @@ import {
   moveCard,
   listCards,
   pickNextCard,
+  TASK_ID_RE,
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, sanitizeIntent, appendFollowUps, CARD_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -2941,6 +2943,14 @@ async function cmdPropose(repoRoot, opts) {
       log(`propose：planner 产出 ${blocks.length} 张 → 落提案 ${created.length} 张${rejected.length ? `，否决 ${rejected.length} 张` : ''}（上限 ${max}）。`);
       for (const c of created) log(`  提案：drafts/${c}.md`);
       for (const r of rejected) log(`  ✗ ${r}`);
+      // feature 提案提示（上游管线，2026-11 Plan A）：feature 不自动进队列——需调研 brief
+      // + spec 人工审设计；sail 航次会在规划轮自动补齐 research → spec 两步，交互场景给提示
+      const featureDrafts = created.filter((id) => {
+        try { return parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), `${id}.md`), 'utf8'), id).meta.type === 'feature'; } catch { return false; }
+      });
+      if (featureDrafts.length) {
+        log(`  ⛵ feature 提案 ${featureDrafts.join(', ')} 走上游管线：research brief → spec → 人工审设计 → spec build（sail 规划轮自动补齐；交互场景可先跑 research "<问题>" 再 spec "<意图>" --from-brief <id>）。`);
+      }
       // autopilot 白名单自动提交（提交后纳入本周期/下一次 drain）
       const submitted = autoSubmitProposals(repoRoot, root);
       return { created, submitted };
@@ -2964,14 +2974,22 @@ async function cmdPropose(repoRoot, opts) {
  */
 async function cmdSpecStart(repoRoot, opts) {
   const intentText = (opts.intent ?? []).join(' ').trim();
-  if (!intentText) die('用法：spec "<一句话描述特性>" [--backend mock]');
+  if (!intentText) die('用法：spec "<一句话描述特性>" [--from-brief <brief-id>] [--backend mock]');
   opts.backend = resolveBackendName(opts, null).name; // 同 intent：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
 
   try {
-    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes);
+    // --from-brief <id>：调研结论（research 命令产出的 brief）注入 spec prompt——上游管线
+    // 的 glue（brief → spec），spec 三件套/人工审设计/spec build 全流程零改动复用
+    let briefBody = '';
+    if (opts.fromBrief) {
+      const brief = readBrief(repoRoot, opts.fromBrief);
+      if (!brief) die(`调研 brief "${opts.fromBrief}" 不存在（目录 ${researchDir(repoRoot)}）。research list 查看已有 brief。`);
+      briefBody = brief.body;
+    }
+    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -3080,6 +3098,249 @@ function cmdSpecStatus(repoRoot, id) {
     log(`  [${String(t.status).padEnd(14)}] 任务 ${t.n}: ${t.title}（卡 ${t.card_id}）`);
   }
   log(`落位：${Object.entries(counts).map(([s, n]) => `${s} ${n}`).join('、') || '无'}（更新于 ${progress.updated_at}）`);
+}
+
+// ---------------------------------------------------------------------------
+// Researcher（上游管线第一环，docs 10.12）：Deep Research 式外部调研。产物 = 带引用
+// 的 brief（research/<id>/brief.md），供 feature 提案 research 字段与 spec --from-brief
+// 消费。调研不是任务卡：无 diff、不进施工队列。会话工具面 = 只读文件 + WebFetch/
+// WebSearch（backends RESEARCH_TOOLS；无 Bash 无写，fail-closed 同 reviewer）。
+// ---------------------------------------------------------------------------
+
+/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回 null。 */
+async function runResearchSession(repoRoot, { question, backendName, minCitations = 1, traceCommand = 'research' }) {
+  const backend = await getBackend(backendName);
+  const traceCfg = loadWorkflowConfig(repoRoot).trace;
+  const session = plannerTraceTaskId();
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-research-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-research-prompt-')), 'research-prompt.md');
+  try {
+    let promptText = buildResearchPrompt(sanitizeIntent(question), repoRoot, { goalsText: readGoals(repoRoot), minCitations });
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+      const startedAt = Date.now();
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // researcher 只读探索仓库（Read/Glob/Grep）+ 联网检索（WebFetch/WebSearch），无 Bash 无写
+        maxTurns: 25,
+        onEvent: () => {}, // 无任务事件线；researcher 用量不记账（同 planner 家族）
+        web: true,
+        settingsFile,
+      });
+      const parsed = parseBriefBlock(result.output ?? '');
+      tracePlannerSpawn({ repoRoot, session, traceCfg, command: traceCommand, backend: backendName, attempt, promptText, result, parsed: parsed ? { blocks: 1 } : null, startedAt });
+      if (!parsed) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${BRIEF_MARKER}${'```'} 契约块）\n请严格按产出契约重新输出：单个 agents-brief fenced block（id/title + 五段齐全）。`;
+          continue;
+        }
+        return null;
+      }
+      if (!TASK_ID_RE.test(parsed.id)) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（id "${parsed.id}" 不合法）\nid 只允许小写字母/数字/短横线，请修正 agents-brief 块后重新输出。`;
+          continue;
+        }
+        return null;
+      }
+      try {
+        validateBriefBody(parsed.body, { minCitations });
+      } catch (e) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次 brief 未通过校验）\n校验错误：${String(e.message).slice(0, 400)}\n请修正后重新输出完整契约块。`;
+          continue;
+        }
+        return null;
+      }
+      const dir = writeBrief(repoRoot, { id: parsed.id, title: parsed.title, question, backend: backendName, body: parsed.body });
+      return { id: parsed.id, dir, body: parsed.body, citations: extractCitations(parsed.body) };
+    }
+    return null;
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
+ * research——外部调研命令。产物：research/<id>/brief.md（五段契约 + 引用）+ sources/
+ * 引用快照（尽力而为）。--selftest 实测后端 WebFetch/WebSearch 可用性（非 Anthropic
+ * 网关上 WebSearch 常不可用；不可用时调研退化 WebFetch-only，引用不足的 brief 被拒收）。
+ */
+async function cmdResearch(repoRoot, opts) {
+  if (opts.flags?.has('--selftest')) return researchSelftest(repoRoot, opts);
+  const question = (opts.intent ?? []).join(' ').trim();
+  if (!question) die('用法：research "<调研问题>" [--min-citations N] [--backend mock]\n       research --selftest（实测当前后端联网工具可用性，烧少量 token）');
+  const minCitations = Number.isInteger(opts.minCitations) && opts.minCitations > 0 ? opts.minCitations : 1;
+  opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
+  log(`调研问题：${sanitizeIntent(question)}`);
+  const r = await runResearchSession(repoRoot, { question, backendName: opts.backend, minCitations });
+  if (!r) die(`Researcher 会话 3 次均未产出合规 brief（五段契约 + ≥${minCitations} 条引用）。\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`);
+  log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
+  log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
+  const snap = await snapshotCitations(repoRoot, r.id);
+  if (snap.failed.length) {
+    log(`  ⚠ ${snap.failed.length} 条快照失败（引用仍在 brief.md 可人工核）：${snap.failed.map((f) => f.url).slice(0, 3).join(', ')}${snap.failed.length > 3 ? '…' : ''}`);
+  } else {
+    log(`  ✓ ${snap.ok.length} 条引用已快照到 sources/（对账材料）`);
+  }
+  log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}`);
+}
+
+/** research --selftest：一次 6 轮会话实测 WebFetch/WebSearch，输出可用性结论与建议。 */
+async function researchSelftest(repoRoot, opts) {
+  opts.backend = resolveBackendName(opts, null).name;
+  const backend = await getBackend(opts.backend);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-selftest-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-selftest-prompt-')), 'selftest-prompt.md');
+  try {
+    fs.writeFileSync(promptFile, [
+      '# 联网工具可用性自检',
+      '',
+      '依次执行（各自最多尝试一次，失败就如实报 fail）：',
+      '1. 用 WebFetch 抓取 https://example.com ，确认拿到页面内容；',
+      '2. 用 WebSearch 搜索 modeldock gateway ，确认拿到搜索结果。',
+      '',
+      '最后只输出以下三行，不要输出其他内容：',
+      'WEBFETCH: ok 或 WEBFETCH: fail（附一句话原因）',
+      'WEBSEARCH: ok 或 WEBSEARCH: fail（附一句话原因）',
+      'SELFTEST-DONE',
+    ].join('\n'));
+    if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+    const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, settingsFile });
+    const out = String(result.output ?? '');
+    log(`═══ 联网工具自检（后端 ${opts.backend}）═══`);
+    const wf = /WEBFETCH:\s*(ok|fail)(.*)/i.exec(out);
+    const ws = /WEBSEARCH:\s*(ok|fail)(.*)/i.exec(out);
+    log(`- WebFetch: ${wf ? wf[1] + (wf[2]?.trim() ? `（${wf[2].trim()}）` : '') : '未报告（会话未按契约输出）'}`);
+    log(`- WebSearch: ${ws ? ws[1] + (ws[2]?.trim() ? `（${ws[2].trim()}）` : '') : '未报告（会话未按契约输出）'}`);
+    if (!ws || ws[1].toLowerCase() === 'fail') {
+      log('  → WebSearch 不可用（非 Anthropic 后端常态）：调研自动退化为 WebFetch-only（直取已知来源），引用不足的 brief 会被拒收重试。');
+    }
+    if (!wf || wf[1].toLowerCase() === 'fail') {
+      log('  → WebFetch 不可用：先查本机网络与网关连通性，再决定是否启用调研管线。');
+    }
+    log('提示：本轮自检经网关烧了少量 token（maxTurns=6）。');
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
+ * 提案 → 规格升级（上游管线 glue）：以提案目标为意图、brief 全文注入，spec planner
+ * 会话产出三件套落 specs/<draftId>/。与 cmdSpecStart 的差异：id 固定为提案 id（spec
+ * build 拆卡 id 与进度锚对齐）、无人值守（失败返回 false，由调用方记原因下周期重试）。
+ */
+async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }) {
+  if (listSpecs(repoRoot).includes(draftId)) return true; // 幂等：上周期已升级，等人审
+  const backend = await getBackend(backendName);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-prompt-')), 'spec-prompt.md');
+  try {
+    let promptText = buildSpecPrompt(sanitizeIntent(goal || draftId), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
+        maxTurns: 30,
+        onEvent: () => {},
+        readonly: true,
+        settingsFile,
+      });
+      const parsed = parseSpecBlocks(result.output ?? '');
+      if (!parsed || !parseTasksDoc(parsed.tasks).length) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出缺规格契约块或无任务段）\n请严格按产出契约重新输出：四个 fenced block 齐全，tasks 含「## 任务 N:」段（每段带 目标/文件/完成条件/依赖 四行）。`;
+          continue;
+        }
+        return false;
+      }
+      parsed.id = draftId; // 规格与提案同 id：spec build 拆出的卡 id（<id>-t<n>）与提案对齐
+      writeSpec(repoRoot, parsed);
+      return true;
+    }
+    return false;
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/** 把调研 brief id 盖进提案卡 frontmatter（research: todo/缺失 → research: <id>）。 */
+function stampResearchIntoDraft(repoRoot, draftId, briefId) {
+  const p = path.join(draftsDir(repoRoot), `${draftId}.md`);
+  if (!fs.existsSync(p)) return;
+  const text = fs.readFileSync(p, 'utf8');
+  const stamped = /^research:.*$/m.test(text)
+    ? text.replace(/^research:.*$/m, `research: ${briefId}`)
+    : text.replace(/^gate:.*$/m, `gate: L3\nresearch: ${briefId}`);
+  fs.writeFileSync(p, stamped);
+}
+
+/**
+ * sail 规划轮的上游管线（2026-11 Plan A）：新提案里的 feature 卡不直接进队列——先派
+ * 调研（缺 brief 的），brief 到手后自动升级 spec 三件套落盘**待人审**；人工审完设计
+ * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
+ * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
+ * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
+ */
+async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
+  const out = { researched: [], speced: [], failed: [] };
+  if (!proposals.length) return out;
+  const caps = {
+    research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
+    spec: Number.isInteger(cfg.freeSail?.specPerCycle) && cfg.freeSail.specPerCycle > 0 ? cfg.freeSail.specPerCycle : 1,
+  };
+  for (const p of proposals) {
+    if (p.type !== 'feature') continue;
+    let meta = null;
+    try {
+      meta = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), `${p.id}.md`), 'utf8'), p.id).meta;
+    } catch { continue; } // 损坏提案跳过（propose/drafts gc 自有生命周期管它）
+    if (listSpecs(repoRoot).includes(p.id)) continue; // 已升级过规格：等人审/build，不重复烧
+    let briefBody = null;
+    const briefId = meta.research && meta.research !== 'todo' ? meta.research : null;
+    if (briefId) {
+      briefBody = readBrief(repoRoot, briefId)?.body ?? null;
+      if (!briefBody) out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
+    } else if (out.researched.length < caps.research) {
+      log(`  ⛵ 上游管线：${p.id} 缺调研——派 researcher（问题取提案目标）`);
+      const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName });
+      if (r) {
+        out.researched.push(r.id);
+        briefBody = r.body;
+        stampResearchIntoDraft(repoRoot, p.id, r.id);
+        log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
+      }
+    }
+    if (!briefBody) {
+      if (!out.failed.some((f) => f.id === p.id)) out.failed.push({ id: p.id, reason: '缺调研 brief（派发失败或超本周期上限）——下一周期重试' });
+      continue;
+    }
+    if (out.speced.length < caps.spec) {
+      log(`  ⛵ 上游管线：${p.id} → spec 三件套（brief 注入，落盘待人审）`);
+      const ok = await specFromDraft(repoRoot, { draftId: p.id, goal: p.goal, briefBody, backendName });
+      if (ok) {
+        out.speced.push(p.id);
+        log(`  ✓ spec ${p.id} 已落盘——人工审阅设计后：spec build ${p.id}`);
+      } else {
+        out.failed.push({ id: p.id, reason: 'spec 升级失败（planner 未产出合规三件套）——下一周期重试' });
+      }
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -3627,6 +3888,9 @@ async function cmdSail(repoRoot, opts) {
         const draftsAfter = snapshotDrafts(repoRoot);
         const known = new Set(draftsBefore.map((d) => d.id));
         cycle.proposals = draftsAfter.filter((d) => !known.has(d.id));
+        // 上游管线（2026-11 Plan A）：feature 提案 → 派调研 → spec 落盘待人审；不进队列
+        //（bugfix/refactor/docs 照旧 sailAutoSubmit；feature 的提交拒绝理由见 canSailSubmit）
+        cycle.upstream = await sailUpstreamPipeline(repoRoot, cfg, cycle.proposals, opts.backend ?? cfg.worker?.backend);
         const sub = sailAutoSubmit(repoRoot, root, cfg, cycle.proposals.map((p) => p.id));
         cycle.submitted = sub.submitted;
         cycle.skipped = sub.skipped;
@@ -3800,10 +4064,14 @@ function usage() {
                                           清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
-  spec "<一句话描述特性>" [--backend mock]      规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡
+  spec "<一句话描述特性>" [--from-brief <brief-id>] [--backend mock]
+                                          规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡；--from-brief 把调研 brief 结论注入设计
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
+  research "<调研问题>" [--min-citations N] [--backend mock]
+                                          上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
+  research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
@@ -3865,6 +4133,8 @@ async function main() {
     else if (a === '--duration') opts.duration = argv[++i];
     else if (a === '--max-tasks') opts.maxTasks = parseInt(argv[++i], 10);
     else if (a === '--max-cost-usd') opts.maxCostUsd = parseFloat(argv[++i]);
+    else if (a === '--from-brief') opts.fromBrief = argv[++i];
+    else if (a === '--min-citations') opts.minCitations = parseInt(argv[++i], 10);
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
@@ -3920,6 +4190,9 @@ async function main() {
     }
     case 'propose':
       return cmdPropose(repoRoot, opts);
+    case 'research':
+      opts.intent = args;
+      return cmdResearch(repoRoot, opts);
     case 'drafts':
       if (args[0] !== 'gc') die('用法：drafts gc [--apply]（dry-run 缺省只列清单）');
       return cmdDraftsGc(repoRoot, opts);

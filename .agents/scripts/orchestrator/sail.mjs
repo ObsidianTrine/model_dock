@@ -19,8 +19,11 @@ import { fmtUsd } from './cost.mjs';
 /** 自由航行 stop 文件名（.agents/orchestrator/ 下，与 .watch-stop 同款语义）。 */
 export const SAIL_STOP_FILE = '.sail-stop';
 
-/** 自由航行自动提交的类型白名单缺省值（workflow.json freeSail.autoSubmitTypes 可收窄）。 */
-export const DEFAULT_SAIL_SUBMIT_TYPES = ['docs', 'bugfix', 'refactor', 'feature'];
+/** 自由航行自动提交的类型白名单缺省值（workflow.json freeSail.autoSubmitTypes 可收窄）。
+ *  feature 不在列（2026-11 Plan A）：feature 提案走上游管线（research → spec → 人工审
+ *  设计 → spec build），canSailSubmit 在白名单判定前就硬拒——白名单配置加回 feature 也
+ *  不会放大授权面（配置只收窄、永不放大）。 */
+export const DEFAULT_SAIL_SUBMIT_TYPES = ['docs', 'bugfix', 'refactor'];
 
 /**
  * 解析自由航行时长。opts.minutes：正数分钟；opts.duration：人话规格
@@ -55,12 +58,16 @@ export function parseDurationMinutes(opts = {}) {
  * 硬禁区不变（配置只收窄、永不放大）：
  *   - created_by: human 的人工草稿永不自动（等人工 submit）；
  *   - deps 类型永不自动（依赖升级牵一发动全身，人工裁决）；
+ *   - feature 类型永不直接自动——走上游管线：research brief → spec 三件套 → 人工审设计
+ *     → spec build 拆卡进队列（sail 在规划轮自动跑到「spec 落盘待人审」为止，2026-11
+ *     Plan A 收紧：此前 feature 提案直接进队列，设计无人看过）；
  *   - files_hint 命中 corePaths/releasePaths 永不自动（分级闸门兜底前先省一轮 worker）。
  * 注意：自动提交 ≠ 自动合并——提交的卡 gate 覆写 L1，实际合并仍由门禁对真实改动分级裁决。
  */
 export function canSailSubmit(meta, cfg) {
   if (meta.created_by === 'human') return { ok: false, reason: '人工草稿（created_by: human）永不自动提交' };
   if (meta.type === 'deps') return { ok: false, reason: 'deps 类型永不自动提交（依赖升级人工裁决）' };
+  if (meta.type === 'feature') return { ok: false, reason: 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），不直接自动提交——审完设计后跑 spec build 拆卡' };
   const whitelist = Array.isArray(cfg?.freeSail?.autoSubmitTypes) && cfg.freeSail.autoSubmitTypes.length
     ? cfg.freeSail.autoSubmitTypes
     : DEFAULT_SAIL_SUBMIT_TYPES;
@@ -271,11 +278,15 @@ export function buildSailReport(voyage) {
         if (c.submitted?.includes(p.id)) lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 已提交（gate=L1，进队列待派发）`);
         else lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 未提交（${c.skipped?.find((s) => s.id === p.id)?.reason ?? '未提交'}）`);
       }
+      // 上游管线（2026-11 Plan A）：feature 提案的去向——调研/spec/失败原因如实入报告
+      for (const id of c.upstream?.researched ?? []) lines.push(`  - ⛵ 上游管线：调研 brief ${id} 已产出（research/<id>/brief.md，带引用与快照）`);
+      for (const id of c.upstream?.speced ?? []) lines.push(`  - ⛵ 上游管线：spec ${id} 已落盘待人审——审完设计后跑 spec build ${id} 拆卡进队列`);
+      for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
     } else if (c.kind === 'idle') {
       lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟。`);
     }
   }
-  lines.push('- 授权边界：开 sail 即授权本航次自动提交（类型白名单 workflow.json freeSail.autoSubmitTypes，缺省 docs/bugfix/refactor/feature）；deps、人工草稿、核心/发布路径永不自动；提交 gate=L1 而实际合并由分级裁决 + drift 保险丝兜底——自动的是「进队列」，不是「进主干」。');
+  lines.push('- 授权边界：开 sail 即授权本航次自动提交（类型白名单 workflow.json freeSail.autoSubmitTypes，缺省 docs/bugfix/refactor；feature 永不直接提交——走上游管线 research → spec → 人工审设计 → spec build）；deps、人工草稿、核心/发布路径永不自动；提交 gate=L1 而实际合并由分级裁决 + drift 保险丝兜底——自动的是「进队列」，不是「进主干」。');
   lines.push('');
   return lines.join('\n');
 }
