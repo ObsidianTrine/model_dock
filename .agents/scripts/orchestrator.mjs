@@ -34,8 +34,8 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir } from './orchestrator/research.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, appendResearchLedger, readLedgerStats } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3196,7 +3196,20 @@ async function cmdResearch(repoRoot, opts) {
   } else {
     log(`  ✓ ${snap.ok.length} 条引用已快照到 sources/（对账材料）`);
   }
-  log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}`);
+  // L1 可信度初判（report-only）：数字/专名回查所引快照 + 引用深度比，落 verdict.json
+  const verdict = assessBrief(repoRoot, r.id, { model });
+  logVerdict(r.id, verdict, 'L1 快照回查');
+  log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
+}
+
+/** L1 判级结果统一播报（cmdResearch / 上游管线共用）。 */
+function logVerdict(id, verdict, tag) {
+  if (!verdict) return;
+  const cc = verdict.l1?.claim_check ?? {};
+  const icon = verdict.level === 'pass' ? '✓' : verdict.level === 'warn' ? '⚠' : verdict.level === 'fail' ? '⛔' : '·';
+  log(`${icon} 可信度初判（${tag}）：${verdict.level}${cc.checked ? `——数字回查 ${cc.hits}/${cc.checked}` : ''}`);
+  for (const line of verdict.reasons ?? []) log(`  · ${line}`);
+  if (verdict.level === 'fail') log(`  ⛔ 该 brief 建议作废重跑（可归档到 .agents/orchestrator/research-void/）`);
 }
 
 /** research --selftest：一次 6 轮会话实测 WebFetch/WebSearch，输出可用性结论与建议。 */
@@ -3239,6 +3252,92 @@ async function researchSelftest(repoRoot, opts) {
       fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
     } catch {}
   }
+}
+
+/**
+ * research verify <brief-id>——L2 异构复核（按需，落 spec/对外文档前跑）：
+ * readonly 复核会话拿 brief + 快照文本判内部一致性（结论是否被引用支撑），产出
+ * agents-verdict 契约块；与 L1 判级合并落 verdict.json 并记台账（L3）。
+ * 复核船解耦：backend 缺省 review.backend（异构互审同语义），model 缺省 review.model。
+ */
+async function cmdResearchVerify(repoRoot, id, opts) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) die(`brief "${id}" 不存在（${researchDir(repoRoot)}）。research list 查看已有 brief。`);
+  const snapshots = loadSnapshots(repoRoot, id);
+  const cfg = loadWorkflowConfig(repoRoot);
+  const backendName = opts.backend || cfg.review?.backend || 'claude-headless';
+  const model = opts.model || cfg.review?.model || undefined;
+  const backend = await getBackend(backendName);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-verify-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-verify-prompt-')), 'verify-prompt.md');
+  try {
+    const sourcesBlocks = snapshots
+      .map((s, i) => `### 快照 ${i + 1}：${s.url}\n${s.text.slice(0, 12_000)}`)
+      .join('\n\n');
+    let promptText = buildVerifierPrompt(brief.body, sourcesBlocks, repoRoot);
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot,
+        maxTurns: 15,
+        onEvent: () => {},
+        readonly: true, // 复核只读：判一致性不需要联网（快照已在材料里）
+        settingsFile,
+      });
+      const parsed = parseVerdictBlock(result.output ?? '');
+      if (!parsed) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}agents-verdict${'```'} 契约块）\n请严格按产出契约重新输出：level/blockers/理由 齐全。`;
+          continue;
+        }
+        die(`复核会话 3 次均未产出合规 verdict 契约块（--backend mock 可验证管线）。`);
+      }
+      // 合并 L1（既有 verdict.json）+ L2 判级；L2 在场时以 L2 为总体判级（逻辑一致性 > 数字回查）
+      let prev = {};
+      try { prev = JSON.parse(fs.readFileSync(path.join(brief.dir, 'verdict.json'), 'utf8')); } catch { /* 无 L1 */ }
+      const overall = parsed.level === 'high' ? (prev.level === 'fail' ? 'warn' : 'pass') : parsed.level === 'medium' ? 'warn' : 'fail';
+      const verdict = {
+        brief_id: id,
+        model: model ?? prev.model ?? null,
+        created_at: new Date().toISOString(),
+        l1: prev.l1 ?? null,
+        l2: { backend: backendName, model: model ?? null, level: parsed.level, blockers: parsed.blockers, reasons: parsed.reasons },
+        level: overall,
+        reasons: [...(parsed.reasons ?? []), ...(prev.reasons ?? []).slice(0, 3)],
+      };
+      fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
+      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, level: overall, hit_rate: prev.l1?.claim_check?.hit_rate ?? null });
+      log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
+      log(`- 复核判级：${parsed.level}（blockers=${parsed.blockers}）→ 总体：${overall}`);
+      for (const line of parsed.reasons ?? []) log(`  · ${line}`);
+      log(`结果落 ${brief.dir}/verdict.json；L3 台账已记（research stats 看按模型核实率）`);
+      return;
+    }
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/** research stats——L3 台账聚合：按调研船模型看核实率与判级分布（信任=统计量）。 */
+function cmdResearchStats(repoRoot) {
+  const rows = readLedgerStats(repoRoot);
+  if (!rows.length) {
+    log('台账为空——research / research verify 跑过判定后按模型聚合（信任=统计量，drift 保险丝同哲学）。');
+    return;
+  }
+  log('═══ 调研可信度台账（按调研船模型）═══');
+  for (const r of rows) {
+    const hr = r.avg_hit_rate == null ? '-' : `${Math.round(r.avg_hit_rate * 100)}%`;
+    const levels = Object.entries(r.levels).map(([k, n]) => `${k}:${n}`).join(' ');
+    log(`- ${r.model}：${r.runs} 次判定，L1 平均核实率 ${hr}，判级分布 {${levels}}`);
+  }
+  log('低核实率模型的调研应强制人工复核（自动降级为后续演进项）。');
 }
 
 /**
@@ -3305,7 +3404,7 @@ function stampResearchIntoDraft(repoRoot, draftId, briefId) {
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
  */
 async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
-  const out = { researched: [], speced: [], failed: [] };
+  const out = { researched: [], speced: [], failed: [], verdicts: [] };
   if (!proposals.length) return out;
   const caps = {
     research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
@@ -3331,6 +3430,13 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
         briefBody = r.body;
         stampResearchIntoDraft(repoRoot, p.id, r.id);
         log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
+        // L1 可信度初判（report-only）：快照 + 数字回查，落 verdict.json + 台账；fail 会亮牌但不阻断
+        //（管线是否消费 verdict 升级为 gate 属后续演进，先攒 near-miss 分布——晴雨表哲学）
+        await snapshotCitations(repoRoot, r.id);
+        const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
+        out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
+        logVerdict(r.id, verdict, 'L1 快照回查');
+        if (verdict?.level === 'fail') appendResearchLedger(repoRoot, { kind: 'l1', brief_id: r.id, model: cfg.research?.model ?? null, level: verdict.level, hit_rate: verdict.l1?.claim_check?.hit_rate ?? null });
       }
     }
     if (!briefBody) {
@@ -4080,6 +4186,9 @@ function usage() {
   research "<调研问题>" [--min-citations N] [--model <模型名>] [--backend mock]
                                           上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
   research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
+  research verify <brief-id> [--backend …] [--model m]
+                                          L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账——落 spec/对外文档前建议跑
+  research stats                          L3 可信度台账：按调研船模型聚合核实率与判级分布（信任=统计量）
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
@@ -4200,6 +4309,11 @@ async function main() {
     case 'propose':
       return cmdPropose(repoRoot, opts);
     case 'research':
+      if (args[0] === 'verify') {
+        if (!args[1]) die('用法：research verify <brief-id> [--backend <复核船>] [--model <名>]——L2 异构复核（readonly，落 verdict.json + 台账）');
+        return cmdResearchVerify(repoRoot, args[1], opts);
+      }
+      if (args[0] === 'stats') return cmdResearchStats(repoRoot);
       opts.intent = args;
       return cmdResearch(repoRoot, opts);
     case 'drafts':

@@ -464,9 +464,9 @@ export function parseSpecBlocks(text) {
 // 契约 + 引用），供卡 research 字段引用、spec --from-brief 消费。逻辑件在 research.mjs。
 // ---------------------------------------------------------------------------
 
-import { BRIEF_MARKER } from './research.mjs';
+import { BRIEF_MARKER, VERDICT_MARKER } from './research.mjs';
 
-export { BRIEF_MARKER };
+export { BRIEF_MARKER, VERDICT_MARKER };
 
 /**
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
@@ -505,5 +505,40 @@ export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', mi
     `3. 禁止编造：URL、日期、数据、型号名一律以本次检索所见为准；查不到就如实写「未证实」并减少结论，**不要为了凑引用数编造来源**；\n` +
     `4. 结论必须有来源支撑（[n] 标注）；\n` +
     `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// L2 可信度复核（research verify）：readonly 会话拿 brief + 快照文本做内部一致性
+// 审查——结论是否被引用支撑、有无训练先验冒充检索现状的迹象。产出 agents-verdict
+// 契约块（level/blockers/理由），与 L1 快照回查互补（L1 管数字对得上，L2 管逻辑自洽）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装 L2 复核 prompt。sourcesBlocks：快照文本（已截断拼接）；readonly 会话无联网——
+ * 只对给定材料判内部一致性，不给外部知识下结论（训练知识只用来标记「可疑冲突点」）。
+ */
+export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const fence = '```';
+  const CAP = 12_000;
+  const sources = String(sourcesBlocks ?? '').slice(0, CAP * 4);
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：复核一份调研 brief 的可信度（内部一致性审查）\n\n` +
+    `今天是 ${today}。你没有联网工具——只依据下面给定的 brief 与来源快照判断，不给材料之外的事实下结论。\n` +
+    `你的知识只用来标记「可疑冲突」（如 brief 所述与普遍认知明显矛盾处），标注为疑点而非定论。\n\n` +
+    `## 待复核 brief\n\n${String(briefBody ?? '').slice(0, CAP)}\n\n` +
+    `## 来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失——请把「快照缺失，无法对账」列为理由）'}\n\n` +
+    `# 产出契约\n\n` +
+    `${fence}${VERDICT_MARKER}\n` +
+    `level: high | medium | low（high=结论被快照支撑；medium=部分支撑/依赖转述；low=关键结论在快照中找不到依据或与快照矛盾）\n` +
+    `blockers: <低可信的硬伤数>\n` +
+    `# 理由\n- <逐条：结论↔快照的支撑关系、疑点、缺口；没把握写「疑点」>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
+    `2. brief 自己标注「未证实/转述」的地方不算硬伤（诚实标注是加分项）；\n` +
+    `3. 围栏外只允许一句话概述。\n`
   );
 }
