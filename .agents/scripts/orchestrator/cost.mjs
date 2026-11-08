@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { gatewayLogsDir, readGatewayLog } from './reconcile.mjs';
+import { fetchGatewayUsageSummary, gatewayLogsDir, readGatewayLog } from './reconcile.mjs';
 import { logDir, readEvents } from './events.mjs';
 import { resolveGatewayAdmin } from './tiers.mjs';
 
@@ -187,8 +187,11 @@ function readWindowEntries(gwDir, start, end) {
 }
 
 /**
- * 多窗口燃油实测（stats --cost / sail 总账+逐卡拆账共用）：一次日志扫描 + 一次价目请求
- * 服务全部窗口。windows: [{ key, start, end }]；results.get(key) = { measured, viaGateway,
+ * 多窗口燃油实测（stats --cost / sail 总账+逐卡拆账共用）：A3 优先走 /_modeldock/usage
+ * 聚合端点（admin 可得且未显式注入价目表时——cost=1，网关侧价目与 pricing-lookup 同源，
+ * cost.total 直接可用；逐窗口并发查询，任一窗口端点失败即整批落回文件扫描保口径一致）；
+ * 端点不可得 → 文件扫描 + 价目请求两条既有路径（一次日志扫描 + 一次价目请求服务全部窗口）。
+ * windows: [{ key, start, end }]；results.get(key) = { measured, viaGateway,
  * requests, usd, unpriced, reason? }。价目不可得 → 所有窗口 measured:false 附同一 reason。
  */
 export async function measureFuelBatch(repoRoot, cfg, windows = [], opts = {}) {
@@ -197,6 +200,38 @@ export async function measureFuelBatch(repoRoot, cfg, windows = [], opts = {}) {
   if (!gwDir) {
     const reason = '未启用网关日志（workflow.json gatewayLogDir 未配置）';
     return { source: 'unavailable', results: new Map(windows.map((w) => [w.key, { measured: false, reason }])) };
+  }
+  // A3：/usage 聚合优先（显式 opts.table = 价目调用方说了算，测试/复用语义——跳过走原路径）
+  if (!opts.table && resolveGatewayAdmin(cfg)) {
+    const settled = await Promise.all(
+      windows.map(async (w) => {
+        const u = await fetchGatewayUsageSummary(cfg, { fromMs: w.start - 60_000, toMs: w.end + 60_000, withCost: true });
+        if (!u.ok) return { w, failed: true };
+        const ok = u.summary.ok ?? 0;
+        if (!ok) return { w, zero: true };
+        return {
+          w,
+          result: {
+            measured: true,
+            viaGateway: true,
+            requests: ok,
+            usd: u.summary.cost?.total ?? 0,
+            unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
+          },
+        };
+      })
+    );
+    if (settled.every((s) => s.result || s.zero)) {
+      const results = new Map();
+      for (const s of settled) {
+        results.set(
+          s.w.key,
+          s.result ?? { measured: false, viaGateway: false, requests: 0, reason: '时间窗内网关零请求（worker 直连上游或无流量），成本不可测' }
+        );
+      }
+      return { source: 'gateway-usage', results };
+    }
+    // 任一窗口端点失败（含窗口超 31 天封顶 400）→ 整批落回文件扫描，结果口径保持一致
   }
   const lo = Math.min(...windows.map((w) => w.start));
   const hi = Math.max(...windows.map((w) => w.end));

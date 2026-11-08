@@ -11,9 +11,21 @@
 // 该 harness 的 429/5xx/quota 记录：命中 → 按结构化类定性（transient + 命中摘要）；
 // 未命中或无网关数据（未配 gatewayLogDir / 日志读取失败 fail-open / worker 绕行网关）
 // → 落回既有 stderr 正则兜底（正则保留不删，无网关场景是唯一识别面）。
+//
+// cause 精读（2026-11 A1）：状态码只说「失败」，日志 cause 字段说「为什么失败」——
+// 同一 429，key_cooldown（key 池冷却，等会儿就好）与 proto_endpoint_missing（模型×provider
+// 缺协议端点，重试纯属浪费）的处置完全不同。读取窗口条目时同时解析 cause/hint/tokenHint：
+//   proto_endpoint_missing  判定性失败（非 transient）——blocked 理由带 cause + hint 可操作报错；
+//   unauthorized            判定性失败（非 transient）——tokenHint 直接点名归因（替代人工翻日志）；
+//   quota                   transient + switchProvider 信号（建议换 provider）；
+//   key_cooldown/key_pool_empty  transient + retryMs（metrics keypool remaining_ms 推导，可得时）。
+// 其余 cause 不参与精读（该条仍按状态码计数走既有路径）；cause 与状态码冲突时 cause 优先
+// （如 404 + proto_endpoint_missing → 判定性失败，不因 5xx 误判 transient）。
+// fail-open 铁律：网关日志不可得 / 旧日志无 cause 字段 → 行为与历史版本逐字节一致。
 
 import { toIsoLocal } from './events.mjs';
 import { readGatewayLog } from './reconcile.mjs';
+import { resolveGatewayAdmin } from './tiers.mjs';
 
 /** 瞬时故障签名：限流（429/rate limit/overloaded）与网络层错误（连接重置/超时/挂起）、
  *  zcode CLI 的 ERA 连接协商失败（2026-11-03 航行实证：negotiateEra 崩溃间歇性发生、
@@ -30,6 +42,48 @@ export const TRANSIENT_RE =
  */
 export function isTransientWorkerFailure(output, stderrTail = '') {
   return TRANSIENT_RE.test(`${String(output ?? '')}\n${String(stderrTail ?? '')}`);
+}
+
+// ---------------------------------------------------------------------------
+// cause 精读（2026-11 A1）：网关日志 cause 字段参与集（枚举全集见 src/gateway/state/types.ts
+// LogEntry.cause——未列出的 cause 不参与精读，该条仍按状态码计数走既有路径）。
+// ---------------------------------------------------------------------------
+
+/** 判定性 cause：重试无意义，worker 不该原地重试（blocked 理由带可操作报错）。 */
+export const CRASH_CAUSE_DECISIVE = new Set(['proto_endpoint_missing', 'unauthorized']);
+/** 瞬时增强 cause：仍可退避重试，但事件/理由带更准的归因与（可得时的）重试窗口。 */
+export const CRASH_CAUSE_TRANSIENT = new Set(['quota', 'key_cooldown', 'key_pool_empty']);
+
+/** cause 缺 hint 时的兜底建议（旧版网关不写 hint 也要可操作）。 */
+const CAUSE_FALLBACK_HINT = {
+  proto_endpoint_missing: '该模型走此 provider 缺少对应协议端点——请在 ModelDock 换 provider 或补端点',
+  unauthorized: '请用 modeldock status 核对该 harness 的 token，并更新客户端配置的 key',
+  quota: '上游额度受限——建议在 ModelDock 换 provider 或等额度恢复',
+  key_cooldown: 'key 池冷却中，稍后自动恢复；也可在 ModelDock 补充可用 key',
+  key_pool_empty: '请在 ModelDock 补充可用 key 或换 provider',
+};
+
+/** keypool remaining_ms 推导重试窗口的钳制范围：下限避开 0ms 自旋，上限 10min（再长该人工决策）。 */
+export const RETRY_WINDOW_MIN_MS = 1_000;
+export const RETRY_WINDOW_MAX_MS = 600_000;
+
+/** 重试窗口钳制：keypool 余量 → [1s, 10min] 内的整数 ms（调用方直接当退避时长用）。 */
+export function clampRetryWindowMs(ms) {
+  return Math.min(Math.max(Math.round(ms), RETRY_WINDOW_MIN_MS), RETRY_WINDOW_MAX_MS);
+}
+
+/** cause 组的人类可读理由（blocked 理由 / worker_retry 事件 signature 用）：
+ *  可操作报错 = cause 短码 + 计数 + hint（网关 hint 优先，缺席用兜底）。 */
+function causeGroupReason(group, backend) {
+  const cause = group[0].cause;
+  const hint = group.find((g) => g.hint)?.hint || CAUSE_FALLBACK_HINT[cause] || '';
+  const head = `网关归因 ${cause}×${group.length}`;
+  if (cause === 'unauthorized') {
+    const tk = group.find((g) => g.tokenHint)?.tokenHint ?? '';
+    return `${head}：${backend ? `${backend} 使用的 token` : '客户端 token'}${tk ? `（前缀 ${tk}…）` : ''} 被网关拒绝——${hint}`;
+  }
+  if (cause === 'proto_endpoint_missing') return `${head}：重试无意义——${hint}`;
+  return `${head}：${hint}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +149,7 @@ export function readGatewayWindowEntries(gwDir, { startMs, endMs } = {}) {
 }
 
 /**
- * worker 异常结束分类（纯函数）：结构化信号优先，正则兜底。
+ * worker 异常结束分类（纯函数）：结构化信号优先，cause 精读其次，正则兜底。
  * @param {object} p
  * @param {string} [p.output] worker 输出
  * @param {string} [p.stderrTail] stderr 尾部
@@ -103,31 +157,97 @@ export function readGatewayWindowEntries(gwDir, { startMs, endMs } = {}) {
  *        null = 无网关数据，直接走正则）
  * @param {{startMs: number, endMs: number}|null} [p.window] 会话时间窗（entries 非 null 时必填）
  * @param {string} [p.backend] 执行船（harness 匹配用，如 zcode-headless）
- * @returns {{transient: boolean, source: 'gateway'|'regex', hits?: number, reason?: string}}
- *          gateway 命中时带 hits（条数）与 reason（如 "429×2, 503×1"）
+ * @param {number|null} [p.keypoolRemainingMs] metrics keypool 最早可用 key 的剩余冷却 ms
+ *        （classifyWorkerCrashFromDisk 注入；null = 不可得，key 池类 cause 不带 retryMs）
+ * @returns {{transient: boolean, source: 'gateway'|'regex', hits?: number, reason?: string,
+ *          decisive?: boolean, cause?: string, hint?: string, tokenHint?: string,
+ *          switchProvider?: boolean, retryMs?: number}}
+ *          gateway 命中时带 hits（条数）与 reason（状态码路径如 "429×2, 503×1"；cause 路径
+ *          为人类可读的可操作报错）；decisive=true = 判定性失败（proto_endpoint_missing/
+ *          unauthorized，重试无意义）；quota 命中带 switchProvider 信号；key 池类 cause 且
+ *          keypoolRemainingMs 可得时带 retryMs（已钳制 [1s, 10min]）
  */
-export function classifyWorkerCrash({ output = '', stderrTail = '', entries = null, window = null, backend = '' } = {}) {
+export function classifyWorkerCrash({ output = '', stderrTail = '', entries = null, window = null, backend = '', keypoolRemainingMs = null } = {}) {
   if (entries && window && Number.isFinite(window.startMs) && Number.isFinite(window.endMs)) {
     const lo = Math.min(window.startMs, window.endMs);
     const hi = Math.max(window.startMs, window.endMs);
-    const hits = [];
+    const statusHits = [];
+    const causeHits = []; // { cause, hint, tokenHint }
     for (const e of entries) {
-      if (!e || !isCrashStatus(e.status)) continue;
+      if (!e) continue;
       const ts = Date.parse(String(e.ts ?? ''));
       if (!Number.isFinite(ts) || ts < lo || ts > hi) continue;
       if (!harnessMatches(e.harness, backend)) continue;
-      hits.push(e.status);
+      const failed = e.status === undefined || (Number.isInteger(e.status) && e.status >= 400);
+      const cause = failed && typeof e.cause === 'string' ? e.cause : '';
+      if (cause && (CRASH_CAUSE_DECISIVE.has(cause) || CRASH_CAUSE_TRANSIENT.has(cause))) {
+        // cause 精读参与集：该条改走 cause 路径，不再计入状态码 tally（cause 优先）
+        causeHits.push({
+          cause,
+          hint: typeof e.hint === 'string' ? e.hint : '',
+          tokenHint: typeof e.tokenHint === 'string' ? e.tokenHint : '',
+        });
+        continue;
+      }
+      if (isCrashStatus(e.status)) statusHits.push(e.status);
     }
-    if (hits.length) {
-      const tally = {};
-      for (const s of hits) tally[s] = (tally[s] ?? 0) + 1;
+    // 状态码 tally（既有口径，确定性输出；cause 路径也用它拼「另有」段）
+    const statusTally = () => {
+      const t = {};
+      for (const s of statusHits) t[s] = (t[s] ?? 0) + 1;
       // 状态码升序（数字序）：对象键是整数码会自动按数字排，这里显式排序保证 reason 确定性
-      const reason = Object.keys(tally)
+      return Object.keys(t)
         .map(Number)
         .sort((a, b) => a - b)
-        .map((s) => `${s}×${tally[s]}`)
+        .map((s) => `${s}×${t[s]}`)
         .join(', ');
-      return { transient: true, source: 'gateway', hits: hits.length, reason };
+    };
+    // 决定性 cause 压过一切 transient 信号（含状态码 tally 里的 429/5xx——重试无意义）
+    const decisive = causeHits.find((c) => c.cause === 'proto_endpoint_missing') ?? causeHits.find((c) => c.cause === 'unauthorized');
+    if (decisive) {
+      const group = causeHits.filter((c) => c.cause === decisive.cause);
+      return {
+        transient: false,
+        source: 'gateway',
+        decisive: true,
+        cause: decisive.cause,
+        hits: group.length,
+        ...(decisive.hint ? { hint: decisive.hint } : {}),
+        ...(decisive.cause === 'unauthorized' && decisive.tokenHint ? { tokenHint: decisive.tokenHint } : {}),
+        reason: causeGroupReason(group, backend),
+      };
+    }
+    // 瞬时增强 cause：quota（建议换 provider）/ key_cooldown / key_pool_empty（keypool 余量
+    // 可得时推导重试窗口）；窗口里若另有无 cause 标注的状态码命中，拼进 reason 不丢信息
+    if (causeHits.length) {
+      const byCause = new Map();
+      for (const c of causeHits) {
+        if (!byCause.has(c.cause)) byCause.set(c.cause, []);
+        byCause.get(c.cause).push(c);
+      }
+      const primary = causeHits[0].cause;
+      const anyQuota = byCause.has('quota');
+      const keypoolish = primary === 'key_cooldown' || primary === 'key_pool_empty';
+      let reason = causeGroupReason(byCause.get(primary), backend);
+      if (byCause.size > 1) {
+        for (const [cause, group] of byCause) {
+          if (cause === primary) continue;
+          reason += `；${causeGroupReason(group, backend)}`;
+        }
+      }
+      if (statusHits.length) reason += `；另有无 cause 标注的状态码命中 ${statusTally()}`;
+      return {
+        transient: true,
+        source: 'gateway',
+        cause: primary,
+        hits: causeHits.length,
+        reason,
+        ...(anyQuota ? { switchProvider: true } : {}),
+        ...(keypoolish && Number.isFinite(keypoolRemainingMs) && keypoolRemainingMs > 0 ? { retryMs: clampRetryWindowMs(keypoolRemainingMs) } : {}),
+      };
+    }
+    if (statusHits.length) {
+      return { transient: true, source: 'gateway', hits: statusHits.length, reason: statusTally() };
     }
   }
   // 未命中或无网关数据：落回 stderr 正则（兜底保留——无网关场景是唯一识别面）
@@ -135,10 +255,52 @@ export function classifyWorkerCrash({ output = '', stderrTail = '', entries = nu
 }
 
 /**
- * classifyWorkerCrash 的落盘便捷版：从 gwDir 读窗口条目（fail-open → null）后分类。
- * orchestrator 派发点的接线用它；entries 可注入便于单测。
+ * metrics keypool 投影 → 最早可用 key 的剩余冷却 ms（全 provider 取最小：任何一把 key 恢复
+ * 即可承接重试）。无冷却中的 key / 字段缺席 → null。
  */
-export function classifyWorkerCrashFromDisk({ gwDir, output = '', stderrTail = '', window = null, backend = '' } = {}) {
+export function keypoolMinRemainingMs(j) {
+  const keypool = j?.keypool && typeof j.keypool === 'object' && !Array.isArray(j.keypool) ? j.keypool : {};
+  let min = null;
+  for (const p of Object.values(keypool)) {
+    for (const c of Array.isArray(p?.cooldown) ? p.cooldown : []) {
+      const ms = c?.remaining_ms;
+      if (Number.isFinite(ms) && ms > 0 && (min === null || ms < min)) min = ms;
+    }
+  }
+  return min;
+}
+
+/** 查 metrics 的 keypool 冷却余量（key_cooldown/key_pool_empty 重试窗口推导）。
+ *  admin 不可得 / 网关不可达 / 非 200 → null（调用方回落既有退避——fail-open）。 */
+async function fetchKeypoolRemainingMs(cfg, { timeoutMs = 3000 } = {}) {
+  const adm = resolveGatewayAdmin(cfg);
+  if (!adm) return null;
+  try {
+    const res = await fetch(`${adm.base}/_modeldock/metrics`, {
+      headers: { 'x-modeldock-admin': adm.adminToken },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return keypoolMinRemainingMs(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * classifyWorkerCrash 的落盘便捷版：从 gwDir 读窗口条目（fail-open → null）后分类。
+ * orchestrator 派发点的接线用它；entries 可注入便于单测。异步（A1）：窗口内确有 key 池类
+ * cause 时问一次 metrics 拿 keypool 余量推导重试窗口——admin 不可得/网关不可达 → null，
+ * 用调用方既有退避；正常路径（无 key 池 cause）零网络开销。
+ * 数据面保持网关日志文件直读（A3 取舍，与 upstreamSeaState 同理）：分类要逐条明细
+ * （status/cause/hint/harness/ts 逐条判定 + era 签名兜底），/_modeldock/usage 聚合端点
+ * 给不了；未来 /_modeldock/logs 明细端点落地后再切。
+ */
+export async function classifyWorkerCrashFromDisk({ gwDir, cfg = null, output = '', stderrTail = '', window = null, backend = '', keypoolTimeoutMs = 3000 } = {}) {
   const entries = window ? readGatewayWindowEntries(gwDir, window) : null;
-  return classifyWorkerCrash({ output, stderrTail, entries, window, backend });
+  let keypoolRemainingMs = null;
+  if (cfg && entries?.some((e) => e && (e.cause === 'key_cooldown' || e.cause === 'key_pool_empty'))) {
+    keypoolRemainingMs = await fetchKeypoolRemainingMs(cfg, { timeoutMs: keypoolTimeoutMs });
+  }
+  return classifyWorkerCrash({ output, stderrTail, entries, window, backend, keypoolRemainingMs });
 }

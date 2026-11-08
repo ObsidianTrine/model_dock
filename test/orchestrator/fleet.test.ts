@@ -18,12 +18,17 @@ import {
 } from '../../.agents/scripts/orchestrator/fleet.mjs'
 import { resolveGatewayAdmin } from '../../.agents/scripts/orchestrator/tiers.mjs'
 
-// admin 面 mock：/config（buildConfigView 投影）+ /metrics（providers/meltdown）
+// admin 面 mock：/v1/health（免鉴权探活）+ /config（buildConfigView 投影）+ /metrics（providers/meltdown）
 async function mockAdmin({ providers, harness, metricsProviders = {}, meltdown = [] } = {}) {
   const server = http.createServer((req, res) => {
     let body = ''
     req.on('data', (c) => (body += c))
     req.on('end', () => {
+      if (req.url?.split('?')[0] === '/v1/health') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+        return
+      }
       if (req.headers['x-modeldock-admin'] !== 'mock-admin') {
         res.writeHead(401)
         res.end('{}')
@@ -103,14 +108,66 @@ describe('fetchFleetState（快照拉取与压缩）', () => {
     }
   })
 
-  it('gatewayAdmin 未开 / 网关不可达 → unavailable（不抛出）', async () => {
+  it('gatewayAdmin 未开 / 网关不可达 → unavailable（不抛出）；不可达文案经探针定责', async () => {
     expect((await fetchFleetState({})).mode).toBe('unavailable')
     setEnv('http://127.0.0.1:1') // 端口 1 无监听 → 连接失败
     try {
       const s = await fetchFleetState({ gatewayAdmin: true }, { timeoutMs: 1500 })
       expect(s.mode).toBe('unavailable')
-      expect(s.reason).toBeTruthy()
+      expect(s.reason).toContain('网关不可达') // A4：探活失败 → 文案明确「网关不可达」
     } finally {
+      setEnv(undefined)
+    }
+  })
+
+  it('A4 定责探针：探活成功但 admin 拒证 → 「网关在线但 admin 凭据/接口异常」（非「不可达」）', async () => {
+    // /v1/health 免鉴权 200，admin 路径一律 401（凭据错误 ≠ 网关挂了）
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        if (req.url?.split('?')[0] === '/v1/health') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+          return
+        }
+        res.writeHead(401)
+        res.end('{}')
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    setEnv(`http://127.0.0.1:${port}`)
+    try {
+      const s = await fetchFleetState({ gatewayAdmin: true }, { timeoutMs: 1500 })
+      expect(s.mode).toBe('unavailable')
+      expect(s.reason).toContain('网关在线但 admin 凭据/接口异常')
+      expect(s.reason).not.toContain('网关不可达')
+    } finally {
+      server.close()
+      setEnv(undefined)
+    }
+
+    // /v1/health 也 401（鉴权覆盖全路径的网关形态）→ 不算「不可达」（有东西在应答），
+    // 归因为 admin/接口异常，health 非 200 作为线索附上
+    const server2 = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        res.writeHead(401)
+        res.end('{}')
+      })
+    })
+    await new Promise<void>((resolve) => server2.listen(0, '127.0.0.1', resolve))
+    const port2 = (server2.address() as AddressInfo).port
+    setEnv(`http://127.0.0.1:${port2}`)
+    try {
+      const s2 = await fetchFleetState({ gatewayAdmin: true }, { timeoutMs: 1500 })
+      expect(s2.mode).toBe('unavailable')
+      expect(s2.reason).toContain('网关在线但 admin 凭据/接口异常')
+      expect(s2.reason).toContain('/v1/health 返回 401')
+    } finally {
+      server2.close()
       setEnv(undefined)
     }
   })

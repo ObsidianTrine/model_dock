@@ -1,6 +1,6 @@
 // 海况数据面（A1，2026-11-04）测试：/_modeldock/metrics 消费——快照提取、节流缓存、
 // fetchSeaSnapshot（gatewayAdmin 门控）、countUpstreamStorm 同步桥（gwDir 同目录
-// gateway.json 信任域 + 日志扫描回落）+ drain 级 E2E（metrics 风暴 → 滞留派发）。
+// gateway.json 信任域 + /usage 聚合中间层 + 日志扫描回落）+ drain 级 E2E（metrics 风暴 → 滞留派发）。
 // 网关 mock 两种形态（fleet.test.ts 同款原则，绝不触达 8687/8890）：
 //   - 进程内 listen(0)：异步取数路径（fetchSeaSnapshot）——测试进程事件循环空闲可应答；
 //     base 一律经 ORCH_GATEWAY_BASE env 显式注入，杜绝 discoverGatewayState 摸到真实网关。
@@ -264,6 +264,48 @@ describe('weather > countUpstreamStorm 同步桥（gwDir 同目录 gateway.json 
       expect(countUpstreamStorm(logs, { windowMs: 15 * 60_000 })).toBe(1)
       expect(countUpstreamStorm(null, { windowMs: 15 * 60_000 })).toBe(0)
     } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('weather > countUpstreamStorm /usage 聚合中间层（A3：metrics 不可得时的次优数据面）', () => {
+  function mkModeldock(root: string, gatewayJson?: object) {
+    const logs = path.join(root, '.modeldock', 'logs')
+    fs.mkdirSync(logs, { recursive: true })
+    if (gatewayJson !== undefined) fs.writeFileSync(path.join(root, '.modeldock', 'gateway.json'), JSON.stringify(gatewayJson))
+    return logs
+  }
+
+  function writeGwEntry(logs: string, ageMs: number, status: number) {
+    const ts = toIsoLocal(new Date(Date.now() - ageMs))
+    fs.appendFileSync(path.join(logs, `gateway-${ts.slice(0, 10)}.jsonl`), JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', path: '/v1/messages', status }) + '\n')
+  }
+
+  it('metrics 不可得（404）→ by_status 计数（429+402，键口径可精确区分；文件里的条目不再计入）', async () => {
+    // mock 只伺服 /_modeldock/usage：metrics 键缺席 → 404 → seaSnapshotSync 落空 → usage 桥
+    const m = await spawnAdminMock({ 'GET /_modeldock/usage': { ok: true, usage: { requests: 6, ok: 1, failed: 5, by_status: { '429': 3, '402': 1, '500': 1, 'n/a': 2 } } } })
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-sea-usage-'))
+    try {
+      const logs = mkModeldock(root, { port: m.port, admin_token: 'mock-admin' })
+      writeGwEntry(logs, 0, 429) // 文件里的风暴信号：端点可得时不应被计入
+      writeGwEntry(logs, 60_000, 402)
+      expect(countUpstreamStorm(logs, { windowMs: 15 * 60_000 })).toBe(4) // by_status 429×3 + 402×1
+    } finally {
+      m.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('端点答 0（窗口内无风暴）→ 恒 0：端点优先于文件扫描（file 直读只剩兜底地位）', async () => {
+    const m = await spawnAdminMock({ 'GET /_modeldock/usage': { ok: true, usage: { requests: 1, ok: 1, failed: 0, by_status: {} } } })
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-sea-usage-zero-'))
+    try {
+      const logs = mkModeldock(root, { port: m.port, admin_token: 'mock-admin' })
+      writeGwEntry(logs, 0, 429) // 文件里有 429，但端点（网关权威聚合）说没有
+      expect(countUpstreamStorm(logs, { windowMs: 15 * 60_000 })).toBe(0)
+    } finally {
+      m.close()
       fs.rmSync(root, { recursive: true, force: true })
     }
   })

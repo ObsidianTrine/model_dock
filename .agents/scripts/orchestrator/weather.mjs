@@ -8,8 +8,10 @@
 // 上游海况（countUpstreamStorm）：网关先于 worker 看到上游限流（任何 harness 的流量
 // 都经它转发）——窗口内 429/402 合计达阈值同样滞留，风暴中比 worker 重试信号更早收帆。
 // 上游海况数据面（2026-11-04，A1）：优先消费 /_modeldock/metrics 的权威海况
-// （sea_state.storm + per-provider 滑窗错误分桶，5min 节流缓存）；admin 不可达/端点失败
-// 自动落回现有网关日志 429/402 扫描——观测失败绝不阻断派发（fail-open）。
+// （sea_state.storm + per-provider 滑窗错误分桶，5min 节流缓存）；metrics 不可得 →
+// /_modeldock/usage 聚合端点（A3，2026-11：by_status 的 429+402 计数，同步桥同款信任域
+// 与缓存）；端点也不可得 → 自动落回现有网关日志 429/402 扫描——观测失败绝不阻断派发
+//（fail-open）。
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
@@ -174,54 +176,98 @@ export async function fetchSeaSnapshot(cfg, { now = Date.now(), timeoutMs = 3000
 }
 
 /**
- * 同步桥（countUpstreamStorm 专用，因调度闸调用点为同步函数）：以 gwDir 同目录的
- * gateway.json 为唯一信任域与发现源——它就是网关日志所在的同一 ModelDock 安装
- * （<.modeldock>/logs ↔ <.modeldock>/gateway.json），测试 fixture 不放该文件即零网络。
- * 有意不读 ORCH_GATEWAY_* env：无 cfg 的同步路径里 env 发现锚不住信任域。
- * 取数用 spawnSync node -e（Node ≥22 内置 fetch；admin token 经子进程 env 传递，不进
- * argv）。失败/超时/解析失败 → null（调用方落回日志扫描），并把负结果写共享缓存。
+ * 同步桥的发现源（gwDir 同目录的 gateway.json 为唯一信任域）——它就是网关日志所在的
+ * 同一 ModelDock 安装（<.modeldock>/logs ↔ <.modeldock>/gateway.json），测试 fixture
+ * 不放该文件即零网络。有意不读 ORCH_GATEWAY_* env：无 cfg 的同步路径里 env 发现锚不住
+ * 信任域。缺失/损坏/字段不完整 → null。
  */
-function seaSnapshotSync(gwDir, { now = Date.now(), timeoutMs = SEA_SYNC_TIMEOUT_MS, okTtlMs = SEA_SNAPSHOT_TTL_MS, negTtlMs = SEA_SNAPSHOT_NEG_TTL_MS } = {}) {
-  let base = null;
-  let adminToken = '';
+function gwEndpointFromGwDir(gwDir) {
   try {
     const j = JSON.parse(fs.readFileSync(path.join(path.dirname(gwDir), 'gateway.json'), 'utf8'));
     if (Number.isInteger(j?.port) && j.port > 0 && typeof j?.admin_token === 'string' && j.admin_token) {
-      base = `http://127.0.0.1:${j.port}`;
-      adminToken = j.admin_token;
+      return { base: `http://127.0.0.1:${j.port}`, adminToken: j.admin_token };
     }
   } catch { /* 缺失/损坏 = 未发现 → 日志扫描 */ }
-  if (!base) return null;
-  const cached = seaCacheGet(base, now, okTtlMs, negTtlMs);
+  return null;
+}
+
+/**
+ * 同步桥（countUpstreamStorm 专用，因调度闸调用点为同步函数）：spawnSync node -e 取数
+ * （Node ≥22 内置 fetch；admin token 经子进程 env 传递，不进 argv）。失败/超时/解析失败
+ * → null（调用方落回日志扫描），并把负结果写共享缓存。
+ */
+function seaSnapshotSync(gwDir, { now = Date.now(), timeoutMs = SEA_SYNC_TIMEOUT_MS, okTtlMs = SEA_SNAPSHOT_TTL_MS, negTtlMs = SEA_SNAPSHOT_NEG_TTL_MS } = {}) {
+  const ep = gwEndpointFromGwDir(gwDir);
+  if (!ep) return null;
+  const cached = seaCacheGet(ep.base, now, okTtlMs, negTtlMs);
   if (cached) return cached.mode === 'ok' ? cached : null;
   let snap = null;
   try {
-    const script = `fetch(${JSON.stringify(`${base}/_modeldock/metrics`)},{headers:{'x-modeldock-admin':process.env.ORCH_SEA_ADMIN_TOKEN||''},signal:AbortSignal.timeout(${timeoutMs})})`
+    const script = `fetch(${JSON.stringify(`${ep.base}/_modeldock/metrics`)},{headers:{'x-modeldock-admin':process.env.ORCH_SEA_ADMIN_TOKEN||''},signal:AbortSignal.timeout(${timeoutMs})})`
       + `.then(r=>{if(!r.ok)throw new Error('status '+r.status);return r.json()})`
       + `.then(j=>process.stdout.write(JSON.stringify(j))).catch(()=>process.exit(1))`;
     const r = spawnSync(process.execPath, ['-e', script], {
       encoding: 'utf8',
       timeout: timeoutMs + 1500,
       windowsHide: true,
-      env: { ...process.env, ORCH_SEA_ADMIN_TOKEN: adminToken },
+      env: { ...process.env, ORCH_SEA_ADMIN_TOKEN: ep.adminToken },
     });
     if (r.status === 0 && r.stdout) snap = seaSnapshotFromMetricsJson(JSON.parse(r.stdout), now);
   } catch { /* 任何失败 → null → 日志扫描 */ }
-  seaCachePut(base, snap ?? { mode: 'unavailable', reason: '海况同步桥不可得' }, now);
+  seaCachePut(ep.base, snap ?? { mode: 'unavailable', reason: '海况同步桥不可得' }, now);
   return snap;
+}
+
+/**
+ * /usage 风暴计数同步桥（A3，countUpstreamStorm 专用）：metrics 不可得时的中间层——
+ * GET /_modeldock/usage?from=&to=&cost=0 取 by_status 的 429+402 合计。by_status 键口径
+ * 已核对 src/gateway/state/logs.ts createUsageAccumulator：只收失败条目、键 = 状态码原文
+ * （status 缺失计 'n/a'）——'429'/'402' 可精确区分，端点足以服务风暴闸。信任域与缓存
+ * 策略同 seaSnapshotSync（gwDir 同目录 gateway.json；ok 5min / 负 60s；键加 |usage 命名
+ * 空间与 metrics 快照隔离）。失败/超时/解析失败 → null（调用方落回日志文件扫描，fail-open）。
+ */
+function usageStormSync(gwDir, { now = Date.now(), windowMs = 0, timeoutMs = SEA_SYNC_TIMEOUT_MS, okTtlMs = SEA_SNAPSHOT_TTL_MS, negTtlMs = SEA_SNAPSHOT_NEG_TTL_MS } = {}) {
+  const ep = gwEndpointFromGwDir(gwDir);
+  if (!ep) return null;
+  const key = `${ep.base}|usage`;
+  const cached = seaCacheGet(key, now, okTtlMs, negTtlMs);
+  if (cached) return cached.mode === 'ok' ? cached.storm : null;
+  let count = null;
+  try {
+    const url = `${ep.base}/_modeldock/usage?from=${encodeURIComponent(new Date(now - Math.max(0, windowMs)).toISOString())}&to=${encodeURIComponent(new Date(now).toISOString())}&cost=0`;
+    const script = `fetch(${JSON.stringify(url)},{headers:{'x-modeldock-admin':process.env.ORCH_SEA_ADMIN_TOKEN||''},signal:AbortSignal.timeout(${timeoutMs})})`
+      + `.then(r=>{if(!r.ok)throw new Error('status '+r.status);return r.json()})`
+      + `.then(j=>{const b=(j&&j.usage&&j.usage.by_status)||{};process.stdout.write(JSON.stringify((b['429']||0)+(b['402']||0)))}).catch(()=>process.exit(1))`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: timeoutMs + 1500,
+      windowsHide: true,
+      env: { ...process.env, ORCH_SEA_ADMIN_TOKEN: ep.adminToken },
+    });
+    if (r.status === 0 && r.stdout) {
+      const n = Number(String(r.stdout).trim());
+      if (Number.isFinite(n) && n >= 0) count = n;
+    }
+  } catch { /* 任何失败 → null → 日志扫描 */ }
+  seaCachePut(key, count === null ? { mode: 'unavailable', reason: 'usage 风暴同步桥不可得' } : { mode: 'ok', storm: count }, now);
+  return count;
 }
 
 /**
  * 上游海况计数：优先 metrics 数据面（60 分钟窗口 429+quota 真实请求数——与日志扫描的
  * status 429/402 计数同语义，阈值可共用；sea_state.storm 的 60m 429 规则最低 6 次 429，
- * 阈值 ≤5 即可保证「网关判风暴 → 计数闸必触发」）；同步桥不可得（无 gateway.json /
- * 网关挂了 / 超时）→ 落回网关日志窗口扫描（windowMs 生效，行为与历史版本一致）。
- * gwDir=null（未启用网关日志）恒 0。日文件按本地日期切分，读取范围按窗口跨午夜补足。
+ * 阈值 ≤5 即可保证「网关判风暴 → 计数闸必触发」）；metrics 不可得 → /_modeldock/usage
+ * 聚合端点（A3：by_status['429']+['402']，按 windowMs 定 from/to）；端点也不可得（无
+ * gateway.json / 网关挂了 / 超时）→ 落回网关日志窗口扫描（windowMs 生效，行为与历史
+ * 版本一致，fail-open）。gwDir=null（未启用网关日志）恒 0。日文件按本地日期切分，
+ * 读取范围按窗口跨午夜补足。
  */
 export function countUpstreamStorm(gwDir, { windowMs, now = Date.now() } = {}) {
   if (!gwDir) return 0;
   const snap = seaSnapshotSync(gwDir, { now });
   if (snap?.mode === 'ok') return snap.count429_60m + snap.countQuota_60m;
+  const usageCount = usageStormSync(gwDir, { now, windowMs });
+  if (usageCount !== null) return usageCount;
   const dayMs = 86_400_000;
   const dayCount = Math.ceil(windowMs / dayMs) + 1; // 跨本地午夜余量
   let count = 0;

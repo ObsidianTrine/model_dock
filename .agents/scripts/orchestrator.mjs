@@ -712,6 +712,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       let result;
       let workerOutput = '';
       let transientAttempt = 0;
+      let crash = null; // 结构化故障定性（B6/A1 cause 精读）：最后一次会话的分类结果，blocked 理由消费
       let promptFileRefLogged = false; // D17 留痕防刷屏：每 run 记一次 prompt_file_ref
       for (;;) {
         const sessionStartMs = Date.now(); // 本会话起点：结构化故障识别（B6）的日志查询窗口左界
@@ -789,30 +790,37 @@ async function cmdRun(repoRoot, taskId, opts) {
             die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
           }
         }
-        // 自报不可信：先解析契约块。异常结束（无结果块）→ 结构化信号优先定性（B6）：
-        // 查网关日志会话窗口内本 harness 的 429/5xx/quota 记录，命中 = 结构化 transient
-        // （上游改错误文案不再致盲）；未命中/无网关数据（gatewayLogDir 未配、读取失败
-        // fail-open、worker 绕行网关）→ 落回既有 stderr 正则兜底。定性为 transient →
-        // 原地退避重试同一 prompt（60s×attempt，≤3 次，事件留痕带识别来源），worktree
-        // 半成品改动就地续用；否则或自报 stuck → 走既有 blocked 路径。
+        // 自报不可信：先解析契约块。异常结束（无结果块）→ 结构化信号优先定性（B6 +
+        // 2026-11 A1 cause 精读）：查网关日志会话窗口内本 harness 的崩溃记录——状态码
+        // 429/5xx/quota 命中 = 结构化 transient（上游改错误文案不再致盲）；cause 精读
+        // （proto_endpoint_missing/unauthorized = 判定性失败、quota = 建议换 provider、
+        // key_cooldown/key_pool_empty = 带 keypool 重试窗口）。未命中/无网关数据
+        // （gatewayLogDir 未配、读取失败 fail-open、worker 绕行网关）→ 落回既有 stderr
+        // 正则兜底。定性为 transient 且重试配额未尽 → 原地退避重试同一 prompt（重试窗口
+        // 优先用 crash.retryMs，否则 60s×attempt，≤3 次，事件留痕带识别来源），worktree
+        // 半成品改动就地续用；否则或自报 stuck → 走既有 blocked 路径（decisive 时理由带
+        // 可操作报错）。重试配额耗尽也照常分类——决定性归因要点名给人工。
         const preClaimed = parseResultBlock(workerOutput);
-        if (!preClaimed && transientAttempt < MAX_WORKER_RETRIES) {
-          const crash = classifyWorkerCrashFromDisk({
+        if (!preClaimed) {
+          crash = await classifyWorkerCrashFromDisk({
             gwDir: gatewayLogsDir(cfg),
+            cfg,
             output: workerOutput,
             stderrTail: result.stderrTail,
             window: { startMs: sessionStartMs, endMs: Date.now() },
             backend: opts.backend,
           });
-          if (crash.transient) {
+          if (crash.transient && transientAttempt < MAX_WORKER_RETRIES) {
             transientAttempt += 1;
-            const waitMs = retryWaitBaseMs(cfg) * transientAttempt;
+            const waitMs = crash.retryMs ?? retryWaitBaseMs(cfg) * transientAttempt;
             appendEvent(qdir, 'worker_retry', {
               attempt: transientAttempt,
               max: MAX_WORKER_RETRIES,
               wait_ms: waitMs,
               source: crash.source,
               ...(crash.source === 'gateway' ? { gateway_hits: crash.hits, signature: crash.reason } : {}),
+              ...(crash.switchProvider ? { switch_provider: true } : {}),
+              ...(crash.retryMs ? { retry_ms_source: 'keypool' } : {}),
             });
             const how = crash.source === 'gateway' ? `网关日志 ${crash.hits} 条崩溃记录（${crash.reason}）` : 'stderr 瞬时签名';
             log(`⚠ worker 疑似瞬时故障（${how}）——${waitMs >= 1000 ? `${Math.round(waitMs / 1000)}s` : `${waitMs}ms`} 后原地重试（${transientAttempt}/${MAX_WORKER_RETRIES}）`);
@@ -827,8 +835,24 @@ async function cmdRun(repoRoot, taskId, opts) {
       // ---- 自报不可信：先解析契约块，再亲自跑门禁 ----
       const claimed = parseResultBlock(workerOutput);
       if (!claimed || claimed.status !== 'done') {
-        const blockedReason = claimed?.status === 'stuck' ? 'worker 自报 stuck' : '未产出结果块（worker 异常结束）';
-        appendEvent(qdir, 'blocked', { reason: blockedReason });
+        // cause 精读（A1）：决定性归因（proto_endpoint_missing / unauthorized）→ blocked
+        // 理由带可操作报错（cause + hint/tokenHint 点名），替代千篇一律的「未产出结果块」
+        // ——人工拿到理由即可动手修，不用再翻网关日志。
+        const blockedReason = claimed?.status === 'stuck'
+          ? 'worker 自报 stuck'
+          : crash?.decisive
+            ? crash.reason
+            : '未产出结果块（worker 异常结束）';
+        appendEvent(qdir, 'blocked', {
+          reason: blockedReason,
+          ...(crash?.decisive
+            ? {
+                cause: crash.cause,
+                ...(crash.hint ? { hint: crash.hint } : {}),
+                ...(crash.tokenHint ? { token_hint: crash.tokenHint } : {}),
+              }
+            : {}),
+        });
         moveCard(root, taskId, 'running', 'blocked');
         archiveIncident(repoRoot, taskId, root, qdir, blockedReason);
         await settleNotify(repoRoot, taskId, 'blocked', blockedReason);
@@ -2355,12 +2379,12 @@ async function cmdReconcile(repoRoot, taskId, opts = {}) {
   } else if (taskId) {
     const found = findCard(root, taskId);
     if (!found) die(`任务 "${taskId}" 不在队列中。`);
-    const r = reconcileTask(repoRoot, taskId, root);
+    const r = await reconcileTask(repoRoot, taskId, root);
     await attachCost(repoRoot, cfg, [r]);
     log(`任务 ${taskId} 对账（时间窗内经网关转发的成功请求）：`);
     show(r);
   } else {
-    const all = reconcileAll(repoRoot, root);
+    const all = await reconcileAll(repoRoot, root);
     if (!all.length) {
       log('尚无已合并任务可对账。');
     } else {
