@@ -290,6 +290,43 @@ describe('更新服务：检查 / 状态 / 应用（mock API + fakeHome）', () 
     }
   })
 
+  it('守卫命中的 kick 不解析 token（惰性化）：TTL 内换必抛 token_ref 也不碰 getSecret；守卫未命中照常解析透传', async () => {
+    const h = fakeHome()
+    try {
+      await writeGatewayState({ pid: process.pid, port: 18999, admin_token: 'x', started_at: 't' })
+      await setSecret('update-token', TOKEN, 'file')
+      let calls = 0
+      let seenToken: string | null | undefined
+      const manifest: ReleaseManifest = { version: '999.0.0', tagName: 'v999.0.0', notes: '', htmlUrl: '', assets: [] }
+      setUpdateFetchForTests(async (_repo, token) => {
+        calls++
+        seenToken = token
+        return manifest
+      })
+      setUpdateApiBaseForTests('http://127.0.0.1:9') // fetchOverride 拦截在网络之前
+      const rt = await mkRt()
+      // 守卫未命中（首次）：解析 token 并透传给 fetch —— 行为不变
+      await kickUpdateCheck(rt)
+      expect(calls).toBe(1)
+      expect(seenToken).toBe(TOKEN)
+      // 守卫命中（TTL 窗口内，60s 轮询常态）：零解析成本——换必抛 token_ref 也纹丝不动
+      //（非串 ref 在 parseKeyRef 即抛 SecretsError、零 I/O；守卫前解析的旧实现会在 catch 落 failedAt，此处即回归绊线）
+      const rtBad = await mkRt({ update: { repo: REPO, token_ref: 123 as unknown as string } })
+      await kickUpdateCheck(rtBad)
+      expect(calls).toBe(1)
+      const st = await readGatewayState()
+      expect(st?.update_check?.failedAt).toBeUndefined()
+      expect(st?.update_check?.at).not.toBeNull()
+      // force 越过守卫：解析真的发生，SecretsError 照旧经 catch 透出并落 failedAt（错误路径不变）
+      await kickUpdateCheck(rtBad, { force: true })
+      expect(calls).toBe(1) // 解析先于 fetch 抛出，fetch 不再执行
+      const st2 = await readGatewayState()
+      expect(st2?.update_check?.failedAt).not.toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+
   it('检查失败不占成功 TTL：lastCheckedAt 保留、failedAt 落盘（30min 重试退避），成功后清 failedAt', async () => {
     const h = fakeHome()
     try {
@@ -697,7 +734,7 @@ describe('预取与 force 升级语义（v1.8 预取）', () => {
     }
   })
 
-  it('force 撞在飞 TTL-skip：升级为真查，绝不带旧缓存收场', async () => {
+  it('TTL 窗口内非 force kick 同步跳过（守卫命中不建在飞、零拉取）；随后的 force 真查生效，绝不带旧缓存收场', async () => {
     const h = fakeHome()
     try {
       await setSecret('update-token', TOKEN, 'file')
@@ -717,16 +754,18 @@ describe('预取与 force 升级语义（v1.8 预取）', () => {
       setUpdateApiBaseForTests('http://127.0.0.1:9')
       await kickUpdateCheck(rt, { force: true })
       expect(calls).toBe(1)
-      // 第二查（非 force）：在飞，将命中 TTL 守卫；此刻 force 进来必须把它升级成真查
+      // 非 force：TTL 守卫同步命中直接跳过（守卫同步化后 skip 不再有在飞窗口，token/代理零解析）
+      await kickUpdateCheck(rt)
+      expect(calls).toBe(1)
+      // force 越过 TTL 守卫真查：结果可见，绝不带旧缓存（999）收场
       const startedP = new Promise<void>((r) => {
         started = r
       })
-      const second = kickUpdateCheck(rt)
-      await kickUpdateCheck(rt, { force: true }) // 同一宏任务内升级：早于 kickA 的守卫求值
+      const third = kickUpdateCheck(rt, { force: true })
       await startedP // fetch#2 已被调用
       release(manifestOf('v888.0.0'))
-      await second
-      expect(calls).toBe(2) // TTL-skip 被升级为真查
+      await third
+      expect(calls).toBe(2)
       expect((await getUpdateStatus(rt)).latest).toBe('888.0.0')
     } finally {
       h.restore()
