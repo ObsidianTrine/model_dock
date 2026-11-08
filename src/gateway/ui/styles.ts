@@ -1,5 +1,5 @@
 /**
- * Web 控制台 · styles.ts —— 内联 CSS（由单文件 ui.ts 拆出，T04 Phase 1，行为零变化）。
+ * Web 控制台 · styles.ts —— 内联 CSS。
  * ui.ts 以 <style>
 ${UI_CSS}</style> 拼装，与拆分前逐字节一致；勿改动片段内换行/转义。
  */
@@ -460,10 +460,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #pkgOverlay textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-family:var(--mono);font-size:var(--fs-sm)}
 /* 导入弹层选项卡：三个互斥来源各一页（走 kit 的 .seg.grow，选中蓝底白字） */
 #importTabs{margin:0 0 14px}
-/* 附近电脑卡片列表 */
 #impPeers .peercard{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;margin:0 0 8px}
 #impPeers .peercard .pname{flex:1;min-width:0;word-break:break-all;font-weight:600}
-/* 存量收编勾选列表（导入存量配置弹层） */
 .legacyrow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)}
 .legacyrow:last-child{border-bottom:none}
 .legacyrow .lname{flex:1;min-width:0;word-break:break-all;font-size:var(--fs-base)}
@@ -489,7 +487,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .listmore{display:flex;justify-content:center;padding:8px 0 2px}
 .listmore .btn{border-style:dashed;color:var(--muted);font-size:var(--fs-sm)}
 .listmore .btn:hover{color:var(--accent);border-color:var(--accent)}
-/* 登录提示（管理面要求凭据时的整页占位） */
 .loginbox{margin-top:48px;text-align:center}
 .loginbox .name{font-weight:600;font-size:var(--fs-lg)}
 .loginbox .desc{color:var(--muted);font-size:var(--fs-sm);margin:10px 0}

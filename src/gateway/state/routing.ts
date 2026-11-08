@@ -140,7 +140,7 @@ function windowDayMatches(w: ScheduleWindow, ref: Date, calendar: () => HolidayC
   const dt = dayTypeFor(ref, calendar())
   if (f === 'holiday') return dt === 'holiday'
   if (f === 'weekend') return dt === 'weekend'
-  return dt === 'workday' || dt === 'makeup' // workday：周一至五与调休补班日，法定节假日不算
+  return dt === 'workday' || dt === 'makeup' // workday 定义见 config/types.ts ScheduleWindow 注
 }
 
 /** 求值当前命中的全部窗口（已停用 → 空数组）。
@@ -412,7 +412,7 @@ export function pickTarget(
         const am = rt.health.get(a[0])?.lastMs ?? Number.POSITIVE_INFINITY
         const bm = rt.health.get(b[0])?.lastMs ?? Number.POSITIVE_INFINITY
         if (am !== bm) return am - bm
-        return 0 // 均无耗时数据：保持配置顺序（稳定排序）
+        return 0
       })
     let autoCount = 0
     for (const [id] of auto) {
@@ -432,7 +432,6 @@ export function pickTarget(
   const avoid: string[] = []
   for (const w of hitWins) {
     if (w.mode !== 'avoid') continue
-    // avoid 仅到服务粒度：target 带模型部分时剥掉，按整个服务避开
     const p = parseFallbackEntry(w.target)
     if (p && !avoid.includes(p.providerId)) avoid.push(p.providerId)
   }

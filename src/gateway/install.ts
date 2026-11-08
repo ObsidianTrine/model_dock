@@ -90,14 +90,13 @@ export async function runInstallCommand(cmd: string, needsNode: boolean): Promis
 /**
  * 客户端安装：有 install.command 则 shell 执行（npm 类 / 平台脚本类自动安装）→ 成功且声明 bootstrap
  * 则复用 applyChanges 补写空配置文件（自动快照 + 原子写，让 detect 生效、attach 可跑）；无 command
- * 的客户端（ZCode/WorkBuddy）不执行，仅返回指引。needsNode 的命令（npm 类）先 ensureNodeRuntime——
- * 本机无 Node 时下载托管运行时，其 bin 目录前置到子进程 PATH（系统 node 经 well-known 命中时同样
- * 前置：LaunchAgent 的 PATH 常缺 nvm 目录，不前置子进程找不到 npm）；子进程 env 经 installChildEnv
- * 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。沙箱模式（MODELRDOCK_FAKE_HOME）只放行
- * 可重定向落点的 npm 全局安装——npm_config_prefix/cache 指进沙箱，不碰宿主全局 prefix；脚本类
- * 安装（curl|bash、irm|iex 等）落点无法重定向，拒绝并提示手动安装。声明 install.probe 的先探测：
- * 命令已在 PATH 就跳过安装——页面状态可能是旧的（用户在别处刚装好），而 npm 全局重装会先把现有
- * 安装目录与 shim 改名 retire 再重建，postinstall 一旦不成功就只剩报错桩，把本来可用的命令弄坏。
+ * 的客户端（ZCode/WorkBuddy）不执行，仅返回指引。needsNode 的命令先 ensureNodeRuntime 并把托管
+ * bin 前置到子进程 PATH（LaunchAgent PATH 缺 nvm 目录的场景见 src/util/fsx.ts commandOnPath 注）；
+ * 子进程 env 经 installChildEnv 统一构造（剥 npm_* 泄漏 + 注镜像 registry + 沙箱落点）。
+ * 沙箱（MODELRDOCK_FAKE_HOME）只放行可重定向落点的 npm 全局安装（npm_config_prefix/cache 指进沙箱）；
+ * 脚本类安装（curl|bash 等）落点无法重定向，拒绝并提示手动安装。声明 install.probe 的先探测：
+ * 命令已在 PATH 就跳过安装——npm 全局重装会先把现有安装目录与 shim 改名 retire 再重建，
+ * postinstall 一旦不成功就只剩报错桩，把本来可用的命令弄坏。
  */
 export async function runClientInstall(
   adapter: HarnessAdapter,

@@ -382,8 +382,8 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     }
   }
 
-  // 存量收编重开入口（添加服务弹层 → 勾选导入）：/import/detect 候选可勾选，/import/apply 按 ids 应用；
-  // 收编与配置包导入是两个概念（收编=本机客户端配置；配置包=.msync 文件/链接/附近）
+  // 存量收编重开入口（添加服务弹层 → 勾选导入）：/import/detect 候选可勾选、/import/apply 按 ids 应用；
+  // 与配置包导入的概念区分见 modals.ts legacyM 注
   var legacyCands = []
   var legacyChecked = []
   function setLegacyErr(msg) {

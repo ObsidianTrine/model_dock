@@ -15,7 +15,7 @@ export const UI_JS_APP = `  function load() {
       if (tor > lastTrayLiteRequestSeen) { lastTrayLiteRequestSeen = tor; enterTrayLite() }
       loadCatalog()
       render()
-      // 首次加载即刷新沙箱徽标与配置路径显示（pollOverview 只管后续轮询）
+      // pollOverview 只管后续轮询，首屏刷新在这里
       $('#health').innerHTML = healthHtml()
       pollLive() // 首屏即拉一次实时字段（用量徽标/服务延迟不必等下一轮 5s）
       var cp = document.getElementById('cfgPath')
@@ -80,7 +80,7 @@ export const UI_JS_APP = `  function load() {
     if (ti) ti.onkeydown = function (e) { if (e && e.key === 'Enter' && tb) tb.onclick() }
   }
 
-  // 旧配置一键迁移（cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo / WorkBuddy / CCR / Crush / Gemini CLI）
+  // 旧配置一键迁移来源标签
   var SRC_LABEL = {
     'cc-switch': 'cc-switch',
     claude: 'Claude Code',
@@ -169,8 +169,7 @@ export const UI_JS_APP = `  function load() {
   function fmtTok(n) {
     return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
   }
-  // 今日用量/成本徽标（/usage-live 实时字段：内存累计器 + 重启回填当日日志；无流量不显示）。
-  // usageToday 每请求都变，放 overview 主载荷会击穿 pollOverview 文本 diff——已拆到轻端点
+  // 今日用量/成本徽标（/usage-live 轻端点，拆出理由见上方 liveUsage 声明注）：内存累计器 + 重启回填，无流量不显示
   function usageHtml() {
     var u = liveUsage && liveUsage.usageToday
     if (!u || !u.requests) return ''
@@ -215,7 +214,7 @@ export const UI_JS_APP = `  function load() {
       if (!j) return
       liveUsage = j
       var sig = JSON.stringify(j)
-      if (sig === lastLiveSig) return // 实时字段没变就不动 DOM
+      if (sig === lastLiveSig) return
       lastLiveSig = sig
       $('#health').innerHTML = healthHtml()
       updateSvcLatency()
@@ -307,7 +306,6 @@ export const UI_JS_BOOT = `  setInterval(function () { if (!document.hidden) ref
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) { pollHealth(); pollOverview(); pollLive(); loadLogs() }
   })
-  // 轻量模式在场心跳：加载即报一次 + 15s 一次（不看 document.hidden）；离场走 pagehide 信标
   uiPresence(false)
   setInterval(function () { uiPresence(false) }, 15000)
   window.addEventListener('pagehide', function () { uiPresence(true) })

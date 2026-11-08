@@ -233,9 +233,8 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   sweeper.unref?.()
   server.on('close', () => clearInterval(sweeper))
 
-  // 临时 harness TTL 清扫（C14）：「用完即焚」凭据到期即摘（纯内存态，重启本就清零）。
-  // 间隔缺省 60s（与上方探活 sweeper 同频，worker 凭据分钟级精度足够）；测试经
-  // opts.ephemeralSweepIntervalMs 注入短间隔。过期条目最多多活一个间隔，无其他副作用。
+  // 临时 harness TTL 清扫（C14，「用完即焚」语义见 state/types.ts EphemeralHarnessState 注）；
+  // 测试经 opts.ephemeralSweepIntervalMs 注入短间隔
   const ephSweeper = setInterval(() => {
     sweepEphemeralHarnesses(rt)
   }, opts.ephemeralSweepIntervalMs ?? EPHEMERAL_SWEEP_INTERVAL_MS)
@@ -376,7 +375,6 @@ async function handleRequest(
     logRequest(rt, { ...entry, ts: localIsoTs(), requestId })
   }
 
-  // 管理面
   if (url.startsWith('/_modeldock/')) {
     return handleAdmin(rt, req, res, o, started)
   }
@@ -570,7 +568,6 @@ async function handleRequest(
   recordTokenUsage(rt, target.harness, usage)
 }
 
-// 管理面
 
 /** 管理面所有端点（含 GET）的 Host 白名单：DNS rebinding 的 Host 不是本机，读取类端点同样拒绝。
  *  参照 Vite allowedHosts（CVE-2025-31125 同类问题的标准修法）。 */
@@ -857,7 +854,7 @@ async function hAutoRoute(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   const b = await jsonRequestBody(req)
   try {
-    // 部分更新语义：未传的字段保持现状（开关 / 主服务钉定 / 下一个切换钉定 / 限流切换 / 自动备用链在 UI 各自独立调用）
+    // 部分更新语义：未传字段保持现状（enabled 缺省口径见 lan.ts /m/api/auto-route 注）；其余字段由 UI 各自独立调用
     const enabled = b.enabled === undefined
       ? rt.config.gateway?.auto_failover === true
       : b.enabled === true || b.enabled === 'true'
@@ -915,13 +912,13 @@ async function hSchedule(c: AdminCtx): Promise<void> {
     if (!rt.config.providers[parsed.providerId]) {
       return sendError(res, 400, t('时段目标服务「{id}」不存在', 'Window target service "{id}" not found', { id: parsed.providerId }), t('在「我的服务」查看服务 ID，或刷新页面同步最新列表', 'Check service IDs in "My Services", or refresh the page for the latest list'))
     }
-    // 窗口模式：avoid（避开该服务）或缺省 prefer（优先走该服务/模型）；avoid 仅到服务粒度，模型部分剥掉按整个服务避开
+    // 窗口模式：avoid（避开该服务）或缺省 prefer（优先走该服务/模型）；avoid 服务粒度语义见 config/types.ts ScheduleWindow 注
     const mode = w.mode === undefined || w.mode === null || w.mode === '' ? undefined : String(w.mode).trim()
     if (mode !== undefined && mode !== 'prefer' && mode !== 'avoid') {
       return sendError(res, 400, t('时段模式「{mode}」无效，应为 prefer（优先走）或 avoid（避开）', 'Window mode "{mode}" is invalid; expected prefer or avoid', { mode }))
     }
     const avoid = mode === 'avoid'
-    // 生效日类型：缺省/any=每天；workday=周一至五与调休补班日（不含法定节假日）；weekend；holiday
+    // 生效日类型（workday/weekend/holiday 定义与缺省语义见 config/types.ts ScheduleWindow 注）
     const dayFilterRaw = w.dayFilter === undefined || w.dayFilter === null || w.dayFilter === '' ? undefined : String(w.dayFilter).trim()
     if (dayFilterRaw !== undefined && dayFilterRaw !== 'any' && dayFilterRaw !== 'workday' && dayFilterRaw !== 'weekend' && dayFilterRaw !== 'holiday') {
       return sendError(res, 400, t('生效日类型「{v}」无效，应为 any / workday / weekend / holiday', 'Day filter "{v}" is invalid; expected any / workday / weekend / holiday', { v: dayFilterRaw }))
@@ -1312,7 +1309,6 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
     if (newModels) t.models = newModels
-    // 协议端点：替换/清空
     if (newEndpoints) {
       const e = { ...(t.endpoints ?? {}) }
       for (const [k, v] of Object.entries(newEndpoints)) { const kp = k as import('../config/types.js').Protocol; if (v) e[kp] = v; else delete e[kp] }
@@ -1432,9 +1428,8 @@ async function hHarnessEnv(c: AdminCtx): Promise<void> {
 }
 
 /** POST /_modeldock/harness/provision：签发 runtime-only 临时 harness（C14 / P2⑧，admin 门内）。
- *  headless worker 的「用完即焚」凭据：不写 config.toml / secrets.json，只注入网关内存
- *  （进程重启全部失效，设计如此——短命凭据不值得持久化）；TTL 到点被 sweeper 摘除（60s 节奏），
- *  也可随时经 harness/revoke 单独吊销。路由语义复用现有 harness.route：钉 profile 或跟随
+ *  「用完即焚」凭据（不落盘、TTL 到点被 sweeper 摘除、可随时经 harness/revoke 吊销）：
+ *  语义与不落盘推演见 state/types.ts EphemeralHarnessState 注。路由语义复用现有 harness.route：钉 profile 或跟随
  *  active_profile；max_daily_tokens 挂进 tokenlimits per-harness 日限额（超限 429 与
  *  daily_tokens 一致）。请求 {id?, profile|route?, ttl_minutes?, max_daily_tokens?}；响应
  *  {ok, id, token, expires_at, env}——token 明文只在本响应出现一次，任何列示端点与审计日志
@@ -1537,8 +1532,7 @@ async function hServiceDelete(c: AdminCtx): Promise<void> {
         .join(t('；', '; '))
     )
   }
-  // 先落配置再删密钥：persistConfig 失败（写锁超时等）时服务仍在配置里但 key 已不可读，
-  // 后续转发 503；先写成功、后删密钥，失败至多留一个无引用的孤儿密钥条目（无副作用）
+  // 顺序不可反，先 config 后删密钥（REVIEW-10，推演见 hServiceUpdate keyWrite 注）
   let removedProfiles: string[] = []
   await persistConfig(rt, (c) => {
     removedProfiles = removeProviderCascade(c, id)
@@ -1792,12 +1786,10 @@ async function hKey(c: AdminCtx): Promise<void> {
     return sendError(res, 400, t('key 不能为空', 'Key must not be empty'))
   }
   const backend = rt.config.security?.store ?? (await defaultStore())
-  // 与 setSecret 内部同规：FAKE_HOME 沙箱下外部后端强制落 file，ref 按实际后端预生成
+  // FAKE_HOME 下外部后端强制落 file、ref 按实际后端预生成（同规见 hServiceUpdate keyWrite 注）
   const effBackend: SecretBackend =
     process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
-  // 池 provider（keys 非空）转发恒走 keys 池（providerKeyRefs），只写 key_ref 会「静默无效」——
-  // 对齐 CLI provider set-key --add：新 key 追加进池（槽位 <id>-k<序号>，与既有引用去重）；
-  // 提交的 key 已在池内时零改动直接返回（幂等）。单 key 配置保持覆盖 key_ref。
+  // 提交的 key 已在池内时幂等早退（池写入语义见 hServiceUpdate keyWrite 注）
   const poolKeys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
   const isPool = poolKeys.length > 0
   if (isPool) {
@@ -1822,9 +1814,7 @@ async function hKey(c: AdminCtx): Promise<void> {
   } else {
     keyWrite = { secretId: provider, ref: makeKeyRef(effBackend, provider), pool: false }
   }
-  // 先落配置后动密钥（REVIEW-10 / hServiceDelete 同序）：persistConfig 失败时密钥未动、
-  // 配置由 mutateConfig 原子性保持原状，无半套状态；反序会在配置写失败时留孤儿密钥条目
-  // （2026-11-04 审查 P2）。ref 在 persist 前确定性预生成，锁外 setSecret 只补密文本。
+  // 顺序不可反，先 config 后 secrets（REVIEW-10，推演见 hServiceUpdate keyWrite 注）
   await persistConfig(rt, (cfg) => {
     const t = cfg.providers[provider]
     if (!t) return
@@ -1964,7 +1954,6 @@ async function hReset(c: AdminCtx): Promise<void> {
       } catch { /* 忽略 */ }
     }
   })
-  // 重载为空配置
   await reloadRuntime(rt)
   audit(
     bi('重置配置', 'Reset config'),
@@ -2099,10 +2088,8 @@ async function hMetrics(c: AdminCtx): Promise<void> {
  *  数据源 = rt.tokenUsage（数据面限额计数，state/tokenlimits.ts；只统计配了 limits 的 harness，
  *  未配置者无条目、不出现在结果里）。rpm 是固定窗口计数：rpm_started_at 距今超 60s 即窗口已
  *  过期、要等下一个请求经过 checkTokenLimits 才清零——消费方按时间戳自行判陈旧，本端点只读不翻窗。
- *  双口径（2026-11 预算实测账）：day_tokens = 总口径（缓存读计入，daily_tokens 限额判定沿用）；
- *  day_billable_tokens = 可计费口径（剔除缓存读，usage tap 按协议算好）——编排器 worker 预算
- *  判定用后者（总口径会把 GLM 大额缓存读当消耗，重蹈 12.1M 假阳性）。旧 usage 无 billable
- *  字段时该值为 0 起步（内存态，重启清零）。 */
+ *  双口径（day_tokens 总口径 / day_billable_tokens 可计费）定义与「编排器预算判定为何用后者」
+ *  见 state/types.ts TokenUsageState 注（2026-11 预算实测账：总口径曾把 GLM 大额缓存读算成 12.1M 假阳性）。 */
 async function hHarnessUsage(c: AdminCtx): Promise<void> {
   const { rt, res } = c
   const usage: Record<string, { rpm: number; rpm_started_at: string; day: string; day_tokens: number; day_billable_tokens: number; ephemeral?: boolean; expires_at?: string }> = {}
@@ -2116,8 +2103,7 @@ async function hHarnessUsage(c: AdminCtx): Promise<void> {
     }
   }
   // 临时 harness（C14）观测：带 ephemeral:true + expires_at 标记；未配日限额、无 tokenUsage
-  // 计数的临时条目也列出（零计数），供编排侧盯 TTL。token 明文任何列示端点绝不回显——
-  // 它只在 provision 响应里出现一次（见 hProvisionHarness）。
+  // 计数的临时条目也列出（零计数），供编排侧盯 TTL。token 明文不回显（见 hProvisionHarness 注）。
   for (const [id, e] of rt.ephemeral) {
     const s = rt.tokenUsage.get(id)
     usage[id] = {
@@ -2265,7 +2251,7 @@ async function hPricingLookup(c: AdminCtx): Promise<void> {
  *  回传对照，判定语义（别名归一等）在编排侧。响应：ok:false（token 未命中/无法解析，reason）
  *  或 ok:true + harness/profile/provider/tier（profile.tier 标签，可 null）+ models（该 profile
  *  当前 provider 的目录 id）+ tier_profiles（全库 tier 标签 → profile id 清单，供「tier 已打标
- *  但 token 指向别档」判定）。token 不回显、不落日志。 */
+ *  但 token 指向别档」判定）。token 不回显（口径见 hProvisionHarness 注）。 */
 async function hTierValidate(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
   const b = await jsonRequestBody(req)
@@ -2443,7 +2429,6 @@ async function handleAdmin(
   // Web 控制台页面：?token= 校验通过则种 HttpOnly cookie 后重定向到干净 URL。
   // 同时种 1 年期「设备记忆」cookie（值登记进 gateway.json 的 devices）：
   // 之后令牌轮换/7 天过期，锁屏「重新登录」按钮凭它一键恢复，无需终端。
-  // cookie 名内嵌端口：RFC 6265 cookie 不按端口隔离，同机双实例（生产+dev）固定名会互顶登录态
   if (url === '/_modeldock/ui' && req.method === 'GET') {
     const q = new URL(req.url ?? '', 'http://x').searchParams
     const token = q.get('token')

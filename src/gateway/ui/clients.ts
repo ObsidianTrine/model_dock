@@ -94,7 +94,8 @@ export const UI_JS_CLIENTS = `  function renderClients() {
             : t('钉定后该客户端固定走所选服务，不受全局切换影响', 'When pinned, this client always uses the selected service regardless of global switching')) +
           '">' + opts.join('') + '</select>'
       }
-      // 网关模式已接入但客户端文件指向别处（可能是另一实例的端口）：明示不一致，重写入口就是「接入」
+      // 网关模式已接入但客户端文件指向别处（可能是另一实例的端口）：明示不一致；
+      // 修复复用 attach 管线，入口=「按本网关重写」按钮（见下方 doRewrite 注）
       var portMismatch = c.attached && c.mode === 'gateway' && c.pointing === 'other'
       return '<div class="service"><div class="info"><span class="name">' + esc(c.label) + '</span> ' + pill +
         (routeSel ? ' ' + routeSel : '') +
@@ -221,8 +222,7 @@ export const UI_JS_CLIENTS = `  function renderClients() {
           .catch(function (e) { toast(t('断开失败：', 'Detach failed: ') + e.message, false) })
       }
     })
-    // 钉定路由：gateway 模式选「跟随全局」= default，选某服务 = 钉定（服务端内存，立即生效）；
-    // direct 模式选某服务 = 更换直连目标（重写客户端配置，自动快照；选定即确认，不弹窗）
+    // 钉定路由 onchange：gateway/direct 两模式语义见上方 renderClients routeSel 注（选定即确认，不弹窗）
     document.querySelectorAll('[data-route]').forEach(function (sel) {
       sel.onchange = function () {
         var id = sel.getAttribute('data-route')

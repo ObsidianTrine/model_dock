@@ -237,7 +237,6 @@ export const UI_JS_SCHEDULE = `  var schedOpen = false
   schedRowsEl.addEventListener('change', function (e) {
     var el = e.target
     if (!el || !el.classList) return
-    // 避开按整个服务生效：切到避开时模型下拉禁用，切回优先走时按当前服务恢复
     if (el.classList.contains('smode')) {
       var row = el.closest('.srow'), mod = row.querySelector('.smod')
       if (el.value === 'avoid') {
@@ -282,7 +281,7 @@ export const UI_JS_SCHEDULE = `  var schedOpen = false
     if (!row || !el) return
     row.hidden = !up.length
     if (!up.length) { el.textContent = ''; return }
-    var md = function (d) { return String(d || '').slice(5) } // YYYY-MM-DD → MM-DD
+    var md = function (d) { return String(d || '').slice(5) }
     el.textContent = t('最近节假日：', 'Upcoming holidays: ') + up.map(function (h) {
       var mk = (h.makeup || []).length ? t('（', ' (') + h.makeup.map(md).join(t('、', ', ')) + t(' 调休上班', ' makeup workday') + t('）', ')') : ''
       return h.name + ' ' + md(h.start) + '～' + md(h.end) + mk
@@ -406,7 +405,7 @@ export const UI_JS_SCHEDULE = `  var schedOpen = false
       timePop.style.left = left + 'px'
       timePop.style.top = top + 'px'
       timePop.style.visibility = 'visible'
-      tpHighlight(input, true) // 打开时滚到当前值
+      tpHighlight(input, true)
     })
   }
   document.addEventListener('focusin', function (e) {
