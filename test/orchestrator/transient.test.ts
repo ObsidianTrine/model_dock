@@ -345,7 +345,13 @@ describe('orchestrator transient > cause 精读（A1）', () => {
 describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线，metrics keypool）', () => {
   function writeLog(dir: string, entry: Record<string, unknown>) {
     fs.mkdirSync(dir, { recursive: true })
-    fs.appendFileSync(path.join(dir, `gateway-${String(entry.ts).slice(0, 10)}.jsonl`), JSON.stringify(entry) + '\n')
+    // 文件名按条目 ts 的本地日期派生：实现侧 readGatewayLog 的日期由 toIsoLocal（本地时区）
+    // 派生，生产网关的 entry.ts 也是本地时区字符串——这里若用 UTC toISOString 直接切片，
+    // 本地零点到早上（UTC+8 为 00:00-07:59）会跨日错一天，readGatewayLog 读不到条目、
+    // 用例必红（CORRECT-12 同族的夹具日期坑，2026-11-09 实锤；161 行用例用 localDate
+    // 命名所以不受影响）
+    const d = localDate(new Date(String(entry.ts)))
+    fs.appendFileSync(path.join(dir, `gateway-${d}.jsonl`), JSON.stringify(entry) + '\n')
   }
 
   it('无 cfg → 不问 metrics：key_cooldown 照常 transient、无 retryMs（既有退避兜底）', async () => {
