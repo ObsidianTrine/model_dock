@@ -132,7 +132,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
   orch spec "add research notes to readme" --from-brief mock-websearch-fallback --backend mock   # ② 规格 → specs/<spec-id>/ 三件套（brief 已注入）
   orch spec build <spec-id>                                          # ③ 人审设计后拆卡 → pending/<spec-id>-t1,t2
   ORCH_MOCK_FILE=docs/notes.md orch drain --backend mock             # ④ 闭环（mock 改 docs/notes.md 落在 files_hint 内）→ awaiting-human（gate=L3），orch approve <spec-id>-t1 合并
-  # 航次型一键验证（可选）：ORCH_MOCK_PLANNER_FEATURE=1 $O sail --duration 12s --interval 1 --backend mock
+  # 航次型一键验证（可选）：ORCH_MOCK_PLANNER_FEATURE=1 orch sail --duration 12s --interval 1 --backend mock
   #   报告 logs/sail/<ts>/report.md 应含「上游管线：调研 brief … 已产出」「spec … 已落盘待人审」
   ```
   通过判据：① brief 五段齐全且引用 ≥1；② design.md 存在且含调研引用注入；③ 拆卡 id 与 spec 同源；④ drain 后 awaiting-human、approve 后 merged。**真链路验证**（去掉 `--backend mock` 用缺省 claude 船）烧真钱且经网关，必须用户显式授权后才能跑；跑前先 `research --selftest`。
