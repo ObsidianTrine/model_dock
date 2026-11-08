@@ -1,0 +1,65 @@
+name: codeql
+
+# CodeQL 确定性静态安全扫描（2026-11 新增，总览见 docs/ai-review-system.md「确定性安全扫描」节）：
+#
+#   作用：与 claude-review.yml 的 security-review（LLM 安全审查）互补——后者是模型判定，不可复现，
+#   且三件套 secrets 未配置时整个 job skip，required check 语义下 skip 视为通过，门禁存在条件性
+#   空洞（该 skip 有显式 warning，非静默）。本 workflow 是确定性数据流分析：同一份代码同一结果、
+#   零 secrets 依赖（公开仓库 CodeQL 免费），补齐确定性扫描腿。结果上报 code scanning alerts
+#   （Security → Code scanning），只读分析，不评论、不修码。
+#
+#   触发分级：push main/develop 与 PR → main/develop 常规扫描；每周 cron（周一 02:23 UTC =
+#   北京 10:23，与 test.yml 每日 18:00 UTC 巡检错开）兜底捕捉查询包/依赖图谱升级带来的新告警；
+#   workflow_dispatch 手动补跑。注意：schedule 只认默认分支（main）上的 workflow 文件，
+#   本文件合入 main 后 cron 才生效。
+#
+#   required check：本 workflow 的 check（CodeQL (javascript-typescript)）计划注册为分支保护
+#   required check——注册是 push 之后在仓库 Settings 手动完成的收尾步骤（按 check 名精确匹配），
+#   登记前本 workflow 照常跑、只是不阻塞合并，见 docs/ai-review-system.md。
+#
+#   防回环：本 workflow 只读分析，不评论、不修码、不开 PR——不产生 PR head 提交（claude-review
+#   的 bot 前缀 guard 不会遇上它）、不触发 ci-autofix / dependabot-fix（两者只认 test workflow
+#   失败），无回环面。
+#
+#   permissions 最小化：workflow 级只给 contents: read；security-events: write（上传 SARIF）
+#   与 actions: read（CodeQL action 读取 workflow run 元数据，官方模板所需）收敛到 job 级
+#   整包发放（job 级 permissions 是整包覆盖，见 claude-review.yml 头注）。
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # 周一 02:23 UTC = 北京时间 10:23：避开整点拥堵，与 test.yml 每日 18:00 UTC 巡检错开
+    - cron: '23 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同分支新推送自动取消旧运行，省排队时间（与 test.yml 同款写法）
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    # check 名即 required check 注册名，改动前先看分支保护名单（docs/ai-review-system.md 有登记口径）
+    name: CodeQL (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read         # checkout 代码
+      security-events: write # 上传 SARIF 结果到 code scanning
+      actions: read          # CodeQL action 读取 workflow run 元数据（官方模板所需）
+    steps:
+      - uses: actions/checkout@v7
+      # JS/TS 无需 autobuild：init 走内置的 javascript-typescript 提取器，直接建库
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      # 默认查询集（含安全类查询）；要扩大覆盖可加 queries: security-extended，先按最小配置跑
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
