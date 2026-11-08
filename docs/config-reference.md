@@ -303,6 +303,7 @@ keep = 20
 | `api_base` | `string` | 否 | GitHub API | 更新源 API 基地址（默认 GitHub API）；自建更新源时覆盖。 |
 | `token_ref` | `string` | 否 | 无（匿名访问） | 访问更新源令牌的密钥引用（可选）：私有仓库必需；公开仓库配了可把匿名限流提高到登录额度。令牌本体存密钥库，不进 config 明文。 |
 | `mirror` | `string[]` | 否 | 内置镜像链 | 下载镜像前缀列表，按序尝试；`[]` = 关闭镜像只走官方直连；缺省用内置镜像链。校验文件始终走官方源，防镜像篡改。 |
+| `prefetch` | `boolean` | 否 | 开启 | 预取：发现新版本后后台静默预下载并校验适配安装包到本机缓存，一键更新时跳过下载直接安装（秒级完成）；下载支持断点续传。`false` 关闭，回到「点击更新后才开始下载」。 |
 
 示例：
 
@@ -312,6 +313,7 @@ repo = "ObsidianTrine/model_dock"
 api_base = "https://api.github.com"
 token_ref = "file:github_pat"
 mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
+prefetch = false
 ```
 
 ## 13. 导入状态（import）

@@ -303,6 +303,7 @@ Where new releases are checked, downloaded and installed from.
 | `api_base` | `string` | no | GitHub API | API base of the update feed (GitHub API by default); override for a self-hosted feed. |
 | `token_ref` | `string` | no | none (anonymous) | Key reference for the update-feed token (optional): required for private repos; on public repos it raises the anonymous rate limit to the authenticated quota. The token itself lives in the secret store, never in plaintext here. |
 | `mirror` | `string[]` | no | built-in mirror chain | Download mirror prefixes, tried in order; `[]` = mirrors off, official direct only; a built-in mirror chain by default. The checksum file always comes from the official source to guard against mirror tampering. |
+| `prefetch` | `boolean` | no | enabled | Prefetch: once a new version is found, the matching package is downloaded and verified in the background; one-click update then installs instantly without waiting for the download. Downloads resume across interruptions. `false` reverts to downloading only after you click update. |
 
 Example:
 
@@ -312,6 +313,7 @@ repo = "ObsidianTrine/model_dock"
 api_base = "https://api.github.com"
 token_ref = "file:github_pat"
 mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
+prefetch = false
 ```
 
 ## 13. Import state (import)
