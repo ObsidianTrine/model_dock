@@ -1,0 +1,7 @@
+dist/
+release/
+.agents/
+node_modules/
+coverage/
+package-lock.json
+docs/images/

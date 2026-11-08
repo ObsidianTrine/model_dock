@@ -58,6 +58,10 @@ jobs:
       # noEmit：类型门禁；产物由发布链生成（build-sea.mjs 自带 tsc emit），本 job 无人消费
       - run: npx tsc -p tsconfig.json --noEmit
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
+      # ESLint 快速信号（linux 腿即可）：规则全 warn 级、退出码恒 0，真正的基线门禁是
+      # test/eslint-baseline.test.ts 棘轮（随下方 npm test 三平台都跑）
+      - run: npm run lint
+        if: runner.os == 'Linux'
       - run: npm test
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
