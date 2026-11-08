@@ -2069,13 +2069,20 @@ async function cmdDrain(repoRoot, opts) {
     if (requested > 1) {
       const supply = await drainSupplyProbe(repoRoot, root, cfg);
       workers = Math.min(requested, supply.capacity);
+      // 并发水位 advisory（2026-11 concurrency signal，纯增量只照亮不拦截）：probe 顺带读到
+      // 的实时 in_flight/queued 出现饱和/排队时给一行提示——排队出现早于 429，是比风暴闸
+      // 更早的前兆信号。workers 计算与派发放行完全不受影响；旧网关缺 concurrency 段 →
+      // 恒无提示（行为与历史一致）。
+      if (supply.saturation_advisory) {
+        log(`⚠ 供给水位：${supply.provider ?? 'provider'} ${supply.saturation_advisory.message}——照常派发（advisory 不拦截，供观察）`);
+      }
       if (workers < requested) {
-        appendFleetEvent(repoRoot, 'workers_scaled', { from: requested, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: requested, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), ...(supply.saturation_advisory ? { saturation_advisory: supply.saturation_advisory } : {}), reason: supply.reason });
         log(`⚠ 供给闸：请求并发 ${requested}，provider 容量 ${supply.capacity === Infinity ? '∞（观测缺席）' : supply.capacity}（${supply.reason}）——按 ${workers} 并发执行`);
       } else if (!opts.workers) {
         // 配置驱动的自动扩容（无显式 --workers）：留痕解锁链（网关 max_concurrency/key 池
         // 解锁 → workflow.json scheduling.maxWorkers → drain 自动生效），永不静默红线
-        appendFleetEvent(repoRoot, 'workers_scaled', { from: 1, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), reason: supply.reason });
+        appendFleetEvent(repoRoot, 'workers_scaled', { from: 1, to: workers, ...(supply.provider ? { provider: supply.provider } : {}), ...(supply.saturation_advisory ? { saturation_advisory: supply.saturation_advisory } : {}), reason: supply.reason });
         log(`⛵ 供给闸：provider 容量 ${workers}（${supply.reason}）——按 scheduling.maxWorkers=${requested} 并发执行`);
       }
     }

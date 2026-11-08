@@ -53,6 +53,10 @@ export function shouldHold(count, threshold) {
 // 上游海况数据面（2026-11-04，A1）：/_modeldock/metrics 消费
 // 数据源：sea_state（网关聚合风暴信号：meltdown_majority / rate_429_60m，判定常量见
 // src/gateway/state/sea.ts）+ providers[].errors 滑窗错误分桶（last_5m/last_60m）。
+// 并发水位 advisory（2026-11 concurrency signal）：metrics.concurrency（per-provider
+// 实时 in_flight/queued/limit）汇总为 queued_providers + max_in_flight_ratio——排队出现
+// 早于 429，是比 sea_state 更早的风暴前兆；**只照亮不拦截**（storm 判定阈值与派发放行
+// 均不动，硬语义变更需用户拍板）。
 // 与 countUpstreamStorm 的日志扫描同一滞留语义：metrics 优先，缺席/失败自动落回日志
 // 扫描（fail-open——观测失败绝不阻断派发）。两条取数路径共享一个模块级节流缓存：
 //   fetchSeaSnapshot  异步（cfg 门控走 resolveGatewayAdmin，decideDispatchForRun 用）
@@ -100,11 +104,40 @@ export function resetSeaSnapshotCache() {
 const _num = (v) => (Number.isFinite(v) ? v : 0);
 
 /**
+ * 并发水位 advisory（2026-11 concurrency signal，纯增量，不参与任何硬判定）：从
+ * metrics.concurrency（per-provider 实时水位 { in_flight, queued, limit }，见
+ * src/gateway/server.ts hMetrics）汇总出两个信号——
+ *   queued_providers     正在排队的 provider 数（queued>0）：排队出现早于 429，是比
+ *                        sea_state 更早的风暴前兆（供给闸只能判「允许几路」，看不到
+ *                        「正在排多少」，本字段补这个盲区）
+ *   max_in_flight_ratio  全队最大 in_flight/limit 占比（0<limit 才进分母；limit=0 不限
+ *                        者不入——否则分母 0 无意义）；无可比条目 → null
+ * metrics 缺 concurrency 段（旧版网关）或形态异常 → null，消费方按缺失处理；provider
+ * 在段内缺席 = 空闲（网关口径：无流量且无在途不露出），不计入排队、不拉低占比。
+ */
+export function concurrencyAdvisoryFromMetrics(j) {
+  const c = j?.concurrency;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  let queuedProviders = 0;
+  let maxRatio = null;
+  for (const v of Object.values(c)) {
+    if (!v || typeof v !== 'object') continue;
+    if (Number.isFinite(v.queued) && v.queued > 0) queuedProviders += 1;
+    if (Number.isFinite(v.in_flight) && Number.isFinite(v.limit) && v.limit > 0) {
+      const r = v.in_flight / v.limit;
+      if (maxRatio === null || r > maxRatio) maxRatio = r;
+    }
+  }
+  return { queued_providers: queuedProviders, max_in_flight_ratio: maxRatio };
+}
+
+/**
  * 从 /_modeldock/metrics 响应提取海况快照（纯函数，字段缺失容错——旧版网关无 sea_state
  * 或 errors 分桶时各字段按「无数据」处理，不抛错）。
  * @returns {{ mode:'ok', at:number, storm:boolean, reasons:string[], meltdown:string[],
  *   meltdownCount:number, rate429_5m:number, total5m:number, count429_5m:number,
- *   countQuota_5m:number, count429_60m:number, countQuota_60m:number }}
+ *   countQuota_5m:number, count429_60m:number, countQuota_60m:number,
+ *   concurrency:{ queued_providers:number, max_in_flight_ratio:number|null }|null }}
  */
 export function seaSnapshotFromMetricsJson(j, now = Date.now()) {
   const sea = j?.sea_state ?? {};
@@ -139,6 +172,9 @@ export function seaSnapshotFromMetricsJson(j, now = Date.now()) {
     countQuota_5m: qa,
     count429_60m: c429b,
     countQuota_60m: qb,
+    // 并发水位 advisory（纯增量）：快照消费者（dispatch 权威风暴位）对该字段零依赖——
+    // 缺席（旧网关）为 null，不影响任何既有判定语义。
+    concurrency: concurrencyAdvisoryFromMetrics(j),
   };
 }
 

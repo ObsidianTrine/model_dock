@@ -44,8 +44,47 @@ export function providerCapacityDecision({ maxConcurrency, keypoolTotal, keypool
 }
 
 /**
+ * provider 实时水位读数与饱和 advisory（纯函数，测试直连；2026-11 concurrency signal）：
+ * entry = metrics.concurrency[providerId]（{ in_flight, queued, limit }，见
+ * src/gateway/server.ts hMetrics）。返回 { waterline, saturation_advisory }：
+ *   waterline            实时读数原样（三字段齐全才给）；provider 在 concurrency 段缺席
+ *                        = 空闲（网关口径：无流量且无在途不露出，缺席勿当故障）→ null
+ *   saturation_advisory  饱和（in_flight>=limit 且 limit>0）或排队（queued>0）时给
+ *                        { level:'saturated'|'queued', in_flight, queued, limit, message }
+ *                        （同时饱和与排队取更强的 saturated）；水位正常 → null。
+ *                        **只照亮不拦截**：不改变 capacity 判定与派发放行（硬语义变更
+ *                        如「排队即延迟派发」需用户拍板）；旧网关缺 concurrency 段 →
+ *                        两者恒 null（fail-open，行为与历史一致）。
+ */
+export function providerWaterline(entry) {
+  if (!entry || typeof entry !== 'object') return { waterline: null, saturation_advisory: null };
+  const in_flight = entry.in_flight;
+  const queued = entry.queued;
+  const limit = entry.limit;
+  if (!Number.isFinite(in_flight) || !Number.isFinite(queued) || !Number.isFinite(limit)) {
+    return { waterline: null, saturation_advisory: null };
+  }
+  const waterline = { in_flight, queued, limit };
+  const saturated = limit > 0 && in_flight >= limit;
+  const hasQueue = queued > 0;
+  if (!saturated && !hasQueue) return { waterline, saturation_advisory: null };
+  const occupancy = limit > 0 ? `in_flight ${in_flight}/${limit}` : `in_flight ${in_flight}（不限上限）`;
+  const message = saturated
+    ? `${occupancy} 已饱和${hasQueue ? `，另有 ${queued} 个请求排队` : ''}`
+    : `请求排队中（queued ${queued}，${occupancy}）`;
+  return {
+    waterline,
+    saturation_advisory: { level: saturated ? 'saturated' : 'queued', in_flight, queued, limit, message },
+  };
+}
+
+/**
  * drain 供给闸探测：把 worker tier token 经网关解析到 provider，再查 config + metrics 判容量。
- * 返回 { capacity, observed, provider?, reason }：
+ * 返回 { capacity, observed, provider?, reason }；观测打通时另附实时水位（纯增量 advisory，
+ * 见 providerWaterline）：
+ *   waterline            { in_flight, queued, limit } | null（concurrency 段可得且该 provider 在列时）
+ *   saturation_advisory  { level, in_flight, queued, limit, message }（仅饱和/排队时存在）
+ *   capacity / observed / reason 语义不变——advisory 不参与任何判定。
  *   capacity = Infinity  观测面未开启（gatewayAdmin ≠ true）——不设闸，行为与历史一致
  *   capacity = 1         观测面已开启但未解锁 / 不可达 / 字段缺失（fail-safe：不盲目扩容）
  *   observed             是否拿到了权威容量判定（true 时 reason 说明依据）
@@ -91,7 +130,19 @@ export async function probeProviderCapacity(p = {}) {
     keypoolTotal: kp && Number.isFinite(kp.total) ? kp.total : NaN,
     keypoolHealthy: kp && Number.isFinite(kp.healthy) ? kp.healthy : NaN,
   });
-  return { capacity: d.capacity, observed: true, provider, reason: d.reason };
+  // 实时水位读数（纯增量 advisory，2026-11 concurrency signal）：probe 本就拉了 metrics——
+  // 直接读目标 provider 的 in_flight/queued 附在结果里，饱和/排队时再附 saturation_advisory
+  // 提示。capacity 判定与派发放行零变化；旧网关无 concurrency 段或 provider 缺席（= 空闲）
+  // → waterline/saturation_advisory 为 null，调用方按缺失处理。
+  const wl = providerWaterline(metricsView.concurrency && typeof metricsView.concurrency === 'object' ? metricsView.concurrency[provider] : null);
+  return {
+    capacity: d.capacity,
+    observed: true,
+    provider,
+    reason: d.reason,
+    waterline: wl.waterline,
+    ...(wl.saturation_advisory ? { saturation_advisory: wl.saturation_advisory } : {}),
+  };
 }
 
 /** admin GET 尽力而为：非 2xx / 超时 / 网络 / 解析失败一律 null（调用方回落，绝不抛出）。 */

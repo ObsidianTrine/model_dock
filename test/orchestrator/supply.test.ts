@@ -18,6 +18,7 @@ import {
   harnessBillableFromUsage,
   probeProviderCapacity,
   providerCapacityDecision,
+  providerWaterline,
   startMeasuredFuelPoller,
 } from '../../.agents/scripts/orchestrator/supply.mjs'
 import { eventsOf, mkRepo, runOrch, cardText } from './helpers.js'
@@ -37,7 +38,7 @@ function listenEphemeral(server: http.Server): Promise<number> {
 }
 
 /** mock 网关：三端点应答由 state 对象驱动（各用例按需改字段）。 */
-async function startMockGateway(state: { provider?: string | null; maxConcurrency?: unknown; keypool?: unknown; usage?: unknown }): Promise<{ port: number; close: () => void }> {
+async function startMockGateway(state: { provider?: string | null; maxConcurrency?: unknown; keypool?: unknown; usage?: unknown; concurrency?: unknown }): Promise<{ port: number; close: () => void }> {
   const server = http.createServer((req, res) => {
     const admin = req.headers['x-modeldock-admin'] === 'admin-test'
     const finish = (code: number, body: unknown) => {
@@ -61,7 +62,8 @@ async function startMockGateway(state: { provider?: string | null; maxConcurrenc
     } else if (req.url === '/_modeldock/config') {
       finish(200, { providers: [{ id: 'glm', name: 'GLM', max_concurrency: state.maxConcurrency }] })
     } else if (req.url === '/_modeldock/metrics') {
-      finish(200, { keypool: state.keypool })
+      // concurrency 缺省不下发（旧网关形态）：advisory 走缺失回落路径
+      finish(200, { keypool: state.keypool, ...(state.concurrency !== undefined ? { concurrency: state.concurrency } : {}) })
     } else if (req.url === '/_modeldock/harness-usage') {
       finish(200, { ok: true, usage: state.usage })
     } else {
@@ -100,6 +102,43 @@ describe('supply > providerCapacityDecision 纯函数', () => {
   })
 })
 
+describe('supply > providerWaterline 纯函数（实时水位读数 + 饱和 advisory，只照亮不拦截）', () => {
+  it('饱和（in_flight>=limit>0）→ level=saturated + 人读 message；同时排队也并入 message', () => {
+    const w = providerWaterline({ in_flight: 4, queued: 0, limit: 4 })
+    expect(w.waterline).toEqual({ in_flight: 4, queued: 0, limit: 4 })
+    expect(w.saturation_advisory).toMatchObject({ level: 'saturated', in_flight: 4, queued: 0, limit: 4 })
+    expect(String(w.saturation_advisory?.message)).toContain('4/4')
+    const both = providerWaterline({ in_flight: 3, queued: 2, limit: 3 })
+    expect(both.saturation_advisory?.level).toBe('saturated')
+    expect(String(both.saturation_advisory?.message)).toContain('2 个请求排队')
+  })
+
+  it('未饱和但在排队（queued>0）→ level=queued', () => {
+    const w = providerWaterline({ in_flight: 1, queued: 3, limit: 4 })
+    expect(w.saturation_advisory).toMatchObject({ level: 'queued', in_flight: 1, queued: 3, limit: 4 })
+    expect(String(w.saturation_advisory?.message)).toContain('排队')
+  })
+
+  it('水位正常（未饱和未排队）→ 有读数无 advisory；limit=0（不限）只按排队判', () => {
+    const ok = providerWaterline({ in_flight: 1, queued: 0, limit: 4 })
+    expect(ok.waterline).toEqual({ in_flight: 1, queued: 0, limit: 4 })
+    expect(ok.saturation_advisory).toBeNull()
+    const unlimitedBusy = providerWaterline({ in_flight: 9, queued: 0, limit: 0 })
+    expect(unlimitedBusy.waterline).toEqual({ in_flight: 9, queued: 0, limit: 0 })
+    expect(unlimitedBusy.saturation_advisory).toBeNull() // 不限上限无排队：不判饱和
+    const unlimitedQueued = providerWaterline({ in_flight: 9, queued: 1, limit: 0 })
+    expect(unlimitedQueued.saturation_advisory?.level).toBe('queued')
+  })
+
+  it('provider 缺席（=空闲，网关不露出）/字段残缺 → waterline 与 advisory 均 null（勿当故障）', () => {
+    expect(providerWaterline(null)).toEqual({ waterline: null, saturation_advisory: null })
+    expect(providerWaterline(undefined)).toEqual({ waterline: null, saturation_advisory: null })
+    expect(providerWaterline({} as unknown)).toEqual({ waterline: null, saturation_advisory: null })
+    expect(providerWaterline({ in_flight: 1, queued: 0 } as unknown).waterline).toBeNull() // 缺 limit
+    expect(providerWaterline('garbage' as unknown).saturation_advisory).toBeNull()
+  })
+})
+
 describe('supply > probeProviderCapacity（mock 网关）', () => {
   it('观测面未开启（optIn=false）：Infinity 不设闸且零请求（base 指死端口证明未触达）', async () => {
     const r = await probeProviderCapacity({ token: 'tok', tier: 'ahead-2', base: 'http://127.0.0.1:1', adminToken: 'x', optIn: false })
@@ -117,6 +156,62 @@ describe('supply > probeProviderCapacity（mock 网关）', () => {
       expect(r.provider).toBe('glm')
     } finally {
       gw.close()
+    }
+  })
+
+  it('并发水位 advisory：metrics 带 concurrency 段 → waterline 附实时读数；饱和/排队附 saturation_advisory，capacity 判定零变化', async () => {
+    // 与上方「全链路可观测」同容量配置（max_concurrency=4 + healthy=3 → capacity 3）：
+    // 叠加饱和水位后 capacity 必须不变（advisory 只照亮不拦截）
+    const gw = await startMockGateway({
+      provider: 'glm',
+      maxConcurrency: 4,
+      keypool: { glm: { total: 3, healthy: 3 } },
+      concurrency: { glm: { in_flight: 4, queued: 2, limit: 4 } },
+    })
+    try {
+      const r = await probeProviderCapacity({ token: 'tok', tier: 'ahead-2', base: `http://127.0.0.1:${gw.port}`, adminToken: 'admin-test', optIn: true })
+      expect(r.capacity).toBe(3) // 硬判定语义零变化
+      expect(r.waterline).toEqual({ in_flight: 4, queued: 2, limit: 4 })
+      expect((r as { saturation_advisory?: { level: string } }).saturation_advisory?.level).toBe('saturated')
+    } finally {
+      gw.close()
+    }
+    const gw2 = await startMockGateway({
+      provider: 'glm',
+      maxConcurrency: 4,
+      keypool: { glm: { total: 3, healthy: 3 } },
+      concurrency: { glm: { in_flight: 1, queued: 3, limit: 4 } },
+    })
+    try {
+      const r2 = await probeProviderCapacity({ token: 'tok', tier: 'ahead-2', base: `http://127.0.0.1:${gw2.port}`, adminToken: 'admin-test', optIn: true })
+      expect(r2.capacity).toBe(3)
+      expect((r2 as { saturation_advisory?: { level: string } }).saturation_advisory?.level).toBe('queued')
+    } finally {
+      gw2.close()
+    }
+  })
+
+  it('并发水位 advisory 回落：concurrency 段缺席（旧网关）或目标 provider 缺席（=空闲）→ waterline null 无 advisory', async () => {
+    const gwOld = await startMockGateway({ provider: 'glm', maxConcurrency: 4, keypool: { glm: { total: 3, healthy: 3 } } })
+    try {
+      const r = await probeProviderCapacity({ token: 'tok', tier: 'ahead-2', base: `http://127.0.0.1:${gwOld.port}`, adminToken: 'admin-test', optIn: true })
+      expect((r as { waterline?: unknown }).waterline).toBeNull()
+      expect((r as { saturation_advisory?: unknown }).saturation_advisory).toBeUndefined()
+    } finally {
+      gwOld.close()
+    }
+    const gwIdle = await startMockGateway({
+      provider: 'glm',
+      maxConcurrency: 4,
+      keypool: { glm: { total: 3, healthy: 3 } },
+      concurrency: { other: { in_flight: 4, queued: 1, limit: 4 } }, // glm 缺席 = 空闲，勿当故障
+    })
+    try {
+      const r2 = await probeProviderCapacity({ token: 'tok', tier: 'ahead-2', base: `http://127.0.0.1:${gwIdle.port}`, adminToken: 'admin-test', optIn: true })
+      expect((r2 as { waterline?: unknown }).waterline).toBeNull()
+      expect((r2 as { saturation_advisory?: unknown }).saturation_advisory).toBeUndefined()
+    } finally {
+      gwIdle.close()
     }
   })
 
@@ -232,7 +327,7 @@ const server = http.createServer((req, res) => {
   } else if (req.url === '/_modeldock/config') {
     finish(200, { providers: [{ id: 'glm', name: 'GLM', max_concurrency: state.maxConcurrency }] })
   } else if (req.url === '/_modeldock/metrics') {
-    finish(200, { keypool: state.keypool })
+    finish(200, { keypool: state.keypool, ...(state.concurrency !== undefined ? { concurrency: state.concurrency } : {}) })
   } else if (req.url === '/_modeldock/harness-usage') {
     finish(200, { ok: true, usage: state.usage })
   } else {
@@ -242,7 +337,7 @@ const server = http.createServer((req, res) => {
 server.listen(0, '127.0.0.1', () => console.log('PORT:' + server.address().port))
 `
 
-  async function startMockGatewayProcess(state: { provider?: string | null; maxConcurrency?: unknown; keypool?: unknown; usage?: unknown }): Promise<{ port: number; close: () => void }> {
+  async function startMockGatewayProcess(state: { provider?: string | null; maxConcurrency?: unknown; keypool?: unknown; usage?: unknown; concurrency?: unknown }): Promise<{ port: number; close: () => void }> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-gwmock-'))
     const stateFile = path.join(dir, 'state.json')
     const scriptFile = path.join(dir, 'mock-gw.mjs')
@@ -348,6 +443,50 @@ server.listen(0, '127.0.0.1', () => console.log('PORT:' + server.address().port)
       expect(scaled!.from).toBe(1)
       expect(scaled!.to).toBe(2)
       expect(scaled!.provider).toBe('glm')
+    } finally {
+      gw.close()
+      repo.cleanup()
+    }
+  }, 180_000)
+
+  it('并发水位 advisory E2E：metrics 饱和/排队 → drain 打 供给水位 提示行 + workers_scaled 带 advisory；扩容与派发照常（advisory 不拦截）', async () => {
+    const gw = await startMockGatewayProcess({
+      provider: 'glm',
+      maxConcurrency: 3,
+      keypool: { glm: { total: 3, healthy: 3 } },
+      concurrency: { glm: { in_flight: 3, queued: 2, limit: 3 } }, // 饱和 + 排队：仅提示，不改 capacity
+    })
+    const repo = mkRepo({
+      extra: {
+        gatewayAdmin: true,
+        scheduling: { maxWorkers: 2 },
+        tiers: { 'ahead-2': { tokenEnv: 'MDK_TIER_TEST' } },
+      },
+    })
+    try {
+      submitCard(repo.root, 'w1', { gate: 'L1', tier: 'ahead-2', files_hint: ['docs/**'] })
+      submitCard(repo.root, 'w2', { gate: 'L1', tier: 'ahead-2', files_hint: ['test/**'] })
+      const out = runOrch(repo.root, 'drain --backend mock', {
+        MDK_TIER_TEST: 'tok-test-supply',
+        ORCH_GATEWAY_BASE: `http://127.0.0.1:${gw.port}`,
+        ORCH_GATEWAY_ADMIN_TOKEN: 'admin-test',
+        ORCH_MOCK_DELAY_MS: '600',
+      })
+      expect(out.stdout).toContain('供给水位')
+      expect(out.stdout).toContain('已饱和')
+      expect(out.stdout).toContain('照常派发')
+      // 扩容照常（capacity 判定零变化）：maxWorkers=2 仍按 2 并发
+      expect(out.stdout).toContain('按 scheduling.maxWorkers=2 并发执行')
+      const scaled = fleetEvents(repo.root).find((e) => e.type === 'workers_scaled') as Record<string, unknown> | undefined
+      expect(scaled).toBeTruthy()
+      expect(scaled!.from).toBe(1)
+      expect(scaled!.to).toBe(2)
+      const adv = scaled!.saturation_advisory as Record<string, unknown> | undefined
+      expect(adv).toBeTruthy()
+      expect(adv!.level).toBe('saturated')
+      // 两张卡照常落位（advisory 绝不阻断派发）
+      expect(eventsOf(repo.root, 'w1').some((e) => e.type === 'worktree_ready')).toBe(true)
+      expect(eventsOf(repo.root, 'w2').some((e) => e.type === 'worktree_ready')).toBe(true)
     } finally {
       gw.close()
       repo.cleanup()
