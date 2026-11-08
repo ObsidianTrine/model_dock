@@ -14,13 +14,40 @@ import {
   readBrief,
   listBriefs,
   snapshotCitations,
+  assessBrief,
+  crossCheckClaims,
+  citationDepthStats,
+  computeVerdict,
+  extractClaimTokens,
+  parseVerdictBlock,
+  appendResearchLedger,
+  readLedgerStats,
   BRIEF_MARKER,
 } from '../../.agents/scripts/orchestrator/research.mjs'
 import { buildResearchPrompt, CARD_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { buildClaudeArgs, RESEARCH_TOOLS } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
+import { mkRepo, runOrch } from './helpers.js'
 
 /** 测试固定时钟：fixtures 的访问日期随它生成（陈旧日期 gate 让写死日期在 7 天后必红）。 */
 const TODAY = new Date().toISOString().slice(0, 10)
+
+/** 五段齐全的可回查样例 brief（L1/L2/e2e 共用，模块级作用域）。 */
+const CLAIM_BODY = [
+  '# 结论',
+  'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [1]。',
+  '',
+  '# 选项对比',
+  '- DeepSeek V4.1：用量第一。',
+  '',
+  '# 引用',
+  '- 2026-11-08 https://a.com/rankings — 支撑',
+  '',
+  '# 建议',
+  '预设库补齐用量头部。',
+  '',
+  '# 罗盘对齐',
+  '对齐配置托管定位。',
+].join('\n')
 
 const BRIEF_BODY = [
   '# 结论',
@@ -196,4 +223,95 @@ describe('orchestrator research > prompt 与工具面', () => {
     expect(worker).toContain('--permission-mode')
     expect(worker).toContain('Edit')
   })
+})
+
+describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
+  it('extractClaimTokens：数字+单位与型号名；排除年份/日期碎片/序号/引用段', () => {
+    const tokens = extractClaimTokens(CLAIM_BODY)
+    expect(tokens).toContain('56.5T')
+    expect(tokens).toContain('43.6%')
+    expect(tokens).toContain('V4.1')
+    expect(tokens).toContain('GPT-6')
+    expect(tokens).toContain('K3.1')
+    expect(tokens).not.toContain('2026')
+    expect(tokens).not.toContain('09')
+    expect(tokens).not.toContain('2026-11-08')
+  })
+
+  it('crossCheckClaims：命中/未命中/命中率；无快照或无 token → checked=0', () => {
+    const r = crossCheckClaims(CLAIM_BODY, [{ url: 'https://a.com/rankings', text: '榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 领跑' }])
+    expect(r.checked).toBeGreaterThan(0)
+    expect(r.hits).toBeGreaterThanOrEqual(3)
+    expect(r.misses).toContain('K3.1')
+    expect(crossCheckClaims(CLAIM_BODY, []).checked).toBe(0)
+  })
+
+  it('citationDepthStats：深链/根路径比', () => {
+    const body = '# 引用\n- 2026-11-08 https://openrouter.ai/rankings — 深链\n- 2026-11-08 https://lmsys.org/ — 根路径'
+    expect(citationDepthStats(body)).toEqual({ deep: 1, root: 1, total: 2, ratio: 0.5 })
+  })
+
+  it('computeVerdict：判级与降级（快照缺失 unknown；低命中 fail；中命中 warn；高命中 pass；深链比降级）', () => {
+    const depth = { deep: 9, root: 1, total: 10, ratio: 0.9 }
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: false, claimCheck: { checked: 10, hits: 8, hit_rate: 0.8, misses: [] }, depth }).level).toBe('unknown')
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 0, hits: 0, hit_rate: null, misses: [] }, depth }).level).toBe('unknown')
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 9, hit_rate: 0.9, misses: [] }, depth }).level).toBe('pass')
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 5, hit_rate: 0.5, misses: ['a'] }, depth }).level).toBe('warn')
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 2, hit_rate: 0.2, misses: ['a'] }, depth }).level).toBe('fail')
+    // 高命中但全是根路径引用 → 降级 warn
+    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 9, hit_rate: 0.9, misses: [] }, depth: { deep: 2, root: 8, total: 10, ratio: 0.2 } }).level).toBe('warn')
+  })
+
+  it('parseVerdictBlock：L2 契约解析；缺失/非法判级返回 null', () => {
+    const block = '复核完成。\n\n```agents-verdict\nlevel: medium\nblockers: 1\n# 理由\n- 部分支撑\n- 疑点：口径未标\n```'
+    expect(parseVerdictBlock(block)).toEqual({ level: 'medium', blockers: 1, reasons: ['部分支撑', '疑点：口径未标'] })
+    expect(parseVerdictBlock('没有契约块')).toBeNull()
+    expect(parseVerdictBlock('```agents-verdict\nlevel: 极高\nblockers: 0\n```')).toBeNull()
+  })
+
+  it('assessBrief + 台账：落 verdict.json；appendResearchLedger/readLedgerStats 聚合', () => {
+    const root = tmpRoot()
+    try {
+      writeBrief(root, { id: 'verify-me', title: 't', body: CLAIM_BODY })
+      const srcDir = path.join(root, '.agents/orchestrator/research/verify-me/sources')
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.writeFileSync(path.join(srcDir, '1.txt'), 'url: https://a.com/rankings\n\n榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 领跑')
+      const verdict = assessBrief(root, 'verify-me', { model: 'glm-5.3-flash' })
+      expect(verdict.level).toBe('pass')
+      expect(JSON.parse(fs.readFileSync(path.join(root, '.agents/orchestrator/research/verify-me/verdict.json'), 'utf8')).brief_id).toBe('verify-me')
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'verify-me', model: 'glm-5.3-flash', level: 'pass', hit_rate: 0.8 })
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'other', model: 'glm-4.5-air', level: 'fail', hit_rate: 0.2 })
+      const stats = readLedgerStats(root)
+      const m53 = stats.find((s) => s.model === 'glm-5.3-flash')
+      const air = stats.find((s) => s.model === 'glm-4.5-air')
+      expect(m53.runs).toBe(1)
+      expect(m53.avg_hit_rate).toBe(0.8)
+      expect(air.levels.fail).toBe(1)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('orchestrator research > verify e2e（mock）', () => {
+  it('research verify：L2 复核合并 L1 落 verdict.json + 记台账 + stats 可读', () => {
+    const repo = mkRepo()
+    try {
+      const root = repo.root
+      writeBrief(root, { id: 'verify-me', title: 't', question: 'q', backend: 'mock', body: CLAIM_BODY })
+      const srcDir = path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'sources')
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.writeFileSync(path.join(srcDir, '1.txt'), 'url: https://a.com/rankings\n\n榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 领跑')
+      runOrch(repo.root, 'research verify verify-me --backend mock')
+      const verdict = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
+      expect(verdict.l2.level).toBe('high')
+      expect(verdict.level).toBe('pass')
+      const ledger = fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'ledger.jsonl'), 'utf8')
+      expect(ledger).toContain('"kind":"l2"')
+      const out = runOrch(repo.root, 'research stats')
+      expect(out.stdout).toContain('次判定')
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })

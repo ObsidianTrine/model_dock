@@ -279,7 +279,10 @@ export function buildSailReport(voyage) {
         else lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 未提交（${c.skipped?.find((s) => s.id === p.id)?.reason ?? '未提交'}）`);
       }
       // 上游管线（2026-11 Plan A）：feature 提案的去向——调研/spec/失败原因如实入报告
-      for (const id of c.upstream?.researched ?? []) lines.push(`  - ⛵ 上游管线：调研 brief ${id} 已产出（research/<id>/brief.md，带引用与快照）`);
+      for (const id of c.upstream?.researched ?? []) {
+        const v = c.upstream?.verdicts?.find((x) => x.id === id)?.level;
+        lines.push(`  - ⛵ 上游管线：调研 brief ${id} 已产出（research/<id>/brief.md，带引用与快照）${v ? `——可信度初判 ${v}` : ''}`);
+      }
       for (const id of c.upstream?.speced ?? []) lines.push(`  - ⛵ 上游管线：spec ${id} 已落盘待人审——审完设计后跑 spec build ${id} 拆卡进队列`);
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
     } else if (c.kind === 'idle') {

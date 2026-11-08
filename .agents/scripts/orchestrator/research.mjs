@@ -176,3 +176,190 @@ export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.f
   }
   return { ok, failed };
 }
+
+// ---------------------------------------------------------------------------
+// 可信度判定（2026-11-08 设计，问题无关）：L1 快照回查（纯规则）→ L2 异构复核（LLM
+// 按需）→ L3 按模型建档核实率。原则：形态 ≠ 真实（判据回到证据本身）、确定性优先于
+// LLM 自评、单次打分不如历史校准。三次真实事故的映射：①日期编造→L0 已拦；②真 URL
+// 假依据→L1 数字回查拦；③模型接地能力差→L3 建档淘汰。
+// ---------------------------------------------------------------------------
+
+/** L2 复核会话输出契约的 fenced block 标记。 */
+export const VERDICT_MARKER = 'agents-verdict';
+
+/**
+ * 从 brief 结论/选项对比提取可回查 token（数字+单位、拉丁字母数字混合的型号名）。
+ * 只取「# 引用」段之前——引用段自身含日期与 URL，回查它们是自指。排除项：年份
+ * （训练先验高发区，且页面必有——回查无区分度）、纯 1-2 位无单位数字（序号/日期碎片）。
+ */
+export function extractClaimTokens(body) {
+  const text = String(body ?? '').split(/^#\s*引用\s*$/m)[0] ?? '';
+  const tokens = new Set();
+  for (const m of text.matchAll(/(?:\$)?\d[\d,，.]*\s*(?:T|万亿|亿|万|M|B|K|%|％|分|倍|美元|次|名|个|年|家|席)?/g)) {
+    let t = m[0].replace(/[\s，,]+/g, '');
+    if (!t) continue;
+    if (/20\d{2}/.test(t)) continue; // 年份/日期片段：无区分度
+    if (/^\d{1,2}$/.test(t)) continue; // 序号/碎片
+    tokens.add(t);
+  }
+  for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9.+-]*\d[A-Za-z0-9.+-]*/g)) {
+    if (m[0].length >= 3) tokens.add(m[0]); // 型号名（GPT-6、Opus 5.5、V4.1、K3.1）
+  }
+  return [...tokens].slice(0, 40);
+}
+
+/**
+ * L1 数字回查：结论里的可回查 token 是否真的出现在其所引来源的快照文本里。
+ * 快照 0 份 = 无法回查（网络问题 ≠ 编造，不计分母、单独报 unknown）。
+ * 真实事故锚定：2026-11-08 二跑「真 URL 假依据」——brief 声称的 56.5T 在其所引
+ * lmsys.org 首页快照里不存在，本法一抓一个准。
+ */
+export function crossCheckClaims(briefBody, sources) {
+  const tokens = extractClaimTokens(briefBody);
+  const texts = (sources ?? []).map((s) => String(s.text ?? ''));
+  if (!tokens.length) return { checked: 0, hits: 0, hit_rate: null, misses: [], tokens };
+  if (!texts.length) return { checked: 0, hits: 0, hit_rate: null, misses: [], tokens };
+  let hits = 0;
+  const misses = [];
+  for (const t of tokens) {
+    const needle = t.replace(/[，,]/g, '');
+    const found = texts.some((txt) => txt.includes(needle) || txt.replace(/[，,]/g, '').includes(needle));
+    if (found) hits++;
+    else misses.push(t);
+  }
+  return { checked: tokens.length, hits, hit_rate: hits / tokens.length, misses, tokens };
+}
+
+/** L1 引用深度比：根路径引用（https://lmsys.org/）占比是红旗——真实数据页几乎都是深链。 */
+export function citationDepthStats(body) {
+  const dated = extractDatedCitations(body);
+  const urls = dated.length ? dated.map((c) => c.url) : extractCitations(body);
+  let deep = 0;
+  let root = 0;
+  for (const u of urls) {
+    try {
+      const p = new URL(u).pathname.replace(/\/+$/, '');
+      if (p) deep++;
+      else root++;
+    } catch {
+      root++;
+    }
+  }
+  return { deep, root, total: urls.length, ratio: urls.length ? deep / urls.length : null };
+}
+
+/** L1 判级（report-only 初版阈值；快照回查先攒 near-miss 分布再收紧——晴雨表哲学）。 */
+export function computeVerdict({ briefBody, snapshotsOk, claimCheck, depth }) {
+  const reasons = [];
+  let level;
+  if (!snapshotsOk) {
+    level = 'unknown';
+    reasons.push('快照 0 份成功——无法回查（网络/拦截原因，不计为编造）');
+  } else if (!claimCheck.checked) {
+    level = 'unknown';
+    reasons.push('结论中无可回查的数字/型号 token——纯定性结论，L1 不适用');
+  } else if (claimCheck.hit_rate >= 0.7) {
+    level = 'pass';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）`);
+  } else if (claimCheck.hit_rate >= 0.4) {
+    level = 'warn';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）偏低——未命中的数字疑似不在来源页上，人工核 sources/ 对账`);
+  } else {
+    level = 'fail';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）过低——结论数字与所引快照严重不符，疑似「真 URL 假依据」`);
+  }
+  if (level === 'pass' && depth?.ratio != null && depth.ratio < 0.5) {
+    level = 'warn';
+    reasons.push(`引用深度比偏低（深链 ${depth.deep}/${depth.total}）——根路径引用难以支撑具体数据`);
+  }
+  if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
+  return { level, reasons };
+}
+
+/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text }]。 */
+export function loadSnapshots(repoRoot, id) {
+  const dir = path.join(briefDir(repoRoot, id), 'sources');
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort()) {
+    const raw = fs.readFileSync(path.join(dir, f), 'utf8');
+    const url = /^url:\s*(.+)$/m.exec(raw)?.[1]?.trim() ?? f;
+    out.push({ url, text: raw });
+  }
+  return out;
+}
+
+/** L1 总入口：读 brief + 快照 → 判级 → 落 verdict.json（幂等覆盖——快照重跑后刷新）。 */
+export function assessBrief(repoRoot, id, { model } = {}) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) return null;
+  const snapshots = loadSnapshots(repoRoot, id);
+  const claimCheck = crossCheckClaims(brief.body, snapshots);
+  const depth = citationDepthStats(brief.body);
+  const { level, reasons } = computeVerdict({
+    briefBody: brief.body,
+    snapshotsOk: snapshots.length > 0,
+    claimCheck,
+    depth,
+  });
+  const verdict = {
+    brief_id: id,
+    model: model ?? brief.meta.backend ?? null,
+    created_at: toIsoLocal(),
+    l1: { snapshots_ok: snapshots.length, claim_check: { checked: claimCheck.checked, hits: claimCheck.hits, hit_rate: claimCheck.hit_rate, misses: claimCheck.misses }, citation_depth: depth },
+    l2: null,
+    level,
+    reasons,
+  };
+  fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
+  return verdict;
+}
+
+/** L3 台账：每次判定（L1/L2）追加一行——信任按 模型×引擎 攒统计量（drift 保险丝同哲学）。 */
+export function appendResearchLedger(repoRoot, entry) {
+  const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
+  fs.mkdirSync(researchDir(repoRoot), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify({ ts: toIsoLocal(), ...entry })}\n`);
+  return file;
+}
+
+/** L3 读台账 → 按模型聚合：n / L1 平均核实率 / 判级分布。 */
+export function readLedgerStats(repoRoot) {
+  const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
+  if (!fs.existsSync(file)) return [];
+  const byModel = new Map();
+  for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
+    try {
+      const e = JSON.parse(line);
+      const key = `${e.model ?? '?'}`;
+      const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [] };
+      agg.runs++;
+      agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;
+      if (typeof e.hit_rate === 'number') agg.hit_rates.push(e.hit_rate);
+      byModel.set(key, agg);
+    } catch { /* 损坏行跳过 */ }
+  }
+  return [...byModel.values()].map((a) => ({
+    model: a.model,
+    runs: a.runs,
+    levels: a.levels,
+    avg_hit_rate: a.hit_rates.length ? a.hit_rates.reduce((s, v) => s + v, 0) / a.hit_rates.length : null,
+  }));
+}
+
+/** 解析 L2 复核输出（agents-verdict 契约块）；缺失/不合法返回 null（调用方喂回重试）。 */
+export function parseVerdictBlock(text) {
+  const re = new RegExp('```' + VERDICT_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  const raw = m[1];
+  const level = /^level:\s*(high|medium|low)\s*$/m.exec(raw)?.[1];
+  const blockers = /^blockers:\s*(\d+)\s*$/m.exec(raw)?.[1];
+  if (!level || blockers === undefined) return null;
+  const reasons = raw
+    .split('\n')
+    .filter((l) => /^-\s+/.test(l.trim()))
+    .map((l) => l.trim().replace(/^-\s+/, ''))
+    .slice(0, 10);
+  return { level, blockers: parseInt(blockers, 10), reasons };
+}

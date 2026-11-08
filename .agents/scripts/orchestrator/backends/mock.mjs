@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -31,8 +31,28 @@ export const mockBackend = {
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
-    const isResearcher = !isSpecPlanner && !isPlanner && prompt.includes(BRIEF_MARKER);
+    const isVerifier = !isSpecPlanner && !isPlanner && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
+    const isResearcher = !isSpecPlanner && !isPlanner && !isVerifier && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
+
+    if (isVerifier) {
+      // L2 复核模式：输出 agents-verdict 契约块（level/blockers/理由）；
+      // ORCH_MOCK_REVIEW_BLOCKERS 映射为 blockers（fail 场景 e2e 复用既有注入）
+      const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      const level = blockers > 0 ? 'low' : 'high';
+      const output = [
+        '复核完成。',
+        '',
+        '```' + VERDICT_MARKER,
+        `level: ${level}`,
+        `blockers: ${blockers}`,
+        '# 理由',
+        `- mock 复核：结论与给定快照${blockers > 0 ? '存在硬伤' : '一致'}`,
+        '```',
+      ].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-verifier' });
+      return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+    }
 
     if (isSpecPlanner) {
       // spec planner 模式：输出三件套契约块（两个任务、文件明确，供 spec build 端到端拆卡）；

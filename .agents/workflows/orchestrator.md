@@ -299,7 +299,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 3. **spec 升级（sail 规划轮自动补齐）**：feature 提案缺 brief 则派调研（每周期上限 `freeSail.researchPerCycle` 缺省 2），brief 到手后 `specFromDraft` 以**提案同 id** 落 spec 三件套（每周期上限 `freeSail.specPerCycle` 缺省 1）；未完成下周期重试（提案同 id 覆盖=升级，不重复烧）。交互场景手动 `spec "<意图>" --from-brief <id>` 等价。
 4. **人审 + 拆卡**：spec 落盘即停——**等人审设计**；审完 `spec build <id>` 拆卡进队列（gate=L3），开发→测试→审查照走闭环。
 
-航海报告「为什么这么编排」如实收录上游管线去向（brief 产出 / spec 落盘待人审 / 失败原因与重试提示）。调研产出质量的回归评测见 D7（discovery-evals）。
+航海报告「为什么这么编排」如实收录上游管线去向（brief 产出 / spec 落盘待人审 / 失败原因与重试提示）。**可信度判定三层（问题无关，2026-11-08）**：L1 快照回查——调研产出后自动跑（`assessBrief`：从结论提取数字/型号名 grep 所引 `sources/` 快照 + 引用深度比，判级 pass/warn/fail/unknown 落 `verdict.json`，**report-only 亮牌不阻断**，阈值收紧待 near-miss 分布；管线内同步跑）；L2 `research verify <brief-id>`——异构复核会话（readonly 拿 brief+快照判内部一致性，agents-verdict 契约，合并 L1 落 verdict.json；复核船缺省 review.backend/model）；L3 `research stats`——按调研船模型聚合核实率与判级分布（台账 `research/ledger.jsonl`，信任=统计量；低核实率模型强制人工核，自动降级为演进项）。调研产出质量的回归评测见 D7（discovery-evals）。
 
 ### B4. 夜航巡港（nightly）与 schedule（每日波次）
 
