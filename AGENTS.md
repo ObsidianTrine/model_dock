@@ -197,6 +197,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 |------|------|------|
 | `workflows/test.yml` | 产品三平台矩阵 + 工作流套件；触发分级（2026-11-03）：mac 腿仅 PR / push main / 每日 schedule，workflow-suite 仅 `.agents/**`、`test/orchestrator/**` 变更才真跑（否则占位绿保 required check） | 无 |
 | `workflows/claude-review.yml` | 分层 PR 审查：`risk-tier` 确定性打 `risk:*` label（零消耗）+ `auto-review` 只读审查（REVIEW.md 纪律，[P0]/[P1]/[P2] + inline，3 轮收敛）+ `security-review`（`SECURITY-VERDICT` 门禁，FAIL 即失败）；`@claude` 评论可交互追问 | `CLAUDE_AUTH_TOKEN`（key；risk-tier 不需要） |
+| `workflows/codeql.yml` | 确定性静态安全扫描（JS/TS；push/PR 仅 main+develop + 每周 cron）：与 security-review 的 LLM 审查互补，补「缺密钥时 skip 视为通过」的确定性缺口；零 secrets；required check 待 push 后登记（check 名 `CodeQL (javascript-typescript)`） | 无 |
 | `REVIEW.md` + `.github/CODEOWNERS` | 审查纪律 + 敏感路径归属；审查者动手前必读 | 无 |
 | `scripts/pr-risk-tier.mjs` | PR 风险分级脚本（规则对齐 workflow.json corePaths/releasePaths；测试 `test/pr-risk-tier.test.ts`） | 无 |
 | `.agents/review-evals/` | 审查评测集：事故/revert 变考题（`scripts/review-eval.mjs` 跑分）——**出事故后必读加题**，改 REVIEW.md/prompt/模型后全量重跑 | 无 |
