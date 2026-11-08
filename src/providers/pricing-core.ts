@@ -45,10 +45,14 @@ export function priceDiffRatios(from: ModelCost, to: ModelCost): { input: number
 }
 
 /** 价格闸门：input 与 output 价差均 ≤ tolerance（缺省 0.05 = 5%）才放行。
- *  双向分别卡闸隐含任意加权融合价差 ≤ tolerance，可解释性最好。 */
+ *  双向分别卡闸隐含任意加权融合价差 ≤ tolerance，可解释性最好。
+ *  epsilon（1e-9）：二进制浮点对十进制语义做减除会有噪声——十进制上恰好 5% 的对价
+ *  （如 2 与 2.1）算出 0.05000000000000004 被判越界，报错还显示「差 5.0%」自相矛盾；
+ *  容差比较统一放宽 1e-9（远小于任何真实档位差，不会放进真超限的价）。 */
 export function priceWithinTolerance(from: ModelCost, to: ModelCost, tolerance = 0.05): boolean {
   const r = priceDiffRatios(from, to)
-  return r.input <= tolerance && r.output <= tolerance
+  const eps = 1e-9
+  return r.input <= tolerance + eps && r.output <= tolerance + eps
 }
 
 /** 单请求成本（USD）。usage 为网关日志口径的四桶 token 原始计数。 */
