@@ -4,7 +4,7 @@ import { mutateConfig } from '../config/store.js'
 import { switchHarnessMode, resyncHarnessToRoute } from '../ops.js'
 import { requireAdapter } from '../adapters/registry.js'
 import { applyChanges } from '../adapters/engine.js'
-import { detachHarness, planAttach, registerAttach } from '../ops.js'
+import { detachHarness, pinRouteProtocolError, planAttach, registerAttach } from '../ops.js'
 import {
   getSnapshot,
   listSnapshots,
@@ -120,6 +120,16 @@ export async function cmdHarnessRoute(id: string, profile?: string): Promise<voi
   if (he.mode === 'file') {
     console.error(c.red(t('✗ {id} 是 file 模式（客户端自管路由），不支持钉定', '✗ {id} runs in file mode (the client manages its own routing) and cannot be pinned', { id })))
     process.exit(1)
+  }
+  // 协议兼容校验（钉到具体 profile 才查；default=恢复跟随全局不查）：单协议客户端钉到
+  // 不支持其协议的服务 = 钉成功但请求永远被静默改发给别家，写盘前拒绝
+  const pinProviderId = profile !== 'default' ? cfg.profiles[profile]?.provider : undefined
+  if (pinProviderId) {
+    const conflict = await pinRouteProtocolError(id, pinProviderId, cfg)
+    if (conflict) {
+      console.error(c.red('✗ ' + conflict))
+      process.exit(1)
+    }
   }
   await mutateConfig((c2) => {
     c2.harness[id] = { ...c2.harness[id]!, route: profile }

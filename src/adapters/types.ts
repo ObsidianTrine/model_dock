@@ -128,6 +128,11 @@ export interface HarnessAdapter {
   /** 模型列表/默认模型烙在客户端配置文件里（dsh 的 patch models、workbuddy 的 models.json、zcode 的 personalModelIds）：
    *  全局切换服务后需按新路由重写客户端文件才跟随（其余客户端指向网关、零改动即跟随） */
   bakesModels?: boolean
+  /** 客户端能讲的协议（钉路由/接入的协议校验用，见 shared.pinProtocolConflict）：单协议/受限协议客户端声明，
+   *  多协议客户端（zcode/dsh 按 provider 协议自适应 wire）与无法判定的客户端（generic）省略 = 不校验。
+   *  依据=各 adapter 实际写的客户端配置形态（claude-code 只写 ANTHROPIC_BASE_URL、codex 只写 wire_api=responses、
+   *  provider-json 系只写 @ai-sdk/openai-compatible + /v1）。 */
+  clientProtocols?: Protocol[]
   install?: ClientInstall
   detect(): Promise<DetectResult>
   /** 客户端自身 profile 名列表（如 dsh 的 desktop / web），供 UI 渲染接入范围选择；无此概念的 adapter 不实现 */

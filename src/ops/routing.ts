@@ -1,13 +1,29 @@
 import { t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
+import type { Config, ProviderConfig } from '../config/types.js'
 import { noteLocalSwitch } from '../sync/state.js'
 import { getAdapter } from '../adapters/registry.js'
+import { pinProtocolConflict } from '../adapters/shared.js'
 import { applyChanges } from '../adapters/engine.js'
 import { readTextIfExists } from '../util/fsx.js'
 import { textEqualsIgnoreEol } from '../util/diff.js'
 import { displayRouteProvider, type GatewayRuntime } from '../gateway/state.js'
 import { planAttach } from './attach.js'
 import { resolveClientGatewayPort } from './gateway-port.js'
+
+/** 钉路由的协议兼容校验（Web hHarnessRoute / CLI cmdHarnessRoute 共用口径）：单协议客户端钉到
+ *  不支持其协议的服务 = 钉成功但请求永远被改发给别家（网关不做跨协议翻译），拒绝并给可操作指引。
+ *  服务不存在 / 客户端多协议未声明 clientProtocols / adapter 不在册 → undefined 放行（宁漏检不误拦）。 */
+export async function pinRouteProtocolError(
+  harnessId: string,
+  providerId: string,
+  cfg: Config
+): Promise<string | undefined> {
+  const provider: ProviderConfig | undefined = cfg.providers[providerId]
+  if (!provider) return undefined
+  const adapter = await getAdapter(harnessId, cfg)
+  return pinProtocolConflict(adapter ?? undefined, provider, providerId)
+}
 
 /** 开启/关闭自动路由(故障切换) + 可选的强制服务商/限流切换/自动备用链开关,均持久化到 gateway。默认关闭,用户显式应用才开启。
  *  未传的可选参数（provider/failoverOn429/autoFallback 为 undefined）保持现状不动。 */

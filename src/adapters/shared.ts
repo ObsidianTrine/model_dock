@@ -1,8 +1,8 @@
 import { t } from '../util/i18n.js'
 import { textEqualsIgnoreEol } from '../util/diff.js'
-import type { Config, ModelMeta, Protocol } from '../config/types.js'
+import type { Config, ModelMeta, Protocol, ProviderConfig } from '../config/types.js'
 import { AdapterError, type AttachOptions, type FileChange, type PlanResult } from './types.js'
-import { gatewayBase, gatewayBaseOpenAI, isOursGatewayUrl } from './types.js'
+import { gatewayBase, gatewayBaseOpenAI, isOursGatewayUrl, type HarnessAdapter } from './types.js'
 
 /** 等值过滤帮手：内容无变化返回 null（稳态重接/周期 refresh 零快照零写盘），有变化才产出 FileChange。
  *  dsh/zcode 内联了同款判定；其余适配器统一走这里（known-issues P2：此前 5 处稳态重接也整包
@@ -70,6 +70,29 @@ export function resolveRoute(opts: Pick<AttachOptions, 'profile'>, cfg: Config):
   const providerId = profile?.provider
   const provider = providerId ? cfg.providers[providerId] : undefined
   return { routeName, profile, providerId, provider, modelMap: provider?.models ?? {} }
+}
+
+/** 钉路由/接入的协议兼容校验（hHarnessRoute / cmdHarnessRoute / planAttach 三口共用口径）：
+ *  网关不做跨协议翻译（relay.upstreamEndpoint 对未配客户端协议端点的候选直接 candidateSkip），
+ *  单协议客户端钉到不支持该协议的服务 = 钉成功但永远打不到（请求只会被静默改发给别家，
+ *  2026-11-08 claude-code 钉 bigmodel 报 404 即此）。声明了 clientProtocols 且目标服务一个都不
+ *  支持 → 返回可操作的拒绝原因（双语）；多协议/未知客户端未声明 → 放行不校验（宁漏检不误拦）。 */
+export function pinProtocolConflict(
+  adapter: HarnessAdapter | undefined,
+  provider: ProviderConfig,
+  providerId?: string
+): string | undefined {
+  const want = adapter?.clientProtocols
+  if (!adapter || !want?.length) return undefined
+  const supported = want.some((p) => provider.endpoints?.[p] || provider.protocol === p)
+  if (supported) return undefined
+  const wantStr = want.join(' / ')
+  const svc = provider.name || providerId || '?'
+  return t(
+    '客户端「{client}」只支持 {want} 协议，服务「{svc}」没有该协议端点——钉过去请求只会被改发给别的服务，永远打不到。修复二选一：在「编辑服务」里给「{svc}」补 {want} 协议端点；或改钉其他支持 {want} 的服务',
+    'Client "{client}" speaks only {want}, and service "{svc}" has no such protocol endpoint — pinned requests would always fail over to other services and never reach this one. Fix either way: add a {want} endpoint to "{svc}" under "Edit Service", or pin to another service that supports {want}',
+    { client: adapter.label, want: wantStr, svc }
+  )
 }
 
 /** 「模型列表取自当前路由…」展示 note（dsh/zcode/workbuddy/provider-json 文案一致，一并收敛） */

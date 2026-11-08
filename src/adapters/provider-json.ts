@@ -105,6 +105,8 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
     // setDefault 时默认模型（modeldock/<路由默认>）必烤进配置；declareModels 另烤模型列表。
     // 全局/钉定路由切换后需重写跟随（见 refreshBakedModelClients）
     bakesModels: true,
+    // provider.<id>.options.baseURL 固定 gatewayBaseOpenAI（@ai-sdk/openai-compatible），只讲 OpenAI 协议
+    clientProtocols: ['openai'],
     ...(factory.install ? { install: factory.install } : {}),
 
     async detect(): Promise<DetectResult> {
