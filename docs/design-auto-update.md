@@ -198,6 +198,20 @@ modeldock update --clean       # 清理 .old 残留（darwin/win）
   5. ~~Web 控制台「检查更新」入口、托盘菜单项、启动检查提示~~ **已完成（见上）**。实现要点：网关进程绝不自行安装（apply 仅分离 spawn `update --yes`，argv 由 `updateDaemonArgs()` 传入）；webupdate 模块不静态依赖 autostart（单测整模块 mock 与共享注册表叠加会击穿静态绑定）。
 - 风险：镜像为第三方公共服，只做下载加速，**完整性仍以 SHA256 为准**（SUMS 本体永走官方 API，镜像调包资产会被校验拦截）。
 
+### 6.1 预取缓存与断点续传（2026-11-08 落地）
+
+对齐主流更新形态（ZCode / VS Code / Chrome / Firefox 调研结论：发现新版即后台预下载，下载校验完成后才亮「可安装」按钮，点击时刻零网络等待）：
+
+- **触发**：kick 检查成功且发现新版本（启动检查 / 控制台 60s 轮询 / 托盘 force 检查三口同源）→ 网关后台把适配安装包预下载到 `~/.modeldock/updates/staging/<version>/`（单版本槽，磁盘上限 ≈ 一个安装包）。
+- **staging 账本**（`src/update/staging.ts`）：`meta.json`（atomicWrite）记 version/assetName/size/etag/url/received/ready/consumed；半成品一律 `<asset>.part`，下载完成+校验通过后 rename 成品——文件名自带完整性语义。SUMS 绝不落盘（完整性锚点永走官方 API，盘上副本无安全价值）。
+- **断点续传**（`transfer.ts` + `check.ts` 的 `downloadAsset` resume 记账）：`Range: bytes=<n>-` + `If-Range`（ETag）；206 追加写、200 覆盖重下（镜像不支持 Range 自动退化，无需预探测）；续传限同一候选 URL（换候选 = 换源，重下）；失败保留 `.part`，30min 失败退避后由 60s 轮询 / 网关启动驱动续传（退避时间戳重启后从 meta.updatedAt 恢复）。
+- **一键更新复用**（`run.ts`）：选资产后查 staging，就绪且版本/资产匹配 → 跳过下载段，**SUMS 仍现拉官方 + 本地重 SHA256**（staging 在盘上可能被改/腐坏）→ 秒级进替换段；校验通过后只标 `consumed`，删除延迟到 sweep（网关启动 / runUpdate 开头 / 换槽）——win-setup 的 Inno 安装器异步读 staging 里的 setup.exe 而 updater 先退，同步删会拆台。
+- **手动检查 force 现查**：托盘「检查更新…」先 POST `/admin/update/check`（force 越过 24h TTL / 30min 退避）再轮询 status，POST 不通回落 CLI 现查；force 撞上在飞检查不丢弃——升级为真查（`forceRequested` 标志在守卫点消费，`checking` 全程 true，观察方不会读到中间旧结果）。Web 端刻意不加手动检查入口（手动检查 = 托盘菜单 + CLI `update --check`）。
+- **预取守卫链**（`prefetch.ts`）：`MODELRDOCK_DISABLE_UPDATE_CHECK=1` / `[update] prefetch = false`（缺省开）/ 开发态（execPath basename 为 node）/ 测试上下文真网 / update.lock 被持有 / 单飞 / 30min 失败退避——任一命中静默跳过，预取是加速器不是依赖，失败一律降级回「点击后现下」。
+- **manifest 全量持久化**：gateway.json `update_check.manifest` 存发布全量（含 assets）——重启后 24h TTL 内徽标/就绪态/apply 不再空窗（此前 manifest 只存内存，重启后 TTL 内显示「已是最新」而实际本轮从未查过）。
+- **三端 UI**：status 载荷加 `staged {version, ready, received, total, error}`；就绪 → 托盘/Web 按钮「立即安装」（Web 副行显示后台下载百分比）；预下载中 → 进度提示；失败 → 不展示（仅日志），静默降级。
+- 不变量不变：SHA256 强校验是安装唯一门槛；预取只缓存不安装（确认后安装的项目定位）；镜像/令牌/候选链语义不变。
+
 ## 7. M3：VPS / R2 自建源（规划）
 
 - **实施状态（2026-10-11）**：用户确认 **VPS 尚未购买**，M3 暂缓、后续再做——当前无进行中工作、无前置代码欠账（客户端 `api_base` 可插拔接口已随 M2 落地）。VPS 到位后按本节实施，动手前按 §0 重新对齐；届时先完成 `docs/deploy-cloud.md` 的占位 IP（203.0.113.10）替换。

@@ -5,6 +5,16 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Update prefetch — one-click upgrades finish in seconds**: once a new version is found, the matching package for this machine is downloaded and verified in the background (enabled by default; set `config.toml [update] prefetch = false` to opt out). The update button in the web console and tray becomes "Install Now" — clicking it skips the download and goes straight to the swap, done in seconds. Downloads resume from where they left off after a network interruption. Checksums are always re-verified against the official source before installing; a corrupted cache is discarded and re-downloaded automatically. Security semantics unchanged.
+
+### Changed
+
+- **Tray "Check for Updates" now checks live**: clicking "Check for Updates…" in the tray could previously return a cached result up to 24 hours old (missing releases published minutes ago); it now always queries GitHub in real time. Automatic checks keep their throttling. The web console is unchanged (manual check entry points are the tray menu and `modeldock update --check`).
+
 ## [1.7.1] - 2026-11-07
 
 A round of polish and fixes: gateway debug logging mode, a "Clear models" button in the edit dialogs, sharper vision-capability detection; plus a fix for the tray-launched gateway exiting silently.
