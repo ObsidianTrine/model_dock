@@ -481,3 +481,168 @@ describe('relay · forwardWithFailover attempts 留痕（逐候选记录 + 跳�
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// 模型级容灾（model_fallback M1）：同服务商内、仅额度耗尽触发——链尾合成备用模型候选。
+// 真实入口（真实 forwardToUpstream + 本地 mock 上游按请求体 model 分流），不 mock 模块。
+describe('relay · forwardWithFailover 模型级容灾链尾合成（model_fallback M1）', () => {
+  const ROUTED = '/v1/messages'
+  const QUOTA_BODY = JSON.stringify({ error: { message: 'Insufficient Balance (request_id: 1)' } })
+
+  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
+  async function startModelMock(
+    route: (model: string) => { status: number; body: string }
+  ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
+    const seen: string[] = []
+    const s = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        let model = ''
+        try {
+          model = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { model?: string }).model ?? ''
+        } catch {
+          /* 非 JSON 体按空模型处理 */
+        }
+        seen.push(model)
+        const out = route(model)
+        res.writeHead(out.status, { 'content-type': 'application/json' })
+        res.end(out.body)
+      })
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    return {
+      url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`,
+      seen,
+      close: () => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) }),
+    }
+  }
+
+  function providerCfg(id: string, over: Partial<ProviderConfig> = {}): ProviderConfig {
+    return { name: id, base_url: 'http://127.0.0.1:1', protocol: 'anthropic', auth_style: 'bearer', key_ref: `file:${id}`, priority: 0, ...over }
+  }
+
+  function buildRt(providers: Record<string, ProviderConfig>, gatewayOver: Record<string, unknown> = {}) {
+    const cfg = { providers, profiles: {}, harness: {}, gateway: { auto_fallback: false, ...gatewayOver } } as unknown as Config
+    return buildRuntime(cfg, 'tok')
+  }
+
+  function baseOn(cfg: Config, id: string): ResolvedTarget {
+    return { harness: 'test', profileName: 'p', profile: { name: 'p', provider: id }, provider: cfg.providers[id] }
+  }
+
+  function bodyOf(model: string): Buffer {
+    return Buffer.from(JSON.stringify({ model, messages: [] }))
+  }
+
+  it('链尾 402 → 合成候选换备用模型 → 200：fallback_to 留痕、不打 failover_to（provider 没换）、attempts 逐跳', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock((model) =>
+      model === 'mB' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('a', 'sk-a', 'file')
+      const cfg = {
+        providers: { a: providerCfg('a', { base_url: mock.url, model_fallback: { mA: 'mB' } }) },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} })
+      expect(out.status).toBe(200)
+      expect(out.usedProviderId).toBe('a')
+      expect(out.reason).toBe('fallback_to:mB') // 恰为这一个 mark：无 failover_to:a、无 replayed_from:a
+      expect(out.cause).toBeUndefined()
+      expect(out.attempts).toHaveLength(2)
+      expect(out.attempts![0]).toMatchObject({ provider: 'a', status: 402 })
+      expect(out.attempts![1]).toMatchObject({ provider: 'a', status: 200 })
+      expect(mock.seen).toEqual(['mA', 'mB'])
+      // provider 级熔断窗口不累计 quota（分流给模型粒度）：errWindow.count 保持 0
+      expect(rt.health.get('a')?.errWindow.count ?? 0).toBe(0)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('链中段 quota 仍优先切 provider 候选（合成只在链尾）；quota 记账分流到模型粒度', async () => {
+    const h = fakeHome()
+    const aMock = await startModelMock((model) =>
+      model === 'mB' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    const bMock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      await setSecret('a', 'sk-a', 'file')
+      await setSecret('b', 'sk-b', 'file')
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: aMock.url, model_fallback: { mA: 'mB' } }),
+          b: providerCfg('b', { base_url: bMock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      expect(out.usedProviderId).toBe('b')
+      expect(out.reason).toBe('failover_to:b,replayed_from:a')
+      expect(aMock.seen).toEqual(['mA']) // 链中段不合成：a 只收到主模型一发
+      expect(bMock.seen).toEqual(['mA'])
+      // 记账分流：a 的 quota 记在模型粒度（1 笔），provider 级窗口 0
+      expect(rt.modelHealth?.get('a\u0000mA')?.errWindow.count).toBe(1)
+      expect(rt.health.get('a')?.errWindow.count ?? 0).toBe(0)
+    } finally {
+      await aMock.close()
+      await bMock.close()
+      h.restore()
+    }
+  })
+
+  it('非额度失败不触发合成：429（无额度体）/ 5xx 原样回传且只打一发；transport 失败走 catch 更到不了合成', async () => {
+    const h = fakeHome()
+    for (const [status, resBody, wantCause] of [
+      [429, '{"error":{"message":"rate limited, slow down"}}', 'upstream_4xx'],
+      [500, '{"error":{"message":"boom"}}', 'upstream_5xx'],
+    ] as const) {
+      const mock = await startModelMock(() => ({ status, body: resBody }))
+      try {
+        await setSecret('a', 'sk-a', 'file')
+        const cfg = {
+          providers: { a: providerCfg('a', { base_url: mock.url, model_fallback: { mA: 'mB' } }) },
+          profiles: {},
+          harness: {},
+        } as unknown as Config
+        const rt = buildRt(cfg.providers)
+        const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} })
+        expect(out.status).toBe(status)
+        expect(out.cause).toBe(wantCause)
+        expect(mock.seen).toEqual(['mA']) // 映射虽在，非额度不合成：只打主模型一发
+      } finally {
+        await mock.close()
+      }
+    }
+    // transport 失败（连接拒绝）：异常路径，根本到不了链尾合成判定
+    const s = http.createServer()
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const deadPort = (s.address() as AddressInfo).port
+    await new Promise<void>((r) => s.close(() => r()))
+    try {
+      await setSecret('t', 'sk-t', 'file')
+      const cfg = {
+        providers: { t: providerCfg('t', { base_url: `http://127.0.0.1:${deadPort}`, model_fallback: { mA: 'mB' } }) },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      const err = await forwardWithFailover(rt, baseOn(cfg, 't'), { body: bodyOf('mA'), path: ROUTED, headers: {} }).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).status).toBe(502)
+      expect((err as UpstreamError).routeReason).toBe('down_all')
+    } finally {
+      h.restore()
+    }
+  })
+})

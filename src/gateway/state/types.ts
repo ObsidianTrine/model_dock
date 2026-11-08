@@ -161,6 +161,23 @@ export interface GatewayRuntime {
   /** provider 多 key 池运行态（内存态，重启清零；配置热加载全清——key 可能已被替换，
    *  按索引记的失效冷却对换上的新 key 不成立）。逻辑见 state/keypool.ts。 */
   keyPool: KeyPoolState
+  /** providerId+model → 模型粒度熔断状态（key = `${providerId}\u0000${model}`）：模型级容灾
+   *  （provider.model_fallback 域）的记账面，见 state/routing.ts recordModelOutcome。内存态
+   *  重启清零；reload 清理 provider 已删或其 model_fallback 已不含该模型键的条目。
+   *  可选 + 惰性建表：兜底测试/嵌入式直建 rt 未带字段的场景（同 seaErrors/modelProbe 先例）。 */
+  modelHealth?: Map<string, ModelHealthState>
+}
+
+/** 模型粒度熔断状态（model_fallback 域）：与 provider 级 HealthState 同构但更瘦——只由
+ *  quota（额度耗尽）档记账（recordModelOutcome），无 okStreak/lastMs；解熔断靠 ok 记账
+ *  或 15min TTL 自然过期（预改写据此恢复试回主模型）。 */
+export interface ModelHealthState {
+  /** 60s 滑动错误窗口（t0 起算点，count 错误次数） */
+  errWindow: { t0: number; count: number }
+  /** 熔断截止时间戳；未熔断则为 undefined */
+  meltdown_until?: number
+  /** 触发本次熔断的错误类（当前仅 quota） */
+  meltdown_cls?: 'quota'
 }
 
 /** 多 key 池运行态：cooldown = providerId → key 池索引（providerKeyRefs 下标）→ 冷却截止 ms 时间戳；

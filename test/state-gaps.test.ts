@@ -34,6 +34,7 @@ import {
   usageTodayView,
   writeGatewayState,
 } from '../src/gateway/state.js'
+import { isModelMeltdown, recordModelOutcome } from '../src/gateway/state/routing.js'
 import type { GatewayRuntime, LogEntry, ResolvedTarget } from '../src/gateway/state/types.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { logsDir } from '../src/util/paths.js'
@@ -118,6 +119,56 @@ describe('state-gaps · routing 熔断与错误窗口', () => {
     h.errWindow.t0 = Date.now() - 61_000
     recordOutcome(r, 'p', { ok: false, cls: 'connect' })
     expect(isMeltdown(r, 'p')).toBe(false)
+  })
+
+  it('recordOutcome modelScoped（模型级容灾接管）：quota 不累计 provider 级窗口，海况照记', () => {
+    const r = rt()
+    recordOutcome(r, 'p', { ok: false, cls: 'quota', modelScoped: true })
+    recordOutcome(r, 'p', { ok: false, cls: 'quota', modelScoped: true })
+    const h = r.health.get('p')!
+    expect(h.errWindow.count).toBe(0) // provider 级窗口不累计
+    expect(isMeltdown(r, 'p')).toBe(false)
+    recordOutcome(r, 'p', { ok: false, cls: 'quota', modelScoped: true })
+    expect(isMeltdown(r, 'p')).toBe(false) // 3 次 modelScoped quota 也不熔断 provider
+    // 海况（provider 级观测面）照记：quota 分桶 3 笔，风暴闸对 402 风暴保持可见
+    const sp = r.seaErrors!.get('p')!
+    const w = seaWindowView(sp, 60 * 60_000)
+    expect(w.quota).toBe(3)
+    // 不带 modelScoped 的 quota 仍走 provider 级熔断（现状不变）
+    recordOutcome(r, 'p', { ok: false, cls: 'quota' })
+    expect(h.errWindow.count).toBe(1)
+  })
+
+  it('模型级熔断（model_fallback 域）：quota 3 次熔断 15min，ok 重置并解熔断，其他档忽略不建账', () => {
+    const r = rt()
+    recordModelOutcome(r, 'p', 'mA', { ok: false, cls: 'quota' })
+    recordModelOutcome(r, 'p', 'mA', { ok: false, cls: 'quota' })
+    expect(isModelMeltdown(r, 'p', 'mA')).toBe(false)
+    recordModelOutcome(r, 'p', 'mA', { ok: false, cls: 'quota' })
+    expect(isModelMeltdown(r, 'p', 'mA')).toBe(true)
+    expect(r.modelHealth?.get('p\u0000mA')?.meltdown_cls).toBe('quota')
+    // TTL 过期自然解封（now 注入）
+    expect(isModelMeltdown(r, 'p', 'mA', Date.now() + 900_001)).toBe(false)
+    // 其他档忽略不计：connect/429/5xx 打满也不熔断、不建账
+    for (const cls of ['connect', '429', '5xx'] as const) {
+      recordModelOutcome(r, 'p', 'mB', { ok: false, cls })
+      recordModelOutcome(r, 'p', 'mB', { ok: false, cls })
+      recordModelOutcome(r, 'p', 'mB', { ok: false, cls })
+    }
+    expect(isModelMeltdown(r, 'p', 'mB')).toBe(false)
+    expect(r.modelHealth?.has('p\u0000mB')).toBe(false)
+    // ok 重置窗口并解熔断
+    recordModelOutcome(r, 'p', 'mA', { ok: true })
+    expect(isModelMeltdown(r, 'p', 'mA')).toBe(false)
+    expect(r.modelHealth?.get('p\u0000mA')?.errWindow.count).toBe(0)
+    // 窗口滑出 60s 重置（t0 拨回 61s 前），满阈值不跨窗累积
+    recordModelOutcome(r, 'p', 'mC', { ok: false, cls: 'quota' })
+    recordModelOutcome(r, 'p', 'mC', { ok: false, cls: 'quota' })
+    const mch = r.modelHealth!.get('p\u0000mC')!
+    mch.errWindow.t0 = Date.now() - 61_000
+    recordModelOutcome(r, 'p', 'mC', { ok: false, cls: 'quota' })
+    expect(mch.errWindow.count).toBe(1)
+    expect(isModelMeltdown(r, 'p', 'mC')).toBe(false)
   })
 })
 
@@ -218,6 +269,30 @@ describe('state-gaps · reloadRuntime 清理已删 provider 的三域运行态',
       expect(r.seaErrors?.has('ghost')).toBe(false)
       expect(r.seaErrors?.has('keep')).toBe(true)
       expect(r.modelProbe?.results.has('ghost')).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('modelHealth：provider 已删或其 model_fallback 已移除该模型键的条目清掉，幸存键保留', async () => {
+    const h = fakeHome()
+    try {
+      await mutateConfig((c) => {
+        c.providers['ghost'] = providerCfg({ name: 'ghost', key_ref: 'file:ghost', models: { mA: { source: 'manual' }, mB: { source: 'manual' } }, model_fallback: { mA: 'mB' } })
+        c.providers['keep'] = providerCfg({ name: 'keep', key_ref: 'file:keep', models: { mA: { source: 'manual' }, kB: { source: 'manual' }, kC: { source: 'manual' } }, model_fallback: { mA: 'mB', kB: 'kC' } })
+      })
+      const r = buildRuntime(await loadConfig(), 't')
+      recordModelOutcome(r, 'ghost', 'mA', { ok: false, cls: 'quota' })
+      recordModelOutcome(r, 'keep', 'mA', { ok: false, cls: 'quota' })
+      recordModelOutcome(r, 'keep', 'kB', { ok: false, cls: 'quota' })
+      await mutateConfig((c) => {
+        delete c.providers.ghost // 分支①：provider 整个删除
+        ;(c.providers['keep'] as ProviderConfig).model_fallback = { kB: 'kC' } // 分支②：mA 映射被移除
+      })
+      await reloadRuntime(r)
+      expect(r.modelHealth?.has('ghost\u0000mA')).toBe(false)
+      expect(r.modelHealth?.has('keep\u0000mA')).toBe(false)
+      expect(r.modelHealth?.has('keep\u0000kB')).toBe(true)
     } finally {
       h.restore()
     }
