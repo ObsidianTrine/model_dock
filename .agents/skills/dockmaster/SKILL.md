@@ -141,6 +141,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 - **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
 - **自由航行（sail）**——**触发条件**：用户表达「让它自己给自己安排活干一段时间」类意图，典型话术：「自由航行」「自由航行 30 分钟」「自己给自己找活干 / 自己安排任务跑一会儿」「让它自主干一小时，完了给我报告」「开自由航行」。判定要点：① 没点名具体任务（有具体任务走第 1 步写卡派单）；② 强调「自己决定做什么」+「一段时间/到点报告」。**时长从话术里取（「30 分钟」「一小时」→ `--minutes`）；话术未给时长时反问一句「自由航行多久？」（本技能唯一允许的主动提问），禁止默认时长**。启动前向用户复述：时长、自动提交范围（docs/bugfix/refactor；**feature 永不直接提交**——走上游管线 research → spec → 人工审设计 → spec build，sail 只自动跑到「spec 落盘待人审」为止）、引擎档位；用户未指定引擎按缺省（claude-headless 网关船，2026-11-03 起；zcode 修复后可显式点名）。执行：`sail --minutes N`（或 `--duration 2h`，可加 `--max-cost-usd N` 燃油上限——实测价达上限即收帆，报告带燃油账）后台常驻（Bash `run_in_background`）——scan 勘察 → propose 规划 + 上游管线/自动提交 → drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。航行期间向用户通报中途状态（status/日志），结束后把报告要点完整汇报给用户，**待审的 spec 提醒用户审设计**。
 - **发版提案（release-propose）**：只出建议与草稿；**版本号决定权在用户**——用户说「发布 vX.Y.Z」才走 release.md 代理发布（不在本技能，永不 push）。
+- **ZCode 原生模式（引擎全断时的降级开航）**：编排器 worker 引擎全部不可用（claude 船被网关路由 pin 死 / zcode CLI 船报「Select a model」）但需要继续派活/开航时——调度台（你）亲自当船长，用 ZCode 会话原生 Agent 工具（子代理，与主会话同引擎）当船，手动走 worktree 闭环。SOP 七步与能力对照表见 `.agents/workflows/zcode-native.md`（派工前先对账 git log 防重复派工；独立验收不盲信船报告；无自动熔断，卡必须小）。引擎恢复后回归自动闭环。
 
 ## 红线（永不）
 
@@ -162,4 +163,5 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 - 使用指南（状态机、闸门交互、混合节奏）：`.agents/docs/orchestrator-usage.md`
 - 操作手册（任务卡字段细节）：`.agents/workflows/orchestrator.md`
+- 引擎不可用时的降级开航（ZCode 原生模式）：`.agents/workflows/zcode-native.md`
 - 设计与原理：`.agents/docs/design-orchestrator.md`
