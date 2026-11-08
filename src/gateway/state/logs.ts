@@ -307,6 +307,13 @@ export interface UsageSummary {
   latency: { p50: number | null; p95: number | null; p99: number | null }
   /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  /** 按 model 分桶的实测用量（与 tokens 同口径：成功且有 usage 的条目；缓存读+缓存建计入
+   *  input_tokens）。可选字段：旧版消费方/旧聚合产物不带此键不破；窗口内条目缺 model 的
+   *  （极老日志）跳过不记账——模型级容灾（model_fallback）的 per-model 观测面。 */
+  tokens_by_model?: Record<
+    string,
+    { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }
+  >
   /** 可计费口径合计（成功且有 usage 的条目，与 tokens 同口径；剔除缓存读的公式在条目落盘前
    *  已按协议形态算好——此处只求和，绝不重算）。窗口内条目缺该数字的跳过（不入和）。 */
   billable_tokens: number
@@ -330,6 +337,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
   const byModel: Record<string, number> = {}
   const ms: number[] = []
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  const tokensByModel: NonNullable<UsageSummary['tokens_by_model']> = {}
   let billableTokens = 0
   let billablePartial = false
   const cost: UsageCost | null = priceOf ? { total: 0, by_provider: {}, by_model: {} } : null
@@ -355,6 +363,14 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
           tokens.output += u.output_tokens ?? 0
           tokens.cache_read += u.cache_read_tokens ?? 0
           tokens.cache_creation += u.cache_creation_tokens ?? 0
+          // per-model 四桶与全局 tokens 同口径累加；条目缺 model（极老日志）跳过不记账
+          if (e.model) {
+            const tm = (tokensByModel[e.model] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+            tm.input_tokens += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
+            tm.output_tokens += u.output_tokens ?? 0
+            tm.cache_read_tokens += u.cache_read_tokens ?? 0
+            tm.cache_creation_tokens += u.cache_creation_tokens ?? 0
+          }
           // billable 只求和不重算（公式分协议形态，条目落盘前已算好）；缺数字 = 旧版日志 → partial
           const b = u.billable_tokens
           if (typeof b === 'number' && Number.isFinite(b)) billableTokens += b
@@ -386,6 +402,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
         by_model: byModel,
         latency: latencyQuantiles(ms),
         tokens,
+        tokens_by_model: tokensByModel,
         billable_tokens: billableTokens,
         billable_partial: billablePartial,
         cost,

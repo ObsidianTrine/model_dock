@@ -315,6 +315,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
 - **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 5, "windowMinutes": 60, "source": "metrics"}`：**metrics 数据面**（2026-11-04 起缺省）优先消费网关 `/_modeldock/metrics` 的权威海况——`sea_state.storm` 直通滞留 + 60 分钟窗限流/额度类请求（429+quota）真实计数达阈值同样滞留（网关先于 worker 看到上游限流，触发时点名为「上游风暴」；阈值 ≤5 可保证网关判风暴时计数闸必触发，因网关 60m 风暴规则最低 6 次 429）；admin 不可达/端点失败自动落回**网关日志扫描**（`gatewayLogDir`，须已配置；429/402 计数，fail-open——观测失败绝不阻断派发）。`source: "log"` 显式降级为仅日志扫描（不发起 metrics 探测）。workflow.json 可选键 `"weatherHold": {"enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": {...}}`（`enabled` 缺省 true，显式 false = 关闭），**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
+- **与模型级容灾的交互（有意取舍，2026-11-08）**：上游服务配置了 `model_fallback` 时，额度类上游错误（402 / 429 quota）被网关在同服务内吸收改发，worker 不再看到 402/quota cause——风暴闸对这类风暴的灵敏度随之下降，这是特性本身的目的（吸收而非扩散），不是漏报。编排器零代码改动；需要分辨「额度耗尽但已被吸收」时看网关用量面（`/_modeldock/usage` 的 `tokens_by_model` 按模型分桶，备用模型的桶出现即说明改发已发生）。
 
 ### B6. 弃船演习（drill）
 

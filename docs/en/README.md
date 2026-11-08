@@ -53,7 +53,7 @@ sequenceDiagram
 | Area | What you get |
 |------|--------------|
 | **Switch in one place** | `modeldock profile use <name>` or one click in the console — every attached client switches instantly, zero config changes |
-| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over to other enabled services; a service can carry multiple API keys — a rejected one cools down and the next takes over; change services by time of day (statutory holidays recognized automatically); pin a per-client service / model, or go "direct" past the gateway |
+| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over to other enabled services; a service can carry multiple API keys — a rejected one cools down and the next takes over; change services by time of day (statutory holidays recognized automatically); pin a per-client service / model, or go "direct" past the gateway; per-model backup models within one provider — when the primary model runs out of quota, retry on the backup (model-level failover) |
 | **Key security** | Upstream keys live only in the local secure backend (macOS Keychain / Windows DPAPI / Linux Secret Service, with machine-bound-encryption fallback when no keyring exists); client configs contain only a local token; existing plaintext keys migrate automatically |
 | **Non-invasive & revertible** | Before `attach`, your existing configs are read-only; every write to a client config is auto-snapshotted, `detach` / `restore` revert in one command |
 | **Always-on** | `gateway install` registers auto-start with crash restart; a permanent macOS menu bar / Windows tray entry keeps the gateway running when the console window closes; "Lightweight mode" collapses everything to the tray |
@@ -131,6 +131,17 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 ```
 
 > Bilingual UI: CLI output and errors are Chinese by default; `modeldock --lang en` (anywhere in the command) switches to English. You can also set `MODELRDOCK_LANG=en`, or write `language = "en"` in config.toml to persist; the Web console toggles in the top bar anytime, and server-side messages such as errors follow along.
+
+### Model-level failover (backup model within the same provider)
+
+**When the primary model runs out of quota, retry on a backup model of the same provider**: instead of switching the whole route to another provider, the gateway retries on the backup model you mapped inside the same service. Boundaries and protections: only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the service's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (the CLI/console write paths enforce the price gate; hand-edited config.toml only gets a shape check); **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Config example (changes hot-apply immediately):
+
+```toml
+[providers.acme]
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # primary model → backup model of the same service
+```
+
+Model IDs come from the service catalog: run `modeldock model list <service-id>` to inspect; see the [config reference](config-reference.md) for the field details.
 
 ## Documentation
 
