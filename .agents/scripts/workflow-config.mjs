@@ -127,7 +127,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify',
+  'dynamicDispatch', 'notify', 'research', 'freeSail',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
