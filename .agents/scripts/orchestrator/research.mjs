@@ -248,32 +248,112 @@ export function citationDepthStats(body) {
   return { deep, root, total: urls.length, ratio: urls.length ? deep / urls.length : null };
 }
 
-/** L1 判级（report-only 初版阈值；快照回查先攒 near-miss 分布再收紧——晴雨表哲学）。 */
-export function computeVerdict({ briefBody, snapshotsOk, claimCheck, depth }) {
-  const reasons = [];
-  let level;
-  if (!snapshotsOk) {
-    level = 'unknown';
-    reasons.push('快照 0 份成功——无法回查（网络/拦截原因，不计为编造）');
-  } else if (!claimCheck.checked) {
-    level = 'unknown';
-    reasons.push('结论中无可回查的数字/型号 token——纯定性结论，L1 不适用');
-  } else if (claimCheck.hit_rate >= 0.7) {
-    level = 'pass';
-    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）`);
-  } else if (claimCheck.hit_rate >= 0.4) {
-    level = 'warn';
-    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）偏低——未命中的数字疑似不在来源页上，人工核 sources/ 对账`);
-  } else {
-    level = 'fail';
-    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）过低——结论数字与所引快照严重不符，疑似「真 URL 假依据」`);
+// ---------------------------------------------------------------------------
+// verdict.json/2（2026-11-08 v3 方案）：回答的不是「这份调研多可信」，而是
+// 「核了多少（coverage）、哪条不可信（claim 级状态 + 否决权）、按用途能不能用
+// （usage 矩阵）、谁还得签字（external_doc → human）」——agent 决策接口。
+// 原则：分数必须从逐条 claim 聚合（不允许 LLM 直接拍分）、null 传染（不可核 ≠ 0 分）、
+// 否决权与覆盖下限写死不可配（防配置放水）、usage=ok 不绕过 spec/合并闸门（advisory）。
+// 消费方契约文档：.agents/docs/research-verdict.md
+// ---------------------------------------------------------------------------
+
+export const VERDICT_SCHEMA = 'modeldock.research.verdict/2';
+export const CLAIM_STATUSES = ['supported', 'partial', 'unsupported', 'contradicted', 'unverifiable'];
+
+/** usage 矩阵的硬底线（不可配置——可配的只有 workflow.json research.usageGates 阈值）。 */
+export const COVERAGE_FLOOR = 50;
+
+/** 空白归一（逐字校验的宽容面：跨行/多空格不算改写）。 */
+export function normalizeClaimText(s) {
+  return String(s ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * claim 逐字校验（v3 关键防线）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
+ * 改写/概括/无中生有即判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
+ */
+export function verifyClaimVerbatim(claims, briefBody) {
+  const brief = normalizeClaimText(briefBody);
+  const valid = [];
+  const fabricated = [];
+  for (const c of claims ?? []) {
+    const text = normalizeClaimText(c?.claim);
+    if (text && text.length <= 120 && brief.includes(text)) valid.push({ ...c, claim: text });
+    else fabricated.push((text || '(空)').slice(0, 80));
   }
-  if (level === 'pass' && depth?.ratio != null && depth.ratio < 0.5) {
-    level = 'warn';
-    reasons.push(`引用深度比偏低（深链 ${depth.deep}/${depth.total}）——根路径引用难以支撑具体数据`);
-  }
-  if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
-  return { level, reasons };
+  return { valid, fabricated };
+}
+
+/** L0 引用面分（0-100 或 null）：当日引用率 / 深链比 / 快照成功率 三分量等权，缺项重归一。 */
+export function scoreCitation({ datedCount, totalCitations, deep, totalUrls, snapOk, snapTotal }) {
+  const parts = [];
+  if (totalCitations > 0) parts.push(datedCount / totalCitations);
+  if (totalUrls > 0 && deep != null) parts.push(deep / totalUrls);
+  if (snapTotal > 0) parts.push(snapOk / snapTotal);
+  if (!parts.length) return null;
+  return Math.round((parts.reduce((s, v) => s + v, 0) / parts.length) * 100);
+}
+
+/** claim 状态聚合分：supported=1 / partial=0.5 / unsupported·contradicted=0；unverifiable 不计（由 coverage 表达）。 */
+function aggregateCoherence(claims) {
+  const checked = claims.filter((c) => c.status !== 'unverifiable');
+  if (!checked.length) return null;
+  const w = { supported: 1, partial: 0.5, unsupported: 0, contradicted: 0 };
+  return Math.round((checked.reduce((s, c) => s + (w[c.status] ?? 0), 0) / checked.length) * 100);
+}
+
+/**
+ * v3 核心（纯函数，全单测）：
+ *   - coverage = 已核承重结论 / 总承重结论（unverifiable 拖 coverage 不拖 coherence）
+ *   - overall = 各非 null 维度加权（evidence .4 / coherence .35 / citation .15 / coverage .10），缺维重归一；
+ *     evidence 或 coverage 或 coherence 为 null → overall null（不可伪装成判断）
+ *   - usage 决策矩阵：contradicted 一票否决 unsafe；fabricated>0 封顶 needs_review；
+ *     维度缺失 → undetermined；阈值来自 gates（可配），否决权与 COVERAGE_FLOOR 不可配
+ */
+export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, gates = {} } = {}) {
+  claims = Array.isArray(claims) ? claims : [];
+  const total = claims.length;
+  const checked = claims.filter((c) => c.status !== 'unverifiable');
+  const coverage = total ? Math.round((checked.length / total) * 100) : null;
+  const coherence = aggregateCoherence(claims);
+  const contradicted = claims.filter((c) => c.status === 'contradicted');
+  const veto = contradicted.length > 0;
+
+  const dims = { citation: citation ?? null, evidence: evidence ?? null, coherence, coverage };
+  const weights = { evidence: 0.4, coherence: 0.35, citation: 0.15, coverage: 0.1 };
+  const present = Object.entries(dims).filter(([, v]) => v != null);
+  const overall = (dims.evidence == null || coverage == null || coherence == null) || !present.length
+    ? null
+    : Math.round(present.reduce((s, [k, v]) => s + weights[k] * v, 0) / present.reduce((s, [k]) => s + weights[k], 0));
+
+  const dg = gates.decision ?? {};
+  const eg = gates.external ?? {};
+  const dCoh = Number.isInteger(dg.coherence) ? dg.coherence : 60;
+  const dCov = Number.isInteger(dg.coverage) ? dg.coverage : COVERAGE_FLOOR;
+  const eCoh = Number.isInteger(eg.coherence) ? eg.coherence : 75;
+  const eCov = Number.isInteger(eg.coverage) ? eg.coverage : 70;
+  const evidenceFail = evidence != null && evidence < 40;
+
+  let decision;
+  if (veto) decision = 'unsafe';
+  else if (evidence == null || coverage == null || coherence == null) decision = 'undetermined';
+  else if (coverage >= Math.max(dCov, COVERAGE_FLOOR) && coherence >= dCoh && !evidenceFail) decision = 'ok';
+  else decision = 'needs_review';
+  if (decision === 'ok' && fabricatedCount > 0) decision = 'needs_review'; // 编造 claim 红旗：封顶 needs_review
+
+  let external;
+  if (decision === 'unsafe') external = 'unsafe';
+  else if (decision !== 'ok') external = 'undetermined';
+  else external = coherence >= eCoh && coverage >= Math.max(eCov, COVERAGE_FLOOR) ? 'ok' : 'needs_review';
+
+  const level = overall == null ? 'unknown' : overall >= 75 ? 'pass' : overall >= 50 ? 'warn' : 'fail';
+  return {
+    scores: { ...dims, overall },
+    usage: { browse: 'ok', internal_decision: decision, external_doc: external },
+    veto,
+    contradicted_count: contradicted.length,
+    level,
+  };
 }
 
 /** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text }]。 */
@@ -289,25 +369,42 @@ export function loadSnapshots(repoRoot, id) {
   return out;
 }
 
-/** L1 总入口：读 brief + 快照 → 判级 → 落 verdict.json（幂等覆盖——快照重跑后刷新）。 */
+/** L1 总入口：读 brief + 快照 → verdict/2（L1-only：claims 空 → coverage/coherence null → 决策 undetermined）落盘。 */
 export function assessBrief(repoRoot, id, { model } = {}) {
   const brief = readBrief(repoRoot, id);
   if (!brief) return null;
   const snapshots = loadSnapshots(repoRoot, id);
   const claimCheck = crossCheckClaims(brief.body, snapshots);
   const depth = citationDepthStats(brief.body);
-  const { level, reasons } = computeVerdict({
-    briefBody: brief.body,
-    snapshotsOk: snapshots.length > 0,
-    claimCheck,
-    depth,
+  const citation = scoreCitation({
+    datedCount: extractDatedCitations(brief.body).length,
+    totalCitations: extractCitations(brief.body).length,
+    deep: depth.deep,
+    totalUrls: depth.total,
+    snapOk: snapshots.length,
+    snapTotal: brief.citations.length,
   });
+  const evidence = claimCheck.checked ? Math.round(claimCheck.hit_rate * 100) : null;
+  const { scores, usage, level } = scoreVerdict({ claims: [], fabricatedCount: 0, citation, evidence });
+  const reasons = [];
+  if (!snapshots.length) reasons.push('快照 0 份成功——L1 无法回查（网络/拦截原因，不计为编造）');
+  else if (!claimCheck.checked) reasons.push('结论中无可回查的数字/型号 token——L1 不适用');
+  else {
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）`);
+    if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
+  }
+  reasons.push('未跑 L2 复核（research verify <brief-id>）——claim 级覆盖与一致性未判定，internal_decision=undetermined');
   const verdict = {
+    schema: VERDICT_SCHEMA,
+    advisory: true,
     brief_id: id,
     model: model ?? brief.meta.backend ?? null,
     created_at: toIsoLocal(),
-    l1: { snapshots_ok: snapshots.length, claim_check: { checked: claimCheck.checked, hits: claimCheck.hits, hit_rate: claimCheck.hit_rate, misses: claimCheck.misses }, citation_depth: depth },
-    l2: null,
+    scores,
+    claims: [],
+    blockers: [],
+    fabricated_claims: 0,
+    usage,
     level,
     reasons,
   };
@@ -347,19 +444,29 @@ export function readLedgerStats(repoRoot) {
   }));
 }
 
-/** 解析 L2 复核输出（agents-verdict 契约块）；缺失/不合法返回 null（调用方喂回重试）。 */
+/**
+ * 解析 L2 复核输出（agents-verdict 契约块，v2 = JSON：claims + blockers）；缺失/不合法
+ * 返回 null（调用方喂回重试）。claim 状态必须落在 CLAIM_STATUSES 枚举内——逐字校验由
+ * verifyClaimVerbatim 在调用方做（需要 brief 原文）。
+ */
 export function parseVerdictBlock(text) {
   const re = new RegExp('```' + VERDICT_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
   const m = re.exec(text ?? '');
   if (!m) return null;
-  const raw = m[1];
-  const level = /^level:\s*(high|medium|low)\s*$/m.exec(raw)?.[1];
-  const blockers = /^blockers:\s*(\d+)\s*$/m.exec(raw)?.[1];
-  if (!level || blockers === undefined) return null;
-  const reasons = raw
-    .split('\n')
-    .filter((l) => /^-\s+/.test(l.trim()))
-    .map((l) => l.trim().replace(/^-\s+/, ''))
-    .slice(0, 10);
-  return { level, blockers: parseInt(blockers, 10), reasons };
+  let j;
+  try {
+    j = JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(j.claims) || !j.claims.length) return null;
+  if (j.claims.length > 10) return null;
+  const claims = [];
+  for (const c of j.claims) {
+    if (typeof c?.claim !== 'string' || !c.claim.trim()) return null;
+    if (!CLAIM_STATUSES.includes(c?.status)) return null;
+    claims.push({ claim: c.claim, status: c.status, note: typeof c?.note === 'string' ? c.note.slice(0, 200) : '' });
+  }
+  const blockers = Array.isArray(j.blockers) ? j.blockers.filter((b) => typeof b === 'string' && b.trim()).slice(0, 10) : [];
+  return { claims, blockers };
 }

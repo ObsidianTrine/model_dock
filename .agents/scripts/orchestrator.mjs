@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, appendResearchLedger, readLedgerStats } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3202,12 +3202,12 @@ async function cmdResearch(repoRoot, opts) {
   log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
 }
 
-/** L1 判级结果统一播报（cmdResearch / 上游管线共用）。 */
+/** L1 判级结果统一播报（cmdResearch / 上游管线共用）——v2 verdict：维度分 + usage 决策。 */
 function logVerdict(id, verdict, tag) {
   if (!verdict) return;
-  const cc = verdict.l1?.claim_check ?? {};
+  const ev = verdict.scores?.evidence;
   const icon = verdict.level === 'pass' ? '✓' : verdict.level === 'warn' ? '⚠' : verdict.level === 'fail' ? '⛔' : '·';
-  log(`${icon} 可信度初判（${tag}）：${verdict.level}${cc.checked ? `——数字回查 ${cc.hits}/${cc.checked}` : ''}`);
+  log(`${icon} 可信度初判（${tag}）：${verdict.level}${ev != null ? `——数字回查核实率 ${ev}%` : ''}（internal_decision=${verdict.usage?.internal_decision ?? '?'}）`);
   for (const line of verdict.reasons ?? []) log(`  · ${line}`);
   if (verdict.level === 'fail') log(`  ⛔ 该 brief 建议作废重跑（可归档到 .agents/orchestrator/research-void/）`);
 }
@@ -3295,30 +3295,64 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       const parsed = parseVerdictBlock(result.output ?? '');
       if (!parsed) {
         if (attempt < MAX_ATTEMPTS) {
-          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}agents-verdict${'```'} 契约块）\n请严格按产出契约重新输出：level/blockers/理由 齐全。`;
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含合规 ${'```'}agents-verdict${'```'} JSON 契约块）\n请严格按产出契约重新输出：claims（逐字摘录 + 五枚举状态）与 blockers。`;
           continue;
         }
         die(`复核会话 3 次均未产出合规 verdict 契约块（--backend mock 可验证管线）。`);
       }
-      // 合并 L1（既有 verdict.json）+ L2 判级；L2 在场时以 L2 为总体判级（逻辑一致性 > 数字回查）
-      let prev = {};
-      try { prev = JSON.parse(fs.readFileSync(path.join(brief.dir, 'verdict.json'), 'utf8')); } catch { /* 无 L1 */ }
-      const overall = parsed.level === 'high' ? (prev.level === 'fail' ? 'warn' : 'pass') : parsed.level === 'medium' ? 'warn' : 'fail';
+      // v3 管线：逐字校验（防编造 claim）→ L1 自动标注（确定性优先，L2 contradicted 一票优先）
+      // → scoreVerdict 聚合（null 传染 + 否决权 + usage 矩阵）→ verdict/2 落盘 + L3 台账
+      const { valid, fabricated } = verifyClaimVerbatim(parsed.claims, brief.body);
+      for (const c of valid) {
+        if (c.status === 'contradicted') { c.by = 'l2'; continue; } // L2 矛盾判定一票优先
+        const toks = extractClaimTokens(c.claim);
+        if (!snapshots.length || !toks.length) { c.by = c.by ?? 'l2'; continue; } // 无快照/纯定性：维持 L2 判（缺省 unverifiable 已在契约）
+        const r = crossCheckClaims(c.claim, snapshots);
+        if (r.checked && r.hits === r.checked) { c.status = 'supported'; c.by = 'l1'; }
+        else if (r.checked && r.hits === 0) { c.status = 'unsupported'; c.by = 'l1'; }
+        else if (r.checked) { c.status = 'partial'; c.by = 'l1'; }
+        // r.checked === 0（claim 无数字 token）：维持 L2 判
+      }
+      const claimCheck = crossCheckClaims(brief.body, snapshots);
+      const depth = citationDepthStats(brief.body);
+      const citation = scoreCitation({
+        datedCount: extractDatedCitations(brief.body).length,
+        totalCitations: extractCitations(brief.body).length,
+        deep: depth.deep,
+        totalUrls: depth.total,
+        snapOk: snapshots.length,
+        snapTotal: brief.citations.length,
+      });
+      const evidence = claimCheck.checked ? Math.round(claimCheck.hit_rate * 100) : null;
+      const v = scoreVerdict({ claims: valid, fabricatedCount: fabricated.length, citation, evidence, gates: cfg.research?.usageGates });
+      const reasons = [
+        ...valid.filter((c) => c.note).map((c) => `[${c.status}] ${c.claim.slice(0, 60)}——${c.note}`),
+        ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录被丢弃（编造红旗）：${fabricated.slice(0, 3).join(' / ')}`] : []),
+        ...(parsed.blockers ?? []),
+      ];
       const verdict = {
+        schema: VERDICT_SCHEMA,
+        advisory: true,
         brief_id: id,
-        model: model ?? prev.model ?? null,
+        model: model ?? null,
+        verifier: { backend: backendName, model: model ?? null },
         created_at: new Date().toISOString(),
-        l1: prev.l1 ?? null,
-        l2: { backend: backendName, model: model ?? null, level: parsed.level, blockers: parsed.blockers, reasons: parsed.reasons },
-        level: overall,
-        reasons: [...(parsed.reasons ?? []), ...(prev.reasons ?? []).slice(0, 3)],
+        scores: v.scores,
+        claims: valid,
+        blockers: parsed.blockers ?? [],
+        fabricated_claims: fabricated.length,
+        usage: v.usage,
+        level: v.level,
+        reasons,
       };
       fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
-      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, level: overall, hit_rate: prev.l1?.claim_check?.hit_rate ?? null });
+      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
-      log(`- 复核判级：${parsed.level}（blockers=${parsed.blockers}）→ 总体：${overall}`);
-      for (const line of parsed.reasons ?? []) log(`  · ${line}`);
-      log(`结果落 ${brief.dir}/verdict.json；L3 台账已记（research stats 看按模型核实率）`);
+      for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
+      if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录已丢弃（编造红旗）`);
+      log(`- 维度分：evidence=${v.scores.evidence} coherence=${v.scores.coherence} coverage=${v.scores.coverage}% citation=${v.scores.citation} → overall=${v.scores.overall}（${v.level}）`);
+      log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
+      log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);
       return;
     }
   } finally {
