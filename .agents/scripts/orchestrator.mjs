@@ -3263,6 +3263,11 @@ async function researchSelftest(repoRoot, opts) {
 async function cmdResearchVerify(repoRoot, id, opts) {
   const brief = readBrief(repoRoot, id);
   if (!brief) die(`brief "${id}" 不存在（${researchDir(repoRoot)}）。research list 查看已有 brief。`);
+  // 对既有 brief（早于 L1 机制产出、无 verdict.json）先补算 L1——verify 输出永远带 L1 回查面
+  if (!fs.existsSync(path.join(brief.dir, 'verdict.json'))) {
+    const l1 = assessBrief(repoRoot, id, { model: opts.model || loadWorkflowConfig(repoRoot).review?.model });
+    logVerdict(id, l1, 'L1 快照回查（补算）');
+  }
   const snapshots = loadSnapshots(repoRoot, id);
   const cfg = loadWorkflowConfig(repoRoot);
   const backendName = opts.backend || cfg.review?.backend || 'claude-headless';
