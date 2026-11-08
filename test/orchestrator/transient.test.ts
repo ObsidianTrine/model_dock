@@ -15,6 +15,7 @@ import {
   classifyWorkerCrash,
   classifyWorkerCrashFromDisk,
   clampRetryWindowMs,
+  fetchGatewayWindowEntries,
   harnessMatches,
   isCrashStatus,
   isTransientWorkerFailure,
@@ -31,6 +32,18 @@ const localDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pa
 /** 网关日志条目（LogEntry 子集：分类只认 ts/status/harness；cause 路径另认 cause/hint/tokenHint）。 */
 function gwEntry(status: number, ts: string, harness = 'zcode', extra: Record<string, unknown> = {}) {
   return { ts, status, harness, profile: 'glm', model: 'glm-5.3-flash', ...extra }
+}
+
+/** 写一条 gateway-*.jsonl 夹具（HTTP 与文件两路用例共用）。 */
+function writeLog(dir: string, entry: Record<string, unknown>) {
+  fs.mkdirSync(dir, { recursive: true })
+  // 文件名按条目 ts 的本地日期派生：实现侧 readGatewayLog 的日期由 toIsoLocal（本地时区）
+  // 派生，生产网关的 entry.ts 也是本地时区字符串——这里若用 UTC toISOString 直接切片，
+  // 本地零点到早上（UTC+8 为 00:00-07:59）会跨日错一天，readGatewayLog 读不到条目、
+  // 用例必红（CORRECT-12 同族的夹具日期坑，2026-11-09 实锤；161 行用例用 localDate
+  // 命名所以不受影响）
+  const d = localDate(new Date(String(entry.ts)))
+  fs.appendFileSync(path.join(dir, `gateway-${d}.jsonl`), JSON.stringify(entry) + '\n')
 }
 
 describe('orchestrator transient > 瞬时故障签名', () => {
@@ -343,17 +356,6 @@ describe('orchestrator transient > cause 精读（A1）', () => {
 })
 
 describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线，metrics keypool）', () => {
-  function writeLog(dir: string, entry: Record<string, unknown>) {
-    fs.mkdirSync(dir, { recursive: true })
-    // 文件名按条目 ts 的本地日期派生：实现侧 readGatewayLog 的日期由 toIsoLocal（本地时区）
-    // 派生，生产网关的 entry.ts 也是本地时区字符串——这里若用 UTC toISOString 直接切片，
-    // 本地零点到早上（UTC+8 为 00:00-07:59）会跨日错一天，readGatewayLog 读不到条目、
-    // 用例必红（CORRECT-12 同族的夹具日期坑，2026-11-09 实锤；161 行用例用 localDate
-    // 命名所以不受影响）
-    const d = localDate(new Date(String(entry.ts)))
-    fs.appendFileSync(path.join(dir, `gateway-${d}.jsonl`), JSON.stringify(entry) + '\n')
-  }
-
   it('无 cfg → 不问 metrics：key_cooldown 照常 transient、无 retryMs（既有退避兜底）', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-'))
     try {
@@ -424,7 +426,7 @@ describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线
     }
   })
 
-  it('无 key 池 cause → 零网络（env 指向死端口也不发请求，状态码路径照常）', async () => {
+  it('无 key 池 cause → 不问 metrics（死端口仅 logs/query 快速失败落回文件直读，状态码路径照常）', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-plain-'))
     process.env.ORCH_GATEWAY_BASE = 'http://127.0.0.1:1'
     process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'x'
@@ -441,11 +443,293 @@ describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线
         backend: 'zcode-headless',
       })
       expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '429×1' })
-      expect(Date.now() - t0).toBeLessThan(5_000) // 零网络：死端口超时不应发生
+      // HTTP 优先（2026-11-09）：logs/query 打死端口连接拒绝即时失败 → 落回文件直读；
+      // metrics 不问（窗口无 key 池 cause）——死端口超时/挂起不应发生，整体仍要快
+      expect(Date.now() - t0).toBeLessThan(5_000)
     } finally {
       delete process.env.ORCH_GATEWAY_BASE
       delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
       fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HTTP 优先取数（2026-11-09）：/_modeldock/logs/query 明细端点，文件直读降为 fallback
+// ---------------------------------------------------------------------------
+
+/** logs/query mock admin server：记录命中请求（url/admin 头），respond 决定响应，
+ *  返回 falsy = 不响应（挂起，超时用例）。listen(0) 随机端口；close 由调用方 finally 负责。 */
+async function startLogsQueryMock(
+  respond: (u: URL, adminHeader: string | undefined) => { status: number; body: unknown } | undefined,
+) {
+  const hits: Array<{ url: URL; admin: string | undefined }> = []
+  const server = http.createServer((req, res) => {
+    const admin = req.headers['x-modeldock-admin'] as string | undefined
+    const u = new URL(req.url ?? '/', 'http://x')
+    if (u.pathname !== '/_modeldock/logs/query') {
+      hits.push({ url: u, admin })
+      res.writeHead(404)
+      res.end('{}')
+      return
+    }
+    hits.push({ url: u, admin })
+    const r = respond(u, admin)
+    if (!r) return // 挂起不响应
+    res.writeHead(r.status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(r.body))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as AddressInfo).port
+  return { server, port, hits }
+}
+
+describe('orchestrator transient > HTTP 优先取数（logs/query，文件 fallback）', () => {
+  const WIN = { startMs: Date.parse('2026-11-08T10:00:00+08:00'), endMs: Date.parse('2026-11-08T10:05:00+08:00') }
+  const older = '2026-11-08T10:02:00.000+08:00'
+  const newer = '2026-11-08T10:03:00.000+08:00'
+
+  it('admin 可得 → 一次窗口查询喂分类（含 cause 精读）：参数 from/to/limit=500、不传 harness', async () => {
+    const { server, port, hits } = await startLogsQueryMock((u, admin) => {
+      expect(admin).toBe('mock-admin')
+      expect(Number(u.searchParams.get('limit'))).toBe(500)
+      // 拿不准 backend → 网关实名的映射就不传 harness，客户端 harnessMatches 兜底
+      expect(u.searchParams.get('harness')).toBeNull()
+      // from/to 与 /usage 同口径（ISO 串）且覆盖窗口
+      expect(Date.parse(u.searchParams.get('from') ?? '')).toBeLessThanOrEqual(WIN.startMs)
+      expect(Date.parse(u.searchParams.get('to') ?? '')).toBeGreaterThanOrEqual(WIN.endMs)
+      // 网关倒序返回（最新在前）：429(新) 在前、decisive cause(旧) 在后
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          days: ['2026-11-08'],
+          filter: null,
+          limit: 500,
+          entries: [
+            gwEntry(429, newer, 'zcode'),
+            gwEntry(404, older, 'zcode', { cause: 'proto_endpoint_missing', hint: '模型未配置 anthropic 端点' }),
+          ],
+        },
+      }
+    })
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const noDir = path.join(os.tmpdir(), 'no-such-gwdir-http-ok')
+    try {
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: noDir, // 目录不存在：decisive 结果即证明条目来自 HTTP（未落回文件直读）
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      // cause 精读路径经 HTTP 条目不回归：决定性归因压过同窗 429
+      expect(r.transient).toBe(false)
+      expect(r.source).toBe('gateway')
+      expect(r.decisive).toBe(true)
+      expect(r.cause).toBe('proto_endpoint_missing')
+      expect(r.hint).toBe('模型未配置 anthropic 端点')
+      expect(r.hits).toBe(1)
+      expect(hits.length).toBe(1) // 一次窗口查询，无 metrics 等额外请求
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(noDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fetchGatewayWindowEntries：网关倒序条目正序归位（与文件直读追加序一致）', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({
+      status: 200,
+      body: { ok: true, entries: [gwEntry(503, newer), gwEntry(429, older)] },
+    }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    try {
+      const entries = await fetchGatewayWindowEntries({ gatewayAdmin: true }, { ...WIN })
+      expect(entries).not.toBeNull()
+      expect(entries!.map((e) => e.status)).toEqual([429, 503]) // 旧 → 新
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+    }
+  })
+
+  it('网关 500 → 落回文件直读（夹具命中，结果与现状一致）', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({ status: 500, body: { ok: false, error: 'boom' } }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-http-500-'))
+    try {
+      writeLog(dir, { ts: older, status: 429, harness: 'zcode', profile: 'p', model: 'm' })
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '429×1' })
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('响应缺 entries（旧版网关形状不符）→ 落回文件直读', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({ status: 200, body: { ok: true, days: [] } }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-http-shape-'))
+    try {
+      writeLog(dir, { ts: older, status: 402, harness: 'zcode', profile: 'p', model: 'm', cause: 'quota' })
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r.transient).toBe(true)
+      expect(r.source).toBe('gateway')
+      expect(r.cause).toBe('quota')
+      expect(r.switchProvider).toBe(true)
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('挂起响应 → 超时 fail-open 返回 null（小超时直测 fetchGatewayWindowEntries）', async () => {
+    const { server, port } = await startLogsQueryMock(() => undefined) // 永不响应
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    try {
+      const r = await fetchGatewayWindowEntries({ gatewayAdmin: true }, { ...WIN, timeoutMs: 150 })
+      expect(r).toBeNull()
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+    }
+  })
+
+  it('未开启 gatewayAdmin（cfg 缺开关）→ 不触网，文件直读行为不变', async () => {
+    const { server, port, hits } = await startLogsQueryMock(() => ({ status: 200, body: { ok: true, entries: [] } }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}` // env 在但 cfg 门不开：一律不触达
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-http-nogate-'))
+    try {
+      writeLog(dir, { ts: older, status: 429, harness: 'zcode', profile: 'p', model: 'm' })
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: {}, // gatewayAdmin !== true → resolveGatewayAdmin null（可移植红线）
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '429×1' })
+      expect(hits.length).toBe(0)
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('HTTP 成功但窗口无条目 → 权威空数组（不落回文件直读，文件夹具在也不读）→ regex 兜底', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({ status: 200, body: { ok: true, entries: [] } }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-http-empty-'))
+    try {
+      writeLog(dir, { ts: older, status: 429, harness: 'zcode', profile: 'p', model: 'm' }) // 文件有数据也不读
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: false, source: 'regex' })
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('两路都无数据（HTTP 404 + gwDir 空目录）→ regex 兜底', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({ status: 404, body: {} })) // 旧实例无端点
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-http-none-'))
+    try {
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '429 too many requests', // 正则兜底证据
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: true, source: 'regex' })
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('harness 过滤语义：HTTP 条目实名 zcode 与 backend zcode-headless 宽容匹配计入，claude-code 不计入', async () => {
+    const { server, port } = await startLogsQueryMock(() => ({
+      status: 200,
+      body: {
+        ok: true,
+        entries: [gwEntry(429, newer, 'zcode'), gwEntry(503, older, 'claude-code')],
+      },
+    }))
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    try {
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: path.join(os.tmpdir(), 'no-such-gwdir-harness'),
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '429×1' }) // 只计 zcode 条目
+      // backend 与窗口内全部实名都不匹配（claude-code 与 codex 船不同源）→ 零条目计入 → regex 兜底
+      const r2 = await classifyWorkerCrashFromDisk({
+        gwDir: path.join(os.tmpdir(), 'no-such-gwdir-harness'),
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: WIN,
+        backend: 'codex-headless',
+      })
+      expect(r2).toEqual({ transient: false, source: 'regex' })
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
     }
   })
 })
