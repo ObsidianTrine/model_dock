@@ -40,9 +40,9 @@ describe('buildProgram 注册面', () => {
     expect(provider.commands.map((c) => c.name()).sort()).toEqual(['add', 'list', 'rm', 'set-key'])
   })
 
-  it('model 子命令齐备（含 catalog refresh）', () => {
+  it('model 子命令齐备（含 catalog refresh 与 fallback）', () => {
     const model = prog.commands.find((c) => c.name() === 'model')!
-    expect(model.commands.map((c) => c.name()).sort()).toEqual(['catalog', 'list', 'refresh', 'set'])
+    expect(model.commands.map((c) => c.name()).sort()).toEqual(['catalog', 'fallback', 'list', 'refresh', 'set'])
     expect(model.commands.find((c) => c.name() === 'catalog')!.commands.map((c) => c.name())).toEqual(['refresh'])
   })
 

@@ -22,6 +22,7 @@ import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../instal
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
 import { addService, applyAttach, detachHarness, planAttach, pinRouteProtocolError, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
+import { resolveModelFallback } from '../ops/service.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
@@ -1327,6 +1328,24 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       newFallback.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
     }
   }
+  // 模型级容灾映射（同服务内 model→model）：字段缺省=不动（与 fallback 链同口径——回填失败的
+  // 弹层/旧客户端不带字段时不得整表清空）；显式 null/空表=删除字段；非空表整体过
+  // resolveModelFallback（价格闸门双向 ≤5%、自映射/环、目录成员，与 CLI 同一校验口径），
+  // ConfigError 经 errorReply 还原 400+hint 信封（fallback 校验同款）
+  let mfProvided = false
+  let newModelFallback: Record<string, string> | undefined
+  if (b.model_fallback !== undefined) {
+    mfProvided = true
+    try {
+      newModelFallback = resolveModelFallback(b.model_fallback, id, {
+        models: p.models,
+        lookupPrice: (m) => lookupPrice(id, m),
+      })
+    } catch (e) {
+      const r = errorReply(e)
+      return sendError(res, r.status, r.message, r.hint)
+    }
+  }
   // 默认模型基线（persist 前取）：persist 后比对，真变了才触发烤模型客户端同步
   const prevProfName = profileRefForProvider(rt.config, id)
   const prevDefaultModel = prevProfName ? rt.config.profiles[prevProfName]?.default_model : undefined
@@ -1346,6 +1365,11 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
     if (newModels) t.models = newModels
+    // 模型级容灾：resolver 返回 undefined（null/空表入参）= 删除字段，非空 = 写归一化映射
+    if (mfProvided) {
+      if (newModelFallback) t.model_fallback = newModelFallback
+      else delete t.model_fallback
+    }
     if (newEndpoints) {
       const e = { ...(t.endpoints ?? {}) }
       for (const [k, v] of Object.entries(newEndpoints)) { const kp = k as import('../config/types.js').Protocol; if (v) e[kp] = v; else delete e[kp] }
@@ -1390,6 +1414,7 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     newEndpoints ? bi('端点 {list} 已更新', 'Endpoints {list} updated', { list: Object.keys(newEndpoints).join('/') }) : '',
     typeof b.default_model === 'string' ? bi('默认模型 → {model}', 'Default model → {model}', { model: b.default_model || bi('(清除)', '(cleared)') }) : '',
     Array.isArray(newFallback) ? bi('备用服务 {n} 个', '{n} fallback services', { n: newFallback.length }) : '',
+    mfProvided ? bi('模型容灾 {n} 条', '{n} model-fallback entries', { n: newModelFallback ? Object.keys(newModelFallback).length : 0 }) : '',
     ...bakedParts,
   ].filter(Boolean) as Array<Bilingual | ''>
   audit(bi('编辑服务', 'Edit service'), id, changes.length ? biJoin('，', ', ', changes) : bi('无字段变更', 'No fields changed'))
@@ -1412,6 +1437,20 @@ async function hRevealKey(c: AdminCtx): Promise<void> {
   audit(bi('查看 Key', 'View key'), id, key ? bi('读取成功', 'Read ok') : bi('Key 不可读（未设置或安全后端拒绝）', 'Key unreadable (not set or the OS keychain refused)'))
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, key: key ?? null }))
+  return
+}
+
+async function hServiceModelFallback(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  // 编辑弹层按需取单个服务的模型容灾映射（reveal-key 同款按需口径：不进 overview 每 5s
+  // 轮询载荷；弹层打开时拉一次用于回填，失败时弹层不带 model_fallback 保存，服务端
+  // 「字段缺省=不动」兜底，不会整表清空）
+  const b = await jsonRequestBody(req)
+  const id = typeof b.id === 'string' ? b.id : ''
+  const p = rt.config.providers[id]
+  if (!p) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id }))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, id, model_fallback: p.model_fallback ?? null }))
   return
 }
 
@@ -2442,6 +2481,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/import/apply': hImportApply,
   'POST /_modeldock/import/dismiss': hImportDismiss,
   'POST /_modeldock/service/update': hServiceUpdate,
+  'POST /_modeldock/service/model-fallback': hServiceModelFallback,
   'POST /_modeldock/service/reveal-key': hRevealKey,
   'POST /_modeldock/harness/env': hHarnessEnv,
   'POST /_modeldock/service/delete': hServiceDelete,
