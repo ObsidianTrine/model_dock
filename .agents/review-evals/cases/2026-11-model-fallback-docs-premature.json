@@ -1,0 +1,10 @@
+{
+  "id": "2026-11-model-fallback-docs-premature",
+  "title": "模型级容灾对外文档句 1「不再一耗尽就把流量切去别家」与句 2「备用服务链都走完才触发」自相矛盾，且把尚未合入的 CLI 与 relay 消费面写成已可用——对外文档描述了树上不存在的行为",
+  "reviewRef": "dbebff0^",
+  "diffRef": "dbebff0",
+  "fixedBy": "099b697",
+  "files": ["CHANGELOG.md", "README.md", "docs/en/CHANGELOG.md", "docs/en/README.md", "src/gateway/state/logs.ts"],
+  "expect": ["矛盾", "未实现", "超前", "消费", "不存在"],
+  "note": "多分支并行施工的「文档先行」题：dbebff0 时 model_fallback 只有写入口（config/ops/pricing 基础分支已合），relay 消费面与 CLI 都未合——对外文档把计划行为写成已可用。两个抓点：① 句 1 与句 2 对同一行为的触发顺序描述相反，材料内自洽可判；② 「CLI / 控制台写入口校验」声称的能力在树上不存在（穷尽 grep：写入口有、消费点与 CLI 零命中）。修复 099b697 改写句 1 并补 CLI 用法（CLI 由 20a1c7a 先行补齐）。堵法（REVIEW.md 对外文档纪律候选）：新配置键的文档声称「可配置/已生效」前，核对消费点已在同一棵树；同一 PR 内描述同一行为的多句话互相对表；并行施工时对外文档只写已合入分支可验证的行为"
+}
