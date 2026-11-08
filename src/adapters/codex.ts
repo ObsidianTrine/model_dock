@@ -60,6 +60,8 @@ export const codexAdapter: HarnessAdapter = {
   directMode: true,
   // setDefault 时把路由 profile 的默认模型烤进 config.toml 的 root.model，路由切换后需重写跟随
   bakesModels: true,
+  // model_providers.modeldock 固定 wire_api='responses'，只讲 Responses 协议
+  clientProtocols: ['responses'],
   install: {
     command: 'npm i -g @openai/codex',
     uninstall: 'npm uninstall -g @openai/codex',

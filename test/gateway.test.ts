@@ -3533,6 +3533,39 @@ describe('管理面安全（2026-09 审查回归）', () => {
     }
   })
 
+  it('harness/route 协议校验：单协议客户端钉到不支持其协议的服务被拒（盘上不改写），兼容服务放行', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const H = { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' }
+      const post = (body: Record<string, unknown>) =>
+        fetch(`${origin}/_modeldock/harness/route`, { method: 'POST', headers: H, body: JSON.stringify(body) })
+      // 补 openai-only 服务与 profile（写盘后热加载进 rt.config）
+      const disk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      disk.providers['openai-only'] = { name: 'OpenAI Only', base_url: 'https://x.example.com/v4', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:k' }
+      disk.profiles['p-openai'] = { provider: 'openai-only', default_model: 'm' }
+      await saveConfig(disk)
+      await reloadRuntime(t.rt)
+
+      // claude-code 只讲 anthropic：钉 openai-only → 400 + 可操作报错（点名服务与协议），盘上 route 不变
+      const bad = await post({ harness: 'claude-code', profile: 'p-openai' })
+      expect(bad.status).toBe(400)
+      const bj: any = await bad.json()
+      expect(bj.error.message).toContain('OpenAI Only')
+      expect(bj.error.message).toContain('anthropic')
+      expect(tomlParse(fs.readFileSync(configPath(), 'utf8')).harness['claude-code'].route).toBe('default')
+
+      // 兼容服务（up=anthropic）放行，钉定成功
+      const good = await post({ harness: 'claude-code', profile: 'other' })
+      expect(good.status).toBe(200)
+      const gj: any = await good.json()
+      expect(gj.ok).toBe(true)
+      expect(gj.route).toBe('other')
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('harness/mode：独立直连 ⇄ 网关接入（重写客户端文件 + 登记 + overview 回显 + 守卫）', async () => {
     const t = await setup()
     // planAttach 要求 claude 命令在场（CI 机器没装）：注入「已安装」，与宿主机解耦（见 presence.ts fakePresence）

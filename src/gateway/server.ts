@@ -21,7 +21,7 @@ import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type Har
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
-import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
+import { addService, applyAttach, detachHarness, planAttach, pinRouteProtocolError, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
@@ -1679,6 +1679,13 @@ async function hHarnessRoute(c: AdminCtx): Promise<void> {
     }
     if (providerId && !rt.config.providers[providerId]) {
       return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }))
+    }
+    // 协议兼容校验（钉到具体服务/profile 才查；恢复跟随全局不查——全局路由动态变化）：
+    // 单协议客户端钉到不支持其协议的服务 = 钉成功但请求永远被静默改发给别家，写盘前拒绝
+    const checkProviderId = profileName ? rt.config.profiles[profileName]?.provider : providerId || undefined
+    if (checkProviderId) {
+      const conflict = await pinRouteProtocolError(hid, checkProviderId, rt.config)
+      if (conflict) return sendError(res, 400, conflict)
     }
     let finalRoute = toDefault ? 'default' : profileName
     await persistConfig(rt, (c) => {
