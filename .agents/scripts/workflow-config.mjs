@@ -27,7 +27,16 @@
 //                   缺省 = 对账关闭（吃狗粮是走网关的项目才有的能力）
 //   gatewayAdmin    网关权威 tier 校验开关（布尔，缺省 false）：true 才允许编排器用 admin 面
 //                   （读 gateway.json 的 port+admin_token 或 ORCH_GATEWAY_* env）调
-//                   /_modeldock/tier-validate 对账 token→profile→tier；未开 = advisory only
+//                   /_modeldock/tier-validate 对账 token→profile→tier；未开 = advisory only。
+//                   也是 gatewayProvision 的前置（admin 面 W 全家共享同一授权面）
+//   gatewayProvision 每任务一次性凭据开关（布尔，缺省 false = 现状不变）：true 且 gatewayAdmin
+//                   已开时，run 的 spawn 前向网关 /_modeldock/harness/provision 签发临时
+//                   harness（TTL ≤24h、不落盘），worker/reviewer 的 env patch 只换
+//                   ANTHROPIC_AUTH_TOKEN（base_url 仍由 ModelDock attach 的客户端配置决定）；
+//                   预算实测账按该 harnessId 精确取数（无同 harness 兄弟流量污染）。
+//                   所有失败形态 fail-open 回落 tier token 并留 harness_provision_failed
+//                   事件；终态/收尾/接管路径 best-effort revoke（失败只告警，TTL 兜底）。
+//                   见 orchestrator/provision.mjs 与 orchestrator.md B16
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
@@ -122,7 +131,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // loadWorkflowConfig 直读
   'version', 'baseBranch', 'baseBranches', 'testCmd', 'testCmdL0', 'buildCmd', 'lintCmd', 'typecheckCmd',
   'packageManager', 'protectedPorts', 'corePaths', 'releasePaths', 'reviewNotes', 'uiCheckCmd',
-  'envPrefix', 'projectName', 'listenCommandNames', 'scheduleId', 'gatewayLogDir', 'gatewayAdmin',
+  'envPrefix', 'projectName', 'listenCommandNames', 'scheduleId', 'gatewayLogDir', 'gatewayAdmin', 'gatewayProvision',
   'driftThreshold', 'reviewMaxTurns', 'gateTimeoutMinutes', 'retryWaitBaseMs', 'fastlaneAllowed',
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
@@ -191,6 +200,9 @@ export function loadWorkflowConfig(repoRoot) {
     // 网关权威 tier 校验开关（admin 面）：显式 true 才允许编排器读 gateway.json / 调
     // /_modeldock/tier-validate——可移植工具链不得默认读用户 home 下的 ModelDock 状态
     gatewayAdmin: raw.gatewayAdmin === true,
+    // 每任务一次性凭据开关（ephemeral harness，provision.mjs）：显式 true 才签发/吊销；
+    // 生效前提是 gatewayAdmin 也为 true（admin 面解析同一套）。缺省 false = 行为与历史一致
+    gatewayProvision: raw.gatewayProvision === true,
     // drift 阈值可调不可关（design doc §10.5）：0 / false / 超界等非法值拒绝生效（回落缺省 0.2）
     // 且显式告警——键缺失不告警（沿用缺省），显式写错必须让人看见（2026-11 B11 常量收口）
     driftThreshold: resolveDriftThreshold(raw.driftThreshold),
