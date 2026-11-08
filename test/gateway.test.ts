@@ -1179,6 +1179,44 @@ describe('网关', () => {
     }
   })
 
+  it('日志端点筛选视图：kind=err 排除操作审计，kind=audit 只含操作，src=ok 取成功请求缓冲，缺省行为不变', async () => {
+    const h = fakeHome()
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      security: { store: 'file' },
+      providers: {},
+      profiles: { demo: { provider: 'up', default_model: 'm' } },
+      harness: {},
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    rt.ring.push({ ts: '2026-11-08T00:00:01.000Z', harness: 'claude-code', profile: 'demo', provider: 'up', model: 'm-err', path: '/v1/messages', status: 404, ms: 1, level: 'error' })
+    rt.ring.push({ ts: '2026-11-08T00:00:02.000Z', kind: 'audit', op: '重载配置', target: '-', ok: true, source: 'web' })
+    rt.okRing!.push({ ts: '2026-11-08T00:00:03.000Z', harness: 'claude-code', profile: 'demo', provider: 'up', model: 'm-ok', path: '/v1/chat/completions', status: 200, ms: 2, level: 'info' })
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const ADMIN = { 'x-modeldock-admin': 'admin-token-x' }
+      const base = `http://127.0.0.1:${gwPort}/_modeldock/logs`
+      const errView: any = await (await fetch(`${base}?n=50&kind=err`, { headers: ADMIN })).json()
+      expect(errView.total).toBe(1)
+      expect(errView.logs[0].model).toBe('m-err')
+      const auditView: any = await (await fetch(`${base}?n=50&kind=audit`, { headers: ADMIN })).json()
+      expect(auditView.total).toBe(1)
+      expect(auditView.logs[0].op).toBe('重载配置')
+      const okView: any = await (await fetch(`${base}?n=50&src=ok`, { headers: ADMIN })).json()
+      expect(okView.total).toBe(1)
+      expect(okView.logs[0].model).toBe('m-ok')
+      // 缺省行为不变：ring 原样（错误 + 审计）
+      const all: any = await (await fetch(`${base}?n=50`, { headers: ADMIN })).json()
+      expect(all.total).toBe(2)
+    } finally {
+      server.close()
+      h.restore()
+    }
+  })
+
   it('Web 控制台 v2：overview 聚合视图 + service/switch 任务端点', async () => {
     const t = await setup()
     try {

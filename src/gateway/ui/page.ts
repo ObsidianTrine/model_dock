@@ -160,7 +160,13 @@ export const UI_BODY_HTML = `<div class="wrap">
 
 <div class="card">
   <h2><span data-i18n="请求日志||Request log">请求日志</span></h2>
-  <p class="desc" data-i18n="仅展示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，不在这里刷屏。||Only error requests (4xx/5xx) and console operations are shown; normal requests are written to the logs/ files only.">仅展示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，不在这里刷屏。</p>
+  <p class="desc" data-i18n="默认只显示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，最近的可到「成功请求」里看。||Errors (4xx/5xx) and console operations by default; normal requests are written to the logs/ files only, recent ones appear under Successful.">默认只显示错误请求（4xx/5xx）与控制台操作；正常请求只写入 logs/ 日志文件，最近的可到「成功请求」里看。</p>
+  <div id="logTabs" class="seg" style="margin-top:10px" role="tablist">
+    <button type="button" data-lt="err" class="on" data-i18n="错误||Errors">错误</button>
+    <button type="button" data-lt="audit" data-i18n="控制台操作||Operations">控制台操作</button>
+    <button type="button" data-lt="all" data-i18n="全部||All">全部</button>
+    <button type="button" data-lt="ok" data-i18n="成功请求||Successful">成功请求</button>
+  </div>
   <div class="tablescroll"><table id="logTable"></table></div>
   <div id="logPager">
     <span class="pglabel">
@@ -176,6 +182,7 @@ export const UI_BODY_HTML = `<div class="wrap">
     <button class="btn small" id="logPrev" data-i18n="上一页||Prev" title="上一页">上一页</button>
     <span id="logPageInfo">1 / 1</span>
     <button class="btn small" id="logNext" data-i18n="下一页||Next" title="下一页">下一页</button>
+    <button class="btn small" id="logCopyPage" data-i18n="复制本页||Copy page" data-i18n-tip="把当前筛选的本页日志整段复制为 JSONL||Copy this page of the current view as JSONL" data-tip="把当前筛选的本页日志整段复制为 JSONL">复制本页</button>
   </div>
   <p class="note"><span data-i18n="配置和 Key 保存在 ||Config and keys are stored in ">配置和 Key 保存在 </span><code id="cfgPath">~/.modeldock/</code><span data-i18n="。本页覆盖日常操作；模型别名映射等高级配置用命令行 ||. This page covers daily operations; advanced settings like model alias mapping use the CLI ">.本页覆盖日常操作；模型别名映射等高级配置用命令行 </span><code>modeldock --help</code><span data-i18n="。||.">。</span></p>
 </div>

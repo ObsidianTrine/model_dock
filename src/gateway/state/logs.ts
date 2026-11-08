@@ -9,6 +9,8 @@ import { costOfUsage, type PriceResolver } from '../../providers/pricing-core.js
 import type { AuditEntry, EventEntry, GatewayRuntime, LogEntry, RingEntry } from './types.js'
 
 const RING_MAX = 500
+/** 成功请求环形缓冲上限：只服务控制台「成功请求」筛选页的近期展示/复制，够看即可（全量在 jsonl 文件） */
+const OK_RING_MAX = 200
 
 /** 内存环形缓冲统一入口（保持 RING_MAX 上限，先进先出挤掉最旧）。导出供 setEventRingSink
  *  注册的转发等模块外写入用。 */
@@ -35,8 +37,13 @@ export function appendLog(file: string, line: string): void {
   appendLine(path.join(dir, file), line)
 }
 
-/** 请求日志：全量按天 JSONL 落盘（不含任何请求体）；仅错误请求（4xx/5xx/异常/自动改发）进内存环形缓冲供 Web 端展示 */
+/** 请求日志：全量按天 JSONL 落盘（不含任何请求体）；仅错误请求（4xx/5xx/异常/自动改发）进内存环形缓冲供 Web 端展示，
+ *  成功请求另进 okRing 小缓冲（控制台「成功请求」筛选页用）。级别按结构化日志惯例统一补写：
+ *  失败=error、偏离主选（改发/排队/退避，reason 非空）=warn、普通成功=info。 */
 export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
+  if (!entry.level) {
+    entry.level = entry.status === undefined || entry.status >= 400 || entry.err ? 'error' : entry.reason ? 'warn' : 'info'
+  }
   // 今日用量实况（overview 状态行的成本仪表）：先记账再落盘，观测失败绝不影响转发
   try {
     usageTodayAdd(entry)
@@ -46,6 +53,9 @@ export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
   // 避免被高频正常请求刷屏
   if (entry.status === undefined || entry.status >= 400 || entry.err || entry.reason) {
     pushRing(rt, entry)
+  } else if (rt.okRing) {
+    rt.okRing.push(entry)
+    if (rt.okRing.length > OK_RING_MAX) rt.okRing.splice(0, rt.okRing.length - OK_RING_MAX)
   }
   // 轻量 metrics：per-provider 耗时采样。与 health.lastMs 的「只记成功」口径不同——metrics 是
   // 吞吐/延迟观测面，失败请求的耗时同样计入分布；provider '-'（未鉴权噪音）不计

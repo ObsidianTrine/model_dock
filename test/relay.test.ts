@@ -382,3 +382,102 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
     }
   })
 })
+
+describe('relay · forwardWithFailover attempts 留痕（逐候选记录 + 跳过原因短码，2026-11-08 协议不匹配排障）', () => {
+  const body = Buffer.from(JSON.stringify({ model: 'm', messages: [] }))
+  const ROUTED = '/v1/messages?beta=true'
+
+  async function startMock(status: number, resBody: string): Promise<{ url: string; close: () => Promise<void> }> {
+    const s = http.createServer((req, res) => {
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(resBody)
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const url = `http://127.0.0.1:${(s.address() as AddressInfo).port}`
+    return { url, close: () => new Promise((r) => s.close(() => r())) }
+  }
+
+  function providerCfg(id: string, over: Partial<ProviderConfig> = {}): ProviderConfig {
+    return { name: id, base_url: 'http://127.0.0.1:1', protocol: 'anthropic', auth_style: 'bearer', key_ref: `file:${id}`, priority: 0, ...over }
+  }
+
+  function buildRt(providers: Record<string, ProviderConfig>) {
+    const cfg = { providers, profiles: {}, harness: {}, gateway: { auto_fallback: false } } as unknown as Config
+    return buildRuntime(cfg, 'tok')
+  }
+
+  function baseOn(cfg: Config, id: string): ResolvedTarget {
+    return { harness: 'test', profileName: 'p', profile: { name: 'p', provider: id }, provider: cfg.providers[id] }
+  }
+
+  it('① 协议端点缺失候选被跳过：attempts 首跳 note=proto_endpoint_missing、末跳真实 404（bigmodel→coding-plan 场景）', async () => {
+    const h = fakeHome()
+    const mock = await startMock(404, '{"error":{"code":"UnsupportedModel","message":"The requested model does not support the coding plan feature."}}')
+    try {
+      const cfg = {
+        providers: {
+          a: providerCfg('a', { base_url: 'http://127.0.0.1:1', protocol: 'openai' }), // openai-only：无 anthropic 端点
+          b: providerCfg('b', { base_url: mock.url }),
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      expect(out.status).toBe(404)
+      expect(out.reason).toContain('replayed_from:a')
+      expect(out.cause).toBe('upstream_4xx')
+      expect(out.attempts).toHaveLength(2)
+      expect(out.attempts![0]).toMatchObject({ provider: 'a', note: 'proto_endpoint_missing' })
+      expect(out.attempts![1].provider).toBe('b')
+      expect(out.attempts![1].status).toBe(404)
+      expect(typeof out.attempts![1].ms).toBe('number')
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('② 直连成功不写 attempts（日志保持精简）', async () => {
+    const h = fakeHome()
+    const mock = await startMock(200, '{"ok":true}')
+    try {
+      const cfg = { providers: { a: providerCfg('a', { base_url: mock.url }) }, profiles: {}, harness: {} } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      await setSecret('a', 'sk-a', 'file')
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      expect(out.status).toBe(200)
+      expect(out.reason).toBeUndefined()
+      expect(out.attempts).toBeUndefined()
+      expect(out.cause).toBeUndefined()
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('③ 全候选 candidateSkip 耗尽：抛错携带 attempts，notes 全为 key_pool_empty', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = {
+        providers: { a: providerCfg('a', { key_ref: 'file:ghost-a' }), b: providerCfg('b', { key_ref: 'file:ghost-b' }) },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRt(cfg.providers)
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] }).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      const e = err as UpstreamError
+      expect(e.routeReason).toBe('skip_all')
+      expect(e.cause).toBe('key_pool_empty')
+      expect(e.attempts).toHaveLength(2)
+      expect(e.attempts!.every((a) => a.provider && a.note === 'key_pool_empty')).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+})
