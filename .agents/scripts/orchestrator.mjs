@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3300,9 +3300,10 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         }
         die(`复核会话 3 次均未产出合规 verdict 契约块（--backend mock 可验证管线）。`);
       }
-      // v3 管线：逐字校验（防编造 claim）→ L1 自动标注（确定性优先，L2 contradicted 一票优先）
+      // v3 管线：逐字校验（防编造 claim）→ note-status 一致性降级 → L1 自动标注（确定性优先，L2 contradicted 一票优先）
       // → scoreVerdict 聚合（null 传染 + 否决权 + usage 矩阵）→ verdict/2 落盘 + L3 台账
-      const { valid, fabricated } = verifyClaimVerbatim(parsed.claims, brief.body);
+      let { valid, fabricated } = verifyClaimVerbatim(parsed.claims, brief.body);
+      valid = normalizeClaimStatuses(valid); // supported 却自认无快照/无直据 → unsupported（L1 回查仍可翻回）
       for (const c of valid) {
         if (c.status === 'contradicted') { c.by = 'l2'; continue; } // L2 矛盾判定一票优先
         const toks = extractClaimTokens(c.claim);
@@ -3330,11 +3331,14 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录被丢弃（编造红旗）：${fabricated.slice(0, 3).join(' / ')}`] : []),
         ...(parsed.blockers ?? []),
       ];
+      // verdict.model=调研船（既有 verdict.json 由 L1 assessBrief 写入、model 即调研船），非复核船——复核船在 verifier 字段
+      let prevModel = null;
+      try { prevModel = JSON.parse(fs.readFileSync(path.join(brief.dir, 'verdict.json'), 'utf8'))?.model ?? null; } catch {}
       const verdict = {
         schema: VERDICT_SCHEMA,
         advisory: true,
         brief_id: id,
-        model: model ?? null,
+        model: prevModel,
         verifier: { backend: backendName, model: model ?? null },
         created_at: new Date().toISOString(),
         scores: v.scores,
@@ -3346,7 +3350,7 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         reasons,
       };
       fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
-      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision });
+      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
       if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录已丢弃（编造红旗）`);
@@ -3475,7 +3479,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
         const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
         out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
         logVerdict(r.id, verdict, 'L1 快照回查');
-        if (verdict?.level === 'fail') appendResearchLedger(repoRoot, { kind: 'l1', brief_id: r.id, model: cfg.research?.model ?? null, level: verdict.level, hit_rate: verdict.l1?.claim_check?.hit_rate ?? null });
+        if (verdict?.level === 'fail') appendResearchLedger(repoRoot, { kind: 'l1', brief_id: r.id, model: cfg.research?.model ?? null, researcher_model: cfg.research?.model ?? null, level: verdict.level, hit_rate: verdict.l1?.claim_check?.hit_rate ?? null });
       }
     }
     if (!briefBody) {
