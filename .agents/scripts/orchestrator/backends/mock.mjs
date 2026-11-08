@@ -36,20 +36,20 @@ export const mockBackend = {
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isVerifier) {
-      // L2 复核模式：输出 agents-verdict 契约块（level/blockers/理由）；
-      // ORCH_MOCK_REVIEW_BLOCKERS 映射为 blockers（fail 场景 e2e 复用既有注入）
+      // L2 复核模式（v2 JSON 契约）：从 prompt 内嵌 brief 摘第一条承重结论逐字回显；
+      // ORCH_MOCK_REVIEW_BLOCKERS>0 映射为 contradicted（否决链路 e2e 复用既有注入）
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
-      const level = blockers > 0 ? 'low' : 'high';
-      const output = [
-        '复核完成。',
-        '',
-        '```' + VERDICT_MARKER,
-        `level: ${level}`,
-        `blockers: ${blockers}`,
-        '# 理由',
-        `- mock 复核：结论与给定快照${blockers > 0 ? '存在硬伤' : '一致'}`,
-        '```',
-      ].join('\n');
+      const briefMatch = /## 待复核 brief\n\n([\s\S]*?)\n\n## 来源快照/.exec(prompt);
+      const firstLine = (briefMatch?.[1] ?? '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? 'mock claim';
+      const payload = {
+        claims: [{
+          claim: firstLine.slice(0, 110),
+          status: blockers > 0 ? 'contradicted' : 'supported',
+          note: blockers > 0 ? 'mock 复核：与给定快照矛盾' : 'mock 复核：与给定快照一致',
+        }],
+        blockers: blockers > 0 ? ['mock 硬伤'] : [],
+      };
+      const output = ['复核完成。', '', '```' + VERDICT_MARKER, JSON.stringify(payload, null, 2), '```'].join('\n');
       onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-verifier' });
       return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
     }

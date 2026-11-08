@@ -9,6 +9,8 @@ import {
   parseBriefBlock,
   extractCitations,
   extractDatedCitations,
+  extractClaimTokens,
+  citationDepthStats,
   validateBriefBody,
   writeBrief,
   readBrief,
@@ -16,12 +18,12 @@ import {
   snapshotCitations,
   assessBrief,
   crossCheckClaims,
-  citationDepthStats,
-  computeVerdict,
-  extractClaimTokens,
+  verifyClaimVerbatim,
+  scoreVerdict,
   parseVerdictBlock,
   appendResearchLedger,
   readLedgerStats,
+  VERDICT_SCHEMA,
   BRIEF_MARKER,
 } from '../../.agents/scripts/orchestrator/research.mjs'
 import { buildResearchPrompt, CARD_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
@@ -251,25 +253,77 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     expect(citationDepthStats(body)).toEqual({ deep: 1, root: 1, total: 2, ratio: 0.5 })
   })
 
-  it('computeVerdict：判级与降级（快照缺失 unknown；低命中 fail；中命中 warn；高命中 pass；深链比降级）', () => {
-    const depth = { deep: 9, root: 1, total: 10, ratio: 0.9 }
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: false, claimCheck: { checked: 10, hits: 8, hit_rate: 0.8, misses: [] }, depth }).level).toBe('unknown')
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 0, hits: 0, hit_rate: null, misses: [] }, depth }).level).toBe('unknown')
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 9, hit_rate: 0.9, misses: [] }, depth }).level).toBe('pass')
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 5, hit_rate: 0.5, misses: ['a'] }, depth }).level).toBe('warn')
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 2, hit_rate: 0.2, misses: ['a'] }, depth }).level).toBe('fail')
-    // 高命中但全是根路径引用 → 降级 warn
-    expect(computeVerdict({ briefBody: 'x', snapshotsOk: true, claimCheck: { checked: 10, hits: 9, hit_rate: 0.9, misses: [] }, depth: { deep: 2, root: 8, total: 10, ratio: 0.2 } }).level).toBe('warn')
+  it('verifyClaimVerbatim：逐字摘录通过；改写/超长判 fabricated（v3 防线）', () => {
+    const ok = [{ claim: 'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [1]。', status: 'supported' }]
+    const v = verifyClaimVerbatim(ok, CLAIM_BODY)
+    expect(v.valid).toHaveLength(1)
+    expect(v.fabricated).toHaveLength(0)
+    // 跨行/多空格归一后仍算逐字
+    const wrapped = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 周下载\n  56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [1]。', status: 'supported' }], CLAIM_BODY)
+    expect(wrapped.valid).toHaveLength(1)
+    // 改写 → fabricated
+    const para = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 下载量全球第一（改写版）', status: 'supported' }], CLAIM_BODY)
+    expect(para.valid).toHaveLength(0)
+    expect(para.fabricated).toHaveLength(1)
   })
 
-  it('parseVerdictBlock：L2 契约解析；缺失/非法判级返回 null', () => {
-    const block = '复核完成。\n\n```agents-verdict\nlevel: medium\nblockers: 1\n# 理由\n- 部分支撑\n- 疑点：口径未标\n```'
-    expect(parseVerdictBlock(block)).toEqual({ level: 'medium', blockers: 1, reasons: ['部分支撑', '疑点：口径未标'] })
+  it('scoreVerdict：null 传染 / contradicted 一票否决 / fabricated 封顶 / coverage 门槛 / overall 重归一', () => {
+    const claimsOk = [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'supported' }]
+    // 维度齐全 + 高分 → decision ok
+    const good = scoreVerdict({ claims: claimsOk, fabricatedCount: 0, citation: 90, evidence: 80, gates: {} })
+    expect(good.scores.coverage).toBe(100)
+    expect(good.scores.coherence).toBe(100)
+    expect(good.usage.internal_decision).toBe('ok')
+    expect(good.usage.external_doc).toBe('ok')
+    expect(good.level).toBe('pass')
+    // contradicted 一票否决（即使其他分很高）
+    const vetoed = scoreVerdict({ claims: [...claimsOk, { claim: 'c', status: 'contradicted' }], citation: 90, evidence: 90 })
+    expect(vetoed.veto).toBe(true)
+    expect(vetoed.usage.internal_decision).toBe('unsafe')
+    expect(vetoed.usage.external_doc).toBe('unsafe')
+    // fabricated 封顶 needs_review（红旗 ≠ 否决）
+    const fab = scoreVerdict({ claims: claimsOk, fabricatedCount: 2, citation: 90, evidence: 80 })
+    expect(fab.usage.internal_decision).toBe('needs_review')
+    // coverage 低于硬底线 50 → 不得 ok（10 条只核 2 条）
+    const lowCov = scoreVerdict({ claims: [...claimsOk, ...Array.from({ length: 8 }, (_, i) => ({ claim: `x${i}`, status: 'unverifiable' }))], citation: 90, evidence: 80 })
+    expect(lowCov.scores.coverage).toBe(20)
+    expect(lowCov.usage.internal_decision).toBe('needs_review')
+    // evidence null（无快照）→ overall null + undetermined（不可核 ≠ 0 分）
+    const unk = scoreVerdict({ claims: claimsOk, citation: 90, evidence: null })
+    expect(unk.scores.overall).toBeNull()
+    expect(unk.usage.internal_decision).toBe('undetermined')
+    expect(unk.level).toBe('unknown')
+    // citation 缺失 → overall 重归一（0.4/0.35/0.10），仍可判
+    const noCite = scoreVerdict({ claims: claimsOk, citation: null, evidence: 80 })
+    expect(noCite.scores.overall).toBe(Math.round((80 * 0.4 + 100 * 0.35 + 100 * 0.1) / 0.85))
+    // 自定义阈值：coherence 门槛提到 90 → 80 分 coherence 落 needs_review
+    const strict = scoreVerdict({ claims: [{ claim: 'a', status: 'partial' }], citation: 90, evidence: 80, gates: { decision: { coherence: 90 } } })
+    expect(strict.usage.internal_decision).toBe('needs_review')
+    // unverifiable 拖 coverage 不拖 coherence
+    const partialUnv = scoreVerdict({ claims: [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'unverifiable' }], citation: 90, evidence: 80 })
+    expect(partialUnv.scores.coherence).toBe(100)
+    expect(partialUnv.scores.coverage).toBe(50)
+  })
+
+  it('parseVerdictBlock：JSON 契约（claims 枚举/上限校验）；非法返回 null', () => {
+    const block = '复核完成。\n\n```agents-verdict\n' + JSON.stringify({
+      claims: [{ claim: 'DeepSeek V4.1 周下载 56.5T', status: 'supported', note: '快照命中' }, { claim: 'OpenHands ~89k stars', status: 'contradicted', note: '两处引文矛盾' }],
+      blockers: ['星数矛盾'],
+    }) + '\n```'
+    expect(parseVerdictBlock(block)).toEqual({
+      claims: [
+        { claim: 'DeepSeek V4.1 周下载 56.5T', status: 'supported', note: '快照命中' },
+        { claim: 'OpenHands ~89k stars', status: 'contradicted', note: '两处引文矛盾' },
+      ],
+      blockers: ['星数矛盾'],
+    })
     expect(parseVerdictBlock('没有契约块')).toBeNull()
-    expect(parseVerdictBlock('```agents-verdict\nlevel: 极高\nblockers: 0\n```')).toBeNull()
+    expect(parseVerdictBlock('```agents-verdict\n{bad json}\n```')).toBeNull()
+    expect(parseVerdictBlock('```agents-verdict\n' + JSON.stringify({ claims: [{ claim: 'x', status: '极高' }] }) + '\n```')).toBeNull()
+    expect(parseVerdictBlock('```agents-verdict\n' + JSON.stringify({ claims: [] }) + '\n```')).toBeNull()
   })
 
-  it('assessBrief + 台账：落 verdict.json；appendResearchLedger/readLedgerStats 聚合', () => {
+  it('assessBrief（L1-only）+ 台账：verdict/2 落盘（claims 空 → coverage/coherence null → 决策 undetermined）', () => {
     const root = tmpRoot()
     try {
       writeBrief(root, { id: 'verify-me', title: 't', body: CLAIM_BODY })
@@ -277,9 +331,16 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       fs.mkdirSync(srcDir, { recursive: true })
       fs.writeFileSync(path.join(srcDir, '1.txt'), 'url: https://a.com/rankings\n\n榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 领跑')
       const verdict = assessBrief(root, 'verify-me', { model: 'glm-5.3-flash' })
-      expect(verdict.level).toBe('pass')
+      expect(verdict.schema).toBe(VERDICT_SCHEMA)
+      expect(verdict.advisory).toBe(true)
+      expect(verdict.scores.evidence).toBeGreaterThan(0)
+      expect(verdict.scores.coverage).toBeNull()
+      expect(verdict.scores.overall).toBeNull()
+      expect(verdict.usage.browse).toBe('ok')
+      expect(verdict.usage.internal_decision).toBe('undetermined')
+      expect(verdict.level).toBe('unknown')
       expect(JSON.parse(fs.readFileSync(path.join(root, '.agents/orchestrator/research/verify-me/verdict.json'), 'utf8')).brief_id).toBe('verify-me')
-      appendResearchLedger(root, { kind: 'l1', brief_id: 'verify-me', model: 'glm-5.3-flash', level: 'pass', hit_rate: 0.8 })
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'verify-me', model: 'glm-5.3-flash', level: 'warn', hit_rate: 0.8 })
       appendResearchLedger(root, { kind: 'l1', brief_id: 'other', model: 'glm-4.5-air', level: 'fail', hit_rate: 0.2 })
       const stats = readLedgerStats(root)
       const m53 = stats.find((s) => s.model === 'glm-5.3-flash')
@@ -294,24 +355,34 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
 })
 
 describe('orchestrator research > verify e2e（mock）', () => {
-  it('research verify：L2 复核合并 L1 落 verdict.json + 记台账 + stats 可读', () => {
+  it('research verify（v2 契约）：claim 逐字校验 + 维度分 + usage 矩阵 + 台账 + stats 可读', () => {
     const repo = mkRepo()
     try {
       const root = repo.root
       writeBrief(root, { id: 'verify-me', title: 't', question: 'q', backend: 'mock', body: CLAIM_BODY })
       const srcDir = path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'sources')
       fs.mkdirSync(srcDir, { recursive: true })
-      fs.writeFileSync(path.join(srcDir, '1.txt'), 'url: https://a.com/rankings\n\n榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 领跑')
+      fs.writeFileSync(path.join(srcDir, '1.txt'), 'url: https://a.com/rankings\n\n榜单页：DeepSeek V4.1 周下载 56.5T、份额 43.6%、GPT-6 与 Kimi K3.1 领跑')
       runOrch(repo.root, 'research verify verify-me --backend mock')
       const verdict = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
-      expect(verdict.l2.level).toBe('high')
-      // 无既有 verdict.json → verify 先补算 L1（对既有 brief 的回查面不缺席）
-      expect(verdict.l1?.claim_check?.checked).toBeGreaterThan(0)
-      expect(verdict.level).toBe('pass')
+      expect(verdict.schema).toBe('modeldock.research.verdict/2')
+      expect(verdict.claims).toHaveLength(1)
+      expect(verdict.claims[0].status).toBe('supported')
+      expect(verdict.claims[0].by).toBe('l1') // L1 数字回查自动标注优先（确定性优先于 LLM 意见）
+      expect(verdict.fabricated_claims).toBe(0)
+      expect(verdict.scores.coverage).toBe(100)
+      expect(verdict.usage.internal_decision).toBe('ok')
+      expect(verdict.usage.external_doc).toBe('ok')
       const ledger = fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'ledger.jsonl'), 'utf8')
       expect(ledger).toContain('"kind":"l2"')
+      expect(ledger).toContain('"decision":"ok"')
       const out = runOrch(repo.root, 'research stats')
       expect(out.stdout).toContain('次判定')
+      // 否决链路：blockers>0 → mock 判 contradicted → 一票否决
+      runOrch(repo.root, 'research verify verify-me --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1' })
+      const vetoed = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
+      expect(vetoed.claims[0].status).toBe('contradicted')
+      expect(vetoed.usage.internal_decision).toBe('unsafe')
     } finally {
       repo.cleanup()
     }
