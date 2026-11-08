@@ -135,3 +135,12 @@ export function providerConcurrencyStats(rt: GatewayRuntime, providerId: string)
   if (!s) return { inFlight: 0, queued: 0 }
   return s.stats()
 }
+
+/** 供 /metrics 并发水位投影：当前持有信号量条目的 provider id 清单。条目随首次 acquire 产生、
+ *  随 rt 一起回收（不清零），故覆盖「首个请求还在途、尚未进耗时采样」的窗口——实时水位若只看
+ *  有完成流量的 provider 会漏掉正在发生的满载。无流量 provider 不出现（与 metrics providers
+ *  段口径一致：缺席 = 空闲，消费方按 0/0 处理）。 */
+export function providerConcurrencyIds(rt: GatewayRuntime): string[] {
+  const m = semaphores.get(rt)
+  return m ? [...m.keys()] : []
+}

@@ -258,6 +258,10 @@ export interface UsageFilter {
   harness?: string
   profile?: string
   provider?: string
+  /** 网关侧错误归类短码（LogEntry.cause 同枚举，见 state/types.ts）；/logs/query 过滤维度 */
+  cause?: string
+  /** HTTP 状态类（'2xx'…'5xx'）；无 status 的条目（客户端中止等）不命中任何状态类 */
+  statusClass?: string
   /** 毫秒时间窗（含边界）；未提供的边界不设限 */
   fromMs?: number
   toMs?: number
@@ -268,6 +272,11 @@ export function logEntryMatches(e: LogEntry, f: UsageFilter): boolean {
   if (f.harness && e.harness !== f.harness) return false
   if (f.profile && e.profile !== f.profile) return false
   if (f.provider && e.provider !== f.provider) return false
+  if (f.cause && e.cause !== f.cause) return false
+  if (f.statusClass) {
+    if (e.status == null) return false
+    if (`${Math.floor(e.status / 100)}xx` !== f.statusClass) return false
+  }
   const ts = new Date(String(e.ts)).getTime()
   if (f.fromMs != null && !(ts >= f.fromMs)) return false
   if (f.toMs != null && !(ts <= f.toMs)) return false
@@ -383,24 +392,39 @@ export function summarizeUsage(entries: LogEntry[], priceOf?: PriceResolver): Us
  *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
  *  （2026-11-02 复查 P2-1；该端点是 Dockmaster 编排侧的轮询数据源）。聚合口径与
  *  「readRequestLogDay + filterLogEntries + summarizeUsage」逐字段一致（共享累加器）。 */
-export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf?: PriceResolver): Promise<UsageSummary> {
-  const acc = createUsageAccumulator(priceOf)
+/** 流式逐条产出各日期日文件里命中过滤的请求日志（/usage 聚合与 /logs/query 明细共用同一
+ *  解析管道，勿另写第二套解析）。逐行读、边过滤边产出，不落全量数组——31 天查询曾用
+ *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
+ *  （2026-11-02 复查 P2-1；/usage 是编排侧轮询数据源）。消费方可提前终止（如 /logs/query
+ *  的 limit 到手即停）：生成器 return 路径经 finally 确定性关闭 readline 与底层文件流。 */
+export async function* streamRequestLogDays(days: string[], f: UsageFilter): AsyncGenerator<LogEntry> {
   for (const d of days) {
     if (!USAGE_DAY_RE.test(d)) continue
     const file = path.join(logsDir(), `gateway-${d}.jsonl`)
     if (!fs.existsSync(file)) continue
-    const lines = createInterface({ input: fs.createReadStream(file, 'utf8'), crlfDelay: Infinity })
-    for await (const line of lines) {
-      if (!line.trim()) continue
-      let e: LogEntry
-      try {
-        e = JSON.parse(line) as LogEntry
-      } catch {
-        continue /* 崩溃半行 */
+    const input = fs.createReadStream(file, 'utf8')
+    const lines = createInterface({ input, crlfDelay: Infinity })
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue
+        let e: LogEntry
+        try {
+          e = JSON.parse(line) as LogEntry
+        } catch {
+          continue /* 崩溃半行 */
+        }
+        if (logEntryMatches(e, f)) yield e
       }
-      if (logEntryMatches(e, f)) acc.add(e)
+    } finally {
+      lines.close()
+      input.destroy() // 提前终止（limit 凑满）时立即释放 fd，不悬挂到 GC
     }
   }
+}
+
+export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf?: PriceResolver): Promise<UsageSummary> {
+  const acc = createUsageAccumulator(priceOf)
+  for await (const e of streamRequestLogDays(days, f)) acc.add(e)
   return acc.summary()
 }
 

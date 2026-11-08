@@ -1951,6 +1951,35 @@ describe('网关', () => {
     }
   })
 
+  it('config 视图协议矩阵：harness.protocols 与 provider.protocols（编排侧派发前对拍，只增不改）', async () => {
+    const t = await setup()
+    try {
+      // 给服务补一个 openai 协议端点：protocols = 默认协议 ∪ endpoints 键
+      t.rt.config.providers.up.endpoints = { openai: 'http://127.0.0.1:1/v1' }
+      const res = await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/config`, {
+        headers: { 'x-modeldock-admin': 'admin-token-x' },
+      })
+      expect(res.status).toBe(200)
+      const view: any = await res.json()
+      const up = view.providers.find((p: any) => p.id === 'up')
+      expect(up.protocols).toEqual(['anthropic', 'openai']) // 排序稳定
+      // 只增不改：既有字段原样保留
+      expect(up.protocol).toBe('anthropic')
+      expect(up.base_url).toBeTruthy()
+      expect(up.max_concurrency).toBeNull()
+      expect(up.key_ref).toBe('sk-upstream-secret')
+      // 单协议客户端声明原样投影；多协议自适应客户端（zcode）未声明 → null（编排侧不校验）
+      const cc = view.harness.find((h: any) => h.id === 'claude-code')
+      expect(cc.protocols).toEqual(['anthropic'])
+      const zc = view.harness.find((h: any) => h.id === 'zcode')
+      expect(zc.protocols).toBeNull()
+      // 无凭据仍 401（admin 门内不变）
+      expect((await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/config`)).status).toBe(401)
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('Web 控制台：新建 profile 端点（校验 + 持久化）', async () => {
     const t = await setup()
     try {
