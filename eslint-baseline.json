@@ -1,0 +1,5 @@
+{
+  "@typescript-eslint/no-unused-vars": 124,
+  "@typescript-eslint/no-misused-promises": 3,
+  "@typescript-eslint/no-floating-promises": 2
+}

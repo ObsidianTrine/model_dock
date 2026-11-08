@@ -19,6 +19,8 @@
 | 测试 | `npx vitest run <相关测试文件>`；**日常改动只跑与改动相关的用例，全绿即交付**（分层规则见「测试指南」） |
 | 全量回归 | `npm test`（产品套件 test/*.test.ts）/ `npm run test:workflow`（编排器套件 test/orchestrator/**）——仅版本发布、develop→main 合并等大节点跑 |
 | 覆盖率 | `npm run test:coverage` |
+| Lint | `npm run lint`（ESLint，作用域 `src/**`，全 warn 级退出码恒 0；超基线由 test/eslint-baseline.test.ts 棘轮拦截） |
+| 格式化 | `npm run format`（Prettier 全仓写入）/ `npm run format:check`（仅检查，本轮未接 CI） |
 | 排障 debug 日志 | `gateway start --debug` / env `MODELRDOCK_DEBUG=1` / config `[gateway] debug = true`（热加载即效，后台 daemon 也可开）；落 `logs/debug-<date>.jsonl`（管理面访问 + 子进程明细），`doctor` 可查开关状态 |
 | 开发热跑 | `npm run dev -- <cmd>`（tsx 直跑源码，**无热重载**，改码后重启实例再验证） |
 | 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口）。完全沙箱化：配置/密钥/日志全在 `~/.modeldock-dev`（密钥本地 file，不写系统钥匙环；npm 全局安装重定向进沙箱；脚本类安装拒绝并提示手动），与生产互不影响。**用户本人日常验证专用——agent 一律不得占用其沙箱与 8890 端口**，测试走硬规则 2 的隔离配方 |
@@ -96,6 +98,7 @@
 - **Web UI 组件与令牌**：一律用 `.agents/conventions/ui-kit.md` 的令牌与组件，禁止写死样式值、禁止 pill 文字当开关；**组件库缺组件先提原型经用户审核，禁止绕过组件库写一次性样式**；机器门禁 `test/ui-lint.test.ts` 随 `npm test` 强制——改 UI 前读规范、改完门禁必须绿；特例走白名单登记。
 - **弹层提示归宿（强制）**：Modal 开着时，其按钮触发的错误与提示一律写弹层底栏 msg 槽位（`.mferr` / `.testline`+语义色），**禁止走全局 toast**（磨砂遮罩 z-modal 100 会盖住 z-toast 50）；只有动作会关闭弹层/页面时反馈才写主页面左下角 toast；新弹层 foot 必须配 `{slot:'msg'}`；分流参考 `createOffer`（shareM）与 `updFail`（updM）；弹层内复制成功反馈 = 按钮图标/文案翻转。
 - **对外文档与用户文案**（CHANGELOG / README / 报错与界面文案）：用户视角、一条一事、粗体点题、不写内部黑话。改前必读 `.agents/conventions/docs-writing.md`（README 遵循「README 结构蓝图」，新增内容按「文档体系」表先归位），收尾过 `.agents/workflows/docs-sync.md` checklist（含链接与截图可达性），英文镜像同一交付同步。
+- **ESLint 棘轮基线门禁**：lint 作用域 `src/**`（不含 test/）；`eslint-baseline.json` 登记各规则存量 warn 计数，**只降不升**——新增违规 = test/eslint-baseline.test.ts 红（错误级违规不经基线直接红），修复后顺手下调对应数字。规则全 warn 级保证 `npm run lint` 退出码恒 0，硬门禁只在棘轮测试。type-aware lint 走 `typescript` 模块（TS 6 JS API），`tsc` 二进制仍是 native TS 7（官方 side-by-side 别名布局，见 package.json devDeps）。
 - **端口使用**：遵循上方「端口与实例约定」——**8687 任何形式的测试/访问/改动一律禁止**，**8890 一律不得占用**；测试统一 `MODELRDOCK_FAKE_HOME=<独立目录>` + `--port 189xx`。
 
 ## 回复风格约定
