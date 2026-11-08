@@ -148,8 +148,11 @@ export function newWorkerSettingsPath() {
 }
 /** researcher 会话工具白名单（只读文件 + 联网检索；无 Bash 无写，fail-closed 同 reviewer）。
  *  WebSearch 在非 Anthropic 后端可能不可用（不可用时会话内自然退化，产出引用不足即被
- *  validateBriefBody 拒收）——research --selftest 供船东实测两条工具的可用性。 */
-export const RESEARCH_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'];
+ *  validateBriefBody 拒收）——research --selftest 供船东实测两条工具的可用性。
+ *  mcp__zsearch__web_search：本地 zsearch MCP server（智谱 BigModel 搜索包，user scope
+ *  注册于 ~/.claude.json，server 脚本 ~/.agents/mcp/zsearch-mcp.mjs）——船东未注册该
+ *  server 时该工具自然缺席（白名单多余项无害），已注册则优先用真实搜索包。 */
+export const RESEARCH_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'mcp__zsearch__web_search'];
 
 /** 组装 claude CLI 参数（纯函数，测试用）。model 可选（--model，执行/审查分源换模型用）。
  *  web: true = researcher 会话（只读 + 联网白名单）；与 readonly 互斥时 web 优先。 */

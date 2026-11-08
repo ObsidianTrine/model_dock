@@ -210,6 +210,8 @@ describe('orchestrator research > prompt 与工具面', () => {
     expect(web.slice(webIdx + 1, webIdx + 1 + RESEARCH_TOOLS.length)).toEqual(RESEARCH_TOOLS)
     expect(RESEARCH_TOOLS).toContain('WebFetch')
     expect(RESEARCH_TOOLS).toContain('WebSearch')
+    // zsearch MCP 搜索工具（BigModel 搜索包）：白名单放行；server 未注册时多余项无害
+    expect(RESEARCH_TOOLS).toContain('mcp__zsearch__web_search')
     expect(RESEARCH_TOOLS).not.toContain('Bash')
     expect(RESEARCH_TOOLS).not.toContain('Edit')
     expect(web).not.toContain('--permission-mode')
