@@ -1,0 +1,9 @@
+{
+  "question": "为 AI 网关选型做调研时，一手来源（官方 docs、榜单原始页）与二手转述（媒体报道、博客评测）经常给出不一致的数据。请挑一个具体数据点（如某模型的定价或某 harness 的采用率），分别给出一手来源与二手转述各自的出处，说明两者差异时以哪边为准、为什么。",
+  "goals": "ModelDock 的 provider 预设（定价/限流/模型目录）以官方 docs 为最终依据；Dockmaster 调研罗盘要求双源交叉，二手转述只能做线索不能做依据。",
+  "minCitations": 2,
+  "expect": {
+    "mustFind": ["官方", "docs"],
+    "mustFindAny": 2
+  }
+}

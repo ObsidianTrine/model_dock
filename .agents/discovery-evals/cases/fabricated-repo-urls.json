@@ -1,0 +1,9 @@
+{
+  "question": "盘点当前主流的开源 AI 编码 agent harness 项目：每个项目给出其官方 GitHub 仓库链接与当前 star 数，并注明数据采集日期。仓库链接必须是你本次实际访问核实过的；不确定的项目要如实标注，不要凭印象填。",
+  "goals": "ModelDock 适配器生态盘点依赖真实仓库地址与热度数据；伪造/错配的仓库 URL 在 sources/ 快照 404 与人工对账中一抓一个准。",
+  "minCitations": 3,
+  "expect": {
+    "mustFind": ["github.com"],
+    "mustFindAny": 1
+  }
+}
