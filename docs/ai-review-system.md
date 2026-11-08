@@ -18,7 +18,7 @@
 | 1 | PR 前验证 | 给 agent 可运行的验证 + fresh-context 子 agent 审 diff；重复发现修到源头 | AGENTS.md（agent 指引）+ `feature-branch finish` 测试门禁 + code-review.md（合并前独立审查）；重复发现修 REVIEW.md / lint | 已有，纪律收敛到 REVIEW.md |
 | 2 | PR 上 AI 审查 | 多 agent 找 bug + 投票确认才上报；风格/清理类丢弃；标 Important/Nit/Pre-existing | claude-review.yml `auto-review`：每条发现先自证（文件+行号）、风格/清理类不报、存量标 [存量]、不重复既往评论、复查只看新增 diff、3 轮不收敛建议换方案 | 已有，本次加降噪与收敛纪律 |
 | 3 | 安全审查可阻塞 | 独立安全审查，有未解决发现不能合并 | claude-review.yml `security-review`：独立会话专查安全面，顶层评论 `SECURITY-VERDICT: PASS/FAIL` 作门禁，FAIL 则 job 失败（可设 required check） | **新增** |
-| 4 | CI 阻塞 | lint / typecheck / 三平台测试 / build | test.yml：三 OS 矩阵 build + npm test | 已有 |
+| 4 | CI 阻塞 | lint / typecheck / 三平台测试 / build | test.yml：三 OS 矩阵 build + npm test；codeql.yml 确定性安全扫描（见下「确定性安全扫描」节） | 已有（CodeQL 2026-11 新增） |
 | 5 | 风险分级人工批准 | 分类器按「改动本身」定档：低 0 / 中 1 / 高 2 个人工批准；agent 的批准永远不算人 | claude-review.yml `risk-tier`：确定性脚本打 `risk:low/medium/high` label + 评论判定依据；CODEOWNERS 标敏感路径；批准刚性靠分支保护承担（见下） | **新增** |
 | 6 | 合并队列 / flag / 渐进发布 | merge queue 重跑全部检查；flag 内部先用；stable 渠道滞后 | **不建**：单维护者 + 本地应用没有合并竞争；发版已有 stable 滞后 latest 的渠道设计（release.md）。出现多人高频合并再上 merge queue | 取舍 |
 | 7 | 快速发现 + 回滚 | flag 一键关停；事故复盘问「哪层该拦住它」 | incident-response.md（8687 故障排查）+ 安装包回滚 + revert 流程 | 已有 |
@@ -44,6 +44,14 @@
   - **三件套 secrets 未配置时 `security-review` job 整体 skip，skip 视为通过**——门禁随 secrets 配置自动生效，不会卡 PR。
   - 改动检查名单时同步更新本节与 `.github/workflows/*.yml` 的 job `name:`（required check 按名字精确匹配）。
 - **误报处理**：在该 inline 下回复依据说明，然后 resolve 线程——对应文章的「每条发现必须被回答」。反复误报修进 REVIEW.md 或 prompt（见改进闭环）。
+
+## 确定性安全扫描（CodeQL，第 3 层的确定性腿）
+
+- **为什么需要**：security-review 是 LLM 判定——同一份代码两次审查结论可能不同（不可复现），且三件套 secrets 未配置时整个 job skip，required check 语义下 **skip 视为通过**，门禁存在条件性空洞（skip 有显式 warning，非静默）。`codeql.yml` 是确定性数据流静态分析：同一份代码同一结果、零 secrets 依赖（公开仓库 CodeQL 免费），补齐这条确定性扫描腿。
+- **与 security-review 的关系**：互补而非替代。CodeQL 覆盖已知漏洞模式（注入 / 路径穿越 / 原型污染 / SSRF 等，language `javascript-typescript` 走默认查询集）；security-review 覆盖需要项目语义的面（鉴权中间件遗漏、密钥落日志、安装器劫持面），并保留「未解决发现不能合并」的阻塞语义。
+- **触发**：push main/develop、PR 到 main/develop、每周一 cron（02:23 UTC，与 test.yml 每日 18:00 UTC 巡检错开——schedule 兜底捕捉查询包升级带来的新告警）、workflow_dispatch 手动补跑。
+- **结果去向**：SARIF 上报 code scanning alerts（Security → Code scanning）；只读分析，不评论、不修码、不开 PR——与 claude-review / ci-autofix / dependabot-fix 无回环面。
+- **required check（待登记）**：check 名 `CodeQL (javascript-typescript)` 计划注册进分支保护 required check 名单；**注册是 push 之后在仓库 Settings 手动完成的收尾步骤**（按 check 名精确匹配，操作同「安全审查门禁」节 2026-10-29 那次）。登记前照常跑、只是不阻塞合并。
 
 ## 人工批准与分支保护（第 5 层的刚性）
 
@@ -104,3 +112,4 @@ gh pr view <N> --json comments -q '[.comments[] | select(.author.login=="claude[
 - `auto-review` / `security-review`：静默跳过（Actions 日志 warning），PR 上不会出现失败的 AI 检查。
 - `security-review` 的门禁步骤也一并跳过——未启用状态不会红。
 - `ci-autofix`：guard 静默跳过（Actions 日志 warning），主干失败照常报警，只是没有自动修复 PR。
+- `codeql`（确定性扫描）：不依赖 secrets，照常运行——这正是它存在的意义之一。
