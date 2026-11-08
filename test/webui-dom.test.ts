@@ -57,6 +57,9 @@ const USAGE_LIVE_FIXTURE = {
   ms: { alpha: 120 },
 }
 
+/** /logs 端点夹具（模块级可变：日志面板用例按需改写，finally 还原） */
+const LOGS_FIXTURE: { logs: any[]; total: number; page: number; pages: number } = { logs: [], total: 0, page: 1, pages: 1 }
+
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
   const routes: Record<string, () => { body: unknown; raw?: string }> = {
@@ -66,7 +69,7 @@ function stubFetch(): void {
     '/_modeldock/model-catalog': () => ({ body: { ok: true, models: {} } }),
     '/_modeldock/presets': () => ({ body: { ok: true, presets: [] } }),
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
-    '/_modeldock/logs': () => ({ body: { logs: [], total: 0, page: 1, pages: 1 } }),
+    '/_modeldock/logs': () => ({ body: LOGS_FIXTURE }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
   }
   vi.stubGlobal('fetch', (url: string) => {
@@ -182,6 +185,51 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
   })
 
+  it('请求日志面板：8 列含操作列、错误行链路两行化（跳过原因可见）、全行复制按钮、筛选 tab 切换记忆', async () => {
+    // 2026-11-08 真实事故形态：bigmodel（openai-only）被 candidateSkip 跳过 → 改发 coding-plan 404
+    LOGS_FIXTURE.logs = [
+      {
+        ts: '2026-11-08T09:33:38.291+08:00', harness: 'claude-code', profile: 'auto-bigmodel', provider: 'coding-plan',
+        model: 'glm-4.5-air', path: '/v1/messages?beta=true', status: 404, ms: 104,
+        err: '{"error":{"code":"UnsupportedModel","message":"The requested model does not support the coding plan feature."}}',
+        reason: 'failover_to:coding-plan,replayed_from:bigmodel', cause: 'upstream_4xx', level: 'error',
+        hint: '给 bigmodel 补 anthropic 端点',
+        attempts: [{ provider: 'bigmodel', note: 'proto_endpoint_missing' }, { provider: 'coding-plan', status: 404, ms: 104 }],
+      },
+      { ts: '2026-11-08T09:49:18.000+08:00', kind: 'audit', op: '编辑服务', op_en: 'Edit service', target: 'bigmodel', detail: '已更新', ok: true, source: 'web' },
+    ]
+    LOGS_FIXTURE.total = 2
+    LOGS_FIXTURE.pages = 1
+    localStorage.setItem('mdk_lang', 'zh')
+    localStorage.setItem('mdk_log_tab', 'all') // 夹具里两类条目都有：切到「全部」保证都进 DOM
+    try {
+      mountPage()
+      await flush()
+      const table = document.getElementById('logTable') as HTMLElement
+      // 8 列表头：新增「操作」列
+      expect(table.querySelectorAll('thead th').length).toBe(8)
+      expect(table.textContent).toContain('操作')
+      // 错误行两行化：链路摘要直出「bigmodel 跳过(协议端点缺失) → coding-plan 404」，建议为第二行
+      expect(table.textContent).toContain('bigmodel 跳过(协议端点缺失) → coding-plan 404')
+      expect(table.textContent).toContain('给 bigmodel 补 anthropic 端点')
+      // 全行复制：请求行 + 操作行都有 ⧉
+      expect(table.querySelectorAll('.lcopy').length).toBe(2)
+      // 复制本页按钮在（pager 右下角）
+      expect(document.getElementById('logCopyPage')).toBeTruthy()
+      // 筛选 tab 切换：选中态迁移 + localStorage 记忆
+      ;(document.querySelector('#logTabs button[data-lt="ok"]') as HTMLElement)!.click()
+      await flush()
+      expect(localStorage.getItem('mdk_log_tab')).toBe('ok')
+      expect((document.querySelector('#logTabs button[data-lt="ok"]') as HTMLElement).className).toBe('on')
+      expect((document.querySelector('#logTabs button[data-lt="all"]') as HTMLElement).className).not.toBe('on')
+    } finally {
+      LOGS_FIXTURE.logs = []
+      LOGS_FIXTURE.total = 0
+      LOGS_FIXTURE.pages = 1
+      localStorage.removeItem('mdk_log_tab')
+      localStorage.setItem('mdk_lang', 'zh')
+    }
+  })
   // 清空模型（草稿两段式确认）：夹具需带模型目录，局部重桩 fetch（finally 还原 beforeAll 桩）
   function stubOverviewWithModels(ms: Array<Record<string, unknown>>, defaultModel: string): () => void {
     const prev = globalThis.fetch

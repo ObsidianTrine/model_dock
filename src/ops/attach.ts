@@ -4,7 +4,8 @@ import type { Config } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
 import { requireAdapter, getAdapter } from '../adapters/registry.js'
 import { applyChanges } from '../adapters/engine.js'
-import type { AttachOptions, PlanResult } from '../adapters/types.js'
+import { pinProtocolConflict } from '../adapters/shared.js'
+import { AdapterError, type AttachOptions, type PlanResult } from '../adapters/types.js'
 import {
   listSnapshots,
   matchesSnapshot,
@@ -40,6 +41,15 @@ export async function planAttach(
   const adapter = await requireAdapter(id, cfg)
   const port = await resolveClientGatewayPort(opts.gatewayPort, cfg.gateway?.port)
   const profileName = opts.profile ?? cfg.active_profile
+  // 钉定接入的协议校验（显式 profile 才查；跟随全局不查——全局路由动态变化，混合客户端靠改发兜底）：
+  // 单协议客户端接入到不支持其协议的服务 = 请求永远被静默改发（2026-11-08 claude-code 钉 openai-only
+  // 服务 404 事故的同型洞），在写盘前拒绝并给可操作指引
+  if (opts.profile && opts.profile !== 'default') {
+    const pinProviderId = cfg.profiles[opts.profile]?.provider
+    const pinProvider = pinProviderId ? cfg.providers[pinProviderId] : undefined
+    const conflict = pinProvider ? pinProtocolConflict(adapter, pinProvider, pinProviderId) : undefined
+    if (conflict) throw new AdapterError(conflict)
+  }
   const token = cfg.harness[id]?.token ?? randomToken(`mdk_${id.replace(/-/g, '_')}`)
   const plan = await adapter.planAttach(
     {

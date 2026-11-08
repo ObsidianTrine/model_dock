@@ -1179,6 +1179,44 @@ describe('网关', () => {
     }
   })
 
+  it('日志端点筛选视图：kind=err 排除操作审计，kind=audit 只含操作，src=ok 取成功请求缓冲，缺省行为不变', async () => {
+    const h = fakeHome()
+    const cfg: Config = {
+      version: 1,
+      active_profile: 'demo',
+      security: { store: 'file' },
+      providers: {},
+      profiles: { demo: { provider: 'up', default_model: 'm' } },
+      harness: {},
+    }
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    rt.ring.push({ ts: '2026-11-08T00:00:01.000Z', harness: 'claude-code', profile: 'demo', provider: 'up', model: 'm-err', path: '/v1/messages', status: 404, ms: 1, level: 'error' })
+    rt.ring.push({ ts: '2026-11-08T00:00:02.000Z', kind: 'audit', op: '重载配置', target: '-', ok: true, source: 'web' })
+    rt.okRing!.push({ ts: '2026-11-08T00:00:03.000Z', harness: 'claude-code', profile: 'demo', provider: 'up', model: 'm-ok', path: '/v1/chat/completions', status: 200, ms: 2, level: 'info' })
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const ADMIN = { 'x-modeldock-admin': 'admin-token-x' }
+      const base = `http://127.0.0.1:${gwPort}/_modeldock/logs`
+      const errView: any = await (await fetch(`${base}?n=50&kind=err`, { headers: ADMIN })).json()
+      expect(errView.total).toBe(1)
+      expect(errView.logs[0].model).toBe('m-err')
+      const auditView: any = await (await fetch(`${base}?n=50&kind=audit`, { headers: ADMIN })).json()
+      expect(auditView.total).toBe(1)
+      expect(auditView.logs[0].op).toBe('重载配置')
+      const okView: any = await (await fetch(`${base}?n=50&src=ok`, { headers: ADMIN })).json()
+      expect(okView.total).toBe(1)
+      expect(okView.logs[0].model).toBe('m-ok')
+      // 缺省行为不变：ring 原样（错误 + 审计）
+      const all: any = await (await fetch(`${base}?n=50`, { headers: ADMIN })).json()
+      expect(all.total).toBe(2)
+    } finally {
+      server.close()
+      h.restore()
+    }
+  })
+
   it('Web 控制台 v2：overview 聚合视图 + service/switch 任务端点', async () => {
     const t = await setup()
     try {
@@ -3496,6 +3534,39 @@ describe('管理面安全（2026-09 审查回归）', () => {
       expect((await post({ harness: 'claude-code', profile: 'nope' })).status).toBe(400)
       expect((await post({ harness: 'no-such-harness', provider: 'up' })).status).toBe(400)
       expect((await post({ harness: 'claude-code' })).status).toBe(400)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('harness/route 协议校验：单协议客户端钉到不支持其协议的服务被拒（盘上不改写），兼容服务放行', async () => {
+    const t = await setup()
+    try {
+      const origin = `http://127.0.0.1:${t.gwPort}`
+      const H = { 'content-type': 'application/json', origin, 'x-modeldock-admin': 'admin-token-x' }
+      const post = (body: Record<string, unknown>) =>
+        fetch(`${origin}/_modeldock/harness/route`, { method: 'POST', headers: H, body: JSON.stringify(body) })
+      // 补 openai-only 服务与 profile（写盘后热加载进 rt.config）
+      const disk: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      disk.providers['openai-only'] = { name: 'OpenAI Only', base_url: 'https://x.example.com/v4', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:k' }
+      disk.profiles['p-openai'] = { provider: 'openai-only', default_model: 'm' }
+      await saveConfig(disk)
+      await reloadRuntime(t.rt)
+
+      // claude-code 只讲 anthropic：钉 openai-only → 400 + 可操作报错（点名服务与协议），盘上 route 不变
+      const bad = await post({ harness: 'claude-code', profile: 'p-openai' })
+      expect(bad.status).toBe(400)
+      const bj: any = await bad.json()
+      expect(bj.error.message).toContain('OpenAI Only')
+      expect(bj.error.message).toContain('anthropic')
+      expect(tomlParse(fs.readFileSync(configPath(), 'utf8')).harness['claude-code'].route).toBe('default')
+
+      // 兼容服务（up=anthropic）放行，钉定成功
+      const good = await post({ harness: 'claude-code', profile: 'other' })
+      expect(good.status).toBe(200)
+      const gj: any = await good.json()
+      expect(gj.ok).toBe(true)
+      expect(gj.route).toBe('other')
     } finally {
       t.closeAll()
     }

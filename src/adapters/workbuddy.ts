@@ -127,6 +127,8 @@ export const workbuddyAdapter: HarnessAdapter = {
   get label() { return t('WorkBuddy（腾讯 AI 办公客户端）', 'WorkBuddy (Tencent AI office client)') },
   directMode: true,
   bakesModels: true, // models.json 里烙着模型列表，全局切换后需重写（见 refreshBakedModelClients）
+  // 接入写 gatewayBaseOpenAI（/v1 + /chat/completions），只讲 OpenAI 协议
+  clientProtocols: ['openai'],
   install: {
     get guide() {
       return t(

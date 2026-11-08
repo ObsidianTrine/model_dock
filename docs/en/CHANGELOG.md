@@ -5,15 +5,25 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.7.2] - 2026-11-08
+
+Update prefetch with one-click second-level installs, readable request logs, and protocol checks before pinning; the bigmodel preset ships with the Anthropic endpoint; the tray "Check for Updates" now checks live.
 
 ### Added
 
 - **Update prefetch — one-click upgrades finish in seconds**: once a new version is found, the matching package for this machine is downloaded and verified in the background (enabled by default; set `config.toml [update] prefetch = false` to opt out). The update button in the web console and tray becomes "Install Now" — clicking it skips the download and goes straight to the swap, done in seconds. Downloads resume from where they left off after a network interruption. Checksums are always re-verified against the official source before installing; a corrupted cache is discarded and re-downloaded automatically. Security semantics unchanged.
 
-### Changed
+- **Request logs you can actually read and search**: every candidate on the automatic failover chain is now recorded with the request log — which service was skipped and why (missing protocol endpoint / unusable keys / concurrency queue timeout), and where the request finally landed, instead of a bare service ID. The console "Request log" panel adds filter tabs (Errors / Operations / All / Successful, defaulting to Errors): error rows show the failover chain summary and a fix hint directly (the raw upstream error moves into the hover tooltip); every row (console operations included) gets a copy button, and a "Copy page" button in the pager copies the whole current view at once; recent successful requests (last 200) are visible under "Successful". Log files gain structured fields (level info/warn/error, cause code, fix hint); historical logs are unaffected.
+- **Top bar links to the project homepage**: the logo and product name in the console top bar are now clickable and open the GitHub project page in a new window.
+
+### Improved
 
 - **Tray "Check for Updates" now checks live**: clicking "Check for Updates…" in the tray could previously return a cached result up to 24 hours old (missing releases published minutes ago); it now always queries GitHub in real time. Automatic checks keep their throttling. The web console is unchanged (manual check entry points are the tray menu and `modeldock update --check`).
+
+### Fixed
+
+- **The built-in "Zhipu GLM · bigmodel" preset now ships with the Anthropic-compatible endpoint**: services added from this preset come with the Anthropic protocol URL (`https://open.bigmodel.cn/api/anthropic`, verified against Zhipu's official docs), so Anthropic-protocol clients such as Claude Code can attach or pin directly without manually adding the endpoint under "Edit Service". The preset previously had only the OpenAI-compatible URL (the Anthropic preset was removed in 2026-10 based on a mistaken "endpoint offline" conclusion). Already-added services are unaffected — existing bigmodel services still need the endpoint added once via "Edit Service" (or delete and re-add).
+- **Protocol compatibility is now checked before pinning a route — no more "pinned successfully but never reachable"**: the gateway does not translate between protocols, so pinning an Anthropic-only client (Claude Code) to a service that only has an OpenAI endpoint made every request silently fail over to other services while the pinned service never received any traffic (typically surfacing as "model does not exist or you lack access"). Pinning in the console, `modeldock harness route` on the CLI, and attach-to-a-specific-service now verify the client's protocol against the service's endpoints before writing, and reject mismatches with two fix paths (add the missing protocol endpoint to the service, or pin to another service that supports it). Protocol-adaptive clients (ZCode, dsh) are unaffected.
 
 ## [1.7.1] - 2026-11-07
 
@@ -549,6 +559,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0

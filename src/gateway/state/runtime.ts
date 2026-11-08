@@ -107,6 +107,7 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     config,
     tokens: buildTokenIndex(config),
     ring: [],
+    okRing: [],
     startedAt: Date.now(),
     adminToken,
     reloads: 0,

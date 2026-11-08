@@ -9,7 +9,7 @@
 export type { AddServiceResult, AddServiceSubmittedModels } from './ops/service.js'
 export { validateServiceInput, resolveServiceModels, resolveFallbackChain, addService } from './ops/service.js'
 export type { RefreshBakedResult, DisplayRouteSyncResult } from './ops/routing.js'
-export { setAutoRoute, setRouteNext, switchToService, switchToServiceWithRoute, refreshBakedModelClients, ensureProfileForProvider, syncBakedClientsForDisplayRoute, resyncHarnessToRoute } from './ops/routing.js'
+export { setAutoRoute, setRouteNext, switchToService, switchToServiceWithRoute, refreshBakedModelClients, ensureProfileForProvider, syncBakedClientsForDisplayRoute, resyncHarnessToRoute, pinRouteProtocolError } from './ops/routing.js'
 export { resolveClientGatewayPort } from './ops/gateway-port.js'
 export type { AttachPlan, AttachOutcome, RegisterAttachResult, DetachOutcome, ModeSwitchOutcome } from './ops/attach.js'
 export { planAttach, registerAttach, applyAttach, switchHarnessMode, detachHarness } from './ops/attach.js'

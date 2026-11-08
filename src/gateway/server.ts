@@ -21,14 +21,14 @@ import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type Har
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
 import { applyChanges } from '../adapters/engine.js'
 import { PRESETS, ensurePresetsLoaded, knownModelsForBaseUrl, presetModels } from '../presets/data.js'
-import { addService, applyAttach, detachHarness, planAttach, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
+import { addService, applyAttach, detachHarness, planAttach, pinRouteProtocolError, refreshBakedModelClients, removeProviderCascade, resyncHarnessToRoute, setAutoRoute, setRouteNext, switchHarnessMode, switchToServiceWithRoute, syncBakedClientsForDisplayRoute } from '../ops.js'
 import { autostartOverview, installAutostart, uninstallAutostart, updateDaemonArgs } from '../autostart.js'
 import { applyImport, normalizeBaseUrl, scanSources } from '../import/sources.js'
 import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type ProviderAvailability, type ResolvedTarget } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
@@ -425,7 +425,7 @@ async function handleRequest(
         err += t('（token 前缀 {hint}… 属于 harness「{h}」）', ' (token prefix {hint}… belongs to harness "{h}")', { hint: hint8, h: known })
       }
     }
-    log({ harness: '-', profile: '-', provider: '-', path: url, status: resolved.status, err, ms: Date.now() - started, ...(tokenHint ? { tokenHint } : {}) })
+    log({ harness: '-', profile: '-', provider: '-', path: url, status: resolved.status, err, ms: Date.now() - started, cause: 'unauthorized', ...(tokenHint ? { tokenHint } : {}) })
     return sendError(res, resolved.status, resolved.message, resolved.hint)
   }
   const { target } = resolved
@@ -468,7 +468,7 @@ async function handleRequest(
         ? t('客户端「{h}」已触发限流：每分钟请求数超过上限 {n}', 'Client "{h}" hit the rate limit: more than {n} requests per minute', { h: target.harness, n: limits?.rpm ?? 0 })
         : t('客户端「{h}」已触发日限额：今日 token 用量达到上限 {n}', 'Client "{h}" hit the daily token cap: today\'s usage reached the limit of {n}', { h: target.harness, n: limits?.daily_tokens ?? 0 })
     const hint = t('限额配置在 config.toml [harness.{h}] 的 limits 键（rpm / daily_tokens，删除即不限），改后热加载生效', 'Limits live under the limits key of [harness.{h}] in config.toml (rpm / daily_tokens; remove to disable) and hot-reload', { h: target.harness })
-    log({ harness: target.harness, profile: target.profileName, provider: '-', path: url, status: 429, ms: Date.now() - started, err: msg })
+    log({ harness: target.harness, profile: target.profileName, provider: '-', path: url, status: 429, ms: Date.now() - started, err: msg, cause: 'local_limit' })
     return sendError(res, 429, msg, hint)
   }
 
@@ -486,7 +486,7 @@ async function handleRequest(
   res.on('close', () => {
     if (!res.writableEnded) fwdAbort.abort()
   })
-  let result: UpstreamResult & { usedProviderId?: string; reason?: string; release?: () => void }
+  let result: UpstreamResult & { usedProviderId?: string; reason?: string; cause?: string; attempts?: LogAttempt[]; release?: () => void }
   try {
     // 故障切换常开：主候选不可达时按 pickTarget 候选链自动改发（备用链/「下一个切换」钉定），不与「程序自动选主」开关绑定；
     // pickTarget 内部再按 auto_failover 决定定时窗口是否参与选主。候选链只有主服务时行为与直连等价（循环一次）。
@@ -503,7 +503,7 @@ async function handleRequest(
   } catch (e) {
     if (fwdAbort.signal.aborted) {
       // 客户端已离开：无处应答，也不进 500 噪音；499（约定俗成的 client closed request）进请求日志
-      log({ harness: target.harness, profile: target.profileName, provider: target.profile.provider, path: url, status: 499, ms: Date.now() - started, err: t('客户端已断开，转发中止', 'Client disconnected; forwarding aborted') })
+      log({ harness: target.harness, profile: target.profileName, provider: target.profile.provider, path: url, status: 499, ms: Date.now() - started, err: t('客户端已断开，转发中止', 'Client disconnected; forwarding aborted'), cause: 'client_abort' })
       return
     }
     if (e instanceof UpstreamError) {
@@ -517,6 +517,9 @@ async function handleRequest(
         ms: Date.now() - started,
         err: e.message,
         reason: e.routeReason ?? undefined,
+        cause: e.cause ?? e.routeReason,
+        ...(e.hint ? { hint: e.hint } : {}),
+        ...(e.attempts?.length ? { attempts: e.attempts } : {}),
       })
       return sendError(res, e.status, e.message, e.hint)
     }
@@ -543,7 +546,28 @@ async function handleRequest(
     }
     res.writeHead(result.status, { ...errHeaders, 'content-type': 'application/json' })
     res.end(wrapped)
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: wrapped.slice(0, 200), reason })
+    // hint 从 modeldock 信封拆出单独成列（err 列 200 字符截断不再吞掉可操作建议）；
+    // cause/attempts 来自 failover 链（attempts 缺省=直连失败）
+    let hint: string | undefined
+    try {
+      hint = (JSON.parse(wrapped) as { modeldock?: { hint?: string } })?.modeldock?.hint
+    } catch {
+      /* wrapped 恒为 translateUpstreamError 产出的 JSON，防御性兜底 */
+    }
+    log({
+      harness: target.harness,
+      profile: target.profileName,
+      provider: providerId,
+      model,
+      path: url,
+      status: result.status,
+      ms: Date.now() - started,
+      err: wrapped.slice(0, 200),
+      reason,
+      cause: result.cause ?? (result.status >= 500 ? 'upstream_5xx' : 'upstream_4xx'),
+      ...(hint ? { hint } : {}),
+      ...(result.attempts?.length ? { attempts: result.attempts } : {}),
+    })
     result.release?.() // 错误回包已发出，释放该候选的并发槽
     return
   }
@@ -559,7 +583,7 @@ async function handleRequest(
     await pipeline(result.body as any, usageTap, res)
     log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage })
   } catch (e) {
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage, cause: 'stream_interrupt' })
   } finally {
     // 流式响应等响应结束（读完/中断）才释放并发槽——响应头到了就放会让 max_concurrency 少算在途流量
     result.release?.()
@@ -690,14 +714,26 @@ async function hLogs(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
   const q = new URL(req.url ?? '', 'http://x').searchParams
   const n = Math.min(500, Math.max(1, Number(q.get('n') ?? 50) || 50))
-  const total = rt.ring.length
+  // 筛选视图：默认=环形缓冲原样（错误请求+控制台操作+后台事件，写入侧已分流）；
+  // src=ok 取成功请求小缓冲；kind=err/audit 在 ring 上做服务端过滤——分页计数按过滤后口径，
+  // 避免前端拿到稀页（客户端过滤会让「每页 N 条」名不副实）
+  const src = q.get('src')
+  const kind = q.get('kind')
+  const base: RingEntry[] = src === 'ok' ? (rt.okRing ?? []) : rt.ring
+  const filtered =
+    !src && kind === 'audit'
+      ? base.filter((l) => l.kind === 'audit')
+      : !src && kind === 'err'
+        ? base.filter((l) => l.kind !== 'audit')
+        : base
+  const total = filtered.length
   // page 从 1 数起，第 1 页是最新 n 条（ring 按 时间正序 追加）；越界页返回空数组
   const page = Math.max(1, Number(q.get('page') ?? 1) || 1)
   const pages = Math.max(1, Math.ceil(total / n))
   const end = Math.max(0, total - (page - 1) * n)
   const start = Math.max(0, end - n)
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ logs: rt.ring.slice(start, end), total, page, pages }))
+  res.end(JSON.stringify({ logs: filtered.slice(start, end), total, page, pages }))
   return
 }
 
@@ -1642,6 +1678,13 @@ async function hHarnessRoute(c: AdminCtx): Promise<void> {
     }
     if (providerId && !rt.config.providers[providerId]) {
       return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }))
+    }
+    // 协议兼容校验（钉到具体服务/profile 才查；恢复跟随全局不查——全局路由动态变化）：
+    // 单协议客户端钉到不支持其协议的服务 = 钉成功但请求永远被静默改发给别家，写盘前拒绝
+    const checkProviderId = profileName ? rt.config.profiles[profileName]?.provider : providerId || undefined
+    if (checkProviderId) {
+      const conflict = await pinRouteProtocolError(hid, checkProviderId, rt.config)
+      if (conflict) return sendError(res, 400, conflict)
     }
     let finalRoute = toDefault ? 'default' : profileName
     await persistConfig(rt, (c) => {

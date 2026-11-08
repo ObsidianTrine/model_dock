@@ -97,6 +97,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
   // 全局切换后按新路由重写（refreshBakedModelClients / resyncHarnessToRoute，见 ops.ts，两者
   // 显式跳过 direct 客户端）；直连目标显式、不随全局切换，重烙发生在接入 / 模式切换时
   bakesModels: true,
+  // 只写 ANTHROPIC_BASE_URL（env.ANTHROPIC_*），只讲 Anthropic 协议
+  clientProtocols: ['anthropic'],
   install: {
     command: 'npm i -g @anthropic-ai/claude-code',
     uninstall: 'npm uninstall -g @anthropic-ai/claude-code',
