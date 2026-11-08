@@ -305,6 +305,8 @@ describe('orchestrator research > verify e2e（mock）', () => {
       runOrch(repo.root, 'research verify verify-me --backend mock')
       const verdict = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
       expect(verdict.l2.level).toBe('high')
+      // 无既有 verdict.json → verify 先补算 L1（对既有 brief 的回查面不缺席）
+      expect(verdict.l1?.claim_check?.checked).toBeGreaterThan(0)
       expect(verdict.level).toBe('pass')
       const ledger = fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'ledger.jsonl'), 'utf8')
       expect(ledger).toContain('"kind":"l2"')
