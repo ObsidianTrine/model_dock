@@ -68,7 +68,8 @@ import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProg
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
-import { resolveTier, tierEnvPatch, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
+import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
+import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
 import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
@@ -479,7 +480,7 @@ async function cmdRun(repoRoot, taskId, opts) {
     });
     if (!v.ok) log(`⚠ tier 目录校验：${v.reason}${v.missing?.length ? `（${v.missing.join(', ')}）` : ''}——继续派发，留意网关模型报错`);
   }
-  const tierEnv = tierEnvPatch(tier);
+  let tierEnv = tierEnvPatch(tier); // gatewayProvision 生效时 ephemeral token 会并入（下方 applyEphemeralToken）
 
   // reviewing 也算恢复场景（2026-10-31 卡 19）：审查阶段硬崩的卡，此前唯一程序化
   // 出口是 abandon 强制落 failed；TRANSITIONS 本就允许 reviewing→running，run/resume
@@ -566,10 +567,61 @@ async function cmdRun(repoRoot, taskId, opts) {
     if (e.type === 'worker_spawned') livePid = e.pid;
   };
 
+  // ---- 每任务一次性凭据（ephemeral harness，provision.mjs，B16）：gatewayProvision: true
+  // 且 admin 可得 → spawn 前向网关签发临时 harness，worker/reviewer 的 env patch 只换
+  // ANTHROPIC_AUTH_TOKEN（base_url 仍由 ModelDock attach 写好的客户端配置决定，不越权）。
+  // 所有失败形态 fail-open：回落 tier token / 全局默认，行为与未接入完全一致，仅留
+  // harness_provision_failed 事件。凭据生命周期 = 本 run 进程的活跃会话窗口：
+  //   ① 接管路径——上次 run（崩溃/被杀）签发未吊销的先 best-effort 吊销再签新的（幂等）；
+  //   ② 终态落位（blocked/failed 经 exitRun，merged / awaiting-human 经 finally）——退出前吊销；
+  //   ③ kill-tree/熔断终归收敛到 ①②（die 语义 = process.exit，finally 不跑，故 exitRun 显式吊销）。
+  // 吊销失败只告警不阻断、不重试（重试风暴红线），漏网凭据由 TTL（≤24h）自然过期兜底。
+  const provGa = cfg.gatewayProvision === true ? resolveGatewayAdmin(cfg) : null;
+  let taskHarness = null; // { id, expiresAt, revoked }；签发失败/未启用保持 null（fail-open 走旧路径）
+  if (cfg.gatewayProvision === true && !provGa) {
+    appendEvent(qdir, 'harness_provision_failed', { reason: 'admin 未配置（gatewayAdmin 未开启或未发现网关）——回落既有凭据路径' });
+    log('⚠ 一次性凭据：gatewayProvision 已开但 admin 不可得（需 gatewayAdmin: true + 网关可发现）——回落既有凭据路径');
+  }
+  if (provGa) {
+    const stale = findUnrevokedHarnessId(readEvents(qdir));
+    if (stale) {
+      const rv = await revokeTaskHarness(provGa, stale);
+      appendEvent(qdir, 'harness_revoked', { harness_id: stale, ok: rv.ok, existed: rv.revoked === true, trigger: 'takeover', ...(rv.reason ? { reason: rv.reason } : {}) });
+      if (rv.ok) log(`🔑 接管清理：上次 run 的一次性凭据已吊销（harness=${stale}）`);
+      else log(`⚠ 上次 run 的一次性凭据吊销失败（${rv.reason}）——harness=${stale} 留待 TTL 自然过期，不重试`);
+    }
+    const pr = await provisionTaskHarness(provGa, { taskId });
+    if (pr.ok) {
+      taskHarness = { id: pr.harnessId, expiresAt: pr.expiresAt, revoked: false };
+      tierEnv = applyEphemeralToken(tierEnv, pr); // 同形通道只换 token；claude 双通道与 zcode env 透传照旧
+      measuredHarness = pr.harnessId; // 实测账按一次性 harness 精确取数（专属凭据无兄弟流量，基线污染消失）
+      appendEvent(qdir, 'harness_provisioned', { harness_id: pr.harnessId, expires_at: pr.expiresAt ?? null });
+      log(`🔑 一次性凭据已签发：harness=${pr.harnessId}（有效期至 ${pr.expiresAt ?? 'TTL 上限'}；收尾即吊销）`);
+    } else {
+      appendEvent(qdir, 'harness_provision_failed', { reason: pr.reason });
+      log(`⚠ 一次性凭据签发失败（${pr.reason}）——fail-open 回落既有凭据路径（行为不变）`);
+    }
+  }
+  // 吊销本 run 已签发的凭据（幂等防重入）：exitRun（die 路径）与 finally（return 路径）共用
+  const revokeRunHarness = async (trigger) => {
+    if (!taskHarness || taskHarness.revoked || !provGa) return;
+    taskHarness.revoked = true;
+    const rv = await revokeTaskHarness(provGa, taskHarness.id);
+    appendEvent(qdir, 'harness_revoked', { harness_id: taskHarness.id, ok: rv.ok, existed: rv.revoked === true, trigger, ...(rv.reason ? { reason: rv.reason } : {}) });
+    if (!rv.ok) log(`⚠ 一次性凭据吊销失败（${rv.reason}）——harness=${taskHarness.id} 留待 TTL 自然过期，不重试`);
+  };
+  // 终态落位出口：die = process.exit（finally 不跑），先 best-effort 吊销再退出
+  const exitRun = async (msg, code = 1) => {
+    await revokeRunHarness('terminal');
+    die(msg, code);
+  };
+
   // ---- 预算实测账（A4，supply.mjs）：worker 运行中每 60s 轮询 harness-usage 的
   // day_billable_tokens（网关实测可计费口径）喂 budget.accountMeasured——zcode 无逐 turn
   // 自报（结束才一次性回填），实测账让它获得真实逐时段 token 预算；字段缺失（旧网关）/
   // 观测不可达 → null → 自报账兜底，行为不回退。reconcile 离线对账逻辑不动。
+  // gatewayProvision 生效时 harness = 本任务专属 ephemeral id（上方签发），精确取数；
+  // 未启用/签发失败回落 tier token 经 tier-validate 解析的 harness id（基线法照旧）。
   const measuredFuel = startMeasuredFuelPoller({ budget, cfg, harness: measuredHarness, log });
 
   // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
@@ -686,7 +738,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
         archiveIncident(repoRoot, taskId, root, qdir, `budget:${budget.tripReason.reason}`);
         await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
-        die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+        await exitRun(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
       }
       // ---- 配置守卫派发闸（B7）：workflow.json 漂移即停止派发新 worker 会话 ----
       // 在途会话已收尾、下一个会话（初始/fixup 返工）尚未开始 = 派发点。漂移说明授权
@@ -704,7 +756,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           appendEvent(qdir, 'blocked', { reason: 'config_drift' });
           archiveIncident(repoRoot, taskId, root, qdir, detail);
           await settleNotify(repoRoot, taskId, 'blocked', detail);
-          die(`⛔ ${detail}——配置守卫停止派发（授权配置被外部改写，继续派发 = 盲飞）。任务转 blocked/。\n`
+          await exitRun(`⛔ ${detail}——配置守卫停止派发（授权配置被外部改写，继续派发 = 盲飞）。任务转 blocked/。\n`
             + `  人工核实改动：合法变更直接改回或重启编排器接受新基线；来历不明按事故处理。`);
         }
       }
@@ -787,7 +839,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             appendEvent(qdir, 'blocked', { reason: `budget:${budget.tripReason.reason}` });
             archiveIncident(repoRoot, taskId, root, qdir, `budget:${budget.tripReason.reason}`);
             await settleNotify(repoRoot, taskId, 'blocked', `预算熔断 ${budget.tripReason.reason}`);
-            die(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
+            await exitRun(`预算熔断：${budget.tripReason.reason}（${budget.tripReason.detail}）。任务已转 blocked/，人工决策后再继续。`);
           }
         }
         // 自报不可信：先解析契约块。异常结束（无结果块）→ 结构化信号优先定性（B6 +
@@ -885,7 +937,7 @@ async function cmdRun(repoRoot, taskId, opts) {
               moveCard(root, taskId, 'running', 'blocked');
               archiveIncident(repoRoot, taskId, root, qdir, `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
               await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
-              die(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）。${g.dieTail}`);
+              await exitRun(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）。${g.dieTail}`);
             }
             return { trigger: g.trigger, output: e.output };
           }
@@ -963,7 +1015,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'failed', { reason: `红线门禁 port_scan：${e.message}` });
         archiveIncident(repoRoot, taskId, root, qdir, `红线门禁 port_scan：${e.message}`);
         await settleNotify(repoRoot, taskId, 'failed', '红线门禁 port_scan 未通过（不可调试）');
-        die(`红线门禁 port_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
+        await exitRun(`红线门禁 port_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
       try {
         const nativeResult = gateNativeScan(worktree, baseBranch, cfg.packageManager);
@@ -975,7 +1027,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         appendEvent(qdir, 'failed', { reason: `红线门禁 native_scan：${e.message}` });
         archiveIncident(repoRoot, taskId, root, qdir, `红线门禁 native_scan：${e.message}`);
         await settleNotify(repoRoot, taskId, 'failed', '红线门禁 native_scan 未通过（不可调试）');
-        die(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
+        await exitRun(`红线门禁 native_scan 未通过：${e.message}\n红线不可调试，任务转 failed/。`);
       }
 
       // UI 冒烟门禁（任务卡 ui_check: true 才跑）：与静态段同经 runGates 执行（UI_GATES 单段表，
@@ -1087,7 +1139,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           moveCard(root, taskId, 'reviewing', 'blocked');
           archiveIncident(repoRoot, taskId, root, qdir, detail);
           await settleNotify(repoRoot, taskId, 'blocked', detail);
-          die(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+          await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
         }
         // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
         // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
@@ -1107,7 +1159,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             moveCard(root, taskId, 'reviewing', 'blocked');
             archiveIncident(repoRoot, taskId, root, qdir, `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
-            die(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
+            await exitRun(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
           promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter));
           moveCard(root, taskId, 'reviewing', 'running');
@@ -1167,9 +1219,10 @@ async function cmdRun(repoRoot, taskId, opts) {
   } catch (e) {
     // 异步异常兜底：backend spawn 失败等——卡不得悬在 running/（见 failTaskToBlocked 注释）
     const reason = await failTaskToBlocked(repoRoot, root, qdir, taskId, e);
-    if (reason) die(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
+    if (reason) await exitRun(`${reason}\n任务已转 blocked/——修好环境后 resume ${taskId} 续做（events.jsonl 有完整时间线）。`);
     throw e;
   } finally {
+    await revokeRunHarness('run_exit'); // 一次性凭据（B16）：run 进程收尾即吊销（die 路径已先走 exitRun，此处幂等防重入）
     measuredFuel.stop(); // 实测油量轮询（A4）：任务收尾即停，不留跨任务定时器
     clearTimeout(budget.wallTimer);
     releaseTaskLock(repoRoot, taskId);

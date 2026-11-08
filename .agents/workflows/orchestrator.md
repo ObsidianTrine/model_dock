@@ -435,6 +435,16 @@ drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 me
 - 防循环双保险：① 修复卡 id 无 `scan-` 前缀，自身 failed 不再繁殖新卡；② 同名修复卡在**任一队列状态**已存在即跳过（merged/failed 也算——scan 卡永驻 failed/，按状态白名单去重会跨 drain 打环）。
 - 事件留痕：原卡日志记 `scan_autofix { fix, reason }`。关闭：`"scanAutoFix": { "enabled": false }`（恢复旧行为）。
 
+### B16. 每任务一次性凭据（gatewayProvision，ephemeral harness）
+
+worker/reviewer 的凭据此前长期复用 tier token（env 注入，源头是长期 harness）。开启 `"gatewayProvision": true`（平铺键，缺省 false = 现状不变；前置 `gatewayAdmin: true`——admin 面同一授权域）后，run 在 spawn 前向网关 `/_modeldock/harness/provision` 签发**任务专属临时 harness**（TTL ≤24h 硬顶、不落盘、token 明文只在签发响应出现一次；id 确定性 `orch-<taskId>`，被占用自动降级为网关随机 id）：
+
+- **注入口径**：env patch 只换 `ANTHROPIC_AUTH_TOKEN`（复用 tierEnvPatch 同形通道；claude-headless 的 settings.env + 子进程 env 双通道、zcode-headless 的 env 透传照旧，后者「CLI 是否认 env」的 no-op 风险同前）。**不注 base_url**——接入目标仍由 ModelDock attach 写好的客户端配置文件决定。zcode 不认 tier 的既有选船规则不变。
+- **fail-open**：所有失败形态（admin 未配置/网关不可达/超时 ≤3s/非 2xx/响应缺字段）回落既有 tier token 路径，行为与未开启完全一致；每类失败留 `harness_provision_failed` 事件（含原因），绝不阻断派发。
+- **实测账更准**：签发成功时预算实测轮询（B12 配合）按该 harnessId 精确取数——专属凭据没有同 harness 兄弟流量，基线污染消失；签发失败/未开启回落 tier token 解析的 harness（基线法照旧）。
+- **吊销时机（best-effort，失败只告警不重试，漏网由 TTL 兜底）**：① 接管路径——run 启动时发现上次 run 签发未吊销的凭据（events.jsonl 查 `harness_provisioned`/`harness_revoked` 对账）先吊销再签新的；② 终态落位（blocked/failed 走 exitRun、merged/awaiting-human 走 finally）进程退出前吊销——awaiting-human 落位后无 worker 流量，一并吊销，approve/retry 的新 run 会重新签发；kill-tree/熔断终归收敛到这两条出口。
+- **事件**：`harness_provisioned { harness_id, expires_at }`、`harness_revoked { harness_id, ok, existed, trigger: takeover|terminal|run_exit }`、`harness_provision_failed { reason }`。
+
 ## C. 观测与对账详解
 
 ### C1. stats 与 follow（引水传令）
