@@ -221,13 +221,16 @@ export async function addService(
       const models = { ...(provider.models ?? {}) }
       for (const mid of f.ids) {
         if (!models[mid]) {
-          // 填充链：上游响应自带值 > 内置表 > models.dev 目录；只补空，不覆盖预设/手填值
+          // 填充链：上游响应自带值 > 内置表 > models.dev 目录；只补空，不覆盖预设/手填值。
+          // 上游自带能力（含 []=明确无视觉）落盘；内置表推断的不落盘，保持读时解析
+          const upCaps = f.meta?.[mid]?.capabilities
           const r = resolveModelMeta(mid, null, { upstream: f.meta?.[mid], baseUrl: provider.base_url })
           models[mid] = {
             display_name: f.display[mid],
             source: 'fetched' as const,
             ...(r?.context_window != null ? { context_window: r.context_window } : {}),
             ...(r?.max_output != null ? { max_output: r.max_output } : {}),
+            ...(upCaps !== undefined ? { capabilities: [...upCaps] } : {}),
           }
         }
       }

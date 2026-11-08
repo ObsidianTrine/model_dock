@@ -9,14 +9,33 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ### Added
 
+- **Update prefetch — one-click upgrades finish in seconds**: once a new version is found, the matching package for this machine is downloaded and verified in the background (enabled by default; set `config.toml [update] prefetch = false` to opt out). The update button in the web console and tray becomes "Install Now" — clicking it skips the download and goes straight to the swap, done in seconds. Downloads resume from where they left off after a network interruption. Checksums are always re-verified against the official source before installing; a corrupted cache is discarded and re-downloaded automatically. Security semantics unchanged.
+
+### Changed
+
+- **Tray "Check for Updates" now checks live**: clicking "Check for Updates…" in the tray could previously return a cached result up to 24 hours old (missing releases published minutes ago); it now always queries GitHub in real time. Automatic checks keep their throttling. The web console is unchanged (manual check entry points are the tray menu and `modeldock update --check`).
+
+## [1.7.1] - 2026-11-07
+
+A round of polish and fixes: gateway debug logging mode, readable request logs, a "Clear models" button in the edit dialogs, sharper vision-capability detection; plus a fix for the tray-launched gateway exiting silently.
+
+### Added
+
 - **Debug logging mode**: off by default, enabled for troubleshooting via the `gateway start --debug` flag, the `MODELRDOCK_DEBUG=1` env var, or `config.toml [gateway] debug = true` (hot-applied on config save, so tray/autostart-launched background gateways can turn it on too). When on, `logs/debug-<date>.jsonl` records per-request access details for the admin API (method/path/status/duration) and child-process invocations (version probes, key encryption, etc.) with outcome and timing; admin 4xx/5xx responses are always logged to the event log regardless of the switch. `modeldock doctor` shows the current switch state and the latest log file. Debug logs never contain key material.
 - **Request logs you can actually read and search**: every candidate on the automatic failover chain is now recorded with the request log — which service was skipped and why (missing protocol endpoint / unusable keys / concurrency queue timeout), and where the request finally landed, instead of a bare service ID. The console "Request log" panel adds filter tabs (Errors / Operations / All / Successful, defaulting to Errors): error rows show the failover chain summary and a fix hint directly (the raw upstream error moves into the hover tooltip); every row (console operations included) gets a copy button, and a "Copy page" button in the pager copies the whole current view at once; recent successful requests (last 200) are visible under "Successful". Log files gain structured fields (level info/warn/error, cause code, fix hint); historical logs are unaffected.
+- **"Clear models" button**: the model section of the edit / add-service dialogs gains one-click clearing (instead of deleting rows one by one), with a two-step confirmation against stray clicks — the first click flips the button to "click again to confirm", and it reverts automatically after 3 seconds.
+
+### Improved
+
+- **Sharper vision-capability detection**: vision capability now prefers the upstream's own declaration (when the upstream explicitly says supported or not, that wins over the built-in table); out-of-table DeepSeek variants (tier / date suffixes) are recognized by prefix fallback; o1-mini / o3-mini are no longer mis-flagged as vision-capable (confirmed text-only per OpenAI's official docs).
 
 ### Fixed
 
 - **The built-in "Zhipu GLM · bigmodel" preset now ships with the Anthropic-compatible endpoint**: services added from this preset come with the Anthropic protocol URL (`https://open.bigmodel.cn/api/anthropic`, verified against Zhipu's official docs), so Anthropic-protocol clients such as Claude Code can attach or pin directly without manually adding the endpoint under "Edit Service". The preset previously had only the OpenAI-compatible URL (the Anthropic preset was removed in 2026-10 based on a mistaken "endpoint offline" conclusion). Already-added services are unaffected — existing bigmodel services still need the endpoint added once via "Edit Service" (or delete and re-add).
 - **Protocol compatibility is now checked before pinning a route — no more "pinned successfully but never reachable"**: the gateway does not translate between protocols, so pinning an Anthropic-only client (Claude Code) to a service that only has an OpenAI endpoint made every request silently fail over to other services while the pinned service never received any traffic (typically surfacing as "model does not exist or you lack access"). Pinning in the console, `modeldock harness route` on the CLI, and attach-to-a-specific-service now verify the client's protocol against the service's endpoints before writing, and reject mismatches with two fix paths (add the missing protocol endpoint to the service, or pin to another service that supports it). Protocol-adaptive clients (ZCode, dsh) are unaffected.
 - **Fixed the Windows background gateway silently exiting on "Attach Claude Code"**: the version probe's child-process invocation made Node write a deprecation warning to stderr; when the tray-launched gateway had broken stdio handles, that write killed the process without any trace (crash log included — the console just showed "cannot reach the local gateway" and the gateway was gone). Now hardened on four layers: the probe uses an equivalent invocation that no longer emits that warning; the crash log is written before any console output (a broken stderr no longer swallows the crash file); the daemon downgrades stdio write errors to non-fatal at boot; and the tray explicitly redirects the gateway child's stdio. Foreground `modeldock gateway start` was never affected.
+- **DeepSeek V4.1-Flash vision flag added**: the bare ids (`deepseek-v4-1-flash` / `deepseek-v4.1-flash` and date-suffixed variants) carried no vision flag, so the attach input modality and the console pre-check were missing; the pro line stays text-only.
+- **Model edit dialog, three polish fixes**: unticking "vision" now sticks on save instead of being backfilled by the built-in table (recorded explicitly as "none"); the "Clear / Fetch" buttons sit grouped right-aligned; the fetch-models panel no longer leaks scrolling rows through a gap while stuck to the top.
 
 ## [1.7.0] - 2026-11-07
 
@@ -533,6 +552,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.5.1...v1.5.2

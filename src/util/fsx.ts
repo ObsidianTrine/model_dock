@@ -185,7 +185,6 @@ function commandOnPathResolvedImpl(cmd: string, accept?: (p: string) => boolean)
   if (isWin) return null
   let nvmShims: string[] = []
   try {
-    // LaunchAgent 的 PATH 里没有 nvm 当前版本目录：把 ~/.nvm 下各已装版本的 bin 全扫一遍
     const root = path.join(home, '.nvm', 'versions', 'node')
     nvmShims = fs.readdirSync(root).map((v) => path.join(root, v, 'bin', cmd))
   } catch { /* 没有 nvm */ }
@@ -256,7 +255,7 @@ export async function atomicWrite(file: string, content: string | Buffer, mode =
           } finally {
             await dir.close()
           }
-        } catch { /* 目录 fsync 非所有平台/文件系统都支持（EINVAL 等），best-effort */ }
+        } catch { /* best-effort：EINVAL 等见上方目录 fsync 注 */ }
       }
       return
     } catch (e) {
@@ -311,8 +310,8 @@ export let lockStaleMs = 15_000
 /** 持锁喂狗间隔：持锁期间周期刷新锁文件 mtime，让活持有者不满足陈锁判定（须 ≪ lockStaleMs）。 */
 let lockHeartbeatMs = 5_000
 
-/** 测试注入：缩短锁的心跳间隔 / 陈锁阈值 / 抢锁总超时（真实值 5s/15s/10s，用例等不起）。
- *  无参调用还原默认。与 secrets/store 的 __testSet* 同套路（模块内 let 替换，不碰 vi.mock 雷区）。 */
+/** 测试注入：缩短锁的心跳/陈锁/总超时（真实值 5s/15s/10s，用例等不起）；无参调用还原默认。
+ *  与 secrets/store 的 __testSet* 同套路（模块内 let 替换，不碰 vi.mock 雷区）。 */
 export function __testSetLockTiming(t?: {
   heartbeatMs?: number
   staleMs?: number

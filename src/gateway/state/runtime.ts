@@ -10,11 +10,8 @@ export function buildTokenIndex(config: Config): Map<string, string> {
   return map
 }
 
-// ===== runtime-only 临时 harness（C14 / P2⑧：headless worker 的「用完即焚」凭据）=====
-// 定位：Dockmaster 给无人值守长跑 worker 供凭据，此前靠固定 tier token 走 env（永久有效直到
-// 重接，泄漏收敛只有整体重接）。临时 harness 反其道：TTL 到点即焚 + 可单独吊销 + 可挂日限额。
-// 不落盘：只注入 rt.config.harness / rt.tokens（纯内存）——mutateConfig 每次从盘上重读
-// （loadConfig structuredClone），临时条目没有任何写回 config.toml 的路径；进程重启全部清零。
+// ===== runtime-only 临时 harness（C14 / P2⑧）：为无人值守 worker 供「用完即焚」凭据——
+// 此前固定 tier token 永久有效、泄漏收敛只有整体重接；不落盘推演见 state/types.ts EphemeralHarnessState 注 =====
 
 /** TTL 缺省 480 分钟（8 小时）：覆盖一个标准无人值守工作日；不够用由调用方显式加长而不是
  *  无限默认——「临时」凭据的默认寿命就该比持久 token 短一个量级。 */

@@ -39,12 +39,13 @@ import { extractArchive } from './transfer.js'
 import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
 import { acquireUpdateLock } from './lock.js'
+import { markStagingConsumed, readReadyStaged, sweepStaging } from './staging.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
 export interface UpdateRunOptions {
   repo: string
-  /** GitHub 访问令牌；null = 匿名（公开仓库默认；PAT 可选——私有仓库必需/提升限流） */
+  /** GitHub 访问令牌；null = 匿名（匿名/PAT 取舍口径见 config UpdateConfig.token_ref 注） */
   token: string | null
   yes: boolean
   /** 确认交互（CLI 默认 @inquirer/prompts；--yes / Web 端点传 () => true） */
@@ -116,12 +117,12 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
 
   // 上次 win-setup 刻意留下的下载目录（setup.exe 留给 Inno）在这里清扫；拿到更新锁后才扫，不误删在途
   await sweepStaleUpdateStaging()
+  // 预取 staging 清扫（consumed / 账本损坏 / 到龄；在途预取不动）——删除统一延迟到此处，
+  // apply 只标 consumed（win-setup 的 Inno 异步读 staging 里的 setup.exe，updater 先退）
+  await sweepStaging()
 
   log(c.gray(t('正在检查新版本…', 'Checking for a new version…')))
-  // 第三参必须显式传 LOCALAPPDATA：漏传时 win-setup 判定回落占位用户目录（C:\Users\u\…），
-  // 真机路径永远不匹配 → 安装器用户被误判 win-bare，自更新退化成裸 zip 替换（跳过安装器登记、托盘不随更）。
-  // 第四参带卸载器指纹（仅 win 探测）：安装器装在自定义目录（可自选，非 LOCALAPPDATA 前缀）时
-  // 同样要认出 win-setup，否则该人群自更新永远走裸 zip、托盘停旧版（2026-10 用户实证 D:\Programs\ModelDock）
+  // 第三参必须显式传 LOCALAPPDATA、第四参带卸载器指纹（误判 win-bare 的踩坑语义见 detectInstallShape 注）
   const shape: InstallShape = detectInstallShape(
     execPath,
     platform,
@@ -176,18 +177,27 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
   // 表现为「已停网关托盘、无安装界面、托盘不随更」（2026-10-26 用户实证）。
   let keepTmpDir = false
   try {
-    // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
-    await writeUpdateProgress('downloading', 0, asset.size)
-    log(t('下载中…', 'Downloading…'))
-    const file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
-      apiBase: opts.apiBase,
-      mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
-      proxyUrl,
-      ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
-      onProgress: (received, total) => {
-        void writeUpdateProgress('downloading', received, total)
-      },
-    })
+    // 预取复用：staging 有就绪包（预取已下载+SHA256 校验过）→ 跳过分钟级下载段。
+    // SUMS 仍现拉官方 + 本地重 hash——完整性锚点不过磁盘缓存（staging 在盘上可能被改/腐坏）
+    const staged = await readReadyStaged(m.version, asset.name)
+    let file: string
+    if (staged) {
+      file = staged.file
+      log(c.gray(t('使用预取的安装包，跳过下载', 'Using the prefetched package; skipping download')))
+    } else {
+      // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
+      await writeUpdateProgress('downloading', 0, asset.size)
+      log(t('下载中…', 'Downloading…'))
+      file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
+        apiBase: opts.apiBase,
+        mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
+        proxyUrl,
+        ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
+        onProgress: (received, total) => {
+          void writeUpdateProgress('downloading', received, total)
+        },
+      })
+    }
     await writeUpdateProgress('verifying', asset.size, asset.size)
     log(t('校验 SHA256…', 'Verifying SHA256…'))
     // SUMS 刻意不走镜像：完整性锚点必须来自官方 API（design §8）
@@ -197,6 +207,9 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
       ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
     })
     await verifyChecksum(file, sums)
+    // 校验通过即标记 staging 槽位已消费（有槽位时）：删除延迟到 sweep——win-setup 的 Inno
+    // 异步读 staging 里的 setup.exe 而 updater 先退，同步删会拆安装器的台
+    await markStagingConsumed(m.version)
     log(c.green(t('✓ 校验通过', '✓ Verified')))
 
     // 校验全过，才进入停机替换段
@@ -204,7 +217,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
     const wasLive = await deps.gatewayWasLive()
     log(t('停止网关与托盘…', 'Stopping the gateway and tray…'))
     await deps.stopGateway()
-    await deps.stopTray(log) // 托盘停没停必须写进日志——静默失败会让托盘带锁活到向导（2026-10-28 实证）
+    await deps.stopTray(log) // 托盘停没停必须写进日志（无痕旧账见 install.ts stopTrayProcesses 注）
 
     try {
       if (shape === 'mac-app') {
@@ -220,11 +233,7 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
         log(c.green(t('✓ 已更新到 v{v}，正在重新启动 ModelDock…', '✓ Updated to v{v}; restarting ModelDock…', { v: m.version })))
         deps.openApp(appRootFromExecPath(execPath)!)
       } else if (shape === 'win-setup') {
-        // setup.exe 不能在更新器还持有自身 exe 锁时等待它跑完：分离拉起 cmd 串联
-        // （弹出与首次安装一致的向导，装完由 Inno [Run] 勾选拉起新托盘；失败/被取消时 `||`
-        // 拉回旧托盘兜底，不再整机失联），更新器随即退出释放锁。
-        // /DIR 钉死当前运行安装目录：更新原位落袋（用户当初选的路径），不依赖注册表记忆。
-        // /LOG 落 logs 目录：静默更新曾三连败于安装中途且无任何提示（2026-10-27 用户实证）。
+        // /DIR /LOG 旗标语义与 || 兜底：见 buildWinInstallerCommand 注（install.ts）
         const cmd = buildWinInstallerCommand(
           file,
           path.join(path.dirname(execPath), 'ModelDockTray.exe'),

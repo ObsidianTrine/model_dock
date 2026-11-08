@@ -158,7 +158,7 @@ export async function refreshBakedModelClients(opts: { port?: number; profile?: 
             return { kind: 'refreshed', id }
           }
         }
-        // 计划零改动（如 dsh 等值过滤后的稳态）：无需写盘，也不得用空列表清掉登记的 files
+        // 计划零改动（如 dsh 等值过滤后的稳态，机制见 shared.ts changeIfChanged 注）：无需写盘，也不得用空列表清掉登记的 files
         if (plan.changes.length === 0) return { kind: 'refreshed', id }
         if (target === undefined) return { kind: 'refreshed', id } // changes 非空必有 path，守卫式兜底
         return { kind: 'write', id, adapter, changes: plan.changes, token }

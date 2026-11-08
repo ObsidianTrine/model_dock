@@ -4,8 +4,9 @@ import { catalogFlatTable, catalogModelMeta } from './catalog.js'
 import { knownMetaTable } from './known.js'
 
 export interface ResolveOpts {
-  /** 上游 /models 响应自带的元数据（fetchModelIds 解析所得），优先级仅次于配置里已有的值 */
-  upstream?: { context_window?: number; max_output?: number }
+  /** 上游 /models 响应自带的元数据（fetchModelIds 解析所得），优先级仅次于配置里已有的值。
+   *  capabilities 三态同 UpstreamMeta：undefined=上游未表态、[]=上游明确无视觉（会短路内置表） */
+  upstream?: { context_window?: number; max_output?: number; capabilities?: string[] }
   /** 服务 base_url：目录按厂商 host 精确匹配用 */
   baseUrl?: string
 }
@@ -31,8 +32,9 @@ export function resolveModelMeta(
   }
   const ctx = pick(config?.context_window, opts?.upstream?.context_window, known?.context_window, cat?.context_window)
   const out = pick(config?.max_output, opts?.upstream?.max_output, known?.max_output, cat?.max_output)
-  // 能力（如 vision）不看上游 /models（不报此项）：配置显式值优先，其次内置表；目录快照无此字段
-  const caps = config?.capabilities ?? known?.capabilities
+  // 能力（如 vision）：配置显式值 > 上游 /models 自带 > 内置表；目录快照无此字段。
+  // 上游已表态（含 []=明确无视觉）即短路内置表——内置表可能落后于服务端，不该再补；上游未提供才落内置表
+  const caps = config?.capabilities ?? opts?.upstream?.capabilities ?? known?.capabilities
   if (ctx === undefined && out === undefined && !caps?.length) return undefined
   const res: KnownMeta = {}
   if (ctx !== undefined) res.context_window = ctx

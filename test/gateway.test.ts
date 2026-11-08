@@ -1675,7 +1675,7 @@ describe('网关', () => {
       expect(svc.models.map((m: any) => m.id)).toEqual(['model-a', 'model-b'])
       expect(svc.models[0].context_window).toBe(131072)
 
-      // 视觉是可选的模型能力：勾选写入 capabilities，取消勾选即清空；未提交该字段的服务保留既有标记
+      // 视觉是可选的模型能力：勾选写入 capabilities；未提交该字段的条目保留既有/内置推断
       const vis = await upd({ provider: 'up', models: { 'model-a': { context_window: 131072, capabilities: ['vision'] }, 'model-b': {} } })
       expect(((await vis.json()) as any).ok).toBe(true)
       const afterVis: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
@@ -1683,11 +1683,17 @@ describe('网关', () => {
       expect(afterVis.providers.up.models['model-b'].capabilities).toBeUndefined()
       const ovVis: any = await (await fetch(`http://127.0.0.1:${t.gwPort}/_modeldock/overview`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })).json()
       expect(ovVis.services.find((s: any) => s.id === 'up').models.find((m: any) => m.id === 'model-a').capabilities).toEqual(['vision'])
-      // 取消勾选（空数组）→ 标记清除
+      // 取消勾选（显式空数组）且既有值非空 → 落盘 capabilities=[]（显式无视觉：读侧短路内置表，
+      // 2026-11 定则——远程/用户明确说没有，内部表不得回填）
       const off = await upd({ provider: 'up', models: { 'model-a': { context_window: 131072, capabilities: [] } } })
       expect(((await off.json()) as any).ok).toBe(true)
       const afterOff: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
-      expect(afterOff.providers.up.models['model-a'].capabilities).toBeUndefined()
+      expect(afterOff.providers.up.models['model-a'].capabilities).toEqual([])
+      // 空数组但「挡不住东西」（model-b 无既有值、内置表也无此 id）→ 不写，目录不堆空数组噪音
+      const offB = await upd({ provider: 'up', models: { 'model-a': { context_window: 131072 }, 'model-b': { capabilities: [] } } })
+      expect(((await offB.json()) as any).ok).toBe(true)
+      const afterOffB: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+      expect(afterOffB.providers.up.models['model-b'].capabilities).toBeUndefined()
 
       // 显示名（display_name）：提交非空且 ≠ ID 才保存（编辑浮层 ID 下副行回显的权威值）；
       // 与 ID 同名的丢弃（去重防「同名两行」）；overview 透传

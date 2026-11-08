@@ -122,11 +122,9 @@ export async function jsonRequestBody(req: http.IncomingMessage): Promise<any> {
   }
 }
 
-/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。
- *  fn 零改动（mutateConfig 内部同值跳写，盘上指纹不变）时跳过热加载——空转保存（控制台
- *  同值重写等）不再白付整包 reload：dispatcher 连接池销毁重建、key 池轮转态清零、reloads
- *  虚增与 overview 缓存连带失效全免。secrets 缓存与 reload 完全解耦（失效收口在 watcher 的
- *  invalidateSecretsCacheIfExternal），config.toml 写不清密钥缓存。 */
+/** 网关侧配置变更：读盘改盘（与 CLI 共用带锁的 mutateConfig），再热加载内存态。fn 同值跳写
+ *  （盘上指纹不变）时跳过热加载，免白付整包 reload（连接池销毁重建 / key 池轮转态清零 / reloads 虚增）。
+ *  secrets 缓存与 reload 完全解耦：失效收口在 watcher 的 invalidateSecretsCacheIfExternal，config 写不清密钥缓存。 */
 export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => void): Promise<void> {
   const before = await configStatKey()
   await mutateConfig(fn)
@@ -155,14 +153,13 @@ export function profileRefForProvider(c: Config, providerId: string): string | u
     : undefined
 }
 
-// 同网直拉迁移（sync-lan-pull，B 机 import 侧）
 
 /** admin 门之后各端点处理器的请求上下文：handleAdmin 每请求构造一次 */
 export interface AdminCtx {
   rt: GatewayRuntime
   req: http.IncomingMessage
   res: http.ServerResponse
-  /** 请求级审计闭包（handleAdmin 每请求构造，见原 audit 函数） */
+  /** 请求级审计闭包（每请求构造一次，见 server.ts handleAdmin 的 audit 闭包） */
   audit: (op: Bilingual, target: string | Bilingual, detail?: Bilingual, err?: Bilingual | string) => void
   o: { idle: number; retries: number }
 }

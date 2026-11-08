@@ -41,7 +41,7 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<div id="panelFile" hidden><p class="row" style="margin:0 0 10px;align-items:center">' +
       '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
       '<span id="impFileChip" class="filechip" hidden></span>' +
-      // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan.ts 同处说明）
+      // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan-mobile-page.ts:106 同款注释）
       '<input type="file" id="impFile2" hidden></p>' +
       '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +

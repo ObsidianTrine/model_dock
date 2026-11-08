@@ -177,8 +177,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
         const models = provider?.models ?? {}
         const ids = Object.keys(models)
         if (ids.length > 0) {
-          // mimocode 模型条目按官方 schema 补元数据（limit/modalities/attachment）：
-          // 解析链与控制台一致（配置值 > 内置表 > models.dev 目录），只补空不覆盖
+          // mimocode 模型条目按官方 schema 补元数据（limit/modalities/attachment）；解析链见 providers/resolve.ts（只补空）
           providers.modeldock.models = Object.fromEntries(
             ids.map((id) => {
               const r = resolveModelMeta(id, models[id], { baseUrl: provider?.base_url })

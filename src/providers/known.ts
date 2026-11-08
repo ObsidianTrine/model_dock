@@ -31,11 +31,6 @@ export function saneCapabilities(v: unknown): string[] | undefined {
   return out
 }
 
-/**
- * 全局常见模型的保守默认元数据（上下文 / 最大输出，单位 tokens）。
- * 用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
- * 优先级：预设库已有模型 > 此处补充的全局常见模型。
- */
 /** 全局常见模型的保守默认元数据（上下文 / 最大输出，单位 tokens）。
  *  用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
  *  优先级：预设库已有模型（见 knownByIdTable()）> 此处补充的全局常见模型。
@@ -141,10 +136,19 @@ const VISION_PREFIXES = [
   'doubao-seed-2-1-turbo', 'doubao-seed-2.1-turbo',
   'doubao-seed-evolving',
   'deepseek-v4-flash-vision',
+  'deepseek-v4.1-flash', 'deepseek-v4-1-flash', // V4.1-Flash 多模态（=预设 deepseek-flash 同款；官方点号 id 与连字符变体；pro 系不带）
 ]
 /** id 自带视觉语义（vision/vl）：表未收录的新变体也能识别。
  *  只匹配词边界整段（-vision / _vision / .vision / 开头 vision），避免裸 /vision/i 把 envisign/revision 等误判为视觉模型 */
 const VISION_ID_RE = /(?:^|[-_.])vision(?![a-z0-9])|(?:^|[-_.])vl(?![a-z0-9])/i
+/** 视觉家族例外：前缀落在视觉清单但 API 实为纯文本（2026-11 OpenAI 官方核对），连带日期后缀等变体一并排除 */
+const VISION_EXCLUDES = ['o1-mini', 'o3-mini']
+
+/** 前缀判定视觉（例外清单优先）：基名/原始 id 命中视觉家族且不在纯文本例外清单 */
+function visionByPrefix(id: string): boolean {
+  if (VISION_EXCLUDES.some((pre) => id.startsWith(pre))) return false
+  return VISION_PREFIXES.some((pre) => id.startsWith(pre))
+}
 
 /** 归一化阶梯：deepseek-v4-flash-ga-260731 → ['deepseek-v4-flash-ga-260731','deepseek-v4-flash-260731','deepseek-v4-flash']
  *  平台日期后缀（-260731 / -20250429）与版本标签（-ga/-preview/-exp…）逐级剥离，供聚变体查表兜底 */
@@ -164,14 +168,16 @@ export function baseModelIds(id: string): string[] {
 }
 
 /** 按模型 id 查已知默认元数据；未收录返回 undefined。
- *  精确未命中时按 baseModelIds 逐级兜底（同一模型换代只改日期后缀时仍能补全）；仍无但 id 自带视觉语义则只给能力标记 */
+ *  精确未命中时按 baseModelIds 逐级兜底（同一模型换代只改日期后缀时仍能补全）；仍无则按原始 id 前缀 /
+ *  视觉语义兜底——只给能力标记不给长度元数据（deepseek-v4-1-flash-economy 等档位/日期后缀变体同基名同模态，
+ *  但 economy/max 等档位词是正规 SKU 名，不进 baseModelIds 剥离清单以免错并独立型号） */
 export function knownModelMeta(id: string): KnownMeta | undefined {
   for (const cand of baseModelIds(id)) {
     const hit = knownByIdTable()[cand] ?? EXTRA[cand]
     if (!hit) continue
-    return VISION_PREFIXES.some((pre) => cand.startsWith(pre)) && !hit.capabilities ? { ...hit, capabilities: ['vision'] } : hit
+    return visionByPrefix(cand) && !hit.capabilities ? { ...hit, capabilities: ['vision'] } : hit
   }
-  if (VISION_ID_RE.test(id)) return { capabilities: ['vision'] }
+  if (visionByPrefix(id) || VISION_ID_RE.test(id)) return { capabilities: ['vision'] }
   return undefined
 }
 
@@ -184,7 +190,7 @@ export function knownMetaTable(): Record<string, KnownMeta> {
   if (knownMetaMemo) return knownMetaMemo
   const out: Record<string, KnownMeta> = { ...EXTRA, ...knownByIdTable() }
   for (const [id, m] of Object.entries(out)) {
-    if (VISION_PREFIXES.some((pre) => id.startsWith(pre)) && !m.capabilities) out[id] = { ...m, capabilities: ['vision'] }
+    if (visionByPrefix(id) && !m.capabilities) out[id] = { ...m, capabilities: ['vision'] }
   }
   knownMetaMemo = out
   return out

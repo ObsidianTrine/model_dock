@@ -193,12 +193,9 @@ export function isConnectTimeoutError(e: unknown): boolean {
   return code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT'
 }
 
-/** 响应头超时（undici UND_ERR_HEADERS_TIMEOUT）：请求体已送达上游，等响应头超过
- *  headers_timeout_ms（非流式长推理 >60s 默认即触发）。与连接层失败（transport=true，
- *  请求未送达、可安全重放）本质不同：请求已送达，上游可能正在处理甚至已计费——
- *  重放=重复计费面，也不计入 connect 熔断（上游没挂，只是慢）。
- *  bodyTimeout 不在此列：响应头已返回，体超时错误在调用方读流阶段才浮出，不经过本分类。
- *  导出供单测断言分类口径。 */
+/** 响应头超时分类（undici UND_ERR_HEADERS_TIMEOUT）：请求已送达、可能已计费——禁自动重放、
+ *  不计 connect 熔断（三态语义见 UpstreamError.transport 注）。bodyTimeout 不归此分类
+ *  （体超时在调用方读流阶段才浮出）；导出供单测断言分类口径。 */
 export function isHeadersTimeoutError(e: unknown): boolean {
   const err = e as { code?: string; cause?: { code?: string } }
   const code = err?.code ?? err?.cause?.code
@@ -430,8 +427,6 @@ export function rewriteModel(
     const final = resolveModelFinal(target, scan.value)
     let modelAfter = scan.value
     if (final !== undefined && final !== scan.value) {
-      // 字节级原位替换：旧值是字符串（有引号区间）且新名无需转义 → 三段拼接；
-      // 其余（值非字符串 / 新名需转义）走全量 parse+stringify 兜底，行为逐字节等价
       if (scan.qStart >= 0 && SAFE_MODEL_NAME_RE.test(final)) {
         return { body: spliceModelValue(body, scan.qStart, scan.qEnd, final), modelAfter: final }
       }
@@ -529,14 +524,11 @@ export async function forwardToUpstream(
       } catch (e) {
         // 客户端已断开：中止错误原样上抛（不包 502、不重试——上游连接由 undici 对 signal 的响应就地释放）
         if (opts.signal?.aborted) throw e
-        // B2：拒绝类连接错误快速失败，保留立即重试；超时类（已等满超时窗口）不再重试，
-        // 直接抛出走 failover 下一候选——挂死上游的最坏等待从 2×连接超时降到 1×
+        // B2：拒绝类连接错误保留立即重试；超时类（已等满超时窗口）不再重试，直接抛出走 failover（最坏等待 2×→1×）
         if (attempt < opts.retries && isConnectError(e) && !isConnectTimeoutError(e)) continue
-        // 响应头超时单独分类（transport='timeout'）：请求已送达上游（非流式长推理 > headers_timeout_ms
-        // 即触发），不与「未送达可安全重放」的连接失败混类——重放有重复计费面，也不计 connect 熔断
+        // 响应头超时单独分类（transport='timeout'）：请求已送达、可能已计费——禁重放、不计 connect 熔断（三态见 UpstreamError.transport 注）
         const headersTimeout = isHeadersTimeoutError(e)
-        // 连接超时类已等满整个窗口才到这一步（error-hints-audit ③）：文案与排查口径与拒绝类分开——
-        // 「连不上」查网络/代理，「连上但等不到响应」查上游是否过慢/挂死
+        // 连接超时类已等满整个窗口（error-hints-audit ③）：排查口径与拒绝类分开——「连不上」查网络，「连上无响应」查上游过慢/挂死
         const timeoutLike = isConnectTimeoutError(e)
         const errNew = new UpstreamError(
           502,
@@ -778,11 +770,10 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
 
 /**
  * 请求级故障切换：按 pickTarget 排出的候选依次转发（手动链优先，自动备用链补尾）。
- * 安全边界：仅「传输层失败」（transport=true，请求未送达）与「额度耗尽类错误」（未产出内容）才改发下一个候选；
- * 任何其他已送达的真实 status（含 5xx）就地返回、不重放，避免重复计费。
- * 例外：gateway.failover_status_codes 显式列出的状态码（如 429/503，上游未产出内容）在还有剩余候选时切换，切换前排空响应体释放连接。
- * 响应头超时（transport='timeout'，请求已送达上游）：默认不切换也不计 connect 熔断，仅当
- * failover_status_codes 白名单显式含其包装 status（502）且还有剩余候选时才切换（用户显式授权的重放）。
+ * 安全边界：仅 transport=true（未送达）与额度耗尽类（未产出内容）才改发下一候选；已送达的真实
+ * status（含 5xx）就地返回、不重放；headers 超时（transport='timeout'，已送达可能已计费）默认不切换、
+ * 不计 connect 熔断，仅 failover_status_codes 白名单显式含其包装 status 且有剩余候选才切（三态见 UpstreamError.transport 注）。
+ * 例外：failover_status_codes 列出的状态码（如 429/503，未产出内容）有剩余候选时切换，切换前排空响应体释放连接。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
  * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
  * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
@@ -849,9 +840,8 @@ export async function forwardWithFailover(
     }
     try {
       let up = await forwardToUpstream(rt, c.target, opts)
-      // 429 退避（P0③）：上游带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次
-      // （429 = 请求未被上游处理，重放无重复计费风险）。无头 / 超过 5s / 额度耗尽体（几秒内不会
-      // 恢复）维持既有 failover 语义不变。重试留痕 retried_429:<id>。
+      // 429 退避（P0③）：带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次（429 = 请求未被上游处理，
+      // 重放无重复计费风险）；无头 / 超过 5s / 额度耗尽体维持既有 failover 语义。留痕 retried_429:<id>。
       let drained: string | undefined
       if (up.status === 429) {
         const raMs = parseRetryAfterMs(up.headers['retry-after'])
@@ -874,7 +864,7 @@ export async function forwardWithFailover(
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
       else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
-      else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性：不计熔断
+      else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
       else recordOutcome(rt, c.providerId, { ok: true, ms })
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < picked.ordered.length - 1) {
@@ -915,9 +905,8 @@ export async function forwardWithFailover(
       if (opts.signal?.aborted) throw e
       lastErr = e
       const ms = Date.now() - t0
-      // 响应头超时（transport='timeout'）：请求已送达上游，禁止按「未送达传输层失败」自动改发
-      // （重复计费面），也不计 connect 熔断（cls=undefined 中性）；是否切换交由
-      // failover_status_codes 白名单显式授权（错误包装 status=502，还有剩余候选才切）
+      // 响应头超时（transport='timeout'）：请求已送达、可能已计费——禁按「未送达」自动改发、不计 connect 熔断；
+      // 是否切换由 failover_status_codes 白名单显式授权（包装 status=502，还有剩余候选才切；三态见 UpstreamError.transport 注）
       const timeoutTransport = e instanceof UpstreamError && e.transport === 'timeout'
       const whitelistSwitch =
         timeoutTransport && i < picked.ordered.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)

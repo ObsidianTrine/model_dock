@@ -9,6 +9,8 @@ import { catalogModelMeta, clearCatalogMemo, normalizeApiCatalog, readCatalogCac
 import { fullKnownTable, resolveModelMeta } from '../src/providers/resolve.js'
 import { EXTRA, baseModelIds, knownByIdTable, knownModelMeta, knownMetaTable } from '../src/providers/known.js'
 import { setSecret } from '../src/config/secrets.js'
+import { loadConfig, mutateConfig } from '../src/config/store.js'
+import { refreshModelsInto } from '../src/cli/providers.js'
 import type { ProviderConfig } from '../src/config/types.js'
 
 /** 在 fakeHome 里写目录缓存文件并清 memo（写盘后 stat mtime 变化会自然失效，双保险） */
@@ -58,6 +60,35 @@ describe('parseUpstreamModelMeta（上游 /models 自带元数据归一化）', 
     expect(parseUpstreamModelMeta('not-an-object', 'openai')).toEqual({})
     expect(parseUpstreamModelMeta(null, 'openai')).toEqual({})
   })
+
+  it('能力字段：input_modalities（嵌套/顶层）与 capabilities（数组/对象形），字段存在才表态', () => {
+    // OpenRouter 风格：architecture.input_modalities 含 'image' 即视觉；存在但无 image = 明确无视觉
+    expect(parseUpstreamModelMeta({ id: 'or', architecture: { input_modalities: ['text', 'image'] } }, 'openai'))
+      .toEqual({ capabilities: ['vision'] })
+    expect(parseUpstreamModelMeta({ id: 'or', architecture: { input_modalities: ['text'] } }, 'openai'))
+      .toEqual({ capabilities: [] })
+    // 顶层 input_modalities（部分 agent 网关风格）
+    expect(parseUpstreamModelMeta({ id: 'ag', input_modalities: ['text', 'image'] }, 'openai'))
+      .toEqual({ capabilities: ['vision'] })
+    // Ollama 风格 capabilities 数组（vision/image 均可）
+    expect(parseUpstreamModelMeta({ id: 'ol', capabilities: ['completion', 'vision'] }, 'openai'))
+      .toEqual({ capabilities: ['vision'] })
+    expect(parseUpstreamModelMeta({ id: 'ol', capabilities: ['completion'] }, 'openai'))
+      .toEqual({ capabilities: [] })
+    expect(parseUpstreamModelMeta({ id: 'ol', capabilities: ['image'] }, 'openai'))
+      .toEqual({ capabilities: ['vision'] })
+    // LM Studio 风格 capabilities 对象
+    expect(parseUpstreamModelMeta({ id: 'lm', capabilities: { vision: true } }, 'openai'))
+      .toEqual({ capabilities: ['vision'] })
+    expect(parseUpstreamModelMeta({ id: 'lm', capabilities: { vision: false } }, 'openai'))
+      .toEqual({ capabilities: [] })
+    // 多数家 /models 不报能力：undefined=未表态（调用方落内置表兜底）
+    expect(parseUpstreamModelMeta({ id: 'ds', context_window: 131072 }, 'openai'))
+      .toEqual({ context_window: 131072 })
+    // 能力与长度字段互不干扰
+    expect(parseUpstreamModelMeta({ id: 'mix', context_length: 128_000, capabilities: ['vision'] }, 'openai'))
+      .toEqual({ context_window: 128_000, capabilities: ['vision'] })
+  })
 })
 
 describe('fetchModelIds（元数据随模型列表带回）', () => {
@@ -69,6 +100,7 @@ describe('fetchModelIds（元数据随模型列表带回）', () => {
         data: [
           { id: 'm-full', display_name: 'Full', context_window: 131072, max_output_tokens: 8192 },
           { id: 'm-ctx-only', context_length: 262144 },
+          { id: 'm-caps', architecture: { input_modalities: ['text', 'image'] } },
           { id: 'm-dirty', context_window: 0, max_output_tokens: 'nope' },
         ],
       }))
@@ -87,9 +119,10 @@ describe('fetchModelIds（元数据随模型列表带回）', () => {
         proxy: 'direct',
       }
       const f = await fetchModelIds(provider)
-      expect(f.ids).toEqual(['m-full', 'm-ctx-only', 'm-dirty'])
+      expect(f.ids).toEqual(['m-full', 'm-ctx-only', 'm-caps', 'm-dirty'])
       expect(f.meta['m-full']).toEqual({ context_window: 131072, max_output: 8192 })
       expect(f.meta['m-ctx-only']).toEqual({ context_window: 262144 })
+      expect(f.meta['m-caps']).toEqual({ capabilities: ['vision'] }) // 只有能力字段也收录进 meta
       expect(f.meta['m-dirty']).toBeUndefined()
     } finally {
       server.closeAllConnections?.()
@@ -109,6 +142,21 @@ describe('resolveModelMeta（分层填充链：配置 > 上游 > 内置表 > 目
   it('上游返回值盖过内置表', () => {
     expect(resolveModelMeta('gpt-4o', null, { upstream: { context_window: 999_999, max_output: 999_999 } }))
       .toEqual({ context_window: 999_999, max_output: 999_999, capabilities: ['vision'] })
+  })
+
+  it('上游能力已表态（含 []）短路内置表；未表态才落内置表', () => {
+    // gpt-4o 内置表带 vision；上游明确报无视觉（[]=字段存在但不含 image）→ 不再落内置表，长度照旧补
+    expect(resolveModelMeta('gpt-4o', null, { upstream: { capabilities: [] } }))
+      .toEqual({ context_window: 128_000, max_output: 16_384 })
+    // 上游报支持 → 内置表没有的表外变体也带出
+    expect(resolveModelMeta('deepseek-v4-1-flash-economy', null, { upstream: { capabilities: ['vision'] } }))
+      .toEqual({ capabilities: ['vision'] })
+    // 上游没报 capabilities（undefined）→ 落内置表
+    expect(resolveModelMeta('gpt-4o', null, { upstream: { context_window: 1 } }))
+      .toEqual({ context_window: 1, max_output: 16_384, capabilities: ['vision'] })
+    // 配置显式值最优先：用户清空（[]）压过上游支持
+    expect(resolveModelMeta('gpt-4o', { capabilities: [] }, { upstream: { capabilities: ['vision'] } }))
+      .toEqual({ context_window: 128_000, max_output: 16_384 })
   })
 
   it('按字段独立下探：配置只填了上下文，最大输出由上游补', () => {
@@ -351,9 +399,86 @@ describe('能力标记与基名兜底（视觉可选能力）', () => {
       expect(resolveModelMeta('kimi-k3-260701')?.capabilities).toContain('vision')
       expect(resolveModelMeta('glm-5-3-flash-260828')?.capabilities).toContain('vision') // 预设自带 TOOLS_REASON_VISION，基名继承
       expect(resolveModelMeta('qwen3-32b-20250429')?.capabilities ?? []).not.toContain('vision') // 纯文本模型不带
+      // V4.1-Flash 多模态（2026-11 用户核对）：连字符/点号两种 id 形态与日期后缀变体都带视觉；pro 系不带
+      expect(knownModelMeta('deepseek-v4-1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4.1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4-1-flash-261231')?.capabilities).toContain('vision')
+      expect(resolveModelMeta('deepseek-v4-1-flash')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4-1-pro')?.capabilities ?? []).not.toContain('vision')
     } finally {
       h.restore()
       clearCatalogMemo()
+    }
+  })
+
+  it('表外档位后缀按原始 id 前缀兜底（只给能力标记）；纯文本例外 o1-mini / o3-mini 排除', () => {
+    const h = fakeHome()
+    try {
+      // 表全未命中（economy 等档位词不进剥离清单）：原始 id 落视觉家族前缀 → 只给 vision 不给长度
+      expect(knownModelMeta('deepseek-v4-1-flash-economy')?.capabilities).toContain('vision')
+      expect(knownModelMeta('deepseek-v4-1-flash-economy')?.context_window).toBeUndefined()
+      expect(knownModelMeta('kimi-k3-anylabel')?.capabilities).toEqual(['vision'])
+      // 纯文本例外（2026-11 OpenAI 官方核对）：o1-mini / o3-mini API 无视觉，前缀 'o1'/'o3' 不再连带标视觉
+      expect(knownModelMeta('o1-mini')?.capabilities ?? []).not.toContain('vision')
+      expect(knownModelMeta('o3-mini')?.capabilities ?? []).not.toContain('vision')
+      expect(knownModelMeta('o1-mini-2024-09-12')?.capabilities ?? []).not.toContain('vision') // 日期变体同排除
+      // 排除只影响能力标记，长度元数据照旧
+      expect(knownModelMeta('o1-mini')?.context_window).toBe(128_000)
+      expect(knownModelMeta('o1-mini')?.max_output).toBe(65_536)
+      expect(knownModelMeta('o1')?.capabilities).toContain('vision') // 全尺寸 o1 仍是视觉
+    } finally {
+      h.restore()
+      clearCatalogMemo()
+    }
+  })
+})
+
+describe('refreshModelsInto（上游能力落盘：只补空，内置表推断不落盘）', () => {
+  it('上游 vision/[] 落盘（含既有条目补空），上游未表态不落盘，显式既有不覆盖', async () => {
+    const h = fakeHome()
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        data: [
+          { id: 'm-vision', architecture: { input_modalities: ['text', 'image'] } },
+          { id: 'm-text', architecture: { input_modalities: ['text'] } }, // [] = 明确无视觉，也落盘
+          { id: 'm-plain', context_length: 262144 }, // 无能力字段：不落 capabilities
+          { id: 'm-exist', architecture: { input_modalities: ['text', 'image'] } },
+          { id: 'm-keep', architecture: { input_modalities: ['text'] } },
+        ],
+      }))
+    })
+    try {
+      server.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      const port = (server.address() as { port: number }).port
+      const ref = await setSecret('persist-test', 'sk-test', 'file')
+      await mutateConfig((c) => {
+        c.providers['pv'] = {
+          name: 't',
+          base_url: `http://127.0.0.1:${port}/v1`,
+          protocol: 'openai',
+          auth_style: 'bearer',
+          key_ref: ref,
+          proxy: 'direct',
+        }
+        c.providers['pv'].models = {
+          'm-exist': { source: 'manual', context_window: 1 }, // 既有无能力：上游补
+          'm-keep': { source: 'manual', capabilities: ['vision'] }, // 显式既有：上游 [] 不覆盖
+        }
+      })
+      const r = await refreshModelsInto('pv')
+      expect(r.added).toBe(3)
+      const models = (await loadConfig()).providers['pv']!.models!
+      expect(models['m-vision']).toMatchObject({ capabilities: ['vision'] })
+      expect(models['m-text']).toMatchObject({ capabilities: [] })
+      expect(models['m-plain']?.capabilities).toBeUndefined()
+      expect(models['m-exist']).toMatchObject({ capabilities: ['vision'], context_window: 1 })
+      expect(models['m-keep']!.capabilities).toEqual(['vision'])
+    } finally {
+      server.closeAllConnections?.()
+      server.close()
+      h.restore()
     }
   })
 })

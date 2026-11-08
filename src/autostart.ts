@@ -14,8 +14,7 @@ import { preferInstalledCli } from './cliinstall.js'
 
 export const SERVICE_LABEL = 'com.modeldock.gateway'
 
-/** 沙箱用独立服务标识：launchd 的 label / systemd 的 unit 名是机器级全局命名空间，与生产共用
- *  同名时沙箱 install/uninstall 的 launchctl/systemctl 操作会卸掉生产服务。沙箱一律挂 .sandbox 后缀。 */
+/** 沙箱用独立服务标识（挂 .sandbox）：launchd/systemd label 是机器级全局命名空间，同名会卸掉生产服务——机器级全局论据见 secrets.ts defaultStore 注 */
 export function serviceLabel(): string {
   return process.env.MODELRDOCK_FAKE_HOME ? `${SERVICE_LABEL}.sandbox` : SERVICE_LABEL
 }
@@ -58,8 +57,7 @@ export function windowsStartupPath(): string {
 export const WINDOWS_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 export const WINDOWS_RUN_VALUE = 'modeldock-gateway'
 
-/** 登录自启标记：Run 键登记的命令尾参。被 Explorer 拉起的进程由 cli.ts 据此分离重拉
- *  隐藏 daemon（控制台程序被直启会常驻黑窗），普通命令行手动跑 --sea-gateway 不受影响。 */
+/** 登录自启标记：Run 键登记的命令尾参，cli.ts 据此分离重拉隐藏 daemon（黑窗论据见上方 Run 键选型注）；手动跑 --sea-gateway 不受影响 */
 export const AUTOSTART_LAUNCH_FLAG = '--autostart'
 
 /** 注册表条目的「显示路径」（诊断/状态展示用；非文件系统路径，不可 fs 存在性判断） */
@@ -155,8 +153,7 @@ function deleteRunValueData(): boolean {
   return existed
 }
 
-/** Run 键（Explorer）拉起的进程带 --autostart 时：以 windowsHide（CREATE_NO_WINDOW）分离
- *  重拉 daemon 本体，父进程随即退出——Explorer 直启控制台程序的黑窗只存活亚秒级瞬间。
+/** Run 键（Explorer）拉起的进程带 --autostart 时分离重拉隐藏 daemon（黑窗亚秒级论证见上方 Run 键选型注）。
  *  返回 true = 已重拉，调用方应直接退出；false = 非自启路径或重拉失败，照常前台运行。 */
 export async function relaunchHiddenIfAutostart(opts: { argv?: string[] } = {}): Promise<boolean> {
   if (process.platform !== 'win32') return false
@@ -239,9 +236,7 @@ export function readRecordedArgv(text: string): string[] | null {
   }
 }
 
-/** 登记的启动命令是否失效：argv[0] 不存在，或非 -- 开头的参数指向的文件已不存在
- *  （nvm 升级 / 二进制移动后旧路径失效，自启会静默失败，必须能探出来）。
- *  纯函数（只做 fs.existsSync，无 spawn），autostartStatus 与 doctor 共用。 */
+/** 纯函数（只做 fs.existsSync，无 spawn），autostartStatus 与 doctor 共用。 */
 export function recordedArgvStale(argv: string[]): boolean {
   return !argv[0] || !fs.existsSync(argv[0]) || argv.slice(1).some((a) => !a.startsWith('--') && !fs.existsSync(a))
 }

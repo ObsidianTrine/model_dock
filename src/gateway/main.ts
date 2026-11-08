@@ -195,8 +195,7 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
   startBootUpdateCheck(rt)
 
   startEventLoopDelaySampler()
-  // 控制台首屏预热：后台构建一次 overview，把适配器探测 memo（Windows reg query / PATH 扫描）、
-  // secrets 解密缓存与缓存串全部焐热——用户随后打开 Web 控制台不再等冷探测的数秒尖峰
+  // 控制台首屏预热（Windows 冷探测见 overview-view.ts overviewServeDecision 注）：焐热探测 memo/解密缓存/缓存串
   warmupOverview(rt)
 
 

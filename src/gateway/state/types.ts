@@ -201,7 +201,7 @@ export interface TokenUsageState {
  *  structuredClone），rt.config 里注入的临时条目没有任何写回路径。 */
 export interface EphemeralHarnessState {
   id: string
-  /** 随机 token（mdk_eph_ 前缀）；明文只在 provision 响应出现一次，任何列示端点与审计日志绝不回显 */
+  /** 随机 token（mdk_eph_ 前缀）；明文仅 provision 响应出现一次、绝不回显（口径见 server.ts hProvisionHarness 注） */
   token: string
   /** 钉定 profile 名；缺省 = 跟随 active_profile（与持久 harness 的 route 字段同语义） */
   route?: string

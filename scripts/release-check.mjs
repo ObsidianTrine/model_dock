@@ -135,7 +135,10 @@ if (skipTest) {
 } else if (hardFails() === 0) {
   console.error('…… npm test（约 2-3 分钟）')
   const t = npm(['test'])
-  const out = (t.stdout || '') + (t.stderr || '')
+  // vitest 汇总行在本机即使非 TTY（spawnSync 管道/重定向）也带 ANSI 色码，
+  // 不剥掉则 /Tests\s+(\d+) passed/ 撞上 \x1b[2m 转义必失配——全绿被误判红
+  // （2026-11-07 v1.7.1 门禁两连假红实证：直跑 exit 0 全绿、门禁内同输出判红）。
+  const out = ((t.stdout || '') + (t.stderr || '')).replace(/\x1b\[[0-9;]*m/g, '')
   const files = out.match(/Test Files\s+(\d+) passed/)
   const tests = out.match(/Tests\s+(\d+) passed(?:\s*\|\s*(\d+) skipped)?/)
   if (t.status === 0 && tests) {

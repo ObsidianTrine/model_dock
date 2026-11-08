@@ -1,5 +1,5 @@
 /**
- * Web 控制台 · styles.ts —— 内联 CSS（由单文件 ui.ts 拆出，T04 Phase 1，行为零变化）。
+ * Web 控制台 · styles.ts —— 内联 CSS。
  * ui.ts 以 <style>
 ${UI_CSS}</style> 拼装，与拆分前逐字节一致；勿改动片段内换行/转义。
  */
@@ -69,6 +69,10 @@ header{position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);displa
 .logo{display:flex;align-items:center}
 .logo svg{display:block;border-radius:7px;box-shadow:0 1px 4px rgba(79,70,229,.35)}
 .brand{font-size:var(--fs-xl);font-weight:700;letter-spacing:.01em}
+/* 头部 logo+品牌名整体是 GitHub 项目页外链：外观与原 span 版一致（内间距复刻 header 的 10px gap），hover 才亮 accent */
+.codelink{display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none;border-radius:var(--r-sm);transition:color var(--dur)}
+.codelink:hover{color:var(--accent)}
+.codelink:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #health{margin-left:8px;font-size:var(--fs-sm);color:var(--muted)}
 #health .dot{display:inline-block;width:8px;height:8px;border-radius:var(--r-full);background:var(--ok);margin-right:5px}
 /* 语言切换 = .seg 分段控件（选中蓝底白字，见 kit 组件段）；这里只补头部专属定位与紧凑尺寸 */
@@ -122,6 +126,8 @@ select.chip{padding-right:24px}
 .svcform .mhead .defcol{color:var(--star);opacity:.55;font-size:var(--fs-xs)}
 .svcform .egrid{display:grid;grid-template-columns:1fr 1fr;column-gap:12px;row-gap:6px}
 .svcform .fsec-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);padding-top:12px;margin-top:10px}
+/* fsec-row 是 space-between：多按钮裸放会被等距撑开（清空/拉取分居中右），包一组右对齐才挨着 */
+.svcform .fsec-btns{display:flex;align-items:center;gap:8px}
 .svcform .fsec{font-size:var(--fs-sm);color:var(--text);font-weight:600}
 .svcform label.fsec{margin:0}
 .svcform label{display:block;font-size:var(--fs-sm);color:var(--muted);margin:8px 0 0}
@@ -239,11 +245,18 @@ select.chip{padding-right:24px}
 .svcform .frow .msub{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .svcform .ftag{font-size:var(--fs-xs);color:var(--muted);text-align:right;white-space:nowrap;overflow:hidden}
 .svcform .frow.dis .mid,.svcform .frow.dis .ftag{opacity:.55}
-.svcform .fetchpanel{margin-top:8px;padding:8px 10px;border:1px dashed var(--border);border-radius:var(--r-md)}
+.svcform .fetchpanel{margin-top:8px;padding:0 10px 8px;border:1px dashed var(--border);border-radius:var(--r-md)}
+.svcform .fetchpanel .fsent{height:1px}
 /* 拉取面板浮头组：搜索框+列头包成单个 sticky 块整体吸顶（背景必须不透明，行从组下滑过不透出）；
-   组内 .mhead 改 static——嵌套 sticky 与组共用同一吸附基准会向上叠压盖住搜索框，吸附职责移交组 */
-.svcform .fetchpanel .fpstick{position:sticky;top:0;z-index:2;background:var(--card)}
+   组内 .mhead 改 static——嵌套 sticky 与组共用同一吸附基准会向上叠压盖住搜索框，吸附职责移交组。
+   面板原 padding-top 8px 挪进吸头自带（不透明底随组走）：吸头最高只能贴到面板内容盒顶，
+   padding 留在外面会成一条滚动内容透出的常驻缝 */
+.svcform .fetchpanel .fpstick{position:sticky;top:0;z-index:2;background:var(--card);padding-top:8px}
 .svcform .fetchpanel .fpstick .mhead{position:static}
+/* 吸附态补条（哨兵切 .stuck，见 edit.ts watchFetchSticky）：吸头受「不越出面板盒」约束，
+   面板上沿与滚动容器 padding 之间（面板 margin/边框 + .editform padding-top）在过渡带会透出
+   滚动行——吸附时向上画一条面板同色不透明条盖住；超出滚动口的部分被裁剪，画宽无副作用 */
+.svcform .fetchpanel .fpstick.stuck::before{content:'';position:absolute;left:-11px;right:-11px;top:-40px;height:40px;background:var(--card)}
 .svcform .fetchpanel .fsearch{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .svcform .fetchq{flex:1;min-width:0;padding:5px 10px;font-size:var(--fs-sm)}
 .svcform .fetchcount{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
@@ -447,10 +460,8 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 #pkgOverlay textarea{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;font-family:var(--mono);font-size:var(--fs-sm)}
 /* 导入弹层选项卡：三个互斥来源各一页（走 kit 的 .seg.grow，选中蓝底白字） */
 #importTabs{margin:0 0 14px}
-/* 附近电脑卡片列表 */
 #impPeers .peercard{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 12px;margin:0 0 8px}
 #impPeers .peercard .pname{flex:1;min-width:0;word-break:break-all;font-weight:600}
-/* 存量收编勾选列表（导入存量配置弹层） */
 .legacyrow{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)}
 .legacyrow:last-child{border-bottom:none}
 .legacyrow .lname{flex:1;min-width:0;word-break:break-all;font-size:var(--fs-base)}
@@ -476,7 +487,6 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .listmore{display:flex;justify-content:center;padding:8px 0 2px}
 .listmore .btn{border-style:dashed;color:var(--muted);font-size:var(--fs-sm)}
 .listmore .btn:hover{color:var(--accent);border-color:var(--accent)}
-/* 登录提示（管理面要求凭据时的整页占位） */
 .loginbox{margin-top:48px;text-align:center}
 .loginbox .name{font-weight:600;font-size:var(--fs-lg)}
 .loginbox .desc{color:var(--muted);font-size:var(--fs-sm);margin:10px 0}

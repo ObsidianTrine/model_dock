@@ -113,7 +113,7 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
     else if (logTab === 'err') qs += '&kind=err'
     else if (logTab === 'audit') qs += '&kind=audit'
     api(qs).then(function (j) {
-      var logs = (j.logs || []).slice().reverse() // 最新在最上
+      var logs = (j.logs || []).slice().reverse()
       var total = j.total || 0
       logPages = j.pages || Math.max(1, Math.ceil(total / logPageSize))
       // 环形缓冲滚动挤掉了旧记录导致当前页越界时，退回最后一页再取一次

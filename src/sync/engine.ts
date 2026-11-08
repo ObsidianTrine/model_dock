@@ -253,9 +253,8 @@ export class SyncLoop {
 
   constructor(private opts: SyncLoopOpts = {}) {}
 
-  /** 单飞：在飞期间所有触发源共用同一 promise。跟踪在飞是为了 stop() 能等它收尾——
-   *  否则测试进程切换/清除 MODELRDOCK_FAKE_HOME 后，长尾 tick 会把簿记写进真实 home（2026-10-05 事故根因）。
-   *  双保险第二层：挂载时钉扎的 home 与当前不符（env 已被切走）→ 本 tick 直接跳过，绝不写盘 */
+  /** 单飞：在飞期间所有触发源共用同一 promise，stop() 才能等它收尾（长尾 tick 写穿真实 home 的
+   *  两次事故论证见 SyncLoopOpts.pinnedHome 注）。双保险第二层：钉扎 home 与当前不符 → 本 tick 直接跳过，绝不写盘 */
   private beginTick(mode: 'safe' | 'raw'): Promise<TickOutcome> {
     if (this.opts.pinnedHome && modeldockDir() !== this.opts.pinnedHome) {
       if (!this.homeMismatchLogged) {
@@ -277,8 +276,8 @@ export class SyncLoop {
     const base = mode === 'raw' ? syncTickOnce(this.opts) : safeSyncTick(this.opts)
     const wrapped = base.finally(() => {
       this.inflight = null
-      // 补跑只在循环存活时进行：stop() 后绝不写盘（同上 2026-10-05 事故不变式）。
-      // 补跑固定走 safe：自身 apply 的写盘经 lastSyncedHash 令下轮空转，链自然终止，不会回环推送
+      // 补跑只在循环存活时进行：stop() 后绝不写盘（事故不变式，见 pinnedHome 注）。
+      // 固定走 safe：自身 apply 的写盘经 lastSyncedHash 令下轮空转，链自然终止，不会回环推送
       if (this.trailing && !this.stopped) {
         this.trailing = false
         this.beginTick('safe').catch(() => {})
@@ -381,9 +380,8 @@ export async function remountSyncEngine(opts?: SyncLoopOpts): Promise<void> {
   active.start()
 }
 
-/** 网关退出与测试收尾调用。返回可等待的停止 promise：**测试必须在 restoreHomes/清 env 前
- *  await 它**——在飞 tick 的后续步骤按「当时的」home 解析路径，env 已切走就会写穿真实 home
- *  （2026-10-05 / 2026-10-30 两次事故根因；与 SyncLoop home 钉扎互为双保险）。
+/** 网关退出与测试收尾调用，返回可等待的停止 promise：**测试必须在 restoreHomes/清 env 前 await**
+ *  （两次事故论证见 SyncLoopOpts.pinnedHome 注；与 SyncLoop home 钉扎互为双保险，不得放开钉扎）。
  *  网关退出路径维持 fire-and-forget（进程将退，钉扎层兜底）。 */
 export function stopSyncEngine(): Promise<void> {
   return stopLoop().catch(() => {})

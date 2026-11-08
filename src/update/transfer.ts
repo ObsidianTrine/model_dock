@@ -43,7 +43,9 @@ export async function doFetch(url: string, init: { headers?: Record<string, stri
 }
 
 export interface DownloadToFileOpts {
-  /** 进度回调：received/total 为字节数；total=0 表示上游未给 content-length */
+  /** 进度回调：received/total 为字节数；total=0 表示上游未给 content-length。
+   *  续传（resumeFrom>0）时 received 为**本次响应的增量**、total 为**本次响应的 content-length**（206 时是剩余量），
+   *  全量口径由调用方自行叠加（downloadAsset 负责）；非续传路径语义不变 */
   onProgress?: (received: number, total: number) => void
   /** 超时（ms），缺省 DOWNLOAD_TIMEOUT_MS */
   timeoutMs?: number
@@ -53,19 +55,34 @@ export interface DownloadToFileOpts {
   redirect?: 'follow' | 'error' | 'manual'
   /** 非空 = 经该代理（http://host:port / socks5://）转发；缺省直连。由 resolveUpdateProxyUrl 解析得出 */
   proxyUrl?: string | null
+  /** 断点续传起点（已有半成品字节数）：>0 时发 `Range: bytes=<n>-`。响应 206 → 追加写（'a'）；
+   *  200 → 服务器不支持 Range 或资源已变，覆盖重写（'w'），自动退化无需预探测。
+   *  416 走 !res.ok 抛错——调用方须保证 start < 资产总大小（半成品已完整时直接走校验，不发请求） */
+  resumeFrom?: number
+  /** 续传一致性校验：首段响应的 ETag，随 Range 发 `If-Range`。资源中途被换 → 服务器回 200 全量
+   *  覆盖，绝不拼出杂交内容；无 ETag 时省略（靠调用方最终 SHA256 兜底） */
+  ifRange?: string
+  /** 响应元信息回调（续传记账）：headers 到达、body 流开始前回调一次。etag 供下次 If-Range */
+  onResponseMeta?: (meta: { status: number; etag: string | null }) => void
 }
 
 /**
- * 下载 URL 到文件（流式写盘 + 进度回调）。返回实际写入字节数。
+ * 下载 URL 到文件（流式写盘 + 进度回调）。返回**本次响应写入**的字节数（非续传 = 全量；
+ * 206 续传 = 剩余增量，全量 = resumeFrom + 返回值，由调用方叠加）。
  * 非 2xx / 无响应体抛错（消息走 t() 双语，objectName 供点名资产）。走全局 fetch，
  * 测试用本地 mock 服务器桩测，不 vi.mock 模块。
  */
 export async function downloadToFile(url: string, dest: string, opts: DownloadToFileOpts & { objectName?: string } = {}): Promise<number> {
+  const start = Math.max(0, opts.resumeFrom ?? 0)
+  const headers: Record<string, string> = { ...opts.headers }
+  if (start > 0) headers.Range = `bytes=${start}-`
+  if (start > 0 && opts.ifRange) headers['If-Range'] = opts.ifRange
   const res = await doFetch(url, {
-    headers: opts.headers,
+    headers,
     signal: AbortSignal.timeout(opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS),
     redirect: opts.redirect ?? 'follow',
   }, opts.proxyUrl)
+  opts.onResponseMeta?.({ status: res.status, etag: res.headers.get('etag') })
   if (!res.ok || !res.body) {
     throw new Error(
       opts.objectName
@@ -73,10 +90,12 @@ export async function downloadToFile(url: string, dest: string, opts: DownloadTo
         : `HTTP ${res.status} ${url}`
     )
   }
+  // 206 且确有起点 = 续传命中（追加写）；否则覆盖写（含「发了 Range 被回 200」的退化路径）
+  const partial = start > 0 && res.status === 206
   const total = Number(res.headers.get('content-length') ?? 0)
   let received = 0
   await ensureDir(path.dirname(dest))
-  const fh = await fsp.open(dest, 'w', 0o600)
+  const fh = await fsp.open(dest, partial ? 'a' : 'w', 0o600)
   try {
     for await (const chunk of res.body) {
       // undici 的 body chunk 标注为 Uint8Array<ArrayBufferLike>；Buffer.from 接受任意 TypedArray，

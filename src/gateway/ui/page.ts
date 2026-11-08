@@ -4,12 +4,12 @@
  */
 export const UI_BODY_HTML = `<div class="wrap">
 <header>
-  <span class="logo"><svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="hlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d7cff"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#hlg)"/><path d="M14 46V20l18 15 18-15V46" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand">ModelDock</span>
+  <a class="codelink" href="https://github.com/ObsidianTrine/model_dock/" target="_blank" rel="noopener"><span class="logo"><svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="hlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d7cff"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#hlg)"/><path d="M14 46V20l18 15 18-15V46" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand">ModelDock</span></a>
   <span id="health">连接中…</span>
   <span id="syncBadge" class="pill" hidden></span>
   <span id="updBadge" class="pill" hidden></span>
   <span id="langSwitch" class="seg"><button type="button" data-lang="zh">中文</button><button type="button" data-lang="en">EN</button></span>
-  <span id="themeSwitch"><button type="button" id="themeBtn" class="tip" data-i18n-tip="主题：自动跟随系统 / 暗色 / 亮色||Theme: auto (follow system) / dark / light" data-tip="主题：自动跟随系统 / 暗色 / 亮色">🎨 自动</button></span>
+  <span id="themeSwitch"><button type="button" id="themeBtn">🎨 自动</button></span>
 </header>
 
 <div class="card migrate" id="migrateCard" hidden>

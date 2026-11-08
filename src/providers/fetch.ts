@@ -3,11 +3,14 @@ import type { ProviderConfig } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
 import { buildDispatcher } from '../util/net.js'
 import { t } from '../util/i18n.js'
-import { saneContextWindow, saneMaxOutput } from './known.js'
+import { saneCapabilities, saneContextWindow, saneMaxOutput } from './known.js'
 
 export interface UpstreamMeta {
   context_window?: number
   max_output?: number
+  /** 上游 /models 自带的能力标记（当前只有 'vision'）。三态：undefined=响应未提供该字段（调用方落内置表兜底）、
+   *  ['vision']=支持、[]=字段存在但不含视觉（明确无）——后两者都视为服务端已表态，优先级压过内置表（内部表可能落后） */
+  capabilities?: string[]
 }
 
 export interface FetchedModels {
@@ -53,19 +56,41 @@ export function modelEndpoints(base: string): string[] {
 }
 
 /**
+ * 上游能力字段解析（只识别 vision 一项）。字段存在才表态（undefined=未提供，[]=明确无视觉），保守识别：
+ * - OpenRouter 风格 architecture.input_modalities / 部分 agent 网关顶层 input_modalities：含 'image' 即视觉
+ * - Ollama / LM Studio 风格 capabilities：数组含 'vision'/'image'，或对象形 {vision:true} / {image:true}
+ * 字段名有出入时宁当未表态（undefined），不猜。
+ */
+function parseUpstreamCapabilities(rec: Record<string, unknown>): string[] | undefined {
+  const arch = typeof rec.architecture === 'object' && rec.architecture !== null
+    ? (rec.architecture as Record<string, unknown>)
+    : undefined
+  const modalities = (Array.isArray(arch?.input_modalities) ? arch.input_modalities : undefined)
+    ?? (Array.isArray(rec.input_modalities) ? rec.input_modalities : undefined)
+  if (modalities) return modalities.some((x) => x === 'image') ? ['vision'] : []
+  const caps = rec.capabilities
+  if (Array.isArray(caps)) return caps.some((x) => x === 'vision' || x === 'image') ? ['vision'] : []
+  if (typeof caps === 'object' && caps !== null) {
+    const o = caps as Record<string, unknown>
+    if ('vision' in o || 'image' in o) return o.vision === true || o.image === true ? ['vision'] : []
+  }
+  return undefined
+}
+
+/**
  * 解析单条模型条目自带的元数据（各家字段名归一化，取首个通过边界校验的数值）：
- * - 上下文：DeepSeek context_window / Kimi、Together、OpenRouter context_length /
- *   Anthropic max_input_tokens / vLLM max_model_len / Gemini inputTokenLimit（含 snake 写法）/
- *   Mistral max_context_length / Fireworks contextLength
- * - 输出：DeepSeek max_output_tokens / Gemini outputTokenLimit（含 snake 写法）/
- *   Groq、OpenRouter（top_provider 嵌套）max_completion_tokens；
- *   max_tokens 仅在 anthropic 协议下当作最大输出（其语义是「max_tokens 参数的上限」；
- *   OpenAI 系响应里该键含义不明，一律不采信）
+ * 上下文 = DeepSeek context_window / Kimi、Together、OpenRouter context_length / Anthropic max_input_tokens /
+ * vLLM max_model_len / Gemini inputTokenLimit / Mistral max_context_length / Fireworks contextLength（含 snake 写法）；
+ * 输出 = DeepSeek max_output_tokens / Gemini outputTokenLimit / Groq、OpenRouter（top_provider 嵌套）max_completion_tokens；
+ * max_tokens 仅在 anthropic 协议下当作最大输出——OpenAI 系响应里该键含义不明，一律不采信；
+ * 能力见 parseUpstreamCapabilities，多数家 /models 不报，undefined 由内置表兜底。
  */
 export function parseUpstreamModelMeta(item: unknown, protocol: string): UpstreamMeta {
   if (typeof item !== 'object' || item === null) return {}
   const rec = item as Record<string, unknown>
   const out: UpstreamMeta = {}
+  const caps = saneCapabilities(parseUpstreamCapabilities(rec))
+  if (caps !== undefined) out.capabilities = caps
   const ctx = saneContextWindow(pickNumber(rec, [
     'context_window', 'context_length', 'max_input_tokens', 'max_model_len',
     'input_token_limit', 'inputTokenLimit', 'max_context_length', 'contextLength',
@@ -169,7 +194,7 @@ export async function fetchModelIds(provider: ProviderConfig): Promise<FetchedMo
           ids.push(item.id)
           if (typeof item?.display_name === 'string') display[item.id] = item.display_name
           const m = parseUpstreamModelMeta(item, provider.protocol)
-          if (m.context_window !== undefined || m.max_output !== undefined) meta[item.id] = m
+          if (m.context_window !== undefined || m.max_output !== undefined || m.capabilities !== undefined) meta[item.id] = m
         }
         if (ids.length === 0) {
           attempts.push(t('{endpoint} 返回 200 但没有模型列表', '{endpoint} returned 200 but no model list', { endpoint }))

@@ -50,13 +50,11 @@ const ONE_M_TOKEN = 1_000_000
 const DIRECT_EFFORT_LEVEL = 'max'
 const DIRECT_AUTO_COMPACT_WINDOW = '786432'
 
-/** 去掉 [1m]/[1M]/[128k] 等上下文变体后缀（NAME 显示用；与 import/sources.ts 的清洗正则一致），见 shared.ts */
 
 const settingsFile = () => path.join(homeDir(), '.claude', 'settings.json')
 
-/** 本体双信号：~/.claude 不随卸载删除（npm uninstall 不清配置目录），配置在而 claude 命令
- *  缺席视为卸载残留，判未安装——否则控制台会对残留文件显示已接入并提供一键接入。
- *  sandboxIsolated：可装进沙箱的 npm 客户端，沙箱实例只认沙箱内的 claude（见 cliPresent）。 */
+/** 本体双信号：配置在而 claude 命令缺席 = 卸载残留，判未安装（防控制台对残留显示一键接入、
+ *  重跑 npm 安装踩 retire——见 types.ts ClientInstall.probe 注）；sandboxIsolated 语义见 cliPresent。 */
 function present(): boolean {
   return cliPresent('claude', 'claude-code', { sandboxIsolated: true })
 }
@@ -120,8 +118,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
     const p = settingsFile()
     const text = await readTextIfExists(p)
     if (text === null) {
-      // 只认配置文件会把"已安装未初始化"误报成未安装，进而引导用户重跑 npm 全局安装
-      // ——那条路径会先 retire 现有安装，postinstall 不成功就只剩报错桩（与 codex 同策略）
+      // 只认配置文件会把「已装未初始化」误报成未安装、引导重跑 npm 安装踩 retire（见 types.ts probe 注）
       if (present()) return { installed: true, configFiles: [], note: notInitializedNote() }
       return {
         installed: false,
@@ -211,8 +208,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
           delete env[`${envKey}_NAME`]
         }
         delete env.CLAUDE_CODE_SUBAGENT_MODEL
-        // 上一目标（网关或用户手配的上游）遗留的 ANTHROPIC_MODEL / SMALL_FAST_MODEL 一并清：
-        // env 优先级高于根 model，残留会把模型钉死在旧 ID 上、压掉下方写入的根 model；
+        // 上一目标遗留的钉死 env 一并清（env 优先级会压掉根 model，论证见「根 model 直写真实 ID」注）；
         // takeoverModels 显式开启时 ANTHROPIC_MODEL 交给下方迁入 profile，不在此删
         if (!opts.takeoverModels) delete env.ANTHROPIC_MODEL
         delete env.ANTHROPIC_SMALL_FAST_MODEL
@@ -258,11 +254,8 @@ export const claudeCodeAdapter: HarnessAdapter = {
         }
         env.CLAUDE_CODE_EFFORT_LEVEL = DIRECT_EFFORT_LEVEL
         env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = DIRECT_AUTO_COMPACT_WINDOW
-        // /model 选择器同样全量策划（官方 modelPicker settings 键，claude-code v2.1.243 起支持，
-        // 与网关模式同版本门控——旧版不认该键，回退下方根 model + env 映射即可）：它是纯客户端
-        // 静态配置（选项烙进 settings.json、不查询 /v1/models），网关挂掉不影响直连可用性；模型 ID
-        // 与上方 env 映射同规则带 [1m] 上下文后缀，label 用显示名，description 换直连措辞、保留
-        // ModelDock 标记供 isOurModelPicker 识别
+        // /model 选择器同样全量策划（与网关分支同版本门控，旧版不认该键则回退已写的根 model + env 映射）；
+        // 纯客户端静态配置（选项烙进 settings.json、不查询 /v1/models），网关挂掉不影响直连可用性
         if (versionAtLeast(await cliVersion('claude', 'claude-code'), MODEL_PICKER_MIN_VERSION)) {
           const pickerOptions = Object.entries(provider?.models ?? {}).map(([id, m]) => ({
             model: suffixed(id),
@@ -316,13 +309,9 @@ export const claudeCodeAdapter: HarnessAdapter = {
       //    模型因此被过早截断；识别交给网关侧（[1m] 等已识别变体不受此开关影响）
       env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1'
       env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT ??= '1'
-      // 此前指向别的上游时清掉模型钉死 env 与根 model：直连切回（direct 写入的映射）与
-      // 用户手配第三方服务首次接管都算——后者 fromMode 未登记，按 prevBase 非网关地址判定
-      // （isOursGatewayUrl：有登记按 gateway_base 精确比对，未登记回退回环启发式，重复接入
-      // 已指向本网关则不动，用户手动加的映射视为有意）。残留会钉死模型：env 优先级高于根
-      // model、压掉 /model 的会话级选择，表现为「切了路由但模型不变」（启动仍用旧上游模型）。
-      // takeoverModels 显式开启时 ANTHROPIC_MODEL / DEFAULT_*_MODEL 由下方迁入 profile，
-      // 不在此删；其余钉死项照清
+      // 此前指向别的上游时清掉模型钉死 env 与根 model（直连切回，或用户手配第三方首次接管——fromMode
+      // 未登记按 prevBase 非网关判定）：残留会钉死模型、压掉 /model 的会话级选择（论证见「根 model 直写真实 ID」注）；
+      // takeoverModels 显式开启时 ANTHROPIC_MODEL / DEFAULT_*_MODEL 由下方迁入 profile，不在此删，其余照清
       if (opts.fromMode === 'direct' || (prevBase && !isOursGatewayUrl(prevBase, 'claude-code', _cfg))) {
         if (!opts.takeoverModels) {
           delete env.ANTHROPIC_MODEL
@@ -395,7 +384,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
         // 槽位不足按末位复用（1 个模型四层同值，行名相同无歧义）；超过 4 个时第 5 个起旧版
         // /model 无行可选（设置里手填 raw ID 仍可用，note 不展开）
         const slot = (i: number): string | undefined => catalog[Math.min(i, catalog.length - 1)]?.[0]
-        const tierModels = [slot(0), slot(1), slot(2), slot(3)] // opus / sonnet / haiku / fable
+        const tierModels = [slot(0), slot(1), slot(2), slot(3)]
         TIER_ENV_KEYS.forEach(([envKey], i) => {
           const model = tierModels[i]
           if (model === undefined) return // 目录为空：不铺槽

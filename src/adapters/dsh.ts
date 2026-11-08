@@ -393,7 +393,6 @@ export const dshAdapter: HarnessAdapter = {
     }
     const changes: FileChange[] = []
 
-    // 旧布局：settings.yaml
     if (layout.legacyExists) {
       const text = (await readTextIfExists(layout.legacyFile)) ?? ''
       const doc = parseDocument(text)
@@ -418,7 +417,6 @@ export const dshAdapter: HarnessAdapter = {
         }
       }
       const legacyAfter = doc.toString()
-      // 等值过滤：内容无变化不产生 change，稳态重接（周期 refresh/重复 attach）零快照零写盘
       const legacyChange = changeIfChanged(
         layout.legacyFile,
         text,
@@ -428,7 +426,6 @@ export const dshAdapter: HarnessAdapter = {
       if (legacyChange) changes.push(legacyChange)
     }
 
-    // 新布局：profiles/*/cordis.patch.yml
     for (const patchFile of targets.patchFiles) {
       const text = (await readTextIfExists(patchFile)) ?? ''
       const doc = parseDocument(text)
@@ -455,7 +452,7 @@ export const dshAdapter: HarnessAdapter = {
         }
       }
       const patchAfter = doc.toString()
-      // 等值过滤：与 legacy 分支同理，稳态不产生 change
+      // 等值过滤（见 shared.ts changeIfChanged 注）
       const patchChange = changeIfChanged(
         patchFile,
         text,
@@ -565,7 +562,6 @@ export const dshAdapter: HarnessAdapter = {
     const layout = await dshLayout()
     const changes: FileChange[] = []
 
-    // 旧布局
     if (layout.legacyExists) {
       const text = (await readTextIfExists(layout.legacyFile)) ?? ''
       const doc = parseDocument(text)
@@ -585,7 +581,6 @@ export const dshAdapter: HarnessAdapter = {
       }
     }
 
-    // 新布局
     for (const patchFile of layout.patchFiles) {
       const text = (await readTextIfExists(patchFile)) ?? ''
       const doc = parseDocument(text)
@@ -614,7 +609,7 @@ export const dshAdapter: HarnessAdapter = {
       for (const k of [delIndex, delJ].filter((x) => x >= 0).sort((a, b) => b - a)) {
         seq.delete(k)
       }
-      // changed 标志收敛为等值过滤（T25-④）：有删除动作 ⟺ 序列化结果与原文不同
+      // 等值过滤（T25-④，权威见 shared.ts changeIfChanged 注）
       const detachChange = changeIfChanged(
         patchFile,
         text,
@@ -624,10 +619,8 @@ export const dshAdapter: HarnessAdapter = {
       if (detachChange) changes.push(detachChange)
     }
 
-    // 凭据文件：等值过滤（与上面 patch 分支同款 T25-④）——重复 detach / 快照还原后
-    // refs 里已无 token 时不再产出 change（避免无谓快照+整文件重写）；且清理动作放在
-    // 提前返回**之前**：patch 全净但凭据 ref 单独残留（attach 写入的独立文件）也是指向
-    // ModelDock 的残留，同样该清，不该被「无改动」短路掉
+    // 凭据文件等值过滤（T25-④，见 shared.ts changeIfChanged 注）；清理在下方「无改动」提前返回之前
+    // ——patch 全净但凭据 ref 单独残留也指向 ModelDock，同样该清
     const ctext = await readTextIfExists(credFile())
     if (ctext !== null) {
       const cdoc = parseDocument(ctext)
