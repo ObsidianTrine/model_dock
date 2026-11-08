@@ -20,6 +20,7 @@ import {
 import type { EventEntry, LogEntry } from '../src/gateway/state.js'
 import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
 import { appendLineErrorCount, drainAppendStreams } from '../src/util/fsx.js'
+import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -345,6 +346,37 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       const tooWide = await request(t.port, '/_modeldock/usage?from=2000-01-01&to=2030-01-01', ADMIN)
       expect(tooWide.status).toBe(400)
       expect(JSON.parse(tooWide.body).modeldock.hint).toContain('/_modeldock/usage')
+    } finally {
+      t.close()
+    }
+  })
+
+  it('metrics.concurrency：per-provider 并发实时水位（在途/排队/上限，编排器扩缩容判定用）', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up.max_concurrency = 2
+      // 直灌信号量（不经转发）：在途 2 满载 + 排队 1——首个请求尚无完成流量、没有耗时采样，
+      // concurrency 段也要露出（只看 providers 段的键会漏掉正在满载的时刻）
+      const s1 = await acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const s2 = await acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const p3 = acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.concurrency.up).toEqual({ in_flight: 2, queued: 1, limit: 2 })
+      s1.release() // 槽位按 FIFO 移交给排队者
+      await p3
+      const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m2.concurrency.up).toEqual({ in_flight: 2, queued: 0, limit: 2 })
+      s2.release()
+      ;(await p3).release()
+      const m3 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m3.concurrency.up).toEqual({ in_flight: 0, queued: 0, limit: 2 })
+      // 无流量且无在途的 provider 不出现（缺席 = 空闲，与 providers 段口径一致）
+      t.rt.config.providers.idle = { base_url: 'https://idle.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k' }
+      const m4 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m4.concurrency.idle).toBeUndefined()
+      expect(m4.concurrency.up).toEqual({ in_flight: 0, queued: 0, limit: 2 })
+      // 无凭据仍 401（admin 门内不变）
+      expect((await request(t.port, '/_modeldock/metrics')).status).toBe(401)
     } finally {
       t.close()
     }

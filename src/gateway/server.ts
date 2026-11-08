@@ -28,12 +28,13 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
 import { appendLineErrorCount } from '../util/fsx.js'
 import { dispatcherFor } from './proxy.js'
+import { providerConcurrencyIds, providerConcurrencyLimit, providerConcurrencyStats } from './concurrency.js'
 import { buildLanStatus, clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { markUiLeaving, markUiPing, markUiSeen, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
@@ -2103,6 +2104,18 @@ async function hMetrics(c: AdminCtx): Promise<void> {
         : {}),
     }
   }
+  // per-provider 并发水位（实时）：in_flight/queued 来自进程内信号量（concurrency.ts，重启清零），
+  // limit 取当前配置 max_concurrency（0 = 不限）。键口径 = providers 段的同款并集（有完成流量才
+  // 露出）∪ 当前持有信号量的 provider——首个请求还在途、尚未进耗时采样时也要露出，否则实时
+  // 水位恰好漏掉正在满载的时刻。无流量且无在途的 provider 不出现：缺席 = 空闲（0/0），编排侧
+  // 勿把缺席当故障（与 model-availability 的缺席语义一致）。
+  const concurrency: Record<string, { in_flight: number; queued: number; limit: number }> = {}
+  const concurrencyIds = new Set<string>(ids)
+  for (const id of providerConcurrencyIds(rt)) concurrencyIds.add(id)
+  for (const id of concurrencyIds) {
+    const s = providerConcurrencyStats(rt, id)
+    concurrency[id] = { in_flight: s.inFlight, queued: s.queued, limit: providerConcurrencyLimit(rt.config.providers[id]) }
+  }
   const now = Date.now()
   const meltdown: Array<{ provider: string; class: string; until: string; remaining_ms: number }> = []
   for (const [id, h] of rt.health) {
@@ -2124,7 +2137,7 @@ async function hMetrics(c: AdminCtx): Promise<void> {
     keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now), keypool }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
 }
 
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。
@@ -2252,6 +2265,59 @@ async function hUsage(c: AdminCtx): Promise<void> {
   return
 }
 
+/** GET /_modeldock/logs/query：请求日志明细查询（admin 门内只读，编排器/Dockmaster 排障用）。
+ *  /usage 只有聚合、/logs 只有内存环形缓冲（200 条），排障要窗口内明细条目（含 cause/attempts/
+ *  hint/tokenHint，定义见 state/types.ts LogEntry）。from/to/date 口径与 /usage 完全一致
+ *  （usageQuery，31 天封顶）；harness/provider/cause/status_class 精确过滤（status_class 取
+ *  2xx…5xx）；limit 缺省 100、上限 500（非法值按 hLogs 先例夹紧不报错）；按时间倒序（最新在前）。
+ *  条目原样返回落盘的 LogEntry——脱敏在落盘侧已完成（tokenHint 仅前 8 字符、无任何 key 材料），
+ *  本端点绝不新增明文密钥字段。取数复用 /usage 的流式读（streamRequestLogDays），凑满 limit
+ *  即停不再读更旧的日子。只读端点无状态变更，不记审计（跟随 /usage 先例）。 */
+async function hLogsQuery(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const parsed = usageQuery(q)
+  if (parsed.err) {
+    sendError(res, 400, parsed.err, t('示例：/_modeldock/logs/query?from=2026-11-01&harness=zcode&cause=upstream_4xx', 'Example: /_modeldock/logs/query?from=2026-11-01&harness=zcode&cause=upstream_4xx'))
+    return
+  }
+  const statusClass = q.get('status_class') ?? undefined
+  if (statusClass && !/^[1-5]xx$/.test(statusClass)) {
+    return sendError(res, 400, t('logs/query 参数 status_class 非法：需为 2xx/3xx/4xx/5xx', 'Invalid logs/query status_class parameter: must be 2xx/3xx/4xx/5xx'))
+  }
+  const filter = {
+    harness: q.get('harness') ?? undefined,
+    provider: q.get('provider') ?? undefined,
+    cause: q.get('cause') ?? undefined,
+    statusClass,
+    fromMs: parsed.fromMs,
+    toMs: parsed.toMs,
+  }
+  const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
+  // 倒序取数：日文件按时间正序追加，从最新日往回读；单日把命中条目滚动截到最新 limit 条
+  // （内存有界），凑满 limit 即停、不再读更旧的日子。条目无跨日乱序可能（日文件按天归属）。
+  const out: LogEntry[] = []
+  for (let i = parsed.days.length - 1; i >= 0 && out.length < limit; i--) {
+    const dayBuf: LogEntry[] = []
+    for await (const e of streamRequestLogDays([parsed.days[i]], filter)) {
+      dayBuf.push(e)
+      if (dayBuf.length >= limit * 2) dayBuf.splice(0, dayBuf.length - limit) // 滚动裁头：只保最新的 limit 条
+    }
+    if (dayBuf.length > limit) dayBuf.splice(0, dayBuf.length - limit)
+    dayBuf.reverse()
+    out.push(...dayBuf)
+    if (out.length > limit) out.splice(limit, out.length - limit)
+  }
+  const filterEcho: Record<string, string> = {}
+  if (filter.harness) filterEcho.harness = filter.harness
+  if (filter.provider) filterEcho.provider = filter.provider
+  if (filter.cause) filterEcho.cause = filter.cause
+  if (filter.statusClass) filterEcho.status_class = filter.statusClass
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filterEcho).length ? filterEcho : null, limit, entries: out }))
+  return
+}
+
 /** POST /_modeldock/pricing-lookup：批量查价（编排侧燃油账用，admin 门内）。
  *  请求体 { models: Array<string | { provider?: string; model: string }> }（≤500 条）；
  *  响应 { ok, currency:'usd', unit:'per_million_tokens', prices, missing, overrides_error }——
@@ -2342,6 +2408,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/admin/update/check': hUpdateCheck,
   'POST /_modeldock/admin/update/apply': hUpdateApply,
   'GET /_modeldock/logs': hLogs,
+  'GET /_modeldock/logs/query': hLogsQuery,
   'GET /_modeldock/config': hConfig,
   'GET /_modeldock/model-catalog': hModelCatalog,
   'GET /_modeldock/presets': hPresetsCatalog,
