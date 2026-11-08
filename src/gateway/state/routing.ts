@@ -58,11 +58,14 @@ export function resolveByProfile(
 // 自动路由：健康/熔断状态与候选选路
 
 /** 滑动窗口 + 熔断更新。cls 仅记录需要熔断的错误类；ok 或 null(4xx 中性)不累计。
- *  quota=额度耗尽（402 / 429+quota 体）：3 次即熔断且冷却 15 分钟——额度不会分钟级恢复，别反复撞耗尽的服务。 */
+ *  quota=额度耗尽（402 / 429+quota 体）：3 次即熔断且冷却 15 分钟——额度不会分钟级恢复，别反复撞耗尽的服务。
+ *  modelScoped=true（模型级容灾接管）：该 quota 事件已由 recordModelOutcome 在 (provider, model)
+ *  粒度记账，provider 级熔断窗口不累计——否则一家服务的模型级容灾会把 provider 熔丝点亮、同服务
+ *  备用模型连带被封死（功能自我否定）；海况分桶照常记账（风暴闸对 402 风暴保持可见）。 */
 export function recordOutcome(
   rt: GatewayRuntime,
   providerId: string,
-  r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number }
+  r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number; modelScoped?: boolean }
 ): void {
   const now = Date.now()
   // 海况分桶与下方熔断判定同源不同构（state/sea.ts）：只随同一事件流记账、供
@@ -87,6 +90,7 @@ export function recordOutcome(
   }
   h.okStreak = 0
   if (!r.cls) return // 4xx 中性：失败但不计熔断（模型/key 配置问题换服务大概率同样失败）
+  if (r.modelScoped) return // 模型级容灾接管（见参数注）：provider 级窗口不累计，海况已在函数头记账
   const w = h.errWindow
   if (now - w.t0 > 60_000) {
     w.t0 = now
@@ -104,6 +108,55 @@ export function recordOutcome(
 /** 是否处于熔断期（不可选作路由目标） */
 export function isMeltdown(rt: GatewayRuntime, providerId: string, now = Date.now()): boolean {
   const h = rt.health.get(providerId)
+  return !!h && h.meltdown_until != null && h.meltdown_until > now
+}
+
+// ===== 模型级容灾（model_fallback 域，M1 relay）：同服务商内换备用模型的熔断丝 =====
+
+/** 模型粒度熔断记账：与 provider 级 recordOutcome 分工——quota（额度耗尽）档在 (provider, model)
+ *  粒度记账（relay 对配了 model_fallback 的 provider 分流调用，provider 级窗口经 modelScoped
+ *  不累计）；ok 重置窗口并解熔断；connect/429/5xx 档忽略不计（provider 级健康问题归
+ *  recordOutcome，模型粒度只回答「这个模型在这家是否额度耗尽」）。阈值与 provider 级 quota
+ *  同源：60s 窗 3 次 → 熔断 15min（额度不会分钟级恢复）。 */
+export function recordModelOutcome(
+  rt: GatewayRuntime,
+  providerId: string,
+  model: string,
+  r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number }
+): void {
+  if (!rt.modelHealth) rt.modelHealth = new Map() // 惰性建表（兜底直建 rt 未带字段的场景，同 seaStore 先例）
+  const key = `${providerId}\u0000${model}`
+  let h = rt.modelHealth.get(key)
+  if (!h) {
+    if (!r.ok && r.cls !== 'quota') return // 其他档忽略不计：不为它们建账
+    h = { errWindow: { t0: Date.now(), count: 0 } }
+    rt.modelHealth.set(key, h)
+  }
+  const now = Date.now()
+  if (r.ok) {
+    h.errWindow = { t0: now, count: 0 }
+    h.meltdown_until = undefined
+    h.meltdown_cls = undefined
+    return
+  }
+  if (r.cls !== 'quota') return // connect/429/5xx 忽略（见函数注）
+  const w = h.errWindow
+  if (now - w.t0 > 60_000) {
+    w.t0 = now
+    w.count = 0
+  }
+  w.count += 1
+  const [thr, cool]: [number, number] = [3, 900_000]
+  if (w.count >= thr) {
+    h.meltdown_until = now + cool
+    h.meltdown_cls = 'quota'
+  }
+}
+
+/** (provider, model) 是否处于模型粒度熔断期：model_fallback 预改写与链尾合成的闸门。
+ *  TTL 过期即 false——预改写据此自然恢复试回主模型。 */
+export function isModelMeltdown(rt: GatewayRuntime, providerId: string, model: string, now = Date.now()): boolean {
+  const h = rt.modelHealth?.get(`${providerId}\u0000${model}`)
   return !!h && h.meltdown_until != null && h.meltdown_until > now
 }
 
@@ -242,6 +295,9 @@ export interface OrderedCandidate {
   isPrimary: boolean
   /** 候选条目 "<providerId>:<modelId>" 携带的模型映射；纯 "<providerId>" 条目为 undefined（透传） */
   modelOverride?: string
+  /** 模型级容灾合成候选（relay 链尾 quota 时按 provider.model_fallback 生成）：同 provider 内
+   *  换模型再试一跳，服务没换——marks 不产生 failover_to:<id>（避免误导）。 */
+  modelFallback?: boolean
 }
 
 /** 解析 fallback 条目："<providerId>"（透传原模型名）或 "<providerId>:<modelId>"（改写模型）。

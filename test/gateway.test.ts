@@ -2615,6 +2615,125 @@ describe('自动备用链（auto fallback）', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// 模型级容灾端到端（model_fallback：同服务商内换模型，仅 quota 触发）。仿上方 402 E2E 模式：
+// 真实网关服务 + 真实 token 鉴权 + 本地 mock 上游按请求体 model 分流。
+describe('模型级容灾端到端（model_fallback）', () => {
+  /** 按请求体 model 分流的 mock 上游：preset-model 回 402 额度体，其余模型回 200 JSON。 */
+  function startModelUpstream(): Promise<{ port: number; seen: string[]; close: () => void }> {
+    const seen: string[] = []
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        let model = ''
+        try {
+          model = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { model?: string }).model ?? ''
+        } catch {
+          /* 非 JSON 体按空模型处理 */
+        }
+        seen.push(model)
+        if (model === 'preset-model') {
+          res.writeHead(402, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'Insufficient Balance (request_id: 893f)', code: 'invalid_request_error' } }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, model }))
+      })
+    })
+    return new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        resolve({
+          port: (server.address() as AddressInfo).port,
+          seen,
+          close: () => {
+            server.closeAllConnections?.()
+            server.close()
+          },
+        })
+      })
+    })
+  }
+
+  function mfCfg(mf: Record<string, string> | undefined, port: number): Config {
+    return {
+      version: 1,
+      active_profile: 'demo',
+      gateway: { auto_failover: true },
+      providers: {
+        A: {
+          name: 'mfA',
+          base_url: `http://127.0.0.1:${port}`,
+          protocol: 'anthropic',
+          auth_style: 'bearer',
+          key_ref: 'sk-a',
+          models: { 'preset-model': { source: 'manual' }, 'backup-model': { source: 'manual' } },
+          ...(mf ? { model_fallback: mf } : {}),
+        },
+      },
+      profiles: { demo: { provider: 'A', default_model: 'preset-model' } },
+      harness: { 'claude-code': { mode: 'gateway', route: 'default', token: TOKEN } },
+    }
+  }
+
+  it('端到端：主模型 402 额度耗尽 → model_fallback 换备用模型 → 200（fallback_to 留痕、无 failover_to）', async () => {
+    const h = fakeHome()
+    const up = await startModelUpstream()
+    const cfg = mfCfg({ 'preset-model': 'backup-model' }, up.port)
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const res = await fetch(`http://127.0.0.1:${gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'preset-model', max_tokens: 10, messages: [] }),
+      })
+      expect(res.status).toBe(200) // 402 额度耗尽 → 同服务商内换备用模型
+      expect(up.seen).toEqual(['preset-model', 'backup-model'])
+      await new Promise((r) => setTimeout(r, 50)) // 日志 appendFile 异步，稍等落盘
+      const logs: any = await (
+        await fetch(`http://127.0.0.1:${gwPort}/_modeldock/logs?n=20`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
+      ).json()
+      const last = (logs.logs || []).filter((l: any) => l.harness === 'claude-code').at(-1)
+      expect(last.provider).toBe('A') // provider 没换
+      expect(last.reason).toBe('fallback_to:backup-model') // 恰为这一个 mark：无 failover_to:A
+    } finally {
+      server.close()
+      up.close()
+      h.restore()
+    }
+  })
+
+  it('端到端：provider 未配 model_fallback 映射时 402 原样回传（现状回归：不合成、不预改写）', async () => {
+    const h = fakeHome()
+    const up = await startModelUpstream()
+    const cfg = mfCfg(undefined, up.port)
+    await saveConfig(cfg)
+    const rt = buildRuntime(cfg, 'admin-token-x')
+    const server = createGatewayServer(rt, { port: 0 })
+    const gwPort = await listenEphemeral(server)
+    try {
+      const res = await fetch(`http://127.0.0.1:${gwPort}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'preset-model', max_tokens: 10, messages: [] }),
+      })
+      expect(res.status).toBe(402) // 无映射：不合成，402 原样回传
+      expect(up.seen).toEqual(['preset-model']) // 只打一发主模型
+      const j: any = await res.json()
+      expect(j.error.message).toContain('Insufficient Balance') // 上游错误体原样保留
+      expect(j.modeldock.hint).toContain('额度不足')
+    } finally {
+      server.close()
+      up.close()
+      h.restore()
+    }
+  })
+})
+
 describe('自动路由 Phase2：候选链模型映射 + 状态码切换', () => {
   function makeRuntime(): { rt: ReturnType<typeof buildRuntime>; config: Config } {
     const config: Config = {
