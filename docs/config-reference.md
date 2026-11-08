@@ -52,6 +52,7 @@ active_profile = "ark-coding"
 | `priority` | `number` | 否 | `0` | 自动路由候选排序权重，数值大者优先；仅在「程序自动选主」开启时生效。 |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | 否 | 无 | 按协议覆盖基地址：同一服务商同时提供 anthropic / openai / responses 多协议端点、供不同客户端直连时使用；未写的协议回落 `base_url`。 |
 | `max_concurrency` | `number` | 否 | `0`（不限） | 该服务的并发请求数上限（网关侧排队）：多 agent worker 并发打上游容易触发上游限流（429）时，设为上游可承受的并发数，超额请求在网关内排队等待而不是压垮上游；排队时长见 `gateway.queue_wait_ms`。 |
+| `model_fallback` | `Record<string, string>` | 否 | 无（不启用模型级容灾） | 模型级容灾映射（同服务商内）：上游模型 ID → 备用模型 ID。仅额度耗尽类错误（HTTP 402 或 429 且错误体带额度特征）且该服务的备用服务链全部走完后触发，改发同服务的备用模型重试；未映射的模型永不触发（审查/规划等质量敏感角色的模型保护由此成立）。写入口（CLI/控制台）校验价格闸门：两模型 input/output 单价差均 ≤5% 才允许配置，config.toml 手编只做形状校验。 |
 
 示例：
 
@@ -68,6 +69,7 @@ enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
 max_concurrency = 2
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }
 ```
 
 ## 3. 模型元数据（models）

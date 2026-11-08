@@ -1,11 +1,12 @@
 import { slugify, t } from '../util/index.js'
-import { loadConfig, mutateConfig } from '../config/store.js'
+import { loadConfig, mutateConfig, ConfigError } from '../config/store.js'
 import type { AuthStyle, ModelMeta, Protocol } from '../config/types.js'
 import { defaultStore, getSecret, setSecret, type SecretBackend } from '../config/secrets.js'
 import { findPreset, presetModels } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 import { saneCapabilities } from '../providers/known.js'
+import { priceDiffRatios, priceWithinTolerance } from '../providers/pricing-core.js'
 import { normalizeBaseUrl } from '../import/sources.js'
 import { parseFallbackEntry } from '../gateway/state.js'
 
@@ -137,6 +138,99 @@ export function resolveFallbackChain(
     out.push(parsed.model ? `${parsed.providerId}:${parsed.model}` : parsed.providerId)
   }
   return out
+}
+
+/** 模型级容灾映射校验与归一（纯函数，无 I/O，查价经 ctx 注入）：
+ *  形状（模型ID→模型ID 非空串）、自映射/环、目录成员（目录非空时 source/target 都须在册，防
+ *  typo；目录未管理容忍字面量）、价格闸门（两模型 input/output 价差均 ≤5%，查不到价 fail-closed
+ *  拒绝并提示补 pricing.json）。违者抛 ConfigError（hint 可操作）。undefined/空表返回 undefined。 */
+export interface ModelFallbackCtx {
+  /** 该服务的模型目录；缺省/空 = 目录未管理，容忍字面量映射 */
+  models?: Record<string, ModelMeta>
+  /** 查价注入（USD/百万 token）：返回 null = 查不到价（不猜）。CLI/控制台传 gateway/pricing 的 lookupPrice 绑定 providerId */
+  lookupPrice: (model: string) => { input: number; output: number } | null
+  /** 价格容差（缺省 0.05 = 双向 5%） */
+  tolerance?: number
+}
+
+export function resolveModelFallback(
+  raw: unknown,
+  ownId: string,
+  ctx: ModelFallbackCtx
+): Record<string, string> | undefined {
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ConfigError(
+      t('服务「{id}」的模型容灾映射必须是「模型ID → 模型ID」的表', 'Model fallback map of service "{id}" must be a table of modelId → modelId', { id: ownId }),
+      t('每条形如 "glm-5.3-flash" = "glm-5.2"；或删除该字段关闭模型级容灾', 'Each entry looks like "glm-5.3-flash" = "glm-5.2"; or remove the field to disable model-level failover')
+    )
+  }
+  const map: Record<string, string> = {}
+  for (const [rawFrom, rawTo] of Object.entries(raw as Record<string, unknown>)) {
+    const from = rawFrom.trim()
+    const to = typeof rawTo === 'string' ? rawTo.trim() : ''
+    if (!from || !to) {
+      throw new ConfigError(
+        t('服务「{id}」的模型容灾映射条目「{entry}」无效，两侧都必须是非空模型 ID', 'Invalid model fallback entry "{entry}" on service "{id}"; both sides must be non-empty model IDs', { id: ownId, entry: rawFrom }),
+        t('每条形如 "glm-5.3-flash" = "glm-5.2"', 'Each entry looks like "glm-5.3-flash" = "glm-5.2"')
+      )
+    }
+    if (from === to) {
+      throw new ConfigError(
+        t('模型容灾映射不能指向自身（{model}）', 'Model fallback mapping cannot point to itself ({model})', { model: from }),
+        t('删除该条目，或改为其他模型 ID', 'Remove the entry, or map it to a different model ID')
+      )
+    }
+    if (ctx.models && Object.keys(ctx.models).length > 0) {
+      for (const [role, mid] of [['源', from], ['目标', to]] as const) {
+        if (!ctx.models[mid]) {
+          throw new ConfigError(
+            t('模型容灾{role}模型「{model}」不在服务「{id}」的模型目录中', 'Model fallback {role} model "{model}" is not in the catalog of service "{id}"', { role, model: mid, id: ownId }),
+            t('modeldock model list {id} 查看目录；目录未管理的服务可忽略此校验（留空模型目录）', 'Run modeldock model list {id} to inspect the catalog; services without a managed catalog may skip this check (leave the catalog empty)', { id: ownId })
+          )
+        }
+      }
+    }
+    const fromPrice = ctx.lookupPrice(from)
+    const toPrice = ctx.lookupPrice(to)
+    if (!fromPrice || !toPrice) {
+      const missing = !fromPrice ? from : to
+      throw new ConfigError(
+        t('无法校验模型容灾价格：{model} 查不到单价（input/output）', 'Cannot validate model fallback pricing: no unit price found for {model} (input/output)', { model: missing }),
+        t('在 ~/.modeldock/pricing.json 补充 {model} 的 {{"input": …, "output": …}}（USD/百万 token）后重试', 'Add {{"input": …, "output": …}} (USD per M tokens) for {model} in ~/.modeldock/pricing.json and retry', { model: missing })
+      )
+    }
+    const r = priceDiffRatios(fromPrice, toPrice)
+    const tol = ctx.tolerance ?? 0.05
+    if (!priceWithinTolerance(fromPrice, toPrice, tol)) {
+      const pct = (x: number) => (x === Number.POSITIVE_INFINITY ? '∞' : `${(x * 100).toFixed(1)}%`)
+      throw new ConfigError(
+        t('模型容灾价格差超限：{from} → {to} input 差 {ri}、output 差 {ro}（上限 {tol}）', 'Model fallback price gap too wide: {from} → {to} input {ri}, output {ro} (limit {tol})', { from, to, ri: pct(r.input), ro: pct(r.output), tol: `${(tol * 100).toFixed(0)}%` }),
+        t('选同价位档的模型作容灾目标；确要跨档请直接用 profile 备用链的「服务ID:模型ID」条目显式配置', 'Pick a same-tier fallback model; to cross tiers intentionally, use an explicit "serviceId:modelId" entry in the profile fallback chain instead')
+      )
+    }
+    map[from] = to
+  }
+  if (!Object.keys(map).length) return undefined
+  // 查环：映射图必须无环（传递链 A→B→C 合法，回边 A→B→A 拒绝）
+  const visiting = new Set<string>()
+  const done = new Set<string>()
+  const walk = (cur: string, chain: string[]): void => {
+    if (done.has(cur)) return
+    if (visiting.has(cur)) {
+      throw new ConfigError(
+        t('模型容灾映射存在环：{chain}', 'Model fallback mapping contains a cycle: {chain}', { chain: [...chain, cur].join(' → ') }),
+        t('去掉构成回边的条目，让映射链单向终止', 'Remove the entry that closes the cycle so every chain terminates')
+      )
+    }
+    visiting.add(cur)
+    const next = map[cur]
+    if (next) walk(next, [...chain, cur])
+    visiting.delete(cur)
+    done.add(cur)
+  }
+  for (const k of Object.keys(map)) walk(k, [])
+  return map
 }
 
 /** 添加一个模型服务：key 入库、url/协议按预设自动填好、自动建对应路由、可选设为当前 */

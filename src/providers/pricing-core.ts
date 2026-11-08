@@ -33,6 +33,24 @@ export function saneModelCost(raw: unknown): ModelCost | undefined {
   return cost
 }
 
+/** 两模型价差比例（模型级容灾的价格闸门算式）：input 与 output 各算一档，分母取源模型价。
+ *  cache_read/cache_write 不参与（计费时缺省回落输入价，闸门只看牌价两主桶）。
+ *  源价为 0：目标同桶也为 0 → 0（相等免费），目标 >0 → Infinity（拒绝）。 */
+export function priceDiffRatios(from: ModelCost, to: ModelCost): { input: number; output: number } {
+  const ratio = (a: number, b: number): number => {
+    if (a === 0) return b === 0 ? 0 : Number.POSITIVE_INFINITY
+    return Math.abs(a - b) / a
+  }
+  return { input: ratio(from.input, to.input), output: ratio(from.output, to.output) }
+}
+
+/** 价格闸门：input 与 output 价差均 ≤ tolerance（缺省 0.05 = 5%）才放行。
+ *  双向分别卡闸隐含任意加权融合价差 ≤ tolerance，可解释性最好。 */
+export function priceWithinTolerance(from: ModelCost, to: ModelCost, tolerance = 0.05): boolean {
+  const r = priceDiffRatios(from, to)
+  return r.input <= tolerance && r.output <= tolerance
+}
+
 /** 单请求成本（USD）。usage 为网关日志口径的四桶 token 原始计数。 */
 export function costOfUsage(
   usage: { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cache_creation_tokens?: number },
