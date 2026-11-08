@@ -6,11 +6,13 @@
 // 仅在「worker 异常结束（无结果块）」时参与判定——正常产出的结果块不做二次猜测。
 //
 // 结构化信号优先（2026-11 定）：stderr 正则认的是上游错误**文案**，上游改措辞即失明。
-// 网关请求日志（gateway-YYYY-MM-DD.jsonl，复用 weather.mjs 同款的日志读取模式）每请求
-// 记 status/err/reason/usage——结构化且权威。worker 异常结束分类时先查会话时间窗内
-// 该 harness 的 429/5xx/quota 记录：命中 → 按结构化类定性（transient + 命中摘要）；
-// 未命中或无网关数据（未配 gatewayLogDir / 日志读取失败 fail-open / worker 绕行网关）
-// → 落回既有 stderr 正则兜底（正则保留不删，无网关场景是唯一识别面）。
+// 网关请求日志每请求记 status/err/reason/cause/usage——结构化且权威。取数 HTTP 优先
+// （admin 可得走 /_modeldock/logs/query 明细端点，2026-11-09 切换），文件直读
+// （gateway-YYYY-MM-DD.jsonl，weather.mjs 同款读取模式）降为 fallback（网关离线/旧
+// 实例无端点仍工作）。worker 异常结束分类时先查会话时间窗内该 harness 的 429/5xx/quota
+// 记录：命中 → 按结构化类定性（transient + 命中摘要）；未命中或无网关数据（未配
+// gatewayAdmin/gatewayLogDir / 取数失败 fail-open / worker 绕行网关）→ 落回既有 stderr
+// 正则兜底（正则保留不删，无网关场景是唯一识别面）。
 //
 // cause 精读（2026-11 A1）：状态码只说「失败」，日志 cause 字段说「为什么失败」——
 // 同一 429，key_cooldown（key 池冷却，等会儿就好）与 proto_endpoint_missing（模型×provider
@@ -129,8 +131,9 @@ function localDateRange(loMs, hiMs) {
 }
 
 /**
- * 读会话时间窗覆盖的网关日志条目（容错：任一文件读不了 → null = 数据缺席，fail-open
- * 落回正则）。日期文件按本地日期切分，窗口跨午夜自动补足日文件。
+ * 文件直读取数（fallback 面，2026-11-09 起 HTTP fetchGatewayWindowEntries 优先，本函数
+ * 在其缺席——网关离线/旧实例无端点——时兜底）。容错：任一文件读不了 → null = 数据缺席，
+ * fail-open 落回正则。日期文件按本地日期切分，窗口跨午夜自动补足日文件。
  * @returns {Array<object> | null} null 表示「无网关数据」（未配 gwDir / 读取失败）
  */
 export function readGatewayWindowEntries(gwDir, { startMs, endMs } = {}) {
@@ -287,18 +290,62 @@ async function fetchKeypoolRemainingMs(cfg, { timeoutMs = 3000 } = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// HTTP 优先取数（2026-11-09）：/_modeldock/logs/query 明细端点（gateway-orch-apis 交付，
+// from/to 与 /usage 完全同口径——同一 usageQuery 解析）
+// ---------------------------------------------------------------------------
+
+/** logs/query 窗口查询超时：与既有 admin 调用（metrics/usage）同款 ≤3s。 */
+const LOGS_QUERY_TIMEOUT_MS = 3000;
+
 /**
- * classifyWorkerCrash 的落盘便捷版：从 gwDir 读窗口条目（fail-open → null）后分类。
+ * 一次 logs/query 窗口查询（HTTP 优先取数面）。from/to 传窗口两端（ISO 串，同
+ * fetchGatewayUsageSummary 的既有构造）；limit 顶格 500：会话窗口条目量小，超限说明该窗
+ * 已泛洪，网关「截旧保新、凑满即停」正合崩溃定性（最近发生了什么），不补读更旧条目。
+ * harness 不传参：backend → 网关实名的映射只有「剥 -headless」可猜，精确过滤会把
+ * harnessMatches 的宽容匹配（zcode-dev 等词边界变体）漏在网关侧——窗口小、条目便宜，
+ * 拿不准就不传，客户端既有 harnessMatches 兜底（与文件直读同口径）。
+ * fail-open：admin 不可得 / 网关不可达 / 超时 / 非 2xx / 响应缺 entries（旧版网关）→ null，
+ * 调用方落回文件直读。成功时条目按时间正序归位（网关倒序返回——最新在前——reverse 后
+ * 与文件直读的追加序一致，cause 精读 primary 取首条的口径两路相同）。
+ * @returns {Promise<Array<object> | null>} null = HTTP 面缺席（落回文件直读）；
+ *          空数组 = 网关权威「窗口内无条目」（不落回文件，两路不混用避免同条目双计）
+ */
+export async function fetchGatewayWindowEntries(cfg, { startMs, endMs, timeoutMs = LOGS_QUERY_TIMEOUT_MS } = {}) {
+  const adm = resolveGatewayAdmin(cfg);
+  if (!adm || !Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+  const q = new URLSearchParams();
+  q.set('from', new Date(Math.min(startMs, endMs)).toISOString());
+  q.set('to', new Date(Math.max(startMs, endMs)).toISOString());
+  q.set('limit', '500');
+  try {
+    const res = await fetch(`${adm.base}/_modeldock/logs/query?${q}`, {
+      headers: { 'x-modeldock-admin': adm.adminToken },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!j?.ok || !Array.isArray(j.entries)) return null;
+    return j.entries.reverse();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * classifyWorkerCrash 的落盘便捷版：读窗口条目（fail-open → null）后分类。
  * orchestrator 派发点的接线用它；entries 可注入便于单测。异步（A1）：窗口内确有 key 池类
  * cause 时问一次 metrics 拿 keypool 余量推导重试窗口——admin 不可得/网关不可达 → null，
  * 用调用方既有退避；正常路径（无 key 池 cause）零网络开销。
- * 数据面保持网关日志文件直读（A3 取舍，与 upstreamSeaState 同理）：分类要逐条明细
- * （status/cause/hint/harness/ts 逐条判定 + era 签名兜底），/_modeldock/usage 聚合端点
- * 给不了；明细端点 /_modeldock/logs/query 已落地（gateway-orch-apis，2026-11-08），
- * 切换留作后续项（本注释 2026-11-09 勘误：原写「未来落地后再切」已过时）。
+ * 取数 HTTP 优先（2026-11-09 切换）：admin 可得 → 一次 /_modeldock/logs/query 窗口查询
+ * （分类要逐条明细 status/cause/hint/harness/ts，聚合端点 /usage 给不了）；HTTP 面缺席
+ * （未配 gatewayAdmin / 网关离线 / 旧实例无端点）→ 落回 gwDir 文件直读（gwDir 缺失 →
+ * null 的既有语义不变），两路不混用。签名向后兼容：cfg 缺省时 resolveGatewayAdmin 恒
+ * null，行为与历史文件直读逐字节一致；纯函数 classifyWorkerCrash 与 cause 精读零改动。
  */
 export async function classifyWorkerCrashFromDisk({ gwDir, cfg = null, output = '', stderrTail = '', window = null, backend = '', keypoolTimeoutMs = 3000 } = {}) {
-  const entries = window ? readGatewayWindowEntries(gwDir, window) : null;
+  let entries = window ? await fetchGatewayWindowEntries(cfg, window) : null;
+  if (window && !entries) entries = readGatewayWindowEntries(gwDir, window);
   let keypoolRemainingMs = null;
   if (cfg && entries?.some((e) => e && (e.cause === 'key_cooldown' || e.cause === 'key_pool_empty'))) {
     keypoolRemainingMs = await fetchKeypoolRemainingMs(cfg, { timeoutMs: keypoolTimeoutMs });
