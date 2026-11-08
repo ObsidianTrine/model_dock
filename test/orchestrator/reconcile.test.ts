@@ -3,10 +3,12 @@
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { AddressInfo } from 'node:net'
 import { createUsageTap } from '../../src/gateway/usage.js'
-import { gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { fetchGatewayUsageSummary, gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
@@ -70,7 +72,7 @@ describe('gateway usage tap > 透传与兜底（usage 提取断言归 hotpath �
 })
 
 describe('orchestrator reconcile > 狗粮对账', () => {
-  it('时间窗内的网关流量汇总 vs 自报；带缓存的合计口径', () => {
+  it('时间窗内的网关流量汇总 vs 自报；带缓存的合计口径', async () => {
     const h = fakeHome() // 隔离真实 ~/.modeldock/logs——机器上有真实网关日志会污染计数
     const repo = mkRepo()
     try {
@@ -84,7 +86,7 @@ describe('orchestrator reconcile > 狗粮对账', () => {
       writeGatewayEntry(mid, { input_tokens: 200, output_tokens: 20 })
       writeGatewayEntry(toIsoLocal(new Date(new Date(start).getTime() - 3600_000)), { input_tokens: 999999, output_tokens: 1 })
       writeGatewayEntry(end, undefined, 500)
-      const r = reconcileTask(repo.root, 'r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.skipped).toBe(false)
       expect(r.gateway.requests).toBe(2)
       expect(r.gateway.tokensIn).toBe(1000 + 500 + 50 + 200) // 缓存读+缓存建都计入输入
@@ -97,12 +99,12 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     }
   })
 
-  it('网关零流量 → viaGateway=false 警示（worker 直连上游，对账无意义）', () => {
+  it('网关零流量 → viaGateway=false 警示（worker 直连上游，对账无意义）', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
       autoMergeTask(repo.root, 'r2')
-      const r = reconcileTask(repo.root, 'r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.viaGateway).toBe(false)
       expect(r.gateway.requests).toBe(0)
     } finally {
@@ -111,7 +113,7 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     }
   })
 
-  it('跨午夜任务窗口：end 日网关日志不漏读（CORRECT-12，读侧本地日切分）', () => {
+  it('跨午夜任务窗口：end 日网关日志不漏读（CORRECT-12，读侧本地日切分）', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
@@ -135,7 +137,7 @@ describe('orchestrator reconcile > 狗粮对账', () => {
       )
       writeGatewayEntry(toIsoLocal(new Date(midnight.getTime() + 60_000)), { input_tokens: 1000, output_tokens: 100 })
       writeGatewayEntry(toIsoLocal(new Date(midnight.getTime() + 360_000)), { input_tokens: 2000, output_tokens: 200 })
-      const r = reconcileTask(repo.root, 'mid-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'mid-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.skipped).toBe(false)
       expect(r.gateway.requests, JSON.stringify(r.gateway)).toBe(2)
       expect(r.gateway.tokensIn).toBe(3000)
@@ -177,7 +179,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
     fs.writeFileSync(path.join(dir, 'events.jsonl'), evts.map((e) => JSON.stringify({ ts: toIsoLocal(new Date()), seq: 0, ...e })).join('\n') + '\n')
   }
 
-  it('两本账都有可计费字段：分歧按 billable 对 billable（总口径会被缓存读摊薄失真）', () => {
+  it('两本账都有可计费字段：分歧按 billable 对 billable（总口径会被缓存读摊薄失真）', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
@@ -186,7 +188,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
         { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
       ])
       writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 900_000, output_tokens: 40_000, cache_read_tokens: 850_000, cache_creation_tokens: 10_000, billable_tokens: 100_000 })
-      const r = reconcileTask(repo.root, 'bill-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'bill-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.scope).toBe('billable')
       expect(r.selfBillable).toBe(500_000)
       expect(r.gatewayBillable).toBe(100_000)
@@ -201,7 +203,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
     }
   })
 
-  it('旧日志无新字段：整体回落旧口径（scope=legacy）不炸，分歧走总账', () => {
+  it('旧日志无新字段：整体回落旧口径（scope=legacy）不炸，分歧走总账', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
@@ -210,7 +212,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
         { type: 'budget_snapshot', tokens_in: 900_000, tokens_out: 100_000 },
       ])
       writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 800_000, output_tokens: 100_000, cache_read_tokens: 100_000, cache_creation_tokens: 0 })
-      const r = reconcileTask(repo.root, 'bill-r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'bill-r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.scope).toBe('legacy')
       expect(r.selfBillable).toBeNull()
       expect(r.gatewayBillable).toBeNull()
@@ -221,7 +223,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
     }
   })
 
-  it('混合口径（部分 snapshot 有新字段）→ 保守回落 legacy，绝不混口径相减', () => {
+  it('混合口径（部分 snapshot 有新字段）→ 保守回落 legacy，绝不混口径相减', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
@@ -231,7 +233,7 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
         { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
       ])
       writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 100, output_tokens: 100, billable_tokens: 150 })
-      const r = reconcileTask(repo.root, 'bill-r3', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'bill-r3', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.scope).toBe('legacy')
       expect(r.selfBillable).toBeNull()
       expect(r.gatewayBillable).toBeNull()
@@ -279,14 +281,14 @@ describe('orchestrator reconcile > 启用条件（gatewayLogDir 配置化，可�
     }
   }
 
-  it('未配置 gatewayLogDir → 对账关闭（gatewayLogsDir null / reconcileTask skipped 可操作原因）', () => {
+  it('未配置 gatewayLogDir → 对账关闭（gatewayLogsDir null / reconcileTask skipped 可操作原因）', async () => {
     const repo = mkRepo() // fixture workflow.json 无 gatewayLogDir
     try {
-      withoutRedirectEnv(() => {
+      await withoutRedirectEnv(async () => {
         expect(gatewayLogsDir(loadWorkflowConfig(repo.root))).toBeNull()
         submitCard(repo.root, 'r-off')
         runOrch(repo.root, 'run r-off --backend mock', { ORCH_MOCK_FILE: 'docs/notes-r-off.md' })
-        const r = reconcileTask(repo.root, 'r-off', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+        const r = await reconcileTask(repo.root, 'r-off', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
         expect(r.skipped).toBe(true)
         expect(r.reason).toContain('gatewayLogDir')
         // CLI 全量路径：未启用 → 显式说明（而非误导性的「尚无已合并任务可对账」）
@@ -528,6 +530,230 @@ describe('orchestrator reconcile > 上游海况（upstreamSeaState，VDR 投影�
       else delete process.env.MODELRDOCK_FAKE_HOME
       if (savedHome !== undefined) process.env.MODELRDOCK_HOME = savedHome
       else delete process.env.MODELRDOCK_HOME
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A3（2026-11）：实测账优先走 /_modeldock/usage 聚合端点（admin 可得且聚合可无损服务时）
+// ---------------------------------------------------------------------------
+
+const USAGE_SUMMARY = {
+  requests: 3,
+  ok: 2,
+  failed: 1,
+  by_status: { '429': 1 },
+  by_provider: { up: 3 },
+  by_model: { m1: 3 },
+  latency: { p50: 10, p95: 20, p99: 30 },
+  tokens: { input: 1_200_000, output: 90_000, cache_read: 800_000, cache_creation: 20_000 },
+  cost: { total: 1.5, by_provider: { up: 1.5 }, by_model: { m1: 1.5 } },
+  unpriced_models: null,
+}
+
+/** 进程内 admin mock：只伺服 GET /_modeldock/usage（带命中计数）。 */
+function mockUsage(payload: unknown, status = 200) {
+  let hits = 0
+  const server = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      if (req.url?.split('?')[0] !== '/_modeldock/usage') {
+        res.writeHead(404)
+        res.end('{}')
+        return
+      }
+      hits += 1
+      if (req.headers['x-modeldock-admin'] !== 'mock-admin') {
+        res.writeHead(401)
+        res.end('{}')
+        return
+      }
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    })
+  })
+  return new Promise<{ url: string; hits: () => number; close: () => Promise<void> }>((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port
+      resolve({ url: `http://127.0.0.1:${port}`, hits: () => hits, close: () => new Promise<void>((done) => server.close(() => done())) })
+    })
+  })
+}
+
+function setUsageEnv(url?: string) {
+  if (url) process.env.ORCH_GATEWAY_BASE = url
+  else delete process.env.ORCH_GATEWAY_BASE
+  process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+}
+
+describe('orchestrator reconcile > fetchGatewayUsageSummary（A3 共享取数助手）', () => {
+  it('admin 可得 → ok + summary；from/to/harness 进查询串；cost=0 缺省', async () => {
+    let seenUrl = ''
+    const server = http.createServer((req, res) => {
+      seenUrl = req.url ?? ''
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, usage: USAGE_SUMMARY }))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    setUsageEnv(`http://127.0.0.1:${port}`)
+    try {
+      const r = await fetchGatewayUsageSummary({ gatewayAdmin: true }, { fromMs: 1000, toMs: 2000, harness: 'zcode' })
+      expect(r.ok).toBe(true)
+      expect(r.ok && r.summary.requests).toBe(3)
+      const q = new URLSearchParams(seenUrl.split('?')[1] ?? '')
+      expect(q.get('harness')).toBe('zcode')
+      expect(q.get('cost')).toBe('0')
+      expect(Number.isFinite(Date.parse(q.get('from') ?? ''))).toBe(true)
+    } finally {
+      server.close()
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+    }
+  })
+
+  it('gatewayAdmin 未开 / 非 200 / 响应形状不符 → ok:false（fail-open 信号）', async () => {
+    expect((await fetchGatewayUsageSummary({}, {})).ok).toBe(false)
+    const bad = await mockUsage({}, 500)
+    setUsageEnv(bad.url)
+    try {
+      expect((await fetchGatewayUsageSummary({ gatewayAdmin: true }, {})).ok).toBe(false)
+    } finally {
+      await bad.close()
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+    }
+    const weird = await mockUsage({ ok: true })
+    setUsageEnv(weird.url)
+    try {
+      expect((await fetchGatewayUsageSummary({ gatewayAdmin: true }, {})).ok).toBe(false) // 缺 usage 字段
+    } finally {
+      await weird.close()
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+    }
+  })
+})
+
+describe('orchestrator reconcile > 实测账 /usage 优先（A3）', () => {
+  /** 手写任务事件流（worker_spawned → merged 窗口；不带 tokens_billable = 旧口径自报账）。 */
+  function writePlainEvents(repo: string, id: string) {
+    const now = Date.now()
+    const dir = path.join(repo, '.agents', 'orchestrator', 'logs', id)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, 'events.jsonl'),
+      [
+        { type: 'worker_spawned', ts: toIsoLocal(new Date(now - 300_000)) },
+        { type: 'merged', ts: toIsoLocal(new Date(now - 60_000)) },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n') + '\n',
+    )
+    return now
+  }
+
+  /** 带可计费字段的新口径事件流。 */
+  function writeBillableEvents(repo: string, id: string) {
+    const now = Date.now()
+    const dir = path.join(repo, '.agents', 'orchestrator', 'logs', id)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, 'events.jsonl'),
+      [
+        { type: 'worker_spawned', ts: toIsoLocal(new Date(now - 300_000)) },
+        { type: 'budget_snapshot', ts: toIsoLocal(new Date(now - 120_000)), tokens_in: 900_000, tokens_out: 100_000, tokens_billable: 500_000 },
+        { type: 'merged', ts: toIsoLocal(new Date(now - 60_000)) },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n') + '\n',
+    )
+  }
+
+  it('admin 可得 + 自报账无可计费字段 → 实测账走聚合端点（tokens/requests/cost 来自 summary）', async () => {
+    const h = fakeHome()
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const m = await mockUsage({ ok: true, usage: USAGE_SUMMARY })
+    setUsageEnv(m.url)
+    try {
+      writePlainEvents(repo.root, 'usage-r1')
+      const r = await reconcileTask(repo.root, 'usage-r1', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.skipped).toBe(false)
+      expect(r.source).toBe('gateway-usage')
+      expect(r.gateway.requests).toBe(2) // ok 计数（成功转发）
+      expect(r.gateway.tokensIn).toBe(1_200_000) // 端点 tokens.input 已含缓存读+建
+      expect(r.gateway.tokensOut).toBe(90_000)
+      expect(r.gateway.cacheRead).toBe(800_000)
+      expect(r.gateway.cacheCreate).toBe(20_000)
+      expect(r.gateway.total).toBe(1_290_000)
+      expect(r.scope).toBe('legacy')
+      expect(r.gatewayBillable).toBeNull()
+      expect(r.selfBillable).toBeNull()
+      expect(r.pairs).toEqual([]) // 端点给不了 (provider,model) token 分桶
+      expect(r.viaGateway).toBe(true)
+      expect(r.cost).toMatchObject({ usd: 1.5, source: 'gateway-usage', requests: 2 }) // 网关侧 cost 预填燃油账
+    } finally {
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('自报账带可计费字段 → 不走端点（零请求）：billable 逐条精确累加与 pairs 分桶保持文件扫描', async () => {
+    const h = fakeHome()
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const m = await mockUsage({ ok: true, usage: USAGE_SUMMARY })
+    setUsageEnv(m.url)
+    try {
+      writeBillableEvents(repo.root, 'usage-bill')
+      fs.mkdirSync(gatewayLogsDir()!, { recursive: true })
+      const ts = toIsoLocal(new Date(Date.now() - 120_000))
+      fs.appendFileSync(
+        path.join(gatewayLogsDir()!, `gateway-${ts.slice(0, 10)}.jsonl`),
+        JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, usage: { input_tokens: 900_000, output_tokens: 40_000, cache_read_tokens: 850_000, cache_creation_tokens: 10_000, billable_tokens: 100_000 } }) + '\n',
+      )
+      const r = await reconcileTask(repo.root, 'usage-bill', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(m.hits()).toBe(0) // 端点未被咨询
+      expect(r.source).toBeUndefined() // 文件路径
+      expect(r.scope).toBe('billable')
+      expect(r.gatewayBillable).toBe(100_000)
+      expect(r.pairs).toHaveLength(1)
+      expect(r.pairs[0]).toMatchObject({ provider: 'up', model: 'm1' })
+    } finally {
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('端点不可得（死端口）→ fail-open 落回文件扫描：结果与历史口径逐字段一致', async () => {
+    const h = fakeHome()
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    setUsageEnv('http://127.0.0.1:1')
+    try {
+      writePlainEvents(repo.root, 'usage-dead')
+      fs.mkdirSync(gatewayLogsDir()!, { recursive: true })
+      const ts = toIsoLocal(new Date(Date.now() - 120_000))
+      fs.appendFileSync(
+        path.join(gatewayLogsDir()!, `gateway-${ts.slice(0, 10)}.jsonl`),
+        JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, usage: { input_tokens: 1000, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 } }) + '\n',
+      )
+      const r = await reconcileTask(repo.root, 'usage-dead', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(r.skipped).toBe(false)
+      expect(r.source).toBeUndefined()
+      expect(r.gateway.requests).toBe(1)
+      expect(r.gateway.tokensIn).toBe(1000)
+      expect(r.pairs).toHaveLength(1)
+    } finally {
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      repo.cleanup()
+      h.restore()
     }
   })
 })
