@@ -1,0 +1,10 @@
+{
+  "id": "2026-11-orch-review-model-engine-coupling",
+  "title": "resolveEngine 把 engine 节 model 与 backend 连坐：backend 缺失即整节返回 null——JSDoc 承诺「model 可选」但只配 model 的配置被静默丢弃，review.model 声明位形同虚设（审查模型分源配置不可达，worker/review 长期同模型的隐性成因之一）",
+  "reviewRef": "214e449^",
+  "diffRef": "214e449",
+  "fixedBy": "0fec018",
+  "files": [".agents/scripts/workflow-config.mjs"],
+  "expect": ["model", "backend", "静默", "丢弃"],
+  "note": "0fec018 修复（model 与 backend 解耦、空节仍 null、非法 model 告警点名节名）；接线本体（cfg.review.model → --model 旗标 + 事件/决策留痕）214e449 同提交已有，唯独 model-only 形态被规整层吞掉。同型三连前科：0eb29bb freeSail 白名单规整丢弃、d6f5ae9 research.model 误报丢弃——「新增配置键被规整/白名单层静默吞键」是本仓编排配置面的惯常事故形态（REVIEW.md 配置面堵法候选：新配置键合入时规整层与消费点成对核对，测试至少覆盖每个键的 model-only/单键形态）。diff 题型：材料 = 214e449 对 workflow-config.mjs 的 diff，JSDoc「model 可选」与 if(!backend) return null 的矛盾在材料内自洽可判"
+}
