@@ -211,7 +211,49 @@ export function loadWorkflowConfig(repoRoot) {
     escalation: resolveEscalation(raw.escalation),
     dynamicDispatch: resolveDynamicDispatch(raw.dynamicDispatch),
     notify: resolveNotify(raw.notify),
+    // 调研船解耦选型（2026-11-08）：research.model 缺省时 research 命令回落 claude CLI 全局默认
+    research: resolveResearch(raw.research),
+    // freeSail 自由航行配置（注意：此前无 resolve 条目，workflow.json 里的 freeSail 键
+    // 被规整丢弃——canSailSubmit 的白名单收窄从未生效过，2026-11-08 L1 排查时发现）
+    freeSail: resolveFreeSail(raw.freeSail),
   };
+}
+
+/** research 调研配置：{ model?: string }——模型名经 ModelDock 网关按名路由。 */
+function resolveResearch(raw) {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名 }）`);
+    return {};
+  }
+  const out = {};
+  if (raw.model !== undefined) {
+    if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
+    else console.warn(`[workflow-config] research.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  return out;
+}
+
+/** freeSail 配置：{ autoSubmitTypes?: string[], researchPerCycle?: 正整数, specPerCycle?: 正整数 }。 */
+function resolveFreeSail(raw) {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[workflow-config] freeSail 配置非法，已忽略：${JSON.stringify(raw)}`);
+    return {};
+  }
+  const out = {};
+  if (raw.autoSubmitTypes !== undefined) {
+    const types = strArr(raw.autoSubmitTypes);
+    if (types.length) out.autoSubmitTypes = types;
+    else console.warn(`[workflow-config] freeSail.autoSubmitTypes ${JSON.stringify(raw.autoSubmitTypes)} 不合法（应为类型字符串数组）——忽略`);
+  }
+  for (const k of ['researchPerCycle', 'specPerCycle']) {
+    if (raw[k] !== undefined) {
+      if (Number.isInteger(raw[k]) && raw[k] > 0) out[k] = raw[k];
+      else console.warn(`[workflow-config] freeSail.${k} ${JSON.stringify(raw[k])} 不合法（应为正整数）——忽略`);
+    }
+  }
+  return out;
 }
 
 /** drift 降级阈值：0 < v ≤ 1，缺省 0.2。可调不可关（design doc §10.5）——显式给出的
