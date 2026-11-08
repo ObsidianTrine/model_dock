@@ -172,6 +172,9 @@ export interface UpdateConfig {
   /** 下载镜像前缀列表（拼在 browser_download_url 前；仅资产走镜像，SHA256SUMS 永走官方 API）。
    *  空数组 = 关闭镜像只走官方直连；缺省用 DEFAULT_UPDATE_MIRRORS */
   mirror?: string[]
+  /** 预取：检查发现新版本后后台静默预下载+校验适配安装包到 staging（~/.modeldock/updates/staging），
+   *  一键更新就绪后跳过下载段秒级安装。缺省开启；false 显式关闭（回到「点击后才下载」） */
+  prefetch?: boolean
 }
 
 export const CONFIG_VERSION = 1

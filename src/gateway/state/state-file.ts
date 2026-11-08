@@ -18,8 +18,23 @@ export interface GatewayStateFile {
   /** LAN 实际监听端口（冲突顺延后回写；关闭时移除） */
   lan_port?: number
   /** 更新检查时间（24h TTL 跨网关重启有效）；version = 当时看到的最新版；failedAt = 最近一次失败检查（30min 重试退避，不占成功 TTL）。
-   *  at 可选：从未成功过、只有失败记录时没有 at。 */
-  update_check?: { at?: number; version?: string; failedAt?: number }
+   *  at 可选：从未成功过、只有失败记录时没有 at。
+   *  manifest = 当时看到的发布全量（含 assets——预取跨重启恢复要靠它选资产；概要只存内存的话，
+   *  重启后 TTL 内 latest=null，托盘/网页显示「已是最新」而 apply 因无 latest 直接 no_update）。
+   *  tagName/assets 可选：旧版网关只写概要，读取方须容忍。 */
+  update_check?: {
+    at?: number
+    version?: string
+    failedAt?: number
+    manifest?: {
+      version: string
+      notes: string
+      htmlUrl: string
+      sizeBytes: number | null
+      tagName?: string
+      assets?: { name: string; id: number; size: number; browserUrl?: string }[]
+    }
+  }
 }
 
 export async function readGatewayState(): Promise<GatewayStateFile | null> {

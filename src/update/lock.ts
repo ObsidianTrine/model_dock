@@ -111,3 +111,11 @@ export async function acquireUpdateLock(): Promise<() => void> {
     t('请稍后重试', 'Please retry shortly')
   )
 }
+
+/** 非阻塞探测：更新锁当前是否被存活进程持有（陈锁/残骸不算）。预取让路用——runUpdate 在跑时
+ *  预取本轮跳过，不与安装流抢网络与磁盘；探测只读不写，绝不改变锁的归属。 */
+export function updateLockHeld(): boolean {
+  const holder = readHolder(updateLockPath())
+  if (!holder?.pid) return false
+  return processAlive(holder.pid)
+}

@@ -1,6 +1,6 @@
 /** 更新面板域：status/check/apply 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import { AdminCtx, sendError } from './admin-shared.js'
-import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
+import { applyUpdate, drivePrefetchFromState, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { updateDaemonArgs } from '../autostart.js'
 import { engineWarningHint, installChildEnv } from '../install/noderuntime.js'
 import { bi, t } from '../util/i18n.js'
@@ -13,6 +13,9 @@ export async function hUpdateStatus(c: AdminCtx): Promise<void> {
   // kick 内部有 成功 24h TTL / 失败 30min 退避 双守卫，命中即静默跳过，
   // 常驻网关因此不必重启也能在控制台开着时发现新版本（此前只在启动时查一次）
   void kickUpdateCheck(rt).catch(() => {})
+  // 预取重试/续传驱动：已知最新版可用且 staged 未就绪时后台补/续预取（守卫链在 prefetch.ts，
+  // 30min 失败退避 + 单飞，重复调用安全）；预取失败静默，不占检查链路
+  drivePrefetchFromState(rt)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify(await getUpdateStatus(rt)))
   return

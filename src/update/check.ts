@@ -219,22 +219,57 @@ export function validateAssetName(name: unknown): asserts name is string {
   }
 }
 
+/** 断点续传记账状态：downloadAsset 在响应头/进度回调里回写，调用方（预取）持久化后跨重启续传 */
+export interface DownloadResumeState {
+  /** 上次写入的候选 URL：续传只在同一候选内进行（换候选 = 换源，从 0 重下，杜绝异源混拼） */
+  url: string | null
+  /** 上次响应的 ETag（下次续传作 If-Range；资源中途被换 → 服务器回 200 全量覆盖） */
+  etag: string | null
+  /** 已落盘字节数（= .part 文件实际大小） */
+  partBytes: number
+}
+
 /** 下载资产到目标目录，返回落盘路径。按候选链逐个尝试；官方 API 端点整文件重试 3 次
- *  （对象存储间歇断是大陆常态），失败清理半成品 */
+ *  （对象存储间歇断是大陆常态），失败清理半成品。
+ *  opts.resume 提供时启用断点续传：入参 state 携带上次半成品位置，同候选内先试
+ *  `Range + If-Range` 续传；失败保留半成品（跨尝试/跨进程续传），onState 逐次回写记账。
+ *  opts.destName 覆盖落盘文件名（预取用 `<asset>.part`，完成+校验后由调用方 rename 成品）；
+ *  完整性断言仍以 asset.size 为准（全量口径 = 续传基点 + 本次响应字节数）。 */
 export async function downloadAsset(
   repo: string,
   token: string | null,
   asset: ReleaseAsset,
   destDir: string,
-  opts: { apiBase?: string; mirrors?: string[]; onProgress?: (received: number, total: number) => void; retryDelayMs?: number; proxyUrl?: string | null } = {}
+  opts: {
+    apiBase?: string
+    mirrors?: string[]
+    onProgress?: (received: number, total: number) => void
+    retryDelayMs?: number
+    proxyUrl?: string | null
+    resume?: { state: DownloadResumeState | null; onState: (s: DownloadResumeState) => void }
+    destName?: string
+  } = {}
 ): Promise<string> {
   validateAssetName(asset.name)
-  const dest = path.join(destDir, asset.name)
+  const dest = path.join(destDir, opts.destName ?? asset.name)
   const retryDelay = opts.retryDelayMs ?? 2000
   const candidates = buildDownloadCandidates(repo, asset, opts.mirrors ?? [], opts.apiBase ?? API_BASE)
+  // 续传记账：size 未知（manifest 缺 size）时无法断言完整性，续传整体禁用
+  const resumeOn = !!opts.resume && asset.size > 0
+  let rs = opts.resume?.state ?? null
   let lastErr: Error | null = null
+  // 统一记账出口：本地 rs（下轮尝试的续传基点）与调用方 onState（跨进程持久化）同步推进；
+  // 失败路径不回填——最后一次 onState 已是磁盘实况（连接失败则保持原状，文件未被触碰）
+  const reportState = (s: DownloadResumeState): void => {
+    rs = s
+    if (opts.resume) opts.resume.onState(s)
+  }
   for (const cand of candidates) {
     for (let attempt = 1; attempt <= cand.attempts; attempt++) {
+      // 同候选且有未满半成品才续传；换候选（镜像→官方兜底）或无半成品从 0 开始
+      const base = resumeOn && rs && rs.url === cand.url && rs.partBytes > 0 && rs.partBytes < asset.size ? rs.partBytes : 0
+      let respStatus = 200
+      let etag: string | null = rs?.etag ?? null
       try {
         // 进镜像候选时锁定的 size 来自 manifest，作完整性基线（drain 节奏与进度节流留在下载原语内）
         let lastReport = 0
@@ -243,30 +278,41 @@ export async function downloadAsset(
           timeoutMs: cand.timeoutMs,
           objectName: asset.name,
           proxyUrl: opts.proxyUrl,
-          ...(opts.onProgress
+          ...(base > 0 ? { resumeFrom: base, ...(etag ? { ifRange: etag } : {}) } : {}),
+          onResponseMeta: (meta) => {
+            respStatus = meta.status
+            etag = meta.etag
+            if (resumeOn) reportState({ url: cand.url, etag: meta.etag, partBytes: meta.status === 206 ? base : 0 })
+          },
+          ...(opts.onProgress || resumeOn
             ? {
                 onProgress: (r: number) => {
-                  if (r - lastReport > 5 * 1024 * 1024) {
-                    lastReport = r
-                    opts.onProgress!(r, asset.size)
+                  const total = (respStatus === 206 ? base : 0) + r
+                  if (resumeOn) reportState({ url: cand.url, etag, partBytes: total })
+                  if (opts.onProgress && total - lastReport > 5 * 1024 * 1024) {
+                    lastReport = total
+                    opts.onProgress!(total, asset.size)
                   }
                 },
               }
             : {}),
         })
-        if (asset.size > 0 && received !== asset.size) {
+        const totalReceived = (respStatus === 206 ? base : 0) + received
+        if (resumeOn) reportState({ url: cand.url, etag, partBytes: totalReceived })
+        if (asset.size > 0 && totalReceived !== asset.size) {
           throw new UpdateError(
             t(
               '下载 {n} 不完整（{r}/{t} 字节），已重试仍失败——请检查网络后重跑',
               'Download of {n} is incomplete ({r}/{t} bytes) even after retries — check the network and rerun',
-              { n: asset.name, r: received, t: asset.size }
+              { n: asset.name, r: totalReceived, t: asset.size }
             )
           )
         }
         return dest
       } catch (e) {
         lastErr = e as Error
-        await fsp.rm(dest, { force: true }).catch(() => {})
+        // 续传模式保留半成品（同候选下轮尝试 Range 续传，跨进程由调用方记账续传）；否则维持旧行为清理
+        if (!resumeOn) await fsp.rm(dest, { force: true }).catch(() => {})
         if (attempt >= cand.attempts) break
         await new Promise((r) => setTimeout(r, retryDelay * attempt))
       }
