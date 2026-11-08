@@ -24,6 +24,8 @@ export const holidaysCachePath = () => path.join(modeldockDir(), 'holidays-cn.js
 export const modelCatalogCachePath = () => path.join(modeldockDir(), 'model-catalog.json')
 /** 模型单价用户覆盖（USD / 百万 token）：models.dev 官方牌价与实际折扣/套餐不符时在此覆盖 */
 export const pricingJsonPath = () => path.join(modeldockDir(), 'pricing.json')
+/** 更新预取 staging（单版本槽：下载中/已就绪的适配安装包 + meta.json；见 src/update/staging.ts） */
+export const updatesStagingDir = () => path.join(modeldockDir(), 'updates', 'staging')
 
 /** 展开 ~ 前缀（用户在 config 里写的相对家目录路径） */
 export function expandHome(p: string): string {
