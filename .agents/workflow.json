@@ -46,6 +46,12 @@
   "scan": {
     "smartFilter": true
   },
+  "research": {
+    "model": "glm-5.3-flash"
+  },
+  "propose": {
+    "feedback": true
+  },
   "budgetProfiles": {
     "claude-headless": {
       "max_tokens": 20000000

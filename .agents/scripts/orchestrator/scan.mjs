@@ -283,6 +283,10 @@ function renderCard(c) {
     // 信号哈希（eventfilter.signalHash）：程序过滤的数据基础——后续同源信号与它碰撞
     // 决定直通/去重（issue 按号、其余按内容），frontmatter 校验容忍该字段缺省
     ...(c.signal_hashes?.length ? [`signal_hashes: [${c.signal_hashes.join(', ')}]`] : []),
+    // 证据行（评分择优的输入面，score.mjs/调度定序消费）：scan 卡统一从背景段派生——
+    // 信号描述本身就是证据；planner 提案卡的 score/evidence 由 prompt 契约产出
+    'evidence:',
+    `  - 巡检信号：${String(c.background).replace(/\s+/g, ' ').slice(0, 160)}`,
     'files_hint:',
     ...c.files_hint.map((f) => `  - ${f}`),
     'workflows:',

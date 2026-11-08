@@ -1,0 +1,365 @@
+// research.mjs — 调研（Deep Research 式）的纯逻辑件，全部可单测：
+//   parseBriefBlock    researcher 会话输出 → { id, title, body }（```agents-brief 契约块）
+//   extractCitations   正文引用行提取（URL 列表，去重保序）
+//   validateBriefBody  brief 正文校验：五段齐全 + 引用数达标（无引用即拒收——可对账底线）
+//   writeBrief         落盘 research/<id>/（meta.json + brief.md）
+//   readBrief/listBriefs
+//   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
+// 设计：调研不是任务卡——没有 diff，不走施工队列/合并管线（queue.mjs 校验、classifyChange、
+// files_hint 越界判定对它全是错配）。产物 = brief 文件，由卡的 research: <id> 字段引用，
+// spec/propose 消费。docs 10.12。
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { toIsoLocal } from './events.mjs';
+
+/** researcher 输出契约的 fenced block 标记（prompt.mjs buildResearchPrompt 同款）。 */
+export const BRIEF_MARKER = 'agents-brief';
+
+/** brief 正文五段（产出契约固定段；校验按标题行匹配，段内自由文本）。 */
+export const BRIEF_SECTIONS = ['结论', '选项对比', '引用', '建议', '罗盘对齐'];
+
+/** 引用行 URL 识别（http/https；引用行形如 `- 2026-11-08 https://... — 一句话依据`）。
+ *  排除集含中英文常用标点——中文句读紧贴 URL 是常态（「见 https://a.com/x。另有」）。 */
+const URL_RE = /https?:\/\/[^\s)）\]。，、；！？;,!?]+/g;
+
+export function researchDir(repoRoot) {
+  return path.join(repoRoot, '.agents', 'orchestrator', 'research');
+}
+
+export function briefDir(repoRoot, id) {
+  return path.join(researchDir(repoRoot), id);
+}
+
+/**
+ * 从 researcher 输出提取 brief 契约块。块内首两行须是 `id:` / `title:`（spec 契约同款），
+ * 其余为正文。找不到块或 meta 缺失返回 null（调用方喂回重试）。
+ */
+export function parseBriefBlock(text) {
+  const re = new RegExp('```' + BRIEF_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  const raw = m[1];
+  const id = /^id:\s*(.+)$/m.exec(raw)?.[1]?.trim();
+  const title = /^title:\s*(.+)$/m.exec(raw)?.[1]?.trim();
+  if (!id || !title) return null;
+  // 去掉 meta 两行，剩余即正文（首部空行折叠）
+  const body = raw
+    .replace(/^id:\s*.+\s*$/m, '')
+    .replace(/^title:\s*.+\s*$/m, '')
+    .replace(/^\s*\n/, '')
+    .trim();
+  return { id, title: title.trim(), body };
+}
+
+/** 正文引用提取：URL 去重保序。 */
+export function extractCitations(body) {
+  const out = [];
+  for (const m of String(body ?? '').matchAll(URL_RE)) {
+    const url = m[0].replace(/[.,;、。]+$/, '');
+    if (!out.includes(url)) out.push(url);
+  }
+  return out;
+}
+
+/**
+ * 带访问日期的引用行提取（gate 计数口径，2026-11 编造引用防线）：
+ * 契约格式 `- YYYY-MM-DD <URL> — 来源名：一句话依据`。裸 URL 行不计入——
+ * 「引用日期」是本次会话访问证据的时刻，缺失/陈旧/未来都是编造信号（真实首跑实证：
+ * 模型曾把 2023 年训练先验写进 2026 年的「当前流行度」调研且引用日期全编成 2023）。
+ */
+export function extractDatedCitations(body) {
+  const out = [];
+  for (const m of String(body ?? '').matchAll(/^-\s*(\d{4}-\d{2}-\d{2})\s+(https?:\/\/[^\s)）\]。，、；！？;,!?]+)/gm)) {
+    const url = m[2].replace(/[.,;、。]+$/, '');
+    if (!out.some((c) => c.url === url)) out.push({ date: m[1], url });
+  }
+  return out;
+}
+
+/**
+ * brief 正文校验：五段标题齐全 + 带当日访问日期的引用 ≥ minCitations + 日期合理性。
+ * 无引用即拒收（调研的可对账底线）；引用行必须以访问日期开头（`- YYYY-MM-DD <URL> …`）：
+ *   - 未来日期 → 拒收（编造信号）；
+ *   - 距 today 超过 7 天（跨午夜容忍窗）→ 拒收（陈旧日期 = 拿旧数据冒充本次核查，
+ *     2026-11-08 首跑实证：引用日期全部编成 2023 年）。
+ * opts.today 注入 'YYYY-MM-DD' 供测试固定时钟；缺省取当前本地日期。
+ */
+export function validateBriefBody(body, { minCitations = 1, today = toIsoLocal().slice(0, 10) } = {}) {
+  const text = String(body ?? '');
+  for (const s of BRIEF_SECTIONS) {
+    if (!new RegExp(`^#\\s*${s}\\s*$`, 'm').test(text)) {
+      throw new Error(`brief 缺少「# ${s}」段——产出契约五段齐全（${BRIEF_SECTIONS.join('/')}），请补段后重试。`);
+    }
+  }
+  const dated = extractDatedCitations(text);
+  if (dated.length < minCitations) {
+    throw new Error(`brief 引用数不足：带访问日期的引用 ${dated.length} 条，要求 ≥${minCitations}——# 引用 段每行必须以本次访问日期开头（"- ${today} <URL> — 来源名：依据"，裸 URL 行不计入），无引用的调研不可对账，一律拒收。`);
+  }
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  for (const c of dated) {
+    const dMs = Date.parse(`${c.date}T00:00:00Z`);
+    if (!Number.isFinite(dMs)) {
+      throw new Error(`引用日期不合法："${c.date}"（${c.url}）——访问日期必须是 YYYY-MM-DD 格式，请修正后重试。`);
+    }
+    if (dMs > todayMs + 86_400_000) {
+      throw new Error(`引用日期在未来："${c.date}"（${c.url}）——今天才 ${today}，未来日期是编造信号，一律拒收。`);
+    }
+    if (todayMs - dMs > 7 * 86_400_000) {
+      throw new Error(`引用访问日期陈旧："${c.date}"（${c.url}）——今天是 ${today}，访问日期必须 ≈本次会话当日（容忍跨午夜 7 天）；陈旧日期 = 拿旧数据冒充本次核查，拒收后请重新检索并如实填当日日期。`);
+    }
+  }
+  return { citations: dated.map((c) => c.url) };
+}
+
+/**
+ * brief 落盘：research/<id>/{meta.json, brief.md}。同 id 已存在则抛错（brief 是证据
+ * 产物，不允许静默覆盖——深化调研用新 id 或人工删旧目录）。
+ */
+export function writeBrief(repoRoot, { id, title, question, backend, body }) {
+  validateBriefBody(body);
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
+    throw new Error(`brief id "${id}" 不合法：只允许小写字母/数字/短横线。`);
+  }
+  const dir = briefDir(repoRoot, id);
+  if (fs.existsSync(dir)) {
+    throw new Error(`brief id "${id}" 已存在（${dir}）——同名调研请换 id 或人工删除旧目录后再跑。`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  const meta = { id, title, question: String(question ?? '').slice(0, 500), backend: backend ?? null, created_at: toIsoLocal() };
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  fs.writeFileSync(path.join(dir, 'brief.md'), `${body.trim()}\n`);
+  return dir;
+}
+
+/** 读单个 brief：{ dir, meta, body, citations }；不存在返回 null。 */
+export function readBrief(repoRoot, id) {
+  const dir = briefDir(repoRoot, id);
+  if (!fs.existsSync(path.join(dir, 'meta.json'))) return null;
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'));
+  const body = fs.readFileSync(path.join(dir, 'brief.md'), 'utf8');
+  return { dir, meta, body, citations: extractCitations(body) };
+}
+
+export function listBriefs(repoRoot) {
+  const dir = researchDir(repoRoot);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'meta.json')))
+    .map((e) => e.name)
+    .sort();
+}
+
+/**
+ * 引用快照（对账材料）：逐条 GET 引用 URL，响应文本截断落 research/<id>/sources/<n>.txt。
+ * 尽力而为：单条失败/超时只记 failure，绝不抛错——快照缺席不否定 brief（引用本身已在
+ * brief.md 里）；上限 max 条（防引用面失控）。fetchImpl 注入供测试。
+ */
+export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.fetch, timeoutMs = 15_000, max = 8 } = {}) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) return { ok: [], failed: [] };
+  const sourcesDir = path.join(brief.dir, 'sources');
+  const ok = [];
+  const failed = [];
+  for (const [i, url] of brief.citations.slice(0, max).entries()) {
+    try {
+      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      fs.mkdirSync(sourcesDir, { recursive: true });
+      fs.writeFileSync(path.join(sourcesDir, `${i + 1}.txt`), `url: ${url}\nfetched_at: ${toIsoLocal()}\n\n${text.slice(0, 200_000)}`);
+      ok.push(url);
+    } catch (e) {
+      failed.push({ url, reason: String(e?.message ?? e).slice(0, 200) });
+    }
+  }
+  return { ok, failed };
+}
+
+// ---------------------------------------------------------------------------
+// 可信度判定（2026-11-08 设计，问题无关）：L1 快照回查（纯规则）→ L2 异构复核（LLM
+// 按需）→ L3 按模型建档核实率。原则：形态 ≠ 真实（判据回到证据本身）、确定性优先于
+// LLM 自评、单次打分不如历史校准。三次真实事故的映射：①日期编造→L0 已拦；②真 URL
+// 假依据→L1 数字回查拦；③模型接地能力差→L3 建档淘汰。
+// ---------------------------------------------------------------------------
+
+/** L2 复核会话输出契约的 fenced block 标记。 */
+export const VERDICT_MARKER = 'agents-verdict';
+
+/**
+ * 从 brief 结论/选项对比提取可回查 token（数字+单位、拉丁字母数字混合的型号名）。
+ * 只取「# 引用」段之前——引用段自身含日期与 URL，回查它们是自指。排除项：年份
+ * （训练先验高发区，且页面必有——回查无区分度）、纯 1-2 位无单位数字（序号/日期碎片）。
+ */
+export function extractClaimTokens(body) {
+  const text = String(body ?? '').split(/^#\s*引用\s*$/m)[0] ?? '';
+  const tokens = new Set();
+  for (const m of text.matchAll(/(?:\$)?\d[\d,，.]*\s*(?:T|万亿|亿|万|M|B|K|%|％|分|倍|美元|次|名|个|年|家|席)?/g)) {
+    let t = m[0].replace(/[\s，,]+/g, '');
+    if (!t) continue;
+    if (/20\d{2}/.test(t)) continue; // 年份/日期片段：无区分度
+    if (/^\d{1,2}$/.test(t)) continue; // 序号/碎片
+    tokens.add(t);
+  }
+  for (const m of text.matchAll(/[A-Za-z][A-Za-z0-9.+-]*\d[A-Za-z0-9.+-]*/g)) {
+    if (m[0].length >= 3) tokens.add(m[0]); // 型号名（GPT-6、Opus 5.5、V4.1、K3.1）
+  }
+  return [...tokens].slice(0, 40);
+}
+
+/**
+ * L1 数字回查：结论里的可回查 token 是否真的出现在其所引来源的快照文本里。
+ * 快照 0 份 = 无法回查（网络问题 ≠ 编造，不计分母、单独报 unknown）。
+ * 真实事故锚定：2026-11-08 二跑「真 URL 假依据」——brief 声称的 56.5T 在其所引
+ * lmsys.org 首页快照里不存在，本法一抓一个准。
+ */
+export function crossCheckClaims(briefBody, sources) {
+  const tokens = extractClaimTokens(briefBody);
+  const texts = (sources ?? []).map((s) => String(s.text ?? ''));
+  if (!tokens.length) return { checked: 0, hits: 0, hit_rate: null, misses: [], tokens };
+  if (!texts.length) return { checked: 0, hits: 0, hit_rate: null, misses: [], tokens };
+  let hits = 0;
+  const misses = [];
+  for (const t of tokens) {
+    const needle = t.replace(/[，,]/g, '');
+    const found = texts.some((txt) => txt.includes(needle) || txt.replace(/[，,]/g, '').includes(needle));
+    if (found) hits++;
+    else misses.push(t);
+  }
+  return { checked: tokens.length, hits, hit_rate: hits / tokens.length, misses, tokens };
+}
+
+/** L1 引用深度比：根路径引用（https://lmsys.org/）占比是红旗——真实数据页几乎都是深链。 */
+export function citationDepthStats(body) {
+  const dated = extractDatedCitations(body);
+  const urls = dated.length ? dated.map((c) => c.url) : extractCitations(body);
+  let deep = 0;
+  let root = 0;
+  for (const u of urls) {
+    try {
+      const p = new URL(u).pathname.replace(/\/+$/, '');
+      if (p) deep++;
+      else root++;
+    } catch {
+      root++;
+    }
+  }
+  return { deep, root, total: urls.length, ratio: urls.length ? deep / urls.length : null };
+}
+
+/** L1 判级（report-only 初版阈值；快照回查先攒 near-miss 分布再收紧——晴雨表哲学）。 */
+export function computeVerdict({ briefBody, snapshotsOk, claimCheck, depth }) {
+  const reasons = [];
+  let level;
+  if (!snapshotsOk) {
+    level = 'unknown';
+    reasons.push('快照 0 份成功——无法回查（网络/拦截原因，不计为编造）');
+  } else if (!claimCheck.checked) {
+    level = 'unknown';
+    reasons.push('结论中无可回查的数字/型号 token——纯定性结论，L1 不适用');
+  } else if (claimCheck.hit_rate >= 0.7) {
+    level = 'pass';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）`);
+  } else if (claimCheck.hit_rate >= 0.4) {
+    level = 'warn';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）偏低——未命中的数字疑似不在来源页上，人工核 sources/ 对账`);
+  } else {
+    level = 'fail';
+    reasons.push(`数字回查 ${claimCheck.hits}/${claimCheck.checked}（${Math.round(claimCheck.hit_rate * 100)}%）过低——结论数字与所引快照严重不符，疑似「真 URL 假依据」`);
+  }
+  if (level === 'pass' && depth?.ratio != null && depth.ratio < 0.5) {
+    level = 'warn';
+    reasons.push(`引用深度比偏低（深链 ${depth.deep}/${depth.total}）——根路径引用难以支撑具体数据`);
+  }
+  if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
+  return { level, reasons };
+}
+
+/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text }]。 */
+export function loadSnapshots(repoRoot, id) {
+  const dir = path.join(briefDir(repoRoot, id), 'sources');
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort()) {
+    const raw = fs.readFileSync(path.join(dir, f), 'utf8');
+    const url = /^url:\s*(.+)$/m.exec(raw)?.[1]?.trim() ?? f;
+    out.push({ url, text: raw });
+  }
+  return out;
+}
+
+/** L1 总入口：读 brief + 快照 → 判级 → 落 verdict.json（幂等覆盖——快照重跑后刷新）。 */
+export function assessBrief(repoRoot, id, { model } = {}) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) return null;
+  const snapshots = loadSnapshots(repoRoot, id);
+  const claimCheck = crossCheckClaims(brief.body, snapshots);
+  const depth = citationDepthStats(brief.body);
+  const { level, reasons } = computeVerdict({
+    briefBody: brief.body,
+    snapshotsOk: snapshots.length > 0,
+    claimCheck,
+    depth,
+  });
+  const verdict = {
+    brief_id: id,
+    model: model ?? brief.meta.backend ?? null,
+    created_at: toIsoLocal(),
+    l1: { snapshots_ok: snapshots.length, claim_check: { checked: claimCheck.checked, hits: claimCheck.hits, hit_rate: claimCheck.hit_rate, misses: claimCheck.misses }, citation_depth: depth },
+    l2: null,
+    level,
+    reasons,
+  };
+  fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
+  return verdict;
+}
+
+/** L3 台账：每次判定（L1/L2）追加一行——信任按 模型×引擎 攒统计量（drift 保险丝同哲学）。 */
+export function appendResearchLedger(repoRoot, entry) {
+  const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
+  fs.mkdirSync(researchDir(repoRoot), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify({ ts: toIsoLocal(), ...entry })}\n`);
+  return file;
+}
+
+/** L3 读台账 → 按模型聚合：n / L1 平均核实率 / 判级分布。 */
+export function readLedgerStats(repoRoot) {
+  const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
+  if (!fs.existsSync(file)) return [];
+  const byModel = new Map();
+  for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
+    try {
+      const e = JSON.parse(line);
+      const key = `${e.model ?? '?'}`;
+      const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [] };
+      agg.runs++;
+      agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;
+      if (typeof e.hit_rate === 'number') agg.hit_rates.push(e.hit_rate);
+      byModel.set(key, agg);
+    } catch { /* 损坏行跳过 */ }
+  }
+  return [...byModel.values()].map((a) => ({
+    model: a.model,
+    runs: a.runs,
+    levels: a.levels,
+    avg_hit_rate: a.hit_rates.length ? a.hit_rates.reduce((s, v) => s + v, 0) / a.hit_rates.length : null,
+  }));
+}
+
+/** 解析 L2 复核输出（agents-verdict 契约块）；缺失/不合法返回 null（调用方喂回重试）。 */
+export function parseVerdictBlock(text) {
+  const re = new RegExp('```' + VERDICT_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  const raw = m[1];
+  const level = /^level:\s*(high|medium|low)\s*$/m.exec(raw)?.[1];
+  const blockers = /^blockers:\s*(\d+)\s*$/m.exec(raw)?.[1];
+  if (!level || blockers === undefined) return null;
+  const reasons = raw
+    .split('\n')
+    .filter((l) => /^-\s+/.test(l.trim()))
+    .map((l) => l.trim().replace(/^-\s+/, ''))
+    .slice(0, 10);
+  return { level, blockers: parseInt(blockers, 10), reasons };
+}

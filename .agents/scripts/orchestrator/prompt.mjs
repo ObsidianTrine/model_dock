@@ -4,6 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { toIsoLocal } from './events.mjs';
 
 /** worker 结束前必须产出的契约块标记（fenced code block 的语言名）。 */
 export const RESULT_MARKER = 'agents-result';
@@ -331,6 +332,14 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `  - feature-branch\n` +
     `gate: L3\n` +
     `proposal: true\n` +
+    `research: <feature 卡必填：引用既有调研 brief 的 id；仓库里没有能回答它的 brief 就写 todo——系统会先派调研、再出规格；非 feature 卡省略此行>\n` +
+    `score:\n` +
+    `  value: <1-3 价值档>\n` +
+    `  effort: <1-3 成本档>\n` +
+    `  confidence: <1-3 证据强度>\n` +
+    `  risk: <1-3 风险档>\n` +
+    `evidence:\n` +
+    `  - <证据：巡检信号来源 / goals 条目 / 运行度量数据，一句话一条>\n` +
     `---\n` +
     `\n# 目标\n<做什么、为什么；引用目标面条目或巡检信号来源>\n\n# 验收标准\n<必须可机器检查：具体行为断言>\n\n# 航次计划\n<3-6 个检查点，每个检查点一句话「做什么 + 怎么验证」；末尾一行「备选路线：若 X 不通则 Y」>\n\n# 背景\n<探索到的现状与线索>\n` +
     `${fence}\n\n` +
@@ -338,10 +347,12 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `1. 验收标准必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止只有「测试全绿」这类空洞标准；\n` +
     `2. files_hint 写真实范围（你确认过的路径），写裸 glob，不要用反引号或引号包住；\n` +
     `3. created_by 固定 planner、gate 固定 L3、frontmatter 带 proposal: true；\n` +
-    `4. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +
-    `5. 价值说不清或验收写不具体 → 宁可不出这张卡；\n` +
-    `6. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
-    `7. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `4. feature 卡 frontmatter 必带 research 行（引用既有 brief id 或写 todo）——feature 不直接进队列，走 research → spec → 人工审设计 → spec build 管线；\n` +
+    `5. score 四因子只取 1/2/3 档并在 evidence 里给出依据（量化给调度定序用，宁缺毋滥：证据不足就整体省略 score/evidence）；\n` +
+    `6. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +
+    `7. 价值说不清或验收写不具体 → 宁可不出这张卡；\n` +
+    `8. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
+    `9. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
 
@@ -377,17 +388,23 @@ function parseMarkerBlock(text, marker) {
  * 与 buildPlannerPrompt 同构（AGENTS.md 注入 + 意图消毒 + 契约模板 + 硬性要求），
  * 差异在产物：单张任务卡 → requirements/design/tasks 三份文档（人审后再拆卡）。
  * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 只提 AGENTS.md 不展开）
+ * @param {string} brief 调研结论全文（research/<id>/brief.md，--from-brief 注入；可选）——
+ *   插在产出契约之前；为空 = 不出现该段，prompt 与历史逐字节一致（回归红线）。
  */
-export function buildSpecPrompt(intentText, repoRoot, redlines = '') {
+export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '') {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const clean = sanitizeIntent(intentText);
   const fence = '```';
+  const briefSection = brief
+    ? `## 调研结论（research brief 已产出，设计须以此为据；与其冲突时在「取舍」段说明理由）\n\n${String(brief).trim()}\n\n`
+    : '';
   return (
     `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
     `# 任务：把下面的意图编译成规格三件套（requirements → design → tasks）\n\n` +
     `用户意图：${clean}\n\n` +
     `你可以用 Read/Glob/Grep 探索本仓库（当前目录就是仓库根）来了解现状：定位相关模块、\n` +
     `看测试怎么组织、确认涉及的真实文件路径。禁止编造不存在的文件与端点。\n\n` +
+    briefSection +
     `# 产出契约\n\n` +
     `探索完成后，按顺序输出四个 fenced block：\n\n` +
     `${fence}${SPEC_META_MARKER}\n` +
@@ -439,4 +456,89 @@ export function parseSpecBlocks(text) {
   const title = /^title:\s*(.+)$/m.exec(metaRaw)?.[1]?.trim();
   if (!id || !title) return null;
   return { id, title: title.trim(), requirements, design, tasks };
+}
+
+// ---------------------------------------------------------------------------
+// Researcher（research 命令）：Deep Research 式外部调研。会话工具面 = WebFetch/WebSearch
+// + Read/Glob/Grep（无 Bash 无写，fail-closed）；产物 = research/<id>/brief.md（五段
+// 契约 + 引用），供卡 research 字段引用、spec --from-brief 消费。逻辑件在 research.mjs。
+// ---------------------------------------------------------------------------
+
+import { BRIEF_MARKER, VERDICT_MARKER } from './research.mjs';
+
+export { BRIEF_MARKER, VERDICT_MARKER };
+
+/**
+ * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
+ * 硬性要求）。goalsText：goals.md 罗盘全文（可选）——注入「罗盘对齐」段的判定依据。
+ * minCitations 透传 research.mjs validateBriefBody（缺省 1）。
+ * 2026-11 编造引用防线：显式注入今天的日期（headless 会话对「当前日期」不可靠，真实
+ * 首跑曾把 2023 训练先验当 2026 现状且引用日期全编成 2023）+ gate 强校验引用日期
+ * ≈今天（未来/陈旧拒收）+ 一手来源优先、关键结论双源交叉。
+ */
+export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', minCitations = 1, today = toIsoLocal().slice(0, 10) } = {}) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const clean = sanitizeIntent(questionText);
+  const fence = '```';
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：把下面的问题调研清楚，产出一份带引用的调研结论（research brief）\n\n` +
+    `今天是 ${today}——你输出的一切「当前/最新」都以它为准；你的训练知识可能过时，现状问题必须以本次检索结果为准。\n\n` +
+    `调研问题：${clean}\n\n` +
+    `你可以用 WebSearch / WebFetch 检索与阅读外部资料，用 Read/Glob/Grep 查看本仓库现状。\n` +
+    `你没有 Bash 也没有任何写文件工具——只调研，不改仓库。\n\n` +
+    (goalsText ? `## 项目罗盘（goals.md——「罗盘对齐」段对照它写）\n${String(goalsText).trim().slice(0, 2000)}\n\n` : '') +
+    `# 产出契约\n\n` +
+    `调研完成后，输出一个 fenced block（id 用小写短横线、体现问题主题）：\n\n` +
+    `${fence}${BRIEF_MARKER}\n` +
+    `id: <小写短横线>\n` +
+    `title: <一句话标题>\n` +
+    `# 结论\n<直接回答调研问题；每条关键结论标注来源编号 [1] [2]…>\n\n` +
+    `# 选项对比\n<有可比项时列表对比（方案/库/竞品/做法 × 优劣）；无则写「单结论问题，无选项对比」>\n\n` +
+    `# 引用\n<每行一条，必须以今天的访问日期开头：- ${today} <URL> — <来源名>：<一句话说明这条来源支撑什么>>\n\n` +
+    `# 建议\n<落到本项目可执行的下一步建议（做/不做/先做什么）>\n\n` +
+    `# 罗盘对齐\n<该结论与项目罗盘/现状的关系：对齐哪条、或说明为何值得偏离>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 「# 引用」段至少 ${minCitations} 条，且**每行必须以今天的访问日期 ${today} 开头**（格式：- ${today} <URL> — 来源名：依据）——无日期/旧日期/未来日期/裸 URL 行不计入，产出会被 gate 直接拒收重做（未来或陈旧日期视为编造）；\n` +
+    `2. 来源可信核查：**优先一手来源**（官方文档/官方公告/榜单原始页，如 OpenRouter Rankings、LMArena、HuggingFace、GitHub 官方仓库）；关键结论至少 2 个独立来源交叉；检索结果与你的训练知识冲突时以检索为准；\n` +
+    `3. 禁止编造：URL、日期、数据、型号名一律以本次检索所见为准；查不到就如实写「未证实」并减少结论，**不要为了凑引用数编造来源**；\n` +
+    `4. 结论必须有来源支撑（[n] 标注）；\n` +
+    `5. 围栏外只允许一句话概述，不要输出其他内容。\n`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// L2 可信度复核（research verify）：readonly 会话拿 brief + 快照文本做内部一致性
+// 审查——结论是否被引用支撑、有无训练先验冒充检索现状的迹象。产出 agents-verdict
+// 契约块（level/blockers/理由），与 L1 快照回查互补（L1 管数字对得上，L2 管逻辑自洽）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装 L2 复核 prompt。sourcesBlocks：快照文本（已截断拼接）；readonly 会话无联网——
+ * 只对给定材料判内部一致性，不给外部知识下结论（训练知识只用来标记「可疑冲突点」）。
+ */
+export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const fence = '```';
+  const CAP = 12_000;
+  const sources = String(sourcesBlocks ?? '').slice(0, CAP * 4);
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：复核一份调研 brief 的可信度（内部一致性审查）\n\n` +
+    `今天是 ${today}。你没有联网工具——只依据下面给定的 brief 与来源快照判断，不给材料之外的事实下结论。\n` +
+    `你的知识只用来标记「可疑冲突」（如 brief 所述与普遍认知明显矛盾处），标注为疑点而非定论。\n\n` +
+    `## 待复核 brief\n\n${String(briefBody ?? '').slice(0, CAP)}\n\n` +
+    `## 来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失——请把「快照缺失，无法对账」列为理由）'}\n\n` +
+    `# 产出契约\n\n` +
+    `${fence}${VERDICT_MARKER}\n` +
+    `level: high | medium | low（high=结论被快照支撑；medium=部分支撑/依赖转述；low=关键结论在快照中找不到依据或与快照矛盾）\n` +
+    `blockers: <低可信的硬伤数>\n` +
+    `# 理由\n- <逐条：结论↔快照的支撑关系、疑点、缺口；没把握写「疑点」>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
+    `2. brief 自己标注「未证实/转述」的地方不算硬伤（诚实标注是加分项）；\n` +
+    `3. 围栏外只允许一句话概述。\n`
+  );
 }
