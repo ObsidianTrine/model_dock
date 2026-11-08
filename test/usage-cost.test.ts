@@ -189,6 +189,53 @@ describe('usage 聚合 cost 维度（createUsageAccumulator）', () => {
   })
 })
 
+describe('usage 聚合 billable 维度（createUsageAccumulator：条目已算好，只求和不重算）', () => {
+  const entry = (over: Partial<LogEntry>): LogEntry =>
+    ({
+      ts: '2026-11-02T10:00:00.000+08:00',
+      harness: 'c',
+      profile: 'p',
+      provider: 'zhipuai',
+      model: 'glm-4.6',
+      path: '/v1/messages',
+      status: 200,
+      usage: { input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      ...over,
+    }) as LogEntry
+
+  it('全新条目求和正确（剔除缓存读的公式在条目上，聚合不加总口径字段）', () => {
+    const s = summarizeUsage([
+      entry({ usage: { input_tokens: 1000, output_tokens: 200, cache_read_tokens: 90000, cache_creation_tokens: 500, billable_tokens: 3500 } }),
+      entry({ usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 110 } }),
+    ])
+    expect(s.billable_tokens).toBe(3610)
+    expect(s.billable_partial).toBe(false)
+    // 总口径 tokens 不受 billable 影响（既有字段口径不变）
+    expect(s.tokens.input).toBe(91600)
+  })
+
+  it('混入旧格式条目（usage 缺 billable_tokens 数字）→ partial=true 且和为可得部分', () => {
+    const s = summarizeUsage([
+      entry({ usage: { input_tokens: 500, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 550 } }),
+      entry({ usage: { input_tokens: 10, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } }), // 旧版网关日志
+    ])
+    expect(s.billable_tokens).toBe(550)
+    expect(s.billable_partial).toBe(true)
+  })
+
+  it('无 usage 条目的窗口 → 0/false（空窗口语义）；失败条目不进和（与 tokens 同口径）', () => {
+    const s = summarizeUsage([entry({ usage: undefined }), entry({ status: 429, usage: undefined })])
+    expect(s.billable_tokens).toBe(0)
+    expect(s.billable_partial).toBe(false)
+    // 失败条目即便携带 usage 也不计（实测口径 = 成功且有 usage，与 tokens/cost 一致）
+    const f = summarizeUsage([
+      entry({ status: 500, usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 999_999 } }),
+    ])
+    expect(f.billable_tokens).toBe(0)
+    expect(f.billable_partial).toBe(false)
+  })
+})
+
 describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）', () => {
   it('回填当日日文件 + logRequest 增量记账，跨 fakeHome 重置', () => {
     const h = fakeHome()

@@ -191,6 +191,10 @@ function readWindowEntries(gwDir, start, end) {
  * 聚合端点（admin 可得且未显式注入价目表时——cost=1，网关侧价目与 pricing-lookup 同源，
  * cost.total 直接可用；逐窗口并发查询，任一窗口端点失败即整批落回文件扫描保口径一致）；
  * 端点不可得 → 文件扫描 + 价目请求两条既有路径（一次日志扫描 + 一次价目请求服务全部窗口）。
+ * 2026-11 billable 聚合闭环：同一响应现也携带 billable_tokens/billable_partial（成本路径
+ * 不消费，零额外查询）；刻意不按 billable 完整性加闸——partial 只说明可计费求和不完整，
+ * 不影响 cost 口径，老网关（响应缺 billable 字段）的 cost 聚合通道照常可用（与 reconcile
+ * billable 对账的 HTTP 准入条件不同是刻意的，见 reconcile.mjs A3 闭环注）。
  * windows: [{ key, start, end }]；results.get(key) = { measured, viaGateway,
  * requests, usd, unpriced, reason? }。价目不可得 → 所有窗口 measured:false 附同一 reason。
  */

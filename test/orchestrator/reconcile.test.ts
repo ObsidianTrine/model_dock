@@ -702,7 +702,7 @@ describe('orchestrator reconcile > 实测账 /usage 优先（A3）', () => {
     }
   })
 
-  it('自报账带可计费字段 → 不走端点（零请求）：billable 逐条精确累加与 pairs 分桶保持文件扫描', async () => {
+  it('自报账带可计费字段 + 响应缺 billable（旧版网关）→ 端点被咨询但整批落回文件扫描，结果与历史一致', async () => {
     const h = fakeHome()
     const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
     const m = await mockUsage({ ok: true, usage: USAGE_SUMMARY })
@@ -716,12 +716,71 @@ describe('orchestrator reconcile > 实测账 /usage 优先（A3）', () => {
         JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, usage: { input_tokens: 900_000, output_tokens: 40_000, cache_read_tokens: 850_000, cache_creation_tokens: 10_000, billable_tokens: 100_000 } }) + '\n',
       )
       const r = await reconcileTask(repo.root, 'usage-bill', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
-      expect(m.hits()).toBe(0) // 端点未被咨询
+      expect(m.hits()).toBe(1) // 端点被咨询一次；响应缺 billable_tokens（旧版网关）→ 不可信服务 billable 对账
       expect(r.source).toBeUndefined() // 文件路径
       expect(r.scope).toBe('billable')
-      expect(r.gatewayBillable).toBe(100_000)
+      expect(r.gatewayBillable).toBe(100_000) // 文件逐条精确累加
+      expect(r.gateway.total).toBe(1_800_000)
       expect(r.pairs).toHaveLength(1)
       expect(r.pairs[0]).toMatchObject({ provider: 'up', model: 'm1' })
+    } finally {
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('自报账带可计费字段 + 端点 billable 完整 → billable 对账走 HTTP：一次查询服务对账与成本', async () => {
+    const h = fakeHome()
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const m = await mockUsage({ ok: true, usage: { ...USAGE_SUMMARY, billable_tokens: 420_000, billable_partial: false } })
+    setUsageEnv(m.url)
+    try {
+      writeBillableEvents(repo.root, 'usage-http')
+      const r = await reconcileTask(repo.root, 'usage-http', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(m.hits()).toBe(1) // 一次窗口查询：tokens + billable + cost 同响应，不重复打两次
+      expect(r.source).toBe('gateway-usage')
+      expect(r.scope).toBe('billable')
+      expect(r.selfBillable).toBe(500_000)
+      expect(r.gatewayBillable).toBe(420_000)
+      expect(r.gateway.billable).toBe(420_000)
+      expect(r.gateway.requests).toBe(2) // 端点 ok 计数（与 legacy HTTP 路径同款可接受偏差）
+      expect(r.gateway.tokensIn).toBe(1_200_000)
+      expect(r.gateway.total).toBe(1_290_000)
+      expect(r.divergence).toBeCloseTo(0.16, 10) // |500k − 420k| / 500k
+      expect(r.pairs).toEqual([]) // 分桶端点给不了 → 燃油账由同一响应的网关 cost 预填
+      expect(r.cost).toMatchObject({ usd: 1.5, source: 'gateway-usage', requests: 2 })
+      expect(r.viaGateway).toBe(true)
+    } finally {
+      setUsageEnv(undefined)
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('端点 billable_partial=true（窗口混旧版日志）→ 整批落回文件扫描：结果与历史一致', async () => {
+    const h = fakeHome()
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const m = await mockUsage({ ok: true, usage: { ...USAGE_SUMMARY, billable_tokens: 420_000, billable_partial: true } })
+    setUsageEnv(m.url)
+    try {
+      writeBillableEvents(repo.root, 'usage-partial')
+      fs.mkdirSync(gatewayLogsDir()!, { recursive: true })
+      const ts = toIsoLocal(new Date(Date.now() - 120_000))
+      fs.appendFileSync(
+        path.join(gatewayLogsDir()!, `gateway-${ts.slice(0, 10)}.jsonl`),
+        JSON.stringify({ ts, harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, usage: { input_tokens: 900_000, output_tokens: 40_000, cache_read_tokens: 850_000, cache_creation_tokens: 10_000, billable_tokens: 100_000 } }) + '\n',
+      )
+      const r = await reconcileTask(repo.root, 'usage-partial', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      expect(m.hits()).toBe(1) // partial=true：求和只是可得部分 → 不可信服务 billable 对账
+      expect(r.source).toBeUndefined() // 文件路径
+      expect(r.scope).toBe('billable')
+      expect(r.gatewayBillable).toBe(100_000) // 文件逐条精确累加
+      expect(r.pairs).toHaveLength(1)
     } finally {
       setUsageEnv(undefined)
       delete process.env.ORCH_GATEWAY_ADMIN_TOKEN

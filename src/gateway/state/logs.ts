@@ -307,6 +307,13 @@ export interface UsageSummary {
   latency: { p50: number | null; p95: number | null; p99: number | null }
   /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  /** 可计费口径合计（成功且有 usage 的条目，与 tokens 同口径；剔除缓存读的公式在条目落盘前
+   *  已按协议形态算好——此处只求和，绝不重算）。窗口内条目缺该数字的跳过（不入和）。 */
+  billable_tokens: number
+  /** 上述求和是否可信完整：窗口内存在「有 usage 对象但缺 billable_tokens 数字」的条目
+   *  （旧版网关日志混入）时为 true——消费方（编排侧 reconcile）据此整体回落文件直读。
+   *  窗口内完全没有 usage 条目时为 false（空窗口语义：0 和是完整的）。 */
+  billable_partial: boolean
   /** 成本（USD / 百万 token 牌价口径）；未注入 priceResolver 时为 null */
   cost: UsageCost | null
   /** 注入 resolver 时：命中过但查不到单价的模型名（成本按 $0 计，提醒补 pricing.json） */
@@ -323,6 +330,8 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
   const byModel: Record<string, number> = {}
   const ms: number[] = []
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  let billableTokens = 0
+  let billablePartial = false
   const cost: UsageCost | null = priceOf ? { total: 0, by_provider: {}, by_model: {} } : null
   const unpriced = priceOf ? new Set<string>() : null
   let ok = 0
@@ -346,6 +355,10 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
           tokens.output += u.output_tokens ?? 0
           tokens.cache_read += u.cache_read_tokens ?? 0
           tokens.cache_creation += u.cache_creation_tokens ?? 0
+          // billable 只求和不重算（公式分协议形态，条目落盘前已算好）；缺数字 = 旧版日志 → partial
+          const b = u.billable_tokens
+          if (typeof b === 'number' && Number.isFinite(b)) billableTokens += b
+          else billablePartial = true
           if (priceOf && cost && unpriced) {
             const price = priceOf(e.provider, e.model)
             if (price) {
@@ -373,6 +386,8 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
         by_model: byModel,
         latency: latencyQuantiles(ms),
         tokens,
+        billable_tokens: billableTokens,
+        billable_partial: billablePartial,
         cost,
         unpriced_models: unpriced ? [...unpriced].sort() : null,
         window: { first, last },
