@@ -3107,8 +3107,11 @@ function cmdSpecStatus(repoRoot, id) {
 // WebSearch（backends RESEARCH_TOOLS；无 Bash 无写，fail-closed 同 reviewer）。
 // ---------------------------------------------------------------------------
 
-/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回 null。 */
-async function runResearchSession(repoRoot, { question, backendName, minCitations = 1, traceCommand = 'research' }) {
+/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回 null。
+ *  model：调研船模型（--model 显式 > workflow.json research.model > claude CLI 全局默认）——
+ *  2026-11-08 实证：researcher 吃全局默认 glm-4.5-air 时检索接地失效产出旧世界内容，
+ *  换 glm-5.3-flash 后恢复正常——调研船必须与执行船解耦选型。 */
+async function runResearchSession(repoRoot, { question, backendName, minCitations = 1, model, traceCommand = 'research' }) {
   const backend = await getBackend(backendName);
   const traceCfg = loadWorkflowConfig(repoRoot).trace;
   const session = plannerTraceTaskId();
@@ -3127,6 +3130,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
         maxTurns: 25,
         onEvent: () => {}, // 无任务事件线；researcher 用量不记账（同 planner 家族）
         web: true,
+        model,
         settingsFile,
       });
       const parsed = parseBriefBlock(result.output ?? '');
@@ -3174,12 +3178,16 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
 async function cmdResearch(repoRoot, opts) {
   if (opts.flags?.has('--selftest')) return researchSelftest(repoRoot, opts);
   const question = (opts.intent ?? []).join(' ').trim();
-  if (!question) die('用法：research "<调研问题>" [--min-citations N] [--backend mock]\n       research --selftest（实测当前后端联网工具可用性，烧少量 token）');
+  if (!question) die('用法：research "<调研问题>" [--min-citations N] [--model <模型名>] [--backend mock]\n       research --selftest（实测当前后端联网工具可用性，烧少量 token）');
   const minCitations = Number.isInteger(opts.minCitations) && opts.minCitations > 0 ? opts.minCitations : 1;
   opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
-  log(`调研问题：${sanitizeIntent(question)}`);
-  const r = await runResearchSession(repoRoot, { question, backendName: opts.backend, minCitations });
-  if (!r) die(`Researcher 会话 3 次均未产出合规 brief（五段契约 + ≥${minCitations} 条引用）。\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`);
+  // 调研船模型解耦选型：--model 显式 > workflow.json research.model > claude CLI 全局默认
+  //（2026-11-08 实证：全局默认 glm-4.5-air 检索接地失效，brief 全是 2024 旧世界内容）
+  const cfg = loadWorkflowConfig(repoRoot);
+  const model = opts.model || cfg.research?.model || undefined;
+  log(`调研问题：${sanitizeIntent(question)}${model ? `\n调研船模型：${model}` : '\n调研船模型：（未指定——用 claude CLI 全局默认，建议 workflow.json research.model 显式配置）'}`);
+  const r = await runResearchSession(repoRoot, { question, backendName: opts.backend, minCitations, model });
+  if (!r) die(`Researcher 会话 3 次均未产出合规 brief（五段契约 + ≥${minCitations} 条当日引用）。\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`);
   log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
   log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
   const snap = await snapshotCitations(repoRoot, r.id);
@@ -3211,7 +3219,7 @@ async function researchSelftest(repoRoot, opts) {
       'SELFTEST-DONE',
     ].join('\n'));
     if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
-    const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, settingsFile });
+    const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, model: opts.model || loadWorkflowConfig(repoRoot).research?.model || undefined, settingsFile });
     const out = String(result.output ?? '');
     log(`═══ 联网工具自检（后端 ${opts.backend}）═══`);
     const wf = /WEBFETCH:\s*(ok|fail)(.*)/i.exec(out);
@@ -3317,7 +3325,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
       if (!briefBody) out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
     } else if (out.researched.length < caps.research) {
       log(`  ⛵ 上游管线：${p.id} 缺调研——派 researcher（问题取提案目标）`);
-      const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName });
+      const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName, model: cfg.research?.model });
       if (r) {
         out.researched.push(r.id);
         briefBody = r.body;
@@ -4069,7 +4077,7 @@ function usage() {
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
-  research "<调研问题>" [--min-citations N] [--backend mock]
+  research "<调研问题>" [--min-citations N] [--model <模型名>] [--backend mock]
                                           上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
   research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
@@ -4135,6 +4143,7 @@ async function main() {
     else if (a === '--max-cost-usd') opts.maxCostUsd = parseFloat(argv[++i]);
     else if (a === '--from-brief') opts.fromBrief = argv[++i];
     else if (a === '--min-citations') opts.minCitations = parseInt(argv[++i], 10);
+    else if (a === '--model') opts.model = argv[++i];
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
