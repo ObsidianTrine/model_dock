@@ -298,6 +298,10 @@ export interface OrderedCandidate {
   /** 模型级容灾合成候选（relay 链尾 quota 时按 provider.model_fallback 生成）：同 provider 内
    *  换模型再试一跳，服务没换——marks 不产生 failover_to:<id>（避免误导）。 */
   modelFallback?: boolean
+  /** 自动补尾 / 避开补链候选（非显式配置）：relay 转发前按请求模型（别名改写后）与候选服务目录对账，
+   *  目录已管理且不含该模型的剔除（主候选 / 手动 fallback / 钉定 / 窗口目标是显式配置，不受限），
+   *  见 relay.ts filterModelCompatible */
+  auto?: boolean
 }
 
 /** 解析 fallback 条目："<providerId>"（透传原模型名）或 "<providerId>:<modelId>"（改写模型）。
@@ -474,7 +478,7 @@ export function pickTarget(
     for (const [id] of auto) {
       if (autoCount >= AUTO_FALLBACK_MAX) break
       seen.add(id)
-      ordered.push({ target: makeTarget(id), providerId: id, isPrimary: false })
+      ordered.push({ target: makeTarget(id), providerId: id, isPrimary: false, auto: true })
       autoCount++
     }
   }
@@ -503,7 +507,7 @@ export function pickTarget(
   const extras = Object.entries(rt.config.providers)
     .filter(([id, p]) => !seen.has(id) && p.enabled !== false && !avoid.includes(id) && !isMeltdown(rt, id, now) && tierCompatible(rt.config, id, reqTier))
     .sort((a, b) => (b[1].priority ?? 0) - (a[1].priority ?? 0))
-    .map(([id]) => ({ target: makeTarget(id), providerId: id, isPrimary: false }))
+    .map(([id]) => ({ target: makeTarget(id), providerId: id, isPrimary: false, auto: true }))
   if (extras.length) return choose(extras)
   // 全部服务都被避开或不可用：回退原链（软约束——宁可用被避开的服务也不能无服务可用）
   return choose(ordered)

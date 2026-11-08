@@ -235,13 +235,38 @@ export function loadWorkflowConfig(repoRoot) {
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名 }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
   if (raw.model !== undefined) {
     if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
     else console.warn(`[workflow-config] research.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  // usage 矩阵阈值（verdict/2）：可配的只有 coherence/coverage 两档阈值——否决权与
+  // COVERAGE_FLOOR=50 硬底线在 scoreVerdict 里写死，不可配（防配置失误放水）
+  if (raw.usageGates !== undefined) {
+    if (typeof raw.usageGates !== 'object' || Array.isArray(raw.usageGates)) {
+      console.warn(`[workflow-config] research.usageGates ${JSON.stringify(raw.usageGates)} 不合法（应为 { decision?: {coherence?,coverage?}, external?: {…} }）——忽略`);
+    } else {
+      out.usageGates = {};
+      for (const key of ['decision', 'external']) {
+        const sub = raw.usageGates[key];
+        if (sub === undefined) continue;
+        if (typeof sub !== 'object' || Array.isArray(sub)) {
+          console.warn(`[workflow-config] research.usageGates.${key} 不合法（应为 {coherence?,coverage?} 0-100 整数）——忽略`);
+          continue;
+        }
+        const entry = {};
+        for (const k of ['coherence', 'coverage']) {
+          if (sub[k] === undefined) continue;
+          if (Number.isInteger(sub[k]) && sub[k] >= 0 && sub[k] <= 100) entry[k] = sub[k];
+          else console.warn(`[workflow-config] research.usageGates.${key}.${k} ${JSON.stringify(sub[k])} 不合法（0-100 整数）——忽略`);
+        }
+        if (Object.keys(entry).length) out.usageGates[key] = entry;
+      }
+      if (!Object.keys(out.usageGates).length) delete out.usageGates;
+    }
   }
   return out;
 }

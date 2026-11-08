@@ -525,20 +525,31 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
   const sources = String(sourcesBlocks ?? '').slice(0, CAP * 4);
   return (
     `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
-    `# 任务：复核一份调研 brief 的可信度（内部一致性审查）\n\n` +
+    `# 任务：复核一份调研 brief 的可信度（claim 级一致性审查）\n\n` +
     `今天是 ${today}。你没有联网工具——只依据下面给定的 brief 与来源快照判断，不给材料之外的事实下结论。\n` +
     `你的知识只用来标记「可疑冲突」（如 brief 所述与普遍认知明显矛盾处），标注为疑点而非定论。\n\n` +
     `## 待复核 brief\n\n${String(briefBody ?? '').slice(0, CAP)}\n\n` +
-    `## 来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失——请把「快照缺失，无法对账」列为理由）'}\n\n` +
+    `## 来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失——相应 claim 请判 unverifiable）'}\n\n` +
     `# 产出契约\n\n` +
+    `挑出 brief 中**至多 10 条承重结论**（数字/排名/事实性断言），逐条判定，输出单个 fenced block（内容为合法 JSON）：\n\n` +
     `${fence}${VERDICT_MARKER}\n` +
-    `level: high | medium | low（high=结论被快照支撑；medium=部分支撑/依赖转述；low=关键结论在快照中找不到依据或与快照矛盾）\n` +
-    `blockers: <低可信的硬伤数>\n` +
-    `# 理由\n- <逐条：结论↔快照的支撑关系、疑点、缺口；没把握写「疑点」>\n` +
+    `{\n` +
+    `  "claims": [\n` +
+    `    { "claim": "<逐字摘自 brief 原文的承重结论，≤80 字，禁止改写/概括>", "status": "supported", "note": "<一句话：快照哪里支撑/矛盾/缺口>" }\n` +
+    `  ],\n` +
+    `  "blockers": ["<低可信硬伤一句话；无则空数组>"]\n` +
+    `}\n` +
     `${fence}\n\n` +
+    `status 枚举（只允许这五个）：\n` +
+    `- supported：快照里有直接依据\n` +
+    `- partial：部分依据/依赖转述\n` +
+    `- unsupported：快照里找不到依据\n` +
+    `- contradicted：与快照内容矛盾（或两处引文互相矛盾）\n` +
+    `- unverifiable：快照缺失或纯定性无法对账\n\n` +
     `硬性要求：\n` +
-    `1. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
-    `2. brief 自己标注「未证实/转述」的地方不算硬伤（诚实标注是加分项）；\n` +
-    `3. 围栏外只允许一句话概述。\n`
+    `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废）；\n` +
+    `2. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
+    `3. brief 自己标注「未证实/转述」不算硬伤（诚实标注是加分项），但该 claim 最多 partial；\n` +
+    `4. 围栏外只允许一句话概述。\n`
   );
 }

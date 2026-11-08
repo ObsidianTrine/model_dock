@@ -8,7 +8,7 @@ export interface LogAttempt {
   provider: string
   status?: number
   ms?: number
-  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / connect_failed / headers_timeout */
+  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / model_mismatch / connect_failed / headers_timeout */
   note?: string
 }
 

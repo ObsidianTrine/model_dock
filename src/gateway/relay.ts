@@ -4,7 +4,7 @@ import { providerKeyRefs, resolveProviderKeys } from '../config/secrets.js'
 import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
-import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type OrderedCandidate, type ResolvedTarget } from './state.js'
 import { isModelMeltdown, recordModelOutcome } from './state/routing.js'
 import type { LogAttempt } from './state/types.js'
 import { debugLog, debugOn } from './state/debuglog.js'
@@ -795,6 +795,42 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
   return out
 }
 
+/** 自动候选（自动补尾 / 避开补链，OrderedCandidate.auto）的模型相容过滤：按「别名/兜底改写后实际
+ *  会发给候选的模型名」对照候选服务目录（provider.models），目录已管理（非空）且不含该模型的候选
+ *  直接剔除——重放过去必然 400 Unsupported model（2026-11-08 实证：bigmodel-2 限流 429 → 自动补尾
+ *  把 glm-4.7 原样发往不支持它的服务，整链失败，错误日志被「模型不存在」噪音淹没、真因 429 反被掩盖）。
+ *  显式配置不受限：主候选 / 手动 fallback（含 <provider>:<model> 映射）/「下一个切换」/ 窗口目标照旧。
+ *  目录未管理（models 缺省或空）不拦——没有证据不判死刑，维持「模型归客户端管」的透传语义。
+ *  wire（请求体顶层 model）拿不准（扫描 null）或非 routed path 时整体不过滤；undefined（无 model 键）
+ *  时仍按 resolveModelFinal 判定——改写层会给无 model 请求注入 default_model，对账口径必须一致。
+ *  被剔候选留痕：attempts 记 note=model_mismatch（与 queue_full 同风格），modelSkip 供 reason 标记。 */
+function filterModelCompatible(
+  ordered: OrderedCandidate[],
+  wire: string | undefined | null,
+  routedPath: boolean,
+  attempts: LogAttempt[],
+  modelSkip: string[]
+): OrderedCandidate[] {
+  if (!routedPath || wire === null) return ordered
+  const kept: OrderedCandidate[] = []
+  for (const c of ordered) {
+    if (!c.auto || c.isPrimary) {
+      kept.push(c)
+      continue
+    }
+    const final = resolveModelFinal(c.target, wire)
+    const catalog = c.target.provider.models
+    const managed = !!catalog && Object.keys(catalog).length > 0
+    if (!final || !managed || catalog[final] !== undefined) {
+      kept.push(c)
+      continue
+    }
+    if (!modelSkip.includes(c.providerId)) modelSkip.push(c.providerId)
+    attempts.push({ provider: c.providerId, note: 'model_mismatch' })
+  }
+  return kept.length === ordered.length ? ordered : kept
+}
+
 /**
  * 请求级故障切换：按 pickTarget 排出的候选依次转发（手动链优先，自动备用链补尾）。
  * 安全边界：仅 transport=true（未送达）与额度耗尽类（未产出内容）才改发下一候选；已送达的真实
@@ -805,6 +841,8 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
  * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
  * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
  * 429 退避（P0③）：上游 429 带 Retry-After 且 ≤ 5s 时同候选原地等待重试一次（额度体除外），留痕 retried_429:。
+ * 模型相容：自动补尾/避开补链候选按请求模型（别名改写后）对照服务目录，目录已管理且不含该模型的
+ * 不重放（model_mismatch 留痕，见 filterModelCompatible）；显式配置（手动链/钉定/窗口）不受限。
  */
 export async function forwardWithFailover(
   rt: GatewayRuntime,
@@ -835,6 +873,8 @@ export async function forwardWithFailover(
   // （安全帽 MAX_MODEL_FALLBACK_HOPS，见常量注）
   const fallbackTo: string[] = []
   let mfHops = 0
+  // 因模型目录不含请求模型被剔除的自动候选（reason 留痕，同 replayed_from 风格）
+  const modelMismatch: string[] = []
   // 逐候选 attempt 记录（日志 attempts 列）：真实转发记 status+ms，被跳过记 note 短码——
   // 排障时能看出「哪个候选因什么被跳过」，不再只有 replayed_from:<id> 一个 id 痕迹
   const attempts: LogAttempt[] = []
@@ -843,8 +883,16 @@ export async function forwardWithFailover(
     if (!(e instanceof UpstreamError)) return 'connect_failed'
     return e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
   }
-  for (let i = 0; i < picked.ordered.length; i++) {
-    const c = picked.ordered[i]
+  // 自动候选模型相容过滤（见 filterModelCompatible）：目录不含请求模型的服务不重放，剔除留痕 attempts/reason
+  const cands = filterModelCompatible(
+    picked.ordered,
+    topLevelModel(opts.body),
+    ROUTED_PATH_RE.test(opts.path.split('?')[0]),
+    attempts,
+    modelMismatch,
+  )
+  for (let i = 0; i < cands.length; i++) {
+    const c = cands[i]
     const t0 = Date.now()
     // 并发闸（P0②）：转发前对实际选中候选的 provider 取槽；满载排队 ≤ queue_wait_ms。
     // 槽位生命周期到响应结束（成功路径挂在返回值上由 server.ts 释放）；失败路径就地释放
@@ -856,7 +904,7 @@ export async function forwardWithFailover(
       } catch (e) {
         // 排队超时 ≠ 上游故障（不记熔断）：链中还有候选就跳过去换一家，链尾才回 429+hint
         if (e instanceof ProviderQueueTimeoutError) {
-          if (i < picked.ordered.length - 1) {
+          if (i < cands.length - 1) {
             if (!queueFull.includes(c.providerId)) queueFull.push(c.providerId)
             attempts.push({ provider: c.providerId, note: 'queue_full' })
             markReplay(c.providerId)
@@ -910,7 +958,7 @@ export async function forwardWithFailover(
       else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
       else recordOutcome(rt, c.providerId, { ok: true, ms })
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
-      if (canSwitch && i < picked.ordered.length - 1) {
+      if (canSwitch && i < cands.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
         slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
         slot = undefined
@@ -919,13 +967,14 @@ export async function forwardWithFailover(
         continue
       }
       // 模型级容灾（M1 链尾合成）：到这里还带 quota 的必是链尾候选（链中段已在上方分支切走）——
-      // 同 provider 内按 model_fallback 映射换备用模型再试一跳。合成候选 push 进 picked.ordered，
-      // 循环头每次迭代重读数组长度自然接管；备用模型再 402 时按其键继续查映射（配置期已拒环）。
+      // 同 provider 内按 model_fallback 映射换备用模型再试一跳。合成候选 push 进 cands（本次迭代的
+      // 候选数组：无剔除时即 picked.ordered 同一引用，有剔除时为过滤副本，push picked.ordered 进不了循环）；
+      // 备用模型再 402 时按其键继续查映射（配置期已拒环）。
       // 备用模型已熔断 / 达跳数安全帽 / 该模型无映射 → 不合成，402 维持原样回传（现状行为）。
       if (quota && sentModel !== undefined && mfMap) {
         const fbModel = mfMap[sentModel]
         if (fbModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
-          picked.ordered.push({
+          cands.push({
             target: { ...c.target, modelOverride: fbModel }, // 全新对象：绝不改共享候选引用
             providerId: c.providerId,
             isPrimary: false,
@@ -945,6 +994,7 @@ export async function forwardWithFailover(
       if (fallbackTo.length) marks.push(`fallback_to:${fallbackTo.join(',')}`)
       if (queueFull.length) marks.push(`queue_full:${queueFull.join(',')}`)
       if (retried429.length) marks.push(`retried_429:${retried429.join(',')}`)
+      if (modelMismatch.length) marks.push(`model_mismatch:${modelMismatch.join(',')}`)
       if (replayedFrom.length) marks.push(`replayed_from:${replayedFrom.join(',')}`)
       // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
       // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
@@ -975,7 +1025,7 @@ export async function forwardWithFailover(
       // 是否切换由 failover_status_codes 白名单显式授权（包装 status=502，还有剩余候选才切；三态见 UpstreamError.transport 注）
       const timeoutTransport = e instanceof UpstreamError && e.transport === 'timeout'
       const whitelistSwitch =
-        timeoutTransport && i < picked.ordered.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
+        timeoutTransport && i < cands.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
       recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
       const note = classifyAttemptError(e)

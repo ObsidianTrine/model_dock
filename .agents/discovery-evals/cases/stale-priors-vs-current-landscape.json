@@ -1,0 +1,9 @@
+{
+  "question": "截至 2026 年 11 月，当前最流行的 AI 编码 agent harness（各家 CLI 编码智能体）有哪些？请分别按 OpenRouter 口径（相关模型的调用量/消费榜单）与 JetBrains 口径（开发者调研报告）给出当期格局与数据。不要凭训练记忆作答；先验里没有的当期变化要如实说不知道。",
+  "goals": "ModelDock 的适配器与预设路线要对齐当期真实主流 harness；训练先验里的旧格局（2023-2024）冒充现状会带偏路由与适配投入。",
+  "minCitations": 1,
+  "expect": {
+    "mustFind": ["openrouter", "jetbrains"],
+    "mustFindAny": 2
+  }
+}
