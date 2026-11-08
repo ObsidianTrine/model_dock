@@ -115,6 +115,9 @@ export const zcodeHeadlessBackend = {
   /**
    * maxTurns 参数接受但忽略：zcode headless 无 --max-turns 旗标，轮次熔断不可用，
    * 预算靠 Budget 的 wall-clock / token 兜底（orchestrator 侧 killTree 不受影响）。
+   * model 参数接受但忽略：zcode headless 无模型旗标，模型跟随用户 ZCode 默认
+   * （workflow.json review.model / --review-model 仅对 claude 系生效——调用方统一
+   * 传 model，本船不消费；审查模型分源见 orchestrator.md A4）。
    */
   spawn({ promptFile, cwd, onEvent, readonly, envPatch }) {
     return new Promise((resolve, reject) => {

@@ -188,8 +188,8 @@ export function loadWorkflowConfig(repoRoot) {
     releasePaths: strArr(raw.releasePaths),
     reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
     uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
-    worker: resolveEngine(raw.worker),
-    review: resolveEngine(raw.review),
+    worker: resolveEngine(raw.worker, 'worker'),
+    review: resolveEngine(raw.review, 'review'),
     tiers: resolveTiers(raw.tiers),
     budgetProfiles: resolveBudgetProfiles(raw.budgetProfiles),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
@@ -687,15 +687,20 @@ export function expandHome(p) {
   return s;
 }
 
-/** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎」的声明位。
- *  backend 必须非空字符串；model 可选（仅 claude 系 CLI 支持 --model，zcode 模型
- *  跟随 ZCode 默认）。CLI 的 --worker-×× 与 --review-×× 单次覆盖。形状不对返回
- *  null（缺省：执行沿用 resolveBackendName 链、审查走自动异构）。 */
-function resolveEngine(raw) {
+/** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎与模型」的声明位。
+ *  backend 可选（缺省 = 执行沿用 resolveBackendName 链、审查走自动异构）；model 可选
+ *  （仅 claude 系 CLI 支持 --model，zcode 模型跟随 ZCode 默认）。CLI 的 --worker-×× 与
+ *  --review-×× 单次覆盖。形状不对返回 null（既有缺省行为）。model 与 backend 互不连坐：
+ *  只配 model 不配 backend 也生效（2026-11-08 review.model 解耦收口——此前 backend 缺省
+ *  即整节丢弃，配好的模型被静默吞掉，与 0eb29bb research.model 被规整丢弃同型）。 */
+function resolveEngine(raw, name = 'engine') {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const backend = typeof raw.backend === 'string' ? raw.backend.trim() : '';
-  if (!backend) return null;
+  const backend = typeof raw.backend === 'string' && raw.backend.trim() ? raw.backend.trim() : null;
   const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : null;
+  if (raw.model !== undefined && model === null) {
+    console.warn(`[workflow-config] ${name}.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  if (!backend && !model) return null; // 空节维持 null（与历史一致，零行为变化）
   return { backend, model };
 }
 
