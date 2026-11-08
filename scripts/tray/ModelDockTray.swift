@@ -171,6 +171,17 @@ struct UpdateStatusPayload: Decodable {
     /// 摘要收口（首段 + 分节点题计数，服务端已降好纯文本）；旧版网关无此字段，弹窗回落 notes 全文
     let summary: String?
     let htmlUrl: String?
+    /// 预取缓存态（网关后台预下载的安装包）；旧版网关无此字段
+    let staged: StagedStatus?
+}
+
+/// 预取缓存态：ready=true 时一键更新跳过下载秒装；未 ready 时 received/total 是后台下载进度
+struct StagedStatus: Decodable {
+    let version: String
+    let ready: Bool
+    let received: Double
+    let total: Double
+    let error: String?
 }
 
 /// update-progress.json（update --yes 子进程写的进度；读方按 at 过期判残留）
@@ -783,7 +794,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     }
 
-    /// 检查更新入口：网关存活走网关缓存接口（控制台/托盘/网关三方同源），否则退回 CLI 现查。
+    /// 检查更新入口：网关存活走「POST force 现查 → 轮询 status」，否则退回 CLI 现查。
     /// 点击后立刻弹「正在检查更新…」小窗——此前静默等待最长 15s，用户以为点击无效（v1.1.1 实测反馈）。
     @objc func checkUpdateClicked() {
         guard !checkingUpdate else { return } // 菜单项已置灰，这里兜底防连点
@@ -795,14 +806,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updatePanel!.show(title: "ModelDock", text: L("正在检查更新…", "Checking for updates…"))
         let state = readState()
         if let s = state, pidAlive(s.pid) {
-            pollGatewayUpdateStatus(state: s, attempts: 0, gen: gen)
+            forceGatewayCheck(state: s, gen: gen)
         } else {
             checkViaCli(gen: gen)
         }
     }
 
-    /// 网关缓存路径：GET /admin/update/status 自带惰性检查（24h TTL / 失败 30min 退避），
-    /// checking=true 表示首次检查在飞，0.5s 轮询到 false 取结果；HTTP 不通退回 CLI 现查
+    /// 手动检查先 POST /admin/update/check（force 现查，越过网关 24h TTL / 30min 退避）——
+    /// 「检查更新…」的语义就是现查，缓存态只配自动路径。POST 不通（旧版网关无此端点 / HTTP 故障）
+    /// 回落 CLI 现查；成功后进入 status 轮询（checking=true 期间 0.5s 一次到 false 取结果）。
+    private func forceGatewayCheck(state: GatewayState, gen: Int) {
+        guard checkingUpdate, gen == updateActionGen else { return }
+        guard let url = URL(string: "http://127.0.0.1:\(state.port)/_modeldock/admin/update/check") else {
+            checkViaCli(gen: gen)
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 5
+        req.setValue(state.admin_token, forHTTPHeaderField: "x-modeldock-admin")
+        URLSession.shared.dataTask(with: req) { [weak self] _, resp, err in
+            DispatchQueue.main.async {
+                guard let self = self, self.checkingUpdate, gen == self.updateActionGen else { return }
+                let ok = (resp as? HTTPURLResponse)?.statusCode == 200
+                guard err == nil, ok else {
+                    self.checkViaCli(gen: gen)
+                    return
+                }
+                self.pollGatewayUpdateStatus(state: state, attempts: 0, gen: gen)
+            }
+        }.resume()
+    }
+
+    /// 网关状态轮询：GET /admin/update/status，checking=true 表示检查在飞，0.5s 轮询到 false 取结果；
+    /// HTTP 不通退回 CLI 现查
     private func pollGatewayUpdateStatus(state: GatewayState, attempts: Int, gen: Int) {
         guard checkingUpdate, gen == updateActionGen else { return } // 已被超时/新操作作废
         guard let url = URL(string: "http://127.0.0.1:\(state.port)/_modeldock/admin/update/status") else {
@@ -883,14 +920,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 检查结果弹窗（网关路径）：字段齐全，不再解析 CLI 文本
     private func showUpdateCheckResultPayload(_ st: UpdateStatusPayload) {
         if st.available {
-            let hint = L("点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray icon will restart when done.")
+            // 预取就绪 → 按钮改「安装 vX（已就绪）」：点击后子进程复用缓存跳过下载，秒级进替换段；
+            // 预取进行中 → 正文顶部给后台下载进度；失败/未启动 → 一切照旧（点击后现下）
+            let stagedOk = st.staged?.ready == true && st.staged?.version == st.latest
+            var bgNote = ""
+            if let s = st.staged, !s.ready, s.version == st.latest, s.total > 0, s.received > 0 {
+                let pct = Int(s.received / s.total * 100)
+                bgNote = L("新版本已在后台预下载（\(pct)%），现在点击更新也无需等待。\n\n", "The new version is being prefetched in the background (\(pct)%); updating now needs no wait.\n\n")
+            }
+            let hint = stagedOk
+                ? L("安装包已就绪，点击「立即安装」直接进入替换段（几秒完成），网关与菜单栏图标自动重启。", "The package is ready — \"Install Now\" goes straight to the swap (done in seconds); the gateway and tray icon restart automatically.")
+                : L("点击「立即更新」自动下载并校验新版本，完成后网关与菜单栏图标自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray icon will restart when done.")
             // 正文优先用网关摘要收口（首段 + 分节点题计数）；旧版网关无 summary 字段回落全文，
             // 两者都进可滚动文本区——短则自适应收高，长则封顶出滚动条，按钮永远在屏内
             let body = (st.summary ?? st.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let full = bgNote + (body.isEmpty ? hint : body + "\n\n" + hint)
             let a = NSAlert()
             a.messageText = newVersionTitle(latest: st.latest ?? "", current: st.current)
-            a.accessoryView = scrollableInfo(body.isEmpty ? hint : body + "\n\n" + hint)
-            a.addButton(withTitle: L("立即更新", "Update Now"))
+            a.accessoryView = scrollableInfo(full)
+            a.addButton(withTitle: stagedOk
+                ? L("立即安装", "Install Now")
+                : L("立即更新", "Update Now"))
             if st.htmlUrl != nil { a.addButton(withTitle: L("打开发布页", "Open Release Page")) } // 无链接就不摆无用按钮
             a.addButton(withTitle: L("稍后", "Later"))
             let answer = a.runModal()
