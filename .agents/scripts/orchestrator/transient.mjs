@@ -294,7 +294,8 @@ async function fetchKeypoolRemainingMs(cfg, { timeoutMs = 3000 } = {}) {
  * 用调用方既有退避；正常路径（无 key 池 cause）零网络开销。
  * 数据面保持网关日志文件直读（A3 取舍，与 upstreamSeaState 同理）：分类要逐条明细
  * （status/cause/hint/harness/ts 逐条判定 + era 签名兜底），/_modeldock/usage 聚合端点
- * 给不了；未来 /_modeldock/logs 明细端点落地后再切。
+ * 给不了；明细端点 /_modeldock/logs/query 已落地（gateway-orch-apis，2026-11-08），
+ * 切换留作后续项（本注释 2026-11-09 勘误：原写「未来落地后再切」已过时）。
  */
 export async function classifyWorkerCrashFromDisk({ gwDir, cfg = null, output = '', stderrTail = '', window = null, backend = '', keypoolTimeoutMs = 3000 } = {}) {
   const entries = window ? readGatewayWindowEntries(gwDir, window) : null;
