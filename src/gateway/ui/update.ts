@@ -124,13 +124,20 @@ export const UI_JS_UPDATE = `  function render() {
     title.textContent = t('可更新到 ', 'Update to ') + upd.latest
     var subText = t('发现新版本 · 当前 v' + upd.current, 'New version · current v' + upd.current)
     if (upd.sizeBytes > 0) subText += t(' · 安装包 ', ' · package ') + (upd.sizeBytes / 1048576).toFixed(1) + ' MB'
+    // 预取缓存态（旧版网关无 staged 字段照常工作）：就绪 → 按钮换「立即安装」（点击后子进程
+    // 复用缓存跳过下载秒装）；后台预下载中 → 副行给进度；失败/未启动 → 不打扰，点击后现下
+    var staged = upd.staged
+    var stagedReady = !!(staged && staged.ready && staged.version === upd.latest)
+    if (staged && !stagedReady && staged.version === upd.latest && staged.total > 0 && staged.received > 0) {
+      subText += t(' · 后台已下载 ', ' · prefetched ') + Math.floor((staged.received / staged.total) * 100) + '%'
+    }
     sub.textContent = subText
     // 说明是纯文本（服务端已去 markdown 标记）：弹层不渲染富文本，只给「去发布页看全文」的外链
     notes.hidden = !upd.notes
     notes.textContent = upd.notes || ''
     more.hidden = !upd.htmlUrl
     more.innerHTML = more.hidden ? '' : docLinkA(t('在 GitHub 查看完整说明', 'View full notes on GitHub'), upd.htmlUrl)
-    go.textContent = updApplying ? t('更新中…', 'Updating…') : t('更新到 ', 'Update to ') + upd.latest
+    go.textContent = updApplying ? t('更新中…', 'Updating…') : stagedReady ? t('立即安装', 'Install Now') : t('更新到 ', 'Update to ') + upd.latest
     go.disabled = updApplying
     copy.disabled = updApplying
     dismiss.disabled = updApplying

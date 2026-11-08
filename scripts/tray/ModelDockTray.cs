@@ -554,11 +554,17 @@ namespace ModelDockTray
             CloseProgressForm();
         }
 
-        /// 网关缓存路径：GET /admin/update/status 自带惰性检查（成功 24h TTL / 失败 30min 退避），
-        /// checking=true 轮询至 false 取结果；HTTP 不通退回 CLI 现查
+        /// 网关路径：先 POST /admin/update/check（force 现查，越过网关 24h TTL / 30min 退避——
+        /// 「检查更新…」的语义就是现查，缓存态只配自动路径），再轮询 GET status 至 checking=false
+        /// 取结果；force POST 不通（旧版网关无此端点 / HTTP 故障）退回 CLI 现查
         private static void CheckViaGateway()
         {
             var gw = _gw;
+            try
+            {
+                HttpPost("http://127.0.0.1:" + (gw != null ? gw.Port : "") + "/_modeldock/admin/update/check", gw != null ? gw.Token : "");
+            }
+            catch { CheckViaCli(); return; }
             for (int attempt = 0; attempt < 60; attempt++)
             {
                 string json;
@@ -692,10 +698,25 @@ namespace ModelDockTray
             if (available)
             {
                 string title = NewVersionTitle(latest, JsonString(json, "current"));
+                // 预取缓存态（旧版网关无 staged 字段 → stagedOk 恒 false，一切照旧）：
+                // ready=true → 按钮改「立即安装」（子进程复用缓存跳过下载秒装）；
+                // 后台预下载中 → 正文顶部给进度行；失败/未启动 → 不打扰，点击后现下
+                string staged = JsonSubObject(json, "staged");
+                bool stagedOk = staged != null && JsonBool(staged, "ready") && JsonString(staged, "version") == latest;
+                if (!stagedOk && staged != null && JsonString(staged, "version") == latest)
+                {
+                    double received = JsonNum(staged, "received");
+                    double total = JsonNum(staged, "total");
+                    if (total > 0 && received > 0)
+                    {
+                        int pct = (int)(received / total * 100);
+                        summary = I18n.L("新版本已在后台预下载（" + pct + "%），现在点击更新也无需等待。", "The new version is being prefetched in the background (" + pct + "%); updating now needs no wait.") + "\n\n" + summary;
+                    }
+                }
                 // 小窗只放摘要（全文塞进 560×400 会变成一面墙的长段落）；底部 hint Label 常驻说明，
                 // 正文不再重复拼一遍（原先正文和 Label 各一份同文案）
                 string body = string.IsNullOrEmpty(summary) ? (notes ?? "") : summary;
-                DialogResult r = ShowUpdateDialog(title, body, htmlUrl);
+                DialogResult r = ShowUpdateDialog(title, body, htmlUrl, stagedOk);
                 if (r == DialogResult.OK)
                 {
                     if (StartUpdate()) ShowProgressForm(I18n.L("正在更新到 v", "Updating to v") + (latest ?? ""));
@@ -724,6 +745,27 @@ namespace ModelDockTray
             }
         }
 
+        private static string HttpPost(string url, string token)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = 5000;
+            req.Method = "POST";
+            if (!string.IsNullOrEmpty(token)) req.Headers["x-modeldock-admin"] = token;
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var sr = new StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8))
+            {
+                return sr.ReadToEnd();
+            }
+        }
+
+        /// 提取顶层嵌套 flat 小对象（staged 等，无嵌套花括号）的原始内容；缺失返回 null
+        private static string JsonSubObject(string json, string field)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            var m = Regex.Match(json, "\"" + field + "\"\\s*:\\s*\\{([^{}]*)\\}");
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
         private static bool JsonBool(string json, string field)
         {
             return Regex.IsMatch(json, "\"" + field + "\"\\s*:\\s*true");
@@ -734,6 +776,14 @@ namespace ModelDockTray
             var m = Regex.Match(json, "\"" + field + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
             if (!m.Success) return null;
             return JsonUnescape(m.Groups[1].Value);
+        }
+
+        /// 数字字段解析（staged.received/total 等）：缺失或非数返回 0
+        private static double JsonNum(string json, string field)
+        {
+            var m = Regex.Match(json ?? "", "\"" + field + "\"\\s*:\\s*(-?[0-9.]+)");
+            double v;
+            return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0;
         }
 
         /// JSON 转义反转义：占位符换控——先把 \\ 换成 \u0001 占位，防止被后续 \n 等替换误吃
@@ -908,14 +958,14 @@ namespace ModelDockTray
         /// 说明窗跑在专用 STA 线程上：ThreadPool 线程是 MTA，而只读文本框的复制走 OLE 剪贴板，
         /// MTA 下会抛 ThreadStateException（既有 MessageBox 是纯 Win32 才没这问题）。
         /// 调用方（ThreadPool 线程）本就为这个弹窗存在，故 Join 等用户选完再返回。
-        private static DialogResult ShowUpdateDialog(string title, string body, string releaseUrl)
+        private static DialogResult ShowUpdateDialog(string title, string body, string releaseUrl, bool ready)
         {
             DialogResult result = DialogResult.Cancel;
             var t = new Thread(delegate()
             {
                 try
                 {
-                    using (var dlg = new UpdateDialog(title, body, releaseUrl)) { result = dlg.ShowDialog(); }
+                    using (var dlg = new UpdateDialog(title, body, releaseUrl, ready)) { result = dlg.ShowDialog(); }
                 }
                 catch (Exception ex)
                 {
@@ -974,7 +1024,7 @@ namespace ModelDockTray
     /// 由 TrayActions.ShowUpdateDialog 在专用 STA 线程上弹出（文本框复制走 OLE 剪贴板，MTA 下会抛异常）。
     internal class UpdateDialog : Form
     {
-        public UpdateDialog(string title, string body, string releaseUrl)
+        public UpdateDialog(string title, string body, string releaseUrl, bool ready)
         {
             Text = title;
             Font = SystemFonts.MessageBoxFont;
@@ -1016,14 +1066,16 @@ namespace ModelDockTray
             }
 
             var hint = new Label();
-            hint.Text = I18n.L("点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray will restart when done.");
+            hint.Text = ready
+                ? I18n.L("安装包已就绪（后台预下载完成），点击「立即安装」直接进入替换段，网关与托盘自动重启。", "Package ready (background prefetch done) — \"Install Now\" goes straight to the swap; the gateway and tray restart automatically.")
+                : I18n.L("点击「立即更新」自动下载并校验新版本，完成后网关与托盘自动重启，无需手动操作。", "Click \"Update Now\" to download and verify the new version automatically; the gateway and tray will restart when done.");
             hint.AutoSize = false;
             hint.ForeColor = SystemColors.GrayText;
             hint.SetBounds(14, 336, 532, 18);
             Controls.Add(hint);
 
             var go = new Button();
-            go.Text = I18n.L("立即更新", "Update Now");
+            go.Text = ready ? I18n.L("立即安装", "Install Now") : I18n.L("立即更新", "Update Now");
             go.DialogResult = DialogResult.OK;
             go.SetBounds(378, 362, 80, 26);
 
