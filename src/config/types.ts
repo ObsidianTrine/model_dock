@@ -40,6 +40,12 @@ export interface ProviderConfig {
    *  并发数可让超额请求在网关内排队等待（等待时长见 gateway.queue_wait_ms）而非压垮上游 */
   max_concurrency?: number
   models?: Record<string, ModelMeta>
+  /** 模型级容灾映射（同服务商内）：上游模型 ID → 备用模型 ID。仅额度耗尽类错误（HTTP 402 或
+   *  429 且错误体带额度特征）且该服务候选链走完后触发，改发同服务的备用模型重试；
+   *  未映射的模型永不触发（审查/规划等质量敏感角色的模型保护由此天然成立）。
+   *  写入口（CLI/控制台）校验价格闸门：两模型 input/output 单价差均 ≤5% 才允许配置；
+   *  config.toml 手编只做形状校验（migrate），价格闸门不拦启动。 */
+  model_fallback?: Record<string, string>
 }
 
 export interface ProfileConfig {
