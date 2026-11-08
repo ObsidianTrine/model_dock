@@ -250,10 +250,14 @@ describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 w
       expect(out.stdout).toContain('sail --minutes 30')
       expect(out.stdout).not.toContain(' --tests')
       expect(out.stdout).not.toContain(' --auto')
-      // 钥匙串解析块随预览生成（darwin 实际生效；其他平台 if 守卫空转）
-      expect(out.stdout).toContain('command -v security')
+      // 钥匙串解析块只随 unix wrapper 预览生成（darwin 实际生效、linux if 守卫空转）；
+      // win 预览是 cmd wrapper（buildRunnerWin），本就不含钥匙串块——2026-11-08 v1.7.2 门禁实证
       const win = process.platform === 'win32'
-      if (win) expect(out.stdout).not.toContain('security find-generic-password')
+      if (win) {
+        expect(out.stdout).not.toContain('security find-generic-password')
+      } else {
+        expect(out.stdout).toContain('command -v security')
+      }
       // 零落盘
       expect(fs.existsSync(runnerPath(repo.root))).toBe(false)
     } finally {
