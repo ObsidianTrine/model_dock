@@ -13,7 +13,7 @@ function stubAdapter(over: { label: string; clientProtocols?: string[] }): Harne
 }
 
 function openaiOnly(over: Partial<ProviderConfig> = {}): ProviderConfig {
-  return { name: 'BigModel-130', base_url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai', auth_style: 'bearer', ...over }
+  return { name: 'BigModel-130', base_url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:k', ...over } as ProviderConfig
 }
 
 const claudeCode = stubAdapter({ label: 'Claude Code', clientProtocols: ['anthropic'] })
