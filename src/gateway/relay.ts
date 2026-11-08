@@ -5,6 +5,8 @@ import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type ResolvedTarget } from './state.js'
+import type { LogAttempt } from './state/types.js'
+import { debugLog, debugOn } from './state/debuglog.js'
 import { dispatcherFor } from './proxy.js'
 import { acquireProviderSlot, ProviderQueueTimeoutError, providerConcurrencyLimit, queueWaitMs, type ProviderSlot } from './concurrency.js'
 
@@ -43,6 +45,7 @@ export function upstreamEndpoint(provider: ProviderConfig, proto: Protocol): str
       t('在「编辑服务」里填入该协议的接口地址，或改用该服务商支持的协议', 'Fill in the endpoint URL for this protocol in "Edit Service", or use a protocol the provider supports')
     )
     e.candidateSkip = true // 该候选不支持客户端协议
+    e.cause = 'proto_endpoint_missing'
     throw e
   }
   return ep
@@ -127,6 +130,10 @@ export class UpstreamError extends Error {
   candidateSkip?: boolean
   /** 自动路由结果标记（down_all / failover / skip_all 等），用于日志 reason */
   routeReason?: string
+  /** 网关侧错误归类短码（与 LogEntry.cause 同一枚举）：各抛出点就地打标，日志/前端据此显示可读原因，不再靠解析错误文本 */
+  cause?: string
+  /** failover 链已发生的逐候选记录（链中途抛出时经错误对象带出到日志，见 forwardWithFailover） */
+  attempts?: LogAttempt[]
   constructor(status: number, message: string, hint?: string) {
     super(message)
     this.name = 'UpstreamError'
@@ -470,6 +477,7 @@ export async function forwardToUpstream(
       t('检查系统钥匙环是否已解锁（解锁后重试）；或 modeldock provider set-key {id} 重新设置 key', 'Check that the system keyring is unlocked and retry; or run modeldock provider set-key {id} to set the key again', { id: providerId })
     )
     e.candidateSkip = true
+    e.cause = 'key_pool_empty'
     throw e
   }
   // key 级健康过滤（P1⑥）：处于失效冷却期（上游 401/403 标记）的 key 直接跳过；全部在冷却
@@ -484,6 +492,7 @@ export async function forwardToUpstream(
       t('冷却 15 分钟后自动重试；已换新 key 可在 config.toml 保存 keys（热加载立即恢复），或 modeldock provider set-key {id} 更新', 'Cooldown ends in 15 minutes and retries automatically; after replacing a key, save the keys array in config.toml (hot-reload restores it immediately) or run modeldock provider set-key {id}', { id: providerId })
     )
     e.candidateSkip = true
+    e.cause = 'key_cooldown'
     throw e
   }
 
@@ -581,6 +590,7 @@ export async function forwardToUpstream(
           t('key 已自动冷却并切换备用服务；更换 key 后热加载立即恢复：modeldock provider set-key {id}', 'Keys were cooled down automatically and traffic moved to the fallback; replacing a key restores it immediately via hot-reload: modeldock provider set-key {id}', { id: providerId })
         )
         e.candidateSkip = true
+        e.cause = 'key_pool_rejected'
         throw e
       }
     }
@@ -686,6 +696,10 @@ export interface FailoverResult extends UpstreamResult {
   usedProviderId: string
   /** 改发/重放事件标记（failover_to:<id>、replayed_from:<id>）；主选直连成功不设——日志过滤与 Web 展示依赖「非空即事件」约定 */
   reason?: string
+  /** 最终候选的错误归类短码（仅失败时非空：quota / upstream_4xx / upstream_5xx 等），供日志 cause 列 */
+  cause?: string
+  /** failover 链逐候选记录：链长>1 或最终失败才有（直连成功不写，日志保持精简） */
+  attempts?: LogAttempt[]
   /** 并发闸槽位释放句柄（该候选配了 max_concurrency 时非空）：响应结束（错误回包发出 / 流式读完）后必须调用，
    *  流式响应要等客户端收完才释放。转发失败路径由 forwardWithFailover 内部就地释放，不经此字段 */
   release?: () => void
@@ -748,6 +762,7 @@ function queueTimeoutError(e: ProviderQueueTimeoutError, p: ProviderConfig | und
     t('调大 config.toml 中该服务的 max_concurrency（Web 控制台「编辑服务」可改），或降低客户端并发数', 'Raise max_concurrency for this provider in config.toml (editable under "Edit Service" in the web console), or reduce client concurrency')
   )
   err.routeReason = 'queue_full'
+  err.cause = 'queue_full'
   return err
 }
 
@@ -798,6 +813,14 @@ export async function forwardWithFailover(
   // 并发闸排队超时被跳过的候选与做了 429 退避重试的候选（reason 留痕，同 replayed_from 风格）
   const queueFull: string[] = []
   const retried429: string[] = []
+  // 逐候选 attempt 记录（日志 attempts 列）：真实转发记 status+ms，被跳过记 note 短码——
+  // 排障时能看出「哪个候选因什么被跳过」，不再只有 replayed_from:<id> 一个 id 痕迹
+  const attempts: LogAttempt[] = []
+  /** 候选失败/跳过的原因短码：抛出点已打标（UpstreamError.cause）的优先；传输层失败按 transport 分类 */
+  const classifyAttemptError = (e: unknown): string | undefined => {
+    if (!(e instanceof UpstreamError)) return 'connect_failed'
+    return e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
+  }
   for (let i = 0; i < picked.ordered.length; i++) {
     const c = picked.ordered[i]
     const t0 = Date.now()
@@ -813,10 +836,13 @@ export async function forwardWithFailover(
         if (e instanceof ProviderQueueTimeoutError) {
           if (i < picked.ordered.length - 1) {
             if (!queueFull.includes(c.providerId)) queueFull.push(c.providerId)
+            attempts.push({ provider: c.providerId, note: 'queue_full' })
             markReplay(c.providerId)
             continue
           }
-          throw queueTimeoutError(e, rt.config.providers[c.providerId])
+          const qe = queueTimeoutError(e, rt.config.providers[c.providerId])
+          qe.attempts = attempts
+          throw qe
         }
         throw e // 客户端断开（aborted）：原样上抛，handleRequest 落 499
       }
@@ -840,6 +866,7 @@ export async function forwardWithFailover(
         }
       }
       const ms = Date.now() - t0
+      attempts.push({ provider: c.providerId, status: up.status, ms })
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
       if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
@@ -855,6 +882,7 @@ export async function forwardWithFailover(
         slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
         slot = undefined
         markReplay(c.providerId)
+        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: quota ? 'quota' : `http_${up.status}`, ms })
         continue
       }
       const marks: string[] = []
@@ -870,10 +898,14 @@ export async function forwardWithFailover(
         : up
       // 成功路径不在此释放：流式响应要等客户端收完才释放槽（server.ts 于响应结束后调用 release）
       const held = slot
+      // attempts 只在「发生过改发」或「最终失败」时随行（直连成功不写，日志保持精简）
+      const finalBad = out.status >= 400 || !!quota
       return {
         ...out,
         usedProviderId: c.providerId,
         reason: marks.length ? marks.join(',') : undefined,
+        ...(finalBad ? { cause: quota ? 'quota' : out.status >= 500 ? 'upstream_5xx' : 'upstream_4xx' } : {}),
+        ...(attempts.length > 1 || finalBad ? { attempts } : {}),
         ...(held ? { release: () => held.release() } : {}),
       }
     } catch (e) {
@@ -891,8 +923,16 @@ export async function forwardWithFailover(
         timeoutTransport && i < picked.ordered.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
       recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
-      if (skip || whitelistSwitch) markReplay(c.providerId)
-      else throw e // 非传输层错误：不重放，原样上抛
+      const note = classifyAttemptError(e)
+      attempts.push(note ? { provider: c.providerId, note, ms } : { provider: c.providerId, ms })
+      if (skip || whitelistSwitch) {
+        markReplay(c.providerId)
+        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: note, ms })
+      } else {
+        // 非传输层错误：不重放，原样上抛——链上已发生的 attempts 经错误对象带出（供日志 cause/attempts 列）
+        if (e instanceof UpstreamError) e.attempts = attempts
+        throw e
+      }
     }
   }
   // 链尾出口（CORRECT-09 ②）：候选全部 candidateSkip 耗尽时从未发生真实连接——透传最后一个
@@ -901,6 +941,7 @@ export async function forwardWithFailover(
   // 既有 502 包装 + down_all 语义不变。
   if (lastErr instanceof UpstreamError && lastErr.candidateSkip === true) {
     lastErr.routeReason = 'skip_all'
+    lastErr.attempts = attempts
     throw lastErr
   }
   const e = new UpstreamError(
@@ -909,5 +950,7 @@ export async function forwardWithFailover(
     t('modeldock test 逐个验证候选服务；常见根因：key 失效（modeldock provider set-key）、网络/代理不通、上游宕机', 'Verify each candidate with modeldock test; common causes: a stale key (modeldock provider set-key), network/proxy down, or the upstream being down')
   )
   e.routeReason = 'down_all'
+  e.cause = 'connect_failed'
+  e.attempts = attempts
   throw e
 }

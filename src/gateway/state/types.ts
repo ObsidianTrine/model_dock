@@ -2,6 +2,16 @@ import type { Dispatcher } from 'undici'
 import type { Config, ProfileConfig, ProviderConfig } from '../../config/types.js'
 import type { HolidayCalendar, HolidayDayNamed } from '../daytype.js'
 
+/** failover 链逐候选记录：真实转发候选记 status+ms；被跳过候选（candidateSkip/排队超时）note=跳过原因短码。
+ *  附着于 LogEntry.attempts / UpstreamError.attempts（链中途抛出时经错误对象带出）。 */
+export interface LogAttempt {
+  provider: string
+  status?: number
+  ms?: number
+  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / connect_failed / headers_timeout */
+  note?: string
+}
+
 export interface LogEntry {
   ts: string
   /** 默认 'request'（转发请求）；管理面连接测试也记为 request，便于排查 */
@@ -14,6 +24,17 @@ export interface LogEntry {
   status?: number
   ms?: number
   err?: string
+  /** 日志级别（结构化日志惯例，供按严重度筛选）：error=请求失败（status≥400/err）；warn=偏离主选直连成功（发生改发/排队/退避等事件，reason 非空）；info=普通成功。logRequest 统一补写，旧日志无此字段。 */
+  level?: 'info' | 'warn' | 'error'
+  /** 网关侧错误归类短码（机器可读；显示文案由前端按语言映射，服务端不固化语言）：
+   *  proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full /
+   *  connect_failed / headers_timeout / quota / upstream_4xx / upstream_5xx / unauthorized /
+   *  local_limit / client_abort / stream_interrupt */
+  cause?: string
+  /** 可操作修复建议（来自 translateUpstreamError 的 modeldock 信封拆出，不再被 err 截断吞掉） */
+  hint?: string
+  /** failover 链逐候选记录：仅当链长>1 或最终失败时写入，直连成功不写（文件保持精简） */
+  attempts?: LogAttempt[]
   /** 路由事件标记：仅在偏离主选直连成功时设置（failover_to:<id>、replayed_from:<id>、down_all、skip_all）；缺席=普通成功，日志过滤依赖「非空即事件」 */
   reason?: string
   /** 请求关联 ID（8 字节 hex）：handleRequest 入口生成，与响应头 x-modeldock-request-id、错误响应体
@@ -97,6 +118,9 @@ export interface GatewayRuntime {
   /** token → harness id */
   tokens: Map<string, string>
   ring: RingEntry[]
+  /** 成功请求小环形缓冲（与 ring 同构、独立上限）：2xx 且无 err/reason 的转发请求才进，
+   *  供控制台「成功请求」筛选页展示/复制（默认错误视图不受影响）。可选：测试手搭的 rt 可不建。 */
+  okRing?: LogEntry[]
   startedAt: number
   adminToken: string
   reloads: number
