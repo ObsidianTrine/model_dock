@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Model-level failover**: when the primary model inside one provider runs out of quota, the gateway retries on a backup model of the same provider instead of switching the whole route to another provider. Only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the provider's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (enforced by the CLI/console write paths); **unmapped models never trigger**, so quality-sensitive roles such as reviewers and planners are never silently swapped. Enable with `model_fallback = { "primary" = "backup" }` in the service section of config.toml; changes hot-apply immediately.
+
 ## [1.7.2] - 2026-11-08
 
 Update prefetch with one-click second-level installs, readable request logs, and protocol checks before pinning; the bigmodel preset ships with the Anthropic endpoint; the tray "Check for Updates" now checks live.

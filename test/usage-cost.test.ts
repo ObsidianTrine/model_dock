@@ -18,6 +18,7 @@ import {
   summarizeUsage,
   usageTodayView,
   type LogEntry,
+  type UsageSummary,
 } from '../src/gateway/state.js'
 import { normalizeApiCatalog } from '../src/providers/catalog.js'
 import { clearCatalogMemo } from '../src/providers/catalog.js'
@@ -233,6 +234,74 @@ describe('usage 聚合 billable 维度（createUsageAccumulator：条目已算�
     ])
     expect(f.billable_tokens).toBe(0)
     expect(f.billable_partial).toBe(false)
+  })
+})
+
+describe('usage 聚合 tokens_by_model 维度（模型级容灾观测：per-model token 四桶）', () => {
+  const entry = (over: Partial<LogEntry>): LogEntry =>
+    ({
+      ts: '2026-11-02T10:00:00.000+08:00',
+      harness: 'c',
+      profile: 'p',
+      provider: 'zhipuai',
+      model: 'glm-5.3-flash',
+      path: '/v1/messages',
+      status: 200,
+      usage: { input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      ...over,
+    }) as LogEntry
+
+  it('多模型多请求：四桶按 model 分桶，全局 tokens 桶不受影响', () => {
+    const s = summarizeUsage([
+      entry({ usage: { input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 200, cache_creation_tokens: 50 } }),
+      entry({ usage: { input_tokens: 500, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+      entry({ model: 'glm-5.2', usage: { input_tokens: 10, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+    ])
+    // input_tokens 与全局 tokens 同口径：缓存读 + 缓存建计入
+    expect(s.tokens_by_model!['glm-5.3-flash']).toEqual({
+      input_tokens: 1_000 + 200 + 50 + 500,
+      output_tokens: 120,
+      cache_read_tokens: 200,
+      cache_creation_tokens: 50,
+    })
+    expect(s.tokens_by_model!['glm-5.2']).toEqual({ input_tokens: 10, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    // 全局 tokens 桶不变（既有口径零变化）
+    expect(s.tokens.input).toBe(1_760)
+    expect(s.tokens.output).toBe(121)
+    expect(s.tokens.cache_read).toBe(200)
+    expect(s.tokens.cache_creation).toBe(50)
+    // 纯 token 观测不依赖查价器（cost=null 时照常产出）
+    expect(s.cost).toBeNull()
+  })
+
+  it('缺 model 的条目跳过分桶不记账（全局桶照记）；失败与无 usage 条目不进分桶', () => {
+    const s = summarizeUsage([
+      entry({ model: undefined, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 } }), // 极老日志：无 model
+      entry({ status: 500, usage: { input_tokens: 999_999, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 } }), // 失败请求
+      entry({ usage: undefined }), // 成功但无 usage
+    ])
+    expect(s.tokens_by_model).toEqual({})
+    expect(s.tokens.input).toBe(100) // 全局桶不受缺 model 影响
+    expect(s.by_model['(unknown)']).toBeUndefined() // 不落 (unknown) 桶（与 cost 的 unpriced 口径不同：token 分桶直接跳过）
+  })
+
+  it('字段可选：不带 tokens_by_model 的旧 Summary 结构仍合法（旧消费方不破）', () => {
+    const old: UsageSummary = {
+      requests: 1,
+      ok: 1,
+      failed: 0,
+      by_status: {},
+      by_provider: {},
+      by_model: {},
+      latency: { p50: null, p95: null, p99: null },
+      tokens: { input: 1, output: 2, cache_read: 0, cache_creation: 0 },
+      billable_tokens: 0,
+      billable_partial: false,
+      cost: null,
+      unpriced_models: null,
+      window: { first: null, last: null },
+    }
+    expect(old.tokens_by_model).toBeUndefined()
   })
 })
 
