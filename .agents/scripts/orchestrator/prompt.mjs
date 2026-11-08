@@ -485,7 +485,8 @@ export function buildResearchPrompt(questionText, repoRoot, { goalsText = '', mi
     `# 任务：把下面的问题调研清楚，产出一份带引用的调研结论（research brief）\n\n` +
     `今天是 ${today}——你输出的一切「当前/最新」都以它为准；你的训练知识可能过时，现状问题必须以本次检索结果为准。\n\n` +
     `调研问题：${clean}\n\n` +
-    `你可以用 WebSearch / WebFetch 检索与阅读外部资料，用 Read/Glob/Grep 查看本仓库现状。\n` +
+    `你可以用 WebSearch / WebFetch 检索与阅读外部资料；若工具列表里有 mcp__zsearch__web_search（智谱搜索包）也可直接使用。` +
+    `用 Read/Glob/Grep 查看本仓库现状。\n` +
     `你没有 Bash 也没有任何写文件工具——只调研，不改仓库。\n\n` +
     (goalsText ? `## 项目罗盘（goals.md——「罗盘对齐」段对照它写）\n${String(goalsText).trim().slice(0, 2000)}\n\n` : '') +
     `# 产出契约\n\n` +
