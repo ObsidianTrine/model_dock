@@ -9,8 +9,8 @@ export type AppPresent = boolean | 'unknown'
 
 /**
  * 客户端「本体探测」：安装判定 = 配置文件 + 程序本体双信号。配置目录（~/.claude、~/.zcode、
- * %APPDATA% 下的应用数据等）不随卸载删除，只认配置文件会把「已卸载有残留」误报成已安装，
- * 还可能对残留文件执行一键接入改写（zcode 实测踩坑）。
+ * %APPDATA% 下的应用数据等）不随卸载删除，只认配置文件会把「已卸载有残留」误报成已安装、
+ * 对残留一键改写（zcode 实测踩坑；重装 retire 风险见 types.ts ClientInstall.probe 注）。
  *
  * 测试钩子：`MODELRDOCK_FAKE_<ID 大写下划线>_PRESENT`（如 MODELRDOCK_FAKE_ZCODE_PRESENT /
  * MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT）置 '1'/'0' 可强制按已安装/未安装判定，
@@ -144,10 +144,9 @@ async function registryHas(appName: string): Promise<boolean> {
   return hit
 }
 
-// 目录安装痕迹探测 memo（与 regMemo 同思路）：overview 每 5s 轮询会对每个桌面客户端重复
-// readdir 同几个目录（/Applications、%LOCALAPPDATA%\Programs 等），目录内容只有装卸才会变。
-// 「重新检测」与装卸后最多延迟 TTL 反映，与 regMemo 的既定取舍一致。FAKE_HOME（测试/沙箱）
-// 下绕过：沙箱内装/卸状态必须对 detect/status 即时可见（与 fsx PATH memo 同款豁免）
+// 目录安装痕迹探测 memo（取舍与 regMemo 同，装卸后最多延迟 TTL 反映；FAKE_HOME 豁免理由见 verMemo 注）：
+// overview 每 5s 轮询会对每个桌面客户端重复 readdir 同几个目录（/Applications、%LOCALAPPDATA%\Programs 等），
+// 目录内容只有装卸才会变
 const DIR_TTL = 60_000
 const dirMemo = new Map<string, { at: number; hit: boolean }>()
 

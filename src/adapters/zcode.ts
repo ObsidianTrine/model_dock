@@ -133,11 +133,7 @@ function zcodeGatewayBase(protocol: Protocol | undefined, port: number): string 
   return protocol === 'openai' || protocol === 'responses' ? gatewayBaseOpenAI(port) : gatewayBase(port)
 }
 
-/** 整份个人供应商配置的最小校验。ZCode 用严格 Zod schema 解析 provider_config.json：任一条目字段非法
- *  （schemaVersion 不是 1、缺 providerRules、api.type / group / access.type 不在枚举、providerId 重复、
- *  同一 provider/model 同时声明智能与手动规则）就会丢弃整份文件、界面里看不到任何自定义供应商
- *  （日志只留一行 warn、状态行却仍是绿灯）。这里只覆盖能写坏这份文件的字段——ZCode 收紧 schema 时
- *  要同步扩这张表；接入写值后的自检与 status 判定共用同一份判断。 */
+/** 写值可弄坏整份文件的字段级最小校验（Zod 丢整份机制见 ZCODE_API_TYPES 注）；ZCode 收紧 schema 时必须同步扩这张表。 */
 function personalConfigIssues(root: ZcodePersonalConfig | null | undefined): string[] {
   const issues: string[] = []
   if (!root || typeof root !== 'object') {
@@ -169,8 +165,7 @@ function personalConfigIssues(root: ZcodePersonalConfig | null | undefined): str
         continue
       }
       seen.add(id)
-      // 个人供应商的 api 用 sparseShape 构建，type 是 nullable optional（暂存中的草稿也合法），
-      // 所以只查「写了值但不是 ZCode 认的取值」——写错一个值才会让 ZCode 丢弃整份文件。
+      // api.type 是 sparseShape 的 nullable optional（暂存中的草稿也合法），只查写了值的非法取值（Zod 丢整份机制见 ZCODE_API_TYPES 注）
       const api = rule?.config?.api
       if (api?.type != null && !isZcodeApiType(api.type)) {
         issues.push(
@@ -240,7 +235,7 @@ function personalConfigIssues(root: ZcodePersonalConfig | null | undefined): str
 /**
  * ZCode 本体探测（双信号之一，统一逻辑见 presence.ts）：zcode 命令在 PATH 上（开源 CLI 形态），
  * 或桌面应用安装痕迹（Windows 注册表卸载项/常见安装目录、macOS /Applications）。
- * 探测出错或平台未知时回退按配置文件判定——宁可维持旧行为，也不把装好的 ZCode 误报成未安装。
+ * 探测出错或平台未知时回退按配置文件判定（「宁可维持旧行为」取舍见 presence.ts desktopPresent 注）。
  */
 async function appPresent(): Promise<AppPresent> {
   if (cliPresent('zcode', 'zcode')) return true
@@ -251,7 +246,7 @@ export const zcodeAdapter: HarnessAdapter = {
   id: 'zcode',
   label: 'ZCode',
   directMode: true,
-  bakesModels: true, // personalModelIds 烙着模型列表，全局切换后需重写（见 refreshBakedModelClients）
+  bakesModels: true, // personalModelIds 烙模型列表（bakesModels 语义见 types.ts 注；重写机制见 refreshBakedModelClients）
   install: {
     get guide() {
       return t(
@@ -383,9 +378,7 @@ export const zcodeAdapter: HarnessAdapter = {
 
     const changes: FileChange[] = []
 
-    // 直连写上游真实 Key 与对应协议端点；网关模式同样跟随当前路由服务的协议。
-    // 这里的 type 是 ZCode 自己的枚举（openai-chat-completions / openai-responses / anthropic-messages），
-    // 不是 dsh 的 llm-pi wire 名——写错一个值，ZCode 会丢弃整份个人供应商配置（界面里一条都不显示）。
+    // 直连/网关均按当前协议选 type：这是 ZCode 自己的枚举，不是 dsh 的 llm-pi wire 名（写错一个值即丢整份，见 ZCODE_API_TYPES 注）
     const d = opts.direct
     const protocol: Protocol = d ? d.protocol : (provider?.protocol ?? 'anthropic')
     const apiType = zcodeApiType(protocol)
@@ -401,7 +394,6 @@ export const zcodeAdapter: HarnessAdapter = {
       notes.push(directResponsesEndpointNote())
     }
 
-    // 现行存储：provider_config.json 个人供应商
     const root = personalText !== null ? (parseJsonStrict(personalText, personalPath) as ZcodePersonalConfig) : freshPersonalConfig()
     if (!root || typeof root !== 'object' || Array.isArray(root)) {
       throw new AdapterError(
@@ -454,8 +446,8 @@ export const zcodeAdapter: HarnessAdapter = {
       pconf.providerOrder = [...pconf.providerOrder.filter((id) => id !== PROVIDER_ID), PROVIDER_ID]
     }
 
-    // 写值自检：ModelDock 自己刚写的条目一定合法，但文件里可能还有别的坏条目（历史版本 / 手改残留），
-    // 它会让 ZCode 连 modeldock 一起忽略——接入时就该说明白，而不是等用户发现界面空白。
+    // 写值自检：本条目必合法，但文件里可能残留别的坏条目（历史版本/手改）连坐拒收整份
+    //（机制见 ZCODE_API_TYPES 注）——接入时就该说明白，不等用户发现界面空白
     const issues = personalConfigIssues(root)
     if (issues.length > 0) {
       notes.push(
@@ -637,8 +629,8 @@ export const zcodeAdapter: HarnessAdapter = {
           detail: t('provider_config.json 解析失败', 'Failed to parse provider_config.json'),
         }
       }
-      // 文件被 ZCode 拒收时它一条个人供应商都不加载（界面空白），此时 base 看起来仍指向网关——
-      // 只报「已接入 + 指向网关」是假绿灯，必须按文件是否被接受来判。
+      // 文件被拒收时 base 仍指向网关，只报「已接入 + 指向网关」是假绿灯——必须按文件是否被接受来判
+      //（拒收机制见 ZCODE_API_TYPES 注）
       const issues = personalConfigIssues(root)
       if (issues.length > 0) {
         return {
