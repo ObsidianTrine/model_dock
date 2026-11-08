@@ -17,6 +17,8 @@ import {
   listBriefs,
   snapshotCitations,
   assessBrief,
+  assessSnapshotUsability,
+  buildResearchNotifyBody,
   crossCheckClaims,
   verifyClaimVerbatim,
   normalizeClaimStatuses,
@@ -448,4 +450,49 @@ describe('orchestrator research > verify e2e（mock）', () => {
       repo.cleanup()
     }
   }, 120_000)
+})
+
+describe('orchestrator research > 快照骨架识别与完成通知', () => {
+  const HEAD_PAGE = '<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="description" content="app"/><script src="/x.js"></script></head><body class="dark"><div id="root"></div></body></html>'
+
+  it('assessSnapshotUsability：骨架页（可见文本 <400）判 unusable；正文页判 usable', () => {
+    const head = assessSnapshotUsability(`url: https://x.com\nfetched_at: t\n\n${HEAD_PAGE}`)
+    expect(head.usable).toBe(false)
+    expect(head.visibleChars).toBeLessThan(400)
+    const rich = assessSnapshotUsability(`url: https://x.com\nfetched_at: t\n\n${'榜单正文内容。'.repeat(60)}`)
+    expect(rich.usable).toBe(true)
+  })
+
+  it('loadSnapshots 标注 usable；assessBrief 带 snapshots 字段与骨架 reason（只标注不改判级/evidence 口径）', () => {
+    const root = tmpRoot()
+    try {
+      writeBrief(root, { id: 'sk-test', title: 't', body: CLAIM_BODY })
+      const srcDir = path.join(root, '.agents/orchestrator/research/sk-test/sources')
+      fs.mkdirSync(srcDir, { recursive: true })
+      fs.writeFileSync(path.join(srcDir, '1.txt'), `url: https://a.com/rankings\n\n${HEAD_PAGE}`)
+      const verdict = assessBrief(root, 'sk-test', { model: 'glm-5.3-flash' })
+      expect(verdict.snapshots).toEqual({ total: 1, usable: 0, skeleton: 1 })
+      expect(verdict.reasons.join('\n')).toMatch(/骨架页/)
+      // 只标注不改口径：claim 回查仍吃全部快照（meta 也可佐证），evidence 不因骨架置 null
+      expect(verdict.scores.evidence).not.toBeNull()
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('buildResearchNotifyBody：判级/usage/claims 统计/理由截断成通知正文', () => {
+    const body = buildResearchNotifyBody({
+      brief_id: 'b1', level: 'warn',
+      scores: { overall: 58 },
+      usage: { browse: 'ok', internal_decision: 'unsafe', external_doc: 'unsafe' },
+      claims: [{ claim: 'a', status: 'contradicted' }, { claim: 'b', status: 'unsupported' }, { claim: 'c', status: 'supported' }],
+      reasons: ['[contradicted] x——y', '第二条', '第三条', '第四条'],
+      blockers: ['星数矛盾'],
+    })
+    expect(body).toContain('⚠️ b1——warn（overall 58）')
+    expect(body).toContain('decision=unsafe')
+    expect(body).toContain('claims: 1 contradicted / 1 unsupported / 共 3 条')
+    expect(body).toContain('blockers: 星数矛盾')
+    expect(body.split('\n').length).toBeLessThanOrEqual(7) // reasons 截前 3 条
+  })
 })

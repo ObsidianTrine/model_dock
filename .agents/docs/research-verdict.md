@@ -18,6 +18,7 @@
 | `scores.overall` | int\|null | 加权（0.4/0.35/0.15/0.10，缺维重归一）。**任一决策关键维 null → null**。仅用于排序与 L3 台账 |
 | `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话）。note 自认无快照/无直据的 supported 自动降级 unsupported（带 `downgraded: true` 留痕） |
 | `claims[].status` | enum | `supported / partial / unsupported / contradicted / unverifiable` |
+| `snapshots` | object | `{ total, usable, skeleton }`——骨架页（剥标签后可见文本 <400 字，客户端渲染/被拦的典型形态）只做标注不改判级：meta 描述仍可佐证排名类结论，但**数字类结论的可核性受限**（reasons 里有同款提示） |
 | `blockers[]` | array | 复核会话给出的硬伤（一句话一条） |
 | `fabricated_claims` | int | 非逐字摘录被丢弃的 claim 数（**编造红旗**，>0 时 decision 封顶 needs_review） |
 | `usage` | object | **决策矩阵（消费方唯一行动接口）**，见下 |
