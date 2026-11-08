@@ -184,6 +184,11 @@ describe('orchestrator research > prompt 与工具面', () => {
     expect(RESEARCH_TOOLS).not.toContain('Bash')
     expect(RESEARCH_TOOLS).not.toContain('Edit')
     expect(web).not.toContain('--permission-mode')
+    // 调研船解耦选型：model 透传成 --model（2026-11-08 glm-4.5-air 事故）
+    const withModel = buildClaudeArgs({ maxTurns: 25, web: true, model: 'glm-5.3-flash' })
+    expect(withModel).toContain('--model')
+    expect(withModel[withModel.indexOf('--model') + 1]).toBe('glm-5.3-flash')
+    expect(buildClaudeArgs({ maxTurns: 25, web: true })).not.toContain('--model')
     const ro = buildClaudeArgs({ maxTurns: 10, readonly: true })
     expect(ro).toContain('Read')
     expect(ro).not.toContain('WebFetch')
