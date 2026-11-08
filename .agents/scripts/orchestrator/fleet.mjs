@@ -10,6 +10,9 @@
 // 船 ↔ harness 映射：编排后端是 headless CLI，接入态看的是同一个 CLI 的交互形态适配器
 // （zcode-headless ↔ zcode、claude-headless ↔ claude-code）——客户端指向「其他端点」
 // = 船将绕开 ModelDock 燃油（reconcile 会显示网关零流量），这是本模块要照亮的头号盲区。
+// 协议矩阵透出（2026-11-09）：providers/harnesses 条目附带 `protocols`（网关 2026-11-08
+// 起在 /config 露出的协议支持集/客户端声明），供 dispatch 派发协议预检对拍——快照在本模块
+// 现取，预检零重复请求。
 
 import { resolveGatewayAdmin } from './tiers.mjs';
 
@@ -68,16 +71,27 @@ export async function fetchFleetState(cfg, opts = {}) {
         .filter((m) => m && m.provider)
         .map((m) => [m.provider, { provider: m.provider, class: m.class ?? null }])
     );
-    const providers = Object.entries(cfgView?.providers ?? {}).map(([id, p]) => ({
-      id,
+    // config 视图的 providers 是数组（overview-view 投影，条目自带 id）。此前按 map 消费，
+    // 对真实网关条目 id 落成 "0"/"1" 序号——熔断标记/延迟对拍全失效，协议预检按 id 找
+    // 条目也依赖此修正；map 形态保留兜底（键为 id，防御性容错）。
+    const providersRaw = cfgView?.providers;
+    const providerRows = Array.isArray(providersRaw)
+      ? providersRaw.filter((p) => p && typeof p === 'object')
+      : Object.entries(providersRaw && typeof providersRaw === 'object' ? providersRaw : {}).map(([id, p]) => ({ ...(p && typeof p === 'object' ? p : {}), id }));
+    const providers = providerRows.map((p) => ({
+      id: p.id,
       models: Array.isArray(p?.models) ? p.models.length : 0,
-      down: melted.has(id),
-      lastMs: metrics?.providers?.[id]?.last_ms ?? null,
+      down: melted.has(p.id),
+      lastMs: metrics?.providers?.[p.id]?.last_ms ?? null,
+      // 协议支持集（2026-11-09 派发协议预检消费）：缺失/非数组 → null（双端声明才校验，fail-open）
+      protocols: Array.isArray(p?.protocols) ? p.protocols : null,
     }));
     const harnesses = (Array.isArray(cfgView?.harness) ? cfgView.harness : []).map((h) => ({
       id: h?.id,
       attached: h?.attached === true,
       pointing: h?.pointing ?? 'unknown',
+      // 客户端协议声明（adapter clientProtocols 投影）：null = 未声明（与网关「未声明不校验」同口径）
+      protocols: Array.isArray(h?.protocols) ? h.protocols : null,
     }));
     return {
       mode: 'ok',
