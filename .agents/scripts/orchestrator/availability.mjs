@@ -123,7 +123,8 @@ export async function precheckModelAvailability({ cfg, tier, model, now = Date.n
     const resolved = await resolveProviderViaTier({ token: tier.token, tier: tier.name, base: adm.base, adminToken: adm.adminToken, optIn: true, timeoutMs });
     if (!resolved?.provider) return { hold: false, reason: 'provider-unresolved' };
     const snap = await fetchModelAvailability(cfg, { now, timeoutMs });
-    if (snap.mode !== 'ok') return { hold: false, reason: 'availability-unavailable' };
+    // provider 随 fail-open 路径一并返回：协议兼容预检复用同一 tier-validate 解析（零重复请求）
+    if (snap.mode !== 'ok') return { hold: false, reason: 'availability-unavailable', provider: resolved.provider };
     const v = availabilityVerdict(snap.availability, resolved.provider, model, { now });
     return { ...v, provider: resolved.provider, model };
   } catch {

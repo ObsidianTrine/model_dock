@@ -80,11 +80,15 @@ describe('resolveGatewayAdmin（admin 面地址解析）', () => {
 
 describe('fetchFleetState（快照拉取与压缩）', () => {
   it('config+metrics 合成：providers（含熔断标记）、harnesses 指向、meltdown 清单', async () => {
+    // providers 用真实网关形态（overview-view buildConfigView 投影：数组、条目自带 id + protocols）
     const gw = await mockAdmin({
-      providers: { up: { models: [{ id: 'm1' }, { id: 'm2' }] }, down2: { models: [] } },
+      providers: [
+        { id: 'up', protocol: 'openai', protocols: ['openai', 'anthropic'], models: [{ id: 'm1' }, { id: 'm2' }] },
+        { id: 'down2', protocol: 'openai', protocols: ['openai'], models: [] },
+      ],
       harness: [
-        { id: 'zcode', attached: true, pointing: 'gateway' },
-        { id: 'claude-code', attached: true, pointing: 'other' },
+        { id: 'zcode', attached: true, pointing: 'gateway', protocols: null },
+        { id: 'claude-code', attached: true, pointing: 'other', protocols: ['anthropic'] },
       ],
       metricsProviders: { up: { count: 3, last_ms: 42 } },
       meltdown: [{ provider: 'down2', class: 'quota', remaining_ms: 1000 }],
@@ -94,14 +98,33 @@ describe('fetchFleetState（快照拉取与压缩）', () => {
       const s = await fetchFleetState({ gatewayAdmin: true })
       expect(s.mode).toBe('ok')
       expect(s.providers).toEqual([
-        { id: 'up', models: 2, down: false, lastMs: 42 },
-        { id: 'down2', models: 0, down: true, lastMs: null },
+        { id: 'up', models: 2, down: false, lastMs: 42, protocols: ['openai', 'anthropic'] },
+        { id: 'down2', models: 0, down: true, lastMs: null, protocols: ['openai'] },
       ])
       expect(s.harnesses).toEqual([
-        { id: 'zcode', attached: true, pointing: 'gateway' },
-        { id: 'claude-code', attached: true, pointing: 'other' },
+        { id: 'zcode', attached: true, pointing: 'gateway', protocols: null },
+        { id: 'claude-code', attached: true, pointing: 'other', protocols: ['anthropic'] },
       ])
       expect(s.meltdown).toEqual([{ provider: 'down2', class: 'quota' }])
+    } finally {
+      gw.close()
+      setEnv(undefined)
+    }
+  })
+
+  it('providers 兼容 map 形态（防御性兜底）；protocols 缺失/非数组 → null（fail-open 口径）', async () => {
+    const gw = await mockAdmin({
+      providers: { up: { models: [{ id: 'm1' }] } },
+      harness: [{ id: 'zcode', attached: true, pointing: 'gateway' }],
+      metricsProviders: {},
+      meltdown: [],
+    })
+    setEnv(gw.url)
+    try {
+      const s = await fetchFleetState({ gatewayAdmin: true })
+      expect(s.mode).toBe('ok')
+      expect(s.providers).toEqual([{ id: 'up', models: 1, down: false, lastMs: null, protocols: null }])
+      expect(s.harnesses).toEqual([{ id: 'zcode', attached: true, pointing: 'gateway', protocols: null }])
     } finally {
       gw.close()
       setEnv(undefined)
@@ -285,5 +308,5 @@ describe('cmdRun E2E：海况观测装配', () => {
     } finally {
       repo.cleanup()
     }
-  })
+  }, 120_000) // 两次 runOrch 子进程（Windows 上含 CLI 探测与 git init），20s 默认超时不够（基线实测 ~28s）
 })

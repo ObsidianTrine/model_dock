@@ -24,6 +24,10 @@
 // 派发预检（2026-11-04，A5）：worker 模型在上游服务目录缺席（model-availability 数据面，
 // tier-validate 解析 provider）→ 滞留派发：卡转 blocked + dispatch_held 事件，不烧一程
 // 注定失败的 worker；判定模糊（条目缺席/陈旧/ok=false/观测不可达）一律照常派发（fail-open）。
+// 派发预检②（2026-11-09，协议兼容矩阵）：选船后、spawn 前对目标 provider 校验「该船 harness
+// 客户端协议 × provider 协议端点」——两侧交集为空 = 派发必 404（claude-code 钉 bigmodel 缺
+// anthropic 端点事故）。数据面消费派发路径现成的 fleet /config 快照与预检①的 tier-validate
+// provider 解析（零重复请求）；双端都声明才校验，观测缺席/条目缺失一律照常派发（fail-open）。
 // 零第三方依赖（.agents/ 工具链红线）。
 
 import fs from 'node:fs';
@@ -31,9 +35,9 @@ import path from 'node:path';
 import { readEvents, appendEvent, logDir } from './events.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, fetchSeaSnapshot, SEA_429_RATE_5M_THRESHOLD, SEA_429_RATE_5M_MIN_TOTAL } from './weather.mjs';
 import { gatewayLogsDir } from './reconcile.mjs';
-import { normalizeTierName } from './tiers.mjs';
+import { normalizeTierName, resolveGatewayAdmin } from './tiers.mjs';
 import { queueRoot, moveCard } from './queue.mjs';
-import { precheckModelAvailability } from './availability.mjs';
+import { precheckModelAvailability, resolveProviderViaTier } from './availability.mjs';
 import { SHIP_HARNESS } from './fleet.mjs';
 import { hintsOverlap } from '../policy.mjs';
 import { claudeAvailable } from './backends/claude-headless.mjs';
@@ -281,11 +285,70 @@ export function decideDispatch({ cfg, defaultBackend, explicit = false, inherite
 }
 
 /**
+ * 协议兼容判定（纯函数，测试直连）：harness 客户端协议声明 × provider 协议支持集求交集。
+ * **双端都声明才校验**（任一侧 null / 缺失 / 空数组 / 非字符串项 → 不拦，fail-open——
+ * 与网关 pinProtocolConflict「未声明不校验」同口径：zcode/dsh 等多协议自适应 harness
+ * 天然不受影响）；两侧交集为空 = 派发必 404 的组合 → hold，返回两侧完整列表供留痕。
+ * @returns {{ hold:boolean, reason:string, providerProtocols?:string[], harnessProtocols?:string[] }}
+ *   reason：compatible（放行）/ harness-undeclared | provider-undeclared（未声明不校验）/
+ *   protocol_incompatible（滞留）
+ */
+export function protocolCompatVerdict(providerProtocols, harnessProtocols) {
+  const harness = Array.isArray(harnessProtocols) ? harnessProtocols.filter((p) => typeof p === 'string' && p) : [];
+  const provider = Array.isArray(providerProtocols) ? providerProtocols.filter((p) => typeof p === 'string' && p) : [];
+  if (!harness.length) return { hold: false, reason: 'harness-undeclared' };
+  if (!provider.length) return { hold: false, reason: 'provider-undeclared' };
+  const overlap = harness.filter((p) => provider.includes(p));
+  if (overlap.length) return { hold: false, reason: 'compatible', providerProtocols: provider, harnessProtocols: harness };
+  return { hold: true, reason: 'protocol_incompatible', providerProtocols: provider, harnessProtocols: harness };
+}
+
+/**
+ * 派发预检②（协议兼容矩阵，2026-11-09）：选船后、spawn 前对目标 provider 校验「该船
+ * harness 客户端协议 × provider 协议端点」。数据面：/_modeldock/config 的协议矩阵
+ * （provider.protocols + harness.protocols）——经派发路径现成的 fleetState 快照消费
+ * （fleet 观测已拉过 /config，零重复请求）；provider 解析优先复用预检①（model-availability）
+ * 的 tier-validate 结果（resolvedProvider），缺席且带 tier token 时补解析一次（≤3s 超时）。
+ * fail-open 口径（观测红线——绝不因观测缺失阻断派发）：无 harness 映射（mock 等测试链路）/
+ * 快照缺席（gatewayAdmin 未开、网关不可达、config 查询失败）/ 快照里找不到 provider 或
+ * harness 条目 / 任一侧未声明 / 解析链任何一步不可得 → 一律照常派发。
+ * @returns {{ hold:boolean, reason:string, provider?:string, harness?:string, model?:string, providerProtocols?:string[], harnessProtocols?:string[] }}
+ */
+export async function precheckProtocolCompat({ cfg, tier, backend, fleetState, resolvedProvider = null, model = null, timeoutMs = 3000 } = {}) {
+  try {
+    const hid = SHIP_HARNESS[backend];
+    if (!hid) return { hold: false, reason: 'no-harness-mapping' }; // mock 等无对应 harness：测试链路照常可用
+    if (fleetState?.mode !== 'ok') return { hold: false, reason: 'fleet-state-unavailable' }; // 观测缺席 ≠ 协议不兼容
+    if (resolvedProvider == null) {
+      if (!tier?.token) return { hold: false, reason: 'no-tier-token' }; // 与预检①同口径：无凭据即无权威 provider
+      const adm = resolveGatewayAdmin(cfg);
+      if (!adm) return { hold: false, reason: 'admin-unavailable' };
+      if (tier.gatewayBase && adm.base !== String(tier.gatewayBase).replace(/\/+$/, '')) {
+        return { hold: false, reason: 'gateway-base-mismatch' }; // 跨源比对会张冠李戴（保守 fail-open）
+      }
+      const resolved = await resolveProviderViaTier({ token: tier.token, tier: tier.name, base: adm.base, adminToken: adm.adminToken, optIn: true, timeoutMs });
+      if (!resolved?.provider) return { hold: false, reason: 'provider-unresolved' };
+      resolvedProvider = resolved.provider;
+    }
+    const prow = (fleetState.providers ?? []).find((p) => p?.id === resolvedProvider);
+    if (!prow) return { hold: false, reason: 'provider-row-missing' }; // 快照缺条目 ≠ 协议不兼容
+    const hrow = (fleetState.harnesses ?? []).find((h) => h?.id === hid);
+    if (!hrow) return { hold: false, reason: 'harness-row-missing' };
+    const v = protocolCompatVerdict(prow.protocols, hrow.protocols);
+    return { ...v, provider: resolvedProvider, harness: hid, ...(model ? { model } : {}) };
+  } catch {
+    return { hold: false, reason: 'precheck-error' }; // fail-open：预检自身故障绝不阻断派发
+  }
+}
+
+/**
  * cmdRun 派发装配（单点调用）：海况快照现取（A1/A2 数据面，source:"log" 显式降级时不取）
- * + seaWeather 现算 + CLI 可用性探测 + decideDispatch + 派发预检（A5，模型可用性）。
+ * + seaWeather 现算 + CLI 可用性探测 + decideDispatch + 派发预检（①model-availability，
+ * ②协议兼容矩阵，首个命中即滞留）。
  * 任何一步失败都回落「不决策」按既有规则派发——动态选船是优化，绝不阻断派发。
- * 预检唯一的阻断出口：worker 模型确认不在上游服务目录（availabilityVerdict hold）→
- * holdCardForPrecheck 落位后干净退出 run 子进程（holdExit 可注入，测试传 stub）。
+ * 预检唯一的阻断出口：①worker 模型确认不在上游服务目录（model_unavailable）或 ②该船
+ * harness 与目标 provider 协议交集为空（protocol_incompatible）→ holdCardForPrecheck
+ * 落位后干净退出 run 子进程（holdExit 可注入，测试传 stub）。
  */
 export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend, explicit, inherited, tier, fleetState, holdExit } = {}) {
   try {
@@ -297,17 +360,41 @@ export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend
       'zcode-headless': zcodeAvailable(),
     };
     const decision = decideDispatch({ cfg, defaultBackend, explicit, inherited, meta, tier, fleetState, weather, availability });
-    // A5 派发预检（独立于动态选船开关）：tier token 经 tier-validate 解析 provider 后核对
+    // A5 派发预检①（独立于动态选船开关）：tier token 经 tier-validate 解析 provider 后核对
     // model-availability——确认缺席才滞留，其余判定模糊一律照常派发（fail-open）。
-    const pre = await precheckModelAvailability({ cfg, tier, model: tier?.workerModel ?? cfg?.worker?.model ?? null });
+    const model = tier?.workerModel ?? cfg?.worker?.model ?? null;
+    const pre = await precheckModelAvailability({ cfg, tier, model });
     if (pre?.hold && meta?.id) {
       holdCardForPrecheck({
         repoRoot,
         taskId: meta.id,
-        provider: pre.provider,
-        model: pre.model,
-        fetchedAt: pre.fetchedAt,
         holdExit,
+        held: { reason: 'model_unavailable', provider: pre.provider, model: pre.model, ...(pre.fetchedAt ? { fetched_at: pre.fetchedAt } : {}) },
+        headline: `worker 模型 "${pre.model}" 不在 provider "${pre.provider}" 的上游服务目录（快照 ${pre.fetchedAt ?? 'n/a'}）`,
+        hint: '模型恢复 / 目录刷新后',
+      });
+      return decision; // 首个命中即滞留：holdExit 已退出进程；落位失败回落时也不再叠加预检②
+    }
+    // 派发预检②（2026-11-09 协议兼容矩阵）：选船后、spawn 前对目标 provider 校验——消费
+    // 派发路径现成的 fleet /config 快照与预检①的 provider 解析（零重复请求），fail-open 同①。
+    const proto = await precheckProtocolCompat({ cfg, tier, backend: decision.backend, fleetState, resolvedProvider: pre?.provider ?? null, model });
+    if (proto?.hold && meta?.id) {
+      holdCardForPrecheck({
+        repoRoot,
+        taskId: meta.id,
+        holdExit,
+        held: {
+          reason: 'protocol_incompatible',
+          provider: proto.provider,
+          harness: proto.harness,
+          ...(proto.model ? { model: proto.model } : {}),
+          provider_protocols: proto.providerProtocols,
+          harness_protocols: proto.harnessProtocols,
+        },
+        headline: proto.model
+          ? `worker 模型 "${proto.model}" × provider "${proto.provider}" 缺协议端点：harness ${proto.harness} 声明 [${(proto.harnessProtocols ?? []).join(', ')}]，provider 支持 [${(proto.providerProtocols ?? []).join(', ')}]`
+          : `harness ${proto.harness} × provider "${proto.provider}" 缺协议端点：harness 声明 [${(proto.harnessProtocols ?? []).join(', ')}]，provider 支持 [${(proto.providerProtocols ?? []).join(', ')}]`,
+        hint: '补齐协议端点或换 provider 后',
       });
     }
     return decision;
@@ -326,17 +413,20 @@ export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend
  * 预检滞留落位（A5 终点）：dispatch_held 事件 + failed 留痕（与 drain 拉黑同款事件对）
  * + 卡 pending→blocked（TRANSITIONS 合法迁移，队列保留不丢），随后 exit 0 干净退出
  * run 子进程——不退 pending：drain 死循环防护会对留 pending 的卡二次选中后拉黑，两次
- * 白烧；直接 blocked 一次到位，事件与原因具体（模型恢复后 resume 即可）。
+ * 白烧；直接 blocked 一次到位，事件与原因具体（修复后 resume 即可）。
  * 落位本身失败（卡不在 pending 等）→ 不退出，照常返回决策（预检绝不放大成派发故障）。
+ * @param held   dispatch_held 事件载荷（含 reason 与该预检的具体字段）
+ * @param headline 人读滞留原因（⛔ 行 + failed 事件共用）
+ * @param hint   可操作修复建议前缀（接「node … resume <task-id>」）
  */
-function holdCardForPrecheck({ repoRoot, taskId, provider, model, fetchedAt, holdExit } = {}) {
+function holdCardForPrecheck({ repoRoot, taskId, held, headline, hint, holdExit } = {}) {
   const exit = holdExit ?? ((code) => process.exit(code));
-  console.log(`⛔ 派发预检滞留（model_unavailable）：worker 模型 "${model}" 不在 provider "${provider}" 的上游服务目录（快照 ${fetchedAt ?? 'n/a'}）——跳过派发。`);
-  console.log(`  卡转 blocked（队列保留）：模型恢复 / 目录刷新后 node .agents/scripts/orchestrator.mjs resume ${taskId}`);
+  console.log(`⛔ 派发预检滞留（${held?.reason}）：${headline}——跳过派发。`);
+  console.log(`  卡转 blocked（队列保留）：${hint} node .agents/scripts/orchestrator.mjs resume ${taskId}`);
   try {
     const qdir = logDir(repoRoot, taskId);
-    appendEvent(qdir, 'dispatch_held', { reason: 'model_unavailable', provider, model, ...(fetchedAt ? { fetched_at: fetchedAt } : {}) });
-    appendEvent(qdir, 'failed', { reason: `派发预检滞留：worker 模型 ${model} 不在 ${provider} 上游服务目录（model_unavailable）——模型恢复后 resume` });
+    appendEvent(qdir, 'dispatch_held', held);
+    appendEvent(qdir, 'failed', { reason: `派发预检滞留：${headline}（${held?.reason}）——${hint} resume` });
     moveCard(queueRoot(repoRoot), taskId, 'pending', 'blocked');
     exit(0);
   } catch (e) {
