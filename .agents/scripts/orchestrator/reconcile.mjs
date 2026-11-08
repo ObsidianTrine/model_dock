@@ -43,8 +43,10 @@ export function gatewayLogsDir(cfg) {
 // 调用方落回文件扫描（行为与历史一致）。summary 形状见 src/gateway/state/logs.ts 的
 // UsageSummary：requests/ok/failed/by_status（键 = String(status)，仅失败条目，缺失计
 // 'n/a'）/by_provider|by_model（请求数，非 token）/latency/tokens{input,output,cache_read,
-// cache_creation}/cost/unpriced_models——注意 tokens.input 已含缓存读+缓存建（与实测账
-// tokensIn 同口径），by_provider/by_model 只是请求数，token 分桶端点给不了。
+// cache_creation}/billable_tokens（可计费口径求和：成功且有 usage 条目）/billable_partial
+// （窗口混入旧版网关日志 → true，求和只是可得部分）/cost/unpriced_models——注意
+// tokens.input 已含缓存读+缓存建（与实测账 tokensIn 同口径），by_provider/by_model 只是
+// 请求数，token 分桶端点给不了。
 // ---------------------------------------------------------------------------
 
 const USAGE_TIMEOUT_MS = 3000;
@@ -141,61 +143,113 @@ export async function reconcileTask(repoRoot, taskId, queueRootDir) {
   const gwDir = gatewayLogsDir(cfg);
   if (!gwDir) return { skipped: true, reason: '未启用网关对账（workflow.json gatewayLogDir 未配置）' };
 
-  // A3：实测账优先走 /_modeldock/usage 聚合端点——但仅当聚合能无损服务本次对账：
-  // 自报账无可计费字段（scope 必为 legacy）时，端点的 tokens/requests 聚合即全部所需；
-  // 自报账有可计费字段则网关侧 billable 必须逐条精确累加（billable 公式分协议形态——
-  // anthropic = input+cache_creation+output、openai = prompt−cached+output，聚合摘要无
-  // 形态标记推不准；UsageSummary 也无 (provider,model) token 分桶）→ 保持文件扫描。
-  // 端点不可得 → fail-open 落回文件扫描（下方原路径，行为与历史一致）。
-  if (selfReported.billable === null) {
-    const u = await fetchGatewayUsageSummary(cfg, { fromMs: start - 60_000, toMs: end + 60_000, withCost: true });
-    if (u.ok) {
-      const t = u.summary.tokens && typeof u.summary.tokens === 'object' ? u.summary.tokens : {};
-      const tokensIn = t.input ?? 0; // 端点 tokens.input = input+cache_read+cache_creation（实测账 tokensIn 同口径）
-      const tokensOut = t.output ?? 0;
-      const gwTotal = tokensIn + tokensOut;
-      return {
-        skipped: false,
-        taskId,
-        window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
-        selfReported,
-        selfTotal: selfReported.tokensIn + selfReported.tokensOut,
-        selfBillable: null,
-        gateway: {
-          // 端点 ok = status<400 条数（文件路径口径是「成功且带 usage」——成功请求几乎必有
-          // usage，可接受偏差）；billable 恒 0（端点给不了，scope 固定 legacy）
-          requests: u.summary.ok ?? 0,
-          tokensIn,
-          tokensOut,
-          cacheRead: t.cache_read ?? 0,
-          cacheCreate: t.cache_creation ?? 0,
-          billable: 0,
-          total: gwTotal,
-        },
-        gatewayBillable: null,
-        scope: 'legacy',
-        divergence:
-          selfReported.tokensIn + selfReported.tokensOut + gwTotal > 0
-            ? Math.abs(selfReported.tokensIn + selfReported.tokensOut - gwTotal) / Math.max(selfReported.tokensIn + selfReported.tokensOut, gwTotal)
-            : 0,
-        // 聚合端点给不了 (provider,model) token 分桶——燃油账由网关侧 cost 聚合预填
-        // （价目与 pricing-lookup 同源），attachCost 见空 pairs 跳过、不覆盖预填值
-        pairs: [],
-        viaGateway: gwTotal > 0,
-        source: 'gateway-usage',
-        ...(u.summary.cost && typeof u.summary.cost === 'object'
-          ? {
-              cost: {
-                usd: u.summary.cost.total ?? 0,
-                unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
-                requests: u.summary.ok ?? 0,
-                source: 'gateway-usage',
-              },
-            }
-          : {}),
-      };
-    }
+  // A3 闭环（2026-11-08 billable 聚合）：实测账优先走 /_modeldock/usage 聚合端点。
+  // 端点已补 billable_tokens（条目级可计费口径求和——公式分协议形态，网关落盘前已算好，
+  // 聚合只求和不重算）与 billable_partial（窗口混入旧版网关日志 → true）。两种口径的
+  // HTTP 准入：
+  //   legacy（自报账无可计费字段）：summary 的 tokens/requests 聚合即全部所需（现状不变）；
+  //   billable（自报账带可计费字段）：还需响应带 billable_tokens 且 partial!==true——
+  //     partial / 缺字段（旧版网关）/ 端点不可得 / 查询失败 → 整批落回文件扫描（下方
+  //     原路径，行为与历史逐字节一致；与 measureFuelBatch 的整批 fail-open 粒度一致）。
+  // (provider,model) token 分桶端点仍给不了 → 两条 HTTP 路径的 pairs 均留空、燃油账由
+  // 同一响应里的网关 cost 聚合预填（价目与 pricing-lookup 同源；attachCost 见空 pairs
+  // 跳过、不覆盖预填值）——一次窗口查询同时服务对账与成本，不重复打两次。transient /
+  // 海况调查包仍文件直读：明细端点给不了逐条目（见 upstreamSeaState 注）。
+  const u = await fetchGatewayUsageSummary(cfg, { fromMs: start - 60_000, toMs: end + 60_000, withCost: true });
+  if (u.ok && selfReported.billable === null) {
+    const t = u.summary.tokens && typeof u.summary.tokens === 'object' ? u.summary.tokens : {};
+    const tokensIn = t.input ?? 0; // 端点 tokens.input = input+cache_read+cache_creation（实测账 tokensIn 同口径）
+    const tokensOut = t.output ?? 0;
+    const gwTotal = tokensIn + tokensOut;
+    return {
+      skipped: false,
+      taskId,
+      window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
+      selfReported,
+      selfTotal: selfReported.tokensIn + selfReported.tokensOut,
+      selfBillable: null,
+      gateway: {
+        // 端点 ok = status<400 条数（文件路径口径是「成功且带 usage」——成功请求几乎必有
+        // usage，可接受偏差）；billable 恒 0（scope 固定 legacy：自报账无可计费字段）
+        requests: u.summary.ok ?? 0,
+        tokensIn,
+        tokensOut,
+        cacheRead: t.cache_read ?? 0,
+        cacheCreate: t.cache_creation ?? 0,
+        billable: 0,
+        total: gwTotal,
+      },
+      gatewayBillable: null,
+      scope: 'legacy',
+      divergence:
+        selfReported.tokensIn + selfReported.tokensOut + gwTotal > 0
+          ? Math.abs(selfReported.tokensIn + selfReported.tokensOut - gwTotal) / Math.max(selfReported.tokensIn + selfReported.tokensOut, gwTotal)
+          : 0,
+      // 聚合端点给不了 (provider,model) token 分桶——燃油账由网关侧 cost 聚合预填
+      // （价目与 pricing-lookup 同源），attachCost 见空 pairs 跳过、不覆盖预填值
+      pairs: [],
+      viaGateway: gwTotal > 0,
+      source: 'gateway-usage',
+      ...(u.summary.cost && typeof u.summary.cost === 'object'
+        ? {
+            cost: {
+              usd: u.summary.cost.total ?? 0,
+              unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
+              requests: u.summary.ok ?? 0,
+              source: 'gateway-usage',
+            },
+          }
+        : {}),
+    };
   }
+  if (u.ok && selfReported.billable !== null && Number.isFinite(u.summary.billable_tokens) && u.summary.billable_partial !== true) {
+    // billable HTTP 路径：分歧率按可计费口径对可计费口径（与文件路径 billableMode 同式）。
+    // requests 用端点 ok 计数（同 legacy 路径的可接受偏差）；partial 已在上游条件排除——
+    // 这里的求和与文件逐条累加同值（条目级 billable 落盘前已算好，聚合只是求和）。
+    const t = u.summary.tokens && typeof u.summary.tokens === 'object' ? u.summary.tokens : {};
+    const tokensIn = t.input ?? 0;
+    const tokensOut = t.output ?? 0;
+    const gwTotal = tokensIn + tokensOut;
+    const gwBillable = u.summary.billable_tokens;
+    const denom = Math.max(selfReported.billable, gwBillable);
+    return {
+      skipped: false,
+      taskId,
+      window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
+      selfReported,
+      selfTotal: selfReported.tokensIn + selfReported.tokensOut,
+      selfBillable: selfReported.billable,
+      gateway: {
+        requests: u.summary.ok ?? 0,
+        tokensIn,
+        tokensOut,
+        cacheRead: t.cache_read ?? 0,
+        cacheCreate: t.cache_creation ?? 0,
+        billable: gwBillable,
+        total: gwTotal,
+      },
+      gatewayBillable: gwBillable,
+      scope: 'billable',
+      // 分母取两账较大者（文件路径同式）；两边都为 0 记 0（完美一致，避免 0/0 = NaN）
+      divergence: denom > 0 ? Math.abs(selfReported.billable - gwBillable) / denom : 0,
+      // 端点给不了 (provider,model) token 分桶——燃油账由同一响应里的网关 cost 聚合预填
+      // （价目与 pricing-lookup 同源），attachCost 见空 pairs 跳过、不覆盖预填值
+      pairs: [],
+      viaGateway: gwTotal > 0,
+      source: 'gateway-usage',
+      ...(u.summary.cost && typeof u.summary.cost === 'object'
+        ? {
+            cost: {
+              usd: u.summary.cost.total ?? 0,
+              unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
+              requests: u.summary.ok ?? 0,
+              source: 'gateway-usage',
+            },
+          }
+        : {}),
+    };
+  }
+  // 其余（端点不可得 / partial / 缺 billable 字段）→ 整批落回文件扫描，行为与历史一致
 
   const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0, billable: 0 };
   let billableEntries = 0; // 带 usage.billable_tokens 的条数（旧网关日志无此字段 → 回落旧口径）

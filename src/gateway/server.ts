@@ -2235,7 +2235,12 @@ function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs
 
 /** /_modeldock/usage：请求日志聚合（admin 只读）。编排侧（Dockmaster 燃油实测/风暴闸）与
  *  排查的数据面：date/from/to 选日（见 usageQuery），harness/profile/provider 精确过滤；
- *  聚合口径见 summarizeUsage。 */
+ *  聚合口径见 summarizeUsage。
+ *  可计费口径字段（2026-11 billable 聚合）：usage.billable_tokens = 窗口内成功且有 usage
+ *  条目的可计费 token 求和（与 tokens 同口径；公式分协议形态、条目落盘前已算好，聚合只
+ *  求和不重算）；usage.billable_partial = 窗口内存在「有 usage 但缺 billable_tokens 数字」
+ *  的条目（旧版网关日志混入）时为 true，此时求和只是可得部分——消费方（编排侧 reconcile）
+ *  据此整体回落文件直读。窗口内无任何 usage 条目：billable_tokens=0、partial=false。 */
 async function hUsage(c: AdminCtx): Promise<void> {
   const { req, res } = c
   const q = new URL(req.url ?? '', 'http://x').searchParams

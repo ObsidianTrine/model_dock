@@ -385,6 +385,29 @@ describe('measureFuelBatch /usage 聚合优先（A3）', () => {
     }
   })
 
+  it('响应带 billable_partial=true / 缺 billable 字段也照走聚合（成本不消费 billable，刻意不加闸）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({
+      usagePayload: { ok: true, usage: { ...USAGE_OK.usage, billable_tokens: 7, billable_partial: true } },
+    })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const batch = await measureFuelBatch(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, [
+        { key: 'wp', start: now - 600_000, end: now },
+      ])
+      // partial 只说明可计费求和不完整，不影响 cost 口径；老网关（响应缺 billable）同款放行
+      expect(batch.source).toBe('gateway-usage')
+      expect(batch.results.get('wp')).toMatchObject({ measured: true, viaGateway: true, usd: 1.5 })
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
   it('窗口内零请求（ok=0）→ measured:false + 零请求 reason（与文件路径同文案）', async () => {
     const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
     const h = fakeHome()
