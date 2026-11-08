@@ -19,6 +19,8 @@
 | test-false-green | 否 | 断言假绿：用例名「坏格式阻断」夹具却写合法 JSON、断言恒真（tier-silence / finish-lock-wait-contract 事故同型） |
 | scope-drift | 否 | 越界改动：files_hint 声明 src/presets/**，diff 混入 src/gateway/server.ts 无关调整 |
 | clean-deadcode-removal | **是** | 干净负样本：调试开关下线的纯删除改动，预期 0 阻塞，报任何阻塞即误报（防误报倾向） |
+| terminal-die-skips-revoke | 否 | 新增终态闸门用裸 die 绕过 exitRun「先吊销再退出」契约：process.exit 跳过 finally，一次性 harness 凭据泄漏活到 TTL（2026-11-08 ephemeral harness 接入引入的不变式；die/exitRun 契约在 diff 上下文自洽可见，「与既有闸门风格一致」是迷惑面） |
+| fail-open-throw | 否 | 网关观测失败从「回落文件直读」改成抛错阻断——违反编排侧 fail-open 口径（2026-11-08 reconcile/usage 接入的既有先例）；「宁可不决策也不用不完整的账」当理由是迷惑面，被删注释与残留承诺在 diff 内自相矛盾 |
 
 ## 出题纪律
 
