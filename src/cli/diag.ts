@@ -102,21 +102,13 @@ export interface DoctorFinding {
 }
 
 export interface DoctorDeps {
-  /** 注入 start-gateway 修复的执行器（单测传 fake，绝不真起 daemon） */
   startGateway?: () => Promise<string | void>
-  /** 注入 restart-gateway 修复的执行器（单测传 fake，绝不真停/真起 daemon） */
   restartGateway?: () => Promise<string | void>
-  /** 注入网关存活探测（单测免真实状态文件；默认 gatewayLive()） */
   gatewayLive?: () => Promise<GatewayStateFile | null>
-  /** 注入端口占用探测（单测免真实 socket） */
   portProbe?: (port: number) => Promise<boolean>
-  /** 注入端口占用者身份查询（单测免真实 lsof/netstat；默认 findPortOccupier） */
   portOccupier?: (port: number) => Promise<string | null>
-  /** 注入修复确认（单测免 TTY） */
   confirm?: (message: string) => Promise<boolean>
-  /** 注入自启重装（单测免真实 launchctl/systemd；默认 uninstall+install） */
   reinstallAutostart?: () => Promise<string | void>
-  /** 注入过期日志清理（单测免真实删盘；默认 pruneExpiredLogs） */
   pruneLogs?: (retentionDays: number) => Promise<number>
   /** 注入 --deep 直连认证探测（单测免真实网络；默认 upstreamAuthProbe） */
   upstreamProbe?: (provider: ProviderConfig) => Promise<DeepProbeResult>

@@ -52,7 +52,7 @@ if (process.argv.includes('--sea-gateway')) {
     process.exit(1)
   })
 } else if (isSEA() && process.argv.length <= 2) {
-  // SEA 双击启动：后台网关 + 打开浏览器
+  // SEA 双击启动
   launchGui().catch((e) => {
     console.error(`✗ ${(e as Error).message}`)
     process.exit(1)

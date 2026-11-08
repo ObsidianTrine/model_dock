@@ -53,22 +53,21 @@ let lastFullManifest: ReleaseManifest | null = null
  *  本要 TTL/退避 skip 的检查升级为真查（托盘 force 接线后，60s 轮询恰好在飞的窗口
  *  会把手动检查吞成旧缓存；此前直接 return 丢弃）。 */
 let forceRequested = false
-/** 测试注入：本地 mock API 基地址（null = 官方 https://api.github.com） */
 let apiBaseOverride: string | null = null
-/** 测试注入：替换底层拉取函数（单测并发防重入时用桩计数）；第 4 参为代理解析结果 */
+/** 测试注入：单测并发防重入用桩计数；第 4 参 = 代理解析结果 */
 let fetchOverride: ((repo: string, token: string | null, apiBase?: string, opts?: { proxyUrl?: string | null }) => Promise<ReleaseManifest>) | null = null
 
-/** 测试专用：注入更新检查的 API 基地址（单测用本地 http server 伪造 GitHub API） */
+/** 测试专用：单测用本地 http server 伪造 GitHub API */
 export function setUpdateApiBaseForTests(base: string | null): void {
   apiBaseOverride = base
 }
 
-/** 测试专用：注入底层拉取函数（null = 默认 fetchLatestRelease） */
+/** 测试专用；null = 还原为默认 fetchLatestRelease */
 export function setUpdateFetchForTests(fn: ((repo: string, token: string | null, apiBase?: string, opts?: { proxyUrl?: string | null }) => Promise<ReleaseManifest>) | null): void {
   fetchOverride = fn
 }
 
-/** 测试专用：清空模块级状态（manifest/updating/检查时间跨用例泄漏会让守卫误判） */
+/** 测试专用：清空模块级状态（跨用例泄漏会让守卫误判） */
 export function resetUpdateStateForTests(): void {
   state.checking = false
   state.lastCheckedAt = null
@@ -82,7 +81,7 @@ export function resetUpdateStateForTests(): void {
   lastFullManifest = null
 }
 
-/** 公开仓库匿名即可检查；配置了 token_ref 才带令牌（私有仓库兼容/提升限流）。
+/** 匿名即可检查、配置 token_ref 才带令牌（匿名/PAT 取舍口径见 config UpdateConfig.token_ref 注）；
  *  返回 null 仅在极端异常（无 config）时——repo 恒有默认值 */
 async function resolveTokenAndRepo(cfg: Config): Promise<{ repo: string; token: string | null; apiBase?: string }> {
   const ref = cfg.update?.token_ref
@@ -257,7 +256,7 @@ export function startBootUpdateCheck(rt: GatewayRuntime): void {
 
 export interface UpdateStatusPayload {
   current: string
-  /** 是否配置了更新令牌（可选：公开仓库匿名即可更新；令牌=私有仓库兼容/提升限流） */
+  /** 是否配置了更新令牌（匿名/PAT 取舍口径见 config UpdateConfig.token_ref 注） */
   configured: boolean
   checking: boolean
   lastCheckedAt: number | null
@@ -283,8 +282,7 @@ export interface UpdateStatusPayload {
 
 /** 本机适配安装包的体积（字节）：按安装形态与架构选资产名；选不到返回 null */
 function matchedAssetSize(m: ReleaseManifest): number | null {
-  // 第三参必须显式传 LOCALAPPDATA（同 run.ts）：漏传真机永远判 win-bare，资产体积基线选错；
-  // 第四参带卸载器指纹（同 run.ts）：安装器装在自定义目录时按 win-setup 选包，界面体积与实际更新一致
+  // 第三参必须显式传 LOCALAPPDATA、第四参带卸载器指纹（同 run.ts；语义见 detectInstallShape 注）
   const shape = detectInstallShape(
     process.execPath,
     process.platform,
@@ -343,8 +341,8 @@ export interface ApplyResult {
 }
 
 /** 一键更新：校验有可用新版后分离 spawn `update --yes`，立即返回。网关稍后被子进程停掉、换包、拉起。
- *  argv 由调用方传（server.ts 用 autostart 的 updateDaemonArgs() 推导）——本模块不静态依赖 autostart，
- *  避免单测整模块 mock 与共享模块注册表叠加时击穿静态绑定。 */
+ *  argv 由调用方传（server.ts 用 autostart 的 updateDaemonArgs() 推导）；本模块不静态依赖 autostart
+ *  （mock 击穿论据见 autostart.ts updateDaemonArgs 注）。 */
 export function applyUpdate(
   rt: GatewayRuntime,
   opts: { argv: string[]; latest?: string; spawner?: (argv: string[], logFile: string) => void; watchDelayMs?: number } = { argv: [] }

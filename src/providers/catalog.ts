@@ -143,13 +143,10 @@ export function clearCatalogMemo(): void {
   baseMemo = undefined
 }
 
-// 合并视图 memo：键 = 缓存文件 path+mtime+size（snapshot 为构建期常量，catalogSnapshot() 进程内
-// 同一对象）。catalogModelMeta 在展示/编辑/适配器写配置的多条路径上被高频调用，此前每次调用
-// 都重建 226 家合并对象并重新 sort；memo 后重建只在指纹变化或 clearCatalogMemo 时发生。
-// 回验窗（perf-p2-polish）：仅窗外付一次 statSync——memo 命中也要 stat 的旧形态让查价热路径
-// （lookupPrice → catalogFlatTable）每成功请求两次同步 stat，窗内纯内存命中后归零；外部
-// refreshCatalog 改写缓存最迟一个窗口生效。data/sortedKeys/flat 共享同一份，返回的是共享
-// 只读对象，调用方不得修改。
+// 合并视图 memo（perf-p2-polish）：catalogModelMeta 在展示/编辑/适配器写配置的多条路径上高频调用，
+// 此前每次调用都重建 226 家合并对象并重新 sort；重建只在指纹变化或 clearCatalogMemo 时发生。
+// 键 = 缓存文件 path+mtime+size（snapshot 构建期常量）；回验窗 5s 仅窗外付一次 statSync，
+// 外部 refreshCatalog 改写缓存最迟一窗生效。data/sortedKeys/flat 共享同一份，返回共享只读对象，调用方不得修改。
 interface CatalogBaseMemo {
   path: string
   mtimeMs: number

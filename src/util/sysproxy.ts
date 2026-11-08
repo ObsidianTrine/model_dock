@@ -30,8 +30,8 @@ export function pickEnvProxy(env: NodeJS.ProcessEnv = process.env): string | nul
 
 /**
  * 解析 macOS `scutil --proxy` 输出。优先 HTTPS（更新目标是 https），其次 HTTP。
- * SOCKS-only 配置不产出（undici ProxyAgent 只认 HTTP 代理，socks5:// 交进去更新必然失败）——
- * 按「无可用代理」回落直连，系统若同配了 HTTP 口则已在上分支返回。
+ * SOCKS-only 不产出（论据留档见 httpProxyUrl 注）——按「无可用代理」回落直连，
+ * 系统若同配了 HTTP 口则已在上分支返回。
  */
 export function parseScutilProxy(out: string): string | null {
   const read = (key: string): string | null => {
@@ -53,12 +53,12 @@ export function parseScutilProxy(out: string): string | null {
     const port = num('HTTPPort')
     if (host && port && validHostPort(host, port)) return `http://${host}:${port}`
   }
-  return null // SOCKS-only：undici 不支持，弃用走直连（不产出 socks5://）
+  return null // SOCKS-only：undici 不支持，弃用走直连（论据留档见 httpProxyUrl 注）
 }
 
 /**
  * 解析 Windows 注册表 ProxyServer 值。两种形态：整機 "host:port"；
- * 分协议 "http=h:p;https=h:p;socks=h:p"（取 https，退 http；socks 条目弃用——undici 不支持）。
+ * 分协议 "http=h:p;https=h:p;socks=h:p"（取 https，退 http；socks 条目弃用，论据留档见 httpProxyUrl 注）。
  */
 export function parseWinProxyServer(value: string): string | null {
   const v = value.trim()
@@ -136,11 +136,9 @@ function httpProxyUrl(v: string): string | null {
 }
 
 /**
- * 更新链路的代理解析入口：显式环境变量优先（含用户 shell 里的 HTTPS_PROXY），
- * 其后 macOS/Windows 系统代理设置；MODELRDOCK_NO_SYS_PROXY=1 直接禁用。
- * 环境变量是 SOCKS 形态（Clash 常见）时弃用，继续查系统代理的 HTTP 口——
- * 与其把必然失败的 socks5:// 交出去，不如按「无可用的环境变量代理」处理。
- * 返回 null = 未检测到可用代理，按直连走（与既有行为一致）。
+ * 更新链路的代理解析入口：显式环境变量优先，其后 macOS/Windows 系统代理设置；
+ * MODELRDOCK_NO_SYS_PROXY=1 直接禁用。环境变量是 SOCKS 形态（Clash 常见）时弃用、
+ * 继续查系统代理的 HTTP 口（论据留档见 httpProxyUrl 注）；返回 null = 按直连走。
  */
 export async function resolveUpdateProxyUrl(env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   if (env.MODELRDOCK_NO_SYS_PROXY === '1') return null

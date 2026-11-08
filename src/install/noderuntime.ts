@@ -117,7 +117,7 @@ export function managedNodeBinDir(version = nodeVersion()): string {
   return process.platform === 'win32' ? managedNodeDir(version) : path.join(managedNodeDir(version), 'bin')
 }
 
-/** 平台资产名：node-v24.22.0-darwin-arm64.tar.gz / node-v24.22.0-win-x64.zip */
+/** 平台资产名：node-v24.22.2-darwin-arm64.tar.gz / node-v24.22.2-win-x64.zip */
 export function nodeAssetName(
   version = nodeVersion(),
   platform = process.platform,

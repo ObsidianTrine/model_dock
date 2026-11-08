@@ -56,18 +56,6 @@ export function modelEndpoints(base: string): string[] {
 }
 
 /**
- * 解析单条模型条目自带的元数据（各家字段名归一化，取首个通过边界校验的数值）：
- * - 上下文：DeepSeek context_window / Kimi、Together、OpenRouter context_length /
- *   Anthropic max_input_tokens / vLLM max_model_len / Gemini inputTokenLimit（含 snake 写法）/
- *   Mistral max_context_length / Fireworks contextLength
- * - 输出：DeepSeek max_output_tokens / Gemini outputTokenLimit（含 snake 写法）/
- *   Groq、OpenRouter（top_provider 嵌套）max_completion_tokens；
- *   max_tokens 仅在 anthropic 协议下当作最大输出（其语义是「max_tokens 参数的上限」；
- *   OpenAI 系响应里该键含义不明，一律不采信）
- * - 能力：architecture.input_modalities / input_modalities / capabilities（见 parseUpstreamCapabilities），
- *   字段存在才产出；多数家 /models 不报能力，此时为 undefined 由内置表兜底
- */
-/**
  * 上游能力字段解析（只识别 vision 一项）。字段存在才表态（undefined=未提供，[]=明确无视觉），保守识别：
  * - OpenRouter 风格 architecture.input_modalities / 部分 agent 网关顶层 input_modalities：含 'image' 即视觉
  * - Ollama / LM Studio 风格 capabilities：数组含 'vision'/'image'，或对象形 {vision:true} / {image:true}
@@ -89,6 +77,14 @@ function parseUpstreamCapabilities(rec: Record<string, unknown>): string[] | und
   return undefined
 }
 
+/**
+ * 解析单条模型条目自带的元数据（各家字段名归一化，取首个通过边界校验的数值）：
+ * 上下文 = DeepSeek context_window / Kimi、Together、OpenRouter context_length / Anthropic max_input_tokens /
+ * vLLM max_model_len / Gemini inputTokenLimit / Mistral max_context_length / Fireworks contextLength（含 snake 写法）；
+ * 输出 = DeepSeek max_output_tokens / Gemini outputTokenLimit / Groq、OpenRouter（top_provider 嵌套）max_completion_tokens；
+ * max_tokens 仅在 anthropic 协议下当作最大输出——OpenAI 系响应里该键含义不明，一律不采信；
+ * 能力见 parseUpstreamCapabilities，多数家 /models 不报，undefined 由内置表兜底。
+ */
 export function parseUpstreamModelMeta(item: unknown, protocol: string): UpstreamMeta {
   if (typeof item !== 'object' || item === null) return {}
   const rec = item as Record<string, unknown>

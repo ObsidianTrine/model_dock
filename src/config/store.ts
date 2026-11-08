@@ -17,7 +17,7 @@ export class ConfigError extends Error {
 }
 
 function migrate(raw: Record<string, unknown>): Config {
-  // 版本迁移器：version 逐级升级，当前仅 v1
+  // 版本迁移器（当前仅 v1）
   const version = Number(raw.version ?? 1)
   if (version > CONFIG_VERSION) {
     throw new ConfigError(

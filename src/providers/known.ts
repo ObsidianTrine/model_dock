@@ -31,11 +31,6 @@ export function saneCapabilities(v: unknown): string[] | undefined {
   return out
 }
 
-/**
- * 全局常见模型的保守默认元数据（上下文 / 最大输出，单位 tokens）。
- * 用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
- * 优先级：预设库已有模型 > 此处补充的全局常见模型。
- */
 /** 全局常见模型的保守默认元数据（上下文 / 最大输出，单位 tokens）。
  *  用于在导入、展示、编辑时自动填充 model 目录，避免长留"未知"。
  *  优先级：预设库已有模型（见 knownByIdTable()）> 此处补充的全局常见模型。

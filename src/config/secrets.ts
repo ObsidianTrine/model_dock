@@ -246,7 +246,6 @@ function setKeychain(id: string, value: string): Promise<void> {
     let err = ''
     child.stderr.on('data', (d) => (err += d))
     child.on('error', (e) => { guard.dispose(); reject(e) })
-    // 子进程早退时 stdin EPIPE 不能崩整个进程（同 dpapiBatch 的 stdin 守卫）
     child.stdin.on('error', () => {})
     child.on('close', (code) => {
       guard.dispose()
@@ -369,7 +368,6 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
           child.stdout.on('data', (d) => (out += d))
           child.stderr.on('data', (d) => (err += d))
           child.on('error', (e) => { guard.dispose(); reject(e) })
-          // 子进程早退/ spawn 失败时 stdin 可能发 EPIPE：未监听会以 uncaught exception 崩掉整个进程
           child.stdin.on('error', () => {})
           child.on('close', (code) => {
             guard.dispose()
@@ -478,7 +476,7 @@ export const machCipher: FileCipher = {
         typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX) &&
         typeof prevC === 'string' && prevC.startsWith(MACH_PREFIX) && reuse?.plain[k] === v
       ) {
-        raw[k] = prevC // 未变更条目复用原密文（nonce 随机，重加密产出不同密文，纯浪费）
+        raw[k] = prevC
         continue
       }
       raw[k] = typeof v === 'string' && v !== '' && !v.startsWith(MACH_PREFIX) ? await encMach(v) : v
@@ -526,7 +524,7 @@ export function pickFileCipher(): FileCipher {
 //   零 I/O（旧实现是纯内存时间戳比较直到显式失效，此处保持每窗口至多一次 stat 的回验节奏）。
 // raw/snapshot 配对（perf-secrets-cache）：raw 是生成 data 时的盘上密文表（raw[k] 解密必得
 // snapshot[k]）、snapshot 是与之配对的明文快照——writeFileSecrets 写回时「明文 == snapshot」的
-// 条目沿用 raw 原密文不再重加密（密文非确定性，重加密纯浪费 + 整文件 churn）；缺失 = 无法按条
+// 条目沿用 raw 原密文不再重加密；缺失 = 无法按条
 // 复用，整表加密（保守）。mutateFileSecrets 会原地改 data 返回值，写路径判「条目未变更」必须比对
 // snapshot 而非 data 本身。
 const FILE_RECHECK_MS = 5_000
@@ -551,14 +549,12 @@ async function secretsStatKey(): Promise<string | null> {
   }
 }
 
-/** 读 secrets.json 原始明文表；损坏抛可操作 SecretsError（不再静默当「无密钥」） */
-/** 测试注入的整表原始读取（数读盘次数用）；undefined=真实实现。与 __testSetDpapiBatch 同套路：
- *  模块内 let 替换，不碰 vi.mock 跨文件雷区。 */
 let secretsRawImpl: (() => Promise<Record<string, string>>) | undefined
 export function __testSetSecretsRawReader(fn?: () => Promise<Record<string, string>>): void {
   secretsRawImpl = fn
 }
 
+/** 读 secrets.json 原始明文表；损坏抛可操作 SecretsError（不再静默当「无密钥」） */
 async function readSecretsRaw(): Promise<Record<string, string>> {
   if (secretsRawImpl) return secretsRawImpl()
   const text = await readTextIfExists(secretsPath())
@@ -661,10 +657,8 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
 }
 
 /** 读取 file 后端解密表；win32/linux 首次加载会把存量明文自动加密迁移（整表一次进程）。
- *  @param useCache 默认读内存缓存（转发热路径：FILE_RECHECK_MS 窗口内零 I/O，窗口到 stat 回验
- *  一次，盘未变续期复用、变了重读）。写路径传 false：跳过节流窗直接回验——file 后端全部写路径
- *  过同一把锁，持锁期间无并发写者，指纹相等即缓存必然反映盘上当前内容，可安全复用解密表
- *  （不再无条件重读盘：跨进程丢更新防线不变，win32 锁内通常省掉解密一次 PowerShell spawn）。 */
+ *  @param useCache 默认读内存缓存（FILE_RECHECK_MS 窗口内零 I/O，窗口到 stat 回验，盘未变续期复用）。
+ *  写路径传 false：跳过节流窗直接回验、指纹相等即复用缓存解密表（锁-指纹论据见上方 fileCache 块注）。 */
 async function loadFileSecrets(useCache = true): Promise<Record<string, string>> {
   const cached = fileCache && fileCache.path === secretsPath() ? fileCache : null
   if (cached) {
@@ -716,10 +710,7 @@ async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
 }
 
 /** 写路径统一入口：跨进程锁（与 config 同语义）+ 锁内新鲜读拼最新的解密表，改后整表写回。
- *  锁内新鲜读按盘上指纹复用缓存解密表（loadFileSecrets(false)：持锁期间无并发写者，指纹相等
- *  即缓存必然反映盘上当前内容；另一进程刚写入时指纹必然不等，自动整表重读）——跨进程丢更新
- *  防线不变，win32 锁内从「解密+加密各一次 PowerShell spawn」收敛为通常只剩加密一次，且加密
- *  只对变更条目出（未变更条目复用原密文，全部未变 0 次）。
+ *  锁内新鲜读按盘上指纹复用缓存解密表（loadFileSecrets(false)；锁-指纹论据见上方 fileCache 块注），跨进程丢更新防线不变。
  *  锁内的 DPAPI 加密（win32 spawn PowerShell，最坏 2 次 × 10s 超时 ≈ 20s）**有意留在临界区**，
  *  依赖 fsx 的持锁喂狗保活（acquireFileLock 心跳刷新锁 mtime，陈锁判定对活者永不满足）：
  *  解密已可凭指纹跳过；加密移不出锁——改后整表只有锁内才知道，而整表原子写必须发生在锁内。
@@ -883,9 +874,7 @@ export async function setSecretsBatch(
   })
 }
 
-/** 删除 key。
- *  沙箱守卫：沙箱配置里的 keychain/secret-service 引用源自生产种子（dev-seed 原样复制 key 照搬），
- *  而外部存储是机器级全局、不随 home 隔离——按引用删除删掉的是生产正在用的条目，跳过外部删除。 */
+/** 删除 key。沙箱跳过外部删除：外部存储机器级全局、不随 home 隔离，删的是生产条目（论据见 defaultStore 注） */
 export async function deleteSecret(ref: string): Promise<void> {
   const { scheme, id } = parseKeyRef(ref)
   if (scheme === 'keychain' || scheme === 'secret-service') {
