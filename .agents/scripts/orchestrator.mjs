@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBrief, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3107,7 +3107,19 @@ function cmdSpecStatus(repoRoot, id) {
 // WebSearch（backends RESEARCH_TOOLS；无 Bash 无写，fail-closed 同 reviewer）。
 // ---------------------------------------------------------------------------
 
-/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回 null。
+/** 3 次重试全败的会话返回值：真值对象（区别于成功的 { id, dir, … }），带最后一跳现场——
+ *  2026-11-08 P1-⑤：此前失败只返回 null，claude CLI 把「模型不存在/无权」「tool_call 被当
+ *  纯文本」这类死因写在 stderr，全部丢弃后 die 文案只剩「N 次均未产出」，无法定位。 */
+function researchFailure(result) {
+  return {
+    failed: true,
+    exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
+    stderrTail: String(result?.stderrTail ?? '').trim(),
+  };
+}
+
+/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回
+ *  { failed: true, exitCode, stderrTail }（researchFailure，带最后一跳现场供 die 文案）。
  *  model：调研船模型（--model 显式 > workflow.json research.model > claude CLI 全局默认）——
  *  2026-11-08 实证：researcher 吃全局默认 glm-4.5-air 时检索接地失效产出旧世界内容，
  *  换 glm-5.3-flash 后恢复正常——调研船必须与执行船解耦选型。 */
@@ -3120,6 +3132,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
   try {
     let promptText = buildResearchPrompt(sanitizeIntent(question), repoRoot, { goalsText: readGoals(repoRoot), minCitations });
     const MAX_ATTEMPTS = 3;
+    let lastResult = null; // 最后一跳 spawn 结果：失败时透出 stderrTail/exitCode（P1-⑤）
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
@@ -3133,6 +3146,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
         model,
         settingsFile,
       });
+      lastResult = result;
       const parsed = parseBriefBlock(result.output ?? '');
       tracePlannerSpawn({ repoRoot, session, traceCfg, command: traceCommand, backend: backendName, attempt, promptText, result, parsed: parsed ? { blocks: 1 } : null, startedAt });
       if (!parsed) {
@@ -3140,14 +3154,14 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${BRIEF_MARKER}${'```'} 契约块）\n请严格按产出契约重新输出：单个 agents-brief fenced block（id/title + 五段齐全）。`;
           continue;
         }
-        return null;
+        return researchFailure(lastResult);
       }
       if (!TASK_ID_RE.test(parsed.id)) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（id "${parsed.id}" 不合法）\nid 只允许小写字母/数字/短横线，请修正 agents-brief 块后重新输出。`;
           continue;
         }
-        return null;
+        return researchFailure(lastResult);
       }
       try {
         validateBriefBody(parsed.body, { minCitations });
@@ -3156,12 +3170,13 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
           promptText += `\n\n# 重试要求（第 ${attempt} 次 brief 未通过校验）\n校验错误：${String(e.message).slice(0, 400)}\n请修正后重新输出完整契约块。`;
           continue;
         }
-        return null;
+        return researchFailure(lastResult);
       }
-      const dir = writeBrief(repoRoot, { id: parsed.id, title: parsed.title, question, backend: backendName, body: parsed.body });
-      return { id: parsed.id, dir, body: parsed.body, citations: extractCitations(parsed.body) };
+      // 同 id 已存在时自动派生 <id>-2…-9 落盘（P1-④，同题重跑不再裸崩）；回执用实际落盘 id
+      const { dir, id } = writeBriefAuto(repoRoot, { id: parsed.id, title: parsed.title, question, backend: backendName, body: parsed.body });
+      return { id, dir, body: parsed.body, citations: extractCitations(parsed.body) };
     }
-    return null;
+    return researchFailure(lastResult);
   } finally {
     try {
       fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
@@ -3187,7 +3202,19 @@ async function cmdResearch(repoRoot, opts) {
   const model = opts.model || cfg.research?.model || undefined;
   log(`调研问题：${sanitizeIntent(question)}${model ? `\n调研船模型：${model}` : '\n调研船模型：（未指定——用 claude CLI 全局默认，建议 workflow.json research.model 显式配置）'}`);
   const r = await runResearchSession(repoRoot, { question, backendName: opts.backend, minCitations, model });
-  if (!r) die(`Researcher 会话 3 次均未产出合规 brief（五段契约 + ≥${minCitations} 条当日引用）。\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`);
+  if (!r || r.failed) {
+    // 2026-11-08 P1-⑤：die 文案带最后一跳 stderr 摘要 + 两个实测死因的处置建议
+    //（unrecognized_model = 服务商对该模型 tool-call 支持不完整；</tool_call> = 模型把
+    // tool_call 输出成纯文本 XML）。stderrTail 本身已是 stderr 末尾 4000 字，致命错误在最末，
+    // 取尾 200 字（与 tracePlannerSpawn/plannerSpawnDetail 口径一致）。
+    const tail = String(r?.stderrTail ?? '').trim().slice(-200);
+    die(
+      `Researcher 会话 3 次均未产出合规 brief（五段契约 + ≥${minCitations} 条当日引用）。\n` +
+      `最后一跳 stderr：${tail || '（无 stderr 留痕）'}\n` +
+      `若报 unrecognized_model 或输出含 </tool_call>，说明该服务商对此模型的 tool-call 支持不完整——换 --model 或检查服务商模型接入。\n` +
+      `可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
+    );
+  }
   log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
   log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
   const snap = await snapshotCitations(repoRoot, r.id);
@@ -3468,7 +3495,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
     } else if (out.researched.length < caps.research) {
       log(`  ⛵ 上游管线：${p.id} 缺调研——派 researcher（问题取提案目标）`);
       const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName, model: cfg.research?.model });
-      if (r) {
+      if (r && !r.failed) { // 失败返回真值对象 { failed, … }（P1-⑤），别当成功消费
         out.researched.push(r.id);
         briefBody = r.body;
         stampResearchIntoDraft(repoRoot, p.id, r.id);
