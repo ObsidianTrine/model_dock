@@ -15,6 +15,7 @@
 // 现取，预检零重复请求。
 
 import { resolveGatewayAdmin } from './tiers.mjs';
+import { concurrencyAdvisoryFromMetrics } from './weather.mjs';
 
 const FLEET_TIMEOUT_MS = 3000;
 /** /v1/health 免鉴权探活超时（A4）：定责「网关不可达」vs「在线但 admin 异常」。 */
@@ -34,8 +35,11 @@ export const SHIP_HARNESS = { 'zcode-headless': 'zcode', 'claude-headless': 'cla
 
 /**
  * 拉取并压缩海况快照。返回
- *   { mode:'ok', observedAt, providers:[{id, models, down, lastMs}], harnesses:[{id, attached, pointing}], meltdown:[{provider, class}] }
+ *   { mode:'ok', observedAt, providers:[{id, models, down, lastMs}], harnesses:[{id, attached, pointing}], meltdown:[{provider, class}], concurrency:{ queued_providers, max_in_flight_ratio }|null }
  *   | { mode:'unavailable', reason }
+ * concurrency 是并发水位 advisory（2026-11 concurrency signal，纯增量只照亮不拦截）：
+ * metrics.concurrency 的汇总（排队中的 provider 数 + 全队最大 in_flight/limit 占比），
+ * 旧网关缺段 → null；消费方按缺失处理，任何判定都不读它。
  * 观测失败永不抛出——海况是观测面，断了就如实 unavailable。
  */
 export async function fetchFleetState(cfg, opts = {}) {
@@ -99,6 +103,7 @@ export async function fetchFleetState(cfg, opts = {}) {
       providers,
       harnesses,
       meltdown: [...melted.values()],
+      concurrency: concurrencyAdvisoryFromMetrics(metrics), // 旧网关缺段 → null（纯增量 advisory）
     };
   } catch (e) {
     // 探活已过（网络层在线）走到这里 = admin 面（凭据/接口）异常——文案直接点名，替代
@@ -144,7 +149,8 @@ export function assessFleet(state, { backend } = {}) {
   return warnings;
 }
 
-/** 海况一行摘要（日志用）：服务数/熔断数 + 各客户端指向。 */
+/** 海况一行摘要（日志用）：服务数/熔断数 + 各客户端指向；有并发水位信号（排队或占用）
+ *  时附 advisory 段（纯增量展示——全队空闲时不加段，常态输出与历史逐字节一致）。 */
 export function renderFleetLine(state) {
   const providers = state.providers ?? [];
   const melted = providers.filter((p) => p.down).length;
@@ -152,7 +158,13 @@ export function renderFleetLine(state) {
     .filter((h) => h.id)
     .map((h) => `${h.id}=${h.pointing}${h.attached ? '' : '(未接入)'}`)
     .join(' / ');
-  return `⚓ 海况（${state.observedAt}）：服务 ${providers.length} 个（熔断 ${melted}）${pointing ? ` · 客户端 ${pointing}` : ''}`;
+  // 并发水位 advisory（2026-11 concurrency signal）：排队中的 provider 数 + 最大占用占比。
+  // 只在有信号时展示（排队>0 或占比>0）；占比/排队全零 = 空闲，不占日志行。
+  const cw = state.concurrency;
+  const cwParts = [];
+  if (cw && Number.isFinite(cw.queued_providers) && cw.queued_providers > 0) cwParts.push(`排队 ${cw.queued_providers} 服务`);
+  if (cw && Number.isFinite(cw.max_in_flight_ratio) && cw.max_in_flight_ratio > 0) cwParts.push(`峰值占用 ${Math.round(cw.max_in_flight_ratio * 100)}%`);
+  return `⚓ 海况（${state.observedAt}）：服务 ${providers.length} 个（熔断 ${melted}）${pointing ? ` · 客户端 ${pointing}` : ''}${cwParts.length ? ` · 并发水位：${cwParts.join(' · ')}` : ''}`;
 }
 
 /**
@@ -181,6 +193,7 @@ export async function observeFleetForRun(cfg, { backend } = {}) {
       meltdown: (state.meltdown ?? []).map((m) => m.provider),
       harnesses: Object.fromEntries((state.harnesses ?? []).map((h) => [h.id, h.pointing])),
       warnings: warnings.map((w) => w.code),
+      ...(state.concurrency ? { concurrency: state.concurrency } : {}), // 水位 advisory 留痕（纯增量）
       ...(warnings.some((w) => w.code === 'dogfood_bypass') ? { dogfood_bypass: true } : {}),
     },
   };

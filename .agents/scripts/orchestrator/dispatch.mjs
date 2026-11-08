@@ -144,6 +144,9 @@ export function seaWeather(repoRoot, cfg, { now = Date.now(), seaSnap = null } =
         total5m: seaSnap.total5m ?? 0,
         count429_60m: seaSnap.count429_60m ?? 0,
         countQuota_60m: seaSnap.countQuota_60m ?? 0,
+        // 并发水位 advisory（2026-11 concurrency signal）纯透传：仅供观测/人读，任何
+        // 判定都不读它（storm 权威位仍是 sea_state）——旧网关缺段为 null。
+        concurrency: seaSnap.concurrency ?? null,
       }
     : null;
   if (sea) sea.rate429Breach = sea.rate429_5m >= SEA_429_RATE_5M_THRESHOLD && sea.total5m >= SEA_429_RATE_5M_MIN_TOTAL;
