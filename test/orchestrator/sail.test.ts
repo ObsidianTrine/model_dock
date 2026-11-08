@@ -67,9 +67,22 @@ describe('orchestrator sail > 纯逻辑件', () => {
       canSailSubmit({ ...base, type: 'refactor', files_hint: ['src/gateway/server.ts'] }, { corePaths: ['src/gateway/server.ts'] }).ok,
     ).toBe(false)
     expect(canSailSubmit({ ...base, type: 'refactor' }, { freeSail: { autoSubmitTypes: ['docs'] } }).ok).toBe(false)
-    // 缺省白名单覆盖四种常规类型（deps 天然不在列）
-    for (const t of ['docs', 'bugfix', 'refactor', 'feature']) expect(DEFAULT_SAIL_SUBMIT_TYPES).toContain(t)
+    // 缺省白名单覆盖常规维护类型（deps 天然不在列；feature 2026-11 起走上游管线不入白名单）
+    for (const t of ['docs', 'bugfix', 'refactor']) expect(DEFAULT_SAIL_SUBMIT_TYPES).toContain(t)
     expect(DEFAULT_SAIL_SUBMIT_TYPES).not.toContain('deps')
+    expect(DEFAULT_SAIL_SUBMIT_TYPES).not.toContain('feature')
+  })
+
+  it('canSailSubmit：feature 提案永不直接自动提交（上游管线 research → spec → 人工审设计 → spec build）', () => {
+    const feature = { id: 'feat-x', type: 'feature', created_by: 'planner', files_hint: ['docs/**'] }
+    // 有无 research 字段都拒——拒绝理由指向 spec 管线（引用 brief 只影响管线推进，不影响提交判定）
+    const noResearch = canSailSubmit(feature, {})
+    expect(noResearch.ok).toBe(false)
+    expect(noResearch.reason).toMatch(/上游管线|spec/)
+    const withResearch = canSailSubmit({ ...feature, research: 'some-brief' }, {})
+    expect(withResearch.ok).toBe(false)
+    // 白名单配置强行加回 feature 也不放大授权面（配置只收窄、永不放大）
+    expect(canSailSubmit(feature, { freeSail: { autoSubmitTypes: ['docs', 'feature'] } }).ok).toBe(false)
   })
 
   it('diffQueueStates：状态迁移与新入队', () => {
@@ -196,6 +209,35 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
       const fleet = fs.readFileSync(fleetLogPath(repo.root), 'utf8')
       expect(fleet).toContain('sail_started')
       expect(fleet).toContain('sail_finished')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('上游管线（Plan A）：feature 提案 → 派调研出 brief → 自动升级 spec 落盘待人审，不直接进队列', () => {
+    const repo = mkRepo()
+    try {
+      // 秒级时长（同「到时收帆」测试技巧）：feature 不进队列 → max-tasks 永不触达，
+      // 周期 1 完成规划+上游管线后睡到 deadline 收帆
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1' })
+      expect(out.stdout).toContain('到达时长上限')
+      // spec 三件套落盘（id=提案 id）+ 调研 brief 落盘 + 提案未进队列
+      const specDir = path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task')
+      expect(fs.existsSync(path.join(specDir, 'design.md'))).toBe(true)
+      expect(fs.existsSync(path.join(specDir, 'requirements.md'))).toBe(true)
+      expect(fs.existsSync(path.join(specDir, 'tasks.md'))).toBe(true)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'research', 'mock-planner', 'brief.md'))).toBe(true)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'planner-mock-task.md'))).toBe(false)
+      // 提案 research 字段被盖成 brief id；brief 引用非空
+      const draft = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'planner-mock-task.md'), 'utf8')
+      expect(draft).toMatch(/research: mock-planner/)
+      const brief = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'research', 'mock-planner', 'brief.md'), 'utf8')
+      expect(brief).toContain('https://example.com/mock-research')
+      // 航海报告如实收录上游管线去向
+      const report = latestReport(repo.root)
+      expect(report).toContain('上游管线：调研 brief mock-planner')
+      expect(report).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+      expect(report).toContain('feature 提案走上游管线')
     } finally {
       repo.cleanup()
     }

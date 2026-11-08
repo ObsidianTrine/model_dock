@@ -1,0 +1,10 @@
+{
+  "id": "headless-websearch-fallback",
+  "question": "Claude Code / claude CLI 以第三方 Anthropic 兼容端点（非 Anthropic 官方 API）为后端时，WebSearch 工具的可用性如何？不可用时的调研降级做法有哪些？",
+  "goals": "ModelDock 网关供油的 headless 舰队保持可调研能力；零 native 依赖；改动尽量落在 .agents 工具链内。",
+  "minCitations": 1,
+  "expect": {
+    "mustFind": ["websearch", "webfetch"],
+    "mustFindAny": 2
+  }
+}

@@ -15,7 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -31,6 +31,7 @@ export const mockBackend = {
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
+    const isResearcher = !isSpecPlanner && !isPlanner && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isSpecPlanner) {
@@ -99,9 +100,11 @@ export const mockBackend = {
 
     if (isPlanner) {
       // planner 模式：输出一张合法任务卡（契约块）；ORCH_MOCK_PLANNER_INVALID=1 模拟非法输出（校验重试路径测试）
-      const invalid = process.env.ORCH_MOCK_PLANNER_INVALID === '1';
+      // ORCH_MOCK_PLANNER_FEATURE=1：产 feature 卡（带 research: todo + score/evidence——
+      // sail 上游管线 e2e 用：先派 researcher 出 brief，再自动升级 spec，不直接进队列）
       const intentId = /用户意图：\s*(.+)$/m.exec(prompt)?.[1]?.trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'planner-mock-task';
-      const output = invalid
+      const isFeature = process.env.ORCH_MOCK_PLANNER_FEATURE === '1';
+      const output = process.env.ORCH_MOCK_PLANNER_INVALID === '1'
         ? '我想了一下,这个任务大概需要改一些文件。没有产出任务卡。'
         : [
             `已探索仓库,意图编译为任务卡。`,
@@ -109,15 +112,28 @@ export const mockBackend = {
             '```' + CARD_MARKER,
             '---',
             `id: ${intentId || 'planner-mock-task'}`,
-            'type: docs',
+            `type: ${isFeature ? 'feature' : 'docs'}`,
             'priority: normal',
             `created_at: ${new Date().toISOString()}`,
             'created_by: planner',
             'files_hint:',
-            '  - docs/**',
+            `  - ${isFeature ? 'docs/**' : 'docs/**'}`,
             'workflows:',
             '  - feature-branch',
             'gate: L3',
+            ...(isFeature
+              ? [
+                  'proposal: true',
+                  'research: todo',
+                  'score:',
+                  '  value: 2',
+                  '  effort: 1',
+                  '  confidence: 3',
+                  '  risk: 1',
+                  'evidence:',
+                  '  - mock 证据：ORCH_MOCK_PLANNER_FEATURE 注入',
+                ]
+              : []),
             '---',
             '',
             '# 目标',
@@ -133,6 +149,40 @@ export const mockBackend = {
           ].join('\n');
       onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-planner' });
       return { exitCode: 0, output, usage: { tokensIn: 300, tokensOut: 200 }, pid: process.pid };
+    }
+
+    if (isResearcher) {
+      // researcher 模式：输出一份带引用的 brief 契约块（research 命令端到端 / sail 上游管线 e2e）；
+      // ORCH_MOCK_RESEARCH_NO_CITE=1 注入无引用产出（validateBriefBody 拒收重试路径测试）
+      const noCite = process.env.ORCH_MOCK_RESEARCH_NO_CITE === '1';
+      const qId = /调研问题：\s*(.+)$/m.exec(prompt)?.[1]?.trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'planner-mock-brief';
+      const output = process.env.ORCH_MOCK_PLANNER_INVALID === '1'
+        ? '我查了一些资料但没有产出契约块。'
+        : [
+            '调研完成,产出 brief。',
+            '',
+            '```' + BRIEF_MARKER,
+            `id: ${qId}`,
+            'title: mock 调研标题',
+            '',
+            '# 结论',
+            'mock 调研结论占位 [1]。',
+            '',
+            '# 选项对比',
+            '- 方案 A：mock——优劣占位。',
+            '',
+            '# 引用',
+            ...(noCite ? [] : [`- ${new Date().toISOString().slice(0, 10)} https://example.com/mock-research — 支撑结论 [1]`]),
+            '',
+            '# 建议',
+            'mock 建议占位。',
+            '',
+            '# 罗盘对齐',
+            'mock 对齐说明占位。',
+            '```',
+          ].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-researcher' });
+      return { exitCode: 0, output, usage: { tokensIn: 200, tokensOut: 150 }, pid: process.pid };
     }
 
     if (isReviewer) {

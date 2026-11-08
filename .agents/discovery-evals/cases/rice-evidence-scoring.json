@@ -1,0 +1,10 @@
+{
+  "id": "rice-evidence-scoring",
+  "question": "用 RICE/WSJF 给 agent 自主生成的软件需求做量化排序时，业界对「因子误差复利」与证据化输入（evidence）的处理经验是什么？",
+  "goals": "Dockmaster 的自动提案需要可解释的优先级；人工批示是最终裁决；不引入第三方依赖。",
+  "minCitations": 1,
+  "expect": {
+    "mustFind": ["rice", "confidence"],
+    "mustFindAny": 2
+  }
+}

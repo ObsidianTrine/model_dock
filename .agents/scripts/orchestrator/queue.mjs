@@ -5,6 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { orderKey, keyLess } from './score.mjs';
 
 /** 7 个队列状态目录；merged/failed 为终态。 */
 export const STATES = ['pending', 'running', 'reviewing', 'awaiting-human', 'merged', 'failed', 'blocked'];
@@ -267,6 +268,35 @@ export function validateCard(meta) {
       fail(`任务卡 spec "${JSON.stringify(meta.spec)}" 不合法：只允许小写字母/数字/短横线（所属规格 id）`);
     }
   }
+  // 调研引用（可选）：feature 提案关联的调研 brief id（research 命令产出）；'todo' = 待派调研
+  //（sail 上游管线识别后先跑 researcher 再升级 spec）。不校验 brief 存在性——校验在
+  // 消费侧（sailAutoSubmit/specFromDraft，需要 repoRoot），这里只管语法。
+  if (meta.research !== undefined && meta.research !== null && meta.research !== '') {
+    if (typeof meta.research !== 'string' || (meta.research !== 'todo' && !TASK_ID_RE.test(meta.research))) {
+      fail(`任务卡 research "${JSON.stringify(meta.research)}" 不合法：只允许 brief id（小写字母/数字/短横线）或 "todo"`);
+    }
+  }
+  // 量化评分（可选，纯规则消费见 score.mjs）：value/effort/confidence/risk 各 1-3 档
+  if (meta.score !== undefined && meta.score !== null) {
+    if (typeof meta.score !== 'object' || Array.isArray(meta.score)) {
+      fail(`任务卡 score "${JSON.stringify(meta.score)}" 不合法：应是一层嵌套对象（value/effort/confidence/risk 各 1-3）`);
+    }
+    for (const k of ['value', 'effort', 'confidence', 'risk']) {
+      const v = meta.score[k];
+      if (v === undefined) continue;
+      if (!Number.isInteger(v) || v < 1 || v > 3) {
+        fail(`任务卡 score.${k} "${JSON.stringify(v)}" 不合法：只允许 1 | 2 | 3（缺省按 2 计）`);
+      }
+    }
+  }
+  // 证据清单（可选，与 score 配套）：一句话一条，调度定序的依据面
+  if (meta.evidence !== undefined && meta.evidence !== null) {
+    if (!Array.isArray(meta.evidence) || meta.evidence.some((e) => typeof e !== 'string')) {
+      fail('任务卡 evidence 不合法：应为字符串数组（每条一句话证据）');
+    }
+    meta.evidence = meta.evidence.map((e) => e.trim()).filter(Boolean);
+    if (!meta.evidence.length) delete meta.evidence;
+  }
   const budget = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
   for (const k of Object.keys(DEFAULT_BUDGET)) requirePositiveInt(budget, k);
   meta.budget = budget;
@@ -362,7 +392,9 @@ const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
 
 /**
  * 自动调度：取 pending 中下一个该跑的任务（Phase 2，docs 10.3）。
- * 排序：priority（high > normal > low）→ 同优先级按 created_at 升序（先到先跑）。
+ * 排序：priority（high > normal > low）→ 同优先级内带分卡先于无分卡（带分按 composite
+ * 降序，评分规则见 score.mjs；无分按 created_at 升序保持先到先跑）。全无分卡队列与
+ * 历史行为一致（score 是插队信号，不是重排器）。
  * 解析/校验失败的卡跳过（留在原地等人工修复，不阻塞队列——drain 靠它避免死循环）。
  * opts.skipIds：调用方显式排除的 id 集合（drain 的引水闸跳过——待人工确认的卡
  * 留在 pending/ 不派发，队列顺序不因跳过而改变）。返回 { id, meta } 或 null。
@@ -375,10 +407,12 @@ export function pickNextCard(root, opts = {}) {
     try {
       const text = fs.readFileSync(cardPath(root, 'pending', id), 'utf8');
       const { meta } = loadCard(text, `${id}.md`);
-      const key = [PRIORITY_RANK[meta.priority] ?? 1, Date.parse(meta.created_at) || Infinity];
-      if (!best || key[0] < best.key[0] || (key[0] === best.key[0] && key[1] < best.key[1])) {
-        best = { id, meta, key };
-      }
+      const key = [PRIORITY_RANK[meta.priority] ?? 1, ...orderKey(meta)];
+      const better =
+        !best ||
+        key[0] < best.key[0] ||
+        (key[0] === best.key[0] && keyLess(key.slice(1), best.key.slice(1)));
+      if (better) best = { id, meta, key };
     } catch {
       continue; // 损坏卡：人工修（status 可见），不阻塞调度
     }
