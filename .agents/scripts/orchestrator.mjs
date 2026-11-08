@@ -3227,9 +3227,12 @@ async function cmdResearch(repoRoot, opts) {
   const verdict = assessBrief(repoRoot, r.id, { model });
   logVerdict(r.id, verdict, 'L1 快照回查');
   // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
+  // 标题带项目名：飞书自定义关键词过滤按消息文本命中——标题不含项目名会被 19024 静默丢弃
+  //（2026-11-09 实测：关键词=ModelDock 的机器人把无关键词的调研通知整条吞掉）
   try {
     if (cfg.research?.notify !== false) {
-      await notify({ title: `调研判定 ${r.id}（${verdict?.level ?? '?'}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+      const proj = displayProjectName(cfg.projectName ?? '');
+      await notify({ title: `${proj} 调研判定 ${r.id}（${verdict?.level ?? '?'}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
     }
   } catch { /* 通知失败不阻断 */ }
   log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
@@ -3394,9 +3397,11 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);
       // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
+      // 标题带项目名：飞书自定义关键词过滤按消息文本命中——无关键词整条静默丢弃（19024）
       try {
         if (cfg.research?.notify !== false) {
-          await notify({ title: `复核判定 ${id}（${v.level}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+          const proj = displayProjectName(cfg.projectName ?? '');
+          await notify({ title: `${proj} 复核判定 ${id}（${v.level}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
         }
       } catch { /* 通知失败不阻断 */ }
       return;
