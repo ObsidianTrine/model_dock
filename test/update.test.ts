@@ -29,6 +29,7 @@ import {
 } from '../src/update/install.js'
 import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
 import { readUpdateProgress } from '../src/update/progress.js'
+import { readStagingMeta, saveStagingMeta, stagingFinalFile } from '../src/update/staging.js'
 import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
 
@@ -859,6 +860,53 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(fs.readFileSync(execPath + '.old', 'utf8')).toBe('OLD-BIN')
       // 拉回用的是新二进制 + SEA 守护入口参数
       expect(calls.detached).toEqual([{ file: execPath, args: ['--sea-gateway'] }])
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('预取复用：staging 就绪包跳过下载段（资产端点 0 请求），SUMS 仍现拉重验，槽位标 consumed', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+
+      const pkg = makeBareArchive(root, '999.0.0')
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+
+      // 预置 staging 就绪包：与发布资产同内容 + ready 账本（预取完成态）
+      fs.mkdirSync(path.dirname(stagingFinalFile('999.0.0', pkg.name)), { recursive: true })
+      fs.writeFileSync(stagingFinalFile('999.0.0', pkg.name), pkg.buf)
+      await saveStagingMeta({
+        version: '999.0.0',
+        tagName: 'v999.0.0',
+        assetName: pkg.name,
+        assetId: 1,
+        size: pkg.buf.length,
+        etag: null,
+        url: null,
+        received: pkg.buf.length,
+        sumsVerified: true,
+        ready: true,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+
+      const r = await runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath }))
+      expect(r.updated).toBe(true)
+      expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
+      // 下载段被 staging 复用替代：安装包资产端点零请求；SUMS 端点照常现拉（完整性锚点不过磁盘缓存）
+      expect(api.requests.filter((u) => /releases\/assets\/1$/.test(u)).length).toBe(0)
+      expect(api.requests.some((u) => /releases\/assets\/2$/.test(u))).toBe(true)
+      // 槽位标 consumed（删除延迟到 sweep；win-setup 的 Inno 异步读包不可同步删）
+      expect((await readStagingMeta())?.consumed).toBe(true)
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
     }

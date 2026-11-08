@@ -44,11 +44,17 @@ export interface PrefetchOpts {
   apiBase?: string
   mirrors?: string[]
   manifest: ReleaseManifest
+  /** 测试注入：安装形态探测锚点（vitest 下 process.execPath 是 node，会被开发态守卫拦掉） */
+  execPath?: string
+  /** 测试注入：下载重试间隔（缺省 2s，断点续传用例要多次断流重试，等不起真实退避） */
+  retryDelayMs?: number
 }
 
 let inflight: Promise<void> | null = null
 let lastFailAt = 0
 let lastFailVersion: string | null = null
+/** 测试注入：execPath 覆盖（经 kickUpdateCheck → drivePrefetch 的集成路径无法传 opts，用模块缝隙） */
+let execPathOverride: string | null = null
 
 /** meta.json 进度节流（字节进度 3s 合并；初始/就绪/失败等终态直接 saveStagingMeta 不走此路） */
 let lastMetaSave = 0
@@ -89,6 +95,7 @@ export function resetPrefetchStateForTests(): void {
   lastFailAt = 0
   lastFailVersion = null
   lastMetaSave = 0
+  execPathOverride = null
 }
 
 /** 测试专用：注入失败退避时间戳（免真实等待 30min） */
@@ -97,19 +104,30 @@ export function setPrefetchFailAtForTests(at: number, version: string): void {
   lastFailVersion = version
 }
 
+/** 测试专用：注入 execPath（集成路径 kickUpdateCheck → drivePrefetch 传不了 opts.execPath） */
+export function setPrefetchExecPathForTests(p: string | null): void {
+  execPathOverride = p
+}
+
+/** 测试专用：取在飞预取任务（null = 空闲），用例 await 它等任务收敛 */
+export function prefetchInflightForTests(): Promise<void> | null {
+  return inflight
+}
+
 async function runPrefetch(opts: PrefetchOpts): Promise<void> {
   const m = opts.manifest
   if (process.env.MODELRDOCK_DISABLE_UPDATE_CHECK === '1') return
   if (compareVersions(m.version, VERSION) <= 0) return
+  const execPath = execPathOverride ?? opts.execPath ?? process.execPath
   // 安装形态与资产选择（第三/四参同 run.ts 口径：LOCALAPPDATA 显式传、win 查卸载器指纹）
   const shape = detectInstallShape(
-    process.execPath,
+    execPath,
     process.platform,
     process.env.LOCALAPPDATA,
-    process.platform === 'win32' ? hasWindowsUninstaller(process.execPath) : false
+    process.platform === 'win32' ? hasWindowsUninstaller(execPath) : false
   )
   // 开发态守卫（同 run.ts）：tsx/npm 态 execPath 是 node 运行时，资产选择无意义
-  if ((shape === 'bare' || shape === 'win-bare') && path.basename(process.execPath).toLowerCase().startsWith('node')) return
+  if ((shape === 'bare' || shape === 'win-bare') && path.basename(execPath).toLowerCase().startsWith('node')) return
   if (inTestContext() && !opts.apiBase) return
   const assetName = selectAssetName(shape, process.platform, process.arch, m.version)
   const asset = assetName ? findAsset(m, assetName) : null
@@ -174,6 +192,7 @@ async function runPrefetch(opts: PrefetchOpts): Promise<void> {
           apiBase: opts.apiBase,
           mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
           proxyUrl,
+          ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
           destName: `${assetName}.part`,
           resume: {
             state: meta.received > 0 ? { url: meta.url, etag: meta.etag, partBytes: meta.received } : null,

@@ -1,4 +1,5 @@
 import http from 'node:http'
+import crypto from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -13,6 +14,7 @@ import fs from 'node:fs'
 import { EventEmitter } from 'node:events'
 import {
   applyUpdate,
+  drivePrefetchFromState,
   getUpdateStatus,
   kickUpdateCheck,
   resetUpdateStateForTests,
@@ -21,6 +23,10 @@ import {
   setUpdateFetchForTests,
   watchApplyChild,
 } from '../src/update/webupdate.js'
+import { prefetchInflightForTests, resetPrefetchStateForTests, setPrefetchExecPathForTests } from '../src/update/prefetch.js'
+import { markStagingConsumed, readStagingMeta, saveStagingMeta } from '../src/update/staging.js'
+import { selectAssetName } from '../src/update/check.js'
+import { detectInstallShape } from '../src/update/install.js'
 import { writeUpdateProgress, updateProgressPath } from '../src/update/progress.js'
 import { logsDir, modeldockDir } from '../src/util/paths.js'
 import type { ReleaseManifest } from '../src/update/check.js'
@@ -29,8 +35,12 @@ import { updateDaemonArgs } from '../src/autostart.js'
 const TOKEN = 'ghp_test-token'
 const REPO = 'owner/repo'
 
-// 本地伪造 GitHub releases/latest（仅检查链路；apply 不真 spawn，spawner 注入）
-function startMockApi(tag: string, opts: { htmlUrl?: string | null } = {}): Promise<{ apiBase: string; close: () => Promise<void> }> {
+// 本地伪造 GitHub releases/latest（仅检查链路；apply 不真 spawn，spawner 注入）。
+// opts.asset 提供时发布带资产（预取集成用例）：assets/1 = 安装包、assets/2 = SHA256SUMS。
+function startMockApi(
+  tag: string,
+  opts: { htmlUrl?: string | null; asset?: { name: string; body: Buffer; sums: Buffer } } = {}
+): Promise<{ apiBase: string; close: () => Promise<void> }> {
   const htmlUrl = opts.htmlUrl === undefined ? `https://github.com/${REPO}/releases/tag/${tag}` : opts.htmlUrl
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -40,10 +50,25 @@ function startMockApi(tag: string, opts: { htmlUrl?: string | null } = {}): Prom
             tag_name: tag,
             body: '**更新说明摘要**：一条改动\n\n### 新增\n\n- **点题**：细节',
             html_url: htmlUrl === null ? undefined : htmlUrl, // null = 发布里没有 html_url（自建镜像常见）
-            assets: [],
+            assets: opts.asset
+              ? [
+                  { name: opts.asset.name, id: 1, size: opts.asset.body.length },
+                  { name: 'SHA256SUMS', id: 2, size: opts.asset.sums.length },
+                ]
+              : [],
           })
         )
         return
+      }
+      if (opts.asset) {
+        if (req.url === `/repos/${REPO}/releases/assets/1`) {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(opts.asset.body)
+          return
+        }
+        if (req.url === `/repos/${REPO}/releases/assets/2`) {
+          res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(opts.asset.sums)
+          return
+        }
       }
       res.writeHead(404).end()
     })
@@ -594,11 +619,263 @@ describe('server 更新端点（admin 门内）', () => {
       const check = await fetch(`${base}/_modeldock/admin/update/check`, { method: 'POST', headers: auth })
       expect(check.status).toBe(200)
       expect(((await check.json()) as { ok: boolean }).ok).toBe(true)
+      // 排空 POST check 背后的 fire-and-forget kick：其完成态（checking 收口）若跨用例漂移，
+      // 会改写下一个用例窗口内的守卫态（本文件「force 撞在飞」组曾踩）。终态判据：checking=false
+      // 且 lastCheckedAt 已落（v0.9.9 检查成功）
+      for (let i = 0; i < 100; i++) {
+        const s = await getUpdateStatus(rt)
+        if (!s.checking && s.lastCheckedAt != null) break
+        await new Promise((r) => setTimeout(r, 20))
+      }
     } finally {
       setUpdateApiBaseForTests(null)
       closeAll?.()
       await api.close()
       await h.restore()
+    }
+  })
+})
+
+describe('预取与 force 升级语义（v1.8 预取）', () => {
+  let cleanup: (() => Promise<void>) | null = null
+  beforeEach(() => {
+    resetUpdateStateForTests()
+    resetPrefetchStateForTests()
+    setUpdateApiBaseForTests(null)
+  })
+  afterEach(async () => {
+    setUpdateApiBaseForTests(null)
+    setUpdateFetchForTests(null)
+    setPrefetchExecPathForTests(null)
+    await cleanup?.()
+    cleanup = null
+  })
+
+  function manifestOf(tag: string): ReleaseManifest {
+    return { version: tag.replace(/^v/, ''), tagName: tag, notes: 'n', htmlUrl: '', assets: [] }
+  }
+
+  // 预取集成用例的资产名：必须与 selectAssetName(安装形态) 精确一致，mock 才能被 findAsset 命中
+  const PF_EXEC = '/usr/local/bin/modeldock'
+  const PF_SHAPE = detectInstallShape(PF_EXEC, process.platform, process.env.LOCALAPPDATA, false)
+  const PF_ASSET = selectAssetName(PF_SHAPE, process.platform, process.arch, '999.0.0')!
+  const PF_ASSET_BODY = Buffer.from('PREFETCH-KICK-BODY')
+
+  it('force 撞在飞真查：被该次检查满足（底层只查一次，不重复拉）', async () => {
+    const h = fakeHome()
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      let calls = 0
+      let release: (m: ReleaseManifest) => void = () => {}
+      let started: () => void = () => {}
+      const startedP = new Promise<void>((r) => {
+        started = r
+      })
+      setUpdateFetchForTests(async () => {
+        calls++
+        return new Promise<ReleaseManifest>((resolve) => {
+          started() // fetch 真被调用（deferred 已建）才放行下一步——getSecret/代理探测是宏任务
+          release = resolve
+        })
+      })
+      // 哑 apiBase：fetchOverride 拦截在网络之前，且跳过跨用例共享的 sysproxy 解析缓存（全序跑下曾挂）
+      setUpdateApiBaseForTests('http://127.0.0.1:9')
+      // 在飞 kick 用 force 起手（越过守卫直挂 deferred）；fire-and-forget kick 的跨用例尾流（server
+      // 端点用例的 void check）可能在本用例窗口内改写守卫态，force 起手对本用例语义无损且免疫
+      resetUpdateStateForTests()
+      const first = kickUpdateCheck(rt, { force: true }) // 在飞真查（挂在 deferred 上）
+      await startedP
+      await kickUpdateCheck(rt, { force: true }) // 撞在飞：排队升级，立即返回
+      release(manifestOf('v999.0.0'))
+      await first
+      await new Promise((r) => setTimeout(r, 10)) // 给可能的重查留出暴露窗口
+      expect(calls).toBe(1) // force 被刚完成的真查满足，不再二次拉
+      expect((await getUpdateStatus(rt)).latest).toBe('999.0.0')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('force 撞在飞 TTL-skip：升级为真查，绝不带旧缓存收场', async () => {
+    const h = fakeHome()
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      let calls = 0
+      let release: (m: ReleaseManifest) => void = () => {}
+      let started: () => void = () => {}
+      setUpdateFetchForTests(async () => {
+        calls++
+        if (calls === 1) return manifestOf('v999.0.0') // 第一查立即放行，建立 24h TTL 窗口
+        return new Promise<ReleaseManifest>((resolve) => {
+          started()
+          release = resolve
+        })
+      })
+      // 哑 apiBase（fetchOverride 拦截在网络之前）：与上方用例同口径，绕开跨用例 sysproxy 缓存
+      setUpdateApiBaseForTests('http://127.0.0.1:9')
+      await kickUpdateCheck(rt, { force: true })
+      expect(calls).toBe(1)
+      // 第二查（非 force）：在飞，将命中 TTL 守卫；此刻 force 进来必须把它升级成真查
+      const startedP = new Promise<void>((r) => {
+        started = r
+      })
+      const second = kickUpdateCheck(rt)
+      await kickUpdateCheck(rt, { force: true }) // 同一宏任务内升级：早于 kickA 的守卫求值
+      await startedP // fetch#2 已被调用
+      release(manifestOf('v888.0.0'))
+      await second
+      expect(calls).toBe(2) // TTL-skip 被升级为真查
+      expect((await getUpdateStatus(rt)).latest).toBe('888.0.0')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('manifest 全量持久化进 gateway.json；restoreUpdateCheckState 恢复 latest/时间戳（重启后不空窗）', async () => {
+    const h = fakeHome()
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      // persistCheckTime 只在既有 gateway.json 上合并写（无文件返回 null 不新建）——预置一份
+      await writeGatewayState({ pid: process.pid, port: 18999, admin_token: 'x', started_at: 't' })
+      setUpdateFetchForTests(async () => manifestOf('v999.0.0'))
+      await kickUpdateCheck(rt, { force: true })
+      const state = await readGatewayState()
+      expect(state?.update_check?.manifest).toMatchObject({ version: '999.0.0', tagName: 'v999.0.0' })
+      expect(state?.update_check?.manifest?.assets).toEqual([])
+      // 模拟重启：内存清空 → restore → latest/时间戳/全量 manifest 全回来
+      resetUpdateStateForTests()
+      await restoreUpdateCheckState()
+      const s = await getUpdateStatus(rt)
+      expect(s.latest).toBe('999.0.0')
+      expect(s.available).toBe(true)
+      expect(s.lastCheckedAt).not.toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('status 载荷透传 staged：ready/consumed 语义正确', async () => {
+    const h = fakeHome()
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      expect((await getUpdateStatus(rt)).staged).toBeNull()
+      await saveStagingMeta({
+        version: '999.0.0',
+        tagName: 'v999.0.0',
+        assetName: 'modeldock-999.0.0-darwin-arm64.tar.gz',
+        assetId: 1,
+        size: 10,
+        etag: null,
+        url: null,
+        received: 10,
+        sumsVerified: true,
+        ready: true,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+      expect((await getUpdateStatus(rt)).staged).toMatchObject({ version: '999.0.0', ready: true, received: 10, total: 10 })
+      await markStagingConsumed('999.0.0')
+      expect((await getUpdateStatus(rt)).staged).toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('kick 成功且 available 自动驱动预取（集成）：staged ready；prefetch=false 关闭', async () => {
+    const h = fakeHome()
+    const api = await startMockApi('v999.0.0', {
+      asset: { name: PF_ASSET, body: PF_ASSET_BODY, sums: Buffer.from(`${crypto.createHash('sha256').update(PF_ASSET_BODY).digest('hex')}  ${PF_ASSET}\n`) },
+    })
+    cleanup = api.close
+    setUpdateApiBaseForTests(api.apiBase)
+    setPrefetchExecPathForTests('/usr/local/bin/modeldock')
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      await kickUpdateCheck(rt, { force: true })
+      // 预取在飞/收敛（fire-and-forget：轮询 inflight）
+      for (let i = 0; i < 400 && !prefetchInflightForTests(); i++) await new Promise((r) => setTimeout(r, 5))
+      const p = prefetchInflightForTests()
+      if (p) await p
+      expect((await getUpdateStatus(rt)).staged).toMatchObject({ version: '999.0.0', ready: true })
+      // prefetch=false：换新槽位也不预取（staged 保持 null——consumed 后清账本）
+      const rtOff = await mkRt({ update: { repo: REPO, token_ref: 'file:update-token', prefetch: false } })
+      resetUpdateStateForTests()
+      resetPrefetchStateForTests()
+      await saveStagingMeta({
+        version: '888.0.0',
+        tagName: 'v888.0.0',
+        assetName: 'old.tar.gz',
+        assetId: 9,
+        size: 1,
+        etag: null,
+        url: null,
+        received: 0,
+        sumsVerified: false,
+        ready: false,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+      await kickUpdateCheck(rtOff, { force: true })
+      await new Promise((r) => setTimeout(r, 20))
+      // 预取被关：旧槽位没被换掉、也没发起下载
+      expect((await readStagingMeta())?.version).toBe('888.0.0')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('重启恢复后 drivePrefetchFromState 补/续预取：半成品槽位跨重启收敛到 ready', async () => {
+    const h = fakeHome()
+    const assetBody = Buffer.from('PREFETCH-RESTART-BODY')
+    const sums = Buffer.from(`${crypto.createHash('sha256').update(assetBody).digest('hex')}  ${PF_ASSET}\n`)
+    const api = await startMockApi('v999.0.0', { asset: { name: PF_ASSET, body: assetBody, sums } })
+    cleanup = api.close
+    setUpdateApiBaseForTests(api.apiBase)
+    setPrefetchExecPathForTests('/usr/local/bin/modeldock')
+    try {
+      await setSecret('update-token', TOKEN, 'file')
+      const rt = await mkRt()
+      // persistCheckTime 只在既有 gateway.json 上合并写——预置一份
+      await writeGatewayState({ pid: process.pid, port: 18999, admin_token: 'x', started_at: 't' })
+      // 第一次检查：持久化 manifest 全量（含 assets）
+      await kickUpdateCheck(rt, { force: true })
+      // 模拟重启：内存清空 → 从 gateway.json 恢复 → 预置半成品槽位（断点续传起点）
+      resetUpdateStateForTests()
+      await restoreUpdateCheckState()
+      await saveStagingMeta({
+        version: '999.0.0',
+        tagName: 'v999.0.0',
+        assetName: PF_ASSET,
+        assetId: 1,
+        size: assetBody.length,
+        etag: null,
+        url: null,
+        received: 0,
+        sumsVerified: false,
+        ready: false,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+      drivePrefetchFromState(rt)
+      for (let i = 0; i < 400 && !prefetchInflightForTests(); i++) await new Promise((r) => setTimeout(r, 5))
+      const p = prefetchInflightForTests()
+      if (p) await p
+      const st = await getUpdateStatus(rt)
+      expect(st.available).toBe(true) // 恢复的 manifest 让徽标不空窗
+      expect(st.staged).toMatchObject({ version: '999.0.0', ready: true, received: assetBody.length })
+    } finally {
+      h.restore()
     }
   })
 })
