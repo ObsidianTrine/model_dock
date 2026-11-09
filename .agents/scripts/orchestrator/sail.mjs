@@ -290,6 +290,7 @@ export function buildSailReport(voyage) {
         else lines.push(`  - ⛵ 上游管线：spec ${id} 已落盘待人审——审完设计后跑 spec build ${id} 拆卡进队列`);
       }
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
+      for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，复核改判后下周期复查自动放行`);
     } else if (c.kind === 'idle') {
       lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟。`);
     }
