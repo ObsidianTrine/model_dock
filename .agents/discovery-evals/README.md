@@ -7,7 +7,9 @@
 - **案例**：`cases/<id>.json`——`question`（题干写背景不写答案）+ `goals` + `minCitations`
   + `expect.mustFind[]` / `expect.mustFindAny`（期望关键词与命中下限）。
 - **跑分**：`node .agents/scripts/discovery-eval.mjs`（dry-run 零消耗）/
-  `--run --backend <name> --cases a,b`（真跑烧钱，人工发起）。
+  `--run --backend <name> [--model m] --cases a,b`（真跑烧钱，人工发起）。
+  调研船模型：`--model` 显式 > workflow.json `research.model` > claude CLI 全局默认——
+  评测不吃全局默认，否则换船时分数与模型档位对不上。
 - **评分**：确定性规则——无引用即拒收（引用 ≥ minCitations）+ 关键词命中率 ≥ mustFindAny。
   引用真伪以 `<id>.output.txt` 原文与 brief sources/ 快照人工复核为准（关键词有「复述型」
   假阳性先例，见 review-evals README）。

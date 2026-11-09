@@ -161,6 +161,7 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 | `add-adapter.md` | 新增 harness 客户端适配器 | 新增 adapter 时读 |
 | `add-preset.md` | 新增 provider 预设 | 新增供应商时读 |
 | `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：任务卡进、合并出（速查 + A 核心闭环 / B 自主模式 / C 观测对账 / D 周边） | 写任务卡 / 跑编排 / 处理 blocked 任务时读 |
+| `zcode-native.md` | 编排器引擎全断时的降级开航（ZCode 会话原生 Agent 当船，调度台手动闭环） | claude/zcode 引擎都起不来仍要派活时读 |
 
 ### feature-branch 核心命令
 

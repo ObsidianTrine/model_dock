@@ -22,6 +22,7 @@ import path from 'node:path'
 import { getBackend, writeWorkerSettings } from './orchestrator/backends/claude-headless.mjs'
 import { buildResearchPrompt } from './orchestrator/prompt.mjs'
 import { parseBriefBlock, validateBriefBody } from './orchestrator/research.mjs'
+import { loadWorkflowConfig } from './workflow-config.mjs'
 
 const CASES_DIR = '.agents/discovery-evals/cases'
 const OUTPUTS_DIR = '.agents/discovery-evals/outputs'
@@ -101,6 +102,7 @@ async function main() {
     if (argv[i] === '--backend') vals.backend = argv[++i]
     if (argv[i] === '--cases') vals.cases = argv[++i]
     if (argv[i] === '--max-turns') vals.maxTurns = parseInt(argv[++i], 10)
+    if (argv[i] === '--model') vals.model = argv[++i]
   }
   const repoRoot = findRepoRoot()
   let cases
@@ -111,7 +113,7 @@ async function main() {
   }
   if (!cases.length) die('没有匹配的案例。')
   if (flags.has('--list') || !flags.has('--run')) {
-    log(`discovery-eval：${cases.length} 个案例（dry-run 零消耗；--run --backend <name> 真跑）`)
+    log(`discovery-eval：${cases.length} 个案例（dry-run 零消耗；--run --backend <name> [--model m] 真跑）`)
     for (const c of cases) {
       log(`- ${c.id}\n    问：${c.question.slice(0, 80)}\n    考：关键词 ≥${c.mustFindAny}/${c.mustFind.length} + 引用 ≥${c.minCitations}`)
     }
@@ -120,10 +122,13 @@ async function main() {
   const backendName = vals.backend || 'mock'
   const backend = await getBackend(backendName)
   const maxTurns = Number.isInteger(vals.maxTurns) && vals.maxTurns > 0 ? vals.maxTurns : 25
+  // 调研船解耦选型（同 research 命令）：--model 显式 > workflow.json research.model > claude CLI 全局默认
+  //——评测不吃全局默认，否则换船时分数与模型档位对不上（2026-11-08 glm-4.5-air 事故同款）
+  const model = vals.model || loadWorkflowConfig(repoRoot).research?.model || undefined
   const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
   const outDir = path.join(repoRoot, OUTPUTS_DIR, ts)
   fs.mkdirSync(outDir, { recursive: true })
-  log(`═══ discovery-eval 真跑：${cases.length} 案 × 后端 ${backendName}（输出 ${outDir}）═══`)
+  log(`═══ discovery-eval 真跑：${cases.length} 案 × 后端 ${backendName}${model ? ` / 调研船 ${model}` : ''}（输出 ${outDir}）═══`)
   let pass = 0
   for (const c of cases) {
     const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'disco-eval-')), 'prompt.md')
@@ -131,7 +136,7 @@ async function main() {
     try {
       fs.writeFileSync(promptFile, buildResearchPrompt(c.question, repoRoot, { goalsText: c.goals, minCitations: c.minCitations }))
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot)
-      const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns, onEvent: () => {}, web: true, settingsFile })
+      const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns, onEvent: () => {}, web: true, model, settingsFile })
       fs.writeFileSync(path.join(outDir, `${c.id}.output.txt`), String(result.output ?? ''))
       const parsed = parseBriefBlock(result.output ?? '')
       const g = gradeCase(c, parsed?.body ?? null)

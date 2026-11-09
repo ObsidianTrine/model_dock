@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { AddressInfo } from 'node:net'
+import { drainAppendStreams } from '../src/util/fsx.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { fakeHome } from './helpers.js'
 import {
@@ -423,6 +424,11 @@ describe('pricing-lookup 与 usage 端点（E2E，admin 门内）', () => {
           ms: 20,
           usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 },
         } as LogEntry)
+        // why: appendLine 常驻流异步 open+内存缓冲（write 后文件可能尚不存在），而 /usage 端点
+        // 立即 existsSync+读盘不等 flush——同 tick 内写→读在 ubuntu CI（GH runner I/O 慢、
+        // 事件循环拥挤）稳定输给竞态读到空文件（cost.total=0），mac 本地时序恰好赢全绿；
+        // 照 observability.test.ts 同款，查端点前先排空流池
+        await drainAppendStreams()
         const r1 = JSON.parse((await request(port, `/_modeldock/usage?date=${today}`, admin)).body)
         expect(r1.usage.cost.total).toBeCloseTo(expectCost(1, 0.1), 10)
         expect(r1.usage.unpriced_models).toEqual([])

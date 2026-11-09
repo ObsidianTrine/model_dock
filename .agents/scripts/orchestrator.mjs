@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3310,6 +3310,15 @@ async function cmdResearch(repoRoot, opts) {
   // L1 可信度初判（report-only）：数字/专名回查所引快照 + 引用深度比，落 verdict.json
   const verdict = assessBrief(repoRoot, r.id, { model });
   logVerdict(r.id, verdict, 'L1 快照回查');
+  // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
+  // 标题带项目名：飞书自定义关键词过滤按消息文本命中——标题不含项目名会被 19024 静默丢弃
+  //（2026-11-09 实测：关键词=ModelDock 的机器人把无关键词的调研通知整条吞掉）
+  try {
+    if (cfg.research?.notify !== false) {
+      const proj = displayProjectName(cfg.projectName ?? '');
+      await notify({ title: `${proj} 调研判定 ${r.id}（${verdict?.level ?? '?'}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+    }
+  } catch { /* 通知失败不阻断 */ }
   log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
 }
 
@@ -3437,10 +3446,12 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       });
       const evidence = claimCheck.checked ? Math.round(claimCheck.hit_rate * 100) : null;
       const v = scoreVerdict({ claims: valid, fabricatedCount: fabricated.length, citation, evidence, gates: cfg.research?.usageGates });
+      const skeleton = snapshots.filter((s) => s.usable === false).length;
       const reasons = [
         ...valid.filter((c) => c.note).map((c) => `[${c.status}] ${c.claim.slice(0, 60)}——${c.note}`),
         ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录被丢弃（编造红旗）：${fabricated.slice(0, 3).join(' / ')}`] : []),
         ...(parsed.blockers ?? []),
+        ...(skeleton ? [`⚠ ${skeleton}/${snapshots.length} 份快照为骨架页（正文未渲染/被拦）——数字类结论可核性受限`] : []),
       ];
       // verdict.model=调研船（既有 verdict.json 由 L1 assessBrief 写入、model 即调研船），非复核船——复核船在 verifier 字段
       let prevModel = null;
@@ -3453,6 +3464,7 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         verifier: { backend: backendName, model: model ?? null },
         created_at: new Date().toISOString(),
         scores: v.scores,
+        snapshots: { total: snapshots.length, usable: snapshots.length - skeleton, skeleton },
         claims: valid,
         blockers: parsed.blockers ?? [],
         fabricated_claims: fabricated.length,
@@ -3468,6 +3480,14 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       log(`- 维度分：evidence=${v.scores.evidence} coherence=${v.scores.coherence} coverage=${v.scores.coverage}% citation=${v.scores.citation} → overall=${v.scores.overall}（${v.level}）`);
       log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);
+      // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
+      // 标题带项目名：飞书自定义关键词过滤按消息文本命中——无关键词整条静默丢弃（19024）
+      try {
+        if (cfg.research?.notify !== false) {
+          const proj = displayProjectName(cfg.projectName ?? '');
+          await notify({ title: `${proj} 复核判定 ${id}（${v.level}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+        }
+      } catch { /* 通知失败不阻断 */ }
       return;
     }
   } finally {

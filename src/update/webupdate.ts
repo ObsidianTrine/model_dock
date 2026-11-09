@@ -49,9 +49,10 @@ let inflight: Promise<void> | null = null
 /** 最近一次成功检查的全量 manifest（含 assets）：预取选资产必需，gateway.json 一并持久化——
  *  state.manifest 是 UI 概要视图（窄类型），预取恢复走这里。 */
 let lastFullManifest: ReleaseManifest | null = null
-/** force 升级语义的排队标志：force 撞上在飞检查时不丢弃，交给在飞运行在守卫点消费——
- *  本要 TTL/退避 skip 的检查升级为真查（托盘 force 接线后，60s 轮询恰好在飞的窗口
- *  会把手动检查吞成旧缓存；此前直接 return 丢弃）。 */
+/** force 升级语义的排队标志：force 撞上在飞真查时不丢弃，由该次检查在收尾点消费——
+ *  成功即已被满足、失败已把 lastError 交付给排队者（托盘 force 接线后，60s 轮询恰好在飞的
+ *  窗口会把手动检查吞成旧缓存；此前直接 return 丢弃）。守卫命中的 skip 是同步完成
+ *  （见 kickUpdateCheck），不存在「在飞 skip」，故不再有守卫点消费。 */
 let forceRequested = false
 let apiBaseOverride: string | null = null
 /** 测试注入：单测并发防重入用桩计数；第 4 参 = 代理解析结果 */
@@ -113,52 +114,45 @@ export async function restoreUpdateCheckState(): Promise<void> {
 
 /** 发起一次检查：检查中 / 成功 TTL 内 / 失败重试窗内（未 force）静默跳过。匿名（无令牌）照常检查。
  *  force 撞上在飞检查时升级在飞检查为真查（不丢弃、不等待结果重查——见 forceRequested）。
+ *  守卫（TTL/退避）只读内存态，在任何 await 之前同步求值：命中的常驻轮询（60s status kick）
+ *  连在飞 promise 都不建，更不付 token（keychain spawn）/代理（scutil）解析成本。
  *  不等待完成，状态经 getUpdateStatus 轮询。检查成功且发现新版本时自动驱动预取。 */
 export async function kickUpdateCheck(rt: GatewayRuntime, opts: { force?: boolean } = {}): Promise<void> {
   if (state.checking || inflight) {
     if (opts.force) forceRequested = true
     return
   }
-  // 在任何 await 之前同步创建并占位 inflight：并发两次 kick 才能被上方 guard 挡住。
-  // （此前 inflight 赋值在首个 await resolveTokenAndRepo 之后——并发调用双双穿透，双拉 GitHub 耗 rate-limit。）
+  // 在任何 await 之前同步判守卫并占位 inflight：并发两次 kick 才能被上方 guard 挡住。
+  // （此前 inflight 赋值在首个 await 之后——并发调用双双穿透，双拉 GitHub 耗 rate-limit。）
+  // 守卫必须同步先于一切 async：挪进 async 体则命中路径会同步跑完 IIFE，finally 先清 inflight
+  // 再被下方赋值盖回已决 promise——后续 kick 全被上方 guard 挡死。
+  const force = opts.force === true || forceRequested
+  forceRequested = false
+  const now = Date.now()
+  if (!force) {
+    if (state.lastCheckedAt && now - state.lastCheckedAt < CHECK_TTL_MS) return
+    if (state.lastFailAt && now - state.lastFailAt < FAIL_RETRY_MS) return
+  }
   const p = (async () => {
     state.checking = true
     try {
-      for (;;) {
-        // force 来源二路：调用方显式传 + 在飞期间他人请求升级（forceRequested）
-        const force = opts.force === true || forceRequested
-        forceRequested = false
-        const resolved = await resolveTokenAndRepo(rt.config)
-        const now = Date.now()
-        if (!force) {
-          // 守卫命中但 force 在 await 期间进来：本要 skip 的检查升级为真查（continue 消费标志），
-          // 绝不带着 forceRequested 返回——托盘轮询会拿旧缓存收场
-          if (state.lastCheckedAt && now - state.lastCheckedAt < CHECK_TTL_MS) {
-            if (!forceRequested) return
-            continue
-          }
-          if (state.lastFailAt && now - state.lastFailAt < FAIL_RETRY_MS) {
-            if (!forceRequested) return
-            continue
-          }
-        }
-        // 仅在真的要发请求时才解析代理（TTL 命中的常驻轮询不付 scutil/注册表查询成本）。
-        // 与 run.ts 同口径：apiBase 是测试注入缝隙，注入即本地 mock，绝不代理
-        const proxyUrl = apiBaseOverride ? null : await resolveUpdateProxyUrl()
-        const fetchFn = fetchOverride ?? fetchLatestRelease
-        const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase, { proxyUrl })
-        lastFullManifest = m
-        state.manifest = { version: m.version, notes: m.notes, htmlUrl: m.htmlUrl, sizeBytes: matchedAssetSize(m) }
-        state.lastError = null
-        state.lastFailAt = null
-        state.lastCheckedAt = Date.now()
-        await persistCheckTime(m.version)
-        // 检查成功即驱动预取（守卫链在 prefetch.ts；非新版自动空转）
-        drivePrefetch(rt, resolved, m)
-        // 刚完成的检查就是新查——在飞期间进来的 force 已被它满足
-        forceRequested = false
-        return
-      }
+      // 仅在真的要发请求时才解析 token 与代理（与 proxyUrl 同款惰性化：守卫命中已同步返回，
+      // TTL 命中的常驻轮询不付 keychain spawn 成本）。
+      // 与 run.ts 同口径：apiBase 是测试注入缝隙，注入即本地 mock，绝不代理
+      const resolved = await resolveTokenAndRepo(rt.config)
+      const proxyUrl = apiBaseOverride ? null : await resolveUpdateProxyUrl()
+      const fetchFn = fetchOverride ?? fetchLatestRelease
+      const m = await fetchFn(resolved.repo, resolved.token, apiBaseOverride ?? resolved.apiBase, { proxyUrl })
+      lastFullManifest = m
+      state.manifest = { version: m.version, notes: m.notes, htmlUrl: m.htmlUrl, sizeBytes: matchedAssetSize(m) }
+      state.lastError = null
+      state.lastFailAt = null
+      state.lastCheckedAt = Date.now()
+      await persistCheckTime(m.version)
+      // 检查成功即驱动预取（守卫链在 prefetch.ts；非新版自动空转）
+      drivePrefetch(rt, resolved, m)
+      // 刚完成的检查就是新查——在飞期间进来的 force 已被它满足
+      forceRequested = false
     } catch (e) {
       // 检查失败静默（不打扰用户），lastError 供控制台手动检查时展示。
       // 失败不占成功 TTL（lastCheckedAt 不动），只记 lastFailAt 走 30min 重试退避

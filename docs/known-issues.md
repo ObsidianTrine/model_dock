@@ -18,6 +18,7 @@
 > 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
 > 2026-10-29 正确性批（fix-sync-race）：CORRECT-06 已修（@b917687，withFileLock 同路径重入 + 同步拉取 apply/collect 原子化）。
 > 2026-10-29 注记：① §二「已核查无问题」的 PowerShell CIM 进程枚举补记一行——其输出的行解析曾因 Windows CRLF 行尾全行失配、枚举恒空（@e4ac854 已修）；② 转发热路径首份可复现基线落档（scripts/bench-relay.mjs + docs/bench-baseline.md，PERF-01 条目已附实测对照）——「（推测）」条目的量化验证从此有同机 before/after 基建；③ 文末测试盲区注记更新（§六尾注三处已于 T07 @05dd0a6 补齐，另补配置/运维与 CLI/安装两批 @083284d/@3d74124）。
+> 2026-11-09 性能复检批（perf-ledger-pass，ZCode 原生模式双勘察船→双修复船）：11-06 后 72 文件新代码全量复审——**发现并修复 9b2229f 回归劣化**（failover 对账引入每请求双全量体扫描，@f367675 扫描一次下沉+惰性求值，bench 5MB 改写 p50 -12%/透传 -9%）；webupdate token 解析挪入 TTL/退避守卫与 proxyUrl 同款惰性化（@2f613ad）；**PERF-15/21/36 复核维持暂缓**（11-03 理由未变、翻案条件均未触发）；cost 查价链/failover 对账/流池/overview/CLI 闭包经逐链审计均沿用既有记忆化范式无同步 I/O 残留。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
 ## 总览
@@ -183,6 +184,8 @@
 
 ### E. 内存与磁盘增长
 
+- 2026-11-09 ledger-pass 复检：**维持暂缓**——11-03 重估理由全部成立（低频路径/改动面大于收益/翻案条件未触发），本轮双勘察船逐链审计无新翻案证据。
+
 **PERF-16（P2）JSONL 日志无轮转**
 - 位置：`src/gateway/state.ts:614`（`gateway-YYYY-MM-DD.jsonl`）、`:625`（audit 同款）。写盘本身健康（常驻流池、无逐条 fsync、错误 ring≤500），但按天落盘**永不清理**，磁盘无界增长。
 - 修复方向：启动/每日惰性清理 N 天前日志。
@@ -215,6 +218,8 @@
 - 现状：模型改写管线的设计前提（topLevelModel 浅扫描已把解析成本压到最低），非纯浪费；TTFB 含完整上传，大请求高并发内存峰值 = 64MB×N。修复方向：无改写需求的 GET/DELETE 跳过 buffer。
 - 2026-10-20 复核：**暂缓**——GET/DELETE 跳过 buffer 是请求管线的分支重构，涉及 body 消费路径约定；本地回环上大请求高并发场景罕见，收益不抵扰动。
 - 2026-11-03 重估（ledger-closeout-xplat 卡）：**维持暂缓**——理由不变；body 收集段现位于 `src/gateway/admin-shared.ts`（T24 拆分后行号漂移，64MB 上限 + 超限排空逻辑同址），GET/DELETE 跳过仍需动 body 消费约定。翻案重启条件：本地回环之外出现大请求高并发的真实部署形态（如云端部署场景扩容），或上游大请求 TTFB 实测可感知。
+
+- 2026-11-09 ledger-pass 复检：**维持暂缓**——11-03 重估理由全部成立（低频路径/改动面大于收益/翻案条件未触发），本轮双勘察船逐链审计无新翻案证据。
 
 **PERF-22（P2）pollOverview 双 stringify diff**
 - 位置：`src/gateway/ui.ts:1383`（`JSON.stringify(v) === JSON.stringify(view)`）
@@ -293,6 +298,8 @@
 ## 二、跨平台兼容问题（Linux / Windows / macOS）
 
 > 未发现 P0 级跨平台破损。以下按影响排序。修复时遵循 AGENTS.md「工程硬性约定」三平台清单。
+
+- 2026-11-09 ledger-pass 复检：**维持暂缓**——11-03 重估理由全部成立（低频路径/改动面大于收益/翻案条件未触发），本轮双勘察船逐链审计无新翻案证据。
 
 **XPLAT-01（P2）atomicWrite 重试白名单缺 EBUSY**
 - 位置：`src/util/fsx.ts:120-131`：`code !== 'EPERM' && code !== 'EACCES'` 即抛。libuv 把 `ERROR_SHARING_VIOLATION`（目标被无共享删除位的句柄占用：杀毒/编辑器/备份扫描）映射为 **EBUSY**，不重试直接失败并删 tmp。两个独立审查线一致发现。

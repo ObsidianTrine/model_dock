@@ -152,6 +152,11 @@ export interface ForwardOptions {
   retries: number
   /** 客户端断开信号：中止在途上游请求与 failover 候选迭代，不再为已离开的客户端白烧上游 token */
   signal?: AbortSignal
+  /** 调用方对 body 本身已做过的顶层 model 浅扫描（forwardWithFailover 一次计算、候选切换与
+   *  429 原地重试整链复用——改写层只造新 Buffer 从不原地改入参，body 全链不变，扫描全程有效）。
+   *  undefined = 未提供（rewriteModel 自扫，行为同未提供时）；null = 已扫但拿不准（走全量解析）。
+   *  必须是对同一 body Buffer 的扫描结果，否则改写字节区间错位。 */
+  bodyScan?: TopModelScan | null
 }
 
 export interface UpstreamBody {
@@ -241,10 +246,20 @@ async function buildUpstreamHeaders(
 /** 顶层浅扫描的单次结果。value：顶层 model 字段值（JSON 解码语义，重复键取最后一个；
  *  无 model 键或末次出现为非字符串值时 undefined）。qStart/qEnd：value 为字符串时该值的
  *  字节区间（含两侧引号，qEnd 独占），供改写热路径做字节级原位替换；否则恒为 -1。 */
-interface TopModelScan {
+export interface TopModelScan {
   value: string | undefined
   qStart: number
   qEnd: number
+}
+
+/** 浅扫描执行计数（__test* 模块内计数器套路，同 fsx/secrets，不碰 vi.mock 跨文件雷区）：
+ *  供测试断言「每请求全量体扫描次数收敛」，生产路径无读方，自增开销可忽略。 */
+let scanCountForTest = 0
+export function __testScanCount(): number {
+  return scanCountForTest
+}
+export function __testResetScanCount(): void {
+  scanCountForTest = 0
 }
 
 /** 从 JSON 请求体顶层对象浅扫描 "model" 字段（不解码整个文档、零大对象分配）。
@@ -256,6 +271,7 @@ interface TopModelScan {
  *  区间追踪：qStart/qEnd 随最后一次命中的 model 字符串值更新——重复键取最后一个的语义
  *  在区间上同样成立；末次出现为非字符串值时区间作废（-1），改写回落全量路径。 */
 function scanTopLevelModel(body: Buffer): TopModelScan | null {
+  scanCountForTest++
   const n = body.length
   let i = 0
   const isWs = (c: number) => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d
@@ -423,12 +439,16 @@ export function rewriteModel(
   target: ResolvedTarget,
   body: Buffer,
   path: string,
+  prescan?: TopModelScan | null,
   mfGate?: (final: string) => string | undefined
 ): { body: Buffer; modelAfter?: string } {
   if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
   const gated = (final: string | undefined): string | undefined =>
     final !== undefined && mfGate ? (mfGate(final) ?? final) : final
-  const scan = scanTopLevelModel(body)
+  // prescan：调用方对同一 body 已有的浅扫描结果直接复用（failover 链整链共享一次全量体扫描，
+  // 见 ForwardOptions.bodyScan）；undefined = 未提供照旧自扫，null = 已扫但拿不准 → 直接走全量
+  // 解析路径。扫描是纯函数，同 Buffer 同结果，复用与自扫逐字节等价。
+  const scan = prescan === undefined ? scanTopLevelModel(body) : prescan
   if (scan !== null) {
     // 快路径：全部改写判定只用顶层 model 值字符串完成，不再全量 parse
     const final = gated(resolveModelFinal(target, scan.value))
@@ -513,7 +533,7 @@ export async function forwardToUpstream(
         return fb
       }
     : undefined
-  const rewritten = rewriteModel(target, opts.body, opts.path, mfGate)
+  const rewritten = rewriteModel(target, opts.body, opts.path, opts.bodyScan, mfGate)
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
@@ -795,6 +815,16 @@ function withoutContentEncoding(headers: Record<string, string | string[]>): Rec
   return out
 }
 
+/** O(1) 非空判定（命中首个自有键即短路）：服务目录可有数百条模型条目，每请求每候选
+ *  Object.keys 整份键数组分配纯浪费；Object.hasOwn 守住与 Object.keys 一致的「自有可枚举键」口径。 */
+function isNonEmptyRecord(o: Record<string, unknown> | undefined): boolean {
+  if (!o) return false
+  for (const k in o) {
+    if (Object.hasOwn(o, k)) return true
+  }
+  return false
+}
+
 /** 自动候选（自动补尾 / 避开补链，OrderedCandidate.auto）的模型相容过滤：按「别名/兜底改写后实际
  *  会发给候选的模型名」对照候选服务目录（provider.models），目录已管理（非空）且不含该模型的候选
  *  直接剔除——重放过去必然 400 Unsupported model（2026-11-08 实证：bigmodel-2 限流 429 → 自动补尾
@@ -820,7 +850,8 @@ function filterModelCompatible(
     }
     const final = resolveModelFinal(c.target, wire)
     const catalog = c.target.provider.models
-    const managed = !!catalog && Object.keys(catalog).length > 0
+    // !!catalog 前缀保住 TS 别名窄化（下方 catalog[final] 需非空收窄），判空本身走 isNonEmptyRecord
+    const managed = !!catalog && isNonEmptyRecord(catalog)
     if (!final || !managed || catalog[final] !== undefined) {
       kept.push(c)
       continue
@@ -883,11 +914,18 @@ export async function forwardWithFailover(
     if (!(e instanceof UpstreamError)) return 'connect_failed'
     return e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
   }
+  // 全量体浅扫描整链一次（9b2229f 回归修复）：此前此处无条件 topLevelModel 全量扫描 + 逐候选
+  // rewriteModel 内再各扫一次（单候选常态链 2 次、N 候选 N+1 次）。改为算一次经 opts.bodyScan
+  // 下沉复用——改写层只造新 Buffer 从不原地改入参，候选切换 / 429 原地重试后 body 不变，同一
+  // 扫描全程有效；非 routed / 空体时改写层与过滤层都不需要它，直接跳过（零扫描）。
+  const routedPath = ROUTED_PATH_RE.test(opts.path.split('?')[0])
+  const bodyScan = routedPath && opts.body.length > 0 ? scanTopLevelModel(opts.body) : null
+  const fwdOpts: ForwardOptions = { ...opts, bodyScan }
   // 自动候选模型相容过滤（见 filterModelCompatible）：目录不含请求模型的服务不重放，剔除留痕 attempts/reason
   const cands = filterModelCompatible(
     picked.ordered,
-    topLevelModel(opts.body),
-    ROUTED_PATH_RE.test(opts.path.split('?')[0]),
+    bodyScan === null ? null : bodyScan.value,
+    routedPath,
     attempts,
     modelMismatch,
   )
@@ -918,7 +956,7 @@ export async function forwardWithFailover(
       }
     }
     try {
-      let up = await forwardToUpstream(rt, c.target, opts)
+      let up = await forwardToUpstream(rt, c.target, fwdOpts)
       // 429 退避（P0③）：带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次（429 = 请求未被上游处理，
       // 重放无重复计费风险）；无头 / 超过 5s / 额度耗尽体维持既有 failover 语义。留痕 retried_429:<id>。
       let drained: string | undefined
@@ -929,7 +967,7 @@ export async function forwardWithFailover(
           if (!isQuotaError(up.status, drained)) {
             if (raMs > 0) await sleepInterruptible(raMs, opts.signal)
             if (!retried429.includes(c.providerId)) retried429.push(c.providerId)
-            up = await forwardToUpstream(rt, c.target, opts)
+            up = await forwardToUpstream(rt, c.target, fwdOpts)
             drained = undefined // 重试产生的是新响应，体未读
           }
         }
