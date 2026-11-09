@@ -6,7 +6,7 @@ import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type OrderedCandidate, type ResolvedTarget } from './state.js'
 import { isModelMeltdown, recordModelOutcome } from './state/routing.js'
-import type { LogAttempt } from './state/types.js'
+import type { LogAttempt, LogEntry } from './state/types.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { dispatcherFor } from './proxy.js'
 import { acquireProviderSlot, ProviderQueueTimeoutError, providerConcurrencyLimit, queueWaitMs, type ProviderSlot } from './concurrency.js'
@@ -772,6 +772,55 @@ export function parseRetryAfterMs(v: string | string[] | undefined, now = Date.n
   const at = Date.parse(raw)
   if (Number.isNaN(at)) return null
   return Math.max(0, at - now)
+}
+
+/** x-ratelimit-reset → epoch ms（尽力而为，判不出返回 undefined）。各上游单位不一（OpenRouter 系
+ *  epoch ms、GitHub 系 epoch s、部分网关 delta 秒、RFC3339/HTTP-date 时间戳），只按量级与可解析性
+ *  归一、不做业务猜测：整数值 ≥1e12 视为 epoch ms（当前量级）；1e9~1e12 视为 epoch s（×1000，
+ *  2286 年前两种秒/毫秒量级不会相撞）；更小值在 epoch 语义下不可能，按 delta 秒折算绝对时刻。
+ *  非数值走 Date.parse（RFC3339 / HTTP-date 通吃），失败即缺省（「存在才记、判不出不猜」）。 */
+function parseResetHeaderMs(raw: string, now = Date.now()): number | undefined {
+  if (/^-?\d+$/.test(raw)) {
+    const n = Number(raw)
+    if (n >= 1e12) return n
+    if (n >= 1e9) return n * 1000
+    return now + n * 1000
+  }
+  const at = Date.parse(raw)
+  return Number.isNaN(at) ? undefined : at
+}
+
+/** 解析上游限流响应头（x-ratelimit-remaining / x-ratelimit-reset / retry-after）→ LogEntry.ratelimit。
+ *  头存在才记、缺失不猜：子项解析失败缺省该子项、三个头全缺返回 undefined（日志零新增字段，
+ *  /logs/query 只增不改）。键名大小写不敏感（上游头经不同 HTTP 栈大小写不保证）；重复头取首值
+ *  （与 parseRetryAfterMs 同口径）。remaining 为上游原值（Number 可解析才记）。 */
+export function parseRatelimitHeaders(
+  headers: Record<string, string | string[]>,
+  now = Date.now(),
+): LogEntry['ratelimit'] {
+  let remaining: number | undefined
+  let reset: number | undefined
+  let retryAfterMs: number | undefined
+  for (const [k, raw] of Object.entries(headers)) {
+    const v = Array.isArray(raw) ? raw[0] : raw
+    if (typeof v !== 'string' || !v.trim()) continue
+    const lk = k.toLowerCase()
+    if (lk === 'x-ratelimit-remaining') {
+      const n = Number(v.trim())
+      if (Number.isFinite(n)) remaining = n
+    } else if (lk === 'x-ratelimit-reset') {
+      reset = parseResetHeaderMs(v.trim(), now)
+    } else if (lk === 'retry-after') {
+      const ms = parseRetryAfterMs(v, now)
+      if (ms !== null) retryAfterMs = ms
+    }
+  }
+  if (remaining === undefined && reset === undefined && retryAfterMs === undefined) return undefined
+  return {
+    ...(remaining !== undefined ? { remaining } : {}),
+    ...(reset !== undefined ? { reset } : {}),
+    ...(retryAfterMs !== undefined ? { retry_after_ms: retryAfterMs } : {}),
+  }
 }
 
 /** 可中断 sleep：signal 触发（客户端断开）时立刻 reject，不为已离开的客户端占着并发槽等退避 */

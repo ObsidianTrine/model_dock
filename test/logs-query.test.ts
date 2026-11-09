@@ -252,6 +252,24 @@ describe('/_modeldock/logs/query（admin 门内只读，明细查询）', () => 
       t.close()
     }
   })
+
+  it('ratelimit 字段投影（只增不改）：带 ratelimit 条目原样带出；无头条目不出现该字段', async () => {
+    const t = await setup()
+    try {
+      const withRl = entry({ status: 429, cause: 'upstream_4xx', ratelimit: { remaining: 3, reset: 1762156800000, retry_after_ms: 0 } })
+      const withoutRl = entry({ status: 200 })
+      writeDayFile(today, [withRl, withoutRl])
+      const j = JSON.parse((await request(t.port, `/_modeldock/logs/query?date=${today}`, ADMIN)).body)
+      expect(j.entries).toHaveLength(2)
+      const got429 = j.entries.find((e: LogEntry) => e.status === 429)
+      expect(got429.ratelimit).toEqual({ remaining: 3, reset: 1762156800000, retry_after_ms: 0 }) // 原样带出
+      const got200 = j.entries.find((e: LogEntry) => e.status === 200)
+      expect('ratelimit' in got200).toBe(false) // 缺省不出现：既有消费方零感知
+      expect(JSON.stringify(got200)).not.toContain('ratelimit')
+    } finally {
+      t.close()
+    }
+  })
 })
 
 describe('streamRequestLogDays / logEntryMatches 扩展（cause / statusClass）', () => {

@@ -25,6 +25,7 @@ import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { recordModelOutcome } from '../src/gateway/state/routing.js'
+import { setSecret } from '../src/config/secrets.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
   return new Promise((resolve) => {
@@ -574,6 +575,111 @@ describe('summarizeUsageDays 流式聚合（卡 33：不落全量数组，口径
       expect(streamed.billable_partial).toBe(true) // 旧格式混入 → 求和不完整
     } finally {
       h.restore()
+    }
+  })
+})
+
+describe('上游限流信号留痕（LogEntry.ratelimit：带限流头才记，编排器 429 风暴前降并发数据源）', () => {
+  const TOKEN = 'mdk_tok_ratelimit'
+  /** mock 上游按 canned 应答 + 网关整链（隔离沙箱 + 随机端口），走真实 handleRequest 落账路径 */
+  async function setup(canned: { status: number; headers: Record<string, string>; body: string }) {
+    const h = fakeHome()
+    await setSecret('up', 'sk-rl', 'file')
+    const mock = http.createServer((_req, res) => {
+      res.writeHead(canned.status, { 'content-type': 'application/json', ...canned.headers })
+      res.end(canned.body)
+    })
+    await new Promise<void>((r) => mock.listen(0, '127.0.0.1', () => r()))
+    const cfg = {
+      active_profile: 'default',
+      providers: { up: { base_url: `http://127.0.0.1:${(mock.address() as AddressInfo).port}`, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:up' } },
+      profiles: { default: { provider: 'up', default_model: 'm1' } },
+      harness: { 'claude-code': { mode: 'gateway', route: 'default', token: TOKEN } },
+    } as never
+    const rt = buildRuntime(cfg, 'admin-token-rl')
+    const server = createGatewayServer(rt, { port: 0 })
+    const port = await listenEphemeral(server)
+    return {
+      rt,
+      port,
+      close: async () => {
+        server.closeAllConnections?.()
+        server.close()
+        await new Promise<void>((r) => mock.close(() => r()))
+        h.restore()
+      },
+    }
+  }
+  /** 落账是响应收尾后的同步尾活，客户端读到响应可能早于落账完成：轮询到条目出现再断言 */
+  async function poll<T>(probe: () => T, hit: (v: T) => boolean): Promise<T> {
+    let v = probe()
+    for (let i = 0; i < 40 && !hit(v); i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      v = probe()
+    }
+    return v
+  }
+  /** POST /v1/messages（routed 透传路径——GET /v1/models 被网关本地合成目录截胡，不打上游） */
+  function post(port: number): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' } },
+        (res) => {
+          let body = ''
+          res.on('data', (c) => (body += c))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+        },
+      )
+      req.on('error', reject)
+      req.end('{"model":"m1","messages":[]}')
+    })
+  }
+
+  it('429 + 限流头：ring 条目带 ratelimit（reset 归一 epoch ms、retry_after_ms 同退避口径）', async () => {
+    const t = await setup({ status: 429, headers: { 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': '1762156800', 'retry-after': '0' }, body: '{"error":{"message":"rate limited"}}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(429)
+      const last = await poll(() => t.rt.ring.at(-1) as LogEntry | undefined, (e) => e?.status === 429)
+      expect(last.ratelimit).toEqual({ remaining: 3, reset: 1762156800000, retry_after_ms: 0 })
+      expect(last.cause).toBe('upstream_4xx')
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('200 带限流头：成功路径落账 ratelimit（day 文件可读出）', async () => {
+    const t = await setup({ status: 200, headers: { 'x-ratelimit-remaining': '41' }, body: '{"ok":true}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(200)
+      const today = localIsoTs().slice(0, 10)
+      const entries = await poll(
+        () => readRequestLogDay(today).filter((e) => e.path === '/v1/messages'),
+        (es) => es.length > 0,
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0].status).toBe(200)
+      expect(entries[0].ratelimit).toEqual({ remaining: 41 })
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('200 无限流头：落盘条目不出现 ratelimit 键（零新增字段，既有消费方零感知）', async () => {
+    const t = await setup({ status: 200, headers: {}, body: '{"ok":true}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(200)
+      const today = localIsoTs().slice(0, 10)
+      const entries = await poll(
+        () => readRequestLogDay(today).filter((e) => e.path === '/v1/messages'),
+        (es) => es.length > 0,
+      )
+      expect(entries).toHaveLength(1)
+      expect('ratelimit' in entries[0]).toBe(false)
+    } finally {
+      await t.close()
     }
   })
 })
