@@ -231,11 +231,12 @@ export function loadWorkflowConfig(repoRoot) {
   };
 }
 
-/** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4 }——模型名经 ModelDock 网关按名路由。 */
+/** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4,
+ *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean }——模型名经 ModelDock 网关按名路由。 */
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
@@ -255,6 +256,20 @@ function resolveResearch(raw) {
   if (raw.concurrency !== undefined) {
     if (Number.isInteger(raw.concurrency) && raw.concurrency >= 1 && raw.concurrency <= 4) out.concurrency = raw.concurrency;
     else console.warn(`[workflow-config] research.concurrency ${JSON.stringify(raw.concurrency)} 不合法（应为 1–4 整数；维度并发池上限，缺省 2）——忽略`);
+  }
+  // 引用快照覆盖上限（snapshotCitations 的 max，2026-11-10 快照质量包）：1–48 整数，缺省 16。
+  // 真实对拍实证：21 条引用的 brief 在缺省 8 下有 13 条从未尝试快照——L2 复核反复报
+  // 「引用 [n] 无快照无法对账」。缺省不写此键（用缺省 16）
+  if (raw.snapshotMax !== undefined) {
+    if (Number.isInteger(raw.snapshotMax) && raw.snapshotMax >= 1 && raw.snapshotMax <= 48) out.snapshotMax = raw.snapshotMax;
+    else console.warn(`[workflow-config] research.snapshotMax ${JSON.stringify(raw.snapshotMax)} 不合法（应为 1–48 整数；引用快照上限，缺省 16）——忽略`);
+  }
+  // 快照镜像回退（2026-11-10 快照质量包，缺省 false）：开启后直连失败（非 404）或分类
+  // 非 ok 的引用追加一次 r.jina.ai 镜像读取。隐私取舍：开启 = 把引用 URL 发给第三方
+  // reader 服务——所以默认关、显式 opt-in
+  if (raw.snapshotMirror !== undefined) {
+    if (typeof raw.snapshotMirror === 'boolean') out.snapshotMirror = raw.snapshotMirror;
+    else console.warn(`[workflow-config] research.snapshotMirror ${JSON.stringify(raw.snapshotMirror)} 不合法（应为 boolean；缺省 false——开启会把引用 URL 发给 r.jina.ai 第三方服务）——忽略`);
   }
   // 仲裁轮开关（research verify 判出 contradicted 时的联网外部取证，2026-11-09 实测驱动）：
   // 缺省开（不配置 = true）——仲裁是取证不是放水，upheld 才翻案、翻不了维持否决；false 只省 token

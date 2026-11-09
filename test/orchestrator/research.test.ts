@@ -157,7 +157,7 @@ describe('orchestrator research > brief 契约', () => {
     }
   })
 
-  it('snapshotCitations：快照成功与失败都尽力而为、绝不抛错', async () => {
+  it('snapshotCitations：快照成功与失败都尽力而为、绝不抛错（2026-11-10 分类语义：HTTP 200 但可见文本 <400 → skeleton，不计入 ok）', async () => {
     const root = tmpRoot()
     try {
       writeBrief(root, { id: 'snap-test', title: 't', body: BRIEF_BODY })
@@ -165,16 +165,19 @@ describe('orchestrator research > brief 契约', () => {
       const snap = await snapshotCitations(root, 'snap-test', {
         fetchImpl: (async (url: string) => {
           calls.push(url)
-          if (String(url).includes('blog')) throw new Error('boom')
+          if (String(url).includes('blog')) throw new Error('boom') // 永久类失败：不重试
           return { ok: true, status: 200, text: async () => 'page content' }
         }) as unknown as typeof fetch,
         timeoutMs: 1000,
       })
       expect(calls).toHaveLength(2)
-      expect(snap.ok).toEqual(['https://docs.example.com/websearch'])
-      expect(snap.failed).toHaveLength(1)
+      // ok 语义收窄：skeleton 不再计入 ok；snapshots 逐条分类（含 index/url/status/via）
+      expect(snap.ok).toEqual([])
+      expect(snap.failed.map((f: any) => f.url)).toEqual(['https://blog.example.com/gateway'])
+      expect(snap.snapshots.map((s: any) => s.status)).toEqual(['skeleton', 'failed'])
+      expect(snap.snapshots.every((s: any) => s.via === 'direct')).toBe(true)
       expect(fs.readFileSync(path.join(root, '.agents/orchestrator/research/snap-test/sources/1.txt'), 'utf8')).toContain('page content')
-      expect(await snapshotCitations(root, 'not-exist')).toEqual({ ok: [], failed: [] })
+      expect(await snapshotCitations(root, 'not-exist')).toEqual({ ok: [], failed: [], snapshots: [] })
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
