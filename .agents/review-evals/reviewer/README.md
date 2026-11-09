@@ -22,6 +22,10 @@
 | terminal-die-skips-revoke | 否 | 新增终态闸门用裸 die 绕过 exitRun「先吊销再退出」契约：process.exit 跳过 finally，一次性 harness 凭据泄漏活到 TTL（2026-11-08 ephemeral harness 接入引入的不变式；die/exitRun 契约在 diff 上下文自洽可见，「与既有闸门风格一致」是迷惑面） |
 | fail-open-throw | 否 | 网关观测失败从「回落文件直读」改成抛错阻断——违反编排侧 fail-open 口径（2026-11-08 reconcile/usage 接入的既有先例）；「宁可不决策也不用不完整的账」当理由是迷惑面，被删注释与残留承诺在 diff 内自相矛盾 |
 
+## 首跑记录（2026-11-09，GLM-5.3-Flash via claude-headless）
+
+- terminal-die-skips-revoke / fail-open-throw：**召回 2/2 ✅ 真审出**（exitRun 漏用凭据泄漏机制+行号+修法齐全；fail-open 收窄与被删注释矛盾定位到调用链）；机械口径「误报」经人工改判——excess blockers 中 1 条真发现（行为翻转零配套测试），3 条是合成材料 v1 与真实树不自洽被对拍挖出（出题材料缺陷，非审查者误报）。归档：`../runs/2026-11-09-firstrun-reviewer-batch2-cases.md`。两份材料已修 v2（meta.files_hint / running→blocked / 对齐真实 {ok,summary} 契约），v2 重跑待下轮定基线。
+
 ## 出题纪律
 
 1. **成对文件，考点只写在注释里**：`<id>.diff.md` 头部 HTML 注释写 `考点：`（可多行）+ 机器读取的 `goal:` / `acceptance:` / `files_hint:` 三行；diff 正文放 ` ```diff ` 围栏。**考点注释绝不进审查材料**——那是答案（extractDiff 只取围栏，测试有防泄漏断言）。
@@ -33,6 +37,7 @@
    - `## 不应抓（噪音）` 段：`- 关键词: a|b — 说明` 参与误报判定；无「关键词:」前缀的行仅报告展示。
 5. **每集必留干净负样本**：只测召回不测误报的审查者会把「凑数报告」当能力——负样本报了阻塞即判 ❌。
 6. 新案例先 `--list` / dry-run 核对解析结果，再等下一轮真跑；首跑结果如实记录到本文件（未审出照写，没审出的题才是最有价值的题）。
+7. **合成 diff 必须与真实树自洽可对拍**（2026-11-09 首跑教训）：强审查者会 git cat-file / 全文件检索验证材料——变量名（g vs meta）、卡状态迁移方向（插入点已在 running 却写 pending）、hunk 上下文行、虚构 blob hash 都会被对拍，材料自身破绽会被当真 bug 报出（这恰是审查能力的正向证据，却污染误报口径）。出题时逐行核对 hunk 上下文与真实文件、变量与真实作用域一致、不带 index 行或用真实可达形态。
 
 ## 跑分方法
 

@@ -83,7 +83,7 @@
 | 2026-11-sail-report-foreign-merge | 航海报告 touched() 把基线→终态任何迁移都算本航次战果，并行会话航期内合并的卡（running→merged）误标进「已出港」 | 6792700 | —（2026-11-03 入库，待下次全量跑分） |
 | 2026-11-cost-midnight-dayloop | 网关日志日循环以 start 时刻整日推进、条件 day<=end——跨本地午夜窗口永远读不到 end 日文件，燃油账/对账静默漏记（cost.test 偶发红同根，CORRECT-12） | 8d50bde | —（2026-11-04 入库，待下次全量跑分） |
 | 2026-11-schedule-dryrun-writes | schedule install --dry-run 在判定前无条件 writeRunner——「预演」静默覆写已装调度的在线 wrapper，换参数冒烟即改掉真实调度下次触发行为（CORRECT-13，当夜本仓实锤） | 4510b57 | —（2026-11-04 入库，待下次全量跑分） |
-| 2026-11-orch-review-model-engine-coupling | resolveEngine 把 engine 节 model 与 backend 连坐：backend 缺失即整节返回 null——JSDoc 承诺「model 可选」但只配 model 的配置被静默丢弃，review.model 声明位形同虚设（审查模型分源配置不可达，worker/review 长期同模型的隐性成因之一） | 0fec018 | —（2026-11-08 入库，待下次全量跑分） |
+| 2026-11-orch-review-model-engine-coupling | resolveEngine 把 engine 节 model 与 backend 连坐：backend 缺失即整节返回 null——JSDoc 承诺「model 可选」但只配 model 的配置被静默丢弃，review.model 声明位形同虚设（审查模型分源配置不可达，worker/review 长期同模型的隐性成因之一） | 0fec018 | ✅（11-09 首跑，GLM-5.3-Flash）4 关键词全中且非复述——定位 214e449:85 精确机制 + commit message 自证 + worker 节同型；主动连带 P2「非法 model 静默忽略」（0fec018 配套改动同被点中）；原文 runs/2026-11-09-firstrun-2026-11-orch-review-model-engine-coupling.md |
 | 2026-11-model-fallback-docs-premature | 模型级容灾对外文档句 1「不再一耗尽就把流量切去别家」与句 2「备用服务链都走完才触发」自相矛盾，且把尚未合入的 CLI 与 relay 消费面写成已可用——对外文档描述了树上不存在的行为（并行施工「文档先行」题，句内矛盾可判、超前描述需穷尽 grep） | 099b697 | —（2026-11-09 入库，待首跑） |
 | 2026-11-price-gate-float-boundary | 价格闸门容差比较无 epsilon：十进制语义恰 5%（2 与 2.1）被二进制浮点噪声判越界，报错显示「差 5.0%」与上限 5% 自相矛盾——fail-closed 拒掉合法配置（引入时的测试用整数价绕开噪声，测试绿≠比较点对） | f0ec255 | —（2026-11-09 入库，待首跑） |
 
@@ -148,7 +148,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-30 增补 7 题**（第三轮：卡 01-04、10 与防回环守卫修复对回灌，commit 2964ff4，dry 全过）：3 题已首跑 ✅（runs/2026-10-30-{lan-bearer-empty-token,policy-dispatch-tamper,spawndaemon-stderr-pipe-pin}.md），4 题 ⏳ 待首跑。
 - **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：首跑已补（2026-11-02 双 ✅，见上表）。
 - **2026-11-04 增补 2 题**（夜航修复对回灌：CORRECT-12 跨午夜日循环漏读 8d50bde + CORRECT-13 dry-run 覆写在线 wrapper 4510b57，dry 全过）：2 题 ⏳ 待首跑，不计入基线分母。
-- **2026-11-08 增补 1 题**（review.model 连坐收口回灌：214e449 引入 resolveEngine 起 model-only 配置即被静默丢弃，0fec018 解耦修复。与 0eb29bb freeSail / d6f5ae9 research.model 构成「规整层静默吞键」同型三连——编排配置面惯常事故形态，考 PR 审查者对「新配置键 + 规整层成对核对」的敏感度；dry 过）：1 题 ⏳ 待首跑，不计入基线分母。
+- **2026-11-08 增补 1 题**（review.model 连坐收口回灌：214e449 引入 resolveEngine 起 model-only 配置即被静默丢弃，0fec018 解耦修复。与 0eb29bb freeSail / d6f5ae9 research.model 构成「规整层静默吞键」同型三连——编排配置面惯常事故形态，考 PR 审查者对「新配置键 + 规整层成对核对」的敏感度；dry 过）：首跑 2026-11-09 ✅（GLM-5.3-Flash，原文 runs/），并入基线待下次全量对齐。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
