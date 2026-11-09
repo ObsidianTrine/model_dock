@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { homeDir, readTextIfExists, t } from '../util/index.js'
+import { homeDir, modeldockDir, readTextIfExists, t } from '../util/index.js'
 import type { Config } from '../config/types.js'
 import {
   AdapterError,
@@ -15,6 +15,7 @@ import { reorderTomlRoot, tomlParse, tomlStringify } from './format.js'
 import { cliPresent, residueNote } from './presence.js'
 import { changeIfChanged, directAttachNote, directResponsesEndpointNote, ensurePlainObjectField, noChangeResult, oursEntryUrl } from './shared.js'
 import { resolveModelMeta } from '../providers/resolve.js'
+import { CODEX_BASE_INSTRUCTIONS } from './codex-base-prompt.js'
 
 const configFile = () => path.join(homeDir(), '.codex', 'config.toml')
 
@@ -51,7 +52,71 @@ interface CodexConfig {
   /** 根级窗口/输出上限（作用于当前激活模型；接入随默认模型写入，detach 随路由接管收回） */
   model_context_window?: number
   model_max_output_tokens?: number
+  /** /model 选择器的模型元数据目录文件（codex 0.4x+ 官方机制，小米 token plan 官方模板同款）：
+   *  指向 JSON 文件（{ models: [...] }），选择器据此列出内置 GPT 预设之外的模型。
+   *  不写此键时选择器只渲染编译进二进制的 OpenAI 静态预设——自定义 provider 的模型
+   *  （网关路由的 glm/mimo 等）永远不会出现，且从内置预设选中即 400（路由目录不含）。 */
+  model_catalog_json?: string
+  /** 内建 web_search 工具开关（小米官方模板写 "disabled"）。codex 0.167 缺省把
+   *  web_search 工具类型随请求发出，多数非 OpenAI 上游（小米 token plan 实测）直接
+   *  400「tool type 'web_search' is not supported」——接入时缺省关、用户显式值不动。 */
+  web_search?: string | boolean
   [k: string]: unknown
+}
+
+/** ModelDock 生成的 codex catalog 文件落点（自家目录，config.toml 只写指针）。
+ *  惰性求值：MODELRDOCK_FAKE_HOME（测试）在调用时才生效。 */
+export const codexCatalogPath = () => path.join(modeldockDir(), 'codex-catalog.json')
+
+/** supported_reasoning_levels 通用四档：catalog 条目的 effort 菜单（文案对齐小米官方目录风格）。 */
+const REASONING_LEVELS = [
+  { effort: 'none', description: 'No extra reasoning for faster responses' },
+  { effort: 'low', description: 'Fast responses with lighter reasoning' },
+  { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+  { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+]
+
+/**
+ * 由路由服务商模型目录生成 codex catalog（/model 选择器数据源，model_catalog_json 机制）。
+ * 字段投影：slug=模型 id（= codex 发出的模型名 = 网关路由键，picker 选谁路由通谁）；
+ * context_window=resolveModelMeta 解析链（只补空）；input_modalities 按视觉能力链
+ * （capabilities 含 'vision' → text+image）。目录空返回 null（fail-open：不写键，
+ * picker 回落内置预设）。
+ * 必填字段（codex 0.167 serde 实测逐轮探明，缺一拒载）：shell_type / support_verbosity /
+ * truncation_policy / experimental_supported_tools / base_instructions（或
+ * model_messages.instructions_template 二选一）。base_instructions 填 codex 自家默认
+ * 指令（codex-base-prompt.ts，0.167 原文）= 与「无 catalog 时 codex 对未知模型的行为」
+ * 一致；其余行为位取小米官方 catalog 同款中性值。不注入任何第三方人设/专属提示词。
+ */
+export function buildCodexCatalog(cfg: Config, providerId: string): { models: Record<string, unknown>[] } | null {
+  const provider = cfg.providers[providerId]
+  const entries = Object.entries(provider?.models ?? {})
+  if (!entries.length) return null
+  const models = entries.map(([id, meta], i) => {
+    const resolved = resolveModelMeta(id, meta, { baseUrl: provider!.base_url })
+    const entry: Record<string, unknown> = {
+      slug: id,
+      display_name: meta?.display_name ?? id,
+      description: `${provider?.name || providerId}: ${id}`,
+      default_reasoning_level: 'medium',
+      supported_reasoning_levels: REASONING_LEVELS,
+      shell_type: 'unified_exec',
+      support_verbosity: false,
+      truncation_policy: { mode: 'tokens', limit: 10000 },
+      experimental_supported_tools: [],
+      base_instructions: CODEX_BASE_INSTRUCTIONS,
+      visibility: 'list',
+      supported_in_api: true,
+      priority: i,
+    }
+    if (resolved?.context_window) {
+      entry.context_window = resolved.context_window
+      entry.max_context_window = resolved.context_window
+    }
+    entry.input_modalities = resolved?.capabilities?.includes('vision') ? ['text', 'image'] : ['text']
+    return entry
+  })
+  return { models }
 }
 
 export const codexAdapter: HarnessAdapter = {
@@ -151,8 +216,24 @@ export const codexAdapter: HarnessAdapter = {
       wire_api: 'responses',
     }
     if (d) {
+      // 直连守卫（2026-11-09）：codex 只讲 OpenAI Responses 协议（新版 CLI 已移除 wire_api=chat，
+      // 多源实证报「wire_api chat is no longer supported」）——Anthropic 协议端点结构性不可直连，
+      // 提前给可操作报错；openai/responses 协议的 base_url 回退保持合法（小米 token plan 官方
+      // 模板即此形态：base_url 本身暴露 /responses），但 chat-completions-only 上游必败，note 强提示。
+      if (d.protocol === 'anthropic') {
+        throw new AdapterError(
+          t('codex 只讲 OpenAI Responses 协议，无法直连 Anthropic 协议端点', 'Codex speaks the OpenAI Responses protocol only and cannot attach directly to an Anthropic-protocol endpoint'),
+          t('改走网关（网关按服务商协议转发），或选暴露 Responses 端点的服务做直连', 'Attach through the gateway instead, or pick a provider that exposes a Responses endpoint for direct mode')
+        )
+      }
       directNotes.push(directAttachNote(directBase))
       if (!d.base_url_responses) directNotes.push(directResponsesEndpointNote())
+      directNotes.push(
+        t(
+          '注意：新版 codex 仅支持 Responses 协议（wire_api=chat 已移除）——回退 base_url 仅当该地址本身可响应 /responses 时可用（小米 token plan 官方模板即此形态）；chat-completions-only 上游请改走网关',
+          'Note: recent Codex builds support the Responses protocol only (wire_api=chat removed) — the base_url fallback works only if that endpoint itself serves /responses (the Xiaomi token plan official template is exactly this shape); for chat-completions-only providers use the gateway'
+        )
+      )
     }
     if (opts.setDefault) {
       root.model_provider = 'modeldock'
@@ -170,10 +251,57 @@ export const codexAdapter: HarnessAdapter = {
       }
     }
 
+    // /model 选择器目录（model_catalog_json 机制）：把当前路由服务商的模型目录投影成
+    // catalog 文件——选择器从此只列路由真支持的模型，「从内置预设选中 → 上游 400」与
+    // 「选择器里看不到网关模型」两个问题同根消除（2026-11-09 实证：codex 0.167 的
+    // 选择器数据源 = 编译进二进制的 OpenAI 静态预设 + 本文件，从不查询 provider）。
+    // 直连模式不生成（上游模型目录 ModelDock 未必掌握）；目录空 fail-open。
+    const catalogNotes: string[] = []
+    const catalogChanges: FileChange[] = []
+    if (!d && opts.profile && cfg.profiles[opts.profile]?.provider) {
+      const provId = cfg.profiles[opts.profile]!.provider!
+      const catalog = buildCodexCatalog(cfg, provId)
+      if (catalog) {
+        const catPath = codexCatalogPath()
+        const existing = root.model_catalog_json
+        if (typeof existing === 'string' && existing && existing !== catPath) {
+          catalogNotes.push(
+            t(
+              '用户已自设 model_catalog_json（{v}），ModelDock 不覆盖——/model 目录以用户文件为准',
+              'model_catalog_json is user-set ({v}); ModelDock leaves it untouched — the /model catalog follows the user file',
+              { v: existing }
+            )
+          )
+        } else {
+          root.model_catalog_json = catPath
+          const json = `${JSON.stringify(catalog, null, 2)}\n`
+          const catChange = changeIfChanged(
+            catPath,
+            await readTextIfExists(catPath),
+            json,
+            t('生成 codex /model 目录（当前路由服务商模型）', 'Generate the codex /model catalog (current route provider models)')
+          )
+          if (catChange) catalogChanges.push(catChange)
+          // web_search 工具缺省关（2026-11-09 实测：小米 token plan 上游对独立 web_search
+          // 工具类型直接 400；小米官方模板亦写 disabled）。仅补空——用户显式配置不动。
+          if (root.web_search === undefined) {
+            root.web_search = 'disabled'
+            catalogNotes.push(
+              t(
+                '已缺省 web_search=disabled（多数非 OpenAI 上游不支持该工具类型，小米官方模板同款）；需要联网检索时手动改 web_search 值',
+                'Set web_search=disabled by default (most non-OpenAI upstreams reject the standalone web_search tool type; same as the Xiaomi official template); set web_search manually to enable it'
+              )
+            )
+          }
+        }
+      }
+    }
+
     const body = tomlStringify(reorderTomlRoot(root) as Record<string, unknown>)
     const after = body.endsWith('\n') ? body : body + '\n'
     const notes = [
       ...directNotes,
+      ...catalogNotes,
       t(
         '令牌内联为 http_headers 的 Authorization（Bearer），无需任何环境变量，任何终端/IDE 直接可用',
         'The token is inlined as the http_headers Authorization (Bearer) — no environment variables needed, works in any terminal/IDE'
@@ -197,6 +325,7 @@ export const codexAdapter: HarnessAdapter = {
     return {
       changes: [
         changeIfChanged(p, text, after, t('注册 modeldock provider', 'Register the modeldock provider')),
+        ...catalogChanges,
       ].filter((c): c is NonNullable<typeof c> => c !== null),
       notes,
       writtenBaseUrl: d ? directBase : undefined,
@@ -223,6 +352,8 @@ export const codexAdapter: HarnessAdapter = {
           // 用户手设值有 attach 快照兜底，可 restore 找回
           delete root.model_context_window
           delete root.model_max_output_tokens
+          // catalog 指针同理收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）
+          if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
         }
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
         if (c2) changes.push(c2)
