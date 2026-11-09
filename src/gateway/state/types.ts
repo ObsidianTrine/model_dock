@@ -132,7 +132,8 @@ export interface GatewayRuntime {
   dispatchers: Map<string, Dispatcher | undefined>
   /** providerId → 自动路由健康/熔断状态（仅 auto_failover 开启时使用） */
   health: Map<string, HealthState>
-  /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目） */
+  /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目——
+   *  ephemeral 例外：无条件建账计量，供编排器预算实测账读数，见 state/tokenlimits.ts） */
   tokenUsage: Map<string, TokenUsageState>
   /** runtime-only 临时 harness 注册表（id → 状态；provision/revoke/TTL sweeper 维护，
    *  逻辑见 state/runtime.ts）。内存态：进程重启即全部失效（设计如此——用完即焚凭据），

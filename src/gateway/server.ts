@@ -29,7 +29,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, summarizeUsageDaysWithHours, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry, type UsageHourBucket } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
@@ -2118,7 +2118,8 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
 
 /** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
  *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
- *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类。
+ *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类；model_meltdown 为
+ *  模型级容灾（model_fallback 域）的同形投影，供编排侧按 (provider, model) 粒度避让。
  *  海况扩展（只增不改，state/sea.ts）：providers[].errors 滑窗错误分桶（last_5m/last_60m 的
  *  分错误类计数与错误率）+ sea_state 聚合海况信号——同为编排侧风暴闸数据源。 */
 async function hMetrics(c: AdminCtx): Promise<void> {
@@ -2166,6 +2167,21 @@ async function hMetrics(c: AdminCtx): Promise<void> {
       remaining_ms: h.meltdown_until - now,
     })
   }
+  // 模型级熔断投影（model_fallback 域，ModelHealthState）：与 provider 级 meltdown 段同形，
+  // 多 model 维度。键 = `${providerId}\u0000${model}`（state/routing.ts recordModelOutcome 记账），
+  // 纯内存读；只露熔断中的条目（TTL 过期/已解除不出现，缺席 = 该模型无在熔断）。
+  const model_meltdown: Array<{ provider: string; model: string; class: string; until: string; remaining_ms: number }> = []
+  for (const [key, h] of rt.modelHealth ?? []) {
+    if (h.meltdown_until == null || h.meltdown_until <= now) continue
+    const sep = key.indexOf('\u0000')
+    model_meltdown.push({
+      provider: sep === -1 ? key : key.slice(0, sep),
+      model: sep === -1 ? '' : key.slice(sep + 1),
+      class: h.meltdown_cls ?? 'unknown',
+      until: new Date(h.meltdown_until).toISOString(),
+      remaining_ms: h.meltdown_until - now,
+    })
+  }
   // key 池健康（P1⑥ 观测面）：per-provider 配置的 key 数量与失效冷却中的索引（含剩余 ms）。
   // 只有数量/索引/时间，绝无 key 明文或引用原文（ref 可能内嵌明文 key，一律不出域）。
   // 不实际读 key（无 IO，metrics 是轻量端点）：total=配置引用数；healthy=total-冷却数——
@@ -2176,7 +2192,7 @@ async function hMetrics(c: AdminCtx): Promise<void> {
     keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, model_meltdown, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
 }
 
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。
@@ -2274,12 +2290,17 @@ function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs
 
 /** /_modeldock/usage：请求日志聚合（admin 只读）。编排侧（Dockmaster 燃油实测/风暴闸）与
  *  排查的数据面：date/from/to 选日（见 usageQuery），harness/profile/provider 精确过滤；
- *  聚合口径见 summarizeUsage。
+ *  聚合口径见 summarizeUsage。bucket=hour 附加 hours[] 小时桶（精简版形状见 UsageHourBucket，
+ *  稀疏输出：无流量的小时不出桶）——编排侧长跑分时段观测（油量曲线/高峰定位），总账照常返回。
  *  可计费口径字段（2026-11 billable 聚合）：usage.billable_tokens = 窗口内成功且有 usage
  *  条目的可计费 token 求和（与 tokens 同口径；公式分协议形态、条目落盘前已算好，聚合只
  *  求和不重算）；usage.billable_partial = 窗口内存在「有 usage 但缺 billable_tokens 数字」
  *  的条目（旧版网关日志混入）时为 true，此时求和只是可得部分——消费方（编排侧 reconcile）
  *  据此整体回落文件直读。窗口内无任何 usage 条目：billable_tokens=0、partial=false。 */
+/** 小时桶窗口封顶：与 USAGE_MAX_DAYS 联动（31 天 × 24 = 744）。usageQuery 已按日把窗口封到
+ *  31 天、今日桶数恒不超限，此检查守的是未来日上限调大后 hours[] 无感膨胀——桶数超限直接
+ *  400，不做静默截断（编排侧对账宁可显式失败不可缺桶）。 */
+const USAGE_MAX_HOURS = 744
 async function hUsage(c: AdminCtx): Promise<void> {
   const { req, res } = c
   const q = new URL(req.url ?? '', 'http://x').searchParams
@@ -2288,24 +2309,33 @@ async function hUsage(c: AdminCtx): Promise<void> {
     sendError(res, 400, parsed.err, t('示例：/_modeldock/usage?date=2026-11-01&harness=zcode', 'Example: /_modeldock/usage?date=2026-11-01&harness=zcode'))
     return
   }
+  const bucket = q.get('bucket')
+  if (bucket != null && bucket !== 'hour') {
+    return sendError(res, 400, t('usage 参数 bucket 非法：仅支持 hour', 'Invalid usage bucket parameter: only hour is supported'), t('示例：/_modeldock/usage?date=2026-11-01&bucket=hour', 'Example: /_modeldock/usage?date=2026-11-01&bucket=hour'))
+  }
+  const withHours = bucket === 'hour'
+  if (withHours && parsed.days.length * 24 > USAGE_MAX_HOURS) {
+    return sendError(res, 400, t('usage 小时桶窗口过大：最多查询 {n} 桶（31 天）', 'Usage hour-bucket window too large: query at most {n} buckets (31 days)', { n: USAGE_MAX_HOURS }), t('收窄 from/to 窗口后重试', 'Narrow the from/to window and retry'))
+  }
   // 流式聚合：逐行读、边过滤边累加，不落全量数组——31 天查询曾把事件循环卡数秒、
   // 在途 SSE 全冻结（本端点是编排侧的轮询数据源，见 summarizeUsageDays 注释）
   const harness = q.get('harness') ?? undefined
   const profile = q.get('profile') ?? undefined
   const provider = q.get('provider') ?? undefined
   const withCost = q.get('cost') !== '0' // 缺省带成本；cost=0 只算 token（编排侧风暴闸等免查价路径）
-  const usage = await summarizeUsageDays(
-    parsed.days,
-    { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs },
-    withCost ? gatewayPriceResolver : undefined
-  )
+  const filterOpt = { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs }
+  const priceOf = withCost ? gatewayPriceResolver : undefined
+  // 单趟双账：bucket=hour 经 summarizeUsageDaysWithHours 同管道同时出总账与小时桶，不二次扫文件
+  const { usage, hours } = withHours
+    ? await summarizeUsageDaysWithHours(parsed.days, filterOpt, priceOf)
+    : { usage: await summarizeUsageDays(parsed.days, filterOpt, priceOf), hours: null as UsageHourBucket[] | null }
   const filter: Record<string, string> = {}
   if (harness) filter.harness = harness
   if (profile) filter.profile = profile
   if (provider) filter.provider = provider
   res.writeHead(200, { 'content-type': 'application/json' })
   const pricingError = withCost ? loadPricingOverrides().error ?? null : null
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage }))
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage, ...(hours ? { hours } : {}) }))
   return
 }
 

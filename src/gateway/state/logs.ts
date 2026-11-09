@@ -305,6 +305,9 @@ export interface UsageSummary {
   by_model: Record<string, number>
   /** 成功请求的时延分位（线性插值，同 metrics 口径） */
   latency: { p50: number | null; p95: number | null; p99: number | null }
+  /** 按 model 分桶的成功请求时延（与 latency 同口径：只计成功且有 ms 的条目）。可选字段：
+   *  旧版消费方/旧聚合产物不带此键不破。avg_ms 为算术均值，分位线性插值同 latencyQuantiles。 */
+  latency_by_model?: Record<string, { count: number; avg_ms: number; p50_ms: number | null; p95_ms: number | null }>
   /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
   /** 按 model 分桶的实测用量（与 tokens 同口径：成功且有 usage 的条目；缓存读+缓存建计入
@@ -336,6 +339,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
   const byProvider: Record<string, number> = {}
   const byModel: Record<string, number> = {}
   const ms: number[] = []
+  const msByModel: Record<string, number[]> = {}
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
   const tokensByModel: NonNullable<UsageSummary['tokens_by_model']> = {}
   let billableTokens = 0
@@ -356,7 +360,10 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
       const isOk = e.status !== undefined && e.status < 400
       if (isOk) {
         ok++
-        if (e.ms != null) ms.push(e.ms)
+        if (e.ms != null) {
+          ms.push(e.ms)
+          if (e.model) (msByModel[e.model] ??= []).push(e.ms)
+        }
         const u = e.usage
         if (u) {
           tokens.input += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
@@ -393,6 +400,11 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
       }
     },
     summary(): UsageSummary {
+      const latencyByModel: NonNullable<UsageSummary['latency_by_model']> = {}
+      for (const [model, arr] of Object.entries(msByModel)) {
+        const q = latencyQuantiles(arr)
+        latencyByModel[model] = { count: arr.length, avg_ms: arr.reduce((a, b) => a + b, 0) / arr.length, p50_ms: q.p50, p95_ms: q.p95 }
+      }
       return {
         requests: count,
         ok,
@@ -401,6 +413,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
         by_provider: byProvider,
         by_model: byModel,
         latency: latencyQuantiles(ms),
+        latency_by_model: latencyByModel,
         tokens,
         tokens_by_model: tokensByModel,
         billable_tokens: billableTokens,
@@ -418,6 +431,52 @@ export function summarizeUsage(entries: LogEntry[], priceOf?: PriceResolver): Us
   const acc = createUsageAccumulator(priceOf)
   for (const e of entries) acc.add(e)
   return acc.summary()
+}
+
+// ===== 按小时分桶（/usage bucket=hour，编排侧长跑分时段观测）=====
+
+/** 小时桶精简版（/usage bucket=hour 的 hours[] 条目）：UsageSummary 的子集——分时段观测只要
+ *  量与时点，分位/成本明细/provider 维度留在总账（usage 字段），桶内不重复出。 */
+export interface UsageHourBucket {
+  /** 本地小时键（YYYY-MM-DDTHH:00，localIsoTs 截断补 :00）：字符串排序即时序 */
+  hour: string
+  requests: number
+  /** 桶内成本合计（USD）；未注入查价器为 null（与 summary.cost 的 null 语义一致） */
+  cost: number | null
+  tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  by_model: Record<string, number>
+  by_status: Record<string, number>
+}
+
+/** 按小时分桶累加器：桶内复用 createUsageAccumulator（口径与总账逐字段同源），只投影精简版。
+ *  桶键取条目本地小时——Map 收集后按键排序输出，不依赖条目落盘时序（乱序条目也归对桶）；
+ *  稀疏输出：窗口内无流量的小时不出桶（744 桶零填充是浪费，消费方按 hour 键对齐即可）。 */
+export function createUsageHourAccumulator(priceOf?: PriceResolver) {
+  const buckets = new Map<string, ReturnType<typeof createUsageAccumulator>>()
+  return {
+    add(e: LogEntry): void {
+      const hour = `${localIsoTs(new Date(String(e.ts))).slice(0, 13)}:00`
+      let acc = buckets.get(hour)
+      if (!acc) {
+        acc = createUsageAccumulator(priceOf)
+        buckets.set(hour, acc)
+      }
+      acc.add(e)
+    },
+    hours(): UsageHourBucket[] {
+      return [...buckets.keys()].sort().map((hour) => {
+        const s = buckets.get(hour)!.summary()
+        return {
+          hour,
+          requests: s.requests,
+          cost: s.cost ? s.cost.total : null,
+          tokens: s.tokens,
+          by_model: s.by_model,
+          by_status: s.by_status,
+        }
+      })
+    },
+  }
 }
 
 /** 流式聚合：逐行读各日期文件、边过滤边累加，不落全量条目数组——/usage 查 31 天曾用
@@ -458,6 +517,22 @@ export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf
   const acc = createUsageAccumulator(priceOf)
   for await (const e of streamRequestLogDays(days, f)) acc.add(e)
   return acc.summary()
+}
+
+/** 流式聚合 + 小时桶：与 summarizeUsageDays 同一条解析管道单趟双账（总账 + hours），bucket=hour
+ *  查询不付两次全量文件扫描的代价（31 天扫描是本管道存在的理由，见 streamRequestLogDays 注）。 */
+export async function summarizeUsageDaysWithHours(
+  days: string[],
+  f: UsageFilter,
+  priceOf?: PriceResolver
+): Promise<{ usage: UsageSummary; hours: UsageHourBucket[] }> {
+  const acc = createUsageAccumulator(priceOf)
+  const hrs = createUsageHourAccumulator(priceOf)
+  for await (const e of streamRequestLogDays(days, f)) {
+    acc.add(e)
+    hrs.add(e)
+  }
+  return { usage: acc.summary(), hours: hrs.hours() }
 }
 
 // 事件循环延迟采样：main.ts 启动处挂一次（懒初始化——单测直建 rt 不挂，metrics.eventLoopLagMs

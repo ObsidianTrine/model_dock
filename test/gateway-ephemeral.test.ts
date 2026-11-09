@@ -289,28 +289,28 @@ describe('临时 harness > TTL sweeper（间隔注入 20ms）', () => {
   })
 })
 
-describe('临时 harness > 日限额（max_daily_tokens 挂进 tokenlimits，超限 429 与 daily_tokens 一致）', () => {
-  /** mock 上游：/v1/messages 回 SSE（usage: input 100 / cache_read 20 / cache_create 5 / output 42 → 合计 167） */
-  async function startMockUpstream(): Promise<{ port: number; close: () => void }> {
-    const server = http.createServer((req, res) => {
-      req.resume()
-      req.on('end', () => {
-        res.writeHead(200, { 'content-type': 'text/event-stream' })
-        res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}\n\n')
-        res.write('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n')
-        res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n')
-      })
+/** mock 上游：/v1/messages 回 SSE（usage: input 100 / cache_read 20 / cache_create 5 / output 42 → 合计 167，可计费 147） */
+async function startMockUpstream(): Promise<{ port: number; close: () => void }> {
+  const server = http.createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}\n\n')
+      res.write('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":42}}\n\n')
+      res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n')
     })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    return {
-      port: (server.address() as AddressInfo).port,
-      close: () => {
-        server.closeAllConnections?.()
-        server.close()
-      },
-    }
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return {
+    port: (server.address() as AddressInfo).port,
+    close: () => {
+      server.closeAllConnections?.()
+      server.close()
+    },
   }
+}
 
+describe('临时 harness > 日限额（max_daily_tokens 挂进 tokenlimits，超限 429 与 daily_tokens 一致）', () => {
   it('daily 累计达上限后 429（不打上游）；用量计入临时 harness 名下', async () => {
     const h = fakeHome()
     const up = await startMockUpstream()
@@ -340,6 +340,42 @@ describe('临时 harness > 日限额（max_daily_tokens 挂进 tokenlimits，超
       expect(third.status).toBe(429)
       expect(third.body).toContain('日限额')
       expect(third.body).toContain('daily_tokens')
+      server.closeAllConnections?.()
+      server.close()
+    } finally {
+      up.close()
+      h.restore()
+    }
+  })
+})
+
+describe('临时 harness > 无限额计量建账（gatewayProvision 预算实测账数据源）', () => {
+  it('provision 不带 max_daily_tokens（无 limits）：连发不熔断、无条件建账，harness-usage day_billable_tokens>0', async () => {
+    const h = fakeHome()
+    const up = await startMockUpstream()
+    try {
+      const cfg = {
+        version: 1,
+        active_profile: 'demo',
+        security: { store: 'file' },
+        providers: { A: { name: 'A', base_url: `http://127.0.0.1:${up.port}`, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k1' } },
+        profiles: { demo: { provider: 'A', default_model: 'preset-model' }, heavy: { provider: 'A', default_model: 'preset-model' } },
+        harness: {},
+      } as never as Config
+      const rt = buildRuntime(cfg, 'admin-tok')
+      const server = createGatewayServer(rt, { port: 0 })
+      const port = await listenEphemeral(server)
+      const j = JSON.parse((await adminPost(port, '/_modeldock/harness/provision', { id: 'eph-meter' })).body) as Record<string, any>
+      expect(rt.config.harness['eph-meter']?.limits).toBeUndefined() // gatewayProvision 只传 taskId 的形态
+      const MSG = JSON.stringify({ model: 'preset-model', messages: [{ role: 'user', content: 'hi' }] })
+      const AUTH = { authorization: `Bearer ${j.token}`, 'content-type': 'application/json' }
+      expect((await request(port, '/v1/messages', AUTH, MSG)).status).toBe(200)
+      expect((await request(port, '/v1/messages', AUTH, MSG)).status).toBe(200) // 无 limits 仍放行（不熔断）
+      // 账面两口径齐动（此前恒 0：无 limits 不建状态 + recordTokenUsage no-op）
+      expect(rt.tokenUsage.get('eph-meter')?.dayTokens).toBe(334) // 167 × 2
+      expect(rt.tokenUsage.get('eph-meter')?.dayBillableTokens).toBe(294) // 147 × 2（剔除缓存读）
+      const usage = JSON.parse((await adminGet(port, '/_modeldock/harness-usage')).body) as Record<string, any>
+      expect(usage.usage['eph-meter']).toMatchObject({ ephemeral: true, day_tokens: 334, day_billable_tokens: 294 })
       server.closeAllConnections?.()
       server.close()
     } finally {
