@@ -72,7 +72,7 @@ import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, vali
 import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
-import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
+import { parseDurationMinutes, canSailSubmit, hardZoneReason, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -2802,6 +2802,18 @@ function highPriorityDraftIds(repoRoot) {
   return high;
 }
 
+/** 读一张提案卡的 frontmatter（nightly --auto 硬禁区过滤用）。缺失/解析失败返回 null——
+ *  过滤只对能解析的卡生效，损坏提案走 submitDraft 既有「留在 drafts 等人工修」路径。 */
+function draftCardMeta(repoRoot, id) {
+  const text = safeRead(path.join(draftsDir(repoRoot), `${id}.md`));
+  if (!text) return null;
+  try {
+    return parseCard(text, `${id}.md`).meta;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * drafts gc——提案生命周期清退（B9）：扫 drafts/ 顶层提案，产出两份迁移清单——
  *   superseded：files_hint 与 merged/ 卡重叠（真实实现已覆盖提案现场）；
@@ -3921,6 +3933,15 @@ async function cmdNightly(repoRoot, opts) {
       if (!autoHeld) {
         const high = highPriorityDraftIds(repoRoot);
         for (const id of high) {
+          // 硬禁区对齐（canSailSubmit 同款口径，单一来源 sail.mjs 的 hardZoneReason）：
+          // deps/feature/核心·发布路径提案 submit+run 后必被引水闸打回 pending——白烧一次
+          // run 启动（P2-15），选卡阶段直接跳过。解析失败的提案不拦，走 submitDraft 既有报错。
+          const meta = draftCardMeta(repoRoot, id);
+          const hz = meta ? hardZoneReason(meta, ncfg) : null;
+          if (hz) {
+            log(`⏸ 提案 ${id} 不自动提交：${hz}`);
+            continue;
+          }
           const r = submitDraft(repoRoot, root, id);
           if (!r.submitted) {
             log(`提案 ${id} 未提交：${r.skipped}`);

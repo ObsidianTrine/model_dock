@@ -1,6 +1,7 @@
 // sail.mjs — 自由航行（时间盒完全自治）的纯逻辑件，全部可单测：
 //   parseDurationMinutes  --minutes / --duration 的人话时长解析（45 | 90m | 2h | 1h30m | 90s）
 //   canSailSubmit         自由航行自动提交判定（开 sail 即本航次授权；硬禁区沿用 autopilot 哲学）
+//   hardZoneReason        自动提交硬禁区（deps/feature/核心·发布路径）——sail 与 nightly --auto 共用单一口径
 //   snapshotQueue         队列状态快照（开航基线与收帆快照——战果清单的原料）
 //   snapshotDrafts        drafts/ 提案快照（每周期规划产出的 id/类型/目标句——「为什么这么编排」的原料）
 //   diffQueueStates       前后两次队列快照的差分
@@ -68,10 +69,28 @@ export function parseDurationMinutes(opts = {}) {
 }
 
 /**
+ * 自动提交硬禁区判定（deps / feature / files_hint 命中核心·发布路径）：命中返回原因，
+ * 否则 null。sail（canSailSubmit）与 nightly --auto 选卡共用的单一口径——nightly --auto
+ * 此前只按 priority 选卡，硬禁区提案 submit+run 后必被引水闸打回 pending，白烧一次
+ * run 启动（P2-15）；对齐后选卡阶段直接跳过。corePaths/releasePaths 都未配置 = 无守卫面
+ * （与 canAutoSubmit/pilotageReason 同款：不把所有卡拒掉）。
+ */
+export function hardZoneReason(meta, cfg) {
+  if (meta.type === 'deps') return 'deps 类型永不自动提交（依赖升级人工裁决）';
+  if (meta.type === 'feature') return 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），不直接自动提交——审完设计后跑 spec build 拆卡';
+  const guarded = [...(cfg?.corePaths ?? []), ...(cfg?.releasePaths ?? [])];
+  // 空守卫清单 = 无守卫面（与 canAutoSubmit 同款：未配置时不把所有卡拒掉）
+  if (guarded.length && hintsOverlap(meta.files_hint, guarded)) {
+    return 'files_hint 命中核心/发布路径（永不自动提交）';
+  }
+  return null;
+}
+
+/**
  * 判定一张提案卡能否被自由航行自动提交进队列。
  * 与 autopilot（canAutoSubmit）同款哲学，授权来源不同：autopilot 是 workflow.json 的
  * 持久授权，sail 是「人显式敲下带时长的 sail 命令」这一动作本身即本航次授权。
- * 硬禁区不变（配置只收窄、永不放大）：
+ * 硬禁区不变（配置只收窄、永不放大），判定收口在 hardZoneReason（nightly --auto 同口径）：
  *   - created_by: human 的人工草稿永不自动（等人工 submit）；
  *   - deps 类型永不自动（依赖升级牵一发动全身，人工裁决）；
  *   - feature 类型永不直接自动——走上游管线：research brief → spec 三件套 → 人工审设计
@@ -82,18 +101,13 @@ export function parseDurationMinutes(opts = {}) {
  */
 export function canSailSubmit(meta, cfg) {
   if (meta.created_by === 'human') return { ok: false, reason: '人工草稿（created_by: human）永不自动提交' };
-  if (meta.type === 'deps') return { ok: false, reason: 'deps 类型永不自动提交（依赖升级人工裁决）' };
-  if (meta.type === 'feature') return { ok: false, reason: 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），不直接自动提交——审完设计后跑 spec build 拆卡' };
+  const hz = hardZoneReason(meta, cfg);
+  if (hz) return { ok: false, reason: hz };
   const whitelist = Array.isArray(cfg?.freeSail?.autoSubmitTypes) && cfg.freeSail.autoSubmitTypes.length
     ? cfg.freeSail.autoSubmitTypes
     : DEFAULT_SAIL_SUBMIT_TYPES;
   if (!whitelist.includes(meta.type)) {
     return { ok: false, reason: `type "${meta.type}" 不在 freeSail.autoSubmitTypes [${whitelist.join(', ')}]` };
-  }
-  const guarded = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
-  // 空守卫清单 = 无守卫面（与 canAutoSubmit 同款：未配置时不把所有卡拒掉）
-  if (guarded.length && hintsOverlap(meta.files_hint, guarded)) {
-    return { ok: false, reason: 'files_hint 命中核心/发布路径（永不自动提交）' };
   }
   return { ok: true };
 }
