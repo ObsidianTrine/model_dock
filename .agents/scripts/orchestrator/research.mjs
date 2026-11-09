@@ -186,6 +186,36 @@ export function listBriefs(repoRoot) {
 // 天然不收录（回归测试钉住）；单 brief 契约与 verify 路径对 topic 无感知。
 // ---------------------------------------------------------------------------
 
+/**
+ * 拆维规划输出解析（sail researchAutoDim，2026-11-10 P3；prompt 契约见 prompt.mjs
+ * buildResearchDimsPrompt）：模型输出 2–4 个短维度、每行一个。容忍 ```agents-dims```
+ * 或普通 ``` 围栏包裹（有围栏取首个围栏内容，无围栏取全文）、容忍行首序号/项目符号
+ * （输出里存在带序号/符号的行时只取这类行——「维度如下」式前导白话不混入维度清单）。
+ * 剔除空行/标题行/围栏残留行与超长行（一句话解释混入的高发形态）；精确去重保序。
+ * 不足 2 维返回 null（调用方降级单 brief）；超 4 维截断（契约上限，防跑飞）。
+ */
+export function parseDimsPlan(text) {
+  const raw = String(text ?? '');
+  const fence = /```[^\n]*\n([\s\S]*?)\n```/.exec(raw);
+  const body = fence ? fence[1] : raw;
+  const MARK_RE = /^\s*(?:[-*•]|\d+[.、)．]|[①②③④⑤⑥⑦⑧⑨⑩])\s*/;
+  const seen = new Set();
+  const all = [];
+  const marked = [];
+  for (const line of body.split(/\r?\n/)) {
+    const hasMark = MARK_RE.test(line);
+    const dim = line.replace(MARK_RE, '').trim();
+    if (!dim || dim === '```' || dim.startsWith('#')) continue;
+    if (dim.length > 40) continue; // 一句话解释混进来的概率高——按非维度行丢弃
+    if (seen.has(dim)) continue;
+    seen.add(dim);
+    all.push(dim);
+    if (hasMark) marked.push(dim);
+  }
+  const dims = (marked.length >= 2 ? marked : all).slice(0, 4);
+  return dims.length >= 2 ? dims : null;
+}
+
 /** topic.json 落盘路径：research/topics/<topic-id>.json。 */
 export function topicPath(repoRoot, topicId) {
   return path.join(researchDir(repoRoot), 'topics', `${topicId}.json`);

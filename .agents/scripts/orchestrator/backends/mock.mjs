@@ -14,13 +14,21 @@
 //                                        stderr 摘要路径；复刻真实 claude CLI 死法）
 //   ORCH_MOCK_RESEARCH_FAIL_DIM=<子串>   调研问题含该子串的 researcher 会话输出无契约块
 //                                        （research multi 单维失败隔离：按维度点名失败）
+//   ORCH_MOCK_DIMS_SPLIT=one|invalid     拆维规划会话（sail researchAutoDim）注入：
+//                                        one=只给 1 维（不足 2 维 → 调用方降级单 brief）、
+//                                        invalid=无围栏无维度行（解析失败同降级）；缺省正常
+//                                        输出 3 维
+//   ORCH_MOCK_PLANNER_RESEARCH=<id>      feature 卡 research 行写该值（缺省 todo）——sail
+//                                        autoDim 续接路径 e2e 用（planner 引用既有 brief/topic）
+//   ORCH_MOCK_PLANNER_FEATURE_COUNT=<n>  feature 模式产 n 张卡（id 后缀 -2…-n，缺省 1 张）——
+//                                        researchPerCycle cap 的「multi 计 1」断言用
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER, DIMS_SPLIT_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -39,7 +47,8 @@ export const mockBackend = {
     const isPlanner = !isSpecPlanner && !isSpecReviewer && prompt.includes(CARD_MARKER);
     const isArbiter = !isSpecPlanner && !isSpecReviewer && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
     const isVerifier = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
-    const isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(BRIEF_MARKER);
+    const isDimsSplit = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(DIMS_SPLIT_MARKER); // 拆维规划（sail researchAutoDim）：先于 researcher 判定
+    const isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && !isDimsSplit && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isSpecReviewer) {
@@ -191,53 +200,84 @@ export const mockBackend = {
       // planner 模式：输出一张合法任务卡（契约块）；ORCH_MOCK_PLANNER_INVALID=1 模拟非法输出（校验重试路径测试）
       // ORCH_MOCK_PLANNER_FEATURE=1：产 feature 卡（带 research: todo + score/evidence——
       // sail 上游管线 e2e 用：先派 researcher 出 brief，再自动升级 spec，不直接进队列）
+      // ORCH_MOCK_PLANNER_RESEARCH=<id>：feature 卡 research 行写该值（缺省 todo——纯增量，
+      // 不设时输出与历史逐字节一致；sail autoDim 续接路径 e2e 用）
+      // ORCH_MOCK_PLANNER_FEATURE_COUNT=<n>：feature 模式产 n 张卡（id 后缀 -2…-n，缺省 1——
+      // researchPerCycle cap 的「multi 计 1」断言用）
       const intentId = /用户意图：\s*(.+)$/m.exec(prompt)?.[1]?.trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'planner-mock-task';
       const isFeature = process.env.ORCH_MOCK_PLANNER_FEATURE === '1';
+      const featureCount = isFeature ? (parseInt(process.env.ORCH_MOCK_PLANNER_FEATURE_COUNT ?? '1', 10) || 1) : 1;
+      const plannerResearch = process.env.ORCH_MOCK_PLANNER_RESEARCH ?? 'todo';
+      const cardBlock = (id) =>
+        [
+          '```' + CARD_MARKER,
+          '---',
+          `id: ${id}`,
+          `type: ${isFeature ? 'feature' : 'docs'}`,
+          'priority: normal',
+          `created_at: ${new Date().toISOString()}`,
+          'created_by: planner',
+          'files_hint:',
+          `  - ${isFeature ? 'docs/**' : 'docs/**'}`,
+          'workflows:',
+          '  - feature-branch',
+          'gate: L3',
+          ...(isFeature
+            ? [
+                'proposal: true',
+                `research: ${plannerResearch}`,
+                'score:',
+                '  value: 2',
+                '  effort: 1',
+                '  confidence: 3',
+                '  risk: 1',
+                'evidence:',
+                '  - mock 证据：ORCH_MOCK_PLANNER_FEATURE 注入',
+              ]
+            : []),
+          '---',
+          '',
+          '# 目标',
+          'mock planner 目标:完成用户意图。',
+          '',
+          '# 验收标准',
+          '- `npm test` 全绿',
+          '- docs/ 下出现意图所述的新文档内容',
+          '',
+          '# 背景',
+          'mock planner 探索结论占位。',
+          '```',
+        ].join('\n');
       const output = process.env.ORCH_MOCK_PLANNER_INVALID === '1'
         ? '我想了一下,这个任务大概需要改一些文件。没有产出任务卡。'
         : [
             `已探索仓库,意图编译为任务卡。`,
             '',
-            '```' + CARD_MARKER,
-            '---',
-            `id: ${intentId || 'planner-mock-task'}`,
-            `type: ${isFeature ? 'feature' : 'docs'}`,
-            'priority: normal',
-            `created_at: ${new Date().toISOString()}`,
-            'created_by: planner',
-            'files_hint:',
-            `  - ${isFeature ? 'docs/**' : 'docs/**'}`,
-            'workflows:',
-            '  - feature-branch',
-            'gate: L3',
-            ...(isFeature
-              ? [
-                  'proposal: true',
-                  'research: todo',
-                  'score:',
-                  '  value: 2',
-                  '  effort: 1',
-                  '  confidence: 3',
-                  '  risk: 1',
-                  'evidence:',
-                  '  - mock 证据：ORCH_MOCK_PLANNER_FEATURE 注入',
-                ]
-              : []),
-            '---',
-            '',
-            '# 目标',
-            'mock planner 目标:完成用户意图。',
-            '',
-            '# 验收标准',
-            '- `npm test` 全绿',
-            '- docs/ 下出现意图所述的新文档内容',
-            '',
-            '# 背景',
-            'mock planner 探索结论占位。',
-            '```',
+            // 多卡（FEATURE_COUNT>1）：id 后缀 -2…-n 区分；缺省 1 张与历史逐字节一致
+            [intentId || 'planner-mock-task', ...Array.from({ length: Math.max(0, featureCount - 1) }, (_, k) => `${intentId || 'planner-mock-task'}-${k + 2}`)]
+              .map((id) => cardBlock(id))
+              .join('\n\n'),
           ].join('\n');
       onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-planner' });
       return { exitCode: 0, output, usage: { tokensIn: 300, tokensOut: 200 }, pid: process.pid };
+    }
+
+    if (isDimsSplit) {
+      // 拆维规划模式（sail researchAutoDim，2026-11-10 P3）：输出 2-4 个短维度（围栏包裹，
+      // 每行一个——research.mjs parseDimsPlan 消费）。ORCH_MOCK_DIMS_SPLIT 注入：
+      //   'one'     只给 1 维（<2 → 调用方降级单 brief 路径）
+      //   'invalid' 无围栏无维度行（解析失败同降级）
+      //   缺省      正常 3 维（multi 成功路径）
+      const mode = process.env.ORCH_MOCK_DIMS_SPLIT ?? '';
+      const output = mode === 'invalid'
+        ? '我想了想，这个提案大概需要先调研一下再说。'
+        : [
+            '```' + DIMS_SPLIT_MARKER,
+            ...(mode === 'one' ? ['技术选型'] : ['技术选型', '成本与维护', '生态兼容风险']),
+            '```',
+          ].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-dims-planner' });
+      return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 50 }, pid: process.pid };
     }
 
     if (isResearcher) {

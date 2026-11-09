@@ -290,7 +290,13 @@ function resolveResearch(raw) {
   return out;
 }
 
-/** freeSail 配置：{ autoSubmitTypes?: string[], researchPerCycle?: 正整数, specPerCycle?: 正整数 }。 */
+/**
+ * freeSail 配置：{ autoSubmitTypes?: string[], researchPerCycle?: 正整数, specPerCycle?: 正整数,
+ * researchAutoDim?: boolean }。
+ * researchAutoDim（2026-11-10 P3，缺省 false）：sail 上游管线自动拆维度调研——feature 提案
+ * 缺调研时先派拆维规划会话，≥2 维跑 research multi（一个 multi 对 researchPerCycle 仍计 1 个
+ * 调研动作，成本倍乘靠默认关治理）。非 bool 值 warn + 忽略（与本模块各键同口径）。
+ */
 function resolveFreeSail(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -308,6 +314,10 @@ function resolveFreeSail(raw) {
       if (Number.isInteger(raw[k]) && raw[k] > 0) out[k] = raw[k];
       else console.warn(`[workflow-config] freeSail.${k} ${JSON.stringify(raw[k])} 不合法（应为正整数）——忽略`);
     }
+  }
+  if (raw.researchAutoDim !== undefined) {
+    if (typeof raw.researchAutoDim === 'boolean') out.researchAutoDim = raw.researchAutoDim;
+    else console.warn(`[workflow-config] freeSail.researchAutoDim ${JSON.stringify(raw.researchAutoDim)} 不合法（应为布尔值 true/false）——忽略（缺省 false，行为与未开启一致）`);
   }
   return out;
 }

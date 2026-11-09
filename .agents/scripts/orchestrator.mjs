@@ -34,8 +34,8 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildResearchDimsPrompt, DIMS_SPLIT_MARKER, buildVerifierPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER } from './orchestrator/prompt.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, parseDimsPlan, briefDir, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3454,6 +3454,40 @@ async function runArbitrationSession(repoRoot, { claims, snapshots, backendName,
 }
 
 /**
+ * 拆维规划会话（sail 上游管线 researchAutoDim 专用，2026-11-10 P3）：readonly 轻会话
+ * （maxTurns 8，planner 家族风格——AGENTS.md 注入 + 契约模板，见 buildResearchDimsPrompt）
+ * 把提案目标拆成 2–4 个调研维度。单次尝试不重试：拆维是锦上添花，失败成本与重试收益
+ * 不成比例，且失败有安全出路（调用方降级单 brief，下周期管线自然重试）。会话异常/
+ * 解析不足 2 维返回 null——sail 韧性优先，不因拆维会话抖动卡管线。
+ */
+async function planResearchDims(repoRoot, { goal, backendName }) {
+  const backend = await getBackend(backendName);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dims-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dims-prompt-')), 'dims-prompt.md');
+  try {
+    fs.writeFileSync(promptFile, buildResearchDimsPrompt(sanitizeIntent(goal), repoRoot));
+    if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+    const result = await backend.spawn({
+      promptFile,
+      cwd: repoRoot, // 拆维规划只读探索仓库（理解提案语境），无 Bash 无写
+      maxTurns: 8,
+      onEvent: () => {}, // 规划家族不记账
+      readonly: true,
+      settingsFile,
+    });
+    return parseDimsPlan(result.output ?? ''); // 不足 2 维 = null（调用方降级）
+  } catch (e) {
+    log(`  ↩ 拆维规划会话异常（${String(e?.message ?? e).slice(0, 120)}）——降级单 brief 调研`);
+    return null;
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
  * 调研收尾流水线（cmdResearch 与 cmdResearchMulti 共用，2026-11-09 从 cmdResearch 抽出）：
  * 引用快照落盘 → L1 可信度初判（assessBrief 落 verdict.json）→ logVerdict 播报。
  * ledgerExtra（可选）：非空时追加一条 l1 台账（multi 每维一条，附 topic_id/dim 溯源）——
@@ -3549,6 +3583,51 @@ async function runBoundedPool(limit, count, starter) {
 }
 
 /**
+ * 多维调研执行核心（cmdResearchMulti 与 sail 上游管线 researchAutoDim 共用，2026-11-10 P3
+ * 从 cmdResearchMulti 抽出）：调用方已完成参数校验（topic 非空、dims ≥2 且 ≤maxDims）并
+ * 解析好 model/backendName/concurrency——本函数不读 workflow.json（并发池由调用方传入，
+ * 防 CLI 路径二次 loadWorkflowConfig 重复告警）。职责：派 N 个维度 researcher 会话（三连败
+ * 重试自带）→ 有界并发池（dims 按输入顺序回填，与完成先后无关）→ 单维失败隔离 → rollup
+ * 最差档聚合 → writeTopicAuto 竞态复检落盘。日志（表头/逐维/落盘）在核心里打——CLI 与
+ * sail 两条路共享同一套可观测口径。
+ * 返回 { id, file, topic, dims, rollup }（id = 实际落盘 topic-id，回执/引用一律用它）；
+ * 全维失败返回 { failed: true, dims }——CLI 据此 die 汇总，sail 记 failed 下周期重试。
+ */
+async function runMultiResearch(repoRoot, { topic, dims, model, backendName, concurrency }) {
+  const pool = Number.isInteger(concurrency) && concurrency > 0 ? concurrency : (loadWorkflowConfig(repoRoot).research?.concurrency ?? 2);
+  const topicId = deriveTopicId(repoRoot, slugifyTopic(topic));
+  log(`多维调研：${topic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——并发 ${pool}，单维失败隔离`);
+  const runDim = async (i, dim) => {
+    const forcedId = `${topicId}-d${i + 1}`;
+    log(`── 维度 ${i + 1}/${dims.length}：${dim}（brief ${forcedId}）──`);
+    const r = await runResearchSession(repoRoot, { question: `${topic}——${dim}`, backendName, model, briefId: forcedId, topicId, dim });
+    if (!r || r.failed) {
+      // 失败隔离：该维记 failed（留最后一跳 stderr 尾摘要），批次继续——部分成功仍有价值
+      const tail = String(r?.stderrTail ?? '').trim().slice(-200);
+      log(`  ✗ 维度「${dim}」未产出 brief——已隔离，继续下一维`);
+      return { dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null };
+    }
+    const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: { topic_id: topicId, dim } });
+    return { dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' };
+  };
+  // 有界并发池：dims 按 --dim 顺序回填（runBoundedPool 的 index 写回保证，与完成先后无关）
+  const dimResults = await runBoundedPool(pool, dims.length, (i) => runDim(i, dims[i]));
+  if (!dimResults.some((d) => d.status === 'ok')) {
+    return { failed: true, dims: dimResults };
+  }
+  const rollup = rollupTopicVerdict(dimResults);
+  const topicObj = { id: topicId, topic, created_at: toIsoLocal(), dims: dimResults, rollup };
+  // 落盘瞬间竞态复检（P2）：deriveTopicId 是 check-then-write，同主题并行 multi 可能互覆——
+  // writeTopicAuto 'wx' 排他创建 + 占用续派 -2…-9（取舍注释见该函数）
+  const { file, id: finalTopicId } = writeTopicAuto(repoRoot, topicObj);
+  if (finalTopicId !== topicId) {
+    log(`⚠ topic-id ${topicId} 被并行的同主题调研占用——汇总续派 ${finalTopicId} 落盘（各维 brief 保留 ${topicId}-d<N> 命名空间，溯源不受影响）`);
+  }
+  log(`topic 汇总已落盘：${file}（rollup ${rollup.level} / ${rollup.internal_decision}${rollup.partial ? '，partial：有失败维' : ''}）`);
+  return { id: finalTopicId, file, topic, dims: dimResults, rollup };
+}
+
+/**
  * research multi——多维度调研（2026-11-09，multi-dim 方案 P1 机制化；P2 起维度走有界并发池）：
  * 一个主题 × N 个维度（--dim 逐个给，≥2 才算 multi，上限 research.maxDims 缺省 4）。
  * 每维问题 = `主题——维度`，喂 runResearchSession（三连败重试自带）；同时最多
@@ -3559,6 +3638,8 @@ async function runBoundedPool(limit, count, starter) {
  * dims 数组按 --dim 顺序回填（index 写回，与完成先后无关）——消费方依赖维序稳定。
  * 落盘前 writeTopicAuto 竞态复检（同主题并行的 topic-id 互覆收口）。
  * 消费方契约：.agents/docs/research-verdict.md 的 topic 节（读 rollup.internal_decision 决策）。
+ * 执行核心在 runMultiResearch（P3 抽出，sail autoDim 共用）——本命令保留参数校验/
+ * 通知/提示职责。
  */
 async function cmdResearchMulti(repoRoot, topic, opts) {
   const cleanTopic = sanitizeIntent(topic);
@@ -3575,48 +3656,23 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
   opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
   const model = opts.model || cfg.research?.model || undefined;
   const concurrency = cfg.research?.concurrency ?? 2; // resolveResearch 已校验 1–4；键缺省回落 2
-  const topicId = deriveTopicId(repoRoot, slugifyTopic(cleanTopic));
-  log(`多维调研：${cleanTopic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——并发 ${concurrency}，单维失败隔离`);
-  const runDim = async (i, dim) => {
-    const forcedId = `${topicId}-d${i + 1}`;
-    log(`── 维度 ${i + 1}/${dims.length}：${dim}（brief ${forcedId}）──`);
-    const r = await runResearchSession(repoRoot, { question: `${cleanTopic}——${dim}`, backendName: opts.backend, model, briefId: forcedId, topicId, dim });
-    if (!r || r.failed) {
-      // 失败隔离：该维记 failed（留最后一跳 stderr 尾摘要），批次继续——部分成功仍有价值
-      const tail = String(r?.stderrTail ?? '').trim().slice(-200);
-      log(`  ✗ 维度「${dim}」未产出 brief——已隔离，继续下一维`);
-      return { dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null };
-    }
-    const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: { topic_id: topicId, dim } });
-    return { dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' };
-  };
-  // 有界并发池：dims 按 --dim 顺序回填（runBoundedPool 的 index 写回保证，与完成先后无关）
-  const dimResults = await runBoundedPool(concurrency, dims.length, (i) => runDim(i, dims[i]));
-  if (!dimResults.some((d) => d.status === 'ok')) {
+  const r = await runMultiResearch(repoRoot, { topic: cleanTopic, dims, model, backendName: opts.backend, concurrency });
+  if (r.failed) {
     die(
-      `多维调研全部 ${dimResults.length} 个维度失败（无一产出 brief）——逐维最后一跳 stderr：\n` +
-      dimResults.map((d) => `- ${d.dim}：${d.reason}`).join('\n') +
+      `多维调研全部 ${r.dims.length} 个维度失败（无一产出 brief）——逐维最后一跳 stderr：\n` +
+      r.dims.map((d) => `- ${d.dim}：${d.reason}`).join('\n') +
       `\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
     );
   }
-  const rollup = rollupTopicVerdict(dimResults);
-  const topicObj = { id: topicId, topic: cleanTopic, created_at: toIsoLocal(), dims: dimResults, rollup };
-  // 落盘瞬间竞态复检（P2）：deriveTopicId 是 check-then-write，同主题并行 multi 可能互覆——
-  // writeTopicAuto 'wx' 排他创建 + 占用续派 -2…-9（取舍注释见该函数）
-  const { file, id: finalTopicId } = writeTopicAuto(repoRoot, topicObj);
-  if (finalTopicId !== topicId) {
-    log(`⚠ topic-id ${topicId} 被并行的同主题调研占用——汇总续派 ${finalTopicId} 落盘（各维 brief 保留 ${topicId}-d<N> 命名空间，溯源不受影响）`);
-  }
-  log(`topic 汇总已落盘：${file}（rollup ${rollup.level} / ${rollup.internal_decision}${rollup.partial ? '，partial：有失败维' : ''}）`);
   // 汇总飞书通知（整批一条，不带按钮）：标题必须含项目名——飞书自定义关键词过滤按消息
   // 文本命中，无关键词整条静默丢弃（HTTP 200 + code 19024，2026-11-09 实测）
   try {
     if (cfg.research?.notify !== false) {
       const proj = displayProjectName(cfg.projectName ?? '');
-      await notify({ title: `${proj} 调研判定 ${finalTopicId}（${rollup.level}）`, body: buildResearchMultiNotifyBody(topicObj), webhookEnvs: orchWebhookEnvs(repoRoot) });
+      await notify({ title: `${proj} 调研判定 ${r.id}（${r.rollup.level}）`, body: buildResearchMultiNotifyBody({ id: r.id, dims: r.dims, rollup: r.rollup }), webhookEnvs: orchWebhookEnvs(repoRoot) });
     }
   } catch { /* 通知失败不阻断 */ }
-  log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${finalTopicId}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${dimResults.find((d) => d.status === 'ok')?.brief_id}）`);
+  log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${r.id}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${r.dims.find((d) => d.status === 'ok')?.brief_id}）`);
 }
 
 /** L1 判级结果统一播报（cmdResearch / 上游管线共用）——v2 verdict：维度分 + usage 决策。 */
@@ -3937,15 +3993,72 @@ async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }
   }
 }
 
-/** 把调研 brief id 盖进提案卡 frontmatter（research: todo/缺失 → research: <id>）。 */
-function stampResearchIntoDraft(repoRoot, draftId, briefId) {
+/**
+ * 把调研 brief id 盖进提案卡 frontmatter（research: todo/缺失 → research: <id>）。
+ * kind（可选，2026-11-10 P3）：'topic' = research 字段引用的是多维调研复合清单
+ * （research/topics/<id>.json 而非 brief 目录）——同步盖 research_kind: topic 留痕，
+ * 读方可选拿取（旧提案无此字段，向后兼容）。缺省 = 行为与从前逐字节一致。
+ */
+function stampResearchIntoDraft(repoRoot, draftId, briefId, kind = null) {
   const p = path.join(draftsDir(repoRoot), `${draftId}.md`);
   if (!fs.existsSync(p)) return;
   const text = fs.readFileSync(p, 'utf8');
-  const stamped = /^research:.*$/m.test(text)
-    ? text.replace(/^research:.*$/m, `research: ${briefId}`)
-    : text.replace(/^gate:.*$/m, `gate: L3\nresearch: ${briefId}`);
-  fs.writeFileSync(p, stamped);
+  const kindLine = kind ? `\nresearch_kind: ${kind}` : '';
+  if (/^research:.*$/m.test(text)) {
+    fs.writeFileSync(p, text.replace(/^research:.*$/m, `${'research: ' + briefId}${kindLine}`));
+  } else {
+    fs.writeFileSync(p, text.replace(/^gate:.*$/m, `gate: L3\nresearch: ${briefId}${kindLine}`));
+  }
+}
+
+/** 把调研判定状态盖进提案卡 frontmatter（research_status: <status>，2026-11-10 P3）。
+ *  当前唯一取值 unsafe：成本闸门留痕——后续周期管线见此即跳过调研与 spec（防自治循环
+ *  反复烧钱）。无 research/gate 行可锚时不动笔（防破坏卡结构），返回是否落笔。 */
+function stampResearchStatusIntoDraft(repoRoot, draftId, status) {
+  const p = path.join(draftsDir(repoRoot), `${draftId}.md`);
+  if (!fs.existsSync(p)) return false;
+  const text = fs.readFileSync(p, 'utf8');
+  if (/^research_status:.*$/m.test(text)) {
+    fs.writeFileSync(p, text.replace(/^research_status:.*$/m, `research_status: ${status}`));
+    return true;
+  }
+  if (/^research:.*$/m.test(text)) {
+    fs.writeFileSync(p, text.replace(/^(research:.*)$/m, (m0) => `${m0}\nresearch_status: ${status}`));
+    return true;
+  }
+  if (/^gate:.*$/m.test(text)) {
+    fs.writeFileSync(p, text.replace(/^(gate:.*)$/m, (m0) => `${m0}\nresearch_status: ${status}`));
+    return true;
+  }
+  return false;
+}
+
+/** 读 brief 的 verdict.json usage.internal_decision（消费方契约口径）；无 verdict / 损坏
+ *  返回 null——fail-open，保持现行为（L1-only 的 verdict 恒为 undetermined，闸门是空转）。 */
+function briefInternalDecision(repoRoot, briefId) {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(briefDir(repoRoot, briefId), 'verdict.json'), 'utf8'));
+    return v?.usage?.internal_decision ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 上游管线的 unsafe 拦截（决策契约消费方义务，.agents/docs/research-verdict.md）：调研
+ * 判 unsafe（topic rollup 任一维 contradicted 一票否决 / 单 brief verdict 同判）时 spec
+ * 永不升级；草稿盖 research_status: unsafe 留痕（后续周期成本闸门跳过，防重复烧钱）+
+ * out.unsafe 航次留痕 + fleet 事件。可操作信息给到「作废重跑 / 人工归档 / 清留痕」。
+ */
+function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = {}) {
+  const what = topic ? `topic ${topic}` : `brief ${brief}`;
+  stampResearchStatusIntoDraft(repoRoot, p.id, 'unsafe');
+  out.unsafe.push({ id: p.id, topic, brief });
+  log(`  ⛔ 上游管线：${p.id} 调研 ${what} 判 unsafe（决策契约：一票否决，不可用于内部决策）——spec 不升级，已留痕 research_status: unsafe（后续周期不再调研该提案）`);
+  log(`     处置：作废重跑——把${topic ? ` topic 清单（research/topics/${topic}.json）` : ` brief（research/${brief}/）`}归档到 .agents/orchestrator/research-void/ 或修正矛盾后重跑复核；人工清理提案留痕后才会重新调研`);
+  try {
+    appendFleetEvent(repoRoot, 'sail_research_unsafe', { draft: p.id, topic, brief });
+  } catch { /* 留痕失败不阻断 */ }
 }
 
 /**
@@ -3954,49 +4067,124 @@ function stampResearchIntoDraft(repoRoot, draftId, briefId) {
  * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
  * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
+ * researchAutoDim（2026-11-10 P3，缺省 false）：开启时缺调研的 feature 提案先派拆维规划
+ * 会话，≥2 维跑 runMultiResearch（多维调研，一个 multi 对 researchPerCycle 仍计 1 个动作）
+ * → topic 决策闸门（unsafe 拒绝升级 + 留痕跳过；undetermined 提示后照常）→ spec 按维注入；
+ * 拆维失败/不足 2 维优雅降级回单 brief（现行为）。autoDim 关 = 本函数路径与从前逐字节一致。
  */
 async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
-  const out = { researched: [], speced: [], failed: [], verdicts: [] };
+  const out = { researched: [], researchedTopics: [], speced: [], failed: [], unsafe: [], verdicts: [] };
   if (!proposals.length) return out;
   const caps = {
     research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
     spec: Number.isInteger(cfg.freeSail?.specPerCycle) && cfg.freeSail.specPerCycle > 0 ? cfg.freeSail.specPerCycle : 1,
   };
+  const autoDim = cfg.freeSail?.researchAutoDim === true; // resolveFreeSail 已校验 bool；缺省/非法 = 关
   for (const p of proposals) {
     if (p.type !== 'feature') continue;
     let meta = null;
     try {
       meta = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), `${p.id}.md`), 'utf8'), p.id).meta;
     } catch { continue; } // 损坏提案跳过（propose/drafts gc 自有生命周期管它）
+    // 成本闸门（P3）：曾判 unsafe 的提案永不重复调研——留痕即裁决，防自治循环反复烧钱
+    if (meta.research_status === 'unsafe') {
+      log(`  ⛔ 上游管线：${p.id} 调研曾判 unsafe（提案留痕 research_status: unsafe）——跳过调研与 spec；作废重跑请人工清理留痕`);
+      continue;
+    }
     if (listSpecs(repoRoot).includes(p.id)) continue; // 已升级过规格：等人审/build，不重复烧
     let briefBody = null;
+    let consumedBriefId = null; // 本提案消费的单 brief id（spec 升级前的 verdict 闸门用）
+    let consumedTopicId = null; // 本提案消费的 topic id（topic 模式闸门已在取材时跑过）
     const briefId = meta.research && meta.research !== 'todo' ? meta.research : null;
     if (briefId) {
-      briefBody = readBrief(repoRoot, briefId)?.body ?? null;
-      if (!briefBody) out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
-    } else if (out.researched.length < caps.research) {
-      log(`  ⛵ 上游管线：${p.id} 缺调研——派 researcher（问题取提案目标）`);
-      const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName, model: cfg.research?.model });
-      if (r && !r.failed) { // 失败返回真值对象 { failed, … }（P1-⑤），别当成功消费
-        out.researched.push(r.id);
-        briefBody = r.body;
-        stampResearchIntoDraft(repoRoot, p.id, r.id);
-        log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
-        // L1 可信度初判（report-only）：快照 + 数字回查，落 verdict.json + 台账；fail 会亮牌但不阻断
-        //（管线是否消费 verdict 升级为 gate 属后续演进，先攒 near-miss 分布——晴雨表哲学）
-        await snapshotCitations(repoRoot, r.id);
-        const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
-        out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
-        logVerdict(r.id, verdict, 'L1 快照回查');
-        if (verdict?.level === 'fail') appendResearchLedger(repoRoot, { kind: 'l1', brief_id: r.id, model: cfg.research?.model ?? null, researcher_model: cfg.research?.model ?? null, level: verdict.level, hit_rate: verdict.l1?.claim_check?.hit_rate ?? null });
+      // meta.research 指向 topic（上周期 multi 产出，autoDim 或人工写入）→ topic 模式续接：
+      // 决策契约闸门后按维展开（CLI cmdSpecStart 同契约，sail 版不 die——unsafe 走留痕跳过）
+      let topicObj = null;
+      try { topicObj = readTopic(repoRoot, briefId); } catch { topicObj = null; } // 损坏清单回落单 brief 口径
+      if (topicObj) {
+        const decision = topicObj.rollup?.internal_decision ?? 'undetermined';
+        if (decision === 'unsafe') {
+          blockUnsafeResearch(repoRoot, p, out, { topic: briefId });
+          continue;
+        }
+        if (decision === 'undetermined') {
+          log(`  ⚠ topic ${briefId} 未 L2 复核（internal_decision=undetermined）——建议 research verify ${briefId}（不阻断，spec 落盘本就待人审）`);
+        }
+        consumedTopicId = briefId;
+        briefBody = buildTopicSpecSections(repoRoot, topicObj);
+        if (!briefBody) out.failed.push({ id: p.id, reason: `topic "${briefId}" 无可注入的维度结论（ok 维 brief 缺失）——补跑调研或改卡` });
+      } else {
+        briefBody = readBrief(repoRoot, briefId)?.body ?? null;
+        if (briefBody) consumedBriefId = briefId;
+        else out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
+      }
+    } else if (out.researched.length + out.researchedTopics.length < caps.research) {
+      // 缺调研：autoDim 开启先试拆维（cap 语义 = 每周期调研动作数，multi 是一个动作计 1）
+      let dims = null;
+      if (autoDim) {
+        log(`  ⛵ 上游管线：${p.id} 缺调研——researchAutoDim 开启，先派拆维规划会话`);
+        dims = await planResearchDims(repoRoot, { goal: p.goal || p.id, backendName });
+        if (!dims) log(`  ↩ 拆维不可用（会话失败或解析不足 2 维）——降级单 brief 调研（提案 ${p.id}）`);
+      }
+      if (dims) {
+        const maxDims = cfg.research?.maxDims ?? 4;
+        const multi = await runMultiResearch(repoRoot, {
+          topic: sanitizeIntent(p.goal || p.id),
+          dims: dims.slice(0, Math.max(2, maxDims)),
+          model: cfg.research?.model,
+          backendName,
+          concurrency: cfg.research?.concurrency ?? 2,
+        });
+        if (multi.failed) {
+          // 全维失败：不降级再烧一次单 brief（后端八成同样故障），记 failed 下周期重试
+          out.failed.push({ id: p.id, reason: `多维调研全部 ${multi.dims.length} 维失败——下一周期重试` });
+          continue;
+        }
+        out.researchedTopics.push({ id: multi.id, dims: multi.dims.length, rollup: `${multi.rollup.level}/${multi.rollup.internal_decision}` });
+        stampResearchIntoDraft(repoRoot, p.id, multi.id, 'topic');
+        const decision = multi.rollup?.internal_decision ?? 'undetermined';
+        if (decision === 'unsafe') {
+          blockUnsafeResearch(repoRoot, p, out, { topic: multi.id });
+          continue;
+        }
+        if (decision === 'undetermined') {
+          log(`  ⚠ topic ${multi.id} 未 L2 复核（internal_decision=undetermined）——建议 research verify ${multi.id}（不阻断，spec 落盘本就待人审）`);
+        }
+        consumedTopicId = multi.id;
+        briefBody = buildTopicSpecSections(repoRoot, multi);
+        if (!briefBody) out.failed.push({ id: p.id, reason: `topic "${multi.id}" 无可注入的维度结论——下一周期重试` });
+      } else {
+        log(`  ⛵ 上游管线：${p.id} 缺调研——派 researcher（问题取提案目标）`);
+        const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName, model: cfg.research?.model });
+        if (r && !r.failed) { // 失败返回真值对象 { failed, … }（P1-⑤），别当成功消费
+          out.researched.push(r.id);
+          consumedBriefId = r.id;
+          briefBody = r.body;
+          stampResearchIntoDraft(repoRoot, p.id, r.id);
+          log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
+          // L1 可信度初判（report-only）：快照 + 数字回查，落 verdict.json + 台账；fail 会亮牌但不阻断
+          //（管线是否消费 verdict 升级为 gate 属后续演进，先攒 near-miss 分布——晴雨表哲学）
+          await snapshotCitations(repoRoot, r.id);
+          const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
+          out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
+          logVerdict(r.id, verdict, 'L1 快照回查');
+          if (verdict?.level === 'fail') appendResearchLedger(repoRoot, { kind: 'l1', brief_id: r.id, model: cfg.research?.model ?? null, researcher_model: cfg.research?.model ?? null, level: verdict.level, hit_rate: verdict.l1?.claim_check?.hit_rate ?? null });
+        }
       }
     }
     if (!briefBody) {
       if (!out.failed.some((f) => f.id === p.id)) out.failed.push({ id: p.id, reason: '缺调研 brief（派发失败或超本周期上限）——下一周期重试' });
       continue;
     }
+    // 单 brief 决策契约闸门（P2 交接点③统一口径）：verdict 判 unsafe 的 brief 不可用于内部
+    // 决策——拒绝升级 spec + 留痕跳过；无 verdict / 非 unsafe 行为不变（L1-only 恒 undetermined，
+    // 本闸门只在 brief 被人工 research verify 判 unsafe 后生效）。topic 模式已在取材时闸过。
+    if (!consumedTopicId && consumedBriefId && briefInternalDecision(repoRoot, consumedBriefId) === 'unsafe') {
+      blockUnsafeResearch(repoRoot, p, out, { brief: consumedBriefId });
+      continue;
+    }
     if (out.speced.length < caps.spec) {
-      log(`  ⛵ 上游管线：${p.id} → spec 三件套（brief 注入，落盘待人审）`);
+      log(`  ⛵ 上游管线：${p.id} → spec 三件套（${consumedTopicId ? `topic ${consumedTopicId} 按维注入` : 'brief 注入'}，落盘待人审）`);
       const ok = await specFromDraft(repoRoot, { draftId: p.id, goal: p.goal, briefBody, backendName });
       if (ok) {
         out.speced.push(p.id);
