@@ -3884,6 +3884,9 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
       if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录——降级保留（non_verbatim，编造红旗封顶 needs_review）`);
+      // fuzzy 放行计数（2026-11-10）：轻度转述进 claims[] 时带 verbatim:'fuzzy' 标注，仅观测不降级
+      const fuzzyCount = valid.filter((c) => c.verbatim === 'fuzzy').length;
+      if (fuzzyCount) log(`  · ${fuzzyCount} 条 claim 轻度转述按 fuzzy 放行`);
       log(`- 维度分：evidence=${v.scores.evidence} coherence=${v.scores.coherence} coverage=${v.scores.coverage}% citation=${v.scores.citation} → overall=${v.scores.overall}（${v.level}）`);
       log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);

@@ -16,11 +16,11 @@
 | `scores.coverage` | int\|null | 已核承重结论 / 总承重结论（%）。unverifiable 拖它不拖 coherence |
 | `scores.citation` | int\|null | L0 引用面（当日引用率/深链比/快照成功率 等权） |
 | `scores.overall` | int\|null | 加权（0.4/0.35/0.15/0.10，缺维重归一）。**任一决策关键维 null → null**。仅用于排序与 L3 台账 |
-| `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief，行内 [n] 引用标注豁免）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话）。note 自认无快照/无直据的 supported 自动降级 unsupported（带 `downgraded: true` 留痕）；逐字校验未通过的降级保留条目带 `non_verbatim: true`（见下节） |
+| `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief，行内 [n] 引用标注豁免；轻度转述放行的条目带 `verbatim: "fuzzy"`，见下节）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话）。note 自认无快照/无直据的 supported 自动降级 unsupported（带 `downgraded: true` 留痕）；逐字校验未通过的降级保留条目带 `non_verbatim: true`（见下节） |
 | `claims[].status` | enum | `supported / partial / unsupported / contradicted / unverifiable` |
 | `snapshots` | object | `{ total, usable, skeleton }`——骨架页（剥标签后可见文本 <400 字，客户端渲染/被拦的典型形态）只做标注不改判级：meta 描述仍可佐证排名类结论，但**数字类结论的可核性受限**（reasons 里有同款提示） |
 | `blockers[]` | array | 复核会话给出的硬伤（一句话一条） |
-| `fabricated_claims` | int | 逐字校验未通过的 claim 数（**编造红旗**，>0 时 decision 封顶 needs_review）。2026-11-10 起非逐字 claim 不再丢弃——降级保留进 `claims[]`（带 `non_verbatim`，见下节），本计数仍含这些条数 |
+| `fabricated_claims` | int | 逐字校验未通过的 claim 数（**编造红旗**，>0 时 decision 封顶 needs_review）。2026-11-10 起非逐字 claim 不再丢弃——降级保留进 `claims[]`（带 `non_verbatim`，见下节），本计数仍含这些条数。fuzzy 放行的轻度转述**不计入**本计数（已按词元重叠达标放行，见下节） |
 | `arbitration` | object\|null | 仲裁轮留痕（判出 contradicted 时自动跑，见下节）：`{ ran, upheld, overturned, undetermined, unmatched, veto_cleared, model, backend }`；会话失败为 `{ ran, failed: true, error }` |
 | `usage` | object | **决策矩阵（消费方唯一行动接口）**，见下 |
 | `level` | string | overall 的三值映射（pass ≥75 / warn ≥50 / fail <50；null → unknown）——兼容旧消费者 |
@@ -55,6 +55,7 @@ L2 复核船无联网、只拿快照裁断；快照自身误导（页面 publish
 L2 复核的 claim 级逐字校验（`verifyClaimVerbatim`）有三层宽容与降级，目的：复核员「剥标注复述」不再被误判编造，逐字失败不再一票丢弃、信息全灭：
 
 - **行内 [n] 引用标注豁免**：claim 与 brief 空白归一后**两侧各剥 `[n]`（1–3 位纯数字）再比包含**——brief 正文按 researcher 契约自带 `[17]` 类行内标注，复核员复述时省略它不算改写。**豁免限纯数字**：`[2026]`、`[1m]` 类年份/型号方括号不豁免（不给改写开口子）；120 字长度上限仍按原始归一文本计。
+- **轻度转述 fuzzy 放行（2026-11-10 对拍驱动）**：剥 [n] 后精确包含仍失败的 claim，再过一遍**词元重叠**判定（`verifyClaimVerbatim` 第二级）——三条硬线**全部**满足才放行：① claim 词元 ≥90% 出现在 brief 词元集合（拦无中生有的实体/数字）；② claim 与 brief 最佳等长窗口的词元集合 Jaccard ≥0.85（拦「两处各半拼新句」的改写拼接——任何等长窗口最多盖住一半）；③ claim 词元数 ≥4（碎句偶然命中面大）。放行条目进 `claims[]` 并打 **`verbatim: "fuzzy"`**（语义：轻度转述、非逐字——换序/加助词级别，确能在 brief 里找到原文出处）。阈值宁严勿松：压缩/扩写级改写、剥 [n] 后残留方括号（`[2026]` 类形状违规）一律不给 fuzzy，仍按非逐字处理。**消费方处理建议：`verbatim: "fuzzy"` 只标注不降级**——该条目的 status/note 照常参与聚合与决策，无需为此调整引用策略。
 - **逐字失败自动重试一次**：复核输出含非逐字 claim 且本轮尚未因逐字失败重试过时，系统向复核会话追加一段逐字摘录契约重试要求（强调「逐字摘录，剥 [n] 不算改写，改写/概括一律作废」）后重跑；重试与「无合规契约块」重试共享既有会话上限（MAX_ATTEMPTS=3），不新增配额。
 - **仍失败 → 非逐字降级保留（`non_verbatim`）**：重试后仍非逐字的 claim **不再丢弃**，保留进 `claims[]` 并打 `non_verbatim: true`：`status` 强制 `partial`（不得 supported、不进 contradicted 否决——veto 面收窄为纯逐字 claim），note 前缀「非逐字摘录（复核改写）」；L1 自动升格循环跳过 `non_verbatim` 条目（不得被确定性回查升为 supported）。
 - **`fabricated_claims` 语义**：仍计非逐字条数、红旗封顶 `needs_review` 不变——非逐字残余 = 复核契约仍被违反的证据，保守面保留；改进点在信息不丢（claims/coverage 可见）而非放行。
