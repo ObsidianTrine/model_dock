@@ -7,7 +7,8 @@
 //   readBrief/listBriefs
 //   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
 //   topic 一族          research multi 的复合清单（topics/<topic-id>.json：dims + rollup），
-//                      slugifyTopic/deriveTopicId/readTopic/writeTopic/rollupTopicVerdict
+//                      slugifyTopic/deriveTopicId/readTopic/writeTopic/writeTopicAuto/
+//                      rollupTopicVerdict/buildTopicSpecSections（spec 注入展开）
 // 设计：调研不是任务卡——没有 diff，不走施工队列/合并管线（queue.mjs 校验、classifyChange、
 // files_hint 越界判定对它全是错配）。产物 = brief 文件，由卡的 research: <id> 字段引用，
 // spec/propose 消费。docs 10.12。
@@ -234,12 +235,41 @@ export function readTopic(repoRoot, topicId) {
   return parsed;
 }
 
-/** topic.json 落盘（research/topics/ 自动建目录；纯 JSON 证据文件，与 meta.json 同风格直写）。 */
+/** topic.json 落盘（research/topics/ 自动建目录；纯 JSON 证据文件，与 meta.json 同风格直写）。
+ *  覆盖写语义：verify 更新既有 topic.json 用它；创建场景（research multi 收尾）用 writeTopicAuto。 */
 export function writeTopic(repoRoot, topic) {
   const file = topicPath(repoRoot, topic.id);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(topic, null, 2)}\n`);
   return file;
+}
+
+/**
+ * topic.json 落盘（创建场景 + 同名竞态复检，2026-11-09 P2）：deriveTopicId 是 check-then-write——
+ * 两个同主题 multi 并行可能都通过 derive 检查，收尾落盘时互覆对方的清单。这里在落盘瞬间复检：
+ * 'wx' 排他创建把「检查 + 写入」合成一次原子操作（复检自身的 TOCTOU 窗口一并消灭），已占用
+ * 则续派 -2…-9 找空位。取舍：不做跨进程文件锁（复杂度与收益不成比例，竞态窗口只在同主题
+ * 恰好并行时出现）；派生后 id 可能与维 brief id 命名空间（<原-id>-d<N>）错位——竞态撞上时清单
+ * id 平移后缀、brief meta 的 topic_id 溯源留在原命名空间，可接受（好过静默互覆）。
+ * 返回 { file, id }（id = 实际落盘 id，回执/通知一律用它）；9 个派生位全占用抛可操作报错
+ * （循环安全退出：候选有限，deriveTopicId 同款报错口径）。
+ */
+export function writeTopicAuto(repoRoot, topic) {
+  const candidates = [topic.id, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${topic.id}-${n}`)];
+  for (const id of candidates) {
+    const file = topicPath(repoRoot, id);
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify({ ...topic, id }, null, 2)}\n`, { flag: 'wx' });
+      return { file, id };
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e; // 非「已存在」的 IO 错误原样上抛
+    }
+  }
+  throw new Error(
+    `topic-id "${topic.id}" 及派生位 -2…-9 已全部占用（${path.join(researchDir(repoRoot), 'topics')}）——` +
+    `同一主题已连跑 10 次。请人工归档（移出 topics/ 目录）或换更具体的主题表述后再跑。`,
+  );
 }
 
 /** rollup 聚合的最差档序（首项最差）：decision 任一 unsafe 一票否决（与单 brief usage 矩阵同哲学）；
@@ -284,6 +314,33 @@ export function buildResearchMultiNotifyBody(topic) {
     }),
   ];
   return lines.join('\n');
+}
+
+/**
+ * topic → spec --from-brief 注入材料（纯函数，2026-11-09 P2）：每个 ok 维一节（沿用 P0
+ * 分节格式，节头带 topic/维度/brief 溯源），failed 维不注入正文、展开末尾附覆盖缺口行
+ * （让 planner 知道覆盖缺口）。ok 维的 brief 已被人工删除时同缺口处理（正文缺失 ≈ 该维
+ * 无产出）。调用方先读 rollup.internal_decision 接决策契约（unsafe 拒绝 / undetermined
+ * 提示，见 cmdSpecStart）——本函数只管展开，不管闸门。返回整段文本（多节以 --- 分隔；
+ * 无 ok 维且无缺口行可产出时返回空串，调用方按 missing 口径处理）。
+ */
+export function buildTopicSpecSections(repoRoot, topic) {
+  const sections = [];
+  const gaps = [];
+  for (const d of topic?.dims ?? []) {
+    if (d?.status !== 'ok' || !d.brief_id) {
+      gaps.push(`（维度 ${d?.dim ?? '?'} 调研失败：${String(d?.reason ?? '（无 stderr 留痕）').slice(0, 100)}）`);
+      continue;
+    }
+    const brief = readBrief(repoRoot, d.brief_id);
+    if (!brief) {
+      gaps.push(`（维度 ${d?.dim ?? '?'} 调研失败：brief ${d.brief_id} 已不存在）`);
+      continue;
+    }
+    sections.push(`# 调研结论（topic：${topic.id}｜维度：${d.dim}｜brief：${d.brief_id}）\n\n${String(brief.body).trim()}`);
+  }
+  const body = sections.join('\n\n---\n\n');
+  return gaps.length ? `${body}${body ? '\n\n' : ''}${gaps.join('\n')}` : body;
 }
 
 /**

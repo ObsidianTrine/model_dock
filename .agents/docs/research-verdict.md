@@ -71,7 +71,16 @@ L2 复核船无联网、只拿快照裁断；快照自身误导（页面 publish
 - failed 维不参与聚合但在 `dims` 留痕（`reason` = 最后一跳 stderr 尾摘要，`verdict_level`/`internal_decision` 为 null）；有失败维时 `rollup.partial: true`——rollup 只代表成功维的可信度下限，缺失维度需补跑。
 - `research verify <topic-id>` 走 topic 模式：逐维 L2 复核（每维行为与单 brief verify 完全一致，含仲裁轮）后重算 rollup、更新 topic.json、补一条 `kind: topic-verify` 台账。**未 verify 的 topic，各 ok 维判定是 L1 初判（恒 undetermined）——rollup 也只是 undetermined；消费前先 verify。**
 
+### 注入 spec（`spec --from-brief <topic-id>`，2026-11-09 P2）
 
+`spec "<意图>" --from-brief <topic-id>` 对命中 `topics/<id>.json` 的 id 走 **topic 模式**（brief 与 topic id 可混排：`--from-brief <brief>,<topic>`；brief 模式行为不变）：
+
+- **决策契约接线**：注入前读 `rollup.internal_decision`——`unsafe` 一票否决**拒绝注入**并报可操作错误（处置：作废重跑，归档 `research-void/` 或拆维重跑 multi）；`undetermined` **不阻断**，提示先 `research verify <topic-id>`；`ok` / `needs_review` 正常注入。（单 brief 的 unsafe 是否拒绝属后续演进，本层不接。）
+- **展开格式**：每个 ok 维一节，节头带维度与 rollup 溯源——`# 调研结论（topic：<topic-id>｜维度：<dim>｜brief：<brief-id>）` + brief 正文，节间 `---` 分隔；failed 维不注入正文，展开末尾附一行覆盖缺口 `（维度 <dim> 调研失败：<reason 摘要>）`——让 planner 知道覆盖缺口（ok 维的 brief 已被人工删除时同缺口处理）。
+
+### 并发（`research.concurrency`，2026-11-09 P2）
+
+multi 维度池与 verify topic 逐维复核共用**有界并发池**：同时最多 `research.concurrency` 维在跑（1–4 整数，缺省 2；显式非法值 console.warn 并忽略回落缺省）。语义保证：`dims` 数组**按 `--dim` 顺序回填**（index 写回，与完成先后无关）；rollup 重算与完成顺序无关；单维失败隔离语义不变。同主题并行 multi 的 topic-id 撞车在**落盘瞬间复检**、自动续派 `-2…-9`（`writeTopicAuto`，'wx' 排他创建；不做跨进程文件锁——复杂度与收益不成比例；派生后 id 可能平移后缀，各维 brief 保留原命名空间）。
 ## 消费方 agent 的标准动作
 
 1. 读 `usage.internal_decision`：`ok` → 可直接引用其 `claims[].status=supported` 的条目做决策；`needs_review` → 只引用 supported 条目并人工核 `blockers`；`unsafe` → 禁用该 brief（可在 `research-void/` 归档）；`undetermined` → 先补 `research verify` 或重跑调研。
