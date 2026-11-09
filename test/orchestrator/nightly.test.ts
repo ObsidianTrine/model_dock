@@ -3,9 +3,11 @@
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { readNightlyState, writeNightlyState } from '../../.agents/scripts/orchestrator/nightly-state.mjs'
+import { buildNightlySummary } from '../../.agents/scripts/orchestrator/notify.mjs'
 import { mkRepo, runOrch, cardText, type TestRepo } from './helpers.js'
 
 describe('orchestrator nightly > 巡检编排端到端', () => {
@@ -254,6 +256,66 @@ describe('orchestrator nightly > drafts gc 自动清退（老化自动档）', (
       expect(fs.existsSync(path.join(pendingDir, 'gc-stale-traced.md'))).toBe(true)
       expect(listCards(queueRoot(repo.root), 'pending')).toEqual(['gc-stale-traced'])
     } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// 摘要 drafts gc 清退计数（notify.buildNightlySummary × cmdNightly 接线）：自动清退
+// 此前只落 fleet 事件与日志，通知摘要未计清退数——补上；零清退不出现该段（有才说）。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator nightly > 摘要 drafts gc 清退计数', () => {
+  it('有清退：摘要含清退计数段（superseded + 超龄未提交合计）', () => {
+    const s = buildNightlySummary({ created: 1, awaiting: 0, pending: 0, gcSwept: { superseded: 2, agedUnsubmitted: 3 } })
+    expect(s).toContain('drafts gc 自动清退 5 张')
+    expect(s).toContain('superseded 2、超龄未提交 3')
+  })
+
+  it('无清退：摘要不出现清退段（未传与双零同款）', () => {
+    expect(buildNightlySummary({ created: 1, awaiting: 0, pending: 0 })).not.toContain('自动清退')
+    expect(buildNightlySummary({ created: 1, awaiting: 0, pending: 0, gcSwept: { superseded: 0, agedUnsubmitted: 0 } })).not.toContain('自动清退')
+  })
+
+  it('端到端：nightly 真清退 1 张超龄提案时，NIGHTLY_WEBHOOK 收到的摘要正文含计数', async () => {
+    const repo = mkRepo()
+    const posts: Array<{ title?: string; body?: string }> = []
+    const server = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        try { posts.push(JSON.parse(raw)) } catch { /* 非 JSON 忽略 */ }
+        res.writeHead(200)
+        res.end('ok')
+      })
+    })
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+      const addr = (server.address() as { port: number }).port
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      fs.mkdirSync(draftsDir, { recursive: true })
+      // 相对真实 now 取龄（同上方 gc 用例口径，避开子进程 Date.now() 毫秒偏移）
+      const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+      fs.writeFileSync(path.join(draftsDir, 'gc-notify-stale.md'), cardText({ id: 'gc-notify-stale', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/x.ts'] }))
+      runOrch(repo.root, 'nightly', { AGENTS_NIGHTLY_WEBHOOK: `http://127.0.0.1:${addr}` })
+      // notify 尽力而为、fire-and-forget：轮询等 POST 到达（≤5s，同 l0-gate merged 通知用法）
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if (posts.length || Date.now() > deadline) return resolve()
+          setTimeout(tick, 200)
+        }
+        tick()
+      })
+      expect(posts.length).toBeGreaterThanOrEqual(1)
+      const nightlyPost = posts.find((p) => p.body?.includes('巡检'))
+      expect(nightlyPost?.body).toContain('drafts gc 自动清退 1 张')
+      expect(nightlyPost?.body).toContain('superseded 0、超龄未提交 1')
+      // 计数不是空转：清退确实发生了
+      expect(fs.existsSync(path.join(draftsDir, 'superseded', 'gc-notify-stale.md'))).toBe(true)
+    } finally {
+      server.close()
       repo.cleanup()
     }
   }, 120_000)

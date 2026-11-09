@@ -96,13 +96,17 @@ export function buildSettleSummary({ taskId, state, reason } = {}) {
 }
 
 /** 组装单行多段的 nightly 摘要正文（通知场景：短、可扫读）。 */
-export function buildNightlySummary({ created, proposals, awaiting, pending, degraded, autoRan, error } = {}) {
+export function buildNightlySummary({ created, proposals, awaiting, pending, degraded, autoRan, error, gcSwept } = {}) {
   const parts = [];
   if (error) parts.push(`✗ 巡检异常：${error}`);
   else parts.push('✓ 巡检完成');
   const prop = proposals ? `、规划提案 ${proposals}` : '';
   parts.push(`新提案 ${created ?? 0}${prop}、待审 ${awaiting ?? 0}、待调度 ${pending ?? 0}`);
   if (autoRan) parts.push(`夜间已自动跑 ${autoRan} 个任务`);
+  // drafts gc 自动清退计数（autoCleanDrafts 返回值，cmdNightly 接线）：零清退不占版面
+  //（与 autoRan 同款「有才说」口径），只在真清退了提案时出现
+  const gcTotal = (gcSwept?.superseded ?? 0) + (gcSwept?.agedUnsubmitted ?? 0);
+  if (gcTotal > 0) parts.push(`🧹 drafts gc 自动清退 ${gcTotal} 张（superseded ${gcSwept.superseded}、超龄未提交 ${gcSwept.agedUnsubmitted}）`);
   if (degraded) parts.push('⚠ 漂移降级生效中');
   return parts.join('；');
 }
