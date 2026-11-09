@@ -48,3 +48,4 @@ tmp/
 # 调研 brief 与可信度产物（research 命令运行态产物，人工阅读的工作区；ledger/verdict/snapshot 均为对账材料）
 .agents/orchestrator/research/
 .agents/orchestrator/research-void/
+*.output.txt
