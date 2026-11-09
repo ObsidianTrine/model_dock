@@ -428,6 +428,32 @@ export function loadSnapshots(repoRoot, id) {
   return out;
 }
 
+/**
+ * 读已落盘的 verdict.json（消费方入口）：不存在/损坏一律返回 null。缺席 ≠ 判定不通过——
+ * 消费方（research-verdict.md 契约）对 null 放行（旧 brief / 未跑 L1 的行为保持不变）。
+ */
+export function readVerdict(repoRoot, id) {
+  if (!id) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(briefDir(repoRoot, id), 'verdict.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * spec 升级闸门（2026-11 report-only → 阻断，消费方契约 .agents/docs/research-verdict.md）：
+ * `usage.internal_decision=unsafe` 或任一 claim `contradicted` → 阻断。claims 复核与 usage
+ * 同源双保险（scoreVerdict 的 veto 本就会把 contradicted 折进 unsafe，这里防旧 verdict/
+ * 手改文件两者脱钩）。`needs_review`/`undetermined` 不阻断——先攒 near-miss 分布，L2 复核
+ * 改判后下周期自动放行（晴雨表哲学）；verdict 缺席（null）放行。
+ */
+export function verdictGateBlocks(verdict) {
+  if (!verdict || typeof verdict !== 'object') return false;
+  if (verdict.usage?.internal_decision === 'unsafe') return true;
+  return Array.isArray(verdict.claims) && verdict.claims.some((c) => c?.status === 'contradicted');
+}
+
 /** L1 总入口：读 brief + 快照 → verdict/2（L1-only：claims 空 → coverage/coherence null → 决策 undetermined）落盘。 */
 export function assessBrief(repoRoot, id, { model } = {}) {
   const brief = readBrief(repoRoot, id);

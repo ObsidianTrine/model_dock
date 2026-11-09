@@ -12,6 +12,8 @@
 //   ORCH_MOCK_RESEARCH_STDERR=1          researcher 会话附带 unrecognized_model 签名 stderrTail
 //                                        （配 ORCH_MOCK_PLANNER_INVALID=1 测 research die 文案带
 //                                        stderr 摘要路径；复刻真实 claude CLI 死法）
+//   ORCH_MOCK_PLANNER_RESEARCH=<id>      feature 卡 research 字段直接引用既有 brief id（sail
+//                                        verdict 闸门 e2e：预置 brief+verdict 走阻断/放行分支）
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
@@ -147,7 +149,7 @@ export const mockBackend = {
             ...(isFeature
               ? [
                   'proposal: true',
-                  'research: todo',
+                  `research: ${process.env.ORCH_MOCK_PLANNER_RESEARCH || 'todo'}`,
                   'score:',
                   '  value: 2',
                   '  effort: 1',

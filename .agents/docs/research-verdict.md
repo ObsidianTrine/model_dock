@@ -44,6 +44,7 @@
 2. 引用具体数字前看对应 claim 的 `status` 与 `note`——**只采信 supported；partial 需注明依赖转述**。
 3. `fabricated_claims > 0` 或 `blockers` 非空：逐条人工复核后再用。
 4. L3 趋势：`research stats` 按调研船模型看核实率——低分模型的产物默认 needs_review。台账条目以 `researcher_model` 记调研船（L2 条目的 `model` 是复核船）；旧条目无该字段时回退 `model` 分组。
+5. sail 无人值守上游管线（orchestrator.mjs `sailUpstreamPipeline`）按本矩阵阻断：升 spec 前读 `verdict.json`——`internal_decision=unsafe` 或任一 claim `contradicted` → 本周期不升 spec，事件 `research_verdict_blocked` 留痕、不重试（下周期复查 verdict 是否改判）；`undetermined` / `needs_review` 不阻断；无 verdict（旧 brief / 未跑 L1）行为不变放行。人工 `spec --from-brief` 不受此闸（人已过目）。
 
 ## 判级与分数的对应（供人读）
 

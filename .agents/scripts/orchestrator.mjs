@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, readVerdict, verdictGateBlocks, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3681,9 +3681,12 @@ function stampResearchIntoDraft(repoRoot, draftId, briefId) {
  * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
  * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
+ * 升 spec 前过调研可信度闸门（2026-11 report-only → 阻断）：brief 的 verdict.json
+ * usage=unsafe 或任一 claim contradicted → 本周期不升、事件留痕不重试；verdict 缺席
+ * （旧 brief / 未跑 L1）行为不变放行（消费方契约 .agents/docs/research-verdict.md）。
  */
 async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
-  const out = { researched: [], speced: [], built: [], failed: [], verdicts: [] };
+  const out = { researched: [], speced: [], built: [], failed: [], verdicts: [], blocked: [] };
   if (!proposals.length) return out;
   const caps = {
     research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
@@ -3697,8 +3700,10 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
     } catch { continue; } // 损坏提案跳过（propose/drafts gc 自有生命周期管它）
     if (listSpecs(repoRoot).includes(p.id)) continue; // 已升级过规格：等人审/build，不重复烧
     let briefBody = null;
+    let gateBriefId = null; // 可信度闸门按此 id 读 research/<id>/verdict.json（含本周期新产 brief）
     const briefId = meta.research && meta.research !== 'todo' ? meta.research : null;
     if (briefId) {
+      gateBriefId = briefId;
       briefBody = readBrief(repoRoot, briefId)?.body ?? null;
       if (!briefBody) out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
     } else if (out.researched.length < caps.research) {
@@ -3706,11 +3711,13 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
       const r = await runResearchSession(repoRoot, { question: p.goal || p.id, backendName, model: cfg.research?.model });
       if (r && !r.failed) { // 失败返回真值对象 { failed, … }（P1-⑤），别当成功消费
         out.researched.push(r.id);
+        gateBriefId = r.id;
         briefBody = r.body;
         stampResearchIntoDraft(repoRoot, p.id, r.id);
         log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
-        // L1 可信度初判（report-only）：快照 + 数字回查，落 verdict.json + 台账；fail 会亮牌但不阻断
-        //（管线是否消费 verdict 升级为 gate 属后续演进，先攒 near-miss 分布——晴雨表哲学）
+        // L1 可信度初判：快照 + 数字回查，落 verdict.json + 台账。L1-only 的 verdict 是
+        // undetermined（claims 空），不触发下方 spec 闸门——阻断只来自 L2 复核改判出的
+        // unsafe/contradicted（下周期复查 verdict，晴雨表哲学不变）。
         await snapshotCitations(repoRoot, r.id);
         const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
         out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
@@ -3723,6 +3730,19 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
       continue;
     }
     if (out.speced.length < caps.spec) {
+      // 可信度闸门（2026-11 report-only → 阻断）：verdict unsafe/contradicted 的 brief 不再
+      // 自动喂 spec planner——无人值守时未核实的调研直接进 spec 是缺口。只读 usage 行动
+      //（消费方契约 .agents/docs/research-verdict.md）；claims 的 contradicted 复核是同源双
+      // 保险。verdict 缺席（旧 brief/未跑 L1）行为不变放行；undetermined/needs_review 不阻断。
+      const verdict = readVerdict(repoRoot, gateBriefId);
+      if (verdictGateBlocks(verdict)) {
+        const usage = verdict?.usage?.internal_decision ?? '?';
+        const contradicted = Array.isArray(verdict?.claims) && verdict.claims.some((c) => c?.status === 'contradicted');
+        appendEvent(logDir(repoRoot, 'sail'), 'research_verdict_blocked', { card: p.id, brief: gateBriefId, usage, contradicted });
+        out.blocked.push({ id: p.id, brief: gateBriefId, usage });
+        log(`  ⛔ 上游管线：${p.id} 暂不升 spec——brief ${gateBriefId} 判定不可自动放行（usage=${usage}${contradicted ? '，claim contradicted 一票否决' : ''}）。本周期跳过不重试，下周期复查 verdict 是否改判（research verify）。`);
+        continue;
+      }
       log(`  ⛵ 上游管线：${p.id} → spec 三件套（brief 注入，落盘待人审）`);
       const ok = await specFromDraft(repoRoot, { draftId: p.id, goal: p.goal, briefBody, backendName });
       if (ok) {

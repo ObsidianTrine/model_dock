@@ -26,15 +26,49 @@ function submitCard(repo: string, id: string, overrides: Record<string, unknown>
   runOrch(repo, `submit "${cardFile}"`)
 }
 
-/** 最近一次航行的报告目录（logs/sail/<ts>/）。 */
+/** 最近一次航行的报告目录（logs/sail/<ts>/）。只认目录——events.jsonl 等散文件同层落盘时不参与「最新航次」排序。 */
 function latestSailDir(repo: string): string {
   const dir = path.join(repo, '.agents', 'orchestrator', 'logs', 'sail')
-  const entries = fs.readdirSync(dir).sort()
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort()
   return path.join(dir, entries[entries.length - 1])
 }
 
 function latestReport(repo: string): string {
   return fs.readFileSync(path.join(latestSailDir(repo), 'report.md'), 'utf8')
+}
+
+/** 预置 brief（meta+brief+可选 verdict）：提案经 ORCH_MOCK_PLANNER_RESEARCH 直接引用，跳过派调研。 */
+function plantBrief(repo: string, id: string, verdict: Record<string, unknown> | null): void {
+  const dir = path.join(repo, '.agents', 'orchestrator', 'research', id)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'meta.json'),
+    JSON.stringify({ id, title: 'mock 调研标题', question: 'mock 问题', backend: 'mock', created_at: new Date().toISOString() }),
+  )
+  fs.writeFileSync(
+    path.join(dir, 'brief.md'),
+    '# 结论\nmock 结论占位。\n\n# 选项对比\n- 方案 A：mock 占位。\n\n# 引用\n\n# 建议\nmock 占位。\n\n# 罗盘对齐\nmock 占位。\n',
+  )
+  if (verdict) fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify(verdict, null, 2))
+}
+
+/** verdict.json 最小形（assessBrief 产出同构；测试只关心 usage.internal_decision 与 claims）。 */
+function verdictFixture(internalDecision: string, claims: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  return {
+    schema: 'modeldock.research.verdict/2',
+    advisory: true,
+    brief_id: 'mock-planner',
+    model: 'mock',
+    created_at: new Date().toISOString(),
+    scores: { evidence: null, coherence: null, coverage: null, citation: 100, overall: null },
+    snapshots: { total: 0, usable: 0, skeleton: 0 },
+    claims,
+    blockers: [],
+    fabricated_claims: 0,
+    usage: { browse: 'ok', internal_decision: internalDecision, external_doc: internalDecision },
+    level: 'unknown',
+    reasons: [],
+  }
 }
 
 describe('orchestrator sail > 纯逻辑件', () => {
@@ -238,6 +272,74 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
       expect(report).toContain('上游管线：调研 brief mock-planner')
       expect(report).toContain('上游管线：spec planner-mock-task 已落盘待人审')
       expect(report).toContain('feature 提案走上游管线')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：usage=unsafe 的 brief 阻断 spec 升级（事件留痕、本周期跳过不重试、spec 不落盘）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).toContain('⛔ 上游管线')
+      expect(out.stdout).toContain('usage=unsafe')
+      // spec 三件套不落盘；提案也不进队列（feature 本就不自动提交）
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'planner-mock-task.md'))).toBe(false)
+      // 事件留痕：brief id + usage 值（logs/sail/events.jsonl）
+      const events = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl'), 'utf8')
+      expect(events).toContain('"type":"research_verdict_blocked"')
+      expect(events).toContain('"card":"planner-mock-task"')
+      expect(events).toContain('"brief":"mock-planner"')
+      expect(events).toContain('"usage":"unsafe"')
+      // 航海报告如实收录阻断去向
+      const report = latestReport(repo.root)
+      expect(report).toContain('⛔ 上游管线：spec planner-mock-task 被调研可信度闸门阻断（brief mock-planner usage=unsafe）')
+      expect(report).not.toContain('spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：claims contradicted 一票否决同阻断（usage=needs_review 也拦）', () => {
+    const repo = mkRepo()
+    try {
+      // usage 未标 unsafe（needs_review）但 claim contradicted：闸门按 claims 独立否决
+      plantBrief(repo.root, 'mock-planner', verdictFixture('needs_review', [{ claim: 'mock 结论占位。', status: 'contradicted', note: '' }]))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).toContain('⛔ 上游管线')
+      expect(out.stdout).toContain('claim contradicted 一票否决')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      const events = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl'), 'utf8')
+      expect(events).toContain('"usage":"needs_review"')
+      expect(events).toContain('"contradicted":true')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：usage=ok 放行——spec 照常落盘待人审', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('ok'))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).not.toContain('⛔ 上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：无 verdict（旧 brief / 未跑 L1）行为完全不变——放行', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', null)
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).not.toContain('⛔ 上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
     } finally {
       repo.cleanup()
     }
