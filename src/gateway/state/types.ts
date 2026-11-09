@@ -177,6 +177,11 @@ export interface GatewayRuntime {
    *  重启清零；reload 清理 provider 已删或其 model_fallback 已不含该模型键的条目。
    *  可选 + 惰性建表：兜底测试/嵌入式直建 rt 未带字段的场景（同 seaErrors/modelProbe 先例）。 */
   modelHealth?: Map<string, ModelHealthState>
+  /** providerId+model → 模型级容灾改发计数（key/口径同 modelHealth，model = 被改发的原请求
+   *  模型）：「改发已发生」的显式观测面，见 state/routing.ts recordModelFallback 与
+   *  /_modeldock/metrics 的 model_fallback 段。内存态重启清零；reload 清理同 modelHealth 口径。
+   *  可选 + 惰性建表（同上）。 */
+  modelFallbackCounts?: Map<string, ModelFallbackCounter>
 }
 
 /** 模型粒度熔断状态（model_fallback 域）：与 provider 级 HealthState 同构但更瘦——只由
@@ -189,6 +194,15 @@ export interface ModelHealthState {
   meltdown_until?: number
   /** 触发本次熔断的错误类（当前仅 quota） */
   meltdown_cls?: 'quota'
+}
+
+/** 模型级容灾改发计数条目（纯观测，不参与熔断/门禁判定）：fallbackCount = 改发累计
+ *  （闸门预改写命中 + 链尾合成两路都计）；absorbedCount = 其中闸门吸收（请求被预改写、
+ *  未触达原模型上游）的次数。键 = `${providerId}\u0000${model}`，model = 被改发的原请求
+ *  模型（与 modelHealth 同口径）。单调累计、熔断解除不清零——改发已发生是历史事实。 */
+export interface ModelFallbackCounter {
+  fallbackCount: number
+  absorbedCount: number
 }
 
 /** 多 key 池运行态：cooldown = providerId → key 池索引（providerKeyRefs 下标）→ 冷却截止 ms 时间戳；

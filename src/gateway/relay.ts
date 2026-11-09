@@ -5,7 +5,7 @@ import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type OrderedCandidate, type ResolvedTarget } from './state.js'
-import { isModelMeltdown, recordModelOutcome } from './state/routing.js'
+import { isModelMeltdown, recordModelFallback, recordModelOutcome } from './state/routing.js'
 import type { LogAttempt, LogEntry } from './state/types.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { dispatcherFor } from './proxy.js'
@@ -530,6 +530,9 @@ export async function forwardToUpstream(
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
         if (!isModelMeltdown(rt, providerId, final)) return undefined // 主模型未熔断：不动
         if (isModelMeltdown(rt, providerId, fb)) return undefined // 备用也在熔断：不去撞
+        // 闸门命中 = 改发已发生且请求被吸收（直接改发备用模型，原模型上游零往返）：
+        // fallback/absorbed 双计（absorbed 是 fallback 的真子集，见 recordModelFallback 注）
+        recordModelFallback(rt, providerId, final, true)
         return fb
       }
     : undefined
@@ -1061,6 +1064,8 @@ export async function forwardWithFailover(
       if (quota && sentModel !== undefined && mfMap) {
         const fbModel = mfMap[sentModel]
         if (fbModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
+          // 链尾合成 = 改发已发生（只计 fallback：原模型已被真实请求过，非闸门吸收）
+          recordModelFallback(rt, c.providerId, sentModel, false)
           cands.push({
             target: { ...c.target, modelOverride: fbModel }, // 全新对象：绝不改共享候选引用
             providerId: c.providerId,

@@ -485,4 +485,48 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       h.restore()
     }
   })
+
+  it('容灾改发计数：闸门吸收 fallback/absorbed 双计、链尾合成只计 fallback、未触发无条目；熔断解除不清零', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock((model) =>
+      model === 'mB' || model === 'mC' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      await setSecret('pn', 'sk-pn', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const pn = providerCfg({ name: 'pn', base_url: mock.url, key_ref: 'file:pn' }) // 无映射：对照组
+      const rt = buildRt({ pa, pn })
+      const cfg = rt.config as Config
+      // 未触发：配了映射但请求模型 200（mC 不在映射）、无映射 provider 的 402（mZ）——都不产生条目
+      const rOk = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mC', messages: [] }))) as never)
+      expect(rOk.status).toBe(200)
+      const rNoMap = await forwardWithFailover(rt, baseOn(cfg, 'pn'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never)
+      expect(rNoMap.status).toBe(402)
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0)
+      // 链尾合成（mA 402 → mB 200）：只递增 fallback_count，absorbed 不动
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      for (let i = 0; i < 3; i++) {
+        const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+        expect(r.status).toBe(200)
+      }
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 3, absorbedCount: 0 })
+      // 闸门吸收（mA 已熔断 → 预改写直发 mB，主模型零上游往返）：fallback/absorbed 双计
+      const r4 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r4.status).toBe(200)
+      expect(r4.modelAfter).toBe('mB')
+      expect(countOf(mock.seen, 'mA')).toBe(3) // 第 4 发未触达主模型
+      expect(countOf(mock.seen, 'mB')).toBe(4)
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 4, absorbedCount: 1 })
+      // 熔断 TTL 过期恢复试回主模型（402 → 链尾合成）：fallback 续计，absorbed 不变（历史事实不清零）
+      ;(rt.modelHealth!.get('pa\u0000mA')!).meltdown_until = Date.now() - 1
+      const r5 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r5.status).toBe(200)
+      expect(r5.reason).toBe('fallback_to:mB')
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 5, absorbedCount: 1 })
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
 })

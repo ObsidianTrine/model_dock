@@ -34,7 +34,7 @@ import {
   usageTodayView,
   writeGatewayState,
 } from '../src/gateway/state.js'
-import { isModelMeltdown, recordModelOutcome } from '../src/gateway/state/routing.js'
+import { isModelMeltdown, recordModelFallback, recordModelOutcome } from '../src/gateway/state/routing.js'
 import type { GatewayRuntime, LogEntry, ResolvedTarget } from '../src/gateway/state/types.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { logsDir } from '../src/util/paths.js'
@@ -274,7 +274,7 @@ describe('state-gaps · reloadRuntime 清理已删 provider 的三域运行态',
     }
   })
 
-  it('modelHealth：provider 已删或其 model_fallback 已移除该模型键的条目清掉，幸存键保留', async () => {
+  it('modelHealth/modelFallbackCounts：provider 已删或其 model_fallback 已移除该模型键的条目清掉，幸存键保留', async () => {
     const h = fakeHome()
     try {
       await mutateConfig((c) => {
@@ -285,6 +285,9 @@ describe('state-gaps · reloadRuntime 清理已删 provider 的三域运行态',
       recordModelOutcome(r, 'ghost', 'mA', { ok: false, cls: 'quota' })
       recordModelOutcome(r, 'keep', 'mA', { ok: false, cls: 'quota' })
       recordModelOutcome(r, 'keep', 'kB', { ok: false, cls: 'quota' })
+      recordModelFallback(r, 'ghost', 'mA', true)
+      recordModelFallback(r, 'keep', 'mA', false)
+      recordModelFallback(r, 'keep', 'kB', true)
       await mutateConfig((c) => {
         delete c.providers.ghost // 分支①：provider 整个删除
         ;(c.providers['keep'] as ProviderConfig).model_fallback = { kB: 'kC' } // 分支②：mA 映射被移除
@@ -293,6 +296,10 @@ describe('state-gaps · reloadRuntime 清理已删 provider 的三域运行态',
       expect(r.modelHealth?.has('ghost\u0000mA')).toBe(false)
       expect(r.modelHealth?.has('keep\u0000mA')).toBe(false)
       expect(r.modelHealth?.has('keep\u0000kB')).toBe(true)
+      // 改发计数同口径清理（键与 modelHealth 同形）：被删 provider / 映射已移除的键不残留
+      expect(r.modelFallbackCounts?.get('ghost\u0000mA')).toBeUndefined()
+      expect(r.modelFallbackCounts?.get('keep\u0000mA')).toBeUndefined()
+      expect(r.modelFallbackCounts?.get('keep\u0000kB')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
     } finally {
       h.restore()
     }
