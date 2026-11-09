@@ -5,7 +5,8 @@
 //   writeBrief         落盘 research/<id>/（meta.json + brief.md）
 //   writeBriefAuto     同 writeBrief，id 冲突自动派生 <id>-2…-9 落盘（同题重跑不裸崩）
 //   readBrief/listBriefs
-//   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
+//   snapshotCitations  引用快照（Node 内建 fetch，并发小池 + 瞬时类重试，按分类落
+//                      sources/<n>.txt 头行元数据，尽力而为不阻断；镜像回退 opt-in）
 //   topic 一族          research multi 的复合清单（topics/<topic-id>.json：dims + rollup），
 //                      slugifyTopic/deriveTopicId/readTopic/writeTopic/writeTopicAuto/
 //                      rollupTopicVerdict/buildTopicSpecSections（spec 注入展开）
@@ -383,30 +384,196 @@ export function buildTopicSpecSections(repoRoot, topic) {
   return gaps.length ? `${body}${body ? '\n\n' : ''}${gaps.join('\n')}` : body;
 }
 
+// ---------------------------------------------------------------------------
+// 引用快照质量包（2026-11-10，multi-dim 真实对拍实证 evidence 天花板=快照可得性）：
+// ① 覆盖：缺省 max 8→16（21 条引用的 brief 曾有 13 条从未尝试快照，L2 复核反复报
+//    「引用 [8][9] 无快照无法对账」）；并发小池缺省 4（本文件本地实现，勿 import
+//    orchestrator.mjs 的 runBoundedPool——会循环依赖）。
+// ② 重试：只重试瞬时类（超时/网络错误/HTTP 5xx·429），每条最多 2 次尝试（间隔 ~1.5s）——
+//    瞬时抖动直接判死是快照缺席的另一大源；4xx（404/403 等）= 永久类不重试。
+// ③ 分类：快照文件头从 url/fetched_at 扩为 url/fetched_at/type/usable/via——PDF 存在性
+//    证据（正文截 2000 字符，二进制无对账价值）、区域封锁页（"App unavailable in
+//    region" 类拦截）不再混进骨架页归因不清。**分类只写文件头与日志/verdict reasons
+//    （标注与可观测），不改 scoreVerdict/scoreCitation/assessBrief 的分值行为——判分
+//    语义零改动（改判分另立卡）**。
+// ④ 镜像回退（可选，缺省关）：直连失败（非 404）或分类非 ok 时追加一次 r.jina.ai
+//    reader。**隐私取舍：开启 = 把引用 URL 发给第三方 reader 服务**——所以缺省关、
+//    workflow.json research.snapshotMirror 显式 opt-in；镜像失败维持原分类，绝不抛错。
+// ---------------------------------------------------------------------------
+
+/** 文本快照正文截断（既有口径不变）；PDF 只留存在性证据。 */
+const SNAPSHOT_TEXT_LIMIT = 200_000;
+const SNAPSHOT_PDF_LIMIT = 2_000;
+
+/** 快照重试间隔（首次失败与重试之间）；retryDelayMs 参数可注入收短（测试钩子）。 */
+const SNAPSHOT_RETRY_DELAY_MS = 1_500;
+
+/** 区域封锁特征（大小写不敏感）：OpenAI 文档「App unavailable in region」类拦截页实测形态。 */
+const REGION_BLOCK_RE = /unavailable in your region|app unavailable in region|not available in your country|地区不可用/i;
+
 /**
- * 引用快照（对账材料）：逐条 GET 引用 URL，响应文本截断落 research/<id>/sources/<n>.txt。
- * 尽力而为：单条失败/超时只记 failure，绝不抛错——快照缺席不否定 brief（引用本身已在
- * brief.md 里）；上限 max 条（防引用面失控）。fetchImpl 注入供测试。
+ * 瞬时类失败识别（重试白名单）：超时（AbortSignal.timeout 的 TimeoutError / 手动 abort
+ * 的 AbortError）、网络错误（undici 'fetch failed' 与 ECONNRESET/ENOTFOUND/ECONNREFUSED/
+ * ETIMEDOUT/EPIPE/terminated 族）、HTTP 5xx / 429。其余（404/403 等 4xx、解析类异常）
+ * = 永久类：不重试，镜像回退也跳过 404（资源确不存在，换路无意义）。
  */
-export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.fetch, timeoutMs = 15_000, max = 8 } = {}) {
-  const brief = readBrief(repoRoot, id);
-  if (!brief) return { ok: [], failed: [] };
-  const sourcesDir = path.join(brief.dir, 'sources');
-  const ok = [];
-  const failed = [];
-  for (const [i, url] of brief.citations.slice(0, max).entries()) {
+function isTransientFailure(err, status = null) {
+  if (status != null) return status >= 500 || status === 429;
+  const name = String(err?.name ?? '');
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const msg = String(err?.message ?? err);
+  return /fetch failed|econnreset|enotfound|econnrefused|etimedout|epipe|terminated|aborted|timeout/i.test(msg);
+}
+
+/**
+ * 小并发池（snapshotCitations 本地版，勿与 orchestrator.mjs runBoundedPool 混用——
+ * 跨文件 import 会循环依赖）：同时最多 limit 个任务，results 按输入顺序回填。
+ * worker 必须自兜失败不向池抛错（attemptSnapshot 内部全捕获）。
+ */
+async function mapPool(limit, items, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        results[i] = await worker(items[i], i);
+      }
+    }),
+  );
+  return results;
+}
+
+/**
+ * 快照内容分类：响应 Content-Type 含 pdf → type=pdf（usable=pdf——正文是二进制，
+ * 只留存在性证据）；text 且 assessSnapshotUsability 可见文本达标 → ok；不可用时再查
+ * 区域封锁特征 → region_blocked，否则 skeleton（既有骨架语义不变）。
+ * 返回 { type, usable }（写进文件头三行元数据之一，也是返回值 snapshots[].status）。
+ */
+function classifySnapshot(contentType, text) {
+  if (String(contentType ?? '').toLowerCase().includes('pdf')) return { type: 'pdf', usable: 'pdf' };
+  if (assessSnapshotUsability(text).usable) return { type: 'text', usable: 'ok' };
+  if (REGION_BLOCK_RE.test(String(text ?? ''))) return { type: 'text', usable: 'region_blocked' };
+  return { type: 'text', usable: 'skeleton' };
+}
+
+/** 从响应读 Content-Type：真实 fetch 用 headers.get，测试替身可能是 { 'content-type': … } 普通对象。 */
+function readContentType(res) {
+  const h = res?.headers;
+  if (!h) return '';
+  if (typeof h.get === 'function') return h.get('content-type') ?? '';
+  return h['content-type'] ?? h['Content-Type'] ?? '';
+}
+
+/** 落盘一份快照：头行逐行 key: value、空行后正文（loadSnapshots 的解析契约，勿破坏）。 */
+function writeSnapshotFile(sourcesDir, index, url, { type, usable, via }, body) {
+  fs.mkdirSync(sourcesDir, { recursive: true });
+  const header = [`url: ${url}`, `fetched_at: ${toIsoLocal()}`, `type: ${type}`, `usable: ${usable}`, `via: ${via}`].join('\n');
+  fs.writeFileSync(path.join(sourcesDir, `${index + 1}.txt`), `${header}\n\n${body}`);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 单条引用的快照尝试（绝不抛错）：直连最多 2 次（瞬时类失败重试 1 次）→ 仍败时按
+ * mirror 开关决定是否走镜像回退（仅 1 次，404 直连不回退）。镜像成功 → 覆盖落盘
+ * via: mirror 并重跑分类；镜像失败 → 维持直连的分类/失败。返回统一形状
+ * { index, url, status, via, reason? }（status: ok|skeleton|region_blocked|pdf|failed）。
+ */
+async function attemptSnapshot({ url, index, fetchImpl, timeoutMs, mirror, retryDelayMs, sourcesDir }) {
+  const fetchOnce = async (target) => {
+    const res = await fetchImpl(target, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+    if (!res.ok) {
+      const e = new Error(`HTTP ${res.status}`);
+      e.httpStatus = res.status;
+      throw e;
+    }
+    return res;
+  };
+  const MAX_ATTEMPTS = 2;
+  let lastErr = null;
+  let attempts = 1;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetchOnce(url);
       const text = await res.text();
-      fs.mkdirSync(sourcesDir, { recursive: true });
-      fs.writeFileSync(path.join(sourcesDir, `${i + 1}.txt`), `url: ${url}\nfetched_at: ${toIsoLocal()}\n\n${text.slice(0, 200_000)}`);
-      ok.push(url);
+      const cls = classifySnapshot(readContentType(res), text);
+      const bodyLimit = cls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT;
+      if (mirror && cls.usable !== 'ok') {
+        // 镜像回退：仅 1 次不重试；成功覆盖落盘并重跑分类（jina reader 返回转写文本，type 恒 text）
+        try {
+          const mres = await fetchOnce(`https://r.jina.ai/${url}`);
+          const mtext = await mres.text();
+          const mcls = classifySnapshot(readContentType(mres), mtext);
+          writeSnapshotFile(sourcesDir, index, url, { ...mcls, via: 'mirror' }, mtext.slice(0, mcls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT));
+          return { index, url, status: mcls.usable, via: 'mirror', reason: `直连分类 ${cls.usable}——镜像取得并覆盖` };
+        } catch (me) {
+          // 镜像也失败：维持直连分类落盘，绝不抛错
+          writeSnapshotFile(sourcesDir, index, url, { ...cls, via: 'direct' }, text.slice(0, bodyLimit));
+          return { index, url, status: cls.usable, via: 'direct', reason: `${cls.usable}（镜像回退失败：${String(me?.message ?? me).slice(0, 120)}）` };
+        }
+      }
+      writeSnapshotFile(sourcesDir, index, url, { ...cls, via: 'direct' }, text.slice(0, bodyLimit));
+      return { index, url, status: cls.usable, via: 'direct' };
     } catch (e) {
-      failed.push({ url, reason: String(e?.message ?? e).slice(0, 200) });
+      lastErr = e;
+      if (attempt < MAX_ATTEMPTS && isTransientFailure(e, e?.httpStatus)) {
+        attempts++;
+        await sleep(retryDelayMs);
+        continue;
+      }
+      break; // 永久类或重试已用尽
     }
   }
-  return { ok, failed };
+  // 直连彻底失败：mirror 开且非 404 → 镜像兜底一次
+  if (mirror && !(lastErr?.httpStatus === 404)) {
+    try {
+      const mres = await fetchOnce(`https://r.jina.ai/${url}`);
+      const mtext = await mres.text();
+      const mcls = classifySnapshot(readContentType(mres), mtext);
+      writeSnapshotFile(sourcesDir, index, url, { ...mcls, via: 'mirror' }, mtext.slice(0, mcls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT));
+      return { index, url, status: mcls.usable, via: 'mirror', reason: `直连失败（${directReason(lastErr, attempts)}）——镜像取得并覆盖` };
+    } catch (me) {
+      return { index, url, status: 'failed', via: 'mirror', reason: `${directReason(lastErr, attempts)}；镜像也失败：${String(me?.message ?? me).slice(0, 120)}` };
+    }
+  }
+  return { index, url, status: 'failed', via: 'direct', reason: directReason(lastErr, attempts) };
+}
+
+/** 直连失败 reason（带尝试次数——重试后仍败的判死要让人看见）。 */
+function directReason(err, attempts) {
+  const base = err?.httpStatus != null ? `HTTP ${err.httpStatus}` : String(err?.name && err.name !== 'Error' ? `${err.name}: ` : '') + String(err?.message ?? err).slice(0, 160);
+  return attempts > 1 ? `${base}（重试 1 次后仍失败，共 ${attempts} 次尝试）` : base;
+}
+
+/**
+ * 引用快照（对账材料）：逐条 GET 引用 URL，响应按分类落 research/<id>/sources/<n>.txt
+ * （文件头 url/fetched_at/type/usable/via，见「引用快照质量包」注释块）。
+ * 尽力而为：单条失败/超时只记 failure，绝不抛错——快照缺席不否定 brief（引用本身已在
+ * brief.md 里）；上限 max 条（缺省 16，防引用面失控），并发小池缺省 4。
+ * 返回向后兼容：{ ok, failed, snapshots }——ok=分类 ok 的 URL 列表（200 但骨架/区域封锁/
+ * PDF 不再计入 ok，2026-11-10 分类语义）；failed={url, reason}；snapshots=逐条
+ * { index, url, status, via, reason? }。fetchImpl 注入供测试；retryDelayMs 同（测试钩子）。
+ */
+export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.fetch, timeoutMs = 15_000, max = 16, concurrency = 4, mirror = false, retryDelayMs = SNAPSHOT_RETRY_DELAY_MS } = {}) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) return { ok: [], failed: [], snapshots: [] };
+  const sourcesDir = path.join(brief.dir, 'sources');
+  const citations = brief.citations.slice(0, Math.max(1, max));
+  const results = await mapPool(concurrency, citations, (url, i) =>
+    attemptSnapshot({ url, index: i, fetchImpl, timeoutMs, mirror, retryDelayMs, sourcesDir }),
+  );
+  const ok = [];
+  const failed = [];
+  const snapshots = [];
+  for (const r of results) {
+    if (r.status === 'ok') ok.push(r.url);
+    if (r.status === 'failed') failed.push({ url: r.url, reason: r.reason });
+    snapshots.push(r.reason ? { index: r.index, url: r.url, status: r.status, via: r.via, reason: r.reason } : { index: r.index, url: r.url, status: r.status, via: r.via });
+  }
+  return { ok, failed, snapshots };
 }
 
 // ---------------------------------------------------------------------------
@@ -757,7 +924,9 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
 export const SNAPSHOT_MIN_VISIBLE = 400;
 
 export function assessSnapshotUsability(text) {
-  const body = String(text ?? '').replace(/^url:.*$/m, '').replace(/^fetched_at:.*$/m, '');
+  // 剥文件头（头行逐行 key: value）：url/fetched_at 是既有两行，type/usable/via 是
+  // 2026-11-10 快照质量包新增的三行元数据——不剥会混进可见字符计数
+  const body = String(text ?? '').replace(/^(url|fetched_at|type|usable|via):.*$/gm, '');
   const visible = body
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -768,7 +937,10 @@ export function assessSnapshotUsability(text) {
   return { usable: visible.length >= SNAPSHOT_MIN_VISIBLE, visibleChars: visible.length };
 }
 
-/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text, usable, visibleChars }]。 */
+/** 读已落盘的快照（sources/*.txt，头行 key: value、空行后正文）→
+ *  [{ url, text, usable, visibleChars, kind?, via? }]。usable 是文本可见性布尔
+ *  （assessSnapshotUsability 口径，语义与历史一致）；kind/via 是文件头分类
+ *  （ok|skeleton|region_blocked|pdf 与 direct|mirror）——旧格式文件无头行时为 null（向后兼容）。 */
 export function loadSnapshots(repoRoot, id) {
   const dir = path.join(briefDir(repoRoot, id), 'sources');
   if (!fs.existsSync(dir)) return [];
@@ -776,7 +948,9 @@ export function loadSnapshots(repoRoot, id) {
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort()) {
     const raw = fs.readFileSync(path.join(dir, f), 'utf8');
     const url = /^url:\s*(.+)$/m.exec(raw)?.[1]?.trim() ?? f;
-    out.push({ url, text: raw, ...assessSnapshotUsability(raw) });
+    const kind = /^usable:\s*(\S+)\s*$/m.exec(raw)?.[1]?.trim() ?? null;
+    const via = /^via:\s*(\S+)\s*$/m.exec(raw)?.[1]?.trim() ?? null;
+    out.push({ url, text: raw, kind, via, ...assessSnapshotUsability(raw) });
   }
   return out;
 }
@@ -807,6 +981,12 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
   }
   if (skeleton) reasons.push(`⚠ ${skeleton}/${snapshots.length} 份快照为骨架页（正文未渲染/被拦）——meta 描述仍可佐证排名类结论，但数字类结论的可核性受限`);
+  // 快照质量包 ③（2026-11-10）：区域封锁/PDF 从骨架页里拆出来归因（只标注不改判分；
+  // 旧格式快照无头行分类，kind 为 null，不触发这两行——行为与历史一致）
+  const regionBlocked = snapshots.filter((s) => s.kind === 'region_blocked').length;
+  if (regionBlocked) reasons.push(`⚠ ${regionBlocked} 份快照为区域封锁页（"App unavailable in region" 类拦截）——非模型编造，网络/地区受限；可 research snapshot ${id} --mirror 补跑`);
+  const pdfSnaps = snapshots.filter((s) => s.kind === 'pdf').length;
+  if (pdfSnaps) reasons.push(`⚠ ${pdfSnaps} 份快照为 PDF（只留存在性证据，正文未转文本）——数字对账需人工打开原链接`);
   reasons.push('未跑 L2 复核（research verify <brief-id>）——claim 级覆盖与一致性未判定，internal_decision=undetermined');
   const verdict = {
     schema: VERDICT_SCHEMA,

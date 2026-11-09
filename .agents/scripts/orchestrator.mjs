@@ -3491,17 +3491,17 @@ async function planResearchDims(repoRoot, { goal, backendName }) {
  * 调研收尾流水线（cmdResearch 与 cmdResearchMulti 共用，2026-11-09 从 cmdResearch 抽出）：
  * 引用快照落盘 → L1 可信度初判（assessBrief 落 verdict.json）→ logVerdict 播报。
  * ledgerExtra（可选）：非空时追加一条 l1 台账（multi 每维一条，附 topic_id/dim 溯源）——
- * 单 brief research 命令不记账（历史行为保持不变）。返回 L1 verdict（level/usage 等）。
+ * 单 brief research 命令不记账（历史行为保持不变）。
+ * snapshotMax/snapshotMirror（可选，2026-11-10 快照质量包）：调用方从 workflow.json
+ * research.snapshotMax（1–48，缺省 16）/research.snapshotMirror（缺省 false）透传——
+ * 配置传递统一在这一个点做（CLI 与 multi 共用）；未传回落 snapshotCitations 缺省。
+ * 返回 L1 verdict（level/usage 等）。
  */
-async function researchFinalize(repoRoot, r, { model, ledgerExtra = null } = {}) {
+async function researchFinalize(repoRoot, r, { model, ledgerExtra = null, snapshotMax, snapshotMirror } = {}) {
   log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
   log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
-  const snap = await snapshotCitations(repoRoot, r.id);
-  if (snap.failed.length) {
-    log(`  ⚠ ${snap.failed.length} 条快照失败（引用仍在 brief.md 可人工核）：${snap.failed.map((f) => f.url).slice(0, 3).join(', ')}${snap.failed.length > 3 ? '…' : ''}`);
-  } else {
-    log(`  ✓ ${snap.ok.length} 条引用已快照到 sources/（对账材料）`);
-  }
+  const snap = await snapshotCitations(repoRoot, r.id, { max: snapshotMax, mirror: snapshotMirror === true });
+  logSnapshotSummary(snap);
   // L1 可信度初判（report-only）：数字/专名回查所引快照 + 引用深度比，落 verdict.json
   const verdict = assessBrief(repoRoot, r.id, { model });
   logVerdict(r.id, verdict, 'L1 快照回查');
@@ -3550,7 +3550,7 @@ async function cmdResearch(repoRoot, opts) {
       `可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
     );
   }
-  const verdict = await researchFinalize(repoRoot, r, { model });
+  const verdict = await researchFinalize(repoRoot, r, { model, snapshotMax: cfg.research?.snapshotMax, snapshotMirror: cfg.research?.snapshotMirror });
   // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
   // 标题带项目名：飞书自定义关键词过滤按消息文本命中——标题不含项目名会被 19024 静默丢弃
   //（2026-11-09 实测：关键词=ModelDock 的机器人把无关键词的调研通知整条吞掉）
@@ -3593,7 +3593,7 @@ async function runBoundedPool(limit, count, starter) {
  * 返回 { id, file, topic, dims, rollup }（id = 实际落盘 topic-id，回执/引用一律用它）；
  * 全维失败返回 { failed: true, dims }——CLI 据此 die 汇总，sail 记 failed 下周期重试。
  */
-async function runMultiResearch(repoRoot, { topic, dims, model, backendName, concurrency }) {
+async function runMultiResearch(repoRoot, { topic, dims, model, backendName, concurrency, snapshotMax, snapshotMirror }) {
   const pool = Number.isInteger(concurrency) && concurrency > 0 ? concurrency : (loadWorkflowConfig(repoRoot).research?.concurrency ?? 2);
   const topicId = deriveTopicId(repoRoot, slugifyTopic(topic));
   log(`多维调研：${topic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——并发 ${pool}，单维失败隔离`);
@@ -3607,7 +3607,7 @@ async function runMultiResearch(repoRoot, { topic, dims, model, backendName, con
       log(`  ✗ 维度「${dim}」未产出 brief——已隔离，继续下一维`);
       return { dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null };
     }
-    const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: { topic_id: topicId, dim } });
+    const verdict = await researchFinalize(repoRoot, r, { model, snapshotMax, snapshotMirror, ledgerExtra: { topic_id: topicId, dim } });
     return { dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' };
   };
   // 有界并发池：dims 按 --dim 顺序回填（runBoundedPool 的 index 写回保证，与完成先后无关）
@@ -3656,7 +3656,7 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
   opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
   const model = opts.model || cfg.research?.model || undefined;
   const concurrency = cfg.research?.concurrency ?? 2; // resolveResearch 已校验 1–4；键缺省回落 2
-  const r = await runMultiResearch(repoRoot, { topic: cleanTopic, dims, model, backendName: opts.backend, concurrency });
+  const r = await runMultiResearch(repoRoot, { topic: cleanTopic, dims, model, backendName: opts.backend, concurrency, snapshotMax: cfg.research?.snapshotMax, snapshotMirror: cfg.research?.snapshotMirror });
   if (r.failed) {
     die(
       `多维调研全部 ${r.dims.length} 个维度失败（无一产出 brief）——逐维最后一跳 stderr：\n` +
@@ -3673,6 +3673,53 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
     }
   } catch { /* 通知失败不阻断 */ }
   log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${r.id}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${r.dims.find((d) => d.status === 'ok')?.brief_id}）`);
+}
+
+/**
+ * research snapshot <brief-id>——对既有 brief 补跑引用快照（2026-11-10 快照质量包 ⑤）：
+ * 覆盖 sources/ 下同名文件（幂等），打印分类汇总。零 LLM token（纯 HTTP fetch）——
+ * 人工核查/补网工具：瞬时失败自动重试 + 分类标注 + 可选镜像回退，把「引用 [n] 无快照
+ * 无法对账」的 L2 复核缺口补上（补跑后 research verify 即拿到新快照）。
+ * --mirror 临时覆盖 research.snapshotMirror（只影响本次）；--max N 临时覆盖
+ * research.snapshotMax（1–48，非法回落配置值/缺省 16）。
+ */
+async function cmdResearchSnapshot(repoRoot, id, opts) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) die(`brief "${id}" 不存在（${researchDir(repoRoot)}）。research list 查看已有 brief；brief id 一律取 research 产出回执的实际 id（可能带 -2 派生后缀）。`);
+  const cfg = loadWorkflowConfig(repoRoot);
+  let max = cfg.research?.snapshotMax; // resolveResearch 已校验 1–48；键缺省回落 16
+  if (opts.max !== undefined) {
+    if (Number.isInteger(opts.max) && opts.max >= 1 && opts.max <= 48) max = opts.max;
+    else log(`⚠ --max ${opts.max} 不合法（应为 1–48 整数）——回落 ${max ?? 16}`);
+  }
+  const mirror = opts.flags?.has('--mirror') || cfg.research?.snapshotMirror === true;
+  log(`引用快照补跑：${id}（引用 ${brief.citations.length} 条，max ${max ?? 16}，镜像回退${mirror ? '开（引用 URL 将发给 r.jina.ai 第三方服务）' : '关'}）——零 LLM token，纯 HTTP fetch`);
+  const snap = await snapshotCitations(repoRoot, id, { max, mirror });
+  logSnapshotSummary(snap);
+  log(`快照已刷新：${brief.dir}/sources/（幂等覆盖同名文件；深度复核：research verify ${id}）`);
+}
+
+/**
+ * 快照分类汇总日志（researchFinalize 与 research snapshot 共用，2026-11-10 快照质量包）：
+ * 分类计数一行（如「✓ 8 快照（6 ok/1 骨架/1 区域封锁），2 失败（重试后）」）——骨架/
+ * 区域封锁/PDF 是标注不是失败（正文已落盘）；失败单列出 URL（尽力而为口径不变，
+ * 单条失败不影响 brief）。reason 带「重试」字样 = 瞬时类失败重试后仍死。
+ */
+function logSnapshotSummary(snap) {
+  const counts = { ok: 0, skeleton: 0, region_blocked: 0, pdf: 0, failed: 0 };
+  for (const s of snap.snapshots ?? []) counts[s.status] = (counts[s.status] ?? 0) + 1;
+  const parts = [];
+  if (counts.ok) parts.push(`${counts.ok} ok`);
+  if (counts.skeleton) parts.push(`${counts.skeleton} 骨架`);
+  if (counts.region_blocked) parts.push(`${counts.region_blocked} 区域封锁`);
+  if (counts.pdf) parts.push(`${counts.pdf} PDF`);
+  const retried = (snap.failed ?? []).some((f) => /重试/.test(f.reason ?? ''));
+  const files = counts.ok + counts.skeleton + counts.region_blocked + counts.pdf;
+  const head = files ? `  ✓ ${files} 快照（${parts.join('/')}）` : '  ⚠ 0 条快照可用';
+  log(`${head}${counts.failed ? `，${counts.failed} 失败${retried ? '（重试后）' : ''}` : ''}`);
+  if (counts.failed) {
+    log(`    失败引用（仍在 brief.md 可人工核）：${snap.failed.map((f) => f.url).slice(0, 3).join(', ')}${snap.failed.length > 3 ? '…' : ''}`);
+  }
 }
 
 /** L1 判级结果统一播报（cmdResearch / 上游管线共用）——v2 verdict：维度分 + usage 决策。 */
@@ -4152,6 +4199,8 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
           model: cfg.research?.model,
           backendName,
           concurrency: cfg.research?.concurrency ?? 2,
+          snapshotMax: cfg.research?.snapshotMax,
+          snapshotMirror: cfg.research?.snapshotMirror,
         });
         if (multi.failed) {
           // 全维失败：不降级再烧一次单 brief（后端八成同样故障），记 failed 下周期重试
@@ -4182,7 +4231,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
           log(`  ✓ 调研 brief ${r.id}（${r.citations.length} 条引用）→ 已盖进提案 research 字段`);
           // L1 可信度初判（report-only）：快照 + 数字回查，落 verdict.json + 台账；fail 会亮牌但不阻断
           //（管线是否消费 verdict 升级为 gate 属后续演进，先攒 near-miss 分布——晴雨表哲学）
-          await snapshotCitations(repoRoot, r.id);
+          await snapshotCitations(repoRoot, r.id, { max: cfg.research?.snapshotMax, mirror: cfg.research?.snapshotMirror === true });
           const verdict = assessBrief(repoRoot, r.id, { model: cfg.research?.model });
           out.verdicts.push({ id: r.id, level: verdict?.level ?? 'unknown' });
           logVerdict(r.id, verdict, 'L1 快照回查');
@@ -4951,6 +5000,8 @@ function usage() {
   research verify <brief-id|topic-id> [--backend …] [--model m]
                                           L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账；判出矛盾自动跑联网仲裁轮（upheld 翻案解除否决；research.arbitration=false 关）——落 spec/对外文档前建议跑；topic-id 走逐维复核并重算 topic rollup
   research stats                          L3 可信度台账：按调研船模型聚合核实率与判级分布（信任=统计量）
+  research snapshot <brief-id> [--mirror] [--max N]
+                                          对既有 brief 补跑引用快照（覆盖 sources/ 同名文件，幂等）：瞬时失败自动重试 + 分类标注（ok/骨架/区域封锁/PDF，只标注不改判分）；--mirror 经 r.jina.ai 镜像读取（把引用 URL 发给第三方服务，默认关、显式开启）；零 LLM token 的纯 HTTP 人工核查/补网工具
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
@@ -5077,6 +5128,10 @@ async function main() {
       return cmdPropose(repoRoot, opts);
     case 'research':
       if (args[0] === 'multi') return cmdResearchMulti(repoRoot, args.slice(1).join(' ').trim(), opts);
+      if (args[0] === 'snapshot') {
+        if (!args[1]) die('用法：research snapshot <brief-id> [--mirror] [--max N]——对既有 brief 补跑引用快照（覆盖 sources/ 同名文件，幂等；零 LLM token 纯 HTTP）');
+        return cmdResearchSnapshot(repoRoot, args[1], opts);
+      }
       if (args[0] === 'verify') {
         if (!args[1]) die('用法：research verify <brief-id|topic-id> [--backend <复核船>] [--model <名>]——L2 异构复核（readonly，落 verdict.json + 台账；topic-id 走逐维复核 + rollup 重算）');
         return cmdResearchVerify(repoRoot, args[1], opts);
