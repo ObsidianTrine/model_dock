@@ -4,6 +4,7 @@
 //   snapshotQueue         队列状态快照（开航基线与收帆快照——战果清单的原料）
 //   snapshotDrafts        drafts/ 提案快照（每周期规划产出的 id/类型/目标句——「为什么这么编排」的原料）
 //   diffQueueStates       前后两次队列快照的差分
+//   sailIdleSleepMin      空队退避休眠时长（连续零新提交 ≥2 轮翻倍、cap 封顶）
 //   buildSailReport       航海报告确定性组装（不烧 LLM、理由引卡片原文，防幻觉）
 //   buildSailSummary      通知用单行摘要
 // 接口契约（永不改名）：命令名 sail、stop 文件 .sail-stop、报告目录 logs/sail/<ts>/。
@@ -24,6 +25,21 @@ export const SAIL_STOP_FILE = '.sail-stop';
  *  设计 → spec build），canSailSubmit 在白名单判定前就硬拒——白名单配置加回 feature 也
  *  不会放大授权面（配置只收窄、永不放大）。 */
 export const DEFAULT_SAIL_SUBMIT_TYPES = ['docs', 'bugfix', 'refactor'];
+
+/** 空队规划轮指数退避的休眠上限（分钟）：连续零新提交 ≥2 轮起逐轮翻倍，到此封顶。 */
+export const SAIL_IDLE_BACKOFF_CAP_MIN = 60;
+
+/**
+ * 连续第 idleStreak 轮零新提交的计划休眠时长（分钟）：第 1 轮用缺省 interval，≥2 轮起
+ * 逐轮翻倍、封顶 SAIL_IDLE_BACKOFF_CAP_MIN。cap 只封退避增长——调用方显式配了更高的
+ * interval 时不缩（与提交白名单同哲学：配置只收窄、永不放大）；interval=0 保持禁睡。
+ */
+export function sailIdleSleepMin(idleStreak, intervalMin) {
+  const base = Math.max(0, Math.floor(Number(intervalMin) || 0));
+  if (base <= 0) return 0;
+  const doubled = base * 2 ** Math.max(0, Math.max(1, idleStreak) - 1);
+  return Math.min(doubled, Math.max(base, SAIL_IDLE_BACKOFF_CAP_MIN));
+}
 
 /**
  * 解析自由航行时长。opts.minutes：正数分钟；opts.duration：人话规格
@@ -164,11 +180,21 @@ function typeOf(info) {
   return info?.type ?? '?';
 }
 
+/** 处于空队退避（streak≥2 且本周期确有计划休眠——interval=0 禁睡时不虚报）。 */
+function inIdleBackoff(c) {
+  return (c.idleStreak ?? 0) >= 2 && c.sleepPlannedMin != null;
+}
+
+/** 退避中的周期注记：点出连续空轮数与计划休眠值（实际休眠可能被 deadline 截短）。 */
+function idleBackoffNote(c) {
+  return inIdleBackoff(c) ? `（连续 ${c.idleStreak} 轮零提交，指数退避计划休眠 ${c.sleepPlannedMin} 分钟）` : '';
+}
+
 /**
  * 航海报告（确定性组装，不烧 LLM）。
  * voyage 字段：{ projectName, root, startedAtISO, finishedAtISO, minutes, actualMinutes,
  *   stopReason, cycles[], baseline, endState, diff, dispatchedTotal, goalsText, reportPath }
- * cycles 元素：{ n, kind: dispatch|plan|idle, dispatched[], proposals[], submitted[], skipped[], sleepMin, drainExit }
+ * cycles 元素：{ n, kind: dispatch|plan|idle, dispatched[], proposals[], submitted[], skipped[], sleepMin, sleepPlannedMin, idleStreak, drainExit }
  * proposals 元素：{ id, createdBy, type, priority, goal }；skipped 元素：{ id, reason }。
  */
 export function buildSailReport(voyage) {
@@ -270,7 +296,7 @@ export function buildSailReport(voyage) {
       lines.push(`- 周期 ${c.n}：派发执行 → ${names}${c.drainExit != null && c.drainExit !== 0 ? `（drain 退出码 ${c.drainExit}）` : ''}`);
     } else if (c.kind === 'plan') {
       if (!c.proposals?.length) {
-        lines.push(`- 周期 ${c.n}：巡检+规划：无新提案（信号已处理过 / planner 判定无值得做的）——休眠 ${c.sleepMin ?? 0} 分钟后再看海况。`);
+        lines.push(`- 周期 ${c.n}：巡检+规划：无新提案（信号已处理过 / planner 判定无值得做的）——休眠 ${c.sleepMin ?? 0} 分钟后再看海况${idleBackoffNote(c)}。`);
         continue;
       }
       lines.push(`- 周期 ${c.n}：巡检+规划，产出 ${c.proposals.length} 张提案：`);
@@ -292,8 +318,14 @@ export function buildSailReport(voyage) {
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
       for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，复核改判后下周期复查自动放行`);
     } else if (c.kind === 'idle') {
-      lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟。`);
+      lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟${idleBackoffNote(c)}。`);
     }
+  }
+  // 空队退避轨迹：何时进入退避 + 最长计划休眠（真退避过才出行，普通航程不加噪音）
+  const backedOff = (voyage.cycles ?? []).filter(inIdleBackoff);
+  if (backedOff.length) {
+    const maxPlanned = Math.max(...backedOff.map((c) => c.sleepPlannedMin));
+    lines.push(`- 空队退避轨迹：周期 ${backedOff[0].n} 起连续零新提交，休眠逐轮翻倍（${SAIL_IDLE_BACKOFF_CAP_MIN} 分钟封顶），最长计划休眠 ${maxPlanned} 分钟——空跑 planner 的开销靠拉长休眠省下来。`);
   }
   lines.push('- 授权边界：开 sail 即授权本航次自动提交（类型白名单 workflow.json freeSail.autoSubmitTypes，缺省 docs/bugfix/refactor；feature 永不直接提交——走上游管线 research → spec → 人工审设计 → spec build）；deps、人工草稿、核心/发布路径永不自动；提交 gate=L1 而实际合并由分级裁决 + drift 保险丝兜底——自动的是「进队列」，不是「进主干」。');
   lines.push('');

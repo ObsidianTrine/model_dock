@@ -14,6 +14,8 @@ import {
   snapshotDrafts,
   diffQueueStates,
   buildSailReport,
+  sailIdleSleepMin,
+  SAIL_IDLE_BACKOFF_CAP_MIN,
   DEFAULT_SAIL_SUBMIT_TYPES,
 } from '../../.agents/scripts/orchestrator/sail.mjs'
 import { queueRoot, listCards } from '../../.agents/scripts/orchestrator/queue.mjs'
@@ -178,6 +180,96 @@ describe('orchestrator sail > 纯逻辑件', () => {
     expect(report).toContain('休眠 10 分钟')
     expect(report).toContain('自动的是「进队列」，不是「进主干」')
   })
+})
+
+describe('orchestrator sail > 空队退避（idle backoff）', () => {
+  it('sailIdleSleepMin：缺省 interval 连续零提交 10→20→40，第 4 轮起 60 封顶', () => {
+    expect(sailIdleSleepMin(1, 10)).toBe(10)
+    expect(sailIdleSleepMin(2, 10)).toBe(20)
+    expect(sailIdleSleepMin(3, 10)).toBe(40)
+    expect(sailIdleSleepMin(4, 10)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+    expect(sailIdleSleepMin(9, 10)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+  })
+
+  it('sailIdleSleepMin：自定义 interval 同曲线缩放；高于 cap 不缩显式值；0 保持禁睡', () => {
+    expect(sailIdleSleepMin(1, 5)).toBe(5)
+    expect(sailIdleSleepMin(2, 5)).toBe(10)
+    expect(sailIdleSleepMin(3, 5)).toBe(20)
+    expect(sailIdleSleepMin(5, 5)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+    // cap 只封退避增长，不缩用户显式配的更高 interval（配置只收窄、永不放大）
+    expect(sailIdleSleepMin(1, 90)).toBe(90)
+    expect(sailIdleSleepMin(4, 90)).toBe(90)
+    expect(sailIdleSleepMin(4, 0)).toBe(0)
+  })
+
+  it('buildSailReport：退避轨迹行（进入周期 + 最长计划休眠）与逐周期注记；未触发不出行', () => {
+    const empty = { running: [], reviewing: [], failed: [], blocked: [] }
+    const voyageBase = {
+      projectName: 'TestDock',
+      root: '/nonexistent-root',
+      startedAtISO: '2026-11-10T01:13:00.000Z',
+      finishedAtISO: '2026-11-10T03:00:00.000Z',
+      minutes: 120,
+      actualMinutes: 107,
+      stopReason: '到达时长上限',
+      dispatchedTotal: 0,
+      goalsText: '',
+      baseline: { pending: [], 'awaiting-human': [], merged: [], ...empty },
+      endState: { pending: [], 'awaiting-human': [], merged: [], ...empty },
+      diff: { changed: [], added: [] },
+    }
+    const cycle = (n: number, kind: string, idleStreak: number, sleepPlannedMin: number, sleepMin = sleepPlannedMin) =>
+      ({ n, kind, at: '', dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin, idleStreak, sleepPlannedMin })
+    const withBackoff = buildSailReport({
+      ...voyageBase,
+      cycles: [
+        cycle(1, 'plan', 1, 10),
+        cycle(2, 'plan', 2, 20),
+        cycle(3, 'plan', 3, 40),
+        cycle(4, 'plan', 4, 60, 58), // 实际休眠被 deadline 截短（58 < 计划 60）
+        cycle(5, 'idle', 5, 60),
+      ],
+    })
+    expect(withBackoff).toContain('空队退避轨迹：周期 2 起')
+    expect(withBackoff).toContain('最长计划休眠 60 分钟')
+    expect(withBackoff).toContain('（连续 3 轮零提交，指数退避计划休眠 40 分钟）')
+    expect(withBackoff).toContain('连续 5 轮零提交')
+    // streak 1 未进退避：无注记、轨迹行从周期 2 起算
+    expect(withBackoff).not.toContain('连续 1 轮零提交')
+    const noBackoff = buildSailReport({ ...voyageBase, cycles: [cycle(1, 'plan', 1, 10)] })
+    expect(noBackoff).not.toContain('空队退避轨迹')
+  })
+
+  it('闭环（mock）：提交轮复位、连续空轮 streak 逐轮 +1、第 2 空轮起休眠翻倍、报告出退避轨迹', () => {
+    const repo = mkRepo()
+    try {
+      // 周期 1 规划提交（docs 白名单）→ 周期 2 派发 merged → 此后队列去重无新提案，
+      // 连续空轮 streak 递增；interval 1 时第 1/2 空轮计划休眠 1→2 分钟（翻倍可见）
+      const out = runOrch(repo.root, 'sail --duration 120s --interval 1 --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
+      expect(out.stdout).toContain('到达时长上限')
+      const voyage = JSON.parse(
+        fs.readFileSync(path.join(latestSailDir(repo.root), 'voyage.json'), 'utf8'),
+      ) as { cycles: Array<{ n: number; kind: string; submitted: string[]; idleStreak: number; sleepPlannedMin?: number }> }
+      const plans = voyage.cycles.filter((c) => c.kind === 'plan')
+      expect(plans.length).toBeGreaterThanOrEqual(3)
+      // 复位凭证：提交轮 streak=0，紧随的首个空轮从 1 重新起算（而非累计值）
+      expect(plans[0].submitted).toContain('planner-mock-task')
+      expect(plans[0].idleStreak).toBe(0)
+      expect(plans[1].idleStreak).toBe(1)
+      expect(plans[1].sleepPlannedMin).toBe(1)
+      // ≥2 空轮起翻倍：计划休眠 1 → 2
+      expect(plans[2].idleStreak).toBe(2)
+      expect(plans[2].sleepPlannedMin).toBe(2)
+      const report = latestReport(repo.root)
+      expect(report).toContain('空队退避轨迹')
+      expect(report).toContain(`周期 ${plans[2].n} 起`)
+      expect(report).toContain('最长计划休眠 2 分钟')
+      expect(report).toContain('连续 2 轮零提交')
+      expect(report).not.toContain('连续 1 轮零提交')
+    } finally {
+      repo.cleanup()
+    }
+  }, 200_000)
 })
 
 describe('orchestrator sail > 停止条件与留痕', () => {

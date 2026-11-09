@@ -72,7 +72,7 @@ import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, vali
 import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
-import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
+import { parseDurationMinutes, canSailSubmit, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -4160,6 +4160,8 @@ function sailAutoSubmit(repoRoot, root, cfg, ids) {
  * 停止条件（任一）：到达 --minutes/--duration、.sail-stop 文件、drift 降级、--max-tasks
  * 上限、--max-cost-usd 燃油上限（网关实测价 ≥ 上限即收帆——只停不换引擎，换计费方必须人批）、
  * 连续 3 轮派发无进展。软截止：跑着的任务让它跑完，不在剩余不足时开新派发。
+ * 空队退避：连续零新提交 ≥2 轮起规划轮休眠逐轮翻倍（sailIdleSleepMin，60 分钟封顶），
+ * 新提交/派发即复位——空跑航程的 planner 会话烧钱无产出，靠拉长休眠省下来。
  */
 async function cmdSail(repoRoot, opts) {
   const cfg0 = loadWorkflowConfig(repoRoot);
@@ -4203,6 +4205,7 @@ async function cmdSail(repoRoot, opts) {
   };
   let stopReason = null;
   let noProgress = 0;
+  let idleStreak = 0; // 连续零新提交轮数（空队退避计数）：≥2 轮起休眠翻倍，新提交/派发即归零
   let weatherAnnounced = false;
   let lastCostCheckAt = 0;
   let sigint = false;
@@ -4307,6 +4310,8 @@ async function cmdSail(repoRoot, opts) {
         cycle.dispatched = pending.filter((id) => !after.includes(id));
         voyage.dispatchedTotal += cycle.dispatched.length;
         noProgress = cycle.dispatched.length ? 0 : noProgress + 1;
+        idleStreak = cycle.dispatched.length ? 0 : idleStreak + 1; // 派发出新卡同属「新提交」，复位退避
+        cycle.idleStreak = idleStreak;
         voyage.cycles.push(cycle);
         writeVoyage();
         continue; // 不休眠：立即看表再决定
@@ -4333,10 +4338,15 @@ async function cmdSail(repoRoot, opts) {
           : '配置守卫生效中：本周期跳过规划与派发（文件改回基线或重启编排器后恢复）。');
       }
       voyage.cycles.push(cycle);
+      // 空队退避计数：零新提交轮 +1、有提交即归零（派发轮同口径，见上）——只拉长空跑
+      // 休眠，提交白名单与「连续无进展」熔断语义不变
+      idleStreak = cycle.submitted.length ? 0 : idleStreak + 1;
+      cycle.idleStreak = idleStreak;
       // 休眠：本轮无新卡可派才睡（有提交 → 下一轮直接派发）；分片睡，stop 文件/Ctrl-C/到点即醒
       if (!cycle.submitted.length && Date.now() < deadline && intervalMin > 0) {
+        cycle.sleepPlannedMin = sailIdleSleepMin(idleStreak, intervalMin);
         const sleepStart = Date.now();
-        const sliceEnd = Math.min(deadline, sleepStart + intervalMin * 60_000);
+        const sliceEnd = Math.min(deadline, sleepStart + cycle.sleepPlannedMin * 60_000);
         while (Date.now() < sliceEnd) {
           if (fs.existsSync(stopFile) || sigint) break;
           await new Promise((r) => setTimeout(r, Math.min(5000, sliceEnd - Date.now())));
