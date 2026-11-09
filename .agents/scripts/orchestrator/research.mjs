@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { toIsoLocal } from './events.mjs';
 
 /** researcher 输出契约的 fenced block 标记（prompt.mjs buildResearchPrompt 同款）。 */
@@ -223,17 +224,26 @@ export function topicPath(repoRoot, topicId) {
 
 /**
  * 主题文本 → topic-id slug（与 brief id 同规：小写字母/数字/短横线，TASK_ID_RE 兼容）。
- * 中文主题会大量折叠成短横线（「LLM 可信度」→ llm）——同 slug 的不同主题靠 deriveTopicId
- * 的 -2…-9 派生兜底；截断 48 字符防目录名失控。
+ * 中文主题会大量折叠成短横线（「LLM 输出可信度判定机制的业界现状」→ llm、纯中文 → topic）
+ * ——折叠后信息量近零、不同主题高频同 slug，可读性与唯一性双差。短 slug（<6 字符，含兜底
+ * topic）追加原主题归一化文本（trim 后原文）的 sha256 前 8 位十六进制哈希尾（llm →
+ * llm-1a2b3c4d）：同输入恒同哈希（确定性可复现），不同主题几乎必然不同尾——保唯一性与
+ * 可溯源性；长 slug（≥6）信息量足够，保持原样不加尾。同 slug 的不同主题靠 deriveTopicId
+ * 的 -2…-9 派生兜底语义不变；截断 48 字符防目录名失控。
  */
 export function slugifyTopic(text) {
-  const s = String(text ?? '')
+  const raw = String(text ?? '').trim();
+  const s = raw
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48)
     .replace(/-+$/g, '');
-  return s || 'topic';
+  const slug = s || 'topic';
+  if (slug.length >= 6) return slug; // 长 slug 不加哈希尾
+  // 哈希输入用 trim 后原文（utf8）：跨平台确定（Buffer/hex 与平台无关），同输入同 id
+  const hash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 8);
+  return `${slug}-${hash}`;
 }
 
 /**
@@ -503,20 +513,125 @@ export function stripInlineCitations(s) {
   return normalizeClaimText(s).replace(/ ?\[\d{1,3}\]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+// ---------------------------------------------------------------------------
+// fuzzy 轻度转述放行（2026-11-10 对拍驱动）：一级精确包含把「复核模型转述 brief」也一律
+// 丢弃，对账材料白白损失。二级只放行「确实能在 brief 里找到的轻度转述」——三条硬线全过
+// 才算（阈值宁严勿松：宁可多丢一条疑似，不可放进一条真编造）：
+//   - FUZZY_JACCARD 0.85：claim 词元序列与 brief 词元序列上最佳等长窗口的词元集合 Jaccard。
+//     轻度转述（换序/加助词）的源句窗口几乎全重合；两处各半拼接的新句，任何等长窗口最多
+//     盖住一半词元，远达不到该线——这是拦「改写拼接」的主防线
+//   - FUZZY_CONTAINMENT 0.90：claim 词元至少 90% 出现在 brief 词元集合——无中生有的实体/
+//     数字直接拦（这是拦「编造」的主防线）
+//   - FUZZY_MIN_TOKENS 4：2-3 词元的碎句偶然命中的面太大，不设下限会给编造开口子
+// 判分语义零改动：fuzzy 只影响 claim 的去留与 verbatim 标注，scoreVerdict/aggregateCoherence
+// 权重与阈值不动。
+// ---------------------------------------------------------------------------
+const FUZZY_JACCARD = 0.85;
+const FUZZY_CONTAINMENT = 0.9;
+const FUZZY_MIN_TOKENS = 4;
+
 /**
- * claim 逐字校验（v3 关键防线）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
- * 改写/概括/无中生有即判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
+ * fuzzy 词元化：小写化、去标点（非 [a-z0-9]/CJK 基本区字符一律当词边界，中英都按连续
+ * 非空白段切）。纯函数、确定性、无回溯（单字符类 replace，无嵌套量词）。
+ */
+function fuzzyTokens(s) {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * 最佳等长窗口词元 Jaccard：在 brief 词元序列上滑一个长度 = claim 词元数的窗口，取与
+ * claim 词元集合 Jaccard 的最大值。滑动计数维护（词元进出各 O(1)），整体 O(brief 词元数)，
+ * 无嵌套循环无回溯。
+ */
+function bestWindowJaccard(claimSeq, briefSeq) {
+  const n = claimSeq.length;
+  const m = briefSeq.length;
+  if (!n || !m) return 0;
+  const cset = new Set(claimSeq);
+  const winCount = new Map(); // 窗口内词元 → 出现次数
+  let winDistinct = 0; // 窗口内不同词元数（并集的分母项）
+  let inter = 0; // |cset ∩ 窗口集合|
+  let best = 0;
+  for (let i = 0; i < m; i++) {
+    const t = briefSeq[i];
+    const prev = winCount.get(t) ?? 0;
+    winCount.set(t, prev + 1);
+    if (prev === 0) {
+      winDistinct++;
+      if (cset.has(t)) inter++;
+    }
+    if (i >= n) {
+      // 窗口满后再进新词元就要弹最老的（保持窗口长度恒 = n）
+      const out = briefSeq[i - n];
+      const cnt = winCount.get(out) ?? 0;
+      if (cnt <= 1) {
+        winCount.delete(out);
+        winDistinct--;
+        if (cset.has(out)) inter--;
+      } else {
+        winCount.set(out, cnt - 1);
+      }
+    }
+    if (i >= n - 1) {
+      const union = cset.size + winDistinct - inter;
+      if (union > 0) {
+        const j = inter / union;
+        if (j > best) best = j;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * fuzzy 放行判定（verifyClaimVerbatim 第二级的判据，纯函数）。三条硬线见常量区注释；
+ * 另有一条契约线：claim 剥 [n] 后仍残留方括号（[2026]/[1m] 类未豁免标注形状）→ 直接
+ * 不给 fuzzy——引用标注形状违规是契约问题，不是转述，宁丢不放。
+ */
+function fuzzyParaphrasePass(bare, briefSeq) {
+  if (/[\[\]]/.test(bare)) return false;
+  const ct = fuzzyTokens(bare);
+  if (ct.length < FUZZY_MIN_TOKENS) return false;
+  const cset = new Set(ct);
+  const bset = new Set(briefSeq);
+  let contained = 0;
+  for (const t of cset) {
+    if (bset.has(t)) contained++;
+  }
+  if (contained / cset.size < FUZZY_CONTAINMENT) return false;
+  return bestWindowJaccard(ct, briefSeq) >= FUZZY_JACCARD;
+}
+
+/**
+ * claim 逐字校验（v3 关键防线，两级制）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
+ * 改写/概括/无中生有判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
  * 行内 [n] 引用标注豁免：两侧先剥 [n] 再比包含（长度上限仍按原始归一文本计）。
+ * 第二级 fuzzy（2026-11-10）：一级精确包含失败后按词元重叠判定——确属 brief 内轻度转述
+ * （换序/加助词，词元几乎全部能在 brief 找到）则放行并附 `verbatim: 'fuzzy'` 标注
+ * （消费方只标注不降级）；判据与阈值见上方常量区，编造/拼接仍 fabricated（现状口径）。
  */
 export function verifyClaimVerbatim(claims, briefBody) {
   const brief = stripInlineCitations(briefBody);
+  let briefSeq = null; // 惰性：无 claim 走到二级就不付 brief 词元化的成本
   const valid = [];
   const fabricated = [];
   for (const c of claims ?? []) {
     const text = normalizeClaimText(c?.claim);
     const bare = stripInlineCitations(text);
-    if (text && text.length <= 120 && bare && brief.includes(bare)) valid.push({ ...c, claim: text });
-    else fabricated.push((text || '(空)').slice(0, 80));
+    if (text && text.length <= 120 && bare && brief.includes(bare)) {
+      valid.push({ ...c, claim: text }); // 一级精确：无 verbatim 标注（向后兼容）
+    } else if (text && text.length <= 120 && bare) {
+      briefSeq ??= fuzzyTokens(brief);
+      if (fuzzyParaphrasePass(bare, briefSeq)) valid.push({ ...c, claim: text, verbatim: 'fuzzy' });
+      else fabricated.push((text || '(空)').slice(0, 80));
+    } else {
+      fabricated.push((text || '(空)').slice(0, 80));
+    }
   }
   return { valid, fabricated };
 }

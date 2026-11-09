@@ -4,6 +4,8 @@
 // 行为注入（集成测试在子进程里通过 env 控制）：
 //   ORCH_MOCK_WORKER_STATUS=done|stuck   worker 结果块的状态（默认 done）
 //   ORCH_MOCK_REVIEW_BLOCKERS=<n>        reviewer 输出的阻塞项数（默认 0）
+//   ORCH_MOCK_REVIEW_FUZZY=1             L2 复核额外注入轻度转述 + 编造 claim 各一条
+//                                        （verifyClaimVerbatim fuzzy 两级制的 e2e 用）
 //   ORCH_MOCK_SPAWN_ERROR=1              spawn 直接抛错（测 cmdRun 异常兜底落 blocked）
 //   ORCH_MOCK_TRANSIENT=1                worker 中途死亡：无结果块 + 瞬时签名 stderr
 //                                        （走 isTransientWorkerFailure 原地退避重试路径，
@@ -126,7 +128,10 @@ export const mockBackend = {
       // L2 复核模式（v2 JSON 契约）：从 prompt 内嵌 brief 摘第一条承重结论逐字回显；
       // ORCH_MOCK_REVIEW_BLOCKERS>0 映射为 contradicted（否决链路 e2e 复用既有注入）；
       // ORCH_MOCK_REVIEW_PARAPHRASE=1 每次都改写复述（尾部加词 → 非 brief 子串），
-      // PARAPHRASE_ONCE=1 仅第一次改写、重试后逐字（测逐字重试恢复链路）
+      // PARAPHRASE_ONCE=1 仅第一次改写、重试后逐字（测逐字重试恢复链路）；
+      // ORCH_MOCK_REVIEW_FUZZY=1 额外注入轻度转述 + 编造 claim 各一条（fuzzy 两级制 e2e 用：
+      // 转述条——空白段轮换、词元集合不变——应被 fuzzy 层放行标 verbatim:'fuzzy'；编造条
+      // brief 外实体应 fabricated 走降级保留）
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
       const briefMatch = /## 待复核 brief\n\n([\s\S]*?)\n\n## 来源快照/.exec(prompt);
       const firstLine = (briefMatch?.[1] ?? '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? 'mock claim';
@@ -134,12 +139,19 @@ export const mockBackend = {
       const paraphrase = process.env.ORCH_MOCK_REVIEW_PARAPHRASE === '1' || (paraphraseOnce && verifierCall === 0);
       if (paraphraseOnce) verifierCall++;
       if (paraphrase) claim = `${claim.replace(/。$/, '')}（mock 复核改写）。`;
+      const segs = firstLine.split(/\s+/).filter(Boolean);
+      const rotated = segs.length >= 2 ? [...segs.slice(1), segs[0]].join(' ') : null;
+      const claims = [{
+        claim,
+        status: blockers > 0 ? 'contradicted' : 'supported',
+        note: blockers > 0 ? 'mock 复核：与给定快照矛盾' : 'mock 复核：与给定快照一致',
+      }];
+      if (process.env.ORCH_MOCK_REVIEW_FUZZY === '1') {
+        if (rotated) claims.push({ claim: rotated.slice(0, 110), status: 'supported', note: 'mock 复核：轻度转述（词序轮换）' });
+        claims.push({ claim: 'mock 复核编造：Phantom Model X9 市占率 99.9% 领跑虚构榜', status: 'supported', note: 'mock 复核：编造注入' });
+      }
       const payload = {
-        claims: [{
-          claim,
-          status: blockers > 0 ? 'contradicted' : 'supported',
-          note: blockers > 0 ? 'mock 复核：与给定快照矛盾' : 'mock 复核：与给定快照一致',
-        }],
+        claims,
         blockers: blockers > 0 ? ['mock 硬伤'] : [],
       };
       const output = ['复核完成。', '', '```' + VERDICT_MARKER, JSON.stringify(payload, null, 2), '```'].join('\n');

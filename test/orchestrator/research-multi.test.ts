@@ -62,10 +62,10 @@ function seedSnapshot(repo: string, briefId: string): void {
 }
 
 describe('orchestrator research-multi > topic-id 与 rollup 纯函数', () => {
-  it('slugifyTopic：小写化/非字母数字折叠/截断；全中文主题回落 topic 兜底', () => {
+  it('slugifyTopic：小写化/非字母数字折叠/截断；短 slug 加哈希尾（中文折叠兜底）', () => {
     expect(slugifyTopic('LLM Trust Probe')).toBe('llm-trust-probe')
-    expect(slugifyTopic('LLM 可信度——技术选型')).toBe('llm') // 中文折叠成短横线
-    expect(slugifyTopic('  --多--维--  ')).toBe('topic') // 全非 [a-z0-9] → 兜底
+    expect(slugifyTopic('LLM 可信度——技术选型')).toMatch(/^llm-[0-9a-f]{8}$/) // 中文折叠成短横线 → 短 slug 加哈希尾
+    expect(slugifyTopic('  --多--维--  ')).toMatch(/^topic-[0-9a-f]{8}$/) // 全非 [a-z0-9] → 兜底 + 哈希尾
     expect(slugifyTopic('x'.repeat(80)).length).toBeLessThanOrEqual(48)
     // TASK_ID_RE 兼容：小写字母/数字/短横线
     expect(slugifyTopic('A_B.C')).toMatch(/^[a-z0-9][a-z0-9-]*$/)
