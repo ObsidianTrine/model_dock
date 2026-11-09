@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, topicPath, rollupTopicVerdict, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3207,12 +3207,15 @@ function researchFailure(result) {
   };
 }
 
-/** 单次调研会话核心（cmdResearch 与 sail 上游管线共用）：3 次重试 → brief 落盘，失败返回
- *  { failed: true, exitCode, stderrTail }（researchFailure，带最后一跳现场供 die 文案）。
+/** 单次调研会话核心（cmdResearch / cmdResearchMulti 与 sail 上游管线共用）：3 次重试 → brief 落盘，
+ *  失败返回 { failed: true, exitCode, stderrTail }（researchFailure，带最后一跳现场供 die 文案）。
  *  model：调研船模型（--model 显式 > workflow.json research.model > claude CLI 全局默认）——
  *  2026-11-08 实证：researcher 吃全局默认 glm-4.5-air 时检索接地失效产出旧世界内容，
- *  换 glm-5.3-flash 后恢复正常——调研船必须与执行船解耦选型。 */
-async function runResearchSession(repoRoot, { question, backendName, minCitations = 1, model, traceCommand = 'research' }) {
+ *  换 glm-5.3-flash 后恢复正常——调研船必须与执行船解耦选型。
+ *  briefId/topicId/dim（可选，research multi 专用）：briefId 显式指定时忽略模型自报 id，
+ *  强制以 <topic-slug>-d<N> 落盘（topic 的并行/连跑 brief 从命名空间上隔离，TOCTOU 消灭在
+ *  落盘层）；topicId/dim 透传进 meta.json 溯源。缺省 null = 行为与从前逐字节一致。 */
+async function runResearchSession(repoRoot, { question, backendName, minCitations = 1, model, traceCommand = 'research', briefId = null, topicId = null, dim = null }) {
   const backend = await getBackend(backendName);
   const traceCfg = loadWorkflowConfig(repoRoot).trace;
   const session = plannerTraceTaskId();
@@ -3245,7 +3248,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
         }
         return researchFailure(lastResult);
       }
-      if (!TASK_ID_RE.test(parsed.id)) {
+      if (!briefId && !TASK_ID_RE.test(parsed.id)) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（id "${parsed.id}" 不合法）\nid 只允许小写字母/数字/短横线，请修正 agents-brief 块后重新输出。`;
           continue;
@@ -3261,8 +3264,9 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
         }
         return researchFailure(lastResult);
       }
-      // 同 id 已存在时自动派生 <id>-2…-9 落盘（P1-④，同题重跑不再裸崩）；回执用实际落盘 id
-      const { dir, id } = writeBriefAuto(repoRoot, { id: parsed.id, title: parsed.title, question, backend: backendName, body: parsed.body });
+      // 同 id 已存在时自动派生 <id>-2…-9 落盘（P1-④，同题重跑不再裸崩）；回执用实际落盘 id。
+      // briefId 显式指定（research multi）时忽略模型自报 id，强制 <topic>-d<N> 命名空间
+      const { dir, id } = writeBriefAuto(repoRoot, { id: briefId ?? parsed.id, title: parsed.title, question, backend: backendName, body: parsed.body, topicId, dim });
       return { id, dir, body: parsed.body, citations: extractCitations(parsed.body) };
     }
     return researchFailure(lastResult);
@@ -3326,6 +3330,39 @@ async function runArbitrationSession(repoRoot, { claims, snapshots, backendName,
 }
 
 /**
+ * 调研收尾流水线（cmdResearch 与 cmdResearchMulti 共用，2026-11-09 从 cmdResearch 抽出）：
+ * 引用快照落盘 → L1 可信度初判（assessBrief 落 verdict.json）→ logVerdict 播报。
+ * ledgerExtra（可选）：非空时追加一条 l1 台账（multi 每维一条，附 topic_id/dim 溯源）——
+ * 单 brief research 命令不记账（历史行为保持不变）。返回 L1 verdict（level/usage 等）。
+ */
+async function researchFinalize(repoRoot, r, { model, ledgerExtra = null } = {}) {
+  log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
+  log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
+  const snap = await snapshotCitations(repoRoot, r.id);
+  if (snap.failed.length) {
+    log(`  ⚠ ${snap.failed.length} 条快照失败（引用仍在 brief.md 可人工核）：${snap.failed.map((f) => f.url).slice(0, 3).join(', ')}${snap.failed.length > 3 ? '…' : ''}`);
+  } else {
+    log(`  ✓ ${snap.ok.length} 条引用已快照到 sources/（对账材料）`);
+  }
+  // L1 可信度初判（report-only）：数字/专名回查所引快照 + 引用深度比，落 verdict.json
+  const verdict = assessBrief(repoRoot, r.id, { model });
+  logVerdict(r.id, verdict, 'L1 快照回查');
+  if (ledgerExtra) {
+    appendResearchLedger(repoRoot, {
+      kind: 'l1',
+      brief_id: r.id,
+      model: model ?? null,
+      researcher_model: model ?? null,
+      level: verdict?.level ?? 'unknown',
+      hit_rate: verdict?.scores?.evidence != null ? verdict.scores.evidence / 100 : null,
+      decision: verdict?.usage?.internal_decision ?? null,
+      ...ledgerExtra,
+    });
+  }
+  return verdict;
+}
+
+/**
  * research——外部调研命令。产物：research/<id>/brief.md（五段契约 + 引用）+ sources/
  * 引用快照（尽力而为）。--selftest 实测后端 WebFetch/WebSearch 可用性（非 Anthropic
  * 网关上 WebSearch 常不可用；不可用时调研退化 WebFetch-only，引用不足的 brief 被拒收）。
@@ -3355,17 +3392,7 @@ async function cmdResearch(repoRoot, opts) {
       `可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
     );
   }
-  log(`调研 brief 已产出：${r.dir}/brief.md（引用 ${r.citations.length} 条）`);
-  log('引用快照落盘（尽力而为，单条失败不影响 brief）…');
-  const snap = await snapshotCitations(repoRoot, r.id);
-  if (snap.failed.length) {
-    log(`  ⚠ ${snap.failed.length} 条快照失败（引用仍在 brief.md 可人工核）：${snap.failed.map((f) => f.url).slice(0, 3).join(', ')}${snap.failed.length > 3 ? '…' : ''}`);
-  } else {
-    log(`  ✓ ${snap.ok.length} 条引用已快照到 sources/（对账材料）`);
-  }
-  // L1 可信度初判（report-only）：数字/专名回查所引快照 + 引用深度比，落 verdict.json
-  const verdict = assessBrief(repoRoot, r.id, { model });
-  logVerdict(r.id, verdict, 'L1 快照回查');
+  const verdict = await researchFinalize(repoRoot, r, { model });
   // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
   // 标题带项目名：飞书自定义关键词过滤按消息文本命中——标题不含项目名会被 19024 静默丢弃
   //（2026-11-09 实测：关键词=ModelDock 的机器人把无关键词的调研通知整条吞掉）
@@ -3376,6 +3403,68 @@ async function cmdResearch(repoRoot, opts) {
     }
   } catch { /* 通知失败不阻断 */ }
   log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
+}
+
+/**
+ * research multi——多维度调研（2026-11-09，multi-dim 方案 P1 机制化，串行执行；并发池属 P2）：
+ * 一个主题 × N 个维度（--dim 逐个给，≥2 才算 multi，上限 research.maxDims 缺省 4）。
+ * 每维问题 = `主题——维度`，喂 runResearchSession（三连败重试自带）；brief id 强制
+ * <topic-slug>-d<N>（忽略模型自报 id——并行/连跑的 TOCTOU 竞态从命名空间上消灭）。
+ * 产物：每维一份 brief（同单 brief 契约）+ research/topics/<topic-id>.json 复合清单
+ * （dims 留痕 + rollup 最差档聚合）；单维失败隔离（记 failed 继续跑），全维失败才 die。
+ * 消费方契约：.agents/docs/research-verdict.md 的 topic 节（读 rollup.internal_decision 决策）。
+ */
+async function cmdResearchMulti(repoRoot, topic, opts) {
+  const cleanTopic = sanitizeIntent(topic);
+  if (!cleanTopic) die('用法：research multi "<主题>" --dim "<维度1>" --dim "<维度2>" … [--model <模型名>] [--backend mock]\n       维度 ≥2 才算 multi（单维问题直接用 research "<问题>"）');
+  const dims = (opts.dims ?? []).map((d) => sanitizeIntent(d)).filter(Boolean);
+  if (dims.length < 2) {
+    die(`multi 调研至少 2 个维度（收到 ${dims.length} 个）——单维问题直接用 research "<问题>"；多维用 --dim 逐个给（如 --dim 技术选型 --dim 成本 --dim 风险）。`);
+  }
+  const cfg = loadWorkflowConfig(repoRoot);
+  const maxDims = cfg.research?.maxDims ?? 4;
+  if (dims.length > maxDims) {
+    die(`维度数 ${dims.length} 超过上限 research.maxDims=${maxDims}——拆成多个 topic 分批跑，或在 .agents/workflow.json 的 research.maxDims 调大（正整数）。`);
+  }
+  opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
+  const model = opts.model || cfg.research?.model || undefined;
+  const topicId = deriveTopicId(repoRoot, slugifyTopic(cleanTopic));
+  log(`多维调研：${cleanTopic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——串行执行，单维失败隔离`);
+  const dimResults = [];
+  for (const [i, dim] of dims.entries()) {
+    const forcedId = `${topicId}-d${i + 1}`;
+    log(`── 维度 ${i + 1}/${dims.length}：${dim}（brief ${forcedId}）──`);
+    const r = await runResearchSession(repoRoot, { question: `${cleanTopic}——${dim}`, backendName: opts.backend, model, briefId: forcedId, topicId, dim });
+    if (!r || r.failed) {
+      // 失败隔离：该维记 failed（留最后一跳 stderr 尾摘要），批次继续——部分成功仍有价值
+      const tail = String(r?.stderrTail ?? '').trim().slice(-200);
+      log(`  ✗ 维度「${dim}」未产出 brief——已隔离，继续下一维`);
+      dimResults.push({ dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null });
+      continue;
+    }
+    const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: { topic_id: topicId, dim } });
+    dimResults.push({ dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' });
+  }
+  if (!dimResults.some((d) => d.status === 'ok')) {
+    die(
+      `多维调研全部 ${dimResults.length} 个维度失败（无一产出 brief）——逐维最后一跳 stderr：\n` +
+      dimResults.map((d) => `- ${d.dim}：${d.reason}`).join('\n') +
+      `\n可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
+    );
+  }
+  const rollup = rollupTopicVerdict(dimResults);
+  const topicObj = { id: topicId, topic: cleanTopic, created_at: toIsoLocal(), dims: dimResults, rollup };
+  const file = writeTopic(repoRoot, topicObj);
+  log(`topic 汇总已落盘：${file}（rollup ${rollup.level} / ${rollup.internal_decision}${rollup.partial ? '，partial：有失败维' : ''}）`);
+  // 汇总飞书通知（整批一条，不带按钮）：标题必须含项目名——飞书自定义关键词过滤按消息
+  // 文本命中，无关键词整条静默丢弃（HTTP 200 + code 19024，2026-11-09 实测）
+  try {
+    if (cfg.research?.notify !== false) {
+      const proj = displayProjectName(cfg.projectName ?? '');
+      await notify({ title: `${proj} 调研判定 ${topicId}（${rollup.level}）`, body: buildResearchMultiNotifyBody(topicObj), webhookEnvs: orchWebhookEnvs(repoRoot) });
+    }
+  } catch { /* 通知失败不阻断 */ }
+  log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${topicId}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${dimResults.find((d) => d.status === 'ok')?.brief_id}）`);
 }
 
 /** L1 判级结果统一播报（cmdResearch / 上游管线共用）——v2 verdict：维度分 + usage 决策。 */
@@ -3431,14 +3520,28 @@ async function researchSelftest(repoRoot, opts) {
 }
 
 /**
- * research verify <brief-id>——L2 异构复核（按需，落 spec/对外文档前跑）：
+ * research verify <brief-id|topic-id>——L2 异构复核（按需，落 spec/对外文档前跑）：
  * readonly 复核会话拿 brief + 快照文本判内部一致性（结论是否被引用支撑），产出
  * agents-verdict 契约块；与 L1 判级合并落 verdict.json 并记台账（L3）。判出 contradicted
  * 时自动追加一轮联网仲裁（≥2 独立带日期来源，upheld 翻案解除否决；research.arbitration=false 关）。
  * 复核船解耦：backend 缺省 review.backend（异构互审同语义），model 缺省 review.model；
  * 仲裁船模型缺省 research.model（检索接地强者）。
+ * id 命中 research/topics/<id>.json 时走 topic 模式（cmdResearchVerifyTopic：逐维复核 +
+ * rollup 重算）；单 brief id 路径行为不变。
  */
 async function cmdResearchVerify(repoRoot, id, opts) {
+  const topic = readTopic(repoRoot, id);
+  if (topic) return cmdResearchVerifyTopic(repoRoot, topic, opts);
+  return verifyBriefOnce(repoRoot, id, opts);
+}
+
+/**
+ * 单 brief L2 复核核心（cmdResearchVerify 与 topic 模式逐维共用，2026-11-09 从
+ * cmdResearchVerify 抽出——单 brief 路径行为逐字节不变）。silent=true（topic 模式逐维跑）
+ * 时跳过本 brief 的飞书通知（由 topic 汇总通知一条代替）；topicId/dim 透传进 l2 台账条目
+ * 溯源（topic 模式专用）。返回落盘的 verdict 对象（level/usage 供 topic rollup 重算）。
+ */
+async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = null, dim = null } = {}) {
   const brief = readBrief(repoRoot, id);
   if (!brief) die(`brief "${id}" 不存在（${researchDir(repoRoot)}）。research list 查看已有 brief。`);
   // 对既有 brief（早于 L1 机制产出、无 verdict.json）先补算 L1——verify 输出永远带 L1 回查面
@@ -3553,8 +3656,8 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         reasons,
       };
       fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
-      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision });
-      if (arbitration?.ran) appendResearchLedger(repoRoot, { kind: 'l2-arbitration', brief_id: id, model: arbitration.model, researcher_model: prevModel, upheld: arbitration.upheld ?? 0, overturned: arbitration.overturned ?? 0, undetermined: arbitration.undetermined ?? 0, veto_cleared: arbitration.veto_cleared ?? false, failed: arbitration.failed ?? false, decision: v.usage.internal_decision });
+      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
+      if (arbitration?.ran) appendResearchLedger(repoRoot, { kind: 'l2-arbitration', brief_id: id, model: arbitration.model, researcher_model: prevModel, upheld: arbitration.upheld ?? 0, overturned: arbitration.overturned ?? 0, undetermined: arbitration.undetermined ?? 0, veto_cleared: arbitration.veto_cleared ?? false, failed: arbitration.failed ?? false, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
       if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录已丢弃（编造红旗）`);
@@ -3563,13 +3666,14 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);
       // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
       // 标题带项目名：飞书自定义关键词过滤按消息文本命中——无关键词整条静默丢弃（19024）
+      // silent（topic 模式逐维跑）：跳过单维通知，由 topic 汇总一条代替
       try {
-        if (cfg.research?.notify !== false) {
+        if (!silent && cfg.research?.notify !== false) {
           const proj = displayProjectName(cfg.projectName ?? '');
           await notify({ title: `${proj} 复核判定 ${id}（${v.level}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
         }
       } catch { /* 通知失败不阻断 */ }
-      return;
+      return verdict;
     }
   } finally {
     try {
@@ -3577,6 +3681,45 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
     } catch {}
   }
+}
+
+/**
+ * research verify <topic-id> 的 topic 模式（2026-11-09 multi P1）：逐维复用既有 L2 复核
+ * 核心（verifyBriefOnce，单维行为与单 brief verify 完全一致），全维完成后重算 rollup、
+ * 更新 topic.json、补一条 topic 级台账；飞书通知整批一条（标题含项目名，19024 教训）。
+ * failed 维无复核产物——保留原状不参与聚合；ok 维的 brief 已被人工删除时保留原判定并告警。
+ */
+async function cmdResearchVerifyTopic(repoRoot, topic, opts) {
+  const cfg = loadWorkflowConfig(repoRoot);
+  log(`═══ topic 复核：${topic.id}（${(topic.dims ?? []).length} 维，逐维 L2，复核船 ${opts.backend || cfg.review?.backend || 'claude-headless'}）═══`);
+  const dims = [];
+  for (const d of topic.dims ?? []) {
+    if (d?.status !== 'ok' || !d.brief_id) {
+      log(`  – 维度「${d?.dim}」原为 failed（无 brief 产物）——保留原状，不参与 rollup`);
+      dims.push({ ...d });
+      continue;
+    }
+    if (!readBrief(repoRoot, d.brief_id)) {
+      log(`  ⚠ 维度「${d.dim}」的 brief ${d.brief_id} 已不存在——保留原判定（人工删除的产物不做复核）`);
+      dims.push({ ...d });
+      continue;
+    }
+    const verdict = await verifyBriefOnce(repoRoot, d.brief_id, opts, { silent: true, topicId: topic.id, dim: d.dim });
+    log(`  ✓ 维度「${d.dim}」（${d.brief_id}）→ ${verdict.level} / ${verdict.usage.internal_decision}`);
+    dims.push({ ...d, verdict_level: verdict.level, internal_decision: verdict.usage.internal_decision });
+  }
+  const rollup = rollupTopicVerdict(dims);
+  const updated = { ...topic, dims, rollup };
+  writeTopic(repoRoot, updated);
+  appendResearchLedger(repoRoot, { kind: 'topic-verify', topic_id: topic.id, level: rollup.level, decision: rollup.internal_decision, partial: rollup.partial === true });
+  log(`rollup 重算：${rollup.level} / ${rollup.internal_decision}${rollup.partial ? '（partial：有失败维，仅成功维参与聚合）' : ''}——topic.json 已更新`);
+  // 整批一条飞书通知（缩范围只推不做按钮；标题含项目名——关键词过滤 19024 静默吞消息的教训）
+  try {
+    if (cfg.research?.notify !== false) {
+      const proj = displayProjectName(cfg.projectName ?? '');
+      await notify({ title: `${proj} 复核判定 ${topic.id}（${rollup.level}）`, body: buildResearchMultiNotifyBody(updated), webhookEnvs: orchWebhookEnvs(repoRoot) });
+    }
+  } catch { /* 通知失败不阻断 */ }
 }
 
 /** research stats——L3 台账聚合：按调研船模型看核实率与判级分布（信任=统计量）。 */
@@ -4441,8 +4584,10 @@ function usage() {
   research "<调研问题>" [--min-citations N] [--model <模型名>] [--backend mock]
                                           上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
   research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
-  research verify <brief-id> [--backend …] [--model m]
-                                          L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账；判出矛盾自动跑联网仲裁轮（upheld 翻案解除否决；research.arbitration=false 关）——落 spec/对外文档前建议跑
+  research multi "<主题>" --dim "<维度1>" --dim "<维度2>" … [--model <模型名>] [--backend mock]
+                                          多维调研（维度 ≥2，上限 research.maxDims 缺省 4）：每维派一次 researcher（维度问题 = 主题——维度），brief id 强制 <topic>-d<N>；单维失败隔离不炸批次；落 research/topics/<topic-id>.json（dims 明细 + rollup 最差档聚合，消费方契约见 .agents/docs/research-verdict.md topic 节）
+  research verify <brief-id|topic-id> [--backend …] [--model m]
+                                          L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账；判出矛盾自动跑联网仲裁轮（upheld 翻案解除否决；research.arbitration=false 关）——落 spec/对外文档前建议跑；topic-id 走逐维复核并重算 topic rollup
   research stats                          L3 可信度台账：按调研船模型聚合核实率与判级分布（信任=统计量）
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
@@ -4507,6 +4652,7 @@ async function main() {
     else if (a === '--max-cost-usd') opts.maxCostUsd = parseFloat(argv[++i]);
     else if (a === '--from-brief') opts.fromBrief = argv[++i];
     else if (a === '--min-citations') opts.minCitations = parseInt(argv[++i], 10);
+    else if (a === '--dim') (opts.dims ??= []).push(argv[++i]); // research multi：可重复，每维一项
     else if (a === '--model') opts.model = argv[++i];
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
@@ -4564,8 +4710,9 @@ async function main() {
     case 'propose':
       return cmdPropose(repoRoot, opts);
     case 'research':
+      if (args[0] === 'multi') return cmdResearchMulti(repoRoot, args.slice(1).join(' ').trim(), opts);
       if (args[0] === 'verify') {
-        if (!args[1]) die('用法：research verify <brief-id> [--backend <复核船>] [--model <名>]——L2 异构复核（readonly，落 verdict.json + 台账）');
+        if (!args[1]) die('用法：research verify <brief-id|topic-id> [--backend <复核船>] [--model <名>]——L2 异构复核（readonly，落 verdict.json + 台账；topic-id 走逐维复核 + rollup 重算）');
         return cmdResearchVerify(repoRoot, args[1], opts);
       }
       if (args[0] === 'stats') return cmdResearchStats(repoRoot);

@@ -50,6 +50,27 @@ L2 复核船无联网、只拿快照裁断；快照自身误导（页面 publish
 
 **消费方语义不变**：仍只读 `usage.internal_decision`——仲裁只是让 unsafe 的成立需要经过外部证据检验，`overturned/undetermined` 的 unsafe 与从前完全同义。
 
+## topic（research multi 的复合清单，2026-11-09）
+
+`research multi "<主题>" --dim "<维度1>" --dim "<维度2>" …` 把一个主题按维度拆成 N 份 brief（每维 id 强制 `<topic-slug>-d<N>`，meta.json 带 `topic_id`/`dim` 溯源字段），另落一份复合清单 **`research/topics/<topic-id>.json`**：
+
+```json
+{
+  "id": "<topic-id>", "topic": "<主题>", "created_at": "<ISO>",
+  "dims": [
+    { "dim": "<维度>", "brief_id": "<id>", "status": "ok|failed", "reason": null,
+      "verdict_level": "pass|warn|fail|unknown|null", "internal_decision": "ok|needs_review|unsafe|undetermined|null" }
+  ],
+  "rollup": { "level": "<最差档>", "internal_decision": "<最差档>", "partial": true }
+}
+```
+
+**消费方读 `rollup.internal_decision` 决策**（语义与单 brief 的 `usage.internal_decision` 同矩阵：ok / needs_review / unsafe / undetermined），逐维明细在 `dims`。聚合规则（代码见 `rollupTopicVerdict`）：
+
+- rollup 只聚合 `status: "ok"` 的维，取**最差档**：`internal_decision` 序 `unsafe > needs_review > undetermined > ok`——任一维 unsafe 一票否决整批（与单 brief contradicted 否决同哲学）；`verdict_level` 序 `fail > warn > pass > unknown`。
+- failed 维不参与聚合但在 `dims` 留痕（`reason` = 最后一跳 stderr 尾摘要，`verdict_level`/`internal_decision` 为 null）；有失败维时 `rollup.partial: true`——rollup 只代表成功维的可信度下限，缺失维度需补跑。
+- `research verify <topic-id>` 走 topic 模式：逐维 L2 复核（每维行为与单 brief verify 完全一致，含仲裁轮）后重算 rollup、更新 topic.json、补一条 `kind: topic-verify` 台账。**未 verify 的 topic，各 ok 维判定是 L1 初判（恒 undetermined）——rollup 也只是 undetermined；消费前先 verify。**
+
 
 ## 消费方 agent 的标准动作
 

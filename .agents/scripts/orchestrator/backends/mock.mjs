@@ -12,6 +12,8 @@
 //   ORCH_MOCK_RESEARCH_STDERR=1          researcher 会话附带 unrecognized_model 签名 stderrTail
 //                                        （配 ORCH_MOCK_PLANNER_INVALID=1 测 research die 文案带
 //                                        stderr 摘要路径；复刻真实 claude CLI 死法）
+//   ORCH_MOCK_RESEARCH_FAIL_DIM=<子串>   调研问题含该子串的 researcher 会话输出无契约块
+//                                        （research multi 单维失败隔离：按维度点名失败）
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
@@ -203,9 +205,15 @@ export const mockBackend = {
     if (isResearcher) {
       // researcher 模式：输出一份带引用的 brief 契约块（research 命令端到端 / sail 上游管线 e2e）；
       // ORCH_MOCK_RESEARCH_NO_CITE=1 注入无引用产出（validateBriefBody 拒收重试路径测试）
+      // ORCH_MOCK_RESEARCH_FAIL_DIM=<维度子串>（research multi 单维失败隔离测试）：调研问题
+      // （`主题——维度`）含该子串的会话输出无契约块（3 连败 → 该维 failed），其余维度照常；
+      // 配合 ORCH_MOCK_RESEARCH_STDERR=1 让失败维的 reason 带 unrecognized_model 签名 stderr
       const noCite = process.env.ORCH_MOCK_RESEARCH_NO_CITE === '1';
+      const failDim = process.env.ORCH_MOCK_RESEARCH_FAIL_DIM ?? '';
+      const qLine = /调研问题：\s*(.+)$/m.exec(prompt)?.[1] ?? '';
+      const dimFailed = Boolean(failDim) && qLine.includes(failDim);
       const qId = /调研问题：\s*(.+)$/m.exec(prompt)?.[1]?.trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'planner-mock-brief';
-      const output = process.env.ORCH_MOCK_PLANNER_INVALID === '1'
+      const output = process.env.ORCH_MOCK_PLANNER_INVALID === '1' || dimFailed
         ? '我查了一些资料但没有产出契约块。'
         : [
             '调研完成,产出 brief。',
