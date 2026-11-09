@@ -10,10 +10,13 @@ import type { GatewayRuntime } from './types.js'
 export type TokenLimitTrip = 'rpm' | 'daily_tokens'
 
 /** 转发前检查（rpm 计数在此进行：请求即计数，含 in-flight 与失败）。返回 null = 放行；
- *  未配置 limits 的 harness（含 admin-test 伪 harness）恒放行且不建状态。 */
+ *  未配置 limits 的 harness（含 admin-test 伪 harness）恒放行且不建状态——ephemeral 例外：
+ *  provision 签发的临时 worker 无条件建账计量（gatewayProvision 场景只传 taskId 不配 limits，
+ *  沿用旧口径会让编排器预算实测账 day_billable_tokens 恒 0、预算熔断静默失效），无 limits 时
+ *  阈值判定全部不命中、恒放行，只恢复 day_tokens/day_billable_tokens 计数。 */
 export function checkTokenLimits(rt: GatewayRuntime, harnessId: string, now = Date.now()): TokenLimitTrip | null {
   const limits = rt.config.harness[harnessId]?.limits
-  if (!limits || (limits.rpm == null && limits.daily_tokens == null)) return null
+  if (!rt.ephemeral.has(harnessId) && (!limits || (limits.rpm == null && limits.daily_tokens == null))) return null
   let st = rt.tokenUsage.get(harnessId)
   if (!st) {
     st = { rpmStart: now, rpmCount: 0, dayKey: dayKeyOf(now), dayTokens: 0, dayBillableTokens: 0 }
@@ -23,18 +26,19 @@ export function checkTokenLimits(rt: GatewayRuntime, harnessId: string, now = Da
     st.rpmStart = now
     st.rpmCount = 0
   }
-  if (limits.rpm != null && st.rpmCount >= limits.rpm) return 'rpm'
+  if (limits?.rpm != null && st.rpmCount >= limits.rpm) return 'rpm'
   st.rpmCount += 1
   if (st.dayKey !== dayKeyOf(now)) {
     st.dayKey = dayKeyOf(now)
     st.dayTokens = 0
   }
-  if (limits.daily_tokens != null && st.dayTokens >= limits.daily_tokens) return 'daily_tokens'
+  if (limits?.daily_tokens != null && st.dayTokens >= limits.daily_tokens) return 'daily_tokens'
   return null
 }
 
 /** 响应后累计当日 token（usage 缺省/解析失败记 0——尽力而为，与 usage tap 同语义）。
- *  未经过 checkTokenLimits（无 limits 配置，无状态条目）时不建状态、静默跳过。
+ *  无状态条目时不建状态、静默跳过——ephemeral 例外（兜底建账：记账路径可能未经
+ *  checkTokenLimits，如测试直灌；见 checkTokenLimits 注）。
  *  双口径：dayTokens = 总口径（缓存读计入，daily_tokens 限额判定沿用）；dayBillableTokens =
  *  可计费口径（usage.billable_tokens，usage tap 按协议算好）——供 /_modeldock/harness-usage
  *  消费方（编排器预算实测账）做剔除缓存读的判定。旧 usage 无 billable_tokens 字段（旧网关
@@ -46,8 +50,12 @@ export function recordTokenUsage(
   now = Date.now()
 ): void {
   if (!usage) return
-  const st = rt.tokenUsage.get(harnessId)
-  if (!st) return
+  let st = rt.tokenUsage.get(harnessId)
+  if (!st) {
+    if (!rt.ephemeral.has(harnessId)) return
+    st = { rpmStart: now, rpmCount: 0, dayKey: dayKeyOf(now), dayTokens: 0, dayBillableTokens: 0 }
+    rt.tokenUsage.set(harnessId, st)
+  }
   if (st.dayKey !== dayKeyOf(now)) {
     st.dayKey = dayKeyOf(now)
     st.dayTokens = 0

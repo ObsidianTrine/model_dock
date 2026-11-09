@@ -24,6 +24,7 @@ import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
+import { recordModelOutcome } from '../src/gateway/state/routing.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
   return new Promise((resolve) => {
@@ -55,6 +56,40 @@ describe('latencyQuantiles（纯函数，Prometheus 线性插值口径）', () =
     expect(latencyQuantiles([5])).toEqual({ p50: 5, p95: 5, p99: 5 })
     const r = latencyQuantiles([1, 2])
     expect(r.p50).toBe(1.5)
+  })
+})
+
+describe('usage 聚合 latency_by_model（per-model 时延：只计成功且有 ms 的条目）', () => {
+  it('count/avg_ms/p50_ms/p95_ms 按模型聚合；失败条目与无 ms 条目不入账', () => {
+    const e = (over: Partial<LogEntry>): LogEntry => ({
+      ts: localIsoTs(),
+      harness: 'h',
+      profile: 'p',
+      provider: 'up',
+      model: 'm1',
+      path: '/v1/messages',
+      ...over,
+    })
+    const s = summarizeUsage([
+      e({ status: 200, ms: 100 }),
+      e({ status: 200, ms: 200 }),
+      e({ status: 200, ms: 300 }),
+      e({ model: 'm2', status: 200, ms: 50 }),
+      e({ status: 429, ms: 999 }), // 失败：ms 不入任何分位账
+      e({ status: 200, model: undefined }), // 无 model：跳过
+    ])
+    expect(s.latency_by_model).toEqual({
+      m1: { count: 3, avg_ms: 200, p50_ms: 200, p95_ms: 290 }, // [100,200,300] 线性插值
+      m2: { count: 1, avg_ms: 50, p50_ms: 50, p95_ms: 50 },
+    })
+    expect(s.latency.p50).toBe(150) // 全局口径不变：[50,100,200,300]
+  })
+
+  it('窗口内无可计时延条目：latency_by_model 空对象（与 latency 分位 null 并存）', () => {
+    const e = { ts: localIsoTs(), harness: 'h', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 500, ms: 10 } as LogEntry
+    const s = summarizeUsage([e])
+    expect(s.latency_by_model).toEqual({})
+    expect(s.latency.p50).toBeNull()
   })
 })
 
@@ -259,6 +294,26 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
     }
   })
 
+  it('metrics.model_meltdown：模型级熔断投影（与 provider 级 meltdown 同形、互不联动）', async () => {
+    const t = await setup()
+    try {
+      // 模型级记账（model_fallback 域）：quota×3 触发 (provider, model) 粒度熔断
+      for (let i = 0; i < 3; i++) recordModelOutcome(t.rt, 'up', 'glm-4.7', { ok: false, cls: 'quota' })
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.meltdown).toEqual([]) // 模型级记账不点亮 provider 级熔断（recordOutcome 分工）
+      expect(m1.model_meltdown).toHaveLength(1)
+      expect(m1.model_meltdown[0]).toMatchObject({ provider: 'up', model: 'glm-4.7', class: 'quota' })
+      expect(m1.model_meltdown[0].remaining_ms).toBeGreaterThan(0)
+      expect(typeof m1.model_meltdown[0].until).toBe('string')
+      // 未熔断的模型键不出现（缺席 = 无在熔断）
+      recordModelOutcome(t.rt, 'up', 'glm-4.7', { ok: true })
+      const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m2.model_meltdown).toEqual([])
+    } finally {
+      t.close()
+    }
+  })
+
   it('usage 聚合：成功/失败/无 status 分布、维度 tally、时延分位、用量口径（缓存计入输入）', async () => {
     const t = await setup()
     try {
@@ -375,6 +430,52 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       const body = JSON.parse((await request(t.port, `/_modeldock/usage?from=${yesterday}&to=${today}`, ADMIN)).body)
       expect(body.days).toEqual([yesterday, today])
       expect(body.usage.requests).toBe(2)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('usage bucket=hour：小时桶精简版（稀疏、按时排序、cost=0 为 null）；超窗仍 400', async () => {
+    const t = await setup()
+    try {
+      const today = localIsoTs().slice(0, 10)
+      const ts = (h: number, m: number) => `${today}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00.000`
+      const base = { harness: 'zcode', profile: 'p', provider: 'up', path: '/v1/messages' }
+      logRequest(t.rt, { ...base, ts: ts(8, 5), status: 200, ms: 100, model: 'm-a', usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      logRequest(t.rt, { ...base, ts: ts(8, 50), status: 429 })
+      logRequest(t.rt, { ...base, ts: ts(9, 10), status: 200, ms: 300, model: 'm-b', usage: { input_tokens: 5, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      logRequest(t.rt, { ...base, ts: ts(9, 40), status: 200, ms: 100, model: 'm-b' })
+      await drainAppendStreams()
+      const body = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&bucket=hour&cost=0`, ADMIN)).body)
+      expect(body.hours).toHaveLength(2) // 08/09 两个小时有流量，稀疏出桶
+      expect(body.hours[0]).toEqual({
+        hour: `${today}T08:00`,
+        requests: 2,
+        cost: null, // cost=0 免查价路径：桶内成本 null（与总账 cost null 同语义）
+        tokens: { input: 10, output: 2, cache_read: 0, cache_creation: 0 },
+        by_model: { 'm-a': 1 },
+        by_status: { '429': 1 },
+      })
+      expect(body.hours[1]).toEqual({
+        hour: `${today}T09:00`,
+        requests: 2,
+        cost: null,
+        tokens: { input: 5, output: 1, cache_read: 0, cache_creation: 0 },
+        by_model: { 'm-b': 2 },
+        by_status: {},
+      })
+      // 桶外口径：总账照常返回（latency_by_model 聚合正确性另见纯函数用例）
+      expect(body.usage.requests).toBe(4)
+      expect(body.usage.latency_by_model).toEqual({
+        'm-a': { count: 1, avg_ms: 100, p50_ms: 100, p95_ms: 100 },
+        'm-b': { count: 2, avg_ms: 200, p50_ms: 200, p95_ms: 290 },
+      })
+      // 缺省带查价器：cost 是数字（未配价模型按 0 计）
+      const withCost = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&bucket=hour`, ADMIN)).body)
+      expect(typeof withCost.hours[0].cost).toBe('number')
+      // 非法 bucket 值 400；超窗（>31 天）带 bucket=hour 仍 400
+      expect((await request(t.port, `/_modeldock/usage?date=${today}&bucket=day`, ADMIN)).status).toBe(400)
+      expect((await request(t.port, '/_modeldock/usage?from=2000-01-01&to=2030-01-01&bucket=hour', ADMIN)).status).toBe(400)
     } finally {
       t.close()
     }
