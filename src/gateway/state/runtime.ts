@@ -169,6 +169,15 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
     const mf = rt.config.providers[pid]?.model_fallback
     if (!rt.config.providers[pid] || !mf || !Object.hasOwn(mf, model)) rt.modelHealth?.delete(key)
   }
+  // 改发计数同口径清理（键与 modelHealth 同形：model = 被改发的原请求模型，必是该 provider
+  // model_fallback 的键）：映射被移除后计数失去语义，随之清掉；幸存键跨热加载保留观测连续性
+  for (const key of rt.modelFallbackCounts?.keys() ?? []) {
+    const sep = key.indexOf('\u0000')
+    const pid = sep === -1 ? key : key.slice(0, sep)
+    const model = sep === -1 ? '' : key.slice(sep + 1)
+    const mf = rt.config.providers[pid]?.model_fallback
+    if (!rt.config.providers[pid] || !mf || !Object.hasOwn(mf, model)) rt.modelFallbackCounts?.delete(key)
+  }
   // key 池运行态（失效冷却/轮转游标）全清：keys 配置可能已被改（换 key / 增删条目），
   // 按索引记账的冷却对新 key 不成立——人工换 key 后立即恢复轮转，无须等满 15min 冷却。
   // 内联清空而非引 state/keypool：state/ 四域模块互不引用（见本文件头拆分说明），types ← 四模块单向

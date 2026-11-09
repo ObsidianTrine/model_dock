@@ -160,6 +160,23 @@ export function isModelMeltdown(rt: GatewayRuntime, providerId: string, model: s
   return !!h && h.meltdown_until != null && h.meltdown_until > now
 }
 
+/** 模型级容灾改发计数（只观测，不参与熔断/门禁判定）：relay 两个改发决策点各计一次——
+ *  闸门预改写命中（absorbed=true，请求被吸收、未触达原模型上游）与链尾合成（absorbed=false，
+ *  原模型已被真实请求过）。键与 modelHealth 同口径（`${providerId}\u0000${model}`，model =
+ *  被改发的原请求模型），单调累计、熔断解除不清零（改发已发生是历史事实）。可选 + 惰性建表
+ *  （同 recordModelOutcome 先例）；消费面 /_modeldock/metrics 的 model_fallback 段。 */
+export function recordModelFallback(rt: GatewayRuntime, providerId: string, model: string, absorbed: boolean): void {
+  if (!rt.modelFallbackCounts) rt.modelFallbackCounts = new Map()
+  const key = `${providerId}\u0000${model}`
+  let s = rt.modelFallbackCounts.get(key)
+  if (!s) {
+    s = { fallbackCount: 0, absorbedCount: 0 }
+    rt.modelFallbackCounts.set(key, s)
+  }
+  s.fallbackCount++
+  if (absorbed) s.absorbedCount++
+}
+
 // 定时切换：时段求值（纯函数，每次选路实时计算，无定时器/无运行态）
 // parseHHmm 共享实现已上移 src/util/time.ts（syncdoc 校验同源，CORRECT-10）
 

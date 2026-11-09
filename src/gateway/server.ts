@@ -2123,7 +2123,8 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
 /** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
  *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
  *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类；model_meltdown 为
- *  模型级容灾（model_fallback 域）的同形投影，供编排侧按 (provider, model) 粒度避让。
+ *  模型级容灾（model_fallback 域）的同形投影，供编排侧按 (provider, model) 粒度避让；
+ *  model_fallback 为该域的改发计数投影（fallback_count/absorbed_count，见 ModelFallbackCounter）。
  *  海况扩展（只增不改，state/sea.ts）：providers[].errors 滑窗错误分桶（last_5m/last_60m 的
  *  分错误类计数与错误率）+ sea_state 聚合海况信号——同为编排侧风暴闸数据源。 */
 async function hMetrics(c: AdminCtx): Promise<void> {
@@ -2186,6 +2187,21 @@ async function hMetrics(c: AdminCtx): Promise<void> {
       remaining_ms: h.meltdown_until - now,
     })
   }
+  // 模型级容灾改发计数投影（model_fallback 域，ModelFallbackCounter）：与 model_meltdown 同形
+  // 位置、同键口径（key = `${providerId}\u0000${model}`，model = 被改发的原请求模型），纯内存读。
+  // fallback_count = 改发累计（闸门预改写 + 链尾合成两路）；absorbed_count = 其中闸门吸收
+  // （请求未触达原模型上游）的次数。单调累计（进程生命周期），熔断解除不清零——改发已发生
+  // 是历史事实；只露有改发的条目（缺席 = 该键从未改发，与 model_meltdown 的缺席语义一致）。
+  const model_fallback: Array<{ provider: string; model: string; fallback_count: number; absorbed_count: number }> = []
+  for (const [key, s] of rt.modelFallbackCounts ?? []) {
+    const sep = key.indexOf('\u0000')
+    model_fallback.push({
+      provider: sep === -1 ? key : key.slice(0, sep),
+      model: sep === -1 ? '' : key.slice(sep + 1),
+      fallback_count: s.fallbackCount,
+      absorbed_count: s.absorbedCount,
+    })
+  }
   // key 池健康（P1⑥ 观测面）：per-provider 配置的 key 数量与失效冷却中的索引（含剩余 ms）。
   // 只有数量/索引/时间，绝无 key 明文或引用原文（ref 可能内嵌明文 key，一律不出域）。
   // 不实际读 key（无 IO，metrics 是轻量端点）：total=配置引用数；healthy=total-冷却数——
@@ -2196,7 +2212,7 @@ async function hMetrics(c: AdminCtx): Promise<void> {
     keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, model_meltdown, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, model_meltdown, model_fallback, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
 }
 
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。

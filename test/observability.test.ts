@@ -24,7 +24,7 @@ import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
-import { recordModelOutcome } from '../src/gateway/state/routing.js'
+import { recordModelFallback, recordModelOutcome } from '../src/gateway/state/routing.js'
 import { setSecret } from '../src/config/secrets.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
@@ -310,6 +310,25 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       recordModelOutcome(t.rt, 'up', 'glm-4.7', { ok: true })
       const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
       expect(m2.model_meltdown).toEqual([])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('metrics.model_fallback：模型级容灾改发计数投影（闸门吸收双计/链尾合成只计 fallback，未改发缺席）', async () => {
+    const t = await setup()
+    try {
+      // 未改发：缺席（与 model_meltdown「缺席 = 无」的口径一致）
+      const m0 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m0.model_fallback).toEqual([])
+      // 闸门吸收（absorbed=true：fallback/absorbed 双计）+ 链尾合成（absorbed=false：只计 fallback）
+      recordModelFallback(t.rt, 'up', 'glm-4.7', true)
+      recordModelFallback(t.rt, 'up', 'glm-4.7', false)
+      recordModelFallback(t.rt, 'up', 'glm-4.8', false)
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.model_fallback).toHaveLength(2)
+      expect(m1.model_fallback[0]).toMatchObject({ provider: 'up', model: 'glm-4.7', fallback_count: 2, absorbed_count: 1 })
+      expect(m1.model_fallback[1]).toMatchObject({ provider: 'up', model: 'glm-4.8', fallback_count: 1, absorbed_count: 0 })
     } finally {
       t.close()
     }
