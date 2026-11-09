@@ -29,7 +29,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, summarizeUsageDaysWithHours, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry, type UsageHourBucket } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, renewEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, summarizeUsageDaysWithHours, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry, type UsageHourBucket } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
@@ -1579,6 +1579,38 @@ async function hRevokeHarness(c: AdminCtx): Promise<void> {
   return
 }
 
+/** POST /_modeldock/harness/renew：临时 harness TTL 续期（admin 门内）。网关 P1「TTL 无续期」
+ *  的网关半边：超长任务凭据临期续一把，不再中途 401（编排器侧 ttlHours 传参另行落地）。
+ *  请求 {harnessId, ttl_minutes}（harnessId = provision 响应返回的临时 id；ttl 需正数分钟）；
+ *  新到期 = max(旧到期, now+ttl) 收敛到与 provision 同顶 1440min——只延不缩，缩短请求 = 无效
+ *  no-op（到期不变，响应如实回报）。已过期拒绝（410）：sweeper 60s 节奏未及摘除的窗口内同样
+ *  拒绝，过期凭据不得复活；非在册临时条目（未知 id / 持久 harness / 已吊销或已清扫）404。
+ *  token 不换发也不回显（响应与审计均无 token 明文，凭据身份 = id）；热加载幸存语义不变
+ *  （expiresAt 是 reapply 基准，renew 后过 reload 依旧有效）。 */
+async function hRenewHarness(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const id = typeof b.harnessId === 'string' ? b.harnessId.trim() : ''
+  if (!id) return sendError(res, 400, t('缺少 harnessId（provision 响应返回的临时 harness id）', 'Missing harnessId (the ephemeral harness id returned by provision)'))
+  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes != null ? Number(b.ttl_minutes) : NaN
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    return sendError(res, 400, t('ttl_minutes 非法：需为正数（分钟）。续期只延不缩，请求值小于剩余寿命时到期不变', 'Invalid ttl_minutes: must be a positive number (minutes). Renewal only extends; a value below the remaining lifetime leaves the expiry unchanged'))
+  }
+  const r = renewEphemeralHarness(rt, id, ttl)
+  if (!r.ok) {
+    if (r.reason === 'expired') {
+      return sendError(res, 410, t('临时凭据「{id}」已过期，拒绝续期：过期凭据不得复活，请重新 provision 签发新凭据', 'Ephemeral credential "{id}" has expired; renewal is refused — expired credentials must not be revived, provision a new one instead', { id }))
+    }
+    return sendError(res, 404, t('「{id}」不是在册临时凭据（未知 id、持久 harness 或已吊销/已清扫）：renew 仅作用于 provision 签发的临时条目', '"{id}" is not a registered ephemeral credential (unknown id, persistent harness, or already revoked/swept): renew applies only to entries issued via provision', { id }))
+  }
+  const expiresIso = new Date(r.state.expiresAt).toISOString()
+  // 审计不含 token 明文（与 provision 同口径）：凭据身份 = id + 续后到期
+  audit(bi('续期临时凭据', 'Renew ephemeral credential'), id, bi(`TTL 延至 ${expiresIso}`, `TTL extended to ${expiresIso}`))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, id, expires_at: expiresIso, ttl_minutes: r.ttlMinutes }))
+  return
+}
+
 async function hServiceDelete(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   const b = await jsonRequestBody(req)
@@ -2544,6 +2576,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/harness/mode': hHarnessMode,
   'POST /_modeldock/harness/provision': hProvisionHarness,
   'POST /_modeldock/harness/revoke': hRevokeHarness,
+  'POST /_modeldock/harness/renew': hRenewHarness,
   'POST /_modeldock/use': hUse,
   'POST /_modeldock/profile': hProfile,
   'POST /_modeldock/key': hKey,
