@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, topicPath, rollupTopicVerdict, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3056,32 +3056,51 @@ async function cmdPropose(repoRoot, opts) {
  */
 async function cmdSpecStart(repoRoot, opts) {
   const intentText = (opts.intent ?? []).join(' ').trim();
-  if (!intentText) die('用法：spec "<一句话描述特性>" [--from-brief <brief-id[,id2…]>] [--backend mock]');
+  if (!intentText) die('用法：spec "<一句话描述特性>" [--from-brief <brief-id|topic-id[,id2…]>] [--backend mock]');
   opts.backend = resolveBackendName(opts, null).name; // 同 intent：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
 
   try {
-    // --from-brief <id[,id2…]>：调研结论（research 命令产出的 brief）注入 spec prompt——上游管线
-    // 的 glue（brief → spec），spec 三件套/人工审设计/spec build 全流程零改动复用。
-    // 值支持英文逗号分隔多个 brief id（容忍逗号两侧空格），multi-dim 调研的多份结论一次注入
+    // --from-brief <id[,id2…]>：调研结论（research 命令产出的 brief 或 multi 复合清单 topic）注入
+    // spec prompt——上游管线的 glue（brief/topic → spec），spec 三件套/人工审设计/spec build
+    // 全流程零改动复用。值支持英文逗号分隔多个 id（容忍逗号两侧空格），可混排 brief id 与 topic id。
+    // id 命中 topics/<id>.json → topic 模式（P2 2026-11-09）：按 ok 维展开 + 决策契约接线
+    //（读 rollup.internal_decision：unsafe 一票否决拒绝注入；undetermined 提示 L2 复核不阻断），
+    // 否则维持 brief 模式（单 brief 路径行为逐字节不变）。
     let briefBody = '';
     if (opts.fromBrief) {
       const briefIds = String(opts.fromBrief).split(',').map((s) => s.trim()).filter(Boolean);
       if (!briefIds.length) die(`--from-brief "${opts.fromBrief}" 未解析出任何 brief id。用法：--from-brief <brief-id[,id2…]>，research list 查看已有 brief。`);
       const missing = [];
-      const briefs = [];
+      const parts = []; // 每个 id 一个元素：topic → 展开整段（string，buildTopicSpecSections）；brief → { id, body }
       for (const id of briefIds) {
+        const topic = readTopic(repoRoot, id);
+        if (topic) {
+          // 决策契约接线（本卡灵魂）：消费方只读 rollup.internal_decision（契约见
+          // .agents/docs/research-verdict.md topic 节）——unsafe 一票否决按契约不可用于内部决策
+          const decision = topic.rollup?.internal_decision ?? 'undetermined';
+          if (decision === 'unsafe') {
+            die(`调研 topic "${id}" 的 rollup 判为 unsafe（任一维 contradicted——一票否决），按决策契约不可用于内部决策（消费方契约见 .agents/docs/research-verdict.md topic 节）。\n` +
+                `处置：作废重跑——把该 topic 归档到 .agents/orchestrator/research-void/，或修正矛盾维后重跑 research multi；rollup 解除后再注入 spec。`);
+          }
+          if (decision === 'undetermined') {
+            log(`⚠ 话题 ${id} 未 L2 复核（internal_decision=undetermined），建议先 research verify ${id}（不阻断本次注入）。`);
+          }
+          parts.push(buildTopicSpecSections(repoRoot, topic));
+          continue;
+        }
         const brief = readBrief(repoRoot, id);
         if (!brief) missing.push(id);
-        else briefs.push({ id, body: brief.body });
+        else parts.push({ id, body: brief.body });
       }
       if (missing.length) die(`调研 brief 不存在：${missing.map((id) => `"${id}"`).join('、')}（目录 ${researchDir(repoRoot)}）。research list 查看已有 brief。`);
-      // 单 id 保持 body 原文不包装：向后兼容（既有注入格式与测试断言依赖原文）；多 id 才拼分节
-      briefBody = briefs.length === 1
-        ? briefs[0].body
-        : briefs.map((b) => `# 调研结论（brief：${b.id}）\n\n${String(b.body).trim()}`).join('\n\n---\n\n');
+      // 单 id 且为 brief 保持 body 原文不包装：向后兼容（既有注入格式与测试断言依赖原文）；
+      // 其余按分节拼接（brief → P0 节格式；topic → 展开整段，节与缺口行由 buildTopicSpecSections 构建）
+      briefBody = briefIds.length === 1 && typeof parts[0] === 'object'
+        ? parts[0].body
+        : parts.map((p) => (typeof p === 'object' ? `# 调研结论（brief：${p.id}）\n\n${String(p.body).trim()}` : p)).join('\n\n---\n\n');
     }
     let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
     const MAX_ATTEMPTS = 3;
@@ -3411,12 +3430,34 @@ async function cmdResearch(repoRoot, opts) {
 }
 
 /**
- * research multi——多维度调研（2026-11-09，multi-dim 方案 P1 机制化，串行执行；并发池属 P2）：
+ * 有界并发池（2026-11-09 P2，multi 维度池与 verify topic 逐维复核共用）：同时最多 limit 个
+ * 任务在跑，results 按输入顺序回填（index 写回，与完成先后无关）。worker 任务自己兜失败
+ * （不得向池抛错）；die() 等进程退出路径不受影响（直接 exit，与串行同语义）。
+ */
+async function runBoundedPool(limit, count, starter) {
+  const results = new Array(count);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, count)) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= count) return;
+      results[i] = await starter(i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * research multi——多维度调研（2026-11-09，multi-dim 方案 P1 机制化；P2 起维度走有界并发池）：
  * 一个主题 × N 个维度（--dim 逐个给，≥2 才算 multi，上限 research.maxDims 缺省 4）。
- * 每维问题 = `主题——维度`，喂 runResearchSession（三连败重试自带）；brief id 强制
- * <topic-slug>-d<N>（忽略模型自报 id——并行/连跑的 TOCTOU 竞态从命名空间上消灭）。
+ * 每维问题 = `主题——维度`，喂 runResearchSession（三连败重试自带）；同时最多
+ * research.concurrency 维在跑（整数 1–4，缺省 2，非法值 resolveResearch warn+回落）；
+ * brief id 强制 <topic-slug>-d<N>（忽略模型自报 id——并行/连跑的 TOCTOU 竞态从命名空间上消灭）。
  * 产物：每维一份 brief（同单 brief 契约）+ research/topics/<topic-id>.json 复合清单
  * （dims 留痕 + rollup 最差档聚合）；单维失败隔离（记 failed 继续跑），全维失败才 die。
+ * dims 数组按 --dim 顺序回填（index 写回，与完成先后无关）——消费方依赖维序稳定。
+ * 落盘前 writeTopicAuto 竞态复检（同主题并行的 topic-id 互覆收口）。
  * 消费方契约：.agents/docs/research-verdict.md 的 topic 节（读 rollup.internal_decision 决策）。
  */
 async function cmdResearchMulti(repoRoot, topic, opts) {
@@ -3433,10 +3474,10 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
   }
   opts.backend = resolveBackendName(opts, null).name; // 规划家族不记账：缺省回落，防 undefined 直喂 getBackend
   const model = opts.model || cfg.research?.model || undefined;
+  const concurrency = cfg.research?.concurrency ?? 2; // resolveResearch 已校验 1–4；键缺省回落 2
   const topicId = deriveTopicId(repoRoot, slugifyTopic(cleanTopic));
-  log(`多维调研：${cleanTopic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——串行执行，单维失败隔离`);
-  const dimResults = [];
-  for (const [i, dim] of dims.entries()) {
+  log(`多维调研：${cleanTopic}（${dims.length} 维，topic-id ${topicId}${model ? `，调研船 ${model}` : ''}）——并发 ${concurrency}，单维失败隔离`);
+  const runDim = async (i, dim) => {
     const forcedId = `${topicId}-d${i + 1}`;
     log(`── 维度 ${i + 1}/${dims.length}：${dim}（brief ${forcedId}）──`);
     const r = await runResearchSession(repoRoot, { question: `${cleanTopic}——${dim}`, backendName: opts.backend, model, briefId: forcedId, topicId, dim });
@@ -3444,12 +3485,13 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
       // 失败隔离：该维记 failed（留最后一跳 stderr 尾摘要），批次继续——部分成功仍有价值
       const tail = String(r?.stderrTail ?? '').trim().slice(-200);
       log(`  ✗ 维度「${dim}」未产出 brief——已隔离，继续下一维`);
-      dimResults.push({ dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null });
-      continue;
+      return { dim, brief_id: null, status: 'failed', reason: tail || '（无 stderr 留痕）', verdict_level: null, internal_decision: null };
     }
     const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: { topic_id: topicId, dim } });
-    dimResults.push({ dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' });
-  }
+    return { dim, brief_id: r.id, status: 'ok', reason: null, verdict_level: verdict?.level ?? 'unknown', internal_decision: verdict?.usage?.internal_decision ?? 'undetermined' };
+  };
+  // 有界并发池：dims 按 --dim 顺序回填（runBoundedPool 的 index 写回保证，与完成先后无关）
+  const dimResults = await runBoundedPool(concurrency, dims.length, (i) => runDim(i, dims[i]));
   if (!dimResults.some((d) => d.status === 'ok')) {
     die(
       `多维调研全部 ${dimResults.length} 个维度失败（无一产出 brief）——逐维最后一跳 stderr：\n` +
@@ -3459,17 +3501,22 @@ async function cmdResearchMulti(repoRoot, topic, opts) {
   }
   const rollup = rollupTopicVerdict(dimResults);
   const topicObj = { id: topicId, topic: cleanTopic, created_at: toIsoLocal(), dims: dimResults, rollup };
-  const file = writeTopic(repoRoot, topicObj);
+  // 落盘瞬间竞态复检（P2）：deriveTopicId 是 check-then-write，同主题并行 multi 可能互覆——
+  // writeTopicAuto 'wx' 排他创建 + 占用续派 -2…-9（取舍注释见该函数）
+  const { file, id: finalTopicId } = writeTopicAuto(repoRoot, topicObj);
+  if (finalTopicId !== topicId) {
+    log(`⚠ topic-id ${topicId} 被并行的同主题调研占用——汇总续派 ${finalTopicId} 落盘（各维 brief 保留 ${topicId}-d<N> 命名空间，溯源不受影响）`);
+  }
   log(`topic 汇总已落盘：${file}（rollup ${rollup.level} / ${rollup.internal_decision}${rollup.partial ? '，partial：有失败维' : ''}）`);
   // 汇总飞书通知（整批一条，不带按钮）：标题必须含项目名——飞书自定义关键词过滤按消息
   // 文本命中，无关键词整条静默丢弃（HTTP 200 + code 19024，2026-11-09 实测）
   try {
     if (cfg.research?.notify !== false) {
       const proj = displayProjectName(cfg.projectName ?? '');
-      await notify({ title: `${proj} 调研判定 ${topicId}（${rollup.level}）`, body: buildResearchMultiNotifyBody(topicObj), webhookEnvs: orchWebhookEnvs(repoRoot) });
+      await notify({ title: `${proj} 调研判定 ${finalTopicId}（${rollup.level}）`, body: buildResearchMultiNotifyBody(topicObj), webhookEnvs: orchWebhookEnvs(repoRoot) });
     }
   } catch { /* 通知失败不阻断 */ }
-  log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${topicId}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${dimResults.find((d) => d.status === 'ok')?.brief_id}）`);
+  log(`逐维 L2 复核（复核后 rollup 重算）：research verify ${finalTopicId}\n单维结论进规格：spec "<意图>" --from-brief <brief-id>（如 ${dimResults.find((d) => d.status === 'ok')?.brief_id}）`);
 }
 
 /** L1 判级结果统一播报（cmdResearch / 上游管线共用）——v2 verdict：维度分 + usage 决策。 */
@@ -3689,30 +3736,32 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
 }
 
 /**
- * research verify <topic-id> 的 topic 模式（2026-11-09 multi P1）：逐维复用既有 L2 复核
- * 核心（verifyBriefOnce，单维行为与单 brief verify 完全一致），全维完成后重算 rollup、
- * 更新 topic.json、补一条 topic 级台账；飞书通知整批一条（标题含项目名，19024 教训）。
- * failed 维无复核产物——保留原状不参与聚合；ok 维的 brief 已被人工删除时保留原判定并告警。
+ * research verify <topic-id> 的 topic 模式（2026-11-09 multi P1；P2 起逐维复核并入有界并发池）：
+ * 逐维复用既有 L2 复核核心（verifyBriefOnce，单维行为与单 brief verify 完全一致），同时最多
+ * research.concurrency 维在跑（与 multi 同一上限，缺省 2）；dims 按 topic.json 原维序回填
+ * （index 写回，与完成先后无关），全维完成后重算 rollup（rollupTopicVerdict 最差档聚合，
+ * 与完成顺序无关）、更新 topic.json、补一条 topic 级台账；飞书通知整批一条（标题含项目名，
+ * 19024 教训）。failed 维无复核产物——保留原状不参与聚合；ok 维的 brief 已被人工删除时
+ * 保留原判定并告警。
  */
 async function cmdResearchVerifyTopic(repoRoot, topic, opts) {
   const cfg = loadWorkflowConfig(repoRoot);
-  log(`═══ topic 复核：${topic.id}（${(topic.dims ?? []).length} 维，逐维 L2，复核船 ${opts.backend || cfg.review?.backend || 'claude-headless'}）═══`);
-  const dims = [];
-  for (const d of topic.dims ?? []) {
+  const concurrency = cfg.research?.concurrency ?? 2; // resolveResearch 已校验 1–4；键缺省回落 2
+  log(`═══ topic 复核：${topic.id}（${(topic.dims ?? []).length} 维，逐维 L2 并发 ${concurrency}，复核船 ${opts.backend || cfg.review?.backend || 'claude-headless'}）═══`);
+  const dims = await runBoundedPool(concurrency, (topic.dims ?? []).length, async (i) => {
+    const d = (topic.dims ?? [])[i];
     if (d?.status !== 'ok' || !d.brief_id) {
       log(`  – 维度「${d?.dim}」原为 failed（无 brief 产物）——保留原状，不参与 rollup`);
-      dims.push({ ...d });
-      continue;
+      return { ...d };
     }
     if (!readBrief(repoRoot, d.brief_id)) {
       log(`  ⚠ 维度「${d.dim}」的 brief ${d.brief_id} 已不存在——保留原判定（人工删除的产物不做复核）`);
-      dims.push({ ...d });
-      continue;
+      return { ...d };
     }
     const verdict = await verifyBriefOnce(repoRoot, d.brief_id, opts, { silent: true, topicId: topic.id, dim: d.dim });
     log(`  ✓ 维度「${d.dim}」（${d.brief_id}）→ ${verdict.level} / ${verdict.usage.internal_decision}`);
-    dims.push({ ...d, verdict_level: verdict.level, internal_decision: verdict.usage.internal_decision });
-  }
+    return { ...d, verdict_level: verdict.level, internal_decision: verdict.usage.internal_decision };
+  });
   const rollup = rollupTopicVerdict(dims);
   const updated = { ...topic, dims, rollup };
   writeTopic(repoRoot, updated);
@@ -4581,8 +4630,8 @@ function usage() {
                                           清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
-  spec "<一句话描述特性>" [--from-brief <brief-id[,id2…]>] [--backend mock]
-                                          规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡；--from-brief 把调研 brief 结论注入设计
+  spec "<一句话描述特性>" [--from-brief <brief-id|topic-id[,id2…]>] [--backend mock]
+                                          规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡；--from-brief 把调研结论注入设计（brief 或 multi 复合清单 topic——按维展开，rollup unsafe 一票否决拒绝注入）
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
