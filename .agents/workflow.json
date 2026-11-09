@@ -87,6 +87,11 @@
   "autoResume": {
     "enabled": true
   },
+  "autoApprove": {
+    "enabled": true,
+    "timeoutMinutes": 3,
+    "maxAutoRetry": 1
+  },
   "configGuard": {
     "enabled": true
   },

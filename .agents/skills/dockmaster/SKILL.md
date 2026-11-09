@@ -112,7 +112,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 落位处置：
 - **merged** → 完成（L1 自动合并进本地 develop）。
-- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。
+- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。L3 闸门另有超时委托（D6.5）：落位后缺省 3 分钟内没批，autoapprove sweep 会按最后一条审查结论的推荐自动执行（blockers=0 合并 / >0 限次返工；无审查结论 fail-closed 不动）——所以要批示就趁窗口内批，超时后再批也以先到者为准。
 - **blocked / failed** → 异常处置速查（文末）。
 
 ## 第 4 步：收尾汇报

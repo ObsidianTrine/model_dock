@@ -65,9 +65,9 @@ import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { readNightlyState, writeNightlyState, decideNightlyStart } from './orchestrator/nightly-state.mjs';
-import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
+import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress, specDir } from './orchestrator/spec.mjs';
 import { runSpecL0Checks, auditSpecFindings, computeSpecVerdict, parseSpecVerdictBlock, buildSpecReviewNotifyBody } from './orchestrator/spec-review.mjs';
-import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
+import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock, SCHED_LOCK_ENV } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
 import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
@@ -1214,6 +1214,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         log(fastlaneWanted ? 'fastlane 轻卡（跳过 LLM 审查），任务已进入 awaiting-human/（人工合并闸门）。' : '审查通过，任务已进入 awaiting-human/（L3 人工合并闸门）。');
         printGateSummary(taskId, summary);
         log(`人工操作：node .agents/scripts/orchestrator.mjs approve|reject|retry ${taskId}`);
+        // 分层审核超时委托（D6.5）：落位后拉起一次性 detached sweep——睡满拍板窗口后
+        // 仍未批示的卡按审查推荐自动执行；交互式闸门（人工在场）不拉起
+        maybeSpawnAutoApproveSweep(repoRoot, cfg);
       }
       appendEvent(qdir, 'budget_snapshot', { tokens_in: budget.tokens, tokens_billable: budget.billable, tokens_cache_read: budget.cacheRead, elapsed_min: Math.round((Date.now() - runStarted) / 60000) });
       return;
@@ -1663,6 +1666,214 @@ async function doRetry(repoRoot, taskId, root, qdir, note, opts) {
   moveCard(root, taskId, 'awaiting-human', 'running');
   log('已打回 running/，重新启动闭环……');
   await cmdRun(repoRoot, taskId, { ...opts, interactive: false });
+}
+
+// ---------------------------------------------------------------------------
+// 分层审核超时委托（D6.5，autoapprove sweep，2026-11-10）
+// ---------------------------------------------------------------------------
+//
+// L2/L3 卡落 awaiting-human 后人工有拍板窗口（autoApprove.timeoutMinutes，缺省 3 分钟）；
+// 超时未批示的卡由本 sweep 按最后一条 review_verdict 的推荐自动执行：
+//   blockers===0 / verdict==='skipped'（fastlane）→ 自动合并（doApprove source='auto'）
+//   blockers>0 → 自动返工（doRetry），每卡限 autoApprove.maxAutoRetry 次，超限留人
+//   无 review_verdict / 最后是 review_engine_failed / blockers 不可解析 → fail-closed 不动作
+// 红线（不可关闭）：① feature 提案的 intake 自动提交拒绝逻辑零改动；② drift 降级期间
+// sweep 整体跳过（恢复只能人工 drift --clear）；③ blockers>0 的卡永不自动合并，只返工；
+// ④ 没有审查结论的卡超时也绝不合并。
+// spec 环节同 sweep：review-verdict.json 结论 approve_to_build 且超时且未 build 过的规格
+// 直接拆卡（设计人审的分层超时执行）；blocked/rework 结论永不自动放行。
+
+/** 自动返工写回卡的补充指令（doRetry note，测试断言锚点）。 */
+const AUTOAPPROVE_RETRY_NOTE = '超时自动按审查结论返工（分层审核）';
+
+/**
+ * 取卡的最后一条有效 review_verdict：自尾部扫描，先遇到 review_verdict 返回它；
+ * 先遇到 review_engine_failed（其后的审查尝试以引擎故障收场）返回 null——fail-closed。
+ */
+function lastReviewVerdictEvent(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === 'review_verdict') return events[i];
+    if (events[i].type === 'review_engine_failed') return null;
+  }
+  return null;
+}
+
+/** 审查结论 → sweep 推荐动作：'merge' | 'retry' | null（null = fail-closed 不动作）。 */
+function recommendFromVerdict(ev) {
+  if (!ev) return null;
+  if (ev.verdict === 'skipped') return 'merge'; // fastlane 轻卡：审查有意跳过，非缺结论
+  if (ev.blockers === 0) return 'merge';
+  if (Number.isInteger(ev.blockers) && ev.blockers > 0) return 'retry';
+  return null; // blockers 缺失/-1（审查输出无契约块）等同无结论，保守不动作
+}
+
+/** sweep 动作的飞书通报（标题带项目名前缀防网关 19024 吞消息；尽力而为不阻断）。 */
+async function notifyAutoApproveAction(repoRoot, cfg, body) {
+  try {
+    await notify({
+      title: `${displayProjectName(cfg.projectName ?? '')} 超时自动批示`,
+      body,
+      webhookEnvs: orchWebhookEnvs(repoRoot),
+    });
+  } catch { /* 通知失败不阻断 sweep */ }
+}
+
+/** 同一卡同一原因的 autoapprove_skipped 已是最后一条事件时不重复写（降级期间周期性 sweep 防刷屏）。 */
+function lastEventIs(dir, type, reason) {
+  const evts = readEvents(dir);
+  const last = evts[evts.length - 1];
+  return Boolean(last && last.type === type && (reason === undefined || last.reason === reason));
+}
+
+/**
+ * autoapprove 一次性 sweep（CLI：`autoapprove [--timeout N] [--dry-run] [--sleep-first]`）。
+ * --sleep-first：先睡 timeout+0.5 分钟再扫（drain 落位后拉起的 detached sweep 用——给人工
+ * 留满拍板窗口；0.5 分钟余量吸收事件时间戳秒级偏差）。--timeout 覆盖 workflow.json 的
+ * timeoutMinutes（测试/临时收紧用，正整数分钟）。
+ * 全程持调度器锁（非阻塞抢，抢不到即退出防并发批示）；watch/sail/nightly 的周期 sweep
+ * spawnSync 本命令、子进程经 ORCH_SCHED_LOCK_HELD 豁免直接执行（父已持锁）。
+ */
+async function cmdAutoApprove(repoRoot, opts = {}) {
+  const root = queueRoot(repoRoot);
+  ensureQueue(root);
+  const cfg = loadWorkflowConfig(repoRoot);
+  const aa = cfg.autoApprove ?? { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1 };
+  let timeoutMinutes = aa.timeoutMinutes;
+  if (opts.timeout !== undefined) {
+    if (!Number.isInteger(opts.timeout) || opts.timeout <= 0) {
+      die('用法：autoapprove [--timeout N] [--dry-run]——--timeout 须为正整数（分钟）。');
+    }
+    timeoutMinutes = opts.timeout;
+  }
+  if (opts.flags?.has('--sleep-first')) {
+    await new Promise((r) => setTimeout(r, Math.round((timeoutMinutes + 0.5) * 60_000)));
+  }
+  const lock = acquireSchedulerLock(repoRoot, 'autoapprove');
+  if (!lock.held) {
+    log(`⏸ 调度器已在运行（pid=${lock.owner.pid}，${lock.owner.cmd ?? ''}）——autoapprove sweep 退出，不并发批示。`);
+    return;
+  }
+  const dryRun = opts.flags?.has('--dry-run') === true;
+  const enabled = aa.enabled === true;
+  const degraded = readDegraded(repoRoot);
+  // 可执行 = 功能开 && 非 dry-run && 无降级；留痕 = 功能开 && 非 dry-run（降级跳过也留痕）
+  const act = enabled && !dryRun && !degraded;
+  const trace = enabled && !dryRun;
+  const report = { merged: [], retried: [], retryLimit: [], noVerdict: [], waiting: [], specBuilt: [], specWaiting: [] };
+  const timeoutMs = timeoutMinutes * 60_000;
+  try {
+    if (degraded) {
+      // 红线②：drift 降级期间 sweep 整体跳过（含 spec 环节），逐卡留痕（gate_result 风格）；
+      // 恢复 drift --clear 后下一轮 sweep 再按推荐执行。
+      if (trace) {
+        for (const taskId of listCards(root, 'awaiting-human')) {
+          const qdir = logDir(repoRoot, taskId);
+          if (!lastEventIs(qdir, 'autoapprove_skipped', 'drift_degraded')) {
+            appendEvent(qdir, 'autoapprove_skipped', { reason: 'drift_degraded', detail: String(degraded.reason ?? '').slice(0, 200) });
+          }
+        }
+      }
+    } else {
+      for (const taskId of listCards(root, 'awaiting-human')) {
+        const qdir = logDir(repoRoot, taskId);
+        const verdict = lastReviewVerdictEvent(readEvents(qdir));
+        const rec = recommendFromVerdict(verdict);
+        if (!verdict || !rec) {
+          // 红线④：没有可执行的审查结论——超时也绝不自动动作
+          report.noVerdict.push(taskId);
+          if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'no_verdict')) {
+            appendEvent(qdir, 'autoapprove_skipped', { reason: 'no_verdict' });
+          }
+          continue;
+        }
+        const ageMs = Date.now() - Date.parse(verdict.ts ?? '');
+        if (!Number.isFinite(ageMs) || ageMs < timeoutMs) {
+          report.waiting.push(taskId); // 拍板窗口未过：留人
+          continue;
+        }
+        if (rec === 'merge') {
+          report.merged.push(taskId);
+          if (!act) continue;
+          appendEvent(qdir, 'autoapprove_decision', { decision: 'merge', source: 'timeout', verdict_ts: verdict.ts });
+          await doApprove(repoRoot, taskId, root, qdir, 'auto');
+          await notifyAutoApproveAction(repoRoot, cfg, `卡 ${taskId}：审查 blockers=0 且超时 ${timeoutMinutes} 分钟——已按推荐自动合并（merged/）`);
+        } else {
+          // 红线③：blockers>0 永不自动合并——只自动返工，且每卡限 maxAutoRetry 次
+          const retries = readEvents(qdir).filter((e) => e.type === 'autoapprove_decision' && e.decision === 'retry').length;
+          if (retries >= aa.maxAutoRetry) {
+            report.retryLimit.push(taskId);
+            if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'retry_limit')) {
+              appendEvent(qdir, 'autoapprove_skipped', { reason: 'retry_limit', retries });
+            }
+            continue;
+          }
+          report.retried.push(taskId);
+          if (!act) continue;
+          appendEvent(qdir, 'autoapprove_decision', { decision: 'retry', source: 'timeout', verdict_ts: verdict.ts });
+          await doRetry(repoRoot, taskId, root, qdir, AUTOAPPROVE_RETRY_NOTE, {});
+          await notifyAutoApproveAction(repoRoot, cfg, `卡 ${taskId}：审查 blockers=${verdict.blockers} 且超时 ${timeoutMinutes} 分钟——已按推荐自动返工（第 ${retries + 1}/${aa.maxAutoRetry} 次）`);
+        }
+      }
+      // ---- spec 分层超时：设计人审的委托（审查 approve_to_build 且超时且未 build 过 → 拆卡）----
+      for (const id of listSpecs(repoRoot)) {
+        const dir = specDir(repoRoot, id);
+        if (!fs.existsSync(path.join(dir, 'review-verdict.json'))) continue;
+        if (fs.existsSync(path.join(dir, 'progress.json'))) continue; // 已 build 过（幂等锚）
+        let v = null;
+        try { v = JSON.parse(fs.readFileSync(path.join(dir, 'review-verdict.json'), 'utf8')); } catch { continue; }
+        if (v?.usage?.build_ready !== 'approve_to_build') continue; // blocked/rework 永不自动放行
+        const ageMs = Date.now() - Date.parse(v.created_at ?? '');
+        if (!Number.isFinite(ageMs) || ageMs < timeoutMs) {
+          report.specWaiting.push(id);
+          continue;
+        }
+        report.specBuilt.push(id);
+        if (!act) continue;
+        cmdSpecBuild(repoRoot, id);
+        await notifyAutoApproveAction(repoRoot, cfg, `规格 ${id}：审查 approve_to_build 且超时 ${timeoutMinutes} 分钟——已按推荐自动拆卡（pending/）`);
+      }
+    }
+  } finally {
+    releaseSchedulerLock(repoRoot);
+  }
+  // 报告（enabled=false / dry-run 同样盘点，只是不动作——动作行加「建议」标记防误读）
+  const fmt = (a) => a.join(', ');
+  const acted = act ? '' : '（建议，未执行）';
+  log(`═══ autoapprove sweep（enabled=${enabled}，timeout=${timeoutMinutes}min${dryRun ? '，dry-run' : ''}${degraded ? '，⚠ drift 降级中——整体跳过' : ''}）═══`);
+  if (report.merged.length) log(`  自动合并${acted}：${fmt(report.merged)}`);
+  if (report.retried.length) log(`  自动返工${acted}：${fmt(report.retried)}`);
+  if (report.retryLimit.length) log(`  返工超限留人：${fmt(report.retryLimit)}`);
+  if (report.noVerdict.length) log(`  fail-closed（无审查结论，不动作）：${fmt(report.noVerdict)}`);
+  if (report.waiting.length) log(`  拍板窗口未过：${fmt(report.waiting)}`);
+  if (report.specBuilt.length) log(`  spec 自动拆卡${acted}：${fmt(report.specBuilt)}`);
+  if (report.specWaiting.length) log(`  spec 拍板窗口未过：${fmt(report.specWaiting)}`);
+  if (!report.merged.length && !report.retried.length && !report.retryLimit.length && !report.noVerdict.length && !report.waiting.length && !report.specBuilt.length && !report.specWaiting.length) {
+    log('  无待批示项。');
+  }
+  if (dryRun) log('  （dry-run：以上为建议动作，未实际执行）');
+}
+
+/**
+ * drain 落位 awaiting-human 后拉起一次性 detached sweep（D6.5 接线）：先睡
+ * timeout+0.5 分钟（人工拍板窗口）再扫，到点仍未批示才按推荐执行。enabled 且确有
+ * 待批示卡才拉起；sweep 自己抢调度器锁——drain 未收尾时它会自行退出，不并发。
+ * 交互式闸门（人工在场）不拉起。detach + unref：run 子进程正常退出不受影响。
+ */
+function maybeSpawnAutoApproveSweep(repoRoot, cfg) {
+  try {
+    if (cfg.autoApprove?.enabled !== true) return;
+    if (!listCards(queueRoot(repoRoot), 'awaiting-human').length) return;
+    // run 子进程可能带着父调度器的锁豁免 env（drain spawn 时注入）——必须剥掉，
+    // 否则 sweep 跳过自己的抢锁检查，与仍在跑的 drain 并发批示
+    const sweepEnv = { ...process.env };
+    delete sweepEnv[SCHED_LOCK_ENV];
+    spawn(process.execPath, [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'autoapprove', '--sleep-first'], {
+      cwd: repoRoot,
+      detached: true,
+      stdio: 'ignore',
+      env: sweepEnv,
+    }).unref();
+  } catch { /* 尽力而为：拉起失败不影响本轮落位（watch/sail/nightly 周期 sweep 兜底） */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -4341,6 +4552,9 @@ async function cmdNightly(repoRoot, opts) {
   ensureQueue(root);
   const ncfg = runConfig(repoRoot); // repoRoot 锚定（风暴闸/巡检信号共用；勿与收尾处的 loadWorkflowConfig 混名）
   const childEnv = { ...process.env, ...childEnvForHeldLock() };
+  // 分层审核超时 sweep（D6.5）：巡检开头先清一遍到期审查结论（watch/sail 同款 spawnSync 同步；
+  // 子进程经 ORCH_SCHED_LOCK_HELD 豁免直接执行——调度锁在本进程手里）
+  spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
   let created = [];
   let skipped = [];
   let warnings = [];
@@ -4543,6 +4757,10 @@ async function cmdWatch(repoRoot, opts) {
       }
       // 1) pending 非空 → drain（autopilot.autoDrainPerCycle > 0 时按它设每周期上限）
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读：改配置即时生效
+      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论——spawnSync 同步跑，
+      // 子进程吃 die 隔离（finish 失败不炸 watch 主循环）；本进程已持调度器锁，子进程
+      // 经 ORCH_SCHED_LOCK_HELD 豁免直接执行
+      spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
       // 配置守卫（B7）：workflow.json 漂移期间跳过派发/重探（改配置即时生效的老语义让位
       // 给守卫——被改的授权面不再静默生效；文件改回基线或重启编排器后恢复）
       const configPaused = !configGuardPass(repoRoot, cfg);
@@ -4744,6 +4962,8 @@ async function cmdSail(repoRoot, opts) {
         break;
       }
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读（watch 同款：改配置即时生效）
+      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论（watch 同款 spawnSync 同步）
+      spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
       const weather = cfg.weatherHold ? weatherHoldCount(repoRoot, cfg) : { held: false, count: 0 };
       // 配置守卫（B7）：workflow.json 漂移期间跳过派发与规划（同风暴闸语义；改回基线或
       // 重启后恢复）
@@ -4990,6 +5210,7 @@ function usage() {
                                           启动单任务闭环（--next 自动取最高优先级 pending；审查后端缺省自动异构互审）
   drain [--max N] [--workers N] [--backend mock] [--review-backend …]
                                           清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
+  autoapprove [--timeout N] [--dry-run]   分层审核超时 sweep（D6.5）：扫 awaiting-human 卡与 spec 审查结论，把拍板窗口（autoApprove.timeoutMinutes 缺省 3 分钟）已过的按最后一条 review_verdict 推荐自动执行（blockers=0/skipped→merge；blockers>0→限次 retry；无审查结论 fail-closed 不动作；drift 降级跳过）。--dry-run 只报告；--sleep-first 先睡满窗口再扫（drain 落位自动拉起）；watch/sail/nightly 每周期开头自动跑一次
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
   spec "<一句话描述特性>" [--from-brief <brief-id|topic-id[,id2…]>] [--backend mock]
@@ -5066,6 +5287,7 @@ async function main() {
     else if (a === '--days') opts.days = parseInt(argv[++i], 10);
     else if (a === '--interval') opts.interval = parseInt(argv[++i], 10);
     else if (a === '--max-cycles') opts.maxCycles = parseInt(argv[++i], 10);
+    else if (a === '--timeout') opts.timeout = parseInt(argv[++i], 10);
     else if (a === '--minutes') opts.minutes = parseInt(argv[++i], 10);
     else if (a === '--duration') opts.duration = argv[++i];
     else if (a === '--max-tasks') opts.maxTasks = parseInt(argv[++i], 10);
@@ -5106,6 +5328,8 @@ async function main() {
       return cmdRun(repoRoot, args[0], opts);
     case 'drain':
       return cmdDrain(repoRoot, opts);
+    case 'autoapprove':
+      return cmdAutoApprove(repoRoot, opts);
     case 'intent':
       opts.intent = args;
       return cmdIntent(repoRoot, opts);
