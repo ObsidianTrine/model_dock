@@ -128,6 +128,17 @@ export async function watchdogCheck({ goal, timeline, spawnFn, traceDir, traceOp
 }
 
 /**
+ * 看门狗判定模型解析（纯函数）：workflow.json watchdog.model 显式配置优先——判定是
+ * 自包含短调用（输入只有卡目标 + 事件时间线，不检索仓库），勘察类小模型够用且省执行
+ * 档位配额；未配置回落执行模型（tier 感知的 effWorkerModel，历史行为）。仅 claude 系
+ * 生效（zcode 系 spawn 收 model 但忽略，跟随用户 ZCode 默认）。
+ */
+export function resolveWatchdogModel(cfg, effModel) {
+  const m = typeof cfg?.model === 'string' && cfg.model.trim() ? cfg.model.trim() : null;
+  return m ?? effModel ?? null;
+}
+
+/**
  * 一次性 headless 会话的 spawnFn 工厂：复用现有 backend.spawn（reviewer 同款只读形态，
  * claude 系 --allowedTools 收敛为 Read/Glob/Grep、zcode 系 --mode plan）。与 worker/
  * reviewer 会话完全隔离：无事件记账（onEvent 空）、maxTurns 收紧到 WATCHDOG_MAX_TURNS、

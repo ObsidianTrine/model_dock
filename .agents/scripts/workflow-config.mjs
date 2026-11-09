@@ -434,32 +434,40 @@ function resolveEscalation(raw) {
 }
 
 /** propose 配置解析（需求综合）：{ feedback?: bool（缺省 false=planner prompt 不注入
- *  舰队反馈段，行为与历史版本一致；true = 注入 stats 同源的运行度量数据事实段） }。
- *  非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）。 */
+ *  舰队反馈段，行为与历史版本一致；true = 注入 stats 同源的运行度量数据事实段）,
+ *  model?: 模型名（缺省 null=planner 会话跟随引擎默认） }。model 显式钉定 planner
+ *  会话模型（propose 需求综合与 intent 意图编译共用），消费在 orchestrator.mjs 两个
+ *  planner spawn 点。非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）。 */
 function resolvePropose(raw) {
-  const DEFAULTS = { feedback: false };
+  const DEFAULTS = { feedback: false, model: null };
   const warn = (detail) =>
-    console.warn(`[workflow-config] propose 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 propose 键：{ feedback?: boolean }）`);
+    console.warn(`[workflow-config] propose 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 propose 键：{ feedback?: boolean, model?: 模型名 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { feedback? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { feedback?, model? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
   if (raw.feedback !== undefined) out.feedback = raw.feedback === true;
+  if (raw.model !== undefined) {
+    if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
+    else warn(`model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）`);
+  }
   return out;
 }
 
-/** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数 }，缺省 observe/20。
+/** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数, model?: 模型名 }，
+ *  缺省 observe/20/无（判定会话跟随执行模型）。model 给勘察类小模型（判定是自包含短调用，
+ *  不检索仓库）——缺省回落执行模型，消费见 orchestrator.mjs 挂钩区（resolveWatchdogModel）。
  *  非法值回落缺省并 console.warn 告警（可操作：指出哪个键、允许什么；stderr 输出，
  *  不污染 hook 的 stdout 裁决通道）。键缺失 = 沿用缺省，不告警。 */
 function resolveWatchdog(raw) {
-  const DEFAULTS = { mode: 'observe', everyTurns: 20 };
+  const DEFAULTS = { mode: 'observe', everyTurns: 20, model: null };
   const warn = (detail) =>
-    console.warn(`[workflow-config] watchdog 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 watchdog 键，mode 允许 observe|actuate、everyTurns 须为正整数）`);
+    console.warn(`[workflow-config] watchdog 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 watchdog 键，mode 允许 observe|actuate、everyTurns 须为正整数、model 须为模型名字符串）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { mode?, everyTurns? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { mode?, everyTurns?, model? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -470,6 +478,10 @@ function resolveWatchdog(raw) {
   if (raw.everyTurns !== undefined) {
     if (Number.isInteger(raw.everyTurns) && raw.everyTurns > 0) out.everyTurns = raw.everyTurns;
     else warn(`everyTurns ${JSON.stringify(raw.everyTurns)} 不合法（须为正整数）`);
+  }
+  if (raw.model !== undefined) {
+    if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
+    else warn(`model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）`);
   }
   return out;
 }

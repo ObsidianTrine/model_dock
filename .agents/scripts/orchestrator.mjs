@@ -59,7 +59,7 @@ import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstr
 import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
 import { observeFleetForRun } from './orchestrator/fleet.mjs';
 import { decideDispatchForRun, normalizeEnvelope } from './orchestrator/dispatch.mjs';
-import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, resolveWatchdogModel, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
@@ -637,7 +637,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
   let watchdogHalted = false; // 看门狗 actuate 已落位：主循环收敛标志（见 runWatchdogCheck circuit_break 分支）
-  const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: effWorkerModel, envPatch: tierEnv });
+  const watchdogSpawn = opts.backend === 'mock' ? null : makeWatchdogSpawnFn(backend, { cwd: worktree, model: resolveWatchdogModel(cfg.watchdog, effWorkerModel), envPatch: tierEnv });
   const runWatchdogCheck = async (session) => {
     try {
       const verdict = await watchdogCheck({ goal: card.body.goal, timeline: watchdogTimelineSummary(readEvents(qdir)), spawnFn: watchdogSpawn, traceDir: traceCfg.enabled ? qdir : null, traceOpts: traceCfg });
@@ -2823,7 +2823,7 @@ function plannerTraceTaskId() {
  * 「模型当时输出了什么」。复用 trace.mjs 滚动/截断（写失败内部消化，绝不影响主流程）；
  * trace.enabled=false 整体关闭。parsed 传提取结果摘要（{ blocks: n } 或 null）。
  */
-function tracePlannerSpawn({ repoRoot, session, traceCfg, command, backend, attempt, promptText, result, parsed, startedAt }) {
+function tracePlannerSpawn({ repoRoot, session, traceCfg, command, backend, model, attempt, promptText, result, parsed, startedAt }) {
   if (!traceCfg?.enabled) return;
   const stderrTail = String(result?.stderrTail ?? '').trim();
   writeDecisionTrace(
@@ -2837,6 +2837,7 @@ function tracePlannerSpawn({ repoRoot, session, traceCfg, command, backend, atte
       meta: {
         command,
         backend,
+        ...(model ? { model } : {}), // 会话模型留痕（propose.model 钉定后可复盘当时跑的哪个脑子）
         attempt,
         exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
         ...(stderrTail ? { stderrTail: stderrTail.slice(-200) } : {}), // 尾部 ≤200 字符
@@ -2869,7 +2870,9 @@ async function cmdIntent(repoRoot, opts) {
   ensureQueue(root);
   opts.backend = resolveBackendName(opts, null).name; // 规划会话不记账：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
-  const traceCfg = loadWorkflowConfig(repoRoot).trace;
+  const cfg = loadWorkflowConfig(repoRoot);
+  const traceCfg = cfg.trace;
+  const plannerModel = cfg.propose?.model ?? null; // intent 与 propose 共用 planner 模型键（缺省跟随引擎默认）
   const session = plannerTraceTaskId();
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-planner-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-intent-')), 'planner-prompt.md');
@@ -2887,10 +2890,11 @@ async function cmdIntent(repoRoot, opts) {
         maxTurns: 25,
         onEvent: () => {}, // 无任务事件线；planner 用量不记账
         readonly: true,
+        ...(plannerModel ? { model: plannerModel } : {}), // 仅 claude 系生效（--model）；zcode 跟随其默认
         settingsFile,
       });
       const cardText = parseCardBlock(result.output ?? '');
-      tracePlannerSpawn({ repoRoot, session, traceCfg, command: 'intent', backend: opts.backend, attempt, promptText, result, parsed: cardText ? { blocks: 1 } : null, startedAt });
+      tracePlannerSpawn({ repoRoot, session, traceCfg, command: 'intent', backend: opts.backend, model: plannerModel, attempt, promptText, result, parsed: cardText ? { blocks: 1 } : null, startedAt });
       if (!cardText) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请严格按产出契约重新输出：单个 fenced 契约块内含完整任务卡。`;
@@ -2986,6 +2990,7 @@ async function cmdPropose(repoRoot, opts) {
       fleetFeedback = buildFleetFeedback({ summary: fb.summary, perType: fb.perType, drift: fb.drift, goalsThemes: extractGoalsThemes(goals) });
     }
     let promptText = buildProposePrompt({ goals, signals, queueSummary, maxCards: max, repoRoot, fleetFeedback });
+    const plannerModel = cfg.propose?.model ?? null; // planner 会话模型（propose.model 钉定，缺省跟随引擎默认）
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -2997,10 +3002,11 @@ async function cmdPropose(repoRoot, opts) {
         maxTurns: 25,
         onEvent: () => {}, // 无任务事件线；planner 用量不记账
         readonly: true,
+        ...(plannerModel ? { model: plannerModel } : {}), // 仅 claude 系生效（--model）；zcode 跟随其默认
         settingsFile,
       });
       const blocks = parseCardBlocks(result.output ?? '');
-      tracePlannerSpawn({ repoRoot, session, traceCfg: cfg.trace, command: 'propose', backend: opts.backend, attempt, promptText, result, parsed: blocks.length ? { blocks: blocks.length } : null, startedAt });
+      tracePlannerSpawn({ repoRoot, session, traceCfg: cfg.trace, command: 'propose', backend: opts.backend, model: plannerModel, attempt, promptText, result, parsed: blocks.length ? { blocks: blocks.length } : null, startedAt });
       if (!blocks.length) {
         if (attempt < MAX_ATTEMPTS) {
           promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含 ${'```'}${CARD_MARKER}${'```'} 契约块）\n请按产出契约重新输出：每张任务卡一个独立 fenced 契约块（没有值得做的就一张都不出）。`;

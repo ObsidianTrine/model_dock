@@ -42,16 +42,21 @@
   },
   "review": {
     "backend": "claude-headless",
-    "model": "glm-5.3-flash"
+    "model": "glm-5.3-flashx"
   },
   "scan": {
-    "smartFilter": true
+    "smartFilter": true,
+    "smartModel": "glm-4.5-air"
   },
   "research": {
     "model": "glm-5.3-flash"
   },
   "propose": {
-    "feedback": true
+    "feedback": true,
+    "model": "glm-5.3-flash"
+  },
+  "watchdog": {
+    "model": "glm-4.5-air"
   },
   "budgetProfiles": {
     "claude-headless": {
@@ -72,7 +77,8 @@
       "tokenEnv": "MDK_TIER_AHEAD3_TOKEN"
     },
     "ahead-4": {
-      "tokenEnv": "MDK_TIER_AHEAD4_TOKEN"
+      "tokenEnv": "MDK_TIER_AHEAD4_TOKEN",
+      "workerModel": "glm-5.3"
     }
   },
   "autopilot": {
