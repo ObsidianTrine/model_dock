@@ -96,7 +96,7 @@ describe('runSpecL0Checks', () => {
     expect(l0.checks.some((c: { name: string; status: string }) => c.name === '依赖 DAG' && c.status === 'fail')).toBe(true)
   })
 
-  it('files_hint 指向不存在路径 → fail', () => {
+  it('files_hint 指向不存在路径 → warn（拟新建文件合法，裁决交 L2）', () => {
     const root = tmpRoot()
     const id = fixtureSpec(root, {
       tasks: [
@@ -108,7 +108,8 @@ describe('runSpecL0Checks', () => {
       ].join('\n'),
     })
     const l0 = runSpecL0Checks(root, id)
-    expect(l0.ok).toBe(false)
+    expect(l0.ok).toBe(true)
+    expect(l0.checks.find((c: { name: string; status: string }) => c.name === 'files_hint 存在')?.status).toBe('warn')
     expect(l0.checks.find((c: { name: string }) => c.name === 'files_hint 存在')?.detail).toContain('src/no-such-dir/ghost.ts')
   })
 

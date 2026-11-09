@@ -123,10 +123,16 @@ export function runSpecL0Checks(repoRoot, specId) {
       if (!fs.existsSync(path.join(repoRoot, probe || '.'))) missingPaths.push(`任务${t.n}:${f}`);
     }
   }
+  // files_hint 存在性：缺路径是 warn 不是 fail——任务引用拟新建文件（如新测试文件）时
+  // 路径不存在是合法的（2026-11-10 首跑真 spec 实测误判：research-verbatim-precision
+  // 任务 2 新建 research-verbatim.test.ts 被拦）。裁决义务交 L2：新建=正常，改错=typo P1。
+  // fail 只留给让审查无法进行的结构性问题（三件套缺失/任务段不可解析/依赖悬空成环）。
   checks.push({
     name: 'files_hint 存在',
-    status: missingPaths.length ? 'fail' : 'pass',
-    detail: missingPaths.length ? `路径不存在：${missingPaths.join('；')}` : `${tasks.reduce((a, t) => a + t.files.filter((f) => f !== '**').length, 0)} 条路径全部存在（通配符查前缀目录）`,
+    status: missingPaths.length ? 'warn' : 'pass',
+    detail: missingPaths.length
+      ? `路径不存在（L2 裁决：任务拟新建=正常 / 修改既有文件写错路径=P1）：${missingPaths.join('；')}`
+      : `${tasks.reduce((a, t) => a + t.files.filter((f) => f !== '**').length, 0)} 条路径全部存在（通配符查前缀目录）`,
   });
 
   // 红线关键词扫描（命中 ≠ 违规——L2 逐条裁决义务，见 REDLINE_PATTERNS 注释）
