@@ -441,8 +441,9 @@ describe('orchestrator research > verify e2e（mock）', () => {
       expect(ledger).toContain('"researcher_model":"mock"') // L3 台账带调研船口径（model 是复核船，未指定 → null）
       const out = runOrch(repo.root, 'research stats')
       expect(out.stdout).toContain('次判定')
-      // 否决链路：blockers>0 → mock 判 contradicted → 一票否决
-      runOrch(repo.root, 'research verify verify-me --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1' })
+      // 否决链路：blockers>0 → mock 判 contradicted → 仲裁轮 overturned（外部证实矛盾）
+      // → 一票否决维持（缺省 upheld 会翻案解除——仲裁 e2e 见 research-arbitration.test.ts）
+      runOrch(repo.root, 'research verify verify-me --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1', ORCH_MOCK_ARB_RULING: 'overturned' })
       const vetoed = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
       expect(vetoed.claims[0].status).toBe('contradicted')
       expect(vetoed.usage.internal_decision).toBe('unsafe')

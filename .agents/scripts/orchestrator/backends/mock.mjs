@@ -18,7 +18,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -34,9 +34,35 @@ export const mockBackend = {
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
-    const isVerifier = !isSpecPlanner && !isPlanner && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
-    const isResearcher = !isSpecPlanner && !isPlanner && !isVerifier && prompt.includes(BRIEF_MARKER);
+    const isArbiter = !isSpecPlanner && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
+    const isVerifier = !isSpecPlanner && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
+    const isResearcher = !isSpecPlanner && !isPlanner && !isVerifier && !isArbiter && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
+
+    if (isArbiter) {
+      // 仲裁轮模式：从 prompt 逐字摘录「待仲裁 claim」行（buildArbitrationPrompt 的
+      // `N. 「claim」` 列表），ORCH_MOCK_ARB_RULING=upheld|overturned|undetermined 统一切换
+      // 裁定（默认 upheld=翻案解除否决）；ORCH_MOCK_ARB_INVALID=1 输出无契约块（测 2 连败
+      // fail-closed 维持否决路径）。
+      if (process.env.ORCH_MOCK_ARB_INVALID === '1') {
+        const output = '仲裁想好了但没有契约块。';
+        onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-arbiter' });
+        return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+      }
+      const ruling = ['upheld', 'overturned', 'undetermined'].includes(process.env.ORCH_MOCK_ARB_RULING) ? process.env.ORCH_MOCK_ARB_RULING : 'upheld';
+      const claims = [...prompt.matchAll(/^\d+\. 「(.+)」$/gm)].map((m) => m[1]);
+      const payload = {
+        rulings: (claims.length ? claims : ['mock claim']).map((c) => ({
+          claim: c,
+          ruling,
+          sources: ['- 2026-11-09 https://example.com/arb — mock 仲裁：独立带日期来源'],
+          reasoning: 'mock 仲裁裁定',
+        })),
+      };
+      const output = ['仲裁完成。', '', '```' + ARBITRATION_MARKER, JSON.stringify(payload, null, 2), '```'].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-arbiter' });
+      return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+    }
 
     if (isVerifier) {
       // L2 复核模式（v2 JSON 契约）：从 prompt 内嵌 brief 摘第一条承重结论逐字回显；

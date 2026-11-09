@@ -208,6 +208,9 @@ export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.f
 /** L2 复核会话输出契约的 fenced block 标记。 */
 export const VERDICT_MARKER = 'agents-verdict';
 
+/** 仲裁轮会话输出契约的 fenced block 标记（L2 contradicted 的外部取证翻案，见 parseArbitrationBlock）。 */
+export const ARBITRATION_MARKER = 'agents-arbitration';
+
 /**
  * 从 brief 结论/选项对比提取可回查 token（数字+单位、拉丁字母数字混合的型号名）。
  * 只取「# 引用」段之前——引用段自身含日期与 URL，回查它们是自指。排除项：年份
@@ -479,10 +482,13 @@ export function buildResearchNotifyBody(verdict) {
   const u = verdict?.usage ?? {};
   const icon = verdict?.level === 'pass' ? '✅' : verdict?.level === 'warn' ? '⚠️' : verdict?.level === 'fail' ? '⛔' : '❔';
   const overall = verdict?.scores?.overall != null ? `（overall ${verdict.scores.overall}）` : '';
+  const arb = verdict?.arbitration;
+  const arbLine = arb?.ran && !arb.failed ? `⚖ 仲裁轮：${arb.upheld} upheld / ${arb.overturned} overturned / ${arb.undetermined} undetermined——${arb.veto_cleared ? '否决解除' : '否决维持'}` : arb?.failed ? '⚖ 仲裁轮失败——维持原否决' : null;
   const lines = [
     `${icon} ${verdict?.brief_id ?? '?'}——${verdict?.level ?? '?'}${overall}`,
     `usage: browse=${u.browse ?? '?'} / decision=${u.internal_decision ?? '?'} / external=${u.external_doc ?? '?'}`,
     ...(verdict?.claims?.length ? [`claims: ${verdict.claims.filter((c) => c.status === 'contradicted').length} contradicted / ${verdict.claims.filter((c) => c.status === 'unsupported').length} unsupported / 共 ${verdict.claims.length} 条`] : []),
+    ...(arbLine ? [arbLine] : []),
     ...(verdict?.reasons ?? []).slice(0, 3).map((r) => `· ${String(r).slice(0, 120)}`),
     ...(verdict?.blockers?.length ? [`blockers: ${verdict.blockers.slice(0, 2).join('；')}`] : []),
   ];
@@ -546,4 +552,70 @@ export function parseVerdictBlock(text) {
   }
   const blockers = Array.isArray(j.blockers) ? j.blockers.filter((b) => typeof b === 'string' && b.trim()).slice(0, 10) : [];
   return { claims, blockers };
+}
+
+const ARBITRATION_RULINGS = ['upheld', 'overturned', 'undetermined'];
+
+/**
+ * 解析仲裁轮契约块（```agents-arbitration``` JSON）。rulings 每条：claim（须逐字摘录
+ * 被 L2 判 contradicted 的原句）+ ruling（upheld=外部来源佐证 brief 正确 / overturned=
+ * 外部来源证实矛盾成立 / undetermined=证据不足或来源冲突）+ sources（带日期的依据 URL）。
+ * 任一条不合规整块作废（fail-closed，同 parseVerdictBlock 口径）。
+ */
+export function parseArbitrationBlock(text) {
+  const re = new RegExp('```' + ARBITRATION_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  let j;
+  try {
+    j = JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(j.rulings) || !j.rulings.length || j.rulings.length > 10) return null;
+  const rulings = [];
+  for (const r of j.rulings) {
+    if (typeof r?.claim !== 'string' || !r.claim.trim()) return null;
+    if (!ARBITRATION_RULINGS.includes(r?.ruling)) return null;
+    const sources = Array.isArray(r?.sources) ? r.sources.filter((s) => typeof s === 'string' && s.trim()).slice(0, 6) : [];
+    rulings.push({ claim: r.claim, ruling: r.ruling, sources, reasoning: typeof r?.reasoning === 'string' ? r.reasoning.slice(0, 300) : '' });
+  }
+  return { rulings };
+}
+
+/** 归一化逐字对账口径（空白折叠），与 verifyClaimVerbatim 同源思路。 */
+const arbNorm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * 仲裁裁定合并进 L2 claims（只动 status==='contradicted' 的条目）：
+ * - upheld → 翻案为 partial（不是 supported：外部来源与快照属不同证据面，partial 承认
+ *   「快照不支撑但外部佐证」，一票否决随之解除）；
+ * - overturned / undetermined → 维持 contradicted（保守：翻不了案就维持否决，不因
+ *   「没查到」放行——与 COVERAGE_FLOOR 同一哲学）。
+ * 裁定与 claim 按归一化逐字匹配；匹配不上的裁定计入 unmatched（丢弃不误伤）。
+ * 返回 { claims, stats: { upheld, overturned, undetermined, unmatched } }（原地修改 claims）。
+ */
+export function arbitrateClaims(claims, rulings) {
+  const stats = { upheld: 0, overturned: 0, undetermined: 0, unmatched: 0 };
+  const used = new Set();
+  for (const r of Array.isArray(rulings) ? rulings : []) {
+    const c = claims.find((x) => x.status === 'contradicted' && arbNorm(x.claim) === arbNorm(r.claim) && !used.has(x));
+    if (!c) {
+      stats.unmatched++;
+      continue;
+    }
+    used.add(c);
+    if (r.ruling === 'upheld') {
+      c.status = 'partial';
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部独立来源佐证，矛盾否决解除`.slice(0, 200);
+      stats.upheld++;
+    } else if (r.ruling === 'overturned') {
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部来源证实矛盾成立`.slice(0, 200);
+      stats.overturned++;
+    } else {
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部证据不足或来源冲突，否决维持`.slice(0, 200);
+      stats.undetermined++;
+    }
+  }
+  return { claims, stats };
 }

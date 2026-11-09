@@ -21,6 +21,7 @@
 | `snapshots` | object | `{ total, usable, skeleton }`——骨架页（剥标签后可见文本 <400 字，客户端渲染/被拦的典型形态）只做标注不改判级：meta 描述仍可佐证排名类结论，但**数字类结论的可核性受限**（reasons 里有同款提示） |
 | `blockers[]` | array | 复核会话给出的硬伤（一句话一条） |
 | `fabricated_claims` | int | 非逐字摘录被丢弃的 claim 数（**编造红旗**，>0 时 decision 封顶 needs_review） |
+| `arbitration` | object\|null | 仲裁轮留痕（判出 contradicted 时自动跑，见下节）：`{ ran, upheld, overturned, undetermined, unmatched, veto_cleared, model, backend }`；会话失败为 `{ ran, failed: true, error }` |
 | `usage` | object | **决策矩阵（消费方唯一行动接口）**，见下 |
 | `level` | string | overall 的三值映射（pass ≥75 / warn ≥50 / fail <50；null → unknown）——兼容旧消费者 |
 
@@ -31,12 +32,24 @@
 | `browse` | 恒 `ok` | 入库阅读无害 |
 | `internal_decision` | `ok` | coverage ≥50（硬底线，不可配）且 coherence ≥阈值（缺省 60）且 evidence ≠ fail（<40）且 fabricated=0 且无否决 |
 | | `needs_review` | 未达 ok 但无否决；或 fabricated>0（含 claims 全灭——复核契约被违反是红旗，不是「没测」） |
-| | `unsafe` | **任一 claim contradicted（一票否决，不可配置）** |
+| | `unsafe` | **任一 claim contradicted（一票否决，不可配置）**；仲裁轮 upheld 翻案后解除（见下节） |
 | | `undetermined` | evidence/coverage/coherence 任一 null（数据不足以判定） |
 | `external_doc` | `ok` | internal_decision=ok 且 coherence ≥75 且 coverage ≥70（阈值可配，硬底线同样适用） |
 | | `needs_review` / `undetermined` / `unsafe` | 随 internal_decision；external_doc=ok 也建议人工过目后才对外 |
 
 阈值可在 workflow.json `research.usageGates` 调（`{decision|external: {coherence?, coverage?}}` 0-100 整数）；**否决权与 coverage 50 硬底线不可配**。
+
+## 仲裁轮（contradicted 的外部取证翻案，2026-11-09 实测驱动）
+
+L2 复核船无联网、只拿快照裁断；快照自身误导（页面 published_time 元数据语义、骨架截断）时矛盾可能是误报——实测案例：公告页 `published_time=2025-06` 被当事件日期判 contradicted，四来源证实 brief 的「2025 年 1 月上线」正确。因此 `research verify` 判出 contradicted 时**自动追加一轮联网仲裁**（`research.arbitration: false` 可关）：
+
+- 仲裁会话（researcher 同款联网工具面，模型缺省 `research.model`）对每条 contradicted claim 检索 **≥2 个独立带日期来源**（优先官方公告/文档/changelog），并显式区分「页面发布/更新时间 ≠ 事件发生时间」；
+- 裁定合并语义（保守，只放行有正证据的翻案）：`upheld`（≥2 来源佐证）→ claim 翻案为 `partial`、note 标「仲裁轮」，**一票否决解除**；`overturned`（来源证实矛盾）/ `undetermined`（证据不足）→ 维持 contradicted，否决保留；
+- verdict.json `arbitration` 字段留痕裁定统计与 `veto_cleared`；台账记 `kind: l2-arbitration`（含翻案率，供 `research stats` 后续分析误报面）；
+- 仲裁会话 2 连败 → fail-closed 维持原否决（取证失败 ≠ 放行）。
+
+**消费方语义不变**：仍只读 `usage.internal_decision`——仲裁只是让 unsafe 的成立需要经过外部证据检验，`overturned/undetermined` 的 unsafe 与从前完全同义。
+
 
 ## 消费方 agent 的标准动作
 

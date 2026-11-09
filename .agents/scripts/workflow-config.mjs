@@ -243,6 +243,12 @@ function resolveResearch(raw) {
     if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
     else console.warn(`[workflow-config] research.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
   }
+  // 仲裁轮开关（research verify 判出 contradicted 时的联网外部取证，2026-11-09 实测驱动）：
+  // 缺省开（不配置 = true）——仲裁是取证不是放水，upheld 才翻案、翻不了维持否决；false 只省 token
+  if (raw.arbitration !== undefined) {
+    if (typeof raw.arbitration === 'boolean') out.arbitration = raw.arbitration;
+    else console.warn(`[workflow-config] research.arbitration ${JSON.stringify(raw.arbitration)} 不合法（应为 boolean）——忽略`);
+  }
   // usage 矩阵阈值（verdict/2）：可配的只有 coherence/coverage 两档阈值——否决权与
   // COVERAGE_FLOOR=50 硬底线在 scoreVerdict 里写死，不可配（防配置失误放水）
   if (raw.usageGates !== undefined) {
