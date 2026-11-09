@@ -632,7 +632,24 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 观测不可达 → null → 自报账兜底，行为不回退。reconcile 离线对账逻辑不动。
   // gatewayProvision 生效时 harness = 本任务专属 ephemeral id（上方签发），精确取数；
   // 未启用/签发失败回落 tier token 经 tier-validate 解析的 harness id（基线法照旧）。
-  const measuredFuel = startMeasuredFuelPoller({ budget, cfg, harness: measuredHarness, log });
+  // 一次性凭据临期预警（orch-ephemeral-expiry-watch）：ephemeral 条目的轮询响应带 expires_at，
+  // 剩余 < min(20% TTL, 30min) 落 harness_expiry_warning 事件 + log——网关无 TTL 续期能力，
+  // 夜航中途 401 前的主动预警是当前最优解。去抖在 supply 侧（每凭据每阈值一次）；这里再挡
+  // 已吊销与任务终态两道：revokeRunHarness 置位后/卡落位 blocked·merged·failed 后不再刷
+  // 事件（盖住落位与 finally 停轮询之间的窗口；awaiting-human 人工闸门期间凭据仍活，照常预警）。
+  const measuredFuel = startMeasuredFuelPoller({
+    budget,
+    cfg,
+    harness: measuredHarness,
+    log,
+    onExpiryWarning: (w) => {
+      if (!taskHarness || taskHarness.revoked || w.harness_id !== taskHarness.id) return;
+      if (['blocked', 'merged', 'failed'].includes(findCard(root, taskId)?.state)) return;
+      appendEvent(qdir, 'harness_expiry_warning', { harness_id: w.harness_id, expires_at: w.expires_at, remaining_ms: w.remaining_ms, threshold_ms: w.threshold_ms });
+      const mins = Math.max(1, Math.ceil(w.remaining_ms / 60000));
+      log(`⏳ 一次性凭据临期：harness=${w.harness_id} 剩余约 ${mins} 分钟（阈值 ${Math.round(w.threshold_ms / 60000)} 分钟）——网关无续期能力，尽快收尾落位，避免中途 401`);
+    },
+  });
 
   // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
   // 实质进展。observe（缺省）只记 watchdog_suspect 事件；actuate 连续 2 次 suspect 走既有

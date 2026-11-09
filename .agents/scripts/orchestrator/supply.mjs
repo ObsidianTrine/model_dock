@@ -167,36 +167,110 @@ export function harnessBillableFromUsage(payload, harnessId) {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
+/** 临期告警阈值（orch-ephemeral-expiry-watch）：剩余 < min(20% TTL, 30min) 触发——
+ *  短 TTL 凭据按寿命比例提前量，长 TTL 被 30min 封顶（预警窗口再大也只是刷屏）。 */
+export const EXPIRY_WARN_TTL_SHARE = 0.2;
+export const EXPIRY_WARN_MAX_MS = 30 * 60 * 1000;
+
+/**
+ * harness-usage 响应 → 该 harness 的临期判定原料（expiresAtMs）。仅 ephemeral 条目带
+ * expires_at（网关 hHarnessUsage 对 rt.ephemeral 的投影）；非临时凭据（tier token 解析的
+ * 常驻 harness）无该字段 → null，天然不参与临期预警。已吊销/已过期被网关摘除的条目
+ * 直接缺席 usage → 同样 null（吊销即静默）。expires_at 非法时间戳 → null（fail-open）。
+ */
+export function harnessExpiryFromUsage(payload, harnessId) {
+  const u = payload && typeof payload === 'object' ? payload.usage : null;
+  const e = u && typeof u === 'object' ? u[harnessId] : null;
+  if (!e || typeof e !== 'object' || e.ephemeral !== true || typeof e.expires_at !== 'string') return null;
+  const ms = Date.parse(e.expires_at);
+  return Number.isFinite(ms) ? { expiresAtMs: ms } : null;
+}
+
+/**
+ * 临期预警观察器（纯判定 + 去抖，测试直连）：observe() 每次轮询喂一次 usage payload，
+ * 跨阈值时返回 { harness_id, expires_at, remaining_ms, threshold_ms, ttl_ms }，否则 null。
+ * 内部两份状态：
+ *   anchor  expiresAtMs → 首次观测时刻。TTL 无法从单个绝对时间戳反推（网关响应只有
+ *           expires_at、无签发时刻；网关 src/** 本卡禁碰不可加字段），用首次观测时刻锚定
+ *           ——轮询器在 provision 后 ≤一个周期内首采，误差 ≤60s，只对 TTL<2.5h 的短凭据
+ *           的 20% 分支有秒级影响，可接受。
+ *   warned  已告警的 expiresAtMs 集合。去抖口径 = 每个阈值实例只告警一次：同一次签发的
+ *           凭据 expires_at 恒定 → 只告一次；re-provision 产生新 expires_at = 新阈值实例
+ *           → 允许再告（跨 run 重试属新凭据，不是重复刷屏）。
+ * @param {{ ttlShare?: number, capMs?: number }} opts 阈值参数（测试注入；生产用缺省）
+ */
+export function createExpiryWatcher({ ttlShare = EXPIRY_WARN_TTL_SHARE, capMs = EXPIRY_WARN_MAX_MS } = {}) {
+  const anchor = new Map();
+  const warned = new Set();
+  return {
+    observe(payload, harnessId, nowMs = Date.now()) {
+      const ex = harnessExpiryFromUsage(payload, harnessId);
+      if (!ex) return null;
+      const { expiresAtMs } = ex;
+      if (!anchor.has(expiresAtMs)) anchor.set(expiresAtMs, nowMs);
+      const ttlMs = Math.max(expiresAtMs - anchor.get(expiresAtMs), 0);
+      const thresholdMs = Math.min(ttlMs * ttlShare, capMs);
+      const remainingMs = expiresAtMs - nowMs;
+      if (remainingMs >= thresholdMs || warned.has(expiresAtMs)) return null;
+      warned.add(expiresAtMs);
+      return {
+        harness_id: harnessId,
+        expires_at: new Date(expiresAtMs).toISOString(),
+        remaining_ms: remainingMs,
+        threshold_ms: Math.round(thresholdMs),
+        ttl_ms: Math.round(ttlMs),
+      };
+    },
+  };
+}
+
+/** 单次拉取 harness-usage 原始 payload：失败/字段缺失 → null（fail-open，静默）。 */
+async function fetchHarnessUsagePayload({ base, adminToken, timeoutMs }) {
+  if (!base || !adminToken) return null;
+  return fetchAdminJson(`${String(base).replace(/\/+$/, '')}/_modeldock/harness-usage`, adminToken, timeoutMs);
+}
+
 /** 单次拉取实测油量：失败/字段缺失 → null（fail-open，静默）。 */
 export async function fetchHarnessBillable({ base, adminToken, harness, timeoutMs = MEASURED_FUEL_TIMEOUT_MS }) {
-  if (!base || !adminToken || !harness) return null;
-  const payload = await fetchAdminJson(`${base.replace(/\/+$/, '')}/_modeldock/harness-usage`, adminToken, timeoutMs);
+  if (!harness) return null;
+  const payload = await fetchHarnessUsagePayload({ base, adminToken, timeoutMs });
   return payload ? harnessBillableFromUsage(payload, harness) : null;
 }
 
 /**
  * 实测油量轮询器（A4）：每 60s 拉 harness-usage 的 day_billable_tokens 喂 budget.accountMeasured
- * （可计费口径、网关实测）；取不到时静默（自报账兜底）。返回 { active, stop() }——
+ * （可计费口径、网关实测）；取不到时静默（自报账兜底）。同一份 payload 兼顾一次性凭据临期
+ * 预警（orch-ephemeral-expiry-watch）：ephemeral 条目带 expires_at，剩余 < min(20% TTL, 30min)
+ * 时经 onExpiryWarning 回调上抛（事件落盘 + log 由调用方负责；去抖在 createExpiryWatcher——
+ * 每凭据每阈值一次）。返回 { active, stop() }——
  * harness 未知 / gatewayAdmin 未开 / 无 admin 地址时不启动（active=false，零副作用）。
- * intervalMs 仅测试注入（生产恒 60s）。定时器 unref：进程自然退出不被它拖住；调用方收尾必须 stop()。
+ * intervalMs / nowFn 仅测试注入（生产恒 60s / Date.now）。定时器 unref：进程自然退出不被它
+ * 拖住；调用方收尾必须 stop()。
  */
-export function startMeasuredFuelPoller({ budget, cfg, harness, intervalMs = MEASURED_FUEL_POLL_MS, log = () => {} } = {}) {
+export function startMeasuredFuelPoller({ budget, cfg, harness, intervalMs = MEASURED_FUEL_POLL_MS, log = () => {}, onExpiryWarning = null, nowFn = Date.now } = {}) {
   const adm = harness && cfg?.gatewayAdmin === true ? resolveGatewayAdmin(cfg) : null;
   if (!adm) return { active: false, stop() {} };
+  const expiryWatcher = typeof onExpiryWarning === 'function' ? createExpiryWatcher() : null;
   let inFlight = false;
   const timer = setInterval(() => {
     if (inFlight) return; // 上一轮超时未归：跳过本轮，不堆叠请求
     inFlight = true;
     void (async () => {
       try {
-        const v = await fetchHarnessBillable({ base: adm.base, adminToken: adm.adminToken, harness });
-        if (v != null) budget.accountMeasured(v); // null（旧网关字段缺失/不可达）→ 自报账兜底
+        const payload = await fetchHarnessUsagePayload({ base: adm.base, adminToken: adm.adminToken, timeoutMs: MEASURED_FUEL_TIMEOUT_MS });
+        if (!payload) return; // 不可达/旧网关字段缺失 → 静默（自报账兜底）
+        const v = harnessBillableFromUsage(payload, harness);
+        if (v != null) budget.accountMeasured(v); // null → 自报账兜底
+        if (expiryWatcher) {
+          const warn = expiryWatcher.observe(payload, harness, nowFn());
+          if (warn) onExpiryWarning(warn);
+        }
       } finally {
         inFlight = false;
       }
     })();
   }, intervalMs);
   timer.unref?.();
-  log(`⛽ 实测油量轮询已启动：harness=${harness} ← ${adm.base}/_modeldock/harness-usage（60s 节流，网关实测口径；取不到时自报账兜底）`);
+  log(`⛽ 实测油量轮询已启动：harness=${harness} ← ${adm.base}/_modeldock/harness-usage（60s 节流，网关实测口径；取不到时自报账兜底${expiryWatcher ? '；一次性凭据临期预警已接线' : ''}）`);
   return { active: true, stop: () => clearInterval(timer) };
 }

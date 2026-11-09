@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { Budget } from '../../.agents/scripts/orchestrator/budget.mjs'
 import {
   MEASURED_FUEL_POLL_MS,
+  createExpiryWatcher,
   fetchHarnessBillable,
   harnessBillableFromUsage,
   probeProviderCapacity,
@@ -300,6 +301,87 @@ describe('supply > 实测油量（harness-usage）', () => {
       expect(b.measuredBaseline).toBe(3_000_000) // 首次采样固化基线（跨任务流量不入本任务账）
       expect(b.measuredBillable).toBe(0)
       expect(b.tripped).toBe(false)
+    } finally {
+      gw.close()
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k]
+        else process.env[k] = savedEnv[k]
+      }
+    }
+  }, 10_000)
+})
+
+describe('supply > 一次性凭据临期预警（harness_expiry_warning）', () => {
+  const T0 = 1_700_000_000_000
+  const MIN = 60_000
+  const usageWithExpiry = (iso: string) => ({ ok: true, usage: { worker: { ephemeral: true, expires_at: iso, day_billable_tokens: 1 } } })
+
+  it('未临期不告警：剩余远大于阈值 → null', () => {
+    const w = createExpiryWatcher()
+    const payload = usageWithExpiry(new Date(T0 + 8 * 60 * MIN).toISOString()) // TTL≈8h
+    expect(w.observe(payload, 'worker', T0)).toBeNull()
+    expect(w.observe(payload, 'worker', T0 + 60 * MIN)).toBeNull() // 剩余 7h ≥ 阈值 30min
+  })
+
+  it('阈值口径 = min(20% TTL, 30min)：长 TTL 被 30min 封顶，短 TTL 按 20% 触发', () => {
+    // 长 TTL（8h）：20%=96min > 30min → 阈值封顶 30min；剩余 29min < 30min → 告警
+    const long = createExpiryWatcher()
+    const longPayload = usageWithExpiry(new Date(T0 + 8 * 60 * MIN).toISOString())
+    long.observe(longPayload, 'worker', T0) // 首采锚定 TTL
+    expect(long.observe(longPayload, 'worker', T0 + 8 * 60 * MIN - 29 * MIN)).toMatchObject({ harness_id: 'worker', threshold_ms: 30 * MIN })
+    // 短 TTL（40min）：20%=8min < 30min → 阈值按 20% 计；剩余 7min → 告警
+    const short = createExpiryWatcher()
+    const shortPayload = usageWithExpiry(new Date(T0 + 40 * MIN).toISOString())
+    short.observe(shortPayload, 'worker', T0)
+    expect(short.observe(shortPayload, 'worker', T0 + 33 * MIN)).toMatchObject({ threshold_ms: 8 * MIN, remaining_ms: 7 * MIN })
+  })
+
+  it('跨阈值告警一次 + 重复轮询不重复（去抖）；新 expires_at（re-provision）是新阈值实例', () => {
+    const w = createExpiryWatcher()
+    const iso = new Date(T0 + 10 * MIN).toISOString()
+    const payload = usageWithExpiry(iso)
+    expect(w.observe(payload, 'worker', T0)).toBeNull() // 剩余 10min ≥ 阈值 2min（20%×10min）
+    expect(w.observe(payload, 'worker', T0 + 9 * MIN)).toMatchObject({ harness_id: 'worker', expires_at: iso, remaining_ms: MIN, threshold_ms: 2 * MIN })
+    expect(w.observe(payload, 'worker', T0 + 9.5 * MIN)).toBeNull() // 同凭据重复轮询：静默
+    // 新凭据（新 expires_at）= 新阈值实例：允许再告一次（跨 run 重试是新凭据，不是刷屏）
+    const payload2 = usageWithExpiry(new Date(T0 + 40 * MIN).toISOString())
+    expect(w.observe(payload2, 'worker', T0)).toBeNull()
+    expect(w.observe(payload2, 'worker', T0 + 33 * MIN)).toMatchObject({ harness_id: 'worker' })
+  })
+
+  it('非临时凭据 / 条目消失（已吊销）/ 字段非法 → null（吊销即静默）', () => {
+    const w = createExpiryWatcher()
+    expect(w.observe({ ok: true, usage: { worker: { ephemeral: true } } }, 'worker', T0)).toBeNull() // 缺 expires_at
+    // 非 ephemeral（tier token 常驻 harness）：无临期预警资格
+    expect(w.observe({ ok: true, usage: { worker: { expires_at: new Date(T0 + MIN).toISOString() } } }, 'worker', T0)).toBeNull()
+    expect(w.observe({ ok: true, usage: {} }, 'worker', T0)).toBeNull() // 已吊销：条目被网关摘除
+    expect(w.observe({ ok: true, usage: { worker: { ephemeral: true, expires_at: 'not-a-time' } } }, 'worker', T0)).toBeNull() // 非法时间戳
+  })
+
+  it('poller 集成：未临期不回调，跨阈值回调恰一次（去抖）；nowFn 注入控时', async () => {
+    const b = new Budget({ meta: { budget: { max_tokens: 100_000, max_wall_minutes: 10 } } })
+    const iso = new Date(T0 + 10 * MIN).toISOString()
+    const gw = await startMockGateway({ usage: { worker: { ephemeral: true, expires_at: iso, day_billable_tokens: 1 } } })
+    // resolveGatewayAdmin 走 ORCH_GATEWAY_* env：注入 + 测试内立即还原（supply.test 既有口径）
+    const envKeys = ['ORCH_GATEWAY_BASE', 'ORCH_GATEWAY_ADMIN_TOKEN']
+    const savedEnv: Record<string, string | undefined> = {}
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k]
+      process.env[k] = k === 'ORCH_GATEWAY_BASE' ? `http://127.0.0.1:${gw.port}` : 'admin-test'
+    }
+    let now = T0
+    const warns: Array<Record<string, unknown>> = []
+    try {
+      const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 30, onExpiryWarning: (x) => warns.push(x as Record<string, unknown>), nowFn: () => now })
+      expect(p.active).toBe(true)
+      await new Promise((r) => setTimeout(r, 300))
+      expect(warns).toHaveLength(0) // 未临期：安静
+      now = T0 + 9 * MIN // 跨阈值：剩余 1min < 阈值 2min
+      await new Promise((r) => setTimeout(r, 300))
+      p.stop()
+      expect(warns).toHaveLength(1) // 恰一次：后续轮询去抖
+      expect(warns[0]).toMatchObject({ harness_id: 'worker', expires_at: iso })
+      expect(b.measuredBaseline).toBe(1) // 油量账与临期预警同 payload 并行，互不干扰
     } finally {
       gw.close()
       for (const k of envKeys) {
