@@ -224,6 +224,101 @@ export function createExpiryWatcher({ ttlShare = EXPIRY_WARN_TTL_SHARE, capMs = 
   };
 }
 
+/** 临期续命单请求超时（orch-ephemeral-renew-consume，AGENTS 硬性约束 ≤3s，与 provision/revoke 同款）。 */
+export const RENEW_TIMEOUT_MS = 3000;
+
+/**
+ * 续期一次性 harness（orch-ephemeral-renew-consume）：POST /_modeldock/harness/renew（船 9
+ * 交付的网关端点，src/gateway/server.ts hRenewHarness）。请求体 { harnessId, ttl_minutes }——
+ * body 键是 harnessId（与 provision/revoke 的 id 不同名，网关侧决策）；ttl_minutes 为正数分钟，
+ * 网关只延不缩（新到期 = max(旧到期, now+ttl)，收敛 ≤1440min 硬顶；缩短请求 = 无效 no-op）。
+ * 响应 200 { ok, id, expires_at, ttl_minutes }；400 非法传参 / 404 非在册临时条目（未知 id、
+ * 持久 harness、已吊销或已清扫）/ 410 已过期（过期凭据不得复活）。
+ * fail-open（provision.mjs 同口径）：admin 未配置 / 网关不可达 / 超时 / 非 2xx / 响应异常
+ * 一律 { ok:false, reason } 返回，绝不抛出——调用方只落事件，续期失败不重试（重试风暴红线）。
+ * @param {{ base: string, adminToken: string }} ga admin 地址与令牌（resolveGatewayAdmin 产物）
+ * @param {string} harnessId provision 响应返回的临时 harness id
+ * @param {number} ttlMinutes 续期分钟数（与 provision ttlHours×60 同源；非法值直接 fail-open）
+ * @returns { Promise<{ ok: true, id: string, expiresAt: string|null, ttlMinutes: number|null }
+ *                  | { ok: false, reason: string }> }
+ */
+export async function renewTaskHarness(ga, harnessId, ttlMinutes, { timeoutMs = RENEW_TIMEOUT_MS } = {}) {
+  if (!ga || !/^https?:\/\//.test(String(ga.base ?? '')) || !ga.adminToken) {
+    return { ok: false, reason: 'admin 未配置（gatewayAdmin 未开启或未发现网关）' };
+  }
+  if (!harnessId) return { ok: false, reason: '缺少 harnessId（未签发一次性凭据，无可续期）' };
+  if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0) return { ok: false, reason: 'ttl_minutes 未定（卡无生效 max_wall_minutes）——不续' };
+  try {
+    const res = await fetch(`${String(ga.base).replace(/\/+$/, '')}/_modeldock/harness/renew`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-modeldock-admin': ga.adminToken },
+      body: JSON.stringify({ harnessId, ttl_minutes: ttlMinutes }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.status === 401) return { ok: false, reason: 'admin token 被网关拒绝（gateway.json 与运行实例不同源？）' };
+    if (!res.ok) return { ok: false, reason: `网关返回 ${res.status}` };
+    const j = await res.json().catch(() => null);
+    if (!j?.ok) return { ok: false, reason: `网关响应异常：${j?.reason ?? '缺少 ok'}` };
+    return {
+      ok: true,
+      id: typeof j.id === 'string' && j.id ? j.id : harnessId,
+      expiresAt: typeof j.expires_at === 'string' ? j.expires_at : null,
+      ttlMinutes: Number.isFinite(j.ttl_minutes) ? j.ttl_minutes : null,
+    };
+  } catch (e) {
+    return { ok: false, reason: `网关不可达：${e?.message ?? e}` };
+  }
+}
+
+/**
+ * 临期续命消费钩子（orch-ephemeral-renew-consume）：createExpiryWatcher 跨阈值时由
+ * orchestrator 的 onExpiryWarning 接线调用——先落 harness_expiry_warning（船 5 事件口径不变），
+ * 随即向网关 renew 端点续命（≤3s 超时、fail-open）：成功落 harness_renewed（含新 expires_at），
+ * 失败落 harness_renew_failed（不抛、不重试——与 revoke 同红线，漏网由 TTL 自然过期兜底）。
+ *
+ * 保守闸（deps 注入，orchestrator 闭包取实时值）：liveHarnessId() 只认本 run 已签发且未吊销的
+ * 一次性凭据（gatewayAdmin/provision 前置已由上游保证——taskHarness 存在即 admin 可得）；任务
+ * 落位终态（terminalState()，blocked/merged/failed）后不再续——awaiting-human 人工闸门期间凭据
+ * 仍活，照常预警与续期。id 不匹配（tier 解析的非任务凭据等）一律静默。
+ *
+ * 去抖重置口径：续期成功改写网关侧 expires_at → 下一轮 harness-usage 即新值 →
+ * createExpiryWatcher 以 expiresAtMs 为去抖键，天然按新实例重新锚定/去抖（新 expires_at 是
+ * 新阈值实例，可再告警/再续），无需手动清状态；旧实例已 warned，即使续期后短暂读到旧值也
+ * 不会重复告警/续期。续期失败后本实例亦不再重试（已 warned）。
+ *
+ * 依赖注入（appendEvent/log）保持本模块零编排域依赖；返回的回调返回续命 Promise
+ * （生产 fire-and-forget 不 await，测试可 await 精确断言事件时序）。
+ * @param {{ ga: object|null, ttlMinutes?: number, liveHarnessId: () => string|null,
+ *          terminalState: () => boolean, appendEvent: (type: string, fields: object) => void,
+ *          log?: (msg: string) => void, timeoutMs?: number }} deps
+ */
+export function createExpiryRenewal({ ga, ttlMinutes, liveHarnessId, terminalState, appendEvent, log = () => {}, timeoutMs = RENEW_TIMEOUT_MS } = {}) {
+  return (w) => {
+    const harnessId = typeof liveHarnessId === 'function' ? liveHarnessId() : null;
+    if (!harnessId || !w || w.harness_id !== harnessId) return Promise.resolve();
+    if (typeof terminalState === 'function' && terminalState() === true) return Promise.resolve();
+    appendEvent('harness_expiry_warning', { harness_id: w.harness_id, expires_at: w.expires_at, remaining_ms: w.remaining_ms, threshold_ms: w.threshold_ms });
+    const mins = Math.max(1, Math.ceil((w.remaining_ms ?? 0) / 60000));
+    log(`⏳ 一次性凭据临期：harness=${w.harness_id} 剩余约 ${mins} 分钟（阈值 ${Math.round((w.threshold_ms ?? 0) / 60000)} 分钟）——触发网关续期（失败只留痕，尽快收尾落位）`);
+    return (async () => {
+      try {
+        const rr = await renewTaskHarness(ga, harnessId, ttlMinutes, { timeoutMs });
+        if (rr.ok) {
+          appendEvent('harness_renewed', { harness_id: rr.id ?? harnessId, expires_at: rr.expiresAt, ttl_minutes: rr.ttlMinutes });
+          log(`♻ 一次性凭据已续期：harness=${harnessId} 新到期 ${rr.expiresAt ?? '未知'}（网关只延不缩；下一轮 usage 即新阈值实例，可再告警/再续）`);
+        } else {
+          appendEvent('harness_renew_failed', { harness_id: harnessId, reason: rr.reason });
+          log(`⚠ 一次性凭据续期失败（${rr.reason}）——fail-open 不重试，凭据按原到期继续，临期前尽量收尾落位避免中途 401`);
+        }
+      } catch (e) {
+        // 双保险：renewTaskHarness 本身 fail-open 不抛，这里兜 appendEvent/log 等意外——回调经
+        // poller fire-and-forget 消费，未处理的 rejection 会带崩整个 run 进程（fail-open 红线）
+        log(`⚠ 一次性凭据续命意外失败（${e?.message ?? e}）——fail-open 继续跑`);
+      }
+    })();
+  };
+}
+
 /** 单次拉取 harness-usage 原始 payload：失败/字段缺失 → null（fail-open，静默）。 */
 async function fetchHarnessUsagePayload({ base, adminToken, timeoutMs }) {
   if (!base || !adminToken) return null;

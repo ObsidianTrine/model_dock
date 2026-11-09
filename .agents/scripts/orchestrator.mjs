@@ -51,7 +51,7 @@ import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mj
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
-import { probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
+import { MEASURED_FUEL_POLL_MS, createExpiryRenewal, probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
 import { installWorkspaceDeps as installWorkspaceDepsImpl } from './orchestrator/deps.mjs';
 import { readDegraded, evaluateDrift, clearDegraded } from './orchestrator/drift.mjs';
@@ -578,6 +578,12 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 吊销失败只告警不阻断、不重试（重试风暴红线），漏网凭据由 TTL（≤24h）自然过期兜底。
   const provGa = cfg.gatewayProvision === true ? resolveGatewayAdmin(cfg) : null;
   let taskHarness = null; // { id, expiresAt, revoked }；签发失败/未启用保持 null（fail-open 走旧路径）
+  // 凭据 TTL 传参（provision 与临期 renew 同源，orch-ephemeral-renew-consume）：按 wall 预算收敛
+  // ceil(wall/60)+1 小时（provision/renew 内再转分钟、受 ≤24h 网关硬顶收敛）——缺省 8h TTL 可能
+  // 先于 wall 熔断过期，长任务后半程掉凭据；renew 同源取值保证续期寿命口径与签发一致。
+  const ephemeralTtlHours = Number.isFinite(meta.budget?.max_wall_minutes) && meta.budget.max_wall_minutes > 0
+    ? Math.ceil(meta.budget.max_wall_minutes / 60) + 1
+    : undefined;
   if (cfg.gatewayProvision === true && !provGa) {
     appendEvent(qdir, 'harness_provision_failed', { reason: 'admin 未配置（gatewayAdmin 未开启或未发现网关）——回落既有凭据路径' });
     log('⚠ 一次性凭据：gatewayProvision 已开但 admin 不可得（需 gatewayAdmin: true + 网关可发现）——回落既有凭据路径');
@@ -592,15 +598,11 @@ async function cmdRun(repoRoot, taskId, opts) {
     }
     // 传参限额与寿命（2026-11 长跑自治）：maxDailyTokens = 卡生效 token 预算（上方预算
     // 校准段已把 budgetProfiles 合并进 meta.budget），per-harness 日限额与任务熔断同源——
-    // 凭据本身也成为预算防线；ttlHours 按 wall 预算收敛（ceil(wall/60)+1 小时，provision.mjs
-    // 内再受 ≤24h 硬顶）——此前缺省 8h TTL 可能先于 wall 熔断过期，长任务后半程掉凭据。
-    const ttlHours = Number.isFinite(meta.budget?.max_wall_minutes) && meta.budget.max_wall_minutes > 0
-      ? Math.ceil(meta.budget.max_wall_minutes / 60) + 1
-      : undefined;
+    // 凭据本身也成为预算防线；ttlHours 见上方 ephemeralTtlHours（provision 与 renew 同源）。
     const maxDailyTokens = Number.isFinite(meta.budget?.max_tokens) && meta.budget.max_tokens > 0
       ? meta.budget.max_tokens
       : undefined;
-    const pr = await provisionTaskHarness(provGa, { taskId, ttlHours, maxDailyTokens });
+    const pr = await provisionTaskHarness(provGa, { taskId, ttlHours: ephemeralTtlHours, maxDailyTokens });
     if (pr.ok) {
       taskHarness = { id: pr.harnessId, expiresAt: pr.expiresAt, revoked: false };
       tierEnv = applyEphemeralToken(tierEnv, pr); // 同形通道只换 token；claude 双通道与 zcode env 透传照旧
@@ -632,23 +634,32 @@ async function cmdRun(repoRoot, taskId, opts) {
   // 观测不可达 → null → 自报账兜底，行为不回退。reconcile 离线对账逻辑不动。
   // gatewayProvision 生效时 harness = 本任务专属 ephemeral id（上方签发），精确取数；
   // 未启用/签发失败回落 tier token 经 tier-validate 解析的 harness id（基线法照旧）。
-  // 一次性凭据临期预警（orch-ephemeral-expiry-watch）：ephemeral 条目的轮询响应带 expires_at，
-  // 剩余 < min(20% TTL, 30min) 落 harness_expiry_warning 事件 + log——网关无 TTL 续期能力，
-  // 夜航中途 401 前的主动预警是当前最优解。去抖在 supply 侧（每凭据每阈值一次）；这里再挡
-  // 已吊销与任务终态两道：revokeRunHarness 置位后/卡落位 blocked·merged·failed 后不再刷
-  // 事件（盖住落位与 finally 停轮询之间的窗口；awaiting-human 人工闸门期间凭据仍活，照常预警）。
+  // 一次性凭据临期预警 + 自动续命（orch-ephemeral-expiry-watch / orch-ephemeral-renew-consume）：
+  // ephemeral 条目的轮询响应带 expires_at，剩余 < min(20% TTL, 30min) 落 harness_expiry_warning
+  // 事件 + log，并随即调网关 renew 端点续命（orch-ephemeral-renew-consume：成功落 harness_renewed
+  // 含新 expires_at，失败落 harness_renew_failed——fail-open 不抛不重试）。续期后网关侧 expires_at
+  // 改写，下一轮 usage 即新阈值实例，可再告警/再续（去抖重置口径见 createExpiryRenewal）。
+  // 保守闸两道在钩子内（supply.mjs）：只认本 run 已签发未吊销的凭据（revokeRunHarness 置位后
+  // 不再续）+ 卡落位 blocked·merged·failed 后不续（盖住落位与 finally 停轮询之间的窗口；
+  // awaiting-human 人工闸门期间凭据仍活，照常预警与续期）。
+  // 轮询间隔：60s 缺省；ORCH_FUEL_POLL_MS 仅供测试收缩到亚秒级（ORCH_RETRY_WAIT_MS 同款测试
+  // 旋钮，生产行为不变；下限 250ms 防误配打爆网关，低于下限按缺省 60s）。
+  const fuelPollMs = Math.max(250, Number.parseInt(process.env.ORCH_FUEL_POLL_MS ?? '', 10) || MEASURED_FUEL_POLL_MS);
+  const renewOnExpiry = createExpiryRenewal({
+    ga: provGa,
+    ttlMinutes: ephemeralTtlHours ? ephemeralTtlHours * 60 : undefined,
+    liveHarnessId: () => (taskHarness && !taskHarness.revoked ? taskHarness.id : null),
+    terminalState: () => ['blocked', 'merged', 'failed'].includes(findCard(root, taskId)?.state),
+    appendEvent: (type, fields) => appendEvent(qdir, type, fields),
+    log,
+  });
   const measuredFuel = startMeasuredFuelPoller({
     budget,
     cfg,
     harness: measuredHarness,
+    intervalMs: fuelPollMs,
     log,
-    onExpiryWarning: (w) => {
-      if (!taskHarness || taskHarness.revoked || w.harness_id !== taskHarness.id) return;
-      if (['blocked', 'merged', 'failed'].includes(findCard(root, taskId)?.state)) return;
-      appendEvent(qdir, 'harness_expiry_warning', { harness_id: w.harness_id, expires_at: w.expires_at, remaining_ms: w.remaining_ms, threshold_ms: w.threshold_ms });
-      const mins = Math.max(1, Math.ceil(w.remaining_ms / 60000));
-      log(`⏳ 一次性凭据临期：harness=${w.harness_id} 剩余约 ${mins} 分钟（阈值 ${Math.round(w.threshold_ms / 60000)} 分钟）——网关无续期能力，尽快收尾落位，避免中途 401`);
-    },
+    onExpiryWarning: renewOnExpiry,
   });
 
   // ---- 进展看门狗（watchdog.mjs）：worker 每 N 个 turn 由一次性 headless LLM 判断是否有
