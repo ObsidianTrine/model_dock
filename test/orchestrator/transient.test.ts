@@ -345,7 +345,10 @@ describe('orchestrator transient > cause 精读（A1）', () => {
 describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线，metrics keypool）', () => {
   function writeLog(dir: string, entry: Record<string, unknown>) {
     fs.mkdirSync(dir, { recursive: true })
-    fs.appendFileSync(path.join(dir, `gateway-${String(entry.ts).slice(0, 10)}.jsonl`), JSON.stringify(entry) + '\n')
+    // 日文件按**本地日期**切分（网关 localIsoTs().slice(0,10) 同款口径）；entry.ts 是 UTC ISO，
+    // 直接 slice 取到的是 UTC 日——本地 00:00-08:00（UTC+8）与 UTC 日错位一天 → 读不到日志
+    // → 3 例 metrics keypool 用例假红（2026-11-10 实证 10/10 红，非概率 flake）
+    fs.appendFileSync(path.join(dir, `gateway-${localDate(new Date(String(entry.ts)))}.jsonl`), JSON.stringify(entry) + '\n')
   }
 
   it('无 cfg → 不问 metrics：key_cooldown 照常 transient、无 retryMs（既有退避兜底）', async () => {
