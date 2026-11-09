@@ -591,6 +591,21 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
 }
 
 /**
+ * L2 逐字校验失败重试段（verifyBriefOnce 追加，2026-11-10）：逐字失败一票终审改为
+ * 先自动重试一次——强调逐字摘录契约（行内 [n] 引用标注剥除不算改写，改写/概括一律
+ * 作废），压低二次违反率；重试仍败走 downgradeNonVerbatimClaims 降级保留。重试与
+ * 「无契约块」重试共享 MAX_ATTEMPTS 会话上限（追加段不再新开配额）。
+ */
+export function buildVerbatimRetryPrompt(attempt, fabricatedCount) {
+  const fence = '```';
+  return (
+    `\n\n# 重试要求（第 ${attempt} 次输出有 ${fabricatedCount} 条 claim 未通过逐字校验）\n` +
+    `claims 每条必须**逐字摘自 brief 原文**：跨行/多空格可以，行内 [n] 引用标注剥除不算改写；改写、概括、增删词一律作废（系统逐字校验，仍不通过将整条降级保留并计入编造红旗）。\n` +
+    `请重新输出完整 ${fence}${VERDICT_MARKER}${fence} JSON 契约块（claims + blockers，字段要求同上）。`
+  );
+}
+
+/**
  * 组装仲裁轮 prompt（L2 contradicted 的外部取证）：复核船无联网，矛盾只能拿快照文本
  * 裁断；快照自身误导（页面元数据语义、骨架截断）时矛盾可能是误报。仲裁会话带联网工具
  * （同 researcher 工具面），对每条 contradicted claim 检索 ≥2 个独立带日期来源、优先
