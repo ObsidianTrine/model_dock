@@ -99,7 +99,7 @@ L2 的**逐条裁决义务**：审查船必须在 gates.notes 对每个命中标
 1. 三件套文件齐全且非空（requirements/design/tasks）。
 2. tasks.md「## 任务 N:」可解析（复用 parseTasksDoc），每段 目标/文件/完成条件/依赖 四行齐全。
 3. 依赖图无环、依赖 id 均存在于本 tasks.md。
-4. 「文件」行路径（files_hint）在仓库中存在（支持 `src/gateway/` 目录形式与 `a.md` 文件形式；通配符展开后须非空）。
+4. 「文件」行路径（files_hint）存在性（支持 `src/gateway/` 目录形式与 `a.md` 文件形式；通配符查前缀目录）。**缺路径是 warn 不是 fail**：任务引用拟新建文件（新测试/新模块）时路径不存在是合法的——裁决义务交 L2（新建=正常；修改既有文件却写错路径=P1）。fail 只留给让审查无法进行的结构性问题（2026-11-10 首跑真 spec 误判后修正，见 §6）。
 5. 红线关键词扫描（§2 清单）扫三件套全文。
 6. TBD/待定/后续再定 标记计数（report-only，进入 completeness 扣分依据）。
 7. finding 定位对账（§3 硬纪律）——L2 输出落地后机器复核 file/section 真实性。
@@ -112,6 +112,8 @@ L2 的**逐条裁决义务**：审查船必须在 gates.notes 对每个命中标
 - **台账**：appendResearchLedger 加 kind:'spec-review' 记录（复用基建，不新建库）。
 
 ## 6. 误报/漏报案例回填（活文档）
+
+- **2026-11-10 首跑真 spec（research-verbatim-precision）——L0 自身误判被实测纠正**：任务 2 引用拟新建的 `test/orchestrator/research-verbatim.test.ts`，路径不存在被旧逻辑判结构 fail → 提前 die 不烧 L2。教训与 §2 红线同哲学：**确定性层管机械事实，语义裁决交 L2**——「缺路径」无法机器区分「新建文件」与「typo」，降 warn 交裁决。fail 集合收敛为：三件套缺失、任务段不可解析、依赖悬空/成环。
 
 - **2026-11-09 首跑（research-verdict-trust-fixes 试点）——零误报，捕获真漂移**：spec 21:18:31 写就，develop 21:31:42 合入 753a1b4（L2 仲裁轮+verifier 日期硬规则，另一会话实施），「现状」节整体过期——L2 审查船经现状对账判 rework（overall=73，consistency=45），4 条 P1 全部经人工复核为真（行号漂移 3 处、prompt 硬规则已存在、docs 认领缺口、守卫×仲裁轮顺序交互未讨论）。教训固化：**「现状」节定位一律用 符号+函数名，行号只作辅助**——行号漂移是常态不是事故；L0 补一条「spec 落盘时间晚于 HEAD 提交时间的审查警告」可提前暴露基线漂移。
 
