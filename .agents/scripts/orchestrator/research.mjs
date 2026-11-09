@@ -494,16 +494,28 @@ export function normalizeClaimText(s) {
 }
 
 /**
+ * 行内 [n] 引用标注豁免：空白归一后剥 `/\[\d{1,3}\]/g`（brief 行内引用契约的形状
+ * 就是 1-3 位纯数字）。限纯数字：[2026]/[1m] 类年份/型号不豁免，不给改写开口子；
+ * 剥标注时连同至多一个前导空格一起剥（模型省略 [n] 时会连空格一起省），剥后再
+ * 折叠空白清残。仅吃前导不吃尾随：「A [1] B」→「A B」仍留词间分隔。
+ */
+export function stripInlineCitations(s) {
+  return normalizeClaimText(s).replace(/ ?\[\d{1,3}\]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
  * claim 逐字校验（v3 关键防线）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
  * 改写/概括/无中生有即判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
+ * 行内 [n] 引用标注豁免：两侧先剥 [n] 再比包含（长度上限仍按原始归一文本计）。
  */
 export function verifyClaimVerbatim(claims, briefBody) {
-  const brief = normalizeClaimText(briefBody);
+  const brief = stripInlineCitations(briefBody);
   const valid = [];
   const fabricated = [];
   for (const c of claims ?? []) {
     const text = normalizeClaimText(c?.claim);
-    if (text && text.length <= 120 && brief.includes(text)) valid.push({ ...c, claim: text });
+    const bare = stripInlineCitations(text);
+    if (text && text.length <= 120 && bare && brief.includes(bare)) valid.push({ ...c, claim: text });
     else fabricated.push((text || '(空)').slice(0, 80));
   }
   return { valid, fabricated };

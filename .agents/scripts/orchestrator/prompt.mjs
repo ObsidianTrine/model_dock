@@ -582,7 +582,7 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
     `- contradicted：与快照内容矛盾（或两处引文互相矛盾）\n` +
     `- unverifiable：快照缺失或纯定性无法对账\n\n` +
     `硬性要求：\n` +
-    `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废）；\n` +
+    `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废；行内 [n] 引用标注可省略，系统已豁免）；\n` +
     `2. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
     `3. brief 自己标注「未证实/转述」不算硬伤（诚实标注是加分项），但该 claim 最多 partial；\n` +
     `4. **页面发布/更新时间 ≠ 事件发生时间**（2026-11-09 实测误报：公告页 published_time=2025-06 被当成「API 1 月上线」的反证，事后四来源证实 1 月正确）——判 contradicted 前确认快照文本本身断言了该事件日期；仅凭 published_time/last-updated 元数据与 claim 断言的日期不符，判 partial 并在 note 写明依据，不判 contradicted；\n` +
