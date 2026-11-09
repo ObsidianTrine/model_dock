@@ -96,7 +96,7 @@ describe('weather > 集成（drain 风暴滞留）', () => {
     } finally {
       repo.cleanup()
     }
-  })
+  }, 120_000) // 两次 runOrch 子进程（Windows 上含 CLI 探测与 git init），20s 默认超时不够（fleet.test.ts 同款加固）
 
   it('未配 weatherHold 键 = 功能关闭：同样的重试现场 drain 照常派发（行为不变）', () => {
     const repo = mkRepo()
@@ -112,7 +112,7 @@ describe('weather > 集成（drain 风暴滞留）', () => {
     } finally {
       repo.cleanup()
     }
-  })
+  }, 120_000) // runOrch 子进程 E2E，同款加固
 
   it('worker_retry 经 appendEvent 落盘的真实 ts 同样入窗（toIsoLocal 兼容）', () => {
     const repo = mkRepo()
@@ -150,7 +150,7 @@ describe('weather > 集成（watch 瞭望模式同样受风暴闸约束）', () 
     } finally {
       repo.cleanup()
     }
-  })
+  }, 120_000) // watch 子进程 E2E，同款加固
 })
 
 describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴）', () => {
@@ -203,7 +203,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
       repo.cleanup()
       h.restore()
     }
-  })
+  }, 120_000) // runOrch 子进程 E2E，同款加固
 
   it('配置了 upstream 但网关日志不可得（无 gatewayLogDir）→ 不滞留照常派发', () => {
     const savedFake = process.env.MODELRDOCK_FAKE_HOME
