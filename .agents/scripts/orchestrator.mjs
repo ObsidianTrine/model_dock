@@ -34,7 +34,7 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER } from './orchestrator/prompt.mjs';
 import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
@@ -66,6 +66,7 @@ import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
 import { readNightlyState, writeNightlyState, decideNightlyStart } from './orchestrator/nightly-state.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress } from './orchestrator/spec.mjs';
+import { runSpecL0Checks, auditSpecFindings, computeSpecVerdict, parseSpecVerdictBlock, buildSpecReviewNotifyBody } from './orchestrator/spec-review.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
@@ -3171,6 +3172,105 @@ function cmdSpecBuild(repoRoot, id) {
   log(`推进：node .agents/scripts/orchestrator.mjs drain（卡按任务序先后调度，合并逐张等人工 approve）`);
 }
 
+/**
+ * spec review <id>——三件套 agent 分层审查（规约 .agents/conventions/spec-review.md）：
+ * L0 确定性检查（零 token）→ L2 审查船 readonly 会话（五维评分 + findings 防编造定位对账）
+ * → 服务端权威裁决（加权 + null 传染 + fabricated 降档 + build_ready 矩阵）→
+ * specs/<id>/review-verdict.json + L3 台账 + 通知。**advisory**：结论只做筛查，
+ * spec build 拆卡永远人工拍板（与 research verdict 同哲学）。审查船模型解耦：backend
+ * 缺省 review.backend（异构互审同语义），model 缺省 review.model。
+ */
+async function cmdSpecReview(repoRoot, id, opts) {
+  if (!listSpecs(repoRoot).includes(id)) die(`规格 "${id}" 不存在。spec list 查看。`);
+  const spec = readSpec(repoRoot, id);
+  const cfg = loadWorkflowConfig(repoRoot);
+  log(`═══ spec 审查（advisory——拆卡权在人）：${id}：${spec.meta.title} ═══`);
+  const l0 = runSpecL0Checks(repoRoot, id);
+  for (const c of l0.checks) {
+    log(`  [${c.status === 'fail' ? '⛔' : c.status === 'warn' ? '⚠' : '✓'}] ${c.name}: ${c.detail}`);
+  }
+  for (const h of l0.redlineHits) log(`  ⚠ 红线关键词命中（待 L2 裁决）：${h.name} —— …${h.snippet}…`);
+  if (!l0.ok) {
+    die('L0 结构性检查未过（⛔ 项）——先修三件套结构再审查；结构修复不需要烧 L2 会话。');
+  }
+  if (cfg.research?.notify !== false && (l0.redlineHits.length || l0.baselineDrift)) {
+    log('  ⚠ 存在红线命中或基线漂移——L2 将被要求逐条裁决/按当前 develop 复核现状。');
+  }
+
+  const backendName = opts.backend || cfg.review?.backend || 'claude-headless';
+  const model = opts.model || cfg.review?.model || undefined;
+  const backend = await getBackend(backendName);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specreview-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specreview-prompt-')), 'spec-review-prompt.md');
+  try {
+    let promptText = buildSpecReviewPrompt(id, spec, l0, repoRoot);
+    const MAX_ATTEMPTS = 2;
+    let parsed = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // 审查船只读探索主仓库（Read/Glob/Grep；现状对账要真开代码文件）
+        maxTurns: 30,
+        onEvent: () => {},
+        readonly: true,
+        settingsFile,
+      });
+      parsed = parseSpecVerdictBlock(result.output ?? '');
+      if (!parsed) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含合规 ${'```'}${SPECVERDICT_MARKER}${'```'} JSON 契约块）\n请严格按产出契约重新输出：gates/dimensions(五键)/findings(≤12)/usage/advisory。`;
+          continue;
+        }
+        die(`spec 审查会话 ${MAX_ATTEMPTS} 次均未产出合规 spec-verdict 契约块（--backend mock 可验证管线）。`);
+      }
+      break;
+    }
+    // 防编造对账（规约 §3 硬纪律）：file/claim/section 机器可验证，对不上 = fabricated 剔除 + 降档
+    const { audited, fabricated } = auditSpecFindings(repoRoot, parsed.findings);
+    for (const f of fabricated) log(`  ⚠ finding 定位对账失败（剔除）：${f.fabricated_reason}`);
+    const verdict = computeSpecVerdict({ dimensions: parsed.dimensions, findings: audited, gates: { ...parsed.gates, redlineHits: l0.redlineHits }, fabricatedCount: fabricated.length });
+    const stored = {
+      schema: 'spec-verdict/1',
+      spec: id,
+      reviewer_model: model ?? null,
+      backend: backendName,
+      created_at: toIsoLocal(),
+      gates: parsed.gates ?? null,
+      dimensions: parsed.dimensions ?? null,
+      overall: verdict.overall,
+      findings: audited,
+      fabricatedFindings: fabricated,
+      counts: verdict.counts,
+      usage: { build_ready: verdict.build_ready, reviewer_suggestion: parsed.usage?.build_ready ?? null },
+      reasons: verdict.reasons,
+      l0: { checks: l0.checks, redlineHits: l0.redlineHits, tbdCount: l0.tbdCount, fuzzyCount: l0.fuzzyCount, baselineDrift: l0.baselineDrift },
+      advisory: true, // 永远 true：审查不改变拆卡权归属（人工）
+    };
+    const verdictPath = path.join(spec.dir, 'review-verdict.json');
+    fs.writeFileSync(verdictPath, `${JSON.stringify(stored, null, 2)}\n`);
+    const icon = verdict.build_ready === 'approve_to_build' ? '✓' : verdict.build_ready === 'blocked' ? '⛔' : '⚠';
+    log(`${icon} 审查结论：${verdict.build_ready}（overall ${verdict.overall ?? 'null'}；服务端重算，审查船建议 ${parsed.usage?.build_ready ?? '?'}）`);
+    for (const r of verdict.reasons) log(`  · ${r}`);
+    log(`  findings：P0×${verdict.counts.p0} P1×${verdict.counts.p1} P2×${verdict.counts.p2}`);
+    for (const f of audited.slice(0, 6)) log(`  · [${f.severity}] ${f.file}${f.section ? ` ${f.section}` : ''}——${String(f.fix ?? f.why ?? '').slice(0, 70)}`);
+    appendResearchLedger(repoRoot, { kind: 'spec-review', spec_id: id, backend: backendName, model: model ?? null, overall: verdict.overall, build_ready: verdict.build_ready, p0: verdict.counts.p0, p1: verdict.counts.p1, p2: verdict.counts.p2, fabricated: fabricated.length });
+    try {
+      if (cfg.research?.notify !== false) {
+        const proj = displayProjectName(cfg.projectName ?? '');
+        await notify({ title: `${proj} spec 审查 ${id}（${verdict.build_ready}）`, body: buildSpecReviewNotifyBody({ ...verdict, dimensions: parsed.dimensions, findings: audited, fabricatedCount: fabricated.length }), webhookEnvs: orchWebhookEnvs(repoRoot) });
+      }
+    } catch { /* 通知失败不阻断 */ }
+    log(`消费：review-verdict.json（schema/1，规约 .agents/conventions/spec-review.md）——人审 findings 后：spec build ${id} 拆卡`);
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch { /* 清理失败不阻断 */ }
+  }
+}
+
 /** spec list/show：浏览规格目录与单规格概要。 */
 function cmdSpecList(repoRoot) {
   const ids = listSpecs(repoRoot);
@@ -4635,6 +4735,8 @@ function usage() {
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
   spec status <id>                          规格全局进度锚（progress.json，跨夜断点视图）
+  spec review <id> [--backend <名>] [--model m]
+                                          三件套 agent 分层审查（L0 确定性 + L2 审查船五维评分 + findings 定位对账）：落 review-verdict.json（spec-verdict/1）+ 台账 + 通知——**advisory**，只做筛查，拆卡仍人审（规约 .agents/conventions/spec-review.md）
   research "<调研问题>" [--min-citations N] [--model <模型名>] [--backend mock]
                                           上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
   research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
@@ -4757,6 +4859,10 @@ async function main() {
       if (sub === 'status') {
         if (!args[1]) die('用法：spec status <spec-id>');
         return cmdSpecStatus(repoRoot, args[1]);
+      }
+      if (sub === 'review') {
+        if (!args[1]) die('用法：spec review <spec-id> [--backend <名>] [--model <模型>]');
+        return cmdSpecReview(repoRoot, args[1], opts);
       }
       opts.intent = args;
       return cmdSpecStart(repoRoot, opts);

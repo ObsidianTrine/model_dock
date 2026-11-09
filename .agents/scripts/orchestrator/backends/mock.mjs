@@ -20,7 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER } from '../prompt.mjs';
 
 export const mockBackend = {
   name: 'mock',
@@ -35,11 +35,49 @@ export const mockBackend = {
     const prompt = fs.readFileSync(promptFile, 'utf8');
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
-    const isPlanner = !isSpecPlanner && prompt.includes(CARD_MARKER);
-    const isArbiter = !isSpecPlanner && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
-    const isVerifier = !isSpecPlanner && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
-    const isResearcher = !isSpecPlanner && !isPlanner && !isVerifier && !isArbiter && prompt.includes(BRIEF_MARKER);
+    const isSpecReviewer = !isSpecPlanner && !isReviewer && prompt.includes(SPECVERDICT_MARKER); // spec 三件套审查船（cmdSpecReview）
+    const isPlanner = !isSpecPlanner && !isSpecReviewer && prompt.includes(CARD_MARKER);
+    const isArbiter = !isSpecPlanner && !isSpecReviewer && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
+    const isVerifier = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
+    const isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
+
+    if (isSpecReviewer) {
+      // spec 审查模式（spec-verdict/1）：固定五维 + 1 条 P2 finding（file 指向 prompt 中的
+      // spec design.md，section 行号 1 恒在界内——auditSpecFindings 对账必过）。
+      //   ORCH_MOCK_SPEC_REVIEW_INVALID=1   输出无契约块（测重试→die 路径）
+      //   ORCH_MOCK_SPEC_REVIEW_BLOCKERS>=2 两条 P0（测 rework 矩阵路径）
+      //   ORCH_MOCK_SPEC_REVIEW_FABRICATED=1 finding 指向不存在的文件（测定位对账剔除+降档）
+      const invalid = process.env.ORCH_MOCK_SPEC_REVIEW_INVALID === '1';
+      const blockers = parseInt(process.env.ORCH_MOCK_SPEC_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      const fabricated = process.env.ORCH_MOCK_SPEC_REVIEW_FABRICATED === '1';
+      if (invalid) {
+        const output = '审查想好了但没有契约块。';
+        onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-spec-reviewer' });
+        return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+      }
+      const specId = /"spec":\s*"([a-z0-9-]+)"/.exec(prompt)?.[1] ?? 'mock-spec';
+      const goodFile = `.agents/orchestrator/specs/${specId}/design.md`;
+      const base = blockers >= 2
+        ? [
+            { severity: 'P0', file: goodFile, section: '第 1 行', claim: '', why: 'mock：现状对账不符（注入）', fix: '按当前 develop 重写现状节' },
+            { severity: 'P0', file: `.agents/orchestrator/specs/${specId}/tasks.md`, section: '第 1 行', claim: '', why: 'mock：完成条件不可验证（注入）', fix: '改断言级完成条件' },
+          ]
+        : [{ severity: 'P2', file: goodFile, section: '第 1 行', claim: '', why: 'mock：轻微建议', fix: '可改可不改' }];
+      const ghost = { severity: 'P2', file: '.agents/orchestrator/specs/no-such-dir/ghost.md', section: '第 1 行', claim: '', why: 'mock：幽灵文件', fix: '应被定位对账剔除' };
+      const findings = fabricated ? [...base, ghost] : base;
+      const payload = {
+        spec: specId,
+        gates: { redlines: 'pass', notes: ['mock：L0 无红线命中'] },
+        dimensions: { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90 },
+        findings,
+        usage: { build_ready: blockers >= 2 ? 'rework' : 'approve_to_build' },
+        advisory: true,
+      };
+      const output = ['审查完成。', '', '```' + SPECVERDICT_MARKER, JSON.stringify(payload, null, 2), '```'].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-spec-reviewer' });
+      return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+    }
 
     if (isArbiter) {
       // 仲裁轮模式：从 prompt 逐字摘录「待仲裁 claim」行（buildArbitrationPrompt 的
