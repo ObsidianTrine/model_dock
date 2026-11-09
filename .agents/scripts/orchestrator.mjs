@@ -3051,20 +3051,32 @@ async function cmdPropose(repoRoot, opts) {
  */
 async function cmdSpecStart(repoRoot, opts) {
   const intentText = (opts.intent ?? []).join(' ').trim();
-  if (!intentText) die('用法：spec "<一句话描述特性>" [--from-brief <brief-id>] [--backend mock]');
+  if (!intentText) die('用法：spec "<一句话描述特性>" [--from-brief <brief-id[,id2…]>] [--backend mock]');
   opts.backend = resolveBackendName(opts, null).name; // 同 intent：缺省回落，防 undefined 直喂 getBackend
   const backend = await getBackend(opts.backend);
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-spec-prompt-')), 'spec-prompt.md');
 
   try {
-    // --from-brief <id>：调研结论（research 命令产出的 brief）注入 spec prompt——上游管线
-    // 的 glue（brief → spec），spec 三件套/人工审设计/spec build 全流程零改动复用
+    // --from-brief <id[,id2…]>：调研结论（research 命令产出的 brief）注入 spec prompt——上游管线
+    // 的 glue（brief → spec），spec 三件套/人工审设计/spec build 全流程零改动复用。
+    // 值支持英文逗号分隔多个 brief id（容忍逗号两侧空格），multi-dim 调研的多份结论一次注入
     let briefBody = '';
     if (opts.fromBrief) {
-      const brief = readBrief(repoRoot, opts.fromBrief);
-      if (!brief) die(`调研 brief "${opts.fromBrief}" 不存在（目录 ${researchDir(repoRoot)}）。research list 查看已有 brief。`);
-      briefBody = brief.body;
+      const briefIds = String(opts.fromBrief).split(',').map((s) => s.trim()).filter(Boolean);
+      if (!briefIds.length) die(`--from-brief "${opts.fromBrief}" 未解析出任何 brief id。用法：--from-brief <brief-id[,id2…]>，research list 查看已有 brief。`);
+      const missing = [];
+      const briefs = [];
+      for (const id of briefIds) {
+        const brief = readBrief(repoRoot, id);
+        if (!brief) missing.push(id);
+        else briefs.push({ id, body: brief.body });
+      }
+      if (missing.length) die(`调研 brief 不存在：${missing.map((id) => `"${id}"`).join('、')}（目录 ${researchDir(repoRoot)}）。research list 查看已有 brief。`);
+      // 单 id 保持 body 原文不包装：向后兼容（既有注入格式与测试断言依赖原文）；多 id 才拼分节
+      briefBody = briefs.length === 1
+        ? briefs[0].body
+        : briefs.map((b) => `# 调研结论（brief：${b.id}）\n\n${String(b.body).trim()}`).join('\n\n---\n\n');
     }
     let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
     const MAX_ATTEMPTS = 3;
@@ -4421,7 +4433,7 @@ function usage() {
                                           清空 pending 队列（--workers N 并发跑，按 files_hint 分区互斥）
   status [task-id]                        队列全貌 / 单任务事件时间线
   intent "<一句话描述>" [--draft] [--backend mock]  Planner 把意图编译成任务卡（--draft 只出草稿不进队列）
-  spec "<一句话描述特性>" [--from-brief <brief-id>] [--backend mock]
+  spec "<一句话描述特性>" [--from-brief <brief-id[,id2…]>] [--backend mock]
                                           规格驱动（Spec Kit/Kiro 式）：Planner 出 requirements/design/tasks 三件套，人工审阅后再拆卡；--from-brief 把调研 brief 结论注入设计
   spec build <id>                           把已审阅规格的 tasks 拆成任务卡进 pending/（design 全文注入卡背景；幂等）
   spec list / spec show <id>                浏览规格目录 / 单规格任务概要
