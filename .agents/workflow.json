@@ -12,7 +12,7 @@
   ],
   "gatewayLogDir": "~/.modeldock/logs",
   "gatewayAdmin": true,
-  "gatewayProvision": false,
+  "gatewayProvision": true,
   "scheduling": {
     "maxWorkers": 1
   },
