@@ -34,8 +34,8 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildArbitrationPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER } from './orchestrator/prompt.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, appendResearchLedger, readLedgerStats, VERDICT_SCHEMA } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3263,6 +3263,57 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
 }
 
 /**
+ * 仲裁轮会话（research verify 的 contradicted 外部取证，2026-11-09 实测驱动）：
+ * 复核船无联网、只拿快照裁断——快照自身误导（published_time 语义、骨架截断）时矛盾
+ * 可能是误报（今日实测：公告页 published_time=2025-06 被当事件日期，四来源证实 1 月
+ * 正确）。仲裁会话带 researcher 同款联网工具面，对每条 contradicted claim 检索 ≥2 个
+ * 独立带日期来源（优先官方），产出 agents-arbitration 契约块。模型用 research.model
+ * （检索接地强者），2 连败返回 { failed, stderrTail }，调用方 fail-closed 维持否决。
+ */
+async function runArbitrationSession(repoRoot, { claims, snapshots, backendName, model }) {
+  const backend = await getBackend(backendName);
+  const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-arbit-')), 'settings.json');
+  const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-arbit-prompt-')), 'arbitration-prompt.md');
+  const sourcesBlocks = snapshots
+    .map((s, i) => `### 快照 ${i + 1}：${s.url}\n${s.text.slice(0, 12_000)}`)
+    .join('\n\n');
+  try {
+    let promptText = buildArbitrationPrompt(claims, sourcesBlocks, repoRoot);
+    const MAX_ATTEMPTS = 2;
+    let lastResult = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      fs.writeFileSync(promptFile, promptText);
+      if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
+      const result = await backend.spawn({
+        promptFile,
+        cwd: repoRoot, // 仲裁只读仓库 + 联网检索（researcher 同款工具白名单，无 Bash 无写）
+        maxTurns: 20,
+        onEvent: () => {},
+        web: true,
+        model,
+        settingsFile,
+      });
+      lastResult = result;
+      const parsed = parseArbitrationBlock(result.output ?? '');
+      if (!parsed) {
+        if (attempt < MAX_ATTEMPTS) {
+          promptText += `\n\n# 重试要求（第 ${attempt} 次输出不含合规 ${'```'}agents-arbitration${'```'} 契约块）\n请严格按产出契约重新输出：rulings 每条含逐字 claim + ruling 三枚举 + 带日期 sources。`;
+          continue;
+        }
+        return { failed: true, stderrTail: String(lastResult?.stderr ?? '') };
+      }
+      return parsed;
+    }
+    return { failed: true, stderrTail: '' };
+  } finally {
+    try {
+      fs.rmSync(path.dirname(promptFile), { recursive: true, force: true });
+      fs.rmSync(path.dirname(settingsFile), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
  * research——外部调研命令。产物：research/<id>/brief.md（五段契约 + 引用）+ sources/
  * 引用快照（尽力而为）。--selftest 实测后端 WebFetch/WebSearch 可用性（非 Anthropic
  * 网关上 WebSearch 常不可用；不可用时调研退化 WebFetch-only，引用不足的 brief 被拒收）。
@@ -3370,8 +3421,10 @@ async function researchSelftest(repoRoot, opts) {
 /**
  * research verify <brief-id>——L2 异构复核（按需，落 spec/对外文档前跑）：
  * readonly 复核会话拿 brief + 快照文本判内部一致性（结论是否被引用支撑），产出
- * agents-verdict 契约块；与 L1 判级合并落 verdict.json 并记台账（L3）。
- * 复核船解耦：backend 缺省 review.backend（异构互审同语义），model 缺省 review.model。
+ * agents-verdict 契约块；与 L1 判级合并落 verdict.json 并记台账（L3）。判出 contradicted
+ * 时自动追加一轮联网仲裁（≥2 独立带日期来源，upheld 翻案解除否决；research.arbitration=false 关）。
+ * 复核船解耦：backend 缺省 review.backend（异构互审同语义），model 缺省 review.model；
+ * 仲裁船模型缺省 research.model（检索接地强者）。
  */
 async function cmdResearchVerify(repoRoot, id, opts) {
   const brief = readBrief(repoRoot, id);
@@ -3427,6 +3480,25 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         else if (r.checked) { c.status = 'partial'; c.by = 'l1'; }
         // r.checked === 0（claim 无数字 token）：维持 L2 判
       }
+      // 仲裁轮（2026-11-09 实测驱动）：L2 contradicted 且配置未关 → 派一次联网取证会话
+      //（≥2 独立带日期来源，优先官方）。upheld 翻案为 partial 解除一票否决；overturned/
+      // undetermined 维持（保守）。复核船只读无联网——快照误导类误报在这里获得二次裁决。
+      let arbitration = null;
+      const contradictedClaims = valid.filter((c) => c.status === 'contradicted');
+      if (contradictedClaims.length && cfg.research?.arbitration !== false) {
+        const arbModel = cfg.research?.model || model;
+        log(`  ⚖ ${contradictedClaims.length} 条 claim 被判矛盾——派仲裁轮外部取证（${arbModel ?? '缺省模型'}）…`);
+        const arb = await runArbitrationSession(repoRoot, { claims: contradictedClaims, snapshots, backendName, model: arbModel });
+        if (arb && !arb.failed && Array.isArray(arb.rulings)) {
+          const merged = arbitrateClaims(valid, arb.rulings);
+          arbitration = { ran: true, ...merged.stats, veto_cleared: !merged.claims.some((c) => c.status === 'contradicted'), model: arbModel ?? null, backend: backendName };
+          valid = merged.claims;
+          log(`  ⚖ 仲裁轮：${arbitration.upheld} upheld / ${arbitration.overturned} overturned / ${arbitration.undetermined} undetermined${arbitration.unmatched ? ` / ${arbitration.unmatched} unmatched` : ''}${arbitration.veto_cleared ? '——一票否决解除' : '——否决维持'}`);
+        } else {
+          arbitration = { ran: true, failed: true, error: '仲裁会话 2 次均未产出合规契约块——维持原否决（fail-closed）', model: arbModel ?? null, backend: backendName };
+          log(`  ⚠ 仲裁轮失败——维持原否决（fail-closed）。`);
+        }
+      }
       const claimCheck = crossCheckClaims(brief.body, snapshots);
       const depth = citationDepthStats(brief.body);
       const citation = scoreCitation({
@@ -3443,6 +3515,8 @@ async function cmdResearchVerify(repoRoot, id, opts) {
       const reasons = [
         ...valid.filter((c) => c.note).map((c) => `[${c.status}] ${c.claim.slice(0, 60)}——${c.note}`),
         ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录被丢弃（编造红旗）：${fabricated.slice(0, 3).join(' / ')}`] : []),
+        ...(arbitration?.ran && !arbitration.failed ? [`⚖ 仲裁轮：${arbitration.upheld} upheld / ${arbitration.overturned} overturned / ${arbitration.undetermined} undetermined——${arbitration.veto_cleared ? '一票否决解除' : '否决维持'}`] : []),
+        ...(arbitration?.failed ? [`⚠ 仲裁轮失败——维持原否决（fail-closed）`] : []),
         ...(parsed.blockers ?? []),
         ...(skeleton ? [`⚠ ${skeleton}/${snapshots.length} 份快照为骨架页（正文未渲染/被拦）——数字类结论可核性受限`] : []),
       ];
@@ -3461,12 +3535,14 @@ async function cmdResearchVerify(repoRoot, id, opts) {
         claims: valid,
         blockers: parsed.blockers ?? [],
         fabricated_claims: fabricated.length,
+        arbitration: arbitration ?? null,
         usage: v.usage,
         level: v.level,
         reasons,
       };
       fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
       appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision });
+      if (arbitration?.ran) appendResearchLedger(repoRoot, { kind: 'l2-arbitration', brief_id: id, model: arbitration.model, researcher_model: prevModel, upheld: arbitration.upheld ?? 0, overturned: arbitration.overturned ?? 0, undetermined: arbitration.undetermined ?? 0, veto_cleared: arbitration.veto_cleared ?? false, failed: arbitration.failed ?? false, decision: v.usage.internal_decision });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
       if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录已丢弃（编造红旗）`);
@@ -4354,7 +4430,7 @@ function usage() {
                                           上游调研：researcher 只读+联网会话产出带引用 brief（research/<id>/brief.md + sources/ 快照）——feature 提案与 spec --from-brief 消费；无引用即拒收
   research --selftest                     实测当前后端 WebFetch/WebSearch 可用性（非 Anthropic 网关换源后先跑一次；烧少量 token）
   research verify <brief-id> [--backend …] [--model m]
-                                          L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账——落 spec/对外文档前建议跑
+                                          L2 可信度复核：readonly 会话拿 brief+快照判内部一致性（结论是否被引用支撑），合并 L1 落 verdict.json + L3 台账；判出矛盾自动跑联网仲裁轮（upheld 翻案解除否决；research.arbitration=false 关）——落 spec/对外文档前建议跑
   research stats                          L3 可信度台账：按调研船模型聚合核实率与判级分布（信任=统计量）
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）

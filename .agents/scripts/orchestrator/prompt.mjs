@@ -464,9 +464,9 @@ export function parseSpecBlocks(text) {
 // 契约 + 引用），供卡 research 字段引用、spec --from-brief 消费。逻辑件在 research.mjs。
 // ---------------------------------------------------------------------------
 
-import { BRIEF_MARKER, VERDICT_MARKER } from './research.mjs';
+import { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER } from './research.mjs';
 
-export { BRIEF_MARKER, VERDICT_MARKER };
+export { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER };
 
 /**
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
@@ -551,6 +551,50 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
     `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废）；\n` +
     `2. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
     `3. brief 自己标注「未证实/转述」不算硬伤（诚实标注是加分项），但该 claim 最多 partial；\n` +
-    `4. 围栏外只允许一句话概述。\n`
+    `4. **页面发布/更新时间 ≠ 事件发生时间**（2026-11-09 实测误报：公告页 published_time=2025-06 被当成「API 1 月上线」的反证，事后四来源证实 1 月正确）——判 contradicted 前确认快照文本本身断言了该事件日期；仅凭 published_time/last-updated 元数据与 claim 断言的日期不符，判 partial 并在 note 写明依据，不判 contradicted；\n` +
+    `5. 围栏外只允许一句话概述。\n`
+  );
+}
+
+/**
+ * 组装仲裁轮 prompt（L2 contradicted 的外部取证）：复核船无联网，矛盾只能拿快照文本
+ * 裁断；快照自身误导（页面元数据语义、骨架截断）时矛盾可能是误报。仲裁会话带联网工具
+ * （同 researcher 工具面），对每条 contradicted claim 检索 ≥2 个独立带日期来源、优先
+ * 官方源，产出 agents-arbitration JSON 契约块。maintains：upheld 才翻案，翻不了维持否决。
+ */
+export function buildArbitrationPrompt(contradictedClaims, sourcesBlocks, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const fence = '```';
+  const CAP = 12_000;
+  const sources = String(sourcesBlocks ?? '').slice(0, CAP * 4);
+  const claimsText = (contradictedClaims ?? [])
+    .map((c, i) => `${i + 1}. 「${c.claim}」\n   L2 矛盾理由：${c.note || '（未注明）'}`)
+    .join('\n');
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：仲裁 L2 复核判为 contradicted 的调研 claim（外部取证翻案/维持）\n\n` +
+    `今天是 ${today}。你有联网检索工具（WebSearch / mcp__zsearch__web_search / WebFetch）。` +
+    `逐条对下列被否决 claim 做外部取证，裁定矛盾是否成立。\n\n` +
+    `## 待仲裁 claim（L2 判 contradicted）\n\n${claimsText}\n\n` +
+    `## 触发矛盾的来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失）'}\n\n` +
+    `# 裁定规则\n\n` +
+    `1. 每条 claim 检索 **≥2 个独立来源**（优先官方公告/官方文档/changelog/权威媒体；来源必须带发布日期）；\n` +
+    `2. **页面发布/更新时间（published_time / last-updated）≠ 事件发生时间**——页面被后续改版很常见，` +
+    `仅凭元数据时间与 claim 断言日期不符不足以判矛盾（这正是本轮仲裁最常见误报）；\n` +
+    `3. upheld：≥2 个带日期的独立来源一致支持 claim 断言 → 矛盾是误报，翻案；` +
+    `overturned：≥2 个独立来源一致否定 claim → 矛盾成立；` +
+    `其余（来源冲突/只有单一来源/查不到带日期来源）→ undetermined；\n` +
+    `4. 与快照同源的内容（同一域名/转载）不算独立来源；\n` +
+    `5. claim 必须逐字摘录上面列出的原句（系统逐字对账，改写作废）。\n\n` +
+    `# 产出契约\n\n` +
+    `输出单个 fenced block（内容为合法 JSON，对每条待仲裁 claim 各一条裁定）：\n\n` +
+    `${fence}${ARBITRATION_MARKER}\n` +
+    `{\n` +
+    `  "rulings": [\n` +
+    `    { "claim": "<逐字摘录待仲裁 claim 原句>", "ruling": "upheld", "sources": ["- 2026-01-24 https://… — 一句话说明"], "reasoning": "<一句话：为何维持/推翻>" }\n` +
+    `  ]\n` +
+    `}\n` +
+    `${fence}\n\n` +
+    `ruling 枚举（只允许这三个）：upheld（翻案，否决解除）/ overturned（矛盾成立）/ undetermined（证据不足，否决维持）。围栏外只允许一句话概述。\n`
   );
 }
