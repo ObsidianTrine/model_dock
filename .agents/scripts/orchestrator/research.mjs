@@ -6,6 +6,8 @@
 //   writeBriefAuto     同 writeBrief，id 冲突自动派生 <id>-2…-9 落盘（同题重跑不裸崩）
 //   readBrief/listBriefs
 //   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
+//   topic 一族          research multi 的复合清单（topics/<topic-id>.json：dims + rollup），
+//                      slugifyTopic/deriveTopicId/readTopic/writeTopic/rollupTopicVerdict
 // 设计：调研不是任务卡——没有 diff，不走施工队列/合并管线（queue.mjs 校验、classifyChange、
 // files_hint 越界判定对它全是错配）。产物 = brief 文件，由卡的 research: <id> 字段引用，
 // spec/propose 消费。docs 10.12。
@@ -116,8 +118,10 @@ export function validateBriefBody(body, { minCitations = 1, today = toIsoLocal()
 /**
  * brief 落盘：research/<id>/{meta.json, brief.md}。同 id 已存在则抛错（brief 是证据
  * 产物，不允许静默覆盖——深化调研用新 id 或人工删旧目录）。
+ * topicId/dim（可选，research multi 每维 brief 的溯源字段）：写进 meta.json 的
+ * topic_id/dim——旧 meta 无此字段，读方一律可选拿取（向后兼容）。
  */
-export function writeBrief(repoRoot, { id, title, question, backend, body }) {
+export function writeBrief(repoRoot, { id, title, question, backend, body, topicId, dim }) {
   validateBriefBody(body);
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
     throw new Error(`brief id "${id}" 不合法：只允许小写字母/数字/短横线。`);
@@ -128,6 +132,8 @@ export function writeBrief(repoRoot, { id, title, question, backend, body }) {
   }
   fs.mkdirSync(dir, { recursive: true });
   const meta = { id, title, question: String(question ?? '').slice(0, 500), backend: backend ?? null, created_at: toIsoLocal() };
+  if (topicId) meta.topic_id = topicId;
+  if (dim) meta.dim = dim;
   fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
   fs.writeFileSync(path.join(dir, 'brief.md'), `${body.trim()}\n`);
   return dir;
@@ -170,6 +176,114 @@ export function listBriefs(repoRoot) {
     .filter((e) => e.isDirectory() && fs.existsSync(path.join(dir, e.name, 'meta.json')))
     .map((e) => e.name)
     .sort();
+}
+
+// ---------------------------------------------------------------------------
+// topic（research multi，2026-11-09）：一个主题 × N 个维度 = N 份 brief + 1 份复合清单。
+// topics/<topic-id>.json 收纳每维 brief id 与判定，rollup 给消费方一个单一决策接口
+// （internal_decision 最差档）。topics/ 是 research/ 的子目录且无 meta.json——listBriefs
+// 天然不收录（回归测试钉住）；单 brief 契约与 verify 路径对 topic 无感知。
+// ---------------------------------------------------------------------------
+
+/** topic.json 落盘路径：research/topics/<topic-id>.json。 */
+export function topicPath(repoRoot, topicId) {
+  return path.join(researchDir(repoRoot), 'topics', `${topicId}.json`);
+}
+
+/**
+ * 主题文本 → topic-id slug（与 brief id 同规：小写字母/数字/短横线，TASK_ID_RE 兼容）。
+ * 中文主题会大量折叠成短横线（「LLM 可信度」→ llm）——同 slug 的不同主题靠 deriveTopicId
+ * 的 -2…-9 派生兜底；截断 48 字符防目录名失控。
+ */
+export function slugifyTopic(text) {
+  const s = String(text ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '');
+  return s || 'topic';
+}
+
+/**
+ * topic-id 冲突自动派生（同 writeBriefAuto 思路）：slug 已占用 → -2…-9 逐个找空位，
+ * 9 个全占用抛可操作报错。返回实际可用 topic-id。
+ */
+export function deriveTopicId(repoRoot, slug) {
+  const candidates = [slug, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${slug}-${n}`)];
+  for (const id of candidates) {
+    if (!fs.existsSync(topicPath(repoRoot, id))) return id;
+  }
+  throw new Error(
+    `topic-id "${slug}" 及派生位 -2…-9 已全部占用（${path.join(researchDir(repoRoot), 'topics')}）——` +
+    `同一主题已连跑 10 次。请人工归档（移出 topics/ 目录）或换更具体的主题表述后再跑。`,
+  );
+}
+
+/** 读 topic.json：不存在或形状不对（无 dims 数组）返回 null（verify 回落单 brief 路径）。 */
+export function readTopic(repoRoot, topicId) {
+  const file = topicPath(repoRoot, topicId);
+  if (!fs.existsSync(file)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`topic 文件损坏（${file}）：${e.message}——修复或删除该文件后重试。`);
+  }
+  if (!parsed || parsed.id !== topicId || !Array.isArray(parsed.dims)) return null;
+  return parsed;
+}
+
+/** topic.json 落盘（research/topics/ 自动建目录；纯 JSON 证据文件，与 meta.json 同风格直写）。 */
+export function writeTopic(repoRoot, topic) {
+  const file = topicPath(repoRoot, topic.id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(topic, null, 2)}\n`);
+  return file;
+}
+
+/** rollup 聚合的最差档序（首项最差）：decision 任一 unsafe 一票否决（与单 brief usage 矩阵同哲学）；
+ *  level 里 unknown 是「无判定数据」的兜底、排最末——决策以 internal_decision 为准（level 只是排序信号）。 */
+const ROLLUP_DECISION_SEVERITY = ['unsafe', 'needs_review', 'undetermined', 'ok'];
+const ROLLUP_LEVEL_SEVERITY = ['fail', 'warn', 'pass', 'unknown'];
+
+/**
+ * topic rollup（纯函数）：internal_decision 取各 ok 维的最差档（unsafe > needs_review >
+ * undetermined > ok），verdict_level 同理（fail > warn > pass > unknown）；failed 维不参与
+ * 聚合但在 dims 留痕，有失败维时 rollup 附 partial: true。无任何可聚合判定时回落 unknown。
+ */
+export function rollupTopicVerdict(dims) {
+  const okDims = (dims ?? []).filter((d) => d?.status === 'ok');
+  const worst = (order, values) => order.find((v) => values.includes(v)) ?? 'unknown';
+  const rollup = {
+    level: worst(ROLLUP_LEVEL_SEVERITY, okDims.map((d) => d.verdict_level).filter(Boolean)),
+    internal_decision: worst(ROLLUP_DECISION_SEVERITY, okDims.map((d) => d.internal_decision).filter(Boolean)),
+  };
+  if ((dims ?? []).some((d) => d?.status === 'failed')) rollup.partial = true;
+  return rollup;
+}
+
+/** 判级图标（通知用，buildResearchMultiNotifyBody）：pass ✅ / warn ⚠️ / fail ⛔ / 其他 ❔。 */
+function verdictLevelIcon(level) {
+  return level === 'pass' ? '✅' : level === 'warn' ? '⚠️' : level === 'fail' ? '⛔' : '❔';
+}
+
+/**
+ * multi 调研完成通知正文（纯函数）：rollup 行 + 每维一行（图标+档位+internal_decision）。
+ * 单 brief 通知复用 buildResearchNotifyBody（契约钉死，勿混用）。
+ */
+export function buildResearchMultiNotifyBody(topic) {
+  const rollup = topic?.rollup ?? {};
+  const lines = [
+    `${verdictLevelIcon(rollup.level)} rollup：${rollup.level ?? '?'}（internal_decision=${rollup.internal_decision ?? '?'}）${rollup.partial ? '——partial（有失败维，仅成功维参与聚合）' : ''}`,
+    ...(topic?.dims ?? []).map((d) => {
+      const icon = d?.status === 'failed' ? '✗' : verdictLevelIcon(d?.verdict_level);
+      const head = `  ${icon} ${d?.dim ?? '?'}（${d?.brief_id ?? 'brief 未产出'}）`;
+      if (d?.status === 'failed') return `${head}——failed：${String(d?.reason ?? '').slice(0, 100) || '（无 stderr 留痕）'}`;
+      return `${head}——${d?.verdict_level ?? '?'} / ${d?.internal_decision ?? '?'}`;
+    }),
+  ];
+  return lines.join('\n');
 }
 
 /**

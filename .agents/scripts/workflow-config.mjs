@@ -231,17 +231,23 @@ export function loadWorkflowConfig(repoRoot) {
   };
 }
 
-/** research 调研配置：{ model?: string }——模型名经 ModelDock 网关按名路由。 */
+/** research 调研配置：{ model?: string, maxDims?: 正整数 }——模型名经 ModelDock 网关按名路由。 */
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
   if (raw.model !== undefined) {
     if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
     else console.warn(`[workflow-config] research.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  // multi 调研的维度上限（research multi --dim 数量封顶）：正整数，缺省 4（调用方回落）。
+  // 与本模块各键同口径：显式非法值 console.warn 报错并忽略（回落缺省），不阻断其他键
+  if (raw.maxDims !== undefined) {
+    if (Number.isInteger(raw.maxDims) && raw.maxDims > 0) out.maxDims = raw.maxDims;
+    else console.warn(`[workflow-config] research.maxDims ${JSON.stringify(raw.maxDims)} 不合法（应为正整数；research multi 的维度上限，缺省 4）——忽略`);
   }
   // 仲裁轮开关（research verify 判出 contradicted 时的联网外部取证，2026-11-09 实测驱动）：
   // 缺省开（不配置 = true）——仲裁是取证不是放水，upheld 才翻案、翻不了维持否决；false 只省 token
