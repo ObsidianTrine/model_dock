@@ -157,11 +157,15 @@ describe('orchestrator nightly > 幂等补跑（中断恢复 + 双跑防护）',
 // 普通 high 提案照常提交闭环。
 // ---------------------------------------------------------------------------
 
-/** 种一张 high 优先级提案进 drafts/（nightly --auto 的选卡候选）。 */
+/** 种一张 high 优先级提案进 drafts/（nightly --auto 的选卡候选）。
+ *  created_at 缺省取 1 天前（相对真实 now）：老化自动档会把超龄（缺省 14 天）未提交
+ *  机器提案在 --auto 选卡前清退——选卡候选必须是「新鲜」提案，写死日历日会随时间漂移
+ *  撞上清退闸。 */
 function seedDraft(repo: TestRepo, id: string, overrides: Record<string, unknown>): void {
   const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, `${id}.md`), cardText({ id, priority: 'high', created_by: 'planner', ...overrides }))
+  const fresh = overrides.created_at ?? new Date(Date.now() - 86_400_000).toISOString()
+  fs.writeFileSync(path.join(dir, `${id}.md`), cardText({ id, priority: 'high', created_at: fresh, created_by: 'planner', ...overrides }))
 }
 
 describe('orchestrator nightly > --auto 选卡硬禁区', () => {
@@ -207,6 +211,48 @@ describe('orchestrator nightly > --auto 选卡硬禁区', () => {
       expect(out.stdout).toContain('命中核心/发布路径')
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-core-hard.md'))).toBe(true)
       expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// drafts gc 自动清退（老化自动档接线）：nightly 周期内自动执行一次「superseded +
+// 超龄未提交」两类保守清退 → drafts/superseded/。队列痕迹/人工草稿/未超龄不动。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator nightly > drafts gc 自动清退（老化自动档）', () => {
+  it('超龄未提交机器提案自动迁 superseded/（aged-out 标注）一次；队列痕迹/人工草稿/未超龄不动，队列卡零改动', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      const pendingDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending')
+      fs.mkdirSync(draftsDir, { recursive: true })
+      fs.mkdirSync(pendingDir, { recursive: true })
+      // 相对真实 now 取龄：nightly 子进程内 Date.now() 有毫秒级偏移，14 天档位下无影响
+      const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+      const fresh = new Date(Date.now() - 3 * 86_400_000).toISOString()
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-auto.md'), cardText({ id: 'gc-stale-auto', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/a.ts'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-traced.md'), cardText({ id: 'gc-stale-traced', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/b.ts'] }))
+      // 队列痕迹：pending/ 有同名卡（提案已在队列等待——提交态不是「积压」）
+      fs.writeFileSync(path.join(pendingDir, 'gc-stale-traced.md'), cardText({ id: 'gc-stale-traced', created_at: stale, created_by: 'human', files_hint: ['mock-worker-output.txt'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-manual.md'), cardText({ id: 'gc-stale-manual', created_at: stale, created_by: 'human', files_hint: ['src/cli/c.ts'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-fresh.md'), cardText({ id: 'gc-fresh', created_at: fresh, created_by: 'scanner', files_hint: ['src/cli/d.ts'] }))
+      const out = runOrch(repo.root, 'nightly')
+      expect(out.stdout).toContain('nightly 摘要') // 巡检完整跑完（清退失败会中断走不到摘要）
+      expect(out.stdout).toContain('drafts gc 自动清退')
+      // 超龄未提交机器提案：迁入 superseded/ 并带 aged-out 标注
+      expect(fs.existsSync(path.join(draftsDir, 'gc-stale-auto.md'))).toBe(false)
+      const swept = fs.readFileSync(path.join(draftsDir, 'superseded', 'gc-stale-auto.md'), 'utf8')
+      expect(swept).toContain('superseded_by: aged-out')
+      // 三类保护对象留原地
+      for (const keep of ['gc-stale-traced.md', 'gc-stale-manual.md', 'gc-fresh.md']) {
+        expect(fs.existsSync(path.join(draftsDir, keep))).toBe(true)
+      }
+      // 队列目录零改动：pending 痕迹卡原样、无新增
+      expect(fs.existsSync(path.join(pendingDir, 'gc-stale-traced.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toEqual(['gc-stale-traced'])
     } finally {
       repo.cleanup()
     }

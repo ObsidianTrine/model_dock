@@ -46,7 +46,7 @@ import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchest
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, scanRunningCards } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
-import { listDrafts, planGc, applyGc, supersedeForMerged, draftsRoot, DEFAULT_ARCHIVE_DAYS } from './orchestrator/drafts-gc.mjs';
+import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
@@ -2815,8 +2815,10 @@ function draftCardMeta(repoRoot, id) {
 }
 
 /**
- * drafts gc——提案生命周期清退（B9）：扫 drafts/ 顶层提案，产出两份迁移清单——
+ * drafts gc——提案生命周期清退（B9）：扫 drafts/ 顶层提案，产出三份迁移清单——
  *   superseded：files_hint 与 merged/ 卡重叠（真实实现已覆盖提案现场）；
+ *   agedUnsubmitted：超 draftsGc.maxAgeDays（缺省 14 天）且队列 7 状态零痕迹的机器提案
+ *     （nightly 周期也自动清退这一类与 superseded 类；队列有痕迹/人工草稿绝不清退）；
  *   aged：超 draftsGc.archiveDays（缺省 30 天，created_at 优先、mtime 兜底）。
  * 缺省 dry-run 只列清单；--apply 才迁移（superseded/ 带标注、archived/ 原文）。
  * 永不删除文件；仅标题相似（goal Jaccard ≥ 0.6）的不迁，只在报告中提示（防误杀）。
@@ -2825,23 +2827,23 @@ function cmdDraftsGc(repoRoot, opts) {
   const cfg = loadWorkflowConfig(repoRoot);
   const apply = opts.flags?.has('--apply') ?? false;
   const archiveDays = cfg.draftsGc?.archiveDays ?? DEFAULT_ARCHIVE_DAYS;
+  const maxAgeDays = cfg.draftsGc?.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS;
   const { drafts, unreadable } = listDrafts(repoRoot);
-  // merged/ 卡摘要（清退对照面）：损坏卡跳过
   const root = queueRoot(repoRoot);
-  const mergedCards = [];
-  for (const id of listCards(root, 'merged')) {
-    try {
-      const { meta, body } = parseCard(fs.readFileSync(cardPath(root, 'merged', id), 'utf8'), `${id}.md`);
-      mergedCards.push({ id, filesHint: meta.files_hint ?? [], goal: body.goal ?? '' });
-    } catch { /* 损坏卡不进对照面 */ }
-  }
-  const plan = planGc(drafts, mergedCards, { now: Date.now(), archiveDays });
+  const mergedCards = mergedSummaries(root);
+  const plan = planGc(drafts, mergedCards, { now: Date.now(), archiveDays, maxAgeDays, queueTraced: collectTracedIds(root) });
   log(`drafts gc${apply ? '（--apply 执行迁移）' : '（dry-run，加 --apply 才动文件）'}：提案 ${drafts.length} 张、merged 对照 ${mergedCards.length} 张${unreadable.length ? `、解析失败 ${unreadable.length} 张（${unreadable.join(', ')}）` : ''}。`);
   if (plan.superseded.length) {
     log(`\n【superseded 候选】改动面已被 merged 卡覆盖（${plan.superseded.length} 张）：`);
     for (const { draft, mergedId } of plan.superseded) log(`  - ${draft.file} ← ${mergedId}`);
   } else {
     log('\n【superseded 候选】无（没有与 merged 卡改动面重叠的提案）。');
+  }
+  if (plan.agedUnsubmitted.length) {
+    log(`\n【超龄未提交候选】超 ${maxAgeDays} 天且队列零痕迹的机器提案（${plan.agedUnsubmitted.length} 张，nightly 自动清退 → drafts/superseded/）：`);
+    for (const { draft, ageDays } of plan.agedUnsubmitted) log(`  - ${draft.file}（${ageDays} 天）`);
+  } else {
+    log(`\n【超龄未提交候选】无（没有超 ${maxAgeDays} 天且队列零痕迹的机器提案）。`);
   }
   if (plan.aged.length) {
     log(`\n【aged 候选】超 ${archiveDays} 天（${plan.aged.length} 张）：`);
@@ -2854,14 +2856,16 @@ function cmdDraftsGc(repoRoot, opts) {
     for (const { draft, mergedId } of plan.titleSimilar) log(`  - ${draft.file} ≈ ${mergedId}（目标相似但 files_hint 不重叠——人工判断是否废弃）`);
   }
   if (!apply) {
-    if (plan.superseded.length || plan.aged.length) log(`\ndry-run 结束：加 --apply 迁移 ${plan.superseded.length + plan.aged.length} 张（superseded/ ${plan.superseded.length}、archived/ ${plan.aged.length}）。`);
+    const moving = plan.superseded.length + plan.agedUnsubmitted.length + plan.aged.length;
+    if (moving) log(`\ndry-run 结束：加 --apply 迁移 ${moving} 张（superseded/ ${plan.superseded.length + plan.agedUnsubmitted.length}、archived/ ${plan.aged.length}）。`);
     return;
   }
   const r = applyGc(repoRoot, plan, { now: Date.now() });
   for (const m of r.movedSuperseded) log(`  迁移 ${m.file} → drafts/superseded/`);
+  for (const m of r.movedAgedUnsubmitted) log(`  迁移 ${m.file} → drafts/superseded/（超龄清退）`);
   for (const m of r.movedAged) log(`  迁移 ${m.file} → drafts/archived/`);
   for (const f of r.failed) console.warn(`[orchestrator] 迁移失败 ${f.file}：${f.reason}（留原地，绝不删除）`);
-  log(`\n--apply 完成：superseded ${r.movedSuperseded.length} 张、archived ${r.movedAged.length} 张${r.failed.length ? `、失败 ${r.failed.length} 张` : ''}。`);
+  log(`\n--apply 完成：superseded ${r.movedSuperseded.length} 张、超龄未提交 ${r.movedAgedUnsubmitted.length} 张、archived ${r.movedAged.length} 张${r.failed.length ? `、失败 ${r.failed.length} 张` : ''}。`);
 }
 
 /**
@@ -3898,6 +3902,19 @@ async function cmdNightly(repoRoot, opts) {
     // 1.1) autopilot 白名单自动提交（enabled 才生效；提交的卡进 pending，纳入下方 --auto 的 drain）
     autoSubmitProposals(repoRoot, root);
 
+    // 1.1a) drafts gc 自动清退（老化自动档）：superseded（与 merged 卡 files_hint 重叠）+
+    //    超龄未提交（超 draftsGc.maxAgeDays 缺省 14 天、队列 7 状态零痕迹、机器来源）两类
+    //    → drafts/superseded/。aged→archived 与 titleSimilar 维持 report-only（drafts gc
+    //    手动档）；draftsGc.autoSupersede=false 同闸关闭。尽力而为，失败不阻断巡检。
+    const swept = autoCleanDrafts(repoRoot);
+    if (swept.superseded.length || swept.agedUnsubmitted.length) {
+      log(`🧹 drafts gc 自动清退：superseded ${swept.superseded.length} 张、超龄未提交 ${swept.agedUnsubmitted.length} 张 → drafts/superseded/${swept.failed.length ? `（失败 ${swept.failed.length} 张留原地，下次巡检重试）` : ''}`);
+      for (const f of swept.failed) log(`  ⚠ ${f.file} 清退失败：${f.reason}`);
+      try { appendFleetEvent(repoRoot, 'drafts_gc_auto', { superseded: swept.superseded, agedUnsubmitted: swept.agedUnsubmitted }); } catch { /* 留痕失败不阻断 */ }
+    } else if (swept.failed.length) {
+      log(`⚠ drafts gc 自动清退失败 ${swept.failed.length} 张（留原地，下次巡检重试）。`);
+    }
+
     // 1.2) --plan：planner 需求综合（autopilot 提案，烧钱动作——显式开启才跑）
     if (flags.has('--plan')) {
       log(`\n═══ nightly --plan → propose（autopilot 需求综合）═══`);
@@ -4559,7 +4576,7 @@ function usage() {
   scan [--todo] [--audit] [--tests] [--issues] [--ki] [--ci] [--dry-run] [--run]
                                           巡检出提案落 drafts/（人工批量 submit 或 autopilot 白名单自动提交；--run 对 high 提案立即提交并闭环）
   propose [--max N] [--backend mock]      autopilot 需求综合：goals.md + 巡检提案 → planner 高质量提案落 drafts/（白名单卡自动提交）
-  drafts gc [--apply]                     提案生命周期清退（dry-run 只列清单；--apply 迁移文件，永不删除）：与 merged 卡 files_hint 重叠的提案迁 drafts/superseded/（带标注），超 draftsGc.archiveDays（缺省 30 天）迁 drafts/archived/
+  drafts gc [--apply]                     提案生命周期清退（dry-run 只列清单；--apply 迁移文件，永不删除）：与 merged 卡 files_hint 重叠的提案迁 drafts/superseded/（带标注，nightly 周期自动执行），超 draftsGc.maxAgeDays（缺省 14 天）且队列零痕迹的机器提案自动清退迁 drafts/superseded/（nightly 同闸），超 draftsGc.archiveDays（缺省 30 天）迁 drafts/archived/
   nightly [--tests] [--plan] [--auto N] [--backend …] [--review-backend …] [--manual]
                                           一次完整巡检编排（scan + drift 报告；--plan 加跑 planner 提案；--auto N 顺带跑 high 提案并 drain——worker 烧钱仅在此档）。--manual 显式人工触发（终端 TTY 跑自动识别），不受 20h 双跑防护限制
   watch [--interval 30] [--max-cycles N] [--backend …] [--review-backend …]

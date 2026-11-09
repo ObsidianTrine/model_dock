@@ -515,15 +515,15 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     }
   }
 
-  it('缺省全开：configGuard.enabled=true / draftsGc={autoSupersede:true,archiveDays:30} / scanAutoFix.enabled=true', () => {
+  it('缺省全开：configGuard.enabled=true / draftsGc={autoSupersede:true,archiveDays:30,maxAgeDays:14} / scanAutoFix.enabled=true', () => {
     expect(cfgOf({}).configGuard).toEqual({ enabled: true })
-    expect(cfgOf({}).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+    expect(cfgOf({}).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
     expect(cfgOf({}).scanAutoFix).toEqual({ enabled: true })
   })
 
-  it('显式值生效（enabled=false 关闭 / archiveDays 自定义）', () => {
+  it('显式值生效（enabled=false 关闭 / archiveDays、maxAgeDays 自定义）', () => {
     expect(cfgOf({ configGuard: { enabled: false } }).configGuard).toEqual({ enabled: false })
-    expect(cfgOf({ draftsGc: { autoSupersede: false, archiveDays: 7 } }).draftsGc).toEqual({ autoSupersede: false, archiveDays: 7 })
+    expect(cfgOf({ draftsGc: { autoSupersede: false, archiveDays: 7, maxAgeDays: 3 } }).draftsGc).toEqual({ autoSupersede: false, archiveDays: 7, maxAgeDays: 3 })
     expect(cfgOf({ scanAutoFix: { enabled: false } }).scanAutoFix).toEqual({ enabled: false })
   })
 
@@ -532,14 +532,14 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     try {
       expect(cfgOf({ configGuard: 'on' }).configGuard).toEqual({ enabled: true })
       expect(cfgOf({ configGuard: { enabled: 'yes' } }).configGuard).toEqual({ enabled: true })
-      expect(cfgOf({ draftsGc: 'x' }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
-      expect(cfgOf({ draftsGc: { archiveDays: 0 } }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+      expect(cfgOf({ draftsGc: 'x' }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
+      expect(cfgOf({ draftsGc: { archiveDays: 0, maxAgeDays: -1 } }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
       expect(cfgOf({ scanAutoFix: { enabled: 1 } }).scanAutoFix).toEqual({ enabled: true })
-      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(5)
+      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(6)
       expect(String(warn.mock.calls[0]?.[0])).toContain('configGuard')
       warn.mockClear()
       // 键缺失 = 沿用缺省且不告警
-      expect(cfgOf({ configGuard: {}, draftsGc: { archiveDays: 14 }, scanAutoFix: {} }).draftsGc.archiveDays).toBe(14)
+      expect(cfgOf({ configGuard: {}, draftsGc: { archiveDays: 14, maxAgeDays: 7 }, scanAutoFix: {} }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 14, maxAgeDays: 7 })
       expect(warn).not.toHaveBeenCalled()
     } finally {
       warn.mockRestore()
