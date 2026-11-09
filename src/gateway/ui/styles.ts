@@ -391,8 +391,25 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    collapse 的边框画在表层，sticky 表头滚入吸附位会丢底线；th 加不透明背景盖住滚过的行 */
 #logTable{border-collapse:separate;border-spacing:0}
 #logTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
-#logTable th,#logTable td{white-space:nowrap}
-#logTable td:nth-child(4),#logTable td:last-child{white-space:normal;word-break:break-all}
+/* 日志表改固定布局：8 列里 7 列定宽（宽在表头上声明），错误列（第 7 列）不设宽=吃剩余空间。
+   auto 布局下 nowrap 列按内容撑宽、限宽盒的固有宽度又不可靠（width:1% 弹性列被无视），
+   窄内容带（--wrap-ratio 61.8%）必横向溢出；fixed 布局任何窗宽都不溢出，更窄走 .tablescroll 滚动。
+   截断口径：链路/审计目标/审计详情 1-2 行行数截断，全文在 title 悬浮与 ⧉ 复制里；模型列 anywhere
+   优先在连字符处折行（break-all 会把 glm-5-3-flash-260828 断成 flash-26|0828 那种逐字断）。
+   不用 nowrap+text-overflow 省略错误列：nowrap 的 min-content 是整行文本；行数截断的盒在任何
+   定宽格里都稳定。last-child 已是复制按钮列，勿再对它放行换行 */
+#logTable{table-layout:fixed;min-width:640px}
+#logTable th:nth-child(1){width:84px}
+#logTable th:nth-child(2){width:104px}
+#logTable th:nth-child(3){width:104px}
+#logTable th:nth-child(4){width:150px}
+#logTable th:nth-child(5){width:44px}
+#logTable th:nth-child(6){width:72px}
+#logTable th:nth-child(8){width:44px}
+#logTable th,#logTable td{overflow:hidden;text-overflow:ellipsis}
+#logTable td:nth-child(4){white-space:normal;overflow-wrap:anywhere}
+#logTable td:nth-child(3) div,#logTable td:nth-child(4) div,#logTable td:nth-child(7) div{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1;overflow:hidden;overflow-wrap:anywhere}
+#logTable td:nth-child(4) div,#logTable td:nth-child(7) div.lhint{-webkit-line-clamp:2}
 .note{color:var(--muted);font-size:var(--fs-sm);margin-top:10px}
 code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:1px solid var(--border);border-radius:var(--r-sm);padding:1px 6px}
 .svc-toolbar{display:flex;gap:10px;margin:0 0 12px;flex-wrap:wrap;align-items:center}
