@@ -21,7 +21,7 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 | 前进3 | claude-headless + tier ahead-3 | 计费 | 常规重活 |
 | 前进4 | claude-headless + tier ahead-4 | 计费 | 核心/发布路径、复杂特性 |
 
-> 2026-11-03 船东定：全部档位换 claude-code CLI（zcode 免费船可靠性不足，`workflow.json worker.backend: claude-headless`）；zcode-headless 仍可用（`--worker-backend zcode-headless` 显式点名，需修好 TUI `/model`），也是恢复异构互审的途径。
+> 2026-11-03 船东定：全部档位换 claude-code CLI（zcode 免费船可靠性不足，`workflow.json worker.backend: claude-headless`）；zcode-headless 仍可用（`--worker-backend zcode-headless` 显式点名，需修好 TUI `/model`），也是恢复异构互审的途径。codex-headless（2026-11-09 起）第三艘真实船：`--worker-backend codex-headless` 点名（须 ModelDock 接入的 codex，worker 沙箱默认禁网=push 物理不可达）；自动异构审查候选环 claude→zcode→codex。
 
 - **没说档位就自动选**：文档/测试→前进1，代码小改→前进3，核心路径/复杂→前进4；**卡里写明所选档位，汇报第一句告知**，用户说「换前进N」即重派。
 - 船 ≠ workflow.json 默认（claude-headless）时附 `--approve-backend-switch`——**用户口头指定档位/引擎即人工批准**，汇报注明「引擎切换已获你本次口头批准」（自动跑中永远禁止自行切换，红线见下）。全档位同船后，只有显式点名其他引擎（如 zcode）才带批准标志。

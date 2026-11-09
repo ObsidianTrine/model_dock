@@ -42,6 +42,7 @@ import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
 import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateNativeScan, gateScopePurity, gateCliEntry, gateUiCheck, changedFiles, runArgvTreeSafe, GateError } from './orchestrator/gates.mjs';
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
+import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
@@ -1822,6 +1823,10 @@ function preflightWorkerBackend(backend) {
   if (backend === 'zcode-headless' && !zcodeAvailable()) {
     die('预检失败：zcode CLI 不可用（ORCH_ZCODE_CLI 未设 / PATH 无 zcode / --version 探测失败）。\n'
       + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径> 或安装 PATH 版 zcode）后重跑。', 1);
+  }
+  if (backend === 'codex-headless' && !codexAvailable()) {
+    die('预检失败：codex CLI 不可用（ORCH_CODEX_CLI 未设 / PATH 无 codex / --version 探测失败）。\n'
+      + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_CODEX_CLI=<codex 绝对路径> 或安装 PATH 版 codex）后重跑。', 1);
   }
   if (backend === 'claude-headless' && !claudeAvailable()) {
     die('预检失败：claude CLI 不可用（PATH 无 claude / 未登录 / --version 探测失败）。\n'
@@ -4614,7 +4619,7 @@ function usage() {
   stats [--days N] [--json] [--cost]      运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）；--cost 加燃油账（网关实测 × 价目，USD）
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
 
-后端：worker claude-headless | zcode-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>）。
+后端：worker claude-headless | zcode-headless | codex-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
 审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
 互斥：调度器级（drain/nightly/scan --run 全局单实例）+ 任务级（同任务同时只允许一个 run 闭环，陈锁自动接管）。

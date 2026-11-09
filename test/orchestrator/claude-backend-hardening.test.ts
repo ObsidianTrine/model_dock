@@ -52,7 +52,7 @@ describe('resolveReviewBackendName > mock 防御双向', () => {
       resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': true }) }),
     ).toEqual({ name: 'zcode-headless', mode: 'heterogeneous' })
     expect(
-      resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': false }) }),
+      resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': false, 'codex-headless': false }) }),
     ).toEqual({ name: 'claude-headless', mode: 'fallback' })
   })
 
