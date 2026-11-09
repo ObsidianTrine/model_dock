@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { readNightlyState, writeNightlyState } from '../../.agents/scripts/orchestrator/nightly-state.mjs'
-import { mkRepo, runOrch } from './helpers.js'
+import { mkRepo, runOrch, cardText, type TestRepo } from './helpers.js'
 
 describe('orchestrator nightly > 巡检编排端到端', () => {
   it('TODO 信号出提案落 drafts + 漂移报告 + 摘要；无 --auto 不跑 worker（提案不进队列）', () => {
@@ -149,4 +149,66 @@ describe('orchestrator nightly > 幂等补跑（中断恢复 + 双跑防护）',
       repo.cleanup()
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// --auto 选卡硬禁区（P2-15）：deps/feature/核心·发布路径提案 submit+run 后必被引水闸
+// 打回 pending——白烧一次 run 启动。选卡阶段按 hardZoneReason（sail.mjs 单一口径）跳过；
+// 普通 high 提案照常提交闭环。
+// ---------------------------------------------------------------------------
+
+/** 种一张 high 优先级提案进 drafts/（nightly --auto 的选卡候选）。 */
+function seedDraft(repo: TestRepo, id: string, overrides: Record<string, unknown>): void {
+  const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, `${id}.md`), cardText({ id, priority: 'high', created_by: 'planner', ...overrides }))
+}
+
+describe('orchestrator nightly > --auto 选卡硬禁区', () => {
+  it('deps 提案不提交（留 drafts、不起 run）；普通 high 提案照常提交闭环', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      seedDraft(repo, 'night-deps-hard', { type: 'deps', files_hint: ['package.json'] })
+      seedDraft(repo, 'night-bugfix-ok', { type: 'bugfix', files_hint: ['mock-worker-output.txt'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      // 硬禁区：deps 类型选卡阶段跳过——日志给原因、草稿原地保留、无 run 启动标记
+      expect(out.stdout).toContain('night-deps-hard 不自动提交')
+      expect(out.stdout).toContain('deps 类型永不自动提交')
+      expect(out.stdout).not.toContain('nightly --auto → night-deps-hard')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-deps-hard.md'))).toBe(true)
+      // 普通 high：照常提交（离开 drafts/ 并起 run）
+      expect(out.stdout).toContain('nightly --auto → night-bugfix-ok')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-bugfix-ok.md'))).toBe(false)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('feature 提案不提交（上游管线，硬禁区）', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      seedDraft(repo, 'night-feature-hard', { type: 'feature', files_hint: ['docs/**'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      expect(out.stdout).toContain('night-feature-hard 不自动提交')
+      expect(out.stdout).toContain('上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-feature-hard.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('files_hint 命中 corePaths 的提案不提交（硬禁区）', () => {
+    const repo = mkRepo({ workerBackend: 'mock', extra: { corePaths: ['src/gateway/server.ts'] } })
+    try {
+      seedDraft(repo, 'night-core-hard', { type: 'refactor', files_hint: ['src/gateway/relay.ts'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      expect(out.stdout).toContain('night-core-hard 不自动提交')
+      expect(out.stdout).toContain('命中核心/发布路径')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-core-hard.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })
