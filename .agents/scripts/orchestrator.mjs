@@ -3891,6 +3891,9 @@ async function cmdNightly(repoRoot, opts) {
   let warnings = [];
   let planned = 0;
   let errMsg = null;
+  // drafts gc 自动清退结果（摘要计数用）：提到 try 外——scan 抛错时按「零清退」出摘要，
+  // 不让收尾通知撞 ReferenceError
+  let swept = { superseded: [], agedUnsubmitted: [], failed: [] };
 
   try {
     // 1) 巡检落提案（信号源与 scan 命令默认一致；--tests 显式开启慢路径；issues/ci 为 gh best-effort）
@@ -3916,7 +3919,7 @@ async function cmdNightly(repoRoot, opts) {
     //    超龄未提交（超 draftsGc.maxAgeDays 缺省 14 天、队列 7 状态零痕迹、机器来源）两类
     //    → drafts/superseded/。aged→archived 与 titleSimilar 维持 report-only（drafts gc
     //    手动档）；draftsGc.autoSupersede=false 同闸关闭。尽力而为，失败不阻断巡检。
-    const swept = autoCleanDrafts(repoRoot);
+    swept = autoCleanDrafts(repoRoot);
     if (swept.superseded.length || swept.agedUnsubmitted.length) {
       log(`🧹 drafts gc 自动清退：superseded ${swept.superseded.length} 张、超龄未提交 ${swept.agedUnsubmitted.length} 张 → drafts/superseded/${swept.failed.length ? `（失败 ${swept.failed.length} 张留原地，下次巡检重试）` : ''}`);
       for (const f of swept.failed) log(`  ⚠ ${f.file} 清退失败：${f.reason}`);
@@ -4030,6 +4033,7 @@ async function cmdNightly(repoRoot, opts) {
       degraded: Boolean(readDegraded(repoRoot)),
       autoRan: opts.auto ?? 0,
       error: errMsg,
+      gcSwept: { superseded: swept.superseded.length, agedUnsubmitted: swept.agedUnsubmitted.length },
     }),
   });
   if (errMsg) die(`nightly 异常中断：${errMsg}`, 1);
