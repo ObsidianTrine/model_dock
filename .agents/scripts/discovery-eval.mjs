@@ -137,6 +137,9 @@ async function main() {
       fs.writeFileSync(promptFile, buildResearchPrompt(c.question, repoRoot, { goalsText: c.goals, minCitations: c.minCitations }))
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot)
       const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns, onEvent: () => {}, web: true, model, settingsFile })
+      // 每案写入前幂等重建 outDir：长会话期间 outputs/ 被并行清理（git clean 等）不再炸整案
+      //（2026-11-09 实测：outputs/ 未入 gitignore 且被中途删除，5 案全 ENOENT）
+      fs.mkdirSync(outDir, { recursive: true })
       fs.writeFileSync(path.join(outDir, `${c.id}.output.txt`), String(result.output ?? ''))
       const parsed = parseBriefBlock(result.output ?? '')
       const g = gradeCase(c, parsed?.body ?? null)
