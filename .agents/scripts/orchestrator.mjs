@@ -34,8 +34,8 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildResearchDimsPrompt, DIMS_SPLIT_MARKER, buildVerifierPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, parseDimsPlan, briefDir, VERDICT_SCHEMA } from './orchestrator/research.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from'./orchestrator/prompt.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, briefDir } from'./orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3770,6 +3770,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       .join('\n\n');
     let promptText = buildVerifierPrompt(brief.body, sourcesBlocks, repoRoot);
     const MAX_ATTEMPTS = 3;
+    let verbatimRetried = false; // 逐字失败重试（一次）：与「无契约块」重试共享 MAX_ATTEMPTS 会话上限
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
@@ -3792,8 +3793,22 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       // v3 管线：逐字校验（防编造 claim）→ note-status 一致性降级 → L1 自动标注（确定性优先，L2 contradicted 一票优先）
       // → scoreVerdict 聚合（null 传染 + 否决权 + usage 矩阵）→ verdict/2 落盘 + L3 台账
       let { valid, fabricated } = verifyClaimVerbatim(parsed.claims, brief.body);
+      if (fabricated.length && !verbatimRetried && attempt < MAX_ATTEMPTS) {
+        // 逐字失败自动重试（一次）：多数失败实为「剥标注复述」而非真编造——追加逐字
+        // 摘录契约重试段重跑，重试总次数仍被 MAX_ATTEMPTS 封顶（token 烧量有界）。
+        verbatimRetried = true;
+        log(`  ↻ ${fabricated.length} 条 claim 非逐字摘录——追加逐字摘录契约重试（会话上限 ${MAX_ATTEMPTS} 次内）`);
+        promptText += buildVerbatimRetryPrompt(attempt, fabricated.length);
+        continue;
+      }
+      if (fabricated.length) {
+        // 重试仍败（或已到会话上限）：非逐字 claim 降级保留而非丢弃——claims/coverage
+        // 信息不丢，fabricated_claims 红旗计数照常（封顶 needs_review 语义不变）。
+        valid = [...valid, ...downgradeNonVerbatimClaims(fabricated)];
+      }
       valid = normalizeClaimStatuses(valid); // supported 却自认无快照/无直据 → unsupported（L1 回查仍可翻回）
       for (const c of valid) {
+        if (c.non_verbatim) continue; // 非逐字降级条目跳过 L1 自动升格（未过逐字校验，不得被确定性回查升为 supported）
         if (c.status === 'contradicted') { c.by = 'l2'; continue; } // L2 矛盾判定一票优先
         const toks = extractClaimTokens(c.claim);
         if (!snapshots.length || !toks.length) { c.by = c.by ?? 'l2'; continue; } // 无快照/纯定性：维持 L2 判（缺省 unverifiable 已在契约）
@@ -3837,7 +3852,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       const skeleton = snapshots.filter((s) => s.usable === false).length;
       const reasons = [
         ...valid.filter((c) => c.note).map((c) => `[${c.status}] ${c.claim.slice(0, 60)}——${c.note}`),
-        ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录被丢弃（编造红旗）：${fabricated.slice(0, 3).join(' / ')}`] : []),
+        ...(fabricated.length ? [`⚠ ${fabricated.length} 条 claim 非逐字摘录（编造红旗）——降级保留（non_verbatim），封顶 needs_review`] : []),
         ...(arbitration?.ran && !arbitration.failed ? [`⚖ 仲裁轮：${arbitration.upheld} upheld / ${arbitration.overturned} overturned / ${arbitration.undetermined} undetermined——${arbitration.veto_cleared ? '一票否决解除' : '否决维持'}`] : []),
         ...(arbitration?.failed ? [`⚠ 仲裁轮失败——维持原否决（fail-closed）`] : []),
         ...(parsed.blockers ?? []),
@@ -3868,7 +3883,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       if (arbitration?.ran) appendResearchLedger(repoRoot, { kind: 'l2-arbitration', brief_id: id, model: arbitration.model, researcher_model: prevModel, upheld: arbitration.upheld ?? 0, overturned: arbitration.overturned ?? 0, undetermined: arbitration.undetermined ?? 0, veto_cleared: arbitration.veto_cleared ?? false, failed: arbitration.failed ?? false, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
-      if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录已丢弃（编造红旗）`);
+      if (fabricated.length) log(`  ⚠ ${fabricated.length} 条 claim 非逐字摘录——降级保留（non_verbatim，编造红旗封顶 needs_review）`);
       log(`- 维度分：evidence=${v.scores.evidence} coherence=${v.scores.coherence} coverage=${v.scores.coverage}% citation=${v.scores.citation} → overall=${v.scores.overall}（${v.level}）`);
       log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);

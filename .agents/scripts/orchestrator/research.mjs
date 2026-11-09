@@ -537,6 +537,28 @@ export function normalizeClaimStatuses(claims) {
   );
 }
 
+/**
+ * 非逐字 claim 降级保留（2026-11-10）：L2 逐字校验失败重试一次仍败后，claim 不再从
+ * claims 中丢弃——保留进 verdict.claims（claims/coverage 信息不丢），但 non_verbatim:
+ * true 留痕、status 强制 partial（未过逐字校验不足以上升为 supported；原判 contradicted
+ * 的非逐字文本同样不进 contradicted 一票否决——veto 面收窄为纯逐字 claim，置 partial
+ * 是撤销否决而非降权）、note 前缀标注。fabricated_claims 计数由调用方照常保留（红旗
+ * 封顶 needs_review 语义不变——非逐字残余 = 复核契约仍被违反的证据）。入参兼容字符串
+ * （verifyClaimVerbatim 的 fabricated 产物）与对象。
+ */
+export function downgradeNonVerbatimClaims(claims) {
+  if (!Array.isArray(claims)) return [];
+  return claims.map((c) => {
+    const src = typeof c === 'string' ? { claim: c } : { ...(c ?? {}) };
+    return {
+      ...src,
+      status: 'partial',
+      non_verbatim: true,
+      note: `非逐字摘录（复核改写）${src.note ? `；原 note：${src.note}` : ''}`,
+    };
+  });
+}
+
 /** L0 引用面分（0-100 或 null）：当日引用率 / 深链比 / 快照成功率 三分量等权，缺项重归一。 */
 export function scoreCitation({ datedCount, totalCitations, deep, totalUrls, snapOk, snapTotal }) {
   const parts = [];

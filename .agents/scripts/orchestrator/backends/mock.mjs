@@ -21,7 +21,11 @@
 //   ORCH_MOCK_PLANNER_RESEARCH=<id>      feature 卡 research 行写该值（缺省 todo）——sail
 //                                        autoDim 续接路径 e2e 用（planner 引用既有 brief/topic）
 //   ORCH_MOCK_PLANNER_FEATURE_COUNT=<n>  feature 模式产 n 张卡（id 后缀 -2…-n，缺省 1 张）——
-//                                        researchPerCycle cap 的「multi 计 1」断言用
+//                                        researchPerCycle cap 的「multi 计 1」断言用//   ORCH_MOCK_REVIEW_PARAPHRASE=1        L2 复核每次都改写复述 claim（非逐字 → fabricated；
+//                                        测逐字重试仍败 → 降级保留链路）
+//   ORCH_MOCK_REVIEW_PARAPHRASE_ONCE=1   仅本子进程第一次复核改写、重试后逐字（测重试恢复；
+//                                        模块级计数器，runOrch 每次新子进程天然复位——
+//                                        勿在同进程直接 import mock 断言次数）
 // prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
@@ -29,6 +33,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER, DIMS_SPLIT_MARKER } from '../prompt.mjs';
+
+// L2 复核会话计数（PARAPHRASE_ONCE 用）：本子进程内第一次改写、重试后逐字。
+// 模块级变量——runOrch 每次新子进程天然复位；测试不得在同进程 import mock 断言次数。
+let verifierCall = 0;
+const paraphraseOnce = process.env.ORCH_MOCK_REVIEW_PARAPHRASE_ONCE === '1';
 
 export const mockBackend = {
   name: 'mock',
@@ -115,13 +124,19 @@ export const mockBackend = {
 
     if (isVerifier) {
       // L2 复核模式（v2 JSON 契约）：从 prompt 内嵌 brief 摘第一条承重结论逐字回显；
-      // ORCH_MOCK_REVIEW_BLOCKERS>0 映射为 contradicted（否决链路 e2e 复用既有注入）
+      // ORCH_MOCK_REVIEW_BLOCKERS>0 映射为 contradicted（否决链路 e2e 复用既有注入）；
+      // ORCH_MOCK_REVIEW_PARAPHRASE=1 每次都改写复述（尾部加词 → 非 brief 子串），
+      // PARAPHRASE_ONCE=1 仅第一次改写、重试后逐字（测逐字重试恢复链路）
       const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
       const briefMatch = /## 待复核 brief\n\n([\s\S]*?)\n\n## 来源快照/.exec(prompt);
       const firstLine = (briefMatch?.[1] ?? '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? 'mock claim';
+      let claim = firstLine.slice(0, 110);
+      const paraphrase = process.env.ORCH_MOCK_REVIEW_PARAPHRASE === '1' || (paraphraseOnce && verifierCall === 0);
+      if (paraphraseOnce) verifierCall++;
+      if (paraphrase) claim = `${claim.replace(/。$/, '')}（mock 复核改写）。`;
       const payload = {
         claims: [{
-          claim: firstLine.slice(0, 110),
+          claim,
           status: blockers > 0 ? 'contradicted' : 'supported',
           note: blockers > 0 ? 'mock 复核：与给定快照矛盾' : 'mock 复核：与给定快照一致',
         }],
