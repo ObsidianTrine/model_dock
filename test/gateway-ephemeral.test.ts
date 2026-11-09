@@ -12,6 +12,7 @@ import {
   buildRuntime,
   checkTokenLimits,
   registerEphemeralHarness,
+  renewEphemeralHarness,
   reapplyEphemeralHarnesses,
   reloadRuntime,
   sweepEphemeralHarnesses,
@@ -416,6 +417,145 @@ describe('临时 harness > 不落盘 + 热加载幸存（config.toml 零痕迹�
       await reloadRuntime(rt)
       const tv = JSON.parse((await adminPost(port, '/_modeldock/tier-validate', { token: j.token })).body) as Record<string, any>
       expect(tv).toMatchObject({ ok: true, harness: 'eph-p', profile: 'heavy' })
+      server.closeAllConnections?.()
+      server.close()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('renewEphemeralHarness > 纯逻辑（时间注入）', () => {
+  it('新到期 = max(剩余, ttl) 收敛 1440 硬顶；缩短 no-op；过期与不在册分流', () => {
+    const rt = buildRuntime(baseConfig(), 'adm')
+    const t0 = Date.parse('2026-11-10T01:00:00Z')
+    registerEphemeralHarness(rt, { id: 'eph-m', ttlMinutes: 60, now: t0 })
+    // ttl 小于剩余寿命：no-op，到期不变
+    const r1 = renewEphemeralHarness(rt, 'eph-m', 10, t0 + 60_000)
+    expect(r1.ok && r1.state.expiresAt).toBe(t0 + 60 * 60_000)
+    // ttl 大于剩余：后移到 now + ttl
+    const r2 = renewEphemeralHarness(rt, 'eph-m', 90, t0 + 60_000)
+    expect(r2.ok && r2.state.expiresAt).toBe(t0 + 60_000 + 90 * 60_000)
+    // 超硬顶收敛到 now + 1440min（不 400，续期口顶住即可）
+    const r3 = renewEphemeralHarness(rt, 'eph-m', 5000, t0 + 2 * 60_000)
+    expect(r3.ok && r3.state.expiresAt).toBe(t0 + 2 * 60_000 + EPHEMERAL_TTL_MAX_MINUTES * 60_000)
+    // 仍在册但已过点（sweeper 未及摘除窗口）：拒绝，不复活
+    registerEphemeralHarness(rt, { id: 'eph-dead', ttlMinutes: 1, now: t0 })
+    expect(renewEphemeralHarness(rt, 'eph-dead', 30, t0 + 61_000)).toEqual({ ok: false, reason: 'expired' })
+    // 未知 id / 持久 harness（不在临时注册表）：not_found
+    expect(renewEphemeralHarness(rt, 'eph-ghost', 30, t0 + 62_000)).toEqual({ ok: false, reason: 'not_found' })
+    expect(renewEphemeralHarness(rt, 'zcode', 30, t0 + 62_000)).toEqual({ ok: false, reason: 'not_found' })
+  })
+})
+
+describe('POST /_modeldock/harness/renew（admin 门内）', () => {
+  it('未过期续期：expires_at 后移到 max(旧到期, now+ttl)；缩短请求 no-op；token 不换发不回显', async () => {
+    const t = await setupAsync()
+    try {
+      const j = JSON.parse((await adminPost(t.port, '/_modeldock/harness/provision', { id: 'eph-renew', profile: 'heavy', ttl_minutes: 30 })).body) as Record<string, any>
+      const raw = await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-renew', ttl_minutes: 45 })
+      const r = JSON.parse(raw.body) as Record<string, any>
+      expect(r.ok).toBe(true)
+      expect(r.id).toBe('eph-renew')
+      expect(r.token).toBeUndefined() // token 不换发：续期只改 expiresAt
+      expect(raw.body).not.toContain('mdk_eph') // 响应不回显 token 明文
+      const newMs = Date.parse(r.expires_at)
+      expect(newMs).toBeGreaterThan(Date.parse(j.expires_at)) // 后移
+      expect(Math.abs(newMs - Date.now() - 45 * 60_000)).toBeLessThan(60_000)
+      // 原 token 仍权威有效（路由钉定不变）
+      const tv = JSON.parse((await adminPost(t.port, '/_modeldock/tier-validate', { token: j.token })).body) as Record<string, any>
+      expect(tv).toMatchObject({ ok: true, harness: 'eph-renew', profile: 'heavy' })
+      // 缩短请求（ttl 5min < 剩余 45min）：到期不变
+      const r2 = JSON.parse((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-renew', ttl_minutes: 5 })).body) as Record<string, any>
+      expect(r2.ok).toBe(true)
+      expect(r2.expires_at).toBe(r.expires_at)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('超硬顶收敛：ttl_minutes 超过 1440 时新到期收敛到 now+1440min；harness-usage 反映续后到期', async () => {
+    const t = await setupAsync()
+    try {
+      await adminPost(t.port, '/_modeldock/harness/provision', { id: 'eph-cap', ttl_minutes: 30 })
+      const r = JSON.parse((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-cap', ttl_minutes: 5000 })).body) as Record<string, any>
+      expect(r.ok).toBe(true)
+      expect(Math.abs(Date.parse(r.expires_at) - Date.now() - EPHEMERAL_TTL_MAX_MINUTES * 60_000)).toBeLessThan(60_000)
+      const usage = JSON.parse((await adminGet(t.port, '/_modeldock/harness-usage')).body) as Record<string, any>
+      expect(usage.usage['eph-cap'].expires_at).toBe(r.expires_at)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('已过期拒绝（410，sweeper 未及摘除窗口内不复活）；摘除后 / 非 ephemeral / 未知 id / 已吊销 404', async () => {
+    const t = await setupAsync()
+    try {
+      await adminPost(t.port, '/_modeldock/harness/provision', { id: 'eph-dead', ttl_minutes: 0.002 }) // ≈120ms
+      await adminPost(t.port, '/_modeldock/harness/provision', { id: 'eph-live', ttl_minutes: 30 })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      // 仍在册（sweeper 默认 60s 未跑）但已过点：410 拒绝，僵尸凭据不得复活
+      const dead = await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-dead', ttl_minutes: 30 })
+      expect(dead.status).toBe(410)
+      expect(dead.body).toContain('已过期')
+      // 持久 harness 与未知 id：404（renew 仅作用于 provision 签发的临时条目）
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'zcode', ttl_minutes: 30 })).status).toBe(404)
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-never', ttl_minutes: 30 })).status).toBe(404)
+      // 吊销后 404
+      await adminPost(t.port, '/_modeldock/harness/revoke', { id: 'eph-live' })
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-live', ttl_minutes: 30 })).status).toBe(404)
+      // sweeper 摘除后：expired 窗口消失 → 404（与 410 分流）
+      expect(sweepEphemeralHarnesses(t.rt, Date.now())).toContain('eph-dead')
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-dead', ttl_minutes: 30 })).status).toBe(404)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('非法请求 400（缺 harnessId / ttl 非法）；无 admin 头 401；审计全程无 token 明文', async () => {
+    const t = await setupAsync()
+    try {
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { ttl_minutes: 30 })).status).toBe(400)
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-nope', ttl_minutes: 0 })).status).toBe(400)
+      expect((await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-nope', ttl_minutes: 'abc' })).status).toBe(400)
+      const noAuth = await request(t.port, '/_modeldock/harness/renew', { 'content-type': 'application/json' }, '{}')
+      expect(noAuth.status).toBe(401)
+      const j = JSON.parse((await adminPost(t.port, '/_modeldock/harness/provision', { id: 'eph-audit' })).body) as Record<string, any>
+      const rr = await adminPost(t.port, '/_modeldock/harness/renew', { harnessId: 'eph-audit', ttl_minutes: 50 })
+      expect(rr.status).toBe(200)
+      const auditEntry = t.rt.ring.find((e) => e.kind === 'audit' && e.op === '续期临时凭据')
+      expect(auditEntry).toBeTruthy()
+      // provision 与 renew 两条审计（含 detail）全程无 token 明文：前缀与明文都不出现
+      const audits = t.rt.ring.filter((e) => e.kind === 'audit')
+      for (const a of audits) {
+        const s = JSON.stringify(a)
+        expect(s).not.toContain('mdk_eph')
+        expect(s).not.toContain(j.token)
+      }
+    } finally {
+      t.close()
+    }
+  })
+
+  it('热加载幸存语义不变：renew 后 reloadRuntime，续后到期保持、token 仍权威可用', async () => {
+    const h = fakeHome()
+    try {
+      await mutateConfig((cfg) => {
+        cfg.active_profile = 'demo'
+        cfg.security = { store: 'file' }
+        cfg.providers = { A: { name: 'A', base_url: 'http://a.example', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k1' } }
+        cfg.profiles = { demo: { provider: 'A', default_model: 'm1' }, heavy: { provider: 'A', default_model: 'm1' } }
+        cfg.harness = { zcode: { mode: 'gateway', token: 'mdk_zcode_tok', limits: { rpm: 100 } } }
+      })
+      const rt = buildRuntime(await loadConfig(), 'admin-tok')
+      const server = createGatewayServer(rt, { port: 0 })
+      const port = await listenEphemeral(server)
+      const j = JSON.parse((await adminPost(port, '/_modeldock/harness/provision', { id: 'eph-rl', profile: 'heavy' })).body) as Record<string, any>
+      const r = JSON.parse((await adminPost(port, '/_modeldock/harness/renew', { harnessId: 'eph-rl', ttl_minutes: 60 })).body) as Record<string, any>
+      await reloadRuntime(rt)
+      expect(rt.ephemeral.get('eph-rl')?.expiresAt).toBe(Date.parse(r.expires_at))
+      const tv = JSON.parse((await adminPost(port, '/_modeldock/tier-validate', { token: j.token })).body) as Record<string, any>
+      expect(tv).toMatchObject({ ok: true, harness: 'eph-rl', profile: 'heavy' })
       server.closeAllConnections?.()
       server.close()
     } finally {

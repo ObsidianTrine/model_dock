@@ -76,6 +76,29 @@ export function unregisterEphemeralHarness(rt: GatewayRuntime, id: string): bool
   return true
 }
 
+/** 续期结果：ok 带续后条目与实际生效 TTL（分钟，可含小数）；not_found = 非在册临时条目
+ *  （未知 id / 持久 harness / 已吊销或已被 sweeper 摘除）；expired = 仍在册但已过点
+ *  （sweeper 60s 节奏未及摘除的窗口），与 not_found 分流以便端点拒绝时给出不同指引。 */
+export type EphemeralRenewResult =
+  | { ok: true; state: EphemeralHarnessState; ttlMinutes: number }
+  | { ok: false; reason: 'not_found' | 'expired' }
+
+/** 续期临时 harness（TTL 续期端点的核心逻辑）：新到期 = max(旧到期, now + ttl) 再收敛到与
+ *  provision 同顶 1440min。只延不缩是刻意的——缩短请求等价 no-op（worker 凭据没有「提前作废
+ *  续期」诉求，要提前作废走 revoke）；超顶收敛而非 400（provision 的 400 卡在签发口，续期口
+ *  顶住即可，编排侧无需为超长 ttl 先做范围探测）。已过点拒绝：条目还在册也绝不复活，否则
+ *  sweeper 摘除前的小窗口就成了僵尸凭据洗白通道。token / route / 日限额不动——config.harness
+ *  合成条目无须重注，expiresAt 是 sweeper 与热加载 reapply 的唯一基准，改它即全链生效。 */
+export function renewEphemeralHarness(rt: GatewayRuntime, id: string, ttlMinutes: number, now = Date.now()): EphemeralRenewResult {
+  const e = rt.ephemeral.get(id)
+  if (!e) return { ok: false, reason: 'not_found' }
+  if (e.expiresAt <= now) return { ok: false, reason: 'expired' }
+  const ttlMs = Math.round(ttlMinutes * 60_000)
+  const expiresAt = Math.min(Math.max(e.expiresAt, now + ttlMs), now + EPHEMERAL_TTL_MAX_MINUTES * 60_000)
+  e.expiresAt = expiresAt
+  return { ok: true, state: e, ttlMinutes: (expiresAt - now) / 60_000 }
+}
+
 /** TTL 清扫：摘除全部过期条目，返回被摘的 id 清单（空转零开销）。 */
 export function sweepEphemeralHarnesses(rt: GatewayRuntime, now = Date.now()): string[] {
   const swept: string[] = []
