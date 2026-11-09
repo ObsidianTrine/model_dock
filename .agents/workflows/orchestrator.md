@@ -98,8 +98,8 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 | `scan` | 巡检 6 类信号出提案，落 drafts/（**不进队列**） |
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
 | `research "<问题>"` | 上游调研（B3.5）：researcher 只读+联网会话产出带引用 brief；`--selftest` 实测联网工具可用性 |
-| `drafts gc [--apply]` | 提案清退（B13）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除） |
-| `nightly [--plan] [--auto N]` | 一次完整巡检编排；`schedule` 注册成每日定时 |
+| `drafts gc [--apply]` | 提案清退（B13）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除）；超龄（maxAgeDays 缺省 14 天）未提交的机器提案 nightly 也自动清退 |
+| `nightly [--plan] [--auto N]` | 一次完整巡检编排；含 drafts gc 自动清退（B14 老化自动档）；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
 | `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+上游管线/自动提交→执行循环），到点收帆交航海报告 |
 | `drill` | 弃船演习：临时港 mock 全链跑一张合成托运单，验证港口闭环自身健康（不烧真钱、不碰真队列） |
@@ -430,11 +430,13 @@ workflow.json 是编排器的**授权面**（autopilot 白名单、escalation fa
 
 ### B14. 提案生命周期（drafts gc，B9 清退机制）
 
-drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 merged 工作覆盖）。两条生命周期（**永不删除文件，只迁移目录**）：
+drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 merged 工作覆盖）。三条生命周期（**永不删除文件，只迁移目录**）：
 
-- **自动 superseded（闭环内动作，merge 即触发）**：卡落 merged/ 时，drafts/ 里 `files_hint` 与刚合并卡**路径重叠**（前缀精确口径：同文件/同目录/互为路径前缀；完全通配 `**` 独占；仅标题相似**不迁**——防误杀，只在 gc 报告提示）的提案自动迁入 `drafts/superseded/`，文件头标注 `superseded_by: <合并卡 id>`。关闭：`"draftsGc": { "autoSupersede": false }`。fleet 留痕 `drafts_superseded`。
-- **老化（手动档）**：`orchestrator drafts gc [--apply]`——缺省 dry-run 只列清单（superseded 候选 / 超 `draftsGc.archiveDays`（缺省 30 天）的 aged 候选 / 仅标题相似的提示）；`--apply` 才迁移（superseded 带标注、aged 原文迁入 `drafts/archived/`）。年龄口径：frontmatter `created_at` 优先、mtime 兜底、都缺不老化（宁少勿滥）。
-- 已在 superseded/ 或 archived/ 的提案不回锅（`drafts gc` 只扫顶层 .md）；同名目标文件已存在跳过不覆盖（Windows rename 语义安全），失败留原地等人工。
+- **自动 superseded（闭环内动作，merge 即触发）**：卡落 merged/ 时，drafts/ 里 `files_hint` 与刚合并卡**路径重叠**（前缀精确口径：同文件/同目录/互为路径前缀；完全通配 `**` 独占；仅标题相似**不迁**——防误杀，只在 gc 报告提示）的提案自动迁入 `drafts/superseded/`，文件头标注 `superseded_by: <合并卡 id>`。fleet 留痕 `drafts_superseded`。
+- **老化自动档（nightly 清退，2026-11-10）**：nightly 周期自动执行一次两类保守清退 → `drafts/superseded/`：① superseded 类（与 merged/ 卡 files_hint 重叠——补收提案晚于合并创建的现场）；② 超龄未提交类（超 `draftsGc.maxAgeDays`（缺省 14 天）且**队列 7 状态零痕迹**、机器来源（`created_by` ∈ planner/scanner）的提案，文件头标注 `superseded_by: aged-out`）。三重保护：队列有同名卡不动（提案已提交/被真实工作吸收）、人工草稿不动、痕迹面不可知整档关闭。fleet 留痕 `drafts_gc_auto`。
+- **老化（手动档）**：`orchestrator drafts gc [--apply]`——缺省 dry-run 只列清单（superseded 候选 / 超龄未提交候选 / 超 `draftsGc.archiveDays`（缺省 30 天）的 aged 候选 / 仅标题相似的提示）；`--apply` 才迁移（superseded/超龄未提交带标注迁 `drafts/superseded/`、aged 原文迁入 `drafts/archived/`）。年龄口径：frontmatter `created_at` 优先、mtime 兜底、都缺不老化（宁少勿滥）。
+- **总闸**：`"draftsGc": { "autoSupersede": false }` 同时关闭 merge 时与 nightly 的自动 supersede/清退（drafts gc 手动档不受影响）；超龄档阈值 `"maxAgeDays"` 可调。
+- 已在 superseded/ 或 archived/ 的提案不回锅（`drafts gc` 只扫顶层 .md）；同名目标文件已存在跳过不覆盖（Windows rename 语义安全），失败留原地等人工；超龄档与归档档独占（同一提案不会被两份清单重复迁移）。
 
 ### B15. scan 卡自动转修复卡（scanAutoFix，B10 断链自愈）
 

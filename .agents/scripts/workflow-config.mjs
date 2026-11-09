@@ -89,10 +89,13 @@
 //                   任务继续），恢复 = 基线重新匹配（文件改回）或编排器自己 merge 后重置。
 //                   2026-11 实证动机：sail 派发的卡自改 workflow.json 默认引擎后合并——
 //                   授权配置被被调度方改写而编排器无感。enabled=false 关闭守卫（不推荐）
-//   draftsGc        drafts/ 提案生命周期：{ autoSupersede?: boolean（缺省 true——卡落 merged/
-//                   时 files_hint 重叠的提案自动迁入 drafts/superseded/ 并标注合并卡 id），
+//   draftsGc        drafts/ 提案生命周期：{ autoSupersede?: boolean（缺省 true——自动
+//                   supersede 总闸，管两处：卡落 merged/ 时 files_hint 重叠提案自动迁入
+//                   drafts/superseded/ 并标注合并卡 id；nightly 周期的自动清退同闸），
 //                   archiveDays?: 正整数（缺省 30——drafts gc 时超龄提案迁入 drafts/archived/，
-//                   永不删除只迁移） }
+//                   永不删除只迁移），maxAgeDays?: 正整数（缺省 14——老化自动档阈值：超龄
+//                   且队列 7 状态零痕迹的机器来源提案（created_by ∈ planner/scanner）由
+//                   nightly 自动清退迁 drafts/superseded/；队列有痕迹与人工草稿绝不清退） }
 //   scanAutoFix     scan 型卡 failed 后自动转修复卡：{ enabled?: boolean（缺省 true） }。
 //                   drain 处理到 failed/ 的 scan-* 卡时自动创建 pending 修复卡（id
 //                   fix-<原名>，引用 incident.md 与失败摘要，files_hint/门禁继承原卡）；
@@ -677,17 +680,19 @@ function resolveConfigGuard(raw) {
   return out;
 }
 
-/** drafts/ 提案生命周期配置解析：{ autoSupersede: boolean, archiveDays: 正整数 }，
- *  缺省 true / 30。autoSupersede=false 关闭「卡落 merged/ 时 files_hint 重叠提案自动
- *  迁 superseded/」（drafts gc 手动档不受影响）；archiveDays 非法回落 30。非法值回落
+/** drafts/ 提案生命周期配置解析：{ autoSupersede: boolean, archiveDays: 正整数,
+ *  maxAgeDays: 正整数 }，缺省 true / 30 / 14（与 orchestrator/drafts-gc.mjs 的
+ *  DEFAULT_ARCHIVE_DAYS / DEFAULT_MAX_AGE_DAYS 同一口径，改动须两处同步）。
+ *  autoSupersede=false 关闭一切自动 supersede（合并时 + nightly 自动清退同闸；
+ *  drafts gc 手动档不受影响）；archiveDays / maxAgeDays 非法回落缺省。非法值回落
  *  缺省并 console.warn 告警。 */
 function resolveDraftsGc(raw) {
-  const DEFAULTS = { autoSupersede: true, archiveDays: 30 };
+  const DEFAULTS = { autoSupersede: true, archiveDays: 30, maxAgeDays: 14 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] draftsGc 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 draftsGc 键：{ autoSupersede?: boolean, archiveDays?: 正整数 }）`);
+    console.warn(`[workflow-config] draftsGc 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 draftsGc 键：{ autoSupersede?: boolean, archiveDays?: 正整数, maxAgeDays?: 正整数 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { autoSupersede?, archiveDays? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { autoSupersede?, archiveDays?, maxAgeDays? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -698,6 +703,10 @@ function resolveDraftsGc(raw) {
   if (raw.archiveDays !== undefined) {
     if (Number.isInteger(raw.archiveDays) && raw.archiveDays > 0) out.archiveDays = raw.archiveDays;
     else warn(`archiveDays ${JSON.stringify(raw.archiveDays)} 不合法（须为正整数）`);
+  }
+  if (raw.maxAgeDays !== undefined) {
+    if (Number.isInteger(raw.maxAgeDays) && raw.maxAgeDays > 0) out.maxAgeDays = raw.maxAgeDays;
+    else warn(`maxAgeDays ${JSON.stringify(raw.maxAgeDays)} 不合法（须为正整数）`);
   }
   return out;
 }
