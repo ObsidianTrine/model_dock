@@ -365,6 +365,39 @@ describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况�
   })
 })
 
+describe('workflow-config > upstream（上游管线预授权档 specAutoBuild，缺省关）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-upstream-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('未配 = 缺省关（spec 落盘即停等人审，行为与历史一致）；显式 true / false 生效', () => {
+    expect(cfgOf({}).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: true } } }).upstream).toEqual({ specAutoBuild: { enabled: true } })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: false } } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    // upstream 键合法：不再进未知顶层键告警（拼写错误防线白名单）
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      cfgOf({ upstream: { specAutoBuild: { enabled: true } } })
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('未知顶层键'))).toHaveLength(0)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('非法形态回落缺省关：非对象 upstream / 非对象 specAutoBuild / 非布尔 enabled', () => {
+    expect(cfgOf({ upstream: 'x' }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    expect(cfgOf({ upstream: { specAutoBuild: 'on' } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: 'yes' } } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+  })
+})
+
 describe('workflow-config > B11 常量收口新键（gateTimeoutMinutes/retryWaitBaseMs/scheduling/drift 告警）', () => {
   function fixture(workflow: Record<string, unknown>): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-b11-'))

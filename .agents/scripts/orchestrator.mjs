@@ -44,7 +44,7 @@ import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSe
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
-import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow } from './orchestrator/autoresume.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, scanRunningCards } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
 import { listDrafts, planGc, applyGc, supersedeForMerged, draftsRoot, DEFAULT_ARCHIVE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
@@ -590,7 +590,17 @@ async function cmdRun(repoRoot, taskId, opts) {
       if (rv.ok) log(`🔑 接管清理：上次 run 的一次性凭据已吊销（harness=${stale}）`);
       else log(`⚠ 上次 run 的一次性凭据吊销失败（${rv.reason}）——harness=${stale} 留待 TTL 自然过期，不重试`);
     }
-    const pr = await provisionTaskHarness(provGa, { taskId });
+    // 传参限额与寿命（2026-11 长跑自治）：maxDailyTokens = 卡生效 token 预算（上方预算
+    // 校准段已把 budgetProfiles 合并进 meta.budget），per-harness 日限额与任务熔断同源——
+    // 凭据本身也成为预算防线；ttlHours 按 wall 预算收敛（ceil(wall/60)+1 小时，provision.mjs
+    // 内再受 ≤24h 硬顶）——此前缺省 8h TTL 可能先于 wall 熔断过期，长任务后半程掉凭据。
+    const ttlHours = Number.isFinite(meta.budget?.max_wall_minutes) && meta.budget.max_wall_minutes > 0
+      ? Math.ceil(meta.budget.max_wall_minutes / 60) + 1
+      : undefined;
+    const maxDailyTokens = Number.isFinite(meta.budget?.max_tokens) && meta.budget.max_tokens > 0
+      ? meta.budget.max_tokens
+      : undefined;
+    const pr = await provisionTaskHarness(provGa, { taskId, ttlHours, maxDailyTokens });
     if (pr.ok) {
       taskHarness = { id: pr.harnessId, expiresAt: pr.expiresAt, revoked: false };
       tierEnv = applyEphemeralToken(tierEnv, pr); // 同形通道只换 token；claude 双通道与 zcode env 透传照旧
@@ -2027,6 +2037,92 @@ function autoResumePass(repoRoot, root, cfg, opts) {
 }
 
 /**
+ * 孤儿 running 卡启动自愈（2026-11 长跑自治；归类纯逻辑在 orchestrator/autoresume.mjs
+ * 的 classifyOrphan / pickOrphanResumeCandidates）。blocked 通道覆盖不到的形态：sail/drain
+ * 单进程被硬杀后卡还挂在 running/——状态「在跑」而实际无进程，等下一个调度入口接管。
+ * drain / watch / nightly 入口（获得调度器锁后）调用，任务锁判活分三类处置：
+ *   ① 锁活（readTaskLock + taskLockLooksLive，同进程嵌套闭环或并行实例在驱动）→ 跳过；
+ *   ② 孤儿 + classifyOrphan='resume'（崩溃族 / 上会话 transient 签名 / retry 链）→
+ *      有限自动续：沿用 24h 冷却（cooldownHours）与每次 ≤maxPerRun 张，与 blocked 通道同参；
+ *   ③ 孤儿 + 其余（'breaker' 熔断卡永不续 / 'stuck' 非 transient）→ 落 blocked/
+ *      （failTaskToBlocked 同款：failed 事件 + 迁移，附不可续原因），交人工。
+ * 护栏：仅在实际获得调度器锁的进程执行（调用方守卫——watch/nightly 派生的 drain 子进程
+ * 走 ORCH_SCHED_LOCK_HELD 豁免路径跳过，父调度器本周期已扫，与并行驾驶实例互斥）；
+ * drift 降级 = 全人工，整通道暂停；autoResume.enabled=false 完全不扫。
+ * 永不静默：自动续记 auto_resume { card, attempts, source: 'orphan_running' }，落 blocked
+ * 记 failed 事件（孤儿现场写不进通知回调，落卡事件即对账凭据）。
+ * @returns {{ resumed: string[], blocked: string[] }} 本轮自动续与落 blocked 的卡 id
+ */
+function orphanHealPass(repoRoot, root, cfg, opts) {
+  const empty = { resumed: [], blocked: [] };
+  const ar = cfg.autoResume;
+  if (!ar?.enabled) return empty;
+  if (readDegraded(repoRoot)) return empty; // 降级 = 全人工：状态归位也一并等人工（现场保持原样）
+  const { candidates, unreadable, total } = scanRunningCards(repoRoot, root);
+  if (total === 0) return empty;
+  if (unreadable.length) {
+    console.warn(`[orchestrator] 孤儿自愈资格判定：${unreadable.length} 张 running 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
+  }
+  // 判活备料：锁活 = 有驱动者（心跳 15s 内新鲜）；无锁/陈锁（心跳静默 60s）= 孤儿
+  const orphans = [];
+  for (const c of candidates) {
+    const lock = readTaskLock(repoRoot, c.id);
+    if (lock && taskLockLooksLive(lock)) continue;
+    orphans.push(c);
+  }
+  if (!orphans.length) return empty;
+  log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失/心跳静默）：${orphans.map((c) => c.id).join(', ')}`);
+  const picked = pickOrphanResumeCandidates(orphans, {
+    maxPerRun: ar.maxPerRun,
+    cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+  });
+  const resumed = [];
+  for (const c of picked) {
+    const card = orphans.find((x) => x.id === c.id);
+    try {
+      fs.writeFileSync(card.path, withAutoResumedAt(card.text, autoResumedAtNow()));
+    } catch (e) {
+      // Windows EBUSY 等写失败：宁可不续也不无冷却地续（防反复烧钱），与 blocked 通道同款
+      console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
+      continue;
+    }
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts, source: 'orphan_running' });
+    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族；冷却期内至多此一次）`);
+    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
+      ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: { ...process.env, ...childEnvForHeldLock() },
+    });
+    resumed.push(c.id);
+    if (r.status !== 0) log(`任务 ${c.id} 自动续退出码 ${r.status}（已落 blocked/failed/或等待人工——冷却期内不再自动续）。`);
+  }
+  // 其余孤儿落 blocked（failTaskToBlocked 同款语义）：熔断卡（'breaker'）只做状态归位
+  // 永不续；'stuck'（最后会话以 failed/非签名 settle 收尾）交人工定性。先重查现状——
+  // 上方自动续的子进程可能已把同 id 卡迁走（同步 spawn，此处必已收敛）。
+  const pickedIds = new Set(picked.map((p) => p.id));
+  const blocked = [];
+  for (const c of orphans) {
+    if (pickedIds.has(c.id)) continue;
+    const cur = findCard(root, c.id);
+    if (!cur || !['running', 'reviewing'].includes(cur.state)) continue; // 已被自动续子进程迁移/落位
+    const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
+    const kind = classifyOrphan(c.events);
+    // reason 面向 isTransientBlocked 的签名匹配写（只引程序写入的枚举 reason，不引自由文本
+    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续
+    const reason = kind === 'breaker'
+      ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
+      : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
+    appendEvent(logDir(repoRoot, c.id), 'failed', { reason });
+    moveCard(root, c.id, cur.state, 'blocked');
+    blocked.push(c.id);
+    log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);
+  }
+  log(`孤儿自愈检查：running ${total} 张，孤儿 ${orphans.length} 张，自动续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}，落 blocked ${blocked.length} 张${blocked.length ? `（${blocked.join(', ')}）` : ''}。`);
+  return { resumed, blocked };
+}
+
+/**
  * scan 卡自动转修复卡（B10）：drain 落位点调用——failed 的是 scan 型卡（id scan- 前缀，
  * 见 scanfix.mjs）且 scanAutoFix.enabled（缺省 true）时，自动补一张 pending 修复卡
  * （id fix-<原名>，正文引用 incident.md 与失败摘要，files_hint/门禁继承原卡）。修复卡
@@ -2087,6 +2183,9 @@ async function cmdDrain(repoRoot, opts) {
       }
     }
     preflightWorkerBackend(opts.backend ?? cfg.worker?.backend); // mock/未配置引擎跳过（探测函数只认真实 CLI）
+    // 孤儿 running 卡启动自愈（仅实际持锁的调度进程；watch/nightly/sail 派生的 drain 子进程
+    // 走 inherited 豁免路径跳过——父调度器本周期已扫，避免同周期双跑）
+    if (!lock.inherited) orphanHealPass(repoRoot, root, cfg, opts);
     // 选卡前先过一遍 blocked 自动续通道（串行/并发路径共用；引擎预检通过才续，防止坏引擎把卡反复烧）
     autoResumePass(repoRoot, root, cfg, opts);
     if (workers > 1) return await cmdDrainParallel(repoRoot, root, opts, workers, cfg);
@@ -3584,7 +3683,7 @@ function stampResearchIntoDraft(repoRoot, draftId, briefId) {
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
  */
 async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
-  const out = { researched: [], speced: [], failed: [], verdicts: [] };
+  const out = { researched: [], speced: [], built: [], failed: [], verdicts: [] };
   if (!proposals.length) return out;
   const caps = {
     research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
@@ -3628,7 +3727,21 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
       const ok = await specFromDraft(repoRoot, { draftId: p.id, goal: p.goal, briefBody, backendName });
       if (ok) {
         out.speced.push(p.id);
-        log(`  ✓ spec ${p.id} 已落盘——人工审阅设计后：spec build ${p.id}`);
+        if (cfg.upstream?.specAutoBuild?.enabled === true) {
+          // 预授权 spec 档（2026-11 长跑自治）：spec 落盘即自动拆卡（gate=L1、type=feature），
+          // 不停盘等人审。安全网不另造判断：拆出的卡 files_hint 命中核心/发布路径时引水闸
+          // 天然拦停派发；实际合并仍由 classifyChange 对真实改动分级（L2/L3 照样回人工）。
+          try {
+            const r = buildSpecCards(repoRoot, queueRoot(repoRoot), p.id, { gate: 'L1' });
+            out.built.push(p.id); // 报告按 spec id 对账（out.speced 同键）；拆出的卡 id 只进日志
+            for (const w of r.warnings) log(`  ⚠ ${w}`);
+            log(`  ⚡ specAutoBuild：spec ${p.id} 自动拆卡 ${r.created.length} 张进 pending（gate=L1；引水闸与分级闸门照走）`);
+          } catch (e) {
+            out.failed.push({ id: p.id, reason: `specAutoBuild 拆卡失败：${e?.message ?? e}——人工 spec build ${p.id}` });
+          }
+        } else {
+          log(`  ✓ spec ${p.id} 已落盘——人工审阅设计后：spec build ${p.id}`);
+        }
       } else {
         out.failed.push({ id: p.id, reason: 'spec 升级失败（planner 未产出合规三件套）——下一周期重试' });
       }
@@ -3707,6 +3820,9 @@ async function cmdNightly(repoRoot, opts) {
   ensureQueue(root);
   const ncfg = runConfig(repoRoot); // repoRoot 锚定（风暴闸/巡检信号共用；勿与收尾处的 loadWorkflowConfig 混名）
   const childEnv = { ...process.env, ...childEnvForHeldLock() };
+  // 孤儿 running 卡启动自愈（夜里先接管昨天崩溃残留的 running 卡再巡检；本进程实持调度器锁，
+  // 下方 --auto 派生的 drain 子进程走 inherited 豁免不会重复扫）
+  orphanHealPass(repoRoot, root, ncfg, opts);
   let created = [];
   let skipped = [];
   let warnings = [];
@@ -3926,6 +4042,9 @@ async function cmdWatch(repoRoot, opts) {
       } else {
         weatherAnnounced = false;
       }
+      // 孤儿 running 卡自愈（每周期：watch 常驻，上一周期 drain 子进程硬杀留下的 running
+      // 卡只有这里能接管；风暴滞留/配置漂移期间跳过——自愈会 spawn resume 子进程）
+      if (!weather.held && !configPaused) orphanHealPass(repoRoot, root, cfg, opts);
       if (pending.length) {
         if (!weather.held && !configPaused) {
           const n = Math.min(pending.length, cap);

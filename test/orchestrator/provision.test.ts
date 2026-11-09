@@ -372,16 +372,21 @@ server.listen(0, '127.0.0.1', () => console.log('PORT:' + server.address().port)
     // mkRepo 各用例自己清理，fakehome 统一惰性——不追杀（os.tmpdir 由系统回收）。
   })
 
-  it('开关开 + 网关在线：spawn 前签发、收尾即吊销（事件 + 网关请求双向对账）', async () => {
+  it('开关开 + 网关在线：spawn 前签发（限额/TTL 按卡生效预算传参）、收尾即吊销（事件 + 网关请求双向对账）', async () => {
     const gw = await startMockGatewayProcess()
     const repo = mkRepo({ extra: { gatewayAdmin: true, gatewayProvision: true } })
     try {
-      submitCard(repo.root, 'prov-e2e')
+      // 显式预算卡：wall 150min → TTL ceil(150/60)+1 = 4h；token 预算 → per-harness 日限额同源
+      const cardFile = path.join(repo.root, 'card-prov-e2e.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'prov-e2e', budget: { max_tokens: 777777, max_wall_minutes: 150 } }))
+      runOrch(repo.root, `submit "${cardFile}"`)
       runOrch(repo.root, 'run prov-e2e --backend mock', envFor(gw.port))
-      // 网关侧：1 签发（确定性 id）+ 1 吊销
+      // 网关侧：1 签发（确定性 id + 卡预算传参）+ 1 吊销
       const reqs = gw.requests()
       expect(provReqs(reqs)).toHaveLength(1)
       expect(provReqs(reqs)[0].body.id).toBe('orch-prov-e2e')
+      expect(provReqs(reqs)[0].body.ttl_minutes).toBe(240) // ceil(150/60)+1 = 4h（TTL 覆盖整个 wall 熔断窗口）
+      expect(provReqs(reqs)[0].body.max_daily_tokens).toBe(777777) // 与卡 token 预算同源——凭据本身也是预算防线
       expect(provReqs(reqs)[0].auth).toBe(true)
       expect(revokeReqs(reqs)).toHaveLength(1)
       expect(revokeReqs(reqs)[0].body).toEqual({ id: 'orch-prov-e2e' })

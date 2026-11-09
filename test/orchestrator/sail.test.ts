@@ -243,6 +243,34 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
     }
   }, 150_000)
 
+  it('specAutoBuild 预授权档（on）：spec 落盘即自动拆卡 gate=L1 进 pending（引水闸兜底，不停盘等人审）', () => {
+    // corePaths 盖住 mock 规格的文件面（docs/**）：拆出的卡被引水闸拦停派发、稳定留
+    // pending——既验证自动拆卡落位，也验证「安全网由引水闸天然兜底，不另造判断」。
+    const repo = mkRepo({ extra: { upstream: { specAutoBuild: { enabled: true } }, corePaths: ['docs/**'] } })
+    try {
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1' })
+      expect(out.stdout).toContain('specAutoBuild')
+      expect(out.stdout).toContain('自动拆卡 2 张进 pending')
+      // 拆出的卡进 pending：gate=L1、type=feature（renderTaskCard 硬编码 type 不变）
+      const pending = [...listCards(queueRoot(repo.root), 'pending')].sort()
+      expect(pending).toEqual(['planner-mock-task-t1', 'planner-mock-task-t2'])
+      for (const id of pending) {
+        const card = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', `${id}.md`), 'utf8')
+        expect(card).toContain('gate: L1')
+        expect(card).toContain('type: feature')
+        expect(card).toContain('spec: planner-mock-task')
+      }
+      // 进度锚与三件套照常落盘
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'progress.json'))).toBe(true)
+      // 航海报告如实区分自动拆卡（与「落盘待人审」分叉）
+      const report = latestReport(repo.root)
+      expect(report).toContain('已自动拆卡进队列')
+      expect(report).not.toContain('已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
   it('执行存量卡：开航前 pending 的卡派发到 awaiting-human，报告收录且基线如实区分', () => {
     const repo = mkRepo()
     try {
