@@ -48,7 +48,7 @@
     "smartFilter": true
   },
   "research": {
-    "model": "glm-5.3-flash"
+    "model": "glm-4.5-air"
   },
   "propose": {
     "feedback": true
