@@ -60,10 +60,12 @@
   },
   "budgetProfiles": {
     "claude-headless": {
-      "max_tokens": 20000000
+      "max_tokens": 20000000,
+      "max_wall_minutes": 150
     },
     "zcode-headless": {
-      "max_tokens": 20000000
+      "max_tokens": 20000000,
+      "max_wall_minutes": 150
     }
   },
   "tiers": {
@@ -82,12 +84,19 @@
     }
   },
   "autopilot": {
-    "enabled": false,
+    "enabled": true,
     "autoSubmitTypes": [
-      "docs"
+      "docs",
+      "bugfix",
+      "refactor"
     ],
     "autoDrainPerCycle": 0,
     "maxProposalsPerCycle": 3
+  },
+  "upstream": {
+    "specAutoBuild": {
+      "enabled": true
+    }
   },
   "autoResume": {
     "enabled": true

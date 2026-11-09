@@ -93,8 +93,11 @@ export function parseTasksDoc(text) {
 /**
  * 渲染单张任务卡。created_at 按任务序递增 n 分钟——drain 同优先级按 created_at
  * 升序调度，「依赖: 任务 N」由此天然先跑被依赖方（不引入显式依赖图，保持简单）。
+ * gate：手动 spec build 拆卡保持 L3（设计人审后的卡合并仍人工）；预授权档
+ * （upstream.specAutoBuild，sailUpstreamPipeline 自动拆卡）传 'L1'——实际合并仍由
+ * classifyChange 对真实改动分级（L2/L3 照样回人工），引水闸天然兜底核心路径。
  */
-export function renderTaskCard(spec, task, total) {
+export function renderTaskCard(spec, task, total, gate = 'L3') {
   const fm = [
     '---',
     `id: ${spec.meta.id}-t${task.n}`,
@@ -107,7 +110,7 @@ export function renderTaskCard(spec, task, total) {
     ...task.files.map((f) => `  - ${f}`),
     'workflows:',
     '  - feature-branch',
-    'gate: L3',
+    `gate: ${gate === 'L1' ? 'L1' : 'L3'}`, // 白名单外值一律回落 L3（宁严勿松）
     '---',
   ];
   const body = [
@@ -173,9 +176,11 @@ export function readProgress(queueRootDir, specId) {
 
 /**
  * 拆卡进 pending/（幂等：同 id 已存在于任何状态目录则跳过）。
+ * opts.gate：'L1' 仅限预授权自动拆卡（upstream.specAutoBuild，调用方 sailUpstreamPipeline）；
+ * 缺省/其他值一律 L3——手动 spec build 的卡合并仍人工。
  * 返回 { created: string[], skipped: string[], warnings: string[] }。
  */
-export function buildSpecCards(repoRoot, queueRootDir, id) {
+export function buildSpecCards(repoRoot, queueRootDir, id, opts = {}) {
   const spec = readSpec(repoRoot, id);
   const tasks = parseTasksDoc(spec.tasks);
   const created = [];
@@ -189,7 +194,7 @@ export function buildSpecCards(repoRoot, queueRootDir, id) {
       continue;
     }
     if (t.files.length === 1 && t.files[0] === '**') warnings.push(`${cardId}: 「文件」行缺失或未解析，files_hint 兜底为 **（独占分区）——建议手改卡收窄`);
-    fs.writeFileSync(cardPath(queueRootDir, 'pending', cardId), renderTaskCard(spec, t, tasks.length));
+    fs.writeFileSync(cardPath(queueRootDir, 'pending', cardId), renderTaskCard(spec, t, tasks.length, opts.gate));
     created.push(cardId);
   }
   writeProgress(queueRootDir, spec, tasks);

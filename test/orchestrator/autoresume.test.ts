@@ -10,10 +10,13 @@ import path from 'node:path'
 import { cardText, mkRepo, readCard, runOrch, eventsOf } from './helpers.js'
 import { ensureQueue, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import {
+  classifyOrphan,
   cooldownPassed,
   isTransientBlocked,
   pickAutoResumeCandidates,
+  pickOrphanResumeCandidates,
   scanBlockedCards,
+  scanRunningCards,
   withAutoResumedAt,
 } from '../../.agents/scripts/orchestrator/autoresume.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
@@ -464,6 +467,238 @@ describe('orchestrator autoresume > drain 集成（mock 后端）', () => {
       expect(run.stdout).toContain('drift 降级期间自动续暂停')
       expect(readCard(repo.root, 'blocked', 'tr3')).toBeTruthy()
       expect(eventsOf(repo.root, 'tr3').map((e) => e.type)).not.toContain('auto_resume')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 孤儿 running 卡自愈（2026-11 长跑自治）：sail/drain 单进程被硬杀后卡挂在 running/
+// ——状态「在跑」而实际无进程，blocked 通道覆盖不到。classifyOrphan / pickOrphanResume-
+// Candidates 纯函数 + drain 接线三分支（transient 自动续 / 非 transient 落 blocked / 活跃卡跳过）。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator autoresume > classifyOrphan 孤儿 running 卡处置归类', () => {
+  it('Path C-orphan：最后 spawn 之后无 settle（进程树被硬杀的典型现场）→ resume', () => {
+    expect(classifyOrphan([ev('task_accepted'), ev('worker_spawned', { pid: 1 })])).toBe('resume')
+    expect(classifyOrphan([ev('task_accepted')])).toBe('resume') // 刚迁 running 就崩：重跑无害
+    expect(classifyOrphan([])).toBe('resume')
+  })
+
+  it('Path A/B 复用：上会话 transient 签名收尾（resume 后再崩、spawn 后无新 settle）→ resume', () => {
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('blocked', { reason: 'HTTP 429 too many requests' }),
+      ev('worker_spawned', { pid: 2 }, '2026-11-01T02:00:00.000+08:00'),
+    ])).toBe('resume')
+  })
+
+  it('熔断护栏：最后 spawn 之后有 circuit_breaker → breaker（熔断卡永不自动续）', () => {
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('worker_retry', { attempt: 1, max: 3 }),
+      ev('circuit_breaker', { reason: 'budget:max_wall_minutes', detail: '40/30 min' }),
+    ])).toBe('breaker')
+    // 窄窗（settle 写完进程即死）：熔断收尾同为 breaker
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('circuit_breaker', { reason: 'watchdog' }),
+      ev('blocked', { reason: 'watchdog' }),
+    ])).toBe('breaker')
+    // 上会话熔断、本会话开桌后崩 → resume（spawn 重新开桌，与 isTransientBlocked 同口径）
+    expect(classifyOrphan([
+      ev('circuit_breaker', { reason: 'budget:max_tokens' }, '2026-10-31T00:00:00.000+08:00'),
+      ev('worker_spawned', { pid: 2 }, '2026-11-01T00:00:00.000+08:00'),
+    ])).toBe('resume')
+  })
+
+  it('stuck：最后会话以 failed / 非签名 settle 收尾（窄窗崩溃）→ 非 transient 落 blocked', () => {
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('failed', { reason: '异常中断：无法定位 CLI 配置' }),
+    ])).toBe('stuck')
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('blocked', { reason: 'worker 自报 stuck' }),
+    ])).toBe('stuck')
+    // settle 在上会话、本会话（最后 spawn）之后无 settle → 崩溃族 resume，不按上会话定性连坐
+    expect(classifyOrphan([
+      ev('worker_spawned', { pid: 1 }),
+      ev('failed', { reason: '异常中断：无法定位 CLI 配置' }),
+      ev('worker_spawned', { pid: 2 }, '2026-11-01T02:00:00.000+08:00'),
+    ])).toBe('resume')
+  })
+})
+
+describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () => {
+  const crashEvents = () => [ev('task_accepted'), ev('worker_spawned', { pid: 1 })]
+
+  it('孤儿 transient 卡入选；locked（活跃卡）无条件跳过；attempts 记 retry 次数', () => {
+    const cards = [
+      { id: 'live', meta: {}, events: crashEvents(), locked: true },
+      { id: 'orph', meta: {}, events: [ev('task_accepted'), ev('worker_spawned', { pid: 1 }), ev('worker_retry', { attempt: 1, max: 3 })] },
+    ]
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([{ id: 'orph', attempts: 1 }])
+  })
+
+  it('非 resume 归类（breaker/stuck）不入候选；冷却与 maxPerRun 与 blocked 通道同款', () => {
+    const cards = [
+      { id: 'bk', meta: {}, events: [ev('worker_spawned'), ev('circuit_breaker', { reason: 'budget:max_tokens' })] },
+      { id: 'st', meta: {}, events: [ev('worker_spawned'), ev('blocked', { reason: 'worker 自报 stuck' })] },
+      { id: 'c1', meta: {}, events: crashEvents() },
+      { id: 'c2', meta: {}, events: crashEvents() },
+      { id: 'c3', meta: {}, events: crashEvents() },
+      { id: 'cool', meta: { auto_resumed_at: '2026-11-02T00:00:00+08:00' }, events: crashEvents() }, // 12h 前自动续过
+    ]
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 2 }).map((c) => c.id)).toEqual(['c1', 'c2'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['c1', 'c2', 'c3'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5, cooldownMs: 6 * HOUR }).map((c) => c.id)).toEqual(['c1', 'c2', 'c3', 'cool'])
+  })
+
+  it('id 稳定排序（孤儿无 settle 时间可排，确定性优先）', () => {
+    const cards = [
+      { id: 'z', meta: {}, events: crashEvents() },
+      { id: 'a', meta: {}, events: crashEvents() },
+    ]
+    expect(pickOrphanResumeCandidates(cards, { now: NOW }).map((c) => c.id)).toEqual(['a', 'z'])
+  })
+})
+
+describe('orchestrator autoresume > scanRunningCards 扫描（读不了跳过并计入 unreadable）', () => {
+  it('running 卡带 meta/events 备齐；损坏卡进 unreadable；total 为全量', () => {
+    const repo = mkRepo()
+    try {
+      const root = queueRoot(repo.root)
+      ensureQueue(root)
+      fs.writeFileSync(path.join(root, 'running', 'alive.md'), cardText({ id: 'alive' }))
+      fs.writeFileSync(path.join(root, 'running', 'broken.md'), '不是合法任务卡')
+      const { candidates, unreadable, total } = scanRunningCards(repo.root, root)
+      expect(total).toBe(2)
+      expect(unreadable).toEqual(['broken'])
+      expect(candidates).toHaveLength(1)
+      expect(candidates[0].id).toBe('alive')
+      expect(candidates[0].meta.id).toBe('alive')
+    } finally {
+      repo.cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 孤儿自愈 drain 集成（三分支）：与 blocked 通道同沙箱（临时仓库 + mock 后端）。
+// ---------------------------------------------------------------------------
+
+/** 造一张挂在 running/ 的卡 + 手写 events.jsonl（崩溃现场）。 */
+function seedRunning(repo: string, id: string, events: Array<Record<string, unknown>>) {
+  ensureQueue(queueRoot(repo))
+  fs.writeFileSync(path.join(repo, '.agents', 'orchestrator', 'queue', 'running', `${id}.md`), cardText({ id }))
+  const dir = path.join(repo, '.agents', 'orchestrator', 'logs', id)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'events.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n')
+}
+
+/** 活锁：pid 用测试进程自身 + 新鲜心跳——taskLockLooksLive 判活成立（进程真实存在）。 */
+function seedLiveLock(repo: string, id: string) {
+  const p = path.join(repo, '.agents', 'orchestrator', `.run-${id}.lock`)
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  fs.writeFileSync(p, JSON.stringify({ pid: process.pid, task: id, cmd: 'test', acquired_at: new Date().toISOString(), beat: Date.now() }))
+}
+
+describe('orchestrator autoresume > 孤儿自愈 drain 集成（三分支）', () => {
+  it('transient 孤儿自动续到 awaiting-human；非 transient 与熔断孤儿落 blocked；活跃卡跳过', () => {
+    const repo = mkRepo()
+    try {
+      // ① transient 孤儿：上会话 429 收尾 → resume 再崩（最后 spawn 之后无 settle）
+      seedRunning(repo.root, 'orph1', [
+        { ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 100 },
+        { ts: '2026-11-01T01:10:00.000+08:00', seq: 2, type: 'blocked', reason: 'HTTP 429 too many requests' },
+        { ts: '2026-11-01T02:00:00.000+08:00', seq: 3, type: 'worker_spawned', backend: 'mock', pid: 101 },
+      ])
+      // ② 非 transient 孤儿：最后会话 failed 收尾（窄窗）
+      seedRunning(repo.root, 'orph2', [
+        { ts: '2026-11-01T03:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 102 },
+        { ts: '2026-11-01T03:30:00.000+08:00', seq: 2, type: 'failed', reason: '异常中断：无法定位 CLI 配置' },
+      ])
+      // ②' 熔断孤儿：永不自动续，只做状态归位
+      seedRunning(repo.root, 'orph3', [
+        { ts: '2026-11-01T04:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 103 },
+        { ts: '2026-11-01T04:30:00.000+08:00', seq: 2, type: 'circuit_breaker', reason: 'budget:max_wall_minutes', detail: '40/30 min' },
+      ])
+      // ③ 活跃卡：任务锁心跳新鲜（pid=测试进程），无条件跳过
+      seedRunning(repo.root, 'alive1', [
+        { ts: '2026-11-01T05:00:00.000+08:00', seq: 1, type: 'task_accepted', backend: 'mock' },
+        { ts: '2026-11-01T05:01:00.000+08:00', seq: 2, type: 'worker_spawned', backend: 'mock', pid: process.pid },
+      ])
+      seedLiveLock(repo.root, 'alive1')
+
+      const run = runOrch(repo.root, 'drain --backend mock')
+      expect(run.stdout).toContain('孤儿自愈')
+      expect(run.stdout).toContain('自动续孤儿卡 orph1')
+      expect(run.stdout).toContain('孤儿卡 orph2 落 blocked')
+      expect(run.stdout).toContain('孤儿卡 orph3 落 blocked')
+
+      // ① transient：走既有 resume 闭环 → awaiting-human；auto_resume 事件带 source 区分
+      expect(readCard(repo.root, 'awaiting-human', 'orph1')).toBeTruthy()
+      expect(readCard(repo.root, 'awaiting-human', 'orph1')).toContain('auto_resumed_at:')
+      const orph1Events = eventsOf(repo.root, 'orph1')
+      const auto = orph1Events.find((e) => e.type === 'auto_resume')
+      expect(auto?.card).toBe('orph1')
+      expect(auto?.source).toBe('orphan_running')
+      const resumed = orph1Events.find((e) => e.type === 'resumed')
+      expect(resumed?.by).toBe('auto')
+      // ② 非 transient / 熔断：failTaskToBlocked 同款 failed 事件 + 迁移，零 auto_resume
+      expect(readCard(repo.root, 'blocked', 'orph2')).toBeTruthy()
+      expect(readCard(repo.root, 'blocked', 'orph3')).toBeTruthy()
+      // 孤儿自愈的 failed 事件追加在 fixture 事件之后：取最后一条断言
+      const lastFailReason = (id: string) => {
+        const fails = eventsOf(repo.root, id).filter((e) => e.type === 'failed')
+        return String(fails[fails.length - 1]?.reason)
+      }
+      expect(lastFailReason('orph2')).toContain('孤儿 running 卡自愈')
+      expect(lastFailReason('orph3')).toContain('熔断卡永不自动续')
+      expect(eventsOf(repo.root, 'orph2').map((e) => e.type)).not.toContain('auto_resume')
+      expect(eventsOf(repo.root, 'orph3').map((e) => e.type)).not.toContain('auto_resume')
+      // ③ 活跃卡原地不动（闭环进程还在驱动，接管会双写 worktree）
+      expect(readCard(repo.root, 'running', 'alive1')).toBeTruthy()
+      expect(eventsOf(repo.root, 'alive1').map((e) => e.type)).not.toContain('auto_resume')
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('autoResume.enabled=false 完全不扫：孤儿 running 卡原地不动、零事件', () => {
+    const repo = mkRepo({ extra: { autoResume: { enabled: false } } })
+    try {
+      seedRunning(repo.root, 'orph4', [
+        { ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'task_accepted', backend: 'mock' },
+        { ts: '2026-11-01T01:01:00.000+08:00', seq: 2, type: 'worker_spawned', backend: 'mock', pid: 104 },
+      ])
+      const run = runOrch(repo.root, 'drain --backend mock')
+      expect(run.stdout).not.toContain('孤儿自愈')
+      expect(readCard(repo.root, 'running', 'orph4')).toBeTruthy()
+      expect(eventsOf(repo.root, 'orph4').map((e) => e.type)).not.toContain('auto_resume')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('drift 降级期间孤儿自愈暂停（降级 = 全人工，状态归位也等人工）', () => {
+    const repo = mkRepo()
+    try {
+      seedRunning(repo.root, 'orph5', [
+        { ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'task_accepted', backend: 'mock' },
+        { ts: '2026-11-01T01:01:00.000+08:00', seq: 2, type: 'worker_spawned', backend: 'mock', pid: 105 },
+      ])
+      fs.mkdirSync(path.join(repo.root, '.agents', 'orchestrator'), { recursive: true })
+      fs.writeFileSync(
+        path.join(repo.root, '.agents', 'orchestrator', 'degraded.json'),
+        JSON.stringify({ degraded_at: '2026-11-01T00:00:00.000Z', reason: '测试降级' }),
+      )
+      const run = runOrch(repo.root, 'drain --backend mock')
+      expect(run.stdout).not.toContain('孤儿自愈')
+      expect(readCard(repo.root, 'running', 'orph5')).toBeTruthy()
+      expect(eventsOf(repo.root, 'orph5').map((e) => e.type)).not.toContain('auto_resume')
     } finally {
       repo.cleanup()
     }

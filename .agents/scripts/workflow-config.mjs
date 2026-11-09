@@ -136,7 +136,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify', 'research', 'freeSail',
+  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
@@ -228,7 +228,34 @@ export function loadWorkflowConfig(repoRoot) {
     // freeSail 自由航行配置（注意：此前无 resolve 条目，workflow.json 里的 freeSail 键
     // 被规整丢弃——canSailSubmit 的白名单收窄从未生效过，2026-11-08 L1 排查时发现）
     freeSail: resolveFreeSail(raw.freeSail),
+    // 上游管线预授权档（B3.5 specAutoBuild）：缺省关 = spec 落盘即停等人审（行为不变）
+    upstream: resolveUpstream(raw.upstream),
   };
+}
+
+/** 上游管线预授权配置：{ specAutoBuild?: { enabled?: boolean } }。spec 落盘后自动拆卡
+ *  （gate=L1、type=feature；手动 spec build 保持 gate=L3 不变）。缺省 enabled=false =
+ *  行为与历史一致。非法值回落缺省并 console.warn 告警（与各 resolveXxx 同风格）。 */
+function resolveUpstream(raw) {
+  const DEFAULTS = { specAutoBuild: { enabled: false } };
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[workflow-config] upstream 配置非法，已忽略：${JSON.stringify(raw)}（应为 { specAutoBuild?: { enabled?: boolean } }）`);
+    return DEFAULTS;
+  }
+  const out = { specAutoBuild: { enabled: false } };
+  const sab = raw.specAutoBuild;
+  if (sab !== undefined) {
+    if (sab && typeof sab === 'object' && !Array.isArray(sab)) {
+      if (sab.enabled !== undefined) {
+        if (typeof sab.enabled === 'boolean') out.specAutoBuild.enabled = sab.enabled;
+        else console.warn(`[workflow-config] upstream.specAutoBuild.enabled ${JSON.stringify(sab.enabled)} 不合法（应为 boolean）——按 false 处理`);
+      }
+    } else {
+      console.warn(`[workflow-config] upstream.specAutoBuild ${JSON.stringify(sab)} 不合法（应为 { enabled?: boolean }）——按 false 处理`);
+    }
+  }
+  return out;
 }
 
 /** research 调研配置：{ model?: string }——模型名经 ModelDock 网关按名路由。 */
