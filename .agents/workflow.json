@@ -56,6 +56,7 @@
     "model": "glm-5.3-flash"
   },
   "watchdog": {
+    "mode": "actuate",
     "model": "glm-4.5-air"
   },
   "budgetProfiles": {

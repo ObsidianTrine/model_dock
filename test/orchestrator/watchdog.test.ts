@@ -169,6 +169,20 @@ describe('watchdog > createWatchdogState 纯逻辑状态机', () => {
     expect(s.onTurn()).toBeNull() // 熔断后不再触发
   })
 
+  it('actuate 单次 suspect 不动作：返回 suspect、机器未禁用，下一次检查照常触发', () => {
+    const s = createWatchdogState({ mode: 'actuate', everyTurns: 2 })
+    expect(s.report(false, '单次 suspect')).toBe('suspect')
+    expect(s.snapshot().disabled).toBe(false) // 未熔断：killTree/落 blocked 只在连续 2 次后
+    expect(s.onTurn()).toBeNull() // turn 1
+    expect(s.onTurn()).toBe('check') // turn 2：单次 suspect 后看门狗仍在执法
+  })
+
+  it('observe 连续 suspect 永不熔断（执法上线后 observe 行为完全不变：只记事件）', () => {
+    const s = createWatchdogState({ mode: 'observe' })
+    for (let i = 0; i < 10; i++) expect(s.report(false, `suspect #${i}`)).toBe('suspect')
+    expect(s.snapshot().disabled).toBe(false) // report 在 observe 档永不置 disabled
+  })
+
   it('错误静默：recordError 前 3 次为 true，之后 false', () => {
     const s = createWatchdogState()
     expect(s.recordError()).toBe(true)
