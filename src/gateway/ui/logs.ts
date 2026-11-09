@@ -137,23 +137,24 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
           var errTxt = pick('err') || ''
           return '<tr><td class="muted mono">' + esc((l.ts || '').slice(11, 19)) + '</td>' +
             '<td>' + iconInline('gear', 12) + ' ' + esc(opTxt) + '</td>' +
-            '<td>' + esc(pick('target') || '-') + '</td>' +
-            '<td class="muted" title="' + esc(detTxt) + '">' + esc(detTxt) + '</td>' +
+            '<td><div>' + esc(pick('target') || '-') + '</div></td>' +
+            '<td class="muted" title="' + esc(detTxt) + '"><div>' + esc(detTxt) + '</div></td>' +
             '<td class="' + (ok ? 'st-ok' : 'st-err') + '" title="' + esc(ok ? t('成功', 'ok') : t('失败', 'failed')) + '">' + iconInline(ok ? 'check' : 'close', 13) + '</td>' +
             '<td>-</td>' +
-            '<td class="muted" title="' + esc(errTxt) + '">' + esc(errTxt.slice(0, 60)) + '</td>' +
+            '<td class="muted" title="' + esc(errTxt) + '"><div>' + esc(errTxt.slice(0, 60)) + '</div></td>' +
             '<td>' + copyBtn + '</td></tr>'
         }
         // 错误列两行化：第一行=改发链摘要（如 bigmodel 跳过(协议端点缺失) → coding-plan 404）或根因短码，
-        // 第二行=可操作建议（hint）；原始 JSON 收进 title 悬浮与复制内容。旧条目无新字段回退原样截断
+        // 第二行=可操作建议（hint，title 挂自身——悬浮可见被截断的建议）；原始 err 收进 title 悬浮与复制内容。
+        // 各分支一律包 div：CSS 对 td:nth-child(7)>div 做定宽单行省略（last-child 已是复制列，吃不到截断规则）
         var chain = logChainText(l, false)
         var reqErr = pick('err') || ''
         var cell
         if (chain) {
           cell = '<div title="' + esc(reqErr) + '">' + esc(chain) + '</div>'
-          if (l.hint) cell += '<div class="muted" title="' + esc(reqErr) + '">' + esc(l.hint) + '</div>'
+          if (l.hint) cell += '<div class="lhint muted" title="' + esc(l.hint) + '">' + esc(l.hint) + '</div>'
         } else {
-          cell = '<span title="' + esc(reqErr) + '">' + esc(reqErr.slice(0, 60)) + '</span>'
+          cell = '<div class="muted" title="' + esc(reqErr) + '">' + esc(reqErr.slice(0, 60)) + '</div>'
         }
         return '<tr><td class="muted mono">' + esc((l.ts || '').slice(11, 19)) + '</td>' +
           '<td>' + esc(l.harness) + '</td>' +
@@ -161,7 +162,7 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
           '<td class="mono">' + esc(l.model || '-') + '</td>' +
           '<td style="color:' + (bad ? 'var(--err)' : 'var(--ok)') + '">' + esc(l.status == null ? '-' : l.status) + '</td>' +
           '<td>' + (l.ms == null ? '-' : l.ms + 'ms') + '</td>' +
-          '<td class="muted">' + cell + '</td>' +
+          '<td>' + cell + '</td>' +
           '<td>' + copyBtn + '</td></tr>'
       }).join('')
       var html = '<thead><tr><th>' + t('时间', 'Time') + '</th><th>' + t('客户端 / 操作', 'Client / op') + '</th><th>' + t('服务 / 目标', 'Service / target') + '</th><th>' + t('模型 / 详情', 'Model / detail') + '</th><th>' + t('状态', 'Status') + '</th><th>' + t('耗时', 'Took') + '</th><th>' + t('错误', 'Error') + '</th><th>' + t('操作', 'Actions') + '</th></tr></thead>' +
