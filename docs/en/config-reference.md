@@ -52,6 +52,7 @@ One block per upstream provider; `<id>` is a name you choose (lowercase letters,
 | `priority` | `number` | no | `0` | Sorting weight for auto-routing candidates; higher wins. Only effective when "program picks the primary" is on. |
 | `endpoints` | `{ anthropic?, openai?, responses? }` | no | none | Per-protocol base URL overrides: for vendors serving anthropic / openai / responses at different addresses; protocols without an entry fall back to `base_url`. |
 | `max_concurrency` | `number` | no | `0` (unlimited) | Concurrency cap for this service (queued at the gateway): when parallel agent workers trigger upstream 429 rate limits, set it to what the upstream tolerates — excess requests queue at the gateway instead of hammering the upstream; see `gateway.queue_wait_ms` for the queue wait. |
+| `model_fallback` | `Record<string, string>` | no | none (model-level failover disabled) | Model-level failover map (within the same provider): upstream model ID → backup model ID. Triggered only by quota-exhaustion errors (HTTP 402, or 429 with a quota-flavored body) after the provider fallback chain is exhausted, retrying on the backup model of the same service; unmapped models never trigger (quality-sensitive roles like reviewers stay protected by not being mapped). Write paths (CLI/console) enforce a price gate — both models' input/output unit prices must be within 5%; hand-edited config.toml only gets a shape check. |
 
 Example:
 
@@ -68,6 +69,7 @@ enabled = true
 priority = 10
 endpoints.openai = "https://api.acme.com/openai"
 max_concurrency = 2
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }
 ```
 
 ## 3. Model metadata (models)

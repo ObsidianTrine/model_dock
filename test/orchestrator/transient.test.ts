@@ -2,26 +2,35 @@
 // 须命中（可退避重试自愈）；既有 429/网络签名不回归；确定性错误不误报。
 // B6 扩展：结构化信号优先——网关日志窗口（429/5xx/quota）命中即 transient（source=gateway），
 // 无网关数据/未命中/读取失败 fail-open 落回 stderr 正则（source=regex）。
+// A1 扩展（2026-11）：cause 精读——proto_endpoint_missing/unauthorized 判定性失败、
+// quota 建议换 provider、key_cooldown/key_pool_empty 带 keypool 重试窗口；cause 优先于状态码。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { AddressInfo } from 'node:net'
 import {
   classifyWorkerCrash,
+  classifyWorkerCrashFromDisk,
+  clampRetryWindowMs,
   harnessMatches,
   isCrashStatus,
   isTransientWorkerFailure,
+  keypoolMinRemainingMs,
   readGatewayWindowEntries,
+  RETRY_WINDOW_MAX_MS,
+  RETRY_WINDOW_MIN_MS,
   TRANSIENT_RE,
 } from '../../.agents/scripts/orchestrator/transient.mjs'
 
 const pad = (n: number, w = 2) => String(n).padStart(w, '0')
 const localDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 
-/** 网关日志条目（LogEntry 子集：分类只认 ts/status/harness）。 */
-function gwEntry(status: number, ts: string, harness = 'zcode') {
-  return { ts, status, harness, profile: 'glm', model: 'glm-5.3-flash' }
+/** 网关日志条目（LogEntry 子集：分类只认 ts/status/harness；cause 路径另认 cause/hint/tokenHint）。 */
+function gwEntry(status: number, ts: string, harness = 'zcode', extra: Record<string, unknown> = {}) {
+  return { ts, status, harness, profile: 'glm', model: 'glm-5.3-flash', ...extra }
 }
 
 describe('orchestrator transient > 瞬时故障签名', () => {
@@ -182,6 +191,254 @@ describe('orchestrator transient > readGatewayWindowEntries（落盘读取，fai
       const entries = readGatewayWindowEntries(dir, { startMs: now - 60_000, endMs: now })
       expect(entries).toEqual([])
     } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A1（2026-11）：cause 精读——状态码只说「失败」，cause 说「为什么失败」
+// ---------------------------------------------------------------------------
+
+describe('orchestrator transient > cause 精读（A1）', () => {
+  const WIN = { startMs: Date.parse('2026-11-08T10:00:00+08:00'), endMs: Date.parse('2026-11-08T10:05:00+08:00') }
+  const mid = '2026-11-08T10:02:30.000+08:00'
+
+  it('proto_endpoint_missing → 判定性失败（非 transient）：reason 带 cause + hint 可操作报错', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(404, mid, 'zcode', { cause: 'proto_endpoint_missing', hint: '模型未配置 anthropic 端点' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.source).toBe('gateway')
+    expect(r.decisive).toBe(true)
+    expect(r.cause).toBe('proto_endpoint_missing')
+    expect(r.hits).toBe(1)
+    expect(r.hint).toBe('模型未配置 anthropic 端点')
+    expect(r.reason).toContain('proto_endpoint_missing')
+    expect(r.reason).toContain('模型未配置 anthropic 端点')
+  })
+
+  it('cause 优先于状态码：502 + proto_endpoint_missing → decisive（不因 5xx 误判 transient）', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(502, mid, 'zcode', { cause: 'proto_endpoint_missing' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.decisive).toBe(true)
+    // hint 缺席（旧网关）→ 兜底建议也要可操作
+    expect(r.reason).toContain('换 provider 或补端点')
+  })
+
+  it('决定性 cause 压过同窗的 transient 状态码命中（429 与 proto_endpoint_missing 并存 → decisive）', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(429, mid), gwEntry(404, mid, 'zcode', { cause: 'proto_endpoint_missing' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.decisive).toBe(true)
+  })
+
+  it('unauthorized → 判定性失败：tokenHint 点名归因（含 backend）', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(401, mid, 'zcode', { cause: 'unauthorized', tokenHint: 'sk-deadbe', hint: 'token 未注册' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.decisive).toBe(true)
+    expect(r.cause).toBe('unauthorized')
+    expect(r.tokenHint).toBe('sk-deadbe')
+    expect(r.reason).toContain('unauthorized')
+    expect(r.reason).toContain('sk-deadbe')
+    expect(r.reason).toContain('zcode-headless')
+  })
+
+  it('quota → transient + switchProvider 信号', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(402, mid, 'zcode', { cause: 'quota' }), gwEntry(402, mid, 'zcode', { cause: 'quota' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(true)
+    expect(r.source).toBe('gateway')
+    expect(r.cause).toBe('quota')
+    expect(r.switchProvider).toBe(true)
+    expect(r.decisive).toBeUndefined()
+    expect(r.reason).toContain('quota×2')
+  })
+
+  it('key_cooldown/key_pool_empty + keypoolRemainingMs → retryMs（钳制 [1s, 10min]）；缺省无 retryMs', () => {
+    const entries = [gwEntry(429, mid, 'zcode', { cause: 'key_cooldown' })]
+    const base = { output: '', stderrTail: '', entries, window: WIN, backend: 'zcode-headless' }
+    expect(classifyWorkerCrash({ ...base, keypoolRemainingMs: 45_000 }).retryMs).toBe(45_000)
+    expect(classifyWorkerCrash({ ...base, keypoolRemainingMs: 5 }).retryMs).toBe(RETRY_WINDOW_MIN_MS)
+    expect(classifyWorkerCrash({ ...base, keypoolRemainingMs: 9e9 }).retryMs).toBe(RETRY_WINDOW_MAX_MS)
+    // 拿不到 keypool（null）→ 无 retryMs（调用方走既有退避），仍 transient
+    const noKp = classifyWorkerCrash(base)
+    expect(noKp.transient).toBe(true)
+    expect(noKp.retryMs).toBeUndefined()
+    // key_pool_empty 同样携带
+    expect(classifyWorkerCrash({ ...base, entries: [gwEntry(429, mid, 'zcode', { cause: 'key_pool_empty' })], keypoolRemainingMs: 30_000 }).retryMs).toBe(30_000)
+  })
+
+  it('quota 与无 cause 状态码命中并存 → reason 拼「另有」段，hits 只计 cause 条目', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(402, mid, 'zcode', { cause: 'quota' }), gwEntry(429, mid), gwEntry(503, mid)],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(true)
+    expect(r.cause).toBe('quota')
+    expect(r.hits).toBe(1)
+    expect(r.reason).toContain('429×1, 503×1')
+  })
+
+  it('非参与 cause（connect_failed 等）维持状态码路径：不产 cause 字段', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(500, mid, 'zcode', { cause: 'connect_failed' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '500×1' })
+  })
+
+  it('成功条目（status<400）即便带 cause 也不采信（防御：cause 只认失败条目）', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(200, mid, 'zcode', { cause: 'proto_endpoint_missing' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r).toEqual({ transient: false, source: 'regex' })
+  })
+
+  it('clampRetryWindowMs 边界；keypoolMinRemainingMs 从 metrics json 提取全池最小余量', () => {
+    expect(clampRetryWindowMs(0)).toBe(RETRY_WINDOW_MIN_MS)
+    expect(clampRetryWindowMs(-5)).toBe(RETRY_WINDOW_MIN_MS)
+    expect(clampRetryWindowMs(1234.6)).toBe(1235)
+    expect(keypoolMinRemainingMs({ keypool: { up: { total: 2, healthy: 0, cooldown: [{ index: 0, remaining_ms: 90_000 }, { index: 1, remaining_ms: 30_000 }] }, p2: { cooldown: [] } } })).toBe(30_000)
+    expect(keypoolMinRemainingMs({ keypool: { up: { cooldown: [] } } })).toBeNull()
+    expect(keypoolMinRemainingMs({})).toBeNull()
+    expect(keypoolMinRemainingMs(null)).toBeNull()
+  })
+})
+
+describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线，metrics keypool）', () => {
+  function writeLog(dir: string, entry: Record<string, unknown>) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(path.join(dir, `gateway-${String(entry.ts).slice(0, 10)}.jsonl`), JSON.stringify(entry) + '\n')
+  }
+
+  it('无 cfg → 不问 metrics：key_cooldown 照常 transient、无 retryMs（既有退避兜底）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-'))
+    try {
+      const mid = new Date(Date.now() - 30_000).toISOString()
+      writeLog(dir, { ts: mid, status: 429, harness: 'zcode', profile: 'p', model: 'm', cause: 'key_cooldown' })
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: null,
+        output: '',
+        stderrTail: '',
+        window: { startMs: Date.now() - 60_000, endMs: Date.now() },
+        backend: 'zcode-headless',
+      })
+      expect(r.transient).toBe(true)
+      expect(r.cause).toBe('key_cooldown')
+      expect(r.retryMs).toBeUndefined()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('cfg + admin 可得 → metrics keypool 余量推导 retryMs（最早可用 key）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-kp-'))
+    let hits = 0
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        if (req.url !== '/_modeldock/metrics') {
+          res.writeHead(404)
+          res.end('{}')
+          return
+        }
+        hits += 1
+        if (req.headers['x-modeldock-admin'] !== 'mock-admin') {
+          res.writeHead(401)
+          res.end('{}')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ keypool: { up: { total: 2, healthy: 0, cooldown: [{ index: 0, remaining_ms: 90_000 }, { index: 1, remaining_ms: 45_000 }] } } }))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    process.env.ORCH_GATEWAY_BASE = `http://127.0.0.1:${port}`
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+    try {
+      const mid = new Date(Date.now() - 30_000).toISOString()
+      writeLog(dir, { ts: mid, status: 429, harness: 'zcode', profile: 'p', model: 'm', cause: 'key_cooldown' })
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: { startMs: Date.now() - 60_000, endMs: Date.now() },
+        backend: 'zcode-headless',
+      })
+      expect(r.transient).toBe(true)
+      expect(r.cause).toBe('key_cooldown')
+      expect(r.retryMs).toBe(45_000)
+      expect(hits).toBe(1)
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
+      server.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('无 key 池 cause → 零网络（env 指向死端口也不发请求，状态码路径照常）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-plain-'))
+    process.env.ORCH_GATEWAY_BASE = 'http://127.0.0.1:1'
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'x'
+    try {
+      const mid = new Date(Date.now() - 30_000).toISOString()
+      writeLog(dir, { ts: mid, status: 429, harness: 'zcode', profile: 'p', model: 'm' })
+      const t0 = Date.now()
+      const r = await classifyWorkerCrashFromDisk({
+        gwDir: dir,
+        cfg: { gatewayAdmin: true },
+        output: '',
+        stderrTail: '',
+        window: { startMs: Date.now() - 60_000, endMs: Date.now() },
+        backend: 'zcode-headless',
+      })
+      expect(r).toEqual({ transient: true, source: 'gateway', hits: 1, reason: '429×1' })
+      expect(Date.now() - t0).toBeLessThan(5_000) // 零网络：死端口超时不应发生
+    } finally {
+      delete process.env.ORCH_GATEWAY_BASE
+      delete process.env.ORCH_GATEWAY_ADMIN_TOKEN
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })

@@ -18,6 +18,7 @@ import {
   fmtUsd,
   getPricingTable,
   measureFuel,
+  measureFuelBatch,
 } from '../../.agents/scripts/orchestrator/cost.mjs'
 import { reconcileTask } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { buildSailReport, buildSailSummary } from '../../.agents/scripts/orchestrator/sail.mjs'
@@ -179,7 +180,7 @@ describe('reconcileTask pairs + attachCost（成本附加）', () => {
         { ts: iso(now - 400_000), harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, ms: 30, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
         { ts: iso(now - 300_000), harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, ms: 30, usage: { input_tokens: 500_000, output_tokens: 50_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
       ])
-      const r = reconcileTask(repo.root, 'task-a', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
+      const r = await reconcileTask(repo.root, 'task-a', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.skipped).toBe(false)
       expect(r.pairs).toHaveLength(1)
       expect(r.pairs[0]).toMatchObject({ provider: 'up', model: 'm1', requests: 2, input: 1_500_000, output: 150_000 })
@@ -292,6 +293,196 @@ describe('measureFuel（窗口实测 + 逐卡拆账）', () => {
     } finally {
       h.restore()
       repo.cleanup()
+    }
+  })
+})
+
+describe('measureFuelBatch /usage 聚合优先（A3）', () => {
+  /** usage 聚合 mock（可按 status 造失败；可选附带 pricing-lookup 服务回落链验证）。 */
+  function mockUsageAndPricing({ usageStatus = 200, usagePayload, prices }: { usageStatus?: number; usagePayload?: unknown; prices?: Record<string, unknown> }) {
+    let usageHits = 0
+    let pricingHits = 0
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        const path = req.url?.split('?')[0] ?? ''
+        if (path === '/_modeldock/usage') {
+          usageHits += 1
+          if (req.headers['x-modeldock-admin'] !== 'mock-admin') {
+            res.writeHead(401)
+            res.end('{}')
+            return
+          }
+          res.writeHead(usageStatus, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(usagePayload ?? {}))
+          return
+        }
+        if (path === '/_modeldock/pricing-lookup') {
+          pricingHits += 1
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, currency: 'usd', unit: 'per_million_tokens', prices: prices ?? {}, missing: [] }))
+          return
+        }
+        res.writeHead(404)
+        res.end('{}')
+      })
+    })
+    return new Promise<{ url: string; usageHits: () => number; pricingHits: () => number; close: () => Promise<void> }>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const port = (server.address() as AddressInfo).port
+        resolve({
+          url: `http://127.0.0.1:${port}`,
+          usageHits: () => usageHits,
+          pricingHits: () => pricingHits,
+          close: () => new Promise<void>((done) => server.close(() => done())),
+        })
+      })
+    })
+  }
+
+  function setEnv(url?: string) {
+    if (url) process.env.ORCH_GATEWAY_BASE = url
+    else delete process.env.ORCH_GATEWAY_BASE
+    process.env.ORCH_GATEWAY_ADMIN_TOKEN = 'mock-admin'
+  }
+
+  const USAGE_OK = {
+    ok: true,
+    usage: {
+      requests: 3,
+      ok: 2,
+      failed: 1,
+      by_status: { '429': 1 },
+      by_provider: { up: 3 },
+      by_model: { m1: 3 },
+      latency: { p50: 10, p95: 20, p99: 30 },
+      tokens: { input: 1_000_000, output: 100_000, cache_read: 0, cache_creation: 0 },
+      cost: { total: 1.5, by_provider: { up: 1.5 }, by_model: { m1: 1.5 } },
+      unpriced_models: null,
+    },
+  }
+
+  it('admin 可得 → usd/requests 来自网关侧聚合（source=gateway-usage，本侧零价目请求）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({ usagePayload: USAGE_OK, prices: { 'up/m1': { input: 1, output: 2 } } })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const batch = await measureFuelBatch(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, [
+        { key: 'w1', start: now - 600_000, end: now },
+      ])
+      expect(batch.source).toBe('gateway-usage')
+      const r = batch.results.get('w1')
+      expect(r).toMatchObject({ measured: true, viaGateway: true, requests: 2, usd: 1.5, unpriced: [] })
+      expect(m.pricingHits()).toBe(0) // 价目不需本侧再查——cost 随聚合端点一并返回
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('响应带 billable_partial=true / 缺 billable 字段也照走聚合（成本不消费 billable，刻意不加闸）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({
+      usagePayload: { ok: true, usage: { ...USAGE_OK.usage, billable_tokens: 7, billable_partial: true } },
+    })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const batch = await measureFuelBatch(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, [
+        { key: 'wp', start: now - 600_000, end: now },
+      ])
+      // partial 只说明可计费求和不完整，不影响 cost 口径；老网关（响应缺 billable）同款放行
+      expect(batch.source).toBe('gateway-usage')
+      expect(batch.results.get('wp')).toMatchObject({ measured: true, viaGateway: true, usd: 1.5 })
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('窗口内零请求（ok=0）→ measured:false + 零请求 reason（与文件路径同文案）', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({ usagePayload: { ok: true, usage: { ...USAGE_OK, ok: 0, requests: 0 } } })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const batch = await measureFuelBatch(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, [
+        { key: 'w0', start: now - 60_000, end: now },
+      ])
+      const r = batch.results.get('w0')
+      expect(r?.measured).toBe(false)
+      expect(r?.viaGateway).toBe(false)
+      expect(String((r as { reason?: string })?.reason)).toContain('零请求')
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('端点失败（usage 500）→ 整批落回文件扫描：pricing-lookup 补价，成本来自本地计算', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({ usageStatus: 500, prices: { 'up/m1': { input: 1, output: 2 } } })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const iso = (t: number) => new Date(t).toISOString()
+      writeGatewayLog(h.home, [
+        { ts: iso(now - 300_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+      ])
+      const batch = await measureFuelBatch(repo.root, { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' }, [
+        { key: 'wf', start: now - 600_000, end: now },
+      ])
+      expect(batch.source).not.toBe('gateway-usage') // 文件扫描路径
+      expect(m.usageHits()).toBeGreaterThan(0) // 端点确实被试过
+      const r = batch.results.get('wf')
+      expect(r).toMatchObject({ measured: true, viaGateway: true, requests: 1 })
+      expect(r?.usd).toBeCloseTo(1.2, 6)
+      expect(m.pricingHits()).toBe(1)
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
+    }
+  })
+
+  it('显式注入价目表（opts.table）→ 跳过端点（零请求），走文件扫描 + 注入价', async () => {
+    const repo = mkRepo({ extra: { gatewayLogDir: '~/.modeldock/logs', gatewayAdmin: true } })
+    const h = fakeHome()
+    const m = await mockUsageAndPricing({ usagePayload: USAGE_OK })
+    setEnv(m.url)
+    try {
+      const now = Date.now()
+      const iso = (t: number) => new Date(t).toISOString()
+      writeGatewayLog(h.home, [
+        { ts: iso(now - 300_000), provider: 'up', model: 'm1', status: 200, usage: { input_tokens: 500_000, output_tokens: 50_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+      ])
+      const batch = await measureFuelBatch(
+        repo.root,
+        { gatewayAdmin: true, gatewayLogDir: '~/.modeldock/logs' },
+        [{ key: 'wt', start: now - 600_000, end: now }],
+        { table: new Map([['up/m1', { input: 1, output: 2 }]]) },
+      )
+      expect(m.usageHits()).toBe(0) // 注入语义：价目调用方说了算
+      expect(batch.source).toBe('injected')
+      expect(batch.results.get('wt')).toMatchObject({ measured: true, usd: 0.6 })
+    } finally {
+      setEnv(undefined)
+      await m.close()
+      repo.cleanup()
+      h.restore()
     }
   })
 })

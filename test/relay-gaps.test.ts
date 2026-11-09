@@ -378,3 +378,111 @@ describe('relay · 错误体翻译与解压读面', () => {
     expect(await readUpstreamErrorText({}, { text: async () => 'plain-error' })).toBe('plain-error')
   })
 })
+
+// ---------------------------------------------------------------------------
+// 模型级容灾（model_fallback M1）relay-gaps：熔断感知预改写（已熔断模型跳过上游往返）与
+// 链尾合成跳数安全帽。真实入口 + 本地 mock 上游按请求体 model 分流，不 mock 模块。
+describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_HOPS 安全帽', () => {
+  const QUOTA_BODY = JSON.stringify({ error: { message: 'Insufficient Balance (request_id: 1)' } })
+
+  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
+  async function startModelMock(
+    route: (model: string) => { status: number; body: string }
+  ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
+    const seen: string[] = []
+    const s = http.createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        let model = ''
+        try {
+          model = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { model?: string }).model ?? ''
+        } catch {
+          /* 非 JSON 体按空模型处理 */
+        }
+        seen.push(model)
+        const out = route(model)
+        res.writeHead(out.status, { 'content-type': 'application/json' })
+        res.end(out.body)
+      })
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    return {
+      url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`,
+      seen,
+      close: () => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) }),
+    }
+  }
+
+  const countOf = (arr: string[], m: string) => arr.filter((x) => x === m).length
+
+  function fwd(body: Buffer): Record<string, unknown> {
+    return { method: 'POST', path: ROUTED, headers: {}, body, idleTimeoutMs: 5000, retries: 0 }
+  }
+
+  it('模型熔断（60s 窗 3 次 quota）后第 4 个请求预改写直落备用模型：主模型路径零上游调用；TTL 过期恢复走主模型', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock((model) =>
+      model === 'mB' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      // 前三个请求：mA 402 → 链尾合成 mB → 200，每次给 mA 记一笔模型级 quota（第 3 笔熔断 15min）
+      for (let i = 0; i < 3; i++) {
+        const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+        expect(r.status).toBe(200)
+        expect(r.reason).toBe('fallback_to:mB')
+      }
+      expect(countOf(mock.seen, 'mA')).toBe(3)
+      expect(rt.modelHealth?.get('pa\u0000mA')?.meltdown_until).toBeDefined()
+      // 第 4 个请求：mA 已熔断 → forwardToUpstream 预改写直发 mB，主模型路径零调用、预改写透明无 marks
+      const r4 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r4.status).toBe(200)
+      expect(r4.modelAfter).toBe('mB')
+      expect(r4.reason).toBeUndefined()
+      expect(countOf(mock.seen, 'mA')).toBe(3)
+      expect(countOf(mock.seen, 'mB')).toBe(4)
+      // 手动把熔断 TTL 拨到过去：第 5 个请求恢复试回主模型（402 → 合成 → 200）
+      const mh = rt.modelHealth!.get('pa\u0000mA')!
+      mh.meltdown_until = Date.now() - 1
+      const r5 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r5.status).toBe(200)
+      expect(r5.reason).toBe('fallback_to:mB')
+      expect(countOf(mock.seen, 'mA')).toBe(4)
+      expect(countOf(mock.seen, 'mB')).toBe(5)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('MAX_MODEL_FALLBACK_HOPS=4：单请求最多合成 4 跳，达帽维持原样回传（mF 不再合成）', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 402, body: QUOTA_BODY }))
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({
+        name: 'pa',
+        base_url: mock.url,
+        key_ref: 'file:pa',
+        model_fallback: { mA: 'mB', mB: 'mC', mC: 'mD', mD: 'mE', mE: 'mF' }, // 5 级映射，安全帽截在 4 跳
+      })
+      const rt = buildRt({ pa })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const r = await forwardWithFailover(rt, baseOn(rt.config as Config, 'pa'), fwd(body) as never)
+      expect(r.status).toBe(402)
+      expect(r.cause).toBe('quota')
+      expect(r.reason).toBe('fallback_to:mB,mC,mD,mE')
+      expect(r.attempts).toHaveLength(5)
+      expect(mock.seen).toEqual(['mA', 'mB', 'mC', 'mD', 'mE'])
+      expect(mock.seen).not.toContain('mF')
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+})

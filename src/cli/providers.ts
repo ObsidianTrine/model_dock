@@ -9,6 +9,8 @@ import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { endpointRisks } from '../gateway/relay.js'
+import { resolveModelFallback } from '../ops/service.js'
+import { lookupPrice } from '../gateway/pricing.js'
 import { exitWithError, exitWithThrown } from './shared.js'
 import { displayPath, modelCatalogCachePath, secretsPath } from '../util/paths.js'
 
@@ -398,4 +400,116 @@ export async function cmdModelSet(
     models[model] = meta
   })
   console.log(c.green(t('✓ {p} / {m} 元数据已更新', '✓ {p} / {m} metadata updated', { p: providerId, m: model })))
+}
+
+// 模型级容灾（model_fallback）：同服务内 主模型 → 备用模型 的额度耗尽改发映射
+
+/** 校验上下文构造：目录成员与价格闸门都取该服务实时状态（models 目录 + pricing.json 覆盖，
+ *  models.dev 目录兜底）。挂在 mutateConfig 读改写内调用——校验对象是套用变更后的最终映射。 */
+function modelFallbackCtx(
+  providerId: string,
+  models: Record<string, import('../config/types.js').ModelMeta> | undefined
+): import('../ops/service.js').ModelFallbackCtx {
+  return {
+    models,
+    lookupPrice: (m: string) => lookupPrice(providerId, m),
+  }
+}
+
+/** 触发条件说明（成功确认与 --list 尾注共用一句口径，types.ts model_fallback 注释同源） */
+function fallbackTriggerNote(): string {
+  return t(
+    '触发条件：仅当上游返回额度耗尽类错误（HTTP 402 或带额度特征的 429）且该服务的候选链走完后，才改发备用模型重试；未映射的模型永不触发',
+    'Triggered only on quota-exhaustion errors (HTTP 402 or a quota-flavored 429) after the service failover chain is exhausted; unmapped models never trigger it'
+  )
+}
+
+const FALLBACK_USAGE = t(
+  '用法：modeldock model fallback <providerId> <fromModel> <toModel>（配置）；--rm <fromModel>（删除）；--list（列出）',
+  'Usage: modeldock model fallback <providerId> <fromModel> <toModel> (set); --rm <fromModel> (remove); --list (list)'
+)
+
+export async function cmdModelFallback(
+  providerId: string,
+  fromModel: string | undefined,
+  toModel: string | undefined,
+  opts: { rm?: string; list?: boolean }
+): Promise<void> {
+  const cfg = await loadCfg()
+  if (!cfg.providers[providerId]) {
+    exitWithError(
+      t('provider「{id}」不存在', 'provider "{id}" does not exist', { id: providerId }),
+      t('modeldock provider list 查看服务 id', 'Run modeldock provider list to check service ids')
+    )
+  }
+  if (opts.list) {
+    if (opts.rm !== undefined || fromModel !== undefined || toModel !== undefined) {
+      exitWithError(t('参数冲突：--list 不能与其他参数同用', 'Conflicting arguments: --list cannot be combined with other arguments'), FALLBACK_USAGE)
+    }
+    const map = cfg.providers[providerId].model_fallback ?? {}
+    const entries = Object.entries(map)
+    if (entries.length === 0) {
+      console.log(c.gray(t('该服务暂无模型容灾映射（未映射的模型永不触发）', 'No model failover mappings for this service (unmapped models never trigger)')))
+      console.log(c.gray(t('配置一条：modeldock model fallback {p} <fromModel> <toModel>', 'To configure one: modeldock model fallback {p} <fromModel> <toModel>', { p: providerId })))
+      return
+    }
+    for (const [from, to] of entries) console.log(`${c.bold(from)} → ${to}`)
+    console.log(c.gray(fallbackTriggerNote()))
+    return
+  }
+  if (opts.rm !== undefined) {
+    if (fromModel !== undefined || toModel !== undefined) {
+      exitWithError(t('参数冲突：--rm 只接受一个模型 ID', 'Conflicting arguments: --rm takes exactly one model ID'), FALLBACK_USAGE)
+    }
+    const from = opts.rm.trim()
+    if (!from) exitWithError(t('要删除的模型 ID 不能为空', 'The model ID to remove cannot be empty'), FALLBACK_USAGE)
+    let had = false
+    let emptied = false
+    try {
+      await mutateConfig((c) => {
+        const p = c.providers[providerId]
+        if (!p) throw new Error(t('provider「{id}」不存在', 'provider "{id}" does not exist', { id: providerId }))
+        const next = { ...(p.model_fallback ?? {}) }
+        had = from in next
+        delete next[from]
+        // 删空后整字段移除；剩余映射整体复检（价格闸门/查环与配置口径一致，手编的坏映射也在此拦下）
+        const resolved = resolveModelFallback(next, providerId, modelFallbackCtx(providerId, p.models))
+        if (resolved) p.model_fallback = resolved
+        else delete p.model_fallback
+        emptied = !resolved
+      })
+    } catch (e) {
+      exitWithThrown(e)
+    }
+    if (!had) {
+      console.log(c.yellow(t('该服务本没有「{from}」的映射（无改动）', 'This service has no mapping for "{from}" (nothing changed)', { from })))
+      return
+    }
+    if (emptied) console.log(c.green(t('✓ 已删除模型容灾映射：{from}（该服务的模型级容灾已关闭）', '✓ Removed model failover mapping: {from} (model-level failover is now off for this service)', { from })))
+    else console.log(c.green(t('✓ 已删除模型容灾映射：{from}', '✓ Removed model failover mapping: {from}', { from })))
+    return
+  }
+  if (!fromModel || !toModel) {
+    exitWithError(t('缺少模型参数：配置一条映射需要 <fromModel> 和 <toModel>', 'Missing model arguments: setting a mapping needs both <fromModel> and <toModel>'), FALLBACK_USAGE)
+  }
+  const from = fromModel.trim()
+  const to = toModel.trim()
+  if (!from || !to) {
+    exitWithError(t('模型 ID 不能为空', 'Model IDs cannot be empty'), FALLBACK_USAGE)
+  }
+  try {
+    await mutateConfig((c) => {
+      const p = c.providers[providerId]
+      if (!p) throw new Error(t('provider「{id}」不存在', 'provider "{id}" does not exist', { id: providerId }))
+      const next = { ...(p.model_fallback ?? {}), [from]: to }
+      // 对套用变更后的最终映射整体跑校验（价格闸门双向 ≤5%、自映射/环、目录成员），过闸才落盘
+      const resolved = resolveModelFallback(next, providerId, modelFallbackCtx(providerId, p.models))
+      if (resolved) p.model_fallback = resolved
+      else delete p.model_fallback
+    })
+  } catch (e) {
+    exitWithThrown(e)
+  }
+  console.log(c.green(t('✓ 已配置模型容灾：{from} → {to}', '✓ Model failover configured: {from} → {to}', { from, to })))
+  console.log(c.gray(fallbackTriggerNote()))
 }

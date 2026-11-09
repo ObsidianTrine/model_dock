@@ -27,7 +27,16 @@
 //                   缺省 = 对账关闭（吃狗粮是走网关的项目才有的能力）
 //   gatewayAdmin    网关权威 tier 校验开关（布尔，缺省 false）：true 才允许编排器用 admin 面
 //                   （读 gateway.json 的 port+admin_token 或 ORCH_GATEWAY_* env）调
-//                   /_modeldock/tier-validate 对账 token→profile→tier；未开 = advisory only
+//                   /_modeldock/tier-validate 对账 token→profile→tier；未开 = advisory only。
+//                   也是 gatewayProvision 的前置（admin 面 W 全家共享同一授权面）
+//   gatewayProvision 每任务一次性凭据开关（布尔，缺省 false = 现状不变）：true 且 gatewayAdmin
+//                   已开时，run 的 spawn 前向网关 /_modeldock/harness/provision 签发临时
+//                   harness（TTL ≤24h、不落盘），worker/reviewer 的 env patch 只换
+//                   ANTHROPIC_AUTH_TOKEN（base_url 仍由 ModelDock attach 的客户端配置决定）；
+//                   预算实测账按该 harnessId 精确取数（无同 harness 兄弟流量污染）。
+//                   所有失败形态 fail-open 回落 tier token 并留 harness_provision_failed
+//                   事件；终态/收尾/接管路径 best-effort revoke（失败只告警，TTL 兜底）。
+//                   见 orchestrator/provision.mjs 与 orchestrator.md B16
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
@@ -122,7 +131,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // loadWorkflowConfig 直读
   'version', 'baseBranch', 'baseBranches', 'testCmd', 'testCmdL0', 'buildCmd', 'lintCmd', 'typecheckCmd',
   'packageManager', 'protectedPorts', 'corePaths', 'releasePaths', 'reviewNotes', 'uiCheckCmd',
-  'envPrefix', 'projectName', 'listenCommandNames', 'scheduleId', 'gatewayLogDir', 'gatewayAdmin',
+  'envPrefix', 'projectName', 'listenCommandNames', 'scheduleId', 'gatewayLogDir', 'gatewayAdmin', 'gatewayProvision',
   'driftThreshold', 'reviewMaxTurns', 'gateTimeoutMinutes', 'retryWaitBaseMs', 'fastlaneAllowed',
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
@@ -179,8 +188,8 @@ export function loadWorkflowConfig(repoRoot) {
     releasePaths: strArr(raw.releasePaths),
     reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
     uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
-    worker: resolveEngine(raw.worker),
-    review: resolveEngine(raw.review),
+    worker: resolveEngine(raw.worker, 'worker'),
+    review: resolveEngine(raw.review, 'review'),
     tiers: resolveTiers(raw.tiers),
     budgetProfiles: resolveBudgetProfiles(raw.budgetProfiles),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
@@ -191,6 +200,9 @@ export function loadWorkflowConfig(repoRoot) {
     // 网关权威 tier 校验开关（admin 面）：显式 true 才允许编排器读 gateway.json / 调
     // /_modeldock/tier-validate——可移植工具链不得默认读用户 home 下的 ModelDock 状态
     gatewayAdmin: raw.gatewayAdmin === true,
+    // 每任务一次性凭据开关（ephemeral harness，provision.mjs）：显式 true 才签发/吊销；
+    // 生效前提是 gatewayAdmin 也为 true（admin 面解析同一套）。缺省 false = 行为与历史一致
+    gatewayProvision: raw.gatewayProvision === true,
     // drift 阈值可调不可关（design doc §10.5）：0 / false / 超界等非法值拒绝生效（回落缺省 0.2）
     // 且显式告警——键缺失不告警（沿用缺省），显式写错必须让人看见（2026-11 B11 常量收口）
     driftThreshold: resolveDriftThreshold(raw.driftThreshold),
@@ -700,15 +712,20 @@ export function expandHome(p) {
   return s;
 }
 
-/** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎」的声明位。
- *  backend 必须非空字符串；model 可选（仅 claude 系 CLI 支持 --model，zcode 模型
- *  跟随 ZCode 默认）。CLI 的 --worker-×× 与 --review-×× 单次覆盖。形状不对返回
- *  null（缺省：执行沿用 resolveBackendName 链、审查走自动异构）。 */
-function resolveEngine(raw) {
+/** 引擎默认配置 { backend, model? }：仓库级「执行/审查各用什么引擎与模型」的声明位。
+ *  backend 可选（缺省 = 执行沿用 resolveBackendName 链、审查走自动异构）；model 可选
+ *  （仅 claude 系 CLI 支持 --model，zcode 模型跟随 ZCode 默认）。CLI 的 --worker-×× 与
+ *  --review-×× 单次覆盖。形状不对返回 null（既有缺省行为）。model 与 backend 互不连坐：
+ *  只配 model 不配 backend 也生效（2026-11-08 review.model 解耦收口——此前 backend 缺省
+ *  即整节丢弃，配好的模型被静默吞掉，与 0eb29bb research.model 被规整丢弃同型）。 */
+function resolveEngine(raw, name = 'engine') {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const backend = typeof raw.backend === 'string' ? raw.backend.trim() : '';
-  if (!backend) return null;
+  const backend = typeof raw.backend === 'string' && raw.backend.trim() ? raw.backend.trim() : null;
   const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : null;
+  if (raw.model !== undefined && model === null) {
+    console.warn(`[workflow-config] ${name}.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  if (!backend && !model) return null; // 空节维持 null（与历史一致，零行为变化）
   return { backend, model };
 }
 

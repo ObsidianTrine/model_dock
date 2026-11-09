@@ -5,6 +5,7 @@ import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type OrderedCandidate, type ResolvedTarget } from './state.js'
+import { isModelMeltdown, recordModelOutcome } from './state/routing.js'
 import type { LogAttempt } from './state/types.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { dispatcherFor } from './proxy.js'
@@ -423,6 +424,9 @@ function spliceModelValue(body: Buffer, qStart: number, qEnd: number, final: str
 }
 
 /** 请求体中的模型重写：aliases 精确/通配 → default_model 兜底；未命中透传。
+ *  mfGate（可选，模型级容灾 M1）：resolveModelFinal 算出 final 后、注入判定前咨询——返回备用
+ *  模型名则替换 final 再改写（熔断感知预改写，闸门见 forwardToUpstream）；返回 undefined 保持
+ *  final。仅 ROUTED_PATH_RE 改写路径会被咨询（非对话端点在函数头已原样返回）。
  *  三层路径（改写判定的全部输入就是模型名字符串，无需完整文档）：
  *  ① 不需改写（final === wire）：返回入参同一个 Buffer 引用（body === body），零解析零分配。
  *  ② 确需改写且浅扫描已锁定顶层 model 字符串值的字节区间（qStart ≥ 0）、新名仅含 JSON 安全
@@ -435,16 +439,19 @@ export function rewriteModel(
   target: ResolvedTarget,
   body: Buffer,
   path: string,
-  prescan?: TopModelScan | null
+  prescan?: TopModelScan | null,
+  mfGate?: (final: string) => string | undefined
 ): { body: Buffer; modelAfter?: string } {
   if (body.length === 0 || !ROUTED_PATH_RE.test(path.split('?')[0])) return { body }
+  const gated = (final: string | undefined): string | undefined =>
+    final !== undefined && mfGate ? (mfGate(final) ?? final) : final
   // prescan：调用方对同一 body 已有的浅扫描结果直接复用（failover 链整链共享一次全量体扫描，
   // 见 ForwardOptions.bodyScan）；undefined = 未提供照旧自扫，null = 已扫但拿不准 → 直接走全量
   // 解析路径。扫描是纯函数，同 Buffer 同结果，复用与自扫逐字节等价。
   const scan = prescan === undefined ? scanTopLevelModel(body) : prescan
   if (scan !== null) {
     // 快路径：全部改写判定只用顶层 model 值字符串完成，不再全量 parse
-    const final = resolveModelFinal(target, scan.value)
+    const final = gated(resolveModelFinal(target, scan.value))
     let modelAfter = scan.value
     if (final !== undefined && final !== scan.value) {
       if (scan.qStart >= 0 && SAFE_MODEL_NAME_RE.test(final)) {
@@ -464,7 +471,7 @@ export function rewriteModel(
   }
   if (!json || typeof json !== 'object') return { body }
   const wire = typeof json.model === 'string' ? json.model : undefined
-  const final = resolveModelFinal(target, wire)
+  const final = gated(resolveModelFinal(target, wire))
   let modelAfter = wire
   if (final !== undefined && final !== wire) return injectModel(body, final) ?? { body }
   if (final !== undefined) modelAfter = final
@@ -511,7 +518,22 @@ export async function forwardToUpstream(
     throw e
   }
 
-  const rewritten = rewriteModel(target, opts.body, opts.path, opts.bodyScan)
+  // 模型级容灾（M1）熔断感知预改写：主模型已熔断（60s 窗 3 次 quota → 熔断 15min）时直接换
+  // model_fallback 备用模型发送，跳过注定 402 的上游往返（LiteLLM cooldown 语义）；15min TTL
+  // 过期后 isModelMeltdown 自然转 false，流量试回主模型。备用模型自身也在熔断期则不动——
+  // 让它照常撞一次上游并按既有语义切换/回传，不静默吞掉。仅 provider 配了 model_fallback 才
+  // 构造闸门（未配置零开销）；非对话端点 rewriteModel 函数头原样返回，闸门自然不被咨询。
+  const mfMap = provider.model_fallback
+  const mfGate = mfMap && Object.keys(mfMap).length > 0
+    ? (final: string): string | undefined => {
+        const fb = mfMap[final]
+        if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
+        if (!isModelMeltdown(rt, providerId, final)) return undefined // 主模型未熔断：不动
+        if (isModelMeltdown(rt, providerId, fb)) return undefined // 备用也在熔断：不去撞
+        return fb
+      }
+    : undefined
+  const rewritten = rewriteModel(target, opts.body, opts.path, opts.bodyScan, mfGate)
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
@@ -731,6 +753,11 @@ function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
 }
 
+/** 模型级容灾（model_fallback 域）单请求可合成的模型跳数安全帽：映射链在配置期已拒环，
+ *  但为防超长映射链把一次请求放大成上游打爆，每请求最多合成 4 跳（同 provider 内换模型），
+ *  达帽后维持原样回传（后续请求因模型熔断预改写会直接跳过已熔断段，实际链长自然收敛）。 */
+const MAX_MODEL_FALLBACK_HOPS = 4
+
 /** 上游 429 Retry-After 退避重试的等待上限：交互请求不宜长等——上游要 5s 以上才让重试时，
  *  原地干等不如维持既有 failover 语义换候选（或把 429 交还客户端自行退避） */
 const RETRY_AFTER_MAX_WAIT_MS = 5_000
@@ -873,6 +900,10 @@ export async function forwardWithFailover(
   // 并发闸排队超时被跳过的候选与做了 429 退避重试的候选（reason 留痕，同 replayed_from 风格）
   const queueFull: string[] = []
   const retried429: string[] = []
+  // 模型级容灾（M1）：本请求内已合成的备用模型序列（reason marks 的 fallback_to:）与跳数
+  // （安全帽 MAX_MODEL_FALLBACK_HOPS，见常量注）
+  const fallbackTo: string[] = []
+  let mfHops = 0
   // 因模型目录不含请求模型被剔除的自动候选（reason 留痕，同 replayed_from 风格）
   const modelMismatch: string[] = []
   // 逐候选 attempt 记录（日志 attempts 列）：真实转发记 status+ms，被跳过记 note 短码——
@@ -947,7 +978,19 @@ export async function forwardWithFailover(
       let bodyText: string | undefined
       if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
+      // 本次 attempt 实际发送的模型（rewriteModel 产物；非对话端点 / 体无 model 时 undefined）：
+      // 模型级熔断记账与链尾映射查找的 key
+      const sentModel = up.modelAfter
+      const mfMap = rt.config.providers[c.providerId]?.model_fallback
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
+      else if (quota && mfMap && Object.keys(mfMap).length > 0 && sentModel !== undefined) {
+        // 模型级容灾记账分流（M1）：quota 事件在 (provider, model) 粒度记账（recordModelOutcome），
+        // provider 级熔断窗口不累计（modelScoped）——否则 provider 熔丝会把同服务备用模型一起封死
+        // （功能自我否定）；海况是 provider 级上游健康视图，经 recordOutcome 内部 recordSeaOutcome
+        // 照旧记账，402 风暴对风暴闸保持可见。connect/429/5xx 与未配映射路径行为不变。
+        recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms, modelScoped: true })
+        recordModelOutcome(rt, c.providerId, sentModel, { ok: false, cls: 'quota', ms })
+      }
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
       else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
       else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
@@ -961,8 +1004,32 @@ export async function forwardWithFailover(
         if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: quota ? 'quota' : `http_${up.status}`, ms })
         continue
       }
+      // 模型级容灾（M1 链尾合成）：到这里还带 quota 的必是链尾候选（链中段已在上方分支切走）——
+      // 同 provider 内按 model_fallback 映射换备用模型再试一跳。合成候选 push 进 cands（本次迭代的
+      // 候选数组：无剔除时即 picked.ordered 同一引用，有剔除时为过滤副本，push picked.ordered 进不了循环）；
+      // 备用模型再 402 时按其键继续查映射（配置期已拒环）。
+      // 备用模型已熔断 / 达跳数安全帽 / 该模型无映射 → 不合成，402 维持原样回传（现状行为）。
+      if (quota && sentModel !== undefined && mfMap) {
+        const fbModel = mfMap[sentModel]
+        if (fbModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
+          cands.push({
+            target: { ...c.target, modelOverride: fbModel }, // 全新对象：绝不改共享候选引用
+            providerId: c.providerId,
+            isPrimary: false,
+            modelOverride: fbModel,
+            modelFallback: true,
+          })
+          mfHops++
+          if (!fallbackTo.includes(fbModel)) fallbackTo.push(fbModel)
+          slot?.release() // 同 provider 下一轮取新槽：先释放旧槽（与切 provider 候选同规，防槽位泄漏）
+          slot = undefined
+          if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: 'model_fallback', model: fbModel, ms })
+          continue
+        }
+      }
       const marks: string[] = []
-      if (!c.isPrimary) marks.push(`failover_to:${c.providerId}`)
+      if (!c.isPrimary && !c.modelFallback) marks.push(`failover_to:${c.providerId}`) // modelFallback 候选 provider 没换，不打 failover_to
+      if (fallbackTo.length) marks.push(`fallback_to:${fallbackTo.join(',')}`)
       if (queueFull.length) marks.push(`queue_full:${queueFull.join(',')}`)
       if (retried429.length) marks.push(`retried_429:${retried429.join(',')}`)
       if (modelMismatch.length) marks.push(`model_mismatch:${modelMismatch.join(',')}`)

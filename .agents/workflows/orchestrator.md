@@ -217,7 +217,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 ### A4. 后端与 tier（执行/审查各用什么引擎与模型）
 
 - **后端**：`--backend mock|claude-headless|zcode-headless`。缺省沿用上次会话；mock 只测闭环本身。**本仓库默认 `worker.backend: claude-headless`（2026-11-03 船东定：全档位换 claude-code CLI——zcode 免费船可靠性不足；模型仍 glm-5.3-flash 经网关）**——claude CLI 经 `~/.claude/settings.json` 指向本机 ModelDock 网关（127.0.0.1:8687）供油（`modeldock test claude-code` 验连通）。zcode-headless 仍可用（`--worker-backend zcode-headless` 显式点名须批准；ORCH_ZCODE_CLI 指向 zcode.cjs；prompt 走 argv 超 30000 字符快速失败；headless 无 `--max-turns`，wall-clock/token 熔断直接杀进程树），修复 TUI `/model` 后可点回。claude 侧对等的 `ORCH_CLAUDE_CLI` 仅覆盖可用性探测/诊断定位（.cjs/.mjs/.js 用 node 直跑；worker 拉起仍走 PATH claude，不随它改道）。**引擎切换人工闸门**：最终引擎 ≠ workflow.json `worker.backend` 即拒绝启动（resume 沿用也不豁免），须 `--approve-backend-switch` 或 `ORCH_APPROVE_BACKEND_SWITCH=1`——切换引擎=切换计费方，必须过人（2026-10-29 夜跑静默换引擎烧穿账单的事故防线）。
-- **异构审查**：执行与审查是两个独立会话。审查引擎解析顺序：`--review-backend` 显式 > workflow.json `review.backend` > 上次 `review_spawned` 事件（retry/resume 不换审查引擎）> **自动异构**（自动选另一个可用的真实引擎，如 claude 干活 / zcode 审查；mock 永不异构）> 回落同源（记 `review_backend_fallback`）。**去相关的关键是引擎异源——只拆会话不换引擎仍有共同盲区**。
+- **异构审查**：执行与审查是两个独立会话。审查引擎解析顺序：`--review-backend` 显式 > workflow.json `review.backend` > 上次 `review_spawned` 事件（retry/resume 不换审查引擎）> **自动异构**（自动选另一个可用的真实引擎，如 claude 干活 / zcode 审查；mock 永不异构）> 回落同源（记 `review_backend_fallback`）。**去相关的关键是引擎异源——只拆会话不换引擎仍有共同盲区**。**审查模型分源（2026-11-08 收口）**：workflow.json `review.model`（执行侧对应 `worker.model`）给审查会话配独立上游模型——引擎同源时至少换脑子（模型异源去相关；值走 ModelDock 网关别名重写，编排器原样透传不校验）。模型解析顺序：`--review-model` 显式 > tier.reviewModel > `review.model` > 不传（跟随引擎默认；未配时 `review_spawned` 事件与决策留底不带 model 字段，消费者兼容）。model 仅 claude 系生效（zcode 跟随用户 ZCode 默认）。引擎 + 模型双异源才是完整互审。
 - **tier 车钟档位（前进1-4，接口键 ahead-1..4）**：按航程难度选服务与模型——
   | 档位 | 接口键 | 适用 | tokenEnv |
   |---|---|---|---|
@@ -315,6 +315,7 @@ TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub
 - **投机重探**：每周期检查 blocked 卡——worker 异常结束 + 瞬时故障签名且从未重探过的，一次性有痕 resume（`speculative_resume` 事件）；熔断卡与 worker 自报 stuck 永不重探（「永不静默重试」红线不变）。
 - **风暴闸（weather hold）**：瞭望位先看天——每次派发前无状态统计最近 `windowMinutes` 分钟（缺省 60）各任务 `worker_retry` 合计，达 `threshold`（缺省 3）即停止派发（drain/nightly --auto/watch 通用）：日志「风暴滞留」+ webhook 通知 + fleet 级事件 `weather_hold`（`logs/fleet.jsonl`，跨任务调度层留痕）。可选**上游海况**子键 `"upstream": {"threshold": 5, "windowMinutes": 60, "source": "metrics"}`：**metrics 数据面**（2026-11-04 起缺省）优先消费网关 `/_modeldock/metrics` 的权威海况——`sea_state.storm` 直通滞留 + 60 分钟窗限流/额度类请求（429+quota）真实计数达阈值同样滞留（网关先于 worker 看到上游限流，触发时点名为「上游风暴」；阈值 ≤5 可保证网关判风暴时计数闸必触发，因网关 60m 风暴规则最低 6 次 429）；admin 不可达/端点失败自动落回**网关日志扫描**（`gatewayLogDir`，须已配置；429/402 计数，fail-open——观测失败绝不阻断派发）。`source: "log"` 显式降级为仅日志扫描（不发起 metrics 探测）。workflow.json 可选键 `"weatherHold": {"enabled": true, "threshold": 3, "windowMinutes": 60, "upstream": {...}}`（`enabled` 缺省 true，显式 false = 关闭），**未配 = 关闭**（行为与历史版本一致）；窗口滑过自动恢复（不落 hold 标记文件），瞬时重试退避基值可经 `ORCH_RETRY_WAIT_MS` 注入（缺省 60s×attempt）。
 - 与 drain/nightly 共用调度器锁：watch 在跑时手动 drain 提示退出而非并发。
+- **与模型级容灾的交互（有意取舍，2026-11-08）**：上游服务配置了 `model_fallback` 时，额度类上游错误（402 / 429 quota）被网关在同服务内吸收改发，worker 不再看到 402/quota cause——风暴闸对这类风暴的灵敏度随之下降，这是特性本身的目的（吸收而非扩散），不是漏报。编排器零代码改动；需要分辨「额度耗尽但已被吸收」时看网关用量面（`/_modeldock/usage` 的 `tokens_by_model` 按模型分桶，备用模型的桶出现即说明改发已发生）。
 
 ### B6. 弃船演习（drill）
 
@@ -434,6 +435,16 @@ drafts/ 提案此前只进不出（16 张积压实证，其中 ≥3 张已被 me
 - 修复卡 id `fix-<原名>`（如 `scan-ci-414aba6c` → `fix-scan-ci-414aba6c`），正文引用原卡路径、`incident.md` 调查包与失败摘要（最后一条 failed/blocked 事件的 reason）；`files_hint`/type/priority/gate 继承原卡。**它是普通任务卡，照走既有全部门禁**（引水闸/L2L3 人审不绕过）。
 - 防循环双保险：① 修复卡 id 无 `scan-` 前缀，自身 failed 不再繁殖新卡；② 同名修复卡在**任一队列状态**已存在即跳过（merged/failed 也算——scan 卡永驻 failed/，按状态白名单去重会跨 drain 打环）。
 - 事件留痕：原卡日志记 `scan_autofix { fix, reason }`。关闭：`"scanAutoFix": { "enabled": false }`（恢复旧行为）。
+
+### B16. 每任务一次性凭据（gatewayProvision，ephemeral harness）
+
+worker/reviewer 的凭据此前长期复用 tier token（env 注入，源头是长期 harness）。开启 `"gatewayProvision": true`（平铺键，缺省 false = 现状不变；前置 `gatewayAdmin: true`——admin 面同一授权域）后，run 在 spawn 前向网关 `/_modeldock/harness/provision` 签发**任务专属临时 harness**（TTL ≤24h 硬顶、不落盘、token 明文只在签发响应出现一次；id 确定性 `orch-<taskId>`，被占用自动降级为网关随机 id）：
+
+- **注入口径**：env patch 只换 `ANTHROPIC_AUTH_TOKEN`（复用 tierEnvPatch 同形通道；claude-headless 的 settings.env + 子进程 env 双通道、zcode-headless 的 env 透传照旧，后者「CLI 是否认 env」的 no-op 风险同前）。**不注 base_url**——接入目标仍由 ModelDock attach 写好的客户端配置文件决定。zcode 不认 tier 的既有选船规则不变。
+- **fail-open**：所有失败形态（admin 未配置/网关不可达/超时 ≤3s/非 2xx/响应缺字段）回落既有 tier token 路径，行为与未开启完全一致；每类失败留 `harness_provision_failed` 事件（含原因），绝不阻断派发。
+- **实测账更准**：签发成功时预算实测轮询（B12 配合）按该 harnessId 精确取数——专属凭据没有同 harness 兄弟流量，基线污染消失；签发失败/未开启回落 tier token 解析的 harness（基线法照旧）。
+- **吊销时机（best-effort，失败只告警不重试，漏网由 TTL 兜底）**：① 接管路径——run 启动时发现上次 run 签发未吊销的凭据（events.jsonl 查 `harness_provisioned`/`harness_revoked` 对账）先吊销再签新的；② 终态落位（blocked/failed 走 exitRun、merged/awaiting-human 走 finally）进程退出前吊销——awaiting-human 落位后无 worker 流量，一并吊销，approve/retry 的新 run 会重新签发；kill-tree/熔断终归收敛到这两条出口。
+- **事件**：`harness_provisioned { harness_id, expires_at }`、`harness_revoked { harness_id, ok, existed, trigger: takeover|terminal|run_exit }`、`harness_provision_failed { reason }`。
 
 ## C. 观测与对账详解
 

@@ -119,6 +119,7 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     seaErrors: new Map(),
     modelProbe: { results: new Map(), inflight: new Set() },
     keyPool: { cooldown: new Map(), rr: new Map() },
+    modelHealth: new Map(),
   }
 }
 
@@ -158,6 +159,15 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   }
   for (const id of rt.modelProbe?.results.keys() ?? []) {
     if (!rt.config.providers[id]) rt.modelProbe?.results.delete(id)
+  }
+  // 模型粒度熔断运行态（model_fallback 域）同口径清理：provider 已删，或其 model_fallback 已
+  // 不含该模型键（映射被移除 → 该键的熔断记账失去语义）时清掉；幸存键跨热加载保留
+  for (const key of rt.modelHealth?.keys() ?? []) {
+    const sep = key.indexOf('\u0000')
+    const pid = sep === -1 ? key : key.slice(0, sep)
+    const model = sep === -1 ? '' : key.slice(sep + 1)
+    const mf = rt.config.providers[pid]?.model_fallback
+    if (!rt.config.providers[pid] || !mf || !Object.hasOwn(mf, model)) rt.modelHealth?.delete(key)
   }
   // key 池运行态（失效冷却/轮转游标）全清：keys 配置可能已被改（换 key / 增删条目），
   // 按索引记账的冷却对新 key 不成立——人工换 key 后立即恢复轮转，无须等满 15min 冷却。

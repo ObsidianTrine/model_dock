@@ -20,6 +20,7 @@ import {
 import type { EventEntry, LogEntry } from '../src/gateway/state.js'
 import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
 import { appendLineErrorCount, drainAppendStreams } from '../src/util/fsx.js'
+import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -298,11 +299,56 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       expect(u.tokens.output).toBe(210)
       expect(u.tokens.cache_read).toBe(900)
       expect(u.window.first).toBeTruthy()
+      // billable 新字段（fixture 的 usage 均为旧格式、缺 billable_tokens 数字）：
+      // 求和为可得部分（0），partial=true 标记不可信完整——既有字段口径逐字节不变由上方断言证
+      expect(u.billable_tokens).toBe(0)
+      expect(u.billable_partial).toBe(true)
 
       // harness 精确过滤：滤掉 claude-code 一条
       const f = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&harness=zcode`, ADMIN)).body)
       expect(f.usage.requests).toBe(4)
       expect(f.filter).toEqual({ harness: 'zcode' })
+    } finally {
+      t.close()
+    }
+  })
+
+  it('usage billable 聚合：新条目求和 / 旧格式混入 partial=true / 无 usage 窗口 0/false', async () => {
+    const t = await setup()
+    try {
+      const now = new Date()
+      const today = localIsoTs(now).slice(0, 10)
+      const entry = (over: Partial<LogEntry>): LogEntry => ({
+        ts: localIsoTs(now),
+        harness: 'zcode',
+        profile: 'p',
+        provider: 'up',
+        model: 'glm-4.7',
+        path: '/v1/messages',
+        ...over,
+      })
+      // 全新条目：billable 已在条目上按协议形态算好（剔除缓存读），端点只求和不重算
+      logRequest(t.rt, entry({ status: 200, ms: 100, usage: { input_tokens: 1000, output_tokens: 200, cache_read_tokens: 90000, cache_creation_tokens: 500, billable_tokens: 3500 } }))
+      logRequest(t.rt, entry({ status: 200, ms: 100, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 110 } }))
+      await drainAppendStreams()
+      const full = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}`, ADMIN)).body)
+      expect(full.usage.billable_tokens).toBe(3610)
+      expect(full.usage.billable_partial).toBe(false)
+
+      // 混入旧格式条目（usage 缺 billable_tokens 数字）：和 = 可得部分，partial=true
+      logRequest(t.rt, entry({ status: 200, ms: 100, usage: { input_tokens: 500, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 } }))
+      await drainAppendStreams()
+      const mixed = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}`, ADMIN)).body)
+      expect(mixed.usage.billable_tokens).toBe(3610)
+      expect(mixed.usage.billable_partial).toBe(true)
+
+      // 无 usage 条目的窗口（成功但无 usage）→ 0/false；tokens 既有口径不受影响
+      logRequest(t.rt, entry({ harness: 'nouse', status: 200, ms: 50 }))
+      await drainAppendStreams()
+      const nouse = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&harness=nouse`, ADMIN)).body)
+      expect(nouse.usage.requests).toBe(1)
+      expect(nouse.usage.billable_tokens).toBe(0)
+      expect(nouse.usage.billable_partial).toBe(false)
     } finally {
       t.close()
     }
@@ -349,6 +395,37 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
       t.close()
     }
   })
+
+  it('metrics.concurrency：per-provider 并发实时水位（在途/排队/上限，编排器扩缩容判定用）', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up.max_concurrency = 2
+      // 直灌信号量（不经转发）：在途 2 满载 + 排队 1——首个请求尚无完成流量、没有耗时采样，
+      // concurrency 段也要露出（只看 providers 段的键会漏掉正在满载的时刻）
+      const s1 = await acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const s2 = await acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const p3 = acquireProviderSlot(t.rt, 'up', 2, 5_000, undefined)
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.concurrency.up).toEqual({ in_flight: 2, queued: 1, limit: 2 })
+      s1.release() // 槽位按 FIFO 移交给排队者
+      await p3
+      const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m2.concurrency.up).toEqual({ in_flight: 2, queued: 0, limit: 2 })
+      s2.release()
+      ;(await p3).release()
+      const m3 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m3.concurrency.up).toEqual({ in_flight: 0, queued: 0, limit: 2 })
+      // 无流量且无在途的 provider 不出现（缺席 = 空闲，与 providers 段口径一致）
+      t.rt.config.providers.idle = { base_url: 'https://idle.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k' }
+      const m4 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m4.concurrency.idle).toBeUndefined()
+      expect(m4.concurrency.up).toEqual({ in_flight: 0, queued: 0, limit: 2 })
+      // 无凭据仍 401（admin 门内不变）
+      expect((await request(t.port, '/_modeldock/metrics')).status).toBe(401)
+    } finally {
+      t.close()
+    }
+  })
 })
 
 describe('summarizeUsageDays 流式聚合（卡 33：不落全量数组，口径与数组路径一致）', () => {
@@ -372,6 +449,28 @@ describe('summarizeUsageDays 流式聚合（卡 33：不落全量数组，口径
       expect(streamed.requests).toBe(2)
       expect(streamed.ok).toBe(2)
       expect(streamed.tokens.input).toBe(15)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('billable 聚合：流式与数组路径同口径（新条目求和、旧格式条目 partial 标记）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = { providers: {}, profiles: {}, harness: {} } as never
+      const rt = buildRuntime(cfg, 't')
+      const now = new Date()
+      const today = localIsoTs(now).slice(0, 10)
+      const base = { ts: localIsoTs(now), harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages' }
+      logRequest(rt, { ...base, status: 200, ms: 100, usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0, billable_tokens: 12 } })
+      logRequest(rt, { ...base, status: 200, ms: 200, usage: { input_tokens: 5, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } }) // 旧版格式：缺 billable
+      await drainAppendStreams()
+      const f = { harness: 'zcode' }
+      const streamed = await summarizeUsageDays([today], f)
+      const arrayed = summarizeUsage(filterLogEntries(readRequestLogDay(today), f))
+      expect(streamed).toEqual(arrayed)
+      expect(streamed.billable_tokens).toBe(12) // 和 = 可得部分
+      expect(streamed.billable_partial).toBe(true) // 旧格式混入 → 求和不完整
     } finally {
       h.restore()
     }

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { AdminCtx, persistConfig, jsonRequestBody, profileRefForProvider, sendError } from './admin-shared.js'
 import { allAdapters } from '../adapters/registry.js'
 import { getFirstProviderSecret } from '../config/secrets.js'
-import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
+import { DEFAULT_GATEWAY_PORT, type Config, type Protocol, type ProviderConfig } from '../config/types.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { resolveInstallCommand } from '../adapters/types.js'
 import { sandboxNpmPrefix } from '../util/paths.js'
@@ -18,6 +18,14 @@ import { peekSyncRequest } from './lan.js'
 import { syncStatus } from '../sync/engine.js'
 import { bi, getLang, t } from '../util/i18n.js'
 import { localIsoTs } from '../util/time.js'
+/** provider 支持的协议集（config 层 Protocol 命名，与 adapter 的 clientProtocols 同一口径，
+ *  编排侧派发前直接对拍两侧即可发现「该客户端 → 该服务会 404」）：默认协议（protocol，走
+ *  base_url）∪ endpoints 的键（每协议端点）。排序保证输出稳定。 */
+export function providerProtocols(p: ProviderConfig): Protocol[] {
+  const set = new Set<Protocol>([p.protocol, ...(Object.keys(p.endpoints ?? {}) as Protocol[])])
+  return [...set].sort()
+}
+
 export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string, unknown>> {
   const cfg = rt.config
   const port = rt.port ?? cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
@@ -34,6 +42,10 @@ export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string
       route: cfg.harness[a.id]?.route ?? null,
       pointing: st.pointing ?? 'unknown',
       detail: st.detail ?? '',
+      // 客户端能讲的协议集（adapter clientProtocols 原样投影）：null = 未声明（多协议自适应如
+      // zcode/dsh、无法判定如 generic——与 pinProtocolConflict 的「未声明不校验」口径一致，
+      // 编排侧对 null 不做协议对拍，宁漏检不误拦）
+      protocols: a.clientProtocols ? [...a.clientProtocols] : null,
     }
   })
   return {
@@ -44,6 +56,9 @@ export async function buildConfigView(rt: GatewayRuntime): Promise<Record<string
       name: p.name ?? id,
       base_url: p.base_url,
       protocol: p.protocol,
+      // 该服务各协议端点的支持集（默认协议 + endpoints 键，providerProtocols 注）：
+      // 编排侧与 harness.protocols 求交集，空集 = 派发必 404 的协议不兼容组合
+      protocols: providerProtocols(p),
       auth_style: p.auth_style,
       key_ref: p.key_ref,
       proxy: p.proxy ?? 'direct',

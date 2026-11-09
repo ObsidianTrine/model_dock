@@ -258,6 +258,10 @@ export interface UsageFilter {
   harness?: string
   profile?: string
   provider?: string
+  /** 网关侧错误归类短码（LogEntry.cause 同枚举，见 state/types.ts）；/logs/query 过滤维度 */
+  cause?: string
+  /** HTTP 状态类（'2xx'…'5xx'）；无 status 的条目（客户端中止等）不命中任何状态类 */
+  statusClass?: string
   /** 毫秒时间窗（含边界）；未提供的边界不设限 */
   fromMs?: number
   toMs?: number
@@ -268,6 +272,11 @@ export function logEntryMatches(e: LogEntry, f: UsageFilter): boolean {
   if (f.harness && e.harness !== f.harness) return false
   if (f.profile && e.profile !== f.profile) return false
   if (f.provider && e.provider !== f.provider) return false
+  if (f.cause && e.cause !== f.cause) return false
+  if (f.statusClass) {
+    if (e.status == null) return false
+    if (`${Math.floor(e.status / 100)}xx` !== f.statusClass) return false
+  }
   const ts = new Date(String(e.ts)).getTime()
   if (f.fromMs != null && !(ts >= f.fromMs)) return false
   if (f.toMs != null && !(ts <= f.toMs)) return false
@@ -298,6 +307,20 @@ export interface UsageSummary {
   latency: { p50: number | null; p95: number | null; p99: number | null }
   /** 实测用量（成功且有 usage 的条目；缓存读+缓存建计入 input——与 reconcile 对账口径一致） */
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  /** 按 model 分桶的实测用量（与 tokens 同口径：成功且有 usage 的条目；缓存读+缓存建计入
+   *  input_tokens）。可选字段：旧版消费方/旧聚合产物不带此键不破；窗口内条目缺 model 的
+   *  （极老日志）跳过不记账——模型级容灾（model_fallback）的 per-model 观测面。 */
+  tokens_by_model?: Record<
+    string,
+    { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }
+  >
+  /** 可计费口径合计（成功且有 usage 的条目，与 tokens 同口径；剔除缓存读的公式在条目落盘前
+   *  已按协议形态算好——此处只求和，绝不重算）。窗口内条目缺该数字的跳过（不入和）。 */
+  billable_tokens: number
+  /** 上述求和是否可信完整：窗口内存在「有 usage 对象但缺 billable_tokens 数字」的条目
+   *  （旧版网关日志混入）时为 true——消费方（编排侧 reconcile）据此整体回落文件直读。
+   *  窗口内完全没有 usage 条目时为 false（空窗口语义：0 和是完整的）。 */
+  billable_partial: boolean
   /** 成本（USD / 百万 token 牌价口径）；未注入 priceResolver 时为 null */
   cost: UsageCost | null
   /** 注入 resolver 时：命中过但查不到单价的模型名（成本按 $0 计，提醒补 pricing.json） */
@@ -314,6 +337,9 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
   const byModel: Record<string, number> = {}
   const ms: number[] = []
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  const tokensByModel: NonNullable<UsageSummary['tokens_by_model']> = {}
+  let billableTokens = 0
+  let billablePartial = false
   const cost: UsageCost | null = priceOf ? { total: 0, by_provider: {}, by_model: {} } : null
   const unpriced = priceOf ? new Set<string>() : null
   let ok = 0
@@ -337,6 +363,18 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
           tokens.output += u.output_tokens ?? 0
           tokens.cache_read += u.cache_read_tokens ?? 0
           tokens.cache_creation += u.cache_creation_tokens ?? 0
+          // per-model 四桶与全局 tokens 同口径累加；条目缺 model（极老日志）跳过不记账
+          if (e.model) {
+            const tm = (tokensByModel[e.model] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+            tm.input_tokens += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
+            tm.output_tokens += u.output_tokens ?? 0
+            tm.cache_read_tokens += u.cache_read_tokens ?? 0
+            tm.cache_creation_tokens += u.cache_creation_tokens ?? 0
+          }
+          // billable 只求和不重算（公式分协议形态，条目落盘前已算好）；缺数字 = 旧版日志 → partial
+          const b = u.billable_tokens
+          if (typeof b === 'number' && Number.isFinite(b)) billableTokens += b
+          else billablePartial = true
           if (priceOf && cost && unpriced) {
             const price = priceOf(e.provider, e.model)
             if (price) {
@@ -364,6 +402,9 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
         by_model: byModel,
         latency: latencyQuantiles(ms),
         tokens,
+        tokens_by_model: tokensByModel,
+        billable_tokens: billableTokens,
+        billable_partial: billablePartial,
         cost,
         unpriced_models: unpriced ? [...unpriced].sort() : null,
         window: { first, last },
@@ -383,24 +424,39 @@ export function summarizeUsage(entries: LogEntry[], priceOf?: PriceResolver): Us
  *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
  *  （2026-11-02 复查 P2-1；该端点是 Dockmaster 编排侧的轮询数据源）。聚合口径与
  *  「readRequestLogDay + filterLogEntries + summarizeUsage」逐字段一致（共享累加器）。 */
-export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf?: PriceResolver): Promise<UsageSummary> {
-  const acc = createUsageAccumulator(priceOf)
+/** 流式逐条产出各日期日文件里命中过滤的请求日志（/usage 聚合与 /logs/query 明细共用同一
+ *  解析管道，勿另写第二套解析）。逐行读、边过滤边产出，不落全量数组——31 天查询曾用
+ *  readFileSync×31 + concat O(n²) 拷贝 + 全量驻留把事件循环卡数秒、在途 SSE 全冻结
+ *  （2026-11-02 复查 P2-1；/usage 是编排侧轮询数据源）。消费方可提前终止（如 /logs/query
+ *  的 limit 到手即停）：生成器 return 路径经 finally 确定性关闭 readline 与底层文件流。 */
+export async function* streamRequestLogDays(days: string[], f: UsageFilter): AsyncGenerator<LogEntry> {
   for (const d of days) {
     if (!USAGE_DAY_RE.test(d)) continue
     const file = path.join(logsDir(), `gateway-${d}.jsonl`)
     if (!fs.existsSync(file)) continue
-    const lines = createInterface({ input: fs.createReadStream(file, 'utf8'), crlfDelay: Infinity })
-    for await (const line of lines) {
-      if (!line.trim()) continue
-      let e: LogEntry
-      try {
-        e = JSON.parse(line) as LogEntry
-      } catch {
-        continue /* 崩溃半行 */
+    const input = fs.createReadStream(file, 'utf8')
+    const lines = createInterface({ input, crlfDelay: Infinity })
+    try {
+      for await (const line of lines) {
+        if (!line.trim()) continue
+        let e: LogEntry
+        try {
+          e = JSON.parse(line) as LogEntry
+        } catch {
+          continue /* 崩溃半行 */
+        }
+        if (logEntryMatches(e, f)) yield e
       }
-      if (logEntryMatches(e, f)) acc.add(e)
+    } finally {
+      lines.close()
+      input.destroy() // 提前终止（limit 凑满）时立即释放 fd，不悬挂到 GC
     }
   }
+}
+
+export async function summarizeUsageDays(days: string[], f: UsageFilter, priceOf?: PriceResolver): Promise<UsageSummary> {
+  const acc = createUsageAccumulator(priceOf)
+  for await (const e of streamRequestLogDays(days, f)) acc.add(e)
   return acc.summary()
 }
 

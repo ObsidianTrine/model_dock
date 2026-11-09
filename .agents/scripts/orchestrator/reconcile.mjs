@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { STATES, cardPath, listCards, moveCard } from './queue.mjs';
 import { appendEvent, logDir, readEvents } from './events.mjs';
+import { resolveGatewayAdmin } from './tiers.mjs';
 import { loadWorkflowConfig } from '../workflow-config.mjs';
 
 /**
@@ -32,6 +33,59 @@ export function gatewayLogsDir(cfg) {
   const envBase = process.env.MODELRDOCK_FAKE_HOME || process.env.MODELRDOCK_HOME;
   if (envBase) return path.join(envBase, '.modeldock', 'logs');
   return (cfg ?? loadWorkflowConfig()).gatewayLogDir || null;
+}
+
+// ---------------------------------------------------------------------------
+// /_modeldock/usage 聚合取数助手（A3，2026-11）：编排侧对网关请求日志的取数从「直读
+// jsonl」升级为「admin 可得时优先走聚合端点，文件直读降级为 fallback」——复用 tiers.mjs
+// resolveGatewayAdmin 的同一信任域与开启哲学（cfg.gatewayAdmin !== true 一律不触达，
+// 与既有 admin 调用同款 ≤3s 超时）。fail-open：端点不可得/非 200/解析失败 → ok:false，
+// 调用方落回文件扫描（行为与历史一致）。summary 形状见 src/gateway/state/logs.ts 的
+// UsageSummary：requests/ok/failed/by_status（键 = String(status)，仅失败条目，缺失计
+// 'n/a'）/by_provider|by_model（请求数，非 token）/latency/tokens{input,output,cache_read,
+// cache_creation}/billable_tokens（可计费口径求和：成功且有 usage 条目）/billable_partial
+// （窗口混入旧版网关日志 → true，求和只是可得部分）/cost/unpriced_models——注意
+// tokens.input 已含缓存读+缓存建（与实测账 tokensIn 同口径），by_provider/by_model 只是
+// 请求数，token 分桶端点给不了。
+// ---------------------------------------------------------------------------
+
+const USAGE_TIMEOUT_MS = 3000;
+
+/**
+ * 查询网关请求日志聚合（GET /_modeldock/usage?from=&to=&harness=&provider=&cost=）。
+ * @param {object} cfg loadWorkflowConfig 结果（gatewayAdmin 门控）
+ * @param {object} [p] fromMs/toMs 毫秒时间窗（缺省不设限）、harness/provider 精确过滤、
+ *        withCost=true 时带网关侧成本聚合（cost=1，价目与 pricing-lookup 同源）、timeoutMs
+ * @returns {Promise<{ ok: true, summary: object } | { ok: false, reason: string }>}
+ */
+export async function fetchGatewayUsageSummary(cfg, { fromMs, toMs, harness = '', provider = '', withCost = false, timeoutMs = USAGE_TIMEOUT_MS } = {}) {
+  const adm = resolveGatewayAdmin(cfg);
+  if (!adm) {
+    return {
+      ok: false,
+      reason: cfg?.gatewayAdmin === true
+        ? '未发现网关（gateway.json 缺失或 ORCH_GATEWAY_* 未配置）'
+        : 'workflow.json 未开启 gatewayAdmin',
+    };
+  }
+  const q = new URLSearchParams();
+  if (Number.isFinite(fromMs)) q.set('from', new Date(fromMs).toISOString());
+  if (Number.isFinite(toMs)) q.set('to', new Date(toMs).toISOString());
+  if (harness) q.set('harness', String(harness));
+  if (provider) q.set('provider', String(provider));
+  q.set('cost', withCost ? '1' : '0');
+  try {
+    const res = await fetch(`${adm.base}/_modeldock/usage?${q}`, {
+      headers: { 'x-modeldock-admin': adm.adminToken },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return { ok: false, reason: `网关返回 ${res.status}` };
+    const j = await res.json();
+    if (!j?.ok || !j.usage || typeof j.usage !== 'object') return { ok: false, reason: 'usage 响应形状不符（旧版网关？）' };
+    return { ok: true, summary: j.usage };
+  } catch (e) {
+    return { ok: false, reason: `usage 查询失败：${String(e?.message ?? e).slice(0, 120)}` };
+  }
 }
 
 function usageTotal(u) {
@@ -62,10 +116,10 @@ export function readGatewayLog(dir, date) {
 }
 
 /**
- * 单任务对账：事件时间窗内的网关转发请求汇总。
+ * 单任务对账：事件时间窗内的网关转发请求汇总（异步，A3——实测账优先走 /_modeldock/usage）。
  * 多天任务自动跨日期文件；MODELRDOCK_FAKE_HOME/HOME 重定向生效（测试隔离）。
  */
-export function reconcileTask(repoRoot, taskId, queueRootDir) {
+export async function reconcileTask(repoRoot, taskId, queueRootDir) {
   const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs', taskId);
   const events = readEvents(logsRoot);
   const spawned = events.filter((e) => e.type === 'worker_spawned');
@@ -85,8 +139,118 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
   };
 
   // 锚定 repoRoot 的配置（临时仓库/测试才有正确归属；env 重定向仍优先——测试隔离通道）
-  const gwDir = gatewayLogsDir(loadWorkflowConfig(repoRoot));
+  const cfg = loadWorkflowConfig(repoRoot);
+  const gwDir = gatewayLogsDir(cfg);
   if (!gwDir) return { skipped: true, reason: '未启用网关对账（workflow.json gatewayLogDir 未配置）' };
+
+  // A3 闭环（2026-11-08 billable 聚合）：实测账优先走 /_modeldock/usage 聚合端点。
+  // 端点已补 billable_tokens（条目级可计费口径求和——公式分协议形态，网关落盘前已算好，
+  // 聚合只求和不重算）与 billable_partial（窗口混入旧版网关日志 → true）。两种口径的
+  // HTTP 准入：
+  //   legacy（自报账无可计费字段）：summary 的 tokens/requests 聚合即全部所需（现状不变）；
+  //   billable（自报账带可计费字段）：还需响应带 billable_tokens 且 partial!==true——
+  //     partial / 缺字段（旧版网关）/ 端点不可得 / 查询失败 → 整批落回文件扫描（下方
+  //     原路径，行为与历史逐字节一致；与 measureFuelBatch 的整批 fail-open 粒度一致）。
+  // (provider,model) token 分桶端点仍给不了 → 两条 HTTP 路径的 pairs 均留空、燃油账由
+  // 同一响应里的网关 cost 聚合预填（价目与 pricing-lookup 同源；attachCost 见空 pairs
+  // 跳过、不覆盖预填值）——一次窗口查询同时服务对账与成本，不重复打两次。transient /
+  // 海况调查包仍文件直读：明细端点给不了逐条目（见 upstreamSeaState 注）。
+  const u = await fetchGatewayUsageSummary(cfg, { fromMs: start - 60_000, toMs: end + 60_000, withCost: true });
+  if (u.ok && selfReported.billable === null) {
+    const t = u.summary.tokens && typeof u.summary.tokens === 'object' ? u.summary.tokens : {};
+    const tokensIn = t.input ?? 0; // 端点 tokens.input = input+cache_read+cache_creation（实测账 tokensIn 同口径）
+    const tokensOut = t.output ?? 0;
+    const gwTotal = tokensIn + tokensOut;
+    return {
+      skipped: false,
+      taskId,
+      window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
+      selfReported,
+      selfTotal: selfReported.tokensIn + selfReported.tokensOut,
+      selfBillable: null,
+      gateway: {
+        // 端点 ok = status<400 条数（文件路径口径是「成功且带 usage」——成功请求几乎必有
+        // usage，可接受偏差）；billable 恒 0（scope 固定 legacy：自报账无可计费字段）
+        requests: u.summary.ok ?? 0,
+        tokensIn,
+        tokensOut,
+        cacheRead: t.cache_read ?? 0,
+        cacheCreate: t.cache_creation ?? 0,
+        billable: 0,
+        total: gwTotal,
+      },
+      gatewayBillable: null,
+      scope: 'legacy',
+      divergence:
+        selfReported.tokensIn + selfReported.tokensOut + gwTotal > 0
+          ? Math.abs(selfReported.tokensIn + selfReported.tokensOut - gwTotal) / Math.max(selfReported.tokensIn + selfReported.tokensOut, gwTotal)
+          : 0,
+      // 聚合端点给不了 (provider,model) token 分桶——燃油账由网关侧 cost 聚合预填
+      // （价目与 pricing-lookup 同源），attachCost 见空 pairs 跳过、不覆盖预填值
+      pairs: [],
+      viaGateway: gwTotal > 0,
+      source: 'gateway-usage',
+      ...(u.summary.cost && typeof u.summary.cost === 'object'
+        ? {
+            cost: {
+              usd: u.summary.cost.total ?? 0,
+              unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
+              requests: u.summary.ok ?? 0,
+              source: 'gateway-usage',
+            },
+          }
+        : {}),
+    };
+  }
+  if (u.ok && selfReported.billable !== null && Number.isFinite(u.summary.billable_tokens) && u.summary.billable_partial !== true) {
+    // billable HTTP 路径：分歧率按可计费口径对可计费口径（与文件路径 billableMode 同式）。
+    // requests 用端点 ok 计数（同 legacy 路径的可接受偏差）；partial 已在上游条件排除——
+    // 这里的求和与文件逐条累加同值（条目级 billable 落盘前已算好，聚合只是求和）。
+    const t = u.summary.tokens && typeof u.summary.tokens === 'object' ? u.summary.tokens : {};
+    const tokensIn = t.input ?? 0;
+    const tokensOut = t.output ?? 0;
+    const gwTotal = tokensIn + tokensOut;
+    const gwBillable = u.summary.billable_tokens;
+    const denom = Math.max(selfReported.billable, gwBillable);
+    return {
+      skipped: false,
+      taskId,
+      window: { start: new Date(start).toISOString(), end: new Date(Math.min(end, Date.now())).toISOString() },
+      selfReported,
+      selfTotal: selfReported.tokensIn + selfReported.tokensOut,
+      selfBillable: selfReported.billable,
+      gateway: {
+        requests: u.summary.ok ?? 0,
+        tokensIn,
+        tokensOut,
+        cacheRead: t.cache_read ?? 0,
+        cacheCreate: t.cache_creation ?? 0,
+        billable: gwBillable,
+        total: gwTotal,
+      },
+      gatewayBillable: gwBillable,
+      scope: 'billable',
+      // 分母取两账较大者（文件路径同式）；两边都为 0 记 0（完美一致，避免 0/0 = NaN）
+      divergence: denom > 0 ? Math.abs(selfReported.billable - gwBillable) / denom : 0,
+      // 端点给不了 (provider,model) token 分桶——燃油账由同一响应里的网关 cost 聚合预填
+      // （价目与 pricing-lookup 同源），attachCost 见空 pairs 跳过、不覆盖预填值
+      pairs: [],
+      viaGateway: gwTotal > 0,
+      source: 'gateway-usage',
+      ...(u.summary.cost && typeof u.summary.cost === 'object'
+        ? {
+            cost: {
+              usd: u.summary.cost.total ?? 0,
+              unpriced: Array.isArray(u.summary.unpriced_models) ? u.summary.unpriced_models : [],
+              requests: u.summary.ok ?? 0,
+              source: 'gateway-usage',
+            },
+          }
+        : {}),
+    };
+  }
+  // 其余（端点不可得 / partial / 缺 billable 字段）→ 整批落回文件扫描，行为与历史一致
+
   const observed = { requests: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheCreate: 0, billable: 0 };
   let billableEntries = 0; // 带 usage.billable_tokens 的条数（旧网关日志无此字段 → 回落旧口径）
   // (provider, model) token 分桶：成本投影（cost.mjs computeCost）的原料——同一循环顺手聚合，
@@ -164,6 +328,9 @@ export function reconcileTask(repoRoot, taskId, queueRootDir) {
  * 标记 failover_to:/down_all/skip_all）、时延分位、实测用量、最近一次失败现场。
  * events 复用调用方已读的事件流（archiveIncident 手里有一份，避免重复读盘）。
  * skipped=true 时带可操作 reason；未启用网关日志（gatewayLogsDir null）与对账同口径。
+ * A3 注：保持网关日志文件直读——调查包要逐条明细（routeEvents 路由痕迹、lastFailure
+ * 失败现场），/_modeldock/usage 聚合端点给不了；未来 /_modeldock/logs 明细端点落地后再切
+ * （与 transient.classifyWorkerCrash 同一取舍）。
  */
 export function upstreamSeaState(repoRoot, events) {
   const spawned = events.filter((e) => e.type === 'worker_spawned');
@@ -248,11 +415,11 @@ export function upstreamSeaState(repoRoot, events) {
   };
 }
 
-/** 全部 merged 任务的对账汇总（按 divergence 降序，最可疑的在前）。 */
-export function reconcileAll(repoRoot, queueRootDir) {
+/** 全部 merged 任务的对账汇总（按 divergence 降序，最可疑的在前）。异步（A3 同 reconcileTask）。 */
+export async function reconcileAll(repoRoot, queueRootDir) {
   const out = [];
   for (const id of listCards(queueRootDir, 'merged')) {
-    const r = reconcileTask(repoRoot, id, queueRootDir);
+    const r = await reconcileTask(repoRoot, id, queueRootDir);
     if (!r.skipped) out.push(r);
   }
   out.sort((a, b) => b.divergence - a.divergence);

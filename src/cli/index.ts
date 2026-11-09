@@ -82,6 +82,12 @@ export function buildProgram(): Command {
     .command('refresh')
     .description(t('立即拉取目录到本地缓存（网关每 7 天自动刷新）', 'Fetch the catalog into the local cache now (the gateway auto-refreshes every 7 days)'))
     .action(async () => (await import('./providers.js')).cmdModelCatalogRefresh())
+  model
+    .command('fallback <providerId> [fromModel] [toModel]')
+    .description(t('模型级容灾映射（同服务内：主模型额度耗尽时改发备用模型重试）', 'Model-level failover map (within one service: retry with a backup model when the primary runs out of quota)'))
+    .option('--rm <fromModel>', t('删除一条映射', 'Remove a mapping'))
+    .option('--list', t('列出当前映射', 'List current mappings'))
+    .action(async (pid, from, to, o) => (await import('./providers.js')).cmdModelFallback(pid, from, to, o))
 
   const profile = prog.command('profile').description(t('路由 profile：用谁 + 用哪个模型 + 模型别名', 'Routing profile: which provider + which model + model aliases'))
   profile

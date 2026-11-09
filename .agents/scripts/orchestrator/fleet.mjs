@@ -3,6 +3,10 @@
 // 什么状态、哪些客户端指向网关、谁在熔断」写进任务事件时间线（fleet_observed）并打印
 // 告警行。**只观测不决策**——选船仍走既有静态规则（workflow.json > CLI 显式 > 沿用），
 // 引擎切换人工闸门不变；观测缺席（gatewayAdmin 未开/网关不可达）绝不阻断派发。
+// A4（2026-11）：admin 查询前先打免鉴权 /v1/health 探活（≤2s）——此前 admin 凭据错误与
+// 网关挂了都表现成「查询失败」，人工无法区分该修凭据还是该救网关；现在探活失败 =
+// 「网关不可达」，探活成功但 admin 失败 = 「网关在线但 admin 凭据/接口异常」。只改告警
+// 文案与分类，不拦截（observe 只照亮不拦截的设计不变）。
 // 船 ↔ harness 映射：编排后端是 headless CLI，接入态看的是同一个 CLI 的交互形态适配器
 // （zcode-headless ↔ zcode、claude-headless ↔ claude-code）——客户端指向「其他端点」
 // = 船将绕开 ModelDock 燃油（reconcile 会显示网关零流量），这是本模块要照亮的头号盲区。
@@ -10,6 +14,8 @@
 import { resolveGatewayAdmin } from './tiers.mjs';
 
 const FLEET_TIMEOUT_MS = 3000;
+/** /v1/health 免鉴权探活超时（A4）：定责「网关不可达」vs「在线但 admin 异常」。 */
+const HEALTH_PROBE_TIMEOUT_MS = 2000;
 
 async function getJson(base, adminToken, path, timeoutMs) {
   const res = await fetch(`${base}${path}`, {
@@ -40,6 +46,18 @@ export async function fetchFleetState(cfg, opts = {}) {
     };
   }
   const timeoutMs = opts.timeoutMs ?? FLEET_TIMEOUT_MS;
+  // A4 前置探活：免鉴权 GET /v1/health（≤2s）先于 admin 查询定责。网络层探活失败
+  // （拒连/超时）→ 直接 unavailable「网关不可达」（admin 查询不必再撞超时）；探活成功
+  // → 继续 admin 查询，此时查询失败 = 「网关在线但 admin 凭据/接口异常」。/v1/health 返回
+  // 非 200 不算不可达（有东西在应答——可能非网关服务或旧版鉴权），留作 admin 失败时的
+  // 归因线索。只影响文案与分类，不拦截（observe 只照亮不拦截的设计不变）。
+  let healthNote = '';
+  try {
+    const h = await fetch(`${adm.base}/v1/health`, { signal: AbortSignal.timeout(opts.healthTimeoutMs ?? HEALTH_PROBE_TIMEOUT_MS) });
+    if (!h.ok) healthNote = `（/v1/health 返回 ${h.status}）`;
+  } catch (e) {
+    return { mode: 'unavailable', reason: `网关不可达（/v1/health 探活失败：${String(e?.message ?? e).slice(0, 120)}）` };
+  }
   try {
     const [cfgView, metrics] = await Promise.all([
       getJson(adm.base, adm.adminToken, '/_modeldock/config', timeoutMs),
@@ -69,7 +87,10 @@ export async function fetchFleetState(cfg, opts = {}) {
       meltdown: [...melted.values()],
     };
   } catch (e) {
-    return { mode: 'unavailable', reason: `网关查询失败：${e?.message ?? e}` };
+    // 探活已过（网络层在线）走到这里 = admin 面（凭据/接口）异常——文案直接点名，替代
+    // 含混的「查询失败」（A4：人工该去核对 admin token 而不是去救网关）；health 探活的
+    // 非 200 异常（如有）作为归因线索附上
+    return { mode: 'unavailable', reason: `网关在线但 admin 凭据/接口异常${healthNote}——网关查询失败：${e?.message ?? e}` };
   }
 }
 

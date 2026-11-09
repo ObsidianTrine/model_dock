@@ -42,7 +42,7 @@ function migrate(raw: Record<string, unknown>): Config {
     version: CONFIG_VERSION,
     language,
     active_profile: raw.active_profile as string | undefined,
-    providers: containerOrEmpty(raw.providers, 'providers'),
+    providers: guardModelFallbackShape(containerOrEmpty(raw.providers, 'providers')),
     profiles: containerOrEmpty(raw.profiles, 'profiles'),
     harness: containerOrEmpty(raw.harness, 'harness'),
     adapter_packs: raw.adapter_packs as Config['adapter_packs'],
@@ -55,6 +55,27 @@ function migrate(raw: Record<string, unknown>): Config {
     sync_assets: normalizable(raw.sync_assets, 'sync_assets'),
   }
   return cfg
+}
+
+/** 模型容灾映射形状守卫（手编 config.toml 同口径）：model_fallback 必须是「字符串 → 非空字符串」的表。
+ *  只拦形状——价格闸门是写入口（CLI/控制台）职责，不拦启动（可用性优先，fail-open）；
+ *  语检（自映射/环/目录成员/价格差）在保存路径 resolveModelFallback。 */
+function guardModelFallbackShape<T extends object>(providers: T): T {
+  for (const [pid, p] of Object.entries(providers as Record<string, unknown>)) {
+    const mf = (p as Record<string, unknown> | undefined)?.model_fallback
+    if (mf === undefined || mf === null) continue
+    const bad =
+      typeof mf !== 'object' ||
+      Array.isArray(mf) ||
+      Object.values(mf as Record<string, unknown>).some((v) => typeof v !== 'string' || !v.trim())
+    if (bad) {
+      throw new ConfigError(
+        t('config.toml 的 [providers.{pid}.model_fallback] 必须是「模型ID → 模型ID」的表（当前值非法）', 'config.toml [providers.{pid}.model_fallback] must be a table of modelId → modelId (got an invalid value)', { pid }),
+        t('每条形如 "glm-5.3-flash" = "glm-5.2"；或删除该节恢复默认。价格闸门在 CLI/控制台保存时校验，手编不拦', 'Each entry looks like "glm-5.3-flash" = "glm-5.2"; or remove the section. The price gate is enforced when saving via CLI/console, not on hand-edited config')
+      )
+    }
+  }
+  return providers
 }
 
 /** 容器键形状守卫：手写 TOML 合法但形状错（如 `providers = 5`）时，`as` 断言会原样放行、
