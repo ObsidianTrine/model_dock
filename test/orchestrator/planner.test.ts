@@ -98,6 +98,27 @@ describe('orchestrator planner > intent 命令端到端（mock 后端）', () =>
     }
   })
 
+  it('propose.model 配置 → intent 会话留痕 meta.model（与 propose 共用同一模型键）', () => {
+    const repo = mkRepo({ extra: { propose: { model: 'glm-5.3-flash' } } })
+    try {
+      const out = runOrch(repo.root, 'intent "fix the presets merge bug" --backend mock')
+      expect(out.status).toBe(0)
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
+      const sessions = fs.readdirSync(logsDir).filter((d) => d.startsWith('planner-'))
+      expect(sessions).toHaveLength(1)
+      const decDir = path.join(logsDir, sessions[0], 'decisions')
+      const files = fs.readdirSync(decDir).filter((f) => f.startsWith('planner-') && f.endsWith('.json'))
+      expect(files.length).toBeGreaterThan(0)
+      for (const f of files) {
+        const doc = JSON.parse(fs.readFileSync(path.join(decDir, f), 'utf8'))
+        expect(doc.meta.command).toBe('intent')
+        expect(doc.meta.model).toBe('glm-5.3-flash')
+      }
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('id 冲突被喂回重试（同 id 已存在时报错，不静默覆盖）', () => {
     const repo = mkRepo()
     try {

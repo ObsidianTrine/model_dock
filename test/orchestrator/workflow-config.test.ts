@@ -210,12 +210,12 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     return dir
   }
 
-  it('缺省 observe / everyTurns 20；未配置 watchdog 键不告警', () => {
+  it('缺省 observe / everyTurns 20 / model null；未配置 watchdog 键不告警', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const dir = fixture({})
     try {
       const cfg = loadWorkflowConfig(dir)
-      expect(cfg.watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(cfg.watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
       expect(warn).not.toHaveBeenCalled()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -223,10 +223,10 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     }
   })
 
-  it('合法配置生效（actuate / 自定义 everyTurns）', () => {
-    const dir = fixture({ watchdog: { mode: 'actuate', everyTurns: 50 } })
+  it('合法配置生效（actuate / 自定义 everyTurns / 勘察小模型 model）', () => {
+    const dir = fixture({ watchdog: { mode: 'actuate', everyTurns: 50, model: 'glm-4.5-air' } })
     try {
-      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'actuate', everyTurns: 50 })
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'actuate', everyTurns: 50, model: 'glm-4.5-air' })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -237,13 +237,13 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     const dir = fixture({ watchdog: 'banana' })
     const wfPath = path.join(dir, '.agents', 'workflow.json')
     try {
-      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
       expect(String(warn.mock.calls[0]?.[0])).toContain('watchdog')
       warn.mockClear()
-      // 非法 mode / 非法 everyTurns / watchdog 数组：各自回落并告警
-      for (const bad of [{ mode: 'kill' }, { everyTurns: 0 }, { everyTurns: 2.5 }, ['observe']]) {
+      // 非法 mode / 非法 everyTurns / 非法 model / watchdog 数组：各自回落并告警
+      for (const bad of [{ mode: 'kill' }, { everyTurns: 0 }, { everyTurns: 2.5 }, { model: 42 }, ['observe']]) {
         fs.writeFileSync(wfPath, JSON.stringify({ watchdog: bad }))
-        expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+        expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
         expect(warn.mock.calls.length).toBeGreaterThan(0)
         warn.mockClear()
       }
@@ -289,18 +289,29 @@ describe('workflow-config > propose（舰队反馈开关，缺省关）', () => 
     }
   }
 
-  it('缺省 feedback false（行为与历史一致）；显式 true 生效；非 true 值视为 false', () => {
-    expect(cfgOf({}).propose).toEqual({ feedback: false })
-    expect(cfgOf({ propose: { feedback: true } }).propose).toEqual({ feedback: true })
-    expect(cfgOf({ propose: { feedback: 'yes' } }).propose).toEqual({ feedback: false })
-    expect(cfgOf({ propose: { other: 1 } }).propose).toEqual({ feedback: false })
+  it('缺省 feedback false / model null（行为与历史一致）；显式 true 生效；非 true 值视为 false', () => {
+    expect(cfgOf({}).propose).toEqual({ feedback: false, model: null })
+    expect(cfgOf({ propose: { feedback: true } }).propose).toEqual({ feedback: true, model: null })
+    expect(cfgOf({ propose: { feedback: 'yes' } }).propose).toEqual({ feedback: false, model: null })
+    expect(cfgOf({ propose: { other: 1 } }).propose).toEqual({ feedback: false, model: null })
+  })
+
+  it('model 键（planner 会话模型，propose/intent 共用）：合法模型名生效、非法值回落 null', () => {
+    expect(cfgOf({ propose: { model: ' glm-5.3-flash ' } }).propose).toEqual({ feedback: false, model: 'glm-5.3-flash' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ propose: { model: 42 } }).propose).toEqual({ feedback: false, model: null })
+      expect(String(warn.mock.calls[0]?.[0])).toContain('model')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('非法 propose 值回落缺省并 console.warn 告警（可操作文案）', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      expect(cfgOf({ propose: 'on' }).propose).toEqual({ feedback: false })
-      expect(cfgOf({ propose: ['feedback'] }).propose).toEqual({ feedback: false })
+      expect(cfgOf({ propose: 'on' }).propose).toEqual({ feedback: false, model: null })
+      expect(cfgOf({ propose: ['feedback'] }).propose).toEqual({ feedback: false, model: null })
       expect(String(warn.mock.calls[0]?.[0])).toContain('propose')
       expect(String(warn.mock.calls[0]?.[0])).toContain('feedback')
     } finally {

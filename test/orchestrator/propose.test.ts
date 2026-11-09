@@ -272,3 +272,46 @@ describe('orchestrator propose > 舰队反馈（propose.feedback，缺省关）'
     }
   }, 90_000)
 })
+
+describe('orchestrator propose > planner 模型键（propose.model，缺省跟随引擎默认）', () => {
+  /** 全部 planner 会话 trace 文档（decisions/planner-*.json）。 */
+  function plannerTraces(repo: string): Array<Record<string, unknown>> {
+    const logsDir = path.join(repo, '.agents', 'orchestrator', 'logs')
+    const out: Array<Record<string, unknown>> = []
+    for (const s of fs.readdirSync(logsDir).filter((d) => d.startsWith('planner-'))) {
+      const decDir = path.join(logsDir, s, 'decisions')
+      if (!fs.existsSync(decDir)) continue
+      for (const f of fs.readdirSync(decDir).filter((x) => x.startsWith('planner-') && x.endsWith('.json'))) {
+        out.push(JSON.parse(fs.readFileSync(path.join(decDir, f), 'utf8')))
+      }
+    }
+    return out
+  }
+
+  it('配置 propose.model：会话留痕 meta.model（intent 命令同键），产出照常落卡', () => {
+    const repo = mkRepo({ extra: { propose: { model: 'glm-5.3-flash' } } })
+    try {
+      const out = runOrch(repo.root, 'propose --backend mock')
+      expect(out.status).toBe(0)
+      const docs = plannerTraces(repo.root)
+      expect(docs.length).toBeGreaterThan(0)
+      for (const d of docs) expect((d.meta as Record<string, unknown>).model).toBe('glm-5.3-flash')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'planner-mock-task.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  }, 90_000)
+
+  it('未配置：trace 无 model 字段（与历史逐字节兼容）', () => {
+    const repo = mkRepo()
+    try {
+      const out = runOrch(repo.root, 'propose --backend mock')
+      expect(out.status).toBe(0)
+      const docs = plannerTraces(repo.root)
+      expect(docs.length).toBeGreaterThan(0)
+      for (const d of docs) expect('model' in (d.meta as Record<string, unknown>)).toBe(false)
+    } finally {
+      repo.cleanup()
+    }
+  }, 90_000)
+})
