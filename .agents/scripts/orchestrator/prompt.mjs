@@ -465,8 +465,9 @@ export function parseSpecBlocks(text) {
 // ---------------------------------------------------------------------------
 
 import { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER } from './research.mjs';
+import { SPECVERDICT_MARKER } from './spec-review.mjs';
 
-export { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER };
+export { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER };
 
 /**
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
@@ -596,5 +597,52 @@ export function buildArbitrationPrompt(contradictedClaims, sourcesBlocks, repoRo
     `}\n` +
     `${fence}\n\n` +
     `ruling 枚举（只允许这三个）：upheld（翻案，否决解除）/ overturned（矛盾成立）/ undetermined（证据不足，否决维持）。围栏外只允许一句话概述。\n`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spec 审查船（spec review 命令）：readonly 会话按 .agents/conventions/spec-review.md
+// 规约对三件套做五维评分 + findings（防编造定位对账）。advisory——产出只做筛查，
+// spec build 拆卡永远人工拍板。逻辑件在 spec-review.mjs（L0/对账/裁决重算）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装 spec 审查 prompt。l0：runSpecL0Checks 结果——L0 findings 以 JSON 注入（审查船
+ * 必须回应每个红线命中与 fail 项）；红线条目命中 ≠ 违规，裁决义务在审查船。
+ */
+export function buildSpecReviewPrompt(specId, spec, l0, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const fence = '```';
+  const specDirHint = `.agents/orchestrator/specs/${specId}`;
+  return (
+    `# 任务：按规约审查一份 spec 三件套（advisory）\n\n` +
+    `今天是 ${today}。你是 spec 审查船：只读，不修改任何文件，不跑 git 写操作或测试。\n` +
+    `工作目录是仓库根 ${repoRoot}（你只有只读探索工具：Read/Glob/Grep）。\n\n` +
+    `## 必读（按序，审查标准的事实源）\n\n` +
+    `1. .agents/conventions/spec-review.md —— 审查规约全文（五维定义/红线 gate/防编造硬纪律/裁决矩阵）\n` +
+    `2. ${specDirHint}/requirements.md\n` +
+    `3. ${specDirHint}/design.md\n` +
+    `4. ${specDirHint}/tasks.md\n\n` +
+    `## 硬纪律（规约 §1.3/§3，违反 = 该 finding 判编造并整体降档）\n\n` +
+    `- **现状对账**：design「现状」节引用的每个代码事实（符号/函数名/文件:行号）必须实际打开对应文件核实；行号可能漂移，以符号为准。行号漂移记 P1；符号不存在或行为不符记 P1 并说明。\n` +
+    `- finding 的 file 必须真实存在（相对仓库根路径）；涉及 spec 原文的 claim 必须逐字定位；无 claim 时 section 必须可定位（§节名或行号）。≤12 条，按 P0>P1>P2 排序，每条带一句话 fix。\n` +
+    `- 红线裁决：L0 命中（见下）不等于违规——你必须在 gates.notes 逐条裁决 violation / legitimate-mention；有 violation 才 gates.redlines=fail。\n` +
+    `- 维度分不确定给 null（服务端会 null 传染不聚合），禁止拍脑袋填数。\n\n` +
+    `## L0 确定性检查结果（零 token 已跑，你不重复跑，但必须回应其中的 fail/warn 与红线命中）\n\n` +
+    `${fence}json\n${JSON.stringify({ checks: l0.checks, redlineHits: l0.redlineHits, tbdCount: l0.tbdCount, fuzzyCount: l0.fuzzyCount, baselineDrift: l0.baselineDrift }, null, 2)}\n${fence}\n\n` +
+    `## 产出契约\n\n` +
+    `输出单个 fenced block（内容为合法 JSON）：\n\n` +
+    `${fence}${SPECVERDICT_MARKER}\n` +
+    `{\n` +
+    `  "spec": "${specId}",\n` +
+    `  "gates": { "redlines": "pass", "notes": ["<逐条裁决 L0 红线命中；无命中则一句 pass 说明>"] },\n` +
+    `  "dimensions": { "completeness": 0-100|null, "unambiguity": 0-100|null, "consistency": 0-100|null, "testability": 0-100|null, "feasibility": 0-100|null },\n` +
+    `  "findings": [\n` +
+    `    { "severity": "P0|P1|P2", "file": "${specDirHint}/design.md 或被引代码文件", "section": "§节名或第N行", "claim": "<涉及 spec 原文时逐字摘录，否则留空>", "why": "<依据：规约条目或代码事实>", "fix": "<一句话建议>" }\n` +
+    `  ],\n` +
+    `  "usage": { "build_ready": "approve_to_build|needs_revision|rework|blocked" },\n` +
+    `  "advisory": true\n` +
+    `}\n` +
+    `${fence}\n\n` +
+    `围栏外只允许一句话概述。不要输出其他内容。\n`
   );
 }
