@@ -53,6 +53,16 @@ export interface LogEntry {
     cache_creation_tokens: number
     billable_tokens?: number
   }
+  /** 上游限流信号（编排器 429 风暴前主动降并发的数据源）：上游响应带限流头才记、缺失不猜
+   *  （旧日志与上游未带头时整个字段缺省，/logs/query 消费方零感知）。remaining = x-ratelimit-remaining；
+   *  reset = x-ratelimit-reset 归一为 epoch ms（各上游单位不一，量级判单位见 parseRatelimitHeaders）；
+   *  retry_after_ms = Retry-After 相对毫秒（与 relay 429 退避重试同一解析，parseRetryAfterMs）。
+   *  429 次数本身已入 metrics 错误分桶（state/sea.ts SeaMinuteBucket['429']），此处只留信号值不重复计数。 */
+  ratelimit?: {
+    remaining?: number
+    reset?: number
+    retry_after_ms?: number
+  }
 }
 
 /** 操作审计：Web 控制台修改类配置操作（添加/编辑/删除服务、切换、接入等） */

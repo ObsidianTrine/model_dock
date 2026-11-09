@@ -49,7 +49,7 @@ import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from 
 import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
-import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
+import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -531,6 +531,9 @@ async function handleRequest(
   const providerId = result.usedProviderId ?? target.profile.provider
   const reason = result.reason
   const model = result.modelAfter ?? target.profile.default_model
+  // 上游限流信号留痕（编排器 429 风暴前降并发的数据源）：带限流头才记，全缺返回 undefined
+  // → 日志条目零新增字段（只增不改，既有消费方零感知）。成功/错误/流中断三处落账共用同一份解析。
+  const ratelimit = parseRatelimitHeaders(result.headers)
 
   const resHeaders = filterResponseHeaders(result.headers)
   if (result.status >= 400) {
@@ -569,6 +572,7 @@ async function handleRequest(
       cause: result.cause ?? (result.status >= 500 ? 'upstream_5xx' : 'upstream_4xx'),
       ...(hint ? { hint } : {}),
       ...(result.attempts?.length ? { attempts: result.attempts } : {}),
+      ...(ratelimit ? { ratelimit } : {}),
     })
     result.release?.() // 错误回包已发出，释放该候选的并发槽
     return
@@ -583,9 +587,9 @@ async function handleRequest(
   const usage = usageTap.getUsage()
   try {
     await pipeline(result.body as any, usageTap, res)
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage, ...(ratelimit ? { ratelimit } : {}) })
   } catch (e) {
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage, cause: 'stream_interrupt' })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage, ...(ratelimit ? { ratelimit } : {}), cause: 'stream_interrupt' })
   } finally {
     // 流式响应等响应结束（读完/中断）才释放并发槽——响应头到了就放会让 max_concurrency 少算在途流量
     result.release?.()
