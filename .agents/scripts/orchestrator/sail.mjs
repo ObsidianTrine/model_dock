@@ -283,7 +283,14 @@ export function buildSailReport(voyage) {
         const v = c.upstream?.verdicts?.find((x) => x.id === id)?.level;
         lines.push(`  - ⛵ 上游管线：调研 brief ${id} 已产出（research/<id>/brief.md，带引用与快照）${v ? `——可信度初判 ${v}` : ''}`);
       }
+      // 多维调研 topic（researchAutoDim，2026-11-10 P3）：复合清单 + rollup 如实入报告
+      for (const t of c.upstream?.researchedTopics ?? []) {
+        lines.push(`  - ⛵ 上游管线：多维调研 topic ${t.id} 已落盘（${t.dims} 维，rollup ${t.rollup}）——spec 按维注入待人审`);
+      }
       for (const id of c.upstream?.speced ?? []) lines.push(`  - ⛵ 上游管线：spec ${id} 已落盘待人审——审完设计后跑 spec build ${id} 拆卡进队列`);
+      for (const u of c.upstream?.unsafe ?? []) {
+        lines.push(`  - ⛔ 上游管线：${u.id}——调研 ${u.topic ? `topic ${u.topic}` : `brief ${u.brief}`} 判 unsafe（决策契约一票否决），spec 不升级，已留痕跳过（后续周期不再调研）`);
+      }
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
     } else if (c.kind === 'idle') {
       lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟。`);

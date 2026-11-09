@@ -469,6 +469,39 @@ import { SPECVERDICT_MARKER } from './spec-review.mjs';
 
 export { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER };
 
+/** 拆维规划会话输出契约的 fenced block 标记（sail researchAutoDim，P3 2026-11-10；
+ *  backends/mock.mjs 以 prompt 含此标记判定拆维会话模式）。 */
+export const DIMS_SPLIT_MARKER = 'agents-dims';
+
+/**
+ * 组装拆维规划 prompt（sail 上游管线 researchAutoDim，2026-11-10 P3）：readonly 轻会话
+ * 把提案目标拆成 2–4 个互补的调研维度。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 +
+ * 契约模板 + 硬性要求），产物既不是卡也不是 brief，是纯维度清单——每行一个、无解释；
+ * 解析在 research.mjs parseDimsPlan（容忍围栏包裹，不足 2 维调用方降级单 brief）。
+ */
+export function buildResearchDimsPrompt(goalText, repoRoot) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const clean = sanitizeIntent(goalText);
+  const fence = '```';
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：为下面的提案目标拆分调研维度（research auto-dim 规划）\n\n` +
+    `提案目标：${clean}\n\n` +
+    `你可以用 Read/Glob/Grep 快速了解本仓库语境（当前目录就是仓库根），判断该目标值得从哪些互补角度调研。\n` +
+    `你没有 Bash 也没有任何写文件工具——只规划，不改仓库。\n\n` +
+    `# 产出契约\n\n` +
+    `输出一个 fenced block，块内每行一个维度（2–4 个）：\n\n` +
+    `${fence}${DIMS_SPLIT_MARKER}\n` +
+    `<维度1>\n<维度2>\n<维度3（可选）>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 维度必须互补（合起来覆盖目标的关键未知面，如技术选型/成本/风险/生态），不要同义反复；\n` +
+    `2. 每个维度一行、不超过 20 字、不带编号、不带项目符号、不写任何解释——多余文字会破坏解析；\n` +
+    `3. 维度数量 2–4 个：少于 2 个无法多维调研，多于 4 个会被截断；\n` +
+    `4. 围栏外不要输出任何内容。\n`
+  );
+}
+
 /**
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
  * 硬性要求）。goalsText：goals.md 罗盘全文（可选）——注入「罗盘对齐」段的判定依据。
