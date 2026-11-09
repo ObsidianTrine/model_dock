@@ -2802,7 +2802,7 @@ function highPriorityDraftIds(repoRoot) {
   return high;
 }
 
-/** 读一张提案卡的 frontmatter（nightly --auto 硬禁区过滤用）。缺失/解析失败返回 null——
+/** 读一张提案卡的 frontmatter（nightly --auto / scan --run 硬禁区过滤用）。缺失/解析失败返回 null——
  *  过滤只对能解析的卡生效，损坏提案走 submitDraft 既有「留在 drafts 等人工修」路径。 */
 function draftCardMeta(repoRoot, id) {
   const text = safeRead(path.join(draftsDir(repoRoot), `${id}.md`));
@@ -2916,7 +2916,17 @@ async function cmdScan(repoRoot, opts) {
     try {
       const createdIds = created.map((c) => c.replace(/^\[dry-run\] /, ''));
       const high = createdIds.filter((id) => highPriorityDraftIds(repoRoot).includes(id));
+      // 硬禁区对齐（nightly --auto 同款口径，单一来源 sail.mjs 的 hardZoneReason）：
+      // deps/feature/核心·发布路径提案 submit+run 后必被引水闸打回 pending——白烧一次
+      // run 启动，选卡阶段直接跳过。解析失败的提案不拦，走 submitDraft 既有报错。
+      const scanCfg = runConfig(repoRoot);
       for (const id of high) {
+        const meta = draftCardMeta(repoRoot, id);
+        const hz = meta ? hardZoneReason(meta, scanCfg) : null;
+        if (hz) {
+          log(`⏸ 提案 ${id} 不自动提交：${hz}`);
+          continue;
+        }
         const r = submitDraft(repoRoot, root, id);
         if (!r.submitted) {
           log(`提案 ${id} 未提交：${r.skipped}`);

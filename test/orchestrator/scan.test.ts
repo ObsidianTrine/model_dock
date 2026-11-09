@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { issuesToCards, runScan, sanitize, scanCI, scanIssues, scanKnownIssues, scanTodo, sha8 } from '../../.agents/scripts/orchestrator/scan.mjs'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
@@ -259,5 +260,73 @@ describe('orchestrator scan > GitHub issues 信号源（gh best-effort）', () =
       repo.cleanup()
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// --run 硬禁区对齐（P2-15 同款）：deps/feature/核心·发布路径提案 submit+run 后必被
+// 引水闸打回 pending——白烧一次 run 启动。提交循环按 hardZoneReason（sail.mjs 单一
+// 口径）选卡阶段跳过。scan 信号源不产 feature 类型提案，该分支由 nightly --auto 用例
+// 覆盖（同一单一来源函数）；这里端到端覆盖 deps（audit 信号）与 corePaths（testfail
+// 信号 files_hint [src/**, test/**] 首段与 corePaths 重叠）。
+// ---------------------------------------------------------------------------
+
+/** 假 npm：audit 信号源输出固定漏洞 JSON——免网络/真 npm（deps 硬禁区判定只看 type）。
+ *  返回 stub 目录（调用方清理）；runOrch 以 PATH 前插注入。 */
+function stubNpmAudit(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-npm-stub-'))
+  const json = '{"metadata":{"vulnerabilities":{"total":1}},"vulnerabilities":{"left-pad":{"severity":"high"}}}'
+  const file = path.join(dir, process.platform === 'win32' ? 'npm.cmd' : 'npm')
+  // cmd echo 的 JSON 不含 ( ) & | < > ^ 等批处理特殊字符，双引号/花括号原样输出
+  fs.writeFileSync(file, process.platform === 'win32' ? `@echo ${json}\r\n` : `#!/bin/sh\necho '${json}'\n`)
+  if (process.platform !== 'win32') fs.chmodSync(file, 0o755)
+  return dir
+}
+
+describe('orchestrator scan > --run 硬禁区对齐', () => {
+  it('files_hint 命中 corePaths 的 high 提案不提交：留 drafts、不起 run', () => {
+    const repo = mkRepo({ testCmd: 'node -e "process.exit(1)"', workerBackend: 'mock', extra: { corePaths: ['src/gateway/**'] } })
+    try {
+      const out = runOrch(repo.root, 'scan --tests --run')
+      expect(out.stdout).toContain('不自动提交')
+      expect(out.stdout).toContain('命中核心/发布路径')
+      expect(out.stdout).not.toContain('scan --run →')
+      const drafts = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts')).filter((f) => f.startsWith('scan-testfail-'))
+      expect(drafts).toHaveLength(1) // 提案原地保留等人工
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('普通 high 提案（不命中 corePaths）照常提交闭环', () => {
+    const repo = mkRepo({ testCmd: 'node -e "process.exit(1)"', workerBackend: 'mock', extra: { corePaths: ['docs/**'] } })
+    try {
+      const out = runOrch(repo.root, 'scan --tests --run')
+      expect(out.stdout).toMatch(/scan --run → scan-testfail-\d{4}-\d{2}-\d{2}/)
+      // 提交即离开 drafts（run 后卡片落队列状态目录；gate 失败落 blocked/failed 亦属正常闭环）
+      expect(fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts')).filter((f) => f.endsWith('.md'))).toHaveLength(0)
+      const queued = ['pending', 'running', 'reviewing', 'awaiting-human', 'merged', 'failed', 'blocked'].flatMap((s) => listCards(queueRoot(repo.root), s))
+      expect(queued).toHaveLength(1)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('deps 提案（audit 信号）不提交：deps 类型永不自动', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    const stubDir = stubNpmAudit()
+    try {
+      const out = runOrch(repo.root, 'scan --audit --run', { PATH: `${stubDir}${path.delimiter}${process.env.PATH}` })
+      expect(out.stdout).toContain('不自动提交')
+      expect(out.stdout).toContain('deps 类型永不自动提交')
+      expect(out.stdout).not.toContain('scan --run →')
+      const drafts = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts')).filter((f) => f.startsWith('scan-audit-'))
+      expect(drafts).toHaveLength(1)
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      fs.rmSync(stubDir, { recursive: true, force: true })
+      repo.cleanup()
+    }
+  }, 120_000)
 })
 
