@@ -12,17 +12,13 @@
 - **现状**：**条件已达成**（快照可用性已合；台账 25 条判定，glm-5.3-flash 为主力船）
 - **专家结论**：✅ 值得做。四层可信度判定（L0 门禁→L1 快照→L2 逐字/仲裁→L3 台账）只差 L3→行动这最后一步；成本小（assessBrief/verify 路径加策略钩子 + 单测）。建议语义：连续 N 次 fail → 通知 + 标记「该模型调研结果需人工复核」，不做硬熔断（模型漂移可能瞬时）
 
-### 2. codex 重烤覆盖面核对（烤入失联防御）
-- **功能**：路由/服务商变更后核对 refreshBakedModelClients 覆盖面——确保烤入客户端（codex/dsh/workbuddy 等模型烙在文件里的）全部跟随重烤，杜绝「烤入模型 ≠ 路由目录」失联（gpt-6-astra 事故的根因面收口）
-- **暂缓理由**：P0+P1 已解主痛（catalog + 无头船）；此项属防御性收尾，当前靠「控制台重接激活」人工兜底
-- **专家结论**：✅ 值得做（小卡）。建议与 #3 一起做，一张卡两个任务段
+### 2. codex 重烤覆盖面核对（烤入失联防御）——✅ 已完成（ea9484e，2026-11-11）
+refreshBakedModelClients 内聚进 switchToService/switchToServiceWithRoute 单一漏斗：云端/同步引擎远程切换回调漏重烤的缺口（gpt-6-astra 事故根因面）闭合；稳态守卫重复调用零写盘。测试 ops-switch-rebake.test.ts 回归锁。
 
 ## 二、值得做但排后（P2，触发条件明确）
 
-### 3. codex profiles 多路由
-- **功能**：attach 时为每条 ModelDock 路由写 `[profiles.<id>]` 进 codex config，`codex -p <id>` 一键切换路由/模型，免控制台往返
-- **暂缓理由**：当前单路由钉定够用；切路由习惯走 ModelDock 控制台（控制台是唯一事实源，避免两侧状态漂移）
-- **重启条件**：出现频繁切路由需求、或要在 codex 侧自助切换时
+### 3. codex profiles 多路由——✅ 已完成（ea9484e，2026-11-11，提前重启：船东拍板「codex 现在就可以做」）
+attach 为每条 ModelDock 路由写 `[profiles.<id>]`（default_model 必须在 provider 目录内，防烤出死条目）；`codex -p <路由id>` 免控制台切换；用户自设同名 profile 不覆盖；detach 只收自家条目。
 
 ### 4. multi-dim sail 集成（feature 提案自动拆维度）
 - **功能**：上游管线对 feature 提案自动分解 2-4 个维度并行调研（planner 拆维会话 + 并发池调度）
