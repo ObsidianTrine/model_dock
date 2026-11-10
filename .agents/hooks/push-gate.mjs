@@ -18,6 +18,7 @@
 //     任一命中 → defer 走原拦截路径（复合命令里触端口的段绝不随 push 放行）；--follow-tags
 //     可顺带推可达 annotated tag（含 v* 触发 Release），与 --tags 同待遇按保护拦；cd 到其他
 //     仓库 / --git-dir/--work-tree 改锚形态一律 defer——工件核验的仓库必须 = 实推的仓库。
+//     （2026-11 round3：refspec '+' 前缀强推形态、--repo 位移歧义段一并 defer/保守面。）
 //
 // 取舍（fail-safe 口径）：git 子进程 5s 超时——hook 卡死不能堵死会话；超时/解析失败/模块
 // 异常一律 defer 走既有裁决（push 仍被既有 publish 红线拦住，只是不用新文案），绝不因门禁
@@ -39,9 +40,13 @@ export const ARTIFACT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ARTIFACT_REL = path.join('.agents', 'orchestrator', 'push-review', 'latest.json');
 
 // push 子命令 flag 表（保守白名单：表外一律「解析不可靠」defer，绝不猜 token 边界）。
+// round3 全量核对（对 git 2.23 / 2.39.2 实测）：-n 补入 BOOL（--dry-run 短形态，两版一致）；
+// --recurse-submodules 刻意不入表——空格形态是否吞值随版本漂移（2.23 不吞值并 fatal
+// missing parameter；2.39.2 吞值），表外 defer 保守面；--force-with-lease 空格形态两版
+// 都不吞值（OPTARG），按无值处理正确。
 const PUSH_BOOL_FLAGS = new Set([
   '-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose', '--atomic',
-  '--no-verify', '--verify', '--dry-run', '--thin', '--prune', '--progress', '--no-progress',
+  '--no-verify', '--verify', '--dry-run', '-n', '--thin', '--prune', '--progress', '--no-progress',
   '--signed', '--no-signed', '-d', '--delete', '--porcelain', '-4', '--ipv4', '-6', '--ipv6',
   '--no-force-with-lease', '--no-force-if-includes',
 ]);
@@ -49,6 +54,8 @@ const PUSH_VALUE_FLAGS = new Set(['-o', '--push-option', '--receive-pack', '--ex
 // --follow-tags 顺带推可达 annotated tag（含 v* 触发 Release）——与 --tags 同待遇按保护拦（round2 P2）
 const BROAD_FLAGS = new Set(['--all', '--branches', '--mirror', '--tags', '--follow-tags']);
 const FORCE_FLAGS = new Set(['-f', '--force', '--force-with-lease', '--force-if-includes']);
+// = 附着形态的已知 flag 头（round3 audit：表外 flag 的 = 附着与空格形态同口径 defer）
+const KNOWN_PUSH_FLAGS = new Set([...PUSH_BOOL_FLAGS, ...PUSH_VALUE_FLAGS, ...BROAD_FLAGS, ...FORCE_FLAGS]);
 
 const basename = (t) => String(t ?? '').split(/[\\/]/).pop() ?? '';
 
@@ -138,8 +145,11 @@ export function scanPushCommand(cmd, policy) {
 /**
  * 解析单条 push 段：git 全局 flag（-C <path>/-c/--git-dir/--work-tree 带值）→ push →
  * push 自身 flag（白名单）→ 位置参数（首个 = remote，其余 = refspec）。
- * unreliable=true 表示遇到表外 flag，token 边界不可靠（调用方必须 defer）。
+ * unreliable=true 表示遇到表外 flag，token 边界不可靠（调用方必须 defer）；= 附着形态的
+ * 表外 flag 头同样 unreliable（round3 audit：两种形态同口径）。
  * auth=true 表示本段带 AGENTS_ALLOW_PUSH=1 命令前缀 hatch（envPrefixSpan 复用 policy 实现）。
+ * repoFlag=true 表示 --repo 出现过（空格 /= 附着两形态）——repository 位与位置参数的角色
+ * 关系随 git 版本有歧义，由 resolvePushTargets 按双语义并集保守核验。
  */
 export function parsePushSegment(seg, policy) {
   const tokens = String(seg).trim().split(/\s+/);
@@ -189,6 +199,7 @@ export function parsePushSegment(seg, policy) {
   let broad = false;
   let force = false;
   let unreliable = false;
+  let repoFlag = false;
   for (; k < tokens.length; k++) {
     const t = tokens[k];
     if (!t.startsWith('-')) {
@@ -198,8 +209,14 @@ export function parsePushSegment(seg, policy) {
     const eq = t.indexOf('=');
     if (eq > 1) {
       // --flag=value：值附着，不吞下一 token
-      if (BROAD_FLAGS.has(t.slice(0, eq))) broad = true;
-      if (FORCE_FLAGS.has(t.slice(0, eq))) force = true;
+      const head = t.slice(0, eq);
+      if (BROAD_FLAGS.has(head)) broad = true;
+      if (FORCE_FLAGS.has(head)) force = true;
+      if (head === '--repo') repoFlag = true;
+      if (!KNOWN_PUSH_FLAGS.has(head)) {
+        unreliable = true; // 表外 flag 的 = 附着形态与空格形态同口径 defer（round3 audit）
+        break;
+      }
       continue;
     }
     if (BROAD_FLAGS.has(t)) {
@@ -212,23 +229,29 @@ export function parsePushSegment(seg, policy) {
     }
     if (PUSH_BOOL_FLAGS.has(t)) continue;
     if (PUSH_VALUE_FLAGS.has(t)) {
+      if (t === '--repo') repoFlag = true;
       k += 1; // 吞值
       continue;
     }
     unreliable = true;
     break;
   }
-  return { seg, gitDir, broad, force, unreliable, auth, args, deferReason };
+  return { seg, gitDir, broad, force, unreliable, auth, args, repoFlag, deferReason };
 }
 
 /**
- * refspec → 目标分支。tag 一律 defer（发布动作走既有 AGENTS_ALLOW_RELEASE 白名单，绝不借道）；
- * 通配 refspec（refs/heads/* 等）一律 defer——命中面是全部分支，绝不按字面分支名放行；
- * 裸名 refspec 本地 show-ref 消歧（分支/tag/新分支），消歧失败保守 defer。
+ * refspec → 目标分支。'+' 前缀强推形态（+develop / +HEAD:develop / +:dst 全形态）一律
+ * defer——force push 永不借道审查放行，与段级 --force 同口径（round3 P1：前版只剥前缀
+ * 不判 force，带有效工件时可走 allow-review 实推非快进强推）；tag 一律 defer（发布动作
+ * 走既有 AGENTS_ALLOW_RELEASE 白名单，绝不借道）；通配 refspec（refs/heads/* 等）一律
+ * defer——命中面是全部分支，绝不按字面分支名放行；裸名 refspec 本地 show-ref 消歧
+ * （分支/tag/新分支），消歧失败保守 defer。
  */
 export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
-  let s = String(rs ?? '');
-  if (s.startsWith('+')) s = s.slice(1); // force 前缀已在段级 force 判过，这里只剥
+  const s = String(rs ?? '');
+  if (s.startsWith('+')) {
+    return { deferReason: `refspec ${rs} 带 + 强推前缀（force push 永不借道审查放行——保守走既有裁决）` };
+  }
   if (!s) return { deferReason: '空 refspec（冒号匹配形态面太宽，保守走既有裁决）' };
   // 通配/glob 元字符（refs/heads/*、feature/*、:refs/heads/* 等）：'*' 会被 branchOf 剥成
   // 字面分支名放行，实际命中含 main/develop 在内的全部分支——与 tag/force 同待遇 defer。
@@ -261,23 +284,57 @@ export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = de
   return { deferReason: `refspec ${rs} 分支与 tag 同名歧义（保守走既有裁决）` };
 }
 
-/** 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 按 push.default 解析。 */
+/**
+ * 裸 push（实推 refspec 集为空，目标由 push.default 决定）的分支解析：缺省（未配置）与
+ * simple/current 才是「推当前分支」；matching 推全部同名分支、upstream/tracking 推
+ * upstream（可能与当前分支不同名），命中面不确定 → 保守 defer（表外一律 defer）。
+ */
+function barePushTargets(repoDir, runGit) {
+  const pd = runGit(repoDir, ['config', 'push.default']);
+  if (pd && !['simple', 'current'].includes(pd)) {
+    return { deferReason: `裸 push 的 push.default=${pd}（推全部同名分支或 upstream，命中面不确定——保守走既有裁决）` };
+  }
+  const cur = runGit(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!cur || cur === 'HEAD') return { deferReason: '裸 push 的当前分支解析失败（保守走既有裁决）' };
+  return { branches: [cur], protected: PROTECTED_BRANCHES.includes(cur) };
+}
+
+/**
+ * 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 与 --repo 位移形态
+ * 见 barePushTargets / repoFlag 并集口径（round3 P1）。
+ */
 export function resolvePushTargets(p, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
   if (p.deferReason) return { deferReason: p.deferReason };
   if (p.unreliable) return { deferReason: 'push 命令含未识别 flag（解析不可靠，保守走既有裁决）' };
   if (p.force) return { deferReason: 'force push 走既有裁决（永不借道审查放行）' };
   if (p.broad) return { branches: [...PROTECTED_BRANCHES], protected: true, broad: true };
-  if (p.args.length <= 1) {
-    // 裸 push（无参数或只给 remote）：目标分支由 push.default 决定——缺省（未配置）与
-    // simple/current 才是「推当前分支」；matching 推全部同名分支、upstream/tracking 推
-    // upstream（可能与当前分支不同名），命中面不确定 → 保守 defer（表外一律 defer）。
-    const pd = runGit(repoDir, ['config', 'push.default']);
-    if (pd && !['simple', 'current'].includes(pd)) {
-      return { deferReason: `裸 push 的 push.default=${pd}（推全部同名分支或 upstream，命中面不确定——保守走既有裁决）` };
+  if (p.repoFlag) {
+    // --repo <r>（round3 P1）：repository 位被 flag 占用后，位置参数的角色随 git 版本有歧义——
+    //   评审口径（现代 git）：--repo 占 repository 位，位置参数全是 refspec（`--repo origin
+    //   develop` 实推 develop）；git 2.23 / 2.39.2 实测：位置参数首个仍占 repository 位
+    //   （--repo 被忽略），`--repo origin develop` 实推**当前分支**到名为 develop 的仓。
+    // 门禁按两种语义的**并集**保守核验：① 全部位置参数按 refspec 消歧（评审口径，绝不落入
+    // 单一「裸 push 按当前分支」误判——前版在此放行非保护分支检出上的 develop 实推）；
+    // ② 恰有一个位置参数时叠加裸 push 当前分支口径（实测口径的镜像借道：refspec 看着非
+    // 保护、实推的当前分支可能是保护分支）。任一语义命中保护分支即按保护处理，refspec
+    // 消歧失败一律 defer。
+    const branches = new Set();
+    for (const rs of p.args) {
+      const t = refspecTarget(rs, repoDir, runGit, runGitOk);
+      if (t.deferReason) return t;
+      branches.add(t.branch);
     }
-    const cur = runGit(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (!cur || cur === 'HEAD') return { deferReason: '裸 push 的当前分支解析失败（保守走既有裁决）' };
-    return PROTECTED_BRANCHES.includes(cur) ? { branches: [cur], protected: true } : { branches: [cur], protected: false };
+    if (p.args.length <= 1) {
+      const bare = barePushTargets(repoDir, runGit);
+      if (bare.deferReason) return bare;
+      for (const b of bare.branches) branches.add(b);
+    }
+    const list = [...branches];
+    return { branches: list, protected: list.some((b) => PROTECTED_BRANCHES.includes(b)) };
+  }
+  if (p.args.length <= 1) {
+    // 裸 push（无参数或只给 remote）
+    return barePushTargets(repoDir, runGit);
   }
   const branches = [];
   for (const rs of p.args.slice(1)) {

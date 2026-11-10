@@ -457,6 +457,48 @@ describe('policy-dispatch push 闸 > 判定矩阵（子进程实测）', () => {
     }
   })
 
+  it('round3 P1：+ 前缀 force（+develop / +HEAD:develop）→ defer，有结论/人工旁路都拦', () => {
+    const repo = mkRepo()
+    try {
+      // defer → 既有 publish 拦截原文案（非三选一）
+      for (const cmd of ['git push origin +develop', 'git push origin +HEAD:develop']) {
+        const r = runDispatch(bashEvent(repo.root, cmd))
+        expect(r.status).toBe(2)
+        expect(r.stderr).toContain('发布动作人工授权制')
+        expect(r.stderr).not.toContain('三选一')
+      }
+      // 有有效结论也拦（结论只担保 HEAD 内容，不担保非快进改写——与 -f 同口径）
+      writeArtifact(repo.root)
+      expect(runDispatch(bashEvent(repo.root, 'git push origin +develop')).status).toBe(2)
+      expect(runDispatch(bashEvent(repo.root, 'git push origin +HEAD:develop')).status).toBe(2)
+      // 人工旁路同样不借道（defer 先于旁路判定）
+      const bypass = runDispatch(bashEvent(repo.root, 'AGENTS_ALLOW_PUSH=1 git push origin +develop'), { AGENTS_ALLOW_PUSH: '1' })
+      expect(bypass.status).toBe(2)
+      expect(bypass.stderr).not.toContain('三选一')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('round3 P1：--repo 位移——目标分支按 refspec 核验（develop），绝不按裸 push 误判放行', () => {
+    const repo = mkRepo()
+    try {
+      git(repo.root, 'checkout -b feature/wip') // 检出非保护分支：修复前的误判在此放行
+      // 无工件：develop 是 refspec → 按保护分支拦（三选一；前版误判成裸 push → exit 0）
+      const r = runDispatch(bashEvent(repo.root, 'git push --repo origin develop'))
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('三选一')
+      // --repo 值不是真 remote 名也一样（门禁按语法消费，不依赖远端存在）
+      expect(runDispatch(bashEvent(repo.root, 'git push --repo x develop')).status).toBe(2)
+      // 有效工件 → 审查路径放行（目标=develop 已核验，按保护分支口径拦/放）
+      writeArtifact(repo.root)
+      expect(runDispatch(bashEvent(repo.root, 'git push --repo origin develop')).status).toBe(0)
+      expect(runDispatch(bashEvent(repo.root, 'git push --repo x develop')).status).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('非 push 命令不受门禁影响（既有放行/拦截面零变化）', () => {
     const repo = mkRepo()
     try {
@@ -490,7 +532,12 @@ describe('push-gate 纯函数矩阵', () => {
     expect(gate.refspecTarget('refs/heads/main', '/r', gate.defaultRunGit, okBranches)).toEqual({ branch: 'main' })
     expect(gate.refspecTarget('HEAD:develop', '/r', gate.defaultRunGit, okBranches)).toEqual({ branch: 'develop' })
     expect(gate.refspecTarget('develop:feature/x', '/r', gate.defaultRunGit, okBranches)).toEqual({ branch: 'feature/x' })
-    expect(gate.refspecTarget('+develop', '/r', gate.defaultRunGit, okBranches)).toEqual({ branch: 'develop' })
+    // + 前缀 = force push 语义（+develop / +HEAD:develop / +:dst 全形态）：一律 defer，
+    // 与段级 -f 同口径（round3 P1——前版只剥前缀不判 force，带工件可走 allow-review 强推）
+    expect(gate.refspecTarget('+develop', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('+HEAD:develop', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('+:develop', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('+refs/heads/develop:refs/heads/main', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
     expect(gate.refspecTarget(':develop', '/r', gate.defaultRunGit, okBranches)).toEqual({ branch: 'develop' }) // 删除保护分支同判
     // tag 形态一律 defer（发布动作绝不借道）
     expect(gate.refspecTarget('refs/tags/v1.2.3', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
@@ -523,6 +570,10 @@ describe('push-gate 纯函数矩阵', () => {
     // 带值 flag 的值不被误当 refspec；= 附着形态不吞下一 token
     expect(gate.parsePushSegment('git push --repo upstream develop', policy)?.args).toEqual(['develop'])
     expect(gate.parsePushSegment('git push --push-option=ci origin develop', policy)?.args).toEqual(['origin', 'develop'])
+    // round3 audit：-n 是 --dry-run 短形态（无值）；表外 flag 的 = 附着形态与空格形态同口径 unreliable
+    expect(gate.parsePushSegment('git push -n origin develop', policy)?.unreliable).toBe(false)
+    expect(gate.parsePushSegment('git push --frobnicate=x origin main', policy)?.unreliable).toBe(true)
+    expect(gate.parsePushSegment('git push --recurse-submodules=on-demand origin develop', policy)?.unreliable).toBe(true)
     expect(gate.parsePushSegment('git status', policy)).toBeNull()
   })
 
@@ -575,6 +626,34 @@ describe('push-gate 纯函数矩阵', () => {
     expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'simple'), ok)).toEqual({ branches: ['develop'], protected: true })
     expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'current'), ok)).toEqual({ branches: ['develop'], protected: true })
     expect(gate.resolvePushTargets(bareRemote!, '/r', fakeHead('feature/wip', null), ok)).toEqual({ branches: ['feature/wip'], protected: false })
+  })
+
+  it('resolvePushTargets（round3 P1）：--repo 位移按两种 git 语义并集核验，绝不按裸 push 误判', () => {
+    const okDev = fakeOkFor('refs/heads/develop')
+    const okBoth = fakeOkFor('refs/heads/develop', 'refs/heads/feature/wip')
+    // 评审主案例：--repo 吞值后 develop 是 refspec（评审口径）→ 按保护判，并叠加实测口径的
+    // 当前分支——绝不落入「裸 push 按当前分支」误判（前版在此返回 protected:false 直接放行）
+    const p1 = gate.parsePushSegment('git push --repo origin develop', policy)
+    expect(p1?.repoFlag).toBe(true)
+    expect(gate.resolvePushTargets(p1!, '/r', fakeHead('feature/wip', null), okDev)).toEqual({ branches: ['develop', 'feature/wip'], protected: true })
+    // = 附着形态同样置 repoFlag
+    const p2 = gate.parsePushSegment('git push --repo=origin develop', policy)
+    expect(p2?.repoFlag).toBe(true)
+    expect(gate.resolvePushTargets(p2!, '/r', fakeHead('feature/wip', null), okDev)).toEqual({ branches: ['develop', 'feature/wip'], protected: true })
+    // 镜像借道（git 2.23 / 2.39.2 实测口径：位置参数首个仍占 repository 位、实推当前分支）：
+    // refspec 看着非保护，但当前分支是保护分支时必须按保护拦
+    const p3 = gate.parsePushSegment('git push --repo x feature/wip', policy)
+    expect(gate.resolvePushTargets(p3!, '/r', fakeHead('develop', null), okBoth)).toEqual({ branches: ['feature/wip', 'develop'], protected: true })
+    // 当前分支也非保护：正常放行（--repo 合法用法不误伤）
+    expect(gate.resolvePushTargets(p3!, '/r', fakeHead('feature/wip', null), okBoth)).toEqual({ branches: ['feature/wip'], protected: false })
+    // --repo 无位置参数（git push --repo origin）：两种语义同为裸 push，按 push.default 口径
+    const p4 = gate.parsePushSegment('git push --repo origin', policy)
+    expect(gate.resolvePushTargets(p4!, '/r', fakeHead('feature/wip', null), okDev)).toEqual({ branches: ['feature/wip'], protected: false })
+    // 单位置参数 + push.default=matching：实测口径实推全部同名分支 → defer
+    expect(gate.resolvePushTargets(p3!, '/r', fakeHead('develop', 'matching'), okBoth)).toHaveProperty('deferReason')
+    // 对照：无 --repo 的裸 push 口径不变
+    const bare = gate.parsePushSegment('git push origin', policy)
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('feature/wip', null), okDev)).toEqual({ branches: ['feature/wip'], protected: false })
   })
 
   it('scanPushCommand：混入 tag / npm publish 全量上报（defer 依据）', () => {
