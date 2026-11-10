@@ -67,6 +67,7 @@ import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } fr
 import { readNightlyState, writeNightlyState, decideNightlyStart } from './orchestrator/nightly-state.mjs';
 import { writeSpec, readSpec, listSpecs, buildSpecCards, parseTasksDoc, readProgress, specDir } from './orchestrator/spec.mjs';
 import { runSpecL0Checks, auditSpecFindings, computeSpecVerdict, parseSpecVerdictBlock, buildSpecReviewNotifyBody } from './orchestrator/spec-review.mjs';
+import { cmdPushReview } from './orchestrator/push-review.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock, SCHED_LOCK_ENV } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
@@ -5342,6 +5343,8 @@ function usage() {
   schedule install|uninstall|status [--mode nightly|watch|sail] [--hour 0-23] [--minute 0-59] [--interval 30] [--tests] [--auto N] [--minutes N|--duration 2h] [--dry-run]
                                           定时调度注册（launchd/crontab/schtasks 经 wrapper 绝对路径启动；--mode watch 注册常驻循环，--mode sail 注册每日定时自由航行）
   release-propose [X.Y.Z]                  发版提案：盘点提交 + semver 定档 + CHANGELOG 草稿（只读仓库；确认后说「发布 vX.Y.Z」）
+  push-review [--range A..B] [--model m] [--backend mock]
+                                          push 前整体审查：只读审查船按 REVIEW.md 口径过一遍待推提交（缺省 @{u}..HEAD，回落 origin/develop..HEAD；diff >400KB die 建议分段）——结论落 .agents/orchestrator/push-review/latest.json（push-verdict/1）+ fleet 留痕；verdict=fail 退出码非 0。pass 且 24h 内且 HEAD 未变时，hook 闸（policy-dispatch）自动放行 git push main/develop；HEAD 再变即失效需重审
   drift [--clear]                          质量漂移报告：自动合并回溯失败率超 20% 自动降级全人工（--clear 人工恢复）
   reconcile [task-id] [--fix-states]      用量对账（自报 token vs 网关实测）+ 燃油账（实测 token × 价目 = USD，需 gatewayAdmin）+ 卡状态对账（git 合并现实 vs 队列落位；--fix-states 把「已合并未落位」的卡落位 merged/）
   resume <task-id> [--backend mock]       崩溃任务带恢复上下文续做
@@ -5397,6 +5400,7 @@ async function main() {
     else if (a === '--min-citations') opts.minCitations = parseInt(argv[++i], 10);
     else if (a === '--dim') (opts.dims ??= []).push(argv[++i]); // research multi：可重复，每维一项
     else if (a === '--model') opts.model = argv[++i];
+    else if (a === '--range') opts.range = argv[++i]; // push-review：待审 git range（A..B / A...B）
     else if (a === '--mode') opts.mode = argv[++i];
     else if (a.startsWith('--')) flags.add(a);
     else args.push(a);
@@ -5486,6 +5490,8 @@ async function main() {
       return cmdSchedule(repoRoot, args[0], opts);
     case 'release-propose':
       return cmdReleasePropose(repoRoot, args[0]);
+    case 'push-review':
+      return cmdPushReview(repoRoot, opts);
     case 'drift':
       return cmdDrift(repoRoot, opts);
     case 'reconcile':

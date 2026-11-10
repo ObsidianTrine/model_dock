@@ -145,7 +145,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 ## 红线（永不）
 
-- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。
+- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。确需 push 上远程（船东明确要求）：先过 `orch push-review`（pass 且 24h 内且 HEAD 未变时 hook 闸自动放行 main/develop），或由船东当场 `AGENTS_ALLOW_PUSH=1` 授权（见 orchestrator.md B9.5）。
 - **8687 / 8890 端口永不触碰**（监听/stop/改配置一律禁止）。
 - 不改门禁与熔断逻辑来「让任务通过」；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试。
 - 自治跑中引擎故障**禁止自行换引擎**（切换=换计费方，必须用户批准）；测试结束清理你拉起的全部临时进程。

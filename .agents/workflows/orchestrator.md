@@ -372,6 +372,15 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 - **燃油账（报告「值不值得」的依据）**：本航次 [起航, 收帆] 网关实测 token × 价目 = USD（总账 + 逐卡拆账，逐卡按各自事件时间窗投影）；worker 直连上游时如实标「不可测」；收帆时若成本上限已触发，按完整航程重算覆盖触发时刻快照。
 - **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
 
+### B9.5 push 审查门禁（push-review，上远程前的整体审查闸）
+
+背景：夜间自由巡航 / 多卡并行的本地 develop 提交此前 push 上远程没有整体审查闸门。防线分两层——**① 审查命令** `node .agents/scripts/orchestrator.mjs push-review [--range A..B] [--model m] [--backend mock]`：只读审查船按 REVIEW.md 口径过一遍待推提交（缺省 range `@{u}..HEAD`，回落 `origin/develop..HEAD`，再无则要求显式 `--range`；diff >400KB 拒审并建议分段），结论落 `.agents/orchestrator/push-review/latest.json`（schema `push-verdict/1`：verdict/overall/findings/reasons/head/range/reviewed_at）+ fleet 留痕 `push_review`；verdict=fail 退出码非 0。**② hook 闸**（`.agents/hooks/policy-dispatch.mjs` 扩展，判定核心在同目录 `push-gate.mjs`）：agent 会话里的 `git push`（含 `git -C <path> push` 形态）命中 main/develop 时——无审查要件拦截并给三选一；`AGENTS_ALLOW_PUSH=1` 人工授权旁路（认 hook 进程 env 与命令前缀 hatch 两形态，与 `AGENTS_ALLOW_RELEASE` 同语义，责任在人，留痕 `~/.agents/hooks/push-gate.log`）或 push-review 结论 pass 且 24h 内且 HEAD 未变 → 放行。推其他分支显式指名即放行；tag/npm publish/force push/`--all` 等一律走既有裁决（tag 触发 Release 永远人工，绝不借道本闸；`AGENTS_ALLOW_RELEASE` 发版白名单原样生效）。
+
+- **流程**：巡航收帆 / 批量合并到 develop 之后 → `orch push-review` → 绿了才 push → **HEAD 再变即失效**（结论绑定 `git rev-parse HEAD` 全 sha），需重跑审查；verdict=fail 先修 findings 再重审。
+- **生效面（务必写进认知）**：hook 只拦 agent 的 Bash 会话——policy-dispatch 挂在 claude/zcode hook 链上、按既有语义仅 `ORCH_POLICY_ENFORCE=1` 的会话（编排器 headless worker / 审查船等）裁决；**船东本人终端不经 hook，完全不受影响**。门禁对既有红线只收窄不放行：仅覆盖「纯 push 段 + publish 类拦截」，端口等其他红线与 `AGENTS_ALLOW_RELEASE` 发版通道原样生效。
+- **两层防线**：本闸是本地事前审查；CI 仍有 test-workflow 兜底（push 后三平台矩阵），漏网错误在远程 CI 再拦一次。
+- **安装（合并后由调度台执行一次）**：`cp .agents/hooks/policy-dispatch.mjs .agents/hooks/push-gate.mjs ~/.agents/hooks/`（**两个文件都要**——dispatcher 运行时动态加载同目录 push-gate.mjs），并确认用户级 hook 注册仍指向 `~/.agents/hooks/policy-dispatch.mjs`（缺 push-gate.mjs 时门禁自动 defer 走既有裁决，不丢拦截只丢新文案）。
+
 ### B10. 双向批示（approval listener，飞书卡片远程审批闸门）
 
 闸门通知原来只有单行文本（B4 webhook）——人不在电脑前就得等回工位再批。双向批示把回路补上：**需要人工动作的落位事件在文本通知之外多发一张飞书交互卡片，群里点按钮即可远程批示 approve / reject / retry**。缺省完全不启用：卡片开关不开不发卡、监听器不启动不占端口，行为与历史版本零差异。

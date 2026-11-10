@@ -42,6 +42,9 @@ NOTES.md
 # 规格三件套（spec 命令产物，人工审阅的工作区；拆出的任务卡进队列即完成使命）
 .agents/orchestrator/specs/
 
+# push 审查结论（push-review 命令运行态产物；hook 闸消费后按 24h/HEAD 失效）
+.agents/orchestrator/push-review/
+
 # vitest coverage 报告（test:coverage 产物，不入库）
 coverage/
 tmp/
