@@ -697,3 +697,72 @@ export function buildSpecReviewPrompt(specId, spec, l0, repoRoot, { today = toIs
     `围栏外只允许一句话概述。不要输出其他内容。\n`
   );
 }
+
+// ---------------------------------------------------------------------------
+// push 审查船（push review 命令，push-review-gate 卡 2026-11）：readonly 会话按
+// REVIEW.md 口径对「即将上远程的提交范围」做整体审查，产出 push-verdict/1 契约块。
+// 结论落 .agents/orchestrator/push-review/latest.json，由 .agents/hooks/push-gate.mjs
+// （policy-dispatch 的 push 闸）消费：pass 且 24h 内且 HEAD 未变才放行 git push main/develop。
+// ---------------------------------------------------------------------------
+
+/** push 审查船产出契约的 fenced block 标记。
+ *  命名注意（spec-review.mjs 同款纪律）：不得与既有任何标记互为子串、不得用 'agents-spec'
+ *  前缀——mock 后端按 prompt.includes() 判角色。'agents-push-verdict' 与既有全部标记
+ *  （agents-result/card/spec/requirements/design/tasks/dims/brief/verdict/arbitration/
+ *  review-verdict）逐一对拍：'push' 段隔断，无包含关系。 */
+export const PUSHVERDICT_MARKER = 'agents-push-verdict';
+
+/**
+ * 组装 push 审查 prompt：与 spec 审查同构（瘦 prompt + 纪律内嵌 + 单契约块），差异在
+ * 纪律源——REVIEW.md 摘要直接烘焙进模板（审查目标仓未必有该文件，如测试夹具；REVIEW.md
+ * 改动时需人工同步本摘要）。
+ */
+export function buildPushReviewPrompt({ range, branch, commits, diff }) {
+  const fence = '```';
+  const discipline = [
+    '只报有把握的真问题：每条给 文件+行号 证据，不许按名字猜；先自行验证（读文件确认行号与代码属实）再报。',
+    '风格/诊断/清理类不报；不是本批提交引入的问题不报；同类问题一次说全（标明「同类还有 N 处」）。',
+    '一票否决红线（出现即 P0）：测试或默认配置出现 8687/8890 端口；硬编码 ~/.modeldock；绕过 atomicWrite() 写盘；使用 import.meta.url；引入 native addon；src/cli.ts 三路分发被破坏。',
+    '重点区域失败形态：网关转发（src/gateway/）——密钥或 token 出现在日志/错误消息、流式中断处理缺失、句柄泄漏；配置与密钥（src/config/）——静默丢用户数据、secrets 明文外泄或权限过宽；适配器（src/adapters/）——写坏客户端配置文件、detach 冲掉用户改动；测试（test/）——vitest 跨文件 mock 雷、监听 8687/8890、平台差异无分支（路径分隔符/权限位/进程树）、写死 /tmp 或盘符。',
+    '文档与代码行为不一致（「它撒谎」）同样算失败。',
+    '跳过生成物与锁文件：src/gateway/ui-minified.ts、src/providers/catalog-snapshot.generated.ts、dist/、release/、coverage/、package-lock.json。',
+  ].map((s) => `- ${s}`).join('\n');
+  return (
+    `# 任务：push 前整体审查（push review gate）\n\n` +
+    `这批提交即将上远程。你是审查船：只读，不修改任何文件，不跑 git 写操作或测试。\n` +
+    `工作目录是仓库根（你只有只读探索工具：Read/Glob/Grep），可打开 diff 涉及的文件核实上下文。\n\n` +
+    `## 待审范围\n\n当前分支 ${branch}；提交范围 ${range}。\n\n` +
+    `## 审查纪律（与人工/PR 审查同一标准，REVIEW.md 口径摘要）\n\n${discipline}\n\n` +
+    `## 提交清单（git log --oneline ${range}）\n\n${commits || '（空：范围内没有提交）'}\n\n` +
+    `## 整体 diff（git diff ${range}）\n\n${fence}diff\n${diff || '（空 diff）'}\n${fence}\n\n` +
+    `## 产出契约\n\n` +
+    `输出单个 fenced block（内容为合法 JSON）：\n\n` +
+    `${fence}${PUSHVERDICT_MARKER}\n` +
+    `{\n` +
+    `  "verdict": "pass | fail",\n` +
+    `  "overall": 0-100,\n` +
+    `  "findings": [\n` +
+    `    { "severity": "P0 | P1 | P2", "file": "<相对仓库根路径>", "line": <行号，可选>, "claim": "<问题一句话>", "why": "<依据：纪律条目或代码事实>", "fix": "<一句话建议，可选>" }\n` +
+    `  ],\n` +
+    `  "reasons": ["<verdict 的关键理由，一句话一条>"]\n` +
+    `}\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. verdict=fail 当且仅当存在 P0 或功能性硬伤（P1）；只有 P2 或无问题 → verdict=pass，不凑数；\n` +
+    `2. findings ≤ 12 条，按 P0>P1>P2 排序；N=0 明说通过（reasons 写明审了什么）；\n` +
+    `3. 围栏外只允许一句话概述。不要输出其他内容。\n`
+  );
+}
+
+/** 从 push 审查输出提取契约块 JSON；找不到或非法 JSON 返回 null（调用方喂回重试）。 */
+export function parsePushVerdictBlock(text) {
+  const re = new RegExp('```' + PUSHVERDICT_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  try {
+    const j = JSON.parse(m[1]);
+    return j && typeof j === 'object' ? j : null;
+  } catch {
+    return null;
+  }
+}
