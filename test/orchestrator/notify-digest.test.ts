@@ -3,9 +3,10 @@
 // 首航实卡 docs-nightly-webhook-envs 的真实事件形状（类型与字段名以此为准）。
 //
 // 第二族（2026-11-10 digest 聚合改造）：notify-digest.mjs 的批量聚合通报——queueDigestItem
-// / aggregateDigest（同卡终态合并）/ buildDigestBody（三段式 ≤30 行）/ flushDigest（认领
-// 语义 + 本地 http webhook 实发）+ e2e（mock 卡 drain → digest POST）。digest 缺省关，
-// e2e 用例经 mkRepo extra 显式开且 quietWindowSec 调小（防 detached flusher 孤儿进程）。
+// / aggregateDigest（同卡终态合并）/ buildDigestBody（扁平事件流 ≤5 行，标题分诊、细节落
+// last.txt）/ flushDigest（认领语义 + 本地 http webhook 实发）+ e2e（mock 卡 drain →
+// digest POST）。digest 缺省关，e2e 用例经 mkRepo extra 显式开且 quietWindowSec 调小
+// （防 detached flusher 孤儿进程）。
 
 import { describe, expect, it } from 'vitest'
 import { spawn as spawnProc } from 'node:child_process'
@@ -27,6 +28,7 @@ import {
   aggregateDigest,
   buildDigestBody,
   digestFlushMarkerPath,
+  digestLastPath,
   digestPendingPath,
   digestStateRank,
   digestTitle,
@@ -189,7 +191,7 @@ describe('orchestrator notify digest > buildSailSummary 花名册', () => {
 })
 
 // ---------------------------------------------------------------------------
-// digest 聚合通报（notify-digest.mjs，2026-11-10）：批量聚合、同卡终态合并、三段式正文。
+// digest 聚合通报（notify-digest.mjs，2026-11-10）：批量聚合、同卡终态合并、扁平事件流正文。
 // 纯函数单测用独立 tmp 目录（flushDigest 对缺失 workflow.json 回落缺省，无需 mkRepo）；
 // e2e 走 runOrch 子进程 + 本地 http webhook（listen(0)，零 vi.mock——singleFork 纪律）。
 // ---------------------------------------------------------------------------
@@ -241,17 +243,14 @@ describe('orchestrator notify digest aggregator > 同卡终态合并', () => {
   const tsA = '2026-11-10T10:00:00.000+08:00'
   const tsB = '2026-11-10T10:06:00.000+08:00'
 
-  it('pending→merged 只留 merged（跳过中间态），队列行注 merged(+本批)', () => {
+  it('pending→merged 只留 merged（跳过中间态），正文一行合并终态', () => {
     const body = buildDigestBody({
       items: [
         { ts: tsA, kind: 'task', taskId: 't1', state: 'pending', title: '卡 t1', lines: ['进入队列'], priority: 'normal' },
         { ts: tsB, kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal' },
       ],
-      counts: { pending: 0, running: 0, 'awaiting-human': 0, blocked: 0, merged: 1, failed: 0 },
     })
-    expect(body).toContain('· 10:06 卡 t1 ✅ 已出港 审查通过，自动出港')
-    expect(body).not.toContain('进入队列')
-    expect(body).toContain('merged 1(+1)')
+    expect(body).toBe('✅ t1 合并')
   })
 
   it('同状态多条（落位 + 超时自动批示）取后到者——动作说明更具体', () => {
@@ -286,82 +285,87 @@ describe('orchestrator notify digest aggregator > 同卡终态合并', () => {
   })
 })
 
-describe('orchestrator notify digest aggregator > buildDigestBody 三段式', () => {
-  const ts = '2026-11-10T14:30:00.000+08:00'
-
-  it('attention 事件进核心段（首条贴标签、余下缩进列出）', () => {
+describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件流', () => {
+  it('四类行格式：attention 在前；merged 带 commit、awaiting 带 3 分钟预告、blocked 带状态标签、其余 📄 标题', () => {
+    const reason = '审查返工超限，需要人工拍板是否继续返工重试一轮'
     const body = buildDigestBody({
       items: [
-        { ts, kind: 'task', taskId: 't3', state: 'awaiting-human', title: '卡 t3 ⏸ 待船东放行', lines: ['审查返工超限'], priority: 'attention' },
-        { ts, kind: 'task', taskId: 't5', state: 'blocked', title: '卡 t5 ⚠ 搁浅', lines: ['预算熔断 max_tokens'], priority: 'attention' },
+        { ts: '', kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal', commit: '407fae32d24c21b697775494feb250bdfa76b44b' },
+        { ts: '', kind: 'task', taskId: 't3', state: 'awaiting-human', title: '卡 t3 ⏸ 待船东放行', lines: [reason], priority: 'attention' },
+        { ts: '', kind: 'task', taskId: 't5', state: 'blocked', title: '卡 t5 ⚠ 搁浅', lines: ['预算熔断 max_tokens'], priority: 'attention' },
+        { ts: '', kind: 'research', title: '调研 r1 判定 low：结论可信，无需升级', lines: ['rollup low'], priority: 'normal' },
       ],
-      counts: { pending: 0, running: 0, 'awaiting-human': 1, blocked: 1, merged: 2, failed: 0 },
+    })
+    expect(body.split('\n')).toEqual([
+      `⏸ t3 待批示（${reason.slice(0, 20)}）——3 分钟未批将自动合并`,
+      '⛔ t5 ⚠ 搁浅（预算熔断 max_tokens）',
+      '✅ t1 合并（407fae3）',
+      '📄 调研 r1 判定 low：结论可信，无需升级',
+    ])
+  })
+
+  it('缺数据兜底：merged 无 commit 不带括号、awaiting 无 reason 无括号；reason 截 20 字、title 截 40 字、单行 ≤60 字', () => {
+    const body = buildDigestBody({
+      items: [
+        { ts: '', kind: 'task', taskId: 't9', state: 'blocked', title: '卡 t9', lines: ['长'.repeat(45)], priority: 'attention' },
+        { ts: '', kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: [], priority: 'normal' },
+        { ts: '', kind: 'task', taskId: 't2', state: 'awaiting-human', title: '卡 t2', lines: [], priority: 'attention' },
+        { ts: '', kind: 'other', title: '标'.repeat(50), lines: [], priority: 'normal' },
+      ],
     })
     const lines = body.split('\n')
-    expect(lines[0]).toBe('■ 核心：14:30 卡 t3 ⏸ 待船东放行 审查返工超限')
-    expect(lines[1]).toBe('  · 14:30 卡 t5 ⚠ 搁浅 预算熔断 max_tokens')
-    expect(lines[2]).toBe('■ 事件')
-    expect(lines).toContain('■ 流程状态')
+    expect(lines).toEqual([
+      `⛔ t9 ⚠ 搁浅（${'长'.repeat(20)}）`,
+      `⏸ t2 待批示——3 分钟未批将自动合并`,
+      '✅ t1 合并',
+      `📄 ${'标'.repeat(40)}`,
+    ])
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(60)
   })
 
-  it('无 attention：核心是一句总结，需要动作从队列计数来（待批示/搁浅）', () => {
-    const body = buildDigestBody({
-      items: [{ ts, kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['ok'], priority: 'normal' }],
-      counts: { pending: 1, running: 2, 'awaiting-human': 1, blocked: 2, merged: 4, failed: 0 },
-    })
-    expect(body.split('\n')[0]).toBe('■ 核心：本批 1 事件，需要动作：待批示 1、搁浅 2')
-    const noNeed = buildDigestBody({
-      items: [{ ts, kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['ok'], priority: 'normal' }],
-      counts: { pending: 0, running: 0, 'awaiting-human': 0, blocked: 0, merged: 5, failed: 0 },
-    })
-    expect(noNeed.split('\n')[0]).toBe('■ 核心：本批 1 事件，无需动作')
-  })
-
-  it('事件描述截 40 字；正文整体 >30 行截 29 行 + 「…」（核心段在最前必保）', () => {
-    const items = Array.from({ length: 40 }, (_, i) => ({
-      ts,
-      kind: 'task',
-      taskId: `t-${i}`,
-      state: 'merged',
-      title: `卡 t-${i} ✅ 已出港`,
-      lines: ['长'.repeat(60)],
-      priority: 'normal',
-    }))
-    const body = buildDigestBody({ items, counts: { pending: 0, running: 0, 'awaiting-human': 0, blocked: 0, merged: 40, failed: 0 } })
+  it('超 5 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
+    const items = [
+      { ts: '', kind: 'task', taskId: 'ta', state: 'blocked', title: '卡 ta', lines: ['x'], priority: 'attention' },
+      ...Array.from({ length: 7 }, (_, i) => ({ ts: '', kind: 'task', taskId: `t${i}`, state: 'merged', title: `卡 t${i}`, lines: [], priority: 'normal' })),
+    ]
+    const body = buildDigestBody({ items })
     const lines = body.split('\n')
-    expect(lines).toHaveLength(30)
-    expect(lines[29]).toBe('…')
-    expect(lines[0]).toContain('■ 核心：')
-    const evLine = lines.find((l) => l.includes('卡 t-0 '))
-    expect(evLine!.length).toBeLessThanOrEqual('  · 14:30 卡 t-0 ✅ 已出港 '.length + 40)
+    expect(lines).toHaveLength(5)
+    expect(lines[0]).toBe('⛔ ta ⚠ 搁浅（x）')
+    expect(lines.slice(1, 4)).toEqual(['✅ t0 合并', '✅ t1 合并', '✅ t2 合并'])
+    expect(lines[4]).toBe('…另 4 条见详情')
   })
 
-  it('规格进度行：t1 ✅merged t2 ⏳awaiting-human 紧凑记号；超 8 任务注总数', () => {
-    const body = buildDigestBody({
-      items: [],
-      counts: { pending: 0, running: 0, 'awaiting-human': 1, blocked: 0, merged: 1, failed: 0 },
-      specs: [{ id: 'spec-a', tasks: [{ n: 1, status: 'merged' }, { n: 2, status: 'awaiting-human' }] }],
+  it('规格尾行：本批 item 带 specId 且 specs 查得到 progress 才出（n/总 ✅）；无 specId 或无 progress 省略', () => {
+    const specs = [{ id: 'spec-a', tasks: [{ n: 1, status: 'merged' }, { n: 2, status: 'awaiting-human' }] }]
+    const withSpec = buildDigestBody({
+      items: [{ ts: '', kind: 'spec', taskId: 's1', specId: 'spec-a', state: 'merged', title: '规格 s1', lines: [], priority: 'normal' }],
+      specs,
     })
-    expect(body).toContain('■ 流程状态')
-    expect(body).toContain('规格 spec-a：t1 ✅merged t2 ⏳awaiting-human')
-    const long = buildDigestBody({
-      items: [],
-      counts: null,
-      specs: [{ id: 'spec-b', tasks: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, status: 'pending' })) }],
+    expect(withSpec.split('\n')).toEqual(['✅ s1 合并', '📋 规格 spec-a：1/2 ✅'])
+    const noSpecId = buildDigestBody({
+      items: [{ ts: '', kind: 'spec', taskId: 's1', state: 'merged', title: '规格 s1', lines: [], priority: 'normal' }],
+      specs,
     })
-    expect(long).toContain('…共 10 个')
+    expect(noSpecId).toBe('✅ s1 合并')
+    const noProgress = buildDigestBody({ items: [{ ts: '', kind: 'other', specId: 'spec-z', title: 'x', lines: [], priority: 'normal' }], specs })
+    expect(noProgress).toBe('📄 x')
   })
 
-  it('counts 缺省 null 不出队列行；空 items + 无 specs 无 counts → 只剩核心总结', () => {
-    const bare = buildDigestBody({ items: [] })
-    expect(bare).toBe('■ 核心：本批 0 事件，无需动作')
-    expect(bare).not.toContain('■ 事件')
-    expect(bare).not.toContain('■ 流程状态')
+  it('详情行：digestDirPath 给出才出，指向 last.txt；空批次正文空串', () => {
+    expect(buildDigestBody({ items: [], digestDirPath: '/r/.agents/orchestrator/notify-digest' })).toBe(
+      '📄 详情：/r/.agents/orchestrator/notify-digest/last.txt',
+    )
+    expect(buildDigestBody({ items: [] })).toBe('')
   })
+})
 
-  it('digestTitle：【项目名 编排通报】MM-DD HH:mm（本地时间补零）', () => {
-    expect(digestTitle('Digest 港', new Date(2026, 10, 10, 14, 30))).toBe('【Digest 港 编排通报】11-10 14:30')
-    expect(digestTitle('', new Date(2026, 0, 3, 9, 5))).toBe('【编排 编排通报】01-03 09:05')
+describe('orchestrator notify digest aggregator > digestTitle emoji 计数摘要', () => {
+  it('只列非零项：✅合并 · ⏸待批 · ⛔阻塞 · 📄事件；纯 normal 批 = 📄N 事件；空批无计数段', () => {
+    expect(digestTitle('ModelDock', [{ state: 'merged' }, { state: 'merged' }, { state: 'awaiting-human' }])).toBe('【ModelDock】✅2 · ⏸1')
+    expect(digestTitle('M', [{ state: 'blocked' }, { state: 'failed' }, { state: 'merged' }])).toBe('【M】✅1 · ⛔2')
+    expect(digestTitle('', [{ kind: 'research' }, { kind: 'spec' }, { kind: 'other' }])).toBe('【编排】📄3 事件')
+    expect(digestTitle('M', [])).toBe('【M】')
   })
 })
 
@@ -425,11 +429,11 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
     }
   })
 
-  it('flushDigest dryRun：聚合成一条三段式正文（同卡终态合并 + 规格进度 + 队列行），发完队列清空', async () => {
+  it('flushDigest dryRun：聚合成一条扁平通报（终态合并 + 规格尾行 + 详情行），last.txt 归档本批完整 JSON', async () => {
     const d = tmpDir()
     try {
       queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'pending', title: '卡 t1', lines: ['进入队列'], priority: 'normal' })
-      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal' })
+      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal', specId: 'spec-a' })
       // 规格进度锚（flushDigest 读 specs/<id>/progress.json）
       const specDir = path.join(d.root, '.agents', 'orchestrator', 'specs', 'spec-a')
       fs.mkdirSync(specDir, { recursive: true })
@@ -437,13 +441,17 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       fs.writeFileSync(path.join(specDir, 'progress.json'), JSON.stringify({ id: 'spec-a', tasks: [{ n: 1, status: 'merged' }, { n: 2, status: 'awaiting-human' }] }))
       const r = await flushDigest(d.root, { dryRun: true })
       expect(r.sent).toBe(false) // dryRun 不算实发
-      expect(r.title).toContain('编排通报】')
-      expect(r.body).toContain('■ 核心：本批 1 事件，无需动作')
-      expect(r.body).toMatch(/· \d{2}:\d{2} 卡 t1 ✅ 已出港 审查通过，自动出港/) // HH:mm 来自 queueDigestItem 盖戳时刻
+      expect(r.title).toBe('【编排】✅1') // tmp 无 workflow.json → 项目名回落「编排」
+      expect(r.body.split('\n')).toEqual([
+        '✅ t1 合并', // 卡事件流不存在 → 无 commit 括号
+        '📋 规格 spec-a：1/2 ✅',
+        `📄 详情：${path.join(d.root, '.agents', 'orchestrator', 'notify-digest')}/last.txt`,
+      ])
       expect(r.body).not.toContain('进入队列')
-      expect(r.body).toContain('规格 spec-a：t1 ✅merged t2 ⏳awaiting-human')
-      expect(r.body).toContain('队列：pending 0 · running 0 · awaiting-human 0 · blocked 0 · merged 0(+1)')
       expect(fs.existsSync(digestPendingPath(d.root))).toBe(false) // 认领语义：先清队列再发
+      const last = JSON.parse(fs.readFileSync(digestLastPath(d.root), 'utf8'))
+      expect(last).toHaveLength(2) // 本批完整 JSON：两条原始事件全在
+      expect(last.map((x: { state?: string }) => x.state)).toEqual(['pending', 'merged'])
     } finally {
       d.cleanup()
     }
@@ -458,14 +466,14 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       expect(await flushDigest(d.root, { dryRun: true, force: false, quietWindowSec: 60 })).toMatchObject({ sent: false, reason: 'inflight' })
       expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // 让位不清队列
       const r = await flushDigest(d.root, { dryRun: true, force: true })
-      expect(r.body).toContain('卡 t1')
+      expect(r.body).toContain('✅ t1 合并')
       expect(fs.existsSync(digestPendingPath(d.root))).toBe(false)
     } finally {
       d.cleanup()
     }
   })
 
-  it('webhook 实发：本地 http 收到一条 digest POST（标题含编排通报、正文三段式）', async () => {
+  it('webhook 实发：本地 http 收到一条 digest POST（标题 emoji 计数、正文扁平事件流）', async () => {
     const d = tmpDir()
     const hook = await startWebhook()
     const prev = process.env.AGENTS_ORCH_WEBHOOK
@@ -475,13 +483,29 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       const r = await flushDigest(d.root, { force: true })
       expect(r.sent).toBe(true)
       expect(hook.posts).toHaveLength(1)
-      expect(hook.posts[0].title).toContain('编排通报】')
-      expect(hook.posts[0].body).toContain('■ 事件')
-      expect(hook.posts[0].body).toContain('卡 t1 ✅ 已出港')
+      expect(hook.posts[0].title).toBe('【编排】✅1')
+      expect(hook.posts[0].body).toBe('✅ t1 合并')
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
       await hook.close()
+      d.cleanup()
+    }
+  })
+
+  it('flushDigest 为 merged 行补 commit：卡事件流最后一条 merged 事件的 merge_commit 前 7 位', async () => {
+    const d = tmpDir()
+    try {
+      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1', lines: [], priority: 'normal' })
+      const log = path.join(d.root, '.agents', 'orchestrator', 'logs', 't1')
+      fs.mkdirSync(log, { recursive: true })
+      fs.writeFileSync(
+        path.join(log, 'events.jsonl'),
+        `${JSON.stringify({ seq: 1, ts: 't', type: 'merged', merge_commit: '407fae32d24c21b697775494feb250bdfa76b44b' })}\n`,
+      )
+      const r = await flushDigest(d.root, { dryRun: true })
+      expect(r.body).toContain('✅ t1 合并（407fae3）')
+    } finally {
       d.cleanup()
     }
   })
@@ -532,7 +556,7 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
     })
   }
 
-  it('digest 开 + merged 卡：drain 全链 → 单条三段式 digest POST，pending.jsonl 清空', async () => {
+  it('digest 开 + merged 卡：drain 全链 → 单条扁平 digest POST，pending.jsonl 清空、last.txt 归档', async () => {
     const hook = await startWebhook()
     const prev = process.env.AGENTS_ORCH_WEBHOOK
     process.env.AGENTS_ORCH_WEBHOOK = hook.url
@@ -547,14 +571,13 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
       expect(drain.status).toBe(0)
       // detached flusher（quietWindowSec=1）可能晚于 drain 收官 flush 醒来：等它退出再对账
       await new Promise((r) => setTimeout(r, 2000))
-      const digestPosts = hook.posts.filter((p) => p.title.includes('编排通报】'))
+      const digestPosts = hook.posts.filter((p) => p.title.startsWith('【DigestE2e】'))
       expect(digestPosts).toHaveLength(1)
-      expect(digestPosts[0].title).toContain('DigestE2e')
-      expect(digestPosts[0].body).toContain('■ 核心：')
-      expect(digestPosts[0].body).toContain('卡 digest-m ✅ 已出港')
-      expect(digestPosts[0].body).toContain('■ 流程状态')
-      expect(digestPosts[0].body).toContain('队列：')
+      expect(digestPosts[0].title).toBe('【DigestE2e】✅1')
+      expect(digestPosts[0].body).toContain('✅ digest-m 合并')
+      expect(digestPosts[0].body).toContain('📄 详情：')
       expect(fs.existsSync(digestPendingPath(repo.root))).toBe(false)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'notify-digest', 'last.txt'))).toBe(true)
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
@@ -563,7 +586,7 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
     }
   }, 120_000)
 
-  it('digest 开 + attention 卡（gate L3 → awaiting-human）：立即同步 flush，核心段带待批示', async () => {
+  it('digest 开 + attention 卡（gate L3 → awaiting-human）：立即同步 flush，正文带待批示行', async () => {
     const hook = await startWebhook()
     const prev = process.env.AGENTS_ORCH_WEBHOOK
     process.env.AGENTS_ORCH_WEBHOOK = hook.url
@@ -574,10 +597,10 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
       await runOrchAsync(repo.root, ['submit', cardFile])
       const run = await runOrchAsync(repo.root, ['run', 'digest-ah', '--backend', 'mock']) // run 子进程内 attention 即发
       expect(run.status).toBe(0)
-      const digestPosts = hook.posts.filter((p) => p.title.includes('编排通报】'))
+      const digestPosts = hook.posts.filter((p) => p.title.startsWith('【DigestE2e】'))
       expect(digestPosts).toHaveLength(1)
-      expect(digestPosts[0].body).toContain('■ 核心：')
-      expect(digestPosts[0].body).toContain('待船东放行')
+      expect(digestPosts[0].title).toBe('【DigestE2e】⏸1')
+      expect(digestPosts[0].body).toContain('⏸ digest-ah 待批示')
       expect(fs.existsSync(digestPendingPath(repo.root))).toBe(false)
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
@@ -599,7 +622,7 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
       const run = await runOrchAsync(repo.root, ['run', 'digest-off', '--backend', 'mock'])
       expect(run.status).toBe(0)
       expect(hook.posts.some((p) => p.title.includes('任务通报'))).toBe(true)
-      expect(hook.posts.some((p) => p.title.includes('编排通报】'))).toBe(false)
+      expect(hook.posts.some((p) => p.title.startsWith('【'))).toBe(false) // digest 关：无聚合通报（分诊标题以【项目名】开头）
       expect(fs.existsSync(digestPendingPath(repo.root))).toBe(false)
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
