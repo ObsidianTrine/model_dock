@@ -21,6 +21,19 @@ import { toIsoLocal } from './events.mjs';
  *  分段重跑也不静默截断——截断审查 = 没审到的部分裸奔上远程。 */
 const DIFF_MAX_BYTES = 400 * 1024;
 const ARTIFACT_RELPATH = path.join('.agents', 'orchestrator', 'push-review', 'latest.json');
+/** 短 sha 长度：与 .agents/hooks/push-gate.mjs 的 SHORT_SHA_LEN 同口径（不跨目录 import——
+ *  scripts 目录保持零 hooks 依赖可独立拷贝，两边一致性由 push-gate.test.ts e2e 断言锁定）。 */
+const SHORT_SHA_LEN = 12;
+
+/**
+ * 防伪造 generation 戳（date +%s%N 同精度：墙钟 ms + hrtime 纳秒尾数，唯一且单调）。
+ * gate 侧只验格式存在——把「随手编辑一个 json 就能过」的门槛抬高到「需真跑本命令」；
+ * 这是成本抬高层，不是密码学防护（防 agent 顺手造假，不防蓄意攻击者——读得到 gate 源码
+ * 就能伪造全部字段；完全防线 = hook 只拦 agent 会话 + AGENTS_ALLOW_PUSH 人工在环）。
+ */
+function generationStamp() {
+  return `${Date.now()}${(BigInt.asUintN(64, process.hrtime.bigint()) % 1_000_000_000n).toString().padStart(9, '0')}`;
+}
 
 const die = (msg, code = 1) => {
   console.error(`[orchestrator] ${msg}`);
@@ -107,6 +120,11 @@ export async function cmdPushReview(repoRoot, opts = {}) {
       schema: 'push-verdict/1',
       branch,
       head,
+      // 防伪造三件套（gate 侧 loadPushArtifact 双向核验，口径与口径注释见该函数头）：
+      // short + full sha 必须与当时 rev-parse 一致，generation 是本命令真跑产出的一次性戳。
+      head_sha: head.slice(0, SHORT_SHA_LEN),
+      head_sha_full: head,
+      generation: generationStamp(),
       range,
       verdict,
       overall,

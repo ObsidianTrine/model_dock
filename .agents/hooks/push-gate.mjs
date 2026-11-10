@@ -8,7 +8,8 @@
 //   - 命中 main/develop：两条放行路径（AGENTS_ALLOW_PUSH=1 人工授权旁路，认 hook 进程 env
 //     与命令前缀 hatch 两形态；24h 内 push-review 结论且 HEAD 未变），否则拦截（可操作三选一）；
 //   - 纯分支 push 且目标非保护分支：放行（覆盖既有 policy 一刀切的 publish 拦截）；
-//   - 混入 tag/npm publish、force push、--all/--mirror、refspec 无法消歧、未识别 flag 等
+//   - 混入 tag/npm publish、force push、--all/--mirror、通配 refspec（refs/heads/* 等）、
+//     push.default=matching/upstream 的裸 push、refspec 无法消歧、未识别 flag 等
 //     一律 defer——交回既有 policy 裁决（原样拦截）。门禁对既有红线**只收窄不放行**：
 //     仅覆盖「纯 push 段 + publish 类拦截」这一种情形，端口/其他红线永不覆盖；
 //     tag 推送（触发 Release）绝不借道本闸，走 AGENTS_ALLOW_RELEASE 既有白名单。
@@ -171,12 +172,16 @@ export function parsePushSegment(seg, policy) {
 
 /**
  * refspec → 目标分支。tag 一律 defer（发布动作走既有 AGENTS_ALLOW_RELEASE 白名单，绝不借道）；
+ * 通配 refspec（refs/heads/* 等）一律 defer——命中面是全部分支，绝不按字面分支名放行；
  * 裸名 refspec 本地 show-ref 消歧（分支/tag/新分支），消歧失败保守 defer。
  */
 export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
   let s = String(rs ?? '');
   if (s.startsWith('+')) s = s.slice(1); // force 前缀已在段级 force 判过，这里只剥
   if (!s) return { deferReason: '空 refspec（冒号匹配形态面太宽，保守走既有裁决）' };
+  // 通配/glob 元字符（refs/heads/*、feature/*、:refs/heads/* 等）：'*' 会被 branchOf 剥成
+  // 字面分支名放行，实际命中含 main/develop 在内的全部分支——与 tag/force 同待遇 defer。
+  if (/[*?\\[\]]/.test(s)) return { deferReason: `refspec ${rs} 含通配元字符（命中面是全部分支，绝不自行放行——保守走既有裁决）` };
   const ci = s.indexOf(':');
   const lhs = ci >= 0 ? s.slice(0, ci) : s;
   const dst = ci >= 0 ? s.slice(ci + 1) : '';
@@ -205,13 +210,19 @@ export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = de
   return { deferReason: `refspec ${rs} 分支与 tag 同名歧义（保守走既有裁决）` };
 }
 
-/** 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 取当前分支。 */
+/** 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 按 push.default 解析。 */
 export function resolvePushTargets(p, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
   if (p.unreliable) return { deferReason: 'push 命令含未识别 flag（解析不可靠，保守走既有裁决）' };
   if (p.force) return { deferReason: 'force push 走既有裁决（永不借道审查放行）' };
   if (p.broad) return { branches: [...PROTECTED_BRANCHES], protected: true, broad: true };
   if (p.args.length <= 1) {
-    // 裸 push（无参数或只给 remote）：push.default 语义 = 推当前分支
+    // 裸 push（无参数或只给 remote）：目标分支由 push.default 决定——缺省（未配置）与
+    // simple/current 才是「推当前分支」；matching 推全部同名分支、upstream/tracking 推
+    // upstream（可能与当前分支不同名），命中面不确定 → 保守 defer（表外一律 defer）。
+    const pd = runGit(repoDir, ['config', 'push.default']);
+    if (pd && !['simple', 'current'].includes(pd)) {
+      return { deferReason: `裸 push 的 push.default=${pd}（推全部同名分支或 upstream，命中面不确定——保守走既有裁决）` };
+    }
     const cur = runGit(repoDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
     if (!cur || cur === 'HEAD') return { deferReason: '裸 push 的当前分支解析失败（保守走既有裁决）' };
     return PROTECTED_BRANCHES.includes(cur) ? { branches: [cur], protected: true } : { branches: [cur], protected: false };
@@ -225,9 +236,18 @@ export function resolvePushTargets(p, repoDir, runGit = defaultRunGit, runGitOk 
   return { branches, protected: branches.some((b) => PROTECTED_BRANCHES.includes(b)) };
 }
 
+/** 短 sha 长度（工件 head_sha 的口径，写入侧 push-review.mjs 同步使用）。 */
+export const SHORT_SHA_LEN = 12;
+
 /**
  * 读 push-review 结论并判放行要件：schema push-verdict/1 + verdict=pass + reviewed_at 24h 内
- * + head 与当前 rev-parse HEAD 一致。cwd 不在仓库内（rev-parse 失败）视为无结论。
+ * + 防伪造三件套核验 + head 与当前 rev-parse HEAD 一致。cwd 不在仓库内（rev-parse 失败）视为无结论。
+ *
+ * 防伪造口径（成本抬高层，非密码学防护）：latest.json 是仓库内普通文件，被守护的 agent/worker
+ * 理论上写得到——工件头带 head_sha（短）+ head_sha_full（全 sha）+ generation（写工件时盖的
+ * 高精度时间戳），gate 双向核验后，「随手编辑一个 json 就能过」变成「需真跑 orch push-review
+ * 才能产出齐套字段」。它防的是 agent 顺手造假，不防蓄意攻击者（读得到本文件即可伪造全部字段）；
+ * 完全防线 = hook 只拦 agent 会话 + AGENTS_ALLOW_PUSH 人工在环（与 AGENTS_ALLOW_RELEASE 同信任级）。
  */
 export function loadPushArtifact(repoDir, now = Date.now(), runGit = defaultRunGit) {
   let art;
@@ -242,9 +262,19 @@ export function loadPushArtifact(repoDir, now = Date.now(), runGit = defaultRunG
   if (!Number.isFinite(t)) return { ok: false, detail: '审查结论 reviewed_at 缺失或非法——重跑 orch push-review' };
   const age = now - t;
   if (age < 0 || age > ARTIFACT_MAX_AGE_MS) return { ok: false, detail: `审查结论已超 24h（${art.reviewed_at}）——重跑 orch push-review` };
+  // 防伪造三件套（见函数头注释）：generation 格式存在即可 + short/full 双向与 rev-parse 一致
+  if (!/^\d{15,}$/.test(String(art?.generation ?? ''))) {
+    return { ok: false, detail: '审查结论缺 generation 戳（工件疑似手改而非 push-review 产出）——重跑 orch push-review' };
+  }
   const head = runGit(repoDir, ['rev-parse', 'HEAD']);
-  const claimed = String(art?.head ?? '').trim();
-  if (!head || !claimed || head !== claimed) {
+  const claimed = String(art?.head ?? '').trim().toLowerCase();
+  const claimedFull = String(art?.head_sha_full ?? '').trim().toLowerCase();
+  const claimedShort = String(art?.head_sha ?? '').trim().toLowerCase();
+  if (
+    !head || !claimed || claimed !== head ||
+    !claimedFull || claimedFull !== head ||
+    !claimedShort || claimedShort !== head.slice(0, SHORT_SHA_LEN)
+  ) {
     return { ok: false, detail: `HEAD 已变（结论针对 ${claimed ? claimed.slice(0, 12) : '?'}，当前 ${head ? head.slice(0, 12) : 'rev-parse 失败/非仓库'}）——重跑 orch push-review` };
   }
   return { ok: true, head, age, artifact: art };

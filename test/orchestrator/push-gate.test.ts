@@ -39,14 +39,19 @@ function runDispatch(input: unknown, env: Record<string, string | undefined> = {
 
 const bashEvent = (cwd: string, command: string) => ({ tool_name: 'Bash', cwd, tool_input: { command } })
 
-/** 在夹具仓里写一份 push-review 结论（缺省指向当前 HEAD、刚刚审查、verdict=pass）。 */
+/** 在夹具仓里写一份 push-review 结论（缺省指向当前 HEAD、刚刚审查、verdict=pass）。
+ *  防伪造三件套（head_sha/head_sha_full/generation）与真跑 push-review 的写入侧同口径。 */
 function writeArtifact(repo: string, patch: Record<string, unknown> = {}): Record<string, unknown> {
   const dir = path.join(repo, '.agents', 'orchestrator', 'push-review')
   fs.mkdirSync(dir, { recursive: true })
+  const headFull = git(repo, 'rev-parse HEAD')
   const art = {
     schema: 'push-verdict/1',
     branch: 'develop',
-    head: git(repo, 'rev-parse HEAD'),
+    head: headFull,
+    head_sha: headFull.slice(0, 12),
+    head_sha_full: headFull,
+    generation: `${Date.now()}000000000`,
     range: 'HEAD~1..HEAD',
     verdict: 'pass',
     overall: 88,
@@ -86,6 +91,10 @@ describe('orch push-review > mock 船 e2e', () => {
       expect(art.schema).toBe('push-verdict/1')
       expect(art.verdict).toBe('pass')
       expect(art.head).toBe(git(repo.root, 'rev-parse HEAD'))
+      // 防伪造三件套：gate 侧 loadPushArtifact 据此双向核验（手改工件产不出齐套字段）
+      expect(art.head_sha).toBe(art.head.slice(0, 12))
+      expect(art.head_sha_full).toBe(art.head)
+      expect(String(art.generation)).toMatch(/^\d{15,}$/)
       expect(art.range).toBe('HEAD~1..HEAD')
       expect(art.branch).toBe('develop')
       expect(typeof art.reviewed_at).toBe('string')
@@ -292,6 +301,87 @@ describe('policy-dispatch push 闸 > 判定矩阵（子进程实测）', () => {
     }
   })
 
+  it('通配 refspec / --mirror / --all → defer 或按保护拦，绝不放行（P1 通配绕过回归）', () => {
+    const repo = mkRepo()
+    try {
+      // 'refs/heads/*' → defer → 既有 publish 拦截原文案（非三选一）；实推会把全部本地分支推上远程
+      const wild = runDispatch(bashEvent(repo.root, `git push origin 'refs/heads/*'`))
+      expect(wild.status).toBe(2)
+      expect(wild.stderr).toContain('发布动作人工授权制')
+      expect(wild.stderr).not.toContain('三选一')
+      // 删除通配（:refs/heads/*）与显式 dst 通配同样 defer
+      expect(runDispatch(bashEvent(repo.root, `git push origin ':refs/heads/*'`)).status).toBe(2)
+      expect(runDispatch(bashEvent(repo.root, `git push origin HEAD:'refs/heads/*'`)).status).toBe(2)
+      // --mirror / --all → broad 按保护处理：无结论 → 三选一拦截
+      for (const flag of ['--mirror', '--all']) {
+        const r = runDispatch(bashEvent(repo.root, `git push origin ${flag}`))
+        expect(r.status).toBe(2)
+        expect(r.stderr).toContain('三选一')
+      }
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('push.default=matching 的裸 push → defer（推全部同名分支，命中面不确定）', () => {
+    const repo = mkRepo()
+    try {
+      git(repo.root, 'config push.default matching')
+      // 夹具停在 develop（保护分支）：defer → 既有 publish 拦截原文案
+      const r = runDispatch(bashEvent(repo.root, 'git push'))
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('发布动作人工授权制')
+      expect(r.stderr).not.toContain('三选一')
+      // 只给 remote 的形态同判；非保护分支上也拦（matching 面 = 所有同名分支）
+      expect(runDispatch(bashEvent(repo.root, 'git push origin')).status).toBe(2)
+      git(repo.root, 'checkout -b feature/other')
+      expect(runDispatch(bashEvent(repo.root, 'git push')).status).toBe(2)
+      // 对照：未配置 push.default（缺省 simple）在非保护分支 → 正常放行
+      git(repo.root, 'config --unset push.default')
+      expect(runDispatch(bashEvent(repo.root, 'git push')).status).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('工件防伪造三件套：篡改 head_sha / head_sha_full / 缺 generation → 拦；齐套 + HEAD 一致 → 放行', () => {
+    const repo = mkRepo()
+    try {
+      writeArtifact(repo.root, { head_sha: '0'.repeat(12) }) // 短 sha 与 HEAD 不符
+      expect(runDispatch(bashEvent(repo.root, 'git push origin develop')).status).toBe(2)
+      writeArtifact(repo.root, { head_sha_full: '1'.repeat(40) }) // 全 sha 与 HEAD 不符
+      expect(runDispatch(bashEvent(repo.root, 'git push origin develop')).status).toBe(2)
+      writeArtifact(repo.root, { generation: undefined }) // 手改工件没有 generation 戳
+      const r = runDispatch(bashEvent(repo.root, 'git push origin develop'))
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('generation')
+      // 三件套齐 + HEAD 一致 → 正常放行（核验不误伤真跑产出）
+      writeArtifact(repo.root)
+      expect(runDispatch(bashEvent(repo.root, 'git push origin develop')).status).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('AGENTS_ALLOW_PUSH=1 但命令混入端口红线段 → 整体拦截且不留 bypass 日志（留痕只在放行覆盖确认后写）', () => {
+    const repo = mkRepo({ extra: { protectedPorts: ['8687'], listenCommandNames: ['modeldock'] } })
+    const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pushgate-log-')), 'push-gate.log')
+    try {
+      // 端口段藏进 bash -c 包装：递归裁决以 rule='port' 拦下，publish 放行覆盖不成立——
+      // 此前 bypass 日志在覆盖确认前就落盘，排障时会看到一次未发生的 bypass
+      const r = runDispatch(
+        bashEvent(repo.root, `AGENTS_ALLOW_PUSH=1 git push origin develop && bash -c 'modeldock gateway start --port 8687'`),
+        { AGENTS_ALLOW_PUSH: '1', AGENTS_PUSH_GATE_LOG: logFile },
+      )
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('8687')
+      expect(fs.existsSync(logFile)).toBe(false)
+    } finally {
+      fs.rmSync(path.dirname(logFile), { recursive: true, force: true })
+      repo.cleanup()
+    }
+  })
+
   it('非 push 命令不受门禁影响（既有放行/拦截面零变化）', () => {
     const repo = mkRepo()
     try {
@@ -313,7 +403,10 @@ const fakeOkFor = (...refs: string[]) => (_cwd: string, args: string[]) => {
   const target = args[args.length - 1] ?? ''
   return args[0] === 'show-ref' && refs.includes(target)
 }
-const fakeHead = (branch: string) => (cwd: string, args: string[]) => (args[1] === '--abbrev-ref' ? branch : 'a'.repeat(40))
+const fakeHead = (branch: string, pushDefault: string | null = null) => (cwd: string, args: string[]) => {
+  if (args[0] === 'config') return pushDefault // git config push.default（null = 未配置 → 缺省 simple 语义）
+  return args[1] === '--abbrev-ref' ? branch : 'a'.repeat(40)
+}
 
 describe('push-gate 纯函数矩阵', () => {
   it('refspecTarget：显式分支 / refs/heads / 显式 dst / HEAD:develop / 删除保护分支 / tag 全 defer', () => {
@@ -332,6 +425,12 @@ describe('push-gate 纯函数矩阵', () => {
     expect(gate.refspecTarget('new-branch', '/r', gate.defaultRunGit, fakeOkFor())).toHaveProperty('deferReason')
     // 分支与 tag 同名歧义：保守 defer
     expect(gate.refspecTarget('ghost', '/r', gate.defaultRunGit, fakeOkFor('refs/heads/ghost', 'refs/tags/ghost'))).toHaveProperty('deferReason')
+    // 通配/glob 元字符：命中面是全部分支，一律 defer（绝不按字面 '*' 当普通分支放行，P1 回归）
+    expect(gate.refspecTarget('refs/heads/*', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('refs/heads/*:refs/heads/*', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget(':refs/heads/*', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('feature/*', '/r', gate.defaultRunGit, fakeOkFor())).toHaveProperty('deferReason')
+    expect(gate.refspecTarget('HEAD:refs/heads/feat*', '/r', gate.defaultRunGit, okBranches)).toHaveProperty('deferReason')
   })
 
   it('parsePushSegment：-C 提取 / 未知 flag unreliable / force / broad / 前缀 hatch / 非 push 段', () => {
@@ -350,6 +449,25 @@ describe('push-gate 纯函数矩阵', () => {
     expect(gate.parsePushSegment('git push --repo upstream develop', policy)?.args).toEqual(['develop'])
     expect(gate.parsePushSegment('git push --push-option=ci origin develop', policy)?.args).toEqual(['origin', 'develop'])
     expect(gate.parsePushSegment('git status', policy)).toBeNull()
+  })
+
+  it('resolvePushTargets：裸 push 按 push.default 消歧（matching/upstream defer，simple/current/未配置按当前分支）', () => {
+    const ok = fakeOkFor('refs/heads/develop')
+    const bare = gate.parsePushSegment('git push', policy)
+    const bareRemote = gate.parsePushSegment('git push origin', policy)
+    expect(bare).toBeTruthy()
+    expect(bareRemote).toBeTruthy()
+    // matching：推全部同名分支（含保护分支）→ defer
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'matching'), ok)).toHaveProperty('deferReason')
+    // upstream/tracking：推 upstream，可能与当前分支不同名 → defer
+    expect(gate.resolvePushTargets(bareRemote!, '/r', fakeHead('feature/wip', 'upstream'), ok)).toHaveProperty('deferReason')
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('feature/wip', 'tracking'), ok)).toHaveProperty('deferReason')
+    // 配置成垃圾值：git 自身会拒绝，但门禁侧保守 defer
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'bogus'), ok)).toHaveProperty('deferReason')
+    // simple / current / 未配置（null）：推当前分支，按保护表判
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'simple'), ok)).toEqual({ branches: ['develop'], protected: true })
+    expect(gate.resolvePushTargets(bare!, '/r', fakeHead('develop', 'current'), ok)).toEqual({ branches: ['develop'], protected: true })
+    expect(gate.resolvePushTargets(bareRemote!, '/r', fakeHead('feature/wip', null), ok)).toEqual({ branches: ['feature/wip'], protected: false })
   })
 
   it('scanPushCommand：混入 tag / npm publish 全量上报（defer 依据）', () => {
@@ -375,13 +493,21 @@ describe('push-gate 纯函数矩阵', () => {
     const bypass = gate.evaluatePushGate({ cmd: 'git push', cwd: '/r', env: { AGENTS_ALLOW_PUSH: '1' }, policy, runGit: head, runGitOk: ok })
     expect(bypass.decision).toBe('allow-bypass')
     expect((bypass.logEntry as Record<string, unknown>)?.bypass).toBe(true)
-    // 有效结论（真实 tmp 仓落盘）→ allow-review
+    // 有效结论（真实 tmp 仓落盘，三件套与 HEAD 一致）→ allow-review
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pushgate-eval-'))
     try {
       fs.mkdirSync(path.join(dir, '.agents', 'orchestrator', 'push-review'), { recursive: true })
       fs.writeFileSync(
         path.join(dir, '.agents', 'orchestrator', 'push-review', 'latest.json'),
-        JSON.stringify({ schema: 'push-verdict/1', verdict: 'pass', head: 'a'.repeat(40), reviewed_at: new Date().toISOString() }),
+        JSON.stringify({
+          schema: 'push-verdict/1',
+          verdict: 'pass',
+          head: 'a'.repeat(40),
+          head_sha: 'a'.repeat(12),
+          head_sha_full: 'a'.repeat(40),
+          generation: `${Date.now()}000000000`,
+          reviewed_at: new Date().toISOString(),
+        }),
       )
       expect(gate.evaluatePushGate({ cmd: 'git push origin develop', cwd: dir, policy, runGit: head, runGitOk: ok }).decision).toBe('allow-review')
     } finally {
@@ -389,14 +515,23 @@ describe('push-gate 纯函数矩阵', () => {
     }
   })
 
-  it('loadPushArtifact：schema/verdict/超期/head 四道要件逐项判否', () => {
+  it('loadPushArtifact：schema/verdict/超期/head/防伪造三件套逐项判否', () => {
     const now = Date.now()
     const dirs: string[] = []
     const mk = (patch: Record<string, unknown>) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pushgate-art-'))
       dirs.push(dir)
       fs.mkdirSync(path.join(dir, '.agents', 'orchestrator', 'push-review'), { recursive: true })
-      const art = { schema: 'push-verdict/1', verdict: 'pass', head: 'a'.repeat(40), reviewed_at: new Date(now).toISOString(), ...patch }
+      const art = {
+        schema: 'push-verdict/1',
+        verdict: 'pass',
+        head: 'a'.repeat(40),
+        head_sha: 'a'.repeat(12),
+        head_sha_full: 'a'.repeat(40),
+        generation: `${now}000000000`,
+        reviewed_at: new Date(now).toISOString(),
+        ...patch,
+      }
       fs.writeFileSync(path.join(dir, '.agents', 'orchestrator', 'push-review', 'latest.json'), JSON.stringify(art))
       return dir
     }
@@ -407,6 +542,11 @@ describe('push-gate 纯函数矩阵', () => {
       expect(gate.loadPushArtifact(mk({ verdict: 'fail' }), now, () => 'a'.repeat(40)).ok).toBe(false)
       expect(gate.loadPushArtifact(mk({ reviewed_at: new Date(now - 25 * 3600 * 1000).toISOString() }), now, () => 'a'.repeat(40)).ok).toBe(false)
       expect(gate.loadPushArtifact(mk({}), now, () => 'b'.repeat(40)).ok).toBe(false)
+      // 防伪造三件套：短 sha / 全 sha / generation 任一不符或缺失 → 判否（手改工件不是真跑产出）
+      expect(gate.loadPushArtifact(mk({ head_sha: '0'.repeat(12) }), now, () => 'a'.repeat(40)).ok).toBe(false)
+      expect(gate.loadPushArtifact(mk({ head_sha_full: 'b'.repeat(40) }), now, () => 'a'.repeat(40)).ok).toBe(false)
+      expect(gate.loadPushArtifact(mk({ generation: '' }), now, () => 'a'.repeat(40)).ok).toBe(false)
+      expect(gate.loadPushArtifact(mk({ generation: '123' }), now, () => 'a'.repeat(40)).ok).toBe(false)
       // cwd 不在仓库内（读不到文件）视为无
       expect(gate.loadPushArtifact(path.join(os.tmpdir(), 'pushgate-nonrepo-xyz'), now).ok).toBe(false)
     } finally {

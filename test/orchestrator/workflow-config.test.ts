@@ -507,6 +507,25 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     expect(cfgOf({ notify: { signSecretService: 'modeldock-orch-feishu-sign' } }).notify.signSecretService).toBe('modeldock-orch-feishu-sign')
     expect(cfgOf({ notify: { signSecretService: '   ' } }).notify.signSecretService).toBeNull()
   })
+
+  it('notify.digest.quietWindowSec 三态：缺省 60 / 显式 0 = 无静默窗 / 非法回落 60 并 warn（2026-11-10 修复 0 被当缺省）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({}).notify.digest).toEqual({ enabled: false, quietWindowSec: 60 }) // 缺省 60
+      expect(cfgOf({ notify: { digest: { enabled: true, quietWindowSec: 0 } } }).notify.digest).toEqual({ enabled: true, quietWindowSec: 0 }) // 显式 0 = 真无静默窗
+      expect(cfgOf({ notify: { digest: { quietWindowSec: 3600 } } }).notify.digest.quietWindowSec).toBe(3600)
+      // 非法（负数/非整数/超上限/类型错）→ 回落 60 且告警
+      for (const bad of [-1, 1.5, 4000, 'x']) {
+        warn.mockClear()
+        expect(cfgOf({ notify: { digest: { quietWindowSec: bad } } }).notify.digest.quietWindowSec).toBe(60)
+        expect(warn.mock.calls.some((c) => String(c[0]).includes('quietWindowSec'))).toBe(true)
+      }
+      // digest 整体类型错 → 回落缺省
+      expect(cfgOf({ notify: { digest: 'on' } }).notify.digest).toEqual({ enabled: false, quietWindowSec: 60 })
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
 
 describe('workflow-config > research.notify（调研/复核判定推送开关，P1 吞键修复）', () => {
