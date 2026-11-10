@@ -13,6 +13,11 @@
 //     一律 defer——交回既有 policy 裁决（原样拦截）。门禁对既有红线**只收窄不放行**：
 //     仅覆盖「纯 push 段 + publish 类拦截」这一种情形，端口/其他红线永不覆盖；
 //     tag 推送（触发 Release）绝不借道本闸，走 AGENTS_ALLOW_RELEASE 既有白名单。
+//     放行覆盖前置二次核验（2026-11 round2）：覆盖只担保 push 段本身的裁决面——放行前对
+//     每个 非 push 段独立重跑既有红线（policy.evaluateCommand + 受保护端口字符串保守面），
+//     任一命中 → defer 走原拦截路径（复合命令里触端口的段绝不随 push 放行）；--follow-tags
+//     可顺带推可达 annotated tag（含 v* 触发 Release），与 --tags 同待遇按保护拦；cd 到其他
+//     仓库 / --git-dir/--work-tree 改锚形态一律 defer——工件核验的仓库必须 = 实推的仓库。
 //
 // 取舍（fail-safe 口径）：git 子进程 5s 超时——hook 卡死不能堵死会话；超时/解析失败/模块
 // 异常一律 defer 走既有裁决（push 仍被既有 publish 红线拦住，只是不用新文案），绝不因门禁
@@ -35,13 +40,14 @@ const ARTIFACT_REL = path.join('.agents', 'orchestrator', 'push-review', 'latest
 
 // push 子命令 flag 表（保守白名单：表外一律「解析不可靠」defer，绝不猜 token 边界）。
 const PUSH_BOOL_FLAGS = new Set([
-  '-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose', '--atomic', '--follow-tags',
+  '-u', '--set-upstream', '-q', '--quiet', '-v', '--verbose', '--atomic',
   '--no-verify', '--verify', '--dry-run', '--thin', '--prune', '--progress', '--no-progress',
   '--signed', '--no-signed', '-d', '--delete', '--porcelain', '-4', '--ipv4', '-6', '--ipv6',
   '--no-force-with-lease', '--no-force-if-includes',
 ]);
 const PUSH_VALUE_FLAGS = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo']);
-const BROAD_FLAGS = new Set(['--all', '--branches', '--mirror', '--tags']);
+// --follow-tags 顺带推可达 annotated tag（含 v* 触发 Release）——与 --tags 同待遇按保护拦（round2 P2）
+const BROAD_FLAGS = new Set(['--all', '--branches', '--mirror', '--tags', '--follow-tags']);
 const FORCE_FLAGS = new Set(['-f', '--force', '--force-with-lease', '--force-if-includes']);
 
 const basename = (t) => String(t ?? '').split(/[\\/]/).pop() ?? '';
@@ -68,9 +74,38 @@ export function defaultRunGitOk(cwd, args, timeoutMs = 5000) {
 }
 
 /**
+ * 解析 cd 段的目标目录（纯语法层，不做 git 判定；round2 P2）：
+ *   - 非 cd 段返回 null；`cd`（无参数）按 POSIX 语义解析为 HOME。
+ *   - 返回 { seg, target, unreliable: false }，target 为 tilde 展开后的路径（相对路径由调用方
+ *     对 cwd 解析）；`cd -`、变量/引号/通配/目标后还有 token 等 token 边界不可靠形态返回
+ *     { seg, target: '', unreliable: true }——解析不可靠一律 defer。
+ */
+export function parseCdTarget(seg, policy) {
+  const tokens = String(seg).trim().split(/\s+/);
+  const start = typeof policy?.envPrefixSpan === 'function' ? policy.envPrefixSpan(tokens, 0, []).i : 0;
+  if (tokens[start] !== 'cd') return null;
+  const unreliable = { seg, target: '', unreliable: true };
+  let j = start + 1;
+  if (tokens[j] === '--') j += 1; // cd -- <dir>
+  if (j >= tokens.length) return { seg, target: os.homedir(), unreliable: false }; // 无参数 = HOME
+  const raw = tokens[j];
+  if (raw.startsWith('-')) return unreliable; // cd - / cd -P 等无法定位目标
+  let t = raw;
+  const paired = /^(['"])(.*)\1$/.exec(t);
+  if (paired) t = paired[2]; // 成对包裹引号剥离（引号内空格已被切段打散，剥不净即不可靠）
+  if (t === '~') t = os.homedir();
+  else if (t.startsWith('~/')) t = path.join(os.homedir(), t.slice(2));
+  if (/['"$*?`[]/.test(t)) return unreliable; // 变量/通配/残留引号：路径解析不可靠
+  if (j + 1 < tokens.length) return unreliable; // 目标后还有 token（cd a b 形态）：保守不可靠
+  return { seg, target: t, unreliable: false };
+}
+
+/**
  * 纯解析：按 policy.mjs 同口径切段（\r\n 归一 + [;&|\n]+），逐段识别 git push / git tag /
  * npm publish。嵌套载荷（bash -c '…'、$(…)）不在此解析——外层词不是 git，push 藏在载荷里
  * 时 hasPush=false，门禁不介入，既有 policy 递归裁决照旧拦截（保守方向）。
+ * others = 非 push 段（含解析失败的 push 段）——放行覆盖前须逐段重跑既有红线（round2 P1）；
+ * cds = cd 段解析出的目标——供仓库归属核验，保证「工件核验的仓库 = 实推的仓库」（round2 P2）。
  */
 export function scanPushCommand(cmd, policy) {
   const segments = String(cmd ?? '')
@@ -79,17 +114,25 @@ export function scanPushCommand(cmd, policy) {
     .map((s) => s.trim())
     .filter(Boolean);
   const pushes = [];
+  const others = [];
+  const cds = [];
   let hasTag = false;
   let hasNpmPublish = false;
   for (const seg of segments) {
     if (typeof policy?.isPublishCommand === 'function' && policy.isPublishCommand(seg)) hasNpmPublish = true;
     const sub = typeof policy?.gitSubcommand === 'function' ? policy.gitSubcommand(seg) : null;
     if (sub === 'tag' && !/-l|--list/.test(seg)) hasTag = true;
-    if (sub !== 'push') continue;
+    if (sub !== 'push') {
+      others.push(seg);
+      const cd = parseCdTarget(seg, policy);
+      if (cd) cds.push(cd);
+      continue;
+    }
     const parsed = parsePushSegment(seg, policy);
     if (parsed) pushes.push(parsed);
+    else others.push(seg); // push 段解析失败：与普通段一样交既有红线兜底，绝不参与放行覆盖
   }
-  return { hasPush: pushes.length > 0, pushes, hasTag, hasNpmPublish };
+  return { hasPush: pushes.length > 0, pushes, hasTag, hasNpmPublish, others, cds };
 }
 
 /**
@@ -116,6 +159,7 @@ export function parsePushSegment(seg, policy) {
   if (tokens[j] !== 'git') return null;
   j += 1;
   let gitDir = null;
+  let deferReason = null;
   let k = j;
   for (; k < tokens.length; k++) {
     const t = tokens[k];
@@ -124,7 +168,14 @@ export function parsePushSegment(seg, policy) {
       k += 1;
       continue;
     }
-    if (t === '-c' || t === '--git-dir' || t === '--work-tree') {
+    if (t === '--git-dir' || t === '--work-tree' || t.startsWith('--git-dir=') || t.startsWith('--work-tree=')) {
+      // 改变实推仓库的形态（round2 P2）：repoDir 若仍锚事件 cwd，会「工件核验的仓库 ≠ 实推的
+      // 仓库」——-C 已捕获进 gitDir 对齐锚定，这两个形态捕获后工件路径仍难对齐 → defer 保守面
+      deferReason = 'git --git-dir/--work-tree 改变实推仓库锚定（工件核验仓库无法对齐，保守走既有裁决）';
+      if (!t.includes('=')) k += 1; // 空格形态吞值（= 附着形态值在 token 内）
+      continue;
+    }
+    if (t === '-c') {
       k += 1; // 带值全局 flag：跳过参数
       continue;
     }
@@ -167,7 +218,7 @@ export function parsePushSegment(seg, policy) {
     unreliable = true;
     break;
   }
-  return { seg, gitDir, broad, force, unreliable, auth, args };
+  return { seg, gitDir, broad, force, unreliable, auth, args, deferReason };
 }
 
 /**
@@ -212,6 +263,7 @@ export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = de
 
 /** 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 按 push.default 解析。 */
 export function resolvePushTargets(p, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
+  if (p.deferReason) return { deferReason: p.deferReason };
   if (p.unreliable) return { deferReason: 'push 命令含未识别 flag（解析不可靠，保守走既有裁决）' };
   if (p.force) return { deferReason: 'force push 走既有裁决（永不借道审查放行）' };
   if (p.broad) return { branches: [...PROTECTED_BRANCHES], protected: true, broad: true };
@@ -309,9 +361,66 @@ export function appendBypassLog(entry, env = process.env) {
 }
 
 /**
+ * 放行覆盖前置核验（round2：P1 复合命令跨段放行 + P2 cd/--git-dir 跨仓锚定）。
+ * 返回 defer 原因字符串；null = 核验通过。覆盖只担保 push 段本身的裁决面：
+ *   ① 每个 非 push 段独立重跑既有红线（policy.evaluateCommand）——任一命中即 defer。
+ *     根因：policy.mjs evaluateSegments 的 pushSeen 先于 portBlock 返回，复合命令的 rule
+ *     可能是 'publish' 而端口段只落进 portBlock——逐段复评才能把非 publish 红线找回来；
+ *   ② 非 push 段仅含受保护端口字符串也 defer（保守面）：端口红线是否真命中不由门禁复判
+ *     （listen 词表外的形态如 ssh -R 8687 不在 policy 拦截面），只要有涉就交回既有裁决；
+ *   ③ cd 段核验仓库归属：解析出的 toplevel 与事件 cwd 不同 → defer（工件核验的仓库必须
+ *     = 实推的仓库）；非仓库目录（push 本身会失败，如 cd /tmp）与本仓路径不拦。
+ */
+function overrideRefusal(scan, { cwd, policy, runGit }) {
+  if (scan.others.length) {
+    if (typeof policy?.evaluateCommand !== 'function') {
+      return '无法对非 push 段复跑既有红线（policy.evaluateCommand 不可用）——保守走既有裁决';
+    }
+    let ports = [];
+    if (typeof policy?.protectedPorts === 'function') {
+      try {
+        const p = policy.protectedPorts();
+        if (Array.isArray(p)) ports = p;
+      } catch {
+        ports = []; // 配置读取失败不在此拦（dispatcher 侧 evaluateCommand 有自己的容错）
+      }
+    }
+    for (const seg of scan.others) {
+      let v = null;
+      try {
+        v = policy.evaluateCommand(seg);
+      } catch (e) {
+        return `非 push 段复跑既有红线失败（${e?.message ?? e}）——保守走既有裁决`;
+      }
+      if (v && !v.allowed) {
+        return `复合命令的非 push 段命中既有红线（${v.rule ?? '?'}）——门禁放行覆盖只限 push 段，走既有裁决`;
+      }
+      const port = ports.find((p) => seg.includes(p));
+      if (port) {
+        return `复合命令的非 push 段涉及受保护端口 ${port}——端口等非 publish 红线永不覆盖，走既有裁决`;
+      }
+    }
+  }
+  if (scan.cds.length) {
+    const baseTop = runGit(cwd, ['rev-parse', '--show-toplevel']);
+    for (const cd of scan.cds) {
+      if (cd.unreliable || !cd.target) {
+        return `cd 目标解析不可靠（${cd.seg}）——跨仓 push 无法排除，保守走既有裁决`;
+      }
+      const top = runGit(path.resolve(cwd, cd.target), ['rev-parse', '--show-toplevel']);
+      if (top && top !== baseTop) {
+        return `cd 切换到其他仓库（${cd.target}）——工件核验仓库与实推仓库不一致，保守走既有裁决`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * 闸门主判定。返回 { decision, hasPush, hasTag, hasNpmPublish, detail?, targets?, reason?, message?, warning?, logEntry? }：
  *   no-push          命令里没有顶层 git push 段（门禁不介入）
- *   defer            混入 tag/npm publish / force / 解析不可靠 / git 失败——交回既有裁决
+ *   defer            混入 tag/npm publish / force / 解析不可靠 / git 失败 / 非 push 段命中
+ *                    既有红线或涉受保护端口 / cd 跨仓或解析不可靠——交回既有裁决
  *   pass-unprotected 纯分支 push 且目标非保护分支（放行覆盖）
  *   allow-bypass     保护分支 + 人工授权旁路（env 或命令前缀 hatch；dispatcher 负责警告+日志）
  *   allow-review     保护分支 + 有效 push-review 结论（正常路径，不写日志）
@@ -325,6 +434,10 @@ export function evaluatePushGate({ cmd, cwd, env = process.env, now = Date.now()
   if (scan.hasTag || scan.hasNpmPublish) {
     return { decision: 'defer', ...mixed, detail: '命令混入 tag/npm publish 段——发布动作走既有裁决（AGENTS_ALLOW_RELEASE 白名单）' };
   }
+  // 放行覆盖前置核验（round2）：非 push 段红线复评 + cd 跨仓锚定——任一命中即 defer，
+  // 走既有裁决的原拦截路径（端口等其他红线永不覆盖，见 overrideRefusal 注释）。
+  const refused = overrideRefusal(scan, { cwd, policy, runGit });
+  if (refused) return { decision: 'defer', ...mixed, detail: refused };
   const envBypass = env?.[BYPASS_ENV] === '1';
   const resolved = [];
   const seen = new Set();

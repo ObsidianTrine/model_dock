@@ -382,6 +382,81 @@ describe('policy-dispatch push 闸 > 判定矩阵（子进程实测）', () => {
     }
   })
 
+  it('round2 e2e 三断言：纯 push 放行 / cd 无害段放行 / 触端口复合命令绝不放行', () => {
+    const repo = mkRepo({ extra: { protectedPorts: ['8687', '8890'], listenCommandNames: ['modeldock', 'gateway'] } })
+    const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pushgate-log-')), 'push-gate.log')
+    try {
+      writeArtifact(repo.root)
+      // ① 纯 push：放行（放行覆盖的正样本）
+      expect(runDispatch(bashEvent(repo.root, 'git push origin develop')).status).toBe(0)
+      // ② cd 无害段（非仓库目录，push 本身会失败）：放行
+      expect(runDispatch(bashEvent(repo.root, 'cd /tmp && git push origin develop')).status).toBe(0)
+      // ③ 触端口段复合命令（直排段形态，round2 P1 主案例）：端口红线胜出、绝不放行——
+      //    defer 走既有 publish 拦截（原拦截路径），非门禁三选一新文案
+      const direct = runDispatch(bashEvent(repo.root, 'modeldock gateway start --port 8687 && git push origin develop'))
+      expect(direct.status).toBe(2)
+      expect(direct.stderr).toContain('发布动作人工授权制')
+      expect(direct.stderr).not.toContain('三选一')
+      // ssh -R 8687（listen 词表外形态）：受保护端口字符串保守面兜住，同样绝不放行
+      const ssh = runDispatch(bashEvent(repo.root, 'ssh -R 8687 tunnel.example.com && git push origin develop'))
+      expect(ssh.status).toBe(2)
+      expect(ssh.stderr).not.toContain('三选一')
+      // 人工旁路压不过端口红线：整体拦截且不留 bypass 日志（留痕只在放行覆盖确认后写）
+      const bypass = runDispatch(
+        bashEvent(repo.root, 'AGENTS_ALLOW_PUSH=1 git push origin develop && modeldock gateway start --port 8687'),
+        { AGENTS_ALLOW_PUSH: '1', AGENTS_PUSH_GATE_LOG: logFile },
+      )
+      expect(bypass.status).toBe(2)
+      expect(fs.existsSync(logFile)).toBe(false)
+    } finally {
+      fs.rmSync(path.dirname(logFile), { recursive: true, force: true })
+      repo.cleanup()
+    }
+  })
+
+  it('round2 P2：cd 他仓 / --git-dir 他仓 → defer（工件不跨仓借道）；cd 本仓路径照常放行', () => {
+    const repoA = mkRepo() // 事件 cwd：有有效工件
+    const repoB = mkRepo() // 实推目标仓（develop，无工件）
+    try {
+      writeArtifact(repoA.root)
+      // cd 到他仓再推 develop：修复前按事件 cwd 的工件误放行——现在 defer 走既有拦截
+      const cdOther = runDispatch(bashEvent(repoA.root, `cd ${repoB.root} && git push origin develop`))
+      expect(cdOther.status).toBe(2)
+      expect(cdOther.stderr).toContain('发布动作人工授权制')
+      expect(cdOther.stderr).not.toContain('三选一')
+      // --git-dir 指向他仓（空格形态）：defer
+      const gitDirOther = runDispatch(bashEvent(repoA.root, `git --git-dir ${repoB.root}/.git push origin develop`))
+      expect(gitDirOther.status).toBe(2)
+      expect(gitDirOther.stderr).not.toContain('三选一')
+      // = 附着形态同判；--work-tree 改锚形态同判
+      expect(runDispatch(bashEvent(repoA.root, `git --git-dir=${repoB.root}/.git push origin develop`)).status).toBe(2)
+      expect(runDispatch(bashEvent(repoA.root, `git --work-tree ${repoB.root} --git-dir ${repoB.root}/.git push origin develop`)).status).toBe(2)
+      // 对照：cd 本仓内（cd .）锚定不变 → 正常放行
+      expect(runDispatch(bashEvent(repoA.root, 'cd . && git push origin develop')).status).toBe(0)
+    } finally {
+      repoA.cleanup()
+      repoB.cleanup()
+    }
+  })
+
+  it('round2 P2：--follow-tags 借道推可达 tag——与 --tags 同待遇按保护拦，有结论才放行', () => {
+    const repo = mkRepo()
+    try {
+      git(repo.root, 'branch feature/with-tags')
+      // 非保护分支 + --follow-tags：可顺带推可达 annotated tag（含 v* 触发 Release）→ 按保护拦（三选一）
+      const r = runDispatch(bashEvent(repo.root, 'git push --follow-tags origin feature/with-tags'))
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('三选一')
+      // 保护分支 + --follow-tags：无结论同拦
+      expect(runDispatch(bashEvent(repo.root, 'git push --follow-tags origin develop')).status).toBe(2)
+      // 有效结论 → 放行（与 --tags 口径一致：结论担保 HEAD，可达 tag 随行）
+      writeArtifact(repo.root)
+      expect(runDispatch(bashEvent(repo.root, 'git push --follow-tags origin feature/with-tags')).status).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('非 push 命令不受门禁影响（既有放行/拦截面零变化）', () => {
     const repo = mkRepo()
     try {
@@ -451,6 +526,38 @@ describe('push-gate 纯函数矩阵', () => {
     expect(gate.parsePushSegment('git status', policy)).toBeNull()
   })
 
+  it('parsePushSegment（round2）：--git-dir/--work-tree 带值形态 deferReason；--follow-tags 归 BROAD', () => {
+    // 空格 / = 附着两形态都 defer，且值不被误吞当 refspec
+    const space = gate.parsePushSegment('git --git-dir /x/.git push origin develop', policy)
+    expect(space?.deferReason).toBeTruthy()
+    expect(space?.args).toEqual(['origin', 'develop'])
+    expect(gate.parsePushSegment('git --git-dir=/x/.git push origin develop', policy)?.deferReason).toBeTruthy()
+    expect(gate.parsePushSegment('git --work-tree /x push origin develop', policy)?.deferReason).toBeTruthy()
+    // -C 仍是捕获锚定（不 defer）
+    expect(gate.parsePushSegment('git -C /x push origin develop', policy)?.deferReason).toBeNull()
+    // --follow-tags：broad（按保护处理），不再是无害布尔；对照 -u 仍是无害布尔
+    expect(gate.parsePushSegment('git push --follow-tags origin feature/x', policy)?.broad).toBe(true)
+    expect(gate.parsePushSegment('git push -u origin feature/x', policy)?.broad).toBe(false)
+  })
+
+  it('parseCdTarget（round2）：常规/无参/~ 形态可解析；变量/引号/cd -/额外参数不可靠', () => {
+    expect(gate.parseCdTarget('cd /tmp', policy)).toEqual({ seg: 'cd /tmp', target: '/tmp', unreliable: false })
+    expect(gate.parseCdTarget('cd rel/sub', policy)?.target).toBe('rel/sub')
+    expect(gate.parseCdTarget('cd .', policy)?.target).toBe('.')
+    expect(gate.parseCdTarget('cd', policy)).toEqual({ seg: 'cd', target: os.homedir(), unreliable: false })
+    expect(gate.parseCdTarget('cd ~/other', policy)?.target).toBe(path.join(os.homedir(), 'other'))
+    expect(gate.parseCdTarget('cd -- /tmp', policy)?.target).toBe('/tmp')
+    // 不可靠形态（解析不可靠一律 defer）
+    expect(gate.parseCdTarget('cd $WHERE', policy)?.unreliable).toBe(true)
+    expect(gate.parseCdTarget('cd -', policy)?.unreliable).toBe(true)
+    expect(gate.parseCdTarget('cd "a', policy)?.unreliable).toBe(true) // 引号内空格被切段打散
+    expect(gate.parseCdTarget('cd a b', policy)?.unreliable).toBe(true)
+    expect(gate.parseCdTarget('cd -P /tmp', policy)?.unreliable).toBe(true)
+    // 非 cd 段
+    expect(gate.parseCdTarget('echo hi', policy)).toBeNull()
+    expect(gate.parseCdTarget('git push origin develop', policy)).toBeNull()
+  })
+
   it('resolvePushTargets：裸 push 按 push.default 消歧（matching/upstream defer，simple/current/未配置按当前分支）', () => {
     const ok = fakeOkFor('refs/heads/develop')
     const bare = gate.parsePushSegment('git push', policy)
@@ -478,6 +585,20 @@ describe('push-gate 纯函数矩阵', () => {
     expect(s2.hasPush).toBe(true)
     expect(s2.hasNpmPublish).toBe(true)
     expect(gate.scanPushCommand('git status', policy).hasPush).toBe(false)
+  })
+
+  it('scanPushCommand（round2）：非 push 段与 cd 段上报（放行覆盖二次核验的输入）', () => {
+    const s1 = gate.scanPushCommand('cd /tmp && git push origin develop', policy)
+    expect(s1.pushes.length).toBe(1)
+    expect(s1.others).toEqual(['cd /tmp'])
+    expect(s1.cds).toEqual([{ seg: 'cd /tmp', target: '/tmp', unreliable: false }])
+    const s2 = gate.scanPushCommand('echo hi; git push origin feature/x', policy)
+    expect(s2.others).toEqual(['echo hi'])
+    expect(s2.cds.length).toBe(0)
+    // --git-dir 改锚 push 段：带 deferReason 上报（resolvePushTargets 据此 defer）
+    const s3 = gate.scanPushCommand('git push origin develop && git --git-dir /x push origin develop', policy)
+    expect(s3.pushes.length).toBe(2)
+    expect(s3.pushes[1]?.deferReason).toBeTruthy()
   })
 
   it('evaluatePushGate：裸 push 当前分支矩阵 + 环境旁路 + 真实 artifact 放行（注入 fake git）', () => {
@@ -513,6 +634,45 @@ describe('push-gate 纯函数矩阵', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  it('evaluatePushGate（round2 放行覆盖二次核验）：非 push 段触端口/命中红线 → defer；cd 跨仓/不可靠 → defer；本仓与非仓库目录放行', () => {
+    const ok = () => false // 显式 refspec 走不到 show-ref；走到了也按不存在保守判
+    const topOf = (map: Record<string, string | null>) => (dir: string, args: string[]) =>
+      args[0] === 'rev-parse' && args[1] === '--show-toplevel' ? (map[dir] ?? null) : null
+    const noTop = topOf({ '/repo': '/repo' })
+    // 非 push 段含受保护端口（真 policy.protectedPorts → 本仓 workflow.json 8687/8890）：保守面 defer
+    expect(
+      gate.evaluatePushGate({ cmd: 'ssh -R 8687 h && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: noTop, runGitOk: ok }).decision,
+    ).toBe('defer')
+    // 对照：高位测试端口不触发保守面 → 正常放行
+    expect(
+      gate.evaluatePushGate({ cmd: 'ssh -R 18901 h && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: noTop, runGitOk: ok }).decision,
+    ).toBe('pass-unprotected')
+    // 非 push 段命中既有红线（fake evaluateCommand 注入非 publish 规则）：defer
+    const boomPolicy = {
+      ...policy,
+      evaluateCommand: (seg: string) => (seg.includes('boom') ? { allowed: false, rule: 'boom', reason: '演示红线' } : { allowed: true }),
+    }
+    expect(
+      gate.evaluatePushGate({ cmd: 'boom-tool run && git push origin refs/heads/feature/x', cwd: '/repo', policy: boomPolicy, runGit: noTop, runGitOk: ok }).decision,
+    ).toBe('defer')
+    // cd 他仓（toplevel 不同）→ defer
+    expect(
+      gate.evaluatePushGate({ cmd: 'cd /other && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: topOf({ '/repo': '/repo', '/other': '/other-repo' }), runGitOk: ok }).decision,
+    ).toBe('defer')
+    // cd 本仓子目录（toplevel 相同）→ 放行
+    expect(
+      gate.evaluatePushGate({ cmd: 'cd /repo/sub && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: topOf({ '/repo': '/repo', '/repo/sub': '/repo' }), runGitOk: ok }).decision,
+    ).toBe('pass-unprotected')
+    // cd 非仓库目录（toplevel 解析失败，push 本身会失败）→ 放行
+    expect(
+      gate.evaluatePushGate({ cmd: 'cd /nowhere && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: noTop, runGitOk: ok }).decision,
+    ).toBe('pass-unprotected')
+    // cd 解析不可靠 → defer
+    expect(
+      gate.evaluatePushGate({ cmd: 'cd $WHERE && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: noTop, runGitOk: ok }).decision,
+    ).toBe('defer')
   })
 
   it('loadPushArtifact：schema/verdict/超期/head/防伪造三件套逐项判否', () => {

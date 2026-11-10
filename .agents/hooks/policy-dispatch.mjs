@@ -128,8 +128,10 @@ try {
 //   - 纯分支 push 且目标非 main/develop → 放行（覆盖 publish 拦截）；
 //   - 命中 main/develop：AGENTS_ALLOW_PUSH=1 人工旁路（显眼警告 + push-gate.log 留痕）或
 //     24h 内 push-review 结论（HEAD 未变）→ 放行；否则拦截并给可操作三选一。
-// 门禁只覆盖「纯 push 段 + publish 类拦截」：混入 tag/npm publish、force、解析不可靠一律
-// defer 回既有裁决；端口等非 publish 拦截永不覆盖——放行面相对既有红线只收窄不放大。
+// 门禁只覆盖「纯 push 段 + publish 类拦截」：混入 tag/npm publish、force、解析不可靠、
+// 非 push 段命中既有红线（含仅涉受保护端口）或 cd 跨仓 / --git-dir 改锚一律 defer 回既有
+// 裁决（gate 侧放行前逐段二次核验，2026-11 round2）；端口等非 publish 拦截永不覆盖
+// ——放行面相对既有红线只收窄不放大。
 // 门禁模块装在本文件同目录（~/.agents/hooks/push-gate.mjs，被守护 agent 写不到）；加载或
 // 裁决失败一律 defer 走既有裁决（不新增放行、不卡死会话；安装漏拷文件只丢新文案不丢拦截）。
 let gate = null;
