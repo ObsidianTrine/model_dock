@@ -70,6 +70,7 @@ import { runSpecL0Checks, auditSpecFindings, computeSpecVerdict, parseSpecVerdic
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock, SCHED_LOCK_ENV } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
+import { queueDigestItem, flushDigest, maybeSpawnDigestFlush } from './orchestrator/notify-digest.mjs';
 import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
@@ -137,18 +138,48 @@ function cardGoalLine(repoRoot, taskId) {
 }
 
 /**
- * 卡片落位通知（merged/awaiting-human/blocked/failed）：按任务号为话题的任务通报——
- * 为什么（卡目标）/ 成果（worker 交付摘要）/ 过程（事件流阶段链）/ 结果（落位理由），
- * 夜跑无人值守时手机可扫读。尽力而为——webhook 未配置时零开销，通道失败静默，
- * 绝不影响编排本身。
+ * 卡片落位通知（merged/awaiting-human/blocked/failed）。
+ * notify.digest.enabled=true（聚合通报）：落位事件进 digest 队列（notify-digest.mjs）——
+ * 一行一卡（同卡多条合并终态），attention 级（awaiting-human 待批示 / blocked 熔断）
+ * 立即同步 flush 不进静默窗，其余走 detached flush 子进程的 quietWindowSec 静默窗
+ * （窗内多条落位合并成一条三段式通报）。
+ * enabled=false（缺省）：旧直发路径——按任务号为话题的任务通报（为什么/成果/过程/结果），
+ * 行为逐字节不变。
  * 双向批示：需要人工动作的落位（awaiting-human=人工合并闸门；blocked 含预算熔断/
  * 看门狗等 circuit_breaker 落位）在文本通知外叠加一张飞书交互卡片（approve/reject
  * 按钮，回调 approval-listener）——notify.cardWebhook 未开启（缺省）时 notifyActionCard
  * 内部直接短路，零开销零行为变化。
+ * 尽力而为——webhook 未配置时零开销，通道失败静默，绝不影响编排本身。
  */
 async function settleNotify(repoRoot, taskId, state, reason) {
   try {
     const cfg = loadWorkflowConfig(repoRoot);
+    const attention = state === 'awaiting-human' || state === 'blocked';
+    if (cfg.notify?.digest?.enabled) {
+      queueDigestItem(repoRoot, {
+        kind: 'task',
+        taskId,
+        state,
+        title: `卡 ${taskId} ${taskStateTag(state)}`,
+        lines: reason ? [String(reason)] : [],
+        priority: attention ? 'attention' : 'normal',
+      });
+      if (attention) {
+        await flushDigest(repoRoot, { force: true }); // attention 立即同步 flush（不进静默窗）
+      } else {
+        maybeSpawnDigestFlush(repoRoot, cfg); // 静默窗 detached flush（窗内落位合并一条）
+      }
+      if (attention) {
+        await notifyActionCard({
+          repoRoot,
+          webhookEnvs: orchWebhookEnvs(repoRoot),
+          taskId,
+          title: `${displayProjectName(cfg.projectName ?? '')} 待批示`,
+          reason: `${taskStateTag(state)}${reason ? `：${String(reason).slice(0, 200)}` : ''}`,
+        });
+      }
+      return;
+    }
     let events = [];
     try { events = readEvents(logDir(repoRoot, taskId)); } catch { /* 无事件流照发（手工场景退化为一行） */ }
     await notify({
@@ -156,7 +187,7 @@ async function settleNotify(repoRoot, taskId, state, reason) {
       body: buildTaskDigest({ taskId, state, reason, why: cardGoalLine(repoRoot, taskId), events }),
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
-    if (state === 'awaiting-human' || state === 'blocked') {
+    if (attention) {
       await notifyActionCard({
         repoRoot,
         webhookEnvs: orchWebhookEnvs(repoRoot),
@@ -1707,12 +1738,29 @@ function recommendFromVerdict(ev) {
   return null; // blockers 缺失/-1（审查输出无契约块）等同无结论，保守不动作
 }
 
-/** sweep 动作的飞书通报（标题带项目名前缀防网关 19024 吞消息；尽力而为不阻断）。 */
-async function notifyAutoApproveAction(repoRoot, cfg, body) {
+/**
+ * sweep 动作的飞书通报（标题带项目名前缀防网关 19024 吞消息；尽力而为不阻断）。
+ * notify.digest.enabled=true：动作进 digest 队列（同一 taskId 与落位事件合并成一行终态
+ * ——autoapprove 的动作说明比落位行更具体，同级后到覆盖）；关：旧直发（正文逐字节不变）。
+ * act = { taskId, state（'merged'=自动合并 / 'pending'=返工或拆卡的中态）, spec?, detail }。
+ */
+async function notifyAutoApproveAction(repoRoot, cfg, { taskId, state = 'pending', spec = false, detail }) {
+  const noun = spec ? '规格' : '卡';
   try {
+    if (cfg.notify?.digest?.enabled) {
+      queueDigestItem(repoRoot, {
+        kind: spec ? 'spec' : 'autoapprove',
+        taskId,
+        state,
+        title: `${noun} ${taskId} 超时自动批示`,
+        lines: [String(detail ?? '')],
+        priority: 'normal',
+      });
+      return;
+    }
     await notify({
       title: `${displayProjectName(cfg.projectName ?? '')} 超时自动批示`,
-      body,
+      body: `${noun} ${taskId}：${String(detail ?? '')}`,
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
   } catch { /* 通知失败不阻断 sweep */ }
@@ -1796,7 +1844,7 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
           if (!act) continue;
           appendEvent(qdir, 'autoapprove_decision', { decision: 'merge', source: 'timeout', verdict_ts: verdict.ts });
           await doApprove(repoRoot, taskId, root, qdir, 'auto');
-          await notifyAutoApproveAction(repoRoot, cfg, `卡 ${taskId}：审查 blockers=0 且超时 ${timeoutMinutes} 分钟——已按推荐自动合并（merged/）`);
+          await notifyAutoApproveAction(repoRoot, cfg, { taskId, state: 'merged', detail: `审查 blockers=0 且超时 ${timeoutMinutes} 分钟——已按推荐自动合并（merged/）` });
         } else {
           // 红线③：blockers>0 永不自动合并——只自动返工，且每卡限 maxAutoRetry 次
           const retries = readEvents(qdir).filter((e) => e.type === 'autoapprove_decision' && e.decision === 'retry').length;
@@ -1811,7 +1859,7 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
           if (!act) continue;
           appendEvent(qdir, 'autoapprove_decision', { decision: 'retry', source: 'timeout', verdict_ts: verdict.ts });
           await doRetry(repoRoot, taskId, root, qdir, AUTOAPPROVE_RETRY_NOTE, {});
-          await notifyAutoApproveAction(repoRoot, cfg, `卡 ${taskId}：审查 blockers=${verdict.blockers} 且超时 ${timeoutMinutes} 分钟——已按推荐自动返工（第 ${retries + 1}/${aa.maxAutoRetry} 次）`);
+          await notifyAutoApproveAction(repoRoot, cfg, { taskId, state: 'pending', detail: `审查 blockers=${verdict.blockers} 且超时 ${timeoutMinutes} 分钟——已按推荐自动返工（第 ${retries + 1}/${aa.maxAutoRetry} 次）` });
         }
       }
       // ---- spec 分层超时：设计人审的委托（审查 approve_to_build 且超时且未 build 过 → 拆卡）----
@@ -1830,7 +1878,7 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
         report.specBuilt.push(id);
         if (!act) continue;
         cmdSpecBuild(repoRoot, id);
-        await notifyAutoApproveAction(repoRoot, cfg, `规格 ${id}：审查 approve_to_build 且超时 ${timeoutMinutes} 分钟——已按推荐自动拆卡（pending/）`);
+        await notifyAutoApproveAction(repoRoot, cfg, { taskId: id, spec: true, state: 'pending', detail: `审查 approve_to_build 且超时 ${timeoutMinutes} 分钟——已按推荐自动拆卡（pending/）` });
       }
     }
   } finally {
@@ -1851,6 +1899,12 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
     log('  无待批示项。');
   }
   if (dryRun) log('  （dry-run：以上为建议动作，未实际执行）');
+  // digest 聚合通报：有动作才可能进了队列——sweep 收尾拉起 detached flush（60s 静默窗
+  // 内合并发送）。retry/拆卡路径没有落位 settleNotify 兜底拉 flusher，这里统一保证；
+  // merge 路径 doApprove→settleNotify 已拉过的由 marker 去重（不双拉）。
+  if (act && (report.merged.length || report.retried.length || report.specBuilt.length)) {
+    maybeSpawnDigestFlush(repoRoot, cfg);
+  }
 }
 
 /**
@@ -1873,6 +1927,9 @@ function maybeSpawnAutoApproveSweep(repoRoot, cfg) {
       stdio: 'ignore',
       env: sweepEnv,
     }).unref();
+    // digest 聚合通报的 detached flush 分支（与 sweep 同款 detach）：attention 落位已
+    // 立即同步 flush，这里兜静默窗内可能残留的 normal 事件；队列空/未启用 = 零开销短路
+    maybeSpawnDigestFlush(repoRoot, cfg);
   } catch { /* 尽力而为：拉起失败不影响本轮落位（watch/sail/nightly 周期 sweep 兜底） */ }
 }
 
@@ -2176,8 +2233,13 @@ function configGuardPass(repoRoot, cfg) {
 let configDriftAnnouncedKey = null;
 
 /** drain 收官摘要通知（尽力而为）：夜里 drain 跑完手机可收「N 卡：merged x、awaiting y」
- *  + 任务花名册（按任务号列本次做了什么、目标是什么）。 */
+ *  + 任务花名册（按任务号列本次做了什么、目标是什么）。digest 聚合通报开启时先 force
+ *  flush（drain 收口是权威 flush：静默窗内落位的事件在这里合并发出，不跨 drain 存量）。 */
 async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
+  try {
+    const cfgDigest = loadWorkflowConfig(repoRoot).notify?.digest;
+    if (cfgDigest?.enabled) await flushDigest(repoRoot, { force: true });
+  } catch { /* flush 失败不阻断收官摘要 */ }
   if (!done) return; // 零消费不吵
   try {
     const cfg = loadWorkflowConfig(repoRoot);
@@ -4685,6 +4747,10 @@ async function cmdNightly(repoRoot, opts) {
       error: errMsg,
     }),
   });
+  // digest 聚合通报收口（force）：夜航内落位的事件合并发出，不跨夜存量
+  try {
+    if (cfg.notify?.digest?.enabled) await flushDigest(repoRoot, { force: true });
+  } catch { /* digest flush 失败不阻断 nightly 收尾 */ }
   if (errMsg) die(`nightly 异常中断：${errMsg}`, 1);
 }
 
@@ -5108,6 +5174,10 @@ async function cmdSail(repoRoot, opts) {
         webhookEnvs: nightlyWebhookEnvs(repoRoot),
       });
     } catch { /* 通知失败不阻断收帆 */ }
+    // digest 聚合通报收口（force）：航次内落位的事件合并发出，不跨航次存量
+    try {
+      if (loadWorkflowConfig(repoRoot).notify?.digest?.enabled) await flushDigest(repoRoot, { force: true });
+    } catch { /* digest flush 失败不阻断收帆 */ }
   }
 }
 
@@ -5203,6 +5273,29 @@ function cmdDrill(repoRoot, opts) {
   if (!r.ok) die('演习未通过', 1);
 }
 
+/**
+ * notify-digest——digest 聚合通报的 flush 子命令（一次性，非守护）：--flush 先睡满
+ * notify.digest.quietWindowSec（60s 静默窗，--sleep N 覆盖；测试/手动立即冲刷用 0）
+ * 再冲刷待发队列——聚合规则见 orchestrator/notify-digest.mjs。落位流程经
+ * maybeSpawnDigestFlush detached 拉起本命令；人工也可手动跑一次补发。
+ */
+async function cmdNotifyDigest(repoRoot, opts) {
+  const cfg = loadWorkflowConfig(repoRoot);
+  const digest = cfg.notify?.digest;
+  if (!digest?.enabled) {
+    log('digest 聚合通报未启用（workflow.json notify.digest.enabled）——无事可做。');
+    return;
+  }
+  let sleepSec = Number.isInteger(opts.sleep) && opts.sleep >= 0 ? opts.sleep : (Number(digest.quietWindowSec) > 0 ? Number(digest.quietWindowSec) : 60);
+  if (sleepSec > 0) {
+    log(`digest flush：先睡 ${sleepSec}s 静默窗（窗内落位合并成一条通报）…`);
+    await new Promise((r) => setTimeout(r, sleepSec * 1000));
+  }
+  const r = await flushDigest(repoRoot, { force: true });
+  if (r.sent) log(`digest 已发送：${(r.delivered ?? []).join('、') || '无通道（webhook 未配置）'}`);
+  else log(`digest 无待发事件（${r.reason ?? 'empty'}）——不发空消息。`);
+}
+
 // ---------------------------------------------------------------------------
 // CLI 分发
 // ---------------------------------------------------------------------------
@@ -5260,6 +5353,7 @@ function usage() {
   follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
   stats [--days N] [--json] [--cost]      运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）；--cost 加燃油账（网关实测 × 价目，USD）
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
+  notify-digest --flush [--sleep N]       digest 聚合通报冲刷：睡满 notify.digest.quietWindowSec（--sleep N 覆盖）后把待发事件合并成一条三段式通报发出（落位流程 detached 自动拉起；手动补发可直达）
 
 后端：worker claude-headless | zcode-headless | codex-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
@@ -5298,6 +5392,7 @@ async function main() {
     else if (a === '--duration') opts.duration = argv[++i];
     else if (a === '--max-tasks') opts.maxTasks = parseInt(argv[++i], 10);
     else if (a === '--max-cost-usd') opts.maxCostUsd = parseFloat(argv[++i]);
+    else if (a === '--sleep') opts.sleep = parseInt(argv[++i], 10);
     else if (a === '--from-brief') opts.fromBrief = argv[++i];
     else if (a === '--min-citations') opts.minCitations = parseInt(argv[++i], 10);
     else if (a === '--dim') (opts.dims ??= []).push(argv[++i]); // research multi：可重复，每维一项
@@ -5445,6 +5540,8 @@ async function main() {
       return cmdStats(repoRoot, opts);
     case 'drill':
       return cmdDrill(repoRoot, opts);
+    case 'notify-digest':
+      return cmdNotifyDigest(repoRoot, opts);
     default:
       usage();
       die(`未知命令 "${cmd}"`, 1);

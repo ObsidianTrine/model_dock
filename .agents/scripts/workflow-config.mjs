@@ -444,11 +444,17 @@ function resolveDynamicDispatch(raw) {
  *  cardWebhook?: boolean（缺省 false——需要人工动作的落位事件额外发一张飞书交互卡片，
  *  按钮批示经 approval-listener 回流；非飞书 webhook 端点自动跳过），
  *  listenerPort?: 正整数（approval-listener 缺省监听端口；监听器必须显式配置才启动，
- *  永不缺省监听）}。缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
+ *  永不缺省监听），
+ *  digest?: { enabled?: boolean（缺省 false = 逐事件直发旧行为；true = 落位/批示通知进
+ *  digest 聚合队列，批量合并成一条三段式通报，见 orchestrator/notify-digest.mjs）,
+ *  quietWindowSec?: 0-3600 整数（缺省 60——detached flush 子进程先睡再发的静默窗，
+ *  窗内多条落位合并成一条通报） } }。缺省 null/false → 一切照旧（向后兼容：老 workflow.json
+ *  无此键零行为变化）。 */
 function resolveNotify(raw) {
-  const DEFAULTS = { keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null };
+  const DIGEST_DEFAULTS = { enabled: false, quietWindowSec: 60 };
+  const DEFAULTS = { keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null, digest: DIGEST_DEFAULTS };
   const warn = (detail) =>
-    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, signSecretService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数 }）`);
+    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, signSecretService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数, digest?: { enabled?: boolean, quietWindowSec?: 0-3600 } }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     warn(`应为对象，当前为 ${JSON.stringify(raw)}`);
@@ -464,7 +470,20 @@ function resolveNotify(raw) {
   if (raw.listenerPort !== undefined && listenerPort === null) {
     warn(`listenerPort ${JSON.stringify(raw.listenerPort)} 不合法（须为 1-65535 的正整数）`);
   }
-  return { keychainService, signSecretService, cardWebhook, listenerPort };
+  let digest = { ...DIGEST_DEFAULTS };
+  if (raw.digest !== undefined) {
+    if (!raw.digest || typeof raw.digest !== 'object' || Array.isArray(raw.digest)) {
+      warn(`digest ${JSON.stringify(raw.digest)} 不合法（应为 { enabled?: boolean, quietWindowSec?: 0-3600 整数 }）`);
+    } else {
+      digest.enabled = raw.digest.enabled === true;
+      if (raw.digest.quietWindowSec !== undefined) {
+        const qs = raw.digest.quietWindowSec;
+        if (Number.isInteger(qs) && qs >= 0 && qs <= 3600) digest.quietWindowSec = qs;
+        else warn(`digest.quietWindowSec ${JSON.stringify(qs)} 不合法（须为 0-3600 的整数秒）`);
+      }
+    }
+  }
+  return { keychainService, signSecretService, cardWebhook, listenerPort, digest };
 }
 
 /** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即
