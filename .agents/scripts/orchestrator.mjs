@@ -143,7 +143,7 @@ function cardGoalLine(repoRoot, taskId) {
  * notify.digest.enabled=true（聚合通报）：落位事件进 digest 队列（notify-digest.mjs）——
  * 一行一卡（同卡多条合并终态），attention 级（awaiting-human 待批示 / blocked 熔断）
  * 立即同步 flush 不进静默窗，其余走 detached flush 子进程的 quietWindowSec 静默窗
- * （窗内多条落位合并成一条三段式通报）。
+ * （窗内多条落位合并成一条扁平事件流通报）。
  * enabled=false（缺省）：旧直发路径——按任务号为话题的任务通报（为什么/成果/过程/结果），
  * 行为逐字节不变。
  * 双向批示：需要人工动作的落位（awaiting-human=人工合并闸门；blocked 含预算熔断/
@@ -5383,7 +5383,7 @@ function usage() {
   follow <task-id> <补充指令>             运行中任务的直通信息通道（写 inbox，会话边界送达 worker；awaiting-human 用 retry --note）
   stats [--days N] [--json] [--cost]      运行度量：每卡 wall/turns/迭代/token 峰值/watchdog/follow-up 聚合（只读）；--cost 加燃油账（网关实测 × 价目，USD）
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
-  notify-digest --flush [--sleep N]       digest 聚合通报冲刷：睡满 notify.digest.quietWindowSec（--sleep N 覆盖）后把待发事件合并成一条三段式通报发出（落位流程 detached 自动拉起；手动补发可直达）
+  notify-digest --flush [--sleep N]       digest 聚合通报冲刷：睡满 notify.digest.quietWindowSec（--sleep N 覆盖）后把待发事件合并成一条扁平事件流通报（标题 emoji 计数分诊，正文 ≤4 行关键事件）发出（落位流程 detached 自动拉起；手动补发可直达）
 
 后端：worker claude-headless | zcode-headless | codex-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。

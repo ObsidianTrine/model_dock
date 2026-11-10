@@ -3,7 +3,7 @@
 // 首航实卡 docs-nightly-webhook-envs 的真实事件形状（类型与字段名以此为准）。
 //
 // 第二族（2026-11-10 digest 聚合改造）：notify-digest.mjs 的批量聚合通报——queueDigestItem
-// / aggregateDigest（同卡终态合并）/ buildDigestBody（扁平事件流 ≤5 行，标题分诊、细节落
+// / aggregateDigest（同卡终态合并）/ buildDigestBody（扁平事件流 ≤4 行，标题分诊、细节落
 // last.txt）/ flushDigest（认领语义 + 本地 http webhook 实发）+ e2e（mock 卡 drain →
 // digest POST）。digest 缺省关，e2e 用例经 mkRepo extra 显式开且 quietWindowSec 调小
 // （防 detached flusher 孤儿进程）。
@@ -304,7 +304,7 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     ])
   })
 
-  it('缺数据兜底：merged 无 commit 不带括号、awaiting 无 reason 无括号；reason 截 20 字、title 截 40 字、单行 ≤60 字', () => {
+  it('缺数据兜底：merged 无 commit 不带括号、awaiting 无 reason 无括号；reason 截 20 字、title 截 40 字、单行 ≤50 字', () => {
     const body = buildDigestBody({
       items: [
         { ts: '', kind: 'task', taskId: 't9', state: 'blocked', title: '卡 t9', lines: ['长'.repeat(45)], priority: 'attention' },
@@ -320,20 +320,29 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
       '✅ t1 合并',
       `📄 ${'标'.repeat(40)}`,
     ])
-    for (const l of lines) expect(l.length).toBeLessThanOrEqual(60)
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(50)
   })
 
-  it('超 5 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
+  it('超 4 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
     const items = [
       { ts: '', kind: 'task', taskId: 'ta', state: 'blocked', title: '卡 ta', lines: ['x'], priority: 'attention' },
       ...Array.from({ length: 7 }, (_, i) => ({ ts: '', kind: 'task', taskId: `t${i}`, state: 'merged', title: `卡 t${i}`, lines: [], priority: 'normal' })),
     ]
     const body = buildDigestBody({ items })
     const lines = body.split('\n')
-    expect(lines).toHaveLength(5)
+    expect(lines).toHaveLength(4)
     expect(lines[0]).toBe('⛔ ta ⚠ 搁浅（x）')
-    expect(lines.slice(1, 4)).toEqual(['✅ t0 合并', '✅ t1 合并', '✅ t2 合并'])
-    expect(lines[4]).toBe('…另 4 条见详情')
+    expect(lines.slice(1, 3)).toEqual(['✅ t0 合并', '✅ t1 合并'])
+    expect(lines[3]).toBe('…另 5 条见详情')
+  })
+
+  it('单行宽护栏：超 50 字截断加 …（细节落 last.txt 不丢）', () => {
+    const body = buildDigestBody({
+      items: [{ ts: '', kind: 'task', taskId: '长'.repeat(60), state: 'merged', title: '卡', lines: [], priority: 'normal' }],
+    })
+    const line = body.split('\n')[0]
+    expect(line.length).toBe(50)
+    expect(line.endsWith('…')).toBe(true)
   })
 
   it('规格尾行：本批 item 带 specId 且 specs 查得到 progress 才出（n/总 ✅）；无 specId 或无 progress 省略', () => {

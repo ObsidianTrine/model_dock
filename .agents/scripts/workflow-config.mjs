@@ -446,7 +446,7 @@ function resolveDynamicDispatch(raw) {
  *  listenerPort?: 正整数（approval-listener 缺省监听端口；监听器必须显式配置才启动，
  *  永不缺省监听），
  *  digest?: { enabled?: boolean（缺省 false = 逐事件直发旧行为；true = 落位/批示通知进
- *  digest 聚合队列，批量合并成一条三段式通报，见 orchestrator/notify-digest.mjs）,
+ *  digest 聚合队列，批量合并成一条扁平事件流通报，见 orchestrator/notify-digest.mjs）,
  *  quietWindowSec?: 0-3600 整数（缺省 60——detached flush 子进程先睡再发的静默窗，
  *  窗内多条落位合并成一条通报；显式 0 = 无静默窗立即冲刷，缺省语义只认 undefined） } }。
  *  缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
