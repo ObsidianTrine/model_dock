@@ -25,6 +25,7 @@
 ## 首跑记录（2026-11-09，GLM-5.3-Flash via claude-headless）
 
 - terminal-die-skips-revoke / fail-open-throw：**召回 2/2 ✅ 真审出**（exitRun 漏用凭据泄漏机制+行号+修法齐全；fail-open 收窄与被删注释矛盾定位到调用链）；机械口径「误报」经人工改判——excess blockers 中 1 条真发现（行为翻转零配套测试），3 条是合成材料 v1 与真实树不自洽被对拍挖出（出题材料缺陷，非审查者误报）。归档：`../runs/2026-11-09-firstrun-reviewer-batch2-cases.md`。两份材料已修 v2（meta.files_hint / running→blocked / 对齐真实 {ok,summary} 契约），v2 重跑待下轮定基线。
+- 2026-11-10：审查模型 review.model → glm-5.3-flashx（074abdf）。审查者基线待重跑（本文件纪律：审查模型改动必须重跑）。
 
 ## 出题纪律
 
