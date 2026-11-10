@@ -115,6 +115,16 @@ describe('relay · parseRatelimitHeaders（上游限流信号 → LogEntry.ratel
       parseRatelimitHeaders({ 'x-ratelimit-reset': '2026-11-03T08:00:05Z' }, now),
     ).toEqual({ reset: now + 5_000 }) // RFC3339 时间戳
   })
+  it('reset 边界宁缺毋滥：小数/科学计数不进 Date.parse 引擎回退（防日期重排）；超界大整数缺省', () => {
+    // V8 引擎回退把 "1.5" 重排成 2001-01-05——数值串但非整数格式直接缺省
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1.5' }, now)).toBeUndefined()
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1e12' }, now)).toBeUndefined()
+    // 超出 ECMA time-clip（±8.64e15）：消费方 toISOString 会 RangeError，缺省
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '99999999999999999999' }, now)).toBeUndefined()
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '-99999999999999' }, now)).toBeUndefined()
+    // 正常量级不受影响
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1799999999' }, now)).toEqual({ reset: 1_799_999_999_000 })
+  })
   it('键名大小写不敏感、重复头取首值、数组形态防御', () => {
     expect(parseRatelimitHeaders({ 'X-RateLimit-Remaining': ['12', '0'], 'Retry-After': '2' }, now)).toEqual({
       remaining: 12,

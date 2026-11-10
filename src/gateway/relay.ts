@@ -781,14 +781,19 @@ export function parseRetryAfterMs(v: string | string[] | undefined, now = Date.n
  *  epoch ms、GitHub 系 epoch s、部分网关 delta 秒、RFC3339/HTTP-date 时间戳），只按量级与可解析性
  *  归一、不做业务猜测：整数值 ≥1e12 视为 epoch ms（当前量级）；1e9~1e12 视为 epoch s（×1000，
  *  2286 年前两种秒/毫秒量级不会相撞）；更小值在 epoch 语义下不可能，按 delta 秒折算绝对时刻。
- *  非数值走 Date.parse（RFC3339 / HTTP-date 通吃），失败即缺省（「存在才记、判不出不猜」）。 */
+ *  非数值走 Date.parse（RFC3339 / HTTP-date 通吃），失败即缺省（「存在才记、判不出不猜」）。
+ *  两类边界宁缺毋滥：数值串但非整数格式（小数/科学计数）不进 Date.parse——引擎回退解析器会把
+ *  "1.5" 当日期重排（V8 → 2001-01-05）；结果夹在 ECMA time-clip 范围（±8.64e15）内，超界大整数
+ *  返回 undefined（消费方 toISOString 不炸 RangeError）。 */
+const DATE_MS_CLIP = 8.64e15
+
 function parseResetHeaderMs(raw: string, now = Date.now()): number | undefined {
   if (/^-?\d+$/.test(raw)) {
     const n = Number(raw)
-    if (n >= 1e12) return n
-    if (n >= 1e9) return n * 1000
-    return now + n * 1000
+    const ms = n >= 1e12 ? n : n >= 1e9 ? n * 1000 : now + n * 1000
+    return ms >= -DATE_MS_CLIP && ms <= DATE_MS_CLIP ? ms : undefined
   }
+  if (!Number.isNaN(Number(raw))) return undefined
   const at = Date.parse(raw)
   return Number.isNaN(at) ? undefined : at
 }
