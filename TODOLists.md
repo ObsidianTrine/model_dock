@@ -70,4 +70,4 @@
 | research multi 多维调研 | 0486201 merged（topic 复合清单 + rollup + 失败隔离） |
 | codex /model catalog + 无头船 + 直连守卫 | bf969f3 merged（codex-catalog-ship） |
 | 台账按调研船记账 | 已实现（ledger researcher_model 字段） |
-| 评测集补录「发布时间≠事件时间」案例 | 进行中（agent 补录，2026-11-10 派工） |
+| 评测集补录「发布时间≠事件时间」案例 | 5c686f2 merged（案例 announcement-date-vs-event-date，真跑 PASS，keywords 阈值设计保证抄页面日期必 FAIL） |
