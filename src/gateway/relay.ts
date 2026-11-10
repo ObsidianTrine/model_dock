@@ -798,10 +798,28 @@ function parseResetHeaderMs(raw: string, now = Date.now()): number | undefined {
   return Number.isNaN(at) ? undefined : at
 }
 
-/** 解析上游限流响应头（x-ratelimit-remaining / x-ratelimit-reset / retry-after）→ LogEntry.ratelimit。
- *  头存在才记、缺失不猜：子项解析失败缺省该子项、三个头全缺返回 undefined（日志零新增字段，
- *  /logs/query 只增不改）。键名大小写不敏感（上游头经不同 HTTP 栈大小写不保证）；重复头取首值
- *  （与 parseRetryAfterMs 同口径）。remaining 为上游原值（Number 可解析才记）。 */
+/** Go duration（OpenAI 系 x-ratelimit-reset-requests/-tokens，如 "6m0s"/"1h2m30s"/"500ms"）→ ms。
+ *  最小实现只认 h/m/s/ms 四段组合（time.ParseDuration 的常用子集，覆盖上游真实输出）；
+ *  全串必须被完整消费（含空白/杂字符判不出），至少含一段。µs/ns 未见于限流头，不猜。 */
+export function parseGoDurationMs(raw: string): number | undefined {
+  let total = 0
+  let consumed = 0
+  for (const m of raw.matchAll(/(\d+(?:\.\d+)?)(h|ms|s|m)/g)) {
+    const [, num, unit] = m
+    const mult = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1
+    total += Number(num) * mult
+    consumed += m[0].length
+  }
+  if (consumed === 0 || consumed !== raw.length) return undefined
+  return Math.round(total)
+}
+
+/** 解析上游限流响应头 → LogEntry.ratelimit。键族覆盖三大家族（主力上游零信号缺口补齐）：
+ *  OpenRouter/GitHub 系 x-ratelimit-{remaining,reset}、OpenAI 系 x-ratelimit-reset-{requests,tokens}
+ *  （Go duration delta）、Anthropic 系 anthropic-ratelimit-*-reset/-remaining（RFC3339）。
+ *  头存在才记、缺失不猜：子项解析失败缺省该子项、三子项全缺返回 undefined（日志零新增字段，
+ *  /logs/query 只增不改）。键名大小写不敏感；重复头取首值（与 parseRetryAfterMs 同口径），
+ *  新增键族先到先得不覆盖主键已得值。remaining 为上游原值（Number 可解析才记）。 */
 export function parseRatelimitHeaders(
   headers: Record<string, string | string[]>,
   now = Date.now(),
@@ -818,6 +836,18 @@ export function parseRatelimitHeaders(
       if (Number.isFinite(n)) remaining = n
     } else if (lk === 'x-ratelimit-reset') {
       reset = parseResetHeaderMs(v.trim(), now)
+    } else if (lk === 'x-ratelimit-reset-requests' || lk === 'x-ratelimit-reset-tokens') {
+      if (reset === undefined) {
+        const ms = parseGoDurationMs(v.trim())
+        if (ms !== undefined) reset = now + ms
+      }
+    } else if (lk.startsWith('anthropic-ratelimit-') && lk.endsWith('-reset')) {
+      if (reset === undefined) reset = parseResetHeaderMs(v.trim(), now)
+    } else if (lk.startsWith('anthropic-ratelimit-') && lk.endsWith('-remaining')) {
+      if (remaining === undefined) {
+        const n = Number(v.trim())
+        if (Number.isFinite(n)) remaining = n
+      }
     } else if (lk === 'retry-after') {
       const ms = parseRetryAfterMs(v, now)
       if (ms !== null) retryAfterMs = ms

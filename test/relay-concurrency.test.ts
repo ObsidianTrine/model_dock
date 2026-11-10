@@ -125,6 +125,21 @@ describe('relay · parseRatelimitHeaders（上游限流信号 → LogEntry.ratel
     // 正常量级不受影响
     expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1799999999' }, now)).toEqual({ reset: 1_799_999_999_000 })
   })
+  it('OpenAI/Anthropic 键名族覆盖（主力上游限流信号补齐）', () => {
+    // OpenAI 系 Go duration（delta）
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': '6m0s' }, now)).toEqual({ reset: now + 360_000 })
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-tokens': '500ms' }, now)).toEqual({ reset: now + 500 })
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': '1h2m30s' }, now)).toEqual({ reset: now + 3_750_000 })
+    // Anthropic 系 RFC3339 + remaining 别名
+    expect(parseRatelimitHeaders({ 'anthropic-ratelimit-unified-reset': '2026-11-03T08:00:05Z' }, now)).toEqual({ reset: now + 5_000 })
+    expect(
+      parseRatelimitHeaders({ 'anthropic-ratelimit-requests-remaining': '9', 'anthropic-ratelimit-unified-reset': '2026-11-03T08:00:05Z' }, now),
+    ).toEqual({ remaining: 9, reset: now + 5_000 })
+    // 与主键共存：先到先得不覆盖
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '90', 'x-ratelimit-reset-requests': '6m0s' }, now)).toEqual({ reset: now + 90_000 })
+    // Go duration 判不出 → 子项缺省（不猜）
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': 'soon' }, now)).toBeUndefined()
+  })
   it('键名大小写不敏感、重复头取首值、数组形态防御', () => {
     expect(parseRatelimitHeaders({ 'X-RateLimit-Remaining': ['12', '0'], 'Retry-After': '2' }, now)).toEqual({
       remaining: 12,

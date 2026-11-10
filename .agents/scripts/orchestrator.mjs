@@ -5036,6 +5036,7 @@ async function cmdSail(repoRoot, opts) {
       }
       // 规划轮：队列空（或风暴滞留/配置守卫漂移）→ 巡检出提案；propose 烧钱——风暴中跳过
       cycle.kind = 'plan';
+      cycle.held = weather.held || configPaused; // 滞留轮与空队轮区分：退避计数仍计入（风暴中睡更久方向正确），报告注记不混称
       const draftsBefore = snapshotDrafts(repoRoot);
       spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
       if (!weather.held && !configPaused) {

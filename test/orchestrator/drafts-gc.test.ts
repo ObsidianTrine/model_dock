@@ -14,6 +14,7 @@ import {
   annotateSuperseded,
   applyGc,
   autoCleanDrafts,
+  collectTracedIds,
   draftAgeMs,
   goalSimilarity,
   listDrafts,
@@ -169,6 +170,29 @@ describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）',
     const plan = planGc([traced, ancientTraced], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set(['traced', 'ancient-traced']) })
     expect(plan.agedUnsubmitted).toEqual([])
     expect(plan.aged.map((a) => a.draft.id)).toEqual(['ancient-traced']) // 归档档（手动 --apply 才动）兜底
+  })
+
+  it('collectTracedIds 补 specs/<id>/ 目录痕迹：spec 已拆卡的草稿不进 agedUnsubmitted', () => {
+    const d = mkDrafts()
+    try {
+      fs.mkdirSync(path.join(d.root, '.agents', 'orchestrator', 'specs', 'spec-live'), { recursive: true })
+      const traced = collectTracedIds(d.root)
+      expect(traced.has('spec-live')).toBe(true) // specs 目录 = 拆卡痕迹
+      // 端到端：同龄两提案，有 specs 痕迹的活 spec 不清退、无痕迹的照常进清单
+      const live = obj('spec-live', 20, 'scanner')
+      const dead = obj('spec-dead', 20, 'scanner')
+      const plan = planGc([live, dead], [], { now: NOW, maxAgeDays: 14, queueTraced: collectTracedIds(d.root) })
+      expect(plan.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['spec-dead'])
+      // 无 specs 目录的根：空痕迹不炸（从未拆过卡）
+      const d2 = mkDrafts()
+      try {
+        expect([...collectTracedIds(d2.root)]).toEqual([])
+      } finally {
+        d2.cleanup()
+      }
+    } finally {
+      d.cleanup()
+    }
   })
 
   it('未超龄不动（=maxAgeDays 边界按不动处理）', () => {

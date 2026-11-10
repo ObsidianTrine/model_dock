@@ -69,6 +69,20 @@ describe('autopilot > canAutoSubmit 授权矩阵', () => {
     expect(canAutoSubmit(proposal({ type: 'deps' }), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs', 'deps'] } })).ok).toBe(false)
   })
 
+  it('硬禁区收口 hardZoneReason 单一口径：规则不变、reason 归一（sail/nightly/scan 同源）', () => {
+    const rDeps = canAutoSubmit(proposal({ type: 'deps' }), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs', 'deps'] } }))
+    expect(rDeps.ok).toBe(false)
+    expect(rDeps.reason).toBe('deps 类型永不自动提交（依赖升级人工裁决）')
+    const rFeat = canAutoSubmit(proposal({ type: 'feature' }), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs', 'feature'] } }))
+    expect(rFeat.ok).toBe(false)
+    expect(rFeat.reason).toContain('上游管线')
+    const rGuard = canAutoSubmit(proposal({ files_hint: ['src/gateway/relay.ts'] }), cfg({ corePaths: ['src/gateway/server.ts'] }))
+    expect(rGuard.ok).toBe(false)
+    expect(rGuard.reason).toBe('files_hint 命中核心/发布路径（永不自动提交）')
+    // 收口不改授权面：白名单内照常放行
+    expect(canAutoSubmit(proposal(), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs'] } })).ok).toBe(true)
+  })
+
   it('白名单外类型拒绝', () => {
     const r = canAutoSubmit(proposal({ type: 'refactor' }), cfg())
     expect(r.ok).toBe(false)

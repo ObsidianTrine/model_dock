@@ -371,14 +371,16 @@ export function buildSailReport(voyage) {
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
       for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，已记复查名单下周期重进管线复查 verdict（人工 research verify 改判后自动放行）`);
     } else if (c.kind === 'idle') {
-      lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟${idleBackoffNote(c)}。`);
+      lines.push(`- 周期 ${c.n}：${c.held ? '海况/守卫滞留（非空队，提案轮跳过）' : '队列空、无新提案'}——休眠 ${c.sleepMin ?? 0} 分钟${idleBackoffNote(c)}。`);
     }
   }
-  // 空队退避轨迹：何时进入退避 + 最长计划休眠（真退避过才出行，普通航程不加噪音）
+  // 空队退避轨迹：何时进入退避 + 最长计划休眠（真退避过才出行，普通航程不加噪音；
+  // 滞留轮计入零提交计数是刻意的——风暴中睡更久方向正确，但注记不混称「空队」）
   const backedOff = (voyage.cycles ?? []).filter(inIdleBackoff);
   if (backedOff.length) {
     const maxPlanned = Math.max(...backedOff.map((c) => c.sleepPlannedMin));
-    lines.push(`- 空队退避轨迹：周期 ${backedOff[0].n} 起连续零新提交，休眠逐轮翻倍（${SAIL_IDLE_BACKOFF_CAP_MIN} 分钟封顶），最长计划休眠 ${maxPlanned} 分钟——空跑 planner 的开销靠拉长休眠省下来。`);
+    const heldCount = backedOff.filter((c) => c.held).length;
+    lines.push(`- 空队退避轨迹：周期 ${backedOff[0].n} 起连续零新提交${heldCount ? `（含 ${heldCount} 轮海况/守卫滞留）` : ''}，休眠逐轮翻倍（${SAIL_IDLE_BACKOFF_CAP_MIN} 分钟封顶），最长计划休眠 ${maxPlanned} 分钟——空跑 planner 的开销靠拉长休眠省下来。`);
   }
   lines.push('- 授权边界：开 sail 即授权本航次自动提交（类型白名单 workflow.json freeSail.autoSubmitTypes，缺省 docs/bugfix/refactor；feature 永不直接提交——走上游管线 research → spec → 人工审设计 → spec build）；deps、人工草稿、核心/发布路径永不自动；提交 gate=L1 而实际合并由分级裁决 + drift 保险丝兜底——自动的是「进队列」，不是「进主干」。');
   lines.push('');
