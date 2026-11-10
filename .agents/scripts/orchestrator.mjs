@@ -4353,7 +4353,8 @@ function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = 
  * researchAutoDim（2026-11-10 P3，缺省 false）：开启时缺调研的 feature 提案先派拆维规划
  * 会话，≥2 维跑 runMultiResearch（多维调研，一个 multi 对 researchPerCycle 仍计 1 个动作）
  * → topic 决策闸门（unsafe 拒绝升级 + 留痕跳过；undetermined 提示后照常）→ spec 按维注入；
- * 拆维失败/不足 2 维优雅降级回单 brief（现行为）。autoDim 关 = 本函数路径与从前逐字节一致。
+ * 拆维失败/不足 2 维/research.maxDims<2（退化配置，CLI 路径同语义 die，sail 韧性优先不 die）
+ * 优雅降级回单 brief（现行为）。autoDim 关 = 本函数路径与从前逐字节一致。
  */
 async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
   const out = { researched: [], researchedTopics: [], speced: [], failed: [], unsafe: [], verdicts: [] };
@@ -4404,16 +4405,21 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
     } else if (out.researched.length + out.researchedTopics.length < caps.research) {
       // 缺调研：autoDim 开启先试拆维（cap 语义 = 每周期调研动作数，multi 是一个动作计 1）
       let dims = null;
-      if (autoDim) {
+      if (autoDim && (cfg.research?.maxDims ?? 4) >= 2) {
         log(`  ⛵ 上游管线：${p.id} 缺调研——researchAutoDim 开启，先派拆维规划会话`);
         dims = await planResearchDims(repoRoot, { goal: p.goal || p.id, backendName });
         if (!dims) log(`  ↩ 拆维不可用（会话失败或解析不足 2 维）——降级单 brief 调研（提案 ${p.id}）`);
+      } else if (autoDim) {
+        // maxDims<2（退化配置，与 CLI 拆维路径 <2 维 die 同语义）：sail 韧性优先不 die——
+        // 跳过拆维（规划会话都不派）降级单 brief；旧口径 Math.max(2, maxDims) 会硬 slice
+        // 出 2 维、违反 research.maxDims 封顶语义
+        log(`  ↩ research.maxDims=${cfg.research?.maxDims} 低于拆维下限 2——降级单 brief 调研（提案 ${p.id}）`);
       }
       if (dims) {
-        const maxDims = cfg.research?.maxDims ?? 4;
+        const maxDims = cfg.research?.maxDims ?? 4; // 此分支 maxDims>=2（<2 已在上面降级）
         const multi = await runMultiResearch(repoRoot, {
           topic: sanitizeIntent(p.goal || p.id),
-          dims: dims.slice(0, Math.max(2, maxDims)),
+          dims: dims.slice(0, maxDims),
           model: cfg.research?.model,
           backendName,
           concurrency: cfg.research?.concurrency ?? 2,

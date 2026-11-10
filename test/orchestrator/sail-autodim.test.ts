@@ -275,6 +275,33 @@ describe('orchestrator sail-autodim > 拆维失败优雅降级（mock e2e）', (
   }, 180_000)
 })
 
+describe('orchestrator sail-autodim > maxDims<2 退化配置（CLI 维度闸门 <2 die 同语义，sail 韧性优先不 die）', () => {
+  it('research.maxDims=1 + researchAutoDim 开：跳过拆维（规划会话不派）降级单 brief，不 slice 出 2 维', () => {
+    const repo = mkRepo({ extra: { freeSail: { researchAutoDim: true }, research: { maxDims: 1 } } })
+    const cap = makeCaptureRunner()
+    try {
+      const out = cap.run(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1' })
+      expect(out.status).toBe(0)
+      // 一行降级原因；拆维规划会话零派出（跳过拆维，不烧白给的会话），单 brief researcher 恰 1 个
+      expect(out.stdout).toContain('research.maxDims=1 低于拆维下限 2——降级单 brief 调研')
+      const prompts = cap.prompts()
+      expect(prompts.filter(isDimsPrompt)).toHaveLength(0)
+      expect(prompts.filter(isResearchPrompt)).toHaveLength(1)
+      // 单 brief 落盘：无 topic 清单、草稿无 research_kind（multi 痕迹为零）
+      expect(fs.existsSync(path.join(orchBase(repo), 'research', 'topics', 'mock-planner.json'))).toBe(false)
+      expect(fs.existsSync(path.join(orchBase(repo), 'research', 'mock-planner', 'brief.md'))).toBe(true)
+      const draft = readDraft(repo.root)
+      expect(draft).toMatch(/research: mock-planner$/m)
+      expect(draft).not.toMatch(/^research_kind:/m)
+      // 管线不炸：spec 照常落盘
+      expect(fs.existsSync(path.join(orchBase(repo), 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+      cap.cleanup()
+    }
+  }, 180_000)
+})
+
 describe('orchestrator sail-autodim > unsafe 决策闸门（mock e2e）', () => {
   it('rollup unsafe（verify 造 contradicted）→ 下一航次不升级 spec、草稿留痕、零调研零拆维（成本闸门）', () => {
     const repo = mkRepo({ extra: { freeSail: { researchAutoDim: true } } })
