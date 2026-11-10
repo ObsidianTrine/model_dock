@@ -158,6 +158,22 @@ modeldock update --clean          # 清理上一版残留（ModelDock.app.old / 
 
 > 不想敲命令也可以：网关运行中发现新版本时，控制台右下角会弹一条可复制的提醒，顶栏出现琥珀色「可更新 vX.Y.Z」徽标——点开居中更新卡片（版本 / 安装包大小 / 更新说明正文，底部给「在 GitHub 查看完整说明」链接）并一键升级，更新后页面自动重连；升级失败会立即提示原因；不想升级可选「此版本不再提醒」；没有新版本时界面零打扰（手动检查可用 `modeldock update --check` 或 macOS 菜单栏 / Windows 托盘的「检查更新…」——托盘弹窗里是收口后的摘要（首段 + 几条要点 + 共 N 项改动），可直接点「立即更新」就地升级，或点「打开发布页」逐条细看）。网关启动时会自动静默检查一次（24 小时内不重复，失败不打扰）。
 
+### 模型级容灾（同服务商备用模型）
+
+**主力模型额度耗尽，改发同服务商的备用模型**：主模型额度用完时，网关自动改发同服务里你指定的备用模型重试，把额度耗尽兜在同服务内解决。
+
+- **触发时机**：仅额度耗尽类错误（HTTP 402，或 429 且错误体带额度特征）且该服务的备用服务链都走完才触发；**未映射的模型永不触发**——审查、规划等质量敏感角色的模型不会被静默替换。
+- **价格保护**：备用模型与主模型单价差须双向 ≤5%（CLI / 控制台写入口校验价格闸门，config.toml 手编只做形状校验）。
+
+配置（改完热加载即时生效）：`modeldock model fallback <服务id> <主力模型> <备用模型>`（`--list` 查看现有映射，`--rm <主力模型>` 移除）；控制台在「编辑服务」弹层的「模型容灾」块操作。模型 ID 以服务目录为准：`modeldock model list <服务id>` 查看。也可在 config.toml 手写：
+
+```toml
+[providers.<服务id>]
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务备用模型
+```
+
+字段说明见[配置参考](config-reference.md)。
+
 ## 5.5 Web 控制台
 
 浏览器打开 `http://127.0.0.1:8687/_modeldock/ui`，或直接：
@@ -294,6 +310,7 @@ protocol = "anthropic"            # anthropic | openai
 auth_style = "bearer"             # bearer | x-api-key
 key_ref = "file:ark_coding"       # 也支持 keychain: <id> / env:<VAR>
 proxy = "direct"                  # direct | env | http://127.0.0.1:7890（clash）
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }  # 模型级容灾（可选）：主力模型 → 同服务备用模型
 
 [providers.ark_coding.models.deepseek-v4-flash]
 display_name = "DeepSeek V4 Flash"

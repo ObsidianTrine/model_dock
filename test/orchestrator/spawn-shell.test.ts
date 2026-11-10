@@ -15,6 +15,9 @@ describe('spawn-shell > shellCommandline DEP0190 整串化', () => {
   it('useShell（win32）把 cmd+args 拼整串、spawn argv 只剩命令（与 Node 内部 shell 拼行等价，消 DEP0190）；unix 原样', () => {
     expect(shellCommandline('npm', ['audit', '--json'], true)).toEqual(['npm audit --json', []])
     expect(shellCommandline('claude', ['-p', 'x y'], false)).toEqual(['claude', ['-p', 'x y']])
+    // 含空格的 cmd（node 直跑桩 seam 走 process.execPath 全路径）必须整段包引号——
+    // 裸拼被 cmd.exe 断在第一个空格，spawn e2e exit 1（2026-11-10 win 机实证）
+    expect(shellCommandline('D:\\Program Files\\node.exe', ['exec'], true)).toEqual(['"D:\\Program Files\\node.exe" exec', []])
   })
 })
 

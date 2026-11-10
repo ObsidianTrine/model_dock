@@ -473,9 +473,43 @@ export function parseSpecBlocks(text) {
 // 契约 + 引用），供卡 research 字段引用、spec --from-brief 消费。逻辑件在 research.mjs。
 // ---------------------------------------------------------------------------
 
-import { BRIEF_MARKER, VERDICT_MARKER } from './research.mjs';
+import { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER } from './research.mjs';
+import { SPECVERDICT_MARKER } from './spec-review.mjs';
 
-export { BRIEF_MARKER, VERDICT_MARKER };
+export { BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER };
+
+/** 拆维规划会话输出契约的 fenced block 标记（sail researchAutoDim，P3 2026-11-10；
+ *  backends/mock.mjs 以 prompt 含此标记判定拆维会话模式）。 */
+export const DIMS_SPLIT_MARKER = 'agents-dims';
+
+/**
+ * 组装拆维规划 prompt（sail 上游管线 researchAutoDim，2026-11-10 P3）：readonly 轻会话
+ * 把提案目标拆成 2–4 个互补的调研维度。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 +
+ * 契约模板 + 硬性要求），产物既不是卡也不是 brief，是纯维度清单——每行一个、无解释；
+ * 解析在 research.mjs parseDimsPlan（容忍围栏包裹，不足 2 维调用方降级单 brief）。
+ */
+export function buildResearchDimsPrompt(goalText, repoRoot) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const clean = sanitizeIntent(goalText);
+  const fence = '```';
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：为下面的提案目标拆分调研维度（research auto-dim 规划）\n\n` +
+    `提案目标：${clean}\n\n` +
+    `你可以用 Read/Glob/Grep 快速了解本仓库语境（当前目录就是仓库根），判断该目标值得从哪些互补角度调研。\n` +
+    `你没有 Bash 也没有任何写文件工具——只规划，不改仓库。\n\n` +
+    `# 产出契约\n\n` +
+    `输出一个 fenced block，块内每行一个维度（2–4 个）：\n\n` +
+    `${fence}${DIMS_SPLIT_MARKER}\n` +
+    `<维度1>\n<维度2>\n<维度3（可选）>\n` +
+    `${fence}\n\n` +
+    `硬性要求：\n` +
+    `1. 维度必须互补（合起来覆盖目标的关键未知面，如技术选型/成本/风险/生态），不要同义反复；\n` +
+    `2. 每个维度一行、不超过 20 字、不带编号、不带项目符号、不写任何解释——多余文字会破坏解析；\n` +
+    `3. 维度数量 2–4 个：少于 2 个无法多维调研，多于 4 个会被截断；\n` +
+    `4. 围栏外不要输出任何内容。\n`
+  );
+}
 
 /**
  * 组装 researcher prompt。与 planner 家族同构（AGENTS.md 注入 + 意图消毒 + 契约模板 +
@@ -557,9 +591,115 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
     `- contradicted：与快照内容矛盾（或两处引文互相矛盾）\n` +
     `- unverifiable：快照缺失或纯定性无法对账\n\n` +
     `硬性要求：\n` +
-    `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废）；\n` +
+    `1. claim **逐字摘自 brief 原文**（系统逐字校验，改写/概括/编造一律作废；行内 [n] 引用标注可省略，系统已豁免）；\n` +
     `2. 只判「结论是否被给定快照支撑」与「内部是否自洽」，不引入外部事实下断言；\n` +
     `3. brief 自己标注「未证实/转述」不算硬伤（诚实标注是加分项），但该 claim 最多 partial；\n` +
-    `4. 围栏外只允许一句话概述。\n`
+    `4. **页面发布/更新时间 ≠ 事件发生时间**（2026-11-09 实测误报：公告页 published_time=2025-06 被当成「API 1 月上线」的反证，事后四来源证实 1 月正确）——判 contradicted 前确认快照文本本身断言了该事件日期；仅凭 published_time/last-updated 元数据与 claim 断言的日期不符，判 partial 并在 note 写明依据，不判 contradicted；\n` +
+    `5. 围栏外只允许一句话概述。\n`
+  );
+}
+
+/**
+ * L2 逐字校验失败重试段（verifyBriefOnce 追加，2026-11-10）：逐字失败一票终审改为
+ * 先自动重试一次——强调逐字摘录契约（行内 [n] 引用标注剥除不算改写，改写/概括一律
+ * 作废），压低二次违反率；重试仍败走 downgradeNonVerbatimClaims 降级保留。重试与
+ * 「无契约块」重试共享 MAX_ATTEMPTS 会话上限（追加段不再新开配额）。
+ */
+export function buildVerbatimRetryPrompt(attempt, fabricatedCount) {
+  const fence = '```';
+  return (
+    `\n\n# 重试要求（第 ${attempt} 次输出有 ${fabricatedCount} 条 claim 未通过逐字校验）\n` +
+    `claims 每条必须**逐字摘自 brief 原文**：跨行/多空格可以，行内 [n] 引用标注剥除不算改写；改写、概括、增删词一律作废（系统逐字校验，仍不通过将整条降级保留并计入编造红旗）。\n` +
+    `请重新输出完整 ${fence}${VERDICT_MARKER}${fence} JSON 契约块（claims + blockers，字段要求同上）。`
+  );
+}
+
+/**
+ * 组装仲裁轮 prompt（L2 contradicted 的外部取证）：复核船无联网，矛盾只能拿快照文本
+ * 裁断；快照自身误导（页面元数据语义、骨架截断）时矛盾可能是误报。仲裁会话带联网工具
+ * （同 researcher 工具面），对每条 contradicted claim 检索 ≥2 个独立带日期来源、优先
+ * 官方源，产出 agents-arbitration JSON 契约块。maintains：upheld 才翻案，翻不了维持否决。
+ */
+export function buildArbitrationPrompt(contradictedClaims, sourcesBlocks, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
+  const fence = '```';
+  const CAP = 12_000;
+  const sources = String(sourcesBlocks ?? '').slice(0, CAP * 4);
+  const claimsText = (contradictedClaims ?? [])
+    .map((c, i) => `${i + 1}. 「${c.claim}」\n   L2 矛盾理由：${c.note || '（未注明）'}`)
+    .join('\n');
+  return (
+    `# 系统层：仓库约定（AGENTS.md，必须遵守其中的工程约定与红线）\n\n${agentsMd}\n\n` +
+    `# 任务：仲裁 L2 复核判为 contradicted 的调研 claim（外部取证翻案/维持）\n\n` +
+    `今天是 ${today}。你有联网检索工具（WebSearch / mcp__zsearch__web_search / WebFetch）。` +
+    `逐条对下列被否决 claim 做外部取证，裁定矛盾是否成立。\n\n` +
+    `## 待仲裁 claim（L2 判 contradicted）\n\n${claimsText}\n\n` +
+    `## 触发矛盾的来源快照（brief 所引页面的抓取文本）\n\n${sources || '（快照缺失）'}\n\n` +
+    `# 裁定规则\n\n` +
+    `1. 每条 claim 检索 **≥2 个独立来源**（优先官方公告/官方文档/changelog/权威媒体；来源必须带发布日期）；\n` +
+    `2. **页面发布/更新时间（published_time / last-updated）≠ 事件发生时间**——页面被后续改版很常见，` +
+    `仅凭元数据时间与 claim 断言日期不符不足以判矛盾（这正是本轮仲裁最常见误报）；\n` +
+    `3. upheld：≥2 个带日期的独立来源一致支持 claim 断言 → 矛盾是误报，翻案；` +
+    `overturned：≥2 个独立来源一致否定 claim → 矛盾成立；` +
+    `其余（来源冲突/只有单一来源/查不到带日期来源）→ undetermined；\n` +
+    `4. 与快照同源的内容（同一域名/转载）不算独立来源；\n` +
+    `5. claim 必须逐字摘录上面列出的原句（系统逐字对账，改写作废）。\n\n` +
+    `# 产出契约\n\n` +
+    `输出单个 fenced block（内容为合法 JSON，对每条待仲裁 claim 各一条裁定）：\n\n` +
+    `${fence}${ARBITRATION_MARKER}\n` +
+    `{\n` +
+    `  "rulings": [\n` +
+    `    { "claim": "<逐字摘录待仲裁 claim 原句>", "ruling": "upheld", "sources": ["- 2026-01-24 https://… — 一句话说明"], "reasoning": "<一句话：为何维持/推翻>" }\n` +
+    `  ]\n` +
+    `}\n` +
+    `${fence}\n\n` +
+    `ruling 枚举（只允许这三个）：upheld（翻案，否决解除）/ overturned（矛盾成立）/ undetermined（证据不足，否决维持）。围栏外只允许一句话概述。\n`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spec 审查船（spec review 命令）：readonly 会话按 .agents/conventions/spec-review.md
+// 规约对三件套做五维评分 + findings（防编造定位对账）。advisory——产出只做筛查，
+// spec build 拆卡永远人工拍板。逻辑件在 spec-review.mjs（L0/对账/裁决重算）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 组装 spec 审查 prompt。l0：runSpecL0Checks 结果——L0 findings 以 JSON 注入（审查船
+ * 必须回应每个红线命中与 fail 项）；红线条目命中 ≠ 违规，裁决义务在审查船。
+ */
+export function buildSpecReviewPrompt(specId, spec, l0, repoRoot, { today = toIsoLocal().slice(0, 10) } = {}) {
+  const fence = '```';
+  const specDirHint = `.agents/orchestrator/specs/${specId}`;
+  return (
+    `# 任务：按规约审查一份 spec 三件套（advisory）\n\n` +
+    `今天是 ${today}。你是 spec 审查船：只读，不修改任何文件，不跑 git 写操作或测试。\n` +
+    `工作目录是仓库根 ${repoRoot}（你只有只读探索工具：Read/Glob/Grep）。\n\n` +
+    `## 必读（按序，审查标准的事实源）\n\n` +
+    `1. .agents/conventions/spec-review.md —— 审查规约全文（五维定义/红线 gate/防编造硬纪律/裁决矩阵）\n` +
+    `2. ${specDirHint}/requirements.md\n` +
+    `3. ${specDirHint}/design.md\n` +
+    `4. ${specDirHint}/tasks.md\n\n` +
+    `## 硬纪律（规约 §1.3/§3，违反 = 该 finding 判编造并整体降档）\n\n` +
+    `- **现状对账**：design「现状」节引用的每个代码事实（符号/函数名/文件:行号）必须实际打开对应文件核实；行号可能漂移，以符号为准。行号漂移记 P1；符号不存在或行为不符记 P1 并说明。\n` +
+    `- finding 的 file 必须真实存在（相对仓库根路径）；涉及 spec 原文的 claim 必须逐字定位；无 claim 时 section 必须可定位（§节名或行号）。≤12 条，按 P0>P1>P2 排序，每条带一句话 fix。\n` +
+    `- 红线裁决：L0 命中（见下）不等于违规——你必须在 gates.notes 逐条裁决 violation / legitimate-mention；有 violation 才 gates.redlines=fail。\n` +
+    `- 维度分不确定给 null（服务端会 null 传染不聚合），禁止拍脑袋填数。\n\n` +
+    `## L0 确定性检查结果（零 token 已跑，你不重复跑，但必须回应其中的 fail/warn 与红线命中）\n\n` +
+    `${fence}json\n${JSON.stringify({ checks: l0.checks, redlineHits: l0.redlineHits, tbdCount: l0.tbdCount, fuzzyCount: l0.fuzzyCount, baselineDrift: l0.baselineDrift }, null, 2)}\n${fence}\n\n` +
+    `## 产出契约\n\n` +
+    `输出单个 fenced block（内容为合法 JSON）：\n\n` +
+    `${fence}${SPECVERDICT_MARKER}\n` +
+    `{\n` +
+    `  "spec": "${specId}",\n` +
+    `  "gates": { "redlines": "pass", "notes": ["<逐条裁决 L0 红线命中；无命中则一句 pass 说明>"] },\n` +
+    `  "dimensions": { "completeness": 0-100|null, "unambiguity": 0-100|null, "consistency": 0-100|null, "testability": 0-100|null, "feasibility": 0-100|null },\n` +
+    `  "findings": [\n` +
+    `    { "severity": "P0|P1|P2", "file": "${specDirHint}/design.md 或被引代码文件", "section": "§节名或第N行", "claim": "<涉及 spec 原文时逐字摘录，否则留空>", "why": "<依据：规约条目或代码事实>", "fix": "<一句话建议>" }\n` +
+    `  ],\n` +
+    `  "usage": { "build_ready": "approve_to_build|needs_revision|rework|blocked" },\n` +
+    `  "advisory": true\n` +
+    `}\n` +
+    `${fence}\n\n` +
+    `围栏外只允许一句话概述。不要输出其他内容。\n`
   );
 }

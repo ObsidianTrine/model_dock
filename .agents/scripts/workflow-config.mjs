@@ -261,17 +261,51 @@ function resolveUpstream(raw) {
   return out;
 }
 
-/** research 调研配置：{ model?: string }——模型名经 ModelDock 网关按名路由。 */
+/** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4,
+ *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean }——模型名经 ModelDock 网关按名路由。 */
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
   if (raw.model !== undefined) {
     if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
     else console.warn(`[workflow-config] research.model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）——忽略`);
+  }
+  // multi 调研的维度上限（research multi --dim 数量封顶）：正整数，缺省 4（调用方回落）。
+  // 与本模块各键同口径：显式非法值 console.warn 报错并忽略（回落缺省），不阻断其他键
+  if (raw.maxDims !== undefined) {
+    if (Number.isInteger(raw.maxDims) && raw.maxDims > 0) out.maxDims = raw.maxDims;
+    else console.warn(`[workflow-config] research.maxDims ${JSON.stringify(raw.maxDims)} 不合法（应为正整数；research multi 的维度上限，缺省 4）——忽略`);
+  }
+  // 维度并发池上限（research multi 维度池与 verify topic 逐维复核共用，2026-11-09 P2）：
+  // 1–4 整数，缺省 2（调用方回落）。workflow.json 缺省不写此键（用缺省值，避免配置漂移）。
+  // 与本模块各键同口径：显式非法值 console.warn 报错并忽略（回落缺省），不阻断其他键
+  if (raw.concurrency !== undefined) {
+    if (Number.isInteger(raw.concurrency) && raw.concurrency >= 1 && raw.concurrency <= 4) out.concurrency = raw.concurrency;
+    else console.warn(`[workflow-config] research.concurrency ${JSON.stringify(raw.concurrency)} 不合法（应为 1–4 整数；维度并发池上限，缺省 2）——忽略`);
+  }
+  // 引用快照覆盖上限（snapshotCitations 的 max，2026-11-10 快照质量包）：1–48 整数，缺省 16。
+  // 真实对拍实证：21 条引用的 brief 在缺省 8 下有 13 条从未尝试快照——L2 复核反复报
+  // 「引用 [n] 无快照无法对账」。缺省不写此键（用缺省 16）
+  if (raw.snapshotMax !== undefined) {
+    if (Number.isInteger(raw.snapshotMax) && raw.snapshotMax >= 1 && raw.snapshotMax <= 48) out.snapshotMax = raw.snapshotMax;
+    else console.warn(`[workflow-config] research.snapshotMax ${JSON.stringify(raw.snapshotMax)} 不合法（应为 1–48 整数；引用快照上限，缺省 16）——忽略`);
+  }
+  // 快照镜像回退（2026-11-10 快照质量包，缺省 false）：开启后直连失败（非 404）或分类
+  // 非 ok 的引用追加一次 r.jina.ai 镜像读取。隐私取舍：开启 = 把引用 URL 发给第三方
+  // reader 服务——所以默认关、显式 opt-in
+  if (raw.snapshotMirror !== undefined) {
+    if (typeof raw.snapshotMirror === 'boolean') out.snapshotMirror = raw.snapshotMirror;
+    else console.warn(`[workflow-config] research.snapshotMirror ${JSON.stringify(raw.snapshotMirror)} 不合法（应为 boolean；缺省 false——开启会把引用 URL 发给 r.jina.ai 第三方服务）——忽略`);
+  }
+  // 仲裁轮开关（research verify 判出 contradicted 时的联网外部取证，2026-11-09 实测驱动）：
+  // 缺省开（不配置 = true）——仲裁是取证不是放水，upheld 才翻案、翻不了维持否决；false 只省 token
+  if (raw.arbitration !== undefined) {
+    if (typeof raw.arbitration === 'boolean') out.arbitration = raw.arbitration;
+    else console.warn(`[workflow-config] research.arbitration ${JSON.stringify(raw.arbitration)} 不合法（应为 boolean）——忽略`);
   }
   // usage 矩阵阈值（verdict/2）：可配的只有 coherence/coverage 两档阈值——否决权与
   // COVERAGE_FLOOR=50 硬底线在 scoreVerdict 里写死，不可配（防配置失误放水）
@@ -301,7 +335,13 @@ function resolveResearch(raw) {
   return out;
 }
 
-/** freeSail 配置：{ autoSubmitTypes?: string[], researchPerCycle?: 正整数, specPerCycle?: 正整数 }。 */
+/**
+ * freeSail 配置：{ autoSubmitTypes?: string[], researchPerCycle?: 正整数, specPerCycle?: 正整数,
+ * researchAutoDim?: boolean }。
+ * researchAutoDim（2026-11-10 P3，缺省 false）：sail 上游管线自动拆维度调研——feature 提案
+ * 缺调研时先派拆维规划会话，≥2 维跑 research multi（一个 multi 对 researchPerCycle 仍计 1 个
+ * 调研动作，成本倍乘靠默认关治理）。非 bool 值 warn + 忽略（与本模块各键同口径）。
+ */
 function resolveFreeSail(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -319,6 +359,10 @@ function resolveFreeSail(raw) {
       if (Number.isInteger(raw[k]) && raw[k] > 0) out[k] = raw[k];
       else console.warn(`[workflow-config] freeSail.${k} ${JSON.stringify(raw[k])} 不合法（应为正整数）——忽略`);
     }
+  }
+  if (raw.researchAutoDim !== undefined) {
+    if (typeof raw.researchAutoDim === 'boolean') out.researchAutoDim = raw.researchAutoDim;
+    else console.warn(`[workflow-config] freeSail.researchAutoDim ${JSON.stringify(raw.researchAutoDim)} 不合法（应为布尔值 true/false）——忽略（缺省 false，行为与未开启一致）`);
   }
   return out;
 }

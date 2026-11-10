@@ -21,6 +21,7 @@ import {
   buildResearchNotifyBody,
   crossCheckClaims,
   verifyClaimVerbatim,
+  stripInlineCitations,
   normalizeClaimStatuses,
   scoreVerdict,
   readVerdict,
@@ -31,7 +32,7 @@ import {
   VERDICT_SCHEMA,
   BRIEF_MARKER,
 } from '../../.agents/scripts/orchestrator/research.mjs'
-import { buildResearchPrompt, CARD_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
+import { buildResearchPrompt, buildVerifierPrompt, CARD_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { buildClaudeArgs, RESEARCH_TOOLS } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
 import { mkRepo, runOrch } from './helpers.js'
 
@@ -133,9 +134,11 @@ describe('orchestrator research > brief 契约', () => {
     // 跨午夜容忍窗：昨天日期放行
     const yesterday = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2026-11-07')
     expect(() => validateBriefBody(yesterday, { today })).not.toThrow()
-    // 部分陈旧也拒（任一行命中即拒）
-    const mixed = BRIEF_BODY.replace(
-      new RegExp(`^- ${TODAY} (https://blog\\.example\\.com/gateway)`, 'm'),
+    // 部分陈旧也拒（任一行命中即拒）——基准体先把引用日期对齐 today（TODAY 是跑测日，
+    // 漂出 today 容忍窗后未改行会先报「未来」，翻转报错类型）
+    const aligned = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), today)
+    const mixed = aligned.replace(
+      new RegExp(`^- ${today} (https://blog\\.example\\.com/gateway)`, 'm'),
       '- 2023-01-01 $1',
     )
     expect(() => validateBriefBody(mixed, { today })).toThrow(/引用访问日期陈旧/)
@@ -158,7 +161,7 @@ describe('orchestrator research > brief 契约', () => {
     }
   })
 
-  it('snapshotCitations：快照成功与失败都尽力而为、绝不抛错', async () => {
+  it('snapshotCitations：快照成功与失败都尽力而为、绝不抛错（2026-11-10 分类语义：HTTP 200 但可见文本 <400 → skeleton，不计入 ok）', async () => {
     const root = tmpRoot()
     try {
       writeBrief(root, { id: 'snap-test', title: 't', body: BRIEF_BODY })
@@ -166,16 +169,19 @@ describe('orchestrator research > brief 契约', () => {
       const snap = await snapshotCitations(root, 'snap-test', {
         fetchImpl: (async (url: string) => {
           calls.push(url)
-          if (String(url).includes('blog')) throw new Error('boom')
+          if (String(url).includes('blog')) throw new Error('boom') // 永久类失败：不重试
           return { ok: true, status: 200, text: async () => 'page content' }
         }) as unknown as typeof fetch,
         timeoutMs: 1000,
       })
       expect(calls).toHaveLength(2)
-      expect(snap.ok).toEqual(['https://docs.example.com/websearch'])
-      expect(snap.failed).toHaveLength(1)
+      // ok 语义收窄：skeleton 不再计入 ok；snapshots 逐条分类（含 index/url/status/via）
+      expect(snap.ok).toEqual([])
+      expect(snap.failed.map((f: any) => f.url)).toEqual(['https://blog.example.com/gateway'])
+      expect(snap.snapshots.map((s: any) => s.status)).toEqual(['skeleton', 'failed'])
+      expect(snap.snapshots.every((s: any) => s.via === 'direct')).toBe(true)
       expect(fs.readFileSync(path.join(root, '.agents/orchestrator/research/snap-test/sources/1.txt'), 'utf8')).toContain('page content')
-      expect(await snapshotCitations(root, 'not-exist')).toEqual({ ok: [], failed: [] })
+      expect(await snapshotCitations(root, 'not-exist')).toEqual({ ok: [], failed: [], snapshots: [] })
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
@@ -207,6 +213,13 @@ describe('orchestrator research > prompt 与工具面', () => {
     expect(p).toContain('独立来源交叉')
     expect(p).toContain('不要为了凑引用数编造来源')
     expect(p).toContain('训练知识可能过时')
+  })
+
+  it('buildVerifierPrompt：硬性要求 1 含行内 [n] 引用豁免句（prompt 契约锁定，2026-11-10）', () => {
+    const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
+    const req1 = p.split('\n').find((l) => l.startsWith('1. claim'))
+    expect(req1).toContain('逐字摘自 brief 原文')
+    expect(req1).toContain('行内 [n] 引用标注可省略')
   })
 
   it('buildClaudeArgs web 模式：只读 + 联网白名单、无 acceptEdits（fail-closed）；readonly/worker 契约不回归', () => {
@@ -272,6 +285,40 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     const para = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 下载量全球第一（改写版）', status: 'supported' }], CLAIM_BODY)
     expect(para.valid).toHaveLength(0)
     expect(para.fabricated).toHaveLength(1)
+  })
+
+  it('stripInlineCitations + verifyClaimVerbatim：剥 [n] 后逐字通过（行内引用豁免）', () => {
+    // 纯函数本身：剥 1-3 位数字标注，其余方括号内容不动
+    expect(stripInlineCitations('A [1] B [42] C')).toBe('A B C')
+    expect(stripInlineCitations('A [2026] B [1m]')).toBe('A [2026] B [1m]')
+    // claim 省略 [n]、brief 带 [n]：剥后逐字 → 通过
+    const v = verifyClaimVerbatim(
+      [{ claim: 'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜。', status: 'supported' }],
+      CLAIM_BODY,
+    )
+    expect(v.valid).toHaveLength(1)
+    expect(v.fabricated).toHaveLength(0)
+    // 通过的 claim 保留原始归一文本（[n] 不被改写进存储值）
+    expect(v.valid[0].claim).toBe('DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜。')
+  })
+
+  it('verifyClaimVerbatim：[2026]/[1m] 不豁免——仅差非数字标注仍 fabricated', () => {
+    // brief 是 …质量榜 [1]。；claim 换成 [2026]/[1m]：不豁免，剥后对不上 → fabricated
+    const y = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [2026]。', status: 'supported' }], CLAIM_BODY)
+    expect(y.valid).toHaveLength(0)
+    expect(y.fabricated).toHaveLength(1)
+    const m = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [1m]。', status: 'supported' }], CLAIM_BODY)
+    expect(m.valid).toHaveLength(0)
+    expect(m.fabricated).toHaveLength(1)
+  })
+
+  it('verifyClaimVerbatim：空白归一叠加 [n] 豁免组合——跨行 + 多空格 + 省略 [n] 仍逐字通过', () => {
+    const combo = verifyClaimVerbatim(
+      [{ claim: 'DeepSeek V4.1 周下载\n  56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜。', status: 'supported' }],
+      CLAIM_BODY,
+    )
+    expect(combo.valid).toHaveLength(1)
+    expect(combo.fabricated).toHaveLength(0)
   })
 
   it('normalizeClaimStatuses：note 自认无快照/无直据的 supported 降级 unsupported（downgraded 留痕、note 保留）；真 supported 与非 supported 不误伤', () => {
@@ -472,8 +519,9 @@ describe('orchestrator research > verify e2e（mock）', () => {
       expect(ledger).toContain('"researcher_model":"mock"') // L3 台账带调研船口径（model 是复核船，未指定 → null）
       const out = runOrch(repo.root, 'research stats')
       expect(out.stdout).toContain('次判定')
-      // 否决链路：blockers>0 → mock 判 contradicted → 一票否决
-      runOrch(repo.root, 'research verify verify-me --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1' })
+      // 否决链路：blockers>0 → mock 判 contradicted → 仲裁轮 overturned（外部证实矛盾）
+      // → 一票否决维持（缺省 upheld 会翻案解除——仲裁 e2e 见 research-arbitration.test.ts）
+      runOrch(repo.root, 'research verify verify-me --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1', ORCH_MOCK_ARB_RULING: 'overturned' })
       const vetoed = JSON.parse(fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'verify-me', 'verdict.json'), 'utf8'))
       expect(vetoed.claims[0].status).toBe('contradicted')
       expect(vetoed.usage.internal_decision).toBe('unsafe')

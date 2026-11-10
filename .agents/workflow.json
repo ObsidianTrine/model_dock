@@ -49,7 +49,8 @@
     "smartModel": "glm-4.5-air"
   },
   "research": {
-    "model": "glm-5.3-flash"
+    "model": "glm-5.3-flash",
+    "snapshotMax": 24
   },
   "propose": {
     "feedback": true,

@@ -325,9 +325,16 @@ export function buildSailReport(voyage) {
         const v = c.upstream?.verdicts?.find((x) => x.id === id)?.level;
         lines.push(`  - ⛵ 上游管线：调研 brief ${id} 已产出（research/<id>/brief.md，带引用与快照）${v ? `——可信度初判 ${v}` : ''}`);
       }
+      // 多维调研 topic（researchAutoDim，2026-11-10 P3）：复合清单 + rollup 如实入报告
+      for (const t of c.upstream?.researchedTopics ?? []) {
+        lines.push(`  - ⛵ 上游管线：多维调研 topic ${t.id} 已落盘（${t.dims} 维，rollup ${t.rollup}）——spec 按维注入待人审`);
+      }
       for (const id of c.upstream?.speced ?? []) {
         if (autoBuilt.has(id)) lines.push(`  - ⚡ 上游管线：spec ${id} 已自动拆卡进队列（specAutoBuild 预授权档，gate=L1；引水闸与分级闸门照走）`);
         else lines.push(`  - ⛵ 上游管线：spec ${id} 已落盘待人审——审完设计后跑 spec build ${id} 拆卡进队列`);
+      }
+      for (const u of c.upstream?.unsafe ?? []) {
+        lines.push(`  - ⛔ 上游管线：${u.id}——调研 ${u.topic ? `topic ${u.topic}` : `brief ${u.brief}`} 判 unsafe（决策契约一票否决），spec 不升级，已留痕跳过（后续周期不再调研）`);
       }
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
       for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，复核改判后下周期复查自动放行`);

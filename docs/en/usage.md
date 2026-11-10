@@ -154,6 +154,22 @@ After a release you never manually download and reinstall again: `modeldock upda
 
 > Prefer not to type commands? When the gateway discovers a new version while running, a copyable notice pops up in the console's bottom-right corner and an amber "Update available vX.Y.Z" badge appears in the top bar — click it for a centered update card (version / package size / release-notes body, with a "See the full notes on GitHub" link at the bottom) and upgrade in one click; the page reconnects automatically afterwards; failures immediately explain why; "Don't remind me for this version" opts out; with no new version the UI stays silent (manual check via `modeldock update --check`, or the macOS menu bar / Windows tray "Check for updates…" — the tray dialog shows the curated summary (first paragraph + key bullets + N changes in total) with "Update now" to upgrade in place, or "Open release page" to read every item). The gateway also silently checks once at startup (no repeats within 24 hours; failures stay quiet).
 
+### Model-level failover (backup model within the same provider)
+
+**When the primary model runs out of quota, retry on a backup model of the same provider**: the gateway retries on the backup model you mapped inside the same service, keeping quota exhaustion resolved within the provider.
+
+- **When it triggers**: only on quota-exhaustion errors (HTTP 402, or a 429 with a quota-flavored body) and only after the service's backup chain is exhausted; **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped.
+- **Price protection**: the backup model's unit prices must stay within ±5% of the primary's on both input and output (the CLI/console write paths enforce the price gate; hand-edited config.toml only gets a shape check).
+
+Configure it (changes hot-apply immediately): `modeldock model fallback <service-id> <primary> <backup>` (`--list` shows existing mappings, `--rm <primary>` removes one); in the console use the "Model failover" block of the edit-service dialog. Model IDs come from the service catalog: run `modeldock model list <service-id>` to inspect. Or write it in config.toml by hand:
+
+```toml
+[providers.<service-id>]
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # primary model → backup model of the same service
+```
+
+Field details: see the [config reference](config-reference.md).
+
 ## 5.5 Web console
 
 Open `http://127.0.0.1:8687/_modeldock/ui` in a browser, or simply:
@@ -276,6 +292,7 @@ protocol = "anthropic"            # anthropic | openai
 auth_style = "bearer"             # bearer | x-api-key
 key_ref = "file:ark_coding"       # also keychain: <id> / env:<VAR>
 proxy = "direct"                  # direct | env | http://127.0.0.1:7890 (clash)
+model_fallback = { "glm-5.3-flash" = "glm-5.2" }  # model-level failover (optional): primary model → backup model of the same service
 
 [providers.ark_coding.models.deepseek-v4-flash]
 display_name = "DeepSeek V4 Flash"

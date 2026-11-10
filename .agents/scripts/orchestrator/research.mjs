@@ -5,13 +5,18 @@
 //   writeBrief         落盘 research/<id>/（meta.json + brief.md）
 //   writeBriefAuto     同 writeBrief，id 冲突自动派生 <id>-2…-9 落盘（同题重跑不裸崩）
 //   readBrief/listBriefs
-//   snapshotCitations  引用快照（Node 内建 fetch，逐条落 sources/<n>.txt，尽力而为不阻断）
+//   snapshotCitations  引用快照（Node 内建 fetch，并发小池 + 瞬时类重试，按分类落
+//                      sources/<n>.txt 头行元数据，尽力而为不阻断；镜像回退 opt-in）
+//   topic 一族          research multi 的复合清单（topics/<topic-id>.json：dims + rollup），
+//                      slugifyTopic/deriveTopicId/readTopic/writeTopic/writeTopicAuto/
+//                      rollupTopicVerdict/buildTopicSpecSections（spec 注入展开）
 // 设计：调研不是任务卡——没有 diff，不走施工队列/合并管线（queue.mjs 校验、classifyChange、
 // files_hint 越界判定对它全是错配）。产物 = brief 文件，由卡的 research: <id> 字段引用，
 // spec/propose 消费。docs 10.12。
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { toIsoLocal } from './events.mjs';
 
 /** researcher 输出契约的 fenced block 标记（prompt.mjs buildResearchPrompt 同款）。 */
@@ -116,8 +121,10 @@ export function validateBriefBody(body, { minCitations = 1, today = toIsoLocal()
 /**
  * brief 落盘：research/<id>/{meta.json, brief.md}。同 id 已存在则抛错（brief 是证据
  * 产物，不允许静默覆盖——深化调研用新 id 或人工删旧目录）。
+ * topicId/dim（可选，research multi 每维 brief 的溯源字段）：写进 meta.json 的
+ * topic_id/dim——旧 meta 无此字段，读方一律可选拿取（向后兼容）。
  */
-export function writeBrief(repoRoot, { id, title, question, backend, body }) {
+export function writeBrief(repoRoot, { id, title, question, backend, body, topicId, dim }) {
   validateBriefBody(body);
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
     throw new Error(`brief id "${id}" 不合法：只允许小写字母/数字/短横线。`);
@@ -128,6 +135,8 @@ export function writeBrief(repoRoot, { id, title, question, backend, body }) {
   }
   fs.mkdirSync(dir, { recursive: true });
   const meta = { id, title, question: String(question ?? '').slice(0, 500), backend: backend ?? null, created_at: toIsoLocal() };
+  if (topicId) meta.topic_id = topicId;
+  if (dim) meta.dim = dim;
   fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
   fs.writeFileSync(path.join(dir, 'brief.md'), `${body.trim()}\n`);
   return dir;
@@ -172,30 +181,399 @@ export function listBriefs(repoRoot) {
     .sort();
 }
 
+// ---------------------------------------------------------------------------
+// topic（research multi，2026-11-09）：一个主题 × N 个维度 = N 份 brief + 1 份复合清单。
+// topics/<topic-id>.json 收纳每维 brief id 与判定，rollup 给消费方一个单一决策接口
+// （internal_decision 最差档）。topics/ 是 research/ 的子目录且无 meta.json——listBriefs
+// 天然不收录（回归测试钉住）；单 brief 契约与 verify 路径对 topic 无感知。
+// ---------------------------------------------------------------------------
+
 /**
- * 引用快照（对账材料）：逐条 GET 引用 URL，响应文本截断落 research/<id>/sources/<n>.txt。
- * 尽力而为：单条失败/超时只记 failure，绝不抛错——快照缺席不否定 brief（引用本身已在
- * brief.md 里）；上限 max 条（防引用面失控）。fetchImpl 注入供测试。
+ * 拆维规划输出解析（sail researchAutoDim，2026-11-10 P3；prompt 契约见 prompt.mjs
+ * buildResearchDimsPrompt）：模型输出 2–4 个短维度、每行一个。容忍 ```agents-dims```
+ * 或普通 ``` 围栏包裹（有围栏取首个围栏内容，无围栏取全文）、容忍行首序号/项目符号
+ * （输出里存在带序号/符号的行时只取这类行——「维度如下」式前导白话不混入维度清单）。
+ * 剔除空行/标题行/围栏残留行与超长行（一句话解释混入的高发形态）；精确去重保序。
+ * 不足 2 维返回 null（调用方降级单 brief）；超 4 维截断（契约上限，防跑飞）。
  */
-export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.fetch, timeoutMs = 15_000, max = 8 } = {}) {
-  const brief = readBrief(repoRoot, id);
-  if (!brief) return { ok: [], failed: [] };
-  const sourcesDir = path.join(brief.dir, 'sources');
-  const ok = [];
-  const failed = [];
-  for (const [i, url] of brief.citations.slice(0, max).entries()) {
+export function parseDimsPlan(text) {
+  const raw = String(text ?? '');
+  const fence = /```[^\n]*\n([\s\S]*?)\n```/.exec(raw);
+  const body = fence ? fence[1] : raw;
+  const MARK_RE = /^\s*(?:[-*•]|\d+[.、)．]|[①②③④⑤⑥⑦⑧⑨⑩])\s*/;
+  const seen = new Set();
+  const all = [];
+  const marked = [];
+  for (const line of body.split(/\r?\n/)) {
+    const hasMark = MARK_RE.test(line);
+    const dim = line.replace(MARK_RE, '').trim();
+    if (!dim || dim === '```' || dim.startsWith('#')) continue;
+    if (dim.length > 40) continue; // 一句话解释混进来的概率高——按非维度行丢弃
+    if (seen.has(dim)) continue;
+    seen.add(dim);
+    all.push(dim);
+    if (hasMark) marked.push(dim);
+  }
+  const dims = (marked.length >= 2 ? marked : all).slice(0, 4);
+  return dims.length >= 2 ? dims : null;
+}
+
+/** topic.json 落盘路径：research/topics/<topic-id>.json。 */
+export function topicPath(repoRoot, topicId) {
+  return path.join(researchDir(repoRoot), 'topics', `${topicId}.json`);
+}
+
+/**
+ * 主题文本 → topic-id slug（与 brief id 同规：小写字母/数字/短横线，TASK_ID_RE 兼容）。
+ * 中文主题会大量折叠成短横线（「LLM 输出可信度判定机制的业界现状」→ llm、纯中文 → topic）
+ * ——折叠后信息量近零、不同主题高频同 slug，可读性与唯一性双差。短 slug（<6 字符，含兜底
+ * topic）追加原主题归一化文本（trim 后原文）的 sha256 前 8 位十六进制哈希尾（llm →
+ * llm-1a2b3c4d）：同输入恒同哈希（确定性可复现），不同主题几乎必然不同尾——保唯一性与
+ * 可溯源性；长 slug（≥6）信息量足够，保持原样不加尾。同 slug 的不同主题靠 deriveTopicId
+ * 的 -2…-9 派生兜底语义不变；截断 48 字符防目录名失控。
+ */
+export function slugifyTopic(text) {
+  const raw = String(text ?? '').trim();
+  const s = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/g, '');
+  const slug = s || 'topic';
+  if (slug.length >= 6) return slug; // 长 slug 不加哈希尾
+  // 哈希输入用 trim 后原文（utf8）：跨平台确定（Buffer/hex 与平台无关），同输入同 id
+  const hash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 8);
+  return `${slug}-${hash}`;
+}
+
+/**
+ * topic-id 冲突自动派生（同 writeBriefAuto 思路）：slug 已占用 → -2…-9 逐个找空位，
+ * 9 个全占用抛可操作报错。返回实际可用 topic-id。
+ */
+export function deriveTopicId(repoRoot, slug) {
+  const candidates = [slug, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${slug}-${n}`)];
+  for (const id of candidates) {
+    if (!fs.existsSync(topicPath(repoRoot, id))) return id;
+  }
+  throw new Error(
+    `topic-id "${slug}" 及派生位 -2…-9 已全部占用（${path.join(researchDir(repoRoot), 'topics')}）——` +
+    `同一主题已连跑 10 次。请人工归档（移出 topics/ 目录）或换更具体的主题表述后再跑。`,
+  );
+}
+
+/** 读 topic.json：不存在或形状不对（无 dims 数组）返回 null（verify 回落单 brief 路径）。 */
+export function readTopic(repoRoot, topicId) {
+  const file = topicPath(repoRoot, topicId);
+  if (!fs.existsSync(file)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`topic 文件损坏（${file}）：${e.message}——修复或删除该文件后重试。`);
+  }
+  if (!parsed || parsed.id !== topicId || !Array.isArray(parsed.dims)) return null;
+  return parsed;
+}
+
+/** topic.json 落盘（research/topics/ 自动建目录；纯 JSON 证据文件，与 meta.json 同风格直写）。
+ *  覆盖写语义：verify 更新既有 topic.json 用它；创建场景（research multi 收尾）用 writeTopicAuto。 */
+export function writeTopic(repoRoot, topic) {
+  const file = topicPath(repoRoot, topic.id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(topic, null, 2)}\n`);
+  return file;
+}
+
+/**
+ * topic.json 落盘（创建场景 + 同名竞态复检，2026-11-09 P2）：deriveTopicId 是 check-then-write——
+ * 两个同主题 multi 并行可能都通过 derive 检查，收尾落盘时互覆对方的清单。这里在落盘瞬间复检：
+ * 'wx' 排他创建把「检查 + 写入」合成一次原子操作（复检自身的 TOCTOU 窗口一并消灭），已占用
+ * 则续派 -2…-9 找空位。取舍：不做跨进程文件锁（复杂度与收益不成比例，竞态窗口只在同主题
+ * 恰好并行时出现）；派生后 id 可能与维 brief id 命名空间（<原-id>-d<N>）错位——竞态撞上时清单
+ * id 平移后缀、brief meta 的 topic_id 溯源留在原命名空间，可接受（好过静默互覆）。
+ * 返回 { file, id }（id = 实际落盘 id，回执/通知一律用它）；9 个派生位全占用抛可操作报错
+ * （循环安全退出：候选有限，deriveTopicId 同款报错口径）。
+ */
+export function writeTopicAuto(repoRoot, topic) {
+  const candidates = [topic.id, ...[2, 3, 4, 5, 6, 7, 8, 9].map((n) => `${topic.id}-${n}`)];
+  for (const id of candidates) {
+    const file = topicPath(repoRoot, id);
     try {
-      const res = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-      fs.mkdirSync(sourcesDir, { recursive: true });
-      fs.writeFileSync(path.join(sourcesDir, `${i + 1}.txt`), `url: ${url}\nfetched_at: ${toIsoLocal()}\n\n${text.slice(0, 200_000)}`);
-      ok.push(url);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${JSON.stringify({ ...topic, id }, null, 2)}\n`, { flag: 'wx' });
+      return { file, id };
     } catch (e) {
-      failed.push({ url, reason: String(e?.message ?? e).slice(0, 200) });
+      if (e?.code !== 'EEXIST') throw e; // 非「已存在」的 IO 错误原样上抛
     }
   }
-  return { ok, failed };
+  throw new Error(
+    `topic-id "${topic.id}" 及派生位 -2…-9 已全部占用（${path.join(researchDir(repoRoot), 'topics')}）——` +
+    `同一主题已连跑 10 次。请人工归档（移出 topics/ 目录）或换更具体的主题表述后再跑。`,
+  );
+}
+
+/** rollup 聚合的最差档序（首项最差）：decision 任一 unsafe 一票否决（与单 brief usage 矩阵同哲学）；
+ *  level 里 unknown 是「无判定数据」的兜底、排最末——决策以 internal_decision 为准（level 只是排序信号）。 */
+const ROLLUP_DECISION_SEVERITY = ['unsafe', 'needs_review', 'undetermined', 'ok'];
+const ROLLUP_LEVEL_SEVERITY = ['fail', 'warn', 'pass', 'unknown'];
+
+/**
+ * topic rollup（纯函数）：internal_decision 取各 ok 维的最差档（unsafe > needs_review >
+ * undetermined > ok），verdict_level 同理（fail > warn > pass > unknown）；failed 维不参与
+ * 聚合但在 dims 留痕，有失败维时 rollup 附 partial: true。无任何可聚合判定时回落 unknown。
+ */
+export function rollupTopicVerdict(dims) {
+  const okDims = (dims ?? []).filter((d) => d?.status === 'ok');
+  const worst = (order, values) => order.find((v) => values.includes(v)) ?? 'unknown';
+  const rollup = {
+    level: worst(ROLLUP_LEVEL_SEVERITY, okDims.map((d) => d.verdict_level).filter(Boolean)),
+    internal_decision: worst(ROLLUP_DECISION_SEVERITY, okDims.map((d) => d.internal_decision).filter(Boolean)),
+  };
+  if ((dims ?? []).some((d) => d?.status === 'failed')) rollup.partial = true;
+  return rollup;
+}
+
+/** 判级图标（通知用，buildResearchMultiNotifyBody）：pass ✅ / warn ⚠️ / fail ⛔ / 其他 ❔。 */
+function verdictLevelIcon(level) {
+  return level === 'pass' ? '✅' : level === 'warn' ? '⚠️' : level === 'fail' ? '⛔' : '❔';
+}
+
+/**
+ * multi 调研完成通知正文（纯函数）：rollup 行 + 每维一行（图标+档位+internal_decision）。
+ * 单 brief 通知复用 buildResearchNotifyBody（契约钉死，勿混用）。
+ */
+export function buildResearchMultiNotifyBody(topic) {
+  const rollup = topic?.rollup ?? {};
+  const lines = [
+    `${verdictLevelIcon(rollup.level)} rollup：${rollup.level ?? '?'}（internal_decision=${rollup.internal_decision ?? '?'}）${rollup.partial ? '——partial（有失败维，仅成功维参与聚合）' : ''}`,
+    ...(topic?.dims ?? []).map((d) => {
+      const icon = d?.status === 'failed' ? '✗' : verdictLevelIcon(d?.verdict_level);
+      const head = `  ${icon} ${d?.dim ?? '?'}（${d?.brief_id ?? 'brief 未产出'}）`;
+      if (d?.status === 'failed') return `${head}——failed：${String(d?.reason ?? '').slice(0, 100) || '（无 stderr 留痕）'}`;
+      return `${head}——${d?.verdict_level ?? '?'} / ${d?.internal_decision ?? '?'}`;
+    }),
+  ];
+  return lines.join('\n');
+}
+
+/**
+ * topic → spec --from-brief 注入材料（纯函数，2026-11-09 P2）：每个 ok 维一节（沿用 P0
+ * 分节格式，节头带 topic/维度/brief 溯源），failed 维不注入正文、展开末尾附覆盖缺口行
+ * （让 planner 知道覆盖缺口）。ok 维的 brief 已被人工删除时同缺口处理（正文缺失 ≈ 该维
+ * 无产出）。调用方先读 rollup.internal_decision 接决策契约（unsafe 拒绝 / undetermined
+ * 提示，见 cmdSpecStart）——本函数只管展开，不管闸门。返回整段文本（多节以 --- 分隔；
+ * 无 ok 维且无缺口行可产出时返回空串，调用方按 missing 口径处理）。
+ */
+export function buildTopicSpecSections(repoRoot, topic) {
+  const sections = [];
+  const gaps = [];
+  for (const d of topic?.dims ?? []) {
+    if (d?.status !== 'ok' || !d.brief_id) {
+      gaps.push(`（维度 ${d?.dim ?? '?'} 调研失败：${String(d?.reason ?? '（无 stderr 留痕）').slice(0, 100)}）`);
+      continue;
+    }
+    const brief = readBrief(repoRoot, d.brief_id);
+    if (!brief) {
+      gaps.push(`（维度 ${d?.dim ?? '?'} 调研失败：brief ${d.brief_id} 已不存在）`);
+      continue;
+    }
+    sections.push(`# 调研结论（topic：${topic.id}｜维度：${d.dim}｜brief：${d.brief_id}）\n\n${String(brief.body).trim()}`);
+  }
+  const body = sections.join('\n\n---\n\n');
+  return gaps.length ? `${body}${body ? '\n\n' : ''}${gaps.join('\n')}` : body;
+}
+
+// ---------------------------------------------------------------------------
+// 引用快照质量包（2026-11-10，multi-dim 真实对拍实证 evidence 天花板=快照可得性）：
+// ① 覆盖：缺省 max 8→16（21 条引用的 brief 曾有 13 条从未尝试快照，L2 复核反复报
+//    「引用 [8][9] 无快照无法对账」）；并发小池缺省 4（本文件本地实现，勿 import
+//    orchestrator.mjs 的 runBoundedPool——会循环依赖）。
+// ② 重试：只重试瞬时类（超时/网络错误/HTTP 5xx·429），每条最多 2 次尝试（间隔 ~1.5s）——
+//    瞬时抖动直接判死是快照缺席的另一大源；4xx（404/403 等）= 永久类不重试。
+// ③ 分类：快照文件头从 url/fetched_at 扩为 url/fetched_at/type/usable/via——PDF 存在性
+//    证据（正文截 2000 字符，二进制无对账价值）、区域封锁页（"App unavailable in
+//    region" 类拦截）不再混进骨架页归因不清。**分类只写文件头与日志/verdict reasons
+//    （标注与可观测），不改 scoreVerdict/scoreCitation/assessBrief 的分值行为——判分
+//    语义零改动（改判分另立卡）**。
+// ④ 镜像回退（可选，缺省关）：直连失败（非 404）或分类非 ok 时追加一次 r.jina.ai
+//    reader。**隐私取舍：开启 = 把引用 URL 发给第三方 reader 服务**——所以缺省关、
+//    workflow.json research.snapshotMirror 显式 opt-in；镜像失败维持原分类，绝不抛错。
+// ---------------------------------------------------------------------------
+
+/** 文本快照正文截断（既有口径不变）；PDF 只留存在性证据。 */
+const SNAPSHOT_TEXT_LIMIT = 200_000;
+const SNAPSHOT_PDF_LIMIT = 2_000;
+
+/** 快照重试间隔（首次失败与重试之间）；retryDelayMs 参数可注入收短（测试钩子）。 */
+const SNAPSHOT_RETRY_DELAY_MS = 1_500;
+
+/** 区域封锁特征（大小写不敏感）：OpenAI 文档「App unavailable in region」类拦截页实测形态。 */
+const REGION_BLOCK_RE = /unavailable in your region|app unavailable in region|not available in your country|地区不可用/i;
+
+/**
+ * 瞬时类失败识别（重试白名单）：超时（AbortSignal.timeout 的 TimeoutError / 手动 abort
+ * 的 AbortError）、网络错误（undici 'fetch failed' 与 ECONNRESET/ENOTFOUND/ECONNREFUSED/
+ * ETIMEDOUT/EPIPE/terminated 族）、HTTP 5xx / 429。其余（404/403 等 4xx、解析类异常）
+ * = 永久类：不重试，镜像回退也跳过 404（资源确不存在，换路无意义）。
+ */
+function isTransientFailure(err, status = null) {
+  if (status != null) return status >= 500 || status === 429;
+  const name = String(err?.name ?? '');
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const msg = String(err?.message ?? err);
+  return /fetch failed|econnreset|enotfound|econnrefused|etimedout|epipe|terminated|aborted|timeout/i.test(msg);
+}
+
+/**
+ * 小并发池（snapshotCitations 本地版，勿与 orchestrator.mjs runBoundedPool 混用——
+ * 跨文件 import 会循环依赖）：同时最多 limit 个任务，results 按输入顺序回填。
+ * worker 必须自兜失败不向池抛错（attemptSnapshot 内部全捕获）。
+ */
+async function mapPool(limit, items, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const n = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        results[i] = await worker(items[i], i);
+      }
+    }),
+  );
+  return results;
+}
+
+/**
+ * 快照内容分类：响应 Content-Type 含 pdf → type=pdf（usable=pdf——正文是二进制，
+ * 只留存在性证据）；text 且 assessSnapshotUsability 可见文本达标 → ok；不可用时再查
+ * 区域封锁特征 → region_blocked，否则 skeleton（既有骨架语义不变）。
+ * 返回 { type, usable }（写进文件头三行元数据之一，也是返回值 snapshots[].status）。
+ */
+function classifySnapshot(contentType, text) {
+  if (String(contentType ?? '').toLowerCase().includes('pdf')) return { type: 'pdf', usable: 'pdf' };
+  if (assessSnapshotUsability(text).usable) return { type: 'text', usable: 'ok' };
+  if (REGION_BLOCK_RE.test(String(text ?? ''))) return { type: 'text', usable: 'region_blocked' };
+  return { type: 'text', usable: 'skeleton' };
+}
+
+/** 从响应读 Content-Type：真实 fetch 用 headers.get，测试替身可能是 { 'content-type': … } 普通对象。 */
+function readContentType(res) {
+  const h = res?.headers;
+  if (!h) return '';
+  if (typeof h.get === 'function') return h.get('content-type') ?? '';
+  return h['content-type'] ?? h['Content-Type'] ?? '';
+}
+
+/** 落盘一份快照：头行逐行 key: value、空行后正文（loadSnapshots 的解析契约，勿破坏）。 */
+function writeSnapshotFile(sourcesDir, index, url, { type, usable, via }, body) {
+  fs.mkdirSync(sourcesDir, { recursive: true });
+  const header = [`url: ${url}`, `fetched_at: ${toIsoLocal()}`, `type: ${type}`, `usable: ${usable}`, `via: ${via}`].join('\n');
+  fs.writeFileSync(path.join(sourcesDir, `${index + 1}.txt`), `${header}\n\n${body}`);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 单条引用的快照尝试（绝不抛错）：直连最多 2 次（瞬时类失败重试 1 次）→ 仍败时按
+ * mirror 开关决定是否走镜像回退（仅 1 次，404 直连不回退）。镜像成功 → 覆盖落盘
+ * via: mirror 并重跑分类；镜像失败 → 维持直连的分类/失败。返回统一形状
+ * { index, url, status, via, reason? }（status: ok|skeleton|region_blocked|pdf|failed）。
+ */
+async function attemptSnapshot({ url, index, fetchImpl, timeoutMs, mirror, retryDelayMs, sourcesDir }) {
+  const fetchOnce = async (target) => {
+    const res = await fetchImpl(target, { signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+    if (!res.ok) {
+      const e = new Error(`HTTP ${res.status}`);
+      e.httpStatus = res.status;
+      throw e;
+    }
+    return res;
+  };
+  const MAX_ATTEMPTS = 2;
+  let lastErr = null;
+  let attempts = 1;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetchOnce(url);
+      const text = await res.text();
+      const cls = classifySnapshot(readContentType(res), text);
+      const bodyLimit = cls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT;
+      if (mirror && cls.usable !== 'ok') {
+        // 镜像回退：仅 1 次不重试；成功覆盖落盘并重跑分类（jina reader 返回转写文本，type 恒 text）
+        try {
+          const mres = await fetchOnce(`https://r.jina.ai/${url}`);
+          const mtext = await mres.text();
+          const mcls = classifySnapshot(readContentType(mres), mtext);
+          writeSnapshotFile(sourcesDir, index, url, { ...mcls, via: 'mirror' }, mtext.slice(0, mcls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT));
+          return { index, url, status: mcls.usable, via: 'mirror', reason: `直连分类 ${cls.usable}——镜像取得并覆盖` };
+        } catch (me) {
+          // 镜像也失败：维持直连分类落盘，绝不抛错
+          writeSnapshotFile(sourcesDir, index, url, { ...cls, via: 'direct' }, text.slice(0, bodyLimit));
+          return { index, url, status: cls.usable, via: 'direct', reason: `${cls.usable}（镜像回退失败：${String(me?.message ?? me).slice(0, 120)}）` };
+        }
+      }
+      writeSnapshotFile(sourcesDir, index, url, { ...cls, via: 'direct' }, text.slice(0, bodyLimit));
+      return { index, url, status: cls.usable, via: 'direct' };
+    } catch (e) {
+      lastErr = e;
+      if (attempt < MAX_ATTEMPTS && isTransientFailure(e, e?.httpStatus)) {
+        attempts++;
+        await sleep(retryDelayMs);
+        continue;
+      }
+      break; // 永久类或重试已用尽
+    }
+  }
+  // 直连彻底失败：mirror 开且非 404 → 镜像兜底一次
+  if (mirror && !(lastErr?.httpStatus === 404)) {
+    try {
+      const mres = await fetchOnce(`https://r.jina.ai/${url}`);
+      const mtext = await mres.text();
+      const mcls = classifySnapshot(readContentType(mres), mtext);
+      writeSnapshotFile(sourcesDir, index, url, { ...mcls, via: 'mirror' }, mtext.slice(0, mcls.type === 'pdf' ? SNAPSHOT_PDF_LIMIT : SNAPSHOT_TEXT_LIMIT));
+      return { index, url, status: mcls.usable, via: 'mirror', reason: `直连失败（${directReason(lastErr, attempts)}）——镜像取得并覆盖` };
+    } catch (me) {
+      return { index, url, status: 'failed', via: 'mirror', reason: `${directReason(lastErr, attempts)}；镜像也失败：${String(me?.message ?? me).slice(0, 120)}` };
+    }
+  }
+  return { index, url, status: 'failed', via: 'direct', reason: directReason(lastErr, attempts) };
+}
+
+/** 直连失败 reason（带尝试次数——重试后仍败的判死要让人看见）。 */
+function directReason(err, attempts) {
+  const base = err?.httpStatus != null ? `HTTP ${err.httpStatus}` : String(err?.name && err.name !== 'Error' ? `${err.name}: ` : '') + String(err?.message ?? err).slice(0, 160);
+  return attempts > 1 ? `${base}（重试 1 次后仍失败，共 ${attempts} 次尝试）` : base;
+}
+
+/**
+ * 引用快照（对账材料）：逐条 GET 引用 URL，响应按分类落 research/<id>/sources/<n>.txt
+ * （文件头 url/fetched_at/type/usable/via，见「引用快照质量包」注释块）。
+ * 尽力而为：单条失败/超时只记 failure，绝不抛错——快照缺席不否定 brief（引用本身已在
+ * brief.md 里）；上限 max 条（缺省 16，防引用面失控），并发小池缺省 4。
+ * 返回向后兼容：{ ok, failed, snapshots }——ok=分类 ok 的 URL 列表（200 但骨架/区域封锁/
+ * PDF 不再计入 ok，2026-11-10 分类语义）；failed={url, reason}；snapshots=逐条
+ * { index, url, status, via, reason? }。fetchImpl 注入供测试；retryDelayMs 同（测试钩子）。
+ */
+export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.fetch, timeoutMs = 15_000, max = 16, concurrency = 4, mirror = false, retryDelayMs = SNAPSHOT_RETRY_DELAY_MS } = {}) {
+  const brief = readBrief(repoRoot, id);
+  if (!brief) return { ok: [], failed: [], snapshots: [] };
+  const sourcesDir = path.join(brief.dir, 'sources');
+  const citations = brief.citations.slice(0, Math.max(1, max));
+  const results = await mapPool(concurrency, citations, (url, i) =>
+    attemptSnapshot({ url, index: i, fetchImpl, timeoutMs, mirror, retryDelayMs, sourcesDir }),
+  );
+  const ok = [];
+  const failed = [];
+  const snapshots = [];
+  for (const r of results) {
+    if (r.status === 'ok') ok.push(r.url);
+    if (r.status === 'failed') failed.push({ url: r.url, reason: r.reason });
+    snapshots.push(r.reason ? { index: r.index, url: r.url, status: r.status, via: r.via, reason: r.reason } : { index: r.index, url: r.url, status: r.status, via: r.via });
+  }
+  return { ok, failed, snapshots };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +585,9 @@ export async function snapshotCitations(repoRoot, id, { fetchImpl = globalThis.f
 
 /** L2 复核会话输出契约的 fenced block 标记。 */
 export const VERDICT_MARKER = 'agents-verdict';
+
+/** 仲裁轮会话输出契约的 fenced block 标记（L2 contradicted 的外部取证翻案，见 parseArbitrationBlock）。 */
+export const ARBITRATION_MARKER = 'agents-arbitration';
 
 /**
  * 从 brief 结论/选项对比提取可回查 token（数字+单位、拉丁字母数字混合的型号名）。
@@ -290,17 +671,134 @@ export function normalizeClaimText(s) {
 }
 
 /**
- * claim 逐字校验（v3 关键防线）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
- * 改写/概括/无中生有即判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
+ * 行内 [n] 引用标注豁免：空白归一后剥 `/\[\d{1,3}\]/g`（brief 行内引用契约的形状
+ * 就是 1-3 位纯数字）。限纯数字：[2026]/[1m] 类年份/型号不豁免，不给改写开口子；
+ * 剥标注时连同至多一个前导空格一起剥（模型省略 [n] 时会连空格一起省），剥后再
+ * 折叠空白清残。仅吃前导不吃尾随：「A [1] B」→「A B」仍留词间分隔。
+ */
+export function stripInlineCitations(s) {
+  return normalizeClaimText(s).replace(/ ?\[\d{1,3}\]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// fuzzy 轻度转述放行（2026-11-10 对拍驱动）：一级精确包含把「复核模型转述 brief」也一律
+// 丢弃，对账材料白白损失。二级只放行「确实能在 brief 里找到的轻度转述」——三条硬线全过
+// 才算（阈值宁严勿松：宁可多丢一条疑似，不可放进一条真编造）：
+//   - FUZZY_JACCARD 0.85：claim 词元序列与 brief 词元序列上最佳等长窗口的词元集合 Jaccard。
+//     轻度转述（换序/加助词）的源句窗口几乎全重合；两处各半拼接的新句，任何等长窗口最多
+//     盖住一半词元，远达不到该线——这是拦「改写拼接」的主防线
+//   - FUZZY_CONTAINMENT 0.90：claim 词元至少 90% 出现在 brief 词元集合——无中生有的实体/
+//     数字直接拦（这是拦「编造」的主防线）
+//   - FUZZY_MIN_TOKENS 4：2-3 词元的碎句偶然命中的面太大，不设下限会给编造开口子
+// 判分语义零改动：fuzzy 只影响 claim 的去留与 verbatim 标注，scoreVerdict/aggregateCoherence
+// 权重与阈值不动。
+// ---------------------------------------------------------------------------
+const FUZZY_JACCARD = 0.85;
+const FUZZY_CONTAINMENT = 0.9;
+const FUZZY_MIN_TOKENS = 4;
+
+/**
+ * fuzzy 词元化：小写化、去标点（非 [a-z0-9]/CJK 基本区字符一律当词边界，中英都按连续
+ * 非空白段切）。纯函数、确定性、无回溯（单字符类 replace，无嵌套量词）。
+ */
+function fuzzyTokens(s) {
+  return String(s ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * 最佳等长窗口词元 Jaccard：在 brief 词元序列上滑一个长度 = claim 词元数的窗口，取与
+ * claim 词元集合 Jaccard 的最大值。滑动计数维护（词元进出各 O(1)），整体 O(brief 词元数)，
+ * 无嵌套循环无回溯。
+ */
+function bestWindowJaccard(claimSeq, briefSeq) {
+  const n = claimSeq.length;
+  const m = briefSeq.length;
+  if (!n || !m) return 0;
+  const cset = new Set(claimSeq);
+  const winCount = new Map(); // 窗口内词元 → 出现次数
+  let winDistinct = 0; // 窗口内不同词元数（并集的分母项）
+  let inter = 0; // |cset ∩ 窗口集合|
+  let best = 0;
+  for (let i = 0; i < m; i++) {
+    const t = briefSeq[i];
+    const prev = winCount.get(t) ?? 0;
+    winCount.set(t, prev + 1);
+    if (prev === 0) {
+      winDistinct++;
+      if (cset.has(t)) inter++;
+    }
+    if (i >= n) {
+      // 窗口满后再进新词元就要弹最老的（保持窗口长度恒 = n）
+      const out = briefSeq[i - n];
+      const cnt = winCount.get(out) ?? 0;
+      if (cnt <= 1) {
+        winCount.delete(out);
+        winDistinct--;
+        if (cset.has(out)) inter--;
+      } else {
+        winCount.set(out, cnt - 1);
+      }
+    }
+    if (i >= n - 1) {
+      const union = cset.size + winDistinct - inter;
+      if (union > 0) {
+        const j = inter / union;
+        if (j > best) best = j;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * fuzzy 放行判定（verifyClaimVerbatim 第二级的判据，纯函数）。三条硬线见常量区注释；
+ * 另有一条契约线：claim 剥 [n] 后仍残留方括号（[2026]/[1m] 类未豁免标注形状）→ 直接
+ * 不给 fuzzy——引用标注形状违规是契约问题，不是转述，宁丢不放。
+ */
+function fuzzyParaphrasePass(bare, briefSeq) {
+  if (/[\[\]]/.test(bare)) return false;
+  const ct = fuzzyTokens(bare);
+  if (ct.length < FUZZY_MIN_TOKENS) return false;
+  const cset = new Set(ct);
+  const bset = new Set(briefSeq);
+  let contained = 0;
+  for (const t of cset) {
+    if (bset.has(t)) contained++;
+  }
+  if (contained / cset.size < FUZZY_CONTAINMENT) return false;
+  return bestWindowJaccard(ct, briefSeq) >= FUZZY_JACCARD;
+}
+
+/**
+ * claim 逐字校验（v3 关键防线，两级制）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
+ * 改写/概括/无中生有判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
+ * 行内 [n] 引用标注豁免：两侧先剥 [n] 再比包含（长度上限仍按原始归一文本计）。
+ * 第二级 fuzzy（2026-11-10）：一级精确包含失败后按词元重叠判定——确属 brief 内轻度转述
+ * （换序/加助词，词元几乎全部能在 brief 找到）则放行并附 `verbatim: 'fuzzy'` 标注
+ * （消费方只标注不降级）；判据与阈值见上方常量区，编造/拼接仍 fabricated（现状口径）。
  */
 export function verifyClaimVerbatim(claims, briefBody) {
-  const brief = normalizeClaimText(briefBody);
+  const brief = stripInlineCitations(briefBody);
+  let briefSeq = null; // 惰性：无 claim 走到二级就不付 brief 词元化的成本
   const valid = [];
   const fabricated = [];
   for (const c of claims ?? []) {
     const text = normalizeClaimText(c?.claim);
-    if (text && text.length <= 120 && brief.includes(text)) valid.push({ ...c, claim: text });
-    else fabricated.push((text || '(空)').slice(0, 80));
+    const bare = stripInlineCitations(text);
+    if (text && text.length <= 120 && bare && brief.includes(bare)) {
+      valid.push({ ...c, claim: text }); // 一级精确：无 verbatim 标注（向后兼容）
+    } else if (text && text.length <= 120 && bare) {
+      briefSeq ??= fuzzyTokens(brief);
+      if (fuzzyParaphrasePass(bare, briefSeq)) valid.push({ ...c, claim: text, verbatim: 'fuzzy' });
+      else fabricated.push((text || '(空)').slice(0, 80));
+    } else {
+      fabricated.push((text || '(空)').slice(0, 80));
+    }
   }
   return { valid, fabricated };
 }
@@ -319,6 +817,28 @@ export function normalizeClaimStatuses(claims) {
       ? { ...c, status: 'unsupported', downgraded: true }
       : c,
   );
+}
+
+/**
+ * 非逐字 claim 降级保留（2026-11-10）：L2 逐字校验失败重试一次仍败后，claim 不再从
+ * claims 中丢弃——保留进 verdict.claims（claims/coverage 信息不丢），但 non_verbatim:
+ * true 留痕、status 强制 partial（未过逐字校验不足以上升为 supported；原判 contradicted
+ * 的非逐字文本同样不进 contradicted 一票否决——veto 面收窄为纯逐字 claim，置 partial
+ * 是撤销否决而非降权）、note 前缀标注。fabricated_claims 计数由调用方照常保留（红旗
+ * 封顶 needs_review 语义不变——非逐字残余 = 复核契约仍被违反的证据）。入参兼容字符串
+ * （verifyClaimVerbatim 的 fabricated 产物）与对象。
+ */
+export function downgradeNonVerbatimClaims(claims) {
+  if (!Array.isArray(claims)) return [];
+  return claims.map((c) => {
+    const src = typeof c === 'string' ? { claim: c } : { ...(c ?? {}) };
+    return {
+      ...src,
+      status: 'partial',
+      non_verbatim: true,
+      note: `非逐字摘录（复核改写）${src.note ? `；原 note：${src.note}` : ''}`,
+    };
+  });
 }
 
 /** L0 引用面分（0-100 或 null）：当日引用率 / 深链比 / 快照成功率 三分量等权，缺项重归一。 */
@@ -404,7 +924,9 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
 export const SNAPSHOT_MIN_VISIBLE = 400;
 
 export function assessSnapshotUsability(text) {
-  const body = String(text ?? '').replace(/^url:.*$/m, '').replace(/^fetched_at:.*$/m, '');
+  // 剥文件头（头行逐行 key: value）：url/fetched_at 是既有两行，type/usable/via 是
+  // 2026-11-10 快照质量包新增的三行元数据——不剥会混进可见字符计数
+  const body = String(text ?? '').replace(/^(url|fetched_at|type|usable|via):.*$/gm, '');
   const visible = body
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -415,7 +937,10 @@ export function assessSnapshotUsability(text) {
   return { usable: visible.length >= SNAPSHOT_MIN_VISIBLE, visibleChars: visible.length };
 }
 
-/** 读已落盘的快照（sources/*.txt，首行 url: …）→ [{ url, text, usable, visibleChars }]。 */
+/** 读已落盘的快照（sources/*.txt，头行 key: value、空行后正文）→
+ *  [{ url, text, usable, visibleChars, kind?, via? }]。usable 是文本可见性布尔
+ *  （assessSnapshotUsability 口径，语义与历史一致）；kind/via 是文件头分类
+ *  （ok|skeleton|region_blocked|pdf 与 direct|mirror）——旧格式文件无头行时为 null（向后兼容）。 */
 export function loadSnapshots(repoRoot, id) {
   const dir = path.join(briefDir(repoRoot, id), 'sources');
   if (!fs.existsSync(dir)) return [];
@@ -423,7 +948,9 @@ export function loadSnapshots(repoRoot, id) {
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.txt')).sort()) {
     const raw = fs.readFileSync(path.join(dir, f), 'utf8');
     const url = /^url:\s*(.+)$/m.exec(raw)?.[1]?.trim() ?? f;
-    out.push({ url, text: raw, ...assessSnapshotUsability(raw) });
+    const kind = /^usable:\s*(\S+)\s*$/m.exec(raw)?.[1]?.trim() ?? null;
+    const via = /^via:\s*(\S+)\s*$/m.exec(raw)?.[1]?.trim() ?? null;
+    out.push({ url, text: raw, kind, via, ...assessSnapshotUsability(raw) });
   }
   return out;
 }
@@ -480,6 +1007,12 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     if (claimCheck.misses?.length) reasons.push(`未命中 token：${claimCheck.misses.slice(0, 6).join(', ')}${claimCheck.misses.length > 6 ? '…' : ''}`);
   }
   if (skeleton) reasons.push(`⚠ ${skeleton}/${snapshots.length} 份快照为骨架页（正文未渲染/被拦）——meta 描述仍可佐证排名类结论，但数字类结论的可核性受限`);
+  // 快照质量包 ③（2026-11-10）：区域封锁/PDF 从骨架页里拆出来归因（只标注不改判分；
+  // 旧格式快照无头行分类，kind 为 null，不触发这两行——行为与历史一致）
+  const regionBlocked = snapshots.filter((s) => s.kind === 'region_blocked').length;
+  if (regionBlocked) reasons.push(`⚠ ${regionBlocked} 份快照为区域封锁页（"App unavailable in region" 类拦截）——非模型编造，网络/地区受限；可 research snapshot ${id} --mirror 补跑`);
+  const pdfSnaps = snapshots.filter((s) => s.kind === 'pdf').length;
+  if (pdfSnaps) reasons.push(`⚠ ${pdfSnaps} 份快照为 PDF（只留存在性证据，正文未转文本）——数字对账需人工打开原链接`);
   reasons.push('未跑 L2 复核（research verify <brief-id>）——claim 级覆盖与一致性未判定，internal_decision=undetermined');
   const verdict = {
     schema: VERDICT_SCHEMA,
@@ -505,10 +1038,13 @@ export function buildResearchNotifyBody(verdict) {
   const u = verdict?.usage ?? {};
   const icon = verdict?.level === 'pass' ? '✅' : verdict?.level === 'warn' ? '⚠️' : verdict?.level === 'fail' ? '⛔' : '❔';
   const overall = verdict?.scores?.overall != null ? `（overall ${verdict.scores.overall}）` : '';
+  const arb = verdict?.arbitration;
+  const arbLine = arb?.ran && !arb.failed ? `⚖ 仲裁轮：${arb.upheld} upheld / ${arb.overturned} overturned / ${arb.undetermined} undetermined——${arb.veto_cleared ? '否决解除' : '否决维持'}` : arb?.failed ? '⚖ 仲裁轮失败——维持原否决' : null;
   const lines = [
     `${icon} ${verdict?.brief_id ?? '?'}——${verdict?.level ?? '?'}${overall}`,
     `usage: browse=${u.browse ?? '?'} / decision=${u.internal_decision ?? '?'} / external=${u.external_doc ?? '?'}`,
     ...(verdict?.claims?.length ? [`claims: ${verdict.claims.filter((c) => c.status === 'contradicted').length} contradicted / ${verdict.claims.filter((c) => c.status === 'unsupported').length} unsupported / 共 ${verdict.claims.length} 条`] : []),
+    ...(arbLine ? [arbLine] : []),
     ...(verdict?.reasons ?? []).slice(0, 3).map((r) => `· ${String(r).slice(0, 120)}`),
     ...(verdict?.blockers?.length ? [`blockers: ${verdict.blockers.slice(0, 2).join('；')}`] : []),
   ];
@@ -572,4 +1108,70 @@ export function parseVerdictBlock(text) {
   }
   const blockers = Array.isArray(j.blockers) ? j.blockers.filter((b) => typeof b === 'string' && b.trim()).slice(0, 10) : [];
   return { claims, blockers };
+}
+
+const ARBITRATION_RULINGS = ['upheld', 'overturned', 'undetermined'];
+
+/**
+ * 解析仲裁轮契约块（```agents-arbitration``` JSON）。rulings 每条：claim（须逐字摘录
+ * 被 L2 判 contradicted 的原句）+ ruling（upheld=外部来源佐证 brief 正确 / overturned=
+ * 外部来源证实矛盾成立 / undetermined=证据不足或来源冲突）+ sources（带日期的依据 URL）。
+ * 任一条不合规整块作废（fail-closed，同 parseVerdictBlock 口径）。
+ */
+export function parseArbitrationBlock(text) {
+  const re = new RegExp('```' + ARBITRATION_MARKER + '\\s*\\n([\\s\\S]*?)\\n```');
+  const m = re.exec(text ?? '');
+  if (!m) return null;
+  let j;
+  try {
+    j = JSON.parse(m[1].trim());
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(j.rulings) || !j.rulings.length || j.rulings.length > 10) return null;
+  const rulings = [];
+  for (const r of j.rulings) {
+    if (typeof r?.claim !== 'string' || !r.claim.trim()) return null;
+    if (!ARBITRATION_RULINGS.includes(r?.ruling)) return null;
+    const sources = Array.isArray(r?.sources) ? r.sources.filter((s) => typeof s === 'string' && s.trim()).slice(0, 6) : [];
+    rulings.push({ claim: r.claim, ruling: r.ruling, sources, reasoning: typeof r?.reasoning === 'string' ? r.reasoning.slice(0, 300) : '' });
+  }
+  return { rulings };
+}
+
+/** 归一化逐字对账口径（空白折叠），与 verifyClaimVerbatim 同源思路。 */
+const arbNorm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * 仲裁裁定合并进 L2 claims（只动 status==='contradicted' 的条目）：
+ * - upheld → 翻案为 partial（不是 supported：外部来源与快照属不同证据面，partial 承认
+ *   「快照不支撑但外部佐证」，一票否决随之解除）；
+ * - overturned / undetermined → 维持 contradicted（保守：翻不了案就维持否决，不因
+ *   「没查到」放行——与 COVERAGE_FLOOR 同一哲学）。
+ * 裁定与 claim 按归一化逐字匹配；匹配不上的裁定计入 unmatched（丢弃不误伤）。
+ * 返回 { claims, stats: { upheld, overturned, undetermined, unmatched } }（原地修改 claims）。
+ */
+export function arbitrateClaims(claims, rulings) {
+  const stats = { upheld: 0, overturned: 0, undetermined: 0, unmatched: 0 };
+  const used = new Set();
+  for (const r of Array.isArray(rulings) ? rulings : []) {
+    const c = claims.find((x) => x.status === 'contradicted' && arbNorm(x.claim) === arbNorm(r.claim) && !used.has(x));
+    if (!c) {
+      stats.unmatched++;
+      continue;
+    }
+    used.add(c);
+    if (r.ruling === 'upheld') {
+      c.status = 'partial';
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部独立来源佐证，矛盾否决解除`.slice(0, 200);
+      stats.upheld++;
+    } else if (r.ruling === 'overturned') {
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部来源证实矛盾成立`.slice(0, 200);
+      stats.overturned++;
+    } else {
+      c.note = `${c.note ? `${c.note}；` : ''}仲裁轮：外部证据不足或来源冲突，否决维持`.slice(0, 200);
+      stats.undetermined++;
+    }
+  }
+  return { claims, stats };
 }

@@ -16,7 +16,10 @@ export function shellSpawnOptions(platform, base = {}) {
  *  useShell 判定（platform === 'win32'）成对使用。 */
 export function shellCommandline(cmd, args, useShell) {
   if (!useShell) return [cmd, args];
-  return [[cmd, ...args].join(' '), []];
+  // cmd 段与 args 同规则包引号：node 直跑桩/CLI（codex 等 seam 走 process.execPath）
+  // 常是含空格的绝对路径，裸拼会被 cmd.exe 断在第一个空格（如 Program Files 下的 node）。
+  const quotedCmd = /[\s"]/.test(cmd) ? `"${cmd.replace(/"/g, '\\"')}"` : cmd;
+  return [[quotedCmd, ...args].join(' '), []];
 }
 
 /** shell 模式参数包装：含空格/引号的参数包双引号（如 --allowedTools 的
