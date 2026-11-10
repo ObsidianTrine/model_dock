@@ -18,6 +18,7 @@ import { cardText, eventsOf, mkRepo, readCard, runOrch } from './helpers.js'
 import {
   availabilityVerdict,
   fetchModelAvailability,
+  fetchProviderModelFallback,
   precheckModelAvailability,
   resetAvailabilityCache,
 } from '../../.agents/scripts/orchestrator/availability.mjs'
@@ -265,6 +266,181 @@ describe('availability > precheckModelAvailability（tier-validate → provider 
   })
 })
 
+describe('availability > 备用模型 advisory（fallbackMissing，M3）', () => {
+  const TIER = { name: 'ahead-4', token: 'tok-ahead4', tokenEnv: 'MDK_TIER_AHEAD4_TOKEN', gatewayAdmin: true, gatewayBase: null }
+
+  /** 三端点进程内 mock：tier-validate（provider 解析）+ model-availability（目录快照）+
+   *  service/model-fallback（映射，带命中计数；mfStatus 模拟端点缺席/旧版网关 404）。 */
+  async function startAdvisoryMock(opts: { availability: Record<string, unknown>; mf?: unknown; mfStatus?: number }) {
+    let mfHits = 0
+    const server = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', (c) => (body += c))
+      req.on('end', () => {
+        if (req.headers['x-modeldock-admin'] !== 'mock-admin') {
+          res.writeHead(401)
+          res.end('{}')
+          return
+        }
+        if (req.url === '/_modeldock/tier-validate' && req.method === 'POST') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(TIER_VALIDATE_OK))
+          return
+        }
+        if (req.url === '/_modeldock/model-availability') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, availability: opts.availability }))
+          return
+        }
+        if (req.url === '/_modeldock/service/model-fallback' && req.method === 'POST') {
+          mfHits += 1
+          if (opts.mfStatus) {
+            res.writeHead(opts.mfStatus)
+            res.end('{}')
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(opts.mf ?? { ok: true, id: 'prov-glm', model_fallback: null }))
+          return
+        }
+        res.writeHead(404)
+        res.end('{}')
+      })
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    return {
+      url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      hits: () => mfHits,
+      close: () => server.close(),
+    }
+  }
+
+  it('worker 在目录 + 备用目标缺席（严格条件成立）→ fallbackMissing 留痕且 hold=false 照常派发', async () => {
+    const m = await startAdvisoryMock({
+      availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-5.3-flash', 'glm-x'] } },
+      mf: { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-gone', 'glm-a': 'glm-x' } },
+    })
+    setGatewayEnv(m.url)
+    try {
+      const r = await precheckModelAvailability({ cfg: { gatewayAdmin: true }, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+      expect(r).toMatchObject({ hold: false, reason: 'listed', provider: 'prov-glm', model: 'glm-5.3-flash', fallbackMissing: ['glm-gone'] })
+    } finally {
+      clearGatewayEnv()
+      m.close()
+    }
+  })
+
+  it('备用目标都在目录 → 无 advisory（无 fallbackMissing 字段）', async () => {
+    const m = await startAdvisoryMock({
+      availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-5.3-flash', 'glm-x'] } },
+      mf: { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-x' } },
+    })
+    setGatewayEnv(m.url)
+    try {
+      const r = await precheckModelAvailability({ cfg: { gatewayAdmin: true }, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+      expect(r).toMatchObject({ hold: false, reason: 'listed' })
+      expect(r.fallbackMissing).toBeUndefined()
+    } finally {
+      clearGatewayEnv()
+      m.close()
+    }
+  })
+
+  it('预检不可得（映射端点 404 / 未配置 null）→ 无 advisory 不报错；worker hold 路径零映射请求', async () => {
+    const m = await startAdvisoryMock({
+      availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-5.3-flash'] } },
+      mfStatus: 404, // 旧版网关无此端点
+    })
+    setGatewayEnv(m.url)
+    try {
+      const cfg = { gatewayAdmin: true }
+      const r = await precheckModelAvailability({ cfg, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+      expect(r).toMatchObject({ hold: false, reason: 'listed' })
+      expect(r.fallbackMissing).toBeUndefined()
+      // 未配置（model_fallback: null）→ 同款无 advisory
+      const m2 = await startAdvisoryMock({
+        availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-5.3-flash'] } },
+        mf: { ok: true, id: 'prov-glm', model_fallback: null },
+      })
+      setGatewayEnv(m2.url)
+      try {
+        const r2 = await precheckModelAvailability({ cfg, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+        expect(r2.fallbackMissing).toBeUndefined()
+      } finally {
+        clearGatewayEnv()
+        m2.close()
+      }
+      // worker 模型 hold（不在目录）→ 不做映射核验（advisory 只在 worker 预检通过后）
+      const m3 = await startAdvisoryMock({
+        availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-other'] } },
+        mf: { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-gone' } },
+      })
+      setGatewayEnv(m3.url)
+      try {
+        const r3 = await precheckModelAvailability({ cfg, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+        expect(r3).toMatchObject({ hold: true, reason: 'model_unavailable' })
+        expect(m3.hits()).toBe(0) // 零映射请求
+      } finally {
+        clearGatewayEnv()
+        m3.close()
+      }
+    } finally {
+      clearGatewayEnv()
+      m.close()
+    }
+  })
+
+  it('映射查询节流：同一 provider 两次预检只打一次 service/model-fallback（5min TTL 命中缓存）', async () => {
+    const m = await startAdvisoryMock({
+      availability: { 'prov-glm': { ok: true, fetched_at: freshAt, model_ids: ['glm-5.3-flash'] } },
+      mf: { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-gone' } },
+    })
+    setGatewayEnv(m.url)
+    try {
+      const cfg = { gatewayAdmin: true }
+      await precheckModelAvailability({ cfg, tier: TIER, model: 'glm-5.3-flash', now: NOW, timeoutMs: 2000 })
+      await precheckModelAvailability({ cfg, tier: TIER, model: 'glm-5.3-flash', now: NOW + 60_000, timeoutMs: 2000 })
+      expect(m.hits()).toBe(1) // 5min TTL 内命中缓存
+    } finally {
+      clearGatewayEnv()
+      m.close()
+    }
+  })
+
+  it('fetchProviderModelFallback 直连：ok 映射返回 + 5min 缓存；404 负缓存 60s 内不重试；未开 gatewayAdmin 零请求', async () => {
+    const cfg = { gatewayAdmin: true }
+    const m = await startAdvisoryMock({
+      availability: {},
+      mf: { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-x' } },
+    })
+    setGatewayEnv(m.url)
+    try {
+      expect(await fetchProviderModelFallback(cfg, 'prov-glm', { now: NOW, timeoutMs: 2000 })).toEqual({ 'glm-5.3-flash': 'glm-x' })
+      expect(await fetchProviderModelFallback(cfg, 'prov-glm', { now: NOW + 30_000, timeoutMs: 2000 })).toEqual({ 'glm-5.3-flash': 'glm-x' })
+      expect(m.hits()).toBe(1) // ok 5min 缓存命中
+      // 非 200（旧版网关无此端点）→ 负缓存 60s
+      const m2 = await startAdvisoryMock({ availability: {}, mfStatus: 404 })
+      setGatewayEnv(m2.url)
+      try {
+        expect(await fetchProviderModelFallback(cfg, 'prov-glm', { now: NOW, timeoutMs: 2000 })).toBeNull()
+        expect(await fetchProviderModelFallback(cfg, 'prov-glm', { now: NOW + 30_000, timeoutMs: 2000 })).toBeNull()
+        expect(m2.hits()).toBe(1) // 负缓存 60s 内不重试
+        expect(await fetchProviderModelFallback(cfg, 'prov-glm', { now: NOW + 120_000, timeoutMs: 2000 })).toBeNull()
+        expect(m2.hits()).toBe(2) // 过期后重试
+      } finally {
+        clearGatewayEnv()
+        m2.close()
+      }
+      // 未开 gatewayAdmin → 零请求
+      expect(await fetchProviderModelFallback({}, 'prov-glm', { now: NOW + 240_000, timeoutMs: 2000 })).toBeNull()
+      expect(m.hits()).toBe(1)
+    } finally {
+      clearGatewayEnv()
+      m.close()
+    }
+  })
+})
+
 describe('availability > run E2E（mock 后端 + mock admin 子进程）', () => {
   const REPO_EXTRA = {
     gatewayAdmin: true,
@@ -318,6 +494,36 @@ describe('availability > run E2E（mock 后端 + mock admin 子进程）', () =>
         expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'avail-pass.md'))).toBe(false) // 未被预检拉黑
         expect(eventsOf(repo.root, 'avail-pass').some((e) => e.type === 'dispatch_held')).toBe(false)
         expect(eventsOf(repo.root, 'avail-pass').some((e) => e.type === 'worker_spawned')).toBe(true)
+      } finally {
+        repo.cleanup()
+      }
+    } finally {
+      m.close()
+      h.restore()
+    }
+  })
+
+  it('worker 在目录但备用模型缺席 → 照常派发 + dispatch_advisory 事件留痕（advisory 不阻断）', async () => {
+    const m = await spawnAdminMock({
+      'POST /_modeldock/tier-validate': TIER_VALIDATE_OK,
+      'GET /_modeldock/model-availability': { ok: true, availability: { 'prov-glm': { ok: true, fetched_at: new Date().toISOString(), model_ids: ['glm-5.3-flash'] } } },
+      'POST /_modeldock/service/model-fallback': { ok: true, id: 'prov-glm', model_fallback: { 'glm-5.3-flash': 'glm-gone' } },
+    })
+    const h = fakeHome()
+    try {
+      const repo = mkRepo({ extra: REPO_EXTRA })
+      try {
+        const card = path.join(repo.root, 'card-avail-advisory.md')
+        fs.writeFileSync(card, cardText({ id: 'avail-advisory', tier: 'ahead-4' }))
+        runOrch(repo.root, `submit "${card}"`)
+        const out = runOrch(repo.root, 'run avail-advisory --backend mock', { ...RUN_ENV, ORCH_GATEWAY_BASE: m.url })
+        expect(out.status).toBe(0)
+        expect(out.stdout).toContain('容灾兜底缺席')
+        expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'avail-advisory.md'))).toBe(false) // advisory 不拉黑
+        const events = eventsOf(repo.root, 'avail-advisory')
+        expect(events.find((e) => e.type === 'dispatch_advisory')).toMatchObject({ reason: 'fallback_model_missing', provider: 'prov-glm', model: 'glm-5.3-flash', fallback_missing: ['glm-gone'] })
+        expect(events.some((e) => e.type === 'dispatch_held')).toBe(false)
+        expect(events.some((e) => e.type === 'worker_spawned')).toBe(true) // 照常派发
       } finally {
         repo.cleanup()
       }
