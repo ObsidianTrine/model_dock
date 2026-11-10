@@ -41,7 +41,7 @@ export function digestFlushMarkerPath(repoRoot) {
   return path.join(digestDir(repoRoot), 'flush-inflight');
 }
 
-/** 原子写（tmp + rename）：queueDigestItem 的追加与 marker 落盘共用，半行/截断文件不可见。 */
+/** 原子写（tmp + rename）：flush-inflight marker 落盘用，半行/截断文件不可见。 */
 function atomicWriteText(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -54,6 +54,11 @@ function atomicWriteText(file, text) {
  * taskId?, state?, title, lines?: string[], priority?: 'normal'|'attention' }。
  * ts 由本函数盖戳（事件行 HH:mm 与终态排序的数据源）；未知 kind/priority 容错归一。
  * 返回归一后的记录（测试断言用）。
+ *
+ * 并发语义：fs.appendFileSync 真追加（O_APPEND 单行 JSONL）——drain --workers N 下多个 run
+ * 子进程同时落位时各自整行追加，不会像「读全文+原子整写」那样以后写者旧快照覆盖前写者丢
+ * 事件。这是尽力而为面内的收敛（常规本地文件系统上单行追加行级不可分割，但多行交错/损坏行
+ * 由 flush 侧跳过兜底），不承诺强一致。
  */
 export function queueDigestItem(repoRoot, item) {
   const rec = {
@@ -66,8 +71,8 @@ export function queueDigestItem(repoRoot, item) {
     priority: item?.priority === 'attention' ? 'attention' : 'normal',
   };
   const file = digestPendingPath(repoRoot);
-  const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  atomicWriteText(file, `${prev}${JSON.stringify(rec)}\n`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify(rec)}\n`);
   return rec;
 }
 
@@ -284,6 +289,15 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, now
 }
 
 /**
+ * 静默窗秒数（三态口径）：显式 0 = 无静默窗（合法域，窗内不等待立即冲刷）；undefined/非法值
+ * 回落缺省 60。2026-11-10 修复——此前消费点 `Number(x) > 0 ? x : 60` 把配置 0 误当缺省，
+ * 「配置无静默窗」实际得到 60s。上限 3600 与 workflow-config 解析层一致。
+ */
+export function quietWindowSecOf(v, fallback = 60) {
+  return Number.isInteger(v) && v >= 0 && v <= 3600 ? v : fallback;
+}
+
+/**
  * 落位后拉起一次性 detached flush 子进程（60s 静默窗）：睡满 quietWindowSec 再 flush——
  * 窗内后续落位被同一子进程合并发送。静默窗去重：marker mtime 在窗内 = 已有在飞 flusher
  * （它醒来会读到本批），不重复拉起。digest 未启用或队列空 = 零开销直接返回。
@@ -295,7 +309,7 @@ export function maybeSpawnDigestFlush(repoRoot, cfg) {
     if (!digest?.enabled) return false;
     const file = digestPendingPath(repoRoot);
     if (!fs.existsSync(file) || !fs.readFileSync(file, 'utf8').trim()) return false;
-    const windowMs = (Number(digest.quietWindowSec) > 0 ? Number(digest.quietWindowSec) : 60) * 1000;
+    const windowMs = quietWindowSecOf(digest.quietWindowSec) * 1000;
     const marker = digestFlushMarkerPath(repoRoot);
     try {
       if (fs.existsSync(marker) && Date.now() - fs.statSync(marker).mtimeMs < windowMs) return false;

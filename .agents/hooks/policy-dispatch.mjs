@@ -140,10 +140,8 @@ try {
 } catch (e) {
   console.error(`[policy-dispatch] push 审查门禁不可用（defer 走既有裁决；检查 hook 安装是否含 push-gate.mjs）：${e?.message ?? e}`);
 }
-if (gateResult?.decision === 'allow-bypass') {
-  console.error(gateResult.warning);
-  gate.appendBypassLog(gateResult.logEntry ?? { ts: new Date().toISOString(), cwd, branch: '?', bypass: true });
-}
+// 注意：bypass 的警告与日志**不在**这里写——放行覆盖条件（含 verdict.rule==='publish'）
+// 要到下面确认后才算数，命令若被端口等其他红线拦下就不存在「已发生的 bypass」，先写会留痕失真。
 
 let verdict;
 try {
@@ -166,6 +164,11 @@ if (
   (gateResult.decision === 'allow-bypass' || gateResult.decision === 'allow-review' || gateResult.decision === 'pass-unprotected') &&
   verdict.rule === 'publish'
 ) {
+  if (gateResult.decision === 'allow-bypass') {
+    // 旁路真实落地的唯一时刻：放行覆盖已确认（命令不会再被其他红线拦下）——此时才警告+留痕
+    console.error(gateResult.warning);
+    gate.appendBypassLog(gateResult.logEntry ?? { ts: new Date().toISOString(), cwd, branch: '?', bypass: true });
+  }
   policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'allowed', reason: `push 审查门禁放行（${gateResult.decision}${gateResult.detail ? '：' + gateResult.detail : ''}）`, target: cmd.slice(0, 200) });
   process.exit(0);
 }

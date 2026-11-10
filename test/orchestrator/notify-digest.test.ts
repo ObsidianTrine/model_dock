@@ -31,6 +31,7 @@ import {
   digestStateRank,
   digestTitle,
   flushDigest,
+  quietWindowSecOf,
   queueDigestItem,
 } from '../../.agents/scripts/orchestrator/notify-digest.mjs'
 import { cardText, mkRepo } from './helpers.js'
@@ -382,6 +383,32 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
     } finally {
       d.cleanup()
     }
+  })
+
+  it('queueDigestItem 真追加：两次连续写不互覆（并发写者各留一行，2026-11-10 read-modify-write 丢事件回归）', () => {
+    const d = tmpDir()
+    try {
+      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'running', title: '卡 t1 进入队列', lines: [], priority: 'normal' })
+      queueDigestItem(d.root, { kind: 'task', taskId: 't2', state: 'merged', title: '卡 t2 已出港', lines: ['done'], priority: 'normal' })
+      const lines = fs.readFileSync(digestPendingPath(d.root), 'utf8').trim().split('\n')
+      expect(lines).toHaveLength(2)
+      const recs = lines.map((l) => JSON.parse(l))
+      expect(recs.map((r) => r.title)).toEqual(['卡 t1 进入队列', '卡 t2 已出港']) // 先写者不被后写者以旧快照覆盖
+      expect(recs.map((r) => r.taskId)).toEqual(['t1', 't2'])
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('quietWindowSecOf 三态：显式 0 = 无静默窗、undefined/非法回落 60、合法域原样', () => {
+    expect(quietWindowSecOf(undefined)).toBe(60)
+    expect(quietWindowSecOf(0)).toBe(0) // 2026-11-10 修复：0 不再误判缺省 60
+    expect(quietWindowSecOf(120)).toBe(120)
+    expect(quietWindowSecOf(3600)).toBe(3600)
+    expect(quietWindowSecOf(-1)).toBe(60)
+    expect(quietWindowSecOf(1.5)).toBe(60)
+    expect(quietWindowSecOf('x' as unknown as number)).toBe(60)
+    expect(quietWindowSecOf(4000)).toBe(60)
   })
 
   it('空批次不发：无文件/空文件/全损坏行均 { sent:false }，不碰 webhook', async () => {

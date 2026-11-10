@@ -71,7 +71,7 @@ import { cmdPushReview } from './orchestrator/push-review.mjs';
 import { acquireSchedulerLock, releaseSchedulerLock, childEnvForHeldLock, SCHED_LOCK_ENV } from './orchestrator/run-lock.mjs';
 import { acquireTaskLock, releaseTaskLock, readTaskLock, taskLockPath, taskLockLooksLive, TASK_LOCK_STALE_MS } from './orchestrator/task-lock.mjs';
 import { notify, buildNightlySummary, buildTaskDigest, buildTaskRoster, taskStateTag, nightlyWebhookEnvs, orchWebhookEnvs, notifyActionCard } from './orchestrator/notify.mjs';
-import { queueDigestItem, flushDigest, maybeSpawnDigestFlush } from './orchestrator/notify-digest.mjs';
+import { queueDigestItem, flushDigest, maybeSpawnDigestFlush, quietWindowSecOf } from './orchestrator/notify-digest.mjs';
 import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, validateTierViaGateway, tierTagNames, tierDisplayName } from './orchestrator/tiers.mjs';
 import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
@@ -5287,7 +5287,9 @@ async function cmdNotifyDigest(repoRoot, opts) {
     log('digest 聚合通报未启用（workflow.json notify.digest.enabled）——无事可做。');
     return;
   }
-  let sleepSec = Number.isInteger(opts.sleep) && opts.sleep >= 0 ? opts.sleep : (Number(digest.quietWindowSec) > 0 ? Number(digest.quietWindowSec) : 60);
+  // quietWindowSecOf 三态口径：显式 0 = 无静默窗（立即冲刷）；undefined/非法回落 60。
+  // --sleep N 显式覆盖仍优先（测试/手动立即冲刷用 0）。
+  let sleepSec = Number.isInteger(opts.sleep) && opts.sleep >= 0 ? opts.sleep : quietWindowSecOf(digest.quietWindowSec);
   if (sleepSec > 0) {
     log(`digest flush：先睡 ${sleepSec}s 静默窗（窗内落位合并成一条通报）…`);
     await new Promise((r) => setTimeout(r, sleepSec * 1000));
