@@ -114,6 +114,39 @@ describe('token limits > 纯逻辑单测（checkTokenLimits / recordTokenUsage�
     expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(7)
     expect(rt.tokenUsage.get('worker')?.dayTokens).toBe(2)
   })
+
+  it('ephemeral 的 daily_tokens 按可计费口径判定（provision 传参为 billable 校准预算）；显式配置 harness 保持总口径', () => {
+    const rt = rtWith(undefined)
+    const t0 = Date.parse('2026-11-01T10:00:00+08:00')
+    // ephemeral：总口径已超限（缓存读大头）但 billable 未达 → 放行（预算远未烧到不提前 429）
+    registerEphemeralHarness(rt, { id: 'eph-bill', ttlMinutes: 600, maxDailyTokens: 600, now: t0 })
+    checkTokenLimits(rt, 'eph-bill', t0)
+    recordTokenUsage(rt, 'eph-bill', { input_tokens: 400, cache_read_tokens: 800, output_tokens: 100, billable_tokens: 500 }, t0 + 100)
+    expect(rt.tokenUsage.get('eph-bill')?.dayTokens).toBe(1300) // 总口径 1300 ≥ 600（旧逻辑此处已熔断）
+    expect(rt.tokenUsage.get('eph-bill')?.dayBillableTokens).toBe(500)
+    expect(checkTokenLimits(rt, 'eph-bill', t0 + 200)).toBeNull()
+    // billable 达限（620 ≥ 600）→ 熔断
+    recordTokenUsage(rt, 'eph-bill', { input_tokens: 100, output_tokens: 20, billable_tokens: 120 }, t0 + 300)
+    expect(checkTokenLimits(rt, 'eph-bill', t0 + 400)).toBe('daily_tokens')
+    // 对照：显式配置 harness（config.toml limits）同样账面 → 总口径判定照旧熔断
+    const rt2 = rtWith({ daily_tokens: 600 })
+    checkTokenLimits(rt2, 'worker', t0)
+    recordTokenUsage(rt2, 'worker', { input_tokens: 400, cache_read_tokens: 800, output_tokens: 100, billable_tokens: 500 }, t0 + 100)
+    expect(rt2.tokenUsage.get('worker')?.dayTokens).toBe(1300)
+    expect(checkTokenLimits(rt2, 'worker', t0 + 200)).toBe('daily_tokens')
+  })
+
+  it('跨本地日经 check 路径滚动：两口径同时清零（record 先记账、check 跨日后触发）', () => {
+    const rt = rtWith({ daily_tokens: 999_999 })
+    const t0 = Date.parse('2026-11-01T10:00:00+08:00')
+    checkTokenLimits(rt, 'worker', t0)
+    recordTokenUsage(rt, 'worker', { input_tokens: 100, output_tokens: 42, cache_read_tokens: 20, billable_tokens: 122 }, t0 + 100)
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(122)
+    // 跨日首个请求走 check：修复前只清 dayTokens，dayBillableTokens 结转（跨午夜预算账虚高）
+    checkTokenLimits(rt, 'worker', t0 + 86_400_000)
+    expect(rt.tokenUsage.get('worker')?.dayTokens).toBe(0)
+    expect(rt.tokenUsage.get('worker')?.dayBillableTokens).toBe(0)
+  })
 })
 
 describe('token limits > E2E（隔离沙箱 + 随机端口 + mock 上游）', () => {
