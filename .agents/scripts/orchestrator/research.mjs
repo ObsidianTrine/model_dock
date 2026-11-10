@@ -877,6 +877,12 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
   const veto = contradicted.length > 0;
 
   const dims = { citation: citation ?? null, evidence: evidence ?? null, coherence, coverage };
+  // Strong Support Rate（观测指标，spec research-verdict-calibration 任务 2）：supported 数 /
+  // 已核承重结论数（%，unverifiable 不计分母，checked 空 → null）。与 level 同属纯派生值——
+  // 不进 overall 权重、不影响 usage 决策矩阵（判分语义零改动）。
+  const strongSupport = checked.length
+    ? Math.round((checked.filter((c) => c.status === 'supported').length / checked.length) * 100)
+    : null;
   const weights = { evidence: 0.4, coherence: 0.35, citation: 0.15, coverage: 0.1 };
   const present = Object.entries(dims).filter(([, v]) => v != null);
   const overall = (dims.evidence == null || coverage == null || coherence == null) || !present.length
@@ -906,7 +912,7 @@ export function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, 
 
   const level = overall == null ? 'unknown' : overall >= 75 ? 'pass' : overall >= 50 ? 'warn' : 'fail';
   return {
-    scores: { ...dims, overall },
+    scores: { ...dims, strong_support: strongSupport, overall },
     usage: { browse: 'ok', internal_decision: decision, external_doc: external },
     veto,
     contradicted_count: contradicted.length,
@@ -1007,16 +1013,24 @@ export function assessBrief(repoRoot, id, { model } = {}) {
   return verdict;
 }
 
-/** research/verify 完成事件的飞书通知正文（纯函数）：判级 + usage 三字段 + 前 3 条理由。 */
+/** research/verify 完成事件的飞书通知正文（纯函数）：判级 + usage 三字段 + 维度分行 + 前 3 条理由。 */
 export function buildResearchNotifyBody(verdict) {
   const u = verdict?.usage ?? {};
   const icon = verdict?.level === 'pass' ? '✅' : verdict?.level === 'warn' ? '⚠️' : verdict?.level === 'fail' ? '⛔' : '❔';
-  const overall = verdict?.scores?.overall != null ? `（overall ${verdict.scores.overall}）` : '';
+  const s = verdict?.scores ?? {};
+  const overall = s.overall != null ? `（overall ${s.overall}）` : '';
+  const fmtDim = (v) => (v == null ? '-' : String(v));
+  // 维度分行（spec research-verdict-calibration 任务 2）：四维 + strong_support（观测）；
+  // 四维全 null（无 scores 或 L1 纯空壳）时省略整行
+  const dimLine = [s.evidence, s.coherence, s.coverage, s.citation].some((v) => v != null)
+    ? `维度分: evidence=${fmtDim(s.evidence)} coherence=${fmtDim(s.coherence)} coverage=${fmtDim(s.coverage)}% citation=${fmtDim(s.citation)} strong_support=${fmtDim(s.strong_support)}`
+    : null;
   const arb = verdict?.arbitration;
   const arbLine = arb?.ran && !arb.failed ? `⚖ 仲裁轮：${arb.upheld} upheld / ${arb.overturned} overturned / ${arb.undetermined} undetermined——${arb.veto_cleared ? '否决解除' : '否决维持'}` : arb?.failed ? '⚖ 仲裁轮失败——维持原否决' : null;
   const lines = [
     `${icon} ${verdict?.brief_id ?? '?'}——${verdict?.level ?? '?'}${overall}`,
     `usage: browse=${u.browse ?? '?'} / decision=${u.internal_decision ?? '?'} / external=${u.external_doc ?? '?'}`,
+    ...(dimLine ? [dimLine] : []),
     ...(verdict?.claims?.length ? [`claims: ${verdict.claims.filter((c) => c.status === 'contradicted').length} contradicted / ${verdict.claims.filter((c) => c.status === 'unsupported').length} unsupported / 共 ${verdict.claims.length} 条`] : []),
     ...(arbLine ? [arbLine] : []),
     ...(verdict?.reasons ?? []).slice(0, 3).map((r) => `· ${String(r).slice(0, 120)}`),
@@ -1033,7 +1047,7 @@ export function appendResearchLedger(repoRoot, entry) {
   return file;
 }
 
-/** L3 读台账 → 按调研船模型聚合：n / L1 平均核实率 / 判级分布。L2 条目的调研船在 researcher_model（model 是复核船）；旧条目无 researcher_model 回退 model。 */
+/** L3 读台账 → 按调研船模型聚合：n / L1 平均核实率 / L2 平均完全支撑率 / 判级分布。L2 条目的调研船在 researcher_model（model 是复核船）；旧条目无 researcher_model 回退 model。 */
 export function readLedgerStats(repoRoot) {
   const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
   if (!fs.existsSync(file)) return [];
@@ -1042,10 +1056,12 @@ export function readLedgerStats(repoRoot) {
     try {
       const e = JSON.parse(line);
       const key = `${e.researcher_model ?? e.model ?? '?'}`;
-      const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [] };
+      const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [], strong_supports: [] };
       agg.runs++;
       agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;
       if (typeof e.hit_rate === 'number') agg.hit_rates.push(e.hit_rate);
+      // avg_strong_support 与 avg_hit_rate 同款 null 语义：旧条目缺字段跳过，一个都没有 → null
+      if (typeof e.strong_support === 'number') agg.strong_supports.push(e.strong_support);
       byModel.set(key, agg);
     } catch { /* 损坏行跳过 */ }
   }
@@ -1054,6 +1070,7 @@ export function readLedgerStats(repoRoot) {
     runs: a.runs,
     levels: a.levels,
     avg_hit_rate: a.hit_rates.length ? a.hit_rates.reduce((s, v) => s + v, 0) / a.hit_rates.length : null,
+    avg_strong_support: a.strong_supports.length ? a.strong_supports.reduce((s, v) => s + v, 0) / a.strong_supports.length : null,
   }));
 }
 

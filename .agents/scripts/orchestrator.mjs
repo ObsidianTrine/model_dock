@@ -4206,7 +4206,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
         reasons,
       };
       fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
-      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
+      appendResearchLedger(repoRoot, { kind: 'l2', brief_id: id, model: model ?? null, researcher_model: prevModel, level: v.level, overall: v.scores.overall, strong_support: v.scores.strong_support, hit_rate: claimCheck.checked ? claimCheck.hit_rate : null, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
       if (arbitration?.ran) appendResearchLedger(repoRoot, { kind: 'l2-arbitration', brief_id: id, model: arbitration.model, researcher_model: prevModel, upheld: arbitration.upheld ?? 0, overturned: arbitration.overturned ?? 0, undetermined: arbitration.undetermined ?? 0, veto_cleared: arbitration.veto_cleared ?? false, failed: arbitration.failed ?? false, decision: v.usage.internal_decision, ...(topicId ? { topic_id: topicId } : {}), ...(dim ? { dim } : {}) });
       log(`═══ L2 复核（${id}，复核船 ${backendName}${model ? `/${model}` : ''}）═══`);
       for (const c of valid) log(`  [${c.status}] ${c.claim.slice(0, 60)}${c.note ? `——${c.note}` : ''}`);
