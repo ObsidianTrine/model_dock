@@ -258,9 +258,11 @@ function mergeCommitOf(repoRoot, taskId) {
  * 只有一家拿到内容；投递失败 rename 回 pending 不丢事件）→ merged 事件补 commit（读卡
  * 事件流）→ 聚合（同卡终态合并）→ 组扁平通报 → 经 notify() 发 orchWebhookEnvs 通道。
  * force=false 时若在飞 flusher 标记很新（静默窗内），让位给它（窗内事件由它合并发送）；
- * 长跑收口与 attention 即发一律 force=true。送达/dry-run 后认领文件原子 rename 归档为
+ * 长跑收口与 attention 即发一律 force=true。送达后认领文件原子 rename 归档为
  * last.txt（通知「📄 详情」指针的落点，本批完整 JSON）。
- * dryRun 不发网不响系统通知，返回将发送的 title/body（测试用）。
+ * dryRun 不发网不响系统通知，返回将发送的 title/body（测试用）；且不消费队列——事件写回
+ * pending 不归档（round5 修复：dry-run 只是预览，实发时同批再发；round4 曾误删 claimed
+ * 文件把事件消费掉，与「dry-run 不消费」注释相反）。
  * @returns { sent, title?, body?, delivered?, reason? }
  */
 export async function flushDigest(repoRoot, { force = false, dryRun = false, quietWindowSec = 60 } = {}) {
@@ -329,8 +331,8 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, qui
       const title = digestTitle(displayProjectName(cfg.projectName ?? ''), aggregateDigest(items));
       const r = await notify({ title, body, dryRun, webhookEnvs: orchWebhookEnvs(repoRoot), repoRoot });
       const delivered = !dryRun && r.delivered.length > 0;
-      if (delivered || dryRun) archive(); // 送达/dry-run：认领文件转 last.txt 详情档
-      else restore(); // 无通道/投递失败：事件写回 pending（count 随返回，调用方文案不再谎报 empty）
+      if (delivered) archive(); // 送达：认领文件转 last.txt 详情档
+      else restore(); // 无通道/投递失败/dry-run：事件写回 pending 不消费不归档——dry-run 只是预览，实发时同批再发（round5 修复）
       return { sent: delivered, title, body, delivered: r.delivered, count: items.length, ...(delivered ? {} : { reason: dryRun ? 'dry-run' : 'no-channel' }) };
     } catch (e) {
       restore();

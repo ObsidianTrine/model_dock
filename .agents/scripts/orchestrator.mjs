@@ -1711,7 +1711,8 @@ async function doRetry(repoRoot, taskId, root, qdir, note, opts) {
 //   无 review_verdict / 最后是 review_engine_failed / blockers 不可解析 → fail-closed 不动作
 // 红线（不可关闭）：① feature 提案的 intake 自动提交拒绝逻辑零改动；② drift 降级期间
 // sweep 整体跳过（恢复只能人工 drift --clear）；③ blockers>0 的卡永不自动合并，只返工；
-// ④ 没有审查结论的卡超时也绝不合并。
+// ④ 没有审查结论的卡超时也绝不合并；⑤ scope_outside（范围失控）落位的卡超时也绝不
+// 自动批示——范围失控不该静默合并（与合并闸门同一条不变量），留人工拍板。
 // spec 环节同 sweep：review-verdict.json 结论 approve_to_build 且超时且未 build 过的规格
 // 直接拆卡（设计人审的分层超时执行）；blocked/rework 结论永不自动放行。
 
@@ -1808,7 +1809,7 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
   // 可执行 = 功能开 && 非 dry-run && 无降级；留痕 = 功能开 && 非 dry-run（降级跳过也留痕）
   const act = enabled && !dryRun && !degraded;
   const trace = enabled && !dryRun;
-  const report = { merged: [], retried: [], retryLimit: [], noVerdict: [], waiting: [], specBuilt: [], specWaiting: [] };
+  const report = { merged: [], retried: [], retryLimit: [], noVerdict: [], waiting: [], scopeOutside: [], specBuilt: [], specWaiting: [] };
   const timeoutMs = timeoutMinutes * 60_000;
   try {
     if (degraded) {
@@ -1838,6 +1839,18 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
         const ageMs = Date.now() - Date.parse(verdict.ts ?? '');
         if (!Number.isFinite(ageMs) || ageMs < timeoutMs) {
           report.waiting.push(taskId); // 拍板窗口未过：留人
+          continue;
+        }
+        // 红线⑤：scope_outside（范围失控）落位的卡超时也绝不自动批示——范围失控不该
+        // 静默合并（与合并闸门 purity.outside 同一条不变量），自动返工同样跳过（重跑
+        // 也可能带着失控改动再回来）。只认最后一条 awaiting_human 事件的 reason；
+        // drift_degraded 落位由上面的整体跳过覆盖（恢复后按推荐执行是文档化语义）。
+        const awaitEv = readEvents(qdir).slice().reverse().find((e) => e.type === 'awaiting_human');
+        if (awaitEv?.reason === 'scope_outside') {
+          report.scopeOutside.push(taskId);
+          if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'scope_outside')) {
+            appendEvent(qdir, 'autoapprove_skipped', { reason: 'scope_outside' });
+          }
           continue;
         }
         if (rec === 'merge') {
@@ -1894,9 +1907,10 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
   if (report.retryLimit.length) log(`  返工超限留人：${fmt(report.retryLimit)}`);
   if (report.noVerdict.length) log(`  fail-closed（无审查结论，不动作）：${fmt(report.noVerdict)}`);
   if (report.waiting.length) log(`  拍板窗口未过：${fmt(report.waiting)}`);
+  if (report.scopeOutside.length) log(`  范围失控留人（scope_outside 不自动批示）：${fmt(report.scopeOutside)}`);
   if (report.specBuilt.length) log(`  spec 自动拆卡${acted}：${fmt(report.specBuilt)}`);
   if (report.specWaiting.length) log(`  spec 拍板窗口未过：${fmt(report.specWaiting)}`);
-  if (!report.merged.length && !report.retried.length && !report.retryLimit.length && !report.noVerdict.length && !report.waiting.length && !report.specBuilt.length && !report.specWaiting.length) {
+  if (!report.merged.length && !report.retried.length && !report.retryLimit.length && !report.noVerdict.length && !report.waiting.length && !report.scopeOutside.length && !report.specBuilt.length && !report.specWaiting.length) {
     log('  无待批示项。');
   }
   if (dryRun) log('  （dry-run：以上为建议动作，未实际执行）');
@@ -4830,13 +4844,18 @@ async function cmdWatch(repoRoot, opts) {
       }
       // 1) pending 非空 → drain（autopilot.autoDrainPerCycle > 0 时按它设每周期上限）
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读：改配置即时生效
-      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论——spawnSync 同步跑，
-      // 子进程吃 die 隔离（finish 失败不炸 watch 主循环）；本进程已持调度器锁，子进程
-      // 经 ORCH_SCHED_LOCK_HELD 豁免直接执行
-      spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
       // 配置守卫（B7）：workflow.json 漂移期间跳过派发/重探（改配置即时生效的老语义让位
       // 给守卫——被改的授权面不再静默生效；文件改回基线或重启编排器后恢复）
       const configPaused = !configGuardPass(repoRoot, cfg);
+      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论——spawnSync 同步跑，
+      // 子进程吃 die 隔离（finish 失败不炸 watch 主循环）；本进程已持调度器锁，子进程
+      // 经 ORCH_SCHED_LOCK_HELD 豁免直接执行。配置守卫漂移期间跳过：sweep 按 autoApprove
+      // 配置动作，被改的授权面不得在漂移期静默生效（与派发/规划同口径）
+      if (configPaused) {
+        log('配置守卫：workflow.json 漂移生效中——本周期跳过 autoapprove sweep（被改的 autoApprove 配置不生效）。');
+      } else {
+        spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+      }
       let pending = listCards(root, 'pending');
       const cap = Number.isInteger(cfg.autopilot?.autoDrainPerCycle) && cfg.autopilot.autoDrainPerCycle > 0 ? cfg.autopilot.autoDrainPerCycle : Infinity;
       // 风暴闸（瞭望位先看天）：滞留则本周期不派发（drain/投机重探全跳过），scan/propose
@@ -5035,12 +5054,17 @@ async function cmdSail(repoRoot, opts) {
         break;
       }
       const cfg = loadWorkflowConfig(repoRoot); // 每周期重读（watch 同款：改配置即时生效）
-      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论（watch 同款 spawnSync 同步）
-      spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
       const weather = cfg.weatherHold ? weatherHoldCount(repoRoot, cfg) : { held: false, count: 0 };
       // 配置守卫（B7）：workflow.json 漂移期间跳过派发与规划（同风暴闸语义；改回基线或
       // 重启后恢复）
       const configPaused = !configGuardPass(repoRoot, cfg);
+      // 分层审核超时 sweep（D6.5）：每周期开头清一遍到期审查结论（watch 同款 spawnSync 同步）。
+      // 配置守卫漂移期间跳过：被改的 autoApprove 授权面不得在漂移期静默生效（watch 同口径）
+      if (configPaused) {
+        log('配置守卫：workflow.json 漂移生效中——本周期跳过 autoapprove sweep（被改的 autoApprove 配置不生效）。');
+      } else {
+        spawnSync('node', [orch, 'autoapprove'], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
+      }
       if (weather.held && !weatherAnnounced) {
         weatherAnnounced = true;
         announceWeatherHold(repoRoot, cfg, weather);

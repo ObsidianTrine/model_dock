@@ -429,7 +429,7 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
     }
   })
 
-  it('flushDigest dryRun：聚合成一条扁平通报（终态合并 + 规格尾行 + 详情行），last.txt 归档本批完整 JSON', async () => {
+  it('flushDigest dryRun：聚合成一条扁平通报（终态合并 + 规格尾行），队列不消费不归档（round5 修复：写回 pending）', async () => {
     const d = tmpDir()
     try {
       queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'pending', title: '卡 t1', lines: ['进入队列'], priority: 'normal' })
@@ -448,11 +448,35 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
         `📄 详情：${path.join(d.root, '.agents', 'orchestrator', 'notify-digest')}/last.txt`,
       ])
       expect(r.body).not.toContain('进入队列')
-      expect(fs.existsSync(digestPendingPath(d.root))).toBe(false) // 认领语义：先清队列再发
-      const lastLines = fs.readFileSync(digestLastPath(d.root), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
-      expect(lastLines).toHaveLength(2) // 本批完整 JSON（JSONL 逐行一条）：两条原始事件全在
-      expect(lastLines.map((x: { state?: string }) => x.state)).toEqual(['pending', 'merged'])
+      expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // dry-run 不消费队列：事件写回 pending（round5 修复）
+      expect(fs.existsSync(digestLastPath(d.root))).toBe(false) // dry-run 不归档：last.txt 是送达通知的详情指针，预览无通知不落档
     } finally {
+      d.cleanup()
+    }
+  })
+
+  it('round5：dry-run 不消费队列——pending 文件仍在，随后实发同批只发一次', async () => {
+    const d = tmpDir()
+    const hook = await startWebhook()
+    const prev = process.env.AGENTS_ORCH_WEBHOOK
+    process.env.AGENTS_ORCH_WEBHOOK = hook.url
+    try {
+      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal' })
+      const dry = await flushDigest(d.root, { dryRun: true, force: true })
+      expect(dry.sent).toBe(false)
+      expect(dry.reason).toBe('dry-run')
+      expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // 事件写回 pending，不丢
+      const real = await flushDigest(d.root, { force: true }) // 同批实发
+      expect(real.sent).toBe(true)
+      expect(real.count).toBe(1)
+      expect(hook.posts).toHaveLength(1) // 同批事件只发一次
+      expect(hook.posts[0].title).toMatch(/^【.+】✅1$/) // 扁平格式：标题 emoji 计数分诊
+      expect(hook.posts[0].body).toContain('✅ t1 合并')
+      expect(fs.existsSync(digestPendingPath(d.root))).toBe(false) // 实发才消费（并归档 last.txt）
+    } finally {
+      if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
+      else process.env.AGENTS_ORCH_WEBHOOK = prev
+      await hook.close()
       d.cleanup()
     }
   })
@@ -467,7 +491,7 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // 让位不清队列
       const r = await flushDigest(d.root, { dryRun: true, force: true })
       expect(r.body).toContain('✅ t1 合并')
-      expect(fs.existsSync(digestPendingPath(d.root))).toBe(false)
+      expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // dry-run 不消费队列（round5 修复：写回 pending）
     } finally {
       d.cleanup()
     }
@@ -540,6 +564,7 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
         await hook.close()
       }
     } finally {
+      process.env.PATH = prevPath
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
       if (prevPath === undefined) delete process.env.PATH
