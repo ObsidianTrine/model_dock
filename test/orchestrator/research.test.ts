@@ -25,6 +25,7 @@ import {
   normalizeClaimStatuses,
   scoreVerdict,
   readVerdict,
+  readVerdictDetailed,
   verdictGateBlocks,
   parseVerdictBlock,
   appendResearchLedger,
@@ -415,6 +416,26 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       expect(readVerdict(root, 'b1')).toBeNull()
       fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify({ schema: VERDICT_SCHEMA, usage: { internal_decision: 'ok' } }))
       expect(readVerdict(root, 'b1')?.usage?.internal_decision).toBe('ok')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('readVerdictDetailed：三态区分——正常 { verdict } / 存在但损坏 { corrupt } / 不存在 null', () => {
+    const root = tmpRoot()
+    try {
+      expect(readVerdictDetailed(root, 'no-such-brief')).toBeNull()
+      expect(readVerdictDetailed(root, '')).toBeNull()
+      const dir = path.join(root, '.agents', 'orchestrator', 'research', 'b2')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'verdict.json'), '{手改损坏')
+      const corrupt = readVerdictDetailed(root, 'b2')
+      expect(corrupt?.corrupt).toBe(true)
+      expect(corrupt?.verdict).toBeNull()
+      expect(readVerdict(root, 'b2')).toBeNull() // 旧消费方语义不变（放行口径）
+      fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify({ schema: VERDICT_SCHEMA, usage: { internal_decision: 'ok' } }))
+      expect(readVerdictDetailed(root, 'b2')?.corrupt).toBeUndefined()
+      expect(readVerdictDetailed(root, 'b2')?.verdict?.usage?.internal_decision).toBe('ok')
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

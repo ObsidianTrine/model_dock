@@ -958,13 +958,28 @@ export function loadSnapshots(repoRoot, id) {
 /**
  * 读已落盘的 verdict.json（消费方入口）：不存在/损坏一律返回 null。缺席 ≠ 判定不通过——
  * 消费方（research-verdict.md 契约）对 null 放行（旧 brief / 未跑 L1 的行为保持不变）。
+ * 需要区分「存在但损坏」的调用方（落观测事件）用 readVerdictDetailed。
  */
 export function readVerdict(repoRoot, id) {
+  return readVerdictDetailed(repoRoot, id)?.verdict ?? null;
+}
+
+/** 区分三态：{ verdict }（正常）/ { corrupt }（存在但解析失败）/ null（不存在或未传 id）。
+ *  写入侧已原子化（tmp+rename），corrupt 只可能来自手改/磁盘损坏——调用方对 corrupt 落
+ *  观测事件再按 null 语义放行（不静默，也不阻断）。 */
+export function readVerdictDetailed(repoRoot, id) {
   if (!id) return null;
+  const file = path.join(briefDir(repoRoot, id), 'verdict.json');
+  let text;
   try {
-    return JSON.parse(fs.readFileSync(path.join(briefDir(repoRoot, id), 'verdict.json'), 'utf8'));
+    text = fs.readFileSync(file, 'utf8');
   } catch {
-    return null;
+    return null; // 不存在（ENOENT 等）
+  }
+  try {
+    return { verdict: JSON.parse(text) };
+  } catch {
+    return { corrupt: true, verdict: null };
   }
 }
 
@@ -1029,7 +1044,12 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     level,
     reasons,
   };
-  fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
+  // 原子写（tmp+rename 同目录）：L2 verify 落盘途中被 sail 周期 readVerdict 读到半文会
+  // 解析失败当缺席放行——方向与闸门意图相反；rename 原子可见，半写窗口关闭。
+  const verdictFile = path.join(brief.dir, 'verdict.json');
+  const tmpFile = `${verdictFile}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(verdict, null, 2)}\n`);
+  fs.renameSync(tmpFile, verdictFile);
   return verdict;
 }
 

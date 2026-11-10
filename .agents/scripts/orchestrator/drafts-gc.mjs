@@ -258,13 +258,21 @@ export function isAutoProposal(meta) {
   return AUTO_SOURCES.has(String(meta?.created_by ?? ''));
 }
 
-/** 队列痕迹面：7 个状态目录全部卡 id 集合。reviewing 也在内——「无任何队列痕迹」按
- *  全集保守判定（多查一个状态只会少清退，不会误杀）。 */
+/** 队列痕迹面：7 个状态目录全部卡 id 集合 + specs/<id>/ 目录存在性。reviewing 也在内——
+ *  「无任何队列痕迹」按全集保守判定（多查一个状态只会少清退，不会误杀）。specs 目录单独
+ *  查：spec 拆出的卡 id 是 <specId>-tN，不在队列痕迹面与草稿 id 同名——specs/<specId>/
+ *  存在即该草稿已被拆卡（设计/施工期间），不补这条 aged-out 会把活 spec 的草稿误清退。 */
 export function collectTracedIds(root) {
   const ids = new Set();
   for (const s of STATES) {
     for (const id of listCards(root, s)) ids.add(id);
   }
+  const specsDir = path.join(root, '.agents', 'orchestrator', 'specs');
+  try {
+    for (const e of fs.readdirSync(specsDir, { withFileTypes: true })) {
+      if (e.isDirectory()) ids.add(e.name);
+    }
+  } catch { /* specs/ 不存在 = 从未拆过卡 */ }
   return ids;
 }
 
