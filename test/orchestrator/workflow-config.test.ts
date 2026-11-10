@@ -365,7 +365,7 @@ describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况�
   })
 })
 
-describe('workflow-config > upstream（上游管线预授权档 specAutoBuild，缺省关）', () => {
+describe('workflow-config > upstream（上游管线：specAutoBuild 预授权档 + autoPipeline watch/nightly 下沉档，缺省关）', () => {
   function cfgOf(obj: Record<string, unknown>) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-upstream-'))
     try {
@@ -377,10 +377,12 @@ describe('workflow-config > upstream（上游管线预授权档 specAutoBuild，
     }
   }
 
+  const AP_DEFAULT = { enabled: false, researchPerCycle: 2, specPerCycle: 1 }
+
   it('未配 = 缺省关（spec 落盘即停等人审，行为与历史一致）；显式 true / false 生效', () => {
-    expect(cfgOf({}).upstream).toEqual({ specAutoBuild: { enabled: false } })
-    expect(cfgOf({ upstream: { specAutoBuild: { enabled: true } } }).upstream).toEqual({ specAutoBuild: { enabled: true } })
-    expect(cfgOf({ upstream: { specAutoBuild: { enabled: false } } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    expect(cfgOf({}).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: true } } }).upstream).toEqual({ specAutoBuild: { enabled: true }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: false } } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
     // upstream 键合法：不再进未知顶层键告警（拼写错误防线白名单）
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
@@ -391,10 +393,42 @@ describe('workflow-config > upstream（上游管线预授权档 specAutoBuild，
     }
   })
 
+  it('autoPipeline：缺省关 = watch/nightly 行为与历史一致；enabled/配额键显式合法值生效', () => {
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: true } } }).upstream?.autoPipeline).toEqual({ enabled: true, researchPerCycle: 2, specPerCycle: 1 })
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 3, specPerCycle: 2 } } }).upstream?.autoPipeline).toEqual({
+      enabled: true,
+      researchPerCycle: 3,
+      specPerCycle: 2,
+    })
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: false } } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+  })
+
+  it('autoPipeline 非法形态逐键回落：非对象子键整体缺省 / 非布尔 enabled / 非正整数配额（单键回落不牵连合法键）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ upstream: { autoPipeline: 'on' } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: 'yes' } } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+      // 非法配额键回落缺省值，enabled 照常生效（逐键回落）
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 0, specPerCycle: -1 } } }).upstream?.autoPipeline).toEqual({
+        enabled: true,
+        researchPerCycle: 2,
+        specPerCycle: 1,
+      })
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 'many' } } }).upstream?.autoPipeline).toEqual({
+        enabled: true,
+        researchPerCycle: 2,
+        specPerCycle: 1,
+      })
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('upstream.autoPipeline')).length).toBeGreaterThanOrEqual(5)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('非法形态回落缺省关：非对象 upstream / 非对象 specAutoBuild / 非布尔 enabled', () => {
-    expect(cfgOf({ upstream: 'x' }).upstream).toEqual({ specAutoBuild: { enabled: false } })
-    expect(cfgOf({ upstream: { specAutoBuild: 'on' } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
-    expect(cfgOf({ upstream: { specAutoBuild: { enabled: 'yes' } } }).upstream).toEqual({ specAutoBuild: { enabled: false } })
+    expect(cfgOf({ upstream: 'x' }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: 'on' } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: 'yes' } } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
   })
 })
 
