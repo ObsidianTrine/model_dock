@@ -236,17 +236,22 @@ export function loadWorkflowConfig(repoRoot) {
   };
 }
 
-/** 上游管线预授权配置：{ specAutoBuild?: { enabled?: boolean } }。spec 落盘后自动拆卡
- *  （gate=L1、type=feature；手动 spec build 保持 gate=L3 不变）。缺省 enabled=false =
- *  行为与历史一致。非法值回落缺省并 console.warn 告警（与各 resolveXxx 同风格）。 */
+/** 上游管线配置：{ specAutoBuild?: { enabled?: boolean },
+ *  autoPipeline?: { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 } }。
+ *  specAutoBuild：spec 落盘后自动拆卡（gate=L1、type=feature；手动 spec build 保持 gate=L3
+ *  不变）。autoPipeline：watch（autopilot 开时）/ nightly --plan 周期推进 feature 提案的
+ *  research → spec 管线（2026-11 P1-8 从 sail 下沉；sail 不受此键管辖，走 freeSail 配额），
+ *  配额键为 watch/nightly 调用方传入 sailUpstreamPipeline 的周期上限（缺省 research 2 / spec 1）。
+ *  两键缺省 enabled=false = 行为与历史一致。非法值回落缺省并 console.warn 告警（与各
+ *  resolveXxx 同风格）。 */
 function resolveUpstream(raw) {
-  const DEFAULTS = { specAutoBuild: { enabled: false } };
+  const DEFAULTS = { specAutoBuild: { enabled: false }, autoPipeline: { enabled: false, researchPerCycle: 2, specPerCycle: 1 } };
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] upstream 配置非法，已忽略：${JSON.stringify(raw)}（应为 { specAutoBuild?: { enabled?: boolean } }）`);
+    console.warn(`[workflow-config] upstream 配置非法，已忽略：${JSON.stringify(raw)}（应为 { specAutoBuild?: { enabled?: boolean }, autoPipeline?: { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 } }）`);
     return DEFAULTS;
   }
-  const out = { specAutoBuild: { enabled: false } };
+  const out = { specAutoBuild: { enabled: false }, autoPipeline: { enabled: false, researchPerCycle: 2, specPerCycle: 1 } };
   const sab = raw.specAutoBuild;
   if (sab !== undefined) {
     if (sab && typeof sab === 'object' && !Array.isArray(sab)) {
@@ -256,6 +261,20 @@ function resolveUpstream(raw) {
       }
     } else {
       console.warn(`[workflow-config] upstream.specAutoBuild ${JSON.stringify(sab)} 不合法（应为 { enabled?: boolean }）——按 false 处理`);
+    }
+  }
+  const ap = raw.autoPipeline;
+  if (ap !== undefined) {
+    if (ap && typeof ap === 'object' && !Array.isArray(ap)) {
+      if (ap.enabled !== undefined) {
+        if (typeof ap.enabled === 'boolean') out.autoPipeline.enabled = ap.enabled;
+        else console.warn(`[workflow-config] upstream.autoPipeline.enabled ${JSON.stringify(ap.enabled)} 不合法（应为 boolean）——按 false 处理`);
+      }
+      for (const k of ['researchPerCycle', 'specPerCycle']) {
+        out.autoPipeline[k] = resolvePositiveInt(ap[k], DEFAULTS.autoPipeline[k], `upstream.autoPipeline.${k}`);
+      }
+    } else {
+      console.warn(`[workflow-config] upstream.autoPipeline ${JSON.stringify(ap)} 不合法（应为 { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 }）——按缺省处理`);
     }
   }
   return out;

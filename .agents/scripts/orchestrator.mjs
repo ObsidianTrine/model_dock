@@ -4295,6 +4295,9 @@ function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = 
  * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
  * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
+ * 配额随调用方传入（2026-11 P1-8 管线下沉）：pipelineOpts.caps 显式给出 watch/nightly 等
+ * 非 sail 调用方的周期上限（来源 upstream.autoPipeline.researchPerCycle/specPerCycle）；
+ * 缺省（sail 调用）维持 freeSail 配额，行为不变。
  * 复查通道（P2-a，2026-11-11）：proposals 除本周期新增外还含调用方按事件留痕重建的
  * 上周期被闸门拦下的提案（collectUpstreamRechecks）——verdict/unsafe 闸门未改判在此
  * 零配额跳过，改判才继续走升 spec（消耗当期配额）。
@@ -4306,12 +4309,16 @@ function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = 
  * usage=unsafe 或任一 claim contradicted → 本周期不升、事件留痕不重试；verdict 缺席
  * （旧 brief / 未跑 L1）行为不变放行（消费方契约 .agents/docs/research-verdict.md）。
  */
-async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
+async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName, pipelineOpts = {}) {
   const out = { researched: [], researchedTopics: [], speced: [], built: [], failed: [], unsafe: [], verdicts: [], blocked: [] };
   if (!proposals.length) return out;
   const caps = {
-    research: Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
-    spec: Number.isInteger(cfg.freeSail?.specPerCycle) && cfg.freeSail.specPerCycle > 0 ? cfg.freeSail.specPerCycle : 1,
+    research: Number.isInteger(pipelineOpts.caps?.research) && pipelineOpts.caps.research > 0
+      ? pipelineOpts.caps.research
+      : Number.isInteger(cfg.freeSail?.researchPerCycle) && cfg.freeSail.researchPerCycle > 0 ? cfg.freeSail.researchPerCycle : 2,
+    spec: Number.isInteger(pipelineOpts.caps?.spec) && pipelineOpts.caps.spec > 0
+      ? pipelineOpts.caps.spec
+      : Number.isInteger(cfg.freeSail?.specPerCycle) && cfg.freeSail.specPerCycle > 0 ? cfg.freeSail.specPerCycle : 1,
   };
   const autoDim = cfg.freeSail?.researchAutoDim === true; // resolveFreeSail 已校验 bool；缺省/非法 = 关
   for (const p of proposals) {
@@ -4534,6 +4541,7 @@ async function cmdNightly(repoRoot, opts) {
   let skipped = [];
   let warnings = [];
   let planned = 0;
+  let nightlyUpstream = null; // --plan 周期的上游管线结果（摘要行用；未开启/无 feature 提案 = null）
   let errMsg = null;
   // drafts gc 自动清退结果（摘要计数用）：提到 try 外——scan 抛错时按「零清退」出摘要，
   // 不让收尾通知撞 ReferenceError
@@ -4575,6 +4583,7 @@ async function cmdNightly(repoRoot, opts) {
     // 1.2) --plan：planner 需求综合（autopilot 提案，烧钱动作——显式开启才跑）
     if (flags.has('--plan')) {
       log(`\n═══ nightly --plan → propose（autopilot 需求综合）═══`);
+      const draftsBefore = snapshotDrafts(repoRoot);
       const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
         cwd: repoRoot,
         stdio: 'inherit',
@@ -4584,6 +4593,25 @@ async function cmdNightly(repoRoot, opts) {
       try {
         planned = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md')).length;
       } catch { /* drafts/ 不存在 */ }
+      // 上游管线（2026-11 P1-8 从 sail 下沉）：--plan 出提案后推进 feature 提案的 research →
+      // spec（夜航 9h 循环主粮管线不缺位）。配置 upstream.autoPipeline（缺省关 = 行为与历史
+      // 一致）；配额随调用方传入（upstream.autoPipeline.researchPerCycle/specPerCycle，缺省
+      // research 2 / spec 1），与 sail 的 freeSail 配额互不相干；复查通道与 sail/watch 同款
+      //（collectUpstreamRechecks 事件留痕重建，殿后重进管线）。--auto 的硬禁区过滤不受影响
+      //（feature 提案照旧被 hardZoneReason 拦下，不进自动 run）。
+      if (ncfg.upstream?.autoPipeline?.enabled === true) {
+        const draftsAfter = snapshotDrafts(repoRoot);
+        const known = new Set(draftsBefore.map((d) => d.id));
+        const proposals = draftsAfter.filter((d) => !known.has(d.id));
+        const recheckIds = new Set(collectUpstreamRechecks(repoRoot, draftsAfter));
+        const rechecks = draftsAfter.filter((d) => recheckIds.has(d.id) && !proposals.some((p) => p.id === d.id));
+        if (proposals.length || rechecks.length) {
+          log(`\n═══ nightly --plan → 上游管线（新提案 ${proposals.length} 张、复查 ${rechecks.length} 张；research ≤${ncfg.upstream.autoPipeline.researchPerCycle}/周期、spec ≤${ncfg.upstream.autoPipeline.specPerCycle}/周期）═══`);
+          nightlyUpstream = await sailUpstreamPipeline(repoRoot, ncfg, [...proposals, ...rechecks], opts.backend ?? ncfg.worker?.backend, {
+            caps: { research: ncfg.upstream.autoPipeline.researchPerCycle, spec: ncfg.upstream.autoPipeline.specPerCycle },
+          });
+        }
+      }
     }
 
     // 2) 质量漂移报告
@@ -4660,6 +4688,9 @@ async function cmdNightly(repoRoot, opts) {
   }
   log(`\n════════ nightly 摘要 ════════`);
   log(`新提案: ${created.length}${flags.has('--plan') ? `    规划后 drafts 存量: ${planned}` : ''}    待审（awaiting-human）: ${awaiting.length}${awaiting.length ? `（${awaiting.join(', ')}）` : ''}    待调度（pending）: ${pending.length}`);
+  if (flags.has('--plan') && nightlyUpstream) {
+    log(`上游管线: 调研 ${nightlyUpstream.researched.length + nightlyUpstream.researchedTopics.length}    spec 落盘 ${nightlyUpstream.speced.length}${nightlyUpstream.built.length ? `    自动拆卡 ${nightlyUpstream.built.length}` : ''}    失败 ${nightlyUpstream.failed.length}${nightlyUpstream.blocked.length ? `    闸门拦下 ${nightlyUpstream.blocked.length}` : ''}`);
+  }
   if (awaiting.length) log(`人工放行：node .agents/scripts/orchestrator.mjs approve <task-id>`);
   if (pending.length && !opts.auto) log(`推进队列：node .agents/scripts/orchestrator.mjs drain（或下次 nightly --auto）`);
   log(`人工审阅提案：drafts/ 下批量 submit——node .agents/scripts/orchestrator.mjs submit .agents/orchestrator/drafts/<id>.md`);
@@ -4715,7 +4746,8 @@ function speculativeResumes(repoRoot, root, childEnv, opts) {
 
 /**
  * watch——连续自治运行（DeepSeek Super-agent「连续/主动」的落地形态）：drain →
- * 队列空时 scan +（autopilot 开时）propose → 休眠 interval → 循环。
+ * 队列空时 scan +（autopilot 开时）propose +（upstream.autoPipeline 开时）feature 提案
+ * 上游管线（research → spec，配额 upstream.autoPipeline）→ 休眠 interval → 循环。
  * 停止条件（任一）：stop 文件（touch .agents/orchestrator/.watch-stop）、--max-cycles、
  * drift 降级生效（保险丝不允许自己插回去，恢复后人工重启 watch）、SIGINT。
  * 护栏：调度器锁互斥（与 drain/nightly 同一套）；每周期重读 workflow.json（改配置
@@ -4793,12 +4825,32 @@ async function cmdWatch(repoRoot, opts) {
         spawnSync('node', [orch, 'scan', ...(opts.backend ? ['--backend', opts.backend] : [])], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
         if (cfg.autopilot?.enabled) {
           log(`\n──── watch 周期 ${cycle} → propose（autopilot 需求综合）────`);
+          const draftsBefore = snapshotDrafts(repoRoot);
           spawnSync('node', [orch, 'propose', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], { cwd: repoRoot, stdio: 'inherit', env: childEnv });
-          // 提案被白名单自动提交后队列非空 → 本周期内立即推进，不等到下一周期
+          const draftsAfter = snapshotDrafts(repoRoot);
+          // 上游管线（2026-11 P1-8 从 sail 下沉）：autopilot 开启时 watch 周期也推进 feature
+          // 提案的 research → spec（9h 自主循环的主粮管线不缺位）。配置 upstream.autoPipeline
+          // （缺省关 = 行为与历史一致）；配额随调用方传入（upstream.autoPipeline.researchPerCycle/
+          // specPerCycle，缺省 research 2 / spec 1），与 sail 的 freeSail 配额互不相干；复查通道
+          // 与 sail 同款（collectUpstreamRechecks 从事件留痕重建上周期被闸门拦下的提案，殿后重进
+          // 管线）。风暴滞留/配置守卫期跳过——管线派 researcher/spec 会话，与派发同闸。
+          if (!weather.held && !configPaused && cfg.upstream?.autoPipeline?.enabled === true) {
+            const known = new Set(draftsBefore.map((d) => d.id));
+            const proposals = draftsAfter.filter((d) => !known.has(d.id));
+            const recheckIds = new Set(collectUpstreamRechecks(repoRoot, draftsAfter));
+            const rechecks = draftsAfter.filter((d) => recheckIds.has(d.id) && !proposals.some((p) => p.id === d.id));
+            if (proposals.length || rechecks.length) {
+              log(`──── watch 周期 ${cycle} → 上游管线（新提案 ${proposals.length} 张、复查 ${rechecks.length} 张；research ≤${cfg.upstream.autoPipeline.researchPerCycle}/周期、spec ≤${cfg.upstream.autoPipeline.specPerCycle}/周期）────`);
+              await sailUpstreamPipeline(repoRoot, cfg, [...proposals, ...rechecks], opts.backend ?? cfg.worker?.backend, {
+                caps: { research: cfg.upstream.autoPipeline.researchPerCycle, spec: cfg.upstream.autoPipeline.specPerCycle },
+              });
+            }
+          }
+          // 提案被白名单自动提交/specAutoBuild 拆卡后队列非空 → 本周期内立即推进，不等到下一周期
           const submitted = listCards(root, 'pending');
           if (submitted.length && !weather.held && !configPaused) {
             const n = Math.min(submitted.length, cap);
-            log(`autopilot 提交 ${submitted.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
+            log(`autopilot 提交/拆卡 ${submitted.length} 张 → drain --max ${n === Infinity ? '∞' : n}`);
             spawnSync('node', [orch, 'drain', ...(n === Infinity ? [] : ['--max', String(n)]), ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
               cwd: repoRoot,
               stdio: 'inherit',
