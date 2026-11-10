@@ -112,4 +112,44 @@ describe('budget > 实测账（accountMeasured，A4 harness-usage 轮询）', ()
     b.accountMeasured(1_090_000) // 90%：不再重复告警（软告警一次红线不变）
     expect(emit).toHaveBeenCalledTimes(1)
   })
+
+  it('跨午夜重锚：采样跌破基线即新的一天——旧日消耗 carryover 接力，任务总账跨日连续', () => {
+    const b = new Budget(mkCard(100_000))
+    b.accountMeasured(3_000_000) // 基线（当日已有 3M）
+    b.accountMeasured(3_040_000) // 旧日消耗 40k
+    expect(b.measuredBillable).toBe(40_000)
+    b.accountMeasured(150) // 跨午夜：网关日账清零 → 采样跌破基线 → 重锚（carryover 40k）
+    expect(b.measuredBaseline).toBe(150)
+    expect(b.measuredBillable).toBe(40_000) // 旧日定格，总账不断档
+    b.accountMeasured(50_150) // 新日消耗 50k → 总账 90k
+    expect(b.measuredBillable).toBe(90_000)
+    // 不重锚的旧行为此处增量钳 0：总账停在 40k，熔断低敏感直到新日烧回 3M
+    b.accountMeasured(120_000) // 新日累计 120k → 总账 160k > 100k → 熔断
+    expect(b.tripped).toBe(true)
+    expect(b.tripReason?.reason).toBe('max_tokens')
+  })
+
+  it('重锚防抖与防御：同日回落（未跌破基线）不重锚不缩账；正常单调路径行为不变', () => {
+    const b = new Budget(mkCard(100_000))
+    b.accountMeasured(2_000_000) // 基线
+    b.accountMeasured(2_010_000) // +10k
+    b.accountMeasured(2_005_000) // 同日回落（高于基线，理论不出现）：不重锚，max 单调保持总账
+    expect(b.measuredBaseline).toBe(2_000_000)
+    expect(b.measuredBillable).toBe(10_000)
+    b.accountMeasured(2_006_000) // 续航：增量钳 0，总账不缩
+    expect(b.measuredBaseline).toBe(2_000_000)
+    expect(b.measuredBillable).toBe(10_000)
+    // 真跨午夜：跌破基线才重锚
+    b.accountMeasured(150)
+    expect(b.measuredBaseline).toBe(150)
+    expect(b.measuredBillable).toBe(10_000) // carryover 接力
+    b.accountMeasured(5_150)
+    expect(b.measuredBillable).toBe(15_000)
+    // 正常单调路径（无跨日）行为与旧版逐字段一致
+    const b2 = new Budget(mkCard(100_000))
+    b2.accountMeasured(500_000)
+    b2.accountMeasured(560_000)
+    expect(b2.measuredBillable).toBe(60_000)
+    expect(b2.measuredCarryover).toBe(0)
+  })
 })

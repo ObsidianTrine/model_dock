@@ -36,6 +36,7 @@ export class Budget {
     this.billable = 0; // committedBillable + sessionBillableMax，熔断与快照用它
     this.measuredBillable = 0; // 网关实测口径（harness-usage day_billable_tokens 的会话增量，A4）
     this.measuredBaseline = null; // 首次实测采样值（本任务起点基线；null = 尚无有效采样）
+    this.measuredCarryover = 0; // 跨午夜重锚时旧日消耗接力（任务总账跨日连续）
     this.started = Date.now();
     this.tripReason = null;
     this.lowFuel = { tokens: false, wall: false }; // 低水位标志位：各触发一次，防重复
@@ -99,6 +100,10 @@ export class Budget {
    * 网关实测账入账（A4 harness-usage 轮询，supply.mjs 喂入）：tokensBillable 是该 harness
    * 当日 day_billable_tokens 原值；本任务消耗 = 当前值 − 起始基线（首次成功采样固化基线，
    * 跨任务/跨来源的同 harness 流量不落入本任务预算——防 12.1M 式假阳性反向下沉到逐任务）。
+   * 跨午夜重锚：网关 day_billable_tokens 按本地日清零，采样跌破基线即「新的一天」——旧日
+   * 消耗定格在 measuredBillable、carryover 接力，新日从 0 重新计入；不重锚则增量钳 0、实测账
+   * 失明至今日累计重新越过旧基线（长任务跨午夜熔断低敏感）。网关重启内存清零同此路径，
+   * 任务总账仍连续。防抖：重锚后基线 = 当前采样，同日后续 tick 恒 ≥ 基线，不会反复触发。
    * 判定基线 = max(自报账, 实测增量)：实测只抬高熔断/低油量基线（同 harness 兄弟流量只多
    * 不少，保守方向安全），绝不回写 committed/session——自报账与 stats/reconcile 口径不动。
    * 返回 true = 已入账；false = 非法值（调用方保持自报账兜底）。
@@ -106,7 +111,11 @@ export class Budget {
   accountMeasured(tokensBillable) {
     if (!Number.isFinite(tokensBillable) || tokensBillable < 0) return false;
     if (this.measuredBaseline == null) this.measuredBaseline = tokensBillable; // 首次采样 = 本任务起点
-    this.measuredBillable = Math.max(this.measuredBillable, Math.max(0, tokensBillable - this.measuredBaseline));
+    if (tokensBillable < this.measuredBaseline) {
+      this.measuredCarryover = this.measuredBillable;
+      this.measuredBaseline = tokensBillable;
+    }
+    this.measuredBillable = Math.max(this.measuredBillable, this.measuredCarryover + Math.max(0, tokensBillable - this.measuredBaseline));
     const eff = Math.max(this.billable, this.measuredBillable);
     this.checkLowFuel(eff);
     if (eff > this.maxTokens) {
