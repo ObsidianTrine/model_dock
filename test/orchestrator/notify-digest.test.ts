@@ -33,6 +33,7 @@ import {
   digestStateRank,
   digestTitle,
   flushDigest,
+  restorePending,
   quietWindowSecOf,
   queueDigestItem,
 } from '../../.agents/scripts/orchestrator/notify-digest.mjs'
@@ -286,9 +287,10 @@ describe('orchestrator notify digest aggregator > 同卡终态合并', () => {
 })
 
 describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件流', () => {
-  it('四类行格式：attention 在前；merged 带 commit、awaiting 带 3 分钟预告、blocked 带状态标签、其余 📄 标题', () => {
+  it('四类行格式：attention 在前；merged 带 commit、awaiting 带拍板窗预告（按 autoMerge 配置渲染）、blocked 带状态标签、其余 📄 标题', () => {
     const reason = '审查返工超限，需要人工拍板是否继续返工重试一轮'
     const body = buildDigestBody({
+      autoMerge: { enabled: true, timeoutMinutes: 3 },
       items: [
         { ts: '', kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal', commit: '407fae32d24c21b697775494feb250bdfa76b44b' },
         { ts: '', kind: 'task', taskId: 't3', state: 'awaiting-human', title: '卡 t3 ⏸ 待船东放行', lines: [reason], priority: 'attention' },
@@ -316,14 +318,52 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     const lines = body.split('\n')
     expect(lines).toEqual([
       `⛔ t9 ⚠ 搁浅（${'长'.repeat(20)}）`,
-      `⏸ t2 待批示——3 分钟未批将自动合并`,
+      `⏸ t2 待批示`, // round6 P2：未传 autoMerge 不再写死「3 分钟」承诺
       '✅ t1 合并',
       `📄 ${'标'.repeat(40)}`,
     ])
     for (const l of lines) expect(l.length).toBeLessThanOrEqual(50)
   })
 
+<<<<<<< HEAD
   it('超 4 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
+=======
+  it('round6 P2：awaiting 尾巴按 autoMerge 配置渲染——未启用不承诺、窗口可配不写死', () => {
+    const item = [{ ts: '', kind: 'task', taskId: 't2', state: 'awaiting-human', title: '卡 t2', lines: [], priority: 'attention' }]
+    const cfg5 = buildDigestBody({ items: item, autoMerge: { enabled: true, timeoutMinutes: 5 } })
+    expect(cfg5).toContain('⏸ t2 待批示——5 分钟未批将自动合并')
+    const off = buildDigestBody({ items: item, autoMerge: { enabled: false, timeoutMinutes: 3 } })
+    expect(off).toBe('⏸ t2 待批示')
+    expect(off).not.toContain('将自动合并')
+  })
+
+  it('round6 P2：restorePending 两分支——pending 缺席原子归位；在席追加合并绝不覆盖并发批', () => {
+    const d = tmpDir()
+    try {
+      const pending = digestPendingPath(d.root)
+      fs.mkdirSync(path.dirname(pending), { recursive: true })
+      // 分支 1：pending 缺席 → rename 原子归位
+      const claimed1 = `${pending}.claiming-1`
+      fs.writeFileSync(claimed1, '{"batch":1}\n')
+      restorePending(claimed1, pending)
+      expect(fs.readFileSync(pending, 'utf8')).toBe('{"batch":1}\n')
+      expect(fs.existsSync(claimed1)).toBe(false)
+      // 分支 2：pending 在席（并发窗口新追加）→ 追加合并，双方内容都在
+      fs.writeFileSync(pending, '{"new":"并发追加的新事件"}\n')
+      const claimed2 = `${pending}.claiming-2`
+      fs.writeFileSync(claimed2, '{"batch":1}\n')
+      restorePending(claimed2, pending)
+      const merged = fs.readFileSync(pending, 'utf8')
+      expect(merged).toContain('并发追加的新事件')
+      expect(merged).toContain('"batch":1')
+      expect(fs.existsSync(claimed2)).toBe(false)
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('超 5 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
+>>>>>>> fix(orchestrator): push-review 遗留 P2 双修——awaiting 批示尾巴按 autoApprove 真实配置渲染（未启用不承诺/窗口可配不写死）+ restorePending 追加合并（并发窗口内 pending 新增事件不再被 rename 覆盖）；对抗用例 3 条
     const items = [
       { ts: '', kind: 'task', taskId: 'ta', state: 'blocked', title: '卡 ta', lines: ['x'], priority: 'attention' },
       ...Array.from({ length: 7 }, (_, i) => ({ ts: '', kind: 'task', taskId: `t${i}`, state: 'merged', title: `卡 t${i}`, lines: [], priority: 'normal' })),
