@@ -576,8 +576,11 @@ export function buildVerifierPrompt(briefBody, sourcesBlocks, repoRoot, { today 
     `}\n` +
     `${fence}\n\n` +
     `status 枚举（只允许这五个）：\n` +
-    `- supported：快照里有直接依据\n` +
-    `- partial：部分依据/依赖转述\n` +
+    `- supported：正面定义——claim 内**全部承重断言**（每个数字、排名、事实点）都有快照直接依据，才可判 supported；只要有一处承重断言缺直接依据，就不算 supported；\n` +
+    `- partial：满足以下任一条即判 partial——\n` +
+    `  1. 快照仅覆盖 claim 的部分承重断言（其余承重断言在快照里找不到依据）；\n` +
+    `  2. 数字方向一致但数值或范围不符（如量级/趋势对得上、具体数字对不上）；\n` +
+    `  3. 依据是对快照内容的转述/归纳，而非快照原文的直接断言；\n` +
     `- unsupported：快照里找不到依据\n` +
     `- contradicted：与快照内容矛盾（或两处引文互相矛盾）\n` +
     `- unverifiable：快照缺失或纯定性无法对账\n\n` +
