@@ -186,7 +186,7 @@ function clip(s) {
  *   blocked/failed → ⛔ <taskId> <状态标签>（reason 前 20 字）
  *   其余（research/spec/autoapprove 中态/中间态卡等）→ 📄 <title 前 40 字>
  */
-function eventLineOf(it) {
+function eventLineOf(it, autoMerge) {
   const id = String(it?.taskId ?? '') || String(it?.title ?? '未命名事件');
   const reason = Array.isArray(it?.lines) && it.lines.length ? String(it.lines[0]) : '';
   if (it?.state === 'merged') {
@@ -195,7 +195,10 @@ function eventLineOf(it) {
   }
   if (it?.state === 'awaiting-human') {
     const why = reason ? `（${reason.slice(0, 20)}）` : '';
-    return clip(`⏸ ${id} 待批示${why}——3 分钟未批将自动合并`);
+    // round6 P2：尾巴按真实 autoApprove 配置渲染——未启用就不许承诺「将自动合并」，
+    // 窗口可配就不许写死「3 分钟」（notify 文案撒谎会让船东错判批示窗口）
+    const tail = autoMerge?.enabled ? `——${autoMerge.timeoutMinutes} 分钟未批将自动合并` : '';
+    return clip(`⏸ ${id} 待批示${why}${tail}`);
   }
   if (it?.state === 'blocked' || it?.state === 'failed') {
     const why = reason ? `（${reason.slice(0, 20)}）` : '';
@@ -213,10 +216,10 @@ const EVENT_LINE_BUDGET = 4;
  * specs 里查得到 progress 才出，`📋 规格 <id>：<n>/<总> ✅`）与详情文件行（digestDirPath
  * 给出才出，`📄 详情：<digestDir>/last.txt`——本批完整 JSON 由 flushDigest 归档 last.txt）。
  */
-export function buildDigestBody({ items, specs = [], digestDirPath = null } = {}) {
+export function buildDigestBody({ items, specs = [], digestDirPath = null, autoMerge = null } = {}) {
   const ev = aggregateDigest(items);
-  const attnLines = ev.filter((it) => it?.priority === 'attention').map(eventLineOf);
-  const normLines = ev.filter((it) => it?.priority !== 'attention').map(eventLineOf);
+  const attnLines = ev.filter((it) => it?.priority === 'attention').map((it) => eventLineOf(it, autoMerge));
+  const normLines = ev.filter((it) => it?.priority !== 'attention').map((it) => eventLineOf(it, autoMerge));
   const lines = [];
   if (attnLines.length + normLines.length <= EVENT_LINE_BUDGET) {
     lines.push(...attnLines, ...normLines);
@@ -265,6 +268,26 @@ function mergeCommitOf(repoRoot, taskId) {
  * 文件把事件消费掉，与「dry-run 不消费」注释相反）。
  * @returns { sent, title?, body?, delivered?, reason? }
  */
+/**
+ * 认领批次写回 pending（投递失败/异常/预览场景，round6 P2）：
+ * pending 不存在 → 原子 rename 归位；已存在（并发窗口内有新追加）→ 本批内容追加回去
+ * （绝不整文件覆盖——rename 会丢并发批）再删认领文件。追加为单次 O_APPEND 写，
+ * 与 queueDigestItem 的逐条追加在同一尽力而为面内。
+ */
+export function restorePending(claimedPath, pendingPath) {
+  try {
+    if (!fs.existsSync(pendingPath)) {
+      fs.renameSync(claimedPath, pendingPath);
+      return;
+    }
+    const content = fs.readFileSync(claimedPath, 'utf8');
+    if (content.trim()) fs.appendFileSync(pendingPath, content.endsWith('\n') ? content : `${content}\n`);
+    fs.rmSync(claimedPath, { force: true });
+  } catch {
+    // 尽力而为面：认领文件残留由 claiming 生命周期兜底（下次 flush 可见）
+  }
+}
+
 export async function flushDigest(repoRoot, { force = false, dryRun = false, quietWindowSec = 60 } = {}) {
   try {
     const file = digestPendingPath(repoRoot);
@@ -286,8 +309,10 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, qui
       if (e?.code === 'ENOENT') return { sent: false, reason: 'inflight' };
       return { sent: false, reason: `claim failed: ${e?.message ?? e}` };
     }
-    // 投递失败/异常时 rename 回 pending——事件不丢，下次 flush 再试（round4 P2）
-    const restore = () => { try { fs.renameSync(claimed, file); } catch { /* 已被并发接走：尽力而为面 */ } };
+    // 投递失败/异常时事件写回 pending——事件不丢，下次 flush 再试（round4 P2）。
+    // round6 P2：并发窗口内 pending 可能已有新追加，直接 rename 会整文件覆盖丢那批——
+    // 已存在时改为追加本批内容（单次 O_APPEND 写，行界完整性尽力而为）再删认领文件。
+    const restore = () => restorePending(claimed, file);
     // 本批完整 JSON 归档 last.txt：认领文件直接 rename 复用（零拷贝原子覆盖旧档）；
     // rename 失败（如 Windows 下详情档被占用）回退删除——归档是尽力而为面，不影响发送
     const archive = () => {
@@ -327,7 +352,7 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, qui
         if (it?.state === 'merged' && it?.taskId) it.commit = mergeCommitOf(repoRoot, it.taskId);
       }
       const cfg = loadWorkflowConfig(repoRoot);
-      const body = buildDigestBody({ items, specs: specProgress(repoRoot), digestDirPath: digestDir(repoRoot) });
+      const body = buildDigestBody({ items, specs: specProgress(repoRoot), digestDirPath: digestDir(repoRoot), autoMerge: cfg.autoApprove ?? null });
       const title = digestTitle(displayProjectName(cfg.projectName ?? ''), aggregateDigest(items));
       const r = await notify({ title, body, dryRun, webhookEnvs: orchWebhookEnvs(repoRoot), repoRoot });
       const delivered = !dryRun && r.delivered.length > 0;
