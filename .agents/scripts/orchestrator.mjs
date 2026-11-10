@@ -45,7 +45,7 @@ import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
-import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, scanRunningCards } from './orchestrator/autoresume.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
 import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
@@ -74,7 +74,7 @@ import { resolveTier, tierEnvPatch, resolveGatewayAdmin, validateTierModel, vali
 import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revokeTaskHarness } from './orchestrator/provision.mjs';
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
-import { parseDurationMinutes, canSailSubmit, hardZoneReason, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
+import { parseDurationMinutes, canSailSubmit, hardZoneReason, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, collectUpstreamRechecks, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -2074,8 +2074,10 @@ function autoResumePass(repoRoot, root, cfg, opts) {
  * 孤儿 running 卡启动自愈（2026-11 长跑自治；归类纯逻辑在 orchestrator/autoresume.mjs
  * 的 classifyOrphan / pickOrphanResumeCandidates）。blocked 通道覆盖不到的形态：sail/drain
  * 单进程被硬杀后卡还挂在 running/——状态「在跑」而实际无进程，等下一个调度入口接管。
- * drain / watch / nightly 入口（获得调度器锁后）调用，任务锁判活分三类处置：
+ * drain / watch / nightly / sail 入口（获得调度器锁后）调用，任务锁判活分三类处置：
  *   ① 锁活（readTaskLock + taskLockLooksLive，同进程嵌套闭环或并行实例在驱动）→ 跳过；
+ *   ①' beat 静默但属主 pid 探活仍活（spawnSync npm ci/ensureWorktree 冻结事件循环的活
+ *      run，P1-a）→ 只落观测（fleet 事件 orphan_heal_beat_silent + log）不动卡；
  *   ② 孤儿 + classifyOrphan='resume'（崩溃族 / 上会话 transient 签名 / retry 链）→
  *      有限自动续：沿用 24h 冷却（cooldownHours）与每次 ≤maxPerRun 张，与 blocked 通道同参；
  *   ③ 孤儿 + 其余（'breaker' 熔断卡永不续 / 'stuck' 非 transient）→ 落 blocked/
@@ -2097,15 +2099,21 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   if (unreadable.length) {
     console.warn(`[orchestrator] 孤儿自愈资格判定：${unreadable.length} 张 running 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
   }
-  // 判活备料：锁活 = 有驱动者（心跳 15s 内新鲜）；无锁/陈锁（心跳静默 60s）= 孤儿
-  const orphans = [];
-  for (const c of candidates) {
-    const lock = readTaskLock(repoRoot, c.id);
-    if (lock && taskLockLooksLive(lock)) continue;
-    orphans.push(c);
+  // 判活备料（P1-a 双条件）：锁活（心跳 15s 内新鲜）= 有驱动者；beat 静默且属主 pid
+  // 已死（或锁缺失/pid 不可探测，回退旧口径）= 孤儿。beat 静默但 pid 仍活——spawnSync
+  // （npm ci / ensureWorktree）冻结事件循环停更心跳 >60s 的活 run——只落观测不动卡：
+  // 此前只看 beat 会把它误判孤儿自动续/落 blocked，双 worker 同 worktree。
+  const { orphans, silentLive } = partitionRunningOrphans(candidates, {
+    lockOf: (id) => readTaskLock(repoRoot, id),
+    pidAlive: (pid) => isAlive(pid),
+  });
+  if (silentLive.length) {
+    log(`👀 孤儿自愈：${silentLive.length} 张 running 卡任务锁心跳静默但属主进程仍存活（pid 探活确认）：${silentLive.join(', ')}——大概率 spawnSync 装依赖冻结事件循环，只观测不动卡（防误杀活 run 致双 worker 同 worktree）。`);
+    // 观测事件落 fleet 不落卡 events.jsonl：属主进程还在写同文件，跨进程双写会撞 seq
+    try { appendFleetEvent(repoRoot, 'orphan_heal_beat_silent', { cards: silentLive }); } catch { /* 留痕失败不阻断 */ }
   }
   if (!orphans.length) return empty;
-  log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失/心跳静默）：${orphans.map((c) => c.id).join(', ')}`);
+  log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
   const picked = pickOrphanResumeCandidates(orphans, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
@@ -4274,8 +4282,8 @@ function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = 
   const what = topic ? `topic ${topic}` : `brief ${brief}`;
   stampResearchStatusIntoDraft(repoRoot, p.id, 'unsafe');
   out.unsafe.push({ id: p.id, topic, brief });
-  log(`  ⛔ 上游管线：${p.id} 调研 ${what} 判 unsafe（决策契约：一票否决，不可用于内部决策）——spec 不升级，已留痕 research_status: unsafe（后续周期不再调研该提案）`);
-  log(`     处置：作废重跑——把${topic ? ` topic 清单（research/topics/${topic}.json）` : ` brief（research/${brief}/）`}归档到 .agents/orchestrator/research-void/ 或修正矛盾后重跑复核；人工清理提案留痕后才会重新调研`);
+  log(`  ⛔ 上游管线：${p.id} 调研 ${what} 判 unsafe（决策契约：一票否决，不可用于内部决策）——spec 不升级，已留痕 research_status: unsafe（留痕在则后续周期不再调研该提案）`);
+  log(`     处置：作废重跑——把${topic ? ` topic 清单（research/topics/${topic}.json）` : ` brief（research/${brief}/）`}归档到 .agents/orchestrator/research-void/ 或修正矛盾后重跑复核；人工清理提案留痕后经复查通道下周期自动重进管线`);
   try {
     appendFleetEvent(repoRoot, 'sail_research_unsafe', { draft: p.id, topic, brief });
   } catch { /* 留痕失败不阻断 */ }
@@ -4287,11 +4295,9 @@ function blockUnsafeResearch(repoRoot, p, out, { topic = null, brief = null } = 
  * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
  * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
  * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
- * sail 规划轮的上游管线（2026-11 Plan A）：新提案里的 feature 卡不直接进队列——先派
- * 调研（缺 brief 的），brief 到手后自动升级 spec 三件套落盘**待人审**；人工审完设计
- * spec build 拆卡才回队列。bugfix/refactor/docs 照旧 sailAutoSubmit。
- * 每周期上限：research 2 次、spec 1 次（workflow.json freeSail.researchPerCycle/
- * specPerCycle 可调）——规划轮烧钱动作封顶，未完成的下一周期重试（提案同 id 覆盖=升级）。
+ * 复查通道（P2-a，2026-11-11）：proposals 除本周期新增外还含调用方按事件留痕重建的
+ * 上周期被闸门拦下的提案（collectUpstreamRechecks）——verdict/unsafe 闸门未改判在此
+ * 零配额跳过，改判才继续走升 spec（消耗当期配额）。
  * researchAutoDim（2026-11-10 P3，缺省 false）：开启时缺调研的 feature 提案先派拆维规划
  * 会话，≥2 维跑 runMultiResearch（多维调研，一个 multi 对 researchPerCycle 仍计 1 个动作）
  * → topic 决策闸门（unsafe 拒绝升级 + 留痕跳过；undetermined 提示后照常）→ spec 按维注入；
@@ -4316,7 +4322,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
     } catch { continue; } // 损坏提案跳过（propose/drafts gc 自有生命周期管它）
     // 成本闸门（P3）：曾判 unsafe 的提案永不重复调研——留痕即裁决，防自治循环反复烧钱
     if (meta.research_status === 'unsafe') {
-      log(`  ⛔ 上游管线：${p.id} 调研曾判 unsafe（提案留痕 research_status: unsafe）——跳过调研与 spec；作废重跑请人工清理留痕`);
+      log(`  ⛔ 上游管线：${p.id} 调研曾判 unsafe（提案留痕 research_status: unsafe）——跳过调研与 spec；作废重跑请人工清理留痕（清留痕后经复查通道下周期自动重进管线）`);
       continue;
     }
     if (listSpecs(repoRoot).includes(p.id)) continue; // 已升级过规格：等人审/build，不重复烧
@@ -4420,7 +4426,7 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
           const contradicted = Array.isArray(verdict?.claims) && verdict.claims.some((c) => c?.status === 'contradicted');
           appendEvent(logDir(repoRoot, 'sail'), 'research_verdict_blocked', { card: p.id, brief: consumedBriefId, usage, contradicted });
           out.blocked.push({ id: p.id, brief: consumedBriefId, usage });
-          log(`  ⛔ 上游管线：${p.id} 暂不升 spec——brief ${consumedBriefId} 判定不可自动放行（usage=${usage}${contradicted ? '，claim contradicted 一票否决' : ''}）。本周期跳过不重试，下周期复查 verdict 是否改判（research verify）。`);
+          log(`  ⛔ 上游管线：${p.id} 暂不升 spec——brief ${consumedBriefId} 判定不可自动放行（usage=${usage}${contradicted ? '，claim contradicted 一票否决' : ''}）。本周期跳过不重试，已记复查名单——下周期规划轮重进管线复查 verdict（人工 research verify ${consumedBriefId} 改判后自动放行；未改判零配额跳过）。`);
           continue;
         }
       }
@@ -5007,6 +5013,11 @@ async function cmdSail(repoRoot, opts) {
         // 派发轮：一次只派一张——每张之间重新看表（截止/风暴/降级/stop 文件）
         cycle.kind = 'dispatch';
         log(`\n──── sail 周期 ${cycleNo} → drain --max 1（已派 ${voyage.dispatchedTotal}${maxTasks === Infinity ? '' : `/${maxTasks}`}，剩余 ${remainingMin()} 分钟）────`);
+        // 孤儿自愈补位（P2-c）：sail 持调度器锁全程、drain 子进程继承锁走 ORCH_SCHED_LOCK_HELD
+        // 豁免——整段航程的 running/ 只有本进程能扫，不补位则航内孤儿要等收帆。每次派发轮
+        // 进入前过一遍（与 dispatch 轮同节奏）；风暴滞留/配置守卫期不派发也就不扫（同闸）。
+        // autoResume 关闭/drift 降级由 orphanHealPass 自守卫跳过。
+        orphanHealPass(repoRoot, root, cfg, opts);
         const r = spawnSync('node', [orch, 'drain', '--max', '1', ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
           cwd: repoRoot,
           stdio: 'inherit',
@@ -5033,9 +5044,17 @@ async function cmdSail(repoRoot, opts) {
         const draftsAfter = snapshotDrafts(repoRoot);
         const known = new Set(draftsBefore.map((d) => d.id));
         cycle.proposals = draftsAfter.filter((d) => !known.has(d.id));
+        // 复查通道（P2-a）：上周期被上游管线闸门拦下（verdict blocked / unsafe 留痕）的
+        // 提案显式重喂管线复查——known 过滤只认本周期新增提案，blocked[] 承诺的「下周期
+        // 复查」此前无实路（提案挂 14 天被 drafts gc 清退）。名单从事件留痕重建（sail
+        // 重启也不丢）；复查提案殿后（新提案优先），与新增提案共享当期 research/spec
+        // 配额——未改判在闸门处零配额跳过，改判才继续走升 spec。
+        const recheckIds = new Set(collectUpstreamRechecks(repoRoot, draftsAfter));
+        const rechecks = draftsAfter.filter((d) => recheckIds.has(d.id) && !cycle.proposals.some((p) => p.id === d.id));
+        cycle.rechecks = rechecks.map((d) => d.id);
         // 上游管线（2026-11 Plan A）：feature 提案 → 派调研 → spec 落盘待人审；不进队列
         //（bugfix/refactor/docs 照旧 sailAutoSubmit；feature 的提交拒绝理由见 canSailSubmit）
-        cycle.upstream = await sailUpstreamPipeline(repoRoot, cfg, cycle.proposals, opts.backend ?? cfg.worker?.backend);
+        cycle.upstream = await sailUpstreamPipeline(repoRoot, cfg, [...cycle.proposals, ...rechecks], opts.backend ?? cfg.worker?.backend);
         const sub = sailAutoSubmit(repoRoot, root, cfg, cycle.proposals.map((p) => p.id));
         cycle.submitted = sub.submitted;
         cycle.skipped = sub.skipped;

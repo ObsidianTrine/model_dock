@@ -313,6 +313,73 @@ describe('supply > 实测油量（harness-usage）', () => {
       }
     }
   }, 10_000)
+
+  it('poller 单轮异常不炸（P2 双保险）：onExpiryWarning 同步抛错 → IIFE catch 收口，下一轮照常轮询记账', async () => {
+    const T0 = 1_700_000_000_000
+    const MIN = 60_000
+    const b = new Budget({ meta: { budget: { max_tokens: 100_000, max_wall_minutes: 10 } } })
+    // usage 闭包实时读 state.usage（startMockGateway 应答时取值）：跨轮改值可观测「后续
+    // 轮次记账继续」——poller 若被单轮异常带走，measuredBillable 永远停在首采样。
+    // nowFn 走可变量：watcher 首采锚定 TTL，now 前进越过阈值才会告警（与既有用例同技巧）
+    const state: { usage?: unknown } = {
+      usage: { worker: { ephemeral: true, expires_at: new Date(T0 + 10 * MIN).toISOString(), day_billable_tokens: 1 } },
+    }
+    const gw = await startMockGateway(state as never)
+    const envKeys = ['ORCH_GATEWAY_BASE', 'ORCH_GATEWAY_ADMIN_TOKEN']
+    const savedEnv: Record<string, string | undefined> = {}
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k]
+      process.env[k] = k === 'ORCH_GATEWAY_BASE' ? `http://127.0.0.1:${gw.port}` : 'admin-test'
+    }
+    let now = T0
+    let warnCount = 0
+    try {
+      const p = startMeasuredFuelPoller({
+        budget: b,
+        cfg: { gatewayAdmin: true },
+        harness: 'worker',
+        intervalMs: 25,
+        nowFn: () => now,
+        onExpiryWarning: () => {
+          warnCount += 1
+          throw new Error('EBUSY: 同步段注入抛错') // 旧行为 = unhandledRejection 带崩 run 进程
+        },
+      })
+      expect(p.active).toBe(true)
+      await new Promise((r) => setTimeout(r, 150)) // 首采锚定（baseline=1，TTL=10min 未临期）
+      expect(b.measuredBaseline).toBe(1)
+      now = T0 + 8.5 * MIN // 剩余 1.5min < 阈值 2min → 本轮告警即同步抛错
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if (warnCount >= 1) return resolve()
+          if (Date.now() > deadline) return reject(new Error('告警未出现'))
+          setTimeout(tick, 25)
+        }
+        tick()
+      })
+      // 记账主链路在异常轮之后继续：usage 涨到 5_000，增量应被下一轮采到
+      state.usage = { worker: { ephemeral: true, expires_at: new Date(T0 + 10 * MIN).toISOString(), day_billable_tokens: 5_000 } }
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if ((b.measuredBillable ?? 0) >= 4_999) return resolve()
+          if (Date.now() > deadline) return reject(new Error('后续轮次未继续记账——poller 被单轮异常带崩'))
+          setTimeout(tick, 25)
+        }
+        tick()
+      })
+      p.stop()
+      expect(b.measuredBaseline).toBe(1)
+      expect(b.measuredBillable).toBe(4_999)
+    } finally {
+      gw.close()
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k]
+        else process.env[k] = savedEnv[k]
+      }
+    }
+  }, 15_000)
 })
 
 describe('supply > 一次性凭据临期预警（harness_expiry_warning）', () => {
@@ -542,6 +609,27 @@ describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemera
     } finally {
       gw.close()
       fs.rmSync(qdir, { recursive: true, force: true })
+    }
+  })
+
+  it('同步段兜错（P2）：appendEvent 同步抛错（Windows EBUSY 形态）→ 回调整体 try/catch 兜住，Promise 正常 resolve、零请求零事件', async () => {
+    const gw = await startRenewMock(() => [200, { ok: true, id: 'x', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 }])
+    try {
+      const renew = createExpiryRenewal({
+        ga: GA(gw.port),
+        ttlMinutes: 240,
+        liveHarnessId: () => 'orch-t',
+        terminalState: () => false,
+        appendEvent: () => { throw new Error('EBUSY: resource busy or locked') },
+        log: () => {},
+      })
+      // 同步段抛出此前会变成 poller fire-and-forget 的 unhandledRejection 带崩 run 进程
+      await expect(
+        renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 }),
+      ).resolves.toBeUndefined()
+      expect(gw.requests).toHaveLength(0) // 预警事件都没落成：续期请求不该发出
+    } finally {
+      gw.close()
     }
   })
 

@@ -17,6 +17,8 @@ import { hintsOverlap } from '../policy.mjs';
 import { readGoals } from './goals.mjs';
 import { buildTaskRoster } from './notify.mjs';
 import { fmtUsd } from './cost.mjs';
+import { logDir, readEvents } from './events.mjs';
+import { readFleetEvents } from './weather.mjs';
 
 /** 自由航行 stop 文件名（.agents/orchestrator/ 下，与 .watch-stop 同款语义）。 */
 export const SAIL_STOP_FILE = '.sail-stop';
@@ -169,6 +171,27 @@ export function diffQueueStates(before, after) {
   return { changed, added };
 }
 
+/**
+ * 上游管线复查名单（P2-a，纯读盘）：从 sail 事件（research_verdict_blocked）与 fleet
+ * 事件（sail_research_unsafe）收集被闸门拦下的提案 id，与现存 drafts/ 提案求交集。
+ * 两种拦截都只落事件不落提案卡，规划轮的 known 过滤又只认本周期新增提案——不重建名单
+ * 则 blocked 提案永远饿死（挂 14 天被 drafts gc 清退），跨航次（nightly 每晚重开 sail）
+ * 也只有事件留痕可循。事件文件读不到按空名单处理（fail-open）；已出 drafts/ 的 id
+ * （gc/提交/迁移）自然出局。
+ */
+export function collectUpstreamRechecks(repoRoot, drafts) {
+  const draftIds = new Set((Array.isArray(drafts) ? drafts : []).map((d) => d.id));
+  if (!draftIds.size) return [];
+  const ids = new Set();
+  for (const e of readEvents(logDir(repoRoot, 'sail'))) {
+    if (e?.type === 'research_verdict_blocked' && typeof e.card === 'string') ids.add(e.card);
+  }
+  for (const e of readFleetEvents(repoRoot)) {
+    if (e?.type === 'sail_research_unsafe' && typeof e.draft === 'string') ids.add(e.draft);
+  }
+  return [...ids].filter((id) => draftIds.has(id)).sort();
+}
+
 /** 单卡信息（报告用）：优先用周期内提案快照，否则从队列现存卡文件现读。返回 { state?, type, goal } 或 null。 */
 export function cardReportInfo(root, id, lookup) {
   const hit = lookup?.[id];
@@ -310,16 +333,25 @@ export function buildSailReport(voyage) {
       lines.push(`- 周期 ${c.n}：派发执行 → ${names}${c.drainExit != null && c.drainExit !== 0 ? `（drain 退出码 ${c.drainExit}）` : ''}`);
     } else if (c.kind === 'plan') {
       if (!c.proposals?.length) {
-        lines.push(`- 周期 ${c.n}：巡检+规划：无新提案（信号已处理过 / planner 判定无值得做的）——休眠 ${c.sleepMin ?? 0} 分钟后再看海况${idleBackoffNote(c)}。`);
-        continue;
-      }
-      lines.push(`- 周期 ${c.n}：巡检+规划，产出 ${c.proposals.length} 张提案：`);
-      for (const p of c.proposals) {
-        if (c.submitted?.includes(p.id)) lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 已提交（gate=L1，进队列待派发）`);
-        else lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 未提交（${c.skipped?.find((s) => s.id === p.id)?.reason ?? '未提交'}）`);
+        if (!c.rechecks?.length) {
+          lines.push(`- 周期 ${c.n}：巡检+规划：无新提案（信号已处理过 / planner 判定无值得做的）——休眠 ${c.sleepMin ?? 0} 分钟后再看海况${idleBackoffNote(c)}。`);
+          continue;
+        }
+        // 复查通道周期（P2-a）：无新提案但上周期被闸门拦下的提案重进了管线——去向照实入报告
+        lines.push(`- 周期 ${c.n}：巡检+规划：无新提案，复查通道重进管线 ${c.rechecks.length} 张（${c.rechecks.join(', ')}）：`);
+      } else {
+        lines.push(`- 周期 ${c.n}：巡检+规划，产出 ${c.proposals.length} 张提案：`);
+        for (const p of c.proposals) {
+          if (c.submitted?.includes(p.id)) lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 已提交（gate=L1，进队列待派发）`);
+          else lines.push(`  - ${p.id}（${p.type}/${p.priority}，by ${p.createdBy}）「${p.goal}」→ 未提交（${c.skipped?.find((s) => s.id === p.id)?.reason ?? '未提交'}）`);
+        }
       }
       // 上游管线（2026-11 Plan A）：feature 提案的去向——调研/spec/失败原因如实入报告；
       // specAutoBuild 预授权档开启时 spec 落盘即自动拆卡（gate=L1），报告行如实区分
+      // 复查通道（P2-a）：上周期被闸门拦下的提案本周期重进管线，先行留痕
+      for (const id of c.rechecks ?? []) {
+        lines.push(`  - ♻ 复查通道：上周期被上游管线闸门拦下的提案 ${id} 本周期重进管线复查 verdict（未改判零配额跳过，改判走升 spec）`);
+      }
       const autoBuilt = new Set(c.upstream?.built ?? []);
       for (const id of c.upstream?.researched ?? []) {
         const v = c.upstream?.verdicts?.find((x) => x.id === id)?.level;
@@ -337,7 +369,7 @@ export function buildSailReport(voyage) {
         lines.push(`  - ⛔ 上游管线：${u.id}——调研 ${u.topic ? `topic ${u.topic}` : `brief ${u.brief}`} 判 unsafe（决策契约一票否决），spec 不升级，已留痕跳过（后续周期不再调研）`);
       }
       for (const f of c.upstream?.failed ?? []) lines.push(`  - ⚠ 上游管线：${f.id}——${f.reason}`);
-      for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，复核改判后下周期复查自动放行`);
+      for (const b of c.upstream?.blocked ?? []) lines.push(`  - ⛔ 上游管线：spec ${b.id} 被调研可信度闸门阻断（brief ${b.brief} usage=${b.usage}）——本周期跳过不重试，已记复查名单下周期重进管线复查 verdict（人工 research verify 改判后自动放行）`);
     } else if (c.kind === 'idle') {
       lines.push(`- 周期 ${c.n}：队列空、无新提案——休眠 ${c.sleepMin ?? 0} 分钟${idleBackoffNote(c)}。`);
     }

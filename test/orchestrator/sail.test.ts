@@ -15,10 +15,11 @@ import {
   diffQueueStates,
   buildSailReport,
   sailIdleSleepMin,
+  collectUpstreamRechecks,
   SAIL_IDLE_BACKOFF_CAP_MIN,
   DEFAULT_SAIL_SUBMIT_TYPES,
 } from '../../.agents/scripts/orchestrator/sail.mjs'
-import { queueRoot, listCards } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { queueRoot, listCards, ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { fleetLogPath } from '../../.agents/scripts/orchestrator/weather.mjs'
 import { cardText, mkRepo, readCard, runOrch, tryOrch } from './helpers.js'
 
@@ -270,6 +271,108 @@ describe('orchestrator sail > 空队退避（idle backoff）', () => {
       repo.cleanup()
     }
   }, 200_000)
+})
+
+describe('orchestrator sail > 上游管线复查通道与派发轮孤儿自愈（P2-a / P2-c）', () => {
+  it('collectUpstreamRechecks 纯函数：sail verdict 阻断 + fleet unsafe 留痕 ∩ 现存 drafts；已出 drafts 的 id 出局；事件文件缺失 fail-open 空名单', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sail-recheck-'))
+    try {
+      const sailLog = path.join(repo, '.agents', 'orchestrator', 'logs', 'sail')
+      fs.mkdirSync(sailLog, { recursive: true })
+      fs.writeFileSync(
+        path.join(sailLog, 'events.jsonl'),
+        [
+          JSON.stringify({ ts: 'x', seq: 1, type: 'research_verdict_blocked', card: 'd1', brief: 'b1', usage: 'unsafe' }),
+          JSON.stringify({ ts: 'x', seq: 2, type: 'research_verdict_blocked', card: 'gone', brief: 'b2', usage: 'unsafe' }),
+          JSON.stringify({ ts: 'x', seq: 3, type: 'sail_started', minutes: 5 }),
+        ].join('\n') + '\n',
+      )
+      fs.writeFileSync(
+        path.join(repo, '.agents', 'orchestrator', 'logs', 'fleet.jsonl'),
+        JSON.stringify({ ts: 'x', seq: 1, type: 'sail_research_unsafe', draft: 'd2', topic: 't1', brief: null }) + '\n',
+      )
+      const drafts = [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }]
+      expect(collectUpstreamRechecks(repo, drafts)).toEqual(['d1', 'd2']) // gone 已出 drafts 自然出局；d3 无留痕不进
+      expect(collectUpstreamRechecks(repo, [])).toEqual([])
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true })
+    }
+    // 无任何事件文件的裸目录：空名单不抛（fail-open）
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'sail-recheck-bare-'))
+    try {
+      expect(collectUpstreamRechecks(bare, [{ id: 'x' }])).toEqual([])
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
+  it('复查通道（P2-a）：verdict 改判后下周期重进管线——spec 落盘；名单跨 sail 重启不丢（事件留痕重建）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      // 人工 research verify 改判：verdict.json 覆写为 ok（真实链路 = research verify 落盘）
+      fs.writeFileSync(path.join(repo.root, '.agents', 'orchestrator', 'research', 'mock-planner', 'verdict.json'), JSON.stringify(verdictFixture('ok'), null, 2))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      // 改判 → 复查通道把上周期 blocked 提案重喂管线 → spec 落盘待人审
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('复查通道')
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('复查通道（P2-a）：未改判 → 重进管线再跳过，零配额消耗（不重调研、不落 spec）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      const eventsFile = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl')
+      const count1 = (fs.readFileSync(eventsFile, 'utf8').match(/research_verdict_blocked/g) ?? []).length
+      expect(count1).toBeGreaterThanOrEqual(1)
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      // 复查轮重进管线再阻断一次（重进实证）；verdict 未改判就永远到不了 spec
+      const count2 = (fs.readFileSync(eventsFile, 'utf8').match(/research_verdict_blocked/g) ?? []).length
+      expect(count2).toBeGreaterThan(count1)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      // 不烧调研配额：research/ 下仍只有预置的 mock-planner 一个 brief 目录
+      const dirs = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'research'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+      expect(dirs).toEqual(['mock-planner'])
+    } finally {
+      repo.cleanup()
+    }
+  }, 200_000)
+
+  it('派发轮前孤儿自愈补位（P2-c）：sail 持锁全程由本进程扫 running/，孤儿卡自动续、pending 卡照常派发', () => {
+    const repo = mkRepo()
+    try {
+      // 孤儿 running 卡（无任务锁 = 属主已退；429 签名收尾 → 可自动续）
+      const qroot = queueRoot(repo.root)
+      ensureQueue(qroot)
+      fs.mkdirSync(path.join(qroot, 'running'), { recursive: true })
+      fs.writeFileSync(path.join(qroot, 'running', 'sail-orph.md'), cardText({ id: 'sail-orph' }))
+      const orphLog = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail-orph')
+      fs.mkdirSync(orphLog, { recursive: true })
+      fs.writeFileSync(
+        path.join(orphLog, 'events.jsonl'),
+        [
+          JSON.stringify({ ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 100 }),
+          JSON.stringify({ ts: '2026-11-01T01:10:00.000+08:00', seq: 2, type: 'blocked', reason: 'HTTP 429 too many requests' }),
+          JSON.stringify({ ts: '2026-11-01T02:00:00.000+08:00', seq: 3, type: 'worker_spawned', backend: 'mock', pid: 101 }),
+        ].join('\n') + '\n',
+      )
+      submitCard(repo.root, 'sail-pre')
+      const out = runOrch(repo.root, 'sail --minutes 5 --interval 0 --max-tasks 1 --backend mock')
+      expect(out.stdout).toContain('孤儿自愈')
+      expect(readCard(repo.root, 'awaiting-human', 'sail-orph')).toBeTruthy()
+      // 孤儿自愈不占派发名额：pending 的存量卡同周期照常派发
+      expect(readCard(repo.root, 'awaiting-human', 'sail-pre')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
 })
 
 describe('orchestrator sail > 停止条件与留痕', () => {
