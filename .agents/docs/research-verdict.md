@@ -14,6 +14,7 @@
 | `scores.evidence` | int\|null | L1 数字回查核实率（%）。null=无快照或无可回查 token（**不可核 ≠ 0 分**） |
 | `scores.coherence` | int\|null | L2 claim 状态聚合（supported=1/partial=0.5/unsupported·contradicted=0；unverifiable 不计） |
 | `scores.coverage` | int\|null | 已核承重结论 / 总承重结论（%）。unverifiable 拖它不拖 coherence |
+| `scores.strong_support` | int\|null | 完全支撑率（%）：supported 数 / 已核承重结论数；checked 空 → null。**仅观测指标——不进 overall 加权、不出现在任何 usage 规则**（coherence 无法区分「全支撑」与「一半撑」，此字段补该盲区） |
 | `scores.citation` | int\|null | L0 引用面（当日引用率/深链比/快照成功率 等权） |
 | `scores.overall` | int\|null | 加权（0.4/0.35/0.15/0.10，缺维重归一）。**任一决策关键维 null → null**。仅用于排序与 L3 台账 |
 | `claims[]` | array | L2 逐条判定：`claim`（逐字摘自 brief，行内 [n] 引用标注豁免；轻度转述放行的条目带 `verbatim: "fuzzy"`，见下节）+ `status` + `note` + `by`（l1=确定性回查 / l2=复核会话）。note 自认无快照/无直据的 supported 自动降级 unsupported（带 `downgraded: true` 留痕）；逐字校验未通过的降级保留条目带 `non_verbatim: true`（见下节） |
@@ -49,6 +50,12 @@ L2 复核船无联网、只拿快照裁断；快照自身误导（页面 publish
 - 仲裁会话 2 连败 → fail-closed 维持原否决（取证失败 ≠ 放行）。
 
 **消费方语义不变**：仍只读 `usage.internal_decision`——仲裁只是让 unsafe 的成立需要经过外部证据检验，`overturned/undetermined` 的 unsafe 与从前完全同义。
+
+## 判定语义边界（2026-11-10）
+
+- **L2 判定的是忠实性（faithfulness），不是事实性（factuality）**：每条 claim 核对的是「结论是否被其所引快照支撑」，快照内容本身是否为真不在 L2 范围内。
+- **事实性仅由仲裁轮覆盖**：只对判出 contradicted 的 claim 做外部取证翻案（upheld 才维持否决）；其余未判矛盾的内容不经事实性检验。
+- **对外引用口径 = `external_doc: ok` + 人工过目 + 关键结论跨源交叉**——三者缺一不可；`strong_support` 高不构成对外发布依据（它同样只测忠实性）。
 
 ## 逐字校验宽容面与降级（2026-11-10）
 
