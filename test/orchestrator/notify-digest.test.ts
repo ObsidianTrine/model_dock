@@ -441,7 +441,7 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       fs.writeFileSync(path.join(specDir, 'progress.json'), JSON.stringify({ id: 'spec-a', tasks: [{ n: 1, status: 'merged' }, { n: 2, status: 'awaiting-human' }] }))
       const r = await flushDigest(d.root, { dryRun: true })
       expect(r.sent).toBe(false) // dryRun 不算实发
-      expect(r.title).toBe('【编排】✅1') // tmp 无 workflow.json → 项目名回落「编排」
+      expect(r.title).toMatch(/^【.+】✅1$/) // 项目名回落 tmp 目录名派生（displayProjectName），计数摘要 ✅1
       expect(r.body.split('\n')).toEqual([
         '✅ t1 合并', // 卡事件流不存在 → 无 commit 括号
         '📋 规格 spec-a：1/2 ✅',
@@ -449,9 +449,9 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       ])
       expect(r.body).not.toContain('进入队列')
       expect(fs.existsSync(digestPendingPath(d.root))).toBe(false) // 认领语义：先清队列再发
-      const last = JSON.parse(fs.readFileSync(digestLastPath(d.root), 'utf8'))
-      expect(last).toHaveLength(2) // 本批完整 JSON：两条原始事件全在
-      expect(last.map((x: { state?: string }) => x.state)).toEqual(['pending', 'merged'])
+      const lastLines = fs.readFileSync(digestLastPath(d.root), 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+      expect(lastLines).toHaveLength(2) // 本批完整 JSON（JSONL 逐行一条）：两条原始事件全在
+      expect(lastLines.map((x: { state?: string }) => x.state)).toEqual(['pending', 'merged'])
     } finally {
       d.cleanup()
     }
@@ -483,8 +483,11 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       const r = await flushDigest(d.root, { force: true })
       expect(r.sent).toBe(true)
       expect(hook.posts).toHaveLength(1)
-      expect(hook.posts[0].title).toBe('【编排】✅1')
-      expect(hook.posts[0].body).toBe('✅ t1 合并')
+      expect(hook.posts[0].title).toMatch(/^【.+】✅1$/) // 项目名回落 tmp 目录名派生
+      expect(hook.posts[0].body.split('\n')).toEqual([
+        '✅ t1 合并',
+        `📄 详情：${path.join(d.root, '.agents', 'orchestrator', 'notify-digest')}/last.txt`,
+      ])
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
@@ -513,7 +516,11 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
   it('round4：无通道投递失败——事件写回 pending（不丢）+ reason=no-channel；通道恢复后重发不双发', async () => {
     const d = tmpDir()
     const prev = process.env.AGENTS_ORCH_WEBHOOK
+    const prevPath = process.env.PATH
     delete process.env.AGENTS_ORCH_WEBHOOK
+    // 无通道前提要在本机成立：PATH 清空让钥匙串兜底（security）与 macOS osascript 通道
+    // 双双 ENOENT——否则登录会话里 osascript 投递成功，delivered 非空（2026-11-10 本机实测踩中）
+    process.env.PATH = ''
     try {
       queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal' })
       const r1 = await flushDigest(d.root, { force: true })
@@ -524,6 +531,7 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       const hook = await startWebhook()
       try {
         process.env.AGENTS_ORCH_WEBHOOK = hook.url
+        process.env.PATH = prevPath
         const r2 = await flushDigest(d.root, { force: true })
         expect(r2.sent).toBe(true)
         expect(hook.posts).toHaveLength(1) // 同批事件只发一次
@@ -534,6 +542,8 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
+      if (prevPath === undefined) delete process.env.PATH
+      else process.env.PATH = prevPath
       d.cleanup()
     }
   })
