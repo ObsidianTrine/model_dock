@@ -125,6 +125,10 @@
   },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",
   "notify": {
-    "keychainService": "modeldock-orch-feishu-webhook"
+    "keychainService": "modeldock-orch-feishu-webhook",
+    "digest": {
+      "enabled": true,
+      "quietWindowSec": 60
+    }
   }
 }
