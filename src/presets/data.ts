@@ -168,6 +168,10 @@ const BUILTIN_PRESETS: ProviderPreset[] = [
       m('glm-5.3', 1048576, 131072, TOOLS_REASON, { zh: 'GLM-5.3（旗舰）', en: 'GLM-5.3 (flagship)' }),
       m('glm-5.3-flash', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-Flash'),
       m('glm-5.3-flashx', 1048576, 131072, TOOLS_VISION, 'GLM-5.3-FlashX'),
+      // 2026-11-10 起服役于编排勘察档（scan 智能过滤 / watchdog 判定，workflow.json）——
+      // 上代轻量款，能力元数据取保守默认（无视觉声明）；128K 上下文 / 16K 输出（原 known.ts
+      // curated 值，DUP-10 收口：EXTRA 移除、数字以 preset 为准）。
+      m('glm-4.5-air', 131072, 16384, TOOLS_REASON, 'GLM-4.5-Air'),
     ],
   },
   {
