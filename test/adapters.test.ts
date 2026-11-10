@@ -2982,7 +2982,9 @@ describe('refreshBakedModelClients：共用配置文件的客户端去重', () =
       const beforeCode = (await listSnapshots('mimo-code')).length
       const beforeDesk = (await listSnapshots('mimo-desktop')).length
 
-      await switchToService('pb')
+      // 切换全局用直改 active_profile 表达（不经 switchToService——内聚重烤后它会先跑
+      // 一轮 refresh，把「单轮去重」场景混成两轮；漏斗行为由 ops-switch-rebake.test.ts 锁）
+      await saveConfig({ ...(await loadConfig()), active_profile: 'proB' })
       const r = await refreshBakedModelClients()
       expect(r.refreshed).toEqual(['mimo-code', 'mimo-desktop']) // 两个身份都视为已刷新
       expect(r.warnings).toEqual([])
