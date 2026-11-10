@@ -312,11 +312,12 @@ describe('policy-dispatch push 闸 > 判定矩阵（子进程实测）', () => {
       // 删除通配（:refs/heads/*）与显式 dst 通配同样 defer
       expect(runDispatch(bashEvent(repo.root, `git push origin ':refs/heads/*'`)).status).toBe(2)
       expect(runDispatch(bashEvent(repo.root, `git push origin HEAD:'refs/heads/*'`)).status).toBe(2)
-      // --mirror / --all → broad 按保护处理：无结论 → 三选一拦截
+      // --mirror / --all → round4 P1：broad 一律 defer（借工件/旁路放行 tag/Release 面）→ 既有 publish 拦截原文案
       for (const flag of ['--mirror', '--all']) {
         const r = runDispatch(bashEvent(repo.root, `git push origin ${flag}`))
         expect(r.status).toBe(2)
-        expect(r.stderr).toContain('三选一')
+        expect(r.stderr).toContain('发布动作人工授权制')
+        expect(r.stderr).not.toContain('三选一')
       }
     } finally {
       repo.cleanup()
@@ -439,19 +440,20 @@ describe('policy-dispatch push 闸 > 判定矩阵（子进程实测）', () => {
     }
   })
 
-  it('round2 P2：--follow-tags 借道推可达 tag——与 --tags 同待遇按保护拦，有结论才放行', () => {
+  it('round4 P1：--follow-tags 一律 defer——工件/旁路均不借道（实推面含可达 tag 不可枚举）', () => {
     const repo = mkRepo()
     try {
       git(repo.root, 'branch feature/with-tags')
-      // 非保护分支 + --follow-tags：可顺带推可达 annotated tag（含 v* 触发 Release）→ 按保护拦（三选一）
+      // 非保护分支 + --follow-tags：defer → 既有 publish 拦截原文案
       const r = runDispatch(bashEvent(repo.root, 'git push --follow-tags origin feature/with-tags'))
       expect(r.status).toBe(2)
-      expect(r.stderr).toContain('三选一')
+      expect(r.stderr).toContain('发布动作人工授权制')
+      expect(r.stderr).not.toContain('三选一')
       // 保护分支 + --follow-tags：无结论同拦
       expect(runDispatch(bashEvent(repo.root, 'git push --follow-tags origin develop')).status).toBe(2)
-      // 有效结论 → 放行（与 --tags 口径一致：结论担保 HEAD，可达 tag 随行）
+      // round4：有效结论也不再放行（结论只担保 HEAD，可达 tag/Release 面不可枚举）
       writeArtifact(repo.root)
-      expect(runDispatch(bashEvent(repo.root, 'git push --follow-tags origin feature/with-tags')).status).toBe(0)
+      expect(runDispatch(bashEvent(repo.root, 'git push --follow-tags origin feature/with-tags')).status).toBe(2)
     } finally {
       repo.cleanup()
     }
@@ -791,5 +793,33 @@ describe('push-gate 纯函数矩阵', () => {
     } finally {
       for (const d of dirs) fs.rmSync(d, { recursive: true, force: true })
     }
+  })
+})
+
+
+describe('push-gate round4 findings 回归', () => {
+  const head = fakeHead('develop')
+  it('P1 broad flags：工件+旁路双要件也不借道（一律 defer）', () => {
+    for (const cmd of ['git push origin --tags', 'git push --mirror', 'git push origin --all', 'git push origin --follow-tags feature/x', 'git push origin --branches']) {
+      const r = gate.evaluatePushGate({ cmd, cwd: '/r', env: { AGENTS_ALLOW_PUSH: '1' }, policy, runGit: head, runGitOk: fakeOkFor('refs/heads/develop') })
+      expect(r.decision, cmd).toBe('defer')
+      expect(String(r.detail), cmd).toContain('不可枚举')
+    }
+  })
+
+  it('P1 env 赋值前缀改锚 defer；旁路赋值不误伤', () => {
+    expect(gate.evaluatePushGate({ cmd: 'GIT_DIR=/other/.git git push origin develop', cwd: '/r', policy, runGit: head, runGitOk: fakeOkFor('refs/heads/develop') }).decision).toBe('defer')
+    expect(gate.evaluatePushGate({ cmd: 'AGENTS_ALLOW_PUSH=1 GIT_DIR=/x git push origin develop', cwd: '/r', policy, runGit: head, runGitOk: fakeOkFor('refs/heads/develop') }).decision).toBe('defer')
+    const bypass = gate.evaluatePushGate({ cmd: 'AGENTS_ALLOW_PUSH=1 git push origin develop', cwd: '/r', policy, runGit: head, runGitOk: fakeOkFor('refs/heads/develop') })
+    expect(bypass.decision).toBe('allow-bypass')
+  })
+
+  it('P2 dst 裸名 tag 消歧', () => {
+    // HEAD:v1.2.3 本地无同名分支 → defer（不再当分支放行）
+    expect(gate.evaluatePushGate({ cmd: 'git push origin HEAD:v1.2.3', cwd: '/r', policy, runGit: head, runGitOk: () => false }).decision).toBe('defer')
+    // HEAD:feature/x 本地存在该分支 → pass-unprotected（不回归）
+    expect(gate.evaluatePushGate({ cmd: 'git push origin HEAD:feature/x', cwd: '/r', policy, runGit: head, runGitOk: fakeOkFor('refs/heads/feature/x') }).decision).toBe('pass-unprotected')
+    // 删除形态 :v1.2.3 本地存在同名 tag → defer
+    expect(gate.evaluatePushGate({ cmd: 'git push origin :v1.2.3', cwd: '/r', policy, runGit: head, runGitOk: fakeOkFor('refs/tags/v1.2.3') }).decision).toBe('defer')
   })
 })

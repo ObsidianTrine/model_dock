@@ -5296,6 +5296,7 @@ async function cmdNotifyDigest(repoRoot, opts) {
   }
   const r = await flushDigest(repoRoot, { force: true });
   if (r.sent) log(`digest 已发送：${(r.delivered ?? []).join('、') || '无通道（webhook 未配置）'}`);
+  else if (r.reason === 'no-channel') log(`digest 投递未完成（${r.count ?? 0} 条事件已保留待下次冲刷）：无可用通知通道（webhook 未配置或投递失败）。`);
   else log(`digest 无待发事件（${r.reason ?? 'empty'}）——不发空消息。`);
 }
 
