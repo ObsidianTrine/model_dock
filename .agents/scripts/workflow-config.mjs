@@ -136,7 +136,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify', 'research', 'freeSail',
+  'dynamicDispatch', 'notify', 'research', 'freeSail', 'autoApprove',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
@@ -228,6 +228,10 @@ export function loadWorkflowConfig(repoRoot) {
     // freeSail 自由航行配置（注意：此前无 resolve 条目，workflow.json 里的 freeSail 键
     // 被规整丢弃——canSailSubmit 的白名单收窄从未生效过，2026-11-08 L1 排查时发现）
     freeSail: resolveFreeSail(raw.freeSail),
+    // 分层审核超时委托（D6.5，2026-11-10）：L2/L3 卡 awaiting-human 后人工 3 分钟内拍板，
+    // 超时由 autoapprove sweep 按最后一条 review_verdict 的推荐自动 merge/retry
+    //（fail-closed：无审查结论绝不动作；blockers>0 只自动返工限次）。缺省开。
+    autoApprove: resolveAutoApprove(raw.autoApprove),
   };
 }
 
@@ -573,6 +577,39 @@ function resolveAutoResume(raw) {
   if (raw.cooldownHours !== undefined) {
     if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
     else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/**
+ * 分层审核超时委托配置（D6.5，2026-11-10）：{ enabled: boolean, timeoutMinutes: 正整数,
+ * maxAutoRetry: 非负整数 }，缺省 true / 3 / 1——L2/L3 卡落 awaiting-human 后人工缺省
+ * 有 3 分钟拍板窗口，超时由 autoapprove sweep 按最后一条 review_verdict 的推荐执行
+ * （merge / 限次 retry）。fail-closed 底线：没有审查结论的卡超时也绝不动作；blockers>0
+ * 只自动返工且每卡最多 maxAutoRetry 次，超限留人。enabled 显式 false = 整个功能关闭
+ * （行为与历史一致）。非法值回落缺省并 console.warn（与 resolveAutoResume 同风格）。
+ */
+function resolveAutoApprove(raw) {
+  const DEFAULTS = { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] autoApprove 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoApprove 键：{ enabled?: boolean, timeoutMinutes?: 正整数, maxAutoRetry?: 非负整数 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, timeoutMinutes?, maxAutoRetry? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  if (raw.timeoutMinutes !== undefined) {
+    if (Number.isInteger(raw.timeoutMinutes) && raw.timeoutMinutes > 0) out.timeoutMinutes = raw.timeoutMinutes;
+    else warn(`timeoutMinutes ${JSON.stringify(raw.timeoutMinutes)} 不合法（须为正整数）——回落缺省 3`);
+  }
+  if (raw.maxAutoRetry !== undefined) {
+    if (Number.isInteger(raw.maxAutoRetry) && raw.maxAutoRetry >= 0) out.maxAutoRetry = raw.maxAutoRetry;
+    else warn(`maxAutoRetry ${JSON.stringify(raw.maxAutoRetry)} 不合法（须为非负整数）——回落缺省 1`);
   }
   return out;
 }

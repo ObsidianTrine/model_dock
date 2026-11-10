@@ -35,7 +35,16 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBac
   // pickNextCard 下轮再选中它 → 死循环（实测踩中）。
   fs.mkdirSync(path.join(root, '.agents', 'workflows'), { recursive: true })
   fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
-  const workflow: Record<string, unknown> = { baseBranch, testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"', ...opts?.extra }
+  const workflow: Record<string, unknown> = {
+    baseBranch,
+    testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"',
+    // autoApprove（D6.5）夹具缺省关：生产缺省开（3 分钟超时自动批示），但集成测试的
+    // awaiting-human 落位会拉起 detached sweep（睡满窗口后可能真的把卡合并掉）——
+    // 不关会让既有测试出现 90s 级孤儿进程与中途卡片迁移。需要测超时委托的用例
+    // 在 extra 里显式 autoApprove: { enabled: true, ... }。
+    autoApprove: { enabled: false },
+    ...opts?.extra,
+  }
   if (opts?.uiCheckCmd) workflow.uiCheckCmd = opts.uiCheckCmd
   if (opts?.workerBackend) workflow.worker = { backend: opts.workerBackend }
   fs.writeFileSync(path.join(root, '.agents', 'workflow.json'), JSON.stringify(workflow))

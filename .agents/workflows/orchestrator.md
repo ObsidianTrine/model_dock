@@ -515,6 +515,17 @@ node .agents/scripts/fleet-console.mjs [--project <目录>]... [--days 7] [--jso
 
 reviewer 的回归评测集在 `.agents/review-evals/reviewer/cases/`（合成 diff + 期望判定成对，覆盖端口/路径/atomicWrite/import.meta 红线、越界、Windows、i18n、断言假绿 + 1 个干净负样本）。跑分器 `node .agents/scripts/reviewer-eval.mjs`：默认 dry-run 零消耗；`--run --backend …` 真跑（烧钱，人工发起）；`--grade <目录>` 静态重放评分（CI 可用）。改 REVIEW.md / reviewer prompt / 审查模型后必跑一轮，分数低于基线不保留；出题纪律与评分口径见 `.agents/review-evals/reviewer/README.md`。
 
+### D6.5 分层审核超时委托（autoapprove，2026-11-10）
+
+L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprove.timeoutMinutes`，**缺省 3 分钟**；`enabled: true` 缺省开、`maxAutoRetry` 缺省 1）。窗口已过仍未批示的卡由 **autoapprove sweep** 按该卡最后一条 `review_verdict` 的推荐自动执行——agent 结论是推荐层，人只是没来得及拍板：
+
+- `blockers=0` 或 `verdict=skipped`（fastlane）→ 自动合并（`doApprove source='auto'`，merged 事件带 auto 标记，计入 drift 回溯统计）；
+- `blockers>0` → 自动返工（retry，note「超时自动按审查结论返工（分层审核）」），**每卡限 maxAutoRetry 次**，超限留人；
+- **fail-closed 四条（不可关闭）**：① 没有 `review_verdict` 的卡超时也绝不动作；② 最后一条相关事件是 `review_engine_failed` 视同无结论；③ blockers>0 的卡永不自动合并、只限次返工；④ drift 降级期间 sweep 整体跳过（恢复只能人工 `drift --clear`，每卡留 `autoapprove_skipped` 痕）。推荐层不存在的场合一律留人。
+- 红线不动声明：feature 提案的 intake 自动提交拒绝逻辑（canSailSubmit/canAutoSubmit 的 feature 拒绝）零改动——超时委托只作用于「已进闭环、已过审查」的卡，不碰任何提案 intake 闸门。
+
+**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。
+
 ### D7. 调研评测集（discovery-evals）
 
 researcher（B3.5）的回归评测集在 `.agents/discovery-evals/cases/`（`<id>.json`：question + goals + minCitations + 期望关键词 mustFind/mustFindAny）。跑分器 `node .agents/scripts/discovery-eval.mjs`：默认 dry-run 零消耗（顺带校验案例 schema）；`--run --backend …` 真跑（烧钱，人工发起）。评分是确定性规则——无引用即拒收（引用数达标）+ 关键词命中率；引用真伪以输出留档与 brief sources/ 快照人工复核为准。改 researcher prompt / 模型 / 换网关后必跑一轮；出题纪律见 `.agents/discovery-evals/README.md`。
