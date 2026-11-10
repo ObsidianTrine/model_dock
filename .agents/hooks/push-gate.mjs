@@ -156,6 +156,15 @@ export function parsePushSegment(seg, policy) {
   const hatch = typeof policy?.envPrefixSpan === 'function' ? policy.envPrefixSpan(tokens, 0, [`${BYPASS_ENV}=1`]) : { i: 0, auth: false };
   const start = hatch.i;
   const auth = hatch.auth === true;
+  // round4 P1：env 赋值前缀可改写仓库锚定（GIT_DIR=/other/.git git push …）——工件核验
+  // 仓库 ≠ 实推仓库，跨仓借道。前缀里凡出现非旁路 hatch 的赋值一律 defer；旁路赋值
+  // （AGENTS_ALLOW_PUSH=1）不误伤。
+  for (let e = 0; e < start; e++) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(tokens[e]);
+    if (m && m[1] !== BYPASS_ENV) {
+      return { seg, gitDir: null, broad: false, force: false, unreliable: false, auth, args: [], repoFlag: false, deferReason: `env 赋值前缀 ${m[1]}=… 可改写仓库锚定（跨仓借道面）——保守走既有裁决` };
+    }
+  }
   let j = start;
   // xargs 包装剥离（与 policy.gitSubcommand 同口径）
   if (/^xargs(\.exe)?$/i.test(basename(tokens[j]))) {
@@ -265,13 +274,24 @@ export function refspecTarget(rs, repoDir, runGit = defaultRunGit, runGitOk = de
     if (!dst) return { deferReason: '空 refspec（保守走既有裁决）' };
     const n = branchOf(dst);
     if (n === null) return { deferReason: `refspec ${rs} 删除 tag（发布动作走既有裁决）` };
+    if (!dst.startsWith('refs/heads/')) {
+      // round4 P2：dst 裸名可能是 tag（:v1.2.3 删远程 tag 也是发布动作）——本地消歧
+      const isTag = runGitOk(repoDir, ['show-ref', '--verify', '--quiet', `refs/tags/${dst}`]);
+      const isBranch = runGitOk(repoDir, ['show-ref', '--verify', '--quiet', `refs/heads/${dst}`]);
+      if (isTag || !isBranch) return { deferReason: `refspec ${rs} 删除目标「${dst}」不是本地分支（tag/远程独有引用——保守走既有裁决）` };
+    }
     return { branch: n };
   }
   if (dst) {
-    // 显式 dst：推送目标以 dst 为准（HEAD:develop / develop:feature/x 等）
-    const n = branchOf(dst);
-    if (n === null) return { deferReason: `refspec ${rs} 目标为 tag（发布动作走既有裁决）` };
-    return { branch: n };
+    // 显式 dst：推送目标以 dst 为准（HEAD:develop / develop:feature/x 等）。
+    // round4 P2：dst 裸名不消歧会把 HEAD:v1.2.3 当分支 v1.2.3 判非保护——与 lhs 同款
+    // show-ref 消歧，是 tag/新建引用/歧义一律 defer。
+    if (dst.startsWith('refs/tags/')) return { deferReason: `refspec ${rs} 目标为 tag（发布动作走既有裁决）` };
+    if (dst.startsWith('refs/heads/')) return { branch: dst.slice('refs/heads/'.length) };
+    const isBranch = runGitOk(repoDir, ['show-ref', '--verify', '--quiet', `refs/heads/${dst}`]);
+    const isTag = runGitOk(repoDir, ['show-ref', '--verify', '--quiet', `refs/tags/${dst}`]);
+    if (isBranch && !isTag) return { branch: dst };
+    return { deferReason: `refspec ${rs} 的目标「${dst}」不是本地分支（tag/新建引用/歧义面——保守走既有裁决）` };
   }
   if (lhs.startsWith('refs/tags/')) return { deferReason: `refspec ${rs} 是 tag（发布动作走既有裁决）` };
   if (lhs.startsWith('refs/heads/')) return { branch: lhs.slice('refs/heads/'.length) };
@@ -300,14 +320,20 @@ function barePushTargets(repoDir, runGit) {
 }
 
 /**
- * 单个 push 段的目标分支集合；broad（--all 等）按保护处理；裸 push 与 --repo 位移形态
+ * 单个 push 段的目标分支集合；broad（--all 等）一律 defer（round4 P1：借工件/旁路放行
+ * tag/Release 面）；裸 push 与 --repo 位移形态
  * 见 barePushTargets / repoFlag 并集口径（round3 P1）。
  */
 export function resolvePushTargets(p, repoDir, runGit = defaultRunGit, runGitOk = defaultRunGitOk) {
   if (p.deferReason) return { deferReason: p.deferReason };
   if (p.unreliable) return { deferReason: 'push 命令含未识别 flag（解析不可靠，保守走既有裁决）' };
   if (p.force) return { deferReason: 'force push 走既有裁决（永不借道审查放行）' };
-  if (p.broad) return { branches: [...PROTECTED_BRANCHES], protected: true, broad: true };
+  if (p.broad) {
+    // round4 P1：broad 形态（--all/--mirror/--tags/--follow-tags/--branches）实推范围不可
+    // 枚举（含 annotated tag——v* 推送即触发 Release），**永不借道审查放行**：工件与
+    // AGENTS_ALLOW_PUSH 旁路均不适用，一律 defer 走既有「发布动作人工授权制」拦截。
+    return { deferReason: 'broad push（--all/--mirror/--tags/--follow-tags/--branches）实推范围不可枚举（含 tag/Release 面）——永不借道审查放行，交既有裁决' };
+  }
   if (p.repoFlag) {
     // --repo <r>（round3 P1）：repository 位被 flag 占用后，位置参数的角色随 git 版本有歧义——
     //   评审口径（现代 git）：--repo 占 repository 位，位置参数全是 refspec（`--repo origin

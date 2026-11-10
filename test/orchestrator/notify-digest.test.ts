@@ -485,6 +485,34 @@ describe('orchestrator notify digest aggregator > queueDigestItem / flushDigest'
       d.cleanup()
     }
   })
+
+  it('round4：无通道投递失败——事件写回 pending（不丢）+ reason=no-channel；通道恢复后重发不双发', async () => {
+    const d = tmpDir()
+    const prev = process.env.AGENTS_ORCH_WEBHOOK
+    delete process.env.AGENTS_ORCH_WEBHOOK
+    try {
+      queueDigestItem(d.root, { kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal' })
+      const r1 = await flushDigest(d.root, { force: true })
+      expect(r1.sent).toBe(false)
+      expect(r1.reason).toBe('no-channel')
+      expect(r1.count).toBe(1)
+      expect(fs.existsSync(digestPendingPath(d.root))).toBe(true) // 事件已还原，不静默丢
+      const hook = await startWebhook()
+      try {
+        process.env.AGENTS_ORCH_WEBHOOK = hook.url
+        const r2 = await flushDigest(d.root, { force: true })
+        expect(r2.sent).toBe(true)
+        expect(hook.posts).toHaveLength(1) // 同批事件只发一次
+        expect(fs.existsSync(digestPendingPath(d.root))).toBe(false)
+      } finally {
+        await hook.close()
+      }
+    } finally {
+      if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
+      else process.env.AGENTS_ORCH_WEBHOOK = prev
+      d.cleanup()
+    }
+  })
 })
 
 describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () => {

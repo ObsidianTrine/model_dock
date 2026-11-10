@@ -10,7 +10,8 @@
 //      合并成一条（maybeSpawnDigestFlush 的 marker 去重保证窗口内只睡一个子进程）
 //   3. 长跑收口（drain 收官 / sail 收帆 / nightly 收尾）——force flush 兜底，
 //      队列里的存量不跨夜
-// flush 是「认领」语义：读到非空队列先清文件再发——并发 flusher 只有一家拿到内容，
+// flush 是「认领」语义：先把 pending 原子 rename 成 claiming 文件（同目录 rename 原子，
+// 并发 flusher 只有认领成功的一家拿到内容；投递失败 rename 回 pending 不丢事件）——
 // 重复 flush 最多空转不发，绝不双发同一条事件。
 // 聚合规则：同一 taskId 的多条事件合并为一行终态（pending→merged 只留 merged，
 // STATE_RANK 定终态序；同级后到覆盖——终态消息带更具体的动作说明）。
@@ -256,33 +257,64 @@ export function buildDigestBody({ items, counts = null, specs = [], now = new Da
 export async function flushDigest(repoRoot, { force = false, dryRun = false, now = new Date(), quietWindowSec = 60 } = {}) {
   try {
     const file = digestPendingPath(repoRoot);
-    if (!fs.existsSync(file)) return { sent: false, reason: 'empty' };
-    const items = [];
-    for (const l of fs.readFileSync(file, 'utf8').split('\n')) {
-      if (!l.trim()) continue;
-      try {
-        items.push(JSON.parse(l));
-      } catch {
-        // 损坏行（并发写窗口期残留）：跳过，不影响其余事件
-      }
+    if (!fs.existsSync(file)) {
+      // pending 不存在：真空队，或已被并发 flusher 原子认领（claiming 文件在场即证明）
+      const dir = path.dirname(file);
+      const claimedOut = fs.existsSync(dir)
+        ? fs.readdirSync(dir).filter((f) => f.startsWith(`${path.basename(file)}.claiming-`))
+        : [];
+      if (claimedOut.length) return { sent: false, reason: 'inflight' };
+      return { sent: false, reason: 'empty' };
     }
-    if (!items.length) return { sent: false, reason: 'empty' };
-    if (!force) {
-      try {
-        const marker = digestFlushMarkerPath(repoRoot);
-        if (fs.existsSync(marker) && Date.now() - fs.statSync(marker).mtimeMs < quietWindowSec * 1000) {
-          return { sent: false, reason: 'inflight' }; // 在飞 flusher 会把本批一起发
+    // 原子认领（round4 P2：此前 read→rm 两步之间并发 flusher 可各自读到同批而双发）——
+    // 同目录 rename 原子，认领失败=并发对手拿走了本批
+    const claimed = `${file}.claiming-${process.pid}-${Date.now()}`;
+    try {
+      fs.renameSync(file, claimed);
+    } catch (e) {
+      if (e?.code === 'ENOENT') return { sent: false, reason: 'inflight' };
+      return { sent: false, reason: `claim failed: ${e?.message ?? e}` };
+    }
+    // 投递失败/异常时 rename 回 pending——事件不丢，下次 flush 再试（round4 P2）
+    const restore = () => { try { fs.renameSync(claimed, file); } catch { /* 已被并发接走：尽力而为面 */ } };
+    let items = [];
+    try {
+      for (const l of fs.readFileSync(claimed, 'utf8').split('\n')) {
+        if (!l.trim()) continue;
+        try {
+          items.push(JSON.parse(l));
+        } catch {
+          // 损坏行（并发写窗口期残留）：跳过，不影响其余事件
         }
-      } catch {
-        // marker 判定失败：照发（尽力而为，宁多发不丢发）
       }
+      if (!items.length) {
+        fs.rmSync(claimed, { force: true });
+        return { sent: false, reason: 'empty' };
+      }
+      if (!force) {
+        try {
+          const marker = digestFlushMarkerPath(repoRoot);
+          if (fs.existsSync(marker) && Date.now() - fs.statSync(marker).mtimeMs < quietWindowSec * 1000) {
+            restore();
+            return { sent: false, reason: 'inflight' }; // 在飞 flusher 会把本批一起发
+          }
+        } catch {
+          // marker 判定失败：照发（尽力而为，宁多发不丢发）
+        }
+      }
+      const cfg = loadWorkflowConfig(repoRoot);
+      const body = buildDigestBody({ items, counts: queueCounts(repoRoot), specs: specProgress(repoRoot), now });
+      const title = digestTitle(displayProjectName(cfg.projectName ?? ''), now);
+      const r = await notify({ title, body, dryRun, webhookEnvs: orchWebhookEnvs(repoRoot), repoRoot });
+      const delivered = !dryRun && r.delivered.length > 0;
+      if (delivered) fs.rmSync(claimed, { force: true });
+      else if (dryRun) fs.rmSync(claimed, { force: true }); // dry-run 不消费队列
+      else restore(); // 无通道/投递失败：事件写回 pending（count 随返回，调用方文案不再谎报 empty）
+      return { sent: delivered, title, body, delivered: r.delivered, count: items.length, ...(delivered ? {} : { reason: dryRun ? 'dry-run' : 'no-channel' }) };
+    } catch (e) {
+      restore();
+      return { sent: false, reason: String(e?.message ?? e), count: items.length };
     }
-    fs.rmSync(file, { force: true }); // 认领：先清队列再发送
-    const cfg = loadWorkflowConfig(repoRoot);
-    const body = buildDigestBody({ items, counts: queueCounts(repoRoot), specs: specProgress(repoRoot), now });
-    const title = digestTitle(displayProjectName(cfg.projectName ?? ''), now);
-    const r = await notify({ title, body, dryRun, webhookEnvs: orchWebhookEnvs(repoRoot), repoRoot });
-    return { sent: !dryRun && r.delivered.length > 0, title, body, delivered: r.delivered };
   } catch (e) {
     return { sent: false, reason: String(e?.message ?? e) };
   }
