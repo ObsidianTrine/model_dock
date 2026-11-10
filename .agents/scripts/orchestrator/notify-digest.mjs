@@ -1,6 +1,10 @@
 // notify-digest.mjs — 编排通报 digest 聚合器：把逐事件直发收敛成批量聚合通报。
 // 动机：逐事件直发是「一堆乱消息」——一次 drain 落位 N 张卡手机收 N 条。digest 把
-// 一个时间窗内的事件聚成一条「三段式」通报（核心信息 + 事件 + 流程中间状态）。
+// 一个时间窗内的事件聚成一条扁平通报（2026-11-10 改版，弃三段式「核心/事件/流程状态」；
+// Claude Code hooks 通知哲学：一条通知=事件+一句话，标题分诊，细节落文件）：
+//   标题  【<项目名>】<emoji 计数摘要>——✅合并 · ⏸待批 · ⛔阻塞 · 📄事件，只列非零项
+//   正文  ≤5 行扁平事件流，每行 `emoji 对象 动作(关键数字)` ≤60 字；超行保 attention 折叠余量
+//   尾行  📋 规格进度（本批带 specId 才出）+ 📄 详情文件指针（本批完整 JSON 落 last.txt）
 //
 // 数据流：各通知落点 queueDigestItem() 追加事件到 pending.jsonl → 三个 flush 触发源：
 //   1. attention 级事件（awaiting-human 待批示 / blocked 熔断）——调用方立即同步 flush，
@@ -22,8 +26,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { notify, orchWebhookEnvs, taskStateTag } from './notify.mjs';
-import { toIsoLocal } from './events.mjs';
-import { listCards, queueRoot, STATES } from './queue.mjs';
+import { logDir, readEvents, toIsoLocal } from './events.mjs';
+import { queueRoot } from './queue.mjs';
 import { listSpecs } from './spec.mjs';
 import { loadWorkflowConfig, displayProjectName } from '../workflow-config.mjs';
 
@@ -42,6 +46,11 @@ export function digestFlushMarkerPath(repoRoot) {
   return path.join(digestDir(repoRoot), 'flush-inflight');
 }
 
+/** 本批详情档（完整 JSON；flush 时由认领文件原子 rename 归档）——通知「📄 详情」行的落点。 */
+export function digestLastPath(repoRoot) {
+  return path.join(digestDir(repoRoot), 'last.txt');
+}
+
 /** 原子写（tmp + rename）：flush-inflight marker 落盘用，半行/截断文件不可见。 */
 function atomicWriteText(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -52,8 +61,9 @@ function atomicWriteText(file, text) {
 
 /**
  * 追加一条 digest 事件。item = { kind: 'task'|'review'|'autoapprove'|'research'|'spec'|'other',
- * taskId?, state?, title, lines?: string[], priority?: 'normal'|'attention' }。
- * ts 由本函数盖戳（事件行 HH:mm 与终态排序的数据源）；未知 kind/priority 容错归一。
+ * taskId?, state?, specId?, title, lines?: string[], priority?: 'normal'|'attention' }。
+ * specId 可选：本批涉及规格时由调用方带上（flush 正文尾行据此读 specs/<id>/progress.json）。
+ * ts 由本函数盖戳（终态排序与事件留档的数据源）；未知 kind/priority 容错归一。
  * 返回归一后的记录（测试断言用）。
  *
  * 并发语义：fs.appendFileSync 真追加（O_APPEND 单行 JSONL）——drain --workers N 下多个 run
@@ -67,6 +77,7 @@ export function queueDigestItem(repoRoot, item) {
     kind: String(item?.kind ?? 'other'),
     ...(item?.taskId ? { taskId: String(item.taskId) } : {}),
     ...(item?.state ? { state: String(item.state) } : {}),
+    ...(item?.specId ? { specId: String(item.specId) } : {}),
     title: String(item?.title ?? '').trim() || '未命名事件',
     lines: Array.isArray(item?.lines) ? item.lines.map((l) => String(l)).filter(Boolean) : [],
     priority: item?.priority === 'attention' ? 'attention' : 'normal',
@@ -123,22 +134,7 @@ export function aggregateDigest(items) {
   return out;
 }
 
-/** 队列七目录计数（running 段并入 reviewing——对用户是同一「在跑」概念）。 */
-function queueCounts(repoRoot) {
-  const root = queueRoot(repoRoot);
-  const n = (s) => {
-    try {
-      return listCards(root, s).length;
-    } catch {
-      return 0;
-    }
-  };
-  const c = {};
-  for (const s of STATES) c[s] = n(s);
-  return { ...c, running: c.running + c.reviewing };
-}
-
-/** 规格进度行数据：读 specs/<id>/progress.json（无 build 的规格没有 progress，跳过）。 */
+/** 规格进度数据：读 specs/<id>/progress.json（无 build 的规格没有 progress，跳过）。 */
 function specProgress(repoRoot) {
   const root = queueRoot(repoRoot);
   const out = [];
@@ -149,112 +145,125 @@ function specProgress(repoRoot) {
       const tasks = Array.isArray(j.tasks) ? j.tasks : [];
       if (tasks.length) out.push({ id, tasks: tasks.map((t) => ({ n: t.n, status: String(t.status ?? 'pending') })) });
     } catch {
-      // progress 缺失/损坏：该规格不进流程状态段（尽力而为）
+      // progress 缺失/损坏：该规格不进规格尾行（尽力而为）
     }
   }
   return out;
 }
 
-/** 规格进度行的紧凑状态记号（纯文本、不用飞书 md）：t1 ✅merged t2 ⏳awaiting-human。 */
-const PROGRESS_GLYPH = {
-  pending: '○',
-  running: '▶',
-  reviewing: '🔍',
-  'awaiting-human': '⏳',
-  merged: '✅',
-  failed: '✗',
-  blocked: '⚠',
-};
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
+/**
+ * 通知标题（标题分诊）：【<项目名>】<emoji 计数摘要>——✅合并数 · ⏸待批数 · ⛔阻塞数
+ * （blocked 与 failed 都计）· 📄事件数（前三类之外的余量；纯 normal 批即全部事件），
+ * 只列非零项，如 【ModelDock】✅2 · ⏸1；纯 normal 无动作批 = 【ModelDock】📄3 事件。
+ * ev 为聚合后事件（flushDigest 传 aggregateDigest(items)；无 taskId 的 attention 兜底计
+ * 入 📄——标题计数恒非空，真实批次 attention 必带 state，不触发该兜底）。
+ */
+export function digestTitle(projectName, ev = []) {
+  const list = Array.isArray(ev) ? ev : [];
+  const merged = list.filter((it) => it?.state === 'merged').length;
+  const awaiting = list.filter((it) => it?.state === 'awaiting-human').length;
+  const blocked = list.filter((it) => it?.state === 'blocked' || it?.state === 'failed').length;
+  const other = list.length - merged - awaiting - blocked;
+  const parts = [];
+  if (merged) parts.push(`✅${merged}`);
+  if (awaiting) parts.push(`⏸${awaiting}`);
+  if (blocked) parts.push(`⛔${blocked}`);
+  if (other) parts.push(`📄${other} 事件`);
+  return `【${projectName || '编排'}】${parts.join(' · ')}`;
 }
 
-/** ts → HH:mm。digest 事件的 ts 全部由 queueDigestItem 经 toIsoLocal 盖戳（本地钟面），
- *  直接取字符串的 T 后两位钟——不經 Date 时区换算，跨时区机器上与落位本地钟一致；
- *  非 ISO 形态回退 Date 解析，解析失败回退 '--:--'（坏时间戳不炸通知）。 */
-function hhmm(ts) {
-  const m = /T(\d{2}:\d{2})/.exec(String(ts ?? ''));
-  if (m) return m[1];
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? '--:--' : `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+/** 事件行宽护栏：单行 ≤60 字，超出截断（细节落 last.txt 不丢）。 */
+const LINE_MAX = 60;
+function clip(s) {
+  s = String(s);
+  return s.length > LINE_MAX ? s.slice(0, LINE_MAX) : s;
 }
-
-/** 通知标题：【<项目名> 编排通报】<MM-DD HH:mm>（本地时间）。 */
-export function digestTitle(projectName, now = new Date()) {
-  return `【${projectName || '编排'} 编排通报】${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
-}
-
-/** 单条事件行：「HH:mm <卡/对象> <一句话>」——描述段截 40 字，一行说一件事。 */
-function eventLineOf(it) {
-  const detail = Array.isArray(it?.lines) && it.lines.length ? ` ${String(it.lines[0]).slice(0, 40)}` : '';
-  return `${hhmm(it?.ts)} ${String(it?.title ?? '')}${detail}`;
-}
-
-/** 正文行预算：三段式整体 ≤30 行，超出截 29 行 + 「…」（核心段在最前，截断保核心）。 */
-const BODY_LINE_BUDGET = 30;
 
 /**
- * 三段式正文（纯函数，固定顺序、每段可空）：
- *   ■ 核心：<attention 项逐条；无则一句总结（本批 N 事件，无需动作/需要动作 X）>
- *   ■ 事件
- *     · HH:mm <卡/对象> <一句话>
- *   ■ 流程状态
- *     规格 <id>：t1 ✅merged t2 ⏳awaiting-human …
- *     队列：pending N · running N · awaiting-human N · blocked N · merged M(+k)
- * counts 缺省 null（无队列可数时核心总结退「无需动作」）；specs 为 specProgress 形状。
+ * 单条事件行（emoji 对象 动作(关键数字)，一行说一件事）：
+ *   merged 卡 → ✅ <taskId> 合并（commit 前 7 位；flushDigest 从卡事件流补 commit 字段，无则不带括号）
+ *   awaiting-human → ⏸ <taskId> 待批示（reason 前 20 字）——3 分钟未批将自动合并
+ *   blocked/failed → ⛔ <taskId> <状态标签>（reason 前 20 字）
+ *   其余（research/spec/autoapprove 中态/中间态卡等）→ 📄 <title 前 40 字>
  */
-export function buildDigestBody({ items, counts = null, specs = [], now = new Date() } = {}) {
+function eventLineOf(it) {
+  const id = String(it?.taskId ?? '') || String(it?.title ?? '未命名事件');
+  const reason = Array.isArray(it?.lines) && it.lines.length ? String(it.lines[0]) : '';
+  if (it?.state === 'merged') {
+    const commit = typeof it?.commit === 'string' && it.commit.trim() ? `（${it.commit.trim().slice(0, 7)}）` : '';
+    return clip(`✅ ${id} 合并${commit}`);
+  }
+  if (it?.state === 'awaiting-human') {
+    const why = reason ? `（${reason.slice(0, 20)}）` : '';
+    return clip(`⏸ ${id} 待批示${why}——3 分钟未批将自动合并`);
+  }
+  if (it?.state === 'blocked' || it?.state === 'failed') {
+    const why = reason ? `（${reason.slice(0, 20)}）` : '';
+    return clip(`⛔ ${id} ${taskStateTag(it.state)}${why}`);
+  }
+  return clip(`📄 ${String(it?.title ?? '未命名事件').slice(0, 40)}`);
+}
+
+/** 正文事件流行预算：超过保留 attention 行 + 前 N 条 normal，余量折叠成一行提示。 */
+const EVENT_LINE_BUDGET = 5;
+
+/**
+ * 扁平事件流正文（纯函数）：≤5 行事件（每行 emoji 对象 动作），超预算保留 attention 行 +
+ * 前 N 条 normal，其余折叠一行 `…另 N 条见详情`；尾接规格进度行（本批 items 带 specId 且
+ * specs 里查得到 progress 才出，`📋 规格 <id>：<n>/<总> ✅`）与详情文件行（digestDirPath
+ * 给出才出，`📄 详情：<digestDir>/last.txt`——本批完整 JSON 由 flushDigest 归档 last.txt）。
+ */
+export function buildDigestBody({ items, specs = [], digestDirPath = null } = {}) {
   const ev = aggregateDigest(items);
-  const attention = ev.filter((it) => it?.priority === 'attention');
+  const attnLines = ev.filter((it) => it?.priority === 'attention').map(eventLineOf);
+  const normLines = ev.filter((it) => it?.priority !== 'attention').map(eventLineOf);
   const lines = [];
-
-  // ■ 核心：attention 逐条；无则按队列存量一句总结（要不要人动作一眼可见）
-  const attentionText = attention.map((it) => eventLineOf(it));
-  if (attentionText.length) {
-    lines.push(`■ 核心：${attentionText[0].slice(0, 60)}`);
-    for (const t of attentionText.slice(1)) lines.push(`  · ${t.slice(0, 60)}`);
+  if (attnLines.length + normLines.length <= EVENT_LINE_BUDGET) {
+    lines.push(...attnLines, ...normLines);
   } else {
-    const needs = counts ? ['awaiting-human', 'blocked'].filter((s) => Number(counts[s]) > 0) : [];
-    const action = needs.length
-      ? needs.map((s) => `${s === 'awaiting-human' ? '待批示' : '搁浅'} ${counts[s]}`).join('、')
-      : null;
-    lines.push(`■ 核心：本批 ${ev.length} 事件，${action ? `需要动作：${action}` : '无需动作'}`);
+    const keep = EVENT_LINE_BUDGET - 1; // 留 1 行折叠提示
+    const keptAttn = attnLines.slice(0, keep);
+    const keptNorm = normLines.slice(0, Math.max(0, keep - keptAttn.length));
+    const folded = attnLines.length - keptAttn.length + (normLines.length - keptNorm.length);
+    lines.push(...keptAttn, ...keptNorm, `…另 ${folded} 条见详情`);
   }
-
-  // ■ 事件：每条一行（终态已合并），无事件整段省略
-  if (ev.length) {
-    lines.push('■ 事件');
-    for (const it of ev) lines.push(`  · ${eventLineOf(it)}`);
-  }
-
-  // ■ 流程状态：规格进度锚 + 队列计数，两行都无数据整段省略
-  const specLines = (Array.isArray(specs) ? specs : []).map((s) => {
-    const tasks = s.tasks.slice(0, 8).map((t) => `t${t.n} ${PROGRESS_GLYPH[t.status] ?? '○'}${t.status}`).join(' ');
-    return `  规格 ${s.id}：${tasks}${s.tasks.length > 8 ? ` …共 ${s.tasks.length} 个` : ''}`;
-  });
-  if (specLines.length || counts) {
-    lines.push('■ 流程状态');
-    lines.push(...specLines);
-    if (counts) {
-      const mergedBatch = ev.filter((it) => it?.state === 'merged').length;
-      const mergedText = `merged ${counts.merged ?? 0}${mergedBatch ? `(+${mergedBatch})` : ''}`;
-      lines.push(`  队列：pending ${counts.pending ?? 0} · running ${counts.running ?? 0} · awaiting-human ${counts['awaiting-human'] ?? 0} · blocked ${counts.blocked ?? 0} · ${mergedText}`);
+  const specId = (Array.isArray(items) ? items : []).find((it) => it?.specId)?.specId;
+  if (specId) {
+    const sp = (Array.isArray(specs) ? specs : []).find((s) => s?.id === specId);
+    if (sp && Array.isArray(sp.tasks) && sp.tasks.length) {
+      const done = sp.tasks.filter((t) => t?.status === 'merged').length;
+      lines.push(`📋 规格 ${specId}：${done}/${sp.tasks.length} ✅`);
     }
   }
+  if (digestDirPath) lines.push(`📄 详情：${digestDirPath}/last.txt`);
+  return lines.join('\n');
+}
 
-  return lines.length > BODY_LINE_BUDGET ? [...lines.slice(0, BODY_LINE_BUDGET - 1), '…'].join('\n') : lines.join('\n');
+/** 卡 merge_commit（尽力而为）：卡事件流最后一条 merged 事件的 merge_commit 前 7 位；读不到回空串。 */
+function mergeCommitOf(repoRoot, taskId) {
+  try {
+    const evts = readEvents(logDir(repoRoot, String(taskId)));
+    for (let i = evts.length - 1; i >= 0; i--) {
+      const c = evts[i]?.type === 'merged' ? evts[i]?.merge_commit : undefined;
+      if (typeof c === 'string' && c.trim()) return c.trim().slice(0, 7);
+    }
+  } catch {
+    // 事件流缺失/损坏：merged 行尾不带括号（尽力而为）
+  }
+  return '';
 }
 
 /**
- * 冲刷待发队列并聚合发送。读到非空队列先清文件（认领语义：并发 flusher 只有一家拿到
- * 内容，重复调用空转不发）→ 聚合（同卡终态合并）→ 组三段式正文 → 经 notify() 发
- * orchWebhookEnvs 通道。force=false 时若在飞 flusher 标记很新（静默窗内），让位给它
- * （窗内事件由它合并发送）；长跑收口与 attention 即发一律 force=true。
+ * 冲刷待发队列并聚合发送。pending 先原子 rename 成 claiming 文件（认领语义：并发 flusher
+ * 只有一家拿到内容；投递失败 rename 回 pending 不丢事件）→ merged 事件补 commit（读卡
+ * 事件流）→ 聚合（同卡终态合并）→ 组扁平通报 → 经 notify() 发 orchWebhookEnvs 通道。
+ * force=false 时若在飞 flusher 标记很新（静默窗内），让位给它（窗内事件由它合并发送）；
+ * 长跑收口与 attention 即发一律 force=true。送达/dry-run 后认领文件原子 rename 归档为
+ * last.txt（通知「📄 详情」指针的落点，本批完整 JSON）。
  * dryRun 不发网不响系统通知，返回将发送的 title/body（测试用）。
  * @returns { sent, title?, body?, delivered?, reason? }
  */
-export async function flushDigest(repoRoot, { force = false, dryRun = false, now = new Date(), quietWindowSec = 60 } = {}) {
+export async function flushDigest(repoRoot, { force = false, dryRun = false, quietWindowSec = 60 } = {}) {
   try {
     const file = digestPendingPath(repoRoot);
     if (!fs.existsSync(file)) {
@@ -277,6 +286,15 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, now
     }
     // 投递失败/异常时 rename 回 pending——事件不丢，下次 flush 再试（round4 P2）
     const restore = () => { try { fs.renameSync(claimed, file); } catch { /* 已被并发接走：尽力而为面 */ } };
+    // 本批完整 JSON 归档 last.txt：认领文件直接 rename 复用（零拷贝原子覆盖旧档）；
+    // rename 失败（如 Windows 下详情档被占用）回退删除——归档是尽力而为面，不影响发送
+    const archive = () => {
+      try {
+        fs.renameSync(claimed, digestLastPath(repoRoot));
+      } catch {
+        try { fs.rmSync(claimed, { force: true }); } catch { /* 尽力而为 */ }
+      }
+    };
     let items = [];
     try {
       for (const l of fs.readFileSync(claimed, 'utf8').split('\n')) {
@@ -302,13 +320,16 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, now
           // marker 判定失败：照发（尽力而为，宁多发不丢发）
         }
       }
+      // merged 事件补 commit（聚合代表行由此带 7 位短 commit；同卡对象引用共享，聚合可见）
+      for (const it of items) {
+        if (it?.state === 'merged' && it?.taskId) it.commit = mergeCommitOf(repoRoot, it.taskId);
+      }
       const cfg = loadWorkflowConfig(repoRoot);
-      const body = buildDigestBody({ items, counts: queueCounts(repoRoot), specs: specProgress(repoRoot), now });
-      const title = digestTitle(displayProjectName(cfg.projectName ?? ''), now);
+      const body = buildDigestBody({ items, specs: specProgress(repoRoot), digestDirPath: digestDir(repoRoot) });
+      const title = digestTitle(displayProjectName(cfg.projectName ?? ''), aggregateDigest(items));
       const r = await notify({ title, body, dryRun, webhookEnvs: orchWebhookEnvs(repoRoot), repoRoot });
       const delivered = !dryRun && r.delivered.length > 0;
-      if (delivered) fs.rmSync(claimed, { force: true });
-      else if (dryRun) fs.rmSync(claimed, { force: true }); // dry-run 不消费队列
+      if (delivered || dryRun) archive(); // 送达/dry-run：认领文件转 last.txt 详情档
       else restore(); // 无通道/投递失败：事件写回 pending（count 随返回，调用方文案不再谎报 empty）
       return { sent: delivered, title, body, delivered: r.delivered, count: items.length, ...(delivered ? {} : { reason: dryRun ? 'dry-run' : 'no-channel' }) };
     } catch (e) {

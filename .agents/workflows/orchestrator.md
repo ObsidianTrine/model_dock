@@ -535,6 +535,27 @@ L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprov
 
 **触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。
 
+### D6.6 任务通报聚合（notify digest，2026-11-10）
+
+逐事件直发是「一堆乱消息」——一次 drain 落位 N 张卡手机收 N 条。workflow.json `notify.digest.enabled=true` 后落位/批示通知进聚合队列（`.agents/orchestrator/notify-digest/pending.jsonl`），按 Claude Code hooks 通知哲学收敛成**一条扁平通报：一条通知=事件+一句话，标题分诊，细节落文件**（实现 `.agents/scripts/orchestrator/notify-digest.mjs`）。
+
+**触发**：① attention 级（awaiting-human/blocked）落位立即同步 flush，不进静默窗（需要人看见的信号不等人）；② 落位后 detached flush 子进程睡满 `notify.digest.quietWindowSec`（缺省 60s，0=无窗）再发——窗内多条合并一条；③ 长跑收口（drain 收官 / sail 收帆 / nightly 收尾）force flush 兜底。同 taskId 多事件合并一行终态（pending→merged 只留 merged）；并发 flusher 靠 rename 原子认领不双发，投递失败事件还原不丢。
+
+**格式**（2026-11-10 改版，弃三段式「核心/事件/流程状态」）：
+
+```
+【ModelDock】✅2 · ⏸1
+⏸ feat-a 待批示（scope_outside）——3 分钟未批将自动合并
+✅ docs-b 合并（407fae3）
+✅ fix-c 合并
+📋 规格 spec-a：1/2 ✅
+📄 详情：/path/to/repo/.agents/orchestrator/notify-digest/last.txt
+```
+
+- **标题** = 项目名 + emoji 计数摘要（✅合并 · ⏸待批 · ⛔阻塞/退关 · 📄其余事件，只列非零项；纯 normal 批 = `【项目名】📄N 事件`）——扫一眼分诊要不要点开。
+- **正文** ≤5 行扁平事件流，每行 `emoji 对象 动作(关键数字)` ≤60 字：merged → `✅ <taskId> 合并（commit 前 7 位，有则带）`；awaiting-human → `⏸ <taskId> 待批示（reason 前 20 字）`；blocked/failed → `⛔ <taskId> <状态标签>（reason 前 20 字）`；其余（research/spec/autoapprove 中态等）→ `📄 <title 前 40 字>`。超 5 行保留 attention 行、余量折叠 `…另 N 条见详情`。
+- **尾行**：本批事件带 specId 才读 `specs/<id>/progress.json` 出规格进度（读不到省略）；详情档 last.txt 是本批完整 JSON（flush 时原子归档），通知里不展开的细节全在那里。
+
 ### D7. 调研评测集（discovery-evals）
 
 researcher（B3.5）的回归评测集在 `.agents/discovery-evals/cases/`（`<id>.json`：question + goals + minCitations + 期望关键词 mustFind/mustFindAny）。跑分器 `node .agents/scripts/discovery-eval.mjs`：默认 dry-run 零消耗（顺带校验案例 schema）；`--run --backend …` 真跑（烧钱，人工发起）。评分是确定性规则——无引用即拒收（引用数达标）+ 关键词命中率；引用真伪以输出留档与 brief sources/ 快照人工复核为准。改 researcher prompt / 模型 / 换网关后必跑一轮；出题纪律见 `.agents/discovery-evals/README.md`。
