@@ -325,9 +325,6 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     for (const l of lines) expect(l.length).toBeLessThanOrEqual(50)
   })
 
-<<<<<<< HEAD
-  it('超 4 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
-=======
   it('round6 P2：awaiting 尾巴按 autoMerge 配置渲染——未启用不承诺、窗口可配不写死', () => {
     const item = [{ ts: '', kind: 'task', taskId: 't2', state: 'awaiting-human', title: '卡 t2', lines: [], priority: 'attention' }]
     const cfg5 = buildDigestBody({ items: item, autoMerge: { enabled: true, timeoutMinutes: 5 } })
@@ -362,8 +359,7 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     }
   })
 
-  it('超 5 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
->>>>>>> fix(orchestrator): push-review 遗留 P2 双修——awaiting 批示尾巴按 autoApprove 真实配置渲染（未启用不承诺/窗口可配不写死）+ restorePending 追加合并（并发窗口内 pending 新增事件不再被 rename 覆盖）；对抗用例 3 条
+  it('超 4 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
     const items = [
       { ts: '', kind: 'task', taskId: 'ta', state: 'blocked', title: '卡 ta', lines: ['x'], priority: 'attention' },
       ...Array.from({ length: 7 }, (_, i) => ({ ts: '', kind: 'task', taskId: `t${i}`, state: 'merged', title: `卡 t${i}`, lines: [], priority: 'normal' })),
