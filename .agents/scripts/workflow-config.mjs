@@ -236,11 +236,11 @@ export function loadWorkflowConfig(repoRoot) {
 }
 
 /** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4,
- *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean }——模型名经 ModelDock 网关按名路由。 */
+ *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean, notify?: boolean }——模型名经 ModelDock 网关按名路由。 */
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, notify?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
@@ -280,6 +280,13 @@ function resolveResearch(raw) {
   if (raw.arbitration !== undefined) {
     if (typeof raw.arbitration === 'boolean') out.arbitration = raw.arbitration;
     else console.warn(`[workflow-config] research.arbitration ${JSON.stringify(raw.arbitration)} 不合法（应为 boolean）——忽略`);
+  }
+  // 调研/复核判定的飞书 webhook 推送开关（orchestrator.mjs 调研/复核/审查完成通知的 6 个
+  // 消费点统一判 cfg.research?.notify !== false）：缺省开（不配置 = true）。此前本键未在
+  // resolveResearch 规整，workflow.json 里的 research.notify 被整包丢弃——关不掉（P1 修复）
+  if (raw.notify !== undefined) {
+    if (typeof raw.notify === 'boolean') out.notify = raw.notify;
+    else console.warn(`[workflow-config] research.notify ${JSON.stringify(raw.notify)} 不合法（应为 boolean；调研/复核判定推送开关，缺省 true）——忽略`);
   }
   // usage 矩阵阈值（verdict/2）：可配的只有 coherence/coverage 两档阈值——否决权与
   // COVERAGE_FLOOR=50 硬底线在 scoreVerdict 里写死，不可配（防配置失误放水）

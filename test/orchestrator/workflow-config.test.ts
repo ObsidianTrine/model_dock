@@ -509,6 +509,54 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
   })
 })
 
+describe('workflow-config > research.notify（调研/复核判定推送开关，P1 吞键修复）', () => {
+  function cfgOf(research: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-rnotify-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify({ research }))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('boolean 生效：notify=false 消费后 research.notify===false（orchestrator 6 个消费点 cfg.research?.notify !== false 据此关推送）', () => {
+    expect(cfgOf({ notify: false }).research).toEqual({ notify: false })
+    expect(cfgOf({ notify: true }).research).toEqual({ notify: true })
+    expect(cfgOf({ notify: false, model: 'glm-5.3-flash' }).research).toEqual({ model: 'glm-5.3-flash', notify: false })
+  })
+
+  it('不配置 = 不产出该键（消费点 !== false 缺省开，现行为不变）', () => {
+    expect(cfgOf({}).research).toEqual({})
+    expect(cfgOf({ model: 'glm-5.3-flash', maxDims: 3 }).research?.notify).toBeUndefined()
+  })
+
+  it('非 boolean console.warn 报错并忽略（回落缺省开），不阻断其他键', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (const bad of ['off', 0, null]) {
+        const cfg = cfgOf({ notify: bad, model: 'glm-5.3-flash' })
+        expect(cfg.research?.notify).toBeUndefined()
+        expect(cfg.research?.model).toBe('glm-5.3-flash')
+        expect(warn.mock.calls.some((args) => String(args[0]).includes('research.notify'))).toBe(true)
+        warn.mockClear()
+      }
+    } finally {
+      warn.mockRestore()
+    }
+  })
+})
+
+describe('workflow-config > 本仓 workflow.json 文件卫生', () => {
+  it('文件以单个换行结尾（a002e17 曾丢尾换行——POSIX 文本文件口径，防 diff「\\ No newline」噪音）', () => {
+    const raw = fs.readFileSync(workflowConfigPath()) // 脚本锚定 = 本仓（worktree 内即 worktree 的文件）
+    expect(raw.length).toBeGreaterThan(0)
+    expect(raw.subarray(-1).toString('utf8')).toBe('\n')
+    expect(raw.subarray(-2).toString('utf8')).not.toBe('\n\n')
+  })
+})
+
 describe('workflow-config > 未知顶层键告警（拼写错误防线，2026-11-05 审查项）', () => {
   function writeCfg(obj: Record<string, unknown>) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-unknown-'))

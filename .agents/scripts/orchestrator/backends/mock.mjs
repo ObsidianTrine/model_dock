@@ -23,7 +23,8 @@
 //   ORCH_MOCK_PLANNER_RESEARCH=<id>      feature 卡 research 行写该值（缺省 todo）——sail
 //                                        autoDim 续接路径 e2e 用（planner 引用既有 brief/topic）
 //   ORCH_MOCK_PLANNER_FEATURE_COUNT=<n>  feature 模式产 n 张卡（id 后缀 -2…-n，缺省 1 张）——
-//                                        researchPerCycle cap 的「multi 计 1」断言用//   ORCH_MOCK_REVIEW_PARAPHRASE=1        L2 复核每次都改写复述 claim（非逐字 → fabricated；
+//                                        researchPerCycle cap 的「multi 计 1」断言用
+//   ORCH_MOCK_REVIEW_PARAPHRASE=1        L2 复核每次都改写复述 claim（非逐字 → fabricated；
 //                                        测逐字重试仍败 → 降级保留链路）
 //   ORCH_MOCK_REVIEW_PARAPHRASE_ONCE=1   仅本子进程第一次复核改写、重试后逐字（测重试恢复；
 //                                        模块级计数器，runOrch 每次新子进程天然复位——
