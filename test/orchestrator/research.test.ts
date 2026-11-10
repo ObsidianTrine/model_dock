@@ -132,9 +132,10 @@ describe('orchestrator research > brief 契约', () => {
     // 跨午夜容忍窗：昨天日期放行
     const yesterday = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2026-11-07')
     expect(() => validateBriefBody(yesterday, { today })).not.toThrow()
-    // 部分陈旧也拒（任一行命中即拒）
-    const mixed = BRIEF_BODY.replace(
-      new RegExp(`^- ${TODAY} (https://blog\\.example\\.com/gateway)`, 'm'),
+    // 部分陈旧也拒（任一行命中即拒）；其余引用日期先对齐 today 再只改一行——
+    // fixture 引用日期随跑测日 TODAY 生成，与固定 today 混用时未对齐行会被「未来日期」抢先报错（2026-11-10 实测）
+    const mixed = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), today).replace(
+      new RegExp(`^- ${today} (https://blog\\.example\\.com/gateway)`, 'm'),
       '- 2023-01-01 $1',
     )
     expect(() => validateBriefBody(mixed, { today })).toThrow(/引用访问日期陈旧/)
@@ -216,6 +217,27 @@ describe('orchestrator research > prompt 与工具面', () => {
     const req1 = p.split('\n').find((l) => l.startsWith('1. claim'))
     expect(req1).toContain('逐字摘自 brief 原文')
     expect(req1).toContain('行内 [n] 引用标注可省略')
+  })
+
+  it('buildVerifierPrompt：status 枚举五行不回退（枚举集合零改动）', () => {
+    const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
+    for (const head of ['- supported：', '- partial：', '- unsupported：', '- contradicted：', '- unverifiable：']) {
+      expect(p).toContain(head)
+    }
+    expect(p).toContain('status 枚举（只允许这五个）')
+  })
+
+  it('buildVerifierPrompt：partial 三条判定标准 + supported 正面定义（rubric 校准，2026-11-10）', () => {
+    const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
+    // partial 三条判定标准关键句
+    expect(p).toContain('快照仅覆盖 claim 的部分承重断言')
+    expect(p).toContain('数字方向一致但数值或范围不符')
+    expect(p).toContain('依据是对快照内容的转述/归纳')
+    // supported 正面定义句
+    expect(p).toContain('全部承重断言')
+    const supportedLine = p.split('\n').find((l) => l.startsWith('- supported：'))
+    expect(supportedLine).toContain('都有快照直接依据')
+    expect(supportedLine).toContain('就不算 supported')
   })
 
   it('buildClaudeArgs web 模式：只读 + 联网白名单、无 acceptEdits（fail-closed）；readonly/worker 契约不回归', () => {
