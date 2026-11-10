@@ -139,7 +139,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream',
+  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream', 'autoApprove',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
@@ -233,6 +233,10 @@ export function loadWorkflowConfig(repoRoot) {
     freeSail: resolveFreeSail(raw.freeSail),
     // 上游管线预授权档（B3.5 specAutoBuild）：缺省关 = spec 落盘即停等人审（行为不变）
     upstream: resolveUpstream(raw.upstream),
+    // 分层审核超时委托（D6.5，2026-11-10）：L2/L3 卡 awaiting-human 后人工 3 分钟内拍板，
+    // 超时由 autoapprove sweep 按最后一条 review_verdict 的推荐自动 merge/retry
+    //（fail-closed：无审查结论绝不动作；blockers>0 只自动返工限次）。缺省开。
+    autoApprove: resolveAutoApprove(raw.autoApprove),
   };
 }
 
@@ -281,11 +285,11 @@ function resolveUpstream(raw) {
 }
 
 /** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4,
- *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean }——模型名经 ModelDock 网关按名路由。 */
+ *  snapshotMax?: 整数 1-48, snapshotMirror?: boolean, notify?: boolean }——模型名经 ModelDock 网关按名路由。 */
 function resolveResearch(raw) {
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== 'object' || Array.isArray(raw)) {
-    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
+    console.warn(`[workflow-config] research 配置非法，已忽略：${JSON.stringify(raw)}（应为 { model?: 模型名, maxDims?: 正整数, concurrency?: 整数 1-4, snapshotMax?: 整数 1-48, snapshotMirror?: boolean, notify?: boolean, usageGates?: {decision|external: {coherence?, coverage?}} }）`);
     return {};
   }
   const out = {};
@@ -325,6 +329,13 @@ function resolveResearch(raw) {
   if (raw.arbitration !== undefined) {
     if (typeof raw.arbitration === 'boolean') out.arbitration = raw.arbitration;
     else console.warn(`[workflow-config] research.arbitration ${JSON.stringify(raw.arbitration)} 不合法（应为 boolean）——忽略`);
+  }
+  // 调研/复核判定的飞书 webhook 推送开关（orchestrator.mjs 调研/复核/审查完成通知的 6 个
+  // 消费点统一判 cfg.research?.notify !== false）：缺省开（不配置 = true）。此前本键未在
+  // resolveResearch 规整，workflow.json 里的 research.notify 被整包丢弃——关不掉（P1 修复）
+  if (raw.notify !== undefined) {
+    if (typeof raw.notify === 'boolean') out.notify = raw.notify;
+    else console.warn(`[workflow-config] research.notify ${JSON.stringify(raw.notify)} 不合法（应为 boolean；调研/复核判定推送开关，缺省 true）——忽略`);
   }
   // usage 矩阵阈值（verdict/2）：可配的只有 coherence/coverage 两档阈值——否决权与
   // COVERAGE_FLOOR=50 硬底线在 scoreVerdict 里写死，不可配（防配置失误放水）
@@ -482,11 +493,17 @@ function resolveDynamicDispatch(raw) {
  *  cardWebhook?: boolean（缺省 false——需要人工动作的落位事件额外发一张飞书交互卡片，
  *  按钮批示经 approval-listener 回流；非飞书 webhook 端点自动跳过），
  *  listenerPort?: 正整数（approval-listener 缺省监听端口；监听器必须显式配置才启动，
- *  永不缺省监听）}。缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
+ *  永不缺省监听），
+ *  digest?: { enabled?: boolean（缺省 false = 逐事件直发旧行为；true = 落位/批示通知进
+ *  digest 聚合队列，批量合并成一条三段式通报，见 orchestrator/notify-digest.mjs）,
+ *  quietWindowSec?: 0-3600 整数（缺省 60——detached flush 子进程先睡再发的静默窗，
+ *  窗内多条落位合并成一条通报；显式 0 = 无静默窗立即冲刷，缺省语义只认 undefined） } }。
+ *  缺省 null/false → 一切照旧（向后兼容：老 workflow.json 无此键零行为变化）。 */
 function resolveNotify(raw) {
-  const DEFAULTS = { keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null };
+  const DIGEST_DEFAULTS = { enabled: false, quietWindowSec: 60 };
+  const DEFAULTS = { keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null, digest: DIGEST_DEFAULTS };
   const warn = (detail) =>
-    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, signSecretService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数 }）`);
+    console.warn(`[workflow-config] notify 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 notify 键：{ keychainService?: 服务名, signSecretService?: 服务名, cardWebhook?: boolean, listenerPort?: 正整数, digest?: { enabled?: boolean, quietWindowSec?: 0-3600 } }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     warn(`应为对象，当前为 ${JSON.stringify(raw)}`);
@@ -502,7 +519,20 @@ function resolveNotify(raw) {
   if (raw.listenerPort !== undefined && listenerPort === null) {
     warn(`listenerPort ${JSON.stringify(raw.listenerPort)} 不合法（须为 1-65535 的正整数）`);
   }
-  return { keychainService, signSecretService, cardWebhook, listenerPort };
+  let digest = { ...DIGEST_DEFAULTS };
+  if (raw.digest !== undefined) {
+    if (!raw.digest || typeof raw.digest !== 'object' || Array.isArray(raw.digest)) {
+      warn(`digest ${JSON.stringify(raw.digest)} 不合法（应为 { enabled?: boolean, quietWindowSec?: 0-3600 整数 }）`);
+    } else {
+      digest.enabled = raw.digest.enabled === true;
+      if (raw.digest.quietWindowSec !== undefined) {
+        const qs = raw.digest.quietWindowSec;
+        if (Number.isInteger(qs) && qs >= 0 && qs <= 3600) digest.quietWindowSec = qs;
+        else warn(`digest.quietWindowSec ${JSON.stringify(qs)} 不合法（须为 0-3600 的整数秒）`);
+      }
+    }
+  }
+  return { keychainService, signSecretService, cardWebhook, listenerPort, digest };
 }
 
 /** escalation 配置解析（故障处置升级链第 1 档）：{ enabled?: bool（缺省 false=超限即
@@ -634,6 +664,39 @@ function resolveAutoResume(raw) {
   if (raw.cooldownHours !== undefined) {
     if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
     else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
+  }
+  return out;
+}
+
+/**
+ * 分层审核超时委托配置（D6.5，2026-11-10）：{ enabled: boolean, timeoutMinutes: 正整数,
+ * maxAutoRetry: 非负整数 }，缺省 true / 3 / 1——L2/L3 卡落 awaiting-human 后人工缺省
+ * 有 3 分钟拍板窗口，超时由 autoapprove sweep 按最后一条 review_verdict 的推荐执行
+ * （merge / 限次 retry）。fail-closed 底线：没有审查结论的卡超时也绝不动作；blockers>0
+ * 只自动返工且每卡最多 maxAutoRetry 次，超限留人。enabled 显式 false = 整个功能关闭
+ * （行为与历史一致）。非法值回落缺省并 console.warn（与 resolveAutoResume 同风格）。
+ */
+function resolveAutoApprove(raw) {
+  const DEFAULTS = { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1 };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] autoApprove 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoApprove 键：{ enabled?: boolean, timeoutMinutes?: 正整数, maxAutoRetry?: 非负整数 }）`);
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`应为对象 { enabled?, timeoutMinutes?, maxAutoRetry? }，当前为 ${JSON.stringify(raw)}`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  if (raw.timeoutMinutes !== undefined) {
+    if (Number.isInteger(raw.timeoutMinutes) && raw.timeoutMinutes > 0) out.timeoutMinutes = raw.timeoutMinutes;
+    else warn(`timeoutMinutes ${JSON.stringify(raw.timeoutMinutes)} 不合法（须为正整数）——回落缺省 3`);
+  }
+  if (raw.maxAutoRetry !== undefined) {
+    if (Number.isInteger(raw.maxAutoRetry) && raw.maxAutoRetry >= 0) out.maxAutoRetry = raw.maxAutoRetry;
+    else warn(`maxAutoRetry ${JSON.stringify(raw.maxAutoRetry)} 不合法（须为非负整数）——回落缺省 1`);
   }
   return out;
 }

@@ -68,6 +68,9 @@
     "zcode-headless": {
       "max_tokens": 20000000,
       "max_wall_minutes": 150
+    },
+    "codex-headless": {
+      "max_tokens": 20000000
     }
   },
   "tiers": {
@@ -106,6 +109,11 @@
   "autoResume": {
     "enabled": true
   },
+  "autoApprove": {
+    "enabled": true,
+    "timeoutMinutes": 3,
+    "maxAutoRetry": 1
+  },
   "configGuard": {
     "enabled": true
   },
@@ -139,6 +147,10 @@
   },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",
   "notify": {
-    "keychainService": "modeldock-orch-feishu-webhook"
+    "keychainService": "modeldock-orch-feishu-webhook",
+    "digest": {
+      "enabled": true,
+      "quietWindowSec": 60
+    }
   }
 }

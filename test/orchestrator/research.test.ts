@@ -135,10 +135,9 @@ describe('orchestrator research > brief 契约', () => {
     // 跨午夜容忍窗：昨天日期放行
     const yesterday = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2026-11-07')
     expect(() => validateBriefBody(yesterday, { today })).not.toThrow()
-    // 部分陈旧也拒（任一行命中即拒）——基准体先把引用日期对齐 today（TODAY 是跑测日，
-    // 漂出 today 容忍窗后未改行会先报「未来」，翻转报错类型）
-    const aligned = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), today)
-    const mixed = aligned.replace(
+    // 部分陈旧也拒（任一行命中即拒）；其余引用日期先对齐 today 再只改一行——
+    // fixture 引用日期随跑测日 TODAY 生成，与固定 today 混用时未对齐行会被「未来日期」抢先报错（2026-11-10 实测）
+    const mixed = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), today).replace(
       new RegExp(`^- ${today} (https://blog\\.example\\.com/gateway)`, 'm'),
       '- 2023-01-01 $1',
     )
@@ -221,6 +220,27 @@ describe('orchestrator research > prompt 与工具面', () => {
     const req1 = p.split('\n').find((l) => l.startsWith('1. claim'))
     expect(req1).toContain('逐字摘自 brief 原文')
     expect(req1).toContain('行内 [n] 引用标注可省略')
+  })
+
+  it('buildVerifierPrompt：status 枚举五行不回退（枚举集合零改动）', () => {
+    const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
+    for (const head of ['- supported：', '- partial：', '- unsupported：', '- contradicted：', '- unverifiable：']) {
+      expect(p).toContain(head)
+    }
+    expect(p).toContain('status 枚举（只允许这五个）')
+  })
+
+  it('buildVerifierPrompt：partial 三条判定标准 + supported 正面定义（rubric 校准，2026-11-10）', () => {
+    const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
+    // partial 三条判定标准关键句
+    expect(p).toContain('快照仅覆盖 claim 的部分承重断言')
+    expect(p).toContain('数字方向一致但数值或范围不符')
+    expect(p).toContain('依据是对快照内容的转述/归纳')
+    // supported 正面定义句
+    expect(p).toContain('全部承重断言')
+    const supportedLine = p.split('\n').find((l) => l.startsWith('- supported：'))
+    expect(supportedLine).toContain('都有快照直接依据')
+    expect(supportedLine).toContain('就不算 supported')
   })
 
   it('buildClaudeArgs web 模式：只读 + 联网白名单、无 acceptEdits（fail-closed）；readonly/worker 契约不回归', () => {
@@ -441,6 +461,48 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     }
   })
 
+  it('scoreVerdict：strong_support 观测指标——全 supported→100、含 partial 按整数、全 unverifiable→null', () => {
+    // 全 supported → 100
+    expect(scoreVerdict({ claims: [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'supported' }], citation: 90, evidence: 80 }).scores.strong_support).toBe(100)
+    // 含 partial：分母只数已核承重结论（unverifiable 不计）——2 supported + 1 partial / 3 → 67
+    const mixed = scoreVerdict({
+      claims: [
+        { claim: 'a', status: 'supported' },
+        { claim: 'b', status: 'supported' },
+        { claim: 'c', status: 'partial' },
+        { claim: 'd', status: 'unverifiable' },
+        { claim: 'e', status: 'unverifiable' },
+      ],
+      citation: 90, evidence: 80,
+    })
+    expect(mixed.scores.strong_support).toBe(67)
+    // unsupported / contradicted 计分母不计分子
+    const bad = scoreVerdict({ claims: [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'unsupported' }, { claim: 'c', status: 'contradicted' }], citation: 90, evidence: 80 })
+    expect(bad.scores.strong_support).toBe(33)
+    // 全 unverifiable → checked 空 → null；claims 空 → null
+    expect(scoreVerdict({ claims: [{ claim: 'a', status: 'unverifiable' }], citation: 90, evidence: 80 }).scores.strong_support).toBeNull()
+    expect(scoreVerdict({ claims: [], citation: 90, evidence: 80 }).scores.strong_support).toBeNull()
+  })
+
+  it('scoreVerdict：决策快照——strong_support 为纯派生观测值，usage/overall 与判分语义逐字段不变', () => {
+    // 快照 1：全 supported 高分——整体返回对象逐字段锁定（overall 加权 0.15*90+0.4*80+0.35*100+0.1*100 = 91）
+    expect(scoreVerdict({ claims: [{ claim: 'a', status: 'supported' }, { claim: 'b', status: 'supported' }], fabricatedCount: 0, citation: 90, evidence: 80, gates: {} })).toEqual({
+      scores: { citation: 90, evidence: 80, coherence: 100, coverage: 100, strong_support: 100, overall: 91 },
+      usage: { browse: 'ok', internal_decision: 'ok', external_doc: 'ok' },
+      veto: false,
+      contradicted_count: 0,
+      level: 'pass',
+    })
+    // 快照 2：partial + 自定义门槛——strong_support=0 不参与决策（coherence 50 < 90 → needs_review，overall 73）
+    expect(scoreVerdict({ claims: [{ claim: 'a', status: 'partial' }], fabricatedCount: 0, citation: 90, evidence: 80, gates: { decision: { coherence: 90 } } })).toEqual({
+      scores: { citation: 90, evidence: 80, coherence: 50, coverage: 100, strong_support: 0, overall: 73 },
+      usage: { browse: 'ok', internal_decision: 'needs_review', external_doc: 'undetermined' },
+      veto: false,
+      contradicted_count: 0,
+      level: 'warn',
+    })
+  })
+
   it('parseVerdictBlock：JSON 契约（claims 枚举/上限校验）；非法返回 null', () => {
     const block = '复核完成。\n\n```agents-verdict\n' + JSON.stringify({
       claims: [{ claim: 'DeepSeek V4.1 周下载 56.5T', status: 'supported', note: '快照命中' }, { claim: 'OpenHands ~89k stars', status: 'contradicted', note: '两处引文矛盾' }],
@@ -510,6 +572,25 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('readLedgerStats：avg_strong_support 聚合——含字段条目取均值、缺字段条目跳过、全缺 → null', () => {
+    const root = tmpRoot()
+    try {
+      // m-a：两条带 strong_support（100/50）+ 一条旧口径缺字段 → 均值 75（缺字段不进分母）
+      appendResearchLedger(root, { kind: 'l2', brief_id: 'a', model: 'v', researcher_model: 'm-a', level: 'pass', strong_support: 100 })
+      appendResearchLedger(root, { kind: 'l2', brief_id: 'b', model: 'v', researcher_model: 'm-a', level: 'warn', strong_support: 50 })
+      appendResearchLedger(root, { kind: 'l2', brief_id: 'c', model: 'v', researcher_model: 'm-a', level: 'warn' })
+      // m-b：全缺 strong_support → null（与 avg_hit_rate 同款 null 语义）
+      appendResearchLedger(root, { kind: 'l1', brief_id: 'd', model: 'm-b', level: 'fail', hit_rate: 0.3 })
+      const stats = readLedgerStats(root)
+      const a = stats.find((s) => s.model === 'm-a')
+      expect(a?.runs).toBe(3)
+      expect(a?.avg_strong_support).toBe(75)
+      expect(stats.find((s) => s.model === 'm-b')?.avg_strong_support).toBeNull()
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('orchestrator research > verify e2e（mock）', () => {
@@ -532,10 +613,12 @@ describe('orchestrator research > verify e2e（mock）', () => {
       expect(verdict.model).toBe('mock')
       expect(verdict.verifier.model).toBeNull()
       expect(verdict.scores.coverage).toBe(100)
+      expect(verdict.scores.strong_support).toBe(100) // L1 回查全命中 → supported → 完全支撑率 100（观测）
       expect(verdict.usage.internal_decision).toBe('ok')
       expect(verdict.usage.external_doc).toBe('ok')
       const ledger = fs.readFileSync(path.join(root, '.agents', 'orchestrator', 'research', 'ledger.jsonl'), 'utf8')
       expect(ledger).toContain('"kind":"l2"')
+      expect(ledger).toContain('"strong_support":100') // l2 台账条目带 strong_support
       expect(ledger).toContain('"decision":"ok"')
       expect(ledger).toContain('"researcher_model":"mock"') // L3 台账带调研船口径（model 是复核船，未指定 → null）
       const out = runOrch(repo.root, 'research stats')
@@ -578,6 +661,19 @@ describe('orchestrator research > 快照骨架识别与完成通知', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  it('buildResearchNotifyBody：维度分行含四维与 strong_support（观测）；四维全 null 不出维度行', () => {
+    const body = buildResearchNotifyBody({
+      brief_id: 'b2', level: 'pass',
+      scores: { citation: 90, evidence: 80, coherence: 100, coverage: 100, strong_support: 100, overall: 91 },
+      usage: { browse: 'ok', internal_decision: 'ok', external_doc: 'ok' },
+    })
+    const dim = body.split('\n').find((l) => l.startsWith('维度分:'))
+    expect(dim).toBe('维度分: evidence=80 coherence=100 coverage=100% citation=90 strong_support=100')
+    // 四维全 null（L1 纯空壳 / 缺 scores）→ 省略整行，通知行数不膨胀
+    const bare = buildResearchNotifyBody({ brief_id: 'b3', level: 'unknown', scores: { overall: null }, usage: {} })
+    expect(bare.split('\n').find((l) => l.startsWith('维度分:'))).toBeUndefined()
   })
 
   it('buildResearchNotifyBody：判级/usage/claims 统计/理由截断成通知正文', () => {

@@ -123,6 +123,28 @@ try {
   process.exit(0);
 }
 
+// ── push 审查门禁（push-review-gate 卡，2026-11）───────────────────────────────────
+// 既有 policy.mjs 对 git push 一刀切人工授权制；本闸在其上叠加「先审查后放行」的窄口：
+//   - 纯分支 push 且目标非 main/develop → 放行（覆盖 publish 拦截）；
+//   - 命中 main/develop：AGENTS_ALLOW_PUSH=1 人工旁路（显眼警告 + push-gate.log 留痕）或
+//     24h 内 push-review 结论（HEAD 未变）→ 放行；否则拦截并给可操作三选一。
+// 门禁只覆盖「纯 push 段 + publish 类拦截」：混入 tag/npm publish、force、解析不可靠、
+// 非 push 段命中既有红线（含仅涉受保护端口）或 cd 跨仓 / --git-dir 改锚一律 defer 回既有
+// 裁决（gate 侧放行前逐段二次核验，2026-11 round2）；端口等非 publish 拦截永不覆盖
+// ——放行面相对既有红线只收窄不放大。
+// 门禁模块装在本文件同目录（~/.agents/hooks/push-gate.mjs，被守护 agent 写不到）；加载或
+// 裁决失败一律 defer 走既有裁决（不新增放行、不卡死会话；安装漏拷文件只丢新文案不丢拦截）。
+let gate = null;
+let gateResult = null;
+try {
+  gate = await import(new URL('./push-gate.mjs', import.meta.url).href);
+  gateResult = gate.evaluatePushGate({ cmd, cwd, env: process.env, now: Date.now(), policy });
+} catch (e) {
+  console.error(`[policy-dispatch] push 审查门禁不可用（defer 走既有裁决；检查 hook 安装是否含 push-gate.mjs）：${e?.message ?? e}`);
+}
+// 注意：bypass 的警告与日志**不在**这里写——放行覆盖条件（含 verdict.rule==='publish'）
+// 要到下面确认后才算数，命令若被端口等其他红线拦下就不存在「已发生的 bypass」，先写会留痕失真。
+
 let verdict;
 try {
   verdict = policy.evaluateCommand(cmd);
@@ -135,6 +157,28 @@ try {
 if (verdict.allowed) {
   policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'allowed', target: cmd.slice(0, 200) });
   process.exit(0);
+}
+// 门禁放行覆盖：仅当「纯 push 段 + 既有裁决因 publish 红线拦截」三条同时成立
+// （tag/npm publish 混入已在 gate 侧 defer，这里再验一道 rule 兜底）
+if (
+  gateResult &&
+  gateResult.hasPush && !gateResult.hasTag && !gateResult.hasNpmPublish &&
+  (gateResult.decision === 'allow-bypass' || gateResult.decision === 'allow-review' || gateResult.decision === 'pass-unprotected') &&
+  verdict.rule === 'publish'
+) {
+  if (gateResult.decision === 'allow-bypass') {
+    // 旁路真实落地的唯一时刻：放行覆盖已确认（命令不会再被其他红线拦下）——此时才警告+留痕
+    console.error(gateResult.warning);
+    gate.appendBypassLog(gateResult.logEntry ?? { ts: new Date().toISOString(), cwd, branch: '?', bypass: true });
+  }
+  policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'allowed', reason: `push 审查门禁放行（${gateResult.decision}${gateResult.detail ? '：' + gateResult.detail : ''}）`, target: cmd.slice(0, 200) });
+  process.exit(0);
+}
+// 保护分支无审查要件：换成可操作三选一文案（仍拦截，exit 2）
+if (gateResult?.decision === 'block' && gateResult.hasPush && verdict.rule === 'publish') {
+  policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'blocked', reason: gateResult.reason ?? 'push 审查门禁', target: cmd.slice(0, 200) });
+  console.error(gateResult.message);
+  process.exit(2);
 }
 
 policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'blocked', reason: verdict.reason, target: cmd.slice(0, 200) });

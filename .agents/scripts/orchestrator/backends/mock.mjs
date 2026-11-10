@@ -36,7 +36,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER, DIMS_SPLIT_MARKER } from '../prompt.mjs';
+import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESIGN_MARKER, TASKS_MARKER, BRIEF_MARKER, VERDICT_MARKER, ARBITRATION_MARKER, SPECVERDICT_MARKER, DIMS_SPLIT_MARKER, PUSHVERDICT_MARKER } from '../prompt.mjs';
 
 // L2 复核会话计数（PARAPHRASE_ONCE 用）：本子进程内第一次改写、重试后逐字。
 // 模块级变量——runOrch 每次新子进程天然复位；测试不得在同进程 import mock 断言次数。
@@ -54,6 +54,12 @@ export const mockBackend = {
     const delay = parseInt(process.env.ORCH_MOCK_DELAY_MS ?? '0', 10) || 0;
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     const prompt = fs.readFileSync(promptFile, 'utf8');
+    // push 审查船（push-review-gate 卡 2026-11）：判定必须置于角色链**最前**——其 prompt
+    // 内嵌待审 diff，diff 内容可能包含任意标记串（甚至 REVIEW_SUMMARY/agents-card 本体），
+    // 任何「先判其他角色」的顺序都可能被 diff 带偏。代价：worker prompt 正文若恰好提到
+    // 'agents-push-verdict' 字样会被误判成本角色（mock 仅测试链路使用，真实后端无此判定，
+    // 可接受；测试夹具自造 diff 时避免该字样即可）。
+    const isPushReviewer = prompt.includes(PUSHVERDICT_MARKER);
     const isReviewer = prompt.includes('REVIEW_SUMMARY');
     const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
     const isSpecReviewer = !isSpecPlanner && !isReviewer && prompt.includes(SPECVERDICT_MARKER); // spec 三件套审查船（cmdSpecReview）
@@ -63,6 +69,31 @@ export const mockBackend = {
     const isDimsSplit = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(DIMS_SPLIT_MARKER); // 拆维规划（sail researchAutoDim）：先于 researcher 判定
     const isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && !isDimsSplit && prompt.includes(BRIEF_MARKER);
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
+
+    if (isPushReviewer) {
+      // push 审查模式（push-verdict/1，cmdPushReview）：缺省 pass + 1 条 P2（findings 不做
+      // 定位对账，file 任意）；ORCH_MOCK_REVIEW_BLOCKERS>0 → verdict=fail（复用既有注入旋钮
+      // 语义：blockers>0 = 判不通过，cmdPushReview 侧 die 退出码非 0）；
+      // ORCH_MOCK_PUSH_REVIEW_INVALID=1 输出无契约块（测重试→die 路径）。
+      const invalid = process.env.ORCH_MOCK_PUSH_REVIEW_INVALID === '1';
+      const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      if (invalid) {
+        const output = 'push 审查想好了但没有契约块。';
+        onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-push-reviewer' });
+        return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+      }
+      const payload = {
+        verdict: blockers > 0 ? 'fail' : 'pass',
+        overall: blockers > 0 ? 40 : 88,
+        findings: blockers > 0
+          ? [{ severity: 'P0', file: 'mock-worker-output.txt', claim: 'mock：注入阻塞项', why: 'ORCH_MOCK_REVIEW_BLOCKERS>0 注入', fix: 'mock 修复建议' }]
+          : [{ severity: 'P2', file: 'README.md', claim: 'mock：轻微建议（不阻塞）', why: 'mock 注入', fix: '可改可不改' }],
+        reasons: [blockers > 0 ? 'mock：注入判 fail' : 'mock：整体通过'],
+      };
+      const output = ['push 审查完成。', '', '```' + PUSHVERDICT_MARKER, JSON.stringify(payload, null, 2), '```'].join('\n');
+      onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-push-reviewer' });
+      return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 80 }, pid: process.pid };
+    }
 
     if (isSpecReviewer) {
       // spec 审查模式（spec-verdict/1）：固定五维 + 1 条 P2 finding（file 指向 prompt 中的

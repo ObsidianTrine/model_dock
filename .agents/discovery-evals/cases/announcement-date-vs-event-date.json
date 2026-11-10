@@ -1,0 +1,9 @@
+{
+  "question": "Anthropic Citations API 最初上线（对外宣布可用）是什么时候？背景：其官方公告页 introducing-citations-api 的 article:published_time 元数据显示 2025-06-23，与部分媒体报道的时间线存在出入，曾有人把该页面日期直接当成功能上线日期引用。请核实该功能最早宣布可用的真实日期，并在结论中明确区分「公告页的发布/更新时间」与「事件实际发生时间」两个概念；每条来源注明来源自身的发布日期。日期一律用 ISO 格式（YYYY-MM-DD）标注；不要凭训练记忆作答，以本次检索结果为准。",
+  "goals": "Dockmaster 调研罗盘要求时间敏感结论区分「页面发布/更新时间」与「事件实际发生时间」并多源交叉；把公告页 published_time 当事件日期会污染航次报告与依赖决策（2026-11-09 L2 复核员把 Citations API 公告页 published_time 误判为上线日期的事故来源）。",
+  "minCitations": 2,
+  "expect": {
+    "mustFind": ["2025-01-24", "1月24", "1 月 24", "january 24", "jan 24", "citations", "发布", "上线"],
+    "mustFindAny": 4
+  }
+}

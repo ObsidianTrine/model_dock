@@ -112,7 +112,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 落位处置：
 - **merged** → 完成（L1 自动合并进本地 develop）。
-- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。
+- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。L3 闸门另有超时委托（D6.5）：落位后缺省 3 分钟内没批，autoapprove sweep 会按最后一条审查结论的推荐自动执行（blockers=0 合并 / >0 限次返工；无审查结论 fail-closed 不动）——所以要批示就趁窗口内批，超时后再批也以先到者为准。
 - **blocked / failed** → 异常处置速查（文末）。
 
 ## 第 4 步：收尾汇报
@@ -145,7 +145,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 ## 红线（永不）
 
-- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。
+- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。确需 push 上远程（船东明确要求）：先过 `orch push-review`（pass 且 24h 内且 HEAD 未变时 hook 闸自动放行 main/develop），或由船东当场 `AGENTS_ALLOW_PUSH=1` 授权（见 orchestrator.md B9.5）。
 - **8687 / 8890 端口永不触碰**（监听/stop/改配置一律禁止）。
 - 不改门禁与熔断逻辑来「让任务通过」；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试。
 - 自治跑中引擎故障**禁止自行换引擎**（切换=换计费方，必须用户批准）；测试结束清理你拉起的全部临时进程。

@@ -381,6 +381,15 @@ node .agents/scripts/orchestrator.mjs drill   # exit 0 = 港口闭环健康
 - **燃油账（报告「值不值得」的依据）**：本航次 [起航, 收帆] 网关实测 token × 价目 = USD（总账 + 逐卡拆账，逐卡按各自事件时间窗投影）；worker 直连上游时如实标「不可测」；收帆时若成本上限已触发，按完整航程重算覆盖触发时刻快照。
 - **报告口径（为什么这么编排）**：全部确定性组装、不再烧 LLM——战果清单按队列快照差分（merged / 待放行 / 搁浅退关 / 剩余 pending，开航基线如实区分「开航前已在队列」与「本航次新增」）；编排理由直接引用 planner 卡片上的目标句原文 + 每周期提交/否决原因 + goals.md 罗盘对齐说明。voyage.json 逐周期落盘，SIGINT 强杀后也能续查航迹。
 
+### B9.5 push 审查门禁（push-review，上远程前的整体审查闸）
+
+背景：夜间自由巡航 / 多卡并行的本地 develop 提交此前 push 上远程没有整体审查闸门。防线分两层——**① 审查命令** `node .agents/scripts/orchestrator.mjs push-review [--range A..B] [--model m] [--backend mock]`：只读审查船按 REVIEW.md 口径过一遍待推提交（缺省 range `@{u}..HEAD`，回落 `origin/develop..HEAD`，再无则要求显式 `--range`；diff >400KB 拒审并建议分段），结论落 `.agents/orchestrator/push-review/latest.json`（schema `push-verdict/1`：verdict/overall/findings/reasons/head/range/reviewed_at）+ fleet 留痕 `push_review`；verdict=fail 退出码非 0。**② hook 闸**（`.agents/hooks/policy-dispatch.mjs` 扩展，判定核心在同目录 `push-gate.mjs`）：agent 会话里的 `git push`（含 `git -C <path> push` 形态）命中 main/develop 时——无审查要件拦截并给三选一；`AGENTS_ALLOW_PUSH=1` 人工授权旁路（认 hook 进程 env 与命令前缀 hatch 两形态，与 `AGENTS_ALLOW_RELEASE` 同语义，责任在人，留痕 `~/.agents/hooks/push-gate.log`）或 push-review 结论 pass 且 24h 内且 HEAD 未变 → 放行。推其他分支显式指名即放行；tag/npm publish/force push/`--all`/`--follow-tags`（顺带推可达 annotated tag，含 v* 触发 Release——与 `--tags` 同待遇按保护拦）等一律走既有裁决（tag 触发 Release 永远人工，绝不借道本闸；`AGENTS_ALLOW_RELEASE` 发版白名单原样生效）。
+
+- **流程**：巡航收帆 / 批量合并到 develop 之后 → `orch push-review` → 绿了才 push → **HEAD 再变即失效**（结论绑定 `git rev-parse HEAD` 全 sha），需重跑审查；verdict=fail 先修 findings 再重审。
+- **生效面（务必写进认知）**：hook 只拦 agent 的 Bash 会话——policy-dispatch 挂在 claude/zcode hook 链上、按既有语义仅 `ORCH_POLICY_ENFORCE=1` 的会话（编排器 headless worker / 审查船等）裁决；**船东本人终端不经 hook，完全不受影响**。门禁对既有红线只收窄不放行：仅覆盖「纯 push 段 + publish 类拦截」，端口等其他红线与 `AGENTS_ALLOW_RELEASE` 发版通道原样生效。放行覆盖前置二次核验（2026-11 round2）：放行前对每个 非 push 段独立重跑既有红线（含「仅涉受保护端口字符串」的保守面，`ssh -R 8687` 这类 listen 词表外形态由此兜住），任一命中即 defer 走原拦截路径；`cd <他仓>` / `git --git-dir=<他仓>` 改锚形态一律 defer——工件核验的仓库必须 = 实推的仓库（`cd` 到非仓库目录与本仓路径不受影响）。
+- **两层防线**：本闸是本地事前审查；CI 仍有 test-workflow 兜底（push 后三平台矩阵），漏网错误在远程 CI 再拦一次。
+- **安装（合并后由调度台执行一次）**：`cp .agents/hooks/policy-dispatch.mjs .agents/hooks/push-gate.mjs ~/.agents/hooks/`（**两个文件都要**——dispatcher 运行时动态加载同目录 push-gate.mjs），并确认用户级 hook 注册仍指向 `~/.agents/hooks/policy-dispatch.mjs`（缺 push-gate.mjs 时门禁自动 defer 走既有裁决，不丢拦截只丢新文案）。
+
 ### B10. 双向批示（approval listener，飞书卡片远程审批闸门）
 
 闸门通知原来只有单行文本（B4 webhook）——人不在电脑前就得等回工位再批。双向批示把回路补上：**需要人工动作的落位事件在文本通知之外多发一张飞书交互卡片，群里点按钮即可远程批示 approve / reject / retry**。缺省完全不启用：卡片开关不开不发卡、监听器不启动不占端口，行为与历史版本零差异。
@@ -527,6 +536,38 @@ node .agents/scripts/fleet-console.mjs [--project <目录>]... [--days 7] [--jso
 ### D6. 验船师评测集（reviewer-evals）
 
 reviewer 的回归评测集在 `.agents/review-evals/reviewer/cases/`（合成 diff + 期望判定成对，覆盖端口/路径/atomicWrite/import.meta 红线、越界、Windows、i18n、断言假绿 + 1 个干净负样本）。跑分器 `node .agents/scripts/reviewer-eval.mjs`：默认 dry-run 零消耗；`--run --backend …` 真跑（烧钱，人工发起）；`--grade <目录>` 静态重放评分（CI 可用）。改 REVIEW.md / reviewer prompt / 审查模型后必跑一轮，分数低于基线不保留；出题纪律与评分口径见 `.agents/review-evals/reviewer/README.md`。
+
+### D6.5 分层审核超时委托（autoapprove，2026-11-10）
+
+L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprove.timeoutMinutes`，**缺省 3 分钟**；`enabled: true` 缺省开、`maxAutoRetry` 缺省 1）。窗口已过仍未批示的卡由 **autoapprove sweep** 按该卡最后一条 `review_verdict` 的推荐自动执行——agent 结论是推荐层，人只是没来得及拍板：
+
+- `blockers=0` 或 `verdict=skipped`（fastlane）→ 自动合并（`doApprove source='auto'`，merged 事件带 auto 标记，计入 drift 回溯统计）；
+- `blockers>0` → 自动返工（retry，note「超时自动按审查结论返工（分层审核）」），**每卡限 maxAutoRetry 次**，超限留人；
+- **fail-closed 五条（不可关闭）**：① 没有 `review_verdict` 的卡超时也绝不动作；② 最后一条相关事件是 `review_engine_failed` 视同无结论；③ blockers>0 的卡永不自动合并、只限次返工；④ drift 降级期间 sweep 整体跳过（恢复只能人工 `drift --clear`，每卡留 `autoapprove_skipped` 痕）；⑤ scope_outside（范围失控）落位的卡超时也绝不自动批示——范围失控不该静默合并（与合并闸门同一条不变量），自动返工同样跳过，一律留人工拍板。推荐层不存在的场合一律留人。
+- 红线不动声明：feature 提案的 intake 自动提交拒绝逻辑（canSailSubmit/canAutoSubmit 的 feature 拒绝）零改动——超时委托只作用于「已进闭环、已过审查」的卡，不碰任何提案 intake 闸门。
+
+**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍（**configGuard 漂移期间跳过**——被改的 autoApprove 配置不生效，与派发/规划同口径）；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。动作与落位通知开启 digest 聚合通报（`notify.digest.enabled`）时先进待发队列，由 `orch notify-digest --flush` 子命令合并成一条扁平通报发出（落位流程 detached 自动拉起；手动补发可直达；机制详见 D6.6）。
+
+### D6.6 任务通报聚合（notify digest，2026-11-10）
+
+逐事件直发是「一堆乱消息」——一次 drain 落位 N 张卡手机收 N 条。workflow.json `notify.digest.enabled=true` 后落位/批示通知进聚合队列（`.agents/orchestrator/notify-digest/pending.jsonl`），按 Claude Code hooks 通知哲学收敛成**一条扁平通报：一条通知=事件+一句话，标题分诊，细节落文件**（实现 `.agents/scripts/orchestrator/notify-digest.mjs`）。
+
+**触发**：① attention 级（awaiting-human/blocked）落位立即同步 flush，不进静默窗（需要人看见的信号不等人）；② 落位后 detached flush 子进程睡满 `notify.digest.quietWindowSec`（缺省 60s，0=无窗）再发——窗内多条合并一条；③ 长跑收口（drain 收官 / sail 收帆 / nightly 收尾）force flush 兜底。同 taskId 多事件合并一行终态（pending→merged 只留 merged）；并发 flusher 靠 rename 原子认领不双发，投递失败事件还原不丢。
+
+**格式**（2026-11-10 改版，弃三段式「核心/事件/流程状态」）：
+
+```
+【ModelDock】✅2 · ⏸1
+⏸ feat-a 待批示（scope_outside）——3 分钟未批将自动合并
+✅ docs-b 合并（407fae3）
+✅ fix-c 合并
+📋 规格 spec-a：1/2 ✅
+📄 详情：/path/to/repo/.agents/orchestrator/notify-digest/last.txt
+```
+
+- **标题** = 项目名 + emoji 计数摘要（✅合并 · ⏸待批 · ⛔阻塞/退关 · 📄其余事件，只列非零项；纯 normal 批 = `【项目名】📄N 事件`）——扫一眼分诊要不要点开。
+- **正文** ≤5 行扁平事件流，每行 `emoji 对象 动作(关键数字)` ≤60 字：merged → `✅ <taskId> 合并（commit 前 7 位，有则带）`；awaiting-human → `⏸ <taskId> 待批示（reason 前 20 字）`；blocked/failed → `⛔ <taskId> <状态标签>（reason 前 20 字）`；其余（research/spec/autoapprove 中态等）→ `📄 <title 前 40 字>`。超 5 行保留 attention 行、余量折叠 `…另 N 条见详情`。
+- **尾行**：本批事件带 specId 才读 `specs/<id>/progress.json` 出规格进度（读不到省略）；详情档 last.txt 是本批完整 JSON（flush 时原子归档），通知里不展开的细节全在那里。
 
 ### D7. 调研评测集（discovery-evals）
 

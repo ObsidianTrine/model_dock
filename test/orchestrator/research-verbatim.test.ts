@@ -65,6 +65,15 @@ describe('orchestrator research-verbatim > downgradeNonVerbatimClaims', () => {
     expect(v.usage.external_doc).toBe('undetermined')
   })
 
+  it('scoreVerdict：降级保留组合的 strong_support——全 partial → 0（观测不进决策，decision 封顶不变）', () => {
+    const downgraded = downgradeNonVerbatimClaims([{ claim: '改写版 claim', status: 'supported' }])
+    const v = scoreVerdict({ claims: downgraded, fabricatedCount: 1, citation: 90, evidence: 80 })
+    expect(v.scores.strong_support).toBe(0)
+    expect(v.scores.coherence).toBe(50)
+    // 决策语义零改动：needs_review 封顶（fabricated 红旗）与 external 口径与引入前一致
+    expect(v.usage).toEqual({ browse: 'ok', internal_decision: 'needs_review', external_doc: 'undetermined' })
+  })
+
   it('verifyClaimVerbatim fabricated 字符串直通降级：端到端形状（字符串 → claim 对象）', () => {
     const { fabricated } = verifyClaimVerbatim([{ claim: 'DeepSeek V4.1 下载量全球第一（改写版）', status: 'supported' }], BRIEF_BODY)
     expect(fabricated).toHaveLength(1)
