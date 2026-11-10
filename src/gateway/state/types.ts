@@ -8,7 +8,9 @@ export interface LogAttempt {
   provider: string
   status?: number
   ms?: number
-  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / model_mismatch / connect_failed / headers_timeout */
+  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / model_mismatch / model_cooldown / connect_failed / headers_timeout
+   *  model_cooldown = 模型级熔断快速失败（(provider, model) 熔断且无 model_fallback 映射，relay.ts
+   *  forwardToUpstream 候选级跳过，无真实上游往返；错误本身 cause 仍打 'quota'） */
   note?: string
 }
 

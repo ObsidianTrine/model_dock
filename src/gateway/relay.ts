@@ -133,6 +133,11 @@ export class UpstreamError extends Error {
   routeReason?: string
   /** 网关侧错误归类短码（与 LogEntry.cause 同一枚举）：各抛出点就地打标，日志/前端据此显示可读原因，不再靠解析错误文本 */
   cause?: string
+  /** attempts 逐候选记录的短码覆盖（缺省按 cause 分类）：cause 是面向客户端/日志的粗分类
+   *  （如 quota），attempt note 需要更细的候选级原因时用——模型熔断快速失败（model_cooldown：
+   *  该候选因 (provider, model) 熔断被跳过、无真实上游往返）是首个用例。forwardWithFailover
+   *  的 classifyAttemptError 优先取它。 */
+  attemptNote?: string
   /** failover 链已发生的逐候选记录（链中途抛出时经错误对象带出到日志，见 forwardWithFailover） */
   attempts?: LogAttempt[]
   constructor(status: number, message: string, hint?: string) {
@@ -537,6 +542,26 @@ export async function forwardToUpstream(
       }
     : undefined
   const rewritten = rewriteModel(target, opts.body, opts.path, opts.bodyScan, mfGate)
+  // 模型级容灾（M3）熔断快速失败：final 模型仍在熔断期且无 model_fallback 映射（预改写帮不上）
+  // 时，跳过注定 402 的上游往返——熔断语义就是「假设 15min 内死」，与 provider 级熔断经
+  // pickTarget eligible() 跳过同语义（LiteLLM cooldown 同款）。有映射的熔断模型已被上方闸门
+  // 预改写直落备用模型（modelAfter = 备用模型，未熔断），不会进到此分支；provider 未配映射时
+  // isModelMeltdown 恒 false（recordModelOutcome 只对配映射 provider 记账），显式判
+  // !mfMap?.[finalModel] 是双保险。candidateSkip 跳链上下一候选（同 key_cooldown 语义，链上
+  // 别家可能伺服同一模型，不中止整条链）；attempt 记 note=model_cooldown（该候选无真实上游往返，
+  // 经 attemptNote 覆盖——cause 保持 quota 供日志/前端按额度类展示）。
+  const finalModel = rewritten.modelAfter
+  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && !mfMap?.[finalModel]) {
+    const e = new UpstreamError(
+      402,
+      t('模型「{model}」在服务「{name}」处于额度熔断期（连续额度耗尽，冷却约 15 分钟），本次请求未发送上游', 'Model "{model}" on provider "{name}" is in quota meltdown (repeated quota exhaustion; ~15 min cooldown); this request was not sent upstream', { model: finalModel, name: provider.name ?? providerId }),
+      t('冷却结束后自动恢复试回；或在「编辑服务」里为该模型配置 model_fallback 备用模型（熔断期间自动改发）', 'It retries the original model automatically after the cooldown; or configure a model_fallback mapping for it in "Edit Service" (traffic is auto-switched during meltdown)')
+    )
+    e.candidateSkip = true
+    e.cause = 'quota'
+    e.attemptNote = 'model_cooldown'
+    throw e
+  }
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
@@ -996,10 +1021,10 @@ export async function forwardWithFailover(
   // 逐候选 attempt 记录（日志 attempts 列）：真实转发记 status+ms，被跳过记 note 短码——
   // 排障时能看出「哪个候选因什么被跳过」，不再只有 replayed_from:<id> 一个 id 痕迹
   const attempts: LogAttempt[] = []
-  /** 候选失败/跳过的原因短码：抛出点已打标（UpstreamError.cause）的优先；传输层失败按 transport 分类 */
+  /** 候选失败/跳过的原因短码：抛出点已打标（attemptNote > UpstreamError.cause）的优先；传输层失败按 transport 分类 */
   const classifyAttemptError = (e: unknown): string | undefined => {
     if (!(e instanceof UpstreamError)) return 'connect_failed'
-    return e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
+    return e.attemptNote ?? e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
   }
   // 全量体浅扫描整链一次（9b2229f 回归修复）：此前此处无条件 topLevelModel 全量扫描 + 逐候选
   // rewriteModel 内再各扫一次（单候选常态链 2 次、N 候选 N+1 次）。改为算一次经 opts.bodyScan

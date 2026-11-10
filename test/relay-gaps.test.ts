@@ -13,6 +13,7 @@ import {
 } from '../src/gateway/relay.js'
 import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { buildRuntime, recordOutcome } from '../src/gateway/state.js'
+import { recordModelOutcome } from '../src/gateway/state/routing.js'
 import { setSecret } from '../src/config/secrets.js'
 import { fakeHome } from './helpers.js'
 import type { Config, ProfileConfig, ProviderConfig } from '../src/config/types.js'
@@ -454,6 +455,42 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       expect(r5.reason).toBe('fallback_to:mB')
       expect(countOf(mock.seen, 'mA')).toBe(4)
       expect(countOf(mock.seen, 'mB')).toBe(5)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('熔断且无映射的模型快速失败：跳过注定 402 的上游往返（attempt 记 model_cooldown），TTL 过期恢复真实调用', async () => {
+    const h = fakeHome()
+    // mZ 故意不在 model_fallback 映射里；mock 对 mZ 回 200——若快速失败缺席，请求会真实打上游
+    // 并拿到 200，status 断言即红（比「只数调用次数」对回归更敏感）
+    const mock = await startModelMock((model) =>
+      model === 'mZ' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      // 直灌 3 笔 (pa, mZ) 模型级 quota（与 relay 真实记账同入口）：第 3 笔触发 15min 熔断
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mZ', { ok: false, cls: 'quota' })
+      expect(rt.modelHealth?.get('pa\u0000mZ')?.meltdown_until).toBeDefined()
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).status).toBe(402)
+      expect((err as UpstreamError).cause).toBe('quota')
+      expect((err as UpstreamError).hint).toBeTruthy()
+      expect((err as UpstreamError).attempts).toEqual([expect.objectContaining({ provider: 'pa', note: 'model_cooldown' })])
+      expect(mock.seen).toEqual([]) // 熔断期零上游往返（402 由网关直接合成）
+      // TTL 拨到过去：恢复真实上游调用（现状回归——无映射模型照常发送）
+      ;(rt.modelHealth!.get('pa\u0000mZ')!).meltdown_until = Date.now() - 1
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never)
+      expect(r.status).toBe(200)
+      expect(mock.seen).toEqual(['mZ'])
     } finally {
       await mock.close()
       h.restore()
