@@ -77,6 +77,7 @@
 | docs/config-reference.md | reference | 查配置键（脚本生成，勿手编） |
 | docs/design.md | explanation | 架构、ADR、威胁模型（内部向，不翻译） |
 | docs/multi-machine-sync.md、deploy-cloud.md | how-to（runbook） | 特定任务照着做就能成 |
+| docs/examples/ | 样例文件 | 照抄即用的配置样例（如价目覆盖 `pricing.json`），复制进数据目录即生效；随新增样例登记 |
 | CHANGELOG.md | 发布记录 | 每个版本的用户可见变化 |
 | AGENTS.md、.agents/ 约定 | agent 约定 | **不是用户文档**，勿混入用户内容 |
 | .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
