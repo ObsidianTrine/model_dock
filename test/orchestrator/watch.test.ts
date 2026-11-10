@@ -1,7 +1,9 @@
 // watch 连续自治运行测试（mock 后端）：周期闭环（drain → scan）、stop 文件即停、
-// drift 降级自动退出、瞬时故障 blocked 卡的一次性有痕重探（投机执行）。
+// drift 降级自动退出、瞬时故障 blocked 卡的一次性有痕重探（投机执行）、
+// configPaused（workflow.json 漂移）期间周期跳过 autoapprove sweep（round5）。
 
 import { describe, expect, it } from 'vitest'
+import { spawn as spawnProc } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { appendEvent } from '../../.agents/scripts/orchestrator/events.mjs'
@@ -11,6 +13,30 @@ function submitCard(repo: string, id: string, overrides: Record<string, unknown>
   const cardFile = path.join(repo, `card-${id}.md`)
   fs.writeFileSync(cardFile, cardText({ id, ...overrides }))
   runOrch(repo, `submit "${cardFile}"`)
+}
+
+/** 异步 spawn watch 子进程（长跑观察用：测试中途改文件再收尸，runOrch 的 execSync 做不到）。 */
+function spawnWatch(repo: string, args: string[]) {
+  const orch = path.join(process.cwd(), '.agents', 'scripts', 'orchestrator.mjs')
+  const child = spawnProc(process.execPath, [orch, ...args], { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = ''
+  child.stdout.on('data', (c: Buffer) => (out += c.toString()))
+  child.stderr.on('data', (c: Buffer) => (out += c.toString()))
+  return { child, output: () => out }
+}
+
+/** Windows 上目标文件可能正被周期子进程瞬时打开：EBUSY/EPERM 退避重试写。 */
+async function writeRetry(p: string, data: string): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      fs.writeFileSync(p, data)
+      return
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code ?? ''
+      if (i >= 5 || !['EBUSY', 'EPERM', 'EACCES'].includes(code)) throw e
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
 }
 
 describe('orchestrator watch > 周期闭环', () => {
@@ -68,6 +94,70 @@ describe('orchestrator watch > 周期闭环', () => {
       repo.cleanup()
     }
   }, 60_000)
+})
+
+describe('orchestrator watch > configPaused 期间跳过 autoapprove sweep（round5）', () => {
+  it('workflow.json 漂移生效后周期不再跑 sweep：超时到期卡留人、被改的 autoApprove 配置不生效', async () => {
+    const repo = mkRepo({ workerBackend: 'mock', extra: { autoApprove: { enabled: true, timeoutMinutes: 1, maxAutoRetry: 1 } } })
+    try {
+      submitCard(repo.root, 'w-cg', { gate: 'L3' })
+      runOrch(repo.root, 'run w-cg --backend mock')
+      expect(readCard(repo.root, 'awaiting-human', 'w-cg')).toBeTruthy()
+      const wf = path.join(repo.root, '.agents', 'workflow.json')
+
+      // 长跑 watch（interval 0 连转）：先让它空转几拍（结论新鲜 → sweep 只报「窗口未过」）
+      const w = spawnWatch(repo.root, ['watch', '--max-cycles', '300', '--interval', '0', '--backend', 'mock'])
+      const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+      // 轮询等待而非固定 sleep：组合跑/慢机下周期节奏不可控，等条件成立再进下一步
+      const waitUntil = async (cond: () => boolean, timeoutMs = 45_000) => {
+        const deadline = Date.now() + timeoutMs
+        while (Date.now() < deadline) {
+          if (cond()) return
+          await sleep(200)
+        }
+        throw new Error(`waitUntil 超时（${timeoutMs}ms）`)
+      }
+      await waitUntil(() => w.output().includes('拍板窗口未过')) // 漂移前 sweep 照跑：卡有被 sweep 处理的资格
+
+      // 运行中注入漂移（模拟被改的授权面）：改 workflow.json → configPaused
+      const before = JSON.parse(fs.readFileSync(wf, 'utf8')) as Record<string, unknown>
+      await writeRetry(wf, JSON.stringify({ ...before, projectName: 'drift-injected' }))
+      // 首个 paused 周期含守卫宣布（钥匙串探测最长 5s）：等满两拍 skip 痕再进下一步
+      await waitUntil(() => w.output().split('本周期跳过 autoapprove sweep').length - 1 >= 2)
+
+      // 此时才把结论回拨成「超时到期」：若 sweep 未被闸住，下一拍就会自动合并
+      const evFile = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'w-cg', 'events.jsonl')
+      const lines = fs.readFileSync(evFile, 'utf8').split('\n').filter(Boolean)
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const e = JSON.parse(lines[i]) as { type?: string; ts?: string }
+        if (e.type === 'review_verdict') {
+          e.ts = new Date(Date.now() - 10 * 60_000).toISOString()
+          lines[i] = JSON.stringify(e)
+          break
+        }
+      }
+      await writeRetry(evFile, `${lines.join('\n')}\n`)
+      await waitUntil(() => w.output().split('本周期跳过 autoapprove sweep').length - 1 >= 3) // 回拨后至少再跑一拍 paused 周期
+
+      w.child.kill()
+      await new Promise<void>((resolve) => {
+        w.child.on('close', () => resolve())
+        setTimeout(() => {
+          try { w.child.kill('SIGKILL') } catch { /* 已退出 */ }
+          resolve()
+        }, 10_000)
+      })
+
+      const out = w.output()
+      expect(out).toContain('配置守卫：workflow.json 漂移生效中——本周期跳过 autoapprove sweep')
+      // sweep 被闸住：到期卡没有被自动合并（也不自动返工）
+      expect(readCard(repo.root, 'awaiting-human', 'w-cg')).toBeTruthy()
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'merged', 'w-cg.md'))).toBe(false)
+      expect(eventsOf(repo.root, 'w-cg').some((e) => e.type === 'autoapprove_decision')).toBe(false)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })
 
 describe('orchestrator watch > 瞬时故障 blocked 卡的有痕重探（投机执行）', () => {

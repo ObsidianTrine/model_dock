@@ -8,8 +8,9 @@
 //     ⑤ enabled=false → 只报告不动作（零事件零迁移）
 //     ⑥ --dry-run → 只报告不动作
 //     ⑦ drift 降级 → sweep 整体跳过 + autoapprove_skipped{drift_degraded} 留痕（二次去重）
+//     ⑧ scope_outside 落位的卡超时 → 不自动批示（红线⑤：范围失控不该静默合并）
 //   spec 分层超时：approve_to_build 超时 → 自动拆卡（progress.json 幂等锚）；rework 不动
-// fail-closed 四条红线是回归锚：没有审查结论的卡超时也绝不自动合并。
+// fail-closed 五条红线是回归锚：没有审查结论 / 范围失控的卡超时也绝不自动批示。
 
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
@@ -17,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { writeSpec } from '../../.agents/scripts/orchestrator/spec.mjs'
+import { appendEvent } from '../../.agents/scripts/orchestrator/events.mjs'
 import { cardText, eventsOf, mkRepo, runOrch } from './helpers.js'
 
 // timeoutMinutes=1：回拨 10 分钟的结论远超窗口；detached sweep（run 落位自动拉起）的
@@ -260,6 +262,33 @@ describe('orchestrator autoapprove > e2e（mock 闭环）', () => {
       repo.cleanup()
     }
   }, 180_000)
+
+  it('⑧ scope_outside 落位的卡超时不自动批示（红线⑤：范围失控不该静默合并）', () => {
+    const repo = mkRepo({ extra: { autoApprove: AA_CFG } })
+    try {
+      submitCard(repo.root, 'aa-scope')
+      fs.renameSync(path.join(queueDir(repo.root, 'pending'), 'aa-scope.md'), path.join(queueDir(repo.root, 'awaiting-human'), 'aa-scope.md'))
+      // 手造闸门现场：审查结论 blockers=0（推荐合并）+ 落位原因 scope_outside，均超拍板窗口
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'aa-scope')
+      fs.mkdirSync(logsDir, { recursive: true })
+      appendEvent(logsDir, 'task_accepted', {})
+      appendRewoundEvent(repo.root, 'aa-scope', { type: 'review_verdict', blockers: 0, suggestions: 0, notes: 0 })
+      appendRewoundEvent(repo.root, 'aa-scope', { type: 'awaiting_human', reason: 'scope_outside' }, 9)
+      const r = runOrch(repo.root, 'autoapprove')
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-scope')).toBe(true)
+      expect(cardIn(repo.root, 'merged', 'aa-scope')).toBe(false)
+      const evts = eventsOf(repo.root, 'aa-scope')
+      expect(evts.some((e) => e.type === 'autoapprove_skipped' && e.reason === 'scope_outside')).toBe(true)
+      expect(evts.some((e) => e.type === 'autoapprove_decision')).toBe(false) // 不合并也不返工
+      expect(r.stdout).toContain('范围失控留人')
+      // 二次 sweep：同一原因不重复留痕，也不动作
+      runOrch(repo.root, 'autoapprove')
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-scope')).toBe(true)
+      expect(eventsOf(repo.root, 'aa-scope').filter((e) => e.type === 'autoapprove_skipped' && e.reason === 'scope_outside')).toHaveLength(1)
+    } finally {
+      repo.cleanup()
+    }
+  })
 })
 
 describe('orchestrator autoapprove > spec 分层超时', () => {

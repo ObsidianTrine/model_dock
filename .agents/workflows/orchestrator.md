@@ -530,10 +530,10 @@ L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprov
 
 - `blockers=0` 或 `verdict=skipped`（fastlane）→ 自动合并（`doApprove source='auto'`，merged 事件带 auto 标记，计入 drift 回溯统计）；
 - `blockers>0` → 自动返工（retry，note「超时自动按审查结论返工（分层审核）」），**每卡限 maxAutoRetry 次**，超限留人；
-- **fail-closed 四条（不可关闭）**：① 没有 `review_verdict` 的卡超时也绝不动作；② 最后一条相关事件是 `review_engine_failed` 视同无结论；③ blockers>0 的卡永不自动合并、只限次返工；④ drift 降级期间 sweep 整体跳过（恢复只能人工 `drift --clear`，每卡留 `autoapprove_skipped` 痕）。推荐层不存在的场合一律留人。
+- **fail-closed 五条（不可关闭）**：① 没有 `review_verdict` 的卡超时也绝不动作；② 最后一条相关事件是 `review_engine_failed` 视同无结论；③ blockers>0 的卡永不自动合并、只限次返工；④ drift 降级期间 sweep 整体跳过（恢复只能人工 `drift --clear`，每卡留 `autoapprove_skipped` 痕）；⑤ scope_outside（范围失控）落位的卡超时也绝不自动批示——范围失控不该静默合并（与合并闸门同一条不变量），自动返工同样跳过，一律留人工拍板。推荐层不存在的场合一律留人。
 - 红线不动声明：feature 提案的 intake 自动提交拒绝逻辑（canSailSubmit/canAutoSubmit 的 feature 拒绝）零改动——超时委托只作用于「已进闭环、已过审查」的卡，不碰任何提案 intake 闸门。
 
-**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。
+**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍（**configGuard 漂移期间跳过**——被改的 autoApprove 配置不生效，与派发/规划同口径）；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。动作与落位通知开启 digest 聚合通报（`notify.digest.enabled`）时先进待发队列，由 `orch notify-digest --flush` 子命令合并成一条扁平通报发出（落位流程 detached 自动拉起；手动补发可直达；机制详见 D6.6）。
 
 ### D6.6 任务通报聚合（notify digest，2026-11-10）
 
