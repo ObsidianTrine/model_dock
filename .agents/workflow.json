@@ -60,6 +60,9 @@
     },
     "zcode-headless": {
       "max_tokens": 20000000
+    },
+    "codex-headless": {
+      "max_tokens": 20000000
     }
   },
   "tiers": {
