@@ -18,8 +18,8 @@ import {
 } from '../../.agents/scripts/orchestrator/fleet.mjs'
 import { resolveGatewayAdmin } from '../../.agents/scripts/orchestrator/tiers.mjs'
 
-// admin 面 mock：/v1/health（免鉴权探活）+ /config（buildConfigView 投影）+ /metrics（providers/meltdown）
-async function mockAdmin({ providers, harness, metricsProviders = {}, meltdown = [] } = {}) {
+// admin 面 mock：/v1/health（免鉴权探活）+ /config（buildConfigView 投影）+ /metrics（providers/meltdown/concurrency）
+async function mockAdmin({ providers, harness, metricsProviders = {}, meltdown = [], concurrency }: { providers?: unknown; harness?: unknown; metricsProviders?: unknown; meltdown?: unknown[]; concurrency?: unknown } = {}) {
   const server = http.createServer((req, res) => {
     let body = ''
     req.on('data', (c) => (body += c))
@@ -39,7 +39,8 @@ async function mockAdmin({ providers, harness, metricsProviders = {}, meltdown =
         res.end(JSON.stringify({ providers, profiles: [], harness }))
       } else if (req.url === '/_modeldock/metrics') {
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ event_loop_lag_ms: null, providers: metricsProviders, meltdown }))
+        // concurrency 缺省不下发（旧网关形态）：advisory 走缺失回落路径
+        res.end(JSON.stringify({ event_loop_lag_ms: null, providers: metricsProviders, meltdown, ...(concurrency !== undefined ? { concurrency } : {}) }))
       } else {
         res.writeHead(404)
         res.end('{}')
@@ -80,11 +81,15 @@ describe('resolveGatewayAdmin（admin 面地址解析）', () => {
 
 describe('fetchFleetState（快照拉取与压缩）', () => {
   it('config+metrics 合成：providers（含熔断标记）、harnesses 指向、meltdown 清单', async () => {
+    // providers 用真实网关形态（overview-view buildConfigView 投影：数组、条目自带 id + protocols）
     const gw = await mockAdmin({
-      providers: { up: { models: [{ id: 'm1' }, { id: 'm2' }] }, down2: { models: [] } },
+      providers: [
+        { id: 'up', protocol: 'openai', protocols: ['openai', 'anthropic'], models: [{ id: 'm1' }, { id: 'm2' }] },
+        { id: 'down2', protocol: 'openai', protocols: ['openai'], models: [] },
+      ],
       harness: [
-        { id: 'zcode', attached: true, pointing: 'gateway' },
-        { id: 'claude-code', attached: true, pointing: 'other' },
+        { id: 'zcode', attached: true, pointing: 'gateway', protocols: null },
+        { id: 'claude-code', attached: true, pointing: 'other', protocols: ['anthropic'] },
       ],
       metricsProviders: { up: { count: 3, last_ms: 42 } },
       meltdown: [{ provider: 'down2', class: 'quota', remaining_ms: 1000 }],
@@ -94,14 +99,33 @@ describe('fetchFleetState（快照拉取与压缩）', () => {
       const s = await fetchFleetState({ gatewayAdmin: true })
       expect(s.mode).toBe('ok')
       expect(s.providers).toEqual([
-        { id: 'up', models: 2, down: false, lastMs: 42 },
-        { id: 'down2', models: 0, down: true, lastMs: null },
+        { id: 'up', models: 2, down: false, lastMs: 42, protocols: ['openai', 'anthropic'] },
+        { id: 'down2', models: 0, down: true, lastMs: null, protocols: ['openai'] },
       ])
       expect(s.harnesses).toEqual([
-        { id: 'zcode', attached: true, pointing: 'gateway' },
-        { id: 'claude-code', attached: true, pointing: 'other' },
+        { id: 'zcode', attached: true, pointing: 'gateway', protocols: null },
+        { id: 'claude-code', attached: true, pointing: 'other', protocols: ['anthropic'] },
       ])
       expect(s.meltdown).toEqual([{ provider: 'down2', class: 'quota' }])
+    } finally {
+      gw.close()
+      setEnv(undefined)
+    }
+  })
+
+  it('providers 兼容 map 形态（防御性兜底）；protocols 缺失/非数组 → null（fail-open 口径）', async () => {
+    const gw = await mockAdmin({
+      providers: { up: { models: [{ id: 'm1' }] } },
+      harness: [{ id: 'zcode', attached: true, pointing: 'gateway' }],
+      metricsProviders: {},
+      meltdown: [],
+    })
+    setEnv(gw.url)
+    try {
+      const s = await fetchFleetState({ gatewayAdmin: true })
+      expect(s.mode).toBe('ok')
+      expect(s.providers).toEqual([{ id: 'up', models: 1, down: false, lastMs: null, protocols: null }])
+      expect(s.harnesses).toEqual([{ id: 'zcode', attached: true, pointing: 'gateway', protocols: null }])
     } finally {
       gw.close()
       setEnv(undefined)
@@ -284,6 +308,68 @@ describe('cmdRun E2E：海况观测装配', () => {
       expect(eventsOf(repo.root, 'fleet-down').some((e) => e.type === 'fleet_observed')).toBe(false)
     } finally {
       repo.cleanup()
+    }
+  }, 120_000) // 两次 runOrch 子进程（Windows 上含 CLI 探测与 git init），20s 默认超时不够（基线实测 ~28s）
+})
+
+describe('并发水位 advisory（2026-11 concurrency signal，纯增量只照亮不拦截）', () => {
+  it('fetchFleetState：metrics.concurrency → state.concurrency advisory（排队计数 + 最大占比，limit=0 不进分母）；旧网关缺段 → null', async () => {
+    const gw = await mockAdmin({
+      providers: { up: { models: [{ id: 'm1' }] }, down2: { models: [] } },
+      harness: [{ id: 'zcode', attached: true, pointing: 'gateway' }],
+      concurrency: {
+        up: { in_flight: 3, queued: 2, limit: 3 },
+        down2: { in_flight: 1, queued: 0, limit: 0 }, // 不限上限：不进占比分母
+        idle: { in_flight: 0, queued: 0, limit: 4 },
+      },
+    })
+    setEnv(gw.url)
+    try {
+      const s = await fetchFleetState({ gatewayAdmin: true })
+      expect(s.mode).toBe('ok')
+      expect(s.concurrency).toEqual({ queued_providers: 1, max_in_flight_ratio: 1 })
+    } finally {
+      gw.close()
+      setEnv(undefined)
+    }
+    const gwOld = await mockAdmin({ providers: { up: { models: [] } }, harness: [] }) // 无 concurrency 段
+    setEnv(gwOld.url)
+    try {
+      const s2 = await fetchFleetState({ gatewayAdmin: true })
+      expect(s2.concurrency).toBeNull()
+    } finally {
+      gwOld.close()
+      setEnv(undefined)
+    }
+  })
+
+  it('renderFleetLine：有水位信号才加 advisory 段；全队空闲/无段输出与历史逐字节一致', () => {
+    const base = { mode: 'ok' as const, observedAt: 't', providers: [], harnesses: [], meltdown: [] }
+    expect(renderFleetLine({ ...base, concurrency: { queued_providers: 2, max_in_flight_ratio: 0.75 } })).toContain('并发水位：排队 2 服务 · 峰值占用 75%')
+    expect(renderFleetLine({ ...base, concurrency: { queued_providers: 0, max_in_flight_ratio: 0.25 } })).toContain('峰值占用 25%')
+    expect(renderFleetLine({ ...base, concurrency: { queued_providers: 0, max_in_flight_ratio: null } })).not.toContain('并发水位')
+    expect(renderFleetLine(base)).not.toContain('并发水位')
+    expect(renderFleetLine(base)).toContain('服务 0 个')
+  })
+
+  it('observeFleetForRun：fleet_observed 事件带 concurrency advisory（纯增量，既有字段不动）', async () => {
+    const gw = await mockAdmin({
+      providers: { up: { models: [{ id: 'm1' }] } },
+      harness: [{ id: 'zcode', attached: true, pointing: 'gateway' }],
+      concurrency: { up: { in_flight: 2, queued: 1, limit: 4 } },
+    })
+    setEnv(gw.url)
+    try {
+      const r = await observeFleetForRun({ gatewayAdmin: true }, { backend: 'zcode-headless' })
+      expect(r.lines[0]).toContain('并发水位')
+      expect(r.event).toMatchObject({
+        mode: 'ok',
+        harnesses: { zcode: 'gateway' },
+        concurrency: { queued_providers: 1, max_in_flight_ratio: 0.5 },
+      })
+    } finally {
+      gw.close()
+      setEnv(undefined)
     }
   })
 })

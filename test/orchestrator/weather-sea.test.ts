@@ -163,6 +163,60 @@ describe('weather > 海况快照提取（seaSnapshotFromMetricsJson）', () => {
   })
 })
 
+describe('weather > 并发水位 advisory（2026-11 concurrency signal，纯增量只照亮不拦截）', () => {
+  it('seaSnapshotFromMetricsJson：concurrency 段 → queued_providers 计数 + max_in_flight_ratio（limit=0 不进分母；全空 → ratio null）', () => {
+    const s = seaSnapshotFromMetricsJson({
+      concurrency: {
+        busy: { in_flight: 4, queued: 2, limit: 4 },
+        partial: { in_flight: 1, queued: 0, limit: 4 },
+        unlimited: { in_flight: 9, queued: 1, limit: 0 }, // 不限上限：不进占比分母，但计排队
+        idle: { in_flight: 0, queued: 0, limit: 3 }, // 缺席=空闲口径：不排队不拉占比
+      },
+    }, 1_000)
+    expect(s.concurrency).toEqual({ queued_providers: 2, max_in_flight_ratio: 1 })
+    const s2 = seaSnapshotFromMetricsJson({ concurrency: { a: { in_flight: 0, queued: 0, limit: 0 } } }, 1_000)
+    expect(s2.concurrency).toEqual({ queued_providers: 0, max_in_flight_ratio: null })
+  })
+
+  it('seaSnapshotFromMetricsJson：缺 concurrency 段/形态异常 → advisory null（旧网关按缺失处理，不抛）', () => {
+    expect(seaSnapshotFromMetricsJson({}, 2_000).concurrency).toBeNull()
+    expect(seaSnapshotFromMetricsJson({ concurrency: [] }, 2_000).concurrency).toBeNull() // 数组形态视同缺失
+    expect(seaSnapshotFromMetricsJson({ concurrency: { a: 'garbage' } }, 2_000).concurrency).toEqual({ queued_providers: 0, max_in_flight_ratio: null })
+  })
+
+  it('fetchSeaSnapshot：metrics 带 concurrency 段 → 快照 advisory 正确；storm 等既有位不受影响', async () => {
+    const m = await mockMetrics({
+      payload: {
+        ...METRICS_PAYLOAD,
+        concurrency: { 'prov-a': { in_flight: 2, queued: 3, limit: 8 }, 'prov-b': { in_flight: 0, queued: 0, limit: 0 } },
+      },
+    })
+    setGatewayEnv(m.url)
+    try {
+      const snap = await fetchSeaSnapshot({ gatewayAdmin: true }, { now: 1_000, timeoutMs: 2000 })
+      expect(snap.mode).toBe('ok')
+      expect((snap as { storm: boolean }).storm).toBe(true) // 权威风暴位照旧（advisory 零依赖）
+      expect((snap as { concurrency: unknown }).concurrency).toEqual({ queued_providers: 1, max_in_flight_ratio: 0.25 })
+    } finally {
+      clearGatewayEnv()
+      await m.close()
+    }
+  })
+
+  it('fetchSeaSnapshot：metrics 缺 concurrency 段（旧网关）→ 快照 advisory null，其余字段照常', async () => {
+    const m = await mockMetrics({ payload: METRICS_PAYLOAD }) // METRICS_PAYLOAD 无 concurrency
+    setGatewayEnv(m.url)
+    try {
+      const snap = await fetchSeaSnapshot({ gatewayAdmin: true }, { now: 1_000, timeoutMs: 2000 })
+      expect(snap.mode).toBe('ok')
+      expect((snap as { concurrency: unknown }).concurrency).toBeNull()
+    } finally {
+      clearGatewayEnv()
+      await m.close()
+    }
+  })
+})
+
 describe('weather > fetchSeaSnapshot（async，gatewayAdmin 门控 + 节流缓存）', () => {
   it('ok 快照 + 5min 节流（第二次调用零新增请求）；负缓存（非 200）同样节流', async () => {
     const m = await mockMetrics({ payload: METRICS_PAYLOAD })

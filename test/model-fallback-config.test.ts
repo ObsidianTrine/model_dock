@@ -30,6 +30,10 @@ describe('priceDiffRatios / priceWithinTolerance（价格闸门算式）', () =>
     expect(priceWithinTolerance(P(100, 30), P(105, 31.5))).toBe(true)
     expect(priceWithinTolerance(P(100, 30), P(105.1, 30))).toBe(false)
     expect(priceWithinTolerance(P(100, 30), P(100, 30.01), 0.05)).toBe(true)
+    // 十进制语义恰好 5%（2 与 2.1）：二进制浮点减除噪声算出 0.05000000000000004，
+    // 无 epsilon 时被判越界且报错显示「差 5.0%」自相矛盾——容差比较须放宽 1e-9
+    expect(priceWithinTolerance(P(2, 8), P(2.1, 8.4))).toBe(true)
+    expect(priceWithinTolerance(P(2, 8), P(2.11, 8))).toBe(false) // 5.5%：真超限仍拒
     // cache_read 差异不影响闸门（计费时缺省回落 input 价）
     expect(priceWithinTolerance({ input: 10, output: 10, cache_read: 1 }, { input: 10, output: 10, cache_read: 2 })).toBe(true)
   })
@@ -85,7 +89,7 @@ describe('resolveModelFallback（模型级容灾映射校验）', () => {
   it('价格差超限：报错带两档百分比与上限；闸门边界值放行', () => {
     const dearer = { 'glm-5.3-flash': P(2, 8), 'glm-5.2': P(2, 9) } // output 差 12.5%
     expect(() => resolveModelFallback({ 'glm-5.3-flash': 'glm-5.2' }, 'v', ctx({ lookupPrice: priceTable(dearer) }))).toThrow(/超限|too wide/)
-    // 边界 5%：用整数价避免浮点减法噪声（10/200 与 40/800 均精确等于 0.05）
+    // 边界 5%：整数价（10/200 与 40/800 均精确等于 0.05）；十进制噪声由闸门 epsilon 兜住（见算式测试）
     const edge = { 'glm-5.3-flash': P(200, 800), 'glm-5.2': P(210, 840) }
     expect(resolveModelFallback({ 'glm-5.3-flash': 'glm-5.2' }, 'v', ctx({ lookupPrice: priceTable(edge) }))).toBeDefined()
   })
