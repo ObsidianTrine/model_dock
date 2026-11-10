@@ -294,28 +294,37 @@ export async function renewTaskHarness(ga, harnessId, ttlMinutes, { timeoutMs = 
  */
 export function createExpiryRenewal({ ga, ttlMinutes, liveHarnessId, terminalState, appendEvent, log = () => {}, timeoutMs = RENEW_TIMEOUT_MS } = {}) {
   return (w) => {
-    const harnessId = typeof liveHarnessId === 'function' ? liveHarnessId() : null;
-    if (!harnessId || !w || w.harness_id !== harnessId) return Promise.resolve();
-    if (typeof terminalState === 'function' && terminalState() === true) return Promise.resolve();
-    appendEvent('harness_expiry_warning', { harness_id: w.harness_id, expires_at: w.expires_at, remaining_ms: w.remaining_ms, threshold_ms: w.threshold_ms });
-    const mins = Math.max(1, Math.ceil((w.remaining_ms ?? 0) / 60000));
-    log(`⏳ 一次性凭据临期：harness=${w.harness_id} 剩余约 ${mins} 分钟（阈值 ${Math.round((w.threshold_ms ?? 0) / 60000)} 分钟）——触发网关续期（失败只留痕，尽快收尾落位）`);
-    return (async () => {
-      try {
-        const rr = await renewTaskHarness(ga, harnessId, ttlMinutes, { timeoutMs });
-        if (rr.ok) {
-          appendEvent('harness_renewed', { harness_id: rr.id ?? harnessId, expires_at: rr.expiresAt, ttl_minutes: rr.ttlMinutes });
-          log(`♻ 一次性凭据已续期：harness=${harnessId} 新到期 ${rr.expiresAt ?? '未知'}（网关只延不缩；下一轮 usage 即新阈值实例，可再告警/再续）`);
-        } else {
-          appendEvent('harness_renew_failed', { harness_id: harnessId, reason: rr.reason });
-          log(`⚠ 一次性凭据续期失败（${rr.reason}）——fail-open 不重试，凭据按原到期继续，临期前尽量收尾落位避免中途 401`);
+    // 整体 try/catch（P2 修正 2026-11-11）：appendEvent/log 的同步段（Windows EBUSY 等写
+    // 失败）在回调里直接抛——回调经 poller fire-and-forget 消费，同步抛与异步 rejection
+    // 同样变成 unhandledRejection 带崩整个 run 进程（fail-open 红线）。保守闸的 fs 读
+    // （liveHarnessId/terminalState 闭包查卡状态）也在兜底面内。
+    try {
+      const harnessId = typeof liveHarnessId === 'function' ? liveHarnessId() : null;
+      if (!harnessId || !w || w.harness_id !== harnessId) return Promise.resolve();
+      if (typeof terminalState === 'function' && terminalState() === true) return Promise.resolve();
+      appendEvent('harness_expiry_warning', { harness_id: w.harness_id, expires_at: w.expires_at, remaining_ms: w.remaining_ms, threshold_ms: w.threshold_ms });
+      const mins = Math.max(1, Math.ceil((w.remaining_ms ?? 0) / 60000));
+      log(`⏳ 一次性凭据临期：harness=${w.harness_id} 剩余约 ${mins} 分钟（阈值 ${Math.round((w.threshold_ms ?? 0) / 60000)} 分钟）——触发网关续期（失败只留痕，尽快收尾落位）`);
+      return (async () => {
+        try {
+          const rr = await renewTaskHarness(ga, harnessId, ttlMinutes, { timeoutMs });
+          if (rr.ok) {
+            appendEvent('harness_renewed', { harness_id: rr.id ?? harnessId, expires_at: rr.expiresAt, ttl_minutes: rr.ttlMinutes });
+            log(`♻ 一次性凭据已续期：harness=${harnessId} 新到期 ${rr.expiresAt ?? '未知'}（网关只延不缩；下一轮 usage 即新阈值实例，可再告警/再续）`);
+          } else {
+            appendEvent('harness_renew_failed', { harness_id: harnessId, reason: rr.reason });
+            log(`⚠ 一次性凭据续期失败（${rr.reason}）——fail-open 不重试，凭据按原到期继续，临期前尽量收尾落位避免中途 401`);
+          }
+        } catch (e) {
+          // 双保险：renewTaskHarness 本身 fail-open 不抛，这里兜 appendEvent/log 等意外——回调经
+          // poller fire-and-forget 消费，未处理的 rejection 会带崩整个 run 进程（fail-open 红线）
+          log(`⚠ 一次性凭据续命意外失败（${e?.message ?? e}）——fail-open 继续跑`);
         }
-      } catch (e) {
-        // 双保险：renewTaskHarness 本身 fail-open 不抛，这里兜 appendEvent/log 等意外——回调经
-        // poller fire-and-forget 消费，未处理的 rejection 会带崩整个 run 进程（fail-open 红线）
-        log(`⚠ 一次性凭据续命意外失败（${e?.message ?? e}）——fail-open 继续跑`);
-      }
-    })();
+      })();
+    } catch (e) {
+      log(`⚠ 一次性凭据临期处置意外失败（${e?.message ?? e}）——fail-open 继续跑（预警/续期本轮跳过，凭据按原到期继续）`);
+      return Promise.resolve();
+    }
   };
 }
 
@@ -363,7 +372,12 @@ export function startMeasuredFuelPoller({ budget, cfg, harness, intervalMs = MEA
       } finally {
         inFlight = false;
       }
-    })();
+    })().catch((e) => {
+      // 双保险收口（P2 修正 2026-11-11）：onExpiryWarning 同步段与观测主体的任何异常都不
+      // 出 poller——fire-and-forget 的 IIFE 只配 finally 时异常仍成 unhandledRejection 带
+      // 崩整个 run 进程。fail-open 名副其实：下一轮照常轮询。
+      try { log(`⚠ 实测油量轮询单轮失败（${e?.message ?? e}）——fail-open 继续跑`); } catch { /* log 再抛也吞 */ }
+    });
   }, intervalMs);
   timer.unref?.();
   log(`⛽ 实测油量轮询已启动：harness=${harness} ← ${adm.base}/_modeldock/harness-usage（60s 节流，网关实测口径；取不到时自报账兜底${expiryWatcher ? '；一次性凭据临期预警已接线' : ''}）`);

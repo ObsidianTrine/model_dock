@@ -13,6 +13,7 @@ import {
   classifyOrphan,
   cooldownPassed,
   isTransientBlocked,
+  partitionRunningOrphans,
   pickAutoResumeCandidates,
   pickOrphanResumeCandidates,
   scanBlockedCards,
@@ -565,6 +566,52 @@ describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () =>
   })
 })
 
+describe('orchestrator autoresume > partitionRunningOrphans 孤儿判定双条件（P1-a）', () => {
+  const crashEvents = () => [ev('task_accepted'), ev('worker_spawned', { pid: 1 })]
+  const freshLock = (pid: number | null) => ({ pid, beat: Date.now() })
+  const staleLock = (pid: number | null) => ({ pid, beat: Date.now() - 120_000 })
+
+  it('beat 静默 + 属主 pid 存活（spawnSync 装依赖冻结事件循环的活 run）→ silentLive 不动卡', () => {
+    const cards = [{ id: 'frozen', meta: {}, events: crashEvents() }]
+    const { orphans, silentLive } = partitionRunningOrphans(cards, {
+      lockOf: () => staleLock(process.pid),
+      pidAlive: (p) => p === process.pid,
+    })
+    expect(silentLive).toEqual(['frozen'])
+    expect(orphans).toEqual([])
+  })
+
+  it('beat 静默 + 属主 pid 已死 → 孤儿（照常进自愈）', () => {
+    const cards = [{ id: 'orph', meta: {}, events: crashEvents() }]
+    const { orphans, silentLive } = partitionRunningOrphans(cards, {
+      lockOf: () => staleLock(999_999_999),
+      pidAlive: () => false,
+    })
+    expect(orphans.map((c) => c.id)).toEqual(['orph'])
+    expect(silentLive).toEqual([])
+  })
+
+  it('pid 缺失/不可探测（无锁 / 旧版锁无 pid / 探活抛错）→ 回退旧口径当孤儿（保守不倒退）', () => {
+    const cards = [{ id: 'a', meta: {}, events: crashEvents() }, { id: 'b', meta: {}, events: crashEvents() }, { id: 'c', meta: {}, events: crashEvents() }]
+    const { orphans, silentLive } = partitionRunningOrphans(cards, {
+      lockOf: (id: string) => (id === 'a' ? null : id === 'b' ? staleLock(null) : (() => { throw new Error('probe boom') })()),
+      pidAlive: () => true,
+    })
+    expect(orphans.map((c) => c.id)).toEqual(['a', 'b', 'c'])
+    expect(silentLive).toEqual([])
+  })
+
+  it('beat 新鲜（活跃卡）两个列表都不进', () => {
+    const cards = [{ id: 'live', meta: {}, events: crashEvents() }]
+    const { orphans, silentLive } = partitionRunningOrphans(cards, {
+      lockOf: () => freshLock(process.pid),
+      pidAlive: () => true,
+    })
+    expect(orphans).toEqual([])
+    expect(silentLive).toEqual([])
+  })
+})
+
 describe('orchestrator autoresume > scanRunningCards 扫描（读不了跳过并计入 unreadable）', () => {
   it('running 卡带 meta/events 备齐；损坏卡进 unreadable；total 为全量', () => {
     const repo = mkRepo()
@@ -603,6 +650,16 @@ function seedLiveLock(repo: string, id: string) {
   const p = path.join(repo, '.agents', 'orchestrator', `.run-${id}.lock`)
   fs.mkdirSync(path.dirname(p), { recursive: true })
   fs.writeFileSync(p, JSON.stringify({ pid: process.pid, task: id, cmd: 'test', acquired_at: new Date().toISOString(), beat: Date.now() }))
+}
+
+/** 指定 pid 与心跳年龄的锁（P1-a 双条件用例：beat 静默 × pid 存活/死亡/缺失）。 */
+function seedLock(repo: string, id: string, pid: number | null, beatAgeMs: number) {
+  const p = path.join(repo, '.agents', 'orchestrator', `.run-${id}.lock`)
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  fs.writeFileSync(
+    p,
+    JSON.stringify({ ...(pid != null ? { pid } : {}), task: id, cmd: 'test', acquired_at: new Date().toISOString(), beat: Date.now() - beatAgeMs }),
+  )
 }
 
 describe('orchestrator autoresume > 孤儿自愈 drain 集成（三分支）', () => {
@@ -703,4 +760,47 @@ describe('orchestrator autoresume > 孤儿自愈 drain 集成（三分支）', (
       repo.cleanup()
     }
   })
+
+  it('P1-a 双条件：beat 静默但属主存活只观测不动卡；属主已死照常自愈；pid 缺失回退孤儿口径', () => {
+    const repo = mkRepo()
+    try {
+      // ① 活 run（pid=测试进程）心跳静默 2min——spawnSync 装依赖冻结事件循环的误判现场
+      seedRunning(repo.root, 'frozen', [
+        { ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'task_accepted', backend: 'mock' },
+        { ts: '2026-11-01T01:01:00.000+08:00', seq: 2, type: 'worker_spawned', backend: 'mock', pid: process.pid },
+      ])
+      seedLock(repo.root, 'frozen', process.pid, 120_000)
+      // ② 心跳静默且属主已死 → 孤儿口径不倒退，transient 崩溃族自动续
+      seedRunning(repo.root, 'deadpid', [
+        { ts: '2026-11-01T02:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 106 },
+        { ts: '2026-11-01T02:10:00.000+08:00', seq: 2, type: 'blocked', reason: 'HTTP 429 too many requests' },
+        { ts: '2026-11-01T03:00:00.000+08:00', seq: 3, type: 'worker_spawned', backend: 'mock', pid: 107 },
+      ])
+      seedLock(repo.root, 'deadpid', 999_999_999, 120_000)
+      // ③ pid 缺失（探活不可判定）→ 回退旧口径当孤儿
+      seedRunning(repo.root, 'legacy', [
+        { ts: '2026-11-01T04:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 108 },
+        { ts: '2026-11-01T04:10:00.000+08:00', seq: 2, type: 'blocked', reason: 'HTTP 429 too many requests' },
+        { ts: '2026-11-01T05:00:00.000+08:00', seq: 3, type: 'worker_spawned', backend: 'mock', pid: 109 },
+      ])
+      seedLock(repo.root, 'legacy', null, 120_000)
+
+      const run = runOrch(repo.root, 'drain --backend mock')
+      // ① 只观测：卡原地不动、零 auto_resume，观测行 + fleet 事件留痕
+      expect(run.stdout).toContain('心跳静默但属主进程仍存活')
+      expect(run.stdout).toContain('frozen')
+      expect(readCard(repo.root, 'running', 'frozen')).toBeTruthy()
+      expect(eventsOf(repo.root, 'frozen').map((e) => e.type)).not.toContain('auto_resume')
+      const fleet = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'fleet.jsonl'), 'utf8')
+      expect(fleet).toContain('orphan_heal_beat_silent')
+      // ② 属主已死：照常自动续（awaiting-human，与无锁孤儿同路径）
+      expect(run.stdout).toContain('自动续孤儿卡 deadpid')
+      expect(readCard(repo.root, 'awaiting-human', 'deadpid')).toBeTruthy()
+      // ③ pid 缺失：回退孤儿口径同样自愈
+      expect(run.stdout).toContain('自动续孤儿卡 legacy')
+      expect(readCard(repo.root, 'awaiting-human', 'legacy')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })

@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import { TRANSIENT_RE } from './transient.mjs';
 import { parseCard, listCards, cardPath } from './queue.mjs';
 import { logDir, readEvents, toIsoLocal } from './events.mjs';
+import { taskLockLooksLive } from './task-lock.mjs';
 
 /** 每卡自动续冷却缺省值：24h（workflow.json autoResume.cooldownHours 可调，须正整数）。 */
 export const DEFAULT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -192,8 +193,9 @@ export function autoResumedAtNow() {
 // ---------------------------------------------------------------------------
 // 孤儿 running 卡自愈（2026-11 长跑自治）：blocked 通道覆盖不到的形态——sail/drain
 // 单进程被硬杀（kill -9/断电/崩溃）后卡还挂在 running/，状态「在跑」而实际无进程，
-// pending 非空才 drain 的入口永远轮不到它。调度入口（drain/watch/nightly，获得调度器
-// 锁后）扫 running/，任务锁判活分三类：活跃卡跳过 / transient 族自动续 / 其余落 blocked。
+// pending 非空才 drain 的入口永远轮不到它。调度入口（drain/watch/nightly/sail——sail
+// 持锁全程、drain 子进程继承锁豁免，须自扫，2026-11-11 P2-c 补位）扫 running/，任务锁
+// 判活分三类：活跃卡跳过 / transient 族自动续 / 其余落 blocked。
 // ---------------------------------------------------------------------------
 
 /**
@@ -254,6 +256,32 @@ export function pickOrphanResumeCandidates(runningCards, opts = {}) {
   }
   eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return eligible.slice(0, maxPerRun);
+}
+
+/**
+ * 孤儿判定分区（P1-a 双条件，2026-11-11；纯函数便于单测，锁读取与 pid 探活由调用方注入）：
+ *   orphans     — 真孤儿候选：无锁/锁损坏、beat 静默且属主 pid 已死亡、pid 缺失或探活
+ *                 不可判定（后两者回退旧口径保守当孤儿——防孤儿漏救，不倒退）；
+ *   silentLive  — 心跳静默但属主进程仍存活：spawnSync（npm ci / ensureWorktree）会冻结
+ *                 事件循环停更心跳 >60s，只看 beat 会把装依赖中的活 run 误判孤儿 →
+ *                 自动续/落 blocked 后双 worker 同 worktree。观测类，调用方只落观测
+ *                 事件与 log，绝不动卡。
+ * beat 新鲜（taskLockLooksLive 为真）的活跃卡两个列表都不进（原有跳过语义）。
+ */
+export function partitionRunningOrphans(candidates, { lockOf, pidAlive }) {
+  const orphans = [];
+  const silentLive = [];
+  for (const c of Array.isArray(candidates) ? candidates : []) {
+    if (!c || typeof c.id !== 'string') continue;
+    let lock = null;
+    try { lock = lockOf(c.id); } catch { lock = null; }
+    if (lock && taskLockLooksLive(lock)) continue;
+    let ownerAlive = false;
+    try { ownerAlive = Number.isInteger(lock?.pid) && pidAlive(lock.pid) === true; } catch { ownerAlive = false; }
+    if (ownerAlive) silentLive.push(c.id);
+    else orphans.push(c);
+  }
+  return { orphans, silentLive };
 }
 
 /**
