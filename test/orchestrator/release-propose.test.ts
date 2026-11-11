@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
 import { githubRepoBase, parseCommit, bumpLevel, incVersion, extractUnreleased, isProductCommit, commitFiles } from '../../.agents/scripts/orchestrator/release-propose.mjs'
-import { mkRepo, git, runOrch, tryOrch } from './helpers.js'
+import { mkRepo, git, runOrchInproc } from './helpers.js'
 
 describe('orchestrator release-propose > 纯函数', () => {
   it('parseCommit：前缀/scope/breaking 标记/body BREAKING CHANGE', () => {
@@ -103,13 +103,13 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     return repo
   }
 
-  it('feat 提交 → 建议 minor；提案文件落盘且含盘点/链接表/下一步；CHANGELOG 保持只读', () => {
+  it('feat 提交 → 建议 minor；提案文件落盘且含盘点/链接表/下一步；CHANGELOG 保持只读', async () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'commit --allow-empty -m "feat(ui): 新功能A"')
       git(repo.root, 'commit --allow-empty -m "fix: 修复B"')
       git(repo.root, 'commit --allow-empty -m "随手提交无前缀"')
-      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      const out = await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.1.0')
       expect(out.stdout).toContain('上个已发布 tag: v1.0.0')
       expect(out.stdout).toContain('feat 1 / fix 1 / breaking 0')
@@ -131,12 +131,12 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     }
   })
 
-  it('无远端 → 链接表行降级为提示行（不猜 compare URL）', () => {
+  it('无远端 → 链接表行降级为提示行（不猜 compare URL）', async () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'remote remove origin')
       git(repo.root, 'commit --allow-empty -m "feat: 新功能"')
-      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      const out = await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.1.0')
       const dir = path.join(repo.root, '.agents', 'orchestrator', 'release-proposals')
       const files = fs.readdirSync(dir).filter((f) => f.startsWith('v1.1.0-'))
@@ -148,36 +148,36 @@ describe('orchestrator release-propose > CLI 端到端', () => {
     }
   })
 
-  it('fix-only → patch；显式大版本指定（versionHint 合法递增）', () => {
+  it('fix-only → patch；显式大版本指定（versionHint 合法递增）', async () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'commit --allow-empty -m "fix: 只修不发新功能"')
-      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('发版提案 v1.0.1')
+      expect((await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)).stdout).toContain('发版提案 v1.0.1')
       // 0.x breaking 惯例由 bumpLevel 纯函数覆盖；CLI 自动档位始终基于最新 tag（v1.0.0）
       git(repo.root, 'commit --allow-empty -m "feat!: 破坏性改动"')
-      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('发版提案 v2.0.0')
-      expect(runOrch(repo.root, 'release-propose 2.1.0', SKIP_REMOTE).stdout).toContain('发版提案 v2.1.0')
+      expect((await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)).stdout).toContain('发版提案 v2.0.0')
+      expect((await runOrchInproc(repo.root, 'release-propose 2.1.0', SKIP_REMOTE)).stdout).toContain('发版提案 v2.1.0')
     } finally {
       repo.cleanup()
     }
   })
 
-  it('versionHint：非 semver / 不递增 → exit 1 可操作报错', () => {
+  it('versionHint：非 semver / 不递增 → exit 1 可操作报错', async () => {
     const repo = seedRepo()
     try {
       git(repo.root, 'commit --allow-empty -m "feat: x"')
-      expect(tryOrch(repo.root, 'release-propose 1.x', SKIP_REMOTE).status).toBe(1)
-      expect(tryOrch(repo.root, 'release-propose 1.0.0', SKIP_REMOTE).stderr).toContain('不大于最近已发布')
-      expect(tryOrch(repo.root, 'release-propose 0.9.0', SKIP_REMOTE).stderr).toContain('不大于最近已发布')
+      expect((await runOrchInproc(repo.root, 'release-propose 1.x', SKIP_REMOTE)).status).toBe(1)
+      expect((await runOrchInproc(repo.root, 'release-propose 1.0.0', SKIP_REMOTE)).stderr).toContain('不大于最近已发布')
+      expect((await runOrchInproc(repo.root, 'release-propose 0.9.0', SKIP_REMOTE)).stderr).toContain('不大于最近已发布')
     } finally {
       repo.cleanup()
     }
   })
 
-  it('无 tag / 无可发内容 → 可操作报错与空态提示', () => {
+  it('无 tag / 无可发内容 → 可操作报错与空态提示', async () => {
     const empty = mkRepo() // 无任何 v* tag
     try {
-      const r = tryOrch(empty.root, 'release-propose')
+      const r = await runOrchInproc(empty.root, 'release-propose')
       expect(r.status).toBe(1)
       expect(r.stderr).toContain('没有任何 v* 版本 tag')
     } finally {
@@ -191,7 +191,7 @@ describe('orchestrator release-propose > CLI 端到端', () => {
       // tag 移到最新提交：v1.0.0..develop 归零，与「无未发布段」共同构成空态
       git(clean.root, 'tag -d v1.0.0')
       git(clean.root, 'tag -a v1.0.0 -m v1.0.0 HEAD')
-      const out = runOrch(clean.root, 'release-propose')
+      const out = await runOrchInproc(clean.root, 'release-propose')
       expect(out.stdout).toContain('没有可发布内容')
     } finally {
       clean.cleanup()
@@ -213,7 +213,7 @@ describe('orchestrator release-propose > 产品/基建分类（用户决策 2026
     return repo
   }
 
-  it('产品+基建混合：产品进「产品侧」节并计档位，基建单独备查节不进 CHANGELOG', () => {
+  it('产品+基建混合：产品进「产品侧」节并计档位，基建单独备查节不进 CHANGELOG', async () => {
     const repo = seedClean()
     try {
       fs.mkdirSync(path.join(repo.root, 'src'), { recursive: true })
@@ -224,7 +224,7 @@ describe('orchestrator release-propose > 产品/基建分类（用户决策 2026
       fs.writeFileSync(path.join(repo.root, '.agents', 'notes.md'), 'note\n')
       git(repo.root, 'add -A')
       git(repo.root, 'commit -m "feat(orch): 基建能力"')
-      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      const out = await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.1.0') // 产品 feat 计档位 → minor（基建 feat 不计）
       expect(out.stdout).toContain('产品侧信号: feat 1 / fix 0 / breaking 0')
       expect(out.stdout).toContain('产品 1 + 基建 1')
@@ -242,27 +242,27 @@ describe('orchestrator release-propose > 产品/基建分类（用户决策 2026
     }
   })
 
-  it('仅基建改动 → 没有可发布内容（基建不计，空态如实）', () => {
+  it('仅基建改动 → 没有可发布内容（基建不计，空态如实）', async () => {
     const repo = seedClean()
     try {
       fs.mkdirSync(path.join(repo.root, '.agents'), { recursive: true })
       fs.writeFileSync(path.join(repo.root, '.agents', 'notes.md'), 'note\n')
       git(repo.root, 'add -A')
       git(repo.root, 'commit -m "chore(agents): 纯基建改动"')
-      expect(runOrch(repo.root, 'release-propose', SKIP_REMOTE).stdout).toContain('没有可发布内容')
+      expect((await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)).stdout).toContain('没有可发布内容')
     } finally {
       repo.cleanup()
     }
   })
 
-  it('只动 scripts/installer.iss 的修复 = 产品侧（patch 档；scripts/ 整体当基建会漏掉它）', () => {
+  it('只动 scripts/installer.iss 的修复 = 产品侧（patch 档；scripts/ 整体当基建会漏掉它）', async () => {
     const repo = seedClean()
     try {
       fs.mkdirSync(path.join(repo.root, 'scripts'), { recursive: true })
       fs.writeFileSync(path.join(repo.root, 'scripts', 'installer.iss'), '; installer\n')
       git(repo.root, 'add -A')
       git(repo.root, 'commit -m "fix: 安装强关兜底"')
-      const out = runOrch(repo.root, 'release-propose', SKIP_REMOTE)
+      const out = await runOrchInproc(repo.root, 'release-propose', SKIP_REMOTE)
       expect(out.stdout).toContain('发版提案 v1.0.1')
       expect(out.stdout).toContain('产品侧信号: feat 0 / fix 1 / breaking 0')
     } finally {

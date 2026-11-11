@@ -191,10 +191,16 @@ class OrchExitError extends Error {
  *
  * 语义对齐（预研 §四）：
  * - 返回值 = tryOrch 语义内建：die → { status: code }，正常返回 → { status: 0 }，不抛出；
+ *   未捕获异常与 CLI 尾部 main().catch(die) 同链路（stderr 记栈 + status 1）；
  * - stdout/stderr 来自 console.log/error/warn 拦截（log() 是 console.log 包装的咽喉）；
  *   ⚠️ stdio:inherit 孙进程（run/finish/worker 链路 ~10 处）直写宿主 fd，绕过拦截——
  *   这是阶段 1 只接轻命令的原因，断言孙进程输出的用例不得使用本函数；
- * - env 经 main(io.env) 入口快照透传，不写 process.env；cwd 经 io.cwd 定位仓库根。
+ * - env 双通道：① 写入真实 process.env（调用期间，finally 逐键还原）——mock.mjs 等
+ *   子模块直读 process.env（execSync 时代靠子进程 env 注入可见，直调后必须真写）；
+ *   ② 经 main(io.env) 入口快照透传（orchestrator.mjs 内部真实读取走 orchEnv）。
+ *   ⚠️ 模块加载时读取的旋钮（如 mock.mjs 的 ORCH_MOCK_REVIEW_PARAPHRASE_ONCE）在
+ *   直调单例下首载即冻结——依赖这类「加载时」旋钮的用例仍须走 execSync 版。
+ * - cwd 经 io.cwd 定位仓库根。
  *
  * 边界（阶段 1 已知不覆盖，勿用于这些命令）：push-review（有自己的本地 die 硬
  * process.exit）、run/drain（holdExit 缺省 process.exit + inherit 孙进程）。
@@ -227,6 +233,12 @@ export async function runOrchInproc(
     err.push(format(...a) + '\n')
   }
   console.warn = console.error // Node 语义：warn 写 stderr
+  // 注入 env 真写 process.env（mock/backends 子模块直读），finally 逐键还原防泄漏
+  const savedEnv: Array<[string, string | undefined]> = []
+  for (const [k, v] of Object.entries(env)) {
+    savedEnv.push([k, process.env[k]])
+    process.env[k] = v
+  }
   setFatalExit((code) => {
     throw new OrchExitError(code)
   })
@@ -235,11 +247,18 @@ export async function runOrchInproc(
     return { status: 0, stdout: out.join(''), stderr: err.join('') }
   } catch (e) {
     if (e instanceof OrchExitError) return { status: e.code, stdout: out.join(''), stderr: err.join('') }
-    throw e
+    // 与 CLI 尾部 main().catch(die) 同链路：未捕获异常 → stderr「[orchestrator] <stack>」+ exit 1
+    //（直调时尾部守卫不跑，这里必须补上等价语义，否则业务 throw 会以未捕获异常炸穿 vitest）
+    err.push(`[orchestrator] ${(e as Error)?.stack ?? String(e)}\n`)
+    return { status: 1, stdout: out.join(''), stderr: err.join('') }
   } finally {
     console.log = origLog
     console.error = origError
     console.warn = origWarn
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
     setFatalExit((code) => process.exit(code)) // 还原缺省出口，防泄漏到后续用例
   }
 }

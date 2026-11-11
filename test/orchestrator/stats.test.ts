@@ -4,25 +4,25 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { cardText, mkRepo, runOrch } from './helpers.js'
+import { cardText, mkRepo, runOrch, runOrchInproc } from './helpers.js'
 import { collectStatsSummary } from '../../.agents/scripts/orchestrator/stats.mjs'
 
-function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
+async function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
   const cardFile = path.join(repo, `card-${id}.md`)
   fs.writeFileSync(cardFile, cardText({ id, ...overrides }))
-  runOrch(repo, `submit "${cardFile}"`)
+  await runOrchInproc(repo, `submit "${cardFile}"`)
 }
 
 describe('orchestrator stats > 聚合口径', () => {
-  it('--json 输出每卡行与汇总；state/outcome/队列计数对齐真实落位', () => {
+  it('--json 输出每卡行与汇总；state/outcome/队列计数对齐真实落位', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'st-await') // gate L3 缺省 → awaiting-human（无终态事件）
+      await submitCard(repo.root, 'st-await') // gate L3 缺省 → awaiting-human（无终态事件）
       runOrch(repo.root, 'run st-await --backend mock')
-      submitCard(repo.root, 'st-block')
+      await submitCard(repo.root, 'st-block')
       runOrch(repo.root, 'run st-block --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
 
-      const r = runOrch(repo.root, 'stats --days 7 --json')
+      const r = await runOrchInproc(repo.root, 'stats --days 7 --json')
       const parsed = JSON.parse(r.stdout)
       expect(parsed.summary.window_days).toBe(7)
       expect(parsed.summary.tasks_started).toBe(2)
@@ -49,12 +49,12 @@ describe('orchestrator stats > 聚合口径', () => {
     }
   })
 
-  it('人类可读输出：标题行 + 每卡 key=value 行 + 汇总行', () => {
+  it('人类可读输出：标题行 + 每卡 key=value 行 + 汇总行', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'st-h')
+      await submitCard(repo.root, 'st-h')
       runOrch(repo.root, 'run st-h --backend mock')
-      const r = runOrch(repo.root, 'stats')
+      const r = await runOrchInproc(repo.root, 'stats')
       expect(r.stdout).toContain('编排运行度量')
       expect(r.stdout).toContain('st-h')
       expect(r.stdout).toContain('汇总')
@@ -63,31 +63,31 @@ describe('orchestrator stats > 聚合口径', () => {
     }
   })
 
-  it('窗口过滤与空日志：days 外的任务不计；全新仓库给可操作提示', () => {
+  it('窗口过滤与空日志：days 外的任务不计；全新仓库给可操作提示', async () => {
     const repo = mkRepo()
     try {
       // 只 submit 不 run：logs/ 无 events.jsonl → 不计入
-      submitCard(repo.root, 'st-norun')
-      const empty = runOrch(repo.root, 'stats --json')
+      await submitCard(repo.root, 'st-norun')
+      const empty = await runOrchInproc(repo.root, 'stats --json')
       const parsed = JSON.parse(empty.stdout)
       expect(parsed.summary.tasks_started).toBe(0)
       expect(parsed.rows).toEqual([])
 
-      const human = runOrch(repo.root, 'stats')
+      const human = await runOrchInproc(repo.root, 'stats')
       expect(human.stdout).toContain('最近 7 天没有任务启动')
     } finally {
       repo.cleanup()
     }
   })
 
-  it('日志残留（卡已不在队列）不阻断度量：state 降级标注、行照出', () => {
+  it('日志残留（卡已不在队列）不阻断度量：state 降级标注、行照出', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'st-ok')
+      await submitCard(repo.root, 'st-ok')
       runOrch(repo.root, 'run st-ok --backend mock')
       // 事后把卡文件挪走（模拟 reconcile 场景外的残留日志）：stats 只读，行照出
       fs.rmSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'awaiting-human', 'st-ok.md'))
-      const r = runOrch(repo.root, 'stats --json')
+      const r = await runOrchInproc(repo.root, 'stats --json')
       const parsed = JSON.parse(r.stdout)
       expect(parsed.summary.tasks_started).toBe(1)
       expect(parsed.rows[0]).toMatchObject({ state: '(日志残留)', outcome: 'unknown' })
@@ -99,15 +99,15 @@ describe('orchestrator stats > 聚合口径', () => {
 })
 
 describe('orchestrator stats > 安全晴雨表（near_miss）', () => {
-  it('瞬时故障卡（重试 3 次 blocked + 调查包）：summary.near_miss 各字段计数正确', () => {
+  it('瞬时故障卡（重试 3 次 blocked + 调查包）：summary.near_miss 各字段计数正确', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'st-nm')
+      await submitCard(repo.root, 'st-nm')
       // mock 瞬时故障：原地重试 3 次（10ms 退避）→ blocked（未产出结果块）→ VDR 归档
       runOrch(repo.root, 'run st-nm --backend mock', { ORCH_MOCK_TRANSIENT: '1', ORCH_RETRY_WAIT_MS: '10' })
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'st-nm', 'incident.md'))).toBe(true)
 
-      const r = runOrch(repo.root, 'stats --days 7 --json')
+      const r = await runOrchInproc(repo.root, 'stats --days 7 --json')
       const parsed = JSON.parse(r.stdout)
       expect(parsed.summary.near_miss).toMatchObject({
         watchdog: 0, // mock 后端跳过进展看门狗
@@ -120,7 +120,7 @@ describe('orchestrator stats > 安全晴雨表（near_miss）', () => {
       expect(row.retries).toBeGreaterThanOrEqual(3)
       expect(row.incident).toBe(1)
 
-      const human = runOrch(repo.root, 'stats')
+      const human = await runOrchInproc(repo.root, 'stats')
       expect(human.stdout).toContain('安全晴雨表')
       expect(human.stdout).toContain('近乎事故')
     } finally {
@@ -130,12 +130,12 @@ describe('orchestrator stats > 安全晴雨表（near_miss）', () => {
 })
 
 describe('orchestrator stats > collectStatsSummary（propose 舰队反馈共用数据层）', () => {
-  it('summary/rows 与 stats --json 输出完全一致；perType/drift 为附加产出不污染 summary', () => {
+  it('summary/rows 与 stats --json 输出完全一致；perType/drift 为附加产出不污染 summary', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'st-cs') // gate L3 → awaiting-human（未合并样本）
+      await submitCard(repo.root, 'st-cs') // gate L3 → awaiting-human（未合并样本）
       runOrch(repo.root, 'run st-cs --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' }) // blocked 样本（带 worker_retry）
-      const r = runOrch(repo.root, 'stats --days 7 --json')
+      const r = await runOrchInproc(repo.root, 'stats --days 7 --json')
       const parsed = JSON.parse(r.stdout)
       const collected = collectStatsSummary(repo.root, { days: 7 })
       // 回归红线：cmdStats 输出形态不变 ←→ 收集函数与命令输出逐字段一致

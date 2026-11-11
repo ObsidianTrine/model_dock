@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { mkRepo, runOrch } from './helpers.js'
+import { mkRepo, runOrchInproc } from './helpers.js'
 import {
   AGED_OUT_BY,
   annotateAgedOut,
@@ -420,7 +420,7 @@ describe('orchestrator drafts-gc > autoCleanDrafts（nightly 自动清退）', (
 // ---------------------------------------------------------------------------
 
 describe('orchestrator drafts-gc > CLI drafts gc', () => {
-  it('dry-run 只列清单不动文件；--apply 迁移（superseded 带标注）', () => {
+  it('dry-run 只列清单不动文件；--apply 迁移（superseded 带标注）', async () => {
     const repo = mkRepo() // git 仓库：orchestrator main() 先 findRepoRoot
     const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
     const mergedDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'merged')
@@ -429,12 +429,12 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
     try {
       fs.writeFileSync(path.join(dir, 'ov.md'), draft('ov.md', 'ov', ['src/gateway/relay.ts']))
       fs.writeFileSync(path.join(mergedDir, 'fix-relay-obs.md'), draft('fix-relay-obs.md', 'fix-relay-obs', ['src/gateway/relay.ts']))
-      const dry = runOrch(repo.root, 'drafts gc')
+      const dry = await runOrchInproc(repo.root, 'drafts gc')
       expect(dry.stdout).toContain('superseded 候选')
       expect(dry.stdout).toContain('ov.md')
       expect(dry.stdout).toContain('--apply')
       expect(fs.existsSync(path.join(dir, 'ov.md'))).toBe(true) // dry-run 不动文件
-      const applied = runOrch(repo.root, 'drafts gc --apply')
+      const applied = await runOrchInproc(repo.root, 'drafts gc --apply')
       expect(applied.stdout).toContain('迁移 ov.md')
       expect(fs.existsSync(path.join(dir, 'superseded', 'ov.md'))).toBe(true)
       expect(fs.readFileSync(path.join(dir, 'superseded', 'ov.md'), 'utf8')).toContain('superseded_by: fix-relay-obs')
@@ -443,7 +443,7 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
     }
   })
 
-  it('老化自动档：超龄未提交机器提案 dry-run 列候选、--apply 迁 superseded/（aged-out 标注）；未超龄/人工草稿不动', () => {
+  it('老化自动档：超龄未提交机器提案 dry-run 列候选、--apply 迁 superseded/（aged-out 标注）；未超龄/人工草稿不动', async () => {
     const repo = mkRepo()
     const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
     fs.mkdirSync(dir, { recursive: true })
@@ -455,13 +455,13 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
       fs.writeFileSync(path.join(dir, 'stale-auto.md'), draft('stale-auto.md', 'stale-auto', ['src/cli/**'], { created: stale }))
       fs.writeFileSync(path.join(dir, 'stale-manual.md'), draft('stale-manual.md', 'stale-manual', ['src/cli/**'], { created: stale, createdBy: 'human' }))
       fs.writeFileSync(path.join(dir, 'fresh.md'), draft('fresh.md', 'fresh', ['src/cli/**'], { created: fresh }))
-      const dry = runOrch(repo.root, 'drafts gc')
+      const dry = await runOrchInproc(repo.root, 'drafts gc')
       expect(dry.stdout).toContain('超龄未提交候选')
       expect(dry.stdout).toContain('stale-auto.md')
       expect(dry.stdout).not.toContain('stale-manual.md')
       expect(dry.stdout).not.toContain('fresh.md')
       expect(fs.existsSync(path.join(dir, 'stale-auto.md'))).toBe(true) // dry-run 不动文件
-      const applied = runOrch(repo.root, 'drafts gc --apply')
+      const applied = await runOrchInproc(repo.root, 'drafts gc --apply')
       expect(applied.stdout).toContain('迁移 stale-auto.md')
       expect(fs.existsSync(path.join(dir, 'stale-auto.md'))).toBe(false)
       expect(fs.readFileSync(path.join(dir, 'superseded', 'stale-auto.md'), 'utf8')).toContain('superseded_by: aged-out')
@@ -473,7 +473,7 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
     }
   })
 
-  it('老化自动档保护：超龄但队列有同名卡（pending 痕迹）不迁移，队列卡本身零改动', () => {
+  it('老化自动档保护：超龄但队列有同名卡（pending 痕迹）不迁移，队列卡本身零改动', async () => {
     const repo = mkRepo()
     const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
     const pendingDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending')
@@ -483,10 +483,10 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
     try {
       fs.writeFileSync(path.join(dir, 'stale-traced.md'), draft('stale-traced.md', 'stale-traced', ['src/cli/**'], { created: stale }))
       fs.writeFileSync(path.join(pendingDir, 'stale-traced.md'), draft('stale-traced.md', 'stale-traced', ['mock-worker-output.txt'], { created: stale }))
-      const dry = runOrch(repo.root, 'drafts gc')
+      const dry = await runOrchInproc(repo.root, 'drafts gc')
       expect(dry.stdout).toContain('超龄未提交候选】无')
       expect(dry.stdout).not.toContain('stale-traced.md')
-      const applied = runOrch(repo.root, 'drafts gc --apply')
+      const applied = await runOrchInproc(repo.root, 'drafts gc --apply')
       expect(applied.stdout).not.toContain('stale-traced.md')
       expect(fs.existsSync(path.join(dir, 'stale-traced.md'))).toBe(true)
       expect(fs.existsSync(path.join(pendingDir, 'stale-traced.md'))).toBe(true) // 队列卡绝不动

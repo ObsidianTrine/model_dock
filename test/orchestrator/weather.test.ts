@@ -8,7 +8,7 @@ import path from 'node:path'
 import { appendEvent, toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
 import { appendFleetEvent, countRecentTransient, countUpstreamStorm, fleetLogPath, readFleetEvents, shouldHold } from '../../.agents/scripts/orchestrator/weather.mjs'
 import { gatewayLogsDir } from '../../.agents/scripts/orchestrator/reconcile.mjs'
-import { cardText, eventsOf, mkRepo, readCard, runOrch } from './helpers.js'
+import { cardText, eventsOf, mkRepo, readCard, runOrch, runOrchInproc } from './helpers.js'
 import { fakeHome } from '../helpers.js'
 
 const NOW = Date.parse('2026-11-01T12:00:00Z')
@@ -65,7 +65,7 @@ function seedRetries(repo: string, id: string, ageOffsetsMs: number[]) {
 }
 
 describe('weather > 集成（drain 风暴滞留）', () => {
-  it('窗口内重试凑满阈值 → drain 停止派发（无新 worker_spawned）+ fleet 留痕 weather_hold', () => {
+  it('窗口内重试凑满阈值 → drain 停止派发（无新 worker_spawned）+ fleet 留痕 weather_hold', async () => {
     const repo = mkRepo({ extra: { weatherHold: { threshold: 3, windowMinutes: 60 } } })
     try {
       // 预置：a 全在窗口内（2 条）；b 1 条窗口内 + 1 条 2 小时前（窗口外）→ 预置窗口内合计 3 = 凑满阈值
@@ -74,7 +74,7 @@ describe('weather > 集成（drain 风暴滞留）', () => {
       // 第三张卡真跑：mock 瞬时故障原地重试 3 次（10ms 退避）→ blocked，窗口内合计涨到 6
       const cardC = path.join(repo.root, 'card-weather-c.md')
       fs.writeFileSync(cardC, cardText({ id: 'weather-c' }))
-      runOrch(repo.root, `submit "${cardC}"`)
+      await runOrchInproc(repo.root, `submit "${cardC}"`)
       runOrch(repo.root, 'run weather-c --backend mock', { ORCH_MOCK_TRANSIENT: '1', ORCH_RETRY_WAIT_MS: '10' })
       expect(readCard(repo.root, 'blocked', 'weather-c')).toBeTruthy()
       expect(eventsOf(repo.root, 'weather-c').filter((e) => e.type === 'worker_retry')).toHaveLength(3)
@@ -82,7 +82,7 @@ describe('weather > 集成（drain 风暴滞留）', () => {
       // drain：风暴闸在派发前拦下——weather-d 不被 spawn，仍留 pending
       const cardD = path.join(repo.root, 'card-weather-d.md')
       fs.writeFileSync(cardD, cardText({ id: 'weather-d' }))
-      runOrch(repo.root, `submit "${cardD}"`)
+      await runOrchInproc(repo.root, `submit "${cardD}"`)
       const out = runOrch(repo.root, 'drain --backend mock')
       expect(out.stdout).toContain('风暴滞留')
       expect(eventsOf(repo.root, 'weather-d')).toEqual([]) // 无派发 = 零事件（无 worker_spawned）
@@ -98,13 +98,13 @@ describe('weather > 集成（drain 风暴滞留）', () => {
     }
   }, 120_000) // 两次 runOrch 子进程（Windows 上含 CLI 探测与 git init），20s 默认超时不够（fleet.test.ts 同款加固）
 
-  it('未配 weatherHold 键 = 功能关闭：同样的重试现场 drain 照常派发（行为不变）', () => {
+  it('未配 weatherHold 键 = 功能关闭：同样的重试现场 drain 照常派发（行为不变）', async () => {
     const repo = mkRepo()
     try {
       seedRetries(repo.root, 'plain-a', [0, 60_000, 120_000])
       const card = path.join(repo.root, 'card-plain-b.md')
       fs.writeFileSync(card, cardText({ id: 'plain-b' }))
-      runOrch(repo.root, `submit "${card}"`)
+      await runOrchInproc(repo.root, `submit "${card}"`)
       const out = runOrch(repo.root, 'drain --backend mock')
       expect(out.stdout).not.toContain('风暴滞留')
       expect(eventsOf(repo.root, 'plain-b').some((e) => e.type === 'worker_spawned')).toBe(true)
@@ -133,13 +133,13 @@ describe('weather > 集成（drain 风暴滞留）', () => {
 })
 
 describe('weather > 集成（watch 瞭望模式同样受风暴闸约束）', () => {
-  it('滞留期 watch 周期不派发：pending 卡零事件留原地，输出含风暴滞留', () => {
+  it('滞留期 watch 周期不派发：pending 卡零事件留原地，输出含风暴滞留', async () => {
     const repo = mkRepo({ extra: { weatherHold: { threshold: 2, windowMinutes: 60 } } })
     try {
       seedRetries(repo.root, 'watch-w', [0, 60_000]) // 窗口内 2 条 = 凑满阈值
       const card = path.join(repo.root, 'card-watch-x.md')
       fs.writeFileSync(card, cardText({ id: 'watch-x' }))
-      runOrch(repo.root, `submit "${card}"`)
+      await runOrchInproc(repo.root, `submit "${card}"`)
 
       const out = runOrch(repo.root, 'watch --max-cycles 1 --interval 0 --backend mock')
       expect(out.status).toBe(0)
@@ -181,7 +181,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
     }
   })
 
-  it('upstream 达阈（worker_retry 未达）→ drain 滞留点名为「上游风暴」，fleet 事件带上游字段', () => {
+  it('upstream 达阈（worker_retry 未达）→ drain 滞留点名为「上游风暴」，fleet 事件带上游字段', async () => {
     const h = fakeHome()
     // worker_retry 阈值给大（0 条也永不触发），只让上游信号触发
     const repo = mkRepo({ extra: { weatherHold: { threshold: 99, windowMinutes: 60, upstream: { threshold: 2, windowMinutes: 15 } } } })
@@ -190,7 +190,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
       writeGwEntry(60_000, 429)
       const card = path.join(repo.root, 'card-sea-x.md')
       fs.writeFileSync(card, cardText({ id: 'sea-x' }))
-      runOrch(repo.root, `submit "${card}"`)
+      await runOrchInproc(repo.root, `submit "${card}"`)
       const out = runOrch(repo.root, 'drain --backend mock')
       expect(out.stdout).toContain('风暴滞留')
       expect(out.stdout).toContain('上游风暴')
@@ -205,7 +205,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
     }
   }, 120_000) // runOrch 子进程 E2E，同款加固
 
-  it('配置了 upstream 但网关日志不可得（无 gatewayLogDir）→ 不滞留照常派发', () => {
+  it('配置了 upstream 但网关日志不可得（无 gatewayLogDir）→ 不滞留照常派发', async () => {
     const savedFake = process.env.MODELRDOCK_FAKE_HOME
     const savedHome = process.env.MODELRDOCK_HOME
     delete process.env.MODELRDOCK_FAKE_HOME
@@ -214,7 +214,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
     try {
       const card = path.join(repo.root, 'card-sea-off.md')
       fs.writeFileSync(card, cardText({ id: 'sea-off' }))
-      runOrch(repo.root, `submit "${card}"`)
+      await runOrchInproc(repo.root, `submit "${card}"`)
       const out = runOrch(repo.root, 'drain --backend mock')
       expect(out.stdout).not.toContain('风暴滞留')
       expect(eventsOf(repo.root, 'sea-off').some((e) => e.type === 'worker_spawned')).toBe(true)

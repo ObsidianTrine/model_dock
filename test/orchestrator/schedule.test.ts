@@ -23,7 +23,7 @@ import {
   buildSchtasksCreateArgs,
   validHourMinute,
 } from '../../.agents/scripts/orchestrator/schedule.mjs'
-import { mkRepo, runOrch, tryOrch } from './helpers.js'
+import { mkRepo, runOrchInproc } from './helpers.js'
 
 const ROOT = '/opt/proj root' // 故意带空格：wrapper/注册命令的引号必须扛得住
 // ROOT 下无 workflow.json / package.json → 标识从目录名派生（proj root → proj-root）
@@ -214,10 +214,10 @@ describe('orchestrator schedule > 三平台注册内容纯函数', () => {
 })
 
 describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 wrapper 预览）', () => {
-  it('schedule install --dry-run：stdout 计划 + wrapper 预览，不写 runner、不建日志目录（CORRECT-13）', () => {
+  it('schedule install --dry-run：stdout 计划 + wrapper 预览，不写 runner、不建日志目录（CORRECT-13）', async () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'schedule install --dry-run --hour 2 --auto 3 --tests')
+      const out = await runOrchInproc(repo.root, 'schedule install --dry-run --hour 2 --auto 3 --tests')
       expect(out.stdout).toContain('[dry-run] 未触碰系统调度、未写任何文件')
       expect(out.stdout).toContain('wrapper 将写入（dry-run 未落盘）')
       // 预览进 stdout：参数与仓库绝对路径固化可见（此前从落盘文件断言）
@@ -231,10 +231,10 @@ describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 w
     }
   })
 
-  it('非法时刻（hour 24）→ exit 1 可操作报错', () => {
+  it('非法时刻（hour 24）→ exit 1 可操作报错', async () => {
     const repo = mkRepo()
     try {
-      const r = tryOrch(repo.root, 'schedule install --dry-run --hour 24')
+      const r = await runOrchInproc(repo.root, 'schedule install --dry-run --hour 24')
       expect(r.status).toBe(1)
       expect(r.stderr).toContain('hour')
     } finally {
@@ -242,10 +242,10 @@ describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 w
     }
   })
 
-  it('schedule install --mode sail --dry-run：预览含 sail 参数；sail 不带 --tests；零落盘', () => {
+  it('schedule install --mode sail --dry-run：预览含 sail 参数；sail 不带 --tests；零落盘', async () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'schedule install --mode sail --minutes 30 --hour 23 --dry-run')
+      const out = await runOrchInproc(repo.root, 'schedule install --mode sail --minutes 30 --hour 23 --dry-run')
       expect(out.stdout).toContain('[dry-run] 未触碰系统调度、未写任何文件')
       expect(out.stdout).toContain('sail --minutes 30')
       expect(out.stdout).not.toContain(' --tests')
@@ -265,25 +265,25 @@ describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 w
     }
   })
 
-  it('sail --duration 透传；--mode sail 缺时长 → exit 1；未知 --mode → exit 1', () => {
+  it('sail --duration 透传；--mode sail 缺时长 → exit 1；未知 --mode → exit 1', async () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'schedule install --mode sail --duration 1h30m --dry-run')
+      const out = await runOrchInproc(repo.root, 'schedule install --mode sail --duration 1h30m --dry-run')
       expect(out.stdout).toContain('sail --duration 1h30m')
 
       // 燃油上限透传（计费船定时巡航的护栏）：>0 才带，非法值忽略
-      const capped = runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 2 --dry-run')
+      const capped = await runOrchInproc(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 2 --dry-run')
       expect(capped.stdout).toContain('sail --minutes 120 --max-cost-usd 2')
-      const uncapped = runOrch(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 0 --dry-run')
+      const uncapped = await runOrchInproc(repo.root, 'schedule install --mode sail --minutes 120 --max-cost-usd 0 --dry-run')
       expect(uncapped.stdout).not.toContain('--max-cost-usd')
       // dry-run 零落盘（CORRECT-13）：以上三轮预演均不产生 runner 文件
       expect(fs.existsSync(runnerPath(repo.root))).toBe(false)
 
-      const noDur = tryOrch(repo.root, 'schedule install --mode sail --dry-run')
+      const noDur = await runOrchInproc(repo.root, 'schedule install --mode sail --dry-run')
       expect(noDur.status).toBe(1)
       expect(noDur.stderr).toContain('--minutes')
 
-      const badMode = tryOrch(repo.root, 'schedule install --mode nope --dry-run')
+      const badMode = await runOrchInproc(repo.root, 'schedule install --mode nope --dry-run')
       expect(badMode.status).toBe(1)
       expect(badMode.stderr).toContain('nightly | watch | sail')
     } finally {
@@ -291,10 +291,10 @@ describe('orchestrator schedule > CLI dry-run（零落盘：只打印计划与 w
     }
   })
 
-  it('缺子命令 → usage 提示 exit 1', () => {
+  it('缺子命令 → usage 提示 exit 1', async () => {
     const repo = mkRepo()
     try {
-      const r = tryOrch(repo.root, 'schedule')
+      const r = await runOrchInproc(repo.root, 'schedule')
       expect(r.status).toBe(1)
       expect(r.stderr).toContain('install|uninstall|status')
     } finally {
