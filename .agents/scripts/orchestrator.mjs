@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync, spawn } from 'node:child_process';
 import readline from 'node:readline';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 import {
   STATES,
@@ -5960,7 +5960,18 @@ export async function main(argv = process.argv.slice(2), io = {}) {
 
 // 直跑守卫（先例 approval-listener.mjs）：进程内直调（runOrchInproc import 本模块）时
 // 不得自动启动 CLI。注意 argv[1] 可能不存在（node -e）——先判存在。
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+// ⚠ 比较必须双侧 realpath：Node ESM 对入口 import.meta.url 做 realpath（macOS 临时目录
+// /var→/private/var、/tmp→/private/tmp 是符号链接，argv[1] 是 /var 形态时裸比较恒 false，
+// CLI 会被静默吞掉——spawn-shell.test.ts linked-worktree 用例实证）。
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(path.resolve(process.argv[1])) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (isMain) {
   main().catch((e) => {
     die(e?.stack ?? String(e));
   });
