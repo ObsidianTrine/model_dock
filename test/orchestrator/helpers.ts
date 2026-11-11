@@ -18,6 +18,33 @@ export interface TestRepo {
   cleanup: () => void
 }
 
+// mkRepo 的 .agents/scripts 模板缓存（预研 B1，docs/archive/test-orch-inproc-presearch.md §六）：
+// B1 估全量套件 mkRepo 332 次 × cpSync ≈ 12s 花在从 WORKTREE_ROOT 反复读同一份源树上。
+// 改为每进程只从 WORKTREE_ROOT 构建一次模板目录（os.tmpdir() 下，按 WORKTREE_ROOT 键控的
+// 惰性单例），之后每仓库 cpSync 从模板复制——CI 上 /tmp 常为 tmpfs（内存盘读源，免磁盘
+// I/O）；本机 APFS 同卷实测单次 15.5ms→15.0ms（收益小，不回退）。每仓库仍拿到独立完整
+// 副本，结果语义不变。测试只在各仓库副本里改 scripts（policy-dispatch / agent-init /
+// fleet-console 均如此），源目录运行期不可变，模板不会过期。best-effort 进程退出清理：
+// 失败忽略，OS 临时目录自清兜底。
+const scriptsTemplates = new Map<string, string>()
+function getScriptsTemplate(): string {
+  const cached = scriptsTemplates.get(WORKTREE_ROOT)
+  if (cached) return cached
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-scripts-tpl-'))
+  fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(dir, 'scripts'), { recursive: true })
+  scriptsTemplates.set(WORKTREE_ROOT, dir)
+  process.once('exit', () => {
+    for (const d of scriptsTemplates.values()) {
+      try {
+        fs.rmSync(d, { recursive: true, force: true })
+      } catch {
+        /* best-effort：退出钩子里失败不阻断，OS 临时目录自清兜底 */
+      }
+    }
+  })
+  return dir
+}
+
 /** 建一个最小可跑 orchestrator 的临时仓库：develop 分支 + 初始 commit。 */
 export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBackend?: string; baseBranch?: string; extra?: Record<string, unknown> }): TestRepo {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-test-'))
@@ -33,8 +60,9 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBac
   // 必须含 orchestrator.mjs 及其全部子模块——drain 的 run 子进程按
   // repoRoot/.agents/scripts/orchestrator.mjs 解析，缺文件会退码 1 而任务不动，
   // pickNextCard 下轮再选中它 → 死循环（实测踩中）。
+  // 复制源走上方模板缓存（预研 B1：332 次 × 36ms ≈ 12s 收益），每仓库仍是独立完整副本。
   fs.mkdirSync(path.join(root, '.agents', 'workflows'), { recursive: true })
-  fs.cpSync(path.join(WORKTREE_ROOT, '.agents', 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
+  fs.cpSync(path.join(getScriptsTemplate(), 'scripts'), path.join(root, '.agents', 'scripts'), { recursive: true })
   const workflow: Record<string, unknown> = {
     baseBranch,
     testCmd: opts?.testCmd ?? 'node -e "process.exit(0)"',
