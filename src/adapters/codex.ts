@@ -49,6 +49,9 @@ function stripEnvBlock(before: string): string {
 interface CodexConfig {
   model_provider?: string
   model_providers?: Record<string, Record<string, unknown>>
+  /** codex 自身 profiles（codex -p <id> 选择）：ModelDock 为每条路由写一份（model_provider
+   *  =modeldock + model=该路由默认模型），路由切换免控制台往返。detach 只收自己的条目。 */
+  profiles?: Record<string, Record<string, unknown>>
   /** 根级窗口/输出上限（作用于当前激活模型；接入随默认模型写入，detach 随路由接管收回） */
   model_context_window?: number
   model_max_output_tokens?: number
@@ -297,11 +300,43 @@ export const codexAdapter: HarnessAdapter = {
       }
     }
 
+    // codex profiles 多路由（codex-rebake-profiles 卡）：为每条 ModelDock 路由写
+    // [profiles.<id>]（model_provider=modeldock + model=该路由默认模型），`codex -p <id>`
+    // 一键切换路由，免控制台往返。守卫：同名 profile 已被用户自设（model_provider 不是
+    // 我们或非对象）→ 跳过不覆盖；我们自己的旧条目随 planAttach 刷新（路由切换重烤时
+    // 跟随新默认模型）。detach 只收 model_provider=modeldock 的条目。
+    ensurePlainObjectField(root.profiles, 'profiles', p)
+    const rootProfiles = (root.profiles ??= {})
+    const skippedProfiles: string[] = []
+    for (const [pid, prof] of Object.entries(cfg.profiles)) {
+      const model = prof.default_model
+      // default_model 必须在 provider 模型目录内（目录空/模型不在目录 → 不写，防烤出
+      // 必 400 的死条目——gpt-6-astra 失联教训的路由侧对账）
+      if (!model || !prof.provider || !cfg.providers[prof.provider]?.models?.[model]) continue
+      const existing = rootProfiles[pid]
+      if (existing && existing.model_provider !== undefined && existing.model_provider !== 'modeldock') {
+        skippedProfiles.push(pid)
+        continue
+      }
+      rootProfiles[pid] = { model_provider: 'modeldock', model }
+    }
+    const profileNotes: string[] = []
+    if (skippedProfiles.length) {
+      profileNotes.push(
+        t(
+          '同名 profiles {ids} 为用户自设，ModelDock 不覆盖（codex -p 以用户定义为准）',
+          'User-defined profiles {ids} are left untouched (codex -p follows the user definitions)',
+          { ids: skippedProfiles.join(', ') }
+        )
+      )
+    }
+
     const body = tomlStringify(reorderTomlRoot(root) as Record<string, unknown>)
     const after = body.endsWith('\n') ? body : body + '\n'
     const notes = [
       ...directNotes,
       ...catalogNotes,
+      ...profileNotes,
       t(
         '令牌内联为 http_headers 的 Authorization（Bearer），无需任何环境变量，任何终端/IDE 直接可用',
         'The token is inlined as the http_headers Authorization (Bearer) — no environment variables needed, works in any terminal/IDE'
@@ -354,6 +389,17 @@ export const codexAdapter: HarnessAdapter = {
           delete root.model_max_output_tokens
           // catalog 指针同理收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）
           if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
+          // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；
+          // 收空后整键删除，不残留空表
+          const ups = root.profiles
+          if (ups && typeof ups === 'object') {
+            for (const [pid, entry] of Object.entries(ups)) {
+              if (entry && typeof entry === 'object' && (entry as Record<string, unknown>).model_provider === 'modeldock') {
+                delete ups[pid]
+              }
+            }
+            if (Object.keys(ups).length === 0) delete root.profiles
+          }
         }
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
         if (c2) changes.push(c2)

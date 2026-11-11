@@ -3,7 +3,7 @@
 // 首航实卡 docs-nightly-webhook-envs 的真实事件形状（类型与字段名以此为准）。
 //
 // 第二族（2026-11-10 digest 聚合改造）：notify-digest.mjs 的批量聚合通报——queueDigestItem
-// / aggregateDigest（同卡终态合并）/ buildDigestBody（扁平事件流 ≤5 行，标题分诊、细节落
+// / aggregateDigest（同卡终态合并）/ buildDigestBody（扁平事件流 ≤4 行，标题分诊、细节落
 // last.txt）/ flushDigest（认领语义 + 本地 http webhook 实发）+ e2e（mock 卡 drain →
 // digest POST）。digest 缺省关，e2e 用例经 mkRepo extra 显式开且 quietWindowSec 调小
 // （防 detached flusher 孤儿进程）。
@@ -33,6 +33,7 @@ import {
   digestStateRank,
   digestTitle,
   flushDigest,
+  restorePending,
   quietWindowSecOf,
   queueDigestItem,
 } from '../../.agents/scripts/orchestrator/notify-digest.mjs'
@@ -286,9 +287,10 @@ describe('orchestrator notify digest aggregator > 同卡终态合并', () => {
 })
 
 describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件流', () => {
-  it('四类行格式：attention 在前；merged 带 commit、awaiting 带 3 分钟预告、blocked 带状态标签、其余 📄 标题', () => {
+  it('四类行格式：attention 在前；merged 带 commit、awaiting 带拍板窗预告（按 autoMerge 配置渲染）、blocked 带状态标签、其余 📄 标题', () => {
     const reason = '审查返工超限，需要人工拍板是否继续返工重试一轮'
     const body = buildDigestBody({
+      autoMerge: { enabled: true, timeoutMinutes: 3 },
       items: [
         { ts: '', kind: 'task', taskId: 't1', state: 'merged', title: '卡 t1 ✅ 已出港', lines: ['审查通过，自动出港'], priority: 'normal', commit: '407fae32d24c21b697775494feb250bdfa76b44b' },
         { ts: '', kind: 'task', taskId: 't3', state: 'awaiting-human', title: '卡 t3 ⏸ 待船东放行', lines: [reason], priority: 'attention' },
@@ -304,7 +306,7 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     ])
   })
 
-  it('缺数据兜底：merged 无 commit 不带括号、awaiting 无 reason 无括号；reason 截 20 字、title 截 40 字、单行 ≤60 字', () => {
+  it('缺数据兜底：merged 无 commit 不带括号、awaiting 无 reason 无括号；reason 截 20 字、title 截 40 字、单行 ≤50 字', () => {
     const body = buildDigestBody({
       items: [
         { ts: '', kind: 'task', taskId: 't9', state: 'blocked', title: '卡 t9', lines: ['长'.repeat(45)], priority: 'attention' },
@@ -316,24 +318,67 @@ describe('orchestrator notify digest aggregator > buildDigestBody 扁平事件�
     const lines = body.split('\n')
     expect(lines).toEqual([
       `⛔ t9 ⚠ 搁浅（${'长'.repeat(20)}）`,
-      `⏸ t2 待批示——3 分钟未批将自动合并`,
+      `⏸ t2 待批示`, // round6 P2：未传 autoMerge 不再写死「3 分钟」承诺
       '✅ t1 合并',
       `📄 ${'标'.repeat(40)}`,
     ])
-    for (const l of lines) expect(l.length).toBeLessThanOrEqual(60)
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(50)
   })
 
-  it('超 5 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
+  it('round6 P2：awaiting 尾巴按 autoMerge 配置渲染——未启用不承诺、窗口可配不写死', () => {
+    const item = [{ ts: '', kind: 'task', taskId: 't2', state: 'awaiting-human', title: '卡 t2', lines: [], priority: 'attention' }]
+    const cfg5 = buildDigestBody({ items: item, autoMerge: { enabled: true, timeoutMinutes: 5 } })
+    expect(cfg5).toContain('⏸ t2 待批示——5 分钟未批将自动合并')
+    const off = buildDigestBody({ items: item, autoMerge: { enabled: false, timeoutMinutes: 3 } })
+    expect(off).toBe('⏸ t2 待批示')
+    expect(off).not.toContain('将自动合并')
+  })
+
+  it('round6 P2：restorePending 两分支——pending 缺席原子归位；在席追加合并绝不覆盖并发批', () => {
+    const d = tmpDir()
+    try {
+      const pending = digestPendingPath(d.root)
+      fs.mkdirSync(path.dirname(pending), { recursive: true })
+      // 分支 1：pending 缺席 → rename 原子归位
+      const claimed1 = `${pending}.claiming-1`
+      fs.writeFileSync(claimed1, '{"batch":1}\n')
+      restorePending(claimed1, pending)
+      expect(fs.readFileSync(pending, 'utf8')).toBe('{"batch":1}\n')
+      expect(fs.existsSync(claimed1)).toBe(false)
+      // 分支 2：pending 在席（并发窗口新追加）→ 追加合并，双方内容都在
+      fs.writeFileSync(pending, '{"new":"并发追加的新事件"}\n')
+      const claimed2 = `${pending}.claiming-2`
+      fs.writeFileSync(claimed2, '{"batch":1}\n')
+      restorePending(claimed2, pending)
+      const merged = fs.readFileSync(pending, 'utf8')
+      expect(merged).toContain('并发追加的新事件')
+      expect(merged).toContain('"batch":1')
+      expect(fs.existsSync(claimed2)).toBe(false)
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('超 4 行折叠：保留 attention 行 + 前 N 条 normal，余量折叠成一行「…另 N 条见详情」', () => {
     const items = [
       { ts: '', kind: 'task', taskId: 'ta', state: 'blocked', title: '卡 ta', lines: ['x'], priority: 'attention' },
       ...Array.from({ length: 7 }, (_, i) => ({ ts: '', kind: 'task', taskId: `t${i}`, state: 'merged', title: `卡 t${i}`, lines: [], priority: 'normal' })),
     ]
     const body = buildDigestBody({ items })
     const lines = body.split('\n')
-    expect(lines).toHaveLength(5)
+    expect(lines).toHaveLength(4)
     expect(lines[0]).toBe('⛔ ta ⚠ 搁浅（x）')
-    expect(lines.slice(1, 4)).toEqual(['✅ t0 合并', '✅ t1 合并', '✅ t2 合并'])
-    expect(lines[4]).toBe('…另 4 条见详情')
+    expect(lines.slice(1, 3)).toEqual(['✅ t0 合并', '✅ t1 合并'])
+    expect(lines[3]).toBe('…另 5 条见详情')
+  })
+
+  it('单行宽护栏：超 50 字截断加 …（细节落 last.txt 不丢）', () => {
+    const body = buildDigestBody({
+      items: [{ ts: '', kind: 'task', taskId: '长'.repeat(60), state: 'merged', title: '卡', lines: [], priority: 'normal' }],
+    })
+    const line = body.split('\n')[0]
+    expect(line.length).toBe(50)
+    expect(line.endsWith('…')).toBe(true)
   })
 
   it('规格尾行：本批 item 带 specId 且 specs 查得到 progress 才出（n/总 ✅）；无 specId 或无 progress 省略', () => {

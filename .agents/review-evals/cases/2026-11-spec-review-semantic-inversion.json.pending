@@ -1,0 +1,34 @@
+{
+  "id": "2026-11-spec-review-semantic-inversion",
+  "pending": "spec-review 题型待适配（见 .agents/review-evals/README.md「spec-review 题型适配缺口」节）；适配后去掉 .pending 后缀即激活，先 --dry --case 校验组装",
+  "title": "spec requirements 验收标准称非逐字 claim「status 降为 partial」，但对原判 contradicted 的 claim，置 partial 实为升权（aggregateCoherence 权重 0→0.5）+撤销 contradicted 一票否决——「降级」措辞与语义方向相反，易误导实施方；审查船 P2 命中（语义方向倒置发现，质量标杆），要求把「降为」改「强制置为」并补显式验收条目「非逐字 claim 不参与 contradicted 一票否决（veto 面收窄为纯逐字 claim）」",
+  "discipline": ".agents/conventions/spec-review.md",
+  "specMaterial": [
+    {
+      "path": "specs/research-verbatim-precision/requirements.md",
+      "note": "重建：以修复后盘上 requirements.md:23 为底、按 review-verdict.json P2#2 引文回退修复词（「强制置为」→「降为」）——引文覆盖段「带 `non_verbatim: true`、status 降为 partial」为审查船当时所见原文，行内其余措辞按修复 diff 反推；修复词由 0f941ec 实现与现行 requirements.md:23-24 佐证。本 note 为出题留档，不渲染进审查 prompt",
+      "content": "# specs/research-verbatim-precision/requirements.md（§验收标准 · 第 23 行，事故时原文）\n\n- 当逐字重试后仍有 claim 非逐字，系统应当把这些 claim 保留进 verdict.json 的 claims（带 `non_verbatim: true`、status 降为 partial、note 标注「非逐字摘录」），不再从 claims 中丢弃，且 `fabricated_claims` 计数保留（needs_review 红旗封顶语义不变）。"
+    },
+    {
+      "path": "specs/research-verbatim-precision/design.md",
+      "note": "§方案② 与当前盘上 design.md:15 逐字一致（该节未因 P2#2 修改，非重建）——「不进 contradicted 否决」的语义在 design 在场而 requirements 未承载，是「三件套互溯缺口」考点的对账面",
+      "content": "# specs/research-verbatim-precision/design.md（§方案② 摘录，与修复后盘上版本一致——该节未因本 finding 修改）\n\n- 仍失败：新增导出纯函数 `downgradeNonVerbatimClaims(claims)`（放 research.mjs，与 normalizeClaimStatuses 同风格）——非逐字 claim 保留，打 `non_verbatim: true`、status 强制 partial（不可 supported、不进 contradicted 否决）、note 前缀「非逐字摘录（复核改写）」；L1 自动升格循环对 non_verbatim 条目跳过；`fabricated_claims` 仍计这些条数（红旗封顶 needs_review 语义不变）。verdict.json schema/2 不变，claims[] 新增可选字段 `non_verbatim`。"
+    },
+    {
+      "path": ".agents/scripts/orchestrator/research.mjs",
+      "note": "摘自 2799230 版 :508-531（审查时代 develop HEAD；0f941ec 实现修复后行号已漂移，但权重表/否决逻辑两版语义一致）——aggregateCoherence 权重 supported=1/partial=0.5/unsupported·contradicted=0 与 scoreVerdict 的 contradicted 一票否决，是「降为实为升权+撤销否决」考点的代码事实面",
+      "content": "/** claim 状态聚合分：supported=1 / partial=0.5 / unsupported·contradicted=0；unverifiable 不计（由 coverage 表达）。 */\nfunction aggregateCoherence(claims) {\n  const checked = claims.filter((c) => c.status !== 'unverifiable');\n  if (!checked.length) return null;\n  const w = { supported: 1, partial: 0.5, unsupported: 0, contradicted: 0 };\n  return Math.round((checked.reduce((s, c) => s + (w[c.status] ?? 0), 0) / checked.length) * 100);\n}\n\n/**\n * v3 核心（纯函数，全单测）：\n *   - coverage = 已核承重结论 / 总承重结论（unverifiable 拖 coverage 不拖 coherence）\n *   - overall = 各非 null 维度加权（evidence .4 / coherence .35 / citation .15 / coverage .10），缺维重归一；\n *     evidence 或 coverage 或 coherence 为 null → overall null（不可伪装成判断）\n *   - usage 决策矩阵：contradicted 一票否决 unsafe；fabricated>0 封顶 needs_review；\n *     维度缺失 → undetermined；阈值来自 gates（可配），否决权与 COVERAGE_FLOOR 不可配\n */\nexport function scoreVerdict({ claims, fabricatedCount = 0, citation, evidence, gates = {} } = {}) {\n  claims = Array.isArray(claims) ? claims : [];\n  const total = claims.length;\n  const checked = claims.filter((c) => c.status !== 'unverifiable');\n  const coverage = total ? Math.round((checked.length / total) * 100) : null;\n  const coherence = aggregateCoherence(claims);\n  const contradicted = claims.filter((c) => c.status === 'contradicted');\n  const veto = contradicted.length > 0;"
+    }
+  ],
+  "files": [],
+  "reviewRef": "2799230",
+  "fixedBy": "0f941ec",
+  "expect": [
+    "降为",
+    "升权",
+    "否决",
+    "撤销",
+    "contradicted"
+  ],
+  "note": "考点 3，2026-11-11 入库，⏸ 待适配（spec-review 题型）。事故：research-verbatim-precision 首跑审查（2026-11-10 00:57，review-verdict.json P2#2）——requirements 验收标准写「status 降为 partial」，但 aggregateCoherence 里 contradicted 权重 0、partial 0.5，对原判 contradicted 的 claim 置 partial 是升权并撤销一票否决，「降级」措辞与语义方向相反。审查船给出修复方向：改「强制置为」+ 补显式验收条目「非逐字 claim 不参与 contradicted 一票否决（veto 面收窄为纯逐字 claim）」——修复后文本见现行 requirements.md:23-24，实现落 0f941ec（downgradeNonVerbatimClaims：status 强制 partial 不进 contradicted 否决）。spec 本体 gitignore 未进树（「bug 在场」侧以重建材料承载）；考法：全 inline 材料，审查船须跨 requirements/design/代码事实三方对账，发现「降为」的方向性错误并给出改法"
+}

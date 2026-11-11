@@ -25,8 +25,10 @@
 | `stale-priors-vs-current-landscape` | 训练先验冒充检索现状（现状型问题 + 双口径当期数据） | 事故① |
 | `primary-source-vs-secondhand` | 一手来源 vs 二手转述（双源交叉） | 事故② |
 | `fabricated-repo-urls` | 伪造/错配来源 URL（官方仓库链接 + star 数） | 事故②（伪造 URL 变体） |
+| `announcement-date-vs-event-date` | 公告页发布/更新时间 ≠ 事件实际发生时间 | 事故④（published_time 误当上线日）；**首跑待补** |
+| `snapshot-truncation-honest-annotation` | 快照截断下的诚实标注（不可对账显式标注而非静默断言） | 事故④（快照仅含标题/meta）；**首跑待补** |
 
-## 事故 ↔ 拦截层映射（2026-11 三次真实事故出题）
+## 事故 ↔ 拦截层映射（2026-11 真实事故出题）
 
 - **事故①（`stale-priors-vs-current-landscape`）——引用日期编造 / 训练先验冒充检索现状**：
   首跑把 2023 年训练先验写进「2026-11 当前流行度」调研，15 条引用日期全编成 2023。主要被
@@ -39,6 +41,14 @@
   claim 全部非逐字被丢弃（fabricated_claims=10）。主要被 **verdict/2 逐字校验** 拦
   （L2 输出每条 claim 必须逐字摘自 brief 原文，非逐字即弃 → L3 建档淘汰）；无独立案例，
   真跑任一题后接 verdict 复核即可覆盖。
+- **事故④（`announcement-date-vs-event-date` + `snapshot-truncation-honest-annotation`，
+  2026-11-09）——快照证据边界误读**：同一次 llm-output-trust-verification-2026 真跑暴露
+  两个考点——L2 复核员把 Citations API 公告页 published_time 误判为上线日期（页面发布/
+  更新时间 ≠ 事件时间，前者已单独成题）；快照仅含页面标题/meta、正文截断时，多数承重
+  claim（RAGAS 公式、12 条 gates、150 次检索 -42%、Patronus 许可断言）不可对账，L2 判
+  partial/unverifiable——好的 brief 须在正文显式标注「快照截断不可见 / 细节另经交叉印证」
+  而非静默断言（该 brief 的 Ragas 引用行即正面示范）。主要被 **sources/ 快照人工对账 +
+  L2 逐条判级** 拦；两案均**首跑待补**。
 
 **评分边界**：discovery-eval 关键词评分只能验产出形态（五段契约 + 引用数量 + 关键词命中），
 事故级拦截验证在 verdict/2 各层（当日引用 gate / L1 快照回查 / L2 逐字校验）——关键词全中

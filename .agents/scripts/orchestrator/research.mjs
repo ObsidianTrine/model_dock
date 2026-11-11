@@ -1093,23 +1093,51 @@ export function appendResearchLedger(repoRoot, entry) {
   return file;
 }
 
-/** L3 读台账 → 按调研船模型聚合：n / L1 平均核实率 / L2 平均完全支撑率 / 判级分布。L2 条目的调研船在 researcher_model（model 是复核船）；旧条目无 researcher_model 回退 model。 */
-export function readLedgerStats(repoRoot) {
+/** L3 读台账（原始条目数组，append 顺序=时间序；损坏行跳过）。降级判定与统计共用。 */
+export function readResearchLedger(repoRoot) {
   const file = path.join(researchDir(repoRoot), 'ledger.jsonl');
   if (!fs.existsSync(file)) return [];
-  const byModel = new Map();
+  const out = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
     try {
-      const e = JSON.parse(line);
-      const key = `${e.researcher_model ?? e.model ?? '?'}`;
-      const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [], strong_supports: [] };
-      agg.runs++;
-      agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;
-      if (typeof e.hit_rate === 'number') agg.hit_rates.push(e.hit_rate);
-      // avg_strong_support 与 avg_hit_rate 同款 null 语义：旧条目缺字段跳过，一个都没有 → null
-      if (typeof e.strong_support === 'number') agg.strong_supports.push(e.strong_support);
-      byModel.set(key, agg);
+      out.push(JSON.parse(line));
     } catch { /* 损坏行跳过 */ }
+  }
+  return out;
+}
+
+/** 台账降级阈值（research-ledger-downgrade 卡，L3→行动闭环）：滚动窗口内 fail 达阈值即
+ *  标记该调研船降级。advisory 语义——sail 自主调研跳过烧钱、交互式 research 只亮牌不拦。 */
+export const RESEARCH_STANDING_WINDOW = 5;
+export const RESEARCH_STANDING_FAIL_THRESHOLD = 3;
+
+/**
+ * 调研船台账降级判定（纯函数）：取该模型最近 WINDOW 次判定（调研船口径 researcher_model，
+ * 旧条目回退 model），fail 绝对数达阈值 → degraded。样本不足不判「好」只看 fail——
+ * 模型漂移往往是瞬时的，宁可误亮牌（人工复核一下）也不漏报。
+ */
+export function researcherStanding(entries, model, opts = {}) {
+  const window = Number.isInteger(opts.window) && opts.window > 0 ? opts.window : RESEARCH_STANDING_WINDOW;
+  const threshold = Number.isInteger(opts.failThreshold) && opts.failThreshold > 0 ? opts.failThreshold : RESEARCH_STANDING_FAIL_THRESHOLD;
+  const mine = (entries ?? [])
+    .filter((e) => (e.researcher_model ?? e.model ?? '?') === model)
+    .slice(-window);
+  const fails = mine.filter((e) => e.level === 'fail').length;
+  return { model, judged: mine.length, fails, degraded: fails >= threshold };
+}
+
+/** L3 读台账 → 按调研船模型聚合：n / L1 平均核实率 / L2 平均完全支撑率 / 判级分布。L2 条目的调研船在 researcher_model（model 是复核船）；旧条目无 researcher_model 回退 model。 */
+export function readLedgerStats(repoRoot) {
+  const byModel = new Map();
+  for (const e of readResearchLedger(repoRoot)) {
+    const key = `${e.researcher_model ?? e.model ?? '?'}`;
+    const agg = byModel.get(key) ?? { model: key, runs: 0, levels: {}, hit_rates: [], strong_supports: [] };
+    agg.runs++;
+    agg.levels[e.level ?? '?'] = (agg.levels[e.level ?? '?'] ?? 0) + 1;
+    if (typeof e.hit_rate === 'number') agg.hit_rates.push(e.hit_rate);
+    // avg_strong_support 与 avg_hit_rate 同款 null 语义：旧条目缺字段跳过，一个都没有 → null
+    if (typeof e.strong_support === 'number') agg.strong_supports.push(e.strong_support);
+    byModel.set(key, agg);
   }
   return [...byModel.values()].map((a) => ({
     model: a.model,

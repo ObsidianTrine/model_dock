@@ -61,7 +61,12 @@ export async function setRouteNext(providerId: string | null): Promise<string | 
   })
 }
 
-/** 切换当前使用的服务：优先复用该服务已有的路由，否则自动创建 */
+/** 切换当前使用的服务：优先复用该服务已有的路由，否则自动创建。
+ *  切换完成即内聚重烤烤模型客户端（2026-11-11 codex-rebake-profiles 卡）：此前 refresh 由
+ *  各调用方自理——控制台「应用」按钮做了、**云端/同步引擎远程切换回调漏了**（main.ts
+ *  applySwitch 只切+热加载），造成「云端切路由 → 烤入客户端不跟随」失联（gpt-6-astra
+ *  事故同型）。内聚成单一漏斗后调用方零改动即全覆盖；稳态内容一致守卫（refresh 内部）
+ *  保证重复调用零写盘。 */
 export async function switchToService(providerId: string): Promise<string> {
   const name = await mutateConfig((c) => {
     if (!c.providers[providerId]) throw new Error(t('服务「{id}」不存在', 'Service "{id}" does not exist', { id: providerId }))
@@ -79,6 +84,9 @@ export async function switchToService(providerId: string): Promise<string> {
   // UI/CLI/云端 agent 三路切换统一在此记时间戳：云端 desired 只在 desired_ts 更新时生效，
   // 防止云端旧指令覆盖本机更新的手动切换（详设 §7.4-5）。未启用同步时静默跳过，不影响切换本职
   await noteLocalSwitch().catch(() => {})
+  // 重烤失败不阻断切换本职（逐客户端失败已在 refresh 内收集为 warnings；此处吞错保持
+  // 「切换永成功」语义，烤模型客户端容错与调用方自理时代一致）
+  await refreshBakedModelClients().catch(() => {})
   return name
 }
 
@@ -101,6 +109,7 @@ export async function switchToServiceWithRoute(providerId: string, autoFailover:
     return name
   })
   await noteLocalSwitch().catch(() => {})
+  await refreshBakedModelClients().catch(() => {}) // 同 switchToService：内聚重烤（云端/远程切换回调不再漏）
   return name
 }
 
