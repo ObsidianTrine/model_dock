@@ -16,7 +16,7 @@
 |------|------|
 | 装依赖 | `npm install` |
 | 编译到 `dist/` | `npm run build`（tsc） |
-| 测试 | `npx vitest run <相关测试文件>`；**日常改动只跑与改动相关的用例，全绿即交付**（分层规则见「测试指南」） |
+| 测试 | `npx vitest run <相关测试文件>`；**日常改动按域跑相关用例，全绿即交付**（域分层规则见「测试指南」） |
 | 全量回归 | `npm test`（产品套件 test/*.test.ts）/ `npm run test:workflow`（编排器套件 test/orchestrator/**）——仅版本发布、develop→main 合并等大节点跑 |
 | 覆盖率 | `npm run test:coverage` |
 | Lint | `npm run lint`（ESLint，作用域 `src/**`，全 warn 级退出码恒 0；超基线由 test/eslint-baseline.test.ts 棘轮拦截） |
@@ -114,9 +114,17 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ## 测试指南
 
-- **测试范围分层（2026-11-02 定）**：日常代码修改**只跑与改动相关的测试用例**，全绿即交付——按文件过滤（`npx vitest run test/<文件>.test.ts`；编排器改动用 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`），更窄再叠加 `-t "用例名关键词"`。**全量** `npm test` / `npm run test:workflow` 只在版本发布、develop→main 合并等大节点跑。注意下方 vitest 隔离模型：涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（如 `uninstall.test` / `store.test`），避免「单独跑绿、组合跑红」。
+- **测试域分层（2026-11-11 重写，取代旧「测试范围分层」，全项目唯一口径）**：按改动域选验证强度，L0→L3 逐级加重：
+
+  | 层级 | 场景 | 跑什么 |
+  |------|------|--------|
+  | **L0** | 纯文档 | docs-lint（≤10s） |
+  | **L1** | 日常改码 | **按域跑相关测试**：ModelDock 域（`src/**`）跑相关产品测试 `npx vitest run test/<文件>.test.ts`；Dockmaster 域（`.agents/**`、`test/orchestrator/**`）跑相关编排测试 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`；更窄叠加 `-t "用例名关键词"`。跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（见下「vitest 隔离模型」），避免「单独跑绿、组合跑红」 |
+  | **L2** | finish 合并门禁 | `node scripts/test-gate.mjs` 按改动域自动路由：**ModelDock 域**=产品全量（~3min）；**Dockmaster 域**=编排冒烟子集（≤60s，编排全量由 CI workflow-suite required check 兜底）；**混合域**=两者。接口：无参自动判域；`--base <ref>` 对比基准、`--staged` 只看暂存、`--dry` 只打印路由不执行、`--full` 强制双域全量（工具由 test-domain-gates 卡交付，feature-branch finish 的 testCmd 已接） |
+  | **L3** | 大节点（发布 / develop→main） | 双套件全量 `npm test` + `npm run test:workflow`（编排套件并行定档后合计 ~6min）；发布侧 release-check 默认只跑产品域，CI preflight tested 兜底 |
+
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
-- 套件：test/ 下 223 个测试文件（产品套件 140 + 编排器套件 83；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- 套件：test/ 下 252 个测试文件（产品套件 149 + 编排器套件 103；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
 - **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入 `VITEST`、种子脚本显式 `MODELRDOCK_TEST=1`、**agent CLI 环境标记**——`ZCODE_*`/`CLAUDECODE` 等，见 `src/util/fsx.ts` AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受误伤；有意写真实 home 的场景（当前仅 test/autostart.test.ts 的 win 真注册表用例）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687 / 8890 / 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
@@ -124,7 +132,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ### vitest 隔离模型：跨文件 mock 是雷区（必读）
 
-`vitest.config.ts` 用 `isolate: false` + `poolOptions.forks.singleFork`：**所有测试文件在同一个子进程里串行跑，模块注册表与模块 mock 注册表全进程共享**。两条硬约束：
+双 config 均 `isolate: false`（vitest4 forks 池）：**同一 worker 进程内所有测试文件共享模块注册表与模块 mock 注册表**。池策略现状（2026-11-11）：产品套件 maxWorkers 缺省 1（2026-10-01 policy.test.ts worker 生命周期 CI 卡死前科 + 顺序耦合对），编排套件缺省并行 4（B3 实验证据 docs/archive/test-orch-parallel-exp.md，CI 复证中——workflow-suite 连续 3 天绿才维持定档），`VITEST_MAX_WORKERS` 可覆盖两处缺省。两条硬约束：
 
 1. **同一个模块不要被两个测试文件 `vi.mock`**——谁生效取决于执行顺序，表现为「单独跑绿、一起跑红」（最典型：别的文件的断言突然收到 0 次调用）。
 2. **不要用 `vi.clearAllMocks()` / `vi.restoreAllMocks()` 做跨用例清场**（会连其他文件的模块 mock 一起清/还原）；只清自己的：`vi.mocked(x).mockClear()`、`vi.spyOn(...).mockRestore()`。
@@ -214,7 +222,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 ## 判定边界（Boundaries）
 
 **必须做**
-- 改完代码跑**与改动相关的测试用例**（见「测试指南」测试范围分层），全绿再交付；全量留给发布、develop→main 等大节点与 CI 门禁。
+- 改完代码**按域跑相关测试用例**（见「测试指南」测试域分层 L1），全绿再交付；全量留给 L3 大节点与 CI 门禁。
 - 涉及路径/文件/进程/shell 的改动，交付前过一遍「工程硬性约定」三平台兼容清单（Windows CI 红是高频事故源，本机 mac 全绿不算数）。
 - 测试结束清理自己拉起的全部临时进程，核实无端口占用、无残留进程再收工（硬规则 4）。
 

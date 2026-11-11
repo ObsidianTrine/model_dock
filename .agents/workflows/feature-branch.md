@@ -27,16 +27,16 @@ node .agents/scripts/feature-branch.mjs start <task-id>
 
 ### 3. 自测
 
-**只跑与改动相关的测试用例**（2026-11-02 分层规则：全量套件慢，日常交付不做全量回归）：
+**按域跑相关测试**（2026-11-11 域分层，层级表见项目 AGENTS.md「测试指南」；全量套件慢，日常交付不做全量回归）：
 
 ```bash
-npx vitest run test/<相关测试文件>.test.ts                              # 产品套件（test/*.test.ts）
-npx vitest run -c vitest.workflow.config.ts test/orchestrator/<相关文件>.test.ts   # 编排器/工作流套件（test/orchestrator/**）
+npx vitest run test/<相关测试文件>.test.ts                              # ModelDock 域：产品套件（test/*.test.ts）
+npx vitest run -c vitest.workflow.config.ts test/orchestrator/<相关文件>.test.ts   # Dockmaster 域：编排器/工作流套件（test/orchestrator/**）
 ```
 
 需要更窄时叠加 `-t "用例名关键词"`。相关用例全绿才能进入合并步骤（项目 AGENTS.md「判定边界」）；涉及跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（见 AGENTS.md「vitest 隔离模型」——单独跑绿 ≠ 组合绿）。
 
-- **范围分层**：全量 `npm test` / `npm run test:workflow` 保留给版本发布、develop→main 合并等大节点与 CI 门禁；finish 的自动 `testCmd`（合并门禁，一次性）保持现状不动。
+- **域分层**：L0 纯文档跑 docs-lint 即可；L1 日常改码按域跑上方命令；L2 合并门禁交给 finish 的自动 `testCmd`（已接 `node scripts/test-gate.mjs`，按改动域自动路由：ModelDock 域=产品全量 ~3min、Dockmaster 域=编排冒烟子集 ≤60s（全量由 CI workflow-suite required check 兜底）、混合域=两者）；L3 双套件全量保留给版本发布、develop→main 合并等大节点与 CI 门禁。
 - 测试期间遵守项目自身的红线约定（见项目 AGENTS.md，如端口/实例/环境限制）。
 
 ### 4. 合并回 develop（串行、保留完整信息）

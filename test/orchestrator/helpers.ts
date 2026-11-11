@@ -19,12 +19,13 @@ export interface TestRepo {
 }
 
 // mkRepo 的 .agents/scripts 模板缓存（预研 B1，docs/archive/test-orch-inproc-presearch.md §六）：
-// 全量套件 mkRepo 332 次 × cpSync 36ms ≈ 12s 都花在从 WORKTREE_ROOT 反复读同一份源树上。
+// B1 估全量套件 mkRepo 332 次 × cpSync ≈ 12s 花在从 WORKTREE_ROOT 反复读同一份源树上。
 // 改为每进程只从 WORKTREE_ROOT 构建一次模板目录（os.tmpdir() 下，按 WORKTREE_ROOT 键控的
-// 惰性单例），之后每仓库 cpSync 从模板复制——OS 临时目录读源更热、CI 上 /tmp 常为 tmpfs，
-// 每仓库仍拿到独立完整副本，结果语义不变。测试只在各仓库副本里改 scripts（policy-dispatch /
-// agent-init / fleet-console 均如此），源目录运行期不可变，模板不会过期。best-effort 进程
-// 退出清理：失败忽略，OS 临时目录自清兜底。
+// 惰性单例），之后每仓库 cpSync 从模板复制——CI 上 /tmp 常为 tmpfs（内存盘读源，免磁盘
+// I/O）；本机 APFS 同卷实测单次 15.5ms→15.0ms（收益小，不回退）。每仓库仍拿到独立完整
+// 副本，结果语义不变。测试只在各仓库副本里改 scripts（policy-dispatch / agent-init /
+// fleet-console 均如此），源目录运行期不可变，模板不会过期。best-effort 进程退出清理：
+// 失败忽略，OS 临时目录自清兜底。
 const scriptsTemplates = new Map<string, string>()
 function getScriptsTemplate(): string {
   const cached = scriptsTemplates.get(WORKTREE_ROOT)
