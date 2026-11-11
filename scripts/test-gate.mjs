@@ -172,7 +172,7 @@ export const ORCH_SMOKE_EXCLUDED = [
   // 以下为「避开」级（非硬排除语义，但同样不进子集）：
   'test/orchestrator/autoapprove.test.ts',      // 真实 sleep ~2.5s
   'test/orchestrator/notify-digest.test.ts',    // 真实 sleep ~2s
-  'test/orchestrator/reviewing-recovery.test.ts', // 并行时序偶发红，待另行修复
+  'test/orchestrator/reviewing-recovery.test.ts', // 曾并行偶发红（共享 tmpdir 差分误判并发 fork 迁移）；已私有 TMPDIR 隔离修复（2026-11-12 同卡），仍不进固定抽检面（非核心主链路，改动时经自证通道入跑）
 ];
 
 // ─────────────────────────── 跨域契约联动 ───────────────────────────
@@ -299,22 +299,27 @@ export function buildPlan(files, opts = {}) {
   // 编排侧：有编排域/双域文件 → 冒烟子集；仅契约触发 → 只跑契约用例
   if (effHasOrch || contract.orch.length) {
     const baseFiles = effHasOrch ? ORCH_SMOKE_FILES : [];
-    const smokeFiles = dedup([...baseFiles, ...contract.orch]);
-    const added = smokeFiles.filter((f) => !baseFiles.includes(f));
+    // 直接改动的编排测试文件必须自证入跑（含硬排除名单内的——排除名单只约束固定抽检面
+    // 的预算纪律，不豁免被改文件本身；改了测试却不跑该测试 = 门禁漏洞，2026-11-12 对账发现）
+    const selfVerify = dedup(changed.dockmaster).filter((f) => f.startsWith('test/orchestrator/'));
+    const smokeFiles = dedup([...baseFiles, ...selfVerify, ...contract.orch]);
+    const contractAdded = contract.orch.filter((f) => !baseFiles.includes(f));
+    const selfAdded = selfVerify.filter((f) => !baseFiles.includes(f));
     const who = conservative
       ? 'diff 不可得，保守全跑'
       : `触达编排域 ${changed.dockmaster.length} 个 + 双域 ${changed.dual.length} 个文件` +
         (changed.dockmaster.length + changed.dual.length === 0 ? '（仅契约联动触发）' : '');
-    const contractNote = added.length
-      ? `；契约联动追加 ${added.join('、')}${contract.orchTriggers.length ? `（触发：${contract.orchTriggers.join('、')}）` : ''}`
+    const contractNote = contractAdded.length
+      ? `；契约联动追加 ${contractAdded.join('、')}${contract.orchTriggers.length ? `（触发：${contract.orchTriggers.join('、')}）` : ''}`
       : '';
+    const selfNote = selfAdded.length ? `；改动测试自证 ${selfAdded.join('、')}` : '';
     actions.push({
       kind: 'orch-smoke',
       label: '编排冒烟子集（vitest · workflow 配置）',
-      reason: who + contractNote + '；全量由 CI workflow-suite 兜底',
+      reason: who + contractNote + selfNote + '；全量由 CI workflow-suite 兜底',
       files: smokeFiles,
       baseCount: baseFiles.length,
-      addedCount: added.length,
+      addedCount: smokeFiles.length - baseFiles.length,
     });
   }
 
