@@ -1,0 +1,20 @@
+{
+ "id": "2026-11-spec-autobuild-default-on",
+ "title": "同日两卡语义对撞：spec-review 卡（bd628f9）与文档 D1.5 承诺「spec 拆卡永远人工拍板」并把 advisory 纪律写进 D6.5（审查不改变拆卡权归属），同日 autoapprove 卡（86cb8b3）却把 approve_to_build 规格的超时自动拆卡缺省开（enabled=true + 3 分钟拍板窗）——3 分钟远低于设计人审节奏，缺省即等效关闭人工闸。两卡单独看都自洽，合流后才暴露矛盾（2026-11-11 巡航审查船 A 抓到）",
+ "reviewRef": "bd628f9",
+ "diffRef": "86cb8b3",
+ "fixedBy": "020239f",
+ "files": [
+  ".agents/scripts/orchestrator.mjs",
+  ".agents/scripts/workflow-config.mjs",
+  ".agents/workflows/orchestrator.md"
+ ],
+ "expect": [
+  "specBuild",
+  "opt-in",
+  "缺省",
+  "人工",
+  "拆卡"
+ ],
+ "note": "020239f 修复（autoApprove.specBuild.enabled 缺省 false——同 researchAutoDim/snapshotMirror「危险自动化缺省关」先例；任务卡自动合并语义不变；orchestrator.md「永远人工」句改准确口径「人工闸+可 opt-in 委托」）；缺陷随 86cb8b3（D6.5 分层审核超时委托）进树——sweep 对 spec 审查 verdict=approve_to_build 的规格超时自动 spec build，与同日 D1.5/advisory 承诺冲突。教训：①「危险自动化」新开关的缺省值必须对照既有授权面声明逐条过（「永远人工」「永不自动」类文案出现即触发缺省审查）；②同日多卡并行时，授权语义类承诺（谁有权做什么）需要一张跨卡一致性清单——功能各自治金丝全绿拦不住语义对撞。考法：diff = 86cb8b3 引入 autoapprove sweep（含 spec 自动拆卡缺省开）——材料内可见线索是 orchestrator.md 既有 D1.5「拆卡永远人工拍板」句（reviewRef 侧），审查者须发现新开关缺省值与该承诺矛盾，并给出 opt-in 缺省关的修法"
+}

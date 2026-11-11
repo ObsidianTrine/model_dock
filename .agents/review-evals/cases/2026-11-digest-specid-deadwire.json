@@ -1,0 +1,20 @@
+{
+ "id": "2026-11-digest-specid-deadwire",
+ "title": "digest 规格尾行管道死接线：2ee380e 给 queueDigestItem 加 specId 透传并在 buildDigestBody 实现「📋 规格 <id>：n/m ✅」尾行、orchestrator.md D6.6 写明承诺与示例，但生产调用点（settleNotify/notifyAutoApproveAction）从不传 specId——尾行在真实环境永不出现，只有单测直构 items 才绿（文档承诺的假功能，2026-11-11 巡航审查船 B 抓到）",
+ "reviewRef": "2ee380e",
+ "diffRef": "2ee380e",
+ "fixedBy": "020239f",
+ "files": [
+  ".agents/scripts/orchestrator/notify-digest.mjs",
+  ".agents/scripts/orchestrator.mjs",
+  ".agents/workflows/orchestrator.md"
+ ],
+ "expect": [
+  "specId",
+  "死接线",
+  "调用点",
+  "尾行",
+  "测试"
+ ],
+ "note": "020239f 修复（specIdOfTask 派生：卡 id 去 /-t\\d+$/ 得 specId 且 specs/<id>/ 在场才认，两生产调用点接线）；缺陷随 2ee380e（digest 扁平化）进树。教训：①「文档/示例承诺的功能」入库前必须从生产调用链走查一遍——单测直构输入绿的管道不等于接线（本例测试全绿恰恰掩盖死接线）；②新增可选参数的透传链要逐跳验证，跳过的接缝就是静默缺口。考法：diff = 2ee380e——审查者须 grep specId 的全部供给点发现零生产调用方，并判断「单测绿 + 文档有示例」三者的组合不可信"
+}

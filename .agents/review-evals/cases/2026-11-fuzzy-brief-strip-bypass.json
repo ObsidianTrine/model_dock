@@ -1,0 +1,19 @@
+{
+ "id": "2026-11-fuzzy-brief-strip-bypass",
+ "title": "verifyClaimVerbatim 一级校验的 brief 侧也剥行内 [n] 标注（stripInlineCitations(briefBody)），使跨引用拼接句直接绕过 fuzzy 三硬线主防线：brief「A [12] B」剥成「A B」后，拼接 claim「A B」一级精确包含即过——与同函数注释「FUZZY_JACCARD 是拦改写拼接的主防线」自相矛盾（防编造设计被自己的宽容面短路，2026-11-11 巡航审查船 A 抓到）",
+ "reviewRef": "1851e59",
+ "diffRef": "1851e59",
+ "fixedBy": "020239f",
+ "files": [
+  ".agents/scripts/orchestrator/research.mjs",
+  "test/orchestrator/verdict-fuzzy.test.ts"
+ ],
+ "expect": [
+  "一级",
+  "gap",
+  "拼接",
+  "fuzzy",
+  "[n]"
+ ],
+ "note": "020239f 修复（一级改 claim 侧剥 [n] 后对 brief 原文 gap 容错匹配——claim 分词以 \\s*(?:\\[\\d{1,3}\\]\\s*)? 连接，只容 1-3 位纯数字引用间隙，[2026]/[1m] 形状不容；brief 侧保留原文不剥标注；fuzzy 级不变）；缺陷随 1851e59（判定链两级制）进树——剥标注本为消「模型逐字拷贝时 [n] 导致精确包含失败」的误伤，但对称地剥 brief 侧把「引用间隙」从噪声变成了拼接的免费豁免通道。教训：①宽容面（豁免/容错）的每一侧都要单独过威胁模型——「对称处理」常是意外通道；②防线注释（主防线/兜底分工）写进代码时要配一条「防线没有被自己的宽容面短路」的用例。考法：diff = 1851e59 引入两级制 + stripInlineCitations——审查者须从「一级是精确包含、fuzzy 才是主防线」的注释推出 brief 侧剥标注使拼接句免检，并给出单侧剥离/gap 容错的修法"
+}

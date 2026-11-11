@@ -85,6 +85,10 @@
 | 2026-11-schedule-dryrun-writes | schedule install --dry-run 在判定前无条件 writeRunner——「预演」静默覆写已装调度的在线 wrapper，换参数冒烟即改掉真实调度下次触发行为（CORRECT-13，当夜本仓实锤） | 4510b57 | —（2026-11-04 入库，待下次全量跑分） |
 | 2026-11-orch-review-model-engine-coupling | resolveEngine 把 engine 节 model 与 backend 连坐：backend 缺失即整节返回 null——JSDoc 承诺「model 可选」但只配 model 的配置被静默丢弃，review.model 声明位形同虚设（审查模型分源配置不可达，worker/review 长期同模型的隐性成因之一） | 0fec018 | —（2026-11-08 入库，待下次全量跑分） |
 | 2026-11-model-fallback-docs-premature | 模型级容灾对外文档句 1「不再一耗尽就把流量切去别家」与句 2「备用服务链都走完才触发」自相矛盾，且把尚未合入的 CLI 与 relay 消费面写成已可用——对外文档描述了树上不存在的行为（并行施工「文档先行」题，句内矛盾可判、超前描述需穷尽 grep） | 099b697 | —（2026-11-09 入库，待首跑） |
+| 2026-11-spec-autobuild-default-on | 同日两卡授权语义对撞：spec-review/D1.5 承诺「拆卡永远人工拍板」（advisory 纪律同句），同日 autoapprove 卡把 approve_to_build 规格超时自动拆卡缺省开（3 分钟窗）——缺省即等效关闭人工闸；单卡自洽、合流才暴露（巡航船 A） | 020239f | —（2026-11-11 入库，待首跑） |
+| 2026-11-fuzzy-brief-strip-bypass | verifyClaimVerbatim brief 侧也剥 [n] 使跨引用拼接句一级精确包含免检——绕过同函数注释自认的「FUZZY_JACCARD 主防线」，防编造被自己的宽容面短路（巡航船 A） | 020239f | —（2026-11-11 入库，待首跑） |
+| 2026-11-sweep-lock-single-attempt | detached sweep 睡满窗后单次抢调度器锁即放弃：drain 全程持锁，多卡 drain 中自动批示概率性静默失效、无重试无日志——「锁被占」在多卡场景是常态非异常（巡航船 A） | 020239f | —（2026-11-11 入库，待首跑） |
+| 2026-11-digest-specid-deadwire | digest 规格尾行管道死接线：queueDigestItem 加 specId 透传 + D6.6 文档承诺+示例，但生产调用点从不传 specId——尾行永不出现，单测直构全绿恰恰掩盖（巡航船 B） | 020239f | —（2026-11-11 入库，待首跑） |
 | 2026-11-price-gate-float-boundary | 价格闸门容差比较无 epsilon：十进制语义恰 5%（2 与 2.1）被二进制浮点噪声判越界，报错显示「差 5.0%」与上限 5% 自相矛盾——fail-closed 拒掉合法配置（引入时的测试用整数价绕开噪声，测试绿≠比较点对） | f0ec255 | —（2026-11-09 入库，待首跑） |
 | 2026-11-spec-review-l0-newfile-overreject | spec 审查 L0 把任务引用的拟新建文件判结构 fail 提前 die（烧不到 L2）：research-verbatim-precision 任务 2 引用拟新建 test/orchestrator/research-verbatim.test.ts，首跑真 spec（2026-11-10）实测误判——「缺路径」机器分不清拟新建与 typo，确定性层管机械事实、语义裁决交 L2（新建=合法/改错路径=P1） | 2799230 | —（2026-11-11 入库，待首跑） |
 | 2026-11-spec-review-stale-baseline | spec design「现状」节基线漂移（主考题）：spec research-verdict-trust-fixes 2026-11-09 21:18 落盘、develop 21:31 合入 753a1b4（并行施工）——三处 orchestrator.mjs 行号锚漂 53-74 行（3376→3429 等）、research.mjs:296→:299、「buildVerifierPrompt 无发布/事件时间区分指引」声明失效、AC7 docs「逐字重试节」无任务认领、守卫插入点×新增仲裁轮顺序交互未讨论——审查船现状对账 4 P1 零误报判 rework（overall=73）；教训固化规约 §6（现状定位一律符号+函数名，行号只辅助）+ L0 基线漂移警告 | bd628f9 | —（2026-11-11 入库，⏸ 待适配：spec-review 题型，见「spec-review 题型适配缺口」节） |
@@ -163,6 +167,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：首跑已补（2026-11-02 双 ✅，见上表）。
 - **2026-11-04 增补 2 题**（夜航修复对回灌：CORRECT-12 跨午夜日循环漏读 8d50bde + CORRECT-13 dry-run 覆写在线 wrapper 4510b57，dry 全过）：2 题 ⏳ 待首跑，不计入基线分母。
 - **2026-11-08 增补 1 题**（review.model 连坐收口回灌：214e449 引入 resolveEngine 起 model-only 配置即被静默丢弃，0fec018 解耦修复。与 0eb29bb freeSail / d6f5ae9 research.model 构成「规整层静默吞键」同型三连——编排配置面惯常事故形态，考 PR 审查者对「新配置键 + 规整层成对核对」的敏感度；dry 过）：1 题 ⏳ 待首跑，不计入基线分母。
+- **2026-11-11 增补 4 题**（ZCode 桌面端 15 分钟自由巡航对 2026-11-10 全天 57 提交的双船审查回灌，修复 020239f）：spec-autobuild-default-on（同日两卡授权语义对撞——「拆卡永远人工」承诺 vs 超时自动拆卡缺省开，单卡自洽合流才矛盾）、fuzzy-brief-strip-bypass（宽容面双侧对称剥离使拼接句免检——防线被自己的豁免短路）、sweep-lock-single-attempt（detached 任务按「锁空闲」假设写单次抢锁——多卡 drain 下概率性静默失效）、digest-specid-deadwire（新增可选参数有管道有文档有单测但零生产供给点——「测试绿+文档全」掩盖死接线）。四题共同教训：单卡全绿拦不住跨卡语义/时序/接线缺陷，巡航透镜（正确性之外的授权面、威胁模型、生产走查）与门禁互補。⏳ 待首跑。
 - **2026-11-11 增补 3 题**（spec review 首跑事故回流，按拆题惯例三题分立）：考点 2 走标准 diffRef 题型（bd628f9 引入 L0 files_hint fail→die，2799230 修 fail→warn），⏳ 待首跑；考点 1（主考题）/考点 3 为 spec-review 题型 ⏸ 待适配（spec 三件套 gitignore 物化不可达 + 出题对象为 L2 审查船，见「spec-review 题型适配缺口」节）——适配激活前不计入基线分母。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
