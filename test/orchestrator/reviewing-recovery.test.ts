@@ -72,25 +72,32 @@ describe('reviewing 卡恢复（run/resume 白名单）', () => {
 })
 
 describe('reviewer 临时目录清理', () => {
-  it('run 正常结束后 os.tmpdir() 无 orch-review-* 残留（finally 统一清，含每轮新建）', () => {
+  it('run 正常结束后无 orch-review-* 残留（私有 TMPDIR 隔离观测，finally 统一清，含每轮新建）', () => {
     const repo = mkRepo()
-    const tmp = fs.realpathSync(os.tmpdir())
+    // 私有 TMPDIR 隔离观测（2026-11-12 并行定档修正）：被测 orchestrator 子进程及其全部
+    // 子孙的临时目录都落进本用例私有 tmpdir，其余 fork 在途的 orch-review-* 不再进入
+    // 观测面——共享 os.tmpdir() 的差分快照在编排套件 maxWorkers=4 下会把并发 fork 的
+    // 目录误判为本用例泄漏（偶发红；AGENTS 执行坑 24 同型：差分观测须区分自因与并发
+    // 迁移）。os.tmpdir() 解析链：darwin/linux 读 TMPDIR、win32 读 TEMP||TMP，三平台成对注入。
+    const priv = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-tmpiso-'))
+    const isolatedEnv = { TMPDIR: priv, TEMP: priv, TMP: priv }
     const reviewDirs = () =>
       fs
-        .readdirSync(tmp)
+        .readdirSync(priv)
         .filter((d) => d.startsWith('orch-review-'))
-        .map((d) => path.join(tmp, d))
+        .map((d) => path.join(priv, d))
     try {
       const before = new Set(reviewDirs())
       const cardFile = path.join(repo.root, 'card-tmp.md')
       fs.writeFileSync(cardFile, cardText({ id: 'tmpclean' }))
-      runOrch(repo.root, `submit "${cardFile}"`)
-      runOrch(repo.root, 'run tmpclean --backend mock')
+      runOrch(repo.root, `submit "${cardFile}"`, isolatedEnv)
+      runOrch(repo.root, 'run tmpclean --backend mock', isolatedEnv)
       expect(readCard(repo.root, 'awaiting-human', 'tmpclean')).toBeTruthy()
-      // 本轮新建的 reviewer 临时目录必须全部清理；其他进程的旧目录不动（只比增量）
+      // 私有 tmpdir 起点恒空，差分=本子进程树新建的 reviewer 临时目录，必须全部清理
       const leaked = reviewDirs().filter((d) => !before.has(d))
       expect(leaked).toEqual([])
     } finally {
+      fs.rmSync(priv, { recursive: true, force: true })
       repo.cleanup()
     }
   })
