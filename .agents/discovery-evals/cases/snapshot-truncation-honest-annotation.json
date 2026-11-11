@@ -1,0 +1,9 @@
+{
+  "question": "调研 RAGAS faithfulness 指标的判级公式，以及 2026 年实践中 claim 级事实核查的判级粒度现状（从二值判级发展到了哪几档）。背景：RAGAS 官方文档等关键来源页面较长，抓取快照可能只含页面标题与元数据、正文截断不可见；凡快照中不可见、无法对账的细节必须在正文显式标注并说明如何交叉印证，不得静默断言。不要凭训练记忆作答，以本次检索与快照对账结果为准。",
+  "goals": "Dockmaster 调研罗盘：引用存在≠引用支撑；来源快照仅含标题/meta、正文截断时，承重结论不可对账必须在正文显式标注（如「快照截断不可见，细节另经交叉印证」）而非静默断言。来源：2026-11-09 llm-output-trust-verification-2026 真跑——快照仅含页面标题/meta 时 RAGAS 公式、12 条 gates、150 次检索 -42%、Patronus 许可断言多数不可对账，L2 判 partial/unverifiable；Ragas 行正面示范（公式细节另经多篇中文解析交叉印证）。",
+  "minCitations": 2,
+  "expect": {
+    "mustFind": ["截断", "不可见", "未见", "快照", "交叉印证", "faithfulness", "ragas", "claim", "判级", "supported"],
+    "mustFindAny": 7
+  }
+}
