@@ -3,7 +3,7 @@
   "goals": "Dockmaster 调研罗盘要求时间敏感结论区分「页面发布/更新时间」与「事件实际发生时间」并多源交叉；把公告页 published_time 当事件日期会污染航次报告与依赖决策（2026-11-09 L2 复核员把 Citations API 公告页 published_time 误判为上线日期的事故来源）。",
   "minCitations": 2,
   "expect": {
-    "mustFind": ["2025-01-24", "1月24", "1 月 24", "january 24", "jan 24", "citations", "发布", "上线"],
+    "mustFind": ["2025-01-24", "1月24", "1 月 24", "january 24", "jan 24", "2025-01-23", "1月23", "1 月 23", "january 23", "jan 23", "citations", "发布", "上线"],
     "mustFindAny": 4
   }
 }

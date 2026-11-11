@@ -96,6 +96,58 @@ describe('orchestrator verdict-fuzzy > verifyClaimVerbatim 两级制', () => {
     expect(v.fabricated).toHaveLength(3)
   })
 
+  // ---- 一级引用间隙容错（2026-11-11 巡航修复）：brief 侧不再全局剥 [n]，改 claim 侧
+  // 剥 [n] 后对 brief 原文做 gap 容错匹配——旧法把 brief 的「A [12] B」变成「A B」，
+  // 拼接句直接过一级精确包含，绕过 FUZZY_JACCARD 拦拼接主防线，自相矛盾。----
+
+  /** 五段齐全、结论句带多个行内标注的 brief（gap 容错判据在其上标定）。 */
+  const GAP_BODY = [
+    '# 结论',
+    'R2D2 引擎用量第一 [3]，增速最快 [7]，成本最低 [9]。',
+    '',
+    '# 选项对比',
+    '- R2D2：用量第一。',
+    '',
+    '# 引用',
+    `- ${TODAY} https://a.com/rankings — 支撑`,
+    '',
+    '# 建议',
+    '预设库补齐用量第一。',
+    '',
+    '# 罗盘对齐',
+    '对齐配置托管定位。',
+  ].join('\n')
+
+  it('跨引用拼接句过一级（引用间隙容错，原有语义保持）：brief 行内 [n] 两侧词原样摘录 → valid 无标注', () => {
+    const v = verifyClaimVerbatim([{ claim: 'R2D2 引擎用量第一，增速最快，成本最低。', status: 'supported' }], GAP_BODY)
+    expect(v.valid).toHaveLength(1)
+    expect(v.fabricated).toHaveLength(0)
+    expect(v.valid[0]).not.toHaveProperty('verbatim') // 一级精确（gap 容错），不走 fuzzy
+  })
+
+  it('句中截取的前缀引用语义保持：截到标注处为止（句尾即标注）→ 一级 gap 容错照过', () => {
+    // brief「…用量第一 [3]，…」句中截到「用量第一，」为止：旧实现剥标注后是子串过一级，
+    // 新实现 gap 容错吃掉「 [3]」同样过一级——豁免面不回退
+    const v = verifyClaimVerbatim([{ claim: 'R2D2 引擎用量第一，', status: 'supported' }], GAP_BODY)
+    expect(v.valid).toHaveLength(1)
+    expect(v.fabricated).toHaveLength(0)
+    expect(v.valid[0]).not.toHaveProperty('verbatim')
+  })
+
+  it('[2026] 形状间隙不容：跳过非标注方括号内容的「拼接句」不进一级 → fabricated', () => {
+    const body = GAP_BODY.replace('R2D2 引擎用量第一 [3]，增速最快 [7]，成本最低 [9]。', '份额 43.6% [2026] 领跑企业榜。')
+    const v = verifyClaimVerbatim([{ claim: '份额 43.6% 领跑企业榜。', status: 'supported' }], body)
+    expect(v.valid).toHaveLength(0)
+    expect(v.fabricated).toHaveLength(1)
+  })
+
+  it('gap 容错不放大豁免面：间隙之外还跳过实词的拼接照旧拒（fuzzy Jaccard 主防线仍在）', () => {
+    // claim 跳过结论句中段的「增速最快」——引用间隙容错只吃 [n]，不吃实词
+    const v = verifyClaimVerbatim([{ claim: 'R2D2 引擎用量第一，成本最低。', status: 'supported' }], GAP_BODY)
+    expect(v.valid).toHaveLength(0)
+    expect(v.fabricated).toHaveLength(1)
+  })
+
   it('剥 [n] 后残留 [2026]/[1m] 类标注：不给 fuzzy（引用标注形状违规宁丢不放）', () => {
     const y = verifyClaimVerbatim(
       [{ claim: 'DeepSeek V4.1 周下载 56.5T，占 43.6%；2026-09 起 GPT-6 与 Kimi K3.1 领跑质量榜 [2026]。', status: 'supported' }],

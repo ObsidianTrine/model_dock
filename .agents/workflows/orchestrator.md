@@ -483,7 +483,7 @@ worker/reviewer 的凭据此前长期复用 tier token（env 注入，源头是�
 
 ### D1.5 spec review（三件套 agent 分层审查，advisory）
 
-`spec review <id> [--backend <名>] [--model m]`：把「人肉通读三件套找问题」变成「人只裁决 findings 清单」（spec-review-cmd 卡，2026-11-10）。两层：**L0 确定性检查**零 token（三件套齐全/任务段四行/依赖 DAG/files_hint 存在/红线关键词/TBD/基线漂移警告——结构性 fail 直接 die 不烧 L2）；**L2 审查船** readonly 会话按 `.agents/conventions/spec-review.md` 规约五维评分 + findings（现状对账杀手锏：design 引用的代码事实逐个开文件核实）。服务端权威重算 overall（加权 + null 传染 + 定位对账失败降档）与 build_ready（blocked/rework/needs_revision/approve_to_build）。产物 `specs/<id>/review-verdict.json`（spec-verdict/1）+ L3 台账（kind=spec-review）+ 通知。**advisory 纪律：审查结论只做筛查，spec build 拆卡永远人工拍板**（与 research verdict 同哲学）。审查船模型解耦：backend 缺省 review.backend、model 缺省 review.model（异构互审）。教训：design「现状」定位一律符号+函数名，行号只作辅助——行号漂移是常态不是事故（规约 §6）。
+`spec review <id> [--backend <名>] [--model m]`：把「人肉通读三件套找问题」变成「人只裁决 findings 清单」（spec-review-cmd 卡，2026-11-10）。两层：**L0 确定性检查**零 token（三件套齐全/任务段四行/依赖 DAG/files_hint 存在/红线关键词/TBD/基线漂移警告——结构性 fail 直接 die 不烧 L2）；**L2 审查船** readonly 会话按 `.agents/conventions/spec-review.md` 规约五维评分 + findings（现状对账杀手锏：design 引用的代码事实逐个开文件核实）。服务端权威重算 overall（加权 + null 传染 + 定位对账失败降档）与 build_ready（blocked/rework/needs_revision/approve_to_build）。产物 `specs/<id>/review-verdict.json`（spec-verdict/1）+ L3 台账（kind=spec-review）+ 通知。**advisory 纪律：审查结论只做筛查，spec build 拆卡默认人工拍板**（与 research verdict 同哲学；可显式 opt-in 委托超时自动拆卡 `autoApprove.specBuild.enabled=true`——缺省关，blocked/rework 结论开了也永不放行，2026-11-11 巡航修复）。审查船模型解耦：backend 缺省 review.backend、model 缺省 review.model（异构互审）。教训：design「现状」定位一律符号+函数名，行号只作辅助——行号漂移是常态不是事故（规约 §6）。
 
 ### D2. release-propose（发版提案）
 
@@ -533,7 +533,7 @@ L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprov
 - **fail-closed 五条（不可关闭）**：① 没有 `review_verdict` 的卡超时也绝不动作；② 最后一条相关事件是 `review_engine_failed` 视同无结论；③ blockers>0 的卡永不自动合并、只限次返工；④ drift 降级期间 sweep 整体跳过（恢复只能人工 `drift --clear`，每卡留 `autoapprove_skipped` 痕）；⑤ scope_outside（范围失控）落位的卡超时也绝不自动批示——范围失控不该静默合并（与合并闸门同一条不变量），自动返工同样跳过，一律留人工拍板。推荐层不存在的场合一律留人。
 - 红线不动声明：feature 提案的 intake 自动提交拒绝逻辑（canSailSubmit/canAutoSubmit 的 feature 拒绝）零改动——超时委托只作用于「已进闭环、已过审查」的卡，不碰任何提案 intake 闸门。
 
-**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾即退出不并发）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍（**configGuard 漂移期间跳过**——被改的 autoApprove 配置不生效，与派发/规划同口径）；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节同 sweep：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 直接拆卡并通知；blocked/rework 结论永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。动作与落位通知开启 digest 聚合通报（`notify.digest.enabled`）时先进待发队列，由 `orch notify-digest --flush` 子命令合并成一条扁平通报发出（落位流程 detached 自动拉起；手动补发可直达；机制详见 D6.6）。
+**触发时机**：① drain/run 落位 awaiting-human 后拉起一次性 detached sweep（先睡满窗口+0.5 分钟再扫，`--sleep-first`；自己抢调度器锁，drain 未收尾时有界重试等锁——60s 间隔 ×10 次上限，每轮失败 log 一行、耗尽 log 放弃交周期 sweep 兜底，绝不并发批示。2026-11-11 巡航修复：旧实现单次抢锁失败即退出，多卡 drain 期间自动批示静默落空）；② watch/sail/nightly 每周期开头 spawnSync 同步扫一遍（**configGuard 漂移期间跳过**——被改的 autoApprove 配置不生效，与派发/规划同口径）；③ 手动 `orch autoapprove [--timeout N] [--dry-run]`（--dry-run 只报告；--timeout 覆盖配置，测试/临时收紧用）。spec 环节 **opt-in**（2026-11-11 巡航修复：拆卡进真实施工，「拆卡人工拍板」闸门缺省不委托——`autoApprove.specBuild.enabled=true` 显式开启才扫描）：`specs/<id>/review-verdict.json` 结论 `approve_to_build` 且超时且未 build 过（无 progress.json）→ 按推荐拆卡并通知；blocked/rework 结论开启也永不自动放行。每个 executed 动作发飞书通报（标题带项目名前缀）。动作与落位通知开启 digest 聚合通报（`notify.digest.enabled`）时先进待发队列，由 `orch notify-digest --flush` 子命令合并成一条扁平通报发出（落位流程 detached 自动拉起；手动补发可直达；机制详见 D6.6）。
 
 ### D6.6 任务通报聚合（notify digest，2026-11-10）
 
@@ -554,7 +554,7 @@ L2/L3 卡落 awaiting-human 后人工有拍板窗口（workflow.json `autoApprov
 
 - **标题** = 项目名 + emoji 计数摘要（✅合并 · ⏸待批 · ⛔阻塞/退关 · 📄其余事件，只列非零项；纯 normal 批 = `【项目名】📄N 事件`）——扫一眼分诊要不要点开。
 - **正文** ≤5 行扁平事件流，每行 `emoji 对象 动作(关键数字)` ≤60 字：merged → `✅ <taskId> 合并（commit 前 7 位，有则带）`；awaiting-human → `⏸ <taskId> 待批示（reason 前 20 字）`；blocked/failed → `⛔ <taskId> <状态标签>（reason 前 20 字）`；其余（research/spec/autoapprove 中态等）→ `📄 <title 前 40 字>`。超 5 行保留 attention 行、余量折叠 `…另 N 条见详情`。
-- **尾行**：本批事件带 specId 才读 `specs/<id>/progress.json` 出规格进度（读不到省略）；详情档 last.txt 是本批完整 JSON（flush 时原子归档），通知里不展开的细节全在那里。
+- **尾行**：本批事件带 specId 才读 `specs/<id>/progress.json` 出规格进度（读不到省略）。specId 接线（2026-11-11 巡航修复）：settleNotify / notifyAutoApproveAction 从卡 id 派生——spec build 拆出的卡 id 形如 `<spec>-t<n>`，去 `-t<n>` 后缀且 `specs/<id>/` 在场才带上；spec 动作（taskId 即规格 id）直接透传。详情档 last.txt 是本批完整 JSONL（一行一条事件，flush 时原子归档），通知里不展开的细节全在那里。
 
 ### D7. 调研评测集（discovery-evals）
 

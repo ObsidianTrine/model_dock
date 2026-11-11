@@ -2,8 +2,8 @@
 
 > spec 三件套（requirements / design / tasks）的分层审查标准与 verdict 契约。给三类读者：
 > ① 未来 `spec review` 命令的 L2 审查船 prompt 注入源；② 人工审设计的 checklist；③ 审查结果消费方的语义依据。
-> 与 `research-verdict.md` 同哲学：**agent 审查一律 advisory**——结论只做筛查与建议，`spec build` 拆卡（进入真实施工）永远人工拍板。
-> 分层审核（2026-11-10 D6.5）：agent 结论是推荐层，人 3 分钟内拍板，超时按推荐执行（fail-closed：无推荐结论不动作）；红线（§2 blocked）永不超时放行。
+> 与 `research-verdict.md` 同哲学：**agent 审查一律 advisory**——结论只做筛查与建议，`spec build` 拆卡（进入真实施工）默认人工拍板；唯一例外是显式 opt-in 的 `autoApprove.specBuild.enabled=true` 超时自动拆卡（2026-11-11：委托而非取消人工闸，blocked/rework 结论开启也永不放行）。
+> 分层审核（2026-11-10 D6.5）：agent 结论是推荐层，人 3 分钟内拍板，超时按推荐执行（fail-closed：无推荐结论不动作；拆卡的超时委托须显式 opt-in，见上）；红线（§2 blocked）永不超时放行。
 > 依据来源见文末引用（带日期）；本文件是活文档：误报/漏报案例发生后回填 §6。
 
 ## 0. 分层模型（与调研可信度判定同构）

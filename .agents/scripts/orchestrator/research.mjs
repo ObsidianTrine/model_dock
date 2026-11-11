@@ -775,25 +775,70 @@ function fuzzyParaphrasePass(bare, briefSeq) {
 }
 
 /**
+ * 一级匹配的引用间隙容错（2026-11-11 巡航修复）：claim（已剥 [n]）是否逐字出现在 brief
+ * 原文（normalizeClaimText 归一，[n] 标注原样保留）。匹配时容忍 brief 在 claim 的任意
+ * 字符间隙里出现 `\s*\[\d{1,3}\]\s*` 形状的引用标注——模型逐字摘录时原文的行内 [n] 会
+ * 一并抄进 claim、claim 侧剥掉后该位置在 brief 里正是标注（"A [12] B" vs claim "A B"；
+ * 句末形状 "质量榜 [1]。" vs claim "质量榜。" 同理，标注可能落在 claim 词元内部边界）。
+ * 只容 1-3 位纯数字（与 stripInlineCitations 豁免同口径）：[2026]/[1m] 类不是标注形状，
+ * 间隙不容——跨它拼接的「A B」不过一级（编造防线，防全局剥标注造成的假相邻）。
+ * 两指针线性扫描（brief 单游标 + 每 start 的 claim 游标；标注跳过只前进不回退），无正则
+ * 回溯风险；claim ≤120 字符、brief 数 KB，最坏 O(m×n) 可忽略。
+ */
+function claimBareInBrief(bare, brief) {
+  const n = bare.length;
+  const m = brief.length;
+  const GAP_RE = /^\s*\[\d{1,3}\]\s*/; // 引用间隙（含两侧至多一段空白，同「剥标注连前导空格」口径）
+  outer: for (let s = 0; s + n <= m; s++) {
+    let i = 0;
+    let j = s;
+    while (i < n) {
+      if (j >= m) continue outer;
+      if (brief[j] === bare[i]) {
+        i++;
+        j++;
+        continue;
+      }
+      // 失配点尝试跳过一个引用间隙（只吃 brief 侧，claim 不动）；非标注形状即失败
+      const rest = brief.slice(j);
+      const g = GAP_RE.exec(rest);
+      if (g && g[0]) {
+        j += g[0].length;
+        continue;
+      }
+      continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
  * claim 逐字校验（v3 关键防线，两级制）：L2 输出的每条 claim 必须逐字摘自 brief 原文——
  * 改写/概括/无中生有判 fabricated 丢弃并计数（引用层编造问题的评分层重演，此处拦）。
- * 行内 [n] 引用标注豁免：两侧先剥 [n] 再比包含（长度上限仍按原始归一文本计）。
- * 第二级 fuzzy（2026-11-10）：一级精确包含失败后按词元重叠判定——确属 brief 内轻度转述
+ * 行内 [n] 引用标注豁免（2026-11-11 巡航修复，2026-11-10 版的口径修正）：claim 侧剥 [n]
+ * 后对 brief 原文做 gap 容错匹配（claimBareInBrief）——brief 侧不再全局剥标注（旧法把
+ * brief 里的「A [12] B」变成「A B」，标注间隙处的真拼接/假相邻绕过 fuzzy 主防线，与
+ * FUZZY_JACCARD 拦拼接的设计自相矛盾）；豁免语义不变（标注间隙照样匹配，长度上限仍按
+ * 原始归一文本计）。
+ * 第二级 fuzzy（2026-11-10）：一级 gap 匹配失败后按词元重叠判定——确属 brief 内轻度转述
  * （换序/加助词，词元几乎全部能在 brief 找到）则放行并附 `verbatim: 'fuzzy'` 标注
  * （消费方只标注不降级）；判据与阈值见上方常量区，编造/拼接仍 fabricated（现状口径）。
+ * fuzzy 词元化维持剥 [n] 后的 brief（现状口径——引用数字噪声不进滑动窗口）。
  */
 export function verifyClaimVerbatim(claims, briefBody) {
-  const brief = stripInlineCitations(briefBody);
+  const brief = normalizeClaimText(briefBody); // 一级干草堆：保留 [n] 原样（豁免由 gap 匹配自带）
+  const briefStripped = stripInlineCitations(briefBody); // fuzzy 词元化用（维持现状）
   let briefSeq = null; // 惰性：无 claim 走到二级就不付 brief 词元化的成本
   const valid = [];
   const fabricated = [];
   for (const c of claims ?? []) {
     const text = normalizeClaimText(c?.claim);
     const bare = stripInlineCitations(text);
-    if (text && text.length <= 120 && bare && brief.includes(bare)) {
+    if (text && text.length <= 120 && bare && claimBareInBrief(bare, brief)) {
       valid.push({ ...c, claim: text }); // 一级精确：无 verbatim 标注（向后兼容）
     } else if (text && text.length <= 120 && bare) {
-      briefSeq ??= fuzzyTokens(brief);
+      briefSeq ??= fuzzyTokens(briefStripped);
       if (fuzzyParaphrasePass(bare, briefSeq)) valid.push({ ...c, claim: text, verbatim: 'fuzzy' });
       else fabricated.push((text || '(空)').slice(0, 80));
     } else {

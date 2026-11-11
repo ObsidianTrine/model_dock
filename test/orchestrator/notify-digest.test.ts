@@ -37,7 +37,8 @@ import {
   quietWindowSecOf,
   queueDigestItem,
 } from '../../.agents/scripts/orchestrator/notify-digest.mjs'
-import { cardText, mkRepo } from './helpers.js'
+import { writeSpec } from '../../.agents/scripts/orchestrator/spec.mjs'
+import { cardText, mkRepo, runOrch } from './helpers.js'
 
 /** 首航实卡 docs-nightly-webhook-envs 的事件序列（省略 worker_turn/budget_snapshot 高频流）。 */
 function realVoyageEvents() {
@@ -682,6 +683,57 @@ describe('orchestrator notify digest aggregator > e2e（mock 卡全链）', () =
       expect(digestPosts[0].title).toBe('【DigestE2e】⏸1')
       expect(digestPosts[0].body).toContain('⏸ digest-ah 待批示')
       expect(fs.existsSync(digestPendingPath(repo.root))).toBe(false)
+    } finally {
+      if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
+      else process.env.AGENTS_ORCH_WEBHOOK = prev
+      await hook.close()
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('digest 开 + spec 拆卡卡落位：正文带「📋 规格 <id>：n/m ✅」尾行（specId 从卡 id 派生，2026-11-11 巡航修复——生产调用点此前从不传 specId，规格尾行管道死接线）', async () => {
+    const hook = await startWebhook()
+    const prev = process.env.AGENTS_ORCH_WEBHOOK
+    process.env.AGENTS_ORCH_WEBHOOK = hook.url
+    const repo = mkRepo({ extra: { projectName: 'digest-e2e', notify: { digest: { enabled: true, quietWindowSec: 60 } } } })
+    try {
+      writeSpec(repo.root, {
+        id: 'spec-e2e',
+        title: 'digest 规格尾行接线规格',
+        requirements: '# 需求\n\n- 作为用户，我希望 fixture 就绪。',
+        design: '# 技术设计\n\n现状：docs 占位。\n\n## 方案\n\n新增说明文档。\n',
+        tasks: ['## 任务 1:写文档', '- 目标: 新增 docs/digest-spec.md', '- 文件: docs/**', '- 完成条件: docs/digest-spec.md 存在', '- 依赖: 无'].join('\n'),
+      })
+      runOrch(repo.root, 'spec build spec-e2e') // 拆卡 pending/spec-e2e-t1.md + specs/spec-e2e/progress.json
+      const run = await runOrchAsync(repo.root, ['run', 'spec-e2e-t1', '--backend', 'mock']) // gate L3 → awaiting-human（attention 即发）
+      expect(run.status).toBe(0)
+      const digestPosts = hook.posts.filter((p) => p.title.startsWith('【DigestE2e】'))
+      expect(digestPosts).toHaveLength(1)
+      expect(digestPosts[0].body).toContain('⏸ spec-e2e-t1 待批示')
+      expect(digestPosts[0].body).toContain('📋 规格 spec-e2e：0/1 ✅') // specId = 卡 id 去 -t<n> 后缀（specs/ 在场）
+    } finally {
+      if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
+      else process.env.AGENTS_ORCH_WEBHOOK = prev
+      await hook.close()
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('digest 开 + 普通卡（无 spec 上下文）：落位正文不带规格尾行（specIdOfTask 派生 null 不透传）', async () => {
+    const hook = await startWebhook()
+    const prev = process.env.AGENTS_ORCH_WEBHOOK
+    process.env.AGENTS_ORCH_WEBHOOK = hook.url
+    const repo = mkRepo({ extra: { projectName: 'digest-e2e', notify: { digest: { enabled: true, quietWindowSec: 60 } } } })
+    try {
+      const cardFile = path.join(repo.root, 'card-digest-nospec.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'digest-nospec' }))
+      await runOrchAsync(repo.root, ['submit', cardFile])
+      const run = await runOrchAsync(repo.root, ['run', 'digest-nospec', '--backend', 'mock'])
+      expect(run.status).toBe(0)
+      const digestPosts = hook.posts.filter((p) => p.title.startsWith('【DigestE2e】'))
+      expect(digestPosts).toHaveLength(1)
+      expect(digestPosts[0].body).toContain('⏸ digest-nospec 待批示')
+      expect(digestPosts[0].body).not.toContain('📋 规格')
     } finally {
       if (prev === undefined) delete process.env.AGENTS_ORCH_WEBHOOK
       else process.env.AGENTS_ORCH_WEBHOOK = prev
