@@ -65,6 +65,9 @@
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5"
   },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  },
   "files": [
     "dist"
   ]
