@@ -1,0 +1,19 @@
+{
+ "id": "2026-11-sweep-lock-single-attempt",
+ "title": "detached autoapprove sweep 睡满拍板窗后只抢调度器锁一次，抢不到即静默退出：drain 全程持调度器锁——多卡 drain 中先落 awaiting-human 的卡，其 detached sweep 在 ≥3.5 分钟（窗口+0.5 余量）后醒来时锁几乎必在他人手里，一次失败即放弃，自动批示静默不发生且无重试无日志（bare drain 无周期兜底，2026-11-11 巡航审查船 A 抓到）",
+ "reviewRef": "86cb8b3",
+ "diffRef": "86cb8b3",
+ "fixedBy": "020239f",
+ "files": [
+  ".agents/scripts/orchestrator.mjs",
+  ".agents/scripts/orchestrator/run-lock.mjs"
+ ],
+ "expect": [
+  "调度器锁",
+  "重试",
+  "detached",
+  "sweep",
+  "静默"
+ ],
+ "note": "020239f 修复（acquireSchedulerLockRetry 有界重试 60s×10，参数可注入 env/opts 供测试；耗尽 log 放弃）；缺陷随 86cb8b3 进树——detached 子进程与 drain 主进程天然竞争同一把调度器锁，「锁被占」在多卡 drain 场景是常态而非异常，单次尝试把这个常态误当故障。教训：①后台/旁路任务抢共享锁时，锁竞争概率要按主任务的持锁时长建模（drain 一张卡数分钟 → 单次抢锁必然高失败率）；②「静默不发生」比「失败报错」更危险——定时类自动化要有重试与放弃留痕，否则观测面看到的是平安无事。考法：diff = 86cb8b3 引入 detached sweep——审查者须推演 drain 持锁 × sleep 后单次抢锁的时序竞争，识别这是概率性静默失效而非偶发噪音"
+}
