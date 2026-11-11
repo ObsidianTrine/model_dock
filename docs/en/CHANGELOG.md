@@ -5,7 +5,9 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.7.3] - 2026-11-12
+
+Model-level failover ships with long-run observability increments; Codex attach polish; automatic failover now checks model catalogs, among other fixes.
 
 ### Added
 
@@ -18,6 +20,19 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **Usage ledger for one-shot credentials**: usage and cost of per-task one-shot credentials (ephemeral harnesses) now get their own ledger — reconcile per credential, so each orchestrated task's spend no longer disappears into the provider total.
 - **Renewable one-shot credentials**: the admin plane gains a renewal endpoint, `POST /_modeldock/harness/renew` — long-running tasks can top up a one-shot credential before it expires instead of hitting a mid-task 401 and starting over. Renewal only extends (a request below the remaining lifetime leaves the expiry unchanged), capped at 24 hours like issuance; expired credentials are refused (410) — provision a new one instead; the token is never re-issued or echoed.
 - **Ready-to-copy price override sample**: the repo now ships `docs/examples/pricing.json` (list prices for common Zhipu GLM models, with deployment notes) — when discounted / plan prices differ from the bundled list prices, copy the sample to `~/.modeldock/pricing.json` and cost estimates follow your actual unit prices (agent sessions are blocked from writing the real data directory; place it manually as the user).
+- **Codex attach polish**: under gateway mode, Codex's `/model` picker now lists and accepts models from the gateway's catalog; switching the cloud service re-bakes the attach config automatically (previously Codex stayed dark until manually re-attached); `codex -p` switches routes by profile in one step; direct mode gains a guard against accidental takeover.
+
+### Improved
+
+- **Billable accounting and per-model usage in the usage aggregate**: `GET /_modeldock/usage` gains billable token counts (excluding non-billed cache reads) and per-model bucketed usage (`tokens_by_model`) — reconciliation and cost figures stop mixing in cache reads, and each model's usage buckets are visible separately.
+- **Routine dependency bump**: dependency overrides pin minimatch ^11.0.1, zeroing `npm audit` findings (build + full test suite verified; no behavior change).
+- **Cheaper idle polling**: the background update check moved token parsing inside its throttle / backoff guards — idle polling no longer touches the system keyring.
+
+### Fixed
+
+- **Automatic failover no longer replays incompatible models**: when the primary service fails over, automatic candidates missing the requested model in their own model catalog are skipped instead of replayed — each replay was a guaranteed-to-fail upstream round trip; explicitly configured candidates are unaffected.
+- **Request log table horizontal overflow**: overlong error cells stretched the whole table into sideways scrolling — fixed layout with flexible columns and line-clamped cells now; full text on hover.
+- **bigmodel preset adds glm-4.5-air**: the scouting-tier model joins the catalog with conservative capability metadata, selectable out of the box.
 
 ## [1.7.2] - 2026-11-08
 
@@ -573,6 +588,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.6.0...v1.7.0
