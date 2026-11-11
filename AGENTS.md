@@ -120,8 +120,8 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
   |------|------|--------|
   | **L0** | 纯文档 | docs-lint（≤10s） |
   | **L1** | 日常改码 | **按域跑相关测试**：ModelDock 域（`src/**`）跑相关产品测试 `npx vitest run test/<文件>.test.ts`；Dockmaster 域（`.agents/**`、`test/orchestrator/**`）跑相关编排测试 `npx vitest run -c vitest.workflow.config.ts test/orchestrator/<文件>.test.ts`；更窄叠加 `-t "用例名关键词"`。跨文件 mock / 共享模块的改动，相关文件之外至少加跑一组组合文件（见下「vitest 隔离模型」），避免「单独跑绿、组合跑红」 |
-  | **L2** | finish 合并门禁 | `node scripts/test-gate.mjs` 按改动域自动路由：**ModelDock 域**=产品全量（~3min）；**Dockmaster 域**=编排冒烟子集（≤60s，编排全量由 CI workflow-suite required check 兜底）；**混合域**=两者。接口：无参自动判域；`--base <ref>` 对比基准、`--staged` 只看暂存、`--dry` 只打印路由不执行、`--full` 强制双域全量（工具由 test-domain-gates 卡交付，feature-branch finish 的 testCmd 已接） |
-  | **L3** | 大节点（发布 / develop→main） | 双套件全量 `npm test` + `npm run test:workflow`（编排套件并行定档后合计 ~6min）；发布侧 release-check 默认只跑产品域，CI preflight tested 兜底 |
+  | **L2** | finish 合并门禁 | `node scripts/test-gate.mjs` 按改动域自动路由：**ModelDock 域**=产品全量（~3min）；**Dockmaster 域**=编排冒烟子集（≤60s，编排全量由 CI workflow-suite required check 兜底；**直接改动的编排测试文件一律自证入跑**，硬排除名单只约束固定抽检面、不豁免被改文件）；**混合域**=两者。接口：无参自动判域；`--base <ref>` 对比基准、`--head <ref>` 对比终点、`--staged` 只看暂存、`--dry` 只打印路由不执行、`--full` 强制双域全量（feature-branch finish 的 testCmd 已接） |
+  | **L3** | 大节点（发布 / develop→main） | 双套件全量 `npm test` + `npm run test:workflow`（实测合计 ~9min：产品 ~200s + 编排 ~320s，编排套件并行 maxWorkers=4）；发布侧 release-check 默认只跑产品域，CI preflight tested 兜底 |
 
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
 - 套件：test/ 下 252 个测试文件（产品套件 149 + 编排器套件 103；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
