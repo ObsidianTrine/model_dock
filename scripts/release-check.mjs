@@ -2,10 +2,14 @@
 /**
  * 发布前机器门禁一键检查——docs/RELEASE_CHECKLIST.md §1 的执行器。
  *
- * 用法：node scripts/release-check.mjs <版本> [--skip-test]
+ * 用法：node scripts/release-check.mjs <版本> [--skip-test] [--with-orchestrator]
  *   版本：1.2.0 或 v1.2.0（对应 CHANGELOG 的 ## [1.2.0] 段与 tag v1.2.0）；
  *   必须大于最近已发布 tag（semver 只增不减，与最近 tag 相等=重复发布同样阻断）
- *   --skip-test：跳过 npm test 与 test:workflow（两套件刚在别处全绿时；build/audit 照常跑）
+ *   --skip-test：跳过 npm test（与 --with-orchestrator 的编排套件）；build/audit 照常跑
+ *   --with-orchestrator：显式追加编排套件全量（npm run test:workflow）。默认不跑——
+ *     2026-11-12 起 release-check 收窄到产品域（L3 收口提速），编排套件由
+ *     CI workflow-suite required check（.agents/**、test/orchestrator/** 变更才真跑）
+ *     与 finish 门禁 test-gate（编排冒烟子集）分层兜底
  *
  * 退出码：存在 ✗（阻断项）→ 1，否则 0。⚠（警告项）不改退出码，但必须逐条过目。
  *
@@ -20,9 +24,10 @@ import fs from 'node:fs'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const skipTest = args.includes('--skip-test')
-const ver = String(args.find((a) => a !== '--skip-test') || '').replace(/^v/, '')
+const withOrchestrator = args.includes('--with-orchestrator')
+const ver = String(args.find((a) => a !== '--skip-test' && a !== '--with-orchestrator') || '').replace(/^v/, '')
 if (!/^\d+\.\d+\.\d+$/.test(ver)) {
-  console.error('用法：node scripts/release-check.mjs <版本> [--skip-test]    // 版本形如 1.2.0')
+  console.error('用法：node scripts/release-check.mjs <版本> [--skip-test] [--with-orchestrator]    // 版本形如 1.2.0')
   process.exit(1)
 }
 const tag = `v${ver}`
@@ -131,9 +136,9 @@ else add('pass', 'src 无 TODO/FIXME 残留')
 const hardFails = () => results.filter((r) => r.status === 'fail').length
 let testStats = null
 if (skipTest) {
-  add('warn', 'npm test / test:workflow 已跳过（--skip-test）', '确认两套件刚在别处全绿（本地或 CI）')
+  add('warn', 'npm test 已跳过（--skip-test）', '确认产品套件刚在别处全绿（本地或 CI）')
 } else if (hardFails() === 0) {
-  console.error('…… npm test（约 2-3 分钟）')
+  console.error('…… npm test（约 3-4 分钟）')
   const t = npm(['test'])
   // vitest 汇总行在本机即使非 TTY（spawnSync 管道/重定向）也带 ANSI 色码，
   // 不剥掉则 /Tests\s+(\d+) passed/ 撞上 \x1b[2m 转义必失配——全绿被误判红
@@ -147,14 +152,19 @@ if (skipTest) {
   } else {
     add('fail', 'npm test 未全绿', '修复后重跑；缺依赖先 npm ci。输出尾部：\n' + out.split('\n').slice(-15).join('\n'))
   }
-  // 工作流套件与产品套件拆分运行（方案 A）：不进 npm test，CI 单独 job 跑——
-  // v1.5.0 实证它红时本地门禁全绿放行到 CI 才炸（tag 已推只能走删 tag 回滚）。
-  // 发布是收口动作，本地多花 1-2 分钟把两套件都拦住。
+  // 工作流套件与产品套件拆分运行（方案 A）：不进 npm test，CI 单独 job 跑。
+  // 2026-11-12 起 release-check 默认收窄到产品域（L3 收口提速）：编排套件由 CI
+  // workflow-suite required check（.agents/**、test/orchestrator/** 变更才真跑）与
+  // finish 门禁 test-gate（编排冒烟子集）分层兜底；确需本地全量用 --with-orchestrator。
   if (testStats) {
-    console.error('…… npm run test:workflow（约 1-2 分钟）')
-    const w = npm(['run', 'test:workflow'])
-    if (w.status === 0) add('pass', 'npm run test:workflow 全绿（编排器 + 守卫 hook）')
-    else add('fail', 'test:workflow 未全绿', '修复后重跑。输出尾部：\n' + ((w.stdout || '') + (w.stderr || '')).split('\n').slice(-15).join('\n'))
+    if (withOrchestrator) {
+      console.error('…… npm run test:workflow（约 2-4 分钟）')
+      const w = npm(['run', 'test:workflow'])
+      if (w.status === 0) add('pass', 'npm run test:workflow 全绿（编排器 + 守卫 hook）')
+      else add('fail', 'test:workflow 未全绿', '修复后重跑。输出尾部：\n' + ((w.stdout || '') + (w.stderr || '')).split('\n').slice(-15).join('\n'))
+    } else {
+      add('pass', '编排套件本地不跑（release-check 默认收窄到产品域）', '由 CI workflow-suite（required check）+ finish 门禁 test-gate 编排冒烟分层兜底；确需本地全量：node scripts/release-check.mjs <版本> --with-orchestrator')
+    }
   }
 }
 if (hardFails() === 0) {

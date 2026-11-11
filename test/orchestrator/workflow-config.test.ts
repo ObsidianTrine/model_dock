@@ -11,7 +11,7 @@ describe('workflow-config > 脚本锚定（hook 场景）', () => {
   it('无 repoRoot 参数 → 读 .agents 自身仓库的 workflow.json（本仓库已配置红线）', () => {
     const cfg = loadWorkflowConfig()
     expect(cfg.baseBranch).toBe('develop')
-    expect(cfg.testCmd).toEqual(['npm test'])
+    expect(cfg.testCmd).toEqual(['node scripts/test-gate.mjs'])
     expect(cfg.buildCmd).toBe('npm run build')
     expect(cfg.packageManager).toBe('npm')
     expect(cfg.protectedPorts).toEqual(['8687', '8890'])
