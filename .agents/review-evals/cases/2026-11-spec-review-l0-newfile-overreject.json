@@ -1,0 +1,10 @@
+{
+  "id": "2026-11-spec-review-l0-newfile-overreject",
+  "title": "spec 审查 L0 确定性门把任务引用的拟新建文件判结构 fail 提前 die（烧不到 L2）：research-verbatim-precision 任务 2 引用拟新建的 test/orchestrator/research-verbatim.test.ts，路径不存在被判 fail 直接 die——2026-11-10 首跑真 spec 实测误判。「缺路径」机器分不清拟新建与 typo：确定性层管机械事实（三件套齐全/任务段可解析/依赖 DAG），语义裁决交 L2（新建=合法/改错路径=P1）",
+  "reviewRef": "2799230^",
+  "diffRef": "bd628f9",
+  "fixedBy": "2799230",
+  "files": [".agents/scripts/orchestrator/spec-review.mjs", ".agents/conventions/spec-review.md"],
+  "expect": ["files_hint", "拟新建", "新建", "路径不存在", "fail"],
+  "note": "2799230 修复（fail→warn + 裁决义务交 L2：新建=正常/修改既有文件写错路径=P1；规约 §4 口径同步 + §6 回填）；bug 随 bd628f9（spec review 机制本体：L0 确定性门 + L2 审查船 + spec-verdict/1 契约）进树——L0 files_hint 存在性检查把「缺路径」归入 fail 集合，cmdSpecReview 对 L0 fail 直接 die（『L0 结构性检查未过——先修三件套结构再审查；结构修复不需要烧 L2 会话』），拟新建文件（新测试/新模块）的合法引用被误杀。教训与红线两级裁决同哲学（规约 §2：关键词命中≠违规）：凡「无法机器判真伪、需语义裁决」的条目一律降 warn 交上层，fail 只留给让审查无法进行的结构性问题。堵法（REVIEW.md 候选）：给确定性门禁定 fail 集合时逐项自问「这条机器真能判真伪吗」；新门禁首跑必须用真 spec 试跑一次再固化口径。考法：diff = bd628f9 引入 spec-review.mjs（L0 门禁本体）+ spec-review.md 规约——拟新建场景的合法性论证要从领域常识出发（材料内唯一在场提示是规约 §1.5「L0 会查，L2 复核改动合理性」括号），审查者须自行推出「spec 计划新建文件时路径必然不存在，fail 会误杀合法 spec」"
+}
