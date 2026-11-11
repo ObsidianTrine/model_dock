@@ -85,7 +85,9 @@ const SCRIPT_VERSION = 'phase1';
 // main() 入口一次性赋值（io.env ?? process.env），下方标 env-snap 的真实 env 读取站点
 // 全部经此透传——直跑 CLI 时恒等于 process.env，语义与直读一致；进程内直调时读测试
 // 注入的 env，不再跨用例泄漏 process.env。构造子进程环境的 {...process.env, ...} 展开
-// 不走此变量（子进程语义保持原样）。子模块零 env 直读（预研核实），无需透传。
+// 不走此变量（子进程语义保持原样）。注意：orchestrator/ 子模块（mock.mjs 等 backends）
+// 仍直读 process.env——直调语境由测试 harness 真写 process.env + finally 还原来对齐，
+// 本文件不为其做线程化。
 let orchEnv = process.env;
 
 // 可注入的致命退出出口：直跑 CLI 恒为 process.exit；进程内直调由测试 setFatalExit
