@@ -35,7 +35,7 @@ import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, append
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
 import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
-import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, briefDir } from './orchestrator/research.mjs';
+import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, readResearchLedger, researcherStanding, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, briefDir } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
 import { canAutoSubmit, AUTO_SUBMIT_GATE } from './orchestrator/autopilot.mjs';
@@ -3845,14 +3845,22 @@ async function cmdResearch(repoRoot, opts) {
       `可用 --backend mock 验证管线；用真实后端时先 research --selftest 实测联网工具。`,
     );
   }
-  const verdict = await researchFinalize(repoRoot, r, { model, snapshotMax: cfg.research?.snapshotMax, snapshotMirror: cfg.research?.snapshotMirror });
+  // 交互式单跑记账（research-ledger-downgrade 卡）：ledgerExtra 触发 L1 记账——此前重构后
+  // 单跑路径不传 ledgerExtra 致台账断供（降级机制主数据源）；记全部判级，与 L2 全记口径一致
+  const verdict = await researchFinalize(repoRoot, r, { model, ledgerExtra: {}, snapshotMax: cfg.research?.snapshotMax, snapshotMirror: cfg.research?.snapshotMirror });
+  // 台账降级标记（research-ledger-downgrade 卡，L3→行动闭环第一步）：交互式调研不拦——
+  // 船东点名就该跑；但 fail 密度达阈值时亮牌 + 通知带标记，人工复核口径与 sail 跳过一致
+  const standing = researcherStanding(readResearchLedger(repoRoot), model ?? '(默认)');
+  if (standing.degraded) {
+    log(`⛔ 调研船降级标记：${model ?? '(默认)'} 近 ${standing.judged} 次判定 fail ${standing.fails} 次——本次结果需人工复核；建议换 --model 或排查服务商接入`);
+  }
   // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
   // 标题带项目名：飞书自定义关键词过滤按消息文本命中——标题不含项目名会被 19024 静默丢弃
   //（2026-11-09 实测：关键词=ModelDock 的机器人把无关键词的调研通知整条吞掉）
   try {
     if (cfg.research?.notify !== false) {
       const proj = displayProjectName(cfg.projectName ?? '');
-      await notify({ title: `${proj} 调研判定 ${r.id}（${verdict?.level ?? '?'}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+      await notify({ title: `${proj} 调研判定 ${r.id}（${verdict?.level ?? '?'}）${standing.degraded ? '⚠调研船降级' : ''}`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
     }
   } catch { /* 通知失败不阻断 */ }
   log(`research list 查看；把结论带进规格：spec "<意图>" --from-brief ${r.id}\n深度复核（L2 异构）：research verify ${r.id}`);
@@ -4232,13 +4240,17 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       log(`- 维度分：evidence=${v.scores.evidence} coherence=${v.scores.coherence} coverage=${v.scores.coverage}% citation=${v.scores.citation} → overall=${v.scores.overall}（${v.level}）`);
       log(`- 用途判定：browse=${v.usage.browse} internal_decision=${v.usage.internal_decision} external_doc=${v.usage.external_doc}${v.veto ? '（contradicted 一票否决）' : ''}`);
       log(`结果落 ${brief.dir}/verdict.json（schema/2，消费方契约见 .agents/docs/research-verdict.md）；L3 台账已记`);
+      // 台账降级标记（research-ledger-downgrade 卡）：L2 记账后 fail 密度达阈值 → 亮牌 +
+      // 通知带标记（与 sail 跳过闸同一判定函数；交互式 verify 不拦）
+      const standing = researcherStanding(readResearchLedger(repoRoot), cfg.research?.model ?? '(默认)');
+      if (standing.degraded) log(`⛔ 调研船降级标记：${standing.model} 近 ${standing.judged} 次判定 fail ${standing.fails} 次——建议人工复核/换船（workflow.json research.model）`);
       // 完成事件飞书通知（缩范围：只推不做按钮——research 决策不是卡片 approve 能表达的动作）
       // 标题带项目名：飞书自定义关键词过滤按消息文本命中——无关键词整条静默丢弃（19024）
       // silent（topic 模式逐维跑）：跳过单维通知，由 topic 汇总一条代替
       try {
         if (!silent && cfg.research?.notify !== false) {
           const proj = displayProjectName(cfg.projectName ?? '');
-          await notify({ title: `${proj} 复核判定 ${id}（${v.level}）`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
+          await notify({ title: `${proj} 复核判定 ${id}（${v.level}）${standing.degraded ? '⚠调研船降级' : ''}`, body: buildResearchNotifyBody(verdict), webhookEnvs: orchWebhookEnvs(repoRoot) });
         }
       } catch { /* 通知失败不阻断 */ }
       return verdict;
@@ -4480,6 +4492,16 @@ async function sailUpstreamPipeline(repoRoot, cfg, proposals, backendName) {
         else out.failed.push({ id: p.id, reason: `research 引用的 brief "${briefId}" 不存在——补跑 research 或改卡` });
       }
     } else if (out.researched.length + out.researchedTopics.length < caps.research) {
+      // 台账降级闸（research-ledger-downgrade 卡，L3→行动闭环）：调研船近窗 fail 达阈值即
+      // 跳过自主调研烧钱——advisory 语义只收口自治面；交互式 research 不拦（船东点名就跑，
+      // 只亮牌）。人工复核/换船（workflow.json research.model）后重试，本周期记 failed 留痕。
+      const sailModel = cfg.research?.model ?? '(默认)';
+      const standing = researcherStanding(readResearchLedger(repoRoot), sailModel);
+      if (standing.degraded) {
+        log(`  ⛔ 上游管线：${p.id} 调研跳过——调研船 ${sailModel} 降级（近 ${standing.judged} 次判定 fail ${standing.fails} 次）；人工复核或换船后重试`);
+        out.failed.push({ id: p.id, reason: `调研船 ${sailModel} 降级（fail ${standing.fails}/${standing.judged}）——人工复核或换船（workflow.json research.model）后重试` });
+        continue;
+      }
       // 缺调研：autoDim 开启先试拆维（cap 语义 = 每周期调研动作数，multi 是一个动作计 1）
       let dims = null;
       if (autoDim && (cfg.research?.maxDims ?? 4) >= 2) {
