@@ -516,9 +516,9 @@ describe('approval listener > resolveNotify 扩展', () => {
     const bad = mkRepo({ notify: { cardWebhook: 'yes', listenerPort: -1 } })
     try {
       const cfg = loadWorkflowConfig(repo.root)
-      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990 })
+      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990, digest: { enabled: false, quietWindowSec: 60 } })
       const cfgBad = loadWorkflowConfig(bad.root)
-      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null })
+      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null, digest: { enabled: false, quietWindowSec: 60 } })
       expect(warnings.some((w) => w.includes('notify'))).toBe(true)
     } finally {
       console.warn = warn
