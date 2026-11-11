@@ -654,7 +654,8 @@ export function buildArbitrationPrompt(contradictedClaims, sourcesBlocks, repoRo
 // ---------------------------------------------------------------------------
 // Spec 审查船（spec review 命令）：readonly 会话按 .agents/conventions/spec-review.md
 // 规约对三件套做五维评分 + findings（防编造定位对账）。advisory——产出只做筛查，
-// spec build 拆卡永远人工拍板。逻辑件在 spec-review.mjs（L0/对账/裁决重算）。
+// spec build 拆卡默认人工拍板（可显式 opt-in 委托超时自动拆卡：autoApprove.specBuild.enabled）。
+// 逻辑件在 spec-review.mjs（L0/对账/裁决重算）。
 // ---------------------------------------------------------------------------
 
 /**

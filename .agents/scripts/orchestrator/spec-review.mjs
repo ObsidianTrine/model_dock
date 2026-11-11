@@ -1,7 +1,8 @@
 // spec-review.mjs — spec 三件套分层审查的机器面（规约：.agents/conventions/spec-review.md）。
 // L0 确定性检查（零 token）→ L2 审查船会话（orchestrator.mjs cmdSpecReview 驱动，本模块只
 // 供契约解析/定位对账/裁决重算）→ review-verdict.json + L3 台账 + 通知。
-// **advisory 纪律**：审查结果只做筛查建议，spec build 拆卡永远人工拍板（规约 §0/§2）。
+// **advisory 纪律**：审查结果只做筛查建议，spec build 拆卡默认人工拍板（规约 §0/§2；
+// 可显式 opt-in 委托超时自动拆卡：autoApprove.specBuild.enabled，缺省关）。
 // 现状对账是杀手锏：design 引用的代码事实必须与仓库真实状态一致（规约 §1.3）——首跑试点
 // （2026-11-09）即靠它捕获真基线漂移，教训回填在规约 §6。
 

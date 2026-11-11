@@ -609,19 +609,23 @@ function resolveAutoResume(raw) {
 
 /**
  * 分层审核超时委托配置（D6.5，2026-11-10）：{ enabled: boolean, timeoutMinutes: 正整数,
- * maxAutoRetry: 非负整数 }，缺省 true / 3 / 1——L2/L3 卡落 awaiting-human 后人工缺省
- * 有 3 分钟拍板窗口，超时由 autoapprove sweep 按最后一条 review_verdict 的推荐执行
- * （merge / 限次 retry）。fail-closed 底线：没有审查结论的卡超时也绝不动作；blockers>0
- * 只自动返工且每卡最多 maxAutoRetry 次，超限留人。enabled 显式 false = 整个功能关闭
- * （行为与历史一致）。非法值回落缺省并 console.warn（与 resolveAutoResume 同风格）。
+ * maxAutoRetry: 非负整数, specBuild: { enabled: boolean } }，缺省 true / 3 / 1 /
+ * { enabled: false }——L2/L3 卡落 awaiting-human 后人工缺省有 3 分钟拍板窗口，超时由
+ * autoapprove sweep 按最后一条 review_verdict 的推荐执行（merge / 限次 retry）。
+ * fail-closed 底线：没有审查结论的卡超时也绝不动作；blockers>0 只自动返工且每卡最多
+ * maxAutoRetry 次，超限留人。enabled 显式 false = 整个功能关闭（行为与历史一致）。
+ * specBuild.enabled（2026-11-11 巡航修复）：spec 审查 approve_to_build 超时自动拆卡
+ * **缺省关**——拆卡进真实施工，「拆卡人工拍板」闸门只允许显式 opt-in 委托（与
+ * researchAutoDim/snapshotMirror「危险自动化缺省关」同口径）；卡级自动合并（enabled
+ * 缺省 true）语义不变。非法值回落缺省并 console.warn（与 resolveAutoResume 同风格）。
  */
 function resolveAutoApprove(raw) {
-  const DEFAULTS = { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1 };
+  const DEFAULTS = { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1, specBuild: { enabled: false } };
   const warn = (detail) =>
-    console.warn(`[workflow-config] autoApprove 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoApprove 键：{ enabled?: boolean, timeoutMinutes?: 正整数, maxAutoRetry?: 非负整数 }）`);
+    console.warn(`[workflow-config] autoApprove 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoApprove 键：{ enabled?: boolean, timeoutMinutes?: 正整数, maxAutoRetry?: 非负整数, specBuild?: { enabled?: boolean } }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { enabled?, timeoutMinutes?, maxAutoRetry? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { enabled?, timeoutMinutes?, maxAutoRetry?, specBuild? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -636,6 +640,18 @@ function resolveAutoApprove(raw) {
   if (raw.maxAutoRetry !== undefined) {
     if (Number.isInteger(raw.maxAutoRetry) && raw.maxAutoRetry >= 0) out.maxAutoRetry = raw.maxAutoRetry;
     else warn(`maxAutoRetry ${JSON.stringify(raw.maxAutoRetry)} 不合法（须为非负整数）——回落缺省 1`);
+  }
+  if (raw.specBuild !== undefined) {
+    if (raw.specBuild && typeof raw.specBuild === 'object' && !Array.isArray(raw.specBuild)) {
+      const sb = { enabled: false };
+      if (raw.specBuild.enabled !== undefined) {
+        if (typeof raw.specBuild.enabled === 'boolean') sb.enabled = raw.specBuild.enabled;
+        else warn(`specBuild.enabled ${JSON.stringify(raw.specBuild.enabled)} 不合法（允许 true | false）——回落缺省 false`);
+      }
+      out.specBuild = sb;
+    } else {
+      warn(`specBuild ${JSON.stringify(raw.specBuild)} 不合法（应为对象 { enabled?: boolean }）——回落缺省关`);
+    }
   }
   return out;
 }

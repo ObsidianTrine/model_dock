@@ -516,9 +516,11 @@ describe('approval listener > resolveNotify 扩展', () => {
     const bad = mkRepo({ notify: { cardWebhook: 'yes', listenerPort: -1 } })
     try {
       const cfg = loadWorkflowConfig(repo.root)
-      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990 })
+      // digest 子键缺省形状与 workflow-config.test.ts 的 notify.digest 三态用例同口径
+      // （notify.digest 2026-11-10 加入 resolveNotify 后，toEqual 需带全键——develop 既有红顺手销）
+      expect(cfg.notify).toEqual({ keychainService: 'svc', signSecretService: null, cardWebhook: true, listenerPort: 18990, digest: { enabled: false, quietWindowSec: 60 } })
       const cfgBad = loadWorkflowConfig(bad.root)
-      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null })
+      expect(cfgBad.notify).toEqual({ keychainService: null, signSecretService: null, cardWebhook: false, listenerPort: null, digest: { enabled: false, quietWindowSec: 60 } })
       expect(warnings.some((w) => w.includes('notify'))).toBe(true)
     } finally {
       console.warn = warn

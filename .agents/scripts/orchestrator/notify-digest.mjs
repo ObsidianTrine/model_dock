@@ -4,7 +4,7 @@
 // Claude Code hooks 通知哲学：一条通知=事件+一句话，标题分诊，细节落文件）：
 //   标题  【<项目名>】<emoji 计数摘要>——✅合并 · ⏸待批 · ⛔阻塞 · 📄事件，只列非零项
 //   正文  ≤4 行扁平事件流，每行 `emoji 对象 动作(关键数字)` ≤50 字；超行保 attention 折叠余量
-//   尾行  📋 规格进度（本批带 specId 才出）+ 📄 详情文件指针（本批完整 JSON 落 last.txt）
+//   尾行  📋 规格进度（本批带 specId 才出）+ 📄 详情文件指针（本批完整 JSONL 落 last.txt）
 //
 // 数据流：各通知落点 queueDigestItem() 追加事件到 pending.jsonl → 三个 flush 触发源：
 //   1. attention 级事件（awaiting-human 待批示 / blocked 熔断）——调用方立即同步 flush，
@@ -46,7 +46,7 @@ export function digestFlushMarkerPath(repoRoot) {
   return path.join(digestDir(repoRoot), 'flush-inflight');
 }
 
-/** 本批详情档（完整 JSON；flush 时由认领文件原子 rename 归档）——通知「📄 详情」行的落点。 */
+/** 本批详情档（完整 JSONL，一行一条事件；flush 时由认领文件原子 rename 归档）——通知「📄 详情」行的落点。 */
 export function digestLastPath(repoRoot) {
   return path.join(digestDir(repoRoot), 'last.txt');
 }
@@ -214,7 +214,7 @@ const EVENT_LINE_BUDGET = 4;
  * 扁平事件流正文（纯函数）：≤4 行事件（每行 emoji 对象 动作），超预算保留 attention 行 +
  * 前 N 条 normal，其余折叠一行 `…另 N 条见详情`；尾接规格进度行（本批 items 带 specId 且
  * specs 里查得到 progress 才出，`📋 规格 <id>：<n>/<总> ✅`）与详情文件行（digestDirPath
- * 给出才出，`📄 详情：<digestDir>/last.txt`——本批完整 JSON 由 flushDigest 归档 last.txt）。
+ * 给出才出，`📄 详情：<digestDir>/last.txt`——本批完整 JSONL（一行一条事件）由 flushDigest 归档 last.txt）。
  */
 export function buildDigestBody({ items, specs = [], digestDirPath = null, autoMerge = null } = {}) {
   const ev = aggregateDigest(items);
@@ -262,7 +262,7 @@ function mergeCommitOf(repoRoot, taskId) {
  * 事件流）→ 聚合（同卡终态合并）→ 组扁平通报 → 经 notify() 发 orchWebhookEnvs 通道。
  * force=false 时若在飞 flusher 标记很新（静默窗内），让位给它（窗内事件由它合并发送）；
  * 长跑收口与 attention 即发一律 force=true。送达后认领文件原子 rename 归档为
- * last.txt（通知「📄 详情」指针的落点，本批完整 JSON）。
+ * last.txt（通知「📄 详情」指针的落点，本批完整 JSONL，一行一条事件）。
  * dryRun 不发网不响系统通知，返回将发送的 title/body（测试用）；且不消费队列——事件写回
  * pending 不归档（round5 修复：dry-run 只是预览，实发时同批再发；round4 曾误删 claimed
  * 文件把事件消费掉，与「dry-run 不消费」注释相反）。
@@ -313,7 +313,7 @@ export async function flushDigest(repoRoot, { force = false, dryRun = false, qui
     // round6 P2：并发窗口内 pending 可能已有新追加，直接 rename 会整文件覆盖丢那批——
     // 已存在时改为追加本批内容（单次 O_APPEND 写，行界完整性尽力而为）再删认领文件。
     const restore = () => restorePending(claimed, file);
-    // 本批完整 JSON 归档 last.txt：认领文件直接 rename 复用（零拷贝原子覆盖旧档）；
+    // 本批完整 JSONL 归档 last.txt：认领文件直接 rename 复用（零拷贝原子覆盖旧档）；
     // rename 失败（如 Windows 下详情档被占用）回退删除——归档是尽力而为面，不影响发送
     const archive = () => {
       try {

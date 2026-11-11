@@ -72,6 +72,27 @@ export function releaseSchedulerLock(repoRoot) {
   if (cur?.pid === process.pid) fs.rmSync(p, { force: true });
 }
 
+/**
+ * 抢调度器锁 + 有界重试（2026-11-11 巡航修复）：detached autoapprove sweep 由 drain 落位
+ * 拉起、先睡满拍板窗口再扫——多卡 drain 全程持锁超过窗口时，旧实现单次抢锁失败即退出，
+ * 本轮自动批示整体静默落空。改为有界重试：每轮失败 log 一行、间隔 intervalMs 再抢，
+ * maxAttempts 轮耗尽 log 放弃返回 { held:false }（交给下一轮周期 sweep 兜底）。
+ * 每次重试都重新走 acquireSchedulerLock——持有者中途放锁 / 陈锁自动接管都自然生效。
+ * intervalMs/maxAttempts 可注入（测试收紧用）；生产缺省 60s × 10 次。
+ */
+export async function acquireSchedulerLockRetry(repoRoot, name = 'scheduler', { intervalMs = 60_000, maxAttempts = 10 } = {}) {
+  let lock = acquireSchedulerLock(repoRoot, name);
+  for (let attempt = 1; !lock.held && attempt <= maxAttempts; attempt++) {
+    console.log(`⏸ 调度器锁被持（pid=${lock.owner?.pid ?? '?'}，${lock.owner?.cmd ?? ''}）——${Math.round(intervalMs / 1000)}s 后重试（${attempt}/${maxAttempts}）……`);
+    await new Promise((r) => setTimeout(r, intervalMs));
+    lock = acquireSchedulerLock(repoRoot, name);
+  }
+  if (!lock.held) {
+    console.log(`⏸ 调度器锁重试 ${maxAttempts} 次仍被持（pid=${lock.owner?.pid ?? '?'}）——本轮 ${name} 放弃，等下一轮周期 sweep。`);
+  }
+  return lock;
+}
+
 /** spawn 子进程时传播「父已持锁」豁免（drain/nightly 内部 spawn 的 run/drain 子进程用）。 */
 export function childEnvForHeldLock() {
   return { [SCHED_LOCK_ENV]: '1' };
