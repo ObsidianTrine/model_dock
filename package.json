@@ -44,16 +44,16 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^8.7.5",
-    "commander": "^15.0.0",
+    "commander": "^15.1.0",
     "qrcode-generator": "^2.0.4",
     "smol-toml": "^1.9.1",
-    "undici": "^8.12.3",
+    "undici": "^8.12.4",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "@vitest/coverage-v8": "^5.0.5",
+    "@vitest/coverage-v8": "^5.1.0",
     "esbuild": "^0.28.2",
     "eslint": "^10.14.0",
     "happy-dom": "^21.0.4",
