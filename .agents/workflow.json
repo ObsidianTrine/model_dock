@@ -2,7 +2,7 @@
   "version": 1,
   "projectName": "ModelDock",
   "baseBranch": "develop",
-  "testCmd": "npm test",
+  "testCmd": "node scripts/test-gate.mjs",
   "setupCmd": "npm ci --prefer-offline",
   "buildCmd": "npm run build",
   "packageManager": "npm",
