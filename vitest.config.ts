@@ -19,7 +19,10 @@ export default defineConfig({
     // 测试期动态 import）。动这三个文件前先重审耦合。
     // 产品套件 = test/ 顶层。agent 工作流套件（test/orchestrator/**，测 .agents/ 编排器与
     // 守卫 hook）拆到 vitest.workflow.config.ts，经 `npm run test:workflow` 单独运行——
-    // 产品门禁不再为其支付 ~40s（方案 A）；池策略等防死锁设置两处必须保持同构。
+    // 产品门禁不再为其支付 ~40s（方案 A）。两 config 的「同构」现指 isolate 与防死锁面
+    // （watchdog / 超时）；maxWorkers 允许分域异构（产品 1 / 编排 4，后者经 B3 实验证据
+    // docs/archive/test-orch-parallel-exp.md 定档），并行度按各域自身风险面前行
+    // （门禁 test/config-isomorphism.test.ts 已同步剔除 maxWorkers）。
     include: ['test/*.test.ts'],
     testTimeout: 20000,
     env: {
@@ -56,7 +59,11 @@ export default defineConfig({
     //   关闭，VITEST_WATCHDOG=1 开启；8 分钟无进展自毁 exit(86) 常开（触发下方
     //   test.yml 的诊断步骤，不再悬死等 job 超时）。
     isolate: false,
-    maxWorkers: 1,
+    // 产品套件缺省仍串行（maxWorkers:1）：2026-10-01 policy.test.ts worker 生命周期 CI
+    // 卡死前科 + 上方顺序耦合对，B3 并行实验明确「产品套件不动」。VITEST_MAX_WORKERS 只是
+    // 实验通道（本地复现/排查用），产品套件并行化必须先 CI 复证再定档，不得凭本机绿直接
+    // 改缺省；编排套件的并行定档见 vitest.workflow.config.ts 头注。
+    maxWorkers: Number(process.env.VITEST_MAX_WORKERS || 1),
     reporters: ['default', './test/vitest-watchdog.mjs'],
     // 常开 setup：sync 域 PBKDF2 测试降迭代（test/setup-fast-kdf.ts 头注有依据与还原方式）
     setupFiles: ['./test/setup-fast-kdf.ts', ...(watchdog ? (['./test/watchdog-heartbeat.mjs'] as string[]) : [])],
