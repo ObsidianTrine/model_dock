@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { UpstreamError, forwardWithFailover, parseRetryAfterMs, type ForwardOptions } from '../src/gateway/relay.js'
+import { UpstreamError, forwardWithFailover, parseRatelimitHeaders, parseRetryAfterMs, type ForwardOptions } from '../src/gateway/relay.js'
 import { providerConcurrencyStats } from '../src/gateway/concurrency.js'
 import { buildRuntime, type GatewayRuntime, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -96,6 +96,65 @@ describe('relay · parseRetryAfterMs（RFC 7231 两种格式）', () => {
     expect(parseRetryAfterMs('soon', now)).toBeNull()
     // '1.5' 非 RFC 合法值：V8 宽松日期解析把它当过去日期 → 钳 0（等同立即重试一次，宽松回落无害）
     expect(parseRetryAfterMs('1.5', now)).toBe(0)
+  })
+})
+
+describe('relay · parseRatelimitHeaders（上游限流信号 → LogEntry.ratelimit）', () => {
+  const now = Date.parse('2026-11-03T08:00:00Z')
+  it('三头齐备：全部归一落账（reset 按 epoch ms / epoch s / delta s 量级判单位）', () => {
+    expect(
+      parseRatelimitHeaders({ 'x-ratelimit-remaining': '42', 'x-ratelimit-reset': '1762156800000', 'retry-after': '30' }, now),
+    ).toEqual({ remaining: 42, reset: 1762156800000, retry_after_ms: 30_000 })
+    expect(
+      parseRatelimitHeaders({ 'x-ratelimit-remaining': '7', 'x-ratelimit-reset': '1762156800', 'retry-after': '0' }, now),
+    ).toEqual({ remaining: 7, reset: 1762156800000, retry_after_ms: 0 }) // epoch s ×1000
+    expect(
+      parseRatelimitHeaders({ 'x-ratelimit-reset': '90' }, now),
+    ).toEqual({ reset: now + 90_000 }) // 小整数：delta 秒折算绝对时刻
+    expect(
+      parseRatelimitHeaders({ 'x-ratelimit-reset': '2026-11-03T08:00:05Z' }, now),
+    ).toEqual({ reset: now + 5_000 }) // RFC3339 时间戳
+  })
+  it('reset 边界宁缺毋滥：小数/科学计数不进 Date.parse 引擎回退（防日期重排）；超界大整数缺省', () => {
+    // V8 引擎回退把 "1.5" 重排成 2001-01-05——数值串但非整数格式直接缺省
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1.5' }, now)).toBeUndefined()
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1e12' }, now)).toBeUndefined()
+    // 超出 ECMA time-clip（±8.64e15）：消费方 toISOString 会 RangeError，缺省
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '99999999999999999999' }, now)).toBeUndefined()
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '-99999999999999' }, now)).toBeUndefined()
+    // 正常量级不受影响
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '1799999999' }, now)).toEqual({ reset: 1_799_999_999_000 })
+  })
+  it('OpenAI/Anthropic 键名族覆盖（主力上游限流信号补齐）', () => {
+    // OpenAI 系 Go duration（delta）
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': '6m0s' }, now)).toEqual({ reset: now + 360_000 })
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-tokens': '500ms' }, now)).toEqual({ reset: now + 500 })
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': '1h2m30s' }, now)).toEqual({ reset: now + 3_750_000 })
+    // Anthropic 系 RFC3339 + remaining 别名
+    expect(parseRatelimitHeaders({ 'anthropic-ratelimit-unified-reset': '2026-11-03T08:00:05Z' }, now)).toEqual({ reset: now + 5_000 })
+    expect(
+      parseRatelimitHeaders({ 'anthropic-ratelimit-requests-remaining': '9', 'anthropic-ratelimit-unified-reset': '2026-11-03T08:00:05Z' }, now),
+    ).toEqual({ remaining: 9, reset: now + 5_000 })
+    // 与主键共存：先到先得不覆盖
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset': '90', 'x-ratelimit-reset-requests': '6m0s' }, now)).toEqual({ reset: now + 90_000 })
+    // Go duration 判不出 → 子项缺省（不猜）
+    expect(parseRatelimitHeaders({ 'x-ratelimit-reset-requests': 'soon' }, now)).toBeUndefined()
+  })
+  it('键名大小写不敏感、重复头取首值、数组形态防御', () => {
+    expect(parseRatelimitHeaders({ 'X-RateLimit-Remaining': ['12', '0'], 'Retry-After': '2' }, now)).toEqual({
+      remaining: 12,
+      retry_after_ms: 2_000,
+    })
+  })
+  it('无头 → undefined（日志零新增字段）；子项畸形只缺该子项', () => {
+    expect(parseRatelimitHeaders({}, now)).toBeUndefined()
+    expect(parseRatelimitHeaders({ 'content-type': 'application/json' }, now)).toBeUndefined()
+    // 头存在但判不出：该子项缺省，不猜
+    expect(parseRatelimitHeaders({ 'x-ratelimit-remaining': 'abc', 'x-ratelimit-reset': '6m0s' }, now)).toBeUndefined()
+    // 混合：remaining 畸形但 retry-after 合法 → 只落可解析项
+    expect(parseRatelimitHeaders({ 'x-ratelimit-remaining': '', 'retry-after': 'Wed, 03 Nov 2026 08:00:03 GMT' }, now)).toEqual({
+      retry_after_ms: 3_000,
+    })
   })
 })
 

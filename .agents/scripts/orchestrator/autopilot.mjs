@@ -11,7 +11,7 @@
 // 注意：自动提交 ≠ 自动合并——提交的卡 gate 覆写为 L1，实际自动合并仍由门禁对真实
 // 改动的分级裁决（drift 降级 / scope 越界 / 实际 L2 照样挡回人工闸门）。
 
-import { hintsOverlap } from '../policy.mjs';
+import { hardZoneReason } from './sail.mjs';
 
 /** autopilot 自动提交的卡 gate 覆写值：预授权到 L1（实际 L2/L3 照样回人工）。 */
 export const AUTO_SUBMIT_GATE = 'L1';
@@ -26,14 +26,12 @@ export function canAutoSubmit(meta, cfg) {
   const ap = cfg?.autopilot;
   if (!ap?.enabled) return { ok: false, reason: 'autopilot 未启用（workflow.json autopilot.enabled）' };
   if (meta.created_by === 'human') return { ok: false, reason: '人工草稿（created_by: human）永不自动提交' };
-  if (meta.type === 'deps') return { ok: false, reason: 'deps 类型永不 autoSubmit（依赖升级人工裁决）' };
-  if (meta.type === 'feature') return { ok: false, reason: 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），永不直接 autoSubmit——与 canSailSubmit 同规则' };
+  // 硬禁区收口 hardZoneReason 单一口径（sail/nightly --auto/scan --run 同源，防两份规则漂移）；
+  // 权限顺序语义不变（deps/feature/守卫路径先于白名单判定），仅 reason 文案与 hardZoneReason 归一。
+  const hardZone = hardZoneReason(meta, cfg);
+  if (hardZone) return { ok: false, reason: hardZone };
   if (!Array.isArray(ap.autoSubmitTypes) || !ap.autoSubmitTypes.includes(meta.type)) {
     return { ok: false, reason: `type "${meta.type}" 不在 autopilot.autoSubmitTypes [${(ap.autoSubmitTypes ?? []).join(', ')}]` };
   }
-  const guarded = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
-  // hintsOverlap 对空列表按「重叠」保守处理——项目未配置 corePaths/releasePaths 时
-  // 不能把所有卡都拒掉：空守卫清单 = 无守卫面，直接跳过该检查
-  if (guarded.length && hintsOverlap(meta.files_hint, guarded)) return { ok: false, reason: 'files_hint 命中核心/发布路径（永不 autoSubmit）' };
   return { ok: true };
 }

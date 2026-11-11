@@ -12,6 +12,7 @@ import {
   createWatchdogState,
   makeWatchdogSpawnFn,
   parseWatchdogVerdict,
+  resolveWatchdogModel,
   watchdogCheck,
   watchdogTimelineSummary,
 } from '../../.agents/scripts/orchestrator/watchdog.mjs'
@@ -168,6 +169,20 @@ describe('watchdog > createWatchdogState 纯逻辑状态机', () => {
     expect(s.onTurn()).toBeNull() // 熔断后不再触发
   })
 
+  it('actuate 单次 suspect 不动作：返回 suspect、机器未禁用，下一次检查照常触发', () => {
+    const s = createWatchdogState({ mode: 'actuate', everyTurns: 2 })
+    expect(s.report(false, '单次 suspect')).toBe('suspect')
+    expect(s.snapshot().disabled).toBe(false) // 未熔断：killTree/落 blocked 只在连续 2 次后
+    expect(s.onTurn()).toBeNull() // turn 1
+    expect(s.onTurn()).toBe('check') // turn 2：单次 suspect 后看门狗仍在执法
+  })
+
+  it('observe 连续 suspect 永不熔断（执法上线后 observe 行为完全不变：只记事件）', () => {
+    const s = createWatchdogState({ mode: 'observe' })
+    for (let i = 0; i < 10; i++) expect(s.report(false, `suspect #${i}`)).toBe('suspect')
+    expect(s.snapshot().disabled).toBe(false) // report 在 observe 档永不置 disabled
+  })
+
   it('错误静默：recordError 前 3 次为 true，之后 false', () => {
     const s = createWatchdogState()
     expect(s.recordError()).toBe(true)
@@ -211,6 +226,22 @@ describe('watchdog > makeWatchdogSpawnFn（复用 backend.spawn 的只读一次�
     await expect(spawnFn({ prompt: 'p' })).rejects.toThrow('起不来')
     expect('model' in calls[0]).toBe(false)
     expect('envPatch' in calls[0]).toBe(false)
+  })
+})
+
+describe('watchdog > resolveWatchdogModel（勘察小模型优先，缺省跟随执行模型）', () => {
+  it('watchdog.model 显式配置优先；空白串视为未配置', () => {
+    expect(resolveWatchdogModel({ model: 'glm-4.5-air' }, 'glm-5.3-flash')).toBe('glm-4.5-air')
+    expect(resolveWatchdogModel({ model: '  glm-4.5-air  ' }, 'glm-5.3-flash')).toBe('glm-4.5-air')
+    expect(resolveWatchdogModel({ model: '   ' }, 'glm-5.3-flash')).toBe('glm-5.3-flash')
+    expect(resolveWatchdogModel({ model: 42 }, 'glm-5.3-flash')).toBe('glm-5.3-flash')
+  })
+
+  it('未配置（null/缺键）回落执行模型；两侧皆缺返回 null（spawn 键缺席路径）', () => {
+    expect(resolveWatchdogModel(null, 'glm-5.3-flash')).toBe('glm-5.3-flash')
+    expect(resolveWatchdogModel({}, 'glm-5.3-flash')).toBe('glm-5.3-flash')
+    expect(resolveWatchdogModel({ model: null }, null)).toBeNull()
+    expect(resolveWatchdogModel(undefined, undefined)).toBeNull()
   })
 })
 

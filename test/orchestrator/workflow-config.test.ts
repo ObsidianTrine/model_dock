@@ -210,12 +210,12 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     return dir
   }
 
-  it('缺省 observe / everyTurns 20；未配置 watchdog 键不告警', () => {
+  it('缺省 observe / everyTurns 20 / model null；未配置 watchdog 键不告警', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const dir = fixture({})
     try {
       const cfg = loadWorkflowConfig(dir)
-      expect(cfg.watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(cfg.watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
       expect(warn).not.toHaveBeenCalled()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
@@ -223,10 +223,10 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     }
   })
 
-  it('合法配置生效（actuate / 自定义 everyTurns）', () => {
-    const dir = fixture({ watchdog: { mode: 'actuate', everyTurns: 50 } })
+  it('合法配置生效（actuate / 自定义 everyTurns / 勘察小模型 model）', () => {
+    const dir = fixture({ watchdog: { mode: 'actuate', everyTurns: 50, model: 'glm-4.5-air' } })
     try {
-      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'actuate', everyTurns: 50 })
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'actuate', everyTurns: 50, model: 'glm-4.5-air' })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -237,13 +237,13 @@ describe('workflow-config > watchdog（LLM 进展看门狗，observe/actuate 双
     const dir = fixture({ watchdog: 'banana' })
     const wfPath = path.join(dir, '.agents', 'workflow.json')
     try {
-      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+      expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
       expect(String(warn.mock.calls[0]?.[0])).toContain('watchdog')
       warn.mockClear()
-      // 非法 mode / 非法 everyTurns / watchdog 数组：各自回落并告警
-      for (const bad of [{ mode: 'kill' }, { everyTurns: 0 }, { everyTurns: 2.5 }, ['observe']]) {
+      // 非法 mode / 非法 everyTurns / 非法 model / watchdog 数组：各自回落并告警
+      for (const bad of [{ mode: 'kill' }, { everyTurns: 0 }, { everyTurns: 2.5 }, { model: 42 }, ['observe']]) {
         fs.writeFileSync(wfPath, JSON.stringify({ watchdog: bad }))
-        expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20 })
+        expect(loadWorkflowConfig(dir).watchdog).toEqual({ mode: 'observe', everyTurns: 20, model: null })
         expect(warn.mock.calls.length).toBeGreaterThan(0)
         warn.mockClear()
       }
@@ -289,18 +289,29 @@ describe('workflow-config > propose（舰队反馈开关，缺省关）', () => 
     }
   }
 
-  it('缺省 feedback false（行为与历史一致）；显式 true 生效；非 true 值视为 false', () => {
-    expect(cfgOf({}).propose).toEqual({ feedback: false })
-    expect(cfgOf({ propose: { feedback: true } }).propose).toEqual({ feedback: true })
-    expect(cfgOf({ propose: { feedback: 'yes' } }).propose).toEqual({ feedback: false })
-    expect(cfgOf({ propose: { other: 1 } }).propose).toEqual({ feedback: false })
+  it('缺省 feedback false / model null（行为与历史一致）；显式 true 生效；非 true 值视为 false', () => {
+    expect(cfgOf({}).propose).toEqual({ feedback: false, model: null })
+    expect(cfgOf({ propose: { feedback: true } }).propose).toEqual({ feedback: true, model: null })
+    expect(cfgOf({ propose: { feedback: 'yes' } }).propose).toEqual({ feedback: false, model: null })
+    expect(cfgOf({ propose: { other: 1 } }).propose).toEqual({ feedback: false, model: null })
+  })
+
+  it('model 键（planner 会话模型，propose/intent 共用）：合法模型名生效、非法值回落 null', () => {
+    expect(cfgOf({ propose: { model: ' glm-5.3-flash ' } }).propose).toEqual({ feedback: false, model: 'glm-5.3-flash' })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ propose: { model: 42 } }).propose).toEqual({ feedback: false, model: null })
+      expect(String(warn.mock.calls[0]?.[0])).toContain('model')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('非法 propose 值回落缺省并 console.warn 告警（可操作文案）', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      expect(cfgOf({ propose: 'on' }).propose).toEqual({ feedback: false })
-      expect(cfgOf({ propose: ['feedback'] }).propose).toEqual({ feedback: false })
+      expect(cfgOf({ propose: 'on' }).propose).toEqual({ feedback: false, model: null })
+      expect(cfgOf({ propose: ['feedback'] }).propose).toEqual({ feedback: false, model: null })
       expect(String(warn.mock.calls[0]?.[0])).toContain('propose')
       expect(String(warn.mock.calls[0]?.[0])).toContain('feedback')
     } finally {
@@ -351,6 +362,73 @@ describe('workflow-config > weatherHold（风暴闸，含 upstream 上游海况�
     expect(cfgOf({ weatherHold: { enabled: false, threshold: 5 } }).weatherHold).toBeNull()
     // 非法 enabled（非布尔）→ 忽略该键，风暴闸照常启用
     expect(cfgOf({ weatherHold: { enabled: 'yes', threshold: 5 } }).weatherHold).toEqual({ threshold: 5, windowMinutes: 60 })
+  })
+})
+
+describe('workflow-config > upstream（上游管线：specAutoBuild 预授权档 + autoPipeline watch/nightly 下沉档，缺省关）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-upstream-'))
+    try {
+      fs.mkdirSync(path.join(dir, '.agents'))
+      fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  const AP_DEFAULT = { enabled: false, researchPerCycle: 2, specPerCycle: 1 }
+
+  it('未配 = 缺省关（spec 落盘即停等人审，行为与历史一致）；显式 true / false 生效', () => {
+    expect(cfgOf({}).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: true } } }).upstream).toEqual({ specAutoBuild: { enabled: true }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: false } } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    // upstream 键合法：不再进未知顶层键告警（拼写错误防线白名单）
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      cfgOf({ upstream: { specAutoBuild: { enabled: true } } })
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('未知顶层键'))).toHaveLength(0)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('autoPipeline：缺省关 = watch/nightly 行为与历史一致；enabled/配额键显式合法值生效', () => {
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: true } } }).upstream?.autoPipeline).toEqual({ enabled: true, researchPerCycle: 2, specPerCycle: 1 })
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 3, specPerCycle: 2 } } }).upstream?.autoPipeline).toEqual({
+      enabled: true,
+      researchPerCycle: 3,
+      specPerCycle: 2,
+    })
+    expect(cfgOf({ upstream: { autoPipeline: { enabled: false } } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+  })
+
+  it('autoPipeline 非法形态逐键回落：非对象子键整体缺省 / 非布尔 enabled / 非正整数配额（单键回落不牵连合法键）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(cfgOf({ upstream: { autoPipeline: 'on' } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: 'yes' } } }).upstream?.autoPipeline).toEqual(AP_DEFAULT)
+      // 非法配额键回落缺省值，enabled 照常生效（逐键回落）
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 0, specPerCycle: -1 } } }).upstream?.autoPipeline).toEqual({
+        enabled: true,
+        researchPerCycle: 2,
+        specPerCycle: 1,
+      })
+      expect(cfgOf({ upstream: { autoPipeline: { enabled: true, researchPerCycle: 'many' } } }).upstream?.autoPipeline).toEqual({
+        enabled: true,
+        researchPerCycle: 2,
+        specPerCycle: 1,
+      })
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('upstream.autoPipeline')).length).toBeGreaterThanOrEqual(5)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('非法形态回落缺省关：非对象 upstream / 非对象 specAutoBuild / 非布尔 enabled', () => {
+    expect(cfgOf({ upstream: 'x' }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: 'on' } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
+    expect(cfgOf({ upstream: { specAutoBuild: { enabled: 'yes' } } }).upstream).toEqual({ specAutoBuild: { enabled: false }, autoPipeline: AP_DEFAULT })
   })
 })
 
@@ -471,15 +549,15 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     }
   }
 
-  it('缺省全开：configGuard.enabled=true / draftsGc={autoSupersede:true,archiveDays:30} / scanAutoFix.enabled=true', () => {
+  it('缺省全开：configGuard.enabled=true / draftsGc={autoSupersede:true,archiveDays:30,maxAgeDays:14} / scanAutoFix.enabled=true', () => {
     expect(cfgOf({}).configGuard).toEqual({ enabled: true })
-    expect(cfgOf({}).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+    expect(cfgOf({}).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
     expect(cfgOf({}).scanAutoFix).toEqual({ enabled: true })
   })
 
-  it('显式值生效（enabled=false 关闭 / archiveDays 自定义）', () => {
+  it('显式值生效（enabled=false 关闭 / archiveDays、maxAgeDays 自定义）', () => {
     expect(cfgOf({ configGuard: { enabled: false } }).configGuard).toEqual({ enabled: false })
-    expect(cfgOf({ draftsGc: { autoSupersede: false, archiveDays: 7 } }).draftsGc).toEqual({ autoSupersede: false, archiveDays: 7 })
+    expect(cfgOf({ draftsGc: { autoSupersede: false, archiveDays: 7, maxAgeDays: 3 } }).draftsGc).toEqual({ autoSupersede: false, archiveDays: 7, maxAgeDays: 3 })
     expect(cfgOf({ scanAutoFix: { enabled: false } }).scanAutoFix).toEqual({ enabled: false })
   })
 
@@ -488,14 +566,14 @@ describe('workflow-config > configGuard / draftsGc / scanAutoFix（B7/B9/B10 新
     try {
       expect(cfgOf({ configGuard: 'on' }).configGuard).toEqual({ enabled: true })
       expect(cfgOf({ configGuard: { enabled: 'yes' } }).configGuard).toEqual({ enabled: true })
-      expect(cfgOf({ draftsGc: 'x' }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
-      expect(cfgOf({ draftsGc: { archiveDays: 0 } }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30 })
+      expect(cfgOf({ draftsGc: 'x' }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
+      expect(cfgOf({ draftsGc: { archiveDays: 0, maxAgeDays: -1 } }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 30, maxAgeDays: 14 })
       expect(cfgOf({ scanAutoFix: { enabled: 1 } }).scanAutoFix).toEqual({ enabled: true })
-      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(5)
+      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(6)
       expect(String(warn.mock.calls[0]?.[0])).toContain('configGuard')
       warn.mockClear()
       // 键缺失 = 沿用缺省且不告警
-      expect(cfgOf({ configGuard: {}, draftsGc: { archiveDays: 14 }, scanAutoFix: {} }).draftsGc.archiveDays).toBe(14)
+      expect(cfgOf({ configGuard: {}, draftsGc: { archiveDays: 14, maxAgeDays: 7 }, scanAutoFix: {} }).draftsGc).toEqual({ autoSupersede: true, archiveDays: 14, maxAgeDays: 7 })
       expect(warn).not.toHaveBeenCalled()
     } finally {
       warn.mockRestore()

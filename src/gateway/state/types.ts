@@ -8,7 +8,9 @@ export interface LogAttempt {
   provider: string
   status?: number
   ms?: number
-  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / model_mismatch / connect_failed / headers_timeout */
+  /** 跳过/失败原因短码（与 LogEntry.cause 同一枚举）：proto_endpoint_missing / key_pool_empty / key_cooldown / key_pool_rejected / queue_full / model_mismatch / model_cooldown / connect_failed / headers_timeout
+   *  model_cooldown = 模型级熔断快速失败（(provider, model) 熔断且无 model_fallback 映射，relay.ts
+   *  forwardToUpstream 候选级跳过，无真实上游往返；错误本身 cause 仍打 'quota'） */
   note?: string
 }
 
@@ -52,6 +54,16 @@ export interface LogEntry {
     cache_read_tokens: number
     cache_creation_tokens: number
     billable_tokens?: number
+  }
+  /** 上游限流信号（编排器 429 风暴前主动降并发的数据源）：上游响应带限流头才记、缺失不猜
+   *  （旧日志与上游未带头时整个字段缺省，/logs/query 消费方零感知）。remaining = x-ratelimit-remaining；
+   *  reset = x-ratelimit-reset 归一为 epoch ms（各上游单位不一，量级判单位见 parseRatelimitHeaders）；
+   *  retry_after_ms = Retry-After 相对毫秒（与 relay 429 退避重试同一解析，parseRetryAfterMs）。
+   *  429 次数本身已入 metrics 错误分桶（state/sea.ts SeaMinuteBucket['429']），此处只留信号值不重复计数。 */
+  ratelimit?: {
+    remaining?: number
+    reset?: number
+    retry_after_ms?: number
   }
 }
 
@@ -132,7 +144,8 @@ export interface GatewayRuntime {
   dispatchers: Map<string, Dispatcher | undefined>
   /** providerId → 自动路由健康/熔断状态（仅 auto_failover 开启时使用） */
   health: Map<string, HealthState>
-  /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目） */
+  /** harnessId → 数据面限额计数（tokenlimits.ts；内存态重启清零，未配 limits 的 harness 无条目——
+   *  ephemeral 例外：无条件建账计量，供编排器预算实测账读数，见 state/tokenlimits.ts） */
   tokenUsage: Map<string, TokenUsageState>
   /** runtime-only 临时 harness 注册表（id → 状态；provision/revoke/TTL sweeper 维护，
    *  逻辑见 state/runtime.ts）。内存态：进程重启即全部失效（设计如此——用完即焚凭据），
@@ -166,6 +179,11 @@ export interface GatewayRuntime {
    *  重启清零；reload 清理 provider 已删或其 model_fallback 已不含该模型键的条目。
    *  可选 + 惰性建表：兜底测试/嵌入式直建 rt 未带字段的场景（同 seaErrors/modelProbe 先例）。 */
   modelHealth?: Map<string, ModelHealthState>
+  /** providerId+model → 模型级容灾改发计数（key/口径同 modelHealth，model = 被改发的原请求
+   *  模型）：「改发已发生」的显式观测面，见 state/routing.ts recordModelFallback 与
+   *  /_modeldock/metrics 的 model_fallback 段。内存态重启清零；reload 清理同 modelHealth 口径。
+   *  可选 + 惰性建表（同上）。 */
+  modelFallbackCounts?: Map<string, ModelFallbackCounter>
 }
 
 /** 模型粒度熔断状态（model_fallback 域）：与 provider 级 HealthState 同构但更瘦——只由
@@ -178,6 +196,15 @@ export interface ModelHealthState {
   meltdown_until?: number
   /** 触发本次熔断的错误类（当前仅 quota） */
   meltdown_cls?: 'quota'
+}
+
+/** 模型级容灾改发计数条目（纯观测，不参与熔断/门禁判定）：fallbackCount = 改发累计
+ *  （闸门预改写命中 + 链尾合成两路都计）；absorbedCount = 其中闸门吸收（请求被预改写、
+ *  未触达原模型上游）的次数。键 = `${providerId}\u0000${model}`，model = 被改发的原请求
+ *  模型（与 modelHealth 同口径）。单调累计、熔断解除不清零——改发已发生是历史事实。 */
+export interface ModelFallbackCounter {
+  fallbackCount: number
+  absorbedCount: number
 }
 
 /** 多 key 池运行态：cooldown = providerId → key 池索引（providerKeyRefs 下标）→ 冷却截止 ms 时间戳；

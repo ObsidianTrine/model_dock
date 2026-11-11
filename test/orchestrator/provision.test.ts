@@ -306,7 +306,12 @@ const server = http.createServer((req, res) => {
       if (state.failRevoke) return finish(500, { ok: false, reason: 'injected' })
       return finish(200, { ok: true, revoked: true })
     }
-    if (req.url === '/_modeldock/harness-usage') return finish(200, { ok: true, usage: {} })
+    if (req.url === '/_modeldock/harness/renew') {
+      // renew 契约（船 9）：body {harnessId, ttl_minutes}；200 {ok,id,expires_at,ttl_minutes}
+      if (state.failRenew) return finish(500, { ok: false, reason: 'injected' })
+      return finish(200, { ok: true, id: body.harnessId, expires_at: state.renewExpiresAt ?? '2026-11-10T00:00:00.000Z', ttl_minutes: 30 })
+    }
+    if (req.url === '/_modeldock/harness-usage') return finish(200, { ok: true, usage: state.usage ?? {} })
     finish(404, { ok: false })
   })
 })
@@ -366,22 +371,28 @@ server.listen(0, '127.0.0.1', () => console.log('PORT:' + server.address().port)
 
   const provReqs = (reqs: Req[]) => reqs.filter((r) => r.url === '/_modeldock/harness/provision')
   const revokeReqs = (reqs: Req[]) => reqs.filter((r) => r.url === '/_modeldock/harness/revoke')
+  const renewReqs = (reqs: Req[]) => reqs.filter((r) => r.url === '/_modeldock/harness/renew')
 
   afterAll(() => {
     // MODELRDOCK_FAKE_HOME 目录在断言后即无价值（仅 discoverGatewayState 的读落点）；
     // mkRepo 各用例自己清理，fakehome 统一惰性——不追杀（os.tmpdir 由系统回收）。
   })
 
-  it('开关开 + 网关在线：spawn 前签发、收尾即吊销（事件 + 网关请求双向对账）', async () => {
+  it('开关开 + 网关在线：spawn 前签发（限额/TTL 按卡生效预算传参）、收尾即吊销（事件 + 网关请求双向对账）', async () => {
     const gw = await startMockGatewayProcess()
     const repo = mkRepo({ extra: { gatewayAdmin: true, gatewayProvision: true } })
     try {
-      submitCard(repo.root, 'prov-e2e')
+      // 显式预算卡：wall 150min → TTL ceil(150/60)+1 = 4h；token 预算 → per-harness 日限额同源
+      const cardFile = path.join(repo.root, 'card-prov-e2e.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'prov-e2e', budget: { max_tokens: 777777, max_wall_minutes: 150 } }))
+      runOrch(repo.root, `submit "${cardFile}"`)
       runOrch(repo.root, 'run prov-e2e --backend mock', envFor(gw.port))
-      // 网关侧：1 签发（确定性 id）+ 1 吊销
+      // 网关侧：1 签发（确定性 id + 卡预算传参）+ 1 吊销
       const reqs = gw.requests()
       expect(provReqs(reqs)).toHaveLength(1)
       expect(provReqs(reqs)[0].body.id).toBe('orch-prov-e2e')
+      expect(provReqs(reqs)[0].body.ttl_minutes).toBe(240) // ceil(150/60)+1 = 4h（TTL 覆盖整个 wall 熔断窗口）
+      expect(provReqs(reqs)[0].body.max_daily_tokens).toBe(777777) // 与卡 token 预算同源——凭据本身也是预算防线
       expect(provReqs(reqs)[0].auth).toBe(true)
       expect(revokeReqs(reqs)).toHaveLength(1)
       expect(revokeReqs(reqs)[0].body).toEqual({ id: 'orch-prov-e2e' })
@@ -394,6 +405,65 @@ server.listen(0, '127.0.0.1', () => console.log('PORT:' + server.address().port)
       // 任务照常落位（gate L3 → awaiting-human），无 fail-open 痕迹
       expect(evts.some((e) => e.type === 'harness_provision_failed')).toBe(false)
       expect(readCard(repo.root, 'awaiting-human', 'prov-e2e')).toBeTruthy()
+    } finally {
+      gw.close()
+      repo.cleanup()
+    }
+  }, 180_000)
+
+  it('临期自动续命（orch-ephemeral-renew-consume）：usage 临期 → renew 200 → harness_renewed 事件（ttl 与 provision 同源）+ 收尾照常吊销', async () => {
+    const gw = await startMockGatewayProcess()
+    const repo = mkRepo({ extra: { gatewayAdmin: true, gatewayProvision: true } })
+    try {
+      const cardFile = path.join(repo.root, 'card-renew-e2e.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'renew-e2e', budget: { max_tokens: 777777, max_wall_minutes: 150 } }))
+      runOrch(repo.root, `submit "${cardFile}"`)
+      // usage 投影：凭据已临期（expires_at = 现在+2s，首轮采样即跨阈值窗口）；
+      // ORCH_FUEL_POLL_MS 收缩轮询到 250ms（测试旋钮，生产行为不变），worker 慢 4s 盖住续命窗口
+      const newExpiry = new Date(Date.now() + 30 * 60_000).toISOString()
+      gw.setState({
+        usage: { 'orch-renew-e2e': { ephemeral: true, expires_at: new Date(Date.now() + 2000).toISOString(), day_billable_tokens: 1 } },
+        renewExpiresAt: newExpiry,
+      })
+      runOrch(repo.root, 'run renew-e2e --backend mock', envFor(gw.port, { ORCH_FUEL_POLL_MS: '250', ORCH_MOCK_DELAY_MS: '4000' }))
+      const reqs = gw.requests()
+      // renew 请求：body {harnessId, ttl_minutes}——ttl = ceil(150/60)+1 = 4h × 60，与 provision 同源
+      expect(renewReqs(reqs)).toHaveLength(1)
+      expect(renewReqs(reqs)[0].body).toEqual({ harnessId: 'orch-renew-e2e', ttl_minutes: 240 })
+      expect(renewReqs(reqs)[0].auth).toBe(true)
+      const evts = eventsOf(repo.root, 'renew-e2e')
+      expect(evts.some((e) => e.type === 'harness_expiry_warning')).toBe(true)
+      expect(evts.find((e) => e.type === 'harness_renewed')).toMatchObject({ harness_id: 'orch-renew-e2e', expires_at: newExpiry, ttl_minutes: 30 })
+      // 收尾照常：吊销 + 任务落位（gate L3 → awaiting-human）；签发不受续命影响
+      expect(evts.find((e) => e.type === 'harness_revoked')).toMatchObject({ ok: true, trigger: 'run_exit' })
+      expect(provReqs(reqs)).toHaveLength(1)
+      expect(readCard(repo.root, 'awaiting-human', 'renew-e2e')).toBeTruthy()
+    } finally {
+      gw.close()
+      repo.cleanup()
+    }
+  }, 180_000)
+
+  it('临期续命 fail-open：renew 端点 500 → harness_renew_failed 留痕、不抛不重试（恰 1 次），任务照常落位', async () => {
+    const gw = await startMockGatewayProcess()
+    const repo = mkRepo({ extra: { gatewayAdmin: true, gatewayProvision: true } })
+    try {
+      submitCard(repo.root, 'renew-fail')
+      gw.setState({
+        usage: { 'orch-renew-fail': { ephemeral: true, expires_at: new Date(Date.now() + 2000).toISOString(), day_billable_tokens: 1 } },
+        failRenew: true,
+      })
+      runOrch(repo.root, 'run renew-fail --backend mock', envFor(gw.port, { ORCH_FUEL_POLL_MS: '250', ORCH_MOCK_DELAY_MS: '4000' }))
+      const reqs = gw.requests()
+      expect(renewReqs(reqs)).toHaveLength(1) // 去抖：失败后本凭据实例不再重试（重试风暴红线）
+      expect(renewReqs(reqs)[0].body).toMatchObject({ harnessId: 'orch-renew-fail' })
+      const evts = eventsOf(repo.root, 'renew-fail')
+      expect(evts.find((e) => e.type === 'harness_renew_failed')).toMatchObject({ harness_id: 'orch-renew-fail' })
+      expect(String(evts.find((e) => e.type === 'harness_renew_failed')!.reason)).toContain('500')
+      expect(evts.some((e) => e.type === 'harness_renewed')).toBe(false)
+      // fail-open：任务照常跑完落位，凭据收尾照常吊销
+      expect(evts.find((e) => e.type === 'harness_revoked')).toMatchObject({ ok: true, trigger: 'run_exit' })
+      expect(readCard(repo.root, 'awaiting-human', 'renew-fail')).toBeTruthy()
     } finally {
       gw.close()
       repo.cleanup()

@@ -24,6 +24,8 @@ import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
+import { recordModelFallback, recordModelOutcome } from '../src/gateway/state/routing.js'
+import { setSecret } from '../src/config/secrets.js'
 
 function listenEphemeral(server: http.Server): Promise<number> {
   return new Promise((resolve) => {
@@ -55,6 +57,40 @@ describe('latencyQuantiles（纯函数，Prometheus 线性插值口径）', () =
     expect(latencyQuantiles([5])).toEqual({ p50: 5, p95: 5, p99: 5 })
     const r = latencyQuantiles([1, 2])
     expect(r.p50).toBe(1.5)
+  })
+})
+
+describe('usage 聚合 latency_by_model（per-model 时延：只计成功且有 ms 的条目）', () => {
+  it('count/avg_ms/p50_ms/p95_ms 按模型聚合；失败条目与无 ms 条目不入账', () => {
+    const e = (over: Partial<LogEntry>): LogEntry => ({
+      ts: localIsoTs(),
+      harness: 'h',
+      profile: 'p',
+      provider: 'up',
+      model: 'm1',
+      path: '/v1/messages',
+      ...over,
+    })
+    const s = summarizeUsage([
+      e({ status: 200, ms: 100 }),
+      e({ status: 200, ms: 200 }),
+      e({ status: 200, ms: 300 }),
+      e({ model: 'm2', status: 200, ms: 50 }),
+      e({ status: 429, ms: 999 }), // 失败：ms 不入任何分位账
+      e({ status: 200, model: undefined }), // 无 model：跳过
+    ])
+    expect(s.latency_by_model).toEqual({
+      m1: { count: 3, avg_ms: 200, p50_ms: 200, p95_ms: 290 }, // [100,200,300] 线性插值
+      m2: { count: 1, avg_ms: 50, p50_ms: 50, p95_ms: 50 },
+    })
+    expect(s.latency.p50).toBe(150) // 全局口径不变：[50,100,200,300]
+  })
+
+  it('窗口内无可计时延条目：latency_by_model 空对象（与 latency 分位 null 并存）', () => {
+    const e = { ts: localIsoTs(), harness: 'h', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 500, ms: 10 } as LogEntry
+    const s = summarizeUsage([e])
+    expect(s.latency_by_model).toEqual({})
+    expect(s.latency.p50).toBeNull()
   })
 })
 
@@ -259,6 +295,45 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
     }
   })
 
+  it('metrics.model_meltdown：模型级熔断投影（与 provider 级 meltdown 同形、互不联动）', async () => {
+    const t = await setup()
+    try {
+      // 模型级记账（model_fallback 域）：quota×3 触发 (provider, model) 粒度熔断
+      for (let i = 0; i < 3; i++) recordModelOutcome(t.rt, 'up', 'glm-4.7', { ok: false, cls: 'quota' })
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.meltdown).toEqual([]) // 模型级记账不点亮 provider 级熔断（recordOutcome 分工）
+      expect(m1.model_meltdown).toHaveLength(1)
+      expect(m1.model_meltdown[0]).toMatchObject({ provider: 'up', model: 'glm-4.7', class: 'quota' })
+      expect(m1.model_meltdown[0].remaining_ms).toBeGreaterThan(0)
+      expect(typeof m1.model_meltdown[0].until).toBe('string')
+      // 未熔断的模型键不出现（缺席 = 无在熔断）
+      recordModelOutcome(t.rt, 'up', 'glm-4.7', { ok: true })
+      const m2 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m2.model_meltdown).toEqual([])
+    } finally {
+      t.close()
+    }
+  })
+
+  it('metrics.model_fallback：模型级容灾改发计数投影（闸门吸收双计/链尾合成只计 fallback，未改发缺席）', async () => {
+    const t = await setup()
+    try {
+      // 未改发：缺席（与 model_meltdown「缺席 = 无」的口径一致）
+      const m0 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m0.model_fallback).toEqual([])
+      // 闸门吸收（absorbed=true：fallback/absorbed 双计）+ 链尾合成（absorbed=false：只计 fallback）
+      recordModelFallback(t.rt, 'up', 'glm-4.7', true)
+      recordModelFallback(t.rt, 'up', 'glm-4.7', false)
+      recordModelFallback(t.rt, 'up', 'glm-4.8', false)
+      const m1 = JSON.parse((await request(t.port, '/_modeldock/metrics', ADMIN)).body)
+      expect(m1.model_fallback).toHaveLength(2)
+      expect(m1.model_fallback[0]).toMatchObject({ provider: 'up', model: 'glm-4.7', fallback_count: 2, absorbed_count: 1 })
+      expect(m1.model_fallback[1]).toMatchObject({ provider: 'up', model: 'glm-4.8', fallback_count: 1, absorbed_count: 0 })
+    } finally {
+      t.close()
+    }
+  })
+
   it('usage 聚合：成功/失败/无 status 分布、维度 tally、时延分位、用量口径（缓存计入输入）', async () => {
     const t = await setup()
     try {
@@ -380,6 +455,52 @@ describe('metrics 熔断暴露与 /_modeldock/usage 聚合端点（E2E）', () =
     }
   })
 
+  it('usage bucket=hour：小时桶精简版（稀疏、按时排序、cost=0 为 null）；超窗仍 400', async () => {
+    const t = await setup()
+    try {
+      const today = localIsoTs().slice(0, 10)
+      const ts = (h: number, m: number) => `${today}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00.000`
+      const base = { harness: 'zcode', profile: 'p', provider: 'up', path: '/v1/messages' }
+      logRequest(t.rt, { ...base, ts: ts(8, 5), status: 200, ms: 100, model: 'm-a', usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      logRequest(t.rt, { ...base, ts: ts(8, 50), status: 429 })
+      logRequest(t.rt, { ...base, ts: ts(9, 10), status: 200, ms: 300, model: 'm-b', usage: { input_tokens: 5, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } })
+      logRequest(t.rt, { ...base, ts: ts(9, 40), status: 200, ms: 100, model: 'm-b' })
+      await drainAppendStreams()
+      const body = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&bucket=hour&cost=0`, ADMIN)).body)
+      expect(body.hours).toHaveLength(2) // 08/09 两个小时有流量，稀疏出桶
+      expect(body.hours[0]).toEqual({
+        hour: `${today}T08:00`,
+        requests: 2,
+        cost: null, // cost=0 免查价路径：桶内成本 null（与总账 cost null 同语义）
+        tokens: { input: 10, output: 2, cache_read: 0, cache_creation: 0 },
+        by_model: { 'm-a': 1 },
+        by_status: { '429': 1 },
+      })
+      expect(body.hours[1]).toEqual({
+        hour: `${today}T09:00`,
+        requests: 2,
+        cost: null,
+        tokens: { input: 5, output: 1, cache_read: 0, cache_creation: 0 },
+        by_model: { 'm-b': 2 },
+        by_status: {},
+      })
+      // 桶外口径：总账照常返回（latency_by_model 聚合正确性另见纯函数用例）
+      expect(body.usage.requests).toBe(4)
+      expect(body.usage.latency_by_model).toEqual({
+        'm-a': { count: 1, avg_ms: 100, p50_ms: 100, p95_ms: 100 },
+        'm-b': { count: 2, avg_ms: 200, p50_ms: 200, p95_ms: 290 },
+      })
+      // 缺省带查价器：cost 是数字（未配价模型按 0 计）
+      const withCost = JSON.parse((await request(t.port, `/_modeldock/usage?date=${today}&bucket=hour`, ADMIN)).body)
+      expect(typeof withCost.hours[0].cost).toBe('number')
+      // 非法 bucket 值 400；超窗（>31 天）带 bucket=hour 仍 400
+      expect((await request(t.port, `/_modeldock/usage?date=${today}&bucket=day`, ADMIN)).status).toBe(400)
+      expect((await request(t.port, '/_modeldock/usage?from=2000-01-01&to=2030-01-01&bucket=hour', ADMIN)).status).toBe(400)
+    } finally {
+      t.close()
+    }
+  })
+
   it('usage 400：date 格式非法 / to 早于 from / 窗口超上限，均带双语报错与示例 hint', async () => {
     const t = await setup()
     try {
@@ -473,6 +594,111 @@ describe('summarizeUsageDays 流式聚合（卡 33：不落全量数组，口径
       expect(streamed.billable_partial).toBe(true) // 旧格式混入 → 求和不完整
     } finally {
       h.restore()
+    }
+  })
+})
+
+describe('上游限流信号留痕（LogEntry.ratelimit：带限流头才记，编排器 429 风暴前降并发数据源）', () => {
+  const TOKEN = 'mdk_tok_ratelimit'
+  /** mock 上游按 canned 应答 + 网关整链（隔离沙箱 + 随机端口），走真实 handleRequest 落账路径 */
+  async function setup(canned: { status: number; headers: Record<string, string>; body: string }) {
+    const h = fakeHome()
+    await setSecret('up', 'sk-rl', 'file')
+    const mock = http.createServer((_req, res) => {
+      res.writeHead(canned.status, { 'content-type': 'application/json', ...canned.headers })
+      res.end(canned.body)
+    })
+    await new Promise<void>((r) => mock.listen(0, '127.0.0.1', () => r()))
+    const cfg = {
+      active_profile: 'default',
+      providers: { up: { base_url: `http://127.0.0.1:${(mock.address() as AddressInfo).port}`, protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:up' } },
+      profiles: { default: { provider: 'up', default_model: 'm1' } },
+      harness: { 'claude-code': { mode: 'gateway', route: 'default', token: TOKEN } },
+    } as never
+    const rt = buildRuntime(cfg, 'admin-token-rl')
+    const server = createGatewayServer(rt, { port: 0 })
+    const port = await listenEphemeral(server)
+    return {
+      rt,
+      port,
+      close: async () => {
+        server.closeAllConnections?.()
+        server.close()
+        await new Promise<void>((r) => mock.close(() => r()))
+        h.restore()
+      },
+    }
+  }
+  /** 落账是响应收尾后的同步尾活，客户端读到响应可能早于落账完成：轮询到条目出现再断言 */
+  async function poll<T>(probe: () => T, hit: (v: T) => boolean): Promise<T> {
+    let v = probe()
+    for (let i = 0; i < 40 && !hit(v); i++) {
+      await new Promise((r) => setTimeout(r, 50))
+      v = probe()
+    }
+    return v
+  }
+  /** POST /v1/messages（routed 透传路径——GET /v1/models 被网关本地合成目录截胡，不打上游） */
+  function post(port: number): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' } },
+        (res) => {
+          let body = ''
+          res.on('data', (c) => (body += c))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }))
+        },
+      )
+      req.on('error', reject)
+      req.end('{"model":"m1","messages":[]}')
+    })
+  }
+
+  it('429 + 限流头：ring 条目带 ratelimit（reset 归一 epoch ms、retry_after_ms 同退避口径）', async () => {
+    const t = await setup({ status: 429, headers: { 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': '1762156800', 'retry-after': '0' }, body: '{"error":{"message":"rate limited"}}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(429)
+      const last = await poll(() => t.rt.ring.at(-1) as LogEntry | undefined, (e) => e?.status === 429)
+      expect(last.ratelimit).toEqual({ remaining: 3, reset: 1762156800000, retry_after_ms: 0 })
+      expect(last.cause).toBe('upstream_4xx')
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('200 带限流头：成功路径落账 ratelimit（day 文件可读出）', async () => {
+    const t = await setup({ status: 200, headers: { 'x-ratelimit-remaining': '41' }, body: '{"ok":true}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(200)
+      const today = localIsoTs().slice(0, 10)
+      const entries = await poll(
+        () => readRequestLogDay(today).filter((e) => e.path === '/v1/messages'),
+        (es) => es.length > 0,
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0].status).toBe(200)
+      expect(entries[0].ratelimit).toEqual({ remaining: 41 })
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('200 无限流头：落盘条目不出现 ratelimit 键（零新增字段，既有消费方零感知）', async () => {
+    const t = await setup({ status: 200, headers: {}, body: '{"ok":true}' })
+    try {
+      const res = await post(t.port)
+      expect(res.status).toBe(200)
+      const today = localIsoTs().slice(0, 10)
+      const entries = await poll(
+        () => readRequestLogDay(today).filter((e) => e.path === '/v1/messages'),
+        (es) => es.length > 0,
+      )
+      expect(entries).toHaveLength(1)
+      expect('ratelimit' in entries[0]).toBe(false)
+    } finally {
+      await t.close()
     }
   })
 })

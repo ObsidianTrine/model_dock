@@ -352,6 +352,9 @@ export async function precheckProtocolCompat({ cfg, tier, backend, fleetState, r
  * 预检唯一的阻断出口：①worker 模型确认不在上游服务目录（model_unavailable）或 ②该船
  * harness 与目标 provider 协议交集为空（protocol_incompatible）→ holdCardForPrecheck
  * 落位后干净退出 run 子进程（holdExit 可注入，测试传 stub）。
+ * 唯一 advisory 出口（2026-11-10 M3，不阻断）：①通过但 provider 的 model_fallback 备用
+ * 目标确认不在上游目录（fallback_model_missing）→ decision.lines + dispatch_advisory
+ * 事件留痕，派发照常（容灾失效只影响兜底路径）。
  */
 export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend, explicit, inherited, tier, fleetState, holdExit } = {}) {
   try {
@@ -377,6 +380,22 @@ export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend
         hint: '模型恢复 / 目录刷新后',
       });
       return decision; // 首个命中即滞留：holdExit 已退出进程；落位失败回落时也不再叠加预检②
+    }
+    // 备用模型 advisory（2026-11-10 M3，不阻断）：worker 模型本身可用、但该 provider 配置的
+    // model_fallback 备用目标确认不在上游目录 → 容灾兜底失效。只影响兜底路径，照常派发；
+    // 留痕同 precheck 家族风格：decision.lines 一行 + dispatch_advisory 事件（fail-open：
+    // 预检无 fallbackMissing 字段时静默跳过）。
+    if (Array.isArray(pre?.fallbackMissing) && pre.fallbackMissing.length) {
+      const ev = {
+        type: 'dispatch_advisory',
+        reason: 'fallback_model_missing',
+        provider: pre.provider,
+        model: pre.model,
+        fallback_missing: pre.fallbackMissing,
+        ...(pre.fetchedAt ? { fetched_at: pre.fetchedAt } : {}),
+      };
+      decision.events.push(ev);
+      decision.lines.push(`⚠ 容灾兜底缺席（advisory，照常派发）：provider "${pre.provider}" 的备用模型 ${pre.fallbackMissing.join('、')} 不在上游服务目录（快照 ${pre.fetchedAt ?? 'n/a'}）——worker 模型 "${pre.model}" 可用，额度耗尽时兜底改发可能失效`);
     }
     // 派发预检②（2026-11-09 协议兼容矩阵）：选船后、spawn 前对目标 provider 校验——消费
     // 派发路径现成的 fleet /config 快照与预检①的 provider 解析（零重复请求），fail-open 同①。

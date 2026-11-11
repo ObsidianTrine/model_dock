@@ -3,10 +3,12 @@
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { readNightlyState, writeNightlyState } from '../../.agents/scripts/orchestrator/nightly-state.mjs'
-import { mkRepo, runOrch } from './helpers.js'
+import { buildNightlySummary } from '../../.agents/scripts/orchestrator/notify.mjs'
+import { mkRepo, runOrch, cardText, type TestRepo } from './helpers.js'
 
 describe('orchestrator nightly > 巡检编排端到端', () => {
   it('TODO 信号出提案落 drafts + 漂移报告 + 摘要；无 --auto 不跑 worker（提案不进队列）', () => {
@@ -149,4 +151,172 @@ describe('orchestrator nightly > 幂等补跑（中断恢复 + 双跑防护）',
       repo.cleanup()
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// --auto 选卡硬禁区（P2-15）：deps/feature/核心·发布路径提案 submit+run 后必被引水闸
+// 打回 pending——白烧一次 run 启动。选卡阶段按 hardZoneReason（sail.mjs 单一口径）跳过；
+// 普通 high 提案照常提交闭环。
+// ---------------------------------------------------------------------------
+
+/** 种一张 high 优先级提案进 drafts/（nightly --auto 的选卡候选）。
+ *  created_at 缺省取 1 天前（相对真实 now）：老化自动档会把超龄（缺省 14 天）未提交
+ *  机器提案在 --auto 选卡前清退——选卡候选必须是「新鲜」提案，写死日历日会随时间漂移
+ *  撞上清退闸。 */
+function seedDraft(repo: TestRepo, id: string, overrides: Record<string, unknown>): void {
+  const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+  fs.mkdirSync(dir, { recursive: true })
+  const fresh = overrides.created_at ?? new Date(Date.now() - 86_400_000).toISOString()
+  fs.writeFileSync(path.join(dir, `${id}.md`), cardText({ id, priority: 'high', created_at: fresh, created_by: 'planner', ...overrides }))
+}
+
+describe('orchestrator nightly > --auto 选卡硬禁区', () => {
+  it('deps 提案不提交（留 drafts、不起 run）；普通 high 提案照常提交闭环', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      seedDraft(repo, 'night-deps-hard', { type: 'deps', files_hint: ['package.json'] })
+      seedDraft(repo, 'night-bugfix-ok', { type: 'bugfix', files_hint: ['mock-worker-output.txt'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      // 硬禁区：deps 类型选卡阶段跳过——日志给原因、草稿原地保留、无 run 启动标记
+      expect(out.stdout).toContain('night-deps-hard 不自动提交')
+      expect(out.stdout).toContain('deps 类型永不自动提交')
+      expect(out.stdout).not.toContain('nightly --auto → night-deps-hard')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-deps-hard.md'))).toBe(true)
+      // 普通 high：照常提交（离开 drafts/ 并起 run）
+      expect(out.stdout).toContain('nightly --auto → night-bugfix-ok')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-bugfix-ok.md'))).toBe(false)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('feature 提案不提交（上游管线，硬禁区）', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      seedDraft(repo, 'night-feature-hard', { type: 'feature', files_hint: ['docs/**'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      expect(out.stdout).toContain('night-feature-hard 不自动提交')
+      expect(out.stdout).toContain('上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-feature-hard.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('files_hint 命中 corePaths 的提案不提交（硬禁区）', () => {
+    const repo = mkRepo({ workerBackend: 'mock', extra: { corePaths: ['src/gateway/server.ts'] } })
+    try {
+      seedDraft(repo, 'night-core-hard', { type: 'refactor', files_hint: ['src/gateway/relay.ts'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      expect(out.stdout).toContain('night-core-hard 不自动提交')
+      expect(out.stdout).toContain('命中核心/发布路径')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-core-hard.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// drafts gc 自动清退（老化自动档接线）：nightly 周期内自动执行一次「superseded +
+// 超龄未提交」两类保守清退 → drafts/superseded/。队列痕迹/人工草稿/未超龄不动。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator nightly > drafts gc 自动清退（老化自动档）', () => {
+  it('超龄未提交机器提案自动迁 superseded/（aged-out 标注）一次；队列痕迹/人工草稿/未超龄不动，队列卡零改动', () => {
+    const repo = mkRepo({ workerBackend: 'mock' })
+    try {
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      const pendingDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending')
+      fs.mkdirSync(draftsDir, { recursive: true })
+      fs.mkdirSync(pendingDir, { recursive: true })
+      // 相对真实 now 取龄：nightly 子进程内 Date.now() 有毫秒级偏移，14 天档位下无影响
+      const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+      const fresh = new Date(Date.now() - 3 * 86_400_000).toISOString()
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-auto.md'), cardText({ id: 'gc-stale-auto', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/a.ts'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-traced.md'), cardText({ id: 'gc-stale-traced', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/b.ts'] }))
+      // 队列痕迹：pending/ 有同名卡（提案已在队列等待——提交态不是「积压」）
+      fs.writeFileSync(path.join(pendingDir, 'gc-stale-traced.md'), cardText({ id: 'gc-stale-traced', created_at: stale, created_by: 'human', files_hint: ['mock-worker-output.txt'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-stale-manual.md'), cardText({ id: 'gc-stale-manual', created_at: stale, created_by: 'human', files_hint: ['src/cli/c.ts'] }))
+      fs.writeFileSync(path.join(draftsDir, 'gc-fresh.md'), cardText({ id: 'gc-fresh', created_at: fresh, created_by: 'scanner', files_hint: ['src/cli/d.ts'] }))
+      const out = runOrch(repo.root, 'nightly')
+      expect(out.stdout).toContain('nightly 摘要') // 巡检完整跑完（清退失败会中断走不到摘要）
+      expect(out.stdout).toContain('drafts gc 自动清退')
+      // 超龄未提交机器提案：迁入 superseded/ 并带 aged-out 标注
+      expect(fs.existsSync(path.join(draftsDir, 'gc-stale-auto.md'))).toBe(false)
+      const swept = fs.readFileSync(path.join(draftsDir, 'superseded', 'gc-stale-auto.md'), 'utf8')
+      expect(swept).toContain('superseded_by: aged-out')
+      // 三类保护对象留原地
+      for (const keep of ['gc-stale-traced.md', 'gc-stale-manual.md', 'gc-fresh.md']) {
+        expect(fs.existsSync(path.join(draftsDir, keep))).toBe(true)
+      }
+      // 队列目录零改动：pending 痕迹卡原样、无新增
+      expect(fs.existsSync(path.join(pendingDir, 'gc-stale-traced.md'))).toBe(true)
+      expect(listCards(queueRoot(repo.root), 'pending')).toEqual(['gc-stale-traced'])
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
+// 摘要 drafts gc 清退计数（notify.buildNightlySummary × cmdNightly 接线）：自动清退
+// 此前只落 fleet 事件与日志，通知摘要未计清退数——补上；零清退不出现该段（有才说）。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator nightly > 摘要 drafts gc 清退计数', () => {
+  it('有清退：摘要含清退计数段（superseded + 超龄未提交合计）', () => {
+    const s = buildNightlySummary({ created: 1, awaiting: 0, pending: 0, gcSwept: { superseded: 2, agedUnsubmitted: 3 } })
+    expect(s).toContain('drafts gc 自动清退 5 张')
+    expect(s).toContain('superseded 2、超龄未提交 3')
+  })
+
+  it('无清退：摘要不出现清退段（未传与双零同款）', () => {
+    expect(buildNightlySummary({ created: 1, awaiting: 0, pending: 0 })).not.toContain('自动清退')
+    expect(buildNightlySummary({ created: 1, awaiting: 0, pending: 0, gcSwept: { superseded: 0, agedUnsubmitted: 0 } })).not.toContain('自动清退')
+  })
+
+  it('端到端：nightly 真清退 1 张超龄提案时，NIGHTLY_WEBHOOK 收到的摘要正文含计数', async () => {
+    const repo = mkRepo()
+    const posts: Array<{ title?: string; body?: string }> = []
+    const server = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        try { posts.push(JSON.parse(raw)) } catch { /* 非 JSON 忽略 */ }
+        res.writeHead(200)
+        res.end('ok')
+      })
+    })
+    try {
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+      const addr = (server.address() as { port: number }).port
+      const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+      fs.mkdirSync(draftsDir, { recursive: true })
+      // 相对真实 now 取龄（同上方 gc 用例口径，避开子进程 Date.now() 毫秒偏移）
+      const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+      fs.writeFileSync(path.join(draftsDir, 'gc-notify-stale.md'), cardText({ id: 'gc-notify-stale', created_at: stale, created_by: 'scanner', files_hint: ['src/cli/x.ts'] }))
+      runOrch(repo.root, 'nightly', { AGENTS_NIGHTLY_WEBHOOK: `http://127.0.0.1:${addr}` })
+      // notify 尽力而为、fire-and-forget：轮询等 POST 到达（≤5s，同 l0-gate merged 通知用法）
+      await new Promise<void>((resolve) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if (posts.length || Date.now() > deadline) return resolve()
+          setTimeout(tick, 200)
+        }
+        tick()
+      })
+      expect(posts.length).toBeGreaterThanOrEqual(1)
+      const nightlyPost = posts.find((p) => p.body?.includes('巡检'))
+      expect(nightlyPost?.body).toContain('drafts gc 自动清退 1 张')
+      expect(nightlyPost?.body).toContain('superseded 0、超龄未提交 1')
+      // 计数不是空转：清退确实发生了
+      expect(fs.existsSync(path.join(draftsDir, 'superseded', 'gc-notify-stale.md'))).toBe(true)
+    } finally {
+      server.close()
+      repo.cleanup()
+    }
+  }, 120_000)
 })

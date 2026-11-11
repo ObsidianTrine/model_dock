@@ -26,6 +26,9 @@ describe('orchestrator planner > prompt 构建与解析', () => {
     expect(p).toContain('gate: L3')
     expect(p).toContain('验收标准必须可机器检查')
     expect(p).toContain('created_by: planner')
+    expect(p).toContain('6. docs/known-issues.md 是已知问题账本')
+    expect(p).toContain('一律视为已解决，禁止为其出卡')
+    expect(p).toContain('7. 围栏外只允许一句话概述')
   })
 
   it('意图文本消毒：结构字符/换行/截断', () => {
@@ -90,6 +93,27 @@ describe('orchestrator planner > intent 命令端到端（mock 后端）', () =>
       const r = tryOrch(repo.root, 'intent "broken" --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
       expect(r.status).not.toBe(0)
       expect(r.stderr).toContain('均未产出任务卡契约块')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('propose.model 配置 → intent 会话留痕 meta.model（与 propose 共用同一模型键）', () => {
+    const repo = mkRepo({ extra: { propose: { model: 'glm-5.3-flash' } } })
+    try {
+      const out = runOrch(repo.root, 'intent "fix the presets merge bug" --backend mock')
+      expect(out.status).toBe(0)
+      const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
+      const sessions = fs.readdirSync(logsDir).filter((d) => d.startsWith('planner-'))
+      expect(sessions).toHaveLength(1)
+      const decDir = path.join(logsDir, sessions[0], 'decisions')
+      const files = fs.readdirSync(decDir).filter((f) => f.startsWith('planner-') && f.endsWith('.json'))
+      expect(files.length).toBeGreaterThan(0)
+      for (const f of files) {
+        const doc = JSON.parse(fs.readFileSync(path.join(decDir, f), 'utf8'))
+        expect(doc.meta.command).toBe('intent')
+        expect(doc.meta.model).toBe('glm-5.3-flash')
+      }
     } finally {
       repo.cleanup()
     }

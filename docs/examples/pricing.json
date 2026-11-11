@@ -1,0 +1,9 @@
+{
+  "glm-5.3": { "input": 1.19516, "output": 4.18306, "cache_read": 0.29879, "cache_write": 0 },
+  "glm-5.3-flash": { "input": 0.11952, "output": 0.41831, "cache_read": 0.03436, "cache_write": 0 },
+  "glm-5.3-flashx": { "input": 0.29879, "output": 1.04577, "cache_read": 0.08516, "cache_write": 0 },
+  "glm-4.5-air": { "input": 0.11952, "output": 0.89637, "cache_read": 0.0239, "cache_write": 0 },
+  "glm-4.7-flashx": { "input": 0.0747, "output": 0.44819, "cache_read": 0.01494, "cache_write": 0 },
+  "glm-4.5-flash": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
+  "glm-4.7-flash": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 }
+}

@@ -14,9 +14,12 @@ import {
   snapshotDrafts,
   diffQueueStates,
   buildSailReport,
+  sailIdleSleepMin,
+  collectUpstreamRechecks,
+  SAIL_IDLE_BACKOFF_CAP_MIN,
   DEFAULT_SAIL_SUBMIT_TYPES,
 } from '../../.agents/scripts/orchestrator/sail.mjs'
-import { queueRoot, listCards } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { queueRoot, listCards, ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { fleetLogPath } from '../../.agents/scripts/orchestrator/weather.mjs'
 import { cardText, mkRepo, readCard, runOrch, tryOrch } from './helpers.js'
 
@@ -26,15 +29,49 @@ function submitCard(repo: string, id: string, overrides: Record<string, unknown>
   runOrch(repo, `submit "${cardFile}"`)
 }
 
-/** 最近一次航行的报告目录（logs/sail/<ts>/）。 */
+/** 最近一次航行的报告目录（logs/sail/<ts>/）。只认目录——events.jsonl 等散文件同层落盘时不参与「最新航次」排序。 */
 function latestSailDir(repo: string): string {
   const dir = path.join(repo, '.agents', 'orchestrator', 'logs', 'sail')
-  const entries = fs.readdirSync(dir).sort()
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort()
   return path.join(dir, entries[entries.length - 1])
 }
 
 function latestReport(repo: string): string {
   return fs.readFileSync(path.join(latestSailDir(repo), 'report.md'), 'utf8')
+}
+
+/** 预置 brief（meta+brief+可选 verdict）：提案经 ORCH_MOCK_PLANNER_RESEARCH 直接引用，跳过派调研。 */
+function plantBrief(repo: string, id: string, verdict: Record<string, unknown> | null): void {
+  const dir = path.join(repo, '.agents', 'orchestrator', 'research', id)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'meta.json'),
+    JSON.stringify({ id, title: 'mock 调研标题', question: 'mock 问题', backend: 'mock', created_at: new Date().toISOString() }),
+  )
+  fs.writeFileSync(
+    path.join(dir, 'brief.md'),
+    '# 结论\nmock 结论占位。\n\n# 选项对比\n- 方案 A：mock 占位。\n\n# 引用\n\n# 建议\nmock 占位。\n\n# 罗盘对齐\nmock 占位。\n',
+  )
+  if (verdict) fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify(verdict, null, 2))
+}
+
+/** verdict.json 最小形（assessBrief 产出同构；测试只关心 usage.internal_decision 与 claims）。 */
+function verdictFixture(internalDecision: string, claims: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  return {
+    schema: 'modeldock.research.verdict/2',
+    advisory: true,
+    brief_id: 'mock-planner',
+    model: 'mock',
+    created_at: new Date().toISOString(),
+    scores: { evidence: null, coherence: null, coverage: null, citation: 100, overall: null },
+    snapshots: { total: 0, usable: 0, skeleton: 0 },
+    claims,
+    blockers: [],
+    fabricated_claims: 0,
+    usage: { browse: 'ok', internal_decision: internalDecision, external_doc: internalDecision },
+    level: 'unknown',
+    reasons: [],
+  }
 }
 
 describe('orchestrator sail > 纯逻辑件', () => {
@@ -146,6 +183,198 @@ describe('orchestrator sail > 纯逻辑件', () => {
   })
 })
 
+describe('orchestrator sail > 空队退避（idle backoff）', () => {
+  it('sailIdleSleepMin：缺省 interval 连续零提交 10→20→40，第 4 轮起 60 封顶', () => {
+    expect(sailIdleSleepMin(1, 10)).toBe(10)
+    expect(sailIdleSleepMin(2, 10)).toBe(20)
+    expect(sailIdleSleepMin(3, 10)).toBe(40)
+    expect(sailIdleSleepMin(4, 10)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+    expect(sailIdleSleepMin(9, 10)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+  })
+
+  it('sailIdleSleepMin：自定义 interval 同曲线缩放；高于 cap 不缩显式值；0 保持禁睡', () => {
+    expect(sailIdleSleepMin(1, 5)).toBe(5)
+    expect(sailIdleSleepMin(2, 5)).toBe(10)
+    expect(sailIdleSleepMin(3, 5)).toBe(20)
+    expect(sailIdleSleepMin(5, 5)).toBe(SAIL_IDLE_BACKOFF_CAP_MIN)
+    // cap 只封退避增长，不缩用户显式配的更高 interval（配置只收窄、永不放大）
+    expect(sailIdleSleepMin(1, 90)).toBe(90)
+    expect(sailIdleSleepMin(4, 90)).toBe(90)
+    expect(sailIdleSleepMin(4, 0)).toBe(0)
+  })
+
+  it('buildSailReport：退避轨迹行（进入周期 + 最长计划休眠）与逐周期注记；未触发不出行', () => {
+    const empty = { running: [], reviewing: [], failed: [], blocked: [] }
+    const voyageBase = {
+      projectName: 'TestDock',
+      root: '/nonexistent-root',
+      startedAtISO: '2026-11-10T01:13:00.000Z',
+      finishedAtISO: '2026-11-10T03:00:00.000Z',
+      minutes: 120,
+      actualMinutes: 107,
+      stopReason: '到达时长上限',
+      dispatchedTotal: 0,
+      goalsText: '',
+      baseline: { pending: [], 'awaiting-human': [], merged: [], ...empty },
+      endState: { pending: [], 'awaiting-human': [], merged: [], ...empty },
+      diff: { changed: [], added: [] },
+    }
+    const cycle = (n: number, kind: string, idleStreak: number, sleepPlannedMin: number, sleepMin = sleepPlannedMin) =>
+      ({ n, kind, at: '', dispatched: [], proposals: [], submitted: [], skipped: [], sleepMin, idleStreak, sleepPlannedMin })
+    const withBackoff = buildSailReport({
+      ...voyageBase,
+      cycles: [
+        cycle(1, 'plan', 1, 10),
+        cycle(2, 'plan', 2, 20),
+        cycle(3, 'plan', 3, 40),
+        cycle(4, 'plan', 4, 60, 58), // 实际休眠被 deadline 截短（58 < 计划 60）
+        cycle(5, 'idle', 5, 60),
+      ],
+    })
+    expect(withBackoff).toContain('空队退避轨迹：周期 2 起')
+    expect(withBackoff).toContain('最长计划休眠 60 分钟')
+    expect(withBackoff).toContain('（连续 3 轮零提交，指数退避计划休眠 40 分钟）')
+    expect(withBackoff).toContain('连续 5 轮零提交')
+    // streak 1 未进退避：无注记、轨迹行从周期 2 起算
+    expect(withBackoff).not.toContain('连续 1 轮零提交')
+    const noBackoff = buildSailReport({ ...voyageBase, cycles: [cycle(1, 'plan', 1, 10)] })
+    expect(noBackoff).not.toContain('空队退避轨迹')
+  })
+
+  it('闭环（mock）：提交轮复位、连续空轮 streak 逐轮 +1、第 2 空轮起休眠翻倍、报告出退避轨迹', () => {
+    const repo = mkRepo()
+    try {
+      // 周期 1 规划提交（docs 白名单）→ 周期 2 派发 merged → 此后队列去重无新提案，
+      // 连续空轮 streak 递增；interval 1 时第 1/2 空轮计划休眠 1→2 分钟（翻倍可见）
+      const out = runOrch(repo.root, 'sail --duration 120s --interval 1 --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
+      expect(out.stdout).toContain('到达时长上限')
+      const voyage = JSON.parse(
+        fs.readFileSync(path.join(latestSailDir(repo.root), 'voyage.json'), 'utf8'),
+      ) as { cycles: Array<{ n: number; kind: string; submitted: string[]; idleStreak: number; sleepPlannedMin?: number }> }
+      const plans = voyage.cycles.filter((c) => c.kind === 'plan')
+      expect(plans.length).toBeGreaterThanOrEqual(3)
+      // 复位凭证：提交轮 streak=0，紧随的首个空轮从 1 重新起算（而非累计值）
+      expect(plans[0].submitted).toContain('planner-mock-task')
+      expect(plans[0].idleStreak).toBe(0)
+      expect(plans[1].idleStreak).toBe(1)
+      expect(plans[1].sleepPlannedMin).toBe(1)
+      // ≥2 空轮起翻倍：计划休眠 1 → 2
+      expect(plans[2].idleStreak).toBe(2)
+      expect(plans[2].sleepPlannedMin).toBe(2)
+      const report = latestReport(repo.root)
+      expect(report).toContain('空队退避轨迹')
+      expect(report).toContain(`周期 ${plans[2].n} 起`)
+      expect(report).toContain('最长计划休眠 2 分钟')
+      expect(report).toContain('连续 2 轮零提交')
+      expect(report).not.toContain('连续 1 轮零提交')
+    } finally {
+      repo.cleanup()
+    }
+  }, 200_000)
+})
+
+describe('orchestrator sail > 上游管线复查通道与派发轮孤儿自愈（P2-a / P2-c）', () => {
+  it('collectUpstreamRechecks 纯函数：sail verdict 阻断 + fleet unsafe 留痕 ∩ 现存 drafts；已出 drafts 的 id 出局；事件文件缺失 fail-open 空名单', () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'sail-recheck-'))
+    try {
+      const sailLog = path.join(repo, '.agents', 'orchestrator', 'logs', 'sail')
+      fs.mkdirSync(sailLog, { recursive: true })
+      fs.writeFileSync(
+        path.join(sailLog, 'events.jsonl'),
+        [
+          JSON.stringify({ ts: 'x', seq: 1, type: 'research_verdict_blocked', card: 'd1', brief: 'b1', usage: 'unsafe' }),
+          JSON.stringify({ ts: 'x', seq: 2, type: 'research_verdict_blocked', card: 'gone', brief: 'b2', usage: 'unsafe' }),
+          JSON.stringify({ ts: 'x', seq: 3, type: 'sail_started', minutes: 5 }),
+        ].join('\n') + '\n',
+      )
+      fs.writeFileSync(
+        path.join(repo, '.agents', 'orchestrator', 'logs', 'fleet.jsonl'),
+        JSON.stringify({ ts: 'x', seq: 1, type: 'sail_research_unsafe', draft: 'd2', topic: 't1', brief: null }) + '\n',
+      )
+      const drafts = [{ id: 'd1' }, { id: 'd2' }, { id: 'd3' }]
+      expect(collectUpstreamRechecks(repo, drafts)).toEqual(['d1', 'd2']) // gone 已出 drafts 自然出局；d3 无留痕不进
+      expect(collectUpstreamRechecks(repo, [])).toEqual([])
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true })
+    }
+    // 无任何事件文件的裸目录：空名单不抛（fail-open）
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'sail-recheck-bare-'))
+    try {
+      expect(collectUpstreamRechecks(bare, [{ id: 'x' }])).toEqual([])
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
+  it('复查通道（P2-a）：verdict 改判后下周期重进管线——spec 落盘；名单跨 sail 重启不丢（事件留痕重建）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      // 人工 research verify 改判：verdict.json 覆写为 ok（真实链路 = research verify 落盘）
+      fs.writeFileSync(path.join(repo.root, '.agents', 'orchestrator', 'research', 'mock-planner', 'verdict.json'), JSON.stringify(verdictFixture('ok'), null, 2))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      // 改判 → 复查通道把上周期 blocked 提案重喂管线 → spec 落盘待人审
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('复查通道')
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('复查通道（P2-a）：未改判 → 重进管线再跳过，零配额消耗（不重调研、不落 spec）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      const eventsFile = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl')
+      const count1 = (fs.readFileSync(eventsFile, 'utf8').match(/research_verdict_blocked/g) ?? []).length
+      expect(count1).toBeGreaterThanOrEqual(1)
+      runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      // 复查轮重进管线再阻断一次（重进实证）；verdict 未改判就永远到不了 spec
+      const count2 = (fs.readFileSync(eventsFile, 'utf8').match(/research_verdict_blocked/g) ?? []).length
+      expect(count2).toBeGreaterThan(count1)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      // 不烧调研配额：research/ 下仍只有预置的 mock-planner 一个 brief 目录
+      const dirs = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'research'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)
+      expect(dirs).toEqual(['mock-planner'])
+    } finally {
+      repo.cleanup()
+    }
+  }, 200_000)
+
+  it('派发轮前孤儿自愈补位（P2-c）：sail 持锁全程由本进程扫 running/，孤儿卡自动续、pending 卡照常派发', () => {
+    const repo = mkRepo()
+    try {
+      // 孤儿 running 卡（无任务锁 = 属主已退；429 签名收尾 → 可自动续）
+      const qroot = queueRoot(repo.root)
+      ensureQueue(qroot)
+      fs.mkdirSync(path.join(qroot, 'running'), { recursive: true })
+      fs.writeFileSync(path.join(qroot, 'running', 'sail-orph.md'), cardText({ id: 'sail-orph' }))
+      const orphLog = path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail-orph')
+      fs.mkdirSync(orphLog, { recursive: true })
+      fs.writeFileSync(
+        path.join(orphLog, 'events.jsonl'),
+        [
+          JSON.stringify({ ts: '2026-11-01T01:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 100 }),
+          JSON.stringify({ ts: '2026-11-01T01:10:00.000+08:00', seq: 2, type: 'blocked', reason: 'HTTP 429 too many requests' }),
+          JSON.stringify({ ts: '2026-11-01T02:00:00.000+08:00', seq: 3, type: 'worker_spawned', backend: 'mock', pid: 101 }),
+        ].join('\n') + '\n',
+      )
+      submitCard(repo.root, 'sail-pre')
+      const out = runOrch(repo.root, 'sail --minutes 5 --interval 0 --max-tasks 1 --backend mock')
+      expect(out.stdout).toContain('孤儿自愈')
+      expect(readCard(repo.root, 'awaiting-human', 'sail-orph')).toBeTruthy()
+      // 孤儿自愈不占派发名额：pending 的存量卡同周期照常派发
+      expect(readCard(repo.root, 'awaiting-human', 'sail-pre')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+})
+
 describe('orchestrator sail > 停止条件与留痕', () => {
   it('缺时长直接拒绝（自由航行烧钱，不允许静默默认时长）', () => {
     const repo = mkRepo()
@@ -238,6 +467,102 @@ describe('orchestrator sail > 全自治闭环（mock）', () => {
       expect(report).toContain('上游管线：调研 brief mock-planner')
       expect(report).toContain('上游管线：spec planner-mock-task 已落盘待人审')
       expect(report).toContain('feature 提案走上游管线')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：usage=unsafe 的 brief 阻断 spec 升级（事件留痕、本周期跳过不重试、spec 不落盘）', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('unsafe', [{ claim: 'mock 结论占位。', status: 'contradicted', note: 'mock 复核矛盾' }]))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).toContain('⛔ 上游管线')
+      expect(out.stdout).toContain('usage=unsafe')
+      // spec 三件套不落盘；提案也不进队列（feature 本就不自动提交）
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'planner-mock-task.md'))).toBe(false)
+      // 事件留痕：brief id + usage 值（logs/sail/events.jsonl）
+      const events = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl'), 'utf8')
+      expect(events).toContain('"type":"research_verdict_blocked"')
+      expect(events).toContain('"card":"planner-mock-task"')
+      expect(events).toContain('"brief":"mock-planner"')
+      expect(events).toContain('"usage":"unsafe"')
+      // 航海报告如实收录阻断去向
+      const report = latestReport(repo.root)
+      expect(report).toContain('⛔ 上游管线：spec planner-mock-task 被调研可信度闸门阻断（brief mock-planner usage=unsafe）')
+      expect(report).not.toContain('spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：claims contradicted 一票否决同阻断（usage=needs_review 也拦）', () => {
+    const repo = mkRepo()
+    try {
+      // usage 未标 unsafe（needs_review）但 claim contradicted：闸门按 claims 独立否决
+      plantBrief(repo.root, 'mock-planner', verdictFixture('needs_review', [{ claim: 'mock 结论占位。', status: 'contradicted', note: '' }]))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).toContain('⛔ 上游管线')
+      expect(out.stdout).toContain('claim contradicted 一票否决')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(false)
+      const events = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'sail', 'events.jsonl'), 'utf8')
+      expect(events).toContain('"usage":"needs_review"')
+      expect(events).toContain('"contradicted":true')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：usage=ok 放行——spec 照常落盘待人审', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', verdictFixture('ok'))
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).not.toContain('⛔ 上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('verdict 闸门：无 verdict（旧 brief / 未跑 L1）行为完全不变——放行', () => {
+    const repo = mkRepo()
+    try {
+      plantBrief(repo.root, 'mock-planner', null)
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1', ORCH_MOCK_PLANNER_RESEARCH: 'mock-planner' })
+      expect(out.stdout).not.toContain('⛔ 上游管线')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'design.md'))).toBe(true)
+      expect(latestReport(repo.root)).toContain('上游管线：spec planner-mock-task 已落盘待人审')
+    } finally {
+      repo.cleanup()
+    }
+  }, 150_000)
+
+  it('specAutoBuild 预授权档（on）：spec 落盘即自动拆卡 gate=L1 进 pending（引水闸兜底，不停盘等人审）', () => {
+    // corePaths 盖住 mock 规格的文件面（docs/**）：拆出的卡被引水闸拦停派发、稳定留
+    // pending——既验证自动拆卡落位，也验证「安全网由引水闸天然兜底，不另造判断」。
+    const repo = mkRepo({ extra: { upstream: { specAutoBuild: { enabled: true } }, corePaths: ['docs/**'] } })
+    try {
+      const out = runOrch(repo.root, 'sail --duration 12s --interval 1 --backend mock', { ORCH_MOCK_PLANNER_FEATURE: '1' })
+      expect(out.stdout).toContain('specAutoBuild')
+      expect(out.stdout).toContain('自动拆卡 2 张进 pending')
+      // 拆出的卡进 pending：gate=L1、type=feature（renderTaskCard 硬编码 type 不变）
+      const pending = [...listCards(queueRoot(repo.root), 'pending')].sort()
+      expect(pending).toEqual(['planner-mock-task-t1', 'planner-mock-task-t2'])
+      for (const id of pending) {
+        const card = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', `${id}.md`), 'utf8')
+        expect(card).toContain('gate: L1')
+        expect(card).toContain('type: feature')
+        expect(card).toContain('spec: planner-mock-task')
+      }
+      // 进度锚与三件套照常落盘
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'specs', 'planner-mock-task', 'progress.json'))).toBe(true)
+      // 航海报告如实区分自动拆卡（与「落盘待人审」分叉）
+      const report = latestReport(repo.root)
+      expect(report).toContain('已自动拆卡进队列')
+      expect(report).not.toContain('已落盘待人审')
     } finally {
       repo.cleanup()
     }

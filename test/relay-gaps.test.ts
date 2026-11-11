@@ -13,6 +13,7 @@ import {
 } from '../src/gateway/relay.js'
 import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { buildRuntime, recordOutcome } from '../src/gateway/state.js'
+import { recordModelOutcome } from '../src/gateway/state/routing.js'
 import { setSecret } from '../src/config/secrets.js'
 import { fakeHome } from './helpers.js'
 import type { Config, ProfileConfig, ProviderConfig } from '../src/config/types.js'
@@ -460,6 +461,42 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
     }
   })
 
+  it('熔断且无映射的模型快速失败：跳过注定 402 的上游往返（attempt 记 model_cooldown），TTL 过期恢复真实调用', async () => {
+    const h = fakeHome()
+    // mZ 故意不在 model_fallback 映射里；mock 对 mZ 回 200——若快速失败缺席，请求会真实打上游
+    // 并拿到 200，status 断言即红（比「只数调用次数」对回归更敏感）
+    const mock = await startModelMock((model) =>
+      model === 'mZ' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      // 直灌 3 笔 (pa, mZ) 模型级 quota（与 relay 真实记账同入口）：第 3 笔触发 15min 熔断
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mZ', { ok: false, cls: 'quota' })
+      expect(rt.modelHealth?.get('pa\u0000mZ')?.meltdown_until).toBeDefined()
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).status).toBe(402)
+      expect((err as UpstreamError).cause).toBe('quota')
+      expect((err as UpstreamError).hint).toBeTruthy()
+      expect((err as UpstreamError).attempts).toEqual([expect.objectContaining({ provider: 'pa', note: 'model_cooldown' })])
+      expect(mock.seen).toEqual([]) // 熔断期零上游往返（402 由网关直接合成）
+      // TTL 拨到过去：恢复真实上游调用（现状回归——无映射模型照常发送）
+      ;(rt.modelHealth!.get('pa\u0000mZ')!).meltdown_until = Date.now() - 1
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never)
+      expect(r.status).toBe(200)
+      expect(mock.seen).toEqual(['mZ'])
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
   it('MAX_MODEL_FALLBACK_HOPS=4：单请求最多合成 4 跳，达帽维持原样回传（mF 不再合成）', async () => {
     const h = fakeHome()
     const mock = await startModelMock(() => ({ status: 402, body: QUOTA_BODY }))
@@ -480,6 +517,50 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       expect(r.attempts).toHaveLength(5)
       expect(mock.seen).toEqual(['mA', 'mB', 'mC', 'mD', 'mE'])
       expect(mock.seen).not.toContain('mF')
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('容灾改发计数：闸门吸收 fallback/absorbed 双计、链尾合成只计 fallback、未触发无条目；熔断解除不清零', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock((model) =>
+      model === 'mB' || model === 'mC' ? { status: 200, body: '{"ok":true}' } : { status: 402, body: QUOTA_BODY },
+    )
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      await setSecret('pn', 'sk-pn', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const pn = providerCfg({ name: 'pn', base_url: mock.url, key_ref: 'file:pn' }) // 无映射：对照组
+      const rt = buildRt({ pa, pn })
+      const cfg = rt.config as Config
+      // 未触发：配了映射但请求模型 200（mC 不在映射）、无映射 provider 的 402（mZ）——都不产生条目
+      const rOk = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mC', messages: [] }))) as never)
+      expect(rOk.status).toBe(200)
+      const rNoMap = await forwardWithFailover(rt, baseOn(cfg, 'pn'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never)
+      expect(rNoMap.status).toBe(402)
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0)
+      // 链尾合成（mA 402 → mB 200）：只递增 fallback_count，absorbed 不动
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      for (let i = 0; i < 3; i++) {
+        const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+        expect(r.status).toBe(200)
+      }
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 3, absorbedCount: 0 })
+      // 闸门吸收（mA 已熔断 → 预改写直发 mB，主模型零上游往返）：fallback/absorbed 双计
+      const r4 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r4.status).toBe(200)
+      expect(r4.modelAfter).toBe('mB')
+      expect(countOf(mock.seen, 'mA')).toBe(3) // 第 4 发未触达主模型
+      expect(countOf(mock.seen, 'mB')).toBe(4)
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 4, absorbedCount: 1 })
+      // 熔断 TTL 过期恢复试回主模型（402 → 链尾合成）：fallback 续计，absorbed 不变（历史事实不清零）
+      ;(rt.modelHealth!.get('pa\u0000mA')!).meltdown_until = Date.now() - 1
+      const r5 = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r5.status).toBe(200)
+      expect(r5.reason).toBe('fallback_to:mB')
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 5, absorbedCount: 1 })
     } finally {
       await mock.close()
       h.restore()

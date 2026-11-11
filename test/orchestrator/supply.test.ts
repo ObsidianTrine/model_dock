@@ -14,13 +14,18 @@ import { describe, expect, it } from 'vitest'
 import { Budget } from '../../.agents/scripts/orchestrator/budget.mjs'
 import {
   MEASURED_FUEL_POLL_MS,
+  RENEW_TIMEOUT_MS,
+  createExpiryRenewal,
+  createExpiryWatcher,
   fetchHarnessBillable,
   harnessBillableFromUsage,
   probeProviderCapacity,
   providerCapacityDecision,
   providerWaterline,
+  renewTaskHarness,
   startMeasuredFuelPoller,
 } from '../../.agents/scripts/orchestrator/supply.mjs'
+import { appendEvent, readEvents } from '../../.agents/scripts/orchestrator/events.mjs'
 import { eventsOf, mkRepo, runOrch, cardText } from './helpers.js'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -300,6 +305,378 @@ describe('supply > 实测油量（harness-usage）', () => {
       expect(b.measuredBaseline).toBe(3_000_000) // 首次采样固化基线（跨任务流量不入本任务账）
       expect(b.measuredBillable).toBe(0)
       expect(b.tripped).toBe(false)
+    } finally {
+      gw.close()
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k]
+        else process.env[k] = savedEnv[k]
+      }
+    }
+  }, 10_000)
+
+  it('poller 单轮异常不炸（P2 双保险）：onExpiryWarning 同步抛错 → IIFE catch 收口，下一轮照常轮询记账', async () => {
+    const T0 = 1_700_000_000_000
+    const MIN = 60_000
+    const b = new Budget({ meta: { budget: { max_tokens: 100_000, max_wall_minutes: 10 } } })
+    // usage 闭包实时读 state.usage（startMockGateway 应答时取值）：跨轮改值可观测「后续
+    // 轮次记账继续」——poller 若被单轮异常带走，measuredBillable 永远停在首采样。
+    // nowFn 走可变量：watcher 首采锚定 TTL，now 前进越过阈值才会告警（与既有用例同技巧）
+    const state: { usage?: unknown } = {
+      usage: { worker: { ephemeral: true, expires_at: new Date(T0 + 10 * MIN).toISOString(), day_billable_tokens: 1 } },
+    }
+    const gw = await startMockGateway(state as never)
+    const envKeys = ['ORCH_GATEWAY_BASE', 'ORCH_GATEWAY_ADMIN_TOKEN']
+    const savedEnv: Record<string, string | undefined> = {}
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k]
+      process.env[k] = k === 'ORCH_GATEWAY_BASE' ? `http://127.0.0.1:${gw.port}` : 'admin-test'
+    }
+    let now = T0
+    let warnCount = 0
+    try {
+      const p = startMeasuredFuelPoller({
+        budget: b,
+        cfg: { gatewayAdmin: true },
+        harness: 'worker',
+        intervalMs: 25,
+        nowFn: () => now,
+        onExpiryWarning: () => {
+          warnCount += 1
+          throw new Error('EBUSY: 同步段注入抛错') // 旧行为 = unhandledRejection 带崩 run 进程
+        },
+      })
+      expect(p.active).toBe(true)
+      await new Promise((r) => setTimeout(r, 150)) // 首采锚定（baseline=1，TTL=10min 未临期）
+      expect(b.measuredBaseline).toBe(1)
+      now = T0 + 8.5 * MIN // 剩余 1.5min < 阈值 2min → 本轮告警即同步抛错
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if (warnCount >= 1) return resolve()
+          if (Date.now() > deadline) return reject(new Error('告警未出现'))
+          setTimeout(tick, 25)
+        }
+        tick()
+      })
+      // 记账主链路在异常轮之后继续：usage 涨到 5_000，增量应被下一轮采到
+      state.usage = { worker: { ephemeral: true, expires_at: new Date(T0 + 10 * MIN).toISOString(), day_billable_tokens: 5_000 } }
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 5000
+        const tick = () => {
+          if ((b.measuredBillable ?? 0) >= 4_999) return resolve()
+          if (Date.now() > deadline) return reject(new Error('后续轮次未继续记账——poller 被单轮异常带崩'))
+          setTimeout(tick, 25)
+        }
+        tick()
+      })
+      p.stop()
+      expect(b.measuredBaseline).toBe(1)
+      expect(b.measuredBillable).toBe(4_999)
+    } finally {
+      gw.close()
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k]
+        else process.env[k] = savedEnv[k]
+      }
+    }
+  }, 15_000)
+})
+
+describe('supply > 一次性凭据临期预警（harness_expiry_warning）', () => {
+  const T0 = 1_700_000_000_000
+  const MIN = 60_000
+  const usageWithExpiry = (iso: string) => ({ ok: true, usage: { worker: { ephemeral: true, expires_at: iso, day_billable_tokens: 1 } } })
+
+  it('未临期不告警：剩余远大于阈值 → null', () => {
+    const w = createExpiryWatcher()
+    const payload = usageWithExpiry(new Date(T0 + 8 * 60 * MIN).toISOString()) // TTL≈8h
+    expect(w.observe(payload, 'worker', T0)).toBeNull()
+    expect(w.observe(payload, 'worker', T0 + 60 * MIN)).toBeNull() // 剩余 7h ≥ 阈值 30min
+  })
+
+  it('阈值口径 = min(20% TTL, 30min)：长 TTL 被 30min 封顶，短 TTL 按 20% 触发', () => {
+    // 长 TTL（8h）：20%=96min > 30min → 阈值封顶 30min；剩余 29min < 30min → 告警
+    const long = createExpiryWatcher()
+    const longPayload = usageWithExpiry(new Date(T0 + 8 * 60 * MIN).toISOString())
+    long.observe(longPayload, 'worker', T0) // 首采锚定 TTL
+    expect(long.observe(longPayload, 'worker', T0 + 8 * 60 * MIN - 29 * MIN)).toMatchObject({ harness_id: 'worker', threshold_ms: 30 * MIN })
+    // 短 TTL（40min）：20%=8min < 30min → 阈值按 20% 计；剩余 7min → 告警
+    const short = createExpiryWatcher()
+    const shortPayload = usageWithExpiry(new Date(T0 + 40 * MIN).toISOString())
+    short.observe(shortPayload, 'worker', T0)
+    expect(short.observe(shortPayload, 'worker', T0 + 33 * MIN)).toMatchObject({ threshold_ms: 8 * MIN, remaining_ms: 7 * MIN })
+  })
+
+  it('跨阈值告警一次 + 重复轮询不重复（去抖）；新 expires_at（re-provision）是新阈值实例', () => {
+    const w = createExpiryWatcher()
+    const iso = new Date(T0 + 10 * MIN).toISOString()
+    const payload = usageWithExpiry(iso)
+    expect(w.observe(payload, 'worker', T0)).toBeNull() // 剩余 10min ≥ 阈值 2min（20%×10min）
+    expect(w.observe(payload, 'worker', T0 + 9 * MIN)).toMatchObject({ harness_id: 'worker', expires_at: iso, remaining_ms: MIN, threshold_ms: 2 * MIN })
+    expect(w.observe(payload, 'worker', T0 + 9.5 * MIN)).toBeNull() // 同凭据重复轮询：静默
+    // 新凭据（新 expires_at）= 新阈值实例：允许再告一次（跨 run 重试是新凭据，不是刷屏）
+    const payload2 = usageWithExpiry(new Date(T0 + 40 * MIN).toISOString())
+    expect(w.observe(payload2, 'worker', T0)).toBeNull()
+    expect(w.observe(payload2, 'worker', T0 + 33 * MIN)).toMatchObject({ harness_id: 'worker' })
+  })
+
+  it('非临时凭据 / 条目消失（已吊销）/ 字段非法 → null（吊销即静默）', () => {
+    const w = createExpiryWatcher()
+    expect(w.observe({ ok: true, usage: { worker: { ephemeral: true } } }, 'worker', T0)).toBeNull() // 缺 expires_at
+    // 非 ephemeral（tier token 常驻 harness）：无临期预警资格
+    expect(w.observe({ ok: true, usage: { worker: { expires_at: new Date(T0 + MIN).toISOString() } } }, 'worker', T0)).toBeNull()
+    expect(w.observe({ ok: true, usage: {} }, 'worker', T0)).toBeNull() // 已吊销：条目被网关摘除
+    expect(w.observe({ ok: true, usage: { worker: { ephemeral: true, expires_at: 'not-a-time' } } }, 'worker', T0)).toBeNull() // 非法时间戳
+  })
+
+  it('poller 集成：未临期不回调，跨阈值回调恰一次（去抖）；nowFn 注入控时', async () => {
+    const b = new Budget({ meta: { budget: { max_tokens: 100_000, max_wall_minutes: 10 } } })
+    const iso = new Date(T0 + 10 * MIN).toISOString()
+    const gw = await startMockGateway({ usage: { worker: { ephemeral: true, expires_at: iso, day_billable_tokens: 1 } } })
+    // resolveGatewayAdmin 走 ORCH_GATEWAY_* env：注入 + 测试内立即还原（supply.test 既有口径）
+    const envKeys = ['ORCH_GATEWAY_BASE', 'ORCH_GATEWAY_ADMIN_TOKEN']
+    const savedEnv: Record<string, string | undefined> = {}
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k]
+      process.env[k] = k === 'ORCH_GATEWAY_BASE' ? `http://127.0.0.1:${gw.port}` : 'admin-test'
+    }
+    let now = T0
+    const warns: Array<Record<string, unknown>> = []
+    try {
+      const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 30, onExpiryWarning: (x) => warns.push(x as Record<string, unknown>), nowFn: () => now })
+      expect(p.active).toBe(true)
+      await new Promise((r) => setTimeout(r, 300))
+      expect(warns).toHaveLength(0) // 未临期：安静
+      now = T0 + 9 * MIN // 跨阈值：剩余 1min < 阈值 2min
+      await new Promise((r) => setTimeout(r, 300))
+      p.stop()
+      expect(warns).toHaveLength(1) // 恰一次：后续轮询去抖
+      expect(warns[0]).toMatchObject({ harness_id: 'worker', expires_at: iso })
+      expect(b.measuredBaseline).toBe(1) // 油量账与临期预警同 payload 并行，互不干扰
+    } finally {
+      gw.close()
+      for (const k of envKeys) {
+        if (savedEnv[k] === undefined) delete process.env[k]
+        else process.env[k] = savedEnv[k]
+      }
+    }
+  }, 10_000)
+})
+
+describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemeral-renew-consume）', () => {
+  type Json = Record<string, unknown>
+  interface Req { url: string; body: Json; auth: boolean }
+
+  /** renew/usage 双端点 mock admin：POST 体感知（renew body 断言需要），响应由 handler 出。 */
+  async function startRenewMock(handler: (url: string, body: Json) => [number, unknown]): Promise<{ port: number; requests: Req[]; close: () => void }> {
+    const requests: Req[] = []
+    const server = http.createServer((req, res) => {
+      let raw = ''
+      req.on('data', (c) => (raw += c))
+      req.on('end', () => {
+        let body: Json = {}
+        try { body = JSON.parse(raw || '{}') } catch { /* 空体 */ }
+        requests.push({ url: req.url ?? '', body, auth: req.headers['x-modeldock-admin'] === 'admin-test' })
+        const [code, out] = handler(req.url ?? '', body)
+        res.writeHead(code, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(out))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    return {
+      port: (server.address() as AddressInfo).port,
+      requests,
+      close: () => {
+        server.closeAllConnections?.()
+        server.close()
+      },
+    }
+  }
+
+  const GA = (port: number) => ({ base: `http://127.0.0.1:${port}`, adminToken: 'admin-test' })
+
+  it('renewTaskHarness 成功：POST body {harnessId, ttl_minutes}（键名与 provision/revoke 的 id 不同，船 9 契约）+ admin 头；响应映射 id/expiresAt/ttlMinutes', async () => {
+    const gw = await startRenewMock((url, body) => {
+      expect(url).toBe('/_modeldock/harness/renew')
+      return [200, { ok: true, id: String(body.harnessId), expires_at: '2026-11-10T00:00:00.000Z', ttl_minutes: 30 }]
+    })
+    try {
+      const r = await renewTaskHarness(GA(gw.port), 'orch-t', 240)
+      expect(r).toEqual({ ok: true, id: 'orch-t', expiresAt: '2026-11-10T00:00:00.000Z', ttlMinutes: 30 })
+      expect(gw.requests).toHaveLength(1)
+      expect(gw.requests[0].body).toEqual({ harnessId: 'orch-t', ttl_minutes: 240 })
+      expect(gw.requests[0].auth).toBe(true)
+    } finally {
+      gw.close()
+    }
+  })
+
+  it('renewTaskHarness 失败形态全 fail-open：401/404/410/500/响应异常/不可达超时/未配置/缺 id/非法 ttl → { ok:false } 不抛出', async () => {
+    const gw401 = await startRenewMock(() => [401, { ok: false }])
+    const gw404 = await startRenewMock(() => [404, { ok: false, reason: 'not registered' }])
+    const gw410 = await startRenewMock(() => [410, { ok: false, reason: 'expired' }])
+    const gw500 = await startRenewMock(() => [500, { ok: false }])
+    const gwBad = await startRenewMock(() => [200, { ok: false, reason: 'weird' }]) // ok:false 也不当成功
+    try {
+      expect(await renewTaskHarness(GA(gw401.port), 'orch-t', 240)).toMatchObject({ ok: false })
+      expect(await renewTaskHarness(GA(gw404.port), 'orch-t', 240)).toMatchObject({ ok: false, reason: expect.stringContaining('404') })
+      expect(await renewTaskHarness(GA(gw410.port), 'orch-t', 240)).toMatchObject({ ok: false, reason: expect.stringContaining('410') })
+      expect(await renewTaskHarness(GA(gw500.port), 'orch-t', 240)).toMatchObject({ ok: false, reason: expect.stringContaining('500') })
+      expect(await renewTaskHarness(GA(gwBad.port), 'orch-t', 240)).toMatchObject({ ok: false })
+      const dead = await renewTaskHarness({ base: 'http://127.0.0.1:1', adminToken: 'x' }, 'orch-t', 240, { timeoutMs: 300 })
+      expect(dead).toMatchObject({ ok: false, reason: expect.stringContaining('不可达') })
+    } finally {
+      for (const g of [gw401, gw404, gw410, gw500, gwBad]) g.close()
+    }
+    expect((await renewTaskHarness(null, 'orch-t', 240)).ok).toBe(false)
+    expect((await renewTaskHarness({ base: 'not-a-url', adminToken: 'x' }, 'orch-t', 240)).ok).toBe(false)
+    expect((await renewTaskHarness(GA(1), '', 240)).ok).toBe(false) // 缺 harnessId
+    expect((await renewTaskHarness(GA(1), 'orch-t', NaN)).ok).toBe(false) // 非法 ttl：本地 fail-open 不发请求
+  })
+
+  it('续期超时上限常量 ≤3s（AGENTS 硬性约束）', () => {
+    expect(RENEW_TIMEOUT_MS).toBeLessThanOrEqual(3000)
+  })
+
+  it('临期触发续命成功：harness_expiry_warning + harness_renewed（含新 expires_at）落盘；renew 请求 ttl_minutes 如实传', async () => {
+    const qdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-renew-ok-'))
+    const gw = await startRenewMock(() => [200, { ok: true, id: 'orch-t', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 }])
+    try {
+      const renew = createExpiryRenewal({
+        ga: GA(gw.port),
+        ttlMinutes: 240,
+        liveHarnessId: () => 'orch-t',
+        terminalState: () => false,
+        appendEvent: (type, fields) => appendEvent(qdir, type, fields),
+        log: () => {},
+      })
+      await renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 })
+      expect(gw.requests).toHaveLength(1)
+      expect(gw.requests[0].body).toEqual({ harnessId: 'orch-t', ttl_minutes: 240 })
+      const evts = readEvents(qdir)
+      expect(evts.map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
+      expect(evts[0]).toMatchObject({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000 })
+      expect(evts[1]).toMatchObject({ harness_id: 'orch-t', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 })
+    } finally {
+      gw.close()
+      fs.rmSync(qdir, { recursive: true, force: true })
+    }
+  })
+
+  it('端点失败 fail-open 不抛：renew 500 → harness_renew_failed 留痕（不抛出、回调 Promise 正常 resolve）', async () => {
+    const qdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-renew-fail-'))
+    const gw = await startRenewMock(() => [500, { ok: false, reason: 'injected' }])
+    try {
+      const renew = createExpiryRenewal({
+        ga: GA(gw.port),
+        ttlMinutes: 240,
+        liveHarnessId: () => 'orch-t',
+        terminalState: () => false,
+        appendEvent: (type, fields) => appendEvent(qdir, type, fields),
+        log: () => {},
+      })
+      await expect(renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 })).resolves.toBeUndefined()
+      const evts = readEvents(qdir)
+      expect(evts.map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renew_failed'])
+      expect(String(evts[1].reason)).toContain('500')
+    } finally {
+      gw.close()
+      fs.rmSync(qdir, { recursive: true, force: true })
+    }
+  })
+
+  it('保守闸：终态（terminalState=true）不落事件不发请求；非本任务凭据（liveHarnessId=null / id 不匹配）同样静默', async () => {
+    const qdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-renew-gate-'))
+    const gw = await startRenewMock(() => [200, { ok: true, id: 'x', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 }])
+    try {
+      const deps = {
+        ga: GA(gw.port),
+        ttlMinutes: 240,
+        terminalState: () => true,
+        appendEvent: (type: string, fields: Json) => appendEvent(qdir, type, fields),
+        log: () => {},
+      }
+      const warn = { harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 }
+      await createExpiryRenewal({ ...deps, liveHarnessId: () => 'orch-t' })(warn) // 终态
+      await createExpiryRenewal({ ...deps, terminalState: () => false, liveHarnessId: () => null })(warn) // 已吊销/未签发
+      await createExpiryRenewal({ ...deps, terminalState: () => false, liveHarnessId: () => 'orch-other' })(warn) // id 不匹配
+      expect(gw.requests).toHaveLength(0)
+      expect(readEvents(qdir)).toEqual([])
+      // 对照组：同 warn 终态闸打开即正常续命（闸只挡终态，不挡 awaiting-human）
+      await createExpiryRenewal({ ...deps, terminalState: () => false, liveHarnessId: () => 'orch-t' })(warn)
+      expect(gw.requests).toHaveLength(1)
+      expect(readEvents(qdir).map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
+    } finally {
+      gw.close()
+      fs.rmSync(qdir, { recursive: true, force: true })
+    }
+  })
+
+  it('同步段兜错（P2）：appendEvent 同步抛错（Windows EBUSY 形态）→ 回调整体 try/catch 兜住，Promise 正常 resolve、零请求零事件', async () => {
+    const gw = await startRenewMock(() => [200, { ok: true, id: 'x', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 }])
+    try {
+      const renew = createExpiryRenewal({
+        ga: GA(gw.port),
+        ttlMinutes: 240,
+        liveHarnessId: () => 'orch-t',
+        terminalState: () => false,
+        appendEvent: () => { throw new Error('EBUSY: resource busy or locked') },
+        log: () => {},
+      })
+      // 同步段抛出此前会变成 poller fire-and-forget 的 unhandledRejection 带崩 run 进程
+      await expect(
+        renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 }),
+      ).resolves.toBeUndefined()
+      expect(gw.requests).toHaveLength(0) // 预警事件都没落成：续期请求不该发出
+    } finally {
+      gw.close()
+    }
+  })
+
+  it('poller 续期循环：renew 改写 usage expires_at → 新阈值实例可再告警/再续（去抖天然重置，无需手动清状态）', async () => {
+    const T0 = 1_700_000_000_000
+    const MIN = 60_000
+    let now = T0
+    let expiresAtMs = T0 + 40 * MIN // E1：TTL 40min，阈值 20%=8min
+    const gw = await startRenewMock((url, body) => {
+      if (url === '/_modeldock/harness-usage') return [200, { ok: true, usage: { worker: { ephemeral: true, expires_at: new Date(expiresAtMs).toISOString(), day_billable_tokens: 1 } } }]
+      if (url === '/_modeldock/harness/renew') {
+        // 网关语义（renewEphemeralHarness）：新到期 = now + ttl（只延不缩）；usage 投影同源即变
+        expiresAtMs = now + Number(body.ttl_minutes) * MIN
+        return [200, { ok: true, id: String(body.harnessId), expires_at: new Date(expiresAtMs).toISOString(), ttl_minutes: Number(body.ttl_minutes) }]
+      }
+      return [404, { ok: false }]
+    })
+    const b = new Budget({ meta: { budget: { max_tokens: 100_000, max_wall_minutes: 10 } } })
+    const envKeys = ['ORCH_GATEWAY_BASE', 'ORCH_GATEWAY_ADMIN_TOKEN']
+    const savedEnv: Record<string, string | undefined> = {}
+    for (const k of envKeys) {
+      savedEnv[k] = process.env[k]
+      process.env[k] = k === 'ORCH_GATEWAY_BASE' ? `http://127.0.0.1:${gw.port}` : 'admin-test'
+    }
+    const events: Array<Json> = []
+    try {
+      const renew = createExpiryRenewal({
+        ga: GA(gw.port),
+        ttlMinutes: 60,
+        liveHarnessId: () => 'worker',
+        terminalState: () => false,
+        appendEvent: (type, fields) => events.push({ type, ...fields }),
+        log: () => {},
+      })
+      const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 25, onExpiryWarning: renew, nowFn: () => now })
+      expect(p.active).toBe(true)
+      await new Promise((r) => setTimeout(r, 200)) // 首采锚定 E1：剩余 40min ≥ 阈值 8min → 安静
+      now = T0 + 33 * MIN // 剩余 7min < 8min → 警#1 → 续期 → E2 = now+60min = T0+93min
+      await new Promise((r) => setTimeout(r, 200))
+      expect(gw.requests.filter((r) => r.url === '/_modeldock/harness/renew')).toHaveLength(1)
+      now = T0 + 82 * MIN // 新实例 E2（anchor 于 T0+33min，阈值 min(12min,30min)=12min）：剩余 11min → 警#2 → 再续
+      await new Promise((r) => setTimeout(r, 200))
+      p.stop()
+      expect(gw.requests.filter((r) => r.url === '/_modeldock/harness/renew')).toHaveLength(2)
+      expect(events.map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed', 'harness_expiry_warning', 'harness_renewed'])
+      const renewed = events.filter((e) => e.type === 'harness_renewed')
+      expect(renewed[0].expires_at).not.toBe(renewed[1].expires_at) // 两轮续期各发新 expires_at（新实例）
     } finally {
       gw.close()
       for (const k of envKeys) {

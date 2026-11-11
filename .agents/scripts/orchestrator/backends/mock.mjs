@@ -21,7 +21,8 @@
 //                                        invalid=无围栏无维度行（解析失败同降级）；缺省正常
 //                                        输出 3 维
 //   ORCH_MOCK_PLANNER_RESEARCH=<id>      feature 卡 research 行写该值（缺省 todo）——sail
-//                                        autoDim 续接路径 e2e 用（planner 引用既有 brief/topic）
+//                                        autoDim 续接路径 e2e 用（planner 引用既有 brief/topic）；
+//                                        预置 brief+verdict 时 sail verdict 闸门走阻断/放行分支
 //   ORCH_MOCK_PLANNER_FEATURE_COUNT=<n>  feature 模式产 n 张卡（id 后缀 -2…-n，缺省 1 张）——
 //                                        researchPerCycle cap 的「multi 计 1」断言用
 //   ORCH_MOCK_REVIEW_PARAPHRASE=1        L2 复核每次都改写复述 claim（非逐字 → fabricated；

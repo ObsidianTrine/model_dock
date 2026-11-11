@@ -1006,6 +1006,47 @@ export function loadSnapshots(repoRoot, id) {
   return out;
 }
 
+/**
+ * 读已落盘的 verdict.json（消费方入口）：不存在/损坏一律返回 null。缺席 ≠ 判定不通过——
+ * 消费方（research-verdict.md 契约）对 null 放行（旧 brief / 未跑 L1 的行为保持不变）。
+ * 需要区分「存在但损坏」的调用方（落观测事件）用 readVerdictDetailed。
+ */
+export function readVerdict(repoRoot, id) {
+  return readVerdictDetailed(repoRoot, id)?.verdict ?? null;
+}
+
+/** 区分三态：{ verdict }（正常）/ { corrupt }（存在但解析失败）/ null（不存在或未传 id）。
+ *  写入侧已原子化（tmp+rename），corrupt 只可能来自手改/磁盘损坏——调用方对 corrupt 落
+ *  观测事件再按 null 语义放行（不静默，也不阻断）。 */
+export function readVerdictDetailed(repoRoot, id) {
+  if (!id) return null;
+  const file = path.join(briefDir(repoRoot, id), 'verdict.json');
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null; // 不存在（ENOENT 等）
+  }
+  try {
+    return { verdict: JSON.parse(text) };
+  } catch {
+    return { corrupt: true, verdict: null };
+  }
+}
+
+/**
+ * spec 升级闸门（2026-11 report-only → 阻断，消费方契约 .agents/docs/research-verdict.md）：
+ * `usage.internal_decision=unsafe` 或任一 claim `contradicted` → 阻断。claims 复核与 usage
+ * 同源双保险（scoreVerdict 的 veto 本就会把 contradicted 折进 unsafe，这里防旧 verdict/
+ * 手改文件两者脱钩）。`needs_review`/`undetermined` 不阻断——先攒 near-miss 分布，L2 复核
+ * 改判后下周期自动放行（晴雨表哲学）；verdict 缺席（null）放行。
+ */
+export function verdictGateBlocks(verdict) {
+  if (!verdict || typeof verdict !== 'object') return false;
+  if (verdict.usage?.internal_decision === 'unsafe') return true;
+  return Array.isArray(verdict.claims) && verdict.claims.some((c) => c?.status === 'contradicted');
+}
+
 /** L1 总入口：读 brief + 快照 → verdict/2（L1-only：claims 空 → coverage/coherence null → 决策 undetermined）落盘。 */
 export function assessBrief(repoRoot, id, { model } = {}) {
   const brief = readBrief(repoRoot, id);
@@ -1054,7 +1095,12 @@ export function assessBrief(repoRoot, id, { model } = {}) {
     level,
     reasons,
   };
-  fs.writeFileSync(path.join(brief.dir, 'verdict.json'), `${JSON.stringify(verdict, null, 2)}\n`);
+  // 原子写（tmp+rename 同目录）：L2 verify 落盘途中被 sail 周期 readVerdict 读到半文会
+  // 解析失败当缺席放行——方向与闸门意图相反；rename 原子可见，半写窗口关闭。
+  const verdictFile = path.join(brief.dir, 'verdict.json');
+  const tmpFile = `${verdictFile}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(verdict, null, 2)}\n`);
+  fs.renameSync(tmpFile, verdictFile);
   return verdict;
 }
 

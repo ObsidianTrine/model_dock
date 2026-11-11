@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import { TRANSIENT_RE } from './transient.mjs';
 import { parseCard, listCards, cardPath } from './queue.mjs';
 import { logDir, readEvents, toIsoLocal } from './events.mjs';
+import { taskLockLooksLive } from './task-lock.mjs';
 
 /** 每卡自动续冷却缺省值：24h（workflow.json autoResume.cooldownHours 可调，须正整数）。 */
 export const DEFAULT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -187,4 +188,121 @@ export function scanBlockedCards(repoRoot, root) {
 /** 当前时刻的冷却标记值（ISO8601 带本地时区，与事件 ts 同一口径）。 */
 export function autoResumedAtNow() {
   return toIsoLocal();
+}
+
+// ---------------------------------------------------------------------------
+// 孤儿 running 卡自愈（2026-11 长跑自治）：blocked 通道覆盖不到的形态——sail/drain
+// 单进程被硬杀（kill -9/断电/崩溃）后卡还挂在 running/，状态「在跑」而实际无进程，
+// pending 非空才 drain 的入口永远轮不到它。调度入口（drain/watch/nightly/sail——sail
+// 持锁全程、drain 子进程继承锁豁免，须自扫，2026-11-11 P2-c 补位）扫 running/，任务锁
+// 判活分三类：活跃卡跳过 / transient 族自动续 / 其余落 blocked。
+// ---------------------------------------------------------------------------
+
+/**
+ * 孤儿 running 卡处置归类（纯函数，只看事件链；锁判活在调用方）：返回
+ *   'resume'  — transient 族，可自动续（沿用 24h 冷却与每次上界）；
+ *   'breaker' — 事件链有熔断（最后一条 worker_spawned 之后），确定性失败永不自动续；
+ *   'stuck'   — 非 transient（会话已以 failed/非签名 settle 收尾），落 blocked 交人工。
+ * 判定路径（'resume' 的三条，与 isTransientBlocked 同哲学，面向「无 settle 收尾」的崩溃现场）：
+ *  A. 事件链套用 isTransientBlocked 成立——上一会话以 transient 签名收尾（resume 后再崩）
+ *     或 worker_retry 链 + blocked 收尾（其内部熔断护栏照常生效）；
+ *  B. 最后一条 settle 在最后一条 worker_spawned 之后且非熔断——进程死在写 settle 与
+ *     moveCard 之间的窄窗，settle 语义照旧（transient blocked 可续，failed 异常不可续）；
+ *  C. 最后一条 worker_spawned 之后无任何 settle——闭环进程树被硬杀，worker 连「未产出
+ *     结果块」都没来得及写：worker 异常结束的极端形态（Path C 同族），按可自愈崩溃族处理。
+ * 熔断护栏与 isTransientBlocked 同构：最后一条 spawn 之后（无 spawn 则全链）出现过
+ * circuit_breaker = 确定性失败，永不续——防「熔断→崩溃→自动续→再熔断」循环烧钱。
+ */
+export function classifyOrphan(events) {
+  if (!Array.isArray(events) || events.length === 0) return 'resume'; // 刚迁 running 就崩：重跑无害
+  let lastSpawnIdx = -1;
+  for (let i = 0; i < events.length; i++) {
+    if (events[i]?.type === 'worker_spawned') lastSpawnIdx = i;
+  }
+  for (let i = lastSpawnIdx + 1; i < events.length; i++) {
+    if (events[i]?.type === 'circuit_breaker') return 'breaker';
+  }
+  if (isTransientBlocked(events)) return 'resume'; // Path A/B
+  for (let i = lastSpawnIdx + 1; i < events.length; i++) {
+    if (SETTLE_TYPES.includes(events[i]?.type)) return 'stuck'; // 窄窗 settle 不可续：语义照旧
+  }
+  return 'resume'; // Path C：spawn 后无 settle = 会话未收尾进程即死（崩溃族）
+}
+
+/**
+ * 纯函数：从 running 卡中挑「可安全自动续」的孤儿。
+ * @param {Array<{id: string, meta: object, events: Array<object>, locked?: boolean}>} runningCards
+ *   扫描方已备好的卡描述；locked = 任务锁判活（readTaskLock + taskLockLooksLive）：
+ *   true = 有活进程在驱动（同进程嵌套闭环或并行实例）——活跃卡无条件跳过。
+ * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number }} [opts]
+ *   与 pickAutoResumeCandidates 同参（非法值静默回落缺省）。
+ * @returns {Array<{id: string, attempts: number}>} 按 id 稳定排序的前 maxPerRun 张
+ *   （孤儿无 settle 时间可排，id 序保证确定性）；attempts = 事件链 worker_retry 次数。
+ */
+export function pickOrphanResumeCandidates(runningCards, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const maxPerRun = Number.isInteger(opts.maxPerRun) && opts.maxPerRun > 0 ? opts.maxPerRun : DEFAULT_MAX_PER_RUN;
+  const cooldownMs = Number.isInteger(opts.cooldownMs) && opts.cooldownMs > 0 ? opts.cooldownMs : DEFAULT_COOLDOWN_MS;
+  const eligible = [];
+  for (const card of Array.isArray(runningCards) ? runningCards : []) {
+    if (!card || typeof card.id !== 'string') continue;
+    if (card.locked) continue;
+    if (classifyOrphan(card.events) !== 'resume') continue;
+    if (!cooldownPassed(card.meta, now, cooldownMs)) continue;
+    eligible.push({
+      id: card.id,
+      attempts: (card.events ?? []).filter((e) => e?.type === 'worker_retry').length,
+    });
+  }
+  eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return eligible.slice(0, maxPerRun);
+}
+
+/**
+ * 孤儿判定分区（P1-a 双条件，2026-11-11；纯函数便于单测，锁读取与 pid 探活由调用方注入）：
+ *   orphans     — 真孤儿候选：无锁/锁损坏、beat 静默且属主 pid 已死亡、pid 缺失或探活
+ *                 不可判定（后两者回退旧口径保守当孤儿——防孤儿漏救，不倒退）；
+ *   silentLive  — 心跳静默但属主进程仍存活：spawnSync（npm ci / ensureWorktree）会冻结
+ *                 事件循环停更心跳 >60s，只看 beat 会把装依赖中的活 run 误判孤儿 →
+ *                 自动续/落 blocked 后双 worker 同 worktree。观测类，调用方只落观测
+ *                 事件与 log，绝不动卡。
+ * beat 新鲜（taskLockLooksLive 为真）的活跃卡两个列表都不进（原有跳过语义）。
+ */
+export function partitionRunningOrphans(candidates, { lockOf, pidAlive }) {
+  const orphans = [];
+  const silentLive = [];
+  for (const c of Array.isArray(candidates) ? candidates : []) {
+    if (!c || typeof c.id !== 'string') continue;
+    let lock = null;
+    try { lock = lockOf(c.id); } catch { lock = null; }
+    if (lock && taskLockLooksLive(lock)) continue;
+    let ownerAlive = false;
+    try { ownerAlive = Number.isInteger(lock?.pid) && pidAlive(lock.pid) === true; } catch { ownerAlive = false; }
+    if (ownerAlive) silentLive.push(c.id);
+    else orphans.push(c);
+  }
+  return { orphans, silentLive };
+}
+
+/**
+ * 扫 running/ 目录备好孤儿卡描述（fs 读取，配合纯函数 pickOrphanResumeCandidates 用）。
+ * 与 scanBlockedCards 同构；任务锁判活（孤儿 vs 活跃）在调用方做——需要 repoRoot 下的
+ * 锁文件与心跳时钟，不宜混进纯数据扫描。读不了的卡进 unreadable 由调用方告警。
+ * @returns {{ candidates: Array<{id, meta, events, text, path}>, unreadable: string[], total: number }}
+ */
+export function scanRunningCards(repoRoot, root) {
+  const ids = listCards(root, 'running');
+  const candidates = [];
+  const unreadable = [];
+  for (const id of ids) {
+    try {
+      const p = cardPath(root, 'running', id);
+      const text = fs.readFileSync(p, 'utf8');
+      const { meta } = parseCard(text, `${id}.md`); // 只要 frontmatter（冷却字段），不做完整校验
+      candidates.push({ id, meta, events: readEvents(logDir(repoRoot, id)), text, path: p });
+    } catch {
+      unreadable.push(id);
+    }
+  }
+  return { candidates, unreadable, total: ids.length };
 }

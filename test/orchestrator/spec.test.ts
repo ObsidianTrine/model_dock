@@ -11,8 +11,8 @@ import {
   DESIGN_MARKER,
   TASKS_MARKER,
 } from '../../.agents/scripts/orchestrator/prompt.mjs'
-import { parseTasksDoc, renderTaskCard } from '../../.agents/scripts/orchestrator/spec.mjs'
-import { loadCard } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { parseTasksDoc, renderTaskCard, buildSpecCards } from '../../.agents/scripts/orchestrator/spec.mjs'
+import { loadCard, queueRoot, ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { mkRepo, runOrch, tryOrch } from './helpers.js'
 
 const FENCE = '```'
@@ -105,6 +105,43 @@ describe('orchestrator spec > tasks 文档解析与拆卡渲染', () => {
     expect(card).toContain('requirements.md')
     expect(card).not.toContain('新增 src/export.ts。') // 全文不再随卡注入
     expect(card).toContain('任务 1/2')
+  })
+
+  it('renderTaskCard gate 参数化：显式 L1 生效（预授权 specAutoBuild 拆卡）；白名单外值回落 L3', () => {
+    const spec = {
+      dir: '/x',
+      meta: { id: 'add-export', title: '导出配置', created_at: '2026-10-25T10:00:00+08:00' },
+      requirements: '# 导出配置\n## 验收标准\n- 当 export 运行，系统应当写 JSON。',
+      design: '# 技术设计\n## 方案\n新增 src/export.ts。',
+      tasks: '# 任务分解',
+    }
+    const task = { n: 1, title: '实现导出', goal: '新增导出命令', files: ['src/**'], done: '端到端可用', deps: '无' }
+    expect(loadCard(renderTaskCard(spec, task, 1, 'L1'), 't.md').meta.gate).toBe('L1')
+    // 宁严勿松：只有 'L1' 允许降档，其余一律回落 L3（手动 build 行为不变）
+    expect(loadCard(renderTaskCard(spec, task, 1, 'L2'), 't.md').meta.gate).toBe('L3')
+    expect(loadCard(renderTaskCard(spec, task, 1, undefined), 't.md').meta.gate).toBe('L3')
+  })
+
+  it('buildSpecCards opts.gate：自动拆卡传 L1 进 pending；缺省保持 L3（手动 build 不变）', () => {
+    const repo = mkRepo()
+    try {
+      const specId = 'gatespec'
+      const dir = path.join(repo.root, '.agents', 'orchestrator', 'specs', specId)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ id: specId, title: 'gate 参数', created_at: '2026-10-01T10:00:00+08:00' }))
+      fs.writeFileSync(path.join(dir, 'requirements.md'), 'r')
+      fs.writeFileSync(path.join(dir, 'design.md'), 'd')
+      fs.writeFileSync(path.join(dir, 'tasks.md'), '## 任务 1:写文档\n- 目标: g\n- 文件: docs/**\n- 完成条件: c\n- 依赖: 无\n')
+      const root = queueRoot(repo.root)
+      ensureQueue(root)
+      buildSpecCards(repo.root, root, specId, { gate: 'L1' })
+      expect(loadCard(fs.readFileSync(path.join(root, 'pending', `${specId}-t1.md`), 'utf8'), 't.md').meta.gate).toBe('L1')
+      fs.rmSync(path.join(root, 'pending', `${specId}-t1.md`))
+      buildSpecCards(repo.root, root, specId) // 手动 build 形态：不传 gate
+      expect(loadCard(fs.readFileSync(path.join(root, 'pending', `${specId}-t1.md`), 'utf8'), 't.md').meta.gate).toBe('L3')
+    } finally {
+      repo.cleanup()
+    }
   })
 })
 

@@ -24,6 +24,9 @@ import {
   stripInlineCitations,
   normalizeClaimStatuses,
   scoreVerdict,
+  readVerdict,
+  readVerdictDetailed,
+  verdictGateBlocks,
   parseVerdictBlock,
   appendResearchLedger,
   readLedgerStats,
@@ -407,6 +410,55 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     // 对照：全灭但无 fabricated → 仍 undetermined（数据不足以判定）
     const plain = scoreVerdict({ claims: [], fabricatedCount: 0, citation: 90, evidence: 80 })
     expect(plain.usage.internal_decision).toBe('undetermined')
+  })
+
+  it('verdictGateBlocks：usage=unsafe 或任一 claim contradicted 阻断；ok/needs_review/undetermined/verdict 缺席放行', () => {
+    expect(verdictGateBlocks({ usage: { internal_decision: 'unsafe' }, claims: [] })).toBe(true)
+    // claims 否决独立生效：usage 未标 unsafe（如旧 verdict / 手改文件）也拦——同源双保险
+    expect(verdictGateBlocks({ usage: { internal_decision: 'needs_review' }, claims: [{ claim: 'a', status: 'contradicted' }] })).toBe(true)
+    expect(verdictGateBlocks({ usage: { internal_decision: 'ok' }, claims: [{ claim: 'a', status: 'supported' }] })).toBe(false)
+    expect(verdictGateBlocks({ usage: { internal_decision: 'needs_review' }, claims: [{ claim: 'a', status: 'unsupported' }] })).toBe(false)
+    expect(verdictGateBlocks({ usage: { internal_decision: 'undetermined' }, claims: [] })).toBe(false)
+    // verdict 缺席（旧 brief / 未跑 L1）与非对象输入一律放行
+    expect(verdictGateBlocks(null)).toBe(false)
+    expect(verdictGateBlocks(undefined)).toBe(false)
+    expect(verdictGateBlocks('garbage')).toBe(false)
+  })
+
+  it('readVerdict：不存在/损坏返回 null（放行口径），合法 JSON 原样返回', () => {
+    const root = tmpRoot()
+    try {
+      expect(readVerdict(root, 'no-such-brief')).toBeNull()
+      expect(readVerdict(root, '')).toBeNull()
+      const dir = path.join(root, '.agents', 'orchestrator', 'research', 'b1')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'verdict.json'), '{oops')
+      expect(readVerdict(root, 'b1')).toBeNull()
+      fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify({ schema: VERDICT_SCHEMA, usage: { internal_decision: 'ok' } }))
+      expect(readVerdict(root, 'b1')?.usage?.internal_decision).toBe('ok')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('readVerdictDetailed：三态区分——正常 { verdict } / 存在但损坏 { corrupt } / 不存在 null', () => {
+    const root = tmpRoot()
+    try {
+      expect(readVerdictDetailed(root, 'no-such-brief')).toBeNull()
+      expect(readVerdictDetailed(root, '')).toBeNull()
+      const dir = path.join(root, '.agents', 'orchestrator', 'research', 'b2')
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'verdict.json'), '{手改损坏')
+      const corrupt = readVerdictDetailed(root, 'b2')
+      expect(corrupt?.corrupt).toBe(true)
+      expect(corrupt?.verdict).toBeNull()
+      expect(readVerdict(root, 'b2')).toBeNull() // 旧消费方语义不变（放行口径）
+      fs.writeFileSync(path.join(dir, 'verdict.json'), JSON.stringify({ schema: VERDICT_SCHEMA, usage: { internal_decision: 'ok' } }))
+      expect(readVerdictDetailed(root, 'b2')?.corrupt).toBeUndefined()
+      expect(readVerdictDetailed(root, 'b2')?.verdict?.usage?.internal_decision).toBe('ok')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('scoreVerdict：strong_support 观测指标——全 supported→100、含 partial 按整数、全 unverifiable→null', () => {

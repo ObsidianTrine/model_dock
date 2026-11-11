@@ -29,7 +29,7 @@ import { resolveModelMeta, fullKnownTable } from '../providers/resolve.js'
 import { knownMetaTable, saneCapabilities } from '../providers/known.js'
 import { refreshCatalog } from '../providers/catalog.js'
 import { fetchModelIds } from '../providers/fetch.js'
-import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry } from './state.js'
+import { autoRouteInfo, checkTokenLimits, eventLoopLagMs, isMeltdown, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, parseFallbackEntry, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, registerEphemeralHarness, renewEphemeralHarness, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, summarizeUsageDaysWithHours, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, EPHEMERAL_TTL_DEFAULT_MINUTES, EPHEMERAL_TTL_MAX_MINUTES, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ProviderAvailability, type ResolvedTarget, type RingEntry, type UsageHourBucket } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { readSyncState } from '../sync/state.js'
@@ -49,7 +49,7 @@ import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from 
 import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
-import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
+import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -531,6 +531,9 @@ async function handleRequest(
   const providerId = result.usedProviderId ?? target.profile.provider
   const reason = result.reason
   const model = result.modelAfter ?? target.profile.default_model
+  // 上游限流信号留痕（编排器 429 风暴前降并发的数据源）：带限流头才记，全缺返回 undefined
+  // → 日志条目零新增字段（只增不改，既有消费方零感知）。成功/错误/流中断三处落账共用同一份解析。
+  const ratelimit = parseRatelimitHeaders(result.headers)
 
   const resHeaders = filterResponseHeaders(result.headers)
   if (result.status >= 400) {
@@ -569,6 +572,7 @@ async function handleRequest(
       cause: result.cause ?? (result.status >= 500 ? 'upstream_5xx' : 'upstream_4xx'),
       ...(hint ? { hint } : {}),
       ...(result.attempts?.length ? { attempts: result.attempts } : {}),
+      ...(ratelimit ? { ratelimit } : {}),
     })
     result.release?.() // 错误回包已发出，释放该候选的并发槽
     return
@@ -583,9 +587,9 @@ async function handleRequest(
   const usage = usageTap.getUsage()
   try {
     await pipeline(result.body as any, usageTap, res)
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, reason, usage, ...(ratelimit ? { ratelimit } : {}) })
   } catch (e) {
-    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage, cause: 'stream_interrupt' })
+    log({ harness: target.harness, profile: target.profileName, provider: providerId, model, path: url, status: result.status, ms: Date.now() - started, err: t('流中断：{msg}', 'Stream interrupted: {msg}', { msg: (e as Error).message }), reason, usage, ...(ratelimit ? { ratelimit } : {}), cause: 'stream_interrupt' })
   } finally {
     // 流式响应等响应结束（读完/中断）才释放并发槽——响应头到了就放会让 max_concurrency 少算在途流量
     result.release?.()
@@ -1575,6 +1579,38 @@ async function hRevokeHarness(c: AdminCtx): Promise<void> {
   return
 }
 
+/** POST /_modeldock/harness/renew：临时 harness TTL 续期（admin 门内）。网关 P1「TTL 无续期」
+ *  的网关半边：超长任务凭据临期续一把，不再中途 401（编排器侧 ttlHours 传参另行落地）。
+ *  请求 {harnessId, ttl_minutes}（harnessId = provision 响应返回的临时 id；ttl 需正数分钟）；
+ *  新到期 = max(旧到期, now+ttl) 收敛到与 provision 同顶 1440min——只延不缩，缩短请求 = 无效
+ *  no-op（到期不变，响应如实回报）。已过期拒绝（410）：sweeper 60s 节奏未及摘除的窗口内同样
+ *  拒绝，过期凭据不得复活；非在册临时条目（未知 id / 持久 harness / 已吊销或已清扫）404。
+ *  token 不换发也不回显（响应与审计均无 token 明文，凭据身份 = id）；热加载幸存语义不变
+ *  （expiresAt 是 reapply 基准，renew 后过 reload 依旧有效）。 */
+async function hRenewHarness(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit } = c
+  const b = await jsonRequestBody(req)
+  const id = typeof b.harnessId === 'string' ? b.harnessId.trim() : ''
+  if (!id) return sendError(res, 400, t('缺少 harnessId（provision 响应返回的临时 harness id）', 'Missing harnessId (the ephemeral harness id returned by provision)'))
+  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes != null ? Number(b.ttl_minutes) : NaN
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    return sendError(res, 400, t('ttl_minutes 非法：需为正数（分钟）。续期只延不缩，请求值小于剩余寿命时到期不变', 'Invalid ttl_minutes: must be a positive number (minutes). Renewal only extends; a value below the remaining lifetime leaves the expiry unchanged'))
+  }
+  const r = renewEphemeralHarness(rt, id, ttl)
+  if (!r.ok) {
+    if (r.reason === 'expired') {
+      return sendError(res, 410, t('临时凭据「{id}」已过期，拒绝续期：过期凭据不得复活，请重新 provision 签发新凭据', 'Ephemeral credential "{id}" has expired; renewal is refused — expired credentials must not be revived, provision a new one instead', { id }))
+    }
+    return sendError(res, 404, t('「{id}」不是在册临时凭据（未知 id、持久 harness 或已吊销/已清扫）：renew 仅作用于 provision 签发的临时条目', '"{id}" is not a registered ephemeral credential (unknown id, persistent harness, or already revoked/swept): renew applies only to entries issued via provision', { id }))
+  }
+  const expiresIso = new Date(r.state.expiresAt).toISOString()
+  // 审计不含 token 明文（与 provision 同口径）：凭据身份 = id + 续后到期
+  audit(bi('续期临时凭据', 'Renew ephemeral credential'), id, bi(`TTL 延至 ${expiresIso}`, `TTL extended to ${expiresIso}`))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, id, expires_at: expiresIso, ttl_minutes: r.ttlMinutes }))
+  return
+}
+
 async function hServiceDelete(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   const b = await jsonRequestBody(req)
@@ -2118,7 +2154,9 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
 
 /** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
  *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
- *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类。
+ *  （Dockmaster 风暴闸）与排查的外部海况数据源：class = 触发熔断的错误类；model_meltdown 为
+ *  模型级容灾（model_fallback 域）的同形投影，供编排侧按 (provider, model) 粒度避让；
+ *  model_fallback 为该域的改发计数投影（fallback_count/absorbed_count，见 ModelFallbackCounter）。
  *  海况扩展（只增不改，state/sea.ts）：providers[].errors 滑窗错误分桶（last_5m/last_60m 的
  *  分错误类计数与错误率）+ sea_state 聚合海况信号——同为编排侧风暴闸数据源。 */
 async function hMetrics(c: AdminCtx): Promise<void> {
@@ -2166,6 +2204,36 @@ async function hMetrics(c: AdminCtx): Promise<void> {
       remaining_ms: h.meltdown_until - now,
     })
   }
+  // 模型级熔断投影（model_fallback 域，ModelHealthState）：与 provider 级 meltdown 段同形，
+  // 多 model 维度。键 = `${providerId}\u0000${model}`（state/routing.ts recordModelOutcome 记账），
+  // 纯内存读；只露熔断中的条目（TTL 过期/已解除不出现，缺席 = 该模型无在熔断）。
+  const model_meltdown: Array<{ provider: string; model: string; class: string; until: string; remaining_ms: number }> = []
+  for (const [key, h] of rt.modelHealth ?? []) {
+    if (h.meltdown_until == null || h.meltdown_until <= now) continue
+    const sep = key.indexOf('\u0000')
+    model_meltdown.push({
+      provider: sep === -1 ? key : key.slice(0, sep),
+      model: sep === -1 ? '' : key.slice(sep + 1),
+      class: h.meltdown_cls ?? 'unknown',
+      until: new Date(h.meltdown_until).toISOString(),
+      remaining_ms: h.meltdown_until - now,
+    })
+  }
+  // 模型级容灾改发计数投影（model_fallback 域，ModelFallbackCounter）：与 model_meltdown 同形
+  // 位置、同键口径（key = `${providerId}\u0000${model}`，model = 被改发的原请求模型），纯内存读。
+  // fallback_count = 改发累计（闸门预改写 + 链尾合成两路）；absorbed_count = 其中闸门吸收
+  // （请求未触达原模型上游）的次数。单调累计（进程生命周期），熔断解除不清零——改发已发生
+  // 是历史事实；只露有改发的条目（缺席 = 该键从未改发，与 model_meltdown 的缺席语义一致）。
+  const model_fallback: Array<{ provider: string; model: string; fallback_count: number; absorbed_count: number }> = []
+  for (const [key, s] of rt.modelFallbackCounts ?? []) {
+    const sep = key.indexOf('\u0000')
+    model_fallback.push({
+      provider: sep === -1 ? key : key.slice(0, sep),
+      model: sep === -1 ? '' : key.slice(sep + 1),
+      fallback_count: s.fallbackCount,
+      absorbed_count: s.absorbedCount,
+    })
+  }
   // key 池健康（P1⑥ 观测面）：per-provider 配置的 key 数量与失效冷却中的索引（含剩余 ms）。
   // 只有数量/索引/时间，绝无 key 明文或引用原文（ref 可能内嵌明文 key，一律不出域）。
   // 不实际读 key（无 IO，metrics 是轻量端点）：total=配置引用数；healthy=total-冷却数——
@@ -2176,7 +2244,7 @@ async function hMetrics(c: AdminCtx): Promise<void> {
     keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
   }
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
+  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, model_meltdown, model_fallback, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
 }
 
 /** GET /_modeldock/harness-usage：per-harness 实时用量计数（admin 门内只读，纯内存读、不落盘）。
@@ -2274,12 +2342,17 @@ function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs
 
 /** /_modeldock/usage：请求日志聚合（admin 只读）。编排侧（Dockmaster 燃油实测/风暴闸）与
  *  排查的数据面：date/from/to 选日（见 usageQuery），harness/profile/provider 精确过滤；
- *  聚合口径见 summarizeUsage。
+ *  聚合口径见 summarizeUsage。bucket=hour 附加 hours[] 小时桶（精简版形状见 UsageHourBucket，
+ *  稀疏输出：无流量的小时不出桶）——编排侧长跑分时段观测（油量曲线/高峰定位），总账照常返回。
  *  可计费口径字段（2026-11 billable 聚合）：usage.billable_tokens = 窗口内成功且有 usage
  *  条目的可计费 token 求和（与 tokens 同口径；公式分协议形态、条目落盘前已算好，聚合只
  *  求和不重算）；usage.billable_partial = 窗口内存在「有 usage 但缺 billable_tokens 数字」
  *  的条目（旧版网关日志混入）时为 true，此时求和只是可得部分——消费方（编排侧 reconcile）
  *  据此整体回落文件直读。窗口内无任何 usage 条目：billable_tokens=0、partial=false。 */
+/** 小时桶窗口封顶：与 USAGE_MAX_DAYS 联动（31 天 × 24 = 744）。usageQuery 已按日把窗口封到
+ *  31 天、今日桶数恒不超限，此检查守的是未来日上限调大后 hours[] 无感膨胀——桶数超限直接
+ *  400，不做静默截断（编排侧对账宁可显式失败不可缺桶）。 */
+const USAGE_MAX_HOURS = 744
 async function hUsage(c: AdminCtx): Promise<void> {
   const { req, res } = c
   const q = new URL(req.url ?? '', 'http://x').searchParams
@@ -2288,24 +2361,33 @@ async function hUsage(c: AdminCtx): Promise<void> {
     sendError(res, 400, parsed.err, t('示例：/_modeldock/usage?date=2026-11-01&harness=zcode', 'Example: /_modeldock/usage?date=2026-11-01&harness=zcode'))
     return
   }
+  const bucket = q.get('bucket')
+  if (bucket != null && bucket !== 'hour') {
+    return sendError(res, 400, t('usage 参数 bucket 非法：仅支持 hour', 'Invalid usage bucket parameter: only hour is supported'), t('示例：/_modeldock/usage?date=2026-11-01&bucket=hour', 'Example: /_modeldock/usage?date=2026-11-01&bucket=hour'))
+  }
+  const withHours = bucket === 'hour'
+  if (withHours && parsed.days.length * 24 > USAGE_MAX_HOURS) {
+    return sendError(res, 400, t('usage 小时桶窗口过大：最多查询 {n} 桶（31 天）', 'Usage hour-bucket window too large: query at most {n} buckets (31 days)', { n: USAGE_MAX_HOURS }), t('收窄 from/to 窗口后重试', 'Narrow the from/to window and retry'))
+  }
   // 流式聚合：逐行读、边过滤边累加，不落全量数组——31 天查询曾把事件循环卡数秒、
   // 在途 SSE 全冻结（本端点是编排侧的轮询数据源，见 summarizeUsageDays 注释）
   const harness = q.get('harness') ?? undefined
   const profile = q.get('profile') ?? undefined
   const provider = q.get('provider') ?? undefined
   const withCost = q.get('cost') !== '0' // 缺省带成本；cost=0 只算 token（编排侧风暴闸等免查价路径）
-  const usage = await summarizeUsageDays(
-    parsed.days,
-    { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs },
-    withCost ? gatewayPriceResolver : undefined
-  )
+  const filterOpt = { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs }
+  const priceOf = withCost ? gatewayPriceResolver : undefined
+  // 单趟双账：bucket=hour 经 summarizeUsageDaysWithHours 同管道同时出总账与小时桶，不二次扫文件
+  const { usage, hours } = withHours
+    ? await summarizeUsageDaysWithHours(parsed.days, filterOpt, priceOf)
+    : { usage: await summarizeUsageDays(parsed.days, filterOpt, priceOf), hours: null as UsageHourBucket[] | null }
   const filter: Record<string, string> = {}
   if (harness) filter.harness = harness
   if (profile) filter.profile = profile
   if (provider) filter.provider = provider
   res.writeHead(200, { 'content-type': 'application/json' })
   const pricingError = withCost ? loadPricingOverrides().error ?? null : null
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage }))
+  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage, ...(hours ? { hours } : {}) }))
   return
 }
 
@@ -2494,6 +2576,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/harness/mode': hHarnessMode,
   'POST /_modeldock/harness/provision': hProvisionHarness,
   'POST /_modeldock/harness/revoke': hRevokeHarness,
+  'POST /_modeldock/harness/renew': hRenewHarness,
   'POST /_modeldock/use': hUse,
   'POST /_modeldock/profile': hProfile,
   'POST /_modeldock/key': hKey,

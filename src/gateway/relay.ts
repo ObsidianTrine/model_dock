@@ -5,8 +5,8 @@ import { matchAlias } from '../util/glob.js'
 import { t } from '../util/i18n.js'
 import type { Protocol, ProviderConfig } from '../config/types.js'
 import { recordOutcome, pickTarget, keyInCooldown, markKeyCooldown, nextRotation, type GatewayRuntime, type OrderedCandidate, type ResolvedTarget } from './state.js'
-import { isModelMeltdown, recordModelOutcome } from './state/routing.js'
-import type { LogAttempt } from './state/types.js'
+import { isModelMeltdown, recordModelFallback, recordModelOutcome } from './state/routing.js'
+import type { LogAttempt, LogEntry } from './state/types.js'
 import { debugLog, debugOn } from './state/debuglog.js'
 import { dispatcherFor } from './proxy.js'
 import { acquireProviderSlot, ProviderQueueTimeoutError, providerConcurrencyLimit, queueWaitMs, type ProviderSlot } from './concurrency.js'
@@ -133,6 +133,11 @@ export class UpstreamError extends Error {
   routeReason?: string
   /** 网关侧错误归类短码（与 LogEntry.cause 同一枚举）：各抛出点就地打标，日志/前端据此显示可读原因，不再靠解析错误文本 */
   cause?: string
+  /** attempts 逐候选记录的短码覆盖（缺省按 cause 分类）：cause 是面向客户端/日志的粗分类
+   *  （如 quota），attempt note 需要更细的候选级原因时用——模型熔断快速失败（model_cooldown：
+   *  该候选因 (provider, model) 熔断被跳过、无真实上游往返）是首个用例。forwardWithFailover
+   *  的 classifyAttemptError 优先取它。 */
+  attemptNote?: string
   /** failover 链已发生的逐候选记录（链中途抛出时经错误对象带出到日志，见 forwardWithFailover） */
   attempts?: LogAttempt[]
   constructor(status: number, message: string, hint?: string) {
@@ -530,10 +535,33 @@ export async function forwardToUpstream(
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
         if (!isModelMeltdown(rt, providerId, final)) return undefined // 主模型未熔断：不动
         if (isModelMeltdown(rt, providerId, fb)) return undefined // 备用也在熔断：不去撞
+        // 闸门命中 = 改发已发生且请求被吸收（直接改发备用模型，原模型上游零往返）：
+        // fallback/absorbed 双计（absorbed 是 fallback 的真子集，见 recordModelFallback 注）
+        recordModelFallback(rt, providerId, final, true)
         return fb
       }
     : undefined
   const rewritten = rewriteModel(target, opts.body, opts.path, opts.bodyScan, mfGate)
+  // 模型级容灾（M3）熔断快速失败：final 模型仍在熔断期且无 model_fallback 映射（预改写帮不上）
+  // 时，跳过注定 402 的上游往返——熔断语义就是「假设 15min 内死」，与 provider 级熔断经
+  // pickTarget eligible() 跳过同语义（LiteLLM cooldown 同款）。有映射的熔断模型已被上方闸门
+  // 预改写直落备用模型（modelAfter = 备用模型，未熔断），不会进到此分支；provider 未配映射时
+  // isModelMeltdown 恒 false（recordModelOutcome 只对配映射 provider 记账），显式判
+  // !mfMap?.[finalModel] 是双保险。candidateSkip 跳链上下一候选（同 key_cooldown 语义，链上
+  // 别家可能伺服同一模型，不中止整条链）；attempt 记 note=model_cooldown（该候选无真实上游往返，
+  // 经 attemptNote 覆盖——cause 保持 quota 供日志/前端按额度类展示）。
+  const finalModel = rewritten.modelAfter
+  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && !mfMap?.[finalModel]) {
+    const e = new UpstreamError(
+      402,
+      t('模型「{model}」在服务「{name}」处于额度熔断期（连续额度耗尽，冷却约 15 分钟），本次请求未发送上游', 'Model "{model}" on provider "{name}" is in quota meltdown (repeated quota exhaustion; ~15 min cooldown); this request was not sent upstream', { model: finalModel, name: provider.name ?? providerId }),
+      t('冷却结束后自动恢复试回；或在「编辑服务」里为该模型配置 model_fallback 备用模型（熔断期间自动改发）', 'It retries the original model automatically after the cooldown; or configure a model_fallback mapping for it in "Edit Service" (traffic is auto-switched during meltdown)')
+    )
+    e.candidateSkip = true
+    e.cause = 'quota'
+    e.attemptNote = 'model_cooldown'
+    throw e
+  }
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
@@ -774,6 +802,90 @@ export function parseRetryAfterMs(v: string | string[] | undefined, now = Date.n
   return Math.max(0, at - now)
 }
 
+/** x-ratelimit-reset → epoch ms（尽力而为，判不出返回 undefined）。各上游单位不一（OpenRouter 系
+ *  epoch ms、GitHub 系 epoch s、部分网关 delta 秒、RFC3339/HTTP-date 时间戳），只按量级与可解析性
+ *  归一、不做业务猜测：整数值 ≥1e12 视为 epoch ms（当前量级）；1e9~1e12 视为 epoch s（×1000，
+ *  2286 年前两种秒/毫秒量级不会相撞）；更小值在 epoch 语义下不可能，按 delta 秒折算绝对时刻。
+ *  非数值走 Date.parse（RFC3339 / HTTP-date 通吃），失败即缺省（「存在才记、判不出不猜」）。
+ *  两类边界宁缺毋滥：数值串但非整数格式（小数/科学计数）不进 Date.parse——引擎回退解析器会把
+ *  "1.5" 当日期重排（V8 → 2001-01-05）；结果夹在 ECMA time-clip 范围（±8.64e15）内，超界大整数
+ *  返回 undefined（消费方 toISOString 不炸 RangeError）。 */
+const DATE_MS_CLIP = 8.64e15
+
+function parseResetHeaderMs(raw: string, now = Date.now()): number | undefined {
+  if (/^-?\d+$/.test(raw)) {
+    const n = Number(raw)
+    const ms = n >= 1e12 ? n : n >= 1e9 ? n * 1000 : now + n * 1000
+    return ms >= -DATE_MS_CLIP && ms <= DATE_MS_CLIP ? ms : undefined
+  }
+  if (!Number.isNaN(Number(raw))) return undefined
+  const at = Date.parse(raw)
+  return Number.isNaN(at) ? undefined : at
+}
+
+/** Go duration（OpenAI 系 x-ratelimit-reset-requests/-tokens，如 "6m0s"/"1h2m30s"/"500ms"）→ ms。
+ *  最小实现只认 h/m/s/ms 四段组合（time.ParseDuration 的常用子集，覆盖上游真实输出）；
+ *  全串必须被完整消费（含空白/杂字符判不出），至少含一段。µs/ns 未见于限流头，不猜。 */
+export function parseGoDurationMs(raw: string): number | undefined {
+  let total = 0
+  let consumed = 0
+  for (const m of raw.matchAll(/(\d+(?:\.\d+)?)(h|ms|s|m)/g)) {
+    const [, num, unit] = m
+    const mult = unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : unit === 's' ? 1_000 : 1
+    total += Number(num) * mult
+    consumed += m[0].length
+  }
+  if (consumed === 0 || consumed !== raw.length) return undefined
+  return Math.round(total)
+}
+
+/** 解析上游限流响应头 → LogEntry.ratelimit。键族覆盖三大家族（主力上游零信号缺口补齐）：
+ *  OpenRouter/GitHub 系 x-ratelimit-{remaining,reset}、OpenAI 系 x-ratelimit-reset-{requests,tokens}
+ *  （Go duration delta）、Anthropic 系 anthropic-ratelimit-*-reset/-remaining（RFC3339）。
+ *  头存在才记、缺失不猜：子项解析失败缺省该子项、三子项全缺返回 undefined（日志零新增字段，
+ *  /logs/query 只增不改）。键名大小写不敏感；重复头取首值（与 parseRetryAfterMs 同口径），
+ *  新增键族先到先得不覆盖主键已得值。remaining 为上游原值（Number 可解析才记）。 */
+export function parseRatelimitHeaders(
+  headers: Record<string, string | string[]>,
+  now = Date.now(),
+): LogEntry['ratelimit'] {
+  let remaining: number | undefined
+  let reset: number | undefined
+  let retryAfterMs: number | undefined
+  for (const [k, raw] of Object.entries(headers)) {
+    const v = Array.isArray(raw) ? raw[0] : raw
+    if (typeof v !== 'string' || !v.trim()) continue
+    const lk = k.toLowerCase()
+    if (lk === 'x-ratelimit-remaining') {
+      const n = Number(v.trim())
+      if (Number.isFinite(n)) remaining = n
+    } else if (lk === 'x-ratelimit-reset') {
+      reset = parseResetHeaderMs(v.trim(), now)
+    } else if (lk === 'x-ratelimit-reset-requests' || lk === 'x-ratelimit-reset-tokens') {
+      if (reset === undefined) {
+        const ms = parseGoDurationMs(v.trim())
+        if (ms !== undefined) reset = now + ms
+      }
+    } else if (lk.startsWith('anthropic-ratelimit-') && lk.endsWith('-reset')) {
+      if (reset === undefined) reset = parseResetHeaderMs(v.trim(), now)
+    } else if (lk.startsWith('anthropic-ratelimit-') && lk.endsWith('-remaining')) {
+      if (remaining === undefined) {
+        const n = Number(v.trim())
+        if (Number.isFinite(n)) remaining = n
+      }
+    } else if (lk === 'retry-after') {
+      const ms = parseRetryAfterMs(v, now)
+      if (ms !== null) retryAfterMs = ms
+    }
+  }
+  if (remaining === undefined && reset === undefined && retryAfterMs === undefined) return undefined
+  return {
+    ...(remaining !== undefined ? { remaining } : {}),
+    ...(reset !== undefined ? { reset } : {}),
+    ...(retryAfterMs !== undefined ? { retry_after_ms: retryAfterMs } : {}),
+  }
+}
+
 /** 可中断 sleep：signal 触发（客户端断开）时立刻 reject，不为已离开的客户端占着并发槽等退避 */
 function sleepInterruptible(ms: number, signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -909,10 +1021,10 @@ export async function forwardWithFailover(
   // 逐候选 attempt 记录（日志 attempts 列）：真实转发记 status+ms，被跳过记 note 短码——
   // 排障时能看出「哪个候选因什么被跳过」，不再只有 replayed_from:<id> 一个 id 痕迹
   const attempts: LogAttempt[] = []
-  /** 候选失败/跳过的原因短码：抛出点已打标（UpstreamError.cause）的优先；传输层失败按 transport 分类 */
+  /** 候选失败/跳过的原因短码：抛出点已打标（attemptNote > UpstreamError.cause）的优先；传输层失败按 transport 分类 */
   const classifyAttemptError = (e: unknown): string | undefined => {
     if (!(e instanceof UpstreamError)) return 'connect_failed'
-    return e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
+    return e.attemptNote ?? e.cause ?? (e.transport === 'timeout' ? 'headers_timeout' : e.transport === true ? 'connect_failed' : undefined)
   }
   // 全量体浅扫描整链一次（9b2229f 回归修复）：此前此处无条件 topLevelModel 全量扫描 + 逐候选
   // rewriteModel 内再各扫一次（单候选常态链 2 次、N 候选 N+1 次）。改为算一次经 opts.bodyScan
@@ -1012,6 +1124,8 @@ export async function forwardWithFailover(
       if (quota && sentModel !== undefined && mfMap) {
         const fbModel = mfMap[sentModel]
         if (fbModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
+          // 链尾合成 = 改发已发生（只计 fallback：原模型已被真实请求过，非闸门吸收）
+          recordModelFallback(rt, c.providerId, sentModel, false)
           cands.push({
             target: { ...c.target, modelOverride: fbModel }, // 全新对象：绝不改共享候选引用
             providerId: c.providerId,

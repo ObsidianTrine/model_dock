@@ -9,8 +9,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkRepo, runOrch } from './helpers.js'
 import {
+  AGED_OUT_BY,
+  annotateAgedOut,
   annotateSuperseded,
   applyGc,
+  autoCleanDrafts,
+  collectTracedIds,
   draftAgeMs,
   goalSimilarity,
   listDrafts,
@@ -18,7 +22,7 @@ import {
   planGc,
   supersedeForMerged,
 } from '../../.agents/scripts/orchestrator/drafts-gc.mjs'
-import { loadCard } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { loadCard, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 
 function mkDrafts(): { root: string; dir: string; cleanup: () => void } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'drafts-gc-'))
@@ -27,14 +31,14 @@ function mkDrafts(): { root: string; dir: string; cleanup: () => void } {
   return { root, dir, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
 }
 
-function draft(name: string, id: string, filesHint: string[], opts: { created?: string; goal?: string; body?: string } = {}) {
+function draft(name: string, id: string, filesHint: string[], opts: { created?: string; goal?: string; body?: string; createdBy?: string } = {}) {
   const fm = [
     '---',
     `id: ${id}`,
     'type: bugfix',
     'priority: normal',
     `created_at: ${opts.created ?? '2026-11-01T00:00:00+08:00'}`,
-    'created_by: scanner',
+    `created_by: ${opts.createdBy ?? 'scanner'}`,
     'files_hint:',
     ...filesHint.map((h) => `  - ${h}`),
     'workflows:',
@@ -135,6 +139,93 @@ describe('orchestrator drafts-gc > planGc（三清单，纯函数）', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// 老化自动档（超龄未提交，nightly 清退第二类）：三重保守闸 + 与既有清单的独占关系
+// ---------------------------------------------------------------------------
+
+describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）', () => {
+  /** 构造纯函数用提案对象。days：距 NOW 的年龄；by：created_by（缺省 scanner）。 */
+  function obj(id: string, days: number, by: string | null, hint = ['src/util/**']) {
+    const meta: Record<string, unknown> = { id, files_hint: hint }
+    if (by !== null) meta.created_by = by
+    if (days > 0) meta.created_at = new Date(NOW - days * 86_400_000).toISOString()
+    return { id, file: `${id}.md`, meta, body: { goal: `提案 ${id}` }, mtimeMs: days > 0 ? NOW - days * 86_400_000 : NOW, text: '' }
+  }
+
+  it('超龄未提交机器提案进 agedUnsubmitted；与 aged 独占（同一文件不进两个迁移清单）', () => {
+    const stale = obj('stale', 20, 'scanner')
+    const plan = planGc([stale], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
+    expect(plan.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['stale'])
+    expect(plan.agedUnsubmitted[0].ageDays).toBe(20)
+    // 20 天 < archiveDays 30：aged 本来就空；再验证 >30d 的也只进自动档不进归档档
+    const ancient = obj('ancient', 95, 'scanner')
+    const plan2 = planGc([ancient], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
+    expect(plan2.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['ancient'])
+    expect(plan2.aged).toEqual([])
+  })
+
+  it('超龄但队列有痕迹不动（7 状态任一同名卡都算痕迹；>archiveDays 的落 aged 走 report-only/--apply 归档）', () => {
+    const traced = obj('traced', 20, 'scanner')
+    const ancientTraced = obj('ancient-traced', 95, 'scanner')
+    const plan = planGc([traced, ancientTraced], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set(['traced', 'ancient-traced']) })
+    expect(plan.agedUnsubmitted).toEqual([])
+    expect(plan.aged.map((a) => a.draft.id)).toEqual(['ancient-traced']) // 归档档（手动 --apply 才动）兜底
+  })
+
+  it('collectTracedIds 补 specs/<id>/ 目录痕迹：spec 已拆卡的草稿不进 agedUnsubmitted', () => {
+    const d = mkDrafts()
+    try {
+      fs.mkdirSync(path.join(d.root, '.agents', 'orchestrator', 'specs', 'spec-live'), { recursive: true })
+      const traced = collectTracedIds(d.root)
+      expect(traced.has('spec-live')).toBe(true) // specs 目录 = 拆卡痕迹
+      // 端到端：同龄两提案，有 specs 痕迹的活 spec 不清退、无痕迹的照常进清单
+      const live = obj('spec-live', 20, 'scanner')
+      const dead = obj('spec-dead', 20, 'scanner')
+      const plan = planGc([live, dead], [], { now: NOW, maxAgeDays: 14, queueTraced: collectTracedIds(d.root) })
+      expect(plan.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['spec-dead'])
+      // 无 specs 目录的根：空痕迹不炸（从未拆过卡）
+      const d2 = mkDrafts()
+      try {
+        expect([...collectTracedIds(d2.root)]).toEqual([])
+      } finally {
+        d2.cleanup()
+      }
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('未超龄不动（=maxAgeDays 边界按不动处理）', () => {
+    const fresh = obj('fresh', 3, 'scanner')
+    const boundary = obj('boundary', 14, 'scanner')
+    const plan = planGc([fresh, boundary], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
+    expect(plan.agedUnsubmitted).toEqual([])
+    expect(plan.aged).toEqual([])
+  })
+
+  it('人工草稿不动：created_by=human / created_by 缺失 / 未知值一律不自动清退', () => {
+    const manual = obj('manual', 20, 'human')
+    const noBy = obj('no-by', 20, null)
+    const unknown = obj('unknown', 20, 'someone')
+    const plan = planGc([manual, noBy, unknown], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
+    expect(plan.agedUnsubmitted).toEqual([])
+  })
+
+  it('queueTraced 缺省（null）= 痕迹面不可知 → 自动档整档关闭（宁少勿滥）', () => {
+    const stale = obj('stale', 20, 'scanner')
+    const plan = planGc([stale], [], { now: NOW, maxAgeDays: 14 })
+    expect(plan.agedUnsubmitted).toEqual([])
+    expect(plan.aged).toEqual([])
+  })
+
+  it('与 superseded 独占：files_hint 有明确合并卡定性的走定性标注，不进超龄档', () => {
+    const stale = { ...obj('stale-ov', 20, 'scanner', ['src/gateway/relay.ts']) }
+    const plan = planGc([stale], [{ id: 'fix-relay-obs', filesHint: ['src/gateway/relay.ts'], goal: '' }], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
+    expect(plan.superseded.map((s) => s.draft.id)).toEqual(['stale-ov'])
+    expect(plan.agedUnsubmitted).toEqual([])
+  })
+})
+
 describe('orchestrator drafts-gc > pathsOverlap（路径前缀精确口径，防误杀）', () => {
   it('同文件/同目录/前缀目录重叠；跨目录不误杀；完全通配独占；反斜杠归一', () => {
     expect(pathsOverlap(['src/gateway/relay.ts'], ['src/gateway/relay.ts'])).toBe(true)
@@ -227,6 +318,104 @@ describe('orchestrator drafts-gc > supersedeForMerged（merge 时的闭环内动
 })
 
 // ---------------------------------------------------------------------------
+// 老化自动档执行段：annotateAgedOut 标注 / applyGc 超龄清退 / autoCleanDrafts（nightly 接线）
+// ---------------------------------------------------------------------------
+
+describe('orchestrator drafts-gc > annotateAgedOut / applyGc 超龄清退', () => {
+  it('标注：superseded_by=aged-out 伪 id + 说明行；标注后仍可 parseCard', () => {
+    const text = draft('a.md', 'feat-a', ['src/gateway/relay.ts'])
+    const next = annotateAgedOut(text, '2026-11-04T12:00:00+08:00')
+    expect(next).toContain(`superseded_by: ${AGED_OUT_BY}`)
+    expect(next).toContain('superseded_at: 2026-11-04T12:00:00+08:00')
+    expect(next).toContain('超龄未提交')
+    const { meta, body } = loadCard(next, 'a.md')
+    expect(meta.id).toBe('feat-a')
+    expect(meta.superseded_by).toBe(AGED_OUT_BY)
+    expect(body.goal).toContain('修复 feat-a')
+  })
+
+  it('applyGc：agedUnsubmitted 迁 superseded/（带 aged-out 标注）原文件消失；与 aged 清单互不越界', () => {
+    const d = mkDrafts()
+    try {
+      fs.writeFileSync(path.join(d.dir, 'stale.md'), draft('stale.md', 'stale', ['src/util/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString() }))
+      fs.writeFileSync(path.join(d.dir, 'traced.md'), draft('traced.md', 'traced', ['src/cli/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString() }))
+      const { drafts } = listDrafts(d.root)
+      const plan = planGc(drafts, [], { now: NOW, maxAgeDays: 14, queueTraced: new Set(['traced']) })
+      const r = applyGc(d.root, plan, { now: NOW })
+      expect(r.movedAgedUnsubmitted.map((m) => m.file)).toEqual(['stale.md'])
+      expect(r.movedSuperseded).toEqual([])
+      expect(r.movedAged).toEqual([])
+      expect(r.failed).toEqual([])
+      expect(fs.existsSync(path.join(d.dir, 'stale.md'))).toBe(false)
+      const moved = fs.readFileSync(path.join(d.dir, 'superseded', 'stale.md'), 'utf8')
+      expect(moved).toContain(`superseded_by: ${AGED_OUT_BY}`)
+      // 痕迹卡留原地
+      expect(fs.existsSync(path.join(d.dir, 'traced.md'))).toBe(true)
+    } finally {
+      d.cleanup()
+    }
+  })
+})
+
+describe('orchestrator drafts-gc > autoCleanDrafts（nightly 自动清退）', () => {
+  /** 种队列痕迹卡（任一状态目录直写；queue/ 尚不存在时顺带建目录）。 */
+  function seedQueueCard(root: string, state: string, id: string): void {
+    const dir = path.join(queueRoot(root), state)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, `${id}.md`), draft(`${id}.md`, id, ['docs/x.md']))
+  }
+
+  it('四象限：超龄未提交机器提案清退（带标注）；队列痕迹/人工草稿/未超龄全部不动；队列卡本身绝不动', () => {
+    const d = mkDrafts()
+    try {
+      seedQueueCard(d.root, 'pending', 'traced')
+      fs.writeFileSync(path.join(d.dir, 'stale-auto.md'), draft('stale-auto.md', 'stale-auto', ['src/cli/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString() }))
+      fs.writeFileSync(path.join(d.dir, 'stale-traced.md'), draft('stale-traced.md', 'traced', ['src/cli/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString() }))
+      fs.writeFileSync(path.join(d.dir, 'stale-manual.md'), draft('stale-manual.md', 'stale-manual', ['src/cli/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString(), createdBy: 'human' }))
+      fs.writeFileSync(path.join(d.dir, 'fresh.md'), draft('fresh.md', 'fresh', ['src/cli/**']))
+      const r = autoCleanDrafts(d.root, { now: NOW })
+      expect(r.superseded).toEqual([])
+      expect(r.agedUnsubmitted).toEqual(['stale-auto.md'])
+      expect(r.failed).toEqual([])
+      const moved = fs.readFileSync(path.join(d.dir, 'superseded', 'stale-auto.md'), 'utf8')
+      expect(moved).toContain(`superseded_by: ${AGED_OUT_BY}`)
+      for (const keep of ['stale-traced.md', 'stale-manual.md', 'fresh.md']) {
+        expect(fs.existsSync(path.join(d.dir, keep))).toBe(true)
+      }
+      // 队列目录零改动：痕迹卡原样
+      expect(fs.existsSync(path.join(queueRoot(d.root), 'pending', 'traced.md'))).toBe(true)
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('draftsGc.autoSupersede=false 总闸关闭（与合并时自动 supersede 同闸）；maxAgeDays 自定义生效', () => {
+    const d = mkDrafts()
+    try {
+      fs.writeFileSync(path.join(d.root, '.agents', 'workflow.json'), JSON.stringify({ draftsGc: { autoSupersede: false } }))
+      fs.writeFileSync(path.join(d.dir, 'stale.md'), draft('stale.md', 'stale', ['src/cli/**'], { created: new Date(NOW - 20 * 86_400_000).toISOString() }))
+      expect(autoCleanDrafts(d.root, { now: NOW })).toEqual({ superseded: [], agedUnsubmitted: [], failed: [] })
+      expect(fs.existsSync(path.join(d.dir, 'stale.md'))).toBe(true)
+      // 放开总闸但 maxAgeDays=60：20 天龄不超龄，仍不动
+      fs.writeFileSync(path.join(d.root, '.agents', 'workflow.json'), JSON.stringify({ draftsGc: { maxAgeDays: 60 } }))
+      expect(autoCleanDrafts(d.root, { now: NOW })).toEqual({ superseded: [], agedUnsubmitted: [], failed: [] })
+      expect(fs.existsSync(path.join(d.dir, 'stale.md'))).toBe(true)
+    } finally {
+      d.cleanup()
+    }
+  })
+
+  it('drafts/ 为空或不存在 → 零动作不报错', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'drafts-gc-empty-'))
+    try {
+      expect(autoCleanDrafts(empty, { now: NOW })).toEqual({ superseded: [], agedUnsubmitted: [], failed: [] })
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // CLI drafts gc（dry-run 与 --apply；临时目录 + 真实 orchestrator.mjs 子进程）
 // ---------------------------------------------------------------------------
 
@@ -249,6 +438,59 @@ describe('orchestrator drafts-gc > CLI drafts gc', () => {
       expect(applied.stdout).toContain('迁移 ov.md')
       expect(fs.existsSync(path.join(dir, 'superseded', 'ov.md'))).toBe(true)
       expect(fs.readFileSync(path.join(dir, 'superseded', 'ov.md'), 'utf8')).toContain('superseded_by: fix-relay-obs')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('老化自动档：超龄未提交机器提案 dry-run 列候选、--apply 迁 superseded/（aged-out 标注）；未超龄/人工草稿不动', () => {
+    const repo = mkRepo()
+    const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+    fs.mkdirSync(dir, { recursive: true })
+    // 相对真实 now 取龄（CLI 子进程内 Date.now() 与测试进程有毫秒级偏移，14 天档位下无影响）；
+    // 全部用相对日期，写死日历日会随仓库时间漂移变成时间炸弹
+    const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+    const fresh = new Date(Date.now() - 3 * 86_400_000).toISOString()
+    try {
+      fs.writeFileSync(path.join(dir, 'stale-auto.md'), draft('stale-auto.md', 'stale-auto', ['src/cli/**'], { created: stale }))
+      fs.writeFileSync(path.join(dir, 'stale-manual.md'), draft('stale-manual.md', 'stale-manual', ['src/cli/**'], { created: stale, createdBy: 'human' }))
+      fs.writeFileSync(path.join(dir, 'fresh.md'), draft('fresh.md', 'fresh', ['src/cli/**'], { created: fresh }))
+      const dry = runOrch(repo.root, 'drafts gc')
+      expect(dry.stdout).toContain('超龄未提交候选')
+      expect(dry.stdout).toContain('stale-auto.md')
+      expect(dry.stdout).not.toContain('stale-manual.md')
+      expect(dry.stdout).not.toContain('fresh.md')
+      expect(fs.existsSync(path.join(dir, 'stale-auto.md'))).toBe(true) // dry-run 不动文件
+      const applied = runOrch(repo.root, 'drafts gc --apply')
+      expect(applied.stdout).toContain('迁移 stale-auto.md')
+      expect(fs.existsSync(path.join(dir, 'stale-auto.md'))).toBe(false)
+      expect(fs.readFileSync(path.join(dir, 'superseded', 'stale-auto.md'), 'utf8')).toContain('superseded_by: aged-out')
+      // 保护对象留原地
+      expect(fs.existsSync(path.join(dir, 'stale-manual.md'))).toBe(true)
+      expect(fs.existsSync(path.join(dir, 'fresh.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('老化自动档保护：超龄但队列有同名卡（pending 痕迹）不迁移，队列卡本身零改动', () => {
+    const repo = mkRepo()
+    const dir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
+    const pendingDir = path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.mkdirSync(pendingDir, { recursive: true })
+    const stale = new Date(Date.now() - 20 * 86_400_000).toISOString()
+    try {
+      fs.writeFileSync(path.join(dir, 'stale-traced.md'), draft('stale-traced.md', 'stale-traced', ['src/cli/**'], { created: stale }))
+      fs.writeFileSync(path.join(pendingDir, 'stale-traced.md'), draft('stale-traced.md', 'stale-traced', ['mock-worker-output.txt'], { created: stale }))
+      const dry = runOrch(repo.root, 'drafts gc')
+      expect(dry.stdout).toContain('超龄未提交候选】无')
+      expect(dry.stdout).not.toContain('stale-traced.md')
+      const applied = runOrch(repo.root, 'drafts gc --apply')
+      expect(applied.stdout).not.toContain('stale-traced.md')
+      expect(fs.existsSync(path.join(dir, 'stale-traced.md'))).toBe(true)
+      expect(fs.existsSync(path.join(pendingDir, 'stale-traced.md'))).toBe(true) // 队列卡绝不动
+      expect(fs.existsSync(path.join(dir, 'superseded', 'stale-traced.md'))).toBe(false)
     } finally {
       repo.cleanup()
     }

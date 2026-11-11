@@ -71,8 +71,7 @@ export const EXTRA: Record<string, KnownMeta> = {
   'deepseek-v4-1-pro': { context_window: 1048576, max_output: 393216 },
   // 智谱 GLM-5.3（glm-5.3 / glm-5.3-flash / glm-5.3-flashx / glm-5-3-flash-260828 已由预设收录，见 BY_ID）
   'glm-5.3-flash-260828': { context_window: 1048576, max_output: 131072 },
-  // 智谱 GLM-4.5-Air（轻量版：128K 上下文 / 16K 输出）
-  'glm-4.5-air': { context_window: 131072, max_output: 16384 },
+  // 智谱 GLM-4.5-Air（轻量版）已由预设收录（2026-11-10 入 bigmodel 预设，勘察档服役），见 BY_ID
   // 通义 Qwen3-32B（阿里云/AWS 权威：原生 32K 上下文 / 8K 输出；-20250429 为日期后缀）
   'qwen3-32b': { context_window: 32768, max_output: 8192 },
   'qwen3-32b-20250429': { context_window: 32768, max_output: 8192 },

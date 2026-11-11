@@ -89,10 +89,13 @@
 //                   任务继续），恢复 = 基线重新匹配（文件改回）或编排器自己 merge 后重置。
 //                   2026-11 实证动机：sail 派发的卡自改 workflow.json 默认引擎后合并——
 //                   授权配置被被调度方改写而编排器无感。enabled=false 关闭守卫（不推荐）
-//   draftsGc        drafts/ 提案生命周期：{ autoSupersede?: boolean（缺省 true——卡落 merged/
-//                   时 files_hint 重叠的提案自动迁入 drafts/superseded/ 并标注合并卡 id），
+//   draftsGc        drafts/ 提案生命周期：{ autoSupersede?: boolean（缺省 true——自动
+//                   supersede 总闸，管两处：卡落 merged/ 时 files_hint 重叠提案自动迁入
+//                   drafts/superseded/ 并标注合并卡 id；nightly 周期的自动清退同闸），
 //                   archiveDays?: 正整数（缺省 30——drafts gc 时超龄提案迁入 drafts/archived/，
-//                   永不删除只迁移） }
+//                   永不删除只迁移），maxAgeDays?: 正整数（缺省 14——老化自动档阈值：超龄
+//                   且队列 7 状态零痕迹的机器来源提案（created_by ∈ planner/scanner）由
+//                   nightly 自动清退迁 drafts/superseded/；队列有痕迹与人工草稿绝不清退） }
 //   scanAutoFix     scan 型卡 failed 后自动转修复卡：{ enabled?: boolean（缺省 true） }。
 //                   drain 处理到 failed/ 的 scan-* 卡时自动创建 pending 修复卡（id
 //                   fix-<原名>，引用 incident.md 与失败摘要，files_hint/门禁继承原卡）；
@@ -136,7 +139,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify', 'research', 'freeSail', 'autoApprove',
+  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream', 'autoApprove',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
@@ -228,11 +231,57 @@ export function loadWorkflowConfig(repoRoot) {
     // freeSail 自由航行配置（注意：此前无 resolve 条目，workflow.json 里的 freeSail 键
     // 被规整丢弃——canSailSubmit 的白名单收窄从未生效过，2026-11-08 L1 排查时发现）
     freeSail: resolveFreeSail(raw.freeSail),
+    // 上游管线预授权档（B3.5 specAutoBuild）：缺省关 = spec 落盘即停等人审（行为不变）
+    upstream: resolveUpstream(raw.upstream),
     // 分层审核超时委托（D6.5，2026-11-10）：L2/L3 卡 awaiting-human 后人工 3 分钟内拍板，
     // 超时由 autoapprove sweep 按最后一条 review_verdict 的推荐自动 merge/retry
     //（fail-closed：无审查结论绝不动作；blockers>0 只自动返工限次）。缺省开。
     autoApprove: resolveAutoApprove(raw.autoApprove),
   };
+}
+
+/** 上游管线配置：{ specAutoBuild?: { enabled?: boolean },
+ *  autoPipeline?: { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 } }。
+ *  specAutoBuild：spec 落盘后自动拆卡（gate=L1、type=feature；手动 spec build 保持 gate=L3
+ *  不变）。autoPipeline：watch（autopilot 开时）/ nightly --plan 周期推进 feature 提案的
+ *  research → spec 管线（2026-11 P1-8 从 sail 下沉；sail 不受此键管辖，走 freeSail 配额），
+ *  配额键为 watch/nightly 调用方传入 sailUpstreamPipeline 的周期上限（缺省 research 2 / spec 1）。
+ *  两键缺省 enabled=false = 行为与历史一致。非法值回落缺省并 console.warn 告警（与各
+ *  resolveXxx 同风格）。 */
+function resolveUpstream(raw) {
+  const DEFAULTS = { specAutoBuild: { enabled: false }, autoPipeline: { enabled: false, researchPerCycle: 2, specPerCycle: 1 } };
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[workflow-config] upstream 配置非法，已忽略：${JSON.stringify(raw)}（应为 { specAutoBuild?: { enabled?: boolean }, autoPipeline?: { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 } }）`);
+    return DEFAULTS;
+  }
+  const out = { specAutoBuild: { enabled: false }, autoPipeline: { enabled: false, researchPerCycle: 2, specPerCycle: 1 } };
+  const sab = raw.specAutoBuild;
+  if (sab !== undefined) {
+    if (sab && typeof sab === 'object' && !Array.isArray(sab)) {
+      if (sab.enabled !== undefined) {
+        if (typeof sab.enabled === 'boolean') out.specAutoBuild.enabled = sab.enabled;
+        else console.warn(`[workflow-config] upstream.specAutoBuild.enabled ${JSON.stringify(sab.enabled)} 不合法（应为 boolean）——按 false 处理`);
+      }
+    } else {
+      console.warn(`[workflow-config] upstream.specAutoBuild ${JSON.stringify(sab)} 不合法（应为 { enabled?: boolean }）——按 false 处理`);
+    }
+  }
+  const ap = raw.autoPipeline;
+  if (ap !== undefined) {
+    if (ap && typeof ap === 'object' && !Array.isArray(ap)) {
+      if (ap.enabled !== undefined) {
+        if (typeof ap.enabled === 'boolean') out.autoPipeline.enabled = ap.enabled;
+        else console.warn(`[workflow-config] upstream.autoPipeline.enabled ${JSON.stringify(ap.enabled)} 不合法（应为 boolean）——按 false 处理`);
+      }
+      for (const k of ['researchPerCycle', 'specPerCycle']) {
+        out.autoPipeline[k] = resolvePositiveInt(ap[k], DEFAULTS.autoPipeline[k], `upstream.autoPipeline.${k}`);
+      }
+    } else {
+      console.warn(`[workflow-config] upstream.autoPipeline ${JSON.stringify(ap)} 不合法（应为 { enabled?: boolean, researchPerCycle?: 正整数, specPerCycle?: 正整数 }）——按缺省处理`);
+    }
+  }
+  return out;
 }
 
 /** research 调研配置：{ model?: string, maxDims?: 正整数, concurrency?: 整数 1-4,
@@ -508,32 +557,40 @@ function resolveEscalation(raw) {
 }
 
 /** propose 配置解析（需求综合）：{ feedback?: bool（缺省 false=planner prompt 不注入
- *  舰队反馈段，行为与历史版本一致；true = 注入 stats 同源的运行度量数据事实段） }。
- *  非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）。 */
+ *  舰队反馈段，行为与历史版本一致；true = 注入 stats 同源的运行度量数据事实段）,
+ *  model?: 模型名（缺省 null=planner 会话跟随引擎默认） }。model 显式钉定 planner
+ *  会话模型（propose 需求综合与 intent 意图编译共用），消费在 orchestrator.mjs 两个
+ *  planner spawn 点。非法值回落缺省并 console.warn 告警（stderr，不污染 stdout 裁决通道）。 */
 function resolvePropose(raw) {
-  const DEFAULTS = { feedback: false };
+  const DEFAULTS = { feedback: false, model: null };
   const warn = (detail) =>
-    console.warn(`[workflow-config] propose 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 propose 键：{ feedback?: boolean }）`);
+    console.warn(`[workflow-config] propose 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 propose 键：{ feedback?: boolean, model?: 模型名 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { feedback? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { feedback?, model? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
   if (raw.feedback !== undefined) out.feedback = raw.feedback === true;
+  if (raw.model !== undefined) {
+    if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
+    else warn(`model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）`);
+  }
   return out;
 }
 
-/** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数 }，缺省 observe/20。
+/** watchdog 配置解析：{ mode: 'observe'|'actuate', everyTurns: 正整数, model?: 模型名 }，
+ *  缺省 observe/20/无（判定会话跟随执行模型）。model 给勘察类小模型（判定是自包含短调用，
+ *  不检索仓库）——缺省回落执行模型，消费见 orchestrator.mjs 挂钩区（resolveWatchdogModel）。
  *  非法值回落缺省并 console.warn 告警（可操作：指出哪个键、允许什么；stderr 输出，
  *  不污染 hook 的 stdout 裁决通道）。键缺失 = 沿用缺省，不告警。 */
 function resolveWatchdog(raw) {
-  const DEFAULTS = { mode: 'observe', everyTurns: 20 };
+  const DEFAULTS = { mode: 'observe', everyTurns: 20, model: null };
   const warn = (detail) =>
-    console.warn(`[workflow-config] watchdog 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 watchdog 键，mode 允许 observe|actuate、everyTurns 须为正整数）`);
+    console.warn(`[workflow-config] watchdog 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 watchdog 键，mode 允许 observe|actuate、everyTurns 须为正整数、model 须为模型名字符串）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { mode?, everyTurns? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { mode?, everyTurns?, model? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -544,6 +601,10 @@ function resolveWatchdog(raw) {
   if (raw.everyTurns !== undefined) {
     if (Number.isInteger(raw.everyTurns) && raw.everyTurns > 0) out.everyTurns = raw.everyTurns;
     else warn(`everyTurns ${JSON.stringify(raw.everyTurns)} 不合法（须为正整数）`);
+  }
+  if (raw.model !== undefined) {
+    if (typeof raw.model === 'string' && raw.model.trim()) out.model = raw.model.trim();
+    else warn(`model ${JSON.stringify(raw.model)} 不合法（应为模型名字符串）`);
   }
   return out;
 }
@@ -761,17 +822,19 @@ function resolveConfigGuard(raw) {
   return out;
 }
 
-/** drafts/ 提案生命周期配置解析：{ autoSupersede: boolean, archiveDays: 正整数 }，
- *  缺省 true / 30。autoSupersede=false 关闭「卡落 merged/ 时 files_hint 重叠提案自动
- *  迁 superseded/」（drafts gc 手动档不受影响）；archiveDays 非法回落 30。非法值回落
+/** drafts/ 提案生命周期配置解析：{ autoSupersede: boolean, archiveDays: 正整数,
+ *  maxAgeDays: 正整数 }，缺省 true / 30 / 14（与 orchestrator/drafts-gc.mjs 的
+ *  DEFAULT_ARCHIVE_DAYS / DEFAULT_MAX_AGE_DAYS 同一口径，改动须两处同步）。
+ *  autoSupersede=false 关闭一切自动 supersede（合并时 + nightly 自动清退同闸；
+ *  drafts gc 手动档不受影响）；archiveDays / maxAgeDays 非法回落缺省。非法值回落
  *  缺省并 console.warn 告警。 */
 function resolveDraftsGc(raw) {
-  const DEFAULTS = { autoSupersede: true, archiveDays: 30 };
+  const DEFAULTS = { autoSupersede: true, archiveDays: 30, maxAgeDays: 14 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] draftsGc 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 draftsGc 键：{ autoSupersede?: boolean, archiveDays?: 正整数 }）`);
+    console.warn(`[workflow-config] draftsGc 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 draftsGc 键：{ autoSupersede?: boolean, archiveDays?: 正整数, maxAgeDays?: 正整数 }）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { autoSupersede?, archiveDays? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { autoSupersede?, archiveDays?, maxAgeDays? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -782,6 +845,10 @@ function resolveDraftsGc(raw) {
   if (raw.archiveDays !== undefined) {
     if (Number.isInteger(raw.archiveDays) && raw.archiveDays > 0) out.archiveDays = raw.archiveDays;
     else warn(`archiveDays ${JSON.stringify(raw.archiveDays)} 不合法（须为正整数）`);
+  }
+  if (raw.maxAgeDays !== undefined) {
+    if (Number.isInteger(raw.maxAgeDays) && raw.maxAgeDays > 0) out.maxAgeDays = raw.maxAgeDays;
+    else warn(`maxAgeDays ${JSON.stringify(raw.maxAgeDays)} 不合法（须为正整数）`);
   }
   return out;
 }

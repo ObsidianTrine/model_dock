@@ -149,7 +149,8 @@ describe('codex model_catalog_json 生成', () => {
       const plan = await attach({ setDefault: true })
       // 手改 config 模拟用户自设（attach 已写入我们的指针，换成他值再 attach 一次）
       const cfgPath = path.join(h.home, '.codex', 'config.toml')
-      fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(codexCatalogPath(), '/custom/catalog.json'))
+      // win 平台路径反斜杠在 TOML 里是转义形态（\），按原样串替换必失配——用 web_search 同款正则按行替换
+      fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(/model_catalog_json = .*/, 'model_catalog_json = "/custom/catalog.json"'))
       const plan2 = await codexAdapter.planAttach(
         { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
         await loadConfig()
@@ -179,7 +180,8 @@ describe('codex model_catalog_json 生成', () => {
       // 用户自设值：不收回
       await attach()
       const cfgPath = path.join(h.home, '.codex', 'config.toml')
-      fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(codexCatalogPath(), '/custom/catalog.json'))
+      // win 平台路径反斜杠在 TOML 里是转义形态（\），按原样串替换必失配——用 web_search 同款正则按行替换
+      fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(/model_catalog_json = .*/, 'model_catalog_json = "/custom/catalog.json"'))
       det = await codexAdapter.planDetach(await loadConfig())
       await applyChanges('codex', 'detach', det.changes, { yes: true, redactions: [TOKEN] })
       root = readRoot(h.home)

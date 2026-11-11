@@ -230,6 +230,13 @@ export function parseResultBlock(text) {
 /** Planner 输出契约的 fenced block 标记。 */
 export const CARD_MARKER = 'agents-card';
 
+/** 账本状态红线（planner/propose 共用）：已修条目禁止出卡，口径同 scanKnownIssues 的
+ *  跳过列（☑/已修/已闭环/已合并/暂缓）——2026-11-09 sail 规划轮曾为已修的 PERF-01/XPLAT-01
+ *  产出过期卡，LLM 只读了级别列没核状态列。序号由注入点自行编排（两个 prompt 列表长度不同）。 */
+const LEDGER_FIXED_RULE =
+  `docs/known-issues.md 是已知问题账本：条目状态列含 ☑ / 已修 / 已闭环 / 已合并 / 暂缓 的一律视为已解决，禁止为其出卡；` +
+  `引用账本条目作证据前必须先核对状态列，只允许引用未修条目；\n`;
+
 /**
  * 组装 planner prompt：只读会话（Read/Glob/Grep）探索仓库，把意图编译成任务卡。
  * 意图文本先经 sanitize 消毒（人给的一句话也可能引用了仓库外的不可信内容）。
@@ -268,7 +275,8 @@ export function buildPlannerPrompt(intentText, repoRoot) {
     `3. files_hint 写真实范围（你确认过的路径），越准越好；写裸 glob（如 src/presets/**），不要用反引号或引号包住；\n` +
     `4. created_by 固定写 planner；\n` +
     `5. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
-    `6. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `6. ${LEDGER_FIXED_RULE}` +
+    `7. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
 
@@ -352,7 +360,8 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `6. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +
     `7. 价值说不清或验收写不具体 → 宁可不出这张卡；\n` +
     `8. 卡必须含「# 航次计划」段：3-6 个检查点，每个检查点一句话写清「做什么 + 怎么验证」，末尾一行「备选路线：若 X 不通则 Y」；\n` +
-    `9. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `9. ${LEDGER_FIXED_RULE}` +
+    `10. 围栏外只允许一句话概述，不要输出其他内容。\n`
   );
 }
 

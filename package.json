@@ -34,7 +34,7 @@
     "dev": "tsx src/cli.ts",
     "dev:watch": "tsx watch src/cli.ts",
     "test": "tsc -p tsconfig.test.json --noEmit && vitest run",
-    "test:workflow": "vitest run -c vitest.workflow.config.ts",
+    "test:workflow": "vitest run --reporter=dot -c vitest.workflow.config.ts",
     "test:coverage": "vitest run --coverage",
     "prepack": "npm run build",
     "gen:ui-min": "node scripts/gen-ui-min.mjs",
@@ -64,6 +64,9 @@
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   },
   "files": [
     "dist"
