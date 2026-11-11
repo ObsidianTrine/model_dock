@@ -86,6 +86,9 @@
 | 2026-11-orch-review-model-engine-coupling | resolveEngine 把 engine 节 model 与 backend 连坐：backend 缺失即整节返回 null——JSDoc 承诺「model 可选」但只配 model 的配置被静默丢弃，review.model 声明位形同虚设（审查模型分源配置不可达，worker/review 长期同模型的隐性成因之一） | 0fec018 | —（2026-11-08 入库，待下次全量跑分） |
 | 2026-11-model-fallback-docs-premature | 模型级容灾对外文档句 1「不再一耗尽就把流量切去别家」与句 2「备用服务链都走完才触发」自相矛盾，且把尚未合入的 CLI 与 relay 消费面写成已可用——对外文档描述了树上不存在的行为（并行施工「文档先行」题，句内矛盾可判、超前描述需穷尽 grep） | 099b697 | —（2026-11-09 入库，待首跑） |
 | 2026-11-price-gate-float-boundary | 价格闸门容差比较无 epsilon：十进制语义恰 5%（2 与 2.1）被二进制浮点噪声判越界，报错显示「差 5.0%」与上限 5% 自相矛盾——fail-closed 拒掉合法配置（引入时的测试用整数价绕开噪声，测试绿≠比较点对） | f0ec255 | —（2026-11-09 入库，待首跑） |
+| 2026-11-spec-review-l0-newfile-overreject | spec 审查 L0 把任务引用的拟新建文件判结构 fail 提前 die（烧不到 L2）：research-verbatim-precision 任务 2 引用拟新建 test/orchestrator/research-verbatim.test.ts，首跑真 spec（2026-11-10）实测误判——「缺路径」机器分不清拟新建与 typo，确定性层管机械事实、语义裁决交 L2（新建=合法/改错路径=P1） | 2799230 | —（2026-11-11 入库，待首跑） |
+| 2026-11-spec-review-stale-baseline | spec design「现状」节基线漂移（主考题）：spec research-verdict-trust-fixes 2026-11-09 21:18 落盘、develop 21:31 合入 753a1b4（并行施工）——三处 orchestrator.mjs 行号锚漂 53-74 行（3376→3429 等）、research.mjs:296→:299、「buildVerifierPrompt 无发布/事件时间区分指引」声明失效、AC7 docs「逐字重试节」无任务认领、守卫插入点×新增仲裁轮顺序交互未讨论——审查船现状对账 4 P1 零误报判 rework（overall=73）；教训固化规约 §6（现状定位一律符号+函数名，行号只辅助）+ L0 基线漂移警告 | bd628f9 | —（2026-11-11 入库，⏸ 待适配：spec-review 题型，见「spec-review 题型适配缺口」节） |
+| 2026-11-spec-review-semantic-inversion | spec requirements 称非逐字 claim「降为 partial」，但对原判 contradicted 的 claim 置 partial 实为升权（aggregateCoherence 权重 0→0.5）+撤销一票否决——「降级」措辞与语义方向相反易误导实施方；审查船 P2 命中，要求改「强制置为」+补显式验收条目（语义方向倒置发现，质量标杆） | 0f941ec | —（2026-11-11 入库，⏸ 待适配：spec-review 题型，见「spec-review 题型适配缺口」节） |
 
 **2026-10-31 合并 origin/develop 并账**：远端侧回灌批次 30 行考题并入上表——14 题已首跑全审出（10-30/31 GLM subagent 修复对回灌二/三/四轮，原文 runs/），16 题 ⏳ 待首跑、按既有口径不计入基线分母，下次全量跑分一并计入；远端侧原基线行（召回 34/34）由其上基线行（37/37）加本并账取代。
 **基线：召回 37/37 审出、零漏报**（10-29 claude CLI 8/8 + 10-30 GLM subagent 19/19 + 10-31 强审查者 9/9——见下方 T31 强复跑行）；噪声面 1/2 无误报（另 1 题经复核为出题标注错误、实为正例）。REVIEW.md 无需因漏报补强。此后任何审查者改动（REVIEW.md / prompt / 模型）全量跑分低于新基线（36/36，或按模型分段对齐）即不保留。新题入库流程（挖题 → dry → 实跑 → 如实记录，未审出照写）见上「怎么加新考题」。
@@ -103,6 +106,17 @@
 3. `note` 写清为什么当时的流程没拦住（哪一层的洞），对应的堵法落进 REVIEW.md / lint / prompt。
 4. 跑一次确认能复现「审出」或「没审出」，如实记录——没审出的题才是最有价值的题。
 5. 成题前提是「bug 在场 + 修复提交」都在树上；同提交内自纠（坏版本从未进树）的坑进「执行坑复盘」，不成题。
+
+## spec-review 题型适配缺口（2026-11-11 登记，待适配）
+
+spec review（规约 `.agents/conventions/spec-review.md`）首跑事故回流为考题时撞到 runner 缺口：①三种物化（reviewRef / diffRef / cleanSha）全走 `git show`，而 spec 三件套落盘在 `.agents/orchestrator/specs/`（gitignore，历史不可达，且 rework 重写后原稿不存盘）；②出题对象是 L2 审查船——纪律注入源是 spec-review.md 非 REVIEW.md，产出 spec-verdict/1 契约块而非「发现 N 个问题」；③cases/ 是单一基线分母，混入不同纪律/出题对象的题型会破坏全量对拍口径。故考点 1/3 不直接进 cases/：案例按未来形态写全、暂存 `cases/*.json.pending`（runner 的 `.json` 过滤器忽略、不进全量跑分），适配后去掉 `.pending` 后缀即激活。
+
+**最小适配方案**（届时实现，勿大改）：case JSON 增两个可选字段——`specMaterial`（inline 材料块 `[{path, note?, content}]`，materialize 直接渲染进 prompt 不走 git；`note` 是出题留档不渲染，`path`+`content` 渲染）、`discipline`（纪律文件路径，buildPrompt 据此替换 REVIEW.md 注入并改用审查船指令：按规约 §1 五维 + §1.3 现状对账审查材料中的 spec 摘录）；score 不变（expect 关键词启发式照用，首跑后人工抽原文定榜）。已暂存案例：
+
+- `2026-11-spec-review-stale-baseline.json.pending`——考点 1（主考题）：`specMaterial` 内联 design「现状」节重建摘录 + orchestrator.mjs 仲裁轮区域代码摘录（351KB 超整文件护栏无法 git 物化）；`files` 走既有 reviewRef 物化（research.mjs / prompt.mjs @753a1b4，均 <120KB）。
+- `2026-11-spec-review-semantic-inversion.json.pending`——考点 3：全 inline（requirements「降为 partial」行重建 + design §方案② + research.mjs 判分语义摘录 @2799230 版）。
+
+**材料重建声明**：spec 原稿 gitignore 且 rework 后不存盘，inline 材料按事故记录（spec-review.md §6 / review-verdict.json findings 引文 / ledger）逐条重建并经 git 对拍核实（753a1b4^ vs 753a1b4 行号漂移逐条验证；判分权重与否决逻辑按 2799230 版核对）——每处重建在对应 `note` 字段标明底稿与回退方式。
 
 ## 怎么跑
 
@@ -149,6 +163,7 @@ node scripts/review-eval.mjs --out eval-report.md  # 报告落盘（默认只打
 - **2026-10-31 增补 2 题**（卡 16 update 暂存清扫年龄门槛修复对 b6b90ce + jsonpath fd235ea 回归修复对 f0ec635，接管 30c 会话补录）：首跑已补（2026-11-02 双 ✅，见上表）。
 - **2026-11-04 增补 2 题**（夜航修复对回灌：CORRECT-12 跨午夜日循环漏读 8d50bde + CORRECT-13 dry-run 覆写在线 wrapper 4510b57，dry 全过）：2 题 ⏳ 待首跑，不计入基线分母。
 - **2026-11-08 增补 1 题**（review.model 连坐收口回灌：214e449 引入 resolveEngine 起 model-only 配置即被静默丢弃，0fec018 解耦修复。与 0eb29bb freeSail / d6f5ae9 research.model 构成「规整层静默吞键」同型三连——编排配置面惯常事故形态，考 PR 审查者对「新配置键 + 规整层成对核对」的敏感度；dry 过）：1 题 ⏳ 待首跑，不计入基线分母。
+- **2026-11-11 增补 3 题**（spec review 首跑事故回流，按拆题惯例三题分立）：考点 2 走标准 diffRef 题型（bd628f9 引入 L0 files_hint fail→die，2799230 修 fail→warn），⏳ 待首跑；考点 1（主考题）/考点 3 为 spec-review 题型 ⏸ 待适配（spec 三件套 gitignore 物化不可达 + 出题对象为 L2 审查船，见「spec-review 题型适配缺口」节）——适配激活前不计入基线分母。
 
 ## 噪音测量（clean 对照，2026-10-30 起建立）
 
