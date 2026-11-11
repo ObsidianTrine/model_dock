@@ -24,6 +24,7 @@ Model-level failover ships with long-run observability increments; Codex attach 
 
 ### Improved
 
+- **Managed Node runtime updated to 24.22.3**: follows the upstream 24-line security patch; installed / self-hosted runtimes pick it up with the new version.
 - **Billable accounting and per-model usage in the usage aggregate**: `GET /_modeldock/usage` gains billable token counts (excluding non-billed cache reads) and per-model bucketed usage (`tokens_by_model`) — reconciliation and cost figures stop mixing in cache reads, and each model's usage buckets are visible separately.
 - **Routine dependency bump**: dependency overrides pin minimatch ^11.0.1, zeroing `npm audit` findings (build + full test suite verified; no behavior change).
 - **Cheaper idle polling**: the background update check moved token parsing inside its throttle / backoff guards — idle polling no longer touches the system keyring.
