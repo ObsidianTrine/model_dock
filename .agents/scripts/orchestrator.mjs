@@ -81,13 +81,31 @@ import { parseDurationMinutes, canSailSubmit, hardZoneReason, snapshotQueue, sna
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
 
+// ---- 运行态环境快照（进程内直调支持，test/orchestrator/helpers.ts runOrchInproc）----
+// main() 入口一次性赋值（io.env ?? process.env），下方标 env-snap 的真实 env 读取站点
+// 全部经此透传——直跑 CLI 时恒等于 process.env，语义与直读一致；进程内直调时读测试
+// 注入的 env，不再跨用例泄漏 process.env。构造子进程环境的 {...process.env, ...} 展开
+// 不走此变量（子进程语义保持原样）。注意：orchestrator/ 子模块（mock.mjs 等 backends）
+// 仍直读 process.env——直调语境由测试 harness 真写 process.env + finally 还原来对齐，
+// 本文件不为其做线程化。
+let orchEnv = process.env;
+
+// 可注入的致命退出出口：直跑 CLI 恒为 process.exit；进程内直调由测试 setFatalExit
+// 注入 throw（die 唯一真实 process.exit 调用点，main().catch 兜底同链路覆盖）。
+// 注入方必须在用例 finally 还原（setFatalExit(defaultFatalExit)），防跨用例泄漏。
+let fatalExit = (code) => process.exit(code);
+const defaultFatalExit = (code) => process.exit(code);
+export function setFatalExit(fn) {
+  fatalExit = fn;
+}
+
 /** worker 瞬时故障（429 限流/网络抖动）原地重试上限；退避基值×attempt（与 dockmaster
  *  技能「429 退避 60s」口径一致）。基值解析序：ORCH_RETRY_WAIT_MS env（测试收缩到 10ms
  *  级，生产行为不变；storm-gate 集成测试依赖毫秒级退避）> workflow.json retryWaitBaseMs
  *  （B11 常量收口）> 缺省 60s。 */
 const MAX_WORKER_RETRIES = 3;
 function retryWaitBaseMs(cfg) {
-  const n = Number.parseInt(process.env.ORCH_RETRY_WAIT_MS ?? '', 10);
+  const n = Number.parseInt(orchEnv.ORCH_RETRY_WAIT_MS ?? '', 10); // env-snap
   if (Number.isInteger(n) && n >= 0) return n;
   return cfg?.retryWaitBaseMs ?? 60_000;
 }
@@ -96,23 +114,26 @@ function retryWaitBaseMs(cfg) {
 // 基础设施
 // ---------------------------------------------------------------------------
 
-function findRepoRoot() {
+/** 定位仓库根。rootDir 缺省 process.cwd()（直跑 CLI 语义不变）；进程内直调时由
+ *  main(io.cwd) 传入目标仓库（预研 §五-1：漏传会解析回 vitest cwd 写穿主仓库队列，
+ *  runOrchInproc 入口有防御断言）。 */
+export function findRepoRoot(rootDir = process.cwd()) {
   // 与 feature-branch.mjs 同款（--git-common-dir）：linked worktree 内它指向主仓库的
   // .git，据此推出主仓库根——--show-toplevel 会返回 worktree 自身，把 queue/ 锚进
   // worktree，与「finish 需主仓库检出」矛盾（两处实现曾语义相反，统一到前者）。
   // git 不可用时回退向上找 .git。
   try {
     const common = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-      cwd: process.cwd(),
+      cwd: rootDir,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
     if (common) {
-      const dotGit = path.resolve(process.cwd(), common);
+      const dotGit = path.resolve(rootDir, common);
       if (fs.existsSync(dotGit)) return path.dirname(dotGit);
     }
   } catch { /* not inside a repo (or git missing) — fall through to the walk-up */ }
-  let dir = process.cwd();
+  let dir = rootDir;
   for (;;) {
     if (fs.existsSync(path.join(dir, '.git'))) return dir;
     const parent = path.dirname(dir);
@@ -123,7 +144,7 @@ function findRepoRoot() {
 
 function die(msg, code = 1) {
   console.error(`[orchestrator] ${msg}`);
-  process.exit(code);
+  fatalExit(code);
 }
 
 const log = (msg) => console.log(msg);
@@ -386,7 +407,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   const ddEnvelope = cfg.dynamicDispatch?.enabled ? normalizeEnvelope(cfg.dynamicDispatch.envelope).envelope : [];
   const envelopeAuthorized = ddEnvelope.includes(opts.backend) && ddEnvelope.includes(cfg.worker?.backend);
   if (cfg.worker?.backend && opts.backend !== cfg.worker.backend && !envelopeAuthorized
-      && !opts.flags?.has('--approve-backend-switch') && process.env.ORCH_APPROVE_BACKEND_SWITCH !== '1') {
+      && !opts.flags?.has('--approve-backend-switch') && orchEnv.ORCH_APPROVE_BACKEND_SWITCH !== '1') { // env-snap
     die(`执行引擎 ${opts.backend} ≠ workflow.json worker.backend（${cfg.worker.backend}）：切换 CLI 需人工审核。\n`
       + `确认切换：本命令追加 --approve-backend-switch（或设环境 ORCH_APPROVE_BACKEND_SWITCH=1）；\n`
       + `不切换：修复原引擎的启动环境（如设 ORCH_ZCODE_CLI、GLM 429 退避并降并发）后重跑；任务卡未动。`);
@@ -691,7 +712,7 @@ async function cmdRun(repoRoot, taskId, opts) {
   // awaiting-human 人工闸门期间凭据仍活，照常预警与续期）。
   // 轮询间隔：60s 缺省；ORCH_FUEL_POLL_MS 仅供测试收缩到亚秒级（ORCH_RETRY_WAIT_MS 同款测试
   // 旋钮，生产行为不变；下限 250ms 防误配打爆网关，低于下限按缺省 60s）。
-  const fuelPollMs = Math.max(250, Number.parseInt(process.env.ORCH_FUEL_POLL_MS ?? '', 10) || MEASURED_FUEL_POLL_MS);
+  const fuelPollMs = Math.max(250, Number.parseInt(orchEnv.ORCH_FUEL_POLL_MS ?? '', 10) || MEASURED_FUEL_POLL_MS); // env-snap
   const renewOnExpiry = createExpiryRenewal({
     ga: provGa,
     ttlMinutes: ephemeralTtlHours ? ephemeralTtlHours * 60 : undefined,
@@ -1671,8 +1692,8 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // 这里兜底等待超时/显式 cap=0 的情形——并发 drain 合并把「立即失败→任务卡滞留
   // awaiting-human 等人工重跑」收敛为自动排队。参数可环境收缩（测试用）：
   // ORCH_FINISH_RETRY_ATTEMPTS（额外重试次数，默认 2）、ORCH_FINISH_RETRY_DELAY_MS（默认 60000）。
-  const extraAttempts = Number.parseInt(process.env.ORCH_FINISH_RETRY_ATTEMPTS ?? '', 10);
-  const retryDelayRaw = Number.parseInt(process.env.ORCH_FINISH_RETRY_DELAY_MS ?? '', 10);
+  const extraAttempts = Number.parseInt(orchEnv.ORCH_FINISH_RETRY_ATTEMPTS ?? '', 10); // env-snap
+  const retryDelayRaw = Number.parseInt(orchEnv.ORCH_FINISH_RETRY_DELAY_MS ?? '', 10); // env-snap
   const maxAttempts = (Number.isInteger(extraAttempts) && extraAttempts >= 0 ? extraAttempts : 2) + 1;
   const retryDelayMs = Number.isInteger(retryDelayRaw) && retryDelayRaw >= 0 ? retryDelayRaw : 60_000;
   const fbScript = path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs');
@@ -1859,9 +1880,9 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
     await new Promise((r) => setTimeout(r, Math.round((timeoutMinutes + 0.5) * 60_000)));
   }
   const lockRetry = { intervalMs: 60_000, maxAttempts: 10, ...(opts.lockRetry ?? {}) };
-  const envMs = Number.parseInt(process.env.ORCH_AA_LOCK_RETRY_MS ?? '', 10);
+  const envMs = Number.parseInt(orchEnv.ORCH_AA_LOCK_RETRY_MS ?? '', 10); // env-snap
   if (Number.isInteger(envMs) && envMs > 0) lockRetry.intervalMs = envMs;
-  const envMax = Number.parseInt(process.env.ORCH_AA_LOCK_RETRY_MAX ?? '', 10);
+  const envMax = Number.parseInt(orchEnv.ORCH_AA_LOCK_RETRY_MAX ?? '', 10); // env-snap
   if (Number.isInteger(envMax) && envMax >= 0) lockRetry.maxAttempts = envMax;
   const lock = await acquireSchedulerLockRetry(repoRoot, 'autoapprove', lockRetry);
   if (!lock.held) return; // 重试耗尽：已 log 放弃原因，交下一轮周期 sweep 兜底
@@ -4853,7 +4874,7 @@ async function cmdNightly(repoRoot, opts) {
   // 人工 vs 调度器触发：launchd/cron/schtasks 语境 stdin 非 TTY；终端手动跑天然 TTY
   //（与 opts.interactive 同款判定）。--manual 是脚本/agent 手动触发时的显式逃生口。
   // 二者都不受 20h 双跑防护限制。
-  const manual = flags.has('--manual') || Boolean(process.stdin.isTTY && !process.env.CI);
+  const manual = flags.has('--manual') || Boolean(process.stdin.isTTY && !orchEnv.CI); // env-snap
   // 幂等补跑自检（nightly-state.mjs）：先判定、后写 startedAt——skip 路径不得覆写
   // 上次的完成态，否则完成记录会被改成「未收尾」，20h 双跑防护随即失明。
   const prevState = readNightlyState(repoRoot);
@@ -5743,12 +5764,17 @@ function usage() {
 红线：发布动作永远人工；端口红线按 workflow.json protectedPorts（配置即生效）；熔断不可关闭。`);
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
+/** CLI 纯入口。argv 缺省取 process.argv.slice(2)（直跑语义不变）；io 供进程内直调
+ *  （test/orchestrator/helpers.ts runOrchInproc）注入：
+ *  - io.env：运行态环境快照，入口一次性赋 orchEnv 全链路透传（不写 process.env，防跨用例泄漏）
+ *  - io.cwd：findRepoRoot 的解析起点（缺省 process.cwd()）
+ *  致命退出经 fatalExit 出口（die），直调可注入 throw 拦截；子进程派生行为不受影响。 */
+export async function main(argv = process.argv.slice(2), io = {}) {
+  orchEnv = io.env ?? process.env;
   const cmd = argv[0];
   const opts = {
     backend: undefined, // 缺省沿用上次会话后端；首次运行回落 claude-headless
-    interactive: process.stdin.isTTY && !process.env.CI,
+    interactive: process.stdin.isTTY && !orchEnv.CI, // env-snap（isTTY：直跑=终端/vitest=undefined，与 execSync stdio ignore 同判定）
   };
   const args = [];
   const flags = new Set();
@@ -5789,7 +5815,7 @@ async function main() {
     usage();
     return;
   }
-  const repoRoot = findRepoRoot();
+  const repoRoot = findRepoRoot(io.cwd ?? process.cwd());
   switch (cmd) {
     case 'submit':
       if (!args[0]) die('用法：submit <card.md>');
@@ -5932,6 +5958,21 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  die(e?.stack ?? String(e));
-});
+// 直跑守卫（先例 approval-listener.mjs）：进程内直调（runOrchInproc import 本模块）时
+// 不得自动启动 CLI。注意 argv[1] 可能不存在（node -e）——先判存在。
+// ⚠ 比较必须双侧 realpath：Node ESM 对入口 import.meta.url 做 realpath（macOS 临时目录
+// /var→/private/var、/tmp→/private/tmp 是符号链接，argv[1] 是 /var 形态时裸比较恒 false，
+// CLI 会被静默吞掉——spawn-shell.test.ts linked-worktree 用例实证）。
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return fs.realpathSync(path.resolve(process.argv[1])) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (isMain) {
+  main().catch((e) => {
+    die(e?.stack ?? String(e));
+  });
+}

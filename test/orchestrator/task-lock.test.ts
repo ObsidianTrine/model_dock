@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { cardText, mkRepo, runOrch, tryOrch } from './helpers.js'
+import { cardText, mkRepo, runOrch, runOrchInproc, tryOrch } from './helpers.js'
 import {
   acquireTaskLock,
   readTaskLock,
@@ -35,10 +35,10 @@ function seedLock(dir: string, id: string, lock: Record<string, unknown>): void 
   fs.writeFileSync(taskLockPath(dir, id), JSON.stringify(lock))
 }
 
-function submitCard(repo: string, id: string) {
+async function submitCard(repo: string, id: string) {
   const cardFile = path.join(repo, `card-${id}.md`)
   fs.writeFileSync(cardFile, cardText({ id }))
-  runOrch(repo, `submit "${cardFile}"`)
+  await runOrchInproc(repo, `submit "${cardFile}"`)
 }
 
 describe('task-lock > 锁语义（库级）', () => {
@@ -150,10 +150,10 @@ describe('task-lock > 锁语义（库级）', () => {
 })
 
 describe('task-lock > run 端到端（CLI + mock 后端）', () => {
-  it('已有进行中闭环（活锁）时 run 被拒，任务卡留在 pending', () => {
+  it('已有进行中闭环（活锁）时 run 被拒，任务卡留在 pending', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'locked')
+      await submitCard(repo.root, 'locked')
       // 模拟另一个 run 进程持锁：pid 用当前测试进程（对子进程而言存活）
       fs.writeFileSync(taskLockPath(repo.root, 'locked'), JSON.stringify({ pid: process.pid, task: 'locked', cmd: 'run' }))
       const r = tryOrch(repo.root, 'run locked --backend mock')
@@ -168,10 +168,10 @@ describe('task-lock > run 端到端（CLI + mock 后端）', () => {
     }
   })
 
-  it('陈锁自动接管：崩溃残留的锁不阻塞恢复，闭环照常跑完且锁已释放', () => {
+  it('陈锁自动接管：崩溃残留的锁不阻塞恢复，闭环照常跑完且锁已释放', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'crashy')
+      await submitCard(repo.root, 'crashy')
       fs.writeFileSync(taskLockPath(repo.root, 'crashy'), JSON.stringify({ pid: deadPid(), task: 'crashy', cmd: 'run', acquired_at: new Date().toISOString() }))
       const r = runOrch(repo.root, 'run crashy --backend mock')
       expect(r.stdout).toContain('接管陈旧任务锁')
@@ -182,10 +182,10 @@ describe('task-lock > run 端到端（CLI + mock 后端）', () => {
     }
   })
 
-  it('正常闭环结束后锁已释放（无残留锁文件）', () => {
+  it('正常闭环结束后锁已释放（无残留锁文件）', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'flow')
+      await submitCard(repo.root, 'flow')
       runOrch(repo.root, 'run flow --backend mock')
       expect(fs.existsSync(taskLockPath(repo.root, 'flow'))).toBe(false)
     } finally {
@@ -193,18 +193,18 @@ describe('task-lock > run 端到端（CLI + mock 后端）', () => {
     }
   })
 
-  it('abandon 守卫：闭环存活时拒绝；陈锁（崩溃残留）时可正常放弃', () => {
+  it('abandon 守卫：闭环存活时拒绝；陈锁（崩溃残留）时可正常放弃', async () => {
     const repo = mkRepo()
     try {
-      submitCard(repo.root, 'doomed')
+      await submitCard(repo.root, 'doomed')
       fs.writeFileSync(taskLockPath(repo.root, 'doomed'), JSON.stringify({ pid: process.pid, task: 'doomed', cmd: 'run' }))
-      const refused = tryOrch(repo.root, 'abandon doomed')
+      const refused = await runOrchInproc(repo.root, 'abandon doomed')
       expect(refused.status).not.toBe(0)
       expect(refused.stderr).toContain('闭环仍在运行')
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'doomed.md'))).toBe(true)
 
       fs.writeFileSync(taskLockPath(repo.root, 'doomed'), JSON.stringify({ pid: deadPid(), task: 'doomed', cmd: 'run' }))
-      runOrch(repo.root, 'abandon doomed')
+      await runOrchInproc(repo.root, 'abandon doomed')
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'failed', 'doomed.md'))).toBe(true)
     } finally {
       repo.cleanup()

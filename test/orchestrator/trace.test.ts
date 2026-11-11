@@ -11,7 +11,7 @@ import { readDecisionTraces, writeDecisionTrace } from '../../.agents/scripts/or
 import { watchdogCheck } from '../../.agents/scripts/orchestrator/watchdog.mjs'
 import { semanticFilter } from '../../.agents/scripts/orchestrator/eventfilter.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
-import { cardText, eventsOf, mkRepo, readCard, runOrch, tryOrch } from './helpers.js'
+import { cardText, eventsOf, mkRepo, readCard, runOrch, runOrchInproc } from './helpers.js'
 
 function tmpDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -302,12 +302,12 @@ describe('orchestrator trace > semanticFilter 接线（smartfilter）', () => {
 })
 
 describe('orchestrator trace > reviewer 集成（mock 后端闭环）', () => {
-  it('run 闭环：review trace 落盘 logs/<id>/decisions/，input=prompt 全文、parsed=verdict、meta.backend 齐备', () => {
+  it('run 闭环：review trace 落盘 logs/<id>/decisions/，input=prompt 全文、parsed=verdict、meta.backend 齐备', async () => {
     const repo = mkRepo()
     try {
       const cardFile = path.join(repo.root, 'card-trace.md')
       fs.writeFileSync(cardFile, cardText({ id: 'revtrace' }))
-      runOrch(repo.root, `submit "${cardFile}"`)
+      await runOrchInproc(repo.root, `submit "${cardFile}"`)
       runOrch(repo.root, 'run revtrace --backend mock --review-backend mock')
       // 闭环照常：审查无阻塞 → awaiting-human（trace 写入不影响审查链路）
       expect(readCard(repo.root, 'awaiting-human', 'revtrace')).toBeTruthy()
@@ -329,10 +329,10 @@ describe('orchestrator trace > reviewer 集成（mock 后端闭环）', () => {
 })
 
 describe('orchestrator trace > planner 会话留底（propose/intent，kind=planner）', () => {
-  it('intent 失败路径（ORCH_MOCK_PLANNER_INVALID=1）：每次尝试留一份 trace 含原始输出全文，stderr 附 exitCode', () => {
+  it('intent 失败路径（ORCH_MOCK_PLANNER_INVALID=1）：每次尝试留一份 trace 含原始输出全文，stderr 附 exitCode', async () => {
     const repo = mkRepo()
     try {
-      const r = tryOrch(repo.root, 'intent "broken" --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
+      const r = await runOrchInproc(repo.root, 'intent "broken" --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
       expect(r.status).not.toBe(0)
       expect(r.stderr).toContain('均未产出任务卡契约块')
       expect(r.stderr).toContain('exitCode=0') // 失败日志不再只有「N 次均未产出契约块」
@@ -357,10 +357,10 @@ describe('orchestrator trace > planner 会话留底（propose/intent，kind=plan
     }
   })
 
-  it('intent 成功路径：spawn 结果同样留底（parsed.blocks=1、usage 留痕），落卡行为不变', () => {
+  it('intent 成功路径：spawn 结果同样留底（parsed.blocks=1、usage 留痕），落卡行为不变', async () => {
     const repo = mkRepo()
     try {
-      runOrch(repo.root, 'intent "write the docs" --backend mock')
+      await runOrchInproc(repo.root, 'intent "write the docs" --backend mock')
       const logsDir = path.join(repo.root, '.agents', 'orchestrator', 'logs')
       const session = fs.readdirSync(logsDir).find((d) => d.startsWith('planner-'))
       expect(session).toBeTruthy()

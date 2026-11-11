@@ -10,7 +10,7 @@ import { buildProposePrompt, parseCardBlocks } from '../../.agents/scripts/orche
 import { buildFleetFeedback, collectStatsSummary, extractGoalsThemes } from '../../.agents/scripts/orchestrator/stats.mjs'
 import { readGoals } from '../../.agents/scripts/orchestrator/goals.mjs'
 import { listCards, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
-import { cardText, mkRepo, runOrch, tryOrch } from './helpers.js'
+import { cardText, mkRepo, runOrch, runOrchInproc } from './helpers.js'
 
 describe('orchestrator propose > prompt 构建与解析', () => {
   it('buildProposePrompt：目标面/信号/队列现状/上限注入；无目标面降级提示', () => {
@@ -117,10 +117,10 @@ describe('orchestrator propose > prompt 构建与解析', () => {
 })
 
 describe('orchestrator propose > 端到端（mock planner）', () => {
-  it('propose：提案落 drafts（proposal/created_by/gate 归一）；autopilot 关闭不提交', () => {
+  it('propose：提案落 drafts（proposal/created_by/gate 归一）；autopilot 关闭不提交', async () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'propose --backend mock')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.stdout).toContain('落提案 1 张')
       const draftsDir = path.join(repo.root, '.agents', 'orchestrator', 'drafts')
       const drafts = fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))
@@ -135,10 +135,10 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
     }
   })
 
-  it('autopilot 开启（白名单 docs）：提案自动提交 pending 且 gate→L1；drain 全链 merged', () => {
+  it('autopilot 开启（白名单 docs）：提案自动提交 pending 且 gate→L1；drain 全链 merged', async () => {
     const repo = mkRepo({ extra: { autopilot: { enabled: true, autoSubmitTypes: ['docs'], autoDrainPerCycle: 3 } } })
     try {
-      const out = runOrch(repo.root, 'propose --backend mock')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.stdout).toContain('autopilot 已提交提案')
       expect(out.stdout).toContain('gate=L1')
       expect(listCards(queueRoot(repo.root), 'pending')).toEqual(['planner-mock-task'])
@@ -171,13 +171,13 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
     }
   })
 
-  it('goals.md 目标面存在时进 planner prompt（mock 会话照常产出）', () => {
+  it('goals.md 目标面存在时进 planner prompt（mock 会话照常产出）', async () => {
     const repo = mkRepo()
     try {
       const ap = path.join(repo.root, '.agents', 'orchestrator')
       fs.mkdirSync(ap, { recursive: true })
       fs.writeFileSync(path.join(ap, 'goals.md'), '# 项目目标面\n\n## 核心目标\n1. 文档自动化提案链路稳定\n')
-      const out = runOrch(repo.root, 'propose --backend mock')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       expect(fs.existsSync(path.join(ap, 'drafts', 'planner-mock-task.md'))).toBe(true)
     } finally {
@@ -185,10 +185,10 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
     }
   })
 
-  it('planner 会话留底：无效输出重试耗尽 → decisions/ 每次尝试一份 trace（含原始输出全文与 exitCode），失败日志附 exitCode', () => {
+  it('planner 会话留底：无效输出重试耗尽 → decisions/ 每次尝试一份 trace（含原始输出全文与 exitCode），失败日志附 exitCode', async () => {
     const repo = mkRepo()
     try {
-      const r = tryOrch(repo.root, 'propose --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
+      const r = await runOrchInproc(repo.root, 'propose --backend mock', { ORCH_MOCK_PLANNER_INVALID: '1' })
       expect(r.status).not.toBe(0)
       expect(r.stderr).toContain('均未产出提案契约块')
       expect(r.stderr).toContain('exitCode=0') // 失败日志不再只有「N 次均未产出契约块」
@@ -234,18 +234,18 @@ describe('orchestrator propose > 舰队反馈（propose.feedback，缺省关）'
     return out
   }
 
-  function runOneTask(repo: string, id: string): void {
+  async function runOneTask(repo: string, id: string): Promise<void> {
     const cardFile = path.join(repo, `card-${id}.md`)
     fs.writeFileSync(cardFile, cardText({ id }))
-    runOrch(repo, `submit "${cardFile}"`)
+    await runOrchInproc(repo, `submit "${cardFile}"`)
     runOrch(repo, `run ${id} --backend mock`)
   }
 
-  it('开启（propose.feedback: true）：planner 输入含舰队反馈段（stats 同源数据事实）', () => {
+  it('开启（propose.feedback: true）：planner 输入含舰队反馈段（stats 同源数据事实）', async () => {
     const repo = mkRepo({ extra: { propose: { feedback: true } } })
     try {
-      runOneTask(repo.root, 'fb-on')
-      const out = runOrch(repo.root, 'propose --backend mock')
+      await runOneTask(repo.root, 'fb-on')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       const inputs = plannerInputs(repo.root)
       expect(inputs.length).toBeGreaterThan(0)
@@ -257,11 +257,11 @@ describe('orchestrator propose > 舰队反馈（propose.feedback，缺省关）'
     }
   }, 90_000)
 
-  it('缺省关闭：planner 输入无舰队反馈段（与历史一致）', () => {
+  it('缺省关闭：planner 输入无舰队反馈段（与历史一致）', async () => {
     const repo = mkRepo()
     try {
-      runOneTask(repo.root, 'fb-off')
-      const out = runOrch(repo.root, 'propose --backend mock')
+      await runOneTask(repo.root, 'fb-off')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       const inputs = plannerInputs(repo.root)
       expect(inputs.length).toBeGreaterThan(0)
@@ -288,10 +288,10 @@ describe('orchestrator propose > planner 模型键（propose.model，缺省跟�
     return out
   }
 
-  it('配置 propose.model：会话留痕 meta.model（intent 命令同键），产出照常落卡', () => {
+  it('配置 propose.model：会话留痕 meta.model（intent 命令同键），产出照常落卡', async () => {
     const repo = mkRepo({ extra: { propose: { model: 'glm-5.3-flash' } } })
     try {
-      const out = runOrch(repo.root, 'propose --backend mock')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       const docs = plannerTraces(repo.root)
       expect(docs.length).toBeGreaterThan(0)
@@ -302,10 +302,10 @@ describe('orchestrator propose > planner 模型键（propose.model，缺省跟�
     }
   }, 90_000)
 
-  it('未配置：trace 无 model 字段（与历史逐字节兼容）', () => {
+  it('未配置：trace 无 model 字段（与历史逐字节兼容）', async () => {
     const repo = mkRepo()
     try {
-      const out = runOrch(repo.root, 'propose --backend mock')
+      const out = await runOrchInproc(repo.root, 'propose --backend mock')
       expect(out.status).toBe(0)
       const docs = plannerTraces(repo.root)
       expect(docs.length).toBeGreaterThan(0)

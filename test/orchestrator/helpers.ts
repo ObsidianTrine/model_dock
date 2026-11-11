@@ -6,6 +6,11 @@ import { execSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { format } from 'node:util'
+// 进程内直调入口（runOrchInproc 用）：orchestrator 主入口 + 可注入致命出口 + 仓库根定位。
+// 直调后 orchestrator.mjs 及其 30 个子模块成为全进程共享单例（vitest isolate:false 单池），
+// 因此 runOrchInproc 文档注释立规：禁止对 orchestrator.* 做 vi.mock。
+import { main as orchMain, setFatalExit, findRepoRoot as orchFindRepoRoot } from '../../.agents/scripts/orchestrator.mjs'
 
 const WORKTREE_ROOT = path.resolve(process.cwd()) // vitest 的 cwd = 仓库根（worktree 内）
 
@@ -165,6 +170,122 @@ export function tryOrch(repo: string, args: string, env: Record<string, string> 
     const err = e as { status?: number; stdout?: string; stderr?: string }
     return { status: err.status ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? '' }
   }
+}
+
+/** die 注入后的致命退出（携带退出码），由 runOrchInproc 捕获换算成 status。 */
+class OrchExitError extends Error {
+  constructor(public readonly code: number) {
+    super(`orchestrator exit ${code}`)
+  }
+}
+
+/**
+ * runOrch 的进程内直调版（阶段 1：只接轻命令用例——submit/status/logs/stats/reconcile
+ * 等无孙进程输出断言的调用；run/drain/sail 等重链路仍走 execSync 版 runOrch/tryOrch）。
+ * 免掉每次 execSync 一个完整 node 子进程的 CLI boot（实测 ~165-200ms/次）。
+ *
+ * ⛔ 立规：禁止对 orchestrator.*（orchestrator.mjs 及 orchestrator/ 子模块）做 vi.mock——
+ * 直调 import 后它们是全进程共享单例（vitest isolate:false + singleFork），谁 mock 谁污染
+ * 全进程，表现为「单独跑绿、一起跑红」。同理本函数的 console 捕获 / setFatalExit 注入
+ * 必须在 finally 全部还原，失败用例不得泄漏到后续文件。
+ *
+ * 语义对齐（预研 §四）：
+ * - 返回值 = tryOrch 语义内建：die → { status: code }，正常返回 → { status: 0 }，不抛出；
+ *   未捕获异常与 CLI 尾部 main().catch(die) 同链路（stderr 记栈 + status 1）；
+ * - stdout/stderr 来自 console.log/error/warn 拦截（log() 是 console.log 包装的咽喉）；
+ *   ⚠️ stdio:inherit 孙进程（run/finish/worker 链路 ~10 处）直写宿主 fd，绕过拦截——
+ *   这是阶段 1 只接轻命令的原因，断言孙进程输出的用例不得使用本函数；
+ * - env 双通道：① 写入真实 process.env（调用期间，finally 逐键还原）——mock.mjs 等
+ *   子模块直读 process.env（execSync 时代靠子进程 env 注入可见，直调后必须真写）；
+ *   ② 经 main(io.env) 入口快照透传（orchestrator.mjs 内部真实读取走 orchEnv）。
+ *   ⚠️ 模块加载时读取的旋钮（如 mock.mjs 的 ORCH_MOCK_REVIEW_PARAPHRASE_ONCE）在
+ *   直调单例下首载即冻结——依赖这类「加载时」旋钮的用例仍须走 execSync 版。
+ * - cwd 经 io.cwd 定位仓库根。
+ *
+ * 边界（阶段 1 已知不覆盖，勿用于这些命令）：push-review（有自己的本地 die 硬
+ * process.exit）、run/drain（holdExit 缺省 process.exit + inherit 孙进程）。
+ */
+export async function runOrchInproc(
+  repo: string,
+  args: string,
+  env: Record<string, string> = {},
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  // 防御断言（预研 §五-1）：main(io.cwd) 的仓库根解析若漏参数化，会回落 vitest cwd
+  // （主/工作仓库），submit/run 将写穿真实 .agents/orchestrator/queue/。repo 本身是
+  // git 根（mkRepo git init），正常必解析为 repo 自身且 ≠ vitest cwd。
+  const resolved = path.resolve(orchFindRepoRoot(repo))
+  if (resolved !== path.resolve(repo) || resolved === WORKTREE_ROOT) {
+    throw new Error(
+      `runOrchInproc 防御断言失败：repoRoot 解析为 ${resolved}（repo=${repo}，vitest cwd=${WORKTREE_ROOT}）——` +
+        'cwd 参数化可能失效，拒绝执行以防写穿主仓库队列。检查 orchestrator.mjs findRepoRoot/main(io.cwd) 透传。',
+    )
+  }
+  const argv = splitOrchArgs(args)
+  const out: string[] = []
+  const err: string[] = []
+  const origLog = console.log
+  const origError = console.error
+  const origWarn = console.warn
+  console.log = (...a: unknown[]) => {
+    out.push(format(...a) + '\n')
+  }
+  console.error = (...a: unknown[]) => {
+    err.push(format(...a) + '\n')
+  }
+  console.warn = console.error // Node 语义：warn 写 stderr
+  // 注入 env 真写 process.env（mock/backends 子模块直读），finally 逐键还原防泄漏
+  const savedEnv: Array<[string, string | undefined]> = []
+  for (const [k, v] of Object.entries(env)) {
+    savedEnv.push([k, process.env[k]])
+    process.env[k] = v
+  }
+  setFatalExit((code) => {
+    throw new OrchExitError(code)
+  })
+  try {
+    await orchMain(argv, { env: { ...process.env, ...env }, cwd: repo })
+    return { status: 0, stdout: out.join(''), stderr: err.join('') }
+  } catch (e) {
+    if (e instanceof OrchExitError) return { status: e.code, stdout: out.join(''), stderr: err.join('') }
+    // 与 CLI 尾部 main().catch(die) 同链路：未捕获异常 → stderr「[orchestrator] <stack>」+ exit 1
+    //（直调时尾部守卫不跑，这里必须补上等价语义，否则业务 throw 会以未捕获异常炸穿 vitest）
+    err.push(`[orchestrator] ${(e as Error)?.stack ?? String(e)}\n`)
+    return { status: 1, stdout: out.join(''), stderr: err.join('') }
+  } finally {
+    console.log = origLog
+    console.error = origError
+    console.warn = origWarn
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    setFatalExit((code) => process.exit(code)) // 还原缺省出口，防泄漏到后续用例
+  }
+}
+
+/** execSync 版 runOrch 走 shell 分词（引号括路径如 `submit "${cardFile}"`）；直调没有
+ * shell，这里做等价的引号感知分词（全套件 args 无 shell 元字符，已普查核实）。 */
+function splitOrchArgs(s: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let quote: '"' | "'" | null = null
+  for (const ch of s) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else cur += ch
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+    } else if (/\s/.test(ch)) {
+      if (cur) {
+        out.push(cur)
+        cur = ''
+      }
+    } else {
+      cur += ch
+    }
+  }
+  if (cur) out.push(cur)
+  return out
 }
 
 export interface NoNodeRun {

@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { AddressInfo } from 'node:net'
 import { fakeHome } from '../helpers.js'
-import { mkRepo, runOrch } from './helpers.js'
+import { mkRepo, runOrchInproc } from './helpers.js'
 import {
   attachCost,
   collectPairs,
@@ -551,7 +551,7 @@ describe('stats --cost CLI 端到端（价目缓存回落路径）', () => {
       writeGatewayLog(h.home, [
         { ts: iso(now - 200_000), harness: 'zcode', profile: 'p', provider: 'up', model: 'm1', path: '/v1/messages', status: 200, ms: 25, usage: { input_tokens: 1_000_000, output_tokens: 100_000, cache_read_tokens: 0, cache_creation_tokens: 0 } },
       ])
-      const r = runOrch(repo.root, 'stats --cost --json', { MODELRDOCK_FAKE_HOME: h.home })
+      const r = await runOrchInproc(repo.root, 'stats --cost --json', { MODELRDOCK_FAKE_HOME: h.home })
       const j = JSON.parse(r.stdout)
       expect(j.rows).toHaveLength(1)
       expect(j.rows[0].cost_usd).toBeCloseTo(1.2, 6)

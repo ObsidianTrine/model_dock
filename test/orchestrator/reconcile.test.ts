@@ -12,13 +12,13 @@ import { fetchGatewayUsageSummary, gatewayLogsDir, parseMergedBranchIds, readGat
 import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
-import { cardText, eventsOf, git, mkRepo, runOrch } from './helpers.js'
+import { cardText, eventsOf, git, mkRepo, runOrch, runOrchInproc } from './helpers.js'
 import { fakeHome } from '../helpers.js'
 
-function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
+async function submitCard(repo: string, id: string, overrides: Record<string, unknown> = {}) {
   const cardFile = path.join(repo, `card-${id}.md`)
   fs.writeFileSync(cardFile, cardText({ id, ...overrides }, '对账测试任务'))
-  runOrch(repo, `submit "${cardFile}"`)
+  await runOrchInproc(repo, `submit "${cardFile}"`)
 }
 
 /** 往 fakeHome 网关日志写一条带 usage 的成功转发请求。 */
@@ -30,8 +30,8 @@ function writeGatewayEntry(ts: string, usage: Record<string, number> | undefined
 }
 
 /** 跑一个自动合并任务并返回其事件窗口（起止时间戳）。 */
-function autoMergeTask(repo: string, id: string): { start: string; end: string } {
-  submitCard(repo, id, { gate: 'L1', files_hint: ['docs/**'] })
+async function autoMergeTask(repo: string, id: string): Promise<{ start: string; end: string }> {
+  await submitCard(repo, id, { gate: 'L1', files_hint: ['docs/**'] })
   runOrch(repo, `run ${id} --backend mock`, { ORCH_MOCK_FILE: `docs/notes-${id}.md` })
   const eventsOf = (id2: string) =>
     fs
@@ -76,7 +76,7 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     const h = fakeHome() // 隔离真实 ~/.modeldock/logs——机器上有真实网关日志会污染计数
     const repo = mkRepo()
     try {
-      const { start, end } = autoMergeTask(repo.root, 'r1')
+      const { start, end } = await autoMergeTask(repo.root, 'r1')
       // 窗口内两笔：普通 + 缓存读；窗口外一笔（应排除）；失败一笔（应排除）。
       // 计算出的时间戳必须走 toIsoLocal（本地 ISO）——writeGatewayEntry 按 ts 前缀的
       // 本地日期分文件、reconcile 也按本地日期读；用 toISOString（UTC）会在本地午夜后
@@ -103,7 +103,7 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
-      autoMergeTask(repo.root, 'r2')
+      await autoMergeTask(repo.root, 'r2')
       const r = await reconcileTask(repo.root, 'r2', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
       expect(r.viaGateway).toBe(false)
       expect(r.gateway.requests).toBe(0)
@@ -148,21 +148,21 @@ describe('orchestrator reconcile > 狗粮对账', () => {
     }
   })
 
-  it('reconcile 命令端到端：分歧降序输出；无任务提示', () => {
+  it('reconcile 命令端到端：分歧降序输出；无任务提示', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
-      const empty = runOrch(repo.root, 'reconcile')
+      const empty = await runOrchInproc(repo.root, 'reconcile')
       expect(empty.stdout).toContain('尚无已合并任务可对账')
-      const { start } = autoMergeTask(repo.root, 'r3')
+      const { start } = await autoMergeTask(repo.root, 'r3')
       writeGatewayEntry(start, { input_tokens: 1, output_tokens: 1 })
-      const out = runOrch(repo.root, 'reconcile')
+      const out = await runOrchInproc(repo.root, 'reconcile')
       expect(out.stdout).toContain('已合并任务对账')
       expect(out.stdout).toContain('r3')
       expect(out.stdout).toContain('分歧')
       // mock 任务事件无 tokens_billable、手写日志无 billable_tokens → 旧口径回落并标注
       expect(out.stdout).toContain('旧口径')
-      const one = runOrch(repo.root, 'reconcile r3')
+      const one = await runOrchInproc(repo.root, 'reconcile r3')
       expect(one.stdout).toContain('r3')
     } finally {
       repo.cleanup()
@@ -243,18 +243,18 @@ describe('orchestrator reconcile > 可计费口径（billable，与 max_tokens �
     }
   })
 
-  it('CLI 输出按口径标注：billable 行带「可计费」两本账数值', () => {
+  it('CLI 输出按口径标注：billable 行带「可计费」两本账数值', async () => {
     const h = fakeHome()
     const repo = mkRepo()
     try {
       // CLI 单任务路径要求卡在队列中：submit 真卡后覆盖其事件流（fabricate billable 快照）
-      submitCard(repo.root, 'bill-r4')
+      await submitCard(repo.root, 'bill-r4')
       writeEvents(repo.root, 'bill-r4', [
         { type: 'worker_spawned' },
         { type: 'budget_snapshot', tokens_in: 950_000, tokens_out: 50_000, tokens_billable: 500_000, tokens_cache_read: 900_000 },
       ])
       writeGatewayEntry(toIsoLocal(new Date(Date.now() - 30_000)), { input_tokens: 100, output_tokens: 100, billable_tokens: 150 })
-      const out = runOrch(repo.root, `reconcile bill-r4`)
+      const out = await runOrchInproc(repo.root, `reconcile bill-r4`)
       expect(out.stdout).toContain('可计费')
       expect(out.stdout).toContain('分歧')
     } finally {
@@ -286,13 +286,13 @@ describe('orchestrator reconcile > 启用条件（gatewayLogDir 配置化，可�
     try {
       await withoutRedirectEnv(async () => {
         expect(gatewayLogsDir(loadWorkflowConfig(repo.root))).toBeNull()
-        submitCard(repo.root, 'r-off')
+        await submitCard(repo.root, 'r-off')
         runOrch(repo.root, 'run r-off --backend mock', { ORCH_MOCK_FILE: 'docs/notes-r-off.md' })
         const r = await reconcileTask(repo.root, 'r-off', path.join(repo.root, '.agents', 'orchestrator', 'queue'))
         expect(r.skipped).toBe(true)
         expect(r.reason).toContain('gatewayLogDir')
         // CLI 全量路径：未启用 → 显式说明（而非误导性的「尚无已合并任务可对账」）
-        const cli = runOrch(repo.root, 'reconcile')
+        const cli = await runOrchInproc(repo.root, 'reconcile')
         expect(cli.stdout).toContain('未启用网关对账')
         expect(cli.stdout).not.toContain('尚无已合并任务可对账')
       })
@@ -421,7 +421,7 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
     }
   })
 
-  it('CLI 端到端：状态对账排在用量对账之后；--fix-states 生效且幂等', () => {
+  it('CLI 端到端：状态对账排在用量对账之后；--fix-states 生效且幂等', async () => {
     const repo = mkRepo()
     try {
       const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
@@ -429,7 +429,7 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       fs.writeFileSync(path.join(root, 'running', 'st-cli.md'), cardText({ id: 'st-cli' }, 'CLI 端到端'))
       mergeFeatureBranch(repo.root, 'st-cli')
 
-      const out1 = runOrch(repo.root, 'reconcile')
+      const out1 = await runOrchInproc(repo.root, 'reconcile')
       expect(out1.stdout).toContain('状态对账 · 已合并未落位')
       expect(out1.stdout).toContain('st-cli')
       expect(out1.stdout).toContain('当前状态 running')
@@ -438,11 +438,11 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       expect(out1.stdout.indexOf('网关对账')).toBeLessThan(out1.stdout.indexOf('状态对账'))
       expect(fs.existsSync(path.join(root, 'running', 'st-cli.md'))).toBe(true) // 只读：卡没动
 
-      const out2 = runOrch(repo.root, 'reconcile --fix-states')
+      const out2 = await runOrchInproc(repo.root, 'reconcile --fix-states')
       expect(out2.stdout).toContain('已落位')
       expect(fs.existsSync(path.join(root, 'merged', 'st-cli.md'))).toBe(true)
 
-      const out3 = runOrch(repo.root, 'reconcile')
+      const out3 = await runOrchInproc(repo.root, 'reconcile')
       expect(out3.stdout).toContain('已合并未落位：无')
     } finally {
       repo.cleanup()
