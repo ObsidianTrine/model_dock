@@ -128,7 +128,7 @@ main / develop 的 test run 失败（首次尝试）时自动发起一次修复�
 
 1. **guard**：校验三件套齐全 + 该 run 尚无修复 PR（每 run 仅 1 次尝试），不满足即静默跳过（零消耗）；
 2. **确定性前置**：检出失败提交、切分支 `ci-autofix/<run-id>`，`npm ci` + `npm run build`——任一失败 job 直接红，结论明确零 token；
-3. **修复会话**：Claude 复现失败 → 根因分析 → 最小修复 + 补测试，`[ci-autofix]` 前缀提交推分支，开 PR（基分支 = 失败所在分支），PR 描述必含失败 run 链接、根因分析、修复说明；
+3. **修复会话**：Claude 复现失败 → 根因分析 → 最小修复 + 补测试，`[ci-autofix]` 前缀提交推分支，开 PR（基分支 = 失败所在分支），PR 描述必含失败 run 链接、根因分析、修复说明。验证走分层：会话内只跑与改动相关的测试文件（2026-11-12 起，此前要求会话内跑全量 npm test，4 次会话烧穿 50 回合上限、0 PR 产出），全量回归由 PR 补发的 test 检查兜底；commit → push → 开 PR 四连要求尽早连续完成，防止 push 成功后超回合死在开 PR 前（11-11 实锤失败形态）；
 4. **无法自动修复**（flaky / 根因不明 / 修复面过大）：不开 PR，会话结论落 Actions run summary，job 红灯指路——看到红灯按 summary 与会话日志人工处理。
 
 **需要哪些 secrets**：不新增——与 claude-review / dependabot-fix 共用三件套（`CLAUDE_AUTH_TOKEN` + `CLAUDE_BASE_URL` / `CLAUDE_MODEL`）。无需 PAT：触发 run 不在 Dependabot PR 上，GITHUB_TOKEN 自带写权限（推分支、开 PR 都够），并以 `github_token` 输入**显式**传给 claude-code-action——缺省未传时 action 改走 OIDC 换 app token（需 `id-token: write`），2026-11-04 曾因此每次 fix 阶段死于 OIDC 三连重试、会话零启动（与 key 无关），显式传 GITHUB_TOKEN 同时保住「其开的 PR 不触发新 workflow run」的防回环语义。
@@ -148,7 +148,7 @@ main / develop 的 test run 失败（首次尝试）时自动发起一次修复�
 
 - **零消耗开关就是 secrets**：不配 / 删掉 secret 即全停，无需改 yml。
 - 已配置想临时停：仓库 Actions 页 → 左侧选中 workflow → `⋯` → **Disable workflow**（恢复同入口 Enable）。
-- 消耗点（每次 = 一次完整 agent 会话）：auto-review 与 security-review 在每次 PR 打开/更新各烧一次（即一个 PR 更新 = 两次会话）；`@claude`、dependabot-fix 各一次；ci-autofix 在主干 test 失败时一次（每次失败 run 至多一次，50 回合上限、约 30 止损）。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
+- 消耗点（每次 = 一次完整 agent 会话）：auto-review 与 security-review 在每次 PR 打开/更新各烧一次（即一个 PR 更新 = 两次会话）；`@claude`、dependabot-fix 各一次；ci-autofix 在主干 test 失败时一次（每次失败 run 至多一次，80 回合上限、约 60 止损——2026-11-12 上调，此前 4 次会话烧穿 50 上限且 0 PR 产出）。量级取决于 diff 大小与 max-turns（粗估单次几万～几十万 token，推测值，以实际账单为准）。
 - 同 PR 并发互斥（concurrency 组），旧审查自动取消，不会叠加烧；auto-review 检测到尾提交是 `[dependabot-fix]` 或 `[ci-autofix]` 也会跳过。
 
 ## 防回环设计

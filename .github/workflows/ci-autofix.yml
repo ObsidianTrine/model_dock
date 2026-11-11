@@ -35,8 +35,11 @@ name: ci-autofix
 #     run（GitHub 平台行为），PR 上的 test 检查由 fix 收尾步骤显式补发（见尾步注释）。
 #   - 合并永远由人工完成；本 workflow 不是 required check，红灯不阻塞任何事。
 #
-# 成本上限：guard 通过时每次主干失败 run 恰好 1 次 Claude 会话，50 回合上限、约 30 止损；
-#   确定性前置（npm ci / build / 日志预取）不占会话回合。
+# 成本上限：guard 通过时每次主干失败 run 恰好 1 次 Claude 会话，80 回合上限、约 60 止损；
+#   确定性前置（npm ci / build / 日志预取）不占会话回合。上限与白名单口径 2026-11-12 定：
+#   此前 4 次会话烧穿 50 上限（每会话另有 12-19 回合白耗在权限拒绝 + 会话内跑全量 npm test），
+#   push 分支成功、PR 恒未开、0 产出——对策：诊断只读命令全放行、验证走分层（全量交给补发
+#   test 的 PR CI）、commit→push→PR 四连尽早连续完成。
 
 on:
   workflow_run:
@@ -167,18 +170,23 @@ jobs:
             1. 读 /tmp/failed-jobs.txt 与 /tmp/failed-logs.txt 定位失败 job 与报错；需要更多上下文可用
                gh run view（只读）。注意三平台矩阵：失败可能在 windows-latest / macos-latest，报错是
                Windows / macOS 专属行为时要按 process.platform 分支思路分析，不要套 unix 直觉。
-            2. 复现失败：先跑最小复现面（对应测试文件），确认可稳定复现；复现不了再跑全量 npm test。
+            2. 复现失败：跑失败现场对应的最小复现面（对应测试文件，来自 /tmp/failed-jobs.txt），确认可
+               稳定复现；复现不了按第 4 步 flaky 路径处理——不要跑全量 npm test（CI 补发检查兜底）。
             3. 根因分析：真回归（代码或测试缺陷）还是 flaky / 环境问题。
             4. flaky 或不可稳定复现：不要改代码、不要开 PR——把「flaky 判定 + 证据 + 建议」用 Write
                工具写进 /tmp/autofix-conclusion.md，然后直接结束会话。
             5. 真回归且修复面小（几处文件以内）：做最小修复（只修失败所必需的部分，补测试覆盖回归；
                测试断言更新也算修复），遵守 AGENTS.md 硬约定（三平台兼容、用户可见文案 t() 双语同写、
-               写盘走 atomicWrite、不引入 native 依赖）。修复后跑全量 npm test 验证，然后：
+               写盘走 atomicWrite、不引入 native 依赖）。修复后只跑与改动相关的测试文件验证
+               （AGENTS.md「测试指南」分层规则，相关用例全绿即达标），然后立刻一口气走完提交四连，
+               中间不要再插任何验证或分析步骤：
                - git add <相关文件> && git commit，提交信息以 "[ci-autofix] " 开头（一句话说明修了什么）；
                - git push origin 修复分支（分支名见上）；
                - gh pr create --base <基分支> --head <修复分支>，标题以 "[ci-autofix] " 开头，描述必含：
                  失败 run 链接（上面给了）、根因分析、修复说明、验证结果（跑过哪些测试、结论）。
                描述先用 Write 写到 /tmp/pr-body.md 再 gh pr create --body-file /tmp/pr-body.md。
+               全量回归不要在会话里跑：PR 开出后工作流会自动给修复分支补发 test 检查，回归在 CI 上做；
+               push 之后若还要完善，再 commit 推同一分支即可，PR 自动更新。
             6. 审查盲区回流（仅开 PR 时、且确属盲区才写）：若根因属于「测试门禁本应拦住却没拦住」——
                测试缺口（缺用例 / 断言太弱）或既有审查纪律未覆盖的缺陷模式，在 PR 描述末尾追加一段
                ```json 围栏代码块作为考题草稿，字段对齐 .agents/review-evals/cases/*.json：
@@ -189,10 +197,11 @@ jobs:
                禁止自行改动 .agents/review-evals/ 下任何文件。根因纯属人为失误、既有门禁本可拦住的，不算盲区。
             7. 无法自动修复（根因不明 / 修复面过大 / 需要产品决策）：不硬改、不开 PR，把「根因分析 +
                影响面 + 人工处理建议」写进 /tmp/autofix-conclusion.md 后结束会话。
-            8. 回合预算纪律（最重要）：本会话上限 50 回合，全量 npm test 每轮都很贵（npm ci / build 已由
-               workflow 完成，不占回合）。若判定修复面会超过几处文件、或已用到约 30 回合仍未接近完成，
-               立即止损：按第 7 步写结论文件后结束。任何情况下都必须先写 /tmp/autofix-conclusion.md
-               （或开好 PR）再结束——宁可结论简短，也不可无声失败。
+            8. 回合预算纪律（最重要）：本会话上限 80 回合。2026-11-11 排查：此前 4 次会话烧穿 50 上限，
+               全部死在 push 分支之后、gh pr create 之前——所以第 5 步的提交四连必须尽早连续完成，
+               预算过半（约 40 回合）还没提交就先提交开 PR，再继续完善。若判定修复面会超过几处文件、
+               或已用到约 60 回合仍未接近完成，立即止损：按第 7 步写结论文件后结束。任何情况下都必须
+               先写 /tmp/autofix-conclusion.md（或开好 PR）再结束——宁可结论简短，也不可无声失败。
             9. 红线：只做最小修复，不重构、不顺手改无关文件；不修改 .github/workflows/ 下任何文件
                （改 CI 超出本次修复授权）；不 push 到 main / develop（只推修复分支）。
 
@@ -204,10 +213,15 @@ jobs:
           # 残余风险：refspec 写法 git push origin ci-autofix/<id>:develop 同样匹配本规则，由
           # main / develop 分支保护兜底（bot 的 GITHUB_TOKEN 不在允许推送名单，直接推主干被拒）；
           # prompt 第 9 步红线（不 push 到 main / develop）只是行为约束，不是机制约束。
+          # 2026-11-12 白名单放宽（11-11 烧穿事故对策）：诊断只读命令（cat/ls/head/tail/wc/grep/
+          # find/diff、git show/branch/checkout/fetch/stash、gh api/pr diff/pr checks、node）全放行
+          # ——每次权限拒绝白烧 1 回合，4 次失败会话各耗 12-19 次。写面仍收窄：文件改动走
+          # Edit/Write、push 白名单仅修复分支前缀；gh api 的写面（POST/DELETE）由分支保护兜底
+          # （推/删保护分支被平台拒），同 refspec 残余风险口径。
           claude_args: |
             --model ${{ vars.CLAUDE_MODEL }}
-            --max-turns 50
-            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin ci-autofix/*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh run view:*),WebFetch,WebSearch"
+            --max-turns 80
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(cat:*),Bash(ls:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(find:*),Bash(diff:*),Bash(node:*),Bash(npm:*),Bash(npx:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git checkout:*),Bash(git fetch:*),Bash(git stash:*),Bash(git add:*),Bash(git commit:*),Bash(git push origin ci-autofix/*),Bash(gh api:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh run view:*),WebFetch,WebSearch"
       # 收尾判定（Claude 会话跑过才执行；install/build 阶段就红时不掺和，让真失败自己说话）：
       # 1) 会话结论落 run summary——无 PR 的结局也能被读到（不允许无声结束）；
       # 2) 开出了 PR → 给修复分支补发 test 检查。为什么需要补发：PR 由 GITHUB_TOKEN 开出，
