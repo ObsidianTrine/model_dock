@@ -180,6 +180,22 @@ describe('buildPlan 路由', () => {
     expect(plan.modeLabel).toBe('混合域：产品全量 + 编排冒烟')
   })
 
+  it('改动的编排测试文件不在冒烟子集 → 自证入跑（固定子集不丢、reason 注明）', () => {
+    const plan = buildPlan(['test/orchestrator/reviewing-recovery.test.ts'])
+    expect(kindsOf(plan)).toEqual(['orch-smoke'])
+    const smoke = plan.actions[0]
+    expect(smoke.files).toContain('test/orchestrator/reviewing-recovery.test.ts')
+    expect(smoke.files).toContain('test/orchestrator/workflow-config.test.ts')
+    expect(smoke.reason).toContain('改动测试自证')
+    expect(smoke.addedCount).toBe(1)
+  })
+
+  it('硬排除文件被直接改动 → 仍自证入跑（排除名单只约束固定抽检面的预算纪律）', () => {
+    const plan = buildPlan(['test/orchestrator/sail.test.ts'])
+    expect(kindsOf(plan)).toEqual(['orch-smoke'])
+    expect(plan.actions[0].files).toContain('test/orchestrator/sail.test.ts')
+  })
+
   it('双域文件（package.json）→ 双段保守', () => {
     const plan = buildPlan(['package.json'])
     expect(plan.mode).toBe('mixed')
