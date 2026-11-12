@@ -553,12 +553,15 @@ export async function forwardToUpstream(
   // 时，跳过注定 402 的上游往返——熔断语义就是「假设 15min 内死」，与 provider 级熔断经
   // pickTarget eligible() 跳过同语义（LiteLLM cooldown 同款）。有映射的熔断模型已被上方闸门
   // 预改写直落备用模型（modelAfter = 备用模型，未熔断），不会进到此分支；provider 未配映射时
-  // isModelMeltdown 恒 false（recordModelOutcome 只对配映射 provider 记账），显式判
-  // !mfMap?.[finalModel] 是双保险。candidateSkip 跳链上下一候选（同 key_cooldown 语义，链上
+  // isModelMeltdown 恒 false（recordModelOutcome 只对配映射 provider 记账），显式判「无映射 /
+  // 自映射」（下方 mfTo）是双保险。candidateSkip 跳链上下一候选（同 key_cooldown 语义，链上
   // 别家可能伺服同一模型，不中止整条链）；attempt 记 note=model_cooldown（该候选无真实上游往返，
   // 经 attemptNote 覆盖——cause 保持 quota 供日志/前端按额度类展示）。
   const finalModel = rewritten.modelAfter
-  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && !mfMap?.[finalModel]) {
+  // 自映射（手编 config.toml 绕过保存期校验，上方闸门已按 fb===final 不动）等同无映射：
+  // 若仍算「有映射」，熔断模型的快速失败被架空——每请求照常撞注定 402 的上游
+  const mfTo = finalModel !== undefined ? mfMap?.[finalModel] : undefined
+  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && (!mfTo || mfTo === finalModel)) {
     const e = new UpstreamError(
       402,
       t('模型「{model}」在服务「{name}」处于额度熔断期（连续额度耗尽，冷却约 15 分钟），本次请求未发送上游', 'Model "{model}" on provider "{name}" is in quota meltdown (repeated quota exhaustion; ~15 min cooldown); this request was not sent upstream', { model: finalModel, name: provider.name ?? providerId }),
@@ -576,7 +579,9 @@ export async function forwardToUpstream(
   // 决策至此成立（fallback/absorbed 双计口径见 recordModelFallback 注）。同请求内同
   // (provider, 原模型) 只计一笔：mfCounted 由 forwardWithFailover 整链共享，429 原地重试与
   // 同 provider 合成候选重复命中闸门时不再叠加（直调方不传 Set = 每次调用各计一笔）。
-  if (mfHit !== undefined && !opts.mfCounted?.has(`${providerId}\u0000${mfHit}`)) {
+  // modelAfter 缺省 = 改写判定命中但注入失败（体可浅扫却全量解析失败的边缘体，见 rewriteModel
+  // 快路径 injectModel 回落）——改发并未发生、原模型照发上游，不得计「吸收」（2026-11-13 二轮审查）。
+  if (mfHit !== undefined && rewritten.modelAfter !== undefined && !opts.mfCounted?.has(`${providerId}\u0000${mfHit}`)) {
     opts.mfCounted?.add(`${providerId}\u0000${mfHit}`)
     recordModelFallback(rt, providerId, mfHit, true)
   }
@@ -1087,6 +1092,7 @@ export async function forwardWithFailover(
       // 429 退避（P0③）：带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次（429 = 请求未被上游处理，
       // 重放无重复计费风险）；无头 / 超过 5s / 额度耗尽体维持既有 failover 语义。留痕 retried_429:<id>。
       let drained: string | undefined
+      let retrySendT0: number | undefined // 429 原地重试那一发的起点（lastMs 口径用，见下方 lastSendMs）
       if (up.status === 429) {
         const raMs = parseRetryAfterMs(up.headers['retry-after'])
         if (raMs !== null && raMs <= RETRY_AFTER_MAX_WAIT_MS) {
@@ -1094,12 +1100,18 @@ export async function forwardWithFailover(
           if (!isQuotaError(up.status, drained)) {
             if (raMs > 0) await sleepInterruptible(raMs, opts.signal)
             if (!retried429.includes(c.providerId)) retried429.push(c.providerId)
+            retrySendT0 = Date.now()
             up = await forwardToUpstream(rt, c.target, fwdOpts)
             drained = undefined // 重试产生的是新响应，体未读
           }
         }
       }
       const ms = Date.now() - t0
+      // lastMs 决胜口径（登记项①回归，2026-11-13 第二轮审查）：t0 基点下成功 ms 含首发 + 退避等待 +
+      // 重发——重试成功会把「最近成功耗时」记成两发加退避（可到 5s+），备用链同优先级按 lastMs
+      // 升序决胜时该服务被伪装成最慢。成功账只记最后一发；attempts 的 ms 保持整段墙钟（候选级对账
+      // 口径不变），recordOutcome 失败档本就不消费 ms（只 ok 写 lastMs）。
+      const lastSendMs = retrySendT0 !== undefined ? Date.now() - retrySendT0 : ms
       attempts.push({ provider: c.providerId, status: up.status, ms })
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
@@ -1121,7 +1133,7 @@ export async function forwardWithFailover(
       else if (quota) recordOutcome(rt, c.providerId, { ok: false, cls: 'quota', ms })
       else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
       else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
-      else recordOutcome(rt, c.providerId, { ok: true, ms })
+      else recordOutcome(rt, c.providerId, { ok: true, ms: lastSendMs })
       const canSwitch = (switchable?.has(up.status) ?? false) || quota
       if (canSwitch && i < cands.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
@@ -1135,10 +1147,12 @@ export async function forwardWithFailover(
       // 同 provider 内按 model_fallback 映射换备用模型再试一跳。合成候选 push 进 cands（本次迭代的
       // 候选数组：无剔除时即 picked.ordered 同一引用，有剔除时为过滤副本，push picked.ordered 进不了循环）；
       // 备用模型再 402 时按其键继续查映射（配置期已拒环）。
-      // 备用模型已熔断 / 达跳数安全帽 / 该模型无映射 → 不合成，402 维持原样回传（现状行为）。
+      // 备用模型已熔断 / 达跳数安全帽 / 该模型无映射或自映射 → 不合成，402 维持原样回传（现状行为）。
       if (quota && sentModel !== undefined && mfMap) {
         const fbModel = mfMap[sentModel]
-        if (fbModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
+        // 自映射（手编 config.toml 绕过保存期校验，闸门同规 fb===final 不动）不再合成同模型
+        // 候选——否则重复 402 会被放大成最多 4 跳同模型空转（2026-11-13 二轮审查）
+        if (fbModel && fbModel !== sentModel && mfHops < MAX_MODEL_FALLBACK_HOPS && !isModelMeltdown(rt, c.providerId, fbModel)) {
           // 链尾合成 = 改发已发生（只计 fallback：原模型已被真实请求过，非闸门吸收）
           recordModelFallback(rt, c.providerId, sentModel, false)
           cands.push({
@@ -1206,6 +1220,19 @@ export async function forwardWithFailover(
         throw e
       }
     }
+  }
+  // 候选被模型相容过滤全部剔除（主候选不可用 + 其余 auto 候选目录均不含请求模型）：循环未跑、
+  // lastErr 为空——如实报「无候选可伺服该模型」，不落进下方「连接失败（undefined）」的误导出口
+  // （2026-11-13 二轮审查：attempts 里已有逐候选 model_mismatch 留痕，随错误对象带出）。
+  if (cands.length === 0) {
+    const e = new UpstreamError(
+      503,
+      t('自动路由：没有候选可伺服该请求模型（主候选不可用，其余自动候选经模型目录核对全部剔除）', 'Auto route: no candidate can serve the requested model (primary unavailable; all other auto candidates were filtered out by the model catalog check)'),
+      t('modeldock provider list 查看各服务健康与模型目录；确认请求模型名是否正确，或让目标服务管理其模型目录', 'Run modeldock provider list for service health and catalogs; verify the requested model name or have a target service manage its catalog')
+    )
+    e.routeReason = 'model_mismatch' // 日志 cause 经 server 侧 e.cause ?? e.routeReason 落 model_mismatch
+    e.attempts = attempts
+    throw e
   }
   // 链尾出口（CORRECT-09 ②）：候选全部 candidateSkip 耗尽时从未发生真实连接——透传最后一个
   // skip 错误的 status 与 hint（如钥匙环锁定的 503 + 解锁指引），routeReason 用 skip_all
