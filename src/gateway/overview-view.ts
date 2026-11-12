@@ -12,7 +12,7 @@ import { sandboxInstallCapability } from './install.js'
 import { PRESETS } from '../presets/data.js'
 import { autoRouteInfo, isMeltdown, parseFallbackEntry, type GatewayRuntime } from './state.js'
 import { usageTodayView } from './state/logs.js'
-import { ensurePresetsLoaded, presetModels } from '../presets/data.js'
+import { ensurePresetsLoaded, presetModels, presetsGenerationNow } from '../presets/data.js'
 import { markUiLeaving, markUiPing, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { peekSyncRequest } from './lan.js'
 import { syncStatus } from '../sync/engine.js'
@@ -376,13 +376,18 @@ export async function hOverview(c: AdminCtx): Promise<void> {
 }
 
 /** 预设目录端点（perf-p2-polish）：预设附带模型目录从 overview 轮询载荷拆出——presets 在进程内
- *  恒定（ensurePresetsLoaded 幂等，用户 presets.json 改动经重启/reloadPresets 生效），旧形态每 5s
- *  轮询重复携带 ~30KB 静态数据。「添加服务」浮层打开时才拉。序列化缓存 + ETag（hModelCatalog
- *  同款）：重复打开命中 304，连 stringify 都省。presets.json 格式错误在此首次触达时抛出
+ *  近似恒定（ensurePresetsLoaded 幂等；例外：同步导入 applyImportedDoc 会在进程内 reloadPresets，
+ *  缓存按 presetsGenerationNow 代数判失效），旧形态每 5s 轮询重复携带 ~30KB 静态数据。
+ *  「添加服务」浮层打开时才拉。序列化缓存 + ETag（hModelCatalog 同款）：重复打开命中 304，
+ *  连 stringify 都省。presets.json 格式错误在此首次触达时抛出
  *  （原 buildOverview 首屏报错点移到这里，BUG-12 的可操作报错不丢）。 */
-let presetsViewCache: { data: string; etag: string } | null = null
+let presetsViewCache: { gen: number; data: string; etag: string } | null = null
 export function presetsView(): { data: string; etag: string } {
-  if (presetsViewCache) return presetsViewCache
+  // 缓存按预设表代数判失效：同步导入（applyImportedDoc → reloadPresets）在网关进程内改了
+  // PRESETS 后，「添加服务」目录必须即时反映新预设——旧实现只认「进程内恒定」，导入后
+  // 旧串 + 旧 ETag 一路 304，直到重启才翻新
+  const gen = presetsGenerationNow()
+  if (presetsViewCache && presetsViewCache.gen === gen) return presetsViewCache
   ensurePresetsLoaded()
   const data = JSON.stringify({
     ok: true,
@@ -396,7 +401,7 @@ export function presetsView(): { data: string; etag: string } {
     }),
   })
   const etag = '"' + createHash('sha256').update(data).digest('base64url').slice(0, 22) + '"'
-  presetsViewCache = { data, etag }
+  presetsViewCache = { gen, data, etag }
   return presetsViewCache
 }
 

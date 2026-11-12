@@ -296,24 +296,22 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
     }
   }, 60_000)
 
-  it('启动失败场景：坏 argv（--port 非数字）时 CLI 限时退出并报错，daemon 日志收到崩溃输出（fd 2 接管）', async () => {
+  it('启动失败场景：坏 argv（--port 非数字）时 CLI 限时退出并报可操作端口错误（先验拦下，不经 daemon 崩溃路径）', async () => {
     const h = fakeHome()
     try {
-      // 端口占用不适用：网关对 EADDRINUSE 有顺延换端口语义（listenWithRetry），不构成 daemon 崩溃；
-      // 坏 argv 让 listen 校验抛 RangeError（非 EADDRINUSE 不重试）→ daemon 走崩溃路径
+      // --port 先验（rev-cli-ops-night）：非法值在 spawn daemon 前就被 exitWithError 拦下，
+      // 用户直接拿到「端口写错了」+ 示例，不再走 listen(NaN) → daemon 崩溃路径（旧断言的
+      // 「网关启动超时」+ daemon 日志 fd 2 接管随该路径一并消失，fd 2 机制对真实崩溃仍生效）
       const { output, exit } = spawnDaemonCli(h, 'notanumber' as unknown as number)
       const exitRes = await Promise.race([
         exit,
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('坏 argv 场景 CLI 15s 未退出')), 15_000)),
       ])
       expect(exitRes.code).toBe(1)
-      // 报错不蒸发：超时文案 + daemon 日志路径提示都到用户眼前
-      expect(output()).toContain('网关启动超时')
-      expect(output()).toContain('daemon 启动报错见日志')
-      // daemon 崩溃输出落日志（fd 2 接管）：IIFE catch 的「网关启动失败」可追
-      const log = path.join(h.home, '.modeldock', 'logs', `daemon-${localDateStr()}.log`)
-      expect(fs.existsSync(log)).toBe(true)
-      expect(fs.readFileSync(log, 'utf8')).toContain('网关启动失败')
+      // 报错不蒸发：端口口径 + 实际收到值 + 修复示例都到用户眼前
+      expect(output()).toContain('端口必须是 0–65535 的整数')
+      expect(output()).toContain('notanumber')
+      expect(output()).toContain('gateway start --port 8890')
     } finally {
       h.restore()
     }

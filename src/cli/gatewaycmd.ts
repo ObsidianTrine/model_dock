@@ -15,7 +15,7 @@ import {
   type AutostartKind,
   type AutostartStatus,
 } from '../autostart.js'
-import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, exitWithError, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
 
 export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; debug?: boolean }): Promise<void> {
   const cfg = await loadCfg()
@@ -25,6 +25,14 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     return
   }
   const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
+  // 显式 --port 先验再传：NaN/越界此前一路漏到 listen(NaN) 才炸，用户看到的是 Node 内部
+  // RangeError 裸栈（daemon 形态更只是超时 + 日志路径），拿不到「端口写错了」的可操作结论
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    exitWithError(
+      t('端口必须是 0–65535 的整数（收到：{v}）', 'The port must be an integer in 0-65535 (got: {v})', { v: String(opts.port) }),
+      t('示例：modeldock gateway start --port 8890；不加 --port 则用 config.toml [gateway] 的 port', 'Example: modeldock gateway start --port 8890; without --port the [gateway] port in config.toml applies')
+    )
+  }
 
   if (!opts.daemon) {
     const { startForeground } = await import('../gateway/main.js')

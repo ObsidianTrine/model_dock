@@ -133,6 +133,23 @@ describe('cmdGatewayStart / requireGateway（活网关伪造）', () => {
       h.restore()
     }
   })
+
+  it('--port 非法值：可操作报错退出（回归：NaN/越界此前漏到 listen 才炸出内部裸栈）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    stubExit()
+    try {
+      await expect(cmdGatewayStart({ port: 'abc' })).rejects.toThrow(ExitError)
+      expect(errs.join('\n')).toContain('端口必须是')
+      expect(errs.join('\n')).toContain('abc')
+      await expect(cmdGatewayStart({ port: '70000' })).rejects.toThrow(ExitError)
+      expect(errs.join('\n')).toContain('70000')
+      // 非整数同样拦下（Number('8890.5') 是合法 Number 但不是端口）
+      await expect(cmdGatewayStart({ port: '8890.5' })).rejects.toThrow(ExitError)
+    } finally {
+      h.restore()
+    }
+  })
 })
 
 describe('cmdGatewayRotateToken', () => {
