@@ -9,7 +9,7 @@ import { createUsageTap, type UsageStats } from '../src/gateway/usage.js'
 import { buildRuntime, logRequest, type ResolvedTarget } from '../src/gateway/state.js'
 import { setSecret } from '../src/config/secrets.js'
 import { globToRegExp, matchAlias } from '../src/util/glob.js'
-import { drainAppendStreams, appendLine } from '../src/util/fsx.js'
+import { drainAppendStreams, appendLine, closeAppendStreams, __testAppendStreamKeys } from '../src/util/fsx.js'
 import { logsDir } from '../src/util/paths.js'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -480,6 +480,30 @@ describe('appendLine 空闲刷盘（XPLAT-02：Windows stop 硬杀前的尾部�
       const lines = fs.readFileSync(file, 'utf8').trim().split('\n')
       expect(lines.map((l) => JSON.parse(l).seq)).toEqual([1, 2])
     } finally {
+      h.restore()
+    }
+  })
+
+  it('容量淘汰按最近使用而非插入序：热点流（早插入、仍活跃写）不被误逐', async () => {
+    const h = fakeHome()
+    try {
+      closeAppendStreams() // 清空流池与本文件前序用例残留，保证计数断言干净
+      fs.mkdirSync(logsDir(), { recursive: true }) // appendLine 契约：调用方保证目录存在
+      const files = Array.from({ length: 8 }, (_, i) => path.join(logsDir(), `lru-${i}.jsonl`))
+      for (const f of files) appendLine(f, '{"n":1}\n')
+      await sleep(10) // lastUse 是 ms 时间戳：批内写入可能同 ms，阶段间拉开保证「次早 < 刷新 < 新建」可比
+      const hot = files[0] // 最早插入：刷新 lastUse 模拟持续活跃写
+      appendLine(hot, '{"n":2}\n')
+      await sleep(10)
+      const ninth = path.join(logsDir(), 'lru-8.jsonl')
+      appendLine(ninth, '{"n":1}\n') // 第 9 个流触发容量淘汰
+      const pool = __testAppendStreamKeys()
+      expect(pool).toHaveLength(8)
+      expect(pool).not.toContain(files[1]) // lastUse 最小者（次早插入且未再写）被逐
+      expect(pool).toContain(hot) // 热点流存活（旧插入序淘汰会误逐它）
+      expect(pool).toContain(ninth)
+    } finally {
+      await drainAppendStreams() // 收尾释放 fd（Windows 上 restore 删目录需无占用）
       h.restore()
     }
   })

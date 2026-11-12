@@ -63,4 +63,27 @@ describe('migrateSandboxKeyRefsToLocal', () => {
       h.restore()
     }
   })
+
+  it('手编非串 key_ref（TOML 整数）：isExternal 短路防御，不再 parseKeyRef 抛错打断启动', async () => {
+    const h = fakeHome()
+    try {
+      // `key_ref = 5`（TOML 合法、形状错）：此前 `!ref` 放行数字 → parseKeyRef 抛 SecretsError
+      // 整体 reject，「单项失败跳过不影响其余」被打破、沙箱网关启动被单条坏数据卡死
+      await saveConfig(baseCfg({
+        security: { store: 'keychain' },
+        providers: {
+          bad: { base_url: 'https://b.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 5 },
+          ark: { base_url: 'https://ark.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'keychain:mdk-hc-missing-c' },
+        },
+      } as unknown as Partial<Config>))
+      const migrated = await migrateSandboxKeyRefsToLocal()
+      expect(migrated).toEqual([]) // 坏条目与读不到的外部条目都跳过，不抛错
+      const cfg = await loadConfig()
+      expect(cfg.providers.bad.key_ref).toBe(5) // 坏值原样保留（守卫兜底），不误改写
+      expect(cfg.providers.ark.key_ref).toBe('keychain:mdk-hc-missing-c')
+      expect(cfg.security.store).toBe('file')
+    } finally {
+      h.restore()
+    }
+  })
 })

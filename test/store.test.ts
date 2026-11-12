@@ -456,6 +456,40 @@ target = "agent"
   })
 })
 
+describe('gateway.schedule.windows 形状守卫（手编 TOML 合法但形状错 → 可操作 ConfigError）', () => {
+  it('windows = 5：ConfigError + hint，不再 `5.map` 裸 TypeError 直穿启动', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+      fs.writeFileSync(configPath(), `version = 1\n[gateway.schedule]\nwindows = 5\n`)
+      let err: unknown
+      try {
+        await loadConfig()
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ConfigError)
+      expect((err as Error).message).toContain('windows')
+      expect((err as ConfigError).hint).toBeTruthy()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('windows 元素非表（字符串/数字）同拦；schedule 非表不再静默吞', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+      fs.writeFileSync(configPath(), `version = 1\n[gateway.schedule]\nwindows = ["x"]\n`)
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      fs.writeFileSync(configPath(), `version = 1\n[gateway]\nschedule = 5\n`)
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('saveConfig 无变化跳写（PERF-14 残余）', () => {
   it('no-op mutateConfig / 同值 saveConfig 不落盘：mtime 与内容不变', async () => {
     const h = fakeHome()

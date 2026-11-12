@@ -347,16 +347,29 @@ export function __testSetDpapiBatch(fn?: (script: string, b64In: string[]) => Pr
   dpapiImpl = fn
 }
 
+/** 是否瞬时类失败（只对这类重试；导出供单测直接验证分流口径）：超时（AV 扫描/CIM 僵死，
+ *  下把子进程可能就正常）、spawn 级资源类错误码（EAGAIN/EMFILE/ENFILE/EBUSY）。非零退出
+ *  （PowerShell 跑完但 Unprotect 失败——换账号/换机器密文必败，同一输入不会变）与
+ *  ENOENT/EACCES（环境缺工具/无权限）是确定性失败：重试只会白付一次 PowerShell spawn
+ *  （跨机 secrets.json 每次 verify/读取都双倍延迟）。 */
+export function transientSpawnError(e: unknown): boolean {
+  const rec = e as Error & { transient?: unknown; code?: unknown }
+  if (rec?.transient === true) return true
+  return rec?.code === 'EAGAIN' || rec?.code === 'EMFILE' || rec?.code === 'ENFILE' || rec?.code === 'EBUSY'
+}
+
 /** 一次 PowerShell 进程批量加/解密多份（base64 入，base64 出，逐行对应）。payload 经 stdin 传、
- *  密钥不进命令行。失败重试一次（覆盖瞬时 spawn 失败）；仍失败即抛——DPAPI Protect/Unprotect
- *  依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条 spawn（旧回退
- *  曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
+ *  密钥不进命令行。失败按错误类型分流：仅瞬时类重试一次；确定性失败即抛——DPAPI Protect/
+ *  Unprotect 依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条
+ *  spawn（旧回退曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
 function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
   if (dpapiImpl) return dpapiImpl(script, b64In)
   return (async () => {
     if (b64In.length === 0) return []
     let lastErr: unknown
+    let attempts = 0
     for (let attempt = 0; attempt < 2; attempt++) {
+      attempts = attempt + 1
       try {
         return await new Promise<string[]>((resolve, reject) => {
           const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -371,7 +384,12 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
           child.stdin.on('error', () => {})
           child.on('close', (code) => {
             guard.dispose()
-            if (guard.timedOut()) return reject(guard.timeoutError())
+            if (guard.timedOut()) {
+              const te = guard.timeoutError()
+              // 瞬时标记（transientSpawnError 分流依据）：超时属可重试类
+              ;(te as Error & { transient?: boolean }).transient = true
+              return reject(te)
+            }
             if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
             resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
           })
@@ -379,12 +397,13 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
         })
       } catch (e) {
         lastErr = e
+        if (!transientSpawnError(e)) break
       }
     }
     // debug 探针：DPAPI 是 Windows daemon 读写密钥的必经 spawn，失败此前只在上抛链可见，
     // 上层吞掉时（如导入路径）完全无痕。明文绝不入日志（密钥走 stdin，err 是 PowerShell 报错）
     if (debugOn()) {
-      debugLog('spawn', 'dpapi', { ok: false, attempts: 2, err: String((lastErr as Error)?.message ?? lastErr).slice(0, 200) })
+      debugLog('spawn', 'dpapi', { ok: false, attempts, err: String((lastErr as Error)?.message ?? lastErr).slice(0, 200) })
     }
     throw lastErr
   })()

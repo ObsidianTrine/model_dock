@@ -46,6 +46,18 @@ describe('jsonpath', () => {
     expect(root.p2.kind).toBe('y')
   })
 
+  it('star 读：任一命中取首个有值结果（此前静默 undefined 与头注矛盾，detect.key_path 假阴性）', () => {
+    const root: any = { a: { x: { b: 1 }, y: { b: 2 } } }
+    expect(getPath(root, '$.a.*.b')).toBe(1) // 首个命中
+    expect(getPath(root, '$.a.*.missing')).toBeUndefined() // 全未命中
+    expect(getPath({ a: 'str' }, '$.a.*.b')).toBeUndefined() // 标量容器：不命中不崩
+    expect(getPath(null, '$.*.b')).toBeUndefined() // 空根
+    expect(getPath({ a: { x: 5 } }, '$.a.*')).toBe(5) // star 收尾段：首个有值子节点
+    expect(getPath({ a: {} }, '$.a.*')).toBeUndefined()
+    // 与写入共用严格 tokenize：语法错误读侧同样报错
+    expect(() => getPath(root, "$.a['b']")).toThrow(/无法解析/)
+  })
+
   // ── CORRECT-08 三处复现原文（坏输入 → 可操作双语报错，不再静默写坏数据）──
 
   it('缺陷①：引号键 / 负数下标 / 未闭合括号不再静默吞字改写，报可操作错误', () => {

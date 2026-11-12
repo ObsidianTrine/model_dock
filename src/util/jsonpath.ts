@@ -2,7 +2,7 @@ import { t } from './i18n.js'
 
 /**
  * 极简 JSONPath 风格路径读写，供 L2 声明式 adapter 使用。
- * 支持 `$.a.b.c`、`$.a[0].b`、`$.a.*.b`（* 遍历对象全部键，至多一个）。
+ * 支持 `$.a.b.c`、`$.a[0].b`、`$.a.*.b`（* 遍历对象全部键，至多一个；读侧取第一个命中）。
  * 表达式必须被完整解析：含引号键 / 负数下标 / 未闭合括号等不支持句式一律抛可操作双语错误
  * （CORRECT-08——L2 pack 的路径来自用户手写，宽容解析会把值静默写进错误的位置）。
  */
@@ -46,16 +46,28 @@ function tokenize(expr: string): Seg[] {
 }
 
 /** 读路径：与写入共用严格 tokenize（表达式无法完整解析即抛错）——取舍：L2 pack 的读写路径是
- *  同一份用户手写表达式，读侧宽容只会把「写错位置」推迟到更难排查的下游，宁可早报错。 */
+ *  同一份用户手写表达式，读侧宽容只会把「写错位置」推迟到更难排查的下游，宁可早报错。
+ *  star 读语义 = 「任一命中」：遍历对象全部键，取第一个沿余下路径读得有值的结果
+ *  （detect.key_path 的消费面只做 truthy 命中判定，与 setPath 的「改写同类叶子」同象限；
+ *  此前静默 undefined 与头注矛盾，pack 作者拿到的是误导性未命中而非语法问题）。 */
 export function getPath(root: unknown, expr: string): unknown {
-  let cur: unknown = root
-  for (const seg of tokenize(expr)) {
-    if (seg.star) return undefined // star 仅用于写入
-    if (cur == null) return undefined
-    if (seg.key !== undefined) cur = (cur as Record<string, unknown>)[seg.key]
-    else cur = (cur as unknown[])[seg.index as number]
+  return readSegs(root, tokenize(expr))
+}
+
+function readSegs(cur: unknown, segs: Seg[]): unknown {
+  if (segs.length === 0) return cur
+  const [seg, ...rest] = segs
+  if (seg.star) {
+    if (cur == null || typeof cur !== 'object' || Array.isArray(cur)) return undefined
+    for (const k of Object.keys(cur as Record<string, unknown>)) {
+      const v = readSegs((cur as Record<string, unknown>)[k], rest)
+      if (v !== undefined) return v
+    }
+    return undefined
   }
-  return cur
+  if (cur == null) return undefined
+  if (seg.key !== undefined) return readSegs((cur as Record<string, unknown>)[seg.key], rest)
+  return readSegs((cur as unknown[])[seg.index as number], rest)
 }
 
 /** 路径表达式 → 段数组（yaml Document.setIn 等需要）；不支持 star */

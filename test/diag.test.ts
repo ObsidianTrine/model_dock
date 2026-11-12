@@ -886,6 +886,50 @@ describe('doctor --deep：端到端真请求', () => {
       h.restore()
     }
   })
+
+  it('upstreamAuthProbe 池全量口径：keys 池首把不可读落到下一把（key_ref 停旧值不再假阴性）；全不可读带后端错误', async () => {
+    const h = fakeHome()
+    const servers: http.Server[] = []
+    const savedHit = process.env.MD_POOL_HIT
+    process.env.MD_POOL_HIT = 'sk-pool-hit'
+    delete process.env.MD_POOL_MISS
+    try {
+      const start = (handler: (res: http.ServerResponse) => void): Promise<number> =>
+        new Promise((resolve) => {
+          const s = http.createServer((_q, res) => handler(res))
+          servers.push(s)
+          s.listen(0, '127.0.0.1', () => resolve((s.address() as AddressInfo).port))
+        })
+      const p200 = await start((res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ data: [{ id: 'm1' }] })) })
+      // 池第 1 把 env 未设（返回 null，非抛错）→ 落到第 2 把：旧 key_ref-only 口径在此直接 skip（假阴性）
+      const poolProvider: ProviderConfig = {
+        name: 'X', base_url: `http://127.0.0.1:${p200}`, protocol: 'openai', auth_style: 'bearer',
+        key_ref: 'env:MD_POOL_MISS', keys: ['env:MD_POOL_MISS', 'env:MD_POOL_HIT'],
+      }
+      const ok = await upstreamAuthProbe(poolProvider)
+      expect(ok.kind).toBe('ok')
+      expect(ok.modelIds).toEqual(['m1'])
+      // 池全不可读且至少一把是密钥后端异常（注入 reader 抛错）：skip 详情带错误，区别于「未配 key」
+      __testSetExternalReader(async (scheme, id) => {
+        if (scheme === 'keychain' && id === 'mdk-probe-locked') throw new Error('keyring locked')
+        return null
+      })
+      const lockedProvider: ProviderConfig = {
+        name: 'X', base_url: `http://127.0.0.1:${p200}`, protocol: 'openai', auth_style: 'bearer',
+        key_ref: '', // 池-only 形态：keys 非空时 key_ref 不参与转发口径
+        keys: ['keychain:mdk-probe-locked'],
+      }
+      const skip = await upstreamAuthProbe(lockedProvider)
+      expect(skip.kind).toBe('skip')
+      expect(skip.detail).toContain('keyring locked')
+    } finally {
+      __testSetExternalReader()
+      for (const s of servers) { s.closeAllConnections?.(); s.close() }
+      if (savedHit === undefined) delete process.env.MD_POOL_HIT
+      else process.env.MD_POOL_HIT = savedHit
+      h.restore()
+    }
+  })
 })
 
 describe('doctor 日志清理修复（prune-logs）', () => {
