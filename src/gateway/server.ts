@@ -970,7 +970,8 @@ async function hSchedule(c: AdminCtx): Promise<void> {
     if (Array.isArray(w.days)) {
       const set = new Set<number>()
       for (const d of w.days as unknown[]) {
-        const n = Number(d)
+        // 仅接受 number：Number(true)===1 曾把布尔 true 静默落成「周一」（ttl_minutes 同型强转，rev-server-night）
+        const n = typeof d === 'number' ? d : NaN
         if (Number.isInteger(n) && n >= 1 && n <= 7) set.add(n)
       }
       days = [...set]
@@ -1294,8 +1295,10 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       const dn = typeof meta?.display_name === 'string' ? meta.display_name.trim() : ''
       if (dn && dn.toLowerCase() !== mid.toLowerCase()) rec.display_name = dn
       else if (prev?.display_name) rec.display_name = prev.display_name
-      const ctx = Number(meta?.context_window)
-      const out = Number(meta?.max_output)
+      // 仅接受 number：Number(true)===1 曾把布尔 true 静默落成 context_window=1（ttl_minutes 同型
+      // 强转，rev-server-night）；非 number 视为未填，走下方填充链
+      const ctx = typeof meta?.context_window === 'number' ? meta.context_window : NaN
+      const out = typeof meta?.max_output === 'number' ? meta.max_output : NaN
       if (Number.isFinite(ctx) && ctx > 0 && Number.isInteger(ctx)) rec.context_window = ctx
       if (Number.isFinite(out) && out > 0 && Number.isInteger(out)) rec.max_output = out
       // 用户留空时，用填充链补齐（内置表 → models.dev 目录；拉取时已收的上游值不会走到这里）
@@ -1535,16 +1538,18 @@ async function hProvisionHarness(c: AdminCtx): Promise<void> {
   }
   if (!id) id = `eph-${randomBytes(6).toString('hex')}`
   // TTL：缺省 480 分钟（8h，覆盖一个无人值守工作日）、上限 1440（24h 硬顶——「临时」凭据
-  // 不得事实永久化，泄漏收敛靠短命）；非法 400 + 可操作报错
-  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes != null ? Number(b.ttl_minutes) : EPHEMERAL_TTL_DEFAULT_MINUTES
+  // 不得事实永久化，泄漏收敛靠短命）；非法 400 + 可操作报错。非 number 一律 NaN 同路 400：
+  // Number(true)===1 曾把布尔 true 静默当 1 分钟 TTL，泄漏收敛被无声绕过（rev-server-night）
+  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes === undefined ? EPHEMERAL_TTL_DEFAULT_MINUTES : NaN
   if (!Number.isFinite(ttl) || ttl <= 0) {
     return sendError(res, 400, t('ttl_minutes 非法：需为正数（分钟），缺省 {d}，上限 {m}', 'Invalid ttl_minutes: must be a positive number (minutes), default {d}, max {m}', { d: EPHEMERAL_TTL_DEFAULT_MINUTES, m: EPHEMERAL_TTL_MAX_MINUTES }))
   }
   if (ttl > EPHEMERAL_TTL_MAX_MINUTES) {
     return sendError(res, 400, t('ttl_minutes 超上限：最多 {m} 分钟（24 小时）。临时凭据的泄漏收敛靠短命，确需长期用请走持久 harness 接入', 'ttl_minutes exceeds the cap: at most {m} minutes (24 hours). Leak containment for ephemeral credentials relies on short lifetimes; use a persistent harness for long-term access', { m: EPHEMERAL_TTL_MAX_MINUTES }))
   }
-  // 日限额：配了就挂进 tokenlimits per-harness 日限额体系（超限 429 与现有 daily_tokens 一致）
-  const maxDailyRaw = b.max_daily_tokens != null ? Number(b.max_daily_tokens) : undefined
+  // 日限额：配了就挂进 tokenlimits per-harness 日限额体系（超限 429 与现有 daily_tokens 一致）；
+  // 非 number 一律 NaN 同路 400：Number(true)===1 曾把布尔 true 当 1 token 日限额（与 ttl_minutes 同型强转）
+  const maxDailyRaw = typeof b.max_daily_tokens === 'number' ? b.max_daily_tokens : b.max_daily_tokens === undefined ? undefined : NaN
   if (maxDailyRaw != null && (!Number.isFinite(maxDailyRaw) || maxDailyRaw <= 0)) {
     return sendError(res, 400, t('max_daily_tokens 非法：需为正数（本地日 token 上限），不配即不限', 'Invalid max_daily_tokens: must be a positive number (local-day token cap); omit for unlimited'))
   }
@@ -1592,7 +1597,8 @@ async function hRenewHarness(c: AdminCtx): Promise<void> {
   const b = await jsonRequestBody(req)
   const id = typeof b.harnessId === 'string' ? b.harnessId.trim() : ''
   if (!id) return sendError(res, 400, t('缺少 harnessId（provision 响应返回的临时 harness id）', 'Missing harnessId (the ephemeral harness id returned by provision)'))
-  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : b.ttl_minutes != null ? Number(b.ttl_minutes) : NaN
+  // 非 number 一律 NaN 同路 400（Number(true)===1 强转陷阱，与 provision 同口径，rev-server-night）
+  const ttl = typeof b.ttl_minutes === 'number' ? b.ttl_minutes : NaN
   if (!Number.isFinite(ttl) || ttl <= 0) {
     return sendError(res, 400, t('ttl_minutes 非法：需为正数（分钟）。续期只延不缩，请求值小于剩余寿命时到期不变', 'Invalid ttl_minutes: must be a positive number (minutes). Renewal only extends; a value below the remaining lifetime leaves the expiry unchanged'))
   }
