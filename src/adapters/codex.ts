@@ -387,19 +387,27 @@ export const codexAdapter: HarnessAdapter = {
           // 用户手设值有 attach 快照兜底，可 restore 找回
           delete root.model_context_window
           delete root.model_max_output_tokens
-          // catalog 指针同理收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）
-          if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
-          // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；
-          // 收空后整键删除，不残留空表
-          const ups = root.profiles
-          if (ups && typeof ups === 'object') {
-            for (const [pid, entry] of Object.entries(ups)) {
-              if (entry && typeof entry === 'object' && (entry as Record<string, unknown>).model_provider === 'modeldock') {
-                delete ups[pid]
-              }
+        }
+        // catalog 指针 / web_search 缺省 / profiles 条目的写入不受 setDefault 门控
+        // （attach 不带 --set-default 也写），收回同样在 model_provider 门控之外——
+        // 否则无 setDefault 的接入 detach 后三处残留（/model 选择器仍列 ModelDock 目录、
+        // web_search 被钉 disabled、codex -p 撞失效路由）。
+        // catalog 指针仅指向 ModelDock 自家文件时收回（用户自设的他值不动）
+        if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
+        // web_search 只收我们补写的缺省值 'disabled'（attach 仅补空、只写这一个值）；
+        // 用户改过的任何其他值不动。用户显式配的 'disabled' 与补写值无法区分，一并收回
+        // （接入前快照可 restore 找回，与窗口键同一兜底口径）
+        if (root.web_search === 'disabled') delete root.web_search
+        // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；
+        // 收空后整键删除，不残留空表
+        const ups = root.profiles
+        if (ups && typeof ups === 'object') {
+          for (const [pid, pentry] of Object.entries(ups)) {
+            if (pentry && typeof pentry === 'object' && (pentry as Record<string, unknown>).model_provider === 'modeldock') {
+              delete ups[pid]
             }
-            if (Object.keys(ups).length === 0) delete root.profiles
           }
+          if (Object.keys(ups).length === 0) delete root.profiles
         }
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
         if (c2) changes.push(c2)

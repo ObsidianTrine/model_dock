@@ -191,6 +191,65 @@ describe('codex model_catalog_json 生成', () => {
       h.restore()
     }
   })
+
+  it('attach 不带 setDefault 也写 catalog/web_search/profiles——detach 后三键清净（收回不随 setDefault 门控）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgWithModels())
+      const plan = await attach({ setDefault: false })
+      const root = readRoot(h.home)
+      // 无 setDefault：默认 provider / 默认模型 / 窗口键不动，其余三面照写
+      expect(root.model_provider).toBeUndefined()
+      expect(root.model).toBeUndefined()
+      expect(root.model_context_window).toBeUndefined()
+      expect(root.model_catalog_json).toBe(codexCatalogPath())
+      expect(root.web_search).toBe('disabled')
+      expect(root.profiles.demo).toEqual({ model_provider: 'modeldock', model: 'glm-5-3-flash-260828' })
+      expect(plan.notes.some((n) => n.includes('--set-default'))).toBe(true)
+
+      const det = await codexAdapter.planDetach(await loadConfig())
+      await applyChanges('codex', 'detach', det.changes, { yes: true, redactions: [TOKEN] })
+      const after = readRoot(h.home)
+      expect(after.model_providers?.modeldock).toBeUndefined()
+      expect(after.model_catalog_json).toBeUndefined()
+      expect(after.web_search).toBeUndefined()
+      expect(after.profiles).toBeUndefined() // 自家条目收空整键删
+      expect(after.model_provider).toBeUndefined() // 用户原值本就没有，不被我们写入
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
+  it('无 setDefault 接入的 detach：用户自己的 model_provider / web_search / catalog / profiles 不动', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgWithModels())
+      await attach({ setDefault: false })
+      // 用户接入后手改：web_search 显式开、catalog 自设他值、demo profile 自定义
+      const cfgPath = path.join(h.home, '.codex', 'config.toml')
+      fs.writeFileSync(
+        cfgPath,
+        fs
+          .readFileSync(cfgPath, 'utf8')
+          .replace(/model_catalog_json = .*/, 'model_catalog_json = "/custom/catalog.json"')
+          .replace(/web_search = .*/, 'web_search = "auto"')
+          .replace('[profiles.demo]\nmodel_provider = "modeldock"', '[profiles.demo]\nmodel_provider = "my-own"')
+      )
+      const det = await codexAdapter.planDetach(await loadConfig())
+      await applyChanges('codex', 'detach', det.changes, { yes: true, redactions: [TOKEN] })
+      const after = readRoot(h.home)
+      expect(after.model_catalog_json).toBe('/custom/catalog.json') // 用户自设他值不收回
+      expect(after.web_search).toBe('auto') // 只收我们补写的缺省 'disabled'，用户显式值不动
+      expect(after.profiles.demo.model_provider).toBe('my-own') // 用户自设 profile 保留
+      expect(after.model_providers?.modeldock).toBeUndefined() // provider 条目本身照常收回
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
 })
 
 describe('codex 直连守卫', () => {

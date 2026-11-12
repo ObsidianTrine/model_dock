@@ -60,6 +60,13 @@ export interface ProviderJsonFactoryOptions {
    * 可能被拒，显式传 false 跳过——模型列表仍由 models 声明接管，行为不受影响。
    */
   onlyConfigured?: boolean
+  /**
+   * 本体探测是否沙箱隔离（透传 cliPresent 的 sandboxIsolated，语义见 presence.ts）：
+   * 可装进沙箱的 npm 类客户端（OpenCode，npm i -g）传 true——FAKE_HOME 下只认沙箱内命中，
+   * 宿主真机的同名命令不算数；脚本/桌面类客户端（MiMoCode 官方脚本装真机二进制）不传，
+   * 保持并集探测，否则沙箱里永远无法接入。
+   */
+  sandboxIsolated?: boolean
 }
 
 /**
@@ -92,7 +99,7 @@ export function craftProviderJsonAdapter(factory: ProviderJsonFactoryOptions): H
 
   /** 本体双信号：配置目录不随卸载删除，配置在而命令缺席视为卸载残留，判未安装 */
   function present(): boolean {
-    return !binName || cliPresent(binName, factory.id)
+    return !binName || cliPresent(binName, factory.id, { sandboxIsolated: factory.sandboxIsolated })
   }
 
   return {

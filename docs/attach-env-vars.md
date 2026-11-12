@@ -2,7 +2,7 @@
 
 > 用途：一览 ModelDock 接入（attach/切模式/detach）会**读、写、删**客户端配置文件里的哪些键——排查「接入后行为不对」时先对照本页，也作为后续新增客户端适配器时的清单模板。
 > 维护约定：
-> 1. **以代码为准**：本文按 2026-11-04 develop（9646298）逐个核对适配器实码整理——claude-code 补录 1.6.0 起网关模式补写的两枚 `CLAUDE_CODE_DISABLE_*` 键、9 个内置客户端契约节全部补齐（承接 2026-11-03 bac930b 接管清理 + 301b66c modelPicker 版本门控的整理）；适配器实现调整后请同步本页，行号不写（会漂移），写分支/条件名。
+> 1. **以代码为准**：本文按 2026-11-04 develop（9646298）逐个核对适配器实码整理——claude-code 补录 1.6.0 起网关模式补写的两枚 `CLAUDE_CODE_DISABLE_*` 键、9 个内置客户端契约节全部补齐（承接 2026-11-03 bac930b 接管清理 + 301b66c modelPicker 版本门控的整理）；2026-11-13 对照实码补齐 Codex 11-09 / 11-11 两波新增键（`model_catalog_json` / `web_search` / `[profiles.*]` / 窗口键），并把各节 detach 匹配口径改写为与 `oursEntryUrl` 实现一致；适配器实现调整后请同步本页，行号不写（会漂移），写分支/条件名。
 > 2. 每个客户端一节；新接入客户端按 Claude Code 节的表式模板补节。
 > 3. 「清除」列的条件口径务必写清（无条件 / 旧上游接管时 / takeoverModels 让位），这是最容易踩坑的部分。
 
@@ -12,6 +12,7 @@
 - **写盘前自动快照**：接入前状态可用 `modeldock restore`（或控制台断开还原）整体还原。
 - **幂等**：重复接入内容无变化时零写盘、零快照。
 - **历史注入物只按我们自己的值精确识别后清除**（如带 ModelDock 标记的 modelPicker、精确比对的白名单值），用户自己配的同名键不动。
+- **detach 的「是我们写的」条目匹配（oursEntryUrl）**：zcode / dsh / codex / provider-json 工厂（OpenCode、MiMo Code、MiMo 桌面端）/ claude-code 的条件统一是——条目 URL 的 **origin** 与接入时登记的 `gateway_base` 一致。`gateway_base` 恒为本机回环网关 `http://127.0.0.1:<端口>`（**直连接入也登记网关地址，直连地址不参与该匹配**）；唯一例外是 WorkBuddy，额外接受等于登记 `direct_base` 的直连条目。未登记 `gateway_base` 的旧版接入回退回环启发式（URL 指向 127.x / ::1 / localhost 即认）。直连写入的条目在 detach 时由接入快照还原收回（detach = 先还原最近一次接入前快照，再跑残留清理兜底）——残留清理这一步只认网关地址（WorkBuddy 直连条目除外）。
 
 ---
 
@@ -109,7 +110,7 @@
 
 `~/.zcode/v2/config.json`（旧版存储）里 ModelDock 历史版本写入的 `provider['builtin:modeldock']` 条目——新版 ZCode 迁移时跳过 `builtin:*` 前缀、该条目永远不会显示，只作清理。用户自己的条目一律不动。
 
-### detach（条件：条目 `api.baseUrl` 经 oursEntryUrl 精确比对通过——等于本 harness 登记的网关地址 / 直连地址；未登记的旧接入回退回环启发式）
+### detach（条件：条目 `api.baseUrl` 经 oursEntryUrl 比对通过——匹配口径见「通用原则」，只认登记的网关地址 origin，直连地址不参与）
 
 删 providerRules 的 modeldock 条目、manual/smart 模型规则里 providerId=`modeldock` 的全部规则、providerOrder 里的 `modeldock` 项、旧版 `builtin:modeldock`。用户其他供应商与其余字段不动。
 
@@ -131,7 +132,7 @@
 | `agent-default-model`（仅 `--set-default`） | `{provider:'modeldock', model:<profile.default_model>}` | 无 default_model 时跳过、不猜占位值 |
 | `~/.dsh/.credentials.yaml` 的 `refs.MODELDOCK_TOKEN` | 网关 token（直连写上游真实 Key） | 顶层 `version` 缺失时补 `1`（新版凭据格式必需、缺失会拒载）；已有 version 不覆写 |
 
-### detach（条件：provider 条目 `baseURL` oursEntryUrl 比对通过）
+### detach（条件：provider 条目 `baseURL` oursEntryUrl 比对通过——匹配口径见「通用原则」，只认登记的网关地址 origin）
 
 删 modeldock provider 条目（空 providers 表 / 空 patch 条目顺带收敛）；`agent-default-model` 仅当其 `provider === 'modeldock'` 时删除；credentials 删 `refs.MODELDOCK_TOKEN` 与旧拼写 `refs.MODELRDOCK_TOKEN`（<0.3.1）——凭据清理独立于 provider 比对，patch 全净但 ref 残留时同样清。
 
@@ -149,17 +150,21 @@
 
 | 键 | 写入值 | 说明 |
 |---|---|---|
-| `model_providers.modeldock` | `{name:'ModelDock', base_url, http_headers:{Authorization:'Bearer <token>'}, wire_api:'responses'}` | 网关写 OpenAI 形态网关地址 + 网关 token；直连写上游 responses 端点（未配置回退 base_url 并提示）。TOML 整包重写会丢注释（含注释时提示，快照可还原） |
+| `model_providers.modeldock` | `{name:'ModelDock', base_url, http_headers:{Authorization:'Bearer <token>'}, wire_api:'responses'}` | 网关写 OpenAI 形态网关地址 + 网关 token；直连写上游 responses 端点（未配置回退 base_url 并提示；Anthropic 协议端点结构性不可直连，attach 直接报错）。TOML 整包重写会丢注释（含注释时提示，快照可还原） |
 | `model_provider`（仅 `--set-default`） | `'modeldock'` | 未加则不切默认 provider |
 | `model`（仅 `--set-default` 且 profile 有 default_model） | 默认模型 ID | — |
+| `model_context_window` / `model_max_output_tokens`（仅 `--set-default` 且解析出对应元数据） | 默认模型的上下文窗口 / 最大输出 | 根级键作用于当前激活模型（Codex 对不在其内置表的模型按假定窗口处理）；路由切换重烙跟随更新 |
+| `model_catalog_json`（网关模式且当前路由服务商有模型目录；**与 --set-default 无关**） | `~/.modeldock/codex-catalog.json`（指针；目录文件由 ModelDock 按 /model 选择器机制投影路由服务商模型目录生成） | 用户已自设他值时尊重不覆盖；目录空 fail-open 不写 |
+| `web_search`（同 `model_catalog_json` 条件，仅缺省时补） | `'disabled'` | 多数非 OpenAI 上游对独立 web_search 工具类型直接 400（小米官方模板同款缺省）；用户显式值不动 |
+| `profiles.<路由 ID>`（全部 ModelDock 路由；**与 --set-default 无关**） | `{model_provider:'modeldock', model:<该路由 default_model>}` | `codex -p <id>` 一键切路由免控制台往返；default_model 不在该路由服务商目录内不写；同名 profile 已被用户自设（model_provider 非 modeldock）跳过不覆盖并点名 |
 
-### detach（条件：`model_providers.modeldock.base_url` oursEntryUrl 比对通过）
+### detach（条件：`model_providers.modeldock.base_url` oursEntryUrl 比对通过——匹配口径见「通用原则」）
 
-删 `model_providers.modeldock`；根 `model_provider === 'modeldock'` 时一并删。另扫 `.zshrc` / `.zprofile` / `.bashrc` / `.bash_profile` / `.profile` 清旧版哨兵段（`# >>> modeldock codex env >>>` … `# <<< modeldock codex env <<<`）——哨兵是 ModelDock 自己的标记，全量扫描幂等且安全。
+删 `model_providers.modeldock`；根 `model_provider === 'modeldock'` 时再删 `model_provider` / `model_context_window` / `model_max_output_tokens`（窗口键随 `--set-default` 的路由接管写入，仅在路由仍由我们接管时收回）。以下三处**无论是否 `--set-default` 接入都收回**（attach 写入同样不受 setDefault 门控）：`model_catalog_json` 仅当仍指向 `~/.modeldock/codex-catalog.json`（用户自设他值不动）；`web_search` 仅当值仍是我们补写的缺省 `'disabled'`（用户改过的其他值不动；用户显式配的 `'disabled'` 与补写值无法区分，一并收回，接入前快照可 restore）；`[profiles.*]` 仅收 `model_provider === 'modeldock'` 的条目（用户自设保留），收空连根删。另扫 `.zshrc` / `.zprofile` / `.bashrc` / `.bash_profile` / `.profile` 清旧版哨兵段（`# >>> modeldock codex env >>>` … `# <<< modeldock codex env <<<`）——哨兵是 ModelDock 自己的标记，全量扫描幂等且安全。
 
 ### 从不触碰
 
-用户其他 model_providers 条目、其余 TOML 字段（注释除外——重写即丢，见上）；不新增任何环境变量。
+用户其他 model_providers 条目、用户自设的 profiles 条目 / model_catalog_json / web_search 值、其余 TOML 字段（注释除外——重写即丢，见上）；不新增任何环境变量。
 
 ---
 
@@ -174,7 +179,7 @@
 | `provider.modeldock` | `{npm:'@ai-sdk/openai-compatible', name:'ModelDock', options:{baseURL, apiKey}}` | 网关写 OpenAI 兼容 `/v1` 地址 + 网关 token；直连写上游 openai 端点 + 真实 Key。JSONC 注释在重写为标准 JSON 时丢失（含注释时提示，快照可还原） |
 | `model`（仅 `--set-default` 且 profile 有 default_model） | `'modeldock/<default_model>'` | 无 default_model 不写、不猜占位值 |
 
-### detach（条件：`provider.modeldock.options.baseURL` oursEntryUrl 比对通过）
+### detach（条件：`provider.modeldock.options.baseURL` oursEntryUrl 比对通过——匹配口径见「通用原则」，只认登记的网关地址 origin）
 
 删 `provider.modeldock`（provider 表因此为空则连根删）；根 `model` 以 `modeldock/` 开头时删。用户其他 provider 不动。
 
@@ -190,7 +195,7 @@
 
 - 配置候选（首个存在者生效，都不存在时第一个为新建目标）：`$MIMOCODE_HOME/config/mimocode.jsonc|.json` → `~/.config/mimocode/mimocode.jsonc|.json` →（Windows 兜底）`%LOCALAPPDATA%\mimocode\mimocode.jsonc|.json`。
 - **写入 / 清除契约与 OpenCode 节完全一致**（`provider.modeldock` 的 npm/name/options.baseURL/apiKey + `--set-default` 的根 `model`），差异是 `declareModels`：attach 另写 `provider.modeldock.models`（每模型 `{name, limit:{context,output}, attachment, modalities}`——上下文与输出缺任一则整段不写、能力未知不声明）与 `provider.modeldock.only_configured_models=true`（MiMoCode 不声明模型就不列出）。
-- detach 同 OpenCode：`options.baseURL` oursEntryUrl 比对通过才删 `provider.modeldock`（含 models 声明）与 `modeldock/` 前缀根 model。
+- detach 同 OpenCode：`options.baseURL` oursEntryUrl 比对通过（匹配口径见「通用原则」）才删 `provider.modeldock`（含 models 声明）与 `modeldock/` 前缀根 model。
 
 ---
 
@@ -211,7 +216,7 @@
 | models 数组追加条目 | 每模型 `{id:<模型 ID>, name:<显示名或 ID>, url:<完整端点>, apiKey:<token>}` | 先精确摘除 isOursEntry 旧条目（`url` oursEntryUrl 比对、或等于本 harness 登记的 `direct_base`）再追加；id 与用户自有条目撞名（指向其它端点）时**跳过不覆盖**并逐个点名 |
 | `{models:[…]}` 形态的 `availableModels`（仅当已是字符串数组） | 并入本次写入的模型 ID（去重） | 手写对象格式才需要 |
 
-### detach（条件：条目 isOursEntry——`url` oursEntryUrl 比对、或等于登记 `direct_base`）
+### detach（条件：条目 isOursEntry——`url` oursEntryUrl 比对通过，或等于登记的 `direct_base`；WorkBuddy 是唯一额外匹配直连地址的客户端，其余客户端口径见「通用原则」）
 
 只删我们的条目；`availableModels` 里清掉「已无任何条目引用」的 ID。用户自有条目一律不动（含与本方模型同 ID 的自有条目）。
 
