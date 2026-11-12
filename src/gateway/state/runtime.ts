@@ -183,6 +183,11 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   for (const id of rt.modelProbe?.results.keys() ?? []) {
     if (!rt.config.providers[id]) rt.modelProbe?.results.delete(id)
   }
+  // per-provider 延迟采样（logs.ts logRequest 按 entry.provider 只增不删）同口径清理：
+  // 已删服务的采样环（各 500 条）与 count/lastMs 失去语义，长驻进程反复增删不再永驻内存
+  for (const id of rt.metricsLatency.keys()) {
+    if (!rt.config.providers[id]) rt.metricsLatency.delete(id)
+  }
   // 模型粒度熔断运行态（model_fallback 域）同口径清理：provider 已删，或其 model_fallback 已
   // 不含该模型键（映射被移除 → 该键的熔断记账失去语义）时清掉；幸存键跨热加载保留
   for (const key of rt.modelHealth?.keys() ?? []) {
@@ -209,4 +214,10 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   // 临时 harness 重登记（C14）：热加载整包替换了 config/tokens，runtime-only 的 eph 条目
   // 需重新注入（未过期者）；过期与 id 被真实条目占用者在 reapply 内自行清场
   reapplyEphemeralHarnesses(rt)
+  // 已删 harness 的 token 限额计数（tokenlimits 按 harnessId 只增不删）同口径清理（P2-7）。
+  // 必须放在 reapply 之后：临时 harness 幸存者此时已重新注入 config.harness，先清会把
+  // 幸存临时条目的当日计数误删（unregisterEphemeralHarness 自己摘条目时会顺手清自己的计数）
+  for (const id of rt.tokenUsage.keys()) {
+    if (!rt.config.harness[id]) rt.tokenUsage.delete(id)
+  }
 }
