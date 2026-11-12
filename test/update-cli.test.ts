@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeHome } from './helpers.js'
 import { cmdUpdate, UPDATE_TOKEN_SECRET_ID } from '../src/cli/update.js'
 import { getSecret } from '../src/config/secrets.js'
@@ -20,12 +20,22 @@ const mockCheck = vi.mocked(checkUpdate)
 const mockClean = vi.mocked(cleanUpdateRemnants)
 
 describe('cmdUpdate CLI 编排', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>
   let errSpy: ReturnType<typeof vi.spyOn>
 
+  // isolate:false 共享 mock 注册表下禁止 clearAllMocks/restoreAllMocks（会连别的文件的
+  // 模块 mock 一起清，AGENTS.md vitest 隔离模型）——只清/只还原本文件自己的桩（F5）
   beforeEach(() => {
-    vi.clearAllMocks()
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    mockRun.mockClear()
+    mockCheck.mockClear()
+    mockClean.mockClear()
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    logSpy.mockRestore()
+    errSpy.mockRestore()
   })
 
   it('无令牌：匿名继续（公开仓库免 PAT），token=null 透传给 runUpdate', async () => {
@@ -70,7 +80,9 @@ describe('cmdUpdate CLI 编排', () => {
     try {
       await saveConfig({ ...emptyConfig(), security: { store: 'file' } })
       await cmdUpdate({ token: 'ghp_saved' })
-      vi.clearAllMocks()
+      mockRun.mockClear()
+      mockCheck.mockClear()
+      mockClean.mockClear()
       await cmdUpdate({ check: true })
       expect(mockCheck).toHaveBeenCalledTimes(1)
       expect(mockRun).not.toHaveBeenCalled()

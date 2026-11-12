@@ -27,8 +27,8 @@ vi.mock('../src/config/secrets.js', async (importOriginal) => ({
   deleteSecret: vi.fn(async () => {}),
 }))
 vi.mock('../src/autostart.js', async () => {
-  const { viFnAutostartMock } = await import('./mocks/autostart.js')
-  return viFnAutostartMock()
+  const { spreadAutostartMock } = await import('./mocks/autostart.js')
+  return spreadAutostartMock()
 })
 vi.mock('../src/cliinstall.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/cliinstall.js')>()),
@@ -53,15 +53,27 @@ function baseCfg(): Config {
 
 describe('cmdUninstall 拆分语义（默认保留配置 / --purge 彻底清除）', () => {
   let logSpy: ReturnType<typeof vi.spyOn>
+  let errSpy: ReturnType<typeof vi.spyOn>
+
+  // isolate:false 共享 mock 注册表下禁止 clearAllMocks/restoreAllMocks（会连别的文件的
+  // 模块 mock 一起清，AGENTS.md vitest 隔离模型）——只清/只还原本文件自己的桩（F5）
+  const clearOwnMocks = () => {
+    vi.mocked(cmdGatewayStop).mockClear()
+    vi.mocked(sweepGatewayProcesses).mockClear()
+    vi.mocked(deleteSecret).mockClear()
+    vi.mocked(uninstallAutostart).mockClear()
+    vi.mocked(removeCliLink).mockClear()
+  }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    clearOwnMocks()
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    logSpy.mockRestore()
+    errSpy.mockRestore()
   })
 
   it('默认：只卸程序——停网关/清自启/清命令行入口，配置目录与密钥原样保留', async () => {

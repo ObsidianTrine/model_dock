@@ -1301,6 +1301,45 @@ describe('dsh adapter', () => {
     }
   })
 
+  it('legacy settings.yaml：provider 条目被用户改指他处时，agent-default-model 仍按名字空间清掉（2026-11-12 审查 F7 口径统一）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      // provider 条目名仍是 modeldock 但 baseURL 已被用户改指别处（非本网关），agent-default 仍指向 modeldock
+      const yaml =
+        'llm-pi-ai:\n  providers:\n    modeldock:\n      api: anthropic-messages\n      baseURL: https://elsewhere.example.com\n      apiKeyEnv: ELSEWHERE\nagent-default-model:\n  provider: modeldock\n  model: m1\n'
+      await atomicWrite(p, yaml, 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await dshAdapter.planDetach(await loadConfig())
+      await applyChanges('dsh', 'detach', plan.changes, { yes: true })
+      const finalText = fs.readFileSync(p, 'utf8')
+      expect(finalText).toContain('https://elsewhere.example.com') // 用户改指他处的 provider 条目原样保留
+      expect(finalText).not.toContain('agent-default-model') // 指向 modeldock 名字空间的默认模型条目清掉（与 patch 布局同口径）
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('legacy settings.yaml：provider 条目已被用户删除时，悬空的 agent-default-model 单独清掉', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers:\n    ark:\n      api: anthropic-messages\n      baseURL: https://ark.example.com\nagent-default-model:\n  provider: modeldock\n  model: m1\n', 0o600)
+      await withConfig(baseCfg())
+
+      const plan = await dshAdapter.planDetach(await loadConfig())
+      await applyChanges('dsh', 'detach', plan.changes, { yes: true })
+      const finalText = fs.readFileSync(p, 'utf8')
+      expect(finalText).toContain('ark.example.com') // 用户自有条目保留
+      expect(finalText).not.toContain('agent-default-model') // 悬空条目清掉，不再留残骸
+    } finally {
+      h.restore()
+    }
+  })
+
   it('clientProfiles：attach 只写指定 profile（desktop），其余（web）不动；未知 profile 报错', async () => {
     const h = fakeHome()
     try {
