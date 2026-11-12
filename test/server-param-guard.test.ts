@@ -227,7 +227,7 @@ describe('全滤空链 503 model_mismatch 日志投影（rev-relay-round2-night 
       const logs = await adminGet(port, '/_modeldock/logs?kind=err')
       expect(logs.status).toBe(200)
       const lj = JSON.parse(logs.body) as {
-        logs: Array<{ path?: string; status?: number; harness?: string; provider?: string; cause?: string; reason?: string; attempts?: Array<{ provider: string; note?: string }> }
+        logs: Array<{ path?: string; status?: number; harness?: string; provider?: string; cause?: string; reason?: string; attempts?: Array<{ provider: string; note?: string }> }>
       }
       const entry = lj.logs.find((e) => e.path === '/v1/messages' && e.status === 503)
       expect(entry).toBeTruthy()
