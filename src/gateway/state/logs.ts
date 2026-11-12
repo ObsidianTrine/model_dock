@@ -110,7 +110,6 @@ interface TodayTracker {
    *  （ts ≥ 下界）不与回填重叠——创建条目本身传其 ts 作下界，被增量记账、被回填跳过，双计
    *  窗口收敛到毫秒级（P2-11）。 */
   sinceMs: number
-  backfilling: boolean
 }
 
 let todayTracker: TodayTracker | null = null
@@ -119,7 +118,7 @@ function ensureTodayTracker(sinceTs?: string): TodayTracker {
   const dir = logsDir()
   const date = localIsoTs().slice(0, 10)
   if (todayTracker && todayTracker.dir === dir && todayTracker.date === date) return todayTracker
-  const t: TodayTracker = { dir, date, acc: createUsageAccumulator(usagePriceResolver), sinceMs: Date.parse(sinceTs ?? localIsoTs()), backfilling: true }
+  const t: TodayTracker = { dir, date, acc: createUsageAccumulator(usagePriceResolver), sinceMs: Date.parse(sinceTs ?? localIsoTs()) }
   todayTracker = t
   void backfillTodayTracker(t)
   return t
@@ -138,8 +137,6 @@ async function backfillTodayTracker(t: TodayTracker): Promise<void> {
     }
   } catch {
     /* 回填失败不影响转发；仪表按已收到的部分展示 */
-  } finally {
-    t.backfilling = false
   }
 }
 
@@ -193,7 +190,7 @@ export function logAudit(rt: GatewayRuntime, entry: AuditEntry): void {
 
 let eventRingSink: ((entry: EventEntry) => void) | null = null
 /** 注册事件 → ring 转发（网关进程启动时调一次，main.ts）：ops 层（switchToService 等）没有
- *  rt 上下文，reportEvent 只落 events.jsonl；经此把同一事件同步进网关运行时 ring，页面日志表
+ *  rt 上下文，reportEvent 只落当日事件日文件（eventsLogName）；经此把同一事件同步进网关运行时 ring，页面日志表
  *  可见。传 null 撤销（测试用）。 */
 export function setEventRingSink(fn: ((entry: EventEntry) => void) | null): void {
   eventRingSink = fn

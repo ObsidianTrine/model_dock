@@ -273,7 +273,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
         }
       })
       .catch((e: unknown) => {
-        // 定时窗口接管重写客户端失败不再无声吞掉：事件落 ring/events.jsonl 可排查
+        // 定时窗口接管重写客户端失败不再无声吞掉：事件落 ring/当日事件日文件（eventsLogName）可排查
         logEvent(rt, { level: 'warn', op: 'display_route_sync', err: e instanceof Error ? e.message : String(e) })
       })
   }
@@ -2618,7 +2618,7 @@ async function handleAdmin(
   const method = req.method ?? '-'
   // 管理面访问日志（debug 级，2026-11-07 事故补课：此前管理面零访问日志，attach/plan 请求
   // 到没到、成没成全无线索）。res finish 时记 {method, path, status, ms}；非 2xx 另无条件记
-  // events.jsonl warn（排障不依赖 debug 开关）。
+  // 当日事件日文件 warn（eventsLogName；排障不依赖 debug 开关）。
   if (debugOn()) {
     res.on('finish', () => {
       debugLog('admin', 'http', { method, path: url, status: res.statusCode, ms: Date.now() - started })
