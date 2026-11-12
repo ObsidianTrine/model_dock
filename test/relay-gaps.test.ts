@@ -389,15 +389,18 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
   /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
   async function startModelMock(
     route: (model: string) => { status: number; body: string; headers?: Record<string, string> }
-  ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
+  ): Promise<{ url: string; seen: string[]; raws: string[]; close: () => Promise<void> }> {
     const seen: string[] = []
+    const raws: string[] = [] // 原始请求体（seen 对非 JSON 体恒 ''，验证「坏体原样透传」需看字节）
     const s = http.createServer((req, res) => {
       const chunks: Buffer[] = []
       req.on('data', (c) => chunks.push(c))
       req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        raws.push(raw)
         let model = ''
         try {
-          model = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { model?: string }).model ?? ''
+          model = (JSON.parse(raw || '{}') as { model?: string }).model ?? ''
         } catch {
           /* 非 JSON 体按空模型处理 */
         }
@@ -411,6 +414,7 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
     return {
       url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`,
       seen,
+      raws,
       close: () => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) }),
     }
   }
@@ -646,7 +650,10 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       const body = Buffer.from('{"model":"mA","x":{bad}}')
       const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
       expect(r.status).toBe(200)
-      expect(mock.seen).toEqual(['mA']) // 原模型照发（改写注入失败，闸门意图未落地）
+      // 坏体原样透传（字节保留，mock seen 对非 JSON 体恒 ''）：原始字节里有原模型、无备用名
+      // ——改写注入失败，闸门意图未落地（mock.raws 验证字节，seen 验不了坏体）
+      expect(mock.raws[0]).toContain('"model":"mA"')
+      expect(mock.raws[0]).not.toContain('m B')
       expect(r.modelAfter).toBeUndefined()
       expect(rt.modelFallbackCounts?.size ?? 0).toBe(0) // 不得虚记「被吸收」（修复前记 1 笔 absorbed）
     } finally {
