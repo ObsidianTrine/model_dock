@@ -46,6 +46,7 @@ export function upstreamEndpoint(provider: ProviderConfig, proto: Protocol): str
       t('在「编辑服务」里填入该协议的接口地址，或改用该服务商支持的协议', 'Fill in the endpoint URL for this protocol in "Edit Service", or use a protocol the provider supports')
     )
     e.candidateSkip = true // 该候选不支持客户端协议
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'proto_endpoint_missing'
     throw e
   }
@@ -129,6 +130,11 @@ export class UpstreamError extends Error {
   transport?: boolean | 'timeout'
   /** true = 候选本身不可用（key 缺失 / 协议端点缺失等配置级问题，请求未发出）：跳到下一候选而不是中止整条链 */
   candidateSkip?: boolean
+  /** true = 本机配置级跳过且请求从未出网关（key 缺失/协议端点缺失/model 熔断快速失败——与
+   *  candidateSkip 的区别：换 key 重试仍被 401/403 拒的 key_pool_rejected 也是 candidateSkip，
+   *  但那次请求真实出过网）。海况分桶据此旁路（recordOutcome skipSea）：未出网尝试不进
+   *  error_rate/风暴闸 429 率的分母（cruise1112 P2-12）。 */
+  localSkip?: boolean
   /** 自动路由结果标记（down_all / failover / skip_all 等），用于日志 reason */
   routeReason?: string
   /** 网关侧错误归类短码（与 LogEntry.cause 同一枚举）：各抛出点就地打标，日志/前端据此显示可读原因，不再靠解析错误文本 */
@@ -510,6 +516,7 @@ export async function forwardToUpstream(
       t('检查系统钥匙环是否已解锁（解锁后重试）；或 modeldock provider set-key {id} 重新设置 key', 'Check that the system keyring is unlocked and retry; or run modeldock provider set-key {id} to set the key again', { id: providerId })
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'key_pool_empty'
     throw e
   }
@@ -525,6 +532,7 @@ export async function forwardToUpstream(
       t('冷却 15 分钟后自动重试；已换新 key 可在 config.toml 保存 keys（热加载立即恢复），或 modeldock provider set-key {id} 更新', 'Cooldown ends in 15 minutes and retries automatically; after replacing a key, save the keys array in config.toml (hot-reload restores it immediately) or run modeldock provider set-key {id}', { id: providerId })
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'key_cooldown'
     throw e
   }
@@ -564,6 +572,7 @@ export async function forwardToUpstream(
       t('冷却结束后自动恢复试回；或在「编辑服务」里为该模型配置 model_fallback 备用模型（熔断期间自动改发）', 'It retries the original model automatically after the cooldown; or configure a model_fallback mapping for it in "Edit Service" (traffic is auto-switched during meltdown)')
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网（快速失败）：海况分桶旁路（skipSea）
     e.cause = 'quota'
     e.attemptNote = 'model_cooldown'
     throw e
@@ -728,18 +737,19 @@ type ZstdDecoder = (buf: Buffer) => Buffer
 const zstdDecoder: ZstdDecoder | null =
   typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null
 
-/** 上游错误体读取上限（P2-6）：错误体只用于日志/诊断/错误翻译（translateUpstreamError 只取
- *  前 500 字符等），1MB 足够任何真实错误 JSON。异常/恶意上游对 4xx 回超大（或无限流式）body
- *  时不再整体进堆——入站 readBody 有 16MB 上限，出站此前无界，是网关单实例无请求级内存护栏
- *  下的堆膨胀点；超限截断保留头部（错误详情在前部，截尾不损诊断价值）。 */
-const UPSTREAM_ERROR_BODY_MAX_BYTES = 1024 * 1024
+/** 上游体读取上限（P2-6）：错误体只用于日志/诊断/错误翻译（translateUpstreamError 只取
+ *  前 500 字符等），探测体只取 usage/错误 message，1MB 足够任何真实 JSON。异常/恶意上游对
+ *  4xx 回超大（或无限流式）body 时不再整体进堆——入站 readBody 有 16MB 上限，出站此前无界，
+ *  是网关单实例无请求级内存护栏下的堆膨胀点；超限截断保留头部（错误详情在前部，截尾不损
+ *  诊断价值）。server.ts 探针（modeldock test 后端）同口径复用（cruise1112 P2-6 收尾）。 */
+export const UPSTREAM_ERROR_BODY_MAX_BYTES = 1024 * 1024
 
 /** 有界读上游体（字节上限截断保留头部）：undici BodyReadable 本体是 Readable，优先逐块累计、
  *  达上限即停（for-await break 走 Readable.return() → 流就地销毁、连接关闭不复用——错误路径
  *  换候选/回包本就不依赖连接复用）。无流形态时优先 arrayBuffer（字节精确，压缩体解压必需；
  *  text() 会按 utf8 解码把二进制体读坏，只作两者皆缺的最后回落）。读取失败不向上抛（错误体
  *  拿不到就按空串处理），返回已收到的部分。 */
-async function readBodyBounded(body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }, maxBytes: number): Promise<Buffer> {
+export async function readBodyBounded(body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }, maxBytes: number): Promise<Buffer> {
   const it = (body as unknown as AsyncIterable<unknown>)[Symbol.asyncIterator]
   if (typeof it === 'function') {
     const chunks: Buffer[] = []
@@ -1220,7 +1230,11 @@ export async function forwardWithFailover(
       const whitelistSwitch =
         timeoutTransport && i < cands.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
-      recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
+      // 未出网的本地跳过不进海况分桶（P2-12）：total 是 error_rate 与风暴闸 429 率的分母，
+      // 混入会稀释两率；真实出网失败（transport/timeout/真实 status）照记。熔断侧不变
+      //（cls 缺席本就不累计窗口，见 routing.ts recordOutcome skipSea 注）
+      const localSkip = e instanceof UpstreamError && e.localSkip === true
+      recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms, skipSea: localSkip })
       const note = classifyAttemptError(e)
       attempts.push(note ? { provider: c.providerId, note, ms } : { provider: c.providerId, ms })
       if (skip || whitelistSwitch) {

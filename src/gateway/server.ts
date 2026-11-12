@@ -49,7 +49,7 @@ import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from 
 import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
-import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
+import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -2821,7 +2821,10 @@ export async function probe(
       retries: o.retries,
     })
     if (up.status >= 400) {
-      const text = await up.body.text()
+      // 有界读（P2-6 收尾）：探针响应体此前无界，异常上游的超大 body 会整体进堆；
+      // readUpstreamErrorText 同时按 content-encoding 解压——压缩错误体直读是乱码，
+      // message/hint 提取随之失效
+      const text = await readUpstreamErrorText(up.headers, up.body)
       // 转成可读的一行：上游 message + 修复提示，而非整段 JSON
       let msg = text.slice(0, 400)
       try {
@@ -2838,7 +2841,9 @@ export async function probe(
         err: msg,
       }
     }
-    const text = await up.body.text()
+    // 成功体同样有界读（P2-6 收尾）：探测只取 usage（max_tokens=16 的响应 KB 级，1MB 上限
+    // 绰绰有余）；截断会让 JSON.parse 失败 → usage 缺席，仅观测降级不致错（见 readBodyBounded 注）
+    const text = (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
     let usage: Record<string, number> | undefined
     if (!stream) {
       try {
