@@ -16,9 +16,10 @@ const UPSTREAM_KEEPALIVE = {
 const directAgent = new Agent(UPSTREAM_KEEPALIVE)
 
 /** 解析 proxy 配置为实际代理 URL：'direct'/未配置 → null；'env' → 环境变量值（空串视为未设，
- *  与原 buildDispatcher 的 truthy 判断一致）；URL 字符串 → 原样。供 buildDispatcher 与调用方的
- *  dispatcher 缓存 key 共用——'env' 模式的缓存 key 必须用解析后的 URL，拿 'env' 字符串当 key
- *  会把首次解析结果冻结（环境变量变了仍走旧代理）。 */
+ *  与 buildDispatcher env 分支的 truthy 判断一致）；URL 字符串 → 原样（**只解析不校验**——
+ *  非法/空代理值的「构造期即抛、不静默退回直连」语义归 buildDispatcher，本函数是缓存 key
+ *  用途，非法值根本走不到缓存）。'env' 模式的缓存 key 必须用解析后的 URL，拿 'env' 字符串
+ *  当 key 会把首次解析结果冻结（环境变量变了仍走旧代理）。 */
 export function resolveProxyUrl(proxy?: string): string | null {
   const mode = proxy ?? 'direct'
   if (mode === 'direct') return null
@@ -34,10 +35,17 @@ export function resolveProxyUrl(proxy?: string): string | null {
  *  本函数无状态、每次调用都新建 ProxyAgent（连接池归属调用方）——需要复用的路径在调用侧按
  *  resolveProxyUrl 结果缓存（update/transfer.ts 与 providers/fetch.ts 的 dispatcherFor 同款），
  *  网关转发走 gateway/proxy.ts 的 rt.dispatchers（随热加载销毁重建）。
+ *  安全语义（net.test.ts 钉住）：非法 / 空代理值在构造期就抛（ProxyAgent 构造器对 uri 校验），
+ *  绝不静默退回直连——「以为走代理其实直连」是静默安全回归。分支必须按原始 mode 判：
+ *  按「解析结果 truthy」判会把 '' 吞成直连（空串是显式代理配置，不是 direct）。
  *  ProxyAgent 的 keepAlive* 选项经内部 {...opts} 透传给按 origin 建的 Agent；注意不能传 connect
  *  对象（构造器把 connect 当 connector 函数解读，proxy TLS 走 requestTls/proxyTls 选项）。 */
 export function buildDispatcher(proxy?: string): Dispatcher {
-  const url = resolveProxyUrl(proxy)
-  if (!url) return directAgent
-  return new ProxyAgent({ uri: url, ...UPSTREAM_KEEPALIVE })
+  const mode = proxy ?? 'direct'
+  if (mode === 'direct') return directAgent
+  if (mode === 'env') {
+    const url = resolveProxyUrl(mode)
+    return url ? new ProxyAgent({ uri: url, ...UPSTREAM_KEEPALIVE }) : directAgent
+  }
+  return new ProxyAgent({ uri: mode, ...UPSTREAM_KEEPALIVE })
 }

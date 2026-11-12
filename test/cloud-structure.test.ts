@@ -20,6 +20,8 @@ describe('cloud/providers 分层结构（DESIGN-05）', () => {
 
   it('providers/fetch.ts 从 util/net 引入 buildDispatcher', () => {
     const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'providers', 'fetch.ts'), 'utf8')
-    expect(src).toMatch(/import \{ buildDispatcher \} from '\.\.\/util\/net\.js'/)
+    // P1-3 代理 dispatcher 缓存（fetch.ts 内 Map 复用）新增同名模块的 resolveProxyUrl 作缓存
+    // key——仍是 util 层依赖（白名单扩一个名字，不引入 gateway/proxy），分层断言意图不变
+    expect(src).toMatch(/import \{ buildDispatcher, resolveProxyUrl \} from '\.\.\/util\/net\.js'/)
   })
 })
