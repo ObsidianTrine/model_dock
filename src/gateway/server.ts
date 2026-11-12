@@ -1361,8 +1361,13 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     if (newProtocol) t.protocol = newProtocol
     if (keyWrite) {
       if (keyWrite.pool) {
-        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）
+        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）。
+        // 建池（盘上 keys 为空）时先把 key_ref 迁入池首——providerKeyRefs 池非空时只认 keys，
+        // 不迁移原 key 静默退出轮转（2026-11-12 审查 P1-2，与 CLI set-key --add 同口径）；
+        // key_ref 保持原值不清（providerAllKeyRefs 删除口径集合去重）。常态是既有池纯追加，
+        // 本迁移只兜「计划期看到池、盘上池被清」的运行态/盘上分歧窗口
         const pool = (t.keys ??= [])
+        if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
         pool.push(keyWrite.ref)
       } else {
         t.key_ref = keyWrite.ref
@@ -1940,7 +1945,9 @@ async function hKey(c: AdminCtx): Promise<void> {
     const t = cfg.providers[provider]
     if (!t) return
     if (keyWrite.pool) {
+      // 建池即迁移 key_ref（口径同 hServiceUpdate 池追加注：2026-11-12 审查 P1-2）
       const pool = (t.keys ??= [])
+      if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
       pool.push(keyWrite.ref)
     } else {
       t.key_ref = keyWrite.ref
@@ -2037,9 +2044,16 @@ async function hReset(c: AdminCtx): Promise<void> {
     snapshotId = (await snapshot('config', 'pre-reset', [configPath(), secretsPath()])).id
   } catch { /* 快照失败不阻断重置（backups/ 通常已有历史快照） */ }
   // 2) 逐个 detach 还原客户端文件（单个失败不中断，对齐 CLI：逐条记失败继续）
+  // 临时 harness（runtime-only 合成条目，不在盘上 config、无客户端文件可还原）不进 detach：
+  // detachHarness 先查盘上 config.harness 必抛「尚未接入」，逐条污染 restoreFailed 假失败——
+  // 用完即焚语义走 unregister 即收尾（重置后也不应幸存，reloadRuntime 的 reapply 会重注入幸存者）
   const restored: string[] = []
   const restoreFailed: string[] = []
   for (const id of Object.keys(rt.config.harness)) {
+    if (rt.ephemeral.has(id)) {
+      unregisterEphemeralHarness(rt, id)
+      continue
+    }
     try {
       await detachHarness(id)
       restored.push(id)

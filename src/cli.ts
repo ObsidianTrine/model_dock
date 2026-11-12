@@ -36,7 +36,18 @@ if (process.argv.includes('--sea-gateway')) {
     const [{ startForeground }, { initLang }] = await Promise.all([import('./gateway/main.js'), import('./config/lang.js')])
     await initLang()
     const idx = process.argv.indexOf('--port')
-    const port = idx >= 0 ? Number(process.argv[idx + 1]) : undefined
+    const rawPort = idx >= 0 ? process.argv[idx + 1] : undefined
+    const port = rawPort !== undefined ? Number(rawPort) : undefined
+    // --port 缺值/非数字时 Number 产出 NaN（或 undefined 直传），startForeground 会以底层
+    // ERR_SOCKET_BAD_PORT 裸栈收场、不可操作——本分支不经 commander，缺校验，这里显式拦
+    // （2026-11-12 审查 F12）。stderr 此时已接管进 daemon 日志（本分支入口
+    // redirectDaemonStderrToLog），报错落那里与本分支其他错误同渠道
+    if (idx >= 0 && (rawPort === undefined || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535)) {
+      const shown = rawPort === undefined || rawPort === '' ? t('(未提供值)', '(not given)') : rawPort
+      console.error(t('✗ --port 无效：{v}。需为 1-65535 的整数', '✗ Invalid --port: {v}. Must be an integer between 1 and 65535', { v: shown }))
+      console.error(t('  提示: 省略 --port 则用 config.toml [gateway] port（缺省 8687），示例：modeldock --sea-gateway --port 8687', '  Hint: omit --port to use [gateway] port from config.toml (default 8687), e.g. modeldock --sea-gateway --port 8687'))
+      process.exit(1)
+    }
     // --debug 与 --port 同款手工解析（本分支不经 commander）；自启/托盘拉起 argv 不带旗标，
     // 持久开关走 config [gateway] debug / MODELRDOCK_DEBUG 环境变量
     const debugFlag = process.argv.includes('--debug')
