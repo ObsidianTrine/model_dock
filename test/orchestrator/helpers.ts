@@ -2,7 +2,7 @@
 // 让真实 feature-branch.mjs + orchestrator.mjs（mock 后端）在里面跑完整闭环。
 // 注意文件名不是 *.test.ts：vitest 只收集 test/**/*.test.ts（docs 7 章评审项）。
 
-import { execSync, spawnSync } from 'node:child_process'
+import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,6 +11,9 @@ import { format } from 'node:util'
 // 直调后 orchestrator.mjs 及其 30 个子模块成为全进程共享单例（vitest isolate:false 单池），
 // 因此 runOrchInproc 文档注释立规：禁止对 orchestrator.* 做 vi.mock。
 import { main as orchMain, setFatalExit, findRepoRoot as orchFindRepoRoot } from '../../.agents/scripts/orchestrator.mjs'
+// 跨平台进程树终止（编排器自带工具，熔断/孤儿清理同款）：rmRfRetry 的 EPERM 补杀复用，
+// 不在测试侧重写 taskkill /T /F 逻辑（Windows 无信号语义，杀树走系统工具是仓库既有约定）。
+import { killTree } from '../../.agents/scripts/orchestrator/kill-tree.mjs'
 
 const WORKTREE_ROOT = path.resolve(process.cwd()) // vitest 的 cwd = 仓库根（worktree 内）
 
@@ -97,10 +100,46 @@ export function mkRepo(opts?: { testCmd?: string; uiCheckCmd?: string; workerBac
   return { root, cleanup: () => rmRfRetry(root) }
 }
 
+/** EPERM/EBUSY 兜底补杀（win32 only）：mkRepo 仓库的 detached 孤儿还活着且 cwd 在仓库内
+ *  （如 run 落位 awaiting-human 拉起的 autoapprove --sleep-first sweep——unref 后父进程退出
+ *  不管它，睡满拍板窗口才退），rmSync 删的正是它的 cwd，等多久都是 EPERM。按命令行含
+ *  仓库根路径精确匹配补杀（mkdtemp 6 位随机后缀，路径前缀不会撞别的仓库；vitest 自身
+ *  命令行不含该路径，pid 排除自身外加一道保险）。枚举一次的成本（PowerShell 冷启动秒级）
+ *  只在删除已失败时支付，happy path 零开销。unix 上 open cwd 不阻塞 rmdir、从无此红，
+ *  不枚举（killTree 的 unix 分支对非进程组进程也不适用）。 */
+function killRepoStrayProcesses(root: string): void {
+  if (process.platform !== 'win32') return
+  let out: string
+  try {
+    out = execFileSync(
+      'powershell',
+      ['-NoProfile', '-Command',
+        'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | ForEach-Object { "{0}`t{1}" -f $_.ProcessId, $_.CommandLine }'],
+      { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+  } catch {
+    return // 枚举失败（PS 不可用/超时）：放弃补杀，交给退避重试兜底
+  }
+  const needle = (root + path.sep).toLowerCase()
+  for (const line of String(out).split('\n')) {
+    const tab = line.indexOf('\t')
+    if (tab <= 0) continue
+    const pid = Number(line.slice(0, tab))
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue
+    const cmdline = line.slice(tab + 1).toLowerCase().replace(/\//g, '\\')
+    if (cmdline.includes(needle)) {
+      try { killTree(pid) } catch { /* 已死/权限不足：忽略，下轮 rmSync 重试见分晓 */ }
+    }
+  }
+}
+
 /** git 对象落盘/异步收尾可能在 rmSync 瞬间仍在进行：ENOTEMPTY/EBUSY 退避重试
- *  （与主 test/helpers.ts 的 rmRfWithRetry 同策略；CI 实测高负载下偶发 ENOTEMPTY）。 */
+ *  （与主 test/helpers.ts 的 rmRfWithRetry 同策略；CI 实测高负载下偶发 ENOTEMPTY）。
+ *  win 的 EPERM 类失败大头不是瞬时句柄滞后而是 detached 孤儿持 cwd（见 killRepoStrayProcesses）
+ *  ——首次失败即补杀一次再退避，纯等退避（旧 6 档 ~1.9s）对 3.5min 的 sweep 毫无意义。 */
 function rmRfRetry(p: string): void {
-  const backoffMs = [10, 50, 100, 250, 500, 1000]
+  const backoffMs = [10, 50, 100, 250, 500, 1000, 2000, 4000]
+  let straysKilled = false
   for (let i = 0; ; i++) {
     try {
       fs.rmSync(p, { recursive: true, force: true })
@@ -108,6 +147,10 @@ function rmRfRetry(p: string): void {
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code ?? ''
       if (!['ENOTEMPTY', 'EBUSY', 'EPERM', 'EACCES'].includes(code) || i >= backoffMs.length) throw e
+      if (!straysKilled) {
+        straysKilled = true
+        killRepoStrayProcesses(p)
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffMs[i])
     }
   }
