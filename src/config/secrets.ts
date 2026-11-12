@@ -395,7 +395,7 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
 // win32→DPAPI（逐条 spawn 曾致几十秒，改用整表一次 PowerShell），linux 无钥匙环→machine-id 绑定 AES，
 // 其余→明文。
 
-interface FileCipher {
+export interface FileCipher {
   prefix: string
   enabled: boolean
   /** 整表解密：raw（带 prefix 的密文表）→ 明文表；未带 prefix 的值原样透传（存量明文/普通值） */
@@ -505,8 +505,16 @@ const plainCipher: FileCipher = {
   },
 }
 
+/** 测试注入的 file 后端加密方案（跨平台守卫分支无法按平台到达，如在本机强制 plainCipher）；
+ *  undefined=按平台真实选定。与既有 __testSetDpapiBatch 同套路：模块内 let 替换，不碰 vi.mock 跨文件雷区。 */
+let cipherOverride: FileCipher | undefined
+export function __testSetFileCipher(c?: FileCipher): void {
+  cipherOverride = c
+}
+
 /** 按平台一次选定 file 后端加密方案（DPAPI > machine-id AES > 明文） */
 export function pickFileCipher(): FileCipher {
+  if (cipherOverride) return cipherOverride
   if (CAN_DPAPI) return dpapiCipher
   if (CAN_MACH) return machCipher
   return plainCipher
@@ -591,16 +599,13 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
   let key = await secretsStatKey()
   const raw = await readSecretsRaw()
   const cipher = pickFileCipher()
-  if (!cipher.enabled) {
-    warnPlainFileOnce()
-    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now(), raw: { ...raw }, snapshot: { ...raw } }
-    return raw
-  }
-  // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
-  // 时，异源密文不带本平台 prefix，会被下方 hasLegacyPlain 当「存量明文」再包一层加密——
-  // 原值永久丢失，解出来的还是密文串（发上游 401）。检测到异源前缀即抛可操作错误，绝不重加密。
+  // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux/mac）
+  // 时，异源密文不带本平台 prefix，会被当「存量明文」再包一层加密（加密后端）或原样当 key 发上游
+  // （明文后端）——原值永久丢失，发上游 401。守卫必须盖住明文后端（enabled=false 的早退分支之前）：
+  // plainCipher prefix='' 时 startsWith('') 恒真会让异源密文整类漏报，前缀为空时 enc: 即异源
+  // （对齐 diag.ts detectForeignCipherRefs 口径）。检测到异源前缀即抛可操作错误，绝不重加密。
   const foreign = Object.entries(raw).find(
-    ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(cipher.prefix)
+    ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !(cipher.prefix && v.startsWith(cipher.prefix))
   )
   if (foreign) {
     const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
@@ -608,6 +613,11 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
       t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密', '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here', { k: foreign[0], p: fp }),
       t('请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json', 'Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json')
     )
+  }
+  if (!cipher.enabled) {
+    warnPlainFileOnce()
+    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now(), raw: { ...raw }, snapshot: { ...raw } }
+    return raw
   }
   const hasLegacyPlain = Object.values(raw).some(
     (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
@@ -762,6 +772,17 @@ export function providerKeyRefs(p: { key_ref?: string; keys?: string[] }): strin
   const keys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
   if (keys.length > 0) return keys
   return [p.key_ref ?? '']
+}
+
+/** provider 密钥的**全量可删清单**（purge/reset/provider rm/控制台删服务的删除口径）。
+ *  与 providerKeyRefs 的差别：池存在时 key_ref 不参与转发，但仍可能持有独立的旧密钥条目
+ *  （--add 追加不清 key_ref、去重只在池内做）——不可逆删除漏掉它会在系统钥匙环留下孤儿
+ *  条目（secrets.json 随目录删除，外部后端条目删不掉）。空哨兵与重复引用剔除。 */
+export function providerAllKeyRefs(p: { key_ref?: string; keys?: string[] }): string[] {
+  const out = new Set(providerKeyRefs(p))
+  if (typeof p.key_ref === 'string' && p.key_ref !== '') out.add(p.key_ref)
+  out.delete('')
+  return [...out]
 }
 
 /** 解析 provider 的整个 key 池：逐 ref 复用既有 scheme 解析（getSecret），单个 ref 解析失败

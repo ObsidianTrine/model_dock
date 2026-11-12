@@ -115,7 +115,10 @@ async function removeProgramArtifacts(): Promise<void> {
 export async function cmdUninstall(opts: { yes?: boolean; purge?: boolean } = {}): Promise<void> {
   const cfg = await loadConfig()
   const attached = Object.keys(cfg.harness)
-  const keyRefs = Object.entries(cfg.providers).map(([id, p]) => [id, p.key_ref] as const)
+  // 密钥删除走全量口径（providerAllKeyRefs）：keys[] 池 + 池存在时残留的 key_ref 旧引用都要清，
+  // 否则 --purge 后外部钥匙环条目成孤儿（secrets.json 随目录删除，钥匙环条目删不掉）
+  const { providerAllKeyRefs } = await import('../config/secrets.js')
+  const keyRefs = Object.entries(cfg.providers).flatMap(([id, p]) => providerAllKeyRefs(p).map((ref) => [id, ref] as const))
 
   if (opts.purge === true) {
     console.log(c.bold(t('执行完整卸载（--purge）：', 'Full uninstall (--purge):')))
@@ -218,12 +221,14 @@ export async function cmdReset(opts: { yes?: boolean; deep?: boolean } = {}): Pr
   const { cmdGatewayStop } = await import('./gatewaycmd.js')
   await cmdGatewayStop()
 
-  // keychain/secret-service 条目不在 secrets.json 里，删文件清不掉
-  const { deleteSecret } = await import('../config/secrets.js')
+  // keychain/secret-service 条目不在 secrets.json 里，删文件清不掉；providerAllKeyRefs 全量口径盖住 keys[] 池
+  const { deleteSecret, providerAllKeyRefs } = await import('../config/secrets.js')
   for (const [, p] of Object.entries(cfg.providers)) {
-    try {
-      await deleteSecret(p.key_ref)
-    } catch { /* 单项失败不阻断 */ }
+    for (const ref of providerAllKeyRefs(p)) {
+      try {
+        await deleteSecret(ref)
+      } catch { /* 单项失败不阻断 */ }
+    }
   }
 
   removeDataPaths([configPath(), secretsPath()])

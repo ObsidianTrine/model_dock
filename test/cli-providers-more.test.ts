@@ -253,6 +253,33 @@ describe('cmdProviderRm', () => {
     }
   })
 
+  it('多 key 池（keys[] + 池存在时残留的 key_ref）：rm 后全部密钥条目清净（P1-2 回归）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      // 池 2 把 file 引用 + key_ref 旧引用（--add 追加不清 key_ref，两处并存是常态）：
+      // rm 必须全删（旧实现只删 key_ref 单条，池内引用在钥匙环残留成孤儿）
+      await setSecret('pv-k1', 'sk-pool-1', 'file')
+      await setSecret('pv-k2', 'sk-pool-2', 'file')
+      await setSecret('pv-legacy', 'sk-legacy', 'file')
+      await mutateConfig((c) => {
+        c.providers['pv']!.key_ref = 'file:pv-legacy'
+        c.providers['pv']!.keys = ['file:pv-k1', 'file:pv-k2']
+      })
+      await cmdProviderRm('pv')
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']).toBeUndefined()
+      // secrets.json 里的条目随 deleteSecret 清除（Windows DPAPI 批量形态同样只是 JSON 表）
+      const store = JSON.parse(fs.readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+      expect(store).not.toHaveProperty('pv-k1')
+      expect(store).not.toHaveProperty('pv-k2')
+      expect(store).not.toHaveProperty('pv-legacy')
+    } finally {
+      h.restore()
+    }
+  })
+
   it('配置写失败：key 不被先行删除（提交序必须先配置后密钥）', async () => {
     const h = fakeHome()
     captureConsole()

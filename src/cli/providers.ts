@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { c, maskSecret, printTable, slugify, t } from '../util/index.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { addService, removeProviderCascade } from '../ops.js'
-import { defaultStore, deleteSecret, getSecret, makeKeyRef, setSecret, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getSecret, makeKeyRef, providerAllKeyRefs, setSecret, type SecretBackend } from '../config/secrets.js'
 import { PRESETS, findPreset, ensurePresetsLoaded } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
@@ -253,10 +253,17 @@ export async function cmdProviderRm(id: string): Promise<void> {
     // 与 Web 控制台 /service/delete 共用：连带清理自动路由强制服务、备用链与定时切换窗口
     removeProviderCascade(c, id)
   })
-  try {
-    await deleteSecret(p.key_ref)
-  } catch (e) {
-    console.error(c.yellow(t('⚠ provider「{id}」已从配置删除，但密钥清理失败：{m}', '⚠ Provider "{id}" removed from config, but key cleanup failed: {m}', { id, m: (e as Error).message })))
+  // 全量口径（providerAllKeyRefs）：keys[] 池 + 池存在时残留的 key_ref 旧引用，逐条尽力删
+  const failed: string[] = []
+  for (const ref of providerAllKeyRefs(p)) {
+    try {
+      await deleteSecret(ref)
+    } catch (e) {
+      failed.push((e as Error).message)
+    }
+  }
+  if (failed.length > 0) {
+    console.error(c.yellow(t('⚠ provider「{id}」已从配置删除，但 {n} 个密钥清理失败：{m}', '⚠ Provider "{id}" removed from config, but {n} key(s) failed to clean up: {m}', { id, n: String(failed.length), m: failed.join('; ') })))
     console.error(c.gray(t('提示: 可检查 {f} 后手动清理该条目', 'Hint: inspect {f} and clean the entry manually', { f: displayPath(secretsPath()) })))
     return
   }
