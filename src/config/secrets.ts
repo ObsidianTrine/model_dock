@@ -301,6 +301,11 @@ const DPAPI_PREFIX = 'enc:dpapi:'
 // 防"secrets.json 单独被拷贝/上传/备份"后直接读到明文 Key（非本机 machine-id 解不出）。
 const MACH_PREFIX = 'enc:mach:'
 
+// 「他机密文形态」白名单（异源守卫用）：只有确属 file 后端两种加密方案前缀之一的值才算异源
+// 密文；任意 enc: 开头不在此列——明文后端下真实 key 可能字面以 enc: 开头（如 enc:foo）。
+// 须与 DPAPI_PREFIX / MACH_PREFIX 保持同步（新增 FileCipher 前缀时扩展）。
+const FOREIGN_CIPHER_RE = /^enc:(dpapi|mach):/
+
 let machIdCache: string | null | undefined
 function linuxMachineId(): string | null {
   if (machIdCache !== undefined) return machIdCache
@@ -347,14 +352,21 @@ export function __testSetDpapiBatch(fn?: (script: string, b64In: string[]) => Pr
   dpapiImpl = fn
 }
 
+/** Windows 安全库暂态特征（stderr 原文判定，R1 复核）：NTE_BAD_KEYSET 族（roaming profile
+ *  密钥集未就绪时 DPAPI 报 Keyset does not exist，同账号下一次读取通常就绪）与 CRYPT_E_*
+ *  杂项族。大小写敏感——Windows 安全库错误码原文恒为此形态，放宽只会扩大误重试面。 */
+const WIN_SPAWN_TRANSIENT_RE = /CRYPT_E_[A-Z0-9_]+|NTE_BAD_KEYSET/
+
 /** 是否瞬时类失败（只对这类重试；导出供单测直接验证分流口径）：超时（AV 扫描/CIM 僵死，
- *  下把子进程可能就正常）、spawn 级资源类错误码（EAGAIN/EMFILE/ENFILE/EBUSY）。非零退出
- *  （PowerShell 跑完但 Unprotect 失败——换账号/换机器密文必败，同一输入不会变）与
+ *  下把子进程可能就正常）、spawn 级资源类错误码（EAGAIN/EMFILE/ENFILE/EBUSY）、非零退出里
+ *  stderr 含上列安全库暂态特征的（dpapiBatch 把 stderr 原文拼进 Error message，退出码数字
+ *  本身不携带可判信息）。其余非零退出（换账号/换机器密文必败，同一输入不会变）与
  *  ENOENT/EACCES（环境缺工具/无权限）是确定性失败：重试只会白付一次 PowerShell spawn
  *  （跨机 secrets.json 每次 verify/读取都双倍延迟）。 */
 export function transientSpawnError(e: unknown): boolean {
   const rec = e as Error & { transient?: unknown; code?: unknown }
   if (rec?.transient === true) return true
+  if (typeof rec?.message === 'string' && WIN_SPAWN_TRANSIENT_RE.test(rec.message)) return true
   return rec?.code === 'EAGAIN' || rec?.code === 'EMFILE' || rec?.code === 'ENFILE' || rec?.code === 'EBUSY'
 }
 
@@ -620,11 +632,13 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
   const cipher = pickFileCipher()
   // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux/mac）
   // 时，异源密文不带本平台 prefix，会被当「存量明文」再包一层加密（加密后端）或原样当 key 发上游
-  // （明文后端）——原值永久丢失，发上游 401。守卫必须盖住明文后端（enabled=false 的早退分支之前）：
-  // plainCipher prefix='' 时 startsWith('') 恒真会让异源密文整类漏报，前缀为空时 enc: 即异源
-  // （对齐 diag.ts detectForeignCipherRefs 口径）。检测到异源前缀即抛可操作错误，绝不重加密。
+  // （明文后端）——原值永久丢失，发上游 401。守卫必须盖住明文后端（enabled=false 的早退分支之前）。
+  // 异源判定只认真正的他机密文形态（enc:dpapi:/enc:mach:），不认任意 enc: 开头：明文后端下真实
+  // key 可能字面以 enc: 开头（如 enc:foo），按任意前缀误拒后 setSecret 原样回存、下次读取再抛，
+  // 报错建议「重新设置」无法自愈成死循环（R1 复核）。新增 FileCipher 前缀时本白名单须同步扩展。
+  // 检测到异源密文即抛可操作错误，绝不重加密。
   const foreign = Object.entries(raw).find(
-    ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !(cipher.prefix && v.startsWith(cipher.prefix))
+    ([, v]) => typeof v === 'string' && FOREIGN_CIPHER_RE.test(v) && !(cipher.prefix && v.startsWith(cipher.prefix))
   )
   if (foreign) {
     const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)

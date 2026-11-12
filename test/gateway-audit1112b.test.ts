@@ -176,9 +176,14 @@ describe('P2-4 relay：并发闸排队等待不计入候选耗时（recordOutcom
       // R1 占住唯一槽位（上游 150ms 后响应；槽位由返回值 release 句柄持有）
       const r1 = await forwardWithFailover(rt, target, opts)
       expect(r1.status).toBe(200)
-      // R2 到达即排队；期间排队者可观测
+      // R2 到达即排队；排队者出现改为 deadline 轮询（固定 sleep 30ms 在慢 CI worker 上
+      // R2 可能尚未走完 relay 前置就断言 → 间歇红，R2-1；范式同本文件 P2-11 用例）
+      const t0 = Date.now()
       const p2 = forwardWithFailover(rt, target, opts)
-      await new Promise((r) => setTimeout(r, 30))
+      const queuedDeadline = t0 + 3000
+      while (providerConcurrencyStats(rt, 'a').queued < 1 && Date.now() < queuedDeadline) {
+        await new Promise((r) => setTimeout(r, 25))
+      }
       expect(providerConcurrencyStats(rt, 'a').queued).toBe(1)
       // 持有槽位 200ms 模拟排队等待窗口，再放行
       await new Promise((r) => setTimeout(r, 200))
@@ -186,10 +191,15 @@ describe('P2-4 relay：并发闸排队等待不计入候选耗时（recordOutcom
       const r2 = await p2
       expect(r2.status).toBe(200)
       r2.release?.()
-      // 旧口径：t0 在取槽前 → lastMs ≈ 230ms+；新口径：t0 在取槽后 → 只含上游往返（毫秒级）
+      // 旧口径：t0 在取槽前 → lastMs ≈ 排队总时长；新口径：t0 在取槽后 → 只含上游往返。
+      // 阈值改相对断言「lastMs < 实测等待总时长的一半」（R2-1 建议）替代固定 <100ms：
+      // 慢机上本地往返本身可能逼近固定阈值，而相对阈值随实际等待一起放大；旧口径
+      // lastMs ≈ waitedMs 全额，过不了半额线。取槽后已 recordOutcome（relay 成功路径
+      // 先记账后返回），lastMs 此时必有值。
+      const waitedMs = Date.now() - t0
       const lastMs = rt.health.get('a')?.lastMs
       expect(lastMs).toBeDefined()
-      expect(lastMs!).toBeLessThan(100)
+      expect(lastMs!).toBeLessThan(waitedMs / 2)
     } finally {
       await close(mock.server)
       h.restore()
@@ -358,8 +368,10 @@ describe('P2-11 今日用量仪表：跨日/重启首请求流式异步回填（
       v = usageTodayView()
       expect(v.requests).toBe(4)
       expect(v.tokens.input).toBe(31)
-      resetUsageTodayForTest()
     } finally {
+      // 用例中途断言失败也要清 tracker（R2-4）：残留条目靠 ensureTodayTracker 按 dir+date
+      // 自愈虽无实害，收尾入 finally 与套件「测试收尾必须清理」纪律一致
+      resetUsageTodayForTest()
       h.restore()
     }
   })

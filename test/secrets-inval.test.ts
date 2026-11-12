@@ -462,4 +462,16 @@ describe('dpapiBatch 重试分流（transientSpawnError）', () => {
     expect(transientSpawnError(Object.assign(new Error('no tool'), { code: 'ENOENT' }))).toBe(false)
     expect(transientSpawnError('not an error object')).toBe(false)
   })
+
+  it('非零退出 stderr 含 Windows 安全库暂态特征（NTE_BAD_KEYSET / CRYPT_E_*）→ 也算瞬时重试一次（R1 复核）', () => {
+    // dpapiBatch 把 PowerShell stderr 原文拼进 Error message，分流按 stderr 特征判
+    expect(transientSpawnError(new Error('NTE_BAD_KEYSET: Keyset does not exist'))).toBe(true)
+    expect(transientSpawnError(new Error('powershell exited 1 -- CRYPT_E_NO_KEY_PROPERTY'))).toBe(true)
+    // NTE_BAD_KEYSET_PARAM 等同族码含同段子串，一并命中
+    expect(transientSpawnError(new Error('Exception calling "Unprotect": NTE_BAD_KEYSET_PARAM'))).toBe(true)
+    // 确定性失败的真实 stderr（换账号密文）：不含特征码，维持不重试（不因扩展白付双倍延迟）
+    expect(transientSpawnError(new Error('Exception calling "Unprotect" with "3" argument(s): "The specified key is not valid for use in the specified state."'))).toBe(false)
+    // 特征码大小写敏感：Windows 安全库原文恒为全大写，小写变体不命中（防误重试面扩大）
+    expect(transientSpawnError(new Error('nte_bad_keyset: keyset does not exist'))).toBe(false)
+  })
 })

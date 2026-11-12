@@ -891,6 +891,7 @@ describe('doctor --deep：端到端真请求', () => {
     const h = fakeHome()
     const servers: http.Server[] = []
     const savedHit = process.env.MD_POOL_HIT
+    const savedMiss = process.env.MD_POOL_MISS
     process.env.MD_POOL_HIT = 'sk-pool-hit'
     delete process.env.MD_POOL_MISS
     try {
@@ -927,6 +928,9 @@ describe('doctor --deep：端到端真请求', () => {
       for (const s of servers) { s.closeAllConnections?.(); s.close() }
       if (savedHit === undefined) delete process.env.MD_POOL_HIT
       else process.env.MD_POOL_HIT = savedHit
+      // 与同用例 MD_POOL_HIT 对称还原（R2-3）：MD_POOL_MISS 此前只删不还
+      if (savedMiss === undefined) delete process.env.MD_POOL_MISS
+      else process.env.MD_POOL_MISS = savedMiss
       h.restore()
     }
   })

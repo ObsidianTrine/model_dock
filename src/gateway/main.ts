@@ -118,7 +118,7 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
   // ops 层（switchToService 等，无 rt 上下文）的后台事件经此转发进本网关运行时 ring，页面日志表可见
   setEventRingSink((entry) => pushRing(rt, entry))
   // 将历史明文密钥迁移到平台安全后端（macOS/Linux）；失败不影响网关启动，但不再无声吞掉——
-  // 经 logEvent 落 ring 与 events.jsonl（放在 rt 构建之后，事件才有环形缓冲可进）
+  // 经 logEvent 落 ring 与当日事件日文件（events-YYYY-MM-DD.jsonl，见 eventsLogName；放在 rt 构建之后，事件才有环形缓冲可进）
   migrateSecretsToSecure().catch((e: unknown) => {
     logEvent(rt, { level: 'warn', op: 'secrets_migrate', err: e instanceof Error ? e.message : String(e) })
   })
