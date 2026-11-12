@@ -104,6 +104,26 @@ describe('cmdUninstall 拆分语义（默认保留配置 / --purge 彻底清除�
     }
   })
 
+  it('--purge：多 key 池（keys[] + 池存在时残留的 key_ref）的密钥条目全量清除（P1-2 回归）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = baseCfg()
+      cfg.providers['up'].keys = ['file:sk-pool-1', 'file:sk-pool-2']
+      await saveConfig(cfg)
+
+      await cmdUninstall({ yes: true, purge: true })
+
+      expect(fs.existsSync(modeldockDir())).toBe(false)
+      // 全量口径：池内 2 条 + 残留 key_ref 旧引用共 3 条全删（旧实现只删 key_ref 单条）
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-pool-1')
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-pool-2')
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-upstream-secret')
+      expect(deleteSecret).toHaveBeenCalledTimes(3)
+    } finally {
+      h.restore()
+    }
+  })
+
   it('未初始化（无配置目录）时默认卸载不报错、也不创建目录', async () => {
     const h = fakeHome()
     try {

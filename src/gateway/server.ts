@@ -15,7 +15,7 @@ import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -1649,7 +1649,9 @@ async function hServiceDelete(c: AdminCtx): Promise<void> {
   await persistConfig(rt, (c) => {
     removedProfiles = removeProviderCascade(c, id)
   })
-  try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
+  for (const ref of providerAllKeyRefs(p)) {
+    try { await deleteSecret(ref) } catch { /* Key 已不存在则忽略 */ }
+  }
   audit(bi('删除服务', 'Delete service'), id, removedProfiles.length ? bi('同时删除路由 {list}', 'Also removed routes {list}', { list: biJoin('、', ', ', removedProfiles) }) : undefined)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, removed: id, profiles: removedProfiles }))
@@ -2045,13 +2047,16 @@ async function hReset(c: AdminCtx): Promise<void> {
       restoreFailed.push(`${id}: ${(e as Error).message}`)
     }
   }
-  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
+  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉；
+  // providerAllKeyRefs 全量口径盖住 keys[] 池，与 CLI reset 同口径）
   let secretsCleared = 0
-  for (const [id, p] of Object.entries(rt.config.providers)) {
-    try {
-      await deleteSecret(p.key_ref)
-      secretsCleared++
-    } catch { /* 单项失败不影响其余 */ }
+  for (const [, p] of Object.entries(rt.config.providers)) {
+    for (const ref of providerAllKeyRefs(p)) {
+      try {
+        await deleteSecret(ref)
+        secretsCleared++
+      } catch { /* 单项失败不影响其余 */ }
+    }
   }
   // 删文件前包同一把 config 写锁（CORRECT-06 同法）：Web reset 与 CLI / 另一实例的 mutateConfig
   // 是独立写者，裸 unlink 会在他人「读文件→改→写回」的窗口里删掉目标、随后被整包写回归活——
