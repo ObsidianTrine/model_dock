@@ -124,6 +124,23 @@ export function collectAssetFiles(dirs: string[]): AssetCollect {
     }
     const abs = path.join(home, ...dir.split('/'))
     if (!fs.existsSync(abs)) continue
+    // 白名单根目录本身先 lstat：符号链接一律拒绝（walkAssets 只拦内部条目，根是软链时会
+    // 跟随链接列举目标内容——指向 ~/.modeldock 等排除段时密钥文件会绕过排除清单入包）
+    let rootSt: fs.Stats
+    try {
+      rootSt = fs.lstatSync(abs)
+    } catch {
+      continue // 拿不到状态同 ENOENT/EACCES 口径：跳过不阻断
+    }
+    if (rootSt.isSymbolicLink()) {
+      throw new Error(
+        t(
+          '白名单目录「{d}」是符号链接，不参与资产同步（软链可能指向白名单之外，例如 ~/.modeldock 时会绕过排除段）；请改挂真实目录或删除该软链',
+          'Whitelisted directory "{d}" is a symbolic link and is excluded from asset sync (symlinks may point outside the whitelist — at ~/.modeldock they would bypass the exclusion list); mount the real directory or remove the symlink instead',
+          { d: dir }
+        )
+      )
+    }
     try {
       walkAssets(abs, home, out, totals)
     } catch (e) {
