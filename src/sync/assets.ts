@@ -105,8 +105,12 @@ function walkAssets(dir: string, home: string, out: AssetCollect, totals: { byte
   }
 }
 
-/** 收集白名单目录内的文本资产。目录不存在视为空（正常：另一台机器同步后才出现）；上限超限抛错。 */
-export function collectAssetFiles(dirs: string[]): AssetCollect {
+/** 收集白名单目录内的文本资产。目录不存在视为空（正常：另一台机器同步后才出现）；上限超限抛错。
+ *  onWarning：软链根等「跳过但用户该知道」的非致命诊断出口（同步引擎接 log 钩子进网关日志）。 */
+export function collectAssetFiles(
+  dirs: string[],
+  opts?: { onWarning?: (line: string) => void }
+): AssetCollect {
   const out: AssetCollect = { files: {}, skipped: [] }
   const totals = { bytes: 0 }
   const home = path.resolve(homeDir())
@@ -133,13 +137,23 @@ export function collectAssetFiles(dirs: string[]): AssetCollect {
       continue // 拿不到状态同 ENOENT/EACCES 口径：跳过不阻断
     }
     if (rootSt.isSymbolicLink()) {
-      throw new Error(
+      // 与 walkAssets 内条目同口径「不跟随即跳过」：软链挂载是合法形态（如 ~/skills →
+      // ~/Documents/skills），throw 会把整条多机同步打停（providers/profiles 全部陪葬）——
+      // 密钥不入包的安全属性由「不跟随」本身保证，跳过事实走 skipped 报告 + onWarning 双通道
+      const note = t(
+        '{d}/（符号链接根，不跟随、未入包）',
+        '{d}/ (symlinked root: not followed, not packaged)',
+        { d: dir }
+      )
+      out.skipped.push(note)
+      opts?.onWarning?.(
         t(
-          '白名单目录「{d}」是符号链接，不参与资产同步（软链可能指向白名单之外，例如 ~/.modeldock 时会绕过排除段）；请改挂真实目录或删除该软链',
-          'Whitelisted directory "{d}" is a symbolic link and is excluded from asset sync (symlinks may point outside the whitelist — at ~/.modeldock they would bypass the exclusion list); mount the real directory or remove the symlink instead',
+          '同步白名单目录「{d}」是符号链接：已跳过（软链不跟随，密钥不入包）；如需同步请改挂真实目录或删除该软链',
+          'Sync whitelist directory "{d}" is a symlink: skipped (symlinks are not followed, secrets stay out of the package); mount the real directory or remove the symlink to sync it',
           { d: dir }
         )
       )
+      continue
     }
     try {
       walkAssets(abs, home, out, totals)

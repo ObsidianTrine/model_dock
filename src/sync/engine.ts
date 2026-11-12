@@ -70,7 +70,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
     await cloudHeartbeat(state, opts)
   }
   const manifest = await target.readManifest()
-  const { doc: localDoc } = await collectSyncdoc()
+  const { doc: localDoc } = await collectSyncdoc(opts?.log)
   const localHash = hashDoc(localDoc)
 
   if (manifest && manifest.rev > state.lastAppliedRev) {
@@ -96,7 +96,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
     let conflict = false
     let afterHash = ''
     await withFileLock(configLockPath(), undefined, async () => {
-      const { doc: localNow } = await collectSyncdoc()
+      const { doc: localNow } = await collectSyncdoc(opts?.log)
       conflict = hashDoc(localNow) !== state.lastSyncedHash
       if (conflict) {
         const file = path.join(backupsDir(), `sync-conflict-${Date.now()}.json`)
@@ -104,7 +104,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
         opts?.log?.(t('[modeldock] 配置同步冲突：本机改动已快照到 {file}，已应用其他机器的最新配置（不做自动合并，差异请在任一机器重做）', '[modeldock] Config sync conflict: local changes were snapshotted to {file}; the latest config from another machine was applied (no auto-merge — redo the differences on either machine)', { file: displayPath(file) }))
       }
       await applySyncdoc(validateSyncdoc(remoteDoc))
-      const { doc: after } = await collectSyncdoc()
+      const { doc: after } = await collectSyncdoc(opts?.log)
       afterHash = hashDoc(after)
     })
     await updateSyncState({
