@@ -95,6 +95,22 @@ describe('资产收集（collectAssetFiles）', () => {
     expect(collectAssetFiles(['.nope/missing'])).toEqual({ files: {}, skipped: [] })
   })
 
+  it('白名单根目录本身是符号链接：拒绝入包（软链可指向白名单外，绕过排除段）', () => {
+    const home = mkHome()
+    // 软链根指向 ~/.modeldock（排除段）：若无根目录守卫，secrets.json 会被收进包里
+    write(home, ['.modeldock', 'secrets.json'], '{"k":"v"}')
+    let linked = false
+    try {
+      fs.symlinkSync(path.join(home, '.modeldock'), path.join(home, 'skills'))
+      linked = true
+    } catch {
+      /* Windows 无符号链接权限：跳过该断言 */
+    }
+    if (linked) {
+      expect(() => collectAssetFiles(['skills'])).toThrow(/skills/)
+    }
+  })
+
   it('单文件超 512KB 跳过不报错；文件数超上限或总量超限抛可操作报错', () => {
     const home = mkHome()
     write(home, ['big', 'huge.md'], 'a'.repeat(ASSET_MAX_FILE_BYTES + 1))
