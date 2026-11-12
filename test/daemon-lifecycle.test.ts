@@ -296,24 +296,23 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
     }
   }, 60_000)
 
-  it('启动失败场景：坏 argv（--port 非数字）时 CLI 限时退出并报错，daemon 日志收到崩溃输出（fd 2 接管）', async () => {
+  it('启动失败场景：坏 argv（--port 非数字）时 CLI fail fast 报错退出，不拉起注定死亡的 daemon 白等超时（2026-11-12 审查 F12）', async () => {
     const h = fakeHome()
     try {
-      // 端口占用不适用：网关对 EADDRINUSE 有顺延换端口语义（listenWithRetry），不构成 daemon 崩溃；
-      // 坏 argv 让 listen 校验抛 RangeError（非 EADDRINUSE 不重试）→ daemon 走崩溃路径
+      // 旧流程把 Number('notanumber') 的 NaN 以 'NaN' 串传给 daemon → daemon 崩溃「网关启动失败」、
+      // 父 CLI 白等超时 20s；cmdGatewayStart 补校验后在拉起前即拒，报错直接到终端
       const { output, exit } = spawnDaemonCli(h, 'notanumber' as unknown as number)
       const exitRes = await Promise.race([
         exit,
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('坏 argv 场景 CLI 15s 未退出')), 15_000)),
       ])
       expect(exitRes.code).toBe(1)
-      // 报错不蒸发：超时文案 + daemon 日志路径提示都到用户眼前
-      expect(output()).toContain('网关启动超时')
-      expect(output()).toContain('daemon 启动报错见日志')
-      // daemon 崩溃输出落日志（fd 2 接管）：IIFE catch 的「网关启动失败」可追
-      const log = path.join(h.home, '.modeldock', 'logs', `daemon-${localDateStr()}.log`)
-      expect(fs.existsSync(log)).toBe(true)
-      expect(fs.readFileSync(log, 'utf8')).toContain('网关启动失败')
+      // 可操作报错（原文回显 + 合法范围）到终端，修复建议同行可查
+      expect(output()).toContain('--port 无效')
+      expect(output()).toContain('notanumber')
+      expect(output()).toContain('1-65535')
+      // daemon 未被拉起（校验发生在 spawn 之前）
+      expect(fs.existsSync(path.join(h.home, '.modeldock', 'gateway.json'))).toBe(false)
     } finally {
       h.restore()
     }

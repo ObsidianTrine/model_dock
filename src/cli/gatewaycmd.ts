@@ -24,7 +24,21 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     console.log(c.yellow(t('网关已在运行：http://127.0.0.1:{port}（pid {pid}）', 'Gateway is already running: http://127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid })))
     return
   }
-  const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
+  // --port 手工校验（commander 对非法数字产出 NaN 且不报错）：不拦的话坏值以 'NaN' 字符串
+  // 传给 daemon、由 --sea-gateway 分支的校验兜底报错，父 CLI 却要白等 daemon 超时才见结局
+  // （2026-11-12 审查 F12 对照项）——这里 fail fast 给可操作报错
+  let port: number
+  if (opts.port !== undefined && opts.port !== '') {
+    const n = Number(opts.port)
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      console.error(c.red(t('✗ --port 无效：{v}。需为 1-65535 的整数', '✗ Invalid --port: {v}. Must be an integer between 1 and 65535', { v: opts.port })))
+      console.error(c.gray(t('示例：modeldock gateway start --port 8687；省略 --port 则用 config.toml [gateway] port（缺省 8687）', 'Example: modeldock gateway start --port 8687; omit --port to use [gateway] port from config.toml (default 8687)')))
+      process.exit(1)
+    }
+    port = n
+  } else {
+    port = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  }
 
   if (!opts.daemon) {
     const { startForeground } = await import('../gateway/main.js')

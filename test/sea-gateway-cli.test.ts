@@ -14,7 +14,9 @@ import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
 
 function runSeaGateway(sandbox: string, args: string[]): { status: number; daemonLog: string } {
-  const env = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox }
+  // 显式标注 ProcessEnv：TS7 对 spread 字面量的推断收窄成只剩显式键（索引签名丢失），
+  // delete env.MODELRDOCK_HOME 会报 TS2551（noderuntime.ts:62 同款惯例）
+  const env: NodeJS.ProcessEnv = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox }
   delete env.MODELRDOCK_HOME
   const r = spawnSync(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, '--sea-gateway', ...args], {
     cwd: sandbox,
