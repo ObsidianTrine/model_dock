@@ -95,10 +95,12 @@ describe('资产收集（collectAssetFiles）', () => {
     expect(collectAssetFiles(['.nope/missing'])).toEqual({ files: {}, skipped: [] })
   })
 
-  it('白名单根目录本身是符号链接：拒绝入包（软链可指向白名单外，绕过排除段）', () => {
+  it('白名单根目录本身是符号链接：不跟随、不入包、不打断收集（与内部软链同口径）', () => {
     const home = mkHome()
-    // 软链根指向 ~/.modeldock（排除段）：若无根目录守卫，secrets.json 会被收进包里
+    // 软链根指向 ~/.modeldock（排除段）：secrets.json 不得收进包里；跳过但不 throw——
+    // throw 会把整条多机同步打停（providers/profiles 陪葬），软链挂载（~/skills → 别处）是合法形态
     write(home, ['.modeldock', 'secrets.json'], '{"k":"v"}')
+    write(home, ['skills2', 'a.md'], 'hello')
     let linked = false
     try {
       fs.symlinkSync(path.join(home, '.modeldock'), path.join(home, 'skills'))
@@ -107,7 +109,12 @@ describe('资产收集（collectAssetFiles）', () => {
       /* Windows 无符号链接权限：跳过该断言 */
     }
     if (linked) {
-      expect(() => collectAssetFiles(['skills'])).toThrow(/skills/)
+      const warnings: string[] = []
+      const a = collectAssetFiles(['skills', 'skills2'], { onWarning: (l) => warnings.push(l) })
+      expect(Object.keys(a.files)).toEqual(['skills2/a.md']) // 软链根跳过，其余目录照常收集
+      expect(a.skipped.some((s) => s.startsWith('skills/'))).toBe(true) // 诊断进 skipped 报告
+      expect(warnings.join('\n')).toContain('skills') // 诊断同时走日志钩子
+      expect(JSON.stringify(a.files)).not.toContain('secrets') // 安全属性：密钥不入包
     }
   })
 

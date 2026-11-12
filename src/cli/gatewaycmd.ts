@@ -29,9 +29,10 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
   // RangeError 裸栈（daemon 形态更只是超时 + 日志路径），拿不到「端口写错了」的可操作结论
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     // 收到值如实回显：--port 缺省时坏值来自 config.toml（store 不校验端口类型/范围），照抄
-    // opts.port 会报「收到：undefined」，用户对着正确的命令行却不知错在配置里
+    // opts.port 会报「收到：undefined」；空串 --port 走到的是 config 值，?? 会回显空串——
+    // 用 || 让「实际参与运算的那个值」上屏（用户对着正确的命令行却不知错在配置里的误导一并消除）
     exitWithError(
-      t('端口必须是 0–65535 的整数（收到：{v}）', 'The port must be an integer in 0-65535 (got: {v})', { v: String(opts.port ?? port) }),
+      t('端口必须是 0–65535 的整数（收到：{v}）', 'The port must be an integer in 0-65535 (got: {v})', { v: String(opts.port || port) }),
       t('示例：modeldock gateway start --port 8890；不加 --port 则用 config.toml [gateway] 的 port', 'Example: modeldock gateway start --port 8890; without --port the [gateway] port in config.toml applies')
     )
   }

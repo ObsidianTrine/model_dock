@@ -13,7 +13,7 @@ import { applyAssets, collectAssetFiles, existingAssetPaths } from './assets.js'
 
 /** 收集/应用摘要：providers/profiles 为 id 清单；envKeyRefs=走环境变量引用不随包的服务；
  *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数；
- *  assetsFiles=随包的文本资产数；assetsSkipped=导出时跳过的二进制/超限文件；assetsWritten=导入时实际写入的资产数 */
+ *  assetsFiles=随包的文本资产数；assetsSkipped=导出时跳过的二进制/超限文件/符号链接根；assetsWritten=导入时实际写入的资产数 */
 export interface SyncdocReport {
   providers: string[]
   profiles: string[]
@@ -52,8 +52,11 @@ function readRawUserPresets(): unknown[] | { presets: unknown[] } {
 
 /** 收集可同步态 → syncdoc（docs/design-cloud-sync.md §4.1 清单）。
  *  key 处理：file/keychain/secret-service/plain 引用解析为明文随包；env: 引用不解析（机器态）原样保留；
- *  解析不到的引用原样保留并记入 missingKeys。 */
-export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocReport }> {
+ *  解析不到的引用原样保留并记入 missingKeys。
+ *  log：软链根等「跳过但用户该知道」诊断的出口（引擎传 opts.log 进网关日志；缺省静默）。 */
+export async function collectSyncdoc(
+  log?: (line: string) => void
+): Promise<{ doc: Syncdoc; report: SyncdocReport }> {
   const cfg = await loadConfig()
   const providers: Record<string, SyncProviderEntry> = {}
   const envKeyRefs: string[] = []
@@ -91,7 +94,7 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
   validateUserPresetEntries(Array.isArray(userPresets) ? userPresets : userPresets.presets, presetsJsonPath())
   const scheduleRules = cfg.gateway?.schedule?.windows ? [...cfg.gateway.schedule.windows] : []
   // 文本资产：白名单目录内的文本文件随包（上限/排除/二进制跳过见 assets.ts）；目录缺失视为无
-  const assets = collectAssetFiles(cfg.sync_assets?.dirs ?? [])
+  const assets = collectAssetFiles(cfg.sync_assets?.dirs ?? [], { onWarning: log })
   const profileIds = Object.keys(cfg.profiles)
   const providerIds = Object.keys(providers)
   return {
