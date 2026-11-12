@@ -14,6 +14,7 @@ import {
   keychainArgValue,
   pickFileCipher,
   setSecret,
+  transientSpawnError,
   __testSetChildTimeoutMs,
   __testSetDpapiBatch,
   __testSetExternalReader,
@@ -447,5 +448,18 @@ describe('外部子进程超时守卫（armChildTimeout）', () => {
     } finally {
       __testSetChildTimeoutMs()
     }
+  })
+})
+describe('dpapiBatch 重试分流（transientSpawnError）', () => {
+  it('瞬时类（超时标记 / 资源类错误码）重试；确定性（非零退出 / ENOENT）不重试', () => {
+    const timeoutErr: Error & { transient?: boolean } = new Error('powershell DPAPI 超时（10000ms 无退出），已强制终止')
+    timeoutErr.transient = true
+    expect(transientSpawnError(timeoutErr)).toBe(true)
+    expect(transientSpawnError(Object.assign(new Error('resource'), { code: 'EAGAIN' }))).toBe(true)
+    expect(transientSpawnError(Object.assign(new Error('resource'), { code: 'EMFILE' }))).toBe(true)
+    // 非零退出 = PowerShell 跑完但 Unprotect 失败（换账号密文必败，同一输入不会变）
+    expect(transientSpawnError(new Error('powershell exited 1'))).toBe(false)
+    expect(transientSpawnError(Object.assign(new Error('no tool'), { code: 'ENOENT' }))).toBe(false)
+    expect(transientSpawnError('not an error object')).toBe(false)
   })
 })

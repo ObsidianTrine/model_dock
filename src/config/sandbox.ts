@@ -17,7 +17,10 @@ export async function migrateSandboxKeyRefsToLocal(): Promise<string[]> {
   const migrated: string[] = []
 
   const isExternal = (ref: string | undefined): ref is string => {
-    if (!ref) return false
+    // 非串短路（手编 TOML 整数等真值会穿过 `!ref`）：parseKeyRef 对非串抛 SecretsError，
+    // filter/条件处均无 try/catch，单项坏数据会打断整个迁移乃至沙箱网关启动——
+    // 非「外部引用」直接 false 交由守卫兜底（与 diag.ts 的 `typeof !== 'string'` 跳过同款防御）
+    if (typeof ref !== 'string' || ref === '') return false
     const s = parseKeyRef(ref).scheme
     return s === 'keychain' || s === 'secret-service'
   }

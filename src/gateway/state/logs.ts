@@ -213,24 +213,32 @@ function eventEntryOf(e: { level: 'warn' | 'error'; op: string; err: string }): 
   }
 }
 
-/** 后台链路事件（有 rt）：错误 ring（页面日志表可见）+ events.jsonl 落盘。
+/** 事件日志文件名，按天切分：单文件 events.jsonl 是唯一不参与保留期清理的日志，provider
+ *  风暴/长驻进程下无界增长；按天命名后与 gateway-/audit- 走同一套 LOG_DAY_FILE_RE 清理
+ *  （同节奏、删前先关流）。导出给测试解析当日文件路径。切分前遗留的单文件不再有写入，
+ *  由 pruneExpiredLogs 按 mtime 过期删除（见其内注）。 */
+export function eventsLogName(): string {
+  return `events-${localIsoTs().slice(0, 10)}.jsonl`
+}
+
+/** 后台链路事件（有 rt）：错误 ring（页面日志表可见）+ 事件日文件落盘。
  *  吞错上报通道——后台 catch 原先 `.catch(() => {})` 的失败改调这里，无声失败变成可排查痕迹。 */
 export function logEvent(rt: GatewayRuntime, e: { level: 'warn' | 'error'; op: string; err: string }): void {
   const entry = eventEntryOf(e)
   pushRing(rt, entry)
   try {
-    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+    appendLog(eventsLogName(), JSON.stringify(entry) + "\n")
   } catch {
     /* 事件日志失败不影响主流程 */
   }
 }
 
-/** 后台链路事件（无 rt 的 ops 层）：events.jsonl 恒落；网关进程内经 eventRingSink 同步进 ring，
+/** 后台链路事件（无 rt 的 ops 层）：事件日文件恒落；网关进程内经 eventRingSink 同步进 ring，
  *  纯 CLI 上下文（网关未运行）只落文件。 */
 export function reportEvent(e: { level: 'warn' | 'error'; op: string; err: string }): void {
   const entry = eventEntryOf(e)
   try {
-    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+    appendLog(eventsLogName(), JSON.stringify(entry) + "\n")
   } catch {
     /* 事件日志失败不影响主流程 */
   }
@@ -596,12 +604,13 @@ export function eventLoopLagMs(): number | null {
   return loopLagMs
 }
 
-/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-（.jsonl）与 daemon-（.log）按天日文件
- *  无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻
- *  流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），
- *  删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
- *  （events.jsonl 单文件与 crash-*.log 不匹配本正则、不参与清理——前者量小、后者事故痕迹保贵。） */
-const LOG_DAY_FILE_RE = /^(gateway|audit|debug|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-/events-（.jsonl）与 daemon-（.log）
+ *  按天日文件无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律
+ *  不碰；被常驻流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/
+ *  EBUSY），删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
+ *  （crash-*.log 不匹配本正则、不参与清理——事故痕迹保贵；切分前遗留的 events.jsonl 单文件
+ *  见循环后专用分支。） */
+const LOG_DAY_FILE_RE = /^(gateway|audit|debug|events|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
 
 export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
   const days = Math.floor(Number(retentionDays))
@@ -628,6 +637,26 @@ export async function pruneExpiredLogs(retentionDays: number, now = new Date()):
       pruned++
     } catch {
       /* 被外部进程占用等：跳过，次日定时重试 */
+    }
+  }
+  // 切分前遗留的 events.jsonl 单文件（不再有写入、冻结）：mtime 早于保留期 = 整份内容必已
+  // 过期，直接删；未过期时留着——行级过滤要为每天一次的清理付全文件解析，而它最迟随保留期
+  // 自然过期，不值得
+  const legacyEvents = path.join(dir, 'events.jsonl')
+  if (names.includes('events.jsonl')) {
+    try {
+      const st = fs.statSync(legacyEvents)
+      if (startOfToday - st.mtimeMs > days * 86_400_000) {
+        await closeAppendStream(legacyEvents)
+        try {
+          fs.unlinkSync(legacyEvents)
+          pruned++
+        } catch {
+          /* 同上：跳过次日重试 */
+        }
+      }
+    } catch {
+      /* stat 失败（竞态删除等）：跳过 */
     }
   }
   return pruned

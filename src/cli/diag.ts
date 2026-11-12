@@ -5,7 +5,7 @@ import path from 'node:path'
 import { c, maskSecret, printTable, randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { getSecret, parseKeyRef, pickFileCipher, verifySecretsStore } from '../config/secrets.js'
+import { getSecret, parseKeyRef, pickFileCipher, providerKeyRefs, verifySecretsStore } from '../config/secrets.js'
 import { debugEnabled } from '../gateway/state/debuglog.js'
 import { allAdapters } from '../adapters/registry.js'
 import { collectClientSecurityFindings } from '../mcp/security.js'
@@ -339,12 +339,37 @@ export interface DeepProbeResult {
   modelIds?: string[]
 }
 
+/** 探测 key 的池全量口径（对齐 modelprobe.resolveProbeKey 同款修法）：keys 池按序取第一把
+ *  可读 key，单把读不到（后端异常/坏引用）先记账再尝试下一把，全部不可读且有后端异常时
+ *  把错误带出（区别于未配 key/条目缺失的 null）——此前只读 key_ref，池型服务轮换后 key_ref
+ *  停在旧引用，探测面给出与转发实态（providerKeyRefs 池口径）相反的假阴性认证结论。 */
+async function resolveProbeKeyValue(p: ProviderConfig): Promise<{ key: string } | { err: string } | null> {
+  let firstErr: string | undefined
+  let sawRef = false
+  for (const ref of providerKeyRefs(p)) {
+    if (ref === '') continue // key_ref 缺失的空 plain 哨兵：等同未配 key，不去碰密钥后端
+    sawRef = true
+    let v: string | null
+    try {
+      v = await getSecret(ref)
+    } catch (e) {
+      firstErr ??= e instanceof Error ? e.message : String(e)
+      continue
+    }
+    if (v) return { key: v }
+  }
+  if (sawRef && firstErr) return { err: firstErr }
+  return null
+}
+
 /** 直连上游认证探测：GET /models 多候选，按 protocol/auth_style 带鉴权头。
  *  任一候选 401/403 = 密钥被拒（auth）；200 = 有效（顺带收模型 id）；全 404/不支持 = 无法验证（skip）；
  *  网络层失败 = fail（上游可达性已由 upstream.reach 报告，此处不重复 bad）。 */
 export async function upstreamAuthProbe(provider: ProviderConfig): Promise<DeepProbeResult> {
-  const key = await getSecret(provider.key_ref).catch(() => null)
-  if (!key) return { kind: 'skip', detail: t('key 不可读，跳过认证验证（见上方 key 检查）', 'Key unreadable; auth check skipped (see the key check above)') }
+  const pk = await resolveProbeKeyValue(provider)
+  if (!pk) return { kind: 'skip', detail: t('key 不可读，跳过认证验证（见上方 key 检查）', 'Key unreadable; auth check skipped (see the key check above)') }
+  if ('err' in pk) return { kind: 'skip', detail: t('读取 key 失败：{msg}，跳过认证验证（见上方 key 检查）', 'Failed to read the key ({msg}); auth check skipped (see the key check above)', { msg: pk.err }) }
+  const key = pk.key
   const { modelEndpoints, authHeaders } = await import('../providers/fetch.js')
   const { request } = await import('undici')
   const { buildDispatcher } = await import('../util/net.js')

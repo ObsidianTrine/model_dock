@@ -8,7 +8,7 @@ export { buildTokenIndex, buildRuntime, reloadRuntime, registerEphemeralHarness,
 export type { EphemeralHarnessInput, EphemeralRenewResult } from './state/runtime.js'
 export type { OrderedCandidate, RouteSource, PickResult, ScheduleHit, RouteState, AutoRouteInfo } from './state/routing.js'
 export { resolveTarget, resolveByProfile, recordOutcome, isMeltdown, activeScheduleWindow, activeAvoidTargets, displayRouteProvider, parseFallbackEntry, pickTarget, routeState, autoRouteInfo } from './state/routing.js'
-export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, latencyQuantiles, readRequestLogDay, filterLogEntries, logEntryMatches, streamRequestLogDays, summarizeUsage, summarizeUsageDays, summarizeUsageDaysWithHours, createUsageAccumulator, createUsageHourAccumulator, setUsagePriceResolver, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs, usageTodayView, resetUsageTodayForTest } from './state/logs.js'
+export { pushRing, logRequest, logAudit, setEventRingSink, logEvent, reportEvent, eventsLogName, latencyQuantiles, readRequestLogDay, filterLogEntries, logEntryMatches, streamRequestLogDays, summarizeUsage, summarizeUsageDays, summarizeUsageDaysWithHours, createUsageAccumulator, createUsageHourAccumulator, setUsagePriceResolver, startEventLoopDelaySampler, eventLoopLagMs, pruneExpiredLogs, usageTodayView, resetUsageTodayForTest } from './state/logs.js'
 export type { UsageFilter, UsageSummary, UsageCost, UsageTodayView, UsageHourBucket } from './state/logs.js'
 export type { GatewayStateFile } from './state/state-file.js'
 export { checkTokenLimits, recordTokenUsage } from './state/tokenlimits.js'

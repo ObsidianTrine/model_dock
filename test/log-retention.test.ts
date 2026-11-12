@@ -7,7 +7,7 @@ import { logsDir } from '../src/util/paths.js'
 import { appendLine } from '../src/util/fsx.js'
 
 /** 距 now 偏移 offsetDays 天的日文件名（本地时区，与 state.ts 落盘命名 entry.ts.slice(0,10) 同构） */
-function dayName(prefix: 'gateway' | 'audit', offsetDays: number, now: Date): string {
+function dayName(prefix: 'gateway' | 'audit' | 'events' | 'debug' | 'daemon', offsetDays: number, now: Date): string {
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offsetDays)
   const mm = String(d.getMonth() + 1).padStart(2, '0')
   const dd = String(d.getDate()).padStart(2, '0')
@@ -68,6 +68,43 @@ describe('JSONL 日志保留期清理', () => {
       // closeAppendStream 会等流 open+close 完成才返回，fd 必然已释放，删除在 Windows 上也不撞 EPERM
       expect(await pruneExpiredLogs(30, now)).toBe(1)
       expect(fs.existsSync(full)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('events 按天切分日文件纳入保留期清理（与 gateway-/audit- 同节奏）', async () => {
+    const h = fakeHome()
+    try {
+      const now = new Date()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      const oldEvents = path.join(logsDir(), dayName('events', 40, now))
+      const freshEvents = path.join(logsDir(), dayName('events', 0, now))
+      fs.writeFileSync(oldEvents, '{"op":"old"}\n')
+      fs.writeFileSync(freshEvents, '{"op":"new"}\n')
+      expect(await pruneExpiredLogs(30, now)).toBe(1)
+      expect(fs.existsSync(oldEvents)).toBe(false)
+      expect(fs.existsSync(freshEvents)).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('切分前遗留的 events.jsonl 单文件：mtime 全过期删除，保留期内冻结保留（不做行级过滤）', async () => {
+    const h = fakeHome()
+    try {
+      const now = new Date()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      const legacy = path.join(logsDir(), 'events.jsonl')
+      fs.writeFileSync(legacy, '{"op":"legacy"}\n')
+      // 升级后最后一次写入仍在保留期内：文件冻结不再增长，最迟随保留期自然过期，留着
+      expect(await pruneExpiredLogs(30, now)).toBe(0)
+      expect(fs.existsSync(legacy)).toBe(true)
+      // mtime 早于保留期 = 整份内容必已过期：整体删除
+      const stale = new Date(now.getTime() - 40 * 86_400_000)
+      fs.utimesSync(legacy, stale, stale)
+      expect(await pruneExpiredLogs(30, now)).toBe(1)
+      expect(fs.existsSync(legacy)).toBe(false)
     } finally {
       h.restore()
     }

@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fakeHome } from './helpers.js'
 import { listSnapshots, matchesSnapshot, pruneSnapshots, restoreSnapshot, snapshot } from '../src/backup/snapshot.js'
@@ -37,6 +38,25 @@ describe('backup snapshot', () => {
       const m = await snapshot('dsh', 'attach', [missing])
       expect(m.files[0].stored_as).toBe('')
       await restoreSnapshot(m) // 不应抛错
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('缺席文件的还原删除分支受写入门禁：manifest 记录真实 home 路径时拒删（rm 旁路封堵）', async () => {
+    const h = fakeHome()
+    try {
+      // 还原写走 atomicWrite（有 assertNotRealHomeWrite）；此前唯独「当时不存在 → 删残留」
+      // 分支直接 fsp.rm 无守卫——测试/agent 上下文进程 restore 真实 home manifest 可删真实文件
+      const manifest = {
+        id: 'x',
+        harness: 'dsh',
+        operation: 'attach',
+        timestamp: new Date().toISOString(),
+        tool_version: 'test',
+        files: [{ path: path.join(os.homedir(), '.modeldock', 'never-exists-gate-probe.txt'), stored_as: '', sha256: '', mode: 0 }],
+      }
+      await expect(restoreSnapshot(manifest)).rejects.toThrow(/真实 home|real home/)
     } finally {
       h.restore()
     }

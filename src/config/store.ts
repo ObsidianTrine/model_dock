@@ -4,7 +4,7 @@ import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml'
 import { configPath } from '../util/paths.js'
 import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
-import { CONFIG_VERSION, emptyConfig, type Config, type Lang } from './types.js'
+import { CONFIG_VERSION, emptyConfig, type Config, type Lang, type ScheduleWindow } from './types.js'
 
 export class ConfigError extends Error {
   /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
@@ -116,7 +116,30 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
   const cfg = gw as NonNullable<Config['gateway']>
   const sch = cfg.schedule
   if (!sch) return cfg
-  const windows = (sch.windows ?? []).map((w) => {
+  // 手编形状守卫：嵌套的 schedule/windows 顶层有 normalizable 兜着，此处不下探——TOML 合法
+  // 但形状错的值（`gateway={schedule=5}`、`[gateway.schedule] windows=5`、windows 元素非表）
+  // 此前要么静默吞、要么 `5.map` 抛裸 TypeError 直穿网关启动/CLI（loadConfig 只包装 tomlParse
+  // 错误）。显式拦下给可操作 ConfigError，与 containerOrEmpty 同口径
+  if (typeof sch !== 'object' || Array.isArray(sch)) {
+    throw new ConfigError(
+      t('config.toml 的 [gateway.schedule] 必须是表（当前是{kind}）', 'config.toml [gateway.schedule] must be a table (got {kind})', { kind: Array.isArray(sch) ? '数组/array' : typeof sch }),
+      t('请把该项改为表形态（如 [gateway.schedule] enabled = true），或删除该行恢复默认', 'Change it to a table (e.g. [gateway.schedule] enabled = true), or remove the line to use defaults')
+    )
+  }
+  const winRaw: unknown = (sch as Record<string, unknown>).windows
+  if (winRaw !== undefined && winRaw !== null) {
+    const bad =
+      !Array.isArray(winRaw) || winRaw.some((w) => w === null || typeof w !== 'object' || Array.isArray(w))
+    if (bad) {
+      throw new ConfigError(
+        t('config.toml 的 [gateway.schedule] windows 必须是「窗口表」的数组（当前是{kind}）', 'config.toml [gateway.schedule] windows must be an array of window tables (got {kind})', {
+          kind: Array.isArray(winRaw) ? '含非表元素' : typeof winRaw,
+        }),
+        t('每条窗口形如 [[gateway.schedule.windows]] 下的 start/end/target；或删除该节恢复默认', 'Each window looks like start/end/target under [[gateway.schedule.windows]]; or remove the section to use defaults')
+      )
+    }
+  }
+  const windows = ((winRaw ?? []) as ScheduleWindow[]).map((w) => {
     if (w.dayFilter || !w.days?.length) return w
     const isWorkday = w.days.length === 5 && [1, 2, 3, 4, 5].every((n, i) => w.days![i] === n)
     const isWeekend = w.days.length === 2 && w.days[0] === 6 && w.days[1] === 7
@@ -136,6 +159,11 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
 // 刻意不把记忆扩到 collectSyncdoc 整体：keychain 后端的密钥轮换不落任何被同步文件的盘（setSecret
 // 只写钥匙串），整包记忆会把旧明文 key 继续推给其他机器——原复核暂缓的语义担忧成立，密钥解析
 // 保持每次现取（其自身已有 TTL 缓存吸收 spawn 成本）。
+// 「命中 memo 免克隆、只读消费方直借」曾评估（2026-11-12 夜航审查 P3）：不采纳——只读约束在
+// 运行时不可强制，单一消费方误改即污染共享 memo（上方 SyncLoop 事故同根）；而 clone 成本在
+// 几十 KB 配置量级为亚毫秒，消费面最高频的 sync tick 也是 60-120s 一跳，收益 < 回归风险。
+// 仅当配置显著膨胀（往 config 塞大表）或 sync tick 提频时再议，届时优先抽「冻结视图」类型
+// 而非靠约定。
 let loadMemo: { key: string; cfg: Config } | null = null
 
 /** config.toml 盘上指纹（mtimeMs:size，与 loadConfig memo 同键）：供网关 watcher 对自家写盘的

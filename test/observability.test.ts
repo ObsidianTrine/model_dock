@@ -13,6 +13,7 @@ import {
   readRequestLogDay,
   recordOutcome,
   reportEvent,
+  eventsLogName,
   setEventRingSink,
   summarizeUsage,
   summarizeUsageDays,
@@ -108,7 +109,7 @@ describe('后台事件上报（logEvent / reportEvent / setEventRingSink）', ()
       expect(e.harness).toBe('-')
       expect(e.path).toBe('event:secrets_migrate')
       await drainAppendStreams() // 常驻流异步刷盘后再读
-      const eventsFile = path.join(logsDir(), 'events.jsonl')
+      const eventsFile = path.join(logsDir(), eventsLogName())
       const line = JSON.parse(fs.readFileSync(eventsFile, 'utf8').trim())
       expect(line.op).toBe('secrets_migrate')
     } finally {
