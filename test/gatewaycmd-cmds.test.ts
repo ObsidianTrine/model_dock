@@ -15,6 +15,8 @@ import {
 import { requireGateway } from '../src/cli/shared.js'
 import { readGatewayState, writeGatewayState, type GatewayStateFile } from '../src/gateway/state.js'
 import type { AutostartStatus } from '../src/autostart.js'
+import { saveConfig } from '../src/config/store.js'
+import { emptyConfig } from '../src/config/types.js'
 import { localDateStr } from '../src/util/index.js'
 import { logsDir, modeldockDir } from '../src/util/paths.js'
 
@@ -146,6 +148,25 @@ describe('cmdGatewayStart / requireGateway（活网关伪造）', () => {
       expect(errs.join('\n')).toContain('70000')
       // 非整数同样拦下（Number('8890.5') 是合法 Number 但不是端口）
       await expect(cmdGatewayStart({ port: '8890.5' })).rejects.toThrow(ExitError)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--port 缺省 + config.toml 端口非法：报错如实回显配置值（不报「收到：undefined」误导用户查命令行）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    stubExit()
+    try {
+      // store 读入不校验端口类型/范围：TOML 手编越界整数 / 字符串都会原样到达 cmdGatewayStart
+      await saveConfig({ ...emptyConfig(), gateway: { port: 70000 } })
+      await expect(cmdGatewayStart({})).rejects.toThrow(ExitError)
+      expect(errs.join('\n')).toContain('端口必须是')
+      expect(errs.join('\n')).toContain('70000')
+      expect(errs.join('\n')).not.toContain('undefined')
+      await saveConfig({ ...emptyConfig(), gateway: { port: 'abc' as unknown as number } })
+      await expect(cmdGatewayStart({})).rejects.toThrow(ExitError)
+      expect(errs.join('\n')).toContain('abc')
     } finally {
       h.restore()
     }
