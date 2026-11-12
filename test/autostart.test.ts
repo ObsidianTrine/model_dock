@@ -214,6 +214,19 @@ function launchdLoaded(): boolean {
   }
 }
 
+/** launchctl print 有注册/注销瞬态竞速（bootstrap 已返回 ok、print 仍可瞬报「服务不存在」，
+ *  全量套件高负载下实测踩中一次：2026-11-12 夜航 perf-flake-night 第一轮）。断言改短窗轮询：
+ *  窗口内达成期望即过、超窗才判负——bootstrap 真失败时窗口内恒 false 照样红，断言力不变，
+ *  只吸收 init 系统的瞬态读数。同步用例内轮询用 Atomics.wait 同步睡眠（不打断用例结构）。 */
+function pollLaunchdLoaded(expected: boolean, timeoutMs = 5_000): boolean {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (launchdLoaded() === expected) return true
+    if (Date.now() >= deadline) return false
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200)
+  }
+}
+
 function systemdUserAvailable(): boolean {
   try {
     execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' })
@@ -250,12 +263,12 @@ describe.skipIf(process.platform !== 'darwin')('autostart 真实生效 > macOS l
       // 无网关 → 健康等待必然失败；但服务必须已被 launchd 真实加载（本测试核心断言）
       expect(installError).not.toBeNull()
       expect(installError!.message).toMatch(/未在 2s 内就绪/)
-      expect(launchdLoaded()).toBe(true)
+      expect(pollLaunchdLoaded(true)).toBe(true)
       expect(fs.existsSync(launchdPlistPath())).toBe(true)
 
       const un = await uninstallAutostart()
       expect(un.wasInstalled).toBe(true)
-      expect(launchdLoaded()).toBe(false)
+      expect(pollLaunchdLoaded(false)).toBe(true)
       expect(fs.existsSync(launchdPlistPath())).toBe(false)
     } finally {
       try { if (launchdLoaded()) uninstallAutostart() } catch { /* 兜底清理失败不影响判定 */ }
