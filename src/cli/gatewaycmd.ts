@@ -24,7 +24,21 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     console.log(c.yellow(t('网关已在运行：http://127.0.0.1:{port}（pid {pid}）', 'Gateway is already running: http://127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid })))
     return
   }
-  const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
+  // --port 手工校验（commander 对非法数字产出 NaN 且不报错）：不拦的话坏值以 'NaN' 字符串
+  // 传给 daemon、由 --sea-gateway 分支的校验兜底报错，父 CLI 却要白等 daemon 超时才见结局
+  // （2026-11-12 审查 F12 对照项）——这里 fail fast 给可操作报错
+  let port: number
+  if (opts.port !== undefined && opts.port !== '') {
+    const n = Number(opts.port)
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      console.error(c.red(t('✗ --port 无效：{v}。需为 1-65535 的整数', '✗ Invalid --port: {v}. Must be an integer between 1 and 65535', { v: opts.port })))
+      console.error(c.gray(t('示例：modeldock gateway start --port 8687；省略 --port 则用 config.toml [gateway] port（缺省 8687）', 'Example: modeldock gateway start --port 8687; omit --port to use [gateway] port from config.toml (default 8687)')))
+      process.exit(1)
+    }
+    port = n
+  } else {
+    port = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  }
 
   if (!opts.daemon) {
     const { startForeground } = await import('../gateway/main.js')
@@ -168,11 +182,7 @@ export function sweepGatewayProcesses(): void {
       if (!lines) return
       for (const { pid, cmd } of parsePidCommandLines(lines)) {
         if (pid === process.pid) continue
-        // 双条件收敛误杀面：必须是“网关启动”命令，且命令属于 ModelDock（CLI 源码路径或 modeldock 二进制）
-        const isGatewayStart = /gateway start|--sea-gateway/.test(cmd)
-        const isModelDock = /modeldock|src[\\/]cli\.ts/.test(cmd)
-        if (!isGatewayStart || !isModelDock) continue
-        if (killByPid(pid)) killed++
+        if (isGatewayProcessCmd(cmd) && killByPid(pid)) killed++
       }
     }
   } catch {
@@ -181,13 +191,39 @@ export function sweepGatewayProcesses(): void {
   if (killed) console.log(c.gray(t('另清扫了 {n} 个游离网关进程', 'Also cleaned up {n} stray gateway process(es)', { n: killed })))
 }
 
+/** 网关启动参数必须落在独立参数位（前后空白/行首尾界定）：引号内的检索词（`rg "gateway start" …`）
+ *  不命中。子串裸匹配会把检索/编辑进程误当网关杀掉（2026-11-12 审查 F5）。 */
+const GATEWAY_ARG_RE = /(?:^|\s)(?:--sea-gateway|gateway\s+start)(?:\s|$)/
+/** 程序标记：modeldock 须以路径段/可执行名形态出现（前面是路径分隔/引号/空白/行首，后面是
+ *  分隔、.exe/.cmd、引号、空白或行尾）——`.modeldock` 数据目录（前导是点）、`my-modeldock`
+ *  之类不命中；dev tsx 实例路径是 `model_dock`（下划线）不含 modeldock，靠 src\cli.ts 单独识别。 */
+const MODELDOCK_PROG_RE = /(?:^|[\\/"'\s])modeldock(?:\.exe|\.cmd|[\\/"']|\s|$)|src[\\/]cli\.ts/
+
+/** 命令行是否为 ModelDock 网关进程（卸载清扫的杀伤判据）。取向「误杀 < 漏杀」：判定从紧——
+ *  ① 网关参数在独立参数位；② 含程序标记；③ 程序标记出现在参数之前（`grep gateway start
+ *  C:\…\.modeldock\logs\x` 这类检索进程参数在前、目标路径在后，不命中）。极端变形漏杀可接受
+ *  （残留网关可手动 gateway stop），误杀用户进程不可逆。导出供单测喂样本命令行。 */
+export function isGatewayProcessCmd(cmd: string): boolean {
+  const argPos = cmd.search(GATEWAY_ARG_RE)
+  if (argPos < 0) return false
+  const progPos = cmd.search(MODELDOCK_PROG_RE)
+  return progPos >= 0 && progPos < argPos
+}
+
 /** 枚举本机进程命令行，输出每行 "pid command"；不可用时返回 null（调用方跳过清扫）。
  *  Windows 没有 ps（wmic 自 Win11 24H2 起也已移除），改用 PowerShell CIM 查询。
  *  导出供 test/gatewaycmd.test.ts 做跨平台冒烟（PS 引号转义/编码在真实机器上验证）。 */
 export function listProcessLines(): string | null {
+  // 超时必挂（secrets.ts 同类 spawn 同款 10s）：AV 扫描/CIM 服务僵死时 PowerShell 不退出，
+  // 无超时会永久卡死 gateway stop / 卸载清扫链（2026-11-12 审查 F4）
   const out = process.platform === 'win32'
-    ? spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', winProcListScript()], { encoding: 'utf8' })
-    : spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8' })
+    ? spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', winProcListScript()], { encoding: 'utf8', timeout: 10_000 })
+    : spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8', timeout: 10_000 })
+  if (out.error) {
+    // 降级：返回 null 让调用方跳过清扫，绝不阻塞主流程；告警落终端让「为何没扫」可查
+    console.error(c.yellow(t('⚠ 进程枚举不可用（{m}），跳过游离网关清扫', '⚠ Process enumeration unavailable ({m}); skipping stray gateway sweep', { m: out.error.message })))
+    return null
+  }
   return out.stdout || null
 }
 

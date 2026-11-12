@@ -16,7 +16,7 @@ import {
   cmdProviderSetKey,
 } from '../src/cli/providers.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
-import { getSecret, setSecret } from '../src/config/secrets.js'
+import { getSecret, providerKeyRefs, setSecret } from '../src/config/secrets.js'
 import { clearPricingMemo } from '../src/gateway/pricing.js'
 import { configPath, pricingJsonPath, secretsPath } from '../src/util/paths.js'
 
@@ -71,6 +71,21 @@ async function seedProvider(): Promise<void> {
       protocol: 'anthropic',
       auth_style: 'bearer',
       key_ref: 'plain:sk-pv',
+    }
+  })
+}
+
+/** file 后端 provider：key_ref 指向真实 secrets 条目（--add 建池迁移用例要验证迁移后的 ref 可读回） */
+async function seedFileProvider(keyRef = 'file:pv', key = 'sk-pv'): Promise<void> {
+  await setSecret(keyRef.slice('file:'.length), key, 'file')
+  await mutateConfig((c) => {
+    c.security = { store: 'file' }
+    c.providers['pv'] = {
+      name: 'PV',
+      base_url: 'https://api.example.com',
+      protocol: 'anthropic',
+      auth_style: 'bearer',
+      key_ref: keyRef,
     }
   })
 }
@@ -332,6 +347,59 @@ describe('cmdProviderSetKey', () => {
       expect(cfg.providers['pv']!.key_ref.startsWith('file:')).toBe(true)
       expect(await getSecret(cfg.providers['pv']!.key_ref)).toBe('sk-new-key')
       expect(logs.join('\n')).toContain('key 已更新')
+    } finally {
+      h.restore()
+    }
+  })
+
+  // --add 建池迁移（2026-11-12 审查 P1-2）：单 key provider 首次 --add 时原 key_ref 必须并入
+  // 池首——providerKeyRefs 池非空只认 keys，不迁移则原 key 静默退出轮转、提示语掩盖池=1 真相
+  it('--add 单 key provider 首次建池：原 key_ref 迁入池首，轮转含两把（第 2 把提示）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2'])
+      expect(cfg.providers['pv']!.key_ref).toBe('file:pv') // key_ref 保持原值（展示/删除口径不动）
+      expect(await getSecret('file:pv')).toBe('sk-pv') // 原 key 密文未被覆盖
+      expect(await getSecret('file:pv-k2')).toBe('sk-second')
+      // 读取口径：轮转清单 = 池两把（迁移前这里只有新 key 一把，原 key 静默出局）
+      expect(providerKeyRefs(cfg.providers['pv']!)).toEqual(['file:pv', 'file:pv-k2'])
+      expect(logs.join('\n')).toContain('第 2 把')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--add 已有池：纯尾插不重复迁移，槽位编号连续', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      await cmdProviderSetKey('pv', { key: 'sk-third', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2', 'file:pv-k3'])
+      expect(cfg.providers['pv']!.key_ref).toBe('file:pv')
+      expect(logs.join('\n')).toContain('第 3 把')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--add 盘上 keys 为空数组（回落 key_ref 读取）：建池同样迁移', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await mutateConfig((c) => {
+        c.providers['pv'].keys = []
+      })
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2'])
     } finally {
       h.restore()
     }
