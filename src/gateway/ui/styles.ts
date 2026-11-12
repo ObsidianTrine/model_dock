@@ -406,8 +406,16 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
 #logTable th:nth-child(5){width:44px}
 #logTable th:nth-child(6){width:72px}
 #logTable th:nth-child(8){width:44px}
+/* 定宽按中文表头/常见值调优后，三处内容仍会放不下：EN 表头 Status/Actions（40/47px > 44 列减
+   16px 留白）被省略成 St…/Ac…；8 位毫秒（≥100s 的长请求，62px > 72 列减留白）截断误导读数。
+   列宽与 min-width 不能动——61.8% 壳下 1280 视口错误列只剩 ~111px，加宽会把它挤没并提前触发
+   横滚；改走减侧留白腾内容宽（4px=--sp-1）：表头 Code/Copy 与 8 位毫秒实测全部放下 */
+#logTable th:nth-child(5),#logTable th:nth-child(6),#logTable th:nth-child(8),#logTable td:nth-child(6){padding-left:4px;padding-right:4px}
 #logTable th,#logTable td{overflow:hidden;text-overflow:ellipsis}
 #logTable td:nth-child(4){white-space:normal;overflow-wrap:anywhere}
+/* 客户端/路由列不包 div（链路截断口径只覆盖 3/4/7 列），长无断点 token（下划线型 profile 名）
+   会在定宽格里静默横裁——放行 anywhere 折行保数据可见，与模型列同口径 */
+#logTable td:nth-child(2),#logTable td:nth-child(3){overflow-wrap:anywhere}
 #logTable td:nth-child(3) div,#logTable td:nth-child(4) div,#logTable td:nth-child(7) div{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1;overflow:hidden;overflow-wrap:anywhere}
 #logTable td:nth-child(4) div,#logTable td:nth-child(7) div.lhint{-webkit-line-clamp:2}
 .note{color:var(--muted);font-size:var(--fs-sm);margin-top:10px}

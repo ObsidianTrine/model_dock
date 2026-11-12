@@ -209,6 +209,9 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       // 8 列表头：新增「操作」列
       expect(table.querySelectorAll('thead th').length).toBe(8)
       expect(table.textContent).toContain('操作')
+      // 审计目标列是行数截断盒（td>div），全文必须在 title 悬浮可见（截断口径：title+⧉ 双通道）
+      const targetTd = [...table.querySelectorAll('tbody td')].find((td) => (td.querySelector('div')?.textContent ?? '') === 'bigmodel')
+      expect(targetTd?.getAttribute('title')).toBe('bigmodel')
       // 错误行两行化：链路摘要直出「bigmodel 跳过(协议端点缺失) → coding-plan 404」，建议为第二行
       expect(table.textContent).toContain('bigmodel 跳过(协议端点缺失) → coding-plan 404')
       expect(table.textContent).toContain('给 bigmodel 补 anthropic 端点')
@@ -230,6 +233,28 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       localStorage.setItem('mdk_lang', 'zh')
     }
   })
+
+  it('日志表定宽截断回归：EN 短表头放得下（Code/Copy）、窄列留白腾位与长 token 折行的 CSS 在页', async () => {
+    // 2026-11-12 审查回归：定宽按中文表头调优后，EN 全称 Status/Actions 被省略成 St…/Ac…、
+    // 8 位毫秒（≥100s）被截断误导读数——修复=窄列减侧留白 + EN 短标签，列宽/min-width 不动
+    localStorage.setItem('mdk_lang', 'en')
+    try {
+      mountPage()
+      await flush()
+      const thead = document.querySelector('#logTable thead')
+      expect(thead?.textContent).toContain('Code')
+      expect(thead?.textContent).toContain('Copy')
+      expect(thead?.textContent).not.toContain('Status')
+      expect(thead?.textContent).not.toContain('Actions')
+    } finally {
+      localStorage.setItem('mdk_lang', 'zh')
+    }
+    // 截断防线是 CSS 而非 JS：DOM 行为测试够不着渲染级断言（happy-dom 不做布局），
+    // 对页内样式源钉两条规则——被误删即红（客户端/路由列 anywhere 折行 + 窄列留白腾位）
+    expect(UI_HTML).toContain('#logTable td:nth-child(2),#logTable td:nth-child(3){overflow-wrap:anywhere}')
+    expect(UI_HTML).toContain('#logTable th:nth-child(5),#logTable th:nth-child(6),#logTable th:nth-child(8),#logTable td:nth-child(6){padding-left:4px;padding-right:4px}')
+  })
+
   // 清空模型（草稿两段式确认）：夹具需带模型目录，局部重桩 fetch（finally 还原 beforeAll 桩）
   function stubOverviewWithModels(ms: Array<Record<string, unknown>>, defaultModel: string): () => void {
     const prev = globalThis.fetch

@@ -137,7 +137,7 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
           var errTxt = pick('err') || ''
           return '<tr><td class="muted mono">' + esc((l.ts || '').slice(11, 19)) + '</td>' +
             '<td>' + iconInline('gear', 12) + ' ' + esc(opTxt) + '</td>' +
-            '<td><div>' + esc(pick('target') || '-') + '</div></td>' +
+            '<td title="' + esc(pick('target') || '-') + '"><div>' + esc(pick('target') || '-') + '</div></td>' +
             '<td class="muted" title="' + esc(detTxt) + '"><div>' + esc(detTxt) + '</div></td>' +
             '<td class="' + (ok ? 'st-ok' : 'st-err') + '" title="' + esc(ok ? t('成功', 'ok') : t('失败', 'failed')) + '">' + iconInline(ok ? 'check' : 'close', 13) + '</td>' +
             '<td>-</td>' +
@@ -165,7 +165,9 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
           '<td>' + cell + '</td>' +
           '<td>' + copyBtn + '</td></tr>'
       }).join('')
-      var html = '<thead><tr><th>' + t('时间', 'Time') + '</th><th>' + t('客户端 / 操作', 'Client / op') + '</th><th>' + t('服务 / 目标', 'Service / target') + '</th><th>' + t('模型 / 详情', 'Model / detail') + '</th><th>' + t('状态', 'Status') + '</th><th>' + t('耗时', 'Took') + '</th><th>' + t('错误', 'Error') + '</th><th>' + t('操作', 'Actions') + '</th></tr></thead>' +
+      // 状态/操作两列定宽 44px（按中文表头调优）：EN 全称 Status/Actions 放不下被裁成 St…/Ac…，
+      // 改用同义短标签 Code/Copy（列内容即状态码与 ⧉ 复制钮，语义不变）
+      var html = '<thead><tr><th>' + t('时间', 'Time') + '</th><th>' + t('客户端 / 操作', 'Client / op') + '</th><th>' + t('服务 / 目标', 'Service / target') + '</th><th>' + t('模型 / 详情', 'Model / detail') + '</th><th>' + t('状态', 'Code') + '</th><th>' + t('耗时', 'Took') + '</th><th>' + t('错误', 'Error') + '</th><th>' + t('操作', 'Copy') + '</th></tr></thead>' +
         (rows || '<tr><td colspan="8" class="empty">' + t('暂无记录', 'No entries yet') + '</td></tr>')
       logsLastGood = html
       logsFailStreak = 0
