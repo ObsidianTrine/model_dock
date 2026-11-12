@@ -162,6 +162,11 @@ export interface ForwardOptions {
    *  undefined = 未提供（rewriteModel 自扫，行为同未提供时）；null = 已扫但拿不准（走全量解析）。
    *  必须是对同一 body Buffer 的扫描结果，否则改写字节区间错位。 */
   bodyScan?: TopModelScan | null
+  /** 模型级容灾闸门吸收计数去重（forwardWithFailover 整链共享一个 Set）：一次请求内同一
+   *  (provider, 原模型) 的闸门改发只计一笔。429 原地重试与同 provider 的合成候选会再次走
+   *  forwardToUpstream、闸门判定随之重新命中——缺去重会把一次请求的「被吸收」记成多笔；
+   *  直调方（admin 探针）不传 = 每次调用各计一笔，行为同旧。 */
+  mfCounted?: Set<string>
 }
 
 export interface UpstreamBody {
@@ -528,16 +533,18 @@ export async function forwardToUpstream(
   // 过期后 isModelMeltdown 自然转 false，流量试回主模型。备用模型自身也在熔断期则不动——
   // 让它照常撞一次上游并按既有语义切换/回传，不静默吞掉。仅 provider 配了 model_fallback 才
   // 构造闸门（未配置零开销）；非对话端点 rewriteModel 函数头原样返回，闸门自然不被咨询。
+  // 闸门此处只标记命中（mfHit）不计数：吸收计数在下方「确认发出」点落账——闸门命中后仍可能
+  // 因端点缺失 candidateSkip（请求根本没发出，改发未发生），且 429 原地重试会再次进入本函数
+  // 重新命中闸门（去重见 ForwardOptions.mfCounted）。
   const mfMap = provider.model_fallback
+  let mfHit: string | undefined
   const mfGate = mfMap && Object.keys(mfMap).length > 0
     ? (final: string): string | undefined => {
         const fb = mfMap[final]
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
         if (!isModelMeltdown(rt, providerId, final)) return undefined // 主模型未熔断：不动
         if (isModelMeltdown(rt, providerId, fb)) return undefined // 备用也在熔断：不去撞
-        // 闸门命中 = 改发已发生且请求被吸收（直接改发备用模型，原模型上游零往返）：
-        // fallback/absorbed 双计（absorbed 是 fallback 的真子集，见 recordModelFallback 注）
-        recordModelFallback(rt, providerId, final, true)
+        mfHit = final
         return fb
       }
     : undefined
@@ -565,6 +572,14 @@ export async function forwardToUpstream(
   const proto = clientProtocolFromPath(opts.path, provider.protocol)
   const url = joinUpstreamUrl(upstreamEndpoint(provider, proto), opts.path, proto)
   const dispatcher = dispatcherFor(rt, provider)
+  // 闸门吸收计数落账点（「确认发出」）：端点解析已通过，此后的失败都是真实发送尝试——改发
+  // 决策至此成立（fallback/absorbed 双计口径见 recordModelFallback 注）。同请求内同
+  // (provider, 原模型) 只计一笔：mfCounted 由 forwardWithFailover 整链共享，429 原地重试与
+  // 同 provider 合成候选重复命中闸门时不再叠加（直调方不传 Set = 每次调用各计一笔）。
+  if (mfHit !== undefined && !opts.mfCounted?.has(`${providerId}\u0000${mfHit}`)) {
+    opts.mfCounted?.add(`${providerId}\u0000${mfHit}`)
+    recordModelFallback(rt, providerId, mfHit, true)
+  }
 
   // 用指定 key 发一轮：headers 含 key，换 key 必须重建。连接错误的立即重试循环原样保留
   //（transport 失败与 key 无关，不在 key 间轮转），只按 key 维度包了一层
@@ -1032,7 +1047,7 @@ export async function forwardWithFailover(
   // 扫描全程有效；非 routed / 空体时改写层与过滤层都不需要它，直接跳过（零扫描）。
   const routedPath = ROUTED_PATH_RE.test(opts.path.split('?')[0])
   const bodyScan = routedPath && opts.body.length > 0 ? scanTopLevelModel(opts.body) : null
-  const fwdOpts: ForwardOptions = { ...opts, bodyScan }
+  const fwdOpts: ForwardOptions = { ...opts, bodyScan, mfCounted: new Set() }
   // 自动候选模型相容过滤（见 filterModelCompatible）：目录不含请求模型的服务不重放，剔除留痕 attempts/reason
   const cands = filterModelCompatible(
     picked.ordered,

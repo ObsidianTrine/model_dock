@@ -388,7 +388,7 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
 
   /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
   async function startModelMock(
-    route: (model: string) => { status: number; body: string }
+    route: (model: string) => { status: number; body: string; headers?: Record<string, string> }
   ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
     const seen: string[] = []
     const s = http.createServer((req, res) => {
@@ -403,7 +403,7 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
         }
         seen.push(model)
         const out = route(model)
-        res.writeHead(out.status, { 'content-type': 'application/json' })
+        res.writeHead(out.status, { 'content-type': 'application/json', ...(out.headers ?? {}) })
         res.end(out.body)
       })
     })
@@ -417,8 +417,8 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
 
   const countOf = (arr: string[], m: string) => arr.filter((x) => x === m).length
 
-  function fwd(body: Buffer): Record<string, unknown> {
-    return { method: 'POST', path: ROUTED, headers: {}, body, idleTimeoutMs: 5000, retries: 0 }
+  function fwd(body: Buffer, path = ROUTED): Record<string, unknown> {
+    return { method: 'POST', path, headers: {}, body, idleTimeoutMs: 5000, retries: 0 }
   }
 
   it('模型熔断（60s 窗 3 次 quota）后第 4 个请求预改写直落备用模型：主模型路径零上游调用；TTL 过期恢复走主模型', async () => {
@@ -491,6 +491,62 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))) as never)
       expect(r.status).toBe(200)
       expect(mock.seen).toEqual(['mZ'])
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('闸门吸收后 429 原地重试：整链共享去重，fallback/absorbed 只计一笔（重试重复命中闸门不叠加）', async () => {
+    const h = fakeHome()
+    let mBHits = 0
+    const mock = await startModelMock((model) => {
+      if (model !== 'mB') return { status: 402, body: QUOTA_BODY }
+      mBHits++
+      return mBHits === 1
+        ? { status: 429, body: JSON.stringify({ error: { message: 'rate limited' } }), headers: { 'retry-after': '1' } }
+        : { status: 200, body: '{"ok":true}' }
+    })
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      // mA 灌满模型级熔断：闸门每次 forwardToUpstream 都会命中（首发 + 429 重试两次进闸门）
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r.status).toBe(200)
+      expect(r.reason).toBe('retried_429:pa')
+      expect(mock.seen).toEqual(['mB', 'mB']) // 首发与重试都打 mB，主模型零往返
+      // 一次请求 = 一次「被吸收」：重试复用同一改写决策，不得记成两笔（回归 2026-11-12 审查实证）
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('闸门改写后端点缺失（candidateSkip）：请求未发出不计改发——吸收计数落账在「确认发出」之后', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      await setSecret('po', 'sk-po', 'file')
+      // anthropic 协议 provider 未配 openai 端点；客户端走 /v1/chat/completions（openai 协议）→ candidateSkip
+      const po = providerCfg({ name: 'po', base_url: mock.url, key_ref: 'file:po', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ po })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'po', 'mA', { ok: false, cls: 'quota' })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'po'), fwd(body, '/v1/chat/completions') as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).cause).toBe('proto_endpoint_missing')
+      expect(mock.seen).toEqual([]) // 零上游往返
+      // 改发未发生（什么都没发出）：不得虚记 fallback/absorbed（回归 2026-11-12 审查实证）
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0)
     } finally {
       await mock.close()
       h.restore()
