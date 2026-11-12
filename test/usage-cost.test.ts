@@ -307,7 +307,7 @@ describe('usage 聚合 tokens_by_model 维度（模型级容灾观测：per-mode
 })
 
 describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）', () => {
-  it('回填当日日文件 + logRequest 增量记账，跨 fakeHome 重置', () => {
+  it('回填当日日文件 + logRequest 增量记账，跨 fakeHome 重置', async () => {
     const h = fakeHome()
     // 查价器由 daemon 启动注入（perf-p2-polish 前置拆叶）：测试里等价接上，收尾复位防泄漏
     setUsagePriceResolver(gatewayPriceResolver)
@@ -318,7 +318,10 @@ describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）',
       fs.mkdirSync(logs, { recursive: true })
       const line = (over: Record<string, unknown>) =>
         JSON.stringify({
-          ts: `${today}T10:00:00.000+08:00`,
+          // 回填只计「仪表创建前」落盘的条目（P2-11 异步回填的双计防线按条目 ts 判界）：
+          // 用相对当前时刻的 ts（略早数秒）代表「重启前的旧流量」，固定时刻在非 +08:00 时区
+          // 的 CI 上会落进未来被界外跳过
+          ts: localIsoTs(new Date(Date.now() - 6000)),
           harness: 'c',
           profile: 'p',
           provider: 'zhipuai',
@@ -331,8 +334,15 @@ describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）',
         })
       // 重启回填：直接落当日日文件（网关崩溃前的旧流量）
       fs.writeFileSync(path.join(logs, `gateway-${today}.jsonl`), line({}) + '\n' + line({ status: 429 }) + '\n')
-      const v1 = usageTodayView()
+      let v1 = usageTodayView()
       expect(v1.date).toBe(today)
+      // 回填改流式异步（P2-11：跨日/重启首请求不再同步整读当日文件冻结事件循环）：
+      // 轮询等回填收齐，期间增量记账照常入账
+      const deadline = Date.now() + 3000
+      while (v1.requests < 2 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25))
+        v1 = usageTodayView()
+      }
       expect(v1.requests).toBe(2)
       expect(v1.ok).toBe(1)
       expect(v1.failed).toBe(1)
@@ -342,7 +352,7 @@ describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）',
       // 实时增量：logRequest 热路径记账
       const rt = { ring: [], metricsLatency: new Map() } as never
       logRequest(rt, {
-        ts: `${today}T11:00:00.000+08:00`,
+        ts: localIsoTs(),
         harness: 'c',
         profile: 'p',
         provider: 'zhipuai',

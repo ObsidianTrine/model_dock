@@ -370,8 +370,12 @@ export async function hUsageLive(c: AdminCtx): Promise<void> {
 export async function hOverview(c: AdminCtx): Promise<void> {
   const { rt, res } = c
   markUiPing(Date.now()) // 控制台页面的 5s overview 轮询即在场心跳（免新端点高频调用）
+  // 先构建再发头（P2-8）：构建失败时头未发出，顶层兜底（server.ts handleRequest catch）能走
+  // sendError 回可操作错误 JSON——先发 200 再 await 的旧写法在构建抛点时只能 res.destroy()，
+  // 5s 轮询的控制台拿到 200 空体/连接 RST，UI 误报「网关未响应」而非真实错误
+  const data = await overviewViewData(rt)
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(await overviewViewData(rt)) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
+  res.end(data) // 命中直接写缓存串，不再重复 stringify（view 几十-几百 KB）
   return
 }
 

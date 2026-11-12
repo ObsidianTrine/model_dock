@@ -36,12 +36,19 @@ export class ProviderQueueTimeoutError extends Error {
 }
 
 /** 单 provider 的计数器 + 等待队列。limit 不固化在信号量上：每次 acquire 传当前配置值并记为
- *  lastLimit（release/pump 用它唤醒排队者）——热加载调大/调小 max_concurrency 即时生效
+ *  lastLimit（无实时读取器时的回落基准）——热加载调大/调小 max_concurrency 即时生效
  *  （调小不驱逐在途请求，只等自然回落后生效；调大在下一次 acquire/release 事件时放行排队者）。 */
 class ProviderSemaphore {
   private inFlight = 0
   private lastLimit = 0
   private waiters: Array<{ resolve: (s: ProviderSlot) => void; reject: (e: unknown) => void; timer?: NodeJS.Timeout }> = []
+  /** 实时上限读取器（semaphoreFor 注入 rt/providerId）：pump 每次唤醒都重读当前配置——
+   *  release 路径不再吃陈旧 lastLimit（P2-9：热加载调小上限后窗口内仍按旧上限超放排队者） */
+  private limitGetter?: () => number
+
+  constructor(limitGetter?: () => number) {
+    this.limitGetter = limitGetter
+  }
 
   async acquire(limit: number, waitMs: number, signal: AbortSignal | undefined, makeTimeout: () => Error): Promise<ProviderSlot> {
     if (signal?.aborted) throw new Error('aborted')
@@ -68,7 +75,12 @@ class ProviderSemaphore {
 
   /** 容量就位则按 FIFO 唤醒等待者（槽位所有权直接移交，授予即 inFlight++） */
   private pump(): void {
-    while (this.waiters.length > 0 && this.inFlight < this.lastLimit) {
+    // 实时重读配置上限：读到 0（热改为不限 / provider 已删——新 acquire 已不走信号量）回落
+    // lastLimit，存量排队按取槽时的上限逐个自然排空；两者皆 0（不可能有排队者的形态）防御性
+    // 视为不限
+    const cfgLimit = this.limitGetter?.() ?? 0
+    const cap = cfgLimit > 0 ? cfgLimit : this.lastLimit > 0 ? this.lastLimit : Number.POSITIVE_INFINITY
+    while (this.waiters.length > 0 && this.inFlight < cap) {
       const w = this.waiters.shift()!
       if (w.timer) clearTimeout(w.timer)
       this.inFlight++
@@ -110,7 +122,7 @@ function semaphoreFor(rt: GatewayRuntime, providerId: string): ProviderSemaphore
   }
   let s = m.get(providerId)
   if (!s) {
-    s = new ProviderSemaphore()
+    s = new ProviderSemaphore(() => providerConcurrencyLimit(rt.config.providers[providerId]))
     m.set(providerId, s)
   }
   return s
