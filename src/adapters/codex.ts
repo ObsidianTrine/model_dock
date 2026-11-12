@@ -297,28 +297,44 @@ export const codexAdapter: HarnessAdapter = {
             )
           }
         }
+      } else if (root.model_catalog_json === codexCatalogPath()) {
+        // 路由切到无模型目录的服务：收回自家旧指针（config 里残留上一家服务商的目录文件，
+        // /model 选中即 400——gpt-6-astra 失联同型）。用户自设的他值不动，回落口径与
+        // 「目录空 fail-open：不写键」一致
+        delete root.model_catalog_json
+        catalogNotes.push(
+          t(
+            '当前路由服务商无模型目录，已收回 ModelDock 写入的 model_catalog_json 指针（旧目录文件描述的是上一家服务商的模型，选中必 400）；/model 选择器回落内置预设',
+            'The current route provider has no model catalog; the ModelDock-written model_catalog_json pointer was removed (the stale file describes the previous provider\'s models, which all 400 on select); the /model picker falls back to built-in presets'
+          )
+        )
       }
     }
 
     // codex profiles 多路由（codex-rebake-profiles 卡）：为每条 ModelDock 路由写
     // [profiles.<id>]（model_provider=modeldock + model=该路由默认模型），`codex -p <id>`
-    // 一键切换路由，免控制台往返。守卫：同名 profile 已被用户自设（model_provider 不是
-    // 我们或非对象）→ 跳过不覆盖；我们自己的旧条目随 planAttach 刷新（路由切换重烤时
-    // 跟随新默认模型）。detach 只收 model_provider=modeldock 的条目。
-    ensurePlainObjectField(root.profiles, 'profiles', p)
-    const rootProfiles = (root.profiles ??= {})
+    // 一键切换路由，免控制台往返。守卫：同名 profile 已被用户自设 → 跳过不覆盖；我们自己的
+    // 旧条目随 planAttach 刷新（路由切换重烤时跟随新默认模型）。detach 只收 model_provider
+    // =modeldock 的条目。直连模式不写（与 catalog 同口径）：modeldock 条目此时=单一直连上游，
+    // 其他路由的默认模型打过去必 400——按路由目录守卫烤入反成死条目烤入。
     const skippedProfiles: string[] = []
-    for (const [pid, prof] of Object.entries(cfg.profiles)) {
-      const model = prof.default_model
-      // default_model 必须在 provider 模型目录内（目录空/模型不在目录 → 不写，防烤出
-      // 必 400 的死条目——gpt-6-astra 失联教训的路由侧对账）
-      if (!model || !prof.provider || !cfg.providers[prof.provider]?.models?.[model]) continue
-      const existing = rootProfiles[pid]
-      if (existing && existing.model_provider !== undefined && existing.model_provider !== 'modeldock') {
-        skippedProfiles.push(pid)
-        continue
+    if (!d) {
+      ensurePlainObjectField(root.profiles, 'profiles', p)
+      const rootProfiles = (root.profiles ??= {})
+      for (const [pid, prof] of Object.entries(cfg.profiles)) {
+        const model = prof.default_model
+        // default_model 必须在 provider 模型目录内（目录空/模型不在目录 → 不写，防烤出
+        // 必 400 的死条目——gpt-6-astra 失联教训的路由侧对账）
+        if (!model || !prof.provider || !cfg.providers[prof.provider]?.models?.[model]) continue
+        const existing = rootProfiles[pid]
+        // 只有自家条目（model_provider=modeldock）才可刷新；其余既有条目一律跳过——含未写
+        // model_provider 的用户 profile（codex 语义=继承根级 provider，覆盖会劫持用户配置）
+        if (existing && existing.model_provider !== 'modeldock') {
+          skippedProfiles.push(pid)
+          continue
+        }
+        rootProfiles[pid] = { model_provider: 'modeldock', model }
       }
-      rootProfiles[pid] = { model_provider: 'modeldock', model }
     }
     const profileNotes: string[] = []
     if (skippedProfiles.length) {
@@ -383,23 +399,27 @@ export const codexAdapter: HarnessAdapter = {
         delete root.model_providers!.modeldock
         if (root.model_provider === 'modeldock') {
           delete root.model_provider
-          // 接入随默认模型写入的窗口/输出上限一并收回（仅路由由我们接管时）；接入前的
-          // 用户手设值有 attach 快照兜底，可 restore 找回
+          // 接入随默认模型写入的窗口/输出上限一并收回（仅路由由我们接管时；根级键作用于
+          // 当前激活模型，根级 provider 不是我们就不是我们写的）；接入前的用户手设值有
+          // attach 快照兜底，可 restore 找回
           delete root.model_context_window
           delete root.model_max_output_tokens
-          // catalog 指针同理收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）
-          if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
-          // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；
-          // 收空后整键删除，不残留空表
-          const ups = root.profiles
-          if (ups && typeof ups === 'object') {
-            for (const [pid, entry] of Object.entries(ups)) {
-              if (entry && typeof entry === 'object' && (entry as Record<string, unknown>).model_provider === 'modeldock') {
-                delete ups[pid]
-              }
+        }
+        // catalog 指针收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）。
+        // 不能锁在根级接管态内：attach 不带 --set-default（或用户后来把根级 provider 切走）
+        // 时指针同样是我们写的，残留会指向已删的 modeldock 条目（codex -p / 选择器全部失联）
+        if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
+        // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；收空后
+        // 整键删除，不残留空表。归属判定按条目自身（profiles 写入不依赖 --set-default，
+        // 与根级接管态无关）
+        const ups = root.profiles
+        if (ups && typeof ups === 'object') {
+          for (const [pid, pe] of Object.entries(ups)) {
+            if (pe && typeof pe === 'object' && (pe as Record<string, unknown>).model_provider === 'modeldock') {
+              delete ups[pid]
             }
-            if (Object.keys(ups).length === 0) delete root.profiles
           }
+          if (Object.keys(ups).length === 0) delete root.profiles
         }
         const c2 = changeIfChanged(p, text, tomlStringify(reorderTomlRoot(root)))
         if (c2) changes.push(c2)
