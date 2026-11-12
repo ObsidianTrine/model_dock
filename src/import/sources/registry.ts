@@ -1,6 +1,6 @@
 /** 导入源 registry：汇总是 11 个本地扫描器 + oneapi 显式拉取的分发入口（形态参照 adapters/registry.ts） */
 import { t } from '../../util/i18n.js'
-import { dedupeCandidates, type ImportCandidate, type ImportSource } from './common.js'
+import { dedupeCandidates, placeholder, type ImportCandidate, type ImportSource } from './common.js'
 import { scanCcSwitch } from './cc-switch.js'
 import { scanClaude } from './claude.js'
 import { scanDsh } from './dsh.js'
@@ -37,7 +37,20 @@ export async function scanSources(source: ImportSource | 'all', opts: ImportScan
     ['gemini', scanGemini],
   ]
   const out: ImportCandidate[] = []
-  const results = await Promise.all(localScanners.filter(([s]) => wanted(s)).map(([, scan]) => scan()))
+  // 逐源隔离：解析类失败各扫描器已自带占位诊断，但读取层异常（EACCES/EISDIR、UTF-16 编码报错——
+  // readTextIfExists 对非 ENOENT 一律上抛）会直接 reject——Promise.all 无隔离时单源故障会放大成
+  // 整个导入扫描失败。与 mcp 盘点「单来源损坏不影响其余」同口径：catch 落成占位诊断。
+  const results = await Promise.all(
+    localScanners
+      .filter(([s]) => wanted(s))
+      .map(async ([s, scan]) => {
+        try {
+          return await scan()
+        } catch (e) {
+          return [placeholder(s, t('扫描 {source} 失败：{msg}', 'Failed to scan {source}: {msg}', { source: s, msg: (e as Error).message }))]
+        }
+      })
+  )
   for (const r of results) out.push(...r)
   if (source === 'oneapi') {
     // oneapi 需要站点凭据，不进 'all'（自动扫描拿不到），只走显式 --from oneapi
