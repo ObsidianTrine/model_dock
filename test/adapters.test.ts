@@ -2611,6 +2611,33 @@ describe('opencode adapter', () => {
       h.restore()
     }
   })
+
+  it('sandboxIsolated：FAKE_HOME 下宿主 PATH 的 opencode 命令不算在场（npm 类探测沙箱隔离）', async () => {
+    const h = fakeHome()
+    const savedPath = process.env.PATH
+    const savedAppData = process.env.APPDATA
+    // fakeHome 之外的目录模拟宿主 PATH（真机 /usr/local/bin 场景）：并集探测会把宿主命令误计为在场
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'modeldock-outside-'))
+    try {
+      fs.writeFileSync(path.join(outside, process.platform === 'win32' ? 'opencode.cmd' : 'opencode'), 'x')
+      process.env.PATH = outside
+      delete process.env.APPDATA
+      // 配置文件在（残留形态）、宿主命令在——沙箱是独立「全新机器」，两者都不算已安装
+      const p = path.join(h.home, '.config', 'opencode', 'opencode.json')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, '{}\n', 0o600)
+      const det = await openCodeAdapter.detect()
+      expect(det.installed).toBe(false)
+      expect(det.note).toContain('残留')
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH
+      else process.env.PATH = savedPath
+      if (savedAppData === undefined) delete process.env.APPDATA
+      else process.env.APPDATA = savedAppData
+      fs.rmSync(outside, { recursive: true, force: true })
+      h.restore()
+    }
+  })
 })
 
 describe('applyChanges 引擎', () => {
