@@ -11,6 +11,7 @@
  *   setup.exe 而 updater 进程先退；删除统一延迟到 sweep（网关启动 / runUpdate 开头 / 换槽）。
  * - 续传起点以 .part 实际字节数为准，meta 仅辅助。
  */
+import path from 'node:path'
 import fsp from 'node:fs/promises'
 import { atomicWrite, readTextIfExists } from '../util/fsx.js'
 import { updatesStagingDir } from '../util/paths.js'
@@ -42,19 +43,19 @@ export interface StagingMeta {
 export const STAGING_MAX_AGE_MS = 7 * 24 * 3600_000
 
 export function stagingMetaPath(): string {
-  return `${updatesStagingDir()}/meta.json`
+  return path.join(updatesStagingDir(), 'meta.json')
 }
 
 export function stagingSlotDir(version: string): string {
-  return `${updatesStagingDir()}/${version}`
+  return path.join(updatesStagingDir(), version)
 }
 
 export function stagingPartFile(version: string, assetName: string): string {
-  return `${updatesStagingDir()}/${version}/${assetName}.part`
+  return path.join(updatesStagingDir(), version, `${assetName}.part`)
 }
 
 export function stagingFinalFile(version: string, assetName: string): string {
-  return `${updatesStagingDir()}/${version}/${assetName}`
+  return path.join(updatesStagingDir(), version, assetName)
 }
 
 /** 读槽位账本：缺失/损坏返回 null（调用方按无槽处理，sweep 会收走残骸） */
