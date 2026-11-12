@@ -274,7 +274,8 @@ export interface HealthState {  /** 60s 滑动错误窗口（t0 起算点，coun
 // ===== 海况观测（state/sea.ts 维护；全部内存态，重启清零）=====
 
 /** 海况滑窗单分钟分桶：错误类与 HealthState.meltdown_cls 同枚举。total 含成功与中性 4xx
- *  （作错误率分母）；429 不含 quota——relay 分类互斥（429+quota 体归 quota），quota 单列。 */
+ *  （作错误率分母；未出网的本地跳过经 recordOutcome skipSea 旁路不进桶，见 routing.ts）；
+ *  429 不含 quota——relay 分类互斥（429+quota 体归 quota），quota 单列。 */
 export interface SeaMinuteBucket {
   /** epoch 分钟数（floor(ms / 60000)）：环形槽位与新鲜度判定键 */
   minute: number

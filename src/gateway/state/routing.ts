@@ -61,16 +61,19 @@ export function resolveByProfile(
  *  quota=额度耗尽（402 / 429+quota 体）：3 次即熔断且冷却 15 分钟——额度不会分钟级恢复，别反复撞耗尽的服务。
  *  modelScoped=true（模型级容灾接管）：该 quota 事件已由 recordModelOutcome 在 (provider, model)
  *  粒度记账，provider 级熔断窗口不累计——否则一家服务的模型级容灾会把 provider 熔丝点亮、同服务
- *  备用模型连带被封死（功能自我否定）；海况分桶照常记账（风暴闸对 402 风暴保持可见）。 */
+ *  备用模型连带被封死（功能自我否定）；海况分桶照常记账（风暴闸对 402 风暴保持可见）。
+ *  skipSea=true（候选本地跳过旁路，cruise1112 P2-12）：该结果未真正出网（key 缺失/协议端点缺失
+ *  等本机配置级跳过），不进海况分桶——分桶 total 是 error_rate 与风暴闸 429 率的分母，混入
+ *  未出网尝试会稀释两率；熔断侧照常处理（cls 缺席本就不累计窗口）。 */
 export function recordOutcome(
   rt: GatewayRuntime,
   providerId: string,
-  r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number; modelScoped?: boolean }
+  r: { ok: boolean; cls?: 'connect' | '429' | '5xx' | 'quota'; ms?: number; modelScoped?: boolean; skipSea?: boolean }
 ): void {
   const now = Date.now()
   // 海况分桶与下方熔断判定同源不同构（state/sea.ts）：只随同一事件流记账、供
   // /_modeldock/metrics 观测面消费，对熔断逻辑零影响；同传 now 保持时间基点一致
-  recordSeaOutcome(rt, providerId, r, now)
+  if (!r.skipSea) recordSeaOutcome(rt, providerId, r, now)
   let h = rt.health.get(providerId)
   if (!h) {
     h = { errWindow: { t0: now, count: 0 }, okStreak: 0 }
