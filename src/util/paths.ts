@@ -26,6 +26,10 @@ export const modelCatalogCachePath = () => path.join(modeldockDir(), 'model-cata
 export const pricingJsonPath = () => path.join(modeldockDir(), 'pricing.json')
 /** 更新预取 staging（单版本槽：下载中/已就绪的适配安装包 + meta.json；见 src/update/staging.ts） */
 export const updatesStagingDir = () => path.join(modeldockDir(), 'updates', 'staging')
+/** 更新还原回滚目录（win-setup 旧版 exe 备份落点：<dir>/<version>/；mac/bare 旧版留安装位置 .old，见 src/update/rollback.ts） */
+export const updatesRollbackDir = () => path.join(modeldockDir(), 'updates', 'rollback')
+/** 更新还原账本（单槽位：上一版产物索引 + 版本/形态；见 src/update/rollback.ts） */
+export const rollbackLedgerPath = () => path.join(modeldockDir(), 'updates', 'rollback.json')
 
 /** 展开 ~ 前缀（用户在 config 里写的相对家目录路径） */
 export function expandHome(p: string): string {

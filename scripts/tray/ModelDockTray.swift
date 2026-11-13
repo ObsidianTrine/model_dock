@@ -202,6 +202,35 @@ func readUpdateProgressFile() -> UpdateProgressFile? {
     return p
 }
 
+// ---------- 还原更新（rollback.json，直读不依赖网关——还原常发生在网关挂掉时） ----------
+
+/// 还原槽位（CLI `update --yes` 换装成功后写的账本）：上一版产物索引 + 版本
+struct RollbackSlot: Decodable {
+    let version: String
+    let mainPath: String
+}
+
+/// 读还原槽位：缺失/损坏/备份文件已不在盘（被 --clean 或手动删除）一律按无槽处理
+func readRollbackSlot() -> RollbackSlot? {
+    let path = modeldockHome() + "/updates/rollback.json"
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    guard let s = try? JSONDecoder().decode(RollbackSlot.self, from: data) else { return nil }
+    guard FileManager.default.fileExists(atPath: s.mainPath) else { return nil }
+    return s
+}
+
+/// 三段数字版本比较（a > b?）：与 CLI compareVersions 同口径，槽位版本高于当前 = 可切回新版本
+func cmpSemver(_ a: String, _ b: String) -> Bool {
+    let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+    let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+    for i in 0..<max(pa.count, pb.count) {
+        let x = i < pa.count ? pa[i] : 0
+        let y = i < pb.count ? pb[i] : 0
+        if x != y { return x > y }
+    }
+    return false
+}
+
 /// update-tray.log 轮转：超 1MB 换 .1；内容已损坏（非法 UTF-8，旧版固定偏移写入互踩所致）换 .bad。
 /// 损坏字节不会自愈，macOS 阅读器会因它整份按 Latin-1 显示；换名留档，下次更新从新文件写起
 private func rotateUpdateLogIfNeeded(_ path: String) {
@@ -314,6 +343,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // 更新子进程在途标志：进度文件尚未首写的短窗兜底（拉起后几秒内），长窗以磁盘进度为准
     var updating = false
     var updatingSince = Date.distantPast
+    // 还原模式标记：进度窗标题/完成文案随它切换（还原走同一份 update-progress.json 进度）
+    var restoringTarget: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory) // 不占 Dock，仅菜单栏
@@ -551,6 +582,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         upd.target = self
         upd.isEnabled = !busy && gatewayBinary() != nil
         menu.addItem(upd)
+
+        // 还原更新：更新时自动保留的上一版（安装位置 .old / 回滚目录），一键对换回去，零下载。
+        // 直读 rollback.json 不依赖网关（还原常发生在网关挂掉时）；槽位版本等于当前 = 陈旧槽，隐藏。
+        // 槽位版本高于当前（还原过后）文案换成「切回新版本」——再点一次即免费切回，双向零下载
+        if !busy, let slot = readRollbackSlot(), slot.version != trayVersion() {
+            let forward = trayVersion().map { cmpSemver(slot.version, $0) } ?? false
+            let restore = NSMenuItem(
+                title: forward
+                    ? L("切回新版本（v\(slot.version)）", "Switch back to v\(slot.version)")
+                    : L("还原更新（回到 v\(slot.version)）", "Restore Update (back to v\(slot.version))"),
+                action: #selector(restoreUpdateClicked), keyEquivalent: ""
+            )
+            restore.target = self
+            restore.isEnabled = gatewayBinary() != nil
+            menu.addItem(restore)
+        }
 
         if !alive {
             let start = NSMenuItem(title: L("启动网关", "Start Gateway"), action: #selector(startGatewayClicked), keyEquivalent: "")
@@ -982,26 +1029,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let panel = updatePanel else { updateTimer?.invalidate(); return }
         if !panel.visible { updateTimer?.invalidate(); return } // 用户手动关窗：停止刷新
         guard let p = readUpdateProgressFile() else { return } // 阶段间隙暂无进度：保留上一帧
+        let restoring = restoringTarget != nil
         if p.stage == "failed" {
             updateTimer?.invalidate()
             panel.close()
             let a = NSAlert()
-            a.messageText = L("ModelDock 更新失败", "ModelDock Update Failed")
-            a.informativeText = cappedInfo(p.error ?? L("未知错误，可重试 modeldock update。", "Unknown error; retry with `modeldock update`."), logHint: nil)
+            a.messageText = restoring ? L("ModelDock 还原失败", "ModelDock Restore Failed") : L("ModelDock 更新失败", "ModelDock Update Failed")
+            a.informativeText = cappedInfo(p.error ?? (restoring ? L("未知错误，可重试 modeldock update --restore。", "Unknown error; retry with `modeldock update --restore`.") : L("未知错误，可重试 modeldock update。", "Unknown error; retry with `modeldock update`.")), logHint: nil)
             a.runModal()
             return
         }
         let names = [
             "downloading": L("下载中", "Downloading"),
             "verifying": L("校验安装包", "Verifying package"),
-            "swapping": L("停止网关并替换安装", "Stopping gateway and swapping install"),
+            "swapping": restoring ? L("停止网关并对换版本", "Stopping gateway and swapping versions") : L("停止网关并替换安装", "Stopping gateway and swapping install"),
             "restarting": L("重启服务", "Restarting service"),
-            "done": L("更新完成", "Update finished"),
+            "done": restoring ? L("还原完成", "Restore finished") : L("更新完成", "Update finished"),
         ]
         let name = names[p.stage] ?? p.stage
         let mbInfo = p.total > 0 ? L("（\(String(format: "%.1f", p.received / 1048576)) / \(String(format: "%.1f", p.total / 1048576)) MB）", " (\(String(format: "%.1f", p.received / 1048576)) / \(String(format: "%.1f", p.total / 1048576)) MB)") : ""
-        let text = p.stage == "done" ? L("更新完成。网关与菜单栏将自动重启。", "Update finished. The gateway and tray will restart automatically.") : name + (p.stage == "downloading" && p.total > 0 ? " \(p.percent)%\(mbInfo)" : "")
-        panel.show(title: L("正在更新到 v\(target)", "Updating to v\(target)"), text: text, percent: p.total > 0 ? Double(p.percent) : (p.stage == "done" ? 100 : nil))
+        let doneText = restoring ? L("还原完成。网关与菜单栏将自动重启。", "Restore finished. The gateway and tray will restart automatically.") : L("更新完成。网关与菜单栏将自动重启。", "Update finished. The gateway and tray will restart automatically.")
+        let text = p.stage == "done" ? doneText : name + (p.stage == "downloading" && p.total > 0 ? " \(p.percent)%\(mbInfo)" : "")
+        let title = restoring ? L("正在还原到 v\(target)", "Restoring to v\(target)") : L("正在更新到 v\(target)", "Updating to v\(target)")
+        panel.show(title: title, text: text, percent: p.total > 0 ? Double(p.percent) : (p.stage == "done" ? 100 : nil))
     }
 
     /// 检查结果弹窗：正文直接用 CLI 的检查输出——那边已去 markdown 标记 + 摘要收口
@@ -1100,11 +1150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return false
     }
 
-    /// 就地更新：分离跑 `modeldock update --yes`（弹窗里的「立即更新」即用户确认），
-    /// 输出追加到 logs/update-tray.log。更新流程会停掉托盘自身（换包后由新版自动拉起），故不等待子进程。
+    /// 就地更新/还原：分离跑 `modeldock update --yes` / `--restore --yes`（弹窗里的确认即用户已确认），
+    /// 输出追加到 logs/update-tray.log。流程会停掉托盘自身（换包后由新版自动拉起），故不等待子进程。
     /// 返回是否真正拉起：在途更新被拒绝时返回 false，调用方不再弹进度窗。
     @discardableResult
-    private func startUpdateCli() -> Bool {
+    private func startUpdateCli(args: [String] = ["update", "--yes"], restoreTarget: String? = nil) -> Bool {
         guard let bin = gatewayBinary() else { return false }
         if updateInFlight() {
             let a = NSAlert()
@@ -1115,9 +1165,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         updating = true
         updatingSince = Date()
+        restoringTarget = restoreTarget // nil = 更新模式；还原传槽位版本，进度窗按还原文案展示
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
-        proc.arguments = ["update", "--yes"]
+        proc.arguments = args
         let logDir = modeldockHome() + "/logs"
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/update-tray.log"
@@ -1143,7 +1194,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return true
         } catch {
             updating = false // 拉起失败：放开防重入，否则这一轮托盘永远点不动更新
+            restoringTarget = nil
             return false
+        }
+    }
+
+    /// 还原更新：确认后分离跑 `modeldock update --restore --yes`（还原逻辑全在 CLI，托盘只做确认与进度展示）。
+    /// 还原流程会停掉托盘自身（对换完成后由还原版自动拉起），故不等待子进程。
+    @objc func restoreUpdateClicked() {
+        guard !updateInFlight() else { return } // 菜单项在 busy 时已隐藏，这里兜底防连点
+        guard gatewayBinary() != nil else { return }
+        guard let slot = readRollbackSlot() else { return }
+        let a = NSAlert()
+        a.messageText = L("还原更新？", "Restore previous version?")
+        a.informativeText = L(
+            "将切换到备份保留的 v\(slot.version)，网关与菜单栏图标自动重启，期间请求会短暂中断。",
+            "ModelDock will switch to the retained v\(slot.version); the gateway and tray icon restart automatically and requests are briefly interrupted."
+        )
+        a.addButton(withTitle: L("还原", "Restore"))
+        a.addButton(withTitle: L("取消", "Cancel"))
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        if startUpdateCli(args: ["update", "--restore", "--yes"], restoreTarget: slot.version) {
+            showRestorePanel(target: slot.version)
+        }
+    }
+
+    /// 还原进度窗：与更新共用同一份 update-progress.json 轮询（refreshUpdateApplyPanel
+    /// 按 restoringTarget 切换标题/文案），仅起始文案不同
+    private func showRestorePanel(target: String) {
+        updatePanel = updatePanel ?? ProgressPanel()
+        updatePanel!.show(title: L("正在还原到 v\(target)", "Restoring to v\(target)"), text: L("正在启动还原程序…", "Starting the restore process…"))
+        updateTimer?.invalidate()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshUpdateApplyPanel(target: target)
         }
     }
 

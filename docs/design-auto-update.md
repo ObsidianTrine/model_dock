@@ -45,8 +45,12 @@
 ### 1.3 非目标
 
 - 不做静默自动安装（检查后必须用户确认才安装；Claude Code 式静默装与本项目「用户掌控配置」的定位冲突）。
-- 不做多版本共存与一键回滚 UI（保留 `.old` 旧版目录 + 手动恢复指引即可）。
+- 不做多版本共存（只保留上一版单槽：mac/裸二进制为安装位置 `.old`，win 安装器版为 `~/.modeldock/updates/rollback/<ver>/`）。
 - 不做增量更新（SEA 单文件约 40–80 MB，全量包可接受）。
+
+> 2026-11-13 修订：一键回滚 UI 已按用户决策落地（原非目标推翻）——更新成功后自动登记上一版，
+> 托盘菜单「还原更新」/ `modeldock update --restore` 一键对换回上一版（含托盘，全程零下载）；
+> 还原采用**对换式**：槽位装回刚被换下的新版本，再点一次可免费切回，双向零下载。见 §8。
 
 ## 2. 业界调研结论（2026-10-05）
 
@@ -225,7 +229,10 @@ modeldock update --clean       # 清理 .old 残留（darwin/win）
 
 - 传输 HTTPS + 内容 SHA256 强校验，两道都过才执行；任何一步失败即终止，不留半成品（staging 目录清理）。
 - PAT 最小权限（fine-grained、单仓库、只读 Contents），存 `secrets.json`（0600，程序管理，不进 config.toml、不打日志）。
-- 回滚：darwin 保留 `ModelDock.app.old`、裸二进制保留 `.old`；`--clean` 显式清理；win 走安装器自身的事务性。
+- 上一版保留（更新成功即自动，单槽）：
+  - darwin .app / 裸二进制：换装本就留 `<安装位置>.old`（含托盘 `.old`），账本 `~/.modeldock/updates/rollback.json` 只做索引，不动 `.old` 原位（同目录 rename 保住换装失败的即时回滚）；
+  - win 安装器版：Inno 原地替换不留旧版——弹向导前把 `modeldock.exe` / `ModelDockTray.exe` 复制进 `~/.modeldock/updates/rollback/<ver>/`（单槽约 30MB）。
+- 一键还原 `modeldock update --restore` / 托盘「还原更新」（2026-11-13）：**对换式**——槽位旧版 ↔ 当前版互换，完成后账本翻转版本号，再点一次可免费切回，双向零下载。Windows 全程 rename（运行中 exe 可改名不可覆盖/删除，被换下的当前版 park 为 `<target>.old` 留给 `--clean`）；跨卷 rename EXDEV 降级 copy+rename。槽位 version === 当前版本视为陈旧槽（向导被取消 / 翻转失败兜底），入口自动隐藏、还原时清除；`--clean` 连账本与回滚目录一并清。
 - 更新器**永不**执行未通过校验的二进制；`open`/spawn 的目标路径全部来自安装位置的推导而非 manifest 字段。
 
 ## 9. 测试红线（沿用 AGENTS 并强调）

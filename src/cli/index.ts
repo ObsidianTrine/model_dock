@@ -279,7 +279,8 @@ export function buildProgram(): Command {
     .option('--yes', t('跳过确认', 'Skip confirmation'))
     .option('--token <pat>', t('可选。保存 GitHub 访问令牌（fine-grained，Contents 只读）——仅私有仓库必需，公开仓库匿名即可更新；配置后匿名限流 60 次/时提到 5000 次/时', 'Optional. Save the GitHub access token (fine-grained, Contents read-only) — only needed for private repos; a public repo updates anonymously, and a token raises the rate limit from 60/h to 5000/h'))
     .option('--clean', t('清理上一版残留（.old）', 'Remove previous-version leftovers (.old)'))
-    .action(async (o) => (await import('./update.js')).cmdUpdate({ check: o.check, yes: o.yes, token: o.token, clean: o.clean, json: o.json }))
+    .option('--restore', t('还原到上一版本（零下载：更新时自动保留的旧版对换回来；还原后可再次还原切回）', 'Restore the previous version (no download: swap back the version retained by the last update; restore again to switch back)'))
+    .action(async (o) => (await import('./update.js')).cmdUpdate({ check: o.check, yes: o.yes, token: o.token, clean: o.clean, json: o.json, restore: o.restore }))
 
   prog
     .command('reset')
