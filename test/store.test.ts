@@ -459,6 +459,40 @@ target = "agent"
   })
 })
 
+describe('gateway.schedule.windows 形状守卫（手编 TOML 合法但形状错 → 可操作 ConfigError）', () => {
+  it('windows = 5：ConfigError + hint，不再 `5.map` 裸 TypeError 直穿启动', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+      fs.writeFileSync(configPath(), `version = 1\n[gateway.schedule]\nwindows = 5\n`)
+      let err: unknown
+      try {
+        await loadConfig()
+      } catch (e) {
+        err = e
+      }
+      expect(err).toBeInstanceOf(ConfigError)
+      expect((err as Error).message).toContain('windows')
+      expect((err as ConfigError).hint).toBeTruthy()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('windows 元素非表（字符串/数字）同拦；schedule 非表不再静默吞', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+      fs.writeFileSync(configPath(), `version = 1\n[gateway.schedule]\nwindows = ["x"]\n`)
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      fs.writeFileSync(configPath(), `version = 1\n[gateway]\nschedule = 5\n`)
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('saveConfig 无变化跳写（PERF-14 残余）', () => {
   it('no-op mutateConfig / 同值 saveConfig 不落盘：mtime 与内容不变', async () => {
     const h = fakeHome()
@@ -556,6 +590,107 @@ describe('config 形状守卫与密文守卫（2026-10 复审 P2）', () => {
     }
   })
 
+  it("明文后端（prefix=''）下 enc: 密文形态值 → 异源守卫拒发，不当明文 key 返回（P1-1 回归）", async () => {
+    const h = fakeHome()
+    const { __testSetFileCipher, SecretsError, getSecret } = await import('../src/config/secrets.js')
+    // 强制 plainCipher 形态（prefix=''、enabled=false），任意平台复现「明文后端机器收到他机密文表」：
+    // 旧守卫 !v.startsWith('') 恒 false，密文被原样当 key 发上游
+    __testSetFileCipher({
+      prefix: '',
+      enabled: false,
+      async decryptTable(raw) {
+        return { ...raw }
+      },
+      async encryptTable(dec) {
+        return { ...dec }
+      },
+    })
+    try {
+      const foreignPrefix = process.platform === 'linux' ? 'enc:dpapi:' : 'enc:mach:'
+      const raw = JSON.stringify({ a: foreignPrefix + 'QUJD', b: 'sk-plain-key' }) + '\n'
+      await atomicWrite(secretsPath(), raw, 0o600)
+      await expect(getSecret('file:a')).rejects.toBeInstanceOf(SecretsError)
+      // 文件保持原样：守卫只拒读，绝不改写
+      expect(await readTextIfExists(secretsPath())).toBe(raw)
+    } finally {
+      __testSetFileCipher() // 还原平台真实后端，避免毒化共享注册表里的后续用例
+      h.restore()
+    }
+  })
+
+  it("明文后端（prefix=''）下普通明文 key 不受异源守卫影响（照常返回）", async () => {
+    const h = fakeHome()
+    const { __testSetFileCipher, getSecret } = await import('../src/config/secrets.js')
+    __testSetFileCipher({
+      prefix: '',
+      enabled: false,
+      async decryptTable(raw) {
+        return { ...raw }
+      },
+      async encryptTable(dec) {
+        return { ...dec }
+      },
+    })
+    try {
+      await atomicWrite(secretsPath(), JSON.stringify({ a: 'sk-plain-key' }) + '\n', 0o600)
+      await expect(getSecret('file:a')).resolves.toBe('sk-plain-key')
+    } finally {
+      __testSetFileCipher()
+      h.restore()
+    }
+  })
+
+  it("明文后端下真实 key 恰以 enc: 开头但非密文形态（enc:foo）→ 照常返回，不再异源误拒死循环（R1 复核回归）", async () => {
+    const h = fakeHome()
+    const { __testSetFileCipher, getSecret } = await import('../src/config/secrets.js')
+    // 旧守卫按任意 enc: 前缀判异源：误拒后重设 key 原样回存，下次读取再抛——无法自愈
+    __testSetFileCipher({
+      prefix: '',
+      enabled: false,
+      async decryptTable(raw) {
+        return { ...raw }
+      },
+      async encryptTable(dec) {
+        return { ...dec }
+      },
+    })
+    try {
+      const raw = JSON.stringify({ a: 'enc:foo-bar-key', b: 'enc:dpapi' }) + '\n'
+      await atomicWrite(secretsPath(), raw, 0o600)
+      await expect(getSecret('file:a')).resolves.toBe('enc:foo-bar-key')
+      await expect(getSecret('file:b')).resolves.toBe('enc:dpapi') // 非完整 dpapi 前缀形态，同属普通 key
+      // 守卫只拒读绝不改写（与 P1-1 用例同口径）
+      expect(await readTextIfExists(secretsPath())).toBe(raw)
+    } finally {
+      __testSetFileCipher()
+      h.restore()
+    }
+  })
+
+  it("明文后端下 enc:dpapi: 完整密文形态仍被异源守卫拒发（白名单收紧不漏报，跨平台确定）", async () => {
+    const h = fakeHome()
+    const { __testSetFileCipher, SecretsError, getSecret } = await import('../src/config/secrets.js')
+    __testSetFileCipher({
+      prefix: '',
+      enabled: false,
+      async decryptTable(raw) {
+        return { ...raw }
+      },
+      async encryptTable(dec) {
+        return { ...dec }
+      },
+    })
+    try {
+      const raw = JSON.stringify({ a: 'enc:dpapi:QUJD' }) + '\n'
+      await atomicWrite(secretsPath(), raw, 0o600)
+      await expect(getSecret('file:a')).rejects.toBeInstanceOf(SecretsError)
+      expect(await readTextIfExists(secretsPath())).toBe(raw)
+    } finally {
+      __testSetFileCipher()
+      h.restore()
+    }
+  })
+
   it('解密失败 → 可操作 SecretsError（不透传 PowerShell/GCM 原始报错）', async () => {
     const h = fakeHome()
     const { pickFileCipher, __testSetDpapiBatch, SecretsError } = await import('../src/config/secrets.js')
@@ -573,6 +708,21 @@ describe('config 形状守卫与密文守卫（2026-10 复审 P2）', () => {
       __testSetDpapiBatch()
       h.restore()
     }
+  })
+})
+
+describe('providerAllKeyRefs 删除全量口径（P1-2）', () => {
+  it('池存在：池内全部 + 残留 key_ref；重复引用去重', async () => {
+    const { providerAllKeyRefs } = await import('../src/config/secrets.js')
+    expect(providerAllKeyRefs({ key_ref: 'file:legacy', keys: ['file:a', 'file:b'] })).toEqual(['file:a', 'file:b', 'file:legacy'])
+    expect(providerAllKeyRefs({ key_ref: 'file:a', keys: ['file:a', 'file:b'] })).toEqual(['file:a', 'file:b'])
+  })
+
+  it('无池：回落 key_ref；两处皆缺 = 空表（不产出空哨兵）', async () => {
+    const { providerAllKeyRefs } = await import('../src/config/secrets.js')
+    expect(providerAllKeyRefs({ key_ref: 'file:solo' })).toEqual(['file:solo'])
+    expect(providerAllKeyRefs({})).toEqual([])
+    expect(providerAllKeyRefs({ key_ref: '', keys: [] })).toEqual([])
   })
 })
 

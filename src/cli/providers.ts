@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { c, maskSecret, printTable, slugify, t } from '../util/index.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { addService, removeProviderCascade } from '../ops.js'
-import { defaultStore, deleteSecret, getSecret, makeKeyRef, setSecret, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getSecret, makeKeyRef, providerAllKeyRefs, setSecret, type SecretBackend } from '../config/secrets.js'
 import { PRESETS, findPreset, ensurePresetsLoaded } from '../presets/data.js'
 import { fetchModelIds } from '../providers/fetch.js'
 import { resolveModelMeta } from '../providers/resolve.js'
@@ -253,10 +253,17 @@ export async function cmdProviderRm(id: string): Promise<void> {
     // 与 Web 控制台 /service/delete 共用：连带清理自动路由强制服务、备用链与定时切换窗口
     removeProviderCascade(c, id)
   })
-  try {
-    await deleteSecret(p.key_ref)
-  } catch (e) {
-    console.error(c.yellow(t('⚠ provider「{id}」已从配置删除，但密钥清理失败：{m}', '⚠ Provider "{id}" removed from config, but key cleanup failed: {m}', { id, m: (e as Error).message })))
+  // 全量口径（providerAllKeyRefs）：keys[] 池 + 池存在时残留的 key_ref 旧引用，逐条尽力删
+  const failed: string[] = []
+  for (const ref of providerAllKeyRefs(p)) {
+    try {
+      await deleteSecret(ref)
+    } catch (e) {
+      failed.push((e as Error).message)
+    }
+  }
+  if (failed.length > 0) {
+    console.error(c.yellow(t('⚠ provider「{id}」已从配置删除，但 {n} 个密钥清理失败：{m}', '⚠ Provider "{id}" removed from config, but {n} key(s) failed to clean up: {m}', { id, n: String(failed.length), m: failed.join('; ') })))
     console.error(c.gray(t('提示: 可检查 {f} 后手动清理该条目', 'Hint: inspect {f} and clean the entry manually', { f: displayPath(secretsPath()) })))
     return
   }
@@ -282,8 +289,13 @@ export async function cmdProviderSetKey(
     // 沙箱守卫与 setSecret 内部同规：FAKE_HOME 下外部后端强制落 file，预演的 slot 引用必须一致
     const effBackend: SecretBackend =
       process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
+    // 建池即迁移（2026-11-12 审查 P1-2）：keys 从空建池时把原 key_ref 并入池首——
+    // providerKeyRefs 池非空时只认 keys，不迁移的话原 key 静默退出轮转。key_ref 保持原值
+    // 不清（provider list 等读路径按它展示；删除口径 providerAllKeyRefs 集合去重）。
+    // 槽位预演同步 +1，密钥 id 保持连续（原 key_ref 占 k1 概念位）
+    const migrateKeyRef = (p.keys?.length ?? 0) === 0 && typeof p.key_ref === 'string' && p.key_ref !== ''
     const taken = new Set([...(p.keys ?? []), p.key_ref])
-    let slot = (p.keys?.length ?? 0) + 1
+    let slot = (p.keys?.length ?? 0) + (migrateKeyRef ? 1 : 0) + 1
     let slotRef = makeKeyRef(effBackend, `${id}-k${slot}`)
     while (taken.has(slotRef)) {
       slot++
@@ -292,7 +304,10 @@ export async function cmdProviderSetKey(
     const keyRef = await setSecret(`${id}-k${slot}`, key, backend)
     let n = 0
     await mutateConfig((c) => {
-      const pool = c.providers[id].keys ??= []
+      const cp = c.providers[id]
+      const pool = (cp.keys ??= [])
+      // 盘上实况复核（loadCfg 快照可能已被其他写者改掉）：仅当池真为空才迁移，绝不双迁
+      if (pool.length === 0 && typeof cp.key_ref === 'string' && cp.key_ref) pool.unshift(cp.key_ref)
       pool.push(keyRef)
       n = pool.length
     })
@@ -424,10 +439,14 @@ function fallbackTriggerNote(): string {
   )
 }
 
-const FALLBACK_USAGE = t(
-  '用法：modeldock model fallback <providerId> <fromModel> <toModel>（配置）；--rm <fromModel>（删除）；--list（列出）',
-  'Usage: modeldock model fallback <providerId> <fromModel> <toModel> (set); --rm <fromModel> (remove); --list (list)'
-)
+/** 用法提示：惰性函数每次现取（模块顶层禁直接求值 t()——语言解析晚于模块加载时会把语言固化，
+ *  sync.ts untouchedLine 同款写法） */
+function fallbackUsage(): string {
+  return t(
+    '用法：modeldock model fallback <providerId> <fromModel> <toModel>（配置）；--rm <fromModel>（删除）；--list（列出）',
+    'Usage: modeldock model fallback <providerId> <fromModel> <toModel> (set); --rm <fromModel> (remove); --list (list)'
+  )
+}
 
 export async function cmdModelFallback(
   providerId: string,
@@ -444,7 +463,7 @@ export async function cmdModelFallback(
   }
   if (opts.list) {
     if (opts.rm !== undefined || fromModel !== undefined || toModel !== undefined) {
-      exitWithError(t('参数冲突：--list 不能与其他参数同用', 'Conflicting arguments: --list cannot be combined with other arguments'), FALLBACK_USAGE)
+      exitWithError(t('参数冲突：--list 不能与其他参数同用', 'Conflicting arguments: --list cannot be combined with other arguments'), fallbackUsage())
     }
     const map = cfg.providers[providerId].model_fallback ?? {}
     const entries = Object.entries(map)
@@ -459,10 +478,10 @@ export async function cmdModelFallback(
   }
   if (opts.rm !== undefined) {
     if (fromModel !== undefined || toModel !== undefined) {
-      exitWithError(t('参数冲突：--rm 只接受一个模型 ID', 'Conflicting arguments: --rm takes exactly one model ID'), FALLBACK_USAGE)
+      exitWithError(t('参数冲突：--rm 只接受一个模型 ID', 'Conflicting arguments: --rm takes exactly one model ID'), fallbackUsage())
     }
     const from = opts.rm.trim()
-    if (!from) exitWithError(t('要删除的模型 ID 不能为空', 'The model ID to remove cannot be empty'), FALLBACK_USAGE)
+    if (!from) exitWithError(t('要删除的模型 ID 不能为空', 'The model ID to remove cannot be empty'), fallbackUsage())
     let had = false
     let emptied = false
     try {
@@ -490,12 +509,12 @@ export async function cmdModelFallback(
     return
   }
   if (!fromModel || !toModel) {
-    exitWithError(t('缺少模型参数：配置一条映射需要 <fromModel> 和 <toModel>', 'Missing model arguments: setting a mapping needs both <fromModel> and <toModel>'), FALLBACK_USAGE)
+    exitWithError(t('缺少模型参数：配置一条映射需要 <fromModel> 和 <toModel>', 'Missing model arguments: setting a mapping needs both <fromModel> and <toModel>'), fallbackUsage())
   }
   const from = fromModel.trim()
   const to = toModel.trim()
   if (!from || !to) {
-    exitWithError(t('模型 ID 不能为空', 'Model IDs cannot be empty'), FALLBACK_USAGE)
+    exitWithError(t('模型 ID 不能为空', 'Model IDs cannot be empty'), fallbackUsage())
   }
   try {
     await mutateConfig((c) => {

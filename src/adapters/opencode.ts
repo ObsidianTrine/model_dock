@@ -28,4 +28,7 @@ export const openCodeAdapter = craftProviderJsonAdapter({
   // onlyConfigured:false 跳过 only_configured_models（MiMoCode 私有键，opencode schema 未收录）。
   declareModels: true,
   onlyConfigured: false,
+  // npm 类客户端（npm i -g opencode-ai）：本体探测沙箱隔离——FAKE_HOME 下宿主真机的
+  // opencode 命令不算在场（与 claude-code / codex 同口径，语义见 presence.ts）
+  sandboxIsolated: true,
 })

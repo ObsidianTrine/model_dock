@@ -1,7 +1,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { backupsDir } from '../util/paths.js'
-import { atomicWrite, ensureDir, fileMode, fileSha256, sha256 } from '../util/fsx.js'
+import { assertNotRealHomeWrite, atomicWrite, ensureDir, fileMode, fileSha256, sha256 } from '../util/fsx.js'
 import { loadConfig } from '../config/store.js'
 import { t } from '../util/i18n.js'
 import { VERSION } from '../version.js'
@@ -147,6 +147,10 @@ export async function getSnapshot(harness: string, id: string): Promise<Snapshot
 export async function restoreSnapshot(manifest: SnapshotManifest): Promise<void> {
   for (const rec of manifest.files) {
     if (!rec.stored_as) {
+      // 删除分支与下方还原写同受写入门禁：测试/agent 上下文进程 restore 一份 manifest 记录
+      // 真实 home 路径的快照时，此前唯独这里无守卫可删真实用户文件（rm 旁路比「日志类
+      // 不设防」的豁免口径更重）
+      assertNotRealHomeWrite(rec.path)
       await fsp.rm(rec.path, { force: true })
       continue
     }

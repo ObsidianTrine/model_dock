@@ -46,6 +46,7 @@ export function upstreamEndpoint(provider: ProviderConfig, proto: Protocol): str
       t('在「编辑服务」里填入该协议的接口地址，或改用该服务商支持的协议', 'Fill in the endpoint URL for this protocol in "Edit Service", or use a protocol the provider supports')
     )
     e.candidateSkip = true // 该候选不支持客户端协议
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'proto_endpoint_missing'
     throw e
   }
@@ -129,6 +130,11 @@ export class UpstreamError extends Error {
   transport?: boolean | 'timeout'
   /** true = 候选本身不可用（key 缺失 / 协议端点缺失等配置级问题，请求未发出）：跳到下一候选而不是中止整条链 */
   candidateSkip?: boolean
+  /** true = 本机配置级跳过且请求从未出网关（key 缺失/协议端点缺失/model 熔断快速失败——与
+   *  candidateSkip 的区别：换 key 重试仍被 401/403 拒的 key_pool_rejected 也是 candidateSkip，
+   *  但那次请求真实出过网）。海况分桶据此旁路（recordOutcome skipSea）：未出网尝试不进
+   *  error_rate/风暴闸 429 率的分母（cruise1112 P2-12）。 */
+  localSkip?: boolean
   /** 自动路由结果标记（down_all / failover / skip_all 等），用于日志 reason */
   routeReason?: string
   /** 网关侧错误归类短码（与 LogEntry.cause 同一枚举）：各抛出点就地打标，日志/前端据此显示可读原因，不再靠解析错误文本 */
@@ -219,7 +225,12 @@ export function isHeadersTimeoutError(e: unknown): boolean {
 }
 
 /** 组装上游请求头：剥离 hop-by-hop 与客户端凭据，按 provider 协议注入真实 key。
- *  cookie 与 x-modeldock-* 一并剥离：admin token / 会话 cookie 绝不能转发给第三方上游。 */
+ *  cookie 与 x-modeldock-* 一并剥离：admin token / 会话 cookie 绝不能转发给第三方上游。
+ *  accept-encoding 一并剥离（P2-5）：usage 旁路解析（usage tap）只能认明文字节，压缩成功体
+ *  进 tap 时 'usage' 字面量匹配不到 / JSON.parse 失败 → 该请求 token 用量记 0，日限额护栏对
+ *  这类流量失明。不向上游要压缩即恒回明文，tap 总能看到明文，错误体解压路径（readUpstreamErrorText）
+ *  也只在异常上游违规压缩时才兜底。转发代价：上游→网关腿多走些字节（本机网关、响应体多为
+ *  数 KB～百 KB 级 JSON/SSE，量级可忽略）；客户端→网关为 loopback，无压缩也无妨。 */
 async function buildUpstreamHeaders(
   target: ResolvedTarget,
   incoming: Record<string, string>,
@@ -233,6 +244,7 @@ async function buildUpstreamHeaders(
       HOP_BY_HOP.has(lk) ||
       lk === 'host' ||
       lk === 'content-length' ||
+      lk === 'accept-encoding' ||
       lk === 'authorization' ||
       lk === 'x-api-key' ||
       lk === 'cookie' ||
@@ -509,6 +521,7 @@ export async function forwardToUpstream(
       t('检查系统钥匙环是否已解锁（解锁后重试）；或 modeldock provider set-key {id} 重新设置 key', 'Check that the system keyring is unlocked and retry; or run modeldock provider set-key {id} to set the key again', { id: providerId })
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'key_pool_empty'
     throw e
   }
@@ -524,6 +537,7 @@ export async function forwardToUpstream(
       t('冷却 15 分钟后自动重试；已换新 key 可在 config.toml 保存 keys（热加载立即恢复），或 modeldock provider set-key {id} 更新', 'Cooldown ends in 15 minutes and retries automatically; after replacing a key, save the keys array in config.toml (hot-reload restores it immediately) or run modeldock provider set-key {id}', { id: providerId })
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网：海况分桶旁路（skipSea）
     e.cause = 'key_cooldown'
     throw e
   }
@@ -568,6 +582,7 @@ export async function forwardToUpstream(
       t('冷却结束后自动恢复试回；或在「编辑服务」里为该模型配置 model_fallback 备用模型（熔断期间自动改发）', 'It retries the original model automatically after the cooldown; or configure a model_fallback mapping for it in "Edit Service" (traffic is auto-switched during meltdown)')
     )
     e.candidateSkip = true
+    e.localSkip = true // 请求未出网（快速失败）：海况分桶旁路（skipSea）
     e.cause = 'quota'
     e.attemptNote = 'model_cooldown'
     throw e
@@ -655,8 +670,9 @@ export async function forwardToUpstream(
     markKeyCooldown(rt, providerId, first.index)
     const rest = healthy.filter((k) => k.index !== first.index)
     if (rest.length > 0) {
-      // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）
-      try { await up.body.text() } catch { /* 排空失败不影响换 key 重试 */ }
+      // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）；有界读（P2-6），
+      // 排空只为释放连接，读满上限即断流不整体进堆
+      try { await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES) } catch { /* 排空失败不影响换 key 重试 */ }
       const second = nextRotation(rt, providerId, rest)!
       up = await sendWithKey(second.key)
       if (up.status === 401 || up.status === 403) {
@@ -665,7 +681,7 @@ export async function forwardToUpstream(
         // 重试」，401 保持既有透传行为（客户端看得到上游错误体），失效跳过从下一次请求生效
         //（本次已标记冷却 → 下次 healthy 为空 → candidateSkip）
         markKeyCooldown(rt, providerId, second.index)
-        try { await up.body.text() } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
+        try { await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES) } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
         const e = new UpstreamError(
           503,
           t('provider「{profile}→{name}」的 key 池被上游整体拒绝（HTTP 401/403，换 key 重试后仍失败，共 {n} 把）', 'The key pool of provider "{profile}→{name}" was rejected by the upstream (HTTP 401/403; still rejected after retrying with another key, {n} keys in total)', { profile: target.profileName, name: provider.name ?? providerId, n: String(pool.length) }),
@@ -741,7 +757,45 @@ type ZstdDecoder = (buf: Buffer) => Buffer
 const zstdDecoder: ZstdDecoder | null =
   typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null
 
-/** 读上游错误体为文本：按 content-encoding 解压后再解码。
+/** 上游体读取上限（P2-6）：错误体只用于日志/诊断/错误翻译（translateUpstreamError 只取
+ *  前 500 字符等），探测体只取 usage/错误 message，1MB 足够任何真实 JSON。异常/恶意上游对
+ *  4xx 回超大（或无限流式）body 时不再整体进堆——入站 readBody 有 16MB 上限，出站此前无界，
+ *  是网关单实例无请求级内存护栏下的堆膨胀点；超限截断保留头部（错误详情在前部，截尾不损
+ *  诊断价值）。server.ts 探针（modeldock test 后端）同口径复用（cruise1112 P2-6 收尾）。 */
+export const UPSTREAM_ERROR_BODY_MAX_BYTES = 1024 * 1024
+
+/** 有界读上游体（字节上限截断保留头部）：undici BodyReadable 本体是 Readable，优先逐块累计、
+ *  达上限即停（for-await break 走 Readable.return() → 流就地销毁、连接关闭不复用——错误路径
+ *  换候选/回包本就不依赖连接复用）。无流形态时优先 arrayBuffer（字节精确，压缩体解压必需；
+ *  text() 会按 utf8 解码把二进制体读坏，只作两者皆缺的最后回落）。读取失败不向上抛（错误体
+ *  拿不到就按空串处理），返回已收到的部分。 */
+export async function readBodyBounded(body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }, maxBytes: number): Promise<Buffer> {
+  const it = (body as unknown as AsyncIterable<unknown>)[Symbol.asyncIterator]
+  if (typeof it === 'function') {
+    const chunks: Buffer[] = []
+    let total = 0
+    try {
+      for await (const chunk of body as unknown as AsyncIterable<unknown>) {
+        const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+        total += b.length
+        chunks.push(b)
+        if (total >= maxBytes) break
+      }
+    } catch {
+      /* 流中途断掉：保留已读部分 */
+    }
+    return Buffer.concat(chunks)
+  }
+  try {
+    if (typeof body.arrayBuffer === 'function') return Buffer.from(await body.arrayBuffer())
+    return Buffer.from(await body.text(), 'utf8')
+  } catch {
+    return Buffer.alloc(0)
+  }
+}
+
+/** 读上游错误体为文本：按 content-encoding 解压后再解码，读取有 1MB 上限（见
+ *  UPSTREAM_ERROR_BODY_MAX_BYTES）。
  *  undici request 不自动解压，压缩错误体（如火山方舟的 gzip 400 体）直读是一段乱码，
  *  客户端只会看到不可诊断的 upstream_error，错误分类（额度特征识别）也随之失效。
  *  解压失败 / 无压缩头回落原始字节按 utf8 解码，不向上抛。
@@ -750,14 +804,7 @@ export async function readUpstreamErrorText(
   headers: Record<string, string | string[]>,
   body: UpstreamBody & { arrayBuffer?(): Promise<ArrayBuffer> }
 ): Promise<string> {
-  let buf: Buffer
-  try {
-    buf = typeof body.arrayBuffer === 'function'
-      ? Buffer.from(await body.arrayBuffer())
-      : Buffer.from(await body.text(), 'utf8')
-  } catch {
-    return ''
-  }
+  const buf = await readBodyBounded(body, UPSTREAM_ERROR_BODY_MAX_BYTES)
   const rawEnc = headers['content-encoding'] ?? headers['Content-Encoding'] ?? ''
   const enc = (Array.isArray(rawEnc) ? rawEnc.join(',') : String(rawEnc)).toLowerCase().trim()
   try {
@@ -1063,7 +1110,6 @@ export async function forwardWithFailover(
   )
   for (let i = 0; i < cands.length; i++) {
     const c = cands[i]
-    const t0 = Date.now()
     // 并发闸（P0②）：转发前对实际选中候选的 provider 取槽；满载排队 ≤ queue_wait_ms。
     // 槽位生命周期到响应结束（成功路径挂在返回值上由 server.ts 释放）；失败路径就地释放
     let slot: ProviderSlot | undefined
@@ -1087,7 +1133,12 @@ export async function forwardWithFailover(
         throw e // 客户端断开（aborted）：原样上抛，handleRequest 落 499
       }
     }
+    // 计时起点在取槽成功之后（P2-4）：排队等待是网关自己的背压，不是上游耗时——计进去会让
+    // recordOutcome.ms（→ health.lastMs「按耗时决胜」）、熔断耗时与 attempts 逐候选 ms 全部失真
+    // （满载服务被系统性记成慢服务）。排队时长不另记账：queue_full 留痕已覆盖排障需要。
+    let t0 = 0
     try {
+      t0 = Date.now()
       let up = await forwardToUpstream(rt, c.target, fwdOpts)
       // 429 退避（P0③）：带 Retry-After 且 ≤ 5s 时原地等待后同候选重试一次（429 = 请求未被上游处理，
       // 重放无重复计费风险）；无头 / 超过 5s / 额度耗尽体维持既有 failover 语义。留痕 retried_429:<id>。
@@ -1208,7 +1259,11 @@ export async function forwardWithFailover(
       const whitelistSwitch =
         timeoutTransport && i < cands.length - 1 && (switchable?.has((e as UpstreamError).status) ?? false)
       const skip = e instanceof UpstreamError && (e.transport === true || e.candidateSkip === true)
-      recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms })
+      // 未出网的本地跳过不进海况分桶（P2-12）：total 是 error_rate 与风暴闸 429 率的分母，
+      // 混入会稀释两率；真实出网失败（transport/timeout/真实 status）照记。熔断侧不变
+      //（cls 缺席本就不累计窗口，见 routing.ts recordOutcome skipSea 注）
+      const localSkip = e instanceof UpstreamError && e.localSkip === true
+      recordOutcome(rt, c.providerId, { ok: false, cls: isTransportFailure(e) ? 'connect' : undefined, ms, skipSea: localSkip })
       const note = classifyAttemptError(e)
       attempts.push(note ? { provider: c.providerId, note, ms } : { provider: c.providerId, ms })
       if (skip || whitelistSwitch) {

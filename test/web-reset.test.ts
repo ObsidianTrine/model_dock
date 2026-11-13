@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fakeHome } from './helpers.js'
-import { buildRuntime } from '../src/gateway/state.js'
+import { buildRuntime, registerEphemeralHarness } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { applyAttach } from '../src/ops.js'
 import { configLockPath, loadConfig, saveConfig } from '../src/config/store.js'
@@ -130,6 +130,45 @@ describe('Web reset 语义（hReset 对齐 CLI cmdReset）', () => {
       expect(j.restored).toEqual([])
       expect(j.restoreFailed).toEqual([])
       expect(fs.existsSync(configPath())).toBe(false)
+    } finally {
+      close()
+      h.restore()
+    }
+  })
+
+  // 临时 harness（runtime-only 合成条目，2026-11-12 审查 P2-10）：盘上 config 无此条目，
+  // 走 detachHarness 必抛「尚未接入」逐条污染 restoreFailed 假失败——重置应 unregister 收尾，
+  // 且重置后不得借 reapply 复活
+  it('临时 harness 在册时重置：unregister 收尾，不进 restored 也不进 restoreFailed', async () => {
+    const h = fakeHome()
+    let close: () => void = () => {}
+    try {
+      await saveConfig(baseCfg())
+      const cfg = await loadConfig()
+      const rt = buildRuntime(JSON.parse(JSON.stringify(cfg)), 'admin-tok')
+      registerEphemeralHarness(rt, { id: 'eph-w1', ttlMinutes: 30 })
+      expect(rt.config.harness['eph-w1']).toBeTruthy() // 合成条目已注入运行态
+      const server = createGatewayServer(rt, { port: 0 })
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
+      })
+      close = () => {
+        server.closeAllConnections?.()
+        server.close()
+      }
+      const resp = await fetch(`http://127.0.0.1:${port}/_modeldock/reset`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-tok' },
+        body: '{}',
+      })
+      expect(resp.status).toBe(200)
+      const j = (await resp.json()) as Record<string, any>
+      expect(j.ok).toBe(true)
+      expect(j.restored).toEqual([]) // 无客户端文件可还原，不冒充 restored
+      expect(j.restoreFailed).toEqual([]) // 修复前这里混入「eph-w1: 尚未接入 ModelDock」假失败
+      expect(rt.ephemeral.size).toBe(0) // 在册临时凭据已收尾（reloadRuntime 的 reapply 无幸存者可复活）
+      expect(rt.config.harness['eph-w1']).toBeUndefined()
     } finally {
       close()
       h.restore()

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import http from 'node:http'
 import { once } from 'node:events'
-import { fetchModelIds } from '../src/providers/fetch.js'
+import { fetchModelIds, __testProxyDispatcherCount } from '../src/providers/fetch.js'
 import { setSecret } from '../src/config/secrets.js'
 import { fakeHome } from './helpers.js'
 import type { ProviderConfig } from '../src/config/types.js'
@@ -139,6 +139,50 @@ describe('fetch · 鉴权头随协议与 auth_style 变化', () => {
     } finally {
       mock.close()
       h.restore()
+    }
+  })
+})
+
+describe('fetch · 代理 dispatcher 缓存复用（P1-3 回归）', () => {
+  it('同 proxy 连续两次 fetchModelIds 复用同一 ProxyAgent（缓存条数只 +1，fd 不逐次累积）', async () => {
+    const h = fakeHome()
+    // mock 兼当「代理」：handler 对任意路径（absolute-form 或 origin-form）都回 200 模型表
+    const mock = await startMock((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'm1' }] }))
+    })
+    try {
+      const ref = await setSecret('fetch-proxy-cache', 'sk-test', 'file')
+      const before = __testProxyDispatcherCount()
+      const r1 = await fetchModelIds(provider({ base_url: `${mock.base}/v1`, key_ref: ref, proxy: mock.base }))
+      expect(r1.ids).toEqual(['m1'])
+      const r2 = await fetchModelIds(provider({ base_url: `${mock.base}/v1`, key_ref: ref, proxy: mock.base }))
+      expect(r2.ids).toEqual(['m1'])
+      expect(__testProxyDispatcherCount()).toBe(before + 1)
+    } finally {
+      mock.close()
+      h.restore()
+    }
+  })
+
+  it('resolveProxyUrl：direct/未配置 → null；显式 URL → 原样；env 读环境变量且空串视为未设', async () => {
+    const { resolveProxyUrl } = await import('../src/util/net.js')
+    expect(resolveProxyUrl(undefined)).toBeNull()
+    expect(resolveProxyUrl('direct')).toBeNull()
+    expect(resolveProxyUrl('http://127.0.0.1:7890')).toBe('http://127.0.0.1:7890')
+    const saved = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'].map((k) => [k, process.env[k]] as const)
+    try {
+      for (const [k] of saved) delete process.env[k]
+      expect(resolveProxyUrl('env')).toBeNull()
+      process.env.HTTPS_PROXY = 'http://p:1'
+      expect(resolveProxyUrl('env')).toBe('http://p:1')
+      process.env.HTTPS_PROXY = ''
+      expect(resolveProxyUrl('env')).toBeNull()
+    } finally {
+      for (const [k, v] of saved) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
     }
   })
 })

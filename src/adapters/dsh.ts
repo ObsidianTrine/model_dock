@@ -569,16 +569,21 @@ export const dshAdapter: HarnessAdapter = {
       const entry = js?.[PROVIDERS_ROOT]?.providers?.modeldock
       if (entry && oursEntryUrl(entry.baseURL, 'dsh', cfg)) {
         doc.deleteIn([PROVIDERS_ROOT, 'providers', 'modeldock'])
-        if (js?.[AGENT_DEFAULT]?.provider === 'modeldock') {
-          doc.deleteIn([AGENT_DEFAULT])
-        }
-        changes.push({
-          path: layout.legacyFile,
-          before: text,
-          after: doc.toString(),
-          note: t('移除 modeldock provider（settings.yaml）', 'Remove the modeldock provider (settings.yaml)'),
-        })
       }
+      // agent-default-model 清理口径与 patch 布局统一（权威 docs/attach-env-vars.md dsh 节）：
+      // 仅看条目自身 provider === 'modeldock'，不挂在 provider 条目的 oursEntryUrl 守卫下——
+      // provider 条目被用户改指他处或已删时，指向 modeldock 名字空间的默认模型条目照样是残留
+      //（2026-11-12 审查 F7；此前 legacy 只在守卫内删，provider 非本网关时留悬空条目）
+      if (js?.[AGENT_DEFAULT]?.provider === 'modeldock') {
+        doc.deleteIn([AGENT_DEFAULT])
+      }
+      const detachChange = changeIfChanged(
+        layout.legacyFile,
+        text,
+        doc.toString(),
+        t('移除 modeldock provider（settings.yaml）', 'Remove the modeldock provider (settings.yaml)')
+      )
+      if (detachChange) changes.push(detachChange)
     }
 
     for (const patchFile of layout.patchFiles) {

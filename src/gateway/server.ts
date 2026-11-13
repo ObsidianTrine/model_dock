@@ -15,7 +15,7 @@ import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -49,7 +49,7 @@ import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from 
 import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
-import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
+import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -273,7 +273,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
         }
       })
       .catch((e: unknown) => {
-        // 定时窗口接管重写客户端失败不再无声吞掉：事件落 ring/events.jsonl 可排查
+        // 定时窗口接管重写客户端失败不再无声吞掉：事件落 ring/当日事件日文件（eventsLogName）可排查
         logEvent(rt, { level: 'warn', op: 'display_route_sync', err: e instanceof Error ? e.message : String(e) })
       })
   }
@@ -1364,8 +1364,13 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     if (newProtocol) t.protocol = newProtocol
     if (keyWrite) {
       if (keyWrite.pool) {
-        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）
+        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）。
+        // 建池（盘上 keys 为空）时先把 key_ref 迁入池首——providerKeyRefs 池非空时只认 keys，
+        // 不迁移原 key 静默退出轮转（2026-11-12 审查 P1-2，与 CLI set-key --add 同口径）；
+        // key_ref 保持原值不清（providerAllKeyRefs 删除口径集合去重）。常态是既有池纯追加，
+        // 本迁移只兜「计划期看到池、盘上池被清」的运行态/盘上分歧窗口
         const pool = (t.keys ??= [])
+        if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
         pool.push(keyWrite.ref)
       } else {
         t.key_ref = keyWrite.ref
@@ -1655,7 +1660,9 @@ async function hServiceDelete(c: AdminCtx): Promise<void> {
   await persistConfig(rt, (c) => {
     removedProfiles = removeProviderCascade(c, id)
   })
-  try { await deleteSecret(p.key_ref) } catch { /* Key 已不存在则忽略 */ }
+  for (const ref of providerAllKeyRefs(p)) {
+    try { await deleteSecret(ref) } catch { /* Key 已不存在则忽略 */ }
+  }
   audit(bi('删除服务', 'Delete service'), id, removedProfiles.length ? bi('同时删除路由 {list}', 'Also removed routes {list}', { list: biJoin('、', ', ', removedProfiles) }) : undefined)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, removed: id, profiles: removedProfiles }))
@@ -1944,7 +1951,9 @@ async function hKey(c: AdminCtx): Promise<void> {
     const t = cfg.providers[provider]
     if (!t) return
     if (keyWrite.pool) {
+      // 建池即迁移 key_ref（口径同 hServiceUpdate 池追加注：2026-11-12 审查 P1-2）
       const pool = (t.keys ??= [])
+      if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
       pool.push(keyWrite.ref)
     } else {
       t.key_ref = keyWrite.ref
@@ -2041,9 +2050,16 @@ async function hReset(c: AdminCtx): Promise<void> {
     snapshotId = (await snapshot('config', 'pre-reset', [configPath(), secretsPath()])).id
   } catch { /* 快照失败不阻断重置（backups/ 通常已有历史快照） */ }
   // 2) 逐个 detach 还原客户端文件（单个失败不中断，对齐 CLI：逐条记失败继续）
+  // 临时 harness（runtime-only 合成条目，不在盘上 config、无客户端文件可还原）不进 detach：
+  // detachHarness 先查盘上 config.harness 必抛「尚未接入」，逐条污染 restoreFailed 假失败——
+  // 用完即焚语义走 unregister 即收尾（重置后也不应幸存，reloadRuntime 的 reapply 会重注入幸存者）
   const restored: string[] = []
   const restoreFailed: string[] = []
   for (const id of Object.keys(rt.config.harness)) {
+    if (rt.ephemeral.has(id)) {
+      unregisterEphemeralHarness(rt, id)
+      continue
+    }
     try {
       await detachHarness(id)
       restored.push(id)
@@ -2051,13 +2067,16 @@ async function hReset(c: AdminCtx): Promise<void> {
       restoreFailed.push(`${id}: ${(e as Error).message}`)
     }
   }
-  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉）
+  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉；
+  // providerAllKeyRefs 全量口径盖住 keys[] 池，与 CLI reset 同口径）
   let secretsCleared = 0
-  for (const [id, p] of Object.entries(rt.config.providers)) {
-    try {
-      await deleteSecret(p.key_ref)
-      secretsCleared++
-    } catch { /* 单项失败不影响其余 */ }
+  for (const [, p] of Object.entries(rt.config.providers)) {
+    for (const ref of providerAllKeyRefs(p)) {
+      try {
+        await deleteSecret(ref)
+        secretsCleared++
+      } catch { /* 单项失败不影响其余 */ }
+    }
   }
   // 删文件前包同一把 config 写锁（CORRECT-06 同法）：Web reset 与 CLI / 另一实例的 mutateConfig
   // 是独立写者，裸 unlink 会在他人「读文件→改→写回」的窗口里删掉目标、随后被整包写回归活——
@@ -2605,7 +2624,7 @@ async function handleAdmin(
   const method = req.method ?? '-'
   // 管理面访问日志（debug 级，2026-11-07 事故补课：此前管理面零访问日志，attach/plan 请求
   // 到没到、成没成全无线索）。res finish 时记 {method, path, status, ms}；非 2xx 另无条件记
-  // events.jsonl warn（排障不依赖 debug 开关）。
+  // 当日事件日文件 warn（eventsLogName；排障不依赖 debug 开关）。
   if (debugOn()) {
     res.on('finish', () => {
       debugLog('admin', 'http', { method, path: url, status: res.statusCode, ms: Date.now() - started })
@@ -2808,7 +2827,10 @@ export async function probe(
       retries: o.retries,
     })
     if (up.status >= 400) {
-      const text = await up.body.text()
+      // 有界读（P2-6 收尾）：探针响应体此前无界，异常上游的超大 body 会整体进堆；
+      // readUpstreamErrorText 同时按 content-encoding 解压——压缩错误体直读是乱码，
+      // message/hint 提取随之失效
+      const text = await readUpstreamErrorText(up.headers, up.body)
       // 转成可读的一行：上游 message + 修复提示，而非整段 JSON
       let msg = text.slice(0, 400)
       try {
@@ -2825,7 +2847,9 @@ export async function probe(
         err: msg,
       }
     }
-    const text = await up.body.text()
+    // 成功体同样有界读（P2-6 收尾）：探测只取 usage（max_tokens=16 的响应 KB 级，1MB 上限
+    // 绰绰有余）；截断会让 JSON.parse 失败 → usage 缺席，仅观测降级不致错（见 readBodyBounded 注）
+    const text = (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
     let usage: Record<string, number> | undefined
     if (!stream) {
       try {

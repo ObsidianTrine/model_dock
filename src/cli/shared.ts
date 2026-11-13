@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { Console } from 'node:console'
 import fs from 'node:fs'
 import path from 'node:path'
+import { Writable } from 'node:stream'
 import type { Config } from '../config/types.js'
 import { DEFAULT_GATEWAY_PORT } from '../config/types.js'
 import { loadConfig } from '../config/store.js'
@@ -49,41 +50,64 @@ export function exitWithThrown(e: unknown): never {
 /** 同步直写流的最小形状（console.error / process.emitWarning / 崩溃处理器只消费 write） */
 type SyncWriteLike = { write(chunk: string): boolean }
 
+/** 鸭子同步直写流：真实 Writable（全量流面）+ write 覆写为 fs.writeSync 直写。
+ *  面必须是完整流：process.stderr 会被 Node 内部当完整流对待——Console 错误处理链每次
+ *  write 都跑「listenerCount → once → finally removeListener」（缺方法即同步抛，接管反而
+ *  让 console.error 变崩溃源）；child_process 的 pipeWithoutWarning（worker/子进程 stdio
+ *  继承管线，daemon 启动期 tsx transform worker 即触发）无警告 pipe 前要
+ *  dest.setMaxListeners(Infinity) 再 source.pipe(dest)，鸭子裸对象缺一面就炸（两项均
+ *  Node 24 实证，cruise1112 stderr 误绑）。write 覆写绕过 Writable 缓冲：缓冲异步刷，
+ *  daemon「console.error 后即 process.exit」的路径（--port 校验报错等）会丢最后几行；
+ *  fs.writeSync 直写同步落盘。写失败只返回 false 不抛不 emit（坏 fd 丢行好过崩进程）。 */
+function makeDuckSyncWrite(fd: number): SyncWriteLike {
+  const duck = new Writable({ write(_chunk, _enc, cb) { cb() } })
+  duck.write = ((chunk: unknown): boolean => {
+    try {
+      // 两个重载各自只收 string / ArrayBufferView，联合实参必须按型分流调用
+      if (typeof chunk === 'string') fs.writeSync(fd, chunk)
+      else fs.writeSync(fd, Buffer.from(chunk as Uint8Array))
+      return true
+    } catch {
+      return false
+    }
+  }) as unknown as typeof duck.write
+  return duck
+}
+
+/** 按原 stderr 流形态构造替换流（cruise1112 stderr 误绑修复）。只复用 SyncWriteStream 的
+ *  构造器——stdio ignore/文件重定向下 process.stderr 是它，构造器签名 (fd, opts) 与日志 fd
+ *  同类（该类公开导出已在 Node 24 移除，只能从现有实例的 constructor 取内部类）。管道/TTY
+ *  形态是 net.Socket：拿它 new 出来的是收养任意 fd 的 TCP Socket 而非文件流（数字 fd 重载
+ *  还会把 autoClose 选项静默丢掉），下游行为不可控，一律走鸭子流。构造失败同样降级鸭子流，
+ *  绝不向上抛。导出供单测钉住分流逻辑；生产路径只有 rebindStderrToLogFd 调用。 */
+export function buildStderrReplacementStream(fd: number, staleCtor: unknown): { stream: SyncWriteLike; duck: boolean } {
+  if (typeof staleCtor === 'function' && staleCtor.name === 'SyncWriteStream') {
+    try {
+      const real = new (staleCtor as unknown as new (fd: number, opts?: { autoClose?: boolean }) => SyncWriteLike)(fd, { autoClose: false })
+      return { stream: real, duck: false }
+    } catch {
+      /* 构造失败退化为鸭子流 */
+    }
+  }
+  return { stream: makeDuckSyncWrite(fd), duck: true }
+}
+
 /** Windows 降级路径（2026-10-30 probe，Node 24 实测）：stdio ignore 下 closeSync(2) 返回成功但
  *  std fd 槽位不真正释放（fstatSync(2) 前后同 inode、writeSync(2) 仍可写），openSync(log) 永落
  *  fd 3 —— fd 2 接管天然不可行。降级为「换流不换 fd」：把 process.stderr 与全局 console 重绑到
  *  直写日志 fd 的同步流，JS 可见的 stderr 输出（console.*、emitWarning、崩溃处理器）照常落日志；
  *  Node 原生崩溃输出仍进 NUL（fd 级无解，纯 JS 上限如此）。两步都尽力而为，失败静默降级。 */
-/** stderr 重绑。返回最终形态：'stream'=SyncWriteStream 绑 fd 成功且属性已换；'duck'=构造失败
- *  退化鸭子流（写入安全但 fs.writeSync 每次现做）；'none'=属性替换失败（原 stderr 原样保留）；
- *  '-console' 后缀=属性替换失败但全局 console 已整体换新（console.error 仍有健康落点）。
- *  返回值供启动诊断留痕（2026-11-07 事故：托盘拉起形态接管失效曾零痕迹）。 */
+/** stderr 重绑。返回最终形态：'stream'=SyncWriteStream 绑 fd 成功且属性已换；'duck'=鸭子流
+ *  兜底（原流非 Sync/FILE 形态或构造失败；写入安全但 fs.writeSync 每次现做）；'none'=属性
+ *  替换失败（原 stderr 原样保留）；'-console' 后缀=属性替换失败但全局 console 已整体换新
+ *  （console.error 仍有健康落点）。返回值供启动诊断留痕（2026-11-07 事故：托盘拉起形态
+ *  接管失效曾零痕迹）。 */
 function rebindStderrToLogFd(fd: number): 'stream' | 'duck' | 'none' | 'stream-console' | 'duck-console' {
-  let fresh: SyncWriteLike | null = null
-  let duck = false
-  try {
-    // SyncWriteStream 与 Node stdio FILE 流同类；公开导出已在 Node 24 移除，从 memoize 实例取
-    // 内部类。访问 process.stderr 会触发懒初始化（绑 fd 2 = NUL，无输出副作用），随后被覆盖。
-    const stale = process.stderr as unknown as {
-      constructor?: new (fd: number, opts?: { autoClose?: boolean }) => SyncWriteLike
-    }
-    if (stale?.constructor) fresh = new stale.constructor(fd, { autoClose: false })
-  } catch {
-    /* 构造失败退化为鸭子流 */
-  }
-  if (!fresh) {
-    duck = true
-    fresh = {
-      write: (chunk) => {
-        try {
-          fs.writeSync(fd, chunk)
-          return true
-        } catch {
-          return false
-        }
-      },
-    }
-  }
+  // 访问 process.stderr 会触发懒初始化（绑 fd 2 = NUL，无输出副作用），随后被覆盖
+  const { stream: fresh, duck } = buildStderrReplacementStream(
+    fd,
+    (process.stderr as unknown as { constructor?: unknown } | null)?.constructor
+  )
   try {
     const stderrDesc = Object.getOwnPropertyDescriptor(process, 'stderr')
     if (stderrDesc?.configurable) {

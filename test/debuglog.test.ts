@@ -8,7 +8,7 @@ import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { debugEnabled, debugLog, debugOn, refreshDebugOn, setDebugFlag } from '../src/gateway/state/debuglog.js'
-import { pruneExpiredLogs } from '../src/gateway/state/logs.js'
+import { eventsLogName, pruneExpiredLogs } from '../src/gateway/state/logs.js'
 import { logsDir } from '../src/util/paths.js'
 import { localDateStr } from '../src/util/index.js'
 import { drainAppendStreams } from '../src/util/fsx.js'
@@ -134,7 +134,7 @@ describe('管理面访问日志（handleAdmin finish 钩子）', () => {
       expect(hit?.method).toBe('POST')
       expect(hit?.status).toBe(400)
       expect(typeof hit?.ms).toBe('number')
-      const events = fs.readFileSync(path.join(logsDir(), 'events.jsonl'), 'utf8')
+      const events = fs.readFileSync(path.join(logsDir(), eventsLogName()), 'utf8')
       expect(events).toContain('admin_http_error')
       expect(events).toContain('/_modeldock/attach/plan')
     } finally {
@@ -157,7 +157,7 @@ describe('管理面访问日志（handleAdmin finish 钩子）', () => {
       await drainAppendStreams()
       const after = readDebugLines().filter((l) => l.scope === 'admin').length
       expect(after).toBe(before)
-      expect(fs.readFileSync(path.join(logsDir(), 'events.jsonl'), 'utf8')).toContain('admin_http_error')
+      expect(fs.readFileSync(path.join(logsDir(), eventsLogName()), 'utf8')).toContain('admin_http_error')
     } finally {
       server.closeAllConnections?.()
       server.close()

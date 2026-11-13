@@ -14,6 +14,7 @@ import {
   keychainArgValue,
   pickFileCipher,
   setSecret,
+  transientSpawnError,
   __testSetChildTimeoutMs,
   __testSetDpapiBatch,
   __testSetExternalReader,
@@ -447,5 +448,30 @@ describe('外部子进程超时守卫（armChildTimeout）', () => {
     } finally {
       __testSetChildTimeoutMs()
     }
+  })
+})
+describe('dpapiBatch 重试分流（transientSpawnError）', () => {
+  it('瞬时类（超时标记 / 资源类错误码）重试；确定性（非零退出 / ENOENT）不重试', () => {
+    const timeoutErr: Error & { transient?: boolean } = new Error('powershell DPAPI 超时（10000ms 无退出），已强制终止')
+    timeoutErr.transient = true
+    expect(transientSpawnError(timeoutErr)).toBe(true)
+    expect(transientSpawnError(Object.assign(new Error('resource'), { code: 'EAGAIN' }))).toBe(true)
+    expect(transientSpawnError(Object.assign(new Error('resource'), { code: 'EMFILE' }))).toBe(true)
+    // 非零退出 = PowerShell 跑完但 Unprotect 失败（换账号密文必败，同一输入不会变）
+    expect(transientSpawnError(new Error('powershell exited 1'))).toBe(false)
+    expect(transientSpawnError(Object.assign(new Error('no tool'), { code: 'ENOENT' }))).toBe(false)
+    expect(transientSpawnError('not an error object')).toBe(false)
+  })
+
+  it('非零退出 stderr 含 Windows 安全库暂态特征（NTE_BAD_KEYSET / CRYPT_E_*）→ 也算瞬时重试一次（R1 复核）', () => {
+    // dpapiBatch 把 PowerShell stderr 原文拼进 Error message，分流按 stderr 特征判
+    expect(transientSpawnError(new Error('NTE_BAD_KEYSET: Keyset does not exist'))).toBe(true)
+    expect(transientSpawnError(new Error('powershell exited 1 -- CRYPT_E_NO_KEY_PROPERTY'))).toBe(true)
+    // NTE_BAD_KEYSET_PARAM 等同族码含同段子串，一并命中
+    expect(transientSpawnError(new Error('Exception calling "Unprotect": NTE_BAD_KEYSET_PARAM'))).toBe(true)
+    // 确定性失败的真实 stderr（换账号密文）：不含特征码，维持不重试（不因扩展白付双倍延迟）
+    expect(transientSpawnError(new Error('Exception calling "Unprotect" with "3" argument(s): "The specified key is not valid for use in the specified state."'))).toBe(false)
+    // 特征码大小写敏感：Windows 安全库原文恒为全大写，小写变体不命中（防误重试面扩大）
+    expect(transientSpawnError(new Error('nte_bad_keyset: keyset does not exist'))).toBe(false)
   })
 })

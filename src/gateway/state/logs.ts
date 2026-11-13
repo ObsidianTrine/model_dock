@@ -79,8 +79,10 @@ export function logRequest(rt: GatewayRuntime, entry: LogEntry): void {
 
 // ===== 今日用量实况（overview 状态行的成本仪表 / usageToday）=====
 // 内存累计器（usagePriceResolver 查价），网关重启后首次触达时回填扫当日日文件——
-// 「今日」语义跨重启不失忆。回填是同步单日扫描（一天一次的代价，本机个人量级可接受）；
-// 之后 logRequest 逐条增量，转发热路径零额外 IO。跨日 / 日志目录切换（fake home）自动重置。
+// 「今日」语义跨重启不失忆。回填走 streamRequestLogDays 流式管道异步预热（P2-11：跨日/重启
+// 首笔请求曾同步 readFileSync 整份当日文件冻结事件循环、在途 SSE 全卡——与 31 天查询的
+// 流式化同款治理）；在飞期间 logRequest 逐条增量照常，仪表先见增量后补全量。跨日 /
+// 日志目录切换（fake home）自动重置。
 // 查价器由 daemon 启动注入（perf-p2-polish）：logs 域不再静态依赖 pricing → catalog →
 // catalog-snapshot（1.18MB），CLI 命令启动闭包不再拖入；未注入（CLI 直用累计器等场景）
 // 时不计成本，与 createUsageAccumulator 的 priceOf 缺省行为一致。
@@ -99,21 +101,48 @@ export interface UsageTodayView {
   unpriced_models: string[] | null
 }
 
-let todayTracker: { dir: string; date: string; acc: ReturnType<typeof createUsageAccumulator> } | null = null
+interface TodayTracker {
+  dir: string
+  date: string
+  acc: ReturnType<typeof createUsageAccumulator>
+  /** 增量记账时间下界（epoch ms，Date.parse 归一比较——条目 ts 与本地时钟同为带偏移 ISO，
+   *  字典序跨偏移不可比）：回填只计 ts 早于该时刻的落盘条目，此后 logRequest 增量记账的条目
+   *  （ts ≥ 下界）不与回填重叠——创建条目本身传其 ts 作下界，被增量记账、被回填跳过，双计
+   *  窗口收敛到毫秒级（P2-11）。 */
+  sinceMs: number
+}
 
-function ensureTodayTracker(): { dir: string; date: string; acc: ReturnType<typeof createUsageAccumulator> } {
+let todayTracker: TodayTracker | null = null
+
+function ensureTodayTracker(sinceTs?: string): TodayTracker {
   const dir = logsDir()
   const date = localIsoTs().slice(0, 10)
   if (todayTracker && todayTracker.dir === dir && todayTracker.date === date) return todayTracker
-  const acc = createUsageAccumulator(usagePriceResolver)
-  for (const e of readRequestLogDay(date)) acc.add(e)
-  todayTracker = { dir, date, acc }
-  return todayTracker
+  const t: TodayTracker = { dir, date, acc: createUsageAccumulator(usagePriceResolver), sinceMs: Date.parse(sinceTs ?? localIsoTs()) }
+  todayTracker = t
+  void backfillTodayTracker(t)
+  return t
+}
+
+/** 回填当日日文件（streamRequestLogDays 流式，同 31 天查询一条解析管道）：逐行边读边累加，
+ *  不再把整份文件 readFileSync 进事件循环。只计 ts 早于 sinceMs 的条目——之后的条目由
+ *  logRequest 增量记账覆盖，不双计；ts 解析失败的旧日志按旧口径照计（sync 时代全量入账）；
+ *  回填失败按增量口径继续（仪表短时偏小，不影响转发）。 */
+async function backfillTodayTracker(t: TodayTracker): Promise<void> {
+  try {
+    for await (const e of streamRequestLogDays([t.date], {})) {
+      const ms = Date.parse(String(e.ts))
+      if (Number.isFinite(ms) && ms >= t.sinceMs) continue
+      t.acc.add(e)
+    }
+  } catch {
+    /* 回填失败不影响转发；仪表按已收到的部分展示 */
+  }
 }
 
 /** logRequest 热路径记账（entry.ts 的日期即所属日——迟到条目也归对日）。 */
 function usageTodayAdd(entry: LogEntry): void {
-  const t = ensureTodayTracker()
+  const t = ensureTodayTracker(entry.ts)
   if (entry.ts.slice(0, 10) === t.date) t.acc.add(entry)
 }
 
@@ -161,7 +190,7 @@ export function logAudit(rt: GatewayRuntime, entry: AuditEntry): void {
 
 let eventRingSink: ((entry: EventEntry) => void) | null = null
 /** 注册事件 → ring 转发（网关进程启动时调一次，main.ts）：ops 层（switchToService 等）没有
- *  rt 上下文，reportEvent 只落 events.jsonl；经此把同一事件同步进网关运行时 ring，页面日志表
+ *  rt 上下文，reportEvent 只落当日事件日文件（eventsLogName）；经此把同一事件同步进网关运行时 ring，页面日志表
  *  可见。传 null 撤销（测试用）。 */
 export function setEventRingSink(fn: ((entry: EventEntry) => void) | null): void {
   eventRingSink = fn
@@ -181,24 +210,32 @@ function eventEntryOf(e: { level: 'warn' | 'error'; op: string; err: string }): 
   }
 }
 
-/** 后台链路事件（有 rt）：错误 ring（页面日志表可见）+ events.jsonl 落盘。
+/** 事件日志文件名，按天切分：单文件 events.jsonl 是唯一不参与保留期清理的日志，provider
+ *  风暴/长驻进程下无界增长；按天命名后与 gateway-/audit- 走同一套 LOG_DAY_FILE_RE 清理
+ *  （同节奏、删前先关流）。导出给测试解析当日文件路径。切分前遗留的单文件不再有写入，
+ *  由 pruneExpiredLogs 按 mtime 过期删除（见其内注）。 */
+export function eventsLogName(): string {
+  return `events-${localIsoTs().slice(0, 10)}.jsonl`
+}
+
+/** 后台链路事件（有 rt）：错误 ring（页面日志表可见）+ 事件日文件落盘。
  *  吞错上报通道——后台 catch 原先 `.catch(() => {})` 的失败改调这里，无声失败变成可排查痕迹。 */
 export function logEvent(rt: GatewayRuntime, e: { level: 'warn' | 'error'; op: string; err: string }): void {
   const entry = eventEntryOf(e)
   pushRing(rt, entry)
   try {
-    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+    appendLog(eventsLogName(), JSON.stringify(entry) + "\n")
   } catch {
     /* 事件日志失败不影响主流程 */
   }
 }
 
-/** 后台链路事件（无 rt 的 ops 层）：events.jsonl 恒落；网关进程内经 eventRingSink 同步进 ring，
+/** 后台链路事件（无 rt 的 ops 层）：事件日文件恒落；网关进程内经 eventRingSink 同步进 ring，
  *  纯 CLI 上下文（网关未运行）只落文件。 */
 export function reportEvent(e: { level: 'warn' | 'error'; op: string; err: string }): void {
   const entry = eventEntryOf(e)
   try {
-    appendLog('events.jsonl', JSON.stringify(entry) + "\n")
+    appendLog(eventsLogName(), JSON.stringify(entry) + "\n")
   } catch {
     /* 事件日志失败不影响主流程 */
   }
@@ -564,12 +601,13 @@ export function eventLoopLagMs(): number | null {
   return loopLagMs
 }
 
-/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-（.jsonl）与 daemon-（.log）按天日文件
- *  无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律不碰；被常驻
- *  流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/EBUSY），
- *  删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
- *  （events.jsonl 单文件与 crash-*.log 不匹配本正则、不参与清理——前者量小、后者事故痕迹保贵。） */
-const LOG_DAY_FILE_RE = /^(gateway|audit|debug|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-/events-（.jsonl）与 daemon-（.log）
+ *  按天日文件无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律
+ *  不碰；被常驻流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/
+ *  EBUSY），删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
+ *  （crash-*.log 不匹配本正则、不参与清理——事故痕迹保贵；切分前遗留的 events.jsonl 单文件
+ *  见循环后专用分支。） */
+const LOG_DAY_FILE_RE = /^(gateway|audit|debug|events|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
 
 export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
   const days = Math.floor(Number(retentionDays))
@@ -596,6 +634,26 @@ export async function pruneExpiredLogs(retentionDays: number, now = new Date()):
       pruned++
     } catch {
       /* 被外部进程占用等：跳过，次日定时重试 */
+    }
+  }
+  // 切分前遗留的 events.jsonl 单文件（不再有写入、冻结）：mtime 早于保留期 = 整份内容必已
+  // 过期，直接删；未过期时留着——行级过滤要为每天一次的清理付全文件解析，而它最迟随保留期
+  // 自然过期，不值得
+  const legacyEvents = path.join(dir, 'events.jsonl')
+  if (names.includes('events.jsonl')) {
+    try {
+      const st = fs.statSync(legacyEvents)
+      if (startOfToday - st.mtimeMs > days * 86_400_000) {
+        await closeAppendStream(legacyEvents)
+        try {
+          fs.unlinkSync(legacyEvents)
+          pruned++
+        } catch {
+          /* 同上：跳过次日重试 */
+        }
+      }
+    } catch {
+      /* stat 失败（竞态删除等）：跳过 */
     }
   }
   return pruned

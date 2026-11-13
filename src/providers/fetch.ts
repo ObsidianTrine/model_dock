@@ -1,7 +1,7 @@
-import { request } from 'undici'
+import { request, type Dispatcher } from 'undici'
 import type { ProviderConfig } from '../config/types.js'
 import { getSecret } from '../config/secrets.js'
-import { buildDispatcher } from '../util/net.js'
+import { buildDispatcher, resolveProxyUrl } from '../util/net.js'
 import { t } from '../util/i18n.js'
 import { saneCapabilities, saneContextWindow, saneMaxOutput } from './known.js'
 
@@ -115,6 +115,27 @@ function pickNumber(rec: Record<string, unknown>, keys: string[]): number | unde
   return undefined
 }
 
+/** 代理 dispatcher 按「解析后的代理 URL」复用（对齐 update/transfer.ts 同款缓存）：fetchModelIds
+ *  此前每次 new ProxyAgent 从不 close，网关 daemon 周期探测逐服务累积连接池泄漏 fd；缓存后同一
+ *  代理全程一条池（空闲 socket 由 keepAliveTimeout 自然回收，条目数以不同 proxy 配置数为上界）。
+ *  direct 走 net.ts 模块级单例，本就无泄漏面。key 必须是解析后的 URL：'env' 模式下环境变量变化
+ *  要换新池，拿 'env' 字符串当 key 会冻结首次解析结果。 */
+const proxyDispatchers = new Map<string, Dispatcher>()
+function dispatcherFor(proxy?: string): Dispatcher {
+  const key = resolveProxyUrl(proxy) ?? 'direct'
+  let d = proxyDispatchers.get(key)
+  if (!d) {
+    d = buildDispatcher(proxy)
+    proxyDispatchers.set(key, d)
+  }
+  return d
+}
+
+/** 测试观测：当前代理 dispatcher 缓存条数（同 proxy 重复 fetch 不增长 = 复用生效） */
+export function __testProxyDispatcherCount(): number {
+  return proxyDispatchers.size
+}
+
 /** 流式读取响应体并设上限：chunked（无 content-length）响应用——累计超 max 立即停止
  *  消费（返回 over:true，调用方 dump 排空），不再把整份无界缓冲进内存。 */
 async function readBodyCapped(body: AsyncIterable<Uint8Array>, max: number): Promise<{ text: string; over: boolean }> {
@@ -138,7 +159,7 @@ export async function fetchModelIds(provider: ProviderConfig): Promise<FetchedMo
   if (!key) throw new Error(t('key 未设置，先 modeldock provider set-key', 'Key not set; run modeldock provider set-key first'))
   const candidates = modelEndpoints(provider.base_url)
 
-  const dispatcher = buildDispatcher(provider.proxy)
+  const dispatcher = dispatcherFor(provider.proxy)
   const deadline = Date.now() + 60_000
   const MAX_BODY_BYTES = 20 * 1024 * 1024
   // 逐候选记录结果（错误信息里全部列出，用户才知道测了哪些地址）

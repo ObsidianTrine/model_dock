@@ -301,6 +301,11 @@ const DPAPI_PREFIX = 'enc:dpapi:'
 // 防"secrets.json 单独被拷贝/上传/备份"后直接读到明文 Key（非本机 machine-id 解不出）。
 const MACH_PREFIX = 'enc:mach:'
 
+// 「他机密文形态」白名单（异源守卫用）：只有确属 file 后端两种加密方案前缀之一的值才算异源
+// 密文；任意 enc: 开头不在此列——明文后端下真实 key 可能字面以 enc: 开头（如 enc:foo）。
+// 须与 DPAPI_PREFIX / MACH_PREFIX 保持同步（新增 FileCipher 前缀时扩展）。
+const FOREIGN_CIPHER_RE = /^enc:(dpapi|mach):/
+
 let machIdCache: string | null | undefined
 function linuxMachineId(): string | null {
   if (machIdCache !== undefined) return machIdCache
@@ -347,16 +352,36 @@ export function __testSetDpapiBatch(fn?: (script: string, b64In: string[]) => Pr
   dpapiImpl = fn
 }
 
+/** Windows 安全库暂态特征（stderr 原文判定，R1 复核）：NTE_BAD_KEYSET 族（roaming profile
+ *  密钥集未就绪时 DPAPI 报 Keyset does not exist，同账号下一次读取通常就绪）与 CRYPT_E_*
+ *  杂项族。大小写敏感——Windows 安全库错误码原文恒为此形态，放宽只会扩大误重试面。 */
+const WIN_SPAWN_TRANSIENT_RE = /CRYPT_E_[A-Z0-9_]+|NTE_BAD_KEYSET/
+
+/** 是否瞬时类失败（只对这类重试；导出供单测直接验证分流口径）：超时（AV 扫描/CIM 僵死，
+ *  下把子进程可能就正常）、spawn 级资源类错误码（EAGAIN/EMFILE/ENFILE/EBUSY）、非零退出里
+ *  stderr 含上列安全库暂态特征的（dpapiBatch 把 stderr 原文拼进 Error message，退出码数字
+ *  本身不携带可判信息）。其余非零退出（换账号/换机器密文必败，同一输入不会变）与
+ *  ENOENT/EACCES（环境缺工具/无权限）是确定性失败：重试只会白付一次 PowerShell spawn
+ *  （跨机 secrets.json 每次 verify/读取都双倍延迟）。 */
+export function transientSpawnError(e: unknown): boolean {
+  const rec = e as Error & { transient?: unknown; code?: unknown }
+  if (rec?.transient === true) return true
+  if (typeof rec?.message === 'string' && WIN_SPAWN_TRANSIENT_RE.test(rec.message)) return true
+  return rec?.code === 'EAGAIN' || rec?.code === 'EMFILE' || rec?.code === 'ENFILE' || rec?.code === 'EBUSY'
+}
+
 /** 一次 PowerShell 进程批量加/解密多份（base64 入，base64 出，逐行对应）。payload 经 stdin 传、
- *  密钥不进命令行。失败重试一次（覆盖瞬时 spawn 失败）；仍失败即抛——DPAPI Protect/Unprotect
- *  依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条 spawn（旧回退
- *  曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
+ *  密钥不进命令行。失败按错误类型分流：仅瞬时类重试一次；确定性失败即抛——DPAPI Protect/
+ *  Unprotect 依赖的是当前账号 DPAPI 密钥集，与单条 payload 无关，逐条重试既无意义又会逐条
+ *  spawn（旧回退曾让导入 6 个 key 慢到几十秒，故取消逐条回退）。 */
 function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
   if (dpapiImpl) return dpapiImpl(script, b64In)
   return (async () => {
     if (b64In.length === 0) return []
     let lastErr: unknown
+    let attempts = 0
     for (let attempt = 0; attempt < 2; attempt++) {
+      attempts = attempt + 1
       try {
         return await new Promise<string[]>((resolve, reject) => {
           const child = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -371,7 +396,12 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
           child.stdin.on('error', () => {})
           child.on('close', (code) => {
             guard.dispose()
-            if (guard.timedOut()) return reject(guard.timeoutError())
+            if (guard.timedOut()) {
+              const te = guard.timeoutError()
+              // 瞬时标记（transientSpawnError 分流依据）：超时属可重试类
+              ;(te as Error & { transient?: boolean }).transient = true
+              return reject(te)
+            }
             if (code !== 0) return reject(new Error(err.trim() || `powershell exited ${code}`))
             resolve(out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
           })
@@ -379,12 +409,13 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
         })
       } catch (e) {
         lastErr = e
+        if (!transientSpawnError(e)) break
       }
     }
     // debug 探针：DPAPI 是 Windows daemon 读写密钥的必经 spawn，失败此前只在上抛链可见，
     // 上层吞掉时（如导入路径）完全无痕。明文绝不入日志（密钥走 stdin，err 是 PowerShell 报错）
     if (debugOn()) {
-      debugLog('spawn', 'dpapi', { ok: false, attempts: 2, err: String((lastErr as Error)?.message ?? lastErr).slice(0, 200) })
+      debugLog('spawn', 'dpapi', { ok: false, attempts, err: String((lastErr as Error)?.message ?? lastErr).slice(0, 200) })
     }
     throw lastErr
   })()
@@ -395,7 +426,7 @@ function dpapiBatch(script: string, b64In: string[]): Promise<string[]> {
 // win32→DPAPI（逐条 spawn 曾致几十秒，改用整表一次 PowerShell），linux 无钥匙环→machine-id 绑定 AES，
 // 其余→明文。
 
-interface FileCipher {
+export interface FileCipher {
   prefix: string
   enabled: boolean
   /** 整表解密：raw（带 prefix 的密文表）→ 明文表；未带 prefix 的值原样透传（存量明文/普通值） */
@@ -505,8 +536,16 @@ const plainCipher: FileCipher = {
   },
 }
 
+/** 测试注入的 file 后端加密方案（跨平台守卫分支无法按平台到达，如在本机强制 plainCipher）；
+ *  undefined=按平台真实选定。与既有 __testSetDpapiBatch 同套路：模块内 let 替换，不碰 vi.mock 跨文件雷区。 */
+let cipherOverride: FileCipher | undefined
+export function __testSetFileCipher(c?: FileCipher): void {
+  cipherOverride = c
+}
+
 /** 按平台一次选定 file 后端加密方案（DPAPI > machine-id AES > 明文） */
 export function pickFileCipher(): FileCipher {
+  if (cipherOverride) return cipherOverride
   if (CAN_DPAPI) return dpapiCipher
   if (CAN_MACH) return machCipher
   return plainCipher
@@ -591,16 +630,15 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
   let key = await secretsStatKey()
   const raw = await readSecretsRaw()
   const cipher = pickFileCipher()
-  if (!cipher.enabled) {
-    warnPlainFileOnce()
-    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now(), raw: { ...raw }, snapshot: { ...raw } }
-    return raw
-  }
-  // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux）
-  // 时，异源密文不带本平台 prefix，会被下方 hasLegacyPlain 当「存量明文」再包一层加密——
-  // 原值永久丢失，解出来的还是密文串（发上游 401）。检测到异源前缀即抛可操作错误，绝不重加密。
+  // 异平台密文守卫：跨机器拷贝 home（如 Linux 的 enc:mach: 落到 win，或 enc:dpapi: 落到 linux/mac）
+  // 时，异源密文不带本平台 prefix，会被当「存量明文」再包一层加密（加密后端）或原样当 key 发上游
+  // （明文后端）——原值永久丢失，发上游 401。守卫必须盖住明文后端（enabled=false 的早退分支之前）。
+  // 异源判定只认真正的他机密文形态（enc:dpapi:/enc:mach:），不认任意 enc: 开头：明文后端下真实
+  // key 可能字面以 enc: 开头（如 enc:foo），按任意前缀误拒后 setSecret 原样回存、下次读取再抛，
+  // 报错建议「重新设置」无法自愈成死循环（R1 复核）。新增 FileCipher 前缀时本白名单须同步扩展。
+  // 检测到异源密文即抛可操作错误，绝不重加密。
   const foreign = Object.entries(raw).find(
-    ([, v]) => typeof v === 'string' && v.startsWith('enc:') && !v.startsWith(cipher.prefix)
+    ([, v]) => typeof v === 'string' && FOREIGN_CIPHER_RE.test(v) && !(cipher.prefix && v.startsWith(cipher.prefix))
   )
   if (foreign) {
     const fp = foreign[1].slice(0, foreign[1].indexOf(':', 4) + 1)
@@ -608,6 +646,11 @@ async function readAndDecryptSecrets(): Promise<Record<string, string>> {
       t('secrets.json 的「{k}」是其他平台/机器加密的密文（{p} 前缀），本机无法解密', '"{k}" in secrets.json is ciphertext encrypted on another machine/platform ({p} prefix) and cannot be decrypted here', { k: foreign[0], p: fp }),
       t('请在本机重新设置各密钥（modeldock provider set-key），不要直接拷贝 secrets.json', 'Re-set the keys on this machine (modeldock provider set-key) instead of copying secrets.json')
     )
+  }
+  if (!cipher.enabled) {
+    warnPlainFileOnce()
+    fileCache = { path, key: key ?? '', data: raw, checkedAt: Date.now(), raw: { ...raw }, snapshot: { ...raw } }
+    return raw
   }
   const hasLegacyPlain = Object.values(raw).some(
     (v) => typeof v === 'string' && v !== '' && !v.startsWith(cipher.prefix)
@@ -762,6 +805,17 @@ export function providerKeyRefs(p: { key_ref?: string; keys?: string[] }): strin
   const keys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
   if (keys.length > 0) return keys
   return [p.key_ref ?? '']
+}
+
+/** provider 密钥的**全量可删清单**（purge/reset/provider rm/控制台删服务的删除口径）。
+ *  与 providerKeyRefs 的差别：池存在时 key_ref 不参与转发，但仍可能持有独立的旧密钥条目
+ *  （--add 追加不清 key_ref、去重只在池内做）——不可逆删除漏掉它会在系统钥匙环留下孤儿
+ *  条目（secrets.json 随目录删除，外部后端条目删不掉）。空哨兵与重复引用剔除。 */
+export function providerAllKeyRefs(p: { key_ref?: string; keys?: string[] }): string[] {
+  const out = new Set(providerKeyRefs(p))
+  if (typeof p.key_ref === 'string' && p.key_ref !== '') out.add(p.key_ref)
+  out.delete('')
+  return [...out]
 }
 
 /** 解析 provider 的整个 key 池：逐 ref 复用既有 scheme 解析（getSecret），单个 ref 解析失败

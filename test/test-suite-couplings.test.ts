@@ -15,6 +15,10 @@
 //     之前载入共享 registry，令 uninstall 的 mock 失效、单测摸到真实网关停止/清扫）。
 //     因此本门禁钉静态属主关系：gatewaycmd mock 唯一属主 uninstall、basic.js 静态 import
 //     唯一属主 uninstall、不重复 mock；收集序观测记录保留作排障线索（不作断言）。
+//   ④ 2026-11-12 审查 F6 后扩展：autostart 是第二个真实共享 mock 点（gateway/syncpull/
+//     uninstall 三属主），同样受收集序漂移支配——钉法不是「谁独占」（三文件都必须 mock，
+//     见 syncpull 头注），而是「属主集合固定 + 工厂单源 test/mocks/autostart.ts」：形状
+//     统一后谁家工厂胜出都等价，uninstall 的调用计数断言不再间歇红。
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -26,6 +30,9 @@ const readTest = (f: string): string =>
 
 const GATEWAYCMD_MOCK = /vi\.mock\(['"][^'"]*gatewaycmd\.js['"]/
 const BASIC_STATIC_IMPORT = /^import\s.+['"][^'"]*basic\.js['"]/m
+const AUTOSTART_MOCK = /vi\.mock\(['"][^'"]*src[/\\]autostart\.js['"]/
+const AUTOSTART_FACTORY = /mocks[/\\]autostart\.js/
+const AUTOSTART_OWNERS = ['gateway.test.ts', 'syncpull.test.ts', 'uninstall.test.ts']
 
 describe('测试套件顺序耦合前提（T21 门禁）', () => {
   it('gatewaycmd 的 vi.mock 属主仍是 uninstall.test.ts（另两文件的前提）', () => {
@@ -38,6 +45,29 @@ describe('测试套件顺序耦合前提（T21 门禁）', () => {
 
   it('update-tray.test.ts 不重复 mock gatewaycmd（其头注声明的既有约定）', () => {
     expect(readTest('update-tray.test.ts')).not.toMatch(GATEWAYCMD_MOCK)
+  })
+
+  it('autostart 的 vi.mock 属主集合仍是固定三文件（T21④，2026-11-12 审查 F6）', () => {
+    // 三文件都必须 mock（syncpull 头注：不 mock 会把真实 launchctl 绑进 server.js 静态绑定；
+    // uninstall 不 mock 会摸到真实 launchctl 超时），但不得新增第四家——isolate:false 共享
+    // 注册表下多一家 mock 就多一分收集序歧义，入栅逼先重审
+    const owners = fs
+      .readdirSync(import.meta.dirname)
+      .filter((f) => f.endsWith('.test.ts') && AUTOSTART_MOCK.test(readTest(f)))
+      .sort()
+    expect(
+      owners,
+      'autostart vi.mock 属主集合漂移——新增属主先审共享注册表耦合，减少属主先看 syncpull 头注的 server.js 静态绑定前提'
+    ).toEqual([...AUTOSTART_OWNERS].sort())
+  })
+
+  it('autostart mock 工厂单源 test/mocks/autostart.ts（T21④：形状统一才对收集序漂移免疫）', () => {
+    for (const f of AUTOSTART_OWNERS) {
+      expect(
+        readTest(f),
+        `${f} 的 autostart mock 工厂须单源于 mocks/autostart.js——内联形状回潮会让「哪个工厂胜出」重新依赖收集序（uninstall 调用计数间歇红的根因，2026-11-12 审查 F6）`
+      ).toMatch(AUTOSTART_FACTORY)
+    }
   })
 
   it('耦合对三文件都在（谁改名/挪走逼先重审耦合），收集序观测记录就绪', () => {

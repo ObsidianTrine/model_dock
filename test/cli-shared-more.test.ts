@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { Console } from 'node:console'
 import { fakeHome } from './helpers.js'
-import { exitWithThrown, killByPid, openUrlInBrowser, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
+import { buildStderrReplacementStream, exitWithThrown, killByPid, openUrlInBrowser, requireGateway, spawnDaemonAndWait } from '../src/cli/shared.js'
 
 // cli/shared.ts 原语补测（cli-shared.test.ts 已覆盖拼装主干）：错误出口 exitWithThrown、
 // requireGateway 未运行分支、win32 浏览器 opener、kill 失败分支、daemon stderr 半行缓冲与
@@ -159,6 +163,113 @@ describe('spawnDaemonAndWait 超时与 spawn 契约', () => {
       expect(errs.join('\n')).toContain('拉起失败')
     } finally {
       h.restore()
+    }
+  })
+})
+
+// ── stderr 接管按流形态分流（cruise1112 stderr 误绑修复）────────────────────
+// 修复船 4 发现：管道 stderr（net.Socket）形态下旧实现拿 stale.constructor 误当
+// SyncWriteStream 重绑，下游 console.error 在 Node Console 的 finally removeListener
+// 上同步炸 → cli.ts 顶层 .catch 再炸 → unhandledRejection → exit 0 静默。
+
+/** 名字伪装成 SyncWriteStream 的构造器（分流判定只认 constructor.name），并记录构造入参 */
+function namedSyncWriteStreamCtor(throwInCtor = false): (new (fd: number, opts?: { autoClose?: boolean }) => { write(): boolean }) & { lastArgs?: unknown[] } {
+  const cls = class FakeSyncWrite {
+    static lastArgs: unknown[] = []
+    fd: number
+    constructor(fd: number, opts?: { autoClose?: boolean }) {
+      cls.lastArgs = [fd, opts]
+      this.fd = fd
+      if (throwInCtor) throw new Error('boom-from-ctor')
+    }
+    write(): boolean {
+      return true
+    }
+  }
+  Object.defineProperty(cls, 'name', { value: 'SyncWriteStream' })
+  return cls as unknown as (new (fd: number, opts?: { autoClose?: boolean }) => { write(): boolean }) & { lastArgs?: unknown[] }
+}
+
+function tempLogPath(): string {
+  return path.join(os.tmpdir(), `md-stderr-rebind-${process.pid}-${Date.now()}.log`)
+}
+
+describe('buildStderrReplacementStream：按原 stderr 流形态分流（绝不抛）', () => {
+  it('SyncWriteStream 形态（stdio ignore/文件重定向）：复用其构造器绑日志 fd，duck=false', () => {
+    const ctor = namedSyncWriteStreamCtor()
+    const { stream, duck } = buildStderrReplacementStream(7, ctor)
+    expect(duck).toBe(false)
+    expect(stream).toBeInstanceOf(ctor)
+    expect(ctor.lastArgs).toEqual([7, { autoClose: false }])
+  })
+
+  it('net.Socket 形态（管道 stderr）：走鸭子流，绝不复用 Socket 构造器', () => {
+    class Socket {
+      write(): boolean {
+        return true
+      }
+    }
+    const { stream, duck } = buildStderrReplacementStream(7, Socket)
+    expect(duck).toBe(true)
+    expect(stream).not.toBeInstanceOf(Socket)
+  })
+
+  it('构造器抛错（名为 SyncWriteStream）：降级鸭子流，不向上抛', () => {
+    const ctor = namedSyncWriteStreamCtor(true)
+    const { stream, duck } = buildStderrReplacementStream(7, ctor)
+    expect(duck).toBe(true)
+    expect(typeof stream.write).toBe('function')
+  })
+
+  it('鸭子流：write 落盘 + Console 监听面齐备——console.error 不再炸 removeListener（回归钉）', () => {
+    const logPath = tempLogPath()
+    const fd = fs.openSync(logPath, 'a')
+    try {
+      class Socket {
+        write(): boolean {
+          return true
+        }
+      }
+      const { stream, duck } = buildStderrReplacementStream(fd, Socket)
+      expect(duck).toBe(true)
+      // Node Console[kWriteToConsole] 每次 write 都跑「listenerCount→once→finally removeListener」，
+      // 缺任一方法 console.error 自身同步抛（Node 24 实证）——鸭子流必须补齐最小监听面
+      const c = new Console({ stdout: process.stdout, stderr: stream as unknown as NodeJS.WritableStream })
+      expect(() => c.error('duck-console-line')).not.toThrow()
+      expect(stream.listenerCount('error')).toBe(0)
+      expect(() => {
+        stream.once('error', () => {})
+        stream.removeListener('error', () => {})
+      }).not.toThrow()
+      // fs.writeSync 直写无缓冲：落盘可同步断言
+      stream.write('duck-direct-line')
+      const content = fs.readFileSync(logPath, 'utf8')
+      expect(content).toContain('duck-console-line')
+      expect(content).toContain('duck-direct-line')
+    } finally {
+      fs.closeSync(fd)
+      try {
+        fs.unlinkSync(logPath)
+      } catch {
+        /* Windows 句柄延迟释放时容忍残留（tmpdir） */
+      }
+    }
+  })
+
+  it('鸭子流写入已关闭的 fd：返回 false 不抛（降级语义）', () => {
+    const logPath = tempLogPath()
+    const fd = fs.openSync(logPath, 'a')
+    fs.closeSync(fd)
+    try {
+      const { stream, duck } = buildStderrReplacementStream(fd, undefined)
+      expect(duck).toBe(true)
+      expect(stream.write('x')).toBe(false)
+    } finally {
+      try {
+        fs.unlinkSync(logPath)
+      } catch {
+        /* 容忍残留（tmpdir） */
+      }
     }
   })
 })

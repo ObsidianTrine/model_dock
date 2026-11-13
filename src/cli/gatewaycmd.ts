@@ -27,12 +27,15 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
   const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
   // 显式 --port 先验再传：NaN/越界此前一路漏到 listen(NaN) 才炸，用户看到的是 Node 内部
   // RangeError 裸栈（daemon 形态更只是超时 + 日志路径），拿不到「端口写错了」的可操作结论
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+  // （2026-11-12 审查 F12，两夜航批次独立实现同一修复，合并取本版：连 config.toml 来源的
+  // 坏端口一起拦，报错走 exitWithError 可操作两行式）。范围与 daemon 侧 --sea-gateway 分支
+  // 校验（1-65535）对齐：port 0 若放行会被 daemon 拒杀、父 CLI 白等超时，恰是 F12 失败模式
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
     // 收到值如实回显：--port 缺省时坏值来自 config.toml（store 不校验端口类型/范围），照抄
     // opts.port 会报「收到：undefined」；空串 --port 走到的是 config 值，?? 会回显空串——
     // 用 || 让「实际参与运算的那个值」上屏（用户对着正确的命令行却不知错在配置里的误导一并消除）
     exitWithError(
-      t('端口必须是 0–65535 的整数（收到：{v}）', 'The port must be an integer in 0-65535 (got: {v})', { v: String(opts.port || port) }),
+      t('端口必须是 1–65535 的整数（收到：{v}）', 'The port must be an integer in 1-65535 (got: {v})', { v: String(opts.port || port) }),
       t('示例：modeldock gateway start --port 8890；不加 --port 则用 config.toml [gateway] 的 port', 'Example: modeldock gateway start --port 8890; without --port the [gateway] port in config.toml applies')
     )
   }
@@ -179,11 +182,7 @@ export function sweepGatewayProcesses(): void {
       if (!lines) return
       for (const { pid, cmd } of parsePidCommandLines(lines)) {
         if (pid === process.pid) continue
-        // 双条件收敛误杀面：必须是“网关启动”命令，且命令属于 ModelDock（CLI 源码路径或 modeldock 二进制）
-        const isGatewayStart = /gateway start|--sea-gateway/.test(cmd)
-        const isModelDock = /modeldock|src[\\/]cli\.ts/.test(cmd)
-        if (!isGatewayStart || !isModelDock) continue
-        if (killByPid(pid)) killed++
+        if (isGatewayProcessCmd(cmd) && killByPid(pid)) killed++
       }
     }
   } catch {
@@ -192,13 +191,39 @@ export function sweepGatewayProcesses(): void {
   if (killed) console.log(c.gray(t('另清扫了 {n} 个游离网关进程', 'Also cleaned up {n} stray gateway process(es)', { n: killed })))
 }
 
+/** 网关启动参数必须落在独立参数位（前后空白/行首尾界定）：引号内的检索词（`rg "gateway start" …`）
+ *  不命中。子串裸匹配会把检索/编辑进程误当网关杀掉（2026-11-12 审查 F5）。 */
+const GATEWAY_ARG_RE = /(?:^|\s)(?:--sea-gateway|gateway\s+start)(?:\s|$)/
+/** 程序标记：modeldock 须以路径段/可执行名形态出现（前面是路径分隔/引号/空白/行首，后面是
+ *  分隔、.exe/.cmd、引号、空白或行尾）——`.modeldock` 数据目录（前导是点）、`my-modeldock`
+ *  之类不命中；dev tsx 实例路径是 `model_dock`（下划线）不含 modeldock，靠 src\cli.ts 单独识别。 */
+const MODELDOCK_PROG_RE = /(?:^|[\\/"'\s])modeldock(?:\.exe|\.cmd|[\\/"']|\s|$)|src[\\/]cli\.ts/
+
+/** 命令行是否为 ModelDock 网关进程（卸载清扫的杀伤判据）。取向「误杀 < 漏杀」：判定从紧——
+ *  ① 网关参数在独立参数位；② 含程序标记；③ 程序标记出现在参数之前（`grep gateway start
+ *  C:\…\.modeldock\logs\x` 这类检索进程参数在前、目标路径在后，不命中）。极端变形漏杀可接受
+ *  （残留网关可手动 gateway stop），误杀用户进程不可逆。导出供单测喂样本命令行。 */
+export function isGatewayProcessCmd(cmd: string): boolean {
+  const argPos = cmd.search(GATEWAY_ARG_RE)
+  if (argPos < 0) return false
+  const progPos = cmd.search(MODELDOCK_PROG_RE)
+  return progPos >= 0 && progPos < argPos
+}
+
 /** 枚举本机进程命令行，输出每行 "pid command"；不可用时返回 null（调用方跳过清扫）。
  *  Windows 没有 ps（wmic 自 Win11 24H2 起也已移除），改用 PowerShell CIM 查询。
  *  导出供 test/gatewaycmd.test.ts 做跨平台冒烟（PS 引号转义/编码在真实机器上验证）。 */
 export function listProcessLines(): string | null {
+  // 超时必挂（secrets.ts 同类 spawn 同款 10s）：AV 扫描/CIM 服务僵死时 PowerShell 不退出，
+  // 无超时会永久卡死 gateway stop / 卸载清扫链（2026-11-12 审查 F4）
   const out = process.platform === 'win32'
-    ? spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', winProcListScript()], { encoding: 'utf8' })
-    : spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8' })
+    ? spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', winProcListScript()], { encoding: 'utf8', timeout: 10_000 })
+    : spawnSync('ps', ['-eo', 'pid=,command='], { encoding: 'utf8', timeout: 10_000 })
+  if (out.error) {
+    // 降级：返回 null 让调用方跳过清扫，绝不阻塞主流程；告警落终端让「为何没扫」可查
+    console.error(c.yellow(t('⚠ 进程枚举不可用（{m}），跳过游离网关清扫', '⚠ Process enumeration unavailable ({m}); skipping stray gateway sweep', { m: out.error.message })))
+    return null
+  }
   return out.stdout || null
 }
 

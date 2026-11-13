@@ -16,7 +16,7 @@ import {
   cmdProviderSetKey,
 } from '../src/cli/providers.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
-import { getSecret, setSecret } from '../src/config/secrets.js'
+import { getSecret, providerKeyRefs, setSecret } from '../src/config/secrets.js'
 import { clearPricingMemo } from '../src/gateway/pricing.js'
 import { configPath, pricingJsonPath, secretsPath } from '../src/util/paths.js'
 
@@ -71,6 +71,21 @@ async function seedProvider(): Promise<void> {
       protocol: 'anthropic',
       auth_style: 'bearer',
       key_ref: 'plain:sk-pv',
+    }
+  })
+}
+
+/** file 后端 provider：key_ref 指向真实 secrets 条目（--add 建池迁移用例要验证迁移后的 ref 可读回） */
+async function seedFileProvider(keyRef = 'file:pv', key = 'sk-pv'): Promise<void> {
+  await setSecret(keyRef.slice('file:'.length), key, 'file')
+  await mutateConfig((c) => {
+    c.security = { store: 'file' }
+    c.providers['pv'] = {
+      name: 'PV',
+      base_url: 'https://api.example.com',
+      protocol: 'anthropic',
+      auth_style: 'bearer',
+      key_ref: keyRef,
     }
   })
 }
@@ -253,6 +268,33 @@ describe('cmdProviderRm', () => {
     }
   })
 
+  it('多 key 池（keys[] + 池存在时残留的 key_ref）：rm 后全部密钥条目清净（P1-2 回归）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      // 池 2 把 file 引用 + key_ref 旧引用（--add 追加不清 key_ref，两处并存是常态）：
+      // rm 必须全删（旧实现只删 key_ref 单条，池内引用在钥匙环残留成孤儿）
+      await setSecret('pv-k1', 'sk-pool-1', 'file')
+      await setSecret('pv-k2', 'sk-pool-2', 'file')
+      await setSecret('pv-legacy', 'sk-legacy', 'file')
+      await mutateConfig((c) => {
+        c.providers['pv']!.key_ref = 'file:pv-legacy'
+        c.providers['pv']!.keys = ['file:pv-k1', 'file:pv-k2']
+      })
+      await cmdProviderRm('pv')
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']).toBeUndefined()
+      // secrets.json 里的条目随 deleteSecret 清除（Windows DPAPI 批量形态同样只是 JSON 表）
+      const store = JSON.parse(fs.readFileSync(secretsPath(), 'utf8')) as Record<string, string>
+      expect(store).not.toHaveProperty('pv-k1')
+      expect(store).not.toHaveProperty('pv-k2')
+      expect(store).not.toHaveProperty('pv-legacy')
+    } finally {
+      h.restore()
+    }
+  })
+
   it('配置写失败：key 不被先行删除（提交序必须先配置后密钥）', async () => {
     const h = fakeHome()
     captureConsole()
@@ -305,6 +347,59 @@ describe('cmdProviderSetKey', () => {
       expect(cfg.providers['pv']!.key_ref.startsWith('file:')).toBe(true)
       expect(await getSecret(cfg.providers['pv']!.key_ref)).toBe('sk-new-key')
       expect(logs.join('\n')).toContain('key 已更新')
+    } finally {
+      h.restore()
+    }
+  })
+
+  // --add 建池迁移（2026-11-12 审查 P1-2）：单 key provider 首次 --add 时原 key_ref 必须并入
+  // 池首——providerKeyRefs 池非空只认 keys，不迁移则原 key 静默退出轮转、提示语掩盖池=1 真相
+  it('--add 单 key provider 首次建池：原 key_ref 迁入池首，轮转含两把（第 2 把提示）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2'])
+      expect(cfg.providers['pv']!.key_ref).toBe('file:pv') // key_ref 保持原值（展示/删除口径不动）
+      expect(await getSecret('file:pv')).toBe('sk-pv') // 原 key 密文未被覆盖
+      expect(await getSecret('file:pv-k2')).toBe('sk-second')
+      // 读取口径：轮转清单 = 池两把（迁移前这里只有新 key 一把，原 key 静默出局）
+      expect(providerKeyRefs(cfg.providers['pv']!)).toEqual(['file:pv', 'file:pv-k2'])
+      expect(logs.join('\n')).toContain('第 2 把')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--add 已有池：纯尾插不重复迁移，槽位编号连续', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      await cmdProviderSetKey('pv', { key: 'sk-third', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2', 'file:pv-k3'])
+      expect(cfg.providers['pv']!.key_ref).toBe('file:pv')
+      expect(logs.join('\n')).toContain('第 3 把')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--add 盘上 keys 为空数组（回落 key_ref 读取）：建池同样迁移', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedFileProvider()
+      await mutateConfig((c) => {
+        c.providers['pv'].keys = []
+      })
+      await cmdProviderSetKey('pv', { key: 'sk-second', add: true })
+      const cfg = await loadConfig()
+      expect(cfg.providers['pv']!.keys).toEqual(['file:pv', 'file:pv-k2'])
     } finally {
       h.restore()
     }

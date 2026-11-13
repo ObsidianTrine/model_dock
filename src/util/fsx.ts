@@ -466,6 +466,10 @@ export function appendLineErrorCount(): number {
   for (const n of appendErrorCounts.values()) total += n
   return total
 }
+/** 测试观察：当前常驻流池的路径键（流池 LRU 淘汰用例用；生产路径不消费） */
+export function __testAppendStreamKeys(): string[] {
+  return [...appendStreams.keys()]
+}
 /** 空闲刷盘阈值：一条流超过该时长没有新写入就 end 掉（缓冲随关流强制落盘），下一条写入按需重建。
  *  Windows 的 gateway stop 是 TerminateProcess（无信号语义），main.ts 的 cleanup/drainAppendStreams
  *  走不到，不关流的话最后缓冲的尾部日志随进程一起丢；空闲即关把最坏丢失窗口从「直到下次 stop」
@@ -522,7 +526,19 @@ export function appendLine(file: string, line: string): void {
     appendStreams.delete(file)
     appendStreams.set(file, ws)
     while (appendStreams.size > APPEND_STREAM_CAP) {
-      const oldestKey = appendStreams.keys().next().value as string
+      // 淘汰按最近使用而非 Map 插入序：重建流会把键挪到队尾，但「最早插入、仍在活跃写」的
+      // 热点流（appendStreamLastUse 已记录却未参与淘汰）按插入序会被误逐——白付一次重建
+      let oldestKey = ''
+      let oldestAt = Infinity
+      for (const [k, at] of appendStreamLastUse) {
+        if (at < oldestAt) {
+          oldestAt = at
+          oldestKey = k
+        }
+      }
+      // 簿记缺失防御：正常时每个流都有 lastUse（appendLine 先 set 再建流、删除成对），
+      // 查不到就停手，避免把空键当淘汰目标或死循环
+      if (!oldestKey || !appendStreams.has(oldestKey)) break
       const oldest = appendStreams.get(oldestKey)
       appendStreams.delete(oldestKey)
       appendStreamLastUse.delete(oldestKey)

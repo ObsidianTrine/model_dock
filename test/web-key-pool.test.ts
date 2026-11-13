@@ -224,6 +224,39 @@ describe('Web 改 Key 与多 key 池（2026-11-04 审查 P1）', () => {
       h.restore()
     }
   })
+
+  // 建池即迁移（2026-11-12 审查 P1-2）：persist 回调按盘上实况建池（keys ??= []）时，若盘上
+  // keys 为空而 key_ref 在池外，先把 key_ref 迁入池首——不迁移则原 key 静默退出轮转。常态
+  // 「运行态与盘上一致」走不到迁移分支；本用例手工制造分歧窗口（运行态有池、盘上无池）钉住
+  // 防御路径，与 CLI set-key --add 建池迁移同口径。
+  it('/key：盘上 keys 为空且 key_ref 在池外时，追加建池把 key_ref 迁入池首', async () => {
+    const h = fakeHome()
+    let close: () => void = () => {}
+    try {
+      // 盘上：单 key（keys 缺省，key_ref='file:up'）；运行态：池 ['file:up-a']（分歧制造）
+      const cfgRuntime = poolCfg()
+      cfgRuntime.providers.up.keys = ['file:up-a']
+      const cfgDisk = poolCfg()
+      delete cfgDisk.providers.up.keys
+      await saveConfig(cfgDisk)
+      await setSecret('up', 'sk-up', 'file')
+      await setSecret('up-a', 'sk-a', 'file')
+      const g = await startGateway(cfgRuntime)
+      close = g.close
+
+      const resp = await post(g.gwPort, 'key', { provider: 'up', key: 'sk-new2' })
+      expect(resp.status).toBe(200)
+      expect(((await resp.json()) as any).ok).toBe(true)
+      // 迁移断言：池 = [key_ref, 新引用]，原 key 不出局
+      expect(providerOnDisk('up').keys).toEqual(['file:up', 'file:up-k2'])
+      expect(providerOnDisk('up').key_ref).toBe('file:up')
+      expect(await getSecret('file:up-k2')).toBe('sk-new2')
+      expect(await getSecret('file:up')).toBe('sk-up') // 原 key 密文未被触碰
+    } finally {
+      close()
+      h.restore()
+    }
+  })
 })
 
 describe('先落配置后动密钥（2026-11-04 审查 P2，REVIEW-10 同序）', () => {

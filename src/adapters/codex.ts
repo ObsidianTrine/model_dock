@@ -405,17 +405,22 @@ export const codexAdapter: HarnessAdapter = {
           delete root.model_context_window
           delete root.model_max_output_tokens
         }
-        // catalog 指针收回（仅指向 ModelDock 自家文件时；用户自设的他值不动）。
-        // 不能锁在根级接管态内：attach 不带 --set-default（或用户后来把根级 provider 切走）
-        // 时指针同样是我们写的，残留会指向已删的 modeldock 条目（codex -p / 选择器全部失联）
+        // catalog 指针 / web_search 缺省 / profiles 条目的写入不受 setDefault 门控
+        // （attach 不带 --set-default 也写），收回同样在 model_provider 门控之外——
+        // 否则无 setDefault 的接入 detach 后三处残留（/model 选择器仍列 ModelDock 目录、
+        // web_search 被钉 disabled、codex -p 撞失效路由）。
+        // catalog 指针仅指向 ModelDock 自家文件时收回（用户自设的他值不动）
         if (root.model_catalog_json === codexCatalogPath()) delete root.model_catalog_json
-        // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；收空后
-        // 整键删除，不残留空表。归属判定按条目自身（profiles 写入不依赖 --set-default，
-        // 与根级接管态无关）
+        // web_search 只收我们补写的缺省值 'disabled'（attach 仅补空、只写这一个值）；
+        // 用户改过的任何其他值不动。用户显式配的 'disabled' 与补写值无法区分，一并收回
+        // （接入前快照可 restore 找回，与窗口键同一兜底口径）
+        if (root.web_search === 'disabled') delete root.web_search
+        // 自家 profiles 条目收回（model_provider=modeldock 的才动；用户自设保留）；
+        // 收空后整键删除，不残留空表
         const ups = root.profiles
         if (ups && typeof ups === 'object') {
-          for (const [pid, pe] of Object.entries(ups)) {
-            if (pe && typeof pe === 'object' && (pe as Record<string, unknown>).model_provider === 'modeldock') {
+          for (const [pid, pentry] of Object.entries(ups)) {
+            if (pentry && typeof pentry === 'object' && (pentry as Record<string, unknown>).model_provider === 'modeldock') {
               delete ups[pid]
             }
           }

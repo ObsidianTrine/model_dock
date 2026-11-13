@@ -172,6 +172,10 @@ describe('tiers > run 端到端（mock）', () => {
         JSON.stringify({
           baseBranch: 'develop',
           testCmd: 'node -e "process.exit(0)"',
+          // 覆写 workflow.json 必须带回 mkRepo 的夹具缺省 autoApprove:false（生产缺省开）：
+          // 漏了它，落位 awaiting-human 会拉起 detached autoapprove --sleep-first sweep
+          // （cwd 在本仓库、睡 3.5min），cleanup 的 rmSync 必 EPERM（Windows EPERM 根因，实测踩中）
+          autoApprove: { enabled: false },
           tiers: { 'ahead-4': { tokenEnv: 'MDK_TEST_TIER_TOKEN', workerModel: 'flagship-x' } },
         }),
       )
@@ -198,6 +202,8 @@ describe('tiers > run 端到端（mock）', () => {
         JSON.stringify({
           baseBranch: 'develop',
           testCmd: 'node -e "process.exit(0)"',
+          // 同上：覆写带回 autoApprove:false（见「显式 tier」用例内注）
+          autoApprove: { enabled: false },
           worker: { backend: 'zcode-headless' },
           tiers: { 'ahead-2': { tokenEnv: 'MDK_TEST_TIER_LIGHT_TOKEN' } },
         }),
@@ -225,6 +231,8 @@ describe('tiers > run 端到端（mock）', () => {
         JSON.stringify({
           baseBranch: 'develop',
           testCmd: 'node -e "process.exit(0)"',
+          // 同上：覆写带回 autoApprove:false（见「显式 tier」用例内注）
+          autoApprove: { enabled: false },
           tiers: { 'ahead-2': { tokenEnv: 'MDK_TEST_TIER_LIGHT_TOKEN' } },
         }),
       )
@@ -389,6 +397,10 @@ describe('tiers > 网关权威校验端到端（gatewayAdmin: true，独立进�
     return JSON.stringify({
       baseBranch: 'develop',
       testCmd: 'node -e "process.exit(0)"',
+      // 覆写 workflow.json 必须带回 mkRepo 的夹具缺省 autoApprove:false（生产缺省开）：
+      // 漏了它，落位 awaiting-human 拉起的 detached autoapprove --sleep-first sweep
+      // 会持仓库 cwd 到 cleanup 之后，rmSync 必 EPERM（Windows EPERM 根因，实测踩中）
+      autoApprove: { enabled: false },
       ...(gatewayAdmin ? { gatewayAdmin: true } : {}),
       tiers: { 'ahead-4': { tokenEnv: 'MDK_TEST_TIER_TOKEN' } },
     })

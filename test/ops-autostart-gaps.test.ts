@@ -395,12 +395,12 @@ describe('crash：appendCrashLog 写盘失败容错', () => {
 })
 
 describe('jsonpath：读取边界与写入守卫（setPath/getPath/toSegments）', () => {
-  it('getPath：star 段与中途 null 值 → undefined；toSegments 不支持 star', () => {
+  it('getPath：star 读 = 任一命中取首个有值；中途 null 值 → undefined；toSegments 不支持 star', () => {
     const root: any = { a: { b: 1 }, n: null, list: [1] }
-    expect(getPath(root, '$.*')).toBeUndefined()
-    expect(getPath(root, '$.n.b')).toBeUndefined()
-    expect(getPath(root, '$.list[5]')).toBeUndefined()
-    expect(() => toSegments('$.*.b')).toThrow(/不支持 \*|does not support \*/)
+    expect(getPath(root, '$.*')).toEqual({ b: 1 }) // star 收尾：首个有值子节点（2026-11-12 起读侧兑现 $.a.*.b，此前恒 undefined）
+    expect(getPath(root, '$.n.b')).toBeUndefined() // 中途 null 容器
+    expect(getPath(root, '$.list[5]')).toBeUndefined() // 越界读
+    expect(() => toSegments('$.*.b')).toThrow(/不支持 \*|does not support \*/) // segments 面（yaml setIn）仍不支持 star
   })
 
   it('setPath：数组越界写报错；末尾追加合法；索引下钻创建容器', () => {

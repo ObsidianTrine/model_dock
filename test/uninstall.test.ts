@@ -27,8 +27,8 @@ vi.mock('../src/config/secrets.js', async (importOriginal) => ({
   deleteSecret: vi.fn(async () => {}),
 }))
 vi.mock('../src/autostart.js', async () => {
-  const { viFnAutostartMock } = await import('./mocks/autostart.js')
-  return viFnAutostartMock()
+  const { spreadAutostartMock } = await import('./mocks/autostart.js')
+  return spreadAutostartMock()
 })
 vi.mock('../src/cliinstall.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/cliinstall.js')>()),
@@ -53,15 +53,27 @@ function baseCfg(): Config {
 
 describe('cmdUninstall 拆分语义（默认保留配置 / --purge 彻底清除）', () => {
   let logSpy: ReturnType<typeof vi.spyOn>
+  let errSpy: ReturnType<typeof vi.spyOn>
+
+  // isolate:false 共享 mock 注册表下禁止 clearAllMocks/restoreAllMocks（会连别的文件的
+  // 模块 mock 一起清，AGENTS.md vitest 隔离模型）——只清/只还原本文件自己的桩（F5）
+  const clearOwnMocks = () => {
+    vi.mocked(cmdGatewayStop).mockClear()
+    vi.mocked(sweepGatewayProcesses).mockClear()
+    vi.mocked(deleteSecret).mockClear()
+    vi.mocked(uninstallAutostart).mockClear()
+    vi.mocked(removeCliLink).mockClear()
+  }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    clearOwnMocks()
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    logSpy.mockRestore()
+    errSpy.mockRestore()
   })
 
   it('默认：只卸程序——停网关/清自启/清命令行入口，配置目录与密钥原样保留', async () => {
@@ -99,6 +111,26 @@ describe('cmdUninstall 拆分语义（默认保留配置 / --purge 彻底清除�
       expect(sweepGatewayProcesses).toHaveBeenCalledTimes(1)
       expect(uninstallAutostart).toHaveBeenCalledTimes(1)
       expect(removeCliLink).toHaveBeenCalledTimes(1)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--purge：多 key 池（keys[] + 池存在时残留的 key_ref）的密钥条目全量清除（P1-2 回归）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = baseCfg()
+      cfg.providers['up'].keys = ['file:sk-pool-1', 'file:sk-pool-2']
+      await saveConfig(cfg)
+
+      await cmdUninstall({ yes: true, purge: true })
+
+      expect(fs.existsSync(modeldockDir())).toBe(false)
+      // 全量口径：池内 2 条 + 残留 key_ref 旧引用共 3 条全删（旧实现只删 key_ref 单条）
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-pool-1')
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-pool-2')
+      expect(deleteSecret).toHaveBeenCalledWith('file:sk-upstream-secret')
+      expect(deleteSecret).toHaveBeenCalledTimes(3)
     } finally {
       h.restore()
     }
