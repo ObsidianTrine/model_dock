@@ -828,11 +828,56 @@ namespace ModelDockTray
             catch { return false; }
         }
 
-        /// 就地更新：分离跑 `modeldock update --yes`（弹窗里的「立即更新」即用户确认）。
-        /// 不重定向输出——更新流程会停掉托盘自身（换包后由新版拉起），托盘死了日志也写不成；
+        /// 还原槽位版本（rollback.json，直读不依赖网关——还原常发生在网关挂掉时）：
+        /// CLI `update --yes` 换装成功后写账本（src/update/rollback.ts）；缺失/损坏/备份文件
+        /// 已不在盘（被 --clean 或手动删除）一律返回 null，还原入口按无槽隐藏
+        public static string RollbackVersion()
+        {
+            try
+            {
+                var file = Home() + "\\updates\\rollback.json";
+                if (!File.Exists(file)) return null;
+                var text = File.ReadAllText(file);
+                var version = JsonString(text, "version");
+                var mainPath = JsonString(text, "mainPath");
+                if (string.IsNullOrEmpty(version) || string.IsNullOrEmpty(mainPath)) return null;
+                if (!File.Exists(mainPath)) return null;
+                return version;
+            }
+            catch { return null; }
+        }
+
+        /// 三段数字版本比较（a > b?）：与 CLI compareVersions 同口径；槽位版本高于当前 = 可切回新版本
+        public static bool CmpSemver(string a, string b)
+        {
+            var pa = SplitSemver(a);
+            var pb = SplitSemver(b);
+            for (int i = 0; i < 3; i++)
+            {
+                int x = i < pa.Count ? pa[i] : 0;
+                int y = i < pb.Count ? pb[i] : 0;
+                if (x != y) return x > y;
+            }
+            return false;
+        }
+
+        private static List<int> SplitSemver(string v)
+        {
+            var list = new List<int>();
+            if (v == null) return list;
+            foreach (var part in v.Split('.'))
+            {
+                int n;
+                list.Add(int.TryParse(part, out n) ? n : 0);
+            }
+            return list;
+        }
+
+        /// 就地更新/还原：分离跑 `modeldock update --yes` / `--restore --yes`（弹窗确认即用户确认）。
+        /// 不重定向输出——流程会停掉托盘自身（换包后由新版拉起），托盘死了日志也写不成；
         /// 失败原因更新后可在控制台或命令行复查。
         /// 返回是否真正拉起：在途更新被拒绝时返回 false，调用方不再弹进度窗（对齐 macOS 托盘）。
-        public static bool StartUpdate()
+        public static bool StartUpdate(string cliArgs = "update --yes")
         {
             if (UpdateInFlight())
             {
@@ -848,7 +893,7 @@ namespace ModelDockTray
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = bin,
-                    Arguments = "update --yes",
+                    Arguments = cliArgs,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 });
@@ -870,7 +915,7 @@ namespace ModelDockTray
         /// 展示/消息循环全在这条专用 STA 线程体内（2026-11-02 卡 29）。
         private static int _progressOpening = 0;
 
-        public static void ShowProgressForm(string title)
+        public static void ShowProgressForm(string title, bool restore = false)
         {
             var f = _progressForm;
             if (f != null && !f.IsDisposed)
@@ -885,7 +930,7 @@ namespace ModelDockTray
             {
                 try
                 {
-                    var form = new UpdateProgressForm(title);
+                    var form = new UpdateProgressForm(title, restore);
                     _progressForm = form;
                     _progressOpening = 0;
                     Application.Run(form);
@@ -1184,7 +1229,7 @@ namespace ModelDockTray
 
         private bool _skeletonReady;
         private ToolStripMenuItem _statusItem, _curItem, _openItem, _webItem;
-        private ToolStripMenuItem _svcItem, _modelItem, _cliItem, _autoLoginItem, _cleanItem, _updItem, _startItem, _liteItem, _quitItem;
+        private ToolStripMenuItem _svcItem, _modelItem, _cliItem, _autoLoginItem, _cleanItem, _updItem, _restoreItem, _startItem, _liteItem, _quitItem;
         private ToolStripItem _sepQuick;
         // 集合项 diff 依据：id 序列 / 当前服务 pid / 客户端整份签名；一致即原地更新，不一致才重建
         private List<string> _svcIds;
@@ -1243,6 +1288,9 @@ namespace ModelDockTray
             _updItem = new ToolStripMenuItem();
             _updItem.Click += delegate { TrayActions.CheckUpdate(); };
 
+            _restoreItem = new ToolStripMenuItem();
+            _restoreItem.Click += delegate { RestoreClicked(); };
+
             _startItem = new ToolStripMenuItem(I18n.L("启动网关", "Start Gateway"));
             _startItem.Click += delegate { TrayActions.RunGatewayCli("--sea-gateway"); };
 
@@ -1275,6 +1323,7 @@ namespace ModelDockTray
             menu.Add(logsItem);
             menu.Add(_cleanItem);
             menu.Add(_updItem);
+            menu.Add(_restoreItem);
             menu.Add(_startItem);
             menu.Add(_liteItem);
             menu.Add(new ToolStripSeparator());
@@ -1305,6 +1354,20 @@ namespace ModelDockTray
                 ? I18n.L("检查中…", "Checking…")
                 : (updBusy ? I18n.L("更新中…", "Updating…") : I18n.L("检查更新…", "Check for Updates…"));
             _updItem.Enabled = !updBusy && hasBin;
+
+            // 还原更新：更新时自动保留的上一版（安装位置 .old / 回滚目录），一键对换回去，零下载。
+            // 忙碌或槽位版本等于当前（陈旧槽 / 已还原但账本未翻转）时隐藏；槽位版本高于当前
+            //（还原过）文案换成「切回新版本」——再点一次即免费切回，双向零下载
+            string rbVersion = updBusy ? null : TrayActions.RollbackVersion();
+            if (rbVersion != null && rbVersion == TrayMeta.Version) rbVersion = null;
+            _restoreItem.Visible = rbVersion != null;
+            if (rbVersion != null)
+            {
+                _restoreItem.Text = TrayActions.CmpSemver(rbVersion, TrayMeta.Version)
+                    ? I18n.L("切回新版本（v" + rbVersion + "）", "Switch back to v" + rbVersion)
+                    : I18n.L("还原更新（回到 v" + rbVersion + "）", "Restore Update (back to v" + rbVersion + ")");
+                _restoreItem.Enabled = hasBin;
+            }
 
             _quitItem.Text = _running ? I18n.L("退出（停止网关）", "Quit (Stop Gateway)") : I18n.L("退出", "Quit");
 
@@ -1518,6 +1581,21 @@ namespace ModelDockTray
 
         // ---------- 动作（薄壳：实现收敛在 TrayActions） ----------
 
+        /// 还原更新：确认后分离跑 `modeldock update --restore --yes`（还原逻辑全在 CLI，
+        /// 托盘只做确认与进度展示）。还原流程会停掉托盘自身（对换完成后由还原版自动拉起）。
+        private void RestoreClicked()
+        {
+            string version = TrayActions.RollbackVersion();
+            if (version == null) return;
+            if (MessageBox.Show(
+                    I18n.L("将切换到备份保留的 v" + version + "，网关与托盘自动重启，期间请求会短暂中断。", "ModelDock will switch to the retained v" + version + "; the gateway and tray restart automatically and requests are briefly interrupted."),
+                    I18n.L("还原更新？", "Restore previous version?"),
+                    MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return;
+            if (TrayActions.StartUpdate("update --restore --yes"))
+                TrayActions.ShowProgressForm(I18n.L("正在还原到 v", "Restoring to v") + version, true);
+        }
+
         private void QuitClicked()
         {
             if (TrayActions.HealthOk()) TrayActions.RunGatewayCli("gateway stop");
@@ -1527,18 +1605,20 @@ namespace ModelDockTray
         }
     }
 
-    /// 更新进度小窗：自有 STA 线程消息循环（ShowProgressForm/CloseProgressForm 跨线程驱动），
+    /// 更新/还原进度小窗：自有 STA 线程消息循环（ShowProgressForm/CloseProgressForm 跨线程驱动），
     /// 每秒自轮询 update-progress.json 刷新阶段与百分比——进度文件由 `modeldock update --yes`
-    /// 子进程写入（src/update/progress.ts）；替换段托盘被更新流程停掉，窗随之消失属预期（新版自动拉起）。
+    /// 子进程写入（src/update/progress.ts）；替换段托盘被流程停掉，窗随之消失属预期（新版自动拉起）。
     public class UpdateProgressForm : Form
     {
         private readonly Label _label = new Label();
         private readonly ProgressBar _bar = new ProgressBar();
         private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
         private readonly string _file;
+        private readonly bool _restore; // 还原模式：完成/失败/阶段文案按还原口径
 
-        public UpdateProgressForm(string title)
+        public UpdateProgressForm(string title, bool restore = false)
         {
+            _restore = restore;
             Text = title;
             Font = SystemFonts.MessageBoxFont;
             // 按 DPI 缩放：控件坐标都按 96dpi 设计，配 manifest 的 PerMonitorV2 高分屏不发糊
@@ -1552,7 +1632,7 @@ namespace ModelDockTray
             ShowInTaskbar = false;
             _label.SetBounds(16, 14, 400, 40);
             _bar.SetBounds(16, 60, 400, 22);
-            _label.Text = I18n.L("正在准备更新…", "Preparing update…");
+            _label.Text = restore ? I18n.L("正在准备还原…", "Preparing restore…") : I18n.L("正在准备更新…", "Preparing update…");
             Controls.Add(_label);
             Controls.Add(_bar);
             _bar.Style = ProgressBarStyle.Marquee;
@@ -1583,7 +1663,11 @@ namespace ModelDockTray
                     _timer.Stop();
                     // JsonString 内部已反转义一次，勿再包 JsonUnescape（双重解码误伤字面 \ 序列）
                     string err = TrayActions.JsonString(text, "error");
-                    MessageBox.Show(string.IsNullOrEmpty(err) ? I18n.L("更新失败，可重试 modeldock update。", "Update failed; retry with `modeldock update`.") : err, I18n.L("ModelDock 更新失败", "ModelDock Update Failed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    string fallback = _restore
+                        ? I18n.L("还原失败，可重试 modeldock update --restore。", "Restore failed; retry with `modeldock update --restore`.")
+                        : I18n.L("更新失败，可重试 modeldock update。", "Update failed; retry with `modeldock update`.");
+                    string title = _restore ? I18n.L("ModelDock 还原失败", "ModelDock Restore Failed") : I18n.L("ModelDock 更新失败", "ModelDock Update Failed");
+                    MessageBox.Show(string.IsNullOrEmpty(err) ? fallback : err, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     Close();
                     return;
                 }
@@ -1598,7 +1682,9 @@ namespace ModelDockTray
                     _timer.Stop();
                     _bar.Style = ProgressBarStyle.Continuous;
                     _bar.Value = 100;
-                    _label.Text = I18n.L("更新完成。网关与托盘将自动重启。", "Update finished. The gateway and tray will restart automatically.");
+                    _label.Text = _restore
+                        ? I18n.L("还原完成。网关与托盘将自动重启。", "Restore finished. The gateway and tray will restart automatically.")
+                        : I18n.L("更新完成。网关与托盘将自动重启。", "Update finished. The gateway and tray will restart automatically.");
                     return;
                 }
                 string name = StageName(stage);
@@ -1620,13 +1706,13 @@ namespace ModelDockTray
             catch { }
         }
 
-        private static string StageName(string stage)
+        private string StageName(string stage)
         {
             if (stage == "downloading") return I18n.L("下载中", "Downloading");
             if (stage == "verifying") return I18n.L("校验安装包", "Verifying package");
-            if (stage == "swapping") return I18n.L("停止网关并替换安装", "Stopping gateway and swapping install");
+            if (stage == "swapping") return _restore ? I18n.L("停止网关并对换版本", "Stopping gateway and swapping versions") : I18n.L("停止网关并替换安装", "Stopping gateway and swapping install");
             if (stage == "restarting") return I18n.L("重启服务", "Restarting service");
-            if (stage == "done") return I18n.L("更新完成", "Update finished");
+            if (stage == "done") return _restore ? I18n.L("还原完成", "Restore finished") : I18n.L("更新完成", "Update finished");
             return stage;
         }
     }

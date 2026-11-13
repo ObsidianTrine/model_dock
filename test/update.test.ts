@@ -28,8 +28,10 @@ import {
   trayPidsFromProcessLines,
 } from '../src/update/install.js'
 import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
+import { readRollbackSlot } from '../src/update/rollback.js'
 import { readUpdateProgress } from '../src/update/progress.js'
 import { readStagingMeta, saveStagingMeta, stagingFinalFile } from '../src/update/staging.js'
+import { updatesRollbackDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
 
@@ -831,6 +833,8 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       const appRoot = path.dirname(path.dirname(path.dirname(execPath)))
       expect(fs.readFileSync(path.join(execPath), 'utf8')).toBe('NEW-APP-BIN')
       expect(fs.readFileSync(path.join(appRoot + '.old', 'Contents', 'MacOS', 'ModelDock'), 'utf8')).toBe('OLD-APP-BIN')
+      // 还原账本登记：「还原更新」入口的数据面（版本=更新前运行版，产物指向保留的 .old）
+      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'mac-app', mainPath: appRoot + '.old' })
       // open 拉起新 .app
       expect(calls.openApp).toEqual([appRoot])
     } finally {
@@ -858,6 +862,9 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(calls.stopGateway).toBe(1)
       expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
       expect(fs.readFileSync(execPath + '.old', 'utf8')).toBe('OLD-BIN')
+      // 还原账本登记（托盘未随包 → trayPath 缺省，还原只还原主程序）
+      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: execPath + '.old' })
+      expect((await readRollbackSlot())?.trayPath).toBeUndefined()
       // 拉回用的是新二进制 + SEA 守护入口参数
       expect(calls.detached).toEqual([{ file: execPath, args: ['--sea-gateway'] }])
     } finally {
@@ -955,6 +962,10 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       // 安装器成败异步发生、更新器无人能替它收尾：进度必须停在 restarting，绝不谎报 done
       const prog = await readUpdateProgress()
       expect(prog?.stage).toBe('restarting')
+      // 还原账本 + 回滚目录备份（win-setup 的 Inno 原地替换不留旧版，弹向导前必须先备份）
+      const backupMain = path.join(updatesRollbackDir(), VERSION, 'modeldock.exe')
+      expect(fs.readFileSync(backupMain, 'utf8')).toBe('OLD-BIN')
+      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'win-setup', mainPath: backupMain })
     } finally {
       // 只清自己保留的 tmpDir，绝不对共享 %TEMP% 全量清扫（会删掉并发测试进程的在途暂存，头注 ①）
       if (keptTmpDir) await fsp.rm(keptTmpDir, { recursive: true, force: true }).catch(() => {})
@@ -1032,6 +1043,8 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(r.updated).toBe(true)
       expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
       expect(fs.readFileSync(path.join(binDir, trayName), 'utf8')).toBe('NEW-TRAY')
+      // 还原账本登记：托盘随包换新 → trayPath 指向托盘 .old（还原一并还原托盘）
+      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: execPath + '.old', trayPath: path.join(binDir, trayName + '.old') })
       // 网关在跑 → 拉回 daemon（托盘由 spawnTrayWhenGatewayReady 补拉，这里不抢）
       expect(calls.detached.some((d) => d.args.includes('--sea-gateway'))).toBe(true)
       expect(calls.startTray).toHaveLength(0)
@@ -1089,6 +1102,7 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(calls.stopGateway).toBe(0) // 校验失败绝不停机
       expect(fs.readFileSync(execPath, 'utf8')).toBe('OLD-BIN')
       expect(fs.existsSync(execPath + '.old')).toBe(false)
+      expect(await readRollbackSlot()).toBeNull() // 未换装即无还原入口登记
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
     }
