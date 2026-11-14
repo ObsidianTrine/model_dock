@@ -56,10 +56,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # JS/TS 无需 autobuild：init 走内置的 javascript-typescript 提取器，直接建库
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
       # 默认查询集（含安全类查询）；要扩大覆盖可加 queries: security-extended，先按最小配置跑
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
         with:
           category: "/language:javascript-typescript"
