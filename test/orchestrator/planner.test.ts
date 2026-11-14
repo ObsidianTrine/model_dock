@@ -28,7 +28,8 @@ describe('orchestrator planner > prompt 构建与解析', () => {
     expect(p).toContain('created_by: planner')
     expect(p).toContain('6. docs/known-issues.md 是已知问题账本')
     expect(p).toContain('一律视为已解决，禁止为其出卡')
-    expect(p).toContain('7. 围栏外只允许一句话概述')
+    expect(p).toContain('7. 背景段第一行必须是用户原始需求逐字原文')
+    expect(p).toContain('8. 围栏外只允许一句话概述')
   })
 
   it('意图文本消毒：结构字符/换行/截断', () => {
