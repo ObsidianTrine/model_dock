@@ -30,6 +30,19 @@ describe('orchestrator prompt > worker prompt 五层组装', () => {
     expect(p).toContain('status: done | stuck')
   })
 
+  it('纪律层 0.5 任务理解回执：位于复诵之后、报告 done 之前（先理解后干活）', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildWorkerPrompt(card(), c)
+    const receiptAt = p.indexOf('0.5. 任务理解回执')
+    const repeatAt = p.indexOf('复诵即承诺')
+    const doneAt = p.indexOf('1. 报告 done 之前')
+    expect(receiptAt).toBeGreaterThan(repeatAt)
+    expect(receiptAt).toBeLessThan(doneAt)
+    expect(p).toContain('主体（做的是什么东西/谁）') // 四要素分解
+    expect(p).toContain('禁止猜一个占位主体硬干到底') // 查证失败必须停船要信息
+    expect(p).toContain('不许带未申报的假设')
+  })
+
   it('缺失 playbook 给明确报错', () => {
     const c = ctx(os.tmpdir())
     const bad = { meta: { ...card().meta, workflows: ['no-such-playbook'] }, body: card().body }
@@ -70,6 +83,21 @@ describe('orchestrator prompt > 审查', () => {
     const p = buildReviewerPrompt(card(), 'diff --git a/x b/x')
     expect(p).toContain('破坏项目红线？')
     expect(p).not.toContain('8687')
+  })
+
+  it('维度 0 需求保真度：始终存在且先于维度 1；卡带背景时注入原始需求作对照基准', () => {
+    const plain = buildReviewerPrompt(card(), 'diff --git a/x b/x')
+    const fidelityAt = plain.indexOf('0. 需求保真度')
+    const goalAt = plain.indexOf('1. 改动是否完整实现了目标')
+    expect(fidelityAt).toBeGreaterThan(-1)
+    expect(fidelityAt).toBeLessThan(goalAt)
+    expect(plain).toContain('主体不符直接计阻塞项')
+    expect(plain).not.toContain('背景与原始需求') // 无背景卡不注入对照节
+
+    const withBg = loadCard(cardText({}, '测试任务目标。\n\n# 背景\n原始需求（逐字）：做一只大嘴鸟骑自行车的页面'), 'card.md')
+    const p = buildReviewerPrompt(withBg, 'diff --git a/x b/x')
+    expect(p).toContain('# 背景与原始需求（保真度对照基准）')
+    expect(p).toContain('原始需求（逐字）：做一只大嘴鸟骑自行车的页面')
   })
 
   it('verdict 三级计数解析', () => {

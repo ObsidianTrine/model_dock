@@ -21,14 +21,15 @@
 2. **写卡**：沿用编排器任务卡模板（放 `.agents/orchestrator/drafts/<id>.md`，`created_by: scanner`）；验收标准必须可机器检查；文件分区不相交才可并行。
 3. **开 worktree**：`node .agents/scripts/feature-branch.mjs start <task-id>`（命令前缀 `export PATH="$HOME/.nvm/versions/node/<v22+>/bin:$PATH"` 修 nvm PATH——shell 默认 node 可能是 v15，编排器/测试都会假死）。
 4. **派船（Agent 工具，run_in_background）**：prompt 六件套缺一不可——
-   - 卡全文（目标/背景/航次计划/验收标准）
+   - 卡全文（目标/背景/**原始需求原文逐字**/航次计划/验收标准；主体是专名而非常识实体时，卡里必须附坞长查证结论与来源——坞长自己没查证的先查证再派工，不许把「猜一个占位主体」下放给施工船）
    - worktree 绝对路径（「一切改动限定于此」）
    - 仓库红线：8687/8890 禁令、不 push、不起网关实例、三平台兼容（win32 分支断言）、注释只写 why、原子写走 atomicWrite()
    - 完成动作：worktree 内 commit 命令（含建议 commit message）+ 更新 NOTES.md + 报告格式
    - 排查方向（已掌握的证据/猜想按概率排序给船，并声明「行号可能漂移先 grep 再改」）
    - 测试命令（worktree 内跑相关文件 + 一组跨文件组合回归——vitest `isolate:false` 共享注册表，单独绿≠组合绿）
+   - **第 0 条任务理解回执**（2026-11-14 醍醐事故新增）：要求施工船报告开头给出「主体×动作×载体×验收外观」四要素分解复诵；发现卡面与需求矛盾时停船要信息，不许带未申报的假设硬干
 5. **并发上限 2 船/会话**；等待期间不轮询子代理（完成会自动通知），可并行做勘察/盘点。
-6. **独立验收（不盲信报告）**：`git diff develop...HEAD` 抽查 + 本地复跑测试；不绿用 `SendMessage` 打回。核心路径改动逐行看。
+6. **独立验收（不盲信报告）**：**先核保真度再核质量**——对照原始需求核对交付物主体/行为没有被偷换（同上事故：两层都精致、主体是错的），再 `git diff develop...HEAD` 抽查 + 本地复跑测试；不绿用 `SendMessage` 打回。核心路径改动逐行看。
 7. **收尾**：`finish <task-id>`（同样必带 nvm PATH，自动跑 testCmd 全量）→ 清理核查（worktree/分支/临时文件/进程零残留）→ memory 留档（成果+commit+教训）→ 汇报（改动/测试/commit/燃耗；**最后一行固定提示：已合本地 develop 未 push，是否 push 由用户决定**）。
 
 ## 三、硬边界
