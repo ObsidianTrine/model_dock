@@ -40,6 +40,9 @@ describe('orchestrator prompt > worker prompt 五层组装', () => {
     expect(receiptAt).toBeLessThan(doneAt)
     expect(p).toContain('主体（做的是什么东西/谁）') // 四要素分解
     expect(p).toContain('禁止猜一个占位主体硬干到底') // 查证失败必须停船要信息
+    expect(p).toContain('先调研，后动工') // 卡面资料只是起点，须独立检索核验
+    expect(p).toContain('残留盘点') // 改造类任务三分类：旧主体遗留人类特征一律清除
+    expect(p).toContain('辫子长在鸟身上就不成立') // 「可保留」授权不豁免主体一致性
     expect(p).toContain('不许带未申报的假设')
   })
 
