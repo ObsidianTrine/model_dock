@@ -26,6 +26,12 @@ import { VERSION } from '../src/version.js'
 // （停网关/停托盘/open/spawn）全部注入 mock（AGENTS 红线）；账本与回滚目录
 // 在 fakeHome 下隔离，不读写真实 ~/.modeldock。
 
+// EXDEV 无法在同卷环境确定性触发：对 fsp.rename 打 spy 注入首发 EXDEV（见下方用例）。
+// 刻意不用 vi.mock（vitest 隔离雷区）：isolate:false 下同 worker 先跑的测试文件可能已把
+// rollback.js 连同真实 fsp 缓存进共享注册表，vi.mock 的模块替换接不到 src 手里那份实例
+// （实测组合跑必红）；而 spy 改的是各 import 方共享的同一内置默认导出对象、调用时取属性，
+// src 与测试必命中同一份，对执行顺序免疫。用完在 finally mockRestore。
+
 let tmp = ''
 let h: ReturnType<typeof fakeHome>
 
@@ -155,6 +161,23 @@ describe('登记（runUpdate 记账钩子的单测面）', () => {
     expect(slot2?.trayPath).toBe(path.join(backupDir, 'ModelDockTray.exe'))
     expect(fs.readFileSync(path.join(backupDir, 'ModelDockTray.exe'), 'utf8')).toBe('OLD-TRAY')
   })
+
+  it('backupWinSetupExes：写新槽前清掉非当前版本的兄弟槽目录（换槽不留约 30MB 孤儿，当前版本槽保留）', async () => {
+    const installDir = path.join(tmp, 'Programs', 'ModelDock')
+    fs.mkdirSync(installDir, { recursive: true })
+    const execPath = path.join(installDir, 'modeldock.exe')
+    fs.writeFileSync(execPath, 'OLD-BIN')
+    const staleDir = path.join(updatesRollbackDir(), '0.8.0')
+    fs.mkdirSync(staleDir, { recursive: true })
+    fs.writeFileSync(path.join(staleDir, 'modeldock.exe'), 'STALE')
+    fs.mkdirSync(path.join(updatesRollbackDir(), VERSION), { recursive: true }) // 当前版本槽已在位
+
+    await backupWinSetupExes(execPath)
+
+    expect(fs.existsSync(staleDir)).toBe(false) // 旧版本槽已收（rollback.ts「换槽统一收」口径落地）
+    expect(fs.readFileSync(path.join(updatesRollbackDir(), VERSION, 'modeldock.exe'), 'utf8')).toBe('OLD-BIN')
+    expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'win-setup', mainPath: path.join(updatesRollbackDir(), VERSION, 'modeldock.exe') })
+  })
 })
 
 // ---------- 对换原语（真实 fs，临时目录） ----------
@@ -197,6 +220,36 @@ describe('对换原语', () => {
     expect(fs.readFileSync(target, 'utf8')).toBe('OLD')
     expect(fs.readFileSync(slot, 'utf8')).toBe('CUR') // 槽位回填当前版：可再切回
     expect(fs.existsSync(target + '.old')).toBe(true) // park 的当前版留给 cleanOldVersions 清扫
+    expect(fs.existsSync(target + '.new')).toBe(false)
+  })
+
+  it('swapWithSlot：首发 rename 抛 EXDEV → 捕获后转入 copy 降级（降级可达的接线用例，防挪出 try 复发）', async () => {
+    // win-setup 异盘边角形态：slot 在回滚目录、target 在安装目录；真实 EXDEV 无法在同卷
+    // 确定性触发，按审查要求对共享 fsp 对象的 rename 打 spy、首发抛 { code: 'EXDEV' }
+    const slotDir = path.join(tmp, 'rollback', '0.9.9')
+    const installDir = path.join(tmp, 'Programs', 'ModelDock')
+    fs.mkdirSync(slotDir, { recursive: true })
+    fs.mkdirSync(installDir, { recursive: true })
+    const slot = path.join(slotDir, 'modeldock.exe')
+    fs.writeFileSync(slot, 'OLD')
+    const target = path.join(installDir, 'modeldock.exe')
+    fs.writeFileSync(target, 'CUR')
+
+    const renameSpy = vi.spyOn(fsp, 'rename')
+    renameSpy.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('cross-volume rename'), { code: 'EXDEV' })
+    })
+    try {
+      await swapWithSlot(slot, target)
+    } finally {
+      renameSpy.mockRestore() // 用完即还：共享对象上的 spy 不允许跨用例存活
+    }
+
+    // 走到了 copy 路径的判据：park 产物 <target>.old 在（rename 路径会把当前版 park 进槽位、无 .old）
+    expect(fs.readFileSync(target, 'utf8')).toBe('OLD')
+    expect(fs.readFileSync(slot, 'utf8')).toBe('CUR')
+    expect(fs.existsSync(target + '.old')).toBe(true)
+    expect(fs.existsSync(target + '.restoring')).toBe(false)
     expect(fs.existsSync(target + '.new')).toBe(false)
   })
 
@@ -265,6 +318,51 @@ describe('runRestore 编排（副作用注入，fakeHome 隔离锁与进度）',
     expect(r.restored).toBe(true)
     expect(calls.detached).toHaveLength(0)
     expect(calls.startTray).toEqual([f.trayPath])
+  })
+
+  it('拉起失败（spawn 抛错）：账本已翻转、单独报「还原成功但启动失败」，不误报还原失败', async () => {
+    const f = await makeBareFixture({ withTray: true, wasLive: true })
+    const { deps } = mockDeps({ wasLive: true })
+    deps.spawnDetached = vi.fn(() => {
+      throw new Error('spawn boom')
+    })
+    const lines: string[] = []
+
+    const r = await runRestore(restoreOpts({ deps, execPath: f.execPath, log: (m) => lines.push(m) }))
+
+    // 还原本身成功（对换已完成），只是拉起失败：返回成功态而非抛「还原失败」
+    expect(r).toEqual({ restored: true, fromVersion: VERSION, toVersion: '0.9.9' })
+    expect(fs.readFileSync(f.execPath, 'utf8')).toBe('OLD-BIN')
+    // 账本在对换成功后已翻转（先于拉起）：否则下次还原会把已对换的槽判成陈旧槽误清
+    expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: f.execPath + '.old', trayPath: f.trayPath + '.old' })
+    expect(lines.join('\n')).toMatch(/还原成功，但启动失败|Restore succeeded, but the launch failed/)
+    expect(lines.join('\n')).toMatch(/spawn boom/)
+    expect(lines.join('\n')).not.toMatch(/还原失败|Restore failed/)
+    expect((await readUpdateProgress())?.stage).toBe('done')
+  })
+
+  it.skipIf(process.platform !== 'darwin')('mac-app：openApp 拉起失败 → 账本已翻转 + 单独报启动失败（还原本身成功）', async () => {
+    const appRoot = path.join(tmp, 'Applications', 'ModelDock.app')
+    const execPath = path.join(appRoot, 'Contents', 'MacOS', 'ModelDock')
+    fs.mkdirSync(path.dirname(execPath), { recursive: true })
+    fs.writeFileSync(execPath, 'CUR')
+    const oldBin = path.join(appRoot + '.old', 'Contents', 'MacOS', 'ModelDock')
+    fs.mkdirSync(path.dirname(oldBin), { recursive: true })
+    fs.writeFileSync(oldBin, 'OLD')
+    await saveRollbackSlot({ version: '0.9.9', shape: 'mac-app', mainPath: appRoot + '.old', recordedAt: Date.now() })
+    const { deps } = mockDeps({ wasLive: true })
+    deps.openApp = vi.fn(() => {
+      throw new Error('open boom')
+    })
+    const lines: string[] = []
+
+    const r = await runRestore(restoreOpts({ deps, execPath, log: (m) => lines.push(m) }))
+
+    expect(r).toEqual({ restored: true, fromVersion: VERSION, toVersion: '0.9.9' })
+    expect(fs.readFileSync(execPath, 'utf8')).toBe('OLD')
+    expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'mac-app', mainPath: appRoot + '.old' })
+    expect(lines.join('\n')).toMatch(/还原成功，但启动失败|Restore succeeded, but the launch failed/)
+    expect(lines.join('\n')).not.toMatch(/还原失败|Restore failed/)
   })
 
   it.skipIf(process.platform !== 'darwin')('mac-app：整包对换 + open 拉起，账本翻转 mainPath 不变', async () => {
