@@ -57,6 +57,30 @@ describe('notesToPlain：markdown → 纯文本', () => {
   })
 })
 
+describe('inlineToPlain 清洗链加固：剥离过程不可再制造新标记（CodeQL incomplete-multi-character-sanitization 复检样本）', () => {
+  it('粗体包链接 / 图片 / 行内码链接 / 下划线斜体 / HTML 标签行', () => {
+    expect(notesToPlain('**[a](b)**')).toBe('a (b)')
+    expect(notesToPlain('![x](y)')).toBe('x')
+    expect(notesToPlain('[`code`](https://x)')).toBe('code (https://x)')
+    expect(notesToPlain('__italic__')).toBe('italic')
+    expect(notesToPlain('<br>粗<strong>体</strong>与 <em>x</em> <img src="y.png">')).toBe('粗体与 x')
+  })
+
+  it('反斜杠转义是字面字符：不参与标记剥离，链尾还原后也不被重新加工', () => {
+    expect(notesToPlain('前 \\*字面\\* 后')).toBe('前 *字面* 后')
+    expect(notesToPlain('\\*\\*不是粗体\\*\\*')).toBe('**不是粗体**')
+    // 转义吃掉标记字符后，图片/链接语法随之失效，原样保留
+    expect(notesToPlain('转义图片 !\\[x\\](y) 原样')).toBe('转义图片 ![x](y) 原样')
+  })
+
+  it('行内代码内容原样保留（内部标记不再被剥离），且不泄漏入库占位符', () => {
+    expect(notesToPlain('代码 `**a**` 原样')).toBe('代码 **a** 原样')
+    const out = notesToPlain('**[a](b)** 与 ![x](y) 与 [`c`](u) 与 __i__ 与 \\*字\\*')
+    expect(out).not.toContain('\u0000')
+    expect(out).toBe('a (b) 与 x 与 c (u) 与 i 与 *字*')
+  })
+})
+
 describe('notesSummary：摘要收口', () => {
   it('首段 + 前 4 条加粗点题；total 报原文条目总数（供「另有 N 项」）', () => {
     const s = notesSummary(RELEASE_BODY)
