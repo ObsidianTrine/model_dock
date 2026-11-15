@@ -303,8 +303,8 @@ export const codexAdapter: HarnessAdapter = {
     // codex profiles 多路由（codex-rebake-profiles 卡）：为每条 ModelDock 路由写
     // [profiles.<id>]（model_provider=modeldock + model=该路由默认模型），`codex -p <id>`
     // 一键切换路由，免控制台往返。守卫：同名 profile 已被用户自设（model_provider 不是
-    // 我们或非对象）→ 跳过不覆盖；我们自己的旧条目随 planAttach 刷新（路由切换重烤时
-    // 跟随新默认模型）。detach 只收 model_provider=modeldock 的条目。
+    // 我们——含缺键/非对象）→ 跳过不覆盖；我们自己的旧条目随 planAttach 刷新（路由切换
+    // 重烤时跟随新默认模型）。detach 只收 model_provider=modeldock 的条目。
     ensurePlainObjectField(root.profiles, 'profiles', p)
     const rootProfiles = (root.profiles ??= {})
     const skippedProfiles: string[] = []
@@ -314,7 +314,10 @@ export const codexAdapter: HarnessAdapter = {
       // 必 400 的死条目——gpt-6-astra 失联教训的路由侧对账）
       if (!model || !prof.provider || !cfg.providers[prof.provider]?.models?.[model]) continue
       const existing = rootProfiles[pid]
-      if (existing && existing.model_provider !== undefined && existing.model_provider !== 'modeldock') {
+      // 跳过判定含缺键（undefined）：缺 model_provider 的同名条目必来自用户/第三方手写
+      // （自家旧条目总带该键），整条替换会吞掉用户的 model 等自定义字段；非对象条目读键
+      // 同得 undefined，一并跳过
+      if (existing && existing.model_provider !== 'modeldock') {
         skippedProfiles.push(pid)
         continue
       }

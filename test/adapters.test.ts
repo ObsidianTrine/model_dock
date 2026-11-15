@@ -547,23 +547,55 @@ describe('claude-code adapter', () => {
     }
   })
 
-  it('旧版 + --takeover-models：env 钉定被迁移进 profileUpdates（settings 不留 env，靠网关改写）', async () => {
+  it('旧版 + --takeover-models：旧 env 映射原样迁入 profileUpdates，铺槽/默认值不覆盖旧值（settings 不留 env，靠网关改写）', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT = '1'
     process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION = '2.1.214'
     try {
       const p = path.join(h.home, '.claude', 'settings.json')
       await ensureDir(path.dirname(p))
-      await atomicWrite(p, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://up.example.com', ANTHROPIC_MODEL: 'old-model' } }, null, 2) + '\n', 0o600)
-      await withConfig(baseCfg())
+      await atomicWrite(
+        p,
+        JSON.stringify(
+          {
+            env: {
+              ANTHROPIC_BASE_URL: 'https://up.example.com',
+              ANTHROPIC_MODEL: 'old-model',
+              ANTHROPIC_DEFAULT_SONNET_MODEL: 'old-sonnet',
+            },
+          },
+          null,
+          2
+        ) + '\n',
+        0o600
+      )
+      // 有目录 + profile 有默认模型：铺槽若先于迁移执行，目录值/profile 默认模型会盖掉旧映射再被迁入 profile
+      await withConfig({
+        ...emptyConfig(),
+        providers: {
+          p: {
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: { 'm-a': { display_name: 'm-a' }, 'm-b': { display_name: 'm-b' } },
+          },
+        },
+        profiles: { demo: { provider: 'p', default_model: 'demo-model' } },
+        active_profile: 'demo',
+      })
 
       const plan = await claudeCodeAdapter.planAttach(
-        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, takeoverModels: true },
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, takeoverModels: true, profile: 'demo' },
         await loadConfig()
       )
+      expect(plan.profileUpdates?.default_model).toBe('old-model') // 旧值迁移，未被 profile 默认模型/目录首模型覆盖
+      expect(plan.profileUpdates?.aliases).toEqual({ 'claude-sonnet-*': 'old-sonnet' }) // 旧映射迁移，未被铺槽值覆盖
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_MODEL).toBeUndefined()
-      expect(plan.profileUpdates?.default_model).toBe('demo-model')
+      expect(after.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined()
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined() // 铺槽未执行：目录值不泄漏进 settings
+      expect(after.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBeUndefined()
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_VERSION
@@ -805,6 +837,41 @@ describe('dsh adapter', () => {
 
       const st = await dshAdapter.status(await loadConfig(), 8687)
       expect(st.pointing).toBe('gateway')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--set-default：profile 存在但无 default_model → 跳过 agent-default-model 切换（不拿目录首模型猜占位值）', async () => {
+    const h = fakeHome()
+    try {
+      const p = path.join(h.home, '.dsh', 'settings.yaml')
+      await ensureDir(path.dirname(p))
+      await atomicWrite(p, 'llm-pi-ai:\n  providers: {}\n', 0o600)
+      await withConfig({
+        ...emptyConfig(),
+        providers: {
+          p: {
+            base_url: 'https://api.up.example.com',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'k',
+            models: { 'm-first': { display_name: 'm-first' } }, // 目录非空：旧行为会回落 entries[0] 占位
+          },
+        },
+        profiles: { demo: { provider: 'p' } }, // 有 profile、无 default_model
+        active_profile: 'demo',
+      })
+
+      const plan = await dshAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
+        await loadConfig()
+      )
+      await applyChanges('dsh', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const after = fs.readFileSync(p, 'utf8')
+      expect(after).toContain('modeldock') // provider 条目照常写入
+      expect(after).not.toContain('agent-default-model') // 默认模型切换跳过，不回落目录首模型
+      expect(plan.notes.some((n) => n.includes('跳过 agent-default-model') || n.includes('skipped the agent-default-model switch'))).toBe(true)
     } finally {
       h.restore()
     }

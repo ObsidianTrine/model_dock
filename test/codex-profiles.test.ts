@@ -108,6 +108,33 @@ describe('codex profiles 多路由', () => {
     }
   })
 
+  it('同名 profile 缺 model_provider 键（用户手写）→ 跳过不覆盖，自定义字段保留', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgMulti())
+      // 用户手写与 ModelDock 路由同名的 profile：只有 model 与附加键，无 model_provider
+      //（缺键条目必来自用户/第三方——自家旧条目总带 model_provider='modeldock'）
+      const cfgPath = path.join(h.home, '.codex', 'config.toml')
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true })
+      fs.writeFileSync(cfgPath, '[profiles.demo]\nmodel = "user-model"\nmodel_reasoning_effort = "high"\n')
+      const plan = await codexAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
+        await loadConfig()
+      )
+      await applyChanges('codex', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const root = readRoot(h.home)
+      expect(root.profiles.demo.model).toBe('user-model') // 用户字段原样保留，未被整条替换
+      expect(root.profiles.demo.model_reasoning_effort).toBe('high')
+      expect(root.profiles.demo.model_provider).toBeUndefined() // 未被我们写入
+      expect(plan.notes.some((n) => n.includes('demo'))).toBe(true) // note 点名跳过
+      expect(plan.notes.some((n) => n.includes('用户自设') || n.includes('user-defined'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
   it('detach 收回自家条目（用户自设保留；收空整键删除）', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'

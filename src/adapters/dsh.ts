@@ -387,7 +387,9 @@ export const dshAdapter: HarnessAdapter = {
     }
     if (entries.length > 0) providerEntry.models = entries
 
-    const defaultModel = profile?.default_model ?? (entries[0]?.id as string | undefined)
+    // 只认 profile.default_model：无值时跳过 agent-default-model 切换，不拿目录首模型猜占位值
+    // （契约见 docs/attach-env-vars.md dsh 节「无 default_model 时跳过、不猜占位值」）
+    const defaultModel = profile?.default_model
     if (d && d.protocol === 'responses') {
       notes.push(directResponsesNote('dsh'))
     }

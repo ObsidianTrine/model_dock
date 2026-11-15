@@ -376,35 +376,40 @@ export const claudeCodeAdapter: HarnessAdapter = {
         // （Opus/Sonnet/Haiku/Fable）只是槽位外壳，用户按名字选用即可。升级 claude 后重接时
         // 清掉此前烙的 lineup（旧版不认的死键）
         if (isOurModelPicker(root.modelPicker)) delete root.modelPicker
-        const suffixed = (target: string): string => {
-          const ctx = resolveModelMeta(target, pickerProvider?.models?.[target], { baseUrl: pickerProvider?.base_url })?.context_window
-          return ctx !== undefined && ctx >= ONE_M_TOKEN ? `${target}[1m]` : target
-        }
-        const catalog = Object.entries(pickerProvider?.models ?? {})
-        // 槽位不足按末位复用（1 个模型四层同值，行名相同无歧义）；超过 4 个时第 5 个起旧版
-        // /model 无行可选（设置里手填 raw ID 仍可用，note 不展开）
-        const slot = (i: number): string | undefined => catalog[Math.min(i, catalog.length - 1)]?.[0]
-        const tierModels = [slot(0), slot(1), slot(2), slot(3)]
-        TIER_ENV_KEYS.forEach(([envKey], i) => {
-          const model = tierModels[i]
-          if (model === undefined) return // 目录为空：不铺槽
-          env[envKey] = suffixed(model)
-          // 行标签用显示名（拉取/编辑时填的友好名），无显示名退回去后缀 ID——行名即用户选用的依据
-          env[`${envKey}_NAME`] = catalog.find(([id]) => id === model)?.[1].display_name || stripContextSuffix(model)
-        })
-        const legacyModel = pickerProf?.default_model ?? catalog[0]?.[0]
-        if (legacyModel !== undefined) env.ANTHROPIC_MODEL = suffixed(legacyModel)
-        notes.push(
-          t(
-            'claude 版本 {ver} 低于 {min}（或未能探测）：不支持 /model 全量选择器（modelPicker），已改用模型环境变量——服务模型按内置档位列出，/model 各行即真实模型（按名字选用即可，无需区分 Opus/Sonnet/Haiku），Default 行为 {model}；升级 claude 到 {min}+ 后重新接入即切换为选择器模式',
-            'claude version {ver} is below {min} (or could not be probed): the curated /model picker (modelPicker) is not supported; model env vars are used instead — the service models fill the built-in tier rows, each row shows its real model name (pick by name; the Opus/Sonnet/Haiku labels are just slots), Default row = {model}; upgrade claude to {min}+ and re-attach to switch to the curated picker',
-            {
-              ver: cliVer ?? t('未知', 'unknown'),
-              min: MODEL_PICKER_MIN_VERSION,
-              model: legacyModel !== undefined ? String(env.ANTHROPIC_MODEL) : t('(未设置)', '(unset)'),
-            }
+        // takeoverModels 时旧 env 映射原样保留给末尾迁移块迁入 profile（与上方旧上游清理同款
+        // if (!opts.takeoverModels) 守卫）：先铺槽/写默认值会把新值盖到旧值上，迁移收进 profile
+        // 的就成了铺槽值、用户旧映射丢失。整段跳过（无旧映射可迁时迁移块静默，与新版路径同口径）
+        if (!opts.takeoverModels) {
+          const suffixed = (target: string): string => {
+            const ctx = resolveModelMeta(target, pickerProvider?.models?.[target], { baseUrl: pickerProvider?.base_url })?.context_window
+            return ctx !== undefined && ctx >= ONE_M_TOKEN ? `${target}[1m]` : target
+          }
+          const catalog = Object.entries(pickerProvider?.models ?? {})
+          // 槽位不足按末位复用（1 个模型四层同值，行名相同无歧义）；超过 4 个时第 5 个起旧版
+          // /model 无行可选（设置里手填 raw ID 仍可用，note 不展开）
+          const slot = (i: number): string | undefined => catalog[Math.min(i, catalog.length - 1)]?.[0]
+          const tierModels = [slot(0), slot(1), slot(2), slot(3)]
+          TIER_ENV_KEYS.forEach(([envKey], i) => {
+            const model = tierModels[i]
+            if (model === undefined) return // 目录为空：不铺槽
+            env[envKey] = suffixed(model)
+            // 行标签用显示名（拉取/编辑时填的友好名），无显示名退回去后缀 ID——行名即用户选用的依据
+            env[`${envKey}_NAME`] = catalog.find(([id]) => id === model)?.[1].display_name || stripContextSuffix(model)
+          })
+          const legacyModel = pickerProf?.default_model ?? catalog[0]?.[0]
+          if (legacyModel !== undefined) env.ANTHROPIC_MODEL = suffixed(legacyModel)
+          notes.push(
+            t(
+              'claude 版本 {ver} 低于 {min}（或未能探测）：不支持 /model 全量选择器（modelPicker），已改用模型环境变量——服务模型按内置档位列出，/model 各行即真实模型（按名字选用即可，无需区分 Opus/Sonnet/Haiku），Default 行为 {model}；升级 claude 到 {min}+ 后重新接入即切换为选择器模式',
+              'claude version {ver} is below {min} (or could not be probed): the curated /model picker (modelPicker) is not supported; model env vars are used instead — the service models fill the built-in tier rows, each row shows its real model name (pick by name; the Opus/Sonnet/Haiku labels are just slots), Default row = {model}; upgrade claude to {min}+ and re-attach to switch to the curated picker',
+              {
+                ver: cliVer ?? t('未知', 'unknown'),
+                min: MODEL_PICKER_MIN_VERSION,
+                model: legacyModel !== undefined ? String(env.ANTHROPIC_MODEL) : t('(未设置)', '(unset)'),
+              }
+            )
           )
-        )
+        }
       }
     }
 
