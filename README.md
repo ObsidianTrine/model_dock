@@ -45,7 +45,7 @@ sequenceDiagram
     G->>U: 转发（注入真实 key）
     U-->>G: 响应
     G-->>C: 原样返回
-    Note over G,U: 主服务故障 / 限流 / 额度用完 → 自动兜底切换其他已启用服务
+    Note over G,U: 主服务故障 / 限流 / 额度用完<br/>→ 自动兜底切换其他已启用服务
 ```
 
 ## 核心能力
@@ -53,7 +53,7 @@ sequenceDiagram
 | 领域 | 你能得到什么 |
 |------|--------------|
 | **一处切换** | `modeldock profile use <name>` 或控制台点一下，所有已接入客户端即时生效，配置文件零改动 |
-| **自动兜底与定时路由** | 主服务连不上 / 限流 / 额度用完，自动切备用；多把 API Key 自动冷却轮换；按时段自动换服务（含法定节假日）；单个客户端可钉定专属服务或「直连」；同一服务内可给模型配同价位备用模型，主模型额度耗尽自动改发（模型级容灾） |
+| **自动兜底与定时路由** | 主服务连不上 / 限流 / 额度用完，自动切备用；多把 API Key 自动冷却轮换；按时段自动换服务（含法定节假日）；单个客户端可钉定专属服务或「直连」 |
 | **密钥安全** | 上游 key 只存本机安全后端（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环时回退机器绑定加密）；客户端配置里只有本地 token，明文存量自动迁移 |
 | **非侵入可回退** | 未 `attach` 前对你现有配置只读不写；写入客户端配置前自动快照，`detach` / `restore` 一键还原 |
 | **常驻可靠** | `gateway install` 开机自启 + 崩溃自动拉起；macOS 菜单栏 / Windows 托盘常驻，关掉控制台窗口网关照跑，「轻量模式」一键只留托盘 |
@@ -103,7 +103,7 @@ modeldock attach claude-code        # ④ 接管 Claude Code（先展示 diff，
 
 > Web 控制台：网关运行时执行 `modeldock ui`（或浏览器开 `http://127.0.0.1:8687`）——上面这些操作都有图形界面，顶栏随时切换中英文。
 
-### 从源码构建（需要 Node.js ≥22）
+### 从源码构建（可选，需 Node.js ≥22）
 
 ```bash
 git clone https://github.com/ObsidianTrine/model_dock.git
@@ -123,7 +123,7 @@ modeldock gateway install       # 开机自启（常驻）：登录自动拉起�
 modeldock gateway stop          # 停止网关：只停网关进程，托盘图标保留（装过自启，下次登录仍自动拉起）
 modeldock gateway status        # 网关运行与自启服务状态
 modeldock gateway rotate-token  # 轮换管理令牌，旧登录全部失效
-modeldock update                # 一键升级：下载 → 校验 → 替换 → 自动重启网关（--check 只看不安）
+modeldock update                # 一键升级：下载 → 校验 → 替换 → 自动重启网关（--check 只看不装）
 modeldock model refresh <id>    # 自动拉取上游可用模型列表
 modeldock config export         # 换电脑搬家：导出口令加密配置包（服务/路由/预设/定时，连同 Key）
 modeldock config import <file>  # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
@@ -138,14 +138,7 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 
 ### 模型级容灾（同服务商备用模型）
 
-**主力模型额度耗尽，改发同服务商的备用模型**：主模型额度用完时，网关自动改发同服务里你指定的备用模型重试，把额度耗尽兜在同服务内解决。边界与保护：仅额度耗尽类错误（HTTP 402，或 429 且错误体带额度特征）且该服务的备用服务链都走完才触发；备用模型与主模型单价差须双向 ≤5%（CLI / 控制台写入口校验价格闸门，config.toml 手编只做形状校验）；**未映射的模型永不触发**——审查、规划等质量敏感角色的模型不会被静默替换。配置示例（改完热加载即时生效）：
-
-```toml
-[providers.acme]
-model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务备用模型
-```
-
-命令行或控制台配置：`modeldock model fallback <服务id> <主力模型> <备用模型>`（`--list` 查看现有映射，`--rm <主力模型>` 移除）；控制台在「编辑服务」弹层的「模型容灾」块操作。模型 ID 以服务目录为准：`modeldock model list <服务id>` 查看；字段说明见[配置参考](docs/config-reference.md)。
+**主力模型额度耗尽，自动改发同服务商的备用模型**：仅额度耗尽类错误、且该服务的备用服务链都走完才触发；**未映射的模型永不触发**——审查、规划等质量敏感角色的模型不会被静默替换。配置入口：`modeldock model fallback <服务id> <主力模型> <备用模型>` 或控制台「编辑服务」弹层；触发边界、价格闸门与 config.toml 写法见[使用指南](docs/usage.md#模型级容灾同服务商备用模型)。
 
 ## 文档
 

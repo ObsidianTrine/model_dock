@@ -208,6 +208,21 @@ describe('云端控制面 API v1', () => {
     }
   })
 
+  // CodeQL ReDoS 改造（Bearer 提取去正则）后的语义回归：'Bearer' 后 ≥1 个任意空白符均可，
+  // 前缀后无空白符 / 大小写不符 / 裸前缀 → 回退 cookie（无 cookie 恒 401）
+  it('鉴权：Bearer 提取边界（多空白/制表符放行；无空白、小写、裸前缀 401）', async () => {
+    const s = await startServer()
+    try {
+      expect((await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { authorization: `Bearer  ${s.consoleToken}` } })).status).toBe(200)
+      expect((await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { authorization: `Bearer\t${s.consoleToken}` } })).status).toBe(200)
+      expect((await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { authorization: `BearerX ${s.consoleToken}` } })).status).toBe(401)
+      expect((await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { authorization: `bearer ${s.consoleToken}` } })).status).toBe(401)
+      expect((await fetch(`http://127.0.0.1:${s.port}/v1/devices`, { headers: { authorization: 'Bearer' } })).status).toBe(401)
+    } finally {
+      await s.close()
+    }
+  })
+
   it('角色守卫：device/console 互访各端点均拒 403（路由表化回归）', async () => {
     const s = await startServer()
     try {

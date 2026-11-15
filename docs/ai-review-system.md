@@ -39,7 +39,7 @@
 
 - 独立 job（独立会话，不与一般审查混注意力）：只查注入、密钥泄漏、鉴权越权、路径穿越、供应链与安装器五类。
 - **verdict 机制**：顶层评论首行固定 `SECURITY-VERDICT: PASS` 或 `SECURITY-VERDICT: FAIL（N 项）`；job 内确定性步骤 `gh pr view` 抓最后一行 verdict——FAIL 或**没有 verdict（bot 静默失败）都判失败**（保守侧）。
-- **required check（已启用，2026-10-29 经 `gh api` 配置）**：main 与 develop 两个分支的保护均已设置——Required status checks = 三 OS `test` 矩阵 + `test-workflow` + `risk-tier` + `security-review`；同时开启 **required conversation resolution**（PR 上的审查线程必须 resolve 才能合并，对应文章「每条发现必须被回答」）。语义注意：
+- **required check（已启用，2026-10-29 经 `gh api` 配置）**：main 与 develop 两个分支的保护均已设置——Required status checks = 三 OS `test` 矩阵 + `test-workflow` + `risk-tier` + `security-review`（2026-11-15 起追加 `CodeQL (javascript-typescript)`，见下节）；同时开启 **required conversation resolution**（PR 上的审查线程必须 resolve 才能合并，对应文章「每条发现必须被回答」）。语义注意：
   - `strict=false`（不强制分支最新）、`enforce_admins=false`（owner 保留人工覆盖权）、未设 PR 审查要求（单人流本地合并，分支保护只管 PR 合并侧，不拦直推）。
   - **三件套 secrets 未配置时 `security-review` job 整体 skip，skip 视为通过**——门禁随 secrets 配置自动生效，不会卡 PR。
   - 改动检查名单时同步更新本节与 `.github/workflows/*.yml` 的 job `name:`（required check 按名字精确匹配）。
@@ -51,13 +51,13 @@
 - **与 security-review 的关系**：互补而非替代。CodeQL 覆盖已知漏洞模式（注入 / 路径穿越 / 原型污染 / SSRF 等，language `javascript-typescript` 走默认查询集）；security-review 覆盖需要项目语义的面（鉴权中间件遗漏、密钥落日志、安装器劫持面），并保留「未解决发现不能合并」的阻塞语义。
 - **触发**：push main/develop、PR 到 main/develop、每周一 cron（02:23 UTC，与 test.yml 每日 18:00 UTC 巡检错开——schedule 兜底捕捉查询包升级带来的新告警）、workflow_dispatch 手动补跑。
 - **结果去向**：SARIF 上报 code scanning alerts（Security → Code scanning）；只读分析，不评论、不修码、不开 PR——与 claude-review / ci-autofix / dependabot-fix 无回环面。
-- **required check（待登记）**：check 名 `CodeQL (javascript-typescript)` 计划注册进分支保护 required check 名单；**注册是 push 之后在仓库 Settings 手动完成的收尾步骤**（按 check 名精确匹配，操作同「安全审查门禁」节 2026-10-29 那次）。登记前照常跑、只是不阻塞合并。
+- **required check（已登记，2026-11-15 经 `gh api` 配置）**：check 名 `CodeQL (javascript-typescript)` 已注册进 main 与 develop 分支保护的 required check 名单（按 job `name:` 精确匹配）——CodeQL 红灯即阻塞 PR 合并；直推不经 PR 仍不受拦（与 security-review 同口径，见上节语义注意）。
 
 ## 人工批准与分支保护（第 5 层的刚性）
 
 文章的「低 0 / 中 1 / 高 2 个批准」由 GitHub 批准机制承担；本仓库是单维护者（owner 无法 approve 自己的 PR），刚性改由两处承担：
 
-1. **required checks（已于 2026-10-29 启用，见上节）**：`test`（三 OS）+ `security-review` 等六项不绿不能合并——这是机器门禁。
+1. **required checks（2026-10-29 启用，2026-11-15 增至七项，见上节）**：`test`（三 OS）+ `security-review` + `CodeQL (javascript-typescript)` 等七项不绿不能合并——这是机器门禁。
 2. **人工纪律**：中/高风险 PR，owner 合并前实际读过 diff 与全部发现（PR 模板的「风险等级」「如何回滚」「测试方式」三栏是最低自查面）；高风险改动建议再走一遍 .agents/workflows/code-review.md 的 fresh-context 独立审查。
 
 启用「Require review from Code Owners」仅当出现第二位维护者时再做；`.github/CODEOWNERS` 已先行登记敏感路径归属。

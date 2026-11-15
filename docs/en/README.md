@@ -45,7 +45,7 @@ sequenceDiagram
     G->>U: forward (inject real key)
     U-->>G: response
     G-->>C: returned as-is
-    Note over G,U: primary provider down / rate-limited / out of quota → automatic failover to other enabled providers
+    Note over G,U: primary provider down / rate-limited / out of quota<br/>→ fail over to other enabled providers
 ```
 
 ## Core capabilities
@@ -53,7 +53,7 @@ sequenceDiagram
 | Area | What you get |
 |------|--------------|
 | **Switch in one place** | `modeldock profile use <name>` or one click in the console — every attached client switches instantly, zero config changes |
-| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over; multiple API keys rotate on cooldown; switch services by time of day (statutory holidays included); pin a per-client service or go "direct"; per-model backup models within one provider — when the primary model runs out of quota, retry on the backup (model-level failover) |
+| **Failover & scheduled routing** | Primary unreachable / rate-limited / out of quota → traffic auto-fails over; multiple API keys rotate on cooldown; switch services by time of day (statutory holidays included); pin a per-client service or go "direct" |
 | **Key security** | Upstream keys live only in the local secure backend (macOS Keychain / Windows DPAPI / Linux Secret Service, with machine-bound-encryption fallback when no keyring exists); client configs contain only a local token; existing plaintext keys migrate automatically |
 | **Non-invasive & revertible** | Before `attach`, your existing configs are read-only; every write to a client config is auto-snapshotted, `detach` / `restore` revert in one command |
 | **Always-on** | `gateway install` registers auto-start with crash restart; a permanent macOS menu bar / Windows tray entry keeps the gateway running when the console window closes; "Lightweight mode" collapses everything to the tray |
@@ -103,7 +103,7 @@ After attaching, run `modeldock test` once for an end-to-end connectivity check 
 
 > Web console: with the gateway running, run `modeldock ui` (or open `http://127.0.0.1:8687` in a browser) — everything above has a GUI, and the top bar toggles Chinese / English anytime.
 
-### Build from source (Node.js ≥22)
+### Build from source (optional, Node.js ≥22)
 
 ```bash
 git clone https://github.com/ObsidianTrine/model_dock.git
@@ -138,14 +138,7 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 
 ### Model-level failover (backup model within the same provider)
 
-**When the primary model runs out of quota, retry on a backup model of the same provider**: the gateway retries on the backup model you mapped inside the same service, keeping quota exhaustion resolved within the provider. Boundaries and protections: only quota-exhaustion errors trigger it (HTTP 402, or a 429 with a quota-flavored body) and only after the service's backup chain is exhausted; the backup model's unit prices must stay within ±5% of the primary's on both input and output (the CLI/console write paths enforce the price gate; hand-edited config.toml only gets a shape check); **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Config example (changes hot-apply immediately):
-
-```toml
-[providers.acme]
-model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # primary model → backup model of the same service
-```
-
-Configure from the CLI or console: `modeldock model fallback <service-id> <primary> <backup>` (`--list` shows existing mappings, `--rm <primary>` removes one); in the console use the "Model failover" block of the edit-service dialog. Model IDs come from the service catalog: run `modeldock model list <service-id>` to inspect; see the [config reference](config-reference.md) for the field details.
+**When the primary model runs out of quota, retry on a backup model of the same provider**: triggers only on quota-exhaustion errors and only after the service's backup chain is exhausted; **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Configure with `modeldock model fallback <service-id> <primary> <backup>` or the "Model failover" block of the edit-service dialog; trigger boundaries, the price gate and config.toml syntax: [usage guide](usage.md#model-level-failover-backup-model-within-the-same-provider).
 
 ## Documentation
 

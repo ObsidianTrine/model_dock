@@ -171,6 +171,19 @@ describe('服务文件内容生成与登记命令回读', () => {
     expect(readRecordedArgv(ini)).toEqual(['/usr/local/bin/node', '/opt/My App/cli.js', '--sea-gateway'])
   })
 
+  it('systemd unit：ExecStart 路径含引号 / 换行 / 回车 / 空字节显式拒绝（无法安全写入 unit 文件，报错附码点可操作）', () => {
+    for (const bad of ['/home/a"b/cli.js', '/home/a\nb/cli.js', '/home/a\rb/cli.js', '/home/a\u0000b/cli.js']) {
+      expect(() => systemdUnitIni(['/usr/local/bin/node', bad, '--sea-gateway'], '/w', '/o.log', '/e.log')).toThrow(/systemd unit/)
+    }
+    expect(() => systemdUnitIni(['/home/a"b/cli.js'], '/w', '/o.log', '/e.log')).toThrow(/U\+0022/)
+    expect(() => systemdUnitIni(['/home/a\nb/cli.js'], '/w', '/o.log', '/e.log')).toThrow(/U\+000A/)
+  })
+
+  it('systemd unit：ExecStart 正常路径引号包裹，含 %/$ 路径翻倍转义', () => {
+    const ini = systemdUnitIni(['/x y/z%a$b.js', '--sea-gateway'], '/w', '/o.log', '/e.log')
+    expect(ini).toContain('ExecStart="/x y/z%%a$$b.js" "--sea-gateway"')
+  })
+
   it('Windows Run 键：argv 全 token 带引号拼接，与 parseRunCommandLine 无损往返', () => {
     const argv = ['/opt/My App/modeldock.exe', '--sea-gateway']
     const data = windowsRunCommandLine([...argv, AUTOSTART_LAUNCH_FLAG])

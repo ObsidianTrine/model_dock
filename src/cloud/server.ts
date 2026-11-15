@@ -87,6 +87,18 @@ function cookieToken(req: http.IncomingMessage): string | null {
   return null
 }
 
+/** Bearer token 提取（无正则，规避 CodeQL js/polynomial-redos）：'Bearer'（区分大小写）后须紧跟
+ *  ≥1 个空白符，token 为去掉前导空白后的其余部分；无 Authorization 头、前缀不符或无空白符 → null
+ *  （回退 cookie，与原 /^Bearer\s+(.+)$/ 不匹配时一致）。trimStart 剥离的字符集与正则 \s 完全相同
+ *  （Unicode WhiteSpace + LineTerminator）。已知微差：'Bearer' 后为纯空白时原式回溯取到空白 token
+ *  （走 401 invalid），此处返回空串（走 401 missing，同样恒拒绝且不回退 cookie），鉴权结果不变。 */
+function bearerToken(header: string | undefined): string | null {
+  if (!header?.startsWith('Bearer')) return null
+  const rest = header.slice('Bearer'.length)
+  const stripped = rest.trimStart()
+  return stripped.length === rest.length ? null : stripped
+}
+
 /** 端点声明的所需角色：`public` 免鉴权，`device`/`console` 须经鉴权并按角色守卫 */
 type EndpointRole = 'public' | 'device' | 'console'
 
@@ -359,8 +371,7 @@ export function createCloudServer(store: CloudStore, opts: CloudServerOptions): 
     }
 
     // 鉴权：Bearer 头优先，其次控制台 cookie
-    const bearer = /^Bearer\s+(.+)$/.exec(req.headers.authorization ?? '')
-    const token = bearer?.[1] ?? cookieToken(req)
+    const token = bearerToken(req.headers.authorization) ?? cookieToken(req)
     if (!token) {
       fail(res, 401, 'unauthorized', t('缺少凭据（Bearer token 或控制台登录）', 'Missing credentials (Bearer token or console login)'))
       return
