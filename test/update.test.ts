@@ -339,6 +339,10 @@ describe('版本比较与资产选择', () => {
 
   it('appRootFromExecPath：从 execPath 上溯 .app 根', () => {
     expect(appRootFromExecPath('/Applications/ModelDock.app/Contents/MacOS/ModelDock')).toBe('/Applications/ModelDock.app')
+    // Windows 反斜杠路径按原分隔符重组（登记还原账本 mainPath 的口径一致性）
+    expect(appRootFromExecPath('C:\\Users\\u\\Applications\\ModelDock.app\\Contents\\MacOS\\ModelDock')).toBe(
+      'C:\\Users\\u\\Applications\\ModelDock.app'
+    )
     expect(appRootFromExecPath('/usr/local/bin/modeldock')).toBeNull()
   })
 
@@ -862,8 +866,12 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(calls.stopGateway).toBe(1)
       expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
       expect(fs.readFileSync(execPath + '.old', 'utf8')).toBe('OLD-BIN')
-      // 还原账本登记（托盘未随包 → trayPath 缺省，还原只还原主程序）
-      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: execPath + '.old' })
+      // 还原账本登记（托盘未随包 → trayPath 缺省，还原只还原主程序）；win32 无卸载器探测为 win-bare
+      expect(await readRollbackSlot()).toMatchObject({
+        version: VERSION,
+        shape: process.platform === 'win32' ? 'win-bare' : 'bare',
+        mainPath: execPath + '.old',
+      })
       expect((await readRollbackSlot())?.trayPath).toBeUndefined()
       // 拉回用的是新二进制 + SEA 守护入口参数
       expect(calls.detached).toEqual([{ file: execPath, args: ['--sea-gateway'] }])
@@ -1043,8 +1051,13 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
       expect(r.updated).toBe(true)
       expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
       expect(fs.readFileSync(path.join(binDir, trayName), 'utf8')).toBe('NEW-TRAY')
-      // 还原账本登记：托盘随包换新 → trayPath 指向托盘 .old（还原一并还原托盘）
-      expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: execPath + '.old', trayPath: path.join(binDir, trayName + '.old') })
+      // 还原账本登记：托盘随包换新 → trayPath 指向托盘 .old（还原一并还原托盘）；win32 探测为 win-bare
+      expect(await readRollbackSlot()).toMatchObject({
+        version: VERSION,
+        shape: process.platform === 'win32' ? 'win-bare' : 'bare',
+        mainPath: execPath + '.old',
+        trayPath: path.join(binDir, trayName + '.old'),
+      })
       // 网关在跑 → 拉回 daemon（托盘由 spawnTrayWhenGatewayReady 补拉，这里不抢）
       expect(calls.detached.some((d) => d.args.includes('--sea-gateway'))).toBe(true)
       expect(calls.startTray).toHaveLength(0)
