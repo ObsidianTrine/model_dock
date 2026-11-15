@@ -338,6 +338,13 @@ Variable templates: `{token}` `{port}` `{base_url}` `{base_url_openai}`. Then `m
 | gateway down, all harnesses broken | with auto-start installed (`gateway install`) it comes back automatically; otherwise `modeldock gateway start --daemon`; emergency `modeldock detach <harness>` returns to direct mode immediately |
 | ZCode not using the gateway | attach only registered the provider — you must also select it once in ZCode settings |
 | config broken | `modeldock config edit` or `modeldock restore` |
+| all clients fail to connect after an upgrade | the gateway is probably not running: check `modeldock gateway status` and start it with `modeldock gateway start --daemon`; if it still fails, check whether antivirus software quarantined the modeldock executable (restore or whitelist it, then retry) |
+| changed a key / switched services, requests still behave the old way | changes hot-reload immediately; keys changed via the system keyring catch up within about a minute; to force it, restart the gateway (`gateway stop` → `gateway start --daemon`) |
+| 404 after pinning a service | usually the service's base URL is missing the matching protocol endpoint (e.g. only an OpenAI address was filled in, leaving Anthropic-style requests nowhere to go): complete the base URLs under "Edit service" and retry — `modeldock doctor` helps check |
+| auto-start stopped working (after a Node / nvm upgrade) | `modeldock gateway status` names the stale start path; re-run `modeldock gateway install` |
+| client behavior unchanged after attach | most clients only re-read their config on restart (see the last column of the §4 table); ZCode additionally needs ModelDock selected once in its settings |
+
+Still stuck after the above? Ask in [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) — including the output of `modeldock status`, `modeldock doctor`, and the request log (`modeldock gateway log`, metadata only, never conversation content) makes diagnosis much faster.
 
 ## 10. Implementation status (2026-11-04 baseline; refresh with the version number at release)
 

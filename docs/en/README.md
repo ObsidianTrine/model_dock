@@ -170,7 +170,7 @@ The main gateway listens on `127.0.0.1` only and is not remotely accessible (by 
 
 The repo ships with a built-in **Dockmaster** autonomous orchestration deck: contributors can hand off a task with one line (`/dockmaster have an agent do X`) — the dockmaster breaks it down, runs it headlessly, enforces test gates and merges the result. See the [Dockmaster manual](../../.agents/workflows/orchestrator.md).
 
-Issues are welcome for bug reports and feature requests. Before submitting a PR, please read the [contributing guide](CONTRIBUTING.md) and [AGENTS.md](../../AGENTS.md) (engineering conventions and hard constraints, maintained in Chinese), and make sure `npm test` passes.
+Issues are welcome for bug reports and feature requests; for usage questions, ask in [Discussions](https://github.com/ObsidianTrine/model_dock/discussions). Before submitting a PR, please read the [contributing guide](CONTRIBUTING.md) and [AGENTS.md](../../AGENTS.md) (engineering conventions and hard constraints, maintained in Chinese), and make sure `npm test` passes.
 
 ## Maintainer
 

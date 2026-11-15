@@ -170,7 +170,7 @@ model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务�
 
 仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)。
 
-欢迎提 [Issue](https://github.com/ObsidianTrine/model_dock/issues) 反馈问题与建议。提交 PR 前请先读[贡献指南](CONTRIBUTING.md)与 [AGENTS.md](AGENTS.md)（工程约定与硬性约束），并确保 `npm test` 全绿。
+欢迎提 [Issue](https://github.com/ObsidianTrine/model_dock/issues) 反馈问题与建议；使用问题可到 [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) 提问交流。提交 PR 前请先读[贡献指南](CONTRIBUTING.md)与 [AGENTS.md](AGENTS.md)（工程约定与硬性约束），并确保 `npm test` 全绿。
 
 ## 维护者
 

@@ -356,12 +356,19 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 | 网关挂了 harness 全断 | 已装自启服务（`gateway install`）会自动拉起；否则 `modeldock gateway start --daemon`，应急 `modeldock detach <harness>` 立即回到直连 |
 | ZCode 没走网关 | attach 只注册了 provider，还需在 ZCode 设置里选择它（一次性） |
 | 配置改坏了 | `modeldock config edit` 或 `modeldock restore` |
+| 升级后客户端全部连不上 | 网关多半没起来：`modeldock gateway status` 确认，未运行就 `modeldock gateway start --daemon`；仍失败排查杀毒软件是否隔离了 modeldock 程序（恢复或加白名单后重试） |
+| 改了 key / 切了服务，请求还是旧行为 | 改动热加载即时生效；经系统钥匙环改的 key 最长约 1 分钟自动跟上；急用可重启网关（`gateway stop` → `gateway start --daemon`） |
+| 钉定某服务后客户端报 404 | 多半是该服务接口地址缺对应协议端点（如只填了 OpenAI 地址，Anthropic 类请求无落点）：「编辑服务」补全接口地址后重试，`modeldock doctor` 可辅助检查 |
+| 开机自启失效（升级 Node / nvm 换版本后） | `modeldock gateway status` 会点名失效的启动路径，重跑 `modeldock gateway install` 即修复 |
+| 接入后客户端行为没变 | 多数客户端要重启才重读配置（各客户端见 §4 表末列）；ZCode 还需在其设置里选一次 ModelDock |
 
 `modeldock doctor` 的体检里含 **Agent 配置安检**（只读、不自动改动，是否调整由你决定）：
 
 - MCP 启动命令是「下载内容管道进 shell/解释器」（`curl … | bash`、`irm … | iex`、`bash -c "$(curl …)"`）→ **警告点名**——这类命令每次启动都在执行远端内容，源头被篡改就会直接进本机；建议固定版本安装。
 - MCP 环境变量带**明文凭据**、客户端以**独立直连**运行（上游 key 明文写在其配置文件）→ 提示泄漏面：只点名服务器与变量名，**值绝不显示**；泄露或换机时先 `modeldock provider set-key` 轮换。
 - 同名 MCP 服务器在多处重复配置 → 提醒换 key / 改命令时容易漏一处（对照 `modeldock mcp list`）。
+
+以上照做仍无解？欢迎到 [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) 提问交流——附上 `modeldock status`、`modeldock doctor` 与请求日志（`modeldock gateway log`，只记元数据不含对话内容）的输出，定位更快。
 
 ## 10. 当前实现状态（2026-11-04 基线；发版时随版本号刷新）
 
