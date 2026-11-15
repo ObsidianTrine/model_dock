@@ -97,11 +97,8 @@ if (!['openai', 'anthropic'].includes(protocol)) die(`--protocol 只支持 opena
 if (apiKey.length < 8) die('--key 看起来不像有效的 API key（长度 < 8）——请粘贴完整 key');
 if (!(RETRY_WAIT_MS >= 0 && RETRY_WAIT_MS <= 10 * 60_000)) die(`VERIFY_QUOTA_RETRY_WAIT_MS 非法：${process.env.VERIFY_QUOTA_RETRY_WAIT_MS}（0 ~ 600000）`);
 
-// key 掩码：任何输出只允许出现掩码形态——掩码串不携带 key 的任何字符片段（保留前缀片段
-// 会被静态安全扫描判为明文日志，也无必要），仅回显长度便于核对粘贴是否完整
-function maskKey(key) {
-  return `***（已掩码，长度 ${key.length} 字符）`;
-}
+// key 不回显任何派生信息（长度也算派生）：日志只允许常量占位串，静态扫描（clear-text-logging）
+// 连掩码串都会命中的根因是 taint 沿字符串派生传播——唯一干净解是日志与 key 完全无关
 const KEY_LITERAL = apiKey;
 
 // 全局兜底：任何意外报错路径都不得把 key 泄进 stderr（全文清洗后输出）
@@ -273,7 +270,7 @@ console.log('ModelDock 上游配额口径诊断（模型级容灾增益验证）
 console.log(`base_url: ${baseUrl}`);
 console.log(`endpoint: ${endpoint.origin}${endpoint.pathname}`);
 console.log(`protocol: ${protocol}`);
-console.log(`key: ${maskKey(KEY_LITERAL)}`);
+console.log('key: ***（已隐去）');
 console.log(`models: ${models.join(', ')}`);
 console.log('提示：本脚本向真实上游发请求，消耗真实额度（每模型 1 条 max_tokens=1 最小请求，几毛钱级）。');
 console.log('');
