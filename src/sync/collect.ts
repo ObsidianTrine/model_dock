@@ -13,7 +13,7 @@ import { applyAssets, collectAssetFiles, existingAssetPaths } from './assets.js'
 
 /** 收集/应用摘要：providers/profiles 为 id 清单；envKeyRefs=走环境变量引用不随包的服务；
  *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数；
- *  assetsFiles=随包的文本资产数；assetsSkipped=导出时跳过的二进制/超限文件；assetsWritten=导入时实际写入的资产数 */
+ *  assetsFiles=随包的文本资产数；assetsSkipped=导出时跳过的二进制/超限文件/符号链接根；assetsWritten=导入时实际写入的资产数 */
 export interface SyncdocReport {
   providers: string[]
   profiles: string[]
@@ -52,8 +52,11 @@ function readRawUserPresets(): unknown[] | { presets: unknown[] } {
 
 /** 收集可同步态 → syncdoc（docs/design-cloud-sync.md §4.1 清单）。
  *  key 处理：file/keychain/secret-service/plain 引用解析为明文随包；env: 引用不解析（机器态）原样保留；
- *  解析不到的引用原样保留并记入 missingKeys。 */
-export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocReport }> {
+ *  解析不到的引用原样保留并记入 missingKeys。
+ *  log：软链根等「跳过但用户该知道」诊断的出口（引擎传 opts.log 进网关日志；缺省静默）。 */
+export async function collectSyncdoc(
+  log?: (line: string) => void
+): Promise<{ doc: Syncdoc; report: SyncdocReport }> {
   const cfg = await loadConfig()
   const providers: Record<string, SyncProviderEntry> = {}
   const envKeyRefs: string[] = []
@@ -91,7 +94,7 @@ export async function collectSyncdoc(): Promise<{ doc: Syncdoc; report: SyncdocR
   validateUserPresetEntries(Array.isArray(userPresets) ? userPresets : userPresets.presets, presetsJsonPath())
   const scheduleRules = cfg.gateway?.schedule?.windows ? [...cfg.gateway.schedule.windows] : []
   // 文本资产：白名单目录内的文本文件随包（上限/排除/二进制跳过见 assets.ts）；目录缺失视为无
-  const assets = collectAssetFiles(cfg.sync_assets?.dirs ?? [])
+  const assets = collectAssetFiles(cfg.sync_assets?.dirs ?? [], { onWarning: log })
   const profileIds = Object.keys(cfg.profiles)
   const providerIds = Object.keys(providers)
   return {
@@ -126,8 +129,9 @@ function countPresets(up: unknown[] | { presets: unknown[] }): number {
 
 /** 应用 syncdoc：替换全部可同步态，机器态一律不动（docs/design-cloud-sync.md §5.2）。
  *  顺序：快照（config.toml/secrets.json/presets.json）→ key 按本机后端重存 → 整包替换 → 写预设。
- *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。 */
-export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend }): Promise<SyncdocReport> {
+ *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。
+ *  log：资产软链守卫等「跳过但用户该知道」告警的出口（引擎传 opts.log 进网关日志，CLI 打印；缺省静默）。 */
+export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend; log?: (line: string) => void }): Promise<SyncdocReport> {
   // 文本资产的目标文件一并进快照：既有文件才进快照清单（新文件无需快照）
   const assetFiles = doc.data.assets?.files ?? {}
   await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath(), ...existingAssetPaths(assetFiles)])
@@ -177,7 +181,7 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
   // 文本资产最后落地：快照已覆盖既有目标；只写有差异的文件、绝不删除本机多出的文件
   let assetsWritten: number | undefined
   if (Object.keys(assetFiles).length > 0) {
-    assetsWritten = (await applyAssets(assetFiles)).written.length
+    assetsWritten = (await applyAssets(assetFiles, { onWarning: opts?.log })).written.length
   }
 
   return {

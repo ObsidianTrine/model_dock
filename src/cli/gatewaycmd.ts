@@ -15,7 +15,7 @@ import {
   type AutostartKind,
   type AutostartStatus,
 } from '../autostart.js'
-import { DEFAULT_GATEWAY_PORT, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, exitWithError, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
 
 export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; debug?: boolean }): Promise<void> {
   const cfg = await loadCfg()
@@ -24,20 +24,21 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     console.log(c.yellow(t('网关已在运行：http://127.0.0.1:{port}（pid {pid}）', 'Gateway is already running: http://127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid })))
     return
   }
-  // --port 手工校验（commander 对非法数字产出 NaN 且不报错）：不拦的话坏值以 'NaN' 字符串
-  // 传给 daemon、由 --sea-gateway 分支的校验兜底报错，父 CLI 却要白等 daemon 超时才见结局
-  // （2026-11-12 审查 F12 对照项）——这里 fail fast 给可操作报错
-  let port: number
-  if (opts.port !== undefined && opts.port !== '') {
-    const n = Number(opts.port)
-    if (!Number.isInteger(n) || n < 1 || n > 65535) {
-      console.error(c.red(t('✗ --port 无效：{v}。需为 1-65535 的整数', '✗ Invalid --port: {v}. Must be an integer between 1 and 65535', { v: opts.port })))
-      console.error(c.gray(t('示例：modeldock gateway start --port 8687；省略 --port 则用 config.toml [gateway] port（缺省 8687）', 'Example: modeldock gateway start --port 8687; omit --port to use [gateway] port from config.toml (default 8687)')))
-      process.exit(1)
-    }
-    port = n
-  } else {
-    port = cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT
+  const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
+  // 显式 --port 先验再传：NaN/越界此前一路漏到 listen(NaN) 才炸，用户看到的是 Node 内部
+  // RangeError 裸栈（daemon 形态更只是超时 + 日志路径），拿不到「端口写错了」的可操作结论
+  // （2026-11-12 审查 F12，两夜航批次独立实现同一修复，合并取本版：连 config.toml 来源的
+  // 坏端口一起拦，报错走 exitWithError 可操作两行式）。范围与 daemon 侧 --sea-gateway 分支
+  // 校验（1-65535）对齐：port 0 若放行会被 daemon 拒杀、父 CLI 白等超时，恰是 F12 失败模式
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    // 收到值如实回显：--port 缺省时坏值来自 config.toml（store 不校验端口类型/范围），照抄
+    // opts.port 会报「收到：undefined」；空串 --port 走到的是 config 值，?? 会回显空串——
+    // 用 || 让「实际参与运算的那个值」上屏（用户对着正确的命令行却不知错在配置里的误导一并消除）
+    // 示例端口必须用中性段（18901）：8890 是用户 dev 沙箱专属端口，照抄进示例会撞 run_dev 单实例保护
+    exitWithError(
+      t('端口必须是 1–65535 的整数（收到：{v}）', 'The port must be an integer in 1-65535 (got: {v})', { v: String(opts.port || port) }),
+      t('示例：modeldock gateway start --port 18901；不加 --port 则用 config.toml [gateway] 的 port', 'Example: modeldock gateway start --port 18901; without --port the [gateway] port in config.toml applies')
+    )
   }
 
   if (!opts.daemon) {

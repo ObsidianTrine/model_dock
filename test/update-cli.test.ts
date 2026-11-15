@@ -14,10 +14,15 @@ vi.mock('../src/update/run.js', () => ({
   cleanUpdateRemnants: vi.fn(async () => []),
 }))
 import { runUpdate, checkUpdate, cleanUpdateRemnants } from '../src/update/run.js'
+vi.mock('../src/update/rollback.js', () => ({
+  runRestore: vi.fn(async () => ({ restored: true, fromVersion: '0.1.0', toVersion: '0.9.9' })),
+}))
+import { runRestore } from '../src/update/rollback.js'
 
 const mockRun = vi.mocked(runUpdate)
 const mockCheck = vi.mocked(checkUpdate)
 const mockClean = vi.mocked(cleanUpdateRemnants)
+const mockRestore = vi.mocked(runRestore)
 
 describe('cmdUpdate CLI 编排', () => {
   let logSpy: ReturnType<typeof vi.spyOn>
@@ -29,6 +34,7 @@ describe('cmdUpdate CLI 编排', () => {
     mockRun.mockClear()
     mockCheck.mockClear()
     mockClean.mockClear()
+    mockRestore.mockClear()
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
@@ -112,6 +118,39 @@ describe('cmdUpdate CLI 编排', () => {
       expect(arg.json).toBe(true)
       expect(mockRun).not.toHaveBeenCalled()
     } finally {
+      h.restore()
+    }
+  })
+
+  it('--restore：纯本地还原（零下载），不走令牌与网络；yes 透传给 runRestore', async () => {
+    const h = fakeHome()
+    try {
+      await cmdUpdate({ restore: true, yes: true })
+      expect(process.exitCode).toBeUndefined()
+      expect(mockRestore).toHaveBeenCalledTimes(1)
+      const arg = mockRestore.mock.calls[0][0] as { yes: boolean }
+      expect(arg.yes).toBe(true)
+      expect(mockRun).not.toHaveBeenCalled()
+      expect(mockCheck).not.toHaveBeenCalled()
+      expect(mockClean).not.toHaveBeenCalled()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--restore 失败带 hint：两行式 ✗ + 提示，exitCode=1', async () => {
+    const h = fakeHome()
+    try {
+      mockRestore.mockImplementationOnce(async () => {
+        throw Object.assign(new Error('restore boom'), { hint: 'no backup kept' })
+      })
+      await cmdUpdate({ restore: true, yes: true })
+      expect(process.exitCode).toBe(1)
+      const errs = errSpy.mock.calls.map((a) => String(a[0])).join('\n')
+      expect(errs).toContain('restore boom')
+      expect(errs).toContain('no backup kept')
+    } finally {
+      process.exitCode = undefined
       h.restore()
     }
   })

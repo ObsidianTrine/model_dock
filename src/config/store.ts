@@ -42,10 +42,14 @@ function migrate(raw: Record<string, unknown>): Config {
     version: CONFIG_VERSION,
     language,
     active_profile: raw.active_profile as string | undefined,
-    providers: guardModelFallbackShape(containerOrEmpty(raw.providers, 'providers')),
-    profiles: containerOrEmpty(raw.profiles, 'profiles'),
-    harness: containerOrEmpty(raw.harness, 'harness'),
-    adapter_packs: raw.adapter_packs as Config['adapter_packs'],
+    providers: guardModelFallbackShape(tableEntriesOrEmpty<Config['providers']>(raw.providers, 'providers')),
+    profiles: tableEntriesOrEmpty<Config['profiles']>(raw.profiles, 'profiles'),
+    harness: tableEntriesOrEmpty<Config['harness']>(raw.harness, 'harness'),
+    // adapter_packs 可缺省：undefined 语义保留（省略时不落空表，避免无谓的整包重写）
+    adapter_packs:
+      raw.adapter_packs === undefined || raw.adapter_packs === null
+        ? undefined
+        : tableEntriesOrEmpty<NonNullable<Config['adapter_packs']>>(raw.adapter_packs, 'adapter_packs'),
     gateway: normalizeGateway(normalizable(raw.gateway, 'gateway')),
     lan: normalizable(raw.lan, 'lan'),
     security: normalizable(raw.security, 'security'),
@@ -89,6 +93,23 @@ function containerOrEmpty<T extends object>(v: unknown, key: string): T {
     )
   }
   return v as T
+}
+
+/** 容器条目形状守卫：providers / profiles / harness / adapter_packs 的**值**必须是表。
+ *  containerOrEmpty 只守容器本身，守不到条目——手写 TOML `[providers]\nx = "hi"`（标量条目）
+ *  合法但下游 `p.base_url` 一类访问会以原始 TypeError 崩在任意使用点；这里在读入时拦成可操作
+ *  ConfigError（含条目键名），口径与 containerOrEmpty 一致。 */
+function tableEntriesOrEmpty<T extends object>(v: unknown, key: string): T {
+  const c = containerOrEmpty<Record<string, unknown>>(v, key)
+  for (const [k, e] of Object.entries(c)) {
+    if (e === null || typeof e !== 'object' || Array.isArray(e)) {
+      throw new ConfigError(
+        t('config.toml 的 {key}.{k} 必须是表（当前是{kind}）', 'config.toml {key}.{k} must be a table (got {kind})', { key, k, kind: Array.isArray(e) ? '数组/array' : typeof e }),
+        t('请改为 `[{key}.{k}]` 形态的表，或删除该行恢复默认', 'Change it to a table like `[{key}.{k}]`, or remove the line to use defaults')
+      )
+    }
+  }
+  return c as T
 }
 
 /** 可选对象键形状守卫：非 undefined/null 时必须是对象（标量/数组直接给 ConfigError） */

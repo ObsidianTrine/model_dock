@@ -101,7 +101,7 @@ export async function cmdConfigImport(file: string, opts: { stdinPass?: boolean;
       return
     }
   }
-  const applied = await applyImportedDoc(doc)
+  const applied = await applyImportedDoc(doc, { log: (line) => console.log(c.yellow(line)) })
   console.log(
     c.green(
       t('✓ 已导入：服务 {p}、路由 {r}、预设 {s}、定时规则 {w}；key 按本机存储重存 {k} 条', '✓ Imported: {p} providers, {r} profiles, {s} presets, {w} schedule rules; {k} keys re-stored into local storage', {
@@ -269,11 +269,11 @@ export async function cmdSyncAssetsList(): Promise<void> {
     return
   }
   for (const dir of dirs) {
-    const a = collectAssetFiles([dir])
+    const a = collectAssetFiles([dir], { onWarning: (line) => console.log(c.yellow(line)) })
     const files = Object.keys(a.files)
     const bytes = files.reduce((s, k) => s + Buffer.byteLength(a.files[k], 'utf8'), 0)
     const skipped = a.skipped.length
-      ? t('（跳过 {n} 个二进制/超限文件）', ' ({n} binary/oversized file(s) skipped)', { n: a.skipped.length })
+      ? t('（跳过 {n} 个二进制/超限/不可入包条目）', ' ({n} binary/oversized/unpackagable entr(y|ies) skipped)', { n: a.skipped.length })
       : ''
     console.log(t('{d} · 文本 {n} 个 / {b}KB{skipped}', '{d} · {n} text file(s) / {b}KB{skipped}', { d: dir, n: files.length, b: Math.max(1, Math.round(bytes / 1024)), skipped }))
   }

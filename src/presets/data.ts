@@ -506,6 +506,17 @@ export function validateUserPresetEntries(arr: unknown[], fp: string): ProviderP
 // 丢掉已写好的可操作报错。错误改在查询时抛出，经命令层既有错误格式化输出；禁止回退到「顶层 try/catch 吞错」。
 let presetsLoaded = false
 
+/** 预设表代数：reloadPresets 每次重建自增（ensurePresetsLoaded 首载不计，初始 0）。
+ *  网关进程内的同步导入（applyImportedDoc）会触发 reloadPresets，「进程内预设恒定」据此
+ *  做序列化缓存的消费方（overview-view presetsView）凭它判失效——用轮询代数而非注册回调，
+ *  避免 presets/data ← gateway/overview-view ← sync/engine ← sync/collect 的模块环。 */
+let presetsGeneration = 0
+
+/** 当前预设表代数（缓存失效判定用；代数相同 = 表未重建，缓存可续用） */
+export function presetsGenerationNow(): number {
+  return presetsGeneration
+}
+
 /** 确保运行时预设已加载（幂等；文件不存在=空，格式错误在此抛可操作报错） */
 export function ensurePresetsLoaded(): void {
   if (presetsLoaded) return
@@ -519,6 +530,7 @@ export function reloadPresets(): void {
   PRESETS.length = 0
   PRESETS.push(...applyUserPresets(readUserPresets()))
   presetsLoaded = true
+  presetsGeneration++
 }
 
 export function findPreset(id: string): ProviderPreset | undefined {

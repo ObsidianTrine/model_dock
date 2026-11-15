@@ -5,6 +5,26 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Improved
+
+- **Log page fixed-width columns no longer truncate silently**: three spots on the log page now render in full — English column headers, 8-digit millisecond values, and long underscore-prefixed profile names; the audit target cell gains full-text hover.
+
+### Fixed
+
+- **Four Codex attach defects closed**: detaching from a half-attached state no longer leaves dead references (previously every `codex -p` route went dark); direct-mode attach no longer rewrites other routes' profiles; your own profiles are no longer overwritten and hijacked; after switching a route to a service without a model catalog, the stale catalog pointer is no longer left behind (selecting it used to fail with 400).
+- **Model failover counters no longer inflate**: upstream 429 backoff retries are no longer double-counted, and a rewrite that failed to land no longer counts as "absorbed" — the `model_fallback` metrics now match what actually happened.
+- **Hand-edited failover maps are guarded**: a config.toml entry mapping a primary model to itself no longer bypasses meltdown fast-fail, and the tail of the backup chain no longer synthesizes a same-model candidate that retries in vain.
+- **Honest errors when the whole failover chain is filtered out**: when every automatic candidate is dropped by model-catalog filtering, the gateway used to answer a misleading 502 "connection failed (undefined)"; it now returns 503 and logs a "model mismatch" entry in the request log.
+- **Type guards on admin API parameters**: booleans used to be silently treated as 1 — incidents like a 1-minute TTL, a 1-token daily cap, a schedule landing on Monday, or a context window of 1 are gone; non-number parameters are rejected with 400. **Behavior change**: string numbers (e.g. `"60"`) that used to pass are rejected too — send actual numbers.
+- **Accurate latency for one-shot credentials**: a request that succeeded only after 429 backoff retries records just the final attempt's duration — retry waits no longer pile up into inflated latencies, and same-priority tie-breaking on the backup chain is no longer misled by them.
+- **"Add service" catalog refreshes immediately after sync import**: after a sync / import brings in new presets, the preset catalog in the console's "Add service" dialog used to keep showing the stale list until the gateway restarted; it now refreshes right away.
+- **`gateway start --port` validates before starting**: non-numeric or out-of-range ports no longer crash with a raw internal error — you get an actionable error message with an example instead.
+- **Sync packaging refuses symlinked roots**: when the sync whitelist root is itself a symlink pointing elsewhere (e.g. `~/skills` linked to the data directory), secret files could previously bypass the exclusion rules and slip into the sync package; such roots are now refused.
+- **Import scan isolates per-client failures**: a single client's broken config file (e.g. saved as UTF-16) no longer fails the entire import scan — the remaining clients are inventoried as usual.
+- **Hand-edited config.toml structural errors are caught on load**: writing a single value where a table belongs used to crash with a raw error at the point of use; it is now rejected when the config is read, with an actionable message.
+
 ## [1.7.3] - 2026-11-12
 
 Model-level failover ships with long-run observability increments; Codex attach polish; automatic failover now checks model catalogs, among other fixes.
@@ -589,6 +609,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...HEAD
 [1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1

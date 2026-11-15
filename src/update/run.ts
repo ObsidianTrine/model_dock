@@ -40,6 +40,7 @@ import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
 import { acquireUpdateLock } from './lock.js'
 import { markStagingConsumed, readReadyStaged, sweepStaging } from './staging.js'
+import { backupWinSetupExes, clearRollbackArtifacts, clearRollbackSlot, readRollbackSlot, recordBareRollback, recordMacAppRollback } from './rollback.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
 
@@ -72,6 +73,23 @@ export interface UpdateRunResult {
 
 function mb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 换装成功后登记还原备份（best-effort：失败只告警，绝不阻塞更新主流程——
+ *  「还原更新」是锦上添花，更新才是主功能）。win-setup 不走这里：它的备份必须在
+ *  弹向导之前做（向导原地替换不留旧版），见 backupWinSetupExes。 */
+async function recordRollbackBestEffort(
+  shape: InstallShape,
+  execPath: string,
+  log: (m: string) => void,
+  trayReplaced = false
+): Promise<void> {
+  try {
+    if (shape === 'mac-app') await recordMacAppRollback(execPath)
+    else if (shape !== 'win-setup') await recordBareRollback(execPath, trayReplaced)
+  } catch (e) {
+    log(c.yellow(t('⚠ 上一版备份登记失败（「还原更新」本次不可用）：{m}', '⚠ Failed to record the restore backup ("Restore Update" unavailable this time): {m}', { m: (e as Error).message })))
+  }
 }
 
 /**
@@ -227,13 +245,20 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
           const appRoot = appRootFromExecPath(execPath)
           if (!appRoot) throw new UpdateError(t('无法定位 ModelDock.app 安装位置', 'Cannot locate the ModelDock.app install path'))
           await installMacApp(staging, appRoot)
+          await recordRollbackBestEffort(shape, execPath, log)
         } finally {
           await fsp.rm(staging, { recursive: true, force: true }).catch(() => {})
         }
         log(c.green(t('✓ 已更新到 v{v}，正在重新启动 ModelDock…', '✓ Updated to v{v}; restarting ModelDock…', { v: m.version })))
         deps.openApp(appRootFromExecPath(execPath)!)
       } else if (shape === 'win-setup') {
-        // /DIR /LOG 旗标语义与 || 兜底：见 buildWinInstallerCommand 注（install.ts）
+        // /DIR /LOG 旗标语义与 || 兜底：见 buildWinInstallerCommand 注（install.ts）。
+        // 向导原地替换不留旧版：先备份当前 exe 到回滚目录（「还原更新」的数据面），失败只告警不拦更新
+        try {
+          await backupWinSetupExes(execPath)
+        } catch (e) {
+          log(c.yellow(t('⚠ 上一版备份失败（「还原更新」本次不可用）：{m}', '⚠ Failed to back up the previous version ("Restore Update" unavailable this time): {m}', { m: (e as Error).message })))
+        }
         const cmd = buildWinInstallerCommand(
           file,
           path.join(path.dirname(execPath), 'ModelDockTray.exe'),
@@ -265,13 +290,16 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
           const trayEntry = platform === 'win32' ? 'ModelDockTray.exe' : 'ModelDockTray'
           const newTray = path.join(staging, trayEntry)
           const targetTray = path.join(path.dirname(execPath), trayEntry)
+          let trayReplaced = false
           if (fs.existsSync(newTray)) {
             try {
               await installBareBinary(newTray, targetTray)
+              trayReplaced = true
             } catch (te) {
               log(c.yellow(t('⚠ 托盘替换失败（主程序已更新）：{m}。旧托盘若还在运行，手动重启即可换新', '⚠ Tray replacement failed (main program updated): {m}. If the old tray is still running, restart it manually to refresh', { m: (te as Error).message })))
             }
           }
+          await recordRollbackBestEffort(shape, execPath, log, trayReplaced)
           log(c.green(t('✓ 已更新到 v{v}', '✓ Updated to v{v}', { v: m.version })))
           if (wasLive) {
             deps.spawnDetached(execPath, ['--sea-gateway'])
@@ -374,9 +402,16 @@ export async function checkUpdate(repo: string, token: string | null, opts: { ap
   return { updated: false, currentVersion: VERSION, latestVersion: m.version, checkedOnly: true }
 }
 
-/** --clean：清 .old 残留（须显式确认安装位置，绝不清别的） */
+/** --clean：清 .old 残留（须显式确认安装位置，绝不清别的）。
+ *  还原账本与 win-setup 备份目录一并清理：备份删了账本就是幽灵入口（还原入口按无槽隐藏）。 */
 export async function cleanUpdateRemnants(execPath: string, log: (m: string) => void = (x) => console.log(x)): Promise<string[]> {
   const removed = await cleanOldVersions(execPath)
+  const hadSlot = (await readRollbackSlot()) != null
+  await clearRollbackSlot()
+  await clearRollbackArtifacts()
+  if (hadSlot) {
+    log(c.green(t('✓ 已清理还原备份（「还原更新」入口随之移除）', '✓ Restore backup removed (the "Restore Update" entry goes away with it)')))
+  }
   if (removed.length) {
     for (const r of removed) log(c.green(t('✓ 已清理：{p}', '✓ Removed: {p}', { p: r })))
   } else {

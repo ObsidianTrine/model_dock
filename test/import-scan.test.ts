@@ -44,6 +44,32 @@ describe('import scan · dsh', () => {
   })
 })
 
+describe('import scan · 逐源故障隔离（registry）', () => {
+  it('单源读取层异常（UTF-16 编码文件）→ 占位诊断，不影响其余来源（scanSources 不 reject）', async () => {
+    const h = fakeHome()
+    try {
+      // ~/.claude/settings.json 写成 UTF-16（Windows 记事本另存常见）：readTextIfExists 对
+      // 非 ENOENT 异常一律上抛，registry 须把它隔离成本源占位而不是放大成整批失败
+      await ensureDir(path.join(h.home, '.claude'))
+      await atomicWrite(path.join(h.home, '.claude', 'settings.json'), Buffer.from([0xff, 0xfe, 0x41, 0x00]), 0o600)
+      // 另一来源（codex）合法可读 → 必须照常产出候选
+      await ensureDir(path.join(h.home, '.codex'))
+      await atomicWrite(
+        path.join(h.home, '.codex', 'config.toml'),
+        '[model_providers.ark]\nname = "Ark"\nbase_url = "https://ark.example.com/api/v3"\n',
+        0o600
+      )
+      const out = await scanSources('all')
+      expect(out.some((c) => c.suggest_id === 'codex-ark' && !c.skip_reason)).toBe(true)
+      const ph = out.find((c) => c.source === 'claude' && c.skip_reason)
+      expect(ph).toBeTruthy()
+      expect(ph!.skip_reason).toContain('claude')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('import scan · stripApiEndpoint', () => {
   it('剥掉最后一层请求端点；非端点形态原样返回', () => {
     expect(stripApiEndpoint('https://api.openai.com/v1/chat/completions')).toBe('https://api.openai.com/v1')

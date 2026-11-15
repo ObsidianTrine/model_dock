@@ -251,17 +251,20 @@ describe('跨进程写锁（BUG-06/07）', () => {
       const lp = secretsLockPath()
       const order: string[] = []
       let unlock1: () => void = () => {}
+      let entered1: () => void = () => {}
       const gate1 = new Promise<void>((r) => (unlock1 = r))
+      const inside1 = new Promise<void>((r) => (entered1 = r))
       const p1 = withFileLock(lp, undefined, async () => {
         order.push('job1-start')
+        entered1()
         await gate1
         order.push('job1-end')
       }).then(() => order.push('job1-done'))
-      await sleep(20) // 让 job1 抢到锁、进入临界区
+      await inside1 // 确定性同步：job1 已拿锁进临界区才放行 job2（此前 sleep(20) 固定等待，高负载下 job1 未及拿锁即崩——2026-11-12 夜航 perf-flake-night 静态扫雷）
       const p2 = withFileLock(lp, undefined, async () => {
         order.push('job2')
       })
-      await sleep(20)
+      await sleep(20) // 观察窗：job2 此间被锁串行挡住是锁语义保证，窗口只为「未发生」取证
       expect(order).toEqual(['job1-start']) // job2 被锁串行挡住，未执行
       unlock1()
       await p1

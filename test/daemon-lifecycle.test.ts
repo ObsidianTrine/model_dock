@@ -296,22 +296,23 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
     }
   }, 60_000)
 
-  it('启动失败场景：坏 argv（--port 非数字）时 CLI fail fast 报错退出，不拉起注定死亡的 daemon 白等超时（2026-11-12 审查 F12）', async () => {
+  it('启动失败场景：坏 argv（--port 非数字）时 CLI 限时退出并报可操作端口错误（先验拦下，不经 daemon 崩溃路径）', async () => {
     const h = fakeHome()
     try {
-      // 旧流程把 Number('notanumber') 的 NaN 以 'NaN' 串传给 daemon → daemon 崩溃「网关启动失败」、
-      // 父 CLI 白等超时 20s；cmdGatewayStart 补校验后在拉起前即拒，报错直接到终端
+      // --port 先验（rev-cli-ops-night）：非法值在 spawn daemon 前就被 exitWithError 拦下，
+      // 用户直接拿到「端口写错了」+ 示例，不再走 listen(NaN) → daemon 崩溃路径（旧断言的
+      // 「网关启动超时」+ daemon 日志 fd 2 接管随该路径一并消失，fd 2 机制对真实崩溃仍生效）
       const { output, exit } = spawnDaemonCli(h, 'notanumber' as unknown as number)
       const exitRes = await Promise.race([
         exit,
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error('坏 argv 场景 CLI 15s 未退出')), 15_000)),
       ])
       expect(exitRes.code).toBe(1)
-      // 可操作报错（原文回显 + 合法范围）到终端，修复建议同行可查
-      expect(output()).toContain('--port 无效')
+      // 报错不蒸发：端口口径 + 实际收到值 + 修复示例都到用户眼前
+      expect(output()).toContain('端口必须是 1–65535 的整数')
       expect(output()).toContain('notanumber')
-      expect(output()).toContain('1-65535')
-      // daemon 未被拉起（校验发生在 spawn 之前）
+      expect(output()).toContain('gateway start --port 18901')
+      // daemon 未被拉起（校验发生在 spawn 之前，吸收 2026-11-12 审查 F12 批次断言）
       expect(fs.existsSync(path.join(h.home, '.modeldock', 'gateway.json'))).toBe(false)
     } finally {
       h.restore()

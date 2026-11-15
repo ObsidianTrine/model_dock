@@ -95,6 +95,29 @@ describe('资产收集（collectAssetFiles）', () => {
     expect(collectAssetFiles(['.nope/missing'])).toEqual({ files: {}, skipped: [] })
   })
 
+  it('白名单根目录本身是符号链接：不跟随、不入包、不打断收集（与内部软链同口径）', () => {
+    const home = mkHome()
+    // 软链根指向 ~/.modeldock（排除段）：secrets.json 不得收进包里；跳过但不 throw——
+    // throw 会把整条多机同步打停（providers/profiles 陪葬），软链挂载（~/skills → 别处）是合法形态
+    write(home, ['.modeldock', 'secrets.json'], '{"k":"v"}')
+    write(home, ['skills2', 'a.md'], 'hello')
+    let linked = false
+    try {
+      fs.symlinkSync(path.join(home, '.modeldock'), path.join(home, 'skills'))
+      linked = true
+    } catch {
+      /* Windows 无符号链接权限：跳过该断言 */
+    }
+    if (linked) {
+      const warnings: string[] = []
+      const a = collectAssetFiles(['skills', 'skills2'], { onWarning: (l) => warnings.push(l) })
+      expect(Object.keys(a.files)).toEqual(['skills2/a.md']) // 软链根跳过，其余目录照常收集
+      expect(a.skipped.some((s) => s.startsWith('skills/'))).toBe(true) // 诊断进 skipped 报告
+      expect(warnings.join('\n')).toContain('skills') // 诊断同时走日志钩子
+      expect(JSON.stringify(a.files)).not.toContain('secrets') // 安全属性：密钥不入包
+    }
+  })
+
   it('单文件超 512KB 跳过不报错；文件数超上限或总量超限抛可操作报错', () => {
     const home = mkHome()
     write(home, ['big', 'huge.md'], 'a'.repeat(ASSET_MAX_FILE_BYTES + 1))
@@ -184,5 +207,103 @@ describe('资产应用（applySyncdoc → applyAssets）', () => {
     mkHome()
     await expect(applyAssets({ '../evil.md': 'x' })).rejects.toThrow()
     await expect(applyAssets({ 'big.md': 'a'.repeat(ASSET_MAX_FILE_BYTES + 1) })).rejects.toThrow()
+  })
+})
+
+describe('applyAssets 导入侧软链守卫（写穿防线，跳过+告警口径对齐导出侧 139d01f）', () => {
+  function trySymlink(target: string, linkPath: string): boolean {
+    try {
+      fs.symlinkSync(target, linkPath)
+      return true
+    } catch {
+      /* Windows 无符号链接权限：按 a3d24c2 先例跳过该用例 */
+      return false
+    }
+  }
+
+  it('中间目录是符号链接：该 key 拒写并告警、软链指向处零落盘；同包其余 key 照常写入（故障隔离）', async () => {
+    const home = mkHome()
+    fs.mkdirSync(path.join(home, 'elsewhere'), { recursive: true })
+    if (!trySymlink(path.join(home, 'elsewhere'), path.join(home, 'skills'))) return
+    const warnings: string[] = []
+    const r = await applyAssets(
+      { 'skills/a.md': 'punch through', '.claude/CLAUDE.md': '# ok' },
+      { onWarning: (l) => warnings.push(l) }
+    )
+    // 故障隔离：正常 key 照常写入
+    expect(r.written).toEqual(['.claude/CLAUDE.md'])
+    expect(fs.readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8')).toBe('# ok')
+    // 软链段 key 拒写：进 skipped（带原因）+ 告警双通道
+    expect(r.skipped.map((s) => s.key)).toEqual(['skills/a.md'])
+    expect(r.skipped[0].reason).toContain('skills/a.md')
+    expect(warnings.join('\n')).toContain('skills/a.md')
+    expect(warnings.join('\n')).toContain('软链')
+    // 软链指向处零落盘，软链本身未被 mkdirSync 顶掉
+    expect(fs.readdirSync(path.join(home, 'elsewhere'))).toEqual([])
+    expect(fs.lstatSync(path.join(home, 'skills')).isSymbolicLink()).toBe(true)
+  })
+
+  it('~/skills → ~/.modeldock：包内 skills/config.toml 不得写穿覆盖真实 ~/.modeldock/config.toml', async () => {
+    const home = mkHome()
+    write(home, ['.modeldock', 'config.toml'], 'real config')
+    if (!trySymlink(path.join(home, '.modeldock'), path.join(home, 'skills'))) return
+    const warnings: string[] = []
+    const r = await applyAssets(
+      { 'skills/config.toml': 'EVIL', '.claude/keep.md': 'fine' },
+      { onWarning: (l) => warnings.push(l) }
+    )
+    // isSafeAssetKey 只看字符串段（'skills' 非排除段）拦不住——fs 软链守卫必须在写入前拦下
+    expect(fs.readFileSync(path.join(home, '.modeldock', 'config.toml'), 'utf8')).toBe('real config')
+    expect(r.skipped.map((s) => s.key)).toContain('skills/config.toml')
+    expect(r.written).toEqual(['.claude/keep.md'])
+    expect(warnings.join('\n')).toContain('skills/config.toml')
+  })
+
+  it('最终段是文件符号链接：同样拒写，软链本身不被 rename 顶掉、指向文件原样', async () => {
+    const home = mkHome()
+    write(home, ['.modeldock', 'config.toml'], 'real config')
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+    if (!trySymlink(path.join(home, '.modeldock', 'config.toml'), path.join(home, '.claude', 'CLAUDE.md'))) return
+    const r = await applyAssets({ '.claude/CLAUDE.md': 'NEW' })
+    expect(r.skipped.map((s) => s.key)).toEqual(['.claude/CLAUDE.md'])
+    expect(r.written).toEqual([])
+    expect(fs.readlinkSync(path.join(home, '.claude', 'CLAUDE.md'))).toBe(path.join(home, '.modeldock', 'config.toml'))
+    expect(fs.readFileSync(path.join(home, '.modeldock', 'config.toml'), 'utf8')).toBe('real config')
+  })
+
+  it('无软链路径行为零变化：照常写入、skipped 为空、无告警；unchanged 口径不变', async () => {
+    const home = mkHome()
+    const warnings: string[] = []
+    const r = await applyAssets(
+      { '.claude/CLAUDE.md': '# v1', '.agents/skills/s.md': 'x' },
+      { onWarning: (l) => warnings.push(l) }
+    )
+    expect(r.written.sort()).toEqual(['.agents/skills/s.md', '.claude/CLAUDE.md'])
+    expect(r.unchanged).toBe(0)
+    expect(r.skipped).toEqual([])
+    expect(warnings).toEqual([])
+    expect(fs.readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8')).toBe('# v1')
+    const r2 = await applyAssets({ '.claude/CLAUDE.md': '# v1' })
+    expect(r2.unchanged).toBe(1)
+    expect(r2.written).toEqual([])
+    expect(r2.skipped).toEqual([])
+  })
+
+  it('applySyncdoc 透传 log：资产软链告警经 log 钩子可达（engine 网关日志 / CLI 打印的公共底座）', async () => {
+    const home = mkHome()
+    await saveConfig(emptyConfig())
+    // 软链目标是沙箱的 ~/.modeldock 数据目录：内容须是合法 TOML（applySyncdoc 内部 loadConfig 要读它）
+    write(home, ['.modeldock', 'config.toml'], 'language = "zh"\n')
+    if (!trySymlink(path.join(home, '.modeldock'), path.join(home, 'skills'))) return
+    const logs: string[] = []
+    const r = await applySyncdoc(
+      fakeDoc({ 'skills/config.toml': 'EVIL', '.claude/ok.md': 'fine' }),
+      { backend: 'file', log: (l) => logs.push(l) }
+    )
+    expect(r.assetsWritten).toBe(1)
+    expect(logs.join('\n')).toContain('skills/config.toml')
+    // applySyncdoc 的 mutateConfig 会整包重序列化 config.toml，精确内容不比对——只断言包内
+    // EVIL 内容未写穿进真实配置
+    expect(fs.readFileSync(path.join(home, '.modeldock', 'config.toml'), 'utf8')).not.toContain('EVIL')
   })
 })

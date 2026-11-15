@@ -386,24 +386,27 @@ describe('relay · 错误体翻译与解压读面', () => {
 describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_HOPS 安全帽', () => {
   const QUOTA_BODY = JSON.stringify({ error: { message: 'Insufficient Balance (request_id: 1)' } })
 
-  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应（headers 可选，如 retry-after）；记录每次收到的模型名。 */
+  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
   async function startModelMock(
     route: (model: string) => { status: number; body: string; headers?: Record<string, string> }
-  ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
+  ): Promise<{ url: string; seen: string[]; raws: string[]; close: () => Promise<void> }> {
     const seen: string[] = []
+    const raws: string[] = [] // 原始请求体（seen 对非 JSON 体恒 ''，验证「坏体原样透传」需看字节）
     const s = http.createServer((req, res) => {
       const chunks: Buffer[] = []
       req.on('data', (c) => chunks.push(c))
       req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8')
+        raws.push(raw)
         let model = ''
         try {
-          model = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { model?: string }).model ?? ''
+          model = (JSON.parse(raw || '{}') as { model?: string }).model ?? ''
         } catch {
           /* 非 JSON 体按空模型处理 */
         }
         seen.push(model)
         const out = route(model)
-        res.writeHead(out.status, { 'content-type': 'application/json', ...out.headers })
+        res.writeHead(out.status, { 'content-type': 'application/json', ...(out.headers ?? {}) })
         res.end(out.body)
       })
     })
@@ -411,14 +414,15 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
     return {
       url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`,
       seen,
+      raws,
       close: () => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) }),
     }
   }
 
   const countOf = (arr: string[], m: string) => arr.filter((x) => x === m).length
 
-  function fwd(body: Buffer): Record<string, unknown> {
-    return { method: 'POST', path: ROUTED, headers: {}, body, idleTimeoutMs: 5000, retries: 0 }
+  function fwd(body: Buffer, path = ROUTED): Record<string, unknown> {
+    return { method: 'POST', path, headers: {}, body, idleTimeoutMs: 5000, retries: 0 }
   }
 
   it('模型熔断（60s 窗 3 次 quota）后第 4 个请求预改写直落备用模型：主模型路径零上游调用；TTL 过期恢复走主模型', async () => {
@@ -497,6 +501,199 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
     }
   })
 
+  it('闸门吸收后 429 原地重试：整链共享去重，fallback/absorbed 只计一笔（重试重复命中闸门不叠加）', async () => {
+    const h = fakeHome()
+    let mBHits = 0
+    const mock = await startModelMock((model) => {
+      if (model !== 'mB') return { status: 402, body: QUOTA_BODY }
+      mBHits++
+      return mBHits === 1
+        ? { status: 429, body: JSON.stringify({ error: { message: 'rate limited' } }), headers: { 'retry-after': '1' } }
+        : { status: 200, body: '{"ok":true}' }
+    })
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      // mA 灌满模型级熔断：闸门每次 forwardToUpstream 都会命中（首发 + 429 重试两次进闸门）
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r.status).toBe(200)
+      expect(r.reason).toBe('retried_429:pa')
+      expect(mock.seen).toEqual(['mB', 'mB']) // 首发与重试都打 mB，主模型零往返
+      // 一次请求 = 一次「被吸收」：重试复用同一改写决策，不得记成两笔（回归 2026-11-12 审查实证）
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('闸门改写后端点缺失（candidateSkip）：请求未发出不计改发——吸收计数落账在「确认发出」之后', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      await setSecret('po', 'sk-po', 'file')
+      // anthropic 协议 provider 未配 openai 端点；客户端走 /v1/chat/completions（openai 协议）→ candidateSkip
+      const po = providerCfg({ name: 'po', base_url: mock.url, key_ref: 'file:po', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ po })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'po', 'mA', { ok: false, cls: 'quota' })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'po'), fwd(body, '/v1/chat/completions') as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).cause).toBe('proto_endpoint_missing')
+      expect(mock.seen).toEqual([]) // 零上游往返
+      // 改发未发生（什么都没发出）：不得虚记 fallback/absorbed（回归 2026-11-12 审查实证）
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('429 原地重试成功：lastMs 只记最后一发（不含首发与退避等待），attempts ms 保持整段墙钟（登记项①回归）', async () => {
+    const h = fakeHome()
+    let hits = 0
+    const mock = await startModelMock(() => {
+      hits++
+      return hits === 1
+        ? { status: 429, body: JSON.stringify({ error: { message: 'slow down' } }), headers: { 'retry-after': '1' } }
+        : { status: 200, body: '{"ok":true}' }
+    })
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa' })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const t0 = Date.now()
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      const elapsed = Date.now() - t0
+      expect(r.status).toBe(200)
+      expect(r.reason).toBe('retried_429:pa')
+      expect(mock.seen).toEqual(['mA', 'mA'])
+      const health = rt.health.get('pa')
+      expect(health?.lastMs).toBeDefined()
+      // 整段调用含 1s 退避（对照基准）
+      expect(elapsed).toBeGreaterThanOrEqual(1000)
+      // 旧口径把首发 + 1s 退避 + 重发全记进 lastMs（≥1000ms）：备用链同优先级按 lastMs 升序决胜时
+      // 该服务被伪装成最慢。修复后 lastMs 只含最后一发（本 mock 本地回包毫秒级）
+      expect(health!.lastMs!).toBeLessThan(1000)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('自映射 model_fallback（手编 config 绕过保存期校验）等同无映射：熔断模型快速失败不撞上游（读路径防御）', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mA' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).status).toBe(402)
+      expect((err as UpstreamError).cause).toBe('quota')
+      expect((err as UpstreamError).attempts).toEqual([expect.objectContaining({ provider: 'pa', note: 'model_cooldown' })])
+      expect(mock.seen).toEqual([]) // 快速失败：零上游往返（修复前映射条目挡住快速失败，会真实撞一次上游并拿 200）
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('自映射 model_fallback 不参与链尾合成：402 原样回传，不合成同模型候选空转多跳', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 402, body: QUOTA_BODY }))
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mA' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      const body = Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r.status).toBe(402)
+      // 修复前自映射把重复 402 放大成 3 次上游往返（熔断记账逐次累积到第 3 笔闸门才合拢）
+      expect(mock.seen).toEqual(['mA'])
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0) // 同模型候选未合成：无改发计数
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('改写判定命中但注入失败（体可浅扫却全量解析失败）：原模型照发、不计吸收（计数与改发事实一致）', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      // 备用模型名含空格（SAFE_MODEL_NAME_RE 白名单外）→ 改写必须走全量解析路径 injectModel
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'm B' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
+      // 体可浅扫（顶层 model 字符串值锁定字节区间）但全量 JSON.parse 失败 → 注入失败、改发未发生
+      const body = Buffer.from('{"model":"mA","x":{bad}}')
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never)
+      expect(r.status).toBe(200)
+      // 坏体原样透传（字节保留，mock seen 对非 JSON 体恒 ''）：原始字节里有原模型、无备用名
+      // ——改写注入失败，闸门意图未落地（mock.raws 验证字节，seen 验不了坏体）
+      expect(mock.raws[0]).toContain('"model":"mA"')
+      expect(mock.raws[0]).not.toContain('m B')
+      expect(r.modelAfter).toBeUndefined()
+      expect(rt.modelFallbackCounts?.size ?? 0).toBe(0) // 不得虚记「被吸收」（修复前记 1 笔 absorbed）
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('全候选被模型相容过滤剔除（主候选熔断 + auto 候选目录均不含请求模型）：503 model_mismatch 如实出口', async () => {
+    const h = fakeHome()
+    const mock = await startModelMock(() => ({ status: 200, body: '{"ok":true}' }))
+    try {
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa' })
+      const pb = providerCfg({ name: 'pb', base_url: mock.url, key_ref: 'file:pb', models: { m1: { source: 'preset' } } })
+      const pc = providerCfg({ name: 'pc', base_url: mock.url, key_ref: 'file:pc', models: { m1: { source: 'preset' } } })
+      const rt = buildRt({ pa, pb, pc }, { auto_fallback: true })
+      const cfg = rt.config as Config
+      // 主候选 pa 熔断（connect 3 次）→ 候选链只剩 auto 补尾 pb/pc；两者目录均不含 mZ → 全滤空
+      for (let i = 0; i < 3; i++) recordOutcome(rt, 'pa', { ok: false, cls: 'connect' })
+      const body = Buffer.from(JSON.stringify({ model: 'mZ', messages: [] }))
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(body) as never).then(
+        () => null,
+        (e) => e,
+      )
+      expect(err).toBeInstanceOf(UpstreamError)
+      expect((err as UpstreamError).status).toBe(503)
+      // 修复前落进链尾 transport 耗尽出口：502「所有候选服务连接失败（undefined）」——既没连接失败
+      // 也没有 lastErr，文案自相矛盾；修复后如实报无候选可伺服该模型
+      expect((err as UpstreamError).routeReason).toBe('model_mismatch')
+      expect((err as UpstreamError).attempts).toEqual([
+        expect.objectContaining({ provider: 'pb', note: 'model_mismatch' }),
+        expect.objectContaining({ provider: 'pc', note: 'model_mismatch' }),
+      ])
+      expect(mock.seen).toEqual([]) // 无候选可发：零上游往返
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
   it('MAX_MODEL_FALLBACK_HOPS=4：单请求最多合成 4 跳，达帽维持原样回传（mF 不再合成）', async () => {
     const h = fakeHome()
     const mock = await startModelMock(() => ({ status: 402, body: QUOTA_BODY }))
@@ -561,41 +758,6 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       expect(r5.status).toBe(200)
       expect(r5.reason).toBe('fallback_to:mB')
       expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 5, absorbedCount: 1 })
-    } finally {
-      await mock.close()
-      h.restore()
-    }
-  })
-
-  it('闸门吸收 × 429 原地重试叠加：同一请求 fallback/absorbed 只计 1 次（记账请求内去重）', async () => {
-    const h = fakeHome()
-    // mB 首发 429（Retry-After 0s + 非额度体 → 触发原地重试）、重试 200；mA 路径全程零真实往返
-    let mBHits = 0
-    const mock = await startModelMock((model) => {
-      if (model === 'mB') {
-        mBHits++
-        return mBHits === 1
-          ? { status: 429, body: JSON.stringify({ error: { message: 'rate limited, slow down' } }), headers: { 'retry-after': '0' } }
-          : { status: 200, body: '{"ok":true}' }
-      }
-      return { status: 402, body: QUOTA_BODY }
-    })
-    try {
-      await setSecret('pa', 'sk-pa', 'file')
-      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
-      const rt = buildRt({ pa })
-      const cfg = rt.config as Config
-      // 直灌 3 笔 (pa, mA) 模型级 quota：第 3 笔触发 15min 熔断（与真实记账同入口）
-      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
-      expect(rt.modelHealth?.get('pa\u0000mA')?.meltdown_until).toBeDefined()
-      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))) as never)
-      expect(r.status).toBe(200)
-      expect(r.reason).toBe('retried_429:pa') // 原地重试确实发生（钉死场景：mB 429 → 同候选重试）
-      expect(r.modelAfter).toBe('mB')
-      expect(countOf(mock.seen, 'mB')).toBe(2) // 首发 + 原地重试，均直发 mB
-      expect(countOf(mock.seen, 'mA')).toBe(0) // 主模型零上游往返
-      // 同一请求只计一次改发（修复前：原地重试再次进闸门 → fallback/absorbed 双计为 2）
-      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
     } finally {
       await mock.close()
       h.restore()

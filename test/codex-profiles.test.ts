@@ -108,27 +108,52 @@ describe('codex profiles 多路由', () => {
     }
   })
 
-  it('同名 profile 缺 model_provider 键（用户手写）→ 跳过不覆盖，自定义字段保留', async () => {
+  it('用户 profile 未写 model_provider（继承根级 provider）→ 同样跳过不覆盖', async () => {
     const h = fakeHome()
     process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
     try {
       await saveConfig(cfgMulti())
-      // 用户手写与 ModelDock 路由同名的 profile：只有 model 与附加键，无 model_provider
-      //（缺键条目必来自用户/第三方——自家旧条目总带 model_provider='modeldock'）
+      await attach()
+      // 用户把 demo 段改成只写 model（codex 语义：model_provider 缺省=继承根级 provider）
       const cfgPath = path.join(h.home, '.codex', 'config.toml')
-      fs.mkdirSync(path.dirname(cfgPath), { recursive: true })
-      fs.writeFileSync(cfgPath, '[profiles.demo]\nmodel = "user-model"\nmodel_reasoning_effort = "high"\n')
-      const plan = await codexAdapter.planAttach(
+      fs.writeFileSync(
+        cfgPath,
+        fs
+          .readFileSync(cfgPath, 'utf8')
+          .replace('[profiles.demo]\nmodel_provider = "modeldock"\nmodel = "glm-5-3-flash-260828"', '[profiles.demo]\nmodel = "user-own-model"')
+      )
+      const plan2 = await codexAdapter.planAttach(
         { mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo' },
         await loadConfig()
       )
-      await applyChanges('codex', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      await applyChanges('codex', 'attach', plan2.changes, { yes: true, redactions: [TOKEN] })
       const root = readRoot(h.home)
-      expect(root.profiles.demo.model).toBe('user-model') // 用户字段原样保留，未被整条替换
-      expect(root.profiles.demo.model_reasoning_effort).toBe('high')
-      expect(root.profiles.demo.model_provider).toBeUndefined() // 未被我们写入
-      expect(plan.notes.some((n) => n.includes('demo'))).toBe(true) // note 点名跳过
-      expect(plan.notes.some((n) => n.includes('用户自设') || n.includes('user-defined'))).toBe(true)
+      expect(root.profiles.demo).toEqual({ model: 'user-own-model' }) // 用户定义原样保留，不被劫持成 modeldock
+      expect(plan2.notes.some((n) => n.includes('demo'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
+  it('直连模式不写 profiles（modeldock 条目=单一直连上游，烤入其他路由默认模型必 400）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgMulti())
+      const plan = await codexAdapter.planAttach(
+        {
+          mode: 'gateway',
+          gatewayPort: 8687,
+          token: TOKEN,
+          profile: 'demo',
+          direct: { base_url: 'https://up.example.com/v1', base_url_responses: 'https://up.example.com/responses', protocol: 'openai', key: 'sk-x', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      const after = tomlParse(plan.changes[0]!.after) as Record<string, any>
+      expect(after.profiles).toBeUndefined() // 多路由 profiles 只在网关模式烤入
+      expect(after.model_catalog_json).toBeUndefined() // 直连同口径（既有行为）
     } finally {
       delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
       h.restore()
@@ -165,6 +190,32 @@ describe('codex profiles 多路由', () => {
       await applyChanges('codex', 'detach', det.changes, { yes: true, redactions: [TOKEN] })
       const root = readRoot(h.home)
       expect(root.profiles).toBeUndefined()
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
+
+  it('attach 未带 --set-default → detach 同样收回自家 profiles 条目（收回不锁根级接管态）', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgMulti())
+      const plan = await codexAdapter.planAttach(
+        { mode: 'gateway', gatewayPort: 8687, token: TOKEN, profile: 'demo' }, // 不设 setDefault：根级 provider 保持用户原值
+        await loadConfig()
+      )
+      await applyChanges('codex', 'attach', plan.changes, { yes: true, redactions: [TOKEN] })
+      const before = readRoot(h.home)
+      expect(before.model_provider).toBeUndefined() // 根级未被接管
+      expect(before.profiles.demo).toBeDefined() // profiles 条目照写（codex -p 不依赖根级接管）
+      expect(before.model_catalog_json).toBeDefined()
+      const det = await codexAdapter.planDetach(await loadConfig())
+      await applyChanges('codex', 'detach', det.changes, { yes: true, redactions: [TOKEN] })
+      const root = readRoot(h.home)
+      expect(root.model_providers?.modeldock).toBeUndefined()
+      expect(root.profiles).toBeUndefined() // 自家条目收回，不残留指向已删 provider 的死引用
+      expect(root.model_catalog_json).toBeUndefined()
     } finally {
       delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
       h.restore()

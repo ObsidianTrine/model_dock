@@ -4,6 +4,7 @@ import { getSecret, setSecret, defaultStore } from '../config/secrets.js'
 import { mutateConfig, loadConfig } from '../config/store.js'
 import { DEFAULT_UPDATE_REPO } from '../config/types.js'
 import { checkUpdate, cleanUpdateRemnants, runUpdate } from '../update/run.js'
+import { runRestore } from '../update/rollback.js'
 import { acquireUpdateLock } from '../update/lock.js'
 
 /** PAT 在 secrets 里的固定 id（key_ref 存 config.toml [update].token_ref） */
@@ -11,7 +12,7 @@ export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 
 /** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
  *  匿名更新/PAT 取舍口径见 config UpdateConfig.token_ref 注（types.ts） */
-export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean; json?: boolean }): Promise<void> {
+export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean; json?: boolean; restore?: boolean }): Promise<void> {
   // --clean 纯本地清理，不需要令牌与网络；但必须持更新锁——恰逢另一 update 在 rename dance
   // （旧 exe 已改名 .old、新 exe 未落位）或 mac 回滚窗口时，裸删 .old 会让失败回滚无从执行
   if (opts.clean) {
@@ -20,6 +21,21 @@ export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: 
       await cleanUpdateRemnants(process.execPath)
     } finally {
       release()
+    }
+    return
+  }
+
+  // --restore 纯本地对换（零下载），同样不需要令牌与网络；锁由 runRestore 自持
+  if (opts.restore) {
+    const confirmFn = opts.yes ? async () => true : (message: string) => confirm({ message })
+    try {
+      await runRestore({ yes: opts.yes === true, confirm: confirmFn })
+    } catch (e) {
+      // 与更新链同款收尾：exitCode 语义 + UpdateError hint 两行式
+      const err = e as Error & { hint?: string }
+      console.error(c.red(`✗ ${err.message}`))
+      if (err.hint) console.error(c.yellow(t('提示: {h}', 'Hint: {h}', { h: err.hint })))
+      process.exitCode = 1
     }
     return
   }

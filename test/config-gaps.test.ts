@@ -71,6 +71,60 @@ describe('store：migrate 版本与形状守卫（错误路径）', () => {
   })
 })
 
+describe('store：容器条目形状守卫（tableEntriesOrEmpty）', () => {
+  it('providers 标量条目（providers.x = "hi"）→ ConfigError 指名 providers.x，不抛原始 TypeError', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(configPath(), '[providers]\nx = "hi"\n')
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadConfig()).rejects.toThrow(/providers\.x/)
+      await expect(loadConfig()).rejects.toThrow(/表|table/)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('harness / profiles 标量条目 → ConfigError 指名条目键', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(configPath(), '[harness]\ncc = "direct"\n')
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadConfig()).rejects.toThrow(/harness\.cc/)
+      await atomicWrite(configPath(), '[profiles]\np = "x"\n')
+      await expect(loadConfig()).rejects.toThrow(/profiles\.p/)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('adapter_packs 标量（adapter_packs = 5）→ ConfigError（此前裸 as 直放行、用点崩 TypeError）', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(configPath(), 'adapter_packs = 5\n')
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      await expect(loadConfig()).rejects.toThrow(/adapter_packs/)
+      // 数组同样拦下
+      await atomicWrite(configPath(), 'adapter_packs = []\n')
+      await expect(loadConfig()).rejects.toThrow(/adapter_packs/)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('缺省 adapter_packs 语义不变（undefined，不落空表）；合法表条目照常通过', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = await loadConfig()
+      expect(cfg.adapter_packs).toBeUndefined()
+      await atomicWrite(configPath(), '[adapter_packs.mypack]\nformat = "json"\nconfig_file = "~/.x.json"\n')
+      const cfg2 = await loadConfig()
+      expect(cfg2.adapter_packs?.mypack?.format).toBe('json')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
 describe('store：normalizeGateway 规范化与 mutateConfig 失败语义', () => {
   it('已退役 tray_lite 键读入即剥除；已带 dayFilter 的窗口原样保留', async () => {
     const h = fakeHome()
