@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { toIsoLocal } from './events.mjs';
+import { splitAcceptanceItems } from './queue.mjs';
 
 /** worker 结束前必须产出的契约块标记（fenced code block 的语言名）。 */
 export const RESULT_MARKER = 'agents-result';
@@ -57,7 +58,7 @@ export function buildWorkerPrompt(card, ctx) {
   parts.push(
     `# 结束纪律（必须遵守）\n\n` +
       `0. 开工第一件事：把托运单**复诵**进 NOTES.md——目的地（目标）、交货标准（验收标准）、禁航区（红线）、航次计划各一行。船长（编排器）与验船师会核对复诵与执行是否一致；复诵即承诺。\n` +
-      `1. 报告 done 之前，亲自跑一遍测试命令（见验收标准）确认全绿——orchestrator 会机器复核，自报与实测不符时以实测为准。\n` +
+      `1. 报告 done 之前，亲自跑一遍测试命令（见验收标准）确认全绿；代码类改动再跑 \`npm run build\`（或验收标准指定的构建/类型检查命令）确认编译通过——orchestrator 会机器复核，自报与实测不符时以实测为准。\n` +
       `2. 收尾现场干净：本卡全部改动已在 worktree 内 git add + git commit，NOTES.md 已更新。\n` +
       `3. 只做本卡范围内的事（对照验收标准与预期改动范围）：不顺手重构、不修无关问题——越界改动会被门禁打回。\n` +
       `4. 权限拒绝熔断：同一条 shell 命令被权限系统拒绝满 2 次，立即停止重试（不要换写法绕过、不要派子代理），\n` +
@@ -74,9 +75,12 @@ export function buildWorkerPrompt(card, ctx) {
       `summary: 一句话说明做了什么\n` +
       `files_changed: ["相对 worktree 的路径", ...]\n` +
       `tests: pass | fail\n` +
+      `acceptance: <已满足的验收条数>/<总条数>（如 2/3）\n` +
       `notes_updated: true | false\n` +
       `${contractFence}\n\n` +
       `- status=stuck 表示你无法继续（缺信息/遇到红线/反复失败），此时必须在 NOTES.md 留全现场。\n` +
+      `- acceptance 逐条对照任务层验收标准如实申报（如 1/3）；申报有缺口会直接送返工，\n` +
+      `  虚报满额会被门禁与审查实测打回——如实报告即可。\n` +
       `- 无论自报什么，orchestrator 都会亲自跑门禁验证；自报不可信，如实报告即可。`
   );
 
@@ -109,12 +113,13 @@ export function buildPromptFileRefBody({ promptPath, card, ctx, originalChars = 
     `# 契约层：结束前必须输出结果块\n\n` +
     `任务收尾时（提交完成之后），在回复的**最末尾**输出一个 fenced block（字段说明见简报文件）：\n\n` +
     `${contractFence}${RESULT_MARKER}\n` +
-    `status: done | stuck\n` +
-    `summary: 一句话说明做了什么\n` +
-    `files_changed: ["相对 worktree 的路径", ...]\n` +
-    `tests: pass | fail\n` +
-    `notes_updated: true | false\n` +
-    `${contractFence}\n`
+      `status: done | stuck\n` +
+      `summary: 一句话说明做了什么\n` +
+      `files_changed: ["相对 worktree 的路径", ...]\n` +
+      `tests: pass | fail\n` +
+      `acceptance: <已满足的验收条数>/<总条数>（如 2/3）\n` +
+      `notes_updated: true | false\n` +
+      `${contractFence}\n`
   );
 }
 
@@ -125,12 +130,24 @@ export function buildPromptFileRefBody({ promptPath, card, ctx, originalChars = 
  * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 不列具体红线）
  * @param {string} discipline 审查纪律文本（如 REVIEW.md 摘要；缺省 = 不注入——
  *   与人工/PR 审查同一套失败形态与红线标准，异构引擎 + 同一纪律）
+ * @param {object} reviewContext 可选审查上下文 { notesRecap?, recitationFact? }：
+ *   notesRecap = worktree NOTES.md 复诵段（截 800 字）；recitationFact = 编排器确定性
+ *   预检事实句（复诵缺失/疑似模板）。两者都以事实形式交给 reviewer 裁决，不直接阻断。
  */
-export function buildReviewerPrompt(card, diff, redlines = '', discipline = '') {
+export function buildReviewerPrompt(card, diff, redlines = '', discipline = '', reviewContext = {}) {
   const { meta, body } = card;
+  const accItems = splitAcceptanceItems(body.acceptance);
+  const accList = accItems.length
+    ? accItems.map((it, i) => `   ${i + 1}. ${it}`).join('\n')
+    : `   （验收标准为空——请评估目标本身是否可验证）`;
+  const reciteNote = (reviewContext.notesRecap || reviewContext.recitationFact)
+    ? `\n5. **复诵核对**：worker 开工时按纪律第 0 条把目标/验收/红线/计划复诵进了 NOTES.md。请核对复诵与卡内容、实际 diff 是否一致——复诵与实际改动矛盾计阻塞项。\n` +
+      (reviewContext.recitationFact ? `   编排器预检事实：${reviewContext.recitationFact}\n` : '') +
+      (reviewContext.notesRecap ? `   <NOTES.md 复诵段（截 800 字）>\n${reviewContext.notesRecap}\n   </NOTES.md>\n` : '')
+    : '';
   const plannerNote =
     meta.created_by === 'planner'
-      ? `\n5. **本任务卡由 Planner 自动生成**：请额外评估「验收标准」本身的完备性——是否空洞（如只有"测试全绿"而无具体行为断言）、是否真正覆盖了意图、是否存在 Planner 幻觉（引用不存在的文件/端点）。验收标准不合格同样计阻塞项。\n`
+      ? `\n- **本任务卡由 Planner 自动生成**：请额外评估「验收标准」本身的完备性——是否空洞（如只有"测试全绿"而无具体行为断言）、是否真正覆盖了意图、是否存在 Planner 幻觉（引用不存在的文件/端点）。验收标准不合格同样计阻塞项。\n`
       : '';
   const redlineNote = redlines ? `（${redlines}）` : '';
   const disciplineNote = discipline
@@ -139,10 +156,10 @@ export function buildReviewerPrompt(card, diff, redlines = '', discipline = '') 
   return (
     `请审查这个 diff。任务目标是：${body.goal}\n\n` +
     `请检查：\n` +
-    `1. 改动是否完整实现了目标（对照验收标准：\n${body.acceptance}\n）？\n` +
+    `1. 逐条核对验收标准（共 ${accItems.length} 条；每条给出 pass/fail 判定与一句证据，任一 fail 计入 blockers）：\n${accList}\n` +
     `2. 有没有引入明显 bug、安全问题、或破坏项目红线${redlineNote}？\n` +
     `3. 测试是否覆盖了改动路径？\n` +
-    `4. 有没有不必要的改动混入（顺手重构、无关格式化、超出预期范围：${meta.files_hint.join(', ')}）？\n${plannerNote}\n` +
+    `4. 有没有不必要的改动混入（顺手重构、无关格式化、超出预期范围：${meta.files_hint.join(', ')}）？\n${reciteNote}${plannerNote}\n` +
     disciplineNote +
     `只报告问题，不修改代码。每个问题给出严重级别（阻塞/建议/提示）。输出末尾用一行汇总：\n` +
     `REVIEW_SUMMARY: blockers=<n> suggestions=<n> notes=<n>\n\n` +
@@ -158,8 +175,63 @@ export function parseReviewVerdict(text) {
 }
 
 /**
+ * reviewer 契约行补问（⑤）：有审查输出但缺 REVIEW_SUMMARY 行时先补问一次再判罚——
+ * 直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）。输入只有上轮
+ * 输出截尾，不重放 diff：补问只求补一行汇总，不重开审查。
+ */
+export function buildReviewRetryPrompt(prevOutput) {
+  const fence = '```';
+  const tail = String(prevOutput ?? '').split('\n').slice(-60).join('\n');
+  return (
+    `你上一轮的审查输出缺少末尾汇总行。请只补输出这一行，不要重复审查、不要输出其他内容：\n\n` +
+    `REVIEW_SUMMARY: blockers=<n> suggestions=<n> notes=<n>\n\n` +
+    `（blockers = 阻塞项数量；若你上轮未发现阻塞项则 blockers=0。）\n\n` +
+    `# 你上一轮的输出（截尾 60 行）\n\n${fence}\n${tail}\n${fence}\n`
+  );
+}
+
+/**
+ * 解析 worker 契约块的 acceptance 申报（"m/n" 形态）；解析不出返回 null
+ * （旧契约块 / 自由文本兼容——申报对账只对能解析的申报生效）。
+ */
+export function parseAcceptanceDeclared(value) {
+  const m = /^(\d+)\s*\/\s*(\d+)$/.exec(String(value ?? '').trim());
+  if (!m) return null;
+  const met = parseInt(m[1], 10);
+  const total = parseInt(m[2], 10);
+  return Number.isFinite(met) && Number.isFinite(total) && total > 0 ? { met, total } : null;
+}
+
+/**
+ * 复诵核对（closed-loop repeat-back 的机器面）：识别 worktree NOTES.md 是否执行了
+ * 纪律第 0 条的复诵协议。只产出「事实」供 reviewer 裁决，不直接阻断——自报不可信
+ * 原则下复诵缺失本身不定罪，但必须照亮。双探针启发式：
+ * ① 复诵关键词（目的地/交货标准/禁航区/航次计划——start 模板不含这些词，命中即人写）；
+ * ② 目标文本重叠（目标前 12 字归一化后出现在 NOTES 里 = 用自己的话复述了目标）。
+ * @param {string} notes worktree NOTES.md 全文（可为空）
+ * @param {object} card loadCard 返回值 { meta, body }
+ * @returns {{ present: boolean, fact: string }} fact = '' 表示复诵在且非模板；否则为注入 reviewer 的事实句
+ */
+export function checkRecitation(notes, card) {
+  const text = String(notes ?? '');
+  if (!text.trim()) return { present: false, fact: 'NOTES.md 不存在或为空——复诵协议未执行。' };
+  const RECAP_MARKERS = ['目的地', '交货标准', '禁航区', '航次计划'];
+  if (RECAP_MARKERS.filter((k) => text.includes(k)).length >= 2) return { present: true, fact: '' };
+  const norm = (s) => String(s ?? '').replace(/[\s\p{P}\p{S}]+/gu, '');
+  const goalKey = norm(card?.body?.goal).slice(0, 12);
+  if (goalKey.length >= 6 && norm(text).includes(goalKey)) return { present: true, fact: '' };
+  const templateOnly = text.includes('<一句话说明') || text.includes('船位（已完成）：');
+  return {
+    present: false,
+    fact: templateOnly
+      ? 'NOTES.md 仍是 start 模板原文——复诵协议未执行（纪律第 0 条）。'
+      : 'NOTES.md 有内容但未检测到复诵段（复诵关键词与目标文本重叠均未命中）。',
+  };
+}
+
+/**
  * 组装 fixup prompt（调试子循环 / 审查返工共用：失败输出尾部注入，同 worktree 续做）。
- * @param {string} reasonTag 'test_failure' | 'build_failure' | 'review_blockers'
+ * @param {string} reasonTag 'test_failure' | 'build_failure' | 'review_blockers' | 'acceptance_gap'
  */
 export function buildFixupPrompt(card, ctx, reasonTag, failureOutput, iteration) {
   const tail = failureOutput.split('\n').slice(-200).join('\n');
