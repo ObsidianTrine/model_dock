@@ -466,6 +466,40 @@ describe('客户端安装并接入', () => {
     expect(isNpmGlobalInstall('')).toBe(false)
   })
 
+  // CodeQL ReDoS 改造（token 化）后的语义等价回归：-g/--global 必须出现在首个非 flag token 之前
+  it('isNpmGlobalInstall：token 化边界（flag 段顺序、大小写、多空白）', () => {
+    // 基础形态
+    expect(isNpmGlobalInstall('npm i -g foo')).toBe(true)
+    expect(isNpmGlobalInstall('npm install --global')).toBe(true)
+    // 怪癖保留：包名（非 flag token）在 -g 之前 → flag 段无法越过 → 不匹配
+    expect(isNpmGlobalInstall('npm i foo -g')).toBe(false)
+    expect(isNpmGlobalInstall('npm i @scope/pkg --global')).toBe(false)
+    // -gx ≠ -g（前缀不算）
+    expect(isNpmGlobalInstall('npm i -gx')).toBe(false)
+    expect(isNpmGlobalInstall('npm i --globals x')).toBe(false)
+    // 先 flag 后 -g
+    expect(isNpmGlobalInstall('npm i --silent -g x')).toBe(true)
+    // Windows npm 包装名
+    expect(isNpmGlobalInstall('npm.cmd i -g x')).toBe(true)
+    expect(isNpmGlobalInstall('npm.CMD i -g x')).toBe(false)
+    // 大小写敏感
+    expect(isNpmGlobalInstall('NPM i -g x')).toBe(false)
+    expect(isNpmGlobalInstall('npm I -g x')).toBe(false)
+    // 多连续空白（含制表符）
+    expect(isNpmGlobalInstall('npm  i   -g  x')).toBe(true)
+    expect(isNpmGlobalInstall('npm\ti\t-g\tx')).toBe(true)
+    expect(isNpmGlobalInstall('  npm i -g x  ')).toBe(true)
+    // 裸 '-' 不是 flag，flag 段在其处截断
+    expect(isNpmGlobalInstall('npm i - -g x')).toBe(false)
+    // -- 结尾 / --global=x 不是 -g 本体
+    expect(isNpmGlobalInstall('npm i --')).toBe(false)
+    expect(isNpmGlobalInstall('npm i --global=x')).toBe(false)
+    // 短命令
+    expect(isNpmGlobalInstall('npm i')).toBe(false)
+    expect(isNpmGlobalInstall('npm')).toBe(false)
+    expect(isNpmGlobalInstall('npm info -g x')).toBe(false)
+  })
+
   it('沙箱 gate：脚本类安装拒绝执行（blocked），bootstrap 不写', async () => {
     const h = fakeHome()
     try {
