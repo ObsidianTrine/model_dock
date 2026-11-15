@@ -117,7 +117,17 @@ export async function recordBareRollback(execPath: string, trayReplaced: boolean
 /** win-setup 弹 Inno 向导前备份当前 exe（向导原地替换不留旧版）。此刻网关与托盘已停，
  *  copy 读完全安全；托盘备份失败降级（还原时只还原主程序）。 */
 export async function backupWinSetupExes(execPath: string): Promise<void> {
-  const destDir = path.join(updatesRollbackDir(), VERSION)
+  const rootDir = updatesRollbackDir()
+  const destDir = path.join(rootDir, VERSION)
+  // 单槽账本只索引当前槽：写新槽前收掉非当前版本的兄弟目录，否则换槽后旧槽（约 30MB）成孤儿
+  const entries = await fsp.readdir(rootDir).catch(() => [] as string[])
+  await Promise.all(
+    entries
+      .filter((name) => name !== VERSION)
+      .map((name) =>
+        fsp.rm(path.join(rootDir, name), { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {})
+      )
+  )
   await fsp.mkdir(destDir, { recursive: true })
   const destMain = path.join(destDir, 'modeldock.exe')
   await fsp.copyFile(execPath, destMain)
@@ -146,19 +156,23 @@ export async function swapWithSlot(slot: string, target: string): Promise<void> 
   if (!fs.existsSync(slot)) {
     throw new UpdateError(t('上一版备份不在位：{p}', 'The retained backup is missing: {p}', { p: slot }))
   }
-  await fsp.rename(slot, tmp) // 槽位先挪开（目标同名的 rename 在 Windows 会失败）
-  const hadTarget = fs.existsSync(target)
+  let moved = false
   let parked = false
   try {
+    // 槽位先挪开（目标同名的 rename 在 Windows 会失败）。首发 rename 必须在 try 内：
+    // 槽位与安装目录异盘时只有这一发能抛 EXDEV，挪出去 catch 接不住、copy 降级不可达
+    await fsp.rename(slot, tmp)
+    moved = true
+    const hadTarget = fs.existsSync(target)
     if (hadTarget) {
       await fsp.rename(target, slot) // 当前版 park 进槽位（对换；运行中文件改名安全）
       parked = true
     }
     await fsp.rename(tmp, target)
   } catch (e) {
-    // 回滚原状：parked 挪回 target、槽位挪回 slot（EXDEV 时 rename(target→slot) 未发生，只差最后一步）
+    // 回滚原状：parked 挪回 target、上一版挪回 slot（首发 EXDEV 时两步都未发生，无可回滚）
     if (parked) await fsp.rename(slot, target).catch(() => {})
-    await fsp.rename(tmp, slot).catch(() => {})
+    if (moved) await fsp.rename(tmp, slot).catch(() => {})
     if (isExdev(e)) {
       await swapWithSlotByCopy(slot, target)
       return
@@ -169,21 +183,29 @@ export async function swapWithSlot(slot: string, target: string): Promise<void> 
 }
 
 /** 跨卷兜底（EXDEV，win-setup 的 ~/.modeldock 与安装目录异盘的边角）：
+ *  上一版先 copy 到 <target>.new（拷贝期间安装位原样在位，Windows 不给运行中 exe 留空窗）→
  *  当前版 park 为 <target>.old（运行中 exe 可改名，留给既有 cleanOldVersions 清扫）→
- *  上一版 copy 到 <target>.new 再落位 → 当前版 copy 回填槽位（对换不丢切回能力）。
+ *  staging rename 落位 → 当前版 copy 回填槽位（对换不丢切回能力）。
  *  导出供单测直测（EXDEV 无法在同卷环境确定性触发，机制按本函数验证）。 */
 export async function swapWithSlotByCopy(slot: string, target: string): Promise<void> {
   const oldPark = target + '.old'
   await fsp.rm(oldPark, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {})
-  const hadTarget = fs.existsSync(target)
-  if (hadTarget) await fsp.rename(target, oldPark)
   const staging = target + '.new'
+  await fsp.rm(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(() => {})
   try {
     await fsp.copyFile(slot, staging)
     if (process.platform !== 'win32') await fsp.chmod(staging, 0o755)
-    await fsp.rename(staging, target)
+  } catch (e) {
+    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {})
+    throw e
+  }
+  const hadTarget = fs.existsSync(target)
+  try {
+    if (hadTarget) await fsp.rename(target, oldPark)
+    await fsp.rename(staging, target) // target 缺位窗口只有这两次 rename 之间
   } catch (e) {
     if (hadTarget) await fsp.rename(oldPark, target).catch(() => {})
+    await fsp.rm(staging, { recursive: true, force: true }).catch(() => {})
     throw e
   }
   try {
@@ -307,19 +329,38 @@ export async function runRestore(opts: RestoreRunOptions): Promise<RestoreRunRes
     await deps.stopGateway()
     await deps.stopTray(log)
     const prevVersion = VERSION
-    let traySwapped = false
+    // 账本翻转：槽位现在装的是刚被换下的版本（再点一次「还原」可免费切回）。
+    // 对换成功立即落盘、先于任何拉起——否则拉起失败误报「还原失败」，且账本停在旧版
+    // 会被下次还原的陈旧槽判定误清，丢掉免费切回能力
+    const flipLedger = async (traySwapped: boolean) => {
+      const flipped: RollbackSlot = { version: prevVersion, shape: slot.shape, mainPath: slot.mainPath, recordedAt: Date.now() }
+      if (traySwapped && slot.trayPath) flipped.trayPath = slot.trayPath
+      await saveRollbackSlot(flipped).catch(() => {})
+    }
+    // 拉起失败不进外层 catch：还原本身已成功，只单独告警 + 给手动启动指引
+    const launchSafe = (fn: () => void, hint: string): boolean => {
+      try {
+        fn()
+        return true
+      } catch (e) {
+        log(c.yellow(t('⚠ 还原成功，但启动失败：{m}。{h}', '⚠ Restore succeeded, but the launch failed: {m}. {h}', { m: (e as Error).message, h: hint })))
+        return false
+      }
+    }
     try {
       if (slot.shape === 'mac-app') {
         const appRoot = appRootFromExecPath(execPath)
         if (!appRoot) throw new UpdateError(t('无法定位 ModelDock.app 安装位置', 'Cannot locate the ModelDock.app install path'))
         await restoreMacApp(appRoot, log)
+        await flipLedger(false)
         log(c.green(t('✓ 已还原到 v{v}，正在重新启动 ModelDock…', '✓ Restored to v{v}; restarting ModelDock…', { v: slot.version })))
-        deps.openApp(appRoot)
+        launchSafe(() => deps.openApp(appRoot), t('请手动打开 ModelDock', 'Open ModelDock manually'))
       } else {
         // bare / win-bare / win-setup 同一套对换：槽位旧版 ↔ 当前版，托盘随主程序一并还原
         await swapWithSlot(slot.mainPath, execPath)
         log(c.green(t('✓ 已还原主程序到 v{v}', '✓ Main program restored to v{v}', { v: slot.version })))
         const targetTray = path.join(path.dirname(execPath), trayEntryName())
+        let traySwapped = false
         if (trayPath) {
           try {
             await swapWithSlot(trayPath, targetTray)
@@ -328,13 +369,17 @@ export async function runRestore(opts: RestoreRunOptions): Promise<RestoreRunRes
             log(c.yellow(t('⚠ 托盘还原失败（主程序已还原）：{m}。旧托盘若还在运行，手动重启即可', '⚠ Tray restore failed (main program restored): {m}. If the old tray is still running, restart it manually', { m: (e as Error).message })))
           }
         }
+        await flipLedger(traySwapped)
         if (wasLive) {
-          deps.spawnDetached(execPath, ['--sea-gateway'])
-          log(c.green(t('✓ 网关已按原状态拉起', '✓ Gateway restarted as before')))
+          if (launchSafe(() => deps.spawnDetached(execPath, ['--sea-gateway']), t('可手动启动：modeldock gateway start --daemon', 'Start it manually with `modeldock gateway start --daemon`'))) {
+            log(c.green(t('✓ 网关已按原状态拉起', '✓ Gateway restarted as before')))
+          }
           // 托盘不在这里抢拉：daemon 就绪后由 spawnTrayWhenGatewayReady 补拉（与更新同口径）
         } else {
           log(c.gray(t('网关之前未在运行，未自动拉起（需要时：modeldock gateway start --daemon）', 'The gateway was not running; not started automatically (start with: modeldock gateway start --daemon)')))
-          if (fs.existsSync(targetTray)) deps.startTray(targetTray)
+          if (fs.existsSync(targetTray)) {
+            launchSafe(() => deps.startTray(targetTray), t('可手动启动托盘', 'Start the tray manually'))
+          }
         }
       }
     } catch (e) {
@@ -342,11 +387,6 @@ export async function runRestore(opts: RestoreRunOptions): Promise<RestoreRunRes
       log(c.yellow(t('网关当前已停止。重试：modeldock update --restore；或先启动网关：modeldock gateway start --daemon', 'The gateway is now stopped. Retry with `modeldock update --restore`; or start the gateway first with `modeldock gateway start --daemon`')))
       throw e
     }
-
-    // 账本翻转：槽位现在装的是刚被换下的版本（再点一次「还原」可免费切回）
-    const flipped: RollbackSlot = { version: prevVersion, shape: slot.shape, mainPath: slot.mainPath, recordedAt: Date.now() }
-    if (traySwapped && slot.trayPath) flipped.trayPath = slot.trayPath
-    await saveRollbackSlot(flipped).catch(() => {})
 
     await writeUpdateProgress('restarting', 0, 0)
     log(c.green(t('还原完成。当前 v{v}（备份已换持 v{p}，可再次还原切回）', 'Restore finished. Now running v{v} (the backup now holds v{p}; restore again to switch back)', { v: slot.version, p: prevVersion })))

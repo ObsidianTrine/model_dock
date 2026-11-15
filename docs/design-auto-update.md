@@ -231,8 +231,8 @@ modeldock update --clean       # 清理 .old 残留（darwin/win）
 - PAT 最小权限（fine-grained、单仓库、只读 Contents），存 `secrets.json`（0600，程序管理，不进 config.toml、不打日志）。
 - 上一版保留（更新成功即自动，单槽）：
   - darwin .app / 裸二进制：换装本就留 `<安装位置>.old`（含托盘 `.old`），账本 `~/.modeldock/updates/rollback.json` 只做索引，不动 `.old` 原位（同目录 rename 保住换装失败的即时回滚）；
-  - win 安装器版：Inno 原地替换不留旧版——弹向导前把 `modeldock.exe` / `ModelDockTray.exe` 复制进 `~/.modeldock/updates/rollback/<ver>/`（单槽约 30MB）。
-- 一键还原 `modeldock update --restore` / 托盘「还原更新」（2026-11-13）：**对换式**——槽位旧版 ↔ 当前版互换，完成后账本翻转版本号，再点一次可免费切回，双向零下载。Windows 全程 rename（运行中 exe 可改名不可覆盖/删除，被换下的当前版 park 为 `<target>.old` 留给 `--clean`）；跨卷 rename EXDEV 降级 copy+rename。槽位 version === 当前版本视为陈旧槽（向导被取消 / 翻转失败兜底），入口自动隐藏、还原时清除；`--clean` 连账本与回滚目录一并清。
+  - win 安装器版：Inno 原地替换不留旧版——弹向导前把 `modeldock.exe` / `ModelDockTray.exe` 复制进 `~/.modeldock/updates/rollback/<ver>/`（单槽约 30MB，写新槽前自动清掉非当前版本的兄弟目录，换槽不留旧槽孤儿）。
+- 一键还原 `modeldock update --restore` / 托盘「还原更新」（2026-11-13）：**对换式**——槽位旧版 ↔ 当前版互换，对换成功即翻转账本（先于拉起；拉起失败单独告警「还原成功但启动失败」，不回滚、不误清账本），再点一次可免费切回，双向零下载。Windows 同卷全程 rename（运行中 exe 可改名不可覆盖/删除，被换下的当前版 park 进槽位）；槽位与安装目录异盘时首发 rename 抛 EXDEV，降级 copy+rename——上一版先 copy 到 `<target>.new` 再连做两次 rename 落位（安装位缺位窗口只夹在两次 rename 之间），被换下的当前版 park 为 `<target>.old` 留给 `--clean`。槽位 version === 当前版本视为陈旧槽（向导被取消 / 翻转失败兜底），入口自动隐藏、还原时清除；`--clean` 连账本与回滚目录一并清。
 - 更新器**永不**执行未通过校验的二进制；`open`/spawn 的目标路径全部来自安装位置的推导而非 manifest 字段。
 
 ## 9. 测试红线（沿用 AGENTS 并强调）
