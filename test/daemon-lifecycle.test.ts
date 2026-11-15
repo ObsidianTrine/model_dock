@@ -311,7 +311,7 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       // 报错不蒸发：端口口径 + 实际收到值 + 修复示例都到用户眼前
       expect(output()).toContain('端口必须是 1–65535 的整数')
       expect(output()).toContain('notanumber')
-      expect(output()).toContain('gateway start --port 8890')
+      expect(output()).toContain('gateway start --port 18901')
       // daemon 未被拉起（校验发生在 spawn 之前，吸收 2026-11-12 审查 F12 批次断言）
       expect(fs.existsSync(path.join(h.home, '.modeldock', 'gateway.json'))).toBe(false)
     } finally {

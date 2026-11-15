@@ -320,6 +320,38 @@ describe('codex 直连守卫', () => {
       h.restore()
     }
   })
+
+  it('路由态 attach → 直接切直连 re-attach：路由态 profiles 条目与 catalog 指针收回、直连配置照写', async () => {
+    const h = fakeHome()
+    process.env.MODELRDOCK_FAKE_CODEX_PRESENT = '1'
+    try {
+      await saveConfig(cfgWithModels())
+      // 先网关态接入：烤 profiles 多路由 + catalog 指针（路由态残留源头）
+      await attach()
+      const before = readRoot(h.home)
+      expect(before.model_catalog_json).toBe(codexCatalogPath())
+      expect(before.profiles.demo).toEqual({ model_provider: 'modeldock', model: 'glm-5-3-flash-260828' })
+      // 不经 detach 直接切直连重接（此前该过渡整块跳过收回，/model 仍列旧服务商模型）
+      const plan2 = await codexAdapter.planAttach(
+        {
+          mode: 'gateway', gatewayPort: 8687, token: TOKEN, setDefault: true, profile: 'demo',
+          direct: { base_url: 'https://up.example.com/v1', base_url_responses: 'https://up.example.com/responses', protocol: 'openai', key: 'sk-x', auth_style: 'bearer' },
+        },
+        await loadConfig()
+      )
+      await applyChanges('codex', 'attach', plan2.changes, { yes: true, redactions: ['sk-x'] })
+      const after = readRoot(h.home)
+      expect(after.model_catalog_json).toBeUndefined() // 自家指针收回，/model 回落内置预设
+      expect(after.profiles).toBeUndefined() // 自家条目收空整键删（不留死路由）
+      expect(after.model_provider).toBe('modeldock') // 直连配置照写
+      expect((after.model_providers?.modeldock as Record<string, unknown>)?.base_url).toBe('https://up.example.com/responses')
+      expect(plan2.notes.some((n) => n.includes('收回') && n.includes('model_catalog_json'))).toBe(true)
+      expect(plan2.notes.some((n) => n.includes('收回') && n.includes('profiles'))).toBe(true)
+    } finally {
+      delete process.env.MODELRDOCK_FAKE_CODEX_PRESENT
+      h.restore()
+    }
+  })
 })
 
 describe('buildCodexCatalog 单元', () => {

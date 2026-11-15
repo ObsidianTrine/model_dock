@@ -105,4 +105,29 @@ describe('ship-selfcheck > 机器自检 runner', () => {
     const r3 = spawnSync(process.execPath, [scriptPath, bad], { encoding: 'utf8' })
     expect(r3.status).toBe(2)
   })
+
+  it('清单项非法正则：不裸栈冒顶，落 bootstrap 文案按清单错误 exit 2', () => {
+    // grepZero 非法正则（[ 未闭合）：旧实现 new RegExp 裸 SyntaxError exit 1，与 FAIL 不可区分
+    const r1 = run({ file: 'index.html', grepZero: ['[未闭合'] }, GOOD_HTML)
+    expect(r1.status).toBe(2)
+    expect(r1.stderr).toContain('FAIL bootstrap — 清单错误')
+    // countAtLeast 非法 pattern 同口径（多检查项共用 runItem 收口；*x = nothing to repeat）
+    const r2 = run({ file: 'index.html', countAtLeast: [{ pattern: '*x', atLeast: 1 }] }, GOOD_HTML)
+    expect(r2.status).toBe(2)
+    expect(r2.stderr).toContain('FAIL bootstrap — 清单错误')
+  })
+
+  it('多 script 块逐块检查：第二块语法错 FAIL 并报告块序号；全好块 PASS 计块数', () => {
+    // 旧实现只检第一个 <script> 块，第二块起的语法错漏检
+    const twoBlocks = GOOD_HTML.replace('</body>', '<script>(() => { const y = ( })();</script></body>')
+    const r = run({ file: 'index.html', jsSyntax: true }, twoBlocks)
+    expect(r.status).toBe(1)
+    expect(r.stdout).toContain('FAIL jsSyntax')
+    expect(r.stdout).toContain('第 2 块')
+    // 对照组：两块全好 → PASS 且报出块数（证明逐块都检了）
+    const twoGood = GOOD_HTML.replace('</body>', '<script>(() => { const y = 1; })();</script></body>')
+    const rOk = run({ file: 'index.html', jsSyntax: true }, twoGood)
+    expect(rOk.status).toBe(0)
+    expect(rOk.stdout).toContain('PASS jsSyntax 2 块')
+  })
 })

@@ -12,12 +12,13 @@
 //   "countAtLeast": [{ "pattern": "@keyframes slideX\\b", "atLeast": 1, "flags": "g" }],
 //   "countEqual":   [{ "pattern": "<div class=\"seg\"", "equal": 2 }],
 //   "tagBalance": ["div", "i", "span", "button"],               // 开闭标签数一致
-//   "jsSyntax": true,                                            // 提取 <script> 语法检查
+//   "jsSyntax": true,                                            // 全部 <script> 块逐块语法检查（报告块序号）
 //   "cssBraces": true,                                           // <style> 花括号平衡
 //   "fileSizeMaxKB": 45,
 //   "noExternalRefs": true                                       // 无 script src/link/@import/url(http)
 // }
-// 退出码: 0 全绿 / 1 有 FAIL / 2 清单或环境错误。输出逐行 PASS/FAIL，末尾汇总。
+// 退出码: 0 全绿 / 1 有 FAIL / 2 清单或环境错误（含清单项非法——如正则写错——统一落
+// FAIL bootstrap 文案收口，绝不以裸栈 exit 1 混入 FAIL）。输出逐行 PASS/FAIL，末尾汇总。
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,70 +58,104 @@ const fail = (name, detail) => {
   fails += 1;
 };
 
+// 清单项执行收口（2026-11-15 审查）：清单里的非法正则此前以裸 SyntaxError 冒顶（exit 1 裸栈），
+// 与 FAIL 不可区分且违反「清单错误=exit 2」契约——每个检查项包 try/catch，正则非法/执行异常
+// 统一落 bootstrap 文案按 exit 2 收口。
+const runItem = (fn) => {
+  try {
+    fn();
+  } catch (e) {
+    console.error(`FAIL bootstrap — 清单错误: ${e.message}`);
+    process.exit(2);
+  }
+};
+
 // 1. grepZero：禁词/旧主体名归零（全文含注释）
 for (const pat of list.grepZero ?? []) {
-  const re = new RegExp(pat, 'gu');
-  const hits = [...html.matchAll(re)].length;
-  if (hits === 0) pass(`grepZero /${pat}/ 归零`);
-  else fail(`grepZero /${pat}/`, `命中 ${hits} 处（须为 0）`);
+  runItem(() => {
+    const re = new RegExp(pat, 'gu');
+    const hits = [...html.matchAll(re)].length;
+    if (hits === 0) pass(`grepZero /${pat}/ 归零`);
+    else fail(`grepZero /${pat}/`, `命中 ${hits} 处（须为 0）`);
+  });
 }
 
 // 2. countAtLeast / countEqual：结构计数（keyframes、速度动画声明、组件实例等）
 for (const c of list.countAtLeast ?? []) {
-  const hits = [...html.matchAll(new RegExp(c.pattern, c.flags ?? 'g'))].length;
-  if (hits >= c.atLeast) pass(`countAtLeast /${c.pattern}/ ${hits} >= ${c.atLeast}`);
-  else fail(`countAtLeast /${c.pattern}/`, `命中 ${hits} < ${c.atLeast}`);
+  runItem(() => {
+    const hits = [...html.matchAll(new RegExp(c.pattern, c.flags ?? 'g'))].length;
+    if (hits >= c.atLeast) pass(`countAtLeast /${c.pattern}/ ${hits} >= ${c.atLeast}`);
+    else fail(`countAtLeast /${c.pattern}/`, `命中 ${hits} < ${c.atLeast}`);
+  });
 }
 for (const c of list.countEqual ?? []) {
-  const hits = [...html.matchAll(new RegExp(c.pattern, c.flags ?? 'g'))].length;
-  if (hits === c.equal) pass(`countEqual /${c.pattern}/ = ${c.equal}`);
-  else fail(`countEqual /${c.pattern}/`, `命中 ${hits} ≠ ${c.equal}`);
+  runItem(() => {
+    const hits = [...html.matchAll(new RegExp(c.pattern, c.flags ?? 'g'))].length;
+    if (hits === c.equal) pass(`countEqual /${c.pattern}/ = ${c.equal}`);
+    else fail(`countEqual /${c.pattern}/`, `命中 ${hits} ≠ ${c.equal}`);
+  });
 }
 
 // 3. tagBalance：开闭标签数量一致
 for (const tag of list.tagBalance ?? []) {
-  const open = (html.match(new RegExp(`<${tag}(\\s|>)`, 'g')) ?? []).length;
-  const close = (html.match(new RegExp(`</${tag}>`, 'g')) ?? []).length;
-  if (open === close && open > 0) pass(`tagBalance <${tag}> ${open}/${close}`);
-  else fail(`tagBalance <${tag}>`, `${open} 开 / ${close} 闭`);
+  runItem(() => {
+    const open = (html.match(new RegExp(`<${tag}(\\s|>)`, 'g')) ?? []).length;
+    const close = (html.match(new RegExp(`</${tag}>`, 'g')) ?? []).length;
+    if (open === close && open > 0) pass(`tagBalance <${tag}> ${open}/${close}`);
+    else fail(`tagBalance <${tag}>`, `${open} 开 / ${close} 闭`);
+  });
 }
 
-// 4. jsSyntax：提取内联 <script> 做语法编译检查
+// 4. jsSyntax：提取全部 <script> 块逐块做语法编译检查（2026-11-15 审查：此前只检第一个块，
+// 第二块起的语法错漏检——任一块失败即 FAIL，报告块序号）
 if (list.jsSyntax) {
-  const m = html.match(/<script>([\s\S]*?)<\/script>/);
-  if (!m) fail('jsSyntax', '未找到 <script> 块');
-  else {
-    try {
-      new Function(m[1]);
-      pass('jsSyntax');
-    } catch (e) {
-      fail('jsSyntax', e.message);
+  runItem(() => {
+    const blocks = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)];
+    if (!blocks.length) {
+      fail('jsSyntax', '未找到 <script> 块');
+      return;
     }
-  }
+    let ok = true;
+    for (let i = 0; i < blocks.length; i++) {
+      try {
+        new Function(blocks[i][1]);
+      } catch (e) {
+        fail('jsSyntax', `第 ${i + 1} 块: ${e.message}`);
+        ok = false;
+      }
+    }
+    if (ok) pass(`jsSyntax ${blocks.length} 块`);
+  });
 }
 
 // 5. cssBraces：<style> 花括号平衡
 if (list.cssBraces) {
-  const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
-  const open = (css.match(/\{/g) ?? []).length;
-  const close = (css.match(/\}/g) ?? []).length;
-  if (open === close) pass(`cssBraces ${open}/${close}`);
-  else fail('cssBraces', `${open} 个 { / ${close} 个 }`);
+  runItem(() => {
+    const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    const open = (css.match(/\{/g) ?? []).length;
+    const close = (css.match(/\}/g) ?? []).length;
+    if (open === close) pass(`cssBraces ${open}/${close}`);
+    else fail('cssBraces', `${open} 个 { / ${close} 个 }`);
+  });
 }
 
 // 6. fileSizeMaxKB：体量上界
 if (list.fileSizeMaxKB) {
-  const kb = Buffer.byteLength(html, 'utf8') / 1024;
-  if (kb <= list.fileSizeMaxKB) pass(`fileSize ${kb.toFixed(1)}KB <= ${list.fileSizeMaxKB}KB`);
-  else fail('fileSize', `${kb.toFixed(1)}KB > ${list.fileSizeMaxKB}KB`);
+  runItem(() => {
+    const kb = Buffer.byteLength(html, 'utf8') / 1024;
+    if (kb <= list.fileSizeMaxKB) pass(`fileSize ${kb.toFixed(1)}KB <= ${list.fileSizeMaxKB}KB`);
+    else fail('fileSize', `${kb.toFixed(1)}KB > ${list.fileSizeMaxKB}KB`);
+  });
 }
 
 // 7. noExternalRefs：零外部资源（外链 script/link/img、@import、url(http)）
 if (list.noExternalRefs) {
-  const ext =
-    /<script[^>]+src=|<link\s+[^>]*href=|@import|url\(\s*['"]?https?:|<img[^>]+src=["']https?:/.test(html);
-  if (!ext) pass('noExternalRefs');
-  else fail('noExternalRefs', '发现外链引用（script src / link href / @import / url(http)）');
+  runItem(() => {
+    const ext =
+      /<script[^>]+src=|<link\s+[^>]*href=|@import|url\(\s*['"]?https?:|<img[^>]+src=["']https?:/.test(html);
+    if (!ext) pass('noExternalRefs');
+    else fail('noExternalRefs', '发现外链引用（script src / link href / @import / url(http)）');
+  });
 }
 
 console.log(fails === 0 ? '\nSELF-CHECK: ALL PASS' : `\nSELF-CHECK: ${fails} FAIL`);
