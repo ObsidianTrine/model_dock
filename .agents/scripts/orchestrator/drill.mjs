@@ -90,7 +90,9 @@ export function runDrill(repoRoot, { log = () => {} } = {}) {
         '弃船演习：验证港口闭环（worktree→门禁→审查→闸门落位）自身健康，本卡无真实改动价值。',
         '',
         '# 验收标准',
-        '- 演习判定以编排闭环为准（卡按预期落 awaiting-human 即为通过）',
+        // 合成卡验收必须过提交口 L0 校验（可机检锚点：node 命令 + scripts 路径 + 退出码/应当 行为词）——
+        // 演习示范的是好卡：空洞标准会被自家闸门拒收、演习断链（2026-11-15 与 P0 质量闸门对接时发现）
+        '- node .agents/scripts/orchestrator.mjs run 本卡 --backend mock 退出码 0，卡应当落 awaiting-human（gate=L3 预期终态）',
         '',
       ].join('\n'),
     );

@@ -740,11 +740,12 @@ describe('push-gate 纯函数矩阵', () => {
     ).toBe('defer')
     // cd 他仓（toplevel 不同）→ defer
     expect(
-      gate.evaluatePushGate({ cmd: 'cd /other && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: topOf({ '/repo': '/repo', '/other': '/other-repo' }), runGitOk: ok }).decision,
+      gate.evaluatePushGate({ cmd: 'cd /other && git push origin refs/heads/feature/x', cwd: '/repo', policy, // 键走 gate 同款 path.resolve(cwd, target)：win32 会把 '/other' 盘符化（D:other），裸 POSIX 键三平台不齐
+      runGit: topOf({ '/repo': '/repo', [path.resolve('/repo', '/other')]: '/other-repo' }), runGitOk: ok }).decision,
     ).toBe('defer')
     // cd 本仓子目录（toplevel 相同）→ 放行
     expect(
-      gate.evaluatePushGate({ cmd: 'cd /repo/sub && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: topOf({ '/repo': '/repo', '/repo/sub': '/repo' }), runGitOk: ok }).decision,
+      gate.evaluatePushGate({ cmd: 'cd /repo/sub && git push origin refs/heads/feature/x', cwd: '/repo', policy, runGit: topOf({ '/repo': '/repo', [path.resolve('/repo', '/repo/sub')]: '/repo' }), runGitOk: ok }).decision,
     ).toBe('pass-unprotected')
     // cd 非仓库目录（toplevel 解析失败，push 本身会失败）→ 放行
     expect(
