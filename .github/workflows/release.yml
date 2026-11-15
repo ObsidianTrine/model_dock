@@ -95,7 +95,7 @@ jobs:
         run: echo "ver=$(grep -oE 'node-v[0-9]+\.[0-9]+\.[0-9]+' scripts/build-sea.mjs | head -1)" >> "$GITHUB_OUTPUT"
       - name: Cache cross-compiled Node binaries
         if: matrix.target == 'linux-arm64' || matrix.target == 'darwin-x64'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .cache/node-binaries
           key: node-binaries-${{ steps.nodever.outputs.ver }}-${{ matrix.target }}
