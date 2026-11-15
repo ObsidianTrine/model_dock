@@ -15,9 +15,11 @@
 | `workflows/claude-review.yml` | AI bot | PR 打开/更新；PR/issue 评论 `@claude` | risk-tier 风险分级（确定性）/ auto-review 自动审查（只读）/ security-review 安全审查（可阻塞）/ interactive 交互改码 | 分级**否**，其余**是** |
 | `dependabot.yml` | 依赖配置 | 每周六上午（Asia/Shanghai；仅默认分支 main 生效） | 自动开依赖升级 PR | 否 |
 | `workflows/dependabot-fix.yml` | AI bot | Dependabot PR 打开/更新 | 验证升级、失败做最小修复推回 | **是** |
-| `workflows/ci-autofix.yml` | AI bot | main / develop 的 test run 失败（首次尝试） | 主干失败投机修复：开 `[ci-autofix]` 修复 PR 供人工合并 | **是** |
+| `workflows/ci-autofix.yml` | AI bot | main / develop 的 test run 失败（首次尝试）；也可 `workflow_dispatch` 手动点火 | 主干失败投机修复：开 `[ci-autofix]` 修复 PR 供人工合并 | **是** |
 
 > **运维注意（2026-11-04 事故）**：ci-autofix 是唯一 workflow_run 触发的 AI workflow——该事件下 claude-code-action 自动进 agent 模式，**workflow 必须带 `id-token: write`**（OIDC 换 App token），缺它 15 秒内 3 连败 exit 1、Claude 会话零启动（上线初期 5 次 failure 全部同因、0 PR 产出）。另注意：workflow_run 的 run 按**默认分支 main 上的 workflow 文件**执行——改 ci-autofix.yml 只合 develop 不生效，须进 main。
+>
+> **手动点火（workflow_dispatch）**：`gh workflow run ci-autofix.yml --ref <ref> -f run_id=<test run id>`——guard 经 API 复验与自动路径同一口径（failure / attempt 1 / push / 主干分支，不满足即警告跳过零消耗；拿绿 run 冒烟即可验证接线）。dispatch 按 `--ref` 上的文件执行，与 workflow_run 的「按 main 文件执行」不同。
 
 ## 模型接入（三件套全在 GitHub，供应商无关）
 
@@ -130,6 +132,8 @@ main / develop 的 test run 失败（首次尝试）时自动发起一次修复�
 2. **确定性前置**：检出失败提交、切分支 `ci-autofix/<run-id>`，`npm ci` + `npm run build`——任一失败 job 直接红，结论明确零 token；
 3. **修复会话**：Claude 复现失败 → 根因分析 → 最小修复 + 补测试，`[ci-autofix]` 前缀提交推分支，开 PR（基分支 = 失败所在分支），PR 描述必含失败 run 链接、根因分析、修复说明。验证走分层：会话内只跑与改动相关的测试文件（2026-11-12 起，此前要求会话内跑全量 npm test，4 次会话烧穿 50 回合上限、0 PR 产出），全量回归由 PR 补发的 test 检查兜底；commit → push → 开 PR 四连要求尽早连续完成，防止 push 成功后超回合死在开 PR 前（11-11 实锤失败形态）；
 4. **无法自动修复**（flaky / 根因不明 / 修复面过大）：不开 PR，会话结论落 Actions run summary，job 红灯指路——看到红灯按 summary 与会话日志人工处理。
+5. **收尾兜底开 PR**（2026-11-15 加固）：修复分支已推上远端但会话没开出 PR（历次事故死点：push 成功后、开 PR 前——11-11 四次会话 + 11-15 run 43716224307 共 5 次）→ 收尾判定确定性代开 PR，会话结论文件若有则随 PR 正文给人工；分支不在远端才红灯。
+6. **逐回合日志 artifact**：会话默认 `show_full_output: false`（控制台只见 init 与最终 result，观感像「卡死」），逐回合记录归档为 artifact `claude-execution-<run-id>`（7 天）——排障先看它，这是唯一逐回合证据源。
 
 **需要哪些 secrets**：不新增——与 claude-review / dependabot-fix 共用三件套（`CLAUDE_AUTH_TOKEN` + `CLAUDE_BASE_URL` / `CLAUDE_MODEL`）。无需 PAT：触发 run 不在 Dependabot PR 上，GITHUB_TOKEN 自带写权限（推分支、开 PR 都够），并以 `github_token` 输入**显式**传给 claude-code-action——缺省未传时 action 改走 OIDC 换 app token（需 `id-token: write`），2026-11-04 曾因此每次 fix 阶段死于 OIDC 三连重试、会话零启动（与 key 无关），显式传 GITHUB_TOKEN 同时保住「其开的 PR 不触发新 workflow run」的防回环语义。
 

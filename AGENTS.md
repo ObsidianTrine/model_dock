@@ -213,7 +213,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 | `.agents/review-evals/` | 审查评测集：事故/revert 变考题（`scripts/review-eval.mjs` 跑分）——**出事故后必读加题**，改 REVIEW.md/prompt/模型后全量重跑 | 无 |
 | `dependabot.yml` | npm + GitHub Actions 依赖周更；minor/patch 成组降噪，major 单独出 | 无 |
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（build+test 全绿评论可合并；失败做最小修复推回；大破坏不硬修） | `CLAUDE_AUTH_TOKEN` + `DEPENDABOT_GH_TOKEN`（PAT） |
-| `workflows/ci-autofix.yml` | 主干 test 失败的投机自动修复（main/develop、首次失败才触发）：最小修复+补测试 → 开 `[ci-autofix]` PR 待审；每 run 仅 1 次 | `CLAUDE_AUTH_TOKEN`（key），无需 PAT |
+| `workflows/ci-autofix.yml` | 主干 test 失败的投机自动修复（main/develop、首次失败才触发；可 `workflow_dispatch` 手动点火）：最小修复+补测试 → 开 `[ci-autofix]` PR 待审；每 run 仅 1 次；收尾兜底代开 PR + 会话日志 artifact | `CLAUDE_AUTH_TOKEN`（key），无需 PAT |
 
 - **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**，换供应商只改三件套。注意项见 `docs/ci-bots.md`「模型接入」。
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（平台行为）：评论/推送必须经 PAT；缺 PAT 时跳过留人工。
