@@ -5,9 +5,17 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.8.0] - 2026-11-15
+
+Update restore ships: every update keeps the previous version, one-click zero-download rollback; a security-hardening batch and a set of robustness fixes.
+
+### Added
+
+- **Update restore, one-click rollback to the previous version**: every successful update now keeps the full previous install around (the Windows setup flavor previously kept nothing); when something goes wrong, the tray's "Restore update" menu item or `modeldock update --restore` swaps the old and current versions back in place — zero downloads, done in seconds, and clicking it again swaps forward for free. Restore does not depend on the gateway (which is exactly when you need it most).
 
 ### Improved
+
+- **A batch of security hardening**: static security scan (CodeQL) findings cleared to zero — low-risk regex backtracking surfaces (Bearer extraction now parses token-by-token), admin-plane cache keys switched to HMAC, log format strings parameterized, explicit quote rejection in autostart scripts, credential masking in troubleshooting scripts, and more. No behavior change.
 
 - **Log page fixed-width columns no longer truncate silently**: three spots on the log page now render in full — English column headers, 8-digit millisecond values, and long underscore-prefixed profile names; the audit target cell gains full-text hover.
 
@@ -610,6 +618,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 
 ---
 [Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...HEAD
+[1.8.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.0...v1.7.1
