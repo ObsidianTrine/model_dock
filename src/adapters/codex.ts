@@ -237,6 +237,40 @@ export const codexAdapter: HarnessAdapter = {
           'Note: recent Codex builds support the Responses protocol only (wire_api=chat removed) — the base_url fallback works only if that endpoint itself serves /responses (the Xiaomi token plan official template is exactly this shape); for chat-completions-only providers use the gateway'
         )
       )
+      // 路由态→直连过渡的残留收回（2026-11-15 双船审查同发现）：下方 catalog 烤入与 profiles
+      // 多路由两块整挂在 !d 守卫内，先前网关态 attach 写入的 modeldock profiles 条目与自家
+      // catalog 指针在切直连时不收回——/model 仍列上一家服务商模型（选中必 400）、codex -p
+      // 撞必 400 死路由。口径复用 detach（只收自家路径的指针与 model_provider=modeldock 条目，
+      // 用户自设值不动）；目录文件本身不删（detach 同款：无指针即不生效，落盘引擎无删除形态）
+      if (root.model_catalog_json === codexCatalogPath()) {
+        delete root.model_catalog_json
+        directNotes.push(
+          t(
+            '已收回路由态写入的 model_catalog_json 指针（目录描述的是网关路由服务商的模型，直连下选中必 400）；/model 选择器回落内置预设',
+            'Removed the routing-mode model_catalog_json pointer (its catalog describes gateway-routed provider models, which all 400 on select in direct mode); the /model picker falls back to built-in presets'
+          )
+        )
+      }
+      // 收回宽容化（detach 同款）：profiles 类型不对就跳过，不抛错挡直连
+      const ups = root.profiles
+      if (ups && typeof ups === 'object') {
+        let reclaimed = false
+        for (const [pid, pentry] of Object.entries(ups)) {
+          if (pentry && typeof pentry === 'object' && (pentry as Record<string, unknown>).model_provider === 'modeldock') {
+            delete ups[pid]
+            reclaimed = true
+          }
+        }
+        if (Object.keys(ups).length === 0) delete root.profiles
+        if (reclaimed) {
+          directNotes.push(
+            t(
+              '已收回路由态烤入的 modeldock profiles 条目（直连下其他路由的默认模型打直连上游必 400）；用户自设 profiles 不动',
+              'Removed routing-mode modeldock profile entries (in direct mode other routes\' default models all 400 against the direct upstream); user-defined profiles are untouched'
+            )
+          )
+        }
+      }
     }
     if (opts.setDefault) {
       root.model_provider = 'modeldock'
