@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { buildFixCardText, fixCardId, isScanCardId, scanAutoFixAfterFailure } from '../../.agents/scripts/orchestrator/scanfix.mjs'
-import { ensureQueue, loadCard, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { checkAcceptanceQuality, ensureQueue, loadCard, queueRoot } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { cardText } from './helpers.js'
 
 const SCAN_CARD_TEXT = [
@@ -89,8 +89,21 @@ describe('orchestrator scanfix > buildFixCardText（组装即合法任务卡）'
     const text = buildFixCardText({ scanId: 'scan-x', scanMeta: meta, scanBody: { goal: '目标', acceptance: '', background: '' }, failReason: '', iso: '2026-11-04T12:00:00.000+08:00' })
     const parsed = loadCard(text, 'fix.md')
     expect(parsed.meta.type).toBe('refactor')
-    expect(parsed.body.acceptance).toContain('测试全绿')
+    expect(parsed.body.acceptance).toContain('npm test 全绿') // 兜底文案带可机检锚点（npm 命中验证命令形态）
     expect(text).toContain('失败摘要：（未记录）')
+  })
+
+  it('组装产物过 checkAcceptanceQuality（直写口护栏语义：兜底与继承两形态都能过）', () => {
+    const iso = '2026-11-04T12:00:00.000+08:00'
+    // 兜底形态：原卡验收为空 → 兜底文案含 npm 命令锚点
+    const fallback = loadCard(
+      buildFixCardText({ scanId: 'scan-x', scanMeta: { id: 'scan-x', type: 'refactor', files_hint: ['src/**'], workflows: ['feature-branch'] }, scanBody: { goal: '目标', acceptance: '', background: '' }, failReason: '', iso }),
+      'fix.md'
+    )
+    expect(checkAcceptanceQuality(fallback.body, fallback.meta).ok).toBe(true)
+    // 继承形态：原卡验收含锚点（「对应」命中行为断言词「应」）
+    const inherited = loadCard(buildFixCardText({ scanId: 'scan-ci-414aba6c', scanMeta: loadCard(SCAN_CARD_TEXT, 'scan.md').meta, scanBody: loadCard(SCAN_CARD_TEXT, 'scan.md').body, failReason: '', iso }), 'fix.md')
+    expect(checkAcceptanceQuality(inherited.body, inherited.meta).ok).toBe(true)
   })
 })
 
@@ -145,6 +158,25 @@ describe('orchestrator scanfix > scanAutoFixAfterFailure（drain 落位点接线
       const r = scanAutoFixAfterFailure(repo.root, repo.root_q, 'scan-ci-broken')
       expect(r.skipped).toBe(true)
       expect(String(r.reason)).toContain('解析失败')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('L0 护栏：原卡验收空洞且无锚点 → 修复卡跳过生成（不写 pending、留 reason、不留痕），不中断整批', () => {
+    const repo = mkRepo()
+    try {
+      // 「问题修复，提交完成」不含命令/文件路径/行为断言词（无「应」字），纯空洞
+      const hollow = SCAN_CARD_TEXT.replace('- 失败测试修复；对应提交全绿', '- 问题修复，提交完成')
+      const id = 'scan-ci-hollow'
+      fs.writeFileSync(path.join(repo.root_q, 'failed', `${id}.md`), hollow.replace('id: scan-ci-414aba6c', `id: ${id}`))
+      const r = scanAutoFixAfterFailure(repo.root, repo.root_q, id)
+      expect(r.skipped).toBe(true)
+      expect(String(r.reason)).toContain('L0 校验') // scanAutoFixPass 把 reason 落 warn 行，整批继续
+      expect(fs.existsSync(path.join(repo.root_q, 'pending', `fix-${id}.md`))).toBe(false)
+      // 跳过路径不落 scan_autofix 事件（创建成功才留痕）
+      const evPath = path.join(repo.root, '.agents', 'orchestrator', 'logs', id, 'events.jsonl')
+      expect(fs.existsSync(evPath)).toBe(false)
     } finally {
       repo.cleanup()
     }

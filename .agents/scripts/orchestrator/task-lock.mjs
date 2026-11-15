@@ -25,6 +25,7 @@ import path from 'node:path';
 import { isAlive } from './kill-tree.mjs';
 import { invalidateSeqCache, logDir } from './events.mjs';
 import { TASK_ID_RE } from './queue.mjs';
+import { readLockJson, writeLockAtomic } from './lockio.mjs';
 
 /** 持有期间心跳间隔 / 心跳静默判陈阈值（连续 ~3 个心跳未续；与 finish 锁同数值）。 */
 export const TASK_LOCK_BEAT_MS = 15_000;
@@ -53,12 +54,10 @@ export function taskLockPath(repoRoot, taskId) {
   return path.join(repoRoot, '.agents', 'orchestrator', `.run-${taskId}.lock`);
 }
 
+// 读锁：坏 JSON（写窗口撞上的半个 JSON）短退避重读一次再定——直接按损坏判陈锁会
+// 在毫秒级窗口里误接管活锁 → 同任务双驱动（lockio.mjs 双保险，写侧已原子化仍保留）。
 function readLock(p) {
-  try {
-    return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch {
-    return null;
-  }
+  return readLockJson(p);
 }
 
 /** 读任务锁（abandon 守卫用）：无锁/损坏锁返回 null。 */
@@ -78,18 +77,26 @@ function stopBeat(p) {
   }
 }
 
+/**
+ * 心跳单拍（startBeat 的 interval 体，导出供测试直驱）：续写 beat 用 tmp+rename 原子
+ * 落盘——原地截断重写会让并发读方在毫秒级窗口读到半个 JSON、误判陈锁接管 → 双驱动。
+ * 写失败（win 目标被占 EPERM/EBUSY 等）静默丢拍：锁文件仍是上一拍完整 JSON，
+ * 下个 tick 重试，不得让属主因此崩。
+ */
+export function taskLockBeatOnce(p) {
+  try {
+    const info = readLock(p);
+    if (info?.pid !== process.pid) {
+      stopBeat(p); // 锁已易主（防御，理论不可达）
+      return;
+    }
+    writeLockAtomic(p, JSON.stringify({ ...info, beat: Date.now() }));
+  } catch { /* 下一个 tick 重试 */ }
+}
+
 function startBeat(p) {
   if (beatTimers.has(p)) return; // 重入：外层已在跳
-  const t = setInterval(() => {
-    try {
-      const info = readLock(p);
-      if (info?.pid !== process.pid) {
-        stopBeat(p); // 锁已易主（防御，理论不可达）
-        return;
-      }
-      fs.writeFileSync(p, JSON.stringify({ ...info, beat: Date.now() }));
-    } catch { /* 下一个 tick 重试 */ }
-  }, TASK_LOCK_BEAT_MS);
+  const t = setInterval(() => taskLockBeatOnce(p), TASK_LOCK_BEAT_MS);
   t.unref();
   beatTimers.set(p, t);
 }

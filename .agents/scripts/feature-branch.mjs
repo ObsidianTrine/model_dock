@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { appendEvent, logDir } from './orchestrator/events.mjs';
 import { ensureQueue, findCard, moveCard, queueRoot } from './orchestrator/queue.mjs';
 import { acquireTaskLock, readTaskLock, releaseTaskLock } from './orchestrator/task-lock.mjs';
+import { readLockJson, writeLockAtomic, sleepSyncMs } from './orchestrator/lockio.mjs';
 import { runCmd } from './orchestrator/gates.mjs';
 
 // Repo root: ask git for the COMMON .git dir first — `git rev-parse --git-common-dir`
@@ -171,11 +172,9 @@ function finishTestTimeoutMs() {
   return Number.isInteger(n) && n > 0 ? n : 20 * 60_000;
 }
 
-// Atomics.wait keeps libuv's thread pool (async log flushes etc.) running while
-// the main thread blocks — same pattern removeWorktreeDir uses below.
-function sleepSyncMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, ms);
-}
+// 同线程短睡 sleepSyncMs 从 lockio.mjs 引入（2026-11-15 修复历史病灶：本地旧实现
+// Atomics.wait 的零填充缓冲区配 true 期望值恒 "not-equal"，从未真正睡过——finish 锁
+// 有界等待实为热转轮询烧 CPU，门禁重试 250ms 退避同样空转）。
 
 // 旧版锁（无 beat 字段）专用：pid 存在性探测。心跳判活落地后 pid 复用只影响旧版
 // 锁的过渡窗口（30min 兜底封顶），新锁一律走 beat——两套机制并存见 acquireFinishLock 注释。
@@ -210,8 +209,9 @@ function acquireFinishLock(taskId) {
       fs.writeFileSync(FINISH_LOCK, JSON.stringify({ pid: process.pid, task: taskId, time: new Date().toISOString(), beat: Date.now() }), { flag: 'wx' });
     } catch (e) {
       if (e.code !== 'EEXIST') die(`could not create finish lock ${FINISH_LOCK}: ${e.message}`);
-      let info = null;
-      try { info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8')); } catch { /* corrupt lock — treat as stale */ }
+      // 坏 JSON（写窗口撞上的半个 JSON）先退避重读一次再定：直接按损坏判陈锁会在
+      // 毫秒级窗口里误接管活锁 → 双 finish 同撞 git index.lock（lockio.mjs 双保险）
+      let info = readLockJson(FINISH_LOCK);
       if (lockLooksLive(info)) {
         const who = `pid ${info?.pid}${info?.task ? `, task "${info.task}"` : ''}${info?.time ? `, started ${info.time}` : ''}`;
         if (capSeconds === 0) {
@@ -244,13 +244,15 @@ function acquireFinishLock(taskId) {
       continue;
     }
     // 心跳：持有期间每 15s 续写 beat（写前校验属主仍是自己，防覆盖接管者的新锁）。
+    // 续写走 tmp+rename 原子落盘（lockio.mjs）——原地截断重写会让并发读方在毫秒级
+    // 窗口读到半个 JSON、误判陈锁接管 → 双 finish；写失败静默丢拍（尽力而为）。
     // unref：不拖住进程退出——主流程结束后若事件循环被泄漏句柄钉住（实测有此形态），
     // 心跳停更，下一位等待者 60s 内即可安全接管，而不是等到僵尸进程自然消亡。
     const beat = setInterval(() => {
       try {
-        const info = JSON.parse(fs.readFileSync(FINISH_LOCK, 'utf8'));
-        if (info.pid !== process.pid) { clearInterval(beat); return; } // 锁已易主（防御，理论不可达）
-        fs.writeFileSync(FINISH_LOCK, JSON.stringify({ ...info, beat: Date.now() }));
+        const info = readLockJson(FINISH_LOCK);
+        if (info?.pid !== process.pid) { clearInterval(beat); return; } // 锁已易主（防御，理论不可达）
+        writeLockAtomic(FINISH_LOCK, JSON.stringify({ ...info, beat: Date.now() }));
       } catch { /* 下一个 tick 重试 */ }
     }, FINISH_LOCK_BEAT_MS);
     beat.unref();
@@ -385,7 +387,7 @@ function removeWorktreeDir(wtPath) {
       return null;
     } catch (e) {
       // Transient locks (Defender scan, exiting test workers) usually clear in ms.
-      if (attempt < 3) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, true, 250);
+      if (attempt < 3) sleepSyncMs(250);
       else return String(e.message).trim();
     }
   }

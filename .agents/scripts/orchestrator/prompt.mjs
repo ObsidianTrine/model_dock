@@ -199,6 +199,9 @@ export function parseAcceptanceDeclared(value) {
   if (!m) return null;
   const met = parseInt(m[1], 10);
   const total = parseInt(m[2], 10);
+  // 倒挂申报（met > total，如 "5/2"）不可信：与「解析不出」同路径返回 null（对账
+  // 跳过）——照单全收会让「完成数超过总数」的假申报绕过对账定罪。
+  if (met > total) return null;
   return Number.isFinite(met) && Number.isFinite(total) && total > 0 ? { met, total } : null;
 }
 

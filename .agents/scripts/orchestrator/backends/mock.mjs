@@ -272,6 +272,9 @@ export const mockBackend = {
       const isFeature = process.env.ORCH_MOCK_PLANNER_FEATURE === '1';
       const featureCount = isFeature ? (parseInt(process.env.ORCH_MOCK_PLANNER_FEATURE_COUNT ?? '1', 10) || 1) : 1;
       const plannerResearch = process.env.ORCH_MOCK_PLANNER_RESEARCH ?? 'todo';
+      // ORCH_MOCK_PLANNER_HOLLOW=1：验收标准替换为无可机检锚点的空洞文案（不含命令/
+      // 文件路径/行为断言词）——intent 直提 L0 校验拒绝路径 e2e 用
+      const hollowAcceptance = process.env.ORCH_MOCK_PLANNER_HOLLOW === '1';
       const cardBlock = (id) =>
         [
           '```' + CARD_MARKER,
@@ -305,8 +308,7 @@ export const mockBackend = {
           'mock planner 目标:完成用户意图。',
           '',
           '# 验收标准',
-          '- `npm test` 全绿',
-          '- docs/ 下出现意图所述的新文档内容',
+          ...(hollowAcceptance ? ['- 任务完成，整体质量达标'] : ['- `npm test` 全绿', '- docs/ 下出现意图所述的新文档内容']),
           '',
           '# 背景',
           'mock planner 探索结论占位。',
