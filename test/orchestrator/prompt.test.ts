@@ -45,6 +45,7 @@ describe('orchestrator prompt > worker prompt 五层组装', () => {
     expect(p).toContain('辫子长在鸟身上就不成立') // 「可保留」授权不豁免主体一致性
     expect(p).toContain('关联内容全量过滤') // 换主体须同步标题/文案/aria/注释
     expect(p).toContain('grep 旧主体名归零')
+    expect(p).toContain('可测量指标') // 造型/视觉任务：形容词不算验收标准
     expect(p).toContain('不许带未申报的假设')
   })
 
