@@ -8,13 +8,19 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { Worker } from 'node:worker_threads'
+import { pathToFileURL } from 'node:url'
 import { cardText, mkRepo, runOrch, runOrchInproc, tryOrch } from './helpers.js'
+import { readLockJson, sleepSyncMs } from '../../.agents/scripts/orchestrator/lockio.mjs'
 import {
   acquireTaskLock,
   readTaskLock,
   releaseTaskLock,
+  taskLockBeatOnce,
   taskLockPath,
 } from '../../.agents/scripts/orchestrator/task-lock.mjs'
+
+const LOCKIO_URL = pathToFileURL(path.resolve(import.meta.dirname, '../../.agents/scripts/orchestrator/lockio.mjs')).href
 
 /** 拿一个确定已退出的 pid（spawn 即退的子进程）：陈锁构造用。 */
 function deadPid(): number {
@@ -143,6 +149,133 @@ describe('task-lock > 锁语义（库级）', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-lib-'))
     try {
       expect(() => taskLockPath(dir, '../escape')).toThrow(/不合法/)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('task-lock > 心跳原子写与读方加固（lockio，2026-11 P2 双驱动防线）', () => {
+  it('并发心跳原子写：读方全程裸 parse 不遇坏 JSON，结束后无 tmp 残留', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-atomic-'))
+    const lockPath = path.join(dir, '.run-beat.lock')
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 1, beat: 0 }))
+    // 两个 worker 线程各连写 50 拍（tmp+rename 原子写）；主线程裸 readFileSync+JSON.parse
+    // 赛跑——旧原地截断重写形态下读方必然撞上半个 JSON，原子写下一个都不该出现
+    const script = [
+      `const { parentPort, workerData } = require('node:worker_threads')`,
+      `import(${JSON.stringify(LOCKIO_URL)}).then(({ writeLockAtomic, sleepSyncMs }) => {`,
+      `  for (let i = 0; i < workerData.writes; i++) {`,
+      `    writeLockAtomic(workerData.lock, JSON.stringify({ pid: workerData.pid, seq: i, thread: workerData.idx, beat: Date.now() }))`,
+      `    sleepSyncMs(1)`,
+      `  }`,
+      `  parentPort.postMessage('done')`,
+      `})`,
+    ].join('\n')
+    const workers = [0, 1].map((idx) =>
+      new Worker(script, { eval: true, workerData: { lock: lockPath, writes: 50, idx, pid: 4242 } })
+    )
+    const exited = workers.map((w) => new Promise<number>((resolve) => w.on('exit', (code) => resolve(code ?? -1))))
+    let parseFailures = 0
+    let reads = 0
+    const readUntil = Date.now() + 1500
+    while (Date.now() < readUntil) {
+      try {
+        JSON.parse(fs.readFileSync(lockPath, 'utf8'))
+        reads++
+      } catch {
+        parseFailures++
+      }
+      sleepSyncMs(1)
+    }
+    const codes = await Promise.all(exited)
+    expect(codes).toEqual([0, 0])
+    expect(parseFailures).toBe(0)
+    expect(reads).toBeGreaterThan(10)
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([])
+    expect(JSON.parse(fs.readFileSync(lockPath, 'utf8')).pid).toBe(4242)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }, 30_000)
+
+  it('读方加固：瞬时坏 JSON（写窗口）退避重读恢复，不误判陈锁接管（修复前这里会 held:true 双驱动）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-flash-'))
+    const sleeper = livePid()
+    try {
+      fs.mkdirSync(path.dirname(taskLockPath(dir, 't-flash')), { recursive: true })
+      const good = JSON.stringify({ pid: sleeper, task: 't-flash', cmd: 'run', beat: Date.now() })
+      // worker 先启动握手就绪，再由 SAB 旗标触发写——写延迟 ~1ms，确定性落在首读（坏）
+      // 与 80ms 重读（好）之间；worker 启动慢（CI 负载）也不至于漂出重读窗
+      const sab = new SharedArrayBuffer(4)
+      const w = new Worker(
+        [
+          `const { parentPort, workerData } = require('node:worker_threads')`,
+          `const fs = require('node:fs')`,
+          `const flag = new Int32Array(workerData.sab)`,
+          `parentPort.postMessage('ready')`,
+          `const timer = setInterval(() => {`,
+          `  if (Atomics.load(flag, 0) !== 1) return`,
+          `  clearInterval(timer)`,
+          `  try { fs.writeFileSync(workerData.lock, workerData.payload) } catch { /* 主线程已清理 */ }`,
+          `  parentPort.postMessage('written')`,
+          `}, 1)`,
+        ].join('\n'),
+        { eval: true, workerData: { sab, lock: taskLockPath(dir, 't-flash'), payload: good } }
+      )
+      await new Promise<void>((resolve) => w.on('message', (m) => { if (m === 'ready') resolve() }))
+      fs.writeFileSync(taskLockPath(dir, 't-flash'), '{torn') // 半个 JSON：写窗口形态
+      const written = new Promise<void>((resolve) => w.on('message', (m) => { if (m === 'written') resolve() }))
+      Atomics.store(new Int32Array(sab), 0, 1)
+      const r = acquireTaskLock(dir, 't-flash')
+      expect(r.held).toBe(false)
+      if (!r.held) expect(r.owner.pid).toBe(sleeper)
+      await written
+      expect(readTaskLock(dir, 't-flash')?.pid).toBe(sleeper) // 接管未发生，他人活锁原样
+    } finally {
+      try { process.kill(sleeper) } catch { /* 已退 */ }
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('读方加固不放过真陈锁：坏 JSON 重读后仍坏 → 照常接管', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-corrupt-'))
+    try {
+      fs.mkdirSync(path.dirname(taskLockPath(dir, 't-corrupt')), { recursive: true })
+      fs.writeFileSync(taskLockPath(dir, 't-corrupt'), '{broken')
+      const r = acquireTaskLock(dir, 't-corrupt')
+      expect(r.held).toBe(true)
+      expect(readTaskLock(dir, 't-corrupt')?.pid).toBe(process.pid)
+      releaseTaskLock(dir, 't-corrupt')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('taskLockBeatOnce：属主续写 beat（原子落盘仍可解析）；他人锁不动（易主防御）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-beat-'))
+    try {
+      seedLock(dir, 't-beat', { pid: process.pid, task: 't-beat', cmd: 'run', beat: 1 })
+      taskLockBeatOnce(taskLockPath(dir, 't-beat'))
+      const info = readTaskLock(dir, 't-beat')
+      expect(info?.pid).toBe(process.pid)
+      expect(info?.beat).toBeGreaterThan(1)
+      const foreign = { pid: 999_999, task: 't-beat2', cmd: 'run', beat: 42 }
+      seedLock(dir, 't-beat2', foreign)
+      taskLockBeatOnce(taskLockPath(dir, 't-beat2'))
+      expect(readTaskLock(dir, 't-beat2')).toEqual(foreign)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('readLockJson：无锁文件返回 null（不重读）；坏 JSON 退避重读一次', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'task-lock-read-'))
+    try {
+      expect(readLockJson(path.join(dir, 'absent.lock'))).toBeNull()
+      const p = path.join(dir, 'x.lock')
+      fs.writeFileSync(p, '{nope')
+      expect(readLockJson(p)).toBeNull()
+      fs.writeFileSync(p, JSON.stringify({ pid: 7, beat: 9 }))
+      expect(readLockJson(p)).toEqual({ pid: 7, beat: 9 })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

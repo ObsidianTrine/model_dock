@@ -123,12 +123,16 @@ describe('orchestrator prompt > 复诵核对（checkRecitation，① 机器面�
 })
 
 describe('orchestrator prompt > acceptance 申报解析与契约行补问（③⑤）', () => {
-  it('parseAcceptanceDeclared 解析 m/n；自由文本/缺失/0 分母返回 null（旧契约块兼容）', () => {
+  it('parseAcceptanceDeclared 解析 m/n；自由文本/缺失/0 分母/倒挂（met>total）返回 null（旧契约块兼容）', () => {
     expect(parseAcceptanceDeclared('2/3')).toEqual({ met: 2, total: 3 })
     expect(parseAcceptanceDeclared(' 1 / 1 ')).toEqual({ met: 1, total: 1 })
     expect(parseAcceptanceDeclared('全部满足')).toBeNull()
     expect(parseAcceptanceDeclared(undefined)).toBeNull()
     expect(parseAcceptanceDeclared('0/0')).toBeNull()
+    // 倒挂申报（修复前 "5/2" 照单全收为 {met:5,total:2}）：与「解析不出」同路径跳过对账
+    expect(parseAcceptanceDeclared('5/2')).toBeNull()
+    expect(parseAcceptanceDeclared('99 / 1')).toBeNull()
+    expect(parseAcceptanceDeclared('3/3')).toEqual({ met: 3, total: 3 }) // 边界：met==total 合法
   })
 
   it('buildReviewRetryPrompt 只求补汇总行，带上一轮输出截尾，不重放 diff', () => {

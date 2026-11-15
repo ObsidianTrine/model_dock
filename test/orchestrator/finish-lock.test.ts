@@ -77,13 +77,32 @@ describe('finish 锁判活（心跳）', () => {
     }
   })
 
-  it('损坏锁（非 JSON）→ 视为陈锁接管', () => {
+  it('损坏锁（非 JSON）→ 视为陈锁接管（读方加固后语义不变：退避重读仍坏才接管）', () => {
     const repo = mkRepo()
     try {
       writeLock(repo.root, '{corrupt!!')
       const r = runFinish(repo.root, 'bench-corrupt')
       expect(r.out).not.toContain('another finish is already running')
       expect(r.out).toContain('no worktree for task')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('原子写纪律（lockio tmp+rename）：拒绝/接管路径全程无 .finish.lock.*.tmp 残留', () => {
+    const repo = mkRepo()
+    const wtDir = path.join(repo.root, '.agents', 'worktrees')
+    const tmpLeftovers = () => fs.readdirSync(wtDir).filter((f) => f.startsWith('.finish.lock.') && f.endsWith('.tmp'))
+    try {
+      // 拒绝路径（他人活锁）：心跳不启动也不写盘，更不许有 tmp
+      writeLock(repo.root, { pid: process.pid, task: 'other', time: new Date().toISOString(), beat: Date.now() })
+      runFinish(repo.root, 'bench-tmp-fresh')
+      expect(tmpLeftovers()).toEqual([])
+      // 接管路径：接管写走 wx，之后 die 退出——同样不得有 tmp 残骸
+      writeLock(repo.root, '{corrupt!!')
+      const r = runFinish(repo.root, 'bench-tmp-stale')
+      expect(r.out).toContain('no worktree for task')
+      expect(tmpLeftovers()).toEqual([])
     } finally {
       repo.cleanup()
     }

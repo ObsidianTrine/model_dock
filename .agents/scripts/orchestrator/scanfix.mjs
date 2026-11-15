@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import { appendEvent, logDir, readEvents, toIsoLocal } from './events.mjs';
-import { cardPath, findCard, loadCard } from './queue.mjs';
+import { cardPath, checkAcceptanceQuality, findCard, loadCard } from './queue.mjs';
 
 /** scan 型卡判定：巡检产出的卡 id 统一带 scan- 前缀（scan-todo-* / scan-audit-* /
  *  scan-ci-* / scan-ki-*，scan.mjs 的命名约定）。只认 id 前缀——type 与普通卡同域
@@ -50,7 +50,10 @@ export function buildFixCardText({ scanId, scanMeta, scanBody, failReason = '', 
     `gate: ${meta.gate ?? 'L3'}`,
     '---',
   ].join('\n');
-  const acceptance = String(scanBody?.acceptance ?? '').trim() || '- 修复后相关测试全绿（具体以原巡检卡验收标准为准）';
+  // 兜底文案带可机检锚点（`npm` 命中 ACCEPTANCE_ANCHORS 的验证命令形态）——修复卡
+  // created_by 留空不享 scanner 豁免，空洞标准会被提交口 L0 校验（scanAutoFixAfterFailure
+  // 的护栏）拦下；「测试全绿」单说不行，必须落成命令。
+  const acceptance = String(scanBody?.acceptance ?? '').trim() || '- npm test 全绿，相关回归无失败（具体以原巡检卡验收标准为准）';
   const background = [String(scanBody?.goal ?? '').trim(), String(scanBody?.background ?? '').trim()].filter(Boolean).join('\n\n');
   const parts = [
     fm,
@@ -96,7 +99,16 @@ export function scanAutoFixAfterFailure(repoRoot, root, scanId, { enabled = true
       const last = [...events].reverse().find((e) => e?.type === 'failed' || e?.type === 'blocked');
       failReason = String(last?.reason ?? last?.detail ?? '');
     } catch { /* 无事件流：摘要留空 */ }
-    fs.writeFileSync(cardPath(root, 'pending', fid), buildFixCardText({ scanId, scanMeta: meta, scanBody: body, failReason, iso: toIsoLocal() }));
+    const fixText = buildFixCardText({ scanId, scanMeta: meta, scanBody: body, failReason, iso: toIsoLocal() });
+    // 验收标准 L0 校验（②）护栏：修复卡直写 pending 前按组装产物本身校验（修复卡
+    // created_by 留空、不享 scanner 豁免，原卡验收空洞会被原样继承）。单卡不过即跳过
+    // 并留 reason（scanAutoFixPass 落 warn 行），不中断整批 scanfix。
+    const fixCard = loadCard(fixText, `${fid}.md`);
+    const quality = checkAcceptanceQuality(fixCard.body, fixCard.meta);
+    if (!quality.ok) {
+      return { skipped: true, reason: `修复卡验收标准未过 L0 校验（${quality.reason}），跳过生成；请人工排查 ${scanId}` };
+    }
+    fs.writeFileSync(cardPath(root, 'pending', fid), fixText);
     appendEvent(logDir(repoRoot, scanId), 'scan_autofix', { fix: fid, reason: failReason.slice(0, 200) });
     return { created: true, id: fid };
   } catch (e) {

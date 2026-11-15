@@ -96,6 +96,21 @@ describe('orchestrator queue > 任务卡校验', () => {
     expect(splitAcceptanceItems('')).toEqual([])
   })
 
+  it('splitAcceptanceItems：bullet 缩进续行并入上一条目（不丢行）；空行/非缩进杂行维持旧行为', () => {
+    // 修复前：`- a\n  续行\n- b` 静默丢「续行」，长断言拆行写 → L0/对账/reviewer 三方一起漏算
+    expect(splitAcceptanceItems('- a\n  续行\n- b')).toEqual(['a 续行', 'b'])
+    expect(splitAcceptanceItems('1. a\n   续行一\n   续行二\n2. b')).toEqual(['a 续行一 续行二', 'b'])
+    expect(splitAcceptanceItems('* a\n\ttab 续行\n* b')).toEqual(['a tab 续行', 'b'])
+    // 条目间空行：仍按条拆（不并入）
+    expect(splitAcceptanceItems('- a\n\n- b')).toEqual(['a', 'b'])
+    // 非缩进杂行：列表形态下丢弃（旧行为不变）
+    expect(splitAcceptanceItems('说明头\n- a\n杂行\n- b')).toEqual(['a', 'b'])
+    // 开头孤儿缩进行（无上一条目可并）：丢弃（旧行为不变）
+    expect(splitAcceptanceItems('  孤儿续行\n- a')).toEqual(['a'])
+    // 无 bullet：非空行逐条（缩进行自成一，旧行为不变）
+    expect(splitAcceptanceItems('散文一\n  散文缩进二')).toEqual(['散文一', '散文缩进二'])
+  })
+
   it('budget 显式非法值报错（不允许无预算运行）', () => {
     expect(() => loadCard(cardText({ budget: { max_turns: -1 } }))).toThrowError(/max_turns/)
     expect(() => loadCard(cardText({ budget: { max_tokens: 'abc' } }))).toThrowError(/max_tokens/)

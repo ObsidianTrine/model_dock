@@ -87,6 +87,26 @@ describe('orchestrator planner > intent 命令端到端（mock 后端）', () =>
     }
   })
 
+  it('intent 直提空洞验收卡被拒（L0 校验直写口接线）；--draft 同卡维持落草稿等人工修', () => {
+    const repo = mkRepo()
+    try {
+      // ORCH_MOCK_PLANNER_HOLLOW=1：planner 卡验收标准无任何可机检锚点
+      const r = tryOrch(repo.root, 'intent "hollow acceptance task" --backend mock', { ORCH_MOCK_PLANNER_HOLLOW: '1' })
+      expect(r.status).not.toBe(0)
+      expect(r.stderr).toContain('未过 L0 校验')
+      expect(listPendingOf(repo.root)).toHaveLength(0)
+      // 确认路径：同一张空洞卡落 drafts（人工修订后再 submit），不走 die
+      const d = runOrch(repo.root, 'intent "hollow acceptance task" --draft --backend mock', { ORCH_MOCK_PLANNER_HOLLOW: '1' })
+      expect(d.status).toBe(0)
+      expect(d.stdout).toContain('草稿已生成')
+      expect(listPendingOf(repo.root)).toHaveLength(0)
+      const drafts = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts'))
+      expect(drafts).toContain('hollow-acceptance-task.md')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
   it('Planner 输出非法卡 → 重试耗尽后可操作报错', () => {
     const repo = mkRepo()
     try {

@@ -208,13 +208,22 @@ export function parseCard(text, sourceName = '') {
  */
 export function splitAcceptanceItems(text) {
   const lines = String(text ?? '').split('\n');
-  const bullets = lines
-    .map((l) => l.trim())
-    .filter((l) => /^([-*]|\d+[.)])\s+/.test(l))
-    .map((l) => l.replace(/^([-*]|\d+[.)])\s+/, '').trim())
-    .filter(Boolean);
-  if (bullets.length) return bullets;
-  return lines.map((l) => l.trim()).filter(Boolean);
+  const isBullet = (l) => /^([-*]|\d+[.)])\s+/.test(l.trim());
+  if (!lines.some(isBullet)) return lines.map((l) => l.trim()).filter(Boolean);
+  const items = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue; // 条目间空行：不产生条目（与旧口径一致）
+    if (isBullet(line)) {
+      items.push(line.replace(/^([-*]|\d+[.)])\s+/, '').trim());
+    } else if (/^\s/.test(raw) && items.length) {
+      // 缩进续行并入上一条目（markdown 列表软换行）——此前被静默丢弃，长断言拆行
+      // 写的验收条在 L0/对账/reviewer 三方一起漏算（2026-11 P3 审计项）
+      items[items.length - 1] = `${items[items.length - 1]} ${line}`;
+    }
+    // 非缩进的杂行维持旧行为：列表形态下丢弃
+  }
+  return items.filter(Boolean);
 }
 
 // 验收标准可机检锚点（② L0 校验）：至少一条须含下列证据形态之一——

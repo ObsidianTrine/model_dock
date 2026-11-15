@@ -3490,7 +3490,7 @@ async function cmdIntent(repoRoot, opts) {
         die(`Planner ${MAX_ATTEMPTS} 次均未产出任务卡契约块（最后一次：${plannerSpawnDetail(result)}）。请改用手写任务卡 + submit。`);
       }
       try {
-        const { meta } = loadCard(cardText, 'planner-draft');
+        const { meta, body } = loadCard(cardText, 'planner-draft');
         if (meta.gate !== 'L3') {
           meta.gate = 'L3';
           log(`⚠ Planner 卡 gate=${meta.gate || '(空)'} 已强制覆写为 L3（Planner 卡固定人工合并闸门，docs 10.8）。`);
@@ -3509,6 +3509,13 @@ async function cmdIntent(repoRoot, opts) {
           log(`草稿已生成（确认路径，未进队列）：${draftPath}`);
           log(`人工审阅后提交：node .agents/scripts/orchestrator.mjs submit "${draftPath}"`);
         } else {
+          // 验收标准 L0 校验（②）：intent 直提与 cmdSubmit 同一口径——planner 产出的
+          // 空洞验收不再直进队列。die 退出（交互命令，报错即终，不走 planner 重试——
+          // 校验器判定的事实喂回去也改不了意图本身）；--draft 路径维持落 drafts 等人工修。
+          const quality = checkAcceptanceQuality(body, meta);
+          if (!quality.ok) {
+            die(`Planner 卡「验收标准」未过 L0 校验：${quality.reason}\n${quality.hint ?? ''}\n可改用 --draft 落草稿人工修订验收标准后再 submit，或改进意图描述后重跑。`);
+          }
           fs.writeFileSync(cardPath(root, 'pending', meta.id), finalText);
           log(`意图已编译为任务卡：pending/${meta.id}.md（gate=L3，合并前会经人工审核）`);
           log(`启动闭环：node .agents/scripts/orchestrator.mjs run ${meta.id}`);
