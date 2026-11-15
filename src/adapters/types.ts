@@ -101,9 +101,20 @@ export function resolveInstallCommand(cmd: ClientInstall['command']): string | n
 
 /** 是否为 npm 全局安装（npm i/install/add … -g/--global …）：其落点可经 npm_config_prefix 重定向，
  *  沙箱模式（MODELRDOCK_FAKE_HOME）因此支持自动安装。脚本类安装（curl|bash、irm|iex 等）
- *  落点由第三方脚本决定、无法重定向，沙箱内不予执行。 */
+ *  落点由第三方脚本决定、无法重定向，沙箱内不予执行。
+ *  token 化判定（无嵌套量词正则，规避 CodeQL js/redos）：与原正则
+ *  /^npm(?:\.cmd)?\s+(?:i|install|add)\s+(?:--\S+\s+|-\S+\s+)*(?:-g|--global)(?:\s|$)/ 逐例等价——
+ *  flag 段（-\S+ 形态，token 无空白故等价于「- 开头且长度 ≥2」）里 -g/--global 必须出现在
+ *  首个非 flag token（如包名）之前：`npm i -g pkg` ✓、`npm i pkg -g` ✗、`npm i -gx` ✗。 */
 export function isNpmGlobalInstall(cmd: string): boolean {
-  return /^npm(?:\.cmd)?\s+(?:i|install|add)\s+(?:--\S+\s+|-\S+\s+)*(?:-g|--global)(?:\s|$)/.test(cmd.trim())
+  const parts = cmd.trim().split(/\s+/)
+  if (parts[0] !== 'npm' && parts[0] !== 'npm.cmd') return false
+  if (parts[1] !== 'i' && parts[1] !== 'install' && parts[1] !== 'add') return false
+  for (const p of parts.slice(2)) {
+    if (p === '-g' || p === '--global') return true
+    if (!(p.startsWith('-') && p.length >= 2)) return false
+  }
+  return false
 }
 
 export class AdapterError extends Error {

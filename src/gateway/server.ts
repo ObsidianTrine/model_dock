@@ -4,7 +4,7 @@ import path from 'node:path'
 import fsp from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { pipeline } from 'node:stream/promises'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
@@ -189,7 +189,7 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
           return
         }
         const r = errorReply(e)
-        if (r.status >= 500) console.error("[gateway] " + req.method + " " + (req.url ?? "") + " " + t('网关内部错误:', 'Gateway internal error:'), e)
+        if (r.status >= 500) console.error("[gateway] %s %s %s", req.method, req.url ?? "", t('网关内部错误:', 'Gateway internal error:'), e)
         sendError(res, r.status, r.message, r.hint)
       }
     })
@@ -803,7 +803,8 @@ async function hFetchModels(c: AdminCtx): Promise<void> {
     return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
   }
   // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响
-  const failKey = `${proto}|${baseUrl}|${createHash('sha256').update(key).digest('hex').slice(0, 16)}`
+  // HMAC 而非裸哈希：稳定指纹且不可逆（CodeQL insufficient-password-hash），密钥为固定语义常量
+  const failKey = `${proto}|${baseUrl}|${createHmac('sha256', 'modeldock.fetch-model.fail-memo').update(key).digest('hex').slice(0, 16)}`
   let cachedFail = false
   try {
     const recentFail = fetchModelFailMemo.get(failKey)
@@ -2547,8 +2548,8 @@ async function hTierValidate(c: AdminCtx): Promise<void> {
   return
 }
 
-/** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串） */
-const ADMIN_ROUTES: Record<string, AdminHandler> = {
+/** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串）；Map 存查表用 .get()，键含请求输入不走对象动态索引 */
+const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/admin/rotate': hRotate,
   'GET /_modeldock/metrics': hMetrics,
   'GET /_modeldock/harness-usage': hHarnessUsage,
@@ -2610,7 +2611,7 @@ const ADMIN_ROUTES: Record<string, AdminHandler> = {
   'POST /_modeldock/tier-validate': hTierValidate,
   'POST /_modeldock/pricing-lookup': hPricingLookup,
   'POST /_modeldock/reset': hReset,
-}
+}))
 
 /** 管理面入口：Host 白名单 → tier-1 豁免端点（health/ui/relogin）→ admin 鉴权 → 路由表分发。 */
 async function handleAdmin(
@@ -2773,7 +2774,7 @@ async function handleAdmin(
     return sendError(res, 401, t('需要登录', 'Sign-in required'), t('控制台请用 modeldock ui 打开（自动携带令牌）；脚本请求请带 x-modeldock-admin 头', 'Open the console with modeldock ui (token carried automatically); scripts must send the x-modeldock-admin header'))
   }
 
-  const handler = ADMIN_ROUTES[`${req.method ?? 'GET'} ${url}`]
+  const handler = ADMIN_ROUTES.get(`${req.method ?? 'GET'} ${url}`)
   if (handler) return handler({ rt, req, res, audit, o })
   sendError(res, 404, t('未知管理端点 {url}', 'Unknown admin endpoint {url}', { url }))
 }

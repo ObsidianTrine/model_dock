@@ -29,7 +29,7 @@
 //                openai 协议自动补 /chat/completions，anthropic 协议自动补 /v1/messages
 //                （base_url 已含完整端点路径时原样使用）
 //   --key        API key，命令行粘贴传入。只经内存使用，绝不落盘、绝不打进输出/日志
-//                （输出仅显示前 6 位掩码；异常兜底路径对输出做 key 全文清洗）。
+//                （输出不显示 key 内容、仅显示长度提示；异常兜底路径对输出做 key 全文清洗）。
 //                本脚本绝不读取任何密钥存储文件。
 //   --models     逗号分隔，第一个为主模型、其余为备用模型（≥2 个才有判定意义）
 //   --protocol   openai（默认）| anthropic
@@ -97,9 +97,10 @@ if (!['openai', 'anthropic'].includes(protocol)) die(`--protocol 只支持 opena
 if (apiKey.length < 8) die('--key 看起来不像有效的 API key（长度 < 8）——请粘贴完整 key');
 if (!(RETRY_WAIT_MS >= 0 && RETRY_WAIT_MS <= 10 * 60_000)) die(`VERIFY_QUOTA_RETRY_WAIT_MS 非法：${process.env.VERIFY_QUOTA_RETRY_WAIT_MS}（0 ~ 600000）`);
 
-// key 掩码：任何输出只允许出现掩码形态
+// key 掩码：任何输出只允许出现掩码形态——掩码串不携带 key 的任何字符片段（保留前缀片段
+// 会被静态安全扫描判为明文日志，也无必要），仅回显长度便于核对粘贴是否完整
 function maskKey(key) {
-  return `${key.slice(0, 6)}****（已掩码）`;
+  return `***（已掩码，长度 ${key.length} 字符）`;
 }
 const KEY_LITERAL = apiKey;
 
