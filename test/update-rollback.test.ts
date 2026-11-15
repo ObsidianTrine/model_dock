@@ -134,7 +134,13 @@ describe('登记（runUpdate 记账钩子的单测面）', () => {
     fs.writeFileSync(trayOld, 'OLD-TRAY')
 
     await recordBareRollback(execPath, true)
-    expect(await readRollbackSlot()).toMatchObject({ version: VERSION, shape: 'bare', mainPath: execPath + '.old', trayPath: trayOld })
+    // shape 由 detectInstallShape 诚实探测：win32 无卸载器即 win-bare（还原语义与 bare 同套）
+    expect(await readRollbackSlot()).toMatchObject({
+      version: VERSION,
+      shape: process.platform === 'win32' ? 'win-bare' : 'bare',
+      mainPath: execPath + '.old',
+      trayPath: trayOld,
+    })
 
     await recordBareRollback(execPath, false)
     const slot = await readRollbackSlot()

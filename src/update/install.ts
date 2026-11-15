@@ -223,7 +223,11 @@ export function appRootFromExecPath(execPath: string): string | null {
   const base = segs.pop()
   if (!base) return null
   const appSeg = base + '.app'
-  return segs.length ? segs.join('/') + '/' + appSeg : appSeg
+  // Windows 反斜杠路径按原分隔符重组（norm 与原串逐字符等长，idx 对原串同样成立）：
+  // 产出的 appRoot 供 fs 操作与还原账本 mainPath 使用，须保持平台原生分隔符，与 bare
+  // 分支（execPath + '.old'）口径一致——手写 '/' 重组会让 Windows 下账本混入正斜杠路径
+  const sep = execPath.includes('\\') ? '\\' : '/'
+  return segs.length ? segs.join(sep) + sep + appSeg : appSeg
 }
 
 /** Windows 安装器指纹：Inno 卸载器 unins000.exe 与主程序同目录（装完即在，卸载才移除）。
