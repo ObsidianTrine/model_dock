@@ -43,6 +43,8 @@ describe('orchestrator prompt > worker prompt 五层组装', () => {
     expect(p).toContain('先调研，后动工') // 卡面资料只是起点，须独立检索核验
     expect(p).toContain('残留盘点') // 改造类任务三分类：旧主体遗留人类特征一律清除
     expect(p).toContain('辫子长在鸟身上就不成立') // 「可保留」授权不豁免主体一致性
+    expect(p).toContain('关联内容全量过滤') // 换主体须同步标题/文案/aria/注释
+    expect(p).toContain('grep 旧主体名归零')
     expect(p).toContain('不许带未申报的假设')
   })
 
