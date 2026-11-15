@@ -201,6 +201,51 @@ export function parseCard(text, sourceName = '') {
   return { meta, body };
 }
 
+/**
+ * 验收标准拆条：`- `/`* `/有序列表项优先，退化为非空行。
+ * 卡 L0 校验（checkAcceptanceQuality）/ 契约对账（acceptance 申报）/ reviewer 逐条裁决三方共用，
+ * 保证「条」的口径一致。
+ */
+export function splitAcceptanceItems(text) {
+  const lines = String(text ?? '').split('\n');
+  const bullets = lines
+    .map((l) => l.trim())
+    .filter((l) => /^([-*]|\d+[.)])\s+/.test(l))
+    .map((l) => l.replace(/^([-*]|\d+[.)])\s+/, '').trim())
+    .filter(Boolean);
+  if (bullets.length) return bullets;
+  return lines.map((l) => l.trim()).filter(Boolean);
+}
+
+// 验收标准可机检锚点（② L0 校验）：至少一条须含下列证据形态之一——
+// 命令 / 测试或源文件路径 / 行为断言词 / spec 拆卡锚点句。「可机器检查」此前只是
+// prompt 纪律（planner/propose 的产出契约），人写卡与 scanner 卡的空洞标准照进闭环，
+// 只能靠返工轮兜底——在提交口堵住（arXiv 2610.34577：任务说明质量是验收的最上游杠杆）。
+const ACCEPTANCE_ANCHORS = [
+  /\b(?:npx|npm|pnpm|yarn|node|tsc|vitest|pytest|cargo|go)\b/i, // 验证命令形态
+  /\b[\w.@/-]*(?:test|tests|spec|src|scripts)[/\\][\w./\\-]+\.(?:ts|tsx|js|mjs|cjs|py|go)\b/i, // 测试/源文件路径
+  /\.(?:test|spec)\.[a-z]+/i, // 测试文件名（含描述性引用）
+  /(?:状态码|返回值|输出|退出码|exit code|端点|文案|等于|包含|不出现|应(?:当|该)?)/i, // 行为断言词
+  /按\s*requirements\s*验收标准逐条自查/, // spec 拆卡固定锚点句（spec.mjs renderTaskCard）
+];
+
+/**
+ * 验收标准 L0 校验（提交口调用，见 cmdSubmit / submitDraft；run 期不复查——存量卡不回溯）。
+ * created_by=scanner 豁免：巡检卡的验证闭环是复扫（信号不再复现），验收天然无行为断言。
+ * @returns {{ ok: boolean, reason?: string, hint?: string }}
+ */
+export function checkAcceptanceQuality(body, meta = {}) {
+  if (meta.created_by === 'scanner') return { ok: true };
+  const items = splitAcceptanceItems(body?.acceptance);
+  if (!items.length) return { ok: false, reason: '验收标准为空' };
+  if (items.some((it) => ACCEPTANCE_ANCHORS.some((re) => re.test(it)))) return { ok: true };
+  return {
+    ok: false,
+    reason: `验收标准 ${items.length} 条中没有任何一条含可机器检查的锚点（验证命令 / 测试文件路径 / 行为断言词）`,
+    hint: '把「测试全绿」这类空洞标准改写为具体断言，例如：npx vitest run test/x.test.ts 全绿；GET /health 应返回 200；src/y.ts 导出的 zzz() 对空输入返回 null。',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 校验
 // ---------------------------------------------------------------------------

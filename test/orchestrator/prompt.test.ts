@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildFixupPrompt, buildPromptFileRefBody, buildReviewerPrompt, buildWorkerPrompt, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
+import { buildFixupPrompt, buildPromptFileRefBody, buildReviewerPrompt, buildReviewRetryPrompt, buildWorkerPrompt, checkRecitation, parseAcceptanceDeclared, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { loadCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { cardText } from './helpers.js'
 
@@ -75,6 +75,74 @@ describe('orchestrator prompt > 审查', () => {
   it('verdict 三级计数解析', () => {
     expect(parseReviewVerdict('...正文...\nREVIEW_SUMMARY: blockers=1 suggestions=2 notes=3')).toEqual({ blockers: 1, suggestions: 2, notes: 3 })
     expect(parseReviewVerdict('没有汇总行')).toBeNull()
+  })
+
+  it('验收标准编号成清单并要求逐条 pass/fail（Task-first review）', () => {
+    const multiText = cardText({ id: 'acc-multi' }).replace(
+      '- 通过（npx vitest run 全绿）',
+      '- npx vitest run test/a.test.ts 全绿\n- GET /health 应返回 200'
+    )
+    const multi = loadCard(multiText, 'c.md')
+    const p = buildReviewerPrompt(multi, 'diff')
+    expect(p).toContain('逐条核对验收标准（共 2 条')
+    expect(p).toContain('1. npx vitest run test/a.test.ts 全绿')
+    expect(p).toContain('2. GET /health 应返回 200')
+  })
+
+  it('reviewContext 注入复诵段与预检事实；不传时无复诵条目', () => {
+    const withCtx = buildReviewerPrompt(card(), 'diff', '', '', { notesRecap: 'NOTES 复诵内容', recitationFact: '' })
+    expect(withCtx).toContain('5. **复诵核对**')
+    expect(withCtx).toContain('<NOTES.md 复诵段')
+    expect(withCtx).toContain('NOTES 复诵内容')
+    const factOnly = buildReviewerPrompt(card(), 'diff', '', '', { notesRecap: '', recitationFact: 'NOTES.md 仍是 start 模板原文' })
+    expect(factOnly).toContain('编排器预检事实：NOTES.md 仍是 start 模板原文')
+    expect(factOnly).not.toContain('<NOTES.md 复诵段')
+    const noCtx = buildReviewerPrompt(card(), 'diff')
+    expect(noCtx).not.toContain('复诵核对')
+  })
+})
+
+describe('orchestrator prompt > 复诵核对（checkRecitation，① 机器面）', () => {
+  it('复诵关键词命中 ≥2 → present；空 NOTES → 事实句', () => {
+    const ok = checkRecitation('# NOTES\n- 目的地（目标）：x\n- 交货标准（验收标准）：y\n', card())
+    expect(ok.present).toBe(true)
+    expect(ok.fact).toBe('')
+    const empty = checkRecitation('', card())
+    expect(empty.present).toBe(false)
+    expect(empty.fact).toContain('复诵协议未执行')
+  })
+
+  it('start 模板原文 → 模板事实句；目标文本重叠 → present', () => {
+    const tpl = '# 任务交接 NOTES — t\n- 船位（已完成）：\n<一句话说明本任务要达成什么>\n'
+    const r1 = checkRecitation(tpl, card())
+    expect(r1.present).toBe(false)
+    expect(r1.fact).toContain('start 模板原文')
+    const r2 = checkRecitation('我把「测试任务目标」这件事做完了', card())
+    expect(r2.present).toBe(true)
+  })
+})
+
+describe('orchestrator prompt > acceptance 申报解析与契约行补问（③⑤）', () => {
+  it('parseAcceptanceDeclared 解析 m/n；自由文本/缺失/0 分母返回 null（旧契约块兼容）', () => {
+    expect(parseAcceptanceDeclared('2/3')).toEqual({ met: 2, total: 3 })
+    expect(parseAcceptanceDeclared(' 1 / 1 ')).toEqual({ met: 1, total: 1 })
+    expect(parseAcceptanceDeclared('全部满足')).toBeNull()
+    expect(parseAcceptanceDeclared(undefined)).toBeNull()
+    expect(parseAcceptanceDeclared('0/0')).toBeNull()
+  })
+
+  it('buildReviewRetryPrompt 只求补汇总行，带上一轮输出截尾，不重放 diff', () => {
+    const p = buildReviewRetryPrompt('审查正文……\n结论若干')
+    expect(p).toContain('REVIEW_SUMMARY: blockers=')
+    expect(p).toContain('审查正文')
+    expect(p).not.toContain('```diff')
+  })
+
+  it('契约块模板（含收缩体）带 acceptance 申报行', () => {
+    const c = ctx(os.tmpdir())
+    expect(buildWorkerPrompt(card(), c)).toContain('acceptance: <已满足的验收条数>/<总条数>')
+    const body = buildPromptFileRefBody({ promptPath: '/p.md', card: card(), originalChars: 21_000 })
+    expect(body).toContain('acceptance: <已满足的验收条数>/<总条数>')
   })
 })
 

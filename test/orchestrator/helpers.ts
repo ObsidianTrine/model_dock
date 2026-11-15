@@ -182,7 +182,7 @@ export function cardText(overrides: Record<string, unknown> = {}, body = '', pla
     }
   }
   return (
-    `---\n${fm.join('\n')}\n---\n\n# 目标\n${body || '测试任务目标。'}\n\n# 验收标准\n- 通过\n` +
+    `---\n${fm.join('\n')}\n---\n\n# 目标\n${body || '测试任务目标。'}\n\n# 验收标准\n- 通过（npx vitest run 全绿）\n` +
     (plan ? `\n# 航次计划\n${plan}\n` : '')
   )
 }

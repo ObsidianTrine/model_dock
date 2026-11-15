@@ -29,12 +29,14 @@ import {
   moveCard,
   listCards,
   pickNextCard,
+  splitAcceptanceItems,
+  checkAcceptanceQuality,
   TASK_ID_RE,
 } from './orchestrator/queue.mjs';
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildReviewRetryPrompt, parseAcceptanceDeclared, checkRecitation, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
 import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, readVerdict, verdictGateBlocks, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, readResearchLedger, researcherStanding } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
@@ -1021,6 +1023,41 @@ async function cmdRun(repoRoot, taskId, opts) {
       }
       appendEvent(qdir, 'worker_done', { summary: String(claimed.summary ?? '').slice(0, 200) });
 
+      // 调试子循环熔断出口（数据表段与验收申报对账共用同一套终态落位，收敛防漂移）
+      const tripDebugLoop = async (detail, dieTail) => {
+        appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
+        moveCard(root, taskId, 'running', 'blocked');
+        archiveIncident(repoRoot, taskId, root, qdir, detail);
+        await settleNotify(repoRoot, taskId, 'blocked', detail);
+        await exitRun(`${detail}。${dieTail}`);
+      };
+
+      // ---- 验收申报对账（契约层 acceptance: m/n）：worker 自认未满足全部验收标准时，
+      // 不等门禁直接送返工子循环——门禁与审查在修复后的下一轮照跑（自报不可信原则不受
+      // 影响：申报缺额只是自认 incomplete 的最快信号；申报缺失 / 解析不出（旧契约块 /
+      // 自由文本）跳过，验收达标与否仍由门禁与 reviewer 逐条机器验证）。
+      const accItems = splitAcceptanceItems(card.body.acceptance);
+      const declaredAcc = parseAcceptanceDeclared(claimed.acceptance);
+      if (accItems.length > 0 && declaredAcc && declaredAcc.met < accItems.length) {
+        debugIter += 1;
+        appendEvent(qdir, 'acceptance_shortfall', { declared: `${declaredAcc.met}/${declaredAcc.total}`, card_items: accItems.length });
+        appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: 'acceptance_gap', max: meta.budget.max_test_iterations });
+        if (debugIter > meta.budget.max_test_iterations) {
+          await tripDebugLoop(`验收申报缺口 ${debugIter} 轮未收敛（worker 自报 ${declaredAcc.met}/${declaredAcc.total}，卡内 ${accItems.length} 条）`, '任务转 blocked/，人工接手。');
+        }
+        promptText = injectFollowUps(
+          qdir,
+          buildFixupPrompt(
+            card,
+            ctx,
+            'acceptance_gap',
+            `worker 契约块自报验收满足 ${declaredAcc.met}/${declaredAcc.total}（卡内共 ${accItems.length} 条）。未满足的验收标准需逐条补齐后再报 done：\n${accItems.map((it, i) => `${i + 1}. ${it}`).join('\n')}`,
+            debugIter
+          )
+        );
+        continue;
+      }
+
       // ---- 静态门禁（数据表驱动，agents-hygiene-batch）----
       // 五段同构 try/catch（npm_test/tsc_build/lint/typecheck/ui_check）收敛为数据表 +
       // 单个执行函数 runGates：run → pass 记 gate_result → GateError 时 debug_iteration 计数、
@@ -1039,11 +1076,7 @@ async function cmdRun(repoRoot, taskId, opts) {
             debugIter += 1;
             appendEvent(qdir, 'debug_iteration', { attempt: debugIter, trigger: g.trigger, max: meta.budget.max_test_iterations });
             if (debugIter > meta.budget.max_test_iterations) {
-              appendEvent(qdir, 'circuit_breaker', { reason: 'max_test_iterations', detail: `${debugIter}/${meta.budget.max_test_iterations}` });
-              moveCard(root, taskId, 'running', 'blocked');
-              archiveIncident(repoRoot, taskId, root, qdir, `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
-              await settleNotify(repoRoot, taskId, 'blocked', `调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`);
-              await exitRun(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）。${g.dieTail}`);
+              await tripDebugLoop(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`, g.dieTail);
             }
             return { trigger: g.trigger, output: e.output };
           }
@@ -1199,7 +1232,20 @@ async function cmdRun(repoRoot, taskId, opts) {
         const reviewPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-review-'));
         reviewTempDirs.push(reviewPromptDir);
         const reviewPromptFile = path.join(reviewPromptDir, 'review-prompt.md');
-        const reviewPromptText = buildReviewerPrompt(card, purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff, cfg.reviewNotes, reviewDiscipline(repoRoot));
+        // 复诵核对事实面（①）：NOTES.md 复诵段 + 确定性预检结果注入 reviewer——复诵协议
+        // 至此闭环到核对（此前只有 prompt 承诺，编排器与 reviewer 都不做对账）
+        const notesText = safeRead(path.join(worktree, 'NOTES.md'));
+        const recite = checkRecitation(notesText, card);
+        const reviewPromptText = buildReviewerPrompt(
+          card,
+          purity.outside.length ? diff + `\n\n# 范围警告\n以下改动超出 files_hint（${meta.files_hint.join(', ')}）：\n${purity.outside.join('\n')}` : diff,
+          cfg.reviewNotes,
+          reviewDiscipline(repoRoot),
+          {
+            notesRecap: recite.present ? String(notesText).slice(0, 800) : '',
+            recitationFact: recite.fact,
+          }
+        );
         fs.writeFileSync(reviewPromptFile, reviewPromptText);
         const reviewStartedAt = Date.now();
         // review_spawned 在 spawn 成功返回后才落——spawn 失败（CLI 临时不可用）不写事件，
@@ -1233,7 +1279,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         });
         livePid = null;
         appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
-        const verdict = parseReviewVerdict(review.output ?? '');
+        let verdict = parseReviewVerdict(review.output ?? '');
         // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
         // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
         // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
@@ -1246,6 +1292,33 @@ async function cmdRun(repoRoot, taskId, opts) {
           archiveIncident(repoRoot, taskId, root, qdir, detail);
           await settleNotify(repoRoot, taskId, 'blocked', detail);
           await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+        }
+        // 契约行补问（⑤）：引擎正常、有审查输出、只缺 REVIEW_SUMMARY 汇总行——先补问
+        // 一次再判罚。直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）；
+        // 补问仍解析不到才落回保守判罚。补问输入只有上轮输出，不重放 diff（不重开审查）。
+        if (!verdict && String(review.output ?? '').trim()) {
+          budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
+          const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
+          const retryPromptText = buildReviewRetryPrompt(review.output);
+          fs.writeFileSync(retryPromptFile, retryPromptText);
+          const retry = await reviewBackend.spawn({
+            promptFile: retryPromptFile,
+            cwd: worktree,
+            maxTurns: 6, // 只求补一行汇总，不重开审查
+            onEvent: (e) => {
+              appendEvent(qdir, e.type, e);
+              trackPid(e);
+              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read);
+            },
+            readonly: true,
+            model: effReviewModel,
+            settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
+            envPatch: tierEnv,
+          });
+          const retryVerdict = parseReviewVerdict(retry.output ?? '');
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
+          appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
+          if (retryVerdict) verdict = retryVerdict;
         }
         // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
         // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
@@ -2081,7 +2154,13 @@ function cmdSubmit(repoRoot, cardFile) {
   ensureQueue(root);
   const text = safeRead(path.resolve(cardFile));
   if (!text) die(`任务卡文件不存在或为空：${cardFile}`);
-  const { meta } = loadCard(text, path.basename(cardFile));
+  const { meta, body } = loadCard(text, path.basename(cardFile));
+  // 验收标准 L0 校验（②）：空洞标准此前只能靠返工轮兜底——在提交口堵住。run 期不复查，
+  // 存量卡不回溯。校验失败附修复示例，人工改卡后重交。
+  const quality = checkAcceptanceQuality(body, meta);
+  if (!quality.ok) {
+    die(`任务卡「验收标准」未过 L0 校验：${quality.reason}\n${quality.hint ?? ''}`);
+  }
   const existing = findCard(root, meta.id);
   if (existing) die(`任务 id "${meta.id}" 已存在于 ${existing.state}/（同 id 不允许重复提交）。`);
   fs.copyFileSync(path.resolve(cardFile), cardPath(root, 'pending', meta.id));
@@ -3108,7 +3187,10 @@ function submitDraft(repoRoot, root, id, { gate } = {}) {
   }
   try {
     const finalText = normalizeProposalText(text, { gate });
-    const { meta } = loadCard(finalText, `${id}.md`);
+    const { meta, body } = loadCard(finalText, `${id}.md`);
+    // 验收标准 L0 校验（②）：不过校验的提案留在 drafts 等人工修（与卡面校验同一失败归宿）
+    const quality = checkAcceptanceQuality(body, meta);
+    if (!quality.ok) return { skipped: `${id} 验收标准未过 L0 校验（${quality.reason}），留在 drafts 等人工修` };
     fs.writeFileSync(cardPath(root, 'pending', meta.id), finalText);
     fs.rmSync(p, { force: true });
     return { submitted: meta.id, gate: meta.gate };

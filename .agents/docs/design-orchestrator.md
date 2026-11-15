@@ -261,11 +261,13 @@ status: done | stuck
 summary: 一句话说明
 files_changed: ["src/presets/data.ts", "test/presets/data.test.ts"]
 tests: pass | fail
+acceptance: 2/2
 notes_updated: true
 ```
 ````
 
 - `stuck` → 任务转 `blocked/`（NOTES.md 已留现场），等人工决策或换模型重试。
+- **acceptance 申报对账（2026-11-15）**：worker 按任务层验收标准逐条申报满足数（`acceptance: m/n`）。自报缺口（m < 卡内条数）= 自认 incomplete 的最快信号——不等门禁直接送返工子循环（`acceptance_gap`，与测试修复共用 `max_test_iterations` 计数）；申报缺失 / 解析不出（旧契约块）跳过，达标与否仍由门禁与 reviewer 机器验证（自报不可信原则不受影响）。
 - **自报不可信**：无论 worker 报什么，orchestrator 都亲自跑静态门禁（见 5.7）。
 
 #### Worker 后端抽象（可插拔）
@@ -338,7 +340,10 @@ worker 报告 done
 ### 5.8 LLM 独立审查
 
 - 静态门禁全过后，orchestrator 生成 `git diff develop...HEAD`，起**第二个 headless 会话**（全新上下文、只读），prompt 用 `.agents/workflows/code-review.md` 中已固化的模板。
+- **逐条裁决（2026-11-15）**：验收标准拆条编号进 prompt，reviewer 对每条给 pass/fail 判定与证据，fail 计阻塞项（Task-first review——给 critic 任务说明 + 变更，按任务逐项核，业界实证最优的 L3 评审形态）。
+- **复诵核对注入（同日）**：编排器对 worktree NOTES.md 做确定性预检（checkRecitation：复诵关键词 / 目标文本重叠双探针），把 NOTES 复诵段（截 800 字）与预检事实句一并注入审查 prompt——复诵协议自此闭环到核对（此前只有 prompt 承诺，编排器与 reviewer 均不对账）；复诵与实际改动矛盾计阻塞项，预检只产事实不直接阻断（判罚权在 reviewer）。
 - 返回三级结果（阻塞/建议/提示）→ 写 `review_verdict` 事件。
+- **契约行补问（同日）**：引擎正常（exitCode=0）但输出缺 REVIEW_SUMMARY 汇总行时，先向 reviewer 补问一次（输入只有上轮输出截尾，不重放 diff），补出即恢复正常链路；仍缺才按 blockers=1 保守判罚——不再白烧一轮 worker 返工。补问写决策留底（`meta.retry: "contract_line"`）+ `review_verdict_retry` 事件（resolved 布尔）。
 - 有阻塞项 → 把审查意见作为 fixup prompt 喂回 worker（**受独立的 `max_review_iterations` 约束**，与调试子循环分开计数）；无阻塞 → 进人工闸门。
 
 ### 5.9 人工闸门交互（Phase 1 唯一的 L3）
@@ -610,3 +615,4 @@ worker 的 token 用量从此有两本账：
 | v1.1 | 2026-10-29 | 任务级互斥锁（§10.6，task-lock.mjs）：同任务同时只允许一个 run 闭环进程，堵住"手动 run 撞 drain / 双重手动操作 → 两个 worker 写同一个 worktree"的全部路径与旧孤儿接管的杀竞窗口；abandon 增加闭环存活守卫；锁文件 .run-\<task-id\>.lock 入 gitignore |
 | v1.2 | 2026-10-30 | 自治长跑加固（feature/orch-autonomy-hardening）：**Windows 权限墙根修**——claude CLI 在 Windows 的 shell 工具是 PowerShell，Bash(...) 白名单匹配不到 PowerShell 调用（沙箱实验实证），白名单/红线/hook matcher 一律 Bash+PowerShell 双形态；zcode 0.17.0 yolo 已恢复全自动。**budgetProfiles** 按引擎校准预算（zcode max_tokens 5M——GLM 缓存读口径失真+结束才回填 usage）+ Budget 会话级记账（committed+sessionMax，修跨 fixup 会话 Math.max 漏计）+ budget_baseline 事件。**瞬时故障退避**：无结果块且带 429/网络签名原地重试 60s×attempt ≤3 次；drain 引擎预检（不可用拒绝启动，杜绝逐卡烧成 blocked）。**无人值守观测**：落位（awaiting-human/blocked/failed）与 drain 收官 webhook 通知（\${envPrefix}_ORCH_WEBHOOK）；spec progress.json 全局进度锚（moveCard 自动同步）+ spec status。**prompt 纪律**：结束纪律层（done 前自验/干净提交/权限拒绝满 2 次 stuck 熔断——实测一次任务白烧 15+ 次重试）、git -C 与复合命令禁用、spec design/requirements 改 worktree 文件引用（防 zcode 30k argv 上限）、reviewer 注入 REVIEW.md 纪律、files_hint 剥反引号（tray-only-mode-t1 实测污染） |
 | v1.3 | 2026-11-03 | **token 计量口径修正（usage-cache-read-scope）**：新增**可计费口径** billable = (tokens_in − 缓存读) + tokens_out，max_tokens 熔断与低油量告警改用它（GLM 网关缓存读占大头，总口径预算虚胖、熔断形同虚设）；缓存读单列（budget_snapshot.tokens_cache_read）。网关 usage tap 落 `usage.billable_tokens`（按 anthropic/openai 协议形态厘清公式）；reconcile 分歧率改 billable 对 billable，任一侧缺新字段回落旧口径并标注「旧口径」。旧口径字段（tokens/sessionMax/总账）全部保留向后兼容；燃油账（美元）不动。budgetProfiles.max_tokens 语义变为可计费口径，数值可按真实消耗回调（§5.10） |
+| v1.4 | 2026-11-15 | **任务质量闸门前置（fix-orch-p0-quality，业界对标后 P0 批次）**：① 复诵协议闭环到机器核对——checkRecitation 双探针（复诵关键词/目标文本重叠）预检 NOTES.md，事实注入 reviewer prompt 裁决；② 验收标准提交口 L0 校验——checkAcceptanceQuality 确定性锚点（验证命令/测试路径/行为断言词），空洞卡拒绝提交（scanner 豁免），「可机器检查」从 prompt 纪律升级为机器门禁；③ 契约块 `acceptance: m/n` 逐条申报——自报缺口不等门禁直接返工（acceptance_gap），反复缺口计入调试子循环熔断；④ 结束纪律补 tsc/build 自查；⑤ reviewer 契约行缺失先补问一次再保守判罚（review_verdict_retry 事件）+ 按验收标准逐条 pass/fail 裁决。设计依据：arXiv 2610.34577（独立 critic 性价比最优 / Task-first review）、Anthropic 多 agent 工程复盘（复述协议须闭环到核对） |
