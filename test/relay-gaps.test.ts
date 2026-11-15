@@ -386,9 +386,9 @@ describe('relay · 错误体翻译与解压读面', () => {
 describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_HOPS 安全帽', () => {
   const QUOTA_BODY = JSON.stringify({ error: { message: 'Insufficient Balance (request_id: 1)' } })
 
-  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应；记录每次收到的模型名。 */
+  /** 按请求体 model 字段分流的 mock 上游：route(model) 决定响应（headers 可选，如 retry-after）；记录每次收到的模型名。 */
   async function startModelMock(
-    route: (model: string) => { status: number; body: string }
+    route: (model: string) => { status: number; body: string; headers?: Record<string, string> }
   ): Promise<{ url: string; seen: string[]; close: () => Promise<void> }> {
     const seen: string[] = []
     const s = http.createServer((req, res) => {
@@ -403,7 +403,7 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
         }
         seen.push(model)
         const out = route(model)
-        res.writeHead(out.status, { 'content-type': 'application/json' })
+        res.writeHead(out.status, { 'content-type': 'application/json', ...out.headers })
         res.end(out.body)
       })
     })
@@ -561,6 +561,41 @@ describe('relay · 模型级容灾：熔断感知预改写 + MAX_MODEL_FALLBACK_
       expect(r5.status).toBe(200)
       expect(r5.reason).toBe('fallback_to:mB')
       expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 5, absorbedCount: 1 })
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('闸门吸收 × 429 原地重试叠加：同一请求 fallback/absorbed 只计 1 次（记账请求内去重）', async () => {
+    const h = fakeHome()
+    // mB 首发 429（Retry-After 0s + 非额度体 → 触发原地重试）、重试 200；mA 路径全程零真实往返
+    let mBHits = 0
+    const mock = await startModelMock((model) => {
+      if (model === 'mB') {
+        mBHits++
+        return mBHits === 1
+          ? { status: 429, body: JSON.stringify({ error: { message: 'rate limited, slow down' } }), headers: { 'retry-after': '0' } }
+          : { status: 200, body: '{"ok":true}' }
+      }
+      return { status: 402, body: QUOTA_BODY }
+    })
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      const pa = providerCfg({ name: 'pa', base_url: mock.url, key_ref: 'file:pa', model_fallback: { mA: 'mB' } })
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      // 直灌 3 笔 (pa, mA) 模型级 quota：第 3 笔触发 15min 熔断（与真实记账同入口）
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pa', 'mA', { ok: false, cls: 'quota' })
+      expect(rt.modelHealth?.get('pa\u0000mA')?.meltdown_until).toBeDefined()
+      const r = await forwardWithFailover(rt, baseOn(cfg, 'pa'), fwd(Buffer.from(JSON.stringify({ model: 'mA', messages: [] }))) as never)
+      expect(r.status).toBe(200)
+      expect(r.reason).toBe('retried_429:pa') // 原地重试确实发生（钉死场景：mB 429 → 同候选重试）
+      expect(r.modelAfter).toBe('mB')
+      expect(countOf(mock.seen, 'mB')).toBe(2) // 首发 + 原地重试，均直发 mB
+      expect(countOf(mock.seen, 'mA')).toBe(0) // 主模型零上游往返
+      // 同一请求只计一次改发（修复前：原地重试再次进闸门 → fallback/absorbed 双计为 2）
+      expect(rt.modelFallbackCounts?.get('pa\u0000mA')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
     } finally {
       await mock.close()
       h.restore()

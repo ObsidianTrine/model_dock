@@ -168,6 +168,12 @@ export interface ForwardOptions {
    *  undefined = 未提供（rewriteModel 自扫，行为同未提供时）；null = 已扫但拿不准（走全量解析）。
    *  必须是对同一 body Buffer 的扫描结果，否则改写字节区间错位。 */
   bodyScan?: TopModelScan | null
+  /** 模型级容灾记账的请求内去重集合（键 `${providerId}\u0000${model}`，与 modelHealth 同口径）：
+   *  闸门吸收在 429 原地重试 / 链上候选切换时会再次咨询（body 未变、熔断态未变），同一请求同一
+   *  (provider, model) 的改发只计一次。forwardWithFailover 一次创建、随本请求的 fwdOpts 生命周期
+   *  消亡（禁模块级持久集合，防跨请求泄漏）；undefined = 调用方未提供（直调单发无重复进闸门的
+   *  路径，行为不变）。 */
+  mfAccounted?: Set<string>
 }
 
 export interface UpstreamBody {
@@ -550,8 +556,14 @@ export async function forwardToUpstream(
         if (!isModelMeltdown(rt, providerId, final)) return undefined // 主模型未熔断：不动
         if (isModelMeltdown(rt, providerId, fb)) return undefined // 备用也在熔断：不去撞
         // 闸门命中 = 改发已发生且请求被吸收（直接改发备用模型，原模型上游零往返）：
-        // fallback/absorbed 双计（absorbed 是 fallback 的真子集，见 recordModelFallback 注）
-        recordModelFallback(rt, providerId, final, true)
+        // fallback/absorbed 双计（absorbed 是 fallback 的真子集，见 recordModelFallback 注）。
+        // 记账请求内去重：429 原地重试 / 候选切换会让同请求再次进闸门（body 未变、熔断态未变），
+        // 同一 (provider, model) 只计一次；集合缺省（直调单发）时无重复路径，照旧记账。
+        const key = `${providerId}\u0000${final}`
+        if (!opts.mfAccounted?.has(key)) {
+          opts.mfAccounted?.add(key)
+          recordModelFallback(rt, providerId, final, true)
+        }
         return fb
       }
     : undefined
@@ -1079,7 +1091,10 @@ export async function forwardWithFailover(
   // 扫描全程有效；非 routed / 空体时改写层与过滤层都不需要它，直接跳过（零扫描）。
   const routedPath = ROUTED_PATH_RE.test(opts.path.split('?')[0])
   const bodyScan = routedPath && opts.body.length > 0 ? scanTopLevelModel(opts.body) : null
-  const fwdOpts: ForwardOptions = { ...opts, bodyScan }
+  // 模型级容灾记账去重集合（per-request）：随 fwdOpts 整链复用（含 429 原地重试与候选切换），
+  // 随本请求消亡——闸门吸收记账前查重，见 ForwardOptions.mfAccounted 注
+  const mfAccounted = new Set<string>()
+  const fwdOpts: ForwardOptions = { ...opts, bodyScan, mfAccounted }
   // 自动候选模型相容过滤（见 filterModelCompatible）：目录不含请求模型的服务不重放，剔除留痕 attempts/reason
   const cands = filterModelCompatible(
     picked.ordered,
