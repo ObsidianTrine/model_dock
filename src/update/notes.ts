@@ -36,18 +36,32 @@ interface NoteBlock {
   lead?: string
 }
 
-/** 行内标记 → 纯文本（粗体/斜体/行内代码/链接/图片/常见 HTML 标签） */
+/** 行内标记 → 纯文本（粗体/斜体/行内代码/链接/图片/常见 HTML 标签）。
+ *  清洗链三段式「入库 → 剥离 → 还原」，保证链中途不再制造新标记：
+ *  1) 行内代码与反斜杠转义最先入库成占位符——code span 内容原样保留（markdown 语义其内部
+ *     不做标记解析），`\*` 等转义是字面字符；两者先摘走，后续剥离步骤既不会误吃它们，
+ *     也不会像「链尾才把 `\*` 还原成 `*`」那样重新制造未处理的标记；
+ *  2) 中段只做标记剥离（图片/链接/粗斜体/HTML），replacement 不引入新标记字符；
+ *  3) 占位符用 \x00 定界 + 索引（原文几乎不可能出现），链尾统一还原为字面文本。 */
 function inlineToPlain(s: string): string {
+  const stash: string[] = []
+  const park = (text: string): string => {
+    stash.push(text)
+    return `\u0000${stash.length - 1}\u0000`
+  }
   return s
+    // 行内代码最先剥离：内容原样入库，其内标记字符不再参与后续解析（`**a**` 原样输出）
+    .replace(/`([^`]+)`/g, (_m, code: string) => park(code))
+    // 反斜杠转义入库：摘走的是「字面字符」，防止 \* 先被当标记剥掉或在还原时制造新标记
+    .replace(/\\([\\`*_{}[\]()#+\-.!])/g, (_m, ch: string) => park(ch))
     .replace(/!\[([^\]]*)\]\([^)\s]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, txt: string, url: string) => (txt === url ? txt : `${txt} (${url})`))
-    .replace(/`([^`]+)`/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1$2')
     .replace(/(^|[\s(])_([^_\n]+)_/g, '$1$2')
     .replace(/<\/?(?:br|p|div|ul|ol|li|h[1-6]|blockquote|strong|em|b|i|code|span|a|img|hr)\b[^>]*>/gi, '')
-    .replace(/\\([\\`*_{}[\]()#+\-.!])/g, '$1')
+    .replace(/\u0000(\d+)\u0000/g, (_m, i: string) => stash[Number(i)] ?? '')
     .replace(/\s+$/, '')
 }
 

@@ -273,9 +273,25 @@ ${args}
 `
 }
 
-/** systemd ExecStart 参数引号包裹（路径可含空格）；%/$ 是 systemd 特殊字符需翻倍转义 */
+/** systemd ExecStart 参数引号包裹（路径可含空格）；%/$ 是 systemd 特殊字符需翻倍转义。
+ *  翻倍必须用函数式 replacement：字符串 replacement 里 `$$` 是「字面 $」的转义，
+ *  `.replace(/\$/g, '$$')` 实为不翻倍的空操作（曾经的真实 bug，测试锚定）。
+ *  引号 / 换行 / 回车 / 空字节在 systemd 双引号参数里没有安全的转义写法（`"` 会提前终止参数、
+ *  换行破坏 unit 行结构、\0 直接非法，靠 `\"` 反斜杠转义链修不完整），入口显式拒绝而不是硬转义；
+ *  报错文案指引更换安装路径，上游（cmdGatewayInstall / 网关 hAutostart）把抛错降级为告警展示。 */
 function systemdQuote(s: string): string {
-  return '"' + s.replace(/%/g, '%%').replace(/\$/g, '$$').replace(/"/g, '\\"') + '"'
+  const bad = s.match(/["\n\r\0]/)?.[0]
+  if (bad != null) {
+    const shown = bad === '\n' ? '\\n' : bad === '\r' ? '\\r' : bad === '\0' ? '\\0' : '"'
+    throw new Error(
+      t(
+        '路径「{p}」含无法安全写入 systemd unit 文件的字符（{ch}，U+{code}）：安装路径不能包含引号、换行符或空字节，请更换安装位置后重试',
+        'The path "{p}" contains a character that cannot be safely written into a systemd unit file ({ch}, U+{code}): install paths must not contain quotes, line breaks, or NUL bytes — pick a different install location and retry',
+        { p: s, ch: shown, code: bad.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') }
+      )
+    )
+  }
+  return '"' + s.replace(/%/g, () => '%%').replace(/\$/g, () => '$$') + '"'
 }
 
 /** 非 ExecStart 设置项同样会做 specifier 展开，% 需转义 */
