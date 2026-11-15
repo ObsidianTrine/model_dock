@@ -42,6 +42,10 @@ import { CARD_MARKER, RESULT_MARKER, SPEC_META_MARKER, REQUIREMENTS_MARKER, DESI
 // 模块级变量——runOrch 每次新子进程天然复位；测试不得在同进程 import mock 断言次数。
 let verifierCall = 0;
 const paraphraseOnce = process.env.ORCH_MOCK_REVIEW_PARAPHRASE_ONCE === '1';
+// reviewer 会话计数（NOVERDICT_ONCE 用）：本子进程第一次审查无汇总行、补问轮补出——
+// 契约行补问（review_verdict_retry resolved=true）链路的 e2e 注入。同一计数口径同上。
+let reviewCall = 0;
+const noVerdictOnce = process.env.ORCH_MOCK_REVIEW_NOVERDICT_ONCE === '1';
 
 export const mockBackend = {
   name: 'mock',
@@ -402,8 +406,12 @@ export const mockBackend = {
         };
       }
       // ORCH_MOCK_REVIEW_NOVERDICT=1：引擎活着（exitCode=0）但输出无 REVIEW_SUMMARY
-      // 契约块——既有保守路径（blockers=1 进审查返工）的回归锚
-      if (process.env.ORCH_MOCK_REVIEW_NOVERDICT === '1') {
+      // 契约块——既有保守路径（补问仍失败 → blockers=1 进审查返工）的回归锚
+      // ORCH_MOCK_REVIEW_NOVERDICT_ONCE=1：仅本子进程第一次审查无汇总行，补问轮补出
+      //（测契约行补问 resolved=true 恢复链路；计数口径同 PARAPHRASE_ONCE）
+      const noVerdict = process.env.ORCH_MOCK_REVIEW_NOVERDICT === '1' || (noVerdictOnce && reviewCall === 0);
+      if (noVerdictOnce) reviewCall++;
+      if (noVerdict) {
         onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-noverdict' });
         return {
           exitCode: 0,
@@ -439,6 +447,14 @@ export const mockBackend = {
     }
     const idMatch = /本次任务（([a-z0-9][a-z0-9-]*)，/.exec(prompt);
     const relFile = process.env.ORCH_MOCK_FILE ?? (delay > 0 && idMatch ? `docs/notes-${idMatch[1]}.md` : 'mock-worker-output.txt');
+    // ORCH_MOCK_NOTES_RECITE=1：worker 把复诵写进 NOTES.md（复诵核对 present 路径 e2e；
+    // 缺省不写——NOTES 保持 start 模板，正好覆盖「复诵协议未执行」的预检事实路径）
+    if (process.env.ORCH_MOCK_NOTES_RECITE === '1') {
+      fs.writeFileSync(
+        path.join(cwd, 'NOTES.md'),
+        '# 任务交接 NOTES\n\n## 复诵\n- 目的地（目标）：mock 复诵目标\n- 交货标准（验收标准）：mock 复诵验收\n- 禁航区（红线）：无\n- 航次计划：按检查点推进\n'
+      );
+    }
     const markerFile = path.join(cwd, relFile);
     fs.mkdirSync(path.dirname(markerFile), { recursive: true });
     fs.writeFileSync(markerFile, `mock worker output @ ${new Date().toISOString()}\n`);
@@ -454,6 +470,9 @@ export const mockBackend = {
     onEvent({ type: 'worker_turn', turn: 1, tool: 'Write', file: relFile });
 
     const status = process.env.ORCH_MOCK_WORKER_STATUS === 'stuck' ? 'stuck' : 'done';
+    // ORCH_MOCK_WORKER_ACCEPTANCE=<m/n>：契约块 acceptance 申报注入（验收申报对账 e2e；
+    // 缺省不带该行——旧契约块兼容路径，parseAcceptanceDeclared 返回 null 跳过对账）
+    const mockAcceptance = process.env.ORCH_MOCK_WORKER_ACCEPTANCE ?? '';
     const output = [
       'mock worker 完成。',
       '',
@@ -462,6 +481,7 @@ export const mockBackend = {
       'summary: mock 后端固定输出',
       `files_changed: ["${relFile}"]`,
       `tests: ${status === 'done' ? 'pass' : 'fail'}`,
+      ...(mockAcceptance ? [`acceptance: ${mockAcceptance}`] : []),
       'notes_updated: true',
       '```',
     ].join('\n');

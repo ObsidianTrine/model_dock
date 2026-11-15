@@ -231,9 +231,11 @@ const ACCEPTANCE_ANCHORS = [
 
 /**
  * 验收标准 L0 校验（提交口调用，见 cmdSubmit / submitDraft；run 期不复查——存量卡不回溯）。
+ * created_by=scanner 豁免：巡检卡的验证闭环是复扫（信号不再复现），验收天然无行为断言。
  * @returns {{ ok: boolean, reason?: string, hint?: string }}
  */
-export function checkAcceptanceQuality(body) {
+export function checkAcceptanceQuality(body, meta = {}) {
+  if (meta.created_by === 'scanner') return { ok: true };
   const items = splitAcceptanceItems(body?.acceptance);
   if (!items.length) return { ok: false, reason: '验收标准为空' };
   if (items.some((it) => ACCEPTANCE_ANCHORS.some((re) => re.test(it)))) return { ok: true };

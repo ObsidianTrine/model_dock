@@ -2157,7 +2157,7 @@ function cmdSubmit(repoRoot, cardFile) {
   const { meta, body } = loadCard(text, path.basename(cardFile));
   // 验收标准 L0 校验（②）：空洞标准此前只能靠返工轮兜底——在提交口堵住。run 期不复查，
   // 存量卡不回溯。校验失败附修复示例，人工改卡后重交。
-  const quality = checkAcceptanceQuality(body);
+  const quality = checkAcceptanceQuality(body, meta);
   if (!quality.ok) {
     die(`任务卡「验收标准」未过 L0 校验：${quality.reason}\n${quality.hint ?? ''}`);
   }
@@ -3189,7 +3189,7 @@ function submitDraft(repoRoot, root, id, { gate } = {}) {
     const finalText = normalizeProposalText(text, { gate });
     const { meta, body } = loadCard(finalText, `${id}.md`);
     // 验收标准 L0 校验（②）：不过校验的提案留在 drafts 等人工修（与卡面校验同一失败归宿）
-    const quality = checkAcceptanceQuality(body);
+    const quality = checkAcceptanceQuality(body, meta);
     if (!quality.ok) return { skipped: `${id} 验收标准未过 L0 校验（${quality.reason}），留在 drafts 等人工修` };
     fs.writeFileSync(cardPath(root, 'pending', meta.id), finalText);
     fs.rmSync(p, { force: true });

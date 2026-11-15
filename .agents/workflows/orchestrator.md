@@ -186,6 +186,8 @@ evidence:                        # 可选：证据清单，一句话一条（与
 
 **门禁按实际改动面分级**：全部改动为 `.md`（纯文档卡，实际分级 L0）时，npm_test 门禁自动改跑 workflow.json `testCmdL0` 轻量命令（本仓库 = docs-lint 测试），tsc_build 跳过——不烧全量回归；含代码改动照旧全量（gate_result 事件带 `scoped: l0` 标记可审计）。**验收标准是灵魂**：作业船（worker）拿它当航海目的地、审查者（验船师）当评判基准、人（船东）当验收清单。写"做得好用一点"等于没写。**自报不可信**——orchestrator 亲自跑 testCmd 与 build 复核（token（可计费口径，剔除缓存读）、失败尾部 200 行都有据可查）。航次计划段（SOLAS V.34 计划先行）要求 3-6 个检查点、每个一句话「做什么 + 怎么验证」、末尾一行备选路线；planner / propose 产卡会自动补写该段。
 
+**提交口 L0 校验（2026-11-15）**：`submit` / autopilot 自动提交时确定性检查验收标准——至少一条须含可机检锚点（验证命令 / 测试文件路径 / 行为断言词），空洞标准拒绝提交并附修复示例（scanner 卡豁免，巡检卡的验证闭环是复扫）。**复诵与逐条对账（同日）**：worker 开工按纪律第 0 条把目标/验收/红线/计划复诵进 NOTES.md；编排器确定性预检（复诵关键词 / 目标文本重叠双探针）并把 NOTES 复诵段与预检事实注入验船师 prompt，复诵与实际改动矛盾计阻塞项。worker 契约块新增 `acceptance: m/n` 申报行，自报缺口（m < 卡内条数）不等门禁直接送返工（`acceptance_gap`），反复缺口计入调试子循环熔断；验船师按验收标准**逐条 pass/fail 裁决**（fail 计阻塞项），审查输出缺 REVIEW_SUMMARY 汇总行时先补问一次、仍缺才按 blockers=1 保守判罚（不再白烧返工轮）。
+
 `run` 在 TTY 下会在人工闸门处交互（a 批准 / v 看 diff / r 驳回 / b 打回 / q 搁置）；非 TTY 打印提示后退出，用 approve/reject/retry 异步处理。
 
 ### A2. 泊位状态机（哪里找我的任务）
@@ -211,6 +213,7 @@ pending（待泊）→ running（在坞作业）→ reviewing（验船）→ awa
 |---|---|
 | 轮次 / token / wall-clock 超预算 | kill 进程树 → blocked |
 | 测试修复超 `max_test_iterations` / 审查返工超 `max_review_iterations` | blocked（附失败尾部） |
+| worker 契约块自报验收缺口（`acceptance: m/n` 且 m < 卡内条数）反复未收敛 | 不等门禁直接返工（`acceptance_gap`，与测试修复共用 `max_test_iterations` 计数），超限 blocked |
 | 看门狗（`watchdog.mode: actuate`）连续 2 次判定无实质进展 | kill → blocked |
 | 燃油 80%（token/wall） | 软告警 `budget_low_fuel` + 引水传令自动注入收尾令（不熔断） |
 

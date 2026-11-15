@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { DEFAULT_BUDGET, STATES, ensureQueue, findCard, loadCard, listCards, moveCard, parseYamlSubset, queueRoot, validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
+import { DEFAULT_BUDGET, STATES, checkAcceptanceQuality, ensureQueue, findCard, loadCard, listCards, moveCard, parseYamlSubset, queueRoot, splitAcceptanceItems, validateCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { cardText, mkRepo } from './helpers.js'
 
 describe('orchestrator queue > YAML 子集解析', () => {
@@ -66,6 +66,34 @@ describe('orchestrator queue > 任务卡校验', () => {
     // 显式省略 gate：从文本里去掉该行再解析
     const noGate = cardText({}).split('\n').filter((l) => !l.startsWith('gate:')).join('\n')
     expect(loadCard(noGate).meta.gate).toBe('L3')
+  })
+
+  it('验收标准 L0 校验：命令/路径/断言词/spec 锚点句任一命中即过', () => {
+    expect(checkAcceptanceQuality({ acceptance: '- npx vitest run test/a.test.ts 全绿' }).ok).toBe(true)
+    expect(checkAcceptanceQuality({ acceptance: '- test/a.test.ts 覆盖该路径' }).ok).toBe(true)
+    expect(checkAcceptanceQuality({ acceptance: '- GET /health 应返回 200' }).ok).toBe(true)
+    expect(checkAcceptanceQuality({ acceptance: '- 按 requirements 验收标准逐条自查' }).ok).toBe(true)
+  })
+
+  it('验收标准 L0 校验：空洞标准拒绝并给修复示例；空验收拒绝', () => {
+    const bad = checkAcceptanceQuality({ acceptance: '- 通过\n- 完成' })
+    expect(bad.ok).toBe(false)
+    expect(String(bad.reason)).toContain('锚点')
+    expect(String(bad.hint)).toContain('npx vitest run')
+    expect(checkAcceptanceQuality({ acceptance: '' }).ok).toBe(false)
+  })
+
+  it('验收标准 L0 校验：scanner 卡豁免（验证闭环是复扫），planner 卡不豁免', () => {
+    const body = { acceptance: '- 该 TODO 已解决不再残留' }
+    expect(checkAcceptanceQuality(body, { created_by: 'scanner' }).ok).toBe(true)
+    expect(checkAcceptanceQuality(body, { created_by: 'planner' }).ok).toBe(false)
+  })
+
+  it('splitAcceptanceItems：bullet/有序列表优先，退化为非空行（三方共用同口径）', () => {
+    expect(splitAcceptanceItems('- a\n- b')).toEqual(['a', 'b'])
+    expect(splitAcceptanceItems('1. a\n2) b')).toEqual(['a', 'b'])
+    expect(splitAcceptanceItems('散文第一行\n散文第二行')).toEqual(['散文第一行', '散文第二行'])
+    expect(splitAcceptanceItems('')).toEqual([])
   })
 
   it('budget 显式非法值报错（不允许无预算运行）', () => {
