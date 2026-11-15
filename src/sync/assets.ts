@@ -170,10 +170,37 @@ export interface AssetApply {
   written: string[]
   /** 内容一致未写入的数量 */
   unchanged: number
+  /** 拒绝写入的 key 与原因（软链守卫等）：单 key 异常跳过不 throw，不放大成整次 apply 失败 */
+  skipped: { key: string; reason: string }[]
 }
 
-/** 应用远端资产：先全量校验（key 安全 + 上限），再对有差异的文件原子写入；绝不删除本机多出的文件。 */
-export async function applyAssets(files: Record<string, string>): Promise<AssetApply> {
+/** key 目标路径逐段软链检查（home 以下每一级，含最终段）：任一段是 symlink → true。
+ *  isSafeAssetKey 是纯字符串判定、看不见 fs 软链——本机 ~/skills → ~/.modeldock 时，
+ *  包内 key skills/config.toml 会写穿软链覆盖真实 ~/.modeldock/config.toml（密钥/配置损坏，
+ *  破坏力比导出方向的读入包更重）；导出侧靠「不跟随」防密钥入包，导入侧在此对偶拦「写穿」。
+ *  home 根本身不查：那是用户自己的家目录，祖先含软链属合法形态，查了会把全部资产误杀。
+ *  段拿不到状态/不存在 → 非软链（交给后续 mkdir/写入的既有语义，不因守卫改变原行为）。 */
+function hasSymlinkSegment(p: string): boolean {
+  const home = path.resolve(homeDir())
+  const rel = path.relative(home, p)
+  let cur = home
+  for (const seg of rel.split(path.sep)) {
+    cur = path.join(cur, seg)
+    try {
+      if (fs.lstatSync(cur).isSymbolicLink()) return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/** 应用远端资产：先全量校验（key 安全 + 上限），再对有差异的文件原子写入；绝不删除本机多出的文件。
+ *  onWarning：软链守卫等「跳过但用户该知道」的非致命诊断出口（引擎接 log 钩子进网关日志，CLI 打印）。 */
+export async function applyAssets(
+  files: Record<string, string>,
+  opts?: { onWarning?: (line: string) => void }
+): Promise<AssetApply> {
   const keys = Object.keys(files)
   for (const key of keys) {
     if (!isSafeAssetKey(key)) {
@@ -192,6 +219,7 @@ export async function applyAssets(files: Record<string, string>): Promise<AssetA
     throw new Error(t('同步包资产总量超过上限 {max}MB，已拒绝应用', 'The sync package assets exceed the {max}MB total limit; apply refused', { max: ASSET_MAX_TOTAL_BYTES / (1024 * 1024) }))
   }
   const written: string[] = []
+  const skipped: { key: string; reason: string }[] = []
   let unchanged = 0
   for (const key of keys) {
     const p = assetKeyToPath(key)!
@@ -203,6 +231,18 @@ export async function applyAssets(files: Record<string, string>): Promise<AssetA
     }
     if (current === files[key]) {
       unchanged++
+      continue
+    }
+    // 对齐导出侧 139d01f 口径：跳过不 throw——providers/profiles 在 applyAssets 之前已落盘，
+    // 抛错会让用户误判整次导入全失败；软链挂载又是合法形态（~/skills → 别处），拒这一个 key 即可
+    if (hasSymlinkSegment(p)) {
+      const reason = t(
+        '同步资产 {key} 路径含软链段，已跳过不写入（防写穿软链破坏链接目标）；如需同步请改挂真实目录或删除该软链',
+        'Sync asset {key} resolves through a symlink: skipped without writing (protects the symlink target from being overwritten); mount the real directory or remove the symlink to sync it',
+        { key }
+      )
+      skipped.push({ key, reason })
+      opts?.onWarning?.(reason)
       continue
     }
     fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -217,7 +257,7 @@ export async function applyAssets(files: Record<string, string>): Promise<AssetA
     await atomicWrite(p, files[key], mode)
     written.push(key)
   }
-  return { written, unchanged }
+  return { written, unchanged, skipped }
 }
 
 /** 应用前快照清单：包内资产中已存在于本机的路径（snapshot 只收存在的文件） */

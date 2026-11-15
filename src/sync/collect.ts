@@ -129,8 +129,9 @@ function countPresets(up: unknown[] | { presets: unknown[] }): number {
 
 /** 应用 syncdoc：替换全部可同步态，机器态一律不动（docs/design-cloud-sync.md §5.2）。
  *  顺序：快照（config.toml/secrets.json/presets.json）→ key 按本机后端重存 → 整包替换 → 写预设。
- *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。 */
-export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend }): Promise<SyncdocReport> {
+ *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。
+ *  log：资产软链守卫等「跳过但用户该知道」告警的出口（引擎传 opts.log 进网关日志，CLI 打印；缺省静默）。 */
+export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBackend; log?: (line: string) => void }): Promise<SyncdocReport> {
   // 文本资产的目标文件一并进快照：既有文件才进快照清单（新文件无需快照）
   const assetFiles = doc.data.assets?.files ?? {}
   await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath(), ...existingAssetPaths(assetFiles)])
@@ -180,7 +181,7 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
   // 文本资产最后落地：快照已覆盖既有目标；只写有差异的文件、绝不删除本机多出的文件
   let assetsWritten: number | undefined
   if (Object.keys(assetFiles).length > 0) {
-    assetsWritten = (await applyAssets(assetFiles)).written.length
+    assetsWritten = (await applyAssets(assetFiles, { onWarning: opts?.log })).written.length
   }
 
   return {

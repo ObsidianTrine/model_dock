@@ -103,7 +103,7 @@ export async function syncTickOnce(opts?: SyncHooks): Promise<TickOutcome> {
         await atomicWrite(file, JSON.stringify(localNow, null, 2) + '\n', 0o600)
         opts?.log?.(t('[modeldock] 配置同步冲突：本机改动已快照到 {file}，已应用其他机器的最新配置（不做自动合并，差异请在任一机器重做）', '[modeldock] Config sync conflict: local changes were snapshotted to {file}; the latest config from another machine was applied (no auto-merge — redo the differences on either machine)', { file: displayPath(file) }))
       }
-      await applySyncdoc(validateSyncdoc(remoteDoc))
+      await applySyncdoc(validateSyncdoc(remoteDoc), { log: opts?.log })
       const { doc: after } = await collectSyncdoc(opts?.log)
       afterHash = hashDoc(after)
     })

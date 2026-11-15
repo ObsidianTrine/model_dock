@@ -101,7 +101,7 @@ export async function cmdConfigImport(file: string, opts: { stdinPass?: boolean;
       return
     }
   }
-  const applied = await applyImportedDoc(doc)
+  const applied = await applyImportedDoc(doc, { log: (line) => console.log(c.yellow(line)) })
   console.log(
     c.green(
       t('✓ 已导入：服务 {p}、路由 {r}、预设 {s}、定时规则 {w}；key 按本机存储重存 {k} 条', '✓ Imported: {p} providers, {r} profiles, {s} presets, {w} schedule rules; {k} keys re-stored into local storage', {

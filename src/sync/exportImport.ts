@@ -56,8 +56,9 @@ export async function previewImport(filePath: string, passphrase: string): Promi
   return { doc, report: reportOfDoc(doc), meta: { createdBy: String(metaEnv.created_by ?? ''), createdAt: String(metaEnv.created_at ?? '') } }
 }
 
-/** 应用已预览确认的 syncdoc（替换全部可同步态、机器态不动）。仅应在 previewImport 之后调用 */
-export async function applyImportedDoc(doc: Syncdoc, opts?: { backend?: SecretBackend }): Promise<SyncdocReport> {
+/** 应用已预览确认的 syncdoc（替换全部可同步态、机器态不动）。仅应在 previewImport 之后调用。
+ *  log：资产软链守卫等「跳过但用户该知道」告警的出口（CLI 传打印函数；缺省静默） */
+export async function applyImportedDoc(doc: Syncdoc, opts?: { backend?: SecretBackend; log?: (line: string) => void }): Promise<SyncdocReport> {
   return applySyncdoc(doc, opts)
 }
 
