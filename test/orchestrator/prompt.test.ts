@@ -42,11 +42,20 @@ describe('orchestrator prompt > worker prompt 五层组装', () => {
     expect(p).toContain('禁止猜一个占位主体硬干到底') // 查证失败必须停船要信息
     expect(p).toContain('先调研，后动工') // 卡面资料只是起点，须独立检索核验
     expect(p).toContain('残留盘点') // 改造类任务三分类：旧主体遗留人类特征一律清除
-    expect(p).toContain('辫子长在鸟身上就不成立') // 「可保留」授权不豁免主体一致性
     expect(p).toContain('关联内容全量过滤') // 换主体须同步标题/文案/aria/注释
     expect(p).toContain('grep 旧主体名归零')
     expect(p).toContain('可测量指标') // 造型/视觉任务：形容词不算验收标准
+    expect(p).toContain('ship-selfcheck.mjs') // 机器清单随卡下发：检查动作外置脚本
+    expect(p).toContain('输出全绿并原文贴进报告')
     expect(p).toContain('不许带未申报的假设')
+  })
+
+  it('纪律层 0.5 瘦身：检查动作迁往脚本后，prompt 长度不随事故线性膨胀', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildWorkerPrompt(card(), c)
+    const receipt = p.slice(p.indexOf('0.5. 任务理解回执'), p.indexOf('1. 报告 done 之前'))
+    // 0.5 保留意图层，机器检查细节外置 selfcheck 脚本；上界防回弹
+    expect(receipt.length).toBeLessThan(1400)
   })
 
   it('缺失 playbook 给明确报错', () => {
