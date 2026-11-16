@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { audit, corePaths, classifyChange, evaluateBranchEdit, evaluateCommand, gitSubcommand, readAudit, setAuditFile } from '../../.agents/scripts/policy.mjs'
+import { mkRepo } from './helpers.js'
 
 describe('policy.mjs > Bash 命令红线（evaluateCommand）', () => {
   it('发布动作全拦：git push / git -C repo push / git tag / npm publish', () => {
@@ -345,6 +348,30 @@ describe('policy.mjs > 拦截审计（append-only，尽力而为）', () => {
     } finally {
       setAuditFile(null)
       fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('缺省落盘脚本锚定：cwd 在仓库子目录时审计仍落仓库根，子目录不产生 .agents/policy', () => {
+    // 子进程触发（audit 缺省路径在模块加载时锚定脚本位置，不受本进程 cwd 影响；
+    // 用 mkRepo 夹具避免把审计写进真实仓库）
+    const repo = mkRepo()
+    try {
+      const sub = path.join(repo.root, '.agents', 'orchestrator')
+      fs.mkdirSync(sub, { recursive: true })
+      const scriptUrl = pathToFileURL(path.join(repo.root, '.agents', 'scripts', 'policy.mjs')).href
+      const r = spawnSync(
+        'node',
+        ['--input-type=module', '-e', `import { audit } from ${JSON.stringify(scriptUrl)};\naudit({ hook: 'policy-worker', tool: 'Bash', decision: 'blocked', reason: 'cwd 锚定', target: 'x' })`],
+        { cwd: sub, encoding: 'utf8', timeout: 30_000 },
+      )
+      expect(r.status).toBe(0)
+      const rootAudit = path.join(repo.root, '.agents', 'policy', 'audit.jsonl')
+      expect(fs.existsSync(rootAudit)).toBe(true)
+      const last = JSON.parse(fs.readFileSync(rootAudit, 'utf8').trim().split('\n').pop() ?? '{}')
+      expect(last).toMatchObject({ hook: 'policy-worker', decision: 'blocked', reason: 'cwd 锚定' })
+      expect(fs.existsSync(path.join(sub, '.agents', 'policy'))).toBe(false)
+    } finally {
+      repo.cleanup()
     }
   })
 

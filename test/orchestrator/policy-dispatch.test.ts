@@ -88,6 +88,53 @@ describe('policy-dispatch > 受保护项目（mkRepo 夹具自带 .agents/script
   })
 })
 
+describe('policy-dispatch > 项目探测向上回溯（cwd 深于仓库根）', () => {
+  it('cwd 在仓库子目录（.agents/orchestrator）→ 定位仓库根 policy.mjs 裁决，审计落仓库根', () => {
+    const repo = mkRepo()
+    try {
+      const sub = path.join(repo.root, '.agents', 'orchestrator')
+      fs.mkdirSync(sub, { recursive: true })
+      expect(runDispatch(bashEvent(sub, 'git push origin main')).status).toBe(2)
+      const auditFile = path.join(repo.root, '.agents', 'policy', 'audit.jsonl')
+      expect(fs.existsSync(auditFile)).toBe(true)
+      const last = JSON.parse(fs.readFileSync(auditFile, 'utf8').trim().split('\n').pop() ?? '{}')
+      expect(last).toMatchObject({ hook: 'policy-dispatch', decision: 'blocked' })
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('cwd 及祖先链均无 .agents/ → 仍 exit 0 直通（嵌套临时目录）', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-bare-'))
+    try {
+      const deep = path.join(bare, 'a', 'b')
+      fs.mkdirSync(deep, { recursive: true })
+      expect(runDispatch(bashEvent(deep, 'git push origin main')).status).toBe(0)
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true })
+    }
+  })
+
+  it('仓库边界停止条件：cwd 在带 .git 但无 .agents 的仓库内 → 直通，不越出仓库命中外层 .agents 项目', () => {
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-nested-'))
+    try {
+      // 外层伪装成工具链项目（只放 policy.mjs，裁决走缺省红线即可）
+      fs.mkdirSync(path.join(outer, '.agents', 'scripts'), { recursive: true })
+      fs.copyFileSync(
+        path.join(WORKTREE_ROOT, '.agents', 'scripts', 'policy.mjs'),
+        path.join(outer, '.agents', 'scripts', 'policy.mjs'),
+      )
+      // 内层 git 仓库不带 .agents
+      const inner = path.join(outer, 'inner')
+      fs.mkdirSync(inner, { recursive: true })
+      git(inner, 'init')
+      expect(runDispatch(bashEvent(inner, 'git push origin main')).status).toBe(0)
+    } finally {
+      fs.rmSync(outer, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('policy-dispatch > 直通与容错（fail-open 语义）', () => {
   it('无 .agents/ 的目录直通（exit 0）', () => {
     const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-bare-'))
