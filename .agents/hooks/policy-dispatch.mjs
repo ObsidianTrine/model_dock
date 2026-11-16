@@ -2,8 +2,8 @@
 // policy-dispatch.mjs — 机器级 Bash 红线 dispatcher：用户级 hook 一次注册、全项目生效。
 // 动机：policy-zcode.mjs 的用户级注册（~/.zcode/cli/config.json）是绝对路径，每换一个
 // 项目都要手工再注册一次。本 dispatcher 注册一次（指向任一稳定副本），按 hook 事件的
-// cwd 找该项目自带的 .agents/scripts/policy.mjs 委托裁决——新项目只要带着 .agents/ 就
-// 自动受保护，零注册。无 .agents/ 的目录直通零拦截。
+// cwd 向上探测最近带 .agents/scripts/policy.mjs 的目录（cwd 深于仓库根也能定位到项目根），
+// 委托裁决——新项目只要带着 .agents/ 就自动受保护，零注册。无 .agents/ 的目录直通零拦截。
 // 语义与 policy-zcode.mjs 完全一致：
 //   - ORCH_POLICY_ENFORCE=1（zcode-headless spawn 注入）才裁决，日常会话直通；
 //   - exit 0 = allow；exit 2 = block，stderr 回传模型；
@@ -39,6 +39,25 @@ if (!cmd) process.exit(0);
 
 // 事件 cwd 优先（headless spawn 的 hook runner cwd 未必是项目根），缺失回落进程 cwd
 const cwd = String(input.cwd ?? '') || process.cwd();
+
+// ── 项目探测：事件 cwd 可能深于仓库根（如 <repoRoot>/.agents/orchestrator 的自治会话）────
+// 沿祖先链向上找最近含 .agents/scripts/policy.mjs 的目录。停止条件：
+//   - 命中：该目录即为项目根（最近优先，嵌套 .agents 项目取内层）；
+//   - 仓库边界：目录带 .git 而无 .agents 工具链——直通，不越出仓库误命中外层项目；
+//   - 文件系统根：直通。
+function findProjectRoot(start) {
+  let dir = path.resolve(start);
+  const fsRoot = path.parse(dir).root;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.agents', 'scripts', 'policy.mjs'))) return dir;
+    if (fs.existsSync(path.join(dir, '.git'))) return null;
+    if (dir === fsRoot) return null;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+const projectRoot = findProjectRoot(cwd);
 
 // ── 防篡改基线（评测集 2026-10-hook-eval-failopen 问题 2：守卫可被守护对象静默关闭）────
 // dispatcher 信任事件 cwd 下的 policy.mjs / workflow.json——被守护的 agent 一条
@@ -94,14 +113,14 @@ function appendAuditDirect(projectRoot, entry) {
 
 let policy;
 try {
-  const script = path.join(cwd, '.agents', 'scripts', 'policy.mjs');
-  if (!fs.existsSync(script)) process.exit(0); // 非工具链项目：直通
-  process.chdir(cwd); // 审计（audit 落 process.cwd()）与项目对齐
+  if (!projectRoot) process.exit(0); // 非工具链项目（含 cwd 深于无工具链仓库）：直通
+  const script = path.join(projectRoot, '.agents', 'scripts', 'policy.mjs');
+  process.chdir(projectRoot); // 进程与项目对齐（审计已脚本锚定落项目根，见 policy.mjs audit）
   // 篡改检查必须在 import 之前：被改写的 policy.mjs 里的顶层代码不该被执行
   const sessionId = typeof input.session_id === 'string' ? input.session_id : undefined;
-  const tamper = checkTamper(cwd, sessionId);
+  const tamper = checkTamper(projectRoot, sessionId);
   if (tamper) {
-    appendAuditDirect(cwd, {
+    appendAuditDirect(projectRoot, {
       hook: 'policy-dispatch',
       tool: 'Bash',
       decision: 'blocked',
@@ -119,7 +138,7 @@ try {
 } catch (e) {
   // 委托失败放行（fail-open）：红线引擎损坏不该把整个会话的 Bash 卡死；
   // claude 系 worker 有独立的 policy-worker 注入兜底，此处告警留痕即可。
-  console.error(`[policy-dispatch] 委托 ${cwd} 的 policy.mjs 失败（已放行）：${e?.message ?? e}`);
+  console.error(`[policy-dispatch] 委托 ${projectRoot} 的 policy.mjs 失败（已放行）：${e?.message ?? e}`);
   process.exit(0);
 }
 
@@ -151,7 +170,7 @@ try {
 } catch (e) {
   // 同 fail-open：项目 workflow.json 损坏等会让 evaluateCommand 抛错（「配置损坏阻断启动」
   // 的语义止于 orchestrator；hook 崩溃退出只会让红线引擎从此静默失效，比放行更糟）
-  console.error(`[policy-dispatch] 裁决异常（已放行，检查 ${cwd}/.agents/workflow.json）：${e?.message ?? e}`);
+  console.error(`[policy-dispatch] 裁决异常（已放行，检查 ${projectRoot}/.agents/workflow.json）：${e?.message ?? e}`);
   process.exit(0);
 }
 if (verdict.allowed) {
@@ -183,7 +202,7 @@ if (gateResult?.decision === 'block' && gateResult.hasPush && verdict.rule === '
 
 policy.audit({ hook: 'policy-dispatch', tool: 'Bash', decision: 'blocked', reason: verdict.reason, target: cmd.slice(0, 200) });
 console.error(
-  `[policy-dispatch] 已拦截（项目：${cwd}）：${verdict.reason}\n` +
+  `[policy-dispatch] 已拦截（项目：${projectRoot}）：${verdict.reason}\n` +
     `（orchestrator 自治会话红线，与 claude worker 同源；发布类动作永远人工。）`
 );
 process.exit(2);

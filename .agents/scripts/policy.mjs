@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { toIsoLocal } from './orchestrator/events.mjs';
 import { loadWorkflowConfig, releaseHatches } from './workflow-config.mjs';
@@ -583,7 +584,9 @@ export function classifyChange(changedFiles, cfg) {
 // ---------------------------------------------------------------------------
 
 let auditFileOverride = null;
-/** 测试注入审计文件路径；生产路径 = <cwd>/.agents/policy/audit.jsonl。 */
+/** 测试注入审计文件路径；生产路径 = 脚本锚定 <repoRoot>/.agents/policy/audit.jsonl
+ *  （hook 进程 cwd 是任意客户端工作目录，可能与仓库根无关——锚定策略见 workflow-config.mjs
+ *  「锚定策略」节，2026-11-17：此前锚 process.cwd()，会话 cwd 在仓库子目录时审计落错位）。 */
 export function setAuditFile(p) {
   auditFileOverride = p;
 }
@@ -592,8 +595,13 @@ export function setAuditFile(p) {
 // 轮转，先例：orchestrator.mjs 的 nightly.log 5MB（NIGHTLY_LOG_MAX）。只留一代、不引入配置项。
 const AUDIT_ROTATE_BYTES = 5 * 1024 * 1024;
 
+// 缺省审计落盘脚本锚定：policy.mjs 随仓库装在 <repoRoot>/.agents/scripts/，往上一级两级即
+// repoRoot——会话 cwd 深于仓库根（如 .agents/orchestrator）时审计仍落仓库根单一文件。
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SCRIPT_ANCHORED_AUDIT_FILE = path.resolve(HERE, '..', '..', '.agents', 'policy', 'audit.jsonl');
+
 export function audit({ hook, tool, decision, reason, target }) {
-  const file = auditFileOverride ?? path.join(process.cwd(), '.agents', 'policy', 'audit.jsonl');
+  const file = auditFileOverride ?? SCRIPT_ANCHORED_AUDIT_FILE;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     try {
