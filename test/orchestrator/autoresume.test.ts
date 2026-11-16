@@ -4,6 +4,7 @@
 // + mock 后端（与 integration.test.ts 同沙箱），子进程隔离无 mock 注册表污染。
 
 import { describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -564,6 +565,24 @@ describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () =>
     ]
     expect(pickOrphanResumeCandidates(cards, { now: NOW }).map((c) => c.id)).toEqual(['a', 'z'])
   })
+
+  it('stuck 终态对冲续用：commitsAhead>0 的 stuck 孤儿入候选（rescue 标记 + 证据字段）；0/缺省/熔断/冷却内照旧拒', () => {
+    const stuckEvents = () => [ev('worker_spawned'), ev('blocked', { reason: 'worker 自报 stuck' })]
+    const cards = [
+      // 对冲续用：stuck 归类 + 调用方对账 commitsAhead>0 = worktree 已有可验收产出
+      { id: 'sr', meta: {}, events: stuckEvents(), commitsAhead: 3 },
+      // 无提交（真 stuck）/ 对账不可得（缺字段）：照旧交人工
+      { id: 'sz', meta: {}, events: stuckEvents(), commitsAhead: 0 },
+      { id: 'sn', meta: {}, events: stuckEvents() },
+      // 熔断卡即使有产出也永不自动续（确定性失败护栏不因对冲松动）
+      { id: 'sb', meta: {}, events: [ev('worker_spawned'), ev('circuit_breaker', { reason: 'budget:max_tokens' })], commitsAhead: 5 },
+      // 冷却内（12h 前自动续过）不重复续
+      { id: 'sc', meta: { auto_resumed_at: '2026-11-02T00:00:00+08:00' }, events: stuckEvents(), commitsAhead: 2 },
+    ]
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([
+      { id: 'sr', attempts: 0, commitsAhead: 3, rescue: 'stuck_with_commits' },
+    ])
+  })
 })
 
 describe('orchestrator autoresume > partitionRunningOrphans 孤儿判定双条件（P1-a）', () => {
@@ -803,4 +822,36 @@ describe('orchestrator autoresume > 孤儿自愈 drain 集成（三分支）', (
       repo.cleanup()
     }
   }, 120_000)
+
+  it('stuck 孤儿 + worktree 已有提交：对冲续用而非清空重做（auto_resume 带 rescue/commits_ahead，半成品提交保留）', () => {
+    const repo = mkRepo()
+    try {
+      seedRunning(repo.root, 'orph-stuck-c', [
+        { ts: '2026-11-01T06:00:00.000+08:00', seq: 1, type: 'worker_spawned', backend: 'mock', pid: 110 },
+        { ts: '2026-11-01T06:30:00.000+08:00', seq: 2, type: 'blocked', reason: 'worker 自报 stuck' },
+      ])
+      // 预置半成品现场：注册 worktree（feature/orph-stuck-c）+ 1 个提交——stuck 归类
+      // 对账见提交 → 走续用路径（resume 原地续做）而非落 blocked 清空重做。
+      // execFileSync 直参免 shell：三平台路径/引号一致。
+      const wt = path.join(repo.root, '.agents', 'worktrees', 'orph-stuck-c')
+      execFileSync('git', ['worktree', 'add', wt, '-b', 'feature/orph-stuck-c'], { cwd: repo.root, stdio: 'ignore' })
+      fs.writeFileSync(path.join(wt, 'half-done.txt'), '半成品现场\n')
+      execFileSync('git', ['add', '-A'], { cwd: wt, stdio: 'ignore' })
+      execFileSync('git', ['commit', '-m', 'wip: half-done work'], { cwd: wt, stdio: 'ignore' })
+
+      const run = runOrch(repo.root, 'drain --backend mock')
+      expect(run.stdout).toContain('自动续孤儿卡 orph-stuck-c')
+      expect(run.stdout).toContain('原地续用半成品')
+      // 续用 = resume 原地续做（mock 正常完成）→ awaiting-human 而非 blocked
+      expect(readCard(repo.root, 'awaiting-human', 'orph-stuck-c')).toBeTruthy()
+      const auto = eventsOf(repo.root, 'orph-stuck-c').find((e) => e.type === 'auto_resume')
+      expect(auto?.rescue).toBe('stuck_with_commits')
+      expect(Number(auto?.commits_ahead)).toBeGreaterThanOrEqual(1)
+      // 半成品保留：种子提交仍在 worktree 历史里（未清空重做）
+      const hist = execFileSync('git', ['log', '--oneline'], { cwd: wt, encoding: 'utf8' })
+      expect(hist).toContain('wip: half-done work')
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
 })

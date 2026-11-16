@@ -147,3 +147,53 @@ describe('orchestrator drain > run 子进程 spawn 失败容错', () => {
     }
   }, 180_000)
 })
+
+// ---------------------------------------------------------------------------
+// worker 自报 stuck 的 worktree 提交对账（stuck 终态对冲，2026-11-17）：自报 stuck 是
+// worker 对「无法继续」的主观申报，落 blocked（清空重做语义）前先对账 worktree 客观
+// 进度——相对 base 非空提交 = 已有可验收产出，转 reviewing 交审查；无提交（真 stuck）
+// 照旧 blocked，事件带 commits_ahead 留痕对账结论。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator drain > worker 自报 stuck 的 worktree 提交对账', () => {
+  it('stuck + worktree 已有提交（mock 默认提交）：不落 blocked，转 reviewing/ + stuck 事件带 commits_ahead 证据', () => {
+    const repo = mkRepo()
+    try {
+      const cardFile = path.join(repo.root, 'card-stuck-commits.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'stuck-with-commits' }))
+      runOrch(repo.root, `submit "${cardFile}"`)
+
+      const r = runOrch(repo.root, 'drain --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      expect(r.status).toBe(0)
+      // 对冲放行：卡在 reviewing/ 交审查，不在 blocked/ 清空重做
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'blocked', 'stuck-with-commits.md'))).toBe(false)
+      expect(readCard(repo.root, 'reviewing', 'stuck-with-commits')).toBeTruthy()
+      // stuck 事件带证据字段（commits_ahead + diverted_to），事件链无 blocked 收尾
+      const stuck = eventsOf(repo.root, 'stuck-with-commits').find((e) => e.type === 'stuck')
+      expect(Number(stuck?.commits_ahead)).toBeGreaterThanOrEqual(1)
+      expect(stuck?.diverted_to).toBe('reviewing')
+      expect(eventsOf(repo.root, 'stuck-with-commits').map((e) => e.type)).not.toContain('blocked')
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('stuck + 空提交（真 stuck，ORCH_MOCK_NO_COMMIT=1）：照旧 blocked，事件带 commits_ahead: 0 留痕', () => {
+    const repo = mkRepo()
+    try {
+      const cardFile = path.join(repo.root, 'card-stuck-nc.md')
+      fs.writeFileSync(cardFile, cardText({ id: 'stuck-no-commits' }))
+      runOrch(repo.root, `submit "${cardFile}"`)
+
+      const r = runOrch(repo.root, 'drain --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
+      expect(r.status).toBe(0)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'reviewing', 'stuck-no-commits.md'))).toBe(false)
+      expect(readCard(repo.root, 'blocked', 'stuck-no-commits')).toBeTruthy()
+      const blocked = eventsOf(repo.root, 'stuck-no-commits').find((e) => e.type === 'blocked')
+      expect(String(blocked?.reason)).toContain('worker 自报 stuck')
+      expect(blocked?.commits_ahead).toBe(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+})

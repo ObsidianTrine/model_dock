@@ -20,7 +20,7 @@ describe('orchestrator stats > 聚合口径', () => {
       await submitCard(repo.root, 'st-await') // gate L3 缺省 → awaiting-human（无终态事件）
       runOrch(repo.root, 'run st-await --backend mock')
       await submitCard(repo.root, 'st-block')
-      runOrch(repo.root, 'run st-block --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run st-block --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
 
       const r = await runOrchInproc(repo.root, 'stats --days 7 --json')
       const parsed = JSON.parse(r.stdout)
@@ -134,7 +134,7 @@ describe('orchestrator stats > collectStatsSummary（propose 舰队反馈共用�
     const repo = mkRepo()
     try {
       await submitCard(repo.root, 'st-cs') // gate L3 → awaiting-human（未合并样本）
-      runOrch(repo.root, 'run st-cs --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' }) // blocked 样本（带 worker_retry）
+      runOrch(repo.root, 'run st-cs --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' }) // blocked 样本（带 worker_retry）
       const r = await runOrchInproc(repo.root, 'stats --days 7 --json')
       const parsed = JSON.parse(r.stdout)
       const collected = collectStatsSummary(repo.root, { days: 7 })

@@ -71,7 +71,7 @@ describe('orchestrator follow > 运行中写入与送达', () => {
       // 后台拉起闭环；mock worker 延迟 2.5s，给 follow 留出落在 running 窗口的时间
       const child = spawn(process.execPath, [ORCH, 'run', 'f-live', '--backend', 'mock'], {
         cwd: repo.root,
-        env: { ...process.env, ORCH_MOCK_DELAY_MS: '2500', ORCH_MOCK_WORKER_STATUS: 'stuck' },
+        env: { ...process.env, ORCH_MOCK_DELAY_MS: '2500', ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' },
         stdio: 'ignore',
       })
       // 等 pending → running（cmdRun 认领即迁）
