@@ -5,7 +5,7 @@
 > 2. 写报错信息、Web 控制台按钮/提示等**用户可见文案**时。
 >
 > **受众提醒**：CHANGELOG / README 是写给**用户**看的，不是给开发者/agent 看的。
-> 内部技术约定写在 AGENTS.md / docs/design.md，不要混进对外文档。
+> 内部技术约定写在 AGENTS.md / docs/design/design.md，不要混进对外文档。
 
 ## 总原则（5 条）
 
@@ -64,7 +64,7 @@
   9. 安全 / 参与贡献 / 维护者 / 许可证
 - **命令示例可直接复制运行**；徽章（test / Release / License / Node / Platform）、链接、平台与客户端列表与实际保持一致。
 - **新增用户可见能力时同步 README**：核心能力表、命令块、支持列表三处自查。
-- 保持简短：细节展开到 `docs/usage.md`，README 不堆长文。
+- 保持简短：细节展开到 `docs/guide/usage.md`，README 不堆长文。
 
 ## 文档体系（新内容先归位，参考 Diátaxis 四分法）
 
@@ -73,14 +73,17 @@
 | 文档 | 类型 | 受众与用途 |
 |---|---|---|
 | README.md | 教程落地点 | 第一次看到项目的人：是什么 / 为什么 / 快速开始 |
-| docs/usage.md | how-to + 排错 | 已上手用户：安装细节、日常操作、故障排查 |
-| docs/config-reference.md | reference | 查配置键（脚本生成，勿手编） |
-| docs/design.md | explanation | 架构、ADR、威胁模型（内部向，不翻译） |
-| docs/multi-machine-sync.md、deploy-cloud.md | how-to（runbook） | 特定任务照着做就能成 |
+| docs/guide/ | how-to + 排错 | 已上手用户：usage（日常操作与故障排查）、multi-machine-sync、deploy-cloud；新用户指南落这里 |
+| docs/reference/ | reference | 查配置键（config-reference.md 脚本生成，勿手编）；新参考面落这里 |
+| docs/ops/ | runbook + 台账 | 维护者面：RELEASE_CHECKLIST、ci-bots、ai-review-system、attach-env-vars、bench-baseline、known-issues；新运维文档/工程台账落这里 |
+| docs/design/ | explanation | 架构、ADR、威胁模型与特性设计（design.md + design-*.md；内部向，不翻译）；新设计文档落这里 |
+| docs/archive/ | 时点归档 | 已闭环的评审/交接/实验记录，只读留底不更新 |
 | docs/examples/ | 样例文件 | 照抄即用的配置样例（如价目覆盖 `pricing.json`），复制进数据目录即生效；随新增样例登记 |
 | CHANGELOG.md | 发布记录 | 每个版本的用户可见变化 |
 | AGENTS.md、.agents/ 约定 | agent 约定 | **不是用户文档**，勿混入用户内容 |
-| .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
+| .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法（ai-pipeline-guide 等）、暂缓台账 TODOLists.md、任务卡 task-cards/；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
+
+en 镜像结构对称：`docs/en/` 下 guide/、reference/ 与中文侧同位；未翻译的文件（ops/、design/）只存在中文版。
 
 ## 代码中的用户可见文案（报错 / 界面）
 

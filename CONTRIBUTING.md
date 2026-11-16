@@ -61,4 +61,4 @@ npm install
 
 ## 发布
 
-发布流程见 [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)（维护者向）。
+发布流程见 [docs/ops/RELEASE_CHECKLIST.md](docs/ops/RELEASE_CHECKLIST.md)（维护者向）。

@@ -1,5 +1,5 @@
 /**
- * 自动更新 M1——平台安装与重启（实施基准：docs/design-auto-update.md §5.4）
+ * 自动更新 M1——平台安装与重启（实施基准：docs/design/design-auto-update.md §5.4）
  *
  * 三种替换手法：
  * - mac .app 整包交换：unix 允许 rename 运行中目录——旧 .app 改名 .old → 新 .app 落位 → `open` 拉起新版；

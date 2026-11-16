@@ -91,8 +91,8 @@
 - **路径**：所有文件系统路径经 `src/util/paths.ts`，**禁止硬编码** `~/.modeldock`。测试用 `MODELRDOCK_FAKE_HOME` 重定向临时目录。
 - **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照（边界：config.toml 自身由 .lock + 原子写保护；版本迁移类写盘与同步导入前快照到 backups/config/）。
 - **SEA 检测**：用 `process.execPath` 文件名（开头 `modeldock`）判断，**不要**依赖 `sea-config.json` 的 `env` 或 `import.meta.url`（postject 注入下失效）。
-- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。各客户端 attach 触达的配置键清单（写入/清除口径，逐客户端分节）见 `docs/attach-env-vars.md`——改适配器的写入/清理行为时同步该文档。
-- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、勿手改；dsh/ZCode 的 YAML 用 `yaml` Document API 保留注释。`mutateConfig` 是整包重序列化，用户手写注释会被抹除（已知取舍，见 docs/known-issues.md CORRECT-03）。
+- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。各客户端 attach 触达的配置键清单（写入/清除口径，逐客户端分节）见 `docs/ops/attach-env-vars.md`——改适配器的写入/清理行为时同步该文档。
+- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、勿手改；dsh/ZCode 的 YAML 用 `yaml` Document API 保留注释。`mutateConfig` 是整包重序列化，用户手写注释会被抹除（已知取舍，见 docs/ops/known-issues.md CORRECT-03）。
 - **预设扩展**：运行时预设 = 内置库 `src/presets/data.ts` 的 `BUILTIN_PRESETS` + 用户覆盖文件 **`~/.modeldock/presets.json`**（同名 `id` 覆盖、新 `id` 追加；缺失视为无自定义、格式错误阻断启动）。**新增 provider 不要只写内嵌，可复用的先落到 presets.json 机制。**
 - **错误信息**：必须可操作，附修复建议。
 - **双语文案**：用户可见文案一律经 `src/util/i18n.ts` 的 `t(中文, English, params?)`（中文原文即 key），**两个语言参数必须同写**；语言解析链 `--lang > MODELRDOCK_LANG > config.toml language > zh`，commander 分支须在 `buildProgram()` 前 `initLang()`。中文段输出须与既有文案逐字节一致（测试有中文断言）；注释、枚举值、程序比较用的字符串不走 t()；模块顶层常量禁直接求值 t()（用 getter/懒函数）。Web 控制台 `data-i18n="中文||English"` 机制独立存在，勿混用。长生命周期 Web 组件的 label/title **必须传惰性函数**且在 `applyLang()` 末尾补 `render()`（传字符串会把语言固化在加载时刻，2026-10 状态行 5 颗 pill 曾踩）。
@@ -201,7 +201,7 @@ cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器�
 
 ### GitHub 侧自动化（分层 PR 审查 + Dependabot）
 
-agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程；总览与运维见 **`docs/ai-review-system.md`**）。启用需在仓库 Settings 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 AI job 跳过并告警）；完整设置与成本控制见 **`docs/ci-bots.md`**：
+agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程；总览与运维见 **`docs/ops/ai-review-system.md`**）。启用需在仓库 Settings 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 AI job 跳过并告警）；完整设置与成本控制见 **`docs/ops/ci-bots.md`**：
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
@@ -215,7 +215,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（build+test 全绿评论可合并；失败做最小修复推回；大破坏不硬修） | `CLAUDE_AUTH_TOKEN` + `DEPENDABOT_GH_TOKEN`（PAT） |
 | `workflows/ci-autofix.yml` | 主干 test 失败的投机自动修复（main/develop、首次失败才触发；可 `workflow_dispatch` 手动点火）：最小修复+补测试 → 开 `[ci-autofix]` PR 待审；每 run 仅 1 次；收尾兜底代开 PR + 会话日志 artifact | `CLAUDE_AUTH_TOKEN`（key），无需 PAT |
 
-- **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**，换供应商只改三件套。注意项见 `docs/ci-bots.md`「模型接入」。
+- **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**，换供应商只改三件套。注意项见 `docs/ops/ci-bots.md`「模型接入」。
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（平台行为）：评论/推送必须经 PAT；缺 PAT 时跳过留人工。
 - **防回环**：bot 修复提交固定前缀（`[dependabot-fix]` / `[ci-autofix]`），review bot 检测 PR head 为该前缀即跳过；ci-autofix 仅认 main/develop 的 push 型 run 且每 run 只尝试一次。
 - **合并权在人**：bot 只发评论与修复提交，不 approve、不 merge；发版仍走 release.md 人工授权流程。

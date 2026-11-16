@@ -1,5 +1,5 @@
 /**
- * 测试盲区 1（docs/known-issues.md §六尾注）：engine 推送部分失败簿记。
+ * 测试盲区 1（docs/ops/known-issues.md §六尾注）：engine 推送部分失败簿记。
  *
  * 引擎推送是两段写：writeBlob（信封 blob，只增不删）→ writeManifest（CAS 读-比-写）。
  * 「部分条目写失败」= 其中一段成功、另一段失败。三个目标各一例：

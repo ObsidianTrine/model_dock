@@ -482,7 +482,7 @@ try {
     }
   }
 
-  // 5. 汇总（含可直接贴进 docs/bench-baseline.md 的表格与机器信息）
+  // 5. 汇总（含可直接贴进 docs/ops/bench-baseline.md 的表格与机器信息）
   const totalSec = ((Date.now() - startedAt) / 1000).toFixed(1);
   const env = {
     cpu: os.cpus()[0]?.model ?? 'unknown',
@@ -493,7 +493,7 @@ try {
     totalSec,
   };
   console.log(`\n[bench] 完成：总耗时 ${totalSec}s（模式 ${env.mode}，含起停）\n`);
-  console.log('## 汇总（可直接入 docs/bench-baseline.md）');
+  console.log('## 汇总（可直接入 docs/ops/bench-baseline.md）');
   console.log(`- CPU: ${env.cpu}`);
   console.log(`- 系统: ${env.platform}`);
   console.log(`- Node: ${env.node}`);

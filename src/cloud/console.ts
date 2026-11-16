@@ -1,5 +1,5 @@
 /**
- * 云端控制台页（docs/design-cloud-sync.md §7.6）：手机优先静态单页，内嵌 HTML/JS/CSS，
+ * 云端控制台页（docs/design/design-cloud-sync.md §7.6）：手机优先静态单页，内嵌 HTML/JS/CSS，
  * 独立实现不 import 网关 ui.ts；双语走 data-i18n="中||EN" 同款机制。
  * 三区：设备列表（在线点/当前/云端期望）+ 切换（单台/批量）+ 配对码生成。
  * 服务下拉数据 = 各设备心跳上报的服务目录并集（云端只见密文，拿不到清单）。

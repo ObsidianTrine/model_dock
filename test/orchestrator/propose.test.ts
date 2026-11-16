@@ -20,7 +20,7 @@ describe('orchestrator propose > prompt 构建与解析', () => {
     expect(p).toContain('pending=0')
     expect(p).toContain('至多 2 张')
     expect(p).toContain('proposal: true')
-    expect(p).toContain('9. docs/known-issues.md 是已知问题账本')
+    expect(p).toContain('9. docs/ops/known-issues.md 是已知问题账本')
     expect(p).toContain('一律视为已解决，禁止为其出卡')
     expect(p).toContain('10. 背景段第一行必须是所对齐目标面/信号条目的逐字原文')
     expect(p).toContain('11. 围栏外只允许一句话概述')

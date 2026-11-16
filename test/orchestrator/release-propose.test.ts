@@ -51,7 +51,7 @@ describe('orchestrator release-propose > 纯函数', () => {
     expect(isProductCommit(c, [])).toBe(true) // 空提交看不了路径，宁多勿漏
     expect(isProductCommit(c, undefined)).toBe(true)
     expect(isProductCommit(c, ['.agents/scripts/orchestrator.mjs'])).toBe(false)
-    expect(isProductCommit(c, ['.github/workflows/test.yml', 'docs/usage.md', 'test/a.test.ts'])).toBe(false)
+    expect(isProductCommit(c, ['.github/workflows/test.yml', 'docs/guide/usage.md', 'test/a.test.ts'])).toBe(false)
     expect(isProductCommit(c, ['scripts/soak.mjs', 'scripts/release-check.mjs'])).toBe(false) // scripts/ 其余是开发工具
     expect(isProductCommit(c, ['.agents/x.md', 'src/util/fsx.ts'])).toBe(true) // 混合提交：src 决定产品侧
   })

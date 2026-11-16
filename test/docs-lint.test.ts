@@ -26,7 +26,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // 中文对外文档：docs-writing「文档体系」表的用户文档 + docs-sync checklist 点名文件。
 // 内部文档（docs/design*、known-issues、backlog、AGENTS.md、REVIEW.md 等）不在规范的自检范围，不扫。
 const ZH_ROOT_DOCS = ['README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md']
-const ZH_DOCS_DIR_DOCS = ['usage.md', 'config-reference.md', 'multi-machine-sync.md', 'deploy-cloud.md']
+const ZH_DOCS_DIR_DOCS = ['guide/usage.md', 'reference/config-reference.md', 'guide/multi-machine-sync.md', 'guide/deploy-cloud.md']
 
 // zh → en 镜像对：docs-writing「多语言文档结构」点名的镜像清单（七件套）。
 // config-reference.md 虽有 en 镜像，但是脚本生成文件（新鲜度有专测），不参与结构类断言；链接扫描仍覆盖它。
@@ -35,9 +35,9 @@ const MIRROR_PAIRS: [string, string][] = [
   ['CHANGELOG.md', 'docs/en/CHANGELOG.md'],
   ['CONTRIBUTING.md', 'docs/en/CONTRIBUTING.md'],
   ['SECURITY.md', 'docs/en/SECURITY.md'],
-  ['docs/usage.md', 'docs/en/usage.md'],
-  ['docs/multi-machine-sync.md', 'docs/en/multi-machine-sync.md'],
-  ['docs/deploy-cloud.md', 'docs/en/deploy-cloud.md'],
+  ['docs/guide/usage.md', 'docs/en/guide/usage.md'],
+  ['docs/guide/multi-machine-sync.md', 'docs/en/guide/multi-machine-sync.md'],
+  ['docs/guide/deploy-cloud.md', 'docs/en/guide/deploy-cloud.md'],
 ]
 
 // 切换行 / 链接可达的扫描集：中文对外文档 + docs/en/ 全量镜像（未来新增镜像文件自动纳入）。
@@ -456,8 +456,8 @@ describe('docs-lint 负例：坏文档必须被抓到', () => {
   it('规则 2：zh 存在而 en 镜像缺失能红；zh 不存在不误报', () => {
     const dir = makeFixture({ 'README.md': '# T\n' })
     expect(checkMirrors(dir).map((x) => x.message).join('; ')).toContain('docs/en/README.md')
-    const clean = makeFixture({ 'docs/usage.md': '# T\n' }) // zh usage 存在但 en 缺 → 红
-    expect(checkMirrors(clean).map((x) => x.message).join('; ')).toContain('docs/en/usage.md')
+    const clean = makeFixture({ 'docs/guide/usage.md': '# T\n' }) // zh usage 存在但 en 缺 → 红
+    expect(checkMirrors(clean).map((x) => x.message).join('; ')).toContain('docs/en/guide/usage.md')
     const untouched = makeFixture({}) // zh/en 都不存在 → 跳过
     expect(checkMirrors(untouched)).toEqual([])
   })

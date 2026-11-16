@@ -140,8 +140,8 @@ describe('orchestrator scan > 已知问题账本与 CI 信号源', () => {
   it('scanKnownIssues：未修条目出提案；已修/暂缓跳过；files_hint 从位置列提取；无账本静默', () => {
     const repo = mkRepo()
     try {
-      fs.mkdirSync(path.join(repo.root, 'docs'), { recursive: true })
-      fs.writeFileSync(path.join(repo.root, 'docs', 'known-issues.md'), KI_TABLE)
+      fs.mkdirSync(path.join(repo.root, 'docs', 'ops'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, 'docs', 'ops', 'known-issues.md'), KI_TABLE)
       const cards = scanKnownIssues(repo.root)
       expect(cards).toHaveLength(1) // PERF-16 已修、PERF-21 暂缓都被过滤
       expect(cards[0].id).toBe('scan-ki-perf-15')

@@ -1,5 +1,5 @@
 /**
- * 云端控制面 API v1（docs/design-cloud-sync.md §7.2）。
+ * 云端控制面 API v1（docs/design/design-cloud-sync.md §7.2）。
  * 鉴权：Authorization: Bearer <deviceToken|consoleToken>；控制台页登录后走 HttpOnly cookie（同 token）。
  * 统一 JSON 错误 {error:{code,message}}；限速单 IP 60 req/min（内存计数）。
  * desired 语义按「应用」按钮同款：值是服务（provider）id——详设 §7.2 写 profileId，

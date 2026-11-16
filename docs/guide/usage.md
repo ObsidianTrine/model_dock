@@ -1,6 +1,6 @@
 # ModelDock 使用指南
 
-**简体中文** ｜ [English](en/usage.md)
+**简体中文** ｜ [English](../en/guide/usage.md)
 <!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/usage.md)），约定见 .agents/conventions/docs-writing.md -->
 
 > 一句话：把所有 AI harness（Claude Code / ZCode / dsh / Codex / …）的 base_url + key 收进 ModelDock 统一保管，harness 只需指向本地网关一次，此后换供应商、换模型映射都是一条命令、即时生效。
@@ -62,7 +62,7 @@ npm run build:sea -- --target darwin-arm64
 
 ## 3. 首次上手（推荐路径）
 
-> 想先看完整走一遍？[上手路径走查记录](archive/onboarding-walkthrough.md)是 2026-10-29 在全新隔离沙箱里按本节（配合 README 快速开始）逐步实测的实录——含每步预期输出与三条易踩的运行态注意事项。
+> 想先看完整走一遍？[上手路径走查记录](../archive/onboarding-walkthrough.md)是 2026-10-29 在全新隔离沙箱里按本节（配合 README 快速开始）逐步实测的实录——含每步预期输出与三条易踩的运行态注意事项。
 
 ### 方式 A：一条命令向导
 
@@ -154,7 +154,7 @@ modeldock update --token <令牌>   # 可选：保存 GitHub 访问令牌（fine
 modeldock update --clean          # 清理上一版残留（ModelDock.app.old / *.old）
 ```
 
-发新版后不用再手动下载重装：`modeldock update` 一条命令完成，安装前会校验下载包的 SHA256 完整性（校验名单永走 GitHub 官方，下载大文件可经镜像加速），替换时网关短暂中断、完成后按原状态自动拉起（macOS 从 ModelDock.app 启动的会自动重开应用与托盘）。检查与下载会自动走本机代理：按「环境变量（`HTTPS_PROXY` 等）→ macOS 系统代理设置 → Windows 注册表」动态检测、不写死地址，检测到时命令行会明说代理来源，设 `MODELRDOCK_NO_SYS_PROXY=1` 可禁用。更新源/令牌/镜像记录在 `~/.modeldock/`（config.toml `[update]` 段 + 密钥安全存储；`mirror` 缺省走 gh-proxy → ghfast → 官方直连回退链，置空数组可关闭），详见 `docs/design-auto-update.md`。
+发新版后不用再手动下载重装：`modeldock update` 一条命令完成，安装前会校验下载包的 SHA256 完整性（校验名单永走 GitHub 官方，下载大文件可经镜像加速），替换时网关短暂中断、完成后按原状态自动拉起（macOS 从 ModelDock.app 启动的会自动重开应用与托盘）。检查与下载会自动走本机代理：按「环境变量（`HTTPS_PROXY` 等）→ macOS 系统代理设置 → Windows 注册表」动态检测、不写死地址，检测到时命令行会明说代理来源，设 `MODELRDOCK_NO_SYS_PROXY=1` 可禁用。更新源/令牌/镜像记录在 `~/.modeldock/`（config.toml `[update]` 段 + 密钥安全存储；`mirror` 缺省走 gh-proxy → ghfast → 官方直连回退链，置空数组可关闭），详见 `docs/design/design-auto-update.md`。
 
 > 不想敲命令也可以：网关运行中发现新版本时，控制台右下角会弹一条可复制的提醒，顶栏出现琥珀色「可更新 vX.Y.Z」徽标——点开居中更新卡片（版本 / 安装包大小 / 更新说明正文，底部给「在 GitHub 查看完整说明」链接）并一键升级，更新后页面自动重连；升级失败会立即提示原因；不想升级可选「此版本不再提醒」；没有新版本时界面零打扰（手动检查可用 `modeldock update --check` 或 macOS 菜单栏 / Windows 托盘的「检查更新…」——托盘弹窗里是收口后的摘要（首段 + 几条要点 + 共 N 项改动），可直接点「立即更新」就地升级，或点「打开发布页」逐条细看）。网关启动时会自动静默检查一次（24 小时内不重复，失败不打扰）。
 
@@ -172,7 +172,7 @@ modeldock update --clean          # 清理上一版残留（ModelDock.app.old / 
 model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务备用模型
 ```
 
-字段说明见[配置参考](config-reference.md)。
+字段说明见[配置参考](../reference/config-reference.md)。
 
 ## 5.5 Web 控制台
 
@@ -182,7 +182,7 @@ model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务�
 modeldock ui
 ```
 
-![ModelDock Web 控制台](images/console.png)
+![ModelDock Web 控制台](../images/console.png)
 
 **打开页面会自动探测旧配置**：如果本机的 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 里已有 provider 配置，顶部会出现「🧲 检测到旧配置，一键搬进来」横幅——点一下即全部导入（Key 一并安全搬入、原软件不受影响、已导入的自动去重不再提示；点「暂不导入」可隐藏）。
 
@@ -287,7 +287,7 @@ modeldock reset --deep                   # 清理数据：上面全部 + 删日�
 
 ## 7. 配置文件速查（~/.modeldock/）
 
-每个配置键的类型、默认值与语义，见 **[config.toml 配置参考](config-reference.md)**（本节只列常用形态）。
+每个配置键的类型、默认值与语义，见 **[config.toml 配置参考](../reference/config-reference.md)**（本节只列常用形态）。
 
 ```
 config.toml    主配置：providers / profiles / harness / adapter_packs / gateway
@@ -372,7 +372,7 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 
 ## 10. 当前实现状态（2026-11-04 基线；发版时随版本号刷新）
 
-已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；**用量统计与成本折算（`GET /_modeldock/usage` 聚合端点：按日期区间与客户端 / 服务 / 模型过滤，汇总请求数、token 明细与估算成本，管理面鉴权；控制台状态行今日用量徽标见 §5.5）**；**可计费 token 口径（`GET /_modeldock/usage` 响应新增 `billable_tokens` / `billable_partial`：只累计窗口内成功且带用量条目的可计费 token，剔除缓存读等不计费部分；`billable_partial=true` 表示窗口混入了旧版网关日志，求和只是可得部分）**；**按小时用量桶（`GET /_modeldock/usage` 支持 `bucket=hour`：响应新增 `hours[]` 小时桶，按小时分列请求数、token、成本与模型 / 状态分布——排障不必再只看全天总数）**；**分模型时延（`GET /_modeldock/usage` 汇总结果新增 `latency_by_model`：按模型给出请求计数与平均 / p50 / p95 时延，同一服务下不同模型的快慢分开看）**；**模型单价覆盖（内置 models.dev 官方牌价随目录刷新；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖，键 = 模型名或 `服务商/模型`，单位美元每百万 token；查不到单价的模型按 $0 计并列名提醒，绝不猜价）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
+已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/guide/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；**用量统计与成本折算（`GET /_modeldock/usage` 聚合端点：按日期区间与客户端 / 服务 / 模型过滤，汇总请求数、token 明细与估算成本，管理面鉴权；控制台状态行今日用量徽标见 §5.5）**；**可计费 token 口径（`GET /_modeldock/usage` 响应新增 `billable_tokens` / `billable_partial`：只累计窗口内成功且带用量条目的可计费 token，剔除缓存读等不计费部分；`billable_partial=true` 表示窗口混入了旧版网关日志，求和只是可得部分）**；**按小时用量桶（`GET /_modeldock/usage` 支持 `bucket=hour`：响应新增 `hours[]` 小时桶，按小时分列请求数、token、成本与模型 / 状态分布——排障不必再只看全天总数）**；**分模型时延（`GET /_modeldock/usage` 汇总结果新增 `latency_by_model`：按模型给出请求计数与平均 / p50 / p95 时延，同一服务下不同模型的快慢分开看）**；**模型单价覆盖（内置 models.dev 官方牌价随目录刷新；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖，键 = 模型名或 `服务商/模型`，单位美元每百万 token；查不到单价的模型按 $0 计并列名提醒，绝不猜价）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
 
 验证状态：TypeScript 编译通过；产品测试全绿——套件覆盖 store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / update 等（含 Web 端点、手机控制台与云端控制面），用例数与文件数以 `npm test` 输出为准（个别用例按平台跳过）；agent 工作流套件（.agents/ 编排器与守卫 hook）拆分单独运行：`npm run test:workflow`；CLI 二进制冒烟通过；Windows / Linux / macOS 跨平台测试通过。真实 harness 的 attach 联调待你在本机执行——首次使用建议保留 diff 确认，并先跑 `modeldock test` / `modeldock doctor`。
 

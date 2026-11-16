@@ -1,5 +1,5 @@
 /**
- * 本机同步凭据与状态（docs/design-cloud-sync.md §4.4 的 ~/.modeldock/sync.json）。
+ * 本机同步凭据与状态（docs/design/design-cloud-sync.md §4.4 的 ~/.modeldock/sync.json）。
  * 与被同步的 config.toml 分文件：凭据不能随包被同步回去。0600 atomicWrite。
  */
 import os from 'node:os'

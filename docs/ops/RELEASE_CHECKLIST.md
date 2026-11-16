@@ -1,8 +1,8 @@
 # ModelDock 发布前检查清单（Release Checklist）
 
 > **用途**：每次版本发布前的质量门禁。机器可查项由 `scripts/release-check.mjs` 一键执行，人工判断项逐条过目——**发布内容盘点前跑一遍，推 main 后再跑一遍（`--skip-test`，与等 CI 并行）**。
-> **与 release.md 的分工**：[release.md](../.agents/workflows/release.md) 是发布**流程**（步骤顺序与命令）；本文件是**门禁清单**（质量标准与执行器）。
-> **维护**：流程或策略变更后，同步更新本文件与 release.md / [AGENTS.md](../AGENTS.md)。基线数字（用例数等）**不写死在本文件**——脚本实测并提示与 usage.md 的漂移。
+> **与 release.md 的分工**：[release.md](../../.agents/workflows/release.md) 是发布**流程**（步骤顺序与命令）；本文件是**门禁清单**（质量标准与执行器）。
+> **维护**：流程或策略变更后，同步更新本文件与 release.md / [AGENTS.md](../../AGENTS.md)。基线数字（用例数等）**不写死在本文件**——脚本实测并提示与 usage.md 的漂移。
 
 ---
 
@@ -40,13 +40,13 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 | ⚠ | `src/` TODO / FIXME / XXX / HACK 残留（列出供裁决） |
 | ⚠ | develop 领先 origin/develop（提示推送备份）、feature/* 分支残留（确认不含本版内容） |
 | ⚠ | 托管 Node 钉版新鲜度：非当前大版本最新 patch（安全补丁滞后，顺手 bump）/ 已有更新 LTS 大版本（提示评估切版，与 SEA/CI 同步） |
-| ⚠ | 基线漂移：实测用例数 / 文件数 ≠ [usage.md](usage.md) §10 所写（提示更新 usage.md） |
+| ⚠ | 基线漂移：实测用例数 / 文件数 ≠ [usage.md](../guide/usage.md) §10 所写（提示更新 usage.md） |
 
 ## 2. 人工判断项（脚本替代不了）
 
 **内容与文档**
-- [ ] 按 release.md 步骤 1 完成盘点归纳；CHANGELOG / README 措辞过 [docs-writing](../.agents/conventions/docs-writing.md) 规范（用户视角、一条一事、粗体点题、无内部黑话）
-- [ ] README / docs/usage.md 与新版本一致（新能力 bullet、命令表、§10 基线数字按脚本实测更新）
+- [ ] 按 release.md 步骤 1 完成盘点归纳；CHANGELOG / README 措辞过 [docs-writing](../../.agents/conventions/docs-writing.md) 规范（用户视角、一条一事、粗体点题、无内部黑话）
+- [ ] README / docs/guide/usage.md 与新版本一致（新能力 bullet、命令表、§10 基线数字按脚本实测更新）
 - [ ] 破坏性变更已识别：有则升 major，并在 usage.md 写迁移说明
 - [ ] 无未合并的 WIP / 半成品开关；内部改动（CI / 测试 / 工具链）未混进 CHANGELOG
 
@@ -60,7 +60,7 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 
 ## 3. 发布执行
 
-按 [release.md](../.agents/workflows/release.md) 步骤 2-5：develop 合入 main 并推送 → **推完即把 §1 脚本再跑一遍**（`--skip-test`，与等 CI 并行——其检查项不依赖 CI 结论）→ 等 test.yml 三平台全绿 → 打 annotated tag 只推这一个 → 验证 11 资产与 Release 正文（`scripts/release-verify.mjs` 一键执行，人工核对兜底）。回滚与「撤回版本号永不复用」规则见 release.md「出错回滚」。
+按 [release.md](../../.agents/workflows/release.md) 步骤 2-5：develop 合入 main 并推送 → **推完即把 §1 脚本再跑一遍**（`--skip-test`，与等 CI 并行——其检查项不依赖 CI 结论）→ 等 test.yml 三平台全绿 → 打 annotated tag 只推这一个 → 验证 11 资产与 Release 正文（`scripts/release-verify.mjs` 一键执行，人工核对兜底）。回滚与「撤回版本号永不复用」规则见 release.md「出错回滚」。
 
 ## 4. 发布后验证（24 小时内）
 

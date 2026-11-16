@@ -6,7 +6,7 @@
 > 1. 修复某项后**回到本文档勾选该项并标注日期与 commit**，不要直接删条目。
 > 2. 文中行号基于审查当日代码（develop@86b23bd 附近），动手前先读对应源码确认仍然成立。
 > 3. 标注（推测）的条目是静态推演结论，未经实测基准；实施前先量化验证。
-> 4. 与 `docs/backlog.md`（2026-10-07 热路径评审 B/C 级遗留）少量重叠：backlog 的 **B4 ≈ PERF-17**、**C2 与 PERF-06/07/09 同域**、**B2/B3 仍开放**（本页未重复收录），实施时可合并处理。
+> 4. 2026-10-07 热路径评审 backlog 已于 2026-11-16 终账删除（零开放项；B2/C1 已实施、B1/B3/C4 评估放弃，结论并入 `.agents/docs/TODOLists.md` 终账节）：**B4 ≈ PERF-17**、**C2 与 PERF-06/07/09 同域** 均已修，正文条目中的「≈backlog Bx」注记保留作历史对照。
 >
 > 2026-10-27 六分区全量复审（网关核心 / Web 控制台与 LAN / 配置与工具 / CLI 与更新链 / 适配器与导入 / 云同步）：新增 **REVIEW-01..29**，除 REVIEW-26 按既定语义留档外全部修复（四个 feature 分支合并：fix-review-p1 @a471295、fix-review-p2-web @f60f67a、fix-review-p2-core @e94e0e1、fix-review-p2-data @50ab868）。明细见文末 §六。
 >
@@ -17,7 +17,7 @@
 > 2026-10-26 收口批（perf-residual-cleanup 三卡）：PERF-03 残余懒加载、PERF-14 残余无变化重写、PERF-16 已修（@26bccbb/@01e1a7f/@0b65ace）；余下 PERF-15/21/23/25/27/28/36 维持暂缓（§一.F）。
 > 2026-10-29 性能复检批（perf-residual）：PERF-25/28 全修、PERF-27 部分修（@60163fe，loadConfig stat 记忆；collect 整包 mtime 短路复核后维持不做——keychain 轮换不落盘的陈旧 key 风险）；余下 PERF-15/21/23/36 维持暂缓（§一.F）。
 > 2026-10-29 正确性批（fix-sync-race）：CORRECT-06 已修（@b917687，withFileLock 同路径重入 + 同步拉取 apply/collect 原子化）。
-> 2026-10-29 注记：① §二「已核查无问题」的 PowerShell CIM 进程枚举补记一行——其输出的行解析曾因 Windows CRLF 行尾全行失配、枚举恒空（@e4ac854 已修）；② 转发热路径首份可复现基线落档（scripts/bench-relay.mjs + docs/bench-baseline.md，PERF-01 条目已附实测对照）——「（推测）」条目的量化验证从此有同机 before/after 基建；③ 文末测试盲区注记更新（§六尾注三处已于 T07 @05dd0a6 补齐，另补配置/运维与 CLI/安装两批 @083284d/@3d74124）。
+> 2026-10-29 注记：① §二「已核查无问题」的 PowerShell CIM 进程枚举补记一行——其输出的行解析曾因 Windows CRLF 行尾全行失配、枚举恒空（@e4ac854 已修）；② 转发热路径首份可复现基线落档（scripts/bench-relay.mjs + docs/ops/bench-baseline.md，PERF-01 条目已附实测对照）——「（推测）」条目的量化验证从此有同机 before/after 基建；③ 文末测试盲区注记更新（§六尾注三处已于 T07 @05dd0a6 补齐，另补配置/运维与 CLI/安装两批 @083284d/@3d74124）。
 > 2026-11-09 性能复检批（perf-ledger-pass，ZCode 原生模式双勘察船→双修复船）：11-06 后 72 文件新代码全量复审——**发现并修复 9b2229f 回归劣化**（failover 对账引入每请求双全量体扫描，@f367675 扫描一次下沉+惰性求值，bench 5MB 改写 p50 -12%/透传 -9%）；webupdate token 解析挪入 TTL/退避守卫与 proxyUrl 同款惰性化（@2f613ad）；**PERF-15/21/36 复核维持暂缓**（11-03 理由未变、翻案条件均未触发）；cost 查价链/failover 对账/流池/overview/CLI 闭包经逐链审计均沿用既有记忆化范式无同步 I/O 残留。
 > 严重度定义：**P0** = 热路径/启动的真实性能损害或功能破损，优先修；**P1** = 明显浪费、周期性阻塞或正确性隐患；**P2** = 轻微、低频或纵深防御项。
 
@@ -69,7 +69,7 @@
 | XPLAT-06 | P2 | `src/autostart.ts:36-39` | Windows VBS 自启长期弃用风险 | ☑ 已修（2026-10-28，注册表 Run 键 + 自分离隐藏启动，见 §三） |
 | XPLAT-07 | P2 | `src/adapters/codex.ts:69` | bootstrap.path 顶层求值，违反惰性约定 | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-08 | P2 | `src/adapters/dsh.ts:236` | label 写死中文未走 t() | ☑ 已修（2026-10-12 @0caad3a） |
-| XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☑ 留档不修（2026-11-03，依据 docs/optimization-handoff.md §2 与本条 §二 详注） |
+| XPLAT-09 | P2 | `src/adapters/format.ts:52-61` | JSONC 剥注释不支持尾逗号（设计取舍） | ☑ 留档不修（2026-11-03，依据 docs/archive/optimization-handoff.md §2 与本条 §二 详注） |
 | XPLAT-10 | P2 | `src/update/check.ts:224` | 更新资产名未校验（供应链纵深防御） | ☑ 已修（2026-10-12 @0caad3a） |
 | XPLAT-11 | P2 | `src/util/color.ts` | 老 conhost ANSI 无检测（推测） | ☑ 留档不修（2026-11-03，依据本条 §二 详注：项目门槛 Win10+ 时无碍） |
 | CORRECT-01 | **P1** | `src/config/secrets.ts:267` | secrets 缓存永不失效：跨进程改 key 网关发旧 key 直到重启 | ☑ 已修（2026-10-12 @2a0c5c9） |
@@ -96,7 +96,7 @@
 - 影响：Claude Code/ZCode 长上下文请求体常达 0.5–10MB，每请求 5–100ms（推测）事件循环阻塞，串行化同实例所有并发流（含正在推流的 SSE）。
 - 修复方向（已人工复核可行）：`topLevelModel` 扫描结果 `pre` 非 null 时，modelOverride / aliases 匹配 / tierFallback（CLAUDE_BUILTIN_RE）/ anthropic. 剥壳 / default_model 兜底的**全部判定只用模型名字符串即可完成**；仅当 `final !== wire` 确需改写时才 parse + 重序列化。`pre === null`（扫描器放弃）再退回现有全量解析路径，逻辑与现路径逐字节等价。
 - 验证：用大请求体（≥5MB）压测对比 p99；回归 gateway 套件的 rewriteModel 用例。
-- 2026-10-29 实测对照（docs/bench-baseline.md 首份基线，i5-8250U/Node 24）：5MB 改写 p50 94.4ms vs 纯透传 73.3ms——修复后「确需改写」路径的全量 parse+重序列化开销约 21ms/5MB（p50 差值），与原「5–100ms（推测）」估算同量级；relay 后续改动用 scripts/bench-relay.mjs 同机 before/after 对比。
+- 2026-10-29 实测对照（docs/ops/bench-baseline.md 首份基线，i5-8250U/Node 24）：5MB 改写 p50 94.4ms vs 纯透传 73.3ms——修复后「确需改写」路径的全量 parse+重序列化开销约 21ms/5MB（p50 差值），与原「5–100ms（推测）」估算同量级；relay 后续改动用 scripts/bench-relay.mjs 同机 before/after 对比。
 
 **PERF-02（P2）dayFilter 每请求 statSync**
 - 位置：`src/gateway/state.ts:285` → `src/gateway/daytype.ts:33`
@@ -471,7 +471,7 @@
 3. **PERF-07 / PERF-06 / PERF-08**（控制台轮询阻塞三件套，presence memo + Promise.all）
 4. **PERF-03 / PERF-04 / PERF-05**（启动链减负，注意 vitest 隔离模型回归）
 5. **PERF-12**（复用 macKey，一行改动）+ **XPLAT-01**（EBUSY 白名单）
-6. 其余 P2 按需排期；与 `docs/backlog.md` 重叠项（B2/B3/B4/C2）合并实施。
+6. 其余 P2 按需排期（原 backlog 重叠项 B2/B3/B4/C2 均已闭环或放弃终账，见 `.agents/docs/TODOLists.md`）。
 
 > 修复纪律提醒：改 `src/**` 必须全绿 `npm test`；一律走 feature-branch 工作流（`node .agents/scripts/feature-branch.mjs start <task-id>`）；涉及 hot path 的改动用手测沙箱配方验证（`MODELRDOCK_FAKE_HOME` + 189xx，禁碰 8687/8890）。修完回到本页勾选。
 

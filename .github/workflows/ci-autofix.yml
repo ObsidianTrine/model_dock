@@ -25,7 +25,7 @@ name: ci-autofix
 #   显式传给 claude-code-action——缺省未传时 action 改走 OIDC 换 app token（需 id-token: write，
 #   且 app token 的推送会触发新 workflow run，破坏本文件依赖的「GITHUB_TOKEN 事件不触发
 #   workflow」防回环设计；2026-11-04 事故：autofix 每次 fix 阶段死于 OIDC 三连重试，
-#   Claude 会话零启动，与 key 无关）。详见 docs/ci-bots.md。
+#   Claude 会话零启动，与 key 无关）。详见 docs/ops/ci-bots.md。
 #   注意：workflow_run 触发的 run 按默认分支上的 workflow 文件执行——本文件合入 main 后才生效。
 #
 # 防回环（为什么天然收敛，不会无限循环）：
@@ -146,7 +146,7 @@ jobs:
           [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
           if [ -n "$miss" ]; then
             ok=false
-            echo "::warning::Claude 配置不齐（缺:$miss），主干失败自动修复未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
+            echo "::warning::Claude 配置不齐（缺:$miss），主干失败自动修复未启用。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           else
             ok=true
           fi

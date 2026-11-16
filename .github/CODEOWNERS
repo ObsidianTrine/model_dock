@@ -1,5 +1,5 @@
 # 敏感路径代码所有者：这些文件的改动必须过 owner 人工审查。
-# 配合分支保护「Require review from Code Owners」生效（配置清单见 docs/ai-review-system.md）。
+# 配合分支保护「Require review from Code Owners」生效（配置清单见 docs/ops/ai-review-system.md）。
 # 与 scripts/pr-risk-tier.mjs 的高风险面同源（corePaths/releasePaths + 发布面）。
 
 /.github/workflows/          @ObsidianTrine

@@ -1,5 +1,5 @@
 /**
- * 同步引擎（docs/design-cloud-sync.md §6.2/§7.4-7.5）：推送/拉取/冲突(D6) + 轮询 + 本地变更即时推(防抖 3s)。
+ * 同步引擎（docs/design/design-cloud-sync.md §6.2/§7.4-7.5）：推送/拉取/冲突(D6) + 轮询 + 本地变更即时推(防抖 3s)。
  * target 模式 120s±30%；cloud 模式 60s±20%（心跳兼轮询，D4 分钟级语义）并在 tick 内做 desired 应用。
  * 网关进程内挂载（remountSyncEngine）；CLI status/overview 只读 syncStatus()。
  * 关键不变式：lastSyncedHash = 本机最近一次推/拉后的可同步态指纹——tick 据此区分「本地有未推改动」与「远端有新版本」，

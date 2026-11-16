@@ -166,11 +166,11 @@ export interface LanConfig {
   port?: number
 }
 
-/** 自动更新（公开仓库匿名直连 + 可选 PAT + 镜像回退链，见 docs/design-auto-update.md §6） */
+/** 自动更新（公开仓库匿名直连 + 可选 PAT + 镜像回退链，见 docs/design/design-auto-update.md §6） */
 export interface UpdateConfig {
   /** 更新源仓库 owner/name（默认公开主仓库；改指私有仓库时需配 token_ref） */
   repo?: string
-  /** 更新 feed 基地址（默认 GitHub API；自建源/本地 mock 可覆盖，见 docs/design-auto-update.md §4 三阶段） */
+  /** 更新 feed 基地址（默认 GitHub API；自建源/本地 mock 可覆盖，见 docs/design/design-auto-update.md §4 三阶段） */
   api_base?: string
   /** PAT 在 secrets 中的 key_ref（setSecret 返回值；令牌本体存 secrets.json/keychain，不进 config 明文）。
    *  可选：公开仓库匿名即可更新，令牌仅私有仓库必需、或把匿名限流 60 次/时提到 5000 次/时 */
@@ -191,7 +191,7 @@ export const DEFAULT_GATEWAY_PORT = 8687
 /** JSONL 日志日文件默认保留天数（见 GatewayConfig.log_retention_days；0 = 禁用清理） */
 export const DEFAULT_LOG_RETENTION_DAYS = 30
 
-/** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design-auto-update.md §6） */
+/** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design/design-auto-update.md §6） */
 export const DEFAULT_UPDATE_REPO = 'ObsidianTrine/model_dock'
 
 /** 下载镜像回退链默认值（大陆加速；design §6 第 4 项）。官方直连是隐式末位，不在此列 */

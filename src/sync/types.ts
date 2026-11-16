@@ -4,7 +4,7 @@ import { parseHHmm } from '../util/time.js'
 import { ASSET_MAX_FILE_BYTES, ASSET_MAX_FILES, ASSET_MAX_TOTAL_BYTES, isSafeAssetKey } from './assets.js'
 
 /**
- * syncdoc v1 —— 可同步态的传输/存储逻辑格式（加密前的明文形态），详见 docs/design-cloud-sync.md §4.2。
+ * syncdoc v1 —— 可同步态的传输/存储逻辑格式（加密前的明文形态），详见 docs/design/design-cloud-sync.md §4.2。
  * providers/profiles 用 Record<id, entry>（与 config store 等价，数组会丢 id）。
  * 机器态（harness 接入/gateway.json/当前激活路由/自启/日志统计）不进 syncdoc。
  */

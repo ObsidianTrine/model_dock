@@ -50,7 +50,7 @@ function readRawUserPresets(): unknown[] | { presets: unknown[] } {
   throw new Error(t('自定义预设 {file} 顶层应为数组，或 { "presets": [...] }', 'The custom presets file {file} must be an array at top level, or { "presets": [...] }', { file: fp }))
 }
 
-/** 收集可同步态 → syncdoc（docs/design-cloud-sync.md §4.1 清单）。
+/** 收集可同步态 → syncdoc（docs/design/design-cloud-sync.md §4.1 清单）。
  *  key 处理：file/keychain/secret-service/plain 引用解析为明文随包；env: 引用不解析（机器态）原样保留；
  *  解析不到的引用原样保留并记入 missingKeys。
  *  log：软链根等「跳过但用户该知道」诊断的出口（引擎传 opts.log 进网关日志；缺省静默）。 */
@@ -127,7 +127,7 @@ function countPresets(up: unknown[] | { presets: unknown[] }): number {
   return Array.isArray(up) ? up.length : up.presets.length
 }
 
-/** 应用 syncdoc：替换全部可同步态，机器态一律不动（docs/design-cloud-sync.md §5.2）。
+/** 应用 syncdoc：替换全部可同步态，机器态一律不动（docs/design/design-cloud-sync.md §5.2）。
  *  顺序：快照（config.toml/secrets.json/presets.json）→ key 按本机后端重存 → 整包替换 → 写预设。
  *  backend 缺省按 config.security.store / 平台默认；测试必须显式传 'file' 以免写真实钥匙串。
  *  log：资产软链守卫等「跳过但用户该知道」告警的出口（引擎传 opts.log 进网关日志，CLI 打印；缺省静默）。 */

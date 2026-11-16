@@ -3,7 +3,7 @@ import { buildRules, classifyRisk, matchPattern } from '../scripts/pr-risk-tier.
 
 describe('matchPattern', () => {
   it('目录 /** 前缀匹配（不吞同级近名目录）', () => {
-    expect(matchPattern('docs/**', 'docs/usage.md')).toBe(true)
+    expect(matchPattern('docs/**', 'docs/guide/usage.md')).toBe(true)
     expect(matchPattern('docs/**', 'docsx/usage.md')).toBe(false)
     expect(matchPattern('.github/workflows/**', '.github/workflows/test.yml')).toBe(true)
   })
@@ -15,7 +15,7 @@ describe('matchPattern', () => {
 
   it('*.ext 按扩展名匹配任意层级', () => {
     expect(matchPattern('*.md', 'README.md')).toBe(true)
-    expect(matchPattern('*.md', 'docs/usage.md')).toBe(true)
+    expect(matchPattern('*.md', 'docs/guide/usage.md')).toBe(true)
     expect(matchPattern('*.md', 'src/cli.ts')).toBe(false)
   })
 
@@ -45,7 +45,7 @@ describe('classifyRisk', () => {
   })
 
   it('纯文档 → 低风险', () => {
-    const r = classifyRisk(['README.md', 'docs/ai-review-system.md', 'CHANGELOG.md'], rules)
+    const r = classifyRisk(['README.md', 'docs/ops/ai-review-system.md', 'CHANGELOG.md'], rules)
     expect(r.tier).toBe('low')
   })
 
@@ -56,12 +56,12 @@ describe('classifyRisk', () => {
   })
 
   it('文档 + 高风险混合 → 取最高档，文档不拉低等级', () => {
-    const r = classifyRisk(['docs/usage.md', '.github/workflows/test.yml'], rules)
+    const r = classifyRisk(['docs/guide/usage.md', '.github/workflows/test.yml'], rules)
     expect(r.tier).toBe('high')
   })
 
   it('文档 + 普通源码混合 → 中风险（未覆盖面不默认放行）', () => {
-    const r = classifyRisk(['docs/usage.md', 'src/util/diff.ts'], rules)
+    const r = classifyRisk(['docs/guide/usage.md', 'src/util/diff.ts'], rules)
     expect(r.tier).toBe('medium')
   })
 

@@ -1,5 +1,5 @@
 /**
- * 自动更新——GitHub Releases 发现与下载（实施基准：docs/design-auto-update.md §5/§6）
+ * 自动更新——GitHub Releases 发现与下载（实施基准：docs/design/design-auto-update.md §5/§6）
  *
  * 检查 = GET /repos/{repo}/releases/latest（公开仓库匿名可读，该端点永不返回 draft/prerelease；
  * 配置 token_ref 时带 PAT——私有仓库兼容模式，顺带把限流从 60 次/时提到 5000 次/时）。

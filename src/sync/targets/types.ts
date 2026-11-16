@@ -1,5 +1,5 @@
 /**
- * 同步目标抽象（docs/design-cloud-sync.md §6.1）。
+ * 同步目标抽象（docs/design/design-cloud-sync.md §6.1）。
  * 接口收窄到 manifest/blob 四操作：WebDAV/localdir 之外的新存储（网盘、S3 类）零改动接入引擎。
  */
 import { t } from '../../util/i18n.js'
