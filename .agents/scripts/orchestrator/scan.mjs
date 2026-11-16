@@ -9,8 +9,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { runCmd } from './gates.mjs';
-import { cardPath, findCard } from './queue.mjs';
+import { cardPath, findCard, listCards, queueRoot } from './queue.mjs';
 import { appendEvent, logDir, toIsoLocal } from './events.mjs';
+import { SUPERSEDED_DIR, draftsRoot, sweepLandedDrafts } from './drafts-gc.mjs';
 import { shellSpawnOptions, shellCommandline } from './spawn-shell.mjs';
 import {
   SEMANTIC_MAX_SIGNALS,
@@ -227,9 +228,89 @@ export function scanKnownIssues(repoRoot) {
   return cards;
 }
 
+// ---------------------------------------------------------------------------
+// CI 信号 · streak 级去重（2026-11-17 信号新鲜度）：旧实现只取最近一条失败 run、id 取
+// 该 run 的 head sha——同一段红 streak 里每个新失败 run 都派生新 id，夜巡连着派重复卡
+// （实证：scan-ci-a49876e0 与 scan-ci-50bd710a 是同一 develop 红 streak 的两张独立卡）。
+// 改为以「失败 streak 首个 run」派 id：去重键 = test workflow + 分支 + streak 首个 run，
+// streak 不重开则 id 不变，runScan 的同 id 存在性去重自然收口（非逐 run id）；旧版逐
+// run id 的存量卡按卡内 run 号/sha 引用对拍桥接（cardCoversStreak）。
+// ---------------------------------------------------------------------------
+
+/** 连续失败 streak（纯函数）：runs 按 gh run list 次序（最新在前），自头连续取
+ *  conclusion==='failure' 的段，遇绿/进行中/取消即止。返回 { runs, firstRun }——
+ *  firstRun 是段内最旧一条：同一红 streak 里它保持不变（streak 增长只在头部追加），
+ *  是 id 稳定性的锚。 */
+export function ciFailureStreak(runs) {
+  const streak = [];
+  for (const r of Array.isArray(runs) ? runs : []) {
+    if (r?.conclusion !== 'failure' || !r?.headSha) break;
+    streak.push(r);
+  }
+  return { runs: streak, firstRun: streak.length ? streak[streak.length - 1] : null };
+}
+
+/** 从卡文本提取 run 引用：run 号（goal「run #id」/background「run id」）与 commit sha
+ *  （background「head sha」/acceptance「对应提交 sha」）。scan-ci 卡措辞由 renderCard
+ *  固定产出，旧版存量卡同格式；数字下限防误吸无关数字。 */
+export function cardRunRefs(text) {
+  const s = String(text ?? '');
+  const runIds = new Set();
+  for (const m of s.matchAll(/\brun\s*#?(\d{3,})\b/g)) runIds.add(m[1]);
+  const shas = new Set();
+  // 对应提交 不带前导 \b：JS \b 定义在 \w 与非 \w 之间，纯 CJK 引导词前导 \b 永不成立
+  // （「；对应提交」场景 sha 永远抓不到）；head 保留双侧 \b 防 header 之类前缀误命中。
+  for (const m of s.matchAll(/(?:\bhead\b|对应提交)\s*([0-9a-f]{8,40})\b/gi)) shas.add(m[1].toLowerCase());
+  return { runIds, shas };
+}
+
+/** 卡是否覆盖当前失败 streak（run 号精确相等；sha 互为前缀——卡里存全 sha 或 8 位短
+ *  sha，gh 数据给全 sha）。 */
+export function cardCoversStreak(text, runs) {
+  const { runIds, shas } = cardRunRefs(text);
+  for (const r of Array.isArray(runs) ? runs : []) {
+    if (runIds.has(String(r.databaseId))) return true;
+    const sha = String(r.headSha ?? '').toLowerCase();
+    if (!sha) continue;
+    for (const s of shas) {
+      if (sha.startsWith(s) || s.startsWith(sha)) return true;
+    }
+  }
+  return false;
+}
+
+/** 同 streak 在途卡对照面：drafts/ 顶层 + 非终态队列卡（merged/failed 是已了结结果，
+ *  不算在途——失败卡重开新卡是正当重派）。损坏卡跳过。 */
+function openCiCards(repoRoot) {
+  const out = [];
+  const dir = draftsRoot(repoRoot);
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith('scan-ci-') || !f.endsWith('.md')) continue;
+      try {
+        out.push({ id: f.replace(/\.md$/, ''), text: fs.readFileSync(path.join(dir, f), 'utf8') });
+      } catch { /* 损坏卡跳过 */ }
+    }
+  } catch { /* drafts/ 不存在 */ }
+  const root = queueRoot(repoRoot);
+  for (const st of ['pending', 'running', 'reviewing', 'awaiting-human', 'blocked']) {
+    for (const id of listCards(root, st)) {
+      if (!id.startsWith('scan-ci-')) continue;
+      try {
+        out.push({ id, text: fs.readFileSync(cardPath(root, st, id), 'utf8') });
+      } catch { /* 损坏卡跳过 */ }
+    }
+  }
+  return out;
+}
+
 /**
  * 信号源 6：主干 test 失败（gh run list，best-effort，模式同 scanIssues）。
- * 只看最近一条失败 run——按 head sha 建 id（同提交同 id 天然去重；run 恢复绿后不再生成）。
+ * streak 级去重：取最近 30 条 run 截出当前连续失败 streak，id 由 streak 首个 run 的
+ * head sha 派生（去重键 = test workflow + 分支 + streak 首个 run，非逐 run id）——
+ * 同一段红 streak 反复巡检得到同一 id，runScan 存在性去重自然收口；streak 恢复绿后
+ * 重红 = 新 streak（首个 run 变了）→ 新 id 新卡。已有在途卡覆盖同一 streak 时跳过
+ * （桥接旧版逐 run id 存量卡）。run 恢复绿后不再生成。
  */
 export function scanCI(repoRoot, opts = {}) {
   let remote = '';
@@ -241,7 +322,7 @@ export function scanCI(repoRoot, opts = {}) {
   if (!/github\.com[:/]/i.test(remote.trim())) return { skipped: true, reason: 'origin 非 GitHub 远端，跳过 CI 信号源' };
   const branch = opts.baseBranch ?? 'main';
   const gh = opts.gh ?? process.env.ORCH_GH_CLI ?? 'gh';
-  const r = (opts.run ?? defaultGhRun)(gh, ['run', 'list', '--workflow', 'test', '--branch', branch, '--status', 'failure', '--limit', '1', '--json', 'databaseId,headSha,displayTitle'], repoRoot);
+  const r = (opts.run ?? defaultGhRun)(gh, ['run', 'list', '--workflow', 'test', '--branch', branch, '--limit', '30', '--json', 'databaseId,headSha,displayTitle,conclusion'], repoRoot);
   if (r.status !== 0) {
     return { skipped: true, reason: `gh run list 不可用（未安装 gh 或未 gh auth login？）：${sanitize(r.stderr || '', 120) || `exit ${r.status}`}` };
   }
@@ -251,18 +332,22 @@ export function scanCI(repoRoot, opts = {}) {
   } catch {
     return { skipped: true, reason: 'gh 输出不可解析，跳过 CI 信号源' };
   }
-  const run = (Array.isArray(runs) ? runs : [])[0];
-  if (!run?.headSha) return [];
-  const shortSha = String(run.headSha).slice(0, 8);
+  const streak = ciFailureStreak(runs);
+  if (!streak.firstRun) return [];
+  const covered = openCiCards(repoRoot).find((c) => cardCoversStreak(c.text, streak.runs));
+  if (covered) {
+    return { skipped: true, reason: `CI 失败 streak 已有在途卡 ${covered.id}，跳过开卡（去重键：test workflow+${branch}+streak 首个 run）` };
+  }
+  const shortSha = String(streak.firstRun.headSha).slice(0, 8);
   return [
     {
       id: `scan-ci-${shortSha}`,
       type: 'bugfix',
       priority: 'high',
       files_hint: ['src/**', 'test/**'],
-      goal: `修复主干（${branch}）test 失败 run #${run.databaseId}`,
+      goal: `修复主干（${branch}）test 失败 run #${streak.firstRun.databaseId}`,
       acceptance: `- 失败测试修复；对应提交 ${shortSha} 上的 test workflow 全绿`,
-      background: `巡检发现主干 test 失败：run ${run.databaseId}（${sanitize(run.displayTitle ?? '', 160)}，head ${run.headSha}）`,
+      background: `巡检发现主干 test 失败：连续 ${streak.runs.length} 个 run 失败（streak 首个 run ${streak.firstRun.databaseId}：${sanitize(streak.firstRun.displayTitle ?? '', 160)}，head ${streak.firstRun.headSha}）`,
     },
   ];
 }
@@ -330,6 +415,15 @@ export async function runScan(repoRoot, opts = {}) {
   const relayedOut = [];
   const droppedOut = [];
   const qdir = logDir(repoRoot, 'scan'); // scan 级事件（signal_relayed/dropped、scan_semantic、scan_filtered）
+
+  // 信号新鲜度（2026-11-17）：卡体带「已落地」标注的提案自动归档迁 drafts/superseded/
+  // （landed 标注）——不再作为活信号进入任何规划输入（planner 输入组装侧另有过滤兜底）。
+  // dry-run 不动盘；失败告警留原地，下次巡检重试。
+  if (!dry) {
+    const landed = sweepLandedDrafts(repoRoot);
+    for (const f of landed.moved) warnings.push(`已落地提案自动归档：${f} → drafts/${SUPERSEDED_DIR}/（landed 标注）`);
+    for (const x of landed.failed) warnings.push(`已落地提案归档失败（${x.file}）：${x.reason}——留原地，下次巡检重试`);
+  }
 
   const candidates = [];
   if (opts.todo) candidates.push(...scanTodo(repoRoot));
