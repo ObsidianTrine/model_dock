@@ -258,7 +258,9 @@ export function cardRunRefs(text) {
   const runIds = new Set();
   for (const m of s.matchAll(/\brun\s*#?(\d{3,})\b/g)) runIds.add(m[1]);
   const shas = new Set();
-  for (const m of s.matchAll(/\b(?:head|对应提交)\s*([0-9a-f]{8,40})\b/gi)) shas.add(m[1].toLowerCase());
+  // 对应提交 不带前导 \b：JS \b 定义在 \w 与非 \w 之间，纯 CJK 引导词前导 \b 永不成立
+  // （「；对应提交」场景 sha 永远抓不到）；head 保留双侧 \b 防 header 之类前缀误命中。
+  for (const m of s.matchAll(/(?:\bhead\b|对应提交)\s*([0-9a-f]{8,40})\b/gi)) shas.add(m[1].toLowerCase());
   return { runIds, shas };
 }
 
