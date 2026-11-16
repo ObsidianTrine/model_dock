@@ -126,6 +126,21 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
 - 套件：test/ 下 252 个测试文件（产品套件 149 + 编排器套件 103；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- **按域套件速查**（L1 选文件的入口，文件名以 test/ 目录为准；同前缀属同域）：
+
+  | 域 | 套件文件（test/） |
+  |---|---|
+  | 网关转发 | `relay` / `hotpath` / `gateway` / `gateway-shared` / `relay-concurrency` / `relay-gaps` / `relay-lazyparse` / `relay-model-filter` / `relay-scan-once` / `concurrency` / `state-gaps` / `token-limits` / `request-log-ring` / `logs-query` / `log-retention` / `err-taxonomy` / `error-hints` / `observability` / `debuglog` |
+  | 路由与接入 | `model-fallback-config` / `model-fallback-web` / `keypool` / `pin-protocol` / `attach-port` / `attach-port-flag` / `attach-cli` |
+  | Web 控制台 | `webui-*` / `ui-html` / `ui-edit-backfill` / `ui-edit-cap` / `ui-min-fresh` / `console-cache` / `dedup-smoke` / `ui-lint` / `overview-presets-view` / `server-param-guard` |
+  | 适配与安装 | `adapters` / `adapter-packs` / `presence` / `install` / `cliinstall` / `noderuntime` / `codex-catalog` / `codex-profiles` / `dshcatalog` |
+  | 配置与密钥 | `store` / `config-gaps` / `config-isomorphism` / `config-reference` / `secrets-*` / `fsx-memo` / `realhome-write-guard` / `backup` / `safeequal` |
+  | 导入与目录 | `import-scan` / `import-sources` / `cli-import` / `presets` / `presets-userpresets-gaps` / `catalog-lazy` / `fetch` |
+  | 凭据与计量 | `gateway-ephemeral` / `transfer` / `net` / `sysproxy` / `time` |
+  | 同步与云 | `sync*` / `cloud*` / `lan` / `lansync` |
+  | 更新 | `update-*` / `sea-state` / `sea-gateway-cli` |
+  | 运维与 CLI | `gatewaycmd*` / `daemon-lifecycle` / `autostart` / `reset*` / `uninstall` / `ops-*` / `tray-*` / `diag` / `cli-*` / `mcp-scan` / `agent-security` / `profile-cli` / `daytype` / `holidays` / `i18n` / `stdio-silent-crash` / `sandbox-migrate` / `startup-lazy` / `passphrase-hint` |
+  | 门禁与基建 | `docs-lint` / `eslint-baseline` / `test-gate` / `test-suite-couplings` / `test-typecheck-gate` / `pr-risk-tier` / `cli-index-cmds` / `perf-*` / `gateway-audit*` |
 - **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入 `VITEST`、种子脚本显式 `MODELRDOCK_TEST=1`、**agent CLI 环境标记**——`ZCODE_*`/`CLAUDECODE` 等，见 `src/util/fsx.ts` AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受误伤；有意写真实 home 的场景（当前仅 test/autostart.test.ts 的 win 真注册表用例）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687 / 8890 / 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。

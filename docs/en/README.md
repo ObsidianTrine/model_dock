@@ -146,18 +146,20 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 |------|------|
 | **[Usage guide](guide/usage.md)** | Core concepts, installation details, full daily-operation walkthrough |
 | [Config reference](reference/config-reference.md) | Every `config.toml` key: type, default and description (generated from code, always in sync) |
+| [Command reference](reference/commands.md) | Quick lookup for every CLI command and its purpose |
 | [New computer & multi-machine sync](guide/multi-machine-sync.md) | Complete steps & troubleshooting for sync-folder onboarding |
 | [Cloud deployment](guide/deploy-cloud.md) | Self-hosted cloud sync hub runbook, manage all devices from one phone page |
-| [Design doc](../design/design.md) (Chinese) | Architecture, ADRs, threat model |
+| [Design doc](../design/hld.md) (Chinese) | Architecture, ADRs, threat model |
 | [AI pipeline guide](../../.agents/docs/ai-pipeline-guide.md) (Chinese) | End-to-end use of the autonomous pipeline: from a one-line intent to a release proposal — task in, merge out |
 | [CI bots](../ops/ci-bots.md) (Chinese) | GitHub Actions layered PR review & Dependabot: setup and usage (maintainers) |
 | [AI review system](../ops/ai-review-system.md) (Chinese) | Design & ops of layered code review: what each layer catches, how to keep improving |
+| [Design deviations ledger](../ops/design-deviations.md) (Chinese) | Ledger of capabilities delivered beyond or deviating from the original design (maintainers) |
 | [Changelog](CHANGELOG.md) | User-visible changes in every release |
 | 中文文档 | [简体中文版 README](../../README.md)（唯一事实来源） |
 
 ## Security
 
-The main gateway listens on `127.0.0.1` only and is not remotely accessible (by design); the optional LAN mobile console is off by default and adds a second listener on the LAN when enabled (see the [security policy](SECURITY.md)). Upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design/design.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
+The main gateway listens on `127.0.0.1` only and is not remotely accessible (by design); the optional LAN mobile console is off by default and adds a second listener on the LAN when enabled (see the [security policy](SECURITY.md)). Upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design/hld.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
 
 ## Contributing
 

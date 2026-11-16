@@ -5,7 +5,7 @@
 > 2. 写报错信息、Web 控制台按钮/提示等**用户可见文案**时。
 >
 > **受众提醒**：CHANGELOG / README 是写给**用户**看的，不是给开发者/agent 看的。
-> 内部技术约定写在 AGENTS.md / docs/design/design.md，不要混进对外文档。
+> 内部技术约定写在 AGENTS.md / docs/design/hld.md，不要混进对外文档。
 
 ## 总原则（5 条）
 
@@ -74,9 +74,9 @@
 |---|---|---|
 | README.md | 教程落地点 | 第一次看到项目的人：是什么 / 为什么 / 快速开始 |
 | docs/guide/ | how-to + 排错 | 已上手用户：usage（日常操作与故障排查）、multi-machine-sync、deploy-cloud；新用户指南落这里 |
-| docs/reference/ | reference | 查配置键（config-reference.md 脚本生成，勿手编）；新参考面落这里 |
-| docs/ops/ | runbook + 台账 | 维护者面：RELEASE_CHECKLIST、ci-bots、ai-review-system、attach-env-vars、bench-baseline、known-issues；新运维文档/工程台账落这里 |
-| docs/design/ | explanation | 架构、ADR、威胁模型与特性设计（design.md + design-*.md；内部向，不翻译）；新设计文档落这里 |
+| docs/reference/ | reference | 查配置键（config-reference.md 脚本生成，勿手编）与命令面（commands.md 手工维护）；新参考面落这里 |
+| docs/ops/ | runbook + 台账 | 维护者面：RELEASE_CHECKLIST、ci-bots、ai-review-system、attach-env-vars、bench-baseline、known-issues、design-deviations（设计偏差台账）；新运维文档/工程台账落这里 |
+| docs/design/ | explanation | 架构、ADR、威胁模型与特性设计（hld.md 主设计 + design-*.md 特性详设；内部向，不翻译）；新设计文档落这里 |
 | docs/archive/ | 时点归档 | 已闭环的评审/交接/实验记录，只读留底不更新 |
 | docs/examples/ | 样例文件 | 照抄即用的配置样例（如价目覆盖 `pricing.json`），复制进数据目录即生效；随新增样例登记 |
 | CHANGELOG.md | 发布记录 | 每个版本的用户可见变化 |
@@ -97,7 +97,7 @@ en 镜像结构对称：`docs/en/` 下 guide/、reference/ 与中文侧同位；
 - **中文是唯一事实来源**；英文版是翻译镜像，放在 `docs/en/`，文件与目录结构和中文一一对应（`README.md` / `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` / `usage.md` / `multi-machine-sync.md` / `deploy-cloud.md`）。纯内部文档（docs/design*、known-issues、backlog、RELEASE_CHECKLIST、AGENTS.md、.agents/ 全部含 docs/ 子目录等）**不做翻译**。
 - **语言切换行**：每篇对外文档 H1 标题下第一行是切换行——当前语言加粗、其他语言是相对链接；其下紧跟一行 `<!-- i18n-slot：… -->` 注释，是**新增语言的预留插入位**（在该行上方追加链接即可，对读者不可见）。
 - **新增语言 = 三步**：① 新建 `docs/<lang>/` 镜像目录，结构对齐 `docs/en/`；② 在所有已有语言的切换行追加链接；③ 在本节登记该语言。
-- **同步规则**：改动任何对外文档（中文）时，同一交付里更新 `docs/en/` 对应镜像；英文版里指向仅中文存在的文档（design.md 等）时直接链中文原文件并标注 "(Chinese)"。
+- **同步规则**：改动任何对外文档（中文）时，同一交付里更新 `docs/en/` 对应镜像；英文版里指向仅中文存在的文档（hld.md 等）时直接链中文原文件并标注 "(Chinese)"。
 - **互链方向**：根目录文档 ↔ `docs/en/` 用相对路径（如 `docs/en/README.md` ↔ `../../README.md`）；docs/ 下文档 ↔ `docs/en/` 同理（`en/usage.md` ↔ `../usage.md`）。
 
 ## 自检清单（每次改完过一遍）

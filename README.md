@@ -146,18 +146,20 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 |------|------|
 | **[使用指南](docs/guide/usage.md)** | 核心概念、安装细节、日常操作全流程（README 展不开的都在这里） |
 | [配置参考](docs/reference/config-reference.md) | `config.toml` 全部配置键的类型、默认值与说明（由脚本生成，与代码同源） |
+| [命令参考](docs/reference/commands.md) | 全部 CLI 命令与用途速查 |
 | [换电脑与多机同步](docs/guide/multi-machine-sync.md) | 同步盘接入新电脑的完整步骤与排错 |
 | [云端部署](docs/guide/deploy-cloud.md) | 自建云端同步中枢 runbook，手机单页管理所有设备 |
-| [设计文档](docs/design/design.md) | 架构、ADR、威胁模型 |
+| [设计文档](docs/design/hld.md) | 架构、ADR、威胁模型（高层设计 hld.md + 特性详设 design-*.md） |
 | [AI 自治流水线指南](.agents/docs/ai-pipeline-guide.md) | 从一句话意图到发版提案：任务卡进、合并出，贡献者派活的全部用法 |
 | [CI 机器人](docs/ops/ci-bots.md) | GitHub Actions 分层 PR 审查与 Dependabot 的设置与用途（维护者） |
 | [AI 审查体系](docs/ops/ai-review-system.md) | 分层代码审查的设计与运维：每层拦什么、如何持续改进 |
+| [设计偏差台账](docs/ops/design-deviations.md) | 超出 / 偏离原设计交付的能力对账（维护者） |
 | [更新日志](CHANGELOG.md) | 每个版本的用户可见变化 |
 | 英文文档 | [docs/en/](docs/en/)（README / 使用指南等英文镜像，随版本同步） |
 
 ## 安全
 
-网关主监听仅 `127.0.0.1`，不支持远程访问（设计如此）；可选的 LAN 手机控制台默认关闭，启用后为局域网内的第二监听器（见[安全政策](SECURITY.md)）。上游 key 只存本机安全后端，客户端配置中只出现本地 token；请求日志只记元数据、不落 prompt。完整威胁模型与安全设计见[设计文档 §9](docs/design/design.md#9-安全设计)。发现安全漏洞？请按[安全政策](SECURITY.md)私密上报。
+网关主监听仅 `127.0.0.1`，不支持远程访问（设计如此）；可选的 LAN 手机控制台默认关闭，启用后为局域网内的第二监听器（见[安全政策](SECURITY.md)）。上游 key 只存本机安全后端，客户端配置中只出现本地 token；请求日志只记元数据、不落 prompt。完整威胁模型与安全设计见[设计文档 §9](docs/design/hld.md#9-安全设计)。发现安全漏洞？请按[安全政策](SECURITY.md)私密上报。
 
 ## 参与贡献
 
