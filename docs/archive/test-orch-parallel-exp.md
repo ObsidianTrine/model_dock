@@ -24,13 +24,15 @@
 ## 落地结果（2026-11-17 查证）
 
 - **配置合入**：@acd718c（2026-11-11 23:59 +0800，"test(orch): 编排套件并行定档 maxWorkers 4（B3 证据+env 回退通道）+ mkRepo scripts 模板缓存"）——`vitest.workflow.config.ts` 缺省 `maxWorkers: 4` + `VITEST_MAX_WORKERS` env 覆盖通道（=1 回串行 / =2 分级复证）；test-suite-couplings 同构断言同步剔除 maxWorkers（允许两 config 按域异构）。
-- **观察窗触发面**：合入至今（2026-11-17）本地 develop 历史有 42 个触达 `.agents/**` 或 `test/orchestrator/**` 的提交（f908c73 起，最新 bf860dc）——按 test.yml paths-filter 规则，这批 push 均为 workflow-suite 真 run 触发点（非占位绿）。
-- **查证受阻，窗口顺延**：run 级 conclusion 核验需 `gh run list --workflow=test.yml`（逐条列 run id / 平台腿 / conclusion），2026-11-17 查证会话 shell 白名单两次拒绝该命令（权限熔断纪律），run 级三平台绿证据**未能核验，不臆断定档**。
-- **定档状态：待复证顺延**：维持 4 与回退 1 的决策暂缓——恢复 gh 查证能力后按窗口规则重计「连续 3 天真 run 三平台绿」；顺延至 2026-11-20 起的查证窗口。期间回退兜底不变：任一真 run 出现 flake / worker 生命周期异常 → 改缺省 `maxWorkers: 1`（或先降 2 复证），异常现象回写本报告风险面（本机 B3 证据面：零超时、零跨文件干扰，异常面预期仍限于 Linux CI fork 行为）。
+- **观察窗触发面（2026-11-17 复核修正）**：真窗口起点是 **f9395b1**（2026-11-12 00:03，合入 acd718c 后首个触达提交）——起点之前的 push 其 CI run 跑的是串行旧配置，不构成本配置的观察证据。acd718c..develop 间触达 `.agents/**` 或 `test/orchestrator/**` 的提交共 **27 个**，其中 **22 个已推送 origin/develop**（末次远端同步 50bd710，2026-11-16 23:30；另 5 个仅本地未推送，无 CI run）。注意提交数 ≠ push 事件数 ≠ run 数——逐条 run id / 平台腿 / conclusion 的唯一来源是 `gh run list --workflow=test.yml`，本地计数只界定观察窗范围，替代不了 run 级证据。
+- **查证受阻**：run 级 conclusion 核验所需的外部通道在本环境全部不可达——2026-11-17 三个查证会话 `gh run list` 累计 4 次被权限拒绝（熔断纪律，未换写法绕行），curl 直连 GitHub API、WebFetch、playwright MCP、`git fetch` 亦各被拒；run 级三平台绿证据**未能核验，不臆断定档**。
+- **定档状态：待回溯核验**：维持 4 与回退 1 的决策暂缓。恢复查证能力后**回溯** 2026-11-12（f9395b1 起）至今的全部 workflow-suite 真 run 逐条核验（run id / 平台腿 / conclusion），即可直接判定是否满足「连续 3 天真 run 三平台绿」——已流逝天数不清零、不重开固定日期窗口。期间回退兜底不变：任一真 run 出现 flake / worker 生命周期异常 → 改缺省 `maxWorkers: 1`（或先降 2 复证），异常现象回写本报告风险面（本机 B3 证据面：零超时、零跨文件干扰，异常面预期仍限于 Linux CI fork 行为）。
 
 ## 结论与建议
 
 **并行可行，建议日间立卡实施**（配置一行 `isolate: false` 保持 + `maxWorkers: 4`；先 CI 灰度再定档）。本机两轮全绿 + 零超时；剩余风险在 CI 三平台（Linux CI 的 fork 进程行为与内存）——这正是串行防线当年的事故面，故仍按「实验证据 → CI 复证 → 定档」三步走，不建议直接并配置。
+
+> 状态更新（2026-11-17）：配置已合入（acd718c）并进入 CI 复证观察，run 级核验受阻待回溯——当前状态以上方「落地结果」节为准，本节为实验当时的建议原文。
 
 ## 若船东批准并行的实施要点（供日间卡）
 - vitest.workflow.config.ts 加 `maxWorkers: N`（先 2 后 4 分级验证），产品套件**不动**（其串行有顺序耦合对与卡死前科）。

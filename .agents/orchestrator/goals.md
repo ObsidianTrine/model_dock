@@ -13,7 +13,7 @@
 
 - v1.6.0 发布收口（提案已出，等船东定版本号）
 - known-issues 账本清账：优先 XPLAT-09、XPLAT-11（scan 已出提案），PERF-23 复核暂缓项重估
-- 优化卡余量：无（T13–T30 全批闭环，2026-11-04 清理卡文件，git 历史可查；T31 首跑清零已闭留档，T32 workflow-parallel CI 灰度查证顺延——配置已合入（acd718c，2026-11-11），run 级核验受 gh 查证权限限制，窗口顺延至 2026-11-20，见 docs/archive/test-orch-parallel-exp.md「落地结果」节）
+- 优化卡余量：无（T13–T30 全批闭环，2026-11-04 清理卡文件，git 历史可查；T31 首跑清零已闭留档，T32 workflow-parallel CI 灰度查证顺延——配置已合入（acd718c，2026-11-11），run 级核验受 gh 查证权限限制（恢复查证后回溯 2026-11-12 起真 run 判定），见 docs/archive/test-orch-parallel-exp.md「落地结果」节）
 - review-evals 基线维持：审查链任何改动（REVIEW.md/prompt/模型）全量重跑并对基线
 
 ## 明确不做
