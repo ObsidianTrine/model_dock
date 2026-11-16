@@ -44,6 +44,8 @@
 
 > **2026-11-04 夜航对账（桌面会话逐项核实，证据见各卡 ✅ 状态行）**：T15（七项全落地：seqCache/audit 轮转/error handler/policy cfg 收敛/门禁表驱动，①之 newWorkerSettingsPath 已有专属测试改判定保留）、T21（test-suite-couplings.test.ts 门禁在位）、T25（oursEntryUrl/noChangeResult/changeIfChanged 收敛 + adaptersDir 已删）、T27（CORRECT-08 @fd235ea 已修）、T28（CORRECT-09 @bf730c6 已修）、T30（package.json test 脚本已带 tsc -p tsconfig.test.json --noEmit 前置 + 豁免白名单，typecheck 1.5s 绿）——**T13–T30 全批闭环**。仅 T31（review-evals 首跑清零）当时未做，同日晚间已执行完毕关闭：强审查者 9/9 全审出并入强基线 36/36，卡留档（8b99cc1，merge aea6a2c）；T32（workflow-parallel）待 CI 灰度定档。同日：test-orch-inproc 预研报告落 docs/archive/test-orch-inproc-presearch.md（方案 B 收益 40–55s，三阶段方案备批），CORRECT-12 登记工作流套件偶发红（当晚升级为真缺陷并修复：跨午夜窗口网关日志日文件漏读，见 known-issues CORRECT-12）。另立 **T32 workflow-parallel**（docs/task-cards/T32-workflow-parallel.md）：B3 并行实验 docs/archive/test-orch-parallel-exp.md（maxWorkers:4 两点复证 190.8s/211.9s = 串行 528s 的 2.5–2.8×，764 绿零超时），待日间 CI 灰度后定档。
 
+> **2026-11-16 T32 闭环（CI 灰度定档收尾）**：配置 acd718c（11-11 并入）的观察窗 11-12~11-16 对账完毕——workflow-suite 真跑 7 次，并行诱发失败 0，**定档维持并行 4**（`VITEST_MAX_WORKERS` 回退通道保留）；11-16 run 43897533479 的 3 红确诊 research.test.ts 夹具日期炸弹（写死 2026-11-08 撞 7 天陈旧窗，内容缺陷非并行 flake），修复 36c0b57 随本卡并入。schedule 巡检 4 次均 paths-filter 占位绿不计样本。证据链见 docs/archive/test-orch-parallel-exp.md「## 落地结果」节、卡状态行见 .agents/docs/task-cards/T32-workflow-parallel.md。至此 **T13–T32 全批闭环**。
+
 ## 2. 明确不立项（维持现状，勿翻案）
 
 | 项 | 不做理由 |
