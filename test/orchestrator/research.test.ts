@@ -49,7 +49,7 @@ const CLAIM_BODY = [
   '- DeepSeek V4.1：用量第一。',
   '',
   '# 引用',
-  '- 2026-11-08 https://a.com/rankings — 支撑',
+  `- ${TODAY} https://a.com/rankings — 支撑`,
   '',
   '# 建议',
   '预设库补齐用量头部。',
