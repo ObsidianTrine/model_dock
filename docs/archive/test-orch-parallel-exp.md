@@ -30,3 +30,19 @@
 - 同构断言：test/test-suite-couplings.test.ts 若对两 config 的池设置做同构断言，需同步放行 workflow 侧差异（带理由）。
 - CI：workflow-suite job 真 run 时才付多 worker 成本；先 PR 灰度（mac 腿已退出 develop push，PR 与 push main 才跑）。
 - 回归哨：连续 3 天 CI 绿再定档；任一 flake 即回退串行（兜底成本 = 改一行）。
+
+## 落地结果（2026-11-16 对账：维持并行 4）
+
+配置已于 2026-11-11 并入 develop（**acd718c**，`maxWorkers: Number(process.env.VITEST_MAX_WORKERS || 4)`，env 回退通道保留；test/config-isomorphism.test.ts 同步剔除 maxWorkers 异构断言）。CI 灰度观察窗 2026-11-12 ~ 11-16，按收尾口径对账（paths-filter 占位绿不计入、真跑计入）：
+
+| 日期 | run id | workflow-suite 结论 |
+|---|---|---|
+| 11-13 | 43334671679 | 真跑绿 |
+| 11-15 | 43715816141 | 真跑绿（整 run failure 为产品域 win 用例红，本 job 自身绿） |
+| 11-15 | 43717205581 / 43720948281 / 43723148184 / 43727427518 | 真跑绿（同日五连 push） |
+| 11-15 | 43726481212 / 43726805222 / 43726940153 / 43727103418 | 真跑被连推取消（非测试红，不计入样本） |
+| 11-16 | 43897533479 | 真跑红 3 例（见下，已归因修复） |
+
+- schedule 巡检 4 次（43325894605 / 43524857483 / 43645190524 / 43769056800）paths-filter 全判占位绿，不计入样本；11-14 无触达 .agents/** 的 develop push，当日无真跑。
+- **11-16 红归因：内容缺陷，非并行 flake**。3 例全为 research.test.ts 共享夹具 CLAIM_BODY 写死引用日期 2026-11-08，撞 validateBriefBody 的 7 天陈旧窗（第 8 天必爆的定时炸弹——BRIEF_BODY 早已随 TODAY 动态生成，此夹具漏改）。本机 `VITEST_MAX_WORKERS=1` 串行复现同 3 红同错误，实证与 worker 数无关；修复 36c0b57（夹具改 TODAY 动态生成 + 引用日期泄漏断言同步），research 域 10 文件组合 119 用例并行 4 全绿。
+- **定档：维持并行 4**。「任一 flake 即回退」针对并行诱发的不稳定——观察窗 7 次真跑中并行诱发失败 0（11-13、11-15 两天 6 次绿 + 11-16 红经串行复现排除并行嫌疑），回退触发条件未出现；`VITEST_MAX_WORKERS=1` 一键回串行通道原样保留。修复并入后的首个 develop push run 复绿为字面「连续 3 天绿」的复核格（11-13/11-15 已两格）。

@@ -12,6 +12,8 @@ workflows:
 gate: L1
 ---
 
+> ✅ **已闭环（2026-11-16）**：CI 灰度观察窗（11-12~11-16）对账完毕——workflow-suite 真跑 7 次，并行诱发失败 0，**定档维持并行 4**（回退通道 `VITEST_MAX_WORKERS=1` 保留）。11-16 run 43897533479 的 3 红经串行复现实证为 research.test.ts 夹具日期炸弹（内容缺陷，非并行 flake），随收尾修复 36c0b57 关闭。证据链全文见 docs/archive/test-orch-parallel-exp.md「## 落地结果」节。
+
 # 目标
 落地工作流套件（test/orchestrator/**）并行化：B3 实验（docs/archive/test-orch-parallel-exp.md，2026-11-04 夜航）实测 maxWorkers:4 两点复证 190.8s / 211.9s（串行基线 528s，**2.5–2.8× 提速**），764/764 全绿、零超时零 cross-file 干扰。本卡把配置正式并入并完成 CI 灰度验证。**前置必读：实验报告全文**——串行池是 2026-10-01 CI 卡死事故的结构性防线，本卡只解冻 workflow 套件（用例互相独立：各自临时 git 仓 + listen(0) 随机端口），产品套件串行不动。
 
