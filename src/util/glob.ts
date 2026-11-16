@@ -16,8 +16,12 @@ export function globToRegExp(g: string): RegExp {
 export function matchAlias(aliases: Record<string, string> | undefined, model: string): string | undefined {
   if (!aliases || !model) return undefined
   if (Object.prototype.hasOwnProperty.call(aliases, model)) return aliases[model]
-  for (const [k, v] of Object.entries(aliases)) {
-    if (k.includes('*') && globToRegExp(k).test(model)) return v
+  // for-in + hasOwn 过滤与 Object.entries 同口径（自有可枚举键），免掉整份 entries 数组分配
+  //（转发热路径每请求执行；无通配键时零分配直达 undefined）
+  for (const k in aliases) {
+    if (Object.prototype.hasOwnProperty.call(aliases, k) && k.includes('*') && globToRegExp(k).test(model)) {
+      return aliases[k]
+    }
   }
   return undefined
 }
