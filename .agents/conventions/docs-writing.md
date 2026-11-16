@@ -81,7 +81,7 @@
 | docs/examples/ | 样例文件 | 照抄即用的配置样例（如价目覆盖 `pricing.json`），复制进数据目录即生效；随新增样例登记 |
 | CHANGELOG.md | 发布记录 | 每个版本的用户可见变化 |
 | AGENTS.md、.agents/ 约定 | agent 约定 | **不是用户文档**，勿混入用户内容 |
-| .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法（ai-pipeline-guide 等）、暂缓台账 TODOLists.md、任务卡 task-cards/；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
+| .agents/docs/ | explanation + how-to（工具链自带） | dockmaster 编排体系的设计与用法（design-orchestrator、ai-pipeline-guide、orchestrator-usage、research-verdict、perf-ledger-pass 复检配方）、暂缓台账 TODOLists.md、任务卡 task-cards/；随 `.agents/` 整体移植，不进 `docs/`、不做翻译 |
 
 en 镜像结构对称：`docs/en/` 下 guide/、reference/ 与中文侧同位；未翻译的文件（ops/、design/）只存在中文版。
 
