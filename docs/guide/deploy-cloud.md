@@ -1,9 +1,9 @@
 # ModelDock 云端控制面部署 runbook（M3）
 
-**简体中文** ｜ [English](en/deploy-cloud.md)
+**简体中文** ｜ [English](../en/guide/deploy-cloud.md)
 <!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/deploy-cloud.md)），约定见 .agents/conventions/docs-writing.md -->
 
-> 对应详设 `docs/design-cloud-sync.md` §7.7。服务端零第三方依赖（`node:http` + `node:sqlite`，Node ≥22.5，部署机统一 Node 24 LTS），与主仓同栈同测。
+> 对应详设 `docs/design/design-cloud-sync.md` §7.7。服务端零第三方依赖（`node:http` + `node:sqlite`，Node ≥22.5，部署机统一 Node 24 LTS），与主仓同栈同测。
 
 | 文档属性 | 内容 |
 |---|---|
@@ -13,7 +13,7 @@
 | 端口 | 仅放行 TCP `18443`（示例端口，可改）+ SSH 22（限自己 IP） |
 | 状态 | runbook 已就绪并随 v1.0.0 发布；**待执行**（VPS 未购，2026-10-11 确认）——购机后按 §1 起逐节执行，替换全文占位 IP |
 
-> **共享基建**：本 VPS 未来兼作**自动更新源**（`docs/design-auto-update.md` M3）——部署时预留更新源端口/反代，TLS 证书与控制面统一拍板（两详设开放问题同源）。
+> **共享基建**：本 VPS 未来兼作**自动更新源**（`docs/design/design-auto-update.md` M3）——部署时预留更新源端口/反代，TLS 证书与控制面统一拍板（两详设开放问题同源）。
 
 ---
 

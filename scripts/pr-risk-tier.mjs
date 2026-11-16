@@ -119,7 +119,7 @@ function markdown({ tier, hits, unmatched }) {
   lines.push('')
   lines.push(`**该等级要求**：${TIER_REQUIREMENT[tier]}`)
   lines.push('')
-  lines.push('> 自动判定：`scripts/pr-risk-tier.mjs`（规则对齐 `.agents/workflow.json` 的 corePaths / releasePaths）。等级含义与调整方法见 docs/ai-review-system.md「风险分级」。')
+  lines.push('> 自动判定：`scripts/pr-risk-tier.mjs`（规则对齐 `.agents/workflow.json` 的 corePaths / releasePaths）。等级含义与调整方法见 docs/ops/ai-review-system.md「风险分级」。')
   return lines.join('\n')
 }
 

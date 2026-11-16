@@ -1,5 +1,5 @@
 /**
- * 测试盲区 3（docs/known-issues.md §六尾注）：applySyncdoc 半完成态恢复 + REVIEW-26 既定语义钉行为。
+ * 测试盲区 3（docs/ops/known-issues.md §六尾注）：applySyncdoc 半完成态恢复 + REVIEW-26 既定语义钉行为。
  *
  * applySyncdoc（src/sync/collect.ts）的落盘顺序：快照 → setSecretsBatch（key 重存）→
  * mutateConfig 整包替换（providers/profiles/schedule/active_profile 补默认）→ presets 整体替换。

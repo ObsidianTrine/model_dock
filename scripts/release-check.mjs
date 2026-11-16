@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布前机器门禁一键检查——docs/RELEASE_CHECKLIST.md §1 的执行器。
+ * 发布前机器门禁一键检查——docs/ops/RELEASE_CHECKLIST.md §1 的执行器。
  *
  * 用法：node scripts/release-check.mjs <版本> [--skip-test] [--with-orchestrator]
  *   版本：1.2.0 或 v1.2.0（对应 CHANGELOG 的 ## [1.2.0] 段与 tag v1.2.0）；

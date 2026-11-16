@@ -10,7 +10,7 @@ import { acquireUpdateLock } from '../update/lock.js'
 /** PAT 在 secrets 里的固定 id（key_ref 存 config.toml [update].token_ref） */
 export const UPDATE_TOKEN_SECRET_ID = 'update-token'
 
-/** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design-auto-update.md §5.6）。
+/** modeldock update：检查 → 确认 → 下载校验 → 替换 → 重启（实施基准 docs/design/design-auto-update.md §5.6）。
  *  匿名更新/PAT 取舍口径见 config UpdateConfig.token_ref 注（types.ts） */
 export async function cmdUpdate(opts: { check?: boolean; yes?: boolean; token?: string; clean?: boolean; json?: boolean; restore?: boolean }): Promise<void> {
   // --clean 纯本地清理，不需要令牌与网络；但必须持更新锁——恰逢另一 update 在 rename dance

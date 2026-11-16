@@ -162,7 +162,7 @@ score:                           # 可选：量化评分四因子 1-3 档（纯�
   confidence: 2
   risk: 1
 evidence:                        # 可选：证据清单，一句话一条（与 score 配套）
-  - 巡检信号：docs/known-issues.md 未修条目
+  - 巡检信号：docs/ops/known-issues.md 未修条目
 ---
 
 # 目标
@@ -294,7 +294,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 
 ### B2. 巡检（scan 的 6 类信号源）
 
-TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub open issues（gh best-effort）· **known-issues 账本**（docs/known-issues.md 未修条目，已修/暂缓自动跳过——人工裁决不被自主提案推翻）· **主干 CI 失败**（gh run list，按 head sha 建 id）。全部内容过 sanitize 消毒（无法携带指令结构进 worker prompt）；id 按内容哈希，信号不变自动去重；gh 类信号仅 GitHub 远端启用、失败警告跳过。
+TODO/FIXME（src/）· npm audit · 测试失败（--tests 慢路径）· GitHub open issues（gh best-effort）· **known-issues 账本**（docs/ops/known-issues.md 未修条目，已修/暂缓自动跳过——人工裁决不被自主提案推翻）· **主干 CI 失败**（gh run list，按 head sha 建 id）。全部内容过 sanitize 消毒（无法携带指令结构进 worker prompt）；id 按内容哈希，信号不变自动去重；gh 类信号仅 GitHub 远端启用、失败警告跳过。
 - **信号两级过滤**（程序 Fast Path 永启 + LLM Slow Path 按 `scan.smartFilter: true` 开启，缺省关）：落卡写 frontmatter `signal_hashes`；同源信号**直通在途卡**（「补充信号」小节追加，记 `signal_relayed`，不重复开卡），与 14 天内 merged/failed 卡同信号的**丢弃**（记 `signal_dropped`）；LLM 层对剩余候选**批量一次**调用（≤50 条，成本上界写死），判定 card/drop/merge，失败全部保守回落开卡（宁多勿漏，`scan_semantic` 事件）；每轮落 `scan_filtered` 总账（raw/keep/relayed/dropped/merged_away）。引擎用 review.backend 同款，模型 `scan.smartModel`（缺省回落 review.model）。
 
 ### B3. propose（planner 需求综合）

@@ -61,4 +61,4 @@ Tasks with clear goals and machine-checkable acceptance criteria can be handed t
 
 ## Releases
 
-The release process lives in [docs/RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md) (maintainer-facing, Chinese).
+The release process lives in [docs/ops/RELEASE_CHECKLIST.md](../ops/RELEASE_CHECKLIST.md) (maintainer-facing, Chinese).

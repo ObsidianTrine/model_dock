@@ -1,5 +1,5 @@
 /**
- * 云端控制面存储（docs/design-cloud-sync.md §7.3）：node:sqlite（Node ≥22.5 内置，零第三方依赖）。
+ * 云端控制面存储（docs/design/design-cloud-sync.md §7.3）：node:sqlite（Node ≥22.5 内置，零第三方依赖）。
  * 明文 token 不落盘——只存 sha256；doc 表恒单行（id=1，整包 LWW，保留 rev 单调递增）。
  */
 import fs from 'node:fs'

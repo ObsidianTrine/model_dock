@@ -17,7 +17,7 @@ import {
 
 describe('matchRule 归属表规则匹配', () => {
   it('dir/** 目录递归，不吞同级近名目录', () => {
-    expect(matchRule('docs/**', 'docs/usage.md')).toBe(true)
+    expect(matchRule('docs/**', 'docs/guide/usage.md')).toBe(true)
     expect(matchRule('.agents/**', '.agents/scripts/orchestrator/cost.mjs')).toBe(true)
     expect(matchRule('docs/**', 'docsx/usage.md')).toBe(false)
   })
@@ -54,7 +54,7 @@ describe('classifyFiles 域归属', () => {
     expect(classifyFile('test/mocks/x.ts')).toBe('product')
     expect(classifyFile('test/setup-fast-kdf.ts')).toBe('product')
     expect(classifyFile('scripts/release-check.mjs')).toBe('product')
-    expect(classifyFile('docs/usage.md')).toBe('product')
+    expect(classifyFile('docs/guide/usage.md')).toBe('product')
     expect(classifyFile('README.md')).toBe('product')
     expect(classifyFile('CHANGELOG.md')).toBe('product')
     expect(classifyFile('eslint-baseline.json')).toBe('product')
@@ -90,10 +90,10 @@ describe('classifyFiles 域归属', () => {
 
 describe('isDocsOnlySet 纯文档判定', () => {
   it('全 .md 且不触双域名单 → true（含未匹配 .md 文档桶）', () => {
-    expect(isDocsOnlySet(['docs/usage.md'])).toBe(true)
+    expect(isDocsOnlySet(['docs/guide/usage.md'])).toBe(true)
     expect(isDocsOnlySet(['README.md', 'CHANGELOG.md'])).toBe(true)
     expect(isDocsOnlySet(['.agents/workflows/docs-sync.md'])).toBe(true)
-    expect(isDocsOnlySet(['TODOLists.md', 'docs/usage.md'])).toBe(true)
+    expect(isDocsOnlySet(['TODOLists.md', 'docs/guide/usage.md'])).toBe(true)
   })
 
   it('混入代码 / 双域文件 / 空集 → false', () => {
@@ -203,7 +203,7 @@ describe('buildPlan 路由', () => {
   })
 
   it('纯 .md diff → docs-lint 单段', () => {
-    const plan = buildPlan(['docs/usage.md', 'README.md'])
+    const plan = buildPlan(['docs/guide/usage.md', 'README.md'])
     expect(plan.mode).toBe('docs')
     expect(kindsOf(plan)).toEqual(['docs-lint'])
     expect(plan.docsOnly).toBe(true)
@@ -255,7 +255,7 @@ describe('buildPlan 路由', () => {
   })
 
   it('未匹配 .md（文档桶）并入纯文档集 → docs-lint；未匹配非文档仍保守双段', () => {
-    const docs = buildPlan(['docs/usage.md', 'TODOLists.md'])
+    const docs = buildPlan(['docs/guide/usage.md', 'TODOLists.md'])
     expect(docs.mode).toBe('docs')
     expect(kindsOf(docs)).toEqual(['docs-lint'])
 

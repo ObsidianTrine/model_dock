@@ -1,5 +1,5 @@
 /**
- * 网关侧更新服务（M2：Web 控制台 / 托盘的更新入口；实施基准 docs/design-auto-update.md §6 + 预取节）
+ * 网关侧更新服务（M2：Web 控制台 / 托盘的更新入口；实施基准 docs/design/design-auto-update.md §6 + 预取节）
  *
  * 职责：启动静默检查（24h TTL，gateway.json 持久化，失败静默）、状态查询、
  * 「一键更新」应用、预取驱动（发现新版即后台预下载+校验到 staging，见 prefetch.ts）。

@@ -1,10 +1,10 @@
 # Multi-machine config sync: how it works + onboarding a new computer
 
-**English** ｜ [简体中文](../multi-machine-sync.md)
+**English** ｜ [简体中文](../../guide/multi-machine-sync.md)
 <!-- i18n-slot: append new-language links on the line above; convention: .agents/conventions/docs-writing.md -->
 
 > Applies to the **local sync folder (localdir)** target of `modeldock sync setup` (Google Drive / iCloud / OneDrive / Nutstore sync folders…), with WebDAV differences at the end.
-> This is a follow-along operational manual, not a design doc; for design trade-offs see [design-cloud-sync.md](../design-cloud-sync.md) (Chinese).
+> This is a follow-along operational manual, not a design doc; for design trade-offs see [design-cloud-sync.md](../../design/design-cloud-sync.md) (Chinese).
 
 ## 0. Build the mental model first (skip this and you will trip)
 

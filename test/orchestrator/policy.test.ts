@@ -217,7 +217,7 @@ describe('policy.mjs > 基准分支直改（evaluateBranchEdit）', () => {
 
   it('develop 上纯文档直改 → 放行；代码 → 拒绝', () => {
     expect(evaluateBranchEdit({ ...base, filePath: '/repo/CHANGELOG.md' }).allowed).toBe(true)
-    expect(evaluateBranchEdit({ ...base, filePath: '/repo/docs/usage.md' }).allowed).toBe(true)
+    expect(evaluateBranchEdit({ ...base, filePath: '/repo/docs/guide/usage.md' }).allowed).toBe(true)
     expect(evaluateBranchEdit({ ...base, filePath: '/repo/src/cli.ts' }).allowed).toBe(false)
   })
 

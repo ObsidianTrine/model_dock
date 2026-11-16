@@ -64,3 +64,13 @@ attach 为每条 ModelDock 路由写 `[profiles.<id>]`（default_model 必须在
 | codex /model catalog + 无头船 + 直连守卫 | bf969f3 merged（codex-catalog-ship） |
 | 台账按调研船记账 | 已实现（ledger researcher_model 字段） |
 | 评测集补录「发布时间≠事件时间」案例 | 5c686f2 merged（案例 announcement-date-vs-event-date，真跑 PASS，keywords 阈值设计保证抄页面日期必 FAIL） |
+
+## 已评估放弃的网关优化（backlog 终账，2026-10-25；原 docs/backlog.md 已删，全档见 git 历史）
+
+防重新立项留底——以下各项已按「先 profile 再优化」纪律评估，结论为不做或已实施：
+
+- **B1 纯透传路径流式化**：放弃。路由端点必须全量缓冲（改写+重放），非路由大上传频率极低；16MB 上限 + `max_body_mb` 已缓解内存顾虑。重启条件：用户真实反馈大文件端点。
+- **B3 joinUpstreamUrl 每请求 new URL**：放弃。微秒级开销可忽略，加缓存反引失效状态。
+- **C4 safeEqual 长度预比较**：放弃。只跑管理面，量不出收益。
+- **B2 连接错误重试分类 / C1 handleAdmin 路由表化**：已实施（isConnectTimeoutError 分类 + ADMIN_ROUTES 表，2026-10-25）。
+

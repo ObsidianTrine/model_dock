@@ -1,5 +1,5 @@
 /**
- * 测试盲区 2（docs/known-issues.md §六尾注）：CloudStore（src/cloud/store.ts + server.ts）专属用例。
+ * 测试盲区 2（docs/ops/known-issues.md §六尾注）：CloudStore（src/cloud/store.ts + server.ts）专属用例。
  *
  * 补 cloudserver.test.ts（HTTP 状态码层）之下/之外的缺口：
  *  - store 层直调：doc 单行 LWW 覆盖语义（此前只经 HTTP 间接覆盖）；

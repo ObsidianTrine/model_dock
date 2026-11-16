@@ -1,9 +1,9 @@
 # ModelDock cloud control-plane deployment runbook (M3)
 
-**English** ｜ [简体中文](../deploy-cloud.md)
+**English** ｜ [简体中文](../../guide/deploy-cloud.md)
 <!-- i18n-slot: append new-language links on the line above; convention: .agents/conventions/docs-writing.md -->
 
-> Corresponds to the detailed design `docs/design-cloud-sync.md` §7.7 (Chinese). The server has zero third-party dependencies (`node:http` + `node:sqlite`, Node ≥22.5; deploy machines standardized on Node 24 LTS) — same stack and tests as the main repository.
+> Corresponds to the detailed design `docs/design/design-cloud-sync.md` §7.7 (Chinese). The server has zero third-party dependencies (`node:http` + `node:sqlite`, Node ≥22.5; deploy machines standardized on Node 24 LTS) — same stack and tests as the main repository.
 
 | Doc property | Content |
 |---|---|
@@ -13,7 +13,7 @@
 | Ports | only TCP `18443` (example port, changeable) + SSH 22 (restricted to your IP) |
 | Status | runbook ready and shipped with v1.0.0; **pending execution** (no VPS yet, confirmed 2026-10-11) — after purchase execute section by section from §1, replacing the placeholder IP throughout |
 
-> **Shared infrastructure**: this VPS will later double as the **auto-update source** (`docs/design-auto-update.md` M3, Chinese) — reserve the update-source port / reverse proxy at deploy time; TLS certificate decisions are shared with the control plane (an open question shared by both detailed designs).
+> **Shared infrastructure**: this VPS will later double as the **auto-update source** (`docs/design/design-auto-update.md` M3, Chinese) — reserve the update-source port / reverse proxy at deploy time; TLS certificate decisions are shared with the control plane (an open question shared by both detailed designs).
 
 ---
 

@@ -1,9 +1,9 @@
 # config.toml 配置参考
 
-**简体中文** ｜ [English](en/config-reference.md)
+**简体中文** ｜ [English](../en/reference/config-reference.md)
 <!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/config-reference.md)），约定见 .agents/conventions/docs-writing.md -->
 
-> `~/.modeldock/config.toml` 是 ModelDock 的主配置文件：模型服务、路由方案、客户端接入与网关行为都在这里，可以直接手编。本页逐项列出全部配置键的**类型、默认值与说明**，并附可直接粘贴的示例；日常操作与命令见[使用指南](usage.md)。
+> `~/.modeldock/config.toml` 是 ModelDock 的主配置文件：模型服务、路由方案、客户端接入与网关行为都在这里，可以直接手编。本页逐项列出全部配置键的**类型、默认值与说明**，并附可直接粘贴的示例；日常操作与命令见[使用指南](../guide/usage.md)。
 
 本页由脚本根据程序内置的配置定义自动生成，与代码同源更新；请勿直接编辑本页，发现描述与实际行为不符时以实际行为为准并反馈。
 <!-- 由 scripts/gen-config-reference.mjs 生成（键清单源：src/config/types.ts，勿手改）；重新生成：node scripts/gen-config-reference.mjs -->

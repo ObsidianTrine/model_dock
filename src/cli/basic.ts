@@ -84,8 +84,8 @@ export async function cmdPresetsUpdate(): Promise<void> {
 
 export async function cmdUsage(): Promise<void> {
   console.log(c.gray(t(
-    '用量统计已上线：Web 控制台状态行实时显示今日请求数 / token / 估算成本（modeldock ui 打开）；聚合查询用管理端点 GET /_modeldock/usage，支持日期区间与客户端 / 服务 / 模型过滤（详见 docs/usage.md）',
-    'Usage stats are live: the Web console status line shows today\'s requests / tokens / estimated cost in real time (open it with modeldock ui); for aggregated queries use the admin endpoint GET /_modeldock/usage, which supports date ranges and per-client / per-service / per-model filters (see docs/usage.md)'
+    '用量统计已上线：Web 控制台状态行实时显示今日请求数 / token / 估算成本（modeldock ui 打开）；聚合查询用管理端点 GET /_modeldock/usage，支持日期区间与客户端 / 服务 / 模型过滤（详见 docs/guide/usage.md）',
+    'Usage stats are live: the Web console status line shows today\'s requests / tokens / estimated cost in real time (open it with modeldock ui); for aggregated queries use the admin endpoint GET /_modeldock/usage, which supports date ranges and per-client / per-service / per-model filters (see docs/guide/usage.md)'
   )))
 }
 

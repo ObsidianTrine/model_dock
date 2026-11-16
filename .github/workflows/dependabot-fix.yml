@@ -6,11 +6,11 @@ name: dependabot-fix
 #   全绿则评论"可安全合并"；失败则做最小修复推回 PR 分支并附说明。
 #
 # 启用前提：仓库 Settings → Secrets and variables → Actions 配置三件套（供应商无关，yml 零默认值）
-#   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL（含义见 docs/ci-bots.md「模型接入」）
+#   secret CLAUDE_AUTH_TOKEN + Variables CLAUDE_BASE_URL / CLAUDE_MODEL（含义见 docs/ops/ci-bots.md「模型接入」）
 #   DEPENDABOT_GH_TOKEN —— PAT（fine-grained：Contents 读写 + Pull requests 读写；classic：repo）。
 #     原因：Dependabot 触发的 workflow 拿到的 GITHUB_TOKEN 一律只读（GitHub 平台行为），
 #     没有 PAT 就无法在 PR 上评论/推送。缺任一 secret 时本工作流打 warning 后跳过，不影响 PR 本身。
-#   未配置时零 token 消耗。设置与用途详见 docs/ci-bots.md。
+#   未配置时零 token 消耗。设置与用途详见 docs/ops/ci-bots.md。
 #
 # 防回环设计：
 #   - 本工作流只在 actor=dependabot[bot] 时执行；Claude 用 PAT 推送触发的 synchronize actor 是
@@ -58,7 +58,7 @@ jobs:
           [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
           if [ -n "$miss" ]; then
             ok=false
-            echo "::warning::Claude 配置不齐（缺:$miss）。补齐方法见 docs/ci-bots.md「模型接入」。"
+            echo "::warning::Claude 配置不齐（缺:$miss）。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           fi
           if [ "$ok" != "true" ]; then
             echo "::warning::依赖升级自动修复未启用，本次跳过。"

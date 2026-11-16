@@ -93,7 +93,7 @@
 |---|---|---|---|
 | **M1** | GitHub API + 用户 PAT（私有直连） | 现在 | 已实施（已随 v1.0.0 公开发布；2026-10-11 起匿名免 PAT，PAT 转可选） |
 | **M2** | ~~公开 releases 专用仓库 + latest.json~~ → 主仓库直连 + 匿名 + 镜像回退链 | —— | 已实施（2026-10-11，见 §6） |
-| **M3** | VPS / Cloudflare R2 自建源（nginx/caddy 或 R2 + 自定义域），cc-switch 同款；与云同步 VPS 基础设施合流 | VPS 到位后（见 `docs/deploy-cloud.md`） | 规划（2026-10-11 确认 VPS 未购，暂缓） |
+| **M3** | VPS / Cloudflare R2 自建源（nginx/caddy 或 R2 + 自定义域），cc-switch 同款；与云同步 VPS 基础设施合流 | VPS 到位后（见 `docs/guide/deploy-cloud.md`） | 规划（2026-10-11 确认 VPS 未购，暂缓） |
 
 - M1 的 PAT 仅需 **fine-grained、单仓库、Contents: Read-only**；存在 `secrets.json`（程序管理，0600，现有 `atomicWrite` 链路）。
 - 三阶段的 feed 地址/凭据全部收敛在配置里，客户端其余逻辑不变。
@@ -218,8 +218,8 @@ modeldock update --clean       # 清理 .old 残留（darwin/win）
 
 ## 7. M3：VPS / R2 自建源（规划）
 
-- **实施状态（2026-10-11）**：用户确认 **VPS 尚未购买**，M3 暂缓、后续再做——当前无进行中工作、无前置代码欠账（客户端 `api_base` 可插拔接口已随 M2 落地）。VPS 到位后按本节实施，动手前按 §0 重新对齐；届时先完成 `docs/deploy-cloud.md` 的占位 IP（203.0.113.10）替换。
-- **触发**：云同步 VPS 到位后（基础设施合流，参照 `docs/deploy-cloud.md`）。
+- **实施状态（2026-10-11）**：用户确认 **VPS 尚未购买**，M3 暂缓、后续再做——当前无进行中工作、无前置代码欠账（客户端 `api_base` 可插拔接口已随 M2 落地）。VPS 到位后按本节实施，动手前按 §0 重新对齐；届时先完成 `docs/guide/deploy-cloud.md` 的占位 IP（203.0.113.10）替换。
+- **触发**：云同步 VPS 到位后（基础设施合流，参照 `docs/guide/deploy-cloud.md`）。
 - 形态（cc-switch 同款二选一，届时拍板）：
   - VPS nginx/caddy 静态托管 `latest.json` + 资产目录，release job 用 scp/rclone 同步；
   - Cloudflare R2 + 自定义域（dl.<domain>），workflow 同步 + manifest URL 改写脚本。

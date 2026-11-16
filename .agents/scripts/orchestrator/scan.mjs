@@ -191,12 +191,12 @@ function defaultGhRun(gh, args, cwd) {
   return spawnSync(gh, args, { cwd, encoding: 'utf8', timeout: 30_000 });
 }
 
-/** 信号源 5：docs/known-issues.md 未修条目（已知问题账本 → 提案）。容错解析总览表
+/** 信号源 5：docs/ops/known-issues.md 未修条目（已知问题账本 → 提案）。容错解析总览表
  *  `| ID | 级别 | 位置 | 一句话 | 状态 |` 行：状态列含 ☑/已修/已闭环 跳过、含「暂缓」
  *  跳过（人工已裁决维持，自主提案不得推翻）。文件缺失/损坏 = 无该信号源（多数仓库
  *  没有这本账，静默跳过不告警）。 */
 export function scanKnownIssues(repoRoot) {
-  const file = path.join(repoRoot, 'docs', 'known-issues.md');
+  const file = path.join(repoRoot, 'docs', 'ops', 'known-issues.md');
   if (!fs.existsSync(file)) return [];
   let text;
   try {
@@ -220,7 +220,7 @@ export function scanKnownIssues(repoRoot) {
       priority: 'normal',
       files_hint: [fileHint ?? 'src/**'],
       goal: `处理已知问题 ${m[1]}：${sanitize(what, 160)}`,
-      acceptance: `- ${m[1]} 项按账本维护约定闭环：修复后在 docs/known-issues.md 勾选该项并标注日期与 commit`,
+      acceptance: `- ${m[1]} 项按账本维护约定闭环：修复后在 docs/ops/known-issues.md 勾选该项并标注日期与 commit`,
       background: `巡检发现已知问题账本未修条目：${sanitize(where, 120)} — ${sanitize(what, 300)}`,
     });
   }

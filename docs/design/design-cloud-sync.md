@@ -270,7 +270,7 @@ Web 控制台「我的服务」页顶部加一行同步状态小字（只读 + �
 
 ## 7. M3：云端控制面（国内轻量 VPS 自托管）
 
-> **实施状态（2026-10-11）**：M3a/M3b/M3c 已全部实施合并并随 v1.0.0 发布；剩 **VPS 真机部署与验收**（VPS 未购，§7.8 验收清单未走）。`docs/deploy-cloud.md` 已就绪（占位 IP 203.0.113.10）。
+> **实施状态（2026-10-11）**：M3a/M3b/M3c 已全部实施合并并随 v1.0.0 发布；剩 **VPS 真机部署与验收**（VPS 未购，§7.8 验收清单未走）。`docs/guide/deploy-cloud.md` 已就绪（占位 IP 203.0.113.10）。
 > **共享基建**：该 VPS 未来兼作**自动更新源**（[design-auto-update.md](./design-auto-update.md) M3，客户端 `[update]` 指向自建 feed）——购买与部署时按两个消费方一起规划：安全组预留更新源端口、TLS 证书统一拍板（见开放问题 1）。
 
 ### 7.1 服务端（`src/cloud/`，与主代码同仓同栈）
@@ -341,7 +341,7 @@ modeldock sync status | pause | resume          # 复用 M2 命令，mode=cloud
 - 登录：输入 consoleToken → 存 cookie（HttpOnly、SameSite=Strict）。
 - 双语 `data-i18n`；按钮 ≤4 字动词开头（docs-writing 约定）。
 
-### 7.7 部署 runbook（写入 `docs/deploy-cloud.md`，随 M3 交付）
+### 7.7 部署 runbook（写入 `docs/guide/deploy-cloud.md`，随 M3 交付）
 
 1. **购买**：阿里云 ECS 2C2G 99 元/年档（续费同价），Ubuntu 24.04 LTS，地域就近；安全组仅放行：SSH(22，限自己 IP) + TCP `18443`（示例，可改）。
 2. **运行**：`git clone` → `npm ci` → `npm run build` → `node dist/cloud/main.js --port 18443 --host 0.0.0.0 --data /var/lib/modeldock-cloud`。域名非必需（裸 IP + 端口，免备案）；将来上域名（含备案）再切 Let's Encrypt TLS。
@@ -402,7 +402,7 @@ modeldock sync status | pause | resume          # 复用 M2 命令，mode=cloud
 |---|---|---|---|---|
 | M1 | `sync-schema-m1` | 1–2 天 | src/sync/{types,collect,crypto,exportImport}.ts、CLI config export/import、测试×2 | 正常版本（release.md 流程；CHANGELOG 用户视角：「**配置可一键打包迁移**」） |
 | M2 | `sync-target-m2` | 2–3 天 | SyncTarget + WebDAV/localdir、sync setup/status/pause、状态行 | 正常版本 |
-| M3a | `cloud-server-m3` | 2–3 天 | src/cloud/*、docs/deploy-cloud.md、测试 | 正常版本 |
+| M3a | `cloud-server-m3` | 2–3 天 | src/cloud/*、docs/guide/deploy-cloud.md、测试 | 正常版本 |
 | M3b | `sync-agent-m3` | 2–3 天 | sync agent、sync enroll、desired 状态机 | 正常版本 |
 | M3c | `cloud-console-m3` | 1–2 天 | 手机控制台单页 | 正常版本 |
 

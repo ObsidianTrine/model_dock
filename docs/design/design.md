@@ -78,7 +78,7 @@
 
 ### 1.4 参考资料
 
-`AGENTS.md`（工程约定）、`docs/usage.md`（使用指南）、`docs/config-reference.md`（配置键参考，自动生成）、`docs/attach-env-vars.md`（各客户端 attach 触达键清单）、`CHANGELOG.md`（版本记录）。
+`AGENTS.md`（工程约定）、`docs/guide/usage.md`（使用指南）、`docs/reference/config-reference.md`（配置键参考，自动生成）、`docs/ops/attach-env-vars.md`（各客户端 attach 触达键清单）、`CHANGELOG.md`（版本记录）。
 
 ---
 
@@ -338,7 +338,7 @@ v1.0.0 已包含：**LAN 手机控制台**（第二监听器 `/m` 页，扫码�
 
 ### 5.4 配置与密钥存储
 
-**config.toml schema**（`config/types.ts`，`version=1`，高于当前版本拒绝加载；62+ 键的权威清单见自动生成的 docs/config-reference.md）：
+**config.toml schema**（`config/types.ts`，`version=1`，高于当前版本拒绝加载；62+ 键的权威清单见自动生成的 docs/reference/config-reference.md）：
 
 | Section | 字段 | 说明 |
 |---|---|---|
@@ -634,7 +634,7 @@ sequenceDiagram
 
 ## 10. 非功能设计
 
-> §10 目标值为设计目标；转发热路径已有本机基准（`scripts/bench-relay.mjs` + `docs/bench-baseline.md`，2026-10-31 首基线——仅同一机器 before/after 对比用，**不作 CI 门禁**，见 R9）。
+> §10 目标值为设计目标；转发热路径已有本机基准（`scripts/bench-relay.mjs` + `docs/ops/bench-baseline.md`，2026-10-31 首基线——仅同一机器 before/after 对比用，**不作 CI 门禁**，见 R9）。
 
 | 维度 | 目标 | 依据/手段 |
 |---|---|---|
@@ -697,7 +697,7 @@ sequenceDiagram
 
 **规划中**
 
-- M2 剩余（2026-10-11 逐项代码复核；其中 doctor 检出 watch 失效（R5）已于 2026-10-20 随 doctor `--fix`/`--json` 改造交付）：L3 外部插件、presets 远程更新（`presets update` 仍为占位）、管理面「严格模式」（R1）、固定端口失败即退出选项（R4）、压测门禁（bench 基线已建，`docs/bench-baseline.md`，门禁未接）、`backup --all`；usage 统计已上线（见超出清单）。
+- M2 剩余（2026-10-11 逐项代码复核；其中 doctor 检出 watch 失效（R5）已于 2026-10-20 随 doctor `--fix`/`--json` 改造交付）：L3 外部插件、presets 远程更新（`presets update` 仍为占位）、管理面「严格模式」（R1）、固定端口失败即退出选项（R4）、压测门禁（bench 基线已建，`docs/ops/bench-baseline.md`，门禁未接）、`backup --all`；usage 统计已上线（见超出清单）。
 - ~~网关侧 `/v1/models` 合成~~：**已交付**（2026-10-11，数据面本地合成，见 §5.1）。
 - M3：~~anthropic ↔ openai 协议互相转换~~ **已定为不做**（ADR-13，校验拒绝替代）；项目级 profile 覆盖（未做）。
 - 云同步（详设 [design-cloud-sync.md](./design-cloud-sync.md)）：M1–M3c 已随 v1.0.0 发布；剩 M4 按需项（恢复码/吊销设备/口令缓存开关）与 VPS 真机验收（VPS 未购）。
@@ -717,7 +717,7 @@ sequenceDiagram
 | R6 | SEA 平台矩阵：Linux ARM64 / Windows 仅 CI 构建验证 | 无真机回归清单 | **接受**；发布前以 CI 全绿 + darwin/linux-x64 真机冒烟为准，清单随发布逐步补充 |
 | R7 | Windows DPAPI 经 PowerShell 批处理，spawn 开销与健壮性 | 失败回退逐条；解密结果有缓存；子进程统一 10s 超时强杀 | **接受**；观察长尾延迟 |
 | R8 | 无并发编辑锁：CLI 与 Web 同时改配置为"最后写者胜" | 原子写 + 热加载兜底；密钥表写入已持锁保活（v1.6.0）；gateway.json 写方串行队列（v1.5.2） | **接受**（单用户工具）；乐观锁列为远期候选 |
-| R9 | 无性能回归门禁（§10 为目标值） | **部分缓解**：`scripts/bench-relay.mjs` 转发热路径基准 + `docs/bench-baseline.md` 基线（2026-10-31 首基线），仅同机 before/after 参考、明确不作 CI 门禁 | 接受；压测门禁仍为 M2 候选 |
+| R9 | 无性能回归门禁（§10 为目标值） | **部分缓解**：`scripts/bench-relay.mjs` 转发热路径基准 + `docs/ops/bench-baseline.md` 基线（2026-10-31 首基线），仅同机 before/after 参考、明确不作 CI 门禁 | 接受；压测门禁仍为 M2 候选 |
 | R10 | 数据面限额（limits）内存计数重启清零 | 计数定位是 runaway 熔断丝不是账本（ADR-12）；计费事实在 usage 日志 | **接受**（设计如此） |
 
 ---

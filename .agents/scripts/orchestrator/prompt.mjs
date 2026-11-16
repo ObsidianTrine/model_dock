@@ -323,7 +323,7 @@ export const CARD_MARKER = 'agents-card';
  *  跳过列（☑/已修/已闭环/已合并/暂缓）——2026-11-09 sail 规划轮曾为已修的 PERF-01/XPLAT-01
  *  产出过期卡，LLM 只读了级别列没核状态列。序号由注入点自行编排（两个 prompt 列表长度不同）。 */
 const LEDGER_FIXED_RULE =
-  `docs/known-issues.md 是已知问题账本：条目状态列含 ☑ / 已修 / 已闭环 / 已合并 / 暂缓 的一律视为已解决，禁止为其出卡；` +
+  `docs/ops/known-issues.md 是已知问题账本：条目状态列含 ☑ / 已修 / 已闭环 / 已合并 / 暂缓 的一律视为已解决，禁止为其出卡；` +
   `引用账本条目作证据前必须先核对状态列，只允许引用未修条目；\n`;
 
 /**

@@ -1,5 +1,5 @@
 /**
- * 更新预取 staging（单版本槽，docs/design-auto-update.md 预取节）：发现新版本后网关后台把
+ * 更新预取 staging（单版本槽，docs/design/design-auto-update.md 预取节）：发现新版本后网关后台把
  * 适配安装包预下载到 ~/.modeldock/updates/staging/<version>/<asset>，下载完成且 SHA256 校验
  * 通过后置 ready；一键更新（update --yes / Web apply，同走 runUpdate）复用就绪包跳过下载段。
  *
