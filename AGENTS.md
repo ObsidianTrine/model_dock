@@ -166,7 +166,7 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 
 ## 多 Agent 并行开发约定（feature-branch 工作流）
 
-本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`。
+本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`（入口+速查，详解按场景拆分在 orch-*.md）。
 
 多个 agent 并行开发时，**禁止直接在 develop/main 上修改代码文件**（PreToolUse hook 拦截 Edit/Write）；**main 上连文档也禁止直改**——对外文档一律在 develop 上改（develop 非源代码类文档直改放行），main 只接受 develop / hotfix 合入。多机同步用 `git pull --rebase`。所有代码改动走 worktree 分支流程，完整规程见 **`.agents/workflows/feature-branch.md`**（动手前必读），由 `.agents/scripts/feature-branch.mjs` 支撑：
 
@@ -184,7 +184,12 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 | `worktree-rescue.md` | 接管 / 清理中断的 worktree 任务 | `list` 显示残留任务时读 |
 | `add-adapter.md` | 新增 harness 客户端适配器 | 新增 adapter 时读 |
 | `add-preset.md` | 新增 provider 预设 | 新增供应商时读 |
-| `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：任务卡进、合并出（速查 + A 核心闭环 / B 自主模式 / C 观测对账 / D 周边） | 写任务卡 / 跑编排 / 处理 blocked 任务时读 |
+| `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：入口 + 速查 + 文档地图（详解按场景拆分在 orch-*.md） | 写任务卡 / 跑编排 / 处理 blocked 任务时读（先看速查与文档地图） |
+| `orch-loop.md` | Dockmaster 核心闭环 runbook：任务卡怎么写 / 泊位状态机 / 熔断与看门狗 / 后端与 tier / 权限红线 / fastlane 与 ui_check / 互斥与并行 | 写任务卡、查闭环机制细节时读 |
+| `orch-autonomy.md` | Dockmaster 自主模式 runbook：引水闸 / 提案与 autopilot / 巡检与 propose / 上游管线 / nightly / watch / sail / drill / 开启清单 / escalation / push-review / 双向批示 | 少人值守自治（提案、夜航、自由航行）时读 |
+| `orch-supply.md` | Dockmaster 供给与守卫 runbook：动态选船 / worker 并发供给闸 / configGuard / drafts gc / scanAutoFix / 一次性凭据 | 调并发、换船、排 workflow.json 自改与提案积压时读 |
+| `orch-observe.md` | Dockmaster 观测对账 runbook：stats / follow / drift / reconcile / 舰队控制台 / 验船师与调研评测集 / autoapprove / notify-digest | 看运行状态、对账、回归评测集时读 |
+| `orch-ecosystem.md` | Dockmaster 生态与边界 runbook：spec / spec review / release-propose / 与 feature-branch 的关系 / 移植到其他项目 | 特性级设计先行、发版提案、移植工具链时读 |
 | `zcode-native.md` | 编排器引擎全断时的降级开航（ZCode 会话原生 Agent 当船，调度台手动闭环） | claude/zcode 引擎都起不来仍要派活时读 |
 
 ### feature-branch 核心命令
@@ -212,7 +217,7 @@ cd <目标项目> && node .agents/scripts/agent-init.mjs   # 交互生成 workfl
 cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器级 Bash 红线 dispatcher：注册一次、全项目生效
 ```
 
-移植要点见 `.agents/workflows/orchestrator.md`「移植」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
+移植要点见 `.agents/workflows/orch-ecosystem.md`「移植到其他项目」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
 
 ### GitHub 侧自动化（分层 PR 审查 + Dependabot）
 

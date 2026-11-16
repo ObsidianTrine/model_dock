@@ -161,7 +161,12 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 ## 深入文档
 
+- 入口与速查（是什么 / 官方映射表 / 命令速查 / 文档地图）：`.agents/workflows/orchestrator.md`
+- 核心闭环 runbook（任务卡 / 泊位状态机 / 熔断与看门狗 / 后端与 tier / 权限红线 / fastlane / 互斥并行）：`.agents/workflows/orch-loop.md`
+- 自主模式 runbook（引水闸 / 提案与 autopilot / 巡检与 propose / 上游管线 / nightly / watch / sail / push-review / 双向批示）：`.agents/workflows/orch-autonomy.md`
+- 供给与守卫 runbook（动态选船 / 并发供给闸 / configGuard / drafts gc / scanAutoFix / 一次性凭据）：`.agents/workflows/orch-supply.md`
+- 观测对账 runbook（stats / drift / reconcile / 舰队控制台 / 评测集 / autoapprove / notify-digest）：`.agents/workflows/orch-observe.md`
+- 生态与边界 runbook（spec / 发版提案 / 与 feature-branch 的关系 / 移植到其他项目）：`.agents/workflows/orch-ecosystem.md`
 - 使用指南（状态机、闸门交互、混合节奏）：`.agents/docs/orchestrator-usage.md`
-- 操作手册（任务卡字段细节）：`.agents/workflows/orchestrator.md`
 - 引擎不可用时的降级开航（ZCode 原生模式）：`.agents/workflows/zcode-native.md`
 - 设计与原理：`.agents/docs/design-orchestrator.md`

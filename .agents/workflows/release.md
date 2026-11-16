@@ -27,7 +27,7 @@
 git log vX.Y.Z..develop --oneline --no-merges    # vX.Y.Z 替换为上一个已发布的 tag
 ```
 
-> 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orchestrator.md`「发版提案」）。
+> 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orch-ecosystem.md`「发版提案」）。
 > 盘点是只读动作（git log + 提案文件），可与前置检查的机器门禁并行跑（见「并行执行羽翼」）；文档收口的采纳仍以门禁全绿为前提。
 
 - 上个 tag 打在 main 侧，develop 的 `git describe` 够不着它，这里必须显式写 tag 名。

@@ -163,7 +163,7 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 
 ## 参与贡献
 
-仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)。
+仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)（入口速查 + 按场景拆分的 runbook）。
 
 欢迎提 [Issue](https://github.com/ObsidianTrine/model_dock/issues) 反馈问题与建议；使用问题可到 [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) 提问交流。提交 PR 前请先读[贡献指南](CONTRIBUTING.md)与 [AGENTS.md](AGENTS.md)（工程约定与硬性约束），并确保 `npm test` 全绿。
 
