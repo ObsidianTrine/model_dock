@@ -24,6 +24,9 @@ NOTES.md
 # orchestrator 运行态不入库（任务队列与事件日志）
 .agents/orchestrator/queue/
 .agents/orchestrator/logs/
+# digest 冲刷运行态（flush-inflight / last.txt）；.agents/ 嵌套是 audit cwd 锚定 bug 的错位残留（真账本在 .agents/policy/audit.jsonl）
+.agents/orchestrator/notify-digest/
+.agents/orchestrator/.agents/
 
 # 调度器/任务互斥锁（运行态；陈锁自动接管，不人工清理）
 .agents/orchestrator/.scheduler-lock.json
