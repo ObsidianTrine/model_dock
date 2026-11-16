@@ -65,6 +65,13 @@ export function allowedTools(cfg = loadWorkflowConfig()) {
   }
   for (const cmd of cfg.testCmd ?? []) toolsAdd(tools, shellPatterns(cmd));
   if (cfg.buildCmd) toolsAdd(tools, shellPatterns(cfg.buildCmd));
+  // 2026-11-17 夜航修复：shell 白名单缺 npx/node 裸形态——AGENTS.md 规定的测试入口
+  // （npx vitest run）与 bench/种子脚本（node scripts/…）在 -p 会话被权限墙自动拒绝
+  // （"This command requires approval"，无人可批准），worker 按任务契约「拒绝 2 次即熔断」
+  // 自报 stuck（当晚 4 船连灭同因）。红线不在此层：policy-worker hook 对每条命令独立
+  // 裁决 push/tag/publish/保护端口，本放行面扩大不越过任何红线。
+  toolsAdd(tools, shellPatterns('npx'));
+  toolsAdd(tools, shellPatterns('node'));
   return [...tools];
 }
 
