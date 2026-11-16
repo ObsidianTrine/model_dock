@@ -24,11 +24,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // ---------------------------------------------------------------- 文件集合（规范口径）
 
 // 中文对外文档：docs-writing「文档体系」表的用户文档 + docs-sync checklist 点名文件。
-// 内部文档（docs/design*、known-issues、backlog、AGENTS.md、REVIEW.md 等）不在规范的自检范围，不扫。
+// 内部文档（docs/design/、docs/ops/、AGENTS.md、REVIEW.md 等）不在规范的自检范围，不扫。
 const ZH_ROOT_DOCS = ['README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md']
-const ZH_DOCS_DIR_DOCS = ['guide/usage.md', 'reference/config-reference.md', 'guide/multi-machine-sync.md', 'guide/deploy-cloud.md']
+const ZH_DOCS_DIR_DOCS = ['guide/usage.md', 'reference/config-reference.md', 'guide/multi-machine-sync.md', 'guide/deploy-cloud.md', 'reference/commands.md']
 
-// zh → en 镜像对：docs-writing「多语言文档结构」点名的镜像清单（七件套）。
+// zh → en 镜像对：docs-writing「多语言文档结构」点名的镜像清单（根部四件 + guide 三件 + reference/commands.md）。
 // config-reference.md 虽有 en 镜像，但是脚本生成文件（新鲜度有专测），不参与结构类断言；链接扫描仍覆盖它。
 const MIRROR_PAIRS: [string, string][] = [
   ['README.md', 'docs/en/README.md'],
@@ -38,6 +38,7 @@ const MIRROR_PAIRS: [string, string][] = [
   ['docs/guide/usage.md', 'docs/en/guide/usage.md'],
   ['docs/guide/multi-machine-sync.md', 'docs/en/guide/multi-machine-sync.md'],
   ['docs/guide/deploy-cloud.md', 'docs/en/guide/deploy-cloud.md'],
+  ['docs/reference/commands.md', 'docs/en/reference/commands.md'],
 ]
 
 // 切换行 / 链接可达的扫描集：中文对外文档 + docs/en/ 全量镜像（未来新增镜像文件自动纳入）。
@@ -335,6 +336,35 @@ export function checkCapabilityTable(root: string): LintViolation[] {
   return violations
 }
 
+// ---------------------------------------------------------------- 规则 8：命令参考与真实命令面对账
+
+// 为什么：commands.md 是手工维护表，2026-11-17 审查实证两处漂移（`sync assets` 整组漏记；
+// 幻影命令 `modeldock restore <harness>` 在 README/usage 流通而真实命令是 `harness restore`）。
+// 从 src/cli/index.ts 抽取全部 `.command('...')` 注册的命令词（首个空白前的 token），断言每个
+// 都在中英 commands.md 出现——词级子串匹配做漂移检测，不做签名级精确对账（宁漏勿误报）。
+export function checkCommandSurface(root: string): LintViolation[] {
+  const violations: LintViolation[] = []
+  const srcPath = path.join(root, 'src', 'cli', 'index.ts')
+  if (!existsSync(srcPath)) return violations
+  const src = readFileSync(srcPath, 'utf8').replace(/\r\n/g, '\n')
+  const tokens = new Set<string>()
+  for (const m of src.matchAll(/\.command\(\s*'([^']+)'\)/g)) {
+    const word = m[1].trim().split(/\s+/)[0]
+    if (word) tokens.add(word)
+  }
+  for (const rel of ['docs/reference/commands.md', 'docs/en/reference/commands.md']) {
+    const lines = readLines(root, rel)
+    if (!lines) continue // 文件存在性由规则 2（镜像对）与扫描集断言负责
+    const text = lines.join('\n')
+    for (const token of [...tokens].sort()) {
+      if (!text.includes(token)) {
+        violations.push({ file: rel, message: `CLI 命令面注册的 \`${token}\` 在 ${rel} 未出现（commands.md 手工维护：新增/改名/删除命令须同步本表——docs-writing「文档体系」reference 行）` })
+      }
+    }
+  }
+  return violations
+}
+
 // ---------------------------------------------------------------- 真实文档：develop 现行必须全绿
 
 const REAL_DOCS = checkAll(ROOT)
@@ -348,6 +378,7 @@ function checkAll(root: string): LintViolation[] {
     ...checkChangelogBold(root),
     ...checkVersionLinks(root),
     ...checkCapabilityTable(root),
+    ...checkCommandSurface(root),
   ]
 }
 
@@ -385,6 +416,10 @@ describe('docs-lint：现行对外文档（develop 基线零误报）', () => {
 
   it('规则 7：README 核心能力表 ≤8 行', () => {
     expect(checkCapabilityTable(ROOT)).toEqual([])
+  })
+
+  it('规则 8：命令参考覆盖真实命令面（中英）', () => {
+    expect(checkCommandSurface(ROOT)).toEqual([])
   })
 
   it('全部规则合计零违规', () => {
@@ -520,5 +555,24 @@ describe('docs-lint 负例：坏文档必须被抓到', () => {
       'README.md': ['# T', '', '## 核心能力', '', '| 领域 | 你能得到什么 |', '|------|--------------|', ...Array.from({ length: 8 }, (_, i) => row(i + 1)), '', '## 下一节', ''].join('\n'),
     })
     expect(checkCapabilityTable(ok)).toEqual([])
+  })
+
+  it('规则 8：index.ts 注册而 commands.md 缺记的命令词能红；齐备不误报', () => {
+    const bad = makeFixture({
+      'src/cli/index.ts': "prog.command('init')\nprog.command('sync').command('assets')\n",
+      'docs/reference/commands.md': '# c\n\n| `init` | 初始化 |\n',
+      'docs/en/reference/commands.md': '# c\n\n| `init` | init |\n',
+    })
+    const v = checkCommandSurface(bad)
+    const msgs = v.map((x) => `${x.file} ${x.message}`)
+    expect(msgs.some((m) => m.includes('docs/reference/commands.md') && m.includes('`assets`'))).toBe(true)
+    expect(msgs.some((m) => m.includes('docs/en/reference/commands.md') && m.includes('`assets`'))).toBe(true)
+    expect(v).toHaveLength(4) // sync + assets 在两份 commands.md 各记一条
+    const ok = makeFixture({
+      'src/cli/index.ts': "prog.command('init')\n",
+      'docs/reference/commands.md': '| `init` | x |',
+      'docs/en/reference/commands.md': '| `init` | x |',
+    })
+    expect(checkCommandSurface(ok)).toEqual([])
   })
 })
