@@ -97,11 +97,11 @@ ModelDock 燃油库（网关）  统一供油 · 按航次计量（reconcile 的
 |---|---|
 | `scan` | 巡检 6 类信号出提案，落 drafts/（**不进队列**） |
 | `propose` | planner 按 goals.md 综合高质量提案（烧钱动作） |
-| `research "<问题>"` | 上游调研（B3.5）：researcher 只读+联网会话产出带引用 brief；`--selftest` 实测联网工具可用性 |
-| `research multi "<主题>" --dim …` | 多维调研（B3.5）：一个主题 × N 维（≥2，上限 `research.maxDims` 缺省 4）有界并发池逐维派 researcher（`research.concurrency` 缺省 2 上限 4），落 `research/topics/<topic-id>.json`（dims 明细 + rollup 最差档）；单维失败隔离 |
-| `research snapshot <brief-id> [--mirror] [--max N]` | 引用快照补跑（B3.5）：对既有 brief 重跑快照（覆盖 `sources/` 同名文件，幂等）——瞬时失败自动重试 + 分类标注（ok/骨架/区域封锁/PDF，只标注不改判分）；`--mirror` 走 r.jina.ai 镜像读取（把引用 URL 发给第三方服务，默认关、显式开启）；零 LLM token 的纯 HTTP 人工核查/补网工具 |
-| `drafts gc [--apply]` | 提案清退（B13）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除）；超龄（maxAgeDays 缺省 14 天）未提交的机器提案 nightly 也自动清退 |
-| `nightly [--plan] [--auto N]` | 一次完整巡检编排；含 drafts gc 自动清退（B14 老化自动档）；`schedule` 注册成每日定时 |
+| `research "<问题>"` | 上游调研（上游管线，orch-autonomy.md）：researcher 只读+联网会话产出带引用 brief；`--selftest` 实测联网工具可用性 |
+| `research multi "<主题>" --dim …` | 多维调研（上游管线，orch-autonomy.md）：一个主题 × N 维（≥2，上限 `research.maxDims` 缺省 4）有界并发池逐维派 researcher（`research.concurrency` 缺省 2 上限 4），落 `research/topics/<topic-id>.json`（dims 明细 + rollup 最差档）；单维失败隔离 |
+| `research snapshot <brief-id> [--mirror] [--max N]` | 引用快照补跑（上游管线，orch-autonomy.md）：对既有 brief 重跑快照（覆盖 `sources/` 同名文件，幂等）——瞬时失败自动重试 + 分类标注（ok/骨架/区域封锁/PDF，只标注不改判分）；`--mirror` 走 r.jina.ai 镜像读取（把引用 URL 发给第三方服务，默认关、显式开启）；零 LLM token 的纯 HTTP 人工核查/补网工具 |
+| `drafts gc [--apply]` | 提案清退（orch-supply.md）：与 merged 卡改动面重叠的提案迁 superseded/、超龄迁 archived/（dry-run 缺省，--apply 才动文件，永不删除）；超龄（maxAgeDays 缺省 14 天）未提交的机器提案 nightly 也自动清退 |
+| `nightly [--plan] [--auto N]` | 一次完整巡检编排；含 drafts gc 自动清退（老化自动档，orch-supply.md）；`schedule` 注册成每日定时 |
 | `watch` | 连续自治循环：drain → 队列空时 scan+propose → 休眠 |
 | `sail --minutes N` | 自由航行：时间盒完全自治（勘察→规划+上游管线/自动提交→执行循环），到点收帆交航海报告 |
 | `drill` | 弃船演习：临时港 mock 全链跑一张合成托运单，验证港口闭环自身健康（不烧真钱、不碰真队列） |
