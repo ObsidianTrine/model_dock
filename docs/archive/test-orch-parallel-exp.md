@@ -21,6 +21,13 @@
 - 提速 **2.5–2.8×**（528→191–212s），8 核机 CPU 利用率 ~3.2–3.5 worker。
 - 无一用例触 20s testTimeout（并行争用下最慢用例 14s，sail 报告通知类）；零 cross-file 干扰——workflow 套件用例互相独立（各自临时 git 仓 + listen(0) 随机端口），多 worker 天然安全。
 
+## 落地结果（2026-11-17 查证）
+
+- **配置合入**：@acd718c（2026-11-11 23:59 +0800，"test(orch): 编排套件并行定档 maxWorkers 4（B3 证据+env 回退通道）+ mkRepo scripts 模板缓存"）——`vitest.workflow.config.ts` 缺省 `maxWorkers: 4` + `VITEST_MAX_WORKERS` env 覆盖通道（=1 回串行 / =2 分级复证）；test-suite-couplings 同构断言同步剔除 maxWorkers（允许两 config 按域异构）。
+- **观察窗触发面**：合入至今（2026-11-17）本地 develop 历史有 42 个触达 `.agents/**` 或 `test/orchestrator/**` 的提交（f908c73 起，最新 bf860dc）——按 test.yml paths-filter 规则，这批 push 均为 workflow-suite 真 run 触发点（非占位绿）。
+- **查证受阻，窗口顺延**：run 级 conclusion 核验需 `gh run list --workflow=test.yml`（逐条列 run id / 平台腿 / conclusion），2026-11-17 查证会话 shell 白名单两次拒绝该命令（权限熔断纪律），run 级三平台绿证据**未能核验，不臆断定档**。
+- **定档状态：待复证顺延**：维持 4 与回退 1 的决策暂缓——恢复 gh 查证能力后按窗口规则重计「连续 3 天真 run 三平台绿」；顺延至 2026-11-20 起的查证窗口。期间回退兜底不变：任一真 run 出现 flake / worker 生命周期异常 → 改缺省 `maxWorkers: 1`（或先降 2 复证），异常现象回写本报告风险面（本机 B3 证据面：零超时、零跨文件干扰，异常面预期仍限于 Linux CI fork 行为）。
+
 ## 结论与建议
 
 **并行可行，建议日间立卡实施**（配置一行 `isolate: false` 保持 + `maxWorkers: 4`；先 CI 灰度再定档）。本机两轮全绿 + 零超时；剩余风险在 CI 三平台（Linux CI 的 fork 进程行为与内存）——这正是串行防线当年的事故面，故仍按「实验证据 → CI 复证 → 定档」三步走，不建议直接并配置。

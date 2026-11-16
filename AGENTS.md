@@ -148,7 +148,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ### vitest 隔离模型：跨文件 mock 是雷区（必读）
 
-双 config 均 `isolate: false`（vitest4 forks 池）：**同一 worker 进程内所有测试文件共享模块注册表与模块 mock 注册表**。池策略现状（2026-11-11）：产品套件 maxWorkers 缺省 1（2026-10-01 policy.test.ts worker 生命周期 CI 卡死前科 + 顺序耦合对），编排套件缺省并行 4（B3 实验证据 docs/archive/test-orch-parallel-exp.md，CI 复证中——workflow-suite 连续 3 天绿才维持定档），`VITEST_MAX_WORKERS` 可覆盖两处缺省。两条硬约束：
+双 config 均 `isolate: false`（vitest4 forks 池）：**同一 worker 进程内所有测试文件共享模块注册表与模块 mock 注册表**。池策略现状（2026-11-11）：产品套件 maxWorkers 缺省 1（2026-10-01 policy.test.ts worker 生命周期 CI 卡死前科 + 顺序耦合对），编排套件缺省并行 4（B3 实验证据 docs/archive/test-orch-parallel-exp.md，CI 复证窗口顺延——2026-11-17 查证受 gh 权限限制未能核验 run 级结论，恢复查证后 workflow-suite 连续 3 天真 run 绿才维持定档，见报告「落地结果」节），`VITEST_MAX_WORKERS` 可覆盖两处缺省。两条硬约束：
 
 1. **同一个模块不要被两个测试文件 `vi.mock`**——谁生效取决于执行顺序，表现为「单独跑绿、一起跑红」（最典型：别的文件的断言突然收到 0 次调用）。
 2. **不要用 `vi.clearAllMocks()` / `vi.restoreAllMocks()` 做跨用例清场**（会连其他文件的模块 mock 一起清/还原）；只清自己的：`vi.mocked(x).mockClear()`、`vi.spyOn(...).mockRestore()`。
