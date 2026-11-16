@@ -898,6 +898,62 @@ describe('网关', () => {
     }
   })
 
+  it('GET /v1/models/{id}：单模型本地直查与列表条目同形；未命中 404 零上游', async () => {
+    const t = await setup()
+    try {
+      const before = t.requests.length
+      // 命中：与列表响应中同 ID 条目逐字段一致（列表/单查共用 payload 的单源验证）
+      const list: any = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models`, { headers: { authorization: `Bearer ${TOKEN}` } }).then((r) => r.json())
+      const hit = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/preset-model`, { headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(hit.status).toBe(200)
+      expect(await hit.json()).toEqual(list.data[0])
+      // 未命中：404 + 可操作提示
+      const miss = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/no-such-model`, { headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(miss.status).toBe(404)
+      const mj: any = await miss.json()
+      expect(mj.error.message).toContain('no-such-model')
+      expect(mj.modeldock.hint).toBeTruthy()
+      // 本地直查不透传：全程零上游调用
+      expect(t.requests.length).toBe(before)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('GET /v1/models/{id}：?provider= 点名与 anthropic. 前缀别名双命名空间', async () => {
+    const t = await setup()
+    try {
+      t.rt.config.providers.up2 = {
+        name: 'mock-b',
+        base_url: 'http://127.0.0.1:1',
+        protocol: 'anthropic',
+        auth_style: 'bearer',
+        key_ref: 'sk-b',
+        models: { 'b-model': { source: 'manual', display_name: 'B 模型' } },
+      }
+      // 点名 up2 查 b-model：目录来自 up2，与当前路由（demo→up）无关
+      const named = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/b-model?provider=up2`, { headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(named.status).toBe(200)
+      const nj: any = await named.json()
+      expect([nj.id, nj.display_name, nj.owned_by]).toEqual(['b-model', 'B 模型', 'up2'])
+      // 未知服务 404（与列表口径一致）
+      const badProvider = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/b-model?provider=nope`, { headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(badProvider.status).toBe(404)
+      // discovery 头：anthropic. 前缀 ID 剥离命中目录条目，响应按 discovery 别名还原前缀
+      const discovery = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/anthropic.preset-model`, {
+        headers: { authorization: `Bearer ${TOKEN}`, 'anthropic-version': '2023-06-01' },
+      })
+      expect(discovery.status).toBe(200)
+      expect(((await discovery.json()) as any).id).toBe('anthropic.preset-model')
+      // 无 discovery 头：anthropic. 前缀同样可命中（双命名空间），返回目录原 ID
+      const plain = await fetch(`http://127.0.0.1:${t.gwPort}/v1/models/anthropic.preset-model`, { headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(plain.status).toBe(200)
+      expect(((await plain.json()) as any).id).toBe('preset-model')
+    } finally {
+      t.closeAll()
+    }
+  })
+
   it('overview：「正在使用」与服务卡 inUse 跟随定时窗口，defaultRoute 保持默认路由', async () => {
     const t = await setup()
     try {

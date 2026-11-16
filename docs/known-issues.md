@@ -515,3 +515,16 @@
 | REVIEW-29 | P2 | `src/cloud/console.ts` + 死代码 | 云控制台 10s 轮询无 document.hidden 门控；CLOUD_ENVELOPE_REF 导出与 sha256Hex 再导出无使用点 | ☑ 已修（hidden 门控 + visibilitychange 立刷；死代码删除） |
 
 > 测试盲区跟踪：REVIEW 轮所列三处（同步 engine 推送部分失败簿记、CloudStore 专属用例、applySyncdoc 半完成态恢复）已于 2026-10-28 补齐（T07 @05dd0a6，test/sync-push-partial / cloudstore / syncdoc-recovery）；2026-10-29 再补两批——配置持久层与 src 根模块（@083284d，config-gaps / ops-autostart-gaps）、CLI 命令层与安装链（@3d74124，注册面全量断言 + provider/profile/import 行为 + noderuntime / update-cli 分支）。REVIEW 轮各修复均带定向回归测试（当时全量 913 例绿，develop @50ab868），全量规模以 `npm test` 实时输出为准。
+
+## 七、数据面 API 评估留底（2026-11-16，/v1/models 端点面对标审查）
+
+> 来源：对标 OpenRouter / LiteLLM / one-api 的模型目录端点语义审查后产出的候选端点清单。**评估后明确暂缓**的项留底于此，避免后续审查重复立项；「何时值得做」的触发条件达成时再立项。
+> 同批已实施：`GET /v1/models/{id}` 单模型查询（2026-11-16）——既是 OpenAI 兼容面补齐，也堵住「未知路径透传上游」与 `/v1/models` 本地合成目录的口径分裂（此前该路径会漏进 relay 返回上游自己的目录）。候选清单共 5 项，其余 4 项判定见下表。
+
+| 编号 | 项 | 暂缓原因 | 何时值得做 |
+|---|---|---|---|
+| API-EVAL-01 | `/v1/models` 条目元数据增强（context_window / capabilities / 折算价进目录条目） | 下游消费方未出现；能力链与价格数据的导出口径需单独设计，改动面比单模型查询大一个量级；admin 侧 `/_modeldock/pricing-lookup` 与 `/_modeldock/model-catalog` 暂能顶上 | 编排侧或下游 SDK 开始按能力/价格选型，admin 端点不再够用时 |
+| API-EVAL-02 | 数据面 token 自省端点 `/v1/me`（OpenRouter `/v1/key` 同款：当前路由目标 + 限额余量） | 消费方未出现（编排走 admin `/_modeldock/tier-validate`）；且「数据面 token 能否看到路由目标」是产品口径决策，未拍板 | 出现 token 维度的排障/编排需求时立项；实施前先拍板数据面暴露口径，顺手带上限额余量 |
+| API-EVAL-03 | 限流响应头 `x-ratelimit-*`（tokenlimits 429 时附带预算信息） | 本地单机场景 429 罕见触顶；主流 SDK 拿到头也不会自动退避，收益≈0 | tokenlimits 真实触发频繁，或下游出现需要预算头做退避的自动化客户端 |
+| API-EVAL-04 | `/v1/models` 健康过滤（LiteLLM `healthy_only` 同款，按 modelprobe 探测结果剔除不可用模型） | 目录本就不承诺上游可用性；availability 属 admin 观测面（`/_modeldock/model-availability`），混入数据面会制造「列表=可用」的错误预期 | 仅当「下游按目录直发且依赖网关预筛可用性」成为明确需求时重估 |
+
