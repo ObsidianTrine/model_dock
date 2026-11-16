@@ -1,8 +1,8 @@
 # Orchestrator 使用指南（Dockmaster，坞长）
 
 > **Dockmaster** 是本仓库 `.agents/` 自治编排体系的名字，命令行名仍是 `orchestrator.mjs`（命名缘由见 `.agents/workflows/orchestrator.md` 开头）。
-> 面向使用者（人或 agent）的实操手册。架构与设计决策见 `.agents/docs/design-orchestrator.md`；
-> 简版命令速查见 `.agents/workflows/orchestrator.md`。本文回答三件事：怎么用、和 feature-branch 是什么关系、agent 会不会自动触发。
+> 面向使用者（人或 agent）的实操手册：状态机、闸门善后、排障。架构与设计决策见 `.agents/docs/design-orchestrator.md`；命令权威清单见 `.agents/reference/orch-commands.md`；
+> 场景 runbook 按「何时读」拆分在 `.agents/workflows/orch-*.md`。本文回答三件事：怎么用、和 feature-branch 是什么关系、agent 会不会自动触发。
 > spec 三件套 / nightly 巡检编排 / schedule 定时 / release-propose 发版提案的完整用法见 [AI 自治流水线使用指南](ai-pipeline-guide.md)。
 
 ## 1. 一句话模型
@@ -49,32 +49,7 @@ Planner 产出的卡 `created_by: planner`，独立审查会额外检查其验�
 
 ### 4.2 手写任务卡（精确控制时用）
 
-```markdown
----
-id: fix-user-presets-merge        # 小写短横线，= feature 分支名
-type: bugfix                      # bugfix | feature | docs | deps | refactor
-priority: normal                  # high 先跑
-files_hint:                       # 预期改动范围——写准！影响纯度检查/审查/并行调度
-  - src/presets/**
-workflows:
-  - feature-branch
-gate: L3                          # 合并闸门：L3=人工（缺省，最保守）；L1=普通改动可自动合并；L0=纯文档可自动
-budget:                           # 可整体省略（回落默认 50轮/500k tok/60分钟/调试5次/审查3次）
-  max_wall_minutes: 40            # max_tokens 按可计费口径计（剔除缓存读，2026-11 起）
----
-
-# 目标
-一句话说清改什么、为什么。
-
-# 验收标准            ← 可机器检查！orchestrator 亲自跑门禁，worker 拿它当靶子
-- `npm test` 全绿
-- 新增用例覆盖：同名 id 覆盖、新 id 追加
-
-# 红线（可选）
-- 不改动 src/cli.ts
-```
-
-**gate 怎么选**：默认 L3（全人工，最稳）。纯文档/测试任务可写 `L0`，普通 src 任务可写 `L1`——审查通过且实际改动分级不超上限时自动合并，否则自动回人工。核心路径（`src/cli.ts`、`gateway/server|state|relay`、`config/store|secrets`、`util/paths`、`package.json`）一律 L2 永人工，声明了也会被拒绝。
+任务卡 frontmatter 与正文的完整写法、gate 选择表（单一出处）见 [ai-pipeline-guide.md §4](ai-pipeline-guide.md)；字段级设计与默认预算（50 轮 / 500k 可计费 token / 60 分钟 / 调试 5 次 / 审查 3 次）见 [design-orchestrator.md](design-orchestrator.md) §6.1 与 §9。
 
 ### 4.2 跑闭环
 
@@ -169,7 +144,7 @@ node .agents/scripts/approval-listener.mjs --port 18991      # 缺省端口写�
 - 难度路由：ahead-1/2 轻卡 → zcode（免费船）；ahead-3/4 重卡 / files_hint 命中核心路径 → claude。
 - 海况防护：所选船绕开狗粮（dogfood_bypass）/ 未接管 / CLI 不可用 → 换包络内下一个健康船；全港风暴（熔断/限流/重试密集）沿用默认并留痕。
 - 显式 `--worker-backend` 与 resume 沿用永远优先，动态选船不越权；所有换船记 `dispatch_selected` 事件。
-- 规则全表见 `.agents/workflows/orchestrator.md` B11。
+- 规则全表见 `.agents/workflows/orch-supply.md`「动态选船」。
 
 ## 5. 状态地图（任务卡在哪、下一步是什么）
 
