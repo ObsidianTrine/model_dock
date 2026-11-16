@@ -14,7 +14,7 @@ import { localIsoTs } from '../util/time.js'
 import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
-import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
+import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ModelMeta, type ProviderConfig } from '../config/types.js'
 import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
@@ -139,30 +139,55 @@ function discoveryModelId(id: string): string {
   return DISCOVERY_ID_RE.test(id) ? id : `anthropic.${id}`
 }
 
-/** 本地合成 /v1/models 响应：Anthropic 形状为主（type/display_name + 分页字段），兼容 OpenAI 字段
- *  （object/created/owned_by）——两类 SDK 各取所需，多余字段互不解析。目录按写入顺序排列；
- *  有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表（picker 无自定义项，
- *  档位请求仍走内置名兜底改写，不劣化）。discoveryAliases=true（请求带 anthropic-version 头，
+/** 单条目录条目的响应形状：Anthropic 形状为主（type/display_name），兼容 OpenAI 字段
+ *  （object/created/owned_by）——两类 SDK 各取所需，多余字段互不解析。列表与单模型查询
+ *  共用此映射，保证两端口径永远一致；discoveryAliases=true（请求带 anthropic-version 头，
  *  即 Claude Code discovery）时对非 Claude 系 ID 加 anthropic. 前缀别名，否则原样。 */
+function modelEntryPayload(rawId: string, m: ModelMeta, providerId: string, discoveryAliases: boolean) {
+  const id = discoveryAliases ? discoveryModelId(rawId) : rawId
+  return {
+    id,
+    type: 'model',
+    display_name: m.display_name || rawId,
+    object: 'model',
+    created: 0,
+    owned_by: providerId,
+  }
+}
+
+/** 本地合成 /v1/models 响应：Anthropic 形状为主（type/display_name + 分页字段），兼容 OpenAI 字段。
+ *  目录按写入顺序排列；有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表
+ *  （picker 无自定义项，档位请求仍走内置名兜底改写，不劣化）。 */
 function modelsListPayload(cfg: Config, providerId: string, discoveryAliases: boolean) {
   const provider = cfg.providers[providerId]
-  const data = Object.entries(provider?.models ?? {}).map(([rawId, m]) => {
-    const id = discoveryAliases ? discoveryModelId(rawId) : rawId
-    return {
-      id,
-      type: 'model',
-      display_name: m.display_name || rawId,
-      object: 'model',
-      created: 0,
-      owned_by: providerId,
-    }
-  })
+  const data = Object.entries(provider?.models ?? {}).map(([rawId, m]) => modelEntryPayload(rawId, m, providerId, discoveryAliases))
   return {
     data,
     first_id: data[0]?.id,
     has_more: false,
     last_id: data[data.length - 1]?.id,
   }
+}
+
+/** /v1/models 目录服务解析（列表与单模型查询共用）：?provider= 显式点名服务（未知服务报错）；
+ *  未点名复用 pickTarget 首候选（含钉定/定时窗口），把目录切到真正在用的服务，保证目录与
+ *  实际请求同源。失败返回可操作的错误描述，由调用方经 sendError 应答。 */
+function resolveCatalogProvider(
+  rt: GatewayRuntime,
+  target: ResolvedTarget,
+  wanted: string
+): { ok: true; providerId: string } | { ok: false; status: 404; message: string; hint: string } {
+  if (wanted && !rt.config.providers[wanted]) {
+    return {
+      ok: false,
+      status: 404,
+      message: t('服务「{id}」不存在', 'Service "{id}" not found', { id: wanted }),
+      hint: t('modeldock provider list 查看服务列表，或在 Web 控制台「服务」页确认 ID', 'Run modeldock provider list to view services, or check the ID on the Services page of the web console'),
+    }
+  }
+  if (wanted) return { ok: true, providerId: wanted }
+  const picked = pickTarget(rt, target, target.profile.fallback)
+  return { ok: true, providerId: (picked.ok ? picked.ordered[0].target : target).profile.provider }
 }
 
 /** 各网关实例的 picker 展示路由基线（route=上次已同步的展示服务）。模块级 WeakMap：周期检测
@@ -440,23 +465,40 @@ async function handleRequest(
   // 以通过其 ID 过滤（DISCOVERY_ID_RE），转发侧按目录还原。
   if (method === 'GET' && url.split('?')[0] === '/v1/models') {
     const wanted = (new URL(req.url ?? '/', 'http://x').searchParams.get('provider') ?? '').trim()
-    if (wanted && !rt.config.providers[wanted]) {
+    const cat = resolveCatalogProvider(rt, target, wanted)
+    if (!cat.ok) return sendError(res, cat.status, cat.message, cat.hint)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(modelsListPayload(rt.config, cat.providerId, req.headers['anthropic-version'] !== undefined)))
+    return
+  }
+
+  // GET /v1/models/{id}：单模型查询（OpenAI 兼容面）。本地按目录直查，不进 relay——未知路径
+  // 透传上游会让别名 ID（下游用别名/anthropic. 前缀，上游只认真实 ID）撞上游自己的目录或
+  // 上游 404，与「目录不透传」口径分裂。与列表同理不耗上游，放在限额检查之前。
+  // ID 双命名空间：真实目录 ID 直查优先；anthropic. 前缀（discovery picker 用的 ID）剥离后兜底。
+  if (method === 'GET' && url.split('?')[0].startsWith('/v1/models/')) {
+    let rawId = url.split('?')[0].slice('/v1/models/'.length)
+    try {
+      rawId = decodeURIComponent(rawId)
+    } catch {
+      // 非法转义序列保留原样参与匹配，未命中即 404
+    }
+    const wanted = (new URL(req.url ?? '/', 'http://x').searchParams.get('provider') ?? '').trim()
+    const cat = resolveCatalogProvider(rt, target, wanted)
+    if (!cat.ok) return sendError(res, cat.status, cat.message, cat.hint)
+    const models = rt.config.providers[cat.providerId]?.models ?? {}
+    const stripped = rawId.startsWith('anthropic.') ? rawId.slice('anthropic.'.length) : ''
+    const catalogId = models[rawId] ? rawId : stripped && models[stripped] ? stripped : undefined
+    if (!catalogId) {
       return sendError(
         res,
         404,
-        t('服务「{id}」不存在', 'Service "{id}" not found', { id: wanted }),
-        t('modeldock provider list 查看服务列表，或在 Web 控制台「服务」页确认 ID', 'Run modeldock provider list to view services, or check the ID on the Services page of the web console')
+        t('模型「{id}」不在服务「{p}」的模型目录', 'Model "{id}" is not in the model catalog of service "{p}"', { id: rawId, p: cat.providerId }),
+        t('GET /v1/models 查看该服务的模型目录', 'GET /v1/models lists the model catalog of the service')
       )
     }
-    let listProviderId = wanted
-    if (!listProviderId) {
-      // target 由 resolveTarget 解析（active_profile 或 harness 钉定），不含定时窗口；
-      // 用同一 pickTarget 首候选把目录切到真正在用的服务，避免窗口期列表与转发各说各话
-      const picked = pickTarget(rt, target, target.profile.fallback)
-      listProviderId = (picked.ok ? picked.ordered[0].target : target).profile.provider
-    }
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(modelsListPayload(rt.config, listProviderId, req.headers['anthropic-version'] !== undefined)))
+    res.end(JSON.stringify(modelEntryPayload(catalogId, models[catalogId], cat.providerId, req.headers['anthropic-version'] !== undefined)))
     return
   }
 

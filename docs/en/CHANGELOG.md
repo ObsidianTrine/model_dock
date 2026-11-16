@@ -5,6 +5,12 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Single-model query endpoint**: `GET /v1/models/{model-id}` returns that model's catalog entry (same shape as a model-list entry), with `?provider=service-id` to query a specific service's catalog. This path was previously relayed to the upstream, returning the upstream's own catalog — inconsistent with the model list's locally curated catalog. It is now answered locally: unknown IDs get a 404 with an actionable hint, and no upstream call is made.
+
 ## [1.8.0] - 2026-11-15
 
 Update restore ships: every update keeps the previous version, one-click zero-download rollback; a security-hardening batch and a set of robustness fixes.
