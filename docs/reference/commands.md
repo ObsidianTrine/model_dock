@@ -74,7 +74,7 @@
 | 命令 | 用途 |
 |---|---|
 | `adapter list` | 三层适配器与检测状态 |
-| `sync setup/status/pause/enroll/resume` | 多机配置同步（WebDAV / 本地同步盘 / 云端入网） |
+| `sync setup/status/pause/enroll/resume` / `sync assets list/add/rm` | 多机配置同步（WebDAV / 本地同步盘 / 云端入网）；assets 管文本资产白名单 |
 | `update [--check/--yes/--token/--clean/--restore]` | 自更新；`--restore` 一键回退上一版（对换式、零下载） |
 | `presets update` | 预设库远程更新（规划中占位，当前随版本发布） |
 | `usage` | 用量统计指引（本体见 Web 控制台状态行与管理面 `/_modeldock/usage`） |

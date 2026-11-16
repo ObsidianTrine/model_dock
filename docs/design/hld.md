@@ -472,9 +472,9 @@ interface HarnessAdapter {
 | 接入 | `attach` / `detach` / `token` / `harness route·direct·gateway·restore` / `env` | 接入与还原、运行期路由与直连⇄网关切换、环境变量兜底 |
 | 网关 | `gateway start·stop·install·uninstall·rotate-token·status·log` / `ui` | 生命周期、开机自启、令牌轮换、请求日志、控制台 |
 | 诊断 | `test` / `doctor` / `status` / `mcp list` | 端到端探测、体检、总览、MCP 盘点 |
-| 维护 | `adapter list` / `sync setup·status·pause·enroll·resume` / `update`（含 `--restore`）/ `reset` / `uninstall` / `presets update`（占位）/ `usage`（指引） | 适配器、多机同步、自更新与还原、重置卸载 |
+| 维护 | `adapter list` / `sync setup·status·pause·enroll·resume·assets` / `update`（含 `--restore`）/ `reset` / `uninstall` / `presets update`（占位）/ `usage`（指引） | 适配器、多机同步（assets 管文本资产白名单）、自更新与还原、重置卸载 |
 
-命令选项级细节见 `docs/guide/usage.md`。编排器（Dockmaster）命令族属开发基建，不在产品 CLI 范围。
+命令选项级细节见 `docs/guide/usage.md`，全命令速查见 `docs/reference/commands.md`。编排器（Dockmaster）命令族属开发基建，不在产品 CLI 范围。
 
 ---
 

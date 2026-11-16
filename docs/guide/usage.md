@@ -5,7 +5,7 @@
 
 > 一句话：把所有 AI harness（Claude Code / ZCode / dsh / Codex / …）的 base_url + key 收进 ModelDock 统一保管，harness 只需指向本地网关一次，此后换供应商、换模型映射都是一条命令、即时生效。
 
-**目录**：[核心概念](#1-三分钟理解核心概念) · [安装与构建](#2-安装与构建) · [首次上手](#3-首次上手推荐路径) · [接管各 harness](#4-接管各-harness-的具体行为) · [日常使用](#5-日常使用) · [Web 控制台](#55-web-控制台) · [还原与卸载](#6-还原与卸载全部可逆) · [配置文件速查](#7-配置文件速查modeldock) · [网关与端口](#8-网关与端口) · [故障排查](#9-故障排查) · [实现状态](#10-当前实现状态2026-11-04-基线发版时随版本号刷新)
+**目录**：[核心概念](#1-三分钟理解核心概念) · [安装与构建](#2-安装与构建) · [首次上手](#3-首次上手推荐路径) · [接管各 harness](#4-接管各-harness-的具体行为) · [日常使用](#5-日常使用) · [Web 控制台](#6-web-控制台) · [还原与卸载](#7-还原与卸载全部可逆) · [配置文件速查](#8-配置文件速查modeldock) · [网关与端口](#9-网关与端口) · [故障排查](#10-故障排查)
 
 ## 1. 三分钟理解核心概念
 
@@ -72,7 +72,7 @@ modeldock init
 
 向导会依次：检测本机 harness → 列出从 cc-switch / Claude Code / Codex / dsh / ZCode / OpenCode / MiMo Code / WorkBuddy / claude-code-router / Crush / Gemini CLI 发现的现有 provider（勾选导入，key 一并入库）→ 没有可导入的就走预设库添加 → 设默认路由 → 后台启动网关 → 逐个 attach（每步先展示 diff）。`--yes` 跳过所有确认与勾选（导入全部发现项、attach 全部已安装客户端）；**预设库选择与粘贴 key 仍需交互**——非交互环境可先 `modeldock provider add <预设id> --key <key> --yes` 完成这一步再 init。
 
-### 方式 B：从 cc-switch 迁移（本机现状推荐）
+### 方式 B：从 cc-switch 迁移（本机已有 cc-switch 配置时推荐）
 
 ```bash
 modeldock import --from cc-switch   # 收编火山/DeepSeek/小米 MiMo 等档案（原库只读）
@@ -174,7 +174,7 @@ model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # 主力模型 → 同服务�
 
 字段说明见[配置参考](../reference/config-reference.md)。
 
-## 5.5 Web 控制台
+## 6. Web 控制台
 
 浏览器打开 `http://127.0.0.1:8687/_modeldock/ui`，或直接：
 
@@ -271,11 +271,11 @@ modeldock sync status            # 目标 / 版本 / 最近推拉 / 错误与冲
 
 也可以自建云端中枢统一管理多台设备（进阶）：在一台云服务器上部署控制面（一页 runbook 见 [deploy-cloud.md](deploy-cloud.md)），电脑 `modeldock sync enroll --server http://<IP>:18443 --code <配对码>` 入网；浏览器（手机最佳）打开云端地址、粘贴 consoleToken 登录，即可查看所有设备、单台 / 批量切换服务（1 分钟内生效）、生成新设备配对码。入网设备心跳上报各自的服务目录，切换下拉自动列出目标机可用的全部服务。
 
-## 6. 还原与卸载（全部可逆）
+## 7. 还原与卸载（全部可逆）
 
 ```bash
-modeldock restore claude-code --list     # 列出该 harness 的所有快照
-modeldock restore claude-code <id>       # 还原到任意快照（还原前也会先快照，可撤销）
+modeldock harness restore claude-code --list   # 列出该 harness 的所有快照
+modeldock harness restore claude-code <id>     # 还原到任意快照（还原前也会先快照，可撤销）
 modeldock detach claude-code             # 分离 = 还原到 attach 前
 modeldock uninstall                      # 卸载程序：停网关 → 移除自启/命令行入口；配置与密钥保留，重装自动接回
 modeldock uninstall --purge              # 彻底清除：还原客户端 → 停网关 → 删 ~/.modeldock 与已存密钥
@@ -285,7 +285,7 @@ modeldock reset --deep                   # 清理数据：上面全部 + 删日�
 
 > 菜单栏 / 托盘图标也有「清理数据…」：确认弹窗后等价于执行 `modeldock reset --deep`，清理逻辑与命令行完全同一套。
 
-## 7. 配置文件速查（~/.modeldock/）
+## 8. 配置文件速查（~/.modeldock/）
 
 每个配置键的类型、默认值与语义，见 **[config.toml 配置参考](../reference/config-reference.md)**（本节只列常用形态）。
 
@@ -338,14 +338,14 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 
 变量模板：`{token}` `{port}` `{base_url}` `{base_url_openai}`。之后 `modeldock attach opencode` 即可接管。
 
-## 8. 网关与端口
+## 9. 网关与端口
 
 - 默认 `127.0.0.1:8687`，仅本机可访问；端口被占用会自动 +1 并打印实际端口（attach 以实际端口写入）。
 - 常驻：`modeldock gateway install` 注册开机自启（登录自动拉起 + macOS/Linux 崩溃自动重启；`gateway uninstall` 移除）；`gateway status` 显示自启状态，能检出服务里登记的启动路径已失效（如 nvm 升级后）。
 - 国外上游（OpenAI / Anthropic / Gemini…）的预设默认 `proxy = "env"`，读 `HTTPS_PROXY` 环境变量，兼容 clash；国内上游直连。
 - 管理端点：`/_modeldock/health` 与数据面 `GET /v1/health` 免鉴权（探活用）；其余管理接口**读写均要求 admin 凭据**（`x-modeldock-admin` 头或 `?token=` 登录种的 cookie，CLI 与 `modeldock ui` 自动携带；令牌存于 gateway.json，`modeldock gateway rotate-token` 可轮换）。浏览器直接访问 `http://127.0.0.1:8687` 会自动跳转到 Web 控制台。
 
-## 9. 故障排查
+## 10. 故障排查
 
 | 现象 | 处理 |
 |---|---|
@@ -355,7 +355,7 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 | 疑似上下文超限 | `modeldock model list` 看该模型 ctx；换长上下文模型 |
 | 网关挂了 harness 全断 | 已装自启服务（`gateway install`）会自动拉起；否则 `modeldock gateway start --daemon`，应急 `modeldock detach <harness>` 立即回到直连 |
 | ZCode 没走网关 | attach 只注册了 provider，还需在 ZCode 设置里选择它（一次性） |
-| 配置改坏了 | `modeldock config edit` 或 `modeldock restore` |
+| 配置改坏了 | `modeldock config edit` 或 `modeldock harness restore <harness>` |
 | 升级后客户端全部连不上 | 网关多半没起来：`modeldock gateway status` 确认，未运行就 `modeldock gateway start --daemon`；仍失败排查杀毒软件是否隔离了 modeldock 程序（恢复或加白名单后重试） |
 | 改了 key / 切了服务，请求还是旧行为 | 改动热加载即时生效；经系统钥匙环改的 key 最长约 1 分钟自动跟上；急用可重启网关（`gateway stop` → `gateway start --daemon`） |
 | 钉定某服务后客户端报 404 | 多半是该服务接口地址缺对应协议端点（如只填了 OpenAI 地址，Anthropic 类请求无落点）：「编辑服务」补全接口地址后重试，`modeldock doctor` 可辅助检查 |
@@ -371,11 +371,3 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 - 同名 MCP 服务器在多处重复配置 → 提醒换 key / 改命令时容易漏一处（对照 `modeldock mcp list`）。
 
 以上照做仍无解？欢迎到 [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) 提问交流——附上 `modeldock status`、`modeldock doctor` 与请求日志（`modeldock gateway log`，只记元数据不含对话内容）的输出，定位更快。
-
-## 10. 当前实现状态（2026-11-04 基线；发版时随版本号刷新）
-
-已实现：本文档所列全部命令；网关（双协议透传/模型重写/SSE/热加载/错误翻译/代理/请求级 failover+熔断：手动备用链优先、自动备用链补尾、额度耗尽自动切换）；快照还原（保留份数由 `backup.keep` 控制）；内置预设库（多协议端点与模型参数，数量以 `modeldock preset list` 输出为准）；多来源存量配置导入；L2 声明式 pack；Web 控制台（§5.5，含一键迁移、顶部「当前 / 下一个切换」双槽位下拉、客户端「安装并接入」（本机无 Node.js 也能装，托管运行时 + 大陆镜像）、定时切换（自动识别工作日/周末/法定节假日/补班，国务院日历）、暗色主题）；**双槽位路由（「当前」/「下一个切换」，手动钉定优先于程序自动，故障切换常开）**；**手机简版控制台（局域网 8787 + 二维码：状态查看 / 切换服务 / 路由调整 / 配置同步，与桌面同口径；PWA 常驻手机桌面）**；**配置加密导出/导入（`config export` / `config import`，口令加密整包 AES-256-GCM，手机扫码当搬运工）**；**多机自动同步（`sync setup/status/pause/resume`，WebDAV / 本地同步盘，双向收敛 + 冲突快照）**；**云端中枢（自建控制面，见 docs/guide/deploy-cloud.md：配对码入网 / 心跳 / 云端手机单页管理设备与远程切换）**；**菜单栏托盘（macOS 菜单栏 / Windows 系统托盘：打开控制台 / 检查更新 / 清理数据，退出即停网关）**；**密钥安全存储（macOS Keychain / Windows DPAPI / Linux Secret Service，无钥匙环回退 machine-id 绑定加密，存量明文自动迁移）**；**开机自启常驻（`gateway install`，macOS LaunchAgent / Linux systemd / Windows 注册表 Run 键）**；**一键升级（`modeldock update`：GitHub Releases 检查 + SHA256 校验 + 按平台替换 + 网关自动拉起，mac 整包换 .app / win 弹出安装向导（与首次安装一致，失败可见）/ 裸二进制原位换新；控制台顶栏「可更新」徽标 + 弹层一键升级 + 自动重连、托盘「检查更新」菜单、启动静默检查 24h TTL）**；**用量统计与成本折算（`GET /_modeldock/usage` 聚合端点：按日期区间与客户端 / 服务 / 模型过滤，汇总请求数、token 明细与估算成本，管理面鉴权；控制台状态行今日用量徽标见 §5.5）**；**可计费 token 口径（`GET /_modeldock/usage` 响应新增 `billable_tokens` / `billable_partial`：只累计窗口内成功且带用量条目的可计费 token，剔除缓存读等不计费部分；`billable_partial=true` 表示窗口混入了旧版网关日志，求和只是可得部分）**；**按小时用量桶（`GET /_modeldock/usage` 支持 `bucket=hour`：响应新增 `hours[]` 小时桶，按小时分列请求数、token、成本与模型 / 状态分布——排障不必再只看全天总数）**；**分模型时延（`GET /_modeldock/usage` 汇总结果新增 `latency_by_model`：按模型给出请求计数与平均 / p50 / p95 时延，同一服务下不同模型的快慢分开看）**；**模型单价覆盖（内置 models.dev 官方牌价随目录刷新；实际折扣 / 套餐价不符时在 `~/.modeldock/pricing.json` 覆盖，键 = 模型名或 `服务商/模型`，单位美元每百万 token；查不到单价的模型按 $0 计并列名提醒，绝不猜价）**；跨平台支持（Linux / macOS / Windows）；单文件可执行包（SEA）与各平台安装包（macOS DMG 拖拽安装 / Windows 安装向导，双击启动自动装 CLI）；GitHub Actions 自动打包发布。
-
-验证状态：TypeScript 编译通过；产品测试全绿——套件覆盖 store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / update 等（含 Web 端点、手机控制台与云端控制面），用例数与文件数以 `npm test` 输出为准（个别用例按平台跳过）；agent 工作流套件（.agents/ 编排器与守卫 hook）拆分单独运行：`npm run test:workflow`；CLI 二进制冒烟通过；Windows / Linux / macOS 跨平台测试通过。真实 harness 的 attach 联调待你在本机执行——首次使用建议保留 diff 确认，并先跑 `modeldock test` / `modeldock doctor`。
-
-计划中：L3 外部插件、预设库远程更新、管理面「严格模式」（只读端点也要求 token）、anthropic↔openai 协议转换；云同步完善项（恢复码 / 吊销设备 / 口令缓存可选开关）与云端控制面 VPS 真机验收按详设推进。

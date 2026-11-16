@@ -74,7 +74,7 @@
 | Command | Purpose |
 |---|---|
 | `adapter list` | Three-tier adapters and detection status |
-| `sync setup/status/pause/enroll/resume` | Multi-machine config sync (WebDAV / local sync folder / cloud enrollment) |
+| `sync setup/status/pause/enroll/resume` / `sync assets list/add/rm` | Multi-machine config sync (WebDAV / local sync folder / cloud enrollment); assets manages the text-asset whitelist |
 | `update [--check/--yes/--token/--clean/--restore]` | Self-update; `--restore` swaps back to the previous version in seconds (no download) |
 | `presets update` | Remote preset-library update (planned placeholder; presets ship with releases today) |
 | `usage` | Usage-stats pointer (see the web console status line and the admin `/_modeldock/usage` endpoint) |

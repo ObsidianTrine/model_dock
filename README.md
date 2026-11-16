@@ -129,7 +129,7 @@ modeldock config export         # 换电脑搬家：导出口令加密配置包�
 modeldock config import <file>  # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup            # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
 modeldock detach <harness>      # 还原接入前的原始配置
-modeldock restore <harness>     # 还原到任意快照（--list 列出）；detach 是整体还原
+modeldock harness restore <harness>  # 还原到任意快照（--list 列出）；detach 是整体还原
 modeldock reset                 # 重置配置（快照保留，可重新 init）；--deep 连日志、同步状态与缓存一起清
 modeldock uninstall             # 卸载程序（配置与密钥保留）；--purge 连配置一起彻底清除
 ```
