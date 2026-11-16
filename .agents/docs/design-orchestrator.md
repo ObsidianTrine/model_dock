@@ -246,7 +246,7 @@ pending/ ──run──► running/ ──worker完成──► reviewing/ ─�
 {"ts":"...","seq":12,"type":"merged","merge_commit":"f5b5f2d","duration_min":31}
 ```
 
-- 事件类型全集含：`task_submitted / worktree_ready / worker_spawned / worker_turn / command / debug_iteration / budget_snapshot / circuit_breaker / gate_result / review_verdict / human_gate / merged / failed / blocked`，另有运行期增量事件（`auto_merge` / `auto_merge_decision` / `change_classification` / `budget_baseline` / `review_verdict_retry` / `awaiting_human` 等，语义见对应小节）。事件字典的完整速查见 `.agents/reference/orch-events.md`（规划中，见 §10）。
+- 事件类型全集含：`task_submitted / worktree_ready / worker_spawned / worker_turn / command / debug_iteration / budget_snapshot / circuit_breaker / gate_result / review_verdict / human_gate / merged / failed / blocked`，另有运行期增量事件（`auto_merge` / `auto_merge_decision` / `change_classification` / `budget_baseline` / `review_verdict_retry` / `awaiting_human` 等，语义见对应小节）。事件字典的完整速查见 `.agents/reference/orch-events.md`。
 - `seq` 单调递增；`ts` 用 ISO8601 带时区。
 - **用途**：崩溃恢复（重建上下文）、成本核算、质量漂移统计（§6.12）。
 
@@ -520,7 +520,7 @@ test/orchestrator/                     # 单测 + 集成测试（文件名必须
 
 **运行态不入库**（`.gitignore`）：`.agents/orchestrator/queue/` 与 `.agents/orchestrator/logs/` 是本机运行产物，整体 ignore；任务与合并历史以 git log + events.jsonl 本地留存为准。7 个状态目录由 `ensureQueue()` 在 submit/run/status 前幂等创建。
 
-CLI 面（`node .agents/scripts/orchestrator.mjs <cmd>`，完整子命令速查规划于 `.agents/reference/orch-commands.md`）：
+CLI 面（`node .agents/scripts/orchestrator.mjs <cmd>`，完整子命令速查见 `.agents/reference/orch-commands.md`）：
 
 | 命令 | 作用 |
 |---|---|
@@ -582,7 +582,6 @@ CLI 面（`node .agents/scripts/orchestrator.mjs <cmd>`，完整子命令速查�
 - **值得做但排后**：multi-dim sail 集成（feature 提案自动拆维度）。
 - **观望 / 不做**：browse 字段改名、飞书卡片双向批示、zsearch 用量计数、codex researcher 联网检索。
 - **待用户动作**：codex 激活、push 远程时机。
-- **reference 层三件套**（orch-commands / orch-config / orch-events）：规划于文档体系，落地后 §6.3 / §6.15 的速查职责移交。
 
 重启某项时把 TODOLists 中该项的「重启条件」改为「已重启（日期+卡片）」，完成后移入「已销账」；本文随之把对应能力收编进 §6。
 

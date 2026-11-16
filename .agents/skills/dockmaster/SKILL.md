@@ -5,7 +5,7 @@ description: Dockmaster（坞长）调度台——用户输入 /dockmaster，或
 
 # dockmaster —— Dockmaster 港务调度台
 
-> **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。对每艘出航的船它是船长，对整支船队它是坞长——harness 是船、大模型是发动机、船东（用户）递托运单等出港（完整灵魂叙事见 `.agents/workflows/orchestrator.md` 开头「Dockmaster 是什么」）。速查与分区详解见同文（A 核心闭环 / B 自主模式 / C 观测对账 / D 周边）。
+> **Dockmaster（坞长）** = 本仓库 `.agents/` 自治编排体系的名字；命令行仍是 `orchestrator.mjs`。对每艘出航的船它是船长，对整支船队它是坞长——harness 是船、大模型是发动机、船东（用户）递托运单等出港（完整灵魂叙事见 `.agents/workflows/orchestrator.md` 开头「Dockmaster 是什么」）。速查见同文；分区详解按场景拆分在 orch-*.md runbook（同文「文档地图」表）。
 > 本技能原名 /orchestrate，2026-11 随体系定名 Dockmaster 改为 /dockmaster（命名缘由见 .agents/workflows/orchestrator.md 开头）。
 
 **一句话派活**：「帮我优化 README，前进1」「让 dockmaster 修 XPLAT-09，前进3」「开船：审查用 zcode」。你的职责：把这句话翻译成托运单（任务卡）、按档位派船、盯闸门、汇报结果——**自动做完所有决策，最多问一个问题**，其余在汇报里说明「选了什么、为什么、怎么说一声就改」。改码的是 headless worker，不是你；你不直接 Edit/Write 仓库源代码。完整手册在 `.agents/workflows/orchestrator.md`，本技能只留调度台最小操作。
@@ -112,7 +112,7 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 
 落位处置：
 - **merged** → 完成（L1 自动合并进本地 develop）。
-- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。L3 闸门另有超时委托（D6.5）：落位后缺省 3 分钟内没批，autoapprove sweep 会按最后一条审查结论的推荐自动执行（blockers=0 合并 / >0 限次返工；无审查结论 fail-closed 不动）——所以要批示就趁窗口内批，超时后再批也以先到者为准。
+- **awaiting-human** → 你亲自看 diff 与审查结论，三选一：`approve`（合并）/ `retry --note`（打回）/ `reject --reason`（废弃）；**拿不准就停下向用户请示**。L3 闸门另有超时委托（分层审核超时委托，orch-observe.md）：落位后缺省 3 分钟内没批，autoapprove sweep 会按最后一条审查结论的推荐自动执行（blockers=0 合并 / >0 限次返工；无审查结论 fail-closed 不动）——所以要批示就趁窗口内批，超时后再批也以先到者为准。
 - **blocked / failed** → 异常处置速查（文末）。
 
 ## 第 4 步：收尾汇报
@@ -139,13 +139,13 @@ node .agents/scripts/orchestrator.mjs drain                  # 多卡清队列�
 - **先设计后施工（spec）**：特性级改动用 `spec "<意图>" [--from-brief <brief-id|topic-id>]` 出三件套——`--from-brief` 值命中 `research/topics/<id>.json` 时自动按 topic 模式注入（每 ok 维一节 + 失败维缺口行；rollup unsafe 一票否决拒绝注入，undetermined 提示先 `research verify`）——**设计必须用户亲自确认后才能 `spec build` 拆卡**（你不能代审）；拆出的卡 gate=L3，用户口头授权自动合并后可改 L1。审设计前可先跑 `spec review <id>` 让审查船出 verdict（L0 确定性 + L2 五维评分 + findings 定位对账，advisory）——把「人肉通读三件套」变成「人只裁决 findings 清单」；写 design 时「现状」定位一律符号+函数名，行号只作辅助（行号漂移是常态不是事故，规约 §6）；verdict 是建议不是批准，拆卡确认永远在用户。
 - **巡检与提案（nightly / scan）**：`nightly` 零烧钱出提案落 drafts；逐张给用户一句话采纳建议，点头后 `submit`。`--plan` 烧钱跑 planner 需求综合。`autopilot.enabled` 开启后白名单提案自动提交（deps/feature/核心路径/人工草稿永不自动——feature 走上游管线）——开启属持久授权，**代改配置前必须先确认**。
 - **连续自治（watch）**：`watch --interval 30` 后台常驻；停止 `touch .agents/orchestrator/.watch-stop`；drift 降级自动退出（向用户说明 `drift --clear` 恢复）；与手动 drain 共用调度器锁，勿并发。
-- **自由航行（sail）**——**触发条件**：用户表达「让它自己给自己安排活干一段时间」类意图，典型话术：「自由航行」「自由航行 30 分钟」「自己给自己找活干 / 自己安排任务跑一会儿」「让它自主干一小时，完了给我报告」「开自由航行」。判定要点：① 没点名具体任务（有具体任务走第 1 步写卡派单）；② 强调「自己决定做什么」+「一段时间/到点报告」。**时长从话术里取（「30 分钟」「一小时」→ `--minutes`）；话术未给时长时反问一句「自由航行多久？」（本技能唯一允许的主动提问），禁止默认时长**。启动前向用户复述：时长、自动提交范围（docs/bugfix/refactor；**feature 永不直接提交**——走上游管线 research → spec → 人工审设计 → spec build，sail 只自动跑到「spec 落盘待人审」为止）、引擎档位；用户未指定引擎按缺省（claude-headless 网关船，2026-11-03 起；zcode 修复后可显式点名）。执行：`sail --minutes N`（或 `--duration 2h`，可加 `--max-cost-usd N` 燃油上限——实测价达上限即收帆，报告带燃油账）后台常驻（Bash `run_in_background`）——scan 勘察 → propose 规划 + 上游管线/自动提交 → drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。航行期间向用户通报中途状态（status/日志），结束后把报告要点完整汇报给用户，**待审的 spec 提醒用户审设计**。上游管线可选自动拆维度调研（workflow.json `freeSail.researchAutoDim: true`，**默认关**——开启后 feature 提案先拆 2–4 维跑多维调研，调研判定 unsafe 的提案自动留痕跳过不再重试，详见 orchestrator.md B3.5）。
+- **自由航行（sail）**——**触发条件**：用户表达「让它自己给自己安排活干一段时间」类意图，典型话术：「自由航行」「自由航行 30 分钟」「自己给自己找活干 / 自己安排任务跑一会儿」「让它自主干一小时，完了给我报告」「开自由航行」。判定要点：① 没点名具体任务（有具体任务走第 1 步写卡派单）；② 强调「自己决定做什么」+「一段时间/到点报告」。**时长从话术里取（「30 分钟」「一小时」→ `--minutes`）；话术未给时长时反问一句「自由航行多久？」（本技能唯一允许的主动提问），禁止默认时长**。启动前向用户复述：时长、自动提交范围（docs/bugfix/refactor；**feature 永不直接提交**——走上游管线 research → spec → 人工审设计 → spec build，sail 只自动跑到「spec 落盘待人审」为止）、引擎档位；用户未指定引擎按缺省（claude-headless 网关船，2026-11-03 起；zcode 修复后可显式点名）。执行：`sail --minutes N`（或 `--duration 2h`，可加 `--max-cost-usd N` 燃油上限——实测价达上限即收帆，报告带燃油账）后台常驻（Bash `run_in_background`）——scan 勘察 → propose 规划 + 上游管线/自动提交 → drain 执行，到点收帆交航海报告（`logs/sail/<ts>/report.md`：完成了什么、为什么这么编排）；停止 `touch .agents/orchestrator/.sail-stop`。航行期间向用户通报中途状态（status/日志），结束后把报告要点完整汇报给用户，**待审的 spec 提醒用户审设计**。上游管线可选自动拆维度调研（workflow.json `freeSail.researchAutoDim: true`，**默认关**——开启后 feature 提案先拆 2–4 维跑多维调研，调研判定 unsafe 的提案自动留痕跳过不再重试，详见 orch-autonomy.md「上游管线」）。
 - **发版提案（release-propose）**：只出建议与草稿；**版本号决定权在用户**——用户说「发布 vX.Y.Z」才走 release.md 代理发布（不在本技能，永不 push）。
 - **ZCode 原生模式（引擎全断时的降级开航）**：编排器 worker 引擎全部不可用（claude 船被网关路由 pin 死 / zcode CLI 船报「Select a model」）但需要继续派活/开航时——调度台（你）亲自当船长，用 ZCode 会话原生 Agent 工具（子代理，与主会话同引擎）当船，手动走 worktree 闭环。SOP 七步与能力对照表见 `.agents/workflows/zcode-native.md`（派工前先对账 git log 防重复派工；独立验收不盲信船报告；无自动熔断，卡必须小）。引擎恢复后回归自动闭环。
 
 ## 红线（永不）
 
-- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。确需 push 上远程（船东明确要求）：先过 `orch push-review`（pass 且 24h 内且 HEAD 未变时 hook 闸自动放行 main/develop），或由船东当场 `AGENTS_ALLOW_PUSH=1` 授权（见 orchestrator.md B9.5）。
+- **禁止 push / tag 远程、禁止 npm publish**——合并终点是本地 develop；worker 被 policy 硬拦，你也不得代执行。确需 push 上远程（船东明确要求）：先过 `orch push-review`（pass 且 24h 内且 HEAD 未变时 hook 闸自动放行 main/develop），或由船东当场 `AGENTS_ALLOW_PUSH=1` 授权（见 orch-autonomy.md「push 审查门禁」）。
 - **8687 / 8890 端口永不触碰**（监听/stop/改配置一律禁止）。
 - 不改门禁与熔断逻辑来「让任务通过」；红线门禁（port_scan / native_scan）失败 = 改设计，不可调试。
 - 自治跑中引擎故障**禁止自行换引擎**（切换=换计费方，必须用户批准）；测试结束清理你拉起的全部临时进程。
