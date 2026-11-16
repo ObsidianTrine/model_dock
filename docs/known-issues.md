@@ -527,4 +527,5 @@
 | API-EVAL-02 | 数据面 token 自省端点 `/v1/me`（OpenRouter `/v1/key` 同款：当前路由目标 + 限额余量） | 消费方未出现（编排走 admin `/_modeldock/tier-validate`）；且「数据面 token 能否看到路由目标」是产品口径决策，未拍板 | 出现 token 维度的排障/编排需求时立项；实施前先拍板数据面暴露口径，顺手带上限额余量 |
 | API-EVAL-03 | 限流响应头 `x-ratelimit-*`（tokenlimits 429 时附带预算信息） | 本地单机场景 429 罕见触顶；主流 SDK 拿到头也不会自动退避，收益≈0 | tokenlimits 真实触发频繁，或下游出现需要预算头做退避的自动化客户端 |
 | API-EVAL-04 | `/v1/models` 健康过滤（LiteLLM `healthy_only` 同款，按 modelprobe 探测结果剔除不可用模型） | 目录本就不承诺上游可用性；availability 属 admin 观测面（`/_modeldock/model-availability`），混入数据面会制造「列表=可用」的错误预期 | 仅当「下游按目录直发且依赖网关预筛可用性」成为明确需求时重估 |
+| API-EVAL-05 | OpenMetrics/Prometheus 文本暴露端点（对标 LiteLLM/new-api 的标准 `/metrics`，与现有 JSON **并排新增**） | 当前消费方只有 Dockmaster 编排（同进程读 JSON）+ 人肉排障，无 Prometheus/Grafana 接入需求；数据源是纯内存环形窗口（`state/sea.ts`，重启清零），算好比率/分位的 JSON 快照形态与之匹配；现有 JSON 不符合 Prom 文本协议（无 `# HELP/# TYPE`、error_rate 是预聚合比率非单调 counter、延迟无 histogram bucket、嵌套 JSON ≠ label 模型），但「不符合」不等于「要改」——消费方决定形态 | 出现真实 Prometheus/Grafana 告警/长时序需求时立项：`/_modeldock/metrics` JSON 保持不动（Dockmaster 读法不破），并排新增 OpenMetrics 端点——count/errors 映射单调 counter（`rate()` 交 Prom 侧算）、延迟映射 histogram、并发/熔断映射 gauge，admin token 走 scrape 的 Authorization 配置 |
 
