@@ -49,7 +49,7 @@ import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchest
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
-import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
+import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, isLandedDraft, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
 import { classifyChange, hintsOverlap } from './policy.mjs';
@@ -3556,7 +3556,9 @@ async function cmdPropose(repoRoot, opts) {
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
   try {
-    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶
+    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶。
+    // 信号新鲜度（2026-11-17）：卡体带「已落地」标注的提案不进规划输入（归档由巡检顺手执行，
+    // 两轮巡检之间的窗口期靠这里过滤兜底）。
     let files = [];
     try {
       files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
@@ -3564,7 +3566,9 @@ async function cmdPropose(repoRoot, opts) {
     const signals = files
       .map((f) => {
         try {
-          const { meta, body } = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8'), f);
+          const text = fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8');
+          if (isLandedDraft(text)) return null; // 已落地提案：不再是活信号
+          const { meta, body } = parseCard(text, f);
           return `- ${meta.id}（${meta.type}/${meta.priority ?? 'normal'}，by ${meta.created_by ?? '?'}）：${String(body.goal ?? '').replace(/\s+/g, ' ').slice(0, 120)}`;
         } catch {
           return null; // 损坏提案跳过，不进 prompt
