@@ -552,7 +552,7 @@ export async function forwardToUpstream(
   // 重新命中闸门（去重见 ForwardOptions.mfCounted）。
   const mfMap = provider.model_fallback
   let mfHit: string | undefined
-  const mfGate = mfMap && Object.keys(mfMap).length > 0
+  const mfGate = mfMap && isNonEmptyRecord(mfMap)
     ? (final: string): string | undefined => {
         const fb = mfMap[final]
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
@@ -740,11 +740,13 @@ export function translateUpstreamError(
   })
 }
 
-/** 响应头过滤：hop-by-hop 与 content-length 交给 node 重新计算（值原样透传，数组语义保留） */
+/** 响应头过滤：hop-by-hop 与 content-length 交给 node 重新计算（值原样透传，数组语义保留）。
+ *  每头只小写化一次（热路径零分配优化：双次 toLowerCase 的小字符串分配收敛为单次，语义不变） */
 export function filterResponseHeaders(headers: Record<string, string | string[]>): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {}
   for (const [k, v] of Object.entries(headers)) {
-    if (HOP_BY_HOP.has(k.toLowerCase()) || k.toLowerCase() === 'content-length') continue
+    const lk = k.toLowerCase()
+    if (HOP_BY_HOP.has(lk) || lk === 'content-length') continue
     out[k] = v
   }
   return out
@@ -1173,7 +1175,7 @@ export async function forwardWithFailover(
       const sentModel = up.modelAfter
       const mfMap = rt.config.providers[c.providerId]?.model_fallback
       if (up.status >= 500) recordOutcome(rt, c.providerId, { ok: false, cls: '5xx', ms })
-      else if (quota && mfMap && Object.keys(mfMap).length > 0 && sentModel !== undefined) {
+      else if (quota && mfMap && isNonEmptyRecord(mfMap) && sentModel !== undefined) {
         // 模型级容灾记账分流（M1）：quota 事件在 (provider, model) 粒度记账（recordModelOutcome），
         // provider 级熔断窗口不累计（modelScoped）——否则 provider 熔丝会把同服务备用模型一起封死
         // （功能自我否定）；海况是 provider 级上游健康视图，经 recordOutcome 内部 recordSeaOutcome
