@@ -242,7 +242,7 @@ describe('orchestrator 集成 > stuck 与崩溃恢复', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'stuckish')
-      const r = tryOrch(repo.root, 'run stuckish --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      const r = tryOrch(repo.root, 'run stuckish --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       // stuck 不算失败退出： orchestrator 正常收尾并转 blocked
       expect(r.stdout).toContain('blocked')
       expect(readCard(repo.root, 'blocked', 'stuckish')).toBeTruthy()

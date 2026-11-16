@@ -278,6 +278,22 @@ function worktreePath(repoRoot, taskId) {
   return path.join(repoRoot, '.agents', 'worktrees', taskId);
 }
 
+/**
+ * worktree 提交对账（stuck 终态对冲，2026-11-17）：统计 worktree HEAD 相对 base 分支的
+ * 非空提交数（git log --oneline <base>..HEAD）。非空 = 已有可验收产出在库——自报 stuck /
+ * 看门狗熔断落 blocked（清空重做语义）前的客观对冲证据。
+ * 返回 null = 对账不可得（worktree 缺失 / git 故障 / base 分支不可达）：调用方按
+ * 「无证据」处理、保持既有 blocked 行为——对账只做对冲不做拦截，绝不因对账失败改终态走向。
+ */
+export function worktreeCommitsAhead(worktree, baseBranch) {
+  try {
+    const out = execFileSync('git', ['log', '--oneline', `${baseBranch}..HEAD`], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return out.split('\n').filter((l) => l.trim()).length;
+  } catch {
+    return null;
+  }
+}
+
 function ensureWorktree(repoRoot, taskId) {
   const wt = worktreePath(repoRoot, taskId);
   if (fs.existsSync(wt)) {
@@ -768,9 +784,20 @@ async function cmdRun(repoRoot, taskId, opts) {
           log(`⏱ 看门狗熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
           killTree(livePid);
         }
-        moveCard(root, taskId, 'running', 'blocked');
-        archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
-        await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        // stuck 终态对冲（2026-11-17）：熔断落 blocked 前对账 worktree 提交——相对 base
+        // 已有非空提交 = 可验收产出在库，转 reviewing 交审查而非 blocked（kill 照常执行；
+        // 对账只读 HEAD，与已终止的 worker 无写竞争）。无提交/对账不可得照旧 blocked。
+        const watchdogCommitsAhead = worktreeCommitsAhead(worktree, baseBranch);
+        if (watchdogCommitsAhead !== null && watchdogCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: 'watchdog', commits_ahead: watchdogCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `看门狗判定任务空转，但 worktree 相对 ${baseBranch} 已有 ${watchdogCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked`);
+          log(`⛔ 看门狗熔断但 worktree 已有 ${watchdogCommitsAhead} 个提交——转 reviewing/ 交审查（不落 blocked 重做），人工 resume 续做或核对后处置。`);
+        } else {
+          moveCard(root, taskId, 'running', 'blocked');
+          archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
+          await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        }
         // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
         // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
         // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
@@ -934,10 +961,11 @@ async function cmdRun(repoRoot, taskId, opts) {
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
           if (watchdogHalted) {
-            // 看门狗 actuate 已完成落位（blocked/ + circuit_breaker 事件 + 事故归档 + 通报）：
-            // 主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重试判定之前——
-            // killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试再派新会话。
-            log('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+            // 看门狗 actuate 已完成落位（有提交 → reviewing/，无提交 → blocked/ + 事故归档
+            // + 通报）：主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重
+            // 试判定之前——killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试
+            // 再派新会话。
+            log('进展看门狗（actuate）已落位（审查或 blocked，见上方日志），人工决策后再继续。');
             return;
           }
           if (budget.tripped) {
@@ -1003,8 +1031,26 @@ async function cmdRun(repoRoot, taskId, opts) {
           : crash?.decisive
             ? crash.reason
             : '未产出结果块（worker 异常结束）';
+        // stuck 终态对冲（2026-11-17）：自报 stuck 是 worker 对「无法继续」的主观申报，
+        // 落 blocked（清空重做语义）前先对账 worktree 客观进度——相对 base 有非空提交 =
+        // 已有可验收产出（实测 4 张 blocked 卡各持完成提交、其一 NOTES 记录实现完成测试
+        // 全绿），转 reviewing 交审查/人工裁决，完成提交不再孤儿化、半成品不重复造轮子。
+        // 无提交照旧 blocked（防误伤真 stuck）；对账不可得（worktree 缺失/git 故障）也
+        // 照旧——对账只对冲不拦截。只对 stuck 自报生效：未产出结果块族有自己的自动续
+        // 通道（isTransientBlocked Path C），熔断/异常归因语义不动。
+        const stuckCommitsAhead = claimed?.status === 'stuck' ? worktreeCommitsAhead(worktree, baseBranch) : null;
+        if (stuckCommitsAhead !== null && stuckCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: blockedReason, commits_ahead: stuckCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `${blockedReason}（worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked）`);
+          log(`worker 自报 stuck，但 worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转 reviewing/ 交审查（不落 blocked 重做）：`);
+          log(`  node .agents/scripts/orchestrator.mjs resume ${taskId}   # 带恢复上下文续做`);
+          log(`  node .agents/scripts/orchestrator.mjs logs ${taskId}     # 核对事件时间线后人工处置`);
+          return;
+        }
         appendEvent(qdir, 'blocked', {
           reason: blockedReason,
+          ...(stuckCommitsAhead !== null ? { commits_ahead: stuckCommitsAhead } : {}),
           ...(crash?.decisive
             ? {
                 cause: crash.cause,
@@ -2531,6 +2577,15 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   }
   if (!orphans.length) return empty;
   log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
+  // stuck 终态对冲备料（2026-11-17）：'stuck' 孤儿（非 transient settle 收尾）先对账
+  // worktree 提交——相对 base 已有非空提交 = 可验收产出在库，走续用路径（resume 原地
+  // 续做）而非落 blocked 清空重做。breaker 熔断卡不受对冲（确定性失败永不自动续）；
+  // resume 族无需对账。对账不可得（worktree 缺失/git 故障）按 0 处理，照旧交人工。
+  for (const c of orphans) {
+    if (classifyOrphan(c.events) === 'stuck') {
+      c.commitsAhead = worktreeCommitsAhead(worktreePath(repoRoot, c.id), cfg.baseBranch || 'develop') ?? 0;
+    }
+  }
   const picked = pickOrphanResumeCandidates(orphans, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
@@ -2545,8 +2600,13 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
       console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
       continue;
     }
-    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts, source: 'orphan_running' });
-    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族；冷却期内至多此一次）`);
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', {
+      card: c.id,
+      attempts: c.attempts,
+      source: 'orphan_running',
+      ...(c.rescue === 'stuck_with_commits' ? { commits_ahead: c.commitsAhead, rescue: c.rescue } : {}),
+    });
+    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族${c.rescue === 'stuck_with_commits' ? `；stuck 但 worktree 已有 ${c.commitsAhead} 个提交——原地续用半成品` : ''}；冷却期内至多此一次）`);
     const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
       ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
       cwd: repoRoot,
@@ -2572,7 +2632,9 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
     const reason = kind === 'breaker'
       ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
       : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
-    appendEvent(logDir(repoRoot, c.id), 'failed', { reason });
+    // stuck 终态对冲证据（2026-11-17）：落 blocked 的 stuck 卡 commits_ahead 恒 0（>0 已走
+    // 续用路径）——字段留痕对账结论，人工核实零提交后才值得清空重做。
+    appendEvent(logDir(repoRoot, c.id), 'failed', { reason, ...(kind === 'stuck' ? { commits_ahead: c.commitsAhead ?? 0 } : {}) });
     moveCard(root, c.id, cur.state, 'blocked');
     blocked.push(c.id);
     log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);

@@ -218,7 +218,7 @@ describe('predeparture B8 交接班单 > NOTES 模板与 resume 恢复', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'relief')
-      tryOrch(repo.root, 'run relief --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      tryOrch(repo.root, 'run relief --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       expect(readCard(repo.root, 'blocked', 'relief')).toBeTruthy()
       const r2 = runOrch(repo.root, 'resume relief --backend mock')
       expect(r2.stdout).toContain('awaiting-human')
