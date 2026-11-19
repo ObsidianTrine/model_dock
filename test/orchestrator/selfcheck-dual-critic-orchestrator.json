@@ -1,0 +1,20 @@
+{
+  "file": "../../.agents/scripts/orchestrator.mjs",
+  "countAtLeast": [
+    { "pattern": "const dualCriticOn = \\(cfg\\.review\\?\\.dualCritic\\?\\.enabled \\?\\? true\\) && hitsCoreOrRelease\\(changed, cfg\\)\\.length > 0", "atLeast": 1 },
+    { "pattern": "Promise\\.allSettled\\(", "atLeast": 1 },
+    { "pattern": "critic: 'second'", "atLeast": 3 },
+    { "pattern": "spawnReviewer\\(", "atLeast": 5 },
+    { "pattern": "review_critic_degraded", "atLeast": 2 },
+    { "pattern": "hitsCoreOrRelease", "atLeast": 2 },
+    { "pattern": "extractBlockerItems", "atLeast": 3 },
+    { "pattern": "blockerKey", "atLeast": 2 },
+    { "pattern": "union_blockers", "atLeast": 1 },
+    { "pattern": "union_deduped", "atLeast": 1 },
+    { "pattern": "union_mode: unionInfo\\.complete \\? 'deduped' : 'max_fallback'", "atLeast": 1 },
+    { "pattern": "review_engine_failed", "atLeast": 2 },
+    { "pattern": "双 critic 并行（高风险卡，orch-dual-critic-review 卡 2026-11-20）", "atLeast": 1 }
+  ],
+  "grepZero": ["Promise\\.all\\(\\["],
+  "fileSizeMaxKB": 400
+}

@@ -36,7 +36,7 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildReviewRetryPrompt, parseAcceptanceDeclared, checkRecitation, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, extractBlockerItems, blockerKey, buildReviewRetryPrompt, parseAcceptanceDeclared, checkRecitation, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
 import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, readVerdict, verdictGateBlocks, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, readResearchLedger, researcherStanding } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
@@ -52,7 +52,7 @@ import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './
 import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
-import { classifyChange, hintsOverlap } from './policy.mjs';
+import { classifyChange, hintsOverlap, hitsCoreOrRelease } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
 import { MEASURED_FUEL_POLL_MS, createExpiryRenewal, probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
@@ -1308,73 +1308,193 @@ async function cmdRun(repoRoot, taskId, opts) {
         // 下一次 beginSession（下轮 worker）把审查峰值入账——reviewer 的 budget_snapshot 此前只落
         // 盘不记账，max_tokens 硬熔断与低油量告警对审查段完全失明
         budget.beginSession();
-        const review = await reviewBackend.spawn({
-          role: 'reviewer', // 显式角色契约（mock 判角色不再嗅探正文，见 types.mjs）
-          promptFile: reviewPromptFile,
-          cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
-          maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
-          onEvent: (e) => {
-            appendEvent(qdir, e.type, e);
-            trackPid(e);
-            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 审查计入同一预算口径（第三参缺省 = 旧口径）
-          },
-          readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
-          model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
-          settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
-          envPatch: tierEnv,
-        });
-        livePid = null;
-        appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
-        let verdict = parseReviewVerdict(review.output ?? '');
-        // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
-        // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
-        // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
-        // 处置：可操作报错 + 留痕 + 通知，修复引擎后 resume。
-        if (!verdict && (review.exitCode ?? 0) !== 0) {
-          const stderrTail = String(review.stderrTail ?? '').trim().slice(-400);
-          const detail = `审查引擎故障（${opts.reviewBackend} exit ${review.exitCode}）：${stderrTail || String(review.output ?? '').trim().slice(-200) || '无输出'}`;
-          appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: review.exitCode, stderr_tail: stderrTail.slice(-400) });
-          moveCard(root, taskId, 'reviewing', 'blocked');
-          archiveIncident(repoRoot, taskId, root, qdir, detail);
-          await settleNotify(repoRoot, taskId, 'blocked', detail);
-          await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
-        }
-        // 契约行补问（⑤）：引擎正常、有审查输出、只缺 REVIEW_SUMMARY 汇总行——先补问
-        // 一次再判罚。直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）；
-        // 补问仍解析不到才落回保守判罚。补问输入只有上轮输出，不重放 diff（不重开审查）。
-        if (!verdict && String(review.output ?? '').trim()) {
-          budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
-          const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
-          const retryPromptText = buildReviewRetryPrompt(review.output);
-          fs.writeFileSync(retryPromptFile, retryPromptText);
-          const retry = await reviewBackend.spawn({
-            role: 'reviewer', // 显式角色契约（retry prompt 内嵌上轮输出，嗅探不可靠）
-            promptFile: retryPromptFile,
-            cwd: worktree,
-            maxTurns: 6, // 只求补一行汇总，不重开审查
+        // 审查会话 spawn（单/双 critic 与契约行补问共用）：显式 role 契约（mock 判角色不再
+        // 嗅探正文，见 types.mjs）+ 只读（策略守护 fail-closed）+ 计账/留痕直通
+        const spawnReviewer = ({ promptFile, model, maxTurns = cfg.reviewMaxTurns }) =>
+          reviewBackend.spawn({
+            role: 'reviewer', // 显式角色契约（mock 判角色不再嗅探正文，见 types.mjs）
+            promptFile,
+            cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
+            maxTurns,
             onEvent: (e) => {
               appendEvent(qdir, e.type, e);
               trackPid(e);
-              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read);
+              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 审查计入同一预算口径（第三参缺省 = 旧口径）
             },
-            readonly: true,
-            model: effReviewModel,
+            readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
+            model, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
             settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
             envPatch: tierEnv,
           });
-          const retryVerdict = parseReviewVerdict(retry.output ?? '');
-          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
-          appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
-          if (retryVerdict) verdict = retryVerdict;
+        // 双 critic 触发口径（与分级同源）：仅改动实际命中 corePaths/releasePaths 的卡
+        // （hitsCoreOrRelease 与 classifyChange 共用同一匹配口径，勿在此重写匹配）。
+        // package.json/未识别文件/GUARD_SELF 的保守归高不算卡面声明的核心面——不触发
+        // （面窄守住缺省 true 的体积）；escape hatch：review.dualCritic.enabled=false
+        const dualCriticOn = (cfg.review?.dualCritic?.enabled ?? true) && hitsCoreOrRelease(changed, cfg).length > 0;
+        let verdict;
+        let failureOutput = ''; // 修复 prompt 引用的失败输出（双 critic = 并集形态）
+        let blockersCriteria = (n) => `reviewer 独立审查判定存在 ${n} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+        if (dualCriticOn) {
+          // ---- 双 critic 并行（高风险卡，orch-dual-critic-review 卡 2026-11-20）----
+          // 两只异模型 reviewer 并行出 verdict，blockers 取并集（同条去重）后走既有裁决链；
+          // 一只失败降级用另一只（不丢审查），双失败走既有失败路径。依据 arXiv 2610.34577：
+          // 并行多 critic ≈ 多轮返工精度、成本低 19%——单 critic 同源盲区是漏网根因型。
+          // 副 critic 模型缺省链 research.model → worker.model 的 why：worker.model 与被审
+          // 代码同源（恰是本机制要打破的盲区），research.model 是独立选型的深读批判模型，
+          // 与审查选型撞名概率更低。backend 同 review.backend（只换脑子不换引擎）。
+          const secondModel = cfg.review?.dualCritic?.secondModel || cfg.research?.model || cfg.worker?.model || undefined;
+          log(`双 critic 审查（命中 corePaths/releasePaths）：主 ${opts.reviewBackend}${effReviewModel ? `/${effReviewModel}` : ''} + 副 ${opts.reviewBackend}${secondModel ? `/${secondModel}` : ''}——blockers 并集去重取严，单只失败降级不丢审查`);
+          const secondPromptFile = path.join(reviewPromptDir, 'review-prompt-2.md');
+          fs.writeFileSync(secondPromptFile, reviewPromptText);
+          // Promise.allSettled 而非卡面所写 Promise.all：降级语义要求单只失败不丢幸存者
+          // 结果，all 的 reject 会连带丢弃——allSettled 才是「并行 + 降级」的正确原语
+          const [primarySettled, secondSettled] = await Promise.allSettled([
+            spawnReviewer({ promptFile: reviewPromptFile, model: effReviewModel }),
+            spawnReviewer({ promptFile: secondPromptFile, model: secondModel }),
+          ]);
+          livePid = null;
+          const settleCritic = (r) =>
+            r.status === 'fulfilled'
+              ? { ...r.value, spawnFailed: false }
+              : { exitCode: 1, output: '', stderrTail: String(r.reason?.message ?? r.reason ?? ''), spawnFailed: true };
+          const primary = settleCritic(primarySettled);
+          const second = settleCritic(secondSettled);
+          // review_spawned 维持「spawn 成功返回才落」不变量（resume prior 解析不钉死坏后端）
+          if (primarySettled.status === 'fulfilled') appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
+          if (secondSettled.status === 'fulfilled') appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, critic: 'second', ...(secondModel ? { model: secondModel } : {}) });
+          let primaryVerdict = parseReviewVerdict(primary.output ?? '');
+          let secondVerdict = parseReviewVerdict(second.output ?? '');
+          let unionInfo = null;
+          if (primaryVerdict && secondVerdict) {
+            // 双双出 verdict：blockers 并集（同条去重）。契约只钉 REVIEW_SUMMARY 计数、逐条
+            // 无结构——行级提取（extractBlockerItems）与契约计数对上才做真去重，对不上回落
+            // 取两 critic 较大计数（取严不放大，防跨模型输出风格差异把启发提取跑偏）
+            const items1 = extractBlockerItems(primary.output);
+            const items2 = extractBlockerItems(second.output);
+            const complete = items1.length === primaryVerdict.blockers && items2.length === secondVerdict.blockers;
+            let unionBlockers;
+            let deduped = 0;
+            let unionList = [];
+            if (complete) {
+              const byKey = new Map();
+              for (const it of [...items1, ...items2]) {
+                const key = blockerKey(it);
+                if (byKey.has(key)) deduped += 1;
+                else byKey.set(key, it);
+              }
+              unionList = [...byKey.values()];
+              unionBlockers = unionList.length;
+            } else {
+              unionBlockers = Math.max(primaryVerdict.blockers, secondVerdict.blockers);
+            }
+            unionInfo = { blockers: unionBlockers, deduped, complete };
+            verdict = { blockers: unionBlockers, suggestions: Math.max(primaryVerdict.suggestions, secondVerdict.suggestions), notes: Math.max(primaryVerdict.notes, secondVerdict.notes) };
+            // 修复 prompt 引用并集：双 critic 全文拼接 + 尾部去重清单（buildFixupPrompt 只保
+            // 尾部 200 行——并集清单钉在尾部保证不被截掉）
+            failureOutput =
+              `# 审查者 1（主）输出\n\n${String(primary.output ?? '')}\n\n# 审查者 2（副）输出\n\n${String(second.output ?? '')}` +
+              (complete ? `\n\n## 双 critic 并集阻塞项（同条去重，共 ${unionBlockers} 条）\n\n${unionList.map((s) => `- ${s}`).join('\n')}` : '');
+            blockersCriteria = (n) => `双 critic 并集判定存在 ${n} 条阻塞项（主 ${primaryVerdict.blockers} + 副 ${secondVerdict.blockers}${complete ? `，去重 ${deduped} 条` : '，逐条提取不全按较大计数取严'}；阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+          } else if (primaryVerdict || secondVerdict) {
+            // 单侧幸存：降级用幸存者结果（不丢审查）；死者留降级痕（critic/死因/exit）
+            const survivorIsSecond = !primaryVerdict;
+            const survivor = survivorIsSecond ? second : primary;
+            const dead = survivorIsSecond ? primary : second;
+            verdict = survivorIsSecond ? secondVerdict : primaryVerdict;
+            failureOutput = String(survivor.output ?? '');
+            appendEvent(qdir, 'review_critic_degraded', {
+              critic: survivorIsSecond ? 'primary' : 'second',
+              reason: dead.spawnFailed ? 'spawn_failed' : (dead.exitCode ?? 0) !== 0 ? 'engine_exit' : 'no_contract',
+              exit_code: dead.exitCode ?? null,
+            });
+            blockersCriteria = (n) => `审查降级（双 critic 单侧幸存）判定存在 ${n} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+          } else if ((primary.spawnFailed || (primary.exitCode ?? 0) !== 0)) {
+            // 双失败且主 critic 引擎级死亡：走既有失败路径（与单 critic 引擎故障同口径，
+            // fail-fast 落 blocked，不烧返工轮——引擎死了不是审查意见）
+            const stderrTail = String(primary.stderrTail ?? '').trim().slice(-400);
+            const detail = `审查引擎故障（${opts.reviewBackend} exit ${primary.exitCode ?? '?'}，双 critic 均未产出结论）：${stderrTail || String(primary.output ?? '').trim().slice(-200) || '无输出'}`;
+            appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: primary.exitCode ?? null, stderr_tail: stderrTail.slice(-400), dual: true });
+            moveCard(root, taskId, 'reviewing', 'blocked');
+            archiveIncident(repoRoot, taskId, root, qdir, detail);
+            await settleNotify(repoRoot, taskId, 'blocked', detail);
+            await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+          }
+          if (!primaryVerdict && !secondVerdict) {
+            // 走到这里 = 主 critic 活着但无契约块（副 critic 无论何种形态都无结论）：
+            // 与单 critic 同口径——契约行补问一次，仍无结论按保守 blockers=1 进返工
+            appendEvent(qdir, 'review_critic_degraded', {
+              critic: 'second',
+              reason: second.spawnFailed ? 'spawn_failed' : (second.exitCode ?? 0) !== 0 ? 'engine_exit' : 'no_contract',
+              exit_code: second.exitCode ?? null,
+            });
+            if (String(primary.output ?? '').trim()) {
+              budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
+              const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
+              const retryPromptText = buildReviewRetryPrompt(primary.output);
+              fs.writeFileSync(retryPromptFile, retryPromptText);
+              const retry = await spawnReviewer({ promptFile: retryPromptFile, model: effReviewModel, maxTurns: 6 }); // 只求补一行汇总，不重开审查
+              const retryVerdict = parseReviewVerdict(retry.output ?? '');
+              writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
+              appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
+              if (retryVerdict) {
+                primaryVerdict = retryVerdict;
+                verdict = retryVerdict;
+                failureOutput = String(retry.output ?? '');
+              }
+            }
+          }
+          // 决策留底：两只各留一份（副 critic 带 critic 标记与模型名，误判复盘可分源）
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(primary.output ?? ''), parsed: primaryVerdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(second.output ?? ''), parsed: secondVerdict, meta: { backend: opts.reviewBackend, critic: 'second', ...(secondModel ? { model: secondModel } : {}) } }, traceCfg);
+          // 两条 review_verdict 留痕（second 标记）：消费者取「末条」语义天然兼容——并集 > 0
+          // 时本轮必然走返工不落 awaiting-human，autoapprove sweep 只会在并集 = 0（两 critic
+          // 均 0）时读到副 critic 的 0，推荐语义不漂移
+          if (primaryVerdict) appendEvent(qdir, 'review_verdict', { blockers: primaryVerdict.blockers, suggestions: primaryVerdict.suggestions, notes: primaryVerdict.notes });
+          if (secondVerdict) appendEvent(qdir, 'review_verdict', { blockers: secondVerdict.blockers, suggestions: secondVerdict.suggestions, notes: secondVerdict.notes, critic: 'second', ...(secondModel ? { model: secondModel } : {}), ...(unionInfo ? { union_blockers: unionInfo.blockers, union_deduped: unionInfo.deduped, union_mode: unionInfo.complete ? 'deduped' : 'max_fallback' } : {}) });
+          if (!primaryVerdict && !secondVerdict) appendEvent(qdir, 'review_verdict', { blockers: -1, suggestions: 0, notes: 0 }); // 保守判罚留痕（与单 critic 同口径）
+        } else {
+          // ---- 单 critic（普通卡既有路径，语义与历史逐字节等价）----
+          const review = await spawnReviewer({ promptFile: reviewPromptFile, model: effReviewModel });
+          livePid = null;
+          appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
+          verdict = parseReviewVerdict(review.output ?? '');
+          // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
+          // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
+          // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
+          // 处置：可操作报错 + 留痕 + 通知，修复引擎后 resume。
+          if (!verdict && (review.exitCode ?? 0) !== 0) {
+            const stderrTail = String(review.stderrTail ?? '').trim().slice(-400);
+            const detail = `审查引擎故障（${opts.reviewBackend} exit ${review.exitCode}）：${stderrTail || String(review.output ?? '').trim().slice(-200) || '无输出'}`;
+            appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: review.exitCode, stderr_tail: stderrTail.slice(-400) });
+            moveCard(root, taskId, 'reviewing', 'blocked');
+            archiveIncident(repoRoot, taskId, root, qdir, detail);
+            await settleNotify(repoRoot, taskId, 'blocked', detail);
+            await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+          }
+          // 契约行补问（⑤）：引擎正常、有审查输出、只缺 REVIEW_SUMMARY 汇总行——先补问
+          // 一次再判罚。直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）；
+          // 补问仍解析不到才落回保守判罚。补问输入只有上轮输出，不重放 diff（不重开审查）。
+          if (!verdict && String(review.output ?? '').trim()) {
+            budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
+            const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
+            const retryPromptText = buildReviewRetryPrompt(review.output);
+            fs.writeFileSync(retryPromptFile, retryPromptText);
+            const retry = await spawnReviewer({ promptFile: retryPromptFile, model: effReviewModel, maxTurns: 6 });
+            const retryVerdict = parseReviewVerdict(retry.output ?? '');
+            writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
+            appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
+            if (retryVerdict) verdict = retryVerdict;
+          }
+          // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
+          // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
+          appendEvent(qdir, 'review_verdict', {
+            blockers: verdict?.blockers ?? -1,
+            suggestions: verdict?.suggestions ?? 0,
+            notes: verdict?.notes ?? 0,
+          });
+          failureOutput = String(review.output ?? '');
         }
-        // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
-        // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
-        writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
-        appendEvent(qdir, 'review_verdict', {
-          blockers: verdict?.blockers ?? -1,
-          suggestions: verdict?.suggestions ?? 0,
-          notes: verdict?.notes ?? 0,
-        });
 
         const blockers = verdict?.blockers ?? 1; // 解析不到按有阻塞保守处理
         if (blockers > 0) {
@@ -1390,7 +1510,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           // 门禁摘要口径避开 REVIEW_SUMMARY 字面量：mock 判角色已改显式契约（2026-11-20），
           // 该规避不再承重，文案保留不动（selfcheck grepZero 仍钉 gateCriteria 不含契约行），
           // 契约行全文只从失败输出段进 prompt
-          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter, { gateName: 'review_blockers（LLM 独立审查）', gateCriteria: `reviewer 独立审查判定存在 ${blockers} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`, prevResult: claimed }));
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', failureOutput, reviewIter, { gateName: 'review_blockers（LLM 独立审查）', gateCriteria: blockersCriteria(blockers), prevResult: claimed }));
           moveCard(root, taskId, 'reviewing', 'running');
           continue;
         }

@@ -30,6 +30,16 @@
 //   ORCH_MOCK_REVIEW_PARAPHRASE_ONCE=1   仅本子进程第一次复核改写、重试后逐字（测重试恢复；
 //                                        模块级计数器，runOrch 每次新子进程天然复位——
 //                                        勿在同进程直接 import mock 断言次数）
+// 双 critic 并行审查注入（orch-dual-critic-review 卡 2026-11-20）：两只 reviewer 在同一
+// 进程内并行 spawn，env 无法按次注入——按 spawn 的 model 参数区分（编排器副 critic 传
+// secondModel）：
+//   ORCH_MOCK_REVIEW_SECOND_MODEL=<名>   model 等于该值的 reviewer 会话判为副 critic，
+//                                        以下三个旋钮只对副 critic 生效（不设 = 无副 critic 注入）
+//   ORCH_MOCK_REVIEW_SECOND_BLOCKERS=<n> 副 critic 输出的阻塞项数；首条复刻主 critic 的
+//                                        第一条阻塞项文本（跨 critic 去重的「同条」饵），
+//                                        其余为独立项——并集 = 主 n1 + 副 n2 - 去重数
+//   ORCH_MOCK_REVIEW_SECOND_FAIL=1       副 critic 引擎故障（exitCode=1 无契约块）
+//   ORCH_MOCK_REVIEW_SECOND_NOVERDICT=1  副 critic 活着但无 REVIEW_SUMMARY 契约块
 // 角色判定：spawn 显式 role 优先（引擎各 spawn 点都传，见 types.mjs），未传才回落正文嗅探。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
@@ -49,7 +59,7 @@ const noVerdictOnce = process.env.ORCH_MOCK_REVIEW_NOVERDICT_ONCE === '1';
 
 export const mockBackend = {
   name: 'mock',
-  async spawn({ promptFile, cwd, onEvent, readonly, role }) {
+  async spawn({ promptFile, cwd, onEvent, readonly, role, model }) {
     // ORCH_MOCK_SPAWN_ERROR：模拟 claude CLI 缺失/启动失败（backend.spawn reject）
     if (process.env.ORCH_MOCK_SPAWN_ERROR === '1') {
       throw new Error('mock: spawn 注入失败（ORCH_MOCK_SPAWN_ERROR=1，模拟 claude CLI 不可用）');
@@ -420,9 +430,14 @@ export const mockBackend = {
     }
 
     if (isReviewer) {
+      // 双 critic 注入分流（orch-dual-critic-review 卡 2026-11-20）：两只 reviewer 同进程
+      // 并行 spawn，env 无法按次注入——按 spawn 的 model 参数与 ORCH_MOCK_REVIEW_SECOND_MODEL
+      // 匹配判副 critic；副 critic 旋钮只覆盖 FAIL/NOVERDICT/BLOCKERS 三个注入面
+      const isSecondCritic = Boolean(process.env.ORCH_MOCK_REVIEW_SECOND_MODEL) && model === process.env.ORCH_MOCK_REVIEW_SECOND_MODEL;
+      const failEnv = isSecondCritic ? process.env.ORCH_MOCK_REVIEW_SECOND_FAIL : process.env.ORCH_MOCK_REVIEW_FAIL;
       // ORCH_MOCK_REVIEW_FAIL=1：审查引擎故障注入（exitCode=1、无契约块、错误文本进
       // output——复刻真实 claude CLI 死法：result 事件携带 "Not logged in" 文本）
-      if (process.env.ORCH_MOCK_REVIEW_FAIL === '1') {
+      if (failEnv === '1') {
         onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-fail' });
         return {
           exitCode: 1,
@@ -436,7 +451,7 @@ export const mockBackend = {
       // 契约块——既有保守路径（补问仍失败 → blockers=1 进审查返工）的回归锚
       // ORCH_MOCK_REVIEW_NOVERDICT_ONCE=1：仅本子进程第一次审查无汇总行，补问轮补出
       //（测契约行补问 resolved=true 恢复链路；计数口径同 PARAPHRASE_ONCE）
-      const noVerdict = process.env.ORCH_MOCK_REVIEW_NOVERDICT === '1' || (noVerdictOnce && reviewCall === 0);
+      const noVerdict = (isSecondCritic ? process.env.ORCH_MOCK_REVIEW_SECOND_NOVERDICT : process.env.ORCH_MOCK_REVIEW_NOVERDICT) === '1' || (noVerdictOnce && reviewCall === 0);
       if (noVerdictOnce) reviewCall++;
       if (noVerdict) {
         onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-noverdict' });
@@ -447,13 +462,28 @@ export const mockBackend = {
           pid: process.pid,
         };
       }
-      const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      const blockersEnv = isSecondCritic && process.env.ORCH_MOCK_REVIEW_SECOND_BLOCKERS !== undefined
+        ? process.env.ORCH_MOCK_REVIEW_SECOND_BLOCKERS
+        : process.env.ORCH_MOCK_REVIEW_BLOCKERS;
+      const blockers = parseInt(blockersEnv ?? '0', 10) || 0;
       // 审查 token 上报注入：集成测试驱动「审查段熔断」路径（reviewer 记账 + 循环顶收敛）
       const reviewTokens = parseInt(process.env.ORCH_MOCK_REVIEW_TOKENS ?? '0', 10) || 0;
       if (reviewTokens > 0) onEvent({ type: 'budget_snapshot', tokens_in: reviewTokens, tokens_out: 0 });
+      // 阻塞项逐条成行且行内带「阻塞」字样（并集去重的 extractBlockerItems 依赖行级提取；
+      // n 条 n 行使提取数与契约计数恒一致）。副 critic 首条复刻主 critic 第一条文本——
+      // 跨 critic「同条」饵（主 critic 无阻塞项时无同条可复刻，全部独立项）
+      let itemLines;
+      if (blockers > 0) {
+        const copyFirst = isSecondCritic && (parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0) > 0;
+        const distinctText = (k) => (isSecondCritic ? `副审查者独立发现第 ${k} 项` : `验收标准第 ${k} 条未实现`);
+        itemLines = [
+          ...(copyFirst ? ['- 🔴 阻塞：mock：验收标准第 1 条未实现（mock 注入）'] : []),
+          ...Array.from({ length: blockers - (copyFirst ? 1 : 0) }, (_, k) => `- 🔴 阻塞：mock：${distinctText(k + 1)}（mock 注入）`),
+        ];
+      }
       const output =
         blockers > 0
-          ? `🔴 阻塞（1 个）\n- mock：验收标准第 ${blockers} 条未实现\nREVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`
+          ? [`🔴 阻塞（${blockers} 个）`, ...itemLines, `REVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`].join('\n')
           : `🟢 无阻塞\nREVIEW_SUMMARY: blockers=0 suggestions=1 notes=0\n- 🟡 建议：mock 建议项（不阻塞）`;
       onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review' });
       return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 50 }, pid: process.pid };

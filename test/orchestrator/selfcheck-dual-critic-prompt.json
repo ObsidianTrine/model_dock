@@ -1,0 +1,11 @@
+{
+  "file": "../../.agents/scripts/orchestrator/prompt.mjs",
+  "countAtLeast": [
+    { "pattern": "export function extractBlockerItems\\(text\\)", "atLeast": 1 },
+    { "pattern": "export function blockerKey\\(item\\)", "atLeast": 1 },
+    { "pattern": "\\[\\^a-z0-9\\\\u4e00-\\\\u9fff\\]", "atLeast": 1 },
+    { "pattern": "不阻塞", "atLeast": 1 }
+  ],
+  "grepZero": [],
+  "fileSizeMaxKB": 120
+}
