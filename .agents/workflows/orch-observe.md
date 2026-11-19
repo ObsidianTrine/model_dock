@@ -13,7 +13,7 @@
 
 ## reconcile（狗粮对账）
 
-`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。**燃油账**（2026-11-02）：实测 token × 模型单价 = USD——价目经 `POST /_modeldock/pricing-lookup`（admin 面，需 `gatewayAdmin: true`）取网关权威价目（`~/.modeldock/pricing.json` 用户覆盖 > models.dev 目录牌价），取不到价按 $0 计并列 unpriced 清单；网关不可达回落陈价目缓存（logs/pricing-cache.json，标注「陈价目」），价目完全不可得时只出 token 账不打断对账主体。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）。纯只读（除 --fix-states）。事故调查包（incident.md）的「上游海况」段复用同一投影（不过滤失败请求）：时间窗内请求/失败分布、路由事件痕迹（failover/down_all）、时延 p50/p95、实测用量与最近失败现场——回答「预算烧在哪」。
+`reconcile [task-id]`：① 用量对账——自报账（events budget_snapshot）vs 网关实测账（转发日志 usage），分歧率 = |自报−实测|/max，网关零流量标 ⚠（worker 绕过了狗粮）；启用条件 = workflow.json `gatewayLogDir` 已配置。**燃油账**（2026-11-02）：实测 token × 模型单价 = USD——价目经 `POST /_modeldock/pricing-lookup`（admin 面，需 `gatewayAdmin: true`）取网关权威价目（`~/.modeldock/pricing.json` 用户覆盖 > models.dev 目录牌价），取不到价按 $0 计并列 unpriced 清单；网关不可达回落陈价目缓存（logs/pricing-cache.json，标注「陈价目」），价目完全不可得时只出 token 账不打断对账主体。② 状态对账——git merge 现实 vs 队列落位：「已合并未落位」`--fix-states` 修复、「账面合并但 git 无实证」警告（squash/改史）；合并判据按**提交数门**核实（merge 提交未实际并入任何提交 = 空合并/标题残留，列 emptyMerges 警示桶；同名分支仍在且与基准持平列 suspects 嫌疑桶）——两桶**只提示不自动修**（落位方向错了不可逆，交人工对账）。纯只读（除 --fix-states）。事故调查包（incident.md）的「上游海况」段复用同一投影（不过滤失败请求）：时间窗内请求/失败分布、路由事件痕迹（failover/down_all）、时延 p50/p95、实测用量与最近失败现场——回答「预算烧在哪」。
 
 ## 舰队控制台（fleet-console，跨仓聚合）
 
