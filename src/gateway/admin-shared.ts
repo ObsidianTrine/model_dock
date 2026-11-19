@@ -1,10 +1,10 @@
 /** admin 门共享底座：请求上下文类型与跨域小帮手（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
 import http from 'node:http'
 import { ConfigError, configStatKey, mutateConfig } from '../config/store.js'
-import { SecretsError } from '../config/secrets.js'
+import { SecretsError, makeKeyRef, type SecretBackend } from '../config/secrets.js'
 import { AdapterError } from '../adapters/types.js'
 import { UpdateError } from '../update/check.js'
-import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
+import { DEFAULT_GATEWAY_PORT, type Config, type ProviderConfig } from '../config/types.js'
 import { reloadRuntime, type GatewayRuntime } from './state.js'
 import { UpstreamError } from './relay.js'
 import { t, type Bilingual } from '../util/i18n.js'
@@ -130,6 +130,75 @@ export async function persistConfig(rt: GatewayRuntime, fn: (cfg: Config) => voi
   await mutateConfig(fn)
   if ((await configStatKey()) === before) return
   await reloadRuntime(rt) // reloadRuntime 内统一触发保存后 overview 预热（perf-p2-polish）
+}
+
+/** 密钥写入计划（writeKeySlotLocked 产出、rollbackKeyWrite 消费）。 */
+export interface KeyWritePlan {
+  pool: boolean
+  /** secrets.json / 钥匙环条目 id（setSecret 第一参） */
+  secretId: string
+  /** 写入 config 的 key_ref */
+  ref: string
+  backend: SecretBackend
+  /** 建池（落盘时池空）为 true：回滚整体摘除 keys 还原单 key 态；既有池追加为 false：按 ref 精确摘除 */
+  createdPool: boolean
+  /** 单 key 覆盖前的旧 key_ref（'' = 原本无 key）；池路径不使用 */
+  prevKeyRef: string
+}
+
+/** 池追加 / 单 key 覆盖的槽位推导 + config 写入。**必须在 mutateConfig / persistConfig 的写锁内
+ *  调用**（审计 F3）：锁外按内存态预生成槽位时，钥匙环读取等 await 可达百 ms，期间另一并发写者
+ *  可先提交一个同槽 key，本写者沿用旧推导会把两个 key 挤进同一槽（后写 setSecret 覆盖先写，先写
+ *  方丢 key）。mutateConfig 锁内重读盘，这里拿到的 t 是盘上最新态，锁内推导天然互斥。
+ *  planPoolKeys：调用方计划期（内存态）池引用快照，兜「运行态/盘上分歧」窗口——盘上池被清时仍按
+ *  计划期池长续号（web-key-pool 建池迁移钉子：盘上 keys 空且 key_ref 在池外，追加建池迁 key_ref
+ *  入池首、新引用 = 计划期池长+1）；盘上池非空一律走追加（盘上为准——计划期未见池但盘上已建池时
+ *  也追加，不再单 key 覆盖静默退出轮转）。taken 并收计划期与盘上两份引用，两个真相来源都不撞。 */
+export function writeKeySlotLocked(t: ProviderConfig, id: string, backend: SecretBackend, planPoolKeys: string[]): KeyWritePlan {
+  const poolKeys = Array.isArray(t.keys) ? t.keys.filter((k): k is string => typeof k === 'string') : []
+  const hadPoolEntries = poolKeys.length > 0
+  if (!hadPoolEntries && planPoolKeys.length === 0) {
+    const prevKeyRef = typeof t.key_ref === 'string' ? t.key_ref : ''
+    const ref = makeKeyRef(backend, id)
+    t.key_ref = ref
+    return { pool: false, secretId: id, ref, backend, createdPool: false, prevKeyRef }
+  }
+  const createdPool = !hadPoolEntries
+  const taken = new Set<string | undefined>([...planPoolKeys, ...poolKeys, t.key_ref])
+  let slot = planPoolKeys.length + 1
+  let ref = makeKeyRef(backend, `${id}-k${slot}`)
+  while (taken.has(ref)) {
+    slot++
+    ref = makeKeyRef(backend, `${id}-k${slot}`)
+  }
+  const pool = (t.keys ??= [])
+  // 建池先把 key_ref 迁入池首——providerKeyRefs 池非空时只认 keys，不迁移原 key 静默退出轮转
+  //（2026-11-12 审查 P1-2，与 CLI set-key --add 同口径）
+  if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
+  pool.push(ref)
+  return { pool: true, secretId: `${id}-k${slot}`, ref, backend, createdPool, prevKeyRef: '' }
+}
+
+/** 审计 F5 回滚：persistConfig 已把新 ref 落盘、锁外 setSecret 失败（密钥没写上）——配置不得留
+ *  「指向无值 ref」的残面（池：轮转常撞空槽空转；单 key：转发无 key 可用）。经 persistConfig 走：
+ *  有改动才触发热加载，转发即刻回到回滚后的引用集。 */
+export async function rollbackKeyWrite(rt: GatewayRuntime, id: string, plan: KeyWritePlan): Promise<void> {
+  await persistConfig(rt, (c) => {
+    const t = c.providers[id]
+    if (!t) return
+    if (plan.pool) {
+      if (plan.createdPool) {
+        delete t.keys
+      } else {
+        const pool = t.keys
+        if (!pool) return
+        const i = pool.indexOf(plan.ref)
+        if (i >= 0) pool.splice(i, 1)
+      }
+    } else {
+      t.key_ref = plan.prevKeyRef
+    }
+  })
 }
 
 /** 服务 → profile 解析（UI 按「服务」操作、底层路由单元是 profile）：
