@@ -62,7 +62,8 @@ import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstr
 import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
 import { observeFleetForRun } from './orchestrator/fleet.mjs';
 import { decideDispatchForRun, normalizeEnvelope } from './orchestrator/dispatch.mjs';
-import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, resolveWatchdogModel, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, resolveWatchdogModel, resolveWatchdogMaxChecks, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { createXteAlarm } from './orchestrator/xte.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
@@ -604,10 +605,13 @@ async function cmdRun(repoRoot, taskId, opts) {
     playbooksDir: path.join(repoRoot, '.agents', 'workflows'),
   };
 
-  // ---- 确定性偏航报警（xte = cross track error，observe-only）：纯规则检查，只留痕
-  // 不动作（kill/熔断仍归预算与看门狗）。三条规则：no_commit（连续 2 个 worker 会话零
-  // 新提交）、test_loop（npm_test 连续 2 轮 fail）、scope_drift（越界文件数达阈值）。
-  const xte = createXteAlarm(qdir, worktree);
+  // ---- 确定性偏航报警（xte = cross track error）：纯规则检查，与 LLM 看门狗互补。
+  // 三条规则：no_commit（连续 2 个 worker 会话零新提交）、test_loop（npm_test 连续 2 轮
+  // fail）、scope_drift（越界文件数达阈值）。observe 档只留痕不动作（kill/熔断仍归预算
+  // 与看门狗）；no_commit 在 watchdog.mode=actuate 下升熔断（2026-11-15 质量专项 P1-⑥，
+  // worker 空转烧钱有熔断）——与看门狗 circuit_break 同款落位，见下方 afterWorkerSession
+  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。
+  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log });
 
   const events = readEvents(qdir);
   let debugIter = debugIterations(events);
@@ -740,7 +744,15 @@ async function cmdRun(repoRoot, taskId, opts) {
   // LLM 决策留底（trace.mjs）：workflow.json trace 键控制（缺省开启），watchdog/reviewer
   // 的模型输入与原始输出落盘 logs/<taskId>/decisions/ 供复盘；enabled=false 不传 traceDir。
   const traceCfg = cfg.trace;
-  const watchdogState = createWatchdogState(cfg.watchdog);
+  // maxChecks 按卡轮次预算缩放（2026-11-15 质量专项 P1-⑥）：写死 5 对大预算卡过早
+  // watchdog_disabled、小预算卡检查过密。meta.budget.max_turns 是 worker 会话的真实轮次
+  // 上限（上方预算校准段已并入 budgetProfiles 覆盖，缺省 50），定式论证见
+  // resolveWatchdogMaxChecks 的 why 注释；worktree 内卡可逐卡调大 max_turns，检查次数
+  // 随之放宽，无需另配 watchdog 键。
+  const watchdogState = createWatchdogState({
+    ...cfg.watchdog,
+    maxChecks: resolveWatchdogMaxChecks({ maxTurns: meta.budget.max_turns, everyTurns: cfg.watchdog.everyTurns }),
+  });
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
@@ -990,7 +1002,24 @@ async function cmdRun(repoRoot, taskId, opts) {
         }
         break;
       }
-      xte.afterWorkerSession(); // 偏航 no_commit：会话收尾对账 HEAD（observe-only，只留痕）
+      // 偏航 no_commit 消费点：actuate 档命中（连续 2 个 worker 会话零新提交）→ 与看门狗
+      // circuit_break 同款落位（circuit_breaker 留痕 → 杀在跑进程树（有则杀）→ 卡 blocked
+      // → 事故归档 → 通报 → return 收敛走 finally 清理）。触发时 worker spawn 已收尾
+      // （livePid 已清），kill 是防御性的；observe 档返回 null / actuate:false，行为同旧
+      // （只留痕，流程照常走门禁与审查）。
+      const xteHit = xte.afterWorkerSession();
+      if (xteHit?.actuate) {
+        appendEvent(qdir, 'circuit_breaker', { reason: 'xte_no_commit', detail: String(xteHit.detail).slice(0, 300) });
+        if (livePid) {
+          log(`⏱ 偏航熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
+          killTree(livePid);
+        }
+        moveCard(root, taskId, 'running', 'blocked');
+        archiveIncident(repoRoot, taskId, root, qdir, '偏航 no_commit（actuate：连续 2 个 worker 会话零新提交）');
+        await settleNotify(repoRoot, taskId, 'blocked', '偏航 no_commit：连续 2 个 worker 会话零新提交（actuate）');
+        log('⛔ 偏航熔断（xte no_commit，actuate）：worker 疑似空转烧钱——任务转 blocked/，人工决策后再继续。');
+        return;
+      }
 
       // ---- 自报不可信：先解析契约块，再亲自跑门禁 ----
       const claimed = parseResultBlock(workerOutput);
@@ -1450,60 +1479,6 @@ async function failTaskToBlocked(repoRoot, root, qdir, taskId, err) {
     return reason;
   }
   return null;
-}
-
-/**
- * 偏航报警（xte = cross track error 航向偏差角，observe-only）：确定性规则检查，
- * 与 LLM 看门狗互补——看门狗靠模型判断「有没有实质进展」，这里只认机器可复核的
- * 硬信号。三条规则：
- *   no_commit   连续 2 个 worker 会话零新提交（HEAD 计数会话首尾对账）
- *   test_loop   npm_test 门禁连续 2 轮 fail（从 gate_result 事件判定）
- *   scope_drift scope_purity 越界文件数 ≥ max(3, files_hint 长度)
- * 每规则每任务至多报一次：内存 Set + 事件播种（resume 跨进程也不重报）。
- * 只留痕不动作——kill/熔断仍归预算与看门狗，报警是给人和夜跑摘要看的信号。
- */
-function createXteAlarm(qdir, worktree) {
-  const fired = new Set(readEvents(qdir).filter((e) => e.type === 'xte_alarm').map((e) => e.rule));
-  const report = (rule, detail) => {
-    if (fired.has(rule)) return;
-    fired.add(rule);
-    appendEvent(qdir, 'xte_alarm', { rule, detail });
-    log(`⚠ 偏航报警（${rule}，只留痕不动作）：${detail}`);
-  };
-  const headCount = () => {
-    try {
-      return Number.parseInt(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 10);
-    } catch {
-      return null; // git 异常不判（缺数据宁可漏报不误报）
-    }
-  };
-  let sessionStart = null; // 本会话起点的 HEAD 提交数
-  let zeroStreak = 0; // 连续零新提交的会话数
-  return {
-    beforeWorkerSession() {
-      sessionStart = headCount();
-    },
-    afterWorkerSession() {
-      if (sessionStart === null) return;
-      const end = headCount();
-      if (end === null) return;
-      zeroStreak = end === sessionStart ? zeroStreak + 1 : 0;
-      sessionStart = null;
-      if (zeroStreak >= 2) report('no_commit', `连续 ${zeroStreak} 个 worker 会话零新提交（HEAD 停在 ${end}）——worker 可能空转`);
-    },
-    testLoop() {
-      const results = readEvents(qdir).filter((e) => e.type === 'gate_result' && e.gate === 'npm_test').map((e) => e.result);
-      if (results.length >= 2 && results[results.length - 1] === 'fail' && results[results.length - 2] === 'fail') {
-        report('test_loop', 'npm_test 门禁连续 2 轮 fail——修复可能在同一处打转');
-      }
-    },
-    scopeDrift(outsideCount, hintLen) {
-      const threshold = Math.max(3, hintLen);
-      if (outsideCount >= threshold) {
-        report('scope_drift', `scope_purity 越界文件 ${outsideCount} 个 ≥ 阈值 ${threshold}——改动面可能失控`);
-      }
-    },
-  };
 }
 
 /** 海况数字人性化：≥1e6 → M、≥1e3 → k；时延 ms → s。 */

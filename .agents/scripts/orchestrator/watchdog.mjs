@@ -5,8 +5,9 @@
 // 事件时间线尾部），调用一次性 headless LLM 判断「是否有实质进展」，期望输出
 // JSON {progressing, reason}。双档模式：observe（缺省，只记 watchdog_suspect 事件）|
 // actuate（连续 2 次 suspect → 既有 stuck 熔断路径 kill→blocked）。
-// 防烧钱上界：每任务检查总次数 ≤5（超限记 watchdog_disabled 后不再触发）；输入截断
-// （时间线尾部 ≤20 条、每条 ≤200 字符）；自身错误记 watchdog_error（每任务 ≤3 条后静默）。
+// 防烧钱上界：每任务检查总次数按卡轮次预算缩放 clamp(ceil(maxTurns/everyTurns), 3, 15)
+// （resolveWatchdogMaxChecks，缺省预算 50 → 3 次；超限记 watchdog_disabled 后不再触发）；
+// 输入截断（时间线尾部 ≤20 条、每条 ≤200 字符）；自身错误记 watchdog_error（每任务 ≤3 条后静默）。
 // 保守原则：解析失败/进程失败一律按 progressing=true 处理——看门狗误报的代价必须小于
 // 打扰正常任务，绝不因看门狗自身故障杀掉在跑的 worker。
 
@@ -16,12 +17,43 @@ import path from 'node:path';
 import { writeDecisionTrace } from './trace.mjs';
 
 import { coalesceEvents } from './events.mjs';
+import { DEFAULT_BUDGET } from './queue.mjs';
 
 /** 看门狗单次检查的 worker 会话轮次上限（只读判断，1-2 轮足够；收紧防跑飞）。 */
 export const WATCHDOG_MAX_TURNS = 4;
+/** 检查触发间隔缺省（每 N 个 worker_turn 触发一次；workflow.json watchdog.everyTurns 可调）。 */
+export const WATCHDOG_EVERY_TURNS_DEFAULT = 20;
+/** maxChecks 缩放上下界（resolveWatchdogMaxChecks；论证见其 why 注释）。 */
+export const WATCHDOG_MAX_CHECKS_MIN = 3;
+export const WATCHDOG_MAX_CHECKS_MAX = 15;
 /** 时间线截断：尾部 ≤20 条、每条 ≤200 字符。 */
 export const WATCHDOG_TIMELINE_MAX_ENTRIES = 20;
 export const WATCHDOG_TIMELINE_ENTRY_MAX_CHARS = 200;
+
+/**
+ * maxChecks 按卡轮次预算缩放（2026-11-15 质量专项 P1-⑥）：定式
+ * clamp(ceil(maxTurns / everyTurns), 3, 15)。写死 5 的旧口径对大预算卡过早
+ * watchdog_disabled（大卡后半程失去监控）、对小预算卡检查过密（每次检查占轮次预算
+ * 比例过高）。定式论证：
+ * - ceil 而非 floor：floor(maxTurns/everyTurns) 是单会话内实际触发窗数，ceil 给 +1 次
+ *   余量——turn 计数跨 fixup 会话累计（见 createWatchdogState.s.turns），一次返工就能
+ *   吃掉这份余量；且 maxTurns 恰好整除 everyTurns 时 floor 会把「最后一次检查」与
+ *   「disabled」挤在同一轮，ceil 让 disabled 至少晚一个窗。
+ * - 下界 3：actuate 熔断需连续 2 次 suspect 结论，低于 3 次连一次完整判定流程
+ *   （2 连 suspect + 1 次翻案机会）都走不完，actuate 档形同虚设；小预算卡检查开销
+ *   占比高，3 是采样收益与看门狗自身成本的平衡下限。
+ * - 上界 15：每次检查是一次 headless 判定会话（≤WATCHDOG_MAX_TURNS 轮），15 封顶把
+ *   看门狗自身开销约束在 ~60 轮量级；everyTurns=20 下覆盖到 300 轮，再大的卡后半程
+ *   放弃监控——宁可漏判不再烧钱，超大预算卡由 wall/token 熔断兜底。
+ * 卡未配 maxTurns 用缺省预算 50 推导（DEFAULT_BUDGET.max_turns 单一事实来源）；输入
+ * 非法（非有限正数）同口径回落缺省不抛错——看门狗配置问题绝不阻断编排。
+ */
+export function resolveWatchdogMaxChecks({ maxTurns, everyTurns } = {}) {
+  const et = Number.isInteger(everyTurns) && everyTurns > 0 ? everyTurns : WATCHDOG_EVERY_TURNS_DEFAULT;
+  const mt = Number.isFinite(maxTurns) && maxTurns > 0 ? maxTurns : DEFAULT_BUDGET.max_turns;
+  const raw = Math.ceil(mt / et);
+  return Math.min(WATCHDOG_MAX_CHECKS_MAX, Math.max(WATCHDOG_MAX_CHECKS_MIN, raw));
+}
 
 /** 从 LLM 输出解析 {progressing, reason}；解析不到返回 null（调用方按保守处理）。
  *  容忍三种形态：裸 JSON、```json fenced block、JSON 前后带解释文字。 */
@@ -175,8 +207,10 @@ export function makeWatchdogSpawnFn(backend, { cwd, model, envPatch } = {}) {
  * 挂钩处的可测内核；事件落盘由调用方按返回值执行）。
  * 约定：onTurn() 在 worker 每个 worker_turn 事件时调一次（含 pending 期间的 turn——
  * 防重入跳过的是「触发」，不是计数，触发点始终落在 N 的整数倍上）。
+ * maxChecks 编排器侧不再用写死缺省，改传 resolveWatchdogMaxChecks 的推导值；缺省 5
+ * 仅兜底本状态机的独立调用方（直测/其他工具），保证无参构造行为不变。
  */
-export function createWatchdogState({ mode = 'observe', everyTurns = 20, maxChecks = 5, maxErrors = 3 } = {}) {
+export function createWatchdogState({ mode = 'observe', everyTurns = WATCHDOG_EVERY_TURNS_DEFAULT, maxChecks = 5, maxErrors = 3 } = {}) {
   const s = {
     turns: 0, // worker_turn 计数（跨 fixup 会话累计，按任务口径）
     checks: 0, // 已发起的 watchdogCheck 次数

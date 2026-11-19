@@ -1,0 +1,15 @@
+{
+  "file": "../../.agents/scripts/orchestrator/xte.mjs",
+  "countAtLeast": [
+    { "pattern": "export function createXteAlarm\\(qdir, worktree, \\{ mode = 'observe'", "atLeast": 1 },
+    { "pattern": "const act = actuate && mode === 'actuate'", "atLeast": 1 },
+    { "pattern": "actuate: true", "atLeast": 1 },
+    { "pattern": "actuate 已升级熔断", "atLeast": 1 },
+    { "pattern": "import \\{ readEvents, appendEvent \\} from './events\\.mjs'", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "observe-only",
+    "function createXteAlarm\\(qdir, worktree\\) \\{"
+  ],
+  "fileSizeMaxKB": 30
+}
