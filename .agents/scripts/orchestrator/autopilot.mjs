@@ -5,9 +5,9 @@
 //   - deps 类型永不自动（依赖升级一律人工裁决）；
 //   - feature 类型永不直接自动（上游管线：research → spec → 人工审设计 → spec build）；
 //   - autoSubmitTypes 白名单圈定可自动提交的卡类型（缺省 ["docs"]，最保守）；
-//   - files_hint 命中 corePaths/releasePaths 永不自动（hintsOverlap 全通配判重叠——
-//     核心路径/发布流水线由 classifyChange 的 L2/L3 分级闸门兜底，这里提前挡掉省一轮
-//     worker 烧钱）。
+//   - files_hint 命中 corePaths/releasePaths 永不自动（hardZoneReason 单一口径、文件级
+//     精确判定 hintsIntersectExact——核心路径/发布流水线由 classifyChange 的 L2/L3 分级
+//     闸门兜底，这里提前挡掉省一轮 worker 烧钱）。
 // 注意：自动提交 ≠ 自动合并——提交的卡 gate 覆写为 L1，实际自动合并仍由门禁对真实
 // 改动的分级裁决（drift 降级 / scope 越界 / 实际 L2 照样挡回人工闸门）。
 

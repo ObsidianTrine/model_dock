@@ -65,9 +65,14 @@ describe('dynamic dispatch > difficultyPref（卡难度偏好）', () => {
     expect(difficultyPref({ meta: { tier: 'ahead-1' }, tier: { token: 'tk', tokenEnv: 'X' } })).toBe('claude-headless')
   })
 
-  it('files_hint 命中核心/发布路径 → claude；路径表为空 = 航道未设限不判；无信号 → null', () => {
+  it('files_hint 命中核心/发布路径 → claude；清单外同族 src 文件不判高难度；路径表为空 = 航道未设限不判；无信号 → null', () => {
     const cfg = { corePaths: ['src/gateway/**'], releasePaths: [] }
     expect(difficultyPref({ meta: { files_hint: ['src/gateway/server.ts'] }, cfg })).toBe('claude-headless')
+    // 真命中发布路径文件同样偏好 claude（文件级精确口径）
+    expect(difficultyPref({ meta: { files_hint: ['scripts/build-sea.mjs'] }, cfg: { corePaths: [], releasePaths: ['scripts/build-sea.mjs'] } })).toBe('claude-headless')
+    // 反例：清单外 src 文件（曾用段首粗口径误判高难度，白烧 claude 凭据）
+    expect(difficultyPref({ meta: { files_hint: ['src/presets/data.ts'] }, cfg })).toBeNull()
+    expect(difficultyPref({ meta: { files_hint: ['src/gateway/other.ts'] }, cfg: { corePaths: ['src/gateway/server.ts'], releasePaths: [] } })).toBeNull()
     expect(difficultyPref({ meta: { files_hint: ['**'] }, cfg: { corePaths: [], releasePaths: [] } })).toBeNull()
     expect(difficultyPref({ meta: {} })).toBeNull()
   })

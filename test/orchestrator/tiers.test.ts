@@ -56,11 +56,14 @@ describe('tiers > resolveTier', () => {
     expect(resolveTier({ tier: 'ahead-4' }, CFG, {})).toMatchObject({ inactive: 'token', name: 'ahead-4', tokenEnv: 'T_A4' })
   })
 
-  it('自动升级：files_hint 命中 corePaths → ahead-4（前进4）/auto；未命中不升级；token 未设仍标 inactive', () => {
-    const hit = resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, { T_A4: 'tok' })
+  it('自动升级：files_hint 真命中 corePaths → ahead-4（前进4）/auto；清单外同族 src 文件不升档；token 未设仍标 inactive', () => {
+    // 正例：清单内文件（文件级精确口径，CFG.corePaths = ['src/gateway/server.ts']）
+    const hit = resolveTier({ files_hint: ['src/gateway/server.ts'] }, CFG, { T_A4: 'tok' })
     expect(hit).toMatchObject({ name: 'ahead-4', auto: true, token: 'tok' })
+    // 反例：同目录不同文件（曾用段首粗口径误升档，白烧前进4 凭据）
+    expect(resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, { T_A4: 'tok' })).toBeNull()
     expect(resolveTier({ files_hint: ['docs/a.md'] }, CFG, { T_A4: 'tok' })).toBeNull()
-    expect(resolveTier({ files_hint: ['src/gateway/other.ts'] }, CFG, {})).toMatchObject({ inactive: 'token', auto: true })
+    expect(resolveTier({ files_hint: ['src/gateway/server.ts'] }, CFG, {})).toMatchObject({ inactive: 'token', auto: true })
   })
 })
 
