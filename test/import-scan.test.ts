@@ -458,18 +458,26 @@ describe('normalizeBaseUrl / isLocalBaseUrl 等价类', () => {
   })
 
   it('isLocalBaseUrl：回环段命中；恰含 127.0.0.1 子串的公网域名不误伤', () => {
-    for (const u of ['http://localhost:8080', 'http://127.0.0.1:8687', 'http://127.127.0.1', 'https://foo.localhost']) {
+    for (const u of [
+      'http://localhost:8080',
+      'http://localhost:8687',
+      'http://127.0.0.1:8687',
+      'http://127.127.0.1',
+      'https://foo.localhost',
+    ]) {
       expect(isLocalBaseUrl(u), u).toBe(true)
     }
-    for (const u of ['https://127.0.0.1.evil.com', 'https://example.com/127.0.0.1', 'https://api.example.com']) {
+    for (const u of ['https://127.0.0.1.evil.com', 'https://example.com/127.0.0.1', 'https://api.example.com', 'http://example.com']) {
       expect(isLocalBaseUrl(u), u).toBe(false)
     }
     // 非法 URL 走 includes 回落分支
     expect(isLocalBaseUrl('not-a-url-but-127.0.0.1-inside')).toBe(true)
     expect(isLocalBaseUrl('not-a-url')).toBe(false)
-    // 已知 quirk（钉住现状）：WHATWG hostname 对 IPv6 字面量带方括号（'[::1]'），
-    // 代码里的 `h === '::1'` 分支实际不可达 → [::1] 不视为本地。修复时同步改此断言。
-    expect(isLocalBaseUrl('http://[::1]:8687')).toBe(false)
+    // IPv6 回环：WHATWG URL hostname 对 IPv6 字面量恒带方括号（'[::1]'），实现内剥括号后命中
+    expect(isLocalBaseUrl('http://[::1]:8687/')).toBe(true)
+    expect(isLocalBaseUrl('https://[::1]:8687')).toBe(true)
+    // 非回环 IPv6 不拦
+    expect(isLocalBaseUrl('http://[2001:db8::1]:8687')).toBe(false)
   })
 })
 
@@ -516,6 +524,17 @@ describe('import scan · claude / zcode / all', () => {
         0o600
       )
       let out = await scanSources('claude')
+      expect(out).toHaveLength(1)
+      expect(out[0].skip_reason).toContain('本地代理')
+      expect(out[0].key).toBeNull()
+
+      // IPv6 回环同构：[::1] 指向本地网关的条目同样只产占位、不当直连上游收编
+      await atomicWrite(
+        path.join(h.home, '.claude', 'settings.json'),
+        JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://[::1]:8687' } }),
+        0o600
+      )
+      out = await scanSources('claude')
       expect(out).toHaveLength(1)
       expect(out[0].skip_reason).toContain('本地代理')
       expect(out[0].key).toBeNull()
