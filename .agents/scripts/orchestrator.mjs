@@ -52,7 +52,7 @@ import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './
 import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, isLandedDraft, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
-import { classifyChange, hintsOverlap } from './policy.mjs';
+import { classifyChange, hintsOverlap, hintsIntersectExact } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
 import { MEASURED_FUEL_POLL_MS, createExpiryRenewal, probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
@@ -345,12 +345,13 @@ function pilotageRequired(meta, cfg) {
 }
 
 /** 命中受限航道的具体原因；不在受限航道返回 null（cmdRun 报错与 drain 日志共用文案）。
- *  核心/发布路径都未配置时 hintsOverlap 与空集相交恒真（「完全通配=独占」语义），
- *  会把所有卡误判成引水卡——路径表为空 = 航道未设限，直接放行。 */
-function pilotageReason(meta, cfg) {
+ *  files_hint 对核心/发布路径清单用文件级精确口径（hintsIntersectExact）：曾用的顶层段
+ *  粗口径把 src/ 下任何卡都判进受限航道，drain 永不派出（2026-11-16 夜航性能卡整夜
+ *  pending）。核心/发布路径都未配置 = 航道未设限，直接放行。 */
+export function pilotageReason(meta, cfg) {
   if (meta.type === 'deps') return 'type: deps（依赖变更）';
   const restricted = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
-  if (restricted.length && hintsOverlap(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
+  if (restricted.length && hintsIntersectExact(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
   return null;
 }
 
