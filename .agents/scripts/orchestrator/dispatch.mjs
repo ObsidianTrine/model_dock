@@ -39,7 +39,7 @@ import { normalizeTierName, resolveGatewayAdmin } from './tiers.mjs';
 import { queueRoot, moveCard } from './queue.mjs';
 import { precheckModelAvailability, resolveProviderViaTier } from './availability.mjs';
 import { SHIP_HARNESS } from './fleet.mjs';
-import { hintsOverlap } from '../policy.mjs';
+import { hintsIntersectExact } from '../policy.mjs';
 import { claudeAvailable } from './backends/claude-headless.mjs';
 import { zcodeAvailable } from './backends/zcode-headless.mjs';
 
@@ -81,8 +81,11 @@ export function difficultyPref({ meta, tier, cfg } = {}) {
   if (name === 'ahead-1' || name === 'ahead-2') return 'zcode-headless';
   if (name === 'ahead-3' || name === 'ahead-4') return 'claude-headless';
   const restricted = [...(cfg?.corePaths ?? []), ...(cfg?.releasePaths ?? [])];
-  // 路径表为空 = 航道未设限（hintsOverlap 与空集相交恒真，与 pilotageReason 同一防误判）
-  if (restricted.length && hintsOverlap(meta?.files_hint, restricted)) return 'claude-headless';
+  // 路径表为空 = 航道未设限（hintsIntersectExact 空清单=不相交，guard 双保险与 pilotageReason 同款）。
+  // 文件级精确口径（2026-11-20 与 pilotageReason/tiers/sail 同族对齐）：曾用的顶层段粗口径把
+  // src/ 下任何卡都判「命中核心/发布路径」强制偏好 claude，清单外文件（如 src/presets/data.ts）
+  // 白烧高难度船凭据；难度信号语义是「真命中核心/发布路径」而非「同族前缀」。
+  if (restricted.length && hintsIntersectExact(meta?.files_hint, restricted)) return 'claude-headless';
   return null;
 }
 
