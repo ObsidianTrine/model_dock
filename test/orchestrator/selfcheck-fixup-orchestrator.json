@@ -1,0 +1,14 @@
+{
+  "file": "../../.agents/scripts/orchestrator.mjs",
+  "countAtLeast": [
+    { "pattern": "gateName: fixup\\.gate, gateCriteria: fixup\\.criteria, prevResult: claimed", "atLeast": 1 },
+    { "pattern": "gateName: uiFixup\\.gate, gateCriteria: uiFixup\\.criteria, prevResult: claimed", "atLeast": 1 },
+    { "pattern": "prevResult: claimed", "atLeast": 4 },
+    { "pattern": "criteria: cmdCriteria\\(", "atLeast": 5 },
+    { "pattern": "return \\{ gate: g\\.gate, trigger: g\\.trigger, criteria: g\\.criteria, output: e\\.output \\}", "atLeast": 1 },
+    { "pattern": "acceptance_gap（验收申报对账）", "atLeast": 1 },
+    { "pattern": "review_blockers（LLM 独立审查）", "atLeast": 1 }
+  ],
+  "grepZero": ["REVIEW_SUMMARY: blockers=.*gateCriteria"],
+  "fileSizeMaxKB": 400
+}

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { buildFixupPrompt, buildPromptFileRefBody, buildReviewerPrompt, buildReviewRetryPrompt, buildWorkerPrompt, checkRecitation, parseAcceptanceDeclared, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
+import { buildFixupContextSections, buildFixupPrompt, buildPromptFileRefBody, buildReviewerPrompt, buildReviewRetryPrompt, buildWorkerPrompt, checkRecitation, extractFirstError, FIXUP_FIRST_ERROR_HEADING, FIXUP_GATE_HEADING, FIXUP_PREV_RESULT_HEADING, FIXUP_SECTION_CAP_CHARS, formatPrevResult, parseAcceptanceDeclared, parseResultBlock, parseReviewVerdict, RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { loadCard } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { cardText } from './helpers.js'
 
@@ -202,6 +202,98 @@ describe('orchestrator prompt > fixup prompt', () => {
     expect(p).toContain('test_failure')
     expect(p).not.toContain('line-100\n') // 前 300 行被截掉
     expect(p).toContain('line-499') // 尾部保留
+  })
+})
+
+describe('orchestrator prompt > fixup 三段定向上下文（2026-11-15 P1-⑦）', () => {
+  it('三段小节标记恒存在；门禁摘要与上轮 result block 有料时注入内容', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildFixupPrompt(card(), c, 'test_failure', 'FAIL test/a.test.ts > 用例', 1, {
+      gateName: 'npm_test',
+      gateCriteria: '测试命令「npm test」在 worktree 内执行，退出码非 0 即失败',
+      prevResult: { status: 'done', summary: '实现完成', files_changed: ['src/a.ts'], tests: 'pass', acceptance: '2/3', notes_updated: true },
+    })
+    expect(p).toContain(FIXUP_GATE_HEADING)
+    expect(p).toContain(FIXUP_FIRST_ERROR_HEADING)
+    expect(p).toContain(FIXUP_PREV_RESULT_HEADING)
+    expect(p).toContain('- 失败门禁：npm_test')
+    expect(p).toContain('退出码非 0 即失败')
+    expect(p).toContain('status: done')
+    expect(p).toContain('summary: 实现完成')
+    expect(p).toContain('files_changed: ["src/a.ts"]')
+    expect(p).toContain('acceptance: 2/3')
+    expect(p).toContain('notes_updated: true')
+  })
+
+  it('首个错误取自完整输出头部：FAIL 在头部、尾 200 行里没有 FAIL 仍注入（根因不再被截）', () => {
+    const c = ctx(os.tmpdir())
+    const lines = ['run started', 'FAIL test/head.test.ts > 根因用例', 'AssertionError: expected true to be false']
+    for (let i = 0; i < 500; i++) lines.push(`noise-${i}`)
+    const p = buildFixupPrompt(card(), c, 'test_failure', lines.join('\n'), 1)
+    expect(p).toContain('FAIL test/head.test.ts > 根因用例')
+    expect(p).toContain('AssertionError: expected true to be false')
+    expect(p).toContain('run started') // 前置上下文
+    expect(p).not.toContain('noise-100\n') // 头部噪音行不被反向带入
+    expect(p).toContain('noise-499') // 尾 200 行块照常保留（既有行为不回归）
+  })
+
+  it('首个错误提取不到时优雅降级：段内说明行，不报错', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildFixupPrompt(card(), c, 'build_failure', '一切正常但退出码 1\n没有任何失败行形态', 1)
+    expect(p).toContain(FIXUP_FIRST_ERROR_HEADING)
+    expect(p).toContain('未能从失败输出提取首个错误')
+    expect(p).toContain('## 失败输出（截取尾部 200 行）') // 基础形状仍在
+  })
+
+  it('上轮 result block 缺失（不传 fixupCtx）时优雅降级：段内说明行', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildFixupPrompt(card(), c, 'test_failure', 'FAIL x', 1)
+    expect(p).toContain(FIXUP_PREV_RESULT_HEADING)
+    expect(p).toContain('未取得上轮 result block')
+    expect(p).toContain('失败门禁：（本轮失败非门禁触发或记录缺失）')
+  })
+
+  it('三段各有 4KB 截断上限：超长 criteria 精确截到 4096；各段总长受控', () => {
+    const c = ctx(os.tmpdir())
+    const p = buildFixupPrompt(card(), c, 'test_failure', 'FAIL\n' + 'z'.repeat(10_000), 1, {
+      gateName: 'npm_test',
+      gateCriteria: 'x'.repeat(10_000),
+      prevResult: { summary: 'y'.repeat(10_000) },
+    })
+    // criteria 单段精确截断（capSection 从头截）
+    expect(p.includes('x'.repeat(FIXUP_SECTION_CAP_CHARS))).toBe(true)
+    expect(p.includes('x'.repeat(FIXUP_SECTION_CAP_CHARS + 1))).toBe(false)
+    // 按小节标记切分：三段各自总长 ≤ cap + 标题/说明行开销
+    const sec = p.slice(p.indexOf(FIXUP_GATE_HEADING), p.indexOf('## 失败输出'))
+    const gateSeg = sec.slice(0, sec.indexOf(FIXUP_FIRST_ERROR_HEADING))
+    const feSeg = sec.slice(sec.indexOf(FIXUP_FIRST_ERROR_HEADING), sec.indexOf(FIXUP_PREV_RESULT_HEADING))
+    const prevSeg = sec.slice(sec.indexOf(FIXUP_PREV_RESULT_HEADING))
+    for (const seg of [gateSeg, feSeg, prevSeg]) {
+      expect(seg.length).toBeLessThanOrEqual(FIXUP_SECTION_CAP_CHARS + 200)
+    }
+  })
+
+  it('extractFirstError：\\r\\n 归一化后命中；无失败行返回 null；预算保错误行本体不被前置超长行吃掉', () => {
+    expect(extractFirstError('before\r\nFAIL real\r\nafter')).toBe('before\nFAIL real\nafter')
+    expect(extractFirstError('nothing wrong here at all')).toBeNull()
+    const guarded = extractFirstError(`${'A'.repeat(6000)}\nFAIL real\nB`)
+    expect(guarded).toBe('FAIL real\nB') // 超长前置行被丢弃，错误行本体完整
+    expect(guarded!.length).toBeLessThanOrEqual(FIXUP_SECTION_CAP_CHARS)
+    expect(extractFirstError('FAIL\n' + 'z'.repeat(10_000))!.length).toBeLessThanOrEqual(FIXUP_SECTION_CAP_CHARS)
+  })
+
+  it('formatPrevResult：字段直排，undefined 剔除；非对象返回 null', () => {
+    expect(formatPrevResult({ status: 'done', notes_updated: false, extra: undefined })).toBe('status: done\nnotes_updated: false')
+    expect(formatPrevResult({ files_changed: ['a.ts', 'b.ts'] })).toBe('files_changed: ["a.ts","b.ts"]')
+    expect(formatPrevResult(null)).toBeNull()
+    expect(formatPrevResult({})).toBeNull()
+  })
+
+  it('buildFixupContextSections 独立可用（与 buildFixupPrompt 同源降级口径）', () => {
+    const sec = buildFixupContextSections({ gateName: 'lint', gateCriteria: 'lint 命令', failureOutput: 'FAIL x', prevResult: { status: 'done' } })
+    expect(sec).toContain(FIXUP_GATE_HEADING)
+    expect(sec).toContain('FAIL x')
+    expect(sec).toContain('status: done')
   })
 })
 
