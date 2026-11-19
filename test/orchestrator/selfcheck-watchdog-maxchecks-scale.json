@@ -1,0 +1,15 @@
+{
+  "file": "../../.agents/scripts/orchestrator/watchdog.mjs",
+  "countAtLeast": [
+    { "pattern": "export function resolveWatchdogMaxChecks", "atLeast": 1 },
+    { "pattern": "export const WATCHDOG_MAX_CHECKS_MIN = 3", "atLeast": 1 },
+    { "pattern": "export const WATCHDOG_MAX_CHECKS_MAX = 15", "atLeast": 1 },
+    { "pattern": "import \\{ DEFAULT_BUDGET \\} from './queue\\.mjs'", "atLeast": 1 },
+    { "pattern": "clamp\\(ceil\\(maxTurns / everyTurns\\), 3, 15\\)", "atLeast": 1 },
+    { "pattern": "Math\\.min\\(WATCHDOG_MAX_CHECKS_MAX, Math\\.max\\(WATCHDOG_MAX_CHECKS_MIN, raw\\)\\)", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "每任务检查总次数 ≤5"
+  ],
+  "fileSizeMaxKB": 60
+}
