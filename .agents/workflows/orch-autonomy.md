@@ -12,7 +12,7 @@
 
 ## 引水闸（compulsory pilotage）
 
-受限航道 = `type: deps` 的卡（依赖变更牵一发动全身）或 files_hint 命中 workflow.json `corePaths` / `releasePaths` 的卡。这类卡**未经人工确认不得自动开航**：
+受限航道 = `type: deps` 的卡（依赖变更牵一发动全身）或 files_hint 命中 workflow.json `corePaths` / `releasePaths` 的卡（**文件级精确口径**，2026-11-20 起：hint 与清单条目同文件 / 同目录真重叠才算命中——此前 src/ 前缀卡整夜待引水、性能卡 pending 一夜的实证；清单外文件不再误拦，真重叠的保护语义不变）。这类卡**未经人工确认不得自动开航**：
 
 - **直接 `run <id>`**：拒绝启动（卡留 pending/ 不动），记 `pilotage_required` 事件（附命中原因）。
 - **怎么确认**：`run <id> --pilot-approved`——人工过目后逐张放行。
