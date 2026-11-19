@@ -1,0 +1,19 @@
+{
+  "file": "../../.agents/scripts/orchestrator.mjs",
+  "countAtLeast": [
+    { "pattern": "role: 'worker',", "atLeast": 1 },
+    { "pattern": "role: 'reviewer',", "atLeast": 2 },
+    { "pattern": "role: 'planner',", "atLeast": 2 },
+    { "pattern": "role: 'spec-planner',", "atLeast": 2 },
+    { "pattern": "role: 'spec-reviewer',", "atLeast": 1 },
+    { "pattern": "role: 'researcher',", "atLeast": 2 },
+    { "pattern": "role: 'arbiter',", "atLeast": 1 },
+    { "pattern": "role: 'dims-split',", "atLeast": 1 },
+    { "pattern": "role: 'verifier',", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "prompt\\.includes\\('REVIEW_SUMMARY'\\)",
+    "mock 后端按 prompt\\.includes 判角色"
+  ],
+  "fileSizeMaxKB": 400
+}

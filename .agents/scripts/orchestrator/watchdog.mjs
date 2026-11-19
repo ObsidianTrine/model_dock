@@ -183,6 +183,7 @@ export function makeWatchdogSpawnFn(backend, { cwd, model, envPatch } = {}) {
       const promptFile = path.join(dir, 'watchdog-prompt.md');
       fs.writeFileSync(promptFile, prompt);
       const r = await backend.spawn({
+        role: 'watchdog', // 显式角色契约（见 backends/types.mjs）：判定 prompt 内嵌事件时间线，可含任意标记串
         promptFile,
         cwd,
         maxTurns: WATCHDOG_MAX_TURNS,

@@ -136,7 +136,7 @@ async function main() {
     try {
       fs.writeFileSync(promptFile, buildResearchPrompt(c.question, repoRoot, { goalsText: c.goals, minCitations: c.minCitations }))
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot)
-      const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns, onEvent: () => {}, web: true, model, settingsFile })
+      const result = await backend.spawn({ role: 'researcher', promptFile, cwd: repoRoot, maxTurns, onEvent: () => {}, web: true, model, settingsFile }) // 显式角色契约（见 orchestrator/backends/types.mjs）
       // 每案写入前幂等重建 outDir：长会话期间 outputs/ 被并行清理（git clean 等）不再炸整案
       //（2026-11-09 实测：outputs/ 未入 gitignore 且被中途删除，5 案全 ENOENT）
       fs.mkdirSync(outDir, { recursive: true })

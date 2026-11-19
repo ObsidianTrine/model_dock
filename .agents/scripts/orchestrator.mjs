@@ -928,6 +928,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
+            role: 'worker', // 显式角色契约：fixup prompt 内嵌审查全文，mock 不再靠正文嗅探判角色（见 types.mjs）
             promptFile,
             cwd: worktree,
             maxTurns: meta.budget.max_turns,
@@ -1308,6 +1309,7 @@ async function cmdRun(repoRoot, taskId, opts) {
         // 盘不记账，max_tokens 硬熔断与低油量告警对审查段完全失明
         budget.beginSession();
         const review = await reviewBackend.spawn({
+          role: 'reviewer', // 显式角色契约（mock 判角色不再嗅探正文，见 types.mjs）
           promptFile: reviewPromptFile,
           cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
           maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
@@ -1346,6 +1348,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           const retryPromptText = buildReviewRetryPrompt(review.output);
           fs.writeFileSync(retryPromptFile, retryPromptText);
           const retry = await reviewBackend.spawn({
+            role: 'reviewer', // 显式角色契约（retry prompt 内嵌上轮输出，嗅探不可靠）
             promptFile: retryPromptFile,
             cwd: worktree,
             maxTurns: 6, // 只求补一行汇总，不重开审查
@@ -1384,8 +1387,9 @@ async function cmdRun(repoRoot, taskId, opts) {
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             await exitRun(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
-          // 门禁摘要口径避开 REVIEW_SUMMARY 字面量（mock 后端按 prompt.includes 判角色，
-          // 该标记字面量已在 review.output 内，上下文段不再复制）
+          // 门禁摘要口径避开 REVIEW_SUMMARY 字面量：mock 判角色已改显式契约（2026-11-20），
+          // 该规避不再承重，文案保留不动（selfcheck grepZero 仍钉 gateCriteria 不含契约行），
+          // 契约行全文只从失败输出段进 prompt
           promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter, { gateName: 'review_blockers（LLM 独立审查）', gateCriteria: `reviewer 独立审查判定存在 ${blockers} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`, prevResult: claimed }));
           moveCard(root, taskId, 'reviewing', 'running');
           continue;
@@ -3498,6 +3502,7 @@ async function cmdIntent(repoRoot, opts) {
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 25,
@@ -3617,6 +3622,7 @@ async function cmdPropose(repoRoot, opts) {
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 25,
@@ -3736,6 +3742,7 @@ async function cmdSpecStart(repoRoot, opts) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 30,
@@ -3839,6 +3846,7 @@ async function cmdSpecReview(repoRoot, id, opts) {
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-reviewer', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // 审查船只读探索主仓库（Read/Glob/Grep；现状对账要真开代码文件）
         maxTurns: 30,
@@ -3983,6 +3991,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'researcher', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // researcher 只读探索仓库（Read/Glob/Grep）+ 联网检索（WebFetch/WebSearch），无 Bash 无写
         maxTurns: 25,
@@ -4054,6 +4063,7 @@ async function runArbitrationSession(repoRoot, { claims, snapshots, backendName,
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'arbiter', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // 仲裁只读仓库 + 联网检索（researcher 同款工具白名单，无 Bash 无写）
         maxTurns: 20,
@@ -4097,6 +4107,7 @@ async function planResearchDims(repoRoot, { goal, backendName }) {
     fs.writeFileSync(promptFile, buildResearchDimsPrompt(sanitizeIntent(goal), repoRoot));
     if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
     const result = await backend.spawn({
+      role: 'dims-split', // 显式角色契约（见 types.mjs）
       promptFile,
       cwd: repoRoot, // 拆维规划只读探索仓库（理解提案语境），无 Bash 无写
       maxTurns: 8,
@@ -4393,7 +4404,7 @@ async function researchSelftest(repoRoot, opts) {
       'SELFTEST-DONE',
     ].join('\n'));
     if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
-    const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, model: opts.model || loadWorkflowConfig(repoRoot).research?.model || undefined, settingsFile });
+    const result = await backend.spawn({ role: 'researcher', promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, model: opts.model || loadWorkflowConfig(repoRoot).research?.model || undefined, settingsFile });
     const out = String(result.output ?? '');
     log(`═══ 联网工具自检（后端 ${opts.backend}）═══`);
     const wf = /WEBFETCH:\s*(ok|fail)(.*)/i.exec(out);
@@ -4463,6 +4474,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'verifier', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot,
         maxTurns: 15,
@@ -4675,6 +4687,7 @@ async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 30,

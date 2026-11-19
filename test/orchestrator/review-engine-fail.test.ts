@@ -46,19 +46,24 @@ describe('orchestrator review > 引擎故障快速落 blocked', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'rev-novd', { gate: 'L1', files_hint: ['src/**'] })
-      // 既有路径对「引擎活着但没给契约块」按 blockers=1 保守处理进返工；mock 的 fixup
-      // prompt 会嵌入含 REVIEW_SUMMARY 字样的失败输出，二次 spawn 被 mock 误判为 reviewer
-      // ——那是 mock 检测怪癖，此处只锚定关键行为：返工轮启动 + 不走引擎故障捷径
+      // 保守路径：审查无契约块按 blockers=1 进返工轮，返工轮 worker 会话真实续跑。
+      // （orch-mock-role-detection 卡前：fixup prompt 内嵌含 REVIEW_SUMMARY 字样的失败输出，
+      // mock 按正文嗅探把二次 spawn 误判成 reviewer → worker 无结果块 → 假性 blocked exit 0
+      // ——旧断言 status=0 钉的正是那个 bug 产物。显式角色契约后返工轮真正跑 worker，
+      // 审查恒无契约块 → 返工烧满走 max_review_iterations 熔断 die，exit 1。）
       const r = tryOrch(repo.root, 'run rev-novd --backend mock --review-backend mock', {
         ORCH_MOCK_REVIEW_NOVERDICT: '1',
         ORCH_MOCK_FILE: 'src/feat.ts',
       })
-      expect(r.status).toBe(0) // 保守路径不 die（与引擎故障的 exit 1 区分）
+      expect(r.status).toBe(1) // 返工烧满熔断 die（与引擎故障 exit 1 同码，路径不同——见 circuit_breaker 断言）
       const events = eventsOf(repo.root, 'rev-novd')
       const types = events.map((e) => e.type)
       expect(types).toContain('review_verdict') // 引擎活着，判定照记（blockers=-1）
       expect(types).toContain('review_iteration') // 返工轮照走
       expect(types).not.toContain('review_engine_failed') // 不误判成引擎故障
+      expect(events.find((e) => e.type === 'circuit_breaker')).toMatchObject({ reason: 'max_review_iterations' }) // 熔断路径钉死
+      const workerDones = types.filter((t) => t === 'worker_done').length
+      expect(workerDones).toBeGreaterThanOrEqual(2) // 返工轮 worker 真实续跑（修复前第 2 会话被误判成 reviewer、无结果块）
       expect(readCard(repo.root, 'blocked', 'rev-novd')).toBeTruthy() // 终局仍保守落 blocked
     } finally {
       repo.cleanup()
