@@ -11,6 +11,19 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 - **Single-model query endpoint**: `GET /v1/models/{model-id}` returns that model's catalog entry (same shape as a model-list entry), with `?provider=service-id` to query a specific service's catalog. This path was previously relayed to the upstream, returning the upstream's own catalog — inconsistent with the model list's locally curated catalog. It is now answered locally: unknown IDs get a 404 with an actionable hint, and no upstream call is made.
 
+### Improved
+
+- **Circuit breaker for uncommitted idling**: when an agent keeps working for a long time without committing, it used to be logged but never stopped; it now goes through the same circuit-breaker path as the watchdog — stopped and handed to a human instead of burning budget.
+- **Lifetime cap on auto-resume**: a task card can now be auto-resumed at most 3 times (configurable) across its whole life; beyond that it goes to a human — crash-resume loops no longer restart and spend forever.
+- **Fixup cards can see the root cause**: fixup prompts used to carry only the last 200 lines of logs, so the root cause was often truncated away; they now include the gate summary, the first error, and the previous round's result (each truncated gracefully when overlong).
+
+### Fixed
+
+- **Multi-key services no longer pick stale keys on direct attach**: after adding a key pool to a service, switching a client to direct attach could previously write an out-of-pool stale key (that can't connect) or falsely report "Key unreadable"; key lookup now follows the same pool-first rule as the relay hot path, and when everything fails the error says the pool keys are all unavailable.
+- **Console reset no longer fakes success**: reset deletes the config and secret files; when they couldn't be deleted (e.g. locked by another process — common on Windows), the console used to report success while the config stayed alive; it now fails loudly with an actionable hint.
+- **Concurrent writes no longer lose API keys**: simultaneous writes (e.g. console and CLI saving at once) could previously overwrite each other and silently drop a key, leaving the service failing with mysterious 503s; key slots are now allocated under the write lock and a failed write rolls back — no more configs pointing at an empty key slot.
+- **The watchdog no longer stands down early on long tasks**: the watchdog's check count used to be a fixed number, leaving the tail of large-budget tasks unwatched; it now scales with the task's budget and stays on guard throughout.
+
 ## [1.8.0] - 2026-11-15
 
 Update restore ships: every update keeps the previous version, one-click zero-download rollback; a security-hardening batch and a set of robustness fixes.
