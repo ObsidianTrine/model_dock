@@ -2127,6 +2127,7 @@ async function hReset(c: AdminCtx): Promise<void> {
   // （读到空配置），不再复活（2026-11-04 审查 P2）
   const files = [configPath(), secretsPath()]
   const deleted: string[] = []
+  const deleteFailed: Array<{ file: string; msg: string }> = []
   await withFileLock(configLockPath(), {
     // 超时报错与 mutateConfig 同口径（ConfigError → 400 + 可操作 hint），裸锁错误会落 500
     timeoutError: (lp) =>
@@ -2138,9 +2139,30 @@ async function hReset(c: AdminCtx): Promise<void> {
     for (const f of files) {
       try {
         if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
-      } catch { /* 忽略 */ }
+      } catch (e) {
+        deleteFailed.push({ file: f, msg: (e as Error).message })
+      }
     }
   })
+  // fail-loud（审计 F4）：破坏性操作删文件失败必须如实报错——旧实现吞错后无条件 ok:true，
+  // 用户以为配置已清空、实际原样存活。失败即中止（不 reloadRuntime 把幸存配置刷进运行态），
+  // ConfigError 经顶层 errorReply 还原 400+hint，与上方锁超时同信封
+  if (deleteFailed.length > 0) {
+    const failedFiles = deleteFailed.map((d) => d.file)
+    audit(
+      bi('重置配置', 'Reset config'),
+      '-',
+      undefined,
+      bi('删除 {files} 失败，重置中止：{msg}', 'Failed to delete {files}; reset aborted: {msg}', {
+        files: biJoin('、', ', ', failedFiles),
+        msg: deleteFailed.map((d) => d.msg).join('；'),
+      })
+    )
+    throw new ConfigError(
+      t('重置失败：{files} 删除未成功（配置未被清除，重置未完成）', 'Reset failed: {files} could not be deleted (config not cleared, reset incomplete)', { files: biJoin('、', ', ', failedFiles) }),
+      t('文件可能被其他程序占用（编辑器/杀毒/云同步等）——关闭占用程序后重试重置', 'The file may be held open by another program (editor/antivirus/cloud sync) — close it and retry the reset')
+    )
+  }
   await reloadRuntime(rt)
   audit(
     bi('重置配置', 'Reset config'),
