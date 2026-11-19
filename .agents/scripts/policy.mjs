@@ -651,6 +651,46 @@ export function hintsOverlap(a, b) {
   return false;
 }
 
+/**
+ * files_hint 与路径清单是否相交（**文件级精确口径**，比 hintsOverlap 的顶层段口径更细；
+ * 先例 drafts-gc.pathsOverlap 同款思路）。每条 hint 取第一个通配段之前的固定前缀全段：
+ * `src/presets/data.ts` → `src/presets/data.ts`，`src/**` → `src`，`.github/workflows/` →
+ * `.github/workflows`；任一对相等或互为路径前缀即相交。
+ * 专供引水闸（pilotageReason）：顶层段口径下 `src/presets/data.ts` 与 `src/cli.ts` 首段
+ * 同为 src 即判相交，src/ 下任何卡全撞闸、drain 永不派出（2026-11-16 夜航实证：性能卡
+ * 整夜 pending）。引水是「人审」语义而非「并行互斥」语义——只有 hint 与清单真重叠
+ * （同文件 / 清单条目目录下）才值得人审，故并行分区继续用 hintsOverlap 的保守粗口径，
+ * 不改其本体。
+ * 保守面保留（宁误勿漏）：完全通配（**、*）→ 独占相交；未声明 files_hint → 相交（与
+ * hintsOverlap「未声明 = 独占」同款）；清单为空 → 不相交（航道未设限）。
+ */
+export function hintsIntersectExact(a, b) {
+  const prefixesOf = (hints) => {
+    const set = new Set();
+    for (const h of (hints ?? []).map((x) => String(x).replace(/\\/g, '/'))) {
+      const fixed = [];
+      for (const seg of h.split('/')) {
+        if (seg.includes('*') || seg.includes('?')) break;
+        if (seg) fixed.push(seg);
+      }
+      if (!fixed.length) return null; // 完全通配 → 独占
+      set.add(fixed.join('/'));
+    }
+    return set;
+  };
+  const A = prefixesOf(a);
+  const B = prefixesOf(b);
+  if (!A || !B) return true;
+  if (!B.size) return false; // 清单为空 = 航道未设限（调用方另有守卫，纯函数口径自洽）
+  if (!A.size) return true; // 未声明 files_hint = 可能动任何文件 → 保守相交
+  for (const x of A) {
+    for (const y of B) {
+      if (x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`)) return true;
+    }
+  }
+  return false;
+}
+
 /** 读取审计日志（容错半行）。 */
 export function readAudit(file) {
   try {
