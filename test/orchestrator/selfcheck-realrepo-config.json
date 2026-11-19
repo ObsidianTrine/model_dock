@@ -1,0 +1,7 @@
+{
+  "file": "../../vitest.config.ts",
+  "countAtLeast": [
+    { "pattern": "globalSetup: \\['\\./test/orchestrator/host-guard\\.mjs'\\]", "atLeast": 1 },
+    { "pattern": "宿主仓只读护栏", "atLeast": 1 }
+  ]
+}

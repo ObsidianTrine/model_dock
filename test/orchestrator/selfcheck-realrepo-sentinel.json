@@ -1,0 +1,14 @@
+{
+  "file": "host-guard.mjs",
+  "countAtLeast": [
+    { "pattern": "export function resolveAnchorRepo", "atLeast": 1 },
+    { "pattern": "export function snapshotRepo", "atLeast": 1 },
+    { "pattern": "export function diffSnapshots", "atLeast": 1 },
+    { "pattern": "export function startHostGuard", "atLeast": 1 },
+    { "pattern": "refs/heads", "atLeast": 1 },
+    { "pattern": "worktree', 'list', '--porcelain", "atLeast": 1 },
+    { "pattern": "orchestrator', 'queue", "atLeast": 1 },
+    { "pattern": "fail-closed", "atLeast": 1 }
+  ],
+  "grepZero": ["import.meta.url"]
+}
