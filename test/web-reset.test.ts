@@ -214,4 +214,43 @@ describe('Web reset 语义（hReset 对齐 CLI cmdReset）', () => {
       h.restore()
     }
   })
+
+  // fail-loud（审计 F4）：unlink 失败不得吞错后报 ok:true——破坏性操作必须如实报失败口径，
+  // 配置未删的事实要进响应。config.toml 用同名目录占位触发 unlinkSync 必败（对目录 unlink
+  // 三平台一致 EPERM，确定性触发、不依赖平台文件占用语义）
+  it('unlink 失败：reset 报失败口径（非 ok:true），配置未删事实如实上报', async () => {
+    const h = fakeHome()
+    let close: () => void = () => {}
+    try {
+      const rt = buildRuntime(baseCfg(), 'admin-tok')
+      const server = createGatewayServer(rt, { port: 0 })
+      const port = await new Promise<number>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port))
+      })
+      close = () => {
+        server.closeAllConnections?.()
+        server.close()
+      }
+      fs.mkdirSync(configPath(), { recursive: true }) // 同名目录占位 config.toml
+      fs.writeFileSync(secretsPath(), '{}', 'utf8')
+
+      const resp = await fetch(`http://127.0.0.1:${port}/_modeldock/reset`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-modeldock-admin': 'admin-tok' },
+        body: '{}',
+      })
+      expect(resp.status).toBe(400)
+      const j = (await resp.json()) as Record<string, any>
+      expect(j.ok).toBeUndefined() // 失败口径：不再是 ok:true
+      const msg = String(j.error?.message ?? '')
+      expect(msg).toContain('重置失败')
+      expect(msg).toContain('config.toml') // 删除未成功的文件如实上报
+      expect(String(j.modeldock?.hint ?? '')).toContain('占用') // 可操作 hint：解除文件占用
+      expect(fs.existsSync(configPath())).toBe(true) // 配置确实未被删——响应如实反映
+    } finally {
+      close()
+      h.restore()
+    }
+  })
 })
