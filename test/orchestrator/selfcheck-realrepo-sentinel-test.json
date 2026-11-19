@@ -1,0 +1,12 @@
+{
+  "file": "host-guard.test.ts",
+  "countAtLeast": [
+    { "pattern": "host-guard > 锚定解析", "atLeast": 1 },
+    { "pattern": "host-guard > 快照形状", "atLeast": 1 },
+    { "pattern": "host-guard > 对账差异", "atLeast": 1 },
+    { "pattern": "host-guard > teardown 语义", "atLeast": 1 },
+    { "pattern": "越界即红", "atLeast": 1 },
+    { "pattern": "fail-closed", "atLeast": 1 }
+  ],
+  "grepZero": ["process\\.cwd\\(\\)"]
+}

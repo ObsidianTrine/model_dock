@@ -164,6 +164,8 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 
 判断方法：涉及多处共享模块的改动，**单独跑新文件绿 ≠ 全量绿**，必须组合跑（至少 `uninstall.test` / `update-cli.test` / `store.test`）。参考实现：`test/reset.test.ts`、`test/reset-cli.test.ts`。
 
+- **编排套件宿主仓红线（2026-11-16 自毁事故防线）**：编排套件全量/组合跑（`npm run test:workflow`、大范围 vitest run）**禁止在与队列卡同名（或存在待 finish 卡）的 linked worktree 内执行**——并发 finish 的清理段（worktree remove + 目录 rmSync + branch -d）会把正在跑套件的 worktree 连根删掉（零事件签名，实验室已逐形状复现）；同理禁止在套件运行窗口内对宿主仓并发跑 finish/手工 worktree/分支操作。套件对宿主仓的越界改动由 `test/orchestrator/host-guard.mjs` 哨兵（vitest globalSetup 前后快照对账，两套件同享）越界即红兜底。
+
 ## 多 Agent 并行开发约定（feature-branch 工作流）
 
 本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`。

@@ -65,6 +65,13 @@ export default defineConfig({
     // 改缺省；编排套件的并行定档见 vitest.workflow.config.ts 头注。
     maxWorkers: Number(process.env.VITEST_MAX_WORKERS || 1),
     reporters: ['default', './test/vitest-watchdog.mjs'],
+    // 宿主仓只读护栏（globalSetup 哨兵，两套件同享——isomorphism 门禁要求两 config 的
+    // test 段同构，护栏只能挂 base 由 workflow spread 继承）：跑前对锚定宿主仓
+    // （--git-common-dir 语义，linked worktree 内锚主仓）快照分支引用 / worktree 注册 /
+    // 队列卡，跑完对账，越界即红。背景（2026-11-16 自毁事故）：与队列卡同名的 linked
+    // worktree 内跑编排套件时，并发 finish 清理段把正在跑套件的 worktree 连根删掉
+    // （实验室逐形状复现）——哨兵不定位责任方，只钉死「套件窗口内宿主仓零改动」事实。
+    globalSetup: ['./test/orchestrator/host-guard.mjs'],
     // 常开 setup：sync 域 PBKDF2 测试降迭代（test/setup-fast-kdf.ts 头注有依据与还原方式）
     setupFiles: ['./test/setup-fast-kdf.ts', ...(watchdog ? (['./test/watchdog-heartbeat.mjs'] as string[]) : [])],
     silent: 'passed-only',
