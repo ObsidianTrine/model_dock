@@ -1052,7 +1052,12 @@ async function cmdRun(repoRoot, taskId, opts) {
             ctx,
             'acceptance_gap',
             `worker 契约块自报验收满足 ${declaredAcc.met}/${declaredAcc.total}（卡内共 ${accItems.length} 条）。未满足的验收标准需逐条补齐后再报 done：\n${accItems.map((it, i) => `${i + 1}. ${it}`).join('\n')}`,
-            debugIter
+            debugIter,
+            {
+              gateName: 'acceptance_gap（验收申报对账）',
+              gateCriteria: `worker 契约块自报 acceptance ${declaredAcc.met}/${declaredAcc.total}，卡内验收标准共 ${accItems.length} 条——申报缺额即自认未达标，门禁与审查会在修复后逐条复验`,
+              prevResult: claimed,
+            }
           )
         );
         continue;
@@ -1078,7 +1083,8 @@ async function cmdRun(repoRoot, taskId, opts) {
             if (debugIter > meta.budget.max_test_iterations) {
               await tripDebugLoop(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`, g.dieTail);
             }
-            return { trigger: g.trigger, output: e.output };
+            // gate 名与校验口径随输出一起返回：fixup prompt 门禁摘要段的原料
+            return { gate: g.gate, trigger: g.trigger, criteria: g.criteria, output: e.output };
           }
         }
         return null;
@@ -1089,11 +1095,16 @@ async function cmdRun(repoRoot, taskId, opts) {
       const changed = changedFiles(worktree, baseBranch);
       const classification = classifyChange(changed, cfg);
       const docsOnly = changed.length > 0 && changed.every((f) => /\.md$/i.test(f.replace(/\\/g, '/')));
+      // 门禁校验口径一行（fixup 门禁摘要段消费）：命令原文照抄进 prompt，返工船按口径
+      // 自查不用猜门禁跑了什么；未配置的命令只会 skipped 不可能 fail，criteria 缺省即降级
+      const activeTestCmd = docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ');
+      const cmdCriteria = (label, cmd) => (cmd ? `${label}「${cmd}」在 worktree 内执行，退出码非 0 即失败` : undefined);
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ')),
+          run: () => gateNpmTest(worktree, activeTestCmd),
           trigger: 'test_failure',
+          criteria: cmdCriteria('测试命令', activeTestCmd),
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
           passExtra: (r) => {
@@ -1115,6 +1126,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
           run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
+          criteria: cmdCriteria('构建命令', cfg.buildCmd),
           dieLabel: 'build 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true, ...(r.reason ? { reason: r.reason } : {}) } : {}),
@@ -1123,6 +1135,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           gate: 'lint',
           run: () => gateLint(worktree, cfg.lintCmd), // cmd 未配置 → 直接 skipped 返回
           trigger: 'lint_failure',
+          criteria: cmdCriteria('lint 命令', cfg.lintCmd),
           dieLabel: 'lint 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true } : {}),
@@ -1131,6 +1144,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           gate: 'typecheck',
           run: () => gateTypecheck(worktree, cfg.typecheckCmd),
           trigger: 'typecheck_failure',
+          criteria: cmdCriteria('typecheck 命令', cfg.typecheckCmd),
           dieLabel: 'typecheck 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true } : {}),
@@ -1139,7 +1153,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       const fixup = await runGates(STATIC_GATES);
       xte.testLoop(); // 偏航 test_loop：npm_test 连续 2 轮 fail（从 gate_result 事件判定，observe-only）
       if (fixup) {
-        promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter));
+        promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter, { gateName: fixup.gate, gateCriteria: fixup.criteria, prevResult: claimed }));
         continue;
       }
 
@@ -1177,13 +1191,14 @@ async function cmdRun(repoRoot, taskId, opts) {
             gate: 'ui_check',
             run: () => gateUiCheck(worktree, cfg.uiCheckCmd),
             trigger: 'ui_check_failure',
+            criteria: cmdCriteria('ui_check 命令', cfg.uiCheckCmd),
             dieLabel: 'ui_check 不过',
             dieTail: '任务转 blocked/，人工接手。',
             passExtra: (r) => (r.skipped ? { skipped: true } : {}),
           },
         ]);
         if (uiFixup) {
-          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter));
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter, { gateName: uiFixup.gate, gateCriteria: uiFixup.criteria, prevResult: claimed }));
           continue;
         }
       }
@@ -1340,7 +1355,9 @@ async function cmdRun(repoRoot, taskId, opts) {
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             await exitRun(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
-          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter));
+          // 门禁摘要口径避开 REVIEW_SUMMARY 字面量（mock 后端按 prompt.includes 判角色，
+          // 该标记字面量已在 review.output 内，上下文段不再复制）
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter, { gateName: 'review_blockers（LLM 独立审查）', gateCriteria: `reviewer 独立审查判定存在 ${blockers} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`, prevResult: claimed }));
           moveCard(root, taskId, 'reviewing', 'running');
           continue;
         }
