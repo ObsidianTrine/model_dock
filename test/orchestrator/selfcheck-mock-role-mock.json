@@ -1,0 +1,21 @@
+{
+  "file": "../../.agents/scripts/orchestrator/backends/mock.mjs",
+  "countAtLeast": [
+    { "pattern": "const explicitRole = typeof role === 'string'", "atLeast": 1 },
+    { "pattern": "if \\(explicitRole !== null\\)", "atLeast": 1 },
+    { "pattern": "isPushReviewer = explicitRole === 'push-reviewer'", "atLeast": 1 },
+    { "pattern": "isReviewer = explicitRole === 'reviewer'", "atLeast": 1 },
+    { "pattern": "isSpecPlanner = explicitRole === 'spec-planner'", "atLeast": 1 },
+    { "pattern": "isSpecReviewer = explicitRole === 'spec-reviewer'", "atLeast": 1 },
+    { "pattern": "isPlanner = explicitRole === 'planner'", "atLeast": 1 },
+    { "pattern": "isArbiter = explicitRole === 'arbiter'", "atLeast": 1 },
+    { "pattern": "isVerifier = explicitRole === 'verifier'", "atLeast": 1 },
+    { "pattern": "isDimsSplit = explicitRole === 'dims-split'", "atLeast": 1 },
+    { "pattern": "isResearcher = explicitRole === 'researcher'", "atLeast": 1 },
+    { "pattern": "isReviewer = prompt\\.includes\\('REVIEW_SUMMARY'\\)", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "const isReviewer = prompt\\.includes",
+    "args\\.role"
+  ]
+}

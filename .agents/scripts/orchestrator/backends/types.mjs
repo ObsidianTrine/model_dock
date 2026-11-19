@@ -10,6 +10,11 @@
  * @property {string} [settingsFile] worker 专属 settings（policy hook 注入），仅 claude-headless 使用
  * @property {boolean} [readonly]  只读会话（reviewer）：allowedTools 收敛为 Read/Glob/Grep，
  *                                 编辑/命令在权限层不可能发生（fail-closed），不靠 prompt 自觉
+ * @property {SpawnRole} [role]    显式角色契约（orch-mock-role-detection 卡 2026-11-20）：引擎各
+ *                                 spawn 点必传；mock 按它定行为分支、prompt 正文不参与判定
+ *                                 （fixup/补问 prompt 会内嵌审查全文，内容嗅探曾把 worker 误判
+ *                                 成 reviewer → 卡假性 blocked）。真实后端忽略；缺省（旧调用方
+ *                                 直调）mock 回落正文嗅探
  */
 
 /**
@@ -34,3 +39,8 @@
 
 /** Phase 1 可用后端名。 */
 export const BACKENDS = ['claude-headless', 'mock'];
+
+/** spawn 显式角色契约的合法值（mock 按此映射行为分支；mock 未实现的值按 worker 兜底）。 */
+export const SPAWN_ROLES = ['worker', 'reviewer', 'push-reviewer', 'planner', 'spec-planner', 'spec-reviewer', 'arbiter', 'verifier', 'dims-split', 'researcher', 'watchdog'];
+
+/** @typedef {typeof SPAWN_ROLES[number]} SpawnRole */

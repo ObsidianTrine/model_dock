@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { resolveBackendName, getBackend } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
 import { mockBackend } from '../../.agents/scripts/orchestrator/backends/mock.mjs'
+import { RESULT_MARKER } from '../../.agents/scripts/orchestrator/prompt.mjs'
 import { readEvents } from '../../.agents/scripts/orchestrator/events.mjs'
 import { mkRepo } from './helpers.js'
 
@@ -100,5 +101,47 @@ describe('backend 缺省回落（resolveBackendName）', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('mock 角色判定 > 显式契约优先（orch-mock-role-detection 卡）', () => {
+  // 分支判别器：worker 分支输出 RESULT_MARKER 结果块；reviewer 分支输出 REVIEW_SUMMARY 契约行。
+  // 两向断言（卡验收）：worker prompt 内嵌 REVIEW_SUMMARY 全文仍判 worker；reviewer 正常判 reviewer。
+  const reviewFullText = '🔴 阻塞（1 个）\n- mock：验收标准第 1 条未实现\nREVIEW_SUMMARY: blockers=1 suggestions=0 notes=0'
+  const fixupLikePrompt = `# 返工指令\n\n## 上轮审查失败输出（全文内嵌）\n\n${reviewFullText}\n\n请修复上述阻塞项后重跑门禁。`
+
+  async function spawnOut(promptText: string, opts: Record<string, unknown> = {}): Promise<string> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mock-contract-'))
+    try {
+      const promptFile = path.join(dir, 'p.md')
+      fs.writeFileSync(promptFile, promptText)
+      const r = await mockBackend.spawn({ promptFile, cwd: dir, onEvent: () => {}, ...opts })
+      return String(r.output ?? '')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('worker prompt 内嵌 REVIEW_SUMMARY 全文（fixup 嵌审查场景）+ role=worker → 仍判 worker', async () => {
+    const out = await spawnOut(fixupLikePrompt, { role: 'worker' })
+    expect(out).toContain(RESULT_MARKER) // worker 结果块
+    expect(out).not.toContain('REVIEW_SUMMARY: blockers=') // 未被带成 reviewer 行为
+  })
+
+  it('reviewer prompt + role=reviewer → 正常判 reviewer', async () => {
+    const out = await spawnOut('独立审查以下 diff……', { role: 'reviewer', readonly: true })
+    expect(out).toContain('REVIEW_SUMMARY: blockers=') // reviewer 契约行
+    expect(out).not.toContain(RESULT_MARKER)
+  })
+
+  it('显式未实现角色（watchdog 判定会话）不嗅探正文——含 REVIEW_SUMMARY 也落 worker 分支', async () => {
+    const out = await spawnOut(fixupLikePrompt, { role: 'watchdog' })
+    expect(out).toContain(RESULT_MARKER)
+    expect(out).not.toContain('REVIEW_SUMMARY: blockers=')
+  })
+
+  it('未传 role（旧调用方直调）回落正文嗅探：含 REVIEW_SUMMARY 判 reviewer', async () => {
+    const out = await spawnOut('审查一下\nREVIEW_SUMMARY', { readonly: true })
+    expect(out).toContain('REVIEW_SUMMARY: blockers=') // 嗅探兜底语义不变
   })
 })
