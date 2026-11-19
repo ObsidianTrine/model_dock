@@ -1,8 +1,8 @@
 // scan.mjs — nightly 巡检信号源（Phase 2，docs 10.4）。
 // 扫描 TODO/FIXME、npm audit、测试失败、GitHub issues、已知问题账本（known-issues.md）、
-// 主干 CI 失败六类信号，**消毒后**生成提案卡落 drafts/（proposal: true）——巡检只出提案、
-// 绝不直接进队列：仓库内容进 worker prompt 的注入面，第一道闸就是这里的内容消毒 +
-// 人工批量 submit（或 autopilot 白名单自动提交，见 autopilot.mjs 的授权矩阵）。
+// 主干 CI 失败六类信号，**消毒后**生成提案卡落 drafts/（created_by: scanner、gate: L3）——
+// 巡检只出提案、绝不直接进队列：仓库内容进 worker prompt 的注入面，第一道闸就是这里的
+// 内容消毒 + 人工批量 submit（或 autopilot 白名单自动提交，见 autopilot.mjs 的授权矩阵）。
 
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -17,6 +17,7 @@ import {
   appendRelaySection,
   collectFilterContext,
   makeSemanticSpawnFn,
+  normalizeSignalHashes,
   programFilter,
   readScanConfig,
   resolveSemanticEngine,
@@ -268,11 +269,14 @@ export function scanCI(repoRoot, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 生成提案卡（写 drafts/，proposal: true；不直接进队列——id 已存在于队列任何状态
-// 目录或 drafts/ 则跳过）
+// 生成提案卡（写 drafts/，机器来源提案由 created_by: scanner 标识；不直接进队列——
+// id 已存在于队列任何状态目录或 drafts/ 则跳过）
 // ---------------------------------------------------------------------------
 
 function renderCard(c) {
+  // signal_hashes 落盘前写侧归一（normalizeSignalHashes，P1-⑨）：非数组/野值 → 空数组
+  // → 整行省略，frontmatter 里只可能出现干净的碰撞键数组（口径与读侧 collectFilterContext 对称）
+  const signalHashes = normalizeSignalHashes(c.signal_hashes);
   return [
     '---',
     `id: ${c.id}`,
@@ -282,7 +286,7 @@ function renderCard(c) {
     'created_by: scanner',
     // 信号哈希（eventfilter.signalHash）：程序过滤的数据基础——后续同源信号与它碰撞
     // 决定直通/去重（issue 按号、其余按内容），frontmatter 校验容忍该字段缺省
-    ...(c.signal_hashes?.length ? [`signal_hashes: [${c.signal_hashes.join(', ')}]`] : []),
+    ...(signalHashes.length ? [`signal_hashes: [${signalHashes.join(', ')}]`] : []),
     // 证据行（评分择优的输入面，score.mjs/调度定序消费）：scan 卡统一从背景段派生——
     // 信号描述本身就是证据；planner 提案卡的 score/evidence 由 prompt 契约产出
     'evidence:',
@@ -292,7 +296,6 @@ function renderCard(c) {
     'workflows:',
     '  - feature-branch',
     'gate: L3',
-    'proposal: true',
     '---',
     '',
     `# 目标`,
@@ -350,8 +353,10 @@ export async function runScan(repoRoot, opts = {}) {
     if (r.skipped) warnings.push(r.reason);
     else candidates.push(...r);
   }
-  // 信号哈希（frontmatter signal_hashes + 程序过滤碰撞键）：issue 按号、其余按内容（id）
-  for (const c of candidates) c.signal_hashes = [signalHash(c)];
+  // 信号哈希（frontmatter signal_hashes + 程序过滤碰撞键）：issue 按号、其余按内容（id）。
+  // 经 normalizeSignalHashes 过一手（写入口径收紧，P1-⑨）——signalHash 恒产出单条干净
+  // 哈希，这里归一是防御性声明：signal_hashes 的唯一合法形态就是干净哈希数组
+  for (const c of candidates) c.signal_hashes = normalizeSignalHashes([signalHash(c)]);
 
   // 既有去重先行：同 id 卡在任何状态目录都已存在 → 原样跳过（不直通，防同一信号夜夜重复 append）
   const fresh = [];

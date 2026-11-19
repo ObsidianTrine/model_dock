@@ -65,6 +65,18 @@ export function signalHash(signal) {
   return n != null ? sha8(`issue:${n}`) : sha8(String(signal?.id ?? ''));
 }
 
+/**
+ * signal_hashes 写侧归一（唯一写入口径，P1-⑨ 字段卫生）：任意输入 → 干净字符串数组。
+ * 非数组 → 空数组（落卡时整行省略）；元素一律 String() 强转 + trim + 剔空——
+ * 与读侧 collectFilterContext 的 Array.isArray 守卫 + map(String).trim().filter 同一变换，
+ * 保证「写进口径 ⊆ 读入口径」：frontmatter 里出现的 signal_hashes 只可能是过滤碰撞键，
+ * 野值（字符串整体、数字、嵌套结构）进不了卡，也就不会被误当哈希参与 relay/drop 判定。
+ */
+export function normalizeSignalHashes(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((h) => String(h ?? '').trim()).filter(Boolean);
+}
+
 /** 信号的摘要行（消毒后）：goal — background，截断到 limit。 */
 function signalSummary(signal, limit = SEMANTIC_SUMMARY_MAX_CHARS) {
   return sanitize(`${signal?.goal ?? ''} — ${signal?.background ?? ''}`, limit) || signalSource(signal?.id);

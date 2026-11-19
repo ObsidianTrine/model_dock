@@ -61,11 +61,12 @@
 //                   （gatewayLogDir，须已配）窗口内 429/402 合计达阈同样滞留（外部风暴）；
 //                   删掉该键 = 关闭风暴闸（行为与历史版本一致）
 //   autoResume      blocked 卡有限自动续跑：{ enabled?: boolean（缺省 true）, maxPerRun?: 正整数
-//                   （缺省 2）, cooldownHours?: 正整数（缺省 24） }。drain 选卡前对「transient 类
-//                   失败 blocked」的卡自动 resume（资格判定见 orchestrator/autoresume.mjs）：
-//                   只续 429 限流/网络类、每卡冷却期内最多 1 次、每次 drain ≤maxPerRun 张、
-//                   auto_resume 事件留痕；enabled=false 完全不扫 blocked/。非法值回落缺省并
-//                   console.warn 告警
+//                   （缺省 2）, cooldownHours?: 正整数（缺省 24）, maxPerCard?: 正整数（缺省 3） }。
+//                   drain 选卡前对「transient 类失败 blocked」的卡自动 resume（资格判定见
+//                   orchestrator/autoresume.mjs）：只续 429 限流/网络类、每卡冷却期内最多 1 次、
+//                   每次 drain ≤maxPerRun 张、每卡全生命周期累计 ≤maxPerCard 次（超限留 blocked
+//                   交人工并落 auto_resume_rejected 事件）、auto_resume 事件留痕；enabled=false
+//                   完全不扫 blocked/。非法值回落缺省并 console.warn 告警
 //   trace           LLM 决策留底：{ enabled?: boolean（缺省 true）, maxPerTask?: 正整数
 //                   （缺省 20）, maxInputKB?: 正整数（缺省 64） }。三类 LLM 决策点（看门狗
 //                   watchdog / scan 语义过滤 smartfilter / 独立审查 review）把模型输入与
@@ -639,17 +640,18 @@ function resolveAutopilot(raw) {
   return out;
 }
 
-/** blocked 卡自动续跑配置解析：{ enabled: boolean, maxPerRun: 正整数, cooldownHours: 正整数 }，
- *  缺省 true / 2 / 24（与 orchestrator/autoresume.mjs 的 DEFAULT_MAX_PER_RUN / DEFAULT_COOLDOWN_MS
- *  同一口径，改动须两处同步）。非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：
- *  stderr 输出可操作文案，不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，不告警。 */
+/** blocked 卡自动续跑配置解析：{ enabled: boolean, maxPerRun: 正整数, cooldownHours: 正整数,
+ *  maxPerCard: 正整数 }，缺省 true / 2 / 24 / 3（与 orchestrator/autoresume.mjs 的
+ *  DEFAULT_MAX_PER_RUN / DEFAULT_COOLDOWN_MS / DEFAULT_MAX_PER_CARD 同一口径，改动须两处同步）。
+ *  非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：stderr 输出可操作文案，
+ *  不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，不告警。 */
 function resolveAutoResume(raw) {
-  const DEFAULTS = { enabled: true, maxPerRun: 2, cooldownHours: 24 };
+  const DEFAULTS = { enabled: true, maxPerRun: 2, cooldownHours: 24, maxPerCard: 3 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] autoResume 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoResume 键，enabled 允许 true|false、maxPerRun/cooldownHours 须为正整数）`);
+    console.warn(`[workflow-config] autoResume 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoResume 键，enabled 允许 true|false、maxPerRun/cooldownHours/maxPerCard 须为正整数）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { enabled?, maxPerRun?, cooldownHours? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { enabled?, maxPerRun?, cooldownHours?, maxPerCard? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -664,6 +666,10 @@ function resolveAutoResume(raw) {
   if (raw.cooldownHours !== undefined) {
     if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
     else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
+  }
+  if (raw.maxPerCard !== undefined) {
+    if (Number.isInteger(raw.maxPerCard) && raw.maxPerCard > 0) out.maxPerCard = raw.maxPerCard;
+    else warn(`maxPerCard ${JSON.stringify(raw.maxPerCard)} 不合法（须为正整数）`);
   }
   return out;
 }

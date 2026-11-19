@@ -332,10 +332,10 @@ describe('orchestrator autoresume > workflow.json autoResume 配置解析', () =
     return dir
   }
 
-  it('缺省 enabled=true / maxPerRun=2 / cooldownHours=24', () => {
+  it('缺省 enabled=true / maxPerRun=2 / cooldownHours=24 / maxPerCard=3', () => {
     const dir = fixture({})
     try {
-      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24 })
+      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24, maxPerCard: 3 })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -344,7 +344,7 @@ describe('orchestrator autoresume > workflow.json autoResume 配置解析', () =
   it('显式值生效（enabled:false 关闭 / 自定义上界与冷却）', () => {
     const dir = fixture({ autoResume: { enabled: false, maxPerRun: 5, cooldownHours: 48 } })
     try {
-      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: false, maxPerRun: 5, cooldownHours: 48 })
+      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: false, maxPerRun: 5, cooldownHours: 48, maxPerCard: 3 })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -355,18 +355,18 @@ describe('orchestrator autoresume > workflow.json autoResume 配置解析', () =
     const dir = fixture({ autoResume: 'banana' })
     const wfPath = path.join(dir, '.agents', 'workflow.json')
     try {
-      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24 })
+      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24, maxPerCard: 3 })
       expect(String(warn.mock.calls[0]?.[0])).toContain('autoResume')
       warn.mockClear()
-      for (const bad of [{ enabled: 'no' }, { maxPerRun: 0 }, { maxPerRun: 1.5 }, { cooldownHours: -1 }, ['true']]) {
+      for (const bad of [{ enabled: 'no' }, { maxPerRun: 0 }, { maxPerRun: 1.5 }, { cooldownHours: -1 }, { maxPerCard: 0 }, { maxPerCard: 2.5 }, ['true']]) {
         fs.writeFileSync(wfPath, JSON.stringify({ autoResume: bad }))
-        expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24 })
+        expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 2, cooldownHours: 24, maxPerCard: 3 })
         expect(warn.mock.calls.length).toBeGreaterThan(0)
         warn.mockClear()
       }
       // 键缺失 = 沿用缺省且不告警
       fs.writeFileSync(wfPath, JSON.stringify({ autoResume: { maxPerRun: 3 } }))
-      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 3, cooldownHours: 24 })
+      expect(loadWorkflowConfig(dir).autoResume).toEqual({ enabled: true, maxPerRun: 3, cooldownHours: 24, maxPerCard: 3 })
       expect(warn).not.toHaveBeenCalled()
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
