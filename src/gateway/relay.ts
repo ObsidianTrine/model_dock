@@ -698,9 +698,13 @@ export async function forwardToUpstream(
 
 /** 模型不匹配类错误特征：上游 400 体里点名模型不存在 / 不支持 / 无效（正反两种语序都算：
  *  「model ... not supported」与「invalid model name」）。中文原文错误同样覆盖。
- *  （真实案例 2026-10：claude-direct 只认 Claude 系模型，glm-5.3-flash 被 400 拒绝，客户端只看到原始英文报错） */
+ *  （真实案例 2026-10：claude-direct 只认 Claude 系模型，glm-5.3-flash 被 400 拒绝，客户端只看到原始英文报错）
+ *  unsupportedmodel 一词（2026-11-16 夜航）：火山方舟 coding-plan 对不支持模型回 404 体
+ *  {"code":"UnsupportedModel","message":"The requested model does not support the coding plan feature."}
+ *  ——message 语序（does not support）不落既有分支，靠结构化 code 命中；404-model 判活切候选
+ *  （forwardWithFailover carve-out）与 400 hint 共用本正则。 */
 const MODEL_MISSING_RE =
-  /model.*(?:does not exist|is not supported|not available|not found|invalid)|(?:invalid|unsupported|unknown|no such)\s+model|模型.*(?:不存在|不支持|无效|不可用)/i
+  /model.*(?:does not exist|is not supported|not available|not found|invalid)|(?:invalid|unsupported|unknown|no such)\s+model|unsupportedmodel|模型.*(?:不存在|不支持|无效|不可用)/i
 
 /** 上游 4xx/5xx → 附带可执行修复建议 */
 export function translateUpstreamError(
@@ -1047,6 +1051,9 @@ function filterModelCompatible(
  * status（含 5xx）就地返回、不重放；headers 超时（transport='timeout'，已送达可能已计费）默认不切换、
  * 不计 connect 熔断，仅 failover_status_codes 白名单显式含其包装 status 且有剩余候选才切（三态见 UpstreamError.transport 注）。
  * 例外：failover_status_codes 列出的状态码（如 429/503，未产出内容）有剩余候选时切换，切换前排空响应体释放连接。
+ * 404 model 类 carve-out（2026-11-16 夜航）：ROUTED_PATH 上游 404 且错误体命中 MODEL_MISSING_RE 时视同
+ * 额度类切下一存活候选——上游明确拒绝该模型、未产出内容、无重复计费；仅链中段适用，链尾/非 routed
+ * 路径/错误体不匹配（可能是路径级资源不存在）一律原样回传。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
  * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
  * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
@@ -1166,8 +1173,21 @@ export async function forwardWithFailover(
       attempts.push({ provider: c.providerId, status: up.status, ms })
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
-      if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
+      // 404 model 类探测（2026-11-16 夜航模式 A 判死链）：仅 ROUTED_PATH 且链中段（有剩余候选）才读体
+      // 判别——链尾 404 无候选可切，不读不判原样回传（response 字节与 cause 语义零改动，含既有
+      // relay.test ①「末跳真实 404」断言）；非 routed 路径的 404 多为路径级资源不存在，一律不判
+      const probeModel404 = up.status === 404 && routedPath && i < cands.length - 1
+      if (up.status === 429 || up.status === 402 || probeModel404) {
+        bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
+      }
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
+      // 404 model 类 carve-out：错误体命中 MODEL_MISSING_RE = 上游明确点名拒绝该模型——请求未产出
+      // 内容、无重复计费，与额度类同理可安全改发；这是对函数头「已送达真实 status 就地返回」安全
+      // 边界的显式豁免（404 不在 failover_status_codes 白名单，此前只能原样回传）。
+      // 实证链：claude 会话中途辅助模型请求经 tierFallback 改写为 profile.default_model，钉定主候选
+      // 目录不含该模型 → 404 UnsupportedModel 原样回传 → CLI [claude-code:unrecognized_model] 退出
+      // → 编排器三路识别皆失明 → 任务判死。切候选即根治；错误体不匹配（路径级 404）不切。
+      const modelMissing = probeModel404 && bodyText !== undefined && MODEL_MISSING_RE.test(bodyText)
       // 本次 attempt 实际发送的模型（rewriteModel 产物；非对话端点 / 体无 model 时 undefined）：
       // 模型级熔断记账与链尾映射查找的 key
       const sentModel = up.modelAfter
@@ -1185,13 +1205,16 @@ export async function forwardWithFailover(
       else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
       else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
       else recordOutcome(rt, c.providerId, { ok: true, ms: lastSendMs })
-      const canSwitch = (switchable?.has(up.status) ?? false) || quota
+      const canSwitch = (switchable?.has(up.status) ?? false) || quota || modelMissing
       if (canSwitch && i < cands.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
         slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
         slot = undefined
         markReplay(c.providerId)
-        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: quota ? 'quota' : `http_${up.status}`, ms })
+        // model_mismatch 留痕（同 filterModelCompatible 剔除口径）：该候选被上游点名不支持本模型，
+        // 与「目录核对剔除」同为模型级不匹配，日志对账时同一签名可查
+        if (modelMissing && !modelMismatch.includes(c.providerId)) modelMismatch.push(c.providerId)
+        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: modelMissing ? 'model_missing' : quota ? 'quota' : `http_${up.status}`, ms })
         continue
       }
       // 模型级容灾（M1 链尾合成）：到这里还带 quota 的必是链尾候选（链中段已在上方分支切走）——

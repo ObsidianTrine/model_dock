@@ -20,10 +20,13 @@
 //   proto_endpoint_missing  判定性失败（非 transient）——blocked 理由带 cause + hint 可操作报错；
 //   unauthorized            判定性失败（非 transient）——tokenHint 直接点名归因（替代人工翻日志）；
 //   quota                   transient + switchProvider 信号（建议换 provider）；
-//   key_cooldown/key_pool_empty  transient + retryMs（metrics keypool remaining_ms 推导，可得时）。
+//   key_cooldown/key_pool_empty  transient + retryMs（metrics keypool remaining_ms 推导，可得时）；
+//   model_mismatch          判定性失败（非 transient）——模型不被候选服务支持（目录剔除全灭 /
+//                           404 UnsupportedModel 链尾透传），建议换模型/检查 profile.default_model。
 // 其余 cause 不参与精读（该条仍按状态码计数走既有路径）；cause 与状态码冲突时 cause 优先
 // （如 404 + proto_endpoint_missing → 判定性失败，不因 5xx 误判 transient）。
-// fail-open 铁律：网关日志不可得 / 旧日志无 cause 字段 → 行为与历史版本逐字节一致。
+// fail-open 铁律：网关日志不可得 / 旧日志无 cause 字段 → 行为与历史版本逐字节一致（404-model
+// 的 stderr 死亡签名不依赖网关数据，无网关场景同样归因——那是识别增强，非 fail-open 回退）。
 
 import { toIsoLocal } from './events.mjs';
 import { readGatewayLog } from './reconcile.mjs';
@@ -35,6 +38,15 @@ import { resolveGatewayAdmin } from './tiers.mjs';
  *  ERA 两分支只带前导 \b：ERA_NEGOTIATION_FAILED 的尾随 _FAILED 会让尾部 \b 失配。 */
 export const TRANSIENT_RE =
   /\b(429|rate.?limit|too many requests|overloaded|overloaded_error|capacity|service unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|UND_ERR|socket hang up|fetch failed)\b|\bera[_-]?negotiation|\bnegotiate[_-]?era/i;
+
+// 404 model 类死亡签名（2026-11-16 夜航模式 A 判死链）：claude CLI 对上游 404 UnsupportedModel
+// （网关 tierFallback 把 claude-* 辅助模型改写为 profile.default_model，钉定主候选目录不含该模型，
+// 404 不在 failover_status_codes 只能原样回传）的 stderr 死法是 [claude-code:unrecognized_model] 退出。
+// 刻意不并入 TRANSIENT_RE：那是「等会儿重试能好」的签名面，且被 autoresume Path A 与
+// speculativeResumes 复用——混入会把确定性失败（重试同一请求必然复现 404）当成可自愈反复重跑。
+// 本签名只认 stderrTail（CLI 把上游错误写 stderr；worker 正文自由文本误配「unrecognized model」
+// 字样不该触发归因）。
+export const MODEL_MISSING_STDERR_RE = /\bunrecognized[_-]?model\b/i;
 
 /**
  * 判定 worker 异常结束是否疑似瞬时故障（可退避重试自愈）。
@@ -51,8 +63,10 @@ export function isTransientWorkerFailure(output, stderrTail = '') {
 // LogEntry.cause——未列出的 cause 不参与精读，该条仍按状态码计数走既有路径）。
 // ---------------------------------------------------------------------------
 
-/** 判定性 cause：重试无意义，worker 不该原地重试（blocked 理由带可操作报错）。 */
-export const CRASH_CAUSE_DECISIVE = new Set(['proto_endpoint_missing', 'unauthorized']);
+/** 判定性 cause：重试无意义，worker 不该原地重试（blocked 理由带可操作报错）。
+ *  model_mismatch（2026-11-16）：模型不被候选服务支持——改写后的模型对同一配置必然复现，
+ *  重试纯属空转；唯一出路是人改配置（换模型 / 补支持该模型的候选）。 */
+export const CRASH_CAUSE_DECISIVE = new Set(['proto_endpoint_missing', 'unauthorized', 'model_mismatch']);
 /** 瞬时增强 cause：仍可退避重试，但事件/理由带更准的归因与（可得时的）重试窗口。 */
 export const CRASH_CAUSE_TRANSIENT = new Set(['quota', 'key_cooldown', 'key_pool_empty']);
 
@@ -63,6 +77,7 @@ const CAUSE_FALLBACK_HINT = {
   quota: '上游额度受限——建议在 ModelDock 换 provider 或等额度恢复',
   key_cooldown: 'key 池冷却中，稍后自动恢复；也可在 ModelDock 补充可用 key',
   key_pool_empty: '请在 ModelDock 补充可用 key 或换 provider',
+  model_mismatch: '请求模型不被候选服务支持——换模型，或检查 profile.default_model 是否为候选服务支持的模型',
 };
 
 /** keypool remaining_ms 推导重试窗口的钳制范围：下限避开 0ms 自旋，上限 10min（再长该人工决策）。 */
@@ -84,7 +99,7 @@ function causeGroupReason(group, backend) {
     const tk = group.find((g) => g.tokenHint)?.tokenHint ?? '';
     return `${head}：${backend ? `${backend} 使用的 token` : '客户端 token'}${tk ? `（前缀 ${tk}…）` : ''} 被网关拒绝——${hint}`;
   }
-  if (cause === 'proto_endpoint_missing') return `${head}：重试无意义——${hint}`;
+  if (cause === 'proto_endpoint_missing' || cause === 'model_mismatch') return `${head}：重试无意义——${hint}`;
   return `${head}：${hint}`;
 }
 
@@ -92,7 +107,10 @@ function causeGroupReason(group, backend) {
 // 结构化信号（网关日志窗口）：B6 优先识别面
 // ---------------------------------------------------------------------------
 
-/** 崩溃相关状态码：限流 429 / 额度不足 402（weather 上游海况同口径）/ 5xx 服务端故障。 */
+/** 崩溃相关状态码：限流 429 / 额度不足 402（weather 上游海况同口径）/ 5xx 服务端故障。
+ *  404 刻意不入列（2026-11-16）：404 可能是路径级资源不存在，无差别计入会把非模型类失败
+ *  误判成 worker 崩溃信号；404-model 类定性走两条已收窄到模型语义的面——cause=model_mismatch
+ *  精读（目录剔除全灭等）与 classifyWorkerCrash 顶部的 stderr unrecognized_model 死亡签名。 */
 export function isCrashStatus(status) {
   return status === 429 || status === 402 || (Number.isInteger(status) && status >= 500 && status < 600);
 }
@@ -167,10 +185,29 @@ export function readGatewayWindowEntries(gwDir, { startMs, endMs } = {}) {
  *          switchProvider?: boolean, retryMs?: number}}
  *          gateway 命中时带 hits（条数）与 reason（状态码路径如 "429×2, 503×1"；cause 路径
  *          为人类可读的可操作报错）；decisive=true = 判定性失败（proto_endpoint_missing/
- *          unauthorized，重试无意义）；quota 命中带 switchProvider 信号；key 池类 cause 且
+ *          unauthorized/model_mismatch，重试无意义）——source 亦可为 regex（stderr 命中
+ *          unrecognized_model 死亡签名时优先于网关窗口，reason 带换模型/profile 建议）；
+ *          quota 命中带 switchProvider 信号；key 池类 cause 且
  *          keypoolRemainingMs 可得时带 retryMs（已钳制 [1s, 10min]）
  */
 export function classifyWorkerCrash({ output = '', stderrTail = '', entries = null, window = null, backend = '', keypoolRemainingMs = null } = {}) {
+  // 404 model 类死亡签名（stderr 权威面，优先于网关日志窗口）：垂死进程自己的死因申报最直接。
+  // 结构化面在此场景识别不到——旧网关 404 条目 cause=upstream_4xx 不参与精读；新网关链尾透传
+  // 404（无剩余候选）不读体、不打 model_mismatch cause；窗口里的 429/quota 条目可能只是同会话
+  // 背景噪音，反把致命 404-model 掩盖成「重试能好」。确定性失败：重试必然复现（改写后的模型
+  // 对同一配置不变），不进 transient 重试（与 proto_endpoint_missing 同哲学）；switchProvider
+  // 仅作归因族元数据（remedy = 换模型/换 provider，同 quota），decisive 路径不重试故不进
+  // worker_retry 事件——可操作建议直接随 blocked 理由带给人工，不再落「未产出结果块」泛化 blocked。
+  if (MODEL_MISSING_STDERR_RE.test(String(stderrTail ?? ''))) {
+    return {
+      transient: false,
+      source: 'regex',
+      decisive: true,
+      cause: 'model_mismatch',
+      switchProvider: true,
+      reason: 'CLI 以 unrecognized_model 退出：请求模型不被目标服务支持——换模型，或检查 profile.default_model（tierFallback 会把辅助模型改写为该默认模型）',
+    };
+  }
   if (entries && window && Number.isFinite(window.startMs) && Number.isFinite(window.endMs)) {
     const lo = Math.min(window.startMs, window.endMs);
     const hi = Math.max(window.startMs, window.endMs);
@@ -205,8 +242,13 @@ export function classifyWorkerCrash({ output = '', stderrTail = '', entries = nu
         .map((s) => `${s}×${t[s]}`)
         .join(', ');
     };
-    // 决定性 cause 压过一切 transient 信号（含状态码 tally 里的 429/5xx——重试无意义）
-    const decisive = causeHits.find((c) => c.cause === 'proto_endpoint_missing') ?? causeHits.find((c) => c.cause === 'unauthorized');
+    // 决定性 cause 压过一切 transient 信号（含状态码 tally 里的 429/5xx——重试无意义）。
+    // 选取链按固定优先级（不随条目顺序漂移）：proto_endpoint_missing > unauthorized > model_mismatch
+    // （2026-11-16 扩：模型不被候选支持同属确定性失败，重试必然复现）。
+    const decisive =
+      causeHits.find((c) => c.cause === 'proto_endpoint_missing') ??
+      causeHits.find((c) => c.cause === 'unauthorized') ??
+      causeHits.find((c) => c.cause === 'model_mismatch');
     if (decisive) {
       const group = causeHits.filter((c) => c.cause === decisive.cause);
       return {
@@ -217,6 +259,9 @@ export function classifyWorkerCrash({ output = '', stderrTail = '', entries = nu
         hits: group.length,
         ...(decisive.hint ? { hint: decisive.hint } : {}),
         ...(decisive.cause === 'unauthorized' && decisive.tokenHint ? { tokenHint: decisive.tokenHint } : {}),
+        // switchProvider 族标记：model_mismatch 的出路同 quota（换），但 decisive 不重试，
+        // 标记仅作归因元数据（建议随 reason 带给人工）
+        ...(decisive.cause === 'model_mismatch' ? { switchProvider: true } : {}),
         reason: causeGroupReason(group, backend),
       };
     }
