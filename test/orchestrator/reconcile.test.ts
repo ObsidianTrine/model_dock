@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { AddressInfo } from 'node:net'
 import { createUsageTap } from '../../src/gateway/usage.js'
-import { fetchGatewayUsageSummary, gatewayLogsDir, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
+import { fetchGatewayUsageSummary, gatewayLogsDir, parseMergedBranchCommits, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
@@ -371,6 +371,24 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
     expect([...ids].sort()).toEqual(['abc', 'backslash-id', 'def', 'spec-x-1'])
   })
 
+  it('parseMergedBranchCommits：从 %H %P %s 行解析 sha+id；单亲/非 feature 合并标题不收', () => {
+    const sha = '9a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b'
+    const p1 = '1111111111111111111111111111111111111111'
+    const p2 = '2222222222222222222222222222222222222222'
+    const out = parseMergedBranchCommits([
+      `${sha} ${p1} ${p2} Merge branch 'feature/abc'`, // finish 默认消息
+      `${sha} ${p1} ${p2} Merge branch "feature/def" into develop`, // 双引号 + into 尾巴
+      `${sha} ${p1} Merge branch 'feature/mono'`, // 单亲（--merges 不会出，防御跳过）
+      `${sha} ${p1} ${p2} Merge branch 'develop' into feature/x`, // 非 feature 合并 → 不收
+      `${sha} ${p1} ${p2} chore: 普通 titled 合并 → 不收`,
+      '',
+    ])
+    expect(out).toEqual([
+      { sha, id: 'abc' },
+      { sha, id: 'def' },
+    ])
+  })
+
   it('已合并未落位（running/blocked）+ 账面合并但 git 无实证（squash/改史）双向对账', () => {
     const repo = mkRepo()
     try {
@@ -416,6 +434,62 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       expect(fs.existsSync(path.join(root, 'running', 'st-fix.md'))).toBe(false)
       const evts = eventsOf(repo.root, 'st-fix')
       expect(evts.some((e) => e.type === 'state_reconciled' && e.from === 'running' && e.to === 'merged' && e.base_branch === 'develop')).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('提交数门：空合并/标题残留（^1..^2 计数 0）不 fix、落警示桶——2026-11-16 四张 perf 卡假 merged 回归', () => {
+    // 造空合并提交（确定性复现标题残留）：树=develop 树、双亲=develop+feature/st-zero，
+    // 标题与真合并同形但 ^1..^2 计数恰为 0——旧判据（标题正则存在性）会把它当已合并误捕。
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      // st-zero 分支先建在 init（≠ develop tip）：commit-tree 对重复双亲会去重成单亲，
+      // 第二亲必须指向不同提交才能造出双亲空合并
+      git(repo.root, 'branch feature/st-zero')
+      mergeFeatureBranch(repo.root, 'st-real') // 真合并对照（helper 保留分支：残留分支 feature..base 计数 ≥1，不触发分支现存门）
+      const emptySha = git(
+        repo.root,
+        `commit-tree "$(git rev-parse develop^{tree})" -p develop -p feature/st-zero -m ${JSON.stringify("Merge branch 'feature/st-zero'")}`,
+      )
+      git(repo.root, `update-ref refs/heads/develop ${emptySha}`)
+      fs.writeFileSync(path.join(root, 'blocked', 'st-zero.md'), cardText({ id: 'st-zero' }, '空合并残留'))
+      fs.writeFileSync(path.join(root, 'blocked', 'st-real.md'), cardText({ id: 'st-real' }, '真合并对照'))
+
+      const sr = reconcileCardStates(repo.root, root, { fix: true })
+      // 真合并照常落位；空合并卡永不自动 fix（警示桶交人工对账）
+      expect(sr.fixed).toEqual(['st-real'])
+      expect(fs.existsSync(path.join(root, 'blocked', 'st-zero.md'))).toBe(true)
+      expect(fs.existsSync(path.join(root, 'merged', 'st-zero.md'))).toBe(false)
+      expect(fs.existsSync(path.join(root, 'merged', 'st-real.md'))).toBe(true)
+      expect(sr.emptyMerges.map((c: { id: string }) => c.id)).toEqual(['st-zero'])
+      expect(sr.mergedNotSettled).toEqual([expect.objectContaining({ id: 'st-real', state: 'blocked' })])
+      expect(sr.suspects).toEqual([])
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('分支现存门：真合并但同名分支重建到 base tip（重做开局/id 复用）→ 列 suspect 不 fix', () => {
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      mergeFeatureBranch(repo.root, 'st-re')
+      // 重做开局：同名分支重建到 develop tip（零自有提交）——卡代表重做中的新工作，
+      // 不能因旧合并标题被落位 merged/。方向取 feature..base（=0 持平）：真合并后残留
+      // 分支落后 base ≥1（merge 提交本身）不误伤，只有「分支包含 base 全部提交」才列嫌疑
+      git(repo.root, 'branch -f feature/st-re')
+      fs.writeFileSync(path.join(root, 'blocked', 'st-re.md'), cardText({ id: 'st-re' }, '重做中'))
+
+      const sr = reconcileCardStates(repo.root, root, { fix: true })
+      expect(sr.fixed).toEqual([])
+      expect(fs.existsSync(path.join(root, 'blocked', 'st-re.md'))).toBe(true)
+      expect(fs.existsSync(path.join(root, 'merged', 'st-re.md'))).toBe(false)
+      expect(sr.suspects.map((c: { id: string }) => c.id)).toEqual(['st-re'])
+      expect(sr.mergedNotSettled).toHaveLength(0)
     } finally {
       repo.cleanup()
     }

@@ -1784,11 +1784,45 @@ async function humanGateInteractive(repoRoot, taskId, root, qdir, summary, runOp
 // 闸门操作（交互与非交互共用）
 // ---------------------------------------------------------------------------
 
+/**
+ * 零提交防假合并门的对账原语：feature 分支相对 base 的提交数。查分支 ref 而非复用
+ * worktreeCommitsAhead（worktree HEAD）：worktree 可能已被上次失败的 finish 清掉而卡
+ * 仍留 awaiting-human（清理失败退出 1 的重试场景），分支 ref 才是 finish 实际要合并的
+ * 对象。null = 不可判定（分支缺失 / git 故障）——不拦截，交给 finish 自己报错：门只拦
+ * 「有明确证据的零提交」，不为排查失败扩大拦截面。
+ */
+function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', `${baseBranch}..refs/heads/feature/${taskId}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
   if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
   else appendEvent(qdir, 'human_gate', { decision: 'approved' });
+  // 零提交防假合并门（2026-11-16 夜航四张 perf 卡假 merged 实证）：spawn finish 前先对账
+  // 分支产出。零提交分支上 finish 走「nothing to merge」成功路径 exit 0，旧逻辑随后无条件
+  // 记 merged 并把当时的 develop HEAD 误记成 merge_commit。拒绝时卡转 failed/（终态：
+  // 落 reviewing/ 会被自动批示再次拉回闸门反复重跑审查，failed/ 与人工驳回 doReject 同款
+  // 落位）；事件留拒绝理由、不记 merge_commit、不动 develop，worktree 保留供人工核对
+  // worker 到底留了什么（多半是漏提交）。
+  const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
+  const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
+  if (commitsAhead === 0) {
+    moveCard(root, taskId, 'awaiting-human', 'failed');
+    appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
+    die(
+      `任务 ${taskId} 拒绝合并：feature 分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门，2026-11-16 假 merged 事故防线）。\n` +
+      `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
+      `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
+    );
+  }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
   // approve 给 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD——finish 内部校验
@@ -3098,6 +3132,16 @@ async function cmdReconcile(repoRoot, taskId, opts = {}) {
     for (const c of sr.settledNotMerged) log(`  ${c.id}`);
   } else {
     log('状态对账 · 账面合并但 git 无实证：无');
+  }
+  // 警示桶（2026-11-16 假 merged 事故防线）：只提示不自动修——空合并/标题残留与同名
+  // 空转分支都可能是真卡重做中，fix 方向（落位 merged/）错了不可逆，交人工对账。
+  if (sr.emptyMerges?.length) {
+    log(`⚠ 状态对账 · 空合并/标题残留（merge 提交计数为 0，无实际并入内容，共 ${sr.emptyMerges.length} 张，永不自动 fix）：`);
+    for (const c of sr.emptyMerges) log(`  ${c.id.padEnd(24)} merge ${c.mergeSha.slice(0, 7)}`);
+  }
+  if (sr.suspects?.length) {
+    log(`⚠ 状态对账 · 分支现存嫌疑（真合并但同名分支仍在且与基准分支持平，疑似 id 复用/重做中，共 ${sr.suspects.length} 张，不自动 fix）：`);
+    for (const c of sr.suspects) log(`  ${c.id.padEnd(24)} ${c.branch} —— ${c.reason}`);
   }
 
   function show(r) {

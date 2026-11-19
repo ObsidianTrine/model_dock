@@ -3,6 +3,8 @@
 //         run-lock acquireSchedulerLockRetry 有界重试（抢锁失败 60s×10 缺省，参数可注入）
 //   e2e（mkRepo + mock 后端跑真实闭环到 awaiting-human）：
 //     ① 超时 + blockers=0 → 按推荐自动合并（merged/，autoapprove_decision + merged auto:true）
+//     ①b 零提交分支（ORCH_MOCK_NO_COMMIT=1）→ 防假合并门拒绝：卡转 failed/、develop 不动、
+//       不记 merge_commit（2026-11-16 夜航四张 perf 卡假 merged 回归）
 //     ② 超时 + blockers>0 → 自动返工（doRetry 完整闭环），maxAutoRetry=1 第二次超限留人
 //     ③ 无 review_verdict / 最后是 review_engine_failed → fail-closed 不动作
 //     ④ 拍板窗口未过 → 不动作
@@ -28,7 +30,7 @@ import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
 import { writeSpec } from '../../.agents/scripts/orchestrator/spec.mjs'
 import { appendEvent } from '../../.agents/scripts/orchestrator/events.mjs'
 import { acquireSchedulerLockRetry, releaseSchedulerLock, schedulerLockPath } from '../../.agents/scripts/orchestrator/run-lock.mjs'
-import { cardText, eventsOf, mkRepo, runOrch } from './helpers.js'
+import { cardText, eventsOf, git, mkRepo, runOrch, tryOrch } from './helpers.js'
 
 // timeoutMinutes=1：回拨 10 分钟的结论远超窗口；detached sweep（run 落位自动拉起）的
 // 睡眠也只有 1.5 分钟，测试收尾后空转自灭，不拖累套件
@@ -168,6 +170,37 @@ describe('orchestrator autoapprove > e2e（mock 闭环）', () => {
       const evts = eventsOf(repo.root, 'aa-merge')
       expect(evts.some((e) => e.type === 'autoapprove_decision' && e.decision === 'merge' && e.source === 'timeout')).toBe(true)
       expect(evts.some((e) => e.type === 'merged' && e.auto === true)).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
+
+  it('①b 零提交分支（ORCH_MOCK_NO_COMMIT=1）超时自动合并被防假合并门拒绝：卡转 failed/、develop 不动、不记 merge_commit', () => {
+    // 回归：2026-11-16 夜航四张 perf 卡假 merged——零提交分支上 finish 走「nothing to
+    // merge」成功路径 exit 0，doApprove 随后无条件记 merged 并把 develop HEAD 误记为
+    // merge_commit。现在 doApprove 在 spawn finish 前对账分支产出，零提交直接拒绝。
+    const repo = mkRepo({ workerBackend: 'mock', extra: { autoApprove: AA_CFG } })
+    try {
+      submitCard(repo.root, 'aa-zero', { gate: 'L3' })
+      runOrch(repo.root, 'run aa-zero --backend mock', { ORCH_MOCK_NO_COMMIT: '1' })
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-zero')).toBe(true)
+      rewindLastVerdict(repo.root, 'aa-zero')
+      const developBefore = git(repo.root, 'rev-parse develop')
+      const r = tryOrch(repo.root, 'autoapprove')
+      expect(r.status).not.toBe(0) // die 非零退出（与 finish 失败同语义：合并动作未发生）
+      expect(r.stderr).toContain('零提交')
+      expect(r.stderr).toContain('无可验收产出')
+      // 卡不落 merged/、不滞留 awaiting-human/（防下一轮 sweep 再拉起），转 failed/ 终态
+      expect(cardIn(repo.root, 'merged', 'aa-zero')).toBe(false)
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-zero')).toBe(false)
+      expect(cardIn(repo.root, 'failed', 'aa-zero')).toBe(true)
+      expect(git(repo.root, 'rev-parse develop')).toBe(developBefore)
+      // 事件链：failed 事件带拒绝理由 + commits_ahead 证据；无 merged 事件（不记假 merge_commit）
+      const evts = eventsOf(repo.root, 'aa-zero')
+      const failed = evts.find((e) => e.type === 'failed') as Record<string, unknown> | undefined
+      expect(String(failed?.reason)).toContain('零提交')
+      expect(failed?.commits_ahead).toBe(0)
+      expect(evts.some((e) => e.type === 'merged')).toBe(false)
     } finally {
       repo.cleanup()
     }
