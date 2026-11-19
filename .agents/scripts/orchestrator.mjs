@@ -47,7 +47,7 @@ import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
-import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards } from './orchestrator/autoresume.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards, lifetimeCapRejections } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
 import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
@@ -2452,14 +2452,31 @@ async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
 }
 
 /**
+ * 生命周期上限拒绝留痕（P1-⑨，判定纯逻辑在 lifetimeCapRejections）：落卡事件
+ * auto_resume_rejected { reason: 'lifetime_cap', count, max_per_card } + 主日志一行——
+ * 超限卡留 blocked 待人工，卡上已有 auto_resume_count 累计值即留痕；同一上限状态
+ * 只报一次（去重口径见 lifetimeCapRejections），防 drain 每轮刷屏。
+ */
+function reportLifetimeCapRejections(repoRoot, rejections) {
+  for (const c of rejections) {
+    try {
+      appendEvent(logDir(repoRoot, c.id), 'auto_resume_rejected', { card: c.id, reason: 'lifetime_cap', count: c.count, max_per_card: c.cap });
+    } catch { /* 留痕失败不阻断选卡 */ }
+    log(`⛔ 卡 ${c.id} 自动续累计 ${c.count} 次已达上限 ${c.cap}——不再自动续，等人工 resume（判否原因见 logs/${c.id}/ 事件）。`);
+  }
+}
+
+/**
  * blocked 卡有限自动续跑（长跑自主的关键小件；资格判定纯逻辑在 orchestrator/autoresume.mjs）。
  * drain 选卡前调用：扫 blocked/ → 挑「transient 类失败 + 冷却已过」的卡（≤maxPerRun 张，
- * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记写进卡 frontmatter
- * （自动续后再 blocked 时下轮靠它判冷却——连续自动续失败不重试）→ 记 auto_resume
+ * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记 + auto_resume_count 累计
+ * 写进卡 frontmatter（自动续后再 blocked 时下轮靠前者判冷却、靠后者判生命周期上限——
+ * 连续自动续失败不重试、全生命周期封顶防「续→崩→冷却→续」循环烧钱）→ 记 auto_resume
  * { card, attempts } 事件 → spawn 既有 resume 子命令（闭环复用不复制逻辑；子进程隔离，
  * 熔断 process.exit 不伤 drain 主循环，与派 run 子进程同哲学，--auto-resume 让 resumed
- * 事件标记 by=auto 区别于人工）。上界三重：只续 transient 类、每卡 24h（cooldownHours）
- * 最多 1 次、每次 drain ≤2 张（maxPerRun）。drift 降级 = 全人工，整个通道暂停；
+ * 事件标记 by=auto 区别于人工）。上界四重：只续 transient 类、每卡 24h（cooldownHours）
+ * 最多 1 次、每次 drain ≤2 张（maxPerRun）、每卡全生命周期 ≤3 次（maxPerCard，超限留
+ * blocked 交人工并落 auto_resume_rejected 事件）。drift 降级 = 全人工，整个通道暂停；
  * autoResume.enabled=false 完全不扫。
  * @returns {string[]} 本轮自动续的卡 id（drain 汇总口径）
  */
@@ -2478,7 +2495,9 @@ function autoResumePass(repoRoot, root, cfg, opts) {
   const picked = pickAutoResumeCandidates(candidates, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+    maxPerCard: ar.maxPerCard,
   });
+  reportLifetimeCapRejections(repoRoot, lifetimeCapRejections(candidates, { maxPerCard: ar.maxPerCard }));
   const resumed = [];
   for (const c of picked) {
     const card = candidates.find((x) => x.id === c.id);
@@ -2513,7 +2532,8 @@ function autoResumePass(repoRoot, root, cfg, opts) {
  *   ①' beat 静默但属主 pid 探活仍活（spawnSync npm ci/ensureWorktree 冻结事件循环的活
  *      run，P1-a）→ 只落观测（fleet 事件 orphan_heal_beat_silent + log）不动卡；
  *   ② 孤儿 + classifyOrphan='resume'（崩溃族 / 上会话 transient 签名 / retry 链）→
- *      有限自动续：沿用 24h 冷却（cooldownHours）与每次 ≤maxPerRun 张，与 blocked 通道同参；
+ *      有限自动续：沿用 24h 冷却（cooldownHours）、每次 ≤maxPerRun 张与每卡生命周期上限
+ *      （maxPerCard，auto_resume_count 随卡累计），与 blocked 通道同参；
  *   ③ 孤儿 + 其余（'breaker' 熔断卡永不续 / 'stuck' 非 transient）→ 落 blocked/
  *      （failTaskToBlocked 同款：failed 事件 + 迁移，附不可续原因），交人工。
  * 护栏：仅在实际获得调度器锁的进程执行（调用方守卫——watch/nightly 派生的 drain 子进程
@@ -2551,8 +2571,18 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   const picked = pickOrphanResumeCandidates(orphans, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+    maxPerCard: ar.maxPerCard,
   });
+  // 生命周期上限拒绝留痕（与 blocked 通道同口径）：capped 孤儿不进候选，随后在下方
+  // 落 blocked 循环里按 cap 专属原因归位——failed 事件的 reason 面向人工与未来
+  // isTransientBlocked 匹配写，上限拒绝不匹配任何可续签名，卡留在 blocked 交人工。
+  const capRejections = lifetimeCapRejections(orphans, {
+    maxPerCard: ar.maxPerCard,
+    isEligible: (c) => classifyOrphan(c.events) === 'resume', // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致
+  });
+  reportLifetimeCapRejections(repoRoot, capRejections);
   const resumed = [];
+  const cappedIds = new Set(capRejections.map((c) => c.id));
   for (const c of picked) {
     const card = orphans.find((x) => x.id === c.id);
     try {
@@ -2585,10 +2615,13 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
     const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
     const kind = classifyOrphan(c.events);
     // reason 面向 isTransientBlocked 的签名匹配写（只引程序写入的枚举 reason，不引自由文本
-    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续
-    const reason = kind === 'breaker'
-      ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
-      : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
+    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续。
+    // capped（P1-⑨ 生命周期上限）：本是 transient 族但自动续次数已封顶，专属原因交人工。
+    const reason = cappedIds.has(c.id)
+      ? '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），自动续次数已达生命周期上限——不再自动续，交人工 resume'
+      : kind === 'breaker'
+        ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
+        : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
     appendEvent(logDir(repoRoot, c.id), 'failed', { reason });
     moveCard(root, c.id, cur.state, 'blocked');
     blocked.push(c.id);
@@ -3178,13 +3211,14 @@ function draftsDir(repoRoot) {
   return path.join(repoRoot, '.agents', 'orchestrator', 'drafts');
 }
 
-/** 提案卡 frontmatter 文本级归一：created_by / gate 覆写、proposal: true 补齐
- *  （保留 planner/scanner 正文全部段落——与 intent 的文本覆写同款手法）。 */
+/** 提案卡 frontmatter 文本级归一：created_by / gate 覆写
+ *  （保留 planner/scanner 正文全部段落——与 intent 的文本覆写同款手法）。
+ *  proposal: true 死字段已退役（P1-⑨ 字段卫生：全库零读点，提案身份由 drafts/ 落位 +
+ *  created_by 标识），不再补齐；旧卡里残留的该行是无人消费的惰性文本，提交时原样保留。 */
 function normalizeProposalText(text, { createdBy, gate } = {}) {
   let out = String(text ?? '');
   if (createdBy) out = out.replace(/^created_by:.*$/m, `created_by: ${createdBy}`);
   if (gate) out = out.replace(/^gate:.*$/m, `gate: ${gate}`);
-  if (!/^proposal:\s*true$/m.test(out)) out = out.replace(/^gate:.*$/m, (g) => `${g}\nproposal: true`);
   return out;
 }
 

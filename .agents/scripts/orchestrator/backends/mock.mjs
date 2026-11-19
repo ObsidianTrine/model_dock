@@ -291,7 +291,6 @@ export const mockBackend = {
           'gate: L3',
           ...(isFeature
             ? [
-                'proposal: true',
                 `research: ${plannerResearch}`,
                 'score:',
                 '  value: 2',

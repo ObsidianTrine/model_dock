@@ -530,7 +530,6 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `workflows:\n` +
     `  - feature-branch\n` +
     `gate: L3\n` +
-    `proposal: true\n` +
     `research: <feature 卡必填：引用既有调研 brief 的 id；仓库里没有能回答它的 brief 就写 todo——系统会先派调研、再出规格；非 feature 卡省略此行>\n` +
     `score:\n` +
     `  value: <1-3 价值档>\n` +
@@ -545,7 +544,7 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `硬性要求：\n` +
     `1. 验收标准必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止只有「测试全绿」这类空洞标准；造型/视觉类任务写可测量指标（比例/尺寸/色值）并注明参考图来源，「像/美观」不算验收标准；\n` +
     `2. files_hint 写真实范围（你确认过的路径），写裸 glob，不要用反引号或引号包住；\n` +
-    `3. created_by 固定 planner、gate 固定 L3、frontmatter 带 proposal: true；\n` +
+    `3. created_by 固定 planner、gate 固定 L3；\n` +
     `4. feature 卡 frontmatter 必带 research 行（引用既有 brief id 或写 todo）——feature 不直接进队列，走 research → spec → 人工审设计 → spec build 管线；\n` +
     `5. score 四因子只取 1/2/3 档并在 evidence 里给出依据（量化给调度定序用，宁缺毋滥：证据不足就整体省略 score/evidence）；\n` +
     `6. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +

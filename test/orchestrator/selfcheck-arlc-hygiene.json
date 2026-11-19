@@ -1,0 +1,14 @@
+{
+  "file": "../../.agents/scripts/orchestrator/scan.mjs",
+  "countEqual": [
+    { "pattern": "const signalHashes = normalizeSignalHashes\\(c\\.signal_hashes\\)", "equal": 1 },
+    { "pattern": "c\\.signal_hashes = normalizeSignalHashes\\(\\[signalHash\\(c\\)\\]\\)", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "normalizeSignalHashes", "atLeast": 4 }
+  ],
+  "grepZero": [
+    "'proposal: true',",
+    "import\\.meta"
+  ]
+}

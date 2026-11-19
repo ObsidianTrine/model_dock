@@ -1,0 +1,17 @@
+{
+  "file": "../../.agents/scripts/orchestrator.mjs",
+  "countEqual": [
+    { "pattern": "maxPerCard: ar\\.maxPerCard", "equal": 4 },
+    { "pattern": "function reportLifetimeCapRejections", "equal": 1 },
+    { "pattern": "reason: 'lifetime_cap'", "equal": 2 }
+  ],
+  "countAtLeast": [
+    { "pattern": "reportLifetimeCapRejections\\(repoRoot", "atLeast": 2 },
+    { "pattern": "auto_resume_rejected", "atLeast": 2 },
+    { "pattern": "maxPerCard", "atLeast": 10 }
+  ],
+  "grepZero": [
+    "\\\\\\+\\\\nproposal: true",
+    "\\(g\\) => `\\$\\{g\\}"
+  ]
+}

@@ -75,7 +75,7 @@ describe('orchestrator nightly > 巡检编排端到端', () => {
       const drafts = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts')).filter((f) => f.endsWith('.md'))
       expect(drafts.some((f) => f.startsWith('planner-'))).toBe(true)
       const proposal = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', drafts.find((f) => f.startsWith('planner-'))), 'utf8')
-      expect(proposal).toContain('proposal: true')
+      expect(proposal).not.toContain('proposal:') // 死字段已退役（P1-⑨ 字段卫生）
       expect(proposal).toContain('gate: L3')
       expect(out.stdout).toContain('批量 submit')
     } finally {

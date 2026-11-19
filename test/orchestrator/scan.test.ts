@@ -58,11 +58,12 @@ describe('orchestrator scan > scan 命令端到端', () => {
       let drafts = fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))
       expect(drafts).toHaveLength(1)
       expect(drafts[0]).toMatch(/^scan-todo-/)
-      // 提案内 created_by: scanner、gate: L3、proposal: true
+      // 提案内 created_by: scanner、gate: L3、干净的 signal_hashes（proposal: true 死字段已退役，P1-⑨）
       const cardText = fs.readFileSync(path.join(draftsDir, drafts[0]), 'utf8')
       expect(cardText).toContain('created_by: scanner')
       expect(cardText).toContain('gate: L3')
-      expect(cardText).toContain('proposal: true')
+      expect(cardText).not.toContain('proposal:')
+      expect(cardText).toMatch(/signal_hashes: \[[0-9a-f]{8}\]/)
 
       const again = runOrch(repo.root, 'scan --todo')
       expect(again.stdout).toContain('已存在，跳过')
