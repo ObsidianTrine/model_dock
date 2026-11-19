@@ -553,6 +553,23 @@ export function evaluateBranchEdit({ branch, repoRoot, fileRoot, filePath }, cfg
  *   L1 普通 src 改动
  *   L0 纯文档/测试
  */
+// corePaths（精确相等）/ releasePaths（前缀）单文件命中判定：classifyChange 与
+// hitsCoreOrRelease 共用同一匹配口径（防两处口径漂移），匹配语义改动只改这里。
+const isCorePathHit = (f, core) => core.includes(f);
+const isReleasePathHit = (f, release) => release.some((p) => f.startsWith(p) || f === p);
+
+/**
+ * 改动文件集合中命中 corePaths/releasePaths 的文件（分级同源口径：core 精确相等、
+ * release 前缀）。双 critic 触发等消费方复用，勿自行重写匹配；package.json 与
+ * GUARD_SELF 的保守归高不在此列——未识别文件的保守 L2 不算「卡面声明的核心面」。
+ */
+export function hitsCoreOrRelease(changedFiles, cfg) {
+  const files = (changedFiles ?? []).map((f) => String(f).replace(/\\/g, '/'));
+  const core = corePaths(cfg);
+  const release = releasePaths(cfg);
+  return files.filter((f) => isCorePathHit(f, core) || isReleasePathHit(f, release));
+}
+
 export function classifyChange(changedFiles, cfg) {
   const files = (changedFiles ?? []).map((f) => String(f).replace(/\\/g, '/'));
   if (!files.length) return { level: 'L0', reasons: ['无改动'] };
@@ -566,9 +583,9 @@ export function classifyChange(changedFiles, cfg) {
     if (order.indexOf(l) > order.indexOf(level)) level = l;
   };
   for (const f of files) {
-    if (release.some((p) => f.startsWith(p) || f === p)) bump('L3', `${f}（发布流水线）`);
+    if (isReleasePathHit(f, release)) bump('L3', `${f}（发布流水线）`);
     else if (GUARD_SELF.some((re) => re.test(f))) bump('L2', `${f}（守护器自身/评测题库，守卫自持性）`);
-    else if (core.includes(f) || f === 'package.json') bump('L2', `${f}（核心路径）`);
+    else if (isCorePathHit(f, core) || f === 'package.json') bump('L2', `${f}（核心路径）`);
     else if (L0_ALLOW.some((re) => re.test(f))) {
       /* L0 候选，保持当前级别 */
     } else if (/^src\//.test(f)) bump('L1', `${f}（普通 src 改动）`);

@@ -189,6 +189,31 @@ export function parseReviewVerdict(text) {
 }
 
 /**
+ * 从审查输出提取阻塞项条目行（双 critic 并集去重用，简单口径不过度工程）：只认列表行
+ * （- / * / 数字编号）且行内带阻塞语义（「阻塞」/「blocker」，排除「不阻塞」否定式——
+ * 建议项常以「（不阻塞）」收尾）。REVIEW_SUMMARY 契约只钉计数、逐条无结构，这是行级
+ * 宽容启发——提取数与契约计数不符时由调用方回落保守口径（取两 critic 计数较大者）。
+ */
+export function extractBlockerItems(text) {
+  const out = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const s = line.trim();
+    if (!/^([-*•]|\d+[.、)])\s*/.test(s)) continue;
+    if (/REVIEW_SUMMARY/.test(s)) continue;
+    if (!/(?:阻塞|blocker)/i.test(s)) continue;
+    if (/不阻塞/.test(s)) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+/** 阻塞项归一化键（file+issue 摘要同一把钥匙）：只留字母/数字/CJK 并小写——emoji、严重度
+ *  徽标、标点、空白差异不参与比对，同一问题在两只 critic 笔下的措辞装饰归一后可判同条。 */
+export function blockerKey(item) {
+  return String(item ?? '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+}
+
+/**
  * reviewer 契约行补问（⑤）：有审查输出但缺 REVIEW_SUMMARY 行时先补问一次再判罚——
  * 直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）。输入只有上轮
  * 输出截尾，不重放 diff：补问只求补一行汇总，不重开审查。
