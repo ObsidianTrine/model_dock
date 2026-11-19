@@ -15,7 +15,7 @@ import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
 import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ModelMeta, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -60,7 +60,7 @@ export { OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision, warmupOvervie
 export { runClientInstall, runClientUninstall } from './install.js'
 export { errorReply, maxBodyBytes } from './admin-shared.js'
 import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
-import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
+import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, rollbackKeyWrite, sendError, writeKeySlotLocked, type KeyWritePlan } from './admin-shared.js'
 import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
 import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
@@ -1299,28 +1299,25 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // Key 写入计划：池 provider（keys 非空）转发恒走 keys 池（providerKeyRefs），只写 key_ref
   // 会「静默无效」——对齐 CLI provider set-key --add：新 key 追加进池（槽位 <id>-k<序号>，
   // 与既有引用去重）；提交的 key 已在池内时零改动（keyChanged=false 走不到这里，幂等）。
-  // 单 key 配置保持覆盖 key_ref。ref 在 persist 前按实际后端确定性预生成（makeKeyRef 与
-  // setSecret 返回同构），persistConfig 落配置成功后才 setSecret 补密文本（先配置后密钥，
-  // REVIEW-10 同序：persist 失败时密钥未动、配置由 mutateConfig 原子性保持原状，无半套状态——
-  // 反序会在配置写失败时留孤儿密钥条目，2026-11-04 审查 P2）。
-  let keyWrite: { secretId: string; ref: string; pool: boolean; backend: SecretBackend } | undefined
+  // 单 key 配置保持覆盖 key_ref。仍先配置后密钥（REVIEW-10 同序：persist 失败时密钥未动、
+  // 配置由 mutateConfig 原子性保持原状，无半套状态——反序会在配置写失败时留孤儿密钥条目，
+  // 2026-11-04 审查 P2）。
+  // 审计 F3：槽位不再锁外预生成——计划期只锁「是否写 key」（keyIntent，含计划期池引用快照
+  // planPool），具体槽位在 persistConfig 写锁内按盘上最新池态推导（writeKeySlotLocked）：
+  // 下方去重校验的钥匙环读取等 await 可达百 ms，锁外推导期间另一并发写者可先落同槽 key，
+  // 沿用旧推导会把两个 key 挤进同一槽（后写 setSecret 覆盖先写，先写方丢 key）。
+  // 审计 F5：先配置后密钥的残余面由失败回滚收口——setSecret 失败时 rollbackKeyWrite 摘除
+  // 刚落的引用再上抛，配置不留「指向无值 ref」的残面（单 key 503 残留）。
+  let keyIntent: { key: string; backend: SecretBackend; planPool: string[] } | undefined
   if (hasNewKey && keyChanged) {
     const backend = rt.config.security?.store ?? (await defaultStore())
     // 与 setSecret 内部同规：FAKE_HOME 沙箱下外部后端强制落 file，ref 必须按实际后端预生成
     const effBackend: SecretBackend =
       process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
-    const poolKeys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
-    if (poolKeys.length > 0) {
-      const taken = new Set([...poolKeys, p.key_ref])
-      let slot = poolKeys.length + 1
-      let ref = makeKeyRef(effBackend, `${id}-k${slot}`)
-      while (taken.has(ref)) {
-        slot++
-        ref = makeKeyRef(effBackend, `${id}-k${slot}`)
-      }
-      keyWrite = { secretId: `${id}-k${slot}`, ref, pool: true, backend: effBackend }
-    } else {
-      keyWrite = { secretId: id, ref: makeKeyRef(effBackend, id), pool: false, backend: effBackend }
+    keyIntent = {
+      key: b.key as string,
+      backend: effBackend,
+      planPool: Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : [],
     }
   }
   // 模型目录：完整列表替换语义（UI 传全量）。校验：id 非空去重、ctx/out 为正整数；
@@ -1399,26 +1396,15 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // 默认模型基线（persist 前取）：persist 后比对，真变了才触发烤模型客户端同步
   const prevProfName = profileRefForProvider(rt.config, id)
   const prevDefaultModel = prevProfName ? rt.config.profiles[prevProfName]?.default_model : undefined
+  let keyWrite: KeyWritePlan | undefined
   await persistConfig(rt, (c) => {
     const t = c.providers[id]
     if (!t) return
     if (name) t.name = name
     if (baseUrl) t.base_url = baseUrl
     if (newProtocol) t.protocol = newProtocol
-    if (keyWrite) {
-      if (keyWrite.pool) {
-        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）。
-        // 建池（盘上 keys 为空）时先把 key_ref 迁入池首——providerKeyRefs 池非空时只认 keys，
-        // 不迁移原 key 静默退出轮转（2026-11-12 审查 P1-2，与 CLI set-key --add 同口径）；
-        // key_ref 保持原值不清（providerAllKeyRefs 删除口径集合去重）。常态是既有池纯追加，
-        // 本迁移只兜「计划期看到池、盘上池被清」的运行态/盘上分歧窗口
-        const pool = (t.keys ??= [])
-        if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
-        pool.push(keyWrite.ref)
-      } else {
-        t.key_ref = keyWrite.ref
-      }
-    }
+    // 槽位推导在写锁内按盘上最新态进行（审计 F3，推演见 keyIntent 注）；产出计划供锁外 setSecret 与失败回滚
+    if (keyIntent) keyWrite = writeKeySlotLocked(t, id, keyIntent.backend, keyIntent.planPool)
     if (newModels) t.models = newModels
     // 模型级容灾：resolver 返回 undefined（null/空表入参）= 删除字段，非空 = 写归一化映射
     if (mfProvided) {
@@ -1446,8 +1432,16 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
   })
-  // 配置已落盘，锁外补写密钥文本（先配置后密钥，见 keyWrite 处注释）
-  if (keyWrite) await setSecret(keyWrite.secretId, b.key as string, keyWrite.backend)
+  // 配置已落盘，锁外补写密钥文本（先配置后密钥，见 keyIntent 注）；失败回滚刚落的引用（审计 F5）
+  // 再原样上抛——顶层 errorReply 还原 SecretsError 的 400+hint，配置不留指向无值 ref 的残面
+  if (keyWrite && keyIntent) {
+    try {
+      await setSecret(keyWrite.secretId, keyIntent.key, keyWrite.backend)
+    } catch (e) {
+      await rollbackKeyWrite(rt, id, keyWrite)
+      throw e
+    }
+  }
   // 默认模型真变了才同步烤模型客户端（dsh/workbuddy/zcode 模型列表烙在客户端文件里，
   // 与全局切换 hSwitch 同口径）；钉定路由的客户端不在其职责内，不受影响
   const bakedParts: Array<Bilingual | ''> = []
@@ -1976,33 +1970,27 @@ async function hKey(c: AdminCtx): Promise<void> {
       return
     }
   }
-  let keyWrite: { secretId: string; ref: string; pool: boolean }
-  if (isPool) {
-    const taken = new Set([...poolKeys, p.key_ref])
-    let slot = poolKeys.length + 1
-    let ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
-    while (taken.has(ref)) {
-      slot++
-      ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
-    }
-    keyWrite = { secretId: `${provider}-k${slot}`, ref, pool: true }
-  } else {
-    keyWrite = { secretId: provider, ref: makeKeyRef(effBackend, provider), pool: false }
-  }
-  // 顺序不可反，先 config 后 secrets（REVIEW-10，推演见 hServiceUpdate keyWrite 注）
+  // 槽位推导进写锁内按盘上最新池态重推导（审计 F3，推演见 hServiceUpdate keyIntent 注）；
+  // poolKeys 是计划期池引用快照（兜「计划期见池、盘上池被清」的分歧窗口）
+  let keyWrite: KeyWritePlan | undefined
   await persistConfig(rt, (cfg) => {
     const t = cfg.providers[provider]
     if (!t) return
-    if (keyWrite.pool) {
-      // 建池即迁移 key_ref（口径同 hServiceUpdate 池追加注：2026-11-12 审查 P1-2）
-      const pool = (t.keys ??= [])
-      if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
-      pool.push(keyWrite.ref)
-    } else {
-      t.key_ref = keyWrite.ref
-    }
+    keyWrite = writeKeySlotLocked(t, provider, effBackend, poolKeys)
   })
-  await setSecret(keyWrite.secretId, key, effBackend)
+  if (!keyWrite) {
+    // persist 回调空转 = provider 在校验后、持锁写盘前被并发删除：配置未动，不再补写密钥
+    // （旧实现此时仍会 setSecret 留孤儿条目），按不存在回应
+    return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
+  }
+  // 顺序不可反，先 config 后 secrets（REVIEW-10，推演见 hServiceUpdate keyIntent 注）；
+  // setSecret 失败回滚刚落的引用（审计 F5），配置不留指向无值 ref 的残面，原样上抛走顶层 errorReply
+  try {
+    await setSecret(keyWrite.secretId, key, keyWrite.backend)
+  } catch (e) {
+    await rollbackKeyWrite(rt, provider, keyWrite)
+    throw e
+  }
   audit(
     bi('更新密钥', 'Update key'),
     provider,
