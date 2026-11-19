@@ -2,6 +2,8 @@
 // 「<一句话说明本任务要达成什么>」占位符）→ 打 WARNING 但不阻断（NOTES 永不入库，
 // 不构成代码风险）。子进程跑真实脚本（参照 finish-lock.test.ts 配方，
 // FINISH_LOCK_WAIT_SECONDS=0 免锁等待）。
+// 2026-11-20 起 finish 对零提交分支显式失败（防假合并收口）：第一个用例的分支恰为零
+// 提交，终态断言随新行为更新——NOTES 软门禁本身仍是「只警告、不因此拦截」。
 
 import { describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
@@ -29,7 +31,7 @@ function ignoreNotes(repo: string) {
 }
 
 describe('finish NOTES.md 空模板软门禁', () => {
-  it('模板 NOTES（占位符还在）→ finish 输出 WARNING 但不阻断', () => {
+  it('模板 NOTES（占位符还在）→ finish 输出 WARNING（软门禁不拦），零提交分支随后显式失败', () => {
     const repo = mkRepo()
     try {
       ignoreNotes(repo.root)
@@ -42,7 +44,9 @@ describe('finish NOTES.md 空模板软门禁', () => {
       expect(f.out).toContain('WARNING')
       expect(f.out).toContain('unfilled start template')
       expect(f.out).toContain('NOTES.md')
-      expect(f.status).toBe(0) // 警告不阻断：零提交路径照常清理成功
+      expect(f.status).toBe(1) // 失败源自零提交门（防假合并收口），NOTES 警告本身不拦截
+      expect(f.out).toContain('has no commits relative to develop')
+      expect(fs.existsSync(wt)).toBe(true) // 零提交失败保留现场
     } finally {
       repo.cleanup()
     }

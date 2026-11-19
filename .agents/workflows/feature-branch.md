@@ -45,7 +45,7 @@ npx vitest run -c vitest.workflow.config.ts test/orchestrator/<相关文件>.tes
 node .agents/scripts/feature-branch.mjs finish <task-id>
 ```
 
-finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。**认领的卡随之归位**：finish 成功后若队列里该任务的卡在 `running/`，自动落 `merged/`（写 `manual_merged` 事件）——工作已合并进主干，与编排器闭环的同一终态；卡在其他状态（如 `awaiting-human/`）则不动，归编排器状态机处理。orchestrator 自己的 approve 路径（带 `ORCHESTRATOR_GATE_HEAD` 标记）不受影响，卡仍由闭环状态机落位。
+finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你在 worktree 内解决后重跑）→ 在 worktree 内跑配置的验证命令 `testCmd`（`.agents/workflow.json`）→ `git merge --no-ff` 合入基准分支（保留完整合并信息）→ 删除 feature 分支和 worktree。**认领的卡随之归位**：finish 成功后若队列里该任务的卡在 `running/`，自动落 `merged/`（写 `manual_merged` 事件）——工作已合并进主干，与编排器闭环的同一终态；卡在其他状态（如 `awaiting-human/`）则不动，归编排器状态机处理。orchestrator 自己的 approve 路径（带 `ORCHESTRATOR_GATE_HEAD` 标记）不受影响，卡仍由闭环状态机落位。分支相对基准分支**零提交**时 finish 显式失败（非零退出、worktree 与分支原样保留供核对补提交）——多为 worker 漏提交，回 worktree 补提交后重跑即可。
 
 - **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者**有界等待**持锁者（轮询 2.5s，默认上限 300s，`FINISH_LOCK_WAIT_SECONDS` 可调、设 0 恢复立即失败），等待期间持锁者退出则自动接管；超时才提示重跑。陈锁（属主进程已死）同样自动接管，无需手动清理。
 
