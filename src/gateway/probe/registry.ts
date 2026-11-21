@@ -7,6 +7,7 @@
 // P11 递增）的 requests 字段即请求基数，累计口径一律 run-total（账本按次落条目、预算按月合计）。
 
 import { t } from '../../util/i18n.js'
+import { DEFAULT_PROBE_BUDGET_TOKENS } from '../../config/types.js'
 
 /** 探针成本档：none = 零 token（P15 被动聚合）。 */
 export type ProbeCostTier = 'S' | 'M' | 'L' | 'none'
@@ -37,8 +38,8 @@ export interface ProbeDef {
 /** 档位 token 上限（requirements「成本知情」节：S≤200 / M≤2000 / L≤10000） */
 export const PROBE_TIER_TOKENS: Record<ProbeCostTier, number> = { S: 200, M: 2000, L: 10000, none: 0 }
 
-/** 月度预算缺省（[probe].budget_tokens；任务 5 落类型化配置段，此前经 probeBudgetTokens 兜底） */
-export const PROBE_BUDGET_TOKENS_DEFAULT = 50_000
+/** 月度预算缺省（[probe].budget_tokens；数值唯一事实来源在 config/types.ts DEFAULT_PROBE_BUDGET_TOKENS，此处保留既有导入路径） */
+export const PROBE_BUDGET_TOKENS_DEFAULT = DEFAULT_PROBE_BUDGET_TOKENS
 
 // 名称/标题为静态数据（中文原文即 key）；t() 只在展示时求值——模块顶层禁直接求值 t()（AGENTS 双语文案约定）
 export const PROBE_REGISTRY: readonly ProbeDef[] = [

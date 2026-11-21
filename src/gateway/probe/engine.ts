@@ -13,12 +13,13 @@ import { t } from '../../util/i18n.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
 import { applyVerdictEvidence, sanitizeErrorSummary, verdictKey } from './verdict.js'
 import { probeBudgetTokens, probeMonthKey, probeMonthSpend, readProbeLedger, recordProbeLedgerEntry } from './ledger.js'
+import { DEFAULT_PROBE_CONCURRENCY, PROBE_CONCURRENCY_MAX, PROBE_CONCURRENCY_MIN } from '../../config/types.js'
+import type { ProbeConfig } from '../../config/types.js'
 import type { GatewayRuntime, ProbeEngineRuntime, ProbeVerdict, ProbeVerdictState } from '../state/types.js'
 
-/** 全局并发闸缺省（[probe].concurrency 的运行时缺省；配置段任务 5 落地） */
-export const PROBE_CONCURRENCY_DEFAULT = 2
-/** 全局并发闸上限（design：2–4，硬顶 4） */
-export const PROBE_CONCURRENCY_MAX = 4
+/** 全局并发闸缺省/上限（数值唯一事实来源在 config/types.ts DEFAULT_PROBE_CONCURRENCY / PROBE_CONCURRENCY_MAX，此处保留既有导入路径） */
+export const PROBE_CONCURRENCY_DEFAULT = DEFAULT_PROBE_CONCURRENCY
+export { PROBE_CONCURRENCY_MAX }
 /** provider 探针冷却（429 负缓存）：收到 429 后该 provider 的后续探针跳过 10 分钟 */
 export const PROBE_RATE_LIMIT_COOLDOWN_MS = 10 * 60_000
 /** Retry-After 退避等待上限：探针非交互可稍长等（relay 转发是 5s），60s 封顶 */
@@ -84,7 +85,7 @@ export interface ProbeRunOptions {
   transport: ProbeTransport
   /** 单样本判定实现（任务 3+ 起由 runners/ 提供；缺省 = 全部 not-implemented 零上游请求） */
   runner?: ProbeRunner
-  /** 全局并发闸（1–4，缺省 2；上限硬顶 4） */
+  /** 全局并发闸运行级覆盖（不传读 [probe].concurrency，仍缺省 2；上限硬顶 4） */
   concurrency?: number
   /** 成本确认闸：true 才允许发主动探针（P1–P14）的上游请求；缺省 false = 0 请求返回预估 */
   confirmed?: boolean
@@ -103,6 +104,7 @@ export type ProbeSkipReason =
   | 'cooldown'
   | 'busy'
   | 'cancelled'
+  | 'disabled'
 
 export interface ProbeRunSkip {
   probeId: string
@@ -140,6 +142,22 @@ interface ProbeUnit {
 function engineRuntime(rt: GatewayRuntime): ProbeEngineRuntime {
   if (!rt.probeRuntime) rt.probeRuntime = { cooldown: new Map(), inflight: new Set() }
   return rt.probeRuntime
+}
+
+/** [probe] 段解析视图：全字段带缺省，engine/调度器/CLI（任务 6/13）统一从这读——
+ *  不配整段即全缺省（config-gaps「缺省配置下全字段有值」验收的单一锚点）。 */
+export function probeConfigView(rt: GatewayRuntime): Required<ProbeConfig> {
+  const p = rt.config.probe
+  const c = p?.concurrency
+  return {
+    enabled: p?.enabled !== false,
+    concurrency: c != null && Number.isInteger(c) && c >= PROBE_CONCURRENCY_MIN && c <= PROBE_CONCURRENCY_MAX ? c : PROBE_CONCURRENCY_DEFAULT,
+    budget_tokens: probeBudgetTokens(rt),
+    schedule_hours: p?.schedule_hours ?? [],
+    cost_ack: p?.cost_ack === true,
+    disabled_ids: p?.disabled_ids ?? [],
+    deep_flags: p?.deep_flags ?? [],
+  }
 }
 
 /** provider 探针冷却截止（无冷却返回 undefined） */
@@ -231,12 +249,17 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
   const skipped: ProbeRunSkip[] = []
   const units: ProbeUnit[] = []
   let planned = 0
+  const pcfg = probeConfigView(rt)
   for (const probeId of opts.probeIds) {
     const def = getProbeDef(probeId)
     for (const target of opts.targets) {
       planned++
       const skip = (reason: ProbeSkipReason, stale?: boolean): void => {
         skipped.push({ probeId, providerId: target.providerId, model: target.model, reason, ...(stale ? { stale: true } : {}) })
+      }
+      if (!pcfg.enabled) {
+        skip('disabled') // 总开关（[probe].enabled=false）：整轮拒发（含 P15 被动聚合），零上游请求
+        continue
       }
       if (!def) {
         skip('unknown')
@@ -395,7 +418,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     g.push(u)
     groups.set(u.target.providerId, g)
   }
-  const limit = Math.max(1, Math.min(opts.concurrency ?? PROBE_CONCURRENCY_DEFAULT, PROBE_CONCURRENCY_MAX))
+  const limit = Math.max(1, Math.min(opts.concurrency ?? pcfg.concurrency, PROBE_CONCURRENCY_MAX))
   const sem = makeSemaphore(limit)
   const chains: Promise<void>[] = []
   for (const providerUnits of groups.values()) {
