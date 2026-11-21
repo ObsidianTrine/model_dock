@@ -86,7 +86,7 @@ export async function runP11(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
     }
     const completion = resp.usage?.completion_tokens ?? resp.usage?.output_tokens
     const truncated = shellTruncated(resp.bodyText) || usageHitCap(resp.usage, level)
-    levels.push({ max_tokens: level, truncated, ...(typeof completion === 'number' ? { completion_tokens: completion } : {}) })
+    levels.push({ max_tokens: level, truncated, completion_tokens: typeof completion === 'number' ? completion : null })
     if (truncated) {
       measured = level // 首个触顶级别即实测截断点，early-stop 停止加码
       break

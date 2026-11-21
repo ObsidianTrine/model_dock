@@ -42,7 +42,7 @@ function capMock(opts: CapMockOpts = {}): { transport: ProbeTransport; requested
     if (opts.status) return { status: opts.status, ms: 3, bodyText: opts.body ?? '{"error":{"message":"upstream rejected"}}' }
     const truncated = opts.cap != null && level >= opts.cap
     const completion = truncated ? level : level - 128
-    const usage =
+    const usage: Record<string, number> =
       proto === 'openai'
         ? { completion_tokens: completion, prompt_tokens: 10 }
         : { output_tokens: completion, input_tokens: 10 }
