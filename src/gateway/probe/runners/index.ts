@@ -4,6 +4,7 @@
 
 import type { ProbeRunner } from '../engine.js'
 import { runP1 } from './p1.js'
+import { runP2 } from './p2.js'
 import { runP12 } from './p12.js'
 import { runP15 } from './p15.js'
 import { runP3 } from './p3.js'
@@ -12,6 +13,7 @@ import { runP7 } from './p7.js'
 
 const RUNNERS: Readonly<Record<string, ProbeRunner>> = {
   p1: runP1,
+  p2: runP2,
   p12: runP12,
   p15: runP15,
   p3: runP3,
