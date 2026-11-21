@@ -361,3 +361,54 @@ describe('probe-engine · 闸门与派发形态', () => {
     }
   })
 })
+
+describe('probe-engine · [probe] 配置段（任务 5）', () => {
+  it('[probe].enabled=false → 整轮拒发（含 P15，reason=disabled），零上游请求', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      rt.config.probe = { enabled: false }
+      let calls = 0
+      const transport: ProbeTransport = async () => {
+        calls++
+        return { status: 200, ms: 1 }
+      }
+      const r = await runProbeSuite(rt, {
+        probeIds: ['p1', 'p15'],
+        targets: [{ providerId: 'a', model: 'm', keyFp: 'fp' }],
+        transport,
+        runner: okRunner,
+        confirmed: true,
+      })
+      expect(r.skipped).toHaveLength(2)
+      expect(r.skipped.every((s) => s.reason === 'disabled')).toBe(true)
+      expect(r.upstreamRequests).toBe(0)
+      expect(calls).toBe(0)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('opts 未传 concurrency 时读 [probe].concurrency（探针段并发闸生效）', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      rt.config.probe = { concurrency: 3 }
+      let active = 0
+      let maxActive = 0
+      const runner: ProbeRunner = async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await sleep(25)
+        active--
+        return { state: 'healthy', calls: [{ tokens: 1, ms: 1, status: 200 }] }
+      }
+      const targets = Array.from({ length: 6 }, (_, i) => ({ providerId: `c${i}`, model: 'm', keyFp: `fp${i}` }))
+      const r = await runProbeSuite(rt, { probeIds: ['p1'], targets, transport: okTransport, runner, confirmed: true })
+      expect(r.dispatched).toBe(6)
+      expect(maxActive).toBe(3)
+    } finally {
+      h.restore()
+    }
+  })
+})

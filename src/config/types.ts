@@ -133,6 +133,24 @@ export interface ScheduleWindow {
   mode?: 'prefer' | 'avoid'
 }
 
+/** 探针套件配置（provider test --probe / 控制台健康探针，见 src/gateway/probe/）。全字段有缺省，不配即按缺省工作。 */
+export interface ProbeConfig {
+  /** 探针套件总开关（默认 true）：显式 false 时引擎拒绝全部派发（含 P15 被动聚合） */
+  enabled?: boolean
+  /** 全局探针并发闸（整数，限 2–4，默认 2）；同 provider 内始终串行互斥 */
+  concurrency?: number
+  /** 探针月度预算（tokens，自然月累计实际 tokens 达到即硬停，默认 50000） */
+  budget_tokens?: number
+  /** 周期调度触发时刻（0–23 整数小时；缺省空 = 周期调度只跑零 token 的 P15 被动聚合） */
+  schedule_hours?: number[]
+  /** 含 token 周期探针的持久成本授权（默认 false）：true 才允许周期调度跑 P1–P14，仍受 budget_tokens 约束 */
+  cost_ack?: boolean
+  /** 周期调度中排除的探针 id（缺省空 = 不排除） */
+  disabled_ids?: string[]
+  /** 深度探针开关名单（缺省空 = 只跑标准档） */
+  deep_flags?: string[]
+}
+
 export interface Config {
   version: number
   /** 界面语言（CLI 输出 / 报错 / 网关日志消息）：zh | en，缺省 zh；--lang 与环境变量 MODELRDOCK_LANG 可临时覆盖 */
@@ -151,6 +169,8 @@ export interface Config {
   import?: ImportStateConfig
   /** 文本资产同步白名单目录（家目录相对 POSIX 路径，见 src/sync/assets.ts）；每机自选属机器态，不随包同步 */
   sync_assets?: { dirs?: string[] }
+  /** 探针套件（provider-probe-suite，见 src/gateway/probe/）；缺省整段不落盘，读取时按 ProbeConfig 字段缺省兜底 */
+  probe?: ProbeConfig
 }
 
 /** 一键导入（存量收编）状态 */
@@ -199,6 +219,15 @@ export const DEFAULT_UPDATE_MIRRORS = ['https://gh-proxy.com/', 'https://ghfast.
 
 /** 手机简版控制台默认端口（主端口顺延链 8687+10 之外，避免撞车） */
 export const DEFAULT_LAN_PORT = 8787
+
+/** 探针全局并发闸缺省（[probe].concurrency；限 2–4，见 store 校验与 probe/engine.ts 信号量） */
+export const DEFAULT_PROBE_CONCURRENCY = 2
+/** 探针全局并发闸下限（design：2–4） */
+export const PROBE_CONCURRENCY_MIN = 2
+/** 探针全局并发闸上限（design：2–4，硬顶 4） */
+export const PROBE_CONCURRENCY_MAX = 4
+/** 探针月度预算缺省（[probe].budget_tokens，tokens；见 probe/ledger.ts 预算闸） */
+export const DEFAULT_PROBE_BUDGET_TOKENS = 50_000
 
 export function emptyConfig(): Config {
   return { version: CONFIG_VERSION, providers: {}, profiles: {}, harness: {} }

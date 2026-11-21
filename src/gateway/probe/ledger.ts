@@ -15,7 +15,6 @@ import { appendLog } from '../state/logs.js'
 import { closeAppendStream } from '../../util/fsx.js'
 import { PROBE_BUDGET_TOKENS_DEFAULT } from './registry.js'
 import type { GatewayRuntime } from '../state/types.js'
-import type { Config } from '../../config/types.js'
 
 export const PROBE_LEDGER_FILE = 'probe-ledger.jsonl'
 
@@ -119,12 +118,10 @@ export function probeMonthBreakdown(entries: ProbeLedgerEntry[], monthKey = prob
   return { month: monthKey, total, estimated_total: estimated, requests: n, by_probe: byProbe }
 }
 
-/** [probe].budget_tokens 读取。类型化配置段在任务 5 落地（config/types.ts ProbeConfig），
- *  此前防御式读——未配置即缺省 50000，非法值（非正数/非数字）同样落缺省。 */
+/** [probe].budget_tokens 读取：未配置/非法值（非正数）落缺省（store 校验只拦形状，取值语义在此兜底）。 */
 export function probeBudgetTokens(rt: GatewayRuntime): number {
-  const probe = (rt.config as Config & { probe?: { budget_tokens?: number } }).probe
-  const n = Number(probe?.budget_tokens)
-  return Number.isFinite(n) && n > 0 ? n : PROBE_BUDGET_TOKENS_DEFAULT
+  const n = rt.config.probe?.budget_tokens
+  return n != null && Number.isFinite(n) && n > 0 ? n : PROBE_BUDGET_TOKENS_DEFAULT
 }
 
 export interface ProbeBudgetState {

@@ -265,7 +265,34 @@ enabled = true
 port = 8787
 ```
 
-## 10. Secret storage (security)
+## 10. Probe suite (probe)
+
+Provider health probes (shared by `modeldock provider test --probe` and the console): every key has a default, so the suite works out of the box; the monthly budget and cost acknowledgment keep probes from quietly burning tokens.
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | `boolean` | no | `true` (on) | Probe suite master switch (on by default): `false` rejects all probe runs, including the zero-token passive probe. |
+| `concurrency` | `number` | no | `2` | Global probe concurrency gate: how many probes may be in flight at once (integer, 2–4, default 2); probes within one service always run serially. |
+| `budget_tokens` | `number` | no | `50000` | Monthly probe budget (tokens): once probes accrue this many actual tokens in a calendar month, all active probes stop and their targets are marked "budget exhausted" — no more spend until you raise the budget or the month resets. |
+| `schedule_hours` | `number[]` | no | `[]` (passive probe only) | Hours of day (integers 0–23, e.g. `[9, 21]`) when the periodic scheduler triggers; empty by default = the scheduler only runs the zero-token passive probe, generating no model inference requests. |
+| `cost_ack` | `boolean` | no | `false` (scheduler runs zero-token probes only) | Standing cost acknowledgment for token-spending scheduled probes (P1–P14, `false` by default): `true` lets the periodic scheduler run them, still bounded by the monthly `budget_tokens`; manually triggered probes do not use this key — each run has its own confirmation. |
+| `disabled_ids` | `string[]` | no | `[]` (none excluded) | Probe ids excluded from the periodic scheduler (e.g. `["p10"]`); empty by default = none excluded. |
+| `deep_flags` | `string[]` | no | `[]` (standard tiers only) | Deep-tier flags (free-form words, e.g. `["long-context"]`): probe implementations consult the list to run deeper probe tiers; empty by default = standard tiers only. |
+
+Example:
+
+```toml
+[probe]
+enabled = false
+concurrency = 2
+budget_tokens = 50000
+schedule_hours = [9, 21]
+cost_ack = true
+disabled_ids = ["p10"]
+deep_flags = ["long-context"]
+```
+
+## 11. Secret storage (security)
 
 Where sensitive material such as API keys is stored.
 
@@ -280,7 +307,7 @@ Example:
 store = "file"
 ```
 
-## 11. Snapshots (backup)
+## 12. Snapshots (backup)
 
 Before every config change or attach / detach, ModelDock keeps an automatic snapshot for restoring.
 
@@ -295,7 +322,7 @@ Example:
 keep = 20
 ```
 
-## 12. Auto-update (update)
+## 13. Auto-update (update)
 
 Where new releases are checked, downloaded and installed from.
 
@@ -318,7 +345,7 @@ mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
 prefetch = false
 ```
 
-## 13. Import state (import)
+## 14. Import state (import)
 
 Bookkeeping for one-click import of existing configs; program-managed.
 
@@ -333,7 +360,7 @@ Example:
 # dismissed = ["https://api.example.com"]  # program-managed; no need to edit
 ```
 
-## 14. Text-asset sync (sync_assets)
+## 15. Text-asset sync (sync_assets)
 
 Whitelisted directories converged via multi-machine sync (chosen per machine; the list itself does not sync).
 

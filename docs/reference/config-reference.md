@@ -265,7 +265,34 @@ enabled = true
 port = 8787
 ```
 
-## 10. 密钥存储（security）
+## 10. 探针套件（probe）
+
+服务商健康探针（`modeldock provider test --probe` 与控制台探针共用）的行为与预算：全字段有缺省，不配即按缺省工作；月度预算与成本授权防止探针悄悄烧 token。
+
+| 键 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `enabled` | `boolean` | 否 | `true`（开） | 探针套件总开关（默认开）：设 `false` 后探针一律拒绝执行（含零 token 的被动聚合探针）。 |
+| `concurrency` | `number` | 否 | `2` | 探针全局并发闸：同一时刻最多同时在飞几个探针（整数，限 2–4，默认 2）；同一服务内的探针始终串行执行。 |
+| `budget_tokens` | `number` | 否 | `50000` | 探针月度预算（tokens）：自然月内探针累计实际 tokens 达到该值即停止全部主动探针并把目标标为「预算耗尽」，调高预算或次月自动重置前不再花费。 |
+| `schedule_hours` | `number[]` | 否 | `[]`（只跑被动聚合） | 周期调度触发时刻（0–23 整数小时，如 `[9, 21]`）；缺省空 = 周期调度只跑零 token 的被动聚合探针，不产生模型推理请求。 |
+| `cost_ack` | `boolean` | 否 | `false`（周期调度只跑零 token 探针） | 周期调度执行含 token 探针（P1–P14）的持久成本授权（默认 false）：`true` 才允许周期调度跑这些探针，且仍受 `budget_tokens` 月度预算约束；手动触发的探针不走此键，每次运行前另有逐次确认。 |
+| `disabled_ids` | `string[]` | 否 | `[]`（不排除） | 周期调度中排除的探针 id 清单（如 `["p10"]`）：列出的探针不被周期调度执行；缺省空 = 不排除。 |
+| `deep_flags` | `string[]` | 否 | `[]`（只跑标准档） | 深度档开关名单（自由短词，如 `["long-context"]`）：探针实现按名单决定是否执行更深的探测档；缺省空 = 只跑标准档。 |
+
+示例：
+
+```toml
+[probe]
+enabled = false
+concurrency = 2
+budget_tokens = 50000
+schedule_hours = [9, 21]
+cost_ack = true
+disabled_ids = ["p10"]
+deep_flags = ["long-context"]
+```
+
+## 11. 密钥存储（security）
 
 API Key 等敏感信息的存放方式。
 
@@ -280,7 +307,7 @@ API Key 等敏感信息的存放方式。
 store = "file"
 ```
 
-## 11. 快照（backup）
+## 12. 快照（backup）
 
 每次改动配置或接入 / 断开客户端前，ModelDock 会自动留一份快照供还原。
 
@@ -295,7 +322,7 @@ store = "file"
 keep = 20
 ```
 
-## 12. 自动更新（update）
+## 13. 自动更新（update）
 
 新版本检查与下载安装的来源。
 
@@ -318,7 +345,7 @@ mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
 prefetch = false
 ```
 
-## 13. 导入状态（import）
+## 14. 导入状态（import）
 
 一键导入（存量配置收编）的记忆数据，由程序维护。
 
@@ -333,7 +360,7 @@ prefetch = false
 # dismissed = ["https://api.example.com"]  # 程序维护，无需手改
 ```
 
-## 14. 文本资产同步（sync_assets）
+## 15. 文本资产同步（sync_assets）
 
 多机同步时随包收敛的白名单目录清单（每台机器自选，清单本身不随包同步）。
 
