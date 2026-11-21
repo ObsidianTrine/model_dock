@@ -724,7 +724,7 @@ describe('cmdProviderTest 参数校验', () => {
     captureConsole()
     try {
       await mutateConfig((c) => {
-        c.providers['pv-nokey'] = { name: 'NK', base_url: 'https://nk.example.com', protocol: 'anthropic', auth_style: 'bearer' }
+        c.providers['pv-nokey'] = { name: 'NK', base_url: 'https://nk.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: '' }
       })
       await expect(cmdProviderTest('pv-nokey', { probe: 'p1' })).rejects.toBeInstanceOf(ExitError)
       expect(errs.join('\n')).toContain('没有可用 key')
