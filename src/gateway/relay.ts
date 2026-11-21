@@ -847,8 +847,8 @@ function isTransportFailure(e: unknown): boolean {
  *  中文特征（额度/配额/余额/欠费）必须保留：国内上游 429 额度体常为中文，只认英文会漏判、
  *  致使该切换的不切（2026-11-01 T28 存疑项坐实转正）。此类请求上游未产出内容，恒可安全切换
  *  （不依赖 failover_status_codes 白名单）；熔断归 'quota' 类，冷却比普通限流久。 */
-const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
-function isQuotaError(status: number, bodyText: string): boolean {
+export const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
+export function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
 }
 
