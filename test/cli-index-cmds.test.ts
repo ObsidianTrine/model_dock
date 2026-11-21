@@ -37,7 +37,7 @@ describe('buildProgram 注册面', () => {
 
   it('provider 子命令齐备', () => {
     const provider = prog.commands.find((c) => c.name() === 'provider')!
-    expect(provider.commands.map((c) => c.name()).sort()).toEqual(['add', 'list', 'rm', 'set-key'])
+    expect(provider.commands.map((c) => c.name()).sort()).toEqual(['add', 'list', 'rm', 'set-key', 'test'])
   })
 
   it('model 子命令齐备（含 catalog refresh 与 fallback）', () => {
