@@ -61,6 +61,7 @@ export function generateUiMin() {
     'UI_JS_CLIENTS',
     'UI_JS_EDIT',
     'UI_JS_LOGS',
+    'UI_JS_PROBE',
     'UI_JS_BOOT',
   ]
   const dir = path.join(ROOT, 'src', 'gateway', 'ui')

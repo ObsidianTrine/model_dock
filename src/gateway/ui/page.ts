@@ -80,6 +80,7 @@ export const UI_BODY_HTML = `<div class="wrap">
       <option value="nokey" data-i18n="缺 Key||Missing key">缺 Key</option>
       <option value="current" data-i18n="使用中||In use">使用中</option>
     </select>
+    <button type="button" class="btn small" id="probeLedgerBtn" data-i18n="探针账本||Probe ledger" data-i18n-title="探针独立账本：月度花费、预算余量与按探针分解。探针花费不进请求日志与今日用量||Probe ledger: monthly spend, budget headroom and per-probe breakdown. Probe spend stays out of the request log and daily usage" title="探针独立账本：月度花费、预算余量与按探针分解。探针花费不进请求日志与今日用量">探针账本</button>
   </div>
   <div id="routebox">
     <div class="rrow1" id="rrow1">

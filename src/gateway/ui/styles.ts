@@ -391,6 +391,10 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    collapse 的边框画在表层，sticky 表头滚入吸附位会丢底线；th 加不透明背景盖住滚过的行 */
 #logTable{border-collapse:separate;border-spacing:0}
 #logTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+/* 探针账本分解表（probeLedgerOverlay 弹层内，同款卡内滚动变体）：浮头形态复用 #logTable 的
+   sticky 形态；列少不设 fixed 布局与列宽，基础 table/th/td 层照常生效 */
+#probeLedgerTable{border-collapse:separate;border-spacing:0}
+#probeLedgerTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
 /* 日志表改固定布局：8 列里 7 列定宽（宽在表头上声明），错误列（第 7 列）不设宽=吃剩余空间。
    auto 布局下 nowrap 列按内容撑宽、限宽盒的固有宽度又不可靠（width:1% 弹性列被无视），
    窄内容带（--wrap-ratio 61.8%）必横向溢出；fixed 布局任何窗宽都不溢出，更窄走 .tablescroll 滚动。

@@ -303,8 +303,10 @@ export const UI_JS_BOOT = `  setInterval(function () { if (!document.hidden) ref
   setInterval(function () { if (!document.hidden) pollOverview() }, 5000)
   setInterval(function () { if (!document.hidden) pollLive() }, 5000)
   setInterval(function () { if (!document.hidden) loadLogs() }, 5000)
+  pollProbe() // 服务卡 verdict 徽标首屏数据（15s 档，结论只随探针运行变化）
+  setInterval(function () { if (!document.hidden) pollProbe() }, 15000)
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) { pollHealth(); pollOverview(); pollLive(); loadLogs() }
+    if (!document.hidden) { pollHealth(); pollOverview(); pollLive(); loadLogs(); pollProbe() }
   })
   uiPresence(false)
   setInterval(function () { uiPresence(false) }, 15000)

@@ -13,6 +13,13 @@ import { resolveModelFallback } from '../ops/service.js'
 import { lookupPrice } from '../gateway/pricing.js'
 import { exitWithError, exitWithThrown } from './shared.js'
 import { displayPath, modelCatalogCachePath, secretsPath } from '../util/paths.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite } from '../gateway/probe/engine.js'
+import { getProbeRunner } from '../gateway/probe/runners/index.js'
+import { PROBE_REGISTRY, getProbeDef, probeTitle } from '../gateway/probe/registry.js'
+import { probeBudgetState, probeMonthBreakdown, readProbeLedger } from '../gateway/probe/ledger.js'
+import { probeVerdictView } from '../gateway/probe/verdict.js'
+import { buildRuntime } from '../gateway/state.js'
+import type { ProbeVerdictState } from '../gateway/state/types.js'
 
 function backendLabel(backend: SecretBackend): string {
   if (backend === 'keychain') return 'macOS Keychain'
@@ -531,4 +538,262 @@ export async function cmdModelFallback(
   }
   console.log(c.green(t('✓ 已配置模型容灾：{from} → {to}', '✓ Model failover configured: {from} → {to}', { from, to })))
   console.log(c.gray(fallbackTriggerNote()))
+}
+
+// 服务探针（provider-probe-suite 任务 6）：provider test [providerId]
+
+/** 探针 verdict 状态展示名（CLI 行与结论汇总共用） */
+function verdictStateLabel(state: ProbeVerdictState): string {
+  switch (state) {
+    case 'healthy': return t('健康', 'healthy')
+    case 'degraded': return t('降级', 'degraded')
+    case 'quota': return t('额度耗尽', 'quota')
+    case 'auth-dead': return t('鉴权失效', 'auth dead')
+    case 'unreachable': return t('不可达', 'unreachable')
+    case 'unverified': return t('未定论', 'unverified')
+    case 'stale': return t('证据过期', 'stale')
+  }
+}
+
+/** 判定明确为坏的终态（脚本退出码 1 的依据）；unverified/stale 只提示不定论 */
+function verdictStateBad(state: ProbeVerdictState): boolean {
+  return state === 'auth-dead' || state === 'unreachable' || state === 'quota' || state === 'degraded'
+}
+
+function probeSkipReasonLabel(reason: string): string {
+  switch (reason) {
+    case 'not-implemented': return t('未实现', 'not implemented')
+    case 'cooldown': return t('探针冷却中（429 后 10 分钟负缓存）', 'probe cooldown (10-min negative cache after a 429)')
+    case 'busy': return t('同服务探测进行中', 'a probe on this service is already running')
+    case 'budget-exhausted': return t('月预算耗尽', 'monthly budget exhausted')
+    case 'unconfirmed': return t('未确认', 'unconfirmed')
+    case 'cancelled': return t('已取消', 'cancelled')
+    case 'disabled': return t('探针已停用', 'probes disabled')
+    case 'no-key': return t('无可用 key', 'no usable key')
+    default: return reason
+  }
+}
+
+/** 探针账本视图（--ledger）：月度总花费 + 按 probe_id 分解（与控制台账本页同一数据源） */
+async function printProbeLedger(rt: ReturnType<typeof buildRuntime>, json: boolean): Promise<void> {
+  const budget = await probeBudgetState(rt)
+  const breakdown = probeMonthBreakdown(await readProbeLedger())
+  if (json) {
+    console.log(JSON.stringify({ ok: true, budget, breakdown }, null, 2))
+    return
+  }
+  console.log(c.bold(t('探针账本（{month}）', 'Probe ledger ({month})', { month: breakdown.month })))
+  console.log(
+    t(
+      '月度总花费：{t} tokens（预估 {e}）· 上游调用 {n} 次',
+      'Monthly spend: {t} tokens (estimated {e}) · {n} upstream calls',
+      { t: breakdown.total, e: breakdown.estimated_total, n: breakdown.requests }
+    )
+  )
+  console.log(
+    t('月预算：{b} · 已用 {s} · 剩余 {r}', 'Monthly budget: {b} · spent {s} · remaining {r}', {
+      b: budget.budget,
+      s: budget.spent,
+      r: budget.remaining,
+    })
+  )
+  const ids = Object.keys(breakdown.by_probe).sort()
+  if (ids.length === 0) {
+    console.log(c.gray(t('本月暂无探针调用', 'No probe calls this month')))
+    return
+  }
+  const rows = ids.map((id) => {
+    const def = getProbeDef(id)
+    return {
+      probe: def ? `${id} ${probeTitle(def)}` : id,
+      tokens: String(breakdown.by_probe[id]),
+      requests: String(breakdown.by_probe_requests[id] ?? 0),
+    }
+  })
+  printTable(rows, ['probe', 'tokens', 'requests'])
+  console.log(c.gray(t('探针花费记独立账本，不进请求日志与今日用量', 'Probe spend is kept in a separate ledger, outside the request log and daily usage')))
+}
+
+export async function cmdProviderTest(
+  providerId: string | undefined,
+  opts: { probe?: string; json?: boolean; yes?: boolean; ledger?: boolean }
+): Promise<void> {
+  const cfg = await loadConfig()
+  // 服务缺省 = 当前默认路由指向的服务；无默认路由时要求显式指定
+  const fallback = cfg.active_profile ? cfg.profiles[cfg.active_profile]?.provider : undefined
+  const pid = providerId ?? fallback
+  if (!pid || !cfg.providers[pid]) {
+    exitWithError(
+      t('provider「{id}」不存在', 'provider "{id}" does not exist', { id: providerId ?? t('（未指定）', '(not given)') }),
+      t('modeldock provider list 查看服务 id；不带 id 运行时取默认路由的服务', 'Run modeldock provider list to check ids; without an id the default-route service is used')
+    )
+  }
+  const rt = buildRuntime(cfg, 'cli-probe')
+  if (opts.ledger) {
+    await printProbeLedger(rt, opts.json === true)
+    return
+  }
+  // [probe].enabled=false：探针整体停用，先给可操作报错再谈跑（与端点同口径）
+  if (!probeConfigView(rt).enabled) {
+    exitWithError(
+      t('探针已被停用（[probe] enabled=false）', 'Probes are disabled ([probe] enabled=false)'),
+      t('删除 config.toml [probe] 段的 enabled = false（或改为 true）后重试', 'Remove enabled = false from the [probe] section of config.toml (or set it to true) and retry')
+    )
+  }
+  const activeIds = PROBE_REGISTRY.filter((d) => d.status === 'active').map((d) => d.id)
+  const probeIds: string[] = []
+  for (const raw of (opts.probe ?? 'p1').split(',')) {
+    const id = raw.trim()
+    if (!id) continue
+    if (id === 'all') {
+      for (const a of activeIds) if (!probeIds.includes(a)) probeIds.push(a)
+      continue
+    }
+    if (!getProbeDef(id)) {
+      exitWithError(
+        t('未知探针「{id}」', 'Unknown probe "{id}"', { id }),
+        t('可用探针：{list}（all = 全部）', 'Available probes: {list} (all = every one)', { list: activeIds.join(', ') })
+      )
+    }
+    if (!probeIds.includes(id)) probeIds.push(id)
+  }
+  const plan = await buildProbePlan(rt, pid, probeIds)
+  if (plan.keys.length === 0) {
+    exitWithError(
+      t('服务「{id}」没有可用 key，探针无法发请求', 'Service "{id}" has no usable key; probes cannot send requests', { id: pid }),
+      t('modeldock provider set-key {id} 配置后重试', 'Configure one with modeldock provider set-key {id}', { id: pid })
+    )
+  }
+  const budget = await probeBudgetState(rt)
+  // 成本闸②（--yes 仅单探针单目标放行，卡面口径）：超出即逐次交互确认；--json 是机器形态，
+  // 不弹交互，一律先回预估（needConfirm），确认由调用方带 --yes 复跑
+  const autoConfirm = opts.yes === true && plan.planned === 1
+  if (opts.json && !autoConfirm) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: false,
+          needConfirm: true,
+          reason: 'unconfirmed',
+          provider: pid,
+          probes: probeIds,
+          targets: plan.planned,
+          estimate: plan.estimate,
+          per_probe_cost: plan.perProbeCost,
+          budget: { month: budget.month, budget: budget.budget, spent: budget.spent, remaining: budget.remaining },
+          verdicts: [],
+          skipped: [],
+        },
+        null,
+        2
+      )
+    )
+    return
+  }
+  if (!opts.json) {
+    console.log(c.bold(t('预估（S≤200 / M≤2000 / L≤10000 tokens/请求）', 'Estimate (S≤200 / M≤2000 / L≤10000 tokens per request)')))
+    for (const id of probeIds) {
+      const def = getProbeDef(id)
+      if (!def) continue
+      const n = plan.perProbeCost[id] ?? 0
+      console.log(
+        `  ${id} ${probeTitle(def)}：${def.cost} × ${plan.units.filter((u) => u.probeId === id).length} ${t('目标', 'target(s)')} = ${n} tokens`
+      )
+    }
+    console.log(
+      t(
+        '合计预估 {e} tokens · 月预算 {b}（本月已用 {s}，剩余 {r}）',
+        'Total estimate {e} tokens · monthly budget {b} ({s} spent this month, {r} remaining)',
+        { e: plan.estimate, b: budget.budget, s: budget.spent, r: budget.remaining }
+      )
+    )
+    if (opts.yes && !autoConfirm) {
+      console.log(c.yellow(t('--yes 仅对单探针单目标生效：本次运行仍需逐次确认', '--yes only covers single-probe single-target runs; this run still asks for confirmation')))
+    }
+    if (!autoConfirm) {
+      const okRun = await confirm({
+        message: t('确认运行探针（将向上游发真实请求）？', 'Run the probes (real requests will be sent upstream)?'),
+      })
+      if (!okRun) {
+        console.log(c.gray(t('已取消：未发出任何请求', 'Cancelled: no requests sent')))
+        process.exit(1)
+      }
+    }
+  }
+  const result = await runProbeSuite(rt, {
+    probeIds,
+    targets: plan.units.map((u) => u.target),
+    transport: makeRelayProbeTransport(rt),
+    runnerFor: getProbeRunner,
+    confirmed: true,
+    secrets: plan.secrets,
+  })
+  const badStates = result.verdicts.filter((v) => verdictStateBad(probeVerdictView(v).state))
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          ok: result.ok,
+          reason: result.reason,
+          provider: pid,
+          probes: probeIds,
+          targets: plan.planned,
+          dispatched: result.dispatched,
+          upstreamRequests: result.upstreamRequests,
+          tokens: result.tokens,
+          estimate: plan.estimate,
+          per_probe_cost: plan.perProbeCost,
+          budget: { month: budget.month, budget: budget.budget, spent: budget.spent, remaining: budget.remaining },
+          verdicts: result.verdicts.map(probeVerdictView),
+          skipped: result.skipped,
+        },
+        null,
+        2
+      )
+    )
+  } else {
+    for (const v of result.verdicts) {
+      const view = probeVerdictView(v)
+      const ev = view.evidence
+      const mark = view.state === 'healthy' ? c.green('✓') : verdictStateBad(view.state) ? c.red('✗') : c.yellow('·')
+      const detail = [
+        ev.status != null ? `HTTP ${ev.status}` : '',
+        ev.ms != null ? `${ev.ms}ms` : '',
+        ev.err ?? '',
+        view.advisory ? Object.entries(view.advisory).map(([k, val]) => `${k}=${JSON.stringify(val)}`).join(' ') : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+      console.log(`${mark} ${view.provider} · ${view.model} · key ${view.key_fp} → ${verdictStateLabel(view.state)}${detail ? t('（', ' (') + detail + ')' : ''}`)
+    }
+    // 跳过原因折叠输出（--probe all 时未实现探针占多数，逐条刷屏没有信息量）
+    const byReason = new Map<string, string[]>()
+    for (const s of result.skipped) {
+      const list = byReason.get(s.reason) ?? []
+      const label = `${s.probeId} ${s.providerId}`
+      if (!list.includes(label)) list.push(label)
+      byReason.set(s.reason, list)
+    }
+    for (const [reason, labels] of byReason) {
+      console.log(c.gray(t('· 跳过（{reason}）：{list}', '· skipped ({reason}): {list}', { reason: probeSkipReasonLabel(reason), list: labels.join(', ') })))
+    }
+    console.log(
+      t(
+        '上游请求 {n} 次 · 记账 {tok} tokens · 月预算剩余 {r}',
+        '{n} upstream request(s) · {tok} tokens ledgered · monthly budget remaining {r}',
+        { n: result.upstreamRequests, tok: result.tokens, r: (await probeBudgetState(rt)).remaining }
+      )
+    )
+    if (badStates.length > 0) {
+      console.error(
+        c.red(t('✗ {n} 项结论异常（{states}）', '✗ {n} verdict(s) unhealthy ({states})', {
+          n: badStates.length,
+          states: [...new Set(badStates.map((v) => probeVerdictView(v).state))].join(', '),
+        }))
+      )
+    }
+  }
+  // 退出码：闸门拦截/取消 = 1；运行完成但存在明确坏结论（auth-dead/quota/unreachable/degraded）= 1，
+  // 供脚本感知；healthy/unverified/stale = 0
+  if (!result.ok || badStates.length > 0) process.exit(1)
 }
