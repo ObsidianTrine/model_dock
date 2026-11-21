@@ -8,27 +8,10 @@
 import { t } from '../../../util/i18n.js'
 import type { Protocol } from '../../../config/types.js'
 import { extractReplyText, probeWirePath, upstreamErrorLine } from '../wire.js'
-import { PROBE_CANARY_MAX_TOKENS, classifyUpstreamFailure, sendProbe, sumUsageTokens } from './shared.js'
+import { PROBE_CANARY_MAX_TOKENS, classifyUpstreamFailure, parseCanaryJson, sendProbe, sumUsageTokens } from './shared.js'
 import type { ProbeUnitContext, ProbeUnitOutcome } from '../engine.js'
 
 export const P6_PROMPT = 'Reply with exactly {"ok":true} and nothing else.'
-
-/** 回复文本 → JSON 对象：trim + 一次剥 code fence 兜底（模型常包 ```json 围栏，与 P4/P9 的
- *  「一次剥引号」同思路——剥一层后仍非 JSON 即放弃，不递归不猜测）；对象形态才合格
- *  （数组/标量按无约定字段处理）。 */
-export function parseCanaryJson(reply: string | undefined): Record<string, unknown> | undefined {
-  if (!reply) return undefined
-  let s = reply.trim()
-  const fence = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/)
-  if (fence) s = fence[1].trim()
-  try {
-    const j: unknown = JSON.parse(s)
-    if (j && typeof j === 'object' && !Array.isArray(j)) return j as Record<string, unknown>
-  } catch {
-    /* 非 JSON：交调用方从严判定 */
-  }
-  return undefined
-}
 
 /** P6 请求体拼装：任务 3 的 probeWire 线格式不含 response_format 槽位（并行 worktree、字节
  *  一致复制防漂移），openai 形态在此补装该槽；路径仍走 probeWirePath 单一事实源。键序对齐

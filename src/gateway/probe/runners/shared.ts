@@ -1,4 +1,4 @@
-// shared.ts — P3/P6/P7 runner 共享件（provider-probe-suite 任务 7）。
+// shared.ts — P3/P6/P7 runner 共享件（provider-probe-suite 任务 7；任务 8 起含 P4/P5 共用件）。
 // 失败归档与 usage 记账与 runners/p1.ts（任务 3）同口径：探针家族对同一上游失败必须得出同一
 // verdict 分类（口径漂移正是本 spec 要消灭的东西）；任务 3 合并后两处实现收敛为单一函数。
 
@@ -14,6 +14,24 @@ export function sumUsageTokens(usage: Record<string, number> | undefined): numbe
   let sum = 0
   for (const v of Object.values(usage ?? {})) if (typeof v === 'number' && v > 0) sum += v
   return sum
+}
+
+/** 模型吐出的 JSON 字符串 → 对象：trim + 一次剥 code fence 兜底（模型常包 ```json 围栏，与
+ *  P4/P9 的「一次剥引号」同思路——剥一层后仍非 JSON 即放弃，不递归不猜测）；对象形态才合格
+ *  （数组/标量按无约定字段处理）。任务 8 自 p6.ts 迁入：P6 约定字段与 P5 工具 args 的「JSON
+ *  合法」判定共用同一 parse 口径（object 非数组非 null），防两处实现漂移。 */
+export function parseCanaryJson(reply: string | undefined): Record<string, unknown> | undefined {
+  if (!reply) return undefined
+  let s = reply.trim()
+  const fence = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/)
+  if (fence) s = fence[1].trim()
+  try {
+    const j: unknown = JSON.parse(s)
+    if (j && typeof j === 'object' && !Array.isArray(j)) return j as Record<string, unknown>
+  } catch {
+    /* 非 JSON：交调用方从严判定 */
+  }
+  return undefined
 }
 
 /** 上游失败归档（仅 ≥400 有结论）：401/403 → auth-dead；402 或 429+额度特征 → quota（relay

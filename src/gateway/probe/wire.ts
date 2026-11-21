@@ -77,6 +77,45 @@ export function extractReplyText(bodyText: string | undefined): string | undefin
   return undefined
 }
 
+/** 工具调用条目的协议无关投影：name 全协议必有；argsText = openai/responses 的 arguments
+ *  JSON 字符串，input = anthropic 已解析的对象——两者互斥缺席，args 合法性判定在 runner。 */
+export interface ProbeToolUse {
+  name: string
+  argsText?: string
+  input?: unknown
+}
+
+/** 从成功响应体抽工具调用：openai choices[].message.tool_calls[].function、anthropic
+ *  content[].tool_use、responses output[].function_call（含省略 type 字段的宽容形态——中转
+ *  改写响应壳是常态，探测只认结构不挑壳）。全部命中合并返回，空数组 = 无工具调用。 */
+export function extractToolUses(bodyText: string | undefined): ProbeToolUse[] {
+  if (!bodyText) return []
+  let j: unknown
+  try {
+    j = JSON.parse(bodyText)
+  } catch {
+    return []
+  }
+  const o = j as Record<string, unknown>
+  const out: ProbeToolUse[] = []
+  const arr = (v: unknown): Array<Record<string, unknown>> => (Array.isArray(v) ? (v as Array<Record<string, unknown>>) : [])
+  for (const tc of arr((arr(o?.choices)[0]?.message as Record<string, unknown> | undefined)?.tool_calls)) {
+    const fn = tc?.function as Record<string, unknown> | undefined
+    if (fn && typeof fn.name === 'string') {
+      out.push({ name: fn.name, ...(typeof fn.arguments === 'string' ? { argsText: fn.arguments } : {}) })
+    }
+  }
+  for (const part of arr(o?.content)) {
+    if (part?.type === 'tool_use' && typeof part.name === 'string') out.push({ name: part.name, input: part.input })
+  }
+  for (const part of arr(o?.output)) {
+    if (part?.type === 'function_call' && typeof part.name === 'string') {
+      out.push({ name: part.name, ...(typeof part.arguments === 'string' ? { argsText: part.arguments } : {}) })
+    }
+  }
+  return out
+}
+
 /** 响应体 model 字段（三协议都会回显；生产 transport 优先透传 modelAfter——mfGate 改写后的
  *  最终模型，本抽取只作 mock/无 modelAfter 时的兜底）。 */
 export function extractResponseModel(bodyText: string | undefined): string | undefined {
