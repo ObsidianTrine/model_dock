@@ -184,6 +184,11 @@ export interface ForwardOptions {
    *  本身（预改写会把「探 m 的死活」偷换成「探 fb 的死活」，熔断快速失败则让探针只能看到本地
    *  402 而非上游真实状态）。缺省 undefined = 既有路径行为逐字节不变。 */
   skipModelFallbackGate?: boolean
+  /** 探针专用（P1/P12 生产 transport，t4b）：豁免 401/403 的 markKeyCooldown 打标——探针
+   *  探死 key 是观测行为，不得污染池态（15min 冷却会把刚探死的 key 从 P2 复审视野里过滤掉，
+   *  且真实转发热路径的可用把位被探针单方面削减）。换 key 重试/透传逻辑不动（那是 forced
+   *  专属语义之外的既有行为），只豁免「打标」这一个副作用。缺省 undefined = 打标照常。 */
+  skipKeyCooldownMark?: boolean
 }
 
 export interface UpstreamBody {
@@ -690,13 +695,15 @@ export async function forwardToUpstream(
   // 端点的 401 可能是路径级权限/资源问题（不代表 key 失效），据此把 key 冷却 15 分钟会误伤——
   // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试。
   // 探针锁定把位（forced）时整段跳过：既不打 markKeyCooldown（池态零扰动），也不换 key 重试
-  //（换 key 会让 P2 把「这把 401」误读成下一把的响应），401/403 原样返回由探针归档 verdict
+  //（换 key 会让 P2 把「这把 401」误读成下一把的响应），401/403 原样返回由探针归档 verdict。
+  // P1/P12 生产 transport（skipKeyCooldownMark）只豁免打标：换 key 重试/透传照走既有路径，
+  // 冷却标记是池态写入，探死 key 的观测行为不得削减真实转发的可用把位
   const routedApi = ROUTED_PATH_RE.test(opts.path.split('?')[0])
   if (!forced && routedApi && (up.status === 401 || up.status === 403)) {
     // 上游 401/403 = 鉴权层明确拒绝该 key，请求未进入业务处理（未产出内容、未计费）——
     // 该 key 打入冷却；换池内下一把 healthy key 重试一次是安全的，与「transport 未送达才重放」
     // 边界一致且更早：鉴权拒绝发生在请求体被消费之前，不存在重复处理/重复计费
-    markKeyCooldown(rt, providerId, first.index)
+    if (!opts.skipKeyCooldownMark) markKeyCooldown(rt, providerId, first.index)
     const rest = healthy.filter((k) => k.index !== first.index)
     if (rest.length > 0) {
       // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）；有界读（P2-6），
@@ -709,7 +716,7 @@ export async function forwardToUpstream(
         // 链换下一个 provider 候选。仅多 key 池（≥2 把可用）会走到这里；单 key 池没有「换 key
         // 重试」，401 保持既有透传行为（客户端看得到上游错误体），失效跳过从下一次请求生效
         //（本次已标记冷却 → 下次 healthy 为空 → candidateSkip）
-        markKeyCooldown(rt, providerId, second.index)
+        if (!opts.skipKeyCooldownMark) markKeyCooldown(rt, providerId, second.index)
         try { await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES) } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
         const e = new UpstreamError(
           503,
