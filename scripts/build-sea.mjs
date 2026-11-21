@@ -252,8 +252,9 @@ async function buildExecutables() {
         const nodeBin = path.join(extractDir, dirs[0], 'bin', 'node')
         await fsp.copyFile(nodeBin, exePath)
       } else if (archiveName.endsWith('.zip')) {
-        // Windows: 用 PowerShell 解压（if (!$?) 把非终止错误转成失败码，防止解压失败被吞）
-        run(`powershell -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${extractDir}' -Force; if (!$?) { exit 1 }"`)
+        // Windows zip 也走系统 bsdtar（魔数识别，退出码可靠）：不再用 Expand-Archive——
+        // 2026-11-21 镜像 20261116.315 起 Archive cmdlet 往返实测 exit 0 零产物
+        run(`tar xf "${archivePath}" -C "${extractDir}"`)
         const dirs = await fsp.readdir(extractDir)
         const nodeBin = path.join(extractDir, dirs[0], 'node.exe')
         await fsp.copyFile(nodeBin, exePath)
@@ -368,10 +369,10 @@ async function packageDistributions() {
     const fileArgs = packed.map((n) => `"${n}"`).join(' ')
     if (spec.ext === '.exe') {
       if (process.platform === 'win32') {
-        // if (!$?) { exit 1 }：PowerShell 对 cmdlet 的 Write-Error 是非终止错误、exit 0，必须显式转成失败码，否则打包失败静默过关
-        // Compress-Archive 收多文件：包内网关+托盘并排，解压即可整目录替换
-        const multi = packed.map((n) => `'${path.join(staging, n)}'`).join(',')
-        await withRetry(3, 2000, () => run(`powershell -Command "Compress-Archive -Path @(${multi}) -DestinationPath '${archivePath}' -Force; if (!$?) { exit 1 }"`))
+        // win 发布 zip 用 bsdtar 写（--format zip，退出码可靠，与解压侧同依赖）：不再用
+        // Compress-Archive——2026-11-21 镜像 20261116.315 起该 cmdlet 实测打包抽空（exit 0 零产物）
+        // 包内网关+托盘并排，解压即可整目录替换
+        await withRetry(3, 2000, () => run(`tar --format zip -cf "${archivePath}" -C "${staging}" ${fileArgs}`))
       } else {
         run(`cd "${staging}" && zip -q "${archivePath}" ${fileArgs}`)
       }
