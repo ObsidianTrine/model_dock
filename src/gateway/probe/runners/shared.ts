@@ -34,6 +34,25 @@ export function parseCanaryJson(reply: string | undefined): Record<string, unkno
   return undefined
 }
 
+/** canary 词精确匹配（P9）：trim 后全等即过；不中则剥一层成对引号再比（模型常把 canary 词
+ *  用引号整个包起来当作「引用作答」：/"Banana"/ 与 “Banana” 都是忠实转述）。只剥一层、剥后
+ *  仍须全等——I am Banana-2 这类改写一律不匹配（design 宁严勿松：假阴性留人工复核，不引入
+ *  模糊匹配）。 */
+export function canaryExactReply(reply: string | undefined, expected: string): boolean {
+  const s = (reply ?? '').trim()
+  if (s === expected) return true
+  const pairs: ReadonlyArray<readonly [string, string]> = [
+    ['"', '"'],
+    ['“', '”'],
+    ["'", "'"],
+    ['‘', '’'],
+  ]
+  for (const [l, r] of pairs) {
+    if (s.length >= 2 && s.startsWith(l) && s.endsWith(r)) return s.slice(1, -1).trim() === expected
+  }
+  return false
+}
+
 /** 上游失败归档（仅 ≥400 有结论）：401/403 → auth-dead；402 或 429+额度特征 → quota（relay
  *  isQuotaError 单一口径）；普通 429 → degraded + rateLimited（引擎退避重试 + provider 探针
  *  冷却）；其余 4xx/5xx → degraded。成功（<400）返回 undefined，能力判定交 runner 主逻辑。 */
