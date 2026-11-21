@@ -13,7 +13,7 @@ import { localDateStr, localIsoTs } from '../../util/time.js'
 import { sha256 } from '../../util/fsx.js'
 import { appendLog } from '../state/logs.js'
 import { closeAppendStream } from '../../util/fsx.js'
-import type { GatewayRuntime, ProbeEvidence, ProbePendingSample, ProbeVerdict, ProbeVerdictState } from '../state/types.js'
+import type { GatewayRuntime, ProbeCapabilityRecord, ProbeEvidence, ProbePendingSample, ProbeVerdict, ProbeVerdictState } from '../state/types.js'
 
 /** 三元组键分隔符：NUL 与 modelHealth 同款（provider/model 不含 NUL，指纹是 hex） */
 const KEY_SEP = '\u0000'
@@ -73,6 +73,71 @@ export function probeVerdictView(v: ProbeVerdict): {
   return v.advisory ? { ...base, advisory: v.advisory } : base
 }
 
+/** 能力实证探针 → capabilities 标记（design 方案 6：探针结论只写 upstream 采集层）。
+ *  标记口径与预设库 capabilities 对齐（vision/tools/reasoning 既有值），json/stream 为 P6/P3 新词。 */
+const CAPABILITY_PROBES: Record<string, string> = { p3: 'stream', p4: 'vision', p5: 'tools', p6: 'json', p7: 'reasoning' }
+
+/** 能力探针样本落记录：healthy/degraded 结论按标记累积进 verdict.capabilities（多探针独立并存，
+ *  同标记新证据覆盖旧证据）；其余状态（unreachable/quota/auth-dead/unverified）不发明能力结论 */
+function mergeCapabilityRecord(target: ProbeVerdict, source: string, state: ProbeVerdictState | undefined, at: number): void {
+  if (!source.startsWith('probe:')) return
+  const token = CAPABILITY_PROBES[source.slice('probe:'.length)]
+  if (!token || (state !== 'healthy' && state !== 'degraded')) return
+  target.capabilities = { ...(target.capabilities ?? {}), [token]: { ok: state === 'healthy', at } }
+}
+
+/** 能力记录合并（回放/多来源聚合）：逐标记取证据更新者——不同探针的结论并存，同探针新测量胜出 */
+function mergeCapabilityRecords(
+  a: ProbeVerdict['capabilities'] | undefined,
+  b: ProbeVerdict['capabilities'] | undefined
+): ProbeVerdict['capabilities'] | undefined {
+  if (!a) return b
+  if (!b) return a
+  const out: Record<string, ProbeCapabilityRecord> = { ...a }
+  for (const [token, rec] of Object.entries(b)) {
+    if (!out[token] || rec.at > out[token].at) out[token] = rec
+  }
+  return out
+}
+
+/** 探针实测能力视图：capabilities 三态链的探针层素材 + 徽标「实测」态的时间戳 */
+export interface ProbeCapabilityView {
+  capabilities: string[]
+  /** 最新一次能力实证证据时间（epoch ms） */
+  at: number
+}
+
+/** 从 rt.probeVerdicts 派生 (provider, model) 的探针实测能力（任务 10：resolveModelMeta 探针层素材）。
+ *  结论读 verdict.capabilities 按 (provider, model) 聚合（多把 key 各有三元组 verdict，逐标记取最新）；
+ *  记录超 7 天保鲜期视为弃权（实测结论同样过期，回落目录态）。
+ *  表态门只认 vision：链上 capabilities 的 [] 语义与全部消费方都只看 vision——vision 未实测时返回
+ *  undefined，探针层不得替 vision 发明表态（否则 P6 单独通过就会把内置表的 vision 短路掉）；
+ *  门开时其余实测拥有的标记并进列表，实测无（ok=false）只减不加。 */
+export function probeCapabilityView(rt: GatewayRuntime, provider: string, model: string, now = Date.now()): ProbeCapabilityView | undefined {
+  const store = rt.probeVerdicts
+  if (!store || store.size === 0) return undefined
+  const latest = new Map<string, ProbeCapabilityRecord>()
+  for (const v of store.values()) {
+    if (v.provider !== provider || v.model !== model || !v.capabilities) continue
+    for (const [token, rec] of Object.entries(v.capabilities)) {
+      if (now - rec.at > PROBE_VERDICT_STALE_MS) continue
+      const prev = latest.get(token)
+      if (!prev || rec.at > prev.at) latest.set(token, rec)
+    }
+  }
+  const vision = latest.get('vision')
+  if (!vision) return undefined
+  const caps = new Set<string>()
+  if (vision.ok) caps.add('vision')
+  let at = vision.at
+  for (const [token, rec] of latest) {
+    if (token === 'vision') continue
+    if (rec.ok) caps.add(token)
+    if (rec.at > at) at = rec.at
+  }
+  return { capabilities: [...caps].sort(), at }
+}
+
 /** 脱敏错误体摘要：取首行 → 剥离 key 明文（先替换后截断，防截断边界把 key 切半漏脱敏）→
  *  ≤400 字符。secrets 传本次调用涉及的 key 明文（可多把）；短于 8 字符的串不替换（过短会误伤正文）。 */
 export function sanitizeErrorSummary(text: string, secrets?: readonly (string | undefined)[]): string {
@@ -117,6 +182,7 @@ export function applyVerdictEvidence(rt: GatewayRuntime, input: ProbeVerdictInpu
       v.state = input.state
     }
     if (input.advisory) v.advisory = input.advisory
+    mergeCapabilityRecord(v, input.source, input.state, ev.at)
     store.set(key, v)
     appendVerdictJsonl(v)
     return v
@@ -148,6 +214,7 @@ export function applyVerdictEvidence(rt: GatewayRuntime, input: ProbeVerdictInpu
   // 一致样本 / advisory 样本：刷新证据时间戳（freshness），jittery 一致即冲突解除、缓冲清零
   prev.evidence = ev
   if (input.advisory) prev.advisory = input.advisory
+  mergeCapabilityRecord(prev, input.source, input.state, ev.at)
   if (input.kind === 'jittery') prev.pending = undefined
   // canary/passive 单次判定：新样本状态即权威（probe 结论就是结论，后续样本直接覆盖旧状态）；
   // jittery 走上面的共识分支，此处只在解除 stale 时立状态（可判定立新状态，advisory 回 unverified）
@@ -196,8 +263,22 @@ function appendVerdictJsonl(v: ProbeVerdict): void {
     ...(v.evidence.ms != null ? { ms: v.evidence.ms } : {}),
     ...(v.evidence.unverified ? { unverified: true } : {}),
     ...(v.advisory ? { advisory: v.advisory } : {}),
+    ...(v.capabilities ? { capabilities: v.capabilities } : {}),
   }
   appendLog(`${VERDICT_FILE_PREFIX}${localDateStr(new Date(at))}.jsonl`, JSON.stringify(entry) + '\n')
+}
+
+/** 能力记录坏值过滤（回放容错）：只收 {ok:boolean, at:有限数} 的标记条目 */
+function capabilityRecordsFromJsonl(e: unknown): ProbeVerdict['capabilities'] | undefined {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return undefined
+  const out: Record<string, ProbeCapabilityRecord> = {}
+  for (const [token, rec] of Object.entries(e as Record<string, unknown>)) {
+    if (!rec || typeof rec !== 'object' || Array.isArray(rec)) continue
+    const r = rec as { ok?: unknown; at?: unknown }
+    if (typeof r.ok !== 'boolean' || typeof r.at !== 'number' || !Number.isFinite(r.at)) continue
+    out[token] = { ok: r.ok, at: r.at }
+  }
+  return Object.keys(out).length ? out : undefined
 }
 
 function verdictFromJsonl(e: Record<string, unknown>): ProbeVerdict | undefined {
@@ -213,7 +294,8 @@ function verdictFromJsonl(e: Record<string, unknown>): ProbeVerdict | undefined 
   if (typeof e.ms === 'number') evidence.ms = e.ms
   if (e.unverified === true) evidence.unverified = true
   const advisory = e.advisory && typeof e.advisory === 'object' && !Array.isArray(e.advisory) ? (e.advisory as Record<string, unknown>) : undefined
-  return { provider, keyFp, model, state, evidence, ...(advisory ? { advisory } : {}) }
+  const capabilities = capabilityRecordsFromJsonl(e.capabilities)
+  return { provider, keyFp, model, state, evidence, ...(advisory ? { advisory } : {}), ...(capabilities ? { capabilities } : {}) }
 }
 
 /** 启动回放：按天序读 probe-*.jsonl 重建热态（后写覆盖先写 = 最新证据胜；坏行跳过不致命）。
@@ -251,7 +333,12 @@ export async function replayProbeVerdicts(rt: GatewayRuntime): Promise<number> {
       if (e?.kind !== 'probe-verdict') continue
       const v = verdictFromJsonl(e)
       if (!v) continue
-      store.set(verdictKey(v.provider, v.keyFp, v.model), v)
+      const key = verdictKey(v.provider, v.keyFp, v.model)
+      // 回放按时间序后写覆盖先写；能力记录例外——按标记合并累积（多探针结论并存，
+      // 不被后写的非能力样本冲掉，与热态 mergeCapabilityRecord 的累积语义一致）
+      const prevReplay = store.get(key)
+      const capabilities = mergeCapabilityRecords(prevReplay?.capabilities, v.capabilities)
+      store.set(key, capabilities ? { ...v, capabilities } : v)
       count++
     }
   }

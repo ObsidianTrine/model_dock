@@ -12,6 +12,7 @@ import { sandboxInstallCapability } from './install.js'
 import { PRESETS } from '../presets/data.js'
 import { autoRouteInfo, isMeltdown, parseFallbackEntry, type GatewayRuntime } from './state.js'
 import { usageTodayView } from './state/logs.js'
+import { probeCapabilityView } from './probe/verdict.js'
 import { ensurePresetsLoaded, presetModels, presetsGenerationNow } from '../presets/data.js'
 import { markUiLeaving, markUiPing, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { peekSyncRequest } from './lan.js'
@@ -255,7 +256,11 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
       meltdown_until: melted ? (h?.meltdown_until ?? null) : null,
       // lastMs 不进 overview：每请求都变的字段会击穿 UI 文本 diff（有流量时串恒变 → 每轮询全量
       // 重传 + 全页重绘），与 usageToday 一并拆到 /usage-live 轻端点（hUsageLive）按需更新
-      models: Object.entries(p.models ?? {}).map(([mid, meta]) => projectModel(mid, meta, { includeCapabilities: true })),
+      // 探针实测能力按 (provider, model) 派生进投影：能力徽标据此区分 实测（带探针时间）/目录
+      models: Object.entries(p.models ?? {}).map(([mid, meta]) => {
+        const pc = probeCapabilityView(rt, id, mid)
+        return projectModel(mid, meta, { includeCapabilities: true, probe: pc ? { capabilities: pc.capabilities, at: pc.at } : undefined })
+      }),
     })
   }
   // 兼容旧字段名：isCurrent 与 inUse 同值（移动端/PWA 旧页面可能仍读它）
