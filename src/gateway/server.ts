@@ -51,11 +51,12 @@ import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
 import { probeWire } from './probe/wire.js'
-import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite } from './probe/engine.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite, type ProbeTransport } from './probe/engine.js'
 import { PROBE_REGISTRY, getProbeDef } from './probe/registry.js'
 import { probeVerdictView } from './probe/verdict.js'
 import { probeBudgetState, probeMonthBreakdown, readProbeLedger } from './probe/ledger.js'
 import { getProbeRunner } from './probe/runners/index.js'
+import { startProbeSchedule } from './probe/schedule.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -85,6 +86,11 @@ export interface GatewayStartOptions {
   autoModelProbe?: boolean
   /** 注入探测调度节奏（测试用）：不传用 modelprobe.ts 的 MODEL_PROBE_* 默认（启动 90s / 每 24h） */
   modelProbeIntervals?: { initialDelayMs?: number; intervalMs?: number }
+  /** 探针周期调度（probe/schedule.ts：P15 被动聚合恒跑 + cost_ack 授权的周期主动面）；默认开启，
+   *  测试传 false 避免 tick 触发探针（或用 probeScheduleIntervals 注入短间隔 + mock 上游） */
+  autoProbeSchedule?: boolean
+  /** 注入探针调度节奏（测试用）：不传用 schedule.ts 的 PROBE_SCHEDULE_* 默认（启动 90s / 每 1h） */
+  probeScheduleIntervals?: { initialDelayMs?: number; intervalMs?: number; transport?: ProbeTransport }
   /** 临时 harness TTL 清扫间隔（C14，测试注入用）：不传用 EPHEMERAL_SWEEP_INTERVAL_MS（60s） */
   ephemeralSweepIntervalMs?: number
 }
@@ -354,6 +360,14 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   // 测试传 autoModelProbe:false 停用，或 modelProbeIntervals 注入短首查（配 mock 上游）
   if (opts.autoModelProbe !== false) {
     startModelProbeLoop(rt, server, opts.modelProbeIntervals)
+  }
+
+  // 探针周期调度（provider-probe-suite 任务 13，probe/schedule.ts）：每小时 tick——P15 被动聚合
+  // 恒跑（零 token）；含 token 主动面（P1）仅在当前本地小时命中 [probe] schedule_hours 且
+  // cost_ack=true 时执行，同受 budget_tokens 月度硬闸（闸在引擎内）。不影响转发路由；测试传
+  // autoProbeSchedule:false 停用，或 probeScheduleIntervals 注入短间隔（配 mock 上游）
+  if (opts.autoProbeSchedule !== false) {
+    startProbeSchedule(rt, server, opts.probeScheduleIntervals)
   }
 
   // JSONL 日志保留期清理：启动即清一次、之后每 24h；保留天数读 rt.config（随 reloadRuntime
