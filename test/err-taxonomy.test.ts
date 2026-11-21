@@ -7,7 +7,7 @@ import { errorReply } from '../src/gateway/server.js'
 import { ConfigError } from '../src/config/store.js'
 import { SecretsError } from '../src/config/secrets.js'
 import { AdapterError } from '../src/adapters/types.js'
-import { UpstreamError } from '../src/gateway/relay.js'
+import { isQuotaError, UpstreamError } from '../src/gateway/relay.js'
 import { UpdateError } from '../src/update/check.js'
 
 // 错误类型体系统一（专家审查方案 P0-2）回归：
@@ -118,5 +118,15 @@ describe('CLI 顶层出口：带 hint 的业务错误输出两行（真实子进
     } finally {
       h.restore()
     }
+  })
+})
+
+describe('isQuotaError：额度判定共享导出（provider-probe-suite 任务 2）', () => {
+  it('402 无条件判额度；429 需错误体带 quota/insufficient 特征；500 带特征不算', () => {
+    expect(isQuotaError(402, '')).toBe(true)
+    expect(isQuotaError(429, 'AccountQuotaExceeded')).toBe(true)
+    expect(isQuotaError(429, 'insufficient quota')).toBe(true)
+    expect(isQuotaError(429, 'rate limited')).toBe(false)
+    expect(isQuotaError(500, 'quota')).toBe(false)
   })
 })
