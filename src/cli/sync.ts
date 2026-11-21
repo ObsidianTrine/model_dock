@@ -1,10 +1,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { confirm, input, password, select } from '@inquirer/prompts'
+import { checkbox, confirm, input, password, select } from '@inquirer/prompts'
 import { c, t } from '../util/index.js'
 import { displayPath, homeDir } from '../util/paths.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import { exportFileName, exportSyncdoc, previewImport, applyImportedDoc } from '../sync/exportImport.js'
+import { filterMergedDoc, makeVerdictFinder, mergePackages, type MergeCandidate, type MergeSuggestion } from '../sync/merge.js'
+import { replayProbeVerdicts } from '../gateway/probe/verdict.js'
+import type { GatewayRuntime, ProbeVerdict, ProbeVerdictState } from '../gateway/state/types.js'
 import { enrollCloud, setupSyncTarget } from '../sync/setup.js'
 import { syncStatus } from '../sync/engine.js'
 import { readSyncState, updateSyncState, type SyncTargetConfig } from '../sync/state.js'
@@ -115,6 +118,144 @@ export async function cmdConfigImport(file: string, opts: { stdinPass?: boolean;
   )
   keyNotes(applied)
   console.log(c.gray(t('改动前已自动快照到 backups/config/。网关运行中则配置热加载立即生效；自定义预设需重启网关后生效', 'A pre-change snapshot was saved to backups/config/. With the gateway running, config changes hot-reload immediately; custom presets take effect after a gateway restart')))
+}
+
+// ── 多包合并流（provider-probe-suite 任务 11）：config merge <files...> ────────────────────────
+
+function suggestionLabel(s: MergeSuggestion): string {
+  return s === 'keep' ? t('保留候选', 'Keep candidate') : s === 'review' ? t('存疑', 'Suspect') : t('失效', 'Dead')
+}
+
+function verdictLabel(state: ProbeVerdictState | null): string {
+  if (!state) return t('无探针记录', 'No probe record')
+  const meta: Record<ProbeVerdictState, string> = {
+    healthy: t('健康', 'Healthy'),
+    degraded: t('降级', 'Degraded'),
+    quota: t('额度', 'Quota'),
+    'auth-dead': t('失效', 'Auth dead'),
+    unreachable: t('不可达', 'Unreachable'),
+    unverified: t('未验证', 'Unverified'),
+    stale: t('过期', 'Stale'),
+  }
+  return meta[state]
+}
+
+/** 本机探针结论回放（CLI 侧无网关运行态）：probe-<date>.jsonl 是唯一事实源，重放进内存 store 后
+ *  按 (key 指纹, model) 匹配——包内 provider 未进本机路由表，provider 维度匹配不了，指纹是稳定锚 */
+async function localVerdictFinder() {
+  const store = new Map<string, ProbeVerdict>()
+  await replayProbeVerdicts({ probeVerdicts: store } as unknown as GatewayRuntime)
+  return makeVerdictFinder(store)
+}
+
+function candidateLine(cand: MergeCandidate, index: number): string {
+  const fp = cand.key_fp ?? t('（无明文 key）', '(no plaintext key)')
+  const src = cand.sources.length > 1 ? t(' · 来自 {n} 个包', ' · from {n} packages', { n: cand.sources.length }) : ''
+  const prof = cand.profiles.length > 0 ? t(' · 路由 {ids}', ' · profiles {ids}', { ids: cand.profiles.join(', ') }) : ''
+  const dup = cand.duplicateCount > 0 ? t('（与另外 {n} 条同址同 key，已合并）', ' ({n} same-url same-key entries merged)', { n: cand.duplicateCount }) : ''
+  return `  [${index + 1}] ${cand.id}${dup} · ${cand.base_url} · key 指纹 ${fp}${src}${prof}` +
+    `\n      ${t('探针：{v} → 建议：{s}', 'Probe: {v} → suggestion: {s}', { v: verdictLabel(cand.verdict_state), s: suggestionLabel(cand.suggestion) })}`
+}
+
+export async function cmdConfigMerge(files: string[], opts: { stdinPass?: boolean; yes?: boolean; json?: boolean }): Promise<void> {
+  if (files.length < 2) {
+    console.error(c.red(t('✗ 合并至少需要两个配置包：modeldock config merge <包1> <包2> [...]', '✗ Merging needs at least two packages: modeldock config merge <pkg1> <pkg2> [...]')))
+    console.log(c.gray(t('只导入一个包用 modeldock config import <file>', 'To import a single package, use modeldock config import <file>')))
+    process.exit(1)
+  }
+  if (opts.json && !opts.stdinPass) {
+    // --json 是脚本态：交互口令提示会污染 stdout 且无 tty 可答（冒烟实测踩中）
+    console.error(c.red(t('✗ --json 需与 --stdin-pass 配对（口令经 stdin 读入）：echo <口令> | modeldock config merge <files...> --json --stdin-pass', '✗ --json requires --stdin-pass (passphrase via stdin): echo <pass> | modeldock config merge <files...> --json --stdin-pass')))
+    process.exit(1)
+  }
+  // 逐包解包预览（零写盘）。口令策略：--stdin-pass 一份口令全包通用（脚本态）；交互态先用已输入
+  // 的口令逐包试解，失败再对当个包追问（包与包口令可以不同，不为同口令的多包重复打扰）
+  let pass = ''
+  const inputs: { name: string; doc: Awaited<ReturnType<typeof previewImport>>['doc'] }[] = []
+  for (const file of files) {
+    if (opts.stdinPass) pass = pass || readPassStdin()
+    let previewed: Awaited<ReturnType<typeof previewImport>> | null = null
+    for (;;) {
+      const pw = pass || (await password({ message: t('「{f}」的同步口令', 'Sync passphrase for "{f}"', { f: displayPath(file) }), mask: '*' }))
+      try {
+        previewed = await previewImport(file, pw)
+        pass = pw
+        break
+      } catch (e) {
+        if (opts.stdinPass || pass) {
+          console.error(c.red(t('✗ 「{f}」解包失败：{err}', '✗ Failed to open "{f}": {err}', { f: displayPath(file), err: (e as Error).message })))
+          process.exit(1)
+        }
+        console.error(c.red(t('  解包失败：{err}', '  Failed to open the package: {err}', { err: (e as Error).message })))
+      }
+    }
+    inputs.push({ name: displayPath(file), doc: previewed!.doc })
+  }
+
+  const { preview, doc } = mergePackages(inputs, await localVerdictFinder())
+  if (opts.json) {
+    // 机器可读预览（key 只出指纹）；--json 是纯预览态，不进入勾选与应用
+    console.log(JSON.stringify({ ok: true, preview, applied: false }))
+    return
+  }
+  console.log(t('合并 {n} 个配置包：{p} 个服务、{r} 条路由（去重合并 {d} 条）', 'Merging {n} packages: {p} providers, {r} profiles ({d} duplicates merged)', { n: inputs.length, p: preview.candidates.length, r: preview.profileTotal, d: preview.duplicatesMerged }))
+  for (const i of inputs) console.log(c.gray(t('  · {name}（服务 {p}、路由 {r}）', '  · {name} ({p} providers, {r} profiles)', { name: i.name, p: preview.packages.find((x) => x.name === i.name)?.providers ?? 0, r: preview.packages.find((x) => x.name === i.name)?.profiles ?? 0 })))
+  console.log(t('逐服务健康结论与三档建议（探针结论继承自本机探针记录，key 只显示指纹）：', 'Per-service probe verdicts and three-tier suggestions (verdicts come from local probe records; keys shown as fingerprints only):'))
+  for (const [i, cand] of preview.candidates.entries()) console.log(candidateLine(cand, i))
+
+  const choices = preview.candidates.map((cand, i) => ({
+    value: cand.id,
+    name: `[${suggestionLabel(cand.suggestion)}] ${cand.id} · ${cand.base_url} · ${t('指纹', 'fp')} ${cand.key_fp ?? '-'}`,
+    checked: cand.suggestion === 'keep',
+    description: candidateLine(cand, i),
+  }))
+  let keepIds: string[] = []
+  if (!opts.yes) {
+    keepIds = await checkbox({
+      message: t('勾选要保留的服务（保留候选默认勾选；存疑/失效默认不勾，自行判断后可改）', 'Select services to keep (keep-candidates are pre-checked; suspect/dead are not — adjust as you see fit)'),
+      choices,
+      required: false,
+    })
+  } else {
+    // 非交互缺省：只保留「保留候选」档（探针无负证据的服务）
+    keepIds = preview.candidates.filter((cand) => cand.suggestion === 'keep').map((cand) => cand.id)
+  }
+  if (keepIds.length === 0) {
+    console.log(c.gray(t('未勾选任何服务，已取消（未写任何内容）', 'Nothing selected; cancelled (nothing was written)')))
+    return
+  }
+  const filtered = filterMergedDoc(doc, keepIds)
+  if (filtered.droppedProfiles.length > 0) {
+    console.log(c.yellow(t('  ⚠ 路由 {ids} 引用了未保留的服务，将一并剔除', '  ⚠ Profiles {ids} reference dropped services and will be removed too', { ids: filtered.droppedProfiles.join(', ') })))
+  }
+  console.log(
+    t(
+      '将写入：服务 {p} 个、路由 {r} 条、自定义预设 {s} 条、定时规则 {w} 条。应用会整体替换本机可同步态（未包含在包里的现有服务会被移除），改动前自动快照',
+      'Will write: {p} providers, {r} profiles, {s} custom presets, {w} schedule rules. Applying replaces all syncable state (existing services not in the packages are removed); a snapshot is taken first',
+      { p: Object.keys(filtered.doc.data.providers).length, r: Object.keys(filtered.doc.data.profiles).length, s: preview.presetCount, w: preview.scheduleRules }
+    )
+  )
+  console.log(untouchedLine())
+  if (!opts.yes) {
+    const ok = await confirm({ message: t('确认应用合并结果？', 'Apply the merged result?'), default: false })
+    if (!ok) {
+      console.log(c.gray(t('已取消，未做任何改动', 'Cancelled; nothing was changed')))
+      return
+    }
+  }
+  const applied = await applyImportedDoc(filtered.doc, { log: (line) => console.log(c.yellow(line)) })
+  console.log(
+    c.green(
+      t('✓ 已合并导入：服务 {p}、路由 {r}、预设 {s}、定时规则 {w}；key 按本机存储重存 {k} 条', '✓ Merged and imported: {p} providers, {r} profiles, {s} presets, {w} schedule rules; {k} keys re-stored into local storage', {
+        p: applied.providers.length,
+        r: applied.profiles.length,
+        s: applied.presetCount,
+        w: applied.scheduleRules,
+        k: applied.keysRestored ?? 0,
+      })
+    )
+  )
+  console.log(c.gray(t('改动前已自动快照到 backups/config/。网关运行中则配置热加载立即生效', 'A pre-change snapshot was saved to backups/config/. With the gateway running, config changes hot-reload immediately')))
 }
 
 // M2：多机自动同步（docs/design/design-cloud-sync.md §6）
