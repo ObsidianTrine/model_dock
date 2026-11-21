@@ -1,6 +1,7 @@
 /**
- * Web 控制台 · probe.ts —— 服务探针（provider-probe-suite 任务 6）。
- * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染 + 探针账本弹层（月度总花费/预算余量/按探针分解）。
+ * Web 控制台 · probe.ts —— 服务探针（provider-probe-suite 任务 6；任务 14 增趋势弹层）。
+ * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染 + 探针账本弹层（月度总花费/预算余量/按探针分解）
+ * + 探针趋势弹层（近 30 天 verdict 变化时间线/按月花费条形图，GET /_modeldock/probe/trend）。
  * 片段为模板字面量源文本：ui.ts 经 UI_JS_MIN 拼装；新增片段须在 scripts/gen-ui-min.mjs 的 ORDER 登记。
  */
 export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 探针账本 =====
@@ -104,5 +105,73 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 探针账
   }
   var probeLedgerBtn = document.getElementById('probeLedgerBtn')
   if (probeLedgerBtn) probeLedgerBtn.onclick = openProbeLedger
+
+  // 探针趋势弹层（任务 14）：近 30 天 verdict 变化时间线 + 近 6 个月花费条形图。数据源
+  // GET /_modeldock/probe/trend（只读探针 JSONL 与独立账本，30 天外数据不出网关）；曲线为
+  // 纯 DOM 条形（复用进度条令牌，不引图表库——纯 JS 依赖约束）；时间线用 at 升序原样渲染
+  var probeTrendM = createModal({
+    id: 'probeTrendOverlay',
+    title: '探针趋势||Probe trends',
+    align: 'top',
+    bodyHtml: '<p class="testline" data-i18n="加载中…||Loading…"></p>',
+    foot: [
+      { slot: 'msg', id: 'probeTrendMsg', kind: 'err' },
+      { id: 'probeTrendRefresh', label: '刷新||Refresh', onClick: function () { loadProbeTrend() } },
+    ],
+  })
+  function trendPillHtml(meta) {
+    return '<span class="pill ' + meta.cls + '">' + esc(t(meta.zh, meta.en)) + '</span>'
+  }
+  function loadProbeTrend() {
+    fetch('/_modeldock/probe/trend?days=30&months=6', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      return r.json()
+    }).then(function (j) {
+      if (!j || !j.timeline || !j.spend) throw new Error('bad payload')
+      var rows = ''
+      if (!j.timeline.length) {
+        rows = '<tr><td colspan="4" class="empty">' + esc(t('近 30 天无 verdict 变化', 'No verdict changes in the last 30 days')) + '</td></tr>'
+      } else {
+        for (var i = 0; i < j.timeline.length; i++) {
+          var it = j.timeline[i]
+          var d = new Date(it.at)
+          var mm = ('0' + (d.getMonth() + 1)).slice(-2)
+          var dd = ('0' + d.getDate()).slice(-2)
+          var tm = d.getFullYear() + '-' + mm + '-' + dd + ' ' + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2)
+          var changeHtml = it.from == null
+            ? '<span class="dim">—</span> → ' + trendPillHtml(VS_META[it.to] || VS_META.unverified)
+            : trendPillHtml(VS_META[it.from] || VS_META.unverified) + ' → ' + trendPillHtml(VS_META[it.to] || VS_META.unverified)
+          rows += '<tr><td class="mono">' + tm + '</td>' +
+            '<td><span class="mono">' + esc(it.provider + '/' + it.model) + '</span> <span class="dim">@' + esc(it.key_fp) + '</span></td>' +
+            '<td>' + changeHtml + '</td>' +
+            '<td class="dim">' + esc(it.source) + '</td></tr>'
+        }
+      }
+      var max = 0
+      for (var k = 0; k < j.spend.length; k++) if (j.spend[k].tokens > max) max = j.spend[k].tokens
+      var bars = ''
+      for (var b = 0; b < j.spend.length; b++) {
+        var p = j.spend[b]
+        var pct = max > 0 ? Math.round((p.tokens / max) * 100) : 0
+        bars += '<tr><td class="mono">' + esc(p.month) + '</td>' +
+          '<td><div class="progress" title="' + esc(fmtTok(p.tokens)) + '"><div class="progress-fill" style="width:' + pct + '%"></div></div></td>' +
+          '<td class="mono">' + esc(fmtTok(p.tokens)) + '</td></tr>'
+      }
+      probeTrendM.body.innerHTML =
+        '<p class="shint">' + esc(t('近 30 天 verdict 变化（按证据时间升序；「—」= 窗口内首现）', 'Verdict changes in the last 30 days (ascending by evidence time; "—" = first seen in window)')) + '</p>' +
+        '<div class="tablescroll"><table id="probeTrendTimeline"><thead><tr><th>' + esc(t('时间', 'Time')) + '</th><th>' + esc(t('三元组', 'Triple')) + '</th><th>' + esc(t('变化', 'Change')) + '</th><th>' + esc(t('来源', 'Source')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+        '<p class="shint">' + esc(t('按月探针花费（近 6 个月，独立账本）', 'Monthly probe spend (last 6 months, separate ledger)')) + '</p>' +
+        '<div class="tablescroll"><table id="probeTrendSpend"><thead><tr><th>' + esc(t('月份', 'Month')) + '</th><th>tokens</th><th>' + esc(t('月花费', 'Spend')) + '</th></tr></thead><tbody>' + bars + '</tbody></table></div>'
+    }).catch(function (e) {
+      var msg = document.getElementById('probeTrendMsg')
+      if (msg) msg.textContent = t('趋势加载失败：', 'Failed to load trends: ') + ((e && e.message) || e)
+    })
+  }
+  function openProbeTrend() {
+    probeTrendM.open()
+    loadProbeTrend()
+  }
+  var probeTrendBtn = document.getElementById('probeTrendBtn')
+  if (probeTrendBtn) probeTrendBtn.onclick = openProbeTrend
 
 `

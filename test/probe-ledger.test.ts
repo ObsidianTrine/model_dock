@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { buildRuntime, readRequestLogDay, usageTodayView } from '../src/gateway/state.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { AddressInfo } from 'node:net'
+import { buildRuntime, pruneExpiredLogs, readRequestLogDay, usageTodayView } from '../src/gateway/state.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
 import { PROBE_BUDGET_TOKENS_DEFAULT, PROBE_REGISTRY, PROBE_TIER_TOKENS, getProbeDef, probeEstimateTokens } from '../src/gateway/probe/registry.js'
-import { probeBudgetState, probeMonthBreakdown, probeMonthKey, probeMonthSpend, readProbeLedger, recordProbeLedgerEntry } from '../src/gateway/probe/ledger.js'
+import { probeBudgetState, probeMonthBreakdown, probeMonthKey, probeMonthSpend, probeSpendSeries, readProbeLedger, recordProbeLedgerEntry } from '../src/gateway/probe/ledger.js'
+import { probeVerdictTimeline } from '../src/gateway/probe/verdict.js'
 import { runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeRunner, ProbeTransport } from '../src/gateway/probe/engine.js'
+import { createGatewayServer } from '../src/gateway/server.js'
 import { localDateStr } from '../src/util/time.js'
+import { logsDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 import type { Config } from '../src/config/types.js'
 
@@ -223,5 +229,207 @@ describe('probe-ledger · 聚合与隔离', () => {
     } finally {
       h.restore()
     }
+  })
+})
+
+// ===== 任务 14：probe-<date>.jsonl 保留策略 + 趋势视图 =====
+
+/** 距 now 偏移 offsetDays 天的 probe 日文件名（本地时区，与 verdict.ts 落盘命名同构） */
+function probeDayName(offsetDays: number, now: Date): string {
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offsetDays)
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `probe-${d.getFullYear()}-${mm}-${dd}.jsonl`
+}
+
+/** verdict JSONL 一行（shape 对齐 verdict.ts appendVerdictJsonl 落盘条目） */
+function verdictLine(provider: string, keyFp: string, model: string, state: string, source: string, atMs: number): string {
+  const at = new Date(atMs).toISOString()
+  return JSON.stringify({ kind: 'probe-verdict', ts: at, provider, key_fp: keyFp, model, state, source, at }) + '\n'
+}
+
+describe('probe-ledger · 保留策略（任务 14）', () => {
+  it('probe-<date>.jsonl 挂 pruneExpiredLogs 同源策略：retention_days=7 时第 8 天删除、第 7 天保留；账本 probe-ledger.jsonl 无日期后缀不参与清理', async () => {
+    const h = fakeHome()
+    try {
+      const now = new Date()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      const kept = path.join(logsDir(), probeDayName(7, now))
+      const expired = path.join(logsDir(), probeDayName(8, now))
+      const ledger = path.join(logsDir(), 'probe-ledger.jsonl')
+      fs.writeFileSync(kept, '{"kind":"probe-verdict"}\n')
+      fs.writeFileSync(expired, '{"kind":"probe-verdict"}\n')
+      fs.writeFileSync(ledger, '{"tag":"probe"}\n')
+      expect(await pruneExpiredLogs(7, now)).toBe(1)
+      expect(fs.existsSync(expired)).toBe(false)
+      expect(fs.existsSync(kept)).toBe(true)
+      expect(fs.existsSync(ledger)).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('probe-ledger · verdict 时间线（任务 14）', () => {
+  it('30 天窗口外条目不返回；同三元组同态刷新折叠、只有翻转出线；输出按 at 升序', async () => {
+    const h = fakeHome()
+    try {
+      const now = Date.now()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      // 窗口外（40 天前）：oldco 的证据——过滤在读取层，不得出现在任何输出里
+      fs.writeFileSync(path.join(logsDir(), probeDayName(40, new Date(now))), verdictLine('oldco', 'fpold', 'm', 'healthy', 'probe:p1', now - 40 * 86_400_000))
+      // 窗口内：fp1 degraded(5d) → 同态刷新(3d，折叠) → healthy(1d)；fp2 另一三元组 quota(2d)
+      fs.writeFileSync(
+        path.join(logsDir(), probeDayName(5, new Date(now))),
+        verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 5 * 86_400_000) + verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 3 * 86_400_000)
+      )
+      fs.writeFileSync(
+        path.join(logsDir(), probeDayName(1, new Date(now))),
+        verdictLine('acme', 'fp2', 'm', 'quota', 'probe:p3', now - 2 * 86_400_000) + verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', now - 1 * 86_400_000)
+      )
+      const tl = await probeVerdictTimeline(30 * 86_400_000, now)
+      expect(tl).toHaveLength(3)
+      // 升序：at 单调不减
+      for (let i = 1; i < tl.length; i++) expect(Date.parse(tl[i].at)).toBeGreaterThanOrEqual(Date.parse(tl[i - 1].at))
+      // 30 天窗口外数据不返回（oldco 在窗口外；窗口内条目的 at 全部落在窗口内）
+      expect(tl.some((x) => x.provider === 'oldco')).toBe(false)
+      for (const x of tl) expect(Date.parse(x.at)).toBeGreaterThanOrEqual(now - 30 * 86_400_000)
+      // 翻转语义：首现 from=null；同态刷新（3d 前的 degraded）不出线；翻转带 from
+      expect(tl[0]).toMatchObject({ provider: 'acme', key_fp: 'fp1', model: 'm', from: null, to: 'degraded', source: 'probe:p1' })
+      expect(tl[1]).toMatchObject({ provider: 'acme', key_fp: 'fp2', model: 'm', from: null, to: 'quota', source: 'probe:p3' })
+      expect(tl[2]).toMatchObject({ provider: 'acme', key_fp: 'fp1', model: 'm', from: 'degraded', to: 'healthy' })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('窗口非法（非正数）返回空数组不抛错', async () => {
+    const h = fakeHome()
+    try {
+      fs.mkdirSync(logsDir(), { recursive: true })
+      fs.writeFileSync(path.join(logsDir(), probeDayName(0, new Date())), verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', Date.now()))
+      expect(await probeVerdictTimeline(0)).toEqual([])
+      expect(await probeVerdictTimeline(-5)).toEqual([])
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+const ADMIN = 'admin-tok-probe-ledger'
+
+/** 趋势端点测试壳：listen(0) 随机端口 + fakeHome 隔离（探针调度停用，零后台副作用） */
+async function setupTrendEndpoint(): Promise<{ get: (p: string) => Promise<{ status: number; body: string }>; close: () => void }> {
+  const h = fakeHome()
+  const rt = buildRuntime({ version: 1, security: { store: 'file' }, providers: {}, profiles: {}, harness: {} } as unknown as Config, ADMIN)
+  const server = createGatewayServer(rt, {
+    port: 0,
+    autoHolidayRefresh: false,
+    autoCatalogRefresh: false,
+    autoModelProbe: false,
+    autoProbeSchedule: false,
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const port = (server.address() as AddressInfo).port
+  const get = (p: string): Promise<{ status: number; body: string }> =>
+    fetch(`http://127.0.0.1:${port}/_modeldock/${p}`, { headers: { 'x-modeldock-admin': ADMIN } }).then(async (r) => ({ status: r.status, body: await r.text() }))
+  return {
+    get,
+    close: () => {
+      server.closeAllConnections?.()
+      server.close()
+      h.restore()
+    },
+  }
+}
+
+describe('probe-ledger · GET /_modeldock/probe/trend（任务 14）', () => {
+  it('30 天窗口外数据不返回、timeline 按 at 升序；spend 只含窗口月（外月不计），days 参数收窄生效', async () => {
+    const t = await setupTrendEndpoint()
+    try {
+      const now = Date.now()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      // 窗口外（40 天前）+ 窗口内两组证据（同 verdictLine 场景，断言见时间线字段）
+      fs.writeFileSync(path.join(logsDir(), probeDayName(40, new Date(now))), verdictLine('oldco', 'fpold', 'm', 'healthy', 'probe:p1', now - 40 * 86_400_000))
+      fs.writeFileSync(path.join(logsDir(), probeDayName(5, new Date(now))), verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 5 * 86_400_000))
+      fs.writeFileSync(path.join(logsDir(), probeDayName(1, new Date(now))), verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', now - 1 * 86_400_000))
+      // 账本：当月 300（p1）+ 上月 700（p3）+ 7 个月前 9999（6 个月窗口外）
+      const today = new Date(now)
+      const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 15)
+      const farMonth = new Date(today.getFullYear(), today.getMonth() - 7, 15)
+      recordProbeLedgerEntry({ tag: 'probe', probe_id: 'p1', provider: 'acme', key_fp: 'fp1', model: 'm', tokens: 300, estimated_tokens: 300, ms: 5, ts: today.toISOString() })
+      recordProbeLedgerEntry({ tag: 'probe', probe_id: 'p3', provider: 'acme', key_fp: 'fp1', model: 'm', tokens: 700, estimated_tokens: 700, ms: 5, ts: lastMonth.toISOString() })
+      recordProbeLedgerEntry({ tag: 'probe', probe_id: 'p1', provider: 'acme', key_fp: 'fp1', model: 'm', tokens: 9999, estimated_tokens: 9999, ms: 5, ts: farMonth.toISOString() })
+
+      const g = await t.get('probe/trend?days=30&months=6')
+      expect(g.status).toBe(200)
+      const j = JSON.parse(g.body) as {
+        ok: boolean
+        days: number
+        months: number
+        timeline: Array<{ at: string; provider: string; key_fp: string; model: string; from: string | null; to: string; source: string }>
+        spend: Array<{ month: string; tokens: number; by_probe: Record<string, number> }>
+      }
+      expect(j.ok).toBe(true)
+      expect(j.days).toBe(30)
+      expect(j.months).toBe(6)
+      // 窗口外数据不返回：oldco（40 天前）不出现在 timeline
+      expect(j.timeline.some((x) => x.provider === 'oldco')).toBe(false)
+      for (const x of j.timeline) expect(Date.parse(x.at)).toBeGreaterThanOrEqual(now - 30 * 86_400_000)
+      // timeline 按 at 升序：degraded(5d) → healthy(1d)
+      expect(j.timeline).toHaveLength(2)
+      for (let i = 1; i < j.timeline.length; i++) expect(Date.parse(j.timeline[i].at)).toBeGreaterThanOrEqual(Date.parse(j.timeline[i - 1].at))
+      expect(j.timeline[0]).toMatchObject({ provider: 'acme', key_fp: 'fp1', from: null, to: 'degraded' })
+      expect(j.timeline[1]).toMatchObject({ provider: 'acme', key_fp: 'fp1', from: 'degraded', to: 'healthy' })
+      // spend：6 个自然月点（含空月零点），按月升序；窗口外月（7 个月前的 9999）不计入
+      expect(j.spend).toHaveLength(6)
+      expect(j.spend[5].month).toBe(probeMonthKey(new Date(now)))
+      const sum = j.spend.reduce((a, p) => a + p.tokens, 0)
+      expect(sum).toBe(1000)
+      expect(j.spend[5].tokens).toBe(300)
+      expect(j.spend[5].by_probe).toEqual({ p1: 300 })
+      expect(j.spend[4].month).toBe(probeMonthKey(lastMonth))
+      expect(j.spend[4].tokens).toBe(700)
+      expect(j.spend[4].by_probe).toEqual({ p3: 700 })
+
+      // days 收窄：窗口 3 天 → 5 天前的 degraded 出局，只剩 1 天前的 healthy（首现 from=null）
+      const g2 = await t.get('probe/trend?days=3')
+      const j2 = JSON.parse(g2.body) as { days: number; timeline: Array<{ to: string; from: string | null }> }
+      expect(j2.days).toBe(3)
+      expect(j2.timeline).toHaveLength(1)
+      expect(j2.timeline[0]).toMatchObject({ to: 'healthy', from: null })
+    } finally {
+      t.close()
+    }
+  })
+
+  it('非法 days/months 夹紧缺省（30/6），不 400 不抛错', async () => {
+    const t = await setupTrendEndpoint()
+    try {
+      const g = await t.get('probe/trend?days=abc&months=-2')
+      expect(g.status).toBe(200)
+      const j = JSON.parse(g.body) as { ok: boolean; days: number; months: number; spend: unknown[] }
+      expect(j.ok).toBe(true)
+      expect(j.days).toBe(30)
+      expect(j.months).toBe(6)
+      expect(j.spend).toHaveLength(6)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('probeSpendSeries：空月出零点、months 缺省 6、非法夹紧', () => {
+    const now = new Date(2026, 10, 15) // 2026-11-15 本地
+    expect(probeSpendSeries([], 3, now)).toEqual([
+      { month: '2026-09', tokens: 0, by_probe: {} },
+      { month: '2026-10', tokens: 0, by_probe: {} },
+      { month: '2026-11', tokens: 0, by_probe: {} },
+    ])
+    expect(probeSpendSeries([], NaN, now)).toHaveLength(6)
+    expect(probeSpendSeries([], 99, now)).toHaveLength(24)
+    expect(probeSpendSeries([], 0, now)).toHaveLength(1)
   })
 })

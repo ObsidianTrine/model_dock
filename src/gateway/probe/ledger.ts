@@ -122,6 +122,27 @@ export function probeMonthBreakdown(entries: ProbeLedgerEntry[], monthKey = prob
   return { month: monthKey, total, estimated_total: estimated, requests: n, by_probe: byProbe, by_probe_requests: byProbeRequests }
 }
 
+/** 趋势月度花费曲线点（provider-probe-suite 任务 14）：单月实际 tokens 合计 + 按探针分解
+ *  （口径与 probeMonthBreakdown 完全一致，月键为本地自然月 YYYY-MM）。 */
+export interface ProbeTrendMonthPoint {
+  month: string
+  tokens: number
+  by_probe: Record<string, number>
+}
+
+/** 近 months 个自然月（含当月、按时间升序）的花费序列：无调用月也出零点（曲线横轴连续）。
+ *  months 非法缺省 6、合法值夹紧 1–24（防御式读取，与 probeBudgetTokens 同思路）。 */
+export function probeSpendSeries(entries: ProbeLedgerEntry[], months: number, now = new Date()): ProbeTrendMonthPoint[] {
+  const n = Number.isFinite(months) ? Math.min(24, Math.max(1, Math.floor(months))) : 6
+  const out: ProbeTrendMonthPoint[] = []
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    const bd = probeMonthBreakdown(entries, probeMonthKey(d))
+    out.push({ month: bd.month, tokens: bd.total, by_probe: bd.by_probe })
+  }
+  return out
+}
+
 /** [probe].budget_tokens 读取：未配置/非法值（非正数）落缺省（store 校验只拦形状，取值语义在此兜底）。 */
 export function probeBudgetTokens(rt: GatewayRuntime): number {
   const n = rt.config.probe?.budget_tokens

@@ -344,3 +344,81 @@ export async function replayProbeVerdicts(rt: GatewayRuntime): Promise<number> {
   }
   return count
 }
+
+/** 趋势时间线条目（provider-probe-suite 任务 14）：verdict 状态变化证据。from=null = 窗口内该
+ *  三元组首现——窗口外历史因读取层过滤不可见，不等于「无历史」。 */
+export interface ProbeVerdictTimelineItem {
+  /** 证据时间（ISO，与 JSONL 落盘的 at 同形态） */
+  at: string
+  provider: string
+  /** sha256(key) 前 8 位指纹（对齐 probeVerdictView 红线：绝不含 key 明文） */
+  key_fp: string
+  model: string
+  from: ProbeVerdictState | null
+  to: ProbeVerdictState
+  source: string
+}
+
+/** 近 windowMs 的 verdict 变化时间线（GET /_modeldock/probe/trend 数据源）：只读 probe-<date>.jsonl，
+ *  窗口过滤在读取层逐行 at 过滤（窗口外数据不出本函数、更不出网关）；输出按证据时间 at 升序，
+ *  同三元组相邻条目状态相同的（evidence 刷新）不出——变化时间线只记翻转。不读请求日志与账本。
+ *  窗口受保留期约束：probe-<date>.jsonl 随 log_retention_days 清理，超出保留期的历史自然为空。 */
+export async function probeVerdictTimeline(windowMs: number, now = Date.now()): Promise<ProbeVerdictTimelineItem[]> {
+  if (!Number.isFinite(windowMs) || windowMs <= 0) return []
+  const startAt = now - windowMs
+  const dir = logsDir()
+  let names: string[]
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return []
+  }
+  const files = names.filter((n) => VERDICT_FILE_RE.test(n)).sort()
+  const rows: Array<ProbeVerdictTimelineItem & { atMs: number }> = []
+  for (const name of files) {
+    const full = path.join(dir, name)
+    // 常驻流池可能还持有缓冲（appendVerdictJsonl 刚写入未刷盘）：先关流再读，防漏最新几行
+    await closeAppendStream(full)
+    let text: string
+    try {
+      text = fs.readFileSync(full, 'utf8')
+    } catch {
+      continue
+    }
+    for (const line of text.split('\n')) {
+      const t = line.trim()
+      if (!t) continue
+      let e: Record<string, unknown>
+      try {
+        e = JSON.parse(t)
+      } catch {
+        continue
+      }
+      if (e?.kind !== 'probe-verdict') continue
+      const atMs = Date.parse(String(e.at ?? ''))
+      if (!Number.isFinite(atMs) || atMs < startAt) continue
+      const state = VERDICT_STATES.includes(e.state as ProbeVerdictState) ? (e.state as ProbeVerdictState) : undefined
+      if (!state || typeof e.provider !== 'string' || typeof e.key_fp !== 'string' || typeof e.model !== 'string') continue
+      rows.push({
+        atMs,
+        at: new Date(atMs).toISOString(),
+        provider: e.provider,
+        key_fp: e.key_fp,
+        model: e.model,
+        from: null,
+        to: state,
+        source: typeof e.source === 'string' ? e.source : 'replay',
+      })
+    }
+  }
+  rows.sort((a, b) => a.atMs - b.atMs)
+  const lastState = new Map<string, ProbeVerdictState>()
+  const out: ProbeVerdictTimelineItem[] = []
+  for (const r of rows) {
+    const key = verdictKey(r.provider, r.key_fp, r.model)
+    const prev = lastState.get(key) ?? null
+    if (prev !== r.to) out.push({ at: r.at, provider: r.provider, key_fp: r.key_fp, model: r.model, from: prev, to: r.to, source: r.source })
+    lastState.set(key, r.to)
+  }
+  return out
+}
