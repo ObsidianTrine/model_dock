@@ -10,9 +10,10 @@
 
 import { parseRetryAfterMs, forwardToUpstream, readBodyBounded, readUpstreamErrorText, UPSTREAM_ERROR_BODY_MAX_BYTES } from '../relay.js'
 import { t } from '../../util/i18n.js'
+import { providerKeyRefs, resolveProviderKeys } from '../../config/secrets.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
 import { probeWire } from './wire.js'
-import { applyVerdictEvidence, sanitizeErrorSummary, verdictKey } from './verdict.js'
+import { applyVerdictEvidence, keyFingerprint, sanitizeErrorSummary, verdictKey } from './verdict.js'
 import { probeBudgetTokens, probeMonthKey, probeMonthSpend, readProbeLedger, recordProbeLedgerEntry } from './ledger.js'
 import { DEFAULT_PROBE_CONCURRENCY, PROBE_CONCURRENCY_MAX, PROBE_CONCURRENCY_MIN } from '../../config/types.js'
 import type { ProbeConfig } from '../../config/types.js'
@@ -100,6 +101,9 @@ export interface ProbeRunOptions {
   transport: ProbeTransport
   /** 单样本判定实现（任务 3+ 起由 runners/ 提供；缺省 = 全部 not-implemented 零上游请求） */
   runner?: ProbeRunner
+  /** 按探针 id 查判定实现（任务 6 CLI/端点共用形态）：混合清单里未实现 id 记 not-implemented
+   *  跳过、其余照常派发——与 runner 二选一，同给时 runnerFor 优先。 */
+  runnerFor?: (probeId: string) => ProbeRunner | undefined
   /** 全局并发闸运行级覆盖（不传读 [probe].concurrency，仍缺省 2；上限硬顶 4） */
   concurrency?: number
   /** 成本确认闸：true 才允许发主动探针（P1–P14）的上游请求；缺省 false = 0 请求返回预估 */
@@ -377,7 +381,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
   let budgetStopped = false
   const touched = new Set<string>()
 
-  if (!opts.runner) {
+  if (!opts.runner && !opts.runnerFor) {
     // 无 runner（任务 3+ 才有判定实现）：全部记 not-implemented，零上游请求
     for (const u of dispatchable) skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'not-implemented' })
     return { ok: true, reason: 'ok', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
@@ -421,7 +425,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     touched.add(verdictKey(u.target.providerId, keyFp, u.target.model))
   }
 
-  const runUnit = async (u: ProbeUnit): Promise<void> => {
+  const runUnit = async (u: ProbeUnit, runner: ProbeRunner): Promise<void> => {
     const pid = u.target.providerId
     const runtime = engineRuntime(rt)
     if (runtime.inflight.has(pid)) {
@@ -432,7 +436,6 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     try {
       const ctx: ProbeUnitContext = { rt, def: u.def, target: u.target, transport: opts.transport, signal: opts.signal }
       const sampleCount = u.def.kind === 'jittery' ? 3 : 1 // 3 取中位共识的采样轮数（共识判定在 verdict 层）
-      const runner = opts.runner!
       for (let i = 0; i < sampleCount; i++) {
         if (opts.signal?.aborted) {
           anyCancelled = true
@@ -503,6 +506,13 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
             budgetStopped = true
             continue
           }
+          // runner 计划期解析（runnerFor 优先）：未实现 id 记 not-implemented 跳过、零上游请求——
+          // 在 inflight/dispatched 之前拦下，计数不掺水（与上方无 runner 的整轮兜底同口径）
+          const unitRunner = opts.runnerFor ? opts.runnerFor(u.def.id) : opts.runner
+          if (!unitRunner) {
+            skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'not-implemented' })
+            continue
+          }
           const release = await sem.acquire()
           if (opts.signal?.aborted) {
             release()
@@ -512,7 +522,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
           }
           try {
             dispatched++
-            await runUnit(u)
+            await runUnit(u, unitRunner)
           } finally {
             release()
           }
@@ -527,4 +537,71 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     .filter((v): v is ProbeVerdict => !!v)
   const reason: ProbeRunResult['reason'] = anyCancelled ? 'cancelled' : budgetStopped ? 'budget-exhausted' : 'ok'
   return { ok: reason === 'ok', reason, planned, dispatched, upstreamRequests, tokens: tokensTotal, estimate, skipped, verdicts }
+}
+
+// ===== 探测计划（任务 6：CLI provider test 与 POST /_modeldock/probe/run 共用）=====
+
+/** 一次探测的计划：目标展开 + 逐探针预估。目标是 (provider, key 指纹, model) 三元组——
+ *  verdict 归属与账本记账都靠它，key 明文只出现在 secrets（错误体脱敏用），绝不入计划回显面。 */
+export interface ProbePlan {
+  providerId: string
+  /** 目标模型（服务模型目录第一项；空目录 = 空串，transport 侧按 provider 协议兜底拼装） */
+  model: string
+  /** 池内可解析 key 的指纹清单（sha256 前 8 位；绝不含明文） */
+  keys: Array<{ index: number; fp: string }>
+  probeIds: string[]
+  /** 每探针的目标展开（per-key 探针逐把 key 一目标，其余取主 key 一目标） */
+  units: Array<{ probeId: string; target: ProbeTarget }>
+  /** 计划单元数（probeIds × targets 全组合） */
+  planned: number
+  /** 预估 tokens 合计（Σ 单元 档位上限×请求基数；请求级实际用量以账本为准） */
+  estimate: number
+  /** 逐探针预估 tokens（CLI --json 的 per_probe_cost 字段与端点预估回显共用此键） */
+  perProbeCost: Record<string, number>
+  /** key 明文清单（仅传 runProbeSuite secrets 做错误体脱敏；不落盘、不打印） */
+  secrets: string[]
+}
+
+/** 展开 provider 的探测计划：模型取目录首项；per-key 探针（P2）按池内每把可解析 key 各一目标
+ *  （keyIndex 保留原始池位），其余探针取主 key 一目标。无 runner 校验在这里不做——派发期由
+ *  runnerFor 按目录记 not-implemented，预估展示因此可以覆盖未实现探针（先见成本、后见跳过）。 */
+export async function buildProbePlan(
+  rt: GatewayRuntime,
+  providerId: string,
+  probeIds: readonly string[]
+): Promise<ProbePlan> {
+  const provider = rt.config.providers[providerId]
+  if (!provider) {
+    throw new Error(t('服务「{id}」不存在，无法探测', 'Service "{id}" does not exist; nothing to probe', { id: providerId }))
+  }
+  const model = Object.keys(provider.models ?? {})[0] ?? ''
+  const keys = await resolveProviderKeys(providerKeyRefs(provider))
+  const fps = keys.map((k) => ({ index: k.index, fp: keyFingerprint(k.key) }))
+  const units: ProbePlan['units'] = []
+  const perProbeCost: Record<string, number> = {}
+  for (const probeId of probeIds) {
+    const def = getProbeDef(probeId)
+    if (!def) continue // 未知 id 由调用方在参数校验层给出可操作报错，这里静默不展开
+    const targets: ProbeTarget[] =
+      def.requests === 'per-key'
+        ? keys.map((k) => ({ providerId, model, keyIndex: k.index, keyFp: keyFingerprint(k.key) }))
+        : keys.length > 0
+          ? [{ providerId, model, keyIndex: keys[0].index, keyFp: keyFingerprint(keys[0].key) }]
+          : []
+    for (const target of targets) units.push({ probeId, target })
+    perProbeCost[probeId] = targets.length * probeEstimateTokens(def)
+  }
+  let estimate = 0
+  for (const v of Object.values(perProbeCost)) estimate += v
+  return {
+    providerId,
+    model,
+    keys: fps,
+    probeIds: [...probeIds],
+    units,
+    planned: units.length,
+    estimate,
+    perProbeCost,
+    secrets: keys.map((k) => k.key),
+  }
 }

@@ -101,10 +101,13 @@ export interface ProbeMonthBreakdown {
   requests: number
   /** 按 probe_id 分解的实际 tokens */
   by_probe: Record<string, number>
+  /** 按 probe_id 分解的调用次数（账本页分解表列；任务 6 additive，既有字段不动） */
+  by_probe_requests: Record<string, number>
 }
 
 export function probeMonthBreakdown(entries: ProbeLedgerEntry[], monthKey = probeMonthKey()): ProbeMonthBreakdown {
   const byProbe: Record<string, number> = {}
+  const byProbeRequests: Record<string, number> = {}
   let total = 0
   let estimated = 0
   let n = 0
@@ -114,8 +117,9 @@ export function probeMonthBreakdown(entries: ProbeLedgerEntry[], monthKey = prob
     estimated += e.estimated_tokens
     n++
     byProbe[e.probe_id] = (byProbe[e.probe_id] ?? 0) + e.tokens
+    byProbeRequests[e.probe_id] = (byProbeRequests[e.probe_id] ?? 0) + 1
   }
-  return { month: monthKey, total, estimated_total: estimated, requests: n, by_probe: byProbe }
+  return { month: monthKey, total, estimated_total: estimated, requests: n, by_probe: byProbe, by_probe_requests: byProbeRequests }
 }
 
 /** [probe].budget_tokens 读取：未配置/非法值（非正数）落缺省（store 校验只拦形状，取值语义在此兜底）。 */

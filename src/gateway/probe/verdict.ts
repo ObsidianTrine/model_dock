@@ -59,6 +59,20 @@ export function effectiveVerdictState(v: ProbeVerdict, now = Date.now()): ProbeV
   return v.state
 }
 
+/** verdict 视图（任务 6：CLI provider test --json 与 GET /_modeldock/probe/verdicts 共用 JSON 形态）。
+ *  state 取读面状态（freshness 兜底）；key 只出指纹；pending 不出（进程内瞬态采样缓冲，无跨进程意义）。 */
+export function probeVerdictView(v: ProbeVerdict): {
+  provider: string
+  key_fp: string
+  model: string
+  state: ProbeVerdictState
+  evidence: ProbeEvidence
+  advisory?: Record<string, unknown>
+} {
+  const base = { provider: v.provider, key_fp: v.keyFp, model: v.model, state: effectiveVerdictState(v), evidence: v.evidence }
+  return v.advisory ? { ...base, advisory: v.advisory } : base
+}
+
 /** 脱敏错误体摘要：取首行 → 剥离 key 明文（先替换后截断，防截断边界把 key 切半漏脱敏）→
  *  ≤400 字符。secrets 传本次调用涉及的 key 明文（可多把）；短于 8 字符的串不替换（过短会误伤正文）。 */
 export function sanitizeErrorSummary(text: string, secrets?: readonly (string | undefined)[]): string {
