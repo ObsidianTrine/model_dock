@@ -15,16 +15,28 @@ export interface ModelProjectionOptions {
   includeCapabilities?: boolean
   /** 携带内部 source 字段（仅 buildConfigView 需要；overview 与手机视图不外露该内部字段） */
   includeSource?: boolean
+  /** 探针实测能力（verdict.ts probeCapabilityView 派生，调用方按 (provider, model) 传入）：
+   *  undefined=该模型无探针实证。capabilities 进 resolveModelMeta 探针层（位次 config > /models > probe > 内置表），
+   *  at 供徽标「实测」态带探针时间戳 */
+  probe?: { capabilities?: string[]; at?: number }
 }
 export function projectModel(mid: string, meta: ModelMeta, opts: ModelProjectionOptions = {}): Record<string, unknown> {
-  const r = resolveModelMeta(mid, meta)
+  const r = resolveModelMeta(mid, meta, { probeCapabilities: opts.probe?.capabilities })
   const out: Record<string, unknown> = {
     id: mid,
     [opts.nameKey ? 'name' : 'display_name']: opts.nameKey ? meta.display_name || mid : (meta.display_name ?? null),
     context_window: r?.context_window ?? null,
     max_output: r?.max_output ?? null,
   }
-  if (opts.includeCapabilities) out.capabilities = meta.capabilities ?? r?.capabilities ?? []
+  if (opts.includeCapabilities) {
+    out.capabilities = meta.capabilities ?? r?.capabilities ?? []
+    // 能力徽标两态（design 方案 6）：实测=探针层接管了能力表态（config 显式值仍最优先——探针
+    // 从不覆盖用户显式值），值取中文原文即 key（对齐 data-i18n 约定，UI 侧按值映射文案与配色）；
+    // 目录=其余一切来源（配置显式值 / 内置表 / models.dev）
+    const measured = opts.probe?.capabilities !== undefined && meta.capabilities === undefined
+    out.capability_source = measured ? '实测' : '目录'
+    if (measured && opts.probe?.at) out.capability_at = opts.probe.at
+  }
   if (opts.includeSource) out.source = meta.source
   return out
 }

@@ -373,6 +373,14 @@ export interface ProbePendingSample {
   evidence: ProbeEvidence
 }
 
+/** 能力实证记录（探针 P3–P7 落 verdict 的能力结论，任务 10）：ok=该能力实测拥有；
+ *  at=证据时间（epoch ms）。evidence 只存最新一个样本（多探针共用三元组互相覆盖），
+ *  能力结论必须按标记独立累积才能并存——P4 与 P5 各记各的，互不冲掉。 */
+export interface ProbeCapabilityRecord {
+  ok: boolean
+  at: number
+}
+
 /** (provider, key 指纹, model) 三元组的健康结论。键 = `${provider}\u0000${keyFp}\u0000${model}`
  *  （与 modelHealth 同款分隔），keyFp 为 sha256(key) 前 8 位十六进制——绝不含 key 明文
  *  （对齐 keyPoolHealthView 红线）。 */
@@ -387,6 +395,9 @@ export interface ProbeVerdict {
   /** advisory 观测旁注（P12 身份核对等）：最新一次 advisory 样本的观测值——只记录不参与
    *  状态判定（advisory 永不翻状态）；后续非 advisory 样本不清除，供人复核最近一次观测 */
   advisory?: Record<string, unknown>
+  /** 能力实证记录（P3–P7，按能力标记累积；healthy/degraded 样本才记，其余状态不发明结论）。
+   *  resolveModelMeta 探针层（probeCapabilityView 派生）与控制台「实测/目录」徽标的数据源 */
+  capabilities?: Record<string, ProbeCapabilityRecord>
 }
 
 /** 探针引擎运行态：cooldown = providerId → 探针冷却截止 ms（429 负缓存 10 分钟，与 keypool
