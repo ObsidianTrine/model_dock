@@ -15,6 +15,9 @@ import { runP4 } from './p4.js'
 import { runP5 } from './p5.js'
 import { runP6 } from './p6.js'
 import { runP7 } from './p7.js'
+import { runP8 } from './p8.js'
+import { runP9 } from './p9.js'
+import { runP13 } from './p13.js'
 
 const RUNNERS: Readonly<Record<string, ProbeRunner>> = {
   p1: runP1,
@@ -29,6 +32,9 @@ const RUNNERS: Readonly<Record<string, ProbeRunner>> = {
   p5: runP5,
   p6: runP6,
   p7: runP7,
+  p8: runP8,
+  p9: runP9,
+  p13: runP13,
 }
 
 export function getProbeRunner(id: string): ProbeRunner | undefined {
