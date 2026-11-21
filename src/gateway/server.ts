@@ -50,6 +50,7 @@ import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
+import { probeWire } from './probe/wire.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -2845,21 +2846,14 @@ export async function probe(
   if (!model) {
     return { ok: false, status: 0, ms: 0, err: t('该 profile 未设置 default_model，请用 -m 指定或 modeldock profile 修改', 'This profile has no default_model; pass -m or change it with modeldock profile') }
   }
-  // 按服务协议拼探针路径与 body：responses 是一等协议（hServiceAdd/hFetchModels 均接受），
-  // 此前二分法只认 anthropic/其他——responses 服务被拼成 /v1/chat/completions，经
-  // clientProtocolFromPath 判成 openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，
-  // 报错还把责任推给「客户端走 openai 协议」（实际探针拼错了协议）
-  const proto = target.provider.protocol
-  const isAnthropic = proto === 'anthropic'
-  const isResponses = proto === 'responses'
-  const path = isAnthropic ? '/v1/messages' : isResponses ? '/v1/responses' : '/v1/chat/completions'
-  const body = Buffer.from(
-    JSON.stringify(
-      isResponses
-        ? { model, max_output_tokens: 16, stream, input: 'ping' }
-        : { model, max_tokens: 16, stream, messages: [{ role: 'user', content: 'ping' }] }
-    )
-  )
+  // 按服务协议拼探针路径与 body：三协议拼装收口到 probe/wire.ts（探针 runners 同源复用，
+  // 防口径漂移）。responses 是一等协议（hServiceAdd/hFetchModels 均接受），此前二分法只认
+  // anthropic/其他——responses 服务被拼成 /v1/chat/completions，经 clientProtocolFromPath 判成
+  // openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，报错还把责任推给「客户端走
+  // openai 协议」（实际探针拼错了协议）
+  const wire = probeWire(target.provider.protocol, model, { stream })
+  const path = wire.path
+  const body = wire.body
   try {
     const up = await forwardToUpstream(rt, target, {
       method: 'POST',

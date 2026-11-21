@@ -83,6 +83,8 @@ export interface ProbeVerdictInput {
   state?: ProbeVerdictState
   /** 证据本体（at/status/ms/err；source 由本函数按 input.source 统一盖戳） */
   evidence: Omit<ProbeEvidence, 'source'>
+  /** advisory 观测旁注（P12 身份核对等）：挂在 verdict 上供人复核，永不参与翻状态 */
+  advisory?: Record<string, unknown>
 }
 
 /** 证据落状态机：单一样本入口（引擎逐样本调用；jittery 的 3 取中位共识在本函数内积累）。 */
@@ -100,6 +102,7 @@ export function applyVerdictEvidence(rt: GatewayRuntime, input: ProbeVerdictInpu
     } else if (input.state) {
       v.state = input.state
     }
+    if (input.advisory) v.advisory = input.advisory
     store.set(key, v)
     appendVerdictJsonl(v)
     return v
@@ -124,11 +127,13 @@ export function applyVerdictEvidence(rt: GatewayRuntime, input: ProbeVerdictInpu
     } else {
       prev.pending = pending
     }
+    if (input.advisory) prev.advisory = input.advisory
     appendVerdictJsonl(prev)
     return prev
   }
   // 一致样本 / advisory 样本：刷新证据时间戳（freshness），jittery 一致即冲突解除、缓冲清零
   prev.evidence = ev
+  if (input.advisory) prev.advisory = input.advisory
   if (input.kind === 'jittery') prev.pending = undefined
   // canary/passive 单次判定：新样本状态即权威（probe 结论就是结论，后续样本直接覆盖旧状态）；
   // jittery 走上面的共识分支，此处只在解除 stale 时立状态（可判定立新状态，advisory 回 unverified）
@@ -176,6 +181,7 @@ function appendVerdictJsonl(v: ProbeVerdict): void {
     ...(v.evidence.err ? { err: v.evidence.err } : {}),
     ...(v.evidence.ms != null ? { ms: v.evidence.ms } : {}),
     ...(v.evidence.unverified ? { unverified: true } : {}),
+    ...(v.advisory ? { advisory: v.advisory } : {}),
   }
   appendLog(`${VERDICT_FILE_PREFIX}${localDateStr(new Date(at))}.jsonl`, JSON.stringify(entry) + '\n')
 }
@@ -192,7 +198,8 @@ function verdictFromJsonl(e: Record<string, unknown>): ProbeVerdict | undefined 
   if (typeof e.err === 'string') evidence.err = e.err
   if (typeof e.ms === 'number') evidence.ms = e.ms
   if (e.unverified === true) evidence.unverified = true
-  return { provider, keyFp, model, state, evidence }
+  const advisory = e.advisory && typeof e.advisory === 'object' && !Array.isArray(e.advisory) ? (e.advisory as Record<string, unknown>) : undefined
+  return { provider, keyFp, model, state, evidence, ...(advisory ? { advisory } : {}) }
 }
 
 /** 启动回放：按天序读 probe-*.jsonl 重建热态（后写覆盖先写 = 最新证据胜；坏行跳过不致命）。

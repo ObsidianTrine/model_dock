@@ -384,6 +384,9 @@ export interface ProbeVerdict {
   evidence: ProbeEvidence
   /** jittery 冲突采样缓冲（未达 3 取中位共识的待决样本；非 jittery 恒缺席） */
   pending?: ProbePendingSample[]
+  /** advisory 观测旁注（P12 身份核对等）：最新一次 advisory 样本的观测值——只记录不参与
+   *  状态判定（advisory 永不翻状态）；后续非 advisory 样本不清除，供人复核最近一次观测 */
+  advisory?: Record<string, unknown>
 }
 
 /** 探针引擎运行态：cooldown = providerId → 探针冷却截止 ms（429 负缓存 10 分钟，与 keypool
