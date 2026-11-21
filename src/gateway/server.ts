@@ -53,8 +53,8 @@ import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRat
 import { probeWire } from './probe/wire.js'
 import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite, type ProbeTransport } from './probe/engine.js'
 import { PROBE_REGISTRY, getProbeDef } from './probe/registry.js'
-import { probeVerdictView } from './probe/verdict.js'
-import { probeBudgetState, probeMonthBreakdown, readProbeLedger } from './probe/ledger.js'
+import { probeVerdictView, probeVerdictTimeline } from './probe/verdict.js'
+import { probeBudgetState, probeMonthBreakdown, probeSpendSeries, readProbeLedger } from './probe/ledger.js'
 import { getProbeRunner } from './probe/runners/index.js'
 import { startProbeSchedule } from './probe/schedule.js'
 import { request as undiciRequest } from 'undici'
@@ -2528,6 +2528,30 @@ async function hProbeLedger(c: AdminCtx): Promise<void> {
   return
 }
 
+/** GET /_modeldock/probe/trend?days=30&months=6：探针趋势视图（admin 门内只读，
+ *  provider-probe-suite 任务 14）。timeline = 近 days 天 verdict 变化时间线（probeVerdictTimeline，
+ *  只读 probe-<date>.jsonl、按证据时间 at 升序；窗口过滤在读取层逐行做，窗口外数据不出网关）；
+ *  spend = 近 months 个自然月探针花费曲线（probeSpendSeries，读独立账本 probe-ledger.jsonl）。
+ *  两路都不读真实流量请求日志。days/months 非法值按 hLogs 先例夹紧不报错（days 1–365 缺省 30、
+ *  months 1–24 缺省 6）。timeline 条目 from=null = 窗口内该三元组首现；key 只出指纹。
+ *  趋势窗口实际受保留期约束：probe-<date>.jsonl 随 log_retention_days 清理（同源策略），
+ *  超保留期的历史自然为空。 */
+async function hProbeTrend(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const clampNum = (v: string | null, def: number, max: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(max, Math.floor(n)) : def
+  }
+  const days = clampNum(q.get('days'), 30, 365)
+  const months = clampNum(q.get('months'), 6, 24)
+  const timeline = await probeVerdictTimeline(days * 86_400_000)
+  const spend = probeSpendSeries(await readProbeLedger(), months)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, days, months, timeline, spend, generated_at: new Date().toISOString() }))
+  return
+}
+
 /** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
  *  各自接受 YYYY-MM-DD 或 ISO 时间戳（日期形态按本地日界取起止）；跨天封顶 31 个日文件。
  *  非法返回 err 文案（双语）。 */
@@ -2819,6 +2843,7 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/probe/run': hProbeRun,
   'GET /_modeldock/probe/verdicts': hProbeVerdicts,
   'GET /_modeldock/probe/ledger': hProbeLedger,
+  'GET /_modeldock/probe/trend': hProbeTrend,
   'POST /_modeldock/tier-validate': hTierValidate,
   'POST /_modeldock/pricing-lookup': hPricingLookup,
   'POST /_modeldock/reset': hReset,
