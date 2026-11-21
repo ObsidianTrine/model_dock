@@ -174,6 +174,11 @@ export interface GatewayRuntime {
   /** provider 多 key 池运行态（内存态，重启清零；配置热加载全清——key 可能已被替换，
    *  按索引记的失效冷却对换上的新 key 不成立）。逻辑见 state/keypool.ts。 */
   keyPool: KeyPoolState
+  /** (provider, key 指纹, model) 三元组 → 服务探针 verdict 热态（probe/verdict.ts 维护；
+   *  重启清零，probe-<date>.jsonl 启动回放重建；reload 清理已删 provider 条目） */
+  probeVerdicts?: Map<string, ProbeVerdict>
+  /** 探针引擎运行态（probe/engine.ts 维护；纯内存重启清零） */
+  probeRuntime?: ProbeEngineRuntime
   /** providerId+model → 模型粒度熔断状态（key = `${providerId}\u0000${model}`）：模型级容灾
    *  （provider.model_fallback 域）的记账面，见 state/routing.ts recordModelOutcome。内存态
    *  重启清零；reload 清理 provider 已删或其 model_fallback 已不含该模型键的条目。
@@ -333,5 +338,58 @@ export interface ModelProbeState {
   /** providerId → 最近一次探测结果（含失败负缓存：端点只读缓存，不触发补打失败上游） */
   results: Map<string, ProviderAvailability>
   /** 探测中的 providerId：调度 tick 与在飞请求去重，不重复打上游 */
+  inflight: Set<string>
+}
+
+// ===== 服务探针（src/gateway/probe/ 维护；verdicts 热态重启清零、由 probe-<date>.jsonl 回放重建，
+// cooldown/inflight 纯内存重启清零）=====
+
+/** 探针 verdict 状态：unverified = 尚无定论证据（含 jittery 未达共识的首次采样）；stale = 证据
+ *  超 7 天无刷新（读面经 effectiveVerdictState 兜底判定，不依赖清扫任务跑没跑）。 */
+export type ProbeVerdictState =
+  | 'healthy'
+  | 'degraded'
+  | 'quota'
+  | 'auth-dead'
+  | 'unreachable'
+  | 'unverified'
+  | 'stale'
+
+/** verdict 证据五件套 {source, at, 状态码, 脱敏错误体摘要, 耗时}：err 已按 key 明文剥离并截断
+ *  （probe/verdict.ts sanitizeErrorSummary），unverified 标记 jittery 冲突采样（未翻状态）。 */
+export interface ProbeEvidence {
+  source: string
+  /** 证据时间（epoch ms）：freshness 与趋势时间线的锚点 */
+  at: number
+  status?: number
+  err?: string
+  ms?: number
+  unverified?: boolean
+}
+
+/** jittery 冲突采样缓冲条目：样本主张的状态 + 其证据（3 取中位共识的输入） */
+export interface ProbePendingSample {
+  state: ProbeVerdictState
+  evidence: ProbeEvidence
+}
+
+/** (provider, key 指纹, model) 三元组的健康结论。键 = `${provider}\u0000${keyFp}\u0000${model}`
+ *  （与 modelHealth 同款分隔），keyFp 为 sha256(key) 前 8 位十六进制——绝不含 key 明文
+ *  （对齐 keyPoolHealthView 红线）。 */
+export interface ProbeVerdict {
+  provider: string
+  keyFp: string
+  model: string
+  state: ProbeVerdictState
+  evidence: ProbeEvidence
+  /** jittery 冲突采样缓冲（未达 3 取中位共识的待决样本；非 jittery 恒缺席） */
+  pending?: ProbePendingSample[]
+}
+
+/** 探针引擎运行态：cooldown = providerId → 探针冷却截止 ms（429 负缓存 10 分钟，与 keypool
+ *  冷却互不相干——探针不打 markKeyCooldown）；inflight = 在飞 providerId（跨 run 同 provider
+ *  串行互斥）。 */
+export interface ProbeEngineRuntime {
+  cooldown: Map<string, number>
   inflight: Set<string>
 }
