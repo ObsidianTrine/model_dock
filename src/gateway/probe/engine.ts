@@ -283,6 +283,10 @@ export function makeRelayProbeTransport(
       // 探针路径恒禁 mfGate（design 方案 3）：熔断中模型按原模型直发、零熔断计数——探测对象
       // 就是被点名的模型本身
       skipModelFallbackGate: true,
+      // 探针路径恒豁免 key 冷却打标（t4b，与任务 4 的 forced 豁免合流）：P1/P12 非 forced
+      // 直发遇上游 401/403 时不得 markKeyCooldown——探死 key 是观测，池态零扰动（冷却中的
+      // key 会被 healthy 过滤，打了标 P2 复审就看不到刚探死的把位）
+      skipKeyCooldownMark: true,
       // P2 逐把审计（design 方案 3）：req.keyIndex 缺省 undefined = 轮转主选路径（P1/P12 单 key 探针）
       ...(req.keyIndex != null ? { forceKeyIndex: req.keyIndex } : {}),
       ...(req.signal ? { signal: req.signal } : {}),

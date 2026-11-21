@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { buildRuntime } from '../src/gateway/state.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
-import { probeCooldownUntil, runProbeSuite } from '../src/gateway/probe/engine.js'
+import { makeRelayProbeTransport, probeCooldownUntil, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
 import { P1_CANARY, runP1 } from '../src/gateway/probe/runners/p1.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
 import { readProbeLedger } from '../src/gateway/probe/ledger.js'
+import { setSecret } from '../src/config/secrets.js'
 import { fakeHome } from './helpers.js'
 import type { Config, ProviderConfig } from '../src/config/types.js'
 
@@ -199,6 +202,98 @@ describe('probe-p1 · 三协议拼装', () => {
       expect(JSON.parse(seen[1].body).max_output_tokens).toBe(16)
       expect(getProbeVerdict(rtR, 'acme', 'fp2', 'mr')?.state).toBe('healthy')
     } finally {
+      h.restore()
+    }
+  })
+})
+
+// 生产 transport 冷却豁免（provider-probe-suite-t4b）：P1/P12 走 makeRelayProbeTransport（真
+// forwardToUpstream + 本地 mock 上游，listen(0) 随机端口），上游 401/403 不得在 rt.keyPool
+// 打冷却标记——探针探死 key 是观测行为，打了标 15min 内 P2 复审会被 healthy 过滤挡住、真实
+// 转发的可用把位被探针单方面削减（任务 4 只豁免了 forced/P2 路径，此处补齐生产面）。换 key
+// 重试/透传是既有语义，不动——只豁免「打标」这一个副作用。
+describe('probe-p1 · 生产 transport 冷却豁免（t4b）', () => {
+  interface Mock {
+    url: string
+    auths: string[]
+    close: () => Promise<void>
+  }
+
+  async function startAuthMock(handler?: () => number): Promise<Mock> {
+    const auths: string[] = []
+    const s = http.createServer((req, res) => {
+      auths.push(String(req.headers.authorization ?? ''))
+      req.resume()
+      req.on('end', () => {
+        const status = handler ? handler() : 200
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: status >= 400 ? { message: 'invalid api key' } : undefined }))
+      })
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const close = () => new Promise<void>((r) => { s.closeAllConnections?.(); s.close(() => r()) })
+    return { url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, auths, close }
+  }
+
+  const openaiCfg = (url: string, refs: string[]): Record<string, unknown> => ({
+    name: 'acme',
+    base_url: url,
+    protocol: 'openai',
+    auth_style: 'bearer',
+    key_ref: refs[0],
+    ...(refs.length > 1 ? { keys: refs } : {}),
+  })
+
+  it('401 → auth-dead 且 rt.keyPool 冷却 Map 零新增；二次探针仍直达上游（未被冷却过滤挡住）', async () => {
+    const h = fakeHome()
+    const mock = await startAuthMock(() => 401)
+    try {
+      await setSecret('acme-0', 'sk-PROBE', 'file')
+      const rt = mkRt({ acme: openaiCfg(mock.url, ['file:acme-0']) })
+      await runP1Suite(rt, makeRelayProbeTransport(rt))
+      const v = getProbeVerdict(rt, 'acme', 'fp1', 'm')
+      expect(v?.state).toBe('auth-dead')
+      expect(v?.evidence.status).toBe(401)
+      expect(mock.auths).toEqual(['Bearer sk-PROBE']) // 单 key 池无换 key 重试，401 原样归档
+      expect(rt.keyPool.cooldown.size).toBe(0) // 修复前：此把会被打 15min 冷却
+      // 冷却零打标的操作面后果：第二次探针不被 keyInCooldown 过滤挡在本地，仍真实到达上游
+      await runP1Suite(rt, makeRelayProbeTransport(rt))
+      expect(mock.auths).toEqual(['Bearer sk-PROBE', 'Bearer sk-PROBE'])
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('403 同口径：auth-dead 且冷却 Map 零新增', async () => {
+    const h = fakeHome()
+    const mock = await startAuthMock(() => 403)
+    try {
+      await setSecret('acme-0', 'sk-PROBE', 'file')
+      const rt = mkRt({ acme: openaiCfg(mock.url, ['file:acme-0']) })
+      await runP1Suite(rt, makeRelayProbeTransport(rt))
+      const v = getProbeVerdict(rt, 'acme', 'fp1', 'm')
+      expect(v?.state).toBe('auth-dead')
+      expect(v?.evidence.status).toBe(403)
+      expect(rt.keyPool.cooldown.size).toBe(0)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('多 key 池双把皆 401：换 key 重试照走（既有语义不动）、首把与换 key 后两处打标点全部豁免', async () => {
+    const h = fakeHome()
+    const mock = await startAuthMock(() => 401)
+    try {
+      await setSecret('acme-0', 'sk-A', 'file')
+      await setSecret('acme-1', 'sk-B', 'file')
+      const rt = mkRt({ acme: openaiCfg(mock.url, ['file:acme-0', 'file:acme-1']) })
+      await runP1Suite(rt, makeRelayProbeTransport(rt))
+      expect(mock.auths).toEqual(['Bearer sk-A', 'Bearer sk-B']) // 非 forced 既有换 key 重试未被改动
+      expect(rt.keyPool.cooldown.size).toBe(0) // relay.ts 两处 markKeyCooldown 调用点均未打标
+    } finally {
+      await mock.close()
       h.restore()
     }
   })
