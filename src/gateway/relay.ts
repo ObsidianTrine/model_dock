@@ -173,6 +173,17 @@ export interface ForwardOptions {
    *  forwardToUpstream、闸门判定随之重新命中——缺去重会把一次请求的「被吸收」记成多笔；
    *  直调方（admin 探针）不传 = 每次调用各计一笔，行为同旧。 */
   mfCounted?: Set<string>
+  /** 探针专用（P2 逐 key 审计，design 方案 3）：强制用池内第 N 把 key 直发（索引 = 配置 refs
+   *  的原始位置，与 resolveProviderKeys 返回的 index 同源）——跳过冷却过滤（审计对象恰包括
+   *  已被打入冷却的 key）、跳过 401/403 换 key 重试（换 key 会把「这把死了」伪装成「那把活着」），
+   *  且不打 markKeyCooldown（冷却标记只归转发热路径，池态必须不受探针影响）。
+   *  缺省 undefined = 既有轮转路径行为逐字节不变。 */
+  forceKeyIndex?: number
+  /** 探针专用（design 方案 3）：跳过 mfGate 熔断感知预改写与 M3 熔断快速失败——熔断中模型
+   *  按原模型直发、不调 recordModelFallback、不产生 modelAfter 改写。探测对象就是被点名的模型
+   *  本身（预改写会把「探 m 的死活」偷换成「探 fb 的死活」，熔断快速失败则让探针只能看到本地
+   *  402 而非上游真实状态）。缺省 undefined = 既有路径行为逐字节不变。 */
+  skipModelFallbackGate?: boolean
 }
 
 export interface UpstreamBody {
@@ -525,11 +536,23 @@ export async function forwardToUpstream(
     e.cause = 'key_pool_empty'
     throw e
   }
+  // 探针逐 key 直发（ForwardOptions.forceKeyIndex）：锁定池内指定把位。越界（含该 ref 恰好
+  // 解析失败被跳过）= 池在探针计划后已变更（keys 被编辑/钥匙环上锁），抛可操作错误让探针方
+  // 重新展开目标，绝不落到错误的把位上
+  const forced = opts.forceKeyIndex !== undefined
+    ? pool.find((k) => k.index === opts.forceKeyIndex)
+    : undefined
+  if (opts.forceKeyIndex !== undefined && !forced) {
+    throw new Error(
+      t('探针指定的 key 索引 {index} 不在「{name}」当前 key 池内（解析成功 {n} 把）：池配置已变更，请重新发起探针', 'Probe key index {index} is not in the current key pool of "{name}" ({n} resolvable): the pool config changed; rerun the probe', { index: String(opts.forceKeyIndex), name: provider.name ?? providerId, n: String(pool.length) })
+    )
+  }
   // key 级健康过滤（P1⑥）：处于失效冷却期（上游 401/403 标记）的 key 直接跳过；全部在冷却
   // → 本候选本轮不可用，candidateSkip 换 provider 候选。冷却 15min 后自动解封重试（key 被
-  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复
+  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复。
+  // 探针锁定把位（forced）时跳过该过滤：审计对象恰包括已打入冷却的 key，探测它是否仍被上游拒绝
   const now = Date.now()
-  const healthy = pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
+  const healthy = forced ? [forced] : pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
   if (healthy.length === 0) {
     const e = new UpstreamError(
       503,
@@ -552,7 +575,9 @@ export async function forwardToUpstream(
   // 重新命中闸门（去重见 ForwardOptions.mfCounted）。
   const mfMap = provider.model_fallback
   let mfHit: string | undefined
-  const mfGate = mfMap && Object.keys(mfMap).length > 0
+  // skipModelFallbackGate（探针路径）：闸门整体不构造——mfGate 为 undefined 时 rewriteModel 的
+  // 预改写判定短路，熔断中模型按原模型直发（mfHit 恒 undefined，下方 recordModelFallback 自然不计）
+  const mfGate = !opts.skipModelFallbackGate && mfMap && Object.keys(mfMap).length > 0
     ? (final: string): string | undefined => {
         const fb = mfMap[final]
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
@@ -575,7 +600,9 @@ export async function forwardToUpstream(
   // 自映射（手编 config.toml 绕过保存期校验，上方闸门已按 fb===final 不动）等同无映射：
   // 若仍算「有映射」，熔断模型的快速失败被架空——每请求照常撞注定 402 的上游
   const mfTo = finalModel !== undefined ? mfMap?.[finalModel] : undefined
-  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && (!mfTo || mfTo === finalModel)) {
+  // skipModelFallbackGate（探针路径）同步绕过快速失败：探测熔断中的模型要拿到上游真实状态，
+  // 而不是本地 402 快速失败的回声
+  if (!opts.skipModelFallbackGate && finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && (!mfTo || mfTo === finalModel)) {
     const e = new UpstreamError(
       402,
       t('模型「{model}」在服务「{name}」处于额度熔断期（连续额度耗尽，冷却约 15 分钟），本次请求未发送上游', 'Model "{model}" on provider "{name}" is in quota meltdown (repeated quota exhaustion; ~15 min cooldown); this request was not sent upstream', { model: finalModel, name: provider.name ?? providerId }),
@@ -661,9 +688,11 @@ export async function forwardToUpstream(
   let up = await sendWithKey(first.key)
   // 401/403 的 key 级失效处理只认模型 API 端点（ROUTED_PATH_RE，与模型改写同口径）：非对话
   // 端点的 401 可能是路径级权限/资源问题（不代表 key 失效），据此把 key 冷却 15 分钟会误伤——
-  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试
+  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试。
+  // 探针锁定把位（forced）时整段跳过：既不打 markKeyCooldown（池态零扰动），也不换 key 重试
+  //（换 key 会让 P2 把「这把 401」误读成下一把的响应），401/403 原样返回由探针归档 verdict
   const routedApi = ROUTED_PATH_RE.test(opts.path.split('?')[0])
-  if (routedApi && (up.status === 401 || up.status === 403)) {
+  if (!forced && routedApi && (up.status === 401 || up.status === 403)) {
     // 上游 401/403 = 鉴权层明确拒绝该 key，请求未进入业务处理（未产出内容、未计费）——
     // 该 key 打入冷却；换池内下一把 healthy key 重试一次是安全的，与「transport 未送达才重放」
     // 边界一致且更早：鉴权拒绝发生在请求体被消费之前，不存在重复处理/重复计费

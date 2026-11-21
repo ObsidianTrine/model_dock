@@ -29,6 +29,9 @@ export async function runP1(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
   const req: ProbeUpstreamRequest = {
     providerId: ctx.target.providerId,
     model: ctx.target.model,
+    // P2 逐把审计：单元目标带 keyIndex 时透传给 transport（生产实现转 forwardToUpstream
+    // forceKeyIndex 直发该把）；缺省 undefined = 轮转主选路径，P1 单 key 探针行为不变
+    ...(ctx.target.keyIndex != null ? { keyIndex: ctx.target.keyIndex } : {}),
     path: wire.path,
     body: wire.body,
     ...(ctx.signal ? { signal: ctx.signal } : {}),

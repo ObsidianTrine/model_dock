@@ -276,6 +276,11 @@ export function makeRelayProbeTransport(
       body,
       idleTimeoutMs: idle,
       retries,
+      // 探针路径恒禁 mfGate（design 方案 3）：熔断中模型按原模型直发、零熔断计数——探测对象
+      // 就是被点名的模型本身
+      skipModelFallbackGate: true,
+      // P2 逐把审计（design 方案 3）：req.keyIndex 缺省 undefined = 轮转主选路径（P1/P12 单 key 探针）
+      ...(req.keyIndex != null ? { forceKeyIndex: req.keyIndex } : {}),
       ...(req.signal ? { signal: req.signal } : {}),
     })
     // 有界读（同 server.ts probe()）：错误体经 readUpstreamErrorText 按 content-encoding 解压，
