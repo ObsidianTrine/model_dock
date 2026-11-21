@@ -55,6 +55,10 @@ export interface ProbeUpstreamResponse {
    *  核对的比对基准——响应体 model 字段可能仍是被请求的原文，改写事实只在 modelAfter。 */
   modelAfter?: string
   ms: number
+  /** 流式分片到达时刻（每个 SSE data 分片相对请求起点的 elapsed ms，升序）：P3 的 TTFB（首片）
+   *  与分片计数的唯一计时事实源——只有传输层能观测逐片到达；非流式/未观测缺席，runner 退回
+   *  按 bodyText 的 SSE data 行计数（有计数无计时）。 */
+  chunks?: number[]
 }
 
 /** 上游调用封装（可注入）：生产实现走 forwardToUpstream（key 注入/代理/三协议免费获得）。 */
