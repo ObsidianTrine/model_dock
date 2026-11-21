@@ -8,14 +8,15 @@
 // forwardToUpstream；测试注入 mock）——这是「探针走 forwardToUpstream 且不调 logRequest」
 // 可测的实现方式：副作用面在 server.ts 转发 handler 层，transport 天然不经过它。
 
-import { parseRetryAfterMs } from '../relay.js'
+import { parseRetryAfterMs, forwardToUpstream, readBodyBounded, readUpstreamErrorText, UPSTREAM_ERROR_BODY_MAX_BYTES } from '../relay.js'
 import { t } from '../../util/i18n.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
+import { probeWire } from './wire.js'
 import { applyVerdictEvidence, sanitizeErrorSummary, verdictKey } from './verdict.js'
 import { probeBudgetTokens, probeMonthKey, probeMonthSpend, readProbeLedger, recordProbeLedgerEntry } from './ledger.js'
 import { DEFAULT_PROBE_CONCURRENCY, PROBE_CONCURRENCY_MAX, PROBE_CONCURRENCY_MIN } from '../../config/types.js'
 import type { ProbeConfig } from '../../config/types.js'
-import type { GatewayRuntime, ProbeEngineRuntime, ProbeVerdict, ProbeVerdictState } from '../state/types.js'
+import type { GatewayRuntime, ProbeEngineRuntime, ProbeVerdict, ProbeVerdictState, ResolvedTarget } from '../state/types.js'
 
 /** 全局并发闸缺省/上限（数值唯一事实来源在 config/types.ts DEFAULT_PROBE_CONCURRENCY / PROBE_CONCURRENCY_MAX，此处保留既有导入路径） */
 export const PROBE_CONCURRENCY_DEFAULT = DEFAULT_PROBE_CONCURRENCY
@@ -39,9 +40,9 @@ export interface ProbeUpstreamRequest {
   providerId: string
   model: string
   keyIndex?: number
-  /** 协议路径（生产适配器按 provider.protocol 拼，缺省 P1 形态） */
+  /** 协议路径（runner 经 probeWire 按 provider.protocol 拼；缺席时生产适配器按 P1 形态兜底） */
   path?: string
-  body?: unknown
+  body?: Buffer
   signal?: AbortSignal
 }
 
@@ -50,6 +51,9 @@ export interface ProbeUpstreamResponse {
   headers?: Record<string, string | string[] | undefined>
   bodyText?: string
   usage?: Record<string, number>
+  /** mfGate 改写后的最终模型（forwardToUpstream UpstreamResult.modelAfter 透传）：P12 身份
+   *  核对的比对基准——响应体 model 字段可能仍是被请求的原文，改写事实只在 modelAfter。 */
+  modelAfter?: string
   ms: number
 }
 
@@ -75,6 +79,13 @@ export interface ProbeUnitOutcome {
   calls?: Array<{ tokens?: number; ms?: number; status?: number }>
   rateLimited?: boolean
   retryAfter?: string | string[]
+  /** 证据来源短码覆盖：被动探针（P15）标 `passive:<id>`（design 判定规则），缺省 = `probe:<id>` */
+  source?: string
+  /** advisory 观测（P12 身份核对等）：只挂 verdict 旁注、永不参与翻状态 */
+  advisory?: Record<string, unknown>
+  /** 本样本无新证据（P15 窗口内零活动等）：跳过证据落账——空刷新会把 freshness 顶新，
+   *  架空「7 天无证据转 stale」 */
+  noEvidence?: boolean
 }
 
 export type ProbeRunner = (ctx: ProbeUnitContext) => Promise<ProbeUnitOutcome>
@@ -232,16 +243,56 @@ function makeSemaphore(limit: number): { acquire: () => Promise<() => void> } {
   }
 }
 
-/** 生产 transport 适配器（任务 3 接线 forwardToUpstream 的导出桩）：显式抛错而非假成功——
- *  静默返回伪响应会伪造健康结论，宁炸勿骗。报错带上请求目标，便于误用点定位。 */
-export async function relayProbeTransport(req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> {
-  throw new Error(
-    t(
-      '探针生产 transport 尚未实现（目标 {provider} / {path}）：请经 runProbeSuite 的 transport 参数注入实现',
-      'Probe production transport is not implemented yet (target {provider} / {path}); inject an implementation via the transport parameter of runProbeSuite',
-      { provider: req.providerId, path: req.path ?? '-' }
-    )
-  )
+/** 生产 transport 适配器（任务 3 接线）：走 forwardToUpstream——key 注入 / 代理 / 三协议 / 池解析
+ *  免费获得，且天然不调 logRequest（落账面在 server.ts 转发 handler 层，探针不经过它）。
+ *  错误语义：本地跳过（key 池空/全冷却/端点缺失）与网络失败按 UpstreamError/普通异常抛出，
+ *  runner 归档 unreachable——静默转伪响应会伪造健康结论，宁炸勿骗。runner 自带 path/body 时
+ *  原样使用（P1/P12 经 probeWire 拼装），缺席按 provider 协议拼 P1 形态兜底。 */
+export function makeRelayProbeTransport(
+  rt: GatewayRuntime,
+  o: { idleTimeoutMs?: number; retries?: number } = {}
+): ProbeTransport {
+  const idle = o.idleTimeoutMs ?? 10 * 60_000
+  const retries = o.retries ?? 1
+  return async (req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> => {
+    const provider = rt.config.providers[req.providerId]
+    if (!provider) {
+      throw new Error(t('服务「{id}」不存在，无法探测', 'Service "{id}" does not exist; nothing to probe', { id: req.providerId }))
+    }
+    // 假 profile 直探（同 server.ts hTest 按 provider 探测的构造）：探针不依赖任何已配路由
+    const model = req.model || Object.keys(provider.models ?? {})[0] || ''
+    const fakeProfile = { name: `probe-${req.providerId}`, provider: req.providerId, default_model: model }
+    const target: ResolvedTarget = { harness: 'admin-test', profileName: fakeProfile.name, profile: fakeProfile, provider }
+    const path = req.path ?? probeWire(provider.protocol, model).path
+    const body = req.body ?? probeWire(provider.protocol, model).body
+    const up = await forwardToUpstream(rt, target, {
+      method: 'POST',
+      path,
+      headers: { 'content-type': 'application/json' },
+      body,
+      idleTimeoutMs: idle,
+      retries,
+      ...(req.signal ? { signal: req.signal } : {}),
+    })
+    // 有界读（同 server.ts probe()）：错误体经 readUpstreamErrorText 按 content-encoding 解压，
+    // 成功体直接读——探针只取回复文本/usage，1MB 上限防异常上游的超大 body 进堆
+    const text = up.status >= 400
+      ? await readUpstreamErrorText(up.headers, up.body)
+      : (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
+    let usage: Record<string, number> | undefined
+    try {
+      const u = (JSON.parse(text) as { usage?: unknown })?.usage
+      if (u && typeof u === 'object') {
+        usage = {}
+        for (const [k, v] of Object.entries(u as Record<string, unknown>)) {
+          if (typeof v === 'number') usage[k] = v
+        }
+      }
+    } catch {
+      /* SSE 或非 JSON：usage 缺席仅观测降级 */
+    }
+    return { status: up.status, headers: up.headers, bodyText: text, usage, modelAfter: up.modelAfter, ms: up.ms }
+  }
 }
 
 /** 探针套件运行入口：跑 probeIds × targets 全组合。 */
@@ -299,10 +350,11 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     return { ok: false, reason: 'unconfirmed', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
   }
 
-  // 冷却过滤（计划期）：429 负缓存中的 provider 直接跳过并标 stale
+  // 冷却过滤（计划期）：429 负缓存中的 provider 直接跳过并标 stale。被动探针（P15）豁免——
+  // 零上游请求，不存在限流风险，被主动探针的冷却连带停掉会漏被动证据
   const dispatchable: ProbeUnit[] = []
   for (const u of units) {
-    if (providerProbeInCooldown(rt, u.target.providerId)) {
+    if (u.def.kind !== 'passive' && providerProbeInCooldown(rt, u.target.providerId)) {
       skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'cooldown', stale: true })
       continue
     }
@@ -340,12 +392,13 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
         ts: new Date().toISOString(),
       })
     }
+    if (o.noEvidence) return // 无新证据样本（被动窗口零活动）：不落证据不碰 freshness
     const keyFp = u.target.keyFp ?? '-'
     applyVerdictEvidence(rt, {
       provider: u.target.providerId,
       keyFp,
       model: u.target.model,
-      source: `probe:${u.def.id}`,
+      source: o.source ?? `probe:${u.def.id}`,
       kind: u.def.kind,
       state: o.state,
       evidence: {
@@ -354,6 +407,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
         ...(o.err ? { err: sanitizeErrorSummary(o.err, opts.secrets) } : {}),
         ...(o.ms != null ? { ms: o.ms } : {}),
       },
+      ...(o.advisory ? { advisory: o.advisory } : {}),
     })
     touched.add(verdictKey(u.target.providerId, keyFp, u.target.model))
   }
@@ -430,8 +484,8 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
             anyCancelled = true
             continue
           }
-          if (providerProbeInCooldown(rt, u.target.providerId)) {
-            // 本轮前序单元可能刚因 429 置了冷却：派发前复核，命中即跳过标 stale
+          if (u.def.kind !== 'passive' && providerProbeInCooldown(rt, u.target.providerId)) {
+            // 本轮前序单元可能刚因 429 置了冷却：派发前复核，命中即跳过标 stale（被动探针豁免同计划期）
             skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'cooldown', stale: true })
             continue
           }

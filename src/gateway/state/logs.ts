@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { logsDir } from '../../util/paths.js'
 import { appendLine, closeAppendStream } from '../../util/fsx.js'
-import { localIsoTs } from '../../util/time.js'
+import { localDateStr, localIsoTs } from '../../util/time.js'
 import { costOfUsage, type PriceResolver } from '../../providers/pricing-core.js'
 import type { AuditEntry, EventEntry, GatewayRuntime, LogEntry, RingEntry } from './types.js'
 
@@ -289,6 +289,31 @@ export function readRequestLogDay(date: string): LogEntry[] {
     }
   }
   return out
+}
+
+/** 滚动窗口读取：覆盖 [fromMs, toMs]（含边界）的本地日期文件集（24h 窗最多跨两个本地日），
+ *  逐文件读入后按条目 ts 过滤。P15 被动聚合的数据源；日期文件缺失按空处理，崩溃半行容错
+ *  与 readRequestLogDay 同款。非法窗口（from > to）返回空。 */
+export function readRequestLogWindow(fromMs: number, toMs: number): LogEntry[] {
+  if (!(Number.isFinite(fromMs) && Number.isFinite(toMs)) || fromMs > toMs) return []
+  const out: LogEntry[] = []
+  const seen = new Set<string>()
+  const start = new Date(fromMs)
+  const end = new Date(toMs)
+  for (
+    let d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    d <= end;
+    d.setDate(d.getDate() + 1)
+  ) {
+    const day = localDateStr(d)
+    if (seen.has(day)) continue
+    seen.add(day)
+    for (const e of readRequestLogDay(day)) out.push(e)
+  }
+  return out.filter((e) => {
+    const ts = Date.parse(String(e.ts))
+    return Number.isFinite(ts) && ts >= fromMs && ts <= toMs
+  })
 }
 
 export interface UsageFilter {
