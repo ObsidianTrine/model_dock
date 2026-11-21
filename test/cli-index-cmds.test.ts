@@ -51,7 +51,7 @@ describe('buildProgram 注册面', () => {
       profile: ['add', 'list', 'rm', 'use'],
       gateway: ['install', 'log', 'rotate-token', 'start', 'status', 'stop', 'uninstall'],
       harness: ['direct', 'gateway', 'route'],
-      config: ['edit', 'export', 'import'],
+      config: ['edit', 'export', 'import', 'merge'],
       mcp: ['list'],
       sync: ['assets', 'enroll', 'pause', 'resume', 'setup', 'status'],
     }

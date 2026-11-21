@@ -72,6 +72,7 @@ import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fet
 import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
+import { hMergeApply, hMergePreview } from './mergepack.js'
 
 export interface GatewayStartOptions {
   port: number
@@ -2812,6 +2813,8 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/sync/offer': hSyncOffer,
   'POST /_modeldock/sync/import': hSyncImport,
   'POST /_modeldock/config/export': hConfigExport,
+  'POST /_modeldock/merge/preview': hMergePreview,
+  'POST /_modeldock/merge/apply': hMergeApply,
   'POST /_modeldock/sync/discover': hSyncDiscover,
   'POST /_modeldock/sync/request-remote': hSyncRequestRemote,
   'GET /_modeldock/sync/remote-status': hSyncRemoteStatus,

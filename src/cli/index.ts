@@ -230,6 +230,18 @@ export function buildProgram(): Command {
     .option('--stdin-pass', t('口令经 stdin 读入（脚本/CI 用，不进 argv）', 'Read the passphrase from stdin (for scripts/CI; keeps it out of argv)'))
     .option('--yes', t('跳过确认', 'Skip confirmation'))
     .action(async (file, o) => (await import('./sync.js')).cmdConfigImport(file, o))
+  cfgCmd
+    .command('merge <files...>')
+    .description(
+      t(
+        '合并多个配置包：逐包解包去重（同 base_url+同 key 视为同一服务）→ 按本机探针结论给三档建议（保留候选/存疑/失效）→ 勾选后写入；预览零写盘，应用前自动快照',
+        'Merge multiple packages: unpack and dedupe (same base_url + same key = one service) → three-tier suggestions from local probe verdicts (keep/suspect/dead) → apply what you select; preview writes nothing, a snapshot is taken before applying'
+      )
+    )
+    .option('--stdin-pass', t('口令经 stdin 读入（全部包通用；脚本/CI 用，不进 argv）', 'Read one passphrase for all packages from stdin (for scripts/CI; keeps it out of argv)'))
+    .option('--yes', t('跳过勾选与确认（只保留「保留候选」档）', 'Skip selection and confirmation (keeps only keep-candidates)'))
+    .option('--json', t('机器可读 JSON 预览（不进入勾选与应用）', 'Machine-readable JSON preview (no selection or apply)'))
+    .action(async (files, o) => (await import('./sync.js')).cmdConfigMerge(files, o))
 
   const syncCmd = prog.command('sync').description(t('多机配置同步（WebDAV 网盘 / 本地同步盘；改动自动双向收敛）', 'Multi-machine config sync (WebDAV drive / local sync folder; changes converge automatically)'))
   syncCmd

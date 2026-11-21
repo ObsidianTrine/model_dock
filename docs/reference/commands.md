@@ -14,6 +14,7 @@
 | `import --from all\|cc-switch\|claude\|dsh\|zcode\|… [--yes] [--no-with-profiles]` | 只读收编本机存量配置（原软件不动） |
 | `config edit` | `$EDITOR` 直编 config.toml，保存校验 |
 | `config export` / `config import <file>` | 导出 / 导入口令加密配置包（.msync，跨机手动迁移） |
+| `config merge <files...> [--stdin-pass] [--yes] [--json]` | 合并多个配置包：同 base_url+同 key 去重，按探针结论给三档建议（保留候选/存疑/失效），勾选后写入；预览零写盘，应用前自动快照 |
 
 ## 上游服务与模型
 

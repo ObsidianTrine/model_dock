@@ -14,6 +14,7 @@
 | `import --from all\|cc-switch\|claude\|dsh\|zcode\|… [--yes] [--no-with-profiles]` | Read-only onboarding of existing local configs (originals untouched) |
 | `config edit` | Edit config.toml in `$EDITOR`, validated on save |
 | `config export` / `config import <file>` | Export / import passphrase-encrypted config pack (.msync, manual cross-machine migration) |
+| `config merge <files...> [--stdin-pass] [--yes] [--json]` | Merge multiple packages: dedupe by base_url + key, three-tier suggestions from probe verdicts (keep/suspect/dead), apply what you select; preview writes nothing, a snapshot is taken before applying |
 
 ## Providers & models
 
