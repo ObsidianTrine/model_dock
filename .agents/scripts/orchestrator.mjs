@@ -1924,6 +1924,20 @@ function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
   }
 }
 
+/**
+ * 卡面 scratch_only 声明（doApprove 零提交豁免判据）。闸门时刻卡必在 awaiting-human/
+ * （CLI approve / 交互闸门 / run 自动合并 / sweep 四条路径都先落位再进 doApprove）。
+ * 读取失败按 false——豁免是优惠面，卡损坏回严管走原拒绝防线（与 parseCard 的
+ * scratch_only 非法值回 false 同一取舍）。
+ */
+function cardScratchOnly(root, taskId) {
+  try {
+    return parseCard(fs.readFileSync(cardPath(root, 'awaiting-human', taskId), 'utf8'), taskId).meta.scratch_only === true;
+  } catch {
+    return false;
+  }
+}
+
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
@@ -1937,7 +1951,14 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // worker 到底留了什么（多半是漏提交）。
   const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
   const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
-  if (commitsAhead === 0) {
+  // scratch_only 结算豁免（2026-11-23 bench codex 腿实证）：卡面声明产物只落 worktree 非跟踪区
+  // （scratch-only-card：门禁 skipped + XTE no_commit 豁免），零提交是卡面声明的合规形态，
+  // 防假合并门不适用；finish 对零提交显式失败（37bfdfc），也不 spawn——不合并、develop 不动、
+  // 不记 merge_commit，直接落位 merged/。worktree 保留（答卷归档由调度台收尾做），对账锚
+  // scratch_only_settle 事件标记（reconcile settledNotMerged 按此豁免）。人工与 auto 两路径
+  // 同享；非 scratch_only 卡零提交照旧拒绝，防线零放宽。
+  const scratchOnlySettle = commitsAhead === 0 && cardScratchOnly(root, taskId);
+  if (commitsAhead === 0 && !scratchOnlySettle) {
     moveCard(root, taskId, 'awaiting-human', 'failed');
     appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
     die(
@@ -1945,6 +1966,15 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
       `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
       `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
     );
+  }
+  if (scratchOnlySettle) {
+    moveCard(root, taskId, 'awaiting-human', 'merged');
+    appendEvent(qdir, 'merged', { scratch_only_settle: true, ...(source === 'auto' ? { auto: true } : {}) });
+    log(`已结算 merged/（scratch_only 零提交，不合并）：worktree 保留在 ${worktreePath(repoRoot, taskId)}，答卷归档由调度台收尾处理。`);
+    // 不 resetConfigBaseline（没有合并发生，configGuard 基线不该被无来源重置）、不做 draftsGc
+    // 清退（scratch 卡未实现任何 repo 改动面，files_hint 常为 ["**"]，清退会误杀全部提案）。
+    await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
+    return;
   }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
