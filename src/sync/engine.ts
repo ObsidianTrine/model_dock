@@ -303,7 +303,11 @@ export class SyncLoop {
       // 不接则变成 uncaught exception 杀网关，这里挂兜底——清理引用、降级为仅轮询（只损失「即时推」）
       this.watcher.on('error', (err) => {
         this.watcher = undefined
-        this.opts.log?.(t('[modeldock] 配置同步本地文件监听失效（{msg}）：不再即时推送，改为仅轮询同步（不影响网关工作）', '[modeldock] Local file watcher for config sync failed ({msg}): realtime push disabled, polling only (gateway unaffected)', { msg: (err as Error).message }))
+        const msg = t('[modeldock] 配置同步本地文件监听失效（{msg}）：不再即时推送，改为仅轮询同步（不影响网关工作）', '[modeldock] Local file watcher for config sync failed ({msg}): realtime push disabled, polling only (gateway unaffected)', { msg: (err as Error).message })
+        // 生产构造点（gateway/main.ts remountSyncEngine）恒不传 log：log 缺席时 console.error 兜底，
+        // 否则「即时推变慢」这条静默降级在前台/日志零痕迹（tick 错误路径先例同款）；有 log 则不双写防噪声
+        if (this.opts.log) this.opts.log(msg)
+        else console.error(msg)
       })
     } catch {
       /* 目录监听失败只损失「即时推」，轮询兜底 */

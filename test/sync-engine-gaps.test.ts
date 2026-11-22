@@ -356,6 +356,45 @@ describe('SyncLoop 缺口分支', () => {
       await loop.stop()
     }
   }, 60_000)
+
+  it('watcher 异步失效降级：无 log 实例走 console.error 兜底（双语 t() 文案），降级后轮询仍推出', async () => {
+    newHome()
+    await seedBase()
+    const dir = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir }, 'pw-watch-err', { backend: 'file' })
+    let emitError: ((err: Error) => void) | undefined
+    const loop = new SyncLoop({
+      pollMs: 1000, // 1s 下限钳制：降级后推送只能来自轮询定时器（即时推路径已死）
+      jitterRatio: 0,
+      watchFn: () => {
+        const w = neverWatcher()
+        emitError = (err) => w.emit('error', err)
+        return w
+      },
+      // 不传 log：复现生产构造点形态（gateway/main.ts remountSyncEngine({ applySwitch }) 恒不带 log）
+    })
+    loop.start()
+    try {
+      await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
+      await new Promise((r) => setTimeout(r, 50)) // 与防抖用例同款：等初始 tick 的 trailing 收尾清干净，防噪声串进断言
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        emitError!(new Error('EMFILE: too many open files'))
+        expect(spy).toHaveBeenCalledTimes(1) // watcher 失效后 loop 内不重建 → 一次性，无重复噪声
+        const line = String(spy.mock.calls[0]?.[0])
+        expect(line).toContain('配置同步本地文件监听失效')
+        expect(line).toContain('仅轮询同步')
+        expect(line).toContain('EMFILE: too many open files')
+      } finally {
+        spy.mockRestore()
+      }
+      // 降级不哑火：本地改动经轮询定时器照常推出
+      await localEdit('watch-degrade-poll-push')
+      await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 2, 8000)
+    } finally {
+      await loop.stop()
+    }
+  }, 30_000)
 })
 
 /** 永不触发事件的 stub watcher（带 close noop，stop() 可正常关闭）：屏蔽 fs.watch 即时推路径，隔离出轮询/手动触发 */
