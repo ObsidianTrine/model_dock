@@ -1,6 +1,7 @@
 /**
  * Web 控制台 · probe.ts —— 服务探针（provider-probe-suite 任务 6；任务 14 增趋势弹层）。
- * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染 + 探针账本弹层（月度总花费/预算余量/按探针分解）
+ * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染（点击下钻该服务 verdict 变化时间线，
+ * probe-ui-into-usage-health 任务 2）+ 探针账本弹层（月度总花费/预算余量/按探针分解）
  * + 探针趋势弹层（近 30 天 verdict 变化时间线/按月花费条形图，GET /_modeldock/probe/trend）。
  * 片段为模板字面量源文本：ui.ts 经 UI_JS_MIN 拼装；新增片段须在 scripts/gen-ui-min.mjs 的 ORDER 登记。
  */
@@ -47,7 +48,93 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 探针账
     if (ev.status != null) tip += ' · HTTP ' + ev.status
     if (ev.err) tip += ' · ' + ev.err
     if (vs.length > 1) tip += ' · ' + t('共 ', '') + vs.length + t(' 条结论，取最差', ' verdicts, worst shown')
-    return ' <span class="pill ' + m.cls + '" title="' + esc(tip) + '">' + esc(t(m.zh, m.en)) + '</span>'
+    // 徽标即下钻入口（健康历史的最近邻动作：徽标=当前结论，点击看 30 天变化轴）；tip 尾部追加点按提示
+    return ' <button type="button" class="pill ' + m.cls + '" data-probehist="' + esc(pid) + '" title="' + esc(tip + t('（点击查看健康变化历史）', ' (click to view health change history)')) + '">' + esc(t(m.zh, m.en)) + '</button>'
+  }
+  // 服务卡健康徽标下钻弹层（probe-ui-into-usage-health 任务 2）：读取类弹层，关路径三件套
+  // （头部 × + Esc + closeOnScrim:true 遮罩，foot 只留 msg 槽，ui-kit §9 2026-11 修订口径）。
+  // 数据沿用 trend 端点全量响应、客户端按 provider 过滤（端点契约冻结：探针翻转低频、30 天
+  // 条目量级为几十条内，为单消费方加过滤参数属 API 面扩张，见 spec design §2.3 案 A）
+  var probeSvcTimelineM = createModal({
+    id: 'probeSvcTimelineOverlay',
+    titleId: 'probeSvcTimelineTitle',
+    align: 'top',
+    modalClass: 'svcmodal',
+    bodyHtml: '<p class="testline" data-i18n="加载中…||Loading…"></p>',
+    closeOnScrim: true,
+    foot: [
+      { slot: 'msg', id: 'probeSvcTimelineMsg', kind: 'err' },
+    ],
+  })
+  var probeSvcTrend = null // 最近一次 trend 响应缓存：模型过滤切换只重渲染、不重发请求
+  function probeSvcPillHtml(state) {
+    var meta = VS_META[state] || VS_META.unverified
+    return '<span class="pill ' + meta.cls + '">' + esc(t(meta.zh, meta.en)) + '</span>'
+  }
+  function renderProbeSvcTimeline(pid, model) {
+    var title = document.getElementById('probeSvcTimelineTitle')
+    if (title) {
+      var name = pid
+      for (var i = 0; i < (view.services || []).length; i++) {
+        if (view.services[i].id === pid) name = view.services[i].label
+      }
+      title.textContent = t('健康变化 · ', 'Health history · ') + name
+    }
+    var all = ((probeSvcTrend && probeSvcTrend.timeline) || []).filter(function (it) { return it.provider === pid && (!model || it.model === model) })
+    var rows = ''
+    if (!all.length) {
+      rows = '<tr><td colspan="4" class="empty">' + esc(t('近 30 天无 verdict 变化', 'No verdict changes in the last 30 days')) + '</td></tr>'
+    } else {
+      for (var k = 0; k < all.length; k++) {
+        var it = all[k]
+        var d = new Date(it.at)
+        var tm = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2) + ' ' + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2)
+        // 「—」= 30 天窗口内首现（无前态可比）
+        var changeHtml = it.from == null
+          ? '<span class="dim">—</span> → ' + probeSvcPillHtml(it.to)
+          : probeSvcPillHtml(it.from) + ' → ' + probeSvcPillHtml(it.to)
+        rows += '<tr><td class="mono">' + tm + '</td>' +
+          '<td title="' + esc(it.provider + '/' + it.model + ' @' + it.key_fp) + '"><span class="mono">' + esc(it.provider + '/' + it.model) + '</span> <span class="dim">@' + esc(it.key_fp) + '</span></td>' +
+          '<td>' + changeHtml + '</td>' +
+          '<td class="dim">' + esc(it.source) + '</td></tr>'
+      }
+    }
+    // 模型选项 = 该服务条目 distinct model + 「全部模型」；选项按 provider 全集算、不受当前
+    // 模型过滤收窄（收窄后「全部模型」就回不去了）
+    var seen = {}
+    var models = []
+    var src = (probeSvcTrend && probeSvcTrend.timeline) || []
+    for (var m = 0; m < src.length; m++) {
+      if (src[m].provider === pid && !seen[src[m].model]) { seen[src[m].model] = true; models.push(src[m].model) }
+    }
+    var opts = '<option value="">' + esc(t('全部模型', 'All models')) + '</option>'
+    for (var n = 0; n < models.length; n++) {
+      opts += '<option value="' + esc(models[n]) + '"' + (models[n] === model ? ' selected' : '') + '>' + esc(models[n]) + '</option>'
+    }
+    probeSvcTimelineM.body.innerHTML =
+      '<div class="row"><span class="help">' + esc(t('按模型过滤：', 'Filter by model: ')) + '</span><select id="probeSvcTimelineModelSel">' + opts + '</select></div>' +
+      '<div class="tablescroll"><table id="probeSvcTimelineTable"><thead><tr><th>' + esc(t('时间', 'Time')) + '</th><th>' + esc(t('三元组', 'Triple')) + '</th><th>' + esc(t('变化', 'Change')) + '</th><th>' + esc(t('来源', 'Source')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    var sel = document.getElementById('probeSvcTimelineModelSel')
+    if (sel) sel.addEventListener('change', function () { renderProbeSvcTimeline(pid, this.value) })
+  }
+  function loadProbeSvcTimeline(pid) {
+    fetch('/_modeldock/probe/trend?days=30&months=6', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      return r.json()
+    }).then(function (j) {
+      if (!j || !j.timeline) throw new Error('bad payload')
+      probeSvcTrend = j
+      renderProbeSvcTimeline(pid, '')
+    }).catch(function (e) {
+      var msg = document.getElementById('probeSvcTimelineMsg')
+      if (msg) msg.textContent = t('时间线加载失败：', 'Failed to load health history: ') + ((e && e.message) || e)
+    })
+  }
+  function openProbeSvcTimeline(pid) {
+    probeSvcTimelineM.open()
+    // 打开即拉取；重开先回加载占位——上一服务的旧表不得被误读成本服务数据
+    probeSvcTimelineM.body.innerHTML = '<p class="testline">' + esc(t('加载中…', 'Loading…')) + '</p>'
+    loadProbeSvcTimeline(pid)
   }
   // 探针账本弹层：月度总花费 + 预算进度 + 按 probe_id 分解表（数据源 GET /_modeldock/probe/ledger，
   // 与 CLI provider test --ledger 同源）；每次打开/刷新都现取现渲染

@@ -60,6 +60,12 @@ const USAGE_LIVE_FIXTURE = {
 /** /logs 端点夹具（模块级可变：日志面板用例按需改写，finally 还原） */
 const LOGS_FIXTURE: { logs: any[]; total: number; page: number; pages: number } = { logs: [], total: 0, page: 1, pages: 1 }
 
+/** /_modeldock/probe/verdicts 夹具（健康下钻用例按需改写；默认空 = 全部服务无结论、不出徽标） */
+const PROBE_VERDICTS_FIXTURE: { verdicts: any[] } = { verdicts: [] }
+
+/** /_modeldock/probe/trend 夹具（全量响应形态；UI 按 provider 客户端过滤，端点契约无过滤参数） */
+const PROBE_TREND_FIXTURE: { timeline: any[]; spend: any[] } = { timeline: [], spend: [] }
+
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
   const routes: Record<string, () => { body: unknown; raw?: string }> = {
@@ -71,6 +77,8 @@ function stubFetch(): void {
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
     '/_modeldock/logs': () => ({ body: LOGS_FIXTURE }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
+    '/_modeldock/probe/verdicts': () => ({ body: PROBE_VERDICTS_FIXTURE }),
+    '/_modeldock/probe/trend': () => ({ body: PROBE_TREND_FIXTURE }),
   }
   vi.stubGlobal('fetch', (url: string) => {
     const p = String(url).split('?')[0]
@@ -456,5 +464,187 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('')
     // 新文件来源正常接管：chip 换成新文件（清草稿不清文件来源）
     expect(document.getElementById('impFileChip')?.textContent).toContain('c.msync')
+  })
+
+  // —— 健康下钻（probe-ui-into-usage-health 任务 2）：服务卡徽标点击 → 该服务 verdict 变化时间线 ——
+
+  it('健康下钻：verdict 徽标 button 化（无结论服务不出），点击打开按服务过滤的时间线弹层', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [
+      { provider: 'alpha', state: 'healthy', evidence: { source: 'scheduled', at: Date.now() - 60000 } },
+      { provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 120000 } },
+    ]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: 'unverified', to: 'healthy', source: 'manual' },
+    ]
+    PROBE_TREND_FIXTURE.spend = [{ month: '2026-11', tokens: 1200 }]
+    const urls: string[] = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      urls.push(String(url))
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      // R3.1：有结论 → button.pill 徽标，语义色取最差结论（degraded=warn）；无结论服务不出徽标亦不出入口
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLButtonElement | null
+      expect(badge).not.toBeNull()
+      expect(badge!.tagName).toBe('BUTTON')
+      expect(badge!.className).toContain('pill')
+      expect(badge!.className).toContain('warn')
+      expect(badge!.textContent).toContain('降级')
+      expect(badge!.title).toContain('点击查看健康变化历史')
+      expect(document.querySelector('[data-probehist="beta"]')).toBeNull()
+      // R3.2：点击徽标 → 打开弹层，打开动作内拉取 trend（days=30&months=6）
+      badge!.click()
+      const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement | null
+      expect(scrim && scrim.hidden === false).toBe(true)
+      expect(urls.some((u) => u.startsWith('/_modeldock/probe/trend?days=30&months=6'))).toBe(true)
+      await flush()
+      // 标题动态拼服务名（titleId 先例）；timeline 按 provider 客户端过滤（beta 条目不进弹层）
+      expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('健康变化 · Alpha 服务')
+      const table = document.getElementById('probeSvcTimelineTable') as HTMLElement
+      expect(table.textContent).toContain('alpha/a-model')
+      expect(table.textContent).not.toContain('beta')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+      PROBE_TREND_FIXTURE.spend = []
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
+  it('健康下钻：模型过滤 select 按 (provider, model) 重渲染；该服务无翻转条目出「近 30 天无 verdict 变化」空态', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'b-model', key_fp: 'cd34', from: 'healthy', to: 'degraded', source: 'scheduled' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      // R3.3：选项 = 该服务 distinct model + 「全部模型」（value=''，不受当前过滤收窄）
+      const sel = document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement
+      expect([...sel.options].map((o) => o.value)).toEqual(['', 'a-model', 'b-model'])
+      expect(sel.options[0].textContent).toContain('全部模型')
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(2)
+      // 切到 a-model：只重渲染该 (provider, model) 子集，选中态随重渲染保持
+      sel.value = 'a-model'
+      sel.dispatchEvent(new Event('change'))
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(1)
+      expect(document.getElementById('probeSvcTimelineTable')!.textContent).toContain('a-model')
+      expect(document.getElementById('probeSvcTimelineTable')!.textContent).not.toContain('b-model')
+      expect((document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement).value).toBe('a-model')
+      // 切回全部模型：子集约束解除，两行回来
+      const selAll = document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement
+      selAll.value = ''
+      selAll.dispatchEvent(new Event('change'))
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(2)
+      // R3.4 空态：徽标在（有结论）但 30 天窗口内该服务无翻转 → 空态行
+      PROBE_TREND_FIXTURE.timeline = [
+        { at: '2026-11-22T09:00:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: null, to: 'healthy', source: 'manual' },
+      ]
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      const tbody = document.querySelector('#probeSvcTimelineTable tbody') as HTMLElement
+      expect(tbody.querySelectorAll('tr').length).toBe(1)
+      expect(tbody.textContent).toContain('近 30 天无 verdict 变化')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  it('健康下钻：变化列 from→to 出两端语义 pill；窗口内首现 from=null 渲染「— → to」', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'auth-dead', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'healthy', to: 'auth-dead', source: 'scheduled' },
+      { at: '2026-11-22T09:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'auth-dead', to: 'unverified', source: 'scheduled' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      const rows = document.querySelectorAll('#probeSvcTimelineTable tbody tr')
+      expect(rows.length).toBe(3)
+      const changeOf = (i: number) => rows[i].querySelectorAll('td')[2]
+      // from=null：「—」（dim span）→ to pill（ok=健康）
+      expect(changeOf(0).querySelector('.dim')?.textContent).toBe('—')
+      expect(changeOf(0).querySelector('.pill.ok')?.textContent).toBe('健康')
+      // from→to：两端各一枚语义 pill（healthy=ok / auth-dead=err / unverified=dim）
+      expect(changeOf(1).querySelectorAll('.pill').length).toBe(2)
+      expect(changeOf(1).querySelector('.pill.ok')?.textContent).toBe('健康')
+      expect(changeOf(1).querySelector('.pill.err')?.textContent).toBe('失效')
+      expect(changeOf(2).querySelector('.pill.err')?.textContent).toBe('失效')
+      expect(changeOf(2).querySelector('.pill.dim')?.textContent).toBe('未验证')
+      // 时间列按引擎升序原样渲染，UI 不重排
+      expect(rows[0].querySelector('td')?.textContent).toContain('2026-11-20')
+      expect(rows[2].querySelector('td')?.textContent).toContain('2026-11-22')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  it('健康下钻：读取类弹层关路径三件套（头部 ×、Esc、遮罩点击均可关闭，foot 无关闭/刷新按钮），加载失败写 msg 槽不出 toast', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement
+      badge.click()
+      const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement
+      expect(scrim.hidden).toBe(false)
+      // 加载态：打开即拉取，拉取未完成 body 为加载占位
+      expect(scrim.querySelector('.modal-body')?.textContent).toContain('加载中…')
+      const modal = scrim.querySelector('.modal') as HTMLElement
+      const foot = modal.querySelector('.modal-foot') as HTMLElement
+      // R3.5：foot 仅 msg 槽——零按钮（无「关闭」无「刷新」），msg 槽为 err 形态（.mferr）
+      expect(foot.querySelectorAll('button').length).toBe(0)
+      expect(document.getElementById('probeSvcTimelineMsg')?.className).toContain('mferr')
+      // 关路径一：头部 ×
+      ;(modal.querySelector('.close-btn') as HTMLElement).click()
+      expect(scrim.hidden).toBe(true)
+      // 关路径二：Esc（closeOnEsc 默认开）
+      badge.click()
+      expect(scrim.hidden).toBe(false)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      expect(scrim.hidden).toBe(true)
+      // 关路径三：遮罩点击（closeOnScrim:true 显式传入；点弹层内部不关由工厂 e.target 判定兜住）
+      badge.click()
+      expect(scrim.hidden).toBe(false)
+      scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(scrim.hidden).toBe(true)
+      // 错误态：trend 拉取失败 → foot msg 槽就近报错，全局 toast 容器保持为空（弹层提示归宿纪律）
+      const prev = globalThis.fetch
+      vi.stubGlobal('fetch', (url: string) => {
+        const p = String(url).split('?')[0]
+        if (p === '/_modeldock/probe/trend') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
+        return (prev as (u: string) => unknown)(String(url))
+      })
+      try {
+        mountPage()
+        await flush()
+        ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+        await flush()
+        expect(document.getElementById('probeSvcTimelineMsg')?.textContent ?? '').toContain('时间线加载失败')
+        expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+      } finally {
+        vi.stubGlobal('fetch', prev)
+      }
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
   })
 })

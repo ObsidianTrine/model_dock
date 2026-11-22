@@ -108,6 +108,11 @@ export const UI_JS_SERVICES = `  function visibleServices() {
           .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false); b.disabled = false })
       }
     })
+    // 健康徽标下钻（probe-ui-into-usage-health 任务 2）：徽标是 button.pill，点击开该服务的
+    // verdict 变化时间线弹层；与 data-use 同款 render 后重绑（5s/15s 轮询会整卡重建）
+    document.querySelectorAll('[data-probehist]').forEach(function (b) {
+      b.onclick = function () { openProbeSvcTimeline(b.getAttribute('data-probehist')) }
+    })
     // 探测失败文案瘦身：api() 抛的「HTTP 5xx: {json}」里若有结构化 err/hint 就只取用这两段，
     // 避免整包 JSON 上屏（截断由 .testres 的 ellipsis 兜底，这里让常用路径本就短）
     function probeErrMsg(e) {
