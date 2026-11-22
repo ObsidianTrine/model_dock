@@ -17,8 +17,10 @@ import { readSpec, parseTasksDoc } from './spec.mjs';
  *  （2026-11-10 实测踩中）。 */
 export const SPECVERDICT_MARKER = 'agents-review-verdict';
 
-/** 五维权重（规约 §1：completeness25/unambiguity20/consistency25/testability20/feasibility10）。 */
-export const SPEC_DIM_WEIGHTS = { completeness: 25, unambiguity: 20, consistency: 25, testability: 20, feasibility: 10 };
+/** 六维权重（规约 §1：completeness20/unambiguity20/consistency20/testability20/feasibility10/integration10）。
+ *  integration=融入性（2026-11-22 config merge 双入口割裂案例回填，规约 §1.6/§6）——verdict/权重
+ *  消费方一律经 Object.keys(SPEC_DIM_WEIGHTS) 派生，加维不散落改点。 */
+export const SPEC_DIM_WEIGHTS = { completeness: 20, unambiguity: 20, consistency: 20, testability: 20, feasibility: 10, integration: 10 };
 
 const SEVERITIES = ['P0', 'P1', 'P2'];
 const BUILD_READY = ['blocked', 'rework', 'needs_revision', 'approve_to_build', 'undetermined'];
@@ -74,6 +76,18 @@ export function runSpecL0Checks(repoRoot, specId) {
     name: '三件套齐全',
     status: empty.length ? 'fail' : 'pass',
     detail: empty.length ? `空文档：${empty.join('/')}` : 'requirements/design/tasks 齐全且非空',
+  });
+
+  // 融入性探针（规约 §1.6/§4.8，2026-11-22 双入口割裂案例回填）：design 缺「用户可感知功能面」
+  // 盘点或缺「融入位置论证」三问 → report-only warn——扣分裁决在 L2，沿 fail 集合收敛纪律
+  // 绝不入 fail（存量 spec 未按六维模板写也只提示不拦截）。
+  const missingIntegr = ['用户可感知功能面', '融入位置论证'].filter((k) => !norm(spec.design).includes(k));
+  checks.push({
+    name: '融入位置论证',
+    status: missingIntegr.length ? 'warn' : 'pass',
+    detail: missingIntegr.length
+      ? `design 缺节（report-only，L2 按融入性裁决扣分）：${missingIntegr.join('/')}`
+      : '「用户可感知功能面」盘点与「融入位置论证」齐备',
   });
 
   const tasks = parseTasksDoc(spec.tasks);

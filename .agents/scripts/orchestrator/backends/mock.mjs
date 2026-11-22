@@ -136,7 +136,7 @@ export const mockBackend = {
     }
 
     if (isSpecReviewer) {
-      // spec 审查模式（spec-verdict/1）：固定五维 + 1 条 P2 finding（file 指向 prompt 中的
+      // spec 审查模式（spec-verdict/1）：固定六维 + 1 条 P2 finding（file 指向 prompt 中的
       // spec design.md，section 行号 1 恒在界内——auditSpecFindings 对账必过）。
       //   ORCH_MOCK_SPEC_REVIEW_INVALID=1   输出无契约块（测重试→die 路径）
       //   ORCH_MOCK_SPEC_REVIEW_BLOCKERS>=2 两条 P0（测 rework 矩阵路径）
@@ -162,7 +162,7 @@ export const mockBackend = {
       const payload = {
         spec: specId,
         gates: { redlines: 'pass', notes: ['mock：L0 无红线命中'] },
-        dimensions: { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90 },
+        dimensions: { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90, integration: 90 },
         findings,
         usage: { build_ready: blockers >= 2 ? 'rework' : 'approve_to_build' },
         advisory: true,
