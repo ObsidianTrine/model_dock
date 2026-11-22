@@ -1,10 +1,10 @@
 /** 总览/视图域：buildConfigView、overview 缓存簇（TTL/单飞/SWR 决策）与 buildOverview、overview/tray/presence 端点。 */
 import { createHash } from 'node:crypto'
-import { AdminCtx, persistConfig, jsonRequestBody, profileRefForProvider, sendError } from './admin-shared.js'
+import { AdminCtx, jsonRequestBody, profileRefForProvider } from './admin-shared.js'
 import { allAdapters } from '../adapters/registry.js'
 import { getFirstProviderSecret } from '../config/secrets.js'
-import { DEFAULT_GATEWAY_PORT, type Config, type Protocol, type ProviderConfig } from '../config/types.js'
-import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, type Protocol, type ProviderConfig } from '../config/types.js'
+import { projectModel } from './shared.js'
 import { resolveInstallCommand } from '../adapters/types.js'
 import { sandboxNpmPrefix } from '../util/paths.js'
 import { autostartOverview } from '../autostart.js'
@@ -17,8 +17,7 @@ import { ensurePresetsLoaded, presetModels, presetsGenerationNow } from '../pres
 import { markUiLeaving, markUiPing, pendingTrayLiteRequest, requestTrayLite, trayLiteActive } from './presence.js'
 import { peekSyncRequest } from './lan.js'
 import { syncStatus } from '../sync/engine.js'
-import { bi, getLang, t } from '../util/i18n.js'
-import { localIsoTs } from '../util/time.js'
+import { bi, getLang } from '../util/i18n.js'
 /** provider 支持的协议集（config 层 Protocol 命名，与 adapter 的 clientProtocols 同一口径，
  *  编排侧派发前直接对拍两侧即可发现「该客户端 → 该服务会 404」）：默认协议（protocol，走
  *  base_url）∪ endpoints 的键（每协议端点）。排序保证输出稳定。 */
@@ -159,7 +158,7 @@ export async function overviewViewData(rt: GatewayRuntime): Promise<string> {
   if (decision === 'stale') {
     const written = cached.reloads !== rt.reloads
     if (written && overviewRebuilding) return overviewRebuilding.then(() => overviewViewData(rt))
-    startOverviewRebuild(rt)
+    void startOverviewRebuild(rt)
     return cached.data
   }
   return rebuildOverview(rt)
@@ -182,7 +181,7 @@ export function prewarmOverviewAfterWrite(rt: GatewayRuntime): void {
   const cached = overviewCache
   if (!cached || cached.rt !== rt) return
   if (cached.reloads === rt.reloads && cached.lang === getLang()) return
-  startOverviewRebuild(rt)
+  void startOverviewRebuild(rt)
 }
 
 /** 后台单飞重建：SWR 追新与写后预热共用同一在飞 promise；完成时若期间又有保存落下则再排一轮。 */

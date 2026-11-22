@@ -6,7 +6,7 @@ import { migrateSecretsToSecure } from '../ops.js'
 import { ensureDir, randomToken, drainAppendStreams } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { localIsoTs } from '../util/time.js'
-import { gatewayStatePath, modeldockDir } from '../util/paths.js'
+import { modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
 import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
@@ -84,7 +84,6 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
   const existing = await readGatewayState()
   const previousToken = existing?.admin_token // clearGatewayState 之前先取出，供本次复用
   const previousLanToken = existing?.lan_token // LAN 凭据同样跨重启复用（手机 cookie 不掉）
-  const previousDevices = existing?.devices // 设备记忆随令牌一起跨重启保留（浏览器一键重登依赖它）
   if (existing && pidAlive(existing.pid)) {
     if (await healthOk(existing.port)) {
       console.error(t('网关已在运行：127.0.0.1:{port}（pid {pid}）', 'Gateway already running: 127.0.0.1:{port} (pid {pid})', { port: existing.port, pid: existing.pid }))
@@ -273,10 +272,10 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
     // pid 虽失效但 gatewayLive 有 pid+health+started_at 三重校验，陈旧 state 不会误认。
     process.exit(0)
   }
-  process.on('SIGINT', cleanup)
-  process.on('SIGTERM', cleanup)
+  process.on('SIGINT', () => { void cleanup() })
+  process.on('SIGTERM', () => { void cleanup() })
   // 前台运行时关闭终端会发 SIGHUP：也走 cleanup 清状态文件（Windows 无此信号，注册无害）
-  process.on('SIGHUP', cleanup)
+  process.on('SIGHUP', () => { void cleanup() })
   // 保活（无请求时也挂住）
   setInterval(() => {}, 60_000)
 }

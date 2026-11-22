@@ -1,20 +1,18 @@
 /** 安装域：安装/卸载命令执行底座与端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
-import os from 'node:os'
 import path from 'node:path'
 import fsp from 'node:fs/promises'
 import { execFileSync, spawn } from 'node:child_process'
 import { AdminCtx, jsonRequestBody, sendError } from './admin-shared.js'
 import { applyChanges } from '../adapters/engine.js'
-import { allAdapters, requireAdapter } from '../adapters/registry.js'
-import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
+import { requireAdapter } from '../adapters/registry.js'
+import { isNpmGlobalInstall, resolveInstallCommand, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
-import { clearCommandMemo, randomToken, readTextIfExists } from '../util/fsx.js'
+import { clearCommandMemo, readTextIfExists } from '../util/fsx.js'
 import { DEFAULT_GATEWAY_PORT, type Config } from '../config/types.js'
 import { sandboxNpmPrefix } from '../util/paths.js'
-import { mutateGatewayState, reloadRuntime, type GatewayRuntime } from './state.js'
+import { reloadRuntime } from './state.js'
 import { probePresent } from './install-internals.js'
 import { bi, t } from '../util/i18n.js'
-import { localIsoTs } from '../util/time.js'
 /** 收集命令输出的上限（防止日志/响应被刷爆） */
 export const INSTALL_OUTPUT_MAX = 4000
 

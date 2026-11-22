@@ -1,5 +1,5 @@
 /** 配置包域：offer/import/export/discover/approve 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
-import { AdminCtx, jsonRequestBody, persistConfig, sendError } from './admin-shared.js'
+import { AdminCtx, jsonRequestBody, sendError } from './admin-shared.js'
 import { collectSyncdoc } from '../sync/collect.js'
 import { openEnvelope, sealEnvelope } from '../sync/crypto.js'
 import { applyImportedDoc, assertExportable, exportFileName, reportOfDoc } from '../sync/exportImport.js'
@@ -7,11 +7,11 @@ import { fetchEnvelopeFromUrl } from './shared.js'
 import { clearSyncRequest, createSyncOffer, peekSyncRequest, putSyncGrant } from './lan.js'
 import { discoverPeers } from './discover.js'
 import { putSyncTicket, takeSyncTicket } from './remote-device.js'
-import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
+import { validateSyncdoc } from '../sync/types.js'
 import { invalidateOverviewCache } from './overview-view.js'
 import os from 'node:os'
 import { bi, t } from '../util/i18n.js'
-import { reloadRuntime, type GatewayRuntime } from './state.js'
+import { reloadRuntime } from './state.js'
 export async function hSyncOffer(c: AdminCtx): Promise<void> {
   const { rt, res, audit } = c
   // 同网直拉迁移（A 机）：生成一次性链接（口令藏 fragment，10 分钟有效、取走即焚）
