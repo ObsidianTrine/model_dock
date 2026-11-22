@@ -62,6 +62,30 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
     }
     return l.cause ? logCauseLabel(l.cause) : ''
   }
+  // reason 短码串（服务端 marks，如 retried_429:bigmodel,fallback_to:glm-4.5-air）→ 可读文案。
+  // 2026-11-21 用户实证：429 退避原地重试成功的 200 条目（reason 非空、attempts/err/cause 全空）
+  // 在「错误」页渲染成空白错误列，观感即「成功日志进了错误标签」——错误列兜底用它出短标。
+  function logReasonText(reason) {
+    var map = {
+      retried_429: t('429 退避重试', '429 backoff retry'),
+      fallback_to: t('模型容灾', 'model fallback'),
+      failover_to: t('改发', 'failover'),
+      queue_full: t('并发排队超时', 'concurrency queue timeout'),
+      model_mismatch: t('模型不符跳过', 'model mismatch skip'),
+      replayed_from: t('自动改发', 'auto replay')
+    }
+    var segs = String(reason || '').split(',')
+    var out = []
+    for (var i = 0; i < segs.length; i++) {
+      var seg = segs[i]
+      var idx = seg.indexOf(':')
+      var key = idx === -1 ? seg : seg.slice(0, idx)
+      var subj = idx === -1 ? '' : seg.slice(idx + 1)
+      var label = map[key] || seg
+      out.push(subj ? label + ' · ' + subj : label)
+    }
+    return out.join(' · ')
+  }
   // 行复制（每行都有 ⧉）：请求行=人类可读摘要+关键字段（含链路/根因/建议/用量）；操作行=动作+目标+摘要
   function logCopyText(l) {
     if (l.kind === 'audit') {
@@ -152,6 +176,11 @@ export const UI_JS_LOGS = `  var logsLastGood = ''
         var cell
         if (chain) {
           cell = '<div title="' + esc(reqErr) + '">' + esc(chain) + '</div>'
+          if (l.hint) cell += '<div class="lhint muted" title="' + esc(l.hint) + '">' + esc(l.hint) + '</div>'
+        } else if (l.reason) {
+          // 偏离主选但 attempts/cause/err 全空（如 429 退避重试成功的 200）：错误列兜底出 reason 短标，
+          // 不再渲染成空白行（title 挂原始 reason，复制文本本就带 reason 口径不变）
+          cell = '<div title="' + esc(l.reason) + '">' + esc(logReasonText(l.reason)) + '</div>'
           if (l.hint) cell += '<div class="lhint muted" title="' + esc(l.hint) + '">' + esc(l.hint) + '</div>'
         } else {
           cell = '<div class="muted" title="' + esc(reqErr) + '">' + esc(reqErr.slice(0, 60)) + '</div>'
