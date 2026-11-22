@@ -37,9 +37,12 @@ export const UI_JS_KIT = `(function () {
   function iconInline(name, size) {
     return '<span class="ic">' + icon(name, size) + '</span>'
   }
-  // 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / Esc+遮罩关闭 / aria / 底栏槽位
+  // 弹层壳组件（kit「Modal 壳」代码化）：统一磨砂遮罩 / head+body+foot 三层 / aria / 底栏槽位
   // （msg 槽 + 按钮序列，谁有取消、谁是主按钮仍由调用方定——评审定稿语义不变）。scrim 沿用既有 overlay id——
   // id 作用域的 CSS/JS 引用全部保持有效；壳逐期迁入（未迁壳走原静态 HTML，互不影响）。
+  // 关路径两开关不对称是刻意的：Esc 默认开（closeOnEsc:false 显式退出），遮罩点击显式 opt-in（closeOnScrim:true）——
+  // 遮罩若默认开，表单类弹层的未保存输入会被误点遮罩丢弃；显式传参 = 每弹层明示关路径、契约可审计，
+  // 读取类弹层必须传 true（关路径三件套口径见 ui-kit §9，2026-11 修订）。
   var modalStack = []
   function createModal(opts) {
     var scrim = document.createElement('div')
