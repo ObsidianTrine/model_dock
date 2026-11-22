@@ -426,4 +426,35 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect((document.getElementById('mgPw0') as HTMLInputElement).value).toBe('')
     expect((document.getElementById('mgPw1') as HTMLInputElement).value).toBe('')
   })
+
+  // 多包口令换选单文件清草稿（fix-merge-single-pw-draft）：change 单文件分流是 impPw2 的最后一种
+  // 进法（弹层重开清场、删到 1 包迁移回填各有自己的清/覆写口径）——漏了它，上一来源的口令会残留
+  // 在单流唯一口令读点上，换选新文件后被误用
+  it('多包填口令（删到 1 包迁进 impPw2）后 change 重选单文件：单流口令输入从空开始', async () => {
+    mountPage()
+    await flush()
+    const mk = (name: string) => new File(['pkg'], name)
+    // happy-dom 造不出真 FileList：实例上覆写 files（change 处理器只做 Array.prototype.slice 兼容任意数组）
+    const select = (files: File[]) => {
+      const input = document.getElementById('impFile2') as HTMLInputElement
+      Object.defineProperty(input, 'files', { value: files, configurable: true })
+      input.dispatchEvent(new Event('change'))
+    }
+    const fill = (id: string, v: string) => {
+      const el = document.getElementById(id) as HTMLInputElement
+      el.value = v
+      el.dispatchEvent(new Event('input')) // store 只在 input 监听里更新：派发才等价真实键入
+    }
+    select([mk('a.msync'), mk('b.msync')])
+    fill('mgPw0', 'pw-a')
+    fill('mgPw1', 'pw-b')
+    // 删 a 的 chip → 剩 b 一包：impPw2 迁入 b 的口令（52f47a5 口径，此时是合法态）
+    ;(document.querySelector('#impChips .filechip button') as HTMLElement).click()
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('pw-b')
+    // change 重选单文件=换新来源：impPw2 必须从空开始，上一来源口令不得残留误用在新包
+    select([mk('c.msync')])
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('')
+    // 新文件来源正常接管：chip 换成新文件（清草稿不清文件来源）
+    expect(document.getElementById('impFileChip')?.textContent).toContain('c.msync')
+  })
 })

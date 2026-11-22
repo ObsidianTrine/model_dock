@@ -185,7 +185,14 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     // 文件数分流：1 个=原单包导入流；多个=多包合并流（chips + 逐包口令行，确认走 /merge/preview|apply）
     var files = Array.prototype.slice.call(this.files || [])
     if (files.length > 1) mgSetFiles(files)
-    else { mgClearMulti(); showImpFileChip(this.files[0]) }
+    else {
+      mgClearMulti()
+      // 换选=新文件来源：impPw2 是单流唯一口令读点，残留值会把上一来源的口令误用在新包（含
+      // 多包删到 1 包时迁进来的草稿，52f47a5 只清了 mgPwSaved；弹层重开路径已在 openPkgOverlay 清）
+      var pw2 = document.getElementById('impPw2')
+      if (pw2) pw2.value = ''
+      showImpFileChip(this.files[0])
+    }
     setImpErr('')
     updateImpPrimary()
   })
