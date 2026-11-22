@@ -387,4 +387,43 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       restore()
     }
   })
+
+  // 多包合并删包回填口令（fix-merge-rm-pw-keep）：口令草稿按包名键控——删 chip 重建逐包口令行时按名
+  // 回填，已填值不随索引移位清空；删到剩 1 包时该包口令迁进单包输入 impPw2（单流读 impPw2 不读 store）
+  it('多包合并删 chip：其余口令行保值且与包对应关系不错位，删到剩 1 包迁移进单口令输入', async () => {
+    mountPage()
+    await flush()
+    const mk = (name: string) => new File(['pkg'], name)
+    // happy-dom 造不出真 FileList：实例上覆写 files（change 处理器只做 Array.prototype.slice 兼容任意数组）
+    const select = (files: File[]) => {
+      const input = document.getElementById('impFile2') as HTMLInputElement
+      Object.defineProperty(input, 'files', { value: files, configurable: true })
+      input.dispatchEvent(new Event('change'))
+    }
+    const fill = (id: string, v: string) => {
+      const el = document.getElementById(id) as HTMLInputElement
+      el.value = v
+      el.dispatchEvent(new Event('input')) // store 只在 input 监听里更新：派发才等价真实键入
+    }
+    select([mk('a.msync'), mk('b.msync'), mk('c.msync')])
+    expect(document.querySelectorAll('#impChips .filechip').length).toBe(3)
+    fill('mgPw0', 'pw-a')
+    fill('mgPw2', 'pw-c')
+    // 删中间 chip（b.msync）→ 剩 a/c 两行，值按名回填不错位
+    ;(document.querySelectorAll('#impChips .filechip')[1].querySelector('button') as HTMLElement).click()
+    const rows = [...document.querySelectorAll('#impPwRows .prow')]
+    expect(rows.length).toBe(2)
+    const valOf = (name: string) =>
+      (rows.find((r) => (r.querySelector('label')?.textContent ?? '').startsWith(name))!.querySelector('input') as HTMLInputElement).value
+    expect(valOf('a.msync')).toBe('pw-a')
+    expect(valOf('c.msync')).toBe('pw-c')
+    // 再删一个 → 剩 1 包退回单包流：impPw2 回填该包口令，逐包行清场
+    ;(document.querySelectorAll('#impChips .filechip')[0].querySelector('button') as HTMLElement).click()
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('pw-c')
+    expect(document.getElementById('impPwRows')?.hidden).toBe(true)
+    // 重新多选=新清单从空草稿开始（store 已随 mgSetFiles 清空，不回填上一轮的值）
+    select([mk('d.msync'), mk('e.msync')])
+    expect((document.getElementById('mgPw0') as HTMLInputElement).value).toBe('')
+    expect((document.getElementById('mgPw1') as HTMLInputElement).value).toBe('')
+  })
 })

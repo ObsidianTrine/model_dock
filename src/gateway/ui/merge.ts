@@ -46,6 +46,9 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
   })
   var mgFiles = []   // multi 模式的 File 清单：chips/口令行/上传共用同一来源，避免「行删了、input 还有」的不一致
   var mgPendingToken = ''
+  // 口令草稿按包名键控（merge 载荷里包的身份就是 name）：删 chip 后口令行按新索引全量重建，
+  // 只有按名回填才能保住已填值不被索引移位清空；条目随 mgFiles 增删同步（mgSetFiles/mgClearMulti 清空、rm 删键）
+  var mgPwSaved = {}
   // File → {name, content_b64}：内容经 base64 随 JSON 上传（TextEncoder 分块转二进制串再 btoa，UTF-8 安全不爆栈）
   function mgFileToB64(file) {
     return file.text().then(function (txt) {
@@ -73,7 +76,8 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
       rm.title = t('移除', 'Remove')
       rm.innerHTML = icon('close', 11)
       rm.onclick = function () {
-        mgFiles.splice(i, 1)
+        var gone = mgFiles.splice(i, 1)[0]
+        delete mgPwSaved[gone.name]
         mgHideMergePreview()
         setImpErr('')
         if (mgFiles.length > 1) { mgRenderChips(); mgRenderPwRows(); updateImpPrimary() }
@@ -81,6 +85,10 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
           // 删到只剩一个：退回单包流展示形态，但保留 mgFiles 作文件来源（multi 进入时 input.value 已清，input.files 不可用）
           mgExitMultiUi()
           showImpFileChip(mgFiles[0])
+          // 已填口令迁进单包输入（单流读 impPw2 不读 store；无值时 || '' 顺带清掉跨清单残留的旧草稿）
+          var pw2 = document.getElementById('impPw2')
+          if (pw2) pw2.value = mgPwSaved[mgFiles[0].name] || ''
+          delete mgPwSaved[mgFiles[0].name]
           updateImpPrimary()
         } else { mgClearMulti(); showImpFileChip(null); updateImpPrimary() }
       }
@@ -106,9 +114,10 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
       input.type = 'password'
       input.id = 'mgPw' + i
       input.setAttribute('autocomplete', 'new-password')
+      input.value = mgPwSaved[file.name] || ''
       // 动态节点不经 applyI18nTree：占位符渲染时 t() 直译（与 chips title 同款取舍）
       input.placeholder = t('该包导出时设置的同步口令', 'The passphrase this package was exported with')
-      input.addEventListener('input', function () { setImpErr('') })
+      input.addEventListener('input', function () { mgPwSaved[file.name] = input.value; setImpErr('') })
       row.appendChild(nm)
       row.appendChild(input)
       box.appendChild(row)
@@ -133,11 +142,13 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
   }
   function mgClearMulti() {
     mgFiles = []
+    mgPwSaved = {}
     mgExitMultiUi()
   }
   // change 分流入口（configpack.ts 调用）：>1 个文件进入 multi 模式
   function mgSetFiles(files) {
     mgFiles = files
+    mgPwSaved = {}
     mgHideMergePreview()
     if (files.length > 1) {
       mgRenderChips()
