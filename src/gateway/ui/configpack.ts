@@ -212,7 +212,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
       setImpErr('')
       hideImpPreview()
       if (multiP) {
-        // 多包：/merge/preview 出三档候选清单（渲染在 tab 内合并预览块），勾选后 impMergeApplyBtn 走 /merge/apply
+        // 多包：/merge/preview 出三档候选清单（渲染在审阅宽弹层 mergeReviewOverlay），勾选后 mgReviewApply 走 /merge/apply
         bodyP
           .then(function (src) { return api('/merge/preview', { method: 'POST', body: JSON.stringify({ packages: src.packages, passphrases: src.passphrases }) }) })
           .then(function (j) { mgRenderPreview(j); btn.disabled = false })
@@ -227,8 +227,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
             var meta = j.meta || {}
             var line = document.getElementById('impPreviewLine')
             if (line) {
-              line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules')
-                .replace('{n}', (rep.providers || []).length).replace('{n2}', (rep.profiles || []).length).replace('{n3}', rep.presetCount || 0).replace('{n4}', rep.scheduleRules || 0)
+              line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules', { n: (rep.providers || []).length, n2: (rep.profiles || []).length, n3: rep.presetCount || 0, n4: rep.scheduleRules || 0 })
                 + (meta.createdBy ? t('（配置包来自 ', ' (package from ') + meta.createdBy + t('）', ')') : '')
                 + t('。导入会整体替换现有配置（自动快照）。', '. This replaces the whole current config (snapshot taken first).')
             }
@@ -246,7 +245,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     impPendingTicket = ''
     var pv = document.getElementById('impPreview')
     if (pv) pv.hidden = true
-    mgHideMergePreview() // 多包合并预览块一并收起（mgPendingToken 随之失效，重预览才重新发放）
+    mgHideMergePreview() // 多包合并预览态一并失效（confirmToken 清空 + 审阅弹层收起，重预览才重新发放）
   }
   var impConfirmBtn = document.getElementById('impConfirmBtn')
   if (impConfirmBtn) {
@@ -266,8 +265,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     var rep = j.report || {}
     var warns = impWarnList(rep)
     importToggle(false)
-    toast(t('已导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Imported: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules')
-      .replace('{n}', (rep.providers || []).length).replace('{n2}', (rep.profiles || []).length).replace('{n3}', rep.presetCount || 0).replace('{n4}', rep.scheduleRules || 0), true)
+    toast(t('已导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Imported: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules', { n: (rep.providers || []).length, n2: (rep.profiles || []).length, n3: rep.presetCount || 0, n4: rep.scheduleRules || 0 }), true)
     if (warns.length) toast(warns.join(t('；', '; ')), false)
     setTimeout(function () { location.reload() }, warns.length ? 3000 : 600)
   }
@@ -421,8 +419,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     if (!go) return
     var n = legacyChecked.filter(function (x) { return x }).length
     go.disabled = n === 0
-    // 浏览器内嵌 t() 只有两参（不支持 params 占位），占位符手动 replace（与 impApplyResult 同法）
-    go.textContent = t('导入所选（{n}）', 'Import selected ({n})').replace('{n}', String(n))
+    go.textContent = t('导入所选（{n}）', 'Import selected ({n})', { n: n })
   }
   function renderLegacy() {
     var list = document.getElementById('legacyList')
@@ -438,7 +435,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
         legacyCands = cands
         legacyChecked = cands.map(function () { return true })
         if (desc) desc.textContent = cands.length
-          ? t('检测到 {n} 个模型服务，勾选要搬进来的：', 'Found {n} model services. Pick the ones to bring in:').replace('{n}', String(cands.length))
+          ? t('检测到 {n} 个模型服务，勾选要搬进来的：', 'Found {n} model services. Pick the ones to bring in:', { n: cands.length })
           : t('没有检测到可导入的存量配置。', 'No importable legacy configs found.')
         if (list) {
           list.innerHTML = ''

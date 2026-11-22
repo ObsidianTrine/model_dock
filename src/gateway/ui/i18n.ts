@@ -4,7 +4,14 @@
  * 片段为模板字面量源文本：ui.ts 按原次序拼装后与拆分前逐字节一致；勿改动片段内换行/转义/次序。
  */
 export const UI_JS_I18N = `  var LANG = localStorage.getItem('mdk_lang') || 'zh'
-  function t(zh, en) { return LANG === 'en' && en != null ? en : zh }
+  // 第三参 params：占位符插值与 util/i18n.ts 的 interp 对齐（{word} 取 params[word]，数字/string 直插，
+  // 缺 key 或非原始值原样保留占位符——不给 [object Object] 漏进文案的机会）。
+  // 此前浏览器端无插值能力，调用方只能手串 .replace（merge-preview-wide-modal 收编后统一走本参）
+  function t(zh, en, params) {
+    var s = LANG === 'en' && en != null ? en : zh
+    if (params) s = s.replace(/{(\\w+)}/g, function (k, name) { var v = params[name]; return v === undefined || typeof v === 'object' ? k : String(v) })
+    return s
+  }
   function i18nPick(pairAttr) {
     var pair = pairAttr.split('||')
     return LANG === 'en' && pair[1] != null ? pair[1] : pair[0]

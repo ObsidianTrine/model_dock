@@ -50,14 +50,8 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
       '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
       '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +
-      '<div id="impMergePreview" hidden style="margin-top:8px"><p class="testline" id="impMergeLine"></p>' +
-      '<div class="tablescroll"><table id="impMergeTable"><thead><tr>' +
-      '<th></th><th data-i18n="服务||Service">服务</th><th data-i18n="探针||Probe">探针</th><th data-i18n="建议||Suggestion">建议</th><th data-i18n="来源||Sources">来源</th>' +
-      '</tr></thead><tbody id="impMergeRows"></tbody></table></div>' +
-      '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impMergeBackBtn" data-i18n="返回||Back">返回</button>' +
-      '<button type="button" class="btn small primary" id="impMergeApplyBtn" data-i18n="应用所选||Apply selected">应用所选</button></p>' +
-      '<p class="help" data-i18n="同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。||Services with the same base_url + same key merge into one; verdicts come from local probe records (keys shown as fingerprints). Applying replaces providers/routes/presets/schedule rules (unchecked ones are removed); a snapshot is taken first.">' +
-      '同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。</p></div>' +
+      // 多包合并的审阅清单不再渲染在 tab 内（窄列三行折行，信息密度失效）：mgM（mergeReviewOverlay
+      // svcmodal 宽弹层）在 merge.ts 装配，预览后直接打开；tab 只留 表单输入（chips + 逐包口令行）
       '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p></div>',
     foot: [
       { slot: 'msg', id: 'pkgErr', kind: 'err' },
