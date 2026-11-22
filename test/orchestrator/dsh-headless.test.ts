@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   buildDshArgs,
   dshCliSpec,
@@ -18,6 +19,9 @@ import {
   writeDshHookOverlay,
 } from '../../.agents/scripts/orchestrator/backends/dsh-headless.mjs'
 import { resolveReviewBackendName as staticRef } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
+import { isTransientWorkerFailure } from '../../.agents/scripts/orchestrator/transient.mjs'
+
+const DSH_BACKEND_SRC = fileURLToPath(new URL('../../.agents/scripts/orchestrator/backends/dsh-headless.mjs', import.meta.url))
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'))
 
@@ -261,6 +265,104 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
       await expect(
         dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: () => {} })
       ).rejects.toThrow(/ORCH_DSH_CLI/)
+    } finally {
+      if (saved === undefined) delete process.env.ORCH_DSH_CLI
+      else process.env.ORCH_DSH_CLI = saved
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('spawn 流式采集 > 大体积非 final 事件流 + 末尾 final', () => {
+  it('多 MB tool_result 分片逐行 parse 即弃：output 提取正确且实现无 stdoutAll 全量累积路径', async () => {
+    // 源码扫描证「不再全量累积」（大流 e2e 只证提取正确性，证不了内存面）
+    const src = fs.readFileSync(DSH_BACKEND_SRC, 'utf8')
+    expect(src).not.toContain('stdoutAll')
+    // 大流 e2e：8 条 ~0.5MB 的 tool_result 分片（≈4MB 事件流），final 在末尾
+    const dir = tmp()
+    const stub = path.join(dir, 'stub-dsh.mjs')
+    const big = 'A'.repeat(512 * 1024)
+    fs.writeFileSync(
+      stub,
+      [
+        `const big = 'A'.repeat(${big.length})`,
+        `const lines = [JSON.stringify({ type: 'session', sessionId: 'session-big' })]`,
+        `for (let i = 0; i < 8; i++) lines.push(JSON.stringify({ type: 'tool_result', seq: i, text: big }))`,
+        `lines.push(JSON.stringify({ type: 'status', phase: 'step_end', usage: { inputTokens: 100, outputTokens: 5, totalTokens: 105 } }))`,
+        `lines.push(JSON.stringify({ type: 'final', text: 'BIG OK ' + big.length }))`,
+        // end(flush 回调) 再 exit：4MB 远超管道缓冲，裸 exit 会截断未冲刷的异步写（e2e 首跑实证）；
+        // 管道内核分片天然制造跨 data 事件的行重组面（buf 累到 \\n 才 parse）
+        `const payload = lines.join('\\n') + '\\n'`,
+        `process.stdout.end(payload, () => process.exit(0))`,
+      ].join('\n')
+    )
+    const promptFile = path.join(dir, 'prompt.md')
+    fs.writeFileSync(promptFile, 'x')
+    const saved = process.env.ORCH_DSH_CLI
+    process.env.ORCH_DSH_CLI = stub
+    try {
+      const r = await dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: () => {} })
+      expect(r.exitCode).toBe(0)
+      expect(r.output).toBe('BIG OK ' + big.length)
+      expect(r.usage).toEqual({ tokensIn: 100, tokensOut: 5 })
+    } finally {
+      if (saved === undefined) delete process.env.ORCH_DSH_CLI
+      else process.env.ORCH_DSH_CLI = saved
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('spawn 失败归因 > NDCL error 事件 message 透传', () => {
+  it('error 事件 + 无 final + exit 非 0：message 原文进 stderrTail 头部且瞬态签名可达', async () => {
+    const dir = tmp()
+    const stub = path.join(dir, 'stub-dsh.mjs')
+    fs.writeFileSync(
+      stub,
+      [
+        `process.stdout.write(JSON.stringify({ type: 'session', sessionId: 'session-err' }) + '\\n')`,
+        `process.stdout.write(JSON.stringify({ type: 'error', code: 'llm', message: '上游 429 rate limited' }) + '\\n')`,
+        `process.exit(2)`,
+      ].join('\n')
+    )
+    const promptFile = path.join(dir, 'prompt.md')
+    fs.writeFileSync(promptFile, 'x')
+    const saved = process.env.ORCH_DSH_CLI
+    process.env.ORCH_DSH_CLI = stub
+    try {
+      const r = await dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: () => {} })
+      expect(r.exitCode).toBe(2)
+      expect(r.output).toBe('') // output 保持 final 语义：无 final 即空，不混错误文本
+      expect(r.stderrTail.startsWith('上游 429 rate limited')).toBe(true)
+      // 修盲点的本意：引擎层限流文本可被瞬态分类命中 → 自动退避重试（此前 output+stderrTail 全空失明）
+      expect(isTransientWorkerFailure(r.output, r.stderrTail)).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env.ORCH_DSH_CLI
+      else process.env.ORCH_DSH_CLI = saved
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('error 事件但有 final + exit 0：正常产出路径，stderrTail 不注入错误文本', async () => {
+    const dir = tmp()
+    const stub = path.join(dir, 'stub-dsh.mjs')
+    fs.writeFileSync(
+      stub,
+      [
+        `process.stdout.write(JSON.stringify({ type: 'error', code: 'tool', message: 'step 中途错误' }) + '\\n')`,
+        `process.stdout.write(JSON.stringify({ type: 'final', text: 'STUB OK' }) + '\\n')`,
+        `process.exit(0)`,
+      ].join('\n')
+    )
+    const promptFile = path.join(dir, 'prompt.md')
+    fs.writeFileSync(promptFile, 'x')
+    const saved = process.env.ORCH_DSH_CLI
+    process.env.ORCH_DSH_CLI = stub
+    try {
+      const r = await dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: () => {} })
+      expect(r.exitCode).toBe(0)
+      expect(r.output).toBe('STUB OK')
+      expect(r.stderrTail).toBe('')
     } finally {
       if (saved === undefined) delete process.env.ORCH_DSH_CLI
       else process.env.ORCH_DSH_CLI = saved
