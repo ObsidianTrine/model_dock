@@ -143,7 +143,19 @@ export function dshSpawnInvocation(platform, cmd, args, { cwd, envPatch }) {
   return { cmd: c, args: spawnArgs, options };
 }
 
-/** 从 --json NDCL 输出提取最终答案（最后一个 final.text；无 final 返回 null）。 */
+/** 单事件 → final 文本提取（批量与流式两条路径共用，口径单源防漂移）。 */
+function finalTextOf(evt) {
+  return evt?.type === 'final' && typeof evt.text === 'string' ? evt.text : null;
+}
+
+/** 单事件 → 引擎层错误文本提取（NDCL error 事件 message；结构随版本漂移，防御式解析）。 */
+function errorMessageOf(evt) {
+  return evt?.type === 'error' && typeof evt.message === 'string' ? evt.message : null;
+}
+
+/** 从 --json NDCL 输出提取最终答案（最后一个 final.text；无 final 返回 null）。
+ *  批量参考实现：spawn 热路径已改逐行流式采集（不留全量 stdout，见下方 data 处理器），
+ *  此函数保留为提取语义的纯函数锚点（单测直接断言）。 */
 export function outputFromEvents(stdout) {
   let text = null;
   for (const line of String(stdout ?? '').split('\n')) {
@@ -151,7 +163,8 @@ export function outputFromEvents(stdout) {
     if (!t.startsWith('{')) continue;
     try {
       const evt = JSON.parse(t);
-      if (evt?.type === 'final' && typeof evt.text === 'string') text = evt.text;
+      const s = finalTextOf(evt);
+      if (s !== null) text = s;
     } catch {
       // 非 JSON 行（版本差异/告警混流）容错跳过
     }
@@ -214,7 +227,11 @@ export const dshHeadlessBackend = {
       // role 区分 worker/reviewer 会话（resolveBackendName 只认 worker 侧，防 retry 静默换船）
       onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'dsh-headless', pid: child.pid });
 
-      let stdoutAll = '';
+      // NDJSON 逐行 parse 后只留所需字段（最后 final.text / 最后 error.message），原文即弃，
+      // 不整流累积——长会话大文件工具输出（数十 MB 级）不再全量驻留内存（claude/codex 逐行
+      // 即弃同款口径；zcode 全量留存是因其输出为单份 JSON 文档，dsh 不是）。
+      let lastFinalText = null;
+      let lastErrorMessage = null;
       let stderrTail = '';
       let settled = false;
       let tokensIn = 0;
@@ -223,7 +240,6 @@ export const dshHeadlessBackend = {
       child.stdout.setEncoding('utf8');
       let buf = '';
       child.stdout.on('data', (c) => {
-        stdoutAll += c;
         buf += c;
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
@@ -243,6 +259,10 @@ export const dshHeadlessBackend = {
             tokensOut = Math.max(tokensOut, u.output);
             onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: 0, tokens_billable: billableTokens(tokensIn, tokensOut, 0) });
           }
+          const f = finalTextOf(evt);
+          if (f !== null) lastFinalText = f;
+          const em = errorMessageOf(evt);
+          if (em !== null) lastErrorMessage = em;
         }
       });
       child.stderr.setEncoding('utf8');
@@ -262,8 +282,16 @@ export const dshHeadlessBackend = {
         if (settled) return;
         settled = true;
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
-        const output = outputFromEvents(stdoutAll) ?? '';
-        resolve({ exitCode: code ?? 1, output, stderrTail, usage: { tokensIn, tokensOut }, pid: child.pid });
+        const exitCode = code ?? 1;
+        const output = lastFinalText ?? '';
+        // 引擎层失败（NDCL error 事件且无 final，协议见文件头）：error.message 是唯一可行动
+        // 归因（此时 stderr 常为空，瞬态分类 TRANSIENT_RE 只看 output+stderrTail）——透传进
+        // stderrTail 头部即同时喂饱瞬态自动重试与事故包 worker_stderr_tail 留痕；output 保持
+        // final 语义不混错误文本（它是契约块解析面，混入有误配风险）。
+        const stderrOut = lastFinalText === null && exitCode !== 0 && lastErrorMessage !== null
+          ? `${lastErrorMessage}\n${stderrTail}`
+          : stderrTail;
+        resolve({ exitCode, output, stderrTail: stderrOut, usage: { tokensIn, tokensOut }, pid: child.pid });
       });
 
       child.stdin.write(prompt);
