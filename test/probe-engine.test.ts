@@ -19,7 +19,7 @@ import {
 import type { ProbeRunner, ProbeTransport } from '../src/gateway/probe/engine.js'
 import { countSseChunks } from '../src/gateway/probe/runners/p3.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
-import { readProbeLedger } from '../src/gateway/probe/ledger.js'
+import { readProbeLedger, recordProbeLedgerEntry } from '../src/gateway/probe/ledger.js'
 import { setSecret } from '../src/config/secrets.js'
 import { logsDir } from '../src/util/paths.js'
 import { localDateStr, localIsoTs } from '../src/util/time.js'
@@ -361,6 +361,73 @@ describe('probe-engine · 闸门与派发形态', () => {
       const v = getProbeVerdict(rt, 'a', 'fpR', 'm')
       expect(v?.state).toBe('degraded')
       expect(v?.evidence.err).toBe('boom [redacted] tail')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('probe-engine · 预算闸 × 被动豁免（口径归一）', () => {
+  it('预算耗尽：混合清单（主动+被动）只拦主动单元，被动单元照常派发刷证据', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      ;(rt.config as Config & { probe?: { budget_tokens?: number } }).probe = { budget_tokens: 100 }
+      recordProbeLedgerEntry({
+        tag: 'probe', probe_id: 'p1', provider: 'acme', key_fp: 'fp1', model: 'm',
+        tokens: 100, estimated_tokens: 200, ms: 1, ts: new Date().toISOString(),
+      }) // spent 100 ≥ budget 100
+      let p1RunnerCalls = 0
+      const runner: ProbeRunner = async (ctx) => {
+        if (ctx.def.id === 'p1') p1RunnerCalls++
+        // p15 模拟被动聚合产出：零上游调用、回健康状态（真 runner 是日志聚合，此处测引擎派发面）
+        return { state: 'healthy', calls: [], source: 'passive:p15' }
+      }
+      const r = await runProbeSuite(rt, {
+        probeIds: ['p1', 'p15'],
+        targets: [{ providerId: 'a', model: 'm', keyFp: 'fp' }],
+        transport: okTransport,
+        runner,
+        confirmed: true,
+      })
+      // 主动单元：预算闸拦下、runner 未触、零上游请求
+      expect(r.skipped.find((s) => s.probeId === 'p1')?.reason).toBe('budget-exhausted')
+      expect(p1RunnerCalls).toBe(0)
+      expect(r.upstreamRequests).toBe(0)
+      // 被动单元：不在跳过名单、照常派发、verdict 刷新（被动证据不因预算漏刷）
+      expect(r.skipped.find((s) => s.probeId === 'p15')).toBeUndefined()
+      expect(r.dispatched).toBe(1)
+      const v = getProbeVerdict(rt, 'a', 'fp', 'm')
+      expect(v?.state).toBe('healthy')
+      // 整轮口径与逐单元闸一致：任一主动单元因预算被拦 → reason=budget-exhausted（ok=false）
+      expect(r.reason).toBe('budget-exhausted')
+      expect(r.ok).toBe(false)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('预算耗尽：全被动清单不被初闸拦，照常全跑（schedule P15 恒跑同口径）', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      ;(rt.config as Config & { probe?: { budget_tokens?: number } }).probe = { budget_tokens: 100 }
+      recordProbeLedgerEntry({
+        tag: 'probe', probe_id: 'p1', provider: 'acme', key_fp: 'fp1', model: 'm',
+        tokens: 100, estimated_tokens: 200, ms: 1, ts: new Date().toISOString(),
+      })
+      const runner: ProbeRunner = async () => ({ state: 'healthy', calls: [], source: 'passive:p15' })
+      const r = await runProbeSuite(rt, {
+        probeIds: ['p15'],
+        targets: [{ providerId: 'a', model: 'm' }],
+        transport: okTransport,
+        runner, // 与 schedule 被动 tick 同形：不传 confirmed
+      })
+      expect(r.ok).toBe(true)
+      expect(r.reason).toBe('ok')
+      expect(r.dispatched).toBe(1)
+      expect(r.skipped).toHaveLength(0)
+      expect(getProbeVerdict(rt, 'a', '-', 'm')?.state).toBe('healthy')
     } finally {
       h.restore()
     }
