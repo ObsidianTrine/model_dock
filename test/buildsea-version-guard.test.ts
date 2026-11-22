@@ -18,8 +18,10 @@ import {
 const HEAD_VERSION_TS = `export const VERSION = '1.0.0'\n`
 const HEAD_PKG = JSON.stringify({ name: 'modeldock', version: '1.0.0', private: true }, null, 2) + '\n'
 
-function pkgWithVersion(v: string, rest: Record<string, unknown> = { name: 'modeldock', private: true }): string {
-  return JSON.stringify({ ...rest, version: v }, null, 2) + '\n'
+// 与 HEAD_PKG 同键序构造（name, version, private）：键序守卫（P2-1）要求残留夹具保序，
+// rest 展开在尾部仅用于追加依赖等额外键（追加即 foreign 路径，不受键序影响）
+function pkgWithVersion(v: string, rest: Record<string, unknown> = {}): string {
+  return JSON.stringify({ name: 'modeldock', version: v, private: true, ...rest }, null, 2) + '\n'
 }
 
 function git(dir: string, ...argv: string[]): void {
@@ -61,6 +63,17 @@ describe('classifyVersionTsDiff', () => {
   it('foreign：文件其他位置出现的版本串改动不被掩码误吞', () => {
     expect(classifyVersionTsDiff(HEAD_VERSION_TS, `// bumped from 1.0.0\nexport const VERSION = '9.9.9'\n`)).toBe('foreign')
   })
+  it('foreign：注释行含 VERSION 赋值模式且两侧注释不同（掩码只作用首个匹配，复审 P2-2 钉子）', () => {
+    const head = `export const VERSION = '1.0.0'\n// 曾用 export const VERSION = '0.9.0'\n`
+    const cur = `export const VERSION = '2.0.0'\n// 曾用 export const VERSION = '0.9.9'\n`
+    expect(classifyVersionTsDiff(head, cur)).toBe('foreign')
+  })
+  it('residue：注释行含 VERSION 模式但注释两侧一致（掩码去 /g 不破坏正常残留判定）', () => {
+    const comment = `// 曾用 export const VERSION = '0.9.0'\n`
+    const head = `export const VERSION = '1.0.0'\n${comment}`
+    const cur = `export const VERSION = '2.0.0'\n${comment}`
+    expect(classifyVersionTsDiff(head, cur)).toBe('residue')
+  })
 })
 
 describe('classifyPkgJsonDiff', () => {
@@ -73,9 +86,14 @@ describe('classifyPkgJsonDiff', () => {
   it('residue：仅 version 键不同', () => {
     expect(classifyPkgJsonDiff(HEAD_PKG, pkgWithVersion('9.9.9'))).toBe('residue')
   })
-  it('residue：version 键缺失但其余语义一致（version 键差异属版本号形状内）', () => {
+  it('foreign：键序重排 + version 同变（键序意图不吞，复审 P2-1 钉子）', () => {
+    const head = JSON.stringify({ name: 'modeldock', version: '1.0.0', private: true }, null, 2) + '\n'
+    const cur = JSON.stringify({ version: '9.9.9', name: 'modeldock', private: true }, null, 2) + '\n'
+    expect(classifyPkgJsonDiff(head, cur)).toBe('foreign')
+  })
+  it('foreign：version 键缺失（残留写入永不删键，删除属人工改动；键集不同即 foreign）', () => {
     const cur = JSON.stringify({ name: 'modeldock', private: true }, null, 2) + '\n'
-    expect(classifyPkgJsonDiff(HEAD_PKG, cur)).toBe('residue')
+    expect(classifyPkgJsonDiff(HEAD_PKG, cur)).toBe('foreign')
   })
   it('foreign：新增依赖（人工改动）', () => {
     const cur = pkgWithVersion('9.9.9', { name: 'modeldock', private: true, dependencies: { evil: '^1.0.0' } })
@@ -131,6 +149,15 @@ describe('decideVersionResidue 四分支', () => {
     })
     expect(v.action).toBe('reject')
     expect(v.reason).toContain('src/version.ts')
+  })
+  it('分支 3 变体：pkg 键序重排 + version 同变 → reject（复审 P2-1 钉子）', () => {
+    const v = decideVersionResidue({
+      ...clean,
+      headPkgJson: JSON.stringify({ name: 'modeldock', version: '1.0.0', private: true }, null, 2) + '\n',
+      curPkgJson: JSON.stringify({ version: '9.9.9', name: 'modeldock', private: true }, null, 2) + '\n',
+    })
+    expect(v.action).toBe('reject')
+    expect(v.reason).toContain('package.json')
   })
   it('分支 4：HEAD 不可读（version.ts）→ reject', () => {
     const v = decideVersionResidue({ ...clean, headVersionTs: null })

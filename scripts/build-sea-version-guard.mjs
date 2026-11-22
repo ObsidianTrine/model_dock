@@ -30,11 +30,13 @@ function normEol(s) {
  * version.ts 差异形状判定：'clean' | 'residue' | 'foreign'。
  * 残留形状 = 只允许 VERSION 赋值的引号字面量不同（syncVersionFromTag 的唯一写法）；
  * 用占位符掩码比对，掩码只覆盖赋值处的字面量——文件其他任何位置的版本串改动（如注释）不会被误掩。
+ * 掩码不带 /g（复审 P2-2）：只作用首个匹配——/g 会把注释里同模式的历史版本串一并抹平，
+ * 掩盖注释本身的差异；非首个匹配处的差异留在掩码外照常判 foreign。
  */
 export function classifyVersionTsDiff(head, cur) {
   if (normEol(cur) === normEol(head)) return 'clean'
   const mask = (s) =>
-    normEol(s).replace(/(export const VERSION = )(['"])[^'"\n]*\2/g, '$1$2<VER>$2')
+    normEol(s).replace(/(export const VERSION = )(['"])[^'"\n]*\2/, '$1$2<VER>$2')
   return mask(head) === mask(cur) ? 'residue' : 'foreign'
 }
 
@@ -43,6 +45,9 @@ export function classifyVersionTsDiff(head, cur) {
  * why 不比文本：syncVersionFromTag 会重序列化整个 JSON，残留写入本身就会改变键间距之外的
  * 文本细节；只认语义差异才能既放过残留又不放过新增依赖等真实改动。版本键未变（含两侧均无）
  * 却内容有别 → 一律 foreign（保守：不猜格式化意图）。
+ * 键序保守口径（复审 P2-1）：残留写入（parse 后原对象重序列化）永不改键序、增删键——
+ * 键序或键集有任何不同即人工改动 → foreign，与「version 未变即 foreign」对称，
+ * 杜绝「键序重排 + version 同变」被静默还原吞掉键序意图。
  */
 export function classifyPkgJsonDiff(head, cur) {
   if (normEol(cur) === normEol(head)) return 'clean'
@@ -56,6 +61,7 @@ export function classifyPkgJsonDiff(head, cur) {
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   if (!isObj(h) || !isObj(c)) return 'foreign'
   if (h.version === c.version) return 'foreign'
+  if (JSON.stringify(Object.keys(h)) !== JSON.stringify(Object.keys(c))) return 'foreign'
   const { version: _hv, ...hRest } = h
   const { version: _cv, ...cRest } = c
   return deepEqual(hRest, cRest) ? 'residue' : 'foreign'
