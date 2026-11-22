@@ -524,6 +524,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .filechip .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .filechip button{border:none;background:none;color:var(--muted);cursor:pointer;font:inherit;padding:0 2px}
 .filechip button:hover{color:var(--accent)}
+/* 多包逐包口令紧凑行（船东批准原型 .prow 形态）：包名 label 右对齐 150px 截断（悬浮 title 出全量）+ 口令 input 占满余宽；
+   input 外观走全局 input 令牌样式，这里只管布局 */
+#pkgOverlay .prow{display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-2) 0}
+#pkgOverlay .prow label{width:150px;flex:0 0 auto;font-size:var(--fs-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+#pkgOverlay .prow input{flex:1;min-width:0}
+/* 未选文件空态提示（船东批准原型 .empty-hint 形态）：虚线边框弱化小字居中，引导一次多选 .msync 包 */
+#pkgOverlay .empty-hint{font-size:var(--fs-xs);color:var(--muted);padding:var(--sp-2);text-align:center;border:1px dashed var(--border);border-radius:var(--r-sm);margin-top:var(--sp-2)}
 /* 手机远程开关右侧 V 形箭头：收起/展开二维码面板（与下拉框同款 chevron，分隔语义防误触开关） */
 #curSvcSel,#autoRouteSel{font-size:var(--fs-sm);padding:5px 26px 5px 10px;border-radius:var(--r-sm);max-width:200px}
 /* 客户端卡片内的钉定路由下拉：小号、紧凑，与卡片 12px meta 行同节奏 */

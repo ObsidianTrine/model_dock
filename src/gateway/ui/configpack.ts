@@ -141,7 +141,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
   function showImpFileChip(file) {
     var chip = document.getElementById('impFileChip')
     if (!chip) return
-    if (!file) { chip.hidden = true; chip.innerHTML = ''; return }
+    if (!file) { chip.hidden = true; chip.innerHTML = ''; updateImpEmptyHint(); return }
     chip.innerHTML = ''
     var nm = document.createElement('span')
     nm.className = 'fname'
@@ -159,6 +159,15 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     chip.appendChild(nm)
     chip.appendChild(rm)
     chip.hidden = false
+    updateImpEmptyHint()
+  }
+  // 空态提示块显隐（船东批准原型 renderChips 形态：无文件=显示多选引导）：两个文件来源
+  // （multi=mgFiles / 单包=input.files）任一非空即隐藏；挂在 showImpFileChip 与 mgExitMultiUi 上随渲染刷新
+  function updateImpEmptyHint() {
+    var hint = document.getElementById('impEmptyHint')
+    if (!hint) return
+    var f = document.getElementById('impFile2')
+    hint.hidden = mgFiles.length > 0 || !!(f && f.files && f.files.length > 0)
   }
   function openImportOverlay() {
     openPkgOverlay('import') // 空态入口固定落在导入方向（附近电脑默认 tab）
