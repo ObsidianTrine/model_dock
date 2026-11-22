@@ -1,7 +1,7 @@
 // dsh-headless 后端单测（dsh-ship-backend 卡，2026-11-22）：纯函数组装 + ORCH_DSH_CLI
 // 桩 e2e。红线语义锚点：worker=DSH_PERMISSION_MODE workspace-write（沙箱物理拒绝
 // workspace 外 file-write，fail-closed）、reviewer=read-only；hook 桥 matcher=`bash|pwsh`
-// （dsh 工具名全小写，claude 字面量集内精确匹配）；无 usage 事件（wall 熔断兜底）。
+// （dsh 工具名全小写，claude 字面量集内精确匹配）；step_end 隐藏 usage（增量 budget_snapshot）。
 
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
@@ -13,6 +13,7 @@ import {
   dshHeadlessBackend,
   dshSpawnInvocation,
   outputFromEvents,
+  usageFromEvent,
   DSH_HOOK_MATCHER,
   writeDshHookOverlay,
 } from '../../.agents/scripts/orchestrator/backends/dsh-headless.mjs'
@@ -29,11 +30,23 @@ describe('buildDshArgs > headless 形态', () => {
     const pi = args.indexOf('--patch')
     expect(args[pi + 1]).toBe('/tmp/ov.yml')
     expect(args[args.length - 1]).toBe('-')
+    // 旗标顺序红线（2026-11-22 bench 实测）：--patch 是 launcher 旗标，必须在 --json 之前——
+    // launcher 遇到未知项即把余下 argv 全交 app，反序会让 app 报 unknown option '--patch'
+    expect(args.indexOf('--patch')).toBeLessThan(args.indexOf('--json'))
   })
   it('无 overlay 时不带 --patch（防御：直跑形态）', () => {
     const args = buildDshArgs({})
     expect(args).not.toContain('--patch')
     expect(args[args.length - 1]).toBe('-')
+  })
+})
+
+describe('usageFromEvent > step_end 隐藏 usage 解析', () => {
+  it('status.phase=step_end 的 usage 收；其余事件拒', () => {
+    expect(usageFromEvent({ type: 'status', phase: 'step_end', usage: { inputTokens: 5450, outputTokens: 25, totalTokens: 5475 } })).toEqual({ input: 5450, output: 25 })
+    expect(usageFromEvent({ type: 'status', phase: 'turn_start' })).toBeNull()
+    expect(usageFromEvent({ type: 'final', text: 'x' })).toBeNull()
+    expect(usageFromEvent({ type: 'status', phase: 'step_end', usage: 'garbage' })).toBeNull()
   })
 })
 
@@ -149,6 +162,8 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
         `process.stdin.on('end', () => {`,
         `  if (process.env.ORCH_STUB_ARGS) fs.writeFileSync(process.env.ORCH_STUB_ARGS, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), mode: process.env.DSH_PERMISSION_MODE, stdinLen: stdin.length }))`,
         `  process.stdout.write(JSON.stringify({ type: 'session', sessionId: 'session-stub' }) + '\\n')`,
+        `  process.stdout.write(JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 5450, outputTokens: 25, totalTokens: 5475 } }) + '\\n')`,
+        `  process.stdout.write(JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: 2, usage: { inputTokens: 6100, outputTokens: 40, totalTokens: 6140 } }) + '\\n')`,
         `  process.stdout.write(JSON.stringify({ type: 'final', text: 'STUB OK' }) + '\\n')`,
         `  process.exit(0)`,
         `})`,
@@ -170,11 +185,14 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
       })
       expect(r.exitCode).toBe(0)
       expect(r.output).toBe('STUB OK')
-      expect(r.usage).toEqual({ tokensIn: 0, tokensOut: 0 }) // 无 usage 事件：token 预算不发 snapshot
+      expect(r.usage).toEqual({ tokensIn: 6100, tokensOut: 40 }) // step_end 累计快照取 max
+      const snap = events.filter((e) => e.type === 'budget_snapshot')
+      expect(snap.length).toBe(2)
+      expect(snap[1].tokens_in).toBe(6100)
+      expect(snap[1].tokens_billable).toBe(6140)
       const spawned = events.find((e) => e.type === 'worker_spawned')
       expect(spawned.backend).toBe('dsh-headless')
       expect(spawned.role).toBe('worker')
-      expect(events.some((e) => e.type === 'budget_snapshot')).toBe(false)
       // 桩收到的实参与环境：headless 形态 + permission mode + stdin 全量回验
       const seen = JSON.parse(fs.readFileSync(path.join(dir, 'args.json'), 'utf8'))
       expect(seen.args).toContain('--profile')
