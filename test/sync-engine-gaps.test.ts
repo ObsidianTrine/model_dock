@@ -5,7 +5,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { TEST_TMP, newHome, gotoHome, restoreHomes, waitFor } from './helpers.js'
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
@@ -15,8 +15,9 @@ import { readSyncState, updateSyncState, emptySyncState, type SyncState } from '
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
 import { keysToCache } from '../src/sync/runtime.js'
 import { deriveSyncKeys } from '../src/sync/crypto.js'
-import { syncJsonPath, displayPath } from '../src/util/paths.js'
-import { atomicWrite } from '../src/util/fsx.js'
+import { refreshDebugOn, setDebugFlag } from '../src/gateway/state/debuglog.js'
+import { syncJsonPath, displayPath, logsDir } from '../src/util/paths.js'
+import { atomicWrite, drainAppendStreams } from '../src/util/fsx.js'
 import type { Config } from '../src/config/types.js'
 
 /**
@@ -520,5 +521,98 @@ describe('remountSyncEngine / stopSyncEngine / syncStatus 缺口分支', () => {
     await remountSyncEngine()
     await stopSyncEngine()
     expect((await syncStatus()).running).toBe(false)
+  }, 30_000)
+})
+
+describe('watcher 失效降级落 debuglog（daemon 形态可观测）', () => {
+  // debuglog 开关是 gateway/state 的模块级单例态（isolate:false 同 worker 跨文件共享）：
+  // 每例复位三源（旗标/env），防污染 debuglog.test.ts 等同 worker 用例的开关矩阵断言
+  const prevDebugEnv = process.env.MODELRDOCK_DEBUG
+  afterEach(() => {
+    setDebugFlag(false)
+    refreshDebugOn(undefined)
+    if (prevDebugEnv === undefined) delete process.env.MODELRDOCK_DEBUG
+    else process.env.MODELRDOCK_DEBUG = prevDebugEnv
+  })
+
+  /** 读沙箱 logs 下全部 debug-<date>.jsonl 行（logsDir 未建即零条目） */
+  function readDebugLines(): Array<Record<string, unknown>> {
+    const dir = logsDir()
+    if (!fsSync.existsSync(dir)) return []
+    return fsSync
+      .readdirSync(dir)
+      .filter((f) => /^debug-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .flatMap((f) => fsSync.readFileSync(path.join(dir, f), 'utf8').trim().split('\n').filter(Boolean))
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+  }
+
+  /** 复现生产构造点形态的降级 loop（恒不传 log，与 gateway/main.ts remountSyncEngine 同款）；
+   *  start() 同步建 watcher，返回后 emitError 可用 */
+  function startDegradeLoop(): { loop: SyncLoop; emitError: (err: Error) => void } {
+    let emit: ((err: Error) => void) | undefined
+    const loop = new SyncLoop({
+      pollMs: 60_000, // 降级断言与推送无关：轮询拉长到用例内不触发，只盯降级事件本身
+      jitterRatio: 0,
+      watchFn: () => {
+        const w = neverWatcher()
+        emit = (err) => w.emit('error', err)
+        return w
+      },
+    })
+    loop.start()
+    return { loop, emitError: (err) => emit!(err) }
+  }
+
+  it('debug 开启：降级事件落 logs/debug-<date>.jsonl（sync/watch-degrade，msg 带文案与错误详情），console 兜底保留', async () => {
+    newHome()
+    await seedBase()
+    const dir = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir }, 'pw-watch-dbg-on', { backend: 'file' })
+    const { loop, emitError } = startDegradeLoop()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
+      await new Promise((r) => setTimeout(r, 50)) // 与既有降级用例同款：等初始 tick 收尾，防噪声串进断言
+      setDebugFlag(true)
+      refreshDebugOn(undefined)
+      emitError(new Error('EMFILE: too many open files'))
+      expect(spy).toHaveBeenCalledTimes(1) // console 兜底是独立通道（前台观众），不因落盘而取消
+      await drainAppendStreams() // 追加流异步建文件：读前先排空
+      const hit = readDebugLines().find((l) => l.scope === 'sync' && l.op === 'watch-degrade')
+      expect(hit).toBeTruthy()
+      expect(hit?.level).toBe('debug')
+      expect(typeof hit?.ts).toBe('string')
+      const msg = String(hit?.msg)
+      expect(msg).toContain('配置同步本地文件监听失效')
+      expect(msg).toContain('仅轮询同步')
+      expect(msg).toContain('EMFILE: too many open files')
+    } finally {
+      spy.mockRestore()
+      await loop.stop()
+    }
+  }, 30_000)
+
+  it('debug 关闭：降级只走 console 兜底，不落任何 debug-*.jsonl 条目', async () => {
+    newHome()
+    await seedBase()
+    const dir = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir }, 'pw-watch-dbg-off', { backend: 'file' })
+    const { loop, emitError } = startDegradeLoop()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
+      await new Promise((r) => setTimeout(r, 50))
+      setDebugFlag(false)
+      refreshDebugOn(undefined)
+      delete process.env.MODELRDOCK_DEBUG // 关态口径：三源全关（env 残留 '1' 会复活开关）
+      emitError(new Error('ENOSPC: no space left on device'))
+      expect(spy).toHaveBeenCalledTimes(1) // console 兜底不受 debug 开关影响，照常触发
+      await new Promise((r) => setTimeout(r, 150)) // 给足「若误落盘」的发生窗口再排空读盘
+      await drainAppendStreams()
+      expect(readDebugLines().filter((l) => l.scope === 'sync' && l.op === 'watch-degrade')).toEqual([])
+    } finally {
+      spy.mockRestore()
+      await loop.stop()
+    }
   }, 30_000)
 })
