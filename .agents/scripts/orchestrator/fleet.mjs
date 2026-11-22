@@ -8,8 +8,9 @@
 // 「网关不可达」，探活成功但 admin 失败 = 「网关在线但 admin 凭据/接口异常」。只改告警
 // 文案与分类，不拦截（observe 只照亮不拦截的设计不变）。
 // 船 ↔ harness 映射：编排后端是 headless CLI，接入态看的是同一个 CLI 的交互形态适配器
-// （zcode-headless ↔ zcode、claude-headless ↔ claude-code）——客户端指向「其他端点」
-// = 船将绕开 ModelDock 燃油（reconcile 会显示网关零流量），这是本模块要照亮的头号盲区。
+// （zcode-headless ↔ zcode、claude-headless ↔ claude-code、codex-headless ↔ codex）——
+// 客户端指向「其他端点」= 船将绕开 ModelDock 燃油（reconcile 会显示网关零流量），这是
+// 本模块要照亮的头号盲区。
 // 协议矩阵透出（2026-11-09）：providers/harnesses 条目附带 `protocols`（网关 2026-11-08
 // 起在 /config 露出的协议支持集/客户端声明），供 dispatch 派发协议预检对拍——快照在本模块
 // 现取，预检零重复请求。
@@ -31,7 +32,7 @@ async function getJson(base, adminToken, path, timeoutMs) {
 }
 
 /** 船（编排后端）→ 网关 harness 适配器 id（接入态观测对象）；mock 等无对应 harness。 */
-export const SHIP_HARNESS = { 'zcode-headless': 'zcode', 'claude-headless': 'claude-code' };
+export const SHIP_HARNESS = { 'zcode-headless': 'zcode', 'claude-headless': 'claude-code', 'codex-headless': 'codex' };
 
 /**
  * 拉取并压缩海况快照。返回
