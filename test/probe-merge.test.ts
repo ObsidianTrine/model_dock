@@ -47,7 +47,7 @@ interface SeedProvider {
 }
 
 /** 铺一台「机器」的配置并导出 .msync：providers/profiles/preset/schedule 齐活，key 落 file 后端 */
-async function seedAndExport(msyncPath: string, providers: Record<string, SeedProvider>, profiles: Record<string, { provider: string }>, opts?: { presetId?: string; schedule?: boolean }): Promise<Syncdoc> {
+async function seedAndExport(msyncPath: string, providers: Record<string, SeedProvider>, profiles: Record<string, { provider: string }>, opts?: { presetId?: string; schedule?: boolean; pass?: string }): Promise<Syncdoc> {
   const cfg: Config = { version: 1, language: 'zh', security: { store: 'file' }, providers: {}, profiles, harness: {} }
   for (const [id, p] of Object.entries(providers)) {
     if (p.key) {
@@ -63,8 +63,9 @@ async function seedAndExport(msyncPath: string, providers: Record<string, SeedPr
     await fsp.mkdir(path.dirname(presetsJsonPath()), { recursive: true })
     await fsp.writeFile(presetsJsonPath(), JSON.stringify([{ id: opts.presetId, label: opts.presetId, vendor: 'V', base_url: 'https://preset.example.com', protocol: 'openai', auth_style: 'bearer' }], null, 2) + '\n')
   }
-  await exportSyncdoc(msyncPath, PASS)
-  return (await previewImport(msyncPath, PASS)).doc
+  const pass = opts?.pass ?? PASS
+  await exportSyncdoc(msyncPath, pass)
+  return (await previewImport(msyncPath, pass)).doc
 }
 
 /** 探针结论种子：写到 verdict store（进程内匹配）并落 probe-*.jsonl（CLI 子进程回放用） */
@@ -315,6 +316,162 @@ describe('控制台合并端点：preview/apply 两段式', () => {
     } finally {
       h.restore()
     }
+  })
+})
+
+// ── 控制台合并端点：逐包口令（passphrases 数组，merge-import-integration 收编）──────────────
+
+describe('控制台合并端点：逐包口令 passphrases 数组', () => {
+  it('preview 接受 passphrases 数组：两包不同口令各自解包成功（验收①）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      const passA = 'pass-a-11111'
+      const passB = 'pass-b-22222'
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: passA })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: passB })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: [passA, passB] })
+      expect(pv.status).toBe(200)
+      const preview = pv.json.preview as { candidates: { id: string }[] }
+      expect(preview.candidates.map((c) => c.id).sort()).toEqual(['ark', 'solo'])
+      // key 明文不出端点；预览零写盘
+      expect(JSON.stringify(pv.json)).not.toContain('sk-ark-plain')
+      expect(JSON.stringify(pv.json)).not.toContain('sk-solo')
+      expect(fileHash(configPath())).toBe(beforeCfg)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('某包口令错：整体 400 且报错含失败包名，不出半张候选清单（验收②）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: 'pass-a-11111' })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: 'pass-b-22222' })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: ['pass-a-11111', 'wrong-pass'] })
+      expect(pv.status).toBe(400)
+      const msg = String((pv.json.error as { message?: string } | undefined)?.message ?? '')
+      expect(msg).toContain('b.msync')
+      // 整体拒绝：a.msync 解包成功也不出半张清单（无 preview / confirmToken）
+      expect(msg).not.toContain('a.msync')
+      expect(pv.json.preview).toBeUndefined()
+      expect(pv.json.confirmToken).toBeUndefined()
+      expect(fileHash(configPath())).toBe(beforeCfg)
+      // apply 同样整体拒绝
+      const ap = await callEndpoint(hMergeApply, rt, { packages, passphrases: ['pass-a-11111', 'wrong-pass'], keep: ['ark'], confirmToken: 'x' })
+      expect(ap.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('单值 passphrase 向后兼容：全部同口令照常出清单（验收③）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } })
+      await seedAndExport(bPath, { ark2: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrase: PASS })
+      expect(pv.status).toBe(200)
+      const preview = pv.json.preview as { candidates: { id: string }[] }
+      expect(preview.candidates).toHaveLength(1)
+      expect(preview.candidates[0]!.id).toBe('ark')
+      // passphrases 数组与单值 passphrase 等价（全部同口令时）
+      const pv2 = await callEndpoint(hMergePreview, rt, { packages, passphrases: [PASS, PASS] })
+      expect(pv2.json.confirmToken).toBe(pv.json.confirmToken)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('confirmToken 换口令组合后失效：错位/换包重放均 400，正确组合才放行（验收④）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      const passA = 'pass-a-11111'
+      const passB = 'pass-b-22222'
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: passA })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: passB })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: [passA, passB] })
+      expect(pv.status).toBe(200)
+      const token = String(pv.json.confirmToken)
+      // 口令组合换序（digest 随逐包口令变化）→ 旧 token 失效
+      const swapped = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passB, passA], keep: ['ark', 'solo'], confirmToken: token })
+      expect(swapped.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg)
+      // 别的预览发的 token 不能重放到这份包上
+      const cPath = path.join(pkgDir, 'c.msync')
+      const dPath = path.join(pkgDir, 'd.msync')
+      await seedAndExport(cPath, { c1: { base_url: 'https://c1.example.com', key: 'sk-c1' } }, {}, { pass: 'pass-c-33333' })
+      await seedAndExport(dPath, { d1: { base_url: 'https://d1.example.com', key: 'sk-d1' } }, {}, { pass: 'pass-c-33333' })
+      const packagesCD = [
+        { name: 'c.msync', content_b64: b64(fs.readFileSync(cPath, 'utf8')) },
+        { name: 'd.msync', content_b64: b64(fs.readFileSync(dPath, 'utf8')) },
+      ]
+      const beforeCfg2 = fileHash(configPath()) // c/d 种子写盘后取新基线
+      const pvCD = await callEndpoint(hMergePreview, rt, { packages: packagesCD, passphrase: 'pass-c-33333' })
+      expect(pvCD.status).toBe(200)
+      expect(pvCD.json.confirmToken).not.toBe(token)
+      const replay = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passA, passB], keep: ['ark', 'solo'], confirmToken: pvCD.json.confirmToken })
+      expect(replay.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg2)
+      // 正确口令组合 + 本预览的 token → 放行
+      const ok = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passA, passB], keep: ['ark', 'solo'], confirmToken: token })
+      expect(ok.status).toBe(200)
+      expect(fileHash(configPath())).not.toBe(beforeCfg)
+      const cfg = await loadConfig()
+      expect(Object.keys(cfg.providers).sort()).toEqual(['ark', 'solo'])
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+// ── UI 收编冒烟：独立入口移除 + 多选分流（构建产物 grep 断言）──────────────────────────────
+
+describe('控制台合并入口收编（构建产物冒烟）', () => {
+  it('独立合并按钮/弹层已移除；impFile2 支持多选；合并预览块渲染进 tab', () => {
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    expect(min).not.toContain('mergePkgBtn')
+    expect(min).not.toContain('mergeOverlay')
+    expect(min).toContain('impFile2" multiple')
+    expect(min).toContain('impMergePreview')
+    expect(min).toContain('impPwRows')
+    // /merge/preview|apply 调用仍随包携带逐包口令数组
+    expect(min).toContain('passphrases:')
   })
 })
 
