@@ -319,6 +319,13 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .pill.err{color:var(--err);border-color:var(--err);background:var(--err-weak)}
 .pill.warn{color:var(--warn);border-color:var(--warn);background:var(--warn-tint)}
 .pill.dim{opacity:.75}
+/* 可点击 pill（button 形态，健康徽标下钻入口）：显式压住 UA 按钮外观与字重（勿用 font:inherit
+   简写——特异性高于 .pill 会连 font-size:xs 一起复位）；hover 反馈走令牌，口径同 .pill.sw */
+button.pill{appearance:none;font-family:inherit;font-weight:400;cursor:pointer;transition:border-color var(--dur),color var(--dur),background var(--dur)}
+button.pill:hover{border-color:var(--muted);color:var(--text);background:var(--neutral-weak)}
+button.pill.ok:hover{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
+button.pill.warn:hover{border-color:var(--warn);color:var(--warn);background:var(--warn-tint)}
+button.pill.err:hover{border-color:var(--err);color:var(--err);background:var(--err-weak)}
 /* pillSwitch：状态行开关（kit 组件）。视觉与原 pill 一致；主体 / caret 是两个真实按钮，
    各自可 Tab（role=switch+aria-checked / aria-expanded+aria-controls），内嵌 .ptext 承载文案 */
 .pill.sw{cursor:pointer;user-select:none;transition:border-color var(--dur),color var(--dur),background var(--dur)}
@@ -395,6 +402,15 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    sticky 形态；列少不设 fixed 布局与列宽，基础 table/th/td 层照常生效 */
 #probeLedgerTable{border-collapse:separate;border-spacing:0}
 #probeLedgerTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+/* 健康变化时间线表（probeSvcTimelineOverlay 弹层内，svcmodal 680px 宽变体）：#mgReviewTable 同款
+   fixed 配方——时间/变化/来源三列定宽（时间戳与双 pill 长度可预期），三元组列吃剩余空间为信息
+   主列（长模型 ID 截断、全文在 title 悬浮）；任何窗宽不溢出，更窄走 .tablescroll 滚动 */
+#probeSvcTimelineTable{table-layout:fixed;min-width:620px;border-collapse:separate;border-spacing:0}
+#probeSvcTimelineTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+#probeSvcTimelineTable th:nth-child(1){width:140px}
+#probeSvcTimelineTable th:nth-child(3){width:190px}
+#probeSvcTimelineTable th:nth-child(4){width:90px}
+#probeSvcTimelineTable th,#probeSvcTimelineTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 合并审阅表（mergeReviewOverlay 弹层内，svcmodal 680px 宽变体）：fixed 布局按日志表配方——
    勾选/服务ID/探针/建议四列定宽（宽在表头声明），地址列吃剩余空间为信息主列；任何窗宽不溢出，
    更窄走 .tablescroll 滚动。地址格两行块形态（船东批准原型 merge-flow.html 逐字对应）：
