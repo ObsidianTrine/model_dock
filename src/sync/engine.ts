@@ -13,6 +13,7 @@ import { openWithKeys, sealWithKeys } from './crypto.js'
 import { hashDoc, keysFromState, targetFromState } from './runtime.js'
 import { blobRefOf } from './targets/types.js'
 import { loadConfig, configLockPath } from '../config/store.js'
+import { debugLog, debugOn } from '../gateway/state/debuglog.js'
 import { withFileLock } from '../util/fsx.js'
 import { readSyncState, updateSyncState, type SyncState } from './state.js'
 import { validateSyncdoc, type Syncdoc } from './types.js'
@@ -308,6 +309,10 @@ export class SyncLoop {
         // 否则「即时推变慢」这条静默降级在前台/日志零痕迹（tick 错误路径先例同款）；有 log 则不双写防噪声
         if (this.opts.log) this.opts.log(msg)
         else console.error(msg)
+        // daemon 形态无 stdout 观众，console 兜底不可见：debug 开启时降级事件再落 logs/debug-<date>.jsonl
+        //（--debug/MODELRDOCK_DEBUG/config [gateway] debug 任一即效，热加载重算）；debugLog 不自带
+        // 开关判定，须先 debugOn() 短路，否则关态也落盘
+        if (debugOn()) debugLog('sync', 'watch-degrade', { msg })
       })
     } catch {
       /* 目录监听失败只损失「即时推」，轮询兜底 */
