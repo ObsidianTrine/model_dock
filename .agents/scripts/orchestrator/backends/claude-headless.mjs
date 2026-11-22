@@ -27,6 +27,7 @@ import { quoteArgsForShell, shellCommandline } from '../spawn-shell.mjs';
 import { billableTokens } from '../budget.mjs';
 import { zcodeAvailable } from './zcode-headless.mjs';
 import { codexAvailable } from './codex-headless.mjs';
+import { dshAvailable } from './dsh-headless.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -325,8 +326,9 @@ export async function getBackend(name) {
   if (name === 'claude-headless') return claudeHeadlessBackend;
   if (name === 'zcode-headless') return (await import('./zcode-headless.mjs')).zcodeHeadlessBackend;
   if (name === 'codex-headless') return (await import('./codex-headless.mjs')).codexHeadlessBackend;
+  if (name === 'dsh-headless') return (await import('./dsh-headless.mjs')).dshHeadlessBackend;
   if (name === 'mock') return (await import('./mock.mjs')).mockBackend;
-  throw new Error(`未知后端 "${name}"（允许：claude-headless | zcode-headless | codex-headless | mock）`);
+  throw new Error(`未知后端 "${name}"（允许：claude-headless | zcode-headless | codex-headless | dsh-headless | mock）`);
 }
 
 /**
@@ -389,6 +391,7 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
       if (name === 'claude-headless') return claudeAvailable();
       if (name === 'zcode-headless') return zcodeAvailable();
       if (name === 'codex-headless') return codexAvailable();
+      if (name === 'dsh-headless') return dshAvailable();
       return true; // mock 等非 CLI 后端视为可用
     });
   if (explicit) return { name: explicit === 'same' ? worker : explicit, mode: 'explicit' };
@@ -402,11 +405,13 @@ export function resolveReviewBackendName({ worker, explicit, prior, probe } = {}
     return { name: prior, mode: 'prior' };
   }
   // 异构候选有序数组（探测守卫：按序取第一个 CLI 可用的候选；全不可用回落同源）。
-  // codex-headless 作次选加入（codex-catalog-ship 卡），既有 claude↔zcode 优先序不变。
+  // codex-headless 作次选加入（codex-catalog-ship 卡）、dsh-headless 同批（dsh-ship-backend
+  // 卡），既有 claude↔zcode 优先序不变。
   const OTHERS = {
-    'claude-headless': ['zcode-headless', 'codex-headless'],
-    'zcode-headless': ['claude-headless', 'codex-headless'],
-    'codex-headless': ['claude-headless', 'zcode-headless'],
+    'claude-headless': ['zcode-headless', 'codex-headless', 'dsh-headless'],
+    'zcode-headless': ['claude-headless', 'codex-headless', 'dsh-headless'],
+    'codex-headless': ['claude-headless', 'zcode-headless', 'dsh-headless'],
+    'dsh-headless': ['claude-headless', 'zcode-headless', 'codex-headless'],
   };
   for (const other of OTHERS[worker] ?? []) {
     if (probeFn(other)) return { name: other, mode: 'heterogeneous' };

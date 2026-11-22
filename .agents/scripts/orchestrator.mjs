@@ -45,6 +45,7 @@ import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateN
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
+import { dshAvailable } from './orchestrator/backends/dsh-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards, lifetimeCapRejections } from './orchestrator/autoresume.mjs';
@@ -2475,6 +2476,10 @@ function preflightWorkerBackend(backend) {
   if (backend === 'codex-headless' && !codexAvailable()) {
     die('预检失败：codex CLI 不可用（ORCH_CODEX_CLI 未设 / PATH 无 codex / --version 探测失败）。\n'
       + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_CODEX_CLI=<codex 绝对路径> 或安装 PATH 版 codex）后重跑。', 1);
+  }
+  if (backend === 'dsh-headless' && !dshAvailable()) {
+    die('预检失败：dsh CLI 不可用（ORCH_DSH_CLI 未设 / PATH 无 dsh / --version 探测失败）。\n'
+      + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_DSH_CLI=<dsh 绝对路径> 或 npm i -g @deepseek-ai/dsh）后重跑。', 1);
   }
   if (backend === 'claude-headless' && !claudeAvailable()) {
     die('预检失败：claude CLI 不可用（PATH 无 claude / 未登录 / --version 探测失败）。\n'
@@ -6116,7 +6121,7 @@ function usage() {
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
   notify-digest --flush [--sleep N]       digest 聚合通报冲刷：睡满 notify.digest.quietWindowSec（--sleep N 覆盖）后把待发事件合并成一条扁平事件流通报（标题 emoji 计数分诊，正文 ≤4 行关键事件）发出（落位流程 detached 自动拉起；手动补发可直达）
 
-后端：worker claude-headless | zcode-headless | codex-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达）。
+后端：worker claude-headless | zcode-headless | codex-headless | dsh-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达；dsh 设 ORCH_DSH_CLI=<dsh 绝对路径>，沙箱+hook 桥双红线、不禁网络）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
 审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
 互斥：调度器级（drain/nightly/scan --run 全局单实例）+ 任务级（同任务同时只允许一个 run 闭环，陈锁自动接管）。
