@@ -20,9 +20,10 @@ files_hint:                      # 预期改动范围（glob），越准并发�
 workflows:                       # 注入 worker 的 playbook（至少 feature-branch）
   - feature-branch
 gate: L1                         # 允许自动合并的级别上限：L0 仅文档测试 / L1 常规 / L3 全人工
-fastlane: true                   # 可选：跳过 LLM 审查省最大开销（只省审查不省闸门，见『fastlane 与 ui_check』）
+fastlane: true                   # 可选：跳过 LLM 审查省最大开销（只省审查不省闸门；**gate=L3 卡不生效**——L3 审查保护人审质量，见『fastlane 与 ui_check』）
 tier: ahead-3                    # 可选：车钟档位 前进1-4（接口键 ahead-1..4，旧 heavy/light 兼容；见『后端与 tier』）；缺省命中核心路径自动升 前进4
 ui_check: true                   # 可选：改 Web 控制台任务开启 UI 冒烟门禁（见『fastlane 与 ui_check』）
+scratch_only: true               # 可选：产物只落 worktree 非跟踪区（如 scratch/）不入库——豁免 npm_test/tsc_build 门禁与 XTE no_commit（见『fastlane 与 ui_check』）
 research: websearch-fallback     # 可选（feature 提案必填）：调研 brief id 或 todo（上游管线，见 orch-autonomy.md『上游管线』）
 score:                           # 可选：量化评分四因子 1-3 档（纯规则定序用，见 orch-autonomy.md『propose』）
   value: 2
@@ -124,6 +125,7 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 
 - **fastlane**（任务卡 `fastlane: true`）：跳过 LLM 审查子循环（不 spawn reviewer、不进 reviewing），`review_verdict` 记 skipped。**只省审查、不降任何闸门**：自动合并四前提（无 drift 降级 + 声明与实际分级均 L0/L1 + 实际≤声明 + scope 无越界）原样生效。失效规则（记 `fastlane_skipped` 附 reason，失效后本次 run 不复活）：实际分级 L2/L3 → 回常规链路（核心路径恰恰最需要审查）；drift 降级期 → 回常规链路；卡 gate=L3 → 跑前即失效；workflow.json `fastlaneAllowed: false` 团队总开关。适合纯 docs/test 小卡。
 - **ui_check**（`ui_check: true`）：改 Web 控制台/网关页面的卡在 build 后跑 `workflow.json uiCheckCmd`（本仓库 `node scripts/ui-smoke.mjs`，自备 189xx 沙箱）；失败进调试子循环（非红线）；声明了但仓库未配置 → 快速失败卡留 pending。
+- **scratch_only**（`scratch_only: true`，2026-11-22 bench 发现 1/2 修复）：产物只落 worktree 非跟踪区（如 `scratch/`）的卡声明——豁免 **npm_test / tsc_build 门禁**（git diff 无改动面可测，照跑只会误入全量套件）与 **XTE no_commit 规则**（零提交是卡面声明的合规形态，2026-11-22 bench 实测 codex 活干完被误杀）；lint/typecheck/port_scan/native_scan/scope_purity 照跑不豁免。适用面：基准卡、一次性探针、纯人工验收产物。已知行为备注：并发/重载下 npm_test 门禁可能首跑 flake（调试子循环重试兜底，2026-11-22 四船并发基准实测）。
 
 ## 互斥与并行（谁在跑、能并行吗）
 

@@ -68,6 +68,14 @@ describe('orchestrator queue > 任务卡校验', () => {
     expect(loadCard(noGate).meta.gate).toBe('L3')
   })
 
+  it('scratch_only：布尔归一（缺省 false）；非法值降级 false 不阻断（豁免是优惠面）', () => {
+    expect(loadCard(cardText({ scratch_only: true })).meta.scratch_only).toBe(true)
+    expect(loadCard(cardText({})).meta.scratch_only).toBe(false)
+    expect(loadCard(cardText({ scratch_only: false })).meta.scratch_only).toBe(false)
+    const warned = loadCard(cardText({ scratch_only: 'yes' }))
+    expect(warned.meta.scratch_only).toBe(false)
+  })
+
   it('验收标准 L0 校验：命令/路径/断言词/spec 锚点句任一命中即过', () => {
     expect(checkAcceptanceQuality({ acceptance: '- npx vitest run test/a.test.ts 全绿' }).ok).toBe(true)
     expect(checkAcceptanceQuality({ acceptance: '- test/a.test.ts 覆盖该路径' }).ok).toBe(true)
