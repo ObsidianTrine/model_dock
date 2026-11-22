@@ -11,7 +11,8 @@ import {
   DESIGN_MARKER,
   TASKS_MARKER,
 } from '../../.agents/scripts/orchestrator/prompt.mjs'
-import { parseTasksDoc, renderTaskCard, buildSpecCards } from '../../.agents/scripts/orchestrator/spec.mjs'
+import { parseTasksDoc, renderTaskCard, buildSpecCards, writeSpec } from '../../.agents/scripts/orchestrator/spec.mjs'
+import { SPEC_DIM_WEIGHTS, runSpecL0Checks, computeSpecVerdict } from '../../.agents/scripts/orchestrator/spec-review.mjs'
 import { loadCard, queueRoot, ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { mkRepo, runOrch, tryOrch } from './helpers.js'
 
@@ -72,6 +73,53 @@ describe('orchestrator spec > prompt 构建与解析', () => {
     const noId = specOutput().replace('id: add-export', 'slug: add-export')
     expect(parseSpecBlocks(noId)).toBeNull()
     expect(parseSpecBlocks('没有契约块')).toBeNull()
+  })
+})
+
+describe('orchestrator spec > 六维契约（integration 融入性）', () => {
+  it('SPEC_DIM_WEIGHTS 六维含 integration:10 且合计 100', () => {
+    expect(SPEC_DIM_WEIGHTS).toEqual({ completeness: 20, unambiguity: 20, consistency: 20, testability: 20, feasibility: 10, integration: 10 })
+    expect(Object.values(SPEC_DIM_WEIGHTS).reduce((a: number, b: number) => a + b, 0)).toBe(100)
+  })
+
+  it('buildSpecPrompt design 模板含功能面盘点、融入位置论证与硬性要求第 7 条', () => {
+    const p = buildSpecPrompt('支持配置导出', process.cwd())
+    expect(p).toContain('### 代码事实')
+    expect(p).toContain('### 用户可感知功能面')
+    expect(p).toContain('### 融入位置论证')
+    expect(p).toContain('7. 设计含新 UI 入口/新命令/新端点时，方案必须先引用「用户可感知功能面」盘点完成「融入位置论证」，缺失即违反产出契约；')
+  })
+
+  it('L0 融入性探针：design 缺节 → warn（report-only，不进 fail 集合）', () => {
+    const repo = mkRepo()
+    try {
+      const id = 'integr-warn-spec'
+      writeSpec(repo.root, {
+        id,
+        title: '缺融入性节',
+        requirements: '# 需求\n\n- 作为用户，我希望 x。',
+        design: '# 技术设计\n\n## 现状\n\n旧模板现状（fixture）。\n\n## 方案\n\n直接改（fixture）。',
+        tasks: '## 任务 1:改 README\n- 目标: g\n- 文件: README.md\n- 完成条件: c\n- 依赖: 无\n',
+      })
+      const l0 = runSpecL0Checks(repo.root, id)
+      const c = l0.checks.find((c: { name: string }) => c.name === '融入位置论证')
+      expect(c?.status).toBe('warn')
+      expect(c?.detail).toContain('用户可感知功能面')
+      expect(c?.detail).toContain('融入位置论证')
+      expect(l0.ok).toBe(true) // report-only：warn 不影响 ok，结构性 fail 才拦截
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('六维 verdict 加权：integration 计入聚合，integration=null 传染 undetermined', () => {
+    const dims = { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90, integration: 90 }
+    const v = computeSpecVerdict({ dimensions: dims, findings: [], gates: { redlines: 'pass' }, fabricatedCount: 0 })
+    expect(v.overall).toBe(85) // (85*20+80*20+85*20+85*20+90*10+90*10)/100 = 8500/100
+    expect(v.build_ready).toBe('approve_to_build')
+    const nulled = computeSpecVerdict({ dimensions: { ...dims, integration: null }, findings: [], gates: { redlines: 'pass' }, fabricatedCount: 0 })
+    expect(nulled.overall).toBeNull()
+    expect(nulled.build_ready).toBe('undetermined')
   })
 })
 
