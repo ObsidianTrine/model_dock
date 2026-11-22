@@ -21,9 +21,10 @@
 //   agent-default-model（modeldock provider + 船东 set-default 的模型），model 参数
 //   接受但忽略（zcode 同款口径；点号别名不在 dsh catalog，擅自点名会请求期失败）。
 //   `--json` 为 NDCL 事件流：session→status/text/thinking/tool_call/tool_result→final
-//   （final.text=最终答案）；error 事件出现且无 final = 引擎层失败。**无 usage 事件**
-//   ——预算不发 budget_snapshot，token 预算靠 wall-clock 熔断兜底（budgetProfiles 必配
-//   max_wall_minutes，orch-loop.md:112 的 150 分钟校准依据同源）。
+//   （final.text=最终答案）；error 事件出现且无 final = 引擎层失败。usage 藏在
+//   `status.phase=step_end` 事件（README 未记载，0.2.0-rc.2 实测）——逐 step 发
+//   budget_snapshot（累计快照取 max），token 预算可用；wall-clock 兜底不变（budgetProfiles
+//   仍配 max_wall_minutes，orch-loop.md:112 校准依据同源）。
 // CLI 定位：ORCH_DSH_CLI 环境变量优先（.cjs/.mjs/.js 桩用当前 node 直跑，测试 e2e 依赖
 // 此点）；未设走 PATH 里的 dsh。
 
@@ -32,6 +33,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { quoteArgsForShell, shellCommandline } from '../spawn-shell.mjs';
+import { billableTokens } from '../budget.mjs';
 // workerHookCommand：claude 船同一份 policy-worker.mjs 锚定（主仓绝对路径，防 worktree
 // 副本篡改）——dsh hook 桥的 hooks.json 直接复用同一裁决来源。
 import { workerHookCommand } from './claude-headless.mjs';
@@ -77,11 +79,14 @@ export function dshAvailable() {
   return dshProbeCache;
 }
 
-/** 组装 dsh headless 参数（纯函数，供单测断言）。任务用 `-` 占位从 stdin 读入。 */
+/** 组装 dsh headless 参数（纯函数，供单测断言）。任务用 `-` 占位从 stdin 读入。
+ *  **旗标顺序红线**：launcher 只认自己的旗标（--profile/--patch/--dump-*），遇到第一个
+ *  未知项（app 旗标 --json）即把剩余 argv 全部转交 app——`--patch` 必须排在 `--json`
+ *  之前，否则 app 报 `unknown option '--patch'`（2026-11-22 bench 实测，exit 1 无 stderr）。 */
 export function buildDshArgs({ patchFile }) {
-  const args = ['--profile', 'headless', '--json'];
+  const args = ['--profile', 'headless'];
   if (patchFile) args.push('--patch', patchFile);
-  args.push('-'); // prompt 从 stdin 读
+  args.push('--json', '-');
   return args;
 }
 
@@ -154,6 +159,20 @@ export function outputFromEvents(stdout) {
   return text;
 }
 
+/**
+ * 从 NDCL 事件流提取单条累计 token 用量（README 未记载、实测 `status.phase=step_end`
+ * 事件携带 `usage:{inputTokens,outputTokens,totalTokens}`；结构随版本漂移，防御式解析）。
+ * 用量是会话累计快照：调用方取 max 防重复计入（codex 系同款口径）。解析不到返回 null。
+ */
+export function usageFromEvent(evt) {
+  const u = evt?.phase === 'step_end' ? evt?.usage ?? null : null;
+  if (!u || typeof u !== 'object') return null;
+  const input = Number(u.inputTokens ?? 0);
+  const output = Number(u.outputTokens ?? 0);
+  if (!Number.isFinite(input) && !Number.isFinite(output)) return null;
+  return { input: Math.max(0, input), output: Math.max(0, output) };
+}
+
 export const dshHeadlessBackend = {
   name: 'dsh-headless',
 
@@ -198,10 +217,33 @@ export const dshHeadlessBackend = {
       let stdoutAll = '';
       let stderrTail = '';
       let settled = false;
+      let tokensIn = 0;
+      let tokensOut = 0;
 
       child.stdout.setEncoding('utf8');
+      let buf = '';
       child.stdout.on('data', (c) => {
         stdoutAll += c;
+        buf += c;
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          let evt;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            continue; // 非 JSON 行（版本差异/告警混流），容错跳过
+          }
+          const u = usageFromEvent(evt);
+          if (u) {
+            // 用量事件是会话累计快照：取 max 防重复计入（codex 系同款口径）
+            tokensIn = Math.max(tokensIn, u.input);
+            tokensOut = Math.max(tokensOut, u.output);
+            onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: 0, tokens_billable: billableTokens(tokensIn, tokensOut, 0) });
+          }
+        }
       });
       child.stderr.setEncoding('utf8');
       child.stderr.on('data', (c) => {
@@ -221,8 +263,7 @@ export const dshHeadlessBackend = {
         settled = true;
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
         const output = outputFromEvents(stdoutAll) ?? '';
-        // 无 usage 事件：token 预算不发 snapshot，wall-clock 是唯一真闸（见文件头注）
-        resolve({ exitCode: code ?? 1, output, stderrTail, usage: { tokensIn: 0, tokensOut: 0 }, pid: child.pid });
+        resolve({ exitCode: code ?? 1, output, stderrTail, usage: { tokensIn, tokensOut }, pid: child.pid });
       });
 
       child.stdin.write(prompt);
