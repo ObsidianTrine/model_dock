@@ -316,6 +316,98 @@ describe('控制台合并端点：preview/apply 两段式', () => {
       h.restore()
     }
   })
+
+  it('错口令 apply → 解包层报「口令不正确」而非「预览过期」，配置零写入', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } })
+      await seedAndExport(bPath, { ark2: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrase: PASS })
+      expect(pv.status).toBe(200)
+      const before = fileHash(configPath())
+      // confirmToken 用真预览签发的：除口令外请求全部对齐，报错只能来自解包层而非 token 闸
+      const bad = await callEndpoint(hMergeApply, rt, { packages, passphrase: PASS + '-wrong', keep: ['ark'], confirmToken: pv.json.confirmToken })
+      expect(bad.status).toBe(400)
+      const msg = String((bad.json.error as { message?: string } | undefined)?.message ?? '')
+      expect(msg).toMatch(/口令不正确|Incorrect passphrase/)
+      expect(msg).not.toMatch(/过期|expired/)
+      expect(fileHash(configPath())).toBe(before)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('confirmToken 只绑 (adminToken, 包内容摘要, 服务数)——口令不进摘要（回归钉：口令回流进摘要此用例必红）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } })
+      await seedAndExport(bPath, { ark2: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrase: PASS })
+      expect(pv.status).toBe(200)
+      const count = ((pv.json.preview as { candidates: unknown[] }).candidates ?? []).length
+      // pkgDigest/mergeConfirmToken 模块私有，且信封与口令一一绑定（错口令在解包层即 400），
+      // 端点层构造不出「同包内容 × 两口令双成功」的真差分——按文档化绑定公式本地复算做钉
+      const hsha = (s: string) => createHash('sha256').update(s).digest('hex')
+      const asText = (p: { content_b64: string }) => Buffer.from(p.content_b64, 'base64').toString('utf8')
+      const tokenOf = (pkgs: typeof packages, pass?: string) =>
+        hsha(`${rt.adminToken}|merge-apply|${hsha(pkgs.map((p) => `${p.name}\u0000${hsha(asText(p))}`).join('\u0001') + (pass === undefined ? '' : `\u0000${hsha(pass)}`))}|${count}`).slice(0, 32)
+      expect(pv.json.confirmToken).toBe(tokenOf(packages))
+      // 7f135b2 之前的公式形状（口令成分参与摘要）：端点 token 若等于它即口令回流，必红
+      expect(pv.json.confirmToken).not.toBe(tokenOf(packages, PASS))
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('内容变更后旧 confirmToken 拒绝（预览过期语义），配置零写入', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      const cPath = path.join(pkgDir, 'c.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } })
+      await seedAndExport(bPath, { ark2: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      await seedAndExport(cPath, { ark3: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      const packages1 = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const pv = await callEndpoint(hMergePreview, rt, { packages: packages1, passphrase: PASS })
+      expect(pv.status).toBe(200)
+      // 内容变更做成「同名换包体」：候选集与服务数不变，token 失效只能来自内容摘要成分
+      const packages2 = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(cPath, 'utf8')) },
+      ]
+      const before = fileHash(configPath())
+      const stale = await callEndpoint(hMergeApply, rt, { packages: packages2, passphrase: PASS, keep: ['ark'], confirmToken: pv.json.confirmToken })
+      expect(stale.status).toBe(400)
+      const msg = String((stale.json.error as { message?: string } | undefined)?.message ?? '')
+      expect(msg).toContain('confirmToken')
+      expect(msg).toMatch(/过期|expired/)
+      expect(fileHash(configPath())).toBe(before)
+    } finally {
+      h.restore()
+    }
+  })
 })
 
 // ── CLI 冒烟：config merge 两份合成包 → 逐服务三档建议清单 + 勾选写入 ────────────────────────
