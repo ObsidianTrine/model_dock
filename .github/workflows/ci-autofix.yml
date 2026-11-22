@@ -279,7 +279,7 @@ jobs:
       # 该输出可能为空，此处静默跳过（红灯路径不受影响）。artifact 留 7 天，够排障不占存储
       - name: 归档会话逐回合日志（排障唯一证据源）
         if: always() && steps.claude.conclusion != 'skipped' && steps.claude.outputs.execution_file != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: claude-execution-${{ needs.guard.outputs.run_id }}
           path: ${{ steps.claude.outputs.execution_file }}
