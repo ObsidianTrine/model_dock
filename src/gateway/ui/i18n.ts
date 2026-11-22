@@ -4,12 +4,19 @@
  * 片段为模板字面量源文本：ui.ts 按原次序拼装后与拆分前逐字节一致；勿改动片段内换行/转义/次序。
  */
 export const UI_JS_I18N = `  var LANG = localStorage.getItem('mdk_lang') || 'zh'
-  // 第三参 params：占位符插值与 util/i18n.ts 的 interp 对齐（{word} 取 params[word]，数字/string 直插，
-  // 缺 key 或非原始值原样保留占位符——不给 [object Object] 漏进文案的机会）。
-  // 此前浏览器端无插值能力，调用方只能手串 .replace（merge-preview-wide-modal 收编后统一走本参）
+  // 第三参 params：插值语义逐分支移植 util/i18n.ts 的 interp——{word} 取 params[word]：
+  // string 原样、number String()、Bilingual 按当前语言取；params 缺席或键缺失占位符保持字面量。
+  // 此前浏览器端只声明双参、第三参被静默吞掉（merge.ts 传了参仍泄漏的根源），调用方只能手串
+  // .replace——收编后统一走本参；edit/autoroute 三处既有传参调用随之自动生效，勿再手串 replace
   function t(zh, en, params) {
     var s = LANG === 'en' && en != null ? en : zh
-    if (params) s = s.replace(/{(\\w+)}/g, function (k, name) { var v = params[name]; return v === undefined || typeof v === 'object' ? k : String(v) })
+    if (params) s = s.replace(/{(\\w+)}/g, function (k, name) {
+      var v = params[name]
+      if (v === undefined) return k
+      if (typeof v === 'string') return v
+      if (typeof v === 'number') return String(v)
+      return LANG === 'en' ? v.en : v.zh
+    })
     return s
   }
   function i18nPick(pairAttr) {
