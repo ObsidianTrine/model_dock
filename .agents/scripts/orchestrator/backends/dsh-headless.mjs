@@ -224,6 +224,7 @@ export const dshHeadlessBackend = {
       let buf = '';
       child.stdout.on('data', (c) => {
         stdoutAll += c;
+        buf += c;
         let idx;
         while ((idx = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, idx).trim();
