@@ -85,7 +85,8 @@ export async function collectSyncdoc(
       missingKeys.push(r.id)
       continue
     }
-    const { key_ref: _dropped, ...rest } = r.p
+    const rest: SyncProviderEntry = { ...r.p }
+    delete rest.key_ref
     providers[r.id] = { ...rest, key: r.plain }
   }
   // 逐条校验（缺 id 等问题在导出侧就给出可操作报错），原始 JSON 保真随包——校验与取原始值
@@ -149,7 +150,8 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
   const providers: Record<string, ProviderConfig> = {}
   for (const [id, p] of Object.entries(doc.data.providers)) {
     if (typeof p.key === 'string' && p.key !== '') {
-      const { key: _k, ...rest } = p
+      const rest = { ...p }
+      delete rest.key
       providers[id] = { ...rest, key_ref: refs[id]! }
     } else {
       providers[id] = { ...p, key_ref: p.key_ref! }

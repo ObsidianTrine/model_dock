@@ -3,7 +3,7 @@ import path from 'node:path'
 import { homeDir, readTextIfExists, slugify } from '../../util/index.js'
 import { t } from '../../util/i18n.js'
 import { parseJsonTolerant } from '../../adapters/format.js'
-import { firstExisting, isLocalBaseUrl, placeholder, stripApiEndpoint, type ImportCandidate, type ImportSource } from './common.js'
+import { firstExisting, isLocalBaseUrl, placeholder, stripApiEndpoint, type ImportCandidate } from './common.js'
 import type { Protocol } from '../../config/types.js'
 
 /* ── OpenCode / MiMo Code（provider.<id>.options.baseURL/apiKey 同构 JSON/JSONC）──────

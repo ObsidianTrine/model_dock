@@ -320,19 +320,17 @@ export async function detachHarness(id: string): Promise<DetachOutcome> {
   const notes: string[] = []
   let restored = false
   let snapshotId: string | undefined
-  let undoSnapshotId: string | undefined
   let consistent: boolean | undefined
 
   if (attachSnaps.length > 0) {
     // listSnapshots 最新在前；取最新一份 attach 快照 = 本次接入前的状态。
     // 只回滚本次接入写入的内容，不连带回滚用户在这期间对同一文件做的外部改动。
     const pre = attachSnaps[0]
-    const undo = await snapshot(id, 'pre-restore', pre.files.map((f) => f.path))
+    await snapshot(id, 'pre-restore', pre.files.map((f) => f.path))
     await restoreSnapshot(pre)
     consistent = await matchesSnapshot(pre)
     restored = true
     snapshotId = pre.id
-    undoSnapshotId = undo.id
     if (attachSnaps.length > 1) {
       notes.push(
         t(

@@ -145,7 +145,7 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       return { installed: true, configFiles: [p] }
     },
 
-    async planAttach(opts: AttachOptions, _cfg: Config): Promise<PlanResult> {
+    async planAttach(opts: AttachOptions): Promise<PlanResult> {
       const p = file()
       const text = await readTextIfExists(p)
       if (text === null) {
@@ -173,7 +173,7 @@ export function packAdapter(id: string, pack: AdapterPack): HarnessAdapter {
       }
     },
 
-    async planDetach(_cfg: Config): Promise<PlanResult> {
+    async planDetach(): Promise<PlanResult> {
       return {
         changes: [],
         notes: [

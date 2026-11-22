@@ -107,7 +107,6 @@ export function rankLanAddresses(list: LanAddressCandidate[], preferred?: string
 /** 系统默认出口地址（内核选路结果，UDP connect 不实际发包）：多数情况下正是手机能连上的那块网卡。
  *  Node 的 socket.address() 只在 connect 回调后可读（同步读会 EBADF），故异步取一次并缓存。 */
 let preferredAddress: string | null = null
-let preferredDetected = false
 
 export function detectDefaultRouteAddress(): Promise<string | null> {
   return new Promise((resolve) => {
@@ -145,7 +144,6 @@ export function detectDefaultRouteAddress(): Promise<string | null> {
 /** 刷新缓存的默认出口地址（换网/VPN 起停后重算一次即可，排序只把它当倾向而非唯一真相） */
 export async function refreshPreferredAddress(): Promise<void> {
   preferredAddress = await detectDefaultRouteAddress()
-  preferredDetected = true
 }
 
 /** 本机局域网 IPv4 候选（去重 + 优选排序；preferred=系统默认出口地址） */

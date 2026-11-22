@@ -1,11 +1,8 @@
 /** 更新面板域：status/check/apply 端点（由 server.ts 拆出，T05，纯搬移零改写）。块序 = 原文件相对次序，未重排未删改。 */
-import { AdminCtx, sendError } from './admin-shared.js'
+import { AdminCtx } from './admin-shared.js'
 import { applyUpdate, drivePrefetchFromState, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { updateDaemonArgs } from '../autostart.js'
-import { engineWarningHint, installChildEnv } from '../install/noderuntime.js'
-import { bi, t } from '../util/i18n.js'
-import { randomToken } from '../util/fsx.js'
-import { mutateGatewayState, type GatewayRuntime } from './state.js'
+import { bi } from '../util/i18n.js'
 // 一键更新（M2）：admin 门内；apply 只负责分离 spawn，安装由子进程完成
 export async function hUpdateStatus(c: AdminCtx): Promise<void> {
   const { rt, res } = c

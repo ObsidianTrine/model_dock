@@ -1,4 +1,3 @@
-import path from 'node:path'
 import { stat } from 'node:fs/promises'
 import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml'
 import { configPath } from '../util/paths.js'
@@ -188,7 +187,8 @@ function normalizeGateway(input: Config['gateway']): Config['gateway'] {
     const isWorkday = w.days.length === 5 && [1, 2, 3, 4, 5].every((n, i) => w.days![i] === n)
     const isWeekend = w.days.length === 2 && w.days[0] === 6 && w.days[1] === 7
     if (!isWorkday && !isWeekend) return w
-    const { days: _legacy, ...rest } = w
+    const rest = { ...w }
+    delete rest.days
     return { ...rest, dayFilter: isWorkday ? ('workday' as const) : ('weekend' as const) }
   })
   return { ...cfg, schedule: { ...(sch.enabled === undefined ? {} : { enabled: sch.enabled }), ...(windows.length ? { windows } : {}) } }

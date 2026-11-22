@@ -10,7 +10,7 @@ import { openCodeAdapter } from './opencode.js'
 import { packAdapter } from './packs.js'
 import { workbuddyAdapter } from './workbuddy.js'
 import { zcodeAdapter } from './zcode.js'
-import { AdapterError, type AdapterStatus, type AttachOptions, type DetectResult, type HarnessAdapter, type PlanResult } from './types.js'
+import { AdapterError, type AdapterStatus, type DetectResult, type HarnessAdapter, type PlanResult } from './types.js'
 
 function builtins(): HarnessAdapter[] {
   return [claudeCodeAdapter, zcodeAdapter, dshAdapter, codexAdapter, openCodeAdapter, mimoCodeAdapter, mimoDesktopAdapter, workbuddyAdapter, genericAdapter]
