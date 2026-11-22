@@ -206,6 +206,57 @@ describe('orchestrator autoapprove > e2e（mock 闭环）', () => {
     }
   }, 180_000)
 
+  it('①c scratch_only 卡零提交（ORCH_MOCK_NO_COMMIT=1）超时自动结算落位 merged/：merged 事件带 scratch_only_settle、develop 不动、worktree 保留', () => {
+    // 回归：2026-11-23 bench codex 腿（bench-ship-codex-r2b）——scratch_only 卡（产物只落
+    // worktree 非跟踪区，94c6c34：门禁 skipped + XTE no_commit 豁免）零提交跑完闭环，被
+    // 防假合并门当非 scratch 卡拒绝转 failed/。零提交对 scratch_only 是合规形态：不 spawn
+    // finish（它对零提交显式失败，37bfdfc）、直接结算 merged/，worktree 保留（答卷归档由
+    // 调度台收尾做）；非 scratch_only 卡零提交照旧拒绝（①b 保绿即防线零放宽）。
+    const repo = mkRepo({ workerBackend: 'mock', extra: { autoApprove: AA_CFG } })
+    try {
+      submitCard(repo.root, 'aa-scratch', { gate: 'L3', scratch_only: true })
+      runOrch(repo.root, 'run aa-scratch --backend mock', { ORCH_MOCK_NO_COMMIT: '1' })
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-scratch')).toBe(true)
+      rewindLastVerdict(repo.root, 'aa-scratch')
+      const developBefore = git(repo.root, 'rev-parse develop')
+      runOrch(repo.root, 'autoapprove')
+      expect(cardIn(repo.root, 'merged', 'aa-scratch')).toBe(true)
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-scratch')).toBe(false)
+      expect(cardIn(repo.root, 'failed', 'aa-scratch')).toBe(false)
+      const evts = eventsOf(repo.root, 'aa-scratch')
+      const merged = evts.find((e) => e.type === 'merged') as Record<string, unknown> | undefined
+      expect(merged?.scratch_only_settle).toBe(true)
+      expect(merged?.auto).toBe(true) // sweep 路径 source='auto'
+      expect('merge_commit' in (merged ?? {})).toBe(false) // 不合并：不记 merge_commit
+      expect(git(repo.root, 'rev-parse develop')).toBe(developBefore) // develop 不动
+      // worktree 保留（cleanup 延后）：答卷在 worktree 非跟踪区，归档由调度台收尾做
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'worktrees', 'aa-scratch'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
+
+  it('①d scratch_only 卡零提交人工 approve 同享豁免（source=human 同一分支）：结算落位、不带 auto 标记、worktree 保留', () => {
+    const repo = mkRepo({ workerBackend: 'mock' }) // autoApprove 缺省关：纯人工闸门
+    try {
+      submitCard(repo.root, 'aa-scratch-h', { gate: 'L3', scratch_only: true })
+      runOrch(repo.root, 'run aa-scratch-h --backend mock', { ORCH_MOCK_NO_COMMIT: '1' })
+      expect(cardIn(repo.root, 'awaiting-human', 'aa-scratch-h')).toBe(true)
+      const developBefore = git(repo.root, 'rev-parse develop')
+      runOrch(repo.root, 'approve aa-scratch-h')
+      expect(cardIn(repo.root, 'merged', 'aa-scratch-h')).toBe(true)
+      const evts = eventsOf(repo.root, 'aa-scratch-h')
+      expect(evts.some((e) => e.type === 'human_gate' && e.decision === 'approved')).toBe(true)
+      const merged = evts.find((e) => e.type === 'merged') as Record<string, unknown> | undefined
+      expect(merged?.scratch_only_settle).toBe(true)
+      expect(merged?.auto).toBeUndefined() // 人工路径不带 auto 标记
+      expect(git(repo.root, 'rev-parse develop')).toBe(developBefore)
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'worktrees', 'aa-scratch-h'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  }, 180_000)
+
   it('② 超时 + blockers>0 → 自动返工；maxAutoRetry=1 第二次超限留人', () => {
     const repo = mkRepo({ workerBackend: 'mock', extra: { autoApprove: AA_CFG } })
     try {
