@@ -13,10 +13,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hintsOverlap } from '../policy.mjs';
+import { hintsIntersectExact } from '../policy.mjs';
 
-/** files_hint（glob 列表）是否触及核心/发布路径：复用 policy.mjs 的段首相交判定
- *  （src/gateway/** 与 src/gateway/server.ts 首段同为 src → 命中）。 */
+/** files_hint（glob 列表）是否触及核心/发布路径：复用 policy.mjs 的文件级精确判定
+ *  （hintsIntersectExact——2026-11-20 与 pilotageReason/dispatch/sail 同族对齐；曾用的
+ *  段首粗口径把 src/ 下任何卡都判命中，自动升档前进4 白烧高 tier 凭据）。 */
 
 // 车钟档位（2026-11-01 船东定名）：tier 四级制 ahead-1..4，文档与日志显示「前进1-4」
 // （船钟口径：前进1=慢车最省，前进4=旗舰全速）。旧两级制 heavy/light 是别名，
@@ -52,7 +53,7 @@ export function resolveTier(meta, cfg, env = process.env) {
   if (!name) {
     // 规则兜底：只做「升级」方向（files_hint 命中核心/发布路径 → ahead-4/前进4），
     // 不隐式降档——未声明的卡保持全局默认路由，行为不变。
-    if (!tiers[TIER_AUTO_UPGRADE] || !hintsOverlap(meta?.files_hint, [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])])) return null;
+    if (!tiers[TIER_AUTO_UPGRADE] || !hintsIntersectExact(meta?.files_hint, [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])])) return null;
     name = TIER_AUTO_UPGRADE;
     auto = true;
   }

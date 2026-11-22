@@ -2,11 +2,14 @@
 // 背景（2026-10-29/30 夜跑实证）：drain 长跑时 transient 类故障（GLM 429 限流、网络
 // 抖动）把卡打成 blocked，等人工第二天 resume——自主长跑断在夜里。worker 级原地
 // 重试（transient.mjs，spawn 时 ≤3 次）已降低概率，但重试用尽后仍落 blocked。
-// 这里提供 drain 选卡前的自动续通道，设计总纲四条：
+// 这里提供 drain 选卡前的自动续通道，设计总纲五条：
 //   1. 只续 transient 类失败（签名匹配或 worker_retry 链定性，见 isTransientBlocked）；
 //   2. 每卡冷却期内最多自动续 1 次（auto_resumed_at 写进卡 frontmatter，缺省 24h）；
 //   3. 每次 drain 最多 maxPerRun 张（缺省 2），按 blocked 时间最早先续；
-//   4. 永不静默：每次自动续记 auto_resume { card, attempts } 事件；读不了的卡跳过并告警。
+//   4. 永不静默：每次自动续记 auto_resume { card, attempts } 事件；读不了的卡跳过并告警；
+//   5. 每卡全生命周期累计自动续 ≤maxPerCard 次（auto_resume_count 进卡 frontmatter，缺省 3）：
+//      超限不再自动续、留 blocked 交人工并落 auto_resume_rejected 事件——冷却只限频次不限
+//      总量，「续→崩→冷却→续」可无限循环烧钱（2026-11-15 质量专项 P1-⑨），生命周期上限封顶。
 // 全局开关 workflow.json autoResume.enabled（缺省 true）；drift 降级期间整通道暂停
 // （降级 = 全人工，检查在 orchestrator.mjs 的 autoResumePass）。
 // 资格判定抽成纯函数 pickAutoResumeCandidates（无 fs/无子进程）便于单测；
@@ -23,9 +26,13 @@ import { taskLockLooksLive } from './task-lock.mjs';
 export const DEFAULT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 /** 每次 drain 自动续张数缺省值：2（workflow.json autoResume.maxPerRun 可调，须正整数）。 */
 export const DEFAULT_MAX_PER_RUN = 2;
+/** 每卡全生命周期自动续次数缺省上限：3（workflow.json autoResume.maxPerCard 可调，须正整数）。 */
+export const DEFAULT_MAX_PER_CARD = 3;
 
 /** frontmatter 冷却标记键名（卡自动续时写入，人工 resume 不写）。 */
 export const AUTO_RESUMED_AT_KEY = 'auto_resumed_at';
+/** frontmatter 累计自动续次数键名（卡自动续时 +1，人工 resume 不写——生命周期上限的卡上留痕）。 */
+export const AUTO_RESUME_COUNT_KEY = 'auto_resume_count';
 
 // settle 事件类型：卡在 blocked/ 时，最后一条这类事件回答「为什么 blocked」。
 // failed 也要看：cmdRun 异常兜底 failTaskToBlocked 把卡挪进 blocked/ 时写的是 failed 事件
@@ -113,6 +120,24 @@ export function cooldownPassed(meta, now, cooldownMs) {
   return now - t >= cooldownMs;
 }
 
+/**
+ * 读卡 frontmatter 累计自动续次数。缺字段 = 0（从没自动续过）；负整数与非整数
+ * 一律算脏值返回 -1——字段由程序写入，出现脏值说明卡被手改过，与 cooldownPassed
+ * 的脏值口径同哲学（宁少勿滥：调用方把脏值当「已达上限」保守处理，交人工）。
+ */
+export function autoResumeCountOf(meta) {
+  const v = meta?.[AUTO_RESUME_COUNT_KEY];
+  if (v === undefined || v === null || v === '') return 0;
+  return Number.isInteger(v) && v >= 0 ? v : -1;
+}
+
+/** 生命周期上限判定：累计次数达上限（或脏值）→ true，不再自动续。 */
+export function lifetimeCapReached(meta, maxPerCard) {
+  const cap = Number.isInteger(maxPerCard) && maxPerCard > 0 ? maxPerCard : DEFAULT_MAX_PER_CARD;
+  const count = autoResumeCountOf(meta);
+  return count < 0 || count >= cap;
+}
+
 /** 卡的 blocked 时间（最后一条 settle 事件的 ts；缺失/解析失败按 0=最早，先续先解脱）。 */
 function blockedTimeOf(events) {
   const settle = lastSettle(events);
@@ -124,21 +149,25 @@ function blockedTimeOf(events) {
  * 纯函数：从 blocked 卡中挑「可安全自动续」的候选。
  * @param {Array<{id: string, meta: object, events: Array<object>}>} blockedCards
  *   扫描方已备好的卡描述（meta=frontmatter、events=logs/<id>/events.jsonl 全量）。
- * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number }} [opts]
- *   now/maxPerRun/cooldownMs 可注入便于测试；非法值静默回落缺省（配置层的非法值
+ * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number, maxPerCard?: number }} [opts]
+ *   now/maxPerRun/cooldownMs/maxPerCard 可注入便于测试；非法值静默回落缺省（配置层的非法值
  *   告警归 workflow-config.mjs 的 resolveAutoResume，这里不重复告警）。
  * @returns {Array<{id: string, attempts: number, blockedAt: number}>}
  *   按 blocked 时间升序（同刻按 id 稳定）的前 maxPerRun 张；
  *   attempts = 事件链里 worker_retry 的次数（auto_resume 事件的留痕字段）。
+ *   资格三闸顺序：transient 定性 → 生命周期上限（永久性拒绝，优先于时限性的冷却报因）
+ *   → 冷却。达上限的卡不再进入候选，留痕归 lifetimeCapRejections。
  */
 export function pickAutoResumeCandidates(blockedCards, opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
   const maxPerRun = Number.isInteger(opts.maxPerRun) && opts.maxPerRun > 0 ? opts.maxPerRun : DEFAULT_MAX_PER_RUN;
   const cooldownMs = Number.isInteger(opts.cooldownMs) && opts.cooldownMs > 0 ? opts.cooldownMs : DEFAULT_COOLDOWN_MS;
+  const maxPerCard = opts.maxPerCard;
   const eligible = [];
   for (const card of Array.isArray(blockedCards) ? blockedCards : []) {
     if (!card || typeof card.id !== 'string') continue;
     if (!isTransientBlocked(card.events)) continue;
+    if (lifetimeCapReached(card.meta, maxPerCard)) continue;
     if (!cooldownPassed(card.meta, now, cooldownMs)) continue;
     eligible.push({
       id: card.id,
@@ -151,16 +180,68 @@ export function pickAutoResumeCandidates(blockedCards, opts = {}) {
 }
 
 /**
- * 把 auto_resumed_at 写进卡 frontmatter（已存在则覆盖该行），返回新文本。
- * 冷却标记必须在 spawn resume 子进程**之前**落到卡文件（blocked/ 目录内）：
- * 子进程随后 moveCard 只是 rename，字段随卡走——自动续后再 blocked 时，下轮
- * drain 靠它判冷却（连续自动续失败不重试的护栏）。
+ * 纯函数：挑出「本可自动续但累计次数已达生命周期上限」的卡，供调用方落事件/日志留痕
+ * （P1-⑨：超限不再自动续、留 blocked 待人工，判定永不静默）。
+ * 三条件：自动续资格成立（与 pick 同资格——无资格的卡本来就不进通道，不算「被上限拒」；
+ * opts.isEligible 可注入：blocked 通道缺省 isTransientBlocked，孤儿通道传 classifyOrphan
+ * ==='resume' 的谓词，两通道资格口径不同、上限口径相同）+ 达上限（脏值同判）+ 本轮未
+ * 重复留痕。去重口径：事件链里 auto_resume / auto_resume_rejected 两类事件取最后一条，
+ * 若已是 lifetime_cap 拒绝 = 卡在此上限状态下已报过一次，不再重复落（卡持续滞留 blocked
+ * 时防 drain 每轮刷屏）。人工 resume 后再 blocked、次数未清 → 仍视为同一状态不重报。
+ * @returns {Array<{id: string, count: number|string, cap: number}>} count 为卡上累计值
+ *   （脏值原样透出，便于人工排查）；按 id 稳定排序。
+ */
+export function lifetimeCapRejections(cards, opts = {}) {
+  const cap = Number.isInteger(opts.maxPerCard) && opts.maxPerCard > 0 ? opts.maxPerCard : DEFAULT_MAX_PER_CARD;
+  const isEligible = typeof opts.isEligible === 'function' ? opts.isEligible : (c) => isTransientBlocked(c.events);
+  const out = [];
+  for (const card of Array.isArray(cards) ? cards : []) {
+    if (!card || typeof card.id !== 'string') continue;
+    let eligible = false;
+    try { eligible = isEligible(card) === true; } catch { eligible = false; }
+    if (!eligible) continue;
+    const count = autoResumeCountOf(card.meta);
+    if (count >= 0 && count < cap) continue;
+    const events = card.events ?? [];
+    let lastMarkIdx = -1;
+    for (let i = 0; i < events.length; i++) {
+      if (events[i]?.type === 'auto_resume' || events[i]?.type === 'auto_resume_rejected') lastMarkIdx = i;
+    }
+    if (lastMarkIdx >= 0 && events[lastMarkIdx]?.type === 'auto_resume_rejected') continue;
+    out.push({ id: card.id, count: count >= 0 ? count : card.meta?.[AUTO_RESUME_COUNT_KEY], cap });
+  }
+  out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return out;
+}
+
+/**
+ * 把自动续标记写进卡 frontmatter（auto_resumed_at 冷却标记刷新 + auto_resume_count 累计 +1），
+ * 返回新文本。两个字段都必须在 spawn resume 子进程**之前**落到卡文件（blocked/ 目录内）：
+ * 子进程随后 moveCard 只是 rename，字段随卡走——自动续后再 blocked 时，下轮 drain 靠
+ * auto_resumed_at 判冷却（连续自动续失败不重试的护栏）、靠 auto_resume_count 判生命周期上限
+ * （P1-⑨：每卡累计自动续 ≤maxPerCard 次，封顶「续→崩→冷却→续」循环烧钱）。
+ * 命名沿首字段 auto_resumed_at 起名（历史沿用），现在一次落两个字段。
  */
 export function withAutoResumedAt(cardText, iso) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(cardText);
   if (!m) return cardText; // 无 frontmatter（不该发生）：原样返回，调用方另行处理
-  const kept = m[1].split('\n').filter((l) => !/^\s*auto_resumed_at\s*:/.test(l));
-  return cardText.replace(m[0], `---\n${[...kept, `${AUTO_RESUMED_AT_KEY}: ${iso}`].join('\n')}\n---`);
+  let prevCount = 0;
+  const kept = m[1].split('\n').filter((l) => {
+    if (/^\s*auto_resumed_at\s*:/.test(l)) return false;
+    const cm = /^\s*auto_resume_count\s*:\s*(-?\d+)\s*$/.exec(l);
+    if (cm) {
+      prevCount = Number.parseInt(cm[1], 10);
+      return false;
+    }
+    return true;
+  });
+  // 旧值缺失按 0 起算；负值（不该出现）同样归零重计——本函数只在 pick 通过上限闸后被调用，
+  // 脏值卡已被 lifetimeCapReached 拦在候选外，这里是防御性兜底而非脏值修复通道
+  const nextCount = prevCount > 0 ? prevCount + 1 : 1;
+  return cardText.replace(
+    m[0],
+    `---\n${[...kept, `${AUTO_RESUMED_AT_KEY}: ${iso}`, `${AUTO_RESUME_COUNT_KEY}: ${nextCount}`].join('\n')}\n---`,
+  );
 }
 
 /**
@@ -200,9 +281,11 @@ export function autoResumedAtNow() {
 
 /**
  * 孤儿 running 卡处置归类（纯函数，只看事件链；锁判活在调用方）：返回
- *   'resume'  — transient 族，可自动续（沿用 24h 冷却与每次上界）；
+ *   'resume'  — transient 族，可自动续（沿用 24h 冷却、每次上界与每卡生命周期上限）；
  *   'breaker' — 事件链有熔断（最后一条 worker_spawned 之后），确定性失败永不自动续；
  *   'stuck'   — 非 transient（会话已以 failed/非签名 settle 收尾），落 blocked 交人工。
+ *               （对冲：worktree 相对 base 已有非空提交时调用方改走续用路径，见
+ *               pickOrphanResumeCandidates——提交数对账由调用方做，本纯函数不碰 fs。）
  * 判定路径（'resume' 的三条，与 isTransientBlocked 同哲学，面向「无 settle 收尾」的崩溃现场）：
  *  A. 事件链套用 isTransientBlocked 成立——上一会话以 transient 签名收尾（resume 后再崩）
  *     或 worker_retry 链 + blocked 收尾（其内部熔断护栏照常生效）；
@@ -231,27 +314,41 @@ export function classifyOrphan(events) {
 
 /**
  * 纯函数：从 running 卡中挑「可安全自动续」的孤儿。
- * @param {Array<{id: string, meta: object, events: Array<object>, locked?: boolean}>} runningCards
+ * @param {Array<{id: string, meta: object, events: Array<object>, locked?: boolean, commitsAhead?: number|null}>} runningCards
  *   扫描方已备好的卡描述；locked = 任务锁判活（readTaskLock + taskLockLooksLive）：
  *   true = 有活进程在驱动（同进程嵌套闭环或并行实例）——活跃卡无条件跳过。
- * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number }} [opts]
+ *   commitsAhead = 调用方对账后的 worktree 提交数（仅 'stuck' 归类卡需要，见下）。
+ * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number, maxPerCard?: number }} [opts]
  *   与 pickAutoResumeCandidates 同参（非法值静默回落缺省）。
- * @returns {Array<{id: string, attempts: number}>} 按 id 稳定排序的前 maxPerRun 张
- *   （孤儿无 settle 时间可排，id 序保证确定性）；attempts = 事件链 worker_retry 次数。
+ * @returns {Array<{id: string, attempts: number, commitsAhead?: number, rescue?: string}>}
+ *   按 id 稳定排序的前 maxPerRun 张（孤儿无 settle 时间可排，id 序保证确定性）；
+ *   attempts = 事件链 worker_retry 次数；'stuck' 对冲续用卡带 commitsAhead 证据字段与
+ *   rescue='stuck_with_commits' 标记（留痕区分普通崩溃族续跑）。生命周期上限与 blocked
+ *   通道同闸：frontmatter 随卡走，两个通道共享同一累计值。
+ *
+ * stuck 终态对冲（2026-11-17）：'stuck'（最后会话以非 transient settle 收尾）历史卡在
+ * worktree 相对 base 已有非空提交（commitsAhead > 0）时不再落 blocked 清空重做，走续用
+ * 路径——resume 原地续做，完成提交与半成品就地保留。无提交/对账不可得（commitsAhead
+ * 缺失或 0）照旧交人工。冷却与 maxPerRun 护栏两族同款（24h 内不重复续）。
  */
 export function pickOrphanResumeCandidates(runningCards, opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
   const maxPerRun = Number.isInteger(opts.maxPerRun) && opts.maxPerRun > 0 ? opts.maxPerRun : DEFAULT_MAX_PER_RUN;
   const cooldownMs = Number.isInteger(opts.cooldownMs) && opts.cooldownMs > 0 ? opts.cooldownMs : DEFAULT_COOLDOWN_MS;
+  const maxPerCard = opts.maxPerCard;
   const eligible = [];
   for (const card of Array.isArray(runningCards) ? runningCards : []) {
     if (!card || typeof card.id !== 'string') continue;
     if (card.locked) continue;
-    if (classifyOrphan(card.events) !== 'resume') continue;
+    const kind = classifyOrphan(card.events);
+    const stuckRescued = kind === 'stuck' && card.commitsAhead > 0;
+    if (kind !== 'resume' && !stuckRescued) continue;
+    if (lifetimeCapReached(card.meta, maxPerCard)) continue;
     if (!cooldownPassed(card.meta, now, cooldownMs)) continue;
     eligible.push({
       id: card.id,
       attempts: (card.events ?? []).filter((e) => e?.type === 'worker_retry').length,
+      ...(stuckRescued ? { commitsAhead: card.commitsAhead, rescue: 'stuck_with_commits' } : {}),
     });
   }
   eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

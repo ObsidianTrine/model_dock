@@ -91,8 +91,8 @@
 - **路径**：所有文件系统路径经 `src/util/paths.ts`，**禁止硬编码** `~/.modeldock`。测试用 `MODELRDOCK_FAKE_HOME` 重定向临时目录。
 - **写盘**：一律 `atomicWrite()`（tmp + rename，权限 0600）；写前自动快照（边界：config.toml 自身由 .lock + 原子写保护；版本迁移类写盘与同步导入前快照到 backups/config/）。
 - **SEA 检测**：用 `process.execPath` 文件名（开头 `modeldock`）判断，**不要**依赖 `sea-config.json` 的 `env` 或 `import.meta.url`（postject 注入下失效）。
-- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。各客户端 attach 触达的配置键清单（写入/清除口径，逐客户端分节）见 `docs/attach-env-vars.md`——改适配器的写入/清理行为时同步该文档。
-- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、勿手改；dsh/ZCode 的 YAML 用 `yaml` Document API 保留注释。`mutateConfig` 是整包重序列化，用户手写注释会被抹除（已知取舍，见 docs/known-issues.md CORRECT-03）。
+- **适配器**：每个 harness 实现 `detect / planAttach / planDetach / status`；新增放 `src/adapters/` 并在 `registry.ts` 注册。L2 pack 经 `config.toml` 的 `[adapter_packs.*]` 零代码扩展。各客户端 attach 触达的配置键清单（写入/清除口径，逐客户端分节）见 `docs/ops/attach-env-vars.md`——改适配器的写入/清理行为时同步该文档。
+- **配置格式**：`config.toml` 用户可直编（atomicWrite）；`secrets.json` 程序管理、勿手改；dsh/ZCode 的 YAML 用 `yaml` Document API 保留注释。`mutateConfig` 是整包重序列化，用户手写注释会被抹除（已知取舍，见 docs/ops/known-issues.md CORRECT-03）。
 - **预设扩展**：运行时预设 = 内置库 `src/presets/data.ts` 的 `BUILTIN_PRESETS` + 用户覆盖文件 **`~/.modeldock/presets.json`**（同名 `id` 覆盖、新 `id` 追加；缺失视为无自定义、格式错误阻断启动）。**新增 provider 不要只写内嵌，可复用的先落到 presets.json 机制。**
 - **错误信息**：必须可操作，附修复建议。
 - **双语文案**：用户可见文案一律经 `src/util/i18n.ts` 的 `t(中文, English, params?)`（中文原文即 key），**两个语言参数必须同写**；语言解析链 `--lang > MODELRDOCK_LANG > config.toml language > zh`，commander 分支须在 `buildProgram()` 前 `initLang()`。中文段输出须与既有文案逐字节一致（测试有中文断言）；注释、枚举值、程序比较用的字符串不走 t()；模块顶层常量禁直接求值 t()（用 getter/懒函数）。Web 控制台 `data-i18n="中文||English"` 机制独立存在，勿混用。长生命周期 Web 组件的 label/title **必须传惰性函数**且在 `applyLang()` 末尾补 `render()`（传字符串会把语言固化在加载时刻，2026-10 状态行 5 颗 pill 曾踩）。
@@ -126,6 +126,21 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
 - 套件：test/ 下 252 个测试文件（产品套件 149 + 编排器套件 103；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- **按域套件速查**（L1 选文件的入口，文件名以 test/ 目录为准；同前缀属同域）：
+
+  | 域 | 套件文件（test/） |
+  |---|---|
+  | 网关转发 | `relay` / `hotpath` / `gateway` / `gateway-shared` / `relay-concurrency` / `relay-gaps` / `relay-lazyparse` / `relay-model-filter` / `relay-scan-once` / `concurrency` / `state-gaps` / `token-limits` / `request-log-ring` / `logs-query` / `log-retention` / `err-taxonomy` / `error-hints` / `observability` / `debuglog` |
+  | 路由与接入 | `model-fallback-config` / `model-fallback-web` / `keypool` / `pin-protocol` / `attach-port` / `attach-port-flag` / `attach-cli` |
+  | Web 控制台 | `webui-*` / `ui-html` / `ui-edit-backfill` / `ui-edit-cap` / `ui-min-fresh` / `console-cache` / `dedup-smoke` / `ui-lint` / `overview-presets-view` / `server-param-guard` |
+  | 适配与安装 | `adapters` / `adapter-packs` / `presence` / `install` / `cliinstall` / `noderuntime` / `codex-catalog` / `codex-profiles` / `dshcatalog` |
+  | 配置与密钥 | `store` / `config-gaps` / `config-isomorphism` / `config-reference` / `secrets-*` / `fsx-memo` / `realhome-write-guard` / `backup` / `safeequal` |
+  | 导入与目录 | `import-scan` / `import-sources` / `cli-import` / `presets` / `presets-userpresets-gaps` / `catalog-lazy` / `fetch` |
+  | 凭据与计量 | `gateway-ephemeral` / `transfer` / `net` / `sysproxy` / `time` |
+  | 同步与云 | `sync*` / `cloud*` / `lan` / `lansync` |
+  | 更新 | `update-*` / `sea-state` / `sea-gateway-cli` |
+  | 运维与 CLI | `gatewaycmd*` / `daemon-lifecycle` / `autostart` / `reset*` / `uninstall` / `ops-*` / `tray-*` / `diag` / `cli-*` / `mcp-scan` / `agent-security` / `profile-cli` / `daytype` / `holidays` / `i18n` / `stdio-silent-crash` / `sandbox-migrate` / `startup-lazy` / `passphrase-hint` |
+  | 门禁与基建 | `docs-lint` / `eslint-baseline` / `test-gate` / `test-suite-couplings` / `test-typecheck-gate` / `pr-risk-tier` / `cli-index-cmds` / `perf-*` / `gateway-audit*` |
 - **写入门禁**（2026-10-30 生产覆盖事故防线）：测试/agent 上下文进程（vitest 注入 `VITEST`、种子脚本显式 `MODELRDOCK_TEST=1`、**agent CLI 环境标记**——`ZCODE_*`/`CLAUDECODE` 等，见 `src/util/fsx.ts` AGENT_ENV_MARKERS）对真实 home（`~/.modeldock` 或 `MODELRDOCK_HOME`）的 `atomicWrite`/`withFileLock` 一律拒写并给可操作报错——**只看写入目标落点，不看沙箱 env 是否已配**；ModelDock 自家入口进程（cli.ts 三路分发）置受信写者标记不受误伤；有意写真实 home 的场景（当前仅 test/autostart.test.ts 的 win 真注册表用例）在用例内设 `MODELRDOCK_ALLOW_REAL_HOME_WRITE=1` 豁免。测试收尾必须 `await stopSyncEngine()` 再恢复 env（同步引擎长尾 tick 是两次事故的直接写手）。
 - 单测一律 `server.listen(0)` 取随机端口，**绝不监听 8687 / 8890 / 任何写死端口**；手测沙箱配方见「端口与实例约定」。
 - 文件权限断言按 `process.platform === 'win32'` 做平台分支（NTFS 不认权限位）。
@@ -133,7 +148,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
 
 ### vitest 隔离模型：跨文件 mock 是雷区（必读）
 
-双 config 均 `isolate: false`（vitest4 forks 池）：**同一 worker 进程内所有测试文件共享模块注册表与模块 mock 注册表**。池策略现状（2026-11-11）：产品套件 maxWorkers 缺省 1（2026-10-01 policy.test.ts worker 生命周期 CI 卡死前科 + 顺序耦合对），编排套件缺省并行 4（B3 实验证据 docs/archive/test-orch-parallel-exp.md，CI 复证中——workflow-suite 连续 3 天绿才维持定档），`VITEST_MAX_WORKERS` 可覆盖两处缺省。两条硬约束：
+双 config 均 `isolate: false`（vitest4 forks 池）：**同一 worker 进程内所有测试文件共享模块注册表与模块 mock 注册表**。池策略现状（2026-11-11）：产品套件 maxWorkers 缺省 1（2026-10-01 policy.test.ts worker 生命周期 CI 卡死前科 + 顺序耦合对），编排套件缺省并行 4（B3 实验证据 docs/archive/test-orch-parallel-exp.md，CI 复证窗口顺延——2026-11-17 调度台 run 级核验完成：观察窗 11-13–11-15 绿、11-16 因无关域夹具时间炸弹红（research.test.ts，修复 baa55d9 已合本地 develop 待 push 转绿），「连续 3 天绿」未成立、顺延决策维持，新观察窗自修复 push 落 origin 之日起算，见报告「落地结果」节），`VITEST_MAX_WORKERS` 可覆盖两处缺省。两条硬约束：
 
 1. **同一个模块不要被两个测试文件 `vi.mock`**——谁生效取决于执行顺序，表现为「单独跑绿、一起跑红」（最典型：别的文件的断言突然收到 0 次调用）。
 2. **不要用 `vi.clearAllMocks()` / `vi.restoreAllMocks()` 做跨用例清场**（会连其他文件的模块 mock 一起清/还原）；只清自己的：`vi.mocked(x).mockClear()`、`vi.spyOn(...).mockRestore()`。
@@ -149,9 +164,11 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 
 判断方法：涉及多处共享模块的改动，**单独跑新文件绿 ≠ 全量绿**，必须组合跑（至少 `uninstall.test` / `update-cli.test` / `store.test`）。参考实现：`test/reset.test.ts`、`test/reset-cli.test.ts`。
 
+- **编排套件宿主仓红线（2026-11-16 自毁事故防线）**：编排套件全量/组合跑（`npm run test:workflow`、大范围 vitest run）**禁止在与队列卡同名（或存在待 finish 卡）的 linked worktree 内执行**——并发 finish 的清理段（worktree remove + 目录 rmSync + branch -d）会把正在跑套件的 worktree 连根删掉（零事件签名，实验室已逐形状复现）；同理禁止在套件运行窗口内对宿主仓并发跑 finish/手工 worktree/分支操作。套件对宿主仓的越界改动由 `test/orchestrator/host-guard.mjs` 哨兵（vitest globalSetup 前后快照对账，两套件同享）越界即红兜底。
+
 ## 多 Agent 并行开发约定（feature-branch 工作流）
 
-本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`。
+本仓库的自治编排体系定名 **Dockmaster（坞长）**——任务卡进、合并出；agent 入口为 `/dockmaster` 技能（原 `/orchestrate`），操作手册见 `.agents/workflows/orchestrator.md`（入口+速查，详解按场景拆分在 orch-*.md）。
 
 多个 agent 并行开发时，**禁止直接在 develop/main 上修改代码文件**（PreToolUse hook 拦截 Edit/Write）；**main 上连文档也禁止直改**——对外文档一律在 develop 上改（develop 非源代码类文档直改放行），main 只接受 develop / hotfix 合入。多机同步用 `git pull --rebase`。所有代码改动走 worktree 分支流程，完整规程见 **`.agents/workflows/feature-branch.md`**（动手前必读），由 `.agents/scripts/feature-branch.mjs` 支撑：
 
@@ -169,7 +186,12 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 | `worktree-rescue.md` | 接管 / 清理中断的 worktree 任务 | `list` 显示残留任务时读 |
 | `add-adapter.md` | 新增 harness 客户端适配器 | 新增 adapter 时读 |
 | `add-preset.md` | 新增 provider 预设 | 新增供应商时读 |
-| `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：任务卡进、合并出（速查 + A 核心闭环 / B 自主模式 / C 观测对账 / D 周边） | 写任务卡 / 跑编排 / 处理 blocked 任务时读 |
+| `orchestrator.md` | **Dockmaster（坞长）**自治编排操作手册：入口 + 速查 + 文档地图（详解按场景拆分在 orch-*.md） | 写任务卡 / 跑编排 / 处理 blocked 任务时读（先看速查与文档地图） |
+| `orch-loop.md` | Dockmaster 核心闭环 runbook：任务卡怎么写 / 泊位状态机 / 熔断与看门狗 / 后端与 tier / 权限红线 / fastlane 与 ui_check / 互斥与并行 | 写任务卡、查闭环机制细节时读 |
+| `orch-autonomy.md` | Dockmaster 自主模式 runbook：引水闸 / 提案与 autopilot / 巡检与 propose / 上游管线 / nightly / watch / sail / drill / 开启清单 / escalation / push-review / 双向批示 | 少人值守自治（提案、夜航、自由航行）时读 |
+| `orch-supply.md` | Dockmaster 供给与守卫 runbook：动态选船 / worker 并发供给闸 / configGuard / drafts gc / scanAutoFix / 一次性凭据 | 调并发、换船、排 workflow.json 自改与提案积压时读 |
+| `orch-observe.md` | Dockmaster 观测对账 runbook：stats / follow / drift / reconcile / 舰队控制台 / 验船师与调研评测集 / autoapprove / notify-digest | 看运行状态、对账、回归评测集时读 |
+| `orch-ecosystem.md` | Dockmaster 生态与边界 runbook：spec / spec review / release-propose / 与 feature-branch 的关系 / 移植到其他项目 | 特性级设计先行、发版提案、移植工具链时读 |
 | `zcode-native.md` | 编排器引擎全断时的降级开航（ZCode 会话原生 Agent 当船，调度台手动闭环） | claude/zcode 引擎都起不来仍要派活时读 |
 
 ### feature-branch 核心命令
@@ -197,11 +219,11 @@ cd <目标项目> && node .agents/scripts/agent-init.mjs   # 交互生成 workfl
 cp <目标项目>/.agents/hooks/policy-dispatch.mjs ~/.agents/hooks/   # 机器级 Bash 红线 dispatcher：注册一次、全项目生效
 ```
 
-移植要点见 `.agents/workflows/orchestrator.md`「移植」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
+移植要点见 `.agents/workflows/orch-ecosystem.md`「移植到其他项目」节与 `.agents/workflows/feature-branch.md`「移植到其他项目」节。
 
 ### GitHub 侧自动化（分层 PR 审查 + Dependabot）
 
-agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程；总览与运维见 **`docs/ai-review-system.md`**）。启用需在仓库 Settings 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 AI job 跳过并告警）；完整设置与成本控制见 **`docs/ci-bots.md`**：
+agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在 `.github/`，改动同样走 worktree 流程；总览与运维见 **`docs/ops/ai-review-system.md`**）。启用需在仓库 Settings 配置 secret `CLAUDE_AUTH_TOKEN` 与 Variables `CLAUDE_BASE_URL`/`CLAUDE_MODEL`（三件套，缺一 AI job 跳过并告警）；完整设置与成本控制见 **`docs/ops/ci-bots.md`**：
 
 | 文件 | 作用 | 需要 secrets |
 |------|------|------|
@@ -215,7 +237,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 | `workflows/dependabot-fix.yml` | Claude 验证 Dependabot PR（build+test 全绿评论可合并；失败做最小修复推回；大破坏不硬修） | `CLAUDE_AUTH_TOKEN` + `DEPENDABOT_GH_TOKEN`（PAT） |
 | `workflows/ci-autofix.yml` | 主干 test 失败的投机自动修复（main/develop、首次失败才触发；可 `workflow_dispatch` 手动点火）：最小修复+补测试 → 开 `[ci-autofix]` PR 待审；每 run 仅 1 次；收尾兜底代开 PR + 会话日志 artifact | `CLAUDE_AUTH_TOKEN`（key），无需 PAT |
 
-- **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**，换供应商只改三件套。注意项见 `docs/ci-bots.md`「模型接入」。
+- **模型接入**：bot 走任意 Anthropic 兼容端点，**配置全在 GitHub 侧、yml 零默认值**，换供应商只改三件套。注意项见 `docs/ops/ci-bots.md`「模型接入」。
 - **Dependabot PR 上的 GITHUB_TOKEN 一律只读**（平台行为）：评论/推送必须经 PAT；缺 PAT 时跳过留人工。
 - **防回环**：bot 修复提交固定前缀（`[dependabot-fix]` / `[ci-autofix]`），review bot 检测 PR head 为该前缀即跳过；ci-autofix 仅认 main/develop 的 push 型 run 且每 run 只尝试一次。
 - **合并权在人**：bot 只发评论与修复提交，不 approve、不 merge；发版仍走 release.md 人工授权流程。

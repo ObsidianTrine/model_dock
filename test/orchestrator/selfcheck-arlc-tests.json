@@ -1,0 +1,16 @@
+{
+  "file": "autoresume-lifetime.test.ts",
+  "countAtLeast": [
+    { "pattern": "lifetimeCapRejections", "atLeast": 6 },
+    { "pattern": "normalizeSignalHashes", "atLeast": 5 },
+    { "pattern": "withAutoResumedAt", "atLeast": 5 },
+    { "pattern": "pickOrphanResumeCandidates", "atLeast": 2 },
+    { "pattern": "pickAutoResumeCandidates", "atLeast": 4 },
+    { "pattern": "auto_resume_count: 3", "atLeast": 1 },
+    { "pattern": "3 轮「续→blocked」循环", "atLeast": 1 },
+    { "pattern": "冷却语义不回归", "atLeast": 1 },
+    { "pattern": "maxPerCard", "atLeast": 8 },
+    { "pattern": "vi\\.mock", "atLeast": 0 }
+  ],
+  "grepZero": ["vi\\.clearAllMocks", "vi\\.restoreAllMocks", "8687", "8890"]
+}

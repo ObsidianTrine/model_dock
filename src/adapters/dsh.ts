@@ -388,7 +388,7 @@ export const dshAdapter: HarnessAdapter = {
     if (entries.length > 0) providerEntry.models = entries
 
     // 只认 profile.default_model：无值时跳过 agent-default-model 切换，不拿目录首模型猜占位值
-    // （契约见 docs/attach-env-vars.md dsh 节「无 default_model 时跳过、不猜占位值」）
+    // （契约见 docs/ops/attach-env-vars.md dsh 节「无 default_model 时跳过、不猜占位值」）
     const defaultModel = profile?.default_model
     if (d && d.protocol === 'responses') {
       notes.push(directResponsesNote('dsh'))
@@ -572,7 +572,7 @@ export const dshAdapter: HarnessAdapter = {
       if (entry && oursEntryUrl(entry.baseURL, 'dsh', cfg)) {
         doc.deleteIn([PROVIDERS_ROOT, 'providers', 'modeldock'])
       }
-      // agent-default-model 清理口径与 patch 布局统一（权威 docs/attach-env-vars.md dsh 节）：
+      // agent-default-model 清理口径与 patch 布局统一（权威 docs/ops/attach-env-vars.md dsh 节）：
       // 仅看条目自身 provider === 'modeldock'，不挂在 provider 条目的 oursEntryUrl 守卫下——
       // provider 条目被用户改指他处或已删时，指向 modeldock 名字空间的默认模型条目照样是残留
       //（2026-11-12 审查 F7；此前 legacy 只在守卫内删，provider 非本网关时留悬空条目）

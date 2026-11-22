@@ -355,6 +355,81 @@ describe('orchestrator transient > cause 精读（A1）', () => {
   })
 })
 
+describe('orchestrator transient > 404 model 类归因（2026-11-16 夜航模式 A 判死链）', () => {
+  const WIN = { startMs: Date.parse('2026-11-16T10:00:00+08:00'), endMs: Date.parse('2026-11-16T10:05:00+08:00') }
+  const mid = '2026-11-16T10:02:30.000+08:00'
+  // backends/mock.mjs ORCH_MOCK_RESEARCH_STDERR 注入的同款签名（claude CLI 真实死法：
+  // 上游 404 UnsupportedModel 原样回传 → CLI stderr 带此签名退出）
+  const CLI_STDERR = '[claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"sdk"}\n'
+
+  it('unrecognized_model stderr（mock 注入样本）→ decisive 归因 switchProvider 族，reason 带换模型/profile.default_model 建议', () => {
+    const r = classifyWorkerCrash({ output: '', stderrTail: CLI_STDERR, entries: null, window: null, backend: 'claude' })
+    expect(r.transient).toBe(false) // 确定性失败：不进原地重试（与 proto_endpoint_missing 同哲学）
+    expect(r.source).toBe('regex')
+    expect(r.decisive).toBe(true)
+    expect(r.cause).toBe('model_mismatch')
+    expect(r.switchProvider).toBe(true)
+    expect(r.reason).toContain('unrecognized_model')
+    expect(r.reason).toContain('换模型')
+    expect(r.reason).toContain('profile.default_model')
+  })
+
+  it('stderr 死亡签名优先于网关窗口的 transient 噪音（429/quota 并存 → 仍 decisive，不误判「重试能好」）', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: CLI_STDERR,
+      entries: [gwEntry(429, mid, 'claude'), gwEntry(402, mid, 'claude', { cause: 'quota' })],
+      window: WIN,
+      backend: 'claude',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.decisive).toBe(true)
+    expect(r.cause).toBe('model_mismatch')
+    expect(r.source).toBe('regex')
+  })
+
+  it('签名只认 stderrTail：worker 正文带「unrecognized model」字样不触发（自由文本误配不归因）', () => {
+    const r = classifyWorkerCrash({ output: '调研笔记提到 unrecognized model 字样', stderrTail: '', entries: null, window: null, backend: 'zcode' })
+    expect(r).toEqual({ transient: false, source: 'regex' })
+  })
+
+  it('非模型语义的 stderr 404 文案不触发归因（404 可能是路径级资源不存在，边界不放宽）', () => {
+    const r = classifyWorkerCrash({ output: '', stderrTail: 'request failed: 404 not found', entries: null, window: null, backend: 'zcode' })
+    expect(r).toEqual({ transient: false, source: 'regex' })
+  })
+
+  it('网关日志 cause=model_mismatch（目录剔除全灭）→ decisive，兜底建议可操作；同窗 quota 不压过', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(503, mid, 'zcode', { cause: 'model_mismatch' }), gwEntry(402, mid, 'zcode', { cause: 'quota' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.transient).toBe(false)
+    expect(r.decisive).toBe(true)
+    expect(r.cause).toBe('model_mismatch')
+    expect(r.source).toBe('gateway')
+    expect(r.switchProvider).toBe(true)
+    expect(r.reason).toContain('model_mismatch×1')
+    expect(r.reason).toContain('换模型')
+    expect(r.reason).toContain('profile.default_model')
+  })
+
+  it('cause=model_mismatch 条目自带 hint（网关侧产物）→ reason 采用网关 hint', () => {
+    const r = classifyWorkerCrash({
+      output: '',
+      stderrTail: '',
+      entries: [gwEntry(503, mid, 'zcode', { cause: 'model_mismatch', hint: 'modeldock provider list 查看各服务健康与模型目录' })],
+      window: WIN,
+      backend: 'zcode-headless',
+    })
+    expect(r.decisive).toBe(true)
+    expect(r.hint).toBe('modeldock provider list 查看各服务健康与模型目录')
+    expect(r.reason).toContain('modeldock provider list 查看各服务健康与模型目录')
+  })
+})
+
 describe('orchestrator transient > classifyWorkerCrashFromDisk（A1 异步接线，metrics keypool）', () => {
   it('无 cfg → 不问 metrics：key_cooldown 照常 transient、无 retryMs（既有退避兜底）', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gwlog-cause-'))

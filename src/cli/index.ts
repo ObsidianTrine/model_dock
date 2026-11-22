@@ -62,6 +62,14 @@ export function buildProgram(): Command {
     .option('--key-env <var>')
     .option('--add', t('追加进多 key 池而不是覆盖（池在 key 间自动轮转，401/403 自动跳失效 key）', 'Append to the multi-key pool instead of overwriting (the gateway rotates across pool keys and skips keys rejected with 401/403)'))
     .action(async (id, o) => (await import('./providers.js')).cmdProviderSetKey(id, o))
+  provider
+    .command('test [providerId]')
+    .description(t('对服务跑探针套件（鉴权回声/身份核对等真实请求探测，跑前显示 tokens 预估）', 'Run the probe suite against a service (auth echo / identity check etc.; shows a token estimate before any real request)'))
+    .option('--probe <ids>', t('探针清单，逗号分隔：p1|p2|p12|all（缺省 p1；all = 目录内全部探针，未实现的自动跳过）', 'Probe list, comma-separated: p1|p2|p12|all (default p1; all = every probe in the catalog, unimplemented ones are skipped)'), 'p1')
+    .option('--json', t('机器可读 JSON 输出（未带 --yes 时先输出预估，per_probe_cost 为逐探针预估）', 'Machine-readable JSON output (without --yes it prints the estimate first; per_probe_cost lists per-probe estimates)'))
+    .option('--yes', t('跳过确认（仅限单探针单目标；更大范围仍需逐次确认）', 'Skip confirmation (single probe × single target only; bigger runs still confirm)'))
+    .option('--ledger', t('查看探针账本（月度花费与按探针分解，不跑探针）', 'Show the probe ledger (monthly spend and per-probe breakdown; runs nothing)'))
+    .action(async (id, o) => (await import('./providers.js')).cmdProviderTest(id, o))
 
   const model = prog.command('model').description(t('模型目录（自动拉取 + 手动编辑上下文/输出上限）', 'Model catalog (auto-fetched + manual context/output limit editing)'))
   model.command('list [providerId]').description(t('查看模型目录', 'Show the model catalog')).action(async (id) => (await import('./providers.js')).cmdModelList(id))
@@ -222,6 +230,18 @@ export function buildProgram(): Command {
     .option('--stdin-pass', t('口令经 stdin 读入（脚本/CI 用，不进 argv）', 'Read the passphrase from stdin (for scripts/CI; keeps it out of argv)'))
     .option('--yes', t('跳过确认', 'Skip confirmation'))
     .action(async (file, o) => (await import('./sync.js')).cmdConfigImport(file, o))
+  cfgCmd
+    .command('merge <files...>')
+    .description(
+      t(
+        '合并多个配置包：逐包解包去重（同 base_url+同 key 视为同一服务）→ 按本机探针结论给三档建议（保留候选/存疑/失效）→ 勾选后写入；预览零写盘，应用前自动快照',
+        'Merge multiple packages: unpack and dedupe (same base_url + same key = one service) → three-tier suggestions from local probe verdicts (keep/suspect/dead) → apply what you select; preview writes nothing, a snapshot is taken before applying'
+      )
+    )
+    .option('--stdin-pass', t('口令经 stdin 读入（全部包通用；脚本/CI 用，不进 argv）', 'Read one passphrase for all packages from stdin (for scripts/CI; keeps it out of argv)'))
+    .option('--yes', t('跳过勾选与确认（只保留「保留候选」档）', 'Skip selection and confirmation (keeps only keep-candidates)'))
+    .option('--json', t('机器可读 JSON 预览（不进入勾选与应用）', 'Machine-readable JSON preview (no selection or apply)'))
+    .action(async (files, o) => (await import('./sync.js')).cmdConfigMerge(files, o))
 
   const syncCmd = prog.command('sync').description(t('多机配置同步（WebDAV 网盘 / 本地同步盘；改动自动双向收敛）', 'Multi-machine config sync (WebDAV drive / local sync folder; changes converge automatically)'))
   syncCmd

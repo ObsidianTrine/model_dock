@@ -14,11 +14,13 @@ import {
   cmdProviderList,
   cmdProviderRm,
   cmdProviderSetKey,
+  cmdProviderTest,
 } from '../src/cli/providers.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { getSecret, providerKeyRefs, setSecret } from '../src/config/secrets.js'
 import { clearPricingMemo } from '../src/gateway/pricing.js'
 import { configPath, pricingJsonPath, secretsPath } from '../src/util/paths.js'
+import { readProbeLedger, recordProbeLedgerEntry } from '../src/gateway/probe/ledger.js'
 
 // cli/providers.ts 命令壳补测（cmdProviderAdd 已由 ops-addservice.test.ts 覆盖两条委托路径）：
 // 这里补 list/rm/set-key/model 系列与 add 的未知预设分支。纪律：
@@ -662,6 +664,168 @@ describe('cmdModelFallback', () => {
       expect(errs.join('\n')).toContain('不存在')
       expect(errs.join('\n')).toContain('provider list')
     } finally {
+      h.restore()
+    }
+  })
+})
+
+// ===== cmdProviderTest（provider test 子命令，provider-probe-suite 任务 6）=====
+// 零 vi.mock：探针走真实引擎（mock 上游 http.createServer / listen(0)），未确认路径零请求无需触网；
+// 成本闸端到端（含确认后恰 N 请求与 tsx 子进程冒烟）在 probe-cost-gate.test.ts，这里补参数校验面。
+
+describe('cmdProviderTest 参数校验', () => {
+  it('provider 不存在：exit(1)', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      await expect(cmdProviderTest('ghost', {})).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('不存在')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('未知探针：exit(1) 并列可用清单', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      await seedProvider()
+      await expect(cmdProviderTest('pv', { probe: 'p99' })).rejects.toBeInstanceOf(ExitError)
+      const out = errs.join('\n')
+      expect(out).toContain('未知探针')
+      expect(out).toContain('p1')
+      expect(out).toContain('p12')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('[probe].enabled=false：exit(1) 可操作报错（config.toml 恢复指引）', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      await seedProvider()
+      await mutateConfig((c) => {
+        c.probe = { enabled: false }
+      })
+      await expect(cmdProviderTest('pv', { probe: 'p1' })).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('enabled=false')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('无可用 key：exit(1)（探针无法发请求）', async () => {
+    const h = fakeHome()
+    stubExit()
+    captureConsole()
+    try {
+      await mutateConfig((c) => {
+        c.providers['pv-nokey'] = { name: 'NK', base_url: 'https://nk.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: '' }
+      })
+      await expect(cmdProviderTest('pv-nokey', { probe: 'p1' })).rejects.toBeInstanceOf(ExitError)
+      expect(errs.join('\n')).toContain('没有可用 key')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('cmdProviderTest --json 预估与 --ledger', () => {
+  it('--json 未确认：needConfirm + per_probe_cost，不触网（base_url 不可达也不报错）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider() // base_url https://api.example.com 不可达；预估路径必须零请求
+      await cmdProviderTest('pv', { probe: 'p1', json: true })
+      const out = logs.join('\n')
+      expect(out).toContain('"needConfirm": true')
+      expect(out).toContain('"per_probe_cost"')
+      expect(out).toContain('"estimate": 200')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--ledger：月度总花费 + 按探针分解（与账本页同数据源）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      recordProbeLedgerEntry({ tag: 'probe', probe_id: 'p1', provider: 'pv', key_fp: 'fp1', model: 'm1', tokens: 120, estimated_tokens: 200, ms: 9, ts: new Date().toISOString() })
+      recordProbeLedgerEntry({ tag: 'probe', probe_id: 'p12', provider: 'pv', key_fp: 'fp1', model: 'm1', tokens: 30, estimated_tokens: 200, ms: 9, ts: new Date().toISOString() })
+      await cmdProviderTest('pv', { ledger: true })
+      const out = logs.join('\n')
+      expect(out).toContain('探针账本')
+      expect(out).toContain('月度总花费：150 tokens')
+      expect(out).toContain('p1')
+      expect(out).toContain('p12')
+      expect(out).toContain('月预算')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('--ledger --json：budget/breakdown 结构化输出', async () => {
+    const h = fakeHome()
+    captureConsole()
+    try {
+      await seedProvider()
+      await cmdProviderTest('pv', { ledger: true, json: true })
+      const j = JSON.parse(logs.join('\n').slice(logs.join('\n').indexOf('{'))) as {
+        ok: boolean
+        budget: { budget: number }
+        breakdown: { by_probe_requests: Record<string, number> }
+      }
+      expect(j.ok).toBe(true)
+      expect(j.budget.budget).toBeGreaterThan(0)
+      expect(j.breakdown.by_probe_requests).toEqual({})
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('cmdProviderTest 运行（mock 上游）', () => {
+  it('--yes 单探针单目标：verdict 行输出（healthy → 退出码不触发），账本落条目', async () => {
+    const h = fakeHome()
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ content: [{ type: 'text', text: 'MODELDOCK-OK' }], usage: { input_tokens: 5, output_tokens: 2 } }))
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const port = (server.address() as { port: number }).port
+    captureConsole()
+    try {
+      await mutateConfig((c) => {
+        c.security = { store: 'file' }
+        c.providers['pv'] = {
+          name: 'PV',
+          base_url: `http://127.0.0.1:${port}`,
+          protocol: 'anthropic',
+          auth_style: 'bearer',
+          key_ref: 'file:pv',
+          models: { m1: { source: 'manual' } },
+        }
+      })
+      await setSecret('pv', 'sk-pv-run', 'file')
+      await cmdProviderTest('pv', { probe: 'p1', yes: true })
+      const out = logs.join('\n')
+      expect(out).toContain('pv · m1 · key ')
+      expect(out).toContain('健康')
+      expect(out).toContain('✓')
+      expect(out).toContain('合计预估 200 tokens')
+      // 探针独立账本落条目（与请求日志双向隔离由 probe-engine 副作用红线用例覆盖）
+      const entries = await readProbeLedger()
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ tag: 'probe', probe_id: 'p1', provider: 'pv', model: 'm1' })
+    } finally {
+      server.closeAllConnections?.()
+      server.close()
       h.restore()
     }
   })

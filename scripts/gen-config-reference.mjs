@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 生成 docs/config-reference.md 与 docs/en/config-reference.md：config.toml 全部可配键的权威参考（双语）。
+// 生成 docs/reference/config-reference.md 与 docs/en/reference/config-reference.md：config.toml 全部可配键的权威参考（双语）。
 // 键清单与类型从 src/config/types.ts 解析（唯一事实来源）；每键的语义/默认值/示例在本脚本 METAS 维护。
 // 对拍纪律（同 gen-catalog-snapshot）：解析出的键与 METAS 必须一一对应，缺一条/多一条都拒绝生成——
 // types.ts 新增键而没补说明时这里 loud fail，文档永不静默漂移。
@@ -15,8 +15,8 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const TYPES_SRC = path.join(root, 'src', 'config', 'types.ts')
 const I18N_SRC = path.join(root, 'src', 'util', 'i18n.ts')
 const OUTS = {
-  zh: path.join(root, 'docs', 'config-reference.md'),
-  en: path.join(root, 'docs', 'en', 'config-reference.md'),
+  zh: path.join(root, 'docs', 'reference', 'config-reference.md'),
+  en: path.join(root, 'docs', 'en', 'reference', 'config-reference.md'),
 }
 
 // ---------------------------------------------------------------- 解析 types.ts
@@ -222,7 +222,7 @@ export const METAS = {
   'gateway.debug': M('debug 日志开关：开启后向 `logs/debug-<日期>.jsonl` 记录管理面访问与子进程调用等诊断明细（默认关）。与 `MODELRDOCK_DEBUG=1` 环境变量、`gateway start --debug` 旗标任一为真即生效；本键随热加载即时生效，排障时临时开启、定位后关闭。', 'Debug logging switch: when on, admin-API access and child-process details are written to `logs/debug-<date>.jsonl` (off by default). Takes effect if any of this key, the `MODELRDOCK_DEBUG=1` env var, or the `gateway start --debug` flag is set; this key hot-applies — flip it while troubleshooting, flip it back when done.', ['`false`（关）', '`false` (off)'], 'true'),
   'gateway.auto_failover': M('「程序自动选主」开关：开启后按时段 / 优先级 / 实测耗时自动挑选主服务；关闭（默认）= 主服务由人工钉定或默认路由决定。主服务不可达时切备用始终可用，不受此开关影响。', 'Whether the program picks the primary automatically (time windows / priority / measured latency). Off (default) = the primary is whatever you pinned or the default route. Failing over when the primary is down always stays available regardless of this switch.', ['`false`（关）', '`false` (off)'], 'false'),
   'gateway.auto_route_provider': M('人工钉定的主服务 id：设置后路由优先走它（优先于程序自动与定时时段）；留空 = 程序按时段 / 默认路由选主。与控制台「当前」下拉同款。', 'Manually pinned primary provider id: routing prefers it (over program automation and time windows); empty = the program picks by window / default route. Same as the "Current" dropdown in the console.', ['空（自动）', 'empty (automatic)'], '"acme"'),
-  'gateway.failover_status_codes': M('响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。', 'Upstream status codes that still allow switching to a backup after the response has started (e.g. `[429, 503]`); empty by default = a delivered response is passed through as-is, no switch.', ['`[]`（不切换）', '`[]` (no switch)'], '[429, 503]'),
+  'gateway.failover_status_codes': M('响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。例外：上游 404 且错误体明确点名请求模型不被支持（如 `UnsupportedModel`）时，备用链中段自动切下一可用服务，无需列入白名单。', 'Upstream status codes that still allow switching to a backup after the response has started (e.g. `[429, 503]`); empty by default = a delivered response is passed through as-is, no switch. Exception: when an upstream replies 404 and the body explicitly names the requested model as unsupported (e.g. `UnsupportedModel`), the gateway switches to the next alive candidate mid-chain without the code being whitelisted.', ['`[]`（不切换）', '`[]` (no switch)'], '[429, 503]'),
   'gateway.queue_wait_ms': M('服务并发满载（`max_concurrency`）时的排队等待上限（ms）：等不到空位就跳下一候选 / 回 429。', 'Queue wait cap (ms) when a service is at its `max_concurrency` limit: no free slot in time means the next candidate is tried / a 429 is returned.', ['`2000`', '`2000`'], '5000'),
   'gateway.route_next': M('人工钉定的「下一个切换」：主服务不可达时优先切到它（排到备用链首位）；留空按优先级 / 实测耗时自动排序。', 'Manually pinned "next in line": when the primary is down, this one is tried first (ahead of the backup chain); empty = ordered automatically by priority / measured latency.', ['空（自动排序）', 'empty (automatic order)'], '"backup"'),
   'gateway.auto_fallback': M('「自动备用链」开关：手动备用链之外，自动把其他已启用服务补进切换候选（按定时窗口 / 优先级 / 实测耗时排序，模型名透传）；仅显式 `false` 关闭。', 'Automatic backup chain: beyond your manual chain, other enabled services are added as failover candidates automatically (ordered by window / priority / measured latency, models passed through); only an explicit `false` turns it off.', ['`true`（开）', '`true` (on)'], 'true'),
@@ -239,6 +239,15 @@ export const METAS = {
   // ---- lan
   'lan.enabled': M('手机简版控制台开关（默认关）：开启后局域网内的手机可以访问只读状态页并做切换；第二监听器，与主网关互不影响。', 'Phone console switch (off by default): devices on the LAN get a read-only status page with switching; a second listener, independent of the main gateway.', ['`false`（关）', '`false` (off)'], 'true'),
   'lan.port': M('手机控制台监听端口；被占用自动 +1。', 'Phone console listen port; auto-increments if taken.', ['`8787`', '`8787`'], '8787'),
+
+  // ---- probe
+  'probe.enabled': M('探针套件总开关（默认开）：设 `false` 后探针一律拒绝执行（含零 token 的被动聚合探针）。', 'Probe suite master switch (on by default): `false` rejects all probe runs, including the zero-token passive probe.', ['`true`（开）', '`true` (on)'], 'false'),
+  'probe.concurrency': M('探针全局并发闸：同一时刻最多同时在飞几个探针（整数，限 2–4，默认 2）；同一服务内的探针始终串行执行。', 'Global probe concurrency gate: how many probes may be in flight at once (integer, 2–4, default 2); probes within one service always run serially.', ['`2`', '`2`'], '2'),
+  'probe.budget_tokens': M('探针月度预算（tokens）：自然月内探针累计实际 tokens 达到该值即停止全部主动探针并把目标标为「预算耗尽」，调高预算或次月自动重置前不再花费。', 'Monthly probe budget (tokens): once probes accrue this many actual tokens in a calendar month, all active probes stop and their targets are marked "budget exhausted" — no more spend until you raise the budget or the month resets.', ['`50000`', '`50000`'], '50000'),
+  'probe.schedule_hours': M('周期调度触发时刻（0–23 整数小时，如 `[9, 21]`）；缺省空 = 周期调度只跑零 token 的被动聚合探针，不产生模型推理请求。', 'Hours of day (integers 0–23, e.g. `[9, 21]`) when the periodic scheduler triggers; empty by default = the scheduler only runs the zero-token passive probe, generating no model inference requests.', ['`[]`（只跑被动聚合）', '`[]` (passive probe only)'], '[9, 21]'),
+  'probe.cost_ack': M('周期调度执行含 token 探针（P1–P14）的持久成本授权（默认 false）：`true` 才允许周期调度跑这些探针，且仍受 `budget_tokens` 月度预算约束；手动触发的探针不走此键，每次运行前另有逐次确认。', 'Standing cost acknowledgment for token-spending scheduled probes (P1–P14, `false` by default): `true` lets the periodic scheduler run them, still bounded by the monthly `budget_tokens`; manually triggered probes do not use this key — each run has its own confirmation.', ['`false`（周期调度只跑零 token 探针）', '`false` (scheduler runs zero-token probes only)'], 'true'),
+  'probe.disabled_ids': M('周期调度中排除的探针 id 清单（如 `["p10"]`）：列出的探针不被周期调度执行；缺省空 = 不排除。', 'Probe ids excluded from the periodic scheduler (e.g. `["p10"]`); empty by default = none excluded.', ['`[]`（不排除）', '`[]` (none excluded)'], '["p10"]'),
+  'probe.deep_flags': M('深度档开关名单（自由短词，如 `["long-context"]`）：探针实现按名单决定是否执行更深的探测档；缺省空 = 只跑标准档。', 'Deep-tier flags (free-form words, e.g. `["long-context"]`): probe implementations consult the list to run deeper probe tiers; empty by default = standard tiers only.', ['`[]`（只跑标准档）', '`[]` (standard tiers only)'], '["long-context"]'),
 
   // ---- security
   'security.store': M('密钥存储后端：`file`（本地文件；Windows 为系统级加密）/ `keychain`（系统钥匙环）。缺省按平台自动选择（macOS 钥匙环、Windows 加密文件、Linux 系统钥匙环、不可用时回退本地文件）；存量明文密钥会在启动时自动迁移，一般无需手改。', 'Secret storage backend: `file` (local file; OS-encrypted on Windows) / `keychain` (OS keychain). Chosen per platform automatically (macOS keychain, Windows encrypted file, Linux secret service falling back to file); existing plaintext secrets migrate automatically at startup. Rarely needs editing.', ['按平台自动', 'automatic per platform'], '"file"'),
@@ -273,6 +282,7 @@ const SECTIONS = [
   { id: 'gateway', title: ['网关（gateway）', 'Gateway (gateway)'], cut: () => 'gateway.'.length, intro: ['网关监听、超时、日志与故障切换行为。定时切换（schedule）单独见下一节。', 'Gateway listening, timeouts, logs and failover behavior. Scheduled switching (`schedule`) has its own section below.'], pick: (p) => p.startsWith('gateway.') && !p.startsWith('gateway.schedule') },
   { id: 'schedule', title: ['定时切换（gateway.schedule）', 'Scheduled switching (gateway.schedule)'], cut: () => 'gateway.schedule.'.length, intro: ['时段内优先（或避开）某个服务，按本地时钟在每次请求时实时判定；法定节假日由日历数据（holiday-cn）判定。`windows[]` 是时段列表，每个时段一条。', 'Prefer (or avoid) a provider during time windows, evaluated per request against the local clock; public holidays come from calendar data (holiday-cn). `windows[]` is the list of windows, one entry each.'], pick: (p) => p.startsWith('gateway.schedule.') },
   { id: 'lan', title: ['手机控制台（lan）', 'Phone console (lan)'], cut: () => 'lan.'.length, intro: ['局域网内的手机简版控制台：只读状态 + 快捷切换，与主网关互不影响。', 'The phone-sized console on your LAN: read-only status plus quick switching, independent of the main gateway.'], pick: (p) => p.startsWith('lan.') },
+  { id: 'probe', title: ['探针套件（probe）', 'Probe suite (probe)'], cut: () => 'probe.'.length, intro: ['服务商健康探针（`modeldock provider test --probe` 与控制台探针共用）的行为与预算：全字段有缺省，不配即按缺省工作；月度预算与成本授权防止探针悄悄烧 token。', 'Provider health probes (shared by `modeldock provider test --probe` and the console): every key has a default, so the suite works out of the box; the monthly budget and cost acknowledgment keep probes from quietly burning tokens.'], pick: (p) => p.startsWith('probe.') },
   { id: 'security', title: ['密钥存储（security）', 'Secret storage (security)'], cut: () => 'security.'.length, intro: ['API Key 等敏感信息的存放方式。', 'Where sensitive material such as API keys is stored.'], pick: (p) => p.startsWith('security.') },
   { id: 'backup', title: ['快照（backup）', 'Snapshots (backup)'], cut: () => 'backup.'.length, intro: ['每次改动配置或接入 / 断开客户端前，ModelDock 会自动留一份快照供还原。', 'Before every config change or attach / detach, ModelDock keeps an automatic snapshot for restoring.'], pick: (p) => p.startsWith('backup.') },
   { id: 'update', title: ['自动更新（update）', 'Auto-update (update)'], cut: () => 'update.'.length, intro: ['新版本检查与下载安装的来源。', 'Where new releases are checked, downloaded and installed from.'], pick: (p) => p.startsWith('update.') },
@@ -358,8 +368,8 @@ function renderSection(idx, section, leaves, lang) {
 const HEAD = {
   zh: {
     h1: 'config.toml 配置参考',
-    switch: ['**简体中文** ｜ [English](en/config-reference.md)', '<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/config-reference.md)），约定见 .agents/conventions/docs-writing.md -->'],
-    lead: '`~/.modeldock/config.toml` 是 ModelDock 的主配置文件：模型服务、路由方案、客户端接入与网关行为都在这里，可以直接手编。本页逐项列出全部配置键的**类型、默认值与说明**，并附可直接粘贴的示例；日常操作与命令见[使用指南](usage.md)。',
+    switch: ['**简体中文** ｜ [English](../en/reference/config-reference.md)', '<!-- i18n-slot：新增语言时在上一行末尾追加链接（如 ｜ [日本語](ja/config-reference.md)），约定见 .agents/conventions/docs-writing.md -->'],
+    lead: '`~/.modeldock/config.toml` 是 ModelDock 的主配置文件：模型服务、路由方案、客户端接入与网关行为都在这里，可以直接手编。本页逐项列出全部配置键的**类型、默认值与说明**，并附可直接粘贴的示例；日常操作与命令见[使用指南](../guide/usage.md)。',
     genNote: '本页由脚本根据程序内置的配置定义自动生成，与代码同源更新；请勿直接编辑本页，发现描述与实际行为不符时以实际行为为准并反馈。',
     genComment: '<!-- 由 scripts/gen-config-reference.mjs 生成（键清单源：src/config/types.ts，勿手改）；重新生成：node scripts/gen-config-reference.mjs -->',
     tipsTitle: '读前须知',
@@ -372,8 +382,8 @@ const HEAD = {
   },
   en: {
     h1: 'config.toml Configuration Reference',
-    switch: ['**English** ｜ [简体中文](../config-reference.md)', '<!-- i18n-slot: append new-language links on the line above; convention: .agents/conventions/docs-writing.md -->'],
-    lead: '`~/.modeldock/config.toml` is the main ModelDock config: model providers, routing profiles, client attachments and gateway behavior all live here, and it is safe to hand-edit. This page lists every config key with its **type, default and meaning**, plus paste-ready examples; for daily usage and commands see the [usage guide](usage.md).',
+    switch: ['**English** ｜ [简体中文](../../reference/config-reference.md)', '<!-- i18n-slot: append new-language links on the line above; convention: .agents/conventions/docs-writing.md -->'],
+    lead: '`~/.modeldock/config.toml` is the main ModelDock config: model providers, routing profiles, client attachments and gateway behavior all live here, and it is safe to hand-edit. This page lists every config key with its **type, default and meaning**, plus paste-ready examples; for daily usage and commands see the [usage guide](../guide/usage.md).',
     genNote: 'This page is generated from the config definitions built into the program and updates with the code; please do not edit it directly. If a description disagrees with actual behavior, trust the behavior and report it.',
     genComment: '<!-- Generated by scripts/gen-config-reference.mjs (key inventory from src/config/types.ts; do not hand-edit). Regenerate: node scripts/gen-config-reference.mjs -->',
     tipsTitle: 'Before you start',

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 发布前机器门禁一键检查——docs/RELEASE_CHECKLIST.md §1 的执行器。
+ * 发布前机器门禁一键检查——docs/ops/RELEASE_CHECKLIST.md §1 的执行器。
  *
  * 用法：node scripts/release-check.mjs <版本> [--skip-test] [--with-orchestrator]
  *   版本：1.2.0 或 v1.2.0（对应 CHANGELOG 的 ## [1.2.0] 段与 tag v1.2.0）；
@@ -255,19 +255,8 @@ if (hardFails() === 0) {
   }
 }
 
-// 基线漂移（usage §10 的用例数 vs 实测）
-if (testStats) {
-  const usage = fs.readFileSync(path.join(ROOT, 'docs', 'usage.md'), 'utf8')
-  // §10 两种合法形态：硬编码数字（校验漂移）或口径句（数字以 npm test 输出为准，无漂移面）；
-  // 两者皆无才告警——口径化是 2026-10-28 引入的改进，检查不得把它当「缺基线」
-  const m = usage.match(/测试 (\d+) 例全绿（(\d+) 个文件/)
-  const calibrated = /用例数与文件数以\s*`?npm test`?\s*输出为准/.test(usage)
-  if (m && (+m[1] !== testStats.passed || +m[2] !== testStats.files))
-    add('warn', 'usage §10 基线漂移', `写的是 ${m[1]} 例 / ${m[2]} 文件，实测 ${testStats.passed} 例 / ${testStats.files} 文件——发布前更新 usage.md`)
-  else if (m) add('pass', 'usage §10 基线数字与实测一致')
-  else if (calibrated) add('pass', 'usage §10 基线口径句在位（数字以 npm test 实测为准）')
-  else add('warn', 'usage.md §10 未找到基线句式', '按实测补写「测试 X 例全绿（Y 个文件：…）」，或改为「用例数与文件数以 npm test 输出为准」的口径句')
-}
+// usage §10 基线漂移检查已随 usage「当前实现状态」段撤销一并移除（2026-11-17）：
+// 用例数以 npm test 实测为准不再落 usage.md；且本块原读 docs/usage.md，文档重组后路径已不存在。
 
 // 汇总
 const icon = { pass: '✓', warn: '⚠', fail: '✗' }

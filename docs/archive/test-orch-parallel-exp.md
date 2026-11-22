@@ -21,12 +21,51 @@
 - 提速 **2.5–2.8×**（528→191–212s），8 核机 CPU 利用率 ~3.2–3.5 worker。
 - 无一用例触 20s testTimeout（并行争用下最慢用例 14s，sail 报告通知类）；零 cross-file 干扰——workflow 套件用例互相独立（各自临时 git 仓 + listen(0) 随机端口），多 worker 天然安全。
 
+## 落地结果（2026-11-17 查证）
+
+- **配置合入**：@acd718c（2026-11-11 23:59 +0800，"test(orch): 编排套件并行定档 maxWorkers 4（B3 证据+env 回退通道）+ mkRepo scripts 模板缓存"）——`vitest.workflow.config.ts` 缺省 `maxWorkers: 4` + `VITEST_MAX_WORKERS` env 覆盖通道（=1 回串行 / =2 分级复证）；test-suite-couplings 同构断言同步剔除 maxWorkers（允许两 config 按域异构）。
+- **观察窗触发面（2026-11-17 复核修正）**：真窗口起点是 **f9395b1**（2026-11-12 00:03，合入 acd718c 后首个触达提交）——起点之前的 push 其 CI run 跑的是串行旧配置，不构成本配置的观察证据。acd718c..develop 间触达 `.agents/**` 或 `test/orchestrator/**` 的提交共 **27 个**，其中 **22 个已推送 origin/develop**（末次远端同步 50bd710，2026-11-16 23:30；另 5 个仅本地未推送，无 CI run）。注意提交数 ≠ push 事件数 ≠ run 数——逐条 run id / 平台腿 / conclusion 的唯一来源是 `gh run list --workflow=test.yml`，本地计数只界定观察窗范围，替代不了 run 级证据。
+- **查证受阻（已解除）**：run 级 conclusion 核验所需的外部通道在 worker 环境全部不可达——2026-11-17 三个查证会话 `gh run list` 累计 4 次被权限拒绝（熔断纪律，未换写法绕行），curl 直连 GitHub API、WebFetch、playwright MCP、`git fetch` 亦各被拒；同日**调度台以自有 gh 凭证取到 run 级数据**（见下条），核验不再阻塞。
+- **run 级核验（2026-11-17 调度台 gh 实查，`gh run list --workflow test.yml --branch develop` 逐 run 查 test-workflow job）**：观察窗（f9395b1 起）内 test-workflow job 实跑共 **8 个 run**——**2026-11-13 至 11-15 全绿**（按 test-workflow job 结论计 6 success + 1 cancelled：cancelled 系后继 push 顶替、非测试红；43715816141 整 run failure 系产品腿红，test-workflow job 本身 success，与本卡无关），**2026-11-16 红**（43897533479，15:33 UTC，workflow-run 与 test-workflow job 双 failure）。逐 run 记录：
+
+  | run | 时间(UTC) | workflow-run 结论 | test-workflow job |
+  |---|---|---|---|
+  | 43334671679 | 2026-11-13 00:08 | success | success |
+  | 43715816141 | 2026-11-15 12:49 | failure（产品腿红，与本卡无关） | success |
+  | 43717205581 | 2026-11-15 13:05 | success | success |
+  | 43720948281 | 2026-11-15 13:48 | success | success |
+  | 43723148184 | 2026-11-15 14:13 | success | success |
+  | 43726481212 | 2026-11-15 14:49 | cancelled（后继 push 顶替） | cancelled |
+  | 43727427518 | 2026-11-15 15:00 | success | success |
+  | 43897533479 | 2026-11-16 15:33 | failure | failure |
+
+- **11-16 红定性**：test/orchestrator/research.test.ts 夹具引用日期硬编码 2026-11-08、跨过 validateBriefBody 7 天容忍窗的**时间炸弹**——与 B3 并行化无关（非 flake / worker 生命周期异常，不触发回退兜底）；修复 baa55d9 已合本地 develop（2026-11-17），待 push 后 CI 转绿。
+- **定档判定（2026-11-17 run 级核验完成）**：按既定口径回溯 f9395b1 起全部真 run（上表）——窗内实跑 11-13 与 11-15 全绿（11-14 无实跑记录），11-16 断档红，**「连续 3 天绿」未成立**；断档因无关域测试腐化（时间炸弹，已修 baa55d9），**顺延决策维持**（维持 4 与回退 1 的决策继续暂缓），**新观察窗自修复 push 落 origin 之日起算**（原「已流逝天数不清零」口径经调度台判定据此更新）。回退兜底不变：任一真 run 出现 flake / worker 生命周期异常 → 改缺省 `maxWorkers: 1`（或先降 2 复证），异常现象回写本报告风险面（本机 B3 证据面：零超时、零跨文件干扰，异常面预期仍限于 Linux CI fork 行为）。
+
 ## 结论与建议
 
 **并行可行，建议日间立卡实施**（配置一行 `isolate: false` 保持 + `maxWorkers: 4`；先 CI 灰度再定档）。本机两轮全绿 + 零超时；剩余风险在 CI 三平台（Linux CI 的 fork 进程行为与内存）——这正是串行防线当年的事故面，故仍按「实验证据 → CI 复证 → 定档」三步走，不建议直接并配置。
+
+> 状态更新（2026-11-17）：配置已合入（acd718c）并进入 CI 复证观察，run 级核验已由调度台完成（结论见上方「落地结果」节：连续 3 天绿未成立、顺延维持、新窗自修复 push 起算）——当前状态以上方「落地结果」节为准，本节为实验当时的建议原文。
 
 ## 若船东批准并行的实施要点（供日间卡）
 - vitest.workflow.config.ts 加 `maxWorkers: N`（先 2 后 4 分级验证），产品套件**不动**（其串行有顺序耦合对与卡死前科）。
 - 同构断言：test/test-suite-couplings.test.ts 若对两 config 的池设置做同构断言，需同步放行 workflow 侧差异（带理由）。
 - CI：workflow-suite job 真 run 时才付多 worker 成本；先 PR 灰度（mac 腿已退出 develop push，PR 与 push main 才跑）。
 - 回归哨：连续 3 天 CI 绿再定档；任一 flake 即回退串行（兜底成本 = 改一行）。
+
+## 落地结果（2026-11-16 对账：维持并行 4）
+
+配置已于 2026-11-11 并入 develop（**acd718c**，`maxWorkers: Number(process.env.VITEST_MAX_WORKERS || 4)`，env 回退通道保留；test/config-isomorphism.test.ts 同步剔除 maxWorkers 异构断言）。CI 灰度观察窗 2026-11-12 ~ 11-16，按收尾口径对账（paths-filter 占位绿不计入、真跑计入）：
+
+| 日期 | run id | workflow-suite 结论 |
+|---|---|---|
+| 11-13 | 43334671679 | 真跑绿 |
+| 11-15 | 43715816141 | 真跑绿（整 run failure 为产品域 win 用例红，本 job 自身绿） |
+| 11-15 | 43717205581 / 43720948281 / 43723148184 / 43727427518 | 真跑绿（同日五连 push） |
+| 11-15 | 43726481212 / 43726805222 / 43726940153 / 43727103418 | 真跑被连推取消（非测试红，不计入样本） |
+| 11-16 | 43897533479 | 真跑红 3 例（见下，已归因修复） |
+
+- schedule 巡检 4 次（43325894605 / 43524857483 / 43645190524 / 43769056800）paths-filter 全判占位绿，不计入样本；11-14 无触达 .agents/** 的 develop push，当日无真跑。
+- **11-16 红归因：内容缺陷，非并行 flake**。3 例全为 research.test.ts 共享夹具 CLAIM_BODY 写死引用日期 2026-11-08，撞 validateBriefBody 的 7 天陈旧窗（第 8 天必爆的定时炸弹——BRIEF_BODY 早已随 TODAY 动态生成，此夹具漏改）。本机 `VITEST_MAX_WORKERS=1` 串行复现同 3 红同错误，实证与 worker 数无关；修复 36c0b57（夹具改 TODAY 动态生成 + 引用日期泄漏断言同步），research 域 10 文件组合 119 用例并行 4 全绿。
+- **定档：维持并行 4**。「任一 flake 即回退」针对并行诱发的不稳定——观察窗 7 次真跑中并行诱发失败 0（11-13、11-15 两天 6 次绿 + 11-16 红经串行复现排除并行嫌疑），回退触发条件未出现；`VITEST_MAX_WORKERS=1` 一键回串行通道原样保留。修复并入后的首个 develop push run 复绿为字面「连续 3 天绿」的复核格（11-13/11-15 已两格）。

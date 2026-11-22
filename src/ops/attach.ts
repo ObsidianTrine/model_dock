@@ -1,7 +1,7 @@
 import { randomToken, t } from '../util/index.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
 import type { Config } from '../config/types.js'
-import { getSecret } from '../config/secrets.js'
+import { getFirstProviderSecret } from '../config/secrets.js'
 import { requireAdapter, getAdapter } from '../adapters/registry.js'
 import { applyChanges } from '../adapters/engine.js'
 import { pinProtocolConflict } from '../adapters/shared.js'
@@ -198,13 +198,18 @@ async function directAttachValues(cfg: Config, profileName: string): Promise<Non
       )
     )
   }
-  const key = await getSecret(provider.key_ref)
+  // keys 池感知（审计 F2）：池 provider 切直连取池内首把可读 key——只读 key_ref 会漏掉池、
+  // 拿池外旧密钥或对池 provider 误报「Key 不可读」（池存在时转发热路径同样不走 key_ref）
+  const key = await getFirstProviderSecret(provider)
   if (!key) {
+    const keyDesc = provider.keys?.length
+      ? t('keys 池 {n} 把全部不可读', 'all {n} pool keys unreadable', { n: provider.keys.length })
+      : `key_ref=${provider.key_ref ?? '-'}`
     throw new Error(
       t(
-        '无法直连：服务「{name}」的 Key 不可读（key_ref={keyRef}）；执行 modeldock provider set-key {id} 更新后再试',
-        'Cannot switch to direct mode: the key of service "{name}" is unreadable (key_ref={keyRef}); run modeldock provider set-key {id} to update it and try again',
-        { name: provider.name ?? providerId, keyRef: provider.key_ref, id: providerId }
+        '无法直连：服务「{name}」的 Key 不可读（{keyDesc}）；执行 modeldock provider set-key {id} 更新后再试',
+        'Cannot switch to direct mode: the key of service "{name}" is unreadable ({keyDesc}); run modeldock provider set-key {id} to update it and try again',
+        { name: provider.name ?? providerId, keyDesc, id: providerId }
       )
     )
   }

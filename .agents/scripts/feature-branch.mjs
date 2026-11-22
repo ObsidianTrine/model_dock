@@ -668,26 +668,16 @@ then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     console.log(`${branch} is up to date with ${base}.`);
   }
 
-  // 2) nothing to merge?
+  // 2) nothing to merge? 零提交多为 worker 漏提交：旧逻辑静默删 worktree+分支后 exit 0，
+  // 把假合并伪装成成功并销毁现场（闭环路径已被 doApprove 零提交门拦截，这里是人工直跑的残余路径）。
   const ahead = git(['rev-list', '--count', `${base}..${branch}`]);
   if (Number(ahead) === 0) {
-    console.log(`No commits on ${branch}; nothing to merge. Cleaning up worktree and branch.`);
-    const cleanupFails = [];
-    try {
-      git(['worktree', 'remove', wtPath]);
-      git(['branch', '-d', branch]);
-    } catch (e) {
-      cleanupFails.push(`cleanup failed: ${String(e.message).trim()}`);
-    }
-    const shellFail = removeWorktreeDir(wtPath);
-    if (shellFail) cleanupFails.push(`leftover directory could not be removed: ${shellFail}`);
-    if (cleanupFails.length) {
-      console.warn(`WARNING: cleanup incomplete:` + CRLF_N + cleanupFails.map((m) => '  - ' + m).join(CRLF_N) + CRLF_N + lockHint(wtPath) + CRLF_N + `Re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}   (idempotent, finishes the cleanup)`);
-      process.exitCode = 1;
-    } else {
-      settleCardAfterFinish(taskId);
-    }
-    return;
+    die(`${branch} has no commits relative to ${base} — usually the worker made changes but never committed them. Nothing was merged; the worktree is kept at ${wtPath} for manual review.
+  cd "${wtPath}"   # inspect what the worker left behind
+  git -C "${wtPath}" status --short
+  git -C "${wtPath}" add -A && git -C "${wtPath}" commit -m "..."
+then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}
+If the task truly has no deliverable, clean up manually: git worktree remove "${wtPath}" && git branch -d ${branch}`);
   }
 
   // 3) verification (testCmd from .agents/workflow.json) inside the worktree — all green before delivery

@@ -1,0 +1,12 @@
+{
+  "file": "../../.agents/scripts/policy.mjs",
+  "countAtLeast": [
+    { "pattern": "export function hitsCoreOrRelease\\(changedFiles, cfg\\)", "atLeast": 1 },
+    { "pattern": "const isCorePathHit = \\(f, core\\) => core\\.includes\\(f\\)", "atLeast": 1 },
+    { "pattern": "const isReleasePathHit = \\(f, release\\) => release\\.some\\(\\(p\\) => f\\.startsWith\\(p\\) \\|\\| f === p\\)", "atLeast": 1 },
+    { "pattern": "isReleasePathHit\\(f, release\\)", "atLeast": 2 },
+    { "pattern": "isCorePathHit\\(f, core\\)", "atLeast": 2 }
+  ],
+  "grepZero": ["release\\.some\\(\\(p\\) => f\\.startsWith\\(p\\) \\|\\| f === p\\)\\) bump\\('L3'"],
+  "fileSizeMaxKB": 120
+}

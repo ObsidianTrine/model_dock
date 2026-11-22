@@ -1,0 +1,8 @@
+{
+  "file": "../../AGENTS.md",
+  "countAtLeast": [
+    { "pattern": "编排套件宿主仓红线", "atLeast": 1 },
+    { "pattern": "禁止在与队列卡同名（或存在待 finish 卡）的 linked worktree 内执行", "atLeast": 1 },
+    { "pattern": "host-guard", "atLeast": 1 }
+  ]
+}

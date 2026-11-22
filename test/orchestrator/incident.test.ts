@@ -30,7 +30,7 @@ describe('orchestrator incident > 落位自动归档', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'vdr-stuck')
-      runOrch(repo.root, 'run vdr-stuck --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run vdr-stuck --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       expect(readCard(repo.root, 'blocked', 'vdr-stuck')).toBeTruthy()
 
       const p = incidentPath(repo.root, 'vdr-stuck')
@@ -71,8 +71,8 @@ describe('orchestrator incident > 落位自动归档', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'vdr-twice')
-      runOrch(repo.root, 'run vdr-twice --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
-      runOrch(repo.root, 'resume vdr-twice --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run vdr-twice --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
+      runOrch(repo.root, 'resume vdr-twice --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       const archived = eventsOf(repo.root, 'vdr-twice').filter((e) => e.type === 'incident_archived')
       expect(archived.length).toBe(2)
       const logs = fs.readdirSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'vdr-twice')).filter((f) => f.startsWith('incident'))
@@ -106,7 +106,7 @@ describe('orchestrator incident > 人工终态也归档（VDR 全覆盖）', () 
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'vdr-abandon')
-      runOrch(repo.root, 'run vdr-abandon --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run vdr-abandon --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       expect(readCard(repo.root, 'blocked', 'vdr-abandon')).toBeTruthy()
       runOrch(repo.root, 'abandon vdr-abandon')
       expect(readCard(repo.root, 'failed', 'vdr-abandon')).toBeTruthy()
@@ -136,7 +136,7 @@ describe('orchestrator incident > 上游海况（网关请求日志投影）', (
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'vdr-sea')
-      runOrch(repo.root, 'run vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       // 第一次归档时还没有网关日志；窗口从首个 worker_spawned 起算（±60s 容差），
       // 落在窗口内的 3 笔在 resume 的第二次归档中被投影进 incident.md。
       const evts = eventsOf(repo.root, 'vdr-sea') as Array<{ type: string; ts: string }>
@@ -144,7 +144,7 @@ describe('orchestrator incident > 上游海况（网关请求日志投影）', (
       writeSeaEntry(toIsoLocal(new Date(startMs)), 200, { ms: 1200, usage: { input_tokens: 1500, output_tokens: 200, cache_read_tokens: 900, cache_creation_tokens: 0 } })
       writeSeaEntry(toIsoLocal(new Date(startMs + 1000)), 429, { ms: 30 })
       writeSeaEntry(toIsoLocal(new Date(startMs + 2000)), 500, { ms: 40, reason: 'down_all' })
-      runOrch(repo.root, 'resume vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'resume vdr-sea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
 
       const text = fs.readFileSync(incidentPath(repo.root, 'vdr-sea'), 'utf8')
       expect(text).toContain('## 上游海况（网关请求日志投影）')
@@ -171,7 +171,7 @@ describe('orchestrator incident > 上游海况（网关请求日志投影）', (
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'vdr-nosea')
-      runOrch(repo.root, 'run vdr-nosea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      runOrch(repo.root, 'run vdr-nosea --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       const text = fs.readFileSync(incidentPath(repo.root, 'vdr-nosea'), 'utf8')
       expect(text).toContain('## 上游海况（网关请求日志投影）')
       expect(text).toContain('未启用网关日志')

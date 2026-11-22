@@ -14,8 +14,8 @@
 ## 前置检查（动手前，在 develop 上）
 
 - [ ] 当前在 `develop` 分支，`git status` 干净，且 `git log origin/develop..develop` 为空（本地不领先远程）。
-- [ ] 机器门禁全过：`node scripts/release-check.mjs vX.Y.Z`（含 npm test + test:workflow 两套件，约 5 分钟；清单见 `docs/RELEASE_CHECKLIST.md`，⚠ 警告项须逐条过目）。
-- [ ] 托管 Node 钉版核对含在门禁内（npm 客户端 engines 冲突会 ✗ 阻断、补丁滞后/新 LTS 大版本会 ⚠ 提示）：出现 ⚠ 时按 `docs/RELEASE_CHECKLIST.md` §2 的年度评估条目裁决是否随本版 bump `MANAGED_NODE_VERSION`。
+- [ ] 机器门禁全过：`node scripts/release-check.mjs vX.Y.Z`（含 npm test + test:workflow 两套件，约 5 分钟；清单见 `docs/ops/RELEASE_CHECKLIST.md`，⚠ 警告项须逐条过目）。
+- [ ] 托管 Node 钉版核对含在门禁内（npm 客户端 engines 冲突会 ✗ 阻断、补丁滞后/新 LTS 大版本会 ⚠ 提示）：出现 ⚠ 时按 `docs/ops/RELEASE_CHECKLIST.md` §2 的年度评估条目裁决是否随本版 bump `MANAGED_NODE_VERSION`。
 
 ## 流程（严格按顺序，不可跳步）
 
@@ -27,7 +27,7 @@
 git log vX.Y.Z..develop --oneline --no-merges    # vX.Y.Z 替换为上一个已发布的 tag
 ```
 
-> 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orchestrator.md`「发版提案」）。
+> 懒人路径：`node .agents/scripts/orchestrator.mjs release-propose` 自动完成盘点、semver 定档与 CHANGELOG 草稿（含未发布段漏记初筛），产出提案文件供核对采纳——版本号仍是建议，采纳与否人工定（见 `.agents/workflows/orch-ecosystem.md`「发版提案」）。
 > 盘点是只读动作（git log + 提案文件），可与前置检查的机器门禁并行跑（见「并行执行羽翼」）；文档收口的采纳仍以门禁全绿为前提。
 
 - 上个 tag 打在 main 侧，develop 的 `git describe` 够不着它，这里必须显式写 tag 名。
@@ -171,7 +171,7 @@ git push origin develop
 | CHANGELOG 漏记（v1.1.5 补 4 条、v1.2.3 补 2 条、v1.5.0 无未发布段需整段归纳） | ✅ release-propose 自动盘点 + 疑似漏记清单；收口仍以 `git log v上一版..develop --no-merges` 逐条对账，「提交里有而日志没有 = 对外失真」 |
 | 本地 npm test 绿、CI 工作流套件红（v1.5.0：feature-branch finish 把未跟踪文件算脏，编排器套件成组挂） | ✅ release-check 补跑 `npm run test:workflow`，发布前本地拦住两套件；修法教训：把「未跟踪」当「脏」会误伤临时仓库与本地杂物，校验用 `--porcelain --untracked-files=no` |
 | release 构建在 test.yml 不覆盖的平台红、tag 已推（v1.2.1 linux-arm64：测试与网关后台写状态文件竞态） | 测试侧去竞态（用环境开关隔离后台写）；按「出错回滚」删 tag 重打，版本号不消耗。教训：与被测进程有共享状态的测试，先把后台写隔离再断言 |
-| 门禁 §10 基线检查与口径化后的 usage 脱节（v1.5.0 报「未找到句式」） | ✅ 检查同时认硬编码数字（校验漂移）与口径句（数字以 npm test 实测为准） |
+| 门禁 §10 基线检查与口径化后的 usage 脱节（v1.5.0 报「未找到句式」） | ✅ 检查同时认硬编码数字（校验漂移）与口径句（数字以 npm test 实测为准）；2026-11-17 usage §10 实现状态段撤销后，该检查随 release-check 一并移除，用例数以 npm test 实测为准不再落 usage.md |
 | audit 网络超时「未得出结论」（v1.2.2 / v1.2.3 / v1.5.0 三次） | 人工补跑 `npm audit --omit=dev`（带重试）拿到确定结论；查出漏洞**当版修**（v1.2.2 undici 三 CVE 先例），已发布版本可能带病 |
 | 推平后 `--amend` 已推提交 → push 被拒（force push 禁用） | 永不 amend 已推提交；补救 = 软重置回远端已有提交 + 把差异补成新提交（v1.2.1 先例） |
 | 多会话并行修同一 bug → rebase 冲突（v1.5.0 darwin 跨机密文两份等价修复） | `git pull --rebase` 同步；两解等价时二选一，**冲突解算后必须全量测试复验再推** |

@@ -225,14 +225,16 @@ describe('feature-branch 认领 > finish', () => {
     }
   })
 
-  it('空分支（无可合并提交）→ 照常落 merged/（与编排器空任务 approve 同语义）', () => {
+  it('空分支（零提交）→ 显式失败：卡停 running/ 不落 merged，worktree 保留（与 doApprove 零提交门同语义）', () => {
     const repo = mkRepo()
     try {
       placeCard(repo.root, 'pending', 'empty-task')
       expect(runFb(repo.root, ['start', 'empty-task']).status).toBe(0)
       const r = runFb(repo.root, ['finish', 'empty-task'], { FINISH_LOCK_WAIT_SECONDS: '0' })
-      expect(r.status).toBe(0)
-      expect(cardState(repo.root, 'empty-task')).toBe('merged')
+      expect(r.status).toBe(1)
+      expect(r.out).toContain('has no commits relative to develop')
+      expect(cardState(repo.root, 'empty-task')).toBe('running') // die 早于落卡：零提交不再误记 manual_merged
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'worktrees', 'empty-task'))).toBe(true) // 现场保留供核对补提交
     } finally {
       repo.cleanup()
     }

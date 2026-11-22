@@ -76,6 +76,7 @@ export const UI_JS_SERVICES = `  function visibleServices() {
         (s.hasKey ? '' : ' · <b class="hint-warn">' + t('Key 未设置', 'key not set') + '</b>') + (s.usedBy && s.usedBy.length ? t(' · 被 <b>', ' · used by <b>') + s.usedBy.length + t('</b> 个客户端使用', '</b> clients') : '') +
         (s.down && arOn ? ' <span class="pill err" title="' + t('故障熔断中，自动路由会避开该服务，探活恢复后自动回归', 'Down (circuit open); auto route avoids it and brings it back once probes recover') + '">' + t('熔断中', 'down') + '</span>' : '') +
         (s.enabled === false ? ' <span class="pill dim" title="' + t('手动下线，不参与自动路由', 'Manually disabled; excluded from auto route') + '">' + t('已下线', 'offline') + '</span>' : '') +
+        verdictBadgeHtml(s.id) +
         '</span></div>' +
         '<span class="testres" id="pingres-' + esc(s.id) + '" hidden></span>' +
         '<button class="btn small" data-ping="' + esc(s.id) + '" data-i18n-title="纯网络延迟（不做模型请求）||Pure network latency (no model request)" title="纯网络延迟（不做模型请求）">' + t('延迟', 'Ping') + '</button>' +

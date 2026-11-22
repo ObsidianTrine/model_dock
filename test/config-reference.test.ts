@@ -34,15 +34,15 @@ describe('config reference（生成式文档 freshness）', () => {
     for (const p of must) expect(inventory.paths, `缺键：${p}`).toContain(p)
   })
 
-  it('docs/config-reference.md 为最新生成（红 = 跑 node scripts/gen-config-reference.mjs）', () => {
+  it('docs/reference/config-reference.md 为最新生成（红 = 跑 node scripts/gen-config-reference.mjs）', () => {
     const docs = generateDocs()
-    const onDisk = norm(readFileSync(path.join(ROOT, 'docs', 'config-reference.md'), 'utf8'))
+    const onDisk = norm(readFileSync(path.join(ROOT, 'docs', 'reference', 'config-reference.md'), 'utf8'))
     expect(onDisk).toBe(docs.zh)
   })
 
-  it('docs/en/config-reference.md 为最新生成（红 = 跑 node scripts/gen-config-reference.mjs）', () => {
+  it('docs/en/reference/config-reference.md 为最新生成（红 = 跑 node scripts/gen-config-reference.mjs）', () => {
     const docs = generateDocs()
-    const onDisk = norm(readFileSync(path.join(ROOT, 'docs', 'en', 'config-reference.md'), 'utf8'))
+    const onDisk = norm(readFileSync(path.join(ROOT, 'docs', 'en', 'reference', 'config-reference.md'), 'utf8'))
     expect(onDisk).toBe(docs.en)
   })
 })

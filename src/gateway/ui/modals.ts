@@ -44,6 +44,8 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan-mobile-page.ts:106 同款注释）
       '<input type="file" id="impFile2" hidden></p>' +
       '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
+      '<p class="row" style="margin:10px 0 0"><button type="button" class="btn small" id="mergePkgBtn" data-i18n="合并多个配置包…||Merge multiple packages…">合并多个配置包…</button>' +
+      '<span class="help" data-i18n="多包去重合并，按探针结论勾选保留||Dedupe-merge several packages; keep per probe verdicts"></span></p>' +
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
       '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
       '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +

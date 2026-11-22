@@ -80,7 +80,7 @@ chmod +x modeldock
 sudo mv modeldock /usr/local/bin/     # or any other directory on your PATH
 ```
 
-> SHA256 checksums for every artifact ship as `SHA256SUMS` on the Release. SmartScreen / Gatekeeper first-run allowance, uninstall and other details: [Usage guide · Installation & build](usage.md#2-installation--build).
+> SHA256 checksums for every artifact ship as `SHA256SUMS` on the Release. SmartScreen / Gatekeeper first-run allowance, uninstall and other details: [Usage guide · Installation & build](guide/usage.md#2-installation--build).
 
 ### 2. First steps
 
@@ -129,7 +129,7 @@ modeldock config export         # move to a new computer: export a passphrase-en
 modeldock config import <file>  # import on the new computer: preview what will be replaced → confirm → auto-backup then apply
 modeldock sync setup            # multi-machine auto-sync: target = WebDAV drive / local sync folder, changes converge both ways
 modeldock detach <harness>      # restore the pre-attach original config
-modeldock restore <harness>     # revert to any snapshot (--list to show); detach is a full revert
+modeldock harness restore <harness>  # revert to any snapshot (--list to show); detach is a full revert
 modeldock reset                 # reset config (snapshots kept, re-init later); --deep also clears logs, sync state and caches
 modeldock uninstall             # uninstall the program (config & keys kept); --purge wipes everything including config
 ```
@@ -138,26 +138,28 @@ modeldock uninstall             # uninstall the program (config & keys kept); --
 
 ### Model-level failover (backup model within the same provider)
 
-**When the primary model runs out of quota, retry on a backup model of the same provider**: triggers only on quota-exhaustion errors and only after the service's backup chain is exhausted; **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Configure with `modeldock model fallback <service-id> <primary> <backup>` or the "Model failover" block of the edit-service dialog; trigger boundaries, the price gate and config.toml syntax: [usage guide](usage.md#model-level-failover-backup-model-within-the-same-provider).
+**When the primary model runs out of quota, retry on a backup model of the same provider**: triggers only on quota-exhaustion errors and only after the service's backup chain is exhausted; **unmapped models never trigger** — quality-sensitive roles such as reviewers and planners are never silently swapped. Configure with `modeldock model fallback <service-id> <primary> <backup>` or the "Model failover" block of the edit-service dialog; trigger boundaries, the price gate and config.toml syntax: [usage guide](guide/usage.md#model-level-failover-backup-model-within-the-same-provider).
 
 ## Documentation
 
 | Document | Contents |
 |------|------|
-| **[Usage guide](usage.md)** | Core concepts, installation details, full daily-operation walkthrough |
-| [Config reference](config-reference.md) | Every `config.toml` key: type, default and description (generated from code, always in sync) |
-| [New computer & multi-machine sync](multi-machine-sync.md) | Complete steps & troubleshooting for sync-folder onboarding |
-| [Cloud deployment](deploy-cloud.md) | Self-hosted cloud sync hub runbook, manage all devices from one phone page |
-| [Design doc](../design.md) (Chinese) | Architecture, ADRs, threat model |
+| **[Usage guide](guide/usage.md)** | Core concepts, installation details, full daily-operation walkthrough |
+| [Config reference](reference/config-reference.md) | Every `config.toml` key: type, default and description (generated from code, always in sync) |
+| [Command reference](reference/commands.md) | Quick lookup for every CLI command and its purpose |
+| [New computer & multi-machine sync](guide/multi-machine-sync.md) | Complete steps & troubleshooting for sync-folder onboarding |
+| [Cloud deployment](guide/deploy-cloud.md) | Self-hosted cloud sync hub runbook, manage all devices from one phone page |
+| [Design doc](../design/hld.md) (Chinese) | Architecture, ADRs, threat model |
 | [AI pipeline guide](../../.agents/docs/ai-pipeline-guide.md) (Chinese) | End-to-end use of the autonomous pipeline: from a one-line intent to a release proposal — task in, merge out |
-| [CI bots](../ci-bots.md) (Chinese) | GitHub Actions layered PR review & Dependabot: setup and usage (maintainers) |
-| [AI review system](../ai-review-system.md) (Chinese) | Design & ops of layered code review: what each layer catches, how to keep improving |
+| [CI bots](../ops/ci-bots.md) (Chinese) | GitHub Actions layered PR review & Dependabot: setup and usage (maintainers) |
+| [AI review system](../ops/ai-review-system.md) (Chinese) | Design & ops of layered code review: what each layer catches, how to keep improving |
+| [Design deviations ledger](../ops/design-deviations.md) (Chinese) | Ledger of capabilities delivered beyond or deviating from the original design (maintainers) |
 | [Changelog](CHANGELOG.md) | User-visible changes in every release |
 | 中文文档 | [简体中文版 README](../../README.md)（唯一事实来源） |
 
 ## Security
 
-The main gateway listens on `127.0.0.1` only and is not remotely accessible (by design); the optional LAN mobile console is off by default and adds a second listener on the LAN when enabled (see the [security policy](SECURITY.md)). Upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
+The main gateway listens on `127.0.0.1` only and is not remotely accessible (by design); the optional LAN mobile console is off by default and adds a second listener on the LAN when enabled (see the [security policy](SECURITY.md)). Upstream keys live only in the local secure backend, and only local tokens appear in client configs; request logs record metadata only, never prompts. Full threat model and security design: [design doc §9](../design/hld.md#9-安全设计) (Chinese). Found a security vulnerability? Please report it privately via the [security policy](SECURITY.md).
 
 ## Contributing
 

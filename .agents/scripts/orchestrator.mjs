@@ -36,7 +36,7 @@ import {
 import { appendEvent, readEvents, logDir, formatTimeline, coalesceEvents, appendInbox, readInbox, toIsoLocal } from './orchestrator/events.mjs';
 import { Budget } from './orchestrator/budget.mjs';
 import { countRecentTransient, countUpstreamStorm, shouldHold, appendFleetEvent } from './orchestrator/weather.mjs';
-import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, buildReviewRetryPrompt, parseAcceptanceDeclared, checkRecitation, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
+import { buildWorkerPrompt, buildReviewerPrompt, buildFixupPrompt, buildPromptFileRefBody, parseResultBlock, parseReviewVerdict, extractBlockerItems, blockerKey, buildReviewRetryPrompt, parseAcceptanceDeclared, checkRecitation, buildPlannerPrompt, parseCardBlock, parseCardBlocks, buildProposePrompt, buildSpecPrompt, parseSpecBlocks, buildResearchPrompt, buildVerifierPrompt, buildVerbatimRetryPrompt, buildArbitrationPrompt, buildSpecReviewPrompt, sanitizeIntent, appendFollowUps, CARD_MARKER, BRIEF_MARKER, SPECVERDICT_MARKER, buildResearchDimsPrompt, DIMS_SPLIT_MARKER } from './orchestrator/prompt.mjs';
 import { parseBriefBlock, validateBriefBody, extractCitations, extractDatedCitations, extractClaimTokens, citationDepthStats, crossCheckClaims, writeBriefAuto, readBrief, listBriefs, snapshotCitations, researchDir, assessBrief, loadSnapshots, parseVerdictBlock, parseArbitrationBlock, arbitrateClaims, verifyClaimVerbatim, normalizeClaimStatuses, downgradeNonVerbatimClaims, scoreVerdict, scoreCitation, buildResearchNotifyBody, buildResearchMultiNotifyBody, buildTopicSpecSections, appendResearchLedger, readLedgerStats, readVerdict, verdictGateBlocks, slugifyTopic, deriveTopicId, readTopic, writeTopic, writeTopicAuto, topicPath, rollupTopicVerdict, VERDICT_SCHEMA, parseDimsPlan, readResearchLedger, researcherStanding } from './orchestrator/research.mjs';
 import { readGoals } from './orchestrator/goals.mjs';
 import { collectStatsSummary, buildFleetFeedback, extractGoalsThemes } from './orchestrator/stats.mjs';
@@ -47,12 +47,12 @@ import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
-import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards } from './orchestrator/autoresume.mjs';
+import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards, lifetimeCapRejections } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
-import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
+import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, isLandedDraft, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
-import { classifyChange, hintsOverlap } from './policy.mjs';
+import { classifyChange, hintsOverlap, hintsIntersectExact, hitsCoreOrRelease } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
 import { MEASURED_FUEL_POLL_MS, createExpiryRenewal, probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
@@ -62,7 +62,8 @@ import { gatewayLogsDir, reconcileTask, reconcileAll, reconcileCardStates, upstr
 import { attachCost, measureFuel, measureFuelBatch, fmtUsd } from './orchestrator/cost.mjs';
 import { observeFleetForRun } from './orchestrator/fleet.mjs';
 import { decideDispatchForRun, normalizeEnvelope } from './orchestrator/dispatch.mjs';
-import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, resolveWatchdogModel, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { watchdogCheck, createWatchdogState, makeWatchdogSpawnFn, resolveWatchdogModel, resolveWatchdogMaxChecks, watchdogTimelineSummary } from './orchestrator/watchdog.mjs';
+import { createXteAlarm } from './orchestrator/xte.mjs';
 import { writeDecisionTrace } from './orchestrator/trace.mjs';
 import { proposeRelease } from './orchestrator/release-propose.mjs';
 import { installSchedule, uninstallSchedule, scheduleStatus, nightlyLogPath } from './orchestrator/schedule.mjs';
@@ -278,6 +279,22 @@ function worktreePath(repoRoot, taskId) {
   return path.join(repoRoot, '.agents', 'worktrees', taskId);
 }
 
+/**
+ * worktree 提交对账（stuck 终态对冲，2026-11-17）：统计 worktree HEAD 相对 base 分支的
+ * 非空提交数（git log --oneline <base>..HEAD）。非空 = 已有可验收产出在库——自报 stuck /
+ * 看门狗熔断落 blocked（清空重做语义）前的客观对冲证据。
+ * 返回 null = 对账不可得（worktree 缺失 / git 故障 / base 分支不可达）：调用方按
+ * 「无证据」处理、保持既有 blocked 行为——对账只做对冲不做拦截，绝不因对账失败改终态走向。
+ */
+export function worktreeCommitsAhead(worktree, baseBranch) {
+  try {
+    const out = execFileSync('git', ['log', '--oneline', `${baseBranch}..HEAD`], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return out.split('\n').filter((l) => l.trim()).length;
+  } catch {
+    return null;
+  }
+}
+
 function ensureWorktree(repoRoot, taskId) {
   const wt = worktreePath(repoRoot, taskId);
   if (fs.existsSync(wt)) {
@@ -329,12 +346,13 @@ function pilotageRequired(meta, cfg) {
 }
 
 /** 命中受限航道的具体原因；不在受限航道返回 null（cmdRun 报错与 drain 日志共用文案）。
- *  核心/发布路径都未配置时 hintsOverlap 与空集相交恒真（「完全通配=独占」语义），
- *  会把所有卡误判成引水卡——路径表为空 = 航道未设限，直接放行。 */
-function pilotageReason(meta, cfg) {
+ *  files_hint 对核心/发布路径清单用文件级精确口径（hintsIntersectExact）：曾用的顶层段
+ *  粗口径把 src/ 下任何卡都判进受限航道，drain 永不派出（2026-11-16 夜航性能卡整夜
+ *  pending）。核心/发布路径都未配置 = 航道未设限，直接放行。 */
+export function pilotageReason(meta, cfg) {
   if (meta.type === 'deps') return 'type: deps（依赖变更）';
   const restricted = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
-  if (restricted.length && hintsOverlap(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
+  if (restricted.length && hintsIntersectExact(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
   return null;
 }
 
@@ -604,10 +622,13 @@ async function cmdRun(repoRoot, taskId, opts) {
     playbooksDir: path.join(repoRoot, '.agents', 'workflows'),
   };
 
-  // ---- 确定性偏航报警（xte = cross track error，observe-only）：纯规则检查，只留痕
-  // 不动作（kill/熔断仍归预算与看门狗）。三条规则：no_commit（连续 2 个 worker 会话零
-  // 新提交）、test_loop（npm_test 连续 2 轮 fail）、scope_drift（越界文件数达阈值）。
-  const xte = createXteAlarm(qdir, worktree);
+  // ---- 确定性偏航报警（xte = cross track error）：纯规则检查，与 LLM 看门狗互补。
+  // 三条规则：no_commit（连续 2 个 worker 会话零新提交）、test_loop（npm_test 连续 2 轮
+  // fail）、scope_drift（越界文件数达阈值）。observe 档只留痕不动作（kill/熔断仍归预算
+  // 与看门狗）；no_commit 在 watchdog.mode=actuate 下升熔断（2026-11-15 质量专项 P1-⑥，
+  // worker 空转烧钱有熔断）——与看门狗 circuit_break 同款落位，见下方 afterWorkerSession
+  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。
+  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log });
 
   const events = readEvents(qdir);
   let debugIter = debugIterations(events);
@@ -740,7 +761,15 @@ async function cmdRun(repoRoot, taskId, opts) {
   // LLM 决策留底（trace.mjs）：workflow.json trace 键控制（缺省开启），watchdog/reviewer
   // 的模型输入与原始输出落盘 logs/<taskId>/decisions/ 供复盘；enabled=false 不传 traceDir。
   const traceCfg = cfg.trace;
-  const watchdogState = createWatchdogState(cfg.watchdog);
+  // maxChecks 按卡轮次预算缩放（2026-11-15 质量专项 P1-⑥）：写死 5 对大预算卡过早
+  // watchdog_disabled、小预算卡检查过密。meta.budget.max_turns 是 worker 会话的真实轮次
+  // 上限（上方预算校准段已并入 budgetProfiles 覆盖，缺省 50），定式论证见
+  // resolveWatchdogMaxChecks 的 why 注释；worktree 内卡可逐卡调大 max_turns，检查次数
+  // 随之放宽，无需另配 watchdog 键。
+  const watchdogState = createWatchdogState({
+    ...cfg.watchdog,
+    maxChecks: resolveWatchdogMaxChecks({ maxTurns: meta.budget.max_turns, everyTurns: cfg.watchdog.everyTurns }),
+  });
   let workerSessionSeq = 0; // 每次 worker spawn 递增：在途检查的结论只对本会话生效
   let workerInFlight = false; // worker spawn 在跑标记（收尾即清，防陈旧结论动作）
   let escalatedThisRun = false; // 升级链：每 run 至多自动升档一次（engine_escalated 防刷屏）
@@ -768,9 +797,20 @@ async function cmdRun(repoRoot, taskId, opts) {
           log(`⏱ 看门狗熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
           killTree(livePid);
         }
-        moveCard(root, taskId, 'running', 'blocked');
-        archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
-        await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        // stuck 终态对冲（2026-11-17）：熔断落 blocked 前对账 worktree 提交——相对 base
+        // 已有非空提交 = 可验收产出在库，转 reviewing 交审查而非 blocked（kill 照常执行；
+        // 对账只读 HEAD，与已终止的 worker 无写竞争）。无提交/对账不可得照旧 blocked。
+        const watchdogCommitsAhead = worktreeCommitsAhead(worktree, baseBranch);
+        if (watchdogCommitsAhead !== null && watchdogCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: 'watchdog', commits_ahead: watchdogCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `看门狗判定任务空转，但 worktree 相对 ${baseBranch} 已有 ${watchdogCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked`);
+          log(`⛔ 看门狗熔断但 worktree 已有 ${watchdogCommitsAhead} 个提交——转 reviewing/ 交审查（不落 blocked 重做），人工 resume 续做或核对后处置。`);
+        } else {
+          moveCard(root, taskId, 'running', 'blocked');
+          archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
+          await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        }
         // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
         // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
         // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
@@ -916,6 +956,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           appendEvent(qdir, 'worker_spawned', { role: 'worker', backend: opts.backend, attempt: debugIter + reviewIter, ...(effWorkerModel ? { model: effWorkerModel } : {}) });
           if (fastlaneWanted) appendEvent(qdir, 'fastlane_active', { gate: meta.gate });
           result = await backend.spawn({
+            role: 'worker', // 显式角色契约：fixup prompt 内嵌审查全文，mock 不再靠正文嗅探判角色（见 types.mjs）
             promptFile,
             cwd: worktree,
             maxTurns: meta.budget.max_turns,
@@ -934,10 +975,11 @@ async function cmdRun(repoRoot, taskId, opts) {
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
           if (watchdogHalted) {
-            // 看门狗 actuate 已完成落位（blocked/ + circuit_breaker 事件 + 事故归档 + 通报）：
-            // 主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重试判定之前——
-            // killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试再派新会话。
-            log('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+            // 看门狗 actuate 已完成落位（有提交 → reviewing/，无提交 → blocked/ + 事故归档
+            // + 通报）：主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重
+            // 试判定之前——killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试
+            // 再派新会话。
+            log('进展看门狗（actuate）已落位（审查或 blocked，见上方日志），人工决策后再继续。');
             return;
           }
           if (budget.tripped) {
@@ -990,7 +1032,24 @@ async function cmdRun(repoRoot, taskId, opts) {
         }
         break;
       }
-      xte.afterWorkerSession(); // 偏航 no_commit：会话收尾对账 HEAD（observe-only，只留痕）
+      // 偏航 no_commit 消费点：actuate 档命中（连续 2 个 worker 会话零新提交）→ 与看门狗
+      // circuit_break 同款落位（circuit_breaker 留痕 → 杀在跑进程树（有则杀）→ 卡 blocked
+      // → 事故归档 → 通报 → return 收敛走 finally 清理）。触发时 worker spawn 已收尾
+      // （livePid 已清），kill 是防御性的；observe 档返回 null / actuate:false，行为同旧
+      // （只留痕，流程照常走门禁与审查）。
+      const xteHit = xte.afterWorkerSession();
+      if (xteHit?.actuate) {
+        appendEvent(qdir, 'circuit_breaker', { reason: 'xte_no_commit', detail: String(xteHit.detail).slice(0, 300) });
+        if (livePid) {
+          log(`⏱ 偏航熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
+          killTree(livePid);
+        }
+        moveCard(root, taskId, 'running', 'blocked');
+        archiveIncident(repoRoot, taskId, root, qdir, '偏航 no_commit（actuate：连续 2 个 worker 会话零新提交）');
+        await settleNotify(repoRoot, taskId, 'blocked', '偏航 no_commit：连续 2 个 worker 会话零新提交（actuate）');
+        log('⛔ 偏航熔断（xte no_commit，actuate）：worker 疑似空转烧钱——任务转 blocked/，人工决策后再继续。');
+        return;
+      }
 
       // ---- 自报不可信：先解析契约块，再亲自跑门禁 ----
       const claimed = parseResultBlock(workerOutput);
@@ -1003,8 +1062,26 @@ async function cmdRun(repoRoot, taskId, opts) {
           : crash?.decisive
             ? crash.reason
             : '未产出结果块（worker 异常结束）';
+        // stuck 终态对冲（2026-11-17）：自报 stuck 是 worker 对「无法继续」的主观申报，
+        // 落 blocked（清空重做语义）前先对账 worktree 客观进度——相对 base 有非空提交 =
+        // 已有可验收产出（实测 4 张 blocked 卡各持完成提交、其一 NOTES 记录实现完成测试
+        // 全绿），转 reviewing 交审查/人工裁决，完成提交不再孤儿化、半成品不重复造轮子。
+        // 无提交照旧 blocked（防误伤真 stuck）；对账不可得（worktree 缺失/git 故障）也
+        // 照旧——对账只对冲不拦截。只对 stuck 自报生效：未产出结果块族有自己的自动续
+        // 通道（isTransientBlocked Path C），熔断/异常归因语义不动。
+        const stuckCommitsAhead = claimed?.status === 'stuck' ? worktreeCommitsAhead(worktree, baseBranch) : null;
+        if (stuckCommitsAhead !== null && stuckCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: blockedReason, commits_ahead: stuckCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `${blockedReason}（worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked）`);
+          log(`worker 自报 stuck，但 worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转 reviewing/ 交审查（不落 blocked 重做）：`);
+          log(`  node .agents/scripts/orchestrator.mjs resume ${taskId}   # 带恢复上下文续做`);
+          log(`  node .agents/scripts/orchestrator.mjs logs ${taskId}     # 核对事件时间线后人工处置`);
+          return;
+        }
         appendEvent(qdir, 'blocked', {
           reason: blockedReason,
+          ...(stuckCommitsAhead !== null ? { commits_ahead: stuckCommitsAhead } : {}),
           ...(crash?.decisive
             ? {
                 cause: crash.cause,
@@ -1052,7 +1129,12 @@ async function cmdRun(repoRoot, taskId, opts) {
             ctx,
             'acceptance_gap',
             `worker 契约块自报验收满足 ${declaredAcc.met}/${declaredAcc.total}（卡内共 ${accItems.length} 条）。未满足的验收标准需逐条补齐后再报 done：\n${accItems.map((it, i) => `${i + 1}. ${it}`).join('\n')}`,
-            debugIter
+            debugIter,
+            {
+              gateName: 'acceptance_gap（验收申报对账）',
+              gateCriteria: `worker 契约块自报 acceptance ${declaredAcc.met}/${declaredAcc.total}，卡内验收标准共 ${accItems.length} 条——申报缺额即自认未达标，门禁与审查会在修复后逐条复验`,
+              prevResult: claimed,
+            }
           )
         );
         continue;
@@ -1078,7 +1160,8 @@ async function cmdRun(repoRoot, taskId, opts) {
             if (debugIter > meta.budget.max_test_iterations) {
               await tripDebugLoop(`调试子循环超限（${debugIter} 次${g.dieLabel ? `，${g.dieLabel}` : ''}）`, g.dieTail);
             }
-            return { trigger: g.trigger, output: e.output };
+            // gate 名与校验口径随输出一起返回：fixup prompt 门禁摘要段的原料
+            return { gate: g.gate, trigger: g.trigger, criteria: g.criteria, output: e.output };
           }
         }
         return null;
@@ -1089,11 +1172,16 @@ async function cmdRun(repoRoot, taskId, opts) {
       const changed = changedFiles(worktree, baseBranch);
       const classification = classifyChange(changed, cfg);
       const docsOnly = changed.length > 0 && changed.every((f) => /\.md$/i.test(f.replace(/\\/g, '/')));
+      // 门禁校验口径一行（fixup 门禁摘要段消费）：命令原文照抄进 prompt，返工船按口径
+      // 自查不用猜门禁跑了什么；未配置的命令只会 skipped 不可能 fail，criteria 缺省即降级
+      const activeTestCmd = docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ');
+      const cmdCriteria = (label, cmd) => (cmd ? `${label}「${cmd}」在 worktree 内执行，退出码非 0 即失败` : undefined);
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, docsOnly && cfg.testCmdL0 ? cfg.testCmdL0.join(' && ') : cfg.testCmd.join(' && ')),
+          run: () => gateNpmTest(worktree, activeTestCmd),
           trigger: 'test_failure',
+          criteria: cmdCriteria('测试命令', activeTestCmd),
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
           passExtra: (r) => {
@@ -1115,6 +1203,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
           run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
+          criteria: cmdCriteria('构建命令', cfg.buildCmd),
           dieLabel: 'build 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true, ...(r.reason ? { reason: r.reason } : {}) } : {}),
@@ -1123,6 +1212,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           gate: 'lint',
           run: () => gateLint(worktree, cfg.lintCmd), // cmd 未配置 → 直接 skipped 返回
           trigger: 'lint_failure',
+          criteria: cmdCriteria('lint 命令', cfg.lintCmd),
           dieLabel: 'lint 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true } : {}),
@@ -1131,6 +1221,7 @@ async function cmdRun(repoRoot, taskId, opts) {
           gate: 'typecheck',
           run: () => gateTypecheck(worktree, cfg.typecheckCmd),
           trigger: 'typecheck_failure',
+          criteria: cmdCriteria('typecheck 命令', cfg.typecheckCmd),
           dieLabel: 'typecheck 不过',
           dieTail: '任务转 blocked/，人工接手。',
           passExtra: (r) => (r.skipped ? { skipped: true } : {}),
@@ -1139,7 +1230,7 @@ async function cmdRun(repoRoot, taskId, opts) {
       const fixup = await runGates(STATIC_GATES);
       xte.testLoop(); // 偏航 test_loop：npm_test 连续 2 轮 fail（从 gate_result 事件判定，observe-only）
       if (fixup) {
-        promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter));
+        promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, fixup.trigger, fixup.output, debugIter, { gateName: fixup.gate, gateCriteria: fixup.criteria, prevResult: claimed }));
         continue;
       }
 
@@ -1177,13 +1268,14 @@ async function cmdRun(repoRoot, taskId, opts) {
             gate: 'ui_check',
             run: () => gateUiCheck(worktree, cfg.uiCheckCmd),
             trigger: 'ui_check_failure',
+            criteria: cmdCriteria('ui_check 命令', cfg.uiCheckCmd),
             dieLabel: 'ui_check 不过',
             dieTail: '任务转 blocked/，人工接手。',
             passExtra: (r) => (r.skipped ? { skipped: true } : {}),
           },
         ]);
         if (uiFixup) {
-          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter));
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, uiFixup.trigger, uiFixup.output, debugIter, { gateName: uiFixup.gate, gateCriteria: uiFixup.criteria, prevResult: claimed }));
           continue;
         }
       }
@@ -1263,71 +1355,193 @@ async function cmdRun(repoRoot, taskId, opts) {
         // 下一次 beginSession（下轮 worker）把审查峰值入账——reviewer 的 budget_snapshot 此前只落
         // 盘不记账，max_tokens 硬熔断与低油量告警对审查段完全失明
         budget.beginSession();
-        const review = await reviewBackend.spawn({
-          promptFile: reviewPromptFile,
-          cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
-          maxTurns: cfg.reviewMaxTurns, // workflow.json 可调（缺省 30）
-          onEvent: (e) => {
-            appendEvent(qdir, e.type, e);
-            trackPid(e);
-            if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 审查计入同一预算口径（第三参缺省 = 旧口径）
-          },
-          readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
-          model: effReviewModel, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
-          settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
-          envPatch: tierEnv,
-        });
-        livePid = null;
-        appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
-        let verdict = parseReviewVerdict(review.output ?? '');
-        // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
-        // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
-        // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
-        // 处置：可操作报错 + 留痕 + 通知，修复引擎后 resume。
-        if (!verdict && (review.exitCode ?? 0) !== 0) {
-          const stderrTail = String(review.stderrTail ?? '').trim().slice(-400);
-          const detail = `审查引擎故障（${opts.reviewBackend} exit ${review.exitCode}）：${stderrTail || String(review.output ?? '').trim().slice(-200) || '无输出'}`;
-          appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: review.exitCode, stderr_tail: stderrTail.slice(-400) });
-          moveCard(root, taskId, 'reviewing', 'blocked');
-          archiveIncident(repoRoot, taskId, root, qdir, detail);
-          await settleNotify(repoRoot, taskId, 'blocked', detail);
-          await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
-        }
-        // 契约行补问（⑤）：引擎正常、有审查输出、只缺 REVIEW_SUMMARY 汇总行——先补问
-        // 一次再判罚。直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）；
-        // 补问仍解析不到才落回保守判罚。补问输入只有上轮输出，不重放 diff（不重开审查）。
-        if (!verdict && String(review.output ?? '').trim()) {
-          budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
-          const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
-          const retryPromptText = buildReviewRetryPrompt(review.output);
-          fs.writeFileSync(retryPromptFile, retryPromptText);
-          const retry = await reviewBackend.spawn({
-            promptFile: retryPromptFile,
-            cwd: worktree,
-            maxTurns: 6, // 只求补一行汇总，不重开审查
+        // 审查会话 spawn（单/双 critic 与契约行补问共用）：显式 role 契约（mock 判角色不再
+        // 嗅探正文，见 types.mjs）+ 只读（策略守护 fail-closed）+ 计账/留痕直通
+        const spawnReviewer = ({ promptFile, model, maxTurns = cfg.reviewMaxTurns }) =>
+          reviewBackend.spawn({
+            role: 'reviewer', // 显式角色契约（mock 判角色不再嗅探正文，见 types.mjs）
+            promptFile,
+            cwd: worktree, // reviewer 只读，cwd 无关紧要但保持同环境
+            maxTurns,
             onEvent: (e) => {
               appendEvent(qdir, e.type, e);
               trackPid(e);
-              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read);
+              if (e.type === 'budget_snapshot') budget.account(e.tokens_in, e.tokens_out, e.tokens_cache_read); // 审查计入同一预算口径（第三参缺省 = 旧口径）
             },
-            readonly: true,
-            model: effReviewModel,
+            readonly: true, // 策略守护完整版：allowedTools 收敛为只读（fail-closed）
+            model, // 仅 claude 系生效（--model，分源换模型防同底座共因盲区）
             settingsFile: reviewWantsSettings ? reviewSettingsFile : undefined,
             envPatch: tierEnv,
           });
-          const retryVerdict = parseReviewVerdict(retry.output ?? '');
-          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
-          appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
-          if (retryVerdict) verdict = retryVerdict;
+        // 双 critic 触发口径（与分级同源）：仅改动实际命中 corePaths/releasePaths 的卡
+        // （hitsCoreOrRelease 与 classifyChange 共用同一匹配口径，勿在此重写匹配）。
+        // package.json/未识别文件/GUARD_SELF 的保守归高不算卡面声明的核心面——不触发
+        // （面窄守住缺省 true 的体积）；escape hatch：review.dualCritic.enabled=false
+        const dualCriticOn = (cfg.review?.dualCritic?.enabled ?? true) && hitsCoreOrRelease(changed, cfg).length > 0;
+        let verdict;
+        let failureOutput = ''; // 修复 prompt 引用的失败输出（双 critic = 并集形态）
+        let blockersCriteria = (n) => `reviewer 独立审查判定存在 ${n} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+        if (dualCriticOn) {
+          // ---- 双 critic 并行（高风险卡，orch-dual-critic-review 卡 2026-11-20）----
+          // 两只异模型 reviewer 并行出 verdict，blockers 取并集（同条去重）后走既有裁决链；
+          // 一只失败降级用另一只（不丢审查），双失败走既有失败路径。依据 arXiv 2610.34577：
+          // 并行多 critic ≈ 多轮返工精度、成本低 19%——单 critic 同源盲区是漏网根因型。
+          // 副 critic 模型缺省链 research.model → worker.model 的 why：worker.model 与被审
+          // 代码同源（恰是本机制要打破的盲区），research.model 是独立选型的深读批判模型，
+          // 与审查选型撞名概率更低。backend 同 review.backend（只换脑子不换引擎）。
+          const secondModel = cfg.review?.dualCritic?.secondModel || cfg.research?.model || cfg.worker?.model || undefined;
+          log(`双 critic 审查（命中 corePaths/releasePaths）：主 ${opts.reviewBackend}${effReviewModel ? `/${effReviewModel}` : ''} + 副 ${opts.reviewBackend}${secondModel ? `/${secondModel}` : ''}——blockers 并集去重取严，单只失败降级不丢审查`);
+          const secondPromptFile = path.join(reviewPromptDir, 'review-prompt-2.md');
+          fs.writeFileSync(secondPromptFile, reviewPromptText);
+          // Promise.allSettled 而非卡面所写 Promise.all：降级语义要求单只失败不丢幸存者
+          // 结果，all 的 reject 会连带丢弃——allSettled 才是「并行 + 降级」的正确原语
+          const [primarySettled, secondSettled] = await Promise.allSettled([
+            spawnReviewer({ promptFile: reviewPromptFile, model: effReviewModel }),
+            spawnReviewer({ promptFile: secondPromptFile, model: secondModel }),
+          ]);
+          livePid = null;
+          const settleCritic = (r) =>
+            r.status === 'fulfilled'
+              ? { ...r.value, spawnFailed: false }
+              : { exitCode: 1, output: '', stderrTail: String(r.reason?.message ?? r.reason ?? ''), spawnFailed: true };
+          const primary = settleCritic(primarySettled);
+          const second = settleCritic(secondSettled);
+          // review_spawned 维持「spawn 成功返回才落」不变量（resume prior 解析不钉死坏后端）
+          if (primarySettled.status === 'fulfilled') appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
+          if (secondSettled.status === 'fulfilled') appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, critic: 'second', ...(secondModel ? { model: secondModel } : {}) });
+          let primaryVerdict = parseReviewVerdict(primary.output ?? '');
+          let secondVerdict = parseReviewVerdict(second.output ?? '');
+          let unionInfo = null;
+          if (primaryVerdict && secondVerdict) {
+            // 双双出 verdict：blockers 并集（同条去重）。契约只钉 REVIEW_SUMMARY 计数、逐条
+            // 无结构——行级提取（extractBlockerItems）与契约计数对上才做真去重，对不上回落
+            // 取两 critic 较大计数（取严不放大，防跨模型输出风格差异把启发提取跑偏）
+            const items1 = extractBlockerItems(primary.output);
+            const items2 = extractBlockerItems(second.output);
+            const complete = items1.length === primaryVerdict.blockers && items2.length === secondVerdict.blockers;
+            let unionBlockers;
+            let deduped = 0;
+            let unionList = [];
+            if (complete) {
+              const byKey = new Map();
+              for (const it of [...items1, ...items2]) {
+                const key = blockerKey(it);
+                if (byKey.has(key)) deduped += 1;
+                else byKey.set(key, it);
+              }
+              unionList = [...byKey.values()];
+              unionBlockers = unionList.length;
+            } else {
+              unionBlockers = Math.max(primaryVerdict.blockers, secondVerdict.blockers);
+            }
+            unionInfo = { blockers: unionBlockers, deduped, complete };
+            verdict = { blockers: unionBlockers, suggestions: Math.max(primaryVerdict.suggestions, secondVerdict.suggestions), notes: Math.max(primaryVerdict.notes, secondVerdict.notes) };
+            // 修复 prompt 引用并集：双 critic 全文拼接 + 尾部去重清单（buildFixupPrompt 只保
+            // 尾部 200 行——并集清单钉在尾部保证不被截掉）
+            failureOutput =
+              `# 审查者 1（主）输出\n\n${String(primary.output ?? '')}\n\n# 审查者 2（副）输出\n\n${String(second.output ?? '')}` +
+              (complete ? `\n\n## 双 critic 并集阻塞项（同条去重，共 ${unionBlockers} 条）\n\n${unionList.map((s) => `- ${s}`).join('\n')}` : '');
+            blockersCriteria = (n) => `双 critic 并集判定存在 ${n} 条阻塞项（主 ${primaryVerdict.blockers} + 副 ${secondVerdict.blockers}${complete ? `，去重 ${deduped} 条` : '，逐条提取不全按较大计数取严'}；阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+          } else if (primaryVerdict || secondVerdict) {
+            // 单侧幸存：降级用幸存者结果（不丢审查）；死者留降级痕（critic/死因/exit）
+            const survivorIsSecond = !primaryVerdict;
+            const survivor = survivorIsSecond ? second : primary;
+            const dead = survivorIsSecond ? primary : second;
+            verdict = survivorIsSecond ? secondVerdict : primaryVerdict;
+            failureOutput = String(survivor.output ?? '');
+            appendEvent(qdir, 'review_critic_degraded', {
+              critic: survivorIsSecond ? 'primary' : 'second',
+              reason: dead.spawnFailed ? 'spawn_failed' : (dead.exitCode ?? 0) !== 0 ? 'engine_exit' : 'no_contract',
+              exit_code: dead.exitCode ?? null,
+            });
+            blockersCriteria = (n) => `审查降级（双 critic 单侧幸存）判定存在 ${n} 条阻塞项（阻塞项 > 0 即返工；逐条意见见下方失败输出）`;
+          } else if ((primary.spawnFailed || (primary.exitCode ?? 0) !== 0)) {
+            // 双失败且主 critic 引擎级死亡：走既有失败路径（与单 critic 引擎故障同口径，
+            // fail-fast 落 blocked，不烧返工轮——引擎死了不是审查意见）
+            const stderrTail = String(primary.stderrTail ?? '').trim().slice(-400);
+            const detail = `审查引擎故障（${opts.reviewBackend} exit ${primary.exitCode ?? '?'}，双 critic 均未产出结论）：${stderrTail || String(primary.output ?? '').trim().slice(-200) || '无输出'}`;
+            appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: primary.exitCode ?? null, stderr_tail: stderrTail.slice(-400), dual: true });
+            moveCard(root, taskId, 'reviewing', 'blocked');
+            archiveIncident(repoRoot, taskId, root, qdir, detail);
+            await settleNotify(repoRoot, taskId, 'blocked', detail);
+            await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+          }
+          if (!primaryVerdict && !secondVerdict) {
+            // 走到这里 = 主 critic 活着但无契约块（副 critic 无论何种形态都无结论）：
+            // 与单 critic 同口径——契约行补问一次，仍无结论按保守 blockers=1 进返工
+            appendEvent(qdir, 'review_critic_degraded', {
+              critic: 'second',
+              reason: second.spawnFailed ? 'spawn_failed' : (second.exitCode ?? 0) !== 0 ? 'engine_exit' : 'no_contract',
+              exit_code: second.exitCode ?? null,
+            });
+            if (String(primary.output ?? '').trim()) {
+              budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
+              const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
+              const retryPromptText = buildReviewRetryPrompt(primary.output);
+              fs.writeFileSync(retryPromptFile, retryPromptText);
+              const retry = await spawnReviewer({ promptFile: retryPromptFile, model: effReviewModel, maxTurns: 6 }); // 只求补一行汇总，不重开审查
+              const retryVerdict = parseReviewVerdict(retry.output ?? '');
+              writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
+              appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
+              if (retryVerdict) {
+                primaryVerdict = retryVerdict;
+                verdict = retryVerdict;
+                failureOutput = String(retry.output ?? '');
+              }
+            }
+          }
+          // 决策留底：两只各留一份（副 critic 带 critic 标记与模型名，误判复盘可分源）
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(primary.output ?? ''), parsed: primaryVerdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(second.output ?? ''), parsed: secondVerdict, meta: { backend: opts.reviewBackend, critic: 'second', ...(secondModel ? { model: secondModel } : {}) } }, traceCfg);
+          // 两条 review_verdict 留痕（second 标记）：消费者取「末条」语义天然兼容——并集 > 0
+          // 时本轮必然走返工不落 awaiting-human，autoapprove sweep 只会在并集 = 0（两 critic
+          // 均 0）时读到副 critic 的 0，推荐语义不漂移
+          if (primaryVerdict) appendEvent(qdir, 'review_verdict', { blockers: primaryVerdict.blockers, suggestions: primaryVerdict.suggestions, notes: primaryVerdict.notes });
+          if (secondVerdict) appendEvent(qdir, 'review_verdict', { blockers: secondVerdict.blockers, suggestions: secondVerdict.suggestions, notes: secondVerdict.notes, critic: 'second', ...(secondModel ? { model: secondModel } : {}), ...(unionInfo ? { union_blockers: unionInfo.blockers, union_deduped: unionInfo.deduped, union_mode: unionInfo.complete ? 'deduped' : 'max_fallback' } : {}) });
+          if (!primaryVerdict && !secondVerdict) appendEvent(qdir, 'review_verdict', { blockers: -1, suggestions: 0, notes: 0 }); // 保守判罚留痕（与单 critic 同口径）
+        } else {
+          // ---- 单 critic（普通卡既有路径，语义与历史逐字节等价）----
+          const review = await spawnReviewer({ promptFile: reviewPromptFile, model: effReviewModel });
+          livePid = null;
+          appendEvent(qdir, 'review_spawned', { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}) });
+          verdict = parseReviewVerdict(review.output ?? '');
+          // 审查引擎故障快速落 blocked（exitCode≠0 且无契约块）：引擎死了不是审查意见，
+          // 烧满返工轮只会把错误文本当 reviewer 意见反复注入（2026-11-03 夜航实证：claude
+          // CLI 凭据失效时 result 事件携带 "Not logged in" 错误文本）。与 worker stuck 同等
+          // 处置：可操作报错 + 留痕 + 通知，修复引擎后 resume。
+          if (!verdict && (review.exitCode ?? 0) !== 0) {
+            const stderrTail = String(review.stderrTail ?? '').trim().slice(-400);
+            const detail = `审查引擎故障（${opts.reviewBackend} exit ${review.exitCode}）：${stderrTail || String(review.output ?? '').trim().slice(-200) || '无输出'}`;
+            appendEvent(qdir, 'review_engine_failed', { backend: opts.reviewBackend, exitCode: review.exitCode, stderr_tail: stderrTail.slice(-400) });
+            moveCard(root, taskId, 'reviewing', 'blocked');
+            archiveIncident(repoRoot, taskId, root, qdir, detail);
+            await settleNotify(repoRoot, taskId, 'blocked', detail);
+            await exitRun(`${detail}\n任务转 blocked/，人工接手（修复审查引擎后 resume）。`, 1);
+          }
+          // 契约行补问（⑤）：引擎正常、有审查输出、只缺 REVIEW_SUMMARY 汇总行——先补问
+          // 一次再判罚。直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）；
+          // 补问仍解析不到才落回保守判罚。补问输入只有上轮输出，不重放 diff（不重开审查）。
+          if (!verdict && String(review.output ?? '').trim()) {
+            budget.beginSession(); // 主审查峰值入账 committed，补问从零峰值起算（口径同审查段）
+            const retryPromptFile = path.join(reviewPromptDir, 'review-retry-prompt.md');
+            const retryPromptText = buildReviewRetryPrompt(review.output);
+            fs.writeFileSync(retryPromptFile, retryPromptText);
+            const retry = await spawnReviewer({ promptFile: retryPromptFile, model: effReviewModel, maxTurns: 6 });
+            const retryVerdict = parseReviewVerdict(retry.output ?? '');
+            writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: retryPromptText, output: String(retry.output ?? ''), parsed: retryVerdict, meta: { backend: opts.reviewBackend, retry: 'contract_line', ...(effReviewModel ? { model: effReviewModel } : {}) } }, traceCfg);
+            appendEvent(qdir, 'review_verdict_retry', { resolved: retryVerdict != null });
+            if (retryVerdict) verdict = retryVerdict;
+          }
+          // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
+          // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
+          writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
+          appendEvent(qdir, 'review_verdict', {
+            blockers: verdict?.blockers ?? -1,
+            suggestions: verdict?.suggestions ?? 0,
+            notes: verdict?.notes ?? 0,
+          });
+          failureOutput = String(review.output ?? '');
         }
-        // 决策留底（kind=review）：reviewer prompt 全文（可能大，靠 trace 截断上界兜住）+
-        // 模型原始输出落盘，审查误判可复盘；写失败内部消化（trace.mjs），不动审查链路
-        writeDecisionTrace({ root: qdir, taskId, kind: 'review', input: reviewPromptText, output: String(review.output ?? ''), parsed: verdict, meta: { backend: opts.reviewBackend, ...(effReviewModel ? { model: effReviewModel } : {}), durationMs: Date.now() - reviewStartedAt } }, traceCfg);
-        appendEvent(qdir, 'review_verdict', {
-          blockers: verdict?.blockers ?? -1,
-          suggestions: verdict?.suggestions ?? 0,
-          notes: verdict?.notes ?? 0,
-        });
 
         const blockers = verdict?.blockers ?? 1; // 解析不到按有阻塞保守处理
         if (blockers > 0) {
@@ -1340,7 +1554,10 @@ async function cmdRun(repoRoot, taskId, opts) {
             await settleNotify(repoRoot, taskId, 'blocked', `审查返工超限（${reviewIter} 轮仍有阻塞项）`);
             await exitRun(`审查返工超限（${reviewIter} 轮仍有阻塞项）。任务转 blocked/，人工接手。`);
           }
-          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', review.output ?? '', reviewIter));
+          // 门禁摘要口径避开 REVIEW_SUMMARY 字面量：mock 判角色已改显式契约（2026-11-20），
+          // 该规避不再承重，文案保留不动（selfcheck grepZero 仍钉 gateCriteria 不含契约行），
+          // 契约行全文只从失败输出段进 prompt
+          promptText = injectFollowUps(qdir, buildFixupPrompt(card, ctx, 'review_blockers', failureOutput, reviewIter, { gateName: 'review_blockers（LLM 独立审查）', gateCriteria: blockersCriteria(blockers), prevResult: claimed }));
           moveCard(root, taskId, 'reviewing', 'running');
           continue;
         }
@@ -1433,60 +1650,6 @@ async function failTaskToBlocked(repoRoot, root, qdir, taskId, err) {
     return reason;
   }
   return null;
-}
-
-/**
- * 偏航报警（xte = cross track error 航向偏差角，observe-only）：确定性规则检查，
- * 与 LLM 看门狗互补——看门狗靠模型判断「有没有实质进展」，这里只认机器可复核的
- * 硬信号。三条规则：
- *   no_commit   连续 2 个 worker 会话零新提交（HEAD 计数会话首尾对账）
- *   test_loop   npm_test 门禁连续 2 轮 fail（从 gate_result 事件判定）
- *   scope_drift scope_purity 越界文件数 ≥ max(3, files_hint 长度)
- * 每规则每任务至多报一次：内存 Set + 事件播种（resume 跨进程也不重报）。
- * 只留痕不动作——kill/熔断仍归预算与看门狗，报警是给人和夜跑摘要看的信号。
- */
-function createXteAlarm(qdir, worktree) {
-  const fired = new Set(readEvents(qdir).filter((e) => e.type === 'xte_alarm').map((e) => e.rule));
-  const report = (rule, detail) => {
-    if (fired.has(rule)) return;
-    fired.add(rule);
-    appendEvent(qdir, 'xte_alarm', { rule, detail });
-    log(`⚠ 偏航报警（${rule}，只留痕不动作）：${detail}`);
-  };
-  const headCount = () => {
-    try {
-      return Number.parseInt(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(), 10);
-    } catch {
-      return null; // git 异常不判（缺数据宁可漏报不误报）
-    }
-  };
-  let sessionStart = null; // 本会话起点的 HEAD 提交数
-  let zeroStreak = 0; // 连续零新提交的会话数
-  return {
-    beforeWorkerSession() {
-      sessionStart = headCount();
-    },
-    afterWorkerSession() {
-      if (sessionStart === null) return;
-      const end = headCount();
-      if (end === null) return;
-      zeroStreak = end === sessionStart ? zeroStreak + 1 : 0;
-      sessionStart = null;
-      if (zeroStreak >= 2) report('no_commit', `连续 ${zeroStreak} 个 worker 会话零新提交（HEAD 停在 ${end}）——worker 可能空转`);
-    },
-    testLoop() {
-      const results = readEvents(qdir).filter((e) => e.type === 'gate_result' && e.gate === 'npm_test').map((e) => e.result);
-      if (results.length >= 2 && results[results.length - 1] === 'fail' && results[results.length - 2] === 'fail') {
-        report('test_loop', 'npm_test 门禁连续 2 轮 fail——修复可能在同一处打转');
-      }
-    },
-    scopeDrift(outsideCount, hintLen) {
-      const threshold = Math.max(3, hintLen);
-      if (outsideCount >= threshold) {
-        report('scope_drift', `scope_purity 越界文件 ${outsideCount} 个 ≥ 阈值 ${threshold}——改动面可能失控`);
-      }
-    },
-  };
 }
 
 /** 海况数字人性化：≥1e6 → M、≥1e3 → k；时延 ms → s。 */
@@ -1737,11 +1900,45 @@ async function humanGateInteractive(repoRoot, taskId, root, qdir, summary, runOp
 // 闸门操作（交互与非交互共用）
 // ---------------------------------------------------------------------------
 
+/**
+ * 零提交防假合并门的对账原语：feature 分支相对 base 的提交数。查分支 ref 而非复用
+ * worktreeCommitsAhead（worktree HEAD）：worktree 可能已被上次失败的 finish 清掉而卡
+ * 仍留 awaiting-human（清理失败退出 1 的重试场景），分支 ref 才是 finish 实际要合并的
+ * 对象。null = 不可判定（分支缺失 / git 故障）——不拦截，交给 finish 自己报错：门只拦
+ * 「有明确证据的零提交」，不为排查失败扩大拦截面。
+ */
+function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', `${baseBranch}..refs/heads/feature/${taskId}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
   if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
   else appendEvent(qdir, 'human_gate', { decision: 'approved' });
+  // 零提交防假合并门（2026-11-16 夜航四张 perf 卡假 merged 实证）：spawn finish 前先对账
+  // 分支产出。零提交分支上 finish 走「nothing to merge」成功路径 exit 0，旧逻辑随后无条件
+  // 记 merged 并把当时的 develop HEAD 误记成 merge_commit。拒绝时卡转 failed/（终态：
+  // 落 reviewing/ 会被自动批示再次拉回闸门反复重跑审查，failed/ 与人工驳回 doReject 同款
+  // 落位）；事件留拒绝理由、不记 merge_commit、不动 develop，worktree 保留供人工核对
+  // worker 到底留了什么（多半是漏提交）。
+  const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
+  const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
+  if (commitsAhead === 0) {
+    moveCard(root, taskId, 'awaiting-human', 'failed');
+    appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
+    die(
+      `任务 ${taskId} 拒绝合并：feature 分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门，2026-11-16 假 merged 事故防线）。\n` +
+      `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
+      `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
+    );
+  }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
   // approve 给 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD——finish 内部校验
@@ -2435,14 +2632,31 @@ async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
 }
 
 /**
+ * 生命周期上限拒绝留痕（P1-⑨，判定纯逻辑在 lifetimeCapRejections）：落卡事件
+ * auto_resume_rejected { reason: 'lifetime_cap', count, max_per_card } + 主日志一行——
+ * 超限卡留 blocked 待人工，卡上已有 auto_resume_count 累计值即留痕；同一上限状态
+ * 只报一次（去重口径见 lifetimeCapRejections），防 drain 每轮刷屏。
+ */
+function reportLifetimeCapRejections(repoRoot, rejections) {
+  for (const c of rejections) {
+    try {
+      appendEvent(logDir(repoRoot, c.id), 'auto_resume_rejected', { card: c.id, reason: 'lifetime_cap', count: c.count, max_per_card: c.cap });
+    } catch { /* 留痕失败不阻断选卡 */ }
+    log(`⛔ 卡 ${c.id} 自动续累计 ${c.count} 次已达上限 ${c.cap}——不再自动续，等人工 resume（判否原因见 logs/${c.id}/ 事件）。`);
+  }
+}
+
+/**
  * blocked 卡有限自动续跑（长跑自主的关键小件；资格判定纯逻辑在 orchestrator/autoresume.mjs）。
  * drain 选卡前调用：扫 blocked/ → 挑「transient 类失败 + 冷却已过」的卡（≤maxPerRun 张，
- * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记写进卡 frontmatter
- * （自动续后再 blocked 时下轮靠它判冷却——连续自动续失败不重试）→ 记 auto_resume
+ * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记 + auto_resume_count 累计
+ * 写进卡 frontmatter（自动续后再 blocked 时下轮靠前者判冷却、靠后者判生命周期上限——
+ * 连续自动续失败不重试、全生命周期封顶防「续→崩→冷却→续」循环烧钱）→ 记 auto_resume
  * { card, attempts } 事件 → spawn 既有 resume 子命令（闭环复用不复制逻辑；子进程隔离，
  * 熔断 process.exit 不伤 drain 主循环，与派 run 子进程同哲学，--auto-resume 让 resumed
- * 事件标记 by=auto 区别于人工）。上界三重：只续 transient 类、每卡 24h（cooldownHours）
- * 最多 1 次、每次 drain ≤2 张（maxPerRun）。drift 降级 = 全人工，整个通道暂停；
+ * 事件标记 by=auto 区别于人工）。上界四重：只续 transient 类、每卡 24h（cooldownHours）
+ * 最多 1 次、每次 drain ≤2 张（maxPerRun）、每卡全生命周期 ≤3 次（maxPerCard，超限留
+ * blocked 交人工并落 auto_resume_rejected 事件）。drift 降级 = 全人工，整个通道暂停；
  * autoResume.enabled=false 完全不扫。
  * @returns {string[]} 本轮自动续的卡 id（drain 汇总口径）
  */
@@ -2461,7 +2675,9 @@ function autoResumePass(repoRoot, root, cfg, opts) {
   const picked = pickAutoResumeCandidates(candidates, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+    maxPerCard: ar.maxPerCard,
   });
+  reportLifetimeCapRejections(repoRoot, lifetimeCapRejections(candidates, { maxPerCard: ar.maxPerCard }));
   const resumed = [];
   for (const c of picked) {
     const card = candidates.find((x) => x.id === c.id);
@@ -2496,7 +2712,8 @@ function autoResumePass(repoRoot, root, cfg, opts) {
  *   ①' beat 静默但属主 pid 探活仍活（spawnSync npm ci/ensureWorktree 冻结事件循环的活
  *      run，P1-a）→ 只落观测（fleet 事件 orphan_heal_beat_silent + log）不动卡；
  *   ② 孤儿 + classifyOrphan='resume'（崩溃族 / 上会话 transient 签名 / retry 链）→
- *      有限自动续：沿用 24h 冷却（cooldownHours）与每次 ≤maxPerRun 张，与 blocked 通道同参；
+ *      有限自动续：沿用 24h 冷却（cooldownHours）、每次 ≤maxPerRun 张与每卡生命周期上限
+ *      （maxPerCard，auto_resume_count 随卡累计），与 blocked 通道同参；
  *   ③ 孤儿 + 其余（'breaker' 熔断卡永不续 / 'stuck' 非 transient）→ 落 blocked/
  *      （failTaskToBlocked 同款：failed 事件 + 迁移，附不可续原因），交人工。
  * 护栏：仅在实际获得调度器锁的进程执行（调用方守卫——watch/nightly 派生的 drain 子进程
@@ -2531,11 +2748,30 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   }
   if (!orphans.length) return empty;
   log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
+  // stuck 终态对冲备料（2026-11-17）：'stuck' 孤儿（非 transient settle 收尾）先对账
+  // worktree 提交——相对 base 已有非空提交 = 可验收产出在库，走续用路径（resume 原地
+  // 续做）而非落 blocked 清空重做。breaker 熔断卡不受对冲（确定性失败永不自动续）；
+  // resume 族无需对账。对账不可得（worktree 缺失/git 故障）按 0 处理，照旧交人工。
+  for (const c of orphans) {
+    if (classifyOrphan(c.events) === 'stuck') {
+      c.commitsAhead = worktreeCommitsAhead(worktreePath(repoRoot, c.id), cfg.baseBranch || 'develop') ?? 0;
+    }
+  }
   const picked = pickOrphanResumeCandidates(orphans, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
+    maxPerCard: ar.maxPerCard,
   });
+  // 生命周期上限拒绝留痕（与 blocked 通道同口径）：capped 孤儿不进候选，随后在下方
+  // 落 blocked 循环里按 cap 专属原因归位——failed 事件的 reason 面向人工与未来
+  // isTransientBlocked 匹配写，上限拒绝不匹配任何可续签名，卡留在 blocked 交人工。
+  const capRejections = lifetimeCapRejections(orphans, {
+    maxPerCard: ar.maxPerCard,
+    isEligible: (c) => { const k = classifyOrphan(c.events); return k === 'resume' || (k === 'stuck' && (c.commitsAhead ?? 0) > 0); }, // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致（stuck 对冲续用同资格）
+  });
+  reportLifetimeCapRejections(repoRoot, capRejections);
   const resumed = [];
+  const cappedIds = new Set(capRejections.map((c) => c.id));
   for (const c of picked) {
     const card = orphans.find((x) => x.id === c.id);
     try {
@@ -2545,8 +2781,13 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
       console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
       continue;
     }
-    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts, source: 'orphan_running' });
-    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族；冷却期内至多此一次）`);
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', {
+      card: c.id,
+      attempts: c.attempts,
+      source: 'orphan_running',
+      ...(c.rescue === 'stuck_with_commits' ? { commits_ahead: c.commitsAhead, rescue: c.rescue } : {}),
+    });
+    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族${c.rescue === 'stuck_with_commits' ? `；stuck 但 worktree 已有 ${c.commitsAhead} 个提交——原地续用半成品` : ''}；冷却期内至多此一次）`);
     const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
       ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
       cwd: repoRoot,
@@ -2568,11 +2809,16 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
     const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
     const kind = classifyOrphan(c.events);
     // reason 面向 isTransientBlocked 的签名匹配写（只引程序写入的枚举 reason，不引自由文本
-    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续
-    const reason = kind === 'breaker'
-      ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
-      : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
-    appendEvent(logDir(repoRoot, c.id), 'failed', { reason });
+    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续。
+    // capped（P1-⑨ 生命周期上限）：本是 transient 族但自动续次数已封顶，专属原因交人工。
+    const reason = cappedIds.has(c.id)
+      ? '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），自动续次数已达生命周期上限——不再自动续，交人工 resume'
+      : kind === 'breaker'
+        ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
+        : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
+    // stuck 终态对冲证据（2026-11-17）：落 blocked 的 stuck 卡 commits_ahead 恒 0（>0 已走
+    // 续用路径）——字段留痕对账结论，人工核实零提交后才值得清空重做。
+    appendEvent(logDir(repoRoot, c.id), 'failed', { reason, ...(kind === 'stuck' ? { commits_ahead: c.commitsAhead ?? 0 } : {}) });
     moveCard(root, c.id, cur.state, 'blocked');
     blocked.push(c.id);
     log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);
@@ -3036,6 +3282,16 @@ async function cmdReconcile(repoRoot, taskId, opts = {}) {
   } else {
     log('状态对账 · 账面合并但 git 无实证：无');
   }
+  // 警示桶（2026-11-16 假 merged 事故防线）：只提示不自动修——空合并/标题残留与同名
+  // 空转分支都可能是真卡重做中，fix 方向（落位 merged/）错了不可逆，交人工对账。
+  if (sr.emptyMerges?.length) {
+    log(`⚠ 状态对账 · 空合并/标题残留（merge 提交计数为 0，无实际并入内容，共 ${sr.emptyMerges.length} 张，永不自动 fix）：`);
+    for (const c of sr.emptyMerges) log(`  ${c.id.padEnd(24)} merge ${c.mergeSha.slice(0, 7)}`);
+  }
+  if (sr.suspects?.length) {
+    log(`⚠ 状态对账 · 分支现存嫌疑（真合并但同名分支仍在且与基准分支持平，疑似 id 复用/重做中，共 ${sr.suspects.length} 张，不自动 fix）：`);
+    for (const c of sr.suspects) log(`  ${c.id.padEnd(24)} ${c.branch} —— ${c.reason}`);
+  }
 
   function show(r) {
     if (r.skipped) return log(`  ${r.reason}`);
@@ -3161,13 +3417,14 @@ function draftsDir(repoRoot) {
   return path.join(repoRoot, '.agents', 'orchestrator', 'drafts');
 }
 
-/** 提案卡 frontmatter 文本级归一：created_by / gate 覆写、proposal: true 补齐
- *  （保留 planner/scanner 正文全部段落——与 intent 的文本覆写同款手法）。 */
+/** 提案卡 frontmatter 文本级归一：created_by / gate 覆写
+ *  （保留 planner/scanner 正文全部段落——与 intent 的文本覆写同款手法）。
+ *  proposal: true 死字段已退役（P1-⑨ 字段卫生：全库零读点，提案身份由 drafts/ 落位 +
+ *  created_by 标识），不再补齐；旧卡里残留的该行是无人消费的惰性文本，提交时原样保留。 */
 function normalizeProposalText(text, { createdBy, gate } = {}) {
   let out = String(text ?? '');
   if (createdBy) out = out.replace(/^created_by:.*$/m, `created_by: ${createdBy}`);
   if (gate) out = out.replace(/^gate:.*$/m, `gate: ${gate}`);
-  if (!/^proposal:\s*true$/m.test(out)) out = out.replace(/^gate:.*$/m, (g) => `${g}\nproposal: true`);
   return out;
 }
 
@@ -3472,6 +3729,7 @@ async function cmdIntent(repoRoot, opts) {
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 25,
@@ -3556,7 +3814,9 @@ async function cmdPropose(repoRoot, opts) {
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
   try {
-    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶
+    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶。
+    // 信号新鲜度（2026-11-17）：卡体带「已落地」标注的提案不进规划输入（归档由巡检顺手执行，
+    // 两轮巡检之间的窗口期靠这里过滤兜底）。
     let files = [];
     try {
       files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
@@ -3564,7 +3824,9 @@ async function cmdPropose(repoRoot, opts) {
     const signals = files
       .map((f) => {
         try {
-          const { meta, body } = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8'), f);
+          const text = fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8');
+          if (isLandedDraft(text)) return null; // 已落地提案：不再是活信号
+          const { meta, body } = parseCard(text, f);
           return `- ${meta.id}（${meta.type}/${meta.priority ?? 'normal'}，by ${meta.created_by ?? '?'}）：${String(body.goal ?? '').replace(/\s+/g, ' ').slice(0, 120)}`;
         } catch {
           return null; // 损坏提案跳过，不进 prompt
@@ -3591,6 +3853,7 @@ async function cmdPropose(repoRoot, opts) {
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 25,
@@ -3710,6 +3973,7 @@ async function cmdSpecStart(repoRoot, opts) {
       fs.writeFileSync(promptFile, promptText);
       if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 30,
@@ -3813,6 +4077,7 @@ async function cmdSpecReview(repoRoot, id, opts) {
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-reviewer', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // 审查船只读探索主仓库（Read/Glob/Grep；现状对账要真开代码文件）
         maxTurns: 30,
@@ -3957,6 +4222,7 @@ async function runResearchSession(repoRoot, { question, backendName, minCitation
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const startedAt = Date.now();
       const result = await backend.spawn({
+        role: 'researcher', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // researcher 只读探索仓库（Read/Glob/Grep）+ 联网检索（WebFetch/WebSearch），无 Bash 无写
         maxTurns: 25,
@@ -4028,6 +4294,7 @@ async function runArbitrationSession(repoRoot, { claims, snapshots, backendName,
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'arbiter', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // 仲裁只读仓库 + 联网检索（researcher 同款工具白名单，无 Bash 无写）
         maxTurns: 20,
@@ -4071,6 +4338,7 @@ async function planResearchDims(repoRoot, { goal, backendName }) {
     fs.writeFileSync(promptFile, buildResearchDimsPrompt(sanitizeIntent(goal), repoRoot));
     if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
     const result = await backend.spawn({
+      role: 'dims-split', // 显式角色契约（见 types.mjs）
       promptFile,
       cwd: repoRoot, // 拆维规划只读探索仓库（理解提案语境），无 Bash 无写
       maxTurns: 8,
@@ -4367,7 +4635,7 @@ async function researchSelftest(repoRoot, opts) {
       'SELFTEST-DONE',
     ].join('\n'));
     if (opts.backend === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
-    const result = await backend.spawn({ promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, model: opts.model || loadWorkflowConfig(repoRoot).research?.model || undefined, settingsFile });
+    const result = await backend.spawn({ role: 'researcher', promptFile, cwd: repoRoot, maxTurns: 6, onEvent: () => {}, web: true, model: opts.model || loadWorkflowConfig(repoRoot).research?.model || undefined, settingsFile });
     const out = String(result.output ?? '');
     log(`═══ 联网工具自检（后端 ${opts.backend}）═══`);
     const wf = /WEBFETCH:\s*(ok|fail)(.*)/i.exec(out);
@@ -4437,6 +4705,7 @@ async function verifyBriefOnce(repoRoot, id, opts, { silent = false, topicId = n
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'verifier', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot,
         maxTurns: 15,
@@ -4649,6 +4918,7 @@ async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'spec-planner', // 显式角色契约（见 types.mjs）
         promptFile,
         cwd: repoRoot, // spec planner 只读探索主仓库（Read/Glob/Grep 白名单，fail-closed）
         maxTurns: 30,

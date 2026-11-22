@@ -40,4 +40,4 @@ When reporting, please include:
 - Attacks requiring prior local-user privileges (with the default installation, the main gateway listens on `127.0.0.1` only — no remote exposure surface; the optional LAN mobile console is a separate exposure surface, see "In scope" above)
 - Generic vulnerabilities in dependencies (please report those upstream; still tell us if they actually affect ModelDock)
 
-Security design and the full threat model: [docs/design.md](../design.md) (Chinese).
+Security design and the full threat model: [docs/design/hld.md](../design/hld.md) (Chinese).

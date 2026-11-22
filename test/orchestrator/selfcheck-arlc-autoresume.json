@@ -1,0 +1,18 @@
+{
+  "file": "../../.agents/scripts/orchestrator/autoresume.mjs",
+  "countEqual": [
+    { "pattern": "export const DEFAULT_MAX_PER_CARD = 3", "equal": 1 },
+    { "pattern": "export const AUTO_RESUME_COUNT_KEY = 'auto_resume_count'", "equal": 1 },
+    { "pattern": "export function lifetimeCapRejections", "equal": 1 },
+    { "pattern": "export function lifetimeCapReached", "equal": 1 },
+    { "pattern": "export function autoResumeCountOf", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "lifetimeCapReached\\(", "atLeast": 3 },
+    { "pattern": "opts\\.maxPerCard", "atLeast": 2 },
+    { "pattern": "auto_resume_count", "atLeast": 5 },
+    { "pattern": "opts\\.isEligible", "atLeast": 2 },
+    { "pattern": "P1-⑨", "atLeast": 2 }
+  ],
+  "grepZero": ["require\\("]
+}

@@ -12,7 +12,7 @@ import { ENVELOPE_FMT, SCHEMA_VERSION, SYNCDOC_FMT, type SyncEnvelope, type Sync
 import { t } from '../util/i18n.js'
 import { safeEqual } from '../util/safe-equal.js'
 
-/** 信封加密（docs/design-cloud-sync.md §4.3）：
+/** 信封加密（docs/design/design-cloud-sync.md §4.3）：
  *  master = PBKDF2-HMAC-SHA256(口令, salt, 600000, 32B)
  *  encKey || macKey = HKDF-SHA256(master, hkdfSalt, info="modeldock/syncdoc/v1")  各 32B
  *  ct = AES-256-GCM(encKey, iv, syncdocJSON)（认证标签拼在密文尾部）

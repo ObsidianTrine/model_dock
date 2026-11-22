@@ -23,7 +23,7 @@
 - [ ] 动了整体结构（新增 / 删除章节、改版）？→ 遵循 `.agents/conventions/docs-writing.md` 的「README 结构蓝图」与「文档体系」归位表，README 不堆长文。
 - [ ] 收尾核对：README / usage 里的相对链接与截图（`docs/images/`）全部可达；首屏三问（是什么 / 解决什么 / 怎么开始）仍成立；截图与当前 UI 一致（UI 大改版后重拍）。
 
-### 使用指南与配置参考（docs/usage.md、docs/config-reference.md）
+### 使用指南与配置参考（docs/guide/usage.md、docs/reference/config-reference.md）
 
 - [ ] 安装 / 卸载 / 命令行为变了？→ usage.md 对应节同步（细节级改动 README 不展开，落 usage.md）。
 - [ ] 新增 / 改了配置键？→ config-reference 由脚本生成（`node scripts/gen-config-reference.mjs`），确认生成结果已随交付更新，勿手编。

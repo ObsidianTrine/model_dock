@@ -95,6 +95,7 @@ export async function cmdPushReview(repoRoot, opts = {}) {
       fs.writeFileSync(promptFile, promptText);
       if (backendName === 'claude-headless') writeWorkerSettings(settingsFile, {}, repoRoot);
       const result = await backend.spawn({
+        role: 'push-reviewer', // 显式角色契约（见 backends/types.mjs）：prompt 内嵌待审 diff，嗅探不可靠
         promptFile,
         cwd: repoRoot, // 审查船只读探索主仓库（Read/Glob/Grep；readonly 无写工具）
         maxTurns: 30,

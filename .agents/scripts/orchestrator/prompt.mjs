@@ -189,6 +189,31 @@ export function parseReviewVerdict(text) {
 }
 
 /**
+ * 从审查输出提取阻塞项条目行（双 critic 并集去重用，简单口径不过度工程）：只认列表行
+ * （- / * / 数字编号）且行内带阻塞语义（「阻塞」/「blocker」，排除「不阻塞」否定式——
+ * 建议项常以「（不阻塞）」收尾）。REVIEW_SUMMARY 契约只钉计数、逐条无结构，这是行级
+ * 宽容启发——提取数与契约计数不符时由调用方回落保守口径（取两 critic 计数较大者）。
+ */
+export function extractBlockerItems(text) {
+  const out = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const s = line.trim();
+    if (!/^([-*•]|\d+[.、)])\s*/.test(s)) continue;
+    if (/REVIEW_SUMMARY/.test(s)) continue;
+    if (!/(?:阻塞|blocker)/i.test(s)) continue;
+    if (/不阻塞/.test(s)) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+/** 阻塞项归一化键（file+issue 摘要同一把钥匙）：只留字母/数字/CJK 并小写——emoji、严重度
+ *  徽标、标点、空白差异不参与比对，同一问题在两只 critic 笔下的措辞装饰归一后可判同条。 */
+export function blockerKey(item) {
+  return String(item ?? '').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+}
+
+/**
  * reviewer 契约行补问（⑤）：有审查输出但缺 REVIEW_SUMMARY 行时先补问一次再判罚——
  * 直接按 blockers=1 保守会白烧一轮 worker 返工（返工成本 >> 补问成本）。输入只有上轮
  * 输出截尾，不重放 diff：补问只求补一行汇总，不重开审查。
@@ -246,17 +271,118 @@ export function checkRecitation(notes, card) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// fixup 三段定向上下文（2026-11-15 质量专项 P1-⑦）：返工 prompt 原来只带尾 200 行，
+// 根因（首个错误）在输出头部时被整体截掉，返工船修不到点白烧轮次。三段各带小节
+// 标记（selfcheck/测试按前缀 grep）与单段截断上限；任一段来源缺失就位留说明行
+// ——优雅降级不报错，prompt 形状稳定（调用方不传上下文也兼容）。
+// ---------------------------------------------------------------------------
+
+/** fixup 单段上下文截断上限（字符）：三段合计 ≤ 12KB，尾 200 行块独立不受影响。 */
+export const FIXUP_SECTION_CAP_CHARS = 4096;
+
+/** 三段小节标题（文案即用途说明；改文案须同步 selfcheck 清单与测试锚点）。 */
+export const FIXUP_GATE_HEADING = '### 门禁摘要（哪个 gate、按什么标准失败）';
+export const FIXUP_FIRST_ERROR_HEADING = '### 首个错误（测试输出第一条 FAIL/AssertionError 及其上下文，非末尾堆栈）';
+export const FIXUP_PREV_RESULT_HEADING = '### 上轮 result block（上轮 worker 的结果申报，防重复劳动）';
+
+/** 首个错误行的匹配形态（行级测试，取输出中最早命中的行）。 */
+const FIRST_ERROR_PATTERNS = [
+  /\bFAIL\b/, // vitest/jest 失败行（FAIL  test/xxx.test.ts > ...）
+  /AssertionError/, // node assert / jest 断言错误
+  /\bError:/, // 裸 Error: 行（node/tsc/eslint 常见，含 TypeError:/SyntaxError: 等）
+  /^\s*[✗×✘]\s/, // 失败标记行
+  /^npm ERR!/, // npm 命令失败
+];
+
 /**
- * 组装 fixup prompt（调试子循环 / 审查返工共用：失败输出尾部注入，同 worktree 续做）。
- * @param {string} reasonTag 'test_failure' | 'build_failure' | 'review_blockers' | 'acceptance_gap'
+ * 提取首个错误段：完整失败输出（非尾 200 行）中第一条失败行 + 前后少量上下文。
+ * 预算先保错误行本体（根因所在），后置/前置上下文按剩余预算逐行回填——超长行
+ * 不吃掉错误行本体，且返回值恒 ≤ cap。提取不到返回 null（调用方降级为说明行）。
  */
-export function buildFixupPrompt(card, ctx, reasonTag, failureOutput, iteration) {
+export function extractFirstError(output, { before = 4, after = 6, cap = FIXUP_SECTION_CAP_CHARS } = {}) {
+  const lines = String(output ?? '').replace(/\r\n/g, '\n').split('\n');
+  const idx = lines.findIndex((l) => FIRST_ERROR_PATTERNS.some((re) => re.test(l)));
+  if (idx < 0) return null;
+  let body = lines[idx];
+  if (body.length > cap) body = body.slice(0, cap); // 单行超长极端态：保行头（路径+消息多在行首）
+  let budget = cap - body.length;
+  const kept = [];
+  for (let i = idx + 1; i <= idx + after && i < lines.length; i++) {
+    if (lines[i].length + 1 > budget) break;
+    kept.push(lines[i]);
+    budget -= lines[i].length + 1;
+  }
+  const prefix = [];
+  for (let i = Math.min(before, idx) - 1; i >= 0; i--) {
+    if (lines[i].length + 1 > budget) break;
+    prefix.unshift(lines[i]);
+    budget -= lines[i].length + 1;
+  }
+  return [...prefix, body, ...kept].join('\n');
+}
+
+/** 渲染上轮 result block（parseResultBlock 的产出）为 key: line 文本；空值返回 null。 */
+export function formatPrevResult(prevResult) {
+  if (!prevResult || typeof prevResult !== 'object') return null;
+  const lines = Object.entries(prevResult)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? JSON.stringify(v) : String(v)}`);
+  return lines.length ? lines.join('\n') : null;
+}
+
+/** 单段截断：超上限从头截断（根因信息多在段首），末尾标注截断事实。 */
+function capSection(text, cap = FIXUP_SECTION_CAP_CHARS) {
+  const s = String(text ?? '');
+  return s.length <= cap ? s : `${s.slice(0, cap)}\n…（超 ${cap} 字符已截断）`;
+}
+
+/**
+ * 组装 fixup 三段定向上下文：门禁摘要 / 首个错误 / 上轮 result block。
+ * @param {object} p { gateName?, gateCriteria?, failureOutput?, prevResult? }
+ *   gateName/gateCriteria：失败门禁名与校验口径一行（orchestrator runGates 返回，
+ *   acceptance_gap/review_blockers 为等价触发源说明）；failureOutput：完整失败输出
+ *   （首个错误从全量提取，不受尾 200 行截断影响）；prevResult：上轮 worker 契约块
+ *   （parseResultBlock 的产出）。全部可选——缺失即段内说明行降级。
+ */
+export function buildFixupContextSections({ gateName, gateCriteria, failureOutput, prevResult } = {}) {
+  const fence = '```';
+  const gate = String(gateName ?? '').trim();
+  const criteria = String(gateCriteria ?? '').trim();
+  const firstErr = extractFirstError(failureOutput);
+  const prev = formatPrevResult(prevResult);
+  const gateSection =
+    (gate ? `- 失败门禁：${gate}\n` : '- 失败门禁：（本轮失败非门禁触发或记录缺失）\n') +
+    (criteria ? `- 校验口径：${capSection(criteria)}\n` : '- 校验口径：（未取得——以下方失败输出为准）\n');
+  const firstErrorSection = firstErr
+    ? `${fence}\n${capSection(firstErr)}\n${fence}\n`
+    : '（未能从失败输出提取首个错误：未发现失败行形态——根因请直接看下方尾部 200 行）\n';
+  const prevResultSection = prev
+    ? `上轮 worker 契约块申报如下（自报不可信，仅防重复劳动——上轮已做的别重做）：\n${fence}\n${capSection(prev)}\n${fence}\n`
+    : '（未取得上轮 result block：无上轮申报记录——以下方失败输出与 NOTES.md 为准）\n';
+  return (
+    `${FIXUP_GATE_HEADING}\n${gateSection}\n` +
+    `${FIXUP_FIRST_ERROR_HEADING}\n${firstErrorSection}\n` +
+    `${FIXUP_PREV_RESULT_HEADING}\n${prevResultSection}`
+  );
+}
+
+/**
+ * 组装 fixup prompt（调试子循环 / 审查返工共用：三段定向上下文 + 失败输出尾部注入，
+ * 同 worktree 续做）。fixupCtx 可选：不传时三段以说明行降级，基础形状与历史一致。
+ * @param {string} reasonTag 'test_failure' | 'build_failure' | 'review_blockers' | 'acceptance_gap'
+ * @param {object} fixupCtx 可选 { gateName?, gateCriteria?, prevResult? }
+ */
+export function buildFixupPrompt(card, ctx, reasonTag, failureOutput, iteration, fixupCtx = {}) {
   const tail = failureOutput.split('\n').slice(-200).join('\n');
   return (
     `${buildWorkerPrompt(card, ctx)}\n\n---\n\n` +
     `# Fixup 指令（第 ${iteration} 次返工）\n\n` +
     `你此前报告完成，但自动验证未通过（原因：${reasonTag}）。请在同一 worktree 内继续修复，\n` +
-    `修复后重新提交，并再次按契约层要求输出结果块。以下是失败输出（截取尾部 200 行）：\n\n` +
+    `修复后重新提交，并再次按契约层要求输出结果块。先读下方三段定向上下文（首个错误取自\n` +
+    `完整失败输出，不被尾部 200 行截掉），再按需看失败输出全文：\n\n` +
+    `${buildFixupContextSections({ failureOutput, ...fixupCtx })}\n\n` +
+    `## 失败输出（截取尾部 200 行）\n\n` +
     '```\n' +
     `${tail}\n` +
     '```\n'
@@ -323,7 +449,7 @@ export const CARD_MARKER = 'agents-card';
  *  跳过列（☑/已修/已闭环/已合并/暂缓）——2026-11-09 sail 规划轮曾为已修的 PERF-01/XPLAT-01
  *  产出过期卡，LLM 只读了级别列没核状态列。序号由注入点自行编排（两个 prompt 列表长度不同）。 */
 const LEDGER_FIXED_RULE =
-  `docs/known-issues.md 是已知问题账本：条目状态列含 ☑ / 已修 / 已闭环 / 已合并 / 暂缓 的一律视为已解决，禁止为其出卡；` +
+  `docs/ops/known-issues.md 是已知问题账本：条目状态列含 ☑ / 已修 / 已闭环 / 已合并 / 暂缓 的一律视为已解决，禁止为其出卡；` +
   `引用账本条目作证据前必须先核对状态列，只允许引用未修条目；\n`;
 
 /**
@@ -429,7 +555,6 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `workflows:\n` +
     `  - feature-branch\n` +
     `gate: L3\n` +
-    `proposal: true\n` +
     `research: <feature 卡必填：引用既有调研 brief 的 id；仓库里没有能回答它的 brief 就写 todo——系统会先派调研、再出规格；非 feature 卡省略此行>\n` +
     `score:\n` +
     `  value: <1-3 价值档>\n` +
@@ -444,7 +569,7 @@ export function buildProposePrompt({ goals, signals, queueSummary, maxCards, rep
     `硬性要求：\n` +
     `1. 验收标准必须可机器检查（哪个函数/端点/命令/文案应当怎样），禁止只有「测试全绿」这类空洞标准；造型/视觉类任务写可测量指标（比例/尺寸/色值）并注明参考图来源，「像/美观」不算验收标准；\n` +
     `2. files_hint 写真实范围（你确认过的路径），写裸 glob，不要用反引号或引号包住；\n` +
-    `3. created_by 固定 planner、gate 固定 L3、frontmatter 带 proposal: true；\n` +
+    `3. created_by 固定 planner、gate 固定 L3；\n` +
     `4. feature 卡 frontmatter 必带 research 行（引用既有 brief id 或写 todo）——feature 不直接进队列，走 research → spec → 人工审设计 → spec build 管线；\n` +
     `5. score 四因子只取 1/2/3 档并在 evidence 里给出依据（量化给调度定序用，宁缺毋滥：证据不足就整体省略 score/evidence）；\n` +
     `6. 深化巡检信号里的既有卡时用**同 id**（提案落盘同 id 覆盖=升级），不要另起新 id 造成重复；\n` +

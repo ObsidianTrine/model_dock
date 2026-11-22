@@ -1,0 +1,17 @@
+{
+  "file": "../../.agents/scripts/orchestrator.mjs",
+  "countAtLeast": [
+    { "pattern": "import \\{ createXteAlarm \\} from './orchestrator/xte\\.mjs'", "atLeast": 1 },
+    { "pattern": "createXteAlarm\\(qdir, worktree, \\{ mode: cfg\\.watchdog\\.mode, log \\}\\)", "atLeast": 1 },
+    { "pattern": "maxChecks: resolveWatchdogMaxChecks\\(\\{ maxTurns: meta\\.budget\\.max_turns, everyTurns: cfg\\.watchdog\\.everyTurns \\}\\)", "atLeast": 1 },
+    { "pattern": "const xteHit = xte\\.afterWorkerSession\\(\\)", "atLeast": 1 },
+    { "pattern": "reason: 'xte_no_commit'", "atLeast": 1 },
+    { "pattern": "if \\(xteHit\\?\\.actuate\\)", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "function createXteAlarm\\(qdir, worktree\\)",
+    "xte\\.afterWorkerSession\\(\\); //",
+    "会话收尾对账 HEAD（observe-only，只留痕）"
+  ],
+  "fileSizeMaxKB": 400
+}

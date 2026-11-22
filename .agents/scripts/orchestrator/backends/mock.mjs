@@ -30,7 +30,17 @@
 //   ORCH_MOCK_REVIEW_PARAPHRASE_ONCE=1   仅本子进程第一次复核改写、重试后逐字（测重试恢复；
 //                                        模块级计数器，runOrch 每次新子进程天然复位——
 //                                        勿在同进程直接 import mock 断言次数）
-// prompt 里含 "REVIEW_SUMMARY" 时按 reviewer 行为输出，否则按 worker 行为。
+// 双 critic 并行审查注入（orch-dual-critic-review 卡 2026-11-20）：两只 reviewer 在同一
+// 进程内并行 spawn，env 无法按次注入——按 spawn 的 model 参数区分（编排器副 critic 传
+// secondModel）：
+//   ORCH_MOCK_REVIEW_SECOND_MODEL=<名>   model 等于该值的 reviewer 会话判为副 critic，
+//                                        以下三个旋钮只对副 critic 生效（不设 = 无副 critic 注入）
+//   ORCH_MOCK_REVIEW_SECOND_BLOCKERS=<n> 副 critic 输出的阻塞项数；首条复刻主 critic 的
+//                                        第一条阻塞项文本（跨 critic 去重的「同条」饵），
+//                                        其余为独立项——并集 = 主 n1 + 副 n2 - 去重数
+//   ORCH_MOCK_REVIEW_SECOND_FAIL=1       副 critic 引擎故障（exitCode=1 无契约块）
+//   ORCH_MOCK_REVIEW_SECOND_NOVERDICT=1  副 critic 活着但无 REVIEW_SUMMARY 契约块
+// 角色判定：spawn 显式 role 优先（引擎各 spawn 点都传，见 types.mjs），未传才回落正文嗅探。
 // worker 会话收尾发一条 budget_snapshot（与真实后端同契约：zcode 也是会话结束才回填
 // usage）——cmdRun 靠它给 Budget 记账，token 熔断/低油量告警的集成测试因此可用 mock。
 
@@ -49,7 +59,7 @@ const noVerdictOnce = process.env.ORCH_MOCK_REVIEW_NOVERDICT_ONCE === '1';
 
 export const mockBackend = {
   name: 'mock',
-  async spawn({ promptFile, cwd, onEvent, readonly }) {
+  async spawn({ promptFile, cwd, onEvent, readonly, role, model }) {
     // ORCH_MOCK_SPAWN_ERROR：模拟 claude CLI 缺失/启动失败（backend.spawn reject）
     if (process.env.ORCH_MOCK_SPAWN_ERROR === '1') {
       throw new Error('mock: spawn 注入失败（ORCH_MOCK_SPAWN_ERROR=1，模拟 claude CLI 不可用）');
@@ -58,20 +68,46 @@ export const mockBackend = {
     const delay = parseInt(process.env.ORCH_MOCK_DELAY_MS ?? '0', 10) || 0;
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     const prompt = fs.readFileSync(promptFile, 'utf8');
-    // push 审查船（push-review-gate 卡 2026-11）：判定必须置于角色链**最前**——其 prompt
-    // 内嵌待审 diff，diff 内容可能包含任意标记串（甚至 REVIEW_SUMMARY/agents-card 本体），
-    // 任何「先判其他角色」的顺序都可能被 diff 带偏。代价：worker prompt 正文若恰好提到
-    // 'agents-push-verdict' 字样会被误判成本角色（mock 仅测试链路使用，真实后端无此判定，
-    // 可接受；测试夹具自造 diff 时避免该字样即可）。
-    const isPushReviewer = prompt.includes(PUSHVERDICT_MARKER);
-    const isReviewer = prompt.includes('REVIEW_SUMMARY');
-    const isSpecPlanner = prompt.includes(SPEC_META_MARKER);
-    const isSpecReviewer = !isSpecPlanner && !isReviewer && prompt.includes(SPECVERDICT_MARKER); // spec 三件套审查船（cmdSpecReview）
-    const isPlanner = !isSpecPlanner && !isSpecReviewer && prompt.includes(CARD_MARKER);
-    const isArbiter = !isSpecPlanner && !isSpecReviewer && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
-    const isVerifier = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
-    const isDimsSplit = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(DIMS_SPLIT_MARKER); // 拆维规划（sail researchAutoDim）：先于 researcher 判定
-    const isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && !isDimsSplit && prompt.includes(BRIEF_MARKER);
+    // 角色判定两段式（orch-mock-role-detection 卡 2026-11-20）：显式契约优先——引擎各 spawn
+    // 点显式传 role（见 types.mjs AgentBackendOpts.role）；fixup/补问/retry prompt 会内嵌审查
+    // 全文（含 REVIEW_SUMMARY 等标记字面量），正文嗅探会把 worker 误判成 reviewer → 卡假性
+    // blocked（2026-11-20 夜航两船独立撞见）。未传 role 的直调（单测/旧调用方）回落正文嗅探。
+    const explicitRole = typeof role === 'string' && role.trim() ? role.trim() : null;
+    let isPushReviewer;
+    let isReviewer;
+    let isSpecPlanner;
+    let isSpecReviewer;
+    let isPlanner;
+    let isArbiter;
+    let isVerifier;
+    let isDimsSplit;
+    let isResearcher;
+    if (explicitRole !== null) {
+      // 显式契约：一键定分支，正文内容不参与判定。mock 未实现的显式角色（如 watchdog 判定
+      // 会话，makeWatchdogSpawnFn 传入）不嗅探——全 false 落到 worker 分支，行为确定可预期。
+      isPushReviewer = explicitRole === 'push-reviewer';
+      isReviewer = explicitRole === 'reviewer';
+      isSpecPlanner = explicitRole === 'spec-planner';
+      isSpecReviewer = explicitRole === 'spec-reviewer';
+      isPlanner = explicitRole === 'planner';
+      isArbiter = explicitRole === 'arbiter';
+      isVerifier = explicitRole === 'verifier';
+      isDimsSplit = explicitRole === 'dims-split';
+      isResearcher = explicitRole === 'researcher';
+    } else {
+      // 兜底嗅探链（历史口径，逐字保留）：push 审查船（push-review-gate 卡 2026-11）判定必须
+      // 置于角色链**最前**——其 prompt 内嵌待审 diff，diff 内容可能包含任意标记串（甚至
+      // REVIEW_SUMMARY/agents-card 本体），任何「先判其他角色」的顺序都可能被 diff 带偏。
+      isPushReviewer = prompt.includes(PUSHVERDICT_MARKER);
+      isReviewer = prompt.includes('REVIEW_SUMMARY');
+      isSpecPlanner = prompt.includes(SPEC_META_MARKER);
+      isSpecReviewer = !isSpecPlanner && !isReviewer && prompt.includes(SPECVERDICT_MARKER); // spec 三件套审查船（cmdSpecReview）
+      isPlanner = !isSpecPlanner && !isSpecReviewer && prompt.includes(CARD_MARKER);
+      isArbiter = !isSpecPlanner && !isSpecReviewer && !isPlanner && prompt.includes(ARBITRATION_MARKER); // 仲裁轮：无 VERDICT/BRIEF 标记，与复核/调研互斥
+      isVerifier = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isArbiter && prompt.includes(VERDICT_MARKER); // L2 复核：须先于 researcher 判定（verify prompt 内嵌 brief 含 BRIEF_MARKER）
+      isDimsSplit = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && prompt.includes(DIMS_SPLIT_MARKER); // 拆维规划（sail researchAutoDim）：先于 researcher 判定
+      isResearcher = !isSpecPlanner && !isSpecReviewer && !isPlanner && !isVerifier && !isArbiter && !isDimsSplit && prompt.includes(BRIEF_MARKER);
+    }
     onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'mock', pid: process.pid });
 
     if (isPushReviewer) {
@@ -291,7 +327,6 @@ export const mockBackend = {
           'gate: L3',
           ...(isFeature
             ? [
-                'proposal: true',
                 `research: ${plannerResearch}`,
                 'score:',
                 '  value: 2',
@@ -395,9 +430,14 @@ export const mockBackend = {
     }
 
     if (isReviewer) {
+      // 双 critic 注入分流（orch-dual-critic-review 卡 2026-11-20）：两只 reviewer 同进程
+      // 并行 spawn，env 无法按次注入——按 spawn 的 model 参数与 ORCH_MOCK_REVIEW_SECOND_MODEL
+      // 匹配判副 critic；副 critic 旋钮只覆盖 FAIL/NOVERDICT/BLOCKERS 三个注入面
+      const isSecondCritic = Boolean(process.env.ORCH_MOCK_REVIEW_SECOND_MODEL) && model === process.env.ORCH_MOCK_REVIEW_SECOND_MODEL;
+      const failEnv = isSecondCritic ? process.env.ORCH_MOCK_REVIEW_SECOND_FAIL : process.env.ORCH_MOCK_REVIEW_FAIL;
       // ORCH_MOCK_REVIEW_FAIL=1：审查引擎故障注入（exitCode=1、无契约块、错误文本进
       // output——复刻真实 claude CLI 死法：result 事件携带 "Not logged in" 文本）
-      if (process.env.ORCH_MOCK_REVIEW_FAIL === '1') {
+      if (failEnv === '1') {
         onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-fail' });
         return {
           exitCode: 1,
@@ -411,7 +451,7 @@ export const mockBackend = {
       // 契约块——既有保守路径（补问仍失败 → blockers=1 进审查返工）的回归锚
       // ORCH_MOCK_REVIEW_NOVERDICT_ONCE=1：仅本子进程第一次审查无汇总行，补问轮补出
       //（测契约行补问 resolved=true 恢复链路；计数口径同 PARAPHRASE_ONCE）
-      const noVerdict = process.env.ORCH_MOCK_REVIEW_NOVERDICT === '1' || (noVerdictOnce && reviewCall === 0);
+      const noVerdict = (isSecondCritic ? process.env.ORCH_MOCK_REVIEW_SECOND_NOVERDICT : process.env.ORCH_MOCK_REVIEW_NOVERDICT) === '1' || (noVerdictOnce && reviewCall === 0);
       if (noVerdictOnce) reviewCall++;
       if (noVerdict) {
         onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review-noverdict' });
@@ -422,13 +462,28 @@ export const mockBackend = {
           pid: process.pid,
         };
       }
-      const blockers = parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0;
+      const blockersEnv = isSecondCritic && process.env.ORCH_MOCK_REVIEW_SECOND_BLOCKERS !== undefined
+        ? process.env.ORCH_MOCK_REVIEW_SECOND_BLOCKERS
+        : process.env.ORCH_MOCK_REVIEW_BLOCKERS;
+      const blockers = parseInt(blockersEnv ?? '0', 10) || 0;
       // 审查 token 上报注入：集成测试驱动「审查段熔断」路径（reviewer 记账 + 循环顶收敛）
       const reviewTokens = parseInt(process.env.ORCH_MOCK_REVIEW_TOKENS ?? '0', 10) || 0;
       if (reviewTokens > 0) onEvent({ type: 'budget_snapshot', tokens_in: reviewTokens, tokens_out: 0 });
+      // 阻塞项逐条成行且行内带「阻塞」字样（并集去重的 extractBlockerItems 依赖行级提取；
+      // n 条 n 行使提取数与契约计数恒一致）。副 critic 首条复刻主 critic 第一条文本——
+      // 跨 critic「同条」饵（主 critic 无阻塞项时无同条可复刻，全部独立项）
+      let itemLines;
+      if (blockers > 0) {
+        const copyFirst = isSecondCritic && (parseInt(process.env.ORCH_MOCK_REVIEW_BLOCKERS ?? '0', 10) || 0) > 0;
+        const distinctText = (k) => (isSecondCritic ? `副审查者独立发现第 ${k} 项` : `验收标准第 ${k} 条未实现`);
+        itemLines = [
+          ...(copyFirst ? ['- 🔴 阻塞：mock：验收标准第 1 条未实现（mock 注入）'] : []),
+          ...Array.from({ length: blockers - (copyFirst ? 1 : 0) }, (_, k) => `- 🔴 阻塞：mock：${distinctText(k + 1)}（mock 注入）`),
+        ];
+      }
       const output =
         blockers > 0
-          ? `🔴 阻塞（1 个）\n- mock：验收标准第 ${blockers} 条未实现\nREVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`
+          ? [`🔴 阻塞（${blockers} 个）`, ...itemLines, `REVIEW_SUMMARY: blockers=${blockers} suggestions=0 notes=0`].join('\n')
           : `🟢 无阻塞\nREVIEW_SUMMARY: blockers=0 suggestions=1 notes=0\n- 🟡 建议：mock 建议项（不阻塞）`;
       onEvent({ type: 'worker_turn', turn: 1, tool: 'mock-review' });
       return { exitCode: 0, output, usage: { tokensIn: 100, tokensOut: 50 }, pid: process.pid };

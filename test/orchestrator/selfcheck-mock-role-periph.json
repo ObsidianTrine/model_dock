@@ -1,0 +1,9 @@
+{
+  "file": "../../.agents/scripts/orchestrator/push-review.mjs",
+  "countAtLeast": [
+    { "pattern": "role: 'push-reviewer',", "atLeast": 1 }
+  ],
+  "grepZero": [
+    "prompt\\.includes\\(PUSHVERDICT_MARKER\\)"
+  ]
+}

@@ -94,7 +94,7 @@ describe('findRepoRoot 统一 > linked worktree 内锚定主仓库根', () => {
       expect(fs.existsSync(path.join(repo.root, '.agents', 'worktrees', 'probe-anchor'))).toBe(true)
       expect(fs.existsSync(path.join(wt, '.agents', 'worktrees', 'probe-anchor'))).toBe(false)
     } finally {
-      // start 的 worktree 无提交，finish 走「nothing to merge」清理路径
+      // start 的 worktree 无提交：finish 对零提交显式失败不清场（防假合并收口），实际清场由下方 cleanupWt 完成
       spawnSync('node', [path.join(repo.root, '.agents', 'scripts', 'feature-branch.mjs'), 'finish', 'probe-anchor'], {
         cwd: repo.root, encoding: 'utf8',
       })

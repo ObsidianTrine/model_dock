@@ -80,7 +80,7 @@ chmod +x modeldock
 sudo mv modeldock /usr/local/bin/     # 或 PATH 里的其他目录
 ```
 
-> 所有发布物的 SHA256 见 Release 附带的 `SHA256SUMS`。SmartScreen / Gatekeeper 首次放行、卸载等细节见[使用指南 · 安装与构建](docs/usage.md#2-安装与构建)。
+> 所有发布物的 SHA256 见 Release 附带的 `SHA256SUMS`。SmartScreen / Gatekeeper 首次放行、卸载等细节见[使用指南 · 安装与构建](docs/guide/usage.md#2-安装与构建)。
 
 ### 2. 上手
 
@@ -129,7 +129,7 @@ modeldock config export         # 换电脑搬家：导出口令加密配置包�
 modeldock config import <file>  # 新电脑导入：预览将替换的内容 → 确认 → 自动备份后应用
 modeldock sync setup            # 多台电脑自动同步：目标=WebDAV 网盘/本地同步盘，改动自动双向收敛
 modeldock detach <harness>      # 还原接入前的原始配置
-modeldock restore <harness>     # 还原到任意快照（--list 列出）；detach 是整体还原
+modeldock harness restore <harness>  # 还原到任意快照（--list 列出）；detach 是整体还原
 modeldock reset                 # 重置配置（快照保留，可重新 init）；--deep 连日志、同步状态与缓存一起清
 modeldock uninstall             # 卸载程序（配置与密钥保留）；--purge 连配置一起彻底清除
 ```
@@ -138,30 +138,32 @@ modeldock uninstall             # 卸载程序（配置与密钥保留）；--pu
 
 ### 模型级容灾（同服务商备用模型）
 
-**主力模型额度耗尽，自动改发同服务商的备用模型**：仅额度耗尽类错误、且该服务的备用服务链都走完才触发；**未映射的模型永不触发**——审查、规划等质量敏感角色的模型不会被静默替换。配置入口：`modeldock model fallback <服务id> <主力模型> <备用模型>` 或控制台「编辑服务」弹层；触发边界、价格闸门与 config.toml 写法见[使用指南](docs/usage.md#模型级容灾同服务商备用模型)。
+**主力模型额度耗尽，自动改发同服务商的备用模型**：仅额度耗尽类错误、且该服务的备用服务链都走完才触发；**未映射的模型永不触发**——审查、规划等质量敏感角色的模型不会被静默替换。配置入口：`modeldock model fallback <服务id> <主力模型> <备用模型>` 或控制台「编辑服务」弹层；触发边界、价格闸门与 config.toml 写法见[使用指南](docs/guide/usage.md#模型级容灾同服务商备用模型)。
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
-| **[使用指南](docs/usage.md)** | 核心概念、安装细节、日常操作全流程（README 展不开的都在这里） |
-| [配置参考](docs/config-reference.md) | `config.toml` 全部配置键的类型、默认值与说明（由脚本生成，与代码同源） |
-| [换电脑与多机同步](docs/multi-machine-sync.md) | 同步盘接入新电脑的完整步骤与排错 |
-| [云端部署](docs/deploy-cloud.md) | 自建云端同步中枢 runbook，手机单页管理所有设备 |
-| [设计文档](docs/design.md) | 架构、ADR、威胁模型 |
+| **[使用指南](docs/guide/usage.md)** | 核心概念、安装细节、日常操作全流程（README 展不开的都在这里） |
+| [配置参考](docs/reference/config-reference.md) | `config.toml` 全部配置键的类型、默认值与说明（由脚本生成，与代码同源） |
+| [命令参考](docs/reference/commands.md) | 全部 CLI 命令与用途速查 |
+| [换电脑与多机同步](docs/guide/multi-machine-sync.md) | 同步盘接入新电脑的完整步骤与排错 |
+| [云端部署](docs/guide/deploy-cloud.md) | 自建云端同步中枢 runbook，手机单页管理所有设备 |
+| [设计文档](docs/design/hld.md) | 架构、ADR、威胁模型（高层设计 hld.md + 特性详设 design-*.md） |
 | [AI 自治流水线指南](.agents/docs/ai-pipeline-guide.md) | 从一句话意图到发版提案：任务卡进、合并出，贡献者派活的全部用法 |
-| [CI 机器人](docs/ci-bots.md) | GitHub Actions 分层 PR 审查与 Dependabot 的设置与用途（维护者） |
-| [AI 审查体系](docs/ai-review-system.md) | 分层代码审查的设计与运维：每层拦什么、如何持续改进 |
+| [CI 机器人](docs/ops/ci-bots.md) | GitHub Actions 分层 PR 审查与 Dependabot 的设置与用途（维护者） |
+| [AI 审查体系](docs/ops/ai-review-system.md) | 分层代码审查的设计与运维：每层拦什么、如何持续改进 |
+| [设计偏差台账](docs/ops/design-deviations.md) | 超出 / 偏离原设计交付的能力对账（维护者） |
 | [更新日志](CHANGELOG.md) | 每个版本的用户可见变化 |
 | 英文文档 | [docs/en/](docs/en/)（README / 使用指南等英文镜像，随版本同步） |
 
 ## 安全
 
-网关主监听仅 `127.0.0.1`，不支持远程访问（设计如此）；可选的 LAN 手机控制台默认关闭，启用后为局域网内的第二监听器（见[安全政策](SECURITY.md)）。上游 key 只存本机安全后端，客户端配置中只出现本地 token；请求日志只记元数据、不落 prompt。完整威胁模型与安全设计见[设计文档 §9](docs/design.md#9-安全设计)。发现安全漏洞？请按[安全政策](SECURITY.md)私密上报。
+网关主监听仅 `127.0.0.1`，不支持远程访问（设计如此）；可选的 LAN 手机控制台默认关闭，启用后为局域网内的第二监听器（见[安全政策](SECURITY.md)）。上游 key 只存本机安全后端，客户端配置中只出现本地 token；请求日志只记元数据、不落 prompt。完整威胁模型与安全设计见[设计文档 §9](docs/design/hld.md#9-安全设计)。发现安全漏洞？请按[安全政策](SECURITY.md)私密上报。
 
 ## 参与贡献
 
-仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)。
+仓库内置 **Dockmaster（坞长）自治编排**：贡献者一句话（`/dockmaster 让 agent 做 X`）即可派活，坞长自动拆任务、后台执行、跑测试门禁并合并结果。操作手册见 [Dockmaster 调度台](.agents/workflows/orchestrator.md)（入口速查 + 按场景拆分的 runbook）。
 
 欢迎提 [Issue](https://github.com/ObsidianTrine/model_dock/issues) 反馈问题与建议；使用问题可到 [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) 提问交流。提交 PR 前请先读[贡献指南](CONTRIBUTING.md)与 [AGENTS.md](AGENTS.md)（工程约定与硬性约束），并确保 `npm test` 全绿。
 

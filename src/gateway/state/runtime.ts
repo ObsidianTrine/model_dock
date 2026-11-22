@@ -143,6 +143,8 @@ export function buildRuntime(config: Config, adminToken: string): GatewayRuntime
     modelProbe: { results: new Map(), inflight: new Set() },
     keyPool: { cooldown: new Map(), rr: new Map() },
     modelHealth: new Map(),
+    probeVerdicts: new Map(),
+    probeRuntime: { cooldown: new Map(), inflight: new Set() },
   }
 }
 
@@ -182,6 +184,13 @@ export async function reloadRuntime(rt: GatewayRuntime): Promise<void> {
   }
   for (const id of rt.modelProbe?.results.keys() ?? []) {
     if (!rt.config.providers[id]) rt.modelProbe?.results.delete(id)
+  }
+  // 探针 verdict 三元组键前段 = providerId（\u0000 分隔，同 modelHealth 口径）同口径清理
+  for (const key of rt.probeVerdicts?.keys() ?? []) {
+    if (!rt.config.providers[key.split('\u0000')[0]]) rt.probeVerdicts?.delete(key)
+  }
+  for (const id of rt.probeRuntime?.cooldown.keys() ?? []) {
+    if (!rt.config.providers[id]) rt.probeRuntime?.cooldown.delete(id)
   }
   // per-provider 延迟采样（logs.ts logRequest 按 entry.provider 只增不删）同口径清理：
   // 已删服务的采样环（各 500 条）与 count/lastMs 失去语义，长驻进程反复增删不再永驻内存

@@ -4,7 +4,7 @@ import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml'
 import { configPath } from '../util/paths.js'
 import { atomicWrite, readTextIfExists, withFileLock } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
-import { CONFIG_VERSION, emptyConfig, type Config, type Lang, type ScheduleWindow } from './types.js'
+import { CONFIG_VERSION, emptyConfig, PROBE_CONCURRENCY_MAX, PROBE_CONCURRENCY_MIN, type Config, type Lang, type ProbeConfig, type ScheduleWindow } from './types.js'
 
 export class ConfigError extends Error {
   /** 可操作修复建议（CLI 统一出口打「提示: …」、网关 errorReply 放 modeldock.hint） */
@@ -57,8 +57,31 @@ function migrate(raw: Record<string, unknown>): Config {
     update: normalizable(raw.update, 'update'),
     import: normalizable(raw.import, 'import'),
     sync_assets: normalizable(raw.sync_assets, 'sync_assets'),
+    probe: normalizeProbe(normalizable(raw.probe, 'probe')),
   }
   return cfg
+}
+
+/** 探针段守卫：concurrency 限 2–4 整数（design 全局并发闸口径；出界给可操作 ConfigError，
+ *  经网关 errorReply 还原为 400）。其余字段只做 normalizable 形状守卫，取值语义由读取方兜底。 */
+function normalizeProbe(input: ProbeConfig | undefined): ProbeConfig | undefined {
+  if (!input) return input
+  const n = input.concurrency
+  if (n !== undefined && (!Number.isInteger(n) || n < PROBE_CONCURRENCY_MIN || n > PROBE_CONCURRENCY_MAX)) {
+    throw new ConfigError(
+      t(
+        'config.toml 的 [probe] concurrency 必须是 {min}–{max} 的整数（当前值：{v}）',
+        'config.toml [probe] concurrency must be an integer between {min} and {max} (got: {v})',
+        { min: PROBE_CONCURRENCY_MIN, max: PROBE_CONCURRENCY_MAX, v: String(n) }
+      ),
+      t(
+        '探针全局并发闸限 {min}–{max}；删除该行回落缺省 2',
+        'The global probe concurrency gate allows {min}–{max}; remove the line to fall back to the default 2',
+        { min: PROBE_CONCURRENCY_MIN, max: PROBE_CONCURRENCY_MAX }
+      )
+    )
+  }
+  return input
 }
 
 /** 模型容灾映射形状守卫（手编 config.toml 同口径）：model_fallback 必须是「字符串 → 非空字符串」的表。

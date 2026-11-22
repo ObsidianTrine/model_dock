@@ -31,6 +31,7 @@ import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, ty
 import { readRollbackSlot } from '../src/update/rollback.js'
 import { readUpdateProgress } from '../src/update/progress.js'
 import { readStagingMeta, saveStagingMeta, stagingFinalFile } from '../src/update/staging.js'
+import { resolveTar } from '../src/update/transfer.js'
 import { updatesRollbackDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
@@ -38,18 +39,22 @@ import { VERSION } from '../src/version.js'
 // 本文件绝不触达真实网络与真实实例：GitHub API 用本地 http server 伪造，
 // 停网关/停托盘/open/spawn 全部注入 mock（AGENTS 红线：单测禁跑 sweepGatewayProcesses 等）。
 //
-// 已知偶发与根治（2026-10-30/31 实测；bare 全链路用例真实跑 PowerShell Expand-Archive，win 每用例一次 spawn）：
+// 已知偶发与根治（2026-10-30/31 实测；bare 全链路用例真实跑解压子进程，win 每用例一次 spawn）：
 // ① 主因——系统临时目录全机共享，runUpdate 开头的 sweepStaleUpdateStaging 曾无年龄过滤地全删
 //    modeldock-{update,setup,app,bin,sums}-*：并存的另一实例（dev 沙箱）或并发测试进程（多 agent
-//    并发跑测试）会把本进程「正在下载/解压」的在途目录删掉，Expand-Archive 报「路径不存在」。
+//    并发跑测试）会把本进程「正在下载/解压」的在途目录删掉，解压报「路径不存在」。
 //    现清扫带 1h mtime 门槛（run.ts；> 下载总超时 10min，到龄即真残留），在途暂存不再被误删。
 // ② 次因——高负载/杀软活跃窗口下解压子进程偶发「非零退出且 stderr 为空」的瞬态死亡，表现为
 //    「进程退出码 {code}」（src/update/transfer.ts defaultSpawnRunner 的 close 回调）。该层现已对
 //    零诊断死亡带退避重试一次；有 stderr 的真实失败（损坏包等）绝不重试，不掩盖回归。
+// ③ 环境回归（2026-11-21）——windows-latest 镜像 20261116.315 起 Compress-Archive→Expand-Archive
+//    往返 exit 0 零产物（代码零改动、mac/ubuntu 全绿，仅 Windows 六用例齐红），两处 cmdlet 依赖
+//    整体换 bsdtar（transfer.ts 解压 -xf / 本文件打包 --format zip）根治，不再有该故障面。
+// ③b 后续（2026-11-22 本机实证）——'tar' 裸名在 Git Bash 等 MSYS 环境解析到 GNU tar（无 zip
+//    能力，--format zip 报 Invalid archive format），zip 打包/解压双双必败；tar 一律经
+//    resolveTar() 显式钉 System32 bsdtar（win32），PATH 上的 tar 版本不再影响结果。
 // 若同签名失败仍频发：先看报错是「路径不存在」（清扫竞态回潮）还是「进程退出码」（负载/杀软），
 // 分别查 sweep 年龄门槛与机器负载，不要放宽断言。
-// （另一同类面：makeBareArchive 的 Compress-Archive spawnSync，失败文案 'Compress-Archive failed'，
-// 8b73fec memoize 后每形态只打一次，至今未观测到失败。）
 
 const TOKEN = 'ghp_test-token'
 const REPO = 'owner/repo'
@@ -195,15 +200,17 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
     const name = `modeldock-${version}-win32-x64.zip`
     const entry = path.join(staging, 'modeldock.exe')
     fs.writeFileSync(entry, 'NEW-BIN')
-    const parts = [`'${entry}'`]
+    const files = ['modeldock.exe']
     if (opts.withTray) {
-      const tray = path.join(staging, 'ModelDockTray.exe')
-      fs.writeFileSync(tray, 'NEW-TRAY')
-      parts.push(`'${tray}'`)
+      fs.writeFileSync(path.join(staging, 'ModelDockTray.exe'), 'NEW-TRAY')
+      files.push('ModelDockTray.exe')
     }
   const archive = path.join(dir, name)
-  const r = spawnSync('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path @(${parts.join(',')}) -DestinationPath '${archive}' -Force; if (!$?) { exit 1 }`], { stdio: 'ignore' })
-  if (r.status !== 0) throw new Error('Compress-Archive failed')
+  // zip 用 bsdtar 写（--format zip）：不再依赖 PowerShell Compress-Archive——2026-11-21 windows-latest
+  // 镜像 20261116.315 起该 cmdlet 与 Expand-Archive 往返实测 exit 0 零产物（与 src/update/transfer.ts 同步换 tar）；
+  // 裸名 'tar' 在 MSYS 环境解析到 GNU tar（无 zip 能力）——一律 resolveTar() 钉 bsdtar
+  const r = spawnSync(resolveTar(), ['--format', 'zip', '-cf', archive, '-C', staging, ...files], { stdio: 'ignore' })
+  if (r.status !== 0) throw new Error('tar zip failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)
   return result
@@ -219,7 +226,7 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
     files.push('ModelDockTray')
   }
   const archive = path.join(dir, name)
-  const r = spawnSync('tar', ['czf', archive, '-C', staging, ...files])
+  const r = spawnSync(resolveTar(), ['czf', archive, '-C', staging, ...files])
   if (r.status !== 0) throw new Error('tar failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)
@@ -238,7 +245,7 @@ function makeAppArchive(dir: string, version: string): { name: string; buf: Buff
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   const name = `modeldock-${version}-darwin-${arch}-app.tar.gz`
   const archive = path.join(dir, name)
-  const r = spawnSync('tar', ['czf', archive, '-C', staging, 'ModelDock.app'])
+  const r = spawnSync(resolveTar(), ['czf', archive, '-C', staging, 'ModelDock.app'])
   if (r.status !== 0) throw new Error('tar failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)

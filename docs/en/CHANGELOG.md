@@ -5,6 +5,30 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Single-model query endpoint**: `GET /v1/models/{model-id}` returns that model's catalog entry (same shape as a model-list entry), with `?provider=service-id` to query a specific service's catalog. This path was previously relayed to the upstream, returning the upstream's own catalog — inconsistent with the model list's locally curated catalog. It is now answered locally: unknown IDs get a 404 with an actionable hint, and no upstream call is made.
+- **Service health checks (probe suite)**: the console service list gains health badges (healthy / auth-dead / quota / rate-limited / unreachable), and every verdict can be expanded to its evidence (probe time, status code, sanitized error excerpt). `modeldock provider test <provider-id>` manually checks a single service with hands-on probes — auth echo, streaming, vision, tool calls, structured output, reasoning, context retention, system-prompt adherence, caching, output cap, performance profile — exposing relays that "accept images but never look", drop history, or serve a different model. Checks only mark; deletion is always your call.
+- **Fully controlled check costs**: before any real request is sent, the estimated token cost is shown and confirmed step by step — zero requests until you confirm; a monthly budget caps probe spend at 50,000 tokens by default (`[probe] budget_tokens`), tracked in a separate probe ledger that never mixes into the traffic usage dashboard; scheduled checks run only the zero-token passive signal (live-traffic error aggregation) by default, and enabling token-consuming scheduled checks requires explicit authorization (`[probe] cost_ack`).
+- **Per-key pool audit**: multi-key pools can be checked key by key (see exactly which key is dead and which is alive) without disturbing the pool's cooldown or rotation state.
+- **Measured capability badges and trend view**: model capabilities (vision / tools / streaming) are now labeled by source — "measured" (with probe timestamp) vs "catalog" (built-in table + models.dev; your explicit config always wins); the console gains a probe trend view (30-day health timeline + monthly probe spend).
+- **Multi-package merge import**: `modeldock config merge <files...>` or the console "merge import" deduplicates multiple `.msync` packages into one list (same base URL + same key collapses into one service), marks each service as keep candidate / review / dead based on probe verdicts, and writes only what you select in one pass; the preview writes nothing to disk, and a config snapshot is taken before applying. Note: applying is whole-state replacement — local services you did not select and that are absent from the packages will be removed (stated in the confirmation prompt).
+
+### Improved
+
+- **Circuit breaker for uncommitted idling**: when an agent keeps working for a long time without committing, it used to be logged but never stopped; it now goes through the same circuit-breaker path as the watchdog — stopped and handed to a human instead of burning budget.
+- **Lifetime cap on auto-resume**: a task card can now be auto-resumed at most 3 times (configurable) across its whole life; beyond that it goes to a human — crash-resume loops no longer restart and spend forever.
+- **Fixup cards can see the root cause**: fixup prompts used to carry only the last 200 lines of logs, so the root cause was often truncated away; they now include the gate summary, the first error, and the previous round's result (each truncated gracefully when overlong).
+
+### Fixed
+
+- **Multi-key services no longer pick stale keys on direct attach**: after adding a key pool to a service, switching a client to direct attach could previously write an out-of-pool stale key (that can't connect) or falsely report "Key unreadable"; key lookup now follows the same pool-first rule as the relay hot path, and when everything fails the error says the pool keys are all unavailable.
+- **Console reset no longer fakes success**: reset deletes the config and secret files; when they couldn't be deleted (e.g. locked by another process — common on Windows), the console used to report success while the config stayed alive; it now fails loudly with an actionable hint.
+- **Concurrent writes no longer lose API keys**: simultaneous writes (e.g. console and CLI saving at once) could previously overwrite each other and silently drop a key, leaving the service failing with mysterious 503s; key slots are now allocated under the write lock and a failed write rolls back — no more configs pointing at an empty key slot.
+- **The watchdog no longer stands down early on long tasks**: the watchdog's check count used to be a fixed number, leaving the tail of large-budget tasks unwatched; it now scales with the task's budget and stays on guard throughout.
+
 ## [1.8.0] - 2026-11-15
 
 Update restore ships: every update keeps the previous version, one-click zero-download rollback; a security-hardening batch and a set of robustness fixes.

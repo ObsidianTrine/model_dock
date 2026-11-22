@@ -1,0 +1,12 @@
+{
+  "file": "../../.agents/workflows/orch-loop.md",
+  "countAtLeast": [
+    { "pattern": "双 critic 并行审查（高风险卡，2026-11-20）", "atLeast": 1 },
+    { "pattern": "review\\.dualCritic\\.secondModel", "atLeast": 1 },
+    { "pattern": "hitsCoreOrRelease", "atLeast": 1 },
+    { "pattern": "review_critic_degraded", "atLeast": 1 },
+    { "pattern": "Promise\\.allSettled", "atLeast": 1 }
+  ],
+  "grepZero": [],
+  "fileSizeMaxKB": 200
+}

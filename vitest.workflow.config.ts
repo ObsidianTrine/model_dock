@@ -13,6 +13,10 @@ import base from './vitest.config.ts'
 // 仍不稳回 1）；`VITEST_MAX_WORKERS=1 npx vitest run -c vitest.workflow.config.ts` 一键回
 // 串行基线，兜底成本一行。
 //
+// 宿主仓只读护栏（globalSetup 哨兵）经 base spread 从 vitest.config.ts 继承（isomorphism
+// 门禁要求两 config test 段同构）——跑前快照锚定宿主仓、跑完对账、越界即红；
+// 实现与红线背景见 test/orchestrator/host-guard.mjs 头注与 AGENTS.md「测试指南」。
+//
 // maxWorkers 允许与产品套件分域异构（此处 4 / 产品 1），理由：B3 实验的卡死风险面
 // （policy.test.ts worker 生命周期，2026-10-01 Linux CI 事故）只属于产品套件，编排套件无该
 // 前科且用例天然隔离。「两处必须同构」现指 isolate 与防死锁面（watchdog/超时），并行度按

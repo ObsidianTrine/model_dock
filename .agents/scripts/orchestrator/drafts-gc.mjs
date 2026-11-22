@@ -171,7 +171,7 @@ export function annotateAgedOut(cardText, iso) {
 
 /** 迁移单个提案到目标子目录（标注可选）：目标同名文件已存在 → 跳过（绝不覆盖，
  *  Windows rename 不越已有文件）。返回 { moved: true, to } 或 { moved: false, reason }。 */
-function moveDraft(repoRoot, draft, subdir, { mergedId = null, agedOut = false, iso } = {}) {
+function moveDraft(repoRoot, draft, subdir, { mergedId = null, agedOut = false, landed = false, iso } = {}) {
   const dstDir = path.join(draftsRoot(repoRoot), subdir);
   const dst = path.join(dstDir, draft.file);
   try {
@@ -181,13 +181,62 @@ function moveDraft(repoRoot, draft, subdir, { mergedId = null, agedOut = false, 
       ? annotateSuperseded(draft.text, mergedId, iso)
       : agedOut
         ? annotateAgedOut(draft.text, iso)
-        : draft.text;
+        : landed
+          ? annotateLanded(draft.text, iso)
+          : draft.text;
     fs.writeFileSync(dst, text);
     fs.rmSync(draft.path, { force: true });
     return { moved: true, to: dst };
   } catch (e) {
     return { moved: false, reason: String(e?.message ?? e) };
   }
+}
+
+/** 「已落地」标注行（信号新鲜度，2026-11-17）：卡体顶部人工/agent 留痕——本卡修复已随
+ *  某 commit 合入，勿再派同名修复船。行首固定 `> ⚠️ 已落地` 形态（⚠️ 的 VS16 可省略）。
+ *  与 annotateSuperseded/annotateAgedOut 的机器标注（`> ⚠`/`> ⏳` + 固定句式）互不混淆。 */
+export const LANDED_BY = 'landed';
+export const LANDED_RE = /^>\s*⚠️?\s*已落地/m;
+
+/** 卡体是否带「已落地」标注（纯函数）。显式声明直接信任：不查 created_by/队列痕迹——
+ *  保守闸（宁少勿滥）只约束推测性判定，人/agent 写下的定性标注不算推测。 */
+export function isLandedDraft(text) {
+  return LANDED_RE.test(String(text ?? ''));
+}
+
+/** 「已落地」归档标注：superseded_by 用伪 id landed（区别于被某合并卡覆盖的真实 id
+ *  与超龄清退的 aged-out），说明行写明归档原因与恢复路径。 */
+export function annotateLanded(cardText, iso) {
+  return annotateCard(
+    cardText,
+    [`superseded_by: ${LANDED_BY}`, `superseded_at: ${iso}`],
+    `> ⛳ 本卡已标注「已落地」（${iso} 巡检自动归档迁入 ${SUPERSEDED_DIR}/，以标注所指合并实现为准；如误判请移回 drafts/ 并删除「已落地」标注）。`,
+  );
+}
+
+/**
+ * 信号新鲜度巡检顺手归档：卡体带「已落地」标注的顶层提案迁入 drafts/superseded/
+ * （landed 标注）。scan/nightly 每轮调用——标注了的提案不再作为活信号进入任何规划
+ * 输入（planner 输入组装侧另有过滤兜底，两道并存）。尽力而为：失败只记录不阻断巡检。
+ * @returns {{ moved: string[], failed: Array<{file, reason}> }}
+ */
+export function sweepLandedDrafts(repoRoot, { now = Date.now() } = {}) {
+  const moved = [];
+  const failed = [];
+  try {
+    const iso = toIsoLocal(new Date(now));
+    const { drafts } = listDrafts(repoRoot);
+    for (const d of drafts) {
+      if (d?.meta?.superseded_by) continue; // 已处置的不回锅
+      if (!isLandedDraft(d.text)) continue;
+      const r = moveDraft(repoRoot, d, SUPERSEDED_DIR, { landed: true, iso });
+      if (r.moved) moved.push(d.file);
+      else failed.push({ file: d.file, reason: r.reason });
+    }
+  } catch (e) {
+    failed.push({ file: '*', reason: String(e?.message ?? e) });
+  }
+  return { moved, failed };
 }
 
 /**

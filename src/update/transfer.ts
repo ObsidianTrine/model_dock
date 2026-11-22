@@ -6,10 +6,11 @@
  * - `src/install/noderuntime.ts` 的 downloadText / downloadFile / extractExpectedSha / extractArchive；
  * - `src/update/install.ts` 的 extractArchive。
  *
- * 收敛点：SUMS 解析统一为 tolerant 版本（大小写哈希都认）；解压统一 tar / Expand-Archive
- * 平台分支（zip 走 PowerShell，其余走系统 tar）；下载统一流式写盘 + 进度回调 + fetch 可注入。
+ * 收敛点：SUMS 解析统一为 tolerant 版本（大小写哈希都认）；解压统一系统 tar（tar.gz 与 zip 同路，
+ * zip 靠 bsdtar 魔数识别）；下载统一流式写盘 + 进度回调 + fetch 可注入。
  * 校验逻辑（SHA256 比对、删除不通过物）留在调用方，本模块只供原语。
  */
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -142,9 +143,9 @@ export function parseSums(text: string): Record<string, string> {
 /** 注入用命令执行器：跑解压命令并断言成功，失败抛错（供单测桩拼装命令，不真跑系统工具） */
 export type SpawnRunner = (cmd: string, args: string[]) => Promise<void>
 
-/** 零诊断瞬态死亡的重试次数与退避：Windows 高负载 / 杀软活跃窗口里，解压子进程（PowerShell /
- *  tar）偶发「非零退出且 stderr 为空」的瞬态死亡（0xC0000142 / 0xC000013A 一类，无任何诊断输出；
- *  2026-10-31 多套件并发跑测试时 update.test.ts 全链路 Expand-Archive 实测中招）。带退避重试一次；
+/** 零诊断瞬态死亡的重试次数与退避：Windows 高负载 / 杀软活跃窗口里，解压子进程（tar）偶发
+ *  「非零退出且 stderr 为空」的瞬态死亡（0xC0000142 / 0xC000013A 一类，无任何诊断输出；
+ *  2026-10-31 多套件并发跑测试时 update.test.ts 全链路解压实测中招）。带退避重试一次；
  *  带 stderr 的真实失败（损坏包、参数错、文件被占）绝不重试——不掩盖真回归。 */
 const SPAWN_TRANSIENT_RETRIES = 1
 const SPAWN_RETRY_BACKOFF_MS = 150
@@ -193,25 +194,33 @@ export const defaultSpawnRunner: SpawnRunner = async (cmd, args) => {
 }
 
 /**
- * 解压归档到目录：zip 走 PowerShell Expand-Archive，其余（tar.gz 等）走系统 tar
- * （Win10+ 自带 bsdtar）。run 可注入桩验证命令拼装。platform 显式传入便于三平台单测纯函数。
+ * 解析 tar 可执行文件：GNU tar 无 zip 能力（--format zip 报 Invalid archive format，zip 魔数
+ * 也解不开），而 Git Bash 等 MSYS 环境把 /usr/bin/tar 排在 PATH 前面，会遮住 System32 自带的
+ * bsdtar（Win10 1803+，zip 读写皆可）——win32 显式钉到系统 bsdtar，缺失（老系统）才回落 PATH。
+ * unix 侧 macOS 本就是 bsdtar、linux 资产只发 tar.gz，PATH 直取即可。
+ */
+export function resolveTar(): string {
+  if (process.platform !== 'win32') return 'tar'
+  const sysTar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+  return fs.existsSync(sysTar) ? sysTar : 'tar'
+}
+
+/**
+ * 解压归档到目录：tar.gz 与 zip 一律走系统 tar（zip 按魔数自动识别；win32 经 resolveTar 钉
+ * System32 bsdtar，防 GNU tar 遮蔽——本机 Git Bash 实证 GNU tar 1.34 对 zip 打包/解压必败）。
+ * 曾用 PowerShell Expand-Archive 解 zip，2026-11-21 windows-latest 镜像 20261116.315 起
+ * Compress-Archive→Expand-Archive 往返实测 exit 0 零产物（Windows CI 六用例齐红，代码零改动），
+ * Archive cmdlet 依赖整体移除——tar 走参数数组不经 shell 解析，无引号/插值风险。run 可注入桩。
  */
 export async function extractArchive(
   archive: string,
   dir: string,
-  run: SpawnRunner = defaultSpawnRunner,
-  platform: NodeJS.Platform = process.platform
+  run: SpawnRunner = defaultSpawnRunner
 ): Promise<void> {
-  // Expand-Archive 经 -Command 双引号串传路径：引号把命令拼坏，反引号/$( 触发 PowerShell 插值展开；
-  // unix tar 无此问题。落点来自 mkdtemp + validateAssetName，守卫属纵深防御。
-  // 守卫先于 mkdir：被拒路径不得落盘（2026-10 测试传相对路径曾把目录建进进程 CWD）
-  if (archive.toLowerCase().endsWith('.zip') && platform === 'win32' && (/["`$]/.test(archive) || /["`$]/.test(dir))) {
-    throw new Error(t('路径含引号或 PowerShell 元字符，无法解压：{p}', 'Path contains a quote or PowerShell metacharacter, cannot extract: {p}', { p: archive }))
-  }
   await fsp.mkdir(dir, { recursive: true })
   if (archive.toLowerCase().endsWith('.zip')) {
-    await run('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath "${archive}" -DestinationPath "${dir}" -Force`])
+    await run(resolveTar(), ['-xf', archive, '-C', dir]) // zip 非 gzip，不带 -z；bsdtar 按魔数识别格式
   } else {
-    await run('tar', ['-xzf', archive, '-C', dir])
+    await run(resolveTar(), ['-xzf', archive, '-C', dir])
   }
 }

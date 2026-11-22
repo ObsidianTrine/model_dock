@@ -1,5 +1,5 @@
 /**
- * 云端同步目标（docs/design-cloud-sync.md §7.2 的 /v1/doc 协议适配成 SyncTarget 接口）：
+ * 云端同步目标（docs/design/design-cloud-sync.md §7.2 的 /v1/doc 协议适配成 SyncTarget 接口）：
  * 引擎的推拉/冲突逻辑零改动复用。信封在 writeBlob 暂存、writeManifest 一并 PUT（If-Match 基线）。
  * 出站超时 10s（详设 §7.5）。
  */

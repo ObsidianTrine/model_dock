@@ -23,6 +23,9 @@ import { initLang, LANG_ENV } from '../src/config/lang.js'
 import { setLang, getLang } from '../src/util/i18n.js'
 import { atomicWrite } from '../src/util/fsx.js'
 import { configPath, secretsPath, modeldockDir } from '../src/util/paths.js'
+import { errorReply } from '../src/gateway/admin-shared.js'
+import { buildRuntime } from '../src/gateway/state.js'
+import { probeConfigView } from '../src/gateway/probe/engine.js'
 
 // 补配置持久层（store.ts / secrets.ts / lang.ts）的分支覆盖盲区。
 // 只动 test/；零 vi.mock（隔离纪律：secrets.js 在 uninstall.test.ts 有 mock，本文件不使用其
@@ -172,6 +175,87 @@ dayFilter = "holiday"
         c.active_profile = 'ok'
       })
       expect((await loadConfig()).active_profile).toBe('ok')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('store：[probe] 探针段（ProbeConfig）校验', () => {
+  it('concurrency=5 出界 → ConfigError（网关 errorReply 还原 400），下界 1 与非整数同样拒绝', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(configPath(), '[probe]\nconcurrency = 5\n')
+      const err = await loadConfig().then(
+        () => null,
+        (e: unknown) => e as ConfigError
+      )
+      expect(err).toBeInstanceOf(ConfigError)
+      expect(err!.message).toMatch(/concurrency/)
+      expect(err!.hint).toBeTruthy()
+      // 配置校验错误在网关错误映射（admin-shared errorReply）下还原为 400：config 校验的 HTTP 面口径
+      expect(errorReply(err).status).toBe(400)
+      await atomicWrite(configPath(), '[probe]\nconcurrency = 1\n')
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      await atomicWrite(configPath(), '[probe]\nconcurrency = 2.5\n')
+      await expect(loadConfig()).rejects.toBeInstanceOf(ConfigError)
+      // 边界值 2 / 4 合法
+      await atomicWrite(configPath(), '[probe]\nconcurrency = 2\n')
+      expect((await loadConfig()).probe?.concurrency).toBe(2)
+      await atomicWrite(configPath(), '[probe]\nconcurrency = 4\n')
+      expect((await loadConfig()).probe?.concurrency).toBe(4)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('缺省配置下 [probe] 全字段有值（probeConfigView 全缺省锚点；整段缺省不落盘）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = await loadConfig()
+      expect(cfg.probe).toBeUndefined()
+      const rt = buildRuntime(cfg, 'tok')
+      expect(probeConfigView(rt)).toEqual({
+        enabled: true,
+        concurrency: 2,
+        budget_tokens: 50_000,
+        schedule_hours: [],
+        cost_ack: false,
+        disabled_ids: [],
+        deep_flags: [],
+      })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('[probe] 配置值经视图读到（enabled/concurrency/budget_tokens/三数组/cost_ack）', async () => {
+    const h = fakeHome()
+    try {
+      await atomicWrite(
+        configPath(),
+        [
+          '[probe]',
+          'enabled = false',
+          'concurrency = 4',
+          'budget_tokens = 1234',
+          'schedule_hours = [9, 21]',
+          'cost_ack = true',
+          'disabled_ids = ["p10"]',
+          'deep_flags = ["long-context"]',
+          '',
+        ].join('\n')
+      )
+      const rt = buildRuntime(await loadConfig(), 'tok')
+      expect(probeConfigView(rt)).toEqual({
+        enabled: false,
+        concurrency: 4,
+        budget_tokens: 1234,
+        schedule_hours: [9, 21],
+        cost_ack: true,
+        disabled_ids: ['p10'],
+        deep_flags: ['long-context'],
+      })
     } finally {
       h.restore()
     }

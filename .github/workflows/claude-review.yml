@@ -1,7 +1,7 @@
 name: claude-review
 
 # 分层 PR 审查（设计来源：Anthropic《How the Claude Code team does code review》
-# https://claude.dev/blog/solving-code-review-at-anthropic/ ，落地说明见 docs/ai-review-system.md）：
+# https://claude.dev/blog/solving-code-review-at-anthropic/ ，落地说明见 docs/ops/ai-review-system.md）：
 #
 #   risk-tier        确定性风险分级（零 API 消耗）：按改动文件打 risk:* label；
 #                    opened/reopened 时评论一次判定依据。分级规则 = scripts/pr-risk-tier.mjs
@@ -17,7 +17,7 @@ name: claude-review
 #   variable CLAUDE_BASE_URL —— 兼容端点 URL；variable CLAUDE_MODEL —— 模型名（经 claude_args --model 下发）
 #   三件套缺任一项，AI job 静默跳过（Actions 日志 warning 指明缺哪项），零 token 消耗；
 #   risk-tier 是确定性脚本，不依赖三件套、照常运行。
-#   配置项含义、换供应商与切回官方步骤见 docs/ci-bots.md「模型接入」。
+#   配置项含义、换供应商与切回官方步骤见 docs/ops/ci-bots.md「模型接入」。
 #
 # 边界：
 #   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论/label），
@@ -125,7 +125,7 @@ jobs:
           [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
           if [ -n "$miss" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::bot 配置不齐（缺:$miss），PR 审查 bot 未启用。在 Settings → Secrets and variables → Actions 补齐即可，见 docs/ci-bots.md「模型接入」。"
+            echo "::warning::bot 配置不齐（缺:$miss），PR 审查 bot 未启用。在 Settings → Secrets and variables → Actions 补齐即可，见 docs/ops/ci-bots.md「模型接入」。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -224,7 +224,7 @@ jobs:
           [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
           if [ -n "$miss" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::bot 配置不齐（缺:$miss），安全审查未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
+            echo "::warning::bot 配置不齐（缺:$miss），安全审查未启用。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'
@@ -298,7 +298,7 @@ jobs:
               echo "::error::安全审查发现未解决问题（见 PR 上的安全 inline 标注）。修复后新推送会自动重审；判定为误报时在该 inline 下回复依据并联系维护者复核。"
               exit 1 ;;
             *)
-              echo "::error::安全审查未产出 SECURITY-VERDICT 结论（bot 静默失败？见 docs/ci-bots.md「运维注意」）。保守起见按未通过处理。"
+              echo "::error::安全审查未产出 SECURITY-VERDICT 结论（bot 静默失败？见 docs/ops/ci-bots.md「运维注意」）。保守起见按未通过处理。"
               exit 1 ;;
           esac
 
@@ -332,7 +332,7 @@ jobs:
           [ -z "$MODEL" ] && miss="$miss vars.CLAUDE_MODEL"
           if [ -n "$miss" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::bot 配置不齐（缺:$miss），@claude 交互未启用。补齐方法见 docs/ci-bots.md「模型接入」。"
+            echo "::warning::bot 配置不齐（缺:$miss），@claude 交互未启用。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           fi
       - uses: actions/checkout@v7
         if: steps.keyguard.outputs.skip != 'true'

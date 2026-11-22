@@ -26,7 +26,8 @@ describe('engine defaults > workflow.json worker/review 透传', () => {
       )
       const cfg = loadWorkflowConfig(repo.root)
       expect(cfg.worker).toEqual({ backend: 'zcode-headless', model: null })
-      expect(cfg.review).toEqual({ backend: 'claude-headless', model: 'opus' })
+      // resolveReview 节存在即恒带 dualCritic 解析结果（未写该键 = 缺省开，orch-dual-critic-review 卡）
+      expect(cfg.review).toEqual({ backend: 'claude-headless', model: 'opus', dualCritic: { enabled: true, secondModel: null } })
 
       fs.writeFileSync(cfgPath, JSON.stringify({ baseBranch: 'develop', testCmd: 'x', review: 'bad', worker: {} }))
       const cfg2 = loadWorkflowConfig(repo.root)
@@ -47,7 +48,8 @@ describe('engine defaults > workflow.json worker/review 透传', () => {
       )
       const cfg = loadWorkflowConfig(repo.root)
       expect(cfg.worker).toEqual({ backend: null, model: 'sonnet' }) // 此前整节被静默丢弃（0eb29bb 同型）
-      expect(cfg.review).toEqual({ backend: null, model: 'opus' }) // backend null = 审查走自动异构链不受影响
+      // 只配 model 的节同样是「节存在」——dualCritic 缺省对象恒带，backend null 走自动异构链不受影响
+      expect(cfg.review).toEqual({ backend: null, model: 'opus', dualCritic: { enabled: true, secondModel: null } })
     } finally {
       repo.cleanup()
     }
@@ -63,7 +65,8 @@ describe('engine defaults > workflow.json worker/review 透传', () => {
         JSON.stringify({ baseBranch: 'develop', testCmd: 'x', review: { backend: 'mock', model: 42 } }),
       )
       const cfg = loadWorkflowConfig(repo.root)
-      expect(cfg.review).toEqual({ backend: 'mock', model: null })
+      // model 非法只忽略该键，节照常成立——dualCritic 与 model 非法判定互不连坐，缺省对象照常附带
+      expect(cfg.review).toEqual({ backend: 'mock', model: null, dualCritic: { enabled: true, secondModel: null } })
       expect(String(warn.mock.calls[0]?.[0])).toContain('review.model')
     } finally {
       repo.cleanup()

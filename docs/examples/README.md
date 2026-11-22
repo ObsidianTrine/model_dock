@@ -1,8 +1,8 @@
 # docs/examples — 用户配置样例
 
-放「可整体抄走」的用户配置样例。样例只作起点，键与口径以 `docs/config-reference.md` 与 `docs/usage.md` 为准。
+放「可整体抄走」的用户配置样例。样例只作起点，键与口径以 `docs/reference/config-reference.md` 与 `docs/guide/usage.md` 为准。
 
-This directory holds copy-and-adapt sample configs for users. Samples are starting points; the authoritative key reference lives in `docs/config-reference.md` and `docs/usage.md`.
+This directory holds copy-and-adapt sample configs for users. Samples are starting points; the authoritative key reference lives in `docs/reference/config-reference.md` and `docs/guide/usage.md`.
 
 ## pricing.json — 模型单价覆盖样例 / Model price override sample
 

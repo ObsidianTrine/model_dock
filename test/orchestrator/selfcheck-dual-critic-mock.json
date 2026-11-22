@@ -1,0 +1,14 @@
+{
+  "file": "../../.agents/scripts/orchestrator/backends/mock.mjs",
+  "countAtLeast": [
+    { "pattern": "ORCH_MOCK_REVIEW_SECOND_MODEL", "atLeast": 3 },
+    { "pattern": "ORCH_MOCK_REVIEW_SECOND_FAIL", "atLeast": 2 },
+    { "pattern": "ORCH_MOCK_REVIEW_SECOND_BLOCKERS", "atLeast": 3 },
+    { "pattern": "ORCH_MOCK_REVIEW_SECOND_NOVERDICT", "atLeast": 2 },
+    { "pattern": "isSecondCritic", "atLeast": 5 },
+    { "pattern": "promptFile, cwd, onEvent, readonly, role, model", "atLeast": 1 },
+    { "pattern": "副审查者独立发现", "atLeast": 1 }
+  ],
+  "grepZero": ["🔴 阻塞（1 个）"],
+  "fileSizeMaxKB": 120
+}

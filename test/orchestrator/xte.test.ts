@@ -23,7 +23,11 @@ describe('orchestrator xte > no_commit（连续 2 会话零新提交）', () => 
     try {
       // gate L3 + 审查恒有阻塞 → 至少 2 个 worker 会话；ORCH_MOCK_NO_COMMIT 让会话零提交
       submitCard(repo.root, 'xte-nc')
-      tryOrch(repo.root, 'run xte-nc --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1', ORCH_MOCK_NO_COMMIT: '1' }) // 终局审查超限 die → exit 1
+      // 显式角色契约前此处注释钉「审查超限 die → exit 1」是陈旧的：fixup prompt 内嵌审查全文
+      // 被 mock 嗅探误判成 reviewer，实际假性 blocked exit 0；改显式契约后终局才真正回到
+      // 审查返工超限 die，顺手把退出码钉死（此前断言不钉退出码故陈旧注释仍绿）
+      const r = tryOrch(repo.root, 'run xte-nc --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1', ORCH_MOCK_NO_COMMIT: '1' })
+      expect(r.status).toBe(1) // 终局：审查返工超限熔断 die（exitRun 缺省码 1）
       const alarms = alarmsOf(repo.root, 'xte-nc').filter((e) => e.rule === 'no_commit')
       expect(alarms).toHaveLength(1) // 每规则每任务只报一次（后续会话仍零提交也不重复）
       expect(String(alarms[0].detail)).toContain('零新提交')

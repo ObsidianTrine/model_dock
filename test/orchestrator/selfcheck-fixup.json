@@ -1,0 +1,17 @@
+{
+  "file": "../../.agents/scripts/orchestrator/prompt.mjs",
+  "countAtLeast": [
+    { "pattern": "### 门禁摘要（哪个 gate、按什么标准失败）", "atLeast": 1 },
+    { "pattern": "### 首个错误（测试输出第一条 FAIL/AssertionError 及其上下文，非末尾堆栈）", "atLeast": 1 },
+    { "pattern": "### 上轮 result block（上轮 worker 的结果申报，防重复劳动）", "atLeast": 1 },
+    { "pattern": "FIXUP_SECTION_CAP_CHARS = 4096", "atLeast": 1 },
+    { "pattern": "extractFirstError\\(failureOutput\\)", "atLeast": 1 },
+    { "pattern": "capSection\\(", "atLeast": 3 },
+    { "pattern": "未能从失败输出提取首个错误", "atLeast": 1 },
+    { "pattern": "未取得上轮 result block", "atLeast": 1 },
+    { "pattern": "（未取得——以下方失败输出为准）", "atLeast": 1 },
+    { "pattern": "slice\\(-200\\)", "atLeast": 1 }
+  ],
+  "grepZero": [],
+  "fileSizeMaxKB": 70
+}

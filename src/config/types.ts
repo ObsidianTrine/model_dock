@@ -133,6 +133,24 @@ export interface ScheduleWindow {
   mode?: 'prefer' | 'avoid'
 }
 
+/** 探针套件配置（provider test --probe / 控制台健康探针，见 src/gateway/probe/）。全字段有缺省，不配即按缺省工作。 */
+export interface ProbeConfig {
+  /** 探针套件总开关（默认 true）：显式 false 时引擎拒绝全部派发（含 P15 被动聚合） */
+  enabled?: boolean
+  /** 全局探针并发闸（整数，限 2–4，默认 2）；同 provider 内始终串行互斥 */
+  concurrency?: number
+  /** 探针月度预算（tokens，自然月累计实际 tokens 达到即硬停，默认 50000） */
+  budget_tokens?: number
+  /** 周期调度触发时刻（0–23 整数小时；缺省空 = 周期调度只跑零 token 的 P15 被动聚合） */
+  schedule_hours?: number[]
+  /** 含 token 周期探针的持久成本授权（默认 false）：true 才允许周期调度跑 P1–P14，仍受 budget_tokens 约束 */
+  cost_ack?: boolean
+  /** 周期调度中排除的探针 id（缺省空 = 不排除） */
+  disabled_ids?: string[]
+  /** 深度探针开关名单（缺省空 = 只跑标准档） */
+  deep_flags?: string[]
+}
+
 export interface Config {
   version: number
   /** 界面语言（CLI 输出 / 报错 / 网关日志消息）：zh | en，缺省 zh；--lang 与环境变量 MODELRDOCK_LANG 可临时覆盖 */
@@ -151,6 +169,8 @@ export interface Config {
   import?: ImportStateConfig
   /** 文本资产同步白名单目录（家目录相对 POSIX 路径，见 src/sync/assets.ts）；每机自选属机器态，不随包同步 */
   sync_assets?: { dirs?: string[] }
+  /** 探针套件（provider-probe-suite，见 src/gateway/probe/）；缺省整段不落盘，读取时按 ProbeConfig 字段缺省兜底 */
+  probe?: ProbeConfig
 }
 
 /** 一键导入（存量收编）状态 */
@@ -166,11 +186,11 @@ export interface LanConfig {
   port?: number
 }
 
-/** 自动更新（公开仓库匿名直连 + 可选 PAT + 镜像回退链，见 docs/design-auto-update.md §6） */
+/** 自动更新（公开仓库匿名直连 + 可选 PAT + 镜像回退链，见 docs/design/design-auto-update.md §6） */
 export interface UpdateConfig {
   /** 更新源仓库 owner/name（默认公开主仓库；改指私有仓库时需配 token_ref） */
   repo?: string
-  /** 更新 feed 基地址（默认 GitHub API；自建源/本地 mock 可覆盖，见 docs/design-auto-update.md §4 三阶段） */
+  /** 更新 feed 基地址（默认 GitHub API；自建源/本地 mock 可覆盖，见 docs/design/design-auto-update.md §4 三阶段） */
   api_base?: string
   /** PAT 在 secrets 中的 key_ref（setSecret 返回值；令牌本体存 secrets.json/keychain，不进 config 明文）。
    *  可选：公开仓库匿名即可更新，令牌仅私有仓库必需、或把匿名限流 60 次/时提到 5000 次/时 */
@@ -191,7 +211,7 @@ export const DEFAULT_GATEWAY_PORT = 8687
 /** JSONL 日志日文件默认保留天数（见 GatewayConfig.log_retention_days；0 = 禁用清理） */
 export const DEFAULT_LOG_RETENTION_DAYS = 30
 
-/** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design-auto-update.md §6） */
+/** 自动更新默认源仓库（公开主仓库，匿名可读；见 docs/design/design-auto-update.md §6） */
 export const DEFAULT_UPDATE_REPO = 'ObsidianTrine/model_dock'
 
 /** 下载镜像回退链默认值（大陆加速；design §6 第 4 项）。官方直连是隐式末位，不在此列 */
@@ -199,6 +219,15 @@ export const DEFAULT_UPDATE_MIRRORS = ['https://gh-proxy.com/', 'https://ghfast.
 
 /** 手机简版控制台默认端口（主端口顺延链 8687+10 之外，避免撞车） */
 export const DEFAULT_LAN_PORT = 8787
+
+/** 探针全局并发闸缺省（[probe].concurrency；限 2–4，见 store 校验与 probe/engine.ts 信号量） */
+export const DEFAULT_PROBE_CONCURRENCY = 2
+/** 探针全局并发闸下限（design：2–4） */
+export const PROBE_CONCURRENCY_MIN = 2
+/** 探针全局并发闸上限（design：2–4，硬顶 4） */
+export const PROBE_CONCURRENCY_MAX = 4
+/** 探针月度预算缺省（[probe].budget_tokens，tokens；见 probe/ledger.ts 预算闸） */
+export const DEFAULT_PROBE_BUDGET_TOKENS = 50_000
 
 export function emptyConfig(): Config {
   return { version: CONFIG_VERSION, providers: {}, profiles: {}, harness: {} }

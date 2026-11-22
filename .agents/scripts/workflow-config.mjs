@@ -40,6 +40,13 @@
 //   driftThreshold  自动合并回溯失败率的降级阈值（0 < v ≤ 1，缺省 0.2）。只可调严/调松，
 //                   不可关闭——漂移监控没有「不监控」档
 //   reviewMaxTurns  LLM 审查会话的轮次上限（正整数，缺省 30）
+//   review          执行/审查引擎声明（resolveReview）：{ backend?, model?, dualCritic? }。
+//                   dualCritic 双 critic 并行审查（orch-dual-critic-review 卡，2026-11-20）：
+//                   { enabled?: boolean（缺省 true——仅改动实际命中 corePaths/releasePaths 的
+//                   高风险卡生效，面窄；显式 false 关闭，boolean 简写兼容）,
+//                   secondModel?: 模型名（缺省回落 research.model → worker.model → 引擎默认；
+//                   backend 同 review.backend） }。并行两只 reviewer 出 verdict，blockers 取
+//                   并集去重后走既有裁决链；键缺失 = 沿用缺省，非法值回落缺省并 console.warn
 //   fastlaneAllowed 轻卡快速通道总开关（缺省 true）：任务卡 frontmatter 可声明
 //                   fastlane: true 跳过 LLM 审查子循环（门禁/分级闸门不省）；设 false
 //                   后即使卡声明 fastlane 也按常规链路跑审查（fastlane_skipped 事件
@@ -61,11 +68,12 @@
 //                   （gatewayLogDir，须已配）窗口内 429/402 合计达阈同样滞留（外部风暴）；
 //                   删掉该键 = 关闭风暴闸（行为与历史版本一致）
 //   autoResume      blocked 卡有限自动续跑：{ enabled?: boolean（缺省 true）, maxPerRun?: 正整数
-//                   （缺省 2）, cooldownHours?: 正整数（缺省 24） }。drain 选卡前对「transient 类
-//                   失败 blocked」的卡自动 resume（资格判定见 orchestrator/autoresume.mjs）：
-//                   只续 429 限流/网络类、每卡冷却期内最多 1 次、每次 drain ≤maxPerRun 张、
-//                   auto_resume 事件留痕；enabled=false 完全不扫 blocked/。非法值回落缺省并
-//                   console.warn 告警
+//                   （缺省 2）, cooldownHours?: 正整数（缺省 24）, maxPerCard?: 正整数（缺省 3） }。
+//                   drain 选卡前对「transient 类失败 blocked」的卡自动 resume（资格判定见
+//                   orchestrator/autoresume.mjs）：只续 429 限流/网络类、每卡冷却期内最多 1 次、
+//                   每次 drain ≤maxPerRun 张、每卡全生命周期累计 ≤maxPerCard 次（超限留 blocked
+//                   交人工并落 auto_resume_rejected 事件）、auto_resume 事件留痕；enabled=false
+//                   完全不扫 blocked/。非法值回落缺省并 console.warn 告警
 //   trace           LLM 决策留底：{ enabled?: boolean（缺省 true）, maxPerTask?: 正整数
 //                   （缺省 20）, maxInputKB?: 正整数（缺省 64） }。三类 LLM 决策点（看门狗
 //                   watchdog / scan 语义过滤 smartfilter / 独立审查 review）把模型输入与
@@ -192,7 +200,7 @@ export function loadWorkflowConfig(repoRoot) {
     reviewNotes: typeof raw.reviewNotes === 'string' ? raw.reviewNotes.trim() : '',
     uiCheckCmd: typeof raw.uiCheckCmd === 'string' && raw.uiCheckCmd.trim() ? raw.uiCheckCmd.trim() : null,
     worker: resolveEngine(raw.worker, 'worker'),
-    review: resolveEngine(raw.review, 'review'),
+    review: resolveReview(raw.review),
     tiers: resolveTiers(raw.tiers),
     budgetProfiles: resolveBudgetProfiles(raw.budgetProfiles),
     envPrefix: typeof raw.envPrefix === 'string' && /^[A-Z][A-Z0-9_]*$/i.test(raw.envPrefix.trim()) ? raw.envPrefix.trim() : 'AGENTS',
@@ -639,17 +647,18 @@ function resolveAutopilot(raw) {
   return out;
 }
 
-/** blocked 卡自动续跑配置解析：{ enabled: boolean, maxPerRun: 正整数, cooldownHours: 正整数 }，
- *  缺省 true / 2 / 24（与 orchestrator/autoresume.mjs 的 DEFAULT_MAX_PER_RUN / DEFAULT_COOLDOWN_MS
- *  同一口径，改动须两处同步）。非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：
- *  stderr 输出可操作文案，不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，不告警。 */
+/** blocked 卡自动续跑配置解析：{ enabled: boolean, maxPerRun: 正整数, cooldownHours: 正整数,
+ *  maxPerCard: 正整数 }，缺省 true / 2 / 24 / 3（与 orchestrator/autoresume.mjs 的
+ *  DEFAULT_MAX_PER_RUN / DEFAULT_COOLDOWN_MS / DEFAULT_MAX_PER_CARD 同一口径，改动须两处同步）。
+ *  非法值回落缺省并 console.warn 告警（与 resolveWatchdog 同风格：stderr 输出可操作文案，
+ *  不污染 hook 的 stdout 裁决通道，不阻断启动）。键缺失 = 沿用缺省，不告警。 */
 function resolveAutoResume(raw) {
-  const DEFAULTS = { enabled: true, maxPerRun: 2, cooldownHours: 24 };
+  const DEFAULTS = { enabled: true, maxPerRun: 2, cooldownHours: 24, maxPerCard: 3 };
   const warn = (detail) =>
-    console.warn(`[workflow-config] autoResume 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoResume 键，enabled 允许 true|false、maxPerRun/cooldownHours 须为正整数）`);
+    console.warn(`[workflow-config] autoResume 配置非法，已回落缺省：${detail}（.agents/workflow.json 的 autoResume 键，enabled 允许 true|false、maxPerRun/cooldownHours/maxPerCard 须为正整数）`);
   if (raw === undefined || raw === null) return DEFAULTS;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    warn(`应为对象 { enabled?, maxPerRun?, cooldownHours? }，当前为 ${JSON.stringify(raw)}`);
+    warn(`应为对象 { enabled?, maxPerRun?, cooldownHours?, maxPerCard? }，当前为 ${JSON.stringify(raw)}`);
     return DEFAULTS;
   }
   const out = { ...DEFAULTS };
@@ -664,6 +673,10 @@ function resolveAutoResume(raw) {
   if (raw.cooldownHours !== undefined) {
     if (Number.isInteger(raw.cooldownHours) && raw.cooldownHours > 0) out.cooldownHours = raw.cooldownHours;
     else warn(`cooldownHours ${JSON.stringify(raw.cooldownHours)} 不合法（须为正整数）`);
+  }
+  if (raw.maxPerCard !== undefined) {
+    if (Number.isInteger(raw.maxPerCard) && raw.maxPerCard > 0) out.maxPerCard = raw.maxPerCard;
+    else warn(`maxPerCard ${JSON.stringify(raw.maxPerCard)} 不合法（须为正整数）`);
   }
   return out;
 }
@@ -917,6 +930,46 @@ function resolveEngine(raw, name = 'engine') {
   }
   if (!backend && !model) return null; // 空节维持 null（与历史一致，零行为变化）
   return { backend, model };
+}
+
+/** review 引擎配置（复用 resolveEngine）+ dualCritic 双 critic 子配置（orch-dual-critic-review
+ *  卡，2026-11-20）。扩键模式参照 resolveAutoResume 刚扩 maxPerCard 的先例：review 节存在时
+ *  引擎键解析不变（shape 兼容）且恒带解析后的 dualCritic 全形（键缺失 = 沿用 enabled 缺省
+ *  true，与各 resolveXxx「节存在即全缺省对象」同风格；空节维持 null 与历史零行为变化）；
+ *  dualCritic 键存在非法 → 回落缺省并 console.warn（同风格 stderr，不阻断启动）。 */
+function resolveReview(raw) {
+  const engine = resolveEngine(raw, 'review');
+  const dual = resolveDualCritic(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.dualCritic : undefined);
+  if (!engine && !dual) return null; // 空节维持 null（与历史一致，零行为变化）
+  return {
+    ...(engine ?? { backend: null, model: null }),
+    dualCritic: dual ?? { enabled: true, secondModel: null },
+  };
+}
+
+/** 双 critic 配置解析：boolean 简写（false = escape hatch 关闭）或对象 { enabled?, secondModel? }。
+ *  键缺失返回 null（不落键）；enabled 缺省 true——仅高风险卡生效，缺省开的面窄代价低；
+ *  secondModel 缺省 null（编排器回落 research.model → worker.model → 引擎默认，why 见调用点）。 */
+function resolveDualCritic(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'boolean') return { enabled: raw, secondModel: null };
+  const warn = (detail) =>
+    console.warn(`[workflow-config] review.dualCritic 配置非法，已回落缺省：${detail}（应为 boolean 或对象 { enabled?: boolean, secondModel?: 模型名 }；缺省 enabled=true——仅改动命中 corePaths/releasePaths 的高风险卡生效）`);
+  const DEFAULTS = { enabled: true, secondModel: null };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    warn(`当前为 ${JSON.stringify(raw)}`);
+    return { ...DEFAULTS };
+  }
+  const out = { ...DEFAULTS };
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  if (raw.secondModel !== undefined) {
+    if (typeof raw.secondModel === 'string' && raw.secondModel.trim()) out.secondModel = raw.secondModel.trim();
+    else warn(`secondModel ${JSON.stringify(raw.secondModel)} 不合法（应为模型名字符串）`);
+  }
+  return out;
 }
 
 /** 任务等级表 tiers.<name> → { tokenEnv, workerModel?, reviewModel?, provider?, gatewayBase? }。

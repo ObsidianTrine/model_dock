@@ -7,14 +7,18 @@ export interface ResolveOpts {
   /** 上游 /models 响应自带的元数据（fetchModelIds 解析所得），优先级仅次于配置里已有的值。
    *  capabilities 三态同 UpstreamMeta：undefined=上游未表态、[]=上游明确无视觉（会短路内置表） */
   upstream?: { context_window?: number; max_output?: number; capabilities?: string[] }
+  /** 探针实测能力（probe/verdict.ts probeCapabilityView 从 rt.probeVerdicts 派生），位次
+   *  夹在 upstream /models 与内置表之间：config 显式 > /models > 探针 > 内置表，永不覆盖前两级。
+   *  三态同 upstream.capabilities：undefined=探针未实测（落内置表）、[]=实测明确无（短路内置表） */
+  probeCapabilities?: string[]
   /** 服务 base_url：目录按厂商 host 精确匹配用 */
   baseUrl?: string
 }
 
 /**
  * 模型元数据分层解析（只补空、不覆盖），优先级从高到低：
- * 配置已有值 > 上游 /models 返回值 > 内置表（预设+EXTRA）> models.dev 目录（缓存/快照）。
- * 按字段独立下探（如 Kimi 只报上下文，最大输出落到更低层）；四层皆无返回 undefined。
+ * 配置已有值 > 上游 /models 返回值 > 探针实测（probeCapabilities）> 内置表（预设+EXTRA）> models.dev 目录（缓存/快照）。
+ * 按字段独立下探（如 Kimi 只报上下文，最大输出落到更低层）；五层皆无返回 undefined。
  * config 传该模型在 config.toml 里的现有条目（可为 null）。
  */
 export function resolveModelMeta(
@@ -32,9 +36,10 @@ export function resolveModelMeta(
   }
   const ctx = pick(config?.context_window, opts?.upstream?.context_window, known?.context_window, cat?.context_window)
   const out = pick(config?.max_output, opts?.upstream?.max_output, known?.max_output, cat?.max_output)
-  // 能力（如 vision）：配置显式值 > 上游 /models 自带 > 内置表；目录快照无此字段。
-  // 上游已表态（含 []=明确无视觉）即短路内置表——内置表可能落后于服务端，不该再补；上游未提供才落内置表
-  const caps = config?.capabilities ?? opts?.upstream?.capabilities ?? known?.capabilities
+  // 能力（如 vision）：配置显式值 > 上游 /models 自带 > 探针实测 > 内置表；目录快照无此字段。
+  // 任一层已表态（含 []=明确无视觉）即短路更低层——高优来源可能领先于低优来源，不该再补；
+  // [] 非 nullish 所以天然压过探针与内置表，探针层只在 config 与 /models 都未表态时生效
+  const caps = config?.capabilities ?? opts?.upstream?.capabilities ?? opts?.probeCapabilities ?? known?.capabilities
   if (ctx === undefined && out === undefined && !caps?.length) return undefined
   const res: KnownMeta = {}
   if (ctx !== undefined) res.context_window = ctx

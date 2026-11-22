@@ -1,0 +1,10 @@
+{
+  "file": "drill.test.ts",
+  "countEqual": [
+    { "pattern": "process\\.cwd\\(\\)", "equal": 3 }
+  ],
+  "countAtLeast": [
+    { "pattern": "runOrch\\(process\\.cwd\\(\\), 'drill'\\)", "atLeast": 1 },
+    { "pattern": "tryOrch\\(process\\.cwd\\(\\), 'drill", "atLeast": 2 }
+  ]
+}

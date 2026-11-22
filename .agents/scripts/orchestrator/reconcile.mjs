@@ -11,7 +11,9 @@
 //
 // 状态对账（reconcileCardStates）：卡状态 vs git 现实。真实数据发现 running/ 里有卡
 // 实际已 git 合并但卡没落 merged/（状态机被人工旁路，如手工 git merge 后忘了 moveCard）——
-// 用 `git log --merges <baseBranch>` 解析「已合并分支」集合对照队列各状态目录：
+// 用 `git log --merges <baseBranch>` 解析合并候选对照队列各状态目录，判据加固为提交数门
+// （mergeSha^1..^2 计数 ≥1 才算真合并，标题正则存在性会误捕空合并/残留标题，2026-11-16
+// 夜航四张 perf 卡假 merged 实证）+ 分支现存门（同名分支仍在且与 base 持平 → 列嫌疑不 fix）：
 //   已合并未落位（分支已合并、卡不在 merged/）→ 默认只读列出；--fix-states 落位并写事件；
 //   账面合并但 git 无实证（卡在 merged/、无对应 merge 提交）→ 警告级（可能是 squash 或改史）。
 
@@ -430,21 +432,54 @@ export async function reconcileAll(repoRoot, queueRootDir) {
 // 状态对账：卡状态 vs git 现实（状态机被人工旁路的检测，见文件头注）
 // ---------------------------------------------------------------------------
 
+// 合并标题 → 任务 id 的共享正则（parseMergedBranchIds 与 parseMergedBranchCommits 同形，
+// 抽公共常量防两处判据漂移）。形态：`Merge branch 'feature/<id>'`（finish 的默认消息）；
+// 容忍单双引号、分支分隔符差异（[\\/]）与 `into <branch>` 尾巴（合并进非默认分支时 git
+// 会追加）。非任务 id 字符集（小写字母/数字/短横线）的分支名不收——队列 id 本就受此约束。
+const MERGE_TITLE_RE = /^Merge branch ['"]feature[\\/]([a-z0-9][a-z0-9-]*)['"](?:\s|$)/;
+
 /**
- * 从 git merge 提交标题解析已合并的 feature 分支任务 id 集合。
- * 形态：`Merge branch 'feature/<id>'`（finish 的默认消息）；容忍单双引号、
- * 分支分隔符差异（[\\/]）与 `into <branch>` 尾巴（合并进非默认分支时 git 会追加）。
- * 非任务 id 字符集（小写字母/数字/短横线）的分支名不收——队列 id 本就受此约束。
+ * 从 git merge 提交标题解析已合并的 feature 分支任务 id 集合（仅按标题存在性——
+ * reconcileCardStates 的判据已加固为提交数门，本函数保留给纯标题解析场景与测试）。
  */
 export function parseMergedBranchIds(subjects) {
   const lines = Array.isArray(subjects) ? subjects : String(subjects ?? '').split('\n');
   const ids = new Set();
-  const re = /^Merge branch ['"]feature[\\/]([a-z0-9][a-z0-9-]*)['"](?:\s|$)/;
   for (const line of lines) {
-    const m = re.exec(line.trim());
+    const m = MERGE_TITLE_RE.exec(line.trim());
     if (m) ids.add(m[1]);
   }
   return ids;
+}
+
+/**
+ * 从 `git log --merges --pretty=%H %P %s` 行解析 feature 合并候选（mergeSha + 任务 id）。
+ * 行形如 `<sha> <parent1> <parent2> Merge branch 'feature/<id>'`：sha/parent 均为 40 位
+ * 十六进制，merge 提交双亲起步（--merges 已过滤，正则按 {2,} 收紧防御非合并行混入）；
+ * 主体复用 MERGE_TITLE_RE，两处判据同形。
+ */
+export function parseMergedBranchCommits(lines) {
+  const arr = Array.isArray(lines) ? lines : String(lines ?? '').split('\n');
+  const out = [];
+  const re = /^([0-9a-f]{40}) ((?:[0-9a-f]{40} ){2,})(.*)$/;
+  for (const line of arr) {
+    const m = re.exec(line.trim());
+    if (!m) continue;
+    const t = MERGE_TITLE_RE.exec(m[3]);
+    if (t) out.push({ sha: m[1], id: t[1] });
+  }
+  return out;
+}
+
+/** rev-list --count 包装：失败（分支缺失 / git 故障）返回 null，调用方按「无证据」处理。 */
+function gitCount(repoRoot, range) {
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', range], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -465,17 +500,20 @@ function forceSettleCard(root, id, from) {
 
 /**
  * 状态对账：git 合并现实 vs 队列卡落位。
- *   - 分支已合并但卡不在 merged/ → mergedNotSettled [{id, state}]（含当前状态）；
- *   - 卡在 merged/ 但 git 无对应 merge 提交 → settledNotMerged [{id}]（警告级，可能是
- *     squash 或改史——squash 不产生 merge 提交，属已知盲区，只提示不强修）。
+ *   - 分支已合并（通过提交数门）但卡不在 merged/ → mergedNotSettled [{id, state}]（含当前状态）；
+ *   - 卡在 merged/ 但 git 无实证 → settledNotMerged [{id}]（警告级：squash/改史/假合并）；
+ *   - 标题命中但提交计数为 0（空合并/标题残留）→ emptyMerges [{id, mergeSha}]（警示桶，
+ *     永不自动 fix——2026-11-16 夜航四张 perf 卡假 merged 实证的标题正则误捕面）；
+ *   - 真合并但同名分支仍在且与 base 持平（id 复用/重做中）→ suspects [{id, branch, reason}]
+ *     （不 fix 列嫌疑，交人工对账）。
  * opts.fix = true 时把「已合并未落位」的卡落位 merged/ 并写 state_reconciled 事件；
  * opts.baseBranch 覆盖 workflow.json 的基准分支（测试注入用）。
  */
 export function reconcileCardStates(repoRoot, queueRootDir, opts = {}) {
   const baseBranch = opts.baseBranch ?? loadWorkflowConfig(repoRoot).baseBranch ?? 'develop';
-  let subjects;
+  let mergeLines;
   try {
-    subjects = execFileSync('git', ['log', '--merges', '--pretty=%s', baseBranch], {
+    mergeLines = execFileSync('git', ['log', '--merges', '--pretty=%H %P %s', baseBranch], {
       cwd: repoRoot,
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
@@ -483,18 +521,63 @@ export function reconcileCardStates(repoRoot, queueRootDir, opts = {}) {
   } catch (e) {
     throw new Error(`git log --merges 读取失败（基准分支 ${baseBranch}）：${String(e?.message ?? e).trim()}`);
   }
-  const mergedIds = parseMergedBranchIds(subjects);
+  // 提交数门只对「队列里有卡可比对」的 id 评估：历史合并标题成百上千，rev-list 成本
+  // 应随队列规模而非仓库史规模增长。
+  const cardIds = new Set();
+  for (const state of STATES) {
+    for (const id of listCards(queueRootDir, state)) cardIds.add(id);
+  }
+  const candidatesById = new Map();
+  for (const mc of parseMergedBranchCommits(mergeLines)) {
+    if (!cardIds.has(mc.id)) continue;
+    if (!candidatesById.has(mc.id)) candidatesById.set(mc.id, []);
+    candidatesById.get(mc.id).push(mc.sha);
+  }
+  const verifiedIds = new Set();
+  const emptyMerges = [];
+  const suspects = [];
+  for (const [id, shas] of candidatesById) {
+    let realMerge = false;
+    const emptyShas = [];
+    for (const sha of shas) {
+      // 提交数门：^1..^2 = 该合并从 feature 侧并入 base 的提交数，≥1 才算真合并。
+      // 必须用提交计数、不能用「merge 树==第一亲树」判空——cherry-pick 后又真合并的
+      // 场景两棵树相同但计数 ≥1，按树判会误伤。计数 0 = 空合并/标题残留。
+      const cnt = gitCount(repoRoot, `${sha}^1..${sha}^2`);
+      if (cnt === null) continue; // git 故障按无证据处理：对账只对冲不误修，宁可不修等下轮
+      if (cnt >= 1) realMerge = true;
+      else emptyShas.push(sha);
+    }
+    if (!realMerge) {
+      if (emptyShas.length) emptyMerges.push({ id, mergeSha: emptyShas[0] });
+      continue;
+    }
+    // 分支现存门：同名分支仍在且不落后 base（feature..base 计数 0 = 分支包含 base 全部
+    // 提交，即新建/重做中的空转分支）→ 不 fix 列 suspect。方向必须取 feature..base 而非
+    // base..feature：真合并后未删的残留分支相对 base 落后 ≥1（merge 提交本身），不误伤；
+    // 反方向对真合并残留分支同为 0，会把正常已合并卡误列嫌疑（实测 develop..feature=0）。
+    const live = gitCount(repoRoot, `refs/heads/feature/${id}..${baseBranch}`);
+    if (live === 0) {
+      suspects.push({ id, branch: `feature/${id}`, reason: '同名 feature 分支仍在且与基准分支持平（疑似 id 复用/重做中）' });
+      continue;
+    }
+    verifiedIds.add(id);
+  }
+  // 已知盲区（why）：真合并被 revert 后标题仍在且 ^1..^2 计数仍 ≥1（revert 是在主干上
+  // 加反向提交，不动原 merge 提交）——同名新卡重做中会被误判「已合并」落位 merged/。
+  // 识别 revert 需比对合并内容是否仍在主干树（语义比对误报面大、成本高），登记不处理，
+  // 靠 settledNotMerged/suspects 警示桶与人工对账兜底。
   const mergedNotSettled = [];
   for (const state of STATES) {
     if (state === 'merged') continue;
     for (const id of listCards(queueRootDir, state)) {
-      if (mergedIds.has(id)) mergedNotSettled.push({ id, state });
+      if (verifiedIds.has(id)) mergedNotSettled.push({ id, state });
     }
   }
   const settledNotMerged = listCards(queueRootDir, 'merged')
-    .filter((id) => !mergedIds.has(id))
+    .filter((id) => !verifiedIds.has(id))
     .map((id) => ({ id }));
-  const result = { baseBranch, mergedIds: [...mergedIds].sort(), mergedNotSettled, settledNotMerged, fixed: [] };
+  const result = { baseBranch, mergedIds: [...verifiedIds].sort(), mergedNotSettled, settledNotMerged, emptyMerges, suspects, fixed: [] };
   if (opts.fix) {
     for (const c of mergedNotSettled) {
       appendEvent(logDir(repoRoot, c.id), 'state_reconciled', { from: c.state, to: 'merged', base_branch: baseBranch });

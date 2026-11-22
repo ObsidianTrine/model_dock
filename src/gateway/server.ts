@@ -9,13 +9,13 @@ import { gzipSync } from 'node:zlib'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
-import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, withFileLock } from '../util/fsx.js'
+import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, sha256, withFileLock } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
 import { snapshot } from '../backup/snapshot.js'
-import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ProviderConfig } from '../config/types.js'
-import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, makeKeyRef, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
+import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ModelMeta, type ProviderConfig } from '../config/types.js'
+import { defaultStore, deleteSecret, getFirstProviderSecret, invalidateSecretsCacheIfExternal, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, verifySecretsStore, type SecretBackend } from '../config/secrets.js'
 import { allAdapters, requireAdapter } from '../adapters/registry.js'
 import { isNpmGlobalInstall, resolveInstallCommand, type ClientInstall, type HarnessAdapter } from '../adapters/types.js'
 import { engineWarningHint, ensureNodeRuntime, installChildEnv } from '../install/noderuntime.js'
@@ -50,6 +50,13 @@ import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
+import { probeWire } from './probe/wire.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite, type ProbeTransport } from './probe/engine.js'
+import { PROBE_REGISTRY, getProbeDef } from './probe/registry.js'
+import { probeVerdictView, probeVerdictTimeline } from './probe/verdict.js'
+import { probeBudgetState, probeMonthBreakdown, probeSpendSeries, readProbeLedger } from './probe/ledger.js'
+import { getProbeRunner } from './probe/runners/index.js'
+import { startProbeSchedule } from './probe/schedule.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -60,11 +67,12 @@ export { OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision, warmupOvervie
 export { runClientInstall, runClientUninstall } from './install.js'
 export { errorReply, maxBodyBytes } from './admin-shared.js'
 import { INSTALL_OUTPUT_MAX, hInstall, hUninstall, runClientInstall, runClientUninstall, runInstallCommand, runShell, sandboxInstallCapability, tailText } from './install.js'
-import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, sendError } from './admin-shared.js'
+import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, persistConfig, profileForProvider, profileRefForProvider, readBody, rollbackKeyWrite, sendError, writeKeySlotLocked, type KeyWritePlan } from './admin-shared.js'
 import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fetchModelFailMemo, hSyncRemoteStatus, hSyncRequestRemote, putSyncTicket, registerWebDevice, rememberFetchModelFail, remoteRequests, runRemoteRequest, sleep, sweepRemoteRequests, sweepSyncTickets, syncTickets, takeSyncTicket } from './remote-device.js'
 import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
+import { hMergeApply, hMergePreview } from './mergepack.js'
 
 export interface GatewayStartOptions {
   port: number
@@ -79,6 +87,11 @@ export interface GatewayStartOptions {
   autoModelProbe?: boolean
   /** 注入探测调度节奏（测试用）：不传用 modelprobe.ts 的 MODEL_PROBE_* 默认（启动 90s / 每 24h） */
   modelProbeIntervals?: { initialDelayMs?: number; intervalMs?: number }
+  /** 探针周期调度（probe/schedule.ts：P15 被动聚合恒跑 + cost_ack 授权的周期主动面）；默认开启，
+   *  测试传 false 避免 tick 触发探针（或用 probeScheduleIntervals 注入短间隔 + mock 上游） */
+  autoProbeSchedule?: boolean
+  /** 注入探针调度节奏（测试用）：不传用 schedule.ts 的 PROBE_SCHEDULE_* 默认（启动 90s / 每 1h） */
+  probeScheduleIntervals?: { initialDelayMs?: number; intervalMs?: number; transport?: ProbeTransport }
   /** 临时 harness TTL 清扫间隔（C14，测试注入用）：不传用 EPHEMERAL_SWEEP_INTERVAL_MS（60s） */
   ephemeralSweepIntervalMs?: number
 }
@@ -139,30 +152,55 @@ function discoveryModelId(id: string): string {
   return DISCOVERY_ID_RE.test(id) ? id : `anthropic.${id}`
 }
 
-/** 本地合成 /v1/models 响应：Anthropic 形状为主（type/display_name + 分页字段），兼容 OpenAI 字段
- *  （object/created/owned_by）——两类 SDK 各取所需，多余字段互不解析。目录按写入顺序排列；
- *  有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表（picker 无自定义项，
- *  档位请求仍走内置名兜底改写，不劣化）。discoveryAliases=true（请求带 anthropic-version 头，
+/** 单条目录条目的响应形状：Anthropic 形状为主（type/display_name），兼容 OpenAI 字段
+ *  （object/created/owned_by）——两类 SDK 各取所需，多余字段互不解析。列表与单模型查询
+ *  共用此映射，保证两端口径永远一致；discoveryAliases=true（请求带 anthropic-version 头，
  *  即 Claude Code discovery）时对非 Claude 系 ID 加 anthropic. 前缀别名，否则原样。 */
+function modelEntryPayload(rawId: string, m: ModelMeta, providerId: string, discoveryAliases: boolean) {
+  const id = discoveryAliases ? discoveryModelId(rawId) : rawId
+  return {
+    id,
+    type: 'model',
+    display_name: m.display_name || rawId,
+    object: 'model',
+    created: 0,
+    owned_by: providerId,
+  }
+}
+
+/** 本地合成 /v1/models 响应：Anthropic 形状为主（type/display_name + 分页字段），兼容 OpenAI 字段。
+ *  目录按写入顺序排列；有 display_name 的显示名称、没有的回落 ID；目录为空返回空列表
+ *  （picker 无自定义项，档位请求仍走内置名兜底改写，不劣化）。 */
 function modelsListPayload(cfg: Config, providerId: string, discoveryAliases: boolean) {
   const provider = cfg.providers[providerId]
-  const data = Object.entries(provider?.models ?? {}).map(([rawId, m]) => {
-    const id = discoveryAliases ? discoveryModelId(rawId) : rawId
-    return {
-      id,
-      type: 'model',
-      display_name: m.display_name || rawId,
-      object: 'model',
-      created: 0,
-      owned_by: providerId,
-    }
-  })
+  const data = Object.entries(provider?.models ?? {}).map(([rawId, m]) => modelEntryPayload(rawId, m, providerId, discoveryAliases))
   return {
     data,
     first_id: data[0]?.id,
     has_more: false,
     last_id: data[data.length - 1]?.id,
   }
+}
+
+/** /v1/models 目录服务解析（列表与单模型查询共用）：?provider= 显式点名服务（未知服务报错）；
+ *  未点名复用 pickTarget 首候选（含钉定/定时窗口），把目录切到真正在用的服务，保证目录与
+ *  实际请求同源。失败返回可操作的错误描述，由调用方经 sendError 应答。 */
+function resolveCatalogProvider(
+  rt: GatewayRuntime,
+  target: ResolvedTarget,
+  wanted: string
+): { ok: true; providerId: string } | { ok: false; status: 404; message: string; hint: string } {
+  if (wanted && !rt.config.providers[wanted]) {
+    return {
+      ok: false,
+      status: 404,
+      message: t('服务「{id}」不存在', 'Service "{id}" not found', { id: wanted }),
+      hint: t('modeldock provider list 查看服务列表，或在 Web 控制台「服务」页确认 ID', 'Run modeldock provider list to view services, or check the ID on the Services page of the web console'),
+    }
+  }
+  if (wanted) return { ok: true, providerId: wanted }
+  const picked = pickTarget(rt, target, target.profile.fallback)
+  return { ok: true, providerId: (picked.ok ? picked.ordered[0].target : target).profile.provider }
 }
 
 /** 各网关实例的 picker 展示路由基线（route=上次已同步的展示服务）。模块级 WeakMap：周期检测
@@ -325,6 +363,14 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
     startModelProbeLoop(rt, server, opts.modelProbeIntervals)
   }
 
+  // 探针周期调度（provider-probe-suite 任务 13，probe/schedule.ts）：每小时 tick——P15 被动聚合
+  // 恒跑（零 token）；含 token 主动面（P1）仅在当前本地小时命中 [probe] schedule_hours 且
+  // cost_ack=true 时执行，同受 budget_tokens 月度硬闸（闸在引擎内）。不影响转发路由；测试传
+  // autoProbeSchedule:false 停用，或 probeScheduleIntervals 注入短间隔（配 mock 上游）
+  if (opts.autoProbeSchedule !== false) {
+    startProbeSchedule(rt, server, opts.probeScheduleIntervals)
+  }
+
   // JSONL 日志保留期清理：启动即清一次、之后每 24h；保留天数读 rt.config（随 reloadRuntime
   // 跟随配置变化），log_retention_days=0 禁用。删除为尽力而为，失败静默不影响网关服务
   const pruneLogs = async () => {
@@ -440,23 +486,40 @@ async function handleRequest(
   // 以通过其 ID 过滤（DISCOVERY_ID_RE），转发侧按目录还原。
   if (method === 'GET' && url.split('?')[0] === '/v1/models') {
     const wanted = (new URL(req.url ?? '/', 'http://x').searchParams.get('provider') ?? '').trim()
-    if (wanted && !rt.config.providers[wanted]) {
+    const cat = resolveCatalogProvider(rt, target, wanted)
+    if (!cat.ok) return sendError(res, cat.status, cat.message, cat.hint)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(modelsListPayload(rt.config, cat.providerId, req.headers['anthropic-version'] !== undefined)))
+    return
+  }
+
+  // GET /v1/models/{id}：单模型查询（OpenAI 兼容面）。本地按目录直查，不进 relay——未知路径
+  // 透传上游会让别名 ID（下游用别名/anthropic. 前缀，上游只认真实 ID）撞上游自己的目录或
+  // 上游 404，与「目录不透传」口径分裂。与列表同理不耗上游，放在限额检查之前。
+  // ID 双命名空间：真实目录 ID 直查优先；anthropic. 前缀（discovery picker 用的 ID）剥离后兜底。
+  if (method === 'GET' && url.split('?')[0].startsWith('/v1/models/')) {
+    let rawId = url.split('?')[0].slice('/v1/models/'.length)
+    try {
+      rawId = decodeURIComponent(rawId)
+    } catch {
+      // 非法转义序列保留原样参与匹配，未命中即 404
+    }
+    const wanted = (new URL(req.url ?? '/', 'http://x').searchParams.get('provider') ?? '').trim()
+    const cat = resolveCatalogProvider(rt, target, wanted)
+    if (!cat.ok) return sendError(res, cat.status, cat.message, cat.hint)
+    const models = rt.config.providers[cat.providerId]?.models ?? {}
+    const stripped = rawId.startsWith('anthropic.') ? rawId.slice('anthropic.'.length) : ''
+    const catalogId = models[rawId] ? rawId : stripped && models[stripped] ? stripped : undefined
+    if (!catalogId) {
       return sendError(
         res,
         404,
-        t('服务「{id}」不存在', 'Service "{id}" not found', { id: wanted }),
-        t('modeldock provider list 查看服务列表，或在 Web 控制台「服务」页确认 ID', 'Run modeldock provider list to view services, or check the ID on the Services page of the web console')
+        t('模型「{id}」不在服务「{p}」的模型目录', 'Model "{id}" is not in the model catalog of service "{p}"', { id: rawId, p: cat.providerId }),
+        t('GET /v1/models 查看该服务的模型目录', 'GET /v1/models lists the model catalog of the service')
       )
     }
-    let listProviderId = wanted
-    if (!listProviderId) {
-      // target 由 resolveTarget 解析（active_profile 或 harness 钉定），不含定时窗口；
-      // 用同一 pickTarget 首候选把目录切到真正在用的服务，避免窗口期列表与转发各说各话
-      const picked = pickTarget(rt, target, target.profile.fallback)
-      listProviderId = (picked.ok ? picked.ordered[0].target : target).profile.provider
-    }
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify(modelsListPayload(rt.config, listProviderId, req.headers['anthropic-version'] !== undefined)))
+    res.end(JSON.stringify(modelEntryPayload(catalogId, models[catalogId], cat.providerId, req.headers['anthropic-version'] !== undefined)))
     return
   }
 
@@ -1257,28 +1320,25 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // Key 写入计划：池 provider（keys 非空）转发恒走 keys 池（providerKeyRefs），只写 key_ref
   // 会「静默无效」——对齐 CLI provider set-key --add：新 key 追加进池（槽位 <id>-k<序号>，
   // 与既有引用去重）；提交的 key 已在池内时零改动（keyChanged=false 走不到这里，幂等）。
-  // 单 key 配置保持覆盖 key_ref。ref 在 persist 前按实际后端确定性预生成（makeKeyRef 与
-  // setSecret 返回同构），persistConfig 落配置成功后才 setSecret 补密文本（先配置后密钥，
-  // REVIEW-10 同序：persist 失败时密钥未动、配置由 mutateConfig 原子性保持原状，无半套状态——
-  // 反序会在配置写失败时留孤儿密钥条目，2026-11-04 审查 P2）。
-  let keyWrite: { secretId: string; ref: string; pool: boolean; backend: SecretBackend } | undefined
+  // 单 key 配置保持覆盖 key_ref。仍先配置后密钥（REVIEW-10 同序：persist 失败时密钥未动、
+  // 配置由 mutateConfig 原子性保持原状，无半套状态——反序会在配置写失败时留孤儿密钥条目，
+  // 2026-11-04 审查 P2）。
+  // 审计 F3：槽位不再锁外预生成——计划期只锁「是否写 key」（keyIntent，含计划期池引用快照
+  // planPool），具体槽位在 persistConfig 写锁内按盘上最新池态推导（writeKeySlotLocked）：
+  // 下方去重校验的钥匙环读取等 await 可达百 ms，锁外推导期间另一并发写者可先落同槽 key，
+  // 沿用旧推导会把两个 key 挤进同一槽（后写 setSecret 覆盖先写，先写方丢 key）。
+  // 审计 F5：先配置后密钥的残余面由失败回滚收口——setSecret 失败时 rollbackKeyWrite 摘除
+  // 刚落的引用再上抛，配置不留「指向无值 ref」的残面（单 key 503 残留）。
+  let keyIntent: { key: string; backend: SecretBackend; planPool: string[] } | undefined
   if (hasNewKey && keyChanged) {
     const backend = rt.config.security?.store ?? (await defaultStore())
     // 与 setSecret 内部同规：FAKE_HOME 沙箱下外部后端强制落 file，ref 必须按实际后端预生成
     const effBackend: SecretBackend =
       process.env.MODELRDOCK_FAKE_HOME && (backend === 'keychain' || backend === 'secret-service') ? 'file' : backend
-    const poolKeys = Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : []
-    if (poolKeys.length > 0) {
-      const taken = new Set([...poolKeys, p.key_ref])
-      let slot = poolKeys.length + 1
-      let ref = makeKeyRef(effBackend, `${id}-k${slot}`)
-      while (taken.has(ref)) {
-        slot++
-        ref = makeKeyRef(effBackend, `${id}-k${slot}`)
-      }
-      keyWrite = { secretId: `${id}-k${slot}`, ref, pool: true, backend: effBackend }
-    } else {
-      keyWrite = { secretId: id, ref: makeKeyRef(effBackend, id), pool: false, backend: effBackend }
+    keyIntent = {
+      key: b.key as string,
+      backend: effBackend,
+      planPool: Array.isArray(p.keys) ? p.keys.filter((k): k is string => typeof k === 'string') : [],
     }
   }
   // 模型目录：完整列表替换语义（UI 传全量）。校验：id 非空去重、ctx/out 为正整数；
@@ -1357,26 +1417,15 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
   // 默认模型基线（persist 前取）：persist 后比对，真变了才触发烤模型客户端同步
   const prevProfName = profileRefForProvider(rt.config, id)
   const prevDefaultModel = prevProfName ? rt.config.profiles[prevProfName]?.default_model : undefined
+  let keyWrite: KeyWritePlan | undefined
   await persistConfig(rt, (c) => {
     const t = c.providers[id]
     if (!t) return
     if (name) t.name = name
     if (baseUrl) t.base_url = baseUrl
     if (newProtocol) t.protocol = newProtocol
-    if (keyWrite) {
-      if (keyWrite.pool) {
-        // 池追加：keys 数组尾插新引用（转发经 providerKeyRefs 以池为准，热加载后即参与轮转）。
-        // 建池（盘上 keys 为空）时先把 key_ref 迁入池首——providerKeyRefs 池非空时只认 keys，
-        // 不迁移原 key 静默退出轮转（2026-11-12 审查 P1-2，与 CLI set-key --add 同口径）；
-        // key_ref 保持原值不清（providerAllKeyRefs 删除口径集合去重）。常态是既有池纯追加，
-        // 本迁移只兜「计划期看到池、盘上池被清」的运行态/盘上分歧窗口
-        const pool = (t.keys ??= [])
-        if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
-        pool.push(keyWrite.ref)
-      } else {
-        t.key_ref = keyWrite.ref
-      }
-    }
+    // 槽位推导在写锁内按盘上最新态进行（审计 F3，推演见 keyIntent 注）；产出计划供锁外 setSecret 与失败回滚
+    if (keyIntent) keyWrite = writeKeySlotLocked(t, id, keyIntent.backend, keyIntent.planPool)
     if (newModels) t.models = newModels
     // 模型级容灾：resolver 返回 undefined（null/空表入参）= 删除字段，非空 = 写归一化映射
     if (mfProvided) {
@@ -1404,8 +1453,16 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       }
     }
   })
-  // 配置已落盘，锁外补写密钥文本（先配置后密钥，见 keyWrite 处注释）
-  if (keyWrite) await setSecret(keyWrite.secretId, b.key as string, keyWrite.backend)
+  // 配置已落盘，锁外补写密钥文本（先配置后密钥，见 keyIntent 注）；失败回滚刚落的引用（审计 F5）
+  // 再原样上抛——顶层 errorReply 还原 SecretsError 的 400+hint，配置不留指向无值 ref 的残面
+  if (keyWrite && keyIntent) {
+    try {
+      await setSecret(keyWrite.secretId, keyIntent.key, keyWrite.backend)
+    } catch (e) {
+      await rollbackKeyWrite(rt, id, keyWrite)
+      throw e
+    }
+  }
   // 默认模型真变了才同步烤模型客户端（dsh/workbuddy/zcode 模型列表烙在客户端文件里，
   // 与全局切换 hSwitch 同口径）；钉定路由的客户端不在其职责内，不受影响
   const bakedParts: Array<Bilingual | ''> = []
@@ -1934,33 +1991,27 @@ async function hKey(c: AdminCtx): Promise<void> {
       return
     }
   }
-  let keyWrite: { secretId: string; ref: string; pool: boolean }
-  if (isPool) {
-    const taken = new Set([...poolKeys, p.key_ref])
-    let slot = poolKeys.length + 1
-    let ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
-    while (taken.has(ref)) {
-      slot++
-      ref = makeKeyRef(effBackend, `${provider}-k${slot}`)
-    }
-    keyWrite = { secretId: `${provider}-k${slot}`, ref, pool: true }
-  } else {
-    keyWrite = { secretId: provider, ref: makeKeyRef(effBackend, provider), pool: false }
-  }
-  // 顺序不可反，先 config 后 secrets（REVIEW-10，推演见 hServiceUpdate keyWrite 注）
+  // 槽位推导进写锁内按盘上最新池态重推导（审计 F3，推演见 hServiceUpdate keyIntent 注）；
+  // poolKeys 是计划期池引用快照（兜「计划期见池、盘上池被清」的分歧窗口）
+  let keyWrite: KeyWritePlan | undefined
   await persistConfig(rt, (cfg) => {
     const t = cfg.providers[provider]
     if (!t) return
-    if (keyWrite.pool) {
-      // 建池即迁移 key_ref（口径同 hServiceUpdate 池追加注：2026-11-12 审查 P1-2）
-      const pool = (t.keys ??= [])
-      if (pool.length === 0 && typeof t.key_ref === 'string' && t.key_ref) pool.unshift(t.key_ref)
-      pool.push(keyWrite.ref)
-    } else {
-      t.key_ref = keyWrite.ref
-    }
+    keyWrite = writeKeySlotLocked(t, provider, effBackend, poolKeys)
   })
-  await setSecret(keyWrite.secretId, key, effBackend)
+  if (!keyWrite) {
+    // persist 回调空转 = provider 在校验后、持锁写盘前被并发删除：配置未动，不再补写密钥
+    // （旧实现此时仍会 setSecret 留孤儿条目），按不存在回应
+    return sendError(res, 400, t('provider「{id}」不存在', 'Provider "{id}" not found', { id: provider }))
+  }
+  // 顺序不可反，先 config 后 secrets（REVIEW-10，推演见 hServiceUpdate keyIntent 注）；
+  // setSecret 失败回滚刚落的引用（审计 F5），配置不留指向无值 ref 的残面，原样上抛走顶层 errorReply
+  try {
+    await setSecret(keyWrite.secretId, key, keyWrite.backend)
+  } catch (e) {
+    await rollbackKeyWrite(rt, provider, keyWrite)
+    throw e
+  }
   audit(
     bi('更新密钥', 'Update key'),
     provider,
@@ -2085,6 +2136,7 @@ async function hReset(c: AdminCtx): Promise<void> {
   // （读到空配置），不再复活（2026-11-04 审查 P2）
   const files = [configPath(), secretsPath()]
   const deleted: string[] = []
+  const deleteFailed: Array<{ file: string; msg: string }> = []
   await withFileLock(configLockPath(), {
     // 超时报错与 mutateConfig 同口径（ConfigError → 400 + 可操作 hint），裸锁错误会落 500
     timeoutError: (lp) =>
@@ -2096,9 +2148,30 @@ async function hReset(c: AdminCtx): Promise<void> {
     for (const f of files) {
       try {
         if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
-      } catch { /* 忽略 */ }
+      } catch (e) {
+        deleteFailed.push({ file: f, msg: (e as Error).message })
+      }
     }
   })
+  // fail-loud（审计 F4）：破坏性操作删文件失败必须如实报错——旧实现吞错后无条件 ok:true，
+  // 用户以为配置已清空、实际原样存活。失败即中止（不 reloadRuntime 把幸存配置刷进运行态），
+  // ConfigError 经顶层 errorReply 还原 400+hint，与上方锁超时同信封
+  if (deleteFailed.length > 0) {
+    const failedFiles = deleteFailed.map((d) => d.file)
+    audit(
+      bi('重置配置', 'Reset config'),
+      '-',
+      undefined,
+      bi('删除 {files} 失败，重置中止：{msg}', 'Failed to delete {files}; reset aborted: {msg}', {
+        files: biJoin('、', ', ', failedFiles),
+        msg: deleteFailed.map((d) => d.msg).join('；'),
+      })
+    )
+    throw new ConfigError(
+      t('重置失败：{files} 删除未成功（配置未被清除，重置未完成）', 'Reset failed: {files} could not be deleted (config not cleared, reset incomplete)', { files: biJoin('、', ', ', failedFiles) }),
+      t('文件可能被其他程序占用（编辑器/杀毒/云同步等）——关闭占用程序后重试重置', 'The file may be held open by another program (editor/antivirus/cloud sync) — close it and retry the reset')
+    )
+  }
   await reloadRuntime(rt)
   audit(
     bi('重置配置', 'Reset config'),
@@ -2318,6 +2391,176 @@ async function hModelAvailability(c: AdminCtx): Promise<void> {
   for (const [id, a] of rt.modelProbe?.results ?? []) availability[id] = a
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, availability }))
+}
+
+// ===== 服务探针端点（provider-probe-suite 任务 6；与 hTest 的差异：走探针引擎、不调 logRequest——
+// 请求日志 / usageToday / key 冷却 / 熔断计数零副作用，花费只进探针独立账本）=====
+
+/** 探针运行确认 token：绑定 (adminToken, provider, probes, 目标数, 预估) 的短摘要。预估展示与确认
+ *  执行之间 key 池/配置变化会改变目标数与预估——旧 token 即失效（不能拿旧预估执行新计划）；
+ *  键入 adminToken 防外部伪造 (plan → token) 映射；比较走 safeEqual 恒时。 */
+function probeConfirmToken(rt: GatewayRuntime, providerId: string, probeIds: string[], planned: number, estimate: number): string {
+  return sha256(`${rt.adminToken}|probe-run|${providerId}|${probeIds.join(',')}|${planned}|${estimate}`).slice(0, 32)
+}
+
+/** POST /_modeldock/probe/run：跑探针套件（admin 门内写路径，audit 留痕）。两段式成本确认闸：
+ *  首段不带 confirmToken 只出预估（targets/estimate/per_probe_cost/budget + confirmToken），零上游
+ *  请求；第二段带对 bind 计划的 confirmToken 才执行（对应 CLI 的逐次确认）。 */
+async function hProbeRun(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit, o } = c
+  const b = await jsonRequestBody(req)
+  const providerId = typeof b.provider === 'string' ? b.provider.trim() : ''
+  if (!providerId) {
+    return sendError(res, 400, t('缺少 provider', 'Missing provider'), t('示例：{"provider":"myapi","probes":["p1"]}', 'Example: {"provider":"myapi","probes":["p1"]}'))
+  }
+  if (!rt.config.providers[providerId]) {
+    return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }), t('/_modeldock/overview 的 services[].id 为可用值', 'services[].id in GET /_modeldock/overview lists the valid ids'))
+  }
+  const requested: unknown[] = Array.isArray(b.probes) ? b.probes : typeof b.probes === 'string' ? b.probes.split(',') : ['p1']
+  const activeIds = PROBE_REGISTRY.filter((d) => d.status === 'active').map((d) => d.id)
+  const probeIds: string[] = []
+  for (const raw of requested) {
+    const id = String(raw).trim()
+    if (!id) continue
+    if (id === 'all') {
+      for (const a of activeIds) if (!probeIds.includes(a)) probeIds.push(a)
+      continue
+    }
+    if (!getProbeDef(id)) {
+      return sendError(res, 400, t('未知探针「{id}」', 'Unknown probe "{id}"', { id }), t('可用探针：{list}', 'Available probes: {list}', { list: activeIds.join(', ') }))
+    }
+    if (!probeIds.includes(id)) probeIds.push(id)
+  }
+  if (probeIds.length === 0) {
+    return sendError(res, 400, t('探针清单为空', 'Probe list is empty'), t('示例：{"provider":"myapi","probes":["p1"]}', 'Example: {"provider":"myapi","probes":["p1"]}'))
+  }
+  // [probe].enabled=false：与 CLI 同口径的可操作报错，而非静默 0 请求
+  if (!probeConfigView(rt).enabled) {
+    return sendError(
+      res,
+      400,
+      t('探针已被停用（[probe] enabled=false）', 'Probes are disabled ([probe] enabled=false)'),
+      t('删除 config.toml [probe] 段的 enabled = false（或改为 true）后重试', 'Remove enabled = false from the [probe] section of config.toml (or set it to true) and retry')
+    )
+  }
+  let plan
+  try {
+    plan = await buildProbePlan(rt, providerId, probeIds)
+  } catch (e) {
+    return sendError(res, 400, (e as Error).message)
+  }
+  if (plan.keys.length === 0) {
+    return sendError(res, 400, t('服务「{id}」没有可用 key，探针无法发请求', 'Service "{id}" has no usable key; probes cannot send requests', { id: providerId }), t('先为该服务配置 key 后重试', 'Configure a key for this service first, then retry'))
+  }
+  const token = probeConfirmToken(rt, providerId, probeIds, plan.planned, plan.estimate)
+  const supplied = typeof b.confirmToken === 'string' ? b.confirmToken : ''
+  if (!supplied || !safeEqual(supplied, token)) {
+    // 第一段：只回预估（确认闸在引擎层兜底双保险——即使 token 校验有洞，未确认也是 0 请求）
+    const budget = await probeBudgetState(rt)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        ok: false,
+        needConfirm: true,
+        reason: 'unconfirmed',
+        provider: providerId,
+        probes: probeIds,
+        targets: plan.planned,
+        estimate: plan.estimate,
+        per_probe_cost: plan.perProbeCost,
+        budget,
+        confirmToken: token,
+        verdicts: [],
+        skipped: [],
+      })
+    )
+    return
+  }
+  audit(
+    bi('探针运行', 'Probe run'),
+    providerId,
+    bi('{probes} × {n} 目标 · 预估 {e} tokens', '{probes} × {n} targets · estimate {e} tokens', { probes: probeIds.join(','), n: plan.planned, e: plan.estimate })
+  )
+  const result = await runProbeSuite(rt, {
+    probeIds,
+    targets: plan.units.map((u) => u.target),
+    transport: makeRelayProbeTransport(rt, { idleTimeoutMs: o.idle, retries: o.retries }),
+    runnerFor: getProbeRunner,
+    confirmed: true,
+    secrets: plan.secrets,
+  })
+  const budget = await probeBudgetState(rt)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      provider: providerId,
+      probes: probeIds,
+      targets: plan.planned,
+      dispatched: result.dispatched,
+      upstreamRequests: result.upstreamRequests,
+      tokens: result.tokens,
+      estimate: plan.estimate,
+      per_probe_cost: plan.perProbeCost,
+      budget,
+      verdicts: result.verdicts.map(probeVerdictView),
+      skipped: result.skipped,
+    })
+  )
+  return
+}
+
+/** GET /_modeldock/probe/verdicts：三元组 verdict 视图（admin 门内只读，纯内存读）。数据源 =
+ *  rt.probeVerdicts 热态（经本网关运行的探针写入，重启回放 probe-<date>.jsonl 重建）；CLI 直跑的
+ *  结论落盘后要等网关重启回放才进本视图。state 为读面状态（证据超 7 天未刷新即 stale）；
+ *  key 只出 sha256 前 8 位指纹。 */
+async function hProbeVerdicts(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const verdicts = [...(rt.probeVerdicts?.values() ?? [])]
+    .map(probeVerdictView)
+    .sort((x, y) => (x.provider === y.provider ? (x.model < y.model ? -1 : x.model > y.model ? 1 : x.key_fp < y.key_fp ? -1 : 1) : x.provider < y.provider ? -1 : 1))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, verdicts, generated_at: new Date().toISOString() }))
+  return
+}
+
+/** GET /_modeldock/probe/ledger：探针独立账本月度读数（admin 门内只读）。budget = 月度预算闸读数
+ *  （probe/ledger.ts probeBudgetState），breakdown = 当月聚合 + 按 probe_id 分解；probe_labels 供
+ *  前端按界面语言取探针展示名（`中文||English` 形态，与 data-i18n 机制同构）。 */
+async function hProbeLedger(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const breakdown = probeMonthBreakdown(await readProbeLedger())
+  const budget = await probeBudgetState(rt)
+  const probe_labels: Record<string, string> = {}
+  for (const d of PROBE_REGISTRY) probe_labels[d.id] = `${d.titleZh}||${d.titleEn}`
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, budget, breakdown, probe_labels }))
+  return
+}
+
+/** GET /_modeldock/probe/trend?days=30&months=6：探针趋势视图（admin 门内只读，
+ *  provider-probe-suite 任务 14）。timeline = 近 days 天 verdict 变化时间线（probeVerdictTimeline，
+ *  只读 probe-<date>.jsonl、按证据时间 at 升序；窗口过滤在读取层逐行做，窗口外数据不出网关）；
+ *  spend = 近 months 个自然月探针花费曲线（probeSpendSeries，读独立账本 probe-ledger.jsonl）。
+ *  两路都不读真实流量请求日志。days/months 非法值按 hLogs 先例夹紧不报错（days 1–365 缺省 30、
+ *  months 1–24 缺省 6）。timeline 条目 from=null = 窗口内该三元组首现；key 只出指纹。
+ *  趋势窗口实际受保留期约束：probe-<date>.jsonl 随 log_retention_days 清理（同源策略），
+ *  超保留期的历史自然为空。 */
+async function hProbeTrend(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const clampNum = (v: string | null, def: number, max: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(max, Math.floor(n)) : def
+  }
+  const days = clampNum(q.get('days'), 30, 365)
+  const months = clampNum(q.get('months'), 6, 24)
+  const timeline = await probeVerdictTimeline(days * 86_400_000)
+  const spend = probeSpendSeries(await readProbeLedger(), months)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, days, months, timeline, spend, generated_at: new Date().toISOString() }))
+  return
 }
 
 /** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
@@ -2580,6 +2823,8 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/sync/offer': hSyncOffer,
   'POST /_modeldock/sync/import': hSyncImport,
   'POST /_modeldock/config/export': hConfigExport,
+  'POST /_modeldock/merge/preview': hMergePreview,
+  'POST /_modeldock/merge/apply': hMergeApply,
   'POST /_modeldock/sync/discover': hSyncDiscover,
   'POST /_modeldock/sync/request-remote': hSyncRequestRemote,
   'GET /_modeldock/sync/remote-status': hSyncRemoteStatus,
@@ -2608,6 +2853,10 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/key': hKey,
   'POST /_modeldock/reload': hReload,
   'POST /_modeldock/test': hTest,
+  'POST /_modeldock/probe/run': hProbeRun,
+  'GET /_modeldock/probe/verdicts': hProbeVerdicts,
+  'GET /_modeldock/probe/ledger': hProbeLedger,
+  'GET /_modeldock/probe/trend': hProbeTrend,
   'POST /_modeldock/tier-validate': hTierValidate,
   'POST /_modeldock/pricing-lookup': hPricingLookup,
   'POST /_modeldock/reset': hReset,
@@ -2803,21 +3052,14 @@ export async function probe(
   if (!model) {
     return { ok: false, status: 0, ms: 0, err: t('该 profile 未设置 default_model，请用 -m 指定或 modeldock profile 修改', 'This profile has no default_model; pass -m or change it with modeldock profile') }
   }
-  // 按服务协议拼探针路径与 body：responses 是一等协议（hServiceAdd/hFetchModels 均接受），
-  // 此前二分法只认 anthropic/其他——responses 服务被拼成 /v1/chat/completions，经
-  // clientProtocolFromPath 判成 openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，
-  // 报错还把责任推给「客户端走 openai 协议」（实际探针拼错了协议）
-  const proto = target.provider.protocol
-  const isAnthropic = proto === 'anthropic'
-  const isResponses = proto === 'responses'
-  const path = isAnthropic ? '/v1/messages' : isResponses ? '/v1/responses' : '/v1/chat/completions'
-  const body = Buffer.from(
-    JSON.stringify(
-      isResponses
-        ? { model, max_output_tokens: 16, stream, input: 'ping' }
-        : { model, max_tokens: 16, stream, messages: [{ role: 'user', content: 'ping' }] }
-    )
-  )
+  // 按服务协议拼探针路径与 body：三协议拼装收口到 probe/wire.ts（探针 runners 同源复用，
+  // 防口径漂移）。responses 是一等协议（hServiceAdd/hFetchModels 均接受），此前二分法只认
+  // anthropic/其他——responses 服务被拼成 /v1/chat/completions，经 clientProtocolFromPath 判成
+  // openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，报错还把责任推给「客户端走
+  // openai 协议」（实际探针拼错了协议）
+  const wire = probeWire(target.provider.protocol, model, { stream })
+  const path = wire.path
+  const body = wire.body
   try {
     const up = await forwardToUpstream(rt, target, {
       method: 'POST',

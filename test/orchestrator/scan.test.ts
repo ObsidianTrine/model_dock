@@ -58,11 +58,12 @@ describe('orchestrator scan > scan 命令端到端', () => {
       let drafts = fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))
       expect(drafts).toHaveLength(1)
       expect(drafts[0]).toMatch(/^scan-todo-/)
-      // 提案内 created_by: scanner、gate: L3、proposal: true
+      // 提案内 created_by: scanner、gate: L3、干净的 signal_hashes（proposal: true 死字段已退役，P1-⑨）
       const cardText = fs.readFileSync(path.join(draftsDir, drafts[0]), 'utf8')
       expect(cardText).toContain('created_by: scanner')
       expect(cardText).toContain('gate: L3')
-      expect(cardText).toContain('proposal: true')
+      expect(cardText).not.toContain('proposal:')
+      expect(cardText).toMatch(/signal_hashes: \[[0-9a-f]{8}\]/)
 
       const again = runOrch(repo.root, 'scan --todo')
       expect(again.stdout).toContain('已存在，跳过')
@@ -140,8 +141,8 @@ describe('orchestrator scan > 已知问题账本与 CI 信号源', () => {
   it('scanKnownIssues：未修条目出提案；已修/暂缓跳过；files_hint 从位置列提取；无账本静默', () => {
     const repo = mkRepo()
     try {
-      fs.mkdirSync(path.join(repo.root, 'docs'), { recursive: true })
-      fs.writeFileSync(path.join(repo.root, 'docs', 'known-issues.md'), KI_TABLE)
+      fs.mkdirSync(path.join(repo.root, 'docs', 'ops'), { recursive: true })
+      fs.writeFileSync(path.join(repo.root, 'docs', 'ops', 'known-issues.md'), KI_TABLE)
       const cards = scanKnownIssues(repo.root)
       expect(cards).toHaveLength(1) // PERF-16 已修、PERF-21 暂缓都被过滤
       expect(cards[0].id).toBe('scan-ki-perf-15')
@@ -162,12 +163,12 @@ describe('orchestrator scan > 已知问题账本与 CI 信号源', () => {
   it('scanCI：GitHub 远端 + 假 gh 失败 run → high 提案；非 GitHub / gh 失败 / 主干全绿 → skipped 或无卡', () => {
     const repo = mkRepo()
     try {
-      const failRun = () => ({ status: 0, stdout: JSON.stringify([{ databaseId: 99, headSha: 'abcdef1234567890', displayTitle: 'ci: x' }]), stderr: '' })
+      const failRun = () => ({ status: 0, stdout: JSON.stringify([{ databaseId: 99, headSha: 'abcdef1234567890', displayTitle: 'ci: x', conclusion: 'failure' }]), stderr: '' })
       expect(scanCI(repo.root, { run: failRun }).skipped).toBe(true) // 无远端短路，gh 都不调
       git(repo.root, 'remote add origin https://github.com/foo/bar.git')
       const cards = scanCI(repo.root, { run: failRun, baseBranch: 'develop' })
       expect(cards).toHaveLength(1)
-      expect(cards[0].id).toBe('scan-ci-abcdef12') // 同提交同 id 天然去重
+      expect(cards[0].id).toBe('scan-ci-abcdef12') // 单 run streak：id 取 streak 首个 run 的 head sha
       expect(cards[0].goal).toContain('#99')
       expect(cards[0].priority).toBe('high')
       const ghFail = scanCI(repo.root, { run: () => ({ status: 1, stdout: '', stderr: 'gh: auth' }) })

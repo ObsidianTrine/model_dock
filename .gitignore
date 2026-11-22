@@ -24,6 +24,9 @@ NOTES.md
 # orchestrator 运行态不入库（任务队列与事件日志）
 .agents/orchestrator/queue/
 .agents/orchestrator/logs/
+# digest 冲刷运行态（flush-inflight / last.txt）；.agents/ 嵌套是 audit cwd 锚定 bug 的错位残留（真账本在 .agents/policy/audit.jsonl）
+.agents/orchestrator/notify-digest/
+.agents/orchestrator/.agents/
 
 # 调度器/任务互斥锁（运行态；陈锁自动接管，不人工清理）
 .agents/orchestrator/.scheduler-lock.json
@@ -39,6 +42,10 @@ NOTES.md
 .agents/orchestrator/release-proposals/
 .agents/orchestrator/nightly-runner.*
 
+# sail 停止信号与 digest 通报队列（巡航运行态，不入库）
+.agents/orchestrator/.sail-stop
+.agents/orchestrator/notify-digest/
+
 # 规格三件套（spec 命令产物，人工审阅的工作区；拆出的任务卡进队列即完成使命）
 .agents/orchestrator/specs/
 
@@ -51,4 +58,7 @@ tmp/
 # 调研 brief 与可信度产物（research 命令运行态产物，人工阅读的工作区；ledger/verdict/snapshot 均为对账材料）
 .agents/orchestrator/research/
 .agents/orchestrator/research-void/
+
+# 通知摘要聚合器（notify-digest 运行态：pending.jsonl 队列 + flush-inflight marker + last.txt 详情档）
+.agents/orchestrator/notify-digest/
 *.output.txt

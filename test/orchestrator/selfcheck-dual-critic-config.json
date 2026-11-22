@@ -1,0 +1,12 @@
+{
+  "file": "../../.agents/scripts/workflow-config.mjs",
+  "countAtLeast": [
+    { "pattern": "function resolveReview\\(raw\\)", "atLeast": 1 },
+    { "pattern": "function resolveDualCritic\\(raw\\)", "atLeast": 1 },
+    { "pattern": "review: resolveReview\\(raw\\.review\\)", "atLeast": 1 },
+    { "pattern": "dualCritic: dual \\?\\? \\{ enabled: true, secondModel: null \\}", "atLeast": 1 },
+    { "pattern": "review\\.dualCritic 配置非法", "atLeast": 1 }
+  ],
+  "grepZero": ["review: resolveEngine\\(raw\\.review"],
+  "fileSizeMaxKB": 200
+}

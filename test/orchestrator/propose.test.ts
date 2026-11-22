@@ -19,8 +19,8 @@ describe('orchestrator propose > prompt 构建与解析', () => {
     expect(p).toContain('scan-ki-perf-15')
     expect(p).toContain('pending=0')
     expect(p).toContain('至多 2 张')
-    expect(p).toContain('proposal: true')
-    expect(p).toContain('9. docs/known-issues.md 是已知问题账本')
+    expect(p).not.toContain('proposal: true') // 死字段已从产出契约退役（P1-⑨ 字段卫生）
+    expect(p).toContain('9. docs/ops/known-issues.md 是已知问题账本')
     expect(p).toContain('一律视为已解决，禁止为其出卡')
     expect(p).toContain('10. 背景段第一行必须是所对齐目标面/信号条目的逐字原文')
     expect(p).toContain('11. 围栏外只允许一句话概述')
@@ -127,7 +127,7 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
       const drafts = fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md'))
       expect(drafts).toEqual(['planner-mock-task.md'])
       const text = fs.readFileSync(path.join(draftsDir, 'planner-mock-task.md'), 'utf8')
-      expect(text).toContain('proposal: true')
+      expect(text).not.toContain('proposal:') // 死字段不再写入/补齐（P1-⑨ 字段卫生）
       expect(text).toMatch(/created_by: planner/)
       expect(text).toContain('gate: L3')
       expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0) // 未授权：只提案不提交
@@ -146,7 +146,7 @@ describe('orchestrator propose > 端到端（mock planner）', () => {
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'planner-mock-task.md'))).toBe(false)
       const pending = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'planner-mock-task.md'), 'utf8')
       expect(pending).toContain('gate: L1')
-      expect(pending).toContain('proposal: true')
+      expect(pending).not.toContain('proposal:')
       // 提交后可被常规闭环消费：mock worker 写 docs 文件 → 实际分级 L0 → gate L1 自动合并
       const drained = runOrch(repo.root, 'drain --backend mock', { ORCH_MOCK_FILE: 'docs/notes.md' })
       expect(drained.stdout).toContain('自动合并')
