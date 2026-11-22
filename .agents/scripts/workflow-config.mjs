@@ -108,6 +108,11 @@
 //                   drain 处理到 failed/ 的 scan-* 卡时自动创建 pending 修复卡（id
 //                   fix-<原名>，引用 incident.md 与失败摘要，files_hint/门禁继承原卡）；
 //                   修复卡自身 failed 不再繁殖新卡（防循环），同名卡已存在任一状态即跳过
+//   spec            spec 流程开关：{ industrialDesign?: boolean（缺省 false = 行为与历史
+//                   一致） }。true 时 spec planner prompt 末尾注入工业级设计增补契约
+//                   （原型先行/关路径四件套/全状态覆盖/刷新策略，检查点落在
+//                   .agents/conventions/spec-review.md §1.6；注入文本见
+//                   orchestrator/prompt.mjs buildSpecPrompt）。2026-11-22 船东授权新增
 //
 // 锚定策略（两个调用场景，务必区分）：
 //   - hook（guard-develop / policy-worker）：进程 cwd 是任意客户端工作目录，
@@ -147,7 +152,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   // resolveXxx 子配置
   'worker', 'review', 'tiers', 'budgetProfiles', 'scheduling', 'watchdog', 'autopilot', 'propose',
   'weatherHold', 'autoResume', 'trace', 'configGuard', 'draftsGc', 'scanAutoFix', 'escalation',
-  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream', 'autoApprove',
+  'dynamicDispatch', 'notify', 'research', 'freeSail', 'upstream', 'autoApprove', 'spec',
   // 外部消费者直读
   'setupCmd', 'scan',
 ]);
@@ -241,6 +246,8 @@ export function loadWorkflowConfig(repoRoot) {
     freeSail: resolveFreeSail(raw.freeSail),
     // 上游管线预授权档（B3.5 specAutoBuild）：缺省关 = spec 落盘即停等人审（行为不变）
     upstream: resolveUpstream(raw.upstream),
+    // spec 流程开关（工业级设计增补，2026-11-22 船东授权）：缺省关 = prompt 与历史逐字节一致
+    spec: resolveSpec(raw.spec),
     // 分层审核超时委托（D6.5，2026-11-10）：L2/L3 卡 awaiting-human 后人工 3 分钟内拍板，
     // 超时由 autoapprove sweep 按最后一条 review_verdict 的推荐自动 merge/retry
     //（fail-closed：无审查结论绝不动作；blockers>0 只自动返工限次）。缺省开。
@@ -882,6 +889,25 @@ function resolveScanAutoFix(raw) {
   if (raw.enabled !== undefined) {
     if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
     else warn(`enabled ${JSON.stringify(raw.enabled)} 不合法（允许 true | false）`);
+  }
+  return out;
+}
+
+/** spec 流程配置：{ industrialDesign?: boolean }——工业级设计开关（2026-11-22 船东授权，
+ *  industrial-design-flag 卡）。缺省 false = spec prompt 与历史逐字节一致（回归红线）；
+ *  true 时 buildSpecPrompt 末尾注入工业级设计增补契约。非法值回落缺省并 console.warn 告警
+ * （与各 resolveXxx 同风格）。 */
+function resolveSpec(raw) {
+  const DEFAULTS = { industrialDesign: false };
+  if (raw === undefined || raw === null) return DEFAULTS;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[workflow-config] spec 配置非法，已回落缺省：${JSON.stringify(raw)}（应为 { industrialDesign?: boolean }）`);
+    return DEFAULTS;
+  }
+  const out = { ...DEFAULTS };
+  if (raw.industrialDesign !== undefined) {
+    if (typeof raw.industrialDesign === 'boolean') out.industrialDesign = raw.industrialDesign;
+    else console.warn(`[workflow-config] spec.industrialDesign ${JSON.stringify(raw.industrialDesign)} 不合法（应为 boolean）——按 false 处理`);
   }
   return out;
 }

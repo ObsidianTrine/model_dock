@@ -615,8 +615,11 @@ function parseMarkerBlock(text, marker) {
  * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 只提 AGENTS.md 不展开）
  * @param {string} brief 调研结论全文（research/<id>/brief.md，--from-brief 注入；可选）——
  *   插在产出契约之前；为空 = 不出现该段，prompt 与历史逐字节一致（回归红线）。
+ * @param {boolean} industrialDesign workflow.json spec.industrialDesign（工业级设计开关，
+ *   2026-11-22 船东授权流程升级）：true 时 prompt 末尾追加工业级设计增补契约（文本与
+ *   任务卡钉死契约逐字一致，不得改动）；false/缺省 = prompt 与历史逐字节一致（回归红线）。
  */
-export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '') {
+export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '', industrialDesign = false) {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const clean = sanitizeIntent(intentText);
   const fence = '```';
@@ -665,7 +668,17 @@ export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '')
     `4. 设计不得违反 AGENTS.md 红线${redlines ? `（${redlines}）` : ''}；\n` +
     `5. requirements 的背景段第一行必须是用户原始需求逐字原文（上面模板已注明）；\n` +
     `6. 围栏外只允许一句话概述，不要输出其他内容。\n` +
-    `7. 设计含新 UI 入口/新命令/新端点时，方案必须先引用「用户可感知功能面」盘点完成「融入位置论证」，缺失即违反产出契约；\n`
+    `7. 设计含新 UI 入口/新命令/新端点时，方案必须先引用「用户可感知功能面」盘点完成「融入位置论证」，缺失即违反产出契约；\n` +
+    // 工业级设计增补：文本是任务卡钉死契约（industrial-design-flag），逐字不得改动
+    (industrialDesign
+      ? `\n# 工业级设计增补（spec.industrialDesign=true 生效）\n` +
+        `含 UI/交互面的设计必须满足以下五条，缺一即违反产出契约：\n` +
+        `1. 交互原型先行：design 必须附自包含 HTML 交互原型文件路径（原型放 specs/<id>/proto/ 下，不入库），覆盖全部状态：空态/加载态/错误态/成功态/关闭路径；原型未经船东批准前不得 spec build（人工闸执行）。\n` +
+        `2. 关路径四件套：每个弹层/页面 ≥1 显式关闭按钮（头部 × 或 foot 次行动「关闭/返回」）+ Esc + 遮罩点击 + 主行动完成自动关；四路缺一须在 design 说明取舍理由。\n` +
+        `3. 全状态覆盖：空态/加载态/错误态/成功态逐一设计并写进 tasks 的呈现层验收，不许只画理想态。\n` +
+        `4. 刷新策略：打开即拉取数据（数据陈旧可接受）；手动刷新只作次行动（图标化或与主行动并列），禁止孤儿刷新按钮（无主行动配对的独占刷新）。\n` +
+        `5. 呈现面论证（规约 §1.6 既有检查点）持续适用。\n`
+      : '')
   );
 }
 
