@@ -9,7 +9,7 @@
 ## 通用原则（所有客户端）
 
 - **只动接入必需的键**：凭据、端点、模型选择相关的 ModelDock 自写入/自注入键；用户自有配置（权限、主题、输出限制等）一律保留。
-- **写盘前自动快照**：接入前状态可用 `modeldock restore`（或控制台断开还原）整体还原。
+- **写盘前自动快照**：接入前状态可用 `modeldock harness restore <harness>`（或控制台断开还原）整体还原。
 - **幂等**：重复接入内容无变化时零写盘、零快照。
 - **历史注入物只按我们自己的值精确识别后清除**（如带 ModelDock 标记的 modelPicker、精确比对的白名单值），用户自己配的同名键不动。
 - **detach 的「是我们写的」条目匹配（oursEntryUrl）**：zcode / dsh / codex / provider-json 工厂（OpenCode、MiMo Code、MiMo 桌面端）/ claude-code 的条件统一是——条目 URL 的 **origin** 与接入时登记的 `gateway_base` 一致。`gateway_base` 恒为本机回环网关 `http://127.0.0.1:<端口>`（**直连接入也登记网关地址，直连地址不参与该匹配**）；唯一例外是 WorkBuddy，额外接受等于登记 `direct_base` 的直连条目。未登记 `gateway_base` 的旧版接入回退回环启发式（URL 指向 127.x / ::1 / localhost 即认）。直连写入的条目在 detach 时由接入快照还原收回（detach = 先还原最近一次接入前快照，再跑残留清理兜底）——残留清理这一步只认网关地址（WorkBuddy 直连条目除外）。

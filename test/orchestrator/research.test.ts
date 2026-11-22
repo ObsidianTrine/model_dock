@@ -40,6 +40,11 @@ import { mkRepo, runOrch } from './helpers.js'
 /** 测试固定时钟：fixtures 的访问日期随它生成（陈旧日期 gate 让写死日期在 7 天后必红）。 */
 const TODAY = new Date().toISOString().slice(0, 10)
 
+/** 相对偏移 N 天的日期（与 TODAY 同 UTC 口径）——负例夹具随跑测日生成，写死偏移会在容忍窗跨线后再次腐化。 */
+function dayOffset(iso: string, days: number): string {
+  return new Date(Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10)
+}
+
 /** 五段齐全的可回查样例 brief（L1/L2/e2e 共用，模块级作用域）。 */
 const CLAIM_BODY = [
   '# 结论',
@@ -121,25 +126,24 @@ describe('orchestrator research > brief 契约', () => {
   })
 
   it('validateBriefBody：编造引用防线（2026-11-08 首跑事故）——裸 URL 不计数、未来/陈旧日期拒收', () => {
-    const today = '2026-11-08'
+    const today = TODAY
     // 裸 URL 行不计入：契约要求每行以访问日期开头
-    const bare = BRIEF_BODY.replace(new RegExp(`^- ${TODAY} `, 'gm'), '- ')
+    const bare = BRIEF_BODY.replace(new RegExp(`^- ${today} `, 'gm'), '- ')
     expect(extractDatedCitations(bare)).toHaveLength(0)
     expect(() => validateBriefBody(bare, { today })).toThrow(/带访问日期的引用 0 条/)
-    // 未来日期 = 编造信号
-    const future = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2026-12-01')
+    // 未来日期 = 编造信号（容忍上限 today+1，偏移必取 ≥2）
+    const future = BRIEF_BODY.replace(new RegExp(today, 'g'), dayOffset(today, 3))
     expect(() => validateBriefBody(future, { today })).toThrow(/引用日期在未来/)
-    // 陈旧日期 = 拿旧数据冒充本次核查（首跑实录：2023）
-    const stale = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2023-12-10')
+    // 陈旧日期 = 拿旧数据冒充本次核查（首跑实录：2023；容忍窗 7 天，偏移必取 ≥8）
+    const stale = BRIEF_BODY.replace(new RegExp(today, 'g'), dayOffset(today, -365))
     expect(() => validateBriefBody(stale, { today })).toThrow(/引用访问日期陈旧/)
     // 跨午夜容忍窗：昨天日期放行
-    const yesterday = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), '2026-11-07')
+    const yesterday = BRIEF_BODY.replace(new RegExp(today, 'g'), dayOffset(today, -1))
     expect(() => validateBriefBody(yesterday, { today })).not.toThrow()
-    // 部分陈旧也拒（任一行命中即拒）；其余引用日期先对齐 today 再只改一行——
-    // fixture 引用日期随跑测日 TODAY 生成，与固定 today 混用时未对齐行会被「未来日期」抢先报错（2026-11-10 实测）
-    const mixed = BRIEF_BODY.replace(new RegExp(TODAY, 'g'), today).replace(
+    // 部分陈旧也拒（任一行命中即拒）：其余行保持当日、只改一行
+    const mixed = BRIEF_BODY.replace(
       new RegExp(`^- ${today} (https://blog\\.example\\.com/gateway)`, 'm'),
-      '- 2023-01-01 $1',
+      `- ${dayOffset(today, -365)} $1`,
     )
     expect(() => validateBriefBody(mixed, { today })).toThrow(/引用访问日期陈旧/)
   })
@@ -203,7 +207,7 @@ describe('orchestrator research > prompt 与工具面', () => {
   })
 
   it('buildResearchPrompt：编造引用防线——注入今天日期、引用日期契约行、来源核查要求', () => {
-    const today = '2026-11-08'
+    const today = TODAY
     const p = buildResearchPrompt('q', process.cwd(), { today })
     expect(p).toContain(`今天是 ${today}`)
     expect(p).toContain(`- ${today} <URL> — <来源名>`)
@@ -278,7 +282,7 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
     expect(tokens).toContain('K3.1')
     expect(tokens).not.toContain('2026')
     expect(tokens).not.toContain('09')
-    expect(tokens).not.toContain('2026-11-08')
+    expect(tokens).not.toContain(TODAY)
   })
 
   it('crossCheckClaims：命中/未命中/命中率；无快照或无 token → checked=0', () => {
@@ -290,7 +294,7 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
   })
 
   it('citationDepthStats：深链/根路径比', () => {
-    const body = '# 引用\n- 2026-11-08 https://openrouter.ai/rankings — 深链\n- 2026-11-08 https://lmsys.org/ — 根路径'
+    const body = `# 引用\n- ${TODAY} https://openrouter.ai/rankings — 深链\n- ${TODAY} https://lmsys.org/ — 根路径`
     expect(citationDepthStats(body)).toEqual({ deep: 1, root: 1, total: 2, ratio: 0.5 })
   })
 

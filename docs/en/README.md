@@ -129,7 +129,7 @@ modeldock config export         # move to a new computer: export a passphrase-en
 modeldock config import <file>  # import on the new computer: preview what will be replaced → confirm → auto-backup then apply
 modeldock sync setup            # multi-machine auto-sync: target = WebDAV drive / local sync folder, changes converge both ways
 modeldock detach <harness>      # restore the pre-attach original config
-modeldock restore <harness>     # revert to any snapshot (--list to show); detach is a full revert
+modeldock harness restore <harness>  # revert to any snapshot (--list to show); detach is a full revert
 modeldock reset                 # reset config (snapshots kept, re-init later); --deep also clears logs, sync state and caches
 modeldock uninstall             # uninstall the program (config & keys kept); --purge wipes everything including config
 ```

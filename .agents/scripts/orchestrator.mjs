@@ -49,10 +49,10 @@ import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchest
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards, lifetimeCapRejections } from './orchestrator/autoresume.mjs';
 import { captureConfigBaseline, checkConfigDrift, resetConfigBaseline } from './orchestrator/config-guard.mjs';
-import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
+import { listDrafts, planGc, applyGc, supersedeForMerged, autoCleanDrafts, collectTracedIds, mergedSummaries, draftsRoot, isLandedDraft, DEFAULT_ARCHIVE_DAYS, DEFAULT_MAX_AGE_DAYS } from './orchestrator/drafts-gc.mjs';
 import { scanAutoFixAfterFailure, isScanCardId } from './orchestrator/scanfix.mjs';
 import { isAlive, killTree, orphanOwnership, processElapsedMs } from './orchestrator/kill-tree.mjs';
-import { classifyChange, hintsOverlap, hitsCoreOrRelease } from './policy.mjs';
+import { classifyChange, hintsOverlap, hintsIntersectExact, hitsCoreOrRelease } from './policy.mjs';
 import { loadWorkflowConfig, displayProjectName, PROMPT_FILE_THRESHOLD_CHARS } from './workflow-config.mjs';
 import { MEASURED_FUEL_POLL_MS, createExpiryRenewal, probeProviderCapacity, startMeasuredFuelPoller } from './orchestrator/supply.mjs';
 import { runScan } from './orchestrator/scan.mjs';
@@ -279,6 +279,22 @@ function worktreePath(repoRoot, taskId) {
   return path.join(repoRoot, '.agents', 'worktrees', taskId);
 }
 
+/**
+ * worktree 提交对账（stuck 终态对冲，2026-11-17）：统计 worktree HEAD 相对 base 分支的
+ * 非空提交数（git log --oneline <base>..HEAD）。非空 = 已有可验收产出在库——自报 stuck /
+ * 看门狗熔断落 blocked（清空重做语义）前的客观对冲证据。
+ * 返回 null = 对账不可得（worktree 缺失 / git 故障 / base 分支不可达）：调用方按
+ * 「无证据」处理、保持既有 blocked 行为——对账只做对冲不做拦截，绝不因对账失败改终态走向。
+ */
+export function worktreeCommitsAhead(worktree, baseBranch) {
+  try {
+    const out = execFileSync('git', ['log', '--oneline', `${baseBranch}..HEAD`], { cwd: worktree, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return out.split('\n').filter((l) => l.trim()).length;
+  } catch {
+    return null;
+  }
+}
+
 function ensureWorktree(repoRoot, taskId) {
   const wt = worktreePath(repoRoot, taskId);
   if (fs.existsSync(wt)) {
@@ -330,12 +346,13 @@ function pilotageRequired(meta, cfg) {
 }
 
 /** 命中受限航道的具体原因；不在受限航道返回 null（cmdRun 报错与 drain 日志共用文案）。
- *  核心/发布路径都未配置时 hintsOverlap 与空集相交恒真（「完全通配=独占」语义），
- *  会把所有卡误判成引水卡——路径表为空 = 航道未设限，直接放行。 */
-function pilotageReason(meta, cfg) {
+ *  files_hint 对核心/发布路径清单用文件级精确口径（hintsIntersectExact）：曾用的顶层段
+ *  粗口径把 src/ 下任何卡都判进受限航道，drain 永不派出（2026-11-16 夜航性能卡整夜
+ *  pending）。核心/发布路径都未配置 = 航道未设限，直接放行。 */
+export function pilotageReason(meta, cfg) {
   if (meta.type === 'deps') return 'type: deps（依赖变更）';
   const restricted = [...(cfg.corePaths ?? []), ...(cfg.releasePaths ?? [])];
-  if (restricted.length && hintsOverlap(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
+  if (restricted.length && hintsIntersectExact(meta.files_hint, restricted)) return 'files_hint 命中核心/发布路径';
   return null;
 }
 
@@ -780,9 +797,20 @@ async function cmdRun(repoRoot, taskId, opts) {
           log(`⏱ 看门狗熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
           killTree(livePid);
         }
-        moveCard(root, taskId, 'running', 'blocked');
-        archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
-        await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        // stuck 终态对冲（2026-11-17）：熔断落 blocked 前对账 worktree 提交——相对 base
+        // 已有非空提交 = 可验收产出在库，转 reviewing 交审查而非 blocked（kill 照常执行；
+        // 对账只读 HEAD，与已终止的 worker 无写竞争）。无提交/对账不可得照旧 blocked。
+        const watchdogCommitsAhead = worktreeCommitsAhead(worktree, baseBranch);
+        if (watchdogCommitsAhead !== null && watchdogCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: 'watchdog', commits_ahead: watchdogCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `看门狗判定任务空转，但 worktree 相对 ${baseBranch} 已有 ${watchdogCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked`);
+          log(`⛔ 看门狗熔断但 worktree 已有 ${watchdogCommitsAhead} 个提交——转 reviewing/ 交审查（不落 blocked 重做），人工 resume 续做或核对后处置。`);
+        } else {
+          moveCard(root, taskId, 'running', 'blocked');
+          archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
+          await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
+        }
         // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
         // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
         // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
@@ -947,10 +975,11 @@ async function cmdRun(repoRoot, taskId, opts) {
           workerOutput = result.output ?? '';
           if (result.stderrTail) appendEvent(qdir, 'worker_stderr_tail', { text: result.stderrTail.slice(-500) });
           if (watchdogHalted) {
-            // 看门狗 actuate 已完成落位（blocked/ + circuit_breaker 事件 + 事故归档 + 通报）：
-            // 主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重试判定之前——
-            // killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试再派新会话。
-            log('进展看门狗（actuate）连续 2 次判定无实质进展，任务转 blocked/，人工决策后再继续。');
+            // 看门狗 actuate 已完成落位（有提交 → reviewing/，无提交 → blocked/ + 事故归档
+            // + 通报）：主循环在此收敛退出、走 cmdRun 的 finally 清理。必须拦在瞬时故障重
+            // 试判定之前——killTree 的 stderr 尾巴可能撞上 transient 签名，误触发原地重试
+            // 再派新会话。
+            log('进展看门狗（actuate）已落位（审查或 blocked，见上方日志），人工决策后再继续。');
             return;
           }
           if (budget.tripped) {
@@ -1033,8 +1062,26 @@ async function cmdRun(repoRoot, taskId, opts) {
           : crash?.decisive
             ? crash.reason
             : '未产出结果块（worker 异常结束）';
+        // stuck 终态对冲（2026-11-17）：自报 stuck 是 worker 对「无法继续」的主观申报，
+        // 落 blocked（清空重做语义）前先对账 worktree 客观进度——相对 base 有非空提交 =
+        // 已有可验收产出（实测 4 张 blocked 卡各持完成提交、其一 NOTES 记录实现完成测试
+        // 全绿），转 reviewing 交审查/人工裁决，完成提交不再孤儿化、半成品不重复造轮子。
+        // 无提交照旧 blocked（防误伤真 stuck）；对账不可得（worktree 缺失/git 故障）也
+        // 照旧——对账只对冲不拦截。只对 stuck 自报生效：未产出结果块族有自己的自动续
+        // 通道（isTransientBlocked Path C），熔断/异常归因语义不动。
+        const stuckCommitsAhead = claimed?.status === 'stuck' ? worktreeCommitsAhead(worktree, baseBranch) : null;
+        if (stuckCommitsAhead !== null && stuckCommitsAhead > 0) {
+          appendEvent(qdir, 'stuck', { reason: blockedReason, commits_ahead: stuckCommitsAhead, diverted_to: 'reviewing' });
+          moveCard(root, taskId, 'running', 'reviewing');
+          await settleNotify(repoRoot, taskId, 'reviewing', `${blockedReason}（worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转审查而非 blocked）`);
+          log(`worker 自报 stuck，但 worktree 相对 ${baseBranch} 已有 ${stuckCommitsAhead} 个提交——已有可验收产出，转 reviewing/ 交审查（不落 blocked 重做）：`);
+          log(`  node .agents/scripts/orchestrator.mjs resume ${taskId}   # 带恢复上下文续做`);
+          log(`  node .agents/scripts/orchestrator.mjs logs ${taskId}     # 核对事件时间线后人工处置`);
+          return;
+        }
         appendEvent(qdir, 'blocked', {
           reason: blockedReason,
+          ...(stuckCommitsAhead !== null ? { commits_ahead: stuckCommitsAhead } : {}),
           ...(crash?.decisive
             ? {
                 cause: crash.cause,
@@ -1853,11 +1900,45 @@ async function humanGateInteractive(repoRoot, taskId, root, qdir, summary, runOp
 // 闸门操作（交互与非交互共用）
 // ---------------------------------------------------------------------------
 
+/**
+ * 零提交防假合并门的对账原语：feature 分支相对 base 的提交数。查分支 ref 而非复用
+ * worktreeCommitsAhead（worktree HEAD）：worktree 可能已被上次失败的 finish 清掉而卡
+ * 仍留 awaiting-human（清理失败退出 1 的重试场景），分支 ref 才是 finish 实际要合并的
+ * 对象。null = 不可判定（分支缺失 / git 故障）——不拦截，交给 finish 自己报错：门只拦
+ * 「有明确证据的零提交」，不为排查失败扩大拦截面。
+ */
+function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', `${baseBranch}..refs/heads/feature/${taskId}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
   if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
   else appendEvent(qdir, 'human_gate', { decision: 'approved' });
+  // 零提交防假合并门（2026-11-16 夜航四张 perf 卡假 merged 实证）：spawn finish 前先对账
+  // 分支产出。零提交分支上 finish 走「nothing to merge」成功路径 exit 0，旧逻辑随后无条件
+  // 记 merged 并把当时的 develop HEAD 误记成 merge_commit。拒绝时卡转 failed/（终态：
+  // 落 reviewing/ 会被自动批示再次拉回闸门反复重跑审查，failed/ 与人工驳回 doReject 同款
+  // 落位）；事件留拒绝理由、不记 merge_commit、不动 develop，worktree 保留供人工核对
+  // worker 到底留了什么（多半是漏提交）。
+  const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
+  const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
+  if (commitsAhead === 0) {
+    moveCard(root, taskId, 'awaiting-human', 'failed');
+    appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
+    die(
+      `任务 ${taskId} 拒绝合并：feature 分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门，2026-11-16 假 merged 事故防线）。\n` +
+      `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
+      `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
+    );
+  }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
   // approve 给 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD——finish 内部校验
@@ -2667,6 +2748,15 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   }
   if (!orphans.length) return empty;
   log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
+  // stuck 终态对冲备料（2026-11-17）：'stuck' 孤儿（非 transient settle 收尾）先对账
+  // worktree 提交——相对 base 已有非空提交 = 可验收产出在库，走续用路径（resume 原地
+  // 续做）而非落 blocked 清空重做。breaker 熔断卡不受对冲（确定性失败永不自动续）；
+  // resume 族无需对账。对账不可得（worktree 缺失/git 故障）按 0 处理，照旧交人工。
+  for (const c of orphans) {
+    if (classifyOrphan(c.events) === 'stuck') {
+      c.commitsAhead = worktreeCommitsAhead(worktreePath(repoRoot, c.id), cfg.baseBranch || 'develop') ?? 0;
+    }
+  }
   const picked = pickOrphanResumeCandidates(orphans, {
     maxPerRun: ar.maxPerRun,
     cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
@@ -2677,7 +2767,7 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   // isTransientBlocked 匹配写，上限拒绝不匹配任何可续签名，卡留在 blocked 交人工。
   const capRejections = lifetimeCapRejections(orphans, {
     maxPerCard: ar.maxPerCard,
-    isEligible: (c) => classifyOrphan(c.events) === 'resume', // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致
+    isEligible: (c) => { const k = classifyOrphan(c.events); return k === 'resume' || (k === 'stuck' && (c.commitsAhead ?? 0) > 0); }, // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致（stuck 对冲续用同资格）
   });
   reportLifetimeCapRejections(repoRoot, capRejections);
   const resumed = [];
@@ -2691,8 +2781,13 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
       console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
       continue;
     }
-    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts, source: 'orphan_running' });
-    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族；冷却期内至多此一次）`);
+    appendEvent(logDir(repoRoot, c.id), 'auto_resume', {
+      card: c.id,
+      attempts: c.attempts,
+      source: 'orphan_running',
+      ...(c.rescue === 'stuck_with_commits' ? { commits_ahead: c.commitsAhead, rescue: c.rescue } : {}),
+    });
+    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族${c.rescue === 'stuck_with_commits' ? `；stuck 但 worktree 已有 ${c.commitsAhead} 个提交——原地续用半成品` : ''}；冷却期内至多此一次）`);
     const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
       ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
       cwd: repoRoot,
@@ -2721,7 +2816,9 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
       : kind === 'breaker'
         ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
         : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
-    appendEvent(logDir(repoRoot, c.id), 'failed', { reason });
+    // stuck 终态对冲证据（2026-11-17）：落 blocked 的 stuck 卡 commits_ahead 恒 0（>0 已走
+    // 续用路径）——字段留痕对账结论，人工核实零提交后才值得清空重做。
+    appendEvent(logDir(repoRoot, c.id), 'failed', { reason, ...(kind === 'stuck' ? { commits_ahead: c.commitsAhead ?? 0 } : {}) });
     moveCard(root, c.id, cur.state, 'blocked');
     blocked.push(c.id);
     log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);
@@ -3184,6 +3281,16 @@ async function cmdReconcile(repoRoot, taskId, opts = {}) {
     for (const c of sr.settledNotMerged) log(`  ${c.id}`);
   } else {
     log('状态对账 · 账面合并但 git 无实证：无');
+  }
+  // 警示桶（2026-11-16 假 merged 事故防线）：只提示不自动修——空合并/标题残留与同名
+  // 空转分支都可能是真卡重做中，fix 方向（落位 merged/）错了不可逆，交人工对账。
+  if (sr.emptyMerges?.length) {
+    log(`⚠ 状态对账 · 空合并/标题残留（merge 提交计数为 0，无实际并入内容，共 ${sr.emptyMerges.length} 张，永不自动 fix）：`);
+    for (const c of sr.emptyMerges) log(`  ${c.id.padEnd(24)} merge ${c.mergeSha.slice(0, 7)}`);
+  }
+  if (sr.suspects?.length) {
+    log(`⚠ 状态对账 · 分支现存嫌疑（真合并但同名分支仍在且与基准分支持平，疑似 id 复用/重做中，共 ${sr.suspects.length} 张，不自动 fix）：`);
+    for (const c of sr.suspects) log(`  ${c.id.padEnd(24)} ${c.branch} —— ${c.reason}`);
   }
 
   function show(r) {
@@ -3707,7 +3814,9 @@ async function cmdPropose(repoRoot, opts) {
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-settings-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-propose-')), 'propose-prompt.md');
   try {
-    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶
+    // 信号输入：drafts/ 现有提案（scan 产物为主）的 id/type/goal 摘要——planner 深化它们而非另起炉灶。
+    // 信号新鲜度（2026-11-17）：卡体带「已落地」标注的提案不进规划输入（归档由巡检顺手执行，
+    // 两轮巡检之间的窗口期靠这里过滤兜底）。
     let files = [];
     try {
       files = fs.readdirSync(draftsDir(repoRoot)).filter((f) => f.endsWith('.md'));
@@ -3715,7 +3824,9 @@ async function cmdPropose(repoRoot, opts) {
     const signals = files
       .map((f) => {
         try {
-          const { meta, body } = parseCard(fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8'), f);
+          const text = fs.readFileSync(path.join(draftsDir(repoRoot), f), 'utf8');
+          if (isLandedDraft(text)) return null; // 已落地提案：不再是活信号
+          const { meta, body } = parseCard(text, f);
           return `- ${meta.id}（${meta.type}/${meta.priority ?? 'normal'}，by ${meta.created_by ?? '?'}）：${String(body.goal ?? '').replace(/\s+/g, ' ').slice(0, 120)}`;
         } catch {
           return null; // 损坏提案跳过，不进 prompt

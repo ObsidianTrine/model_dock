@@ -9,7 +9,7 @@ import { gzipSync } from 'node:zlib'
 import { safeEqual } from '../util/safe-equal.js'
 import { fetchEnvelopeFromUrl, projectModel } from './shared.js'
 import { CONSOLE_CSP } from './console-shared.js'
-import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, withFileLock } from '../util/fsx.js'
+import { clearCommandMemo, commandOnPath, commandOnPathSandbox, randomToken, readTextIfExists, sha256, withFileLock } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { VERSION } from '../version.js'
 import { ConfigError, configLockPath, loadConfig, mutateConfig } from '../config/store.js'
@@ -50,6 +50,13 @@ import { collectSyncdoc } from '../sync/collect.js'
 import { validateSyncdoc, type Syncdoc } from '../sync/types.js'
 import { applyUpdate, getUpdateStatus, kickUpdateCheck } from '../update/webupdate.js'
 import { filterResponseHeaders, forwardToUpstream, forwardWithFailover, parseRatelimitHeaders, readBodyBounded, readUpstreamErrorText, translateUpstreamError, UPSTREAM_ERROR_BODY_MAX_BYTES, UpstreamError, type UpstreamResult } from './relay.js'
+import { probeWire } from './probe/wire.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite, type ProbeTransport } from './probe/engine.js'
+import { PROBE_REGISTRY, getProbeDef } from './probe/registry.js'
+import { probeVerdictView, probeVerdictTimeline } from './probe/verdict.js'
+import { probeBudgetState, probeMonthBreakdown, probeSpendSeries, readProbeLedger } from './probe/ledger.js'
+import { getProbeRunner } from './probe/runners/index.js'
+import { startProbeSchedule } from './probe/schedule.js'
 import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { displayPath, gatewayStatePath, logsDir, modeldockDir, sandboxNpmPrefix, secretsPath } from '../util/paths.js'
@@ -65,6 +72,7 @@ import { FETCH_MODEL_FAIL_TTL_MS, REMOTE_REQUEST_TTL_MS, SYNC_TICKET_TTL_MS, fet
 import { OVERVIEW_TTL_MS, buildConfigView, buildOverview, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache, overviewRebuilding, overviewServeDecision, overviewViewData, rebuildOverview } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
+import { hMergeApply, hMergePreview } from './mergepack.js'
 
 export interface GatewayStartOptions {
   port: number
@@ -79,6 +87,11 @@ export interface GatewayStartOptions {
   autoModelProbe?: boolean
   /** 注入探测调度节奏（测试用）：不传用 modelprobe.ts 的 MODEL_PROBE_* 默认（启动 90s / 每 24h） */
   modelProbeIntervals?: { initialDelayMs?: number; intervalMs?: number }
+  /** 探针周期调度（probe/schedule.ts：P15 被动聚合恒跑 + cost_ack 授权的周期主动面）；默认开启，
+   *  测试传 false 避免 tick 触发探针（或用 probeScheduleIntervals 注入短间隔 + mock 上游） */
+  autoProbeSchedule?: boolean
+  /** 注入探针调度节奏（测试用）：不传用 schedule.ts 的 PROBE_SCHEDULE_* 默认（启动 90s / 每 1h） */
+  probeScheduleIntervals?: { initialDelayMs?: number; intervalMs?: number; transport?: ProbeTransport }
   /** 临时 harness TTL 清扫间隔（C14，测试注入用）：不传用 EPHEMERAL_SWEEP_INTERVAL_MS（60s） */
   ephemeralSweepIntervalMs?: number
 }
@@ -348,6 +361,14 @@ export function createGatewayServer(rt: GatewayRuntime, opts: GatewayStartOption
   // 测试传 autoModelProbe:false 停用，或 modelProbeIntervals 注入短首查（配 mock 上游）
   if (opts.autoModelProbe !== false) {
     startModelProbeLoop(rt, server, opts.modelProbeIntervals)
+  }
+
+  // 探针周期调度（provider-probe-suite 任务 13，probe/schedule.ts）：每小时 tick——P15 被动聚合
+  // 恒跑（零 token）；含 token 主动面（P1）仅在当前本地小时命中 [probe] schedule_hours 且
+  // cost_ack=true 时执行，同受 budget_tokens 月度硬闸（闸在引擎内）。不影响转发路由；测试传
+  // autoProbeSchedule:false 停用，或 probeScheduleIntervals 注入短间隔（配 mock 上游）
+  if (opts.autoProbeSchedule !== false) {
+    startProbeSchedule(rt, server, opts.probeScheduleIntervals)
   }
 
   // JSONL 日志保留期清理：启动即清一次、之后每 24h；保留天数读 rt.config（随 reloadRuntime
@@ -2372,6 +2393,176 @@ async function hModelAvailability(c: AdminCtx): Promise<void> {
   res.end(JSON.stringify({ ok: true, availability }))
 }
 
+// ===== 服务探针端点（provider-probe-suite 任务 6；与 hTest 的差异：走探针引擎、不调 logRequest——
+// 请求日志 / usageToday / key 冷却 / 熔断计数零副作用，花费只进探针独立账本）=====
+
+/** 探针运行确认 token：绑定 (adminToken, provider, probes, 目标数, 预估) 的短摘要。预估展示与确认
+ *  执行之间 key 池/配置变化会改变目标数与预估——旧 token 即失效（不能拿旧预估执行新计划）；
+ *  键入 adminToken 防外部伪造 (plan → token) 映射；比较走 safeEqual 恒时。 */
+function probeConfirmToken(rt: GatewayRuntime, providerId: string, probeIds: string[], planned: number, estimate: number): string {
+  return sha256(`${rt.adminToken}|probe-run|${providerId}|${probeIds.join(',')}|${planned}|${estimate}`).slice(0, 32)
+}
+
+/** POST /_modeldock/probe/run：跑探针套件（admin 门内写路径，audit 留痕）。两段式成本确认闸：
+ *  首段不带 confirmToken 只出预估（targets/estimate/per_probe_cost/budget + confirmToken），零上游
+ *  请求；第二段带对 bind 计划的 confirmToken 才执行（对应 CLI 的逐次确认）。 */
+async function hProbeRun(c: AdminCtx): Promise<void> {
+  const { rt, req, res, audit, o } = c
+  const b = await jsonRequestBody(req)
+  const providerId = typeof b.provider === 'string' ? b.provider.trim() : ''
+  if (!providerId) {
+    return sendError(res, 400, t('缺少 provider', 'Missing provider'), t('示例：{"provider":"myapi","probes":["p1"]}', 'Example: {"provider":"myapi","probes":["p1"]}'))
+  }
+  if (!rt.config.providers[providerId]) {
+    return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: providerId }), t('/_modeldock/overview 的 services[].id 为可用值', 'services[].id in GET /_modeldock/overview lists the valid ids'))
+  }
+  const requested: unknown[] = Array.isArray(b.probes) ? b.probes : typeof b.probes === 'string' ? b.probes.split(',') : ['p1']
+  const activeIds = PROBE_REGISTRY.filter((d) => d.status === 'active').map((d) => d.id)
+  const probeIds: string[] = []
+  for (const raw of requested) {
+    const id = String(raw).trim()
+    if (!id) continue
+    if (id === 'all') {
+      for (const a of activeIds) if (!probeIds.includes(a)) probeIds.push(a)
+      continue
+    }
+    if (!getProbeDef(id)) {
+      return sendError(res, 400, t('未知探针「{id}」', 'Unknown probe "{id}"', { id }), t('可用探针：{list}', 'Available probes: {list}', { list: activeIds.join(', ') }))
+    }
+    if (!probeIds.includes(id)) probeIds.push(id)
+  }
+  if (probeIds.length === 0) {
+    return sendError(res, 400, t('探针清单为空', 'Probe list is empty'), t('示例：{"provider":"myapi","probes":["p1"]}', 'Example: {"provider":"myapi","probes":["p1"]}'))
+  }
+  // [probe].enabled=false：与 CLI 同口径的可操作报错，而非静默 0 请求
+  if (!probeConfigView(rt).enabled) {
+    return sendError(
+      res,
+      400,
+      t('探针已被停用（[probe] enabled=false）', 'Probes are disabled ([probe] enabled=false)'),
+      t('删除 config.toml [probe] 段的 enabled = false（或改为 true）后重试', 'Remove enabled = false from the [probe] section of config.toml (or set it to true) and retry')
+    )
+  }
+  let plan
+  try {
+    plan = await buildProbePlan(rt, providerId, probeIds)
+  } catch (e) {
+    return sendError(res, 400, (e as Error).message)
+  }
+  if (plan.keys.length === 0) {
+    return sendError(res, 400, t('服务「{id}」没有可用 key，探针无法发请求', 'Service "{id}" has no usable key; probes cannot send requests', { id: providerId }), t('先为该服务配置 key 后重试', 'Configure a key for this service first, then retry'))
+  }
+  const token = probeConfirmToken(rt, providerId, probeIds, plan.planned, plan.estimate)
+  const supplied = typeof b.confirmToken === 'string' ? b.confirmToken : ''
+  if (!supplied || !safeEqual(supplied, token)) {
+    // 第一段：只回预估（确认闸在引擎层兜底双保险——即使 token 校验有洞，未确认也是 0 请求）
+    const budget = await probeBudgetState(rt)
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        ok: false,
+        needConfirm: true,
+        reason: 'unconfirmed',
+        provider: providerId,
+        probes: probeIds,
+        targets: plan.planned,
+        estimate: plan.estimate,
+        per_probe_cost: plan.perProbeCost,
+        budget,
+        confirmToken: token,
+        verdicts: [],
+        skipped: [],
+      })
+    )
+    return
+  }
+  audit(
+    bi('探针运行', 'Probe run'),
+    providerId,
+    bi('{probes} × {n} 目标 · 预估 {e} tokens', '{probes} × {n} targets · estimate {e} tokens', { probes: probeIds.join(','), n: plan.planned, e: plan.estimate })
+  )
+  const result = await runProbeSuite(rt, {
+    probeIds,
+    targets: plan.units.map((u) => u.target),
+    transport: makeRelayProbeTransport(rt, { idleTimeoutMs: o.idle, retries: o.retries }),
+    runnerFor: getProbeRunner,
+    confirmed: true,
+    secrets: plan.secrets,
+  })
+  const budget = await probeBudgetState(rt)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      ok: result.ok,
+      reason: result.reason,
+      provider: providerId,
+      probes: probeIds,
+      targets: plan.planned,
+      dispatched: result.dispatched,
+      upstreamRequests: result.upstreamRequests,
+      tokens: result.tokens,
+      estimate: plan.estimate,
+      per_probe_cost: plan.perProbeCost,
+      budget,
+      verdicts: result.verdicts.map(probeVerdictView),
+      skipped: result.skipped,
+    })
+  )
+  return
+}
+
+/** GET /_modeldock/probe/verdicts：三元组 verdict 视图（admin 门内只读，纯内存读）。数据源 =
+ *  rt.probeVerdicts 热态（经本网关运行的探针写入，重启回放 probe-<date>.jsonl 重建）；CLI 直跑的
+ *  结论落盘后要等网关重启回放才进本视图。state 为读面状态（证据超 7 天未刷新即 stale）；
+ *  key 只出 sha256 前 8 位指纹。 */
+async function hProbeVerdicts(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const verdicts = [...(rt.probeVerdicts?.values() ?? [])]
+    .map(probeVerdictView)
+    .sort((x, y) => (x.provider === y.provider ? (x.model < y.model ? -1 : x.model > y.model ? 1 : x.key_fp < y.key_fp ? -1 : 1) : x.provider < y.provider ? -1 : 1))
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, verdicts, generated_at: new Date().toISOString() }))
+  return
+}
+
+/** GET /_modeldock/probe/ledger：探针独立账本月度读数（admin 门内只读）。budget = 月度预算闸读数
+ *  （probe/ledger.ts probeBudgetState），breakdown = 当月聚合 + 按 probe_id 分解；probe_labels 供
+ *  前端按界面语言取探针展示名（`中文||English` 形态，与 data-i18n 机制同构）。 */
+async function hProbeLedger(c: AdminCtx): Promise<void> {
+  const { rt, res } = c
+  const breakdown = probeMonthBreakdown(await readProbeLedger())
+  const budget = await probeBudgetState(rt)
+  const probe_labels: Record<string, string> = {}
+  for (const d of PROBE_REGISTRY) probe_labels[d.id] = `${d.titleZh}||${d.titleEn}`
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, budget, breakdown, probe_labels }))
+  return
+}
+
+/** GET /_modeldock/probe/trend?days=30&months=6：探针趋势视图（admin 门内只读，
+ *  provider-probe-suite 任务 14）。timeline = 近 days 天 verdict 变化时间线（probeVerdictTimeline，
+ *  只读 probe-<date>.jsonl、按证据时间 at 升序；窗口过滤在读取层逐行做，窗口外数据不出网关）；
+ *  spend = 近 months 个自然月探针花费曲线（probeSpendSeries，读独立账本 probe-ledger.jsonl）。
+ *  两路都不读真实流量请求日志。days/months 非法值按 hLogs 先例夹紧不报错（days 1–365 缺省 30、
+ *  months 1–24 缺省 6）。timeline 条目 from=null = 窗口内该三元组首现；key 只出指纹。
+ *  趋势窗口实际受保留期约束：probe-<date>.jsonl 随 log_retention_days 清理（同源策略），
+ *  超保留期的历史自然为空。 */
+async function hProbeTrend(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const clampNum = (v: string | null, def: number, max: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(max, Math.floor(n)) : def
+  }
+  const days = clampNum(q.get('days'), 30, 365)
+  const months = clampNum(q.get('months'), 6, 24)
+  const timeline = await probeVerdictTimeline(days * 86_400_000)
+  const spend = probeSpendSeries(await readProbeLedger(), months)
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, days, months, timeline, spend, generated_at: new Date().toISOString() }))
+  return
+}
+
 /** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
  *  各自接受 YYYY-MM-DD 或 ISO 时间戳（日期形态按本地日界取起止）；跨天封顶 31 个日文件。
  *  非法返回 err 文案（双语）。 */
@@ -2632,6 +2823,8 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/sync/offer': hSyncOffer,
   'POST /_modeldock/sync/import': hSyncImport,
   'POST /_modeldock/config/export': hConfigExport,
+  'POST /_modeldock/merge/preview': hMergePreview,
+  'POST /_modeldock/merge/apply': hMergeApply,
   'POST /_modeldock/sync/discover': hSyncDiscover,
   'POST /_modeldock/sync/request-remote': hSyncRequestRemote,
   'GET /_modeldock/sync/remote-status': hSyncRemoteStatus,
@@ -2660,6 +2853,10 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/key': hKey,
   'POST /_modeldock/reload': hReload,
   'POST /_modeldock/test': hTest,
+  'POST /_modeldock/probe/run': hProbeRun,
+  'GET /_modeldock/probe/verdicts': hProbeVerdicts,
+  'GET /_modeldock/probe/ledger': hProbeLedger,
+  'GET /_modeldock/probe/trend': hProbeTrend,
   'POST /_modeldock/tier-validate': hTierValidate,
   'POST /_modeldock/pricing-lookup': hPricingLookup,
   'POST /_modeldock/reset': hReset,
@@ -2855,21 +3052,14 @@ export async function probe(
   if (!model) {
     return { ok: false, status: 0, ms: 0, err: t('该 profile 未设置 default_model，请用 -m 指定或 modeldock profile 修改', 'This profile has no default_model; pass -m or change it with modeldock profile') }
   }
-  // 按服务协议拼探针路径与 body：responses 是一等协议（hServiceAdd/hFetchModels 均接受），
-  // 此前二分法只认 anthropic/其他——responses 服务被拼成 /v1/chat/completions，经
-  // clientProtocolFromPath 判成 openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，
-  // 报错还把责任推给「客户端走 openai 协议」（实际探针拼错了协议）
-  const proto = target.provider.protocol
-  const isAnthropic = proto === 'anthropic'
-  const isResponses = proto === 'responses'
-  const path = isAnthropic ? '/v1/messages' : isResponses ? '/v1/responses' : '/v1/chat/completions'
-  const body = Buffer.from(
-    JSON.stringify(
-      isResponses
-        ? { model, max_output_tokens: 16, stream, input: 'ping' }
-        : { model, max_tokens: 16, stream, messages: [{ role: 'user', content: 'ping' }] }
-    )
-  )
+  // 按服务协议拼探针路径与 body：三协议拼装收口到 probe/wire.ts（探针 runners 同源复用，
+  // 防口径漂移）。responses 是一等协议（hServiceAdd/hFetchModels 均接受），此前二分法只认
+  // anthropic/其他——responses 服务被拼成 /v1/chat/completions，经 clientProtocolFromPath 判成
+  // openai，upstreamEndpoint 对未配 openai 端点的服务抛 400，报错还把责任推给「客户端走
+  // openai 协议」（实际探针拼错了协议）
+  const wire = probeWire(target.provider.protocol, model, { stream })
+  const path = wire.path
+  const body = wire.body
   try {
     const up = await forwardToUpstream(rt, target, {
       method: 'POST',

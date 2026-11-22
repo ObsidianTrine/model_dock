@@ -76,9 +76,11 @@ describe('autopilot > canAutoSubmit 授权矩阵', () => {
     const rFeat = canAutoSubmit(proposal({ type: 'feature' }), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs', 'feature'] } }))
     expect(rFeat.ok).toBe(false)
     expect(rFeat.reason).toContain('上游管线')
-    const rGuard = canAutoSubmit(proposal({ files_hint: ['src/gateway/relay.ts'] }), cfg({ corePaths: ['src/gateway/server.ts'] }))
+    const rGuard = canAutoSubmit(proposal({ files_hint: ['src/gateway/server.ts'] }), cfg({ corePaths: ['src/gateway/server.ts'] }))
     expect(rGuard.ok).toBe(false)
     expect(rGuard.reason).toBe('files_hint 命中核心/发布路径（永不自动提交）')
+    // 精确口径（hintsIntersectExact）：清单外同族 src 文件不再误拦（曾用段首粗口径全撞闸）
+    expect(canAutoSubmit(proposal({ files_hint: ['src/gateway/relay.ts'] }), cfg({ corePaths: ['src/gateway/server.ts'] })).ok).toBe(true)
     // 收口不改授权面：白名单内照常放行
     expect(canAutoSubmit(proposal(), cfg({ ap: { enabled: true, autoSubmitTypes: ['docs'] } })).ok).toBe(true)
   })
@@ -89,9 +91,11 @@ describe('autopilot > canAutoSubmit 授权矩阵', () => {
     expect(r.reason).toContain('autoSubmitTypes')
   })
 
-  it('files_hint 命中核心路径 / 发布路径 / 全通配 → 拒绝', () => {
+  it('files_hint 命中核心路径 / 发布路径 / 全通配 → 拒绝；清单外同族文件放行', () => {
     const c = cfg({ corePaths: ['src/gateway/server.ts'], releasePaths: ['.github/workflows/'] })
-    expect(canAutoSubmit(proposal({ files_hint: ['src/gateway/relay.ts'] }), c).ok).toBe(false) // 同前缀段 src 命中
+    expect(canAutoSubmit(proposal({ files_hint: ['src/gateway/server.ts'] }), c).ok).toBe(false) // 清单内文件真命中
+    // 清单外同族 src 文件：文件级精确口径下不命中放行（粗口径曾按同前缀段误拦）
+    expect(canAutoSubmit(proposal({ files_hint: ['src/gateway/relay.ts'] }), c).ok).toBe(true)
     expect(canAutoSubmit(proposal({ files_hint: ['.github/workflows/x.yml'] }), c).ok).toBe(false)
     expect(canAutoSubmit(proposal({ files_hint: ['**'] }), c).ok).toBe(false) // 全通配保守视为重叠
     expect(canAutoSubmit(proposal({ files_hint: ['docs/**'] }), c).ok).toBe(true) // 不相交放行
@@ -134,7 +138,8 @@ describe('autopilot > 本仓白名单（docs/bugfix/refactor）提交语义', ()
     expect(canAutoSubmit(proposal({ type: 'deps' }), shipCfg({ ap: { enabled: true, autoSubmitTypes: ['docs', 'bugfix', 'refactor', 'deps'] } })).ok).toBe(false)
     expect(canAutoSubmit(proposal({ created_by: 'human', type: 'bugfix' }), shipCfg()).ok).toBe(false)
     const guarded = shipCfg({ corePaths: ['src/gateway/server.ts'] })
-    expect(canAutoSubmit(proposal({ type: 'bugfix', files_hint: ['src/gateway/relay.ts'] }), guarded).ok).toBe(false)
+    expect(canAutoSubmit(proposal({ type: 'bugfix', files_hint: ['src/gateway/server.ts'] }), guarded).ok).toBe(false) // 清单内真命中
+    expect(canAutoSubmit(proposal({ type: 'bugfix', files_hint: ['src/gateway/relay.ts'] }), guarded).ok).toBe(true) // 清单外同族文件：精确口径放行（合并面仍由分级闸门兜底）
   })
 
   it('scan 集成（mock）：refactor 巡检卡在新白名单下自动提交 pending 且 gate→L1', () => {

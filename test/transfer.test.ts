@@ -114,16 +114,13 @@ describe('SUMS 解析与资产名校验', () => {
 })
 
 describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工具）', () => {
-  it('tar.zip 分支：zip 走 PowerShell Expand-Archive，其余走系统 tar', async () => {
+  it('tar.zip 分支：tar.gz 与 zip 一律走系统 tar（zip 不带 -z，bsdtar 魔数识别）', async () => {
     const calls: string[][] = []
     const runner: SpawnRunner = async (_cmd, args) => { calls.push(args) }
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-extract-'))
     try {
       await extractArchive(path.join(dir, 'pkg.zip'), dir, runner)
-      expect(calls).toHaveLength(1)
-      expect(calls[0][0]).toBe('-NoProfile')
-      expect(calls[0].join(' ')).toContain('Expand-Archive')
-      // 不注入平台桩也可断言 powershell 参数（zip 分支与平台无关）
+      expect(calls).toEqual([['-xf', path.join(dir, 'pkg.zip'), '-C', dir]])
 
       calls.length = 0
       await extractArchive(path.join(dir, 'pkg.tar.gz'), dir, runner)
@@ -133,31 +130,22 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
     }
   })
 
-  it('win32 解压路径含引号或 PowerShell 元字符会拒绝（Expand-Archive 拼坏/插值防护）', async () => {
+  it('zip 也走参数数组不经 shell：路径含引号 / PowerShell 元字符原样透传（无插值风险）', async () => {
     const calls: string[][] = []
     const runner: SpawnRunner = async (_cmd, args) => { calls.push(args) }
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'ok-'))
     try {
-      // 无引号路径：win 放行（拼好 powershell 命令）
-      await extractArchive(path.join(dir, 'pkg.zip'), dir, runner, 'win32')
-      expect(calls).toHaveLength(1)
-      expect(calls[0].join(' ')).toContain('Expand-Archive')
-      // 含引号 / PowerShell 插值元字符（反引号、$(）：拒绝且不跑任何命令、不落盘建目录
-      calls.length = 0
-      await expect(extractArchive('a"b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
-      await expect(extractArchive('a`b.zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
-      await expect(extractArchive('a$(x).zip', dir, runner, 'win32')).rejects.toThrow(/引号|quote/)
-      const badDir = path.join(dir, 'dir`with$tick')
-      await expect(extractArchive('ab.zip', badDir, runner, 'win32')).rejects.toThrow(/引号|quote/)
-      await expect(fsp.access(badDir).then(() => true, () => false)).resolves.toBe(false)
-      expect(calls).toHaveLength(0)
+      // 历史对照：Expand-Archive 时代这类路径会被元字符守卫拒绝；tar 走参数数组后无插值面，直接放行
+      const weird = path.join(dir, 'a"b`c$(x).zip')
+      await extractArchive(weird, dir, runner)
+      expect(calls).toEqual([['-xf', weird, '-C', dir]])
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
   })
 })
 
-// defaultSpawnRunner 的零诊断瞬态重试：用 node -e 造确定性退出码（不真跑 tar/powershell，三平台一致）。
+// defaultSpawnRunner 的零诊断瞬态重试：用 node -e 造确定性退出码（不真跑 tar，三平台一致）。
 // 背景（2026-10-31 实测）：Windows 高负载/杀软活跃窗口里解压子进程偶发「非零退出且 stderr 为空」的
-// 瞬态死亡（0xC0000142 一类），update.test.ts 全链路 Expand-Archive 中招——有 stderr 的真实失败绝不重试。
+// 瞬态死亡（0xC0000142 一类），update.test.ts 全链路解压中招——有 stderr 的真实失败绝不重试。
 describe('defaultSpawnRunner 零诊断瞬态重试', () => {
   let root = ''
   beforeEach(async () => { root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-spawn-')) })

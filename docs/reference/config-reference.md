@@ -195,7 +195,7 @@ key_path = "$.modeldock"
 | `debug` | `boolean` | 否 | `false`（关） | debug 日志开关：开启后向 `logs/debug-<日期>.jsonl` 记录管理面访问与子进程调用等诊断明细（默认关）。与 `MODELRDOCK_DEBUG=1` 环境变量、`gateway start --debug` 旗标任一为真即生效；本键随热加载即时生效，排障时临时开启、定位后关闭。 |
 | `auto_failover` | `boolean` | 否 | `false`（关） | 「程序自动选主」开关：开启后按时段 / 优先级 / 实测耗时自动挑选主服务；关闭（默认）= 主服务由人工钉定或默认路由决定。主服务不可达时切备用始终可用，不受此开关影响。 |
 | `auto_route_provider` | `string` | 否 | 空（自动） | 人工钉定的主服务 id：设置后路由优先走它（优先于程序自动与定时时段）；留空 = 程序按时段 / 默认路由选主。与控制台「当前」下拉同款。 |
-| `failover_status_codes` | `number[]` | 否 | `[]`（不切换） | 响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。 |
+| `failover_status_codes` | `number[]` | 否 | `[]`（不切换） | 响应已开始送达后，仍允许切换备用服务的上游状态码白名单（如 `[429, 503]`）；缺省空 = 已送达的响应原样返回、不切换。例外：上游 404 且错误体明确点名请求模型不被支持（如 `UnsupportedModel`）时，备用链中段自动切下一可用服务，无需列入白名单。 |
 | `queue_wait_ms` | `number` | 否 | `2000` | 服务并发满载（`max_concurrency`）时的排队等待上限（ms）：等不到空位就跳下一候选 / 回 429。 |
 | `route_next` | `string` | 否 | 空（自动排序） | 人工钉定的「下一个切换」：主服务不可达时优先切到它（排到备用链首位）；留空按优先级 / 实测耗时自动排序。 |
 | `auto_fallback` | `boolean` | 否 | `true`（开） | 「自动备用链」开关：手动备用链之外，自动把其他已启用服务补进切换候选（按定时窗口 / 优先级 / 实测耗时排序，模型名透传）；仅显式 `false` 关闭。 |
@@ -265,7 +265,34 @@ enabled = true
 port = 8787
 ```
 
-## 10. 密钥存储（security）
+## 10. 探针套件（probe）
+
+服务商健康探针（`modeldock provider test --probe` 与控制台探针共用）的行为与预算：全字段有缺省，不配即按缺省工作；月度预算与成本授权防止探针悄悄烧 token。
+
+| 键 | 类型 | 必填 | 默认值 | 说明 |
+|---|---|---|---|---|
+| `enabled` | `boolean` | 否 | `true`（开） | 探针套件总开关（默认开）：设 `false` 后探针一律拒绝执行（含零 token 的被动聚合探针）。 |
+| `concurrency` | `number` | 否 | `2` | 探针全局并发闸：同一时刻最多同时在飞几个探针（整数，限 2–4，默认 2）；同一服务内的探针始终串行执行。 |
+| `budget_tokens` | `number` | 否 | `50000` | 探针月度预算（tokens）：自然月内探针累计实际 tokens 达到该值即停止全部主动探针并把目标标为「预算耗尽」，调高预算或次月自动重置前不再花费。 |
+| `schedule_hours` | `number[]` | 否 | `[]`（只跑被动聚合） | 周期调度触发时刻（0–23 整数小时，如 `[9, 21]`）；缺省空 = 周期调度只跑零 token 的被动聚合探针，不产生模型推理请求。 |
+| `cost_ack` | `boolean` | 否 | `false`（周期调度只跑零 token 探针） | 周期调度执行含 token 探针（P1–P14）的持久成本授权（默认 false）：`true` 才允许周期调度跑这些探针，且仍受 `budget_tokens` 月度预算约束；手动触发的探针不走此键，每次运行前另有逐次确认。 |
+| `disabled_ids` | `string[]` | 否 | `[]`（不排除） | 周期调度中排除的探针 id 清单（如 `["p10"]`）：列出的探针不被周期调度执行；缺省空 = 不排除。 |
+| `deep_flags` | `string[]` | 否 | `[]`（只跑标准档） | 深度档开关名单（自由短词，如 `["long-context"]`）：探针实现按名单决定是否执行更深的探测档；缺省空 = 只跑标准档。 |
+
+示例：
+
+```toml
+[probe]
+enabled = false
+concurrency = 2
+budget_tokens = 50000
+schedule_hours = [9, 21]
+cost_ack = true
+disabled_ids = ["p10"]
+deep_flags = ["long-context"]
+```
+
+## 11. 密钥存储（security）
 
 API Key 等敏感信息的存放方式。
 
@@ -280,7 +307,7 @@ API Key 等敏感信息的存放方式。
 store = "file"
 ```
 
-## 11. 快照（backup）
+## 12. 快照（backup）
 
 每次改动配置或接入 / 断开客户端前，ModelDock 会自动留一份快照供还原。
 
@@ -295,7 +322,7 @@ store = "file"
 keep = 20
 ```
 
-## 12. 自动更新（update）
+## 13. 自动更新（update）
 
 新版本检查与下载安装的来源。
 
@@ -318,7 +345,7 @@ mirror = ["https://gh-proxy.com/", "https://ghfast.top/"]
 prefetch = false
 ```
 
-## 13. 导入状态（import）
+## 14. 导入状态（import）
 
 一键导入（存量配置收编）的记忆数据，由程序维护。
 
@@ -333,7 +360,7 @@ prefetch = false
 # dismissed = ["https://api.example.com"]  # 程序维护，无需手改
 ```
 
-## 14. 文本资产同步（sync_assets）
+## 15. 文本资产同步（sync_assets）
 
 多机同步时随包收敛的白名单目录清单（每台机器自选，清单本身不随包同步）。
 

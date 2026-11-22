@@ -39,7 +39,8 @@ export interface ImportCandidate {
   skip_reason?: string
 }
 
-/** 服务地址归一化：小写主机、去默认端口与结尾斜杠——去重一律用它比较 */
+/** 服务地址归一化：小写主机、去默认端口与结尾斜杠——去重一律用它比较。
+ *  已知缺口（口径未定，刻意不做）：[::1] 与 127.0.0.1 各归各键，IPv6/IPv4 回环跨形态不去重。 */
 export function normalizeBaseUrl(url: string): string {
   try {
     const u = new URL(url)
@@ -52,7 +53,9 @@ export function normalizeBaseUrl(url: string): string {
 /** 本机代理地址判断：按 hostname 精确匹配（回环段），不误伤恰含 "127.0.0.1" 子串的公网域名 */
 export function isLocalBaseUrl(url: string): boolean {
   try {
-    const h = new URL(url).hostname.toLowerCase()
+    // WHATWG URL 的 hostname 对 IPv6 字面量恒带方括号（'[::1]'），比较前须剥掉，
+    // 否则 `h === '::1'` 永不可达、[::1] 回环漏判（口径对齐 adapters/types.ts isGatewayUrl）
+    const h = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '')
     return (
       h === 'localhost' ||
       h.endsWith('.localhost') ||

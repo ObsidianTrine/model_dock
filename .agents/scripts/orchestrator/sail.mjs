@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseCard, STATES, cardPath, listCards, queueRoot } from './queue.mjs';
-import { hintsOverlap } from '../policy.mjs';
+import { hintsIntersectExact } from '../policy.mjs';
 import { readGoals } from './goals.mjs';
 import { buildTaskRoster } from './notify.mjs';
 import { fmtUsd } from './cost.mjs';
@@ -76,13 +76,19 @@ export function parseDurationMinutes(opts = {}) {
  * 此前只按 priority 选卡，硬禁区提案 submit+run 后必被引水闸打回 pending，白烧一次
  * run 启动（P2-15）；对齐后选卡阶段直接跳过。corePaths/releasePaths 都未配置 = 无守卫面
  * （与 canAutoSubmit/pilotageReason 同款：不把所有卡拒掉）。
+ * files_hint 用文件级精确口径（hintsIntersectExact，2026-11-20 与 pilotageReason/dispatch/
+ * tiers 同族对齐）：曾用的顶层段粗口径把 src/ 下任何卡都判进硬禁区，src/ 提案永不自动提交、
+ * drafts 整体积压。它只是「省一轮白烧 worker」的提前过滤而非安全闸——自动提交面扩到清单外
+ * src 卡后，合并面零扩大：提交卡 gate 覆写 L1（sail/autopilot）或缺省 L3（nightly/scan），
+ * 实际合并仍由 classifyChange 对真实改动分级（corePaths→L2、releasePaths→L3 一律回人工）。
  */
 export function hardZoneReason(meta, cfg) {
   if (meta.type === 'deps') return 'deps 类型永不自动提交（依赖升级人工裁决）';
   if (meta.type === 'feature') return 'feature 提案走上游管线（research → spec → 人工审设计 → spec build），不直接自动提交——审完设计后跑 spec build 拆卡';
   const guarded = [...(cfg?.corePaths ?? []), ...(cfg?.releasePaths ?? [])];
-  // 空守卫清单 = 无守卫面（与 canAutoSubmit 同款：未配置时不把所有卡拒掉）
-  if (guarded.length && hintsOverlap(meta.files_hint, guarded)) {
+  // 空守卫清单 = 无守卫面（与 canAutoSubmit 同款：未配置时不把所有卡拒掉）；未声明
+  // files_hint 保守视为相交（hintsIntersectExact 与 hintsOverlap「未声明 = 独占」同款）
+  if (guarded.length && hintsIntersectExact(meta.files_hint, guarded)) {
     return 'files_hint 命中核心/发布路径（永不自动提交）';
   }
   return null;

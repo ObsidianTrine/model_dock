@@ -14,6 +14,7 @@
 | `import --from all\|cc-switch\|claude\|dsh\|zcode\|… [--yes] [--no-with-profiles]` | 只读收编本机存量配置（原软件不动） |
 | `config edit` | `$EDITOR` 直编 config.toml，保存校验 |
 | `config export` / `config import <file>` | 导出 / 导入口令加密配置包（.msync，跨机手动迁移） |
+| `config merge <files...> [--stdin-pass] [--yes] [--json]` | 合并多个配置包：同 base_url+同 key 去重，按探针结论给三档建议（保留候选/存疑/失效），勾选后写入；预览零写盘，应用前自动快照 |
 
 ## 上游服务与模型
 
@@ -74,7 +75,7 @@
 | 命令 | 用途 |
 |---|---|
 | `adapter list` | 三层适配器与检测状态 |
-| `sync setup/status/pause/enroll/resume` | 多机配置同步（WebDAV / 本地同步盘 / 云端入网） |
+| `sync setup/status/pause/enroll/resume` / `sync assets list/add/rm` | 多机配置同步（WebDAV / 本地同步盘 / 云端入网）；assets 管文本资产白名单 |
 | `update [--check/--yes/--token/--clean/--restore]` | 自更新；`--restore` 一键回退上一版（对换式、零下载） |
 | `presets update` | 预设库远程更新（规划中占位，当前随版本发布） |
 | `usage` | 用量统计指引（本体见 Web 控制台状态行与管理面 `/_modeldock/usage`） |

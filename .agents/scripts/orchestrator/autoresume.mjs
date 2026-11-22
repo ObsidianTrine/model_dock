@@ -284,6 +284,8 @@ export function autoResumedAtNow() {
  *   'resume'  — transient 族，可自动续（沿用 24h 冷却、每次上界与每卡生命周期上限）；
  *   'breaker' — 事件链有熔断（最后一条 worker_spawned 之后），确定性失败永不自动续；
  *   'stuck'   — 非 transient（会话已以 failed/非签名 settle 收尾），落 blocked 交人工。
+ *               （对冲：worktree 相对 base 已有非空提交时调用方改走续用路径，见
+ *               pickOrphanResumeCandidates——提交数对账由调用方做，本纯函数不碰 fs。）
  * 判定路径（'resume' 的三条，与 isTransientBlocked 同哲学，面向「无 settle 收尾」的崩溃现场）：
  *  A. 事件链套用 isTransientBlocked 成立——上一会话以 transient 签名收尾（resume 后再崩）
  *     或 worker_retry 链 + blocked 收尾（其内部熔断护栏照常生效）；
@@ -312,14 +314,22 @@ export function classifyOrphan(events) {
 
 /**
  * 纯函数：从 running 卡中挑「可安全自动续」的孤儿。
- * @param {Array<{id: string, meta: object, events: Array<object>, locked?: boolean}>} runningCards
+ * @param {Array<{id: string, meta: object, events: Array<object>, locked?: boolean, commitsAhead?: number|null}>} runningCards
  *   扫描方已备好的卡描述；locked = 任务锁判活（readTaskLock + taskLockLooksLive）：
  *   true = 有活进程在驱动（同进程嵌套闭环或并行实例）——活跃卡无条件跳过。
+ *   commitsAhead = 调用方对账后的 worktree 提交数（仅 'stuck' 归类卡需要，见下）。
  * @param {{ now?: number, maxPerRun?: number, cooldownMs?: number, maxPerCard?: number }} [opts]
  *   与 pickAutoResumeCandidates 同参（非法值静默回落缺省）。
- * @returns {Array<{id: string, attempts: number}>} 按 id 稳定排序的前 maxPerRun 张
- *   （孤儿无 settle 时间可排，id 序保证确定性）；attempts = 事件链 worker_retry 次数。
- *   生命周期上限与 blocked 通道同闸：frontmatter 随卡走，两个通道共享同一累计值。
+ * @returns {Array<{id: string, attempts: number, commitsAhead?: number, rescue?: string}>}
+ *   按 id 稳定排序的前 maxPerRun 张（孤儿无 settle 时间可排，id 序保证确定性）；
+ *   attempts = 事件链 worker_retry 次数；'stuck' 对冲续用卡带 commitsAhead 证据字段与
+ *   rescue='stuck_with_commits' 标记（留痕区分普通崩溃族续跑）。生命周期上限与 blocked
+ *   通道同闸：frontmatter 随卡走，两个通道共享同一累计值。
+ *
+ * stuck 终态对冲（2026-11-17）：'stuck'（最后会话以非 transient settle 收尾）历史卡在
+ * worktree 相对 base 已有非空提交（commitsAhead > 0）时不再落 blocked 清空重做，走续用
+ * 路径——resume 原地续做，完成提交与半成品就地保留。无提交/对账不可得（commitsAhead
+ * 缺失或 0）照旧交人工。冷却与 maxPerRun 护栏两族同款（24h 内不重复续）。
  */
 export function pickOrphanResumeCandidates(runningCards, opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
@@ -330,12 +340,15 @@ export function pickOrphanResumeCandidates(runningCards, opts = {}) {
   for (const card of Array.isArray(runningCards) ? runningCards : []) {
     if (!card || typeof card.id !== 'string') continue;
     if (card.locked) continue;
-    if (classifyOrphan(card.events) !== 'resume') continue;
+    const kind = classifyOrphan(card.events);
+    const stuckRescued = kind === 'stuck' && card.commitsAhead > 0;
+    if (kind !== 'resume' && !stuckRescued) continue;
     if (lifetimeCapReached(card.meta, maxPerCard)) continue;
     if (!cooldownPassed(card.meta, now, cooldownMs)) continue;
     eligible.push({
       id: card.id,
       attempts: (card.events ?? []).filter((e) => e?.type === 'worker_retry').length,
+      ...(stuckRescued ? { commitsAhead: card.commitsAhead, rescue: 'stuck_with_commits' } : {}),
     });
   }
   eligible.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

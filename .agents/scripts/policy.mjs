@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { toIsoLocal } from './orchestrator/events.mjs';
 import { loadWorkflowConfig, releaseHatches } from './workflow-config.mjs';
@@ -600,7 +601,9 @@ export function classifyChange(changedFiles, cfg) {
 // ---------------------------------------------------------------------------
 
 let auditFileOverride = null;
-/** 测试注入审计文件路径；生产路径 = <cwd>/.agents/policy/audit.jsonl。 */
+/** 测试注入审计文件路径；生产路径 = 脚本锚定 <repoRoot>/.agents/policy/audit.jsonl
+ *  （hook 进程 cwd 是任意客户端工作目录，可能与仓库根无关——锚定策略见 workflow-config.mjs
+ *  「锚定策略」节，2026-11-17：此前锚 process.cwd()，会话 cwd 在仓库子目录时审计落错位）。 */
 export function setAuditFile(p) {
   auditFileOverride = p;
 }
@@ -609,8 +612,13 @@ export function setAuditFile(p) {
 // 轮转，先例：orchestrator.mjs 的 nightly.log 5MB（NIGHTLY_LOG_MAX）。只留一代、不引入配置项。
 const AUDIT_ROTATE_BYTES = 5 * 1024 * 1024;
 
+// 缺省审计落盘脚本锚定：policy.mjs 随仓库装在 <repoRoot>/.agents/scripts/，往上一级两级即
+// repoRoot——会话 cwd 深于仓库根（如 .agents/orchestrator）时审计仍落仓库根单一文件。
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SCRIPT_ANCHORED_AUDIT_FILE = path.resolve(HERE, '..', '..', '.agents', 'policy', 'audit.jsonl');
+
 export function audit({ hook, tool, decision, reason, target }) {
-  const file = auditFileOverride ?? path.join(process.cwd(), '.agents', 'policy', 'audit.jsonl');
+  const file = auditFileOverride ?? SCRIPT_ANCHORED_AUDIT_FILE;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     try {
@@ -657,6 +665,46 @@ export function hintsOverlap(a, b) {
   if (!A || !B) return true;
   if (!A.size || !B.size) return true;
   for (const s of A) if (B.has(s)) return true;
+  return false;
+}
+
+/**
+ * files_hint 与路径清单是否相交（**文件级精确口径**，比 hintsOverlap 的顶层段口径更细；
+ * 先例 drafts-gc.pathsOverlap 同款思路）。每条 hint 取第一个通配段之前的固定前缀全段：
+ * `src/presets/data.ts` → `src/presets/data.ts`，`src/**` → `src`，`.github/workflows/` →
+ * `.github/workflows`；任一对相等或互为路径前缀即相交。
+ * 专供引水闸（pilotageReason）：顶层段口径下 `src/presets/data.ts` 与 `src/cli.ts` 首段
+ * 同为 src 即判相交，src/ 下任何卡全撞闸、drain 永不派出（2026-11-16 夜航实证：性能卡
+ * 整夜 pending）。引水是「人审」语义而非「并行互斥」语义——只有 hint 与清单真重叠
+ * （同文件 / 清单条目目录下）才值得人审，故并行分区继续用 hintsOverlap 的保守粗口径，
+ * 不改其本体。
+ * 保守面保留（宁误勿漏）：完全通配（**、*）→ 独占相交；未声明 files_hint → 相交（与
+ * hintsOverlap「未声明 = 独占」同款）；清单为空 → 不相交（航道未设限）。
+ */
+export function hintsIntersectExact(a, b) {
+  const prefixesOf = (hints) => {
+    const set = new Set();
+    for (const h of (hints ?? []).map((x) => String(x).replace(/\\/g, '/'))) {
+      const fixed = [];
+      for (const seg of h.split('/')) {
+        if (seg.includes('*') || seg.includes('?')) break;
+        if (seg) fixed.push(seg);
+      }
+      if (!fixed.length) return null; // 完全通配 → 独占
+      set.add(fixed.join('/'));
+    }
+    return set;
+  };
+  const A = prefixesOf(a);
+  const B = prefixesOf(b);
+  if (!A || !B) return true;
+  if (!B.size) return false; // 清单为空 = 航道未设限（调用方另有守卫，纯函数口径自洽）
+  if (!A.size) return true; // 未声明 files_hint = 可能动任何文件 → 保守相交
+  for (const x of A) {
+    for (const y of B) {
+      if (x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`)) return true;
+    }
+  }
   return false;
 }
 

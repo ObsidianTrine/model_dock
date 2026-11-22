@@ -44,11 +44,17 @@ export async function previewImport(filePath: string, passphrase: string): Promi
   if (text === null) {
     throw new Error(t('文件不存在：{p}', 'File not found: {p}', { p: filePath }))
   }
+  return previewImportText(text, passphrase, filePath)
+}
+
+/** 预览（文本形态）：与 previewImport 同一解包链，输入为已在内存的包文本。多包合并的控制台
+ *  端点用它——浏览器上传的包内容走临时文件落盘会违反「预览零写盘」红线。 */
+export function previewImportText(text: string, passphrase: string, label = ''): { doc: Syncdoc; report: SyncdocReport; meta: { createdBy: string; createdAt: string } } {
   let env: unknown
   try {
     env = JSON.parse(text)
   } catch (e) {
-    throw new Error(t('{p} 不是合法的配置同步包（JSON 解析失败：{err}）', '{p} is not a valid sync package (JSON parse failed: {err})', { p: filePath, err: (e as Error).message }))
+    throw new Error(t('{p} 不是合法的配置同步包（JSON 解析失败：{err}）', '{p} is not a valid sync package (JSON parse failed: {err})', { p: label || t('（无名的包）', '(unnamed package)'), err: (e as Error).message }))
   }
   const envelope = openEnvelope(env, passphrase)
   const doc = validateSyncdoc(envelope)

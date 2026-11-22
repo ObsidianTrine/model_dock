@@ -173,6 +173,22 @@ export interface ForwardOptions {
    *  forwardToUpstream、闸门判定随之重新命中——缺去重会把一次请求的「被吸收」记成多笔；
    *  直调方（admin 探针）不传 = 每次调用各计一笔，行为同旧。 */
   mfCounted?: Set<string>
+  /** 探针专用（P2 逐 key 审计，design 方案 3）：强制用池内第 N 把 key 直发（索引 = 配置 refs
+   *  的原始位置，与 resolveProviderKeys 返回的 index 同源）——跳过冷却过滤（审计对象恰包括
+   *  已被打入冷却的 key）、跳过 401/403 换 key 重试（换 key 会把「这把死了」伪装成「那把活着」），
+   *  且不打 markKeyCooldown（冷却标记只归转发热路径，池态必须不受探针影响）。
+   *  缺省 undefined = 既有轮转路径行为逐字节不变。 */
+  forceKeyIndex?: number
+  /** 探针专用（design 方案 3）：跳过 mfGate 熔断感知预改写与 M3 熔断快速失败——熔断中模型
+   *  按原模型直发、不调 recordModelFallback、不产生 modelAfter 改写。探测对象就是被点名的模型
+   *  本身（预改写会把「探 m 的死活」偷换成「探 fb 的死活」，熔断快速失败则让探针只能看到本地
+   *  402 而非上游真实状态）。缺省 undefined = 既有路径行为逐字节不变。 */
+  skipModelFallbackGate?: boolean
+  /** 探针专用（P1/P12 生产 transport，t4b）：豁免 401/403 的 markKeyCooldown 打标——探针
+   *  探死 key 是观测行为，不得污染池态（15min 冷却会把刚探死的 key 从 P2 复审视野里过滤掉，
+   *  且真实转发热路径的可用把位被探针单方面削减）。换 key 重试/透传逻辑不动（那是 forced
+   *  专属语义之外的既有行为），只豁免「打标」这一个副作用。缺省 undefined = 打标照常。 */
+  skipKeyCooldownMark?: boolean
 }
 
 export interface UpstreamBody {
@@ -525,11 +541,23 @@ export async function forwardToUpstream(
     e.cause = 'key_pool_empty'
     throw e
   }
+  // 探针逐 key 直发（ForwardOptions.forceKeyIndex）：锁定池内指定把位。越界（含该 ref 恰好
+  // 解析失败被跳过）= 池在探针计划后已变更（keys 被编辑/钥匙环上锁），抛可操作错误让探针方
+  // 重新展开目标，绝不落到错误的把位上
+  const forced = opts.forceKeyIndex !== undefined
+    ? pool.find((k) => k.index === opts.forceKeyIndex)
+    : undefined
+  if (opts.forceKeyIndex !== undefined && !forced) {
+    throw new Error(
+      t('探针指定的 key 索引 {index} 不在「{name}」当前 key 池内（解析成功 {n} 把）：池配置已变更，请重新发起探针', 'Probe key index {index} is not in the current key pool of "{name}" ({n} resolvable): the pool config changed; rerun the probe', { index: String(opts.forceKeyIndex), name: provider.name ?? providerId, n: String(pool.length) })
+    )
+  }
   // key 级健康过滤（P1⑥）：处于失效冷却期（上游 401/403 标记）的 key 直接跳过；全部在冷却
   // → 本候选本轮不可用，candidateSkip 换 provider 候选。冷却 15min 后自动解封重试（key 被
-  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复
+  // 人工修复/上游侧恢复时无须重启网关）；配置热加载会清零冷却，换 key 立即恢复。
+  // 探针锁定把位（forced）时跳过该过滤：审计对象恰包括已打入冷却的 key，探测它是否仍被上游拒绝
   const now = Date.now()
-  const healthy = pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
+  const healthy = forced ? [forced] : pool.filter((k) => !keyInCooldown(rt, providerId, k.index, now))
   if (healthy.length === 0) {
     const e = new UpstreamError(
       503,
@@ -552,7 +580,9 @@ export async function forwardToUpstream(
   // 重新命中闸门（去重见 ForwardOptions.mfCounted）。
   const mfMap = provider.model_fallback
   let mfHit: string | undefined
-  const mfGate = mfMap && isNonEmptyRecord(mfMap)
+  // skipModelFallbackGate（探针路径）：闸门整体不构造——mfGate 为 undefined 时 rewriteModel 的
+  // 预改写判定短路，熔断中模型按原模型直发（mfHit 恒 undefined，下方 recordModelFallback 自然不计）
+  const mfGate = !opts.skipModelFallbackGate && mfMap && isNonEmptyRecord(mfMap)
     ? (final: string): string | undefined => {
         const fb = mfMap[final]
         if (!fb || fb === final) return undefined // 无映射 / 自映射：不动
@@ -575,7 +605,9 @@ export async function forwardToUpstream(
   // 自映射（手编 config.toml 绕过保存期校验，上方闸门已按 fb===final 不动）等同无映射：
   // 若仍算「有映射」，熔断模型的快速失败被架空——每请求照常撞注定 402 的上游
   const mfTo = finalModel !== undefined ? mfMap?.[finalModel] : undefined
-  if (finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && (!mfTo || mfTo === finalModel)) {
+  // skipModelFallbackGate（探针路径）同步绕过快速失败：探测熔断中的模型要拿到上游真实状态，
+  // 而不是本地 402 快速失败的回声
+  if (!opts.skipModelFallbackGate && finalModel !== undefined && isModelMeltdown(rt, providerId, finalModel) && (!mfTo || mfTo === finalModel)) {
     const e = new UpstreamError(
       402,
       t('模型「{model}」在服务「{name}」处于额度熔断期（连续额度耗尽，冷却约 15 分钟），本次请求未发送上游', 'Model "{model}" on provider "{name}" is in quota meltdown (repeated quota exhaustion; ~15 min cooldown); this request was not sent upstream', { model: finalModel, name: provider.name ?? providerId }),
@@ -661,13 +693,17 @@ export async function forwardToUpstream(
   let up = await sendWithKey(first.key)
   // 401/403 的 key 级失效处理只认模型 API 端点（ROUTED_PATH_RE，与模型改写同口径）：非对话
   // 端点的 401 可能是路径级权限/资源问题（不代表 key 失效），据此把 key 冷却 15 分钟会误伤——
-  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试
+  // 那类响应维持既有透传行为（客户端看得到上游错误体），不标记、不重试。
+  // 探针锁定把位（forced）时整段跳过：既不打 markKeyCooldown（池态零扰动），也不换 key 重试
+  //（换 key 会让 P2 把「这把 401」误读成下一把的响应），401/403 原样返回由探针归档 verdict。
+  // P1/P12 生产 transport（skipKeyCooldownMark）只豁免打标：换 key 重试/透传照走既有路径，
+  // 冷却标记是池态写入，探死 key 的观测行为不得削减真实转发的可用把位
   const routedApi = ROUTED_PATH_RE.test(opts.path.split('?')[0])
-  if (routedApi && (up.status === 401 || up.status === 403)) {
+  if (!forced && routedApi && (up.status === 401 || up.status === 403)) {
     // 上游 401/403 = 鉴权层明确拒绝该 key，请求未进入业务处理（未产出内容、未计费）——
     // 该 key 打入冷却；换池内下一把 healthy key 重试一次是安全的，与「transport 未送达才重放」
     // 边界一致且更早：鉴权拒绝发生在请求体被消费之前，不存在重复处理/重复计费
-    markKeyCooldown(rt, providerId, first.index)
+    if (!opts.skipKeyCooldownMark) markKeyCooldown(rt, providerId, first.index)
     const rest = healthy.filter((k) => k.index !== first.index)
     if (rest.length > 0) {
       // 排空首个 401 响应体释放连接再改发（与 failover 切换前排空同语义）；有界读（P2-6），
@@ -680,7 +716,7 @@ export async function forwardToUpstream(
         // 链换下一个 provider 候选。仅多 key 池（≥2 把可用）会走到这里；单 key 池没有「换 key
         // 重试」，401 保持既有透传行为（客户端看得到上游错误体），失效跳过从下一次请求生效
         //（本次已标记冷却 → 下次 healthy 为空 → candidateSkip）
-        markKeyCooldown(rt, providerId, second.index)
+        if (!opts.skipKeyCooldownMark) markKeyCooldown(rt, providerId, second.index)
         try { await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES) } catch { /* 排空释放连接；失败不影响抛错换候选 */ }
         const e = new UpstreamError(
           503,
@@ -698,9 +734,13 @@ export async function forwardToUpstream(
 
 /** 模型不匹配类错误特征：上游 400 体里点名模型不存在 / 不支持 / 无效（正反两种语序都算：
  *  「model ... not supported」与「invalid model name」）。中文原文错误同样覆盖。
- *  （真实案例 2026-10：claude-direct 只认 Claude 系模型，glm-5.3-flash 被 400 拒绝，客户端只看到原始英文报错） */
+ *  （真实案例 2026-10：claude-direct 只认 Claude 系模型，glm-5.3-flash 被 400 拒绝，客户端只看到原始英文报错）
+ *  unsupportedmodel 一词（2026-11-16 夜航）：火山方舟 coding-plan 对不支持模型回 404 体
+ *  {"code":"UnsupportedModel","message":"The requested model does not support the coding plan feature."}
+ *  ——message 语序（does not support）不落既有分支，靠结构化 code 命中；404-model 判活切候选
+ *  （forwardWithFailover carve-out）与 400 hint 共用本正则。 */
 const MODEL_MISSING_RE =
-  /model.*(?:does not exist|is not supported|not available|not found|invalid)|(?:invalid|unsupported|unknown|no such)\s+model|模型.*(?:不存在|不支持|无效|不可用)/i
+  /model.*(?:does not exist|is not supported|not available|not found|invalid)|(?:invalid|unsupported|unknown|no such)\s+model|unsupportedmodel|模型.*(?:不存在|不支持|无效|不可用)/i
 
 /** 上游 4xx/5xx → 附带可执行修复建议 */
 export function translateUpstreamError(
@@ -845,8 +885,8 @@ function isTransportFailure(e: unknown): boolean {
  *  中文特征（额度/配额/余额/欠费）必须保留：国内上游 429 额度体常为中文，只认英文会漏判、
  *  致使该切换的不切（2026-11-01 T28 存疑项坐实转正）。此类请求上游未产出内容，恒可安全切换
  *  （不依赖 failover_status_codes 白名单）；熔断归 'quota' 类，冷却比普通限流久。 */
-const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
-function isQuotaError(status: number, bodyText: string): boolean {
+export const QUOTA_BODY_RE = /quota|insufficient|额度|配额|余额|欠费/i
+export function isQuotaError(status: number, bodyText: string): boolean {
   return status === 402 || (status === 429 && QUOTA_BODY_RE.test(bodyText))
 }
 
@@ -1049,6 +1089,9 @@ function filterModelCompatible(
  * status（含 5xx）就地返回、不重放；headers 超时（transport='timeout'，已送达可能已计费）默认不切换、
  * 不计 connect 熔断，仅 failover_status_codes 白名单显式含其包装 status 且有剩余候选才切（三态见 UpstreamError.transport 注）。
  * 例外：failover_status_codes 列出的状态码（如 429/503，未产出内容）有剩余候选时切换，切换前排空响应体释放连接。
+ * 404 model 类 carve-out（2026-11-16 夜航）：ROUTED_PATH 上游 404 且错误体命中 MODEL_MISSING_RE 时视同
+ * 额度类切下一存活候选——上游明确拒绝该模型、未产出内容、无重复计费；仅链中段适用，链尾/非 routed
+ * 路径/错误体不匹配（可能是路径级资源不存在）一律原样回传。
  * 候选本身不可用（key 缺失 / 协议端点缺失，candidateSkip=true）时跳到下一候选，不中止整条链。
  * 并发闸（P0②）：每个候选转发前先取 per-provider 并发槽（max_concurrency，0/缺省不限），
  * 满载排队 ≤ gateway.queue_wait_ms；超时候选被跳过（queue_full 标记），链尾回 429+hint。
@@ -1168,8 +1211,21 @@ export async function forwardWithFailover(
       attempts.push({ provider: c.providerId, status: up.status, ms })
       // 429/402 排空读体判别额度类（切换前本就要排空释放连接）；额度类恒可切换（未产出内容，无重复计费风险）
       let bodyText: string | undefined
-      if (up.status === 429 || up.status === 402) bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
+      // 404 model 类探测（2026-11-16 夜航模式 A 判死链）：仅 ROUTED_PATH 且链中段（有剩余候选）才读体
+      // 判别——链尾 404 无候选可切，不读不判原样回传（response 字节与 cause 语义零改动，含既有
+      // relay.test ①「末跳真实 404」断言）；非 routed 路径的 404 多为路径级资源不存在，一律不判
+      const probeModel404 = up.status === 404 && routedPath && i < cands.length - 1
+      if (up.status === 429 || up.status === 402 || probeModel404) {
+        bodyText = drained ?? (await readUpstreamErrorText(up.headers, up.body))
+      }
       const quota = bodyText !== undefined && isQuotaError(up.status, bodyText)
+      // 404 model 类 carve-out：错误体命中 MODEL_MISSING_RE = 上游明确点名拒绝该模型——请求未产出
+      // 内容、无重复计费，与额度类同理可安全改发；这是对函数头「已送达真实 status 就地返回」安全
+      // 边界的显式豁免（404 不在 failover_status_codes 白名单，此前只能原样回传）。
+      // 实证链：claude 会话中途辅助模型请求经 tierFallback 改写为 profile.default_model，钉定主候选
+      // 目录不含该模型 → 404 UnsupportedModel 原样回传 → CLI [claude-code:unrecognized_model] 退出
+      // → 编排器三路识别皆失明 → 任务判死。切候选即根治；错误体不匹配（路径级 404）不切。
+      const modelMissing = probeModel404 && bodyText !== undefined && MODEL_MISSING_RE.test(bodyText)
       // 本次 attempt 实际发送的模型（rewriteModel 产物；非对话端点 / 体无 model 时 undefined）：
       // 模型级熔断记账与链尾映射查找的 key
       const sentModel = up.modelAfter
@@ -1187,13 +1243,16 @@ export async function forwardWithFailover(
       else if (up.status === 429) recordOutcome(rt, c.providerId, { ok: false, cls: '429', ms })
       else if (up.status >= 400) recordOutcome(rt, c.providerId, { ok: false, ms }) // 4xx 中性不计熔断（口径见 state/routing.ts recordOutcome 注）
       else recordOutcome(rt, c.providerId, { ok: true, ms: lastSendMs })
-      const canSwitch = (switchable?.has(up.status) ?? false) || quota
+      const canSwitch = (switchable?.has(up.status) ?? false) || quota || modelMissing
       if (canSwitch && i < cands.length - 1) {
         if (bodyText === undefined) await readUpstreamErrorText(up.headers, up.body) // 排空响应释放连接后再改发
         slot?.release() // failover 切换候选：先释放旧候选槽再取新候选槽（下一轮自行取）
         slot = undefined
         markReplay(c.providerId)
-        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: quota ? 'quota' : `http_${up.status}`, ms })
+        // model_mismatch 留痕（同 filterModelCompatible 剔除口径）：该候选被上游点名不支持本模型，
+        // 与「目录核对剔除」同为模型级不匹配，日志对账时同一签名可查
+        if (modelMissing && !modelMismatch.includes(c.providerId)) modelMismatch.push(c.providerId)
+        if (debugOn()) debugLog('relay', 'skip', { provider: c.providerId, code: modelMissing ? 'model_missing' : quota ? 'quota' : `http_${up.status}`, ms })
         continue
       }
       // 模型级容灾（M1 链尾合成）：到这里还带 quota 的必是链尾候选（链中段已在上方分支切走）——

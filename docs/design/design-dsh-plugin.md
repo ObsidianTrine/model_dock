@@ -236,7 +236,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 
 ### 4.8 卸载
 
-插件被 `market_uninstall` / `dsh plugin remove` 移除时，cordis 生命周期销毁插件实例，但**不会**还原已写入的 dsh 配置。约定：UI 与 README 在卸载指引中显式要求先执行「断开接入」（或让 agent 跑 `modeldock_detach`）；README 同步说明可用 `modeldock restore dsh` 走快照还原。v1 不尝试在插件销毁钩子里自动 detach（避免卸载插件时误触还原用户配置）。
+插件被 `market_uninstall` / `dsh plugin remove` 移除时，cordis 生命周期销毁插件实例，但**不会**还原已写入的 dsh 配置。约定：UI 与 README 在卸载指引中显式要求先执行「断开接入」（或让 agent 跑 `modeldock_detach`）；README 同步说明可用 `modeldock harness restore dsh` 走快照还原。v1 不尝试在插件销毁钩子里自动 detach（避免卸载插件时误触还原用户配置）。
 
 ## 5. ModelDock 侧配套改动
 
@@ -283,7 +283,7 @@ v1 不支持 `--mode file`（直连）入口，仅网关模式（理由见 D3）
 
 - 砍 client UI（设置页向导）：D4（desktop 端 web plane 可用性）的不确定性直接消失，引导靠 agent 工具回执 + README；
 - 安装渠道只留 GitHub Releases（不依赖 A1）；npm 渠道等 D1 落地后再补为默认；
-- 工具面 5 → 3：`modeldock_status`（吸收 health 探活）、`modeldock_install`（仅 github 渠道）、`modeldock_attach`；detach 与卸载指引放 README（`modeldock detach dsh` / `modeldock restore dsh` 本就是一条 CLI 命令）；
+- 工具面 5 → 3：`modeldock_status`（吸收 health 探活）、`modeldock_install`（仅 github 渠道）、`modeldock_attach`；detach 与卸载指引放 README（`modeldock detach dsh` / `modeldock harness restore dsh` 本就是一条 CLI 命令）；
 - 红线不裁：不写 dsh 配置、不起 HTTP 服务、密钥零接触——「薄」正是这个插件的价值来源；
 - 发布 = 双语 README（含安装截图）+ GitHub 仓库打 topic `dsh-plugin` + `npm publish`（裸名 `dsh-modeldock` 未被占，定了尽早占名）。
 

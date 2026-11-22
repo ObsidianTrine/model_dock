@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { logsDir } from '../../util/paths.js'
 import { appendLine, closeAppendStream } from '../../util/fsx.js'
-import { localIsoTs } from '../../util/time.js'
+import { localDateStr, localIsoTs } from '../../util/time.js'
 import { costOfUsage, type PriceResolver } from '../../providers/pricing-core.js'
 import type { AuditEntry, EventEntry, GatewayRuntime, LogEntry, RingEntry } from './types.js'
 
@@ -289,6 +289,31 @@ export function readRequestLogDay(date: string): LogEntry[] {
     }
   }
   return out
+}
+
+/** 滚动窗口读取：覆盖 [fromMs, toMs]（含边界）的本地日期文件集（24h 窗最多跨两个本地日），
+ *  逐文件读入后按条目 ts 过滤。P15 被动聚合的数据源；日期文件缺失按空处理，崩溃半行容错
+ *  与 readRequestLogDay 同款。非法窗口（from > to）返回空。 */
+export function readRequestLogWindow(fromMs: number, toMs: number): LogEntry[] {
+  if (!(Number.isFinite(fromMs) && Number.isFinite(toMs)) || fromMs > toMs) return []
+  const out: LogEntry[] = []
+  const seen = new Set<string>()
+  const start = new Date(fromMs)
+  const end = new Date(toMs)
+  for (
+    let d = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    d <= end;
+    d.setDate(d.getDate() + 1)
+  ) {
+    const day = localDateStr(d)
+    if (seen.has(day)) continue
+    seen.add(day)
+    for (const e of readRequestLogDay(day)) out.push(e)
+  }
+  return out.filter((e) => {
+    const ts = Date.parse(String(e.ts))
+    return Number.isFinite(ts) && ts >= fromMs && ts <= toMs
+  })
 }
 
 export interface UsageFilter {
@@ -601,13 +626,15 @@ export function eventLoopLagMs(): number | null {
   return loopLagMs
 }
 
-/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-/events-（.jsonl）与 daemon-（.log）
+/** JSONL 日志保留期清理（PERF-16）：gateway-/audit-/debug-/events-/probe-（.jsonl）与 daemon-（.log）
  *  按天日文件无界累积，超保留天数的在网关启动与每日定时删除。文件名严格锚定、日期非法的一律
  *  不碰；被常驻流池持有句柄的日文件先关流再删（Windows 文件有本进程 fd 时 unlink 报 EPERM/
  *  EBUSY），删除失败跳过、次日定时重试。返回删除数；retentionDays 非正数视为禁用。
  *  （crash-*.log 不匹配本正则、不参与清理——事故痕迹保贵；切分前遗留的 events.jsonl 单文件
- *  见循环后专用分支。） */
-const LOG_DAY_FILE_RE = /^(gateway|audit|debug|events|daemon)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
+ *  见循环后专用分支。probe-<date>.jsonl 是探针 verdict 按天落盘（probe/verdict.ts），与
+ *  gateway- 同目录同保留口径（provider-probe-suite 任务 14）——趋势视图窗口因此不超过保留期；
+ *  探针账本 probe-ledger.jsonl 无日期后缀天然不匹配，月度预算闸与花费曲线都读它，永不清理。） */
+const LOG_DAY_FILE_RE = /^(gateway|audit|debug|events|daemon|probe)-(\d{4})-(\d{2})-(\d{2})\.(jsonl|log)$/
 
 export async function pruneExpiredLogs(retentionDays: number, now = new Date()): Promise<number> {
   const days = Math.floor(Number(retentionDays))

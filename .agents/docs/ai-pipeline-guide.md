@@ -2,7 +2,7 @@
 
 > 面向**贡献者**的端到端指南：从「给一句话意图」到「发版提案」，自治流水线（orchestrator）的全部用法。
 > 设计原理见 [design-orchestrator.md](design-orchestrator.md)；状态机与排障深读见 [orchestrator-usage.md](orchestrator-usage.md)；与既有文档的分工见文末 [§10](#10-与既有文档的分工)。
-> 全部子命令与 flag 的权威清单：**不带参数运行 `node .agents/scripts/orchestrator.mjs` 即打印用法**；本文示例与其保持一致。
+> 全部子命令与 flag 的权威清单：`.agents/reference/orch-commands.md`（按场景分组），或**不带参数运行 `node .agents/scripts/orchestrator.mjs`** 即打印用法；本文示例与其保持一致。
 
 ## 1. 一句话模型与适用判定
 
@@ -63,7 +63,7 @@ node .agents/scripts/orchestrator.mjs drain
 
 ## 4. 任务卡与队列：手写卡、gate 选择、看进度
 
-手写任务卡是完全有效的路径（想精确控制验收标准时用）。frontmatter 要点（完整 schema 与字段说明见 [.agents/workflows/orchestrator.md](../workflows/orchestrator.md)）：
+手写任务卡是完全有效的路径（想精确控制验收标准时用）。frontmatter 要点（完整 schema 设计见 [design-orchestrator.md §6.1](design-orchestrator.md)、字段级写卡规程见 [.agents/workflows/orch-loop.md](../workflows/orch-loop.md)「任务卡怎么写」）：
 
 ```markdown
 ---
@@ -210,18 +210,20 @@ node .agents/scripts/orchestrator.mjs schedule uninstall   # 卸载
 ```
 
 - 默认档（不带 `--auto`）零烧钱：只生成任务卡与报告，等人工 drain。
-- **wrapper 固化绝对路径**：定时器经 `.agents/orchestrator/nightly-runner.sh|cmd` 以绝对路径启动，运行时不做环境发现——**仓库挪位置 / node 换路径后需重跑 `schedule install`**。launchd / crontab / schtasks 的平台细节以 [.agents/workflows/orchestrator.md](../workflows/orchestrator.md) 为准，此处不转写。
+- **wrapper 固化绝对路径**：定时器经 `.agents/orchestrator/nightly-runner.sh|cmd` 以绝对路径启动，运行时不做环境发现——**仓库挪位置 / node 换路径后需重跑 `schedule install`**。launchd / crontab / schtasks 的平台细节以 [.agents/workflows/orch-autonomy.md](../workflows/orch-autonomy.md)「夜航巡港与定时」为准，此处不转写。
 
 ## 10. 与既有文档的分工
 
-同一用法只有一处权威描述，本文与既有三份文档这样分工：
+同一用法只有一处权威描述，文档矩阵如下：
 
-| 文档 | 定位 | 什么时候读 |
-|---|---|---|
-| 本文（`.agents/docs/ai-pipeline-guide.md`） | 贡献者端到端指南：从给意图到发版提案的全流程 | 第一次上手、想知道「整条流水线能做什么」 |
-| [orchestrator-usage.md](orchestrator-usage.md) | 使用者手册：状态机、熔断、排障 | 命令行为不符预期、任务卡在奇怪的状态 |
-| [.agents/workflows/orchestrator.md](../workflows/orchestrator.md) | agent 操作手册：全部话题的简版速查与平台细节 | 给 agent 下指令、查调度器/通知的平台细节 |
-| [design-orchestrator.md](design-orchestrator.md) | 设计原理：架构、状态机与红线的设计依据 | 想改 orchestrator 本身 |
+| 文档 | 层 | 定位 | 什么时候读 |
+|---|---|---|---|
+| 本文（`.agents/docs/ai-pipeline-guide.md`） | explanation+how-to | 贡献者端到端指南：从给意图到发版提案的全流程；任务卡写法与 gate 选择的权威出处 | 第一次上手、想知道「整条流水线能做什么」 |
+| [orchestrator-usage.md](orchestrator-usage.md) | how-to | 使用者手册：状态机、闸门善后、排障 | 命令行为不符预期、任务卡在奇怪的状态 |
+| [.agents/workflows/orchestrator.md](../workflows/orchestrator.md) | 入口 | 操作手册入口：一张图 + 速查 + 文档路由 | 给 agent 下指令、找「该读哪份」 |
+| [.agents/workflows/orch-*.md](../workflows/orch-loop.md) | how-to | 场景 runbook：loop（核心闭环）/ autonomy（自主模式）/ supply（选船与供给）/ observe（观测对账）/ ecosystem（spec·发版·移植） | 跑对应场景时 |
+| `.agents/reference/orch-commands.md` / `orch-config.md` / `orch-events.md` | reference | 命令面 / workflow.json 配置键 / 事件字典与通报契约（查表，不叙述） | 查命令 flag、配置键缺省、事件语义 |
+| [design-orchestrator.md](design-orchestrator.md) | explanation | 设计原理：架构、子系统与红线的设计依据 | 想改 orchestrator 本身 |
 
 - 会话中的 agent 入口是 `/dockmaster` 技能（体系名 **Dockmaster（坞长）**，原 `/orchestrate`；[SKILL.md](../skills/dockmaster/SKILL.md)），按意图路由到本文描述的各条路径。
 - 排障速查表见 [orchestrator-usage.md §7](orchestrator-usage.md)；中断任务的 worktree 清理见 [worktree-rescue.md](../workflows/worktree-rescue.md)。

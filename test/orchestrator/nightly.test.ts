@@ -204,8 +204,10 @@ describe('orchestrator nightly > --auto 选卡硬禁区', () => {
     }
   }, 120_000)
 
-  it('files_hint 命中 corePaths 的提案不提交（硬禁区）', () => {
-    const repo = mkRepo({ workerBackend: 'mock', extra: { corePaths: ['src/gateway/server.ts'] } })
+  it('files_hint 命中 corePaths 的提案不提交（硬禁区；src/gateway/relay.ts 是生产 corePaths 真核心文件）', () => {
+    // 精确口径（hintsIntersectExact）：守卫清单须真含被提示文件。曾用粗口径时清单写
+    // server.ts、hint 写 relay.ts（不同文件）也能拦——断言在错误的口径上碰巧成立。
+    const repo = mkRepo({ workerBackend: 'mock', extra: { corePaths: ['src/gateway/relay.ts'] } })
     try {
       seedDraft(repo, 'night-core-hard', { type: 'refactor', files_hint: ['src/gateway/relay.ts'] })
       const out = runOrch(repo.root, 'nightly --auto 1')
@@ -213,6 +215,19 @@ describe('orchestrator nightly > --auto 选卡硬禁区', () => {
       expect(out.stdout).toContain('命中核心/发布路径')
       expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-core-hard.md'))).toBe(true)
       expect(listCards(queueRoot(repo.root), 'pending')).toHaveLength(0)
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('files_hint 为清单外 src 文件的提案照常提交（精确口径不误拦，src/ 提案不再整体积压）', () => {
+    const repo = mkRepo({ workerBackend: 'mock', extra: { corePaths: ['src/gateway/relay.ts'] } })
+    try {
+      seedDraft(repo, 'night-src-ok', { type: 'refactor', files_hint: ['src/presets/data.ts'] })
+      const out = runOrch(repo.root, 'nightly --auto 1')
+      // 清单外 src 文件：硬禁区不拦，照常提交并起 run（mock 后端）
+      expect(out.stdout).toContain('nightly --auto → night-src-ok')
+      expect(fs.existsSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', 'night-src-ok.md'))).toBe(false)
     } finally {
       repo.cleanup()
     }

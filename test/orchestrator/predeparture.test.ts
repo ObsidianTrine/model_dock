@@ -149,6 +149,33 @@ describe('predeparture B3 引水闸 > run 拦截与放行', () => {
       repo.cleanup()
     }
   })
+
+  it('files_hint 为清单外 src 文件（粗口径曾误伤整夜 pending）：不再拦截照常闭环', () => {
+    const repo = mkRepo({ extra: { corePaths: ['src/gateway/server.ts'] } })
+    try {
+      submitCard(repo.root, 'precise-ok', { files_hint: ['src/presets/data.ts'] })
+      const run = runOrch(repo.root, 'run precise-ok --backend mock')
+      expect(run.stdout).toContain('awaiting-human')
+      expect(readCard(repo.root, 'awaiting-human', 'precise-ok')).toBeTruthy()
+      expect(eventsOf(repo.root, 'precise-ok').map((e) => e.type)).not.toContain('pilotage_required')
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('files_hint 命中发布路径：同样拦截（保护语义零放宽）', () => {
+    const repo = mkRepo({ extra: { releasePaths: ['scripts/build-sea.mjs'] } })
+    try {
+      submitCard(repo.root, 'release-pilot', { files_hint: ['scripts/build-sea.mjs'] })
+      const r = tryOrch(repo.root, 'run release-pilot --backend mock')
+      expect(r.status).not.toBe(0)
+      expect(r.stderr).toContain('--pilot-approved')
+      expect(eventsOf(repo.root, 'release-pilot').map((e) => e.type)).toContain('pilotage_required')
+      expect(readCard(repo.root, 'pending', 'release-pilot')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  })
 })
 
 describe('predeparture B3 引水闸 > drain 跳过不派发', () => {
@@ -175,6 +202,20 @@ describe('predeparture B3 引水闸 > drain 跳过不派发', () => {
       const out = runOrch(repo.root, 'drain --backend mock')
       expect(out.stdout).toContain('待引水')
       expect(readCard(repo.root, 'awaiting-human', 'plain-run')).toBeTruthy()
+      expect(readCard(repo.root, 'pending', 'held-pilot')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('清单外 src 卡与引水卡混队 drain：src 卡照常派出（粗口径曾整夜 pending），引水卡仍列清单', () => {
+    const repo = mkRepo({ extra: { corePaths: ['src/gateway/server.ts'] } })
+    try {
+      submitCard(repo.root, 'precise-drain', { files_hint: ['src/presets/data.ts'] })
+      submitCard(repo.root, 'held-pilot', { files_hint: ['src/gateway/server.ts'] })
+      const out = runOrch(repo.root, 'drain --backend mock')
+      expect(out.stdout).toContain('待引水')
+      expect(readCard(repo.root, 'awaiting-human', 'precise-drain')).toBeTruthy()
       expect(readCard(repo.root, 'pending', 'held-pilot')).toBeTruthy()
     } finally {
       repo.cleanup()
@@ -218,7 +259,7 @@ describe('predeparture B8 交接班单 > NOTES 模板与 resume 恢复', () => {
     const repo = mkRepo()
     try {
       submitCard(repo.root, 'relief')
-      tryOrch(repo.root, 'run relief --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck' })
+      tryOrch(repo.root, 'run relief --backend mock', { ORCH_MOCK_WORKER_STATUS: 'stuck', ORCH_MOCK_NO_COMMIT: '1' })
       expect(readCard(repo.root, 'blocked', 'relief')).toBeTruthy()
       const r2 = runOrch(repo.root, 'resume relief --backend mock')
       expect(r2.stdout).toContain('awaiting-human')

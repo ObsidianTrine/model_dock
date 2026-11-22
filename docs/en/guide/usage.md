@@ -5,7 +5,7 @@
 
 > In one line: collect the base_url + key of every AI harness (Claude Code / ZCode / dsh / Codex / …) into ModelDock; each harness points at the local gateway once, and from then on switching providers or model mappings is one command, effective immediately.
 
-**Contents**: [1. Core concepts in three minutes](#1-core-concepts-in-three-minutes) · [2. Installation & build](#2-installation--build) · [3. First steps (recommended path)](#3-first-steps-recommended-path) · [4. What attach does to each harness](#4-what-attach-does-to-each-harness) · [5. Daily usage](#5-daily-usage) · [5.5 Web console](#55-web-console) · [6. Restore & uninstall (fully reversible)](#6-restore--uninstall-fully-reversible) · [7. Config file reference (~/.modeldock/)](#7-config-file-reference-modeldock) · [8. Gateway & ports](#8-gateway--ports) · [9. Troubleshooting](#9-troubleshooting) · [10. Implementation status](#10-implementation-status-2026-11-04-baseline-refresh-with-the-version-number-at-release)
+**Contents**: [1. Core concepts in three minutes](#1-core-concepts-in-three-minutes) · [2. Installation & build](#2-installation--build) · [3. First steps (recommended path)](#3-first-steps-recommended-path) · [4. What attach does to each harness](#4-what-attach-does-to-each-harness) · [5. Daily usage](#5-daily-usage) · [6. Web console](#6-web-console) · [7. Restore & uninstall (fully reversible)](#7-restore--uninstall-fully-reversible) · [8. Config file reference (~/.modeldock/)](#8-config-file-reference-modeldock) · [9. Gateway & ports](#9-gateway--ports) · [10. Troubleshooting](#10-troubleshooting)
 
 ## 1. Core concepts in three minutes
 
@@ -170,7 +170,7 @@ model_fallback = { "glm-5.3-flash" = "glm-5.2" }   # primary model → backup mo
 
 Field details: see the [config reference](../reference/config-reference.md).
 
-## 5.5 Web console
+## 6. Web console
 
 Open `http://127.0.0.1:8687/_modeldock/ui` in a browser, or simply:
 
@@ -197,7 +197,7 @@ Two productivity switches:
 - **Scheduled switching (⏰)**: switch between services automatically by time of day — e.g. route to DeepSeek during its off-peak half-price window (00:30–08:30) and to your main service the rest of the time; statutory holidays are discounted all day on DeepSeek, so add a "statutory holiday" window that prefers it all day. Effective days support every day / weekdays (Mon–Fri plus make-up workdays) / weekends / statutory holidays; the calendar is fetched and updated automatically from the State Council announcements — no manual maintenance; windows may cross midnight. Auto-routing as a whole is one master toggle (on = enabled); settings save as you change them, every request is evaluated in real time, so edits take effect immediately, and the panel also shows the nearest statutory holidays.
 - **Auto-start on boot**: registers the system service in one click from settings (macOS LaunchAgent / Linux systemd with crash auto-restart; Windows registry Run key for login auto-start) — the gateway launches on login, always-on so clients never disconnect.
 
-The auto-routing row also has two failover-related toggles: "Temporary failure → fallback" = when the primary returns 429 rate-limiting or 503 unavailability, automatically retry via the fallback (default on); **"Automatic fallback chain" (default on) = failover works even without a manually configured chain** — when the primary is unreachable, rate-limited, or out of quota (e.g. DeepSeek returning 402 out of balance), the other enabled services automatically join the switching candidates, ordered by schedule, priority, and measured latency (up to 3); model names pass through unchanged — change models in the client. A manually configured "Failover order" always runs before the auto tail.
+The auto-routing row also has two failover-related toggles: "Temporary failure → fallback" = when the primary returns 429 rate-limiting or 503 unavailability, automatically retry via the fallback (default on); **"Automatic fallback chain" (default on) = failover works even without a manually configured chain** — when the primary is unreachable, rate-limited, or out of quota (e.g. DeepSeek returning 402 out of balance), the other enabled services automatically join the switching candidates, ordered by schedule, priority, and measured latency (up to 3); model names pass through unchanged — change models in the client. A manually configured "Failover order" always runs before the auto tail. There is also a model-level exemption: when an upstream explicitly rejects the requested model with a 404 (e.g. `UnsupportedModel`), the gateway also switches to the next alive candidate mid-chain — no configuration needed.
 
 **Menu bar / tray resident**: the macOS menu bar and Windows system tray have a permanent ModelDock icon — open the console, open in browser, switch services / models, attach or detach clients, toggle auto-start, open the log directory; closing the console window keeps the gateway running, and "Quit" stops the gateway and exits the tray. **Lightweight mode** in the menu collapses all ModelDock windows at one click and leaves only the tray resident; reopening the console (tray menu, double-clicking the program, or the browser) exits that state automatically, and the menu checkmark follows in real time — unchecked while any window is open, checked once all are closed.
 
@@ -253,11 +253,11 @@ No link? Use a config package: on the old computer, click **"Export config packa
 
 You can also self-host a cloud hub for unified multi-device management (advanced): deploy the control plane on a cloud server (one-page runbook: [deploy-cloud.md](deploy-cloud.md)), then enroll computers with `modeldock sync enroll --server http://<IP>:18443 --code <pairing code>`; open the cloud address in a browser (best on the phone), paste the consoleToken to log in, and you can view all devices, switch services per-device or in bulk (effective within 1 minute), and generate new pairing codes. Enrolled devices heartbeat their service catalogs up, so the switch dropdown automatically lists every service the target machine actually has.
 
-## 6. Restore & uninstall (fully reversible)
+## 7. Restore & uninstall (fully reversible)
 
 ```bash
-modeldock restore claude-code --list     # list all snapshots for that harness
-modeldock restore claude-code <id>       # restore to any snapshot (it snapshots first too, so this is undoable)
+modeldock harness restore claude-code --list   # list all snapshots for that harness
+modeldock harness restore claude-code <id>     # restore to any snapshot (it snapshots first too, so this is undoable)
 modeldock detach claude-code             # detach = restore to the pre-attach state
 modeldock uninstall                      # uninstall: stop gateway → remove auto-start/CLI entry; config & keys kept, reinstall reconnects
 modeldock uninstall --purge              # full wipe: restore clients → stop gateway → delete ~/.modeldock and stored keys
@@ -267,7 +267,7 @@ modeldock reset --deep                   # clean data: all of the above + delete
 
 > The menu bar / tray icon also has "Clean up data…": after a confirmation dialog it is equivalent to `modeldock reset --deep` — the exact same cleanup logic as the CLI.
 
-## 7. Config file reference (~/.modeldock/)
+## 8. Config file reference (~/.modeldock/)
 
 For the type, default and meaning of every config key, see the **[config.toml configuration reference](../reference/config-reference.md)** (this section lists the common shapes only).
 
@@ -320,24 +320,24 @@ upsert = { "$.provider.modeldock.baseURL" = "{base_url}", "$.provider.modeldock.
 
 Variable templates: `{token}` `{port}` `{base_url}` `{base_url_openai}`. Then `modeldock attach opencode` takes over.
 
-## 8. Gateway & ports
+## 9. Gateway & ports
 
 - Default `127.0.0.1:8687`, accessible from this machine only; if the port is taken it auto-increments and prints the actual port (attach writes the actual port).
 - Resident: `modeldock gateway install` registers auto-start on boot (launch on login + crash auto-restart on macOS/Linux; `gateway uninstall` removes it); `gateway status` shows the auto-start state and detects a stale launch path registered in the service (e.g. after an nvm upgrade).
 - Presets for overseas upstreams (OpenAI / Anthropic / Gemini…) default to `proxy = "env"`, reading the `HTTPS_PROXY` environment variable, clash-compatible; domestic upstreams connect directly.
 - Admin endpoints: `/_modeldock/health` and read endpoints need no auth locally; write operations require a same-origin request or the admin token (gateway.json, used by the CLI automatically). Visiting `http://127.0.0.1:8687` in a browser redirects to the Web console.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | harness reports 401 | wrong token: verify with `modeldock status`, re-run attach; for codex check `MODELRDOCK_CODEX_TOKEN` |
 | upstream 401/403 | key invalid: `modeldock provider set-key <id>` |
-| upstream 404 model | `modeldock model refresh <id>` to fetch models, or switch profile |
+| upstream 404 model | mid-chain the gateway already switched to the next alive service (when the error body names the model as unsupported); only a chain-tail error needs action: `modeldock model refresh <id>` to fetch models, or switch profile |
 | suspected context overflow | check the model's ctx with `modeldock model list`; switch to a longer-context model |
 | gateway down, all harnesses broken | with auto-start installed (`gateway install`) it comes back automatically; otherwise `modeldock gateway start --daemon`; emergency `modeldock detach <harness>` returns to direct mode immediately |
 | ZCode not using the gateway | attach only registered the provider — you must also select it once in ZCode settings |
-| config broken | `modeldock config edit` or `modeldock restore` |
+| config broken | `modeldock config edit` or `modeldock harness restore <harness>` |
 | all clients fail to connect after an upgrade | the gateway is probably not running: check `modeldock gateway status` and start it with `modeldock gateway start --daemon`; if it still fails, check whether antivirus software quarantined the modeldock executable (restore or whitelist it, then retry) |
 | changed a key / switched services, requests still behave the old way | changes hot-reload immediately; keys changed via the system keyring catch up within about a minute; to force it, restart the gateway (`gateway stop` → `gateway start --daemon`) |
 | 404 after pinning a service | usually the service's base URL is missing the matching protocol endpoint (e.g. only an OpenAI address was filled in, leaving Anthropic-style requests nowhere to go): complete the base URLs under "Edit service" and retry — `modeldock doctor` helps check |
@@ -347,11 +347,3 @@ Variable templates: `{token}` `{port}` `{base_url}` `{base_url_openai}`. Then `m
 `modeldock doctor` checks: config parsing, gateway & ports (names the process occupying a taken port), upstream reachability, per-client attachment, the secret store (keyring failures vs. missing keys reported separately, cross-machine ciphertext references named), autostart validity, log size & disk space, gateway version drift (upgraded but not restarted), and more — every bad item ships with an actionable fix suggestion. `--deep` sends a real request to the current service (auth and model-name verification); `--fix` repairs in tiers (safe items automatic, sensitive ones confirmed) and re-verifies automatically afterward; exit code is 1 when bad items remain — scripts and CI can rely on it.
 
 Still stuck after the above? Ask in [Discussions](https://github.com/ObsidianTrine/model_dock/discussions) — including the output of `modeldock status`, `modeldock doctor`, and the request log (`modeldock gateway log`, metadata only, never conversation content) makes diagnosis much faster.
-
-## 10. Implementation status (2026-11-04 baseline; refresh with the version number at release)
-
-Implemented: every command listed in this document; the gateway (dual-protocol passthrough / model rewriting / SSE / hot reload / error translation / proxies / request-level failover + circuit breaking: manual fallback chain first, automatic fallback chain as tail, auto-switch on quota exhaustion); snapshot restore (retention controlled by `backup.keep`); a built-in preset library (multi-protocol endpoints and model parameters; count as reported by `modeldock preset list`); multi-source config import; L2 declarative packs; Web console (§5.5, incl. one-click migration, "Current / Next switch" dual-slot dropdowns at the top, client "Install & attach" (works without Node.js, managed runtime + mainland mirror), scheduled switching (auto weekday / weekend / statutory-holiday / make-up day detection, State Council calendar), dark theme); **dual-slot routing ("Current" / "Next switch", manual pin takes precedence over automation, failover always on)**; **phone compact console (LAN 8787 + QR code: status viewing / service switching / routing adjustment / config sync, same data as the desktop; PWA home-screen resident)**; **encrypted config export/import (`config export` / `config import`, full-package AES-256-GCM passphrase encryption, phone QR code as courier)**; **multi-machine auto-sync (`sync setup/status/pause/resume`, WebDAV / local sync folders, two-way convergence + conflict snapshots)**; **cloud hub (self-hosted control plane, see docs/guide/deploy-cloud.md: pairing-code enrollment / heartbeat / cloud phone page managing devices & remote switching)**; **menu bar tray (macOS menu bar / Windows tray: open console / check updates / clean data, quit stops the gateway)**; **secure key storage (macOS Keychain / Windows DPAPI / Linux Secret Service, machine-id-bound encryption fallback without a keyring, automatic plaintext migration)**; **auto-start residency (`gateway install`, macOS LaunchAgent / Linux systemd / Windows startup folder)**; **one-command upgrade (`modeldock update`: GitHub Releases check + SHA256 verify + per-platform replace + gateway auto-restart, mac swaps the whole .app / win silent installer / bare binary replaced in place; console top-bar "update available" badge + one-click dialog + auto-reconnect, tray "Check for updates" menu, silent check at startup with 24h TTL)**; **usage statistics & cost conversion (`GET /_modeldock/usage` aggregation endpoint: filter by date range and client / service / model, summarizing request counts, token breakdown, and estimated cost, admin-plane auth; the console status-line today-usage badge is in §5.5)**; **billable token accounting (the `GET /_modeldock/usage` response now includes `billable_tokens` / `billable_partial`: sums billable tokens over successful requests that carry usage in the window, excluding non-billable parts such as cache reads; `billable_partial=true` means the window mixes in logs from an older gateway and the sum covers only what is available)**; **hourly usage buckets (`GET /_modeldock/usage` supports `bucket=hour`: the response gains an `hours[]` array listing requests, tokens, cost, and model / status distribution hour by hour — troubleshooting no longer means staring at a whole-day total)**; **per-model latency (the `GET /_modeldock/usage` summary gains `latency_by_model`: request count plus average / p50 / p95 latency per model, so the speed of each model within a service can be compared)**; **model price override (built-in models.dev list prices, refreshed with the catalog; when actual discounted / plan prices differ, override them in `~/.modeldock/pricing.json`, key = model name or `provider/model`, in USD per million tokens; models with no matched price are counted as $0 and named as a reminder — prices are never guessed)**; cross-platform support (Linux / macOS / Windows); single-file executables (SEA) and per-platform installers (macOS DMG drag-and-drop / Windows setup wizard, double-click auto-installs the CLI); GitHub Actions automated packaging & release.
-
-Verification status: TypeScript compiles; product tests all green — suites cover store / backup / util / adapters / gateway / install / autostart / cliinstall / lan / schedule / sync / cloud / i18n / update and more (incl. Web endpoints, the phone console and the cloud control plane); test and file counts are whatever `npm test` reports (a few tests skip per platform); the agent-workflow suite (.agents/ orchestrator and guard hooks) runs separately via `npm run test:workflow`; CLI binary smoke-tested; cross-platform tests pass on Windows / Linux / macOS. Real-harness attach integration is left for you to run on your own machine — for first use, keep the diff confirmation, and run `modeldock test` / `modeldock doctor` first.
-
-Planned: L3 external plugins, remote preset-library updates, management-plane "strict mode" (token required even for read endpoints), anthropic↔openai protocol conversion; cloud-sync refinements (recovery codes / device revocation / optional passphrase-cache switch) and real-VPS acceptance of the cloud control plane proceed per the detailed design.

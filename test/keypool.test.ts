@@ -5,6 +5,7 @@ import { KEY_COOLDOWN_MS, keyInCooldown, keyPoolHealthView, markKeyCooldown, nex
 import { buildRuntime, reloadRuntime } from '../src/gateway/state.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { forwardToUpstream, forwardWithFailover, UpstreamError } from '../src/gateway/relay.js'
+import { recordModelOutcome } from '../src/gateway/state/routing.js'
 import { providerKeyRefs, resolveProviderKeys, setSecret } from '../src/config/secrets.js'
 import { loadConfig, mutateConfig } from '../src/config/store.js'
 import { fakeHome } from './helpers.js'
@@ -129,23 +130,31 @@ describe('keypool · relay 集成（池轮转 / 401 换 key / 全灭切候选）
   interface Mock {
     url: string
     auths: string[]
+    bodies: string[]
     count: () => number
     close: () => Promise<void>
   }
 
-  /** auth → status 的可编程 mock：handler 返回响应码（缺省 200）。逐请求记录 Bearer 后的 key。 */
+  /** auth → status 的可编程 mock：handler 返回响应码（缺省 200）。逐请求记录 Bearer 后的 key
+   *  与请求体（模型改写断言用）。 */
   async function startKeyMock(handler?: (auth: string) => number): Promise<Mock> {
     const auths: string[] = []
+    const bodies: string[] = []
     const s = http.createServer((req, res) => {
       const auth = String(req.headers.authorization ?? '')
       auths.push(auth)
-      const status = handler ? handler(auth) : 200
-      res.writeHead(status, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: status < 400, error: status >= 400 ? { message: 'invalid api key' } : undefined }))
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        bodies.push(Buffer.concat(chunks).toString('utf8'))
+        const status = handler ? handler(auth) : 200
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: status < 400, error: status >= 400 ? { message: 'invalid api key' } : undefined }))
+      })
     })
     await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
     const close = () => new Promise<void>((r) => { s.closeAllConnections?.(); s.close(() => r()) })
-    return { url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, auths, count: () => auths.length, close }
+    return { url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, auths, bodies, count: () => auths.length, close }
   }
 
   function buildRt(providers: Record<string, ProviderConfig>): ReturnType<typeof buildRuntime> {
@@ -313,6 +322,98 @@ describe('keypool · relay 集成（池轮转 / 401 换 key / 全灭切候选）
       const r = await forwardToUpstream(rt, baseOn(cfg, 'pg'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0 })
       expect(r.status).toBe(200)
       expect(mock.auths).toEqual(['Bearer sk-GOOD'])
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  // 探针专用开关（provider-probe-suite 任务 4，design 方案 3）：缺省 undefined 走既有路径
+  //（上方既有用例即缺省路径回归），显式传参仅供探针逐把直发——池态必须不受探针影响
+  it('forceKeyIndex（探针专用）：直发指定把位——冷却中的 key 照发、401 不打冷却不换 key', async () => {
+    const h = fakeHome()
+    const mock = await startKeyMock((auth) => (auth === 'Bearer sk-A' ? 401 : 200))
+    try {
+      const pa = await twoKeyProvider(mock)
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      markKeyCooldown(rt, 'pa', 0) // sk-A 已被转发路径打入冷却
+      // 冷却过滤被绕过：仍直发第 0 把，401 原样返回（探针自己归档 verdict）
+      const r1 = await forwardToUpstream(rt, baseOn(cfg, 'pa'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0, forceKeyIndex: 0 })
+      expect(r1.status).toBe(401)
+      expect(mock.auths).toEqual(['Bearer sk-A']) // 不换 key 重试（换 key 会把死把伪装成活把）
+      // 探针不打 markKeyCooldown：既有冷却原样保留，健康把不被牵连
+      expect(keyInCooldown(rt, 'pa', 0)).toBe(true)
+      expect(keyInCooldown(rt, 'pa', 1)).toBe(false)
+      expect(rt.keyPool.cooldown.get('pa')!.size).toBe(1)
+      // 强制健康把：正常 200
+      const r2 = await forwardToUpstream(rt, baseOn(cfg, 'pa'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0, forceKeyIndex: 1 })
+      expect(r2.status).toBe(200)
+      expect(mock.auths).toEqual(['Bearer sk-A', 'Bearer sk-B'])
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('forceKeyIndex 越界（池已变更/引用失效）：可操作报错且请求未出网，不误打错误的把位', async () => {
+    const h = fakeHome()
+    const mock = await startKeyMock()
+    try {
+      const pa = await twoKeyProvider(mock)
+      const rt = buildRt({ pa })
+      const cfg = rt.config as Config
+      await expect(forwardToUpstream(rt, baseOn(cfg, 'pa'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0, forceKeyIndex: 9 })).rejects.toThrow(/重新发起探针/)
+      expect(mock.count()).toBe(0)
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('skipModelFallbackGate（探针专用）：熔断中模型按原模型直发、零改写零计数；缺省路径 mfGate 仍生效', async () => {
+    const h = fakeHome()
+    const mock = await startKeyMock()
+    try {
+      await setSecret('pm-0', 'sk-PM', 'file')
+      const pm = providerCfg({ name: 'pm', base_url: mock.url, key_ref: 'file:pm-0', model_fallback: { m: 'mb' } })
+      const rt = buildRt({ pm })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pm', 'm', { ok: false, cls: 'quota' }) // (pm, m) 进熔断
+      // 探针路径（skip）：原模型直发，modelAfter = 原模型，不调 recordModelFallback
+      const up1 = await forwardToUpstream(rt, baseOn(cfg, 'pm'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0, skipModelFallbackGate: true })
+      expect(up1.status).toBe(200)
+      expect(JSON.parse(mock.bodies[0]!).model).toBe('m')
+      expect(up1.modelAfter).toBe('m')
+      expect(rt.modelFallbackCounts?.get('pm\u0000m')).toBeUndefined()
+      // 缺省（不传）：既有 mfGate 行为不变——熔断预改写直落备用模型 + 吸收计数
+      const up2 = await forwardToUpstream(rt, baseOn(cfg, 'pm'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0 })
+      expect(up2.status).toBe(200)
+      expect(JSON.parse(mock.bodies[1]!).model).toBe('mb')
+      expect(up2.modelAfter).toBe('mb')
+      expect(rt.modelFallbackCounts?.get('pm\u0000m')).toEqual({ fallbackCount: 1, absorbedCount: 1 })
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('skipModelFallbackGate 同时绕过熔断快速失败：无备用映射的熔断模型也能直发（缺省 402 快速失败不变）', async () => {
+    const h = fakeHome()
+    const mock = await startKeyMock()
+    try {
+      await setSecret('pn2-0', 'sk-PN2', 'file')
+      const pn2 = providerCfg({ name: 'pn2', base_url: mock.url, key_ref: 'file:pn2-0' }) // 无 model_fallback
+      const rt = buildRt({ pn2 })
+      const cfg = rt.config as Config
+      for (let i = 0; i < 3; i++) recordModelOutcome(rt, 'pn2', 'm', { ok: false, cls: 'quota' })
+      // 缺省：M3 快速失败（请求未出网）——既有行为不变
+      await expect(forwardToUpstream(rt, baseOn(cfg, 'pn2'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0 })).rejects.toMatchObject({ status: 402, cause: 'quota', attemptNote: 'model_cooldown' })
+      expect(mock.count()).toBe(0)
+      // 探针路径：绕过快速失败，拿到上游真实状态
+      const up = await forwardToUpstream(rt, baseOn(cfg, 'pn2'), { method: 'POST', body, path: ROUTED, headers: {}, idleTimeoutMs: 5000, retries: 0, skipModelFallbackGate: true })
+      expect(up.status).toBe(200)
+      expect(mock.count()).toBe(1)
     } finally {
       await mock.close()
       h.restore()

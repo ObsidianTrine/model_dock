@@ -163,12 +163,12 @@ describe('orchestrator scan > 已知问题账本与 CI 信号源', () => {
   it('scanCI：GitHub 远端 + 假 gh 失败 run → high 提案；非 GitHub / gh 失败 / 主干全绿 → skipped 或无卡', () => {
     const repo = mkRepo()
     try {
-      const failRun = () => ({ status: 0, stdout: JSON.stringify([{ databaseId: 99, headSha: 'abcdef1234567890', displayTitle: 'ci: x' }]), stderr: '' })
+      const failRun = () => ({ status: 0, stdout: JSON.stringify([{ databaseId: 99, headSha: 'abcdef1234567890', displayTitle: 'ci: x', conclusion: 'failure' }]), stderr: '' })
       expect(scanCI(repo.root, { run: failRun }).skipped).toBe(true) // 无远端短路，gh 都不调
       git(repo.root, 'remote add origin https://github.com/foo/bar.git')
       const cards = scanCI(repo.root, { run: failRun, baseBranch: 'develop' })
       expect(cards).toHaveLength(1)
-      expect(cards[0].id).toBe('scan-ci-abcdef12') // 同提交同 id 天然去重
+      expect(cards[0].id).toBe('scan-ci-abcdef12') // 单 run streak：id 取 streak 首个 run 的 head sha
       expect(cards[0].goal).toContain('#99')
       expect(cards[0].priority).toBe('high')
       const ghFail = scanCI(repo.root, { run: () => ({ status: 1, stdout: '', stderr: 'gh: auth' }) })
