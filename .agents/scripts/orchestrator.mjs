@@ -3972,7 +3972,8 @@ async function cmdSpecStart(repoRoot, opts) {
         ? parts[0].body
         : parts.map((p) => (typeof p === 'object' ? `# 调研结论（brief：${p.id}）\n\n${String(p.body).trim()}` : p)).join('\n\n---\n\n');
     }
-    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
+    const specCfg = loadWorkflowConfig(repoRoot);
+    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, specCfg.reviewNotes, briefBody, specCfg.spec?.industrialDesign === true);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -4917,7 +4918,8 @@ async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-prompt-')), 'spec-prompt.md');
   try {
-    let promptText = buildSpecPrompt(sanitizeIntent(goal || draftId), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
+    const specCfg = loadWorkflowConfig(repoRoot);
+    let promptText = buildSpecPrompt(sanitizeIntent(goal || draftId), repoRoot, specCfg.reviewNotes, briefBody, specCfg.spec?.industrialDesign === true);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);

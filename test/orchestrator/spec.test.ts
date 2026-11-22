@@ -64,6 +64,31 @@ describe('orchestrator spec > prompt 构建与解析', () => {
     expect(p).toContain('设计不得违反 AGENTS.md 红线（受保护端口 7000、禁止手写锁文件）；')
   })
 
+  it('spec prompt 缺省（industrialDesign=false）不含工业级设计增补块（回归红线）', () => {
+    const p = buildSpecPrompt('支持配置导出', process.cwd())
+    expect(p).not.toContain('工业级设计增补')
+    expect(p).not.toContain('交互原型先行')
+    expect(p).not.toContain('关路径四件套')
+    // 显式 false 与缺省同态
+    expect(buildSpecPrompt('支持配置导出', process.cwd(), '', '', false)).not.toContain('工业级设计增补')
+  })
+
+  it('spec prompt industrialDesign=true 末尾注入工业级设计增补块（五条逐字锚，钉死契约）', () => {
+    const p = buildSpecPrompt('支持配置导出', process.cwd(), '', '', true)
+    expect(p).toContain('# 工业级设计增补（spec.industrialDesign=true 生效）\n含 UI/交互面的设计必须满足以下五条，缺一即违反产出契约：\n')
+    expect(p).toContain('1. 交互原型先行：design 必须附自包含 HTML 交互原型文件路径（原型放 specs/<id>/proto/ 下，不入库），覆盖全部状态：空态/加载态/错误态/成功态/关闭路径；原型未经船东批准前不得 spec build（人工闸执行）。')
+    expect(p).toContain('2. 关路径四件套：每个弹层/页面 ≥1 显式关闭按钮（头部 × 或 foot 次行动「关闭/返回」）+ Esc + 遮罩点击 + 主行动完成自动关；四路缺一须在 design 说明取舍理由。')
+    expect(p).toContain('3. 全状态覆盖：空态/加载态/错误态/成功态逐一设计并写进 tasks 的呈现层验收，不许只画理想态。')
+    expect(p).toContain('4. 刷新策略：打开即拉取数据（数据陈旧可接受）；手动刷新只作次行动（图标化或与主行动并列），禁止孤儿刷新按钮（无主行动配对的独占刷新）。')
+    expect(p).toContain('5. 呈现面论证（规约 §1.6 既有检查点）持续适用。')
+    expect(p.trimEnd().endsWith('5. 呈现面论证（规约 §1.6 既有检查点）持续适用。')).toBe(true) // 末尾追加
+  })
+
+  it('本仓库 workflow.json 实际开启 spec.industrialDesign（船东 2026-11-22 授权）', () => {
+    const wf = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.agents', 'workflow.json'), 'utf8'))
+    expect(wf.spec?.industrialDesign).toBe(true)
+  })
+
   it('parseSpecBlocks：四块齐全解出 id/title；缺块或缺 meta 字段返回 null', () => {
     const parsed = parseSpecBlocks(specOutput())
     expect(parsed?.id).toBe('add-export')

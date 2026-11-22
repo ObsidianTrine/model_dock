@@ -111,6 +111,9 @@
       "enabled": true
     }
   },
+  "spec": {
+    "industrialDesign": true
+  },
   "autoResume": {
     "enabled": true
   },
