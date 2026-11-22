@@ -50,8 +50,12 @@ function mergeConfirmToken(adminToken: string, pkgDigest: string, serviceCount: 
   return sha256(`${adminToken}|merge-apply|${pkgDigest}|${serviceCount}`).slice(0, 32)
 }
 
-function pkgDigest(inputs: readonly MergePkgInput[], passphrase: string): string {
-  return sha256(inputs.map((p) => `${p.name}\u0000${sha256(p.text)}`).join('\u0001') + `\u0000${sha256(passphrase)}`)
+/** 包内容摘要：绑定 (name, 包文本) 清单——预览与确认之间内容变化即失效。口令不进摘要：
+ *  口令有效性由解包层强制（错口令 openEnvelope 直接失败，apply 报口令错误而非「预览过期」），
+ *  且口令若参与快速哈希即构成 password→弱哈希污点面（CodeQL insufficient-password-hash，
+ *  2026-11-22 实警 10 条路径全由 sha256(passphrase) 一处引出），安全上零增益。 */
+function pkgDigest(inputs: readonly MergePkgInput[]): string {
+  return sha256(inputs.map((p) => `${p.name}\u0000${sha256(p.text)}`).join('\u0001'))
 }
 
 /** POST /_modeldock/merge/preview：多包解包去重 + 探针三档建议（admin 门内只读路径，零写盘）。
@@ -74,7 +78,7 @@ export async function hMergePreview(c: AdminCtx): Promise<void> {
       JSON.stringify({
         ok: true,
         preview,
-        confirmToken: mergeConfirmToken(rt.adminToken, pkgDigest(inputs, passphrase), preview.candidates.length),
+        confirmToken: mergeConfirmToken(rt.adminToken, pkgDigest(inputs), preview.candidates.length),
         tokenScope: 'unfiltered',
       })
     )
@@ -104,7 +108,7 @@ export async function hMergeApply(c: AdminCtx): Promise<void> {
     if (unknown.length > 0) {
       return sendError(res, 400, t('keep 含未知服务 id：{ids}', 'keep contains unknown provider ids: {ids}', { ids: unknown.join(', ') }), t('重新 preview 取最新候选清单', 'Re-run preview for the latest candidate list'))
     }
-    const token = mergeConfirmToken(rt.adminToken, pkgDigest(inputs, passphrase), preview.candidates.length)
+    const token = mergeConfirmToken(rt.adminToken, pkgDigest(inputs), preview.candidates.length)
     const supplied = typeof b.confirmToken === 'string' ? b.confirmToken : ''
     if (!supplied || !safeEqual(supplied, token)) {
       return sendError(res, 400, t('confirmToken 与当前包内容/勾选不一致（预览已过期）', 'confirmToken does not match the current packages/selection (preview expired)'), t('重新 POST /_modeldock/merge/preview 后再 apply', 'Re-run merge/preview, then apply again'))
