@@ -47,7 +47,7 @@ describe('dynamic dispatch > normalizeEnvelope（包络规范化）', () => {
   it('非数组/空 → 空包络；DYNAMIC_SHIPS 契约不含 mock', () => {
     expect(normalizeEnvelope('zcode-headless').envelope).toEqual([])
     expect(normalizeEnvelope(undefined).envelope).toEqual([])
-    expect(DYNAMIC_SHIPS).toEqual(['claude-headless', 'zcode-headless'])
+    expect(DYNAMIC_SHIPS).toEqual(['claude-headless', 'zcode-headless', 'codex-headless', 'dsh-headless'])
   })
 })
 

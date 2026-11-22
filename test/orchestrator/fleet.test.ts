@@ -230,7 +230,7 @@ describe('assessFleet（船↔harness 判读）', () => {
   })
 
   it('SHIP_HARNESS 映射契约：编排后端 ↔ 交互形态适配器', () => {
-    expect(SHIP_HARNESS).toEqual({ 'zcode-headless': 'zcode', 'claude-headless': 'claude-code', 'codex-headless': 'codex' })
+    expect(SHIP_HARNESS).toEqual({ 'zcode-headless': 'zcode', 'claude-headless': 'claude-code', 'codex-headless': 'codex', 'dsh-headless': 'dsh' })
   })
 
   it('codex 船：attached 且指向其他端点 → dogfood_bypass；未接入 → not_attached（2026-11-22 补映射）', () => {
