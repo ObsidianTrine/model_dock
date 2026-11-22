@@ -485,6 +485,33 @@ describe('控制台合并入口收编（构建产物冒烟）', () => {
     expect(line).toBeTruthy()
     expect(line).toMatch(/,\s*\{\s*n:/)
   })
+
+  // merge-review-two-line（船东批准原型 /tmp/merge-proto/merge-flow.html 落地）：地址格两行化、
+  // 同源标记降噪（仅 >1）、表头全选联动——源级形态断言 + 产物在场断言
+  it('审阅表两行化：地址 rtl 左截断 + scheme 剥离 + 表头全选联动 + dup>1 条件形态', () => {
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const styles = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'styles.ts'), 'utf8')
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    // ① 地址首行 rtl 左截断（省略号在行首、尾部 host/path 保留）：CSS 唯一事实源是 styles.ts
+    // （ui-minified 只含 JS bundle，UI_CSS 由 ui.ts 直拼 <style>，不经过 gen-ui-min）
+    expect(styles).toContain('direction:rtl')
+    // ② scheme 剥离 replace 形态（模板字面量源里 \/ 双写为 \\；产物经 esbuild/模板转义回单杠）
+    const addrLine = src.split('\n').find((l) => l.includes('base_url.replace'))
+    expect(addrLine).toBeTruthy()
+    expect(addrLine).toContain(String.raw`replace(/^https?:\\/\\//`)
+    expect(min).toContain(String.raw`base_url.replace(/^https?:\\/\\//`)
+    // ③ 表头全选联动：th 有 mgSelAll 复选框，change 置位全行，行变化经委托回写表头态
+    expect(src).toContain('id="mgSelAll"')
+    expect(src).toMatch(/mgSelAllBox\.addEventListener\('change'/)
+    expect(src).toContain('mgSyncSelAll')
+    // ④ 同源标记降噪：仅 duplicateCount > 1 才显「同源 ×n」，旧 dup=1 文案路径整条移除
+    expect(src).toMatch(/duplicateCount > 1/)
+    expect(src).not.toMatch(/duplicateCount > 0/)
+    expect(src).not.toContain('合并 {n} 条重复')
+    // 产物在场：全选框与两行形态类名随 esbuild 进 bundle（属性名/字面量不改写）
+    expect(min).toContain('mgSelAll')
+    expect(min).toContain('mgsub')
+  })
 })
 
 // ── CLI 冒烟：config merge 两份合成包 → 逐服务三档建议清单 + 勾选写入 ────────────────────────
