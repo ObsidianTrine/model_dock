@@ -42,13 +42,22 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
       '<span id="impFileChip" class="filechip" hidden></span>' +
       // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan-mobile-page.ts:106 同款注释）
-      '<input type="file" id="impFile2" hidden></p>' +
-      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
-      '<p class="row" style="margin:10px 0 0"><button type="button" class="btn small" id="mergePkgBtn" data-i18n="合并多个配置包…||Merge multiple packages…">合并多个配置包…</button>' +
-      '<span class="help" data-i18n="多包去重合并，按探针结论勾选保留||Dedupe-merge several packages; keep per probe verdicts"></span></p>' +
+      // multiple：多选即进入合并流（mgSetFiles 分流），单选仍走原单包导入
+      '<input type="file" id="impFile2" multiple hidden></p>' +
+      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box">' +
+      '<div id="impChips" class="chips" hidden></div>' +
+      '<div id="impPwRows" hidden></div></div></div>' +
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
       '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
       '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +
+      '<div id="impMergePreview" hidden style="margin-top:8px"><p class="testline" id="impMergeLine"></p>' +
+      '<div class="tablescroll"><table id="impMergeTable"><thead><tr>' +
+      '<th></th><th data-i18n="服务||Service">服务</th><th data-i18n="探针||Probe">探针</th><th data-i18n="建议||Suggestion">建议</th><th data-i18n="来源||Sources">来源</th>' +
+      '</tr></thead><tbody id="impMergeRows"></tbody></table></div>' +
+      '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impMergeBackBtn" data-i18n="返回||Back">返回</button>' +
+      '<button type="button" class="btn small primary" id="impMergeApplyBtn" data-i18n="应用所选||Apply selected">应用所选</button></p>' +
+      '<p class="help" data-i18n="同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。||Services with the same base_url + same key merge into one; verdicts come from local probe records (keys shown as fingerprints). Applying replaces providers/routes/presets/schedule rules (unchecked ones are removed); a snapshot is taken first.">' +
+      '同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。</p></div>' +
       '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p></div>',
     foot: [
       { slot: 'msg', id: 'pkgErr', kind: 'err' },

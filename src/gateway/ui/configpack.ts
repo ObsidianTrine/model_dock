@@ -133,8 +133,9 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
       var u = document.getElementById('impUrl')
       btn.disabled = !(u && u.value.trim())
     } else {
+      // multi 模式（mgFiles 驱动，input.value 已清）与单包模式（input.files 驱动）都算有文件
       var f = document.getElementById('impFile2')
-      btn.disabled = !(f && f.files.length)
+      btn.disabled = !((f && f.files.length) || mgFiles.length >= 1)
     }
   }
   function showImpFileChip(file) {
@@ -171,7 +172,14 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
   var impFileBtn = document.getElementById('impFileBtn')
   if (impFileBtn) impFileBtn.onclick = function () { var f = document.getElementById('impFile2'); if (f) f.click() }
   var impFile2 = document.getElementById('impFile2')
-  if (impFile2) impFile2.addEventListener('change', function () { showImpFileChip(this.files[0]); setImpErr(''); updateImpPrimary() })
+  if (impFile2) impFile2.addEventListener('change', function () {
+    // 文件数分流：1 个=原单包导入流；多个=多包合并流（chips + 逐包口令行，确认走 /merge/preview|apply）
+    var files = Array.prototype.slice.call(this.files || [])
+    if (files.length > 1) mgSetFiles(files)
+    else { mgClearMulti(); showImpFileChip(this.files[0]) }
+    setImpErr('')
+    updateImpPrimary()
+  })
   var impUrlInput = document.getElementById('impUrl')
   if (impUrlInput) impUrlInput.addEventListener('input', function () { setImpErr(''); updateImpPrimary() })
   var impPw2Input = document.getElementById('impPw2')
@@ -181,13 +189,21 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     impImportBtn.onclick = function () {
       var btn = this
       var bodyP
+      var multiP = false
       if (impTab === 'link') {
         var link = (document.getElementById('impUrl').value || '').trim()
         var i = link.indexOf('#p=')
         if (i < 0) { setImpErr(t('链接缺口号段（#p=…）：请回旧电脑复制完整链接', 'The link lacks the passphrase part (#p=…): copy the full link on the old computer')); return }
         bodyP = Promise.resolve({ kind: 'url', url: link.slice(0, i), passphrase: link.slice(i + 3) })
+      } else if (mgFiles.length > 1) {
+        // 多包合并流：逐包口令行全部填了才进预览（服务端对缺口令也是整体拒绝）
+        var pws = mgCollectPassphrases()
+        if (pws.some(function (p) { return !p })) { setImpErr(t('请输入每个配置包的口令', 'Enter the passphrase for every package')); return }
+        multiP = true
+        bodyP = mgReadFiles().then(function (packages) { return { packages: packages, passphrases: pws } })
       } else {
-        var f = document.getElementById('impFile2').files[0]
+        // 多选后删到只剩一个时 input.value 已清：文件来源回落 mgFiles（两来源互斥，不会同时为空）
+        var f = mgFiles.length === 1 ? mgFiles[0] : document.getElementById('impFile2').files[0]
         var pw = document.getElementById('impPw2').value || ''
         if (!pw) { setImpErr(t('请输入导出时设置的口令', 'Enter the passphrase set at export')); return }
         bodyP = f.text().then(function (txt) { return { kind: 'file', file: txt, passphrase: pw } })
@@ -195,25 +211,33 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
       btn.disabled = true
       setImpErr('')
       hideImpPreview()
-      // 先预览（服务端解包出 report，包不入库）再确认：对齐 CLI 的「将被替换/不受影响」确认步
-      bodyP
-        .then(function (src) { return api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'preview', source: src }) }) })
-        .then(function (j) {
-          impPendingTicket = j.ticket || ''
-          var rep = j.report || {}
-          var meta = j.meta || {}
-          var line = document.getElementById('impPreviewLine')
-          if (line) {
-            line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules')
-              .replace('{n}', (rep.providers || []).length).replace('{n2}', (rep.profiles || []).length).replace('{n3}', rep.presetCount || 0).replace('{n4}', rep.scheduleRules || 0)
-              + (meta.createdBy ? t('（配置包来自 ', ' (package from ') + meta.createdBy + t('）', ')') : '')
-              + t('。导入会整体替换现有配置（自动快照）。', '. This replaces the whole current config (snapshot taken first).')
-          }
-          var pv = document.getElementById('impPreview')
-          if (pv) pv.hidden = false
-          btn.disabled = false
-        })
-        .catch(function (e) { setImpErr(t('读取配置包失败：', 'Failed to read the package: ') + e.message); btn.disabled = false })
+      if (multiP) {
+        // 多包：/merge/preview 出三档候选清单（渲染在 tab 内合并预览块），勾选后 impMergeApplyBtn 走 /merge/apply
+        bodyP
+          .then(function (src) { return api('/merge/preview', { method: 'POST', body: JSON.stringify({ packages: src.packages, passphrases: src.passphrases }) }) })
+          .then(function (j) { mgRenderPreview(j); btn.disabled = false })
+          .catch(function (e) { setImpErr(t('合并预览失败：', 'Merge preview failed: ') + ((e && e.message) || e)); btn.disabled = false })
+      } else {
+        // 先预览（服务端解包出 report，包不入库）再确认：对齐 CLI 的「将被替换/不受影响」确认步
+        bodyP
+          .then(function (src) { return api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'preview', source: src }) }) })
+          .then(function (j) {
+            impPendingTicket = j.ticket || ''
+            var rep = j.report || {}
+            var meta = j.meta || {}
+            var line = document.getElementById('impPreviewLine')
+            if (line) {
+              line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules')
+                .replace('{n}', (rep.providers || []).length).replace('{n2}', (rep.profiles || []).length).replace('{n3}', rep.presetCount || 0).replace('{n4}', rep.scheduleRules || 0)
+                + (meta.createdBy ? t('（配置包来自 ', ' (package from ') + meta.createdBy + t('）', ')') : '')
+                + t('。导入会整体替换现有配置（自动快照）。', '. This replaces the whole current config (snapshot taken first).')
+            }
+            var pv = document.getElementById('impPreview')
+            if (pv) pv.hidden = false
+            btn.disabled = false
+          })
+          .catch(function (e) { setImpErr(t('读取配置包失败：', 'Failed to read the package: ') + e.message); btn.disabled = false })
+      }
     }
   }
   // 预览 → 确认：确认时凭 preview 发放的一次性 ticket 直发 apply（与附近直拉链路同一形态）
@@ -222,6 +246,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     impPendingTicket = ''
     var pv = document.getElementById('impPreview')
     if (pv) pv.hidden = true
+    mgHideMergePreview() // 多包合并预览块一并收起（mgPendingToken 随之失效，重预览才重新发放）
   }
   var impConfirmBtn = document.getElementById('impConfirmBtn')
   if (impConfirmBtn) {
@@ -323,6 +348,7 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     if (f) f.value = ''
     if (pw2) pw2.value = ''
     showImpFileChip(null)
+    mgClearMulti() // 多包模式残留（chips/口令行/合并预览）一并清场
     setPkgErr('')
     hideImpPreview()
     renderShareUrls([])
