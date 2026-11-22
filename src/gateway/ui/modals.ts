@@ -39,14 +39,16 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<div id="importPanels"><div id="panelNearby"><p class="shint" id="nearbyStatus" style="margin-top:0"></p><div id="impPeers"></div></div>' +
       '<div id="panelLink" hidden><textarea id="impUrl" data-i18n-ph="粘贴分享链接：http://192.168.x.x:8787/…#p=…||Paste the share link: http://192.168.x.x:8787/…#p=…" placeholder="粘贴分享链接：http://192.168.x.x:8787/…#p=…"></textarea></div>' +
       '<div id="panelFile" hidden><p class="row" style="margin:0 0 10px;align-items:center">' +
-      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
+      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件（可多选）||Choose files (multi-select)">选择文件（可多选）</button>' +
       '<span id="impFileChip" class="filechip" hidden></span>' +
       // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan-mobile-page.ts:106 同款注释）
       // multiple：多选即进入合并流（mgSetFiles 分流），单选仍走原单包导入
       '<input type="file" id="impFile2" multiple hidden></p>' +
       '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box">' +
       '<div id="impChips" class="chips" hidden></div>' +
-      '<div id="impPwRows" hidden></div></div></div>' +
+      '<div id="impPwRows" hidden></div>' +
+      // 空态提示块（船东批准原型 .empty-hint 形态）：未选文件时引导多选；显隐由 updateImpEmptyHint 挂在渲染函数上
+      '<div id="impEmptyHint" class="empty-hint" data-i18n="尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）||No file selected — click Choose files to pick several .msync packages at once (one file = the single-package import flow)">尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）</div></div></div>' +
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
       '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
       '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +

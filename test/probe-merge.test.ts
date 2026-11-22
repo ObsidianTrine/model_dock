@@ -512,6 +512,45 @@ describe('控制台合并入口收编（构建产物冒烟）', () => {
     expect(min).toContain('mgSelAll')
     expect(min).toContain('mgsub')
   })
+
+  // merge-import-ux-polish（船东批准原型 /tmp/merge-proto/merge-flow.html Stage1 形态落地）：
+  // 多选引导文案 + 空态提示块 + 逐包口令 .prow 紧凑行——源级形态断言 + 产物在场断言
+  it('多包导入引导层：按钮多选文案 + 空态提示块切换挂钩 + 口令行 .prow 紧凑形态', () => {
+    const modals = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'modals.ts'), 'utf8')
+    const configpack = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'configpack.ts'), 'utf8')
+    const merge = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const styles = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'styles.ts'), 'utf8')
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    // ① 按钮多选引导文案（data-i18n 双语，初始文案 = 中文半边）+ 产物在场
+    //    （esbuild 缺省 charset=ascii 把非 ASCII 逐字转义为 \uXXXX 大写十六进制，产物内嵌 TS 模板字面量再转义一层为 \\uXXXX）
+    const minEsc = (s: string) =>
+      Array.from(s)
+        .map((c) => (c.charCodeAt(0) > 127 ? '\\\\u' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') : c))
+        .join('')
+    expect(modals).toContain('data-i18n="选择文件（可多选）||Choose files (multi-select)"')
+    expect(min).toContain(minEsc('选择文件（可多选）'))
+    // ② 空态提示块：panelFile 内在场（虚线 muted 形态进 styles.ts），显隐由渲染函数驱动
+    //    ——两个文件来源（multi=mgFiles / 单包=input.files）任一非空即隐藏
+    expect(modals).toMatch(/id="impEmptyHint" class="empty-hint"/)
+    expect(styles).toMatch(/#pkgOverlay \.empty-hint\{[^}]*dashed/)
+    expect(configpack).toMatch(/function updateImpEmptyHint\(\)/)
+    expect(configpack).toMatch(/hint\.hidden = mgFiles\.length > 0/)
+    expect(configpack).toMatch(/f\.files && f\.files\.length > 0/)
+    // 挂钩点：showImpFileChip（单包选/清）与 mgExitMultiUi（multi 清场/降级）都驱动显隐
+    expect(configpack).toMatch(/updateImpEmptyHint\(\)/)
+    expect(merge).toContain('updateImpEmptyHint()')
+    // ③ 逐包口令 .prow 紧凑行（原型形态）：包名 label 截断+title 全量、input flex 占余宽；
+    //    旧「整宽文件名标题 + 行内整宽样式」形态移除
+    expect(merge).toMatch(/row\.className = 'prow'/)
+    expect(merge).toMatch(/nm\.title = file\.name/)
+    expect(styles).toMatch(/#pkgOverlay \.prow label\{[^}]*text-align:right/)
+    expect(styles).toMatch(/#pkgOverlay \.prow label\{[^}]*text-overflow:ellipsis/)
+    expect(styles).toMatch(/#pkgOverlay \.prow input\{[^}]*flex:1/)
+    expect(merge).not.toContain("input.style.width = '100%'")
+    // 产物在场：prow 类与空态提示 id 随 esbuild 进 bundle（字符串字面量不改写；顶层函数名会被改写，不作断言）
+    expect(min).toContain('"prow"')
+    expect(min).toContain('impEmptyHint')
+  })
 })
 
 // ── CLI 冒烟：config merge 两份合成包 → 逐服务三档建议清单 + 勾选写入 ────────────────────────

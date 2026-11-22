@@ -4,7 +4,7 @@
  * 分流进来（chips + 逐包口令行 → /merge/preview → 审阅宽弹层勾选 → /merge/apply）；独立
  * 「合并多个配置包…」按钮与旧独立弹层入口已移除（t11 双入口割裂修复）。单包流（/sync/import）不走本片段。
  * 审阅清单呈现走 mgReviewOverlay 宽弹层（svcmodal 680px，merge-preview-wide-modal 呈现层替换）：
- * 审阅面需要行列结构与宽度，tab 内嵌窄列已删；逐包口令行与端点/confirmToken 链路不动。
+ * 审阅面需要行列结构与宽度，tab 内嵌窄列已删；端点/confirmToken 链路不动。
  * 预览/展示全程不落盘；key 只出指纹（服务端红线）。片段为模板字面量源文本：ui.ts 经 UI_JS_MIN 拼装；
  * 本片段仍在 scripts/gen-ui-min.mjs 的 ORDER 登记。
  */
@@ -89,26 +89,25 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
       box.appendChild(chip)
     })
   }
-  // 逐包口令行：每文件一行（文件名 + password 输入），可见可改；全同口令时逐行填同值即可
+  // 逐包口令行：每文件一行（船东批准原型 .prow 紧凑形态——包名右对齐截断 label + 口令 input flex，
+  // 样式在 styles.ts #pkgOverlay .prow；label 悬浮 title 出全量文件名）；全同口令时逐行填同值即可
   function mgRenderPwRows() {
     var box = document.getElementById('impPwRows')
     if (!box) return
     box.innerHTML = ''
     mgFiles.forEach(function (file, i) {
-      var row = document.createElement('p')
-      row.className = 'row'
-      row.style.margin = '6px 0 0'
-      var nm = document.createElement('span')
-      nm.className = 'fname'
-      nm.textContent = file.name
+      var row = document.createElement('div')
+      row.className = 'prow'
+      var nm = document.createElement('label')
+      nm.title = file.name
+      nm.htmlFor = 'mgPw' + i
+      nm.textContent = file.name + ' ' + t('口令', 'passphrase')
       var input = document.createElement('input')
       input.type = 'password'
       input.id = 'mgPw' + i
       input.setAttribute('autocomplete', 'new-password')
       // 动态节点不经 applyI18nTree：占位符渲染时 t() 直译（与 chips title 同款取舍）
-      input.placeholder = t('口令（导出时设置）', 'Passphrase (set at export)')
-      input.style.width = '100%'
-      input.style.boxSizing = 'border-box'
+      input.placeholder = t('该包导出时设置的同步口令', 'The passphrase this package was exported with')
       input.addEventListener('input', function () { setImpErr('') })
       row.appendChild(nm)
       row.appendChild(input)
@@ -121,7 +120,7 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
       return el ? el.value || '' : ''
     })
   }
-  // 退出 multi 的展示形态（不动 mgFiles）：chips/口令行隐藏、单口令输入恢复
+  // 退出 multi 的展示形态（不动 mgFiles）：chips/口令行隐藏、单口令输入恢复；空态提示块随文件来源刷新
   function mgExitMultiUi() {
     var chips = document.getElementById('impChips')
     if (chips) { chips.hidden = true; chips.innerHTML = '' }
@@ -130,6 +129,7 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     var pw2 = document.getElementById('impPw2')
     if (pw2) pw2.hidden = false
     mgPendingToken = ''
+    updateImpEmptyHint()
   }
   function mgClearMulti() {
     mgFiles = []
