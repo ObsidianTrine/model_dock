@@ -192,7 +192,7 @@ async function scanOpencode(out: McpServerEntry[], errors: McpScanError[], keepE
 export async function scanMcpServers(): Promise<McpScanResult> {
   const { entries, errors } = await scanMcpServersDetailed()
   // 盘点出口剥离 env 值：结果会进控制台与日志，值绝不出本机
-  return { entries: entries.map(({ envValues: _v, ...rest }) => rest), errors }
+  return { entries: entries.map((e) => { const rest = { ...e }; delete rest.envValues; return rest }), errors }
 }
 
 /** 同 scanMcpServers，但条目携带 env 值（McpServerEntry.envValues）——仅供本机安检（mcp/security.ts），

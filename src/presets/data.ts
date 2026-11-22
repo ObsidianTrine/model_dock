@@ -42,7 +42,6 @@ function m(
   return { id, context_window, max_output, capabilities, get display_name() { return t(display_name.zh, display_name.en) } }
 }
 
-const TOOLS = ['tools']
 const TOOLS_REASON = ['tools', 'reasoning']
 const TOOLS_REASON_VISION = ['tools', 'reasoning', 'vision']
 const TOOLS_VISION = ['tools', 'vision']

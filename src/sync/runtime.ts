@@ -1,7 +1,7 @@
 /** 引擎与 setup 共用的运行时辅助：密钥缓存换算、目标构造、可同步态指纹（叶模块，避免循环依赖） */
 import { syncVerifier, type SyncKeys } from './crypto.js'
 import type { Syncdoc } from './types.js'
-import type { SyncCloudConfig, SyncKeyCache, SyncState, SyncTargetConfig } from './state.js'
+import type { SyncKeyCache, SyncState, SyncTargetConfig } from './state.js'
 import type { SyncTarget } from './targets/types.js'
 import { createLocaldirTarget } from './targets/localdir.js'
 import { createWebdavTarget } from './targets/webdav.js'
