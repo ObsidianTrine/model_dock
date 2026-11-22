@@ -1,6 +1,6 @@
 import { t } from '../util/i18n.js'
 import type { Config } from '../config/types.js'
-import type { AdapterStatus, AttachOptions, DetectResult, HarnessAdapter, PlanResult } from './types.js'
+import type { AdapterStatus, DetectResult, HarnessAdapter, PlanResult } from './types.js'
 
 /** 通用环境变量兜底：不写任何文件，配合 modeldock env 使用 */
 export const genericAdapter: HarnessAdapter = {
@@ -21,7 +21,7 @@ export const genericAdapter: HarnessAdapter = {
     }
   },
 
-  async planAttach(_opts: AttachOptions, _cfg: Config): Promise<PlanResult> {
+  async planAttach(): Promise<PlanResult> {
     return {
       changes: [],
       notes: [
@@ -33,7 +33,7 @@ export const genericAdapter: HarnessAdapter = {
     }
   },
 
-  async planDetach(_cfg: Config): Promise<PlanResult> {
+  async planDetach(): Promise<PlanResult> {
     return { changes: [], notes: [t('请从 shell 配置中移除由 modeldock env 注入的变量', 'Remove the variables injected by modeldock env from your shell config')] }
   },
 

@@ -528,7 +528,7 @@ const plainCipher: FileCipher = {
   // enabled=false：明文后端「无加密保护」——正是 loadFileSecrets 触发 warnPlainFileOnce 的分支。
   // 设为 true 会让 `!cipher.enabled` 恒假、警告永不触发（安全提示回归，2026-10-12 review 复现）。
   enabled: false,
-  async encryptTable(dec, _reuse) {
+  async encryptTable(dec) {
     return { ...dec }
   },
   async decryptTable(raw) {

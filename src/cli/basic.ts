@@ -149,7 +149,7 @@ export async function cmdUninstall(opts: { yes?: boolean; purge?: boolean } = {}
 
     // 清除密钥：keychain/secret-service 条目不在 ~/.modeldock 里，rm 目录清不掉
     const { deleteSecret } = await import('../config/secrets.js')
-    for (const [id, ref] of keyRefs) {
+    for (const [, ref] of keyRefs) {
       try {
         await deleteSecret(ref)
       } catch { /* 单项失败不阻断（可能本就不存在） */ }
