@@ -463,15 +463,27 @@ describe('控制台合并端点：逐包口令 passphrases 数组', () => {
 // ── UI 收编冒烟：独立入口移除 + 多选分流（构建产物 grep 断言）──────────────────────────────
 
 describe('控制台合并入口收编（构建产物冒烟）', () => {
-  it('独立合并按钮/弹层已移除；impFile2 支持多选；合并预览块渲染进 tab', () => {
+  it('独立合并按钮/弹层已移除；impFile2 支持多选；审阅清单走宽弹层（svcmodal）', () => {
     const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
     expect(min).not.toContain('mergePkgBtn')
     expect(min).not.toContain('mergeOverlay')
     expect(min).toContain('impFile2" multiple')
-    expect(min).toContain('impMergePreview')
+    // 审阅弹层在场且走 svcmodal 宽变体（esbuild 不改写属性名与字符串字面量，产物可 grep；
+    // mergeReviewOverlay 不含子串 mergeOverlay，旧断言语义不回退）
+    expect(min).toContain('id:"mergeReviewOverlay"')
+    expect(min).toMatch(/id:"mergeReviewOverlay"[\s\S]{0,200}modalClass:"svcmodal"/)
+    // tab 内嵌预览块已整体移除（呈现层替换为宽弹层）
+    expect(min).not.toContain('impMergePreview')
     expect(min).toContain('impPwRows')
     // /merge/preview|apply 调用仍随包携带逐包口令数组
     expect(min).toContain('passphrases:')
+  })
+
+  it('占位符泄漏修复：摘要行 t() 带 params 第三参（传参形态 grep）', () => {
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const line = src.split('\n').find((l) => l.includes('合并 {n} 个包'))
+    expect(line).toBeTruthy()
+    expect(line).toMatch(/,\s*\{\s*n:/)
   })
 })
 

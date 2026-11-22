@@ -1,8 +1,10 @@
 /**
  * Web 控制台 · merge.ts —— 多包合并域逻辑（provider-probe-suite 任务 11，merge-import-integration 收编）。
  * UI_JS_MERGE：多包合并已融入「配置包文件」tab 的多选流——impFile2 选 >1 个文件时由 configpack.ts
- * 分流进来（chips + 逐包口令行 → /merge/preview 三档清单 → 勾选 → /merge/apply）；独立
- * 「合并多个配置包…」按钮与 mgM 弹层入口已移除（t11 双入口割裂修复）。单包流（/sync/import）不走本片段。
+ * 分流进来（chips + 逐包口令行 → /merge/preview → 审阅宽弹层勾选 → /merge/apply）；独立
+ * 「合并多个配置包…」按钮与旧独立弹层入口已移除（t11 双入口割裂修复）。单包流（/sync/import）不走本片段。
+ * 审阅清单呈现走 mgReviewOverlay 宽弹层（svcmodal 680px，merge-preview-wide-modal 呈现层替换）：
+ * 审阅面需要行列结构与宽度，tab 内嵌窄列已删；逐包口令行与端点/confirmToken 链路不动。
  * 预览/展示全程不落盘；key 只出指纹（服务端红线）。片段为模板字面量源文本：ui.ts 经 UI_JS_MIN 拼装；
  * 本片段仍在 scripts/gen-ui-min.mjs 的 ORDER 登记。
  */
@@ -21,6 +23,26 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     review: { cls: 'warn', zh: '存疑', en: 'Suspect' },
     dead: { cls: 'err', zh: '失效', en: 'Dead' },
   }
+  // 审阅宽弹层：审阅清单≠表单输入——逐行勾选需要宽度与行列结构，svcmodal 680px 与编辑/添加弹层同款变体
+  // （styles.ts 既有宽度令牌，勿另开档）。表格列宽/截断口径进 styles.ts（#mgReviewTable，日志表配方）；
+  // 关闭路径只有 返回/✕/Esc 三种（无遮罩点击关）：勾选清单是易丢的手工输入，防误触一抖全没
+  var mgM = createModal({
+    id: 'mergeReviewOverlay',
+    title: '合并审阅||Merge review',
+    align: 'top',
+    modalClass: 'svcmodal',
+    bodyHtml: '<p class="testline" id="mgReviewLine" style="margin:0 0 8px"></p>' +
+      '<div class="tablescroll"><table id="mgReviewTable"><thead><tr>' +
+      '<th></th><th data-i18n="服务||Service">服务</th><th data-i18n="地址与 Key||Endpoint and key">地址与 Key</th><th data-i18n="探针||Probe">探针</th><th data-i18n="建议||Suggestion">建议</th>' +
+      '</tr></thead><tbody id="mgReviewRows"></tbody></table></div>' +
+      '<p class="help" data-i18n="同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。||Services with the same base_url + same key merge into one; verdicts come from local probe records (keys shown as fingerprints). Applying replaces providers/routes/presets/schedule rules (unchecked ones are removed); a snapshot is taken first.">' +
+      '同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。</p>',
+    foot: [
+      { slot: 'msg', id: 'mgReviewErr', kind: 'err' },
+      { id: 'mgReviewBack', label: '返回||Back' },
+      { id: 'mgReviewApply', label: '应用所选||Apply selected', primary: true, end: true },
+    ],
+  })
   var mgFiles = []   // multi 模式的 File 清单：chips/口令行/上传共用同一来源，避免「行删了、input 还有」的不一致
   var mgPendingToken = ''
   // File → {name, content_b64}：内容经 base64 随 JSON 上传（TextEncoder 分块转二进制串再 btoa，UTF-8 安全不爆栈）
@@ -106,8 +128,6 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     if (rows) { rows.hidden = true; rows.innerHTML = '' }
     var pw2 = document.getElementById('impPw2')
     if (pw2) pw2.hidden = false
-    var pv = document.getElementById('impMergePreview')
-    if (pv) pv.hidden = true
     mgPendingToken = ''
   }
   function mgClearMulti() {
@@ -134,9 +154,9 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     }
   }
   function mgHideMergePreview() {
+    // 预览态 = confirmToken + 审阅弹层：文件清单一变即整体失效（token 绑定包与勾选清单，重用必被服务端 400）
     mgPendingToken = ''
-    var pv = document.getElementById('impMergePreview')
-    if (pv) pv.hidden = true
+    if (mgM.isOpen()) mgM.close()
   }
   function mgSuggestionBadge(sug) {
     var m = MG_SUG[sug] || MG_SUG.keep
@@ -146,7 +166,9 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     var m = MG_META[state] || { cls: 'dim', zh: '无探针记录', en: 'No probe record' }
     return '<span class="pill ' + m.cls + '">' + esc(t(m.zh, m.en)) + '</span>'
   }
-  // 预览结果渲染进 tab 内的合并预览块（位置=原单包预览步）；confirmToken 存 mgPendingToken 待 apply
+  // 预览结果渲染进审阅宽弹层（mgRenderPreview 由 configpack.ts 的导入按钮回调触发）；
+  // confirmToken 存 mgPendingToken 待 apply。列结构（勾选/服务/地址与Key/探针/建议）进 styles.ts 配方：
+  // 一行一条不折行，长文本截断读全文走 title 悬浮；来源清单并入服务列悬浮（宽度让给地址列，信息不丢）
   function mgRenderPreview(j) {
     var pv = j.preview || {}
     var cands = pv.candidates || []
@@ -154,43 +176,51 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     var rows = ''
     for (var i = 0; i < cands.length; i++) {
       var c = cands[i]
+      var srcs = (c.sources || []).join(', ')
+      var dupTxt = c.duplicateCount > 0 ? t('合并 {n} 条重复', '{n} duplicates merged', { n: c.duplicateCount }) : ''
       rows += '<tr><td><input type="checkbox" class="mgKeep" data-id="' + esc(c.id) + '"' + (c.suggestion === 'keep' ? ' checked' : '') + '></td>' +
-        '<td><b>' + esc(c.id) + '</b><br><span class="hint">' + esc(c.base_url) + '<br>key ' + esc(c.key_fp || '-') + (c.duplicateCount > 0 ? ' · ' + esc(t('合并 {n} 条重复', '{n} duplicates merged', { n: c.duplicateCount })) : '') + '</span></td>' +
+        '<td title="' + esc(c.id + (srcs ? ' · ' + srcs : '')) + '"><b>' + esc(c.id) + '</b></td>' +
+        '<td class="mgurl" title="' + esc(c.base_url + ' · key ' + (c.key_fp || '-') + (dupTxt ? ' · ' + dupTxt : '')) + '"><div><span class="mgu">' + esc(c.base_url) + '</span><span class="mgfp">key ' + esc(c.key_fp || '-') + '</span>' + (dupTxt ? '<span class="mgdup">' + esc(dupTxt) + '</span>' : '') + '</div></td>' +
         '<td>' + mgVerdictBadge(c.verdict_state) + '</td>' +
-        '<td>' + mgSuggestionBadge(c.suggestion) + '</td>' +
-        '<td class="hint">' + esc((c.sources || []).join(', ')) + '</td></tr>'
+        '<td>' + mgSuggestionBadge(c.suggestion) + '</td></tr>'
     }
     if (!cands.length) rows = '<tr><td colspan="5" class="empty">' + esc(t('包内没有可合并的服务', 'No services to merge in the packages')) + '</td></tr>'
-    var tbody = document.getElementById('impMergeRows')
+    var tbody = document.getElementById('mgReviewRows')
     if (tbody) tbody.innerHTML = rows
-    var line = document.getElementById('impMergeLine')
-    if (line) line.textContent = t('合并 {n} 个包 → {p} 个服务、{r} 条路由（去重 {d} 条）· 预设 {s} · 定时 {w}', 'Merging {n} packages → {p} services, {r} profiles ({d} merged) · {s} presets · {w} schedule rules')
-      .replace('{n}', (pv.packages || []).length).replace('{p}', cands.length).replace('{r}', pv.profileTotal || 0).replace('{d}', pv.duplicatesMerged || 0).replace('{s}', pv.presetCount || 0).replace('{w}', pv.scheduleRules || 0)
-    var box = document.getElementById('impMergePreview')
-    if (box) box.hidden = false
+    var line = document.getElementById('mgReviewLine')
+    if (line) line.textContent = t('合并 {n} 个包 → {p} 个服务、{r} 条路由（去重 {d} 条）· 预设 {s} · 定时 {w}', 'Merging {n} packages → {p} services, {r} profiles ({d} merged) · {s} presets · {w} schedule rules', { n: (pv.packages || []).length, p: cands.length, r: pv.profileTotal || 0, d: pv.duplicatesMerged || 0, s: pv.presetCount || 0, w: pv.scheduleRules || 0 })
+    var applyBtn = document.getElementById('mgReviewApply')
+    if (applyBtn) applyBtn.disabled = !cands.length
+    mgM.open()
   }
-  var impMergeBackBtn = document.getElementById('impMergeBackBtn')
-  if (impMergeBackBtn) impMergeBackBtn.onclick = mgHideMergePreview
-  var impMergeApplyBtn = document.getElementById('impMergeApplyBtn')
-  if (impMergeApplyBtn) {
-    impMergeApplyBtn.onclick = function () {
-      var ids = Array.prototype.map.call(document.querySelectorAll('#impMergeRows .mgKeep:checked'), function (el) { return el.getAttribute('data-id') })
-      if (!ids.length) { setImpErr(t('请至少勾选一个要保留的服务', 'Select at least one service to keep')); return }
-      impMergeApplyBtn.disabled = true
-      setImpErr('')
+  function mgSetErr(msg) {
+    var el = document.getElementById('mgReviewErr')
+    if (el) el.textContent = msg || ''
+  }
+  var mgReviewBackBtn = document.getElementById('mgReviewBack')
+  if (mgReviewBackBtn) mgReviewBackBtn.onclick = function () { mgM.close() }
+  // 应用所选：成功=关审阅弹层+关配置包弹层 → 主页面 toast（动作关闭了弹层，toast 归宿合规）→ 整页刷新；
+  // 失败=同样关审阅弹层回 tab，错误写 pkgErr 槽位（pkgM 仍开着，就近反馈；重试=再点一次导入，口令行原样保留）
+  var mgReviewApplyBtn = document.getElementById('mgReviewApply')
+  if (mgReviewApplyBtn) {
+    mgReviewApplyBtn.onclick = function () {
+      var ids = Array.prototype.map.call(document.querySelectorAll('#mgReviewRows .mgKeep:checked'), function (el) { return el.getAttribute('data-id') })
+      if (!ids.length) { mgSetErr(t('请至少勾选一个要保留的服务', 'Select at least one service to keep')); return }
+      mgReviewApplyBtn.disabled = true
+      mgSetErr('')
       mgReadFiles().then(function (packages) {
         return api('/merge/apply', { method: 'POST', body: JSON.stringify({ packages: packages, passphrases: mgCollectPassphrases(), keep: ids, confirmToken: mgPendingToken }) })
       }).then(function (j) {
-        // 成功即关弹层 → 反馈走主页面 toast（弹层开着时禁止 toast 的红线只约束关闭前的反馈）
+        if (mgM.isOpen()) mgM.close()
         importToggle(false)
         var rep = j.report || {}
         var n = (rep.providers || []).length
         var dropped = (j.droppedProfiles || []).length
-        toast(t('已合并导入：服务 {n} · 路由 {r}', 'Merged and imported: {n} services · {r} profiles').replace('{n}', n).replace('{r}', (rep.profiles || []).length) + (dropped ? t('；剔除悬空路由 {d} 条', '; {d} dangling profiles removed').replace('{d}', dropped) : ''), true)
+        toast(t('已合并导入：服务 {n} · 路由 {r}', 'Merged and imported: {n} services · {r} profiles', { n: n, r: (rep.profiles || []).length }) + (dropped ? t('；剔除悬空路由 {d} 条', '; {d} dangling profiles removed', { d: dropped }) : ''), true)
         setTimeout(function () { location.reload() }, 1200)
       }).catch(function (e) {
+        if (mgM.isOpen()) mgM.close()
         setImpErr(t('应用失败：', 'Apply failed: ') + ((e && e.message) || e))
-        impMergeApplyBtn.disabled = false
       })
     }
   }

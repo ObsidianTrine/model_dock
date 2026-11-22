@@ -395,6 +395,20 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    sticky 形态；列少不设 fixed 布局与列宽，基础 table/th/td 层照常生效 */
 #probeLedgerTable{border-collapse:separate;border-spacing:0}
 #probeLedgerTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+/* 合并审阅表（mergeReviewOverlay 弹层内，svcmodal 680px 宽变体）：fixed 布局按日志表配方——
+   勾选/服务ID/探针/建议四列定宽（宽在表头声明），地址列吃剩余空间；任何窗宽不溢出，更窄走
+   .tablescroll 滚动。截断口径：一行一条不折行，长 base_url/ID 全文走 title 悬浮（同 #logTable）。
+   地址列内部再分两段：URL 弹性截断，key 指纹与合并计数钉右不截——8 位指纹被挤没就读数失败 */
+#mgReviewTable{table-layout:fixed;min-width:520px;border-collapse:separate;border-spacing:0}
+#mgReviewTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+#mgReviewTable th:nth-child(1){width:36px}
+#mgReviewTable th:nth-child(2){width:140px}
+#mgReviewTable th:nth-child(4){width:136px}
+#mgReviewTable th:nth-child(5){width:88px}
+#mgReviewTable th,#mgReviewTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#mgReviewTable td.mgurl > div{display:flex;align-items:baseline;gap:6px;min-width:0}
+#mgReviewTable td.mgurl .mgu{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#mgReviewTable td.mgurl .mgfp,#mgReviewTable td.mgurl .mgdup{flex:0 0 auto;color:var(--muted);font-size:var(--fs-xs)}
 /* 日志表改固定布局：8 列里 7 列定宽（宽在表头上声明），错误列（第 7 列）不设宽=吃剩余空间。
    auto 布局下 nowrap 列按内容撑宽、限宽盒的固有宽度又不可靠（width:1% 弹性列被无视），
    窄内容带（--wrap-ratio 61.8%）必横向溢出；fixed 布局任何窗宽都不溢出，更窄走 .tablescroll 滚动。
