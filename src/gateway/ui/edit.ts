@@ -125,17 +125,24 @@ export const UI_JS_EDIT = `  var editing = null
     return { load: load, collect: collect, el: root }
   }
 
-  // 能力徽标两态（provider-probe-suite 任务 10）：实测=探针实证（悬浮带探针时间）；目录=内置表 / models.dev。
-  // 值来自 overview capability_source（中文原文即 key，对齐 data-i18n「中文||English」约定），UI 侧映射文案与配色
-  var CS_SRC_META = {
-    '实测': { cls: 'ok', zh: '实测', en: 'Measured' },
-    '目录': { cls: 'dim', zh: '目录', en: 'Catalog' },
+  // 视觉勾选框提示按状态分叉（取代 provider-probe-suite 任务 10 的行内「实测/目录」徽标：
+  // 「目录」用户读不懂，且徽标作为第 7 个网格子项会挤破 .svcform .mrow 六列模板、把删除键挤到第二行）。
+  // capability_source（实测|目录）由 overview 投影照常产出，UI 不再行内展示，只在 title 说明可信度：
+  // 实测带探针时间；未实测给行动指引（可跑探针验证）。未实测分支不区分来源——配置显式值/内置表/models.dev
+  // 在数据层同值，UI 不假装能分清。
+  function probeWhen(at) {
+    var mins = at ? Math.max(0, Math.round((Date.now() - at) / 60000)) : null
+    return mins == null ? '' : (mins >= 60 ? Math.floor(mins / 60) + t(' 小时前', 'h ago') : mins + t(' 分钟前', 'm ago'))
   }
-  function csSrcTip(m) {
-    if (m.capability_source !== '实测') return t('能力来自内置表 / models.dev 目录，未经探针实测', 'From the built-in table / models.dev catalog, not probe-measured')
-    var mins = m.capability_at ? Math.max(0, Math.round((Date.now() - m.capability_at) / 60000)) : null
-    var when = mins == null ? '-' : (mins >= 60 ? Math.floor(mins / 60) + t(' 小时前', 'h ago') : mins + t(' 分钟前', 'm ago'))
-    return t('探针实证 ', 'Probe-measured ') + when
+  function visionTip(m) {
+    var vision = (m.capabilities || []).indexOf('vision') >= 0
+    if (m.capability_source === '实测') {
+      var when = probeWhen(m.capability_at) || '-'
+      if (vision) return t('该模型支持图片输入，接入客户端会据此声明（探针实测于 {when}）', 'This model accepts image input; attached clients are told so (probe-measured {when})', { when: when })
+      return t('探针实测：该模型不支持图片输入（{when}）', 'Probe-measured: this model does not accept image input ({when})', { when: when })
+    }
+    if (vision) return t('该模型支持图片输入，接入客户端会据此声明（未经探针实测，可跑探针验证）', 'This model accepts image input; attached clients are told so (not probe-measured; run a probe to verify)')
+    return t('勾选后接入客户端会声明支持图片输入', 'Check to declare image input to attached clients')
   }
 
   function createModelBlock(hostId, prefix, opts) {
@@ -152,18 +159,12 @@ export const UI_JS_EDIT = `  var editing = null
       var vision = (m.capabilities || []).indexOf('vision') >= 0
       // 显示名副行：仅当存在且与 ID 不同（忽略大小写/空格）才渲染，避免同一字符串出现两遍
       var dn = m.display_name && String(m.display_name).trim().toLowerCase() !== String(m.id).trim().toLowerCase() ? String(m.display_name).trim() : ''
-      var cs = CS_SRC_META[m.capability_source]
-      // 徽标出场口径：实测必显（实证值得被看见）；目录只在 vision 勾选时提示（无能力的目录行不添噪音）
-      var csBadge = cs && (m.capability_source === '实测' || vision)
-        ? '<span class="pill ' + cs.cls + '" title="' + esc(csSrcTip(m)) + '">' + esc(t(cs.zh, cs.en)) + '</span>'
-        : ''
       return '<div class="mrow">' +
         '<button class="def' + (m.id === st.defaultModel ? ' on' : '') + '" type="button" title="' + t('设为默认', 'Set as default') + '" data-mid="' + esc(m.id) + '">' + icon('star', 13) + '</button>' +
         '<div class="midwrap"><span class="mid" title="' + esc(m.id) + '">' + esc(m.id) + '</span>' + (dn ? '<span class="msub" title="' + esc(dn) + '">' + esc(dn) + '</span>' : '') + '</div>' +
         '<input type="text" inputmode="numeric" data-f="context_window" value="' + (m.context_window == null ? '' : esc(m.context_window)) + '" placeholder="' + t('未知', 'unknown') + '">' +
         '<input type="text" inputmode="numeric" data-f="max_output" value="' + (m.max_output == null ? '' : esc(m.max_output)) + '" placeholder="' + t('未知', 'unknown') + '">' +
-        '<input type="checkbox" class="vpick" data-f="vision"' + (vision ? ' checked' : '') + ' title="' + t('该模型支持图片输入（接入客户端会据此声明）', 'This model accepts image input (attached clients are told so)') + '">' +
-        csBadge +
+        '<input type="checkbox" class="vpick" data-f="vision"' + (vision ? ' checked' : '') + ' title="' + esc(visionTip(m)) + '">' +
         '<button class="del" type="button" title="' + t('删除该模型', 'Delete this model') + '">' + icon('close', 12) + '</button></div>'
     }
     // PERF-23：「显示全部」条同步（零新样式：btn.small + 计数 span；expanded 或总量
@@ -503,7 +504,7 @@ export const UI_JS_EDIT = `  var editing = null
         '<input type="text" id="' + gid('NewId') + '" data-i18n-ph="新模型 ID，如 deepseek-flash||new model ID, e.g. deepseek-flash" placeholder="新模型 ID，如 deepseek-flash">' +
         '<input type="text" class="num" id="' + gid('NewCtx') + '" data-i18n-ph="上下文||context" placeholder="上下文">' +
         '<input type="text" class="num" id="' + gid('NewOut') + '" data-i18n-ph="最大输出||max output" placeholder="最大输出">' +
-        '<input type="checkbox" class="vpick" id="' + gid('NewVision') + '" data-i18n-title="该模型支持图片输入（接入客户端会据此声明）||This model accepts image input (attached clients are told so)" title="该模型支持图片输入（接入客户端会据此声明）">' +
+        '<input type="checkbox" class="vpick" id="' + gid('NewVision') + '" data-i18n-title="勾选后接入客户端会声明支持图片输入||Check to declare image input to attached clients" title="勾选后接入客户端会声明支持图片输入">' +
         '<button class="btn small" type="button" id="' + gid('AddModel') + '" data-i18n="添加||Add">添加</button>' +
         '</div>' +
         '</div>' +
