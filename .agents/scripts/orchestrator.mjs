@@ -628,8 +628,9 @@ async function cmdRun(repoRoot, taskId, opts) {
   // fail）、scope_drift（越界文件数达阈值）。observe 档只留痕不动作（kill/熔断仍归预算
   // 与看门狗）；no_commit 在 watchdog.mode=actuate 下升熔断（2026-11-15 质量专项 P1-⑥，
   // worker 空转烧钱有熔断）——与看门狗 circuit_break 同款落位，见下方 afterWorkerSession
-  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。
-  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log });
+  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。scratch_only 卡豁免
+  // no_commit（零提交是卡面声明的合规形态，2026-11-22 bench 发现 1）。
+  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log, scratchOnly: meta.scratch_only === true });
 
   const events = readEvents(qdir);
   let debugIter = debugIterations(events);
@@ -1180,12 +1181,16 @@ async function cmdRun(repoRoot, taskId, opts) {
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, activeTestCmd),
+          // scratch_only 卡跳过（2026-11-22 bench 发现 2）：产物只落非跟踪区、git diff 无
+          // 改动面可测——照跑只会误入全量套件（未提交 → changed=[] → docsOnly=false），
+          // 并发负载下即首跑 flake；repo 改动校验对无改动卡无意义
+          run: meta.scratch_only ? () => ({ ok: true, skipped: true, reason: 'scratch_only' }) : () => gateNpmTest(worktree, activeTestCmd),
           trigger: 'test_failure',
           criteria: cmdCriteria('测试命令', activeTestCmd),
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
           passExtra: (r) => {
+            if (r.skipped) return { skipped: true, ...(r.reason ? { reason: r.reason } : {}) };
             // 记 worktree HEAD：approve 的 finish 快捷路径（--skip-test）靠它判断
             // 「gate 验证的就是当前树」——develop 未前进且 HEAD 一致才允许锁内跳过重跑
             let gateHead;
@@ -1201,8 +1206,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         },
         {
           gate: 'tsc_build',
-          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
-          run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
+          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档；
+          // scratch_only 卡同理（无 repo 改动面，build 无从谈起）
+          run: docsOnly || meta.scratch_only ? () => ({ ok: true, skipped: true, reason: docsOnly ? 'docs_only' : 'scratch_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
           criteria: cmdCriteria('构建命令', cfg.buildCmd),
           dieLabel: 'build 不过',

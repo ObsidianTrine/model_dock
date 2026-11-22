@@ -316,6 +316,15 @@ export function validateCard(meta) {
     meta.fastlane = false;
   }
   meta.fastlane = meta.fastlane === true;
+  // scratch_only（可选布尔，缺省 false）：产物只落 worktree 非跟踪区（如 scratch/）、
+  // 卡面声明不入库——门禁管道（npm_test/tsc_build 等 repo 改动校验）与 XTE no_commit
+  // 规则按此豁免（2026-11-22 bench 发现 1/2：零提交任务被看门狗误杀、未提交产物误入
+  // 全量套件）。写了非法值按 false 处理并告警（不阻断：豁免是优惠面，写错回严管最安全）
+  if (meta.scratch_only !== undefined && meta.scratch_only !== null && typeof meta.scratch_only !== 'boolean') {
+    console.warn(`[orchestrator] 任务卡 ${meta.id} scratch_only "${JSON.stringify(meta.scratch_only)}" 不是布尔值——按 false 处理（合法写法：scratch_only: true）`);
+    meta.scratch_only = false;
+  }
+  meta.scratch_only = meta.scratch_only === true;
   // spec 归属（可选）：spec build 拆出的卡记录所属规格，进度锚 specs/<id>/progress.json 按它寻址
   if (meta.spec !== undefined && meta.spec !== null && meta.spec !== '') {
     if (typeof meta.spec !== 'string' || !TASK_ID_RE.test(meta.spec)) {
