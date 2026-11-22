@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import net, { type AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { defaultSpawnRunner, downloadText, downloadToFile, extractArchive, parseSums, type SpawnRunner } from '../src/update/transfer.js'
+import { defaultSpawnRunner, downloadText, downloadToFile, extractArchive, parseSums, resolveTar, type SpawnRunner } from '../src/update/transfer.js'
 import { UpdateError, validateAssetName, downloadAsset, verifyChecksum, type ReleaseAsset } from '../src/update/check.js'
 
 // 本文件零 vi.mock：下载用本地 mock 服务器桩测，命令拼装用注入执行器桩——尊重 vitest singleFork
@@ -140,6 +140,16 @@ describe('extractArchive 命令拼装（注入执行器桩，不真跑系统工�
       await extractArchive(weird, dir, runner)
       expect(calls).toEqual([['-xf', weird, '-C', dir]])
     } finally { await fsp.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('resolveTar：win32 钉 System32 bsdtar（GNU tar 无 zip 能力，MSYS 的 /usr/bin/tar 会遮蔽它），unix 走 PATH', () => {
+    const tar = resolveTar()
+    if (process.platform !== 'win32') {
+      expect(tar).toBe('tar')
+      return
+    }
+    const sysTar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+    expect(tar).toBe(fs.existsSync(sysTar) ? sysTar : 'tar')
   })
 })
 
