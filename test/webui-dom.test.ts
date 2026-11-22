@@ -234,6 +234,50 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     }
   })
 
+  it('错误页 200+reason 偏离条目：错误列兜底出 reason 短标（429 退避重试成功不再渲染成空白行）', async () => {
+    // 2026-11-21 用户实证：探针施工高压期 bigmodel 429 带 Retry-After → 原地退避重试成功，
+    // 470 条 200 躺进「错误」页且错误列全空（reason 无渲染位、attempts/err/cause 也全空）
+    LOGS_FIXTURE.logs = [
+      {
+        ts: '2026-11-21T18:03:59.000+08:00', harness: 'dsh', profile: 'auto-bigmodel', provider: 'bigmodel',
+        model: 'glm-4.5-air', path: '/v1/messages', status: 200, ms: 4385,
+        reason: 'retried_429:bigmodel', level: 'warn',
+      },
+      {
+        ts: '2026-11-21T18:04:01.000+08:00', harness: 'dsh', profile: 'auto-bigmodel', provider: 'bigmodel',
+        model: 'glm-4.5-air', path: '/v1/messages', status: 200, ms: 1119,
+        reason: 'retried_429:bigmodel,fallback_to:glm-4.5-air', level: 'warn',
+      },
+    ]
+    LOGS_FIXTURE.total = 2
+    LOGS_FIXTURE.pages = 1
+    localStorage.setItem('mdk_lang', 'zh')
+    localStorage.setItem('mdk_log_tab', 'err')
+    try {
+      mountPage()
+      await flush()
+      const table = document.getElementById('logTable') as HTMLElement
+      // 单 mark：错误列出「429 退避重试 · bigmodel」，原始 reason 收进 title 悬浮
+      // （title 挂在 td 内层 div 上，与 chain 分支同构；行序 reverse 不影响按 title 定位）
+      expect(table.textContent).toContain('429 退避重试 · bigmodel')
+      const singleDiv = [...table.querySelectorAll('tbody td > div')].find((d) => d.getAttribute('title') === 'retried_429:bigmodel')
+      expect(singleDiv?.textContent?.trim()).toBe('429 退避重试 · bigmodel')
+      // 多 marks 逗号串逐段映射：429 退避重试 · bigmodel · 模型容灾 · glm-4.5-air
+      expect(table.textContent).toContain('429 退避重试 · bigmodel · 模型容灾 · glm-4.5-air')
+      // EN 界面同链路（重挂生效，双语标签两参同写）
+      localStorage.setItem('mdk_lang', 'en')
+      mountPage()
+      await flush()
+      expect((document.getElementById('logTable') as HTMLElement).textContent).toContain('429 backoff retry · bigmodel')
+    } finally {
+      LOGS_FIXTURE.logs = []
+      LOGS_FIXTURE.total = 0
+      LOGS_FIXTURE.pages = 1
+      localStorage.removeItem('mdk_log_tab')
+      localStorage.setItem('mdk_lang', 'zh')
+    }
+  })
+
   it('日志表定宽截断回归：EN 短表头放得下（Code/Copy）、窄列留白腾位与长 token 折行的 CSS 在页', async () => {
     // 2026-11-12 审查回归：定宽按中文表头调优后，EN 全称 Status/Actions 被省略成 St…/Ac…、
     // 8 位毫秒（≥100s）被截断误导读数——修复=窄列减侧留白 + EN 短标签，列宽/min-width 不动
