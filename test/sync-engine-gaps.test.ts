@@ -5,7 +5,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { TEST_TMP, newHome, gotoHome, restoreHomes, waitFor } from './helpers.js'
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
@@ -318,16 +318,44 @@ describe('SyncLoop 缺口分支', () => {
     await setupSyncTarget({ kind: 'localdir', dir }, 'pw-debounce', { backend: 'file' })
     const target = createLocaldirTarget(dir)
     expect(DEFAULT_DEBOUNCE_MS).toBe(3000)
-    const loop = new SyncLoop({ pollMs: 60_000, jitterRatio: 0 }) // 轮询 60s 内不会触发，推送只能来自防抖
+    // 受控事件投递替代真实 fs.watch：慢 CI/杀软机器上事件投递延迟可达秒级（本用例 Windows CI
+    // 偶发红的根因——真实事件 15s 内未到），事件到达时机由测试显式控制，防抖窗口语义改用
+    // fake 时钟钉死（只 fake setTimeout/clearTimeout，真实 fs promise IO 与 Date 轮询不受影响）
+    let deliver: ((event: fsSync.WatchEventType, filename: string | null) => void) | undefined
+    const loop = new SyncLoop({
+      pollMs: 60_000, // 轮询 60s 内不会触发：推送只能来自防抖（stub watcher 屏蔽即时推路径之外的真实事件）
+      jitterRatio: 0,
+      watchFn: (_p, listener) => {
+        deliver = (event, filename) => listener(event, filename)
+        return neverWatcher()
+      },
+    })
     loop.start()
     try {
+      await waitFor(async () => (await target.readManifest())?.rev === 1, 15000)
+      // 初始拉取 tick 从 manifest 落盘到 finally 清 inflight 只隔微任务：留缓冲，避免事件被
+      // trailing 补跑吸收（绕过防抖立即推）污染「窗口内不推」断言
+      await new Promise((r) => setTimeout(r, 50))
       await localEdit('debounced-push')
-      await waitFor(async () => (await target.readManifest())?.rev === 2, 15000)
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        deliver!('change', 'config.toml') // 事件① @ t=0
+        vi.advanceTimersByTime(2000)
+        expect((await target.readManifest())?.rev).toBe(1) // 静默 2s 不推：防抖窗口存在，不是立即推
+        deliver!('change', 'config.toml') // 事件② @ t=2000：重置防抖计时器
+        vi.advanceTimersByTime(2999)
+        expect((await target.readManifest())?.rev).toBe(1) // 距事件①已近 5s 仍不推：重置生效；距事件②不足 3s
+        vi.advanceTimersByTime(1) // t=5000：距事件②满 3s，防抖到点触发推送（真实 fs 推送链在此启动）
+      } finally {
+        vi.useRealTimers()
+      }
+      await waitFor(async () => (await target.readManifest())?.rev === 2, 30000)
       expect((await loadConfig()).profiles?.main?.default_model).toBe('debounced-push')
     } finally {
       await loop.stop()
     }
-  }, 30_000)
+  }, 60_000)
 })
 
 /** 永不触发事件的 stub watcher（带 close noop，stop() 可正常关闭）：屏蔽 fs.watch 即时推路径，隔离出轮询/手动触发 */
