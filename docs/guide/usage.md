@@ -112,7 +112,7 @@ modeldock attach claude-code
 | Claude Code | `modeldock attach claude-code [--takeover-models]` | 改 `~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 两个值，其余字段不动；`--takeover-models` 可选：把 `DEFAULT_*_MODEL` 映射迁进 profile 并从文件删除 | 重启 Claude Code |
 | ZCode | `modeldock attach zcode` | 在 `~/.zcode/v2/provider_config.json` **新增** modeldock provider 条目（热加载，立即生效），不动既有条目；旧版写入 `config.json` 的 `builtin:modeldock` 条目会在接入时自动清理 | 在 ZCode 设置里手动选择一次 ModelDock provider |
 | dsh | `modeldock attach dsh [--set-default]` | `~/.dsh/settings.yaml` 新增 modeldock provider（apiKeyEnv 间接引用），token 写进 `.credentials.yaml`；`--set-default` 顺带切 agent-default-model | 重启 dsh |
-| Codex | `modeldock attach codex [--set-default]` | 创建/修改 `~/.codex/config.toml` 注册 modeldock provider（wire_api=responses，令牌内联请求头、无需环境变量） | 加 `--set-default` 切默认 provider（或在 Codex 配置里选 modeldock） |
+| Codex | `modeldock attach codex [--set-default]` | 创建/修改 `~/.codex/config.toml` 注册 modeldock provider（wire_api=responses，令牌内联请求头、无需环境变量），并为每条 ModelDock 路由写一份 `[profiles.<id>]` | 加 `--set-default` 切默认 provider（或在 Codex 配置里选 modeldock）；也可用 `codex -p <profile>` 免控制台切换路由 |
 | OpenCode | `modeldock attach opencode` | 在 `~/.config/opencode/opencode.json` 新增 `provider.modeldock`（OpenAI 兼容 `/v1`） | 重启 OpenCode |
 | MiMo Code | `modeldock attach mimo-code` | 在 `~/.config/mimocode/mimocode.jsonc`（或 `.json`，`MIMOCODE_HOME` 可覆盖）注册 modeldock provider 并按当前路由写入模型声明；支持自动安装（npm `@mimo-ai/cli`） | 重启 MiMo Code，`mimo models` 可验证 |
 | WorkBuddy | `modeldock attach workbuddy` | 在 `~/.workbuddy-ai/models.json`（多候选探测）写入当前路由的模型条目数组（UI「添加模型」同款格式），你已有的自定义条目原样保留 | WorkBuddy 运行中会热加载；模型列表未刷新就重启 |
