@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import http from 'node:http'
 import path from 'node:path'
+import type { AddressInfo } from 'node:net'
 import { buildRuntime, logRequest, recordOutcome } from '../src/gateway/state.js'
 import { recordModelOutcome } from '../src/gateway/state/routing.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
@@ -9,13 +11,16 @@ import {
   PROBE_CONCURRENCY_MAX,
   PROBE_RATE_LIMIT_COOLDOWN_MS,
   PROBE_RETRY_AFTER_MAX_WAIT_MS,
+  makeRelayProbeTransport,
   probeBackoffWaitMs,
   probeCooldownUntil,
   runProbeSuite,
 } from '../src/gateway/probe/engine.js'
 import type { ProbeRunner, ProbeTransport } from '../src/gateway/probe/engine.js'
+import { countSseChunks } from '../src/gateway/probe/runners/p3.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
 import { readProbeLedger } from '../src/gateway/probe/ledger.js'
+import { setSecret } from '../src/config/secrets.js'
 import { logsDir } from '../src/util/paths.js'
 import { localDateStr, localIsoTs } from '../src/util/time.js'
 import { fakeHome, waitFor } from './helpers.js'
@@ -408,6 +413,110 @@ describe('probe-engine · [probe] 配置段（任务 5）', () => {
       expect(r.dispatched).toBe(6)
       expect(maxActive).toBe(3)
     } finally {
+      h.restore()
+    }
+  })
+})
+
+// 生产 transport 的 SSE 逐片计时（t15）：makeRelayProbeTransport → forwardToUpstream → 本地
+// mock 上游（listen(0)，真实等待 ~130ms 级 setTimeout 而非 3 秒级），验证 P3 生产面拿到真
+// TTFB——chunks 由传输层逐 data 行观测，非流式/错误体路径 chunks 缺席（runner 兜底不变）。
+describe('probe-engine · transport SSE 逐片计时（t15）', () => {
+  /** 按路径分行为的 mock 上游：/sse 延迟写 3 个 data 块、/json 普通体、/err 500 */
+  async function startProbeMock(): Promise<{ url: string; close: () => Promise<void> }> {
+    const s = http.createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        if (req.url === '/json') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ choices: [] }))
+          return
+        }
+        if (req.url === '/err') {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'boom' } }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        const delays = [10, 50, 120]
+        delays.forEach((d, i) => {
+          setTimeout(() => {
+            res.write(`data: {"n":${i}}\n\n`)
+            if (i === delays.length - 1) {
+              res.write('data: [DONE]\n\n')
+              res.end()
+            }
+          }, d)
+        })
+      })
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const close = (): Promise<void> => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) })
+    return { url: `http://127.0.0.1:${(s.address() as AddressInfo).port}`, close }
+  }
+
+  async function probeRt(url: string): Promise<GatewayRuntime> {
+    await setSecret('pe-0', 'sk-live', 'file')
+    return buildRuntime({
+      providers: { ps: { name: 'ps', base_url: url, protocol: 'openai', auth_style: 'bearer', key_ref: 'file:pe-0' } },
+      profiles: {},
+      harness: {},
+    } as unknown as Config, 'tok')
+  }
+
+  it('SSE 分片延迟到达：chunks 长度 3、升序、首片≥10ms 量级且非整包末端计时', async () => {
+    const h = fakeHome()
+    const mock = await startProbeMock()
+    try {
+      const rt = await probeRt(mock.url)
+      const sse = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/sse', body: Buffer.from('{}') })
+      expect(sse.status).toBe(200)
+      const c = sse.chunks
+      expect(c).toHaveLength(3)
+      expect(c![0]).toBeGreaterThanOrEqual(10)
+      // 首片远早于流结束（末块 120ms）才被观测到：整包读完统一计时会退化成 ~120+
+      expect(c![0]).toBeLessThan(100)
+      expect(c![1]).toBeGreaterThanOrEqual(c![0])
+      expect(c![2]).toBeGreaterThanOrEqual(c![1])
+      // 与 runner 兜底计数同口径：transport 观测分片数 == bodyText 的 SSE data 行计数
+      expect(c!.length).toBe(countSseChunks(sse.bodyText))
+      // 非流式：chunks 缺席（runner 走 bodyText 兜底路径，既有语义不变）
+      const json = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/json', body: Buffer.from('{}') })
+      expect(json.status).toBe(200)
+      expect(json.chunks).toBeUndefined()
+      // 错误体（≥400）：既有 readUpstreamErrorText 有界读路径原样，chunks 同样缺席
+      const err = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/err', body: Buffer.from('{}') })
+      expect(err.status).toBe(500)
+      expect(err.bodyText).toContain('boom')
+      expect(err.chunks).toBeUndefined()
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('abort 中止 SSE 增量读：transport 就地返回部分体，不挂死到流结束', async () => {
+    const h = fakeHome()
+    const s = http.createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        const timer = setInterval(() => res.write('data: {"tick":1}\n\n'), 100)
+        res.on('close', () => clearInterval(timer))
+      })
+    })
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()))
+    const close = (): Promise<void> => new Promise((r) => { s.closeAllConnections?.(); s.close(() => r()) })
+    try {
+      const rt = await probeRt(`http://127.0.0.1:${(s.address() as AddressInfo).port}`)
+      const ac = new AbortController()
+      const p = makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/sse', body: Buffer.from('{}'), signal: ac.signal })
+      await sleep(250) // 首片已到、第二片在途
+      ac.abort()
+      const resp = await p // abort 摧毁上游流：增量读就地收尾（挂死会撞测试超时）
+      expect(resp.chunks!.length).toBeLessThanOrEqual(3)
+    } finally {
+      await close()
       h.restore()
     }
   })

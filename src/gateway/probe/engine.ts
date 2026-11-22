@@ -8,7 +8,9 @@
 // forwardToUpstream；测试注入 mock）——这是「探针走 forwardToUpstream 且不调 logRequest」
 // 可测的实现方式：副作用面在 server.ts 转发 handler 层，transport 天然不经过它。
 
+import { StringDecoder } from 'node:string_decoder'
 import { parseRetryAfterMs, forwardToUpstream, readBodyBounded, readUpstreamErrorText, UPSTREAM_ERROR_BODY_MAX_BYTES } from '../relay.js'
+import type { UpstreamBody } from '../relay.js'
 import { t } from '../../util/i18n.js'
 import { providerKeyRefs, resolveProviderKeys } from '../../config/secrets.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
@@ -251,6 +253,54 @@ function makeSemaphore(limit: number): { acquire: () => Promise<() => void> } {
   }
 }
 
+/** SSE 有界增量读（t15：生产 P3 真 TTFB）：逐网络块解码按行切分，每条非空载 data 行边界记录
+ *  一次到达时刻（相对 startMs 的 elapsed ms）。分片行口径与 p3.ts countSseChunks 一致（剔除
+ *  [DONE] 与空载行）——transport 观测的分片数与 bodyText 兜底计数才互为对照。StringDecoder
+ *  持跨块不完整多字节序列（同 usage tap 先例：直接 toString 会把被块边界截断的中文字符变
+ *  替换符，usage 行解析随之失败）。startMs 由调用方回推（Date.now() - up.ms = 请求起点），
+ *  401 换 key 重试后锚到的也是真正产出本响应的那次发送。1MB 上限沿用 readBodyBounded 口径
+ *  封顶总量（行缓冲是已收字节的后缀，天然被同一上限约束，无需另设行帽）；流中途断掉（含
+ *  abort 摧毁连接）保留已读部分不上抛，同 readBodyBounded 语义。 */
+async function readSseBounded(
+  body: UpstreamBody,
+  startMs: number,
+  signal: AbortSignal | undefined
+): Promise<{ text: string; chunks: number[] }> {
+  const chunks: number[] = []
+  const decoder = new StringDecoder('utf8')
+  let text = ''
+  let scanned = 0 // 已按行扫过的字符游标：每块只扫新增段，不整串重扫
+  const feedLine = (line: string): void => {
+    const s = line.trim()
+    if (!s.startsWith('data:')) return
+    const payload = s.slice(5).trim()
+    if (!payload || payload === '[DONE]') return
+    chunks.push(Math.max(0, Date.now() - startMs))
+  }
+  const drain = (): void => {
+    for (let idx = text.indexOf('\n', scanned); idx >= 0; idx = text.indexOf('\n', scanned)) {
+      feedLine(text.slice(scanned, idx))
+      scanned = idx + 1
+    }
+  }
+  try {
+    let total = 0
+    for await (const c of body as unknown as AsyncIterable<unknown>) {
+      const b = Buffer.isBuffer(c) ? c : Buffer.from(c as string)
+      total += b.length
+      text += decoder.write(b)
+      drain()
+      if (signal?.aborted || total >= UPSTREAM_ERROR_BODY_MAX_BYTES) break
+    }
+  } catch {
+    /* 流中途断掉：保留已读部分 */
+  }
+  text += decoder.end()
+  drain()
+  feedLine(text.slice(scanned)) // 末尾无换行的残行也计（与 countSseChunks 的 split('\n') 口径一致）
+  return { text, chunks }
+}
+
 /** 生产 transport 适配器（任务 3 接线）：走 forwardToUpstream——key 注入 / 代理 / 三协议 / 池解析
  *  免费获得，且天然不调 logRequest（落账面在 server.ts 转发 handler 层，探针不经过它）。
  *  错误语义：本地跳过（key 池空/全冷却/端点缺失）与网络失败按 UpstreamError/普通异常抛出，
@@ -292,10 +342,22 @@ export function makeRelayProbeTransport(
       ...(req.signal ? { signal: req.signal } : {}),
     })
     // 有界读（同 server.ts probe()）：错误体经 readUpstreamErrorText 按 content-encoding 解压，
-    // 成功体直接读——探针只取回复文本/usage，1MB 上限防异常上游的超大 body 进堆
-    const text = up.status >= 400
-      ? await readUpstreamErrorText(up.headers, up.body)
-      : (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
+    // 成功体直接读——探针只取回复文本/usage，1MB 上限防异常上游的超大 body 进堆。
+    // SSE 成功体（P3 流式探针，t15）改走增量读逐 data 行记录到达时刻（chunks）：TTFB 只有
+    // 传输层能测，整包读会把它退化成调用总耗时。非流式与 ≥400 路径逐字节保持原样
+    const rawCt = up.headers['content-type'] ?? up.headers['Content-Type']
+    const isSse = /text\/event-stream/i.test((Array.isArray(rawCt) ? rawCt[0] : rawCt) ?? '')
+    let chunks: number[] | undefined
+    let text: string
+    if (up.status >= 400) {
+      text = await readUpstreamErrorText(up.headers, up.body)
+    } else if (isSse) {
+      const r = await readSseBounded(up.body, Date.now() - up.ms, req.signal)
+      text = r.text
+      chunks = r.chunks
+    } else {
+      text = (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
+    }
     let usage: Record<string, number> | undefined
     try {
       const u = (JSON.parse(text) as { usage?: unknown })?.usage
@@ -308,7 +370,15 @@ export function makeRelayProbeTransport(
     } catch {
       /* SSE 或非 JSON：usage 缺席仅观测降级 */
     }
-    return { status: up.status, headers: up.headers, bodyText: text, usage, modelAfter: up.modelAfter, ms: up.ms }
+    return {
+      status: up.status,
+      headers: up.headers,
+      bodyText: text,
+      usage,
+      modelAfter: up.modelAfter,
+      ms: up.ms,
+      ...(chunks != null ? { chunks } : {}),
+    }
   }
 }
 
