@@ -450,9 +450,13 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       // 第二亲必须指向不同提交才能造出双亲空合并
       git(repo.root, 'branch feature/st-zero')
       mergeFeatureBranch(repo.root, 'st-real') // 真合并对照（helper 保留分支：残留分支 feature..base 计数 ≥1，不触发分支现存门）
+      // tree sha 经 `show -s --format=%T` 取：helpers.git() 走 execSync，Windows 缺省 shell 是
+      // cmd.exe——不展开 $() 命令替换、还会吞 `^{tree}` 里的 ^ 转义（本用例首次在 Windows 跑即
+      // 暴露，POSIX bash 两形态都合法故 CI 从未红过）。%T 无 shell 特性，三平台等价。
+      const developTree = git(repo.root, 'show -s --format=%T develop')
       const emptySha = git(
         repo.root,
-        `commit-tree "$(git rev-parse develop^{tree})" -p develop -p feature/st-zero -m ${JSON.stringify("Merge branch 'feature/st-zero'")}`,
+        `commit-tree ${developTree} -p develop -p feature/st-zero -m ${JSON.stringify("Merge branch 'feature/st-zero'")}`,
       )
       git(repo.root, `update-ref refs/heads/develop ${emptySha}`)
       fs.writeFileSync(path.join(root, 'blocked', 'st-zero.md'), cardText({ id: 'st-zero' }, '空合并残留'))

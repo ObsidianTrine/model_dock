@@ -20,8 +20,11 @@ name: claude-review
 #   配置项含义、换供应商与切回官方步骤见 docs/ops/ci-bots.md「模型接入」。
 #
 # 边界：
-#   - Dependabot 的 PR 不走本工作流（它触发的 run 拿到的 GITHUB_TOKEN 只读，发不了评论/label），
-#     由 dependabot-fix.yml 专职处理。
+#   - Dependabot 的 PR 不走本工作流（PR head 在 dependabot 分支上，GITHUB_TOKEN 一律只读，
+#     发不了评论/label），由 dependabot-fix.yml 专职处理。skip 判据是「PR author =
+#     app/dependabot」而非只看 actor：人工对 dependabot PR 做 update-branch / reopen /
+#     手动 rebase 会把 actor 变成人，而 token 只读面由 head 分支归属决定——2026-11-22 #19
+#     实证该形态下 security-review 真跑且 verdict 永远发不出 → fail-closed 恒红。
 #   - bot 自己推的修复提交带 [dependabot-fix]（依赖升级）/ [ci-autofix]（主干失败修复）前缀，
 #     auto-review / security-review 检测到 PR head 提交为任一前缀时跳过，防审查回环。
 #   - fork PR 拿不到 secrets，本工作流不覆盖（本仓库 PR 均来自同仓库分支）。
@@ -53,7 +56,7 @@ permissions:
 jobs:
   risk-tier:
     # 风险分级（确定性，零消耗）：改动文件 → low/medium/high label；opened/reopened 评论判定依据
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.user.login != 'app/dependabot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -100,7 +103,7 @@ jobs:
 
   auto-review:
     # PR 打开/更新 → 只读审查（不推代码，只发评论与 inline 标注）
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.user.login != 'app/dependabot'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -199,7 +202,7 @@ jobs:
   security-review:
     # AI 安全审查（可阻塞）：独立会话专查安全面，与 auto-review 分开跑避免互相稀释注意力。
     # 顶层评论的 SECURITY-VERDICT 行是门禁信号：FAIL → 本 job 失败（可设为 required check）。
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]' && github.event.pull_request.user.login != 'app/dependabot'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
