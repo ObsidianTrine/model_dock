@@ -33,7 +33,8 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     modalClass: 'svcmodal',
     bodyHtml: '<p class="testline" id="mgReviewLine" style="margin:0 0 8px"></p>' +
       '<div class="tablescroll"><table id="mgReviewTable"><thead><tr>' +
-      '<th></th><th data-i18n="服务||Service">服务</th><th data-i18n="地址与 Key||Endpoint and key">地址与 Key</th><th data-i18n="探针||Probe">探针</th><th data-i18n="建议||Suggestion">建议</th>' +
+      // 勾选列 th 放全选框（船东批准原型 selAll 形态）：行多时逐个点已是纯体力，联动语义见 mgSelAllBox
+      '<th><input type="checkbox" id="mgSelAll" data-i18n-title="全选 / 全不选||Select all / none" title="全选 / 全不选"></th><th data-i18n="服务||Service">服务</th><th data-i18n="地址与 Key||Endpoint and key">地址与 Key</th><th data-i18n="探针||Probe">探针</th><th data-i18n="建议||Suggestion">建议</th>' +
       '</tr></thead><tbody id="mgReviewRows"></tbody></table></div>' +
       '<p class="help" data-i18n="同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。||Services with the same base_url + same key merge into one; verdicts come from local probe records (keys shown as fingerprints). Applying replaces providers/routes/presets/schedule rules (unchecked ones are removed); a snapshot is taken first.">' +
       '同 base_url + 同 key 的服务自动合并为一条；探针结论继承自本机探针记录（key 只显示指纹）。应用会整体替换现有服务/路由/预设/定时规则（未勾选的将被移除），改动前自动快照。</p>',
@@ -168,7 +169,9 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
   }
   // 预览结果渲染进审阅宽弹层（mgRenderPreview 由 configpack.ts 的导入按钮回调触发）；
   // confirmToken 存 mgPendingToken 待 apply。列结构（勾选/服务/地址与Key/探针/建议）进 styles.ts 配方：
-  // 一行一条不折行，长文本截断读全文走 title 悬浮；来源清单并入服务列悬浮（宽度让给地址列，信息不丢）
+  // 地址格两行块形态（船东批准原型 /tmp/merge-proto/merge-flow.html）：首行 URL 剥 scheme 渲染 +
+  // direction:rtl 左截断保尾部（host/path 是服务间差异所在），title 悬浮全量含 scheme；次行 key 指纹，
+  // 仅 duplicateCount > 1 才标「同源 ×n」——=1 是去重正常态，每行都标即纯噪音；来源清单并入服务列悬浮
   function mgRenderPreview(j) {
     var pv = j.preview || {}
     var cands = pv.candidates || []
@@ -177,22 +180,43 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
     for (var i = 0; i < cands.length; i++) {
       var c = cands[i]
       var srcs = (c.sources || []).join(', ')
-      var dupTxt = c.duplicateCount > 0 ? t('合并 {n} 条重复', '{n} duplicates merged', { n: c.duplicateCount }) : ''
+      var dupTxt = c.duplicateCount > 1 ? t('同源 ×{n}', 'same-source ×{n}', { n: c.duplicateCount }) : ''
       rows += '<tr><td><input type="checkbox" class="mgKeep" data-id="' + esc(c.id) + '"' + (c.suggestion === 'keep' ? ' checked' : '') + '></td>' +
         '<td title="' + esc(c.id + (srcs ? ' · ' + srcs : '')) + '"><b>' + esc(c.id) + '</b></td>' +
-        '<td class="mgurl" title="' + esc(c.base_url + ' · key ' + (c.key_fp || '-') + (dupTxt ? ' · ' + dupTxt : '')) + '"><div><span class="mgu">' + esc(c.base_url) + '</span><span class="mgfp">key ' + esc(c.key_fp || '-') + '</span>' + (dupTxt ? '<span class="mgdup">' + esc(dupTxt) + '</span>' : '') + '</div></td>' +
+        '<td class="mgurl"><span class="mgu" title="' + esc(c.base_url) + '">' + esc(c.base_url.replace(/^https?:\\/\\//, '')) + '</span><span class="mgsub">key ' + esc(c.key_fp || '-') + (dupTxt ? ' · <span class="mgdup">' + esc(dupTxt) + '</span>' : '') + '</span></td>' +
         '<td>' + mgVerdictBadge(c.verdict_state) + '</td>' +
         '<td>' + mgSuggestionBadge(c.suggestion) + '</td></tr>'
     }
     if (!cands.length) rows = '<tr><td colspan="5" class="empty">' + esc(t('包内没有可合并的服务', 'No services to merge in the packages')) + '</td></tr>'
     var tbody = document.getElementById('mgReviewRows')
     if (tbody) tbody.innerHTML = rows
+    mgSyncSelAll()
     var line = document.getElementById('mgReviewLine')
     if (line) line.textContent = t('合并 {n} 个包 → {p} 个服务、{r} 条路由（去重 {d} 条）· 预设 {s} · 定时 {w}', 'Merging {n} packages → {p} services, {r} profiles ({d} merged) · {s} presets · {w} schedule rules', { n: (pv.packages || []).length, p: cands.length, r: pv.profileTotal || 0, d: pv.duplicatesMerged || 0, s: pv.presetCount || 0, w: pv.scheduleRules || 0 })
     var applyBtn = document.getElementById('mgReviewApply')
     if (applyBtn) applyBtn.disabled = !cands.length
     mgM.open()
   }
+  // 行勾选变化回写表头态（船东批准原型 refreshApply 形态）：全勾=勾、部分/空=不勾；
+  // 不用 indeterminate 三态——易误读且原型未用。空清单也回写不勾，防上一次预览的陈旧勾态残留
+  function mgSyncSelAll() {
+    var boxes = document.querySelectorAll('#mgReviewRows .mgKeep')
+    var sel = document.getElementById('mgSelAll')
+    if (!sel) return
+    var n = 0
+    Array.prototype.forEach.call(boxes, function (el) { if (el.checked) n++ })
+    sel.checked = boxes.length > 0 && n === boxes.length
+  }
+  // 全选联动：表头 change 统一置位全行（原型直接重渲染整表，这里只翻转 checked 同效且少一次重建）；
+  // 行变化经 tbody 事件委托回写表头——tbody 是常驻节点，行 innerHTML 重建不丢监听，免逐行挂
+  var mgSelAllBox = document.getElementById('mgSelAll')
+  if (mgSelAllBox) mgSelAllBox.addEventListener('change', function () {
+    Array.prototype.forEach.call(document.querySelectorAll('#mgReviewRows .mgKeep'), function (el) { el.checked = mgSelAllBox.checked })
+  })
+  var mgReviewRowsBody = document.getElementById('mgReviewRows')
+  if (mgReviewRowsBody) mgReviewRowsBody.addEventListener('change', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('mgKeep')) mgSyncSelAll()
+  })
   function mgSetErr(msg) {
     var el = document.getElementById('mgReviewErr')
     if (el) el.textContent = msg || ''
