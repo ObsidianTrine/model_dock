@@ -334,9 +334,10 @@ describe('SyncLoop 缺口分支', () => {
     loop.start()
     try {
       await waitFor(async () => (await target.readManifest())?.rev === 1, 15000)
-      // 初始拉取 tick 从 manifest 落盘到 finally 清 inflight 只隔微任务：留缓冲，避免事件被
-      // trailing 补跑吸收（绕过防抖立即推）污染「窗口内不推」断言
-      await new Promise((r) => setTimeout(r, 50))
+      // 确定性栅栏替代时间缓冲：初始拉取 tick 的 manifest 落盘与 finally 清 inflight 之间无固定
+      // 上界，50ms 启发式在慢 CI 会被穿透——事件①落在在飞窗口即被 trailing 补跑吸收（绕过防抖
+      // 立即推），「窗口内不推」负断言假红；改为显式等 inflight 清空（tickSettled 只读观测面）
+      await waitFor(() => loop.tickSettled, 15000)
       await localEdit('debounced-push')
 
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
@@ -377,7 +378,8 @@ describe('SyncLoop 缺口分支', () => {
     loop.start()
     try {
       await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
-      await new Promise((r) => setTimeout(r, 50)) // 与防抖用例同款：等初始 tick 的 trailing 收尾清干净，防噪声串进断言
+      // 确定性栅栏（同防抖用例）：等初始 tick 收尾再装 spy 投错，防尾巴噪声串进计次断言
+      await waitFor(() => loop.tickSettled, 15000)
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
         emitError!(new Error('EMFILE: too many open files'))
@@ -572,7 +574,8 @@ describe('watcher 失效降级落 debuglog（daemon 形态可观测）', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
-      await new Promise((r) => setTimeout(r, 50)) // 与既有降级用例同款：等初始 tick 收尾，防噪声串进断言
+      // 确定性栅栏（同防抖用例）：等初始 tick 收尾再投错，防尾巴噪声串进计次断言
+      await waitFor(() => loop.tickSettled, 15000)
       setDebugFlag(true)
       refreshDebugOn(undefined)
       emitError(new Error('EMFILE: too many open files'))
@@ -601,7 +604,8 @@ describe('watcher 失效降级落 debuglog（daemon 形态可观测）', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       await waitFor(async () => (await createLocaldirTarget(dir).readManifest())?.rev === 1, 15000)
-      await new Promise((r) => setTimeout(r, 50))
+      // 确定性栅栏（同防抖用例）：等初始 tick 收尾再投错，防尾巴噪声串进计次断言
+      await waitFor(() => loop.tickSettled, 15000)
       setDebugFlag(false)
       refreshDebugOn(undefined)
       delete process.env.MODELRDOCK_DEBUG // 关态口径：三源全关（env 残留 '1' 会复活开关）

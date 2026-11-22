@@ -303,6 +303,14 @@ export class SyncLoop {
       // watcher 同步构造不抛、但异步失败（EMFILE/ENOSPC 或目录被删）会发 'error'：
       // 不接则变成 uncaught exception 杀网关，这里挂兜底——清理引用、降级为仅轮询（只损失「即时推」）
       this.watcher.on('error', (err) => {
+        // 置空前显式 close（belt-and-braces）：error 后 Node 通常已自行销毁句柄（HandleWrap 对
+        // 已停句柄的重复 close 是 no-op），但个别态（含测试 stub 非 real watcher）仍可能抛——
+        // 降级路径只损失即时推，不得叠加清理异常，吞掉
+        try {
+          this.watcher?.close()
+        } catch {
+          /* 死句柄 close 抛错忽略 */
+        }
         this.watcher = undefined
         const msg = t('[modeldock] 配置同步本地文件监听失效（{msg}）：不再即时推送，改为仅轮询同步（不影响网关工作）', '[modeldock] Local file watcher for config sync failed ({msg}): realtime push disabled, polling only (gateway unaffected)', { msg: (err as Error).message })
         // 生产构造点（gateway/main.ts remountSyncEngine）恒不传 log：log 缺席时 console.error 兜底，
@@ -326,6 +334,15 @@ export class SyncLoop {
     clearTimeout(this.debounce)
     this.watcher?.close()
     await this.inflight?.catch(() => {})
+  }
+
+  /** 测试确定性栅栏（只读观测，零行为面）：在飞 tick 已完全收尾。trailing 补跑在 finally 内
+   *  同步重挂 inflight（观测者不见中间空窗），故 inflight 空即「本 tick 及其补跑已全收尾」。
+   *  why：sync-engine-gaps 防抖用例的「窗口内不推」负断言须等启动 tick 清理后再投递文件事件——
+   *  事件落在在飞窗口会被 trailing 补跑吸收（绕过防抖立即推）→ 假红；时间缓冲在慢 CI 不可靠
+   *  （tick 收尾无固定上界），waitFor 需要显式条件而非拍脑袋毫秒数 */
+  get tickSettled(): boolean {
+    return this.inflight === null
   }
 
   private schedulePoll(): void {
