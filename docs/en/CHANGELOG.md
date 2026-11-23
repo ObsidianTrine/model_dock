@@ -21,6 +21,7 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **Circuit breaker for uncommitted idling**: when an agent keeps working for a long time without committing, it used to be logged but never stopped; it now goes through the same circuit-breaker path as the watchdog — stopped and handed to a human instead of burning budget.
 - **Lifetime cap on auto-resume**: a task card can now be auto-resumed at most 3 times (configurable) across its whole life; beyond that it goes to a human — crash-resume loops no longer restart and spend forever.
 - **Fixup cards can see the root cause**: fixup prompts used to carry only the last 200 lines of logs, so the root cause was often truncated away; they now include the gate summary, the first error, and the previous round's result (each truncated gracefully when overlong).
+- **Sync degradation is no longer silent**: when the local file watcher fails (directory removed, system handle exhaustion, …), sync falls back to polling and data convergence is unaffected; previously this fallback was completely silent — the only symptom was "changes get pushed mysteriously slower", with no clue to investigate. The console now states the reason explicitly, and with debug logging enabled (`gateway start --debug`) the event is also recorded to `logs/debug-<date>.jsonl` for post-hoc tracing.
 
 ### Fixed
 
