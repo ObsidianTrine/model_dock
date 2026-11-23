@@ -164,7 +164,7 @@ spawnSync(process.execPath, ['--import', loader, path.join(ROOT, 'src', 'cli.ts'
 
 判断方法：涉及多处共享模块的改动，**单独跑新文件绿 ≠ 全量绿**，必须组合跑（至少 `uninstall.test` / `update-cli.test` / `store.test`）。参考实现：`test/reset.test.ts`、`test/reset-cli.test.ts`。
 
-- **编排套件宿主仓红线（2026-11-16 自毁事故防线）**：编排套件全量/组合跑（`npm run test:workflow`、大范围 vitest run）**禁止在与队列卡同名（或存在待 finish 卡）的 linked worktree 内执行**——并发 finish 的清理段（worktree remove + 目录 rmSync + branch -d）会把正在跑套件的 worktree 连根删掉（零事件签名，实验室已逐形状复现）；同理禁止在套件运行窗口内对宿主仓并发跑 finish/手工 worktree/分支操作。套件对宿主仓的越界改动由 `test/orchestrator/host-guard.mjs` 哨兵（vitest globalSetup 前后快照对账，两套件同享）越界即红兜底。
+- **编排套件宿主仓红线（2026-11-16 自毁事故防线）**：编排套件全量/组合跑（`npm run test:workflow`、大范围 vitest run）**禁止在与队列卡同名（或存在待 finish 卡）的 linked worktree 内执行**——并发 finish 的清理段（worktree remove + 目录 rmSync + branch -d）会把正在跑套件的 worktree 连根删掉（零事件签名，实验室已逐形状复现）；同理禁止在套件运行窗口内对宿主仓并发跑 finish/手工 worktree/分支操作。套件对宿主仓的越界改动由 `test/orchestrator/host-guard.mjs` 哨兵（vitest globalSetup 前后快照对账，两套件同享）越界即红兜底；finish 侧配套了撞窗预检与 marker 等待重试（`AGENTS_ALLOW_COLLISION_WINDOW=1` 豁免，见「多 Agent 并行开发约定」），编排器活跃时 finish 不再白烧套件窗口。
 
 ## 多 Agent 并行开发约定（feature-branch 工作流）
 
@@ -203,6 +203,7 @@ node .agents/scripts/feature-branch.mjs list              # 查看在跑任务
 ```
 
 - `task-id` 用小写短横线短词（如 `fix-presets-merge`）。
+- **finish 有编排器撞窗预检**：门禁开跑前扫活跃任务锁，编排器在跑即秒级拒绝（等静默重跑 / 纯文档 `--skip-test` / `AGENTS_ALLOW_COLLISION_WINDOW=1` 强行）；门禁红若 host-guard 落了撞窗 marker 会自动等静默重跑一次（详见 `.agents/workflows/feature-branch.md`「编排器撞窗防护」）。
 - **start 即认领（claim-before-execute）**：队列里有同 id 任务卡时 start 自动把卡从 `pending/` 迁 `running/`（抢任务锁+留痕），finish 成功落 `merged/`——人工 agent 与闭环共享卡状态，同一张卡不会被重复执行；`list` 显示 `[claimed]` = 有 agent 在岗勿接手。
 - **未完成任务必须在 worktree 的 `NOTES.md` 留交接**（start 自动生成模板），接手 agent 从 `list` 与 NOTES.md 续起。
 - start 自动跑 `setupCmd`（本仓库 `npm ci --prefer-offline`，失败仅告警可手动重跑）；finish 自动跑 `testCmd`（本仓库 `npm test`，纯文档改动可 `--skip-test`），全程持锁串行（陈锁自动接管）。
