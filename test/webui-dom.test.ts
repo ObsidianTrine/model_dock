@@ -45,12 +45,13 @@ const OVERVIEW_FIXTURE = {
   syncRequest: null,
 }
 
-// /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新）
+// /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新；
+// 字段名对齐 UsageTodayView 真实契约：failed/cache_creation，防新用例建立在漂移字段上）
 const USAGE_LIVE_FIXTURE = {
   ok: true,
   usageToday: {
-    date: '2026-11-06', requests: 3, ok: 3, err: 0,
-    tokens: { input: 1200, output: 340, cache_read: 0, cache_write: 0 },
+    date: '2026-11-06', requests: 3, ok: 3, failed: 0,
+    tokens: { input: 1200, output: 340, cache_read: 0, cache_creation: 0 },
     cost: { total: 0.0042 },
     unpriced_models: [],
   },
@@ -66,6 +67,15 @@ const PROBE_VERDICTS_FIXTURE: { verdicts: any[] } = { verdicts: [] }
 /** /_modeldock/probe/trend 夹具（全量响应形态；UI 按 provider 客户端过滤，端点契约无过滤参数） */
 const PROBE_TREND_FIXTURE: { timeline: any[]; spend: any[] } = { timeline: [], spend: [] }
 
+/** /_modeldock/probe/ledger 夹具（探针自耗 pill/明细弹层用例按需改写；默认无 budget/breakdown
+ *  = 账本未就绪，lite 缓存不落、pill 不出——存量用例零感知） */
+const PROBE_LEDGER_FIXTURE: {
+  ok: boolean
+  budget?: Record<string, unknown> | null
+  breakdown?: Record<string, unknown> | null
+  probe_labels?: Record<string, string>
+} = { ok: true }
+
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
   const routes: Record<string, () => { body: unknown; raw?: string }> = {
@@ -77,8 +87,10 @@ function stubFetch(): void {
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
     '/_modeldock/logs': () => ({ body: LOGS_FIXTURE }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
+    '/_modeldock/ui-presence': () => ({ body: { ok: true } }),
     '/_modeldock/probe/verdicts': () => ({ body: PROBE_VERDICTS_FIXTURE }),
     '/_modeldock/probe/trend': () => ({ body: PROBE_TREND_FIXTURE }),
+    '/_modeldock/probe/ledger': () => ({ body: PROBE_LEDGER_FIXTURE }),
   }
   vi.stubGlobal('fetch', (url: string) => {
     const p = String(url).split('?')[0]
@@ -645,6 +657,179 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
       PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  // —— 探针自耗融入用量仪表 + 入口收敛（probe-ui-selfusage-and-entry-removal）——
+  // 本文件 isolate:false 共享进程：此前用例挂载的页面脚本轮询定时器全部存活，且探针自耗 pill
+  // 的数据走每份闭包各自的 probeLedgerLite 缓存（只在挂载求值与 60s 档重拉时刷新）。
+  // mountAndConverge 推进 60s 让所有闭包的账本缓存都收敛到当前夹具——此后任何闭包的 #health
+  // 重建写的都是同一 pill，断言与「哪个闭包最后写」解耦；夹具变更后再收敛一次即模拟到点重拉。
+
+  function seedLedger(total: number, requests: number, spent: number, remaining: number, exhausted: boolean): void {
+    PROBE_LEDGER_FIXTURE.budget = { month: '2026-11', budget: 50000, spent, remaining, exhausted }
+    PROBE_LEDGER_FIXTURE.breakdown = {
+      month: '2026-11', total, estimated_total: 24000, requests,
+      by_probe: total > 0 ? { p11: Math.round(total * 0.6) } : {},
+      by_probe_requests: requests > 0 ? { p11: requests } : {},
+    }
+    PROBE_LEDGER_FIXTURE.probe_labels = { p11: '输出上限||Output limit' }
+  }
+
+  function resetLedger(): void {
+    PROBE_LEDGER_FIXTURE.budget = null
+    PROBE_LEDGER_FIXTURE.breakdown = null
+    PROBE_LEDGER_FIXTURE.probe_labels = undefined
+  }
+
+  async function mountAndConverge(): Promise<void> {
+    mountPage()
+    await flush(60)
+    vi.advanceTimersByTime(60000)
+    await flush()
+  }
+
+  it('探针自耗 pill 渲染进健康横幅：探针本月/预算余取 breakdown.total 与 budget.remaining，dim 形态带引导 title', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      const health = document.getElementById('health')!
+      const pill = document.getElementById('probeSelfPill') as HTMLButtonElement | null
+      expect(pill).not.toBeNull()
+      expect(pill!.tagName).toBe('BUTTON')
+      expect(pill!.className).toBe('pill dim')
+      expect(pill!.textContent).toContain('探针本月 18.2k tokens · 预算余 31.8k')
+      expect(pill!.title).toContain('探针花费记独立账本，不进请求日志与今日用量')
+      expect(pill!.title).toContain('点击查看按探针明细与月预算余量')
+      // 融入位置：探针 pill 与今日用量 pill 在同一横幅、usageHtml 之后并列
+      expect(health.textContent).toContain('今日 3 请求')
+      expect(health.textContent!.indexOf('今日 3 请求')).toBeLessThan(health.textContent!.indexOf('探针本月'))
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗零值不出 pill：requests=0 且 spent=0 时横幅无探针入口（对齐 usage 无流量不显示）', async () => {
+    seedLedger(0, 0, 0, 50000, false)
+    try {
+      await mountAndConverge()
+      expect(document.getElementById('probeSelfPill')).toBeNull()
+      // 明细弹层壳仍存在（脚本创建），只是无 pill 入口
+      expect(document.getElementById('probeLedgerOverlay')).not.toBeNull()
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗预算耗尽：pill 升 warn 语义色且 title 追加硬停警示', async () => {
+    seedLedger(50000, 20, 50000, 0, true)
+    try {
+      await mountAndConverge()
+      const pill = document.getElementById('probeSelfPill') as HTMLButtonElement | null
+      expect(pill).not.toBeNull()
+      expect(pill!.className).toBe('pill warn')
+      expect(pill!.className).not.toContain('dim')
+      expect(pill!.title).toContain('预算耗尽：探针硬停')
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗明细弹层五态与关路径三件套：打开即拉取、svcmodal 壳、foot 只留 msg 槽（无刷新按钮）', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      // 打开即拉取：点击 pill 开弹层，body 先为加载占位（重开清旧数据面），拉取完成换数据面
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      const scrim = document.getElementById('probeLedgerOverlay') as HTMLElement
+      expect(scrim.hidden).toBe(false)
+      expect(scrim.querySelector('.modal-body')?.textContent).toContain('加载中…')
+      await flush()
+      // 成功态：标题「探针自耗」、账期/月度总花费/预算行/按探针分解（标签取 probe_labels 当前语言半边）
+      expect(scrim.querySelector('.modal-head h3')?.textContent).toBe('探针自耗')
+      const body = scrim.querySelector('.modal-body') as HTMLElement
+      expect(body.textContent).toContain('账期 2026-11 · 月度总花费 18.2k tokens · 预估 24.0k · 17 次调用')
+      expect(body.textContent).toContain('月预算 50.0k · 已用 18.2k · 剩余 31.8k')
+      expect(body.textContent).toContain('探针花费记独立账本，不进请求日志与今日用量')
+      const table = document.getElementById('probeLedgerTable') as HTMLElement
+      expect(table.textContent).toContain('p11')
+      expect(table.textContent).toContain('输出上限')
+      expect(table.textContent).toContain('10.9k')
+      // 读取类弹层呈现面：svcmodal 680px 宽壳；foot 仅 msg 槽（.mferr），零按钮——孤儿「刷新」消灭
+      expect(scrim.querySelector('.modal')?.className).toContain('svcmodal')
+      const foot = scrim.querySelector('.modal-foot') as HTMLElement
+      expect(foot.querySelectorAll('button').length).toBe(0)
+      expect(document.getElementById('probeLedgerMsg')?.className).toContain('mferr')
+      // 关路径三件套（读取类口径）：头部 × / Esc / 遮罩点击，三条均可关闭
+      ;(scrim.querySelector('.close-btn') as HTMLElement).click()
+      expect(scrim.hidden).toBe(true)
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      expect(scrim.hidden).toBe(false)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      expect(scrim.hidden).toBe(true)
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      expect(scrim.hidden).toBe(false)
+      scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(scrim.hidden).toBe(true)
+      // 空态行：by_probe 无键 → 「本月暂无探针调用」（fixture 刻意 requests>0 让 pill 可见以打开弹层）
+      seedLedger(0, 2, 300, 49700, false)
+      await mountAndConverge()
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      await flush()
+      expect((document.getElementById('probeLedgerTable') as HTMLElement).textContent).toContain('本月暂无探针调用')
+      // 错误态：弹层内拉取失败 → foot msg 槽就近报错（body 保守留加载占位），全局 toast 容器为空。
+      // 首拉（pill 缓存）放行保住入口，其后失败——lite 轮询与弹层拉取同端点，按调用次计数分流
+      let ledgerCalls = 0
+      const prev = globalThis.fetch
+      vi.stubGlobal('fetch', (url: string) => {
+        const p = String(url).split('?')[0]
+        if (p === '/_modeldock/probe/ledger') {
+          ledgerCalls++
+          if (ledgerCalls > 1) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
+        }
+        return (prev as (u: string) => unknown)(String(url))
+      })
+      try {
+        await mountAndConverge()
+        ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+        await flush()
+        expect(document.getElementById('probeLedgerMsg')?.textContent ?? '').toContain('账本加载失败')
+        expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+      } finally {
+        vi.stubGlobal('fetch', prev)
+      }
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('入口收敛：探针账本/趋势两按钮与趋势弹层壳从页面消失（费用并入探针 pill、健康历史并入服务徽标）', async () => {
+    mountPage()
+    await flush()
+    expect(document.getElementById('probeLedgerBtn')).toBeNull()
+    expect(document.getElementById('probeTrendBtn')).toBeNull()
+    // probeTrendM 在脚本求值时开壳挂 body：趋势弹层删除后壳不得存在（探针自耗壳照常创建）
+    expect(document.getElementById('probeTrendOverlay')).toBeNull()
+    expect(document.getElementById('probeLedgerOverlay')).not.toBeNull()
+    // 静态骨架与内嵌脚本源均不再携带入口与趋势弹层（防按钮删了、脚本残留死代码）
+    expect(UI_HTML).not.toContain('probeLedgerBtn')
+    expect(UI_HTML).not.toContain('probeTrendBtn')
+    expect(UI_HTML).not.toContain('probeTrendOverlay')
+  })
+
+  it('探针自耗 60s 低频轮询：advanceTimersByTime(60000) 重拉账本，缓存更新经重建点回填横幅新值', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      expect((document.getElementById('probeSelfPill') as HTMLElement).textContent).toContain('31.8k')
+      // 探针人工触发后账本变化：60s 档到点重拉，全部闭包缓存收敛到新夹具后横幅换新值
+      seedLedger(20000, 18, 20000, 30000, false)
+      vi.advanceTimersByTime(60000)
+      await flush()
+      const pill = document.getElementById('probeSelfPill') as HTMLElement
+      expect(pill.textContent).toContain('探针本月 20.0k tokens · 预算余 30.0k')
+    } finally {
+      resetLedger()
     }
   })
 })
