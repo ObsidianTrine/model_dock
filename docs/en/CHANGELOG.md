@@ -5,7 +5,7 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
+## [1.8.1] - 2026-11-23
 
 ### Added
 
@@ -13,7 +13,8 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **Service health checks (probe suite)**: the console service list gains health badges (healthy / auth-dead / quota / rate-limited / unreachable), and every verdict can be expanded to its evidence (probe time, status code, sanitized error excerpt). `modeldock provider test <provider-id>` manually checks a single service with hands-on probes — auth echo, streaming, vision, tool calls, structured output, reasoning, context retention, system-prompt adherence, caching, output cap, performance profile — exposing relays that "accept images but never look", drop history, or serve a different model. Checks only mark; deletion is always your call.
 - **Fully controlled check costs**: before any real request is sent, the estimated token cost is shown and confirmed step by step — zero requests until you confirm; a monthly budget caps probe spend at 50,000 tokens by default (`[probe] budget_tokens`), tracked in a separate probe ledger that never mixes into the traffic usage dashboard; scheduled checks run only the zero-token passive signal (live-traffic error aggregation) by default, and enabling token-consuming scheduled checks requires explicit authorization (`[probe] cost_ack`).
 - **Per-key pool audit**: multi-key pools can be checked key by key (see exactly which key is dead and which is alive) without disturbing the pool's cooldown or rotation state.
-- **Measured-capability hints and trend view**: in the edit dialog's model table, the vision checkbox tooltip now says whether the capability was probe-measured — measured entries show the probe time, unmeasured ones suggest running a probe (your explicit config always wins); the console gains a probe trend view (30-day health timeline + monthly probe spend).
+- **Measured-capability hints**: in the edit dialog's model table, the vision checkbox tooltip now says whether the capability was probe-measured — measured entries show the probe time, unmeasured ones suggest running a probe (your explicit config always wins).
+- **Service health history at your fingertips**: click the health badge on a service card to see that service's 30-day verdict timeline (when it flipped to quota, when it died — filterable by model); the usage banner gains "probe self-usage" — this month's check spend and remaining budget at a glance, with a loud warning when the budget is exhausted.
 - **Multi-package merge import**: `modeldock config merge <files...>`, or select several files at once under the console's "Config package → Import → Package file" to merge them (per-package passphrases, which may differ) — multiple `.msync` packages deduplicate into one list (same base URL + same key collapses into one service), marks each service as keep candidate / review / dead based on probe verdicts, and writes only what you select in one pass; the preview writes nothing to disk, and a config snapshot is taken before applying. Note: applying is whole-state replacement — local services you did not select and that are absent from the packages will be removed (stated in the confirmation prompt).
 
 ### Improved
@@ -642,7 +643,8 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
-[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...HEAD
+[1.8.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...v1.8.1
+[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...HEAD
 [1.8.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
