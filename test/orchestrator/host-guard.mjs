@@ -8,11 +8,21 @@
 // 写穿（应全部走 mkRepo/临时仓沙箱）还是外部并发进程（finish/手工清理，见 AGENTS.md
 // 「测试指南」红线）。快照文件落 os.tmpdir（worktree 中途被删也不丢），teardown fail-closed：
 // 锚定仓读不到 = 红而非绿（无法验证 ≠ 通过）。
+//
+// 撞窗归因（2026-11-22 深夜 finish 门禁产品套件三连红，宿主仓零真越界：生产编排器的
+// bench-ship-* 卡在套件窗口内流转 + 清 worktree，fail-closed 照红但报错无法机器区分
+// 「编排器撞窗」vs「套件真越界」）：teardown 对账发现漂移时，探测宿主仓活跃任务锁
+// （.run-<id>.lock 心跳判活）——有活跃 worker 即在报错前置 [orchestrator-collision]
+// 归因段并落 node_modules/.orch-collision.flag marker（feature-branch finish 门禁失败
+// 后读它决定「等待重试」的机器契约）；无则消息与行为维持现状、绝不写 marker。
+// 两种情况都照旧 throw：归因 ≠ 放行，fail-closed 不变。
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isAlive } from '../../.agents/scripts/orchestrator/kill-tree.mjs';
+import { readLockJson } from '../../.agents/scripts/orchestrator/lockio.mjs';
 
 function isWin() {
   return process.platform === 'win32';
@@ -113,6 +123,64 @@ export function diffSnapshots(before, after) {
   return diffs;
 }
 
+// 任务锁判活阈值：与 .agents/scripts/orchestrator/task-lock.mjs 的 TASK_LOCK_STALE_MS /
+// 旧版 LEGACY_STALE_MS 同数值。本地复刻而非 import 整链——task-lock 传递引 events.mjs /
+// queue.mjs，host-guard 被产品+编排双套件的 vitest globalSetup 加载，那两个模块的顶层
+// 副作用（建目录/写盘）会污染宿主仓或产品套件。锁结构 { pid, task, cmd, acquired_at, beat }。
+const LOCK_STALE_MS = 60_000;
+const LOCK_LEGACY_STALE_MS = 30 * 60_000;
+
+/**
+ * 探测宿主仓的活跃编排器任务锁（撞窗归因用）：扫 .agents/orchestrator/.run-<id>.lock，
+ * 心跳 beat 距今 <60s = 活（持有进程每 15s 续写一拍）；无 beat 的旧版锁兜底
+ * isAlive + acquired_at 30min。调度器级 .run.lock 无 -<id> 段不匹配正则、天然排除。
+ * 读取走 lockio.mjs 的 readLockJson（import 链仅 node 内建、无顶层副作用）；readdir
+ * 失败 / 坏 JSON / 缺 pid 一律按不活计、整体不抛——归因是 fail-closed 本体之外的
+ * 尽力而为加法，探测挂了不得影响红绿判定。
+ */
+export function scanLiveTaskLocks(repoRoot) {
+  const live = [];
+  let names;
+  try {
+    names = fs.readdirSync(path.join(repoRoot, '.agents', 'orchestrator'));
+  } catch {
+    return live; // 编排目录不存在（从未建队）——无锁
+  }
+  for (const name of names) {
+    const m = /^\.run-(.+)\.lock$/.exec(name);
+    if (!m) continue;
+    try {
+      const info = readLockJson(path.join(repoRoot, '.agents', 'orchestrator', name));
+      if (!info || !Number.isInteger(info.pid)) continue;
+      const beatAgeMs = Number.isFinite(info.beat) ? Date.now() - info.beat : null;
+      const at = Date.parse(info.acquired_at ?? '');
+      const liveByBeat = beatAgeMs !== null && beatAgeMs < LOCK_STALE_MS;
+      const liveByLegacy = beatAgeMs === null && isAlive(info.pid) && Number.isFinite(at) && Date.now() - at < LOCK_LEGACY_STALE_MS;
+      if (liveByBeat || liveByLegacy) {
+        live.push({ taskId: m[1], holder: info.cmd, pid: info.pid, beatAgeMs });
+      }
+    } catch { /* 单个锁读取异常 → 该锁按不活计 */ }
+  }
+  return live;
+}
+
+/** 撞窗 marker（机器契约）：feature-branch finish 门禁失败后读它决定「等待重试」。
+ *  落 process.cwd()/node_modules/——finish 场景必然存在且被 gitignore。写入失败静默：
+ *  归因消息已足够人读诊断，marker 丢不得影响 fail-closed 本体。 */
+function writeCollisionMarker(liveLocks) {
+  try {
+    fs.mkdirSync(path.join(process.cwd(), 'node_modules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(process.cwd(), 'node_modules', '.orch-collision.flag'),
+      JSON.stringify({
+        at: Date.now(),
+        summary: `宿主仓在套件窗口内被改动，且探测到 ${liveLocks.length} 个活跃编排器任务锁：疑似编排器撞窗（非套件越界），等其静默后重跑 finish。`,
+        sources: liveLocks,
+      }),
+    );
+  } catch { /* marker 尽力而为 */ }
+}
+
 /**
  * 全局哨兵入口（vitest globalSetup）：快照落盘并返回 teardown 对账函数。
  * 锚定仓解析失败只告警跳过（fail-open——无锚即无守护对象，套件自身沙箱规则仍生效）；
@@ -140,13 +208,29 @@ export function startHostGuard(cwd = process.cwd()) {
       }
       const diffs = diffSnapshots(before, after);
       if (diffs.length) {
-        throw new Error(
+        // 现有对账明细与排查指引：归因未命中时整段原样抛出（逐字节不变），命中时原样
+        // 接在归因段之后（一字不减）。
+        const detail =
           `[host-guard] 套件运行期间宿主仓被改动（越界即红）：\n` +
-            diffs.map((d) => `  - ${d}`).join('\n') +
-            `\n宿主仓 = ${savedRoot}（--git-common-dir 锚定，同编排器 findRepoRoot）。\n` +
-            '排查两向：① 套件内测试是否触达宿主仓（应全部走 mkRepo/临时仓沙箱）；\n' +
-            '② 并发进程（finish 清理 / 手工 worktree/分支操作 / 生产编排器）是否在套件窗口内动了宿主仓。\n' +
-            '红线背景见 AGENTS.md「测试指南」：编排套件全量/组合跑禁止在与队列卡同名（或存在待 finish 卡）的 worktree 内执行。',
+          diffs.map((d) => `  - ${d}`).join('\n') +
+          `\n宿主仓 = ${savedRoot}（--git-common-dir 锚定，同编排器 findRepoRoot）。\n` +
+          '排查两向：① 套件内测试是否触达宿主仓（应全部走 mkRepo/临时仓沙箱）；\n' +
+          '② 并发进程（finish 清理 / 手工 worktree/分支操作 / 生产编排器）是否在套件窗口内动了宿主仓。\n' +
+          '红线背景见 AGENTS.md「测试指南」：编排套件全量/组合跑禁止在与队列卡同名（或存在待 finish 卡）的 worktree 内执行。';
+        const liveLocks = scanLiveTaskLocks(savedRoot);
+        if (liveLocks.length) writeCollisionMarker(liveLocks); // 归因命中才落 marker；未命中绝不写
+        throw new Error(
+          liveLocks.length
+            ? `[orchestrator-collision] 检测到活跃编排器任务锁：\n` +
+              liveLocks
+                .map((l) => {
+                  const beat = l.beatAgeMs === null ? 'beat 未知（旧版锁）' : `beat ${Math.round(l.beatAgeMs / 1000)}s 前`;
+                  return `  - ${l.taskId}（holder=${l.holder ?? 'unknown'}, pid=${l.pid}, ${beat}）`;
+                })
+                .join('\n') +
+              '\n疑似编排器撞窗（非套件越界）：等其静默后重跑 finish；若确认无编排器在跑则为真越界，须按下述排查。\n' +
+              detail
+            : detail,
         );
       }
     } finally {
