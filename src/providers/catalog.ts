@@ -177,6 +177,19 @@ function catalogBaseMemo(): CatalogBaseMemo {
     baseMemo.checkedAt = now
     return baseMemo
   }
+  // mtimeMs 浮点抖动兜底：Windows NTFS 的 FILETIME→double 转换让同一次写入的两次 statSync 得到
+  // 微漂移的 mtimeMs（mac 本地不可复现，Windows CI 实证 catalogView 引用键恒 miss → gateway.test
+  // 「第二次命中缓存」失败）。mtime 差在 2ms 内且 size 相等视为同一文件内容，刷新基准并复用旧
+  // memo 保引用稳定——文件真被重写时 size 几乎必变；此 memo 只稳引用不缓存内容语义，同 size 同
+  // 毫秒级 mtime 的原地改写会在下次 JSON 解析时自然反映，无陈旧读风险。
+  if (baseMemo && baseMemo.path === p && baseMemo.size === size && mtimeMs >= 0 && baseMemo.mtimeMs >= 0) {
+    const drift = Math.abs(baseMemo.mtimeMs - mtimeMs)
+    if (drift > 0 && drift < 2) {
+      baseMemo.mtimeMs = mtimeMs
+      baseMemo.checkedAt = now
+      return baseMemo
+    }
+  }
   const cache = readCatalogCache()
   const snapshot = catalogSnapshot()
   const data =
