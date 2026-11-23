@@ -3,9 +3,10 @@ import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// UI 设计令牌静态门禁（规则正文见 .agents/conventions/ui-kit.md「UI 静态门禁」节）：
+// UI 设计令牌静态门禁（规则正文见 .agents/conventions/ui-kit.md「UI 静态门禁」「呈现面与占位符」节）：
 // 把设计规范里可机器判定的约束变成 CI 红灯——令牌三分支同步、跨文件同源、主题块外禁裸色值
-// （白名单登记制）、字号/圆角/z-index/box-shadow 封闭集、核心令牌对 WCAG 2.2 对比度。
+// （白名单登记制）、字号/圆角/z-index/box-shadow 封闭集、核心令牌对 WCAG 2.2 对比度、
+// t() 占位符参数完整性与 data-i18n 禁占位符（呈现面规约，ui-kit §14）。
 // 纯文本扫描，不 vi.mock 任何模块（singleFork 共享注册表，见测试指南）。
 // 豁免说明：src/cloud/console.ts 尚未接入令牌体系（全页裸 px 字号/圆角），v1 仅参与令牌同源
 // 校验，色值/字号扫描豁免（技术债登记在 ui-kit「已知例外与技术债」）；transition 时长存量
@@ -13,10 +14,11 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // T04 拆分后页面源码 = 拼装壳 ui.ts + src/gateway/ui/ 各域模块：门禁扫描全部源拼接（规则语义不变）
-const SRC_UI = [
+const UI_FILES = [
   path.join(ROOT, 'src', 'gateway', 'ui.ts'),
   ...readdirSync(path.join(ROOT, 'src', 'gateway', 'ui')).filter((f) => f.endsWith('.ts')).sort().map((f) => path.join(ROOT, 'src', 'gateway', 'ui', f)),
-].map((p) => readFileSync(p, 'utf8')).join('\n')
+]
+const SRC_UI = UI_FILES.map((p) => readFileSync(p, 'utf8')).join('\n')
 // T04/T22 拆分后页面源码 = 拼装壳 + 域模块：门禁扫描全部源拼接（规则语义不变；同款先例见上方 SRC_UI）
 const SRC_LAN = [
   path.join(ROOT, 'src', 'gateway', 'lan.ts'),
@@ -143,7 +145,7 @@ type WlEntry = { file: 'ui' | 'lan'; re: RegExp; why: string }
 // 反向约束：每条也必须命中至少一处（防陈旧条目沉淀）。可登记的只有三类：品牌固定色、
 // 结构性固定色（on-accent 白/tooltip 反色调色板/二维码白底）、独立降级页与 JS 选择器误报；
 // 其余一律先令牌化（2026-10 存量散落值已收编为 --err-weak/--warn-tint/--hover-tint/--divider/
-// --on-accent(--dim)/--shadow-accent 系/--shadow-float/--shadow-pop，见 ui-kit §2/§14）。
+// --on-accent(--dim)/--shadow-accent 系/--shadow-float/--shadow-pop，见 ui-kit §2/§15）。
 const COLOR_WL: WlEntry[] = [
   // —— 品牌固定色（主题无关）
   { file: 'ui', re: /\.logo svg\{[^{}]*rgba\(79,70,229,\.35\)/, why: 'logo 品牌靛蓝投影（品牌固定色）' },
@@ -332,5 +334,174 @@ describe('⑤ 核心令牌对 WCAG 2.2 对比度', () => {
       ...checkPairs('tooltip（主题无关）', new Map(), TOOLTIP_PAIRS, 4.5),
     ]
     expect(fail, '对比度跌破 AA——调令牌值是设计决策，先过用户评审；断言对清单与本用例同步维护').toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- ⑥ t() 占位符参数完整性（呈现面规约）
+
+// 呈现面规约（ui-kit §14「呈现面与占位符」）：参数化文案必须 t() 传第三参 params——文案含
+// `{word}` 占位符而未传参 = 占位符原文泄漏给用户（2026-11-22 merge 预览实证）。
+// 语句级近似：t(...) 实参按括号配平解析（字符串感知），跨行调用可解析、报 t( 所在行；
+// `.replace('{n}', …)` 链在调用实参之外，不构成第三参——链式替换正是要禁的泄漏形态，不是豁免。
+// 占位符被字符串拼接拆散（`'{n' + '}'`）等动态构造静态不可判定，不在门禁范围。
+const T_PARAM_WL: { re: RegExp; why: string }[] = []
+
+/** 提取一段源码里的 '…'/"…" 字符串字面量原始内容（转义感知，不拆转义序列） */
+function stringLiterals(seg: string): string[] {
+  const out: string[] = []
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]
+    if (c === '\\') { i++; continue }
+    if (c === "'" || c === '"') {
+      let j = i + 1
+      while (j < seg.length && seg[j] !== c) j += seg[j] === '\\' ? 2 : 1
+      out.push(seg.slice(i + 1, j))
+      i = j
+    }
+  }
+  return out
+}
+
+/** 解析 open（指向 `(`）起的调用实参：按顶层逗号切段（括号配平 + 字符串感知）；不配平返回 null */
+function callArgs(src: string, open: number): string[] | null {
+  const args: string[] = []
+  let cur = ''
+  let depth = 1
+  let str: string | null = null
+  for (let i = open + 1; i < src.length; i++) {
+    const c = src[i]
+    if (str !== null) {
+      cur += c
+      if (c === '\\') { cur += src[i + 1] ?? ''; i++; continue }
+      if (c === str) str = null
+      continue
+    }
+    if (c === "'" || c === '"') { str = c; cur += c; continue }
+    if (c === '(' || c === '[' || c === '{') { depth++; cur += c; continue }
+    if (c === ')' || c === ']' || c === '}') {
+      depth--
+      if (depth === 0) { args.push(cur); return args }
+      cur += c
+      continue
+    }
+    if (c === ',' && depth === 1) { args.push(cur); cur = ''; continue }
+    cur += c
+  }
+  return null
+}
+
+/** 扫描文案含 {word} 占位符而未传第三参 params 的 t() 调用 */
+function scanTParamGaps(src: string): { line: number; ph: string; lineText: string }[] {
+  const lines = src.split('\n')
+  const hits: { line: number; ph: string; lineText: string }[] = []
+  const re = /\bt\(/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(src))) {
+    if (src[m.index - 1] === '.') continue // x.t( 是方法调用，非 i18n 翻译函数
+    const args = callArgs(src, m.index + 1)
+    if (!args || args.length >= 3) continue // 传了第三参 params 即合规
+    const phs = new Set<string>()
+    for (const lit of [...stringLiterals(args[0] ?? ''), ...stringLiterals(args[1] ?? '')]) {
+      for (const p of lit.matchAll(/\{([A-Za-z_]\w*)\}/g)) phs.add(p[1])
+    }
+    if (!phs.size) continue
+    const line = src.slice(0, m.index).split('\n').length
+    hits.push({ line, ph: [...phs].join(','), lineText: lines[line - 1] ?? '' })
+  }
+  return hits
+}
+
+describe('⑥ t() 占位符参数完整性（呈现面规约）', () => {
+  it('构造样例：未传第三参的占位符文案命中（单行/多行/链式 replace）；传参/无占位符/非 t( 调用零误报', () => {
+    // 真违规形态
+    const single = scanTParamGaps("var a = t('合并 {n} 条', 'Merge {n}')")
+    expect(single).toHaveLength(1)
+    expect(single[0]).toMatchObject({ line: 1, ph: 'n' })
+    // 多行调用：语句级近似按整条调用解析，占位符跨两参合并去重，报 t( 所在行
+    const multi = scanTParamGaps("line.textContent = t('合并 {n} → {n2}',\n  'Merging {n} → {n2}')")
+    expect(multi).toHaveLength(1)
+    expect(multi[0]).toMatchObject({ line: 1, ph: 'n,n2' })
+    // 链式 .replace 不构成第三参（正是要禁的泄漏形态）
+    expect(scanTParamGaps("go.textContent = t('导入所选（{n}）', 'Import selected ({n})').replace('{n}', String(n))")).toHaveLength(1)
+    // 传了第三参 = 合规
+    expect(scanTParamGaps("var a = t('合并 {n} 个包 → {p}', 'Merging {n} → {p}', { n: 1, p: 2 })")).toHaveLength(0)
+    // 无占位符 / 非字面量实参 / 非 t( 调用（含方法调用 .t(）零误报
+    expect(scanTParamGaps("var a = t('无占位符文案', 'No placeholder here')")).toHaveLength(0)
+    expect(scanTParamGaps("var a = t(zhLabel, enLabel)")).toHaveLength(0)
+    expect(scanTParamGaps("setTimeout(fn, 10); var s = 'a'.split('|'); first(2); obj.t('x {y}')")).toHaveLength(0)
+  })
+
+  it('ui 片段全量：文案含 {word} 的 t() 调用必须传第三参 params', () => {
+    const bad = UI_FILES.flatMap((p) => {
+      const src = readFileSync(p, 'utf8')
+      return scanTParamGaps(src)
+        .filter((h) => !T_PARAM_WL.some((e) => e.re.test(h.lineText)))
+        .map((h) => `  ${path.relative(ROOT, p)}:${h.line} [${h.ph}] ${h.lineText.trim().slice(0, 90)}`)
+    })
+    expect(bad, "参数化文案必须 t() 传第三参 params——.replace('{n}', …) 链不豁免（占位符原文泄漏给用户）；语法示例类特例到 T_PARAM_WL 登记理由（ui-kit §14）").toEqual([])
+  })
+
+  it('白名单条目必须全部命中（防陈旧）', () => {
+    const stale = T_PARAM_WL.filter((e) => !UI_FILES.some((p) => scanTParamGaps(readFileSync(p, 'utf8')).some((h) => e.re.test(h.lineText))))
+    expect(stale.map((e) => `${e.re} — ${e.why}`), '白名单条目已无命中对象，应删除（对应泄漏已修或代码已改）').toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- ⑦ data-i18n 禁占位符（呈现面规约）
+
+// data-i18n* 家族（-title/-ph/-tip/-aria 同机制）是纯翻译槽：applyI18nTree/i18nPick 按语言取
+// 「中文||English」半边，无参数能力——值里写 {word} 必然原文泄漏；参数化文案必须走 t() JS 渲染。
+// 只扫两类静态可判定形态：HTML 字面属性 data-i18n*="…" 与 setAttribute('data-i18n…', '字面量')；
+// 变量实参（如 kit.ts 的 setAttribute('data-i18n', opts.title)）静态不可判定，不入门禁。
+const I18N_PH_WL: { re: RegExp; why: string }[] = []
+
+/** 扫描 data-i18n* 字面属性值与 setAttribute 字面量实参里的 {word} 占位符 */
+function scanDataI18nPh(src: string): { line: number; attr: string; ph: string; lineText: string }[] {
+  const lines = src.split('\n')
+  const hits: { line: number; attr: string; ph: string; lineText: string }[] = []
+  const push = (m: RegExpExecArray, attr: string, val: string) => {
+    const phs = [...new Set([...val.matchAll(/\{([A-Za-z_]\w*)\}/g)].map((p) => p[1]))]
+    if (!phs.length) return
+    const line = src.slice(0, m.index).split('\n').length
+    hits.push({ line, attr, ph: phs.join(','), lineText: lines[line - 1] ?? '' })
+  }
+  let m: RegExpExecArray | null
+  const litRe = /\b(data-i18n(?:-[\w-]+)?)\s*=\s*(["'])([^"']*)\2/g
+  while ((m = litRe.exec(src))) push(m, m[1], m[3])
+  const setRe = /\bsetAttribute\(\s*(['"])(data-i18n(?:-[\w-]+)?)\1\s*,\s*(['"])([^'"]*)\3/g
+  while ((m = setRe.exec(src))) push(m, m[2], m[4])
+  return hits
+}
+
+describe('⑦ data-i18n 禁占位符（呈现面规约）', () => {
+  it('构造样例：字面属性/setAttribute 字面量里的占位符命中（含家族变体）；变量实参/无占位符零误报', () => {
+    const html = scanDataI18nPh('<h3 data-i18n="共 {n} 条||{n} items">')
+    expect(html).toHaveLength(1)
+    expect(html[0]).toMatchObject({ attr: 'data-i18n', ph: 'n', line: 1 })
+    expect(scanDataI18nPh("x.setAttribute('data-i18n', '共 {n} 条||{n} items')")).toHaveLength(1)
+    // 家族变体同受约束（同一纯翻译槽机制）
+    const ph = scanDataI18nPh('<input data-i18n-ph="请输入 {n} 个||Enter {n}">')
+    expect(ph).toHaveLength(1)
+    expect(ph[0]).toMatchObject({ attr: 'data-i18n-ph', ph: 'n' })
+    // 无占位符 / 变量实参 / 非翻译槽属性零误报
+    expect(scanDataI18nPh("x.setAttribute('data-i18n-title', '关闭||Close')")).toHaveLength(0)
+    expect(scanDataI18nPh("x.setAttribute('data-i18n', opts.title)")).toHaveLength(0)
+    expect(scanDataI18nPh('<td data-i18n="服务||Services">')).toHaveLength(0)
+    expect(scanDataI18nPh("<div class='x'>n = {n}</div>")).toHaveLength(0)
+  })
+
+  it('ui 片段全量：data-i18n* 字面属性与 setAttribute 字面量实参禁止 {word} 占位符', () => {
+    const bad = UI_FILES.flatMap((p) => {
+      const src = readFileSync(p, 'utf8')
+      return scanDataI18nPh(src)
+        .filter((h) => !I18N_PH_WL.some((e) => e.re.test(h.lineText)))
+        .map((h) => `  ${path.relative(ROOT, p)}:${h.line} [${h.attr}:${h.ph}] ${h.lineText.trim().slice(0, 90)}`)
+    })
+    expect(bad, 'data-i18n* 是纯翻译槽、无参数能力——值里写 {word} 必然原文泄漏；参数化文案必须走 t() JS 渲染；语法示例类特例到 I18N_PH_WL 登记理由（ui-kit §14）').toEqual([])
+  })
+
+  it('白名单条目必须全部命中（防陈旧）', () => {
+    const stale = I18N_PH_WL.filter((e) => !UI_FILES.some((p) => scanDataI18nPh(readFileSync(p, 'utf8')).some((h) => e.re.test(h.lineText))))
+    expect(stale.map((e) => `${e.re} — ${e.why}`), '白名单条目已无命中对象，应删除').toEqual([])
   })
 })

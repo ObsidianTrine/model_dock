@@ -17,10 +17,12 @@ import { readEvents, appendEvent } from './events.mjs';
 /**
  * @param {string} qdir 事件目录（报警留痕 + resume 播种）
  * @param {string} worktree worker 工作树（HEAD 计数对账现场）
- * @param {{ mode?: 'observe'|'actuate', log?: (msg: string) => void }} opts
+ * @param {{ mode?: 'observe'|'actuate', log?: (msg: string) => void, scratchOnly?: boolean }} opts
  *   mode 与看门狗同源（cfg.watchdog.mode）——唯一的双档开关，不另立配置键。
+ *   scratchOnly：卡面声明产物不入库（scratch_only: true）——no_commit 规则不适用
+ *   （零提交是该卡的合规形态，2026-11-22 bench 发现 1：codex 活干完被误杀）。
  */
-export function createXteAlarm(qdir, worktree, { mode = 'observe', log = () => {} } = {}) {
+export function createXteAlarm(qdir, worktree, { mode = 'observe', log = () => {}, scratchOnly = false } = {}) {
   const fired = new Set(readEvents(qdir).filter((e) => e.type === 'xte_alarm').map((e) => e.rule));
   const report = (rule, detail, { actuate = false } = {}) => {
     if (fired.has(rule)) return null;
@@ -45,14 +47,18 @@ export function createXteAlarm(qdir, worktree, { mode = 'observe', log = () => {
       sessionStart = headCount();
     },
     /** 会话收尾对账。命中 no_commit 时返回 { rule, detail, actuate }（actuate 档为 true，
-     *  调用方据此走熔断落位）；未命中 / git 异常 / 已报过返回 null。 */
+     *  调用方据此走熔断落位）；未命中 / git 异常 / 已报过返回 null。
+     *  scratchOnly 卡豁免 no_commit（零提交是卡面声明的合规形态，不判空转）。 */
     afterWorkerSession() {
       if (sessionStart === null) return null;
       const end = headCount();
       if (end === null) return null;
       zeroStreak = end === sessionStart ? zeroStreak + 1 : 0;
       sessionStart = null;
-      if (zeroStreak >= 2) return report('no_commit', `连续 ${zeroStreak} 个 worker 会话零新提交（HEAD 停在 ${end}）——worker 可能空转`, { actuate: true });
+      if (zeroStreak >= 2) {
+        if (scratchOnly) return null;
+        return report('no_commit', `连续 ${zeroStreak} 个 worker 会话零新提交（HEAD 停在 ${end}）——worker 可能空转`, { actuate: true });
+      }
       return null;
     },
     testLoop() {

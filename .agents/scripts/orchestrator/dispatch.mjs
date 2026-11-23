@@ -42,9 +42,12 @@ import { SHIP_HARNESS } from './fleet.mjs';
 import { hintsIntersectExact } from '../policy.mjs';
 import { claudeAvailable } from './backends/claude-headless.mjs';
 import { zcodeAvailable } from './backends/zcode-headless.mjs';
+import { codexAvailable } from './backends/codex-headless.mjs';
+import { dshAvailable } from './backends/dsh-headless.mjs';
 
-/** 动态选船的合法船型：mock 永不参与（零产出船，自动切到只会烧成 blocked）。 */
-export const DYNAMIC_SHIPS = ['claude-headless', 'zcode-headless'];
+/** 动态选船的合法船型：mock 永不参与（零产出船，自动切到只会烧成 blocked）。
+ *  codex/dsh 2026-11-22 船东定：与 claude/zcode 同批纳入（dsh-ship-backend 卡）。 */
+export const DYNAMIC_SHIPS = ['claude-headless', 'zcode-headless', 'codex-headless', 'dsh-headless'];
 
 /**
  * 包络规范化（纯函数）：只收真实船型；mock 与未知船型剔除并给可操作原因。
@@ -367,6 +370,8 @@ export async function decideDispatchForRun({ repoRoot, cfg, meta, defaultBackend
     const availability = {
       'claude-headless': claudeAvailable(),
       'zcode-headless': zcodeAvailable(),
+      'codex-headless': codexAvailable(),
+      'dsh-headless': dshAvailable(),
     };
     const decision = decideDispatch({ cfg, defaultBackend, explicit, inherited, meta, tier, fleetState, weather, availability });
     // A5 派发预检①（独立于动态选船开关）：tier token 经 tier-validate 解析 provider 后核对

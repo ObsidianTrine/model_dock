@@ -499,9 +499,26 @@ function forceSettleCard(root, id, from) {
 }
 
 /**
+ * scratch_only 结算豁免（settledNotMerged 警告桶）：scratch_only 卡零提交合法落位 merged/
+ * （doApprove 不 spawn finish、无合并实证），落在「账面合并但 git 无实证」桶会对账永不消音
+ * ——卡落 merged/ 后不再流转，警告永久累积成常驻噪音。豁免锚定 doApprove 写入的 merged
+ * 事件 scratch_only_settle 标记（机器实证，非卡面自声明）：未经结算路径进 merged/ 的
+ * scratch_only 卡仍照常告警，假合并检测面不放宽。读取失败按 false（fail-visible 回警告桶）。
+ */
+function settledByScratchOnly(repoRoot, id) {
+  try {
+    return readEvents(logDir(repoRoot, id)).some((e) => e.type === 'merged' && e.scratch_only_settle === true);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 状态对账：git 合并现实 vs 队列卡落位。
  *   - 分支已合并（通过提交数门）但卡不在 merged/ → mergedNotSettled [{id, state}]（含当前状态）；
- *   - 卡在 merged/ 但 git 无实证 → settledNotMerged [{id}]（警告级：squash/改史/假合并）；
+ *   - 卡在 merged/ 但 git 无实证 → settledNotMerged [{id}]（警告级：squash/改史/假合并；
+ *     scratch_only 卡凭 doApprove 的 scratch_only_settle 事件豁免——合法零提交结算，见
+ *     settledByScratchOnly）；
  *   - 标题命中但提交计数为 0（空合并/标题残留）→ emptyMerges [{id, mergeSha}]（警示桶，
  *     永不自动 fix——2026-11-16 夜航四张 perf 卡假 merged 实证的标题正则误捕面）；
  *   - 真合并但同名分支仍在且与 base 持平（id 复用/重做中）→ suspects [{id, branch, reason}]
@@ -576,6 +593,7 @@ export function reconcileCardStates(repoRoot, queueRootDir, opts = {}) {
   }
   const settledNotMerged = listCards(queueRootDir, 'merged')
     .filter((id) => !verifiedIds.has(id))
+    .filter((id) => !settledByScratchOnly(repoRoot, id))
     .map((id) => ({ id }));
   const result = { baseBranch, mergedIds: [...verifiedIds].sort(), mergedNotSettled, settledNotMerged, emptyMerges, suspects, fixed: [] };
   if (opts.fix) {

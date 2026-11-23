@@ -11,7 +11,7 @@ import { createUsageTap } from '../../src/gateway/usage.js'
 import { fetchGatewayUsageSummary, gatewayLogsDir, parseMergedBranchCommits, parseMergedBranchIds, readGatewayLog, reconcileAll, reconcileCardStates, reconcileTask, upstreamSeaState } from '../../.agents/scripts/orchestrator/reconcile.mjs'
 import { ensureQueue } from '../../.agents/scripts/orchestrator/queue.mjs'
 import { loadWorkflowConfig } from '../../.agents/scripts/workflow-config.mjs'
-import { toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
+import { appendEvent, logDir, toIsoLocal } from '../../.agents/scripts/orchestrator/events.mjs'
 import { cardText, eventsOf, git, mkRepo, runOrch, runOrchInproc } from './helpers.js'
 import { fakeHome } from '../helpers.js'
 
@@ -415,6 +415,28 @@ describe('orchestrator reconcile > 状态对账（卡状态 vs git 现实）', (
       expect(sr.settledNotMerged.map((c: { id: string }) => c.id)).toContain('st-ghost')
       // 默认只读：卡原地不动
       expect(fs.existsSync(path.join(root, 'running', 'st-merged.md'))).toBe(true)
+    } finally {
+      repo.cleanup()
+    }
+  })
+
+  it('scratch_only 结算豁免：merged 事件带 scratch_only_settle 的卡不进 settledNotMerged；无标记照常告警', () => {
+    // 2026-11-23 bench codex 腿实证：scratch_only 卡零提交合法落位 merged/（doApprove 不
+    // spawn finish、无合并实证）——「账面合并但 git 无实证」警告对它是误报且永不消音（卡
+    // 落 merged/ 不再流转）。豁免锚定 doApprove 的 scratch_only_settle 事件（机器实证，非
+    // 卡面自声明）：无标记的卡照常告警，假合并检测面不放宽。
+    const repo = mkRepo()
+    try {
+      const root = path.join(repo.root, '.agents', 'orchestrator', 'queue')
+      ensureQueue(root)
+      const put = (state: string, id: string) => fs.writeFileSync(path.join(root, state, `${id}.md`), cardText({ id }, 'scratch 结算对账'))
+      put('merged', 'st-scratch') // scratch_only 合法零提交结算：无合并实证是预期形态
+      put('merged', 'st-ghost') // 无标记：照常告警
+      appendEvent(logDir(repo.root, 'st-scratch'), 'merged', { scratch_only_settle: true })
+      const sr = reconcileCardStates(repo.root, root)
+      const ids = sr.settledNotMerged.map((c: { id: string }) => c.id)
+      expect(ids).toContain('st-ghost')
+      expect(ids).not.toContain('st-scratch')
     } finally {
       repo.cleanup()
     }

@@ -1,0 +1,301 @@
+// dsh-headless.mjs — 真实后端：包装 `dsh --profile headless --json -`（DeepSeek Harness
+// CLI 的一次性任务模式，0.2.0-rc 实测）。与 claude/zcode/codex 平级的第三个真实引擎。
+//
+// 红线（双保险，物理层 + hook 桥）：
+//   沙箱   dsh 内建 sandbox-policy 经 **DSH_PERMISSION_MODE 环境变量**选档（默认树里
+//          mode/policy 都是 !!js 读该 env）——worker=workspace-write（workspace 外
+//          file-write 被 Seatbelt/Landlock/ACL 物理拒绝，沙箱不可用 fail-closed 绝不
+//          裸跑）；reviewer=read-only。注意 **沙箱不禁网络**（SBPL `(allow default)`，
+//          与 codex 的关键差异）——push/publish 物理不可达在 dsh 上不成立。
+//   hook   经 `--patch` 临时 overlay 挂 `dsh-hooks-claude-code` 桥 + 生成的 hooks.json
+//          （PreToolUse matcher=`bash|pwsh`——dsh 工具名全小写，claude 字面量集
+//          /^[A-Za-z0-9_|]+$/ 内做精确匹配，`Bash|PowerShell` 在 dsh 上匹配不到），
+//          复用 claude 船同一份 policy-worker.mjs（exit 2 = 阻断，桥协议同源）。
+//          已知残差：hook 启动失败按非阻塞记录（协议如此）——文件写仍被沙箱兜住，
+//          网络类红线在该窗口失去 hook 保护（不可达 push 的物理防线在 dsh 不存在，
+//          见上）。任务卡红线（禁 push/publish）由 prompt 纪律兜第一层。
+//
+// 与 claude/codex 的差异（记录在 orch-loop.md 后端差异表）：
+//   prompt 走 stdin（`-` 占位），无 shell 命令行长度问题；无 --max-turns 旗标（wall/
+//   token 熔断杀进程树兜底）；**无 model 旗标**——模型跟随 attach 烤入的
+//   agent-default-model（modeldock provider + 船东 set-default 的模型），model 参数
+//   接受但忽略（zcode 同款口径；点号别名不在 dsh catalog，擅自点名会请求期失败）。
+//   `--json` 为 NDCL 事件流：session→status/text/thinking/tool_call/tool_result→final
+//   （final.text=最终答案）；error 事件出现且无 final = 引擎层失败。usage 藏在
+//   `status.phase=step_end` 事件（README 未记载，0.2.0-rc.2 实测）——逐 step 发
+//   budget_snapshot（累计快照取 max），token 预算可用；wall-clock 兜底不变（budgetProfiles
+//   仍配 max_wall_minutes，orch-loop.md:112 校准依据同源）。
+// CLI 定位：ORCH_DSH_CLI 环境变量优先（.cjs/.mjs/.js 桩用当前 node 直跑，测试 e2e 依赖
+// 此点）；未设走 PATH 里的 dsh。
+
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { quoteArgsForShell, shellCommandline } from '../spawn-shell.mjs';
+import { billableTokens } from '../budget.mjs';
+// workerHookCommand：claude 船同一份 policy-worker.mjs 锚定（主仓绝对路径，防 worktree
+// 副本篡改）——dsh hook 桥的 hooks.json 直接复用同一裁决来源。
+import { workerHookCommand } from './claude-headless.mjs';
+
+/** dsh hook 桥的 PreToolUse matcher：dsh 工具名是全小写 `bash` / `pwsh`（tool-bash/
+ *  tool-pwsh 注册名），claude 字面量集内精确匹配；`Bash|PowerShell` 在 dsh 上永不命中。 */
+export const DSH_HOOK_MATCHER = 'bash|pwsh';
+
+/**
+ * dsh CLI 定位与调用形态（探测与 spawn 同源，zcode/codex 同款 seam）。
+ * 返回 { ok, cmd, baseArgs } 或 { ok: false, reason }。
+ */
+export function dshCliSpec() {
+  const custom = process.env.ORCH_DSH_CLI?.trim();
+  if (custom) {
+    if (!fs.existsSync(custom)) {
+      return { ok: false, reason: `ORCH_DSH_CLI 指向的文件不存在：${custom}` };
+    }
+    if (/\.(cjs|mjs|js)$/i.test(custom)) return { ok: true, cmd: process.execPath, baseArgs: [custom] };
+    return { ok: true, cmd: custom, baseArgs: [] };
+  }
+  return { ok: true, cmd: 'dsh', baseArgs: [] };
+}
+
+/** dsh CLI 可用性探测（spawnSync --version；按进程缓存；win PATH 探测带 shell 命中 .cmd 包装）。 */
+let dshProbeCache;
+export function dshAvailable() {
+  if (dshProbeCache === undefined) {
+    try {
+      const spec = dshCliSpec();
+      const r = spec.ok
+        ? spawnSync(spec.cmd, [...spec.baseArgs, '--version'], {
+            encoding: 'utf8',
+            timeout: 30_000,
+            shell: spec.cmd === 'dsh' && process.platform === 'win32',
+          })
+        : { status: 1 };
+      dshProbeCache = r.status === 0;
+    } catch {
+      dshProbeCache = false;
+    }
+  }
+  return dshProbeCache;
+}
+
+/** 组装 dsh headless 参数（纯函数，供单测断言）。任务用 `-` 占位从 stdin 读入。
+ *  **旗标顺序红线**：launcher 只认自己的旗标（--profile/--patch/--dump-*），遇到第一个
+ *  未知项（app 旗标 --json）即把剩余 argv 全部转交 app——`--patch` 必须排在 `--json`
+ *  之前，否则 app 报 `unknown option '--patch'`（2026-11-22 bench 实测，exit 1 无 stderr）。 */
+export function buildDshArgs({ patchFile }) {
+  const args = ['--profile', 'headless'];
+  if (patchFile) args.push('--patch', patchFile);
+  args.push('--json', '-');
+  return args;
+}
+
+/**
+ * 生成 hooks.json（claude 格式）+ `--patch` overlay（挂 dsh-hooks-claude-code 桥），
+ * 落在独立临时目录，随任务结束清理。返回 overlay 路径。
+ * projectDir 用 worker cwd（worktree）：桥以 CLAUDE_PROJECT_DIR 传给 hook 进程，
+ * 与 claude 船 writeWorkerSettings 的 sessionCwd 语义对齐。
+ */
+export function writeDshHookOverlay(tmpDir, { cwd }) {
+  const hooksFile = path.join(tmpDir, 'hooks.json');
+  const hooks = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: DSH_HOOK_MATCHER,
+          hooks: [{ type: 'command', command: workerHookCommand(cwd) }],
+        },
+      ],
+    },
+  };
+  // 文件不含机密（命令行路径），但按仓库写盘惯例仍 0600；win 忽略 mode 无害
+  fs.writeFileSync(hooksFile, JSON.stringify(hooks, null, 2), { mode: 0o600 });
+  // YAML 手拼：字符串值一律 JSON.stringify（JSON 双引号标量是合法 YAML，免转义歧义）
+  const overlay = [
+    '- insert:',
+    '    - id: hooks-claude-code',
+    "      name: '@deepseek-ai/dsh-hooks-claude-code'",
+    '      config:',
+    `        configPath: ${JSON.stringify(hooksFile)}`,
+    `        projectDir: ${JSON.stringify(cwd)}`,
+    '',
+  ].join('\n');
+  const overlayFile = path.join(tmpDir, 'orch-dsh-overlay.yml');
+  fs.writeFileSync(overlayFile, overlay, { mode: 0o600 });
+  return overlayFile;
+}
+
+/**
+ * spawn 实参/选项组装（纯函数；win 上 dsh 是 npm .cmd 包装，spawn 必须走 shell；
+ * unix 不加 shell（detached 独立进程组 + 熔断杀树依赖它）——codex 系同款）。
+ */
+export function dshSpawnInvocation(platform, cmd, args, { cwd, envPatch }) {
+  const useShell = platform === 'win32';
+  const options = {
+    cwd,
+    detached: !useShell,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    ...(useShell ? { shell: true } : {}),
+  };
+  // DSH_PERMISSION_MODE 在 envPatch 之后合并：红线选档以本后端决定为准，不受外部覆盖
+  options.env = { ...process.env, ...(envPatch && Object.keys(envPatch).length ? envPatch : {}) };
+  const [c, spawnArgs] = shellCommandline(cmd, quoteArgsForShell(args, useShell), useShell);
+  return { cmd: c, args: spawnArgs, options };
+}
+
+/** 单事件 → final 文本提取（批量与流式两条路径共用，口径单源防漂移）。 */
+function finalTextOf(evt) {
+  return evt?.type === 'final' && typeof evt.text === 'string' ? evt.text : null;
+}
+
+/** 单事件 → 引擎层错误文本提取（NDCL error 事件 message；结构随版本漂移，防御式解析）。 */
+function errorMessageOf(evt) {
+  return evt?.type === 'error' && typeof evt.message === 'string' ? evt.message : null;
+}
+
+/** 从 --json NDCL 输出提取最终答案（最后一个 final.text；无 final 返回 null）。
+ *  批量参考实现：spawn 热路径已改逐行流式采集（不留全量 stdout，见下方 data 处理器），
+ *  此函数保留为提取语义的纯函数锚点（单测直接断言）。 */
+export function outputFromEvents(stdout) {
+  let text = null;
+  for (const line of String(stdout ?? '').split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('{')) continue;
+    try {
+      const evt = JSON.parse(t);
+      const s = finalTextOf(evt);
+      if (s !== null) text = s;
+    } catch {
+      // 非 JSON 行（版本差异/告警混流）容错跳过
+    }
+  }
+  return text;
+}
+
+/**
+ * 从 NDCL 事件流提取单条累计 token 用量（README 未记载、实测 `status.phase=step_end`
+ * 事件携带 `usage:{inputTokens,outputTokens,totalTokens}`；结构随版本漂移，防御式解析）。
+ * 用量是会话累计快照：调用方取 max 防重复计入（codex 系同款口径）。解析不到返回 null。
+ */
+export function usageFromEvent(evt) {
+  const u = evt?.phase === 'step_end' ? evt?.usage ?? null : null;
+  if (!u || typeof u !== 'object') return null;
+  const input = Number(u.inputTokens ?? 0);
+  const output = Number(u.outputTokens ?? 0);
+  if (!Number.isFinite(input) && !Number.isFinite(output)) return null;
+  return { input: Math.max(0, input), output: Math.max(0, output) };
+}
+
+export const dshHeadlessBackend = {
+  name: 'dsh-headless',
+
+  /**
+   * maxTurns/model 参数接受但忽略：dsh headless 无轮次旗标（wall/token 熔断兜底）、
+   * 无模型旗标（跟随 attach 烤入的 agent-default-model，见文件头注）。
+   */
+  spawn({ promptFile, cwd, onEvent, readonly, envPatch }) {
+    return new Promise((resolve, reject) => {
+      const prompt = fs.readFileSync(promptFile, 'utf8');
+      const spec = dshCliSpec();
+      if (!spec.ok) {
+        reject(new Error(`dsh CLI 不可用：${spec.reason}\n修复：设 ORCH_DSH_CLI=<dsh 绝对路径> 或安装 PATH 版 dsh CLI（npm i -g @deepseek-ai/dsh）。`));
+        return;
+      }
+      // -o 无对应物：--json 的 final 事件即最终答案，无独立产物文件
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orch-dsh-'));
+      let overlayFile;
+      try {
+        overlayFile = writeDshHookOverlay(tmpDir, { cwd });
+      } catch (e) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        reject(new Error(`dsh hook overlay 写盘失败：${e.message}`));
+        return;
+      }
+      const args = [...spec.baseArgs, ...buildDshArgs({ patchFile: overlayFile })];
+      const inv = dshSpawnInvocation(process.platform, spec.cmd, args, {
+        cwd,
+        envPatch: { ...envPatch, DSH_PERMISSION_MODE: readonly ? 'read-only' : 'workspace-write' },
+      });
+      let child;
+      try {
+        child = spawn(inv.cmd, inv.args, inv.options);
+      } catch (e) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        reject(new Error(`dsh CLI 启动失败（检查 ORCH_DSH_CLI / PATH 中的 dsh）：${e.message}`));
+        return;
+      }
+      // role 区分 worker/reviewer 会话（resolveBackendName 只认 worker 侧，防 retry 静默换船）
+      onEvent({ type: 'worker_spawned', role: readonly ? 'reviewer' : 'worker', backend: 'dsh-headless', pid: child.pid });
+
+      // NDJSON 逐行 parse 后只留所需字段（最后 final.text / 最后 error.message），原文即弃，
+      // 不整流累积——长会话大文件工具输出（数十 MB 级）不再全量驻留内存（claude/codex 逐行
+      // 即弃同款口径；zcode 全量留存是因其输出为单份 JSON 文档，dsh 不是）。
+      let lastFinalText = null;
+      let lastErrorMessage = null;
+      let stderrTail = '';
+      let settled = false;
+      let tokensIn = 0;
+      let tokensOut = 0;
+
+      child.stdout.setEncoding('utf8');
+      let buf = '';
+      child.stdout.on('data', (c) => {
+        buf += c;
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line) continue;
+          let evt;
+          try {
+            evt = JSON.parse(line);
+          } catch {
+            continue; // 非 JSON 行（版本差异/告警混流），容错跳过
+          }
+          const u = usageFromEvent(evt);
+          if (u) {
+            // 用量事件是会话累计快照：取 max 防重复计入（codex 系同款口径）
+            tokensIn = Math.max(tokensIn, u.input);
+            tokensOut = Math.max(tokensOut, u.output);
+            onEvent({ type: 'budget_snapshot', tokens_in: tokensIn, tokens_out: tokensOut, tokens_cache_read: 0, tokens_billable: billableTokens(tokensIn, tokensOut, 0) });
+          }
+          const f = finalTextOf(evt);
+          if (f !== null) lastFinalText = f;
+          const em = errorMessageOf(evt);
+          if (em !== null) lastErrorMessage = em;
+        }
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (c) => {
+        stderrTail = (stderrTail + c).slice(-4000);
+      });
+
+      child.on('error', (e) => {
+        if (!settled) {
+          settled = true;
+          try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
+          reject(new Error(`dsh CLI 启动失败（检查 ORCH_DSH_CLI / PATH 中的 dsh）：${e.message}`));
+        }
+      });
+
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
+        const exitCode = code ?? 1;
+        const output = lastFinalText ?? '';
+        // 引擎层失败（NDCL error 事件且无 final，协议见文件头）：error.message 是唯一可行动
+        // 归因（此时 stderr 常为空，瞬态分类 TRANSIENT_RE 只看 output+stderrTail）——透传进
+        // stderrTail 头部即同时喂饱瞬态自动重试与事故包 worker_stderr_tail 留痕；output 保持
+        // final 语义不混错误文本（它是契约块解析面，混入有误配风险）。
+        const stderrOut = lastFinalText === null && exitCode !== 0 && lastErrorMessage !== null
+          ? `${lastErrorMessage}\n${stderrTail}`
+          : stderrTail;
+        resolve({ exitCode, output, stderrTail: stderrOut, usage: { tokensIn, tokensOut }, pid: child.pid });
+      });
+
+      child.stdin.write(prompt);
+      child.stdin.end();
+    });
+  },
+};

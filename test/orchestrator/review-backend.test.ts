@@ -35,7 +35,7 @@ describe('resolveReviewBackendName > 解析顺序与异构矩阵', () => {
       name: 'zcode-headless',
       mode: 'heterogeneous',
     })
-    expect(resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': false, 'codex-headless': false }) })).toEqual({
+    expect(resolveReviewBackendName({ worker: 'claude-headless', prior: 'mock', probe: probeOf({ 'zcode-headless': false, 'codex-headless': false, 'dsh-headless': false }) })).toEqual({
       name: 'claude-headless',
       mode: 'fallback',
     })
@@ -56,11 +56,11 @@ describe('resolveReviewBackendName > 解析顺序与异构矩阵', () => {
   })
 
   it('异构候选 CLI 不可用 → 回落 worker 同源（fallback）', () => {
-    expect(resolveReviewBackendName({ worker: 'claude-headless', probe: probeOf({ 'zcode-headless': false, 'codex-headless': false }) })).toEqual({
+    expect(resolveReviewBackendName({ worker: 'claude-headless', probe: probeOf({ 'zcode-headless': false, 'codex-headless': false, 'dsh-headless': false }) })).toEqual({
       name: 'claude-headless',
       mode: 'fallback',
     })
-    expect(resolveReviewBackendName({ worker: 'zcode-headless', probe: probeOf({ 'claude-headless': false, 'codex-headless': false }) })).toEqual({
+    expect(resolveReviewBackendName({ worker: 'zcode-headless', probe: probeOf({ 'claude-headless': false, 'codex-headless': false, 'dsh-headless': false }) })).toEqual({
       name: 'zcode-headless',
       mode: 'fallback',
     })
@@ -71,17 +71,22 @@ describe('resolveReviewBackendName > 解析顺序与异构矩阵', () => {
   })
 })
 
-describe('getBackend > 四后端注册', () => {
+describe('getBackend > 五后端注册', () => {
   it('zcode-headless 可取且名字正确；未知后端报错含允许清单', async () => {
     const zcode = await getBackend('zcode-headless')
     expect(zcode.name).toBe('zcode-headless')
     expect(typeof zcode.spawn).toBe('function')
-    await expect(getBackend('bogus')).rejects.toThrow('claude-headless | zcode-headless | codex-headless | mock')
+    await expect(getBackend('bogus')).rejects.toThrow('claude-headless | zcode-headless | codex-headless | dsh-headless | mock')
   })
   it('codex-headless 可取且名字正确（codex-catalog-ship 卡）', async () => {
     const codex = await getBackend('codex-headless')
     expect(codex.name).toBe('codex-headless')
     expect(typeof codex.spawn).toBe('function')
+  })
+  it('dsh-headless 可取且名字正确（dsh-ship-backend 卡）', async () => {
+    const dsh = await getBackend('dsh-headless')
+    expect(dsh.name).toBe('dsh-headless')
+    expect(typeof dsh.spawn).toBe('function')
   })
 })
 

@@ -8,7 +8,7 @@
 
 ## spec review（三件套 agent 分层审查，advisory）
 
-`spec review <id> [--backend <名>] [--model m]`：把「人肉通读三件套找问题」变成「人只裁决 findings 清单」（spec-review-cmd 卡，2026-11-10）。两层：**L0 确定性检查**零 token（三件套齐全/任务段四行/依赖 DAG/files_hint 存在/红线关键词/TBD/基线漂移警告——结构性 fail 直接 die 不烧 L2）；**L2 审查船** readonly 会话按 `.agents/conventions/spec-review.md` 规约五维评分 + findings（现状对账杀手锏：design 引用的代码事实逐个开文件核实）。服务端权威重算 overall（加权 + null 传染 + 定位对账失败降档）与 build_ready（blocked/rework/needs_revision/approve_to_build）。产物 `specs/<id>/review-verdict.json`（spec-verdict/1）+ L3 台账（kind=spec-review）+ 通知。**advisory 纪律：审查结论只做筛查，spec build 拆卡默认人工拍板**（与 research verdict 同哲学；可显式 opt-in 委托超时自动拆卡 `autoApprove.specBuild.enabled=true`——缺省关，blocked/rework 结论开了也永不放行，2026-11-11 巡航修复）。审查船模型解耦：backend 缺省 review.backend、model 缺省 review.model（异构互审）。教训：design「现状」定位一律符号+函数名，行号只作辅助——行号漂移是常态不是事故（规约 §6）。
+`spec review <id> [--backend <名>] [--model m]`：把「人肉通读三件套找问题」变成「人只裁决 findings 清单」（spec-review-cmd 卡，2026-11-10）。两层：**L0 确定性检查**零 token（三件套齐全/任务段四行/依赖 DAG/files_hint 存在/红线关键词/TBD/基线漂移警告——结构性 fail 直接 die 不烧 L2）；**L2 审查船** readonly 会话按 `.agents/conventions/spec-review.md` 规约六维评分（含融入性）+ findings（现状对账杀手锏：design 引用的代码事实逐个开文件核实）。服务端权威重算 overall（加权 + null 传染 + 定位对账失败降档）与 build_ready（blocked/rework/needs_revision/approve_to_build）。产物 `specs/<id>/review-verdict.json`（spec-verdict/1）+ L3 台账（kind=spec-review）+ 通知。**advisory 纪律：审查结论只做筛查，spec build 拆卡默认人工拍板**（与 research verdict 同哲学；可显式 opt-in 委托超时自动拆卡 `autoApprove.specBuild.enabled=true`——缺省关，blocked/rework 结论开了也永不放行，2026-11-11 巡航修复）。审查船模型解耦：backend 缺省 review.backend、model 缺省 review.model（异构互审）。教训：design「现状」定位一律符号+函数名，行号只作辅助——行号漂移是常态不是事故（规约 §6）。六维含 integration（融入性）：新功能必须盘点既有功能面并论证融入位置，双入口割裂/语义重叠直接进 findings（2026-11-22，§6 案例）。
 
 ## release-propose（发版提案）
 

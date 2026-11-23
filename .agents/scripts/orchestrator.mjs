@@ -45,6 +45,7 @@ import { gateNpmTest, gateTscBuild, gateLint, gateTypecheck, gatePortScan, gateN
 import { getBackend, resolveBackendName, resolveReviewBackendName, writeWorkerSettings, claudeAvailable } from './orchestrator/backends/claude-headless.mjs';
 import { zcodeAvailable } from './orchestrator/backends/zcode-headless.mjs';
 import { codexAvailable } from './orchestrator/backends/codex-headless.mjs';
+import { dshAvailable } from './orchestrator/backends/dsh-headless.mjs';
 import { isTransientWorkerFailure, classifyWorkerCrashFromDisk } from './orchestrator/transient.mjs';
 import { shouldEscalatePrompt } from './orchestrator/escalation.mjs';
 import { pickAutoResumeCandidates, scanBlockedCards, withAutoResumedAt, autoResumedAtNow, classifyOrphan, pickOrphanResumeCandidates, partitionRunningOrphans, scanRunningCards, lifetimeCapRejections } from './orchestrator/autoresume.mjs';
@@ -627,8 +628,9 @@ async function cmdRun(repoRoot, taskId, opts) {
   // fail）、scope_drift（越界文件数达阈值）。observe 档只留痕不动作（kill/熔断仍归预算
   // 与看门狗）；no_commit 在 watchdog.mode=actuate 下升熔断（2026-11-15 质量专项 P1-⑥，
   // worker 空转烧钱有熔断）——与看门狗 circuit_break 同款落位，见下方 afterWorkerSession
-  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。
-  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log });
+  // 消费点；mode 与看门狗同源（cfg.watchdog.mode），不另立配置键。scratch_only 卡豁免
+  // no_commit（零提交是卡面声明的合规形态，2026-11-22 bench 发现 1）。
+  const xte = createXteAlarm(qdir, worktree, { mode: cfg.watchdog.mode, log, scratchOnly: meta.scratch_only === true });
 
   const events = readEvents(qdir);
   let debugIter = debugIterations(events);
@@ -1179,12 +1181,16 @@ async function cmdRun(repoRoot, taskId, opts) {
       const STATIC_GATES = [
         {
           gate: 'npm_test',
-          run: () => gateNpmTest(worktree, activeTestCmd),
+          // scratch_only 卡跳过（2026-11-22 bench 发现 2）：产物只落非跟踪区、git diff 无
+          // 改动面可测——照跑只会误入全量套件（未提交 → changed=[] → docsOnly=false），
+          // 并发负载下即首跑 flake；repo 改动校验对无改动卡无意义
+          run: meta.scratch_only ? () => ({ ok: true, skipped: true, reason: 'scratch_only' }) : () => gateNpmTest(worktree, activeTestCmd),
           trigger: 'test_failure',
           criteria: cmdCriteria('测试命令', activeTestCmd),
           dieLabel: '',
           dieTail: '任务转 blocked/——测试仍不绿，人工接手。',
           passExtra: (r) => {
+            if (r.skipped) return { skipped: true, ...(r.reason ? { reason: r.reason } : {}) };
             // 记 worktree HEAD：approve 的 finish 快捷路径（--skip-test）靠它判断
             // 「gate 验证的就是当前树」——develop 未前进且 HEAD 一致才允许锁内跳过重跑
             let gateHead;
@@ -1200,8 +1206,9 @@ async function cmdRun(repoRoot, taskId, opts) {
         },
         {
           gate: 'tsc_build',
-          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档
-          run: docsOnly ? () => ({ ok: true, skipped: true, reason: 'docs_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
+          // 纯文档卡跳过 build（.md 不进构建产物）——与 npm_test 的 L0 轻量门禁同档；
+          // scratch_only 卡同理（无 repo 改动面，build 无从谈起）
+          run: docsOnly || meta.scratch_only ? () => ({ ok: true, skipped: true, reason: docsOnly ? 'docs_only' : 'scratch_only' }) : () => gateTscBuild(worktree, cfg.buildCmd),
           trigger: 'build_failure',
           criteria: cmdCriteria('构建命令', cfg.buildCmd),
           dieLabel: 'build 不过',
@@ -1917,6 +1924,20 @@ function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
   }
 }
 
+/**
+ * 卡面 scratch_only 声明（doApprove 零提交豁免判据）。闸门时刻卡必在 awaiting-human/
+ * （CLI approve / 交互闸门 / run 自动合并 / sweep 四条路径都先落位再进 doApprove）。
+ * 读取失败按 false——豁免是优惠面，卡损坏回严管走原拒绝防线（与 parseCard 的
+ * scratch_only 非法值回 false 同一取舍）。
+ */
+function cardScratchOnly(root, taskId) {
+  try {
+    return parseCard(fs.readFileSync(cardPath(root, 'awaiting-human', taskId), 'utf8'), taskId).meta.scratch_only === true;
+  } catch {
+    return false;
+  }
+}
+
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
@@ -1930,7 +1951,14 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   // worker 到底留了什么（多半是漏提交）。
   const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
   const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
-  if (commitsAhead === 0) {
+  // scratch_only 结算豁免（2026-11-23 bench codex 腿实证）：卡面声明产物只落 worktree 非跟踪区
+  // （scratch-only-card：门禁 skipped + XTE no_commit 豁免），零提交是卡面声明的合规形态，
+  // 防假合并门不适用；finish 对零提交显式失败（37bfdfc），也不 spawn——不合并、develop 不动、
+  // 不记 merge_commit，直接落位 merged/。worktree 保留（答卷归档由调度台收尾做），对账锚
+  // scratch_only_settle 事件标记（reconcile settledNotMerged 按此豁免）。人工与 auto 两路径
+  // 同享；非 scratch_only 卡零提交照旧拒绝，防线零放宽。
+  const scratchOnlySettle = commitsAhead === 0 && cardScratchOnly(root, taskId);
+  if (commitsAhead === 0 && !scratchOnlySettle) {
     moveCard(root, taskId, 'awaiting-human', 'failed');
     appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
     die(
@@ -1938,6 +1966,15 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
       `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
       `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
     );
+  }
+  if (scratchOnlySettle) {
+    moveCard(root, taskId, 'awaiting-human', 'merged');
+    appendEvent(qdir, 'merged', { scratch_only_settle: true, ...(source === 'auto' ? { auto: true } : {}) });
+    log(`已结算 merged/（scratch_only 零提交，不合并）：worktree 保留在 ${worktreePath(repoRoot, taskId)}，答卷归档由调度台收尾处理。`);
+    // 不 resetConfigBaseline（没有合并发生，configGuard 基线不该被无来源重置）、不做 draftsGc
+    // 清退（scratch 卡未实现任何 repo 改动面，files_hint 常为 ["**"]，清退会误杀全部提案）。
+    await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
+    return;
   }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
@@ -2475,6 +2512,10 @@ function preflightWorkerBackend(backend) {
   if (backend === 'codex-headless' && !codexAvailable()) {
     die('预检失败：codex CLI 不可用（ORCH_CODEX_CLI 未设 / PATH 无 codex / --version 探测失败）。\n'
       + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_CODEX_CLI=<codex 绝对路径> 或安装 PATH 版 codex）后重跑。', 1);
+  }
+  if (backend === 'dsh-headless' && !dshAvailable()) {
+    die('预检失败：dsh CLI 不可用（ORCH_DSH_CLI 未设 / PATH 无 dsh / --version 探测失败）。\n'
+      + 'drain 拒绝启动，避免逐卡烧成 blocked。修复（设 ORCH_DSH_CLI=<dsh 绝对路径> 或 npm i -g @deepseek-ai/dsh）后重跑。', 1);
   }
   if (backend === 'claude-headless' && !claudeAvailable()) {
     die('预检失败：claude CLI 不可用（PATH 无 claude / 未登录 / --version 探测失败）。\n'
@@ -3967,7 +4008,8 @@ async function cmdSpecStart(repoRoot, opts) {
         ? parts[0].body
         : parts.map((p) => (typeof p === 'object' ? `# 调研结论（brief：${p.id}）\n\n${String(p.body).trim()}` : p)).join('\n\n---\n\n');
     }
-    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
+    const specCfg = loadWorkflowConfig(repoRoot);
+    let promptText = buildSpecPrompt(sanitizeIntent(intentText), repoRoot, specCfg.reviewNotes, briefBody, specCfg.spec?.industrialDesign === true);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -4912,7 +4954,8 @@ async function specFromDraft(repoRoot, { draftId, goal, briefBody, backendName }
   const settingsFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-')), 'settings.json');
   const promptFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'orch-specup-prompt-')), 'spec-prompt.md');
   try {
-    let promptText = buildSpecPrompt(sanitizeIntent(goal || draftId), repoRoot, loadWorkflowConfig(repoRoot).reviewNotes, briefBody);
+    const specCfg = loadWorkflowConfig(repoRoot);
+    let promptText = buildSpecPrompt(sanitizeIntent(goal || draftId), repoRoot, specCfg.reviewNotes, briefBody, specCfg.spec?.industrialDesign === true);
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       fs.writeFileSync(promptFile, promptText);
@@ -6116,7 +6159,7 @@ function usage() {
   drill [--backend mock]                  弃船演习：临时港 mock 跑一张合成托运单，验证闭环自身健康（不烧真钱、不碰真队列）
   notify-digest --flush [--sleep N]       digest 聚合通报冲刷：睡满 notify.digest.quietWindowSec（--sleep N 覆盖）后把待发事件合并成一条扁平事件流通报（标题 emoji 计数分诊，正文 ≤4 行关键事件）发出（落位流程 detached 自动拉起；手动补发可直达）
 
-后端：worker claude-headless | zcode-headless | codex-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达）。
+后端：worker claude-headless | zcode-headless | codex-headless | dsh-headless | mock（zcode 桌面版设 ORCH_ZCODE_CLI=<zcode.cjs 绝对路径>；codex 设 ORCH_CODEX_CLI=<codex 绝对路径>，worker 走 workspace-write 沙箱默认禁网——push/publish 物理不可达；dsh 设 ORCH_DSH_CLI=<dsh 绝对路径>，沙箱+hook 桥双红线、不禁网络）。
 闸门：worker 引擎 ≠ workflow.json worker.backend 视为切换 CLI，须人工批准（--approve-backend-switch 或 ORCH_APPROVE_BACKEND_SWITCH=1）。
 审查：--review-backend 显式指定；缺省自动异构互审（候选 CLI 不可用回落同源并记 review_backend_fallback 事件）。
 互斥：调度器级（drain/nightly/scan --run 全局单实例）+ 任务级（同任务同时只允许一个 run 闭环，陈锁自动接管）。

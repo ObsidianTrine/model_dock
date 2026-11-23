@@ -187,7 +187,10 @@ export const UI_JS_APP = `  function load() {
     var sandbox = view && view.gateway && view.gateway.sandbox
     return '<span class="dot"></span> ' + t('本地网关运行中 · 端口 ', 'Local gateway running · port ') + esc(location.port) +
       (sandbox ? ' <span class="pill warn" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '') +
-      usageHtml()
+      usageHtml() +
+      // 探针自耗 pill（probe.ts probeSelfUsageHtml）：数据走 probeLedgerLite 60s 低频缓存，
+      // 三路 5s 重建点共用本函数即天然覆盖，缓存就绪后 ≤ 一个轮询周期出现在横幅
+      probeSelfUsageHtml()
   }
 
   function pollHealth() {
@@ -305,6 +308,8 @@ export const UI_JS_BOOT = `  setInterval(function () { if (!document.hidden) ref
   setInterval(function () { if (!document.hidden) loadLogs() }, 5000)
   pollProbe() // 服务卡 verdict 徽标首屏数据（15s 档，结论只随探针运行变化）
   setInterval(function () { if (!document.hidden) pollProbe() }, 15000)
+  pollProbeLedgerLite() // 探针自耗 pill 首屏数据（60s 档：账本读是全文件同步读，不进 5s 热路径）
+  setInterval(function () { if (!document.hidden) pollProbeLedgerLite() }, 60000)
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) { pollHealth(); pollOverview(); pollLive(); loadLogs(); pollProbe() }
   })

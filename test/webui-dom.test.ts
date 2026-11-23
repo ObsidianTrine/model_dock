@@ -45,12 +45,13 @@ const OVERVIEW_FIXTURE = {
   syncRequest: null,
 }
 
-// /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新）
+// /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新；
+// 字段名对齐 UsageTodayView 真实契约：failed/cache_creation，防新用例建立在漂移字段上）
 const USAGE_LIVE_FIXTURE = {
   ok: true,
   usageToday: {
-    date: '2026-11-06', requests: 3, ok: 3, err: 0,
-    tokens: { input: 1200, output: 340, cache_read: 0, cache_write: 0 },
+    date: '2026-11-06', requests: 3, ok: 3, failed: 0,
+    tokens: { input: 1200, output: 340, cache_read: 0, cache_creation: 0 },
     cost: { total: 0.0042 },
     unpriced_models: [],
   },
@@ -59,6 +60,21 @@ const USAGE_LIVE_FIXTURE = {
 
 /** /logs 端点夹具（模块级可变：日志面板用例按需改写，finally 还原） */
 const LOGS_FIXTURE: { logs: any[]; total: number; page: number; pages: number } = { logs: [], total: 0, page: 1, pages: 1 }
+
+/** /_modeldock/probe/verdicts 夹具（健康下钻用例按需改写；默认空 = 全部服务无结论、不出徽标） */
+const PROBE_VERDICTS_FIXTURE: { verdicts: any[] } = { verdicts: [] }
+
+/** /_modeldock/probe/trend 夹具（全量响应形态；UI 按 provider 客户端过滤，端点契约无过滤参数） */
+const PROBE_TREND_FIXTURE: { timeline: any[]; spend: any[] } = { timeline: [], spend: [] }
+
+/** /_modeldock/probe/ledger 夹具（探针自耗 pill/明细弹层用例按需改写；默认无 budget/breakdown
+ *  = 账本未就绪，lite 缓存不落、pill 不出——存量用例零感知） */
+const PROBE_LEDGER_FIXTURE: {
+  ok: boolean
+  budget?: Record<string, unknown> | null
+  breakdown?: Record<string, unknown> | null
+  probe_labels?: Record<string, string>
+} = { ok: true }
 
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
@@ -71,6 +87,10 @@ function stubFetch(): void {
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
     '/_modeldock/logs': () => ({ body: LOGS_FIXTURE }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
+    '/_modeldock/ui-presence': () => ({ body: { ok: true } }),
+    '/_modeldock/probe/verdicts': () => ({ body: PROBE_VERDICTS_FIXTURE }),
+    '/_modeldock/probe/trend': () => ({ body: PROBE_TREND_FIXTURE }),
+    '/_modeldock/probe/ledger': () => ({ body: PROBE_LEDGER_FIXTURE }),
   }
   vi.stubGlobal('fetch', (url: string) => {
     const p = String(url).split('?')[0]
@@ -385,6 +405,431 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(document.querySelectorAll('#efModelRows .mrow').length).toBe(2)
     } finally {
       restore()
+    }
+  })
+
+  // 多包合并删包回填口令（fix-merge-rm-pw-keep）：口令草稿按包名键控——删 chip 重建逐包口令行时按名
+  // 回填，已填值不随索引移位清空；删到剩 1 包时该包口令迁进单包输入 impPw2（单流读 impPw2 不读 store）
+  it('多包合并删 chip：其余口令行保值且与包对应关系不错位，删到剩 1 包迁移进单口令输入', async () => {
+    mountPage()
+    await flush()
+    const mk = (name: string) => new File(['pkg'], name)
+    // happy-dom 造不出真 FileList：实例上覆写 files（change 处理器只做 Array.prototype.slice 兼容任意数组）
+    const select = (files: File[]) => {
+      const input = document.getElementById('impFile2') as HTMLInputElement
+      Object.defineProperty(input, 'files', { value: files, configurable: true })
+      input.dispatchEvent(new Event('change'))
+    }
+    const fill = (id: string, v: string) => {
+      const el = document.getElementById(id) as HTMLInputElement
+      el.value = v
+      el.dispatchEvent(new Event('input')) // store 只在 input 监听里更新：派发才等价真实键入
+    }
+    select([mk('a.msync'), mk('b.msync'), mk('c.msync')])
+    expect(document.querySelectorAll('#impChips .filechip').length).toBe(3)
+    fill('mgPw0', 'pw-a')
+    fill('mgPw2', 'pw-c')
+    // 删中间 chip（b.msync）→ 剩 a/c 两行，值按名回填不错位
+    ;(document.querySelectorAll('#impChips .filechip')[1].querySelector('button') as HTMLElement).click()
+    const rows = [...document.querySelectorAll('#impPwRows .prow')]
+    expect(rows.length).toBe(2)
+    const valOf = (name: string) =>
+      (rows.find((r) => (r.querySelector('label')?.textContent ?? '').startsWith(name))!.querySelector('input') as HTMLInputElement).value
+    expect(valOf('a.msync')).toBe('pw-a')
+    expect(valOf('c.msync')).toBe('pw-c')
+    // 再删一个 → 剩 1 包退回单包流：impPw2 回填该包口令，逐包行清场
+    ;(document.querySelectorAll('#impChips .filechip')[0].querySelector('button') as HTMLElement).click()
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('pw-c')
+    expect(document.getElementById('impPwRows')?.hidden).toBe(true)
+    // 重新多选=新清单从空草稿开始（store 已随 mgSetFiles 清空，不回填上一轮的值）
+    select([mk('d.msync'), mk('e.msync')])
+    expect((document.getElementById('mgPw0') as HTMLInputElement).value).toBe('')
+    expect((document.getElementById('mgPw1') as HTMLInputElement).value).toBe('')
+  })
+
+  // 多包口令换选单文件清草稿（fix-merge-single-pw-draft）：change 单文件分流是 impPw2 的最后一种
+  // 进法（弹层重开清场、删到 1 包迁移回填各有自己的清/覆写口径）——漏了它，上一来源的口令会残留
+  // 在单流唯一口令读点上，换选新文件后被误用
+  it('多包填口令（删到 1 包迁进 impPw2）后 change 重选单文件：单流口令输入从空开始', async () => {
+    mountPage()
+    await flush()
+    const mk = (name: string) => new File(['pkg'], name)
+    // happy-dom 造不出真 FileList：实例上覆写 files（change 处理器只做 Array.prototype.slice 兼容任意数组）
+    const select = (files: File[]) => {
+      const input = document.getElementById('impFile2') as HTMLInputElement
+      Object.defineProperty(input, 'files', { value: files, configurable: true })
+      input.dispatchEvent(new Event('change'))
+    }
+    const fill = (id: string, v: string) => {
+      const el = document.getElementById(id) as HTMLInputElement
+      el.value = v
+      el.dispatchEvent(new Event('input')) // store 只在 input 监听里更新：派发才等价真实键入
+    }
+    select([mk('a.msync'), mk('b.msync')])
+    fill('mgPw0', 'pw-a')
+    fill('mgPw1', 'pw-b')
+    // 删 a 的 chip → 剩 b 一包：impPw2 迁入 b 的口令（52f47a5 口径，此时是合法态）
+    ;(document.querySelector('#impChips .filechip button') as HTMLElement).click()
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('pw-b')
+    // change 重选单文件=换新来源：impPw2 必须从空开始，上一来源口令不得残留误用在新包
+    select([mk('c.msync')])
+    expect((document.getElementById('impPw2') as HTMLInputElement).value).toBe('')
+    // 新文件来源正常接管：chip 换成新文件（清草稿不清文件来源）
+    expect(document.getElementById('impFileChip')?.textContent).toContain('c.msync')
+  })
+
+  // —— 健康下钻（probe-ui-into-usage-health 任务 2）：服务卡徽标点击 → 该服务 verdict 变化时间线 ——
+
+  it('健康下钻：verdict 徽标 button 化（无结论服务不出），点击打开按服务过滤的时间线弹层', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [
+      { provider: 'alpha', state: 'healthy', evidence: { source: 'scheduled', at: Date.now() - 60000 } },
+      { provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 120000 } },
+    ]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: 'unverified', to: 'healthy', source: 'manual' },
+    ]
+    PROBE_TREND_FIXTURE.spend = [{ month: '2026-11', tokens: 1200 }]
+    const urls: string[] = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      urls.push(String(url))
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      // R3.1：有结论 → button.pill 徽标，语义色取最差结论（degraded=warn）；无结论服务不出徽标亦不出入口
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLButtonElement | null
+      expect(badge).not.toBeNull()
+      expect(badge!.tagName).toBe('BUTTON')
+      expect(badge!.className).toContain('pill')
+      expect(badge!.className).toContain('warn')
+      expect(badge!.textContent).toContain('降级')
+      expect(badge!.title).toContain('点击查看健康变化历史')
+      expect(document.querySelector('[data-probehist="beta"]')).toBeNull()
+      // R3.2：点击徽标 → 打开弹层，打开动作内拉取 trend（days=30&months=6）
+      badge!.click()
+      const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement | null
+      expect(scrim && scrim.hidden === false).toBe(true)
+      expect(urls.some((u) => u.startsWith('/_modeldock/probe/trend?days=30&months=6'))).toBe(true)
+      await flush()
+      // 标题动态拼服务名（titleId 先例）；timeline 按 provider 客户端过滤（beta 条目不进弹层）
+      expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('健康变化 · Alpha 服务')
+      const table = document.getElementById('probeSvcTimelineTable') as HTMLElement
+      expect(table.textContent).toContain('alpha/a-model')
+      expect(table.textContent).not.toContain('beta')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+      PROBE_TREND_FIXTURE.spend = []
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
+  it('健康下钻：模型过滤 select 按 (provider, model) 重渲染；该服务无翻转条目出「近 30 天无 verdict 变化」空态', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'b-model', key_fp: 'cd34', from: 'healthy', to: 'degraded', source: 'scheduled' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      // R3.3：选项 = 该服务 distinct model + 「全部模型」（value=''，不受当前过滤收窄）
+      const sel = document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement
+      expect([...sel.options].map((o) => o.value)).toEqual(['', 'a-model', 'b-model'])
+      expect(sel.options[0].textContent).toContain('全部模型')
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(2)
+      // 切到 a-model：只重渲染该 (provider, model) 子集，选中态随重渲染保持
+      sel.value = 'a-model'
+      sel.dispatchEvent(new Event('change'))
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(1)
+      expect(document.getElementById('probeSvcTimelineTable')!.textContent).toContain('a-model')
+      expect(document.getElementById('probeSvcTimelineTable')!.textContent).not.toContain('b-model')
+      expect((document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement).value).toBe('a-model')
+      // 切回全部模型：子集约束解除，两行回来
+      const selAll = document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement
+      selAll.value = ''
+      selAll.dispatchEvent(new Event('change'))
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(2)
+      // R3.4 空态：徽标在（有结论）但 30 天窗口内该服务无翻转 → 空态行
+      PROBE_TREND_FIXTURE.timeline = [
+        { at: '2026-11-22T09:00:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: null, to: 'healthy', source: 'manual' },
+      ]
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      const tbody = document.querySelector('#probeSvcTimelineTable tbody') as HTMLElement
+      expect(tbody.querySelectorAll('tr').length).toBe(1)
+      expect(tbody.textContent).toContain('近 30 天无 verdict 变化')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  it('健康下钻：变化列 from→to 出两端语义 pill；窗口内首现 from=null 渲染「— → to」', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'auth-dead', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+      { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'healthy', to: 'auth-dead', source: 'scheduled' },
+      { at: '2026-11-22T09:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'auth-dead', to: 'unverified', source: 'scheduled' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      const rows = document.querySelectorAll('#probeSvcTimelineTable tbody tr')
+      expect(rows.length).toBe(3)
+      const changeOf = (i: number) => rows[i].querySelectorAll('td')[2]
+      // from=null：「—」（dim span）→ to pill（ok=健康）
+      expect(changeOf(0).querySelector('.dim')?.textContent).toBe('—')
+      expect(changeOf(0).querySelector('.pill.ok')?.textContent).toBe('健康')
+      // from→to：两端各一枚语义 pill（healthy=ok / auth-dead=err / unverified=dim）
+      expect(changeOf(1).querySelectorAll('.pill').length).toBe(2)
+      expect(changeOf(1).querySelector('.pill.ok')?.textContent).toBe('健康')
+      expect(changeOf(1).querySelector('.pill.err')?.textContent).toBe('失效')
+      expect(changeOf(2).querySelector('.pill.err')?.textContent).toBe('失效')
+      expect(changeOf(2).querySelector('.pill.dim')?.textContent).toBe('未验证')
+      // 时间列按引擎升序原样渲染，UI 不重排
+      expect(rows[0].querySelector('td')?.textContent).toContain('2026-11-20')
+      expect(rows[2].querySelector('td')?.textContent).toContain('2026-11-22')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  it('健康下钻：读取类弹层关路径三件套（头部 ×、Esc、遮罩点击均可关闭，foot 无关闭/刷新按钮），加载失败写 msg 槽不出 toast', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_TREND_FIXTURE.timeline = [
+      { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
+    ]
+    try {
+      mountPage()
+      await flush()
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement
+      badge.click()
+      const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement
+      expect(scrim.hidden).toBe(false)
+      // 加载态：打开即拉取，拉取未完成 body 为加载占位
+      expect(scrim.querySelector('.modal-body')?.textContent).toContain('加载中…')
+      const modal = scrim.querySelector('.modal') as HTMLElement
+      const foot = modal.querySelector('.modal-foot') as HTMLElement
+      // R3.5：foot 仅 msg 槽——零按钮（无「关闭」无「刷新」），msg 槽为 err 形态（.mferr）
+      expect(foot.querySelectorAll('button').length).toBe(0)
+      expect(document.getElementById('probeSvcTimelineMsg')?.className).toContain('mferr')
+      // 关路径一：头部 ×
+      ;(modal.querySelector('.close-btn') as HTMLElement).click()
+      expect(scrim.hidden).toBe(true)
+      // 关路径二：Esc（closeOnEsc 默认开）
+      badge.click()
+      expect(scrim.hidden).toBe(false)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      expect(scrim.hidden).toBe(true)
+      // 关路径三：遮罩点击（closeOnScrim:true 显式传入；点弹层内部不关由工厂 e.target 判定兜住）
+      badge.click()
+      expect(scrim.hidden).toBe(false)
+      scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(scrim.hidden).toBe(true)
+      // 错误态：trend 拉取失败 → foot msg 槽就近报错，全局 toast 容器保持为空（弹层提示归宿纪律）
+      const prev = globalThis.fetch
+      vi.stubGlobal('fetch', (url: string) => {
+        const p = String(url).split('?')[0]
+        if (p === '/_modeldock/probe/trend') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
+        return (prev as (u: string) => unknown)(String(url))
+      })
+      try {
+        mountPage()
+        await flush()
+        ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+        await flush()
+        expect(document.getElementById('probeSvcTimelineMsg')?.textContent ?? '').toContain('时间线加载失败')
+        expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+      } finally {
+        vi.stubGlobal('fetch', prev)
+      }
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  // —— 探针自耗融入用量仪表 + 入口收敛（probe-ui-selfusage-and-entry-removal）——
+  // 本文件 isolate:false 共享进程：此前用例挂载的页面脚本轮询定时器全部存活，且探针自耗 pill
+  // 的数据走每份闭包各自的 probeLedgerLite 缓存（只在挂载求值与 60s 档重拉时刷新）。
+  // mountAndConverge 推进 60s 让所有闭包的账本缓存都收敛到当前夹具——此后任何闭包的 #health
+  // 重建写的都是同一 pill，断言与「哪个闭包最后写」解耦；夹具变更后再收敛一次即模拟到点重拉。
+
+  function seedLedger(total: number, requests: number, spent: number, remaining: number, exhausted: boolean): void {
+    PROBE_LEDGER_FIXTURE.budget = { month: '2026-11', budget: 50000, spent, remaining, exhausted }
+    PROBE_LEDGER_FIXTURE.breakdown = {
+      month: '2026-11', total, estimated_total: 24000, requests,
+      by_probe: total > 0 ? { p11: Math.round(total * 0.6) } : {},
+      by_probe_requests: requests > 0 ? { p11: requests } : {},
+    }
+    PROBE_LEDGER_FIXTURE.probe_labels = { p11: '输出上限||Output limit' }
+  }
+
+  function resetLedger(): void {
+    PROBE_LEDGER_FIXTURE.budget = null
+    PROBE_LEDGER_FIXTURE.breakdown = null
+    PROBE_LEDGER_FIXTURE.probe_labels = undefined
+  }
+
+  async function mountAndConverge(): Promise<void> {
+    mountPage()
+    await flush(60)
+    vi.advanceTimersByTime(60000)
+    await flush()
+  }
+
+  it('探针自耗 pill 渲染进健康横幅：探针本月/预算余取 breakdown.total 与 budget.remaining，dim 形态带引导 title', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      const health = document.getElementById('health')!
+      const pill = document.getElementById('probeSelfPill') as HTMLButtonElement | null
+      expect(pill).not.toBeNull()
+      expect(pill!.tagName).toBe('BUTTON')
+      expect(pill!.className).toBe('pill dim')
+      expect(pill!.textContent).toContain('探针本月 18.2k tokens · 预算余 31.8k')
+      expect(pill!.title).toContain('探针花费记独立账本，不进请求日志与今日用量')
+      expect(pill!.title).toContain('点击查看按探针明细与月预算余量')
+      // 融入位置：探针 pill 与今日用量 pill 在同一横幅、usageHtml 之后并列
+      expect(health.textContent).toContain('今日 3 请求')
+      expect(health.textContent!.indexOf('今日 3 请求')).toBeLessThan(health.textContent!.indexOf('探针本月'))
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗零值不出 pill：requests=0 且 spent=0 时横幅无探针入口（对齐 usage 无流量不显示）', async () => {
+    seedLedger(0, 0, 0, 50000, false)
+    try {
+      await mountAndConverge()
+      expect(document.getElementById('probeSelfPill')).toBeNull()
+      // 明细弹层壳仍存在（脚本创建），只是无 pill 入口
+      expect(document.getElementById('probeLedgerOverlay')).not.toBeNull()
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗预算耗尽：pill 升 warn 语义色且 title 追加硬停警示', async () => {
+    seedLedger(50000, 20, 50000, 0, true)
+    try {
+      await mountAndConverge()
+      const pill = document.getElementById('probeSelfPill') as HTMLButtonElement | null
+      expect(pill).not.toBeNull()
+      expect(pill!.className).toBe('pill warn')
+      expect(pill!.className).not.toContain('dim')
+      expect(pill!.title).toContain('预算耗尽：探针硬停')
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗明细弹层五态与关路径三件套：打开即拉取、svcmodal 壳、foot 只留 msg 槽（无刷新按钮）', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      // 打开即拉取：点击 pill 开弹层，body 先为加载占位（重开清旧数据面），拉取完成换数据面
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      const scrim = document.getElementById('probeLedgerOverlay') as HTMLElement
+      expect(scrim.hidden).toBe(false)
+      expect(scrim.querySelector('.modal-body')?.textContent).toContain('加载中…')
+      await flush()
+      // 成功态：标题「探针自耗」、账期/月度总花费/预算行/按探针分解（标签取 probe_labels 当前语言半边）
+      expect(scrim.querySelector('.modal-head h3')?.textContent).toBe('探针自耗')
+      const body = scrim.querySelector('.modal-body') as HTMLElement
+      expect(body.textContent).toContain('账期 2026-11 · 月度总花费 18.2k tokens · 预估 24.0k · 17 次调用')
+      expect(body.textContent).toContain('月预算 50.0k · 已用 18.2k · 剩余 31.8k')
+      expect(body.textContent).toContain('探针花费记独立账本，不进请求日志与今日用量')
+      const table = document.getElementById('probeLedgerTable') as HTMLElement
+      expect(table.textContent).toContain('p11')
+      expect(table.textContent).toContain('输出上限')
+      expect(table.textContent).toContain('10.9k')
+      // 读取类弹层呈现面：svcmodal 680px 宽壳；foot 仅 msg 槽（.mferr），零按钮——孤儿「刷新」消灭
+      expect(scrim.querySelector('.modal')?.className).toContain('svcmodal')
+      const foot = scrim.querySelector('.modal-foot') as HTMLElement
+      expect(foot.querySelectorAll('button').length).toBe(0)
+      expect(document.getElementById('probeLedgerMsg')?.className).toContain('mferr')
+      // 关路径三件套（读取类口径）：头部 × / Esc / 遮罩点击，三条均可关闭
+      ;(scrim.querySelector('.close-btn') as HTMLElement).click()
+      expect(scrim.hidden).toBe(true)
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      expect(scrim.hidden).toBe(false)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      expect(scrim.hidden).toBe(true)
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      expect(scrim.hidden).toBe(false)
+      scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(scrim.hidden).toBe(true)
+      // 空态行：by_probe 无键 → 「本月暂无探针调用」（fixture 刻意 requests>0 让 pill 可见以打开弹层）
+      seedLedger(0, 2, 300, 49700, false)
+      await mountAndConverge()
+      ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+      await flush()
+      expect((document.getElementById('probeLedgerTable') as HTMLElement).textContent).toContain('本月暂无探针调用')
+      // 错误态：弹层内拉取失败 → foot msg 槽就近报错（body 保守留加载占位），全局 toast 容器为空。
+      // 首拉（pill 缓存）放行保住入口，其后失败——lite 轮询与弹层拉取同端点，按调用次计数分流
+      let ledgerCalls = 0
+      const prev = globalThis.fetch
+      vi.stubGlobal('fetch', (url: string) => {
+        const p = String(url).split('?')[0]
+        if (p === '/_modeldock/probe/ledger') {
+          ledgerCalls++
+          if (ledgerCalls > 1) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
+        }
+        return (prev as (u: string) => unknown)(String(url))
+      })
+      try {
+        await mountAndConverge()
+        ;(document.getElementById('probeSelfPill') as HTMLElement).click()
+        await flush()
+        expect(document.getElementById('probeLedgerMsg')?.textContent ?? '').toContain('账本加载失败')
+        expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+      } finally {
+        vi.stubGlobal('fetch', prev)
+      }
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('入口收敛：探针账本/趋势两按钮与趋势弹层壳从页面消失（费用并入探针 pill、健康历史并入服务徽标）', async () => {
+    mountPage()
+    await flush()
+    expect(document.getElementById('probeLedgerBtn')).toBeNull()
+    expect(document.getElementById('probeTrendBtn')).toBeNull()
+    // probeTrendM 在脚本求值时开壳挂 body：趋势弹层删除后壳不得存在（探针自耗壳照常创建）
+    expect(document.getElementById('probeTrendOverlay')).toBeNull()
+    expect(document.getElementById('probeLedgerOverlay')).not.toBeNull()
+    // 静态骨架与内嵌脚本源均不再携带入口与趋势弹层（防按钮删了、脚本残留死代码）
+    expect(UI_HTML).not.toContain('probeLedgerBtn')
+    expect(UI_HTML).not.toContain('probeTrendBtn')
+    expect(UI_HTML).not.toContain('probeTrendOverlay')
+  })
+
+  it('探针自耗 60s 低频轮询：advanceTimersByTime(60000) 重拉账本，缓存更新经重建点回填横幅新值', async () => {
+    seedLedger(18240, 17, 18240, 31760, false)
+    try {
+      await mountAndConverge()
+      expect((document.getElementById('probeSelfPill') as HTMLElement).textContent).toContain('31.8k')
+      // 探针人工触发后账本变化：60s 档到点重拉，全部闭包缓存收敛到新夹具后横幅换新值
+      seedLedger(20000, 18, 20000, 30000, false)
+      vi.advanceTimersByTime(60000)
+      await flush()
+      const pill = document.getElementById('probeSelfPill') as HTMLElement
+      expect(pill.textContent).toContain('探针本月 20.0k tokens · 预算余 30.0k')
+    } finally {
+      resetLedger()
     }
   })
 })

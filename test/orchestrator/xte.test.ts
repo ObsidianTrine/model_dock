@@ -48,6 +48,20 @@ describe('orchestrator xte > no_commit（连续 2 会话零新提交）', () => 
       repo.cleanup()
     }
   }, 90_000)
+
+  it('scratch_only 卡豁免 no_commit：零提交会话不报警（2026-11-22 bench 发现 1 修复）', () => {
+    const repo = mkRepo()
+    try {
+      // 与 xte-nc 同型（审查恒有阻塞 → 至少 2 个零提交会话），但卡面声明 scratch_only
+      submitCard(repo.root, 'xte-nc-so', { scratch_only: true })
+      const r = tryOrch(repo.root, 'run xte-nc-so --backend mock', { ORCH_MOCK_REVIEW_BLOCKERS: '1', ORCH_MOCK_NO_COMMIT: '1' })
+      expect(r.status).toBe(1) // 终局与 xte-nc 相同：审查返工超限熔断
+      expect(alarmsOf(repo.root, 'xte-nc-so').filter((e) => e.rule === 'no_commit')).toHaveLength(0)
+      expect(readCard(repo.root, 'blocked', 'xte-nc-so')).toBeTruthy()
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })
 
 describe('orchestrator xte > test_loop（npm_test 连续 2 轮 fail）', () => {

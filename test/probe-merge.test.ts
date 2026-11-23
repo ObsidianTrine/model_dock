@@ -47,7 +47,7 @@ interface SeedProvider {
 }
 
 /** 铺一台「机器」的配置并导出 .msync：providers/profiles/preset/schedule 齐活，key 落 file 后端 */
-async function seedAndExport(msyncPath: string, providers: Record<string, SeedProvider>, profiles: Record<string, { provider: string }>, opts?: { presetId?: string; schedule?: boolean }): Promise<Syncdoc> {
+async function seedAndExport(msyncPath: string, providers: Record<string, SeedProvider>, profiles: Record<string, { provider: string }>, opts?: { presetId?: string; schedule?: boolean; pass?: string }): Promise<Syncdoc> {
   const cfg: Config = { version: 1, language: 'zh', security: { store: 'file' }, providers: {}, profiles, harness: {} }
   for (const [id, p] of Object.entries(providers)) {
     if (p.key) {
@@ -63,8 +63,9 @@ async function seedAndExport(msyncPath: string, providers: Record<string, SeedPr
     await fsp.mkdir(path.dirname(presetsJsonPath()), { recursive: true })
     await fsp.writeFile(presetsJsonPath(), JSON.stringify([{ id: opts.presetId, label: opts.presetId, vendor: 'V', base_url: 'https://preset.example.com', protocol: 'openai', auth_style: 'bearer' }], null, 2) + '\n')
   }
-  await exportSyncdoc(msyncPath, PASS)
-  return (await previewImport(msyncPath, PASS)).doc
+  const pass = opts?.pass ?? PASS
+  await exportSyncdoc(msyncPath, pass)
+  return (await previewImport(msyncPath, pass)).doc
 }
 
 /** 探针结论种子：写到 verdict store（进程内匹配）并落 probe-*.jsonl（CLI 子进程回放用） */
@@ -407,6 +408,240 @@ describe('控制台合并端点：preview/apply 两段式', () => {
     } finally {
       h.restore()
     }
+  })
+})
+
+// ── 控制台合并端点：逐包口令（passphrases 数组，merge-import-integration 收编）──────────────
+
+describe('控制台合并端点：逐包口令 passphrases 数组', () => {
+  it('preview 接受 passphrases 数组：两包不同口令各自解包成功（验收①）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      const passA = 'pass-a-11111'
+      const passB = 'pass-b-22222'
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: passA })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: passB })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: [passA, passB] })
+      expect(pv.status).toBe(200)
+      const preview = pv.json.preview as { candidates: { id: string }[] }
+      expect(preview.candidates.map((c) => c.id).sort()).toEqual(['ark', 'solo'])
+      // key 明文不出端点；预览零写盘
+      expect(JSON.stringify(pv.json)).not.toContain('sk-ark-plain')
+      expect(JSON.stringify(pv.json)).not.toContain('sk-solo')
+      expect(fileHash(configPath())).toBe(beforeCfg)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('某包口令错：整体 400 且报错含失败包名，不出半张候选清单（验收②）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: 'pass-a-11111' })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: 'pass-b-22222' })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: ['pass-a-11111', 'wrong-pass'] })
+      expect(pv.status).toBe(400)
+      const msg = String((pv.json.error as { message?: string } | undefined)?.message ?? '')
+      expect(msg).toContain('b.msync')
+      // 整体拒绝：a.msync 解包成功也不出半张清单（无 preview / confirmToken）
+      expect(msg).not.toContain('a.msync')
+      expect(pv.json.preview).toBeUndefined()
+      expect(pv.json.confirmToken).toBeUndefined()
+      expect(fileHash(configPath())).toBe(beforeCfg)
+      // apply 同样整体拒绝
+      const ap = await callEndpoint(hMergeApply, rt, { packages, passphrases: ['pass-a-11111', 'wrong-pass'], keep: ['ark'], confirmToken: 'x' })
+      expect(ap.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('单值 passphrase 向后兼容：全部同口令照常出清单（验收③）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } })
+      await seedAndExport(bPath, { ark2: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, {})
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrase: PASS })
+      expect(pv.status).toBe(200)
+      const preview = pv.json.preview as { candidates: { id: string }[] }
+      expect(preview.candidates).toHaveLength(1)
+      expect(preview.candidates[0]!.id).toBe('ark')
+      // passphrases 数组与单值 passphrase 等价（全部同口令时）
+      const pv2 = await callEndpoint(hMergePreview, rt, { packages, passphrases: [PASS, PASS] })
+      expect(pv2.json.confirmToken).toBe(pv.json.confirmToken)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('confirmToken 换口令组合后失效：错位/换包重放均 400，正确组合才放行（验收④）', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const aPath = path.join(pkgDir, 'a.msync')
+      const bPath = path.join(pkgDir, 'b.msync')
+      const passA = 'pass-a-11111'
+      const passB = 'pass-b-22222'
+      await seedAndExport(aPath, { ark: { base_url: 'https://ark.example.com/api', key: 'sk-ark-plain' } }, { main: { provider: 'ark' } }, { pass: passA })
+      await seedAndExport(bPath, { solo: { base_url: 'https://solo.example.com', key: 'sk-solo' } }, {}, { pass: passB })
+      const beforeCfg = fileHash(configPath())
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const packages = [
+        { name: 'a.msync', content_b64: b64(fs.readFileSync(aPath, 'utf8')) },
+        { name: 'b.msync', content_b64: b64(fs.readFileSync(bPath, 'utf8')) },
+      ]
+      const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: [passA, passB] })
+      expect(pv.status).toBe(200)
+      const token = String(pv.json.confirmToken)
+      // 口令组合换序 → 错口令解包失败 400（摘要不绑口令——CodeQL 污点面，口令有效性由解包层强制；断言结果同为 400 且零写盘）
+      const swapped = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passB, passA], keep: ['ark', 'solo'], confirmToken: token })
+      expect(swapped.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg)
+      // 别的预览发的 token 不能重放到这份包上
+      const cPath = path.join(pkgDir, 'c.msync')
+      const dPath = path.join(pkgDir, 'd.msync')
+      await seedAndExport(cPath, { c1: { base_url: 'https://c1.example.com', key: 'sk-c1' } }, {}, { pass: 'pass-c-33333' })
+      await seedAndExport(dPath, { d1: { base_url: 'https://d1.example.com', key: 'sk-d1' } }, {}, { pass: 'pass-c-33333' })
+      const packagesCD = [
+        { name: 'c.msync', content_b64: b64(fs.readFileSync(cPath, 'utf8')) },
+        { name: 'd.msync', content_b64: b64(fs.readFileSync(dPath, 'utf8')) },
+      ]
+      const beforeCfg2 = fileHash(configPath()) // c/d 种子写盘后取新基线
+      const pvCD = await callEndpoint(hMergePreview, rt, { packages: packagesCD, passphrase: 'pass-c-33333' })
+      expect(pvCD.status).toBe(200)
+      expect(pvCD.json.confirmToken).not.toBe(token)
+      const replay = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passA, passB], keep: ['ark', 'solo'], confirmToken: pvCD.json.confirmToken })
+      expect(replay.status).toBe(400)
+      expect(fileHash(configPath())).toBe(beforeCfg2)
+      // 正确口令组合 + 本预览的 token → 放行
+      const ok = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passA, passB], keep: ['ark', 'solo'], confirmToken: token })
+      expect(ok.status).toBe(200)
+      expect(fileHash(configPath())).not.toBe(beforeCfg)
+      const cfg = await loadConfig()
+      expect(Object.keys(cfg.providers).sort()).toEqual(['ark', 'solo'])
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+// ── UI 收编冒烟：独立入口移除 + 多选分流（构建产物 grep 断言）──────────────────────────────
+
+describe('控制台合并入口收编（构建产物冒烟）', () => {
+  it('独立合并按钮/弹层已移除；impFile2 支持多选；审阅清单走宽弹层（svcmodal）', () => {
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    expect(min).not.toContain('mergePkgBtn')
+    expect(min).not.toContain('mergeOverlay')
+    expect(min).toContain('impFile2" multiple')
+    // 审阅弹层在场且走 svcmodal 宽变体（esbuild 不改写属性名与字符串字面量，产物可 grep；
+    // mergeReviewOverlay 不含子串 mergeOverlay，旧断言语义不回退）
+    expect(min).toContain('id:"mergeReviewOverlay"')
+    expect(min).toMatch(/id:"mergeReviewOverlay"[\s\S]{0,200}modalClass:"svcmodal"/)
+    // tab 内嵌预览块已整体移除（呈现层替换为宽弹层）
+    expect(min).not.toContain('impMergePreview')
+    expect(min).toContain('impPwRows')
+    // /merge/preview|apply 调用仍随包携带逐包口令数组
+    expect(min).toContain('passphrases:')
+  })
+
+  it('占位符泄漏修复：摘要行 t() 带 params 第三参（传参形态 grep）', () => {
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const line = src.split('\n').find((l) => l.includes('合并 {n} 个包'))
+    expect(line).toBeTruthy()
+    expect(line).toMatch(/,\s*\{\s*n:/)
+  })
+
+  // merge-review-two-line（船东批准原型 /tmp/merge-proto/merge-flow.html 落地）：地址格两行化、
+  // 同源标记降噪（仅 >1）、表头全选联动——源级形态断言 + 产物在场断言
+  it('审阅表两行化：地址 rtl 左截断 + scheme 剥离 + 表头全选联动 + dup>1 条件形态', () => {
+    const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const styles = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'styles.ts'), 'utf8')
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    // ① 地址首行 rtl 左截断（省略号在行首、尾部 host/path 保留）：CSS 唯一事实源是 styles.ts
+    // （ui-minified 只含 JS bundle，UI_CSS 由 ui.ts 直拼 <style>，不经过 gen-ui-min）
+    expect(styles).toContain('direction:rtl')
+    // ② scheme 剥离 replace 形态（模板字面量源里 \/ 双写为 \\；产物经 esbuild/模板转义回单杠）
+    const addrLine = src.split('\n').find((l) => l.includes('base_url.replace'))
+    expect(addrLine).toBeTruthy()
+    expect(addrLine).toContain(String.raw`replace(/^https?:\\/\\//`)
+    expect(min).toContain(String.raw`base_url.replace(/^https?:\\/\\//`)
+    // ③ 表头全选联动：th 有 mgSelAll 复选框，change 置位全行，行变化经委托回写表头态
+    expect(src).toContain('id="mgSelAll"')
+    expect(src).toMatch(/mgSelAllBox\.addEventListener\('change'/)
+    expect(src).toContain('mgSyncSelAll')
+    // ④ 同源标记降噪：仅 duplicateCount > 1 才显「同源 ×n」，旧 dup=1 文案路径整条移除
+    expect(src).toMatch(/duplicateCount > 1/)
+    expect(src).not.toMatch(/duplicateCount > 0/)
+    expect(src).not.toContain('合并 {n} 条重复')
+    // 产物在场：全选框与两行形态类名随 esbuild 进 bundle（属性名/字面量不改写）
+    expect(min).toContain('mgSelAll')
+    expect(min).toContain('mgsub')
+  })
+
+  // merge-import-ux-polish（船东批准原型 /tmp/merge-proto/merge-flow.html Stage1 形态落地）：
+  // 多选引导文案 + 空态提示块 + 逐包口令 .prow 紧凑行——源级形态断言 + 产物在场断言
+  it('多包导入引导层：按钮多选文案 + 空态提示块切换挂钩 + 口令行 .prow 紧凑形态', () => {
+    const modals = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'modals.ts'), 'utf8')
+    const configpack = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'configpack.ts'), 'utf8')
+    const merge = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
+    const styles = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'styles.ts'), 'utf8')
+    const min = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui-minified.ts'), 'utf8')
+    // ① 按钮多选引导文案（data-i18n 双语，初始文案 = 中文半边）+ 产物在场
+    //    （esbuild 缺省 charset=ascii 把非 ASCII 逐字转义为 \uXXXX 大写十六进制，产物内嵌 TS 模板字面量再转义一层为 \\uXXXX）
+    const minEsc = (s: string) =>
+      Array.from(s)
+        .map((c) => (c.charCodeAt(0) > 127 ? '\\\\u' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') : c))
+        .join('')
+    expect(modals).toContain('data-i18n="选择文件（可多选）||Choose files (multi-select)"')
+    expect(min).toContain(minEsc('选择文件（可多选）'))
+    // ② 空态提示块：panelFile 内在场（虚线 muted 形态进 styles.ts），显隐由渲染函数驱动
+    //    ——两个文件来源（multi=mgFiles / 单包=input.files）任一非空即隐藏
+    expect(modals).toMatch(/id="impEmptyHint" class="empty-hint"/)
+    expect(styles).toMatch(/#pkgOverlay \.empty-hint\{[^}]*dashed/)
+    expect(configpack).toMatch(/function updateImpEmptyHint\(\)/)
+    expect(configpack).toMatch(/hint\.hidden = mgFiles\.length > 0/)
+    expect(configpack).toMatch(/f\.files && f\.files\.length > 0/)
+    // 挂钩点：showImpFileChip（单包选/清）与 mgExitMultiUi（multi 清场/降级）都驱动显隐
+    expect(configpack).toMatch(/updateImpEmptyHint\(\)/)
+    expect(merge).toContain('updateImpEmptyHint()')
+    // ③ 逐包口令 .prow 紧凑行（原型形态）：包名 label 截断+title 全量、input flex 占余宽；
+    //    旧「整宽文件名标题 + 行内整宽样式」形态移除
+    expect(merge).toMatch(/row\.className = 'prow'/)
+    expect(merge).toMatch(/nm\.title = file\.name/)
+    expect(styles).toMatch(/#pkgOverlay \.prow label\{[^}]*text-align:right/)
+    expect(styles).toMatch(/#pkgOverlay \.prow label\{[^}]*text-overflow:ellipsis/)
+    expect(styles).toMatch(/#pkgOverlay \.prow input\{[^}]*flex:1/)
+    expect(merge).not.toContain("input.style.width = '100%'")
+    // 产物在场：prow 类与空态提示 id 随 esbuild 进 bundle（字符串字面量不改写；顶层函数名会被改写，不作断言）
+    expect(min).toContain('"prow"')
+    expect(min).toContain('impEmptyHint')
   })
 })
 

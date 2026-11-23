@@ -42,7 +42,7 @@ function fixtureSpec(repoRoot: string, overrides: Partial<{ id: string; tasks: s
     id,
     title: 'fixture 规格',
     requirements: overrides.requirements ?? '# 需求\n\n- 作为用户，我希望 A 与 B 就绪，以便测试。',
-    design: overrides.design ?? '# 技术设计\n\n现状：src/util/paths.ts 承担路径工具（fixture 假设）。\n\n## 方案\n\n改 paths.ts 与 store.ts。\n',
+    design: overrides.design ?? '# 技术设计\n\n## 现状\n\n### 代码事实\n\nsrc/util/paths.ts 承担路径工具（fixture 假设）。\n\n### 用户可感知功能面\n\n不适用：内部工具面改造，无 UI 入口（fixture）。\n\n## 方案\n\n### 融入位置论证\n\n①与既有 paths.ts 相邻；②融入 util 既有模块；③扩展既有路径。\n\n改 paths.ts 与 store.ts。\n',
     tasks,
   })
   return id
@@ -179,9 +179,9 @@ describe('auditSpecFindings（防编造定位对账）', () => {
 })
 
 describe('computeSpecVerdict（服务端权威裁决）', () => {
-  const DIMS = { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90 }
+  const DIMS = { completeness: 85, unambiguity: 80, consistency: 85, testability: 85, feasibility: 90, integration: 90 }
 
-  it('加权聚合：85/80/85/85/90 → 8450/100=84.5 → round 85（approve 带）', () => {
+  it('加权聚合（六维）：85/80/85/85/90/90 → 8500/100=85（approve 带）', () => {
     const v = computeSpecVerdict({ dimensions: DIMS, findings: [], gates: { redlines: 'pass' }, fabricatedCount: 0 })
     expect(v.overall).toBe(85)
     expect(v.build_ready).toBe('approve_to_build')

@@ -70,7 +70,12 @@
       "max_wall_minutes": 150
     },
     "codex-headless": {
-      "max_tokens": 20000000
+      "max_tokens": 20000000,
+      "max_wall_minutes": 150
+    },
+    "dsh-headless": {
+      "max_tokens": 20000000,
+      "max_wall_minutes": 150
     }
   },
   "tiers": {
@@ -105,6 +110,9 @@
     "autoPipeline": {
       "enabled": true
     }
+  },
+  "spec": {
+    "industrialDesign": true
   },
   "autoResume": {
     "enabled": true
@@ -142,7 +150,9 @@
     "enabled": true,
     "envelope": [
       "zcode-headless",
-      "claude-headless"
+      "claude-headless",
+      "codex-headless",
+      "dsh-headless"
     ]
   },
   "testCmdL0": "npx vitest run test/docs-lint.test.ts",

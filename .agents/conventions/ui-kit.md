@@ -1,7 +1,7 @@
 # ModelDock Web UI 设计规范（ui-kit）
 
 > 适用范围：`src/gateway/ui.ts`（桌面控制台）、`src/gateway/lan.ts`（手机页）、后续任何 ModelDock Web 界面。
-> 本文件 = **设计规范 + 组件使用规范**：§1–8 是设计约束（令牌/布局/字级/色彩/状态/可访问性/动效），§9–11 是组件用法与实测坑，§12 是机器门禁，§13–14 是流程与例外。
+> 本文件 = **设计规范 + 组件使用规范**：§1–8 是设计约束（令牌/布局/字级/色彩/状态/可访问性/动效），§9–11 是组件用法与实测坑，§12 是机器门禁，§13 是流程，§14 是呈现面与占位符规约，§15 是已知例外与技术债。
 > 组件 CSS/JS 的唯一事实来源是 `src/gateway/ui.ts` 内嵌样式与脚本；改组件本身 = 改 ui.ts + 同步更新本文件 + 过 §12 门禁。原型评审稿见会话产物 `/tmp/modeldock-ui-kit/*.html`（不进 git）。
 
 ## 1. 设计原则
@@ -29,7 +29,7 @@
 | 页面壳 | `--wrap-ratio 61.8%`（**黄金比例壳**，冻结为品牌特征，见 §3） |
 | 其他 | `--scrim`（遮罩）、`--dur .15s`（过渡）、`--mono`（等宽栈） |
 
-**新增令牌的流程**：① ui.ts 三分支同步（主题相关）或只放 `:root`（主题不变量）；② 本表登记；③ `test/ui-lint.test.ts` 的 `THEME_REQUIRED` / `INVARIANT_REQUIRED` / `PARITY_*` 清单同步（门禁会红着提醒）。存量散落值已于 2026-10 收编完毕（见 §14），白名单只剩永久豁免类目。
+**新增令牌的流程**：① ui.ts 三分支同步（主题相关）或只放 `:root`（主题不变量）；② 本表登记；③ `test/ui-lint.test.ts` 的 `THEME_REQUIRED` / `INVARIANT_REQUIRED` / `PARITY_*` 清单同步（门禁会红着提醒）。存量散落值已于 2026-10 收编完毕（见 §15），白名单只剩永久豁免类目。
 
 ## 3. 布局与间距
 
@@ -97,7 +97,7 @@
 - **时长档位**：微交互/过渡 `--dur .15s`；入场动画 120–180ms（tipIn .12s / toastIn .18s）；spinner .7s、呼吸 2.6s（循环类）。>300ms 的过渡需说明理由。
 - **缓动**：统一 ease-out 家族；linear 仅 spinner 类匀速运动。
 - **规则**：新过渡优先 `var(--dur)`；循环动画必挂 reduced-motion（§7）。
-- **技术债**：存量 transition 大多硬编码 `.15s`（未收编 `--dur`），门禁暂不设 transition 断言；收编属待办（§14），收编前新增代码请直接写 `var(--dur)` 带头。
+- **技术债**：存量 transition 大多硬编码 `.15s`（未收编 `--dur`），门禁暂不设 transition 断言；收编属待办（§15），收编前新增代码请直接写 `var(--dur)` 带头。
 
 ## 9. 组件清单与用法
 
@@ -115,7 +115,7 @@
 | **进度条** | `.progress`（track）+ `.progress-fill`；`.indet` 不确定态 | 确定：fill 设 `width: n%`；总量未知/校验等待用 `.indet` 往复动画。现用于更新弹窗（updM）下载进度；纯展示不可点 |
 | Toast | JS `toast(msg, ok)`；容器 `#toastWrap` | 固定**左下角**（右下角是 fab「＋」/snav 浮钮栏，z-toast(50)>z-fab(40)，放右下会常驻盖住「添加模型服务」）；堆叠、入场动画、复制按钮、✕ 手动关；错误 8s/其余 4.2s；**签名勿变**（74+ 调用点） |
 | Tooltip | `data-tip` 属性（+`data-i18n-tip` 走 i18n） | 纯 CSS 悬停 0.3s 延迟；**宿主须 positioned**：fixed/absolute/sticky 元素直接用，静态元素补 `.tip` 类——**禁止**给 `[data-tip]` 全局加 position（会顶掉 .fab/.snav 的 fixed，已踩坑）。**自解释的链接/控件不加 tooltip**（logo 外链、themeBtn 先例：按钮自带当前态文字、悬停反馈/浏览器状态栏已足够，2026-11-08 评审定）；头部贴视口顶的元素上方放不下 tooltip，头部位禁用 CSS tooltip |
-| Modal 壳 | **工厂 `createModal(opts)` 代码化（ui.ts）——七个弹层壳已全部迁入，新增弹层一律走工厂，禁止再手写壳 HTML**。opts：`id`（scrim 沿用既有 overlay id，id 作用域 CSS/JS 全部继续生效）、`title`（`中文\|\|English`）/`titleId`（动态标题）、`align:'top'\|'center'`（top=顶对齐+遮罩滚动，长表单用）、`modalClass`（宽度变体如 upmodal；svcmodal=添加+编辑服务弹层共用的 680px 宽度/边框/阴影，改宽度只动这一条）、`closeButton:false`=确认类无 ✕、`closeOnEsc/closeOnScrim`（默认 true）、`bodyClass/bodyId/bodyHtml`、`footId/footHidden`、`foot:[{slot:'msg',id,kind:'err'\|'info'}（.mferr/.testline 左槽 flex:1）\|{id,label/html,title,primary,end,disabled,onClick}]`；返回 `{open/close/isOpen/body/foot}`，open 自动清 .mferr；全局 Esc=关最上层（modalStack，closeOnEsc:false 不穿透）；底栏槽位规则已归一 `.modal-foot .testline/.mferr{flex:1}`、`.modal-foot .btn{flex:0 0 auto}` | head=标题+✕常驻、body 滚动、foot 操作常驻；长表单放 body。**底栏规则（评审定稿）**：有 ✕ 的弹层 footer 不放「关闭/取消」；footer 只放与内容直接相关的动作，主按钮=用户下一步最可能的动作（分享弹层=复制链接，重新生成降次要；复制成功图标/文案翻转「✓ 已复制」1.6s）；确认类小弹层（无 ✕，如删除确认）保留「取消」=唯一反悔路径。**共享表单双宿主的动作区**（添加服务：首用内联卡 + ＋号弹窗）：`.addfoot` 单实例放表单尾，openAdd 时整体搬入工厂 foot 常驻、closeAdd 搬回（单元素 appendChild 搬移，**勿复制成两份 id**）；foot 显隐随表单（pickPreset 亮、close 熄）。**弹层开着时错误与一切提示（校验 / 接口失败 / 进度反馈）一律写底栏 msg 槽位**（`.mferr` 红=kind:'err'、`.testline` 中性+`.ok/.err` 语义色；textContent 填充，上游报错文本不可信；open 自动清 .mferr），**禁止走全局 toast**——遮罩 z-modal(100) 盖过 z-toast(50) 且带磨砂，toast 会被糊掉不可见；只有动作会关闭弹层/页面时反馈才走 toast（成功即关弹层，无遮挡；确认弹窗回调在 close 后执行，toast 可见）；弹层内复制成功的即时反馈=按钮图标/文案翻转，不走槽位也不走 toast。**新弹层 foot 必须配 `{slot:'msg'}`**（updM 曾漏配：4 条失败路径的 toast 全被遮罩糊掉）；「开着写槽位 / 已关 toast」分流写法参考 createOffer（shareM）/ updFail（updM）。**正文原则=内容即界面**：引导段落不进弹层，说明压成一行 `.help`（12px muted）或收进悬停提示（如分享链接框 title）。**正文里的网址自动可点**：`confirmModal` 的每一行都过 `linkifyText()`（按原文切出 http(s) 链接 → 展示文本与 href 各自转义 → 交 `docLinkA` 加外链图标新窗口打开），指引类文案直接写网址即可，不必拼 HTML；只认 `http(s)://`，其余文本与标签一律转义（弹层里可能有上游错误文本），因此**不要**改成 innerHTML 直插 |
+| Modal 壳 | **工厂 `createModal(opts)` 代码化（ui.ts）——七个弹层壳已全部迁入，新增弹层一律走工厂，禁止再手写壳 HTML**。opts：`id`（scrim 沿用既有 overlay id，id 作用域 CSS/JS 全部继续生效）、`title`（`中文\|\|English`）/`titleId`（动态标题）、`align:'top'\|'center'`（top=顶对齐+遮罩滚动，长表单用）、`modalClass`（宽度变体如 upmodal；svcmodal=添加+编辑服务弹层共用的 680px 宽度/边框/阴影，改宽度只动这一条）、`closeButton:false`=确认类无 ✕、`closeOnEsc` 默认 true、`closeOnScrim` 显式 opt-in（读取类弹层必须传 true）、`bodyClass/bodyId/bodyHtml`、`footId/footHidden`、`foot:[{slot:'msg',id,kind:'err'\|'info'}（.mferr/.testline 左槽 flex:1）\|{id,label/html,title,primary,end,disabled,onClick}]`；返回 `{open/close/isOpen/body/foot}`，open 自动清 .mferr；全局 Esc=关最上层（modalStack，closeOnEsc:false 不穿透）；底栏槽位规则已归一 `.modal-foot .testline/.mferr{flex:1}`、`.modal-foot .btn{flex:0 0 auto}` | head=标题+✕常驻、body 滚动、foot 操作常驻；长表单放 body。**底栏规则（评审定稿）**：有 ✕ 的弹层 footer 不放「关闭/取消」；footer 只放与内容直接相关的动作，主按钮=用户下一步最可能的动作（分享弹层=复制链接，重新生成降次要；复制成功图标/文案翻转「✓ 已复制」1.6s）；确认类小弹层（无 ✕，如删除确认）保留「取消」=唯一反悔路径。**读取类弹层（纯展示无主行动）关路径 = 头部 × + Esc + 遮罩点击三件套**（2026-11 修订：关路径四件套仅约束操作类弹层，读取类不适用「主行动完成自动关」）；foot 只留 msg 槽；「关闭」仅在弹层有主行动时作次行动；孤儿刷新按钮禁止（打开即拉取保证新鲜）。**共享表单双宿主的动作区**（添加服务：首用内联卡 + ＋号弹窗）：`.addfoot` 单实例放表单尾，openAdd 时整体搬入工厂 foot 常驻、closeAdd 搬回（单元素 appendChild 搬移，**勿复制成两份 id**）；foot 显隐随表单（pickPreset 亮、close 熄）。**弹层开着时错误与一切提示（校验 / 接口失败 / 进度反馈）一律写底栏 msg 槽位**（`.mferr` 红=kind:'err'、`.testline` 中性+`.ok/.err` 语义色；textContent 填充，上游报错文本不可信；open 自动清 .mferr），**禁止走全局 toast**——遮罩 z-modal(100) 盖过 z-toast(50) 且带磨砂，toast 会被糊掉不可见；只有动作会关闭弹层/页面时反馈才走 toast（成功即关弹层，无遮挡；确认弹窗回调在 close 后执行，toast 可见）；弹层内复制成功的即时反馈=按钮图标/文案翻转，不走槽位也不走 toast。**新弹层 foot 必须配 `{slot:'msg'}`**（updM 曾漏配：4 条失败路径的 toast 全被遮罩糊掉）；「开着写槽位 / 已关 toast」分流写法参考 createOffer（shareM）/ updFail（updM）。**正文原则=内容即界面**：引导段落不进弹层，说明压成一行 `.help`（12px muted）或收进悬停提示（如分享链接框 title）。**正文里的网址自动可点**：`confirmModal` 的每一行都过 `linkifyText()`（按原文切出 http(s) 链接 → 展示文本与 href 各自转义 → 交 `docLinkA` 加外链图标新窗口打开），指引类文案直接写网址即可，不必拼 HTML；只认 `http(s)://`，其余文本与标签一律转义（弹层里可能有上游错误文本），因此**不要**改成 innerHTML 直插 |
 | 选择器 | 基础层 select 自绘箭头 | 全站下拉**必须有右侧箭头**；密集小下拉参考 `.routesel`。**覆盖禁则**：① 禁止对 select 写 `background:` 简写（会连箭头 background-image 一起清掉，用 `background-color`）；② 覆盖 `padding` 时右侧留白 ≥22px（箭头占位），否则箭头压字——基础层默认 `padding-right:26px` |
 | 文件 chip | `.filechip`（.fname + 移除按钮） | 已选文件名展示 |
 | **图标** | JS `icon(name, size)` + `IC` 注册表（check/close/copy/eye/eye-off/star/plus/arrow-up/arrow-down/lock/link/gear/arrow-up-right…）；**行内**用 `iconInline(name, size)`（包 `.ic` 壳与文字基线对齐） | 控件上的图标一律用它，**禁止字符字形**（✕★👁⧉↑↓＋🔒🔗⚙🕐↗）；句子文案内嵌的 ✓⚠✗ 保留文本形态；静态 HTML 可先写字形、init 时统一 `innerHTML = icon(...)` 填充；星标实心态走 CSS `.on svg{fill:currentColor}`；链接类外链图标由 `docLinkA` 统一追加，文案里不写 ↗ |
@@ -159,8 +159,10 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 | ③ | 主题块外禁裸色值（hex/rgba）——**白名单登记制** | ui.ts、lan.ts |
 | ④ | 封闭集：字号只走 `--fs-*`（lan 豁免档 16/11/13px）；圆角只走 `--r-*`/50%/0/999px；z-index 只走 `--z-*`/calc/1\|2；box-shadow 只走 `--shadow-*` 或 var()/inset/transparent 组合 | ui.ts、lan.ts |
 | ⑤ | 核心令牌对 WCAG 对比度（明暗两主题 4.5:1 / 3:1，断言对见 §5） | ui.ts |
+| ⑥ | t() 占位符参数完整性：文案含 `{word}` 而调用未传第三参 params = 违规（`.replace('{n}',…)` 链不豁免；白名单登记制） | ui.ts、ui/ 片段 |
+| ⑦ | data-i18n 禁占位符：`data-i18n*` 字面属性值 / setAttribute 字面量实参含 `{word}` = 违规（纯翻译槽无参数能力） | ui.ts、ui/ 片段 |
 
-**白名单登记制**（COLOR_WL / RADIUS_WL / SHADOW_WL）：每条 = 文件 + 行级正则 + **理由**。两个方向都被门禁管着：新裸色值没登记 → 红；登记了却不再命中（陈旧条目）→ 红。**可登记的只有三类永久豁免**：① 品牌固定色（logo 渐变与投影、PWA/浏览器 chrome、webmanifest）；② 结构性固定色（on-accent 白字白芯、tooltip 反色调色板、二维码白底）；③ 独立降级页内联样式与 JS id 选择器误报；另有视觉配套特例（logo/seg 7px 圆角、滚动条 thumb 3px）。**新代码一律先走令牌，禁止为新样式登记白名单**。
+**白名单登记制**（COLOR_WL / RADIUS_WL / SHADOW_WL / T_PARAM_WL / I18N_PH_WL）：每条 = 文件 + 行级正则 + **理由**。两个方向都被门禁管着：新裸色值没登记 → 红；登记了却不再命中（陈旧条目）→ 红。**可登记的只有三类永久豁免**：① 品牌固定色（logo 渐变与投影、PWA/浏览器 chrome、webmanifest）；② 结构性固定色（on-accent 白字白芯、tooltip 反色调色板、二维码白底）；③ 独立降级页内联样式与 JS id 选择器误报；另有视觉配套特例（logo/seg 7px 圆角、滚动条 thumb 3px）。**新代码一律先走令牌，禁止为新样式登记白名单**。占位符两规则的白名单（T_PARAM_WL / I18N_PH_WL）只收「文案里的 `{word}` 是语法示例而非插值」类特例。
 
 **常见改动对照**：新增主题令牌 → ui.ts 三分支 + §2 表 + `THEME_REQUIRED`；新增组件 → §9 登记 + 五态齐备（§6）；确需特例 → 白名单登记（写清为什么不能走令牌）；收编散落值 → 补令牌 + 删白名单条目。
 
@@ -168,13 +170,21 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 
 1. **先查本文件**：有现成组件直接用；没有 → **扩充组件库，且扩充必须先经用户审核**（原型/截图评审通过后才能进 ui.ts kit 段与本文件），禁止就地发明一次性样式绕过组件库。
 2. 新颜色/令牌：主题相关必须三分支同步；语义色严格按第 5 节，不得新造含义。
-3. 文案：一切用户可见文案走 `t(中, 英)` / `data-i18n*`（含 `data-i18n-tip`），双语同写。
+3. 文案：一切用户可见文案走 `t(中, 英)` / `data-i18n*`（含 `data-i18n-tip`），双语同写；参数化文案传第三参 params、`data-i18n*` 值禁 `{word}` 占位符（§14，门禁 ⑥⑦）。
 4. ui.ts 是 JS 模板字符串：内嵌代码**禁用反引号与 `${`**；正则反斜杠双写；`\n` 要写 `\\n`；改完必须 `node --check` 抽查内嵌脚本。
 5. **过门禁**：`npx vitest run test/ui-lint.test.ts`（或随全量 `npm test`）必须绿——令牌三分支、裸色值、封闭集、对比度都是红灯项。
 6. 验收：`npm test` 全绿 + `MODELRDOCK_FAKE_HOME=<独立目录> npx tsx src/cli.ts gateway start --port 189xx` 起隔离实例真开页（IAB）过一遍交互；**tsx 无热重载，改码后必须重启实例**。端口红线见 AGENTS.md（8687/8890 禁占）。
 7. 移动端 `/m`（lan.ts）暂有独立迷你令牌，对齐桌面是技术债（见下）。
 
-## 14. 已知例外与技术债
+## 14. 呈现面与占位符
+
+- **审阅类清单（逐行 verdict/勾选）禁止塞窄表单面板**——用 `createModal({ modalClass:'svcmodal' })` 宽弹层（680px）+ fixed 表格（日志表配方）。
+- **参数化文案必须 t() 传第三参**；data-i18n 禁占位符（对应 ui-lint 两规则）。
+- **UI 卡验收附渲染截图三自查**：占位符泄漏 / 信息密度 / 换行省略（README 截图配方：沙箱种数据 + playwright + Chrome）。
+
+前两条由 §12 门禁 ⑥⑦ 机器强制（`test/ui-lint.test.ts`）；第三条为人工自查项，渲染截图随 UI 卡验收材料交付（「机器检查了字符串在场」补上「有人看过渲染结果」）。
+
+## 15. 已知例外与技术债
 
 - 主题按钮的 🎨🌙☀️ 前缀是按钮三态文本的一部分（textContent 切换），保留 emoji；句子文案里的 ✓⚠✗ 同理（如 toast 的「✓ 已切换」、延迟探测的「✗ 网络不通」）。**状态/语义图标（锁 🔒 / 链 🔗 / 齿轮 ⚙ / 时钟 🕐 / 外链 ↗）已全部 SVG 化**——emoji 只允许留在装饰性标题（🧲/📲）与句子文案里；提示语要指向某个控件时写「点右侧按钮」这类文字，不要在文案里画图标。
 - `#updOverlay`（更新弹层）保留旧自包含结构，未迁 `.pad0` 三段壳（近期刚改过，避免无谓回归）；其余弹层（编辑/添加/确认/分享/导入/配置包）均已三段化。

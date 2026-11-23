@@ -615,8 +615,11 @@ function parseMarkerBlock(text, marker) {
  * @param {string} redlines 项目红线文本（workflow.json reviewNotes；缺省 = 只提 AGENTS.md 不展开）
  * @param {string} brief 调研结论全文（research/<id>/brief.md，--from-brief 注入；可选）——
  *   插在产出契约之前；为空 = 不出现该段，prompt 与历史逐字节一致（回归红线）。
+ * @param {boolean} industrialDesign workflow.json spec.industrialDesign（工业级设计开关，
+ *   2026-11-22 船东授权流程升级）：true 时 prompt 末尾追加工业级设计增补契约（文本与
+ *   任务卡钉死契约逐字一致，不得改动）；false/缺省 = prompt 与历史逐字节一致（回归红线）。
  */
-export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '') {
+export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '', industrialDesign = false) {
   const agentsMd = fs.readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const clean = sanitizeIntent(intentText);
   const fence = '```';
@@ -644,8 +647,8 @@ export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '')
     `${fence}\n\n` +
     `${fence}${DESIGN_MARKER}\n` +
     `# 技术设计：<标题>\n\n` +
-    `## 现状\n<探索到的相关模块/文件（写真实路径）与现有行为>\n\n` +
-    `## 方案\n<改动方案与关键决策>\n\n` +
+    `## 现状\n### 代码事实\n<探索到的相关模块/文件（写真实路径）与现有行为>\n\n### 用户可感知功能面\n<与意图相关的既有功能盘点：每个相关入口的形态（CLI 命令/控制台页面/弹层/tab）与交互流程（按钮→输入→顺序）；无 UI 面的意图显式声明「不适用及原因」>\n\n` +
+    `## 方案\n### 融入位置论证\n<三问：①哪些既有功能/入口与本意图重叠或相邻（逐个引用功能面盘点）；②新能力融入哪个既有入口、为什么最合理；③与既有路径的关系=替代/扩展/并列——并列新入口必须给出不融合的理由>\n\n<改动方案与关键决策>\n\n` +
     `## 取舍\n<备选方案与放弃理由>\n\n` +
     `## 风险\n<平台兼容/端口/兼容性等风险与规避>\n` +
     `${fence}\n\n` +
@@ -664,7 +667,18 @@ export function buildSpecPrompt(intentText, repoRoot, redlines = '', brief = '')
     `3. 任务间依赖显式写「依赖: 任务 N」，无依赖写「依赖: 无」；\n` +
     `4. 设计不得违反 AGENTS.md 红线${redlines ? `（${redlines}）` : ''}；\n` +
     `5. requirements 的背景段第一行必须是用户原始需求逐字原文（上面模板已注明）；\n` +
-    `6. 围栏外只允许一句话概述，不要输出其他内容。\n`
+    `6. 围栏外只允许一句话概述，不要输出其他内容。\n` +
+    `7. 设计含新 UI 入口/新命令/新端点时，方案必须先引用「用户可感知功能面」盘点完成「融入位置论证」，缺失即违反产出契约；\n` +
+    // 工业级设计增补：文本是任务卡钉死契约（industrial-design-flag），逐字不得改动
+    (industrialDesign
+      ? `\n# 工业级设计增补（spec.industrialDesign=true 生效）\n` +
+        `含 UI/交互面的设计必须满足以下五条，缺一即违反产出契约：\n` +
+        `1. 交互原型先行：design 必须附自包含 HTML 交互原型文件路径（原型放 specs/<id>/proto/ 下，不入库），覆盖全部状态：空态/加载态/错误态/成功态/关闭路径；原型未经船东批准前不得 spec build（人工闸执行）。\n` +
+        `2. 关路径四件套：每个弹层/页面 ≥1 显式关闭按钮（头部 × 或 foot 次行动「关闭/返回」）+ Esc + 遮罩点击 + 主行动完成自动关；四路缺一须在 design 说明取舍理由。\n` +
+        `3. 全状态覆盖：空态/加载态/错误态/成功态逐一设计并写进 tasks 的呈现层验收，不许只画理想态。\n` +
+        `4. 刷新策略：打开即拉取数据（数据陈旧可接受）；手动刷新只作次行动（图标化或与主行动并列），禁止孤儿刷新按钮（无主行动配对的独占刷新）。\n` +
+        `5. 呈现面论证（规约 §1.6 既有检查点）持续适用。\n`
+      : '')
   );
 }
 
@@ -879,7 +893,7 @@ export function buildArbitrationPrompt(contradictedClaims, sourcesBlocks, repoRo
 
 // ---------------------------------------------------------------------------
 // Spec 审查船（spec review 命令）：readonly 会话按 .agents/conventions/spec-review.md
-// 规约对三件套做五维评分 + findings（防编造定位对账）。advisory——产出只做筛查，
+// 规约对三件套做六维评分 + findings（防编造定位对账）。advisory——产出只做筛查，
 // spec build 拆卡默认人工拍板（可显式 opt-in 委托超时自动拆卡：autoApprove.specBuild.enabled）。
 // 逻辑件在 spec-review.mjs（L0/对账/裁决重算）。
 // ---------------------------------------------------------------------------
@@ -896,7 +910,7 @@ export function buildSpecReviewPrompt(specId, spec, l0, repoRoot, { today = toIs
     `今天是 ${today}。你是 spec 审查船：只读，不修改任何文件，不跑 git 写操作或测试。\n` +
     `工作目录是仓库根 ${repoRoot}（你只有只读探索工具：Read/Glob/Grep）。\n\n` +
     `## 必读（按序，审查标准的事实源）\n\n` +
-    `1. .agents/conventions/spec-review.md —— 审查规约全文（五维定义/红线 gate/防编造硬纪律/裁决矩阵）\n` +
+    `1. .agents/conventions/spec-review.md —— 审查规约全文（六维定义/红线 gate/防编造硬纪律/裁决矩阵）\n` +
     `2. ${specDirHint}/requirements.md\n` +
     `3. ${specDirHint}/design.md\n` +
     `4. ${specDirHint}/tasks.md\n\n` +
@@ -913,7 +927,7 @@ export function buildSpecReviewPrompt(specId, spec, l0, repoRoot, { today = toIs
     `{\n` +
     `  "spec": "${specId}",\n` +
     `  "gates": { "redlines": "pass", "notes": ["<逐条裁决 L0 红线命中；无命中则一句 pass 说明>"] },\n` +
-    `  "dimensions": { "completeness": 0-100|null, "unambiguity": 0-100|null, "consistency": 0-100|null, "testability": 0-100|null, "feasibility": 0-100|null },\n` +
+    `  "dimensions": { "completeness": 0-100|null, "unambiguity": 0-100|null, "consistency": 0-100|null, "testability": 0-100|null, "feasibility": 0-100|null, "integration": 0-100|null },\n` +
     `  "findings": [\n` +
     `    { "severity": "P0|P1|P2", "file": "${specDirHint}/design.md 或被引代码文件", "section": "§节名或第N行", "claim": "<涉及 spec 原文时逐字摘录，否则留空>", "why": "<依据：规约条目或代码事实>", "fix": "<一句话建议>" }\n` +
     `  ],\n` +

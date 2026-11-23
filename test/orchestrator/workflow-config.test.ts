@@ -432,6 +432,37 @@ describe('workflow-config > upstream（上游管线：specAutoBuild 预授权档
   })
 })
 
+describe('workflow-config > spec（工业级设计开关 spec.industrialDesign，缺省关）', () => {
+  function cfgOf(obj: Record<string, unknown>) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-spec-'))
+    fs.mkdirSync(path.join(dir, '.agents'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.agents', 'workflow.json'), JSON.stringify(obj))
+    try {
+      return loadWorkflowConfig(dir)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('缺省 false = 行为与历史一致；显式 true 生效；spec 键合法不进未知顶层键告警', () => {
+    expect(cfgOf({}).spec).toEqual({ industrialDesign: false })
+    expect(cfgOf({ spec: { industrialDesign: true } }).spec).toEqual({ industrialDesign: true })
+    expect(cfgOf({ spec: { industrialDesign: false } }).spec).toEqual({ industrialDesign: false })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      cfgOf({ spec: { industrialDesign: true } })
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('未知顶层键'))).toHaveLength(0)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('非法形态回落缺省关：非对象 spec / 非布尔 industrialDesign', () => {
+    expect(cfgOf({ spec: 'on' }).spec).toEqual({ industrialDesign: false })
+    expect(cfgOf({ spec: { industrialDesign: 'yes' } }).spec).toEqual({ industrialDesign: false })
+  })
+})
+
 describe('workflow-config > B11 常量收口新键（gateTimeoutMinutes/retryWaitBaseMs/scheduling/drift 告警）', () => {
   function fixture(workflow: Record<string, unknown>): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wfcfg-b11-'))
@@ -681,7 +712,7 @@ describe('workflow-config > 未知顶层键告警（拼写错误防线，2026-11
     }
   })
 
-  it('合法顶层键（含外部消费者 setupCmd/scan）：零告警', () => {
+  it('合法顶层键（含外部消费者 setupCmd/scan 与 spec 开关键）：零告警', () => {
     const dir = writeCfg({
       baseBranch: 'main',
       testCmd: 'make test',
@@ -689,12 +720,14 @@ describe('workflow-config > 未知顶层键告警（拼写错误防线，2026-11
       scan: { smartFilter: true }, // eventfilter.mjs readScanConfig 消费
       worker: { backend: 'claude-headless' },
       weatherHold: { threshold: 3, windowMinutes: 60 },
+      spec: { industrialDesign: true }, // spec planner 工业级设计开关（2026-11-22 船东授权）
     })
     try {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
-        loadWorkflowConfig(dir)
+        const cfg = loadWorkflowConfig(dir)
         expect(warn).not.toHaveBeenCalled()
+        expect(cfg.spec.industrialDesign).toBe(true)
       } finally {
         warn.mockRestore()
       }

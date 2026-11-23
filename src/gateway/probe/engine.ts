@@ -108,7 +108,7 @@ export interface ProbeRunOptions {
   runnerFor?: (probeId: string) => ProbeRunner | undefined
   /** 全局并发闸运行级覆盖（不传读 [probe].concurrency，仍缺省 2；上限硬顶 4） */
   concurrency?: number
-  /** 成本确认闸：true 才允许发主动探针（P1–P14）的上游请求；缺省 false = 0 请求返回预估 */
+  /** 成本确认闸：true 才允许发主动探针（P1–P14）的上游请求；缺省 false = 主动 0 请求、被动单元照常派发（与预算闸同族豁免，零上游请求） */
   confirmed?: boolean
   /** 批量任务取消 */
   signal?: AbortSignal
@@ -385,7 +385,7 @@ export function makeRelayProbeTransport(
 /** 探针套件运行入口：跑 probeIds × targets 全组合。 */
 export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): Promise<ProbeRunResult> {
   const skipped: ProbeRunSkip[] = []
-  const units: ProbeUnit[] = []
+  let units: ProbeUnit[] = []
   let planned = 0
   const pcfg = probeConfigView(rt)
   for (const probeId of opts.probeIds) {
@@ -419,22 +419,44 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
   for (const u of units) estimate += probeEstimateTokens(u.def)
   const hasActive = units.some((u) => u.def.cost !== 'none')
 
-  // 预算闸（先于确认闸——预算是硬停，连预估展示都不必发请求）
+  let dispatched = 0
+  let upstreamRequests = 0
+  let tokensTotal = 0
+  let anyCancelled = false
+  let budgetStopped = false
+  let confirmStopped = false
+  const touched = new Set<string>()
+
+  // 预算闸（先于确认闸——预算是硬停，连预估展示都不必发请求）。只拦主动探针：
+  // schedule.ts 触发口径明文「预算闸拦的是主动探针」（被动观测断了会架空 7 天转 stale）、
+  // 冷却过滤豁免被动（同理由）、逐单元闸只对 cost !== 'none' 查账——三处既有口径一致，
+  // 唯计划级初闸曾一刀切把混合清单的被动单元也标 budget-exhausted 漏刷被动证据。
+  // 预算耗尽时主动单元拦下、被动单元照常走派发管线；过滤后无剩余可跑单元才整轮早退
   const monthKey = probeMonthKey()
   const budget = probeBudgetTokens(rt)
   let spent = probeMonthSpend(await readProbeLedger(), monthKey)
-  const budgetStop = (markAll: boolean): ProbeRunResult => {
-    if (markAll) {
-      for (const u of units) skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'budget-exhausted' })
+  if (hasActive && spent >= budget) {
+    const blocked = units.filter((u) => u.def.cost !== 'none')
+    units = units.filter((u) => u.def.cost === 'none')
+    for (const u of blocked) skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'budget-exhausted' })
+    if (units.length === 0) {
+      return { ok: false, reason: 'budget-exhausted', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
     }
-    return { ok: false, reason: 'budget-exhausted', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
+    budgetStopped = true // 与逐单元闸同口径：任一主动单元因预算被拦 → 整轮 reason 带 budget-exhausted
   }
-  if (hasActive && spent >= budget) return budgetStop(true)
 
-  // 确认闸：未确认时不发任何主动探针的上游请求（预估随结果返回供调用方回显）
-  if (hasActive && opts.confirmed !== true) {
-    for (const u of units) skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'unconfirmed' })
-    return { ok: false, reason: 'unconfirmed', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
+  // 确认闸：未确认时不发任何主动探针的上游请求（预估随结果返回供调用方回显）。只拦主动单元：
+  // 被动单元零上游请求（p15 runner calls 恒空、transport 不触），不属「防误烧钱」确认面——
+  // 与预算闸 d47d8f2 同族口径：主动拦下标 unconfirmed、被动照常走派发管线刷证据；过滤后
+  // 无剩余可跑单元才整轮早退。对过滤后的 units 重判有无主动（预算闸先行拦走主动时不再误标）
+  if (opts.confirmed !== true && units.some((u) => u.def.cost !== 'none')) {
+    const blocked = units.filter((u) => u.def.cost !== 'none')
+    units = units.filter((u) => u.def.cost === 'none')
+    for (const u of blocked) skipped.push({ probeId: u.def.id, providerId: u.target.providerId, model: u.target.model, reason: 'unconfirmed' })
+    confirmStopped = true // 与预算闸 budgetStopped 同型：任一主动单元被确认闸拦 → 整轮 reason 带 unconfirmed
+    if (units.length === 0) {
+      return { ok: false, reason: 'unconfirmed', planned, dispatched: 0, upstreamRequests: 0, tokens: 0, estimate, skipped, verdicts: [] }
+    }
   }
 
   // 冷却过滤（计划期）：429 负缓存中的 provider 直接跳过并标 stale。被动探针（P15）豁免——
@@ -447,13 +469,6 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     }
     dispatchable.push(u)
   }
-
-  let dispatched = 0
-  let upstreamRequests = 0
-  let tokensTotal = 0
-  let anyCancelled = false
-  let budgetStopped = false
-  const touched = new Set<string>()
 
   if (!opts.runner && !opts.runnerFor) {
     // 无 runner（任务 3+ 才有判定实现）：全部记 not-implemented，零上游请求
@@ -609,7 +624,7 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
   const verdicts = [...touched]
     .map((k) => rt.probeVerdicts?.get(k))
     .filter((v): v is ProbeVerdict => !!v)
-  const reason: ProbeRunResult['reason'] = anyCancelled ? 'cancelled' : budgetStopped ? 'budget-exhausted' : 'ok'
+  const reason: ProbeRunResult['reason'] = anyCancelled ? 'cancelled' : confirmStopped ? 'unconfirmed' : budgetStopped ? 'budget-exhausted' : 'ok'
   return { ok: reason === 'ok', reason, planned, dispatched, upstreamRequests, tokens: tokensTotal, estimate, skipped, verdicts }
 }
 

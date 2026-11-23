@@ -39,16 +39,21 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<div id="importPanels"><div id="panelNearby"><p class="shint" id="nearbyStatus" style="margin-top:0"></p><div id="impPeers"></div></div>' +
       '<div id="panelLink" hidden><textarea id="impUrl" data-i18n-ph="粘贴分享链接：http://192.168.x.x:8787/…#p=…||Paste the share link: http://192.168.x.x:8787/…#p=…" placeholder="粘贴分享链接：http://192.168.x.x:8787/…#p=…"></textarea></div>' +
       '<div id="panelFile" hidden><p class="row" style="margin:0 0 10px;align-items:center">' +
-      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件||Choose file">选择文件</button>' +
+      '<button type="button" class="btn" id="impFileBtn" data-i18n="选择文件（可多选）||Choose files (multi-select)">选择文件（可多选）</button>' +
       '<span id="impFileChip" class="filechip" hidden></span>' +
       // 不设 accept：iOS 选择器会把未注册的 .msync 灰掉（见 lan-mobile-page.ts:106 同款注释）
-      '<input type="file" id="impFile2" hidden></p>' +
-      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box"></div></div>' +
-      '<p class="row" style="margin:10px 0 0"><button type="button" class="btn small" id="mergePkgBtn" data-i18n="合并多个配置包…||Merge multiple packages…">合并多个配置包…</button>' +
-      '<span class="help" data-i18n="多包去重合并，按探针结论勾选保留||Dedupe-merge several packages; keep per probe verdicts"></span></p>' +
+      // multiple：多选即进入合并流（mgSetFiles 分流），单选仍走原单包导入
+      '<input type="file" id="impFile2" multiple hidden></p>' +
+      '<input type="password" id="impPw2" data-i18n-ph="配置包口令（导出时设置）||Package passphrase (set at export)" placeholder="配置包口令（导出时设置）" style="width:100%;box-sizing:border-box">' +
+      '<div id="impChips" class="chips" hidden></div>' +
+      '<div id="impPwRows" hidden></div>' +
+      // 空态提示块（船东批准原型 .empty-hint 形态）：未选文件时引导多选；显隐由 updateImpEmptyHint 挂在渲染函数上
+      '<div id="impEmptyHint" class="empty-hint" data-i18n="尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）||No file selected — click Choose files to pick several .msync packages at once (one file = the single-package import flow)">尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）</div></div></div>' +
       '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
       '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
       '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +
+      // 多包合并的审阅清单不再渲染在 tab 内（窄列三行折行，信息密度失效）：mgM（mergeReviewOverlay
+      // svcmodal 宽弹层）在 merge.ts 装配，预览后直接打开；tab 只留 表单输入（chips + 逐包口令行）
       '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p></div>',
     foot: [
       { slot: 'msg', id: 'pkgErr', kind: 'err' },

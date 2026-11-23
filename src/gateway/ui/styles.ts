@@ -319,6 +319,13 @@ input[type=checkbox]{margin:0;cursor:pointer;accent-color:var(--accent);width:14
 .pill.err{color:var(--err);border-color:var(--err);background:var(--err-weak)}
 .pill.warn{color:var(--warn);border-color:var(--warn);background:var(--warn-tint)}
 .pill.dim{opacity:.75}
+/* 可点击 pill（button 形态，健康徽标下钻入口）：显式压住 UA 按钮外观与字重（勿用 font:inherit
+   简写——特异性高于 .pill 会连 font-size:xs 一起复位）；hover 反馈走令牌，口径同 .pill.sw */
+button.pill{appearance:none;font-family:inherit;font-weight:400;cursor:pointer;transition:border-color var(--dur),color var(--dur),background var(--dur)}
+button.pill:hover{border-color:var(--muted);color:var(--text);background:var(--neutral-weak)}
+button.pill.ok:hover{border-color:var(--ok);color:var(--ok);background:var(--ok-weak)}
+button.pill.warn:hover{border-color:var(--warn);color:var(--warn);background:var(--warn-tint)}
+button.pill.err:hover{border-color:var(--err);color:var(--err);background:var(--err-weak)}
 /* pillSwitch：状态行开关（kit 组件）。视觉与原 pill 一致；主体 / caret 是两个真实按钮，
    各自可 Tab（role=switch+aria-checked / aria-expanded+aria-controls），内嵌 .ptext 承载文案 */
 .pill.sw{cursor:pointer;user-select:none;transition:border-color var(--dur),color var(--dur),background var(--dur)}
@@ -395,6 +402,31 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    sticky 形态；列少不设 fixed 布局与列宽，基础 table/th/td 层照常生效 */
 #probeLedgerTable{border-collapse:separate;border-spacing:0}
 #probeLedgerTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+/* 健康变化时间线表（probeSvcTimelineOverlay 弹层内，svcmodal 680px 宽变体）：#mgReviewTable 同款
+   fixed 配方——时间/变化/来源三列定宽（时间戳与双 pill 长度可预期），三元组列吃剩余空间为信息
+   主列（长模型 ID 截断、全文在 title 悬浮）；任何窗宽不溢出，更窄走 .tablescroll 滚动 */
+#probeSvcTimelineTable{table-layout:fixed;min-width:620px;border-collapse:separate;border-spacing:0}
+#probeSvcTimelineTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+#probeSvcTimelineTable th:nth-child(1){width:140px}
+#probeSvcTimelineTable th:nth-child(3){width:190px}
+#probeSvcTimelineTable th:nth-child(4){width:90px}
+#probeSvcTimelineTable th,#probeSvcTimelineTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 合并审阅表（mergeReviewOverlay 弹层内，svcmodal 680px 宽变体）：fixed 布局按日志表配方——
+   勾选/服务ID/探针/建议四列定宽（宽在表头声明），地址列吃剩余空间为信息主列；任何窗宽不溢出，
+   更窄走 .tablescroll 滚动。地址格两行块形态（船东批准原型 merge-flow.html 逐字对应）：
+   首行 URL 剥 scheme 后 direction:rtl + text-align:left 左截断——省略号落在行首、尾部 host/path
+   保留（服务间差异在尾段，rtl 才能藏头露尾），全文走 title 悬浮含 scheme；次行 key 指纹 muted，
+   dup>1 才显「同源 ×n」（accent 色）——=1 是去重正常态，行行都标即纯噪音 */
+#mgReviewTable{table-layout:fixed;min-width:520px;border-collapse:separate;border-spacing:0}
+#mgReviewTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+#mgReviewTable th:nth-child(1){width:36px}
+#mgReviewTable th:nth-child(2){width:140px}
+#mgReviewTable th:nth-child(4){width:136px}
+#mgReviewTable th:nth-child(5){width:88px}
+#mgReviewTable th,#mgReviewTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#mgReviewTable td.mgurl .mgu{display:block;font-family:var(--mono);font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+#mgReviewTable td.mgurl .mgsub{display:block;margin-top:3px;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
+#mgReviewTable td.mgurl .mgsub .mgdup{color:var(--accent)}
 /* 日志表改固定布局：8 列里 7 列定宽（宽在表头上声明），错误列（第 7 列）不设宽=吃剩余空间。
    auto 布局下 nowrap 列按内容撑宽、限宽盒的固有宽度又不可靠（width:1% 弹性列被无视），
    窄内容带（--wrap-ratio 61.8%）必横向溢出；fixed 布局任何窗宽都不溢出，更窄走 .tablescroll 滚动。
@@ -508,6 +540,13 @@ code{font-family:var(--mono);font-size:var(--fs-sm);background:var(--bg);border:
 .filechip .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .filechip button{border:none;background:none;color:var(--muted);cursor:pointer;font:inherit;padding:0 2px}
 .filechip button:hover{color:var(--accent)}
+/* 多包逐包口令紧凑行（船东批准原型 .prow 形态）：包名 label 右对齐 150px 截断（悬浮 title 出全量）+ 口令 input 占满余宽；
+   input 外观走全局 input 令牌样式，这里只管布局 */
+#pkgOverlay .prow{display:flex;align-items:center;gap:var(--sp-2);margin:var(--sp-2) 0}
+#pkgOverlay .prow label{width:150px;flex:0 0 auto;font-size:var(--fs-xs);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+#pkgOverlay .prow input{flex:1;min-width:0}
+/* 未选文件空态提示（船东批准原型 .empty-hint 形态）：虚线边框弱化小字居中，引导一次多选 .msync 包 */
+#pkgOverlay .empty-hint{font-size:var(--fs-xs);color:var(--muted);padding:var(--sp-2);text-align:center;border:1px dashed var(--border);border-radius:var(--r-sm);margin-top:var(--sp-2)}
 /* 手机远程开关右侧 V 形箭头：收起/展开二维码面板（与下拉框同款 chevron，分隔语义防误触开关） */
 #curSvcSel,#autoRouteSel{font-size:var(--fs-sm);padding:5px 26px 5px 10px;border-radius:var(--r-sm);max-width:200px}
 /* 客户端卡片内的钉定路由下拉：小号、紧凑，与卡片 12px meta 行同节奏 */
