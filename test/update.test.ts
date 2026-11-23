@@ -31,6 +31,7 @@ import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, ty
 import { readRollbackSlot } from '../src/update/rollback.js'
 import { readUpdateProgress } from '../src/update/progress.js'
 import { readStagingMeta, saveStagingMeta, stagingFinalFile } from '../src/update/staging.js'
+import { resolveTar } from '../src/update/transfer.js'
 import { updatesRollbackDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 import { VERSION } from '../src/version.js'
@@ -49,6 +50,9 @@ import { VERSION } from '../src/version.js'
 // ③ 环境回归（2026-11-21）——windows-latest 镜像 20261116.315 起 Compress-Archive→Expand-Archive
 //    往返 exit 0 零产物（代码零改动、mac/ubuntu 全绿，仅 Windows 六用例齐红），两处 cmdlet 依赖
 //    整体换 bsdtar（transfer.ts 解压 -xf / 本文件打包 --format zip）根治，不再有该故障面。
+// ③b 后续（2026-11-22 本机实证）——'tar' 裸名在 Git Bash 等 MSYS 环境解析到 GNU tar（无 zip
+//    能力，--format zip 报 Invalid archive format），zip 打包/解压双双必败；tar 一律经
+//    resolveTar() 显式钉 System32 bsdtar（win32），PATH 上的 tar 版本不再影响结果。
 // 若同签名失败仍频发：先看报错是「路径不存在」（清扫竞态回潮）还是「进程退出码」（负载/杀软），
 // 分别查 sweep 年龄门槛与机器负载，不要放宽断言。
 
@@ -203,8 +207,9 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
     }
   const archive = path.join(dir, name)
   // zip 用 bsdtar 写（--format zip）：不再依赖 PowerShell Compress-Archive——2026-11-21 windows-latest
-  // 镜像 20261116.315 起该 cmdlet 与 Expand-Archive 往返实测 exit 0 零产物（与 src/update/transfer.ts 同步换 tar）
-  const r = spawnSync('tar', ['--format', 'zip', '-cf', archive, '-C', staging, ...files], { stdio: 'ignore' })
+  // 镜像 20261116.315 起该 cmdlet 与 Expand-Archive 往返实测 exit 0 零产物（与 src/update/transfer.ts 同步换 tar）；
+  // 裸名 'tar' 在 MSYS 环境解析到 GNU tar（无 zip 能力）——一律 resolveTar() 钉 bsdtar
+  const r = spawnSync(resolveTar(), ['--format', 'zip', '-cf', archive, '-C', staging, ...files], { stdio: 'ignore' })
   if (r.status !== 0) throw new Error('tar zip failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)
@@ -221,7 +226,7 @@ function makeBareArchive(dir: string, version: string, opts: { withTray?: boolea
     files.push('ModelDockTray')
   }
   const archive = path.join(dir, name)
-  const r = spawnSync('tar', ['czf', archive, '-C', staging, ...files])
+  const r = spawnSync(resolveTar(), ['czf', archive, '-C', staging, ...files])
   if (r.status !== 0) throw new Error('tar failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)
@@ -240,7 +245,7 @@ function makeAppArchive(dir: string, version: string): { name: string; buf: Buff
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   const name = `modeldock-${version}-darwin-${arch}-app.tar.gz`
   const archive = path.join(dir, name)
-  const r = spawnSync('tar', ['czf', archive, '-C', staging, 'ModelDock.app'])
+  const r = spawnSync(resolveTar(), ['czf', archive, '-C', staging, 'ModelDock.app'])
   if (r.status !== 0) throw new Error('tar failed')
   const result = { name, buf: fs.readFileSync(archive) }
   archiveMemo.set(memoKey, result)

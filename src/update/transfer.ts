@@ -10,6 +10,7 @@
  * zip 靠 bsdtar 魔数识别）；下载统一流式写盘 + 进度回调 + fetch 可注入。
  * 校验逻辑（SHA256 比对、删除不通过物）留在调用方，本模块只供原语。
  */
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -193,7 +194,20 @@ export const defaultSpawnRunner: SpawnRunner = async (cmd, args) => {
 }
 
 /**
- * 解压归档到目录：tar.gz 与 zip 一律走系统 tar（Win10+ 自带 bsdtar，zip 按魔数自动识别）。
+ * 解析 tar 可执行文件：GNU tar 无 zip 能力（--format zip 报 Invalid archive format，zip 魔数
+ * 也解不开），而 Git Bash 等 MSYS 环境把 /usr/bin/tar 排在 PATH 前面，会遮住 System32 自带的
+ * bsdtar（Win10 1803+，zip 读写皆可）——win32 显式钉到系统 bsdtar，缺失（老系统）才回落 PATH。
+ * unix 侧 macOS 本就是 bsdtar、linux 资产只发 tar.gz，PATH 直取即可。
+ */
+export function resolveTar(): string {
+  if (process.platform !== 'win32') return 'tar'
+  const sysTar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+  return fs.existsSync(sysTar) ? sysTar : 'tar'
+}
+
+/**
+ * 解压归档到目录：tar.gz 与 zip 一律走系统 tar（zip 按魔数自动识别；win32 经 resolveTar 钉
+ * System32 bsdtar，防 GNU tar 遮蔽——本机 Git Bash 实证 GNU tar 1.34 对 zip 打包/解压必败）。
  * 曾用 PowerShell Expand-Archive 解 zip，2026-11-21 windows-latest 镜像 20261116.315 起
  * Compress-Archive→Expand-Archive 往返实测 exit 0 零产物（Windows CI 六用例齐红，代码零改动），
  * Archive cmdlet 依赖整体移除——tar 走参数数组不经 shell 解析，无引号/插值风险。run 可注入桩。
@@ -205,8 +219,8 @@ export async function extractArchive(
 ): Promise<void> {
   await fsp.mkdir(dir, { recursive: true })
   if (archive.toLowerCase().endsWith('.zip')) {
-    await run('tar', ['-xf', archive, '-C', dir]) // zip 非 gzip，不带 -z；bsdtar 按魔数识别格式
+    await run(resolveTar(), ['-xf', archive, '-C', dir]) // zip 非 gzip，不带 -z；bsdtar 按魔数识别格式
   } else {
-    await run('tar', ['-xzf', archive, '-C', dir])
+    await run(resolveTar(), ['-xzf', archive, '-C', dir])
   }
 }

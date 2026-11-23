@@ -428,7 +428,7 @@ describe('控制台合并端点：逐包口令 passphrases 数组', () => {
       const pv = await callEndpoint(hMergePreview, rt, { packages, passphrases: [passA, passB] })
       expect(pv.status).toBe(200)
       const token = String(pv.json.confirmToken)
-      // 口令组合换序（digest 随逐包口令变化）→ 旧 token 失效
+      // 口令组合换序 → 错口令解包失败 400（摘要不绑口令——CodeQL 污点面，口令有效性由解包层强制；断言结果同为 400 且零写盘）
       const swapped = await callEndpoint(hMergeApply, rt, { packages, passphrases: [passB, passA], keep: ['ark', 'solo'], confirmToken: token })
       expect(swapped.status).toBe(400)
       expect(fileHash(configPath())).toBe(beforeCfg)

@@ -75,14 +75,17 @@ function unpackAll(inputs: readonly MergePkgInput[], passphrases: readonly strin
 
 /** 确认 token：绑定 (adminToken, 包内容摘要, 服务数)。预览时勾选尚未发生（keep 由用户在候选表
  *  上现勾），不能进绑定——token 证明「用户看过这份内容的预览」；keep 完整性由「keep ⊆ 候选集」
- *  校验兜底。预览与确认之间包内容或口令组合变化即失效；键入 adminToken 防外部伪造；比较走 safeEqual 恒时。 */
+ *  校验兜底。预览与确认之间包内容变化即失效；口令变化不进摘要（CodeQL insufficient-password-hash 污点面），由解包层强制——错口令 openEnvelope 直接失败并报包名，而非「预览过期」；键入 adminToken 防外部伪造；比较走 safeEqual 恒时。 */
 function mergeConfirmToken(adminToken: string, pkgDigest: string, serviceCount: number): string {
   return sha256(`${adminToken}|merge-apply|${pkgDigest}|${serviceCount}`).slice(0, 32)
 }
 
-/** 包摘要绑逐包口令：任一包换口令（含次序对调）都产出不同 digest，旧 confirmToken 即失效。 */
-function pkgDigest(inputs: readonly MergePkgInput[], passphrases: readonly string[]): string {
-  return sha256(inputs.map((p, i) => `${p.name}\u0000${sha256(p.text)}\u0000${sha256(passphrases[i] ?? '')}`).join('\u0001'))
+/** 包内容摘要：绑定 (name, 包文本) 清单——预览与确认之间内容变化即失效。口令不进摘要：
+ *  口令有效性由解包层强制（错口令 openEnvelope 直接失败，apply 报口令错误而非「预览过期」），
+ *  且口令若参与快速哈希即构成 password→弱哈希污点面（CodeQL insufficient-password-hash，
+ *  2026-11-22 实警 10 条路径全由 sha256(passphrase) 一处引出），安全上零增益。 */
+function pkgDigest(inputs: readonly MergePkgInput[]): string {
+  return sha256(inputs.map((p) => `${p.name}\u0000${sha256(p.text)}`).join('\u0001'))
 }
 
 /** POST /_modeldock/merge/preview：多包解包去重 + 探针三档建议（admin 门内只读路径，零写盘）。
@@ -105,7 +108,7 @@ export async function hMergePreview(c: AdminCtx): Promise<void> {
       JSON.stringify({
         ok: true,
         preview,
-        confirmToken: mergeConfirmToken(rt.adminToken, pkgDigest(inputs, passphrases), preview.candidates.length),
+        confirmToken: mergeConfirmToken(rt.adminToken, pkgDigest(inputs), preview.candidates.length),
         tokenScope: 'unfiltered',
       })
     )
@@ -135,7 +138,7 @@ export async function hMergeApply(c: AdminCtx): Promise<void> {
     if (unknown.length > 0) {
       return sendError(res, 400, t('keep 含未知服务 id：{ids}', 'keep contains unknown provider ids: {ids}', { ids: unknown.join(', ') }), t('重新 preview 取最新候选清单', 'Re-run preview for the latest candidate list'))
     }
-    const token = mergeConfirmToken(rt.adminToken, pkgDigest(inputs, passphrases), preview.candidates.length)
+    const token = mergeConfirmToken(rt.adminToken, pkgDigest(inputs), preview.candidates.length)
     const supplied = typeof b.confirmToken === 'string' ? b.confirmToken : ''
     if (!supplied || !safeEqual(supplied, token)) {
       return sendError(res, 400, t('confirmToken 与当前包内容/勾选不一致（预览已过期）', 'confirmToken does not match the current packages/selection (preview expired)'), t('重新 POST /_modeldock/merge/preview 后再 apply', 'Re-run merge/preview, then apply again'))
