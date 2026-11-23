@@ -26,6 +26,11 @@
 // 与 orchestrator 闭环共享卡状态，双 agent 撞同一张卡从机制上收口。编排器自身拉起
 // 的 start/finish（ensureWorktree / doApprove）分别带 ORCHESTRATOR_CLOSURE /
 // ORCHESTRATOR_GATE_HEAD 标记，认领与落卡整体跳过，卡的归属权留在闭环状态机。
+//
+// finish × 编排器撞窗防护（AGENTS_ALLOW_COLLISION_WINDOW=1 全局豁免）：编排器在
+// 套件窗口内做卡片流转/worktree 清理会撞 host-guard 哨兵（fail-closed 必红）。finish
+// 门禁开跑前预检活跃任务锁（快失败）；门禁红时若 host-guard 落了撞窗签名 marker
+// （worktree 的 node_modules/.orch-collision.flag），等编排器静默后自动重跑门禁一次。
 
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -40,7 +45,7 @@ import { fileURLToPath } from 'node:url';
 // queueRoot 目录不存在，认领逻辑整体跳过（可移植性不破）。
 import { appendEvent, logDir } from './orchestrator/events.mjs';
 import { ensureQueue, findCard, moveCard, queueRoot } from './orchestrator/queue.mjs';
-import { acquireTaskLock, readTaskLock, releaseTaskLock } from './orchestrator/task-lock.mjs';
+import { acquireTaskLock, readTaskLock, releaseTaskLock, taskLockLooksLive } from './orchestrator/task-lock.mjs';
 import { readLockJson, writeLockAtomic, sleepSyncMs } from './orchestrator/lockio.mjs';
 import { runCmd } from './orchestrator/gates.mjs';
 
@@ -153,6 +158,18 @@ const FINISH_LOCK_STALE_MS = 60_000; // 连续 ~3 个心跳未续 = 陈锁（留
 const FINISH_LOCK_LEGACY_STALE_MS = 30 * 60_000;
 const FINISH_LOCK_POLL_MS = 2500;
 const FINISH_LOCK_PROGRESS_MS = 30_000;
+
+// —— finish × 编排器撞窗防护（2026-11-22 三连红事故修复）——
+// 编排器闭环在 5–9 分钟套件窗口内做卡片流转/worktree 清理，宿主仓快照对账（host-guard
+// 哨兵）fail-closed 必红。两道防线（互斥持锁方案已否决：编排器 mutation 散布全 run
+// 生命周期，持锁会饿死并发 finish）：
+//   ① 预检快失败——门禁开跑前扫活跃任务锁，命中即秒级拒绝，不白烧套件；
+//   ② marker 等待重试——host-guard 归因命中时落 marker（worktree 的
+//      node_modules/.orch-collision.flag，契约字面量与 host-guard.mjs 对接，勿改），
+//      finish 门禁红时读到新鲜 marker → 等编排器静默 → 自动重跑门禁一次。
+const COLLISION_POLL_MS = 30_000; // 等待静默的轮询间隔
+const COLLISION_WAIT_MAX_MS = 10 * 60_000; // 等待编排器静默的上限
+const COLLISION_MARKER_MAX_AGE_MS = 15 * 60_000; // marker 新鲜度：超龄 = 上次会话残留，不触发重试
 
 function finishLockWaitCapSeconds() {
   const raw = process.env.FINISH_LOCK_WAIT_SECONDS;
@@ -570,6 +587,84 @@ function settleCardAfterFinish(taskId) {
   }
 }
 
+// —— 撞窗防护：活跃任务锁扫描与 marker 契约 ——
+
+// 只读扫描活跃的编排器任务锁（.agents/orchestrator/.run-<task-id>.lock）：判活复用
+// task-lock.mjs 的 taskLockLooksLive（心跳优先，旧版锁 isAlive+30min 兜底），只探测锁
+// 文件本身、不真起/不杀任何进程。调度器级 .scheduler-lock.json 等其他文件名不匹配正则。
+// excludeTaskIds：finish 全程持自己的任务锁，须排除；目录不存在（项目未启用 orchestrator）
+// 或锁读取失败（坏锁按不活计）一律返回 []。
+function scanLiveTaskLocks(repoRoot, { excludeTaskIds = [] } = {}) {
+  let entries;
+  try {
+    entries = fs.readdirSync(path.join(repoRoot, '.agents', 'orchestrator'));
+  } catch {
+    return [];
+  }
+  const excluded = new Set(excludeTaskIds);
+  const live = [];
+  for (const name of entries) {
+    const m = /^\.run-(.+)\.lock$/.exec(name);
+    if (!m) continue;
+    const taskId = m[1];
+    if (excluded.has(taskId)) continue;
+    let info = null;
+    try {
+      info = readTaskLock(repoRoot, taskId);
+    } catch { /* 坏锁（含非法 id 的路径校验失败）按不活计 */ }
+    if (!taskLockLooksLive(info)) continue;
+    live.push({
+      taskId,
+      holder: info?.cmd ?? '',
+      pid: info?.pid ?? null,
+      beatAgeMs: Number.isFinite(info?.beat) ? Date.now() - info.beat : null,
+    });
+  }
+  return live;
+}
+
+function describeCollisionSource(s) {
+  const beat = s.beatAgeMs === null ? '旧版锁' : `心跳 ${Math.max(0, Math.round(s.beatAgeMs / 1000))}s 前`;
+  return `${s.taskId}（${s.holder || '未知命令'}, pid ${s.pid ?? '?'}, ${beat}）`;
+}
+
+// 读撞窗签名 marker（host-guard 归因命中时落盘到 worktree 的 node_modules/ 下——
+// node_modules 被 gitignore，不会弄脏 worktree 的提交状态检查）。返回 { at, summary,
+// sources }；不存在/损坏 → null；超龄（≥15min）视为上一次会话残留，顺手 unlink 后返回
+// null，不误触发等待重试。
+function readCollisionMarker(markerPath) {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  } catch {
+    return null;
+  }
+  const stale = !Number.isFinite(data?.at) || Date.now() - data.at >= COLLISION_MARKER_MAX_AGE_MS;
+  if (stale) {
+    try { fs.rmSync(markerPath, { force: true }); } catch { /* 尽力而为 */ }
+    return null;
+  }
+  return data;
+}
+
+// 等编排器静默（活跃任务锁清空）：每 30s 复扫，每轮打印一句提示让人知道 finish 没挂死；
+// 上限 10min——超时 die（编排器长跑不退，硬重跑大概率再撞，不假装成功）。
+function waitForOrchestratorQuiet(taskId) {
+  const waitStartMs = Date.now();
+  for (;;) {
+    const live = scanLiveTaskLocks(REPO_ROOT, { excludeTaskIds: [taskId] });
+    if (live.length === 0) return;
+    const elapsedS = Math.floor((Date.now() - waitStartMs) / 1000);
+    if (Date.now() - waitStartMs >= COLLISION_WAIT_MAX_MS) {
+      die(`等待编排器静默超时（已等 ${elapsedS}s / 上限 10min），仍有活跃任务锁：` + CRLF_N +
+        live.map((s) => `  - ${describeCollisionSource(s)}`).join(CRLF_N) + CRLF_N +
+        `  编排器长时间不退：等它收工后重跑 finish，或确需强行可设 AGENTS_ALLOW_COLLISION_WINDOW=1（自担 host-guard 对账红风险）。`);
+    }
+    console.log(`检测到活跃编排器任务锁 ${live.map((s) => s.taskId).join(', ')}，等待静默…（已等 ${elapsedS}s / 上限 10min）`);
+    sleepSyncMs(COLLISION_POLL_MS);
+  }
+}
+
 async function cmdFinish(taskId, args) {
   let skipTest = args.includes('--skip-test');
   const msgIdx = args.indexOf('--message');
@@ -686,20 +781,64 @@ If the task truly has no deliverable, clean up manually: git worktree remove "${
     if (!testCmds) {
       console.log('No testCmd in .agents/workflow.json; skipping the verification step.');
     } else {
-      for (const cmd of testCmds) {
-        console.log(`Running verification inside the worktree: ${cmd}`);
-        // 超时必须有（本进程持有 .finish.lock，挂死的验证命令会无限期霸锁），且超时按
-        // 进程树收割：runCmd 用 detached（unix 进程组）spawn + killTree（win32 taskkill
-        // /T /F）——旧实现 spawnSync timeout 只杀 shell 直接子进程，vitest/node 孙进程树
-        // 全部孤儿化，Windows 上锁住 worktree 句柄令清理 rename 报 EBUSY/EPERM。stdio
-        // 直通保持 live 输出（人工 finish 可见进度；approve 路径本就整段捕获回放）。
-        const timeoutMs = finishTestTimeoutMs();
-        const t = await runCmd(cmd, wtPath, timeoutMs, { inherit: true });
-        if (!t.ok) {
-          const timedOut = t.timedOut === true;
-          die(`verification failed on ${branch} ("${cmd}")${timedOut ? ` —— 超时（${Math.round(timeoutMs / 60000)}min）被终止，已按进程树收割（含孙进程孤儿），检查是否有挂死的测试进程` : ''}. Fix inside ${wtPath}, commit, then re-run finish. ` +
-            `(Use --skip-test only for changes that cannot affect behavior, e.g. pure docs.)`);
+      // 3a) 撞窗预检：门禁开跑前扫活跃编排器任务锁，命中即秒级拒绝——测试窗口与编排器
+      // 卡片流转并发会撞 host-guard 哨兵（fail-closed 必红），与其白烧 5–9 分钟套件再红，
+      // 不如开测前就给出三个出路。豁免键给确需强行的场景。
+      if (process.env.AGENTS_ALLOW_COLLISION_WINDOW !== '1') {
+        const colliding = scanLiveTaskLocks(REPO_ROOT, { excludeTaskIds: [taskId] });
+        if (colliding.length) {
+          die(`finish 预检发现编排器正在活跃（${colliding.length} 个活跃任务锁）——finish 的测试窗口与编排器卡片流转并发会撞 host-guard（fail-closed 必红），白烧 5–9 分钟。` + CRLF_N +
+            colliding.map((s) => `  - ${describeCollisionSource(s)}`).join(CRLF_N) + CRLF_N +
+            `  出路（三选一）：` + CRLF_N +
+            `  1. 等编排器静默后重跑 finish` + CRLF_N +
+            `  2. 纯文档改动可 --skip-test` + CRLF_N +
+            `  3. 确需强行可设 AGENTS_ALLOW_COLLISION_WINDOW=1（自担 host-guard 对账红风险）`);
         }
+      }
+      // 3b) 门禁主循环，外层包装撞窗等待重试：host-guard 归因命中时落在 worktree 的
+      // node_modules/.orch-collision.flag（机器契约，stdio 直通的 live 输出无法承载）。
+      // 门禁首红且读到新鲜 marker → 等编排器静默（waitForOrchestratorQuiet）→ 自动重跑
+      // 一次（至多 2 次尝试）；重跑仍红且 marker 再现 → 带第二次归因摘要 die，不再重试；
+      // 无签名 / 陈旧签名 → 完全按现状 die（真失败不陪葬）。
+      const markerPath = path.join(wtPath, 'node_modules', '.orch-collision.flag');
+      for (let attempt = 1; ; attempt++) {
+        let failedCmd = null;
+        let failedTimedOut = false;
+        for (const cmd of testCmds) {
+          console.log(`Running verification inside the worktree: ${cmd}`);
+          // 超时必须有（本进程持有 .finish.lock，挂死的验证命令会无限期霸锁），且超时按
+          // 进程树收割：runCmd 用 detached（unix 进程组）spawn + killTree（win32 taskkill
+          // /T /F）——旧实现 spawnSync timeout 只杀 shell 直接子进程，vitest/node 孙进程树
+          // 全部孤儿化，Windows 上锁住 worktree 句柄令清理 rename 报 EBUSY/EPERM。stdio
+          // 直通保持 live 输出（人工 finish 可见进度；approve 路径本就整段捕获回放）。
+          const timeoutMs = finishTestTimeoutMs();
+          const t = await runCmd(cmd, wtPath, timeoutMs, { inherit: true });
+          if (!t.ok) {
+            failedCmd = cmd;
+            failedTimedOut = t.timedOut === true;
+            break;
+          }
+        }
+        const dieVerificationFailed = () => die(`verification failed on ${branch} ("${failedCmd}")${failedTimedOut ? ` —— 超时（${Math.round(finishTestTimeoutMs() / 60000)}min）被终止，已按进程树收割（含孙进程孤儿），检查是否有挂死的测试进程` : ''}. Fix inside ${wtPath}, commit, then re-run finish. ` +
+          `(Use --skip-test only for changes that cannot affect behavior, e.g. pure docs.)`);
+        if (!failedCmd) break; // 全绿 → 进入合并步骤
+        if (attempt >= 2) {
+          // 重跑仍红：marker 再现 → 带第二次归因摘要 die（不再重试）；否则真失败，现状 die
+          const again = readCollisionMarker(markerPath);
+          if (again) {
+            die(`重跑验证仍失败（"${failedCmd}"）且撞窗签名再现——不再自动重试。第二次归因摘要：${again.summary}；sources: ${JSON.stringify(again.sources)}` + CRLF_N +
+              `  编排器仍在与 finish 并发跑：等它静默后重跑 finish，或确需强行可设 AGENTS_ALLOW_COLLISION_WINDOW=1。`);
+          }
+          dieVerificationFailed();
+        }
+        if (process.env.AGENTS_ALLOW_COLLISION_WINDOW === '1') dieVerificationFailed(); // 豁免键：跳过 marker 等待重试，按现状 die
+        const marker = readCollisionMarker(markerPath);
+        if (!marker) dieVerificationFailed(); // 无签名 / 陈旧签名（已顺手 unlink）→ 真失败，现状 die
+        // 新鲜签名：读后立即删除（防同 marker 二次触发），等编排器静默后自动重跑一次
+        try { fs.rmSync(markerPath, { force: true }); } catch { /* 尽力而为 */ }
+        console.log(`检测到撞窗签名（${Math.max(0, Math.round((Date.now() - marker.at) / 1000))}s 前，summary: ${marker.summary}）——等待编排器静默后自动重跑验证（至多一次）。`);
+        waitForOrchestratorQuiet(taskId);
+        console.log('编排器已静默，重跑验证…');
       }
     }
   }
