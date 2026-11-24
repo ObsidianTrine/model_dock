@@ -303,6 +303,51 @@ describe('usage 聚合 tokens_by_model 维度（模型级容灾观测：per-mode
       window: { first: null, last: null },
     }
     expect(old.tokens_by_model).toBeUndefined()
+    expect(old.tokens_by_provider).toBeUndefined()
+  })
+})
+
+describe('usage 聚合 tokens_by_provider 维度（svc-usage-pill：per-provider token 四桶）', () => {
+  const entry = (over: Partial<LogEntry>): LogEntry =>
+    ({
+      ts: '2026-11-02T10:00:00.000+08:00',
+      harness: 'c',
+      profile: 'p',
+      provider: 'zhipuai',
+      model: 'glm-5.3-flash',
+      path: '/v1/messages',
+      status: 200,
+      usage: { input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      ...over,
+    }) as LogEntry
+
+  it('多服务多请求：四桶按 provider 分桶，形状与 tokens_by_model 同构', () => {
+    const s = summarizeUsage([
+      entry({ usage: { input_tokens: 1_000, output_tokens: 100, cache_read_tokens: 200, cache_creation_tokens: 50 } }),
+      entry({ provider: 'ark', usage: { input_tokens: 500, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+      entry({ provider: 'ark', model: 'm2', usage: { input_tokens: 10, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+    ])
+    // input_tokens 与全局 tokens 同口径：缓存读 + 缓存建计入（同 tokens_by_model）
+    expect(s.tokens_by_provider!['zhipuai']).toEqual({
+      input_tokens: 1_000 + 200 + 50,
+      output_tokens: 100,
+      cache_read_tokens: 200,
+      cache_creation_tokens: 50,
+    })
+    expect(s.tokens_by_provider!['ark']).toEqual({ input_tokens: 510, output_tokens: 21, cache_read_tokens: 0, cache_creation_tokens: 0 })
+    expect(s.tokens.input).toBe(1_760) // 全局桶不变（既有口径零变化）
+  })
+
+  it('失败请求进 by_provider 计数但不进 token 分桶；缺 provider 的条目两处都跳过', () => {
+    const s = summarizeUsage([
+      entry({ status: 500, usage: { input_tokens: 999_999, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+      entry({ provider: undefined, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 } }),
+      entry({ provider: 'ark', usage: undefined }), // 成功但无 usage：计数进、分桶不进
+    ])
+    expect(s.tokens_by_provider).toEqual({})
+    expect(s.by_provider['zhipuai']).toBe(1) // 失败请求计入请求分桶
+    expect(s.by_provider['ark']).toBe(1)
+    expect(s.tokens.input).toBe(100) // 全局桶不受缺 provider 影响
   })
 })
 
@@ -365,6 +410,12 @@ describe('今日用量仪表（usageTodayView：重启回填 + 实时增量）',
       const v2 = usageTodayView()
       expect(v2.requests).toBe(3)
       expect(v2.cost!.total).toBeCloseTo(base.input * 1.5 + base.output * 0.15, 10)
+      // 按服务分桶（svc-usage-pill）：requests 含失败（2 旧 + 1 增量），tokens/cost 只计成功
+      expect(v2.by_provider['zhipuai']).toEqual({
+        requests: 3,
+        tokens: { input: 1_500_000, output: 150_000, cache_read: 0, cache_creation: 0 },
+        cost: v2.cost!.total,
+      })
     } finally {
       setUsagePriceResolver(undefined)
       h.restore()

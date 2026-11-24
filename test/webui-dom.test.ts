@@ -46,7 +46,7 @@ const OVERVIEW_FIXTURE = {
 }
 
 // /usage-live 实时字段夹具（usageToday/lastMs 已从 overview 主载荷拆出，UI 从本端点定向更新；
-// 字段名对齐 UsageTodayView 真实契约：failed/cache_creation，防新用例建立在漂移字段上）
+// 字段名对齐 UsageTodayView 真实契约：failed/cache_creation/by_provider，防新用例建立在漂移字段上）
 const USAGE_LIVE_FIXTURE = {
   ok: true,
   usageToday: {
@@ -54,8 +54,25 @@ const USAGE_LIVE_FIXTURE = {
     tokens: { input: 1200, output: 340, cache_read: 0, cache_creation: 0 },
     cost: { total: 0.0042 },
     unpriced_models: [],
+    by_provider: {
+      alpha: { requests: 3, tokens: { input: 1200, output: 340, cache_read: 0, cache_creation: 0 }, cost: 0.0042 },
+    },
   },
   ms: { alpha: 120 },
+}
+
+/** /_modeldock/usage 聚合夹具（用量弹层用例按需改写；形状 = UsageSummary 对外契约子集） */
+const USAGE_AGG_FIXTURE: { ok: boolean; usage: Record<string, unknown> } = {
+  ok: true,
+  usage: {
+    requests: 3, ok: 3, failed: 0,
+    by_provider: { alpha: 3 },
+    by_model: { 'a-model': 3 },
+    tokens_by_provider: { alpha: { input_tokens: 1200, output_tokens: 340, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+    tokens_by_model: { 'a-model': { input_tokens: 1200, output_tokens: 340, cache_read_tokens: 0, cache_creation_tokens: 0 } },
+    cost: { total: 0.0042, by_provider: { alpha: 0.0042 }, by_model: { 'a-model': 0.0042 } },
+    unpriced_models: null,
+  },
 }
 
 /** /logs 端点夹具（模块级可变：日志面板用例按需改写，finally 还原） */
@@ -85,6 +102,7 @@ function stubFetch(): void {
     '/_modeldock/model-catalog': () => ({ body: { ok: true, models: {} } }),
     '/_modeldock/presets': () => ({ body: { ok: true, presets: [] } }),
     '/_modeldock/usage-live': () => ({ body: USAGE_LIVE_FIXTURE }),
+    '/_modeldock/usage': () => ({ body: USAGE_AGG_FIXTURE }),
     '/_modeldock/logs': () => ({ body: LOGS_FIXTURE }),
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
     '/_modeldock/ui-presence': () => ({ body: { ok: true } }),
@@ -152,12 +170,45 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(cards[1].textContent).not.toContain('正在使用')
   })
 
-  it('usage-live 定向更新：用量徽标与服务卡延迟 span 来自 /usage-live（主载荷不再携带易变字段）', async () => {
+  it('usage-live 定向更新：用量徽标（今日 tokens+花费）与服务卡延迟 span 来自 /usage-live（主载荷不再携带易变字段）', async () => {
     mountPage()
     await flush(60) // pollLive 挂在 load() 链尾（多一跳 fetch），比常规断言多冲几轮微任务
-    expect(document.getElementById('health')?.textContent ?? '').toContain('今日 3 请求')
+    // 顶部徽标新形态：tokens 合计（input 含缓存 + output）· 花费；请求数挪进悬浮提示
+    expect(document.getElementById('health')?.textContent ?? '').toContain('今日 1.5k · $0.0042')
+    const topPill = document.getElementById('usageTodayPill')
+    expect(topPill?.getAttribute('title') ?? '').toContain('今日 3 请求')
     const ms = document.querySelector('[data-svcms="alpha"]')
     expect(ms?.textContent).toContain('延迟 120ms')
+    // 服务卡用量徽标：有流量的 alpha 填充、无流量的 beta 空槽
+    const alphaPill = document.querySelector('[data-svcusage="alpha"] button')
+    expect(alphaPill?.textContent ?? '').toContain('1.5k · $0.0042')
+    expect(document.querySelector('[data-svcusage="beta"]')?.textContent ?? '').toBe('')
+  })
+
+  it('用量弹层：顶部徽标点击开全部服务视图，服务行可下钻按模型、可返回', async () => {
+    mountPage()
+    await flush(60)
+    ;(document.getElementById('usageTodayPill') as HTMLElement)!.click()
+    const scrim = document.getElementById('usageOverlay') as HTMLElement | null
+    expect(scrim && scrim.hidden === false).toBe(true)
+    await flush()
+    expect(document.getElementById('usageTitle')?.textContent).toContain('用量')
+    const rows = document.querySelectorAll('#usageTable tbody tr')
+    expect(rows.length).toBe(1)
+    expect(rows[0].textContent).toContain('Alpha 服务')
+    // 下钻：点服务行 → 标题切到该服务、模型行出现、返回按钮可见
+    ;(document.querySelector('#usageTable tr.click') as HTMLElement)!.click()
+    await flush()
+    expect(document.getElementById('usageTitle')?.textContent).toContain('Alpha 服务')
+    expect(document.querySelector('#usageTable tbody tr')?.textContent).toContain('a-model')
+    expect((document.getElementById('usageBack') as HTMLElement)!.hidden).toBe(false)
+    // 返回全部服务
+    ;(document.getElementById('usageBack') as HTMLElement)!.click()
+    await flush()
+    expect(document.querySelector('#usageTable tbody tr')?.textContent).toContain('Alpha 服务')
+    // Esc 关闭（读取类弹层关路径三件套之一，遮罩点击同款走 createModal 内建）
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    expect(scrim!.hidden).toBe(true)
   })
 
   it('语言切换重渲染：点 EN 后静态 data-i18n 节点与服务卡文案随语言变化', async () => {
@@ -702,8 +753,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(pill!.title).toContain('探针花费记独立账本，不进请求日志与今日用量')
       expect(pill!.title).toContain('点击查看按探针明细与月预算余量')
       // 融入位置：探针 pill 与今日用量 pill 在同一横幅、usageHtml 之后并列
-      expect(health.textContent).toContain('今日 3 请求')
-      expect(health.textContent!.indexOf('今日 3 请求')).toBeLessThan(health.textContent!.indexOf('探针本月'))
+      expect(health.textContent).toContain('今日 1.5k')
+      expect(health.textContent!.indexOf('今日 1.5k')).toBeLessThan(health.textContent!.indexOf('探针本月'))
     } finally {
       resetLedger()
     }

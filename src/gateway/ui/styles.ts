@@ -402,6 +402,19 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    sticky 形态；列少不设 fixed 布局与列宽，基础 table/th/td 层照常生效 */
 #probeLedgerTable{border-collapse:separate;border-spacing:0}
 #probeLedgerTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+/* 用量弹层表（usageOverlay 弹层内，svcmodal 宽壳 + .tablescroll 滚动体）：卡内滚动变体，
+   列少不设 fixed 布局——服务/模型名主列吃剩余空间，数字三列右对齐 tabular-nums；
+   「按服务」视图的行可点击下钻（tr.click），已删除服务主列带弱化注记 */
+#usageTable{border-collapse:separate;border-spacing:0}
+#usageTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
+#usageTable th.num,#usageTable td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+#usageTable tbody tr.click{cursor:pointer;transition:background var(--dur)}
+#usageTable tbody tr.click:hover{background:var(--neutral-weak)}
+#usageTable tbody tr.click td:first-child{color:var(--accent)}
+/* 用量弹层窗口合计行（tabs 下、表格上的一行小字）：muted 等宽与表格数字对齐 */
+.usage-total{font-size:var(--fs-sm);color:var(--muted);margin:var(--sp-2) 2px 0;font-family:var(--mono);font-variant-numeric:tabular-nums}
+/* 已删除服务的弱化注记（usageTable 主列内，仅历史窗口出现） */
+.delnote{color:var(--muted);font-size:var(--fs-xs)}
 /* 健康变化时间线表（probeSvcTimelineOverlay 弹层内，svcmodal 680px 宽变体）：#mgReviewTable 同款
    fixed 配方——时间/变化/来源三列定宽（时间戳与双 pill 长度可预期），三元组列吃剩余空间为信息
    主列（长模型 ID 截断、全文在 title 悬浮）；任何窗宽不溢出，更窄走 .tablescroll 滚动 */

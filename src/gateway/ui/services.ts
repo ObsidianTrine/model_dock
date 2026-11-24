@@ -77,6 +77,9 @@ export const UI_JS_SERVICES = `  function visibleServices() {
         (s.down && arOn ? ' <span class="pill err" title="' + t('故障熔断中，自动路由会避开该服务，探活恢复后自动回归', 'Down (circuit open); auto route avoids it and brings it back once probes recover') + '">' + t('熔断中', 'down') + '</span>' : '') +
         (s.enabled === false ? ' <span class="pill dim" title="' + t('手动下线，不参与自动路由', 'Manually disabled; excluded from auto route') + '">' + t('已下线', 'offline') + '</span>' : '') +
         verdictBadgeHtml(s.id) +
+        // 用量徽标槽位（usage.ts usageBadgeSlotHtml）：pollLive 定向填充今日 tokens+花费，
+        // 点击开该服务按模型的用量弹层——同 data-svcms 槽位配方，易变数据不进 overview 主载荷
+        usageBadgeSlotHtml(s.id) +
         '</span></div>' +
         '<span class="testres" id="pingres-' + esc(s.id) + '" hidden></span>' +
         '<button class="btn small" data-ping="' + esc(s.id) + '" data-i18n-title="纯网络延迟（不做模型请求）||Pure network latency (no model request)" title="纯网络延迟（不做模型请求）">' + t('延迟', 'Ping') + '</button>' +
@@ -86,6 +89,7 @@ export const UI_JS_SERVICES = `  function visibleServices() {
     }).join('') + moreHtml
 
     if (liveUsage) updateSvcLatency() // 重绘重建了延迟 span，用当前实时值立即回填（不等下一轮 pollLive）
+    if (liveUsage) updateSvcUsage() // 重绘重建了用量槽位 span，同上立即回填今日 tokens+花费
 
     var moreBtn = document.getElementById('svcMore')
     if (moreBtn) moreBtn.onclick = function () { svcExpanded = !svcExpanded; renderServices() }

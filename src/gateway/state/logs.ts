@@ -91,6 +91,14 @@ let usagePriceResolver: PriceResolver | undefined
 export function setUsagePriceResolver(r: PriceResolver | undefined): void {
   usagePriceResolver = r
 }
+/** 单服务今日用量行（usageToday.by_provider 的值）：requests 含失败（失败无 tokens/cost），
+ *  tokens/cost 只计成功请求——与总账 tokens/cost 同口径（服务卡徽标按 tokens=0 隐藏）。 */
+export interface UsageTodayProviderRow {
+  requests: number
+  tokens: { input: number; output: number; cache_read: number; cache_creation: number }
+  cost: number
+}
+
 export interface UsageTodayView {
   date: string
   requests: number
@@ -99,6 +107,8 @@ export interface UsageTodayView {
   tokens: { input: number; output: number; cache_read: number; cache_creation: number }
   cost: UsageCost | null
   unpriced_models: string[] | null
+  /** 按服务分桶的今日用量（服务卡徽标与用量弹层的数据源）；键 = provider id。 */
+  by_provider: Record<string, UsageTodayProviderRow>
 }
 
 interface TodayTracker {
@@ -151,6 +161,20 @@ export function usageTodayView(): UsageTodayView {
   try {
     const { date, acc } = ensureTodayTracker()
     const s = acc.summary()
+    // 按服务拼行：requests 取 by_provider 计数（含失败），tokens/cost 取分桶（只计成功）；
+    // 成本未注入查价器（CLI 直用场景）时 cost 记 0——徽标由 requests=0 兜底不显示
+    const byProvider: Record<string, UsageTodayProviderRow> = {}
+    const emptyTok = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+    for (const [id, n] of Object.entries(s.by_provider)) {
+      const tk = s.tokens_by_provider?.[id]
+      byProvider[id] = {
+        requests: n,
+        tokens: tk
+          ? { input: tk.input_tokens, output: tk.output_tokens, cache_read: tk.cache_read_tokens, cache_creation: tk.cache_creation_tokens }
+          : { ...emptyTok },
+        cost: s.cost?.by_provider[id] ?? 0,
+      }
+    }
     return {
       date,
       requests: s.requests,
@@ -159,6 +183,7 @@ export function usageTodayView(): UsageTodayView {
       tokens: s.tokens,
       cost: s.cost,
       unpriced_models: s.unpriced_models,
+      by_provider: byProvider,
     }
   } catch {
     return {
@@ -169,6 +194,7 @@ export function usageTodayView(): UsageTodayView {
       tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
       cost: null,
       unpriced_models: null,
+      by_provider: {},
     }
   }
 }
@@ -379,6 +405,12 @@ export interface UsageSummary {
     string,
     { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }
   >
+  /** 按 provider 分桶的实测用量（与 tokens_by_model 同口径同形状，svc-usage-pill）：用量弹层
+   *  「按服务」视图与今日仪表 by_provider 的数据源。可选字段，旧消费方不破。 */
+  tokens_by_provider?: Record<
+    string,
+    { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number }
+  >
   /** 可计费口径合计（成功且有 usage 的条目，与 tokens 同口径；剔除缓存读的公式在条目落盘前
    *  已按协议形态算好——此处只求和，绝不重算）。窗口内条目缺该数字的跳过（不入和）。 */
   billable_tokens: number
@@ -404,6 +436,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
   const msByModel: Record<string, number[]> = {}
   const tokens = { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
   const tokensByModel: NonNullable<UsageSummary['tokens_by_model']> = {}
+  const tokensByProvider: NonNullable<UsageSummary['tokens_by_provider']> = {}
   let billableTokens = 0
   let billablePartial = false
   const cost: UsageCost | null = priceOf ? { total: 0, by_provider: {}, by_model: {} } : null
@@ -439,6 +472,14 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
             tm.output_tokens += u.output_tokens ?? 0
             tm.cache_read_tokens += u.cache_read_tokens ?? 0
             tm.cache_creation_tokens += u.cache_creation_tokens ?? 0
+          }
+          // per-provider 四桶同上（provider 缺失的条目跳过——与 by_provider 计数键一致）
+          if (e.provider) {
+            const tp = (tokensByProvider[e.provider] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 })
+            tp.input_tokens += (u.input_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_creation_tokens ?? 0)
+            tp.output_tokens += u.output_tokens ?? 0
+            tp.cache_read_tokens += u.cache_read_tokens ?? 0
+            tp.cache_creation_tokens += u.cache_creation_tokens ?? 0
           }
           // billable 只求和不重算（公式分协议形态，条目落盘前已算好）；缺数字 = 旧版日志 → partial
           const b = u.billable_tokens
@@ -478,6 +519,7 @@ export function createUsageAccumulator(priceOf?: PriceResolver) {
         latency_by_model: latencyByModel,
         tokens,
         tokens_by_model: tokensByModel,
+        tokens_by_provider: tokensByProvider,
         billable_tokens: billableTokens,
         billable_partial: billablePartial,
         cost,
