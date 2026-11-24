@@ -638,4 +638,25 @@ header{flex-wrap:wrap;row-gap:4px}
   .fetchpanel .mhead span:nth-of-type(4){grid-column:5;grid-row:1}
   .fetchpanel .mhead span:nth-of-type(5){grid-column:6;grid-row:1}
 }
+/* ===== 诊断弹层动作区（diag-modal-probe-ui，原型评审后入 kit）：
+   动作行按成本分层（免费=绿描边 chip / 付费=预估档 chip），结果行走 ok/err 语义色，
+   确认行默认 hidden——display:flex 会覆盖 [hidden]，必须显式写回 display:none（ui-kit §10 同类坑） */
+.diagrow{border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px;margin-top:10px}
+.diagrow .dtop{display:flex;align-items:center;gap:8px}
+.diagrow .dname{font-weight:600;font-size:var(--fs-sm)}
+.diagrow .ddesc{font-size:var(--fs-xs);color:var(--muted);margin:2px 0 0}
+.diagrow .dact{margin-left:auto;display:flex;align-items:center;gap:8px;flex:0 0 auto}
+.costchip{font-size:var(--fs-xs);color:var(--muted);border:1px dashed var(--border);border-radius:var(--r-full);padding:1px 8px;white-space:nowrap}
+.costchip.free{color:var(--ok);border-color:var(--ok)}
+.dres{font-size:var(--fs-sm);margin:6px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dres.ok{color:var(--ok)}
+.dres.err{color:var(--err)}
+.dconfirm{display:flex;align-items:center;gap:8px;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px}
+.dconfirm[hidden]{display:none}
+.dconfirm .cest{font-size:var(--fs-xs);color:var(--warn);flex:1;min-width:0}
+/* 诊断弹层「当前结论」区：逐三元组一行（状态 pill + 模型@key指纹 + 证据年龄），徽标异常才显
+   后这里是全量状态的唯一展示面 */
+.curline{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);padding:6px 2px;border-bottom:1px dashed var(--border);flex-wrap:wrap}
+.curline:last-child{border-bottom:none}
+.curline .cinfo{color:var(--muted);font-size:var(--fs-xs)}
 `
