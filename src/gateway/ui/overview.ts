@@ -169,18 +169,21 @@ export const UI_JS_APP = `  function load() {
   function fmtTok(n) {
     return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
   }
-  // 今日用量/成本徽标（/usage-live 轻端点，拆出理由见上方 liveUsage 声明注）：内存累计器 + 重启回填，无流量不显示
+  // 今日用量/成本徽标（/usage-live 轻端点，拆出理由见上方 liveUsage 声明注）：内存累计器 + 重启回填，无流量不显示。
+  // 徽标形态 = 今日 tokens + 花费（svc-usage-pill：请求数挪进悬浮提示）；点击开统一用量弹层（usage.ts）
   function usageHtml() {
     var u = liveUsage && liveUsage.usageToday
     if (!u || !u.requests) return ''
+    var tok = u.tokens.input + u.tokens.output
     var cost = u.cost && u.cost.total > 0 ? ' · ' + fmtUsd(u.cost.total) : ''
-    var tip = t('输入 ', 'Input ') + fmtTok(u.tokens.input) + ' · ' + t('输出 ', 'Output ') + fmtTok(u.tokens.output) +
+    var tip = t('今日 ', 'Today ') + u.requests + t(' 请求', ' req') +
+      ' · ' + t('输入 ', 'Input ') + fmtTok(u.tokens.input) + ' · ' + t('输出 ', 'Output ') + fmtTok(u.tokens.output) +
       (u.tokens.cache_read ? ' · ' + t('缓存读 ', 'Cache read ') + fmtTok(u.tokens.cache_read) : '') +
-      ' · ' + t('成本按百万 token 牌价估算，实际以服务商账单为准', 'Cost is estimated from per-million-token list prices; vendor bills are authoritative')
+      ' · ' + t('成本按百万 token 牌价估算，实际以服务商账单为准（点击查看用量明细）', 'Cost is estimated from per-million-token list prices; vendor bills are authoritative (click for usage details)')
     if (u.unpriced_models && u.unpriced_models.length) {
       tip += ' · ' + t('未匹配单价（按 $0 计）：', 'No price matched (counted as $0): ') + u.unpriced_models.join(', ')
     }
-    return ' <span class="pill dim" title="' + esc(tip) + '">' + esc(t('今日 ', 'Today ') + u.requests + t(' 请求', ' req') + cost) + '</span>'
+    return ' <button type="button" class="pill dim" id="usageTodayPill" title="' + esc(tip) + '">' + esc(t('今日 ', 'Today ') + fmtTok(tok) + cost) + '</button>'
   }
 
   function healthHtml() {
@@ -221,6 +224,7 @@ export const UI_JS_APP = `  function load() {
       lastLiveSig = sig
       $('#health').innerHTML = healthHtml()
       updateSvcLatency()
+      updateSvcUsage()
     }).catch(function () {})
   }
 

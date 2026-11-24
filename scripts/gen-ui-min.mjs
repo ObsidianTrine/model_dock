@@ -62,6 +62,7 @@ export function generateUiMin() {
     'UI_JS_EDIT',
     'UI_JS_LOGS',
     'UI_JS_PROBE',
+    'UI_JS_USAGE',
     'UI_JS_MERGE',
     'UI_JS_BOOT',
   ]
