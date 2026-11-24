@@ -27,10 +27,10 @@ import {
   installMacApp,
   trayPidsFromProcessLines,
 } from '../src/update/install.js'
-import { checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
+import { adoptStagedPrefetch, checkUpdate, logAlreadyUpToDate, runUpdate, sweepStaleUpdateStaging, type UpdateRunOptions } from '../src/update/run.js'
 import { readRollbackSlot } from '../src/update/rollback.js'
 import { readUpdateProgress } from '../src/update/progress.js'
-import { readStagingMeta, saveStagingMeta, stagingFinalFile } from '../src/update/staging.js'
+import { readStagingMeta, saveStagingMeta, stagingFinalFile, stagingMetaPath, stagingPartFile, type StagingMeta } from '../src/update/staging.js'
 import { resolveTar } from '../src/update/transfer.js'
 import { updatesRollbackDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
@@ -932,6 +932,138 @@ describe('runUpdate 全链路（mock API + 副作用注入）', () => {
     } finally {
       await fsp.rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('收养在途预取：监工镜像进度，ready 后免下载安装（资产端点 0 请求）', async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-e2e-'))
+    try {
+      const binDir = path.join(root, 'bin')
+      fs.mkdirSync(binDir, { recursive: true })
+      const exeName = process.platform === 'win32' ? 'modeldock.exe' : 'modeldock'
+      const execPath = path.join(binDir, exeName)
+      fs.writeFileSync(execPath, 'OLD-BIN')
+
+      const pkg = makeBareArchive(root, '999.0.0')
+      const api = await startMockApi({ tag: 'v999.0.0', assets: { [pkg.name]: pkg.buf, SHA256SUMS: makeSums({ [pkg.name]: pkg.buf }) } })
+      cleanup = api.close
+      const { deps, calls } = mockDeps()
+
+      // 预置「预取进行中」槽位：半成品 .part + 未 ready 账本（updatedAt 新鲜 = 预取活着）
+      const half = Math.floor(pkg.buf.length / 2)
+      fs.mkdirSync(path.dirname(stagingPartFile('999.0.0', pkg.name)), { recursive: true })
+      fs.writeFileSync(stagingPartFile('999.0.0', pkg.name), pkg.buf.subarray(0, half))
+      await saveStagingMeta({
+        version: '999.0.0',
+        tagName: 'v999.0.0',
+        assetName: pkg.name,
+        assetId: 1,
+        size: pkg.buf.length,
+        etag: null,
+        url: null,
+        received: half,
+        sumsVerified: false,
+        ready: false,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+      })
+
+      // 起 runUpdate（进入收养监工），期间捕获镜像进 update-progress.json 的下载进度
+      const updatePromise = runUpdate(runOpts({ apiBase: api.apiBase, deps, execPath, adoptTimings: { tickMs: 20 } }))
+      let sawMirror = false
+      const poll = setInterval(() => {
+        void readUpdateProgress().then((p) => {
+          if (p && p.stage === 'downloading' && p.received >= half) sawMirror = true
+        })
+      }, 15)
+      // 模拟预取收尾：成品先落位 → 账本后 ready（顺序不可反：收养侧按 ready 校验成品在位）
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      fs.writeFileSync(stagingFinalFile('999.0.0', pkg.name), pkg.buf)
+      const meta = await readStagingMeta()
+      if (meta) {
+        meta.ready = true
+        meta.received = meta.size
+        await saveStagingMeta(meta)
+      }
+
+      const r = await updatePromise
+      clearInterval(poll)
+      expect(r.updated).toBe(true)
+      expect(fs.readFileSync(execPath, 'utf8')).toBe('NEW-BIN')
+      expect(sawMirror).toBe(true)
+      // 收养成功：安装包资产端点零请求（SUMS 端点照常现拉重验）；槽位标 consumed
+      expect(api.requests.filter((u) => /releases\/assets\/1$/.test(u)).length).toBe(0)
+      expect(api.requests.some((u) => /releases\/assets\/2$/.test(u))).toBe(true)
+      expect((await readStagingMeta())?.consumed).toBe(true)
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  describe('adoptStagedPrefetch 收养分支（直接单测，注入节拍）', () => {
+    const ADOPT_ASSET = { name: 'modeldock-999.0.0-test.tar.gz', id: 1, size: 4096 }
+    const lines: string[] = []
+    const log = (m: string) => lines.push(m)
+    const mkMeta = async (over: Partial<StagingMeta> = {}) => {
+      await saveStagingMeta({
+        version: '999.0.0',
+        tagName: 'v999.0.0',
+        assetName: ADOPT_ASSET.name,
+        assetId: 1,
+        size: ADOPT_ASSET.size,
+        etag: null,
+        url: null,
+        received: 1000,
+        sumsVerified: false,
+        ready: false,
+        consumed: false,
+        error: null,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        ...over,
+      })
+    }
+
+    it('死账本（updatedAt 超活性阈值）/ 报错 / 已消费 / 版本不匹配：不收养立即返回 null', async () => {
+      // 死账本必须直写：saveStagingMeta 恒刷 updatedAt，回拨会被吃掉
+      await mkMeta()
+      const dead = (await readStagingMeta())!
+      dead.updatedAt = Date.now() - 61_000
+      await fsp.writeFile(stagingMetaPath(), JSON.stringify(dead), 'utf8')
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { stallMs: 60_000, tickMs: 5 })).resolves.toBeNull()
+      await mkMeta({ error: 'boom' })
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 5 })).resolves.toBeNull()
+      await mkMeta({ consumed: true })
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 5 })).resolves.toBeNull()
+      await mkMeta({ version: '998.0.0' })
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 5 })).resolves.toBeNull()
+    })
+
+    it('首读即 ready：返回成品路径（等价就绪包命中）；成品缺位则回落 null', async () => {
+      fs.mkdirSync(path.dirname(stagingFinalFile('999.0.0', ADOPT_ASSET.name)), { recursive: true })
+      await mkMeta({ ready: true, received: ADOPT_ASSET.size })
+      fs.writeFileSync(stagingFinalFile('999.0.0', ADOPT_ASSET.name), Buffer.alloc(ADOPT_ASSET.size, 1))
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 5 })).resolves.toBe(stagingFinalFile('999.0.0', ADOPT_ASSET.name))
+      // ready 但成品不在（盘上被清）：回落自下
+      await fsp.rm(stagingFinalFile('999.0.0', ADOPT_ASSET.name), { force: true })
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 5 })).resolves.toBeNull()
+    })
+
+    it('进度停滞超阈值 → null；进度倒退过半（换源重来）→ null；均留原因日志', async () => {
+      await mkMeta({ received: 1000 })
+      const stallAt = lines.length
+      await expect(adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 20, stallMs: 120 })).resolves.toBeNull()
+      expect(lines.slice(stallAt).some((m) => m.includes('停滞') || m.includes('stalled'))).toBe(true)
+      // 倒退：监工期间预取换下载源清零重下（1000 → 100）
+      await mkMeta({ received: 1000 })
+      const regressAt = lines.length
+      const adopting = adoptStagedPrefetch('999.0.0', ADOPT_ASSET, log, { tickMs: 20, stallMs: 60_000 })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await mkMeta({ received: 100 })
+      await expect(adopting).resolves.toBeNull()
+      expect(lines.slice(regressAt).some((m) => m.includes('下载源') || m.includes('mirrors'))).toBe(true)
+    })
   })
 
   // win-setup 安装器链路只认 Windows 形态（cmd 串联、LOCALAPPDATA 目录判定）

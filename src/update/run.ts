@@ -22,6 +22,7 @@ import {
   selectAssetName,
   verifyChecksum,
   type InstallShape,
+  type ReleaseAsset,
   type ReleaseManifest,
 } from './check.js'
 import {
@@ -39,7 +40,7 @@ import { extractArchive } from './transfer.js'
 import { notesSummaryText } from './notes.js'
 import { writeUpdateProgress } from './progress.js'
 import { acquireUpdateLock } from './lock.js'
-import { markStagingConsumed, readReadyStaged, sweepStaging } from './staging.js'
+import { markStagingConsumed, readReadyStaged, readStagingMeta, stagingFinalFile, sweepStaging, type StagingMeta } from './staging.js'
 import { backupWinSetupExes, clearRollbackArtifacts, clearRollbackSlot, readRollbackSlot, recordBareRollback, recordMacAppRollback } from './rollback.js'
 import { DEFAULT_UPDATE_MIRRORS } from '../config/types.js'
 import { resolveUpdateProxyUrl } from '../util/sysproxy.js'
@@ -58,6 +59,8 @@ export interface UpdateRunOptions {
   mirrors?: string[]
   /** 测试注入：下载重试间隔 ms（默认 2000） */
   retryDelayMs?: number
+  /** 测试注入：收养监工节拍/阈值（生产值 1s 节拍 / 60s 活性 / 15min 上限，用例等不起） */
+  adoptTimings?: AdoptTimings
   /** 测试注入：以这个 execPath 识别安装形态（默认 process.execPath） */
   execPath?: string
   log?: (msg: string) => void
@@ -114,6 +117,110 @@ function logReleaseNotes(m: ReleaseManifest, log: (msg: string) => void): void {
   const text = notesSummaryText(m.notes)
   if (text) log(c.gray(text))
   if (m.htmlUrl) log(c.gray(t('完整说明：{u}', 'Full notes: {u}', { u: m.htmlUrl })))
+}
+
+// ---------- 收养在途预取（预取活着就监工等它，绝不并发自下抢带宽） ----------
+
+/** 收养监工节拍：每 tick 读一次 staging 账本并镜像进度到 update-progress.json */
+const ADOPT_TICK_MS = 1000
+/** 预取活性阈值：账本（received/updatedAt）冻结超过该值视为预取死亡或卡死。预取 3s 节流记账、
+ *  失败重试间隙远小于此——60s 不是精度要求，是「覆盖预取内部重试最坏间隙」的下限 */
+const ADOPT_STALL_MS = 60_000
+/** 收养总等待上限：对齐下载候选超时量级（check.ts DOWNLOAD_TIMEOUT_MS = 15min） */
+const ADOPT_MAX_WAIT_MS = 15 * 60_000
+/** 进度倒退判定：received 掉到先前值一半以下 = 预取换下载源清零重下，等它重爬不如自下 */
+const ADOPT_REGRESSION_RATIO = 0.5
+
+/** 测试注入：收养节拍/阈值（真实值要等 60s-15min，用例等不起） */
+export interface AdoptTimings {
+  tickMs?: number
+  stallMs?: number
+  maxWaitMs?: number
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 成品在位且尺寸对：账本 ready 态的实物校验（与 readReadyStaged 同口径） */
+async function stagedFinalFileIfValid(m: StagingMeta): Promise<string | null> {
+  const file = stagingFinalFile(m.version, m.assetName)
+  const st = await fsp.stat(file).catch(() => null)
+  return st && st.isFile() && (m.size <= 0 || st.size === m.size) ? file : null
+}
+
+/**
+ * 收养在途预取：staging 有同版本未就绪的活预取（账本 60s 内有动静）时不再并发自下，
+ * 改为监工——每秒读 staging meta，把 received/total 镜像写进 update-progress.json
+ * （Web 进度条与托盘进度窗唯一认的账），预取 ready 后直接复用成品。
+ * 返回 null = 不收养或收养失败，调用方按原路自下（预取定位是加速器不是依赖）；
+ * 每条回落路径都留日志原因。预取进程零改动：子进程持更新锁，预取只在启动时查锁，
+ * 跑起来不再查——收养正是要它继续下。
+ */
+export async function adoptStagedPrefetch(
+  version: string,
+  asset: ReleaseAsset,
+  log: (msg: string) => void,
+  timings: AdoptTimings = {}
+): Promise<string | null> {
+  const tickMs = timings.tickMs ?? ADOPT_TICK_MS
+  const stallMs = timings.stallMs ?? ADOPT_STALL_MS
+  const maxWaitMs = timings.maxWaitMs ?? ADOPT_MAX_WAIT_MS
+  const meta = await readStagingMeta()
+  if (!meta || meta.consumed || meta.error) return null
+  if (meta.version !== version || meta.assetName !== asset.name) return null
+  if (Date.now() - meta.updatedAt > stallMs) return null // 死账本（网关重启后无人续传等）
+  if (meta.ready) return await stagedFinalFileIfValid(meta) // 首读即 ready：等价就绪包命中
+  log(
+    c.gray(
+      t(
+        '检测到后台预取进行中（已下载 {p}%），等待其完成后直接安装…',
+        'Background prefetch in progress ({p}% done); waiting for it to finish before installing…',
+        { p: String(asset.size > 0 ? Math.floor((meta.received / asset.size) * 100) : 0) }
+      )
+    )
+  )
+  const startedAt = Date.now()
+  let last = meta.received
+  let lastChangeAt = Date.now()
+  await writeUpdateProgress('downloading', meta.received, asset.size)
+  for (;;) {
+    await sleepMs(tickMs)
+    const cur = await readStagingMeta()
+    if (!cur || cur.version !== version || cur.assetName !== asset.name) {
+      log(c.gray(t('后台预取账本失效（换槽/损坏），改为直接下载', 'Prefetch ledger no longer valid (slot changed or corrupt); downloading directly')))
+      return null
+    }
+    if (cur.ready) {
+      const file = await stagedFinalFileIfValid(cur)
+      if (file) return file
+      log(c.gray(t('后台预取账本就绪但成品缺位，改为直接下载', 'Prefetch ledger is ready but the artifact is missing; downloading directly')))
+      return null
+    }
+    if (cur.consumed || cur.error) {
+      log(c.gray(t('后台预取未就绪（{r}），改为直接下载', 'Background prefetch did not finish ({r}); downloading directly', { r: cur.error ?? 'consumed' })))
+      return null
+    }
+    const now = Date.now()
+    if (now - startedAt > maxWaitMs) {
+      log(c.gray(t('等待后台预取超时，改为直接下载', 'Timed out waiting for the background prefetch; downloading directly')))
+      return null
+    }
+    if (cur.received !== last) {
+      if (last > 0 && cur.received < last * ADOPT_REGRESSION_RATIO) {
+        log(c.gray(t('后台预取换了下载源从头再来，改为直接下载', 'Prefetch switched mirrors and restarted; downloading directly')))
+        return null
+      }
+      last = cur.received
+      lastChangeAt = now
+    } else if (cur.received < asset.size && now - lastChangeAt > stallMs) {
+      // 停滞只在「字节未收满」时计：收满后预取还要现拉 SUMS + 本地重 hash（弱网可达数十秒），
+      // 那段 received 恒等于 size，按停滞误判会把到手的整包扔掉从 0 重下
+      log(c.gray(t('后台预取进度停滞，改为直接下载', 'Background prefetch stalled; downloading directly')))
+      return null
+    }
+    await writeUpdateProgress('downloading', cur.received, asset.size)
+  }
 }
 
 export async function runUpdate(opts: UpdateRunOptions): Promise<UpdateRunResult> {
@@ -203,18 +310,26 @@ async function runUpdateOnce(opts: UpdateRunOptions): Promise<UpdateRunResult> {
       file = staged.file
       log(c.gray(t('使用预取的安装包，跳过下载', 'Using the prefetched package; skipping download')))
     } else {
-      // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
-      await writeUpdateProgress('downloading', 0, asset.size)
-      log(t('下载中…', 'Downloading…'))
-      file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
-        apiBase: opts.apiBase,
-        mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
-        proxyUrl,
-        ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
-        onProgress: (received, total) => {
-          void writeUpdateProgress('downloading', received, total)
-        },
-      })
+      // 收养在途预取：预取活着就监工等它（进度镜像给 Web 进度条/托盘进度窗），不并发自下抢带宽；
+      // 收养失败（报错/停滞/换源/超时）按原因回落自下——预取定位仍是加速器不是依赖
+      const adopted = await adoptStagedPrefetch(m.version, asset, log, opts.adoptTimings)
+      if (adopted) {
+        file = adopted
+        log(c.gray(t('后台预取已完成，跳过下载', 'Background prefetch finished; skipping download')))
+      } else {
+        // 进度文件从「下载」阶段开始写：托盘进度窗与控制台卡片据此展示，更新期间界面不再毫无动静
+        await writeUpdateProgress('downloading', 0, asset.size)
+        log(t('下载中…', 'Downloading…'))
+        file = await downloadAsset(opts.repo, opts.token, asset, tmpDir, {
+          apiBase: opts.apiBase,
+          mirrors: opts.mirrors ?? DEFAULT_UPDATE_MIRRORS,
+          proxyUrl,
+          ...(opts.retryDelayMs != null ? { retryDelayMs: opts.retryDelayMs } : {}),
+          onProgress: (received, total) => {
+            void writeUpdateProgress('downloading', received, total)
+          },
+        })
+      }
     }
     await writeUpdateProgress('verifying', asset.size, asset.size)
     log(t('校验 SHA256…', 'Verifying SHA256…'))

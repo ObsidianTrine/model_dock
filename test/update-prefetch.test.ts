@@ -15,7 +15,7 @@ import {
   setPrefetchFailAtForTests,
   type PrefetchOpts,
 } from '../src/update/prefetch.js'
-import { readStagingMeta, saveStagingMeta, stagingFinalFile, stagingMetaPath, stagingPartFile, type StagingMeta } from '../src/update/staging.js'
+import { markStagingConsumed, readStagingMeta, saveStagingMeta, stagingFinalFile, stagingMetaPath, stagingPartFile, type StagingMeta } from '../src/update/staging.js'
 import { updateLockHeld, updateLockPath } from '../src/update/lock.js'
 import { modeldockDir } from '../src/util/paths.js'
 
@@ -252,6 +252,30 @@ describe('预取编排', () => {
     await waitPrefetch()
     expect(await readStagingMeta()).toBeNull()
     expect(api.assetHits).toBe(0)
+  })
+
+  it('终态落盘保留盘上 consumed 标记：apply 侧的标记不被预取收尾整本覆写翻回', async () => {
+    // 复现交叠：预取下完成品但 SUMS 缺位（error 收尾，成品已在）→ apply 侧标 consumed →
+    // SUMS 补齐后预取再收尾（走 ready 终态落盘）→ consumed 必须保留（曾用内存 meta 覆写翻回 false）
+    api.setSumsAvailable(false)
+    maybeStartPrefetch(pfOpts(api.apiBase))
+    await waitPrefetch()
+    expect((await readStagingMeta())?.error).toBeTruthy()
+    await markStagingConsumed(VER)
+    expect((await readStagingMeta())?.consumed).toBe(true)
+    // 模拟重启清模块退避 + meta.updatedAt 回拨跨过 30min（沿用断点续传用例的写法）
+    resetPrefetchStateForTests()
+    const stale = (await readStagingMeta())!
+    stale.updatedAt = Date.now() - 31 * 60_000
+    await writeRawMeta(stale)
+    const hits = api.assetHits
+    api.setSumsAvailable(true)
+    maybeStartPrefetch(pfOpts(api.apiBase))
+    await waitPrefetch()
+    const done = await readStagingMeta()
+    expect(done).toMatchObject({ ready: true, error: null, consumed: true })
+    // 收尾走「成品已在跳过下载」路径：零新资产请求
+    expect(api.assetHits).toBe(hits)
   })
 
   it('版本换槽：旧版本槽位（含半成品）在预取新版本时清掉', async () => {
