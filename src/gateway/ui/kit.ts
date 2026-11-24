@@ -68,6 +68,10 @@ export const UI_JS_KIT = `(function () {
       x.setAttribute('data-i18n-title', '关闭||Close')
       x.title = t('关闭', 'Close')
       x.onclick = function () { m.close() }
+      // ✕ 图标在工厂内注入（fix-modal-close-icon）：WIRING 的 .close-btn 全量注入是加载时
+      // 一次性扫描，晚于其创建的弹层（probe/merge/usage 等后置片段）吃不到——关闭按钮空壳
+      // 不可见（仅悬停出「关闭」提示）。工厂自足后，WIRING 注入退化为幂等兜底。
+      x.innerHTML = icon('close', 15)
       xrow.appendChild(x)
       head.appendChild(xrow)
     }
