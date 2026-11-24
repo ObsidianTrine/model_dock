@@ -193,6 +193,10 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(scrim && scrim.hidden === false).toBe(true)
     await flush()
     expect(document.getElementById('usageTitle')?.textContent).toContain('用量')
+    // 关闭按钮 ✕ 图标在工厂创建时就地注入（fix-modal-close-icon）：后置片段创建的弹层吃不到
+    // WIRING 的一次性扫描，此前关闭按钮是空壳不可见——此处钉住「工厂创建即带图标」
+    const usageClose = document.querySelector('#usageOverlay .close-btn') as HTMLElement | null
+    expect(usageClose?.querySelector('svg')).not.toBeNull()
     const rows = document.querySelectorAll('#usageTable tbody tr')
     expect(rows.length).toBe(1)
     expect(rows[0].textContent).toContain('Alpha 服务')
@@ -810,6 +814,10 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(scrim.querySelector('.modal')?.className).toContain('svcmodal')
       const foot = scrim.querySelector('.modal-foot') as HTMLElement
       expect(foot.querySelectorAll('button').length).toBe(0)
+      // 关闭按钮 ✕ 图标工厂内注入（fix-modal-close-icon）：probe 弹层创建晚于 WIRING 一次性
+      // 扫描，此前吃不到图标注入呈空壳——后置片段创建的弹层同样必须自带图标
+      const ledgerClose = scrim.querySelector('.close-btn') as HTMLElement | null
+      expect(ledgerClose?.querySelector('svg')).not.toBeNull()
       expect(document.getElementById('probeLedgerMsg')?.className).toContain('mferr')
       // 关路径三件套（读取类口径）：头部 × / Esc / 遮罩点击，三条均可关闭
       ;(scrim.querySelector('.close-btn') as HTMLElement).click()
