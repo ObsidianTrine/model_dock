@@ -113,35 +113,60 @@ export const UI_JS_UPDATE = `  function render() {
 
   function updModalRender() {
     var title = document.getElementById('updTitle'),
-      sub = document.getElementById('updSub'),
       notes = document.getElementById('updNotes'),
-      more = document.getElementById('updMore'),
-      go = document.getElementById('updGo'),
-      copy = document.getElementById('updCopy'),
-      dismiss = document.getElementById('updDismiss')
+      more = document.getElementById('updMore')
     if (!title || !upd) return
     setUpdMsg('')
     title.textContent = t('可更新到 ', 'Update to ') + upd.latest
-    var subText = t('发现新版本 · 当前 v' + upd.current, 'New version · current v' + upd.current)
-    if (upd.sizeBytes > 0) subText += t(' · 安装包 ', ' · package ') + (upd.sizeBytes / 1048576).toFixed(1) + ' MB'
-    // 预取缓存态（旧版网关无 staged 字段照常工作）：就绪 → 按钮换「立即安装」（点击后子进程
-    // 复用缓存跳过下载秒装）；后台预下载中 → 副行给进度；失败/未启动 → 不打扰，点击后现下
-    var staged = upd.staged
-    var stagedReady = !!(staged && staged.ready && staged.version === upd.latest)
-    if (staged && !stagedReady && staged.version === upd.latest && staged.total > 0 && staged.received > 0) {
-      subText += t(' · 后台已下载 ', ' · prefetched ') + Math.floor((staged.received / staged.total) * 100) + '%'
-    }
-    sub.textContent = subText
     // 说明是纯文本（服务端已去 markdown 标记）：弹层不渲染富文本，只给「去发布页看全文」的外链
     notes.hidden = !upd.notes
     notes.textContent = upd.notes || ''
     more.hidden = !upd.htmlUrl
     more.innerHTML = more.hidden ? '' : docLinkA(t('在 GitHub 查看完整说明', 'View full notes on GitHub'), upd.htmlUrl)
+    updModalSoftRender()
+  }
+
+  // 弹层动态段（副行/按钮组/进度条）：弹层开着时的 2s 活轮询只刷这里——不能走全量渲染，
+  // 全量渲染开头 setUpdMsg('') 会抹掉底栏错误提示
+  function updModalSoftRender() {
+    var sub = document.getElementById('updSub'),
+      go = document.getElementById('updGo'),
+      copy = document.getElementById('updCopy'),
+      dismiss = document.getElementById('updDismiss')
+    if (!sub || !upd) return
+    var subText = t('发现新版本 · 当前 v' + upd.current, 'New version · current v' + upd.current)
+    if (upd.sizeBytes > 0) subText += t(' · 安装包 ', ' · package ') + (upd.sizeBytes / 1048576).toFixed(1) + ' MB'
+    // 预取缓存态（旧版网关无 staged 字段照常工作）：就绪 → 按钮换「立即安装」（点击后子进程
+    // 复用缓存跳过下载秒装）；后台预下载中 → 副行给进度；失败/未启动 → 不打扰，点击后现下。
+    // 已点更新（updApplying）后副行让位给进度条：收养模式下两者同源（重复且「后台」失真），
+    // 预取失败回退自下时副行又是死数字——点更新瞬间即隐藏
+    var staged = upd.staged
+    var stagedReady = !!(staged && staged.ready && staged.version === upd.latest)
+    if (!updApplying && staged && !stagedReady && staged.version === upd.latest && staged.total > 0 && staged.received > 0) {
+      subText += t(' · 后台已下载 ', ' · prefetched ') + Math.floor((staged.received / staged.total) * 100) + '%'
+    }
+    sub.textContent = subText
     go.textContent = updApplying ? t('更新中…', 'Updating…') : stagedReady ? t('立即安装', 'Install Now') : t('更新到 ', 'Update to ') + upd.latest
     go.disabled = updApplying
     copy.disabled = updApplying
     dismiss.disabled = updApplying
     updProgressRender(upd)
+  }
+
+  // 弹层开着时每 2s 拉一次状态刷动态段：「后台已下载 X%」从打开时冻结变活进度，
+  // 预取就绪即时换「立即安装」按钮。updApplying 期间不再自己拉（pollApplyAndGateway
+  // 已在 2s 轮询，避免双倍请求）。链式 setTimeout 自检 isOpen 自停——Esc/遮罩等任意
+  // 关闭路径都无需挂钩，下一次 tick 发现弹层已关即不再续期
+  var updModalTimer = null
+  function updModalLivePoll() {
+    if (updModalTimer) { clearTimeout(updModalTimer); updModalTimer = null }
+    if (!updM || !updM.isOpen()) return
+    updModalTimer = setTimeout(function () {
+      updModalTimer = null
+      if (!updM.isOpen()) return
+      if (!updApplying) refreshUpdStatus(function () { updModalSoftRender() })
+      updModalLivePoll()
+    }, 2000)
   }
 
   function updModalToggle(forceHide) {
@@ -150,6 +175,7 @@ export const UI_JS_UPDATE = `  function render() {
     refreshUpdStatus()
     updM.open()
     updModalRender()
+    updModalLivePoll()
   }
 
   // 更新弹窗底栏提示槽（updMsg）：弹层开着时错误/进度写槽位——磨砂遮罩会糊掉全局 toast；

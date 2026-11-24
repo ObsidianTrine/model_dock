@@ -159,7 +159,9 @@ async function runPrefetch(opts: PrefetchOpts): Promise<void> {
     received: sameSlot ? prev.received : 0,
     sumsVerified: false,
     ready: false,
-    consumed: false,
+    // 同槽位复跑（退避过期续传/自愈重验）必须继承盘上 consumed：初始落盘若写 false 会把
+    // apply 侧已标的「已消费」抹掉；跨槽新建才是干净槽
+    consumed: sameSlot ? prev.consumed : false,
     error: null,
     startedAt: sameSlot ? prev.startedAt : Date.now(),
     updatedAt: Date.now(),
@@ -217,11 +219,22 @@ async function runPrefetch(opts: PrefetchOpts): Promise<void> {
     meta.ready = true
     meta.error = null
     lastFailAt = 0
+    await preserveConsumedOnDisk(meta)
     await saveStagingMeta(meta)
   } catch (e) {
     meta.error = (e as Error).message
     lastFailAt = Date.now()
     lastFailVersion = m.version
+    await preserveConsumedOnDisk(meta).catch(() => {})
     await saveStagingMeta(meta).catch(() => {})
   }
+}
+
+/** 终态落盘前同步盘上 consumed 标记：apply 侧校验通过即 markStagingConsumed，若此刻预取
+ *  还在飞（收养模式的 CLI 手动路径仍可能交叠），用内存 meta（consumed:false）整本覆写会把
+ *  该标记翻回 false——ready 槽滞留 7 天/换槽才清，「还原→再更新」的复用判定也被时序打乱。
+ *  只在账本仍是同版本槽位时采纳盘上值（换槽后盘上属新槽，不可照抄）。 */
+async function preserveConsumedOnDisk(meta: StagingMeta): Promise<void> {
+  const disk = await readStagingMeta().catch(() => null)
+  if (disk && disk.version === meta.version) meta.consumed = disk.consumed
 }
