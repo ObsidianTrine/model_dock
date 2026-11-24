@@ -8,6 +8,7 @@
 
 import { isQuotaError } from '../../relay.js'
 import { readRequestLogWindow } from '../../state/logs.js'
+import { nearestRankPercentile } from './shared.js'
 import type { LogEntry, ProbeVerdictState } from '../../state/types.js'
 import type { ProbeUnitContext, ProbeUnitOutcome } from '../engine.js'
 
@@ -63,6 +64,8 @@ export interface P15ProviderSignal {
   by_class: Record<P15ErrorClass, number>
   /** 归档类下最新一条失败条目（verdict 证据的 status/err 取材；无 provider 侧失败缺席） */
   last_error?: { status?: number; err?: string; cause?: string; ts?: string }
+  /** 窗口内带耗时的请求样本（成功与失败同计，metrics 采样环同口径）：延迟分位的取材 */
+  ms_samples: number[]
 }
 
 export interface P15Aggregate {
@@ -88,10 +91,12 @@ export function aggregateProviderSignals(entries: readonly LogEntry[], fromMs: n
         by_cause: {},
         by_status: {},
         by_class: { auth: 0, quota: 0, unreachable: 0, degraded: 0 },
+        ms_samples: [],
         lastByClass: new Map(),
       } as P15ProviderSignal & { lastByClass: Map<P15ErrorClass, LogEntry> })
     byProvider.set(e.provider, sig)
     sig.requests++
+    if (e.ms != null && Number.isFinite(e.ms)) sig.ms_samples.push(e.ms)
     const statusKey = e.status == null ? 'n/a' : String(e.status)
     sig.by_status[statusKey] = (sig.by_status[statusKey] ?? 0) + 1
     if (e.cause) sig.by_cause[e.cause] = (sig.by_cause[e.cause] ?? 0) + 1
@@ -116,6 +121,7 @@ export function aggregateProviderSignals(entries: readonly LogEntry[], fromMs: n
       by_cause: sig.by_cause,
       by_status: sig.by_status,
       by_class: sig.by_class,
+      ms_samples: sig.ms_samples,
     }
     // 归档类取严重度最高且有发生的类；last_error 取该类最新条目（证据与归档类一致，防
     // 「quota 判定却挂着 502 的证据」错位）
@@ -142,7 +148,8 @@ export function p15SignalState(sig: P15ProviderSignal | undefined): ProbeVerdict
 }
 
 /** P15 runner（engine 兼容）：聚合目标 provider 的滚动 24h 分布并落被动证据。零上游请求——
- *  calls 恒空，transport 参数不触。 */
+ *  calls 恒空，transport 参数不触。窗口内有带耗时的请求样本时，延迟 p50/p95（与错误分布同窗）
+ *  挂 verdict advisory.latency——服务卡的「诊断」弹层据此展示真实流量延迟分布（passive:p15）。 */
 export async function runP15(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
   const toMs = Date.now()
   const fromMs = toMs - P15_WINDOW_MS
@@ -152,11 +159,25 @@ export async function runP15(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
   const state = p15SignalState(sig)
   if (!state) return { calls: [], noEvidence: true, source: P15_SOURCE }
   const le = sig.last_error
+  const lat = latencyAdvisory(sig)
   return {
     state,
     ...(le?.status != null ? { status: le.status } : {}),
     ...(le?.err ? { err: le.err } : {}),
+    ...(lat ? { advisory: lat } : {}),
     calls: [],
     source: P15_SOURCE,
+  }
+}
+
+/** 窗口样本的延迟分位旁注（p50/p95 最近秩法，同 P14 口径）：无样本返回 undefined（不挂空档）。 */
+export function latencyAdvisory(sig: P15ProviderSignal): Record<string, unknown> | undefined {
+  if (!sig.ms_samples.length) return undefined
+  return {
+    latency: {
+      p50: nearestRankPercentile(sig.ms_samples, 50) ?? null,
+      p95: nearestRankPercentile(sig.ms_samples, 95) ?? null,
+      n: sig.ms_samples.length,
+    },
   }
 }

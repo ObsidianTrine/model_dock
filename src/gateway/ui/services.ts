@@ -71,9 +71,10 @@ export const UI_JS_SERVICES = `  function visibleServices() {
       return '<div class="service' + (s.inUse ? ' cur' : '') + '">' +
         '<div class="info"><span class="name" title="' + esc(s.base_url) + '">' + esc(s.label) + '</span><br>' +
         '<span class="meta">' + t('默认 ', 'Default ') + esc(s.defaultModel || t('未设置', 'not set')) +
-        // 延迟文本由 pollLive 定向填充（lastMs 每请求易变，不进 overview 主载荷），render 后补一次当前值
-        '<span data-svcms="' + esc(s.id) + '"></span> · ' + s.modelsCount + t(' 个模型', ' models') +
-        (s.hasKey ? '' : ' · <b class="hint-warn">' + t('Key 未设置', 'key not set') + '</b>') + (s.usedBy && s.usedBy.length ? t(' · 被 <b>', ' · used by <b>') + s.usedBy.length + t('</b> 个客户端使用', '</b> clients') : '') +
+        // 延迟文本由 pollLive 定向填充（lastMs 每请求易变，不进 overview 主载荷），render 后补一次当前值；
+        // 悬浮说明补口径（流式≈首包，非流式≈生成时长，diag-modal-probe-ui）
+        '<span data-svcms="' + esc(s.id) + '" title="' + esc(t('该服务最近一次成功请求的响应耗时（流式≈首包延迟；非流式≈生成时长）。', 'Latency of the last successful request (streaming ≈ time to first chunk; non-streaming ≈ full generation).')) + '"></span> · ' + s.modelsCount + t(' 个模型', ' models') +
+        (s.hasKey ? '' : ' · <b class="hint-warn">' + t('Key 未设置', 'key not set') + '</b>') + (s.usedBy && s.usedBy.length ? t(' · 被 <b>', ' · used by <b>') + esc(s.usedBy.join(t('、', ', '))) + t('</b> 使用', '</b>') : '') +
         (s.down && arOn ? ' <span class="pill err" title="' + t('故障熔断中，自动路由会避开该服务，探活恢复后自动回归', 'Down (circuit open); auto route avoids it and brings it back once probes recover') + '">' + t('熔断中', 'down') + '</span>' : '') +
         (s.enabled === false ? ' <span class="pill dim" title="' + t('手动下线，不参与自动路由', 'Manually disabled; excluded from auto route') + '">' + t('已下线', 'offline') + '</span>' : '') +
         verdictBadgeHtml(s.id) +
@@ -81,8 +82,7 @@ export const UI_JS_SERVICES = `  function visibleServices() {
         // 点击开该服务按模型的用量弹层——同 data-svcms 槽位配方，易变数据不进 overview 主载荷
         usageBadgeSlotHtml(s.id) +
         '</span></div>' +
-        '<span class="testres" id="pingres-' + esc(s.id) + '" hidden></span>' +
-        '<button class="btn small" data-ping="' + esc(s.id) + '" data-i18n-title="纯网络延迟（不做模型请求）||Pure network latency (no model request)" title="纯网络延迟（不做模型请求）">' + t('延迟', 'Ping') + '</button>' +
+        '<button class="btn small" data-diag="' + esc(s.id) + '" data-i18n-title="服务健康与诊断：延迟快照、当前结论、连通性测试与探针||Service health and diagnostics: latency snapshot, current verdicts, connectivity tests and probes" title="服务健康与诊断：延迟快照、当前结论、连通性测试与探针">' + t('诊断', 'Diagnose') + '</button>' +
         '<button class="btn small" data-edit="' + esc(s.id) + '">' + t('编辑', 'Edit') + '</button>' +
         '<button class="btn small ghost-danger" data-del="' + esc(s.id) + '">' + t('删除', 'Delete') + '</button>' +
         '<span class="rt">' + useBtn + '</span></div>'
@@ -112,62 +112,13 @@ export const UI_JS_SERVICES = `  function visibleServices() {
           .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false); b.disabled = false })
       }
     })
-    // 健康徽标下钻（probe-ui-into-usage-health 任务 2）：徽标是 button.pill，点击开该服务的
-    // verdict 变化时间线弹层；与 data-use 同款 render 后重绑（5s/15s 轮询会整卡重建）
-    document.querySelectorAll('[data-probehist]').forEach(function (b) {
-      b.onclick = function () { openProbeSvcTimeline(b.getAttribute('data-probehist')) }
+    // 服务健康·诊断统一弹层（diag-modal-probe-ui）：卡片「诊断」按钮与异常徽标（data-probehist）
+    // 双入口，openDiag 按 section 落对应区块；与 data-use 同款 render 后重绑（5s/15s 轮询会整卡重建）
+    document.querySelectorAll('[data-diag]').forEach(function (b) {
+      b.onclick = function () { openDiag(b.getAttribute('data-diag'), 'actions') }
     })
-    // 探测失败文案瘦身：api() 抛的「HTTP 5xx: {json}」里若有结构化 err/hint 就只取用这两段，
-    // 避免整包 JSON 上屏（截断由 .testres 的 ellipsis 兜底，这里让常用路径本就短）
-    function probeErrMsg(e) {
-      var m = (e && e.message) || ''
-      var i = m.indexOf('{')
-      if (i >= 0) {
-        try {
-          var j = JSON.parse(m.slice(i))
-          if (j && (j.err || j.hint)) return (j.err || '') + (j.hint ? (j.err ? ' → ' : '') + j.hint : '')
-        } catch (e2) { /* 响应体不是 JSON，原样返回 */ }
-      }
-      return m
-    }
-    document.querySelectorAll('[data-ping]').forEach(function (b) {
-      b.onclick = function () {
-        var id = b.getAttribute('data-ping')
-        var lbl = document.getElementById('pingres-' + id)
-        if (!lbl) return
-        // 点击复制全文（截断后细节不丢，复制反馈=文案翻转）；title 悬浮看全文
-        lbl.onclick = function () {
-          var full = lbl.title
-          if (!full) return
-          copyText(full, function () {
-            lbl.textContent = '✓ ' + t('已复制', 'Copied')
-            if (lbl._copyT) clearTimeout(lbl._copyT)
-            lbl._copyT = setTimeout(function () { lbl.textContent = full }, 1600)
-          })
-        }
-        b.disabled = true
-        b.textContent = t('测中…', 'Pinging…')
-        lbl.hidden = false
-        lbl.className = 'testres'
-        lbl.textContent = t('检测中…', 'Checking…')
-        lbl.title = ''
-        api('/test', { method: 'POST', body: JSON.stringify({ provider: id, mode: 'ping' }) })
-          .then(function (r) {
-            lbl.hidden = false
-            lbl.className = 'testres ' + (r.ok ? 'ok' : 'err')
-            lbl.textContent = r.ok
-              ? '✓ ' + t('延迟 ', 'latency ') + (r.ms ?? '?') + 'ms'
-              : '✗ ' + t('网络不通 ', 'unreachable ') + (r.err || '') + (r.hint ? ' → ' + r.hint : '')
-            lbl.title = lbl.textContent
-          })
-          .catch(function (e) {
-            lbl.hidden = false
-            lbl.className = 'testres err'
-            lbl.textContent = '✗ ' + t('探测失败：', 'Ping failed: ') + probeErrMsg(e)
-            lbl.title = lbl.textContent
-          })
-          .then(function () { b.disabled = false; b.textContent = t('延迟', 'Ping') })
-      }
+    document.querySelectorAll('[data-probehist]').forEach(function (b) {
+      b.onclick = function () { openDiag(b.getAttribute('data-probehist'), 'health') }
     })
     document.querySelectorAll('[data-edit]').forEach(function (b) {
       b.onclick = function () { openEdit(b.getAttribute('data-edit')) }

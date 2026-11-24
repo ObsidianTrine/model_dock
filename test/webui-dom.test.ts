@@ -570,7 +570,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(urls.some((u) => u.startsWith('/_modeldock/probe/trend?days=30&months=6'))).toBe(true)
       await flush()
       // 标题动态拼服务名（titleId 先例）；timeline 按 provider 客户端过滤（beta 条目不进弹层）
-      expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('健康变化 · Alpha 服务')
+      expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('服务健康 · Alpha 服务')
       const table = document.getElementById('probeSvcTimelineTable') as HTMLElement
       expect(table.textContent).toContain('alpha/a-model')
       expect(table.textContent).not.toContain('beta')
@@ -583,7 +583,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
   })
 
   it('健康下钻：模型过滤 select 按 (provider, model) 重渲染；该服务无翻转条目出「近 30 天无 verdict 变化」空态', async () => {
-    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
     PROBE_TREND_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
       { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'b-model', key_fp: 'cd34', from: 'healthy', to: 'degraded', source: 'scheduled' },
@@ -661,7 +661,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
   })
 
   it('健康下钻：读取类弹层关路径三件套（头部 ×、Esc、遮罩点击均可关闭，foot 无关闭/刷新按钮），加载失败写 msg 槽不出 toast', async () => {
-    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
     PROBE_TREND_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
     ]
@@ -712,6 +712,118 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
       PROBE_TREND_FIXTURE.timeline = []
+    }
+  })
+
+  // —— 诊断统一弹层（diag-modal-probe-ui）：徽标异常才显 + 卡片「诊断」按钮 + 两段式成本确认 ——
+
+  it('diag-modal-probe-ui：健康徽标异常才显——healthy/unverified 静默，degraded 出 warn、auth-dead 出 err', async () => {
+    try {
+      PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+      mountPage()
+      await flush()
+      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull() // 健康静默（全量状态只在弹层「当前结论」区）
+      PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'unverified', evidence: { source: 'probe:p14', at: Date.now() - 60000 } }]
+      mountPage()
+      await flush()
+      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull() // 未验证静默
+      PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+      mountPage()
+      await flush()
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement | null
+      expect(badge).not.toBeNull()
+      expect(badge!.className).toContain('warn')
+      PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'auth-dead', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+      mountPage()
+      await flush()
+      expect((document.querySelector('[data-probehist="alpha"]') as HTMLElement).className).toContain('err')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+    }
+  })
+
+  it('diag-modal-probe-ui：免费 ping 即时执行写行内结果；no-key 服务付费动作按钮禁用', async () => {
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/test') {
+        const body = { ok: true, ms: 42 }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    const betaKey = OVERVIEW_FIXTURE.services[1].hasKey
+    OVERVIEW_FIXTURE.services[1].hasKey = false
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement
+      expect(scrim.hidden).toBe(false)
+      expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('服务健康 · Alpha 服务')
+      expect(document.getElementById('diagPingBtn')).not.toBeNull()
+      ;(document.getElementById('diagPingBtn') as HTMLElement).click()
+      await flush()
+      const res = document.getElementById('diagPingRes') as HTMLElement
+      expect(res.className).toContain('ok')
+      expect(res.textContent).toContain('42ms')
+      // no-key 服务：付费动作禁用（免费 ping 恒可用）
+      ;(document.querySelector('[data-diag="beta"]') as HTMLElement).click()
+      await flush()
+      const p1 = document.getElementById('diagP1Btn') as HTMLButtonElement
+      expect(p1.disabled).toBe(true)
+      expect(p1.title).toContain('key')
+      expect((document.getElementById('diagPingBtn') as HTMLButtonElement).disabled).toBe(false)
+    } finally {
+      OVERVIEW_FIXTURE.services[1].hasKey = betaKey
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
+  it('diag-modal-probe-ui：P1 两段式成本确认——第一段零执行只出确认态，确认后带 confirmToken 重发，结果行写 verdict', async () => {
+    const runCalls: Array<{ url: string; body: any }> = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/probe/run') {
+        runCalls.push({ url: String(url), body: init && init.body ? JSON.parse(String(init.body)) : {} })
+        const body = runCalls.length >= 2
+          ? { ok: true, reason: 'ok', provider: 'alpha', probes: ['p1'], targets: 1, dispatched: 1, upstreamRequests: 1, tokens: 86, estimate: 200, per_probe_cost: { p1: 200 }, budget: {}, verdicts: [{ provider: 'alpha', key_fp: 'ab12', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p1', at: Date.now() } }], skipped: [] }
+          : { ok: false, needConfirm: true, reason: 'unconfirmed', provider: 'alpha', probes: ['p1'], targets: 1, estimate: 200, per_probe_cost: { p1: 200 }, budget: {}, confirmToken: 'tok-1', verdicts: [], skipped: [] }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      const p1 = document.getElementById('diagP1Btn') as HTMLElement
+      p1.click()
+      await flush()
+      // 第一段：无 token 只出预估确认态（needConfirm），confirmToken 缓存待第二段
+      expect(runCalls.length).toBe(1)
+      expect(runCalls[0].body).toEqual({ provider: 'alpha', probes: ['p1'] })
+      expect((document.getElementById('diagP1Confirm') as HTMLElement).hidden).toBe(false)
+      // 取消：确认态收起，不重发
+      ;(document.getElementById('diagP1Cancel') as HTMLElement).click()
+      expect((document.getElementById('diagP1Confirm') as HTMLElement).hidden).toBe(true)
+      // 再运行 → stage1 重发预估（token 重取）→ 确认花费：第二段带 confirmToken；结果行 ok 语义色 + verdict 摘要
+      p1.click()
+      await flush()
+      ;(document.getElementById('diagP1Go') as HTMLElement).click()
+      await flush()
+      expect(runCalls.length).toBe(3)
+      expect(runCalls[2].body).toEqual({ provider: 'alpha', probes: ['p1'], confirmToken: 'tok-1' })
+      const res = document.getElementById('diagP1Res') as HTMLElement
+      expect(res.className).toContain('ok')
+      expect(res.textContent).toContain('健康')
+      expect(res.textContent).toContain('a-model')
+      expect(res.textContent).toContain('86 tokens')
+      // 弹层提示归宿纪律：全程零全局 toast
+      expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+    } finally {
+      vi.stubGlobal('fetch', prev)
     }
   })
 

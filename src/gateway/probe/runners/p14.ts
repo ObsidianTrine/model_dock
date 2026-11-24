@@ -7,7 +7,7 @@
 // vLLM benchmark 同型口径）；usage 缺席的轮次不进 tps 分位数（ttft 仍有效）。
 
 import { probeWire, upstreamErrorLine } from '../wire.js'
-import { PROBE_CANARY_MAX_TOKENS, classifyUpstreamFailure, sendProbe, sumUsageTokens } from './shared.js'
+import { PROBE_CANARY_MAX_TOKENS, classifyUpstreamFailure, nearestRankPercentile, sendProbe, sumUsageTokens } from './shared.js'
 import type { ProbeUnitContext, ProbeUnitOutcome, ProbeUpstreamResponse } from '../engine.js'
 
 /** 采样轮数（registry P14 定档 requests=5） */
@@ -16,15 +16,6 @@ export const P14_ROUNDS = 5
 /** healthy 多数派门槛：5 轮中 ≥3 轮成功——性能画像关注可用通道的时延分布，单轮抖动由
  *  p50/p95 吸收，过半失败才翻 degraded */
 export const P14_MAJORITY = 3
-
-/** 最近秩法百分位（nearest-rank）：升序第 ceil(p/100×n) 个。5 样本固定口径下 p50 = 排序后
- *  取 [2]、p95 = 取 [4]（card 指定并在测试中锚定）。空集返回 undefined。 */
-export function nearestRankPercentile(values: number[], p: number): number | undefined {
-  if (values.length === 0) return undefined
-  const sorted = [...values].sort((a, b) => a - b)
-  const rank = Math.min(sorted.length, Math.max(1, Math.ceil((p / 100) * sorted.length)))
-  return sorted[rank - 1]
-}
 
 /** 单轮成功样本（tps 缺席 = 该轮 usage 无 completion tokens，不进 tps 分位数） */
 export interface P14Sample {

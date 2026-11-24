@@ -179,3 +179,56 @@ describe('probe-p15 · 零上游请求与被动 freshness', () => {
     }
   })
 })
+
+describe('probe-p15 · 延迟分位旁注（diag-modal-probe-ui）', () => {
+  it('窗口内带耗时样本聚合 p50/p95/n 进 advisory.latency（最近秩法，与错误分布同窗）；无样本不挂空档', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      const now = Date.now()
+      const seed = (e: Partial<LogEntry> & { provider: string; agoMs: number; ms?: number }): void => {
+        logRequest(rt, {
+          ts: localIsoTs(new Date(now - e.agoMs)),
+          harness: 'claude-code',
+          profile: 'main',
+          provider: e.provider,
+          model: 'm',
+          path: '/v1/messages',
+          ...(e.status != null ? { status: e.status } : {}),
+          ...(e.ms != null ? { ms: e.ms } : {}),
+          ...(e.err ? { err: e.err } : {}),
+          ...(e.cause ? { cause: e.cause } : {}),
+        })
+      }
+      // upA：5 条成功样本（升序后 200/800/1200/2000/3000）→ p50=取[2]=1200、p95=取[4]=3000
+      seed({ provider: 'upA', agoMs: 5 * H, status: 200, ms: 3000 })
+      seed({ provider: 'upA', agoMs: 4 * H, status: 200, ms: 800 })
+      seed({ provider: 'upA', agoMs: 3 * H, status: 200, ms: 1200 })
+      seed({ provider: 'upA', agoMs: 2 * H, status: 200, ms: 2000 })
+      seed({ provider: 'upA', agoMs: H, status: 200, ms: 200 })
+      // upB：有成功流量但零耗时字段 → healthy 且不挂 latency（不产空档旁注）
+      seed({ provider: 'upB', agoMs: H, status: 200 })
+      await drainAppendStreams()
+
+      const transport: ProbeTransport = async () => ({ status: 200, ms: 1 })
+      const r = await runProbeSuite(rt, {
+        probeIds: ['p15'],
+        targets: [
+          { providerId: 'upA', model: 'm', keyFp: 'fpA' },
+          { providerId: 'upB', model: 'm', keyFp: 'fpB' },
+        ],
+        transport,
+        runner: runP15,
+      })
+      expect(r.skipped).toHaveLength(0)
+      const va = getProbeVerdict(rt, 'upA', 'fpA', 'm')
+      expect(va?.state).toBe('healthy')
+      expect(va?.advisory).toEqual({ latency: { p50: 1200, p95: 3000, n: 5 } })
+      const vb = getProbeVerdict(rt, 'upB', 'fpB', 'm')
+      expect(vb?.state).toBe('healthy')
+      expect(vb?.advisory).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+})

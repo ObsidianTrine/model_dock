@@ -16,6 +16,16 @@ export function sumUsageTokens(usage: Record<string, number> | undefined): numbe
   return sum
 }
 
+/** 最近秩法百分位（nearest-rank）：升序第 ceil(p/100×n) 个。5 样本固定口径下 p50 = 排序后
+ *  取 [2]、p95 = 取 [4]（card 指定并在测试中锚定）。空集返回 undefined。
+ *  P14 性能画像与 P15 被动延迟聚合（自 p14.ts 收编）共用同一分位口径。 */
+export function nearestRankPercentile(values: number[], p: number): number | undefined {
+  if (values.length === 0) return undefined
+  const sorted = [...values].sort((a, b) => a - b)
+  const rank = Math.min(sorted.length, Math.max(1, Math.ceil((p / 100) * sorted.length)))
+  return sorted[rank - 1]
+}
+
 /** 模型吐出的 JSON 字符串 → 对象：trim + 一次剥 code fence 兜底（模型常包 ```json 围栏，与
  *  P4/P9 的「一次剥引号」同思路——剥一层后仍非 JSON 即放弃，不递归不猜测）；对象形态才合格
  *  （数组/标量按无约定字段处理）。任务 8 自 p6.ts 迁入：P6 约定字段与 P5 工具 args 的「JSON
