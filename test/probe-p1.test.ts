@@ -68,7 +68,7 @@ describe('probe-p1 · 五态归档', () => {
     }
   })
 
-  it('200 但回显不匹配 → degraded（宁严勿松）', async () => {
+  it('200 但回复里没有 canary → degraded（实际回复入证据）', async () => {
     const h = fakeHome()
     try {
       const rt = mkRt()
@@ -84,6 +84,55 @@ describe('probe-p1 · 五态归档', () => {
     } finally {
       h.restore()
     }
+  })
+
+  describe('回显宽容匹配（p1-echo-tolerance）', () => {
+    const bodyOf = (content: string): string =>
+      JSON.stringify({ choices: [{ message: { content } }], usage: { input_tokens: 5, output_tokens: 2 } })
+
+    async function stateOf(content: string | undefined, bodyOverride?: string): Promise<{ state: string; err: string }> {
+      const h = fakeHome()
+      try {
+        const rt = mkRt()
+        const transport: ProbeTransport = async () => ({
+          status: 200,
+          ms: 5,
+          bodyText: bodyOverride ?? (content === undefined ? '' : bodyOf(content)),
+        })
+        await runP1Suite(rt, transport)
+        const v = getProbeVerdict(rt, 'acme', 'fp1', 'm')
+        return { state: v?.state ?? '', err: (v?.evidence.err as string) ?? '' }
+      } finally {
+        h.restore()
+      }
+    }
+
+    it('精确回显 / 客套话包裹 / 引号标点 / 推理块 / 代码围栏 → healthy', async () => {
+      expect((await stateOf(P1_CANARY)).state).toBe('healthy')
+      expect((await stateOf('好的：MODELDOCK-OK。')).state).toBe('healthy')
+      expect((await stateOf('「MODELDOCK-OK」')).state).toBe('healthy')
+      expect((await stateOf('<think>用户要求我回复 MODELDOCK-OK</think>MODELDOCK-OK')).state).toBe('healthy')
+      expect((await stateOf('```\nMODELDOCK-OK\n```')).state).toBe('healthy')
+    })
+
+    it('拼接词 / 无 canary / 推理块内提 canary 但正文没有 → degraded', async () => {
+      expect((await stateOf('XMODELDOCK-OK')).state).toBe('degraded')
+      expect((await stateOf('MODELDOCK-OKX')).state).toBe('degraded')
+      expect((await stateOf('hello there')).state).toBe('degraded')
+      // 推理复述指令（含 canary）不算回答：剥离后正文无 canary 仍降级
+      const thinkOnly = await stateOf('<think>应回复 MODELDOCK-OK</think>好的，我明白了。')
+      expect(thinkOnly.state).toBe('degraded')
+      expect(thinkOnly.err).toContain('好的，我明白了')
+    })
+
+    it('空回复 / 解析不出回复文本 → degraded，证据带响应体片段（可诊断性）', async () => {
+      const empty = await stateOf('')
+      expect(empty.state).toBe('degraded')
+      expect(empty.err).toContain('未解析出回复')
+      const reasoningOnly = await stateOf(undefined, JSON.stringify({ choices: [{ message: { content: '', reasoning_content: 'MODELDOCK-OK' } }] }))
+      expect(reasoningOnly.state).toBe('degraded')
+      expect(reasoningOnly.err).toContain('reasoning_content')
+    })
   })
 
   it('401/403 → auth-dead；500/400 等其余 4xx/5xx → degraded', async () => {
