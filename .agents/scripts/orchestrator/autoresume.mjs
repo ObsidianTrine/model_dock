@@ -39,6 +39,11 @@ export const AUTO_RESUME_COUNT_KEY = 'auto_resume_count';
 // （reason=异常中断：<err>），上游网络错误（ECONNRESET 等）经此路径落 blocked。
 const SETTLE_TYPES = ['blocked', 'circuit_breaker', 'failed'];
 
+// 孤儿归类用的 settle 集合：比 blocked 通道多认 worker_done——worker 会话已正常收尾
+// （产出结果块）后进程才死，不属于「spawn 后无 settle」的崩溃族；按 stuck 交人工，
+// worktree 有提交时由 stuck 对冲续用路径原地续做（不重派 worker 重做）。
+const ORPHAN_SETTLE_TYPES = [...SETTLE_TYPES, 'worker_done'];
+
 /** 最后一条 settle 事件（没有则 null）。 */
 function lastSettle(events) {
   for (let i = (events?.length ?? 0) - 1; i >= 0; i--) {
@@ -281,12 +286,15 @@ export function autoResumedAtNow() {
 
 /**
  * 孤儿 running 卡处置归类（纯函数，只看事件链；锁判活在调用方）：返回
+ *   'manual'  — 人工认领（最后一条 worker_spawned 之后出现 manual_claimed）：属主是
+ *               人工 agent，既不能续跑（会双写同一 worktree）也不能落 blocked（撤销
+ *               人工认领现场）——调用方只落 fleet 观测事件，不动卡；
  *   'resume'  — transient 族，可自动续（沿用 24h 冷却、每次上界与每卡生命周期上限）；
  *   'breaker' — 事件链有熔断（最后一条 worker_spawned 之后），确定性失败永不自动续；
  *   'stuck'   — 非 transient（会话已以 failed/非签名 settle 收尾），落 blocked 交人工。
  *               （对冲：worktree 相对 base 已有非空提交时调用方改走续用路径，见
  *               pickOrphanResumeCandidates——提交数对账由调用方做，本纯函数不碰 fs。）
- * 判定路径（'resume' 的三条，与 isTransientBlocked 同哲学，面向「无 settle 收尾」的崩溃现场）：
+ * 判定路径（'resume' 的两条，与 isTransientBlocked 同哲学，面向「无 settle 收尾」的崩溃现场）：
  *  A. 事件链套用 isTransientBlocked 成立——上一会话以 transient 签名收尾（resume 后再崩）
  *     或 worker_retry 链 + blocked 收尾（其内部熔断护栏照常生效）；
  *  B. 最后一条 settle 在最后一条 worker_spawned 之后且非熔断——进程死在写 settle 与
@@ -295,6 +303,9 @@ export function autoResumedAtNow() {
  *     结果块」都没来得及写：worker 异常结束的极端形态（Path C 同族），按可自愈崩溃族处理。
  * 熔断护栏与 isTransientBlocked 同构：最后一条 spawn 之后（无 spawn 则全链）出现过
  * circuit_breaker = 确定性失败，永不续——防「熔断→崩溃→自动续→再熔断」循环烧钱。
+ * 人工认领护栏（DM-02，2026-11-25）：同一窗口出现 manual_claimed → 'manual'，优先级高于
+ * 熔断/settle 判定（人工属主已接手，任何自动动作都可能撞车）。窗口外的 manual_claimed
+ * （编排器自己续跑过后又 spawn 了新会话）不改变既有分类——最后一条 spawn 才代表当前属主。
  */
 export function classifyOrphan(events) {
   if (!Array.isArray(events) || events.length === 0) return 'resume'; // 刚迁 running 就崩：重跑无害
@@ -303,11 +314,16 @@ export function classifyOrphan(events) {
     if (events[i]?.type === 'worker_spawned') lastSpawnIdx = i;
   }
   for (let i = lastSpawnIdx + 1; i < events.length; i++) {
+    if (events[i]?.type === 'manual_claimed') return 'manual';
+  }
+  for (let i = lastSpawnIdx + 1; i < events.length; i++) {
     if (events[i]?.type === 'circuit_breaker') return 'breaker';
   }
   if (isTransientBlocked(events)) return 'resume'; // Path A/B
   for (let i = lastSpawnIdx + 1; i < events.length; i++) {
-    if (SETTLE_TYPES.includes(events[i]?.type)) return 'stuck'; // 窄窗 settle 不可续：语义照旧
+    // worker_done 也是 settle：worker 会话正常收尾后进程才死，不是「未收尾崩溃族」——
+    // 按 stuck 交人工（有提交时走 stuck 对冲续用），不再盲目重派 worker 重做。
+    if (ORPHAN_SETTLE_TYPES.includes(events[i]?.type)) return 'stuck';
   }
   return 'resume'; // Path C：spawn 后无 settle = 会话未收尾进程即死（崩溃族）
 }
@@ -341,6 +357,7 @@ export function pickOrphanResumeCandidates(runningCards, opts = {}) {
     if (!card || typeof card.id !== 'string') continue;
     if (card.locked) continue;
     const kind = classifyOrphan(card.events);
+    if (kind === 'manual') continue; // 人工认领：属主在岗（任务锁随 start 退出已释放），不自动续
     const stuckRescued = kind === 'stuck' && card.commitsAhead > 0;
     if (kind !== 'resume' && !stuckRescued) continue;
     if (lifetimeCapReached(card.meta, maxPerCard)) continue;
