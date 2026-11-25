@@ -2872,6 +2872,16 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   }
   if (!orphans.length) return empty;
   log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
+  // 人工认领观察（DM-02）：feature-branch start 认领卡只短暂持任务锁，进程退出即释放；
+  // 持久认领记录是事件链里的 manual_claimed。这类卡属主是人工 agent——自动续会双写同一
+  // worktree、落 blocked 会撤销人工现场，两者都不做，只落 fleet 观测事件（不写卡
+  // events.jsonl：属主可能正在写同一个文件，跨进程双写会撞 seq）。
+  const manualOrphans = orphans.filter((c) => classifyOrphan(c.events) === 'manual');
+  if (manualOrphans.length) {
+    const ids = manualOrphans.map((c) => c.id);
+    log(`👀 孤儿自愈：${ids.length} 张 running 卡由人工认领（manual_claimed，属主在岗）——跳过自动续与落 blocked，只观测不动卡：${ids.join(', ')}`);
+    try { appendFleetEvent(repoRoot, 'orphan_heal_manual_claimed', { cards: ids }); } catch { /* 留痕失败不阻断 */ }
+  }
   // stuck 终态对冲备料（2026-11-17）：'stuck' 孤儿（非 transient settle 收尾）先对账
   // worktree 提交——相对 base 已有非空提交 = 可验收产出在库，走续用路径（resume 原地
   // 续做）而非落 blocked 清空重做。breaker 熔断卡不受对冲（确定性失败永不自动续）；
@@ -2891,7 +2901,7 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
   // isTransientBlocked 匹配写，上限拒绝不匹配任何可续签名，卡留在 blocked 交人工。
   const capRejections = lifetimeCapRejections(orphans, {
     maxPerCard: ar.maxPerCard,
-    isEligible: (c) => { const k = classifyOrphan(c.events); return k === 'resume' || (k === 'stuck' && (c.commitsAhead ?? 0) > 0); }, // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致（stuck 对冲续用同资格）
+    isEligible: (c) => { const k = classifyOrphan(c.events); if (k === 'manual') return false; return k === 'resume' || (k === 'stuck' && (c.commitsAhead ?? 0) > 0); }, // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致（stuck 对冲续用同资格；manual 人工属主不续）
   });
   reportLifetimeCapRejections(repoRoot, capRejections);
   const resumed = [];
@@ -2930,8 +2940,11 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
     if (pickedIds.has(c.id)) continue;
     const cur = findCard(root, c.id);
     if (!cur || !['running', 'reviewing'].includes(cur.state)) continue; // 已被自动续子进程迁移/落位
-    const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
     const kind = classifyOrphan(c.events);
+    // 人工认领（DM-02）：属主在岗，落 blocked 会撤销人工现场——只观测（fleet 事件已在
+    // 上方统一留痕），不写 failed 事件、不迁卡。
+    if (kind === 'manual') continue;
+    const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
     // reason 面向 isTransientBlocked 的签名匹配写（只引程序写入的枚举 reason，不引自由文本
     // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续。
     // capped（P1-⑨ 生命周期上限）：本是 transient 族但自动续次数已封顶，专属原因交人工。
@@ -2947,7 +2960,7 @@ function orphanHealPass(repoRoot, root, cfg, opts) {
     blocked.push(c.id);
     log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);
   }
-  log(`孤儿自愈检查：running ${total} 张，孤儿 ${orphans.length} 张，自动续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}，落 blocked ${blocked.length} 张${blocked.length ? `（${blocked.join(', ')}）` : ''}。`);
+  log(`孤儿自愈检查：running ${total} 张，孤儿 ${orphans.length} 张，人工认领跳过 ${manualOrphans.length} 张${manualOrphans.length ? `（${manualOrphans.map((c) => c.id).join(', ')}）` : ''}，自动续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}，落 blocked ${blocked.length} 张${blocked.length ? `（${blocked.join(', ')}）` : ''}。`);
   return { resumed, blocked };
 }
 

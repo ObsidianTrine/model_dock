@@ -533,6 +533,39 @@ describe('orchestrator autoresume > classifyOrphan 孤儿 running 卡处置归�
   })
 })
 
+// ---------------------------------------------------------------------------
+// 人工认领（DM-02，2026-11-25 审计）：feature-branch start 认领卡时只短暂持任务锁，
+// 进程退出即释放；持久认领记录是事件链里的 manual_claimed。孤儿自愈必须按事件识别
+// 人工属主——不自动续跑（会与人工 agent 双写同一 worktree）、不落 blocked（撤销人工
+// 认领状态）、只落 fleet 观测事件留痕（属主可能正在写同一个 events.jsonl，不写卡事件）。
+// 判定窗口与 circuit_breaker 护栏同款：最后一条 worker_spawned 之后（无 spawn 则全链）。
+// ---------------------------------------------------------------------------
+
+describe('orchestrator autoresume > classifyOrphan 人工认领（manual）', () => {
+  it('manual_claimed 在最后一条 spawn 之后（无 spawn 则全链）→ manual', () => {
+    expect(classifyOrphan([ev('manual_claimed')])).toBe('manual')
+    expect(classifyOrphan([ev('task_accepted'), ev('manual_claimed')])).toBe('manual')
+    // 人工在既有事件之后接手：即使前面有熔断/settle，人工属主优先
+    expect(classifyOrphan([ev('worker_spawned', { pid: 1 }), ev('circuit_breaker', { reason: 'watchdog' }), ev('manual_claimed')])).toBe('manual')
+  })
+
+  it('编排器自己续跑过的人工卡：manual_claimed 在 spawn 之前 → 不判 manual，按既有规则分类', () => {
+    // 边界用例：最后一条 worker_spawned 在 manual_claimed 之后，说明闭环已重新开桌接管
+    expect(classifyOrphan([ev('manual_claimed'), ev('worker_spawned'), ev('worker_done', { summary: 'ok' })])).toBe('stuck')
+    expect(classifyOrphan([ev('manual_claimed'), ev('worker_spawned')])).toBe('resume') // 再崩：崩溃族
+  })
+})
+
+describe('orchestrator autoresume > pickOrphanResumeCandidates 人工认领卡不入选', () => {
+  it('manual 卡不进候选；同池崩溃族照常入选', () => {
+    const cards = [
+      { id: 'manual1', meta: {}, events: [ev('task_accepted'), ev('manual_claimed')] },
+      { id: 'crash1', meta: {}, events: [ev('task_accepted'), ev('worker_spawned', { pid: 1 })] },
+    ]
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 })).toEqual([{ id: 'crash1', attempts: 0 }])
+  })
+})
+
 describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () => {
   const crashEvents = () => [ev('task_accepted'), ev('worker_spawned', { pid: 1 })]
 
@@ -854,4 +887,35 @@ describe('orchestrator autoresume > 孤儿自愈 drain 集成（三分支）', (
       repo.cleanup()
     }
   }, 180_000)
+
+  it('人工认领集成：start 认领后退出 → 孤儿自愈不续跑不落 blocked，只落 fleet 观测事件', () => {
+    const repo = mkRepo()
+    try {
+      // pending 卡 → 真跑 feature-branch start 认领（写 manual_claimed，进程退出即释放任务锁）
+      ensureQueue(queueRoot(repo.root))
+      fs.writeFileSync(path.join(repo.root, '.agents', 'orchestrator', 'queue', 'pending', 'manual1.md'), cardText({ id: 'manual1' }))
+      execFileSync('node', [path.join(repo.root, '.agents', 'scripts', 'feature-branch.mjs'), 'start', 'manual1'], {
+        cwd: repo.root,
+        encoding: 'utf8',
+        timeout: 120_000,
+        env: { ...process.env },
+      })
+      expect(readCard(repo.root, 'running', 'manual1')).toBeTruthy()
+      expect(eventsOf(repo.root, 'manual1').map((e) => e.type)).toContain('manual_claimed')
+
+      const run = runOrch(repo.root, 'drain --backend mock')
+      expect(run.stdout).toContain('人工认领')
+      // 卡留在 running/（人工属主的工作现场原样保留），零续跑零落 blocked
+      expect(readCard(repo.root, 'running', 'manual1')).toBeTruthy()
+      const types = eventsOf(repo.root, 'manual1').map((e) => e.type)
+      expect(types).not.toContain('worker_spawned')
+      expect(types).not.toContain('auto_resume')
+      expect(types).not.toContain('failed')
+      // 只落 fleet 观测事件（不写卡 events.jsonl，属主可能正在写同一个文件）
+      const fleet = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'logs', 'fleet.jsonl'), 'utf8')
+      expect(fleet).toContain('orphan_heal_manual_claimed')
+    } finally {
+      repo.cleanup()
+    }
+  }, 120_000)
 })
