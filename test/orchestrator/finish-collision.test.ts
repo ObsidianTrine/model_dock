@@ -10,10 +10,11 @@
 // 相对路径可达（同 finish-merge-conflict.test.ts 的 ADVANCE_HELPER 模式）。
 
 import { describe, expect, it } from 'vitest'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { mkRepo, git } from './helpers.js'
+import { killTree } from '../../.agents/scripts/orchestrator/kill-tree.mjs'
 
 const norm = (s: string) => s.replace(/\r\n/g, '\n')
 
@@ -47,6 +48,17 @@ function writeMarker(summary, ageMs) {
 if (mode === 'red-with-marker') {
   // 每跑都写新鲜 marker 并 exit 1：重跑仍红且 marker 再现 → die 不再重试
   writeMarker('stub-collision-attempt-' + n)
+  process.exit(1)
+}
+if (mode === 'marker-lock-hold') {
+  // 每跑都写新鲜 marker + 持久伪造任务锁（测试侧删锁才算静默）并 exit 1：把 finish 钉在
+  // 撞窗等待里，供「等待期间心跳/锁归属」用例观测 .finish.lock
+  writeMarker('stub-collision-hold')
+  const lockDir = path.join(process.env.STUB_REPO_ROOT, '.agents', 'orchestrator')
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(path.join(lockDir, '.run-stub-task.lock'), JSON.stringify({
+    pid: process.pid, task: 'stub-task', cmd: 'run', acquired_at: new Date().toISOString(), beat: Date.now(),
+  }))
   process.exit(1)
 }
 if (mode === 'stale-marker-once') {
@@ -119,6 +131,71 @@ function writeLiveLock(repo: string, taskId: string) {
 
 const markerOf = (repo: string, task: string) => path.join(repo, '.agents', 'worktrees', task, 'node_modules', '.orch-collision.flag')
 const attemptsOf = (repo: string, task: string) => path.join(repo, '.agents', 'worktrees', task, 'node_modules', '.stub-attempts')
+
+// —— 撞窗等待期间 finish 锁的存活与归属（DM-04）——
+// 场景：finish A 持 .finish.lock 进入撞窗等待。等待必须让出事件循环（心跳 setInterval 才续得上
+// beat），醒来后必须复查锁仍属于自己。时间常量（心跳 15s / 陈锁 60s）不设测试开关：照
+// finish-lock.test.ts 的手法直接把锁里的 beat 回拨成陈锁形态。
+
+interface AsyncFinish {
+  pid: number
+  done: Promise<{ status: number | null; out: string }>
+  out: () => string
+}
+
+// 后台起一个真实 finish（非 spawnSync）：本进程持 .finish.lock 期间测试侧并行观测/干预
+function startFinishAsync(repo: string, task: string, extraEnv: Record<string, string> = {}): AsyncFinish {
+  const script = path.join(repo, '.agents', 'scripts', 'feature-branch.mjs')
+  const child = spawn(process.execPath, [script, 'finish', task], {
+    cwd: repo,
+    env: { ...process.env, FINISH_LOCK_WAIT_SECONDS: '0', STUB_REPO_ROOT: repo, STUB_MODE: 'marker-lock-hold', FINISH_COLLISION_POLL_MS: '1000', ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let buf = ''
+  child.stdout.on('data', (d) => { buf += String(d) })
+  child.stderr.on('data', (d) => { buf += String(d) })
+  const done = new Promise<{ status: number | null; out: string }>((resolve) => {
+    child.on('close', (code) => resolve({ status: code, out: norm(buf) }))
+  })
+  return { pid: child.pid, done, out: () => norm(buf) }
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+async function waitUntil(what: string, pred: () => boolean, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs
+  while (!pred()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for: ${what}`)
+    await sleep(100)
+  }
+}
+
+const finishLockPath = (repo: string) => path.join(repo, '.agents', 'worktrees', '.finish.lock')
+const stubTaskLockPath = (repo: string) => path.join(repo, '.agents', 'orchestrator', '.run-stub-task.lock')
+
+function readFinishLock(repo: string): { pid?: number; beat?: number } | null {
+  try {
+    return JSON.parse(fs.readFileSync(finishLockPath(repo), 'utf8'))
+  } catch {
+    return null // 不在 / 读窗口撞上半个 JSON：按无锁计
+  }
+}
+
+// 等 finish 持锁并真正进入撞窗等待。不能只看 stub 落下任务锁就返回——那一刻 finish 可能还没复扫，
+// 测试抢先删锁会让首轮扫描即静默、根本没等过。确定性信号：finish 读到 marker 后「读后即删」
+// （marker 消失 = 已过撞窗判定、马上复扫任务锁），再让出 500ms 确保复扫已发生
+async function waitUntilInCollisionWait(repo: string, task: string, a: AsyncFinish) {
+  await waitUntil('finish 持锁且 stub 已落下任务锁', () => fs.existsSync(stubTaskLockPath(repo)) && readFinishLock(repo)?.pid === a.pid, 40_000)
+  await waitUntil('finish 读到 marker 并进入等待', () => !fs.existsSync(markerOf(repo, task)), 40_000)
+  await sleep(500)
+}
+
+// 收尾：删掉伪造任务锁让等待中的 finish 自然醒来退出；超时（如仍在同步长睡）则按进程树收割
+async function stopFinish(repo: string, a: AsyncFinish) {
+  try { fs.rmSync(stubTaskLockPath(repo), { force: true }) } catch { /* 尽力而为 */ }
+  const settled = await Promise.race([a.done.then((r) => r), sleep(5_000).then(() => null)])
+  if (!settled) killTree(a.pid) // 本用例自己拉起的 finish
+}
 
 describe('finish × 编排器撞窗防护', () => {
   it('预检：活跃任务锁 → 开测前秒级拒绝（门禁零跑），报错含 taskId 与豁免键提示', () => {
@@ -226,4 +303,75 @@ describe('finish × 编排器撞窗防护', () => {
       repo.cleanup()
     }
   }, 60_000)
+
+  it('撞窗等待期间持锁者心跳持续刷新（beat 不冻结）、第二个 finish 不会接管', async () => {
+    const repo = makeRepoWithStub()
+    let a: AsyncFinish | null = null
+    try {
+      startAndCommit(repo.root, 'heartbeat-probe')
+      a = startFinishAsync(repo.root, 'heartbeat-probe')
+      await waitUntilInCollisionWait(repo.root, 'heartbeat-probe', a)
+
+      // 照 finish-lock.test.ts 手法：把持锁者的 beat 回拨 120s（陈锁形态）。等待期间心跳若在续，
+      // 下一拍（15s）就会把 beat 刷回新鲜；同步睡眠冻结事件循环则永远停在陈旧值
+      const forgedAt = Date.now()
+      const held = readFinishLock(repo.root)
+      fs.writeFileSync(finishLockPath(repo.root), JSON.stringify({ ...held, beat: forgedAt - 120_000 }))
+      let refreshed = false
+      try {
+        await waitUntil('持锁者 beat 刷新', () => {
+          const cur = readFinishLock(repo.root)
+          return cur?.pid === a!.pid && Number.isFinite(cur?.beat) && (cur?.beat ?? 0) >= forgedAt
+        }, 40_000) // 心跳间隔 15s + 并行负载余量
+        refreshed = true
+      } catch {
+        refreshed = false
+      }
+
+      // 第二个 finish（无 worktree 的任务名当锁后探针）：锁新鲜 → 拒绝；锁陈旧 → 接管后死在 no worktree
+      const b = runFinish(repo.root, 'heartbeat-other-probe')
+      const afterB = readFinishLock(repo.root)
+
+      expect(a.out()).toContain('等待静默…') // 确实停在撞窗等待里（场景前提）
+      expect(refreshed).toBe(true) // 等待期间 beat 持续刷新
+      expect(b.out).toContain('another finish is already running') // 第二个 finish 不接管
+      expect(afterB?.pid).toBe(a.pid) // 锁仍属第一个 finish
+    } finally {
+      if (a) await stopFinish(repo.root, a)
+      repo.cleanup()
+    }
+  }, 120_000)
+
+  it('撞窗等待期间锁已易主 → 醒来后 die（不合并、不误删接管者的锁）', async () => {
+    const repo = makeRepoWithStub()
+    let a: AsyncFinish | null = null
+    try {
+      startAndCommit(repo.root, 'usurped-probe')
+      a = startFinishAsync(repo.root, 'usurped-probe')
+      await waitUntilInCollisionWait(repo.root, 'usurped-probe', a)
+
+      // 等待期间锁被别的 finish 接管（此处由测试冒充接管者），随后编排器静默（删伪造任务锁）
+      fs.writeFileSync(finishLockPath(repo.root), JSON.stringify({
+        pid: process.pid, task: 'usurper', time: new Date().toISOString(), beat: Date.now(),
+      }))
+      try { fs.rmSync(stubTaskLockPath(repo.root), { force: true }) } catch { /* 尽力而为 */ }
+
+      // 轮询间隔已收缩到 1s：静默后应很快醒来。上限放到 45s——超过生产一轮 30s，留足并行负载余量
+      const r = await Promise.race([a.done, sleep(45_000).then(() => null)])
+      expect(r, 'finish 未在等待结束后及时退出').not.toBeNull()
+      expect(r!.status).toBe(1)
+      expect(r!.out).toContain('等待静默…') // 场景前提：确实经历过撞窗等待
+      expect(r!.out).toContain('锁已易主')
+      expect(r!.out).not.toContain('编排器已静默') // 醒来先复查归属：没走到"重跑验证"那一步
+      expect(r!.out).not.toContain('Merged') // 没有合并
+      const lock = readFinishLock(repo.root)
+      expect(lock?.pid).toBe(process.pid) // 接管者的锁原样保留（exit handler 只清自己的锁）
+    } finally {
+      if (a) {
+        const alive = await Promise.race([a.done.then(() => false), sleep(2_000).then(() => true)])
+        if (alive) killTree(a.pid) // 本用例自己拉起的 finish
+      }
+      repo.cleanup()
+    }
+  }, 90_000)
 })
