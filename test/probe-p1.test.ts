@@ -5,7 +5,9 @@ import { buildRuntime } from '../src/gateway/state.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
 import { makeRelayProbeTransport, probeCooldownUntil, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
+import { probeWire } from '../src/gateway/probe/wire.js'
 import { P1_CANARY, runP1 } from '../src/gateway/probe/runners/p1.js'
+import { getProbeRunner } from '../src/gateway/probe/runners/index.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
 import { readProbeLedger } from '../src/gateway/probe/ledger.js'
 import { setSecret } from '../src/config/secrets.js'
@@ -36,6 +38,33 @@ const okBody = (): string =>
 
 const runP1Suite = (rt: GatewayRuntime, transport: ProbeTransport, target = targetOf()) =>
   runProbeSuite(rt, { probeIds: ['p1'], targets: [target], transport, runner: runP1, confirmed: true })
+
+describe('probe-no-think · 思考注入（anthropic 线缺省关思考）', () => {
+  it('anthropic 请求体带 thinking:{type:disabled}；openai/responses 不注入；P7 keep 不注入', async () => {
+    const h = fakeHome()
+    try {
+      const ant = probeWire('anthropic', 'glm-5-3-flash-260828', { prompt: 'x' })
+      const antBody = JSON.parse(ant.body.toString('utf8'))
+      expect(antBody.thinking).toEqual({ type: 'disabled' })
+      expect(antBody.messages).toEqual([{ role: 'user', content: 'x' }])
+      const oa = probeWire('openai', 'm', { prompt: 'x' })
+      expect(JSON.parse(oa.body.toString('utf8')).thinking).toBeUndefined()
+      const resp = probeWire('responses', 'm', { prompt: 'x' })
+      expect(JSON.parse(resp.body.toString('utf8')).thinking).toBeUndefined()
+      // P7 显式 keep：请求体无 thinking 注入（探的就是推理通道）
+      const rt = mkRt({ acme: providerCfg('anthropic') })
+      let seenBody = ''
+      const t: ProbeTransport = async (req) => {
+        seenBody = req.body?.toString('utf8') ?? ''
+        return { status: 200, ms: 1, bodyText: JSON.stringify({ content: [{ type: 'thinking', thinking: 'x' }, { type: 'text', text: '42' }] }) }
+      }
+      await runProbeSuite(rt, { probeIds: ['p7'], targets: [targetOf()], transport: t, runnerFor: getProbeRunner, confirmed: true })
+      expect(JSON.parse(seenBody).thinking).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+})
 
 describe('probe-p1 · 五态归档', () => {
   it('200 精确回显 MODELDOCK-OK → healthy（canary 单样本）', async () => {
