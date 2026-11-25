@@ -238,6 +238,9 @@ export interface SyncLoopOpts extends SyncHooks {
   pinnedHome?: string
   /** 测试注入：替换 fs.watch 以触发异步 error（默认 = fs.watch）。返回值的 .on('error') 订阅必须可用 */
   watchFn?: (watchPath: string, listener: fs.WatchListener<string>) => fs.FSWatcher
+  /** 测试注入：stop() 在等在飞 tick 之后额外等待它返回，用来把「停止中」窗口拉长到用例可控
+   *  （并发 remount 互斥用例）；生产不传 */
+  __testStopGate?: () => Promise<void>
 }
 
 /** 轮询 + 本地变更监听的循环。多触发源（定时/文件变更/手动）共用单飞tick，不并发推拉 */
@@ -334,6 +337,7 @@ export class SyncLoop {
     clearTimeout(this.debounce)
     this.watcher?.close()
     await this.inflight?.catch(() => {})
+    if (this.opts.__testStopGate) await this.opts.__testStopGate()
   }
 
   /** 测试确定性栅栏（只读观测，零行为面）：在飞 tick 已完全收尾。trailing 补跑在 finally 内
@@ -366,6 +370,17 @@ export class SyncLoop {
 
 let active: SyncLoop | null = null
 let activeSig: string | null = null
+/** remount / stop 的串行队列（同 gateway/state/state-file.ts 的 promise 链写法）：
+ *  并发 remount 曾在「置空 active → await 在飞 tick 收尾」窗口内交错——后到者看不到旧循环就直接
+ *  新建，先到者恢复后又用旧签名建一个覆盖 active，留下 stopSyncEngine 停不掉的孤儿循环对同一
+ *  目标双写。链上任务串行，后到者等前者落定后重新读盘决策。 */
+let remountChain: Promise<void> = Promise.resolve()
+
+function enqueueRemount(task: () => Promise<void>): Promise<void> {
+  const next = remountChain.then(task, task)
+  remountChain = next.catch(() => {})
+  return next
+}
 
 function stateSignature(st: SyncState | null): string | null {
   if (!st || st.paused || !st.key) return null
@@ -381,8 +396,7 @@ async function stopLoop(): Promise<void> {
   await loop?.stop().catch(() => {})
 }
 
-/** 按 sync.json 现状挂载/摘除/重挂引擎（幂等）：签名未变则不动。网关启动与 sync.json 变更时调用 */
-export async function remountSyncEngine(opts?: SyncLoopOpts): Promise<void> {
+async function remountOnce(opts?: SyncLoopOpts): Promise<void> {
   let st: SyncState | null = null
   try {
     st = await readSyncState()
@@ -398,24 +412,48 @@ export async function remountSyncEngine(opts?: SyncLoopOpts): Promise<void> {
   }
   if (active && activeSig === sig) return
   await stopLoop()
+  // 等旧循环在飞 tick 收尾期间盘上 sync.json 可能又变（用户正在重新配置）：按最新签名挂载，
+  // 不复用进函数时的快照，否则会把旧配置的循环覆盖到 active 上。读失败按「无同步态」处理。
+  try {
+    st = await readSyncState()
+  } catch {
+    return
+  }
+  const latestSig = stateSignature(st)
+  if (latestSig === null) {
+    opts?.log?.(t('[modeldock] 配置同步已停用或暂停', '[modeldock] Config sync disabled or paused'))
+    return
+  }
   // cloud 模式 60s±20%（D4 心跳节奏）；target 模式 120s±30%
   const pollMs = st?.mode === 'cloud' ? (opts?.pollMs ?? CLOUD_POLL_MS) : (opts?.pollMs ?? DEFAULT_POLL_MS)
   const jitterRatio = st?.mode === 'cloud' ? (opts?.jitterRatio ?? 0.2) : (opts?.jitterRatio ?? 0.3)
   active = new SyncLoop({ ...opts, pollMs, jitterRatio, pinnedHome: modeldockDir() })
-  activeSig = sig
+  activeSig = latestSig
   active.start()
+}
+
+/** 按 sync.json 现状挂载/摘除/重挂引擎（幂等）：签名未变则不动。网关启动与 sync.json 变更时调用。
+ *  并发调用串行化（见 remountChain 注），返回的 promise 在本次挂载决策落地后 resolve。 */
+export function remountSyncEngine(opts?: SyncLoopOpts): Promise<void> {
+  return enqueueRemount(() => remountOnce(opts))
 }
 
 /** 网关退出与测试收尾调用，返回可等待的停止 promise：**测试必须在 restoreHomes/清 env 前 await**
  *  （两次事故论证见 SyncLoopOpts.pinnedHome 注；与 SyncLoop home 钉扎互为双保险，不得放开钉扎）。
- *  网关退出路径维持 fire-and-forget（进程将退，钉扎层兜底）。 */
+ *  网关退出路径维持 fire-and-forget（进程将退，钉扎层兜底）。同样入队：排在在途 remount 之后，
+ *  否则挂在停止之后落地的 remount 会留下无人回收的循环。 */
 export function stopSyncEngine(): Promise<void> {
-  return stopLoop().catch(() => {})
+  return enqueueRemount(stopLoop).catch(() => {})
 }
 
 /** 测试专用：触发单例 loop 的一轮 raw tick（home 钉扎等用例观察用）；无挂载 loop 返回 null */
 export function __testTickActiveSyncLoop(): Promise<TickOutcome> | null {
   return active ? active.tick() : null
+}
+
+/** 测试专用：当前挂载签名（无挂载 / 已停为 null），并发 remount 用例断言不挂旧签名 */
+export function __testActiveSyncSig(): string | null {
+  return activeSig
 }
 
 export interface SyncStatusView {
