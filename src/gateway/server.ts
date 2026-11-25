@@ -921,8 +921,9 @@ async function hSwitch(c: AdminCtx): Promise<void> {
   const b = await jsonRequestBody(req)
   try {
     // 一次整包落盘完成 active_profile + 人工钉定主服务（人为修改优先于定时窗口与自动选路），默认路由同步跟随
-    // 最后一次人工选择；钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位
-    const profileName = await switchToServiceWithRoute(String(b.service ?? ''), rt.config.gateway?.auto_failover === true)
+    // 最后一次人工选择；钉定持续到「当前」选回「自动 · X」（清除 auto_route_provider），期间定时窗口让位。
+    // auto_failover 不传内存值（审计 P-04）：由回调取盘上现值，rt.config 陈旧时不回写覆盖 CLI 的改动
+    const profileName = await switchToServiceWithRoute(String(b.service ?? ''))
     await reloadRuntime(rt)
     // dsh/workbuddy/zcode 的模型列表烙在客户端配置文件里，切全局后需按新路由重写才跟随
     const baked = await refreshBakedModelClients({ port: rt.port })
@@ -945,9 +946,9 @@ async function hAutoRoute(c: AdminCtx): Promise<void> {
   const { rt, req, res, audit } = c
   const b = await jsonRequestBody(req)
   try {
-    // 部分更新语义：未传字段保持现状（enabled 缺省口径见 lan.ts /m/api/auto-route 注）；其余字段由 UI 各自独立调用
+    // 部分更新语义：未传字段保持现状（enabled 缺省=保持盘上现值，见下方 setAutoRoute 注）；其余字段由 UI 各自独立调用
     const enabled = b.enabled === undefined
-      ? rt.config.gateway?.auto_failover === true
+      ? undefined
       : b.enabled === true || b.enabled === 'true'
     const provider = 'provider' in b
       ? (typeof b.provider === 'string' && b.provider.trim() ? b.provider.trim() : null)
@@ -962,7 +963,7 @@ async function hAutoRoute(c: AdminCtx): Promise<void> {
     await reloadRuntime(rt)
     audit(
       bi('自动路由', 'Auto route'),
-      enabled ? bi('开启', 'on') : bi('关闭', 'off'),
+      r.enabled ? bi('开启', 'on') : bi('关闭', 'off'),
       biCat(
         `auto_failover=${r.enabled} primary=`,
         r.provider ?? bi('自动', 'auto'),
