@@ -5,10 +5,12 @@ import type { AddressInfo } from 'node:net'
 import {
   forwardToUpstream,
   forwardWithFailover,
+  readBodyBounded,
   readUpstreamErrorText,
   rewriteModel,
   topLevelModel,
   translateUpstreamError,
+  UPSTREAM_ERROR_DECOMPRESS_MAX_BYTES,
   UpstreamError,
 } from '../src/gateway/relay.js'
 import { acquireProviderSlot } from '../src/gateway/concurrency.js'
@@ -377,6 +379,36 @@ describe('relay · 错误体翻译与解压读面', () => {
     }
     // undici body 无 arrayBuffer（异构 UpstreamBody）：回落 text() 直读，无压缩头原样返回
     expect(await readUpstreamErrorText({}, { text: async () => 'plain-error' })).toBe('plain-error')
+  })
+
+  // P-03：解压输出曾无上限——上游用高压缩比错误体可在事件循环上同步撑爆堆。
+  // 4MB 零字节压缩后仅几 KB，修前解压返回 4MB；修后各解压器按 maxOutputLength 抛错、
+  // 走既有 catch 回落原始字节（远小于上限）。测试自身内存只需 4MB 源缓冲。
+  it('高压缩比错误体：gzip/deflate/br/zstd 解压输出均不超过上限', async () => {
+    const bomb = Buffer.alloc(4 * 1024 * 1024)
+    const bodyOf = (b: Buffer) => {
+      const ab = new ArrayBuffer(b.byteLength)
+      new Uint8Array(ab).set(b)
+      return { arrayBuffer: async () => ab, text: async () => b.toString('utf8') }
+    }
+    const cases: Array<[string, Buffer]> = [
+      ['gzip', zlib.gzipSync(bomb)],
+      ['deflate', zlib.deflateSync(bomb)],
+      ['br', zlib.brotliCompressSync(bomb)],
+    ]
+    if (typeof zlib.zstdCompressSync === 'function') cases.push(['zstd', zlib.zstdCompressSync(bomb)])
+    for (const [enc, compressed] of cases) {
+      // 前提：压缩体本身远小于读取上限（走的是解压路径，不是读取截断）
+      expect(compressed.length).toBeLessThan(1024 * 1024)
+      const text = await readUpstreamErrorText({ 'content-encoding': enc }, bodyOf(compressed))
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(UPSTREAM_ERROR_DECOMPRESS_MAX_BYTES)
+    }
+  })
+
+  it('readBodyBounded 非流回落分支按 maxBytes 截断', async () => {
+    const huge = new Uint8Array(64 * 1024)
+    const buf = await readBodyBounded({ arrayBuffer: async () => huge.buffer }, 1024)
+    expect(buf.length).toBe(1024)
   })
 })
 

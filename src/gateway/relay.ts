@@ -795,7 +795,7 @@ export function filterResponseHeaders(headers: Record<string, string | string[]>
 /** zstd 解压器（zlib.zstdDecompressSync，Node ≥22.15 提供）。运行时探测而非比对版本号：
  *  22.15+ / 23.x / 24.x 都应有该 API，按版本字符串判断会在 22.16 或 24 上误关。
  *  缺失（旧运行时）时保持 null，错误体回落按 utf8 直读，不抛错、不影响 gzip/deflate/br。 */
-type ZstdDecoder = (buf: Buffer) => Buffer
+type ZstdDecoder = (buf: Buffer, opts?: { maxOutputLength?: number }) => Buffer
 const zstdDecoder: ZstdDecoder | null =
   typeof zlib.zstdDecompressSync === 'function' ? zlib.zstdDecompressSync : null
 
@@ -805,6 +805,12 @@ const zstdDecoder: ZstdDecoder | null =
  *  是网关单实例无请求级内存护栏下的堆膨胀点；超限截断保留头部（错误详情在前部，截尾不损
  *  诊断价值）。server.ts 探针（modeldock test 后端）同口径复用（cruise1112 P2-6 收尾）。 */
 export const UPSTREAM_ERROR_BODY_MAX_BYTES = 1024 * 1024
+
+/** sync 解压输出上限（P-03）：1MB 压缩体经高压缩比（gzip/br/zstd 对零字节可达千倍）可解出
+ *  数百 MB，同步解压会撑爆堆并卡住事件循环。2MB 足够任何真实错误 JSON；超限时各解压器抛
+ *  ERR_BUFFER_TOO_LARGE，走既有 catch 回落原始压缩字节（截断保留头部，仍可诊断）。 */
+export const UPSTREAM_ERROR_DECOMPRESS_MAX_BYTES = 2 * 1024 * 1024
+const DECOMPRESS_LIMITS = { maxOutputLength: UPSTREAM_ERROR_DECOMPRESS_MAX_BYTES } as const
 
 /** 有界读上游体（字节上限截断保留头部）：undici BodyReadable 本体是 Readable，优先逐块累计、
  *  达上限即停（for-await break 走 Readable.return() → 流就地销毁、连接关闭不复用——错误路径
@@ -829,11 +835,16 @@ export async function readBodyBounded(body: UpstreamBody & { arrayBuffer?(): Pro
     return Buffer.concat(chunks)
   }
   try {
-    if (typeof body.arrayBuffer === 'function') return Buffer.from(await body.arrayBuffer())
-    return Buffer.from(await body.text(), 'utf8')
+    if (typeof body.arrayBuffer === 'function') return sliceToMax(Buffer.from(await body.arrayBuffer()), maxBytes)
+    return sliceToMax(Buffer.from(await body.text(), 'utf8'), maxBytes)
   } catch {
     return Buffer.alloc(0)
   }
+}
+
+/** 非流回落同样按上限截断（流分支在读取中截断，回落分支此前忽略 maxBytes） */
+function sliceToMax(buf: Buffer, maxBytes: number): Buffer {
+  return buf.length > maxBytes ? buf.subarray(0, maxBytes) : buf
 }
 
 /** 读上游错误体为文本：按 content-encoding 解压后再解码，读取有 1MB 上限（见
@@ -850,13 +861,17 @@ export async function readUpstreamErrorText(
   const rawEnc = headers['content-encoding'] ?? headers['Content-Encoding'] ?? ''
   const enc = (Array.isArray(rawEnc) ? rawEnc.join(',') : String(rawEnc)).toLowerCase().trim()
   try {
-    if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf).toString('utf8')
+    if (enc === 'gzip' || enc === 'x-gzip') return zlib.gunzipSync(buf, DECOMPRESS_LIMITS).toString('utf8')
     if (enc === 'deflate') {
       // deflate 有 zlib 包头与裸流两种形态，上层无法区分，逐个尝试
-      try { return zlib.inflateSync(buf).toString('utf8') } catch { return zlib.inflateRawSync(buf).toString('utf8') }
+      try { return zlib.inflateSync(buf, DECOMPRESS_LIMITS).toString('utf8') } catch (e) {
+        // 超限不是形态不匹配，换 inflateRaw 只会再撞一次上限（还白耗 CPU）
+        if ((e as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') throw e
+        return zlib.inflateRawSync(buf, DECOMPRESS_LIMITS).toString('utf8')
+      }
     }
-    if (enc === 'br') return zlib.brotliDecompressSync(buf).toString('utf8')
-    if (enc === 'zstd' && zstdDecoder) return zstdDecoder(buf).toString('utf8')
+    if (enc === 'br') return zlib.brotliDecompressSync(buf, DECOMPRESS_LIMITS).toString('utf8')
+    if (enc === 'zstd' && zstdDecoder) return zstdDecoder(buf, DECOMPRESS_LIMITS).toString('utf8')
   } catch {
     /* 回落原文 */
   }
