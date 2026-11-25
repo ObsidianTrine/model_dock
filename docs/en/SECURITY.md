@@ -32,7 +32,7 @@ When reporting, please include:
 - Storage & leakage of upstream API keys (platform secure backend, secrets file, logs, API responses)
 - Gateway authentication & management plane (admin token, cookies, same-origin checks, audit logs)
 - Injection, privilege, or credential-leak issues in client config write / restore (attach, detach, snapshot restore)
-- **Optional LAN mobile console (off by default)**: turning on "mobile remote" in the console adds a second listener on the LAN (bound to `0.0.0.0` by default, separate port; the main gateway still listens on `127.0.0.1` only). The page and status/switch APIs require a token (scanning the QR code provides it), and config sync packages are always encrypted with a user passphrase before leaving the machine — unauthorized access, token bypass, or information leakage on this surface is **in scope**
+- **Optional LAN mobile console (off by default)**: turning on "mobile remote" in the console adds a second listener on the LAN (bound to `0.0.0.0` by default, separate port; the main gateway still listens on `127.0.0.1` only). The page and status/switch APIs require a token (scanning the QR code provides it), and config sync packages are always encrypted with a user passphrase before leaving the machine — unauthorized access, token bypass, or information leakage on this surface is **in scope**. This listener uses **plain HTTP** and is designed for trusted LANs only (home / personal hotspot); do not enable it on public Wi-Fi or other untrusted networks — same-segment sniffing risk is for the user to assess
 
 **Out of scope**:
 
