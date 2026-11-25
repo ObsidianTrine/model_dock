@@ -171,6 +171,15 @@ const COLLISION_POLL_MS = 30_000; // 等待静默的轮询间隔
 const COLLISION_WAIT_MAX_MS = 10 * 60_000; // 等待编排器静默的上限
 const COLLISION_MARKER_MAX_AGE_MS = 15 * 60_000; // marker 新鲜度：超龄 = 上次会话残留，不触发重试
 
+// 等待静默的轮询间隔可经环境收缩（测试等不起生产的一轮 30s）。口径同 FINISH_LOCK_WAIT_SECONDS：
+// 未设或非法值回落生产默认。
+function collisionPollMs() {
+  const raw = process.env.FINISH_COLLISION_POLL_MS;
+  if (raw === undefined || raw.trim() === '') return COLLISION_POLL_MS;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : COLLISION_POLL_MS;
+}
+
 function finishLockWaitCapSeconds() {
   const raw = process.env.FINISH_LOCK_WAIT_SECONDS;
   if (raw === undefined || raw.trim() === '') return 300;
@@ -268,7 +277,7 @@ function acquireFinishLock(taskId) {
     const beat = setInterval(() => {
       try {
         const info = readLockJson(FINISH_LOCK);
-        if (info?.pid !== process.pid) { clearInterval(beat); return; } // 锁已易主（防御，理论不可达）
+        if (info?.pid !== process.pid) { clearInterval(beat); return; } // 锁已易主（持锁期间长阻塞超陈锁阈值被接管）
         writeLockAtomic(FINISH_LOCK, JSON.stringify({ ...info, beat: Date.now() }));
       } catch { /* 下一个 tick 重试 */ }
     }, FINISH_LOCK_BEAT_MS);
@@ -647,9 +656,22 @@ function readCollisionMarker(markerPath) {
   return data;
 }
 
+// 持锁期间每次让出事件循环 / 同步长阻塞之后、继续动基准分支之前复查：锁仍是自己的，否则 die。
+// 醒来时锁已易主 = 另一个 finish 正在自己的 rebase/merge，本进程再往下走就是双 finish 同撞 git。
+function dieUnlessFinishLockOwned(stage, taskId) {
+  const info = readLockJson(FINISH_LOCK);
+  if (info?.pid === process.pid) return;
+  const owner = info ? `现属 pid ${info.pid ?? '?'}${info.task ? `（task "${info.task}"）` : ''}` : '锁文件已不存在';
+  die(`finish 锁已易主（${stage}期间，${owner}），本进程（pid ${process.pid}）不再继续，以免与接管者同时 rebase/merge。` + CRLF_N +
+    `  等接管者完成后重跑：node .agents/scripts/feature-branch.mjs finish ${taskId}`);
+}
+
 // 等编排器静默（活跃任务锁清空）：每 30s 复扫，每轮打印一句提示让人知道 finish 没挂死；
 // 上限 10min——超时 die（编排器长跑不退，硬重跑大概率再撞，不假装成功）。
-function waitForOrchestratorQuiet(taskId) {
+// 必须异步等待：本进程此时持着 .finish.lock，靠 setInterval 心跳续 beat，只有让出事件循环
+// 心跳才走得动。同步睡眠（sleepSyncMs）会冻结事件循环，beat 停更超 60s 即被判陈锁——排队的
+// 下一个 finish 删锁接管、开始自己的 rebase/merge（DM-04）。醒来后由调用方复查锁归属。
+async function waitForOrchestratorQuiet(taskId) {
   const waitStartMs = Date.now();
   for (;;) {
     const live = scanLiveTaskLocks(REPO_ROOT, { excludeTaskIds: [taskId] });
@@ -661,7 +683,7 @@ function waitForOrchestratorQuiet(taskId) {
         `  编排器长时间不退：等它收工后重跑 finish，或确需强行可设 AGENTS_ALLOW_COLLISION_WINDOW=1（自担 host-guard 对账红风险）。`);
     }
     console.log(`检测到活跃编排器任务锁 ${live.map((s) => s.taskId).join(', ')}，等待静默…（已等 ${elapsedS}s / 上限 10min）`);
-    sleepSyncMs(COLLISION_POLL_MS);
+    await new Promise((resolve) => setTimeout(resolve, collisionPollMs()));
   }
 }
 
@@ -759,6 +781,9 @@ async function cmdFinish(taskId, args) {
   git -C "${wtPath}" add -A && git -C "${wtPath}" rebase --continue
 then re-run: node .agents/scripts/feature-branch.mjs finish ${taskId}`);
     }
+    // 同步 rebase 期间心跳同样停更（通常秒级，但卡顿超陈锁阈值就会被接管）：
+    // 继续跑门禁/合并前先复查锁归属
+    dieUnlessFinishLockOwned('git rebase', taskId);
   } else {
     console.log(`${branch} is up to date with ${base}.`);
   }
@@ -837,7 +862,8 @@ If the task truly has no deliverable, clean up manually: git worktree remove "${
         // 新鲜签名：读后立即删除（防同 marker 二次触发），等编排器静默后自动重跑一次
         try { fs.rmSync(markerPath, { force: true }); } catch { /* 尽力而为 */ }
         console.log(`检测到撞窗签名（${Math.max(0, Math.round((Date.now() - marker.at) / 1000))}s 前，summary: ${marker.summary}）——等待编排器静默后自动重跑验证（至多一次）。`);
-        waitForOrchestratorQuiet(taskId);
+        await waitForOrchestratorQuiet(taskId);
+        dieUnlessFinishLockOwned('等待编排器静默', taskId);
         console.log('编排器已静默，重跑验证…');
       }
     }

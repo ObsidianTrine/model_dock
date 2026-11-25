@@ -49,7 +49,7 @@ finish 自动完成：rebase 到最新基准分支（有冲突时脚本提示你
 
 - **并发安全**：合并在主仓库检出上进行，finish 全程持有 `.agents/worktrees/.finish.lock` 串行化——多个 agent 同时 finish，后到者**有界等待**持锁者（轮询 2.5s，默认上限 300s，`FINISH_LOCK_WAIT_SECONDS` 可调、设 0 恢复立即失败），等待期间持锁者退出则自动接管；超时才提示重跑。陈锁（属主进程已死）同样自动接管，无需手动清理。
 
-- **编排器撞窗防护**（2026-11-22 三连红事故修复）：编排器在 5–9 分钟套件窗口内做卡片流转/worktree 清理，会撞宿主仓 host-guard 哨兵（fail-closed 必红）。两道防线：①**预检快失败**——门禁开跑前扫描活跃编排器任务锁（`.agents/orchestrator/.run-<task-id>.lock`，按心跳判活），命中即秒级拒绝并给三个出路（等静默后重跑 / 纯文档改动 `--skip-test` / 强行 `AGENTS_ALLOW_COLLISION_WINDOW=1`）；②**marker 等待重试**——host-guard 归因命中时会在 worktree 落 marker（`node_modules/.orch-collision.flag`），finish 门禁红时读到新鲜 marker（15min 内）→ 每 30s 复扫任务锁等编排器静默（上限 10min）→ 自动重跑门禁一次；重跑仍红且 marker 再现则带归因摘要 die、不再重试；无 marker / marker 陈旧则按真失败照常 die。
+- **编排器撞窗防护**（2026-11-22 三连红事故修复）：编排器在 5–9 分钟套件窗口内做卡片流转/worktree 清理，会撞宿主仓 host-guard 哨兵（fail-closed 必红）。两道防线：①**预检快失败**——门禁开跑前扫描活跃编排器任务锁（`.agents/orchestrator/.run-<task-id>.lock`，按心跳判活），命中即秒级拒绝并给三个出路（等静默后重跑 / 纯文档改动 `--skip-test` / 强行 `AGENTS_ALLOW_COLLISION_WINDOW=1`）；②**marker 等待重试**——host-guard 归因命中时会在 worktree 落 marker（`node_modules/.orch-collision.flag`），finish 门禁红时读到新鲜 marker（15min 内）→ 每 30s 复扫任务锁等编排器静默（上限 10min；轮询间隔 `FINISH_COLLISION_POLL_MS` 可调，仅供测试收缩，生产不必设）→ 自动重跑门禁一次；重跑仍红且 marker 再现则带归因摘要 die、不再重试；无 marker / marker 陈旧则按真失败照常 die。等待静默是异步的，持锁心跳不停；等待结束与 rebase 之后都会复查 finish 锁仍属自己，已被其他 finish 接管则报「锁已易主」退出、不合并（等接管者完成后重跑 finish）。
 
 - rebase 冲突：在 worktree 内解决 → `git add -A && git rebase --continue` → 重新跑 finish。
 - finish 里的验证失败：回 worktree 修复 → 提交 → 重跑 finish。
