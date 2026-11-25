@@ -5,7 +5,7 @@ import { c, sleep, localDateStr, t } from '../util/index.js'
 import { randomToken } from '../util/fsx.js'
 import { logsDir, displayPath } from '../util/paths.js'
 // 直取 state-file 单模块（perf-p2-polish）：CLI 命令启动闭包不拖 gateway/state.js 聚合层
-import { readGatewayState, writeGatewayState } from '../gateway/state/state-file.js'
+import { clearGatewayState, readGatewayState, writeGatewayState } from '../gateway/state/state-file.js'
 import {
   autostartStatus,
   gatewayDaemonArgs,
@@ -15,13 +15,21 @@ import {
   type AutostartKind,
   type AutostartStatus,
 } from '../autostart.js'
-import { DEFAULT_GATEWAY_PORT, exitWithError, gatewayLive, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
+import { DEFAULT_GATEWAY_PORT, exitWithError, gatewayLive, gatewayProbe, loadCfg, requireGateway, spawnDaemonAndWait, openUrlInBrowser, killByPid, parsePidCommandLines } from './shared.js'
 
 export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; debug?: boolean }): Promise<void> {
   const cfg = await loadCfg()
-  const live = await gatewayLive()
-  if (live) {
-    console.log(c.yellow(t('网关已在运行：http://127.0.0.1:{port}（pid {pid}）', 'Gateway is already running: http://127.0.0.1:{port} (pid {pid})', { port: live.port, pid: live.pid })))
+  const probe = await gatewayProbe()
+  if (probe.status === 'live' && !probe.identityMismatch) {
+    console.log(c.yellow(t('网关已在运行：http://127.0.0.1:{port}（pid {pid}）', 'Gateway is already running: http://127.0.0.1:{port} (pid {pid})', { port: probe.state.port, pid: probe.state.pid })))
+    return
+  }
+  // 三态判活（审计 P-06a）：进程活着但健康检查超时 → 不重复拉起（daemon 会在同一 home 抢状态文件），
+  // 也不清状态文件（那个 pid 可能只是卡住）；给可操作出路。
+  if (probe.status === 'unresponsive') {
+    console.error(c.red(t('✗ 网关无响应：http://127.0.0.1:{port}（pid {pid}）', '✗ The gateway is not responding: http://127.0.0.1:{port} (pid {pid})', { port: probe.state.port, pid: probe.state.pid })))
+    console.error(c.yellow(t('提示: 进程存活但健康检查超时；先运行 modeldock gateway stop 停止它，再启动。日志见 logs/daemon-{date}.log', 'Hint: the process is alive but the health check timed out; run "modeldock gateway stop" to stop it first, then start again. See logs/daemon-{date}.log', { date: localDateStr() })))
+    process.exitCode = 1
     return
   }
   const port = opts.port ? Number(opts.port) : (cfg.gateway?.port ?? DEFAULT_GATEWAY_PORT)
@@ -69,9 +77,18 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
   process.exit(1)
 }
 
-/** 轮换管理令牌：网关在跑就调运行时接口（旧 token/cookie 立即失效）；没跑则改残留状态文件（下次启动生效）。 */
+/** 轮换管理令牌：网关在跑就调运行时接口（旧 token/cookie 立即失效）；没跑则改残留状态文件（下次启动生效）。
+ *  网关无响应（pid 活、health 超时）时拒绝直写状态文件（审计 P-06a）：运行中的实例内存里仍是旧
+ *  token，直接改盘只会让「磁盘上是新 token、实际鉴权用旧 token」长期不一致。 */
 export async function cmdGatewayRotateToken(): Promise<void> {
-  const live = await gatewayLive()
+  const probe = await gatewayProbe()
+  const live = probe.status === 'live' && !probe.identityMismatch ? probe.state : null
+  if (probe.status === 'unresponsive') {
+    console.error(c.red(t('✗ 网关无响应（127.0.0.1:{port}，pid {pid}）：未改写状态文件', '✗ The gateway is not responding (127.0.0.1:{port}, pid {pid}); the state file was not modified', { port: probe.state.port, pid: probe.state.pid })))
+    console.error(c.yellow(t('提示: 运行中的实例内存里仍是旧令牌；先运行 modeldock gateway stop 停止它，再轮换', 'Hint: the running instance still holds the old token in memory; run "modeldock gateway stop" first, then rotate')))
+    process.exitCode = 1
+    return
+  }
   if (live) {
     let res: Response
     try {
@@ -111,7 +128,19 @@ export async function cmdGatewayStop(): Promise<void> {
   const svc = autostartStatus()
   const managed = !!(svc?.installed && svc.loaded && svc.kind !== 'windows')
   if (managed) stopService()
-  const live = await gatewayLive()
+  // 三态判活（审计 P-06a）：pid 活但 health 超时 ≠ 未运行。先复核该 pid 是否仍是网关进程
+  // （pid 可能已被系统复用），确认不是就只清陈旧状态文件、绝不误杀无关进程。
+  const probe = await gatewayProbe()
+  if (probe.status === 'unresponsive') {
+    const looks = pidLooksLikeGateway(probe.state.pid)
+    if (looks === false) {
+      await clearGatewayState()
+      console.log(c.yellow(t('网关无响应（pid {pid}），且该 pid 已不是网关进程（疑似被复用）；已清理陈旧状态文件', 'The gateway is not responding (pid {pid}) and that pid no longer belongs to a gateway process (likely reused); stale state file cleared', { pid: probe.state.pid })))
+      return
+    }
+    console.log(c.yellow(t('网关无响应（pid {pid}），进程仍在：按状态文件继续停止', 'The gateway is not responding (pid {pid}) but the process is still alive; stopping it based on the state file', { pid: probe.state.pid })))
+  }
+  const live = probe.status === 'stopped' ? null : probe.state
   if (!live) {
     // 服务托管的实例被 bootout 时进程已随之退出，走不到下面的 SIGTERM 分支
     if (managed) {
@@ -150,6 +179,17 @@ export async function cmdGatewayStop(): Promise<void> {
       console.log(c.red(t('✗ 网关进程未能停止（pid {pid}），请手动结束该进程', '✗ The gateway process did not stop (pid {pid}). End it manually')))
     }
   }
+}
+
+/** 停止前复核：pid 是否仍是网关进程（仅用于「进程活但健康端点无响应」的不可验明正身场景，
+ *  防 pid 复用被误杀）。进程枚举不可用、或枚举里查不到该 pid（权限/竞态）→ null = 未知，
+ *  调用方按状态文件照旧处理；明确命中非网关命令行 → false。 */
+function pidLooksLikeGateway(pid: number): boolean | null {
+  const lines = listProcessLines()
+  if (!lines) return null
+  const hit = parsePidCommandLines(lines).find((p) => p.pid === pid)
+  if (!hit) return null
+  return isGatewayProcessCmd(hit.cmd)
 }
 
 /** 轮询等待进程退位（10×200ms，kill(pid,0) 抛错即视为已退出）。 */
@@ -250,7 +290,15 @@ function kindLabel(k: AutostartKind): string {
 
 export async function cmdGatewayStatus(): Promise<void> {
   const svc = autostartStatus()
-  const live = await gatewayLive()
+  const probe = await gatewayProbe()
+  // 三态判活（审计 P-06a）：pid 活但 health 超时 = 无响应，不是「未运行」；也不去拉管理端点白等
+  if (probe.status === 'unresponsive') {
+    console.log(c.yellow(t('● 网关无响应  http://127.0.0.1:{port}（pid {pid}，since {ts}）', '● Gateway not responding  http://127.0.0.1:{port} (pid {pid}, since {ts})', { port: probe.state.port, pid: probe.state.pid, ts: probe.state.started_at })))
+    console.log(c.gray(t('  进程存活但健康检查超时：看 logs/daemon-{date}.log 排查；停止：modeldock gateway stop', '  The process is alive but the health check timed out: check logs/daemon-{date}.log; stop it: modeldock gateway stop', { date: localDateStr() })))
+    if (svc?.installed) console.log(autostartLine(svc).trimStart())
+    return
+  }
+  const live = probe.status === 'live' && !probe.identityMismatch ? probe.state : null
   if (!live) {
     console.log(c.gray(t('网关未在运行；启动：modeldock gateway start（--daemon 后台）', 'The gateway is not running. Start it: modeldock gateway start (--daemon for background)')))
     if (!svc?.installed) console.log(c.gray(t('开机自启未安装（可选）：modeldock gateway install', 'Start at login is not installed (optional): modeldock gateway install')))

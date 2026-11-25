@@ -8,24 +8,30 @@ import { DEFAULT_GATEWAY_PORT } from '../config/types.js'
 import { loadConfig } from '../config/store.js'
 // 直取 state-file 单模块（perf-p2-polish）：绕开 gateway/state.js 聚合层——那会静态拖入
 // logs→pricing-core 之外的整条 state 域；CLI 探活只需要 state-file 这 3.5KB 零重依赖叶子
-import { gatewayLive, type GatewayStateFile } from '../gateway/state/state-file.js'
+import { gatewayLive, gatewayProbe, type GatewayLiveness, type GatewayStateFile } from '../gateway/state/state-file.js'
 import { c, t, ensureDir, sleep, getLang, localDateStr } from '../util/index.js'
 import { displayPath, logsDir, modeldockDir } from '../util/paths.js'
 import { debugLog } from '../gateway/state/debuglog.js'
 
-export { gatewayLive, DEFAULT_GATEWAY_PORT }
+export { gatewayLive, gatewayProbe, DEFAULT_GATEWAY_PORT }
+export type { GatewayLiveness }
 
 export async function loadCfg(): Promise<Config> {
   return loadConfig()
 }
 
 export async function requireGateway(): Promise<GatewayStateFile> {
-  const live = await gatewayLive()
-  if (!live) {
+  const p = await gatewayProbe()
+  if (p.status === 'unresponsive') {
+    console.error(c.red(t('网关无响应：127.0.0.1:{port}（pid {pid}）：进程存活但健康检查超时', 'Gateway not responding: 127.0.0.1:{port} (pid {pid}): the process is alive but the health check timed out', { port: p.state.port, pid: p.state.pid })))
+    console.error(c.yellow(t('提示: 先运行 modeldock gateway stop 停止该进程，再启动；日志见 logs/daemon-{date}.log', 'Hint: run "modeldock gateway stop" to stop that process first and start again; see logs/daemon-{date}.log', { date: localDateStr() })))
+    process.exit(1)
+  }
+  if (p.status !== 'live' || p.identityMismatch) {
     console.error(c.red(t('网关未运行。先启动：modeldock gateway start（或 --daemon 后台运行）', 'Gateway is not running. Start it first: modeldock gateway start (or --daemon to run in the background)')))
     process.exit(1)
   }
-  return live
+  return p.state
 }
 
 export function exitWithError(msg: string, hint?: string): never {

@@ -243,6 +243,41 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
     }
   }, 120_000)
 
+  it('无响应实例（pid 活、健康端点不通）：status 报「网关无响应」；stop 复核 pid 已非网关进程时不误杀，只清陈旧状态', async () => {
+    const h = fakeHome()
+    let dummy: ChildProcess | undefined
+    try {
+      // 无辜的存活进程（命令行不含 gateway start / modeldock / src/cli.ts）冒充被复用的 pid
+      dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+      await new Promise<void>((resolve, reject) => {
+        dummy!.once('spawn', () => resolve())
+        dummy!.once('error', reject)
+      })
+      const port = await freePort() // 无人监听 → health 连接被拒 → unresponsive（秒级，不占端口）
+      writeState(h.home, {
+        pid: dummy.pid,
+        port,
+        admin_token: 'mdkadm_' + '0'.repeat(32),
+        started_at: '2026-01-01T00:00:00',
+      })
+
+      const status = await runCli(h.home, ['gateway', 'status'])
+      expect(status.output).toContain('网关无响应')
+      expect(status.output).not.toContain('网关未在运行')
+      expect(fs.existsSync(gatewayStatePath())).toBe(true) // 三态：无响应不清状态文件
+
+      const stopped = await runCli(h.home, ['gateway', 'stop'])
+      expect(stopped.output).toContain('网关无响应')
+      expect(stopped.output).toContain('已清理陈旧状态文件')
+      // 无辜进程（疑似被复用的 pid）必须活着
+      expect(() => process.kill(dummy!.pid!, 0)).not.toThrow()
+      expect(fs.existsSync(gatewayStatePath())).toBe(false)
+    } finally {
+      await stopChild(dummy)
+      h.restore()
+    }
+  }, 120_000)
+
   /** --daemon 真链路 CLI 子进程（内部 spawnDaemonAndWait 拉起 daemon 孙进程）。
    *  必须异步 spawn + 逐段收集输出：就绪后 CLI 是否退出正是本组用例的被测行为。 */
   function spawnDaemonCli(h: { home: string }, port: number): { child: ChildProcess; output: () => string; exit: Promise<{ code: number | null; at: number }> } {

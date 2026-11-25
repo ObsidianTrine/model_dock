@@ -5,11 +5,11 @@ import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, type Config } from '../config/t
 import { migrateSecretsToSecure } from '../ops.js'
 import { ensureDir, randomToken, drainAppendStreams } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
-import { localIsoTs } from '../util/time.js'
+import { localDateStr, localIsoTs } from '../util/time.js'
 import { modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
-import { buildRuntime, clearGatewayState, logEvent, pidAlive, pushRing, readGatewayState, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
+import { buildRuntime, gatewayProbe, logEvent, pushRing, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
 import { createGatewayServer } from './server.js'
 import { gatewayPriceResolver } from './pricing.js'
 import { warmupOverview } from './overview-view.js'
@@ -25,18 +25,6 @@ import { VERSION } from '../version.js'
 // 崩溃痕迹兜底：本模块是 --sea-gateway 守护进程入口，daemon 由 stdio 收敛拉起，未处理异常/
 // rejection 此前凭空蒸发（无任何落盘）。幂等，cli.ts 已装也不重复。
 installCrashHandlers()
-
-async function healthOk(port: number): Promise<boolean> {
-  try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 1000)
-    const res = await fetch(`http://127.0.0.1:${port}/_modeldock/health`, { signal: ctrl.signal })
-    clearTimeout(t)
-    return res.ok
-  } catch {
-    return false
-  }
-}
 
 /** 决定本次网关的 admin token：gateway.json 里的旧 token 格式合法（mdkadm_ + 十六进制）就复用，
  *  否则新生成。token 跨重启稳定后，浏览器 cookie 不用每次重新登录（参考 dsh 的持久签名密钥做法）；
@@ -80,20 +68,26 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
   setDebugFlag(debugFlag === true)
   refreshDebugOn(cfg.gateway)
 
-  // 单实例保护
-  const existing = await readGatewayState()
-  const previousToken = existing?.admin_token // clearGatewayState 之前先取出，供本次复用
+  // 单实例保护（三态判活，审计 P-06a）：pid 活 + health 通 = 已在运行；pid 活但 health 超时 =
+  // 无响应——绝不能当成「未运行」清掉状态文件再起第二个实例（会双 daemon 抢同一 home），也不清
+  // 状态：那个 pid 可能真的只是卡住，状态文件仍是它的。只有 pid 已死（stopped）才继续启动。
+  const liveness = await gatewayProbe()
+  const existing = liveness.state
+  const previousToken = existing?.admin_token // 覆盖写之前先取出，供本次复用
   const previousLanToken = existing?.lan_token // LAN 凭据同样跨重启复用（手机 cookie 不掉）
-  if (existing && pidAlive(existing.pid)) {
-    if (await healthOk(existing.port)) {
-      console.error(t('网关已在运行：127.0.0.1:{port}（pid {pid}）', 'Gateway already running: 127.0.0.1:{port} (pid {pid})', { port: existing.port, pid: existing.pid }))
-      // 不用 process.exit(1)：stdout 还是管道时（CLI 被脚本/测试捕获输出）强退会在
-      // Windows 上撞 libuv 的 UV_HANDLE_CLOSING 断言（进程以 0xC000013A 崩掉而非退出码 1）；
-      // 置 exitCode 后自然退出，等管道刷完，行为一致且三平台同码
-      process.exitCode = 1
-      return
-    }
-    await clearGatewayState()
+  if (liveness.status === 'live') {
+    console.error(t('网关已在运行：127.0.0.1:{port}（pid {pid}）', 'Gateway already running: 127.0.0.1:{port} (pid {pid})', { port: liveness.state.port, pid: liveness.state.pid }))
+    // 不用 process.exit(1)：stdout 还是管道时（CLI 被脚本/测试捕获输出）强退会在
+    // Windows 上撞 libuv 的 UV_HANDLE_CLOSING 断言（进程以 0xC000013A 崩掉而非退出码 1）；
+    // 置 exitCode 后自然退出，等管道刷完，行为一致且三平台同码
+    process.exitCode = 1
+    return
+  }
+  if (liveness.status === 'unresponsive') {
+    console.error(t('网关无响应：127.0.0.1:{port}（pid {pid}）：进程存活但健康检查超时', 'Gateway not responding: 127.0.0.1:{port} (pid {pid}): the process is alive but the health check timed out', { port: liveness.state.port, pid: liveness.state.pid }))
+    console.error(t('未启动新实例，状态文件保持不动。先运行 modeldock gateway stop 停止该进程，或查看日志 logs/daemon-{date}.log 排查', 'No new instance started; the state file is left untouched. Run "modeldock gateway stop" to stop that process first, or check logs/daemon-{date}.log', { date: localDateStr() }))
+    process.exitCode = 1
+    return
   }
 
   await ensureDir(modeldockDir())
