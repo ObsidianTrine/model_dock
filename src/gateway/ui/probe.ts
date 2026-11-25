@@ -493,13 +493,15 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     if (!j || !j.breakdown || !j.budget) return ''
     var bd = j.breakdown
     var bu = j.budget
-    // 零值不出 pill：对齐 usageHtml「无流量不显示」先例，横幅不为空状态常驻占位
-    if (!bd.requests && !bu.spent) return ''
+    // 零消耗不出 pill（slim-probe-pill）：tokens=0 即无自耗——旧口径「有过调用就显示」让
+    // 0-token 调用（上游未回 usage 按 0 记）也常驻占位；预算耗尽例外，硬停警示必须常驻。
+    // 完整信息在悬浮提示与点击弹层（明细分解 + 月预算），横幅只留最短信号
+    if (!bd.total && !bu.exhausted) return ''
     var tip = t('探针花费记独立账本，不进请求日志与今日用量；点击查看按探针明细与月预算余量', 'Probe spend is kept in a separate ledger, outside the request log and daily usage; click for per-probe breakdown and monthly budget headroom')
     // 预算耗尽升级 warn 语义色并在 title 追加硬停警示：探针预算闸已硬停，用户必须知道探针为何全挂
     if (bu.exhausted) tip += ' · ' + t('预算耗尽：探针硬停', 'Budget exhausted: probes hard-stop')
     return ' <button type="button" class="pill ' + (bu.exhausted ? 'warn' : 'dim') + '" id="probeSelfPill" title="' + esc(tip) + '">' +
-      esc(t('探针本月 ', 'Probe this month ') + fmtTok(bd.total) + ' tokens · ' + t('预算余 ', 'budget left ') + fmtTok(bu.remaining)) + '</button>'
+      esc(t('探针 ', 'Probe ') + fmtTok(bd.total) + ' · ' + t('余 ', 'left ') + fmtTok(bu.remaining)) + '</button>'
   }
   // 账本读侧是全文件同步读，不进 5s 热路径档；预算只在探针人工触发时变化，60s 足够
   // （对齐 refreshUpdStatus 60s 档写法）。失败静默：pill 缺席不报错，下一周期重试

@@ -856,7 +856,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     await flush()
   }
 
-  it('探针自耗 pill 渲染进健康横幅：探针本月/预算余取 breakdown.total 与 budget.remaining，dim 形态带引导 title', async () => {
+  it('探针自耗 pill 渲染进健康横幅：tokens/预算余取 breakdown.total 与 budget.remaining（slim 短文案），dim 形态带引导 title', async () => {
     seedLedger(18240, 17, 18240, 31760, false)
     try {
       await mountAndConverge()
@@ -865,12 +865,14 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(pill).not.toBeNull()
       expect(pill!.tagName).toBe('BUTTON')
       expect(pill!.className).toBe('pill dim')
-      expect(pill!.textContent).toContain('探针本月 18.2k tokens · 预算余 31.8k')
+      // slim-probe-pill：横幅只留最短信号「探针 X · 余 Y」，完整信息在 title 与明细弹层
+      expect(pill!.textContent).toContain('探针 18.2k · 余 31.8k')
+      expect(pill!.textContent).not.toContain('tokens')
       expect(pill!.title).toContain('探针花费记独立账本，不进请求日志与今日用量')
       expect(pill!.title).toContain('点击查看按探针明细与月预算余量')
       // 融入位置：探针 pill 与今日用量 pill 在同一横幅、usageHtml 之后并列
       expect(health.textContent).toContain('今日 1.5k')
-      expect(health.textContent!.indexOf('今日 1.5k')).toBeLessThan(health.textContent!.indexOf('探针本月'))
+      expect(health.textContent!.indexOf('今日 1.5k')).toBeLessThan(health.textContent!.indexOf('探针 18.2k'))
     } finally {
       resetLedger()
     }
@@ -883,6 +885,17 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(document.getElementById('probeSelfPill')).toBeNull()
       // 明细弹层壳仍存在（脚本创建），只是无 pill 入口
       expect(document.getElementById('probeLedgerOverlay')).not.toBeNull()
+    } finally {
+      resetLedger()
+    }
+  })
+
+  it('探针自耗 0-token 调用不出 pill（slim-probe-pill）：requests>0 但 total=0 且未耗尽 → 隐藏（旧口径常驻占位）', async () => {
+    // 上游未回 usage 的调用按 0 tokens 入账（调用发生本身入账）——有过调用 ≠ 有消耗
+    seedLedger(0, 3, 0, 50000, false)
+    try {
+      await mountAndConverge()
+      expect(document.getElementById('probeSelfPill')).toBeNull()
     } finally {
       resetLedger()
     }
@@ -942,8 +955,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(scrim.hidden).toBe(false)
       scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       expect(scrim.hidden).toBe(true)
-      // 空态行：by_probe 无键 → 「本月暂无探针调用」（fixture 刻意 requests>0 让 pill 可见以打开弹层）
-      seedLedger(0, 2, 300, 49700, false)
+      // 空态行：by_probe 无键 → 「本月暂无探针调用」。slim-probe-pill 后 total=0 不再出 pill
+      //（无入口），故空态夹具给微量消耗（total=spent=300 同源一致）保住 pill 入口，
+      // 再把分解表清空（seedLedger 的 by_probe 与 total 联动，空态需解耦）
+      seedLedger(300, 2, 300, 49700, false)
+      ;(PROBE_LEDGER_FIXTURE.breakdown as Record<string, unknown>)!.by_probe = {}
       await mountAndConverge()
       ;(document.getElementById('probeSelfPill') as HTMLElement).click()
       await flush()
@@ -998,7 +1014,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       vi.advanceTimersByTime(60000)
       await flush()
       const pill = document.getElementById('probeSelfPill') as HTMLElement
-      expect(pill.textContent).toContain('探针本月 20.0k tokens · 预算余 30.0k')
+      expect(pill.textContent).toContain('探针 20.0k · 余 30.0k')
     } finally {
       resetLedger()
     }
