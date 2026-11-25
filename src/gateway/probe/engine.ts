@@ -307,13 +307,36 @@ async function readSseBounded(
  *  错误语义：本地跳过（key 池空/全冷却/端点缺失）与网络失败按 UpstreamError/普通异常抛出，
  *  runner 归档 unreachable——静默转伪响应会伪造健康结论，宁炸勿骗。runner 自带 path/body 时
  *  原样使用（P1/P12 经 probeWire 拼装），缺席按 provider 协议拼 P1 形态兜底。 */
+/** 思考参数自愈回退（thinking-param-fallback，probe-no-think 实测驱动）：部分模型不支持
+ *  thinking 参数（glm-5-3-flash 经火山 coding plan 实测 400 "thinking.type `disabled` is not
+ *  supported by this model"），wire 的缺省注入会把本来能跑的探针打成 400。本包装在「400 且
+ *  错误体指向 thinking 参数」的窄条件下剥掉该字段重发一次——支持关思考的模型首启即生效
+ *  （省 tokens），不支持的自动回落基线（零 token 损耗，多付一次快速 400 往返），供应商差异
+ *  自适应，不吞其他 400。导出供单测直测包装层。 */
+export function withThinkingFallback(transport: ProbeTransport): ProbeTransport {
+  return async (req) => {
+    const resp = await transport(req)
+    if (resp.status !== 400 || !/thinking/i.test(resp.bodyText ?? '')) return resp
+    let stripped: Buffer
+    try {
+      const j = JSON.parse(req.body?.toString('utf8') ?? '') as Record<string, unknown>
+      if (!j || typeof j !== 'object' || !('thinking' in j)) return resp
+      delete j.thinking
+      stripped = Buffer.from(JSON.stringify(j))
+    } catch {
+      return resp
+    }
+    return transport({ ...req, body: stripped })
+  }
+}
+
 export function makeRelayProbeTransport(
   rt: GatewayRuntime,
   o: { idleTimeoutMs?: number; retries?: number } = {}
 ): ProbeTransport {
   const idle = o.idleTimeoutMs ?? 10 * 60_000
   const retries = o.retries ?? 1
-  return async (req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> => {
+  return withThinkingFallback(async (req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> => {
     const provider = rt.config.providers[req.providerId]
     if (!provider) {
       throw new Error(t('服务「{id}」不存在，无法探测', 'Service "{id}" does not exist; nothing to probe', { id: req.providerId }))
@@ -380,7 +403,7 @@ export function makeRelayProbeTransport(
       ms: up.ms,
       ...(chunks != null ? { chunks } : {}),
     }
-  }
+  })
 }
 
 /** 探针套件运行入口：跑 probeIds × targets 全组合。 */

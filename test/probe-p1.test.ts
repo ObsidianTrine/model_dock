@@ -6,6 +6,7 @@ import type { GatewayRuntime } from '../src/gateway/state.js'
 import { makeRelayProbeTransport, probeCooldownUntil, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
 import { probeWire } from '../src/gateway/probe/wire.js'
+import { withThinkingFallback } from '../src/gateway/probe/engine.js'
 import { P1_CANARY, runP1 } from '../src/gateway/probe/runners/p1.js'
 import { getProbeRunner } from '../src/gateway/probe/runners/index.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
@@ -60,6 +61,48 @@ describe('probe-no-think · 思考注入（anthropic 线缺省关思考）', () 
       }
       await runProbeSuite(rt, { probeIds: ['p7'], targets: [targetOf()], transport: t, runnerFor: getProbeRunner, confirmed: true })
       expect(JSON.parse(seenBody).thinking).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('probe-no-think · thinking 参数自愈回退（thinking-param-fallback）', () => {
+  it('模型拒绝 thinking 参数（400）→ 剥参数自动重发一次，verdict 正常归档 healthy', async () => {
+    const h = fakeHome()
+    try {
+      const seen: string[] = []
+      const base: ProbeTransport = async (req) => {
+        const body = req.body?.toString('utf8') ?? ''
+        seen.push(body)
+        if (body.includes('"thinking"')) {
+          return { status: 400, ms: 1, bodyText: '{"error":{"code":"InvalidParameter","message":"thinking.type `disabled` is not supported by this model"}}' }
+        }
+        return { status: 200, ms: 1, bodyText: JSON.stringify({ content: [{ type: 'thinking', thinking: 'x' }, { type: 'text', text: P1_CANARY }] }) }
+      }
+      const rt = mkRt({ acme: providerCfg('anthropic') })
+      await runProbeSuite(rt, { probeIds: ['p1'], targets: [targetOf()], transport: withThinkingFallback(base), runner: runP1, confirmed: true })
+      expect(seen.length).toBe(2) // 首发带 thinking → 400 → 剥参数重发
+      expect(JSON.parse(seen[0]).thinking).toEqual({ type: 'disabled' })
+      expect(JSON.parse(seen[1]).thinking).toBeUndefined()
+      expect(getProbeVerdict(rt, 'acme', 'fp1', 'm')?.state).toBe('healthy')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('非 thinking 的 400 不触发重发（窄条件，只认错误体含 thinking 字样）', async () => {
+    const h = fakeHome()
+    try {
+      let calls = 0
+      const base: ProbeTransport = async () => {
+        calls++
+        return { status: 400, ms: 1, bodyText: '{"error":{"message":"bad request"}}' }
+      }
+      const rt = mkRt({ acme: providerCfg('anthropic') })
+      await runProbeSuite(rt, { probeIds: ['p1'], targets: [targetOf()], transport: withThinkingFallback(base), runner: runP1, confirmed: true })
+      expect(calls).toBe(1) // 不重发
+      expect(getProbeVerdict(rt, 'acme', 'fp1', 'm')?.state).toBe('degraded')
     } finally {
       h.restore()
     }
