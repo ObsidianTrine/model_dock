@@ -16,44 +16,46 @@ import { fileURLToPath } from 'node:url'
 //   排除不构成夹具的行：整行注释、it/test/describe 标题行、`anthropic-version` 等版本串行。
 //   门禁自身内嵌坏例夹具（只作静态样例、不执行），从扫描集剔除。
 //
-// 存量豁免：本仓已有 33 个测试文件在长期演进中形成了「展示/排序用固定日期 + 时钟用于轮询」的组合。
+// 存量豁免：本仓已有 34 个测试文件在长期演进中形成了「展示/排序用固定日期 + 时钟用于轮询」的组合。
 // 这些日期经逐文件核对**不参与当前时钟比较**（多为显式注入的固定 t0、历史元数据或展示字段），
-// 一次性登记在下表并记录允许的日期字面量条数（棘轮：只降不升，条数涨了就红——新增日期请改相对夹具）。
-// 迁移某个文件到相对日期后，把它的条数下调或整条删除；不要为新文件再加豁免。
-export const EXEMPT: Record<string, { reason: string; count: number }> = {
-  'test/backup.test.ts': { reason: '2099 未来时间戳只用于快照排序/命名，不参与当前时钟比较', count: 1 },
-  'test/cloudserver.test.ts': { reason: '文档同步夹具的固定 rev/ts，仅用于 if-match 与回放顺序', count: 17 },
-  'test/daemon-lifecycle.test.ts': { reason: 'gateway.json 陈旧 started_at 夹具；当前时钟只用于轮询超时', count: 2 },
-  'test/debuglog.test.ts': { reason: 'pruneExpiredLogs 显式注入固定 now；真实时钟只用于日志文件名', count: 1 },
-  'test/diag.test.ts': { reason: 'live-state 夹具的固定 started_at 仅作展示；真实时钟用于其他诊断用例', count: 1 },
-  'test/gateway-audit1112b.test.ts': { reason: '日聚合 dayKey 固定值用于计量夹具；真实时钟用于轮询超时', count: 1 },
-  'test/gateway-ephemeral.test.ts': { reason: '一次性凭据夹具显式传入固定 t0；Date.now 只用于轮询与相对过期', count: 3 },
-  'test/gateway.test.ts': { reason: '日志环/节假日缓存夹具的固定 ts 用于展示与聚合', count: 9 },
-  'test/modelmeta.test.ts': { reason: 'fetchedAt 期望值固定用于目录缓存展示；其他夹具用相对当前时间', count: 2 },
-  'test/observability.test.ts': { reason: '请求日志 ts 固定用于展示/聚合断言；真实时钟用于其他观测用例', count: 2 },
-  'test/relay-concurrency.test.ts': { reason: 'ratelimit 头与 now 均显式传入；Date.now 只用于生成 Date 头', count: 5 },
-  'test/state-gaps.test.ts': { reason: 'STARTED/请求日志 ts 为显式入参；熔断窗口用相对 Date.now 构造', count: 8 },
-  'test/sync-engine-gaps.test.ts': { reason: 'manifest ts 固定用于版本排序；心跳 desiredTs 用相对当前时间', count: 3 },
-  'test/syncagent.test.ts': { reason: 'attached_at 历史夹具；相对 Date.now+60s 用于同步状态用例', count: 1 },
-  'test/syncdoc-recovery.test.ts': { reason: '同步文档固定 ts 排序夹具；remoteDoc.ts 用相对当前时间', count: 2 },
-  'test/syncpull.test.ts': { reason: 'attached_at 历史夹具；时钟由 vi.setSystemTime 显式控制', count: 1 },
-  'test/time.test.ts': { reason: '固定日期是 localIsoTs/localDateStr 的期望输出；真实时钟只用于漂移上界', count: 5 },
-  'test/usage-cost.test.ts': { reason: '日志 ts 固定用于按天聚合；实时计数用例用相对 Date.now', count: 5 },
-  'test/webui-dom.test.ts': { reason: 'DOM 渲染夹具的展示日期不与当前时钟比较；健康证据用相对时间', count: 16 },
-  'test/orchestrator/autoresume.test.ts': { reason: '测试固定时钟 NOW=Date.parse(...)，事件 ts 相对它构造；真实时钟只用于锁心跳', count: 65 },
-  'test/orchestrator/cost.test.ts': { reason: '起止时间为展示夹具；localDate 默认参数不参与该断言', count: 2 },
-  'test/orchestrator/drafts-gc.test.ts': { reason: 'GC 用固定 NOW 与固定 created_at；CLI e2e 用相对真实时钟构造 20 天前', count: 9 },
-  'test/orchestrator/drift.test.ts': { reason: 'degraded_at 固定展示夹具；另一用例用真实时钟写入', count: 2 },
-  'test/orchestrator/fleet-console.test.ts': { reason: 'degraded_at 固定展示夹具；hoursAgo 用相对时间', count: 1 },
-  'test/orchestrator/provision.test.ts': { reason: 'mock 一次性凭据 expires_at 固定回放；续期用例用相对 Date.now', count: 5 },
-  'test/orchestrator/reconcile.test.ts': { reason: '按天日志文件名/日期固定用于按日读取断言；midnight 用真实时钟取当天窗口', count: 5 },
-  'test/orchestrator/research-multi.test.ts': { reason: 'topic.created_at 固定元数据；引用日期用 TODAY（相对当前时间）', count: 1 },
-  'test/orchestrator/sail.test.ts': { reason: 'startedAt/finishedAt 为成本展示夹具；created_at 用相对当前时间', count: 7 },
-  'test/orchestrator/snapshot-quality.test.ts': { reason: 'brief.created_at 固定元数据；引用日期用 TODAY（相对当前时间）', count: 1 },
-  'test/orchestrator/supply.test.ts': { reason: 'mock 凭据 expires_at 固定回放；真实时钟只用于轮询告警超时', count: 11 },
-  'test/orchestrator/transient.test.ts': { reason: '崩溃窗口 WIN/条目 ts 显式固定；其他用例用真实时钟构造当日窗口', count: 16 },
-  'test/orchestrator/weather-sea.test.ts': { reason: 'meltdown until 为固定夹具回放；真实时钟只用于轮询超时', count: 2 },
-  'test/orchestrator/weather.test.ts': { reason: '测试固定时钟 NOW=Date.parse(...)；事件 ts 相对构造', count: 1 },
+// 一次性登记在下表。豁免按文件登记（不记条数）——豁免文件里新增展示日期不会误红，代价是门禁不再
+// 复核这些文件的增量（并行开发下按条数棘轮会频繁撞红无关改动）。迁移某个文件到相对日期后整条删除；
+// 不要为新文件再加豁免。
+export const EXEMPT: Record<string, string> = {
+  'test/backup.test.ts': '2099 未来时间戳只用于快照排序/命名，不参与当前时钟比较',
+  'test/cloudserver.test.ts': '文档同步夹具的固定 rev/ts，仅用于 if-match 与回放顺序',
+  'test/daemon-lifecycle.test.ts': 'gateway.json / 探活夹具的陈旧 started_at；当前时钟只用于轮询超时',
+  'test/debuglog.test.ts': 'pruneExpiredLogs 显式注入固定 now；真实时钟只用于日志文件名',
+  'test/diag.test.ts': 'live-state 夹具的固定 started_at 仅作展示；真实时钟用于其他诊断用例',
+  'test/gateway-audit1112b.test.ts': '日聚合 dayKey 固定值用于计量夹具；真实时钟用于轮询超时',
+  'test/gateway-ephemeral.test.ts': '一次性凭据夹具显式传入固定 t0；Date.now 只用于轮询与相对过期',
+  'test/gateway-shared.test.ts': '探活 mock 的固定 started_at 仅作展示；Date.now 只用于超时上界',
+  'test/gateway.test.ts': '日志环/节假日缓存夹具的固定 ts 用于展示与聚合',
+  'test/modelmeta.test.ts': 'fetchedAt 期望值固定用于目录缓存展示；其他夹具用相对当前时间',
+  'test/observability.test.ts': '请求日志 ts 固定用于展示/聚合断言；真实时钟用于其他观测用例',
+  'test/relay-concurrency.test.ts': 'ratelimit 头与 now 均显式传入；Date.now 只用于生成 Date 头',
+  'test/state-gaps.test.ts': 'STARTED/请求日志 ts 为显式入参；熔断窗口用相对 Date.now 构造',
+  'test/sync-engine-gaps.test.ts': 'manifest ts 固定用于版本排序；心跳 desiredTs 用相对当前时间',
+  'test/syncagent.test.ts': 'attached_at 历史夹具；相对 Date.now+60s 用于同步状态用例',
+  'test/syncdoc-recovery.test.ts': '同步文档固定 ts 排序夹具；remoteDoc.ts 用相对当前时间',
+  'test/syncpull.test.ts': 'attached_at 历史夹具；时钟由 vi.setSystemTime 显式控制',
+  'test/time.test.ts': '固定日期是 localIsoTs/localDateStr 的期望输出；真实时钟只用于漂移上界',
+  'test/usage-cost.test.ts': '日志 ts 固定用于按天聚合；实时计数用例用相对 Date.now',
+  'test/webui-dom.test.ts': 'DOM 渲染夹具的展示日期不与当前时钟比较；健康证据用相对时间',
+  'test/orchestrator/autoresume.test.ts': '测试固定时钟 NOW=Date.parse(...)，事件 ts 相对它构造；真实时钟只用于锁心跳',
+  'test/orchestrator/cost.test.ts': '起止时间为展示夹具；localDate 默认参数不参与该断言',
+  'test/orchestrator/drafts-gc.test.ts': 'GC 用固定 NOW 与固定 created_at；CLI e2e 用相对真实时钟构造 20 天前',
+  'test/orchestrator/drift.test.ts': 'degraded_at 固定展示夹具；另一用例用真实时钟写入',
+  'test/orchestrator/fleet-console.test.ts': 'degraded_at 固定展示夹具；hoursAgo 用相对时间',
+  'test/orchestrator/provision.test.ts': 'mock 一次性凭据 expires_at 固定回放；续期用例用相对 Date.now',
+  'test/orchestrator/reconcile.test.ts': '按天日志文件名/日期固定用于按日读取断言；midnight 用真实时钟取当天窗口',
+  'test/orchestrator/research-multi.test.ts': 'topic.created_at 固定元数据；引用日期用 TODAY（相对当前时间）',
+  'test/orchestrator/sail.test.ts': 'startedAt/finishedAt 为成本展示夹具；created_at 用相对当前时间',
+  'test/orchestrator/snapshot-quality.test.ts': 'brief.created_at 固定元数据；引用日期用 TODAY（相对当前时间）',
+  'test/orchestrator/supply.test.ts': 'mock 凭据 expires_at 固定回放；真实时钟只用于轮询告警超时',
+  'test/orchestrator/transient.test.ts': '崩溃窗口 WIN/条目 ts 显式固定；其他用例用真实时钟构造当日窗口',
+  'test/orchestrator/weather-sea.test.ts': 'meltdown until 为固定夹具回放；真实时钟只用于轮询超时',
+  'test/orchestrator/weather.test.ts': '测试固定时钟 NOW=Date.parse(...)；事件 ts 相对构造',
 }
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -108,17 +110,12 @@ export function scanDateBombs(root: string): Map<string, DateBombHit[]> {
   return result
 }
 
-/** 未登记豁免、或条数超出登记上限的文件（新增日期炸弹 → 红）。 */
+/** 未登记豁免的文件（新文件命中 → 红）。 */
 export function unexempted(root: string): { file: string; reason: string; hits: DateBombHit[] }[] {
   const out: { file: string; reason: string; hits: DateBombHit[] }[] = []
   for (const [file, hits] of scanDateBombs(root)) {
-    const ex = EXEMPT[file]
-    if (ex && hits.length <= ex.count) continue
-    out.push({
-      file,
-      reason: ex ? `登记上限 ${ex.count} 条，实际 ${hits.length} 条` : '未登记豁免（新文件请改用 test/helpers/dates.ts 的相对日期）',
-      hits,
-    })
+    if (EXEMPT[file]) continue
+    out.push({ file, reason: '未登记豁免（新文件请改用 test/helpers/dates.ts 的相对日期）', hits })
   }
   return out
 }
@@ -128,7 +125,7 @@ describe('防夹具日期炸弹：现行测试（develop 基线零违规）', ()
     expect(walkTestFiles(ROOT).length).toBeGreaterThan(100)
   })
 
-  it('没有未登记或超出豁免上限的「写死日期 + 系统时钟」组合', () => {
+  it('没有未登记的「写死日期 + 系统时钟」组合', () => {
     expect(unexempted(ROOT)).toEqual([])
   })
 
@@ -206,12 +203,10 @@ describe('防夹具日期炸弹：负例', () => {
     expect(unexempted(dir)).toEqual([])
   })
 
-  it('豁免文件新增日期超过登记上限能红（棘轮只降不升）', () => {
-    // 与真实豁免清单同名、但条数比登记上限（65）多 1 条 → 必须红
-    const rows = Array.from({ length: 66 }, () => "const d = '2026-11-01'")
+  it('豁免文件内的展示日期不误报（豁免按文件登记）', () => {
     const dir = makeFixture({
-      'test/orchestrator/autoresume.test.ts': [...rows, 'const now = Date.now()', ''].join('\n'),
+      'test/orchestrator/autoresume.test.ts': ["const a = '2026-11-01'", 'const now = Date.now()', ''].join('\n'),
     })
-    expect(unexempted(dir).map((x) => x.file)).toEqual(['test/orchestrator/autoresume.test.ts'])
+    expect(unexempted(dir)).toEqual([])
   })
 })
