@@ -24,7 +24,9 @@ const BODY_HTML = UI_HTML.slice(UI_HTML.indexOf('<body>') + 6, UI_HTML.lastIndex
 )
 const PAGE_SCRIPT = scriptBlocks(UI_HTML).join('\n')
 
-const OVERVIEW_FIXTURE = {
+// services 条目运行时 = buildOverview 投影，键随功能演进（probe-model-select 等新增投影键）：
+// 放宽为索引签名让用例按需补字段，不必逐次扩夹具字面量类型（tsconfig.test 前置门禁）
+const OVERVIEW_FIXTURE: Record<string, any> = {
   ok: true,
   gateway: {
     port: 18999,
@@ -303,8 +305,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(last.probe_model).toBe('')
     } finally {
       OVERVIEW_FIXTURE.services[0].models = prevModels
-      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModel
-      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModelExplicit
+      delete OVERVIEW_FIXTURE.services[0].probeModel
+      delete OVERVIEW_FIXTURE.services[0].probeModelExplicit
       vi.stubGlobal('fetch', prev)
     }
   })
@@ -891,8 +893,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect((document.getElementById('diagProbeModelSel') as HTMLSelectElement).value).toBe('')
     } finally {
       OVERVIEW_FIXTURE.services[0].models = prevModels
-      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModel
-      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModelExplicit
+      delete OVERVIEW_FIXTURE.services[0].probeModel
+      delete OVERVIEW_FIXTURE.services[0].probeModelExplicit
       vi.stubGlobal('fetch', prev)
     }
   })
