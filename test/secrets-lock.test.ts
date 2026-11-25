@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { acquireFileLock, __testSetLockTiming } from '../src/util/fsx.js'
 import {
   SecretsError,
+  deleteSecret,
   getSecret,
   invalidateSecretsCache,
   secretsLockPath,
   setSecret,
   __testSetDpapiBatch,
+  __testSetFileCipher,
+  type FileCipher,
 } from '../src/config/secrets.js'
+import { secretsPath } from '../src/util/paths.js'
 import { fakeHome, waitFor } from './helpers.js'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -121,6 +126,102 @@ describe('secrets 写锁：持锁喂狗防陈锁误抢占（fix-core-reliability
       expect(await getSecret('file:lock-a')).toBe('v-a')
       expect(await getSecret('file:lock-b')).toBe('v-b')
     } finally {
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+})
+
+/** 审计 P-01：mutateFileSecrets 的写失败回滚。锁内新鲜读在指纹相等时返回的是 fileCache.data 本体，
+ *  回调原地改它再写盘；加密/写盘抛错时磁盘没变、内存已是新值——指纹一直相等，缓存一直续期，
+ *  直到进程重启都在发「从没落盘」的 key（删 key 则反过来：盘上还在、内存里已消失）。
+ *  cipher 走 __testSetFileCipher 注入（与平台真实后端解耦，win32 不必 spawn PowerShell）。 */
+describe('secrets 写失败后内存缓存回滚（审计 P-01）', () => {
+  const PREFIX = 'enc:t:'
+
+  /** 非确定性加密（密文带随机 salt）+ 按 reuse 复用未变更条目的原密文（同生产 cipher 的契约）：
+   *  「未变更条目是否复用旧密文」可以按盘上字节观察。 */
+  const makeCipher = (encryptTable?: FileCipher['encryptTable']): FileCipher => ({
+    prefix: PREFIX,
+    enabled: true,
+    async encryptTable(dec, reuse) {
+      const raw: Record<string, string> = {}
+      for (const [k, v] of Object.entries(dec)) {
+        const prevC = reuse?.raw[k]
+        if (typeof v === 'string' && v !== '' && typeof prevC === 'string' && prevC.startsWith(PREFIX) && reuse?.plain[k] === v) {
+          raw[k] = prevC
+          continue
+        }
+        raw[k] = typeof v === 'string' && v !== '' ? PREFIX + randomBytes(4).toString('hex') + ':' + Buffer.from(v, 'utf8').toString('base64') : v
+      }
+      return raw
+    },
+    async decryptTable(raw) {
+      const dec: Record<string, string> = {}
+      for (const [k, v] of Object.entries(raw)) {
+        dec[k] = typeof v === 'string' && v.startsWith(PREFIX) ? Buffer.from(v.slice(PREFIX.length).split(':', 2)[1], 'base64').toString('utf8') : v
+      }
+      return dec
+    },
+    ...(encryptTable ? { encryptTable } : {}),
+  })
+
+  const encryptBoom = async (): Promise<Record<string, string>> => {
+    throw new Error('encrypt boom')
+  }
+
+  const readTable = (): Record<string, string> => JSON.parse(fs.readFileSync(secretsPath(), 'utf8'))
+
+  it('加密失败：setSecret reject 后 getSecret 仍是旧值、secrets.json 字节未变；恢复后可写且未变更条目沿用旧密文', async () => {
+    const h = fakeHome()
+    try {
+      __testSetFileCipher(makeCipher())
+      invalidateSecretsCache()
+      await setSecret('rb-a', 'old-a', 'file')
+      await setSecret('rb-b', 'keep-b', 'file')
+      const before = fs.readFileSync(secretsPath())
+      expect(await getSecret('file:rb-a')).toBe('old-a') // 读缓存已热：此后 mutate 走「指纹相等 → 复用 cached.data 本体」分支
+
+      __testSetFileCipher(makeCipher(encryptBoom))
+      await expect(setSecret('rb-a', 'new-a', 'file')).rejects.toThrow('encrypt boom')
+
+      expect(await getSecret('file:rb-a')).toBe('old-a') // 修前：'new-a'（从没落盘的值被缓存续期）
+      expect(await getSecret('file:rb-b')).toBe('keep-b')
+      expect(fs.readFileSync(secretsPath()).equals(before)).toBe(true) // 磁盘始终是旧值
+
+      // 写失败不留下后遗症：恢复后照常写入，另一条目不受牵连
+      __testSetFileCipher(makeCipher())
+      await setSecret('rb-a', 'new-a', 'file')
+      expect(await getSecret('file:rb-a')).toBe('new-a')
+      expect(await getSecret('file:rb-b')).toBe('keep-b')
+      // 回调改的是浅拷贝：写路径判「条目未变更」用的 raw↔snapshot 配对未被污染——
+      // 未变更的 rb-b 沿用旧密文（逐字节相同），变更的 rb-a 重新加密
+      const oldTable = JSON.parse(before.toString('utf8')) as Record<string, string>
+      const newTable = readTable()
+      expect(newTable['rb-b']).toBe(oldTable['rb-b'])
+      expect(newTable['rb-a']).not.toBe(oldTable['rb-a'])
+    } finally {
+      __testSetFileCipher() // 还原平台真实后端，避免毒化共享注册表里的后续用例
+      invalidateSecretsCache()
+      h.restore()
+    }
+  })
+
+  it('加密失败：deleteSecret reject 后 key 仍在内存（盘上还在的 key 不因一次写失败在进程内消失）', async () => {
+    const h = fakeHome()
+    try {
+      __testSetFileCipher(makeCipher())
+      invalidateSecretsCache()
+      await setSecret('rb-del', 'v-del', 'file')
+      const before = fs.readFileSync(secretsPath())
+
+      __testSetFileCipher(makeCipher(encryptBoom))
+      await expect(deleteSecret('file:rb-del')).rejects.toThrow('encrypt boom')
+
+      expect(await getSecret('file:rb-del')).toBe('v-del') // 修前：null
+      expect(fs.readFileSync(secretsPath()).equals(before)).toBe(true)
+    } finally {
+      __testSetFileCipher()
       invalidateSecretsCache()
       h.restore()
     }
