@@ -1938,7 +1938,51 @@ function cardScratchOnly(root, taskId) {
   }
 }
 
+// 任务锁守卫文案（DM-01，2026-11-25 健康审计）：闸门动作的锁被他人持有时点名持有者。
+function gateLockBusy(taskId, info, action) {
+  return `任务 "${taskId}" 的 ${action} 被拒：另一进程正在驱动这同一个泊位（pid ${info.pid}${info.cmd ? `，${info.cmd}` : ''}${info.acquired_at ? `，始于 ${info.acquired_at}` : ''}）。\n`
+    + `  人工批示与自动批示共用任务锁——approve / retry 进行期间（finish 合并通常数分钟）不接受并发批示；交互式闸门（run 在终端等人拍板）在场时请回到该会话内操作。\n`
+    + `  等对方结束；持锁进程心跳停止 ${TASK_LOCK_STALE_MS / 1000}s 后陈锁自动接管（无需手动清理或终止进程）。`;
+}
+
+/**
+ * 闸门动作入口的任务锁守卫（reject 用；approve / retry 走 acquireTaskLock 的重入豁免）：
+ * 锁活且持有者不是本进程 → die 并点名持有者。本进程持锁 = 交互式闸门（cmdRun 仍持锁时
+ * 人在本会话里选了驳回），不是并发，放行。心跳静默的陈锁不拦人（与 cmdAbandon 同口径）。
+ */
+function guardGateActionLock(repoRoot, taskId, action) {
+  const liveLock = readTaskLock(repoRoot, taskId);
+  if (liveLock && Number.isInteger(liveLock.pid) && liveLock.pid !== process.pid && taskLockLooksLive(liveLock)) {
+    die(gateLockBusy(taskId, liveLock, action));
+  }
+}
+
+/**
+ * doApprove：闸门放行的锁壳（DM-01）。合并动作全程持任务锁——此前 doApprove 整段不持锁，
+ * 自动批示 sweep 判定超时进入 finish 的数分钟里，人工 reject / approve / retry 照常执行：
+ * reject 把卡迁 failed/ 而 finish 不知情照常合并；人工 approve 与自动返工撞车后两个进程
+ * 同写一个 worktree，随后 finish 还会把它删掉。run 闭环内（自动合并 / 交互闸门）调用时
+ * 本进程已持锁，acquireTaskLock 同 pid 重入豁免（深度计数配对，锁文件由最外层释放）。
+ * 返回 true = 已落 merged/；false = finish 返回时卡已离开闸门，未记 merged（调用方决定
+ * 是否按失败退出——sweep 继续处理余卡，CLI 非零退出）。
+ */
 async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
+  const lock = acquireTaskLock(repoRoot, taskId, 'approve');
+  if (!lock.held) {
+    if (lock.unremovable) {
+      die(`任务 "${taskId}" 的任务锁无法接管（陈锁删除失败，可能被其他进程占用）。\n手动删除 ${taskLockPath(repoRoot, taskId)} 后重试。`);
+    }
+    die(gateLockBusy(taskId, lock.owner, 'approve'));
+  }
+  try {
+    return await doApproveLocked(repoRoot, taskId, root, qdir, source);
+  } finally {
+    releaseTaskLock(repoRoot, taskId);
+  }
+}
+
+/** doApprove 的锁内主体（持锁语义见 doApprove 锁壳）。 */
+async function doApproveLocked(repoRoot, taskId, root, qdir, source = 'human') {
   // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
   // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
   if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
@@ -1974,7 +2018,7 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
     // 不 resetConfigBaseline（没有合并发生，configGuard 基线不该被无来源重置）、不做 draftsGc
     // 清退（scratch 卡未实现任何 repo 改动面，files_hint 常为 ["**"]，清退会误杀全部提案）。
     await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
-    return;
+    return true;
   }
   // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
   // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
@@ -2032,6 +2076,16 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
     if (lockConflict) appendEvent(qdir, 'merge_lock_wait', { attempts: maxAttempts });
     die(`feature-branch finish 失败（exit ${r.status ?? '?'}${r.timedOut ? '，超时已按进程树收割' : ''}）。任务留在 awaiting-human/，处理后重新 approve。`, r.status ?? 1);
   }
+  // 落位前复查卡位（DM-01）：finish 返回时卡必须仍在 awaiting-human/。锁已挡住并发批示，
+  // 这里兜不认锁的外部改动（手工挪卡、陈锁被接管后的并发动作）——旧实现直接 moveCard，
+  // 卡不在闸门即抛 QueueError 炸穿本轮 sweep，余卡全部跳过。分支此时可能已被 finish 合并：
+  // 不记 merged（不把来路不明的合并记成闸门放行）、不动卡位，交人工核对。
+  const after = findCard(root, taskId);
+  if (after?.state !== 'awaiting-human') {
+    log(`⚠ approve 中止收尾：finish 已返回，但任务卡已不在 awaiting-human/（当前：${after ? `${after.state}/` : '不在队列'}）——未记 merged。`);
+    log(`  分支可能已被 finish 合并进基准分支：核对 git log 与卡位后人工处置（node .agents/scripts/orchestrator.mjs logs ${taskId}）。`);
+    return false;
+  }
   moveCard(root, taskId, 'awaiting-human', 'merged');
   const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
   appendEvent(qdir, 'merged', { merge_commit: mergeCommit, ...(source === 'auto' ? { auto: true } : {}) });
@@ -2057,9 +2111,12 @@ async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
   }
   // 成功出港同样通知（此前 merged 静默——失败人人皆知、成功无声，体验反了）
   await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
+  return true;
 }
 
 async function doReject(repoRoot, taskId, root, qdir, reason) {
+  // 动作前查任务锁（DM-01，与 cmdAbandon 同款守卫）：approve / retry / run 进行期间不接受驳回
+  guardGateActionLock(repoRoot, taskId, 'reject');
   appendEvent(qdir, 'human_gate', { decision: 'rejected', reason });
   moveCard(root, taskId, 'awaiting-human', 'failed');
   appendEvent(qdir, 'failed', { reason: reason || '人工驳回' });
@@ -2069,14 +2126,31 @@ async function doReject(repoRoot, taskId, root, qdir, reason) {
 }
 
 async function doRetry(repoRoot, taskId, root, qdir, note, opts) {
-  appendEvent(qdir, 'human_gate', { decision: 'retry', note });
-  // 补充指令写回任务卡背景段，worker 续做时可见
-  const cardP = cardPath(root, 'awaiting-human', taskId);
-  const text = fs.readFileSync(cardP, 'utf8');
-  fs.writeFileSync(cardP, `${text.trimEnd()}\n\n# 补充指令（人工打回）\n${note}\n`);
-  moveCard(root, taskId, 'awaiting-human', 'running');
-  log('已打回 running/，重新启动闭环……');
-  await cmdRun(repoRoot, taskId, { ...opts, interactive: false });
+  // 打回重试同样持任务锁（DM-01）：卡迁 running/ 到 cmdRun 抢锁之间、以及 sweep 自动返工
+  // 与人工 approve 撞车时，不许第二个批示动作落在同一泊位。cmdRun 内 acquireTaskLock 对
+  // 本进程重入豁免（深度 +1），其 finally 减一层、这里的最外层 finally 才删锁文件。
+  const lock = acquireTaskLock(repoRoot, taskId, 'retry');
+  if (!lock.held) {
+    if (lock.unremovable) {
+      die(`任务 "${taskId}" 的任务锁无法接管（陈锁删除失败，可能被其他进程占用）。\n手动删除 ${taskLockPath(repoRoot, taskId)} 后重试。`);
+    }
+    die(gateLockBusy(taskId, lock.owner, 'retry'));
+  }
+  try {
+    if (findCard(root, taskId)?.state !== 'awaiting-human') {
+      die(`任务 "${taskId}" 已不在 awaiting-human/，无法打回重试（动作前已被其他批示处理）。`);
+    }
+    appendEvent(qdir, 'human_gate', { decision: 'retry', note });
+    // 补充指令写回任务卡背景段，worker 续做时可见
+    const cardP = cardPath(root, 'awaiting-human', taskId);
+    const text = fs.readFileSync(cardP, 'utf8');
+    fs.writeFileSync(cardP, `${text.trimEnd()}\n\n# 补充指令（人工打回）\n${note}\n`);
+    moveCard(root, taskId, 'awaiting-human', 'running');
+    log('已打回 running/，重新启动闭环……');
+    await cmdRun(repoRoot, taskId, { ...opts, interactive: false });
+  } finally {
+    releaseTaskLock(repoRoot, taskId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2215,6 +2289,13 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
       }
     } else {
       for (const taskId of listCards(root, 'awaiting-human')) {
+        // 逐卡动作前复查卡位（DM-01）：awaiting-human 清单只在循环入口快照一次，而本轮里
+        // 前面的卡可能刚跑完整段 finish / 自动返工——期间这张卡可能已被人工批示。卡不在
+        // 闸门 = 已被处理，跳过（不再对它二次批示）。
+        if (findCard(root, taskId)?.state !== 'awaiting-human') {
+          log(`闸门卡 ${taskId} 在本轮 sweep 轮到它之前已离开 awaiting-human/——跳过。`);
+          continue;
+        }
         const qdir = logDir(repoRoot, taskId);
         const verdict = lastReviewVerdictEvent(readEvents(qdir));
         const rec = recommendFromVerdict(verdict);
@@ -2247,7 +2328,9 @@ async function cmdAutoApprove(repoRoot, opts = {}) {
           report.merged.push(taskId);
           if (!act) continue;
           appendEvent(qdir, 'autoapprove_decision', { decision: 'merge', source: 'timeout', verdict_ts: verdict.ts });
-          await doApprove(repoRoot, taskId, root, qdir, 'auto');
+          // doApprove 持任务锁返回 false = finish 返回时卡已离开闸门、未记 merged：不通报
+          // 「已自动合并」（会撒谎），本轮 sweep 继续处理余卡
+          if (!(await doApprove(repoRoot, taskId, root, qdir, 'auto'))) continue;
           await notifyAutoApproveAction(repoRoot, cfg, { taskId, state: 'merged', detail: `审查 blockers=0 且超时 ${timeoutMinutes} 分钟——已按推荐自动合并（merged/）` });
         } else {
           // 红线③：blockers>0 永不自动合并——只自动返工，且每卡限 maxAutoRetry 次
@@ -6317,7 +6400,10 @@ export async function main(argv = process.argv.slice(2), io = {}) {
         const found = findCard(queueRoot(repoRoot), args[0]);
         if (!found) die(`任务 "${args[0]}" 不在队列中。`);
         if (found.state !== 'awaiting-human') die(`任务 "${args[0]}" 状态为 ${found.state}，只有 awaiting-human 可 approve。`);
-        await doApprove(repoRoot, args[0], queueRoot(repoRoot), logDir(repoRoot, args[0]));
+        // doApprove 返回 false = finish 返回时卡已离开闸门、未记 merged：按失败退出
+        if (!(await doApprove(repoRoot, args[0], queueRoot(repoRoot), logDir(repoRoot, args[0])))) {
+          die(`任务 "${args[0]}" 的 approve 未记 merged：finish 返回时任务卡已不在 awaiting-human/（见上方 ⚠ 日志）。分支可能已被合并，核对后人工处置。`);
+        }
       }
       return;
     case 'reject':

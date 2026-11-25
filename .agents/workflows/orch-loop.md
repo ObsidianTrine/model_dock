@@ -130,6 +130,6 @@ worker 会话注入专属 policy hook：git push/tag、npm publish、受保护�
 ## 互斥与并行（谁在跑、能并行吗）
 
 - **调度器锁**：drain / nightly / scan --run / watch 共用一把（`.scheduler-lock.json`），后来者提示退出；持锁进程死 = 陈锁自动接管。手动 `run <id>` 不抢调度器锁。
-- **任务锁**：每卡 `.run-<task-id>.lock`——同一泊位（worktree）不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 orch-ecosystem.md『与 feature-branch 的关系』）。
+- **任务锁**：每卡 `.run-<task-id>.lock`——同一泊位（worktree）不允许两个进程同时驱动（两个 worker 会写同一个 worktree）；人工 agent 经 feature-branch start 认领同一把锁（claim-before-execute，见 orch-ecosystem.md『与 feature-branch 的关系』）。**人工批示与自动批示共用这把任务锁**：`approve` / `retry` 从动作开始到 finish 合并返回全程持锁，锁被别的进程持有时 `approve` / `reject` / `retry` 一律拒绝并点名持有者（pid + 动作）；自动批示 sweep 逐卡动作前复查卡仍在 `awaiting-human/`，finish 返回时卡已离开闸门则不记 `merged`、本轮 sweep 余卡照常处理。不经 orchestrator 的人工直跑 `feature-branch finish` 只持 `.finish.lock`，不在这把锁的覆盖内。
 - **并行 drain**：`drain --workers 3` 最多 3 卡同跑，按 files_hint 分区互斥（`docs/**` 与 `test/**` 可并行；裸 `**` = 独占）。想让任务可并行，把 files_hint 收窄到独立目录。`gatewayAdmin: true` 的仓库并发还受 **供给闸**（见 orch-supply.md『worker 并发供给闸』）约束：有效并发 = min(请求并发, provider 容量)——上游没解锁 `max_concurrency>=2` 时请求多档也只跑单 worker（fail-safe，防 429 烧上游）。
 - **编排器 × 人工 finish 撞窗**（2026-11-22）：闭环在门禁跑套件的 5–9 分钟窗口里做卡片流转/worktree 清理，会撞宿主仓 host-guard 哨兵（fail-closed 必红）。不做全程互斥（编排器 mutation 散布全 run 生命周期，持锁会饿死并发 finish）；改走两条路：feature-branch finish 门禁开跑前**预检活跃任务锁**（命中秒级拒绝，`AGENTS_ALLOW_COLLISION_WINDOW=1` 可豁免）+ host-guard 归因落 marker（worktree 的 `node_modules/.orch-collision.flag`）→ finish 读到**等静默自动重跑门禁一次**。编排器侧无需任何配合改动。
