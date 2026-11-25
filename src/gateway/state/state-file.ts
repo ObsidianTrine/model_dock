@@ -46,23 +46,45 @@ export async function readGatewayState(): Promise<GatewayStateFile | null> {
   }
 }
 
-/** 活着的网关状态（gateway.json 存在且 pid 存活，且健康端点验明正身）。
- *  pid 会被系统复用：仅凭 pid 存活就把复用者当网关，stop 会误杀无关进程。 */
-export async function gatewayLive(): Promise<GatewayStateFile | null> {
+/** 三态判活（审计 P-06a）：pid 存活且健康端点验明正身 = `live`；pid 存活但健康端点超时 /
+ *  拒绝 / 非 200 = `unresponsive`——进程可能真的卡住，也可能是 pid 被复用，两种情况都**不得**
+ *  当作「未运行」清状态文件；无状态文件或 pid 已死 = `stopped`。
+ *  `identityMismatch` 表示健康端点回的是另一个实例（started_at 不符 / 响应不是网关 JSON）：
+ *  端口确实在服务，但 state 文件与它不对应（pid 复用或文件被改），启动侧仍按「已在运行」保守拦截。 */
+export type GatewayLiveness =
+  | { status: 'live'; state: GatewayStateFile; identityMismatch?: boolean }
+  | { status: 'unresponsive'; state: GatewayStateFile }
+  | { status: 'stopped'; state: GatewayStateFile | null }
+
+export async function gatewayProbe(): Promise<GatewayLiveness> {
   const state = await readGatewayState()
-  if (!state || !pidAlive(state.pid)) return null
+  if (!state || !pidAlive(state.pid)) return { status: 'stopped', state }
+  let res: Response
   try {
-    const res = await fetch(`http://127.0.0.1:${state.port}/_modeldock/health`, {
+    res = await fetch(`http://127.0.0.1:${state.port}/_modeldock/health`, {
       signal: AbortSignal.timeout(1000),
     })
-    if (!res.ok) return null
-    const j = (await res.json()) as { started_at?: string }
-    if (j.started_at && state.started_at && j.started_at !== state.started_at) return null
   } catch {
-    // 进程在但健康端点不通：多半是 pid 被复用或端口被别的服务占用，按陈旧状态处理
-    return null
+    // 进程在但健康端点不通/超时：无响应（不再按「陈旧状态」处理——那会误清活进程的状态文件）
+    return { status: 'unresponsive', state }
   }
-  return state
+  if (!res.ok) return { status: 'unresponsive', state }
+  try {
+    const j = (await res.json()) as { started_at?: string }
+    const mismatch = !!(j.started_at && state.started_at && j.started_at !== state.started_at)
+    return mismatch ? { status: 'live', state, identityMismatch: true } : { status: 'live', state }
+  } catch {
+    // 200 但不是网关 JSON：端口被别的服务占用，身份不符
+    return { status: 'live', state, identityMismatch: true }
+  }
+}
+
+/** 活着的网关状态（gateway.json 存在且 pid 存活，且健康端点验明正身）。
+ *  pid 会被系统复用：仅凭 pid 存活就把复用者当网关，stop 会误杀无关进程。
+ *  无响应（pid 活、health 不通）不在此返回——见 gatewayProbe 的三态口径。 */
+export async function gatewayLive(): Promise<GatewayStateFile | null> {
+  const p = await gatewayProbe()
+  return p.status === 'live' && !p.identityMismatch ? p.state : null
 }
 
 export async function writeGatewayState(state: GatewayStateFile): Promise<void> {

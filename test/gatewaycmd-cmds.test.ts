@@ -380,3 +380,99 @@ describe('autostartLine（纯函数四态）', () => {
     expect(autostartLine(fake({ kind: 'launchd' })).replace(/\x1b\[[0-9;]*m/g, '')).toContain('macOS LaunchAgent')
   })
 })
+
+/** 伪造「pid 活但健康端点无响应」（审计 P-06a）：健康端点接受连接但永不回响应 → 1s 超时判
+ *  unresponsive。⚠ 同 fakeLiveGateway：pid 用 process.pid 只为过 pidAlive——这份状态严禁跑
+ *  cmdGatewayStop（会杀到本 worker）。 */
+async function fakeUnresponsiveGateway(): Promise<{ port: number; state: GatewayStateFile; hits: string[]; close: () => Promise<void> }> {
+  const hits: string[] = []
+  const server = http.createServer((req) => {
+    hits.push(req.url ?? '')
+    /* 故意不回响应 */
+  })
+  const port = await listenEphemeral(server)
+  const state: GatewayStateFile = { port, pid: process.pid, admin_token: 'adm-u', started_at: 't-u' }
+  fs.mkdirSync(modeldockDir(), { recursive: true })
+  await writeGatewayState(state)
+  return {
+    port,
+    state,
+    hits,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      }),
+  }
+}
+
+describe('三态判活：pid 活但健康端点无响应（审计 P-06a）', () => {
+  afterEach(() => {
+    process.exitCode = undefined
+  })
+
+  it('status 报「网关无响应」，不报「未在运行」', async () => {
+    const h = fakeHome()
+    captureConsole()
+    const gw = await fakeUnresponsiveGateway()
+    try {
+      await cmdGatewayStatus()
+      const out = logs.join('\n')
+      expect(out).toContain('网关无响应')
+      expect(out).toContain('进程存活但健康检查超时')
+      expect(out).not.toContain('网关未在运行')
+    } finally {
+      await gw.close()
+      h.restore()
+    }
+  })
+
+  it('rotate-token 拒绝直写状态文件：令牌原样保留、退出码 1', async () => {
+    const h = fakeHome()
+    captureConsole()
+    const gw = await fakeUnresponsiveGateway()
+    try {
+      await cmdGatewayRotateToken()
+      const st = await readGatewayState()
+      expect(st?.admin_token).toBe('adm-u') // 未被直接改写
+      expect(gw.hits).not.toContain('/_modeldock/admin/rotate')
+      expect(errs.join('\n')).toContain('未改写状态文件')
+      expect(process.exitCode).toBe(1)
+    } finally {
+      await gw.close()
+      h.restore()
+    }
+  })
+
+  it('start 不拉起第二个实例：报无响应、状态文件不动、退出码 1', async () => {
+    const h = fakeHome()
+    captureConsole()
+    const gw = await fakeUnresponsiveGateway()
+    try {
+      await cmdGatewayStart({})
+      expect(errs.join('\n')).toContain('网关无响应')
+      expect(process.exitCode).toBe(1)
+      const st = await readGatewayState()
+      expect(st?.pid).toBe(process.pid) // 状态文件保持原样
+      expect(st?.started_at).toBe('t-u')
+    } finally {
+      await gw.close()
+      h.restore()
+    }
+  })
+
+  it('requireGateway 无响应：exit(1) 且提示先 stop（不再说「未运行」）', async () => {
+    const h = fakeHome()
+    captureConsole()
+    stubExit()
+    const gw = await fakeUnresponsiveGateway()
+    try {
+      await expect(requireGateway()).rejects.toThrow(ExitError)
+      expect(errs.join('\n')).toContain('网关无响应')
+      expect(errs.join('\n')).not.toContain('网关未运行')
+    } finally {
+      await gw.close()
+      h.restore()
+    }
+  })
+})

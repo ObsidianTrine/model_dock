@@ -2,6 +2,8 @@ import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { fetchEnvelopeFromUrl, listenWithRetry, projectModel } from '../src/gateway/shared.js'
+import { gatewayLive, gatewayProbe, writeGatewayState } from '../src/gateway/state/state-file.js'
+import { fakeHome } from './helpers.js'
 import type { ModelMeta } from '../src/config/types.js'
 
 // gateway/shared.ts 三个导出的纯单测：分享链接拉取的安全属性（fragment 不出网、10MB 封顶、协议
@@ -143,5 +145,104 @@ describe('projectModel：三视图字段投影', () => {
     expect(unknown.context_window).toBeNull()
     expect(unknown.max_output).toBeNull()
     expect(unknown.display_name).toBeNull()
+  })
+})
+
+describe('gatewayProbe 三态判活（审计 P-06a）', () => {
+  /** 活 pid 用本进程：pidAlive(process.pid) 恒真，且绝不真起网关 */
+  function stateOf(port: number, pid: number): { port: number; pid: number; admin_token: string; started_at: string } {
+    return { port, pid, admin_token: 'mdkadm_' + '0'.repeat(32), started_at: '2026-01-01T00:00:00' }
+  }
+
+  /** 接受连接但永不回响应（模拟健康端点卡住/hang）：1s 超时后应判 unresponsive */
+  async function startHangingServer(): Promise<{ port: number; close: () => Promise<void> }> {
+    const server = http.createServer(() => { /* 故意不回 */ })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const port = (server.address() as AddressInfo).port
+    return {
+      port,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections()
+          server.close(() => resolve())
+        }),
+    }
+  }
+
+  it('pid 活 + health 200 + started_at 一致 → live，gatewayLive 原样返回', async () => {
+    const h = fakeHome()
+    const stub = await startStub((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true, started_at: '2026-01-01T00:00:00' }))
+    })
+    try {
+      await writeGatewayState(stateOf(stub.port, process.pid))
+      const p = await gatewayProbe()
+      expect(p.status).toBe('live')
+      expect(p.status === 'live' && p.identityMismatch).toBeFalsy()
+      expect((await gatewayLive())?.pid).toBe(process.pid)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('health 200 但 started_at 不符（pid 复用）→ live + identityMismatch，gatewayLive 不认', async () => {
+    const h = fakeHome()
+    const stub = await startStub((_req, res) => {
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true, started_at: '1999-01-01T00:00:00' }))
+    })
+    try {
+      await writeGatewayState(stateOf(stub.port, process.pid))
+      const p = await gatewayProbe()
+      expect(p.status).toBe('live')
+      expect(p.status === 'live' && p.identityMismatch).toBe(true)
+      expect(await gatewayLive()).toBeNull()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('pid 活 + health 超时 → unresponsive：状态文件保留，gatewayLive 不判「未运行」', async () => {
+    const h = fakeHome()
+    const hang = await startHangingServer()
+    try {
+      await writeGatewayState(stateOf(hang.port, process.pid))
+      const started = Date.now()
+      const p = await gatewayProbe()
+      expect(p.status).toBe('unresponsive')
+      expect(Date.now() - started).toBeLessThan(5_000)
+      // 无响应不得清状态文件（审计 P-06a 的核心断言）
+      expect(p.status !== 'stopped' && p.state.port).toBe(hang.port)
+      expect((await gatewayProbe()).status).toBe('unresponsive')
+    } finally {
+      await hang.close()
+      h.restore()
+    }
+  })
+
+  it('pid 已死 → stopped，但仍带回残留状态（启动侧复用 devices/update_check）', async () => {
+    const h = fakeHome()
+    try {
+      await writeGatewayState(stateOf(59999, 99999999))
+      const p = await gatewayProbe()
+      expect(p.status).toBe('stopped')
+      expect(p.state?.pid).toBe(99999999)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('无状态文件 → stopped 且 state 为 null', async () => {
+    const h = fakeHome()
+    try {
+      const p = await gatewayProbe()
+      expect(p).toEqual({ status: 'stopped', state: null })
+    } finally {
+      h.restore()
+    }
   })
 })
