@@ -799,6 +799,17 @@ async function cmdRun(repoRoot, taskId, opts) {
           log(`⏱ 看门狗熔断，终止在跑 worker 进程树（pid=${livePid}）……`);
           killTree(livePid);
         }
+        // 停止标志必须在 killTree 之后、**第一个 await 之前**置位（DM-03，2026-11-25 审计）：
+        // killTree 触发的 worker close 会在下方 await settleNotify（网络）期间先被派发，
+        // 主循环若此时读到 false，会把熔断误当瞬时故障原地重试，在已落位（blocked/
+        // reviewing）的卡上再派一个 worker；非瞬时路径还会对已不在 running/ 的卡 moveCard
+        // 抛错、把 reviewing/ 的卡改落 blocked/（撤销有提交对冲）。
+        // 置标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die 直接
+        // 退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp 目录与
+        // reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。主循环见标志即正常
+        // return 走 finally（临时目录清理/任务锁释放/油量轮询停止）；落位语义（blocked 或
+        // 有提交转 reviewing + circuit_breaker 事件 + 事故归档 + 通报）不变。
+        watchdogHalted = true;
         // stuck 终态对冲（2026-11-17）：熔断落 blocked 前对账 worktree 提交——相对 base
         // 已有非空提交 = 可验收产出在库，转 reviewing 交审查而非 blocked（kill 照常执行；
         // 对账只读 HEAD，与已终止的 worker 无写竞争）。无提交/对账不可得照旧 blocked。
@@ -813,12 +824,6 @@ async function cmdRun(repoRoot, taskId, opts) {
           archiveIncident(repoRoot, taskId, root, qdir, '看门狗判定任务空转（actuate 连续 2 次）');
           await settleNotify(repoRoot, taskId, 'blocked', '看门狗判定任务空转（actuate 连续 2 次）');
         }
-        // 置停止标志而非 die()（process.exit）：本回调是 fire-and-forget 的异步续体，die
-        // 直接退出进程会跳过 cmdRun 的 finally——orch-prompt-* / orch-settings-* mkdtemp
-        // 目录与 reviewer 各轮临时目录每轮熔断泄漏一次（2026-11-05 审查项）。killTree 后
-        // spawn close 收敛，主循环见标志即正常 return 走 finally（临时目录清理/任务锁释放/
-        // 油量轮询停止）；落位语义（blocked + circuit_breaker 事件 + 事故归档 + 通报）不变。
-        watchdogHalted = true;
       }
     } catch {
       // 看门狗自身异常绝不影响编排；「永不静默」由上面的 watchdog_error 事件承担
@@ -917,6 +922,18 @@ async function cmdRun(repoRoot, taskId, opts) {
       let crash = null; // 结构化故障定性（B6/A1 cause 精读）：最后一次会话的分类结果，blocked 理由消费
       let promptFileRefLogged = false; // D17 留痕防刷屏：每 run 记一次 prompt_file_ref
       for (;;) {
+        // ---- 卡状态断言（循环顶，派发前；DM-03，2026-11-25 审计）----
+        // 会话 await 期间（worker spawn / 瞬时重试退避 / 门禁 / 审查）卡可能已被看门狗
+        // 或人工落位（blocked/reviewing/awaiting-human）。此时任何 continue 回到循环顶都不
+        // 得再派新会话——否则会在已落位卡上再 spawn worker，非瞬时路径还会对已不在
+        // running/ 的卡 moveCard 抛错、把 reviewing/ 的卡改落 blocked/。走 return 让
+        // finally 正常清理（临时目录/任务锁/轮询）。与 runWatchdogCheck 的 watchdogHalted
+        // 互为兜底：标志只覆盖看门狗，本断言覆盖所有「卡已离开 running/」的形态。
+        const liveCard = findCard(root, taskId);
+        if (!liveCard || liveCard.state !== 'running') {
+          log(`⚠ 卡片已离开 running/（当前 ${liveCard?.state ?? '不在队列中'}），主循环停止派发新会话，收敛退出走 finally 清理。`);
+          return;
+        }
         const sessionStartMs = Date.now(); // 本会话起点：结构化故障识别（B6）的日志查询窗口左界
         budget.beginSession(); // 上会话用量入账 committed，本会话从零峰值起算
         xte.beforeWorkerSession(); // 偏航 no_commit：记会话起点 HEAD（连续 2 会话零提交报警）
