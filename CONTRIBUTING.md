@@ -19,7 +19,7 @@ npm install
 
 | 用例 | 命令 |
 |------|------|
-| 跑测试 | `npm test`（改完 `src/**` 必须全绿） |
+| 跑测试 | 按改动域跑相关用例 `npx vitest run test/<文件名>.test.ts`，全绿即交付；`npm test` 是产品全量，由合并门禁与 CI 跑，日常不必手跑（分层规则见 [AGENTS.md](AGENTS.md)「测试指南」） |
 | 跑单个套件 | `npx vitest run test/<文件名>.test.ts` |
 | 覆盖率 | `npm run test:coverage` |
 | 编译 | `npm run build` |
@@ -49,7 +49,7 @@ npm install
 ## 提交 PR
 
 1. 从 `develop` 拉分支；多 agent 并行开发时用 `node .agents/scripts/feature-branch.mjs start <task-id>`（见 AGENTS.md「多 Agent 并行开发约定」）
-2. 改完跑 `npm test`，全绿再交
+2. 改完按域跑相关用例，全绿再交（全量由合并门禁与 CI 兜底）
 3. **文档同步**：改了用户可见行为，按 [.agents/conventions/docs-writing.md](.agents/conventions/docs-writing.md) 更新 CHANGELOG / README（用户视角、一条一事；README 改版遵循其中的结构蓝图），并跑一遍 [docs-sync 工作流](.agents/workflows/docs-sync.md) 的 checklist
 4. 提交信息说清"改了什么、为什么"（中文即可，加 `feat:` / `fix:` / `docs:` 前缀更佳）
 5. 发起 PR，说明改动动机与测试情况

@@ -19,7 +19,7 @@ npm install
 
 | Task | Command |
 |------|------|
-| Run tests | `npm test` (must pass after any change under `src/**`) |
+| Run tests | Run the suites for the area you changed: `npx vitest run test/<file>.test.ts`, all green before delivery; `npm test` is the full product suite, run by the merge gate and CI — no need to run it by hand day to day (tiering rules: [AGENTS.md](../../AGENTS.md), "测试指南", Chinese) |
 | Run a single suite | `npx vitest run test/<file>.test.ts` |
 | Coverage | `npm run test:coverage` |
 | Build | `npm run build` |
@@ -49,7 +49,7 @@ Tasks with clear goals and machine-checkable acceptance criteria can be handed t
 ## Submitting PRs
 
 1. Branch from `develop`; for multi-agent parallel development use `node .agents/scripts/feature-branch.mjs start <task-id>` (see AGENTS.md, "Multi-agent parallel development")
-2. Run `npm test` after your changes — all green before submitting
+2. Run the suites for the area you changed — all green before submitting (the full suite is covered by the merge gate and CI)
 3. **Docs sync**: changed user-visible behavior? Update CHANGELOG / README per [.agents/conventions/docs-writing.md](../../.agents/conventions/docs-writing.md) (user perspective, one topic per item; README restructures follow its structure blueprint), and walk the [docs-sync workflow](../../.agents/workflows/docs-sync.md) checklist
 4. Commit messages explain "what changed & why" (Chinese is fine; `feat:` / `fix:` / `docs:` prefixes appreciated)
 5. Open the PR describing the motivation and test coverage

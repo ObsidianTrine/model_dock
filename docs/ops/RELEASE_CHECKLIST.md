@@ -53,7 +53,7 @@ node scripts/release-check.mjs v1.2.0 --skip-test    # 测试刚在别处全绿�
 - [ ] 新增依赖逐一过目：全部纯 JS、无 native addon（SEA 打包前提）；lockfile 已提交、`npm ci` 可复现、无可疑 postinstall
 - [ ] `package.json` 元数据正确（description / engines node>=22 / files 仅 dist）
 - [ ] secrets.json 永不入库，.gitignore 覆盖 dist / release / .cache / *.tgz；管理面不回传 Key 明文（reveal-key 受 Host 白名单 + 同源校验）
-- [ ] 网关仅监听 127.0.0.1（设计约束，改动即 major + 威胁模型更新）
+- [ ] 主网关仅监听 127.0.0.1（设计约束，改动即 major + 威胁模型更新）；可选的 LAN 手机控制台是独立的第二监听器（默认绑定 `0.0.0.0`），其暴露面有改动同样要更新威胁模型
 - [ ] 托管 Node 钉版年度评估：每年 10 月新 LTS 落地后择发版升级 `MANAGED_NODE_VERSION`（与 SEA 内嵌运行时 / CI / 开发机同大版本切换）；平时发版按门禁 ⚠ 提示跟进当前线最新 patch
 - [ ] 已知限制（AGENTS.md「已知限制」）逐条确认仍成立
 

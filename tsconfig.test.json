@@ -10,7 +10,8 @@
     "types": ["node"]
   },
   "include": ["test", "vitest.config.ts", "vitest.workflow.config.ts"],
-  // 存量豁免清单（T30 白名单渐进，2026-10-30 首测 225 → 84 后的剩余）：测试书写宽松一类
+  // 存量豁免清单（T30 白名单渐进，2026-10-30 首测 225 起；当前清单以本数组与
+  // test/test-typecheck-gate.test.ts 的登记为准，不在此复述计数）：测试书写宽松一类
   // （mock 形状不完整 / 部分 Config 字面量 as 断言 / 模板字面量端口类型 / typed-env 缺键），
   // 非运行时缺陷。新文件默认受检；扩清单必须有理由并同步 test/test-typecheck-gate.test.ts
   // 的登记断言，清完一个删一行。test/orchestrator 整目录豁免：直接 import .agents 的 .mjs
