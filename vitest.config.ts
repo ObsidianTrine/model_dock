@@ -20,9 +20,11 @@ export default defineConfig({
     // 产品套件 = test/ 顶层。agent 工作流套件（test/orchestrator/**，测 .agents/ 编排器与
     // 守卫 hook）拆到 vitest.workflow.config.ts，经 `npm run test:workflow` 单独运行——
     // 产品门禁不再为其支付 ~40s（方案 A）。两 config 的「同构」现指 isolate 与防死锁面
-    // （watchdog / 超时）；maxWorkers 允许分域异构（产品 1 / 编排 4，后者经 B3 实验证据
-    // docs/archive/test-orch-parallel-exp.md 定档），并行度按各域自身风险面前行
-    // （门禁 test/config-isomorphism.test.ts 已同步剔除 maxWorkers）。
+    // （watchdog）；maxWorkers 与 testTimeout 允许分域异构（maxWorkers 产品 1 / 编排 4，
+    // 后者经 B3 实验证据 docs/archive/test-orch-parallel-exp.md 定档；testTimeout 产品 20s /
+    // 编排 60s——编排用例为 mock worker 的子进程链、合法耗时 15-25s，20s 贴边假红，理由
+    // 见 vitest.workflow.config.ts 头注），各域按自身风险面独立定档
+    // （门禁 test/config-isomorphism.test.ts 已同步剔除两者）。
     include: ['test/*.test.ts'],
     testTimeout: 20000,
     env: {
