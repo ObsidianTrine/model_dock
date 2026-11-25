@@ -123,7 +123,7 @@ export const UI_BODY_HTML = `<div class="wrap">
           <p class="shint" data-i18n="手机连不上？换下面这条地址再试——电脑有多块网卡时，二维码可能选到了手机连不上的那块（VPN / 虚拟机网卡）：||Phone cannot connect? Try another address below — with several network adapters the QR may point at one your phone cannot reach (VPN or virtual-machine adapter):">手机连不上？换下面这条地址再试——电脑有多块网卡时，二维码可能选到了手机连不上的那块（VPN / 虚拟机网卡）：</p>
           <div id="lanAltUrls"></div>
         </div>
-        <p class="shint" data-i18n="手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。||Phone on the same Wi-Fi: scan or type the address. The page is view &amp; switch only — no keys.">手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。</p>
+        <p class="shint" data-i18n="手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。仅限可信网络：明文 HTTP 易被同网段嗅探，公共 Wi-Fi 勿开。||Phone on the same Wi-Fi: scan or type the address. The page is view &amp; switch only — no keys. Trusted networks only: plain HTTP can be sniffed on the same network, so avoid public Wi-Fi.">手机与电脑连同一 Wi-Fi，扫码或输入地址进入；页面只含「看状态 + 切服务」，不含 Key。仅限可信网络：明文 HTTP 易被同网段嗅探，公共 Wi-Fi 勿开。</p>
         <p class="shint" id="lanWinHint" hidden data-i18n="Windows 首次开启手机远程会弹防火墙提示：请点「允许访问」，且把「专用网络」「公用网络」都勾上；漏点或点「取消」会导致手机打不开。||On Windows, enabling the mobile console pops a firewall alert the first time: click 'Allow access' and keep both Private and Public networks checked. Dismissing it makes the phone page unreachable.">Windows 首次开启手机远程会弹防火墙提示：请点「允许访问」，且把「专用网络」「公用网络」都勾上；漏点或点「取消」会导致手机打不开。</p>
       </div>
     </div>
