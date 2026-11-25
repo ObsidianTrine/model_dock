@@ -16,6 +16,7 @@ import {
   drainAppendStreams,
   slugify,
   __testSetLockTiming,
+  __testLockTiming,
 } from '../src/util/fsx.js'
 import { TEST_TMP, waitFor } from './helpers.js'
 
@@ -86,6 +87,47 @@ describe('util-gaps2 · fsx 文件锁', () => {
       release()
       expect(fs.existsSync(lockFile)).toBe(false)
     } finally {
+      __testSetLockTiming()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('生产默认时间值不变量：抢锁总超时 > 陈锁阈值 > 喂狗间隔', () => {
+    // 超时短于陈锁阈值时，持有者崩溃后立刻到达的等待者等不到陈锁判定就先拿到超时报错
+    //（见下一条用例）。不变量只约束生产默认值：__testSetLockTiming 注入的缩放值可自由配比。
+    __testSetLockTiming()
+    try {
+      const { heartbeatMs, staleMs, acquireTimeoutMs } = __testLockTiming()
+      expect(acquireTimeoutMs).toBeGreaterThan(staleMs)
+      expect(staleMs).toBeGreaterThan(heartbeatMs)
+    } finally {
+      __testSetLockTiming()
+    }
+  })
+
+  it('崩溃残留锁（生产默认时间值）：持有者死后立刻到达的等待者按陈锁接管，而不是先撞上抢锁超时', async () => {
+    const dir = fs.mkdtempSync(path.join(TEST_TMP, 'md-lock-crash-'))
+    const lockFile = path.join(dir, 'x.lock')
+    __testSetLockTiming() // 生产默认值：5s 喂狗 / 15s 陈锁
+    fs.writeFileSync(lockFile, String(process.pid + 999999)) // mtime = 此刻：持有者最后一次喂狗后即崩溃
+    const { staleMs, acquireTimeoutMs } = __testLockTiming()
+    vi.useFakeTimers() // 真实等待要 10s+：拨快时钟，Date 与 50ms 轮询一起走
+    try {
+      const t0 = Date.now()
+      const settled = acquireFileLock(lockFile).then(
+        (release) => ({ release, error: null as Error | null, at: Date.now() - t0 }),
+        (error: Error) => ({ release: null, error, at: Date.now() - t0 })
+      )
+      await vi.advanceTimersByTimeAsync(30_000)
+      const result = await settled
+      expect(result.error).toBeNull() // 不是「超时…可删除该 .lock 文件重试」
+      expect(result.at).toBeGreaterThanOrEqual(staleMs) // 等满陈锁窗口后走的是陈锁接管
+      expect(result.at).toBeLessThan(acquireTimeoutMs)
+      expect(fs.readFileSync(lockFile, 'utf8')).toBe(String(process.pid))
+      result.release!()
+      expect(fs.existsSync(lockFile)).toBe(false)
+    } finally {
+      vi.useRealTimers()
       __testSetLockTiming()
       fs.rmSync(dir, { recursive: true, force: true })
     }
