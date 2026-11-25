@@ -564,8 +564,8 @@ export function pickFileCipher(): FileCipher {
 // raw/snapshot 配对（perf-secrets-cache）：raw 是生成 data 时的盘上密文表（raw[k] 解密必得
 // snapshot[k]）、snapshot 是与之配对的明文快照——writeFileSecrets 写回时「明文 == snapshot」的
 // 条目沿用 raw 原密文不再重加密；缺失 = 无法按条
-// 复用，整表加密（保守）。mutateFileSecrets 会原地改 data 返回值，写路径判「条目未变更」必须比对
-// snapshot 而非 data 本身。
+// 复用，整表加密（保守）。mutateFileSecrets 改的是 data 的浅拷贝、写成功才换进缓存，缓存里的
+// data 与 snapshot 始终是配对的一版（写失败不会留下「内存新、磁盘旧」的半截状态）。
 const FILE_RECHECK_MS = 5_000
 let fileCache: {
   path: string
@@ -757,12 +757,22 @@ async function writeFileSecrets(dec: Record<string, string>): Promise<void> {
  *  锁内的 DPAPI 加密（win32 spawn PowerShell，最坏 2 次 × 10s 超时 ≈ 20s）**有意留在临界区**，
  *  依赖 fsx 的持锁喂狗保活（acquireFileLock 心跳刷新锁 mtime，陈锁判定对活者永不满足）：
  *  解密已可凭指纹跳过；加密移不出锁——改后整表只有锁内才知道，而整表原子写必须发生在锁内。
- *  竞态防线见 test/secrets-lock.test.ts。 */
+ *  竞态防线见 test/secrets-lock.test.ts。
+ *  缓存回滚：锁内新鲜读在指纹相等时返回的是缓存本体（fileCache.data），回调**改浅拷贝**而不是它——
+ *  加密或写盘抛错时磁盘仍是旧值，缓存必须仍是旧值。此前原地改：写失败后内存已是新值而盘上没变，
+ *  指纹一直相等、回验一直续期，直到进程重启都在发从没落盘的 key（审计 P-01）。 */
 function mutateFileSecrets<T>(fn: (store: Record<string, string>) => T | Promise<T>): Promise<T> {
   return withFileLock(secretsLockPath(), { timeoutError: secretsLockTimeoutError }, async () => {
     const store = await loadFileSecrets(false)
-    const ret = await fn(store)
-    await writeFileSecrets(store)
+    const next = { ...store }
+    const ret = await fn(next)
+    try {
+      await writeFileSecrets(next)
+    } catch (e) {
+      // 保守清缓存（同 mutateConfig 失败清 loadMemo）：下次读按盘上内容重建，绝不信任写失败前后的内存态
+      fileCache = null
+      throw e
+    }
     return ret
   })
 }
