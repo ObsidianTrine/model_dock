@@ -260,6 +260,55 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
   })
 
+  it('编辑弹层探针模型字段（probe-model-select）：回显显式值；未改动不随保存提交，改动后带 probe_model', async () => {
+    const updateCalls: Array<Record<string, unknown>> = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/service/update' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        updateCalls.push(body)
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }), text: () => Promise.resolve('{"ok":true}') })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    const prevModels = OVERVIEW_FIXTURE.services[0].models
+    try {
+      OVERVIEW_FIXTURE.services[0].models = [
+        { id: 'm1', display_name: '贵模型' },
+        { id: 'm2', display_name: 'M2' },
+      ]
+      OVERVIEW_FIXTURE.services[0].probeModel = 'm1'
+      OVERVIEW_FIXTURE.services[0].probeModelExplicit = true
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-edit="alpha"]') as HTMLElement)!.click()
+      const sel = document.getElementById('efProbeModel') as HTMLSelectElement
+      expect(sel).not.toBeNull()
+      expect(sel.value).toBe('m1')
+      expect(sel.textContent).toContain('跟随默认模型')
+      // 未改动直接保存：body 不带 probe_model（无关保存不得把解析值固化成显式配置）
+      ;(document.getElementById('efSave') as HTMLElement)!.click()
+      await flush()
+      expect(updateCalls.length).toBeGreaterThanOrEqual(1)
+      for (const c of updateCalls) expect('probe_model' in c).toBe(false)
+      // 改成「跟随默认模型」再保存：带 probe_model=''（服务端删除字段）
+      ;(document.querySelector('[data-edit="alpha"]') as HTMLElement)!.click()
+      const sel2 = document.getElementById('efProbeModel') as HTMLSelectElement
+      sel2.value = ''
+      ;(document.getElementById('efSave') as HTMLElement)!.click()
+      await flush()
+      const last = updateCalls[updateCalls.length - 1]
+      expect('probe_model' in last).toBe(true)
+      expect(last.probe_model).toBe('')
+    } finally {
+      OVERVIEW_FIXTURE.services[0].models = prevModels
+      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModel
+      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModelExplicit
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
   it('请求日志面板：8 列含操作列、错误行链路两行化（跳过原因可见）、全行复制按钮、筛选 tab 切换记忆', async () => {
     // 2026-11-08 真实事故形态：bigmodel（openai-only）被 candidateSkip 跳过 → 改发 coding-plan 404
     LOGS_FIXTURE.logs = [
@@ -776,6 +825,74 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect((document.getElementById('diagPingBtn') as HTMLButtonElement).disabled).toBe(false)
     } finally {
       OVERVIEW_FIXTURE.services[1].hasKey = betaKey
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
+  it('diag-modal-probe-ui：探针模型下拉回显与保存（probe-model-select）——onchange 即持久化，失败回弹写 foot 槽', async () => {
+    const updateCalls: Array<Record<string, unknown>> = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/service/update' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        updateCalls.push(body)
+        if (body.probe_model === 'm3') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ ok: false, err: '不在模型表', modeldock: { hint: '填模型表内的 ID' } }), text: () => Promise.resolve('{"ok":false,"err":"不在模型表"}') })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }), text: () => Promise.resolve('{"ok":true}') })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    const prevModels = OVERVIEW_FIXTURE.services[0].models
+    try {
+      OVERVIEW_FIXTURE.services[0].models = [
+        { id: 'm1', display_name: '贵模型' },
+        { id: 'm2', display_name: 'M2' },
+        { id: 'm3', display_name: 'M3' },
+      ]
+      OVERVIEW_FIXTURE.services[0].defaultModel = 'm2'
+      OVERVIEW_FIXTURE.services[0].probeModel = 'm2'
+      OVERVIEW_FIXTURE.services[0].probeModelExplicit = false
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      const sel = document.getElementById('diagProbeModelSel') as HTMLSelectElement
+      expect(sel).not.toBeNull()
+      // 未显式指定 → 选中「跟随默认模型」（空值）；选项含模型表全部模型
+      expect(sel.value).toBe('')
+      expect(sel.textContent).toContain('跟随默认模型')
+      expect(sel.textContent).toContain('m1 · 贵模型')
+      // 选 m2 → POST /service/update {provider, probe_model:'m2'}，成功写 foot 槽 + 快照同步
+      sel.value = 'm2'
+      sel.dispatchEvent(new Event('change'))
+      await flush()
+      expect(updateCalls).toHaveLength(1)
+      expect(updateCalls[0]).toEqual({ provider: 'alpha', probe_model: 'm2' })
+      expect(document.getElementById('probeSvcTimelineMsg')?.textContent).toContain('已保存')
+
+      // 快照同步：重开弹层（body 自 view 重建）回显显式值——view 是夹具的深拷贝，内存快照
+      // 的变更只能经重开渲染观察（5s 轮询后服务端权威值亦同）
+      ;(document.getElementById('probeSvcTimelineOverlay') as HTMLElement).hidden = true
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      const sel2 = document.getElementById('diagProbeModelSel') as HTMLSelectElement
+      expect(sel2.value).toBe('m2')
+      // 失败路径：选 m3（stub 回 400）→ select 回弹旧值 + foot 槽报错（不走全局 toast）
+      sel2.value = 'm3'
+      sel2.dispatchEvent(new Event('change'))
+      await flush()
+      expect(sel2.value).toBe('m2')
+      expect(document.getElementById('probeSvcTimelineMsg')?.textContent).toContain('保存失败')
+      // 改回「跟随默认模型」→ 空串提交（服务端删除字段），重开回显空值
+      sel2.value = ''
+      sel2.dispatchEvent(new Event('change'))
+      await flush()
+      expect(updateCalls[updateCalls.length - 1]).toEqual({ provider: 'alpha', probe_model: '' })
+      ;(document.getElementById('probeSvcTimelineOverlay') as HTMLElement).hidden = true
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      expect((document.getElementById('diagProbeModelSel') as HTMLSelectElement).value).toBe('')
+    } finally {
+      OVERVIEW_FIXTURE.services[0].models = prevModels
+      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModel
+      delete (OVERVIEW_FIXTURE.services[0] as Partial<typeof OVERVIEW_FIXTURE.services[0]>).probeModelExplicit
       vi.stubGlobal('fetch', prev)
     }
   })

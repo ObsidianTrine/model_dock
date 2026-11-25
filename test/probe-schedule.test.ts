@@ -221,3 +221,62 @@ describe('probe-schedule · 定时器生命周期（对齐 startModelProbeLoop�
     }
   })
 })
+
+describe('probe-schedule · 探针模型解析（probe-model-select）', () => {
+  it('被动面 targets 走 resolveProbeModel：跟随 profile 默认模型，probe_model 显式指定优先', async () => {
+    const h = fakeHome()
+    try {
+      // 无 probe_model：模型表 {m1,m2} + profile 默认 m2 → 被动证据落 (upA,'-',m2)（默认模型优先于表首）
+      const rt = buildRuntime(
+        {
+          providers: { upA: providerCfg({ models: { m1: {}, m2: {} } }) },
+          profiles: { main: { provider: 'upA', default_model: 'm2' } },
+          harness: {},
+        } as unknown as Config,
+        'tok'
+      )
+      rt.config.active_profile = 'main'
+      seedLog(rt, 'upA', H, 502)
+      await drainAppendStreams()
+      const t1 = countingTransport()
+      const r1 = await runProbeScheduleTick(rt, { transport: t1.transport })
+      expect(t1.calls()).toBe(0)
+      expect(r1.passive).toBeDefined()
+      expect(getProbeVerdict(rt, 'upA', '-', 'm2')?.state).toBe('degraded')
+      expect(getProbeVerdict(rt, 'upA', '-', 'm2')?.evidence.source).toBe(P15_SOURCE)
+
+      // probe_model 显式指定 m1（便宜模型）：被动证据改落 (upA,'-',m1)
+      // （tick1 落的 m2 三元组仍在 rt 内，按既有规则 7 天无证据转 stale，此处不断言它）
+      rt.config.providers.upA.probe_model = 'm1'
+      const t2 = countingTransport()
+      await runProbeScheduleTick(rt, { transport: t2.transport })
+      expect(getProbeVerdict(rt, 'upA', '-', 'm1')?.state).toBe('degraded')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('probe_model 指到不在模型表的值（config.toml 手编错值）：回落默认模型不炸', async () => {
+    const h = fakeHome()
+    try {
+      const rt = buildRuntime(
+        {
+          providers: { upA: providerCfg({ models: { m1: {}, m2: {} }, probe_model: 'no-such' }) },
+          profiles: { main: { provider: 'upA', default_model: 'm2' } },
+          harness: {},
+        } as unknown as Config,
+        'tok'
+      )
+      rt.config.active_profile = 'main'
+      seedLog(rt, 'upA', H, 200)
+      await drainAppendStreams()
+      const t = countingTransport()
+      const r = await runProbeScheduleTick(rt, { transport: t.transport })
+      expect(t.calls()).toBe(0)
+      expect(r.passive).toBeDefined()
+      expect(getProbeVerdict(rt, 'upA', '-', 'm2')?.state).toBe('healthy')
+    } finally {
+      h.restore()
+    }
+  })
+})

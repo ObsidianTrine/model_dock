@@ -13,6 +13,7 @@ import { parseRetryAfterMs, forwardToUpstream, readBodyBounded, readUpstreamErro
 import type { UpstreamBody } from '../relay.js'
 import { t } from '../../util/i18n.js'
 import { providerKeyRefs, resolveProviderKeys } from '../../config/secrets.js'
+import { profileRefForProvider } from '../admin-shared.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
 import { probeWire } from './wire.js'
 import { applyVerdictEvidence, keyFingerprint, sanitizeErrorSummary, verdictKey } from './verdict.js'
@@ -634,7 +635,8 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
  *  verdict 归属与账本记账都靠它，key 明文只出现在 secrets（错误体脱敏用），绝不入计划回显面。 */
 export interface ProbePlan {
   providerId: string
-  /** 目标模型（服务模型目录第一项；空目录 = 空串，transport 侧按 provider 协议兜底拼装） */
+  /** 目标模型（resolveProbeModel 解析：probe_model 指定 > 服务默认模型 > 目录首项；空目录 = 空串，
+   *  transport 侧按 provider 协议兜底拼装） */
   model: string
   /** 池内可解析 key 的指纹清单（sha256 前 8 位；绝不含明文） */
   keys: Array<{ index: number; fp: string }>
@@ -651,9 +653,28 @@ export interface ProbePlan {
   secrets: string[]
 }
 
-/** 展开 provider 的探测计划：模型取目录首项；per-key 探针（P2）按池内每把可解析 key 各一目标
- *  （keyIndex 保留原始池位），其余探针取主 key 一目标。无 runner 校验在这里不做——派发期由
- *  runnerFor 按目录记 not-implemented，预估展示因此可以覆盖未实现探针（先见成本、后见跳过）。 */
+/** 探针代表模型解析（probe-model-select）：provider.probe_model 显式指定（须在该服务模型表
+ *  内，非法回落，config.toml 手编错值不炸）> 服务默认模型（引用该服务的 profile 的
+ *  default_model，与服务卡「默认 X」同口径——探针回答「这个服务活着吗」，打真实流量用的模型
+ *  最有代表性）> 模型表第一个（无 profile/未设 default_model 的兜底）。手动诊断（buildProbePlan）、
+ *  周期调度与被动聚合（schedule targets）、overview 投影统一从这里取，防口径漂移。 */
+export function resolveProbeModel(cfg: GatewayRuntime['config'], providerId: string): string {
+  const p = cfg.providers[providerId]
+  if (!p) return ''
+  const ids = Object.keys(p.models ?? {})
+  if (!ids.length) return ''
+  const probeModel = String(p.probe_model ?? '').trim()
+  if (probeModel && ids.includes(probeModel)) return probeModel
+  const ref = profileRefForProvider(cfg, providerId)
+  const dm = ref ? cfg.profiles[ref]?.default_model : undefined
+  if (dm && ids.includes(dm)) return dm
+  return ids[0]
+}
+
+/** 展开 provider 的探测计划：模型取 resolveProbeModel（probe_model 指定 > 服务默认模型 >
+ *  目录首项）；per-key 探针（P2）按池内每把可解析 key 各一目标（keyIndex 保留原始池位），
+ *  其余探针取主 key 一目标。无 runner 校验在这里不做——派发期由 runnerFor 按目录记
+ *  not-implemented，预估展示因此可以覆盖未实现探针（先见成本、后见跳过）。 */
 export async function buildProbePlan(
   rt: GatewayRuntime,
   providerId: string,
@@ -663,7 +684,7 @@ export async function buildProbePlan(
   if (!provider) {
     throw new Error(t('服务「{id}」不存在，无法探测', 'Service "{id}" does not exist; nothing to probe', { id: providerId }))
   }
-  const model = Object.keys(provider.models ?? {})[0] ?? ''
+  const model = resolveProbeModel(rt.config, providerId)
   const keys = await resolveProviderKeys(providerKeyRefs(provider))
   const fps = keys.map((k) => ({ index: k.index, fp: keyFingerprint(k.key) }))
   const units: ProbePlan['units'] = []

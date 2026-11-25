@@ -220,3 +220,71 @@ describe('Web /service/model-fallback 按需回填端点', () => {
     }
   })
 })
+
+describe('Web /service/update 的 probe_model 分支（probe-model-select）', () => {
+  function providerFieldOnDisk(id: string, key: string): unknown {
+    const doc: any = tomlParse(fs.readFileSync(configPath(), 'utf8'))
+    return doc.providers?.[id]?.[key]
+  }
+
+  async function start(): Promise<{ gwPort: number; close: () => void; h: ReturnType<typeof fakeHome> }> {
+    const h = fakeHome()
+    await saveConfig(fbCfg())
+    const g = await startGateway(fbCfg())
+    return { gwPort: g.gwPort, close: g.close, h }
+  }
+
+  it('合法模型 ID：200 落盘，TOML 可读回；空串清除字段（回随默认模型）', async () => {
+    const g = await start()
+    try {
+      const resp = await post(g.gwPort, 'service/update', { provider: 'up', probe_model: 'm2' })
+      expect(resp.status).toBe(200)
+      expect(providerFieldOnDisk('up', 'probe_model')).toBe('m2')
+      // 显式空串 = 清除字段（整字段移除，非空串落盘）
+      const resp2 = await post(g.gwPort, 'service/update', { provider: 'up', probe_model: '' })
+      expect(resp2.status).toBe(200)
+      expect(providerFieldOnDisk('up', 'probe_model')).toBeUndefined()
+    } finally {
+      g.close()
+      g.h.restore()
+    }
+  })
+
+  it('模型表外的 ID：400 + hint 信封不落盘；同请求替换模型目录时按新表校验', async () => {
+    const g = await start()
+    try {
+      const resp = await post(g.gwPort, 'service/update', { provider: 'up', probe_model: 'no-such' })
+      expect(resp.status).toBe(400)
+      const body = (await resp.json()) as { modeldock?: { hint?: string } }
+      expect(body.modeldock?.hint).toBeTruthy()
+      expect(providerFieldOnDisk('up', 'probe_model')).toBeUndefined()
+      // 同请求提交新模型目录（m4 替换 m1/m2/m3）+ probe_model 指向新表内的 m4：按新表放行
+      const resp2 = await post(g.gwPort, 'service/update', {
+        provider: 'up',
+        models: { m4: { source: 'manual' } },
+        probe_model: 'm4',
+      })
+      expect(resp2.status).toBe(200)
+      expect(providerFieldOnDisk('up', 'probe_model')).toBe('m4')
+    } finally {
+      g.close()
+      g.h.restore()
+    }
+  })
+
+  it('字段缺省不动；只替换模型目录使存量指定悬空时顺手清除', async () => {
+    const g = await start()
+    try {
+      await post(g.gwPort, 'service/update', { provider: 'up', probe_model: 'm2' })
+      // 无关编辑（只改名）：probe_model 保留
+      await post(g.gwPort, 'service/update', { provider: 'up', name: 'renamed' })
+      expect(providerFieldOnDisk('up', 'probe_model')).toBe('m2')
+      // 只替换模型目录（m2 消失）且未提交 probe_model：悬空指定顺手清除
+      await post(g.gwPort, 'service/update', { provider: 'up', models: { m1: { source: 'manual' }, m3: { source: 'manual' } } })
+      expect(providerFieldOnDisk('up', 'probe_model')).toBeUndefined()
+    } finally {
+      g.close()
+      g.h.restore()
+    }
+  })
+})

@@ -46,6 +46,11 @@ export interface ProviderConfig {
    *  写入口（CLI/控制台）校验价格闸门：两模型 input/output 单价差均 ≤5% 才允许配置；
    *  config.toml 手编只做形状校验（migrate），价格闸门不拦启动。 */
   model_fallback?: Record<string, string>
+  /** 探针代表模型（可选，probe-model-select）：探针套件与被动聚合用哪个模型代表本服务发请求
+   *  （健康结论按 服务×key×模型 三元组记录）。贵模型当代表探针不划算时，可指定为便宜模型。
+   *  解析顺序（resolveProbeModel 统一口径）：probe_model（须在本表内，非法回落）> 服务默认
+   *  模型（引用本服务的 profile 的 default_model）> 模型表第一个。缺省字段 = 跟随默认模型。 */
+  probe_model?: string
 }
 
 export interface ProfileConfig {
