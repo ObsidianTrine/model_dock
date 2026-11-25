@@ -924,7 +924,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       const cure = document.querySelector('#diagCurrentBox .cureline') as HTMLElement | null
       expect(cure).not.toBeNull()
       expect(cure!.textContent).toContain('历史失败摘要')
-      cure!.onclick!(new Event('click') as unknown as Event)
+      cure!.click() // .click() 同步触发 onclick（happy-dom onclick 期望 PointerEvent，直接构造 Event 类型不过）
       await flush() // copyText 反馈走 clipboard promise 微任务（happy-dom 有 clipboard API），断言前冲刷
       expect(cure!.textContent).toContain('已复制')
       // 健康三元组不出 err 行（fixture 只有一条 degraded——健康路径用另一服务验证）
@@ -939,7 +939,7 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(dres.className).toContain('copyable')
       expect(dres.textContent).toContain('MODELDOCK-OK')
       expect(dres.textContent).toContain('人工复核')
-      dres.onclick!(new Event('click') as unknown as Event)
+      dres.click()
       await flush()
       expect(dres.textContent).toContain('已复制')
       vi.advanceTimersByTime(1600)
