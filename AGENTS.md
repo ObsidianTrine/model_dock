@@ -125,7 +125,7 @@ Agent 回复用户时（无论是否涉及本仓库代码）遵循以下规则�
   | **L3** | 大节点（发布 / develop→main） | 双套件全量 `npm test` + `npm run test:workflow`（实测合计 ~9min：产品 ~200s + 编排 ~320s，编排套件并行 maxWorkers=4）；发布侧 release-check 默认只跑产品域，CI preflight tested 兜底 |
 
 - **CI 触发分级（2026-11-03 定，见 `.github/workflows/test.yml` 注释）**：mac 腿退出 develop push 矩阵（只跑 PR / push main / 每日 schedule 巡检）；`test-workflow` job 常驻（required check），但仅当变更触达 `.agents/**` 或 `test/orchestrator/**` 才真跑套件，改 src/ 的日常推送只付 paths-filter 占位。
-- 套件：test/ 下 252 个测试文件（产品套件 149 + 编排器套件 103；store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等，以 test/ 目录与 `npm test` 输出为准），均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
+- 套件：test/ 下两套——产品套件（`test/*.test.ts`，`npm test`）+ 编排器套件（`test/orchestrator/**`，`npm run test:workflow`），覆盖 store / backup / adapters / gateway / util / import-scan / sync / cloud / diag / update / ui 门禁等域；文件清单以 test/ 目录为准，此处不记计数（写死数字会随增删漂移）。均以 `fakeHome()` 隔离，`finally` 中 `h.restore()` 还原。
 - **按域套件速查**（L1 选文件的入口，文件名以 test/ 目录为准；同前缀属同域）：
 
   | 域 | 套件文件（test/） |
@@ -263,7 +263,7 @@ agent 在 GitHub Actions 上做分层 PR 审查与依赖升级验证（配置在
 
 - Windows 上 NTFS 不生效 `0o600` 权限位。
 - esbuild CJS 输出下 `import.meta.url` 为空——src 一律不用 `import.meta`：SEA 检测走 `process.execPath`，非 SEA 相对路径以 `process.argv[1]`（cli 入口）为锚点。
-- 网关仅监听 `127.0.0.1`，不支持远程访问（设计如此）。
+- 主网关（代理 + 管理面）仅监听 `127.0.0.1`，不支持远程访问（设计如此）。唯一例外是可选的「手机远程」：在控制台开启后另起一个局域网内的第二监听器（`src/gateway/lan.ts`，默认绑定 `0.0.0.0`、独立端口、明文 HTTP），只暴露简版控制台，主网关的代理与管理面不在该端口出现。
 - tsx 直跑（`npm run dev -- <cmd>`、隔离手测实例）**没有热重载**：改完 `src/**` 后运行中的实例仍伺服旧代码，验证前必须先重启该实例。run_dev.sh / run_dev.bat 用 `tsx watch` 会自动重启，不受此限。
 
 ## 发布

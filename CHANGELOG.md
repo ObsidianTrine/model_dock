@@ -644,7 +644,7 @@ ModelDock 首个公开发布版本：把所有 AI 客户端的上游配置收进
 - CLI 输出、报错、帮助与网关提示全双语：中文默认，`--lang en` / 环境变量 `MODELRDOCK_LANG` / `config.toml language` 持久生效；Web 控制台顶栏随时切换。
 
 ---
-[未发布]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...HEAD
+[未发布]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.1...HEAD
 [1.8.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
