@@ -484,7 +484,8 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
     try {
       if (!rt.config.providers[service]) throw new Error(t('服务不存在：{id}', 'Service not found: {id}', { id: service }))
       // 与桌面「应用/当前」同一链路：写 active_profile + 人工钉定主服务（人为优先于定时窗口）→ 热加载 → 重烤跟随全局的客户端
-      await switchToServiceWithRoute(service, rt.config.gateway?.auto_failover === true)
+      // auto_failover 不传内存值（审计 P-04）：由回调取盘上现值，rt.config 陈旧时不回写覆盖
+      await switchToServiceWithRoute(service)
       await reloadRuntime(rt)
       await refreshBakedModelClients({ port: rt.port })
       audit(true)
@@ -503,9 +504,10 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
       return sendJson(res, 400, { ok: false, error: (e as Error).message })
     }
     const b = body as { enabled?: unknown; provider?: unknown; next?: unknown }
-    // 部分更新语义与桌面 /_modeldock/auto-route 一致：enabled 缺省=保持现状；body 带 provider/next 字段才更新（空/null=恢复自动）
+    // 部分更新语义与桌面 /_modeldock/auto-route 一致：enabled 缺省=保持盘上现值（不传内存快照，审计 P-04）；
+    // body 带 provider/next 字段才更新（空/null=恢复自动）
     const enabled = b.enabled === undefined
-      ? rt.config.gateway?.auto_failover === true
+      ? undefined
       : b.enabled === true || b.enabled === 'true'
     const provider = 'provider' in b
       ? (typeof b.provider === 'string' && b.provider.trim() ? b.provider.trim() : null)
@@ -513,14 +515,14 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
     const next = 'next' in b
       ? (typeof b.next === 'string' && b.next.trim() ? b.next.trim() : null)
       : undefined
-    const audit = (ok: boolean, err?: string): void =>
+    const audit = (ok: boolean, err?: string, resolved?: boolean): void =>
       logAudit(rt, {
         ts: localIsoTs(),
         kind: 'audit',
         op: '手机自动路由',
         op_en: 'Mobile auto route',
         target:
-          `enabled=${enabled}` +
+          `enabled=${resolved ?? enabled}` +
           (provider === undefined ? '' : ` provider=${provider ?? '(自动)'}`) +
           (next === undefined ? '' : ` next=${next ?? '(自动)'}`),
         ok,
@@ -533,7 +535,7 @@ async function handleLanRequest(rt: GatewayRuntime, req: http.IncomingMessage, r
       const r2 = await setAutoRoute(enabled, provider)
       const n = next === undefined ? undefined : await setRouteNext(next)
       await reloadRuntime(rt)
-      audit(true)
+      audit(true, undefined, r2.enabled)
       return sendJson(res, 200, { ok: true, enabled: r2.enabled, provider: r2.provider ?? null, next: n ?? rt.config.gateway?.route_next ?? null })
     } catch (e) {
       audit(false, (e as Error).message)

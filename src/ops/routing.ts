@@ -26,15 +26,17 @@ export async function pinRouteProtocolError(
 }
 
 /** 开启/关闭自动路由(故障切换) + 可选的强制服务商/限流切换/自动备用链开关,均持久化到 gateway。默认关闭,用户显式应用才开启。
- *  未传的可选参数（provider/failoverOn429/autoFallback 为 undefined）保持现状不动。 */
+ *  未传的可选参数（provider/failoverOn429/autoFallback 为 undefined）保持现状不动。
+ *  `enabled` 传 undefined = 保持盘上现值（审计 P-04：调用方不得把可能陈旧的内存快照传进来回写）。 */
 export async function setAutoRoute(
-  enabled: boolean,
+  enabled?: boolean,
   provider?: string | null,
   failoverOn429?: boolean,
   autoFallback?: boolean
 ): Promise<{ enabled: boolean; provider?: string }> {
   return mutateConfig((c) => {
-    const g = { ...(c.gateway ?? {}), auto_failover: enabled }
+    const next = enabled ?? c.gateway?.auto_failover ?? false
+    const g = { ...(c.gateway ?? {}), auto_failover: next }
     if (provider === null) delete g.auto_route_provider
     else if (provider !== undefined) g.auto_route_provider = provider
     if (failoverOn429 !== undefined) {
@@ -43,7 +45,7 @@ export async function setAutoRoute(
     }
     if (autoFallback !== undefined) g.auto_fallback = autoFallback
     c.gateway = g
-    return { enabled, provider: g.auto_route_provider }
+    return { enabled: next, provider: g.auto_route_provider }
   })
 }
 
@@ -92,8 +94,9 @@ export async function switchToService(providerId: string): Promise<string> {
 
 /** 「应用」一站式切换（桌面 /switch 与手机端切换服务的热路径）：active_profile 与 auto_route 一次整包落盘。
  *  语义与 switchToService(id) → setAutoRoute(autoFailover, id) 依次调用完全一致，只是把两次整包
- *  读改写+两次快照合并为一次（known-issues PERF-14 写放大）。noteLocalSwitch 时间戳保护语义不变。 */
-export async function switchToServiceWithRoute(providerId: string, autoFailover: boolean): Promise<string> {
+ *  读改写+两次快照合并为一次（known-issues PERF-14 写放大）。noteLocalSwitch 时间戳保护语义不变。
+ *  `autoFailover` 传 undefined = 保持盘上现值（审计 P-04：调用方的 rt.config 可能陈旧，不得回写）。 */
+export async function switchToServiceWithRoute(providerId: string, autoFailover?: boolean): Promise<string> {
   const name = await mutateConfig((c) => {
     if (!c.providers[providerId]) throw new Error(t('服务「{id}」不存在', 'Service "{id}" does not exist', { id: providerId }))
     const existing = Object.entries(c.profiles).find(([, p]) => p.provider === providerId)
@@ -104,7 +107,7 @@ export async function switchToServiceWithRoute(providerId: string, autoFailover:
       c.profiles[name] = { name, provider: providerId, default_model: models[0] }
     }
     c.active_profile = name
-    const g = { ...(c.gateway ?? {}), auto_failover: autoFailover, auto_route_provider: providerId }
+    const g = { ...(c.gateway ?? {}), auto_failover: autoFailover ?? c.gateway?.auto_failover ?? false, auto_route_provider: providerId }
     c.gateway = g
     return name
   })

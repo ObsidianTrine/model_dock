@@ -5,10 +5,10 @@
 import { describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import { fakeHome } from './helpers.js'
-import { saveConfig } from '../src/config/store.js'
+import { loadConfig, saveConfig } from '../src/config/store.js'
 import { setSecret } from '../src/config/secrets.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
-import { applyAttach, switchHarnessMode } from '../src/ops.js'
+import { applyAttach, setAutoRoute, switchHarnessMode, switchToServiceWithRoute } from '../src/ops.js'
 
 /** 池 provider：keys 池两把（首把不落盘模拟不可读），key_ref 另指向一把仍可读的旧密钥——
  *  池存在时 key_ref 不参与转发（providerKeyRefs 池优先），切直连同理不得漏出旧密钥 */
@@ -89,6 +89,67 @@ describe('switchHarnessMode direct 取密钥：keys 池感知（审计 F2）', (
       expect(direct).toContain('sk-single')
     } finally {
       delete process.env.MODELRDOCK_FAKE_CLAUDE_CODE_PRESENT
+      h.restore()
+    }
+  })
+})
+
+/** 两服务配置：盘上 auto_failover 由 seed 决定，供「陈旧内存快照不得回写」用例使用 */
+function routeCfg(autoFailover: boolean): Config {
+  return {
+    ...emptyConfig(),
+    active_profile: 'main',
+    security: { store: 'file' },
+    gateway: { auto_failover: autoFailover },
+    providers: {
+      p1: { name: 'one', base_url: 'http://127.0.0.1:1', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k1', models: { m: { source: 'preset', context_window: 1000, max_output: 100 } } },
+      p2: { name: 'two', base_url: 'http://127.0.0.1:2', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'file:k2', models: { m: { source: 'preset', context_window: 1000, max_output: 100 } } },
+    },
+    profiles: { main: { provider: 'p1', default_model: 'm' } },
+    harness: {},
+  }
+}
+
+describe('路由写回：「保持现状」取盘上现值而不是调用方内存快照（审计 P-04）', () => {
+  it('switchToServiceWithRoute 不传 autoFailover：盘上 auto_failover=true 不被内存里的 false 覆盖', async () => {
+    const h = fakeHome()
+    try {
+      await saveConfig(routeCfg(true))
+      // 模拟网关 rt.config 陈旧：调用方不再把内存快照传进来（undefined = 保持盘上现值）
+      await switchToServiceWithRoute('p2', undefined)
+      const after = await loadConfig()
+      expect(after.gateway?.auto_failover).toBe(true)
+      expect(after.gateway?.auto_route_provider).toBe('p2')
+      expect(after.active_profile).toBe('auto-p2')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('setAutoRoute enabled 缺省：盘上 auto_failover=true 保持，返回 resolved 值', async () => {
+    const h = fakeHome()
+    try {
+      await saveConfig(routeCfg(true))
+      const r = await setAutoRoute(undefined, 'p2')
+      expect(r.enabled).toBe(true)
+      expect((await loadConfig()).gateway?.auto_failover).toBe(true)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('setAutoRoute 显式 false 仍可关闭；盘上无该字段时缺省解析为 false（原行为兼容）', async () => {
+    const h = fakeHome()
+    try {
+      await saveConfig(routeCfg(true))
+      const off = await setAutoRoute(false)
+      expect(off.enabled).toBe(false)
+      expect((await loadConfig()).gateway?.auto_failover).toBe(false)
+      const cfg = routeCfg(true)
+      delete cfg.gateway
+      await saveConfig(cfg)
+      expect((await setAutoRoute(undefined)).enabled).toBe(false)
+    } finally {
       h.restore()
     }
   })
