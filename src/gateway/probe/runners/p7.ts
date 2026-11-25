@@ -38,6 +38,7 @@ export async function runP7(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
   const wire = probeWire(provider?.protocol ?? 'openai', ctx.target.model, {
     prompt: P7_PROMPT,
     maxTokens: PROBE_CANARY_MAX_TOKENS,
+    thinking: 'keep', // 推理识别探的就是推理通道本身（probe-no-think：其余探针缺省关思考）
   })
   const sent = await sendProbe(ctx, wire.path, wire.body)
   if (!sent.ok) return { state: 'unreachable', err: sent.netErr, ms: sent.ms, calls: [] }

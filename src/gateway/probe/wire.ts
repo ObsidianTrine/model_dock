@@ -20,20 +20,34 @@ export interface ProbeWire {
   body: Buffer
 }
 
-/** 最小会话请求拼装：键序与 server.ts probe() 历史输出逐字节一致（responses 一等协议）。 */
+/** 最小会话请求拼装：键序与 server.ts probe() 历史输出逐字节一致（responses 一等协议）。
+ *  思考注入（probe-no-think）：anthropic 线格式缺省带 `thinking:{type:'disabled'}`——思考型
+ *  模型（GLM/火山 coding plan 等）缺省开思考，推理块烧掉 S/M 档位 max_tokens 预算后正文为空，
+ *  P1 回显解析不出（实测 glm-5-3-flash 40 tokens 只剩 thinking 块）；探针是活性/能力检查，
+ *  不需要推理，关掉还省 tokens。只注入 anthropic 线：GLM/火山 anthropic 兼容层与原生
+ *  Anthropic（ThinkingConfigDisabled）都接受 {type:'disabled'}；openai/responses 线不注入
+ *  （原生 OpenAI 等严格上游拒绝未知顶层参数），那两条线上的思考模型需服务端侧配置关闭。
+ *  P7 推理识别传 thinking:'keep'——它探的就是推理通道本身。 */
 export function probeWire(
   proto: Protocol,
   model: string,
-  opts: { prompt?: string; maxTokens?: number; stream?: boolean } = {}
+  opts: { prompt?: string; maxTokens?: number; stream?: boolean; thinking?: 'disabled' | 'keep' } = {}
 ): ProbeWire {
   const prompt = opts.prompt ?? PROBE_DEFAULT_PROMPT
   const maxTokens = opts.maxTokens ?? PROBE_DEFAULT_MAX_TOKENS
   const stream = opts.stream === true
+  const noThink = (opts.thinking ?? 'disabled') === 'disabled' && proto === 'anthropic'
   const body = Buffer.from(
     JSON.stringify(
       proto === 'responses'
         ? { model, max_output_tokens: maxTokens, stream, input: prompt }
-        : { model, max_tokens: maxTokens, stream, messages: [{ role: 'user', content: prompt }] }
+        : {
+            model,
+            max_tokens: maxTokens,
+            stream,
+            ...(noThink ? { thinking: { type: 'disabled' } } : {}),
+            messages: [{ role: 'user', content: prompt }],
+          }
     )
   )
   return { path: probeWirePath(proto), body }
