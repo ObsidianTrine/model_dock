@@ -5,6 +5,16 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A failed key save no longer looks successful**: if encryption or the disk write failed (full disk, file locked), memory already held the new value while the disk kept the old one — the gateway would keep using a key that was never persisted until a restart silently reverted it. It now rolls back to the on-disk state and reports the failure.
+- **A crashed writer's lock is taken over instead of surfacing as a timeout**: a leftover config write lock had to expire before anyone could proceed, while waiters timed out sooner and got "timed out — delete the .lock file and retry" even though recovery was automatic. Stale locks left by a crashed writer are now taken over; only a genuinely hung holder reports a timeout.
+- **Compressed upstream error bodies can no longer exhaust memory**: decompression had no output cap, so a few hundred KB of highly compressible error body could balloon until the gateway's event loop stalled. Output is now capped at 2MB; beyond that the raw bytes are used (the readable error head is preserved).
+- **Switching from the console or phone no longer overwrites command-line edits**: the "auto failover" state carried into a switch came from an in-memory snapshot, which goes stale when the file watcher degrades — a later switch could silently revert what the CLI had just changed. Fields not explicitly supplied now always follow the latest on-disk config.
+- **An unresponsive gateway is no longer reported as "not running"**: when the health check timed out (slow machine, slow key decryption), `status` / `stop` / `rotate-token` concluded the gateway was down — worst of all, `rotate-token` rewrote the state file and left the running gateway with a token that no longer matched the console. Three states are now distinguished (running / unresponsive / stopped): unresponsive is reported as such, the state file is left alone, and blind token rewrites are refused.
+
 ## [1.8.1] - 2026-11-23
 
 ### Added

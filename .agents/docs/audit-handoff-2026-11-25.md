@@ -59,27 +59,36 @@
 
 ## 1. 任务总览
 
-状态：⬜ 未开始。开工时把它改成 🔧 进行中，合并后改 ✅ 并写 commit。
+状态：⬜ 未开始 / 🔧 进行中 / ✅ 已合并。**执行记录（2026-11-25 夜）见本节末尾。**
 
 | 编号 | 任务 | 域 | 主要改动面 | 规模 | 前置 | 状态 |
 |---|---|---|---|---|---|---|
-| DM-01 | 人工批示与自动合并互不加锁 | Dockmaster | `orchestrator.mjs` | S | — | ⬜ |
-| DM-02 | 人工认领的卡被当孤儿自动续跑 | Dockmaster | `autoresume.mjs`、`orchestrator.mjs` | S | 建议在 DM-01 后 | ⬜ |
-| DM-03 | 看门狗熔断停机标志置位过晚 | Dockmaster | `orchestrator.mjs` | S | 建议在 DM-02 后 | ⬜ |
-| DM-04 | finish 撞窗等待冻结心跳，活锁被接管 | Dockmaster | `feature-branch.mjs` | S | 可与 DM-01~03 并行 | ⬜ |
-| P-01 | 密钥写失败后内存缓存被污染 | ModelDock | `config/secrets.ts` | S | — | ⬜ |
-| P-02 | 锁等待超时短于陈锁判定 | ModelDock | `util/fsx.ts` | S | — | ⬜ |
-| P-03 | 上游错误体解压无输出上限 | ModelDock | `gateway/relay.ts` | S | — | ⬜ |
-| P-04 | 用内存态配置回写磁盘，覆盖并发改动 | ModelDock | `ops/routing.ts`、`gateway/server.ts`、`gateway/lan.ts` | S–M | — | ⬜ |
-| P-05 | `remountSyncEngine` 无互斥 | ModelDock | `sync/engine.ts` | S | — | ⬜ |
-| P-06 | 单实例检查先查后写；无响应被当成未运行 | ModelDock | `gateway/main.ts`、`shared.ts`、`cli/gatewaycmd.ts` | M | — | ⬜ |
-| E-01 | 类型检查与 lint 覆盖面 | 工程 | `tsconfig*.json`、`eslint.config.mjs` | M | — | ⬜ |
+| DM-01 | 人工批示与自动合并互不加锁 | Dockmaster | `orchestrator.mjs` | S | — | ✅ `cf22b1d` |
+| DM-02 | 人工认领的卡被当孤儿自动续跑 | Dockmaster | `autoresume.mjs`、`orchestrator.mjs` | S | 建议在 DM-01 后 | ✅ `ad3b6b0` |
+| DM-03 | 看门狗熔断停机标志置位过晚 | Dockmaster | `orchestrator.mjs` | S | 建议在 DM-02 后 | ✅ `9dc2cc7` |
+| DM-04 | finish 撞窗等待冻结心跳，活锁被接管 | Dockmaster | `feature-branch.mjs` | S | 可与 DM-01~03 并行 | ✅ `e3250ba` |
+| P-01 | 密钥写失败后内存缓存被污染 | ModelDock | `config/secrets.ts` | S | — | ✅ `fed0dc7` |
+| P-02 | 锁等待超时短于陈锁判定 | ModelDock | `util/fsx.ts` | S | — | ✅ `ef87d8a` |
+| P-03 | 上游错误体解压无输出上限 | ModelDock | `gateway/relay.ts` | S | — | ✅ `130d060` |
+| P-04 | 用内存态配置回写磁盘，覆盖并发改动 | ModelDock | `ops/routing.ts`、`gateway/server.ts`、`gateway/lan.ts` | S–M | — | ✅ `0eb7225` |
+| P-05 | `remountSyncEngine` 无互斥 | ModelDock | `sync/engine.ts` | S | — | ✅ `22d9bbc` |
+| P-06 | 单实例检查先查后写；无响应被当成未运行 | ModelDock | `gateway/main.ts`、`shared.ts`、`cli/gatewaycmd.ts` | M | — | ✅ `23903f9`（仅 (a) 三态判活） |
+| E-01 | 类型检查与 lint 覆盖面 | 工程 | `tsconfig*.json`、`eslint.config.mjs` | M | **需用户确认 CI 接线** | ⬜ |
 | E-02 | CI 补廉价门禁 | 工程 | `.github/workflows/test.yml` | S | **需用户确认** | ⬜ |
-| E-03 | LAN 威胁模型与用户提示 | 文档 | `docs/design/hld.md`、guide、`docs/en` | S | — | ⬜ |
-| E-04 | 修正已确认的文档漂移 | 文档 | `AGENTS.md` 等 | S | — | ⬜ |
-| E-05 | 防夹具日期炸弹 | 工程 | `test/**` | S | — | ⬜ |
-| S-01~04 | 结构性拆分 | 两者 | 见第 5 节 | L–XL | P0 合并后 | ⬜ |
-| D-01~06 | 需要用户决策 | — | — | — | **不得自行执行** | ⬜ |
+| E-03 | LAN 威胁模型与用户提示 | 文档 | `docs/design/hld.md`、guide、`docs/en` | S | — | ✅ `64709ad` |
+| E-04 | 修正已确认的文档漂移 | 文档 | `AGENTS.md` 等 | S | — | ✅ `b5cb441` |
+| E-05 | 防夹具日期炸弹 | 工程 | `test/**` | S | — | ✅ `6a11727` |
+| S-01~04 | 结构性拆分 | 两者 | 见第 5 节 | L–XL | P0 合并后 | ⬜（未开工） |
+| D-01~06 | 需要用户决策 | — | — | — | **不得自行执行** | ⬜（待用户拍板） |
+
+**执行记录（2026-11-25 夜）**
+
+- 13 张 P0/P1 工单已合并进 develop：DM-01~04、P-01~06a、E-03~E-05。CHANGELOG 的 `[未发布]` 段由主控统一补（5 条用户可感知修复）。
+- **E-04 收窄**：`tsconfig.test.json` 与 `test/eslint-baseline.test.ts` 的两处注释型漂移移出 E-04（它们会把纯文档卡路由成双域全量门禁），并入 E-01。
+- **本机合并判据**：产品全量门禁在本机不可绿——宿主安全策略全局拉黑 `reg.exe`（注册表用例必红），`test/util-gaps2.test.ts` 的 `ENOTDIR` 用例在 Windows 上既有失败（develop 基线同样红）。CI（Windows + node 24）develop 最近一次为绿。产品域合并因此按「目标用例全绿 + `--skip-test`」执行并逐卡记录理由，全量交由 CI 兜底。
+- **编排冒烟门禁必须串行**：`VITEST_MAX_WORKERS=1`。4 worker 并行时 `provision` / `tiers` / `reconcile` 互相争用假红（develop 上可复现）。串行约 9–10 分钟。
+- **测试环境残留**：`%TEMP%/orch-*` 累积到千级后 `provision` E2E 会稳定假红，跑编排门禁前先清理。
+- **门禁分域待改进**：`scripts/test-gate.mjs` 把 `CHANGELOG.md` 等根目录文档判为产品域，任何带 CHANGELOG 的纯文档提交都会触发产品全量——建议列入 E-01/E-02 的顺手项。
 
 **并行分组**（按文件归属切分，减少 rebase 冲突）：
 
