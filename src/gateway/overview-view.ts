@@ -11,6 +11,7 @@ import { autostartOverview } from '../autostart.js'
 import { sandboxInstallCapability } from './install.js'
 import { PRESETS } from '../presets/data.js'
 import { autoRouteInfo, isMeltdown, parseFallbackEntry, type GatewayRuntime } from './state.js'
+import { resolveProbeModel } from './probe/engine.js'
 import { usageTodayView } from './state/logs.js'
 import { probeCapabilityView } from './probe/verdict.js'
 import { ensurePresetsLoaded, presetModels, presetsGenerationNow } from '../presets/data.js'
@@ -243,6 +244,10 @@ export async function buildOverview(rt: GatewayRuntime): Promise<Record<string, 
       hasKey,
       modelsCount: models.length,
       defaultModel: profileEntry?.default_model ?? models[0] ?? null,
+      // 探针代表模型（probe-model-select，resolveProbeModel 统一口径）：服务健康弹层的探针模型
+      // 下拉回显值。探针模型非每请求易变字段（跟随配置），进 overview 主载荷不击穿文本 diff
+      probeModel: resolveProbeModel(cfg, id),
+      probeModelExplicit: typeof p.probe_model === 'string' && p.probe_model.trim() !== '',
       fallback: (profileEntry?.fallback ?? [])
         .map((e) => parseFallbackEntry(e))
         .filter((x): x is { providerId: string; model?: string } => x !== null)

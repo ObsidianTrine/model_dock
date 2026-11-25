@@ -15,7 +15,7 @@ import { AddressInfo } from 'node:net'
 import { spawn } from 'node:child_process'
 import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import { buildRuntime } from '../src/gateway/state.js'
-import { buildProbePlan, runProbeSuite } from '../src/gateway/probe/engine.js'
+import { buildProbePlan, resolveProbeModel, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
 import { getProbeRunner } from '../src/gateway/probe/runners/index.js'
 import { readProbeLedger } from '../src/gateway/probe/ledger.js'
@@ -88,6 +88,67 @@ describe('probe-cost-gate · 计划展开与预估', () => {
       expect(plan.estimate).toBe(800)
       // 指纹口径：8 位十六进制、绝不含 key 明文
       for (const k of plan.keys) expect(k.fp).toMatch(/^[0-9a-f]{8}$/)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('probe-cost-gate · 探针模型解析（probe-model-select）', () => {
+  const mkCfg = (providerOver: Record<string, unknown>, profiles: Record<string, unknown>): Config =>
+    ({
+      version: 1,
+      providers: {
+        a: {
+          name: 'A',
+          base_url: 'http://upstream.invalid',
+          protocol: 'anthropic',
+          auth_style: 'bearer',
+          key_ref: 'plain:k1',
+          models: { m1: { source: 'manual' }, m2: { source: 'manual' } },
+          ...providerOver,
+        },
+      },
+      profiles,
+      harness: {},
+    }) as unknown as Config
+
+  it('无 probe_model：服务默认模型（profile default_model）优先于表首；buildProbePlan 采用之', async () => {
+    const h = fakeHome()
+    try {
+      const rt = buildRuntime(mkCfg({}, { main: { provider: 'a', default_model: 'm2' } }), 'tok')
+      rt.config.active_profile = 'main'
+      const plan = await buildProbePlan(rt, 'a', ['p1'])
+      expect(plan.model).toBe('m2')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('probe_model 显式指定（便宜模型）优先于默认模型；指到表外值回落默认模型', async () => {
+    const h = fakeHome()
+    try {
+      const rt = buildRuntime(mkCfg({ probe_model: 'm1' }, { main: { provider: 'a', default_model: 'm2' } }), 'tok')
+      rt.config.active_profile = 'main'
+      expect((await buildProbePlan(rt, 'a', ['p1'])).model).toBe('m1')
+      // config.toml 手编错值：非法回落，不炸
+      rt.config.providers.a.probe_model = 'no-such'
+      expect((await buildProbePlan(rt, 'a', ['p1'])).model).toBe('m2')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('无 profile / profile 未设 default_model：回落模型表第一项；resolveProbeModel 对未知服务/空模型表返回空串', async () => {
+    const h = fakeHome()
+    try {
+      const rt = buildRuntime(mkCfg({}, {}), 'tok')
+      expect((await buildProbePlan(rt, 'a', ['p1'])).model).toBe('m1') // 表首兜底
+      rt.config.profiles.main = { provider: 'a', default_model: 'gone' } // default_model 不在表内 → 仍回落表首
+      expect((await buildProbePlan(rt, 'a', ['p1'])).model).toBe('m1')
+      expect(resolveProbeModel(rt.config, 'missing')).toBe('')
+      const rt2 = buildRuntime(mkCfg({ models: {} }, {}), 'tok')
+      expect(resolveProbeModel(rt2.config, 'a')).toBe('')
     } finally {
       h.restore()
     }

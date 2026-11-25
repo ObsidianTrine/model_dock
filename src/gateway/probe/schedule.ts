@@ -15,7 +15,7 @@
 //   budget-exhausted、零上游请求），schedule 只组织触发面，口径单一事实源在引擎
 
 import type { Server } from 'node:http'
-import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite } from './engine.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, resolveProbeModel, runProbeSuite } from './engine.js'
 import type { ProbeRunResult, ProbeTarget, ProbeTransport } from './engine.js'
 import { getProbeRunner } from './runners/index.js'
 import type { GatewayRuntime } from '../state/types.js'
@@ -58,12 +58,13 @@ export async function runProbeScheduleTick(
     .map(([id]) => id)
 
   // 被动面：targets = 全部 enabled 服务（聚合不依赖 key，verdict 键 keyFp 按 '-' 占位——
-  // 引擎口径）；服务零配置时不空跑（targets 为空的套件没有可观测产出）
+  // 引擎口径）；模型走 resolveProbeModel（probe_model 指定 > 服务默认模型 > 目录首项，
+  // 与主动面同口径）；服务零配置时不空跑（targets 为空的套件没有可观测产出）
   const passiveIds = scheduled(PROBE_SCHEDULE_PASSIVE_IDS)
   if (passiveIds.length > 0 && enabledProviderIds.length > 0) {
     const targets = enabledProviderIds.map((id) => ({
       providerId: id,
-      model: Object.keys(rt.config.providers[id].models ?? {})[0] ?? '',
+      model: resolveProbeModel(rt.config, id),
     }))
     out.passive = await runProbeSuite(rt, { probeIds: passiveIds, targets, transport, runnerFor: getProbeRunner })
   }

@@ -53,6 +53,7 @@ One block per upstream provider; `<id>` is a name you choose (lowercase letters,
 | `endpoints` | `{ anthropic?, openai?, responses? }` | no | none | Per-protocol base URL overrides: for vendors serving anthropic / openai / responses at different addresses; protocols without an entry fall back to `base_url`. |
 | `max_concurrency` | `number` | no | `0` (unlimited) | Concurrency cap for this service (queued at the gateway): when parallel agent workers trigger upstream 429 rate limits, set it to what the upstream tolerates — excess requests queue at the gateway instead of hammering the upstream; see `gateway.queue_wait_ms` for the queue wait. |
 | `model_fallback` | `Record<string, string>` | no | none (model-level failover disabled) | Model-level failover map (within the same provider): upstream model ID → backup model ID. Triggered only by quota-exhaustion errors (HTTP 402, or 429 with a quota-flavored body) after the provider fallback chain is exhausted, retrying on the backup model of the same service; unmapped models never trigger (quality-sensitive roles like reviewers stay protected by not being mapped). Write paths (CLI/console) enforce a price gate — both models' input/output unit prices must be within 5%; hand-edited config.toml only gets a shape check. |
+| `probe_model` | `string` | no | unset = follow the service default model | Probe representative model: which model probes and passive aggregation use to represent this service (health verdicts are recorded per service×key×model triple). When the current model is expensive to probe, point this at a cheaper one; the value must be a model ID from this service's model list — values outside the list fall back to the service default model. Resolution order: explicit probe_model > service default model (the default_model of the profile referencing this provider) > first model in the list. |
 
 Example:
 
@@ -70,6 +71,7 @@ priority = 10
 endpoints.openai = "https://api.acme.com/openai"
 max_concurrency = 2
 model_fallback = { "glm-5.3-flash" = "glm-5.2" }
+probe_model = "glm-4.5-air"
 ```
 
 ## 3. Model metadata (models)

@@ -1399,6 +1399,26 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
       return sendError(res, r.status, r.message, r.hint)
     }
   }
+  // 探针代表模型（probe-model-select）：字段缺省=不动（弹层/旧客户端不带字段不得误清）；
+  // 显式空串/null=删除字段（回随服务默认模型）；字符串=须在该服务模型表内（同请求提交了
+  // 模型目录替换时按新表校验，防止指到刚被删掉的模型），否则 400 可操作报错
+  let pmProvided = false
+  let newProbeModel: string | undefined
+  if (b.probe_model !== undefined) {
+    pmProvided = true
+    if (b.probe_model === null || b.probe_model === '') {
+      newProbeModel = ''
+    } else if (typeof b.probe_model === 'string') {
+      const pm = b.probe_model.trim()
+      const modelTable = Object.keys(newModels ?? p.models ?? {})
+      if (!modelTable.includes(pm)) {
+        return sendError(res, 400, t('探针模型「{m}」不在服务「{id}」的模型表中', 'Probe model "{m}" is not in the model list of service "{id}"', { m: pm, id }), t('填该服务模型目录里的模型 ID，或留空恢复跟随默认模型', 'Use a model ID from this service\'s model list, or leave empty to follow the default model'))
+      }
+      newProbeModel = pm
+    } else {
+      return sendError(res, 400, t('probe_model 须为模型 ID 字符串或空值', 'probe_model must be a model ID string or empty'))
+    }
+  }
   // 默认模型基线（persist 前取）：persist 后比对，真变了才触发烤模型客户端同步
   const prevProfName = profileRefForProvider(rt.config, id)
   const prevDefaultModel = prevProfName ? rt.config.profiles[prevProfName]?.default_model : undefined
@@ -1416,6 +1436,15 @@ async function hServiceUpdate(c: AdminCtx): Promise<void> {
     if (mfProvided) {
       if (newModelFallback) t.model_fallback = newModelFallback
       else delete t.model_fallback
+    }
+    // 探针代表模型（probe-model-select）：显式空 = 删除字段（回随默认模型），非空 = 写指定值；
+    // 同请求只替换了模型目录而未提交 probe_model 时，存量指定若已不在新表内顺手清除（悬空
+    // 指定读侧虽有回落，落盘不留死值）
+    if (pmProvided) {
+      if (newProbeModel) t.probe_model = newProbeModel
+      else delete t.probe_model
+    } else if (newModels && t.probe_model && !Object.keys(newModels).includes(t.probe_model)) {
+      delete t.probe_model
     }
     if (newEndpoints) {
       const e = { ...(t.endpoints ?? {}) }

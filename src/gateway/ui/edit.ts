@@ -945,6 +945,21 @@ export const UI_JS_EDIT = `  var editing = null
     if (kt) { kt.innerHTML = icon('eye', 14); kt.title = t('显示明文', 'Show plaintext') }
     efModelB.load(s.models || [], s.defaultModel ?? '')
     efFbB.load(s.fallback || [])
+    // 探针模型（probe-model-select）：选项 = 该服务当前模型表，回显显式值（未指定 = 跟随默认
+    // 模型）。_saved 记打开时的落盘值——保存只在用户改动过时才带 probe_model 字段，无关保存
+    // 不得把解析值固化成显式配置（同请求改模型表后指到已删模型由服务端 400 可操作报错）
+    var pmSel = document.getElementById('efProbeModel')
+    if (pmSel) {
+      var pmOpts = '<option value=""' + (s.probeModelExplicit ? '' : ' selected') + '>' + esc(t('跟随默认模型', 'Follow default model')) + '</option>'
+      for (var pi = 0; pi < (s.models || []).length; pi++) {
+        var pm = s.models[pi]
+        var plbl = pm.display_name && pm.display_name !== pm.id ? pm.id + ' · ' + pm.display_name : pm.id
+        pmOpts += '<option value="' + esc(pm.id) + '"' + (s.probeModelExplicit && s.probeModel === pm.id ? ' selected' : '') + '>' + esc(plbl) + '</option>'
+      }
+      pmSel.innerHTML = pmOpts
+      pmSel._saved = s.probeModelExplicit ? s.probeModel : ''
+      pmSel.value = pmSel._saved
+    }
     // 模型容灾块：先按该服务模型目录出空态，再按需拉取已存映射回填（reveal-key 同款不进
     // overview 轮询）。回填失败保持未载入态——保存不带 model_fallback，服务端缺省=不动，
     // 绝不因回填失败整表清空既有映射；响应按 id 守卫（快速关开切服务时旧响应不串位）
@@ -999,6 +1014,9 @@ export const UI_JS_EDIT = `  var editing = null
       openai: ep.protocol !== 'openai' ? ep.urls.openai : '',
       responses: ep.protocol !== 'responses' ? ep.urls.responses : '',
     }
+    // 探针模型：只在用户改动过下拉时随保存提交（probe-model-select；空值=服务端删除字段回随默认）
+    var pmSel = document.getElementById('efProbeModel')
+    if (pmSel && pmSel.value !== pmSel._saved) body.probe_model = pmSel.value
     // 只在用户点过星标时写入默认模型；校验它仍在列表中
     var dm = efModelB.getDefault()
     if (efModelB.isDefaultDirty() && dm && collected.models[dm]) body.default_model = dm

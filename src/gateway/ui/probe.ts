@@ -228,6 +228,21 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       '<p class="dres" id="diagP14Res"></p></div>'
     return html
   }
+  // 探针模型下拉行（probe-model-select）：显式值回显，未指定=「跟随默认模型」；选项 = 该服务
+  // 模型表（贵模型可换成便宜模型当代表）。保存写在 bindDiag（onchange 即持久化，不走保存按钮）
+  function diagProbeModelHtml(pid) {
+    var s = diagSvc(pid)
+    if (!s || !s.models || !s.models.length) return ''
+    var opts = '<option value=""' + (s.probeModelExplicit ? '' : ' selected') + '>' + esc(t('跟随默认模型', 'Follow default model')) + '</option>'
+    for (var i = 0; i < s.models.length; i++) {
+      var m = s.models[i]
+      var lbl = m.display_name && m.display_name !== m.id ? m.id + ' · ' + m.display_name : m.id
+      opts += '<option value="' + esc(m.id) + '"' + (s.probeModelExplicit && s.probeModel === m.id ? ' selected' : '') + '>' + esc(lbl) + '</option>'
+    }
+    return '<span class="help"><b>' + esc(t('探针模型', 'Probe model')) + '</b></span>' +
+      '<select id="diagProbeModelSel">' + opts + '</select>' +
+      '<span class="help">' + esc(t('探针与被动聚合用它代表本服务，保存即生效', 'Probes and passive aggregation use it to represent this service; saved at once')) + '</span>'
+  }
   function diagBodyHtml(pid) {
     return '<div id="diagSecHealth">' +
       diagLatencyHtml(pid) +
@@ -236,6 +251,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       '</div>' +
       '<div class="divider"></div>' +
       '<div id="diagSecActions">' +
+      '<div class="row">' + diagProbeModelHtml(pid) + '</div>' +
       '<div class="sechead"><b>' + esc(t('诊断动作', 'Diagnostics')) + '</b><span class="help">' + esc(t('按成本分层：免费动作即时执行；付费动作先确认后发出并记入探针账本', 'Tiered by cost: free actions run at once; paid actions require confirmation and are charged to the probe ledger')) + '</span></div>' +
       diagActionsHtml(pid) +
       '<div id="diagBudgetLine">' + diagBudgetHtml() + '</div>' +
@@ -348,6 +364,35 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
         var conf = document.getElementById(confId)
         if (conf) conf.hidden = true
         diagFoot('')
+      }
+    }
+    // 探针模型下拉（probe-model-select）：onchange 即持久化（写 provider.probe_model；选
+    // 「跟随默认模型」= 空值清除字段回随默认）。成功反馈写弹层底栏 msg 槽（弹层开着不走全局
+    // toast），失败回弹旧值；_saved 记最近落盘值——打开时是显式值或空（未指定），保存成功才前移
+    var pmSel = document.getElementById('diagProbeModelSel')
+    if (pmSel) {
+      var s0 = diagSvc(pid)
+      pmSel._saved = s0 && s0.probeModelExplicit ? s0.probeModel : ''
+      // 显式设值：markup 的 selected 属性在部分环境（happy-dom）回读不稳，JS 设值跨环境确定性
+      pmSel.value = pmSel._saved
+      pmSel.onchange = function () {
+        var v = pmSel.value
+        pmSel.disabled = true
+        diagFoot('')
+        api('/service/update', { method: 'POST', body: JSON.stringify({ provider: pid, probe_model: v }) })
+          .then(function () {
+            pmSel.disabled = false
+            pmSel._saved = v
+            var s = diagSvc(pid)
+            if (s) { s.probeModelExplicit = !!v; s.probeModel = v || s.probeModel }
+            diagFoot('✓ ' + t('已保存，手动与周期探针、被动聚合立即用它', 'Saved; manual and scheduled probes and passive aggregation use it at once'), true)
+            pollProbe() // 结论三元组随模型变化：立即刷一次 verdict（徽标/当前结论随后跟上）
+          })
+          .catch(function (e) {
+            pmSel.disabled = false
+            pmSel.value = pmSel._saved
+            diagFoot(t('探针模型保存失败：', 'Failed to save probe model: ') + probeErrMsg(e))
+          })
       }
     }
     wirePaid('diagP1Btn', 'p1', 'diagP1Confirm', 'diagP1Go', 'diagP1Cancel', 'diagP1Res')

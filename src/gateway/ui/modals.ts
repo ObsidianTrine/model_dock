@@ -118,6 +118,8 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
     bodyHtml: '<div id="efEpHost"></div>' +
       '<label>API Key<span class="keywrap"><input type="password" id="efKey" placeholder="已保存（留空不修改；点右侧按钮查看并拷贝）">' +
       '<button type="button" id="efKeyToggle" data-i18n-title="显示明文||Show plaintext" title="显示明文" class="iconbtn"></button></span></label>' +
+      '<label><span data-i18n="探针模型||Probe model"></span><span class="keywrap"><select id="efProbeModel"></select></span></label>' +
+      '<p class="help" data-i18n="探针与被动聚合用哪个模型代表本服务（贵模型可换便宜模型）；「跟随默认模型」= 不指定。||Which model probes and passive aggregation use to represent this service; &quot;Follow default model&quot; = not set."></p>' +
       '<div id="efModelHost"></div><div id="efFbHost"></div>',
     foot: [
       { slot: 'msg', id: 'efMsg', kind: 'info' },
