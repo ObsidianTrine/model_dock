@@ -137,7 +137,11 @@ describe('util-gaps2 · fsx 文件锁', () => {
     const dir = fs.mkdtempSync(path.join(TEST_TMP, 'md-lock-enotdir-'))
     fs.writeFileSync(path.join(dir, 'blocker'), 'x')
     try {
-      await expect(acquireFileLock(path.join(dir, 'blocker', 'sub', 'x.lock'))).rejects.toMatchObject({ code: 'ENOTDIR' })
+      // 父级是文件时建锁的 errno 有平台差异：POSIX 报 ENOTDIR，Windows 报 ENOENT（语义同为
+      // 「路径里存在非目录段」）。本用例的意图是「非 EEXIST 一律原样上抛、不被当成已存在去
+      // 重试」，所以按平台取期望码，不把 Windows 的 errno 当成缺陷。
+      const code = process.platform === 'win32' ? 'ENOENT' : 'ENOTDIR'
+      await expect(acquireFileLock(path.join(dir, 'blocker', 'sub', 'x.lock'))).rejects.toMatchObject({ code })
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
