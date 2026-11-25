@@ -10,7 +10,7 @@ import { TEST_TMP, newHome, gotoHome, restoreHomes, waitFor } from './helpers.js
 import { loadConfig, mutateConfig, saveConfig } from '../src/config/store.js'
 import { setSecret, makeKeyRef } from '../src/config/secrets.js'
 import { setupSyncTarget } from '../src/sync/setup.js'
-import { DEFAULT_DEBOUNCE_MS, safeSyncTick, syncTickOnce, SyncLoop, syncStatus, remountSyncEngine, stopSyncEngine, __testTickActiveSyncLoop } from '../src/sync/engine.js'
+import { DEFAULT_DEBOUNCE_MS, safeSyncTick, syncTickOnce, SyncLoop, syncStatus, remountSyncEngine, stopSyncEngine, __testActiveSyncSig, __testTickActiveSyncLoop } from '../src/sync/engine.js'
 import { readSyncState, updateSyncState, emptySyncState, type SyncState } from '../src/sync/state.js'
 import { createLocaldirTarget } from '../src/sync/targets/localdir.js'
 import { keysToCache } from '../src/sync/runtime.js'
@@ -493,6 +493,65 @@ describe('remountSyncEngine / stopSyncEngine / syncStatus 缺口分支', () => {
     await remountSyncEngine()
     await stopSyncEngine()
     expect((await syncStatus()).running).toBe(false)
+  }, 30_000)
+
+  // P-05：并发 remount 无互斥——旧实现 stopLoop 先置空 active 再 await 在飞 tick，停窗口内
+  // 第二次 remount 看不到旧循环就新建，先到者恢复后又用旧签名建循环覆盖 active，留下停不掉的
+  // 孤儿循环对同一目标双写。修法：模块级 promise 链互斥 + 每个 await 之后重读盘上签名。
+  it('并发 remount 互斥：stop 窗口内签名再变，最终只挂最新签名的循环', async () => {
+    newHome()
+    await seedBase()
+    await stopSyncEngine()
+    const dirA = await newTargetDir()
+    await setupSyncTarget({ kind: 'localdir', dir: dirA }, 'pw-race-a', { backend: 'file' })
+    // 签名是 JSON（Windows 路径反斜杠被转义），按解析后的 target.dir 比对
+    const sigDir = (sig: string | null): string | undefined => {
+      if (!sig) return undefined
+      return (JSON.parse(sig) as { target?: { dir?: string } }).target?.dir
+    }
+
+    let releaseGate!: () => void
+    let signalEntered!: () => void
+    const entered = new Promise<void>((r) => { signalEntered = r })
+    const gate = new Promise<void>((r) => { releaseGate = r })
+
+    let p1: Promise<void> | null = null
+    let p2: Promise<void> | null = null
+    let dirC = ''
+    try {
+      // 先挂 A，并给 A 的 stop() 装可控栅栏（把「停止中」窗口拉长到用例可控）
+      await remountSyncEngine({ __testStopGate: () => { signalEntered(); return gate } })
+      expect(sigDir(__testActiveSyncSig())).toBe(dirA)
+
+      // 签名 B：第一次 remount 读盘后进入 stop，卡在栅栏上（active 已置空）
+      const dirB = await newTargetDir()
+      await setupSyncTarget({ kind: 'localdir', dir: dirB }, 'pw-race-b', { backend: 'file' })
+      p1 = remountSyncEngine()
+      await entered // p1 已进入「停止中」窗口
+
+      // 停窗口内再改签名到 C 并触发第二次 remount：旧实现会趁 active 为空直接挂 C，
+      // p1 恢复后再用 B 覆盖 active（C 变孤儿）。有界轮询等「第二次挂载落地」：
+      // 修后 p2 排在 p1 之后、窗口内 active 仍为空，轮询超时后放行 p1（互斥本身即断言对象）。
+      dirC = await newTargetDir()
+      await setupSyncTarget({ kind: 'localdir', dir: dirC }, 'pw-race-c', { backend: 'file' })
+      p2 = remountSyncEngine()
+      const until = Date.now() + 1000
+      while (Date.now() < until && sigDir(__testActiveSyncSig()) !== dirC) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+    } finally {
+      releaseGate()
+    }
+    await Promise.all([p1 ?? Promise.resolve(), p2 ?? Promise.resolve()])
+
+    // 唯一活动循环必须是最新盘上签名（C）；旧实现这里是 B
+    expect(sigDir(__testActiveSyncSig())).toBe(dirC)
+
+    // 收尾：停净后无活动循环（孤儿循环会带自己的 timer/watcher 继续跑）
+    await stopSyncEngine()
+    expect((await syncStatus()).running).toBe(false)
+    expect(__testActiveSyncSig()).toBeNull()
+    expect(__testTickActiveSyncLoop()).toBeNull()
   }, 30_000)
 
   it('home 钉扎：env 切走后单例 loop 跳过一切 tick 零写盘，切回恢复（2026-10-30 写穿事故不变式）', async () => {
