@@ -135,6 +135,9 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       rows += '<div class="curline">' + diagSvcPillHtml(v.state) +
         '<span class="mono">' + esc(v.model || '-') + ' @' + esc(v.key_fp || '-') + '</span>' +
         '<span class="cinfo">' + esc(age + (age && ev.source ? ' · ' : '') + (ev.source || '')) + '</span></div>'
+      // 错误详情行（diag-err-copy）：非健康且有 evidence.err 的三元组补一行摘要——打开弹层
+      // 不重跑也能看到上次失败原因；全文换行可见，点击复制（绑定在 openDiag 渲染后统一挂）
+      if (v.state !== 'healthy' && ev.err) rows += '<div class="cureline">' + esc(ev.err) + '</div>'
     }
     return rows
   }
@@ -262,8 +265,27 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
   function diagSetRes(id, line) {
     var el = document.getElementById(id)
     if (!el) return
-    el.className = 'dres' + (line && line.cls ? ' ' + line.cls : '')
+    el.className = 'dres' + (line && line.cls ? ' ' + line.cls : '') + (line && line.text ? ' copyable' : '')
     el.textContent = line ? line.text : ''
+    // 整行点击复制（diag-err-copy，先例=服务卡延迟结果行）：换行放开后全文可见，仍提供一键
+    // 拷贝完整组合行（状态·模型·tokens·err 全文）；复制成功反馈=文案翻转「✓ 已复制」1.6s
+    // （kit 规约：弹层内复制反馈不走 toast 不走槽位）
+    if (line && line.text) {
+      el._full = line.text
+      el.title = line.text
+      el.onclick = function () {
+        if (el._copied) return
+        el._copied = true
+        copyText(el._full, function () {
+          el.textContent = '✓ ' + t('已复制', 'Copied')
+          setTimeout(function () { el.textContent = el._full; el._copied = false }, 1600)
+        })
+      }
+    } else {
+      el._full = ''
+      el.title = ''
+      el.onclick = null
+    }
   }
   function diagBtnBusy(id, on, label) {
     var b = document.getElementById(id)
@@ -460,6 +482,19 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     // 打开即渲染静态区段（快照/结论/动作/预算缓存）+ 拉取 trend 与最新预算；重开整体重建——
     // 上一服务的旧内容不得被误读成本服务数据
     probeSvcTimelineM.body.innerHTML = diagBodyHtml(pid)
+    // 错误详情行（.cureline）点击复制全文（diag-err-copy）：textContent 即落库 err 全文
+    // （verdict 层 ≤400 字符摘要），反馈同 .dres 文案翻转；重开整体重建后随渲染重绑
+    Array.prototype.forEach.call(probeSvcTimelineM.body.querySelectorAll('.cureline'), function (el) {
+      el.onclick = function () {
+        if (el._copied) return
+        el._copied = true
+        var full = el.textContent
+        copyText(full, function () {
+          el.textContent = '✓ ' + t('已复制', 'Copied')
+          setTimeout(function () { el.textContent = full; el._copied = false }, 1600)
+        })
+      }
+    })
     bindDiag(pid)
     loadDiagBudget()
     loadProbeSvcTimeline(pid)

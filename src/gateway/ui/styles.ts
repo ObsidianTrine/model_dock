@@ -648,9 +648,16 @@ header{flex-wrap:wrap;row-gap:4px}
 .diagrow .dact{margin-left:auto;display:flex;align-items:center;gap:8px;flex:0 0 auto}
 .costchip{font-size:var(--fs-xs);color:var(--muted);border:1px dashed var(--border);border-radius:var(--r-full);padding:1px 8px;white-space:nowrap}
 .costchip.free{color:var(--ok);border-color:var(--ok)}
-.dres{font-size:var(--fs-sm);margin:6px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 诊断动作结果行（diag-err-copy）：错误全文换行直接可见——原 nowrap+省略号让尾部既看不见
+   也拷不全（长模型 ID/无空格错误串由 word-break 兜折行）；有内容时行可点击复制全文（copyable），
+   反馈=文案翻转「✓ 已复制」，悬浮 title 全文兜底 */
+.dres{font-size:var(--fs-sm);margin:6px 0 0;word-break:break-all}
 .dres.ok{color:var(--ok)}
 .dres.err{color:var(--err)}
+.dres.copyable{cursor:pointer}
+/* 当前结论错误详情行（diag-err-copy）：非健康三元组的 evidence.err 摘要（verdict 层 ≤400
+   字符），muted 小字换行全文可见，点击复制全文（与 .dres 同款交互） */
+.cureline{font-size:var(--fs-xs);color:var(--muted);margin:2px 0 6px;word-break:break-all;cursor:pointer}
 .dconfirm{display:flex;align-items:center;gap:8px;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px}
 .dconfirm[hidden]{display:none}
 .dconfirm .cest{font-size:var(--fs-xs);color:var(--warn);flex:1;min-width:0}

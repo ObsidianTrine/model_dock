@@ -899,6 +899,59 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     }
   })
 
+  it('diag-modal-probe-ui：错误全文可读可拷（diag-err-copy）——结果行换行不截断、点击复制翻转反馈；当前结论补 err 行', async () => {
+    const prev = globalThis.fetch
+    const prevVerdicts = PROBE_VERDICTS_FIXTURE.verdicts
+    let runCalls = 0
+    const LONG_ERR = '探针 P1 回显不匹配：期望「MODELDOCK-OK」，实际「好的，我已经明白您的要求，下面是回复内容：MODELDOCK-OK 以上就是全部回复」（服务可达但 canary 未以独立词出现，人工复核）'
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/probe/run') {
+        runCalls++
+        const body = runCalls === 1
+          ? { ok: false, needConfirm: true, reason: 'unconfirmed', provider: 'alpha', probes: ['p1'], targets: 1, estimate: 200, per_probe_cost: { p1: 200 }, budget: {}, confirmToken: 'tok-copy', verdicts: [], skipped: [] }
+          : { ok: true, reason: 'ok', provider: 'alpha', probes: ['p1'], targets: 1, dispatched: 1, upstreamRequests: 1, tokens: 40, estimate: 200, per_probe_cost: { p1: 200 }, budget: {}, verdicts: [{ provider: 'alpha', key_fp: '2ad4cc96', model: 'glm-5-3-flash-260828', state: 'degraded', evidence: { source: 'probe:p1', at: Date.now(), status: 200, err: LONG_ERR } }], skipped: [] }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'passive:p15', at: Date.now() - 60000, status: 502, err: '历史失败摘要——来自被动聚合的证据（上一轮）' } }]
+      mountPage()
+      await flush()
+      // 当前结论区：非健康且有 evidence.err 的三元组补 err 行，全文可见可点
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement)!.click()
+      const cure = document.querySelector('#diagCurrentBox .cureline') as HTMLElement | null
+      expect(cure).not.toBeNull()
+      expect(cure!.textContent).toContain('历史失败摘要')
+      cure!.onclick!(new Event('click') as unknown as Event)
+      await flush() // copyText 反馈走 clipboard promise 微任务（happy-dom 有 clipboard API），断言前冲刷
+      expect(cure!.textContent).toContain('已复制')
+      // 健康三元组不出 err 行（fixture 只有一条 degraded——健康路径用另一服务验证）
+      expect(document.querySelectorAll('#diagCurrentBox .cureline').length).toBe(1)
+      // 运行 P1 两段式：结果行写长 err → 点击复制翻转 → 1.6s 后还原（fake timers 手动推进）
+      runCalls = 0
+      ;(document.getElementById('diagP1Btn') as HTMLElement)!.click()
+      await flush()
+      ;(document.getElementById('diagP1Go') as HTMLElement)!.click()
+      await flush()
+      const dres = document.getElementById('diagP1Res') as HTMLElement
+      expect(dres.className).toContain('copyable')
+      expect(dres.textContent).toContain('MODELDOCK-OK')
+      expect(dres.textContent).toContain('人工复核')
+      dres.onclick!(new Event('click') as unknown as Event)
+      await flush()
+      expect(dres.textContent).toContain('已复制')
+      vi.advanceTimersByTime(1600)
+      expect(dres.textContent).toBe('✗ 降级 · glm-5-3-flash-260828 @2ad4cc96 · 40 tokens · ' + LONG_ERR)
+      // 空结果行不可点（无 copyable）
+      expect(document.getElementById('diagPingRes')?.className ?? '').not.toContain('copyable')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = prevVerdicts
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
   it('diag-modal-probe-ui：P1 两段式成本确认——第一段零执行只出确认态，确认后带 confirmToken 重发，结果行写 verdict', async () => {
     const runCalls: Array<{ url: string; body: any }> = []
     const prev = globalThis.fetch
