@@ -1,0 +1,16 @@
+{
+  "file": "../../scripts/build-sea.mjs",
+  "grepZero": [
+    "err\\(healVersionResidue",
+    "healVersionResidue\\(.*8687",
+    "healVersionResidue\\(.*8890"
+  ],
+  "countEqual": [
+    { "pattern": "healVersionResidue\\(ROOT", "equal": 1 },
+    { "pattern": "from './build-sea-version-guard.mjs'", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "中断残留自愈", "atLeast": 1 }
+  ],
+  "fileSizeMaxKB": 80
+}

@@ -16,6 +16,8 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 
+import { healVersionResidue } from './build-sea-version-guard.mjs'
+
 const ROOT = path.resolve(import.meta.dirname, '..')
 const DIST = path.join(ROOT, 'dist')
 const RELEASE = path.join(ROOT, 'release')
@@ -1182,6 +1184,11 @@ async function main() {
     log(`✓ release/modeldock.ico 已生成（--ico-only，图标由 scripts/build-sea.mjs 内置 SDF 渲染，无需 Node 二进制/网络）`)
     return
   }
+
+  // Step 0 前：中断残留自愈。err() 直调 process.exit、kill / 断电 / 崩溃都绕过本函数的
+  // finally，版本文件可能残留构建期写入；判定与还原在 build-sea-version-guard.mjs
+  // （仅版本号形状差异才自动还原，超形状差异 fail-loud 绝不吞用户改动）。
+  await healVersionResidue(ROOT, { warn })
 
   log(`构建目标: ${targets.join(', ')}`)
   log(`当前平台: ${currentPlatform}\n`)

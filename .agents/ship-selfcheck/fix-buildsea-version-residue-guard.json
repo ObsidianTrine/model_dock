@@ -1,0 +1,24 @@
+{
+  "file": "../../scripts/build-sea-version-guard.mjs",
+  "grepZero": [
+    "shell:\\s*true",
+    "import\\.meta",
+    "8687|8890",
+    "function err"
+  ],
+  "countEqual": [
+    { "pattern": "export function classifyVersionTsDiff", "equal": 1 },
+    { "pattern": "export function classifyPkgJsonDiff", "equal": 1 },
+    { "pattern": "export function decideVersionResidue", "equal": 1 },
+    { "pattern": "export function readGitHeadFile", "equal": 1 },
+    { "pattern": "export async function healVersionResidue", "equal": 1 },
+    { "pattern": "function normEol", "equal": 1 },
+    { "pattern": "function deepEqual", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "why", "atLeast": 1 },
+    { "pattern": "绝不", "atLeast": 1 },
+    { "pattern": "throw new Error", "atLeast": 1 }
+  ],
+  "fileSizeMaxKB": 20
+}
