@@ -300,7 +300,11 @@ export async function readTextIfExists(p: string): Promise<string | null> {
 // 网关 daemon / Web 控制台是三个独立写者，无互斥会静默丢更新。两层防护：进程内 promise 串行
 // serialize（同进程并发调用）+ 跨进程 O_CREAT|O_EXCL 锁文件。
 
-let lockAcquireTimeoutMs = 10_000
+/** 抢锁总超时。**不变量：必须大于 lockStaleMs**——持有者崩溃后，锁文件要等最后一次喂狗起
+ *  lockStaleMs 才算陈旧；超时若短于它，崩溃后头几秒内到达的等待者等不到陈锁抢占就先拿到
+ *  「超时…可删除该 .lock 文件重试」，而那其实是崩溃残留、本该自动接管。取 20s = 陈锁 15s +
+ *  一拍喂狗余量：崩溃残留最坏等满陈锁窗口即被接管，真挂死（仍在喂狗）的持有者才报超时。 */
+let lockAcquireTimeoutMs = 20_000
 /** 持锁超过该时长视为持有者已死，允许抢占。死者判定语义即老 config 锁语义，勿改：崩溃/被杀的
  *  持有者心跳（见下）随进程消失，超时后照旧可抢占；**活者**由心跳保活，不满足陈锁判定——
  *  此前「临界区内不应有慢 I/O」只是约定，secrets 的 win32 DPAPI 批量加/解密在临界区内 spawn
@@ -310,8 +314,9 @@ export let lockStaleMs = 15_000
 /** 持锁喂狗间隔：持锁期间周期刷新锁文件 mtime，让活持有者不满足陈锁判定（须 ≪ lockStaleMs）。 */
 let lockHeartbeatMs = 5_000
 
-/** 测试注入：缩短锁的心跳/陈锁/总超时（真实值 5s/15s/10s，用例等不起）；无参调用还原默认。
- *  与 secrets/store 的 __testSet* 同套路（模块内 let 替换，不碰 vi.mock 雷区）。 */
+/** 测试注入：缩短锁的心跳/陈锁/总超时（真实值 5s/15s/20s，用例等不起）；无参调用还原默认。
+ *  与 secrets/store 的 __testSet* 同套路（模块内 let 替换，不碰 vi.mock 雷区）。注入值可自由配比
+ *  （有用例只缩总超时），「总超时 > 陈锁阈值」的不变量只约束生产默认值。 */
 export function __testSetLockTiming(t?: {
   heartbeatMs?: number
   staleMs?: number
@@ -319,7 +324,12 @@ export function __testSetLockTiming(t?: {
 }): void {
   lockHeartbeatMs = t?.heartbeatMs ?? 5_000
   lockStaleMs = t?.staleMs ?? 15_000
-  lockAcquireTimeoutMs = t?.acquireTimeoutMs ?? 10_000
+  lockAcquireTimeoutMs = t?.acquireTimeoutMs ?? 20_000
+}
+
+/** 测试观察：当前生效的锁时间值（不变量用例断言「抢锁总超时 > 陈锁阈值」用）。 */
+export function __testLockTiming(): { heartbeatMs: number; staleMs: number; acquireTimeoutMs: number } {
+  return { heartbeatMs: lockHeartbeatMs, staleMs: lockStaleMs, acquireTimeoutMs: lockAcquireTimeoutMs }
 }
 
 /** 持锁喂狗：临界区内周期刷新锁文件 mtime，活持有者永不被陈锁误抢占。
