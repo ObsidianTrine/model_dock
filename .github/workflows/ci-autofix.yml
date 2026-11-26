@@ -175,7 +175,7 @@ jobs:
       RUN_URL: ${{ needs.guard.outputs.run_url }}
     steps:
       # 检出失败 run 对应的提交（不是默认分支头）——修复基于出错的代码
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.guard.outputs.head_sha }}
           fetch-depth: 0
@@ -184,7 +184,7 @@ jobs:
           git checkout -b "ci-autofix/$RUN_ID"
           git config user.name "claude[bot]"
           git config user.email "claude[bot]@users.noreply.github.com"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -208,7 +208,7 @@ jobs:
           tail -n 4000 /tmp/failed-logs-full.txt > /tmp/failed-logs.txt || true
           echo "failed jobs:"; cat /tmp/failed-jobs.txt
           echo "log lines kept: $(wc -l < /tmp/failed-logs.txt)"
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@4411a9e9b0283becf4b924f7bce360fd7756c78c # v1.0.290
         id: claude
         env:
           # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
@@ -279,7 +279,7 @@ jobs:
       # 该输出可能为空，此处静默跳过（红灯路径不受影响）。artifact 留 7 天，够排障不占存储
       - name: 归档会话逐回合日志（排障唯一证据源）
         if: always() && steps.claude.conclusion != 'skipped' && steps.claude.outputs.execution_file != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-execution-${{ needs.guard.outputs.run_id }}
           path: ${{ steps.claude.outputs.execution_file }}

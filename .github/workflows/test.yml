@@ -43,11 +43,11 @@ jobs:
     timeout-minutes: 20
     # step 级分级（= 非(mac && push && 非main)）：develop push 上 mac 腿只付 checkout + 占位
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: mac 腿占位（develop push 分级跳过，PR / push main / 巡检 / 手动才真跑）
         if: matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref != 'refs/heads/main'
         run: echo 'mac 腿按触发分级跳过（见 job 头注）；占位保 required check 报告'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
         with:
           node-version: ${{ matrix.node }}
@@ -197,10 +197,10 @@ jobs:
       pull-requests: read # pull_request 事件经 API 列变更文件所需
     steps:
       # fetch-depth: 0：workflow_dispatch / schedule 事件下 paths-filter 需要完整历史算 diff
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -211,7 +211,7 @@ jobs:
       - name: 变更未触达 .agents/**，跳过套件（占位绿）
         if: steps.filter.outputs.agents != 'true'
         run: echo '本次变更不涉及 .agents/** 或 test/orchestrator/**，工作流套件跳过'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.filter.outputs.agents == 'true'
         with:
           node-version: 24

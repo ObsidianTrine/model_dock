@@ -68,7 +68,7 @@ jobs:
       group: claude-review-tier-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
       - name: 分级并打 label
@@ -130,7 +130,7 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::warning::bot 配置不齐（缺:$miss），PR 审查 bot 未启用。在 Settings → Secrets and variables → Actions 补齐即可，见 docs/ops/ci-bots.md「模型接入」。"
           fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 1
@@ -158,7 +158,7 @@ jobs:
         run: |
           gh pr diff --name-only "$PR" | node scripts/pr-risk-tier.mjs --markdown > risk-tier.md
           cat risk-tier.md
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@4411a9e9b0283becf4b924f7bce360fd7756c78c # v1.0.290
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
           # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值
@@ -229,7 +229,7 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::warning::bot 配置不齐（缺:$miss），安全审查未启用。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 1
@@ -246,7 +246,7 @@ jobs:
           case "$msg" in
             "[dependabot-fix]"*|"[ci-autofix]"*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
           esac
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@4411a9e9b0283becf4b924f7bce360fd7756c78c # v1.0.290
         if: steps.keyguard.outputs.skip != 'true' && steps.guard.outputs.skip != 'true'
         env:
           ANTHROPIC_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
@@ -337,11 +337,11 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::warning::bot 配置不齐（缺:$miss），@claude 交互未启用。补齐方法见 docs/ops/ci-bots.md「模型接入」。"
           fi
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.keyguard.outputs.skip != 'true'
         with:
           fetch-depth: 0
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@4411a9e9b0283becf4b924f7bce360fd7756c78c # v1.0.290
         if: steps.keyguard.outputs.skip != 'true'
         env:
           # 端点/模型/key 全部来自仓库配置（Secrets + Variables），供应商无关、零默认值

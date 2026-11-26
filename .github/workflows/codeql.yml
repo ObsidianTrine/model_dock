@@ -54,12 +54,12 @@ jobs:
       security-events: write # 上传 SARIF 结果到 code scanning
       actions: read          # CodeQL action 读取 workflow run 元数据（官方模板所需）
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # JS/TS 无需 autobuild：init 走内置的 javascript-typescript 提取器，直接建库
-      - uses: github/codeql-action/init@v4
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           languages: javascript-typescript
       # 默认查询集（含安全类查询）；要扩大覆盖可加 queries: security-extended，先按最小配置跑
-      - uses: github/codeql-action/analyze@v4
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         with:
           category: "/language:javascript-typescript"
