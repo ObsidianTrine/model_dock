@@ -62,6 +62,14 @@ jobs:
       # test/eslint-baseline.test.ts 棘轮（随下方 npm test 三平台都跑）
       - run: npm run lint
         if: runner.os == 'Linux'
+      # 格式检查（E-02）：先以「告警态」接入，不阻断。原因：仓库现存 529 个文件未过
+      # prettier --check（2026-11-26 实测：src 160 / test 305 / scripts 17 / docs 34 /
+      # .github 9），直接硬门禁会让三平台 CI 全红、且与本次改动无关。
+      # 转真门禁的路径：单独一张卡跑 `npm run format` 全仓写入并提交 → 去掉
+      # continue-on-error。此后本步骤即廉价格式门禁（只跑 linux 腿，零额外依赖）。
+      - run: npm run format:check
+        if: runner.os == 'Linux'
+        continue-on-error: true
       - run: npm test
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
@@ -86,6 +94,51 @@ jobs:
           ss -ltnp || true
           echo "=== /tmp 测试目录残留 ==="
           ls -d /tmp/modeldock-test-* /tmp/orch-test-* 2>/dev/null | head -20 || true
+
+  # node 22 覆盖（E-02）：package.json engines 声明 >=22，而主矩阵只测 node 24（SEA 内置
+  # 运行时）。本 job 补 engines 下限的运行时覆盖，但**只在 PR 与每日 schedule 跑**，不进
+  # develop push 矩阵——日常直推不为此多付一条腿。
+  # 独立 job 而非 matrix 新条目：不改既有 `test (<os>, node24)` 的 check 名与 mac 分级语义
+  # （job 级 if 在 matrix 下拿不到上下文，加条目只能靠 step 级 if，反而更绕）。
+  # 非 required：不在分支保护名单，红灯只作提示，不阻塞合并。
+  test-node22:
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: test (ubuntu-latest, node22)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc -p tsconfig.json --noEmit
+      - run: npm test
+
+  # 依赖安全巡检（E-02）：npm audit 原先只在发布脚本（release-check）里跑。这里挂到
+  # 每日 schedule（与既有巡检同一 cron，无需新增触发器），只做信息性巡检：
+  # registry 不可达 / 超时与「确有漏洞」都降级为 ::warning::，本 job 永不因此变红
+  # （真正的阻断门禁仍是发布前 release-check 的 `npm audit --omit=dev`）。
+  # 非 required。
+  audit:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: audit (npm audit --omit=dev, schedule)
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: npm audit（网络失败降级告警，不阻断）
+        run: |
+          if npm audit --omit=dev; then
+            echo 'npm audit: 生产依赖无已知漏洞'
+          else
+            echo '::warning::npm audit 未通过（registry 不可达或存在漏洞）——仅告警，不阻断；发布前仍以 release-check 为阻断门禁'
+          fi
 
   # agent 工作流套件（.agents/ 编排器脚本与分支守卫 hook）：与产品测试拆分（npm test 只跑
   # 产品套件，方案 A）。纯 Node + git，无平台差异，只在 ubuntu 跑，与上方三平台矩阵并行。
