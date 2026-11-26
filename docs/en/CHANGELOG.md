@@ -15,6 +15,28 @@ This file records ModelDock's version history. The format follows [Keep a Change
 - **Switching from the console or phone no longer overwrites command-line edits**: the "auto failover" state carried into a switch came from an in-memory snapshot, which goes stale when the file watcher degrades — a later switch could silently revert what the CLI had just changed. Fields not explicitly supplied now always follow the latest on-disk config.
 - **An unresponsive gateway is no longer reported as "not running"**: when the health check timed out (slow machine, slow key decryption), `status` / `stop` / `rotate-token` concluded the gateway was down — worst of all, `rotate-token` rewrote the state file and left the running gateway with a token that no longer matched the console. Three states are now distinguished (running / unresponsive / stopped): unresponsive is reported as such, the state file is left alone, and blind token rewrites are refused.
 
+## [1.8.2] - 2026-11-25
+
+Usage visibility and probe experience upgrades: unified usage modal, unified diagnostics modal, selectable probe model; one-click update now resumes in-flight downloads.
+
+### Added
+
+- **Unified usage modal**: the top bar and service card usage badges now show "Today X.XM · $X.XX" (tokens consumed through the gateway today plus estimated cost at list prices). Click to open the usage modal with today / 7-day / 30-day windows; the all-services view lists tokens / spend / request count per service — click a service row to drill down into its per-model details, and the service card badge goes straight to that service. Costs are estimated from public list prices; models without a matched price count as $0 and are listed at the bottom of the modal as a reminder.
+- **Unified diagnostics modal**: the "Latency" button on each service card is now a diagnostics entry — click to see the full probe verdict. Error details are fully readable and a click on the line copies them; the health badge only appears when something is wrong, keeping healthy services clean.
+- **Selectable probe model**: each service can specify which model health checks run against (dropdown in the "Edit Service" modal; defaults to the service's default model) — no need to swap the default just to diagnose one model.
+- **One-click update resumes in-flight downloads**: clicking "Update now" while an update package is still being prefetched in the background picks up the existing progress and installs as soon as the prefetch completes, instead of downloading from scratch.
+
+### Improved
+
+- **Slimmer probe spend badge**: the "probe spend" badge no longer shows when spend is zero, with shorter text; full budget details moved to the tooltip and the detail modal.
+- **Collision-safe task finishing**: when finishing a task while the autonomous orchestrator is running a test suite, it now waits for a quiet window and retries, instead of having tests wiped out by concurrent cleanup.
+
+### Fixed
+
+- **Smoother integration for thinking models**: when an upstream rejects the thinking parameter, it is now stripped automatically and the request resent once — adapting to provider differences instead of failing.
+- **More accurate probe verdicts**: conversational models are no longer mislabeled as "degraded" (the echo check now tolerates reasoning blocks and code fences); Anthropic-line health checks default to deep thinking off, so reasoning tokens no longer eat into the echo budget and produce empty verdicts.
+- **Modal close button no longer loses its icon**: the ✕ close button on some modals (probe details / merge import / usage) previously rendered as an empty shell.
+
 ## [1.8.1] - 2026-11-23
 
 ### Added
@@ -653,8 +675,9 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.8.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...v1.8.1
-[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.2...HEAD
 [1.8.0]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.3...v1.8.0
 [1.7.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.7.1...v1.7.2
