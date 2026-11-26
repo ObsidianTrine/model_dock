@@ -12,8 +12,8 @@ import { createRequire } from 'node:module'
  * 因此本测试是唯一机器门禁）。
  *
  * 耗时动机：type-aware lint（projectService）全量 src 实测 Windows 本机约 34~45s
- * （2026-11-08，129 处 warn，冷/热 OS cache 有波动）；CI 冷启动 + npm cache 未热时更慢，
- * testTimeout 放宽到 180s 防误杀。本测试给 npm test 增加约 35~90s 运行时（视平台），
+ * （2026-11-08 首测；冷/热 OS cache 有波动，耗时不随存量 warn 数变化）；CI 冷启动 + npm cache
+ * 未热时更慢，testTimeout 放宽到 180s 防误杀。本测试给 npm test 增加约 35~90s 运行时（视平台），
  * 这是棘轮门禁的固定成本。
  *
  * 子进程钦定模式：绝不 import eslint 模块进测试进程（vitest isolate:false 全进程共享模块
@@ -57,7 +57,7 @@ describe('ESLint 棘轮基线门禁', () => {
       const res = spawnSync(process.execPath, [ESLINT_BIN, '--format', 'json', SRC_DIR], {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        // 129 处 warn 的 JSON 报告约数百 KB，留足余量防 maxBuffer 截断
+        // warn 明细 JSON 报告约数百 KB，留足余量防 maxBuffer 截断
         maxBuffer: 64 * 1024 * 1024,
         // 略小于本用例 testTimeout：eslint 卡死时拿到 ETIMEDOUT 报错而不是整个测试被杀
         timeout: 170_000,

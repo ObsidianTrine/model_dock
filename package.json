@@ -39,6 +39,7 @@
     "bench:cold": "node scripts/bench-cold-start.mjs",
     "prepack": "npm run build",
     "gen:ui-min": "node scripts/gen-ui-min.mjs",
+    "typecheck:agents": "node scripts/typecheck-agents.mjs",
     "lint": "eslint src",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

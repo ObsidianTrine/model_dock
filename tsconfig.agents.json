@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    // 纯 JS 工具链的类型检查项目：只查（noEmit），不产出任何文件。
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    // 存量工具链是 .mjs，函数参数普遍无 JSDoc 类型——先关 noImplicitAny 拿到
+    // 「显式类型写错」这类高价值错误，隐式 any 的收敛留给后续卡片。
+    "strict": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  // 覆盖面：Dockmaster 编排器工具链 + 仓库维护脚本（`.agents/scripts`、`scripts`）。
+  // 错误数由 typecheck-agents-baseline.json 棘轮看住（只降不升），不是「跑绿」门禁。
+  "include": [".agents/scripts/**/*.mjs", "scripts/**/*.mjs"]
+}
