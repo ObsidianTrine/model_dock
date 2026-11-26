@@ -157,10 +157,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     await flush()
     const toast = document.getElementById('toastWrap')
     if (toast && toast.textContent) console.error('[webui-dom] toast 内容（load 失败信息）:', toast.textContent)
-    // 首屏健康横幅被 load() 填充（静态骨架被替换即证明 load→render 链走通；
-    // 横幅端口号取 location.port，happy-dom 下为空，不在此断言）
+    // 首屏健康横幅被 load() 填充（静态骨架被替换即证明 load→render 链走通）；
+    // 横幅已瘦身为绿点+端口号，「本地网关运行中」说明文字挪进原生 title；
+    // 端口号取 location.port，happy-dom 下为空，故断言 title 文案而非端口号
     const health = document.getElementById('health')
-    expect(health?.textContent ?? '').toContain('本地网关运行中')
+    expect(health?.querySelector('.dot')?.parentElement?.getAttribute('title') ?? '').toContain('本地网关运行中')
   })
 
   it('overview 渲染契约：2 个服务渲染 2 张卡，使用中服务带「正在使用」pill', async () => {

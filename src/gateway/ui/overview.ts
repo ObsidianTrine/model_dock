@@ -188,7 +188,10 @@ export const UI_JS_APP = `  function load() {
 
   function healthHtml() {
     var sandbox = view && view.gateway && view.gateway.sandbox
-    return '<span class="dot"></span> ' + t('本地网关运行中 · 端口 ', 'Local gateway running · port ') + esc(location.port) +
+    // 横幅瘦身：绿点即「运行中」，页面能打开本身也证明网关在跑，「本地」由 127.0.0.1 监听保证——文字说明全冗余；
+    // 端口号保留：托盘/--app 窗口无地址栏，多实例并存是常态，它是页面上唯一的实例身份标识。
+    // 完整说明挪进原生 title（kit 头部位只禁 CSS tooltip，native title 不在禁列）
+    return '<span title="' + esc(t('本地网关运行中 · 端口 ', 'Local gateway running · port ') + location.port) + '"><span class="dot"></span> ' + esc(location.port) + '</span>' +
       (sandbox ? ' <span class="pill warn" title="' + t('dev 沙箱实例：配置、日志与客户端写入均在沙箱目录内，不影响生产', 'dev sandbox instance: config, logs and client writes stay in the sandbox dir; production is untouched') + '">' + t('dev 沙箱', 'dev sandbox') + '</span>' : '') +
       usageHtml() +
       // 探针自耗 pill（probe.ts probeSelfUsageHtml）：数据走 probeLedgerLite 60s 低频缓存，
