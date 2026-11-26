@@ -7,6 +7,10 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Improved
+
+- **Release artifacts now prove their build origin**: every published artifact on GitHub Releases (per-platform archives, `ModelDock.dmg`, the Windows installer) now ships with an artifact attestation — verify with `gh attestation verify <file> -R ObsidianTrine/model_dock` that it was built by this repository's CI and was not swapped in transit.
+
 ### Fixed
 
 - **A failed key save no longer looks successful**: if encryption or the disk write failed (full disk, file locked), memory already held the new value while the disk kept the old one — the gateway would keep using a key that was never persisted until a restart silently reverted it. It now rolls back to the on-disk state and reports the failure.

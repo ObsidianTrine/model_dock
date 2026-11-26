@@ -7,6 +7,10 @@
 
 ## [未发布]
 
+### 改进
+
+- **发布物可验证构建来源**：GitHub Release 的每个对外发布物（各平台压缩包、`ModelDock.dmg`、Windows 安装包）现附带构建来源证明（artifact attestation），可用 `gh attestation verify <文件> -R ObsidianTrine/model_dock` 核对产物确由本仓库 CI 构建、下载后未被替换。
+
 ### 修复
 
 - **密钥写失败不再"假生效"**：保存密钥时若加密或写盘失败（磁盘满、文件被占用），此前内存里已是新值而磁盘仍是旧值，网关会一直使用一把从未落盘的 Key，直到重启才莫名变回旧的；现在失败即回滚到磁盘状态并如实报错。

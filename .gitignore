@@ -62,3 +62,6 @@ tmp/
 # 通知摘要聚合器（notify-digest 运行态：pending.jsonl 队列 + flush-inflight marker + last.txt 详情档）
 .agents/orchestrator/notify-digest/
 *.output.txt
+
+# 某些 Windows 工具在仓库根创建的注册表镜像空目录（审计 D-06，2026-11-26 已清理一次）
+/HKCU/

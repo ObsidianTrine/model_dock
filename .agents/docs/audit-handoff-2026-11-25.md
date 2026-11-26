@@ -73,13 +73,22 @@
 | P-04 | 用内存态配置回写磁盘，覆盖并发改动 | ModelDock | `ops/routing.ts`、`gateway/server.ts`、`gateway/lan.ts` | S–M | — | ✅ `0eb7225` |
 | P-05 | `remountSyncEngine` 无互斥 | ModelDock | `sync/engine.ts` | S | — | ✅ `22d9bbc` |
 | P-06 | 单实例检查先查后写；无响应被当成未运行 | ModelDock | `gateway/main.ts`、`shared.ts`、`cli/gatewaycmd.ts` | M | — | ✅ `23903f9`（仅 (a) 三态判活） |
-| E-01 | 类型检查与 lint 覆盖面 | 工程 | `tsconfig*.json`、`eslint.config.mjs` | M | **需用户确认 CI 接线** | ⬜ |
-| E-02 | CI 补廉价门禁 | 工程 | `.github/workflows/test.yml` | S | **需用户确认** | ⬜ |
+| E-01 | 类型检查与 lint 覆盖面 | 工程 | `tsconfig*.json`、`eslint.config.mjs` | M | ~~需用户确认~~ 已授权 | ✅ `2edeb22`/`3bc6395`/`50cffda`（三张子卡全做，exclude 清零，agents 基线 1112） |
+| E-02 | CI 补廉价门禁 | 工程 | `.github/workflows/test.yml` | S | ~~需用户确认~~ 已授权 | ✅ `8bc1ea6`（format 先告警态：全仓 529 文件未过 prettier，转正需单独跑 `npm run format`） |
 | E-03 | LAN 威胁模型与用户提示 | 文档 | `docs/design/hld.md`、guide、`docs/en` | S | — | ✅ `64709ad` |
-| E-04 | 修正已确认的文档漂移 | 文档 | `AGENTS.md` 等 | S | — | ✅ `b5cb441` |
+| E-04 | 修正已确认的文档漂移 | 文档 | `AGENTS.md` 等 | S | — | ✅ `b5cb441`（两处注释计数遗留随 E-01 清掉） |
 | E-05 | 防夹具日期炸弹 | 工程 | `test/**` | S | — | ✅ `6a11727` |
-| S-01~04 | 结构性拆分 | 两者 | 见第 5 节 | L–XL | P0 合并后 | ⬜（未开工） |
-| D-01~06 | 需要用户决策 | — | — | — | **不得自行执行** | ⬜（待用户拍板） |
+| S-01 | 拆 `src/gateway/server.ts` | ModelDock | `src/gateway/` | L | P0 合并后 | ✅ `c80fa4d`（3184 → 57 行，11 模块，纯搬移复核 95.3% 逐字 + 28 引用方 502/502） |
+| S-02 | 拆 `.agents/scripts/orchestrator.mjs` | Dockmaster | `orchestrator/` | L | P0 合并后 | ✅ `d7c08ad`（6380 → 5687 行，四簇纯搬移） |
+| S-03 | Web UI 真 TS 通道 | ModelDock | `src/gateway/ui/ts/**` | XL（只做增量） | P0 合并后 | ✅ `bb44255`（通道落地 + UI_JS_USAGE 迁出，存量迁移待续） |
+| S-04 | 其他大文件（可选） | 两者 | relay/diag/secrets | M | — | ⬜（可选，未开工） |
+| D-01 | 主干门禁策略 | — | — | — | 用户拍板 | ✅ 决策：选项 B（ai-review-system.md 已如实记载「保护不拦直推」；若未来要求强制 PR 再评估 A） |
+| D-02 | 发布物签名 | 工程 | `release.yml` | S | — | ✅ `2a954a3`（artifact attestation；证书/公证仍留用户） |
+| D-03 | bench 脚本去留 | 工程 | `bench.yml`、docs | S | — | ✅ `aaead38`（每周 schedule 信息性产物，不设门禁） |
+| D-04 | isolate 金丝雀 | 工程 | vitest.config、CI | S | — | ✅ `5d7674e`（env 通道 + schedule 金丝雀，默认值不变） |
+| D-05 | Actions 钉 SHA、.nvmrc | 工程 | workflows、`.nvmrc` | S | — | ✅ `2bc4edf`（39 处 uses 全钉 SHA + 版本注释） |
+| D-06 | 根目录 `HKCU/` 空目录 | — | — | — | 删除需确认 | ✅ 已授权清理（6 层空目录删除 + `.gitignore` 登记） |
+| D-07 | 流程资产增速 | — | — | — | 用户拍板 | ✅ 决策：不设机械上限（流程文档是工作记忆）；下次健康审计复查增速，超 3 倍再议 |
 
 **执行记录（2026-11-25 夜）**
 
@@ -96,6 +105,14 @@
 - 顺手两条：`2ac0114` 锁父级 errno 断言按平台取码（Windows 报 ENOENT）；`0c52373` 补 `relay-gaps` 用例缺失的 `UpstreamBody.text`。
 - **CI 教训（重要）**：`68e3b46` 推上去后 `test` 工作流在 ubuntu/windows 两腿红，根因是 P-03 新增用例的类型不匹配被 `tsc -p tsconfig.test.json` 拦下——本地因为产品全量走了 `--skip-test` 而没发现（`npx vitest run` 不做类型检查）。**今后凡是产品域 `--skip-test` 合并，提交前必须额外跑一次 `npx tsc -p tsconfig.test.json --noEmit`。**
 - 现状复核（`0c52373`）：`tsc` 两份 config 均绿、eslint 基线 / docs-lint / 日期门禁 / 类型门禁 31/31 绿。仍未闭合项见下方清单。
+
+**2026-11-26 午后补充（用户授权按推荐方案全量修复）**
+
+- **E-01 / E-02 / P-06b / S-01 / S-02** 由 4 个并行 agent 完成。S-01 agent 在收尾阶段因额度中断，但 10 个纯搬移 commit 已落分支——主控机械复核（旧 server.ts 非空行 95.3% 在新模块逐字重现，未命中全是 import/export 接线）+ tsc ×2 + 28 个引用方 502/502 后合并。**教训：agent 中断≠工作丢失，先查 worktree 的提交与脏文件再决定重做还是续做。**
+- **S-03** agent 两次因额度 429 未启动/中断；第二次其实已把半成品（host 桥 + gen-ui-ts + usage 迁移本体）留在 worktree 脏区。主控续完：修正三处与实际机制不符的注释（bundle 是独立 script + 全局别名 + 宿主桥，不是共用闭包）、补 `gen:ui-ts` script 与 `test/ui-ts-bundle-fresh.test.ts`、写 ui-kit §16 与 AGENTS.md 行。
+- **P-06b 实例锁**：`gateway.lock`（O_EXCL + 死 pid 接管 + Windows EBUSY 有界重试），并发启动用例修前红/修后绿。
+- **D-01 / D-07 按选项落决策**（记录于状态表）；D-06 清理；D-02~05 由 CI agent 完成（39 处 uses 钉 SHA、attestation、audit/canary/bench 三个非 required 任务）。
+- **遗留两条**：① E-02 的 `format:check` 是告警态——全仓 529 文件未过 prettier，硬门禁转正需单独一轮 `npm run format`（大 diff，等用户点头）；② S-04 可选大文件拆分未开工。
 
 **并行分组**（按文件归属切分，减少 rebase 冲突）：
 
