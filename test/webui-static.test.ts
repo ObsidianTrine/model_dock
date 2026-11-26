@@ -13,7 +13,13 @@ import { renderMobilePage } from '../src/gateway/lan.js'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const LAN_HTML = renderMobilePage()
 // 源码读取统一归一化换行（\r\n → \n）：Windows CI checkout 出 CRLF，多行 toContain 断言按 LF 写
-const SERVER_SRC = readFileSync(path.join(ROOT, 'src', 'gateway', 'server.ts'), 'utf8').replace(/\r\n/g, '\n')
+// S-01 拆分后管理端点分布在 server.ts（组装）+ admin.ts（路由表/入口）+ routes/* 各域模块：
+// L0-5 端点漂移审计扫全部服务端路由源拼接（规则语义不变；同款先例见下方 SRC_UI）
+const SERVER_SRC = [
+  path.join(ROOT, 'src', 'gateway', 'server.ts'),
+  path.join(ROOT, 'src', 'gateway', 'admin.ts'),
+  ...readdirSync(path.join(ROOT, 'src', 'gateway', 'routes')).filter((f) => f.endsWith('.ts')).sort().map((f) => path.join(ROOT, 'src', 'gateway', 'routes', f)),
+].map((p) => readFileSync(p, 'utf8')).join('\n').replace(/\r\n/g, '\n')
 const LAN_SRC = readFileSync(path.join(ROOT, 'src', 'gateway', 'lan.ts'), 'utf8').replace(/\r\n/g, '\n')
 // ui.ts 源码单读一份（L0-2 的 foot 块解析作用在源码模板上，而非求值产物）
 // T04 拆分后页面源码 = 拼装壳 ui.ts + src/gateway/ui/ 各域模块：foot 块解析扫全部源拼接（规则语义不变）
