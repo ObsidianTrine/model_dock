@@ -120,7 +120,7 @@ describe('probe-cost-gate · 计划展开与预估', () => {
       applyVerdictEvidence(rt, { provider: 'a', keyFp: '-', model: 'm1', source: 'passive:p15', kind: 'passive', state: 'auth-dead', evidence: { at, status: 401 } })
       expect(getProbeVerdict(rt, 'a', keyFingerprint('k1'), 'm1')).toBeDefined()
       // keys 换成 k9 后重新出计划：k1 指纹结论销账，「-」占位保留，新 key 尚无结论
-      ;(cfg.providers.a as Record<string, unknown>).keys = ['plain:k9']
+      ;(cfg.providers.a as unknown as Record<string, unknown>).keys = ['plain:k9']
       await buildProbePlan(rt, 'a', ['p1'])
       expect(getProbeVerdict(rt, 'a', keyFingerprint('k1'), 'm1')).toBeUndefined()
       expect(getProbeVerdict(rt, 'a', '-', 'm1')).toBeDefined()
