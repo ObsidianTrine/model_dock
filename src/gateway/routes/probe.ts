@@ -20,6 +20,9 @@ export async function hModelAvailability(c: AdminCtx): Promise<void> {
   res.end(JSON.stringify({ ok: true, availability }))
 }
 
+// ===== 服务探针端点（provider-probe-suite 任务 6；与 hTest 的差异：走探针引擎、不调 logRequest——
+// 请求日志 / usageToday / key 冷却 / 熔断计数零副作用，花费只进探针独立账本）=====
+
 /** 探针运行确认 token：绑定 (adminToken, provider, probes, 目标数, 预估) 的短摘要。预估展示与确认
  *  执行之间 key 池/配置变化会改变目标数与预估——旧 token 即失效（不能拿旧预估执行新计划）；
  *  键入 adminToken 防外部伪造 (plan → token) 映射；比较走 safeEqual 恒时。 */

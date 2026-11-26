@@ -1,41 +1,32 @@
 import http from 'node:http'
-import fsp from 'node:fs/promises'
 import { pipeline } from 'node:stream/promises'
 import { randomBytes } from 'node:crypto'
 import { safeEqual } from '../util/safe-equal.js'
 import { CONSOLE_CSP } from './console-shared.js'
-import { randomToken, withFileLock } from '../util/fsx.js'
+import { randomToken } from '../util/fsx.js'
 import { localIsoTs } from '../util/time.js'
 import { VERSION } from '../version.js'
-import { ConfigError, configLockPath, mutateConfig } from '../config/store.js'
-import { snapshot } from '../backup/snapshot.js'
-import { DEFAULT_GATEWAY_PORT, DEFAULT_LAN_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ModelMeta } from '../config/types.js'
-import { deleteSecret, invalidateSecretsCacheIfExternal, providerAllKeyRefs, providerKeyRefs, verifySecretsStore } from '../config/secrets.js'
-import { detachHarness, syncBakedClientsForDisplayRoute } from '../ops.js'
-import { installAutostart, uninstallAutostart } from '../autostart.js'
+import { DEFAULT_GATEWAY_PORT, DEFAULT_LOG_RETENTION_DAYS, type Config, type ModelMeta } from '../config/types.js'
+import { syncBakedClientsForDisplayRoute } from '../ops.js'
 import { refreshCatalog } from '../providers/catalog.js'
-import { checkTokenLimits, eventLoopLagMs, keyPoolHealthView, latencyQuantiles, logAudit, logEvent, logRequest, mutateGatewayState, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, reloadRuntime, resolveByProfile, resolveTarget, seaStateSnapshot, seaWindowView, streamRequestLogDays, summarizeUsageDays, summarizeUsageDaysWithHours, sweepEphemeralHarnesses, unregisterEphemeralHarness, EPHEMERAL_SWEEP_INTERVAL_MS, SEA_WINDOW_5M_MS, SEA_WINDOW_60M_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ResolvedTarget, type RingEntry, type UsageHourBucket } from './state.js'
+import { checkTokenLimits, logAudit, logEvent, logRequest, pickTarget, pruneExpiredLogs, readGatewayState, recordTokenUsage, resolveByProfile, resolveTarget, sweepEphemeralHarnesses, EPHEMERAL_SWEEP_INTERVAL_MS, type GatewayRuntime, type LogEntry, type LogAttempt, type ResolvedTarget } from './state.js'
 import { startModelProbeLoop } from './modelprobe.js'
 import { debugLog, debugOn } from './state/debuglog.js'
-import { readSyncState } from '../sync/state.js'
-import { appendLineErrorCount } from '../util/fsx.js'
-import { providerConcurrencyIds, providerConcurrencyLimit, providerConcurrencyStats } from './concurrency.js'
-import { buildLanStatus, refreshPreferredAddress, resolveLanToken, startLanServer, stopLan } from './lan.js'
 import { markUiSeen } from './presence.js'
 import { adminCookieName, deviceCookieName } from './cookies.js'
 import { createUsageTap } from './usage.js'
-import { gatewayPriceResolver, loadPricingOverrides, lookupPrice } from './pricing.js'
 import { refreshCalendar } from './holidays.js'
 import { filterResponseHeaders, forwardWithFailover, parseRatelimitHeaders, readUpstreamErrorText, translateUpstreamError, UpstreamError, type UpstreamResult } from './relay.js'
 import type { ProbeTransport } from './probe/engine.js'
 import { startProbeSchedule } from './probe/schedule.js'
-import { t, bi, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
-import { modeldockDir, secretsPath } from '../util/paths.js'
-import { catalogView, getRenderedUI } from './ui-cache.js'
+import { t, bi, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
+import { getRenderedUI } from './ui-cache.js'
 import { adminAuthorized, cookieValueRe, hostAllowed, safeCookieDecode } from './routes/admin-auth.js'
 import { pickerSyncStates } from './picker-state.js'
 import { hAttachApply, hAttachPlan, hDetach, hHarnessEnv, hHarnessMode, hHarnessRoute, hHarnessUsage, hProvisionHarness, hRenewHarness, hRevokeHarness } from './routes/harness.js'
 import { hModelAvailability, hProbeLedger, hProbeRun, hProbeTrend, hProbeVerdicts } from './routes/probe.js'
+import { hLogs, hLogsQuery, hPricingLookup, hUsage } from './routes/usage.js'
+import { hAutostart, hConfig, hLanGet, hLanPost, hModelCatalog, hMetrics, hReload, hReset, hRotate, hStatus, hTest, hTierValidate, healthView } from './routes/system.js'
 import { probe, probePing } from './probe/direct.js'
 import { hAutoRoute, hFetchModels, hHolidaysCn, hImportApply, hImportDetect, hImportDismiss, hKey, hProfile, hRevealKey, hSchedule, hServiceAdd, hServiceDelete, hServiceModelFallback, hServiceUpdate, hSwitch, hUse } from './routes/services.js'
 
@@ -46,12 +37,13 @@ export { errorReply, maxBodyBytes } from './admin-shared.js'
 export { probe, probePing }
 export type { PingResult, ProbeResult } from './probe/direct.js'
 import { hInstall, hUninstall } from './install.js'
-import { AdminCtx, errorReply, jsonRequestBody, maxBodyBytes, readBody, sendError } from './admin-shared.js'
+import { AdminCtx, errorReply, maxBodyBytes, readBody, sendError } from './admin-shared.js'
 import { hSyncRemoteStatus, hSyncRequestRemote, registerWebDevice, sweepRemoteRequests, sweepSyncTickets } from './remote-device.js'
-import { buildConfigView, hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache } from './overview-view.js'
+import { hOverview, hPresetsCatalog, hTrayLite, hTrayState, hUiPresence, hUsageLive, invalidateOverviewCache } from './overview-view.js'
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { hConfigExport, hSyncDiscover, hSyncImport, hSyncOffer, hSyncOfferApprove } from './configpack.js'
 import { hMergeApply, hMergePreview } from './mergepack.js'
+
 
 export interface GatewayStartOptions {
   port: number
@@ -633,182 +625,13 @@ type AdminHandler = (c: AdminCtx) => Promise<void>
 
 
 // 轮换管理令牌（需当前已鉴权，故位于 admin 门之后）：旧 token/cookie 立即失效。
-async function hRotate(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  try {
-    rt.adminToken = randomToken('mdkadm')
-    // 只更新状态文件里的 token（串行队列防并发丢字段）；无状态文件（测试/嵌入式启动）则只换内存态
-    await mutateGatewayState((state) => (state ? { ...state, admin_token: rt.adminToken } : null))
-    const host = req.headers.host ?? `127.0.0.1:${rt.port ?? ''}`
-    const consoleUrl = `http://${host}/_modeldock/ui?token=${rt.adminToken}`
-    audit(bi('轮换管理令牌', 'Rotate admin token'), '-', bi('旧令牌已失效', 'Old token revoked'))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, admin_token: rt.adminToken, console_url: consoleUrl }))
-  } catch (e) {
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
-
-async function hStatus(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(
-    JSON.stringify({
-      ok: true,
-      active_profile: rt.config.active_profile ?? null,
-      providers: Object.keys(rt.config.providers),
-      profiles: Object.keys(rt.config.profiles),
-      harness: Object.keys(rt.config.harness),
-      reloads: rt.reloads,
-      uptime_ms: Date.now() - rt.startedAt,
-    })
-  )
-  return
-}
 
 
 
-async function hLogs(c: AdminCtx): Promise<void> {
-  const { rt, req, res } = c
-  const q = new URL(req.url ?? '', 'http://x').searchParams
-  const n = Math.min(500, Math.max(1, Number(q.get('n') ?? 50) || 50))
-  // 筛选视图：默认=环形缓冲原样（错误请求+控制台操作+后台事件，写入侧已分流）；
-  // src=ok 取成功请求小缓冲；kind=err/audit 在 ring 上做服务端过滤——分页计数按过滤后口径，
-  // 避免前端拿到稀页（客户端过滤会让「每页 N 条」名不副实）
-  const src = q.get('src')
-  const kind = q.get('kind')
-  const base: RingEntry[] = src === 'ok' ? (rt.okRing ?? []) : rt.ring
-  const filtered =
-    !src && kind === 'audit'
-      ? base.filter((l) => l.kind === 'audit')
-      : !src && kind === 'err'
-        ? base.filter((l) => l.kind !== 'audit')
-        : base
-  const total = filtered.length
-  // page 从 1 数起，第 1 页是最新 n 条（ring 按 时间正序 追加）；越界页返回空数组
-  const page = Math.max(1, Number(q.get('page') ?? 1) || 1)
-  const pages = Math.max(1, Math.ceil(total / n))
-  const end = Math.max(0, total - (page - 1) * n)
-  const start = Math.max(0, end - n)
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ logs: filtered.slice(start, end), total, page, pages }))
-  return
-}
 
-async function hConfig(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  const view = await buildConfigView(rt)
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(view))
-  return
-}
+
 
 // 面向任务的服务端点（Web 控制台 v2，全部用户语言，无内部概念）
-async function hModelCatalog(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  // 模型元数据兜底总表（内置表 ∪ models.dev 目录，8000+ 条）：量大，单端点懒加载一次，
-  // 不进 overview（每 5s 轮询，塞进去每秒多出百 KB 流量）。序列化结果缓存 + ETag：
-  // 控制台每次刷新重拉时命中 304，不再重复 stringify/传输几百 KB（cache-control 覆盖
-  // 管理面统一 no-store 为 no-cache：可存储但必须条件重验证，与 /ui 页同款策略）
-  const { data, etag } = catalogView()
-  if (req.headers['if-none-match'] === etag) {
-    res.writeHead(304, { etag, 'cache-control': 'no-cache' })
-    res.end()
-    return
-  }
-  res.writeHead(200, { 'content-type': 'application/json', etag, 'cache-control': 'no-cache' })
-  res.end(data)
-  return
-}
-
-
-
-
-async function hLanGet(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  // 手机简版控制台状态（二维码只对已过 admin 鉴权的本机控制台返回）
-  // 顺带重算默认出口地址：换 Wi-Fi / 起停 VPN 后该用哪块网卡会变，面板一刷新即纠正二维码
-  await refreshPreferredAddress()
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-  return
-}
-
-async function hLanPost(c: AdminCtx): Promise<void> {
-  const { rt, req, res, audit } = c
-  // 开关手机简版控制台：config.lan.enabled 落盘并即时启停第二监听器；
-  // LAN 凭据复用 gateway.json 旧值（手机 cookie 跨重启不掉），没有才新生成
-  const b = await jsonRequestBody(req)
-  try {
-    if (b.enabled === true) {
-      const state = await readGatewayState()
-      const lanToken = resolveLanToken(state?.lan_token ?? null)
-      await startLanServer(rt, { port: rt.config.lan?.port ?? DEFAULT_LAN_PORT, token: lanToken })
-      await mutateConfig((c) => {
-        c.lan = { ...(c.lan ?? {}), enabled: true }
-      })
-      await reloadRuntime(rt)
-      await mutateGatewayState((refreshed) =>
-        refreshed ? { ...refreshed, lan_token: lanToken, lan_port: rt.lan?.port } : null
-      )
-      audit(bi('手机远程', 'Mobile console'), bi('开启', 'on'), bi('端口 {port}', 'port {port}', { port: rt.lan?.port ?? 0 }))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-    } else {
-      stopLan(rt)
-      await mutateConfig((c) => {
-        c.lan = { ...(c.lan ?? {}), enabled: false }
-      })
-      await reloadRuntime(rt)
-      await mutateGatewayState((refreshed) => (refreshed ? { ...refreshed, lan_port: undefined } : null))
-      audit(bi('手机远程', 'Mobile console'), bi('关闭', 'off'))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, ...buildLanStatus(rt) }))
-    }
-  } catch (e) {
-    audit(bi('手机远程', 'Mobile console'), '-', undefined, (e as Error).message)
-    // 失败走 sendError（经 errorReply 还原业务错误状态码与 hint），不再 200+{ok:false}：
-    // 控制台 api() 封装按 !res.ok 抛错并取 error.message，200 包体会被当成功静默吞掉
-    // （2026-11-04 审查 P2）。前端两处调用（pillSwitch 开关 / configpack 导出面板）均有 catch 展示
-    const r = errorReply(e)
-    sendError(res, r.status, r.message, r.hint)
-  }
-  return
-}
-
-
-
-
-
-
-
-async function hAutostart(c: AdminCtx): Promise<void> {
-  const { req, res, audit } = c
-  // 开机自启开关。网关必然处于运行中，install 只登记服务文件、不 bootstrap——
-  // 否则第二个实例被单实例保护拒掉，launchd KeepAlive 会陷入重启循环。
-  const b = await jsonRequestBody(req)
-  try {
-    if (b.enabled === true) {
-      const r = await installAutostart()
-      audit(bi('开机自启', 'Start at login'), bi('开启', 'on'), bi('服务文件 {file}', 'Service file {file}', { file: r.file }))
-      // 不走 persistConfig（reloads 不变），不清缓存则紧随的 overview GET 会命中 6s TTL 旧值，UI 回灌旧状态
-      invalidateOverviewCache()
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, installed: true, note: r.note ?? t('下次登录自动启动', 'Starts automatically at next login') }))
-    } else {
-      const r = await uninstallAutostart()
-      audit(bi('开机自启', 'Start at login'), bi('关闭', 'off'), r.wasInstalled ? bi('已移除 {path}', 'Removed {path}', { path: r.removed }) : bi('本就未安装', 'Was not installed'))
-      invalidateOverviewCache()
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, installed: false }))
-    }
-  } catch (e) {
-    audit(bi('开机自启', 'Start at login'), '-', undefined, (e as Error).message)
-    sendError(res, 400, (e as Error).message)
-  }
-  return
-}
 
 
 
@@ -821,232 +644,23 @@ async function hAutostart(c: AdminCtx): Promise<void> {
 
 
 
-async function hReload(c: AdminCtx): Promise<void> {
-  const { rt, res, audit } = c
-  try {
-    await reloadRuntime(rt)
-    // 手动兜底语义补全：watcher 失效（health 提示走这里）时外部改的 key 也一并即刻生效——
-    // invalidateSecretsCacheIfExternal 按盘上指纹区分自家/外部写，自家刚写的不误失效
-    await invalidateSecretsCacheIfExternal()
-    audit(bi('重载配置', 'Reload config'), '-', bi('第 {n} 次热重载', 'Hot reload #{n}', { n: rt.reloads }))
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, reloads: rt.reloads }))
-  } catch (e) {
-    audit(bi('重载配置', 'Reload config'), '-', undefined, (e as Error).message)
-    sendError(res, 500, t('配置重载失败：{msg}', 'Failed to reload config: {msg}', { msg: (e as Error).message }))
-  }
-  return
-}
 
-async function hTest(c: AdminCtx): Promise<void> {
-  const { rt, req, res, o } = c
-  const url = '/_modeldock/test'
-  const body = await readBody(req, maxBodyBytes(rt.config))
-  let p: { profile?: string; provider?: string; model?: string; stream?: boolean; mode?: string } = {}
-  try {
-    p = body.length ? JSON.parse(body.toString('utf8')) : {}
-  } catch {
-    return sendError(res, 400, t('test 请求体必须是 JSON', 'The test request body must be JSON'))
-  }
-  let resolved: { ok: boolean; target?: ResolvedTarget; status?: number; message?: string; hint?: string }
-  if (p.provider) {
-    // 按服务直接探测（不必先建路由）
-    const provider = rt.config.providers[p.provider]
-    if (!provider) return sendError(res, 400, t('服务「{id}」不存在', 'Service "{id}" not found', { id: p.provider }))
-    const models = Object.keys(provider.models ?? {})
-    const fakeProfile = {
-      name: `probe-${p.provider}`,
-      provider: p.provider,
-      default_model: p.model ?? models[0],
-    }
-    resolved = { ok: true, target: { harness: 'admin-test', profileName: fakeProfile.name, profile: fakeProfile, provider } }
-  } else {
-    resolved = resolveByProfile(rt, p.profile)
-  }
-  if (!resolved.ok) return sendError(res, resolved.status ?? 400, resolved.message ?? t('无法解析路由', 'Cannot resolve a route'), resolved.hint)
-  // mode='ping' → 纯网络延迟（不推理）；否则保持原有的完整模型请求测速
-  const out = p.mode === 'ping'
-    ? await probePing(rt, resolved.target!.provider)
-    : await probe(rt, resolved.target!, p.model, p.stream === true, o)
-  // 连接测试也记入请求日志（客户端记为 admin-test），便于追溯测试失败原因
-  logRequest(rt, {
-    ts: localIsoTs(),
-    harness: 'admin-test',
-    profile: resolved.target?.profileName ?? '-',
-    provider: p.provider ?? resolved.target?.profile.provider ?? '-',
-    model: (out as { model?: string }).model ?? p.model,
-    path: p.mode === 'ping' ? 'ping' : url,
-    status: out.ok ? 200 : 502,
-    ms: out.ms,
-    err: out.err,
-  })
-  res.writeHead(out.ok ? 200 : 502, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(out))
-  return
-}
 
-async function hReset(c: AdminCtx): Promise<void> {
-  const { rt, res, audit } = c
-  const { configPath, secretsPath } = await import('../util/paths.js')
-  const fs = await import('node:fs')
-  // 与 CLI cmdReset（cli/basic.ts）同语义的三步序：先把已接管客户端逐个 detach 还原快照，
-  // 再清钥匙环、删 config/secrets。旧实现直接 unlink 的后果：客户端文件仍指向本网关但
-  // rt.tokens 已随空配置清空（全部客户端 401），且 config.harness 被删、attach 快照的
-  // 自动还原路径失效——只能人工翻 backups/。
-  // 1) 删前快照当前 config/secrets（unlink 绕过 atomicWrite 不触发自动快照，不补拍就没有「重置前」还原点）
-  let snapshotId: string | undefined
-  try {
-    snapshotId = (await snapshot('config', 'pre-reset', [configPath(), secretsPath()])).id
-  } catch { /* 快照失败不阻断重置（backups/ 通常已有历史快照） */ }
-  // 2) 逐个 detach 还原客户端文件（单个失败不中断，对齐 CLI：逐条记失败继续）
-  // 临时 harness（runtime-only 合成条目，不在盘上 config、无客户端文件可还原）不进 detach：
-  // detachHarness 先查盘上 config.harness 必抛「尚未接入」，逐条污染 restoreFailed 假失败——
-  // 用完即焚语义走 unregister 即收尾（重置后也不应幸存，reloadRuntime 的 reapply 会重注入幸存者）
-  const restored: string[] = []
-  const restoreFailed: string[] = []
-  for (const id of Object.keys(rt.config.harness)) {
-    if (rt.ephemeral.has(id)) {
-      unregisterEphemeralHarness(rt, id)
-      continue
-    }
-    try {
-      await detachHarness(id)
-      restored.push(id)
-    } catch (e) {
-      restoreFailed.push(`${id}: ${(e as Error).message}`)
-    }
-  }
-  // 3) 清 OS 钥匙环里的 Key（keychain/secret-service 条目不在 secrets.json 里，删文件清不掉；
-  // providerAllKeyRefs 全量口径盖住 keys[] 池，与 CLI reset 同口径）
-  let secretsCleared = 0
-  for (const [, p] of Object.entries(rt.config.providers)) {
-    for (const ref of providerAllKeyRefs(p)) {
-      try {
-        await deleteSecret(ref)
-        secretsCleared++
-      } catch { /* 单项失败不影响其余 */ }
-    }
-  }
-  // 删文件前包同一把 config 写锁（CORRECT-06 同法）：Web reset 与 CLI / 另一实例的 mutateConfig
-  // 是独立写者，裸 unlink 会在他人「读文件→改→写回」的窗口里删掉目标、随后被整包写回归活——
-  // reset 表面成功配置却还在。锁内删除让并发写者要么先完成再被删、要么等删除后才拿到锁
-  // （读到空配置），不再复活（2026-11-04 审查 P2）
-  const files = [configPath(), secretsPath()]
-  const deleted: string[] = []
-  const deleteFailed: Array<{ file: string; msg: string }> = []
-  await withFileLock(configLockPath(), {
-    // 超时报错与 mutateConfig 同口径（ConfigError → 400 + 可操作 hint），裸锁错误会落 500
-    timeoutError: (lp) =>
-      new ConfigError(
-        t('重置失败：{lp} 被其他进程长期占用（可能是异常退出的残留锁）', 'Reset failed: {lp} has been held by another process for too long (possibly a stale lock from a crashed process)', { lp }),
-        t('确认没有其他 modeldock 进程在写配置后，可删除该 .lock 文件重试', 'After confirming no other modeldock process is writing the config, delete the .lock file and retry')
-      ),
-  }, async () => {
-    for (const f of files) {
-      try {
-        if (fs.existsSync(f)) { fs.unlinkSync(f); deleted.push(f) }
-      } catch (e) {
-        deleteFailed.push({ file: f, msg: (e as Error).message })
-      }
-    }
-  })
-  // fail-loud（审计 F4）：破坏性操作删文件失败必须如实报错——旧实现吞错后无条件 ok:true，
-  // 用户以为配置已清空、实际原样存活。失败即中止（不 reloadRuntime 把幸存配置刷进运行态），
-  // ConfigError 经顶层 errorReply 还原 400+hint，与上方锁超时同信封
-  if (deleteFailed.length > 0) {
-    const failedFiles = deleteFailed.map((d) => d.file)
-    audit(
-      bi('重置配置', 'Reset config'),
-      '-',
-      undefined,
-      bi('删除 {files} 失败，重置中止：{msg}', 'Failed to delete {files}; reset aborted: {msg}', {
-        files: biJoin('、', ', ', failedFiles),
-        msg: deleteFailed.map((d) => d.msg).join('；'),
-      })
-    )
-    throw new ConfigError(
-      t('重置失败：{files} 删除未成功（配置未被清除，重置未完成）', 'Reset failed: {files} could not be deleted (config not cleared, reset incomplete)', { files: biJoin('、', ', ', failedFiles) }),
-      t('文件可能被其他程序占用（编辑器/杀毒/云同步等）——关闭占用程序后重试重置', 'The file may be held open by another program (editor/antivirus/cloud sync) — close it and retry the reset')
-    )
-  }
-  await reloadRuntime(rt)
-  audit(
-    bi('重置配置', 'Reset config'),
-    '-',
-    bi('还原 {h} 个客户端接管，删除 {files}，清除 {n} 个密钥', 'Restored {h} client attaches; deleted {files}; cleared {n} keys', { h: restored.length, files: deleted.length ? biJoin('、', ', ', deleted) : bi('无文件', 'no files'), n: secretsCleared }),
-    restoreFailed.length ? bi('部分客户端还原失败：' + restoreFailed.join('；'), 'Some client restores failed: ' + restoreFailed.join('; ')) : undefined
-  )
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, deleted, restored, restoreFailed, snapshotId, hint: t('配置已清空（含钥匙环密钥）；快照和日志保留。运行 modeldock init 重新配置', 'Config cleared (including keychain keys); snapshots and logs are kept. Run modeldock init to set up again') }))
-  return
-}
 
-// ===== 健康自检（/_modeldock/health 与数据面 /v1/health 共用）=====
 
-/** secrets 自检缓存：verifySecretsStore 读盘+解密，health 高频被探（gatewayLive / 托盘 / 监控），
- *  结果按 secrets.json mtime 缓存 60s——mtime 未变且 60s 内直接复用，mtime 变化立即重验。 */
-let secretsHealthCache: { at: number; mtimeMs: number; ok: boolean } | null = null
 
-async function secretsOkCached(): Promise<boolean> {
-  const now = Date.now()
-  let mtimeMs = 0
-  try {
-    mtimeMs = (await fsp.stat(secretsPath())).mtimeMs
-  } catch {
-    /* 文件不存在（未设过任何 key）：mtime 记 0，verify 给出确定结论 */
-  }
-  const c = secretsHealthCache
-  if (c && c.mtimeMs === mtimeMs && now - c.at < 60_000) return c.ok
-  const r = await verifySecretsStore()
-  secretsHealthCache = { at: now, mtimeMs, ok: r.ok }
-  return r.ok
-}
 
-/** /health 只读自检视图。全量子检（secrets/watcher/磁盘/同步）各自独立 try/catch：
- *  任一项失败置 null / 降级返回部分，亚健康也要能答（探活不能因自检项异常而 5xx）。 */
-async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> {
-  const now = Date.now()
-  // secrets_ok：密钥表可读可解密（mtime 缓存 60s）
-  let secretsOk: boolean
-  try {
-    secretsOk = await secretsOkCached()
-  } catch {
-    secretsOk = false // verifySecretsStore 自身不抛，此处兜底异常路径
-  }
-  // disk_free_mb：modeldockDir 所在盘剩余空间（fs.statfs，Node≥18 三平台可用；失败置 null）
-  let diskFreeMb: number | null = null
-  try {
-    const st = await fsp.statfs(modeldockDir())
-    const bytes = Number(st.bsize) * Number(st.bavail)
-    if (Number.isFinite(bytes) && bytes >= 0) diskFreeMb = Math.floor(bytes / (1024 * 1024))
-  } catch {
-    diskFreeMb = null
-  }
-  // sync：多机同步状态（sync.json 损坏/缺失降级为 null 字段，不影响其余自检）
-  let syncMode: string | null = null
-  let syncLastErrorTs: string | null = null
-  try {
-    const st = await readSyncState()
-    if (st) {
-      syncMode = st.mode
-      syncLastErrorTs = st.lastErrorTs
-    }
-  } catch {
-    /* sync.json 非法：同步域自检降级，健康端点照常应答 */
-  }
-  return {
-    ok: true,
-    started_at: localIsoTs(new Date(rt.startedAt)),
-    uptime_ms: now - rt.startedAt,
-    reloads: rt.reloads,
-    active_profile: rt.config.active_profile ?? null,
-    secrets_ok: secretsOk,
-    watcher_alive: rt.watcherAlive === true ? true : rt.watcherAlive === false ? false : null,
-    log_write_errors: appendLineErrorCount(),
-    disk_free_mb: diskFreeMb,
-    sync: { mode: syncMode, lastErrorTs: syncLastErrorTs },
-  }
-}
+
+
+
+
+
+
+
+
+
+
+
 
 /** 轻量性能观测（WIP obs-health 意图补完）：per-provider 耗时分位 + 事件循环延迟 + 熔断状态。
  *  admin 门内只读端点，无副作用；samples 环形窗口见 ProviderLatencyRing。熔断数组是编排侧
@@ -1055,290 +669,18 @@ async function healthView(rt: GatewayRuntime): Promise<Record<string, unknown>> 
  *  model_fallback 为该域的改发计数投影（fallback_count/absorbed_count，见 ModelFallbackCounter）。
  *  海况扩展（只增不改，state/sea.ts）：providers[].errors 滑窗错误分桶（last_5m/last_60m 的
  *  分错误类计数与错误率）+ sea_state 聚合海况信号——同为编排侧风暴闸数据源。 */
-async function hMetrics(c: AdminCtx): Promise<void> {
-  const { rt, res } = c
-  const providers: Record<string, unknown> = {}
-  // 键并集：只有耗时采样（logRequest）或只有海况分桶（recordOutcome）之一的 provider 都要露出。
-  // 正常转发两者同来；测试直灌 recordOutcome 时只有 errors 侧（count 等耗时字段缺席）
-  const ids = new Set<string>(rt.metricsLatency.keys())
-  for (const id of rt.seaErrors?.keys() ?? []) ids.add(id)
-  for (const id of ids) {
-    const m = rt.metricsLatency.get(id)
-    const sp = rt.seaErrors?.get(id)
-    providers[id] = {
-      ...(m ? { count: m.count, last_ms: m.lastMs ?? null, ...latencyQuantiles(m.samples) } : {}),
-      ...(sp
-        ? {
-            errors: {
-              last_5m: seaWindowView(sp, SEA_WINDOW_5M_MS),
-              last_60m: seaWindowView(sp, SEA_WINDOW_60M_MS),
-            },
-          }
-        : {}),
-    }
-  }
-  // per-provider 并发水位（实时）：in_flight/queued 来自进程内信号量（concurrency.ts，重启清零），
-  // limit 取当前配置 max_concurrency（0 = 不限）。键口径 = providers 段的同款并集（有完成流量才
-  // 露出）∪ 当前持有信号量的 provider——首个请求还在途、尚未进耗时采样时也要露出，否则实时
-  // 水位恰好漏掉正在满载的时刻。无流量且无在途的 provider 不出现：缺席 = 空闲（0/0），编排侧
-  // 勿把缺席当故障（与 model-availability 的缺席语义一致）。
-  const concurrency: Record<string, { in_flight: number; queued: number; limit: number }> = {}
-  const concurrencyIds = new Set<string>(ids)
-  for (const id of providerConcurrencyIds(rt)) concurrencyIds.add(id)
-  for (const id of concurrencyIds) {
-    const s = providerConcurrencyStats(rt, id)
-    concurrency[id] = { in_flight: s.inFlight, queued: s.queued, limit: providerConcurrencyLimit(rt.config.providers[id]) }
-  }
-  const now = Date.now()
-  const meltdown: Array<{ provider: string; class: string; until: string; remaining_ms: number }> = []
-  for (const [id, h] of rt.health) {
-    if (h.meltdown_until == null || h.meltdown_until <= now) continue
-    meltdown.push({
-      provider: id,
-      class: h.meltdown_cls ?? 'unknown',
-      until: new Date(h.meltdown_until).toISOString(),
-      remaining_ms: h.meltdown_until - now,
-    })
-  }
-  // 模型级熔断投影（model_fallback 域，ModelHealthState）：与 provider 级 meltdown 段同形，
-  // 多 model 维度。键 = `${providerId}\u0000${model}`（state/routing.ts recordModelOutcome 记账），
-  // 纯内存读；只露熔断中的条目（TTL 过期/已解除不出现，缺席 = 该模型无在熔断）。
-  const model_meltdown: Array<{ provider: string; model: string; class: string; until: string; remaining_ms: number }> = []
-  for (const [key, h] of rt.modelHealth ?? []) {
-    if (h.meltdown_until == null || h.meltdown_until <= now) continue
-    const sep = key.indexOf('\u0000')
-    model_meltdown.push({
-      provider: sep === -1 ? key : key.slice(0, sep),
-      model: sep === -1 ? '' : key.slice(sep + 1),
-      class: h.meltdown_cls ?? 'unknown',
-      until: new Date(h.meltdown_until).toISOString(),
-      remaining_ms: h.meltdown_until - now,
-    })
-  }
-  // 模型级容灾改发计数投影（model_fallback 域，ModelFallbackCounter）：与 model_meltdown 同形
-  // 位置、同键口径（key = `${providerId}\u0000${model}`，model = 被改发的原请求模型），纯内存读。
-  // fallback_count = 改发累计（闸门预改写 + 链尾合成两路）；absorbed_count = 其中闸门吸收
-  // （请求未触达原模型上游）的次数。单调累计（进程生命周期），熔断解除不清零——改发已发生
-  // 是历史事实；只露有改发的条目（缺席 = 该键从未改发，与 model_meltdown 的缺席语义一致）。
-  const model_fallback: Array<{ provider: string; model: string; fallback_count: number; absorbed_count: number }> = []
-  for (const [key, s] of rt.modelFallbackCounts ?? []) {
-    const sep = key.indexOf('\u0000')
-    model_fallback.push({
-      provider: sep === -1 ? key : key.slice(0, sep),
-      model: sep === -1 ? '' : key.slice(sep + 1),
-      fallback_count: s.fallbackCount,
-      absorbed_count: s.absorbedCount,
-    })
-  }
-  // key 池健康（P1⑥ 观测面）：per-provider 配置的 key 数量与失效冷却中的索引（含剩余 ms）。
-  // 只有数量/索引/时间，绝无 key 明文或引用原文（ref 可能内嵌明文 key，一律不出域）。
-  // 不实际读 key（无 IO，metrics 是轻量端点）：total=配置引用数；healthy=total-冷却数——
-  // 个别引用读取失败时会高估 healthy（读取失败不进冷却，见 state/keypool.ts）
-  const keypool: Record<string, { total: number; healthy: number; cooldown: Array<{ index: number; remaining_ms: number }> }> = {}
-  for (const [id, p] of Object.entries(rt.config.providers)) {
-    const total = providerKeyRefs(p).length
-    keypool[id] = { total, ...keyPoolHealthView(rt, id, total, now) }
-  }
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ event_loop_lag_ms: eventLoopLagMs(), providers, meltdown, model_meltdown, model_fallback, sea_state: seaStateSnapshot(rt, now), keypool, concurrency }))
-}
-
-
-
-// ===== 服务探针端点（provider-probe-suite 任务 6；与 hTest 的差异：走探针引擎、不调 logRequest——
-// 请求日志 / usageToday / key 冷却 / 熔断计数零副作用，花费只进探针独立账本）=====
 
 
 
 
 
 
-/** /_modeldock/usage 查询参数 → 本地日期列表 + 毫秒窗口。date=单日（缺省今天）；from/to
- *  各自接受 YYYY-MM-DD 或 ISO 时间戳（日期形态按本地日界取起止）；跨天封顶 31 个日文件。
- *  非法返回 err 文案（双语）。 */
-const USAGE_MAX_DAYS = 31
-function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs?: number; err?: string } {
-  const dateRe = /^\d{4}-\d{2}-\d{2}$/
-  const from = q.get('from')
-  const to = q.get('to')
-  if (!from && !to) {
-    const date = q.get('date') ?? localIsoTs().slice(0, 10)
-    if (!dateRe.test(date)) return { days: [], err: t('usage 参数 date 非法：需为 YYYY-MM-DD（本地日期）', 'Invalid usage date parameter: must be YYYY-MM-DD (local date)') }
-    return { days: [date] }
-  }
-  const parseBound = (v: string, endOfDay: boolean): number | undefined => {
-    if (dateRe.test(v)) {
-      const [y, m, d] = v.split('-').map(Number)
-      return endOfDay ? new Date(y, m - 1, d, 23, 59, 59, 999).getTime() : new Date(y, m - 1, d).getTime()
-    }
-    const ts = new Date(v).getTime()
-    return Number.isFinite(ts) ? ts : undefined
-  }
-  const fromMs = from ? parseBound(from, false) : undefined
-  const toMs = to ? parseBound(to, true) : undefined
-  if ((from && fromMs == null) || (to && toMs == null)) {
-    return { days: [], err: t('usage 参数 from/to 非法：需为 YYYY-MM-DD 或 ISO 时间戳', 'Invalid usage from/to parameters: must be YYYY-MM-DD or an ISO timestamp') }
-  }
-  if (fromMs != null && toMs != null && toMs < fromMs) {
-    return { days: [], err: t('usage 参数非法：to 早于 from', 'Invalid usage parameters: to is earlier than from') }
-  }
-  const lo = fromMs ?? toMs!
-  const hi = toMs ?? fromMs!
-  const dayStart = (ts: number) => new Date(new Date(ts).getFullYear(), new Date(ts).getMonth(), new Date(ts).getDate()).getTime()
-  const startDay = dayStart(lo)
-  const endDay = dayStart(hi)
-  if ((endDay - startDay) / 86_400_000 + 1 > USAGE_MAX_DAYS) {
-    return { days: [], err: t('usage 窗口过大：最多查询 {n} 天', 'Usage window too large: query at most {n} days', { n: USAGE_MAX_DAYS }) }
-  }
-  const days: string[] = []
-  const cur = new Date(startDay)
-  while (cur.getTime() <= endDay) {
-    days.push(localIsoTs(cur).slice(0, 10))
-    cur.setDate(cur.getDate() + 1)
-  }
-  return { days, fromMs, toMs }
-}
 
-/** /_modeldock/usage：请求日志聚合（admin 只读）。编排侧（Dockmaster 燃油实测/风暴闸）与
- *  排查的数据面：date/from/to 选日（见 usageQuery），harness/profile/provider 精确过滤；
- *  聚合口径见 summarizeUsage。bucket=hour 附加 hours[] 小时桶（精简版形状见 UsageHourBucket，
- *  稀疏输出：无流量的小时不出桶）——编排侧长跑分时段观测（油量曲线/高峰定位），总账照常返回。
- *  可计费口径字段（2026-11 billable 聚合）：usage.billable_tokens = 窗口内成功且有 usage
- *  条目的可计费 token 求和（与 tokens 同口径；公式分协议形态、条目落盘前已算好，聚合只
- *  求和不重算）；usage.billable_partial = 窗口内存在「有 usage 但缺 billable_tokens 数字」
- *  的条目（旧版网关日志混入）时为 true，此时求和只是可得部分——消费方（编排侧 reconcile）
- *  据此整体回落文件直读。窗口内无任何 usage 条目：billable_tokens=0、partial=false。 */
-/** 小时桶窗口封顶：与 USAGE_MAX_DAYS 联动（31 天 × 24 = 744）。usageQuery 已按日把窗口封到
- *  31 天、今日桶数恒不超限，此检查守的是未来日上限调大后 hours[] 无感膨胀——桶数超限直接
- *  400，不做静默截断（编排侧对账宁可显式失败不可缺桶）。 */
-const USAGE_MAX_HOURS = 744
-async function hUsage(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  const q = new URL(req.url ?? '', 'http://x').searchParams
-  const parsed = usageQuery(q)
-  if (parsed.err) {
-    sendError(res, 400, parsed.err, t('示例：/_modeldock/usage?date=2026-11-01&harness=zcode', 'Example: /_modeldock/usage?date=2026-11-01&harness=zcode'))
-    return
-  }
-  const bucket = q.get('bucket')
-  if (bucket != null && bucket !== 'hour') {
-    return sendError(res, 400, t('usage 参数 bucket 非法：仅支持 hour', 'Invalid usage bucket parameter: only hour is supported'), t('示例：/_modeldock/usage?date=2026-11-01&bucket=hour', 'Example: /_modeldock/usage?date=2026-11-01&bucket=hour'))
-  }
-  const withHours = bucket === 'hour'
-  if (withHours && parsed.days.length * 24 > USAGE_MAX_HOURS) {
-    return sendError(res, 400, t('usage 小时桶窗口过大：最多查询 {n} 桶（31 天）', 'Usage hour-bucket window too large: query at most {n} buckets (31 days)', { n: USAGE_MAX_HOURS }), t('收窄 from/to 窗口后重试', 'Narrow the from/to window and retry'))
-  }
-  // 流式聚合：逐行读、边过滤边累加，不落全量数组——31 天查询曾把事件循环卡数秒、
-  // 在途 SSE 全冻结（本端点是编排侧的轮询数据源，见 summarizeUsageDays 注释）
-  const harness = q.get('harness') ?? undefined
-  const profile = q.get('profile') ?? undefined
-  const provider = q.get('provider') ?? undefined
-  const withCost = q.get('cost') !== '0' // 缺省带成本；cost=0 只算 token（编排侧风暴闸等免查价路径）
-  const filterOpt = { harness, profile, provider, fromMs: parsed.fromMs, toMs: parsed.toMs }
-  const priceOf = withCost ? gatewayPriceResolver : undefined
-  // 单趟双账：bucket=hour 经 summarizeUsageDaysWithHours 同管道同时出总账与小时桶，不二次扫文件
-  const { usage, hours } = withHours
-    ? await summarizeUsageDaysWithHours(parsed.days, filterOpt, priceOf)
-    : { usage: await summarizeUsageDays(parsed.days, filterOpt, priceOf), hours: null as UsageHourBucket[] | null }
-  const filter: Record<string, string> = {}
-  if (harness) filter.harness = harness
-  if (profile) filter.profile = profile
-  if (provider) filter.provider = provider
-  res.writeHead(200, { 'content-type': 'application/json' })
-  const pricingError = withCost ? loadPricingOverrides().error ?? null : null
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filter).length ? filter : null, pricing_error: pricingError, usage, ...(hours ? { hours } : {}) }))
-  return
-}
 
-/** GET /_modeldock/logs/query：请求日志明细查询（admin 门内只读，编排器/Dockmaster 排障用）。
- *  /usage 只有聚合、/logs 只有内存环形缓冲（200 条），排障要窗口内明细条目（含 cause/attempts/
- *  hint/tokenHint，定义见 state/types.ts LogEntry）。from/to/date 口径与 /usage 完全一致
- *  （usageQuery，31 天封顶）；harness/provider/cause/status_class 精确过滤（status_class 取
- *  2xx…5xx）；limit 缺省 100、上限 500（非法值按 hLogs 先例夹紧不报错）；按时间倒序（最新在前）。
- *  条目原样返回落盘的 LogEntry——脱敏在落盘侧已完成（tokenHint 仅前 8 字符、无任何 key 材料），
- *  本端点绝不新增明文密钥字段。取数复用 /usage 的流式读（streamRequestLogDays），凑满 limit
- *  即停不再读更旧的日子。只读端点无状态变更，不记审计（跟随 /usage 先例）。 */
-async function hLogsQuery(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  const q = new URL(req.url ?? '', 'http://x').searchParams
-  const parsed = usageQuery(q)
-  if (parsed.err) {
-    sendError(res, 400, parsed.err, t('示例：/_modeldock/logs/query?from=2026-11-01&harness=zcode&cause=upstream_4xx', 'Example: /_modeldock/logs/query?from=2026-11-01&harness=zcode&cause=upstream_4xx'))
-    return
-  }
-  const statusClass = q.get('status_class') ?? undefined
-  if (statusClass && !/^[1-5]xx$/.test(statusClass)) {
-    return sendError(res, 400, t('logs/query 参数 status_class 非法：需为 2xx/3xx/4xx/5xx', 'Invalid logs/query status_class parameter: must be 2xx/3xx/4xx/5xx'))
-  }
-  const filter = {
-    harness: q.get('harness') ?? undefined,
-    provider: q.get('provider') ?? undefined,
-    cause: q.get('cause') ?? undefined,
-    statusClass,
-    fromMs: parsed.fromMs,
-    toMs: parsed.toMs,
-  }
-  const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
-  // 倒序取数：日文件按时间正序追加，从最新日往回读；单日把命中条目滚动截到最新 limit 条
-  // （内存有界），凑满 limit 即停、不再读更旧的日子。条目无跨日乱序可能（日文件按天归属）。
-  const out: LogEntry[] = []
-  for (let i = parsed.days.length - 1; i >= 0 && out.length < limit; i--) {
-    const dayBuf: LogEntry[] = []
-    for await (const e of streamRequestLogDays([parsed.days[i]], filter)) {
-      dayBuf.push(e)
-      if (dayBuf.length >= limit * 2) dayBuf.splice(0, dayBuf.length - limit) // 滚动裁头：只保最新的 limit 条
-    }
-    if (dayBuf.length > limit) dayBuf.splice(0, dayBuf.length - limit)
-    dayBuf.reverse()
-    out.push(...dayBuf)
-    if (out.length > limit) out.splice(limit, out.length - limit)
-  }
-  const filterEcho: Record<string, string> = {}
-  if (filter.harness) filterEcho.harness = filter.harness
-  if (filter.provider) filterEcho.provider = filter.provider
-  if (filter.cause) filterEcho.cause = filter.cause
-  if (filter.statusClass) filterEcho.status_class = filter.statusClass
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, days: parsed.days, filter: Object.keys(filterEcho).length ? filterEcho : null, limit, entries: out }))
-  return
-}
 
-/** POST /_modeldock/pricing-lookup：批量查价（编排侧燃油账用，admin 门内）。
- *  请求体 { models: Array<string | { provider?: string; model: string }> }（≤500 条）；
- *  响应 { ok, currency:'usd', unit:'per_million_tokens', prices, missing, overrides_error }——
- *  prices 键与请求条目一一对应（带 provider 的键为 "provider/model"），查不到的进 missing（不猜价）。 */
-async function hPricingLookup(c: AdminCtx): Promise<void> {
-  const { req, res } = c
-  const b = await jsonRequestBody(req)
-  const raw = Array.isArray(b.models) ? b.models : []
-  const entries = raw
-    .map((m: unknown) => {
-      if (typeof m === 'string') return { provider: undefined, model: m.trim(), key: m.trim() }
-      if (typeof m === 'object' && m !== null) {
-        const o = m as Record<string, unknown>
-        const model = typeof o.model === 'string' ? o.model.trim() : ''
-        const provider = typeof o.provider === 'string' && o.provider.trim() ? o.provider.trim() : undefined
-        if (model) return { provider, model, key: provider ? `${provider}/${model}` : model }
-      }
-      return null
-    })
-    .filter((x: unknown): x is { provider: string | undefined; model: string; key: string } => x !== null)
-    .slice(0, 500)
-  if (!entries.length) {
-    return sendError(res, 400, t('缺少 models（模型名字符串或 {provider, model} 对象数组）', 'Missing models (array of model name strings or {provider, model} objects)'))
-  }
-  const { error } = loadPricingOverrides()
-  const prices: Record<string, unknown> = {}
-  const missing: string[] = []
-  for (const e of entries) {
-    const price = lookupPrice(e.provider, e.model)
-    if (price) prices[e.key] = { ...price, source: 'priced' }
-    else missing.push(e.key)
-  }
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ ok: true, currency: 'usd', unit: 'per_million_tokens', prices, missing, overrides_error: error ?? null }))
-  return
-}
+
+
+
 
 /** POST /_modeldock/tier-validate：token → harness → profile 权威事实回报（编排侧 tier 校验用，
  *  admin 门内；2026-11-02 船东授权 .agents 使用 admin 面）。请求体 { token?, tier? }——tier 仅
@@ -1346,40 +688,6 @@ async function hPricingLookup(c: AdminCtx): Promise<void> {
  *  或 ok:true + harness/profile/provider/tier（profile.tier 标签，可 null）+ models（该 profile
  *  当前 provider 的目录 id）+ tier_profiles（全库 tier 标签 → profile id 清单，供「tier 已打标
  *  但 token 指向别档」判定）。token 不回显（口径见 hProvisionHarness 注）。 */
-async function hTierValidate(c: AdminCtx): Promise<void> {
-  const { rt, req, res } = c
-  const b = await jsonRequestBody(req)
-  const token = typeof b.token === 'string' ? b.token : ''
-  const wantedTier = typeof b.tier === 'string' ? b.tier.trim() : ''
-  if (!token) return sendError(res, 400, t('缺少 token', 'Missing token'))
-  const resolved = resolveTarget(rt, token)
-  if (!resolved.ok) {
-    res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: false, reason: resolved.status === 401 ? 'unknown_token' : `resolve_${resolved.status}` }))
-    return
-  }
-  const { target } = resolved
-  const providerId = target.profile.provider
-  const tierProfiles: Record<string, string[]> = {}
-  for (const [id, p] of Object.entries(rt.config.profiles)) {
-    const tag = typeof p.tier === 'string' && p.tier.trim() ? p.tier.trim() : null
-    if (tag) (tierProfiles[tag] ??= []).push(id)
-  }
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(
-    JSON.stringify({
-      ok: true,
-      harness: target.harness,
-      profile: target.profileName,
-      provider: providerId,
-      tier: rt.config.profiles[target.profileName]?.tier ?? null,
-      ...(wantedTier ? { requested_tier: wantedTier } : {}),
-      models: Object.keys(rt.config.providers[providerId]?.models ?? {}),
-      tier_profiles: tierProfiles,
-    })
-  )
-  return
-}
 
 /** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串）；Map 存查表用 .get()，键含请求输入不走对象动态索引 */
 const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
