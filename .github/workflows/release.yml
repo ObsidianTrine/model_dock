@@ -76,6 +76,12 @@ jobs:
     name: build (${{ matrix.target }})
     # npm ci + 全量测试 + SEA 打包，最慢的 mac 腿留足余量；防卡死挂满默认 6 小时
     timeout-minutes: 40
+    # 发布物来源证明（D-02）：attest-build-provenance 走 OIDC 换签名令牌（id-token），
+    # 并把 provenance 写进仓库的 attestations（attestations: write）。其余仍只读。
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -145,6 +151,21 @@ jobs:
             else { Write-Host "ok  $file" }
           }
           if ($failed) { exit 1 }
+
+      # 发布物来源证明（D-02 第一步）：对**已产出**的对外发布物生成 SLSA build provenance
+      # （GitHub artifact attestation）。用户可 `gh attestation verify <文件> --repo
+      # <owner>/<repo>` 校验「该文件由本仓库 release.yml 在此 tag 的 commit 上构建」。
+      # 只做来源证明，**不做**代码签名 / Apple 公证 / Windows Authenticode——证书与公证
+      # 是成本项，留给用户决策。未覆盖：合并后的 SHA256SUMS（由下方 release job 在 ubuntu
+      # 上 cat 生成，不是本腿产物）；裸二进制本就不外发，不在 subject 内。
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.dmg
+            release/*-setup.exe
 
       # 只上传对外发布物（压缩包 / DMG / setup / 校验名单）；裸二进制不外发
       - name: Upload artifacts
