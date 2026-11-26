@@ -407,7 +407,9 @@ describe('relay · 错误体翻译与解压读面', () => {
 
   it('readBodyBounded 非流回落分支按 maxBytes 截断', async () => {
     const huge = new Uint8Array(64 * 1024)
-    const buf = await readBodyBounded({ arrayBuffer: async () => huge.buffer }, 1024)
+    // UpstreamBody 的 text() 是必填成员（arrayBuffer 才是可选的快路径）：两条都给，
+    // 走 arrayBuffer 分支，text 只在回落路径被读，这里给空串不影响断言。
+    const buf = await readBodyBounded({ text: async () => '', arrayBuffer: async () => huge.buffer }, 1024)
     expect(buf.length).toBe(1024)
   })
 })
