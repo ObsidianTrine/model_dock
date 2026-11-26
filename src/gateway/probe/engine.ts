@@ -16,7 +16,7 @@ import { providerKeyRefs, resolveProviderKeys } from '../../config/secrets.js'
 import { profileRefForProvider } from '../admin-shared.js'
 import { getProbeDef, probeEstimateTokens } from './registry.js'
 import { probeWire } from './wire.js'
-import { applyVerdictEvidence, keyFingerprint, sanitizeErrorSummary, verdictKey } from './verdict.js'
+import { applyVerdictEvidence, keyFingerprint, pruneOrphanKeyVerdicts, sanitizeErrorSummary, verdictKey } from './verdict.js'
 import { probeBudgetTokens, probeMonthKey, probeMonthSpend, readProbeLedger, recordProbeLedgerEntry } from './ledger.js'
 import { DEFAULT_PROBE_CONCURRENCY, PROBE_CONCURRENCY_MAX, PROBE_CONCURRENCY_MIN } from '../../config/types.js'
 import type { ProbeConfig } from '../../config/types.js'
@@ -710,6 +710,9 @@ export async function buildProbePlan(
   const model = resolveProbeModel(rt.config, providerId)
   const keys = await resolveProviderKeys(providerKeyRefs(provider))
   const fps = keys.map((k) => ({ index: k.index, fp: keyFingerprint(k.key) }))
+  // 换 key 销账（见 pruneOrphanKeyVerdicts）：计划期已持当前 key 指纹，顺手清掉孤儿 key 的旧结论——
+  // 手动运行 / 周期调度 / CLI 全部经 buildProbePlan，此处是唯一对账点
+  pruneOrphanKeyVerdicts(rt, providerId, new Set(fps.map((k) => k.fp)))
   const units: ProbePlan['units'] = []
   const perProbeCost: Record<string, number> = {}
   for (const probeId of probeIds) {

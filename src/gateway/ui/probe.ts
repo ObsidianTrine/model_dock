@@ -13,8 +13,9 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
   var diagConfirmTokens = {} // 两段式成本确认的 confirmToken（probeId → token，来自第一段响应）
   // 徽标异常才显（diag-modal-probe-ui v2）：降级/额度/失效/不可达四态出徽标，健康/未验证/过期
   // 一律静默——服务卡 pill 语义统一为「异常态才显示」（熔断中/已下线同语言）；全量状态（含健康）
-  // 只在诊断弹层「当前结论」区展示。轮询签名随之收敛为「服务 → 异常态集合」：evidence 刷新
-  // （at/ms/status 变化）不再触发整卡重绘，可见面真正变化（异常出现/消失/升级）才重绘
+  // 只在诊断弹层「当前结论」区展示。轮询签名随之收敛为「服务 → 异常态集合」（经 badgePool 让位
+  // 过滤）：evidence 刷新（at/ms/status 变化）不再触发整卡重绘，可见面真正变化（异常出现/消失/
+  // 升级/被主动实证取代）才重绘
   var BADGE_STATES = { degraded: 1, quota: 1, 'auth-dead': 1, unreachable: 1 }
   // verdict 轮询（15s 档足够：结论只随探针运行变化）；签名去重，可见面变了才重绘服务卡
   function pollProbe() {
@@ -22,8 +23,16 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       if (!j || !j.verdicts) return
       probeVerdicts = j.verdicts
       var sig = ''
+      var byP = {}
       for (var i = 0; i < probeVerdicts.length; i++) {
-        if (BADGE_STATES[probeVerdicts[i].state]) sig += probeVerdicts[i].provider + ':' + probeVerdicts[i].state + '|'
+        var v = probeVerdicts[i]
+        ;(byP[v.provider] = byP[v.provider] || []).push(v)
+      }
+      for (var pid in byP) {
+        var pool = badgePool(byP[pid])
+        for (var j = 0; j < pool.length; j++) {
+          if (BADGE_STATES[pool[j].state]) sig += pid + ':' + pool[j].state + '|'
+        }
       }
       if (sig === probeVsSig) return
       probeVsSig = sig
@@ -40,14 +49,31 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     stale: { cls: 'dim', zh: '过期', en: 'Stale' },
   }
   // 徽标取该服务全部结论里最差的一条（坏结论不该被健康结论盖住）；无结论不出徽标（缺席 ≠ 健康）；
-  // 最差结论非异常态（healthy/unverified/stale）同样静默（BADGE_STATES）
+  // 最差结论非异常态（healthy/unverified/stale）同样静默（BADGE_STATES）。
+  // 旧账让位（2026-11-26 用户实证：换 key 重测健康后徽标仍失效）："-" 占位结论（被动 P15
+  // provider 级，不带 key 归属）若已有「真实 key 指纹且证据更新」的同服务结论，则不参与最差
+  // 排序——主动实证新于被动旧账，坏消息优先只在同代证据内比较；历史明细仍在诊断弹层全量可见
   var VS_RANK = { 'auth-dead': 6, unreachable: 5, quota: 4, degraded: 3, healthy: 2, unverified: 1, stale: 0 }
+  function badgePool(vs) {
+    return vs.filter(function (v) {
+      var fp = v.key_fp
+      if (fp && fp !== '-') return true
+      var at = (v.evidence || {}).at || 0
+      for (var j = 0; j < vs.length; j++) {
+        var rfp = vs[j].key_fp
+        if (rfp && rfp !== '-' && (((vs[j].evidence || {}).at || 0) > at)) return false
+      }
+      return true
+    })
+  }
   function verdictBadgeHtml(pid) {
     var vs = probeVerdicts.filter(function (v) { return v.provider === pid })
     if (!vs.length || !view) return ''
+    var pool = badgePool(vs)
+    if (!pool.length) return ''
     var worst = null
-    for (var i = 0; i < vs.length; i++) {
-      var v = vs[i]
+    for (var i = 0; i < pool.length; i++) {
+      var v = pool[i]
       if (!worst || (VS_RANK[v.state] || 0) > (VS_RANK[worst.state] || 0)) worst = v
     }
     if (!BADGE_STATES[worst.state]) return ''
@@ -60,7 +86,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     }
     if (ev.status != null) tip += ' · HTTP ' + ev.status
     if (ev.err) tip += ' · ' + ev.err
-    if (vs.length > 1) tip += ' · ' + t('共 ', '') + vs.length + t(' 条结论，取最差', ' verdicts, worst shown')
+    if (pool.length > 1) tip += ' · ' + t('共 ', '') + pool.length + t(' 条结论，取最差', ' verdicts, worst shown')
     // 徽标即下钻入口（健康历史的最近邻动作：徽标=当前结论，点击看 30 天变化轴）；tip 尾部追加点按提示
     return ' <button type="button" class="pill ' + m.cls + '" data-probehist="' + esc(pid) + '" title="' + esc(tip + t('（点击查看健康变化历史）', ' (click to view health change history)')) + '">' + esc(t(m.zh, m.en)) + '</button>'
   }

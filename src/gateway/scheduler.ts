@@ -7,6 +7,7 @@ import { logAudit, logEvent, pruneExpiredLogs, sweepEphemeralHarnesses, EPHEMERA
 import { startModelProbeLoop } from './modelprobe.js'
 import { refreshCalendar } from './holidays.js'
 import { startProbeSchedule } from './probe/schedule.js'
+import { sweepStaleVerdicts } from './probe/verdict.js'
 import { t, bi, type Bilingual } from '../util/i18n.js'
 import { pickerSyncStates } from './picker-state.js'
 import { probePing } from './probe/direct.js'
@@ -159,7 +160,20 @@ export function startSchedulers(rt: GatewayRuntime, server: http.Server, opts: G
       /* 清理失败不影响网关服务 */
     }
   }
-  const pruneLoop = setInterval(() => void pruneLogs(), 24 * 3600_000)
+  const pruneLoop = setInterval(() => {
+    void pruneLogs()
+    // 探针 verdict 7 天保鲜翻转固化（2026-11-26：sweepStaleVerdicts 此前无调用方——读面
+    // effectiveVerdictState 只兜展示，翻转不落 JSONL，趋势时间线永远缺「→stale」记录）：
+    // 与日志保留期清理同节拍每日一次，失败静默不影响网关服务
+    try {
+      const flipped = sweepStaleVerdicts(rt)
+      if (flipped > 0) {
+        console.log(t('✓ 已固化 {count} 条过期探针结论', '✓ Solidified {count} stale probe verdicts', { count: flipped }))
+      }
+    } catch {
+      /* 清理失败不影响网关服务 */
+    }
+  }, 24 * 3600_000)
   pruneLoop.unref?.()
   server.on('close', () => clearInterval(pruneLoop))
   void pruneLogs()

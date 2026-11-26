@@ -14,6 +14,7 @@ import {
   effectiveVerdictState,
   getProbeVerdict,
   keyFingerprint,
+  pruneOrphanKeyVerdicts,
   replayProbeVerdicts,
   sanitizeErrorSummary,
   sweepStaleVerdicts,
@@ -143,6 +144,27 @@ describe('probe-verdict · 7 天 stale', () => {
     // 未满 7 天不受影响
     applyVerdictEvidence(rt, canaryHealthy('fresh', 'fp2', 'm', now - 1000))
     expect(effectiveVerdictState(getProbeVerdict(rt, 'fresh', 'fp2', 'm')!, now)).toBe('healthy')
+  })
+})
+
+describe('probe-verdict · 换 key 销账（pruneOrphanKeyVerdicts）', () => {
+  it('孤儿指纹结论删除；存活指纹与「-」占位保留；其他服务不受影响', () => {
+    const rt = mkRt()
+    applyVerdictEvidence(rt, canaryHealthy('acme', 'live1111', 'm1'))
+    applyVerdictEvidence(rt, { ...canaryHealthy('acme', 'dead2222', 'm1'), state: 'auth-dead' })
+    applyVerdictEvidence(rt, canaryHealthy('acme', '-', 'm1')) // 被动 P15 占位
+    applyVerdictEvidence(rt, canaryHealthy('other', 'dead2222', 'm1'))
+    expect(pruneOrphanKeyVerdicts(rt, 'acme', new Set(['live1111']))).toBe(1)
+    expect(getProbeVerdict(rt, 'acme', 'live1111', 'm1')).toBeDefined()
+    expect(getProbeVerdict(rt, 'acme', '-', 'm1')).toBeDefined()
+    expect(getProbeVerdict(rt, 'acme', 'dead2222', 'm1')).toBeUndefined()
+    expect(getProbeVerdict(rt, 'other', 'dead2222', 'm1')).toBeDefined()
+  })
+  it('liveFps 空集直接跳过：区分不了「真没 key」与「钥匙环暂时不可读」，宁保留勿误删', () => {
+    const rt = mkRt()
+    applyVerdictEvidence(rt, canaryHealthy('acme', 'dead2222', 'm1'))
+    expect(pruneOrphanKeyVerdicts(rt, 'acme', new Set())).toBe(0)
+    expect(getProbeVerdict(rt, 'acme', 'dead2222', 'm1')).toBeDefined()
   })
 })
 

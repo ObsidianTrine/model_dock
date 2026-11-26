@@ -243,6 +243,28 @@ export function sweepStaleVerdicts(rt: GatewayRuntime, now = Date.now()): number
   return n
 }
 
+/** 换 key 销账（2026-11-26 用户实证：key 出 401 → 换 key 重测健康，旧 key 名下的 auth-dead
+ *  仍压徽标）：provider 存活但其 verdict 记在「已不在当前 key 集合」的真实指纹上 → 结论失去
+ *  主体，热态随之删除。'-' 占位（被动 P15 provider 级）不在此列——它不属于任何 key，展示层由
+ *  「真实指纹更新证据让位」规则处理（ui probe badgePool）。JSONL 落盘历史不删，趋势时间线仍可回溯。
+ *  liveFps 为空集时直接跳过（区别不了「真没 key」与「keychain 暂时不可读」，宁保留勿误删）。
+ *  调用时机 = buildProbePlan（该处已解析当前 key 池，零额外 secrets 读）。返回删除数。 */
+export function pruneOrphanKeyVerdicts(rt: GatewayRuntime, providerId: string, liveFps: ReadonlySet<string>): number {
+  const store = rt.probeVerdicts
+  if (!store || store.size === 0 || liveFps.size === 0) return 0
+  const prefix = providerId + KEY_SEP
+  let n = 0
+  for (const key of [...store.keys()]) {
+    if (!key.startsWith(prefix)) continue
+    const fp = key.slice(prefix.length).split(KEY_SEP)[0] ?? ''
+    if (fp && fp !== '-' && !liveFps.has(fp)) {
+      store.delete(key)
+      n++
+    }
+  }
+  return n
+}
+
 const VERDICT_FILE_PREFIX = 'probe-'
 const VERDICT_FILE_RE = /^probe-(\d{4}-\d{2}-\d{2})\.jsonl$/
 

@@ -17,6 +17,7 @@ import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import { buildProbePlan, resolveProbeModel, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
+import { applyVerdictEvidence, getProbeVerdict, keyFingerprint } from '../src/gateway/probe/verdict.js'
 import { getProbeRunner } from '../src/gateway/probe/runners/index.js'
 import { readProbeLedger } from '../src/gateway/probe/ledger.js'
 import { logsDir } from '../src/util/paths.js'
@@ -88,6 +89,43 @@ describe('probe-cost-gate · 计划展开与预估', () => {
       expect(plan.estimate).toBe(800)
       // 指纹口径：8 位十六进制、绝不含 key 明文
       for (const k of plan.keys) expect(k.fp).toMatch(/^[0-9a-f]{8}$/)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('换 key 销账：buildProbePlan 计划期清掉孤儿 key 的旧 verdict（存活指纹与「-」占位保留）', async () => {
+    const h = fakeHome()
+    try {
+      const cfg = {
+        version: 1,
+        providers: {
+          a: {
+            name: 'A',
+            base_url: 'http://upstream.invalid',
+            protocol: 'anthropic',
+            auth_style: 'bearer',
+            key_ref: 'plain:k1',
+            keys: ['plain:k1'],
+            models: { m1: { source: 'manual' } },
+          },
+        },
+        profiles: {},
+        harness: {},
+      } as unknown as Config
+      const rt = buildRuntime(cfg, 'tok')
+      const at = Date.now()
+      // 旧 key 指纹上的 auth-dead（换 key 前的 401）+ 被动「-」占位
+      applyVerdictEvidence(rt, { provider: 'a', keyFp: keyFingerprint('k1'), model: 'm1', source: 'probe:p1', kind: 'canary', state: 'auth-dead', evidence: { at, status: 401 } })
+      applyVerdictEvidence(rt, { provider: 'a', keyFp: '-', model: 'm1', source: 'passive:p15', kind: 'passive', state: 'auth-dead', evidence: { at, status: 401 } })
+      expect(getProbeVerdict(rt, 'a', keyFingerprint('k1'), 'm1')).toBeDefined()
+      // keys 换成 k9 后重新出计划：k1 指纹结论销账，「-」占位保留，新 key 尚无结论
+      ;(cfg.providers.a as Record<string, unknown>).keys = ['plain:k9']
+      await buildProbePlan(rt, 'a', ['p1'])
+      expect(getProbeVerdict(rt, 'a', keyFingerprint('k1'), 'm1')).toBeUndefined()
+      expect(getProbeVerdict(rt, 'a', '-', 'm1')).toBeDefined()
+      expect(getProbeVerdict(rt, 'a', keyFingerprint('k9'), 'm1')).toBeUndefined()
+      expect(rt.probeVerdicts?.size).toBe(1)
     } finally {
       h.restore()
     }
