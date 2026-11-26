@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { c, sleep, localDateStr, t } from '../util/index.js'
 import { randomToken } from '../util/fsx.js'
-import { logsDir, displayPath } from '../util/paths.js'
+import { logsDir, displayPath, gatewayLockPath } from '../util/paths.js'
 // 直取 state-file 单模块（perf-p2-polish）：CLI 命令启动闭包不拖 gateway/state.js 聚合层
-import { clearGatewayState, readGatewayState, writeGatewayState } from '../gateway/state/state-file.js'
+import { clearGatewayState, pidAlive, readGatewayState, writeGatewayState } from '../gateway/state/state-file.js'
+import { readInstanceLock } from '../gateway/state/instance-lock.js'
 import {
   autostartStatus,
   gatewayDaemonArgs,
@@ -55,6 +56,10 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     return
   }
 
+  // 实例锁（审计 P-06b）：另一进程正在启动、gateway.json 还没落盘时 gatewayProbe 会报 stopped，
+  // 光靠上面的三态判活挡不住并发拉起。锁被存活 pid 持有 → 直接给可操作报错，不拉起注定失败的 daemon。
+  if (reportHeldInstanceLock()) return
+
   const daemonArgv = [...gatewayDaemonArgs(), '--port', String(port)]
   // --debug 透传 daemon（旗标是会话态：自启/托盘拉起的 daemon 不带它，持久开关走 config [gateway] debug）
   if (opts.debug === true) daemonArgv.push('--debug')
@@ -63,6 +68,9 @@ export async function cmdGatewayStart(opts: { port?: string; daemon?: boolean; d
     console.log(c.green(t('✓ 网关已后台启动：http://127.0.0.1:{port}（pid {pid}）', '✓ Gateway started in the background: http://127.0.0.1:{port} (pid {pid})', { port: state.port, pid: state.pid })))
     return
   }
+  // daemon 抢锁失败会立刻退出（见 spawnDaemonAndWait 的早退）：把它没抢到锁这件事翻译成
+  // 用户能动手的报错，而不是笼统的「启动超时 + 去看日志」。
+  if (reportHeldInstanceLock()) return
   console.error(c.red(t('✗ 网关启动超时。可在命令行运行 modeldock gateway start 查看详细错误。', '✗ Gateway start timed out. Run "modeldock gateway start" in a terminal for details.')))
   // daemon 的崩溃/启动报错自写日志（fd 2 接管，CORRECT-07）：超时时把日志路径递给用户，报错不蒸发
   console.error(
@@ -356,6 +364,17 @@ export async function cmdGatewayUninstall(): Promise<void> {
   console.log(c.green(t('✓ 已移除开机自启（{r}）', '✓ Start at login removed ({r})', { r: r.removed })))
   const live = await gatewayLive()
   if (live) console.log(c.gray(t('  当前运行的网关不受影响；modeldock gateway stop 可停止', '  The running gateway is not affected. Stop it with modeldock gateway stop')))
+}
+
+/** 实例锁被存活进程持有 → 打可操作报错（含删锁出路）并置 exitCode 1，返回 true 让调用方停止启动。
+ *  只读锁、不获取：锁的获取点唯一收在 daemon 侧（gateway/main.ts 的 startForeground）。 */
+function reportHeldInstanceLock(): boolean {
+  const holder = readInstanceLock()
+  if (!holder || !pidAlive(holder.pid)) return false
+  console.error(c.red(t('✗ 网关已在运行或正在启动：127.0.0.1:{port}（pid {pid}）', '✗ Gateway already running or starting: 127.0.0.1:{port} (pid {pid})', { port: holder.port, pid: holder.pid })))
+  console.error(c.yellow(t('提示: 同一 ModelDock home 只允许一个网关实例；若确认没有网关在运行（上次异常退出留下的锁），删除 {lock} 后重试', 'Hint: only one gateway instance may run per ModelDock home; if no gateway is running (a lock left by a crash), delete {lock} and retry', { lock: displayPath(gatewayLockPath()) })))
+  process.exitCode = 1
+  return true
 }
 
 export async function cmdGatewayLog(opts: { n?: string; follow?: boolean; harness?: string }): Promise<void> {

@@ -1,8 +1,11 @@
+import fs from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { fetchEnvelopeFromUrl, listenWithRetry, projectModel } from '../src/gateway/shared.js'
 import { gatewayLive, gatewayProbe, writeGatewayState } from '../src/gateway/state/state-file.js'
+import { acquireInstanceLock, readInstanceLock } from '../src/gateway/state/instance-lock.js'
+import { gatewayLockPath, modeldockDir } from '../src/util/paths.js'
 import { fakeHome } from './helpers.js'
 import type { ModelMeta } from '../src/config/types.js'
 
@@ -241,6 +244,86 @@ describe('gatewayProbe 三态判活（审计 P-06a）', () => {
     try {
       const p = await gatewayProbe()
       expect(p).toEqual({ status: 'stopped', state: null })
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('gateway 实例锁（审计 P-06b）', () => {
+  /** 死 pid：不存在的极限值（同 gatewayProbe 用例口径），绝不真起进程 */
+  const DEAD_PID = 99_999_999
+
+  function writeLockRaw(text: string): void {
+    fs.mkdirSync(modeldockDir(), { recursive: true })
+    fs.writeFileSync(gatewayLockPath(), text)
+  }
+
+  it('获取成功 → 再次获取失败并带回持有者 pid/port → 释放后可再次获取', async () => {
+    const h = fakeHome()
+    try {
+      const first = await acquireInstanceLock(18901)
+      expect(first.acquired).toBe(true)
+      expect(fs.existsSync(gatewayLockPath())).toBe(true)
+      expect((await readInstanceLock())?.pid).toBe(process.pid)
+
+      const second = await acquireInstanceLock(18902)
+      expect(second.acquired).toBe(false)
+      if (!second.acquired) {
+        expect(second.holder?.pid).toBe(process.pid)
+        expect(second.holder?.port).toBe(18901)
+      }
+      // 锁内容仍是第一个持有者（第二个没写坏/覆盖）
+      expect((await readInstanceLock())?.port).toBe(18901)
+
+      if (first.acquired) first.release()
+      expect(fs.existsSync(gatewayLockPath())).toBe(false)
+
+      const third = await acquireInstanceLock(18903)
+      expect(third.acquired).toBe(true)
+      if (third.acquired) third.release()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('残留锁（pid 已死）→ 新实例接管，锁内容换成当前 pid', async () => {
+    const h = fakeHome()
+    try {
+      writeLockRaw(JSON.stringify({ pid: DEAD_PID, port: 59998, acquired_at: '2026-01-01T00:00:00.000+08:00' }))
+      const got = await acquireInstanceLock(18904)
+      expect(got.acquired).toBe(true)
+      expect((await readInstanceLock())?.pid).toBe(process.pid)
+      if (got.acquired) got.release()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('损坏/半截锁文件 → 有界等待后接管（不永久卡死）', async () => {
+    const h = fakeHome()
+    try {
+      writeLockRaw('{"pid":') // 创建者写完前崩溃的形态
+      const started = Date.now()
+      const got = await acquireInstanceLock(18905)
+      expect(got.acquired).toBe(true)
+      expect(Date.now() - started).toBeLessThan(5_000)
+      if (got.acquired) got.release()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('释放做归属校验：锁已被他人接管时不删别人的锁', async () => {
+    const h = fakeHome()
+    try {
+      const mine = await acquireInstanceLock(18906)
+      expect(mine.acquired).toBe(true)
+      // 模拟「我的锁被判陈/接管后别人重建」：内容换成另一个 pid
+      writeLockRaw(JSON.stringify({ pid: DEAD_PID, port: 18907, acquired_at: '2026-01-01T00:00:00.000+08:00' }))
+      if (mine.acquired) mine.release()
+      expect(fs.existsSync(gatewayLockPath())).toBe(true)
+      expect((await readInstanceLock())?.pid).toBe(DEAD_PID)
     } finally {
       h.restore()
     }
