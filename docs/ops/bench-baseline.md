@@ -1,6 +1,8 @@
 # 转发热路径基准（bench-baseline）
 
 > ⚠️ **基线仅本机参考，不作 CI 门禁**——不同机器、不同负载下的数字不可直接比较；它只用于**同一台机器**上的 before/after 对比（改 relay 相关代码前跑一次、改后跑一次）。
+>
+> 本文件收两类基准，**都不作门禁**：① 转发热路径（`bench-relay`，本机手工跑，数字贴在下文）；② CLI 冷启动（`bench:cold`，每周 CI schedule 跑，产物存 artifact，见文末「冷启动基准」节）。
 
 ## 复跑命令
 
@@ -55,3 +57,11 @@ node scripts/bench-relay.mjs --quick  # 快跑模式：10/10/8/40 样本，全�
 - **场景 1 vs 场景 2**：两者只差「是否全量 parse + 重序列化」，差值即模型改写路径的 CPU 开销。
 - **场景 3 首字节**：客户端发起请求到首个数据块到达的**端到端**耗时（含鉴权、路由、转发与 mock 上游 ~1ms/块的首块节拍），不是「网关写响应头」起算的网关侧净时延——把 14.8ms 全归因给网关推流滞后是误读；**吞吐**：单请求逐样本观测的字节速率（受 mock 上游块节拍支配，不是转发能力上限）。
 - **场景 4 rps**：网关转发的最小请求处理速率，是其余场景的「开销下限」参照。
+
+## 冷启动基准（bench:cold，每周 CI 信息性产物）
+
+- **脚本**：`scripts/bench-cold-start.mjs`，命令 `npm run bench:cold [-- <entry> <runs>]`；缺省 `entry=dist/cli.js`、`runs=7`（先跑 1 次预热不计入）。
+- **产物**：每次采样耗时、中位数（median）与 `--help` 输出的 sha256 指纹；指纹用于判断前后两次改动是否动过 CLI 表面。
+- **CI 位置**：`.github/workflows/bench.yml`，每周一 03:00 UTC 跑一次（另支持手动 `workflow_dispatch`），结果原文上传为 artifact `bench-cold-start`（保留 90 天）。
+- **不作门禁**：workflow 不对毫秒数做任何阈值断言，脚本只有自身错误（入口缺失、退出码非 0）才让 job 变红。跨 runner / 跨机器的绝对毫秒不可比——趋势只在同一 runner 类别（`ubuntu-latest` + node 24）上读。
+- **判读**：关注同 runner 上的**相对漂移**（例如引入新依赖后 median 明显上台阶），而不是绝对数字。真要做 before/after，仍以同一台机器本地连跑两次为准（下文「怎么读数字」同样适用）。

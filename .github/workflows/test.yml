@@ -43,11 +43,11 @@ jobs:
     timeout-minutes: 20
     # step 级分级（= 非(mac && push && 非main)）：develop push 上 mac 腿只付 checkout + 占位
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: mac 腿占位（develop push 分级跳过，PR / push main / 巡检 / 手动才真跑）
         if: matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref != 'refs/heads/main'
         run: echo 'mac 腿按触发分级跳过（见 job 头注）；占位保 required check 报告'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
         with:
           node-version: ${{ matrix.node }}
@@ -62,6 +62,14 @@ jobs:
       # test/eslint-baseline.test.ts 棘轮（随下方 npm test 三平台都跑）
       - run: npm run lint
         if: runner.os == 'Linux'
+      # 格式检查（E-02）：先以「告警态」接入，不阻断。原因：仓库现存 529 个文件未过
+      # prettier --check（2026-11-26 实测：src 160 / test 305 / scripts 17 / docs 34 /
+      # .github 9），直接硬门禁会让三平台 CI 全红、且与本次改动无关。
+      # 转真门禁的路径：单独一张卡跑 `npm run format` 全仓写入并提交 → 去掉
+      # continue-on-error。此后本步骤即廉价格式门禁（只跑 linux 腿，零额外依赖）。
+      - run: npm run format:check
+        if: runner.os == 'Linux'
+        continue-on-error: true
       - run: npm test
         if: matrix.os != 'macos-latest' || github.event_name != 'push' || github.ref == 'refs/heads/main'
       # 文件权限断言在 NTFS 上做平台分支（见 AGENTS.md），Windows 跑同一套测试验证跨平台行为
@@ -87,6 +95,93 @@ jobs:
           echo "=== /tmp 测试目录残留 ==="
           ls -d /tmp/modeldock-test-* /tmp/orch-test-* 2>/dev/null | head -20 || true
 
+  # node 22 覆盖（E-02）：package.json engines 声明 >=22，而主矩阵只测 node 24（SEA 内置
+  # 运行时）。本 job 补 engines 下限的运行时覆盖，但**只在 PR 与每日 schedule 跑**，不进
+  # develop push 矩阵——日常直推不为此多付一条腿。
+  # 独立 job 而非 matrix 新条目：不改既有 `test (<os>, node24)` 的 check 名与 mac 分级语义
+  # （job 级 if 在 matrix 下拿不到上下文，加条目只能靠 step 级 if，反而更绕）。
+  # 非 required：不在分支保护名单，红灯只作提示，不阻塞合并。
+  test-node22:
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: test (ubuntu-latest, node22)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc -p tsconfig.json --noEmit
+      - run: npm test
+
+  # 依赖安全巡检（E-02）：npm audit 原先只在发布脚本（release-check）里跑。这里挂到
+  # 每日 schedule（与既有巡检同一 cron，无需新增触发器），只做信息性巡检：
+  # registry 不可达 / 超时与「确有漏洞」都降级为 ::warning::，本 job 永不因此变红
+  # （真正的阻断门禁仍是发布前 release-check 的 `npm audit --omit=dev`）。
+  # 非 required。
+  audit:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: audit (npm audit --omit=dev, schedule)
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: npm audit（网络失败降级告警，不阻断）
+        run: |
+          if npm audit --omit=dev; then
+            echo 'npm audit: 生产依赖无已知漏洞'
+          else
+            echo '::warning::npm audit 未通过（registry 不可达或存在漏洞）——仅告警，不阻断；发布前仍以 release-check 为阻断门禁'
+          fi
+
+  # isolate 金丝雀（D-04，**非 required**、仅 schedule）：产品套件刻意 isolate:false +
+  # maxWorkers 1（为结构性消除 worker 生命周期 / 消息路由两个死锁面，见 vitest.config.ts
+  # 头注）。本 job 用 VITEST_ISOLATE=1 打开逐文件隔离，量化「改成 isolate:true 会付多少
+  # 时间、会红哪些文件」——只产证据，不改默认值、不进 PR / develop push、不在 required 名单。
+  # 基线（isolate:false / maxWorkers 1，2026-11-26）：
+  #   · CI（ubuntu, node 24）正常口径约 3 分钟（AGENTS.md「测试指南」L3；test-gate 实测）。
+  #   · 本机 Windows（i5-8250U, node 24）实测 896s / 185 文件 / 2329 用例，4 文件 10 用例红
+  #     （workbuddy adapters、daemon-lifecycle、profile-cli；本机环境已知红：宿主安全策略拦
+  #     reg.exe + 并发 agent 窗口撞 host-guard），只作量级参照，不作口径。
+  # 判读：绿且耗时接近基线 → 才有资格讨论去掉 isolate:false；红例按文件归类记 issue，本 job 不阻断。
+  isolate-canary:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: isolate-canary (schedule, non-required)
+    timeout-minutes: 40
+    env:
+      VITEST_ISOLATE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: '产品全量（isolate: true，计时）'
+        run: |
+          start=$(date +%s)
+          npx vitest run 2>&1 | tee isolate-canary.log
+          rc=${PIPESTATUS[0]}
+          end=$(date +%s)
+          echo "耗时 $((end - start))s（isolate:true / maxWorkers:1）" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: 红例文件清单（失败时）
+        if: failure()
+        run: |
+          {
+            echo '### isolate 金丝雀失败文件（D-04）'
+            echo '```'
+            grep -E '^ FAIL ' isolate-canary.log | sed 's/ >.*//' | sort -u || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # agent 工作流套件（.agents/ 编排器脚本与分支守卫 hook）：与产品测试拆分（npm test 只跑
   # 产品套件，方案 A）。纯 Node + git，无平台差异，只在 ubuntu 跑，与上方三平台矩阵并行。
   # 触发分级（2026-11-03）：job 常驻——test-workflow 是 main/develop 的 required check，
@@ -102,10 +197,10 @@ jobs:
       pull-requests: read # pull_request 事件经 API 列变更文件所需
     steps:
       # fetch-depth: 0：workflow_dispatch / schedule 事件下 paths-filter 需要完整历史算 diff
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -116,7 +211,7 @@ jobs:
       - name: 变更未触达 .agents/**，跳过套件（占位绿）
         if: steps.filter.outputs.agents != 'true'
         run: echo '本次变更不涉及 .agents/** 或 test/orchestrator/**，工作流套件跳过'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.filter.outputs.agents == 'true'
         with:
           node-version: 24

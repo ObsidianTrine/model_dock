@@ -60,7 +60,13 @@ export default defineConfig({
     //   文件生命周期、[WATCHDOG] /proc 扫描、[WORKER-HB] worker 心跳——输出默认
     //   关闭，VITEST_WATCHDOG=1 开启；8 分钟无进展自毁 exit(86) 常开（触发下方
     //   test.yml 的诊断步骤，不再悬死等 job 超时）。
-    isolate: false,
+    // 金丝雀通道（D-04）：默认值不变——`isolate: false` 是为消除「每文件 spawn/销毁
+    // worker」与多 worker 消息路由两个死锁面做的有意取舍（见上方 ①）。只有显式设置
+    // VITEST_ISOLATE=1 才切到逐文件隔离，供 CI schedule 金丝雀（test.yml 的
+    // isolate-canary job，非 required）量化耗时差与红例，不作为日常/门禁口径。
+    // 金丝雀基线（2026-11-26，本机 Windows / node 24 / maxWorkers 1）：isolate:false 全量
+    // 实测见 test.yml 该 job 头注；isolate:true 的耗时以 CI 每轮 step summary 记录为准。
+    isolate: process.env.VITEST_ISOLATE === '1',
     // 产品套件缺省仍串行（maxWorkers:1）：2026-10-01 policy.test.ts worker 生命周期 CI
     // 卡死前科 + 上方顺序耦合对，B3 并行实验明确「产品套件不动」。VITEST_MAX_WORKERS 只是
     // 实验通道（本地复现/排查用），产品套件并行化必须先 CI 复证再定档，不得凭本机绿直接

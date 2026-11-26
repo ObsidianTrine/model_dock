@@ -26,7 +26,7 @@ jobs:
     outputs:
       tested: ${{ steps.tested.outputs.tested }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: CHANGELOG 版本段预检
         run: node scripts/extract-release-notes.mjs --check "$GITHUB_REF_NAME"
       - name: 核验 tag commit 的 test workflow 结论
@@ -76,11 +76,17 @@ jobs:
     name: build (${{ matrix.target }})
     # npm ci + 全量测试 + SEA 打包，最慢的 mac 腿留足余量；防卡死挂满默认 6 小时
     timeout-minutes: 40
+    # 发布物来源证明（D-02）：attest-build-provenance 走 OIDC 换签名令牌（id-token），
+    # 并把 provenance 写进仓库的 attestations（attestations: write）。其余仍只读。
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: npm
@@ -95,7 +101,7 @@ jobs:
         run: echo "ver=$(grep -oE 'node-v[0-9]+\.[0-9]+\.[0-9]+' scripts/build-sea.mjs | head -1)" >> "$GITHUB_OUTPUT"
       - name: Cache cross-compiled Node binaries
         if: matrix.target == 'linux-arm64' || matrix.target == 'darwin-x64'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/node-binaries
           key: node-binaries-${{ steps.nodever.outputs.ver }}-${{ matrix.target }}
@@ -146,9 +152,24 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      # 发布物来源证明（D-02 第一步）：对**已产出**的对外发布物生成 SLSA build provenance
+      # （GitHub artifact attestation）。用户可 `gh attestation verify <文件> --repo
+      # <owner>/<repo>` 校验「该文件由本仓库 release.yml 在此 tag 的 commit 上构建」。
+      # 只做来源证明，**不做**代码签名 / Apple 公证 / Windows Authenticode——证书与公证
+      # 是成本项，留给用户决策。未覆盖：合并后的 SHA256SUMS（由下方 release job 在 ubuntu
+      # 上 cat 生成，不是本腿产物）；裸二进制本就不外发，不在 subject 内。
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tar.gz
+            release/*.dmg
+            release/*-setup.exe
+
       # 只上传对外发布物（压缩包 / DMG / setup / 校验名单）；裸二进制不外发
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: modeldock-${{ matrix.target }}
           path: |
@@ -169,9 +190,9 @@ jobs:
 
     steps:
       # 读 CHANGELOG.md 生成 Release 正文（generate_release_notes 只汇总 PR，直 push 仓库为空）
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
@@ -189,7 +210,7 @@ jobs:
         run: node scripts/extract-release-notes.mjs "$GITHUB_REF_NAME" > release-notes.md
 
       - name: Create release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           body_path: release-notes.md
           generate_release_notes: true
