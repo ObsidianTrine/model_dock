@@ -146,7 +146,7 @@ describe('cmdUpdate CLI 编排', () => {
       })
       await cmdUpdate({ restore: true, yes: true })
       expect(process.exitCode).toBe(1)
-      const errs = errSpy.mock.calls.map((a) => String(a[0])).join('\n')
+      const errs = errSpy.mock.calls.map((a: unknown[]) => String(a[0])).join('\n')
       expect(errs).toContain('restore boom')
       expect(errs).toContain('no backup kept')
     } finally {
@@ -169,7 +169,7 @@ describe('cmdUpdate CLI 编排', () => {
       })
       await cmdUpdate({ yes: true })
       expect(process.exitCode).toBe(1)
-      const errs = errSpy.mock.calls.map((a) => String(a[0])).join('\n')
+      const errs = errSpy.mock.calls.map((a: unknown[]) => String(a[0])).join('\n')
       expect(errs).toContain('install boom')
       expect(errs).toContain('提示')
       expect(errs).toContain('retry later')
@@ -187,7 +187,7 @@ describe('cmdUpdate CLI 编排', () => {
       })
       await cmdUpdate({ yes: true })
       expect(process.exitCode).toBe(1)
-      const errs = errSpy.mock.calls.map((a) => String(a[0])).join('\n')
+      const errs = errSpy.mock.calls.map((a: unknown[]) => String(a[0])).join('\n')
       expect(errs).toContain('plain boom')
       expect(errs).not.toContain('提示')
     } finally {

@@ -443,7 +443,7 @@ describe('supply > 一次性凭据临期预警（harness_expiry_warning）', () 
     let now = T0
     const warns: Array<Record<string, unknown>> = []
     try {
-      const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 30, onExpiryWarning: (x) => warns.push(x as Record<string, unknown>), nowFn: () => now })
+      const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 30, onExpiryWarning: (x: unknown) => warns.push(x as Record<string, unknown>), nowFn: () => now })
       expect(p.active).toBe(true)
       await new Promise((r) => setTimeout(r, 300))
       expect(warns).toHaveLength(0) // 未临期：安静
@@ -547,14 +547,14 @@ describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemera
         ttlMinutes: 240,
         liveHarnessId: () => 'orch-t',
         terminalState: () => false,
-        appendEvent: (type, fields) => appendEvent(qdir, type, fields),
+        appendEvent: (type: string, fields: Record<string, unknown>) => appendEvent(qdir, type, fields),
         log: () => {},
       })
       await renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 })
       expect(gw.requests).toHaveLength(1)
       expect(gw.requests[0].body).toEqual({ harnessId: 'orch-t', ttl_minutes: 240 })
       const evts = readEvents(qdir)
-      expect(evts.map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
+      expect(evts.map((e: { type: string }) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
       expect(evts[0]).toMatchObject({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000 })
       expect(evts[1]).toMatchObject({ harness_id: 'orch-t', expires_at: '2026-11-11T00:00:00.000Z', ttl_minutes: 30 })
     } finally {
@@ -572,12 +572,12 @@ describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemera
         ttlMinutes: 240,
         liveHarnessId: () => 'orch-t',
         terminalState: () => false,
-        appendEvent: (type, fields) => appendEvent(qdir, type, fields),
+        appendEvent: (type: string, fields: Record<string, unknown>) => appendEvent(qdir, type, fields),
         log: () => {},
       })
       await expect(renew({ harness_id: 'orch-t', expires_at: '2026-11-10T00:00:00.000Z', remaining_ms: 60_000, threshold_ms: 120_000, ttl_ms: 600_000 })).resolves.toBeUndefined()
       const evts = readEvents(qdir)
-      expect(evts.map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renew_failed'])
+      expect(evts.map((e: { type: string }) => e.type)).toEqual(['harness_expiry_warning', 'harness_renew_failed'])
       expect(String(evts[1].reason)).toContain('500')
     } finally {
       gw.close()
@@ -605,7 +605,7 @@ describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemera
       // 对照组：同 warn 终态闸打开即正常续命（闸只挡终态，不挡 awaiting-human）
       await createExpiryRenewal({ ...deps, terminalState: () => false, liveHarnessId: () => 'orch-t' })(warn)
       expect(gw.requests).toHaveLength(1)
-      expect(readEvents(qdir).map((e) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
+      expect(readEvents(qdir).map((e: { type: string }) => e.type)).toEqual(['harness_expiry_warning', 'harness_renewed'])
     } finally {
       gw.close()
       fs.rmSync(qdir, { recursive: true, force: true })
@@ -661,7 +661,7 @@ describe('supply > 一次性凭据临期续命（harness_renewed，orch-ephemera
         ttlMinutes: 60,
         liveHarnessId: () => 'worker',
         terminalState: () => false,
-        appendEvent: (type, fields) => events.push({ type, ...fields }),
+        appendEvent: (type: string, fields: Record<string, unknown>) => events.push({ type, ...fields }),
         log: () => {},
       })
       const p = startMeasuredFuelPoller({ budget: b, cfg: { gatewayAdmin: true }, harness: 'worker', intervalMs: 25, onExpiryWarning: renew, nowFn: () => now })

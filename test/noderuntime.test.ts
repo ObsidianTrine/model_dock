@@ -230,7 +230,7 @@ describe('noderuntime 纯函数', () => {
     // 多包同下限去重，不重复点名
     const dup = engineWarningHint(block('commander@15.1.0') + '\n' + block('chalk@6.0.0'))
     expect(dup).toContain('>=22.12.0')
-    expect(dup.split('>=22.12.0').length - 1).toBe(1)
+    expect(dup!.split('>=22.12.0').length - 1).toBe(1)
     // 格式漂移兜底：有 EBADENGINE 无结构化行也提示，不让警告静默消失
     expect(engineWarningHint('npm warn EBADENGINE Unsupported engine')).toContain('EBADENGINE')
     expect(engineWarningHint('added 52 packages in 9s')).toBeNull()

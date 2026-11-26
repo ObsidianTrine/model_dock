@@ -60,7 +60,7 @@ describe('orchestrator drafts-gc > listDrafts', () => {
       fs.mkdirSync(path.join(d.dir, 'superseded'), { recursive: true })
       fs.writeFileSync(path.join(d.dir, 'superseded', 'old.md'), draft('old.md', 'old', ['src/**']))
       const { drafts, unreadable } = listDrafts(d.root)
-      expect(drafts.map((x) => x.file).sort()).toEqual(['a.md'])
+      expect(drafts.map((x: { file: string }) => x.file).sort()).toEqual(['a.md'])
       expect(unreadable).toEqual(['broken.md'])
       expect(drafts[0].meta.id).toBe('feat-a')
     } finally {
@@ -105,9 +105,9 @@ describe('orchestrator drafts-gc > planGc（三清单，纯函数）', () => {
     ]
     const merged = [{ id: 'fix-relay-obs', filesHint: ['src/gateway/relay.ts', 'test/relay.test.ts'], goal: '修复 relay failover 可观测性' }]
     const plan = planGc(drafts, merged, { now: NOW })
-    expect(plan.superseded.map((s) => s.draft.id)).toEqual(['t28'])
+    expect(plan.superseded.map((s: { draft: { id: string } }) => s.draft.id)).toEqual(['t28'])
     expect(plan.superseded[0].mergedId).toBe('fix-relay-obs')
-    expect(plan.titleSimilar.map((s) => s.draft.id)).toEqual(['same']) // 目标相似但 hint 不重叠 → 只提示
+    expect(plan.titleSimilar.map((s: { draft: { id: string } }) => s.draft.id)).toEqual(['same']) // 目标相似但 hint 不重叠 → 只提示
     expect(plan.aged).toEqual([])
   })
 
@@ -117,7 +117,7 @@ describe('orchestrator drafts-gc > planGc（三清单，纯函数）', () => {
       { id: 's', file: 's.md', meta: { id: 's', files_hint: ['src/gateway/relay.ts'] }, body: { goal: '具体提案' }, mtimeMs: NOW, text: '' },
     ]
     const plan = planGc(drafts, [{ id: 'm', filesHint: ['src/gateway/**'], goal: '' }], { now: NOW })
-    expect(plan.superseded.map((s) => s.draft.id)).toEqual(['w', 's'])
+    expect(plan.superseded.map((s: { draft: { id: string } }) => s.draft.id)).toEqual(['w', 's'])
   })
 
   it('老化：超 archiveDays → aged；已入 superseded 清单的不重复入 aged；created_at/mtime 双口径', () => {
@@ -125,7 +125,7 @@ describe('orchestrator drafts-gc > planGc（三清单，纯函数）', () => {
     const oldNoTs = { id: 'old2', file: 'old2.md', meta: { id: 'old2', files_hint: ['src/cli/**'] }, body: { goal: '老提案2' }, mtimeMs: NOW - 40 * 86_400_000, text: '' }
     const fresh = { id: 'new', file: 'new.md', meta: { id: 'new', files_hint: ['src/cli/**'], created_at: '2026-11-01T00:00:00+08:00' }, body: { goal: '新提案' }, mtimeMs: NOW, text: '' }
     const plan = planGc([old, oldNoTs, fresh], [], { now: NOW, archiveDays: 30 })
-    expect(plan.aged.map((a) => a.draft.id)).toEqual(['old', 'old2'])
+    expect(plan.aged.map((a: { draft: { id: string } }) => a.draft.id)).toEqual(['old', 'old2'])
     // archiveDays 自定义（7 天）：11-01 的提案（3 天龄）不老化
     const plan7 = planGc([fresh], [], { now: NOW, archiveDays: 7 })
     expect(plan7.aged).toEqual([])
@@ -155,12 +155,12 @@ describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）',
   it('超龄未提交机器提案进 agedUnsubmitted；与 aged 独占（同一文件不进两个迁移清单）', () => {
     const stale = obj('stale', 20, 'scanner')
     const plan = planGc([stale], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
-    expect(plan.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['stale'])
+    expect(plan.agedUnsubmitted.map((a: { draft: { id: string } }) => a.draft.id)).toEqual(['stale'])
     expect(plan.agedUnsubmitted[0].ageDays).toBe(20)
     // 20 天 < archiveDays 30：aged 本来就空；再验证 >30d 的也只进自动档不进归档档
     const ancient = obj('ancient', 95, 'scanner')
     const plan2 = planGc([ancient], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
-    expect(plan2.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['ancient'])
+    expect(plan2.agedUnsubmitted.map((a: { draft: { id: string } }) => a.draft.id)).toEqual(['ancient'])
     expect(plan2.aged).toEqual([])
   })
 
@@ -169,7 +169,7 @@ describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）',
     const ancientTraced = obj('ancient-traced', 95, 'scanner')
     const plan = planGc([traced, ancientTraced], [], { now: NOW, maxAgeDays: 14, queueTraced: new Set(['traced', 'ancient-traced']) })
     expect(plan.agedUnsubmitted).toEqual([])
-    expect(plan.aged.map((a) => a.draft.id)).toEqual(['ancient-traced']) // 归档档（手动 --apply 才动）兜底
+    expect(plan.aged.map((a: { draft: { id: string } }) => a.draft.id)).toEqual(['ancient-traced']) // 归档档（手动 --apply 才动）兜底
   })
 
   it('collectTracedIds 补 specs/<id>/ 目录痕迹：spec 已拆卡的草稿不进 agedUnsubmitted', () => {
@@ -182,7 +182,7 @@ describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）',
       const live = obj('spec-live', 20, 'scanner')
       const dead = obj('spec-dead', 20, 'scanner')
       const plan = planGc([live, dead], [], { now: NOW, maxAgeDays: 14, queueTraced: collectTracedIds(d.root) })
-      expect(plan.agedUnsubmitted.map((a) => a.draft.id)).toEqual(['spec-dead'])
+      expect(plan.agedUnsubmitted.map((a: { draft: { id: string } }) => a.draft.id)).toEqual(['spec-dead'])
       // 无 specs 目录的根：空痕迹不炸（从未拆过卡）
       const d2 = mkDrafts()
       try {
@@ -221,7 +221,7 @@ describe('orchestrator drafts-gc > planGc 老化自动档（超龄未提交）',
   it('与 superseded 独占：files_hint 有明确合并卡定性的走定性标注，不进超龄档', () => {
     const stale = { ...obj('stale-ov', 20, 'scanner', ['src/gateway/relay.ts']) }
     const plan = planGc([stale], [{ id: 'fix-relay-obs', filesHint: ['src/gateway/relay.ts'], goal: '' }], { now: NOW, maxAgeDays: 14, queueTraced: new Set() })
-    expect(plan.superseded.map((s) => s.draft.id)).toEqual(['stale-ov'])
+    expect(plan.superseded.map((s: { draft: { id: string } }) => s.draft.id)).toEqual(['stale-ov'])
     expect(plan.agedUnsubmitted).toEqual([])
   })
 })
@@ -262,8 +262,8 @@ describe('orchestrator drafts-gc > annotateSuperseded / applyGc（不删只迁�
       const { drafts } = listDrafts(d.root)
       const plan = planGc(drafts, [{ id: 'fix-relay-obs', filesHint: ['src/gateway/relay.ts'], goal: '' }], { now: NOW })
       const r = applyGc(d.root, plan, { now: NOW })
-      expect(r.movedSuperseded.map((m) => m.file)).toEqual(['overlap.md'])
-      expect(r.movedAged.map((m) => m.file)).toEqual(['aged.md'])
+      expect(r.movedSuperseded.map((m: { file: string }) => m.file)).toEqual(['overlap.md'])
+      expect(r.movedAged.map((m: { file: string }) => m.file)).toEqual(['aged.md'])
       expect(r.failed).toEqual([])
       // 原文件消失，目标目录有内容
       expect(fs.existsSync(path.join(d.dir, 'overlap.md'))).toBe(false)
@@ -342,7 +342,7 @@ describe('orchestrator drafts-gc > annotateAgedOut / applyGc 超龄清退', () =
       const { drafts } = listDrafts(d.root)
       const plan = planGc(drafts, [], { now: NOW, maxAgeDays: 14, queueTraced: new Set(['traced']) })
       const r = applyGc(d.root, plan, { now: NOW })
-      expect(r.movedAgedUnsubmitted.map((m) => m.file)).toEqual(['stale.md'])
+      expect(r.movedAgedUnsubmitted.map((m: { file: string }) => m.file)).toEqual(['stale.md'])
       expect(r.movedSuperseded).toEqual([])
       expect(r.movedAged).toEqual([])
       expect(r.failed).toEqual([])

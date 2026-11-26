@@ -22,7 +22,7 @@ const CLI_ENTRY = path.join(REPO_ROOT, 'src', 'cli.ts')
 
 /** 在独立沙箱里同步跑一次真实 CLI，返回 { status, output } */
 function runResetCli(sandbox: string, args: string[]): { status: number; output: string } {
-  const env = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox }
+  const env: NodeJS.ProcessEnv = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox }
   delete env.MODELRDOCK_HOME
   const r = spawnSync(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, 'reset', ...args], {
     cwd: sandbox, // cwd 绝不落在 ~/.modeldock 内：清理要删的就是它（Windows 上被占用会删不掉）

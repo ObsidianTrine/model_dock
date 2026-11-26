@@ -56,7 +56,7 @@ describe('migrateSandboxKeyRefsToLocal', () => {
       expect(cfg.providers.ark.key_ref).toBe('keychain:mdk-hc-missing-a')
       expect(cfg.providers.sec.key_ref).toBe('keychain:mdk-hc-missing-b')
       expect(cfg.update?.token_ref).toBe('keychain:mdk-hc-missing-t')
-      expect(cfg.security.store).toBe('file')
+      expect(cfg.security!.store).toBe('file')
       // 再跑一遍：幂等，结果一致
       expect(await migrateSandboxKeyRefsToLocal()).toEqual([])
     } finally {
@@ -81,7 +81,7 @@ describe('migrateSandboxKeyRefsToLocal', () => {
       const cfg = await loadConfig()
       expect(cfg.providers.bad.key_ref).toBe(5) // 坏值原样保留（守卫兜底），不误改写
       expect(cfg.providers.ark.key_ref).toBe('keychain:mdk-hc-missing-c')
-      expect(cfg.security.store).toBe('file')
+      expect(cfg.security!.store).toBe('file')
     } finally {
       h.restore()
     }

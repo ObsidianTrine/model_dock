@@ -282,7 +282,7 @@ export async function runOrchInproc(
     savedEnv.push([k, process.env[k]])
     process.env[k] = v
   }
-  setFatalExit((code) => {
+  setFatalExit((code: number) => {
     throw new OrchExitError(code)
   })
   try {
@@ -302,7 +302,7 @@ export async function runOrchInproc(
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
     }
-    setFatalExit((code) => process.exit(code)) // 还原缺省出口，防泄漏到后续用例
+    setFatalExit((code: number) => process.exit(code)) // 还原缺省出口，防泄漏到后续用例
   }
 }
 
@@ -364,7 +364,7 @@ export function runDrainWithoutNode(repo: string, args: string[], timeoutMs = 12
       maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, PATH: emptyPath },
     })
-    return { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, errorCode: r.error?.code }
+    return { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}`, errorCode: (r.error as NodeJS.ErrnoException | undefined)?.code }
   } finally {
     fs.rmSync(base, { recursive: true, force: true })
     fs.rmSync(emptyPath, { recursive: true, force: true })

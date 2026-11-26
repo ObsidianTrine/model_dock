@@ -626,7 +626,7 @@ describe('orchestrator transient > HTTP 优先取数（logs/query，文件 fallb
     try {
       const entries = await fetchGatewayWindowEntries({ gatewayAdmin: true }, { ...WIN })
       expect(entries).not.toBeNull()
-      expect(entries!.map((e) => e.status)).toEqual([429, 503]) // 旧 → 新
+      expect(entries!.map((e: { status: number }) => e.status)).toEqual([429, 503]) // 旧 → 新
     } finally {
       delete process.env.ORCH_GATEWAY_BASE
       delete process.env.ORCH_GATEWAY_ADMIN_TOKEN

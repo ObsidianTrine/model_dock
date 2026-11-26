@@ -100,7 +100,7 @@ describe('killByPid 平台分支（注入 fake spawnSync，桩验命令拼装，
   })
   it('unix：走 process.kill(pid, SIGTERM)，不调 taskkill', () => {
     const plat = vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {})
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true)
     const fakeSpawnSync = vi.fn()
     try {
       killByPid(7, fakeSpawnSync)

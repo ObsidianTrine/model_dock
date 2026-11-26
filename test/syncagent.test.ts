@@ -155,7 +155,7 @@ describe('云端入网与多机收敛（M3b）', () => {
       // 控制台对 B 下发 desired=deepseek → B tick（心跳）应用：active_profile 指向 deepseek 的路由
       await desire(cloud, stB!.devid, 'deepseek')
       // 切换经 switchToService 会自动创建 auto-deepseek 路由（可同步态）→ 本 tick 顺带把新路由库推上去（rev2）
-      const applied = await syncTickOnce({ applySwitch: (svc) => switchToService(svc) })
+      const applied = await syncTickOnce({ applySwitch: async (svc) => { await switchToService(svc) } })
       expect(applied).toBe('pushed')
       const cfgB = await loadConfig()
       expect(cfgB.profiles![cfgB.active_profile!]?.provider).toBe('deepseek')
@@ -163,7 +163,7 @@ describe('云端入网与多机收敛（M3b）', () => {
       const stB2 = (await readSyncState()) as SyncState
       expect(stB2.lastLocalSwitchTs).toBeTruthy()
       // 切换后的新状态由下个心跳上报（详设 §7.4-4：本 tick 上报的是切换前的当前服务）
-      await syncTickOnce({ applySwitch: (svc) => switchToService(svc) })
+      await syncTickOnce({ applySwitch: async (svc) => { await switchToService(svc) } })
       const list1 = await devicesList(cloud)
       const bRow = list1.find((d) => d.devid === stB!.devid)
       expect(bRow.reportedProfile).toBe('deepseek')
@@ -171,13 +171,13 @@ describe('云端入网与多机收敛（M3b）', () => {
       // 保护：本机 lastLocalSwitchTs 推到未来 → 旧 desired_ts 不覆盖
       await desire(cloud, stB!.devid, 'ark')
       await updateSyncState({ lastLocalSwitchTs: new Date(Date.now() + 60_000).toISOString() })
-      await syncTickOnce({ applySwitch: (svc) => switchToService(svc) })
+      await syncTickOnce({ applySwitch: async (svc) => { await switchToService(svc) } })
       const cfgB2 = await loadConfig()
       expect(cfgB2.profiles![cfgB2.active_profile!]?.provider).toBe('deepseek')
 
       // 恢复正常时钟后，新 desired（ts 更新）生效 → 切回 ark
       await updateSyncState({ lastLocalSwitchTs: null })
-      await syncTickOnce({ applySwitch: (svc) => switchToService(svc) })
+      await syncTickOnce({ applySwitch: async (svc) => { await switchToService(svc) } })
       const cfgB3 = await loadConfig()
       expect(cfgB3.profiles![cfgB3.active_profile!]?.provider).toBe('ark')
     } finally {

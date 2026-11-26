@@ -66,7 +66,7 @@ describe('buildProgram 注册面', () => {
     const mode = attach.options.find((o) => o.long === '--mode')
     expect(mode).toBeTruthy()
     expect(mode!.argChoices).toEqual(['gateway', 'file'])
-    expect(() => mode!.parseArg('bogus')).toThrow() // 非法值在解析期拦截，不透传给 adapter
+    expect(() => mode!.parseArg!('bogus', undefined)).toThrow() // 非法值在解析期拦截，不透传给 adapter
     expect(longOpts(attach).sort()).toEqual(
       ['--client-profile', '--mode', '--port', '--profile', '--set-default', '--takeover-models', '--yes'].sort()
     )

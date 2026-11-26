@@ -36,7 +36,7 @@ function rmRfRetry(p: string): void {
 
 interface Fixture {
   root: string
-  git(args: string, opts?: { cwd?: string }): string
+  git(args: string[] | string, opts?: { cwd?: string }): string
   cleanup(): void
 }
 
@@ -102,10 +102,10 @@ maybeGit('host-guard > 快照形状', () => {
     try {
       const snap = snapshotRepo(repo.root)
       // 分支行带 tip（名字 + 40 位对象名）：并发 merge 推进主干 tip 也在对账面内
-      expect(snap.branches.some((l) => /^develop [0-9a-f]{40}$/.test(l))).toBe(true)
-      expect(snap.branches.some((l) => /^feature\/probe [0-9a-f]{40}$/.test(l))).toBe(true)
+      expect(snap.branches.some((l: string) => /^develop [0-9a-f]{40}$/.test(l))).toBe(true)
+      expect(snap.branches.some((l: string) => /^feature\/probe [0-9a-f]{40}$/.test(l))).toBe(true)
       // worktree 注册行归一为 / 分隔（win 反斜杠已转）：目录基名必在列
-      expect(snap.worktrees.some((l) => l.includes('wts/probe'))).toBe(true)
+      expect(snap.worktrees.some((l: string) => l.includes('wts/probe'))).toBe(true)
       expect(snap.queue).toEqual(['blocked/card-a.md', 'running/.keep'])
       // 快照幂等：同仓连拍两次零差异
       expect(diffSnapshots(snap, snapshotRepo(repo.root))).toEqual([])
@@ -128,8 +128,8 @@ maybeGit('host-guard > 对账差异', () => {
         path.join(mergedDir, 'card-a.md'),
       )
       const diffs = diffSnapshots(before, snapshotRepo(repo.root))
-      expect(diffs.some((d) => d.includes('队列卡') && d.includes('blocked/card-a.md'))).toBe(true)
-      expect(diffs.some((d) => d.includes('队列卡') && d.includes('merged/card-a.md'))).toBe(true)
+      expect(diffs.some((d: string) => d.includes('队列卡') && d.includes('blocked/card-a.md'))).toBe(true)
+      expect(diffs.some((d: string) => d.includes('队列卡') && d.includes('merged/card-a.md'))).toBe(true)
     } finally {
       repo.cleanup()
     }
@@ -143,7 +143,7 @@ maybeGit('host-guard > 对账差异', () => {
       repo.git(['worktree', 'remove', '--force', path.join(repo.root, 'wts', 'probe')])
       repo.git('branch -D feature/probe')
       const diffs = diffSnapshots(before, snapshotRepo(repo.root))
-      expect(diffs.some((d) => d.includes('分支引用') && d.includes('feature/probe'))).toBe(true)
+      expect(diffs.some((d: string) => d.includes('分支引用') && d.includes('feature/probe'))).toBe(true)
     } finally {
       repo.cleanup()
     }

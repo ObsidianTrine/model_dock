@@ -26,7 +26,7 @@ describe('fetchHolidayData 公告未发布路径（行为回归，DESIGN-09 修�
         server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port))
       })
       process.env.MODELRDOCK_HOLIDAY_SOURCES = `http://127.0.0.1:${port}/{year}`
-      const { failures, notPublished } = await fetchHolidayData([2027], { data: {} })
+      const { failures, notPublished } = await fetchHolidayData([2027], { fetchedAt: '', data: {} })
       expect(notPublished).toEqual([2027])
       expect(failures).toEqual([])
     } finally {
@@ -49,7 +49,7 @@ describe('fetchHolidayData 公告未发布路径（行为回归，DESIGN-09 修�
         server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port))
       })
       process.env.MODELRDOCK_HOLIDAY_SOURCES = `http://127.0.0.1:${port}/{year}`
-      const { failures, notPublished } = await fetchHolidayData([2026], { data: {} })
+      const { failures, notPublished } = await fetchHolidayData([2026], { fetchedAt: '', data: {} })
       expect(notPublished).toEqual([])
       expect(failures[0]).toMatch(/^2026: HTTP 500/)
     } finally {

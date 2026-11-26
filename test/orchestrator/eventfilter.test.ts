@@ -120,9 +120,9 @@ describe('orchestrator eventfilter > programFilter 纯函数（三桶）', () =>
       recent: [{ id: 'scan-todo-old', state: 'failed', signalHashes: [sha8('scan-todo-old')], issueNumber: null, finishedAt: now - DAY }],
       now,
     })
-    expect(r.relayed.map((x) => x.signal.id)).toEqual([relaySig.id])
-    expect(r.dropped.map((x) => x.signal.id)).toEqual([dropSig.id])
-    expect(r.keep.map((s) => s.id)).toEqual([keepTodo.id, keepIssue.id])
+    expect(r.relayed.map((x: { signal: { id: string } }) => x.signal.id)).toEqual([relaySig.id])
+    expect(r.dropped.map((x: { signal: { id: string } }) => x.signal.id)).toEqual([dropSig.id])
+    expect(r.keep.map((s: { id: string }) => s.id)).toEqual([keepTodo.id, keepIssue.id])
     const empty = programFilter([keepTodo], {})
     expect(empty.keep).toHaveLength(1)
   })
@@ -137,14 +137,14 @@ describe('orchestrator eventfilter > collectFilterContext + appendRelaySection',
     fs.writeFileSync(path.join(root, 'merged', 'scan-todo-m.md'), cardText({ id: 'scan-todo-m', signal_hashes: ['cafebabe'] }))
     fs.writeFileSync(path.join(root, 'failed', 'broken.md'), '---\n不是frontmatter\n')
     const ctx = collectFilterContext(root)
-    expect(ctx.inFlight.map((c) => c.id).sort()).toEqual(['scan-issue-9-abc', 'scan-todo-x'])
-    const issue = ctx.inFlight.find((c) => c.id === 'scan-issue-9-abc')
+    expect(ctx.inFlight.map((c: { id: string }) => c.id).sort()).toEqual(['scan-issue-9-abc', 'scan-todo-x'])
+    const issue = ctx.inFlight.find((c: { id: string; issueNumber?: number | null }) => c.id === 'scan-issue-9-abc')
     expect(issue).toMatchObject({ signalHashes: ['deadbeef'], issueNumber: 9, state: 'pending' })
-    expect(ctx.inFlight.find((c) => c.id === 'scan-todo-x')?.issueNumber).toBeNull()
-    expect(ctx.recent.map((c) => c.id).sort()).toEqual(['broken', 'scan-todo-m'])
-    expect(ctx.recent.find((c) => c.id === 'scan-todo-m')?.signalHashes).toEqual(['cafebabe'])
-    expect(ctx.recent.find((c) => c.id === 'scan-todo-m')?.finishedAt).toBeGreaterThan(0)
-    expect(ctx.recent.find((c) => c.id === 'broken')?.signalHashes).toEqual([])
+    expect(ctx.inFlight.find((c: { id: string; issueNumber?: number | null }) => c.id === 'scan-todo-x')?.issueNumber).toBeNull()
+    expect(ctx.recent.map((c: { id: string }) => c.id).sort()).toEqual(['broken', 'scan-todo-m'])
+    expect(ctx.recent.find((c: { id: string; signalHashes?: string[]; finishedAt?: number }) => c.id === 'scan-todo-m')?.signalHashes).toEqual(['cafebabe'])
+    expect(ctx.recent.find((c: { id: string; signalHashes?: string[]; finishedAt?: number }) => c.id === 'scan-todo-m')?.finishedAt).toBeGreaterThan(0)
+    expect(ctx.recent.find((c: { id: string; signalHashes?: string[]; finishedAt?: number }) => c.id === 'broken')?.signalHashes).toEqual([])
   })
 
   it('appendRelaySection：小节头带来源与时间戳，内容消毒（无指令结构字符），幂等防重', () => {
@@ -189,7 +189,7 @@ describe('orchestrator eventfilter > semanticFilter（假 spawnFn，同步契约
     })
     expect(r.used_llm).toBe(true)
     expect(r.fallback).toBeNull()
-    expect(r.cards.map((s) => s.id)).toEqual(['sig-a', 'sig-d'])
+    expect(r.cards.map((s: { id: string }) => s.id)).toEqual(['sig-a', 'sig-d'])
     expect(r.drops).toEqual([{ signal: keep[1], reason: '明显噪音' }])
     expect(r.merges).toEqual([{ signal: keep[2], target: 'sig-a', reason: '同根因' }])
   })
@@ -206,7 +206,7 @@ describe('orchestrator eventfilter > semanticFilter（假 spawnFn，同步契约
         ]),
     })
     expect(r.merges).toHaveLength(0)
-    expect(r.cards.map((s) => s.id)).toEqual(['sig-a', 'sig-c', 'sig-d'])
+    expect(r.cards.map((s: { id: string }) => s.id)).toEqual(['sig-a', 'sig-c', 'sig-d'])
   })
 
   it('fenced block 与前后带解释文字可解析', () => {
@@ -224,7 +224,7 @@ describe('orchestrator eventfilter > semanticFilter（假 spawnFn，同步契约
     const keep = [todoSignal('sig-a'), todoSignal('sig-b')]
     const bad = semanticFilter(keep, { spawnFn: () => '这不是 JSON 数组' })
     expect(bad.fallback).toContain('无法解析')
-    expect(bad.cards.map((s) => s.id)).toEqual(['sig-a', 'sig-b'])
+    expect(bad.cards.map((s: { id: string }) => s.id)).toEqual(['sig-a', 'sig-b'])
     expect(bad.used_llm).toBe(false)
 
     const boom = semanticFilter(keep, {
@@ -255,7 +255,7 @@ describe('orchestrator eventfilter > semanticFilter（假 spawnFn，同步契约
     expect(promptedIds).toHaveLength(SEMANTIC_MAX_SIGNALS) // 只送前 50 条
     expect(r.overflow).toBe(10)
     expect(r.drops).toHaveLength(SEMANTIC_MAX_SIGNALS)
-    expect(r.cards.map((s) => s.id)).toEqual(Array.from({ length: 10 }, (_, i) => `sig-${SEMANTIC_MAX_SIGNALS + i}`))
+    expect(r.cards.map((s: { id: string }) => s.id)).toEqual(Array.from({ length: 10 }, (_, i) => `sig-${SEMANTIC_MAX_SIGNALS + i}`))
   })
 
   it('buildSemanticPrompt：候选行格式 id | 来源 | 摘要（消毒、≤200 字符）与产出契约', () => {
@@ -328,7 +328,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
       const third = await runScan(repo.root, { issues: true, ghRun: () => ({ status: 0, stdout: GH(7, '网关转发偶发 502（更新）'), stderr: '' }) })
       expect(third.created).toHaveLength(0)
       expect(third.relayed).toHaveLength(0)
-      expect(third.dropped.map((d) => d.reason)).toEqual(['already_relayed'])
+      expect(third.dropped.map((d: { reason: string }) => d.reason)).toEqual(['already_relayed'])
       expect(fs.readFileSync(path.join(root, 'pending', `${cardId}.md`), 'utf8').split('## 补充信号')).toHaveLength(2)
       const dropEvents = eventsOf(repo.root, 'scan').filter((e) => e.type === 'signal_dropped')
       expect(dropEvents).toHaveLength(1)
@@ -393,7 +393,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
       fs.writeFileSync(path.join(src, 'c.ts'), '// TODO: 纯噪音琐碎条目\nexport {}\n')
       const todos = scanTodo(repo.root)
       expect(todos).toHaveLength(3)
-      const byText = (frag: string) => todos.find((t) => t.background.includes(frag))!.id
+      const byText = (frag: string) => todos.find((t: { background: string; id: string }) => t.background.includes(frag))!.id
       const mainId = byText('主问题')
       const mergeId = byText('同根因')
       const noiseId = byText('纯噪音')
@@ -409,7 +409,7 @@ describe('orchestrator scan > 两级过滤集成（临时仓库 + 假 gh/spawnFn
         },
       })
       expect(r.created).toEqual([mainId])
-      expect(r.dropped.map((d) => d.signal.id)).toEqual([noiseId])
+      expect(r.dropped.map((d: { signal: { id: string } }) => d.signal.id)).toEqual([noiseId])
       expect(r.filter).toMatchObject({ raw: 3, keep: 1, relayed: 0, dropped: 1, merged_away: 1 })
       // merge：被合并信号以「补充信号」追加进保留卡（不真删信号）
       const cardText3 = fs.readFileSync(path.join(repo.root, '.agents', 'orchestrator', 'drafts', `${mainId}.md`), 'utf8')

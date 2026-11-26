@@ -48,7 +48,7 @@ const SEED_TOML = [
 ].join('\n')
 
 function runProfileCli(sandbox: string, args: string[]): { status: number; output: string } {
-  const env = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox, MODELRDOCK_LANG: 'zh' }
+  const env: NodeJS.ProcessEnv = { ...process.env, MODELRDOCK_FAKE_HOME: sandbox, MODELRDOCK_LANG: 'zh' }
   delete env.MODELRDOCK_HOME
   const r = spawnSync(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, ...args], {
     cwd: sandbox, // cwd 绝不落在 ~/.modeldock 内（Windows 上被占用会删不掉沙箱）

@@ -106,7 +106,7 @@ describe('hardening > 调度器互斥锁（run-lock）', () => {
         // （那是正确的崩溃恢复语义，不是双开），断言就不成立了
         'if (r.held) await new Promise((s) => setTimeout(s, 2000))',
       ].join('\n')
-      const env = { ...process.env, RUN_LOCK_JS: runLockJs, ORCH_TEST_REPO: repo.root }
+      const env: NodeJS.ProcessEnv = { ...process.env, RUN_LOCK_JS: runLockJs, ORCH_TEST_REPO: repo.root }
       delete env[SCHED_LOCK_ENV] // 子进程不豁免，真抢
       const N = 4
       const outs = await Promise.all(

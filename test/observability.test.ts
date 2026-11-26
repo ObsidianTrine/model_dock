@@ -23,6 +23,7 @@ import { appendCrashLog, installCrashHandlers } from '../src/util/crash.js'
 import { appendLineErrorCount, drainAppendStreams } from '../src/util/fsx.js'
 import { acquireProviderSlot } from '../src/gateway/concurrency.js'
 import { logsDir } from '../src/util/paths.js'
+import { emptyConfig } from '../src/config/types.js'
 import { localIsoTs } from '../src/util/time.js'
 import { createGatewayServer } from '../src/gateway/server.js'
 import { recordModelFallback, recordModelOutcome } from '../src/gateway/state/routing.js'
@@ -99,7 +100,7 @@ describe('后台事件上报（logEvent / reportEvent / setEventRingSink）', ()
   it('logEvent：错误 ring 可见（EventEntry 形状）+ events.jsonl 落盘', async () => {
     const h = fakeHome()
     try {
-      const rt = buildRuntime({ providers: {}, profiles: {}, harness: {} }, 'tok')
+      const rt = buildRuntime(emptyConfig(), 'tok')
       logEvent(rt, { level: 'warn', op: 'secrets_migrate', err: '磁盘故障' })
       const e = rt.ring.at(-1) as EventEntry
       expect(e.kind).toBe('event')
@@ -120,7 +121,7 @@ describe('后台事件上报（logEvent / reportEvent / setEventRingSink）', ()
   it('reportEvent：无 rt 只落文件；eventRingSink 注册后同步进 ring；传 null 撤销', async () => {
     const h = fakeHome()
     try {
-      const rt = buildRuntime({ providers: {}, profiles: {}, harness: {} }, 'tok')
+      const rt = buildRuntime(emptyConfig(), 'tok')
       const seen: EventEntry[] = []
       setEventRingSink((entry) => seen.push(entry))
       reportEvent({ level: 'error', op: 'switch_to_service', err: '目标不存在' })
@@ -661,8 +662,8 @@ describe('上游限流信号留痕（LogEntry.ratelimit：带限流头才记，�
       const res = await post(t.port)
       expect(res.status).toBe(429)
       const last = await poll(() => t.rt.ring.at(-1) as LogEntry | undefined, (e) => e?.status === 429)
-      expect(last.ratelimit).toEqual({ remaining: 3, reset: 1762156800000, retry_after_ms: 0 })
-      expect(last.cause).toBe('upstream_4xx')
+      expect(last!.ratelimit).toEqual({ remaining: 3, reset: 1762156800000, retry_after_ms: 0 })
+      expect(last!.cause).toBe('upstream_4xx')
     } finally {
       await t.close()
     }

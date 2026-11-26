@@ -91,7 +91,7 @@ describe('cmdUninstall 拆分语义（默认保留配置 / --purge 彻底清除�
       expect(sweepGatewayProcesses).toHaveBeenCalledTimes(1)
       expect(uninstallAutostart).toHaveBeenCalledTimes(1)
       expect(removeCliLink).toHaveBeenCalledTimes(1)
-      const out = logSpy.mock.calls.map((a) => String(a[0])).join('\n')
+      const out = logSpy.mock.calls.map((a: unknown[]) => String(a[0])).join('\n')
       expect(out).toContain('uninstall --purge')
     } finally {
       h.restore()

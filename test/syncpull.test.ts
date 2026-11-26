@@ -75,7 +75,7 @@ async function seedShareMachine(): Promise<void> {
 }
 
 /** A 机：8687 管理面（offer 端点）+ LAN 监听器（直拉端点），共享同一 rt */
-async function startMachineA(): Promise<{ rt: GatewayRuntime; gwPort: number; lanPort: number }> {
+async function startMachineA(): Promise<{ rt: GatewayRuntime; gwPort: number; lanPort: number; home: string }> {
   useHome()
   await seedShareMachine()
   const rt = buildRuntime(await loadConfig(), ADMIN_A)
@@ -417,7 +417,7 @@ describe('sync-nearby 附近电脑确认式直拉', () => {
 
     // B 搜寻附近电脑，找到 A（127.0.0.1 单播应答；本机其他实例可能一并出现，按端口定位）
     const disc = await (await fetch(`http://127.0.0.1:${b.gwPort}/_modeldock/sync/discover`, { method: 'POST', headers: bAdmin })).json()
-    const peer = (disc.peers as Array<{ ip: string; port: number; name: string }>).find((p) => p.port === a.lanPort)
+    const peer = (disc.peers as Array<{ ip: string; ips: string[]; port: number; name: string }>).find((p) => p.port === a.lanPort)
     expect(peer).toBeTruthy()
 
     // B 点选 A → 敲门（后台任务）→ 立即拿到 requestId
@@ -437,8 +437,10 @@ describe('sync-nearby 附近电脑确认式直拉', () => {
       overview = (await ovRes.json()) as { syncRequest: { nonce: string; from: string } | null }
       return !!(overview && overview.syncRequest)
     }, 5000, 200)
-    expect(overview && overview.syncRequest).toBeTruthy()
-    expect(overview!.syncRequest!.from).toBe(osHostname())
+    // waitFor 在闭包里赋值，控制流分析看不到 → 显式收口成同一形状
+    const ov = overview as unknown as { syncRequest: { nonce: string; from: string } | null } | null
+    expect(ov && ov.syncRequest).toBeTruthy()
+    expect(ov!.syncRequest!.from).toBe(osHostname())
 
     // A 允许 → B 轮询 remote-status 直到 granted（信封已自动拉回、验签、出票据）
     // createSyncOffer→collectSyncdoc 走进程级全局路径：approve 期间临时切回 A home（生产单机单进程无此问题）。
@@ -449,7 +451,7 @@ describe('sync-nearby 附近电脑确认式直拉', () => {
       const approve = await fetch(`http://127.0.0.1:${a.gwPort}/_modeldock/sync/offer-approve`, {
         method: 'POST',
         headers: { 'x-modeldock-admin': ADMIN_A, 'content-type': 'application/json' },
-        body: JSON.stringify({ nonce: overview.syncRequest!.nonce, approve: true }),
+        body: JSON.stringify({ nonce: ov!.syncRequest!.nonce, approve: true }),
       })
       expect(approve.status).toBe(200)
     } finally {

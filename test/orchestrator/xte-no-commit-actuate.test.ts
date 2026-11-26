@@ -53,18 +53,18 @@ describe('xte no_commit 双档 > 纯逻辑 4 象限', () => {
     try {
       const qd = path.join(wt, 'logs', 't1')
       const logs: string[] = []
-      const alarm = createXteAlarm(qd, wt, { mode: 'observe', log: (m) => logs.push(m) })
+      const alarm = createXteAlarm(qd, wt, { mode: 'observe', log: (m: string) => logs.push(m) })
       expect(runSession(alarm, wt)).toBeNull() // 第 1 会话零提交：streak 1 不报
       const hit = runSession(alarm, wt) // 第 2 会话零提交：streak 2 报警
       expect(hit?.rule).toBe('no_commit')
       expect(hit?.actuate).toBe(false)
       expect(logs.join('\n')).toContain('只留痕不动作')
-      const alarms = readEvents(qd).filter((e) => e.type === 'xte_alarm')
+      const alarms = readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')
       expect(alarms).toHaveLength(1)
       expect(alarms[0]).toMatchObject({ rule: 'no_commit' })
       expect(String(alarms[0].detail)).toContain('零新提交')
       expect(runSession(alarm, wt)).toBeNull() // 已报过：不重报
-      expect(readEvents(qd).filter((e) => e.type === 'xte_alarm')).toHaveLength(1)
+      expect(readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')).toHaveLength(1)
     } finally {
       rmRetry(wt)
     }
@@ -75,14 +75,14 @@ describe('xte no_commit 双档 > 纯逻辑 4 象限', () => {
     try {
       const qd = path.join(wt, 'logs', 't1')
       const logs: string[] = []
-      const alarm = createXteAlarm(qd, wt, { mode: 'actuate', log: (m) => logs.push(m) })
+      const alarm = createXteAlarm(qd, wt, { mode: 'actuate', log: (m: string) => logs.push(m) })
       expect(runSession(alarm, wt)).toBeNull() // streak 1：不动作（actuate 也要连续 2 次）
       const hit = runSession(alarm, wt) // streak 2：actuate 升级
       expect(hit?.rule).toBe('no_commit')
       expect(hit?.actuate).toBe(true)
       expect(logs.join('\n')).toContain('actuate')
       expect(logs.join('\n')).not.toContain('只留痕不动作') // actuate 档不得再说「不动作」
-      expect(readEvents(qd).filter((e) => e.type === 'xte_alarm')).toHaveLength(1)
+      expect(readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')).toHaveLength(1)
     } finally {
       rmRetry(wt)
     }
@@ -96,7 +96,7 @@ describe('xte no_commit 双档 > 纯逻辑 4 象限', () => {
       expect(runSession(alarm, wt)).toBeNull() // 零提交：streak 1
       expect(runSession(alarm, wt, true)).toBeNull() // 有提交：streak 清零
       expect(runSession(alarm, wt)).toBeNull() // 零提交：streak 1（不连续，不报）
-      expect(readEvents(qd).filter((e) => e.type === 'xte_alarm')).toHaveLength(0)
+      expect(readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')).toHaveLength(0)
     } finally {
       rmRetry(wt)
     }
@@ -110,7 +110,7 @@ describe('xte no_commit 双档 > 纯逻辑 4 象限', () => {
       expect(runSession(alarm, wt)).toBeNull()
       expect(runSession(alarm, wt, true)).toBeNull()
       expect(runSession(alarm, wt)).toBeNull()
-      expect(readEvents(qd).filter((e) => e.type === 'xte_alarm')).toHaveLength(0)
+      expect(readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')).toHaveLength(0)
     } finally {
       rmRetry(wt)
     }
@@ -124,13 +124,13 @@ describe('xte no_commit 双档 > 纯逻辑 4 象限', () => {
       appendEvent(qd, 'gate_result', { gate: 'npm_test', result: 'fail' })
       appendEvent(qd, 'gate_result', { gate: 'npm_test', result: 'fail' })
       alarm.testLoop() // 命中 test_loop：只留痕
-      const evs = readEvents(qd).filter((e) => e.type === 'xte_alarm')
+      const evs = readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')
       expect(evs).toHaveLength(1)
       expect(evs[0]).toMatchObject({ rule: 'test_loop' })
       // resume 跨进程：新实例从事件播种 fired，同规则不重报（actuate 档同口径）
       const alarm2 = createXteAlarm(qd, wt, { mode: 'actuate', log: () => {} })
       alarm2.testLoop()
-      expect(readEvents(qd).filter((e) => e.type === 'xte_alarm')).toHaveLength(1)
+      expect(readEvents(qd).filter((e: { type: string }) => e.type === 'xte_alarm')).toHaveLength(1)
     } finally {
       rmRetry(wt)
     }

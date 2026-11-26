@@ -23,6 +23,15 @@ import { isTransientWorkerFailure } from '../../.agents/scripts/orchestrator/tra
 
 const DSH_BACKEND_SRC = fileURLToPath(new URL('../../.agents/scripts/orchestrator/backends/dsh-headless.mjs', import.meta.url))
 
+// 后端 spawn 回调事件：只钉测试断言的字段（形状由后端实现决定，其余字段不入断言）
+interface SpawnEvent {
+  type: string
+  backend: string
+  role: string
+  tokens_in: number
+  tokens_billable: number
+}
+
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'))
 
 describe('buildDshArgs > headless 形态', () => {
@@ -141,7 +150,7 @@ describe('outputFromEvents > NDCL final 事件解析', () => {
 })
 
 describe('resolveReviewBackendName > dsh 异构次选（不破坏既有优先序）', () => {
-  const probeOf = (map) => (name) => map[name] ?? false
+  const probeOf = (map: Record<string, boolean>) => (name: string) => map[name] ?? false
   it('worker=dsh-headless：claude 可用 → claude；全不可用 → dsh 回落', () => {
     expect(staticRef({ worker: 'dsh-headless', probe: probeOf({ 'claude-headless': true }) })).toEqual({ name: 'claude-headless', mode: 'heterogeneous' })
     expect(staticRef({ worker: 'dsh-headless', probe: probeOf({ 'claude-headless': false, 'zcode-headless': true }) })).toEqual({ name: 'zcode-headless', mode: 'heterogeneous' })
@@ -178,13 +187,13 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
     fs.writeFileSync(promptFile, promptText)
     const saved = process.env.ORCH_DSH_CLI
     process.env.ORCH_DSH_CLI = stub
-    const events = []
+    const events: SpawnEvent[] = []
     try {
       const r = await dshHeadlessBackend.spawn({
         promptFile,
         cwd: dir,
         maxTurns: 10, // 接受但忽略（dsh 无轮次旗标）
-        onEvent: (e) => events.push(e),
+        onEvent: (e: SpawnEvent) => events.push(e),
         envPatch: { ORCH_STUB_ARGS: path.join(dir, 'args.json') },
       })
       expect(r.exitCode).toBe(0)
@@ -194,7 +203,7 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
       expect(snap.length).toBe(2)
       expect(snap[1].tokens_in).toBe(6100)
       expect(snap[1].tokens_billable).toBe(6140)
-      const spawned = events.find((e) => e.type === 'worker_spawned')
+      const spawned = events.find((e) => e.type === 'worker_spawned')!
       expect(spawned.backend).toBe('dsh-headless')
       expect(spawned.role).toBe('worker')
       // 桩收到的实参与环境：headless 形态 + permission mode + stdin 全量回验
@@ -203,7 +212,7 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
       expect(seen.args).toContain('headless')
       expect(seen.args).toContain('--json')
       expect(seen.args).toContain('--patch')
-      expect(seen.args.filter((a) => a === '-').length).toBe(1)
+      expect(seen.args.filter((a: string) => a === '-').length).toBe(1)
       expect(seen.mode).toBe('workspace-write')
       expect(seen.stdinLen).toBe(promptText.length)
       // overlay 落在桩 cwd 之外的临时目录（orch-dsh- 前缀），任务结束已清理
@@ -224,11 +233,11 @@ describe('spawn e2e（ORCH_DSH_CLI 桩）', () => {
     fs.writeFileSync(promptFile, 'x')
     const saved = process.env.ORCH_DSH_CLI
     process.env.ORCH_DSH_CLI = stub
-    const events = []
+    const events: SpawnEvent[] = []
     try {
-      const r = await dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: (e) => events.push(e), readonly: true, envPatch: { ORCH_STUB_ARGS: path.join(dir, 'mode.json') } })
+      const r = await dshHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: (e: SpawnEvent) => events.push(e), readonly: true, envPatch: { ORCH_STUB_ARGS: path.join(dir, 'mode.json') } })
       expect(r.output).toBe('read-only')
-      expect(events.find((e) => e.type === 'worker_spawned').role).toBe('reviewer')
+      expect(events.find((e) => e.type === 'worker_spawned')!.role).toBe('reviewer')
     } finally {
       if (saved === undefined) delete process.env.ORCH_DSH_CLI
       else process.env.ORCH_DSH_CLI = saved

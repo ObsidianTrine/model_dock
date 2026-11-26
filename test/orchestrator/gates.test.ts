@@ -173,16 +173,18 @@ describe('orchestrator gates > lint / typecheck（未配置跳过、失败可调
         await gateTypecheck(repo.root, 'node -e "process.stderr.write(\'ts-error\'); process.exit(2)"')
         expect.unreachable('应当抛出 GateError')
       } catch (e) {
-        expect(e).toBeInstanceOf(GateError)
-        expect(e.gate).toBe('typecheck')
-        expect(e.output).toContain('ts-error')
+        const err = e as InstanceType<typeof GateError>
+        expect(err).toBeInstanceOf(GateError)
+        expect(err.gate).toBe('typecheck')
+        expect(err.output).toContain('ts-error')
       }
       try {
         await gateLint(repo.root, 'node -e "process.exit(1)"')
         expect.unreachable('应当抛出 GateError')
       } catch (e) {
-        expect(e).toBeInstanceOf(GateError)
-        expect(e.gate).toBe('lint')
+        const err = e as InstanceType<typeof GateError>
+        expect(err).toBeInstanceOf(GateError)
+        expect(err.gate).toBe('lint')
       }
     } finally {
       repo.cleanup()

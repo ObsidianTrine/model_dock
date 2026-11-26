@@ -104,7 +104,7 @@ describe('killByPid 失败分支', () => {
     const plat = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     const fakeSpawnSync = vi.fn(() => ({ status: 1 }))
     try {
-      expect(killByPid(42, fakeSpawnSync)).toBe(false)
+      expect(killByPid(42, fakeSpawnSync as unknown as Parameters<typeof killByPid>[1])).toBe(false)
     } finally {
       plat.mockRestore()
     }
@@ -236,10 +236,11 @@ describe('buildStderrReplacementStream：按原 stderr 流形态分流（绝不�
       // 缺任一方法 console.error 自身同步抛（Node 24 实证）——鸭子流必须补齐最小监听面
       const c = new Console({ stdout: process.stdout, stderr: stream as unknown as NodeJS.WritableStream })
       expect(() => c.error('duck-console-line')).not.toThrow()
-      expect(stream.listenerCount('error')).toBe(0)
+      expect((stream as unknown as NodeJS.WritableStream).listenerCount('error')).toBe(0)
       expect(() => {
-        stream.once('error', () => {})
-        stream.removeListener('error', () => {})
+        const nodeStream = stream as unknown as NodeJS.WritableStream
+        nodeStream.once('error', () => {})
+        nodeStream.removeListener('error', () => {})
       }).not.toThrow()
       // fs.writeSync 直写无缓冲：落盘可同步断言
       stream.write('duck-direct-line')
