@@ -74,7 +74,7 @@ function resolveCatalogProvider(
   return { ok: true, providerId: (picked.ok ? picked.ordered[0].target : target).profile.provider }
 }
 
-export function extractToken(req: http.IncomingMessage): string | null {
+function extractToken(req: http.IncomingMessage): string | null {
   const auth = req.headers.authorization
   if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) return auth.slice(7).trim()
   const xk = req.headers['x-api-key']
@@ -339,4 +339,3 @@ export async function handleRequest(
   // 当日花费累计（水密舱熔断丝的用量侧）：成功与流中断都算已消耗；无 limits 配置时静默跳过
   recordTokenUsage(rt, target.harness, usage)
 }
-

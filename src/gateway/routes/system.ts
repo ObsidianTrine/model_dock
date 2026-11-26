@@ -322,7 +322,7 @@ export async function hReset(c: AdminCtx): Promise<void> {
  *  结果按 secrets.json mtime 缓存 60s——mtime 未变且 60s 内直接复用，mtime 变化立即重验。 */
 let secretsHealthCache: { at: number; mtimeMs: number; ok: boolean } | null = null
 
-export async function secretsOkCached(): Promise<boolean> {
+async function secretsOkCached(): Promise<boolean> {
   const now = Date.now()
   let mtimeMs = 0
   try {

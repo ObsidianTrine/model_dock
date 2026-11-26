@@ -10,7 +10,7 @@ import { pickerSyncStates } from '../picker-state.js'
 
 /** generic-env 四键 env 组的唯一拼装点（C14 抽取）：harness/env 与 harness/provision 共用，
  *  不复制粘贴。ANTHROPIC 面 = 根路径，OPENAI 面 = /v1（OpenAI 兼容路径），与既有下发口径一致。 */
-export function gatewayEnvGroup(
+function gatewayEnvGroup(
   port: number,
   token: string
 ): { base_url: string; vars: { ANTHROPIC_BASE_URL: string; ANTHROPIC_AUTH_TOKEN: string; OPENAI_BASE_URL: string; OPENAI_API_KEY: string } } {
@@ -383,7 +383,7 @@ export async function hHarnessUsage(c: AdminCtx): Promise<void> {
 }
 
 // attach 请求体里的 client_profiles：["desktop"] 或 "desktop,web"（后者兼容表单直传）；非法输入一律忽略为全部
-export const parseClientProfiles = (v: unknown): string[] | undefined => {
+const parseClientProfiles = (v: unknown): string[] | undefined => {
   const list = Array.isArray(v)
     ? v.map((x) => String(x).trim()).filter(Boolean)
     : typeof v === 'string'

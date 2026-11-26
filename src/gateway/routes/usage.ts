@@ -35,7 +35,7 @@ export async function hLogs(c: AdminCtx): Promise<void> {
  *  各自接受 YYYY-MM-DD 或 ISO 时间戳（日期形态按本地日界取起止）；跨天封顶 31 个日文件。
  *  非法返回 err 文案（双语）。 */
 const USAGE_MAX_DAYS = 31
-export function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs?: number; err?: string } {
+function usageQuery(q: URLSearchParams): { days: string[]; fromMs?: number; toMs?: number; err?: string } {
   const dateRe = /^\d{4}-\d{2}-\d{2}$/
   const from = q.get('from')
   const to = q.get('to')

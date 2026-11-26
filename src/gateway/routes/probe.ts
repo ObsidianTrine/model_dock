@@ -26,7 +26,7 @@ export async function hModelAvailability(c: AdminCtx): Promise<void> {
 /** 探针运行确认 token：绑定 (adminToken, provider, probes, 目标数, 预估) 的短摘要。预估展示与确认
  *  执行之间 key 池/配置变化会改变目标数与预估——旧 token 即失效（不能拿旧预估执行新计划）；
  *  键入 adminToken 防外部伪造 (plan → token) 映射；比较走 safeEqual 恒时。 */
-export function probeConfirmToken(rt: GatewayRuntime, providerId: string, probeIds: string[], planned: number, estimate: number): string {
+function probeConfirmToken(rt: GatewayRuntime, providerId: string, probeIds: string[], planned: number, estimate: number): string {
   return sha256(`${rt.adminToken}|probe-run|${providerId}|${probeIds.join(',')}|${planned}|${estimate}`).slice(0, 32)
 }
 
