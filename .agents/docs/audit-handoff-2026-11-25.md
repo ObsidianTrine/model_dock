@@ -112,6 +112,7 @@
 - **S-03** agent 两次因额度 429 未启动/中断；第二次其实已把半成品（host 桥 + gen-ui-ts + usage 迁移本体）留在 worktree 脏区。主控续完：修正三处与实际机制不符的注释（bundle 是独立 script + 全局别名 + 宿主桥，不是共用闭包）、补 `gen:ui-ts` script 与 `test/ui-ts-bundle-fresh.test.ts`、写 ui-kit §16 与 AGENTS.md 行。
 - **P-06b 实例锁**：`gateway.lock`（O_EXCL + 死 pid 接管 + Windows EBUSY 有界重试），并发启动用例修前红/修后绿。
 - **D-01 / D-07 按选项落决策**（记录于状态表）；D-06 清理；D-02~05 由 CI agent 完成（39 处 uses 钉 SHA、attestation、audit/canary/bench 三个非 required 任务）。
+- **教训补记（2026-11-26 晚）**：errno 类断言只断语义、不断具体码——锁父级为文件的错误码在 Windows 本机（ENOENT）与 CI runner（ENOTDIR）不一致，2ac0114 的按平台钉码断言把 Windows CI 弄红，e97846e 改为 win32 收两种码。**本机验证无法替代 CI 的环境差异面，平台相关断言一律按语义写。**
 - **遗留两条**：① E-02 的 `format:check` 是告警态——全仓 529 文件未过 prettier，硬门禁转正需单独一轮 `npm run format`（大 diff，等用户点头）；② S-04 可选大文件拆分未开工。
 
 **并行分组**（按文件归属切分，减少 rebase 冲突）：
