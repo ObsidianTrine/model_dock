@@ -81,6 +81,11 @@ import { applyEphemeralToken, findUnrevokedHarnessId, provisionTaskHarness, revo
 import { shellSpawnOptions } from './orchestrator/spawn-shell.mjs';
 import { runDrill } from './orchestrator/drill.mjs';
 import { parseDurationMinutes, canSailSubmit, hardZoneReason, snapshotQueue, snapshotDrafts, diffQueueStates, buildSailReport, buildSailSummary, sailIdleSleepMin, collectUpstreamRechecks, SAIL_STOP_FILE } from './orchestrator/sail.mjs';
+import { doApprove, doReject, doRetry } from './orchestrator/gate.mjs';
+import { autoResumePass, orphanHealPass } from './orchestrator/orphan-heal.mjs';
+import { cmdAutoApprove, maybeSpawnAutoApproveSweep } from './orchestrator/autoapprove.mjs';
+import { weatherHoldCount, announceWeatherHold } from './orchestrator/weather-hold.mjs';
+export { resetWeatherSnapshotCache } from './orchestrator/weather-hold.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_VERSION = 'phase1';
@@ -92,7 +97,7 @@ const SCRIPT_VERSION = 'phase1';
 // 不走此变量（子进程语义保持原样）。注意：orchestrator/ 子模块（mock.mjs 等 backends）
 // 仍直读 process.env——直调语境由测试 harness 真写 process.env + finally 还原来对齐，
 // 本文件不为其做线程化。
-let orchEnv = process.env;
+export let orchEnv = process.env;
 
 // 可注入的致命退出出口：直跑 CLI 恒为 process.exit；进程内直调由测试 setFatalExit
 // 注入 throw（die 唯一真实 process.exit 调用点，main().catch 兜底同链路覆盖）。
@@ -146,12 +151,12 @@ export function findRepoRoot(rootDir = process.cwd()) {
   }
 }
 
-function die(msg, code = 1) {
+export function die(msg, code = 1) {
   console.error(`[orchestrator] ${msg}`);
   fatalExit(code);
 }
 
-const log = (msg) => console.log(msg);
+export const log = (msg) => console.log(msg);
 
 /** 卡目标首行（任务通报/花名册的「为什么」原料）：查不到卡或解析失败返回空串。 */
 function cardGoalLine(repoRoot, taskId) {
@@ -168,7 +173,7 @@ function cardGoalLine(repoRoot, taskId) {
  * 卡 id 形如 `<spec>-t<n>`——去 /-t\d+$/ 后缀得 specId，且 specs/<specId>/ 在场才认（普通卡
  * id 恰好带 `-t<数字>` 尾巴的不误挂）；无 spec 上下文返回 null（queueDigestItem 对 null 不透传）。
  */
-function specIdOfTask(repoRoot, taskId) {
+export function specIdOfTask(repoRoot, taskId) {
   const id = String(taskId ?? '').replace(/-t\d+$/, '');
   if (!id || id === taskId) return null;
   return fs.existsSync(specDir(repoRoot, id)) ? id : null;
@@ -189,7 +194,7 @@ function specIdOfTask(repoRoot, taskId) {
  * 内部直接短路，零开销零行为变化。
  * 尽力而为——webhook 未配置时零开销，通道失败静默，绝不影响编排本身。
  */
-async function settleNotify(repoRoot, taskId, state, reason) {
+export async function settleNotify(repoRoot, taskId, state, reason) {
   try {
     const cfg = loadWorkflowConfig(repoRoot);
     const attention = state === 'awaiting-human' || state === 'blocked';
@@ -276,7 +281,7 @@ function reviewIterations(events) {
 // worktree 准备（复用 feature-branch.mjs，不另起分支体系）
 // ---------------------------------------------------------------------------
 
-function worktreePath(repoRoot, taskId) {
+export function worktreePath(repoRoot, taskId) {
   return path.join(repoRoot, '.agents', 'worktrees', taskId);
 }
 
@@ -357,7 +362,7 @@ export function pilotageReason(meta, cfg) {
   return null;
 }
 
-async function cmdRun(repoRoot, taskId, opts) {
+export async function cmdRun(repoRoot, taskId, opts) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   const cfg = runConfig(repoRoot); // repoRoot 锚定：临时仓库（集成测试）用它们自己的 workflow.json
@@ -1725,7 +1730,7 @@ function renderSeaState(sea) {
  * 重复落位不堆文件）；只读现场还原，绝不改动队列状态、worktree 与题库。生成失败只
  * 告警——调查包是附赠观测，不能影响落位流程本身。
  */
-function archiveIncident(repoRoot, taskId, root, qdir, reason) {
+export function archiveIncident(repoRoot, taskId, root, qdir, reason) {
   try {
     const events = readEvents(qdir);
     const found = findCard(root, taskId);
@@ -1921,529 +1926,6 @@ async function humanGateInteractive(repoRoot, taskId, root, qdir, summary, runOp
 }
 
 // ---------------------------------------------------------------------------
-// 闸门操作（交互与非交互共用）
-// ---------------------------------------------------------------------------
-
-/**
- * 零提交防假合并门的对账原语：feature 分支相对 base 的提交数。查分支 ref 而非复用
- * worktreeCommitsAhead（worktree HEAD）：worktree 可能已被上次失败的 finish 清掉而卡
- * 仍留 awaiting-human（清理失败退出 1 的重试场景），分支 ref 才是 finish 实际要合并的
- * 对象。null = 不可判定（分支缺失 / git 故障）——不拦截，交给 finish 自己报错：门只拦
- * 「有明确证据的零提交」，不为排查失败扩大拦截面。
- */
-function featureBranchCommitsAhead(repoRoot, taskId, baseBranch) {
-  try {
-    const out = execFileSync('git', ['rev-list', '--count', `${baseBranch}..refs/heads/feature/${taskId}`], { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    const n = Number.parseInt(out.trim(), 10);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 卡面 scratch_only 声明（doApprove 零提交豁免判据）。闸门时刻卡必在 awaiting-human/
- * （CLI approve / 交互闸门 / run 自动合并 / sweep 四条路径都先落位再进 doApprove）。
- * 读取失败按 false——豁免是优惠面，卡损坏回严管走原拒绝防线（与 parseCard 的
- * scratch_only 非法值回 false 同一取舍）。
- */
-function cardScratchOnly(root, taskId) {
-  try {
-    return parseCard(fs.readFileSync(cardPath(root, 'awaiting-human', taskId), 'utf8'), taskId).meta.scratch_only === true;
-  } catch {
-    return false;
-  }
-}
-
-// 任务锁守卫文案（DM-01，2026-11-25 健康审计）：闸门动作的锁被他人持有时点名持有者。
-function gateLockBusy(taskId, info, action) {
-  return `任务 "${taskId}" 的 ${action} 被拒：另一进程正在驱动这同一个泊位（pid ${info.pid}${info.cmd ? `，${info.cmd}` : ''}${info.acquired_at ? `，始于 ${info.acquired_at}` : ''}）。\n`
-    + `  人工批示与自动批示共用任务锁——approve / retry 进行期间（finish 合并通常数分钟）不接受并发批示；交互式闸门（run 在终端等人拍板）在场时请回到该会话内操作。\n`
-    + `  等对方结束；持锁进程心跳停止 ${TASK_LOCK_STALE_MS / 1000}s 后陈锁自动接管（无需手动清理或终止进程）。`;
-}
-
-/**
- * 闸门动作入口的任务锁守卫（reject 用；approve / retry 走 acquireTaskLock 的重入豁免）：
- * 锁活且持有者不是本进程 → die 并点名持有者。本进程持锁 = 交互式闸门（cmdRun 仍持锁时
- * 人在本会话里选了驳回），不是并发，放行。心跳静默的陈锁不拦人（与 cmdAbandon 同口径）。
- */
-function guardGateActionLock(repoRoot, taskId, action) {
-  const liveLock = readTaskLock(repoRoot, taskId);
-  if (liveLock && Number.isInteger(liveLock.pid) && liveLock.pid !== process.pid && taskLockLooksLive(liveLock)) {
-    die(gateLockBusy(taskId, liveLock, action));
-  }
-}
-
-/**
- * doApprove：闸门放行的锁壳（DM-01）。合并动作全程持任务锁——此前 doApprove 整段不持锁，
- * 自动批示 sweep 判定超时进入 finish 的数分钟里，人工 reject / approve / retry 照常执行：
- * reject 把卡迁 failed/ 而 finish 不知情照常合并；人工 approve 与自动返工撞车后两个进程
- * 同写一个 worktree，随后 finish 还会把它删掉。run 闭环内（自动合并 / 交互闸门）调用时
- * 本进程已持锁，acquireTaskLock 同 pid 重入豁免（深度计数配对，锁文件由最外层释放）。
- * 返回 true = 已落 merged/；false = finish 返回时卡已离开闸门，未记 merged（调用方决定
- * 是否按失败退出——sweep 继续处理余卡，CLI 非零退出）。
- */
-async function doApprove(repoRoot, taskId, root, qdir, source = 'human') {
-  const lock = acquireTaskLock(repoRoot, taskId, 'approve');
-  if (!lock.held) {
-    if (lock.unremovable) {
-      die(`任务 "${taskId}" 的任务锁无法接管（陈锁删除失败，可能被其他进程占用）。\n手动删除 ${taskLockPath(repoRoot, taskId)} 后重试。`);
-    }
-    die(gateLockBusy(taskId, lock.owner, 'approve'));
-  }
-  try {
-    return await doApproveLocked(repoRoot, taskId, root, qdir, source);
-  } finally {
-    releaseTaskLock(repoRoot, taskId);
-  }
-}
-
-/** doApprove 的锁内主体（持锁语义见 doApprove 锁壳）。 */
-async function doApproveLocked(repoRoot, taskId, root, qdir, source = 'human') {
-  // source='human' 记人工闸门；'auto' 记自动合并（裁决依据已由 auto_merge 事件先行记录），
-  // merged 事件带 auto 标记——Phase 3 质量漂移统计按此回溯自动合并的回溯失败率。
-  if (source === 'auto') appendEvent(qdir, 'auto_merge_decision', { decision: 'merge' });
-  else appendEvent(qdir, 'human_gate', { decision: 'approved' });
-  // 零提交防假合并门（2026-11-16 夜航四张 perf 卡假 merged 实证）：spawn finish 前先对账
-  // 分支产出。零提交分支上 finish 走「nothing to merge」成功路径 exit 0，旧逻辑随后无条件
-  // 记 merged 并把当时的 develop HEAD 误记成 merge_commit。拒绝时卡转 failed/（终态：
-  // 落 reviewing/ 会被自动批示再次拉回闸门反复重跑审查，failed/ 与人工驳回 doReject 同款
-  // 落位）；事件留拒绝理由、不记 merge_commit、不动 develop，worktree 保留供人工核对
-  // worker 到底留了什么（多半是漏提交）。
-  const baseBranch = loadWorkflowConfig(repoRoot).baseBranch || 'develop';
-  const commitsAhead = featureBranchCommitsAhead(repoRoot, taskId, baseBranch);
-  // scratch_only 结算豁免（2026-11-23 bench codex 腿实证）：卡面声明产物只落 worktree 非跟踪区
-  // （scratch-only-card：门禁 skipped + XTE no_commit 豁免），零提交是卡面声明的合规形态，
-  // 防假合并门不适用；finish 对零提交显式失败（37bfdfc），也不 spawn——不合并、develop 不动、
-  // 不记 merge_commit，直接落位 merged/。worktree 保留（答卷归档由调度台收尾做），对账锚
-  // scratch_only_settle 事件标记（reconcile settledNotMerged 按此豁免）。人工与 auto 两路径
-  // 同享；非 scratch_only 卡零提交照旧拒绝，防线零放宽。
-  const scratchOnlySettle = commitsAhead === 0 && cardScratchOnly(root, taskId);
-  if (commitsAhead === 0 && !scratchOnlySettle) {
-    moveCard(root, taskId, 'awaiting-human', 'failed');
-    appendEvent(qdir, 'failed', { reason: `分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门拒绝记 merged）`, commits_ahead: commitsAhead });
-    die(
-      `任务 ${taskId} 拒绝合并：feature 分支相对 ${baseBranch} 零提交，无可验收产出（防假合并门，2026-11-16 假 merged 事故防线）。\n` +
-      `任务已转 failed/，未记 merge_commit、develop 未动；worktree 保留在 ${worktreePath(repoRoot, taskId)} 供人工查看。\n` +
-      `若工作确已完成，多为 worker 漏提交——进 worktree 核对补提交后按新卡重跑闭环。`,
-    );
-  }
-  if (scratchOnlySettle) {
-    moveCard(root, taskId, 'awaiting-human', 'merged');
-    appendEvent(qdir, 'merged', { scratch_only_settle: true, ...(source === 'auto' ? { auto: true } : {}) });
-    log(`已结算 merged/（scratch_only 零提交，不合并）：worktree 保留在 ${worktreePath(repoRoot, taskId)}，答卷归档由调度台收尾处理。`);
-    // 不 resetConfigBaseline（没有合并发生，configGuard 基线不该被无来源重置）、不做 draftsGc
-    // 清退（scratch 卡未实现任何 repo 改动面，files_hint 常为 ["**"]，清退会误杀全部提案）。
-    await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
-    return true;
-  }
-  // finish：rebase → testCmd → --no-ff 合并 → 清理分支与 worktree。
-  // 门禁快捷路径：npm_test 门禁通过时记录了 worktree HEAD（gate_result.head），
-  // approve 给 finish 带 --skip-test + ORCHESTRATOR_GATE_HEAD——finish 内部校验
-  // 「develop 未前进 且 HEAD 与 gate 一致」成立才跳过锁内重跑，否则自动回落全量
-  // （merge-verify-once：全量测试只跑一次，且不因跳过降低门禁强度）。
-  const gateHead = (() => {
-    const evts = readEvents(qdir);
-    for (let i = evts.length - 1; i >= 0; i--) {
-      const e = evts[i];
-      if (e.type === 'gate_result' && e.gate === 'npm_test' && e.result === 'pass' && typeof e.head === 'string' && e.head) return e.head;
-    }
-    return null;
-  })();
-  const finishArgs = ['finish', taskId];
-  const finishEnv = { ...process.env };
-  if (gateHead) {
-    finishArgs.push('--skip-test');
-    finishEnv.ORCHESTRATOR_GATE_HEAD = gateHead;
-  }
-  // 撞锁有界重试：finish 对 .finish.lock 自带有界等待（FINISH_LOCK_WAIT_SECONDS），
-  // 这里兜底等待超时/显式 cap=0 的情形——并发 drain 合并把「立即失败→任务卡滞留
-  // awaiting-human 等人工重跑」收敛为自动排队。参数可环境收缩（测试用）：
-  // ORCH_FINISH_RETRY_ATTEMPTS（额外重试次数，默认 2）、ORCH_FINISH_RETRY_DELAY_MS（默认 60000）。
-  const extraAttempts = Number.parseInt(orchEnv.ORCH_FINISH_RETRY_ATTEMPTS ?? '', 10); // env-snap
-  const retryDelayRaw = Number.parseInt(orchEnv.ORCH_FINISH_RETRY_DELAY_MS ?? '', 10); // env-snap
-  const maxAttempts = (Number.isInteger(extraAttempts) && extraAttempts >= 0 ? extraAttempts : 2) + 1;
-  const retryDelayMs = Number.isInteger(retryDelayRaw) && retryDelayRaw >= 0 ? retryDelayRaw : 60_000;
-  const fbScript = path.join(repoRoot, '.agents', 'scripts', 'feature-branch.mjs');
-  // 外层超时按 testCmd 数量动态放宽（P0 修复，2026-11）：finish 内每条验证命令上限
-  // 20min（runCmd），数组多条时旧外层 30min 固定值先到——整树被杀、任务误判失败。
-  // 预算 = N×20min + rebase/merge 余量 15min，下限保留旧 30min。
-  const testCmdCount = loadWorkflowConfig(repoRoot).testCmd?.length ?? 0;
-  const finishTimeoutMs = Math.max(30 * 60_000, testCmdCount * 20 * 60_000 + 15 * 60_000);
-  let r = null;
-  let lockConflict = false;
-  for (let attempt = 1; ; attempt++) {
-    // runArgvTreeSafe：detached（unix 进程组）+ 超时 killTree——spawnSync timeout 只杀
-    // 直接子进程，finish 挂死时其内部 testCmd 进程树全部孤儿化（Windows 锁 worktree
-    // 句柄致 EBUSY）。finish 挂死（含内部 testCmd）不能陪跑到底：超时按失败走（任务留 awaiting-human 可重试）
-    r = await runArgvTreeSafe(['node', fbScript, ...finishArgs], {
-      cwd: repoRoot,
-      env: finishEnv,
-      timeoutMs: finishTimeoutMs,
-    });
-    // 透传 finish 输出（保持现场可见性）；撞锁凭 stderr 文案识别
-    if (r.stdout) process.stdout.write(r.stdout);
-    if (r.stderr) process.stderr.write(r.stderr);
-    lockConflict = r.status !== 0 && /another finish is (already running|still running after waiting)/.test(r.stderr ?? '');
-    if (r.status === 0 || !lockConflict || attempt >= maxAttempts) break;
-    log(`finish 撞合并锁（第 ${attempt}/${maxAttempts} 次尝试），${Math.round(retryDelayMs / 1000)}s 后重试……`);
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-  }
-  if (r.status !== 0) {
-    if (lockConflict) appendEvent(qdir, 'merge_lock_wait', { attempts: maxAttempts });
-    die(`feature-branch finish 失败（exit ${r.status ?? '?'}${r.timedOut ? '，超时已按进程树收割' : ''}）。任务留在 awaiting-human/，处理后重新 approve。`, r.status ?? 1);
-  }
-  // 落位前复查卡位（DM-01）：finish 返回时卡必须仍在 awaiting-human/。锁已挡住并发批示，
-  // 这里兜不认锁的外部改动（手工挪卡、陈锁被接管后的并发动作）——旧实现直接 moveCard，
-  // 卡不在闸门即抛 QueueError 炸穿本轮 sweep，余卡全部跳过。分支此时可能已被 finish 合并：
-  // 不记 merged（不把来路不明的合并记成闸门放行）、不动卡位，交人工核对。
-  const after = findCard(root, taskId);
-  if (after?.state !== 'awaiting-human') {
-    log(`⚠ approve 中止收尾：finish 已返回，但任务卡已不在 awaiting-human/（当前：${after ? `${after.state}/` : '不在队列'}）——未记 merged。`);
-    log(`  分支可能已被 finish 合并进基准分支：核对 git log 与卡位后人工处置（node .agents/scripts/orchestrator.mjs logs ${taskId}）。`);
-    return false;
-  }
-  moveCard(root, taskId, 'awaiting-human', 'merged');
-  const mergeCommit = execFileSync('git', ['log', '-1', '--format=%H'], { cwd: repoRoot, encoding: 'utf8' }).trim();
-  appendEvent(qdir, 'merged', { merge_commit: mergeCommit, ...(source === 'auto' ? { auto: true } : {}) });
-  log(`已合并：${mergeCommit.slice(0, 7)}（任务转 merged/${source === 'auto' ? '，自动合并' : ''}）`);
-  // 配置守卫（B7）：编排器自己 finish 合并带来的 workflow.json 变更（合并卡改了授权配置、
-  // 已过门禁与人审）= 合法变更——merge 动作完成后重置基线，下次派发校验按新基线放行。
-  resetConfigBaseline(repoRoot);
-  // 提案清退（B9，闭环内动作）：与刚合并卡 files_hint 重叠的 drafts/ 提案自动迁入
-  // drafts/superseded/ 并标注合并卡 id——现场已被真实实现覆盖，提案留着会误导 planner
-  // 与人工。仅标题相似的不迁（防误杀）。尽力而为，任何失败不影响合并结果。
-  if (loadWorkflowConfig(repoRoot).draftsGc?.autoSupersede !== false) {
-    let mergedMeta = null;
-    try {
-      mergedMeta = parseCard(fs.readFileSync(cardPath(root, 'merged', taskId), 'utf8'), taskId).meta;
-    } catch { /* 损坏卡：清退跳过，提案留原地 */ }
-    if (mergedMeta) {
-      const moved = supersedeForMerged(repoRoot, { mergedId: taskId, filesHint: mergedMeta.files_hint });
-      if (moved.length) {
-        log(`🧹 提案清退：${moved.join(', ')} → drafts/superseded/（改动面与 ${taskId} 重叠）。`);
-        try { appendFleetEvent(repoRoot, 'drafts_superseded', { task: taskId, drafts: moved }); } catch { /* 留痕失败不阻断 */ }
-      }
-    }
-  }
-  // 成功出港同样通知（此前 merged 静默——失败人人皆知、成功无声，体验反了）
-  await settleNotify(repoRoot, taskId, 'merged', source === 'auto' ? '审查通过，自动出港' : '人工放行出港');
-  return true;
-}
-
-async function doReject(repoRoot, taskId, root, qdir, reason) {
-  // 动作前查任务锁（DM-01，与 cmdAbandon 同款守卫）：approve / retry / run 进行期间不接受驳回
-  guardGateActionLock(repoRoot, taskId, 'reject');
-  appendEvent(qdir, 'human_gate', { decision: 'rejected', reason });
-  moveCard(root, taskId, 'awaiting-human', 'failed');
-  appendEvent(qdir, 'failed', { reason: reason || '人工驳回' });
-  // 人工驳回同样进调查包（VDR）：船东与验船师的分歧是最有价值的教训来源，回看与出题都要现场
-  archiveIncident(repoRoot, taskId, root, qdir, reason || '人工驳回');
-  log(`已驳回：任务转 failed/（worktree 保留供人工查看现场：${worktreePath(repoRoot, taskId)}）`);
-}
-
-async function doRetry(repoRoot, taskId, root, qdir, note, opts) {
-  // 打回重试同样持任务锁（DM-01）：卡迁 running/ 到 cmdRun 抢锁之间、以及 sweep 自动返工
-  // 与人工 approve 撞车时，不许第二个批示动作落在同一泊位。cmdRun 内 acquireTaskLock 对
-  // 本进程重入豁免（深度 +1），其 finally 减一层、这里的最外层 finally 才删锁文件。
-  const lock = acquireTaskLock(repoRoot, taskId, 'retry');
-  if (!lock.held) {
-    if (lock.unremovable) {
-      die(`任务 "${taskId}" 的任务锁无法接管（陈锁删除失败，可能被其他进程占用）。\n手动删除 ${taskLockPath(repoRoot, taskId)} 后重试。`);
-    }
-    die(gateLockBusy(taskId, lock.owner, 'retry'));
-  }
-  try {
-    if (findCard(root, taskId)?.state !== 'awaiting-human') {
-      die(`任务 "${taskId}" 已不在 awaiting-human/，无法打回重试（动作前已被其他批示处理）。`);
-    }
-    appendEvent(qdir, 'human_gate', { decision: 'retry', note });
-    // 补充指令写回任务卡背景段，worker 续做时可见
-    const cardP = cardPath(root, 'awaiting-human', taskId);
-    const text = fs.readFileSync(cardP, 'utf8');
-    fs.writeFileSync(cardP, `${text.trimEnd()}\n\n# 补充指令（人工打回）\n${note}\n`);
-    moveCard(root, taskId, 'awaiting-human', 'running');
-    log('已打回 running/，重新启动闭环……');
-    await cmdRun(repoRoot, taskId, { ...opts, interactive: false });
-  } finally {
-    releaseTaskLock(repoRoot, taskId);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 分层审核超时委托（D6.5，autoapprove sweep，2026-11-10）
-// ---------------------------------------------------------------------------
-//
-// L2/L3 卡落 awaiting-human 后人工有拍板窗口（autoApprove.timeoutMinutes，缺省 3 分钟）；
-// 超时未批示的卡由本 sweep 按最后一条 review_verdict 的推荐自动执行：
-//   blockers===0 / verdict==='skipped'（fastlane）→ 自动合并（doApprove source='auto'）
-//   blockers>0 → 自动返工（doRetry），每卡限 autoApprove.maxAutoRetry 次，超限留人
-//   无 review_verdict / 最后是 review_engine_failed / blockers 不可解析 → fail-closed 不动作
-// 红线（不可关闭）：① feature 提案的 intake 自动提交拒绝逻辑零改动；② drift 降级期间
-// sweep 整体跳过（恢复只能人工 drift --clear）；③ blockers>0 的卡永不自动合并，只返工；
-// ④ 没有审查结论的卡超时也绝不合并；⑤ scope_outside（范围失控）落位的卡超时也绝不
-// 自动批示——范围失控不该静默合并（与合并闸门同一条不变量），留人工拍板。
-// spec 环节 opt-in（2026-11-11 巡航修复：86cb8b3 曾把缺省开等效关掉 D1.5「拆卡人工闸」
-// ——拆卡进真实施工，委托必须显式开启）：autoApprove.specBuild.enabled=true 才扫描规格，
-// review-verdict.json 结论 approve_to_build 且超时且未 build 过的规格按推荐自动拆卡；
-// 缺省关 = 拆卡永远等人拍板；blocked/rework 结论开了也永不自动放行。
-
-/** 自动返工写回卡的补充指令（doRetry note，测试断言锚点）。 */
-const AUTOAPPROVE_RETRY_NOTE = '超时自动按审查结论返工（分层审核）';
-
-/**
- * 取卡的最后一条有效 review_verdict：自尾部扫描，先遇到 review_verdict 返回它；
- * 先遇到 review_engine_failed（其后的审查尝试以引擎故障收场）返回 null——fail-closed。
- */
-function lastReviewVerdictEvent(events) {
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i].type === 'review_verdict') return events[i];
-    if (events[i].type === 'review_engine_failed') return null;
-  }
-  return null;
-}
-
-/** 审查结论 → sweep 推荐动作：'merge' | 'retry' | null（null = fail-closed 不动作）。 */
-function recommendFromVerdict(ev) {
-  if (!ev) return null;
-  if (ev.verdict === 'skipped') return 'merge'; // fastlane 轻卡：审查有意跳过，非缺结论
-  if (ev.blockers === 0) return 'merge';
-  if (Number.isInteger(ev.blockers) && ev.blockers > 0) return 'retry';
-  return null; // blockers 缺失/-1（审查输出无契约块）等同无结论，保守不动作
-}
-
-/**
- * sweep 动作的飞书通报（标题带项目名前缀防网关 19024 吞消息；尽力而为不阻断）。
- * notify.digest.enabled=true：动作进 digest 队列（同一 taskId 与落位事件合并成一行终态
- * ——autoapprove 的动作说明比落位行更具体，同级后到覆盖）；关：旧直发（正文逐字节不变）。
- * act = { taskId, state（'merged'=自动合并 / 'pending'=返工或拆卡的中态）, spec?, detail }。
- * spec=true 时 taskId 即规格 id、直接透传 specId；卡动作由 specIdOfTask 从卡 id 派生
- * （2026-11-11 巡航修复：生产调用点此前从不带 specId，flush 的规格尾行管道是死接线）。
- */
-async function notifyAutoApproveAction(repoRoot, cfg, { taskId, state = 'pending', spec = false, detail }) {
-  const noun = spec ? '规格' : '卡';
-  try {
-    if (cfg.notify?.digest?.enabled) {
-      queueDigestItem(repoRoot, {
-        kind: spec ? 'spec' : 'autoapprove',
-        taskId,
-        state,
-        specId: spec ? String(taskId) : specIdOfTask(repoRoot, taskId),
-        title: `${noun} ${taskId} 超时自动批示`,
-        lines: [String(detail ?? '')],
-        priority: 'normal',
-      });
-      return;
-    }
-    await notify({
-      title: `${displayProjectName(cfg.projectName ?? '')} 超时自动批示`,
-      body: `${noun} ${taskId}：${String(detail ?? '')}`,
-      webhookEnvs: orchWebhookEnvs(repoRoot),
-    });
-  } catch { /* 通知失败不阻断 sweep */ }
-}
-
-/** 同一卡同一原因的 autoapprove_skipped 已是最后一条事件时不重复写（降级期间周期性 sweep 防刷屏）。 */
-function lastEventIs(dir, type, reason) {
-  const evts = readEvents(dir);
-  const last = evts[evts.length - 1];
-  return Boolean(last && last.type === type && (reason === undefined || last.reason === reason));
-}
-
-/**
- * autoapprove 一次性 sweep（CLI：`autoapprove [--timeout N] [--dry-run] [--sleep-first]`）。
- * --sleep-first：先睡 timeout+0.5 分钟再扫（drain 落位后拉起的 detached sweep 用——给人工
- * 留满拍板窗口；0.5 分钟余量吸收事件时间戳秒级偏差）。--timeout 覆盖 workflow.json 的
- * timeoutMinutes（测试/临时收紧用，正整数分钟）。
- * 全程持调度器锁；锁被持时有界重试（60s 间隔 ×10 次上限，每轮失败 log 一行、耗尽 log
- * 放弃——2026-11-11 巡航修复：旧实现单次抢锁失败即退出，多卡 drain 期间 detached sweep
- * 的自动批示整体静默落空）。重试参数可注入：opts.lockRetry.{intervalMs,maxAttempts} 或
- * env ORCH_AA_LOCK_RETRY_MS / ORCH_AA_LOCK_RETRY_MAX（测试收紧用，非法值忽略回落缺省）。
- * watch/sail/nightly 的周期 sweep spawnSync 本命令、子进程经 ORCH_SCHED_LOCK_HELD 豁免
- * 直接执行（父已持锁），不受重试逻辑影响。
- */
-async function cmdAutoApprove(repoRoot, opts = {}) {
-  const root = queueRoot(repoRoot);
-  ensureQueue(root);
-  const cfg = loadWorkflowConfig(repoRoot);
-  const aa = cfg.autoApprove ?? { enabled: true, timeoutMinutes: 3, maxAutoRetry: 1, specBuild: { enabled: false } };
-  let timeoutMinutes = aa.timeoutMinutes;
-  if (opts.timeout !== undefined) {
-    if (!Number.isInteger(opts.timeout) || opts.timeout <= 0) {
-      die('用法：autoapprove [--timeout N] [--dry-run]——--timeout 须为正整数（分钟）。');
-    }
-    timeoutMinutes = opts.timeout;
-  }
-  if (opts.flags?.has('--sleep-first')) {
-    await new Promise((r) => setTimeout(r, Math.round((timeoutMinutes + 0.5) * 60_000)));
-  }
-  const lockRetry = { intervalMs: 60_000, maxAttempts: 10, ...(opts.lockRetry ?? {}) };
-  const envMs = Number.parseInt(orchEnv.ORCH_AA_LOCK_RETRY_MS ?? '', 10); // env-snap
-  if (Number.isInteger(envMs) && envMs > 0) lockRetry.intervalMs = envMs;
-  const envMax = Number.parseInt(orchEnv.ORCH_AA_LOCK_RETRY_MAX ?? '', 10); // env-snap
-  if (Number.isInteger(envMax) && envMax >= 0) lockRetry.maxAttempts = envMax;
-  const lock = await acquireSchedulerLockRetry(repoRoot, 'autoapprove', lockRetry);
-  if (!lock.held) return; // 重试耗尽：已 log 放弃原因，交下一轮周期 sweep 兜底
-  const dryRun = opts.flags?.has('--dry-run') === true;
-  const enabled = aa.enabled === true;
-  const degraded = readDegraded(repoRoot);
-  // 可执行 = 功能开 && 非 dry-run && 无降级；留痕 = 功能开 && 非 dry-run（降级跳过也留痕）
-  const act = enabled && !dryRun && !degraded;
-  const trace = enabled && !dryRun;
-  const report = { merged: [], retried: [], retryLimit: [], noVerdict: [], waiting: [], scopeOutside: [], specBuilt: [], specWaiting: [] };
-  const timeoutMs = timeoutMinutes * 60_000;
-  try {
-    if (degraded) {
-      // 红线②：drift 降级期间 sweep 整体跳过（含 spec 环节），逐卡留痕（gate_result 风格）；
-      // 恢复 drift --clear 后下一轮 sweep 再按推荐执行。
-      if (trace) {
-        for (const taskId of listCards(root, 'awaiting-human')) {
-          const qdir = logDir(repoRoot, taskId);
-          if (!lastEventIs(qdir, 'autoapprove_skipped', 'drift_degraded')) {
-            appendEvent(qdir, 'autoapprove_skipped', { reason: 'drift_degraded', detail: String(degraded.reason ?? '').slice(0, 200) });
-          }
-        }
-      }
-    } else {
-      for (const taskId of listCards(root, 'awaiting-human')) {
-        // 逐卡动作前复查卡位（DM-01）：awaiting-human 清单只在循环入口快照一次，而本轮里
-        // 前面的卡可能刚跑完整段 finish / 自动返工——期间这张卡可能已被人工批示。卡不在
-        // 闸门 = 已被处理，跳过（不再对它二次批示）。
-        if (findCard(root, taskId)?.state !== 'awaiting-human') {
-          log(`闸门卡 ${taskId} 在本轮 sweep 轮到它之前已离开 awaiting-human/——跳过。`);
-          continue;
-        }
-        const qdir = logDir(repoRoot, taskId);
-        const verdict = lastReviewVerdictEvent(readEvents(qdir));
-        const rec = recommendFromVerdict(verdict);
-        if (!verdict || !rec) {
-          // 红线④：没有可执行的审查结论——超时也绝不自动动作
-          report.noVerdict.push(taskId);
-          if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'no_verdict')) {
-            appendEvent(qdir, 'autoapprove_skipped', { reason: 'no_verdict' });
-          }
-          continue;
-        }
-        const ageMs = Date.now() - Date.parse(verdict.ts ?? '');
-        if (!Number.isFinite(ageMs) || ageMs < timeoutMs) {
-          report.waiting.push(taskId); // 拍板窗口未过：留人
-          continue;
-        }
-        // 红线⑤：scope_outside（范围失控）落位的卡超时也绝不自动批示——范围失控不该
-        // 静默合并（与合并闸门 purity.outside 同一条不变量），自动返工同样跳过（重跑
-        // 也可能带着失控改动再回来）。只认最后一条 awaiting_human 事件的 reason；
-        // drift_degraded 落位由上面的整体跳过覆盖（恢复后按推荐执行是文档化语义）。
-        const awaitEv = readEvents(qdir).slice().reverse().find((e) => e.type === 'awaiting_human');
-        if (awaitEv?.reason === 'scope_outside') {
-          report.scopeOutside.push(taskId);
-          if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'scope_outside')) {
-            appendEvent(qdir, 'autoapprove_skipped', { reason: 'scope_outside' });
-          }
-          continue;
-        }
-        if (rec === 'merge') {
-          report.merged.push(taskId);
-          if (!act) continue;
-          appendEvent(qdir, 'autoapprove_decision', { decision: 'merge', source: 'timeout', verdict_ts: verdict.ts });
-          // doApprove 持任务锁返回 false = finish 返回时卡已离开闸门、未记 merged：不通报
-          // 「已自动合并」（会撒谎），本轮 sweep 继续处理余卡
-          if (!(await doApprove(repoRoot, taskId, root, qdir, 'auto'))) continue;
-          await notifyAutoApproveAction(repoRoot, cfg, { taskId, state: 'merged', detail: `审查 blockers=0 且超时 ${timeoutMinutes} 分钟——已按推荐自动合并（merged/）` });
-        } else {
-          // 红线③：blockers>0 永不自动合并——只自动返工，且每卡限 maxAutoRetry 次
-          const retries = readEvents(qdir).filter((e) => e.type === 'autoapprove_decision' && e.decision === 'retry').length;
-          if (retries >= aa.maxAutoRetry) {
-            report.retryLimit.push(taskId);
-            if (act && !lastEventIs(qdir, 'autoapprove_skipped', 'retry_limit')) {
-              appendEvent(qdir, 'autoapprove_skipped', { reason: 'retry_limit', retries });
-            }
-            continue;
-          }
-          report.retried.push(taskId);
-          if (!act) continue;
-          appendEvent(qdir, 'autoapprove_decision', { decision: 'retry', source: 'timeout', verdict_ts: verdict.ts });
-          await doRetry(repoRoot, taskId, root, qdir, AUTOAPPROVE_RETRY_NOTE, {});
-          await notifyAutoApproveAction(repoRoot, cfg, { taskId, state: 'pending', detail: `审查 blockers=${verdict.blockers} 且超时 ${timeoutMinutes} 分钟——已按推荐自动返工（第 ${retries + 1}/${aa.maxAutoRetry} 次）` });
-        }
-      }
-      // ---- spec 分层超时（opt-in：autoApprove.specBuild.enabled 缺省关——拆卡人工闸默认不委托）----
-      // 开启后才扫描：审查 approve_to_build 且超时且未 build 过 → 按推荐自动拆卡
-      if (aa.specBuild?.enabled === true) {
-        for (const id of listSpecs(repoRoot)) {
-          const dir = specDir(repoRoot, id);
-          if (!fs.existsSync(path.join(dir, 'review-verdict.json'))) continue;
-          if (fs.existsSync(path.join(dir, 'progress.json'))) continue; // 已 build 过（幂等锚）
-          let v = null;
-          try { v = JSON.parse(fs.readFileSync(path.join(dir, 'review-verdict.json'), 'utf8')); } catch { continue; }
-          if (v?.usage?.build_ready !== 'approve_to_build') continue; // blocked/rework 永不自动放行
-          const ageMs = Date.now() - Date.parse(v.created_at ?? '');
-          if (!Number.isFinite(ageMs) || ageMs < timeoutMs) {
-            report.specWaiting.push(id);
-            continue;
-          }
-          report.specBuilt.push(id);
-          if (!act) continue;
-          cmdSpecBuild(repoRoot, id);
-          await notifyAutoApproveAction(repoRoot, cfg, { taskId: id, spec: true, state: 'pending', detail: `审查 approve_to_build 且超时 ${timeoutMinutes} 分钟——已按推荐自动拆卡（pending/）` });
-        }
-      }
-    }
-  } finally {
-    releaseSchedulerLock(repoRoot);
-  }
-  // 报告（enabled=false / dry-run 同样盘点，只是不动作——动作行加「建议」标记防误读）
-  const fmt = (a) => a.join(', ');
-  const acted = act ? '' : '（建议，未执行）';
-  log(`═══ autoapprove sweep（enabled=${enabled}，timeout=${timeoutMinutes}min${dryRun ? '，dry-run' : ''}${degraded ? '，⚠ drift 降级中——整体跳过' : ''}）═══`);
-  if (report.merged.length) log(`  自动合并${acted}：${fmt(report.merged)}`);
-  if (report.retried.length) log(`  自动返工${acted}：${fmt(report.retried)}`);
-  if (report.retryLimit.length) log(`  返工超限留人：${fmt(report.retryLimit)}`);
-  if (report.noVerdict.length) log(`  fail-closed（无审查结论，不动作）：${fmt(report.noVerdict)}`);
-  if (report.waiting.length) log(`  拍板窗口未过：${fmt(report.waiting)}`);
-  if (report.scopeOutside.length) log(`  范围失控留人（scope_outside 不自动批示）：${fmt(report.scopeOutside)}`);
-  if (report.specBuilt.length) log(`  spec 自动拆卡${acted}：${fmt(report.specBuilt)}`);
-  if (report.specWaiting.length) log(`  spec 拍板窗口未过：${fmt(report.specWaiting)}`);
-  if (!report.merged.length && !report.retried.length && !report.retryLimit.length && !report.noVerdict.length && !report.waiting.length && !report.scopeOutside.length && !report.specBuilt.length && !report.specWaiting.length) {
-    log('  无待批示项。');
-  }
-  if (dryRun) log('  （dry-run：以上为建议动作，未实际执行）');
-  // digest 聚合通报：有动作才可能进了队列——sweep 收尾拉起 detached flush（60s 静默窗
-  // 内合并发送）。retry/拆卡路径没有落位 settleNotify 兜底拉 flusher，这里统一保证；
-  // merge 路径 doApprove→settleNotify 已拉过的由 marker 去重（不双拉）。
-  if (act && (report.merged.length || report.retried.length || report.specBuilt.length)) {
-    maybeSpawnDigestFlush(repoRoot, cfg);
-  }
-}
-
-/**
- * drain 落位 awaiting-human 后拉起一次性 detached sweep（D6.5 接线）：先睡
- * timeout+0.5 分钟（人工拍板窗口）再扫，到点仍未批示才按推荐执行。enabled 且确有
- * 待批示卡才拉起；sweep 自己抢调度器锁——drain 未收尾时有界重试等锁（60s×10，
- * 2026-11-11 巡航修复：旧实现单次失败即退出，多卡 drain 期间自动批示静默落空），
- * 重试仍拿不到才放弃，绝不并发批示。
- * 交互式闸门（人工在场）不拉起。detach + unref：run 子进程正常退出不受影响。
- */
-function maybeSpawnAutoApproveSweep(repoRoot, cfg) {
-  try {
-    if (cfg.autoApprove?.enabled !== true) return;
-    if (!listCards(queueRoot(repoRoot), 'awaiting-human').length) return;
-    // run 子进程可能带着父调度器的锁豁免 env（drain spawn 时注入）——必须剥掉，
-    // 否则 sweep 跳过自己的抢锁检查，与仍在跑的 drain 并发批示
-    const sweepEnv = { ...process.env };
-    delete sweepEnv[SCHED_LOCK_ENV];
-    spawn(process.execPath, [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'autoapprove', '--sleep-first'], {
-      cwd: repoRoot,
-      detached: true,
-      stdio: 'ignore',
-      env: sweepEnv,
-    }).unref();
-    // digest 聚合通报的 detached flush 分支（与 sweep 同款 detach）：attention 落位已
-    // 立即同步 flush，这里兜静默窗内可能残留的 normal 事件；队列空/未启用 = 零开销短路
-    maybeSpawnDigestFlush(repoRoot, cfg);
-  } catch { /* 尽力而为：拉起失败不影响本轮落位（watch/sail/nightly 周期 sweep 兜底） */ }
-}
-
-// ---------------------------------------------------------------------------
 // submit / status / resume / abandon / logs
 // ---------------------------------------------------------------------------
 
@@ -2587,7 +2069,7 @@ function cmdLogs(repoRoot, taskId) {
 
 /** 引擎选择透传：drain/nightly/scan--run spawn 的 run/drain 子进程继承本次引擎参数
  *  （workflow.json 的默认不用传——子进程自己会读同一份配置）。 */
-function engineArgs(opts) {
+export function engineArgs(opts) {
   const args = [];
   if (opts.workerBackend) args.push('--worker-backend', opts.workerBackend);
   if (opts.workerModel) args.push('--worker-model', opts.workerModel);
@@ -2625,88 +2107,6 @@ function preflightWorkerBackend(backend) {
 
 function drainTallyLine(tally) {
   return Object.entries(tally).map(([s, n]) => `${s} ${n}`).join('、') || '无';
-}
-
-/**
- * 风暴闸（weather hold）计数——纯读无副作用：窗口内各任务 worker_retry 合计 vs 阈值；
- * 可选上游海况（hold.upstream 配置）：网关日志窗口内 429/402 合计 vs upstream.threshold，
- * 任一达阈值即滞留。无状态计算（不落 hold 标记文件）：下一次调用窗口滑过即自动恢复。
- * workflow.json 未配 weatherHold 键 = 功能关闭（行为与历史版本一致）。
- */
-// 事件快照缓存（perf，2026-11-05 审查项）：每次派发前全量 readdir + 逐任务解析
-// events.jsonl，drain 每轮 pump / watch 每周期都重复同一 IO。按 repoRoot 分键的模块级
-// 60s TTL 缓存（{allEvents, at}）——命中即复用快照，窗口过滤仍按调用时刻的 now 现算
-// （出窗事件即时失效，滞留判定语义不变）；仅「60s 内新落盘的 worker_retry」延迟可见，
-// 风暴是分钟级信号，该粒度无判据影响。按 repoRoot 分键：多仓库（测试/多实例）互不污染。
-const WEATHER_SNAPSHOT_TTL_MS = 60_000;
-const _weatherSnapshots = new Map(); // repoRoot -> { allEvents, at }
-/** 测试清场：清空风暴闸事件快照缓存（vitest 单 fork 共享注册表，用例收尾可调用）。 */
-export function resetWeatherSnapshotCache() {
-  _weatherSnapshots.clear();
-}
-
-function weatherHoldCount(repoRoot, cfg) {
-  const hold = cfg?.weatherHold;
-  if (!hold) return { held: false, count: 0, upstream: null };
-  const now = Date.now();
-  const logsRoot = path.join(repoRoot, '.agents', 'orchestrator', 'logs');
-  let snap = _weatherSnapshots.get(repoRoot);
-  if (!snap || now - snap.at > WEATHER_SNAPSHOT_TTL_MS) {
-    const allEvents = [];
-    try {
-      for (const id of fs.readdirSync(logsRoot)) {
-        if (id === 'fleet.jsonl') continue; // fleet 级日志不是任务事件线
-        const events = readEvents(path.join(logsRoot, id));
-        if (events.length) allEvents.push({ id, events });
-      }
-    } catch { /* logs/ 不存在 = 还没跑过任务 */ }
-    snap = { allEvents, at: now };
-    _weatherSnapshots.set(repoRoot, snap);
-  }
-  const count = countRecentTransient(snap.allEvents, { windowMs: hold.windowMinutes * 60_000, now });
-  const result = { held: shouldHold(count, hold.threshold), count, upstream: null };
-  // 上游海况（外部风暴）：网关实测先于 worker 重试浮现；未配 upstream 子键 = 关闭，
-  // 网关日志不可得（gatewayLogDir 未配）同样不滞留（观测缺席 ≠ 风暴）。
-  if (hold.upstream?.threshold != null) {
-    const gwDir = gatewayLogsDir(cfg);
-    const windowMinutes = hold.upstream.windowMinutes ?? 15;
-    const uCount = countUpstreamStorm(gwDir, { windowMs: windowMinutes * 60_000, now });
-    result.upstream = { count: uCount, threshold: hold.upstream.threshold, windowMinutes, observed: gwDir != null };
-    if (shouldHold(uCount, hold.upstream.threshold)) result.held = true;
-  }
-  return result;
-}
-
-/** 风暴滞留宣布：log + fleet 级事件 + webhook 通知（通知尽力而为，不阻断调度）。
- *  触发源标注：只有上游海况达阈（worker 重试未达）时点名为「上游风暴」。 */
-function announceWeatherHold(repoRoot, cfg, w) {
-  const hold = cfg.weatherHold;
-  const upstreamTripped = w.upstream?.observed && shouldHold(w.upstream.count, w.upstream.threshold);
-  const reason = upstreamTripped && !shouldHold(w.count, hold.threshold)
-    ? `上游风暴：最近 ${w.upstream.windowMinutes} 分钟网关限流/额度类请求 ${w.upstream.count} 次 ≥ 阈值 ${w.upstream.threshold}`
-    : `最近 ${hold.windowMinutes} 分钟瞬时重试 ${w.count} 次 ≥ 阈值 ${hold.threshold}`;
-  log(`⛈ 风暴滞留（weather hold）：${reason}——停止派发，窗口滑过后自动恢复（下次派发前重算）。`);
-  try {
-    appendFleetEvent(repoRoot, 'weather_hold', {
-      count: w.count,
-      windowMinutes: hold.windowMinutes,
-      ...(w.upstream ? { upstream: { count: w.upstream.count, threshold: w.upstream.threshold, windowMinutes: w.upstream.windowMinutes } } : {}),
-    });
-  } catch { /* 留痕失败不阻断调度 */ }
-  void notify({
-    title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 风暴滞留`,
-    body: `${reason}，已暂停派发任务；窗口滑过后自动恢复。`,
-    webhookEnvs: orchWebhookEnvs(repoRoot),
-  }).catch(() => { /* 通知失败不阻断 */ });
-  // 双向批示叠加卡：weather_hold 是 fleet 级事件，没有可批示的单卡 → 纯信息卡
-  // （不出按钮行）；notify.cardWebhook 未开启（缺省）时内部短路，零开销。
-  void notifyActionCard({
-    repoRoot,
-    webhookEnvs: orchWebhookEnvs(repoRoot),
-    taskId: null,
-    title: `${displayProjectName(loadWorkflowConfig(repoRoot).projectName ?? '')} 风暴滞留`,
-    reason: `${reason}，已暂停派发任务；窗口滑过后自动恢复。`,
-  }).catch(() => { /* 卡片失败不阻断 */ });
 }
 
 /**
@@ -2770,215 +2170,6 @@ async function drainSummaryNotify(repoRoot, done, tally, note, tasks = []) {
       webhookEnvs: orchWebhookEnvs(repoRoot),
     });
   } catch { /* 通知失败不阻断编排 */ }
-}
-
-/**
- * 生命周期上限拒绝留痕（P1-⑨，判定纯逻辑在 lifetimeCapRejections）：落卡事件
- * auto_resume_rejected { reason: 'lifetime_cap', count, max_per_card } + 主日志一行——
- * 超限卡留 blocked 待人工，卡上已有 auto_resume_count 累计值即留痕；同一上限状态
- * 只报一次（去重口径见 lifetimeCapRejections），防 drain 每轮刷屏。
- */
-function reportLifetimeCapRejections(repoRoot, rejections) {
-  for (const c of rejections) {
-    try {
-      appendEvent(logDir(repoRoot, c.id), 'auto_resume_rejected', { card: c.id, reason: 'lifetime_cap', count: c.count, max_per_card: c.cap });
-    } catch { /* 留痕失败不阻断选卡 */ }
-    log(`⛔ 卡 ${c.id} 自动续累计 ${c.count} 次已达上限 ${c.cap}——不再自动续，等人工 resume（判否原因见 logs/${c.id}/ 事件）。`);
-  }
-}
-
-/**
- * blocked 卡有限自动续跑（长跑自主的关键小件；资格判定纯逻辑在 orchestrator/autoresume.mjs）。
- * drain 选卡前调用：扫 blocked/ → 挑「transient 类失败 + 冷却已过」的卡（≤maxPerRun 张，
- * 按 blocked 时间最早先续）→ 逐张先把 auto_resumed_at 冷却标记 + auto_resume_count 累计
- * 写进卡 frontmatter（自动续后再 blocked 时下轮靠前者判冷却、靠后者判生命周期上限——
- * 连续自动续失败不重试、全生命周期封顶防「续→崩→冷却→续」循环烧钱）→ 记 auto_resume
- * { card, attempts } 事件 → spawn 既有 resume 子命令（闭环复用不复制逻辑；子进程隔离，
- * 熔断 process.exit 不伤 drain 主循环，与派 run 子进程同哲学，--auto-resume 让 resumed
- * 事件标记 by=auto 区别于人工）。上界四重：只续 transient 类、每卡 24h（cooldownHours）
- * 最多 1 次、每次 drain ≤2 张（maxPerRun）、每卡全生命周期 ≤3 次（maxPerCard，超限留
- * blocked 交人工并落 auto_resume_rejected 事件）。drift 降级 = 全人工，整个通道暂停；
- * autoResume.enabled=false 完全不扫。
- * @returns {string[]} 本轮自动续的卡 id（drain 汇总口径）
- */
-function autoResumePass(repoRoot, root, cfg, opts) {
-  const ar = cfg.autoResume;
-  if (!ar?.enabled) return [];
-  if (readDegraded(repoRoot)) {
-    log('⏸ drift 降级期间自动续暂停（降级 = 全人工）——blocked 卡等人工 resume。');
-    return [];
-  }
-  const { candidates, unreadable, total } = scanBlockedCards(repoRoot, root);
-  if (total === 0) return [];
-  if (unreadable.length) {
-    console.warn(`[orchestrator] 自动续资格判定：${unreadable.length} 张 blocked 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
-  }
-  const picked = pickAutoResumeCandidates(candidates, {
-    maxPerRun: ar.maxPerRun,
-    cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
-    maxPerCard: ar.maxPerCard,
-  });
-  reportLifetimeCapRejections(repoRoot, lifetimeCapRejections(candidates, { maxPerCard: ar.maxPerCard }));
-  const resumed = [];
-  for (const c of picked) {
-    const card = candidates.find((x) => x.id === c.id);
-    try {
-      fs.writeFileSync(card.path, withAutoResumedAt(card.text, autoResumedAtNow()));
-    } catch (e) {
-      // Windows EBUSY 等写失败：卡可能被编辑器占用——宁可不续也不无冷却地续（防反复烧钱）
-      console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
-      continue;
-    }
-    appendEvent(logDir(repoRoot, c.id), 'auto_resume', { card: c.id, attempts: c.attempts });
-    log(`⟳ 自动续 blocked 卡 ${c.id}（transient 类失败，worker_retry ${c.attempts} 次用尽；冷却期内至多此一次）`);
-    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
-      ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
-      cwd: repoRoot,
-      stdio: 'inherit',
-      env: { ...process.env, ...childEnvForHeldLock() },
-    });
-    resumed.push(c.id);
-    if (r.status !== 0) log(`任务 ${c.id} 自动续退出码 ${r.status}（已落 blocked/failed/或等待人工——冷却期内不再自动续）。`);
-  }
-  log(`自动续检查：blocked ${total} 张，候选 ${picked.length} 张，已续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}。`);
-  return resumed;
-}
-
-/**
- * 孤儿 running 卡启动自愈（2026-11 长跑自治；归类纯逻辑在 orchestrator/autoresume.mjs
- * 的 classifyOrphan / pickOrphanResumeCandidates）。blocked 通道覆盖不到的形态：sail/drain
- * 单进程被硬杀后卡还挂在 running/——状态「在跑」而实际无进程，等下一个调度入口接管。
- * drain / watch / nightly / sail 入口（获得调度器锁后）调用，任务锁判活分三类处置：
- *   ① 锁活（readTaskLock + taskLockLooksLive，同进程嵌套闭环或并行实例在驱动）→ 跳过；
- *   ①' beat 静默但属主 pid 探活仍活（spawnSync npm ci/ensureWorktree 冻结事件循环的活
- *      run，P1-a）→ 只落观测（fleet 事件 orphan_heal_beat_silent + log）不动卡；
- *   ② 孤儿 + classifyOrphan='resume'（崩溃族 / 上会话 transient 签名 / retry 链）→
- *      有限自动续：沿用 24h 冷却（cooldownHours）、每次 ≤maxPerRun 张与每卡生命周期上限
- *      （maxPerCard，auto_resume_count 随卡累计），与 blocked 通道同参；
- *   ③ 孤儿 + 其余（'breaker' 熔断卡永不续 / 'stuck' 非 transient）→ 落 blocked/
- *      （failTaskToBlocked 同款：failed 事件 + 迁移，附不可续原因），交人工。
- * 护栏：仅在实际获得调度器锁的进程执行（调用方守卫——watch/nightly 派生的 drain 子进程
- * 走 ORCH_SCHED_LOCK_HELD 豁免路径跳过，父调度器本周期已扫，与并行驾驶实例互斥）；
- * drift 降级 = 全人工，整通道暂停；autoResume.enabled=false 完全不扫。
- * 永不静默：自动续记 auto_resume { card, attempts, source: 'orphan_running' }，落 blocked
- * 记 failed 事件（孤儿现场写不进通知回调，落卡事件即对账凭据）。
- * @returns {{ resumed: string[], blocked: string[] }} 本轮自动续与落 blocked 的卡 id
- */
-function orphanHealPass(repoRoot, root, cfg, opts) {
-  const empty = { resumed: [], blocked: [] };
-  const ar = cfg.autoResume;
-  if (!ar?.enabled) return empty;
-  if (readDegraded(repoRoot)) return empty; // 降级 = 全人工：状态归位也一并等人工（现场保持原样）
-  const { candidates, unreadable, total } = scanRunningCards(repoRoot, root);
-  if (total === 0) return empty;
-  if (unreadable.length) {
-    console.warn(`[orchestrator] 孤儿自愈资格判定：${unreadable.length} 张 running 卡读不了（frontmatter 解析失败，人工检查）——已跳过：${unreadable.join(', ')}`);
-  }
-  // 判活备料（P1-a 双条件）：锁活（心跳 15s 内新鲜）= 有驱动者；beat 静默且属主 pid
-  // 已死（或锁缺失/pid 不可探测，回退旧口径）= 孤儿。beat 静默但 pid 仍活——spawnSync
-  // （npm ci / ensureWorktree）冻结事件循环停更心跳 >60s 的活 run——只落观测不动卡：
-  // 此前只看 beat 会把它误判孤儿自动续/落 blocked，双 worker 同 worktree。
-  const { orphans, silentLive } = partitionRunningOrphans(candidates, {
-    lockOf: (id) => readTaskLock(repoRoot, id),
-    pidAlive: (pid) => isAlive(pid),
-  });
-  if (silentLive.length) {
-    log(`👀 孤儿自愈：${silentLive.length} 张 running 卡任务锁心跳静默但属主进程仍存活（pid 探活确认）：${silentLive.join(', ')}——大概率 spawnSync 装依赖冻结事件循环，只观测不动卡（防误杀活 run 致双 worker 同 worktree）。`);
-    // 观测事件落 fleet 不落卡 events.jsonl：属主进程还在写同文件，跨进程双写会撞 seq
-    try { appendFleetEvent(repoRoot, 'orphan_heal_beat_silent', { cards: silentLive }); } catch { /* 留痕失败不阻断 */ }
-  }
-  if (!orphans.length) return empty;
-  log(`🔍 孤儿自愈：running ${total} 张，其中 ${orphans.length} 张无人驱动（任务锁缺失，或心跳静默且属主进程已退出）：${orphans.map((c) => c.id).join(', ')}`);
-  // 人工认领观察（DM-02）：feature-branch start 认领卡只短暂持任务锁，进程退出即释放；
-  // 持久认领记录是事件链里的 manual_claimed。这类卡属主是人工 agent——自动续会双写同一
-  // worktree、落 blocked 会撤销人工现场，两者都不做，只落 fleet 观测事件（不写卡
-  // events.jsonl：属主可能正在写同一个文件，跨进程双写会撞 seq）。
-  const manualOrphans = orphans.filter((c) => classifyOrphan(c.events) === 'manual');
-  if (manualOrphans.length) {
-    const ids = manualOrphans.map((c) => c.id);
-    log(`👀 孤儿自愈：${ids.length} 张 running 卡由人工认领（manual_claimed，属主在岗）——跳过自动续与落 blocked，只观测不动卡：${ids.join(', ')}`);
-    try { appendFleetEvent(repoRoot, 'orphan_heal_manual_claimed', { cards: ids }); } catch { /* 留痕失败不阻断 */ }
-  }
-  // stuck 终态对冲备料（2026-11-17）：'stuck' 孤儿（非 transient settle 收尾）先对账
-  // worktree 提交——相对 base 已有非空提交 = 可验收产出在库，走续用路径（resume 原地
-  // 续做）而非落 blocked 清空重做。breaker 熔断卡不受对冲（确定性失败永不自动续）；
-  // resume 族无需对账。对账不可得（worktree 缺失/git 故障）按 0 处理，照旧交人工。
-  for (const c of orphans) {
-    if (classifyOrphan(c.events) === 'stuck') {
-      c.commitsAhead = worktreeCommitsAhead(worktreePath(repoRoot, c.id), cfg.baseBranch || 'develop') ?? 0;
-    }
-  }
-  const picked = pickOrphanResumeCandidates(orphans, {
-    maxPerRun: ar.maxPerRun,
-    cooldownMs: ar.cooldownHours * 60 * 60 * 1000,
-    maxPerCard: ar.maxPerCard,
-  });
-  // 生命周期上限拒绝留痕（与 blocked 通道同口径）：capped 孤儿不进候选，随后在下方
-  // 落 blocked 循环里按 cap 专属原因归位——failed 事件的 reason 面向人工与未来
-  // isTransientBlocked 匹配写，上限拒绝不匹配任何可续签名，卡留在 blocked 交人工。
-  const capRejections = lifetimeCapRejections(orphans, {
-    maxPerCard: ar.maxPerCard,
-    isEligible: (c) => { const k = classifyOrphan(c.events); if (k === 'manual') return false; return k === 'resume' || (k === 'stuck' && (c.commitsAhead ?? 0) > 0); }, // 孤儿通道资格口径与 pickOrphanResumeCandidates 一致（stuck 对冲续用同资格；manual 人工属主不续）
-  });
-  reportLifetimeCapRejections(repoRoot, capRejections);
-  const resumed = [];
-  const cappedIds = new Set(capRejections.map((c) => c.id));
-  for (const c of picked) {
-    const card = orphans.find((x) => x.id === c.id);
-    try {
-      fs.writeFileSync(card.path, withAutoResumedAt(card.text, autoResumedAtNow()));
-    } catch (e) {
-      // Windows EBUSY 等写失败：宁可不续也不无冷却地续（防反复烧钱），与 blocked 通道同款
-      console.warn(`[orchestrator] 卡 ${c.id} 写 auto_resumed_at 失败（${e?.message ?? e}）——本轮跳过自动续。`);
-      continue;
-    }
-    appendEvent(logDir(repoRoot, c.id), 'auto_resume', {
-      card: c.id,
-      attempts: c.attempts,
-      source: 'orphan_running',
-      ...(c.rescue === 'stuck_with_commits' ? { commits_ahead: c.commitsAhead, rescue: c.rescue } : {}),
-    });
-    log(`⟳ 自动续孤儿卡 ${c.id}（闭环进程已退出，崩溃/transient 族${c.rescue === 'stuck_with_commits' ? `；stuck 但 worktree 已有 ${c.commitsAhead} 个提交——原地续用半成品` : ''}；冷却期内至多此一次）`);
-    const r = spawnSync('node', [path.join(repoRoot, '.agents', 'scripts', 'orchestrator.mjs'), 'resume', c.id, '--auto-resume',
-      ...(opts.backend ? ['--backend', opts.backend] : []), ...engineArgs(opts)], {
-      cwd: repoRoot,
-      stdio: 'inherit',
-      env: { ...process.env, ...childEnvForHeldLock() },
-    });
-    resumed.push(c.id);
-    if (r.status !== 0) log(`任务 ${c.id} 自动续退出码 ${r.status}（已落 blocked/failed/或等待人工——冷却期内不再自动续）。`);
-  }
-  // 其余孤儿落 blocked（failTaskToBlocked 同款语义）：熔断卡（'breaker'）只做状态归位
-  // 永不续；'stuck'（最后会话以 failed/非签名 settle 收尾）交人工定性。先重查现状——
-  // 上方自动续的子进程可能已把同 id 卡迁走（同步 spawn，此处必已收敛）。
-  const pickedIds = new Set(picked.map((p) => p.id));
-  const blocked = [];
-  for (const c of orphans) {
-    if (pickedIds.has(c.id)) continue;
-    const cur = findCard(root, c.id);
-    if (!cur || !['running', 'reviewing'].includes(cur.state)) continue; // 已被自动续子进程迁移/落位
-    const kind = classifyOrphan(c.events);
-    // 人工认领（DM-02）：属主在岗，落 blocked 会撤销人工现场——只观测（fleet 事件已在
-    // 上方统一留痕），不写 failed 事件、不迁卡。
-    if (kind === 'manual') continue;
-    const breakerEv = [...c.events].reverse().find((e) => e?.type === 'circuit_breaker');
-    // reason 面向 isTransientBlocked 的签名匹配写（只引程序写入的枚举 reason，不引自由文本
-    // detail）——落 blocked 后不允许被下一轮 blocked 通道按字面误判成 transient 再续。
-    // capped（P1-⑨ 生命周期上限）：本是 transient 族但自动续次数已封顶，专属原因交人工。
-    const reason = cappedIds.has(c.id)
-      ? '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），自动续次数已达生命周期上限——不再自动续，交人工 resume'
-      : kind === 'breaker'
-        ? `孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），事件链有熔断（${breakerEv?.reason ?? '未知'}）——熔断卡永不自动续`
-        : '孤儿 running 卡自愈：闭环进程已退出（任务锁陈旧/缺失），最后会话无 transient 签名——交人工定性';
-    // stuck 终态对冲证据（2026-11-17）：落 blocked 的 stuck 卡 commits_ahead 恒 0（>0 已走
-    // 续用路径）——字段留痕对账结论，人工核实零提交后才值得清空重做。
-    appendEvent(logDir(repoRoot, c.id), 'failed', { reason, ...(kind === 'stuck' ? { commits_ahead: c.commitsAhead ?? 0 } : {}) });
-    moveCard(root, c.id, cur.state, 'blocked');
-    blocked.push(c.id);
-    log(`⚠ 孤儿卡 ${c.id} 落 blocked（${reason}）——人工 resume 前请先看 logs/${c.id}/ 事件时间线。`);
-  }
-  log(`孤儿自愈检查：running ${total} 张，孤儿 ${orphans.length} 张，人工认领跳过 ${manualOrphans.length} 张${manualOrphans.length ? `（${manualOrphans.map((c) => c.id).join(', ')}）` : ''}，自动续 ${resumed.length} 张${resumed.length ? `（${resumed.join(', ')}）` : ''}，落 blocked ${blocked.length} 张${blocked.length ? `（${blocked.join(', ')}）` : ''}。`);
-  return { resumed, blocked };
 }
 
 /**
@@ -4178,7 +3369,7 @@ async function cmdSpecStart(repoRoot, opts) {
 }
 
 /** spec build：把已审阅规格的 tasks 拆成任务卡进 pending/（幂等，同 id 跳过）。 */
-function cmdSpecBuild(repoRoot, id) {
+export function cmdSpecBuild(repoRoot, id) {
   const root = queueRoot(repoRoot);
   ensureQueue(root);
   if (!listSpecs(repoRoot).includes(id)) {
