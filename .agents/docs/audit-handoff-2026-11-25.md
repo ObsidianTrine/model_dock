@@ -90,6 +90,13 @@
 - **测试环境残留**：`%TEMP%/orch-*` 累积到千级后 `provision` E2E 会稳定假红，跑编排门禁前先清理。
 - **门禁分域待改进**：`scripts/test-gate.mjs` 把 `CHANGELOG.md` 等根目录文档判为产品域，任何带 CHANGELOG 的纯文档提交都会触发产品全量——建议列入 E-01/E-02 的顺手项。
 
+**2026-11-26 晨补充**
+
+- 收编两份遗留 worktree：`fix-buildsea-version-residue`（sea 构建版本残留自愈守卫，`6fd762b`+`1d4e3e5`，验收 47/47 + ship-selfcheck 双 PASS）、`test-orch-timeout-tier`（编排套件 `testTimeout` 20s→60s，`d064770`，4 worker 下 provision/tiers/reconcile 由假红转 72/72）。
+- 顺手两条：`2ac0114` 锁父级 errno 断言按平台取码（Windows 报 ENOENT）；`0c52373` 补 `relay-gaps` 用例缺失的 `UpstreamBody.text`。
+- **CI 教训（重要）**：`68e3b46` 推上去后 `test` 工作流在 ubuntu/windows 两腿红，根因是 P-03 新增用例的类型不匹配被 `tsc -p tsconfig.test.json` 拦下——本地因为产品全量走了 `--skip-test` 而没发现（`npx vitest run` 不做类型检查）。**今后凡是产品域 `--skip-test` 合并，提交前必须额外跑一次 `npx tsc -p tsconfig.test.json --noEmit`。**
+- 现状复核（`0c52373`）：`tsc` 两份 config 均绿、eslint 基线 / docs-lint / 日期门禁 / 类型门禁 31/31 绿。仍未闭合项见下方清单。
+
 **并行分组**（按文件归属切分，减少 rebase 冲突）：
 
 - **甲组**：DM-01 → DM-02 → DM-03，同一 agent 顺序做（都改 `orchestrator.mjs`，且 DM-01 定下的锁口径后两张要沿用）。
