@@ -140,6 +140,48 @@ jobs:
             echo '::warning::npm audit 未通过（registry 不可达或存在漏洞）——仅告警，不阻断；发布前仍以 release-check 为阻断门禁'
           fi
 
+  # isolate 金丝雀（D-04，**非 required**、仅 schedule）：产品套件刻意 isolate:false +
+  # maxWorkers 1（为结构性消除 worker 生命周期 / 消息路由两个死锁面，见 vitest.config.ts
+  # 头注）。本 job 用 VITEST_ISOLATE=1 打开逐文件隔离，量化「改成 isolate:true 会付多少
+  # 时间、会红哪些文件」——只产证据，不改默认值、不进 PR / develop push、不在 required 名单。
+  # 基线（isolate:false / maxWorkers 1，2026-11-26）：
+  #   · CI（ubuntu, node 24）正常口径约 3 分钟（AGENTS.md「测试指南」L3；test-gate 实测）。
+  #   · 本机 Windows（i5-8250U, node 24）实测 896s / 185 文件 / 2329 用例，4 文件 10 用例红
+  #     （workbuddy adapters、daemon-lifecycle、profile-cli；本机环境已知红：宿主安全策略拦
+  #     reg.exe + 并发 agent 窗口撞 host-guard），只作量级参照，不作口径。
+  # 判读：绿且耗时接近基线 → 才有资格讨论去掉 isolate:false；红例按文件归类记 issue，本 job 不阻断。
+  isolate-canary:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    name: isolate-canary (schedule, non-required)
+    timeout-minutes: 40
+    env:
+      VITEST_ISOLATE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: '产品全量（isolate: true，计时）'
+        run: |
+          start=$(date +%s)
+          npx vitest run 2>&1 | tee isolate-canary.log
+          rc=${PIPESTATUS[0]}
+          end=$(date +%s)
+          echo "耗时 $((end - start))s（isolate:true / maxWorkers:1）" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: 红例文件清单（失败时）
+        if: failure()
+        run: |
+          {
+            echo '### isolate 金丝雀失败文件（D-04）'
+            echo '```'
+            grep -E '^ FAIL ' isolate-canary.log | sed 's/ >.*//' | sort -u || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # agent 工作流套件（.agents/ 编排器脚本与分支守卫 hook）：与产品测试拆分（npm test 只跑
   # 产品套件，方案 A）。纯 Node + git，无平台差异，只在 ubuntu 跑，与上方三平台矩阵并行。
   # 触发分级（2026-11-03）：job 常驻——test-workflow 是 main/develop 的 required check，
