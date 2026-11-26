@@ -1,0 +1,41 @@
+name: bench
+
+# 冷启动基准巡检（D-03）：`scripts/bench-cold-start.mjs` 原先只被 npm script 引用，
+# CI 与文档零引用、无声腐烂。这里接入每周 schedule，作为**信息性产物**：
+# - 不设门禁、不做基线对比断言；只有脚本自身错误（入口缺失 / 退出码非 0）才红；
+# - 结果原文（每次耗时 + 中位数 + help 指纹 sha256）上传为 artifact，供人工看趋势；
+# - 跨 runner / 跨机器的绝对毫秒不可比（不同 CPU、不同负载），趋势只在同一类 runner 上读。
+# 口径说明同步写在 docs/ops/bench-baseline.md「冷启动基准」节。
+on:
+  schedule:
+    - cron: '0 3 * * 1' # 每周一 03:00 UTC = 北京时间 11:00（与 test/codeql 巡检错开）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  cold-start:
+    runs-on: ubuntu-latest
+    name: bench-cold-start (informational)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # bench 入口缺省是 dist/cli.js（产品形态），默认 7 次采样 + 1 次预热
+      - run: npm run build
+      - name: 冷启动计时（7 次中位数）
+        run: npm run bench:cold -- dist/cli.js 7 | tee bench-cold-start.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-cold-start
+          path: bench-cold-start.txt
+          retention-days: 90
