@@ -133,7 +133,7 @@ describe('orchestrator autoresume > 自恢复交互护栏：watchdog 熔断卡�
       ev('worker_retry', { attempt: 1, max: 3, wait_s: 60 }),
       ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
     ])]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['tr1'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c: { id: string }) => c.id)).toEqual(['tr1'])
   })
 })
 
@@ -154,7 +154,7 @@ describe('orchestrator autoresume > Path C（B8）：未产出结果块族纳入
       ev('blocked', { reason: '未产出结果块（worker 异常结束）' }),
     ]
     expect(isTransientBlocked(events)).toBe(true)
-    expect(pickAutoResumeCandidates([bcard('gap1', events)], { now: NOW }).map((c) => c.id)).toEqual(['gap1'])
+    expect(pickAutoResumeCandidates([bcard('gap1', events)], { now: NOW }).map((c: { id: string }) => c.id)).toEqual(['gap1'])
   })
 
   it('旧文案「未产出结果块」同样命中；英文形态 no result block 兼容', () => {
@@ -195,8 +195,8 @@ describe('orchestrator autoresume > Path C（B8）：未产出结果块族纳入
       bcard('c2', [ev('blocked', { reason: 'HTTP 429' })]),
       bcard('c3', [ev('blocked', { reason: 'worker 自报 stuck' })]),
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 1 }).map((c) => c.id)).toEqual(['c1'])
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['c1', 'c2'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 1 }).map((c: { id: string }) => c.id)).toEqual(['c1'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c: { id: string }) => c.id)).toEqual(['c1', 'c2'])
   })
 })
 
@@ -227,9 +227,9 @@ describe('orchestrator autoresume > pickAutoResumeCandidates 纯函数', () => {
       bcard('fresh', transientEvents(), { auto_resumed_at: '2026-11-02T00:00:00+08:00' }), // 12h 前
       bcard('stale', transientEvents(), { auto_resumed_at: '2026-11-01T00:00:00+08:00' }), // 36h 前
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW }).map((c) => c.id)).toEqual(['stale'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW }).map((c: { id: string }) => c.id)).toEqual(['stale'])
     // cooldownMs=6h：12h 前的标记已过期，fresh 也合格
-    expect(pickAutoResumeCandidates(cards, { now: NOW, cooldownMs: 6 * HOUR }).map((c) => c.id)).toEqual(['fresh', 'stale'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, cooldownMs: 6 * HOUR }).map((c: { id: string }) => c.id)).toEqual(['fresh', 'stale'])
   })
 
   it('超过 maxPerRun 截断；按 blocked 时间升序（同刻按 id 稳定）', () => {
@@ -238,8 +238,8 @@ describe('orchestrator autoresume > pickAutoResumeCandidates 纯函数', () => {
       bcard('a-first', [ev('blocked', { reason: 'HTTP 429' }, '2026-11-01T01:00:00.000+08:00')]),
       bcard('b-mid', [ev('blocked', { reason: 'HTTP 429' }, '2026-11-01T02:00:00.000+08:00')]),
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 2 }).map((c) => c.id)).toEqual(['a-first', 'b-mid'])
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 10 }).map((c) => c.id)).toEqual(['a-first', 'b-mid', 'c-late'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 2 }).map((c: { id: string }) => c.id)).toEqual(['a-first', 'b-mid'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 10 }).map((c: { id: string }) => c.id)).toEqual(['a-first', 'b-mid', 'c-late'])
   })
 
   it('blocked 时间缺失按最早处理（先续先解脱，id 兜底稳定排序）', () => {
@@ -249,7 +249,7 @@ describe('orchestrator autoresume > pickAutoResumeCandidates 纯函数', () => {
       bcard('a-nots', noTsEvents()),
       bcard('a-nots2', noTsEvents()),
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 3 }).map((c) => c.id)).toEqual(['a-nots', 'a-nots2', 'z-ts'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 3 }).map((c: { id: string }) => c.id)).toEqual(['a-nots', 'a-nots2', 'z-ts'])
   })
 
   it('opts 非法静默回落缺省（maxPerRun=2、cooldownMs=24h；配置层才告警）', () => {
@@ -260,9 +260,9 @@ describe('orchestrator autoresume > pickAutoResumeCandidates 纯函数', () => {
       bcard('fresh', transientEvents(), { auto_resumed_at: '2026-11-02T00:00:00+08:00' }),
     ]
     // maxPerRun=0 回落 2：只出 a、b（c 被截断）
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 0 }).map((c) => c.id)).toEqual(['a', 'b'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 0 }).map((c: { id: string }) => c.id)).toEqual(['a', 'b'])
     // cooldownMs=-1 回落 24h：fresh（12h 前自动续过）仍在冷却，同样截到 2 张
-    expect(pickAutoResumeCandidates(cards, { now: NOW, cooldownMs: -1 }).map((c) => c.id)).toEqual(['a', 'b'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, cooldownMs: -1 }).map((c: { id: string }) => c.id)).toEqual(['a', 'b'])
   })
 
   it('混合队列：非 transient / 冷却中 / 熔断收尾的卡全被过滤', () => {
@@ -273,7 +273,7 @@ describe('orchestrator autoresume > pickAutoResumeCandidates 纯函数', () => {
       bcard('good', [ev('blocked', { reason: '上游 429 too many requests，未产出结果块' })]),
       bcard('retry-chain', transientEvents()),
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['good', 'retry-chain'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c: { id: string }) => c.id)).toEqual(['good', 'retry-chain'])
   })
 })
 
@@ -586,9 +586,9 @@ describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () =>
       { id: 'c3', meta: {}, events: crashEvents() },
       { id: 'cool', meta: { auto_resumed_at: '2026-11-02T00:00:00+08:00' }, events: crashEvents() }, // 12h 前自动续过
     ]
-    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 2 }).map((c) => c.id)).toEqual(['c1', 'c2'])
-    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['c1', 'c2', 'c3'])
-    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5, cooldownMs: 6 * HOUR }).map((c) => c.id)).toEqual(['c1', 'c2', 'c3', 'cool'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 2 }).map((c: { id: string }) => c.id)).toEqual(['c1', 'c2'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c: { id: string }) => c.id)).toEqual(['c1', 'c2', 'c3'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5, cooldownMs: 6 * HOUR }).map((c: { id: string }) => c.id)).toEqual(['c1', 'c2', 'c3', 'cool'])
   })
 
   it('id 稳定排序（孤儿无 settle 时间可排，确定性优先）', () => {
@@ -596,7 +596,7 @@ describe('orchestrator autoresume > pickOrphanResumeCandidates 纯函数', () =>
       { id: 'z', meta: {}, events: crashEvents() },
       { id: 'a', meta: {}, events: crashEvents() },
     ]
-    expect(pickOrphanResumeCandidates(cards, { now: NOW }).map((c) => c.id)).toEqual(['a', 'z'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW }).map((c: { id: string }) => c.id)).toEqual(['a', 'z'])
   })
 
   it('stuck 终态对冲续用：commitsAhead>0 的 stuck 孤儿入候选（rescue 标记 + 证据字段）；0/缺省/熔断/冷却内照旧拒', () => {
@@ -627,7 +627,7 @@ describe('orchestrator autoresume > partitionRunningOrphans 孤儿判定双条�
     const cards = [{ id: 'frozen', meta: {}, events: crashEvents() }]
     const { orphans, silentLive } = partitionRunningOrphans(cards, {
       lockOf: () => staleLock(process.pid),
-      pidAlive: (p) => p === process.pid,
+      pidAlive: (p: number) => p === process.pid,
     })
     expect(silentLive).toEqual(['frozen'])
     expect(orphans).toEqual([])
@@ -639,7 +639,7 @@ describe('orchestrator autoresume > partitionRunningOrphans 孤儿判定双条�
       lockOf: () => staleLock(999_999_999),
       pidAlive: () => false,
     })
-    expect(orphans.map((c) => c.id)).toEqual(['orph'])
+    expect(orphans.map((c: { id: string }) => c.id)).toEqual(['orph'])
     expect(silentLive).toEqual([])
   })
 
@@ -649,7 +649,7 @@ describe('orchestrator autoresume > partitionRunningOrphans 孤儿判定双条�
       lockOf: (id: string) => (id === 'a' ? null : id === 'b' ? staleLock(null) : (() => { throw new Error('probe boom') })()),
       pidAlive: () => true,
     })
-    expect(orphans.map((c) => c.id)).toEqual(['a', 'b', 'c'])
+    expect(orphans.map((c: { id: string }) => c.id)).toEqual(['a', 'b', 'c'])
     expect(silentLive).toEqual([])
   })
 

@@ -136,8 +136,8 @@ describe('orchestrator notify digest > buildTaskDigest', () => {
       why: '长'.repeat(120),
       events: [{ seq: 1, ts: 't', type: 'worker_done', summary: '长'.repeat(150) }],
     })
-    const why = digest.split('\n').find((l) => l.startsWith('为什么：'))
-    const done = digest.split('\n').find((l) => l.startsWith('成果：'))
+    const why = digest.split('\n').find((l: string) => l.startsWith('为什么：'))
+    const done = digest.split('\n').find((l: string) => l.startsWith('成果：'))
     expect(why!.length).toBeLessThanOrEqual('为什么：'.length + 80)
     expect(done!.length).toBeLessThanOrEqual('成果：'.length + 100)
   })
@@ -146,7 +146,7 @@ describe('orchestrator notify digest > buildTaskDigest', () => {
 describe('orchestrator notify digest > buildTaskRoster', () => {
   it('按任务号逐行列出状态与目标；超 max 截断注总数', () => {
     const tasks = Array.from({ length: 10 }, (_, i) => ({ id: `task-${i}`, state: i % 2 ? 'merged' : 'blocked' }))
-    const roster = buildTaskRoster(tasks, { max: 8, infoOf: (t) => ({ goal: `目标-${t.id}` }) })
+    const roster = buildTaskRoster(tasks, { max: 8, infoOf: (t: { id: string }) => ({ goal: `目标-${t.id}` }) })
     const lines = roster.split('\n')
     expect(lines).toHaveLength(9)
     expect(lines[0]).toBe('- 【task-0】⚠ 搁浅：目标-task-0')
@@ -271,7 +271,7 @@ describe('orchestrator notify digest aggregator > 同卡终态合并', () => {
       { ts: tsB, kind: 'research', title: '调研 r1 判定 low', lines: ['rollup low'], priority: 'normal' },
     ])
     expect(agg).toHaveLength(2)
-    expect(agg.map((x) => x.title)).toEqual(['卡 t3 ✅ 已出港', '调研 r1 判定 low'])
+    expect(agg.map((x: { title: string }) => x.title)).toEqual(['卡 t3 ✅ 已出港', '调研 r1 判定 low'])
   })
 
   it('digestStateRank：merged > blocked/failed > awaiting-human > reviewing > running > pending；未知 state 按优先级兜底', () => {

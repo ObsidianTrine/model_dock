@@ -36,8 +36,8 @@ describe('orchestrator parallel > drain --workers 并发调度', () => {
       expect(out.stdout).toContain('队列已清空：本次 drain 共跑完 2 个任务（并发 2）')
       const p1Events = eventsOf(repo.root, 'p1')
       const p2Events = eventsOf(repo.root, 'p2')
-      const p1Merged = new Date(p1Events.find((e) => e.type === 'merged')?.ts).getTime()
-      const p2Ready = new Date(p2Events.find((e) => e.type === 'worktree_ready')?.ts).getTime()
+      const p1Merged = new Date(p1Events.find((e) => e.type === 'merged')!.ts as string).getTime()
+      const p2Ready = new Date(p2Events.find((e) => e.type === 'worktree_ready')!.ts as string).getTime()
       expect(Number.isNaN(p1Merged)).toBe(false)
       expect(Number.isNaN(p2Ready)).toBe(false)
       expect(p2Ready).toBeLessThan(p1Merged)
@@ -55,8 +55,8 @@ describe('orchestrator parallel > drain --workers 并发调度', () => {
       const out = runOrch(repo.root, 'drain --workers 2 --backend mock', { ORCH_MOCK_DELAY_MS: '600' })
       expect(out.stdout).toContain('队列已清空：本次 drain 共跑完 2 个任务（并发 2）')
       // 串行证据：s2 的 worktree_ready 晚于 s1 的 merged（同分区，等前一个结束才启动）
-      const s1Merged = new Date(eventsOf(repo.root, 's1').find((e) => e.type === 'merged')?.ts).getTime()
-      const s2Ready = new Date(eventsOf(repo.root, 's2').find((e) => e.type === 'worktree_ready')?.ts).getTime()
+      const s1Merged = new Date(eventsOf(repo.root, 's1').find((e) => e.type === 'merged')!.ts as string).getTime()
+      const s2Ready = new Date(eventsOf(repo.root, 's2').find((e) => e.type === 'worktree_ready')!.ts as string).getTime()
       expect(Number.isNaN(s1Merged)).toBe(false)
       expect(s2Ready).toBeGreaterThanOrEqual(s1Merged)
     } finally {

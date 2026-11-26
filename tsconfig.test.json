@@ -10,13 +10,12 @@
     "types": ["node"]
   },
   "include": ["test", "vitest.config.ts", "vitest.workflow.config.ts"],
-  // 存量豁免清单（T30 白名单渐进，2026-10-30 首测 225 → 84 后的剩余）：测试书写宽松一类
-  // （mock 形状不完整 / 部分 Config 字面量 as 断言 / 模板字面量端口类型 / typed-env 缺键），
-  // 非运行时缺陷。新文件默认受检；扩清单必须有理由并同步 test/test-typecheck-gate.test.ts
-  // 的登记断言，清完一个删一行。test/orchestrator 整目录豁免：直接 import .agents 的 .mjs
-  // 工具链（无声明文件），类型化边界需独立 d.ts 项目（后续卡）。
+  // 存量豁免清单（T30 白名单渐进）：测试书写宽松一类（mock 形状不完整 / 部分 Config
+  // 字面量 as 断言 / 模板字面量端口类型 / typed-env 缺键），非运行时缺陷。新文件默认受检；
+  // 扩清单必须有理由并同步 test/test-typecheck-gate.test.ts 的登记断言，清完一个删一行。
+  // test/orchestrator 不再是豁免：.agents 的 .mjs 工具链由 test/orchestrator/agents-scripts.d.ts
+  // 声明为 any 边界，测试代码本身受本 config 检查。
   "exclude": [
-    "test/orchestrator",
     "test/adapters.test.ts",
     "test/cli-index-cmds.test.ts",
     "test/cli-shared-more.test.ts",

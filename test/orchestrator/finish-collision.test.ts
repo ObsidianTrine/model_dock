@@ -157,7 +157,7 @@ function startFinishAsync(repo: string, task: string, extraEnv: Record<string, s
   const done = new Promise<{ status: number | null; out: string }>((resolve) => {
     child.on('close', (code) => resolve({ status: code, out: norm(buf) }))
   })
-  return { pid: child.pid, done, out: () => norm(buf) }
+  return { pid: child.pid!, done, out: () => norm(buf) }
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))

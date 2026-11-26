@@ -168,7 +168,7 @@ describe('provision > revokeTaskHarness（幂等）', () => {
       const dead = await revokeTaskHarness({ base: 'http://127.0.0.1:1', adminToken: 'x' }, 'orch-t', { timeoutMs: 300 })
       expect(dead.ok).toBe(false)
       expect(await revokeTaskHarness(GA(gw.port), '')).toEqual({ ok: true, revoked: false })
-      expect(await revokeTaskHarness(null, 'orch-t').then((r) => r.ok)).toBe(false)
+      expect(await revokeTaskHarness(null, 'orch-t').then((r: { ok: boolean }) => r.ok)).toBe(false)
       expect(gw.requests).toHaveLength(1) // 后两次没发请求
     } finally {
       gw.close()

@@ -113,7 +113,7 @@ describe('T15② events appendEvent seq 缓存', () => {
     invalidateSeqCache(dir)
     const third = appendEvent(dir, 'c')
     expect(third.seq).toBe(3)
-    expect(readEvents(dir).map((e) => [e.seq, e.type])).toEqual([[1, 'a'], [2, 'b'], [3, 'c']])
+    expect(readEvents(dir).map((e: { seq: number; type: string }) => [e.seq, e.type])).toEqual([[1, 'a'], [2, 'b'], [3, 'c']])
   })
 })
 

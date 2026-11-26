@@ -383,7 +383,7 @@ describe('weather > drain E2E（metrics 风暴 → 滞留派发，日志扫描�
         expect(out.stdout).toContain('上游风暴')
         expect(readCard(repo.root, 'pending', 'sea-metrics')).toBeTruthy() // 未派发
         expect(eventsOf(repo.root, 'sea-metrics')).toEqual([])
-        const hold = readFleetEvents(repo.root).find((e) => e.type === 'weather_hold')
+        const hold = readFleetEvents(repo.root).find((e: { type: string }) => e.type === 'weather_hold')
         expect(hold).toBeTruthy()
         expect(hold?.upstream).toEqual({ count: 10, threshold: 5, windowMinutes: 60 })
       } finally {

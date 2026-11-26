@@ -104,7 +104,7 @@ describe('orchestrator spec > prompt 构建与解析', () => {
 describe('orchestrator spec > 六维契约（integration 融入性）', () => {
   it('SPEC_DIM_WEIGHTS 六维含 integration:10 且合计 100', () => {
     expect(SPEC_DIM_WEIGHTS).toEqual({ completeness: 20, unambiguity: 20, consistency: 20, testability: 20, feasibility: 10, integration: 10 })
-    expect(Object.values(SPEC_DIM_WEIGHTS).reduce((a: number, b: number) => a + b, 0)).toBe(100)
+    expect(Object.values(SPEC_DIM_WEIGHTS as Record<string, number>).reduce((a: number, b: number) => a + b, 0)).toBe(100)
   })
 
   it('buildSpecPrompt design 模板含功能面盘点、融入位置论证与硬性要求第 7 条', () => {

@@ -9,7 +9,6 @@ import { REPO_ROOT } from './helpers.js'
  * 这里立刻红，逼先补类型或给出理由。清完一个就从两边同时删。
  */
 const REGISTERED_EXCLUDE = [
-  'test/orchestrator',
   'test/adapters.test.ts',
   'test/cli-index-cmds.test.ts',
   'test/cli-shared-more.test.ts',

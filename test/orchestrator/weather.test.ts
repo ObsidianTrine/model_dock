@@ -90,7 +90,7 @@ describe('weather > 集成（drain 风暴滞留）', () => {
 
       // fleet 级留痕：weather_hold 事件带 count 与窗口
       const fleet = readFleetEvents(repo.root)
-      const holds = fleet.filter((e) => e.type === 'weather_hold')
+      const holds = fleet.filter((e: { type: string }) => e.type === 'weather_hold')
       expect(holds).toHaveLength(1)
       expect(holds[0]).toMatchObject({ count: 6, windowMinutes: 60 })
     } finally {
@@ -146,7 +146,7 @@ describe('weather > 集成（watch 瞭望模式同样受风暴闸约束）', () 
       expect(out.stdout).toContain('风暴滞留')
       expect(eventsOf(repo.root, 'watch-x')).toEqual([]) // 滞留期不派发 = 零事件
       expect(readCard(repo.root, 'pending', 'watch-x')).toBeTruthy()
-      expect(readFleetEvents(repo.root).some((e) => e.type === 'weather_hold')).toBe(true)
+      expect(readFleetEvents(repo.root).some((e: { type: string }) => e.type === 'weather_hold')).toBe(true)
     } finally {
       repo.cleanup()
     }
@@ -196,7 +196,7 @@ describe('weather > 上游海况（countUpstreamStorm，网关实测外部风暴
       expect(out.stdout).toContain('上游风暴')
       expect(eventsOf(repo.root, 'sea-x')).toEqual([]) // 未派发
       expect(readCard(repo.root, 'pending', 'sea-x')).toBeTruthy()
-      const hold = readFleetEvents(repo.root).find((e) => e.type === 'weather_hold')
+      const hold = readFleetEvents(repo.root).find((e: { type: string }) => e.type === 'weather_hold')
       expect(hold).toBeTruthy()
       expect(hold.upstream).toEqual({ count: 2, threshold: 2, windowMinutes: 15 })
     } finally {

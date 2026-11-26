@@ -123,7 +123,7 @@ describe('orchestrator autoresume lifetime > 3 次循环第 4 次拒（核心验
       bcard('n2', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 2 }),
       bcard('n3', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 3 }),
     ]
-    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 10 }).map((c) => c.id)).toEqual(['n0', 'n1', 'n2'])
+    expect(pickAutoResumeCandidates(cards, { now: NOW, maxPerRun: 10 }).map((c: { id: string }) => c.id)).toEqual(['n0', 'n1', 'n2'])
     // 第 4 次（第 3 轮 blocked 后再触发的自动续请求）被拒且注明原因
     expect(lifetimeCapRejections(cards, { maxPerCard: DEFAULT_MAX_PER_CARD })).toEqual([
       { id: 'n3', count: 3, cap: 3 },
@@ -132,10 +132,10 @@ describe('orchestrator autoresume lifetime > 3 次循环第 4 次拒（核心验
 
   it('maxPerCard 可调：上限 5 时 count 3 仍可续；上限 1 时 count 1 即拒', () => {
     const c3 = [bcard('c3', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 3 })]
-    expect(pickAutoResumeCandidates(c3, { now: NOW, maxPerCard: 5 }).map((c) => c.id)).toEqual(['c3'])
+    expect(pickAutoResumeCandidates(c3, { now: NOW, maxPerCard: 5 }).map((c: { id: string }) => c.id)).toEqual(['c3'])
     expect(lifetimeCapRejections(c3, { maxPerCard: 5 })).toEqual([])
     const c1 = [bcard('c1', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 1 })]
-    expect(pickAutoResumeCandidates(c1, { now: NOW, maxPerCard: 1 }).map((c) => c.id)).toEqual([])
+    expect(pickAutoResumeCandidates(c1, { now: NOW, maxPerCard: 1 }).map((c: { id: string }) => c.id)).toEqual([])
     expect(lifetimeCapRejections(c1, { maxPerCard: 1 })).toEqual([{ id: 'c1', count: 1, cap: 1 }])
   })
 
@@ -161,7 +161,7 @@ describe('orchestrator autoresume lifetime > 冷却语义不回归（上限与�
 
   it('冷却过期后（count 未达上限）照常入选——24h 冷却判定路径与改造前等价', () => {
     const stale = [bcard('stale', transientEvents(), { auto_resumed_at: '2026-11-01T00:00:00+08:00', [AUTO_RESUME_COUNT_KEY]: 1 })]
-    expect(pickAutoResumeCandidates(stale, { now: NOW, cooldownMs: 24 * HOUR }).map((c) => c.id)).toEqual(['stale'])
+    expect(pickAutoResumeCandidates(stale, { now: NOW, cooldownMs: 24 * HOUR }).map((c: { id: string }) => c.id)).toEqual(['stale'])
   })
 })
 
@@ -173,7 +173,7 @@ describe('orchestrator autoresume lifetime > 孤儿通道同上限（frontmatter
       { id: 'o2', meta: { [AUTO_RESUME_COUNT_KEY]: 2 }, events: crashEvents() },
       { id: 'o3', meta: { [AUTO_RESUME_COUNT_KEY]: 3 }, events: crashEvents() },
     ]
-    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c) => c.id)).toEqual(['o2'])
+    expect(pickOrphanResumeCandidates(cards, { now: NOW, maxPerRun: 5 }).map((c: { id: string }) => c.id)).toEqual(['o2'])
     const orphanEligible = (c: { events: Array<Record<string, unknown>> }) => classifyOrphan(c.events) === 'resume'
     expect(lifetimeCapRejections(cards, { isEligible: orphanEligible })).toEqual([{ id: 'o3', count: 3, cap: 3 }])
   })
@@ -213,7 +213,7 @@ describe('orchestrator autoresume lifetime > lifetimeCapRejections 去重口径'
       bcard('z', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 3 }),
       bcard('a', transientEvents(), { [AUTO_RESUME_COUNT_KEY]: 4 }),
     ]
-    expect(lifetimeCapRejections(cards, {}).map((c) => c.id)).toEqual(['a', 'z'])
+    expect(lifetimeCapRejections(cards, {}).map((c: { id: string }) => c.id)).toEqual(['a', 'z'])
   })
 })
 

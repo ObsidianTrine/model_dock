@@ -5,11 +5,20 @@ import { execSync } from 'node:child_process'
 import path from 'node:path'
 import { loadCases, gradeCase } from '../../.agents/scripts/discovery-eval.mjs'
 
+// 评测案例 schema（discovery-eval.mjs 产出）：只声明测试断言用到的字段，边界即契约
+interface DiscoveryCase {
+  id: string
+  question: string
+  mustFind: string[]
+  mustFindAny: number
+  minCitations: number
+}
+
 const REPO = process.cwd() // vitest cwd = worktree 仓库根
 
 describe('discovery-eval > 案例与评分', () => {
   it('loadCases：真实评测集 schema 通过，字段口径正确', () => {
-    const cases = loadCases(REPO)
+    const cases = loadCases(REPO) as DiscoveryCase[]
     expect(cases.length).toBeGreaterThanOrEqual(2)
     for (const c of cases) {
       expect(c.id).toBeTruthy()
@@ -23,7 +32,7 @@ describe('discovery-eval > 案例与评分', () => {
   })
 
   it('loadCases：三道真实事故考题在列（总数 ≥5），schema 校验通过', () => {
-    const cases = loadCases(REPO)
+    const cases = loadCases(REPO) as DiscoveryCase[]
     expect(cases.length).toBeGreaterThanOrEqual(5)
     const byId = new Map(cases.map((c) => [c.id, c]))
     // 事故①：训练先验冒充检索现状——双口径现状关键词 + 当日引用 gate 兜底

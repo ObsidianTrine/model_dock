@@ -40,7 +40,7 @@ describe('orchestrator notify > 钥匙串兜底（darwin）', () => {
       const envWebhook = process.env.AGENTS_NIGHTLY_WEBHOOK ?? process.env.MODELRDOCK_NIGHTLY_WEBHOOK
       if (!envWebhook) {
         // 环境未设 webhook 且测试服务名不在钥匙串 → 无 webhook 通道（darwin 也一样）
-        expect(r.delivered.some((d) => d.startsWith('webhook POST'))).toBe(false)
+        expect(r.delivered.some((d: string) => d.startsWith('webhook POST'))).toBe(false)
       }
     } finally {
       repo.cleanup()
@@ -58,7 +58,7 @@ describe('orchestrator notify > 钥匙串兜底（darwin）', () => {
         webhookEnvs: ['TEST_KC_WEBHOOK'],
       })
       // dryRun 不真的发；TEST_KC_WEBHOOK 未设 → 无 webhook 条目（darwin 亦然，服务名不存在）
-      expect(r.delivered.some((d) => d.startsWith('webhook POST'))).toBe(false)
+      expect(r.delivered.some((d: string) => d.startsWith('webhook POST'))).toBe(false)
     } finally {
       repo.cleanup()
     }

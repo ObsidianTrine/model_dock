@@ -221,7 +221,7 @@ describe('orchestrator research > prompt 与工具面', () => {
 
   it('buildVerifierPrompt：硬性要求 1 含行内 [n] 引用豁免句（prompt 契约锁定，2026-11-10）', () => {
     const p = buildVerifierPrompt(CLAIM_BODY, '快照文本', process.cwd())
-    const req1 = p.split('\n').find((l) => l.startsWith('1. claim'))
+    const req1 = p.split('\n').find((l: string) => l.startsWith('1. claim'))
     expect(req1).toContain('逐字摘自 brief 原文')
     expect(req1).toContain('行内 [n] 引用标注可省略')
   })
@@ -242,7 +242,7 @@ describe('orchestrator research > prompt 与工具面', () => {
     expect(p).toContain('依据是对快照内容的转述/归纳')
     // supported 正面定义句
     expect(p).toContain('全部承重断言')
-    const supportedLine = p.split('\n').find((l) => l.startsWith('- supported：'))
+    const supportedLine = p.split('\n').find((l: string) => l.startsWith('- supported：'))
     expect(supportedLine).toContain('都有快照直接依据')
     expect(supportedLine).toContain('就不算 supported')
   })
@@ -545,8 +545,8 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       appendResearchLedger(root, { kind: 'l1', brief_id: 'verify-me', model: 'glm-5.3-flash', level: 'warn', hit_rate: 0.8 })
       appendResearchLedger(root, { kind: 'l1', brief_id: 'other', model: 'glm-4.5-air', level: 'fail', hit_rate: 0.2 })
       const stats = readLedgerStats(root)
-      const m53 = stats.find((s) => s.model === 'glm-5.3-flash')
-      const air = stats.find((s) => s.model === 'glm-4.5-air')
+      const m53 = stats.find((s: { model: string }) => s.model === 'glm-5.3-flash')
+      const air = stats.find((s: { model: string }) => s.model === 'glm-4.5-air')
       expect(m53.runs).toBe(1)
       expect(m53.avg_hit_rate).toBe(0.8)
       expect(air.levels.fail).toBe(1)
@@ -566,8 +566,8 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       appendResearchLedger(root, { kind: 'l1', brief_id: 'c', model: 'glm-4.5-air', level: 'fail', hit_rate: 0.1 })
       const stats = readLedgerStats(root)
       expect(stats).toHaveLength(2) // 复核船 verifier-x 不单独成档——按调研船归并
-      const m53 = stats.find((s) => s.model === 'glm-5.3-flash')
-      const air = stats.find((s) => s.model === 'glm-4.5-air')
+      const m53 = stats.find((s: { model: string }) => s.model === 'glm-5.3-flash')
+      const air = stats.find((s: { model: string }) => s.model === 'glm-4.5-air')
       expect(m53?.runs).toBe(2)
       expect(m53?.avg_hit_rate).toBeCloseTo(0.7)
       expect(air?.runs).toBe(1)
@@ -587,10 +587,10 @@ describe('orchestrator research > 可信度判定（L1/L2/L3）', () => {
       // m-b：全缺 strong_support → null（与 avg_hit_rate 同款 null 语义）
       appendResearchLedger(root, { kind: 'l1', brief_id: 'd', model: 'm-b', level: 'fail', hit_rate: 0.3 })
       const stats = readLedgerStats(root)
-      const a = stats.find((s) => s.model === 'm-a')
+      const a = stats.find((s: { model: string }) => s.model === 'm-a')
       expect(a?.runs).toBe(3)
       expect(a?.avg_strong_support).toBe(75)
-      expect(stats.find((s) => s.model === 'm-b')?.avg_strong_support).toBeNull()
+      expect(stats.find((s: { model: string; avg_strong_support?: number | null }) => s.model === 'm-b')?.avg_strong_support).toBeNull()
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }
@@ -673,11 +673,11 @@ describe('orchestrator research > 快照骨架识别与完成通知', () => {
       scores: { citation: 90, evidence: 80, coherence: 100, coverage: 100, strong_support: 100, overall: 91 },
       usage: { browse: 'ok', internal_decision: 'ok', external_doc: 'ok' },
     })
-    const dim = body.split('\n').find((l) => l.startsWith('维度分:'))
+    const dim = body.split('\n').find((l: string) => l.startsWith('维度分:'))
     expect(dim).toBe('维度分: evidence=80 coherence=100 coverage=100% citation=90 strong_support=100')
     // 四维全 null（L1 纯空壳 / 缺 scores）→ 省略整行，通知行数不膨胀
     const bare = buildResearchNotifyBody({ brief_id: 'b3', level: 'unknown', scores: { overall: null }, usage: {} })
-    expect(bare.split('\n').find((l) => l.startsWith('维度分:'))).toBeUndefined()
+    expect(bare.split('\n').find((l: string) => l.startsWith('维度分:'))).toBeUndefined()
   })
 
   it('buildResearchNotifyBody：判级/usage/claims 统计/理由截断成通知正文', () => {

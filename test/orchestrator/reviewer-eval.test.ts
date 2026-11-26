@@ -32,13 +32,13 @@ describe('reviewer-eval 评测集格式', () => {
 
   it('案例数量达标（≥8，含 ≥1 个 clean 负样本）且 id 唯一', () => {
     expect(cases.length).toBeGreaterThanOrEqual(8)
-    expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length)
-    expect(cases.filter((c) => c.expect.clean).length).toBeGreaterThanOrEqual(1)
+    expect(new Set(cases.map((c: { id: string }) => c.id)).size).toBe(cases.length)
+    expect(cases.filter((c: { expect: { clean: boolean } }) => c.expect.clean).length).toBeGreaterThanOrEqual(1)
   })
 
   it('目录无孤儿文件（每个文件都属于某个 <id>.diff.md / <id>.expect.md 对）', () => {
     const files = fs.readdirSync(CASES_DIR)
-    const ids = new Set(cases.map((c) => c.id))
+    const ids = new Set(cases.map((c: { id: string }) => c.id))
     for (const f of files) {
       const m = /^(.+)\.(diff|expect)\.md$/.exec(f)
       expect(m, `孤儿文件：${f}`).not.toBeNull()
@@ -76,7 +76,7 @@ describe('reviewer-eval 评测集格式', () => {
   })
 
   it('考点覆盖任务要求的问题域（红线/越界/平台/i18n/假绿/负样本）', () => {
-    const all = cases.map((c) => c.id)
+    const all = cases.map((c: { id: string }) => c.id)
     expect(all).toContain('port-redline') // 端口 8687/8890
     expect(all).toContain('scope-drift') // 越界改动
     expect(all).toContain('hardcoded-home-path') // 硬编码路径绕过 paths.ts
@@ -120,9 +120,9 @@ describe('reviewer-eval 解析与评分', () => {
     const out = '发现 2 个问题：1) 监听 8687 生产端口；2) 老代码有魔法数字。\nREVIEW_SUMMARY: blockers=2 suggestions=0 notes=0'
     const g = gradeOutput(expectObj, out)
     expect(g.status).toBe('partial_miss')
-    expect(g.hits.map((h) => h.desc)).toEqual(['端口'])
-    expect(g.misses.map((m) => m.desc)).toEqual(['权限'])
-    expect(g.noiseHits.map((n) => n.desc)).toEqual(['建议级'])
+    expect(g.hits.map((h: { desc: string }) => h.desc)).toEqual(['端口'])
+    expect(g.misses.map((m: { desc: string }) => m.desc)).toEqual(['权限'])
+    expect(g.noiseHits.map((n: { desc: string }) => n.desc)).toEqual(['建议级'])
     expect(g.excessBlockers).toBe(1) // blockers=2 但只命中 1 个期望点
     expect(g.contractMissing).toBe(false)
   })
@@ -160,7 +160,7 @@ describe('reviewer-eval 解析与评分', () => {
   it('filterCases：未知 id 报错并列出可用清单（防打错字静默全烧）', () => {
     const all = loadCases(CASES_DIR)
     expect(() => filterCases(all, 'no-such-case')).toThrowError(/no-such-case/)
-    expect(filterCases(all, `${all[0].id}, ${all[1].id} `).map((c) => c.id)).toEqual([all[0].id, all[1].id])
+    expect(filterCases(all, `${all[0].id}, ${all[1].id} `).map((c: { id: string }) => c.id)).toEqual([all[0].id, all[1].id])
   })
 })
 

@@ -28,7 +28,7 @@ describe('orchestrator events > jsonl 追加与恢复', () => {
     expect(e1.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/)
     expect(lastSeq(dir)).toBe(2)
     const evts = readEvents(dir)
-    expect(evts.map((e) => e.type)).toEqual(['task_submitted', 'worker_spawned'])
+    expect(evts.map((e: { type: string }) => e.type)).toEqual(['task_submitted', 'worker_spawned'])
   })
 
   it('崩溃残留半行被容错跳过，不抛错', () => {

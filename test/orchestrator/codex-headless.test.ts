@@ -15,6 +15,15 @@ import {
 } from '../../.agents/scripts/orchestrator/backends/codex-headless.mjs'
 import { resolveReviewBackendName as staticRef } from '../../.agents/scripts/orchestrator/backends/claude-headless.mjs'
 
+// 后端 spawn 回调事件：只钉测试断言的字段（形状由后端实现决定，其余字段不入断言）
+interface SpawnEvent {
+  type: string
+  backend: string
+  role: string
+  tokens_in: number
+  tokens_billable: number
+}
+
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'codex-backend-test-'))
 
 describe('buildCodexArgs > 沙箱即红线', () => {
@@ -89,7 +98,7 @@ describe('codexCliSpec > ORCH_CODEX_CLI seam', () => {
 })
 
 describe('resolveReviewBackendName > codex 异构次选（不破坏既有 claude↔zcode 优先序）', () => {
-  const probeOf = (map) => (name) => map[name] ?? false
+  const probeOf = (map: Record<string, boolean>) => (name: string) => map[name] ?? false
   it('worker=codex-headless：claude 可用 → claude；claude 不可用 → zcode', () => {
     expect(staticRef({ worker: 'codex-headless', probe: probeOf({ 'claude-headless': true, 'zcode-headless': false }) })).toEqual({ name: 'claude-headless', mode: 'heterogeneous' })
     expect(staticRef({ worker: 'codex-headless', probe: probeOf({ 'claude-headless': false, 'zcode-headless': true }) })).toEqual({ name: 'zcode-headless', mode: 'heterogeneous' })
@@ -137,26 +146,26 @@ describe('spawn e2e（ORCH_CODEX_CLI 桩）', () => {
     fs.writeFileSync(promptFile, '# 任务\n做一点事')
     const saved = process.env.ORCH_CODEX_CLI
     process.env.ORCH_CODEX_CLI = stub
-    const events = []
+    const events: SpawnEvent[] = []
     try {
       const r = await codexHeadlessBackend.spawn({
         promptFile,
         cwd: dir,
         maxTurns: 10,
-        onEvent: (e) => events.push(e),
+        onEvent: (e: SpawnEvent) => events.push(e),
         envPatch: { ORCH_STUB_ARGS: path.join(dir, 'args.json') },
       })
       expect(r.exitCode).toBe(0)
       expect(r.output).toBe('STUB OK')
       expect(r.usage).toEqual({ tokensIn: 120, tokensOut: 30 }) // input+cached 合计入 tokensIn
-      const spawned = events.find((e) => e.type === 'worker_spawned')
+      const spawned = events.find((e) => e.type === 'worker_spawned')!
       expect(spawned.backend).toBe('codex-headless')
       expect(spawned.role).toBe('worker')
       expect(events.some((e) => e.type === 'budget_snapshot' && e.tokens_in === 120 && e.tokens_billable > 0)).toBe(true)
       // 桩收到的实参：sandbox 与 -o 形态回验
       const stubArgs = JSON.parse(fs.readFileSync(path.join(dir, 'args.json'), 'utf8'))
       expect(stubArgs).toContain('workspace-write')
-      expect(stubArgs.filter((a) => a === '-').length).toBe(1)
+      expect(stubArgs.filter((a: string) => a === '-').length).toBe(1)
     } finally {
       if (saved === undefined) delete process.env.ORCH_CODEX_CLI
       else process.env.ORCH_CODEX_CLI = saved
@@ -172,11 +181,11 @@ describe('spawn e2e（ORCH_CODEX_CLI 桩）', () => {
     fs.writeFileSync(promptFile, 'x')
     const saved = process.env.ORCH_CODEX_CLI
     process.env.ORCH_CODEX_CLI = stub
-    const events = []
+    const events: SpawnEvent[] = []
     try {
-      const r = await codexHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: (e) => events.push(e), readonly: true })
+      const r = await codexHeadlessBackend.spawn({ promptFile, cwd: dir, maxTurns: 1, onEvent: (e: SpawnEvent) => events.push(e), readonly: true })
       expect(r.exitCode).toBe(0)
-      expect(events.find((e) => e.type === 'worker_spawned').role).toBe('reviewer')
+      expect(events.find((e) => e.type === 'worker_spawned')!.role).toBe('reviewer')
     } finally {
       if (saved === undefined) delete process.env.ORCH_CODEX_CLI
       else process.env.ORCH_CODEX_CLI = saved

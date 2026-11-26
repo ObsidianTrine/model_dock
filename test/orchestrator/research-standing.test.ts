@@ -72,7 +72,7 @@ describe('researcherStanding > e2e（mock 船）', () => {
       expect(r.stdout).toContain('mock-ship')
       expect(r.stdout).toContain('brief 已产出') // 交互式不拦：brief 照常产出
       // 台账已追加本 run 条目（判定链不断）
-      expect(readResearchLedger(repo).some((e) => e.brief_id && !String(e.brief_id).startsWith('seed-'))).toBe(true)
+      expect(readResearchLedger(repo).some((e: { brief_id?: string }) => e.brief_id && !String(e.brief_id).startsWith('seed-'))).toBe(true)
     } finally {
       fs.rmSync(repo, { recursive: true, force: true })
     }

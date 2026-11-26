@@ -213,14 +213,14 @@ describe('assessFleet（船↔harness 判读）', () => {
   }
 
   it('zcode 船指向网关 → 无船告警；claude 船 → dogfood_bypass', () => {
-    expect(assessFleet(state, { backend: 'zcode-headless' }).map((w) => w.code)).toEqual(['meltdown_active'])
-    expect(assessFleet(state, { backend: 'claude-headless' }).map((w) => w.code)).toEqual(['dogfood_bypass', 'meltdown_active'])
+    expect(assessFleet(state, { backend: 'zcode-headless' }).map((w: { code: string }) => w.code)).toEqual(['meltdown_active'])
+    expect(assessFleet(state, { backend: 'claude-headless' }).map((w: { code: string }) => w.code)).toEqual(['dogfood_bypass', 'meltdown_active'])
   })
 
   it('未接入的客户端 → not_attached；mock 船无 harness 映射 → 只看熔断', () => {
     const detached = { ...state, harnesses: [{ id: 'zcode', attached: false, pointing: 'unknown' as const }] }
-    expect(assessFleet(detached, { backend: 'zcode-headless' }).map((w) => w.code)).toEqual(['not_attached', 'meltdown_active'])
-    expect(assessFleet(state, { backend: 'mock' }).map((w) => w.code)).toEqual(['meltdown_active'])
+    expect(assessFleet(detached, { backend: 'zcode-headless' }).map((w: { code: string }) => w.code)).toEqual(['not_attached', 'meltdown_active'])
+    expect(assessFleet(state, { backend: 'mock' }).map((w: { code: string }) => w.code)).toEqual(['meltdown_active'])
   })
 
   it('健康海况 → 零告警；unavailable → 零告警', () => {
@@ -238,9 +238,9 @@ describe('assessFleet（船↔harness 判读）', () => {
       ...state,
       harnesses: [...state.harnesses, { id: 'codex', attached: true, pointing: 'other' as const }],
     }
-    expect(assessFleet(withCodex, { backend: 'codex-headless' }).map((w) => w.code)).toEqual(['dogfood_bypass', 'meltdown_active'])
+    expect(assessFleet(withCodex, { backend: 'codex-headless' }).map((w: { code: string }) => w.code)).toEqual(['dogfood_bypass', 'meltdown_active'])
     const codexDetached = { ...state, harnesses: [{ id: 'codex', attached: false, pointing: 'unknown' as const }] }
-    expect(assessFleet(codexDetached, { backend: 'codex-headless' }).map((w) => w.code)).toEqual(['not_attached', 'meltdown_active'])
+    expect(assessFleet(codexDetached, { backend: 'codex-headless' }).map((w: { code: string }) => w.code)).toEqual(['not_attached', 'meltdown_active'])
   })
 })
 
@@ -270,7 +270,7 @@ describe('observeFleetForRun（cmdRun 装配）', () => {
     try {
       const r = await observeFleetForRun({ gatewayAdmin: true }, { backend: 'zcode-headless' })
       expect(r.lines[0]).toContain('⚓ 海况')
-      expect(r.lines.some((l) => l.includes('直连上游'))).toBe(true)
+      expect(r.lines.some((l: string) => l.includes('直连上游'))).toBe(true)
       expect(r.event).toMatchObject({
         mode: 'ok',
         providers: { up: { down: true } },

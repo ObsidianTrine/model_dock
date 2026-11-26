@@ -82,7 +82,7 @@ describe('orchestrator notify-sign > notify（dryRun 全链路形态）', () => 
       process.env[LARK_SIGN_SECRET_ENV] = SECRET
       process.env.TEST_SIGN_WEBHOOK = FEISHU
       const r2 = await notify({ title: 't', body: 'b', dryRun: true, repoRoot: repo.root, webhookEnvs: ['TEST_SIGN_WEBHOOK'] })
-      const line = r2.delivered.find((d) => d.startsWith('webhook POST')) ?? ''
+      const line = r2.delivered.find((d: string) => d.startsWith('webhook POST')) ?? ''
       const payload = JSON.parse(line.slice(line.indexOf('{')))
       expect(typeof payload.timestamp).toBe('string')
       expect(payload.sign).toBe(referenceSign(payload.timestamp, SECRET))
@@ -102,7 +102,7 @@ describe('orchestrator notify-sign > notify（dryRun 全链路形态）', () => 
     try {
       process.env.TEST_SIGN_WEBHOOK = FEISHU
       const r = await notify({ title: 't', body: 'b', dryRun: true, repoRoot: repo.root, webhookEnvs: ['TEST_SIGN_WEBHOOK'] })
-      const line = r.delivered.find((d) => d.startsWith('webhook POST')) ?? ''
+      const line = r.delivered.find((d: string) => d.startsWith('webhook POST')) ?? ''
       const payload = JSON.parse(line.slice(line.indexOf('{')))
       expect(payload.timestamp).toBeUndefined()
       expect(payload.sign).toBeUndefined()

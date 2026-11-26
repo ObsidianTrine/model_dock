@@ -165,9 +165,9 @@ describe('orchestrator trace > readDecisionTraces 只读列出', () => {
       const logRoot = path.join(repo, '.agents', 'orchestrator', 'logs', 't1')
       for (const n of ['n1', 'n2', 'n3']) writeDecisionTrace({ root: logRoot, taskId: 't1', kind: 'watchdog', input: n })
       writeDecisionTrace({ root: logRoot, taskId: 't1', kind: 'review', input: 'n4' })
-      expect(readDecisionTraces(repo, 't1', { kind: 'watchdog' }).map((t) => t.doc.input)).toEqual(['n3', 'n2', 'n1'])
-      expect(readDecisionTraces(repo, 't1', { kind: 'review' }).map((t) => t.doc.input)).toEqual(['n4'])
-      expect(readDecisionTraces(repo, 't1', { kind: 'watchdog', limit: 2 }).map((t) => t.doc.input)).toEqual(['n3', 'n2'])
+      expect(readDecisionTraces(repo, 't1', { kind: 'watchdog' }).map((t: { doc: { input: string } }) => t.doc.input)).toEqual(['n3', 'n2', 'n1'])
+      expect(readDecisionTraces(repo, 't1', { kind: 'review' }).map((t: { doc: { input: string } }) => t.doc.input)).toEqual(['n4'])
+      expect(readDecisionTraces(repo, 't1', { kind: 'watchdog', limit: 2 }).map((t: { doc: { input: string } }) => t.doc.input)).toEqual(['n3', 'n2'])
       expect(readDecisionTraces(repo, 'no-such-task', { kind: 'watchdog', limit: 5 })).toEqual([])
     } finally {
       rmTmp(repo)
@@ -341,8 +341,8 @@ describe('orchestrator trace > planner 会话留底（propose/intent，kind=plan
       expect(session).toBeTruthy()
       const traces = readDecisionTraces(repo.root, session!, { kind: 'planner' })
       expect(traces).toHaveLength(3)
-      const docs = traces.map((t) => t.doc)
-      expect(docs.map((d) => d.meta.attempt)).toEqual([3, 2, 1]) // readDecisionTraces 新→旧
+      const docs = traces.map((t: { doc: { meta: { attempt: number } } }) => t.doc)
+      expect(docs.map((d: { meta: { attempt: number } }) => d.meta.attempt)).toEqual([3, 2, 1]) // readDecisionTraces 新→旧
       for (const doc of docs) {
         expect(doc.kind).toBe('planner')
         expect(doc.taskId).toBe(session)

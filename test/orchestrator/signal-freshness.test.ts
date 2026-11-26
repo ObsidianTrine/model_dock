@@ -232,7 +232,7 @@ describe('信号新鲜度 > CI 失败 streak 级去重', () => {
       const runs = [run(18440, 'f7e0d1c9', 'failure'), run(18433, '50bd710a', 'failure'), run(18427, 'a49876e0', 'failure')]
       const r = await runScan(repo.root, { ci: true, baseBranch: 'develop', ghRun: ghRun(runs) })
       expect(r.created).toHaveLength(0)
-      expect(r.warnings.some((w) => w.includes('在途卡 scan-ci-'))).toBe(true)
+      expect(r.warnings.some((w: string) => w.includes('在途卡 scan-ci-'))).toBe(true)
       expect(fs.readdirSync(draftsDir).filter((f) => f.endsWith('.md')).sort()).toEqual(['scan-ci-50bd710a.md', 'scan-ci-a49876e0.md'])
       // streak 恢复绿后重红 = 新 streak（首个 run 变了，旧卡引用的 run 不在窗口内）→ 正当开新卡
       const fresh = [run(18500, 'deadbeef', 'failure'), run(18499, '0123abcd', 'success')]

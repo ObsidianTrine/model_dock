@@ -80,7 +80,7 @@ describe('backend 缺省回落（resolveBackendName）', () => {
         const promptFile = path.join(dir, 'p.md')
         fs.writeFileSync(promptFile, '干活\n')
         const seen: Array<Record<string, unknown>> = []
-        await mockBackend.spawn({ promptFile, cwd: dir, onEvent: (e) => seen.push(e) })
+        await mockBackend.spawn({ promptFile, cwd: dir, onEvent: (e: Record<string, unknown>) => seen.push(e) })
         expect(seen.find((e) => e.type === 'worker_spawned')?.role).toBe('worker')
       } finally {
         fs.rmSync(dir, { recursive: true, force: true })
@@ -96,7 +96,7 @@ describe('backend 缺省回落（resolveBackendName）', () => {
       const promptFile = path.join(dir, 'p.md')
       fs.writeFileSync(promptFile, '审查一下\nREVIEW_SUMMARY')
       const seen: Array<Record<string, unknown>> = []
-      await mockBackend.spawn({ promptFile, cwd: dir, onEvent: (e) => seen.push(e), readonly: true })
+      await mockBackend.spawn({ promptFile, cwd: dir, onEvent: (e: Record<string, unknown>) => seen.push(e), readonly: true })
       expect(seen.find((e) => e.type === 'worker_spawned')?.role).toBe('reviewer')
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })

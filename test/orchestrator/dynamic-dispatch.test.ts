@@ -39,7 +39,7 @@ describe('dynamic dispatch > normalizeEnvelope（包络规范化）', () => {
   it('只收真实船型；mock/未知剔除并给原因；去重', () => {
     const r = normalizeEnvelope(['zcode-headless', 'mock', 'bogus', 'zcode-headless', 'claude-headless'])
     expect(r.envelope).toEqual(['zcode-headless', 'claude-headless'])
-    expect(r.ignored.map((x) => x.entry)).toEqual(['mock', 'bogus'])
+    expect(r.ignored.map((x: { entry: string }) => x.entry)).toEqual(['mock', 'bogus'])
     expect(r.ignored[0].reason).toContain('mock 不参与自动选船')
     expect(r.ignored[1].reason).toContain('未知船型')
   })
