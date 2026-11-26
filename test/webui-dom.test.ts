@@ -635,6 +635,35 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     }
   })
 
+  // 旧账让位（2026-11-26 用户实证：「-」占位被动失效把换 key 后的健康结论压在徽标下）：
+  // 同服务存在「真实 key 指纹且证据更新」的结论时，「-」占位结论不参与徽标最差排序
+  it('健康下钻：「-」占位旧账让位——真实指纹且更新的健康结论压住被动失效不出徽标；占位更新时照常出', async () => {
+    const at0 = Date.now()
+    // 场景 1：占位失效（21 分钟前 passive）+ 真实指纹健康（刚刚 probe）→ 徽标消失
+    PROBE_VERDICTS_FIXTURE.verdicts = [
+      { provider: 'alpha', key_fp: '-', model: 'a-model', state: 'auth-dead', evidence: { source: 'passive:p15', at: at0 - 21 * 60000, status: 401 } },
+      { provider: 'alpha', key_fp: '0d732852', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p1', at: at0 } },
+    ]
+    try {
+      mountPage()
+      await flush()
+      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull()
+      // 场景 2：占位失效比真实指纹结论更新 → 照常出徽标（坏消息优先不被健康盖住）
+      PROBE_VERDICTS_FIXTURE.verdicts = [
+        { provider: 'alpha', key_fp: '-', model: 'a-model', state: 'auth-dead', evidence: { source: 'passive:p15', at: at0, status: 401 } },
+        { provider: 'alpha', key_fp: '0d732852', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p1', at: at0 - 60000 } },
+      ]
+      mountPage()
+      await flush()
+      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLButtonElement | null
+      expect(badge).not.toBeNull()
+      expect(badge!.className).toContain('err')
+      expect(badge!.textContent).toContain('失效')
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+    }
+  })
+
   it('健康下钻：模型过滤 select 按 (provider, model) 重渲染；该服务无翻转条目出「近 30 天无 verdict 变化」空态', async () => {
     PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
     PROBE_TREND_FIXTURE.timeline = [
