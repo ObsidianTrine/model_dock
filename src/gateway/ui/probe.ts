@@ -94,8 +94,9 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
   // （头部 × + Esc + closeOnScrim:true 遮罩，foot 只留 msg 槽，ui-kit §9 2026-11 修订口径）；
   // 错误一律写 msg 槽，禁 toast（磨砂遮罩会盖住 toast）。双入口落点：卡片「诊断」按钮 →
   // 诊断动作区；徽标点击 → 当前结论/健康变化区（徽标 tooltip 的承诺即「查看健康变化历史」）。
-  // trend 数据沿用 trend 端点全量响应、客户端按 provider 过滤（端点契约冻结：探针翻转低频、
-  // 30 天条目量级为几十条内，为单消费方加过滤参数属 API 面扩张，见 spec design §2.3 案 A）
+  // 健康历史两段加载（svc-timeline-lazy）：打开弹层只拉本服务最近 10 条（GET /probe/timeline，
+  // 服务端按 provider 裁剪 + 尾部截取，不再整包下载全 provider 的 /probe/trend 响应——spend
+  // 曲线本弹层不消费），点「展开全部」再拉全窗口（limit=0）
   var probeSvcTimelineM = createModal({
     id: 'probeSvcTimelineOverlay',
     titleId: 'probeSvcTimelineTitle',
@@ -107,7 +108,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       { slot: 'msg', id: 'probeSvcTimelineMsg', kind: 'err' },
     ],
   })
-  var probeSvcTrend = null // 最近一次 trend 响应缓存：模型过滤切换只重渲染、不重发请求
+  var probeSvcTrend = null // 当前弹层服务的 timeline 缓存 {pid, rows, total, expanded}：模型过滤切换只重渲染、不重发请求
   var diagPid = null // 弹层当前服务的 id（诊断动作请求的 provider 参数）
   function diagSvcLabel(pid) {
     if (view) for (var i = 0; i < (view.services || []).length; i++) {
@@ -457,7 +458,13 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
   function renderProbeSvcTimeline(pid, model) {
     var box = document.getElementById('diagTrendBox')
     if (!box) return
-    var all = ((probeSvcTrend && probeSvcTrend.timeline) || []).filter(function (it) { return it.provider === pid && (!model || it.model === model) })
+    // 数据 = 本服务 timeline 缓存（端点已按 provider 裁剪，不再客户端过滤）；缓存不匹配当前
+    // 服务时按空数据处理（重开弹层会重新拉取，旧服务数据不得误读为本服务）
+    var data = probeSvcTrend && probeSvcTrend.pid === pid ? probeSvcTrend : { pid: pid, rows: [], total: 0, expanded: false }
+    var all = (data.rows || []).filter(function (it) { return !model || it.model === model })
+    // 最新在上（引擎 at 升序 → 渲染倒序）：诊断弹层核心问题是「最近发生了什么」，截断态
+    // 更要保证最新结论在顶、不用滚动就能看到
+    all.reverse()
     var rows = ''
     if (!all.length) {
       rows = '<tr><td colspan="4" class="empty">' + esc(t('近 30 天无 verdict 变化', 'No verdict changes in the last 30 days')) + '</td></tr>'
@@ -476,33 +483,44 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
           '<td class="dim">' + esc(it.source) + '</td></tr>'
       }
     }
-    // 模型选项 = 该服务条目 distinct model + 「全部模型」；选项按 provider 全集算、不受当前
-    // 模型过滤收窄（收窄后「全部模型」就回不去了）
+    // 模型选项 = 已加载条目（截断态=最近 10 条；展开后=全窗口）distinct model + 「全部模型」；
+    // 选项不受当前模型过滤收窄（收窄后「全部模型」就回不去了）
     var seen = {}
     var models = []
-    var src = (probeSvcTrend && probeSvcTrend.timeline) || []
+    var src = data.rows || []
     for (var m = 0; m < src.length; m++) {
-      if (src[m].provider === pid && !seen[src[m].model]) { seen[src[m].model] = true; models.push(src[m].model) }
+      if (!seen[src[m].model]) { seen[src[m].model] = true; models.push(src[m].model) }
     }
     var opts = '<option value="">' + esc(t('全部模型', 'All models')) + '</option>'
     for (var n = 0; n < models.length; n++) {
       opts += '<option value="' + esc(models[n]) + '"' + (models[n] === model ? ' selected' : '') + '>' + esc(models[n]) + '</option>'
     }
+    // 截断态且窗口内还有更多（total > 已加载条数）→ 出「展开全部」按钮，点击拉全窗口重渲染；
+    // 展开态不再出。加载两段化（svc-timeline-lazy）：打开只拉最近 10 条小响应，展开才拉全量
+    var expandHtml = ''
+    if (!data.expanded && data.total > (data.rows || []).length) {
+      expandHtml = '<div class="row"><button type="button" class="btn small" id="probeSvcTimelineExpand">' +
+        esc(t('展开全部 ', 'Show all ')) + data.total + esc(t(' 条', ' entries')) + '</button></div>'
+    }
     box.innerHTML =
       '<div class="row"><span class="help">' + esc(t('按模型过滤：', 'Filter by model: ')) + '</span><select id="probeSvcTimelineModelSel">' + opts + '</select></div>' +
       '<div class="tablescroll"><table id="probeSvcTimelineTable"><thead><tr><th>' + esc(t('时间', 'Time')) + '</th><th>' + esc(t('三元组', 'Triple')) + '</th><th>' + esc(t('变化', 'Change')) + '</th><th>' + esc(t('来源', 'Source')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      expandHtml +
       '<p class="help">' + esc(t('健康变化只在结论翻转时记录；结论由真实流量聚合与手动探针共同刷新。', 'Health history records verdict flips only; verdicts refresh from real-traffic aggregation and manual probes.')) + '</p>'
     var sel = document.getElementById('probeSvcTimelineModelSel')
     if (sel) sel.addEventListener('change', function () { renderProbeSvcTimeline(pid, this.value) })
+    var exp = document.getElementById('probeSvcTimelineExpand')
+    if (exp) exp.addEventListener('click', function () { loadProbeSvcTimeline(pid, 0, model) })
   }
-  function loadProbeSvcTimeline(pid) {
-    fetch('/_modeldock/probe/trend?days=30&months=6', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
+  // limit=10 打开加载 / limit=0 展开全量（keepModel=展开前的模型过滤，重渲染保持选中）
+  function loadProbeSvcTimeline(pid, limit, keepModel) {
+    fetch('/_modeldock/probe/timeline?provider=' + encodeURIComponent(pid) + '&limit=' + limit, { headers: { 'x-modeldock-lang': LANG } }).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status)
       return r.json()
     }).then(function (j) {
       if (!j || !j.timeline) throw new Error('bad payload')
-      probeSvcTrend = j
-      renderProbeSvcTimeline(pid, '')
+      probeSvcTrend = { pid: pid, rows: j.timeline, total: j.total != null ? j.total : j.timeline.length, expanded: limit === 0 }
+      renderProbeSvcTimeline(pid, keepModel || '')
     }).catch(function (e) {
       var msg = document.getElementById('probeSvcTimelineMsg')
       if (msg) msg.textContent = t('时间线加载失败：', 'Failed to load health history: ') + ((e && e.message) || e)
@@ -513,8 +531,8 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     var titleEl = document.getElementById('probeSvcTimelineTitle')
     if (titleEl) titleEl.textContent = t('服务健康 · ', 'Service health · ') + diagSvcLabel(pid)
     probeSvcTimelineM.open()
-    // 打开即渲染静态区段（快照/结论/动作/预算缓存）+ 拉取 trend 与最新预算；重开整体重建——
-    // 上一服务的旧内容不得被误读成本服务数据
+    // 打开即渲染静态区段（快照/结论/动作/预算缓存）+ 拉取健康历史（最近 10 条）与最新预算；
+    // 重开整体重建——上一服务的旧内容不得被误读成本服务数据
     probeSvcTimelineM.body.innerHTML = diagBodyHtml(pid)
     // 错误详情行（.cureline）点击复制全文（diag-err-copy）：textContent 即落库 err 全文
     // （verdict 层 ≤400 字符摘要），反馈同 .dres 文案翻转；重开整体重建后随渲染重绑
@@ -531,7 +549,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     })
     bindDiag(pid)
     loadDiagBudget()
-    loadProbeSvcTimeline(pid)
+    loadProbeSvcTimeline(pid, 10, '')
     var anchor = document.getElementById(section === 'actions' ? 'diagSecActions' : 'diagSecHealth')
     if (anchor && anchor.scrollIntoView) {
       try { anchor.scrollIntoView({ block: 'start' }) } catch (e2) { /* 无滚动几何的环境忽略 */ }

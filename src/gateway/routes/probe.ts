@@ -7,7 +7,7 @@ import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite
 import { probeBudgetState, probeMonthBreakdown, probeSpendSeries, readProbeLedger } from '../probe/ledger.js'
 import { PROBE_REGISTRY, getProbeDef } from '../probe/registry.js'
 import { getProbeRunner } from '../probe/runners/index.js'
-import { probeVerdictTimeline, probeVerdictView } from '../probe/verdict.js'
+import { probeVerdictTimeline, probeVerdictTimelinePage, probeVerdictView } from '../probe/verdict.js'
 
 /** GET /_modeldock/model-availability：per-provider 上游模型目录探测结果（admin 门内只读，纯内存读）。
  *  数据源 = 周期探测（modelprobe.ts：启动 90s + 每 24h，失败负缓存）。从未探测到的 provider
@@ -187,5 +187,34 @@ export async function hProbeTrend(c: AdminCtx): Promise<void> {
   const spend = probeSpendSeries(await readProbeLedger(), months)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, days, months, timeline, spend, generated_at: new Date().toISOString() }))
+  return
+}
+
+/** GET /_modeldock/probe/timeline?provider=x&limit=10&days=30：单服务健康变化时间线（admin 门内
+ *  只读）。服务健康弹层专用轻端点：服务端按 provider 裁剪 + 尾部 limit 截取——弹层打开只拉
+ *  最近 10 条，点「展开全部」再以 limit=0 拉全窗口，不再整包下载全 provider 的 /probe/trend
+ *  响应（spend 曲线弹层不消费）。timeline 语义与 /probe/trend 一致（只记翻转、from=窗口内该
+ *  三元组首现、at 升序；截断后首条 from 仍是真实前态）；total = 窗口内该服务翻转总数（前端
+ *  「展开全部 N 条」据此显示）。provider 必填（缺省 400）；limit 非负整数缺省 10、0=全量、
+ *  非法值夹回缺省（hLogs 夹紧先例）；days 夹紧 1–365 缺省 30。窗口实际受保留期约束
+ *  （probe-<date>.jsonl 随 log_retention_days 清理）。 */
+export async function hProbeTimeline(c: AdminCtx): Promise<void> {
+  const { req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const provider = (q.get('provider') ?? '').trim()
+  if (!provider) {
+    return sendError(res, 400, t('缺少 provider', 'Missing provider'), t('示例：/_modeldock/probe/timeline?provider=myapi&limit=10', 'Example: /_modeldock/probe/timeline?provider=myapi&limit=10'))
+  }
+  const clampNum = (v: string | null, def: number, max: number): number => {
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(max, Math.floor(n)) : def
+  }
+  const days = clampNum(q.get('days'), 30, 365)
+  const limitRaw = q.get('limit')
+  const limitNum = limitRaw != null ? Number(limitRaw) : NaN
+  const limit = Number.isFinite(limitNum) && limitNum >= 0 ? Math.min(Math.floor(limitNum), 10_000) : 10
+  const { items, total } = await probeVerdictTimelinePage(days * 86_400_000, { provider, limit })
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ ok: true, provider, days, limit, total, timeline: items, generated_at: new Date().toISOString() }))
   return
 }
