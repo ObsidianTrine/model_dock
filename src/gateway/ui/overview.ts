@@ -335,5 +335,12 @@ export const UI_JS_BOOT = `  setInterval(function () { if (!document.hidden) ref
   window.addEventListener('scroll', snavUpdate, { passive: true })
   window.addEventListener('resize', snavUpdate)
   snavUpdate()
+  // S-03 真 TS 通道宿主桥：bundle 在后续 <script> 的全局作用域运行，靠这里读取既有闭包内符号。
+  // 函数（esc/t/createModal/fmtTok/fmtUsd）直接引用；view/liveUsage/LANG 是可变状态，用取值函数
+  // 保持实时（切语言、轮询赋值后 bundle 侧立即读到新值）。
+  window.__MDUI_HOST__ = {
+    esc: esc, t: t, createModal: createModal, fmtTok: fmtTok, fmtUsd: fmtUsd,
+    view: function () { return view }, liveUsage: function () { return liveUsage }, lang: function () { return LANG },
+  }
 })()
 `

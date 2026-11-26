@@ -27,6 +27,7 @@
 | 本机网关热重载 | `scripts/run_dev.bat`（Win）/ `run_dev.sh`（mac/Linux），默认端口 **8890**（用户 dev 端口）。完全沙箱化：配置/密钥/日志全在 `~/.modeldock-dev`（密钥本地 file，不写系统钥匙环；npm 全局安装重定向进沙箱；脚本类安装拒绝并提示手动），与生产互不影响。**用户本人日常验证专用——agent 一律不得占用其沙箱与 8890 端口**，测试走硬规则 2 的隔离配方 |
 | SEA 可执行包 | `npm run build:sea`（产出 `release/` 下各平台**对外发布物**：压缩包（包内单一入口程序，unix 名 `modeldock`）+ `SHA256SUMS`；darwin 另产 `ModelDock.app` + `.dmg`；win 另产 Inno Setup `*-setup.exe`；裸二进制只作构建中间产物，不外发） |
 | 一键发布（tgz + 可执行 + 安装包） | 双击 `scripts/build.bat`（Win）/ `build.sh`（mac/Linux），或 `node scripts/build-all.mjs` |
+| UI 真 TS 通道产物 | `npm run gen:ui-ts`（源 `src/gateway/ui/ts/**`，受 tsc/ESLint 检查；漂移由 `test/ui-ts-bundle-fresh.test.ts` 对拍兜底，通道规约见 ui-kit §16） |
 
 > 版本号**唯一事实来源是 git tag**（构建中临时改 `src/version.ts` + `package.json` 后自动还原）。不要手动维护文件里写死的版本号。
 
