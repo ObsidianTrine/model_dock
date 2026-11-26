@@ -9,7 +9,7 @@
  *  token/port 的 replaceAll 注入逻辑在 server.ts 侧，维持原状未动。 */
 import { UI_CSS } from './ui/styles.js'
 import { UI_JS_MIN } from './ui-minified.js'
-import { UI_BODY_HTML } from './ui/page.js'
+import { UI_BODY_HTML, UI_TS_INLINE } from './ui/page.js'
 
 export const UI_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -26,6 +26,8 @@ ${UI_CSS}</style>
 <body>
 ${UI_BODY_HTML}<script>
 ${UI_JS_MIN}</script>
+<script>
+${UI_TS_INLINE}</script>
 </body>
 </html>
 `

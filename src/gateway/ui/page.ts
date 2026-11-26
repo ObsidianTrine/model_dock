@@ -2,6 +2,15 @@
  * Web 控制台 · page.ts —— <body> 静态骨架（由单文件 ui.ts 拆出，T04 Phase 1，行为零变化）。
  * ui.ts 以 ${UI_BODY_HTML} 拼装，与拆分前逐字节一致；勿改动片段内换行/转义。
  */
+import { UI_TS_BUNDLE } from '../ui-ts-bundled.js'
+
+/** 真 TS 通道注入段（S-03）：由 scripts/gen-ui-ts.mjs 从 src/gateway/ui/ts/** 打包，
+ *  ui.ts 把它接在既有内联脚本（UI_JS_MIN）之后的独立 <script> 里——bundle 在全局作用域
+ *  运行（var 别名挂 window），与旧片段不共用闭包：宿主闭包内符号经 window.__MDUI_HOST__
+ *  桥接（UI_JS_BOOT 尾部装配），既有调用点靠全局别名零改动。勿手改产物。 */
+export const UI_TS_INLINE = `
+${UI_TS_BUNDLE}`
+
 export const UI_BODY_HTML = `<div class="wrap">
 <header>
   <a class="codelink" href="https://github.com/ObsidianTrine/model_dock/" target="_blank" rel="noopener"><span class="logo"><svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="hlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d7cff"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#hlg)"/><path d="M14 46V20l18 15 18-15V46" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="brand">ModelDock</span></a>

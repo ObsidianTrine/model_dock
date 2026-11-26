@@ -194,3 +194,13 @@ Tabs（下划线式）、Skeleton、Empty（图标+标题+描述+动作）、Key
 - **transition 收编**：存量过渡硬编码 `.15s`（§8），收编前门禁不设断言。
 - **亮色主题对比度缺口**（§5 表）：ok/warn/star 小字与弱底合成未达 AA，调值是设计决策，需用户评审后统一调。
 - **cloud console.ts 未接入完整令牌体系**：仅 9 个色变量受门禁②同源保护；字号/圆角/裸色值扫描豁免。对齐桌面体系时补齐并移出豁免。
+
+## 16. 真 TS 通道（S-03 增量通道，新 UI 模块优先走这里）
+
+存量 UI JS 是 `src/gateway/ui/*.ts` 里的模板字面量源文本（受「禁反引号/`${`」约束、不受 tsc/ESLint 检查）。S-03 起新增 UI 模块**优先写成真 TypeScript**：
+
+- **源**：`src/gateway/ui/ts/**`（真 TS，受 `tsc -p tsconfig.json` 与 ESLint 检查）。DOM/宿主能力用 `ui/ts/host.ts` 的最小结构类型（tsconfig lib 无 DOM 是红线，不为 UI 通道加 lib）。
+- **宿主桥**：bundle 与既有片段不共用闭包（独立 `<script>` 全局作用域）。宿主闭包内符号经 `window.__MDUI_HOST__` 桥接——装配点在 `ui/overview.ts` 的 `UI_JS_BOOT` 尾部；可变状态（`view`/`liveUsage`/`LANG`）用取值函数实时读取，函数按名绑定。**新符号先在桥上登记再在 ts 侧消费。**
+- **打包**：`npm run gen:ui-ts`（`scripts/gen-ui-ts.mjs`，esbuild IIFE + minify）→ 产物 `src/gateway/ui-ts-bundled.ts`，由 `ui.ts` 注入在 `UI_JS_MIN` 之后的独立 `<script>`。entry 导出经 metafile 对齐生成 `var <name> = __MDUI_TS__.<name>` 全局别名——既有调用点零改动；**entry 新增导出必须重跑生成**（`test/ui-ts-bundle-fresh.test.ts` 对拍兜底）。
+- **迁移存量片段的口径**：迁出的片段从 `scripts/gen-ui-min.mjs` 的 ORDER 移除并删除源片段（防重复拼装红灯）；被别处引用的符号走全局别名；行为逐字等价，仅允许类型标注与宿主桥取值两处形态差。首个迁移样例：`UI_JS_USAGE` → `ui/ts/usage.ts`（2026-11-26）。
+- **门禁**：`tsc -p tsconfig.json --noEmit` 覆盖 ts/**；ESLint 棘轮同样生效（新文件不增 warn）；`ui-lint` 扫描面不含 ts/**（无样式令牌诉求），但 `data-i18n`/`t()` 双语纪律照旧。

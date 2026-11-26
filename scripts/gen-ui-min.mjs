@@ -62,7 +62,8 @@ export function generateUiMin() {
     'UI_JS_EDIT',
     'UI_JS_LOGS',
     'UI_JS_PROBE',
-    'UI_JS_USAGE',
+    // UI_JS_USAGE 已迁入真 TS 通道（src/gateway/ui/ts/usage.ts，由 scripts/gen-ui-ts.mjs 打包）：
+    // 不在本清单内，避免片段被重复拼装进最小化产物
     'UI_JS_MERGE',
     'UI_JS_BOOT',
   ]
