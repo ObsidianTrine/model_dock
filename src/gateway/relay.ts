@@ -1069,7 +1069,9 @@ function isNonEmptyRecord(o: Record<string, unknown> | undefined): boolean {
  *  目录未管理（models 缺省或空）不拦——没有证据不判死刑，维持「模型归客户端管」的透传语义。
  *  wire（请求体顶层 model）拿不准（扫描 null）或非 routed path 时整体不过滤；undefined（无 model 键）
  *  时仍按 resolveModelFinal 判定——改写层会给无 model 请求注入 default_model，对账口径必须一致。
- *  被剔候选留痕：attempts 记 note=model_mismatch（与 queue_full 同风格），modelSkip 供 reason 标记。 */
+ *  被剔候选留痕：attempts 记 note=model_mismatch（与 queue_full 同风格），modelSkip 供 reason 标记；
+ *  但主选直连成功且无其他改发事件时留痕从随行 reason/attempts 剥离（见 forwardWithFailover 的
+ *  deviated 注）——预剔是静态链构图而非已发生事件，不该把健康请求打成 warn 进错误视图。 */
 function filterModelCompatible(
   ordered: OrderedCandidate[],
   wire: string | undefined | null,
@@ -1168,6 +1170,9 @@ export async function forwardWithFailover(
     attempts,
     modelMismatch,
   )
+  // 预剔 note 占据 attempts 头部的条数（filterModelCompatible 只在循环前写入，真实发送 attempt
+  // 从下标 preCullCount 起）：直连成功且无其他偏离事件时从随行 attempts 剥离（见 deviated 注）
+  const preCullCount = attempts.length
   for (let i = 0; i < cands.length; i++) {
     const c = cands[i]
     // 并发闸（P0②）：转发前对实际选中候选的 provider 取槽；满载排队 ≤ queue_wait_ms。
@@ -1297,12 +1302,21 @@ export async function forwardWithFailover(
           continue
         }
       }
+      const finalBad = up.status >= 400 || !!quota // 与 out.status 同值（out 仅换头/换体）
+      // 偏离主选判定（预剔留痕的随行闸门，2026-11-26）：最终候选非主选 / 最终失败 / 发生过任何
+      // 真实改发事件（切候选、排队超时跳过、429 退避重试、模型容灾合成候选）。预剔型 model_mismatch
+      // （filterModelCompatible 循环前剔除）只是「链上潜在候选被目录核对剔除」的静态事实而非已发生
+      // 事件——主选直连成功时拼进 reason 会把健康请求打成 warn 进错误环形缓冲、且进不了成功页
+      // （okRing 只收无 reason 条目），健康流量系统性污染错误视图（与该特性 2026-11-08 防噪初衷相悖）；
+      // 失败/改发路径留痕照旧，「链为何变短」的对账价值不丢。
+      const deviated =
+        !c.isPrimary || finalBad || replayedFrom.length > 0 || queueFull.length > 0 || retried429.length > 0 || fallbackTo.length > 0
       const marks: string[] = []
       if (!c.isPrimary && !c.modelFallback) marks.push(`failover_to:${c.providerId}`) // modelFallback 候选 provider 没换，不打 failover_to
       if (fallbackTo.length) marks.push(`fallback_to:${fallbackTo.join(',')}`)
       if (queueFull.length) marks.push(`queue_full:${queueFull.join(',')}`)
       if (retried429.length) marks.push(`retried_429:${retried429.join(',')}`)
-      if (modelMismatch.length) marks.push(`model_mismatch:${modelMismatch.join(',')}`)
+      if (modelMismatch.length && deviated) marks.push(`model_mismatch:${modelMismatch.join(',')}`)
       if (replayedFrom.length) marks.push(`replayed_from:${replayedFrom.join(',')}`)
       // 已排空的错误体（429/402 但未切换）重新包一层交还客户端，错误原样保留；
       // 体已解压为明文，content-encoding 头一并摘掉，客户端不能再按压缩体解包
@@ -1312,14 +1326,15 @@ export async function forwardWithFailover(
         : up
       // 成功路径不在此释放：流式响应要等客户端收完才释放槽（server.ts 于响应结束后调用 release）
       const held = slot
-      // attempts 只在「发生过改发」或「最终失败」时随行（直连成功不写，日志保持精简）
-      const finalBad = out.status >= 400 || !!quota
+      // attempts 只在「发生过改发」或「最终失败」时随行（直连成功不写，日志保持精简）；
+      // 未偏离时把头部的预剔 note 一并剥离，随行 attempts 与「无预剔链的直连成功」同形
+      const outAttempts = deviated ? attempts : attempts.slice(preCullCount)
       return {
         ...out,
         usedProviderId: c.providerId,
         reason: marks.length ? marks.join(',') : undefined,
         ...(finalBad ? { cause: quota ? 'quota' : out.status >= 500 ? 'upstream_5xx' : 'upstream_4xx' } : {}),
-        ...(attempts.length > 1 || finalBad ? { attempts } : {}),
+        ...(outAttempts.length > 1 || finalBad ? { attempts: outAttempts } : {}),
         ...(held ? { release: () => held.release() } : {}),
       }
     } catch (e) {
