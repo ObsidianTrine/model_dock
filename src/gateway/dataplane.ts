@@ -12,6 +12,9 @@ import { healthView } from './routes/system.js'
 import { handleAdmin } from './admin.js'
 import { t } from '../util/i18n.js'
 
+/** Claude Code gateway discovery 的硬过滤：模型 ID 不含 claude/anthropic 字样的条目全部丢弃
+ *  （2.1.296 二进制实测：filter(te=>/(claude|anthropic)/i.test(te.id))，全滤光时
+ *  「0 usable models after filter」，/model 选择器只剩内置档位）。 */
 const DISCOVERY_ID_RE = /(claude|anthropic)/i
 
 /** discovery 场景服务的模型 ID：非 Claude 系 ID 加 `anthropic.` 前缀别名（Bedrock 同款惯例）
