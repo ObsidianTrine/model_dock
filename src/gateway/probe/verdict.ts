@@ -381,19 +381,45 @@ export interface ProbeVerdictTimelineItem {
   source: string
 }
 
-/** 近 windowMs 的 verdict 变化时间线（GET /_modeldock/probe/trend 数据源）：只读 probe-<date>.jsonl，
- *  窗口过滤在读取层逐行 at 过滤（窗口外数据不出本函数、更不出网关）；输出按证据时间 at 升序，
- *  同三元组相邻条目状态相同的（evidence 刷新）不出——变化时间线只记翻转。不读请求日志与账本。
- *  窗口受保留期约束：probe-<date>.jsonl 随 log_retention_days 清理，超出保留期的历史自然为空。 */
+/** 近 windowMs 的 verdict 变化时间线（GET /_modeldock/probe/trend 数据源）：无作用域全量变体，
+ *  语义见 probeVerdictTimelinePage。 */
 export async function probeVerdictTimeline(windowMs: number, now = Date.now()): Promise<ProbeVerdictTimelineItem[]> {
-  if (!Number.isFinite(windowMs) || windowMs <= 0) return []
+  return (await probeVerdictTimelinePage(windowMs, undefined, now)).items
+}
+
+/** 时间线读取作用域：provider/limit（省略 = 全量，与 probeVerdictTimeline 同行为） */
+export interface ProbeVerdictTimelineOpts {
+  /** 只取该 provider 的条目（扫描层过滤，其他 provider 的行不进内存、不进翻转链） */
+  provider?: string
+  /** 只回最新 N 条翻转：窗口内全翻转链算完后再尾部截取（0/undefined = 不截断）——截断后
+   *  首条的 from 仍是真实前态（可能指向被截掉的更早翻转），与展开态显示一致 */
+  limit?: number
+}
+
+/** 带总数的时间线页（GET /_modeldock/probe/timeline 数据源）：total = 窗口内 provider 过滤后的
+ *  翻转总数（前端「展开全部 N 条」据此显示）；items = limit 截取后的条目（升序）。 */
+export interface ProbeVerdictTimelinePage {
+  items: ProbeVerdictTimelineItem[]
+  total: number
+}
+
+/** 近 windowMs 的 verdict 变化时间线：只读 probe-<date>.jsonl，窗口过滤在读取层逐行 at 过滤
+ *  （窗口外数据不出本函数、更不出网关）；同三元组相邻条目状态相同的（evidence 刷新）不出——
+ *  变化时间线只记翻转。不读请求日志与账本。窗口受保留期约束：probe-<date>.jsonl 随
+ *  log_retention_days 清理，超出保留期的历史自然为空。 */
+export async function probeVerdictTimelinePage(
+  windowMs: number,
+  opts: ProbeVerdictTimelineOpts = {},
+  now = Date.now()
+): Promise<ProbeVerdictTimelinePage> {
+  if (!Number.isFinite(windowMs) || windowMs <= 0) return { items: [], total: 0 }
   const startAt = now - windowMs
   const dir = logsDir()
   let names: string[]
   try {
     names = fs.readdirSync(dir)
   } catch {
-    return []
+    return { items: [], total: 0 }
   }
   const files = names.filter((n) => VERDICT_FILE_RE.test(n)).sort()
   const rows: Array<ProbeVerdictTimelineItem & { atMs: number }> = []
@@ -417,6 +443,7 @@ export async function probeVerdictTimeline(windowMs: number, now = Date.now()): 
         continue
       }
       if (e?.kind !== 'probe-verdict') continue
+      if (opts.provider != null && e.provider !== opts.provider) continue
       const atMs = Date.parse(String(e.at ?? ''))
       if (!Number.isFinite(atMs) || atMs < startAt) continue
       const state = VERDICT_STATES.includes(e.state as ProbeVerdictState) ? (e.state as ProbeVerdictState) : undefined
@@ -442,5 +469,7 @@ export async function probeVerdictTimeline(windowMs: number, now = Date.now()): 
     if (prev !== r.to) out.push({ at: r.at, provider: r.provider, key_fp: r.key_fp, model: r.model, from: prev, to: r.to, source: r.source })
     lastState.set(key, r.to)
   }
-  return out
+  const limit = opts.limit != null && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 0
+  const items = limit > 0 && out.length > limit ? out.slice(-limit) : out
+  return { items, total: out.length }
 }

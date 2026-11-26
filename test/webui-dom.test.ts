@@ -84,8 +84,9 @@ const LOGS_FIXTURE: { logs: any[]; total: number; page: number; pages: number } 
 /** /_modeldock/probe/verdicts 夹具（健康下钻用例按需改写；默认空 = 全部服务无结论、不出徽标） */
 const PROBE_VERDICTS_FIXTURE: { verdicts: any[] } = { verdicts: [] }
 
-/** /_modeldock/probe/trend 夹具（全量响应形态；UI 按 provider 客户端过滤，端点契约无过滤参数） */
-const PROBE_TREND_FIXTURE: { timeline: any[]; spend: any[] } = { timeline: [], spend: [] }
+/** /_modeldock/probe/timeline 夹具（单服务响应形态：timeline=该 provider 条目（服务端已裁剪），
+ *  total=窗口内翻转总数；截断态 total>timeline.length 出「展开全部」钮。用例按需改写，finally 还原） */
+const PROBE_TIMELINE_FIXTURE: { timeline: any[]; total: number } = { timeline: [], total: 0 }
 
 /** /_modeldock/probe/ledger 夹具（探针自耗 pill/明细弹层用例按需改写；默认无 budget/breakdown
  *  = 账本未就绪，lite 缓存不落、pill 不出——存量用例零感知） */
@@ -110,7 +111,7 @@ function stubFetch(): void {
     '/_modeldock/lan': () => ({ body: { ok: true, enabled: false } }),
     '/_modeldock/ui-presence': () => ({ body: { ok: true } }),
     '/_modeldock/probe/verdicts': () => ({ body: PROBE_VERDICTS_FIXTURE }),
-    '/_modeldock/probe/trend': () => ({ body: PROBE_TREND_FIXTURE }),
+    '/_modeldock/probe/timeline': () => ({ body: PROBE_TIMELINE_FIXTURE }),
     '/_modeldock/probe/ledger': () => ({ body: PROBE_LEDGER_FIXTURE }),
   }
   vi.stubGlobal('fetch', (url: string) => {
@@ -588,16 +589,16 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
 
   // —— 健康下钻（probe-ui-into-usage-health 任务 2）：服务卡徽标点击 → 该服务 verdict 变化时间线 ——
 
-  it('健康下钻：verdict 徽标 button 化（无结论服务不出），点击打开按服务过滤的时间线弹层', async () => {
+  it('健康下钻：verdict 徽标 button 化（无结论服务不出），点击打开按服务拉取的时间线弹层（最近 10 条）', async () => {
     PROBE_VERDICTS_FIXTURE.verdicts = [
       { provider: 'alpha', state: 'healthy', evidence: { source: 'scheduled', at: Date.now() - 60000 } },
       { provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 120000 } },
     ]
-    PROBE_TREND_FIXTURE.timeline = [
+    // 夹具 = 服务端对 provider=alpha 的裁剪响应形态（beta 条目不会出现在该服务的响应里）
+    PROBE_TIMELINE_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
-      { at: '2026-11-21T11:30:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: 'unverified', to: 'healthy', source: 'manual' },
     ]
-    PROBE_TREND_FIXTURE.spend = [{ month: '2026-11', tokens: 1200 }]
+    PROBE_TIMELINE_FIXTURE.total = 1
     const urls: string[] = []
     const prev = globalThis.fetch
     vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
@@ -616,21 +617,22 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(badge!.textContent).toContain('降级')
       expect(badge!.title).toContain('点击查看健康变化历史')
       expect(document.querySelector('[data-probehist="beta"]')).toBeNull()
-      // R3.2：点击徽标 → 打开弹层，打开动作内拉取 trend（days=30&months=6）
+      // R3.2：点击徽标 → 打开弹层，打开动作内按服务拉取最近 10 条（provider 服务端裁剪 + limit 截断）
       badge!.click()
       const scrim = document.getElementById('probeSvcTimelineOverlay') as HTMLElement | null
       expect(scrim && scrim.hidden === false).toBe(true)
-      expect(urls.some((u) => u.startsWith('/_modeldock/probe/trend?days=30&months=6'))).toBe(true)
+      expect(urls.some((u) => u.startsWith('/_modeldock/probe/timeline?provider=alpha&limit=10'))).toBe(true)
       await flush()
-      // 标题动态拼服务名（titleId 先例）；timeline 按 provider 客户端过滤（beta 条目不进弹层）
+      // 标题动态拼服务名（titleId 先例）；端点已按 provider 裁剪，弹层直接渲染响应条目
       expect(document.getElementById('probeSvcTimelineTitle')?.textContent).toBe('服务健康 · Alpha 服务')
       const table = document.getElementById('probeSvcTimelineTable') as HTMLElement
       expect(table.textContent).toContain('alpha/a-model')
-      expect(table.textContent).not.toContain('beta')
+      // 截断态无更多（total=1 不超已加载）→ 不出「展开全部」
+      expect(document.getElementById('probeSvcTimelineExpand')).toBeNull()
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
-      PROBE_TREND_FIXTURE.timeline = []
-      PROBE_TREND_FIXTURE.spend = []
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
       vi.stubGlobal('fetch', prev)
     }
   })
@@ -666,10 +668,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
 
   it('健康下钻：模型过滤 select 按 (provider, model) 重渲染；该服务无翻转条目出「近 30 天无 verdict 变化」空态', async () => {
     PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
-    PROBE_TREND_FIXTURE.timeline = [
+    PROBE_TIMELINE_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
       { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'b-model', key_fp: 'cd34', from: 'healthy', to: 'degraded', source: 'scheduled' },
     ]
+    PROBE_TIMELINE_FIXTURE.total = 2
     try {
       mountPage()
       await flush()
@@ -692,10 +695,9 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       selAll.value = ''
       selAll.dispatchEvent(new Event('change'))
       expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(2)
-      // R3.4 空态：徽标在（有结论）但 30 天窗口内该服务无翻转 → 空态行
-      PROBE_TREND_FIXTURE.timeline = [
-        { at: '2026-11-22T09:00:00.000+08:00', provider: 'beta', model: 'z-model', key_fp: 'ef56', from: null, to: 'healthy', source: 'manual' },
-      ]
+      // R3.4 空态：徽标在（有结论）但 30 天窗口内该服务无翻转 → 服务端裁剪响应为空 → 空态行
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
       mountPage()
       await flush()
       ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
@@ -705,17 +707,19 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(tbody.textContent).toContain('近 30 天无 verdict 变化')
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
-      PROBE_TREND_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
     }
   })
 
-  it('健康下钻：变化列 from→to 出两端语义 pill；窗口内首现 from=null 渲染「— → to」', async () => {
+  it('健康下钻：变化列 from→to 出两端语义 pill；窗口内首现 from=null 渲染「— → to」；最新在上', async () => {
     PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'auth-dead', evidence: { source: 'manual', at: Date.now() - 60000 } }]
-    PROBE_TREND_FIXTURE.timeline = [
+    PROBE_TIMELINE_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
       { at: '2026-11-21T11:30:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'healthy', to: 'auth-dead', source: 'scheduled' },
       { at: '2026-11-22T09:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: 'auth-dead', to: 'unverified', source: 'scheduled' },
     ]
+    PROBE_TIMELINE_FIXTURE.total = 3
     try {
       mountPage()
       await flush()
@@ -724,29 +728,86 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       const rows = document.querySelectorAll('#probeSvcTimelineTable tbody tr')
       expect(rows.length).toBe(3)
       const changeOf = (i: number) => rows[i].querySelectorAll('td')[2]
-      // from=null：「—」（dim span）→ to pill（ok=健康）
-      expect(changeOf(0).querySelector('.dim')?.textContent).toBe('—')
-      expect(changeOf(0).querySelector('.pill.ok')?.textContent).toBe('健康')
-      // from→to：两端各一枚语义 pill（healthy=ok / auth-dead=err / unverified=dim）
+      // 最新在上：第一行 = 最新翻转（auth-dead → unverified：err → dim 两枚 pill）
+      expect(changeOf(0).querySelectorAll('.pill').length).toBe(2)
+      expect(changeOf(0).querySelector('.pill.err')?.textContent).toBe('失效')
+      expect(changeOf(0).querySelector('.pill.dim')?.textContent).toBe('未验证')
       expect(changeOf(1).querySelectorAll('.pill').length).toBe(2)
       expect(changeOf(1).querySelector('.pill.ok')?.textContent).toBe('健康')
       expect(changeOf(1).querySelector('.pill.err')?.textContent).toBe('失效')
-      expect(changeOf(2).querySelector('.pill.err')?.textContent).toBe('失效')
-      expect(changeOf(2).querySelector('.pill.dim')?.textContent).toBe('未验证')
-      // 时间列按引擎升序原样渲染，UI 不重排
-      expect(rows[0].querySelector('td')?.textContent).toContain('2026-11-20')
-      expect(rows[2].querySelector('td')?.textContent).toContain('2026-11-22')
+      // from=null：「—」（dim span）→ to pill（ok=健康）
+      expect(changeOf(2).querySelector('.dim')?.textContent).toBe('—')
+      expect(changeOf(2).querySelector('.pill.ok')?.textContent).toBe('健康')
+      // 时间列最新在上（引擎升序 → 渲染倒序）
+      expect(rows[0].querySelector('td')?.textContent).toContain('2026-11-22')
+      expect(rows[2].querySelector('td')?.textContent).toContain('2026-11-20')
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
-      PROBE_TREND_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
+    }
+  })
+
+  it('健康下钻：截断态出「展开全部 N 条」，点击拉 limit=0 全量重渲染且按钮消失', async () => {
+    PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
+    const mk = (i: number) => ({
+      at: `2026-11-${10 + i}T10:00:00.000+08:00`,
+      provider: 'alpha',
+      model: 'a-model',
+      key_fp: 'ab12',
+      from: i % 2 ? 'degraded' : 'healthy',
+      to: i % 2 ? 'healthy' : 'degraded',
+      source: 'manual',
+    })
+    // 截断态：服务端只回最近 10 条（夹具模拟），total=12（窗口内还有 2 条未回）
+    PROBE_TIMELINE_FIXTURE.timeline = Array.from({ length: 10 }, (_, i) => mk(i))
+    PROBE_TIMELINE_FIXTURE.total = 12
+    const urls: string[] = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      urls.push(String(url))
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-probehist="alpha"]') as HTMLElement).click()
+      await flush()
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(10)
+      // 最新在上：首行时间 = 夹具最大 at（10 条 → 2026-11-19）
+      expect(document.querySelector('#probeSvcTimelineTable tbody tr td')?.textContent).toContain('2026-11-19')
+      // 截断态按钮：文案带窗口内总数
+      const expBtn = document.getElementById('probeSvcTimelineExpand') as HTMLButtonElement | null
+      expect(expBtn?.textContent).toBe('展开全部 12 条')
+      // 展开点击 → limit=0 全量拉取；夹具换成服务端全量形态
+      PROBE_TIMELINE_FIXTURE.timeline = Array.from({ length: 12 }, (_, i) => mk(i))
+      expBtn!.click()
+      await flush()
+      expect(urls.some((u) => u.startsWith('/_modeldock/probe/timeline?provider=alpha&limit=0'))).toBe(true)
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(12)
+      // 展开态不再出按钮；模型过滤切换仍走本地缓存（不重发请求）
+      expect(document.getElementById('probeSvcTimelineExpand')).toBeNull()
+      const urlCount = urls.length
+      const sel = document.getElementById('probeSvcTimelineModelSel') as HTMLSelectElement
+      sel.value = 'a-model'
+      sel.dispatchEvent(new Event('change'))
+      await flush()
+      expect(urls.length).toBe(urlCount)
+      expect(document.querySelectorAll('#probeSvcTimelineTable tbody tr').length).toBe(12)
+    } finally {
+      PROBE_VERDICTS_FIXTURE.verdicts = []
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
+      vi.stubGlobal('fetch', prev)
     }
   })
 
   it('健康下钻：读取类弹层关路径三件套（头部 ×、Esc、遮罩点击均可关闭，foot 无关闭/刷新按钮），加载失败写 msg 槽不出 toast', async () => {
     PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
-    PROBE_TREND_FIXTURE.timeline = [
+    PROBE_TIMELINE_FIXTURE.timeline = [
       { at: '2026-11-20T10:00:00.000+08:00', provider: 'alpha', model: 'a-model', key_fp: 'ab12', from: null, to: 'healthy', source: 'manual' },
     ]
+    PROBE_TIMELINE_FIXTURE.total = 1
     try {
       mountPage()
       await flush()
@@ -774,11 +835,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(scrim.hidden).toBe(false)
       scrim.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       expect(scrim.hidden).toBe(true)
-      // 错误态：trend 拉取失败 → foot msg 槽就近报错，全局 toast 容器保持为空（弹层提示归宿纪律）
+      // 错误态：timeline 拉取失败 → foot msg 槽就近报错，全局 toast 容器保持为空（弹层提示归宿纪律）
       const prev = globalThis.fetch
       vi.stubGlobal('fetch', (url: string) => {
         const p = String(url).split('?')[0]
-        if (p === '/_modeldock/probe/trend') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
+        if (p === '/_modeldock/probe/timeline') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('{}') })
         return (prev as (u: string) => unknown)(String(url))
       })
       try {
@@ -793,7 +854,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       }
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
-      PROBE_TREND_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.timeline = []
+      PROBE_TIMELINE_FIXTURE.total = 0
     }
   })
 

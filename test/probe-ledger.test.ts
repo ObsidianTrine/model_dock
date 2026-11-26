@@ -6,7 +6,7 @@ import { buildRuntime, pruneExpiredLogs, readRequestLogDay, usageTodayView } fro
 import type { GatewayRuntime } from '../src/gateway/state.js'
 import { PROBE_BUDGET_TOKENS_DEFAULT, PROBE_REGISTRY, PROBE_TIER_TOKENS, getProbeDef, probeEstimateTokens } from '../src/gateway/probe/registry.js'
 import { probeBudgetState, probeMonthBreakdown, probeMonthKey, probeMonthSpend, probeSpendSeries, readProbeLedger, recordProbeLedgerEntry } from '../src/gateway/probe/ledger.js'
-import { probeVerdictTimeline } from '../src/gateway/probe/verdict.js'
+import { probeVerdictTimeline, probeVerdictTimelinePage } from '../src/gateway/probe/verdict.js'
 import { runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeRunner, ProbeTransport } from '../src/gateway/probe/engine.js'
 import { createGatewayServer } from '../src/gateway/server.js'
@@ -310,6 +310,46 @@ describe('probe-ledger · verdict 时间线（任务 14）', () => {
       fs.writeFileSync(path.join(logsDir(), probeDayName(0, new Date())), verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', Date.now()))
       expect(await probeVerdictTimeline(0)).toEqual([])
       expect(await probeVerdictTimeline(-5)).toEqual([])
+      expect(await probeVerdictTimelinePage(0, { provider: 'acme', limit: 10 })).toEqual({ items: [], total: 0 })
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('probeVerdictTimelinePage：provider 扫描层过滤 + limit 尾部截取（截断后首条 from 仍是真实前态）+ total 计全量翻转', async () => {
+    const h = fakeHome()
+    try {
+      const now = Date.now()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      // acme/fp1：degraded(6d) → healthy(4d) → degraded(2d)，3 次翻转；beta：quota(3d)，1 次
+      fs.writeFileSync(path.join(logsDir(), probeDayName(6, new Date(now))), verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 6 * 86_400_000))
+      fs.writeFileSync(
+        path.join(logsDir(), probeDayName(4, new Date(now))),
+        verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', now - 4 * 86_400_000) + verdictLine('beta', 'fp2', 'm', 'quota', 'probe:p3', now - 3 * 86_400_000)
+      )
+      fs.writeFileSync(path.join(logsDir(), probeDayName(2, new Date(now))), verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 2 * 86_400_000))
+      const win = 30 * 86_400_000
+      // provider 过滤：beta 条目不进 acme 的页；total = 过滤后翻转总数
+      const full = await probeVerdictTimelinePage(win, { provider: 'acme' }, now)
+      expect(full.total).toBe(3)
+      expect(full.items).toHaveLength(3)
+      expect(full.items.every((x) => x.provider === 'acme')).toBe(true)
+      const beta = await probeVerdictTimelinePage(win, { provider: 'beta' }, now)
+      expect(beta.total).toBe(1)
+      expect(beta.items[0]).toMatchObject({ provider: 'beta', key_fp: 'fp2', from: null, to: 'quota' })
+      // limit 尾部截取：最新 2 条；截断后首条（4d healthy）的 from='degraded' 指向被截掉的
+      // 6d 翻转——真实前态保留，与展开态一致；total 不受截断影响
+      const paged = await probeVerdictTimelinePage(win, { provider: 'acme', limit: 2 }, now)
+      expect(paged.total).toBe(3)
+      expect(paged.items).toHaveLength(2)
+      expect(paged.items[0]).toMatchObject({ from: 'degraded', to: 'healthy' })
+      expect(paged.items[1]).toMatchObject({ from: 'healthy', to: 'degraded' })
+      // limit=0 = 不截断；limit 超过总量 = 全量照回
+      const zero = await probeVerdictTimelinePage(win, { provider: 'acme', limit: 0 }, now)
+      expect(zero.items).toHaveLength(3)
+      const over = await probeVerdictTimelinePage(win, { provider: 'acme', limit: 99 }, now)
+      expect(over.items).toHaveLength(3)
+      expect(over.total).toBe(3)
     } finally {
       h.restore()
     }
@@ -431,5 +471,61 @@ describe('probe-ledger · GET /_modeldock/probe/trend（任务 14）', () => {
     expect(probeSpendSeries([], NaN, now)).toHaveLength(6)
     expect(probeSpendSeries([], 99, now)).toHaveLength(24)
     expect(probeSpendSeries([], 0, now)).toHaveLength(1)
+  })
+})
+
+describe('probe-ledger · GET /_modeldock/probe/timeline（svc-timeline-lazy 单服务轻端点）', () => {
+  it('provider 服务端裁剪 + limit 尾部截取 + total 计全量；limit 0=全量、缺省/非法夹回 10', async () => {
+    const t = await setupTrendEndpoint()
+    try {
+      const now = Date.now()
+      fs.mkdirSync(logsDir(), { recursive: true })
+      // acme/fp1：degraded(6d) → healthy(4d) → degraded(2d)；beta：quota(3d)
+      fs.writeFileSync(path.join(logsDir(), probeDayName(6, new Date(now))), verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 6 * 86_400_000))
+      fs.writeFileSync(
+        path.join(logsDir(), probeDayName(4, new Date(now))),
+        verdictLine('acme', 'fp1', 'm', 'healthy', 'probe:p1', now - 4 * 86_400_000) + verdictLine('beta', 'fp2', 'm', 'quota', 'probe:p3', now - 3 * 86_400_000)
+      )
+      fs.writeFileSync(path.join(logsDir(), probeDayName(2, new Date(now))), verdictLine('acme', 'fp1', 'm', 'degraded', 'probe:p1', now - 2 * 86_400_000))
+      // limit=2：只回 acme 最新 2 条（beta 被服务端裁掉），total=3 供「展开全部 N 条」
+      const g = await t.get('probe/timeline?provider=acme&limit=2')
+      expect(g.status).toBe(200)
+      const j = JSON.parse(g.body) as {
+        ok: boolean
+        provider: string
+        limit: number
+        total: number
+        timeline: Array<{ provider: string; from: string | null; to: string }>
+      }
+      expect(j.ok).toBe(true)
+      expect(j.provider).toBe('acme')
+      expect(j.limit).toBe(2)
+      expect(j.total).toBe(3)
+      expect(j.timeline).toHaveLength(2)
+      expect(j.timeline.every((x) => x.provider === 'acme')).toBe(true)
+      expect(j.timeline[0]).toMatchObject({ from: 'degraded', to: 'healthy' })
+      expect(j.timeline[1]).toMatchObject({ from: 'healthy', to: 'degraded' })
+      // limit=0 = 全量；缺省与非法值夹回 10
+      const j0 = JSON.parse(await t.get('probe/timeline?provider=acme&limit=0').then((r) => r.body)) as { limit: number; total: number; timeline: unknown[] }
+      expect(j0.limit).toBe(0)
+      expect(j0.total).toBe(3)
+      expect(j0.timeline).toHaveLength(3)
+      expect((JSON.parse(await t.get('probe/timeline?provider=acme').then((r) => r.body)) as { limit: number }).limit).toBe(10)
+      expect((JSON.parse(await t.get('probe/timeline?provider=acme&limit=abc').then((r) => r.body)) as { limit: number }).limit).toBe(10)
+      expect((JSON.parse(await t.get('probe/timeline?provider=acme&limit=-3').then((r) => r.body)) as { limit: number }).limit).toBe(10)
+    } finally {
+      t.close()
+    }
+  })
+
+  it('缺 provider 400 带示例提示（可操作报错）', async () => {
+    const t = await setupTrendEndpoint()
+    try {
+      const g = await t.get('probe/timeline')
+      expect(g.status).toBe(400)
+      expect(g.body).toContain('provider')
+    } finally {
+      t.close()
+    }
   })
 })
