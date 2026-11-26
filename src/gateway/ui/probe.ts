@@ -332,7 +332,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       diagFoot('')
       diagSetRes(resId, null)
       diagBtnBusy(btnId, true, t('检测中…', 'Checking…'))
-      api('/probe/run', { method: 'POST', body: JSON.stringify({ provider: pid, probes: [probeId] }) })
+      api('/probe/run', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ provider: pid, probes: [probeId] }) })
         .then(function (r) {
           diagBtnBusy(btnId, false, t('运行', 'Run'))
           if (r && r.needConfirm) {
@@ -360,7 +360,10 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       diagFoot('')
       diagSetRes(resId, null)
       diagBtnBusy(btnId, true, t('检测中…', 'Checking…'))
-      api('/probe/run', { method: 'POST', body: JSON.stringify({ provider: pid, probes: [probeId], confirmToken: diagConfirmTokens[probeId] || '' }) })
+      // timeoutMs 放宽到 120s（diag-run-timeout）：P14 一次串行跑 5 轮流式请求，思考型模型
+      // （如 glm-5-3-flash，不支持关思考）单轮 3~6s，5 轮 15~30s 必撞 api() 默认 15s 上限；
+      // 引擎侧无 15s 限制（空闲上限 10min），放宽后正常完成
+      api('/probe/run', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ provider: pid, probes: [probeId], confirmToken: diagConfirmTokens[probeId] || '' }) })
         .then(function (r) {
           diagBtnBusy(btnId, false, t('运行', 'Run'))
           diagRunApply(r, resId)
@@ -369,7 +372,12 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
         })
         .catch(function (e) {
           diagBtnBusy(btnId, false, t('运行', 'Run'))
-          diagSetRes(resId, { cls: 'err', text: '✗ ' + probeErrMsg(e) })
+          var msg = probeErrMsg(e)
+          // 超时不等于失败：客户端断开后引擎仍在后台跑完，结论稍后照常落库——别让用户以为白跑
+          if (/请求超时|Request timed out/.test(msg)) {
+            msg += t('（引擎仍在后台运行，结论稍后出现在「当前结论」区）', ' (the engine keeps running in the background; the verdict will appear under Current verdicts shortly)')
+          }
+          diagSetRes(resId, { cls: 'err', text: '✗ ' + msg })
         })
     }
     function wirePaid(btnId, probeId, confId, goId, cancelId, resId) {
