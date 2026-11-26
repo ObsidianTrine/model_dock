@@ -39,6 +39,7 @@ import { request as undiciRequest } from 'undici'
 import { t, bi, biCat, biJoin, runWithLang, normalizeLang, getLang, type Bilingual } from '../util/i18n.js'
 import { modeldockDir, secretsPath } from '../util/paths.js'
 import { catalogView, getRenderedUI } from './ui-cache.js'
+import { adminAuthorized, cookieValueRe, hostAllowed, safeCookieDecode } from './routes/admin-auth.js'
 import { hAutoRoute, hFetchModels, hHolidaysCn, hImportApply, hImportDetect, hImportDismiss, hKey, hProfile, hRevealKey, hSchedule, hServiceAdd, hServiceDelete, hServiceModelFallback, hServiceUpdate, hSwitch, hUse } from './routes/services.js'
 
 // T05 拆分后保持原导入面：测试与潜在外部引用仍按 server.js 路径取这些符号
@@ -604,45 +605,6 @@ async function handleRequest(
 }
 
 
-/** 管理面所有端点（含 GET）的 Host 白名单：DNS rebinding 的 Host 不是本机，读取类端点同样拒绝。
- *  参照 Vite allowedHosts（CVE-2025-31125 同类问题的标准修法）。 */
-function hostAllowed(req: http.IncomingMessage): boolean {
-  const host = String(req.headers.host ?? '')
-  return /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i.test(host)
-}
-
-// cookie 名 → 提取正则缓存：admin/device cookie 名在进程内只有个位数个（随端口），避免每请求重新编译
-const cookieValueReCache = new Map<string, RegExp>()
-function cookieValueRe(name: string): RegExp {
-  let re = cookieValueReCache.get(name)
-  if (!re) {
-    re = new RegExp(`(?:^|;\\s*)${name}=([^;]+)`)
-    cookieValueReCache.set(name, re)
-  }
-  return re
-}
-
-/** cookie 值解码：畸形值（如裸 `%`）会让 decodeURIComponent 抛 URIError 穿到顶层变 500，
- *  这里按解码失败=值不匹配处理，让鉴权路径落到正常的 401/403。 */
-function safeCookieDecode(v: string): string {
-  try {
-    return decodeURIComponent(v)
-  } catch {
-    return v
-  }
-}
-
-function adminAuthorized(rt: GatewayRuntime, req: http.IncomingMessage): boolean {
-  const h = req.headers['x-modeldock-admin']
-  if (typeof h === 'string' && safeEqual(h, rt.adminToken)) return true
-  // Web 控制台的 cookie 登录（HttpOnly + SameSite=Lax，跨站 POST 不携带）
-  const cookie = req.headers.cookie
-  if (typeof cookie === 'string') {
-    const m = cookieValueRe(adminCookieName(rt.port ?? DEFAULT_GATEWAY_PORT)).exec(cookie)
-    if (m && safeEqual(safeCookieDecode(m[1]), rt.adminToken)) return true
-  }
-  return false
-}
 
 
 
