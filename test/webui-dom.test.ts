@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi, beforeAll, afterAll } from 'vitest'
 import { UI_HTML } from '../src/gateway/ui.js'
+import { UI_JS_PROBE } from '../src/gateway/ui/probe.js'
 
 // Web 控制台 DOM 行为测试（docs/archive/web-testing-plan.md L2）：把桌面页内嵌脚本挂进 happy-dom
 // （纯 JS，无 native，不违反 SEA 依赖约束），stub fetch 返回 /overview 契约夹具，断言渲染与
@@ -897,6 +898,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       delete OVERVIEW_FIXTURE.services[0].probeModelExplicit
       vi.stubGlobal('fetch', prev)
     }
+  })
+
+  it('diag-run-timeout：探针运行请求放宽 api 超时到 120s（P14 五轮串行超 15s 默认上限），超时文案说明引擎仍在后台', () => {
+    expect(UI_JS_PROBE).toContain('timeoutMs: 120000')
+    expect(UI_JS_PROBE).toContain('引擎仍在后台运行')
   })
 
   it('diag-modal-probe-ui：错误全文可读可拷（diag-err-copy）——结果行换行不截断、点击复制翻转反馈；当前结论补 err 行', async () => {
