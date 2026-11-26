@@ -31,6 +31,10 @@ vi.mock('../src/autostart.js', async () => {
 // reg /s /f 全树注册表扫描（每个应用最多 3 个视图 × 8s 超时），overview 等聚合端点会
 // 逐客户端调 status，把用例拖到 CI 超时。本文件统一强制按「未安装」判定跳过 reg 子进程；
 // 需要在场的用例（如 zcode 接入）自行在用例内覆盖为 '1'。不断言 installed 的用例不受影响。
+/** config.toml 直读断言：tomlParse 返回 TomlValue，这里只钉本文件用到的 harness 表 */
+const tomlHarness = (text: string): Record<string, { route: string }> =>
+  (tomlParse(text) as unknown as { harness: Record<string, { route: string }> }).harness
+
 const DESKTOP_PRESENCE_IDS = ['workbuddy', 'zcode', 'mimo-desktop']
 beforeEach(() => {
   for (const id of DESKTOP_PRESENCE_IDS) {
@@ -337,7 +341,7 @@ describe('admin token 持久化', () => {
 describe('autostart 与 overview 缓存', () => {
   it('overview 缓存命中逻辑：TTL 内二次请求命中（重建只跑一次），TTL 过期与键变化即失效', () => {
     const fakeRt = {} as any
-    const cached = { at: 1_000, rt: fakeRt, reloads: 0, lang: 'zh', data: {} }
+    const cached = { at: 1_000, rt: fakeRt, reloads: 0, lang: 'zh', data: '{}' }
     // TTL 内命中；恰好达边界（now - at === TTL）即失效
     expect(overviewCacheHit(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS - 1)).toBe(true)
     expect(overviewCacheHit(cached, fakeRt, 0, 'zh', 1_000 + OVERVIEW_TTL_MS)).toBe(false)
@@ -2576,7 +2580,7 @@ describe('自动备用链（auto fallback）', () => {
       })
       expect(res.status).toBe(200) // 402 额度耗尽 → 自动切到 B
       expect(up.requests.length).toBe(1)
-      expect(JSON.parse(up.requests[0].body).model).toBe('preset-model') // 模型名原样透传，网关不改写
+      expect(JSON.parse(up.requests[0].body!).model).toBe('preset-model') // 模型名原样透传，网关不改写
       const logs: any = await (
         await fetch(`http://127.0.0.1:${gwPort}/_modeldock/logs?n=20`, { headers: { 'x-modeldock-admin': 'admin-token-x' } })
       ).json()
@@ -2869,7 +2873,7 @@ describe('自动路由 Phase2：候选链模型映射 + 状态码切换', () => 
       })
       expect(res.status).toBe(200)
       expect(up.requests.length).toBe(1)
-      expect(JSON.parse(up.requests[0].body).model).toBe('m-fallback')
+      expect(JSON.parse(up.requests[0].body!).model).toBe('m-fallback')
     } finally {
       server.close()
       up.close()
@@ -3077,7 +3081,7 @@ describe('自动路由 Phase2：候选链模型映射 + 状态码切换', () => 
 })
 
 describe('自动路由 Phase3：定时切换', () => {
-  function makeRt(schedule: Config['gateway']['schedule']): ReturnType<typeof buildRuntime> {
+  function makeRt(schedule: NonNullable<Config['gateway']>['schedule']): ReturnType<typeof buildRuntime> {
     const config: Config = {
       version: 1,
       active_profile: 'demo',
@@ -3265,7 +3269,7 @@ describe('自动路由 Phase3：定时切换', () => {
       })
       expect(res.status).toBe(200)
       expect(up.requests.length).toBe(1)
-      expect(JSON.parse(up.requests[0].body).model).toBe('m-fallback') // 窗口携带的模型映射生效
+      expect(JSON.parse(up.requests[0].body!).model).toBe('m-fallback') // 窗口携带的模型映射生效
     } finally {
       server.close()
       up.close()
@@ -3763,7 +3767,7 @@ describe('管理面安全（2026-09 审查回归）', () => {
       const bj: any = await bad.json()
       expect(bj.error.message).toContain('OpenAI Only')
       expect(bj.error.message).toContain('anthropic')
-      expect(tomlParse(fs.readFileSync(configPath(), 'utf8')).harness['claude-code'].route).toBe('default')
+      expect(tomlHarness(fs.readFileSync(configPath(), 'utf8'))['claude-code'].route).toBe('default')
 
       // 兼容服务（up=anthropic）放行，钉定成功
       const good = await post({ harness: 'claude-code', profile: 'other' })
@@ -3981,8 +3985,7 @@ describe('管理面安全（2026-09 审查回归）', () => {
       expect(j.ok).toBe(true)
       expect(j.removed).toBe('up')
       // file 模式的悬空 route 随删除复位 default，不残留指向已删 profile 的引用
-      const onDisk = tomlParse(fs.readFileSync(configPath(), 'utf8'))
-      expect(onDisk.harness['dsh'].route).toBe('default')
+      expect(tomlHarness(fs.readFileSync(configPath(), 'utf8'))['dsh'].route).toBe('default')
     } finally {
       server.closeAllConnections?.()
       server.close()
@@ -4175,6 +4178,7 @@ describe('displayRouteProvider：烤模型客户端的展示路由（人工当�
       version: 1,
       active_profile: activeProfile,
       security: { store: 'file' },
+      harness: {},
       providers: { pa, pb },
       profiles: { proA: { provider: 'pa', default_model: 'a' }, proB: { provider: 'pb', default_model: 'b' } },
       gateway,
@@ -4200,6 +4204,7 @@ describe('routeState：统一「正在使用」口径（钉定 > 可用窗口 > 
       version: 1,
       active_profile: activeProfile,
       security: { store: 'file' },
+      harness: {},
       // 每个用例独立 provider 对象：某个用例改 enabled 不污染后续用例
       providers: { pa: { ...pa }, pb: { ...pb } },
       profiles: { proA: { provider: 'pa', default_model: 'a' }, proB: { provider: 'pb', default_model: 'b' } },

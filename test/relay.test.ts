@@ -152,6 +152,10 @@ describe('relay · isHeadersTimeoutError（headers 超时单独分类：已送�
 // forwardWithFailover（CORRECT-09 可观测性）：真实 rt + 真实 forwardToUpstream。
 // 失败候选用「listen(0) 后关闭」的确认关闭端口造 transport 失败，成功候选用本地 mock；
 // keys 走 fakeHome file 后端。不 mock forwardToUpstream——候选级错误分类必须走真实入口。
+/** forwardWithFailover 入参：本文件只关心 path/body/fallbackIds；method/idleTimeoutMs/retries
+ *  等转发默认值由 relay 内部按缺省处理（与既有用例逐字节一致），不在测试里重复声明。 */
+type FwdOpts = Parameters<typeof forwardWithFailover>[2]
+
 describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
   const body = Buffer.from(JSON.stringify({ model: 'm', messages: [] }))
   const ROUTED = '/v1/messages'
@@ -205,7 +209,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
         harness: {},
       } as unknown as Config
       const rt = buildRt(cfg.providers)
-      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] }).then(
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] } as unknown as FwdOpts).then(
         () => null,
         (e) => e,
       )
@@ -238,7 +242,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
       } as unknown as Config
       const rt = buildRt(cfg.providers)
       for (const id of ['a', 'b', 'c']) await setSecret(id, `sk-${id}`, 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b', 'c'] } as unknown as FwdOpts)
       expect(result.usedProviderId).toBe('c')
       expect(result.status).toBe(200)
       expect(result.reason).toBe('failover_to:c,replayed_from:a,b')
@@ -263,7 +267,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
       } as unknown as Config
       const rt = buildRt(cfg.providers)
       for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts)
       expect(result.usedProviderId).toBe('b')
       expect(result.status).toBe(200)
       expect(result.reason).toBe('failover_to:b,replayed_from:a')
@@ -299,7 +303,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
           const rt = buildRt(cfg.providers)
           for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
           // 无 failover_status_codes 配置（switchable=null）：429 本不在白名单，唯有 quota 识别可切换
-          const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+          const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts)
           expect(result.usedProviderId).toBe('b')
           expect(result.status).toBe(200)
           expect(result.reason).toBe('failover_to:b,replayed_from:a')
@@ -332,7 +336,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
       const rt = buildRt(cfg.providers, { headers_timeout_ms: 200 })
       for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
       // 旧分类（transport=true）会改发第二候选并 resolve 200 结果；修复后原样上抛、不再重放
-      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] }).then(
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts).then(
         () => null,
         (e) => e,
       )
@@ -368,7 +372,7 @@ describe('relay · forwardWithFailover 可观测性（CORRECT-09）', () => {
       } as unknown as Config
       const rt = buildRt(cfg.providers, { headers_timeout_ms: 200, failover_status_codes: [502] })
       for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
-      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const result = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts)
       expect(result.usedProviderId).toBe('b')
       expect(result.status).toBe(200)
       expect(result.reason).toBe('failover_to:b,replayed_from:a')
@@ -424,7 +428,7 @@ describe('relay · forwardWithFailover attempts 留痕（逐候选记录 + 跳�
       } as unknown as Config
       const rt = buildRt(cfg.providers)
       for (const id of ['a', 'b']) await setSecret(id, `sk-${id}`, 'file')
-      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts)
       expect(out.status).toBe(404)
       expect(out.reason).toContain('replayed_from:a')
       expect(out.cause).toBe('upstream_4xx')
@@ -446,7 +450,7 @@ describe('relay · forwardWithFailover attempts 留痕（逐候选记录 + 跳�
       const cfg = { providers: { a: providerCfg('a', { base_url: mock.url }) }, profiles: {}, harness: {} } as unknown as Config
       const rt = buildRt(cfg.providers)
       await setSecret('a', 'sk-a', 'file')
-      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} })
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {} } as unknown as FwdOpts)
       expect(out.status).toBe(200)
       expect(out.reason).toBeUndefined()
       expect(out.attempts).toBeUndefined()
@@ -466,7 +470,7 @@ describe('relay · forwardWithFailover attempts 留痕（逐候选记录 + 跳�
         harness: {},
       } as unknown as Config
       const rt = buildRt(cfg.providers)
-      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] }).then(
+      const err = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body, path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts).then(
         () => null,
         (e) => e,
       )
@@ -548,7 +552,7 @@ describe('relay · forwardWithFailover 模型级容灾链尾合成（model_fallb
         harness: {},
       } as unknown as Config
       const rt = buildRt(cfg.providers)
-      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} })
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} } as unknown as FwdOpts)
       expect(out.status).toBe(200)
       expect(out.usedProviderId).toBe('a')
       expect(out.reason).toBe('fallback_to:mB') // 恰为这一个 mark：无 failover_to:a、无 replayed_from:a
@@ -583,7 +587,7 @@ describe('relay · forwardWithFailover 模型级容灾链尾合成（model_fallb
         harness: {},
       } as unknown as Config
       const rt = buildRt(cfg.providers)
-      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {}, fallbackIds: ['b'] })
+      const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {}, fallbackIds: ['b'] } as unknown as FwdOpts)
       expect(out.usedProviderId).toBe('b')
       expect(out.reason).toBe('failover_to:b,replayed_from:a')
       expect(aMock.seen).toEqual(['mA']) // 链中段不合成：a 只收到主模型一发
@@ -613,7 +617,7 @@ describe('relay · forwardWithFailover 模型级容灾链尾合成（model_fallb
           harness: {},
         } as unknown as Config
         const rt = buildRt(cfg.providers)
-        const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} })
+        const out = await forwardWithFailover(rt, baseOn(cfg, 'a'), { body: bodyOf('mA'), path: ROUTED, headers: {} } as unknown as FwdOpts)
         expect(out.status).toBe(status)
         expect(out.cause).toBe(wantCause)
         expect(mock.seen).toEqual(['mA']) // 映射虽在，非额度不合成：只打主模型一发
@@ -634,7 +638,7 @@ describe('relay · forwardWithFailover 模型级容灾链尾合成（model_fallb
         harness: {},
       } as unknown as Config
       const rt = buildRt(cfg.providers)
-      const err = await forwardWithFailover(rt, baseOn(cfg, 't'), { body: bodyOf('mA'), path: ROUTED, headers: {} }).then(
+      const err = await forwardWithFailover(rt, baseOn(cfg, 't'), { body: bodyOf('mA'), path: ROUTED, headers: {} } as unknown as FwdOpts).then(
         () => null,
         (e) => e,
       )

@@ -31,7 +31,7 @@ describe('transfer 下载原语（本地 mock 服务器）', () => {
     await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))))
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
   })
-  const serve = (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<`http://127.0.0.1:${number}`> => {
+  const serve = (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<string> => {
     const server = http.createServer(handler)
     servers.push(server)
     return listenEphemeral(server).then((port) => `http://127.0.0.1:${port}`)
@@ -193,7 +193,7 @@ describe('transfer 代理转发（系统代理链路）', () => {
     await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))))
     await fsp.rm(root, { recursive: true, force: true }).catch(() => {})
   })
-  const serve = (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<`http://127.0.0.1:${number}`> => {
+  const serve = (handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<string> => {
     const server = http.createServer(handler)
     servers.push(server)
     return listenEphemeral(server).then((port) => `http://127.0.0.1:${port}`)

@@ -5,9 +5,10 @@ import path from 'node:path'
 import { fakeHome } from './helpers.js'
 import { atomicWrite, ensureDir, readTextIfExists } from '../src/util/fsx.js'
 import { loadConfig, saveConfig } from '../src/config/store.js'
-import { emptyConfig, type Config } from '../src/config/types.js'
+import { emptyConfig, type Config, type ModelMeta } from '../src/config/types.js'
 import { applyChanges } from '../src/adapters/engine.js'
 import { claudeCodeAdapter } from '../src/adapters/claude-code.js'
+import type { AttachOptions } from '../src/adapters/types.js'
 import { dshAdapter } from '../src/adapters/dsh.js'
 import { zcodeAdapter } from '../src/adapters/zcode.js'
 import { codexAdapter } from '../src/adapters/codex.js'
@@ -392,7 +393,7 @@ describe('claude-code adapter', () => {
               'mdl-slot-a': { display_name: 'Alpha' },
               'mdl-slot-b': { display_name: 'Beta' },
               'mdl-slot-c': {},
-            },
+            } as unknown as Record<string, ModelMeta>,
           },
         },
         profiles: { demo: { provider: 'p', default_model: 'mdl-slot-b' } },
@@ -441,7 +442,7 @@ describe('claude-code adapter', () => {
             protocol: 'anthropic',
             auth_style: 'bearer',
             key_ref: 'k',
-            models: Object.fromEntries(ids.map((id) => [id, { display_name: id }])),
+            models: Object.fromEntries(ids.map((id) => [id, { display_name: id }])) as unknown as Record<string, ModelMeta>,
           },
         },
         profiles: { demo: { provider: 'p' } },
@@ -510,7 +511,7 @@ describe('claude-code adapter', () => {
       // 有目录的配置：2.1.243 写出 lineup
       const catalogCfg: Config = {
         ...baseCfg(),
-        providers: { p: { base_url: 'https://api.up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k', models: { 'glm-5-3-flash-260828': { display_name: 'glm-5-3-flash' } } } },
+        providers: { p: { base_url: 'https://api.up.example.com', protocol: 'anthropic', auth_style: 'bearer', key_ref: 'k', models: { 'glm-5-3-flash-260828': { display_name: 'glm-5-3-flash' } } as unknown as Record<string, ModelMeta> } },
       }
       await withConfig(catalogCfg)
       await atomicWrite(p, fixture, 0o600)
@@ -578,7 +579,7 @@ describe('claude-code adapter', () => {
             protocol: 'anthropic',
             auth_style: 'bearer',
             key_ref: 'k',
-            models: { 'm-a': { display_name: 'm-a' }, 'm-b': { display_name: 'm-b' } },
+            models: { 'm-a': { display_name: 'm-a' }, 'm-b': { display_name: 'm-b' } } as unknown as Record<string, ModelMeta>,
           },
         },
         profiles: { demo: { provider: 'p', default_model: 'demo-model' } },
@@ -619,7 +620,7 @@ describe('claude-code adapter', () => {
           gatewayPort: 8687,
           token: TOKEN,
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-x', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-x', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         await loadConfig()
       )
@@ -728,8 +729,8 @@ describe('claude-code adapter', () => {
         mode: 'direct',
         gatewayPort: 8687,
         token: TOKEN,
-        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
-      }, await loadConfig())
+        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
+      } as unknown as AttachOptions, await loadConfig())
       const after = JSON.parse(plan.changes[0].after)
       expect(after.env.ANTHROPIC_BASE_URL).toBe('https://api.up.example.com')
       expect(after.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-direct-plain')
@@ -751,8 +752,8 @@ describe('claude-code adapter', () => {
         mode: 'direct',
         gatewayPort: 8687,
         token: TOKEN,
-        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
-      }, await loadConfig())
+        direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
+      } as unknown as AttachOptions, await loadConfig())
       const after2 = JSON.parse(plan2.changes[0].after)
       expect(after2.availableModels).toEqual(['my-custom-model'])
       expect(after2.modelPicker).toEqual({ replaceBuiltInOptions: true, options: [{ model: 'mine', label: 'Mine' }] })
@@ -774,8 +775,8 @@ describe('claude-code adapter', () => {
         await withConfig({
           ...emptyConfig(),
           providers: {
-            pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {}, 'a-model-2': { display_name: 'A 两号' } } },
-            pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+            pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {}, 'a-model-2': { display_name: 'A 两号' } } as unknown as Record<string, ModelMeta> },
+            pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } as unknown as Record<string, ModelMeta> },
           },
           profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
           active_profile: 'proA',
@@ -856,7 +857,7 @@ describe('dsh adapter', () => {
             protocol: 'anthropic',
             auth_style: 'bearer',
             key_ref: 'k',
-            models: { 'm-first': { display_name: 'm-first' } }, // 目录非空：旧行为会回落 entries[0] 占位
+            models: { 'm-first': { display_name: 'm-first' } } as unknown as Record<string, ModelMeta>, // 目录非空：旧行为会回落 entries[0] 占位
           },
         },
         profiles: { demo: { provider: 'p' } }, // 有 profile、无 default_model
@@ -1476,8 +1477,8 @@ describe('dsh adapter', () => {
       await withConfig({
         ...emptyConfig(),
         providers: {
-          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } },
-          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } as unknown as Record<string, ModelMeta> },
+          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } as unknown as Record<string, ModelMeta> },
         },
         profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
         active_profile: 'proA',
@@ -1653,7 +1654,7 @@ describe('zcode adapter', () => {
 
       const st = await zcodeAdapter.status(emptyConfig(), 8687)
       expect(st.pointing).toBe('unknown')
-      expect(st.detail.startsWith('⚠ ')).toBe(true) // 控制台 detail 是灰字，靠 ⚠ 提示用户
+      expect(st.detail!.startsWith('⚠ ')).toBe(true) // 控制台 detail 是灰字，靠 ⚠ 提示用户
       expect(st.detail).toContain('openai-completions')
       expect(st.detail).toContain('ZCode 会忽略整份个人供应商配置')
     } finally {
@@ -2375,8 +2376,8 @@ describe('mimo-code adapter', () => {
       await withConfig({
         ...emptyConfig(),
         providers: {
-          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } },
-          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } as unknown as Record<string, ModelMeta> },
+          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } as unknown as Record<string, ModelMeta> },
         },
         profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
         active_profile: 'proA',
@@ -2603,7 +2604,8 @@ describe('mimo-code adapter', () => {
       expect(inst.homepage).toBe('https://mimo.xiaomi.com/zh/mimocode')
       expect(inst.bootstrap).toBeTruthy()
       // bootstrap.path 惰性求值，须在 fake home 生效后再取（否则 Windows 上会落到宿主机 %LOCALAPPDATA%）
-      const p = inst.bootstrap!.path()
+      const bootPath = inst.bootstrap!.path
+      const p = typeof bootPath === 'function' ? bootPath() : bootPath
       expect(p).toBe(path.join(h.home, '.config', 'mimocode', 'mimocode.jsonc'))
       const boot = JSON.parse(inst.bootstrap!.content)
       expect(boot.$schema).toContain('mimo.xiaomi.com')
@@ -3101,8 +3103,8 @@ describe('refreshBakedModelClients：共用配置文件的客户端去重', () =
       await withConfig({
         ...emptyConfig(),
         providers: {
-          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } },
-          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } as unknown as Record<string, ModelMeta> },
+          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } as unknown as Record<string, ModelMeta> },
         },
         profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
         active_profile: 'proA',
@@ -3166,7 +3168,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         loaded
       )
@@ -3196,7 +3198,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-x', auth_style: 'x-api-key' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-x', auth_style: 'x-api-key' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         loaded
       )
@@ -3238,7 +3240,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         loaded
       )
@@ -3276,7 +3278,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
             protocol: 'anthropic',
             auth_style: 'bearer',
             key_ref: 'sk-direct-plain',
-            models: { 'm-first': { display_name: '首个' }, 'm-second': {} },
+            models: { 'm-first': { display_name: '首个' }, 'm-second': {} } as unknown as Record<string, ModelMeta>,
           },
         },
         profiles: { demo: { provider: 'p' } },
@@ -3289,7 +3291,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         await loadConfig()
       )
@@ -3311,7 +3313,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         await loadConfig()
       )
@@ -3345,7 +3347,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         loaded
       )
@@ -3395,7 +3397,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'x-api-key' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'x-api-key' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         loaded
       )
@@ -3447,7 +3449,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
             models: {
               'm-1m': { display_name: '百万上下文', context_window: 1048576 },
               'm-std': { display_name: '标准' },
-            },
+            } as unknown as Record<string, ModelMeta>,
           },
         },
         profiles: { demo: { provider: 'p', default_model: 'm-std' } },
@@ -3461,7 +3463,7 @@ describe('claude-code 独立直连（direct 模式）', () => {
           gatewayPort: 8687,
           token: 'mdk_x',
           profile: 'demo',
-          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' },
+          direct: { base_url: 'https://api.up.example.com', key: 'sk-direct-plain', auth_style: 'bearer' } as unknown as NonNullable<AttachOptions['direct']>,
         },
         await loadConfig()
       )
@@ -3768,8 +3770,8 @@ describe('定时 prefer 窗口接管：syncBakedClientsForDisplayRoute 跟随', 
         ...emptyConfig(),
         gateway: { auto_failover: true },
         providers: {
-          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } },
-          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } },
+          pa: { base_url: 'https://a.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pa', models: { 'a-model': {} } as unknown as Record<string, ModelMeta> },
+          pb: { base_url: 'https://b.example.com', protocol: 'anthropic', auth_style: 'x-api-key', key_ref: 'file:pb', models: { 'b-model': {} } as unknown as Record<string, ModelMeta> },
         },
         profiles: { proA: { provider: 'pa', default_model: 'a-model' }, proB: { provider: 'pb', default_model: 'b-model' } },
         active_profile: 'proA',

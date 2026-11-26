@@ -107,9 +107,9 @@ describe('createCloudTarget：readBlob', () => {
       res.end(JSON.stringify(DOC))
     })
     const target = makeTarget(stub.base)
-    await expect(target.readBlob()).rejects.toThrow('云端文档尚未拉取')
+    await expect(target.readBlob(blobRefOf(3, 'dev1'))).rejects.toThrow('云端文档尚未拉取')
     await target.readManifest()
-    expect(await target.readBlob()).toBe('ENV-3')
+    expect(await target.readBlob(blobRefOf(3, 'dev1'))).toBe('ENV-3')
   })
 })
 
@@ -150,10 +150,10 @@ describe('createCloudTarget：writeManifest', () => {
     expect(stub.seen[0].headers['content-type']).toContain('application/json')
     expect(JSON.parse(stub.seen[0].body)).toEqual({ envelope: 'ENV-NEW', ts: '2026-10-28T01:00:00.000Z' })
     // 推送后：暂存槽清空、缓存信封可读；再读带 if-none-match 7，全量文档回填后信封不变
-    expect(await target.readBlob()).toBe('ENV-NEW')
+    expect(await target.readBlob(blobRefOf(7, 'dev1'))).toBe('ENV-NEW')
     await target.readManifest()
     expect(stub.seen[1].headers['if-none-match']).toBe('7')
-    expect(await target.readBlob()).toBe('ENV-NEW')
+    expect(await target.readBlob(blobRefOf(7, 'dev1'))).toBe('ENV-NEW')
     await expect(
       target.writeManifest({ rev: 7, ts: 't2', byDevid: 'dev1', blobRef: 'b' }, 7)
     ).rejects.toThrow('推送前未暂存信封')

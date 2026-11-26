@@ -84,7 +84,7 @@ async function seedMachineMain(): Promise<void> {
     providers: { ark: { base_url: 'https://ark.example.com/api', protocol: 'anthropic', auth_style: 'bearer', key_ref: makeKeyRef('file', 'ark') } },
     profiles: { main: { provider: 'ark', default_model: 'auto' } },
     gateway: { port: 12345 },
-  } as Config)
+  } as unknown as Config)
 }
 
 /** 无悬空引用核查：profile→provider、fallback 条目、定时窗口 target 逐项存在 */

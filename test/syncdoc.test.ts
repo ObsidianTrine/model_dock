@@ -62,10 +62,10 @@ describe('syncdoc schema 校验', () => {
 
   it('profile 缺 provider 拒绝；定时规则缺 target 拒绝', () => {
     const d = sampleDoc()
-    delete (d.data.profiles.main as Record<string, unknown>).provider
+    delete (d.data.profiles.main as unknown as Record<string, unknown>).provider
     expect(() => validateSyncdoc(d)).toThrow()
     const d2 = sampleDoc()
-    delete (d2.data.scheduleRules[0] as Record<string, unknown>).target
+    delete (d2.data.scheduleRules[0] as unknown as Record<string, unknown>).target
     expect(() => validateSyncdoc(d2)).toThrow()
   })
 
@@ -111,8 +111,8 @@ describe('加密信封 seal/open', () => {
 
   it('信封 fmt 或 v 不认识拒绝', () => {
     const env = sealEnvelope(sampleDoc(), 'pw')
-    expect(() => openEnvelope({ ...env, fmt: 'nope' } as typeof env, 'pw')).toThrow()
-    expect(() => openEnvelope({ ...env, v: 2 } as typeof env, 'pw')).toThrow()
+    expect(() => openEnvelope({ ...env, fmt: 'nope' } as unknown as typeof env, 'pw')).toThrow()
+    expect(() => openEnvelope({ ...env, v: 2 } as unknown as typeof env, 'pw')).toThrow()
   })
 
   it('每个信封 salt/iv 独立（同口令两次密封密文不同）', () => {

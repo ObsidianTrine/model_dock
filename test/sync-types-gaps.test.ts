@@ -39,7 +39,7 @@ describe('validateSyncdoc 顶层与 fmt/v 形态（缺口补齐）', () => {
   })
 
   it('fmt 缺失：报错文案里 fmt 为空串占位', () => {
-    const d = sampleDoc() as Record<string, unknown>
+    const d = sampleDoc() as unknown as Record<string, unknown>
     delete d.fmt
     expect(() => validateSyncdoc(d)).toThrow(/fmt=/)
   })

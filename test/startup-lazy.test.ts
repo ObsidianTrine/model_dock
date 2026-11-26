@@ -81,7 +81,7 @@ describe('upstreamReachable（真实请求，不 mock undici）', () => {
     const server = http.createServer(() => {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
-    await new Promise<void>((resolve) => server.close(resolve))
+    await new Promise<void>((resolve) => server.close(() => resolve()))
     const r = await upstreamReachable(`http://127.0.0.1:${port}`)
     expect(r.ok).toBe(false)
   })

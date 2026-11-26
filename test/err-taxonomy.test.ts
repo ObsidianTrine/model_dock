@@ -95,7 +95,7 @@ describe('CLI 顶层出口：带 hint 的业务错误输出两行（真实子进
       fs.mkdirSync(path.join(h.home, '.modeldock'), { recursive: true })
       fs.writeFileSync(path.join(h.home, '.modeldock', 'config.toml'), 'version = 1\n[providers\n', 'utf8')
 
-      const env = { ...process.env, MODELRDOCK_FAKE_HOME: h.home, MODELRDOCK_LANG: 'zh' }
+      const env: NodeJS.ProcessEnv = { ...process.env, MODELRDOCK_FAKE_HOME: h.home, MODELRDOCK_LANG: 'zh' }
       delete env.MODELRDOCK_HOME
       const r = spawnSync(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, 'provider', 'list'], {
         cwd: h.home,

@@ -6,34 +6,13 @@ import { REPO_ROOT } from './helpers.js'
 /**
  * test/ 类型检查门禁的登记断言（T30）：tsconfig.test.json 的 exclude 是「存量豁免清单」，
  * 每一项都必须是已知的历史脏文件——谁往 exclude 加文件（让新测试逃过类型检查）或删掉登记，
- * 这里立刻红，逼先补类型或给出理由。清完一个就从两边同时删。
+ * 这里立刻红，逼先补类型或给出理由。
+ *
+ * 现为**空清单**（2026-11-26 E-01 收口）：test/ 全量受检——orchestrator 侧靠
+ * test/orchestrator/agents-scripts.d.ts 把 .agents 的 .mjs 声明为 any 边界，产品侧逐文件补了
+ * 夹具断言。以后要豁免，两边同时加并在这里写明原因。
  */
-const REGISTERED_EXCLUDE = [
-  'test/adapters.test.ts',
-  'test/cli-index-cmds.test.ts',
-  'test/cli-shared-more.test.ts',
-  'test/cli-shared.test.ts',
-  'test/cloud-target.test.ts',
-  'test/daemon-lifecycle.test.ts',
-  'test/err-taxonomy.test.ts',
-  'test/gateway.test.ts',
-  'test/holidays.test.ts',
-  'test/noderuntime.test.ts',
-  'test/observability.test.ts',
-  'test/profile-cli.test.ts',
-  'test/relay.test.ts',
-  'test/reset.test.ts',
-  'test/sandbox-migrate.test.ts',
-  'test/startup-lazy.test.ts',
-  'test/sync-types-gaps.test.ts',
-  'test/syncagent.test.ts',
-  'test/syncdoc-recovery.test.ts',
-  'test/syncdoc.test.ts',
-  'test/syncpull.test.ts',
-  'test/transfer.test.ts',
-  'test/uninstall.test.ts',
-  'test/update-cli.test.ts',
-]
+const REGISTERED_EXCLUDE: string[] = []
 
 describe('test/ 类型检查门禁（T30）', () => {
   it('tsconfig.test.json 存在且豁免清单与登记完全一致（防白名单无意识生长）', () => {
