@@ -248,11 +248,18 @@ export async function spawnDaemonAndWait(
   child.on('error', (err) => {
     console.error(t('[modeldock] daemon 进程拉起失败：{msg}', '[modeldock] Failed to spawn the daemon process: {msg}', { msg: err.message }))
   })
+  // daemon 启动即失败（实例锁被另一实例抢走、端口全占、端口校验等）会立刻退出：不再白等满
+  // 5s 超时，让调用方尽快读 daemon 日志/实例锁给出可操作报错（审计 P-06b）
+  let exited = false
+  child.once('exit', () => {
+    exited = true
+  })
 
   for (let i = 0; i < rounds; i++) {
     await sleep(250)
     const live = await probe()
     if (live) return live
+    if (exited) return null
   }
   return null
 }

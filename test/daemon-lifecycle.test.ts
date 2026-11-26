@@ -4,7 +4,7 @@ import path from 'node:path'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 import { fakeHome, REPO_ROOT, TSX_LOADER } from './helpers.js'
-import { gatewayStatePath } from '../src/util/paths.js'
+import { gatewayStatePath, gatewayLockPath } from '../src/util/paths.js'
 import { localDateStr } from '../src/util/index.js'
 
 // 网关守护进程生命周期端到端：真 CLI 子进程 + 独立沙箱 + listen(0) 随机端口（绝不写死端口，
@@ -108,6 +108,45 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode != null) return
   child.kill('SIGKILL') // 清理用硬杀即可；优雅停机语义由 stop 用例专门验证
   await exitOf(child)
+}
+
+/**
+ * 前台拉起网关子进程并收集输出（调用方负责 finally 停止）。并发启动用例要读败者的报错，
+ * 所以不能像 startGateway 那样 stdio: 'ignore'。
+ */
+function startGatewayCaptured(sandbox: string, port: number): { child: ChildProcess; output: () => string } {
+  const child = spawn(process.execPath, ['--import', TSX_LOADER, CLI_ENTRY, 'gateway', 'start', '--port', String(port)], {
+    cwd: sandbox,
+    env: childEnv(sandbox),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  child.stdout?.on('data', (d: Buffer) => { out += d.toString() })
+  child.stderr?.on('data', (d: Buffer) => { out += d.toString() })
+  return { child, output: () => out }
+}
+
+async function healthOk(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/_modeldock/health`, { signal: AbortSignal.timeout(1000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 实例锁文件内容（审计 P-06b）：锁是 daemon 启动的第一道闸，测试直接读盘对账 */
+function readLock(): { pid: number; port: number; acquired_at: string } | null {
+  try {
+    return JSON.parse(fs.readFileSync(gatewayLockPath(), 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function writeLock(state: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(gatewayLockPath()), { recursive: true })
+  fs.writeFileSync(gatewayLockPath(), JSON.stringify(state, null, 2))
 }
 
 function readState(sandbox: string): { pid: number; port: number; started_at: string } {
@@ -353,4 +392,155 @@ describe('网关守护进程生命周期（真实 CLI 子进程 + 独立沙箱�
       h.restore()
     }
   }, 60_000)
+
+  // ── 实例锁（审计 P-06b）─────────────────────────────────────────────────
+  // 原缺陷：读 gateway.json → 判 pid → healthOk → 写新状态之间没有锁。两个进程同时通过检查时，
+  // 第二个被 listenWithRetry 顺延到下一个端口并覆盖 gateway.json，同一 home 出现两个 daemon。
+
+  it('并发启动两次（同一 home、不同端口）：只有一个实例起来，另一个给可操作报错，gateway.json 只指向胜者', async () => {
+    const h = fakeHome()
+    let a: ChildProcess | undefined
+    let b: ChildProcess | undefined
+    try {
+      const portA = await freePort()
+      let portB = await freePort()
+      while (portB === portA) portB = await freePort() // 端口不同：败者只能被实例锁挡下，而非被端口占用挡下
+      const first = startGatewayCaptured(h.home, portA)
+      const second = startGatewayCaptured(h.home, portB)
+      a = first.child
+      b = second.child
+      const outA = first.output
+      const outB = second.output
+
+      // 两个进程几乎同时通过 gatewayProbe（无状态文件）→ 抢同一把实例锁，恰有一个 listen 成功
+      const winner = await Promise.race([
+        waitHealthy(portA, 60_000).then(() => 'a' as const),
+        waitHealthy(portB, 60_000).then(() => 'b' as const),
+      ])
+      const loser = winner === 'a' ? b : a
+      const loserPort = winner === 'a' ? portB : portA
+      const winnerPort = winner === 'a' ? portA : portB
+      const winnerChild = winner === 'a' ? a : b
+      const loserOut = winner === 'a' ? outB : outA
+
+      // 败者必须退出：不是「两个都活着」，也不是悄悄换个端口再起一个
+      await exitOf(loser, 20_000)
+      expect(loser.exitCode).not.toBeNull()
+      expect(await healthOk(loserPort)).toBe(false)
+      expect(loserOut()).toContain('已在运行')
+
+      // 胜者是唯一实例：状态文件与锁都只指向它
+      const deadline = Date.now() + 15_000
+      let state = readStateSafe()
+      while (state?.pid !== winnerChild!.pid && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100))
+        state = readStateSafe()
+      }
+      expect(state?.pid).toBe(winnerChild!.pid)
+      expect(state?.port).toBe(winnerPort)
+      expect(readLock()?.pid).toBe(winnerChild!.pid)
+      expect(await healthOk(winnerPort)).toBe(true)
+    } finally {
+      await stopChild(a)
+      await stopChild(b)
+      h.restore()
+    }
+  }, 180_000)
+
+  it('实例锁被存活进程持有（gateway.json 尚未写）→ start 明确拒绝、给可操作提示、不落状态文件', async () => {
+    const h = fakeHome()
+    try {
+      // 本进程 pid 充当「另一个正在启动的实例」：锁活、无状态文件——正是并发启动窗口的形态
+      writeLock({ pid: process.pid, port: 59997, acquired_at: new Date().toISOString() })
+      const port = await freePort()
+      const r = await runCli(h.home, ['gateway', 'start', '--port', String(port)])
+      expect(r.status).toBe(1)
+      expect(r.output).toContain('已在运行或正在启动')
+      expect(r.output).toContain('gateway.lock') // 可操作出路：确认无实例后删锁
+      expect(fs.existsSync(gatewayStatePath())).toBe(false)
+      expect(await healthOk(port)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  }, 120_000)
+
+  it('--daemon 启动：实例锁被存活进程持有时父 CLI 直接给可操作报错（不白等启动超时）', async () => {
+    const h = fakeHome()
+    try {
+      writeLock({ pid: process.pid, port: 59997, acquired_at: new Date().toISOString() })
+      const port = await freePort()
+      const r = await runCli(h.home, ['gateway', 'start', '--port', String(port), '--daemon'])
+      expect(r.status).toBe(1)
+      expect(r.output).toContain('已在运行或正在启动')
+      expect(r.output).toContain('gateway.lock')
+      // 不是「启动超时」的笼统报错，也没落下状态文件
+      expect(r.output).not.toContain('启动超时')
+      expect(fs.existsSync(gatewayStatePath())).toBe(false)
+      expect(await healthOk(port)).toBe(false)
+    } finally {
+      h.restore()
+    }
+  }, 120_000)
+
+  it('残留实例锁（pid 已死）→ 新实例接管锁并正常启动', async () => {
+    const h = fakeHome()
+    let child: ChildProcess | undefined
+    try {
+      writeLock({ pid: deadPid(), port: 59998, acquired_at: '2026-01-01T00:00:00.000+08:00' })
+      const port = await freePort()
+      child = startGateway(h.home, port)
+      await waitHealthy(port)
+      const deadline = Date.now() + 15_000
+      let state = readStateSafe()
+      while (state?.pid !== child.pid && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100))
+        state = readStateSafe()
+      }
+      expect(state?.pid).toBe(child.pid)
+      // 锁被接管：内容换成新实例 pid（残留锁不阻断、也不残留误导信息）
+      expect(readLock()?.pid).toBe(child.pid)
+    } finally {
+      await stopChild(child)
+      h.restore()
+    }
+  }, 120_000)
+
+  it('正常 stop 后实例锁释放（或失效）：下一次 start 能再次起来', async () => {
+    const h = fakeHome()
+    let child: ChildProcess | undefined
+    let again: ChildProcess | undefined
+    try {
+      const port = await freePort()
+      child = startGateway(h.home, port)
+      await waitHealthy(port)
+
+      const stopped = await runCli(h.home, ['gateway', 'stop'])
+      expect(stopped.output).toContain('网关已停止')
+      await exitOf(child)
+      await waitGone(port)
+
+      // unix 优雅退出走 exit 钩子删锁；Windows 硬杀走不到 → 锁留着但 pid 已死，必须可被接管
+      const lock = readLock()
+      if (lock) {
+        expect(lock.pid).toBe(child.pid)
+        expect(() => process.kill(lock.pid, 0)).toThrow()
+      }
+
+      const port2 = await freePort()
+      again = startGateway(h.home, port2)
+      await waitHealthy(port2)
+      const deadline = Date.now() + 15_000
+      let state = readStateSafe()
+      while (state?.pid !== again.pid && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100))
+        state = readStateSafe()
+      }
+      expect(state?.pid).toBe(again.pid)
+      expect(readLock()?.pid).toBe(again.pid)
+    } finally {
+      await stopChild(child)
+      await stopChild(again)
+      h.restore()
+    }
+  }, 180_000)
 })

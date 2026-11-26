@@ -16,6 +16,8 @@ export const presetsJsonPath = () => path.join(modeldockDir(), 'presets.json')
 export const backupsDir = () => path.join(modeldockDir(), 'backups')
 export const logsDir = () => path.join(modeldockDir(), 'logs')
 export const gatewayStatePath = () => path.join(modeldockDir(), 'gateway.json')
+/** 网关单实例锁（审计 P-06b）：daemon 启动时 O_EXCL 抢占，进程退出时释放；崩溃残留按 pid 判活接管 */
+export const gatewayLockPath = () => path.join(modeldockDir(), 'gateway.lock')
 /** 多机同步本机凭据（docs/design/design-cloud-sync.md §4.4）：与被同步的 config.toml 分文件，凭据不随包同步 */
 export const syncJsonPath = () => path.join(modeldockDir(), 'sync.json')
 /** 法定节假日（holiday-cn）数据缓存：拉取结果 + 已并入 config 的数据指纹 */

@@ -6,10 +6,11 @@ import { migrateSecretsToSecure } from '../ops.js'
 import { ensureDir, randomToken, drainAppendStreams } from '../util/fsx.js'
 import { t } from '../util/i18n.js'
 import { localDateStr, localIsoTs } from '../util/time.js'
-import { modeldockDir } from '../util/paths.js'
+import { displayPath, gatewayLockPath, modeldockDir } from '../util/paths.js'
 import { endpointRisks } from './relay.js'
 import { lanPrimaryUrl, resolveLanToken, startLanServer } from './lan.js'
 import { buildRuntime, gatewayProbe, logEvent, pushRing, reloadRuntime, setEventRingSink, setUsagePriceResolver, startupGatewayState, writeGatewayState } from './state.js'
+import { acquireInstanceLock } from './state/instance-lock.js'
 import { createGatewayServer } from './server.js'
 import { gatewayPriceResolver } from './pricing.js'
 import { warmupOverview } from './overview-view.js'
@@ -91,6 +92,25 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
   }
 
   await ensureDir(modeldockDir())
+  // 单实例锁（审计 P-06b）：上面的三态判活与下面「listen 成功 → 写 gateway.json」之间还有窗口——
+  // 两个进程同时看到 stopped 时会一起往下走，第二个被 listenWithRetry 顺延到下一端口并覆盖
+  // gateway.json，同一 home 出现两个 daemon。O_EXCL 抢锁把「判活 + 启动 + 落状态」收成一次抢占：
+  // 拿不到锁就不再往下走。释放挂在 process 'exit'（cleanup 的 process.exit(0) 也会触发）；
+  // 硬杀（Windows 的 gateway stop 是 TerminateProcess）走不到钩子，锁留着带死 pid，下次启动接管。
+  const instanceLock = await acquireInstanceLock(requestedPort)
+  if (!instanceLock.acquired) {
+    const holder = instanceLock.holder
+    if (holder) {
+      console.error(t('网关已在运行或正在启动：127.0.0.1:{port}（pid {pid}，自 {since}）', 'Gateway already running or starting: 127.0.0.1:{port} (pid {pid}, since {since})', { port: holder.port, pid: holder.pid, since: holder.acquired_at }))
+      console.error(t('未启动新实例，状态文件保持不动。若确认没有网关在运行（上次异常退出留下的锁），删除 {lock} 后重试', 'No new instance started; the state file is left untouched. If no gateway is running (a lock left by a crash), delete {lock} and retry', { lock: displayPath(gatewayLockPath()) }))
+    } else {
+      console.error(t('✗ 无法获取网关实例锁：{lock} 被其他进程占用', '✗ Failed to acquire the gateway instance lock: {lock} is held by another process', { lock: displayPath(gatewayLockPath()) }))
+      console.error(t('提示: 稍后重试；若持续失败，确认没有其他 modeldock 进程在运行后删除该文件', 'Hint: retry shortly; if it keeps failing, make sure no other modeldock process is running and delete that file'))
+    }
+    process.exitCode = 1
+    return
+  }
+  process.once('exit', () => instanceLock.release())
   logEndpointRisks(cfg)
   // 沙箱隔离：种子配置可能带着指向生产钥匙环的 keychain 引用（dev-seed 原样复制 key），
   // 启动时落地为沙箱本地 file 引用，此后沙箱改/删密钥与生产钥匙环彻底解耦
