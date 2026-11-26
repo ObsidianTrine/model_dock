@@ -102,6 +102,65 @@ describe('relay · 自动候选模型相容过滤', () => {
     }
   })
 
+  it('主候选直连成功（自动候选被预剔）：reason 为空、attempts 不随行——健康流量不打偏离标记', async () => {
+    // 2026-11-26 用户实证：主选 200 直连也带 model_mismatch reason → warn 进错误环形缓冲、
+    // 进不了成功页（okRing 只收无 reason 条目）。预剔是静态链构图不是已发生事件，直连成功不随行。
+    const h = fakeHome()
+    const pa = await startMock(ok200)
+    const pc = await startMock(ok200) // 目录不含 glm-4.7：循环前被剔，但主选已直连成功
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      await setSecret('pc', 'sk-pc', 'file')
+      const rt = buildRt({
+        pa: providerCfg({ name: 'pa', base_url: pa.url, key_ref: 'file:pa', models: catalog('glm-4.7') }),
+        pc: providerCfg({ name: 'pc', base_url: pc.url, key_ref: 'file:pc', models: catalog('other-model') }),
+      })
+      const r = await forwardWithFailover(rt, baseOn(rt.config as Config, 'pa'), fwdOpts() as never)
+      expect(r.usedProviderId).toBe('pa')
+      expect(r.reason).toBeUndefined()
+      expect(r.attempts).toBeUndefined() // 仅预剔 note + 单发成功 → 不随行
+      expect(pc.reqs.length).toBe(0)
+    } finally {
+      await Promise.all([pa.close(), pc.close()])
+      h.restore()
+    }
+  })
+
+  it('主候选 429 退避原地重试成功 + 自动候选预剔：偏离真实发生，retried_429 与预剔留痕照常随行', async () => {
+    const h = fakeHome()
+    const pa = await startMock((_req, res, i) => {
+      if (i === 0) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0' })
+        res.end('{"error":{"message":"rate limited"}}')
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+    const pc = await startMock(ok200)
+    try {
+      await setSecret('pa', 'sk-pa', 'file')
+      await setSecret('pc', 'sk-pc', 'file')
+      const rt = buildRt({
+        pa: providerCfg({ name: 'pa', base_url: pa.url, key_ref: 'file:pa', models: catalog('glm-4.7') }),
+        pc: providerCfg({ name: 'pc', base_url: pc.url, key_ref: 'file:pc', models: catalog('other-model') }),
+      })
+      const r = await forwardWithFailover(rt, baseOn(rt.config as Config, 'pa'), fwdOpts() as never)
+      expect(r.usedProviderId).toBe('pa')
+      expect(r.reason).toBe('retried_429:pa,model_mismatch:pc')
+      // attempts 是「每真实发送迭代一条」（首发+重试合并为一条，ms 为整段墙钟）+ 头部预剔 note
+      expect(r.attempts).toEqual(
+        expect.arrayContaining([
+          { provider: 'pc', note: 'model_mismatch' },
+          { provider: 'pa', status: 200, ms: expect.any(Number) },
+        ]),
+      )
+    } finally {
+      await Promise.all([pa.close(), pc.close()])
+      h.restore()
+    }
+  })
+
   it('目录未管理（models 缺省）的自动候选不拦：照常改发', async () => {
     const h = fakeHome()
     const pa = await startMock((_req, res) => {
