@@ -7,12 +7,26 @@ This file records ModelDock's version history. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-11-27
+
+Multi-machine sync and probe polish: lazy-loaded health history and clearer sync status; a CLI sync status fix plus a batch of stability fixes from the health audit and orchestration race hardening.
+
 ### Improved
 
+- **Health history loads on demand**: opening a service's health modal fetches only the latest 10 verdicts for that service — instant open; expanding loads the full window, newest entries always first.
+- **Slimmer top status banner**: "Local gateway running · port 8687" is now a green dot plus the port number — an open page proves it is running, and the port is the only per-instance identifier on the page; the full explanation moved into the hover tooltip.
+- **Slimmer, greener sync badge**: the top-bar "Device sync · on" gray pill is now a green "Sync" pill — green means on; conflict / error / paused still change both color and text (amber "Sync conflict", red "Sync error", gray "Sync paused").
 - **Release artifacts now prove their build origin**: every published artifact on GitHub Releases (per-platform archives, `ModelDock.dmg`, the Windows installer) now ships with an artifact attestation — verify with `gh attestation verify <file> -R ObsidianTrine/model_dock` that it was built by this repository's CI and was not swapped in transit.
 
 ### Fixed
 
+- **CLI sync status no longer always says "waiting for the gateway"**: `modeldock sync status` used to decide whether the sync engine was running inside the CLI process, while the engine actually lives in the gateway process — it showed "waiting" even with the gateway up. It now asks the running gateway for the authoritative state and only shows "waiting" when the gateway is truly down.
+- **Replacing a key no longer keeps a stale "dead" verdict on the badge**: after replacing a service's key, the previous "auth-dead" probe verdict kept the dead badge lit; the stale verdict is now cleared and the badge reflects reality.
+- **Probes no longer fake-timeout at 15 seconds**: multi-round serial diagnostics were capped by the frontend's default 15-second request timeout and always got cut off; now relaxed to 120 seconds, and the timeout note says the engine keeps running in the background.
+- **A successful direct hit no longer leaves a "model mismatch" trace**: static pre-filtering in the failover chain used to record a trace even when the primary choice succeeded directly, flagging successful requests as warnings in the error list; traces now ride along only on a real deviation or a final failure.
+- **A starting gateway is no longer misjudged as not running**: while another process was starting and its state file was not written yet, `stop` / `status` had a check-then-write race; now closed with the instance lock.
+- **Concurrent sync-engine remounts are serialized**: two remounts racing in the "detach → wait for in-flight tick" window could leave an orphan loop double-writing to the same sync target; remounts are now chained and re-read the on-disk state after waiting.
+- **Orchestration approvals and self-heal no longer step on each other**: manual approvals, auto-approvals and orphan self-heal share the task lock end to end; manually claimed task cards are no longer taken over by auto-resume; the watchdog circuit-breaker's stop flag is set earlier so trailing actions cannot slip into the breaker window.
 - **A failed key save no longer looks successful**: if encryption or the disk write failed (full disk, file locked), memory already held the new value while the disk kept the old one — the gateway would keep using a key that was never persisted until a restart silently reverted it. It now rolls back to the on-disk state and reports the failure.
 - **A crashed writer's lock is taken over instead of surfacing as a timeout**: a leftover config write lock had to expire before anyone could proceed, while waiters timed out sooner and got "timed out — delete the .lock file and retry" even though recovery was automatic. Stale locks left by a crashed writer are now taken over; only a genuinely hung holder reports a timeout.
 - **Compressed upstream error bodies can no longer exhaust memory**: decompression had no output cap, so a few hundred KB of highly compressible error body could balloon until the gateway's event loop stalled. Output is now capped at 2MB; beyond that the raw bytes are used (the readable error head is preserved).
@@ -679,6 +693,7 @@ ModelDock's first public release: bring every AI client's upstream configuration
 - CLI output, errors, help, and gateway messages are fully bilingual: Chinese by default, with `--lang en` / the `MODELRDOCK_LANG` environment variable / `config.toml language` for persistence; the Web console top bar switches anytime.
 
 ---
+[1.8.3]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.2...v1.8.3
 [1.8.2]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.1...v1.8.2
 [1.8.1]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.0...v1.8.1
 [Unreleased]: https://github.com/ObsidianTrine/model_dock/compare/v1.8.2...HEAD
