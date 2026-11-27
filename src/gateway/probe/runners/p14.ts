@@ -76,6 +76,7 @@ export async function runP14(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
     const sent = await sendProbe(ctx, wire.path, wire.body)
     if (!sent.ok) {
       failures.push({ err: sent.netErr })
+      ctx.onRound?.(i + 1, P14_ROUNDS) // 失败轮也算轮次推进（弹层「第 n/m 轮」按发生轮计）
       continue
     }
     const resp = sent.resp
@@ -87,9 +88,11 @@ export async function runP14(ctx: ProbeUnitContext): Promise<ProbeUnitOutcome> {
         status: resp.status,
         ...(upstreamErrorLine(resp.bodyText) ? { err: upstreamErrorLine(resp.bodyText) } : {}),
       })
+      ctx.onRound?.(i + 1, P14_ROUNDS)
       continue
     }
     samples.push(roundSample(resp, sent.ms))
+    ctx.onRound?.(i + 1, P14_ROUNDS)
   }
 
   const advisory = advisoryOf(samples)

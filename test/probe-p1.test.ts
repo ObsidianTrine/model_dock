@@ -6,7 +6,7 @@ import type { GatewayRuntime } from '../src/gateway/state.js'
 import { makeRelayProbeTransport, probeCooldownUntil, runProbeSuite } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
 import { probeWire } from '../src/gateway/probe/wire.js'
-import { withThinkingFallback } from '../src/gateway/probe/engine.js'
+import { withThinkingFallback, withStreamOptionsFallback } from '../src/gateway/probe/engine.js'
 import { P1_CANARY, runP1 } from '../src/gateway/probe/runners/p1.js'
 import { getProbeRunner } from '../src/gateway/probe/runners/index.js'
 import { getProbeVerdict } from '../src/gateway/probe/verdict.js'
@@ -103,6 +103,62 @@ describe('probe-no-think · thinking 参数自愈回退（thinking-param-fallbac
       await runProbeSuite(rt, { probeIds: ['p1'], targets: [targetOf()], transport: withThinkingFallback(base), runner: runP1, confirmed: true })
       expect(calls).toBe(1) // 不重发
       expect(getProbeVerdict(rt, 'acme', 'fp1', 'm')?.state).toBe('degraded')
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('svc-token-accounting · openai 流式 include_usage 与剥参回退', () => {
+  it('openai stream:true 请求体带 stream_options.include_usage；非流式与 anthropic/responses 线不带', () => {
+    const oaStream = JSON.parse(probeWire('openai', 'm', { prompt: 'x', stream: true }).body.toString('utf8'))
+    expect(oaStream.stream_options).toEqual({ include_usage: true })
+    const oaPlain = JSON.parse(probeWire('openai', 'm', { prompt: 'x' }).body.toString('utf8'))
+    expect(oaPlain.stream_options).toBeUndefined()
+    const antStream = JSON.parse(probeWire('anthropic', 'm', { prompt: 'x', stream: true }).body.toString('utf8'))
+    expect(antStream.stream_options).toBeUndefined()
+    const respStream = JSON.parse(probeWire('responses', 'm', { prompt: 'x', stream: true }).body.toString('utf8'))
+    expect(respStream.stream_options).toBeUndefined()
+  })
+
+  it('严格上游 400 且错误体指向 stream_options → 剥参重发一次；其他 400 不重发；body 无该参数不重发', async () => {
+    const h = fakeHome()
+    try {
+      const seen: string[] = []
+      const base: ProbeTransport = async (req) => {
+        const body = req.body?.toString('utf8') ?? ''
+        seen.push(body)
+        if (body.includes('"stream_options"')) {
+          return { status: 400, ms: 1, bodyText: '{"error":{"message":"Unknown parameter: stream_options"}}' }
+        }
+        return { status: 200, ms: 1, bodyText: JSON.stringify({ choices: [{ message: { content: P1_CANARY } }] }) }
+      }
+      const reqOf = (): { providerId: string; model: string; path: string; body: Buffer } => ({
+        providerId: 'acme',
+        model: 'm',
+        path: '/v1/chat/completions',
+        body: Buffer.from(JSON.stringify({ model: 'm', stream: true, stream_options: { include_usage: true }, messages: [] })),
+      })
+      const resp = await withStreamOptionsFallback(base)(reqOf())
+      expect(resp.status).toBe(200)
+      expect(seen.length).toBe(2) // 首发带 stream_options → 400 → 剥参重发
+      expect(JSON.parse(seen[1]).stream_options).toBeUndefined()
+      // 错误体不含 stream_options 的 400：不重发
+      let calls = 0
+      const plain: ProbeTransport = async () => {
+        calls++
+        return { status: 400, ms: 1, bodyText: '{"error":{"message":"bad request"}}' }
+      }
+      await withStreamOptionsFallback(plain)(reqOf())
+      expect(calls).toBe(1)
+      // body 缺 stream_options（如 anthropic 线）：即使错误体提到也不重发
+      let calls2 = 0
+      const noParam: ProbeTransport = async () => {
+        calls2++
+        return { status: 400, ms: 1, bodyText: '{"error":{"message":"stream_options not supported"}}' }
+      }
+      await withStreamOptionsFallback(noParam)({ providerId: 'acme', model: 'm', path: '/v1/messages', body: Buffer.from(JSON.stringify({ model: 'm', stream: true })) })
+      expect(calls2).toBe(1)
     } finally {
       h.restore()
     }

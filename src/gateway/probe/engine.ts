@@ -74,6 +74,9 @@ export interface ProbeUnitContext {
   target: ProbeTarget
   transport: ProbeTransport
   signal: AbortSignal | undefined
+  /** 多轮探针（P14）逐轮进度上报（p14-progress）：引擎按 runId 写 rt.probeRunProgress，
+   *  服务健康弹层轮询刷新「检测中 · 第 n/m 轮」；单轮探针不调用 */
+  onRound?: (done: number, total: number) => void
 }
 
 /** 单个探针样本的判定产出。calls 是本样本每次上游调用的记账明细（账本按次落条目）；429 由
@@ -115,6 +118,9 @@ export interface ProbeRunOptions {
   signal?: AbortSignal
   /** key 明文清单（仅用于错误体脱敏替换，绝不入账本/日志/verdict——引擎不持久化、不打印） */
   secrets?: readonly string[]
+  /** 运行标识（p14-progress）：传入时逐轮进度写 rt.probeRunProgress[runId]，服务健康弹层
+   *  按 runId 轮询「第 n/m 轮」；注册/清除归端点层（registerProbeRunProgress），CLI 直跑不传、零开销 */
+  runId?: string
 }
 
 export type ProbeSkipReason =
@@ -266,17 +272,41 @@ async function readSseBounded(
   body: UpstreamBody,
   startMs: number,
   signal: AbortSignal | undefined
-): Promise<{ text: string; chunks: number[] }> {
+): Promise<{ text: string; chunks: number[]; usage?: Record<string, number> }> {
   const chunks: number[] = []
   const decoder = new StringDecoder('utf8')
   let text = ''
   let scanned = 0 // 已按行扫过的字符游标：每块只扫新增段，不整串重扫
+  /** SSE usage 收割（svc-token-accounting）：三协议的流式 usage 都以 data 行 JSON 携带——
+   *  openai 末 chunk 顶层 usage（需 stream_options.include_usage，wire 已带）、anthropic
+   *  message_start 的 message.usage（input）+ message_delta 顶层 usage（output 累计）、
+   *  responses completed 的 response.usage。逐字段后写覆盖（累计值单调、异名字段互不冲突），
+   *  与整包 JSON 路径（usageOrJsonOf）同一形态。带 usage 字样的行才试解析（正文分片零开销） */
+  let usage: Record<string, number> | undefined
   const feedLine = (line: string): void => {
     const s = line.trim()
     if (!s.startsWith('data:')) return
     const payload = s.slice(5).trim()
     if (!payload || payload === '[DONE]') return
     chunks.push(Math.max(0, Date.now() - startMs))
+    if (payload.indexOf('usage') < 0) return
+    try {
+      const j = JSON.parse(payload) as Record<string, unknown>
+      const cands = [
+        j.usage,
+        (j.message as Record<string, unknown> | undefined)?.usage,
+        (j.response as Record<string, unknown> | undefined)?.usage,
+      ]
+      for (const c of cands) {
+        if (!c || typeof c !== 'object' || Array.isArray(c)) continue
+        usage = usage ?? {}
+        for (const [k, v] of Object.entries(c as Record<string, unknown>)) {
+          if (typeof v === 'number') usage[k] = v
+        }
+      }
+    } catch {
+      /* 正文偶含 usage 字样的非 JSON 行：忽略 */
+    }
   }
   const drain = (): void => {
     for (let idx = text.indexOf('\n', scanned); idx >= 0; idx = text.indexOf('\n', scanned)) {
@@ -299,7 +329,7 @@ async function readSseBounded(
   text += decoder.end()
   drain()
   feedLine(text.slice(scanned)) // 末尾无换行的残行也计（与 countSseChunks 的 split('\n') 口径一致）
-  return { text, chunks }
+  return { text, chunks, ...(usage ? { usage } : {}) }
 }
 
 /** 生产 transport 适配器（任务 3 接线）：走 forwardToUpstream——key 注入 / 代理 / 三协议 / 池解析
@@ -330,13 +360,52 @@ export function withThinkingFallback(transport: ProbeTransport): ProbeTransport 
   }
 }
 
+/** stream_options 自愈回退（svc-token-accounting）：少数严格上游对未知顶层参数 stream_options
+ *  回 400——错误体指向该参数时剥掉重发一次（withThinkingFallback 同型：零 token 损耗，只多付
+ *  一次快速 400 往返，供应商差异自适应，不吞其他 400）。openai 流式线带 include_usage 才能拿到
+ *  usage 记账，回退只牺牲该次记账不牺牲判定。导出供单测直测包装层。 */
+export function withStreamOptionsFallback(transport: ProbeTransport): ProbeTransport {
+  return async (req) => {
+    const resp = await transport(req)
+    if (resp.status !== 400 || !/stream_options/i.test(resp.bodyText ?? '')) return resp
+    let stripped: Buffer
+    try {
+      const j = JSON.parse(req.body?.toString('utf8') ?? '') as Record<string, unknown>
+      if (!j || typeof j !== 'object' || !('stream_options' in j)) return resp
+      delete j.stream_options
+      stripped = Buffer.from(JSON.stringify(j))
+    } catch {
+      return resp
+    }
+    return transport({ ...req, body: stripped })
+  }
+}
+
+/** 运行进度注册（p14-progress，端点层 hProbeRun 调用）：runId → 条目建位（rounds=0 = 尚未
+ *  开跑首轮，前端保持「检测中…」文案），顺带清扫 15min 陈旧条目兜底（端点层 finally 会删，
+ *  这里只防极端路径残留）；runId 已由端点做过字符白名单净化。 */
+export function registerProbeRunProgress(rt: GatewayRuntime, runId: string, providerId: string, probeIds: readonly string[]): void {
+  if (!rt.probeRunProgress) rt.probeRunProgress = new Map()
+  const now = Date.now()
+  for (const [k, v] of rt.probeRunProgress) {
+    if (now - v.at > 15 * 60_000) rt.probeRunProgress.delete(k)
+  }
+  rt.probeRunProgress.set(runId, { probe: probeIds.join(','), provider: providerId, round: 0, rounds: 0, at: now })
+}
+
+/** 运行进度清除（p14-progress）：端点层 finally 调用，run 结束条目即删（Map 常驻内存零泄漏） */
+export function clearProbeRunProgress(rt: GatewayRuntime, runId: string): void {
+  rt.probeRunProgress?.delete(runId)
+}
+
 export function makeRelayProbeTransport(
   rt: GatewayRuntime,
   o: { idleTimeoutMs?: number; retries?: number } = {}
 ): ProbeTransport {
   const idle = o.idleTimeoutMs ?? 10 * 60_000
   const retries = o.retries ?? 1
-  return withThinkingFallback(async (req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> => {
+  return withThinkingFallback(
+    withStreamOptionsFallback(async (req: ProbeUpstreamRequest): Promise<ProbeUpstreamResponse> => {
     const provider = rt.config.providers[req.providerId]
     if (!provider) {
       throw new Error(t('服务「{id}」不存在，无法探测', 'Service "{id}" does not exist; nothing to probe', { id: req.providerId }))
@@ -372,6 +441,7 @@ export function makeRelayProbeTransport(
     const rawCt = up.headers['content-type'] ?? up.headers['Content-Type']
     const isSse = /text\/event-stream/i.test((Array.isArray(rawCt) ? rawCt[0] : rawCt) ?? '')
     let chunks: number[] | undefined
+    let sseUsage: Record<string, number> | undefined
     let text: string
     if (up.status >= 400) {
       text = await readUpstreamErrorText(up.headers, up.body)
@@ -379,20 +449,25 @@ export function makeRelayProbeTransport(
       const r = await readSseBounded(up.body, Date.now() - up.ms, req.signal)
       text = r.text
       chunks = r.chunks
+      sseUsage = r.usage
     } else {
       text = (await readBodyBounded(up.body, UPSTREAM_ERROR_BODY_MAX_BYTES)).toString('utf8')
     }
-    let usage: Record<string, number> | undefined
-    try {
-      const u = (JSON.parse(text) as { usage?: unknown })?.usage
-      if (u && typeof u === 'object') {
-        usage = {}
-        for (const [k, v] of Object.entries(u as Record<string, unknown>)) {
-          if (typeof v === 'number') usage[k] = v
+    // usage：SSE 流内收割优先（svc-token-accounting）；整包 JSON 路径与 SSE 无 usage 的旧上游
+    // 照旧走 JSON.parse 兜底（bodyText 是 JSON 才成立，SSE 文本解析失败仅观测降级）
+    let usage: Record<string, number> | undefined = sseUsage
+    if (!usage) {
+      try {
+        const u = (JSON.parse(text) as { usage?: unknown })?.usage
+        if (u && typeof u === 'object') {
+          usage = {}
+          for (const [k, v] of Object.entries(u as Record<string, unknown>)) {
+            if (typeof v === 'number') usage[k] = v
+          }
         }
+      } catch {
+        /* SSE 或非 JSON：usage 缺席仅观测降级 */
       }
-    } catch {
-      /* SSE 或非 JSON：usage 缺席仅观测降级 */
     }
     return {
       status: up.status,
@@ -404,6 +479,7 @@ export function makeRelayProbeTransport(
       ...(chunks != null ? { chunks } : {}),
     }
   })
+  )
 }
 
 /** 探针套件运行入口：跑 probeIds × targets 全组合。 */
@@ -450,6 +526,15 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
   let budgetStopped = false
   let confirmStopped = false
   const touched = new Set<string>()
+
+  // 轮次进度上报（p14-progress）：runId 由端点层注册（registerProbeRunProgress，含注册即
+  // 建条目 + 15min 陈旧清扫），引擎只覆盖写最近轮次——多单元并发时 last-writer-wins（弹层
+  // 只求「跑到第几轮」的量级反馈，不求逐单元精确）
+  const reportRound = (u: ProbeUnit, done: number, total: number): void => {
+    if (!opts.runId) return
+    if (!rt.probeRunProgress) rt.probeRunProgress = new Map()
+    rt.probeRunProgress.set(opts.runId, { probe: u.def.id, provider: u.target.providerId, round: done, rounds: total, at: Date.now() })
+  }
 
   // 预算闸（先于确认闸——预算是硬停，连预估展示都不必发请求）。只拦主动探针：
   // schedule.ts 触发口径明文「预算闸拦的是主动探针」（被动观测断了会架空 7 天转 stale）、
@@ -547,7 +632,14 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     }
     runtime.inflight.add(pid)
     try {
-      const ctx: ProbeUnitContext = { rt, def: u.def, target: u.target, transport: opts.transport, signal: opts.signal }
+      const ctx: ProbeUnitContext = {
+        rt,
+        def: u.def,
+        target: u.target,
+        transport: opts.transport,
+        signal: opts.signal,
+        ...(opts.runId ? { onRound: (done: number, total: number): void => reportRound(u, done, total) } : {}),
+      }
       const sampleCount = u.def.kind === 'jittery' ? 3 : 1 // 3 取中位共识的采样轮数（共识判定在 verdict 层）
       for (let i = 0; i < sampleCount; i++) {
         if (opts.signal?.aborted) {

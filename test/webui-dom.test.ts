@@ -741,6 +741,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       // 时间列最新在上（引擎升序 → 渲染倒序）
       expect(rows[0].querySelector('td')?.textContent).toContain('2026-11-22')
       expect(rows[2].querySelector('td')?.textContent).toContain('2026-11-20')
+      // 时间列 title 兜底（svc-timeline-time-fix）：完整 ISO 含秒——列宽省略时悬浮可见全量
+      expect((rows[0].querySelector('td') as HTMLElement).title).toBe('2026-11-22T09:00:00.000+08:00')
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
       PROBE_TIMELINE_FIXTURE.timeline = []
@@ -1084,7 +1086,12 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       ;(document.getElementById('diagP1Go') as HTMLElement).click()
       await flush()
       expect(runCalls.length).toBe(3)
-      expect(runCalls[2].body).toEqual({ provider: 'alpha', probes: ['p1'], confirmToken: 'tok-1' })
+      // 第二段带 confirmToken + runId（p14-progress：前端生成随运行请求带上，后端字符白名单净化）
+      expect(runCalls[2].body.provider).toBe('alpha')
+      expect(runCalls[2].body.probes).toEqual(['p1'])
+      expect(runCalls[2].body.confirmToken).toBe('tok-1')
+      expect(typeof runCalls[2].body.runId).toBe('string')
+      expect((runCalls[2].body.runId as string).length).toBeGreaterThanOrEqual(8)
       const res = document.getElementById('diagP1Res') as HTMLElement
       expect(res.className).toContain('ok')
       expect(res.textContent).toContain('健康')
@@ -1092,6 +1099,58 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(res.textContent).toContain('86 tokens')
       // 弹层提示归宿纪律：全程零全局 toast
       expect(document.querySelectorAll('#toastWrap .toast').length).toBe(0)
+    } finally {
+      vi.stubGlobal('fetch', prev)
+    }
+  })
+
+  it('diag-modal-probe-ui：P14 轮次进度——runId 随第二段带上，POST 在飞时轮询 run-progress 刷按钮文案，结束停轮询恢复「运行」', async () => {
+    let resolveRun!: (v: unknown) => void
+    let pollCount = 0
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/probe/run') {
+        const body = init && init.body ? JSON.parse(String(init.body)) : {}
+        if (!body.confirmToken) {
+          const est = { ok: false, needConfirm: true, reason: 'unconfirmed', provider: 'alpha', probes: ['p14'], targets: 1, estimate: 10000, per_probe_cost: { p14: 10000 }, budget: {}, confirmToken: 'tok-14', verdicts: [], skipped: [] }
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(est), text: () => Promise.resolve(JSON.stringify(est)) })
+        }
+        return new Promise((r) => { resolveRun = r }) // 在飞挂起：给轮询留观察窗
+      }
+      if (p === '/_modeldock/probe/run-progress') {
+        pollCount++
+        const body = { ok: true, active: true, probe: 'p14', provider: 'alpha', round: 3, rounds: 5 }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
+      }
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    // 定时器沿用文件级 beforeAll 的 fake timers（冻结 60s 轮询等）：本测试只推进自己的 800ms
+    // 轮询周期，finally 不得 useRealTimers——会把文件级冻结态换回真实定时器，殃及后续用例
+    try {
+      mountPage()
+      await flush()
+      ;(document.querySelector('[data-diag="alpha"]') as HTMLElement).click()
+      ;(document.getElementById('diagP14Btn') as HTMLElement).click()
+      await flush()
+      ;(document.getElementById('diagP14Go') as HTMLElement).click()
+      await flush()
+      // POST 在飞：首tick前仍是「检测中…」，一个轮询周期后按钮出现轮次文案（不走 diagBtnBusy
+      // 刷新——它会把中间文案存进 _t 污染恢复；恢复文案由首次 diagBtnBusy(true) 存的「检测中…」无关）
+      expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toBe('检测中…')
+      vi.advanceTimersByTime(800)
+      await flush()
+      expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toContain('3/5')
+      // 结束：POST resolve → 停轮询恢复「运行」，后续周期不再发请求
+      const done = { ok: true, reason: 'ok', provider: 'alpha', probes: ['p14'], targets: 1, dispatched: 1, upstreamRequests: 5, tokens: 240, estimate: 10000, per_probe_cost: { p14: 10000 }, budget: {}, verdicts: [{ provider: 'alpha', key_fp: 'ab12', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p14', at: Date.now() }, advisory: { ttft_p50: 296, ttft_p95: 311 } }], skipped: [] }
+      resolveRun({ ok: true, json: () => Promise.resolve(done), text: () => Promise.resolve(JSON.stringify(done)) })
+      await flush()
+      expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toBe('运行')
+      expect((document.getElementById('diagP14Res') as HTMLElement).textContent).toContain('240 tokens')
+      const before = pollCount
+      vi.advanceTimersByTime(2400)
+      await flush()
+      expect(pollCount).toBe(before)
     } finally {
       vi.stubGlobal('fetch', prev)
     }

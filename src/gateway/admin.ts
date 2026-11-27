@@ -18,7 +18,7 @@ import { hSyncRemoteStatus, hSyncRequestRemote, registerWebDevice } from './remo
 import { hUpdateApply, hUpdateCheck, hUpdateStatus } from './update-panel.js'
 import { adminAuthorized, cookieValueRe, hostAllowed, safeCookieDecode } from './routes/admin-auth.js'
 import { hAttachApply, hAttachPlan, hDetach, hHarnessEnv, hHarnessMode, hHarnessRoute, hHarnessUsage, hProvisionHarness, hRenewHarness, hRevokeHarness } from './routes/harness.js'
-import { hModelAvailability, hProbeLedger, hProbeRun, hProbeTimeline, hProbeTrend, hProbeVerdicts } from './routes/probe.js'
+import { hModelAvailability, hProbeLedger, hProbeRun, hProbeRunProgress, hProbeTimeline, hProbeTrend, hProbeVerdicts } from './routes/probe.js'
 import { hAutoRoute, hFetchModels, hHolidaysCn, hImportApply, hImportDetect, hImportDismiss, hKey, hProfile, hRevealKey, hSchedule, hServiceAdd, hServiceDelete, hServiceModelFallback, hServiceUpdate, hSwitch, hUse } from './routes/services.js'
 import { hAutostart, hConfig, hLanGet, hLanPost, hModelCatalog, hMetrics, hReload, hReset, hRotate, hStatus, hTest, hTierValidate } from './routes/system.js'
 import { hLogs, hLogsQuery, hPricingLookup, hUsage } from './routes/usage.js'
@@ -157,6 +157,7 @@ const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/reload': hReload,
   'POST /_modeldock/test': hTest,
   'POST /_modeldock/probe/run': hProbeRun,
+  'GET /_modeldock/probe/run-progress': hProbeRunProgress,
   'GET /_modeldock/probe/verdicts': hProbeVerdicts,
   'GET /_modeldock/probe/ledger': hProbeLedger,
   'GET /_modeldock/probe/trend': hProbeTrend,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildRuntime } from '../src/gateway/state.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
-import { providerProbeInCooldown, runProbeSuite } from '../src/gateway/probe/engine.js'
+import { providerProbeInCooldown, runProbeSuite, registerProbeRunProgress, clearProbeRunProgress } from '../src/gateway/probe/engine.js'
 import type { ProbeTransport } from '../src/gateway/probe/engine.js'
 import { P14_MAJORITY, P14_ROUNDS, runP14 } from '../src/gateway/probe/runners/p14.js'
 import { nearestRankPercentile } from '../src/gateway/probe/runners/shared.js'
@@ -245,5 +245,36 @@ describe('probe-p14 · 最近秩分位数纯函数', () => {
     expect(input).toEqual([5, 1, 3])
     // 非 5 样本也成立：n=4 → p50 排序后第 2 个
     expect(nearestRankPercentile([9, 7, 8, 6], 50)).toBe(7)
+  })
+})
+
+describe('probe-p14 · 轮次进度与注册清理（p14-progress）', () => {
+  it('runId 传入时 rt.probeRunProgress 收到逐轮上报，终态 round=5/rounds=5/probe=p14；不传 runId 零写入', async () => {
+    const h = fakeHome()
+    try {
+      const rt = mkRt()
+      const mock = perfMock([{ ttft: 100, completion: 50 }])
+      await runProbeSuite(rt, { probeIds: ['p14'], targets: [TARGET], transport: mock.transport, runner: runP14, confirmed: true, runId: 't1' })
+      // jittery 3 采样 = 15 轮全跑完，last-writer-wins 仍是最后一轮 5/5
+      expect(rt.probeRunProgress!.get('t1')).toMatchObject({ probe: 'p14', provider: 'acme', round: P14_ROUNDS, rounds: P14_ROUNDS })
+      // 不传 runId：Map 不建不写（CLI 直跑零开销）
+      const rt2 = mkRt()
+      const mock2 = perfMock([{ ttft: 100, completion: 50 }])
+      await runProbeSuite(rt2, { probeIds: ['p14'], targets: [TARGET], transport: mock2.transport, runner: runP14, confirmed: true })
+      expect(rt2.probeRunProgress).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('registerProbeRunProgress 建位（rounds=0）+ 15min 陈旧清扫；clearProbeRunProgress 删除', () => {
+    const rt = mkRt()
+    rt.probeRunProgress = new Map()
+    rt.probeRunProgress.set('old', { probe: 'p1', provider: 'acme', round: 1, rounds: 1, at: Date.now() - 16 * 60_000 })
+    registerProbeRunProgress(rt, 'r1', 'acme', ['p14'])
+    expect(rt.probeRunProgress.get('r1')).toMatchObject({ probe: 'p14', provider: 'acme', round: 0, rounds: 0 })
+    expect(rt.probeRunProgress.has('old')).toBe(false) // 注册顺带清扫陈旧条目
+    clearProbeRunProgress(rt, 'r1')
+    expect(rt.probeRunProgress.has('r1')).toBe(false)
   })
 })
