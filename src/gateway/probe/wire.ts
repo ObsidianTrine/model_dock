@@ -45,6 +45,11 @@ export function probeWire(
             model,
             max_tokens: maxTokens,
             stream,
+            // openai 流式线带 include_usage（svc-token-accounting）：缺省上游不发 usage chunk，
+            // P3/P14 流式记账全落 0；严格上游不认该参数由 transport 层剥参回退兜底（不吞其他 400）。
+            // 本分支 openai/anthropic 共用（responses 走上支），故限定 openai——anthropic 流
+            // 默认带 usage 事件，不认该参数
+            ...(stream && proto === 'openai' ? { stream_options: { include_usage: true } } : {}),
             ...(noThink ? { thinking: { type: 'disabled' } } : {}),
             messages: [{ role: 'user', content: prompt }],
           }

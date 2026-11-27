@@ -417,10 +417,13 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
 .delnote{color:var(--muted);font-size:var(--fs-xs)}
 /* 健康变化时间线表（probeSvcTimelineOverlay 弹层内，svcmodal 680px 宽变体）：#mgReviewTable 同款
    fixed 配方——时间/变化/来源三列定宽（时间戳与双 pill 长度可预期），三元组列吃剩余空间为信息
-   主列（长模型 ID 截断、全文在 title 悬浮）；任何窗宽不溢出，更窄走 .tablescroll 滚动 */
+   主列（长模型 ID 截断、全文在 title 悬浮）；任何窗宽不溢出，更窄走 .tablescroll 滚动。
+   时间列 150px：完整 "YYYY-MM-DD HH:mm" 16 字符等宽 @13px 按最宽栈（SF Mono ~7.8px/字符）
+   需 ~125px + td 左右 padding 16px = 141px——140px 是刀口宽度，恰好溢出触发省略号（时间列
+   无 title 兜底即不可读，2026-11-27 实测），150px 留跨平台余量；全文兜底另在 td title */
 #probeSvcTimelineTable{table-layout:fixed;min-width:620px;border-collapse:separate;border-spacing:0}
 #probeSvcTimelineTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
-#probeSvcTimelineTable th:nth-child(1){width:140px}
+#probeSvcTimelineTable th:nth-child(1){width:150px}
 #probeSvcTimelineTable th:nth-child(3){width:190px}
 #probeSvcTimelineTable th:nth-child(4){width:90px}
 #probeSvcTimelineTable th,#probeSvcTimelineTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

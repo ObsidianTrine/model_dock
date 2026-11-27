@@ -387,17 +387,35 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       diagFoot('')
       diagSetRes(resId, null)
       diagBtnBusy(btnId, true, t('检测中…', 'Checking…'))
+      // 轮次进度（p14-progress）：P14 同步跑 5 轮耗时 15~30s+，只有静态「检测中…」易被当成
+      // 卡死。前端生成 runId 随运行请求带上，POST 在飞期间 800ms 轮询引擎进度刷新按钮文案；
+      // 结果返回/出错即停。直接改 textContent 不走 diagBtnBusy——它每次把当前文案存进 _t，
+      // 轮询刷新会污染最终恢复文案。旧网关无端点（非 200）静默保持「检测中…」
+      var rid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+      var poll = null
+      var stopPoll = function () { if (poll) { clearInterval(poll); poll = null } }
+      if (probeId === 'p14') {
+        poll = setInterval(function () {
+          fetch('/_modeldock/probe/run-progress?run=' + rid, { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (j) {
+            if (!j || !j.active || !j.rounds) return
+            var b = document.getElementById(btnId)
+            if (b && b.disabled) b.textContent = t('检测中 · 第 ', 'Checking · round ') + j.round + '/' + j.rounds + t(' 轮', '')
+          }).catch(function () { stopPoll() })
+        }, 800)
+      }
       // timeoutMs 放宽到 120s（diag-run-timeout）：P14 一次串行跑 5 轮流式请求，思考型模型
       // （如 glm-5-3-flash，不支持关思考）单轮 3~6s，5 轮 15~30s 必撞 api() 默认 15s 上限；
       // 引擎侧无 15s 限制（空闲上限 10min），放宽后正常完成
-      api('/probe/run', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ provider: pid, probes: [probeId], confirmToken: diagConfirmTokens[probeId] || '' }) })
+      api('/probe/run', { method: 'POST', timeoutMs: 120000, body: JSON.stringify({ provider: pid, probes: [probeId], confirmToken: diagConfirmTokens[probeId] || '', runId: rid }) })
         .then(function (r) {
+          stopPoll()
           diagBtnBusy(btnId, false, t('运行', 'Run'))
           diagRunApply(r, resId)
           loadDiagBudget()
           pollProbe() // 运行产出新证据：立即刷一次 verdict（徽标/当前结论随后跟上）
         })
         .catch(function (e) {
+          stopPoll()
           diagBtnBusy(btnId, false, t('运行', 'Run'))
           var msg = probeErrMsg(e)
           // 超时不等于失败：客户端断开后引擎仍在后台跑完，结论稍后照常落库——别让用户以为白跑
@@ -477,7 +495,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
         var changeHtml = it.from == null
           ? '<span class="dim">—</span> → ' + diagSvcPillHtml(it.to)
           : diagSvcPillHtml(it.from) + ' → ' + diagSvcPillHtml(it.to)
-        rows += '<tr><td class="mono">' + tm + '</td>' +
+        rows += '<tr><td class="mono" title="' + esc(it.at) + '">' + tm + '</td>' +
           '<td title="' + esc(it.provider + '/' + it.model + ' @' + it.key_fp) + '"><span class="mono">' + esc(it.provider + '/' + it.model) + '</span> <span class="dim">@' + esc(it.key_fp) + '</span></td>' +
           '<td>' + changeHtml + '</td>' +
           '<td class="dim">' + esc(it.source) + '</td></tr>'

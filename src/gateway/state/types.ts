@@ -177,6 +177,9 @@ export interface GatewayRuntime {
   /** (provider, key 指纹, model) 三元组 → 服务探针 verdict 热态（probe/verdict.ts 维护；
    *  重启清零，probe-<date>.jsonl 启动回放重建；reload 清理已删 provider 条目） */
   probeVerdicts?: Map<string, ProbeVerdict>
+  /** 探针运行轮次进度（p14-progress，runId → 最近轮次上报）：服务健康弹层「检测中 · 第 n/m 轮」
+   *  的数据源。端点层注册建位/finally 删，引擎逐轮覆盖写；纯内存重启清零。 */
+  probeRunProgress?: Map<string, { probe: string; provider: string; round: number; rounds: number; at: number }>
   /** 探针引擎运行态（probe/engine.ts 维护；纯内存重启清零） */
   probeRuntime?: ProbeEngineRuntime
   /** providerId+model → 模型粒度熔断状态（key = `${providerId}\u0000${model}`）：模型级容灾

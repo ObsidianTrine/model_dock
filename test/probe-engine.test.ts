@@ -584,6 +584,27 @@ describe('probe-engine · transport SSE 逐片计时（t15）', () => {
           res.end(JSON.stringify({ choices: [] }))
           return
         }
+        if (req.url === '/json-usage') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 4 } }))
+          return
+        }
+        if (req.url === '/sse-usage-open') {
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          res.write('data: {"choices":[{"delta":{"content":"a"}}]}\n\n')
+          res.write('data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":9,"total_tokens":16}}\n\n')
+          res.write('data: [DONE]\n\n')
+          res.end()
+          return
+        }
+        if (req.url === '/sse-usage-ant') {
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}\n\n')
+          res.write('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
+          res.write('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":5}}\n\n')
+          res.end()
+          return
+        }
         if (req.url === '/err') {
           res.writeHead(500, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ error: { message: 'boom' } }))
@@ -647,8 +668,31 @@ describe('probe-engine · transport SSE 逐片计时（t15）', () => {
     }
   })
 
-  it('abort 中止 SSE 增量读：transport 就地返回部分体，不挂死到流结束', async () => {
+  it('SSE usage 收割（svc-token-accounting）：openai usage chunk / anthropic start+delta 合并；非流式与无 usage SSE 原样', async () => {
     const h = fakeHome()
+    const mock = await startProbeMock()
+    try {
+      const rt = await probeRt(mock.url)
+      // openai：末 chunk 顶层 usage（include_usage 形态）整条收割
+      const open = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/sse-usage-open', body: Buffer.from('{}') })
+      expect(open.status).toBe(200)
+      expect(open.usage).toEqual({ prompt_tokens: 7, completion_tokens: 9, total_tokens: 16 })
+      // anthropic：message_start 的 input + 末条 message_delta 累计 output（逐字段后写覆盖）
+      const ant = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/sse-usage-ant', body: Buffer.from('{}') })
+      expect(ant.usage).toEqual({ input_tokens: 12, output_tokens: 5 })
+      // 非流式 JSON 路径既有行为不变
+      const js = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/json-usage', body: Buffer.from('{}') })
+      expect(js.usage).toEqual({ prompt_tokens: 3, completion_tokens: 4 })
+      // 无 usage 行的 SSE：不发明（旧上游观测降级语义保持）
+      const plain = await makeRelayProbeTransport(rt)({ providerId: 'ps', model: 'm', path: '/sse', body: Buffer.from('{}') })
+      expect(plain.usage).toBeUndefined()
+    } finally {
+      await mock.close()
+      h.restore()
+    }
+  })
+
+  it('abort 中止 SSE 增量读：transport 就地返回部分体，不挂死到流结束', async () => {    const h = fakeHome()
     const s = http.createServer((req, res) => {
       req.resume()
       req.on('end', () => {

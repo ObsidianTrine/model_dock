@@ -3,7 +3,7 @@ import { safeEqual } from '../../util/safe-equal.js'
 import { t, bi } from '../../util/i18n.js'
 import { AdminCtx, jsonRequestBody, sendError } from '../admin-shared.js'
 import type { GatewayRuntime, ProviderAvailability } from '../state.js'
-import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite } from '../probe/engine.js'
+import { buildProbePlan, makeRelayProbeTransport, probeConfigView, runProbeSuite, clearProbeRunProgress, registerProbeRunProgress } from '../probe/engine.js'
 import { probeBudgetState, probeMonthBreakdown, probeSpendSeries, readProbeLedger } from '../probe/ledger.js'
 import { PROBE_REGISTRY, getProbeDef } from '../probe/registry.js'
 import { getProbeRunner } from '../probe/runners/index.js'
@@ -108,14 +108,24 @@ export async function hProbeRun(c: AdminCtx): Promise<void> {
     providerId,
     bi('{probes} × {n} 目标 · 预估 {e} tokens', '{probes} × {n} targets · estimate {e} tokens', { probes: probeIds.join(','), n: plan.planned, e: plan.estimate })
   )
-  const result = await runProbeSuite(rt, {
-    probeIds,
-    targets: plan.units.map((u) => u.target),
-    transport: makeRelayProbeTransport(rt, { idleTimeoutMs: o.idle, retries: o.retries }),
-    runnerFor: getProbeRunner,
-    confirmed: true,
-    secrets: plan.secrets,
-  })
+  // 轮次进度（p14-progress）：runId 可选（前端生成，字符白名单净化）；注册建位 → 运行 →
+  // finally 删。非法/缺席不拦运行——进度是体验增强，不属正确性
+  const runId = typeof b.runId === 'string' ? b.runId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) : ''
+  if (runId) registerProbeRunProgress(rt, runId, providerId, probeIds)
+  let result
+  try {
+    result = await runProbeSuite(rt, {
+      probeIds,
+      targets: plan.units.map((u) => u.target),
+      transport: makeRelayProbeTransport(rt, { idleTimeoutMs: o.idle, retries: o.retries }),
+      runnerFor: getProbeRunner,
+      confirmed: true,
+      secrets: plan.secrets,
+      ...(runId ? { runId } : {}),
+    })
+  } finally {
+    if (runId) clearProbeRunProgress(rt, runId)
+  }
   const budget = await probeBudgetState(rt)
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(
@@ -216,5 +226,19 @@ export async function hProbeTimeline(c: AdminCtx): Promise<void> {
   const { items, total } = await probeVerdictTimelinePage(days * 86_400_000, { provider, limit })
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({ ok: true, provider, days, limit, total, timeline: items, generated_at: new Date().toISOString() }))
+  return
+}
+
+/** GET /_modeldock/probe/run-progress?run=<id>：探针运行轮次进度（admin 门内只读，p14-progress）。
+ *  数据源 = rt.probeRunProgress 内存 Map（hProbeRun 注册建位、finally 删，引擎逐轮覆盖写）。
+ *  active=true 带轮次（rounds=0 = 已注册未开跑首轮）；false = 无此 run（已结束/非法 id/旧网关
+ *  重启清 Map）——前端对 false 与请求失败一律静默保持「检测中…」文案，不做区分。 */
+export async function hProbeRunProgress(c: AdminCtx): Promise<void> {
+  const { rt, req, res } = c
+  const q = new URL(req.url ?? '', 'http://x').searchParams
+  const run = (q.get('run') ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+  const e = run ? rt.probeRunProgress?.get(run) : undefined
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(e ? { ok: true, active: true, probe: e.probe, provider: e.provider, round: e.round, rounds: e.rounds } : { ok: true, active: false }))
   return
 }
