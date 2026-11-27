@@ -304,7 +304,11 @@ export async function hImportDetect(c: AdminCtx): Promise<void> {
       source: c.source,
       name: c.name,
       base_url: c.base_url,
+      // protocol/models/keyNote 供导入预览（勾选后先展示将创建的服务/路由再确认）
+      protocol: c.protocol,
       hasKey: !!c.key,
+      keyNote: c.key_note,
+      models: c.models?.length ? c.models : undefined,
       isCurrent: !!c.is_current,
       dismissed: dismissed.has(norm) || undefined,
       sameSite,

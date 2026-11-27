@@ -5,6 +5,18 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
+## [Unreleased]
+
+### Improved
+
+- **Preview step for importing existing configs**: in "Add service → Import from local apps", after picking candidates you now see a preview of the services that will be created (base URL, protocol, key presence, model list) and their matching routes, and the import only happens after you confirm. Candidates previously muted via "don't remind me" are now marked "(dismissed)" and can still be picked.
+- **Empty import results now explain themselves**: when every candidate is unimportable, the dialog used to show only "No importable legacy configs found" with no reasons; it now lists the skipped entries with causes (already in ModelDock, points to a local proxy, no key, config parse failure, and so on).
+
+### Fixed
+
+- **cc-switch official login rows no longer falsely report "TOML parse error"**: the OpenAI official login row carries no custom config (empty config) and was previously treated as a corrupted config, producing an unusable diagnostic entry; it is now skipped silently.
+- **cc-switch database read failures now report the real cause**: when the built-in SQLite fails to read the database (locked or corrupted file), the error used to be swallowed while falling back to the external sqlite3 command, so the reported message came from the command layer and masked the real cause; the true error is now surfaced directly.
+
 ## [1.8.3] - 2026-11-27
 
 Multi-machine sync and probe polish: lazy-loaded health history and clearer sync status; a CLI sync status fix plus a batch of stability fixes from the health audit and orchestration race hardening.

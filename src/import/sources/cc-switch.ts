@@ -16,17 +16,25 @@ const exec = promisify(execFile)
  * 返回 null 表示 node:sqlite 不可用，由调用方走外部 sqlite3 分支。
  */
 async function readCcSwitchProviders(dbPath: string): Promise<RawRow[] | null> {
+  let DatabaseSync: unknown
   try {
-    const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(dbPath, { readOnly: true })
-    try {
-      const rows = db.prepare('SELECT * FROM providers').all() as Array<Record<string, unknown>>
-      return rows.map((r) => ({ ...r }))
-    } finally {
-      db.close()
-    }
+    ;({ DatabaseSync } = await import('node:sqlite'))
   } catch {
-    return null
+    return null // 模块不可用（老版本 Node 需 --experimental-sqlite）→ 调用方回退外部 sqlite3 CLI
+  }
+  if (typeof DatabaseSync !== 'function') return null
+  // 模块可用但读库失败（锁/损坏/权限）→ 如实上抛，不再静默吞掉回退 CLI：
+  // 同类故障 CLI 同样读不了，回退只会用第二个错误盖掉真因（两层掩蔽）
+  const Database = DatabaseSync as new (
+    path: string,
+    opts?: { readOnly?: boolean },
+  ) => { prepare(sql: string): { all(): Array<Record<string, unknown>> }; close(): void }
+  const db = new Database(dbPath, { readOnly: true })
+  try {
+    const rows = db.prepare('SELECT * FROM providers').all() as Array<Record<string, unknown>>
+    return rows.map((r) => ({ ...r }))
+  } finally {
+    db.close()
   }
 }
 
@@ -38,7 +46,12 @@ export async function scanCcSwitch(): Promise<ImportCandidate[]> {
   const dbPath = path.join(homeDir(), '.cc-switch', 'cc-switch.db')
   if (!(await isFile(dbPath))) return []
   let rows: RawRow[]
-  const nativeRows = await readCcSwitchProviders(dbPath)
+  let nativeRows: RawRow[] | null
+  try {
+    nativeRows = await readCcSwitchProviders(dbPath)
+  } catch (e) {
+    return [placeholder('cc-switch', t('读取 cc-switch.db 失败：{msg}', 'Failed to read cc-switch.db: {msg}', { msg: (e as Error).message }))]
+  }
   if (nativeRows !== null) {
     rows = nativeRows
   } else {
@@ -127,7 +140,11 @@ export function ccSwitchCodexRow(row: RawRow): ImportCandidate[] {
     return []
   }
   const rowName = ccSwitchRowName(row, 'cc-switch codex')
-  const doc = parseCodexTomlDoc(cfg?.config)
+  // config 空串/缺省 = 官方登录行（本就没有自定义 provider TOML）：静默跳过，不是解析失败——
+  // 此前空 config 落「TOML 解析失败」误报占位（本机 OpenAI Official 行实证）
+  const toml = typeof cfg?.config === 'string' ? cfg.config : ''
+  if (!toml.trim()) return []
+  const doc = parseCodexTomlDoc(toml)
   if (!doc) {
     return [
       {

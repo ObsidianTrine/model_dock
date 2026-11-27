@@ -422,13 +422,21 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     }
   }
 
-  // 存量收编重开入口（添加服务弹层 → 勾选导入）：/import/detect 候选可勾选、/import/apply 按 ids 应用；
-  // 与配置包导入的概念区分见 modals.ts legacyM 注
+  // 存量收编重开入口（添加服务弹层 → 勾选导入 → 预览确认）：/import/detect 候选勾选 → 预览将创建的
+  // 服务/路由 → /import/apply 按 ids 应用；与配置包导入的概念区分见 modals.ts legacyM 注。
+  // 带 skipReason 的候选不进勾选面，但不再静默吞掉——收进「已跳过」附栏：全部已收编/指向本网关/
+  // 无 Key 时用户至少能看到为什么（此前只剩一句「没有检测到」，空态零解释）
   var legacyCands = []
   var legacyChecked = []
+  var legacyStage = 'list' // 'list'=勾选 | 'preview'=确认预览（对齐配置包导入的两段式）
+  var legacyApplying = false // apply 在飞标记：预览↔列表往返会重置按钮 disabled，靠它挡双重提交
+  var legacyListDesc = '' // 勾选阶段的说明文案快照：预览步改写过 desc，返回时恢复
   function setLegacyErr(msg) {
     var el = document.getElementById('legacyErr')
     if (el) el.textContent = msg || ''
+  }
+  function legacyPicked() {
+    return legacyCands.filter(function (_, i) { return legacyChecked[i] })
   }
   function updateLegacyGo() {
     var go = document.getElementById('legacyGo')
@@ -436,6 +444,70 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     var n = legacyChecked.filter(function (x) { return x }).length
     go.disabled = n === 0
     go.textContent = t('导入所选（{n}）', 'Import selected ({n})', { n: n })
+  }
+  // 底栏随阶段显隐（模式同 updatePkgFoot）：list=导入所选；preview=返回+确认导入
+  function updateLegacyFoot() {
+    var preview = legacyStage === 'preview'
+    var back = document.getElementById('legacyBack')
+    var go = document.getElementById('legacyGo')
+    var ok = document.getElementById('legacyConfirm')
+    if (back) back.hidden = !preview
+    if (go) go.hidden = preview
+    if (ok) ok.hidden = !preview
+  }
+  function legacyShowStage(stage) {
+    legacyStage = stage
+    var list = document.getElementById('legacyList')
+    var pv = document.getElementById('legacyPreview')
+    if (list) list.hidden = stage !== 'list'
+    if (pv) pv.hidden = stage !== 'preview'
+    updateLegacyFoot()
+  }
+  function legacyProtoLabel(p) {
+    if (p === 'anthropic') return t('Anthropic 协议', 'Anthropic protocol')
+    if (p === 'responses') return t('Responses 协议', 'Responses protocol')
+    return t('OpenAI 兼容', 'OpenAI-compatible')
+  }
+  function renderLegacyPreview() {
+    var pv = document.getElementById('legacyPreview')
+    var desc = document.getElementById('legacyDesc')
+    var picked = legacyPicked()
+    if (desc) desc.textContent = t('将创建 {n} 个服务与同名路由，确认无误后导入：', 'Will create {n} services with matching routes. Confirm to import:', { n: picked.length })
+    if (!pv) return
+    pv.innerHTML = ''
+    var ok = document.getElementById('legacyConfirm')
+    if (ok) ok.disabled = legacyApplying
+    picked.forEach(function (c) {
+      var row = document.createElement('div')
+      row.className = 'legacyrow'
+      var nm = document.createElement('span')
+      nm.className = 'lname'
+      nm.textContent = c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '')
+      var src = document.createElement('span')
+      src.className = 'lsrc'
+      src.textContent = SRC_LABEL[c.source] || c.source
+      row.appendChild(nm)
+      row.appendChild(src)
+      pv.appendChild(row)
+      // 细节行：地址 · 协议 · Key · 模型 · 同站点提示（预览核心=导入后到底长什么样）
+      var detail = document.createElement('p')
+      detail.className = 'help'
+      var parts = [c.base_url, legacyProtoLabel(c.protocol)]
+      parts.push(c.hasKey ? t('已带 Key', 'Key included') : t('无 Key（导入后需补）', 'No key (add after import)'))
+      if (c.keyNote) parts.push(c.keyNote)
+      if (c.models && c.models.length) {
+        var mm = c.models.slice(0, 3).join(t('、', ', '))
+        if (c.models.length > 3) mm += t(' 等 {n} 个', ' +{n} more', { n: c.models.length })
+        parts.push(t('模型：', 'Models: ') + mm)
+      }
+      if (c.sameSite) parts.push(c.sameSite)
+      detail.textContent = parts.join(' · ')
+      pv.appendChild(detail)
+    })
+    var foot = document.createElement('p')
+    foot.className = 'help'
+    foot.textContent = t('每个服务会同时登记一条同名路由（默认模型取该服务模型列表第一个）。', 'Each service also registers a matching route (default model = the first model of that service).')
+    pv.appendChild(foot)
   }
   function renderLegacy() {
     var list = document.getElementById('legacyList')
@@ -445,14 +517,20 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
     if (list) list.innerHTML = ''
     if (desc) desc.textContent = t('正在检测本机客户端的存量配置…', 'Scanning local apps for existing configs…')
     setLegacyErr('')
+    legacyShowStage('list')
     api('/import/detect', { timeoutMs: 20000 })
       .then(function (r) {
-        var cands = (r.candidates || []).filter(function (c) { return !c.skipReason && c.base_url })
+        var all = r.candidates || []
+        var cands = all.filter(function (c) { return !c.skipReason && c.base_url })
+        var skipped = all.filter(function (c) { return c.skipReason })
         legacyCands = cands
         legacyChecked = cands.map(function () { return true })
         if (desc) desc.textContent = cands.length
           ? t('检测到 {n} 个模型服务，勾选要搬进来的：', 'Found {n} model services. Pick the ones to bring in:', { n: cands.length })
-          : t('没有检测到可导入的存量配置。', 'No importable legacy configs found.')
+          : (skipped.length
+            ? t('没有可直接导入的存量配置；检测到 {m} 条已跳过：', 'No importable legacy configs; {m} entries were skipped:', { m: skipped.length })
+            : t('没有检测到可导入的存量配置。', 'No importable legacy configs found.'))
+        legacyListDesc = desc ? desc.textContent : ''
         if (list) {
           list.innerHTML = ''
           cands.forEach(function (c, i) {
@@ -465,7 +543,10 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
             var nm = document.createElement('span')
             nm.className = 'lname'
             nm.textContent = c.name + (c.isCurrent ? t('（使用中）', ' (in use)') : '') +
-              (c.hasKey ? '' : t('（无 Key）', ' (no key)')) + (c.sameSite ? ' · ' + c.sameSite : '')
+              (c.hasKey ? '' : t('（无 Key）', ' (no key)')) +
+              // dismissed 只挡首启横幅，手动弹层仍可导入（搬回入口）：标注出来免得用户困惑
+              (c.dismissed ? t('（已忽略）', ' (dismissed)') : '') +
+              (c.sameSite ? ' · ' + c.sameSite : '')
             var src = document.createElement('span')
             src.className = 'lsrc'
             src.textContent = SRC_LABEL[c.source] || c.source
@@ -474,6 +555,20 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
             row.appendChild(src)
             list.appendChild(row)
           })
+          if (skipped.length) {
+            if (cands.length) {
+              var head = document.createElement('p')
+              head.className = 'help'
+              head.textContent = t('另有 {m} 条已跳过：', 'Another {m} entries were skipped:', { m: skipped.length })
+              list.appendChild(head)
+            }
+            skipped.forEach(function (c) {
+              var line = document.createElement('p')
+              line.className = 'help'
+              line.textContent = (SRC_LABEL[c.source] || c.source) + ' · ' + (c.name || c.base_url || '') + t('：', ': ') + c.skipReason
+              list.appendChild(line)
+            })
+          }
         }
         updateLegacyGo()
       })
@@ -492,22 +587,48 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
   var legacyGo = document.getElementById('legacyGo')
   if (legacyGo) {
     legacyGo.onclick = function () {
-      var picked = legacyCands.filter(function (_, i) { return legacyChecked[i] })
+      if (!legacyPicked().length || legacyApplying) return
+      legacyShowStage('preview')
+      renderLegacyPreview()
+    }
+  }
+  var legacyBack = document.getElementById('legacyBack')
+  if (legacyBack) {
+    legacyBack.onclick = function () {
+      legacyShowStage('list')
+      // 预览步改写过 desc（「将创建 N 个服务…」），返回勾选列表时恢复扫描结论文案
+      var desc = document.getElementById('legacyDesc')
+      if (desc) desc.textContent = legacyListDesc
+      updateLegacyGo()
+    }
+  }
+  var legacyConfirm = document.getElementById('legacyConfirm')
+  if (legacyConfirm) {
+    legacyConfirm.onclick = function () {
+      if (legacyApplying) return
+      var picked = legacyPicked()
       var ids = picked.map(function (c) { return c.id })
-      if (!ids.length) return
-      legacyGo.disabled = true
+      if (!ids.length) { legacyShowStage('list'); return }
+      legacyApplying = true
+      legacyConfirm.disabled = true
       api('/import/apply', { method: 'POST', body: JSON.stringify({ ids: ids }) })
         .then(function (r) {
           var n = (r.imported || []).length
           // 导入成功后记住这些候选地址：之后删除该服务，自动弹卡不再拿它回头
           dismissCandidates(picked.map(function (c) { return c.base_url }))
+          legacyApplying = false
           legacyM.close()
           toast('✓ ' + t('已导入 ', 'Imported ') + n + t(' 个服务，下方「我的服务」里可以查看和切换', ' services. See and switch them under "My services" below'), true)
           return load()
         })
-        .catch(function (e) { setLegacyErr(t('导入失败：', 'Import failed: ') + e.message); legacyGo.disabled = false })
+        .catch(function (e) {
+          legacyApplying = false
+          setLegacyErr(t('导入失败：', 'Import failed: ') + e.message)
+          legacyConfirm.disabled = false
+        })
     }
   }
+  updateLegacyFoot() // 初始把 preview 阶段按钮藏好（弹层尚未开过时也保持底栏一致）
 
   // 附近电脑确认式直拉（sync-nearby）
   // B 侧：切到「附近的电脑」标签即自动搜索 → 点卡片「导入」→ 敲门 → 轮询对方裁决 →
