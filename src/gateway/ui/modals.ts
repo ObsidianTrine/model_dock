@@ -70,11 +70,15 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
     title: '导入存量配置||Import existing configs',
     align: 'top',
     closeOnScrim: true,
+    // 两段式（对齐配置包导入）：list=勾选候选 → preview=确认将创建的服务/路由；legacyPreview 容器由 renderLegacyPreview 填充
     bodyHtml: '<p class="shint" id="legacyDesc" style="margin-top:0"></p><div id="legacyList"></div>' +
+      '<div id="legacyPreview" hidden></div>' +
       '<p class="help" data-i18n="只读收编：读取一份副本建服务，原客户端不受影响；导入后可在「我的服务」里切换。||Read-only: a copy is read to create services; your original apps stay untouched. Switch them under My services afterwards.">只读收编：读取一份副本建服务，原客户端不受影响；导入后可在「我的服务」里切换。</p>',
     foot: [
       { slot: 'msg', id: 'legacyErr', kind: 'err' },
+      { id: 'legacyBack', label: '返回||Back', end: true },
       { id: 'legacyGo', label: '导入所选||Import selected', primary: true, end: true, disabled: true },
+      { id: 'legacyConfirm', label: '确认导入||Confirm import', primary: true, end: true },
     ],
   })
   var confirmM = createModal({

@@ -1578,6 +1578,8 @@ describe('网关', () => {
       expect(actionable).toHaveLength(1)
       expect(actionable[0].name).toBe('火山 Coding')
       expect(actionable[0].hasKey).toBe(true)
+      expect(actionable[0].protocol).toBe('anthropic')
+      expect(actionable[0].models).toContain('deepseek-v4-flash') // collectModelEnvs 采到的模型列表随 detect 回传（导入预览用）
       expect(JSON.stringify(detJson)).not.toContain('sk-volc-1') // Key 明文绝不出现在接口响应里
 
       // 一键导入

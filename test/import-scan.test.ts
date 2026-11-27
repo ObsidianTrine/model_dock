@@ -363,6 +363,12 @@ describe('import scan · cc-switch codex / gemini 行', () => {
     expect(rows[0].skip_reason).toBeTruthy()
   })
 
+  it('codex 行 config 为空串/缺省（官方登录行）→ 静默跳过，不误报 TOML 解析失败', () => {
+    expect(ccSwitchCodexRow({ name: 'OpenAI Official', settings_config: JSON.stringify({ auth: {}, config: '' }) })).toHaveLength(0)
+    expect(ccSwitchCodexRow({ name: 'OpenAI Official', settings_config: JSON.stringify({ config: '   ' }) })).toHaveLength(0)
+    expect(ccSwitchCodexRow({ name: 'OpenAI Official', settings_config: JSON.stringify({ auth: { OPENAI_API_KEY: 'sk-x' } }) })).toHaveLength(0)
+  })
+
   it('gemini 行：env 里的中转 base_url + key', () => {
     const cand = ccSwitchGeminiRow({
       name: 'Relay',
