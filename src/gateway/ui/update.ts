@@ -28,18 +28,19 @@ export const UI_JS_UPDATE = `  function render() {
       )
   }
 
-  // 多机同步徽标（顶栏）：正常态一枚安静的灰 pill，冲突/错误/暂停才变色提醒；
+  // 多机同步徽标（顶栏）：常态绿 pill（kit 色彩语义：绿=开启/正常，原灰底偏离「灰=关闭/次要」，
+  // 2026-11-27 船东拍板改绿）；冲突/错误/暂停才换色+换字提醒；
   // 长路径、版本号、CLI 指引全部收进悬浮详情——控制台不做同步配置，管理在电脑端命令行
   function renderSyncBadge() {
     var el = document.getElementById('syncBadge')
     if (!el) return
     var s = view && view.sync
     if (!s || s.mode === 'off') { el.hidden = true; return }
-    var cls = 'pill', txt
-    if (s.paused) { txt = t('同步已暂停', 'Sync paused'); cls += ' dim' }
-    else if (s.lastConflictTs) { txt = t('同步冲突待处理', 'Sync conflict pending'); cls += ' warn' }
-    else if (s.lastError) { txt = t('同步错误', 'Sync error'); cls += ' err' }
-    else { txt = t('多机同步 · 已开启', 'Device sync · on') }
+    var cls = 'pill ok', txt
+    if (s.paused) { txt = t('同步已暂停', 'Sync paused'); cls = 'pill dim' }
+    else if (s.lastConflictTs) { txt = t('同步冲突', 'Sync conflict'); cls = 'pill warn' }
+    else if (s.lastError) { txt = t('同步错误', 'Sync error'); cls = 'pill err' }
+    else { txt = t('多机同步', 'Sync') }
     var tip = []
     if (s.targetLabel) tip.push(t('目标：', 'Target: ') + s.targetLabel)
     if (typeof s.lastAppliedRev === 'number' && s.lastAppliedRev > 0) tip.push(t('已同步到第 ', 'Synced to rev ') + s.lastAppliedRev + t(' 版', ''))
