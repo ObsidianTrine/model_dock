@@ -10,6 +10,7 @@ import { configPath, presetsJsonPath, secretsPath } from '../util/paths.js'
 import { t } from '../util/i18n.js'
 import { SCHEMA_VERSION, SYNCDOC_FMT, type Syncdoc, type SyncProviderEntry } from './types.js'
 import { applyAssets, collectAssetFiles, existingAssetPaths } from './assets.js'
+import { presetKey } from './merge.js'
 
 /** 收集/应用摘要：providers/profiles 为 id 清单；envKeyRefs=走环境变量引用不随包的服务；
  *  missingKeys=导出机上 key 已解析不到（引用原样保留）的服务；keysRestored=导入时按本机后端重存的 key 数；
@@ -25,6 +26,11 @@ export interface SyncdocReport {
   assetsFiles?: number
   assetsSkipped?: string[]
   assetsWritten?: number
+  /** 追加导入路径（applySyncdocAdditive）增量字段：整包替换路径不产出 */
+  overwrittenProviders?: string[]
+  skippedProfiles?: string[]
+  presetsAdded?: number
+  scheduleRulesAdded?: number
 }
 
 /** 读取 presets.json 原始 JSON（保真不归一化，应用时原样写回）；缺失视为无自定义，格式错误抛可操作报错 */
@@ -198,5 +204,98 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
     keysRestored: Object.keys(keyEntries).length,
     assetsFiles: Object.keys(assetFiles).length,
     ...(assetsWritten !== undefined ? { assetsWritten } : {}),
+  }
+}
+
+/** 追加导入（2026-11-27 配置包导入改造）：与 applySyncdoc 的整包替换相对——本机现有可同步态
+ *  一律保留，只并入勾选过滤后的 doc：
+ *  · provider id 撞名 = 覆盖（勾选「将覆盖本机同名」即显式授权，id 保留路由引用不断）；新 id 追加；
+ *  · 路由/预设按 id（或内容键）追加：已有的保留本机版（本机可能改过默认模型/别名），新条目才进；
+ *  · 定时窗口去重追加（JSON 同形视为同一条）；资产同 applySyncdoc（只写差异、绝不删本机多出的文件）；
+ *  · active_profile 等机器态一律不动。同样先快照（追加也是写盘）。
+ *  报告增量字段：overwrittenProviders/skippedProfiles/presetsAdded/scheduleRulesAdded（整包替换路径不产出）。 */
+export async function applySyncdocAdditive(doc: Syncdoc, opts?: { backend?: SecretBackend; log?: (line: string) => void }): Promise<SyncdocReport> {
+  // doc.data.userPresets 两种顶层形态（数组 / {presets:[...]}）的统一取数组口径（与 merge.ts 同款）
+  const presetArray = (up: Syncdoc['data']['userPresets']): unknown[] => (up === undefined || up === null ? [] : Array.isArray(up) ? up : up.presets)
+  let rulesAdded = 0
+  let presetsAdded = 0
+  const assetFiles = doc.data.assets?.files ?? {}
+  await snapshot('config', 'pre-sync-import', [configPath(), secretsPath(), presetsJsonPath(), ...existingAssetPaths(assetFiles)])
+  const cfg = await loadConfig()
+  const backend = opts?.backend ?? (cfg.security?.store as SecretBackend | undefined) ?? (await defaultStore())
+
+  const keyEntries: Record<string, string> = {}
+  for (const [id, p] of Object.entries(doc.data.providers)) {
+    if (typeof p.key === 'string' && p.key !== '') keyEntries[id] = p.key
+  }
+  const refs = await setSecretsBatch(keyEntries, backend)
+
+  const providers: Record<string, ProviderConfig> = {}
+  for (const [id, p] of Object.entries(doc.data.providers)) {
+    if (typeof p.key === 'string' && p.key !== '') {
+      const rest = { ...p }
+      delete rest.key
+      providers[id] = { ...rest, key_ref: refs[id]! }
+    } else {
+      providers[id] = { ...p, key_ref: p.key_ref! }
+    }
+  }
+  const overwritten = Object.keys(providers).filter((id) => cfg.providers[id])
+
+  const incomingProfiles = { ...doc.data.profiles }
+  const skippedProfiles: string[] = []
+  const rules = doc.data.scheduleRules ?? []
+  await mutateConfig((c) => {
+    c.providers = { ...c.providers, ...providers }
+    for (const [rid, profile] of Object.entries(incomingProfiles)) {
+      if (c.profiles[rid]) {
+        skippedProfiles.push(rid) // 已有路由保留本机版（本机可能改过默认模型/别名），只报数不覆盖
+        continue
+      }
+      c.profiles[rid] = profile
+    }
+    const curRules = c.gateway?.schedule?.windows ?? []
+    const seen = new Set(curRules.map((w) => JSON.stringify(w)))
+    const addRules = rules.filter((w) => !seen.has(JSON.stringify(w)))
+    rulesAdded = addRules.length
+    if (addRules.length > 0) {
+      c.gateway = { ...c.gateway, schedule: { ...(c.gateway?.schedule?.enabled === undefined ? {} : { enabled: c.gateway.schedule.enabled }), windows: [...curRules, ...addRules] } }
+    }
+  })
+
+  // 预设按 presetKey 追加：已有的（id 或内容同）保留本机版，新条目才进；两种顶层形态都兼容
+  const curPresets = readRawUserPresets()
+  const curArr = Array.isArray(curPresets) ? curPresets : curPresets.presets
+  const inArr = presetArray(doc.data.userPresets)
+  const seen = new Set(curArr.map((e, i) => presetKey(e, i)))
+  const addPresets = inArr.filter((e, i) => !seen.has(presetKey(e, i)))
+  presetsAdded = addPresets.length
+  if (addPresets.length > 0) {
+    await atomicWrite(presetsJsonPath(), JSON.stringify(Array.isArray(curPresets) ? [...curArr, ...addPresets] : { presets: [...curArr, ...addPresets] }, null, 2) + '\n', 0o600)
+    reloadPresets()
+    clearKnownTable()
+  }
+
+  let assetsWritten: number | undefined
+  if (Object.keys(assetFiles).length > 0) {
+    assetsWritten = (await applyAssets(assetFiles, { onWarning: opts?.log })).written.length
+  }
+
+  return {
+    providers: Object.keys(providers),
+    profiles: Object.keys(incomingProfiles).filter((rid) => !skippedProfiles.includes(rid)),
+    presetCount: countPresets(doc.data.userPresets),
+    scheduleRules: rules.length,
+    envKeyRefs: Object.entries(doc.data.providers).filter(([, p]) => parseKeyRef(p.key_ref ?? '').scheme === 'env').map(([id]) => id),
+    missingKeys: Object.entries(doc.data.providers)
+      .filter(([, p]) => !(typeof p.key === 'string' && p.key !== '') && ['file', 'keychain', 'secret-service'].includes(parseKeyRef(p.key_ref ?? '').scheme))
+      .map(([id]) => id),
+    keysRestored: Object.keys(keyEntries).length,
+    assetsFiles: Object.keys(assetFiles).length,
+    ...(assetsWritten !== undefined ? { assetsWritten } : {}),
+    overwrittenProviders: overwritten,
+    skippedProfiles,
+    presetsAdded,
+    scheduleRulesAdded: rulesAdded,
   }
 }

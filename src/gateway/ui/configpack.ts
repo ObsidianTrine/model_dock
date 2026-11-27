@@ -204,86 +204,53 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
   if (impImportBtn) {
     impImportBtn.onclick = function () {
       var btn = this
-      var bodyP
-      var multiP = false
+      var previewBody // 预览请求体：packages 形态 或 source:{kind:'url'} 形态
       if (impTab === 'link') {
         var link = (document.getElementById('impUrl').value || '').trim()
         var i = link.indexOf('#p=')
         if (i < 0) { setImpErr(t('链接缺口号段（#p=…）：请回旧电脑复制完整链接', 'The link lacks the passphrase part (#p=…): copy the full link on the old computer')); return }
-        bodyP = Promise.resolve({ kind: 'url', url: link.slice(0, i), passphrase: link.slice(i + 3) })
-      } else if (mgFiles.length > 1) {
-        // 多包合并流：逐包口令行全部填了才进预览（服务端对缺口令也是整体拒绝）
-        var pws = mgCollectPassphrases()
-        if (pws.some(function (p) { return !p })) { setImpErr(t('请输入每个配置包的口令', 'Enter the passphrase for every package')); return }
-        multiP = true
-        bodyP = mgReadFiles().then(function (packages) { return { packages: packages, passphrases: pws } })
+        previewBody = { source: { kind: 'url', url: link.slice(0, i), passphrase: link.slice(i + 3) } }
       } else {
+        // 文件 tab（1..N 统一 packages 形态）：多包=逐包口令行；单包=单口令输入。
         // 多选后删到只剩一个时 input.value 已清：文件来源回落 mgFiles（两来源互斥，不会同时为空）
-        var f = mgFiles.length === 1 ? mgFiles[0] : document.getElementById('impFile2').files[0]
-        var pw = document.getElementById('impPw2').value || ''
-        if (!pw) { setImpErr(t('请输入导出时设置的口令', 'Enter the passphrase set at export')); return }
-        bodyP = f.text().then(function (txt) { return { kind: 'file', file: txt, passphrase: pw } })
+        var files = mgFiles.length >= 1 ? mgFiles : Array.prototype.slice.call(document.getElementById('impFile2').files || [])
+        if (!files.length) { setImpErr(t('请先选择配置包文件', 'Choose a package file first')); return }
+        var pws = mgFiles.length > 1
+          ? mgCollectPassphrases()
+          : [(document.getElementById('impPw2').value || '')]
+        if (pws.some(function (p) { return !p })) { setImpErr(t(mgFiles.length > 1 ? '请输入每个配置包的口令' : '请输入导出时设置的口令', mgFiles.length > 1 ? 'Enter the passphrase for every package' : 'Enter the passphrase set at export')); return }
+        previewBody = { files: files, pws: pws }
       }
       btn.disabled = true
       setImpErr('')
       hideImpPreview()
-      if (multiP) {
-        // 多包：/merge/preview 出三档候选清单（渲染在审阅宽弹层 mergeReviewOverlay），勾选后 mgReviewApply 走 /merge/apply
-        bodyP
-          .then(function (src) { return api('/merge/preview', { method: 'POST', body: JSON.stringify({ packages: src.packages, passphrases: src.passphrases }) }) })
-          .then(function (j) { mgRenderPreview(j); btn.disabled = false })
-          .catch(function (e) { setImpErr(t('合并预览失败：', 'Merge preview failed: ') + ((e && e.message) || e)); btn.disabled = false })
-      } else {
-        // 先预览（服务端解包出 report，包不入库）再确认：对齐 CLI 的「将被替换/不受影响」确认步
-        bodyP
-          .then(function (src) { return api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'preview', source: src }) }) })
-          .then(function (j) {
-            impPendingTicket = j.ticket || ''
-            var rep = j.report || {}
-            var meta = j.meta || {}
-            var line = document.getElementById('impPreviewLine')
-            if (line) {
-              line.textContent = t('将导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Will import: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules', { n: (rep.providers || []).length, n2: (rep.profiles || []).length, n3: rep.presetCount || 0, n4: rep.scheduleRules || 0 })
-                + (meta.createdBy ? t('（配置包来自 ', ' (package from ') + meta.createdBy + t('）', ')') : '')
-                + t('。导入会整体替换现有配置（自动快照）。', '. This replaces the whole current config (snapshot taken first).')
-            }
-            var pv = document.getElementById('impPreview')
-            if (pv) pv.hidden = false
-            btn.disabled = false
-          })
-          .catch(function (e) { setImpErr(t('读取配置包失败：', 'Failed to read the package: ') + e.message); btn.disabled = false })
-      }
+      var bodyReady = previewBody.files
+        ? Promise.all(previewBody.files.map(mgFileToB64)).then(function (packages) { return { packages: packages, passphrases: previewBody.pws } })
+        : Promise.resolve(previewBody)
+      // 2026-11-27 导入预览统一：三入口全走 /merge/preview → mergeReviewOverlay 审阅弹层（勾选+
+      // 追加/替换模式）→ mgReviewApply 走 /merge/apply。链接一次性取走即焚：预览时服务端已暂存
+      // 副本并回带 ticket，应用凭 ticket（不再依赖链接二次拉取）
+      bodyReady
+        .then(function (body) {
+          // packages 形态：apply 原样重传（前端持有字节，无状态）；url 形态等预览响应回带 ticket 再注入
+          if (body.packages) mgSetApplySource(function () { return Promise.resolve(body) })
+          return api('/merge/preview', { method: 'POST', body: JSON.stringify(body) })
+        })
+        .then(function (j) {
+          if (j.ticket) {
+            var tk = j.ticket
+            mgSetApplySource(function () { return Promise.resolve({ source: { kind: 'ticket', ticket: tk } }) })
+          }
+          mgRenderPreview(j)
+          btn.disabled = false
+        })
+        .catch(function (e) { setImpErr(t('预览失败：', 'Preview failed: ') + ((e && e.message) || e)); btn.disabled = false })
     }
   }
-  // 预览 → 确认：确认时凭 preview 发放的一次性 ticket 直发 apply（与附近直拉链路同一形态）
-  var impPendingTicket = ''
+  // 预览 → 应用：勾选与模式在审阅弹层完成（merge.ts）；预览态整体失效入口只有 hideImpPreview
+  // （文件清单/链接变化即失效，confirmToken 由服务端兜底）
   function hideImpPreview() {
-    impPendingTicket = ''
-    var pv = document.getElementById('impPreview')
-    if (pv) pv.hidden = true
-    mgHideMergePreview() // 多包合并预览态一并失效（confirmToken 清空 + 审阅弹层收起，重预览才重新发放）
-  }
-  var impConfirmBtn = document.getElementById('impConfirmBtn')
-  if (impConfirmBtn) {
-    impConfirmBtn.onclick = function () {
-      impConfirmBtn.disabled = true
-      setImpErr('')
-      api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'apply', source: { kind: 'ticket', ticket: impPendingTicket } }) })
-        .then(impApplyResult)
-        .catch(function (e) { setImpErr(t('导入失败：', 'Import failed: ') + e.message); impConfirmBtn.disabled = false })
-    }
-  }
-  var impBackBtn = document.getElementById('impBackBtn')
-  if (impBackBtn) impBackBtn.onclick = hideImpPreview
-  // 成功收尾（link/file/nearby 共用）：关弹层 → 主页面 toast 报数量（有需补填的 key 再追一条警告，
-  // 并多留几秒看清再刷新）→ 整页刷新拿全新视图
-  function impApplyResult(j) {
-    var rep = j.report || {}
-    var warns = impWarnList(rep)
-    importToggle(false)
-    toast(t('已导入：服务 {n} · 路由 {n2} · 预设 {n3} · 定时规则 {n4}', 'Imported: {n} providers · {n2} profiles · {n3} presets · {n4} schedule rules', { n: (rep.providers || []).length, n2: (rep.profiles || []).length, n3: rep.presetCount || 0, n4: rep.scheduleRules || 0 }), true)
-    if (warns.length) toast(warns.join(t('；', '; ')), false)
-    setTimeout(function () { location.reload() }, warns.length ? 3000 : 600)
+    mgHideMergePreview() // confirmToken/apply 载荷清空 + 审阅弹层收起，重预览才重新发放
   }
   // 分享/导出/导入/确认/更新弹层的遮罩点击与 Esc 已全部由工厂壳承接，此处不再有手写监听
 
@@ -708,12 +675,13 @@ export const UI_JS_CONFIGPACK = `  function shareToggle(show) { if (show) pkgM.o
             .then(function (st) {
               if (st.status === 'granted') {
                 stopNearbyPoll()
-                setNearbyStatus(t('对方已允许，正在导入…', 'Approved — importing…'))
-                api('/sync/import', { method: 'POST', body: JSON.stringify({ phase: 'apply', source: { kind: 'ticket', ticket: st.ticket } }) })
-                  .then(impApplyResult)
+                // 2026-11-27 导入预览统一：授权拉包后不再直接应用——进审阅弹层勾选（追加默认）再应用
+                setNearbyStatus(t('对方已允许，已拉取配置，请在预览中选择要导入的服务…', 'Approved — package pulled; pick the services to import in the preview…'))
+                mgSetApplySource(function () { return Promise.resolve({ source: { kind: 'ticket', ticket: st.ticket } }) })
+                api('/merge/preview', { method: 'POST', body: JSON.stringify({ source: { kind: 'ticket', ticket: st.ticket } }) })
+                  .then(function (j) { mgRenderPreview(j) })
                   .catch(function (e) {
-                    stopNearbyPoll()
-                    setNearbyStatus(t('导入失败：', 'Import failed: ') + e.message)
+                    setNearbyStatus(t('预览失败：', 'Preview failed: ') + ((e && e.message) || e))
                   })
               } else if (st.status === 'denied') {
                 stopNearbyPoll()

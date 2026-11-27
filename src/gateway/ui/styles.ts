@@ -428,21 +428,28 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
 #probeSvcTimelineTable th:nth-child(4){width:90px}
 #probeSvcTimelineTable th,#probeSvcTimelineTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 合并审阅表（mergeReviewOverlay 弹层内，svcmodal 680px 宽变体）：fixed 布局按日志表配方——
-   勾选/服务ID/探针/建议四列定宽（宽在表头声明），地址列吃剩余空间为信息主列；任何窗宽不溢出，
-   更窄走 .tablescroll 滚动。地址格两行块形态（船东批准原型 merge-flow.html 逐字对应）：
+   勾选/服务ID/探针/建议/与本机关系五列定宽（宽在表头上声明），地址列吃剩余空间为信息主列；任何窗宽
+   不溢出，更窄走 .tablescroll 滚动。地址格两行块形态（船东批准原型 merge-flow.html 逐字对应）：
    首行 URL 剥 scheme 后 direction:rtl + text-align:left 左截断——省略号落在行首、尾部 host/path
    保留（服务间差异在尾段，rtl 才能藏头露尾），全文走 title 悬浮含 scheme；次行 key 指纹 muted，
-   dup>1 才显「同源 ×n」（accent 色）——=1 是去重正常态，行行都标即纯噪音 */
-#mgReviewTable{table-layout:fixed;min-width:520px;border-collapse:separate;border-spacing:0}
+   dup>1 才显「同源 ×n」（accent 色）——=1 是去重正常态，行行都标即纯噪音。
+   与本机关系列（2026-11-27 追加导入）定宽 118px：「将覆盖本机同名」7 字 @12px + pill 内边距按最宽栈 */
+#mgReviewTable{table-layout:fixed;min-width:640px;border-collapse:separate;border-spacing:0}
 #mgReviewTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
 #mgReviewTable th:nth-child(1){width:36px}
 #mgReviewTable th:nth-child(2){width:140px}
 #mgReviewTable th:nth-child(4){width:136px}
 #mgReviewTable th:nth-child(5){width:88px}
+#mgReviewTable th:nth-child(6){width:118px}
 #mgReviewTable th,#mgReviewTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #mgReviewTable td.mgurl .mgu{display:block;font-family:var(--mono);font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
 #mgReviewTable td.mgurl .mgsub{display:block;margin-top:3px;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}
 #mgReviewTable td.mgurl .mgsub .mgdup{color:var(--accent)}
+/* 导入预览模式 radio（追加默认/整体替换迁移，2026-11-27）：面板底双色块；替换态 .warnmode 用
+   warn 令牌着色警示。radio 本体吃 accent 既有样式，label 12.8px 跟 svcmodal 正文 */
+#mgModeRow{display:flex;gap:18px;flex-wrap:wrap;padding:9px 12px;background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);margin:0 0 10px;font-size:var(--fs-sm);color:var(--muted)}
+#mgModeRow label{display:flex;align-items:center;gap:6px;cursor:pointer}
+#mgModeRow label.warnmode{color:var(--warn)}
 /* 日志表改固定布局：8 列里 7 列定宽（宽在表头上声明），错误列（第 7 列）不设宽=吃剩余空间。
    auto 布局下 nowrap 列按内容撑宽、限宽盒的固有宽度又不可靠（width:1% 弹性列被无视），
    窄内容带（--wrap-ratio 61.8%）必横向溢出；fixed 布局任何窗宽都不溢出，更窄走 .tablescroll 滚动。

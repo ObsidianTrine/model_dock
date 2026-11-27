@@ -97,6 +97,9 @@ const PROBE_LEDGER_FIXTURE: {
   probe_labels?: Record<string, string>
 } = { ok: true }
 
+/** /_modeldock/merge/preview 夹具（导入预览统一用例按需改写；candidates 带 relation 碰撞标注） */
+const MERGE_PREVIEW_FIXTURE: Record<string, any> = { ok: true }
+
 /** stub fetch：已知端点回夹具，未知端点回 {ok:true} 并打日志（spike 期便于发现漏配） */
 function stubFetch(): void {
   const routes: Record<string, () => { body: unknown; raw?: string }> = {
@@ -113,6 +116,8 @@ function stubFetch(): void {
     '/_modeldock/probe/verdicts': () => ({ body: PROBE_VERDICTS_FIXTURE }),
     '/_modeldock/probe/timeline': () => ({ body: PROBE_TIMELINE_FIXTURE }),
     '/_modeldock/probe/ledger': () => ({ body: PROBE_LEDGER_FIXTURE }),
+    '/_modeldock/merge/preview': () => ({ body: MERGE_PREVIEW_FIXTURE }),
+    '/_modeldock/merge/apply': () => ({ body: { ok: true, report: { providers: [], profiles: [], presetCount: 0, scheduleRules: 0, overwrittenProviders: [], skippedProfiles: [] }, droppedProfiles: [] } }),
   }
   vi.stubGlobal('fetch', (url: string) => {
     const p = String(url).split('?')[0]
@@ -663,6 +668,72 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect(badge!.textContent).toContain('失效')
     } finally {
       PROBE_VERDICTS_FIXTURE.verdicts = []
+    }
+  })
+
+  // 导入预览统一（2026-11-27）：三入口全走 /merge/preview → 审阅弹层（追加默认 + 关系列）→ 应用带 mode/keep/source
+  it('导入预览统一：链接 tab「预览」→ 审阅弹层（追加默认+关系列+汇总联动），应用带 mode/keep/ticket', async () => {
+    MERGE_PREVIEW_FIXTURE.preview = {
+      candidates: [
+        { id: 'nw-svc', base_url: 'https://nw.example.com', key_fp: 'aabbccdd', protocol: 'openai', auth_style: 'bearer', models: ['m1'], sources: ['链接'], duplicateCount: 0, profiles: ['r1'], verdict_state: 'healthy', verdict_at: null, suggestion: 'keep', relation: 'new' },
+        { id: 'ov-svc', base_url: 'https://ov.example.com', key_fp: '11223344', protocol: 'openai', auth_style: 'bearer', models: [], sources: ['链接'], duplicateCount: 0, profiles: [], verdict_state: 'healthy', verdict_at: null, suggestion: 'keep', relation: 'overwrite' },
+      ],
+      profileTotal: 1, presetCount: 2, scheduleRules: 1, duplicatesMerged: 0,
+      packages: [{ name: '链接', providers: 2, profiles: 1 }],
+      localProviders: 3,
+    }
+    MERGE_PREVIEW_FIXTURE.confirmToken = 'tok-x'
+    MERGE_PREVIEW_FIXTURE.ticket = 'mdkticket-x'
+    const savedServices = OVERVIEW_FIXTURE.services
+    OVERVIEW_FIXTURE.services = [] // 空服务态出「从其他电脑导入…」入口
+    const applyCalls: any[] = []
+    const prev = globalThis.fetch
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      const p = String(url).split('?')[0]
+      if (p === '/_modeldock/merge/apply' && init?.body) applyCalls.push(JSON.parse(String(init.body)))
+      return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
+    })
+    try {
+      mountPage()
+      await flush()
+      ;(document.getElementById('svcImportBtn') as HTMLElement).click()
+      await flush()
+      // 切「粘贴链接」tab，填链接（#p= 口令段必须有），点「预览」（原「导入」按钮改文案）
+      ;(document.getElementById('segLink') as HTMLElement).click()
+      ;(document.getElementById('impUrl') as HTMLTextAreaElement).value = 'http://192.168.1.5:8787/modeldock/pull?t=abc#p=pw'
+      ;(document.getElementById('impUrl') as HTMLElement).dispatchEvent(new Event('input')) // updateImpPrimary 挂 input：不派发按钮仍 disabled
+      expect((document.getElementById('impImportBtn') as HTMLButtonElement).textContent).toContain('预览')
+      ;(document.getElementById('impImportBtn') as HTMLButtonElement).click()
+      await flush()
+      // 审阅弹层打开：追加 radio 默认、关系列碰撞标注、勾选默认（全新勾、覆盖不勾）
+      expect((document.getElementById('mergeReviewOverlay') as HTMLElement).hidden).toBe(false)
+      expect((document.getElementById('mgModeAdd') as HTMLInputElement).checked).toBe(true)
+      const rows = document.getElementById('mgReviewRows')!
+      expect(rows.textContent).toContain('全新')
+      expect(rows.textContent).toContain('将覆盖本机同名')
+      expect((rows.querySelector('[data-id="nw-svc"]') as HTMLInputElement).checked).toBe(true)
+      expect((rows.querySelector('[data-id="ov-svc"]') as HTMLInputElement).checked).toBe(false)
+      expect(document.getElementById('mgReviewLine')!.textContent).toContain('追加导入')
+      expect(document.getElementById('mgReviewApply')!.textContent).toContain('应用所选（1）')
+      // 切替换模式：⚠ 警示汇总 + 勾选回替换默认（建议保留的全勾）+ 按钮文案切换
+      ;(document.getElementById('mgModeReplace') as HTMLElement).click()
+      await flush()
+      expect(document.getElementById('mgReviewLine')!.textContent).toContain('整体替换')
+      expect((rows.querySelector('[data-id="ov-svc"]') as HTMLInputElement).checked).toBe(true)
+      expect(document.getElementById('mgReviewApply')!.textContent).toContain('替换为所选（2）')
+      // 应用 → 请求带 mode/keep/source.ticket（url 预览回带的暂存票据）
+      ;(document.getElementById('mgReviewApply') as HTMLElement).click()
+      await flush()
+      expect(applyCalls).toHaveLength(1)
+      expect(applyCalls[0]!.mode).toBe('replace')
+      expect([...applyCalls[0]!.keep].sort()).toEqual(['nw-svc', 'ov-svc'])
+      expect(applyCalls[0]!.source).toEqual({ kind: 'ticket', ticket: 'mdkticket-x' })
+    } finally {
+      OVERVIEW_FIXTURE.services = savedServices
+      MERGE_PREVIEW_FIXTURE.preview = undefined
+      delete MERGE_PREVIEW_FIXTURE.confirmToken
+      delete MERGE_PREVIEW_FIXTURE.ticket
+      vi.stubGlobal('fetch', prev)
     }
   })
 
