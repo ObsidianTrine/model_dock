@@ -1,7 +1,8 @@
 /**
  * Web 控制台 · probe.ts —— 服务探针（provider-probe-suite 任务 6）。
- * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染（异常才显 + 点击下钻，diag-modal-probe-ui
- * v2）+ 服务健康·诊断统一弹层（双入口：卡片「诊断」按钮落诊断动作区、徽标点击落当前结论/
+ * UI_JS_PROBE：verdict 徽标数据轮询 + 服务卡徽标渲染（有结论即出徽标 + 点击下钻；2026-11-28
+ * 恢复全态展示：留白收窄为「从无探针数据」，原「异常才显」让健康/未验证/过期与无数据同貌不可辨）
+ * + 服务健康·诊断统一弹层（双入口：卡片「诊断」按钮落诊断动作区、徽标点击落当前结论/
  * 健康变化区；四段 = 延迟快照 / 当前结论 / 诊断动作 ping+P1+P14 两段式成本确认 / 预算与健康
  * 变化时间线）+ 探针自耗 pill（融进 #health 今日用量仪表）与其明细弹层（月度总花费/预算余量/
  * 按探针分解）。
@@ -11,12 +12,11 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
   var probeVerdicts = []
   var probeVsSig = ''
   var diagConfirmTokens = {} // 两段式成本确认的 confirmToken（probeId → token，来自第一段响应）
-  // 徽标异常才显（diag-modal-probe-ui v2）：降级/额度/失效/不可达四态出徽标，健康/未验证/过期
-  // 一律静默——服务卡 pill 语义统一为「异常态才显示」（熔断中/已下线同语言）；全量状态（含健康）
-  // 只在诊断弹层「当前结论」区展示。轮询签名随之收敛为「服务 → 异常态集合」（经 badgePool 让位
-  // 过滤）：evidence 刷新（at/ms/status 变化）不再触发整卡重绘，可见面真正变化（异常出现/消失/
-  // 升级/被主动实证取代）才重绘
-  var BADGE_STATES = { degraded: 1, quota: 1, 'auth-dead': 1, unreachable: 1 }
+  // 徽标全态展示（2026-11-28 回退 diag-modal-probe-ui v2 的「异常才显」）：有结论即出徽标
+  // （含健康绿），无结论留白——留白 = 从无探针数据，与已验证健康/未验证/过期一眼可辨。
+  // 轮询签名保持 state 级（经 badgePool 让位过滤、不含 evidence）：evidence 刷新（at/ms/status
+  // 变化）不触发整卡重绘，可见面真正变化（状态出现/消失/翻转/被主动实证取代）才重绘；代价是
+  // 徽标 tooltip 的证据年龄冻结在最近一次重绘时刻（弹层内证据恒新鲜，可接受）
   // verdict 轮询（15s 档足够：结论只随探针运行变化）；签名去重，可见面变了才重绘服务卡
   function pollProbe() {
     fetch('/_modeldock/probe/verdicts', { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (j) {
@@ -31,7 +31,7 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       for (var pid in byP) {
         var pool = badgePool(byP[pid])
         for (var j = 0; j < pool.length; j++) {
-          if (BADGE_STATES[pool[j].state]) sig += pid + ':' + pool[j].state + '|'
+          sig += pid + ':' + pool[j].state + '|'
         }
       }
       if (sig === probeVsSig) return
@@ -48,8 +48,8 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
     unverified: { cls: 'dim', zh: '未验证', en: 'Unverified' },
     stale: { cls: 'dim', zh: '过期', en: 'Stale' },
   }
-  // 徽标取该服务全部结论里最差的一条（坏结论不该被健康结论盖住）；无结论不出徽标（缺席 ≠ 健康）；
-  // 最差结论非异常态（healthy/unverified/stale）同样静默（BADGE_STATES）。
+  // 徽标取该服务全部结论里最差的一条（坏结论不该被健康结论盖住）；无结论不出徽标——留白 =
+  // 从无探针数据（健康有绿徽标在，「缺席 ≠ 健康」的歧义消除）。
   // 旧账让位（2026-11-26 用户实证：换 key 重测健康后徽标仍失效）："-" 占位结论（被动 P15
   // provider 级，不带 key 归属）若已有「真实 key 指纹且证据更新」的同服务结论，则不参与最差
   // 排序——主动实证新于被动旧账，坏消息优先只在同代证据内比较；历史明细仍在诊断弹层全量可见
@@ -76,7 +76,6 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       var v = pool[i]
       if (!worst || (VS_RANK[v.state] || 0) > (VS_RANK[worst.state] || 0)) worst = v
     }
-    if (!BADGE_STATES[worst.state]) return ''
     var m = VS_META[worst.state] || VS_META.unverified
     var ev = worst.evidence || {}
     var tip = t('来源 ', 'source ') + (ev.source || '-')

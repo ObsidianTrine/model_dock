@@ -644,9 +644,9 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
 
   // 旧账让位（2026-11-26 用户实证：「-」占位被动失效把换 key 后的健康结论压在徽标下）：
   // 同服务存在「真实 key 指纹且证据更新」的结论时，「-」占位结论不参与徽标最差排序
-  it('健康下钻：「-」占位旧账让位——真实指纹且更新的健康结论压住被动失效不出徽标；占位更新时照常出', async () => {
+  it('健康下钻：「-」占位旧账让位——真实指纹且更新的健康结论压住被动失效出健康徽标；占位更新时照常出失效', async () => {
     const at0 = Date.now()
-    // 场景 1：占位失效（21 分钟前 passive）+ 真实指纹健康（刚刚 probe）→ 徽标消失
+    // 场景 1：占位失效（21 分钟前 passive）+ 真实指纹健康（刚刚 probe）→ 让位后徽标转健康绿
     PROBE_VERDICTS_FIXTURE.verdicts = [
       { provider: 'alpha', key_fp: '-', model: 'a-model', state: 'auth-dead', evidence: { source: 'passive:p15', at: at0 - 21 * 60000, status: 401 } },
       { provider: 'alpha', key_fp: '0d732852', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p1', at: at0 } },
@@ -654,7 +654,11 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     try {
       mountPage()
       await flush()
-      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull()
+      const badge1 = document.querySelector('[data-probehist="alpha"]') as HTMLButtonElement | null
+      expect(badge1).not.toBeNull()
+      expect(badge1!.className).toContain('ok')
+      expect(badge1!.textContent).toContain('健康')
+      expect(badge1!.className).not.toContain('err')
       // 场景 2：占位失效比真实指纹结论更新 → 照常出徽标（坏消息优先不被健康盖住）
       PROBE_VERDICTS_FIXTURE.verdicts = [
         { provider: 'alpha', key_fp: '-', model: 'a-model', state: 'auth-dead', evidence: { source: 'passive:p15', at: at0, status: 401 } },
@@ -932,22 +936,27 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
     }
   })
 
-  // —— 诊断统一弹层（diag-modal-probe-ui）：徽标异常才显 + 卡片「诊断」按钮 + 两段式成本确认 ——
+  // —— 诊断统一弹层（diag-modal-probe-ui）：徽标全态展示 + 卡片「诊断」按钮 + 两段式成本确认 ——
 
-  it('diag-modal-probe-ui：健康徽标异常才显——healthy/unverified 静默，degraded 出 warn、auth-dead 出 err', async () => {
+  it('diag-modal-probe-ui：健康徽标全态展示——healthy 出 ok、unverified 出 dim，degraded 出 warn、auth-dead 出 err；无结论仍留白', async () => {
     try {
       PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'healthy', evidence: { source: 'manual', at: Date.now() - 60000 } }]
       mountPage()
       await flush()
-      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull() // 健康静默（全量状态只在弹层「当前结论」区）
+      let badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement | null
+      expect(badge).not.toBeNull() // 健康出绿徽标（2026-11-28 恢复全态展示；全量逐三元组仍在弹层「当前结论」区）
+      expect(badge!.className).toContain('ok')
       PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'unverified', evidence: { source: 'probe:p14', at: Date.now() - 60000 } }]
       mountPage()
       await flush()
-      expect(document.querySelector('[data-probehist="alpha"]')).toBeNull() // 未验证静默
+      badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement | null
+      expect(badge).not.toBeNull() // 未验证出灰徽标（与无结论留白可辨）
+      expect(badge!.className).toContain('dim')
+      expect(document.querySelector('[data-probehist="beta"]')).toBeNull() // 无结论服务留白（留白 = 从无探针数据）
       PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'degraded', evidence: { source: 'manual', at: Date.now() - 60000 } }]
       mountPage()
       await flush()
-      const badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement | null
+      badge = document.querySelector('[data-probehist="alpha"]') as HTMLElement | null
       expect(badge).not.toBeNull()
       expect(badge!.className).toContain('warn')
       PROBE_VERDICTS_FIXTURE.verdicts = [{ provider: 'alpha', state: 'auth-dead', evidence: { source: 'manual', at: Date.now() - 60000 } }]
