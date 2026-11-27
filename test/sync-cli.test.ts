@@ -1,8 +1,12 @@
+import http from 'node:http'
 import path from 'node:path'
+import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { fakeHome } from './helpers.js'
 import { cmdSyncPause, cmdSyncResume, cmdSyncSetup, cmdSyncStatus } from '../src/cli/sync.js'
 import { readSyncState, updateSyncState } from '../src/sync/state.js'
+import { writeGatewayState } from '../src/gateway/state/state-file.js'
+import type { SyncStatusView } from '../src/sync/engine.js'
 
 // sync CLI 壳：status/pause/resume 全路径进程内可测（只读写 sync.json，无网络）；
 // setup 只覆盖 --target 非法值分支（合法分支会进 @inquirer 交互/口令 stdin，引擎本体由
@@ -69,6 +73,89 @@ describe('cmdSyncStatus', () => {
       expect(out).toContain('最近冲突')
       expect(out).toContain('boom')
     } finally {
+      h.restore()
+    }
+  })
+})
+
+// running 权威来源是网关进程（引擎单例在那边）：CLI 直调 syncStatus() 恒 false 的回归锚
+describe('cmdSyncStatus 网关权威状态', () => {
+  const TOKEN = 'mdkadm_test'
+  const STARTED_AT = '2026-11-27T00:00:00.000Z'
+
+  function gatewayView(): SyncStatusView {
+    return { mode: 'target', paused: false, running: true, targetKind: 'localdir', targetLabel: '/tmp/syncdir', devid: 'mdksync_t', lastAppliedRev: 2, lastPushTs: null, lastPullTs: '2026-11-27T01:00:00.000Z', lastError: null, lastConflictTs: null }
+  }
+
+  /** 假网关：health 回配对 started_at（gatewayLive 验明正身），overview 验 admin 头后回 sync 视图 */
+  function startFakeGateway(): Promise<{ server: http.Server; port: number }> {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        if (req.url === '/_modeldock/health') {
+          res.end(JSON.stringify({ started_at: STARTED_AT }))
+          return
+        }
+        if (req.url === '/_modeldock/overview') {
+          if (req.headers['x-modeldock-admin'] !== TOKEN) {
+            res.statusCode = 401
+            res.end(JSON.stringify({ error: 'unauthorized' }))
+            return
+          }
+          res.end(JSON.stringify({ ok: true, sync: gatewayView() }))
+          return
+        }
+        res.statusCode = 404
+        res.end('{}')
+      })
+      server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as AddressInfo).port }))
+    })
+  }
+
+  it('网关在跑：采纳 overview 视图，显示「运行中」与网关侧 rev', async () => {
+    const h = fakeHome()
+    capture()
+    const { server, port } = await startFakeGateway()
+    try {
+      await updateSyncState({ mode: 'target', paused: false, target: { kind: 'localdir', dir: path.join(h.home, 'syncdir') } })
+      await writeGatewayState({ pid: process.pid, port, admin_token: TOKEN, started_at: STARTED_AT })
+      await cmdSyncStatus()
+      const out = logs.join('\n')
+      expect(out).toContain('运行中')
+      expect(out).not.toContain('等待网关接管')
+      expect(out).toContain('第 2 版')
+      expect(out).toContain('最近拉取')
+    } finally {
+      server.close()
+      h.restore()
+    }
+  })
+
+  it('网关没在跑（无 gateway.json）：回退本地视图，保持「等待网关接管」', async () => {
+    const h = fakeHome()
+    capture()
+    try {
+      await updateSyncState({ mode: 'target', paused: false, target: { kind: 'localdir', dir: path.join(h.home, 'syncdir') } })
+      await cmdSyncStatus()
+      expect(logs.join('\n')).toContain('等待网关接管')
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('网关在跑但 overview 鉴权失败：回退本地视图，不崩、不误报运行中', async () => {
+    const h = fakeHome()
+    capture()
+    const { server, port } = await startFakeGateway()
+    try {
+      await updateSyncState({ mode: 'target', paused: false, target: { kind: 'localdir', dir: path.join(h.home, 'syncdir') } })
+      await writeGatewayState({ pid: process.pid, port, admin_token: 'wrong-token', started_at: STARTED_AT })
+      await cmdSyncStatus()
+      const out = logs.join('\n')
+      // 注意：等待文案括号里自含「网关运行中」子串，负断言必须带「多机同步 · 」状态行前缀
+      expect(out).toContain('多机同步 · 等待网关接管')
+      expect(out).not.toContain('多机同步 · 运行中')
+    } finally {
+      server.close()
       h.restore()
     }
   })

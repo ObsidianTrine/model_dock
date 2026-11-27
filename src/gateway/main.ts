@@ -244,8 +244,10 @@ export async function startForeground(portOverride?: number, debugFlag?: boolean
       // config.toml 没变，reload 是纯浪费；自家刚写的跳过（invalidateSecretsCacheIfExternal
       // 内部比对写后指纹与宽限窗），失效收口后 config 写不再清密钥缓存
       if (!filename || filename === 'secrets.json') void invalidateSecretsCacheIfExternal().catch(() => {})
-      // 只认精确文件名：引擎自己写 sync.json（lastAppliedRev 等簿记）签名未变，remount 幂等空转
-      if (filename === 'sync.json') scheduleSyncRemount()
+      // sync.json → 重挂引擎。darwin 的 fs.watch 会把目录事件合并后以 filename=null 上报
+      // （上方 config 分支已容忍 null）：漏认会丢「网关运行中跑 sync setup / sync pause」的
+      // 热挂载。null 也兜进来；remount 按签名幂等（引擎簿记写 sync.json 时签名未变，空转可忽略）
+      if (!filename || filename === 'sync.json') scheduleSyncRemount()
     })
     rt.watcherAlive = true
     // watcher 同步构造不抛、但异步失败（EMFILE/ENOSPC 或目录被删）会发 'error'：不接则成

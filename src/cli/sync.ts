@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { checkbox, confirm, input, password, select } from '@inquirer/prompts'
+import { request } from 'undici'
 import { c, t } from '../util/index.js'
 import { displayPath, homeDir } from '../util/paths.js'
 import { loadConfig, mutateConfig } from '../config/store.js'
@@ -8,8 +9,9 @@ import { exportFileName, exportSyncdoc, previewImport, applyImportedDoc } from '
 import { filterMergedDoc, makeVerdictFinder, mergePackages, type MergeCandidate, type MergeSuggestion } from '../sync/merge.js'
 import { replayProbeVerdicts } from '../gateway/probe/verdict.js'
 import type { GatewayRuntime, ProbeVerdict, ProbeVerdictState } from '../gateway/state/types.js'
+import { gatewayLive } from '../gateway/state/state-file.js'
 import { enrollCloud, setupSyncTarget } from '../sync/setup.js'
-import { syncStatus } from '../sync/engine.js'
+import { syncStatus, type SyncStatusView } from '../sync/engine.js'
 import { readSyncState, updateSyncState, type SyncTargetConfig } from '../sync/state.js'
 import { collectAssetFiles, normalizeAssetDir } from '../sync/assets.js'
 import type { SyncdocReport } from '../sync/collect.js'
@@ -319,8 +321,35 @@ export async function cmdSyncSetup(o: { target?: string; url?: string; dir?: str
   console.log(c.gray(t('  同步口令请妥善保管——遗忘后已同步的密文无法恢复。暂停/恢复：modeldock sync pause | resume', '  Keep the sync passphrase safe — if forgotten, the synced ciphertext cannot be recovered. Pause/resume: modeldock sync pause | resume')))
 }
 
+/** 向在跑网关要同步状态的权威视图。overview 在网关进程内构建，running 看的是那边挂载的
+ *  引擎单例；CLI 进程内直调 syncStatus() 时 active 恒为 null——不问网关，「等待网关接管」
+ *  会常驻撒谎（2026-11-27 实测：引擎明明运行中，两台机器的 CLI 全显示等待）。 */
+async function fetchGatewaySyncView(port: number, token: string): Promise<SyncStatusView | null> {
+  try {
+    const res = await request(`http://127.0.0.1:${port}/_modeldock/overview`, {
+      headers: { 'x-modeldock-admin': token },
+      signal: AbortSignal.timeout(1500),
+    })
+    if (res.statusCode !== 200) return null
+    const body = (await res.body.json()) as { sync?: SyncStatusView | null }
+    return body.sync && body.sync.mode !== 'off' ? body.sync : null
+  } catch {
+    return null
+  }
+}
+
+/** CLI 状态解析：本地 sync.json 打底（网关没跑/探针不过时唯一可用），网关在跑则整份采纳
+ *  其视图——同一 home、同一 sync.json，网关侧字段权威且更新（引擎簿记随时可能前进）。 */
+async function resolveSyncStatus(): Promise<SyncStatusView> {
+  const local = await syncStatus()
+  if (local.mode === 'off') return local
+  const gw = await gatewayLive().catch(() => null)
+  if (!gw) return local
+  return (await fetchGatewaySyncView(gw.port, gw.admin_token)) ?? local
+}
+
 export async function cmdSyncStatus(): Promise<void> {
-  const s = await syncStatus()
+  const s = await resolveSyncStatus()
   if (s.mode === 'off') {
     console.log(t('多机同步未启用。配置：modeldock sync setup', 'Multi-machine sync is off. Set it up: modeldock sync setup'))
     if (s.lastError) console.log(c.yellow(t('  ⚠ sync.json 异常：{err}', '  ⚠ sync.json problem: {err}', { err: s.lastError })))
