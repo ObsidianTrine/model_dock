@@ -671,8 +671,8 @@ header{flex-wrap:wrap;row-gap:4px}
 .dconfirm{display:flex;align-items:center;gap:8px;margin-top:8px;border-top:1px dashed var(--border);padding-top:8px}
 .dconfirm[hidden]{display:none}
 .dconfirm .cest{font-size:var(--fs-xs);color:var(--warn);flex:1;min-width:0}
-/* 诊断弹层「当前结论」区：逐三元组一行（状态 pill + 模型@key指纹 + 证据年龄），徽标异常才显
-   后这里是全量状态的唯一展示面 */
+/* 诊断弹层「当前结论」区：逐三元组一行（状态 pill + 模型@key指纹 + 证据年龄），卡片徽标只出
+   最差一条，这里是逐三元组全量状态的展示面 */
 .curline{display:flex;align-items:center;gap:8px;font-size:var(--fs-sm);padding:6px 2px;border-bottom:1px dashed var(--border);flex-wrap:wrap}
 .curline:last-child{border-bottom:none}
 .curline .cinfo{color:var(--muted);font-size:var(--fs-xs)}

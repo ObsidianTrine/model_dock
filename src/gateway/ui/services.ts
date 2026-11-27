@@ -112,7 +112,7 @@ export const UI_JS_SERVICES = `  function visibleServices() {
           .catch(function (e) { toast(t('切换失败：', 'Switch failed: ') + e.message, false); b.disabled = false })
       }
     })
-    // 服务健康·诊断统一弹层（diag-modal-probe-ui）：卡片「诊断」按钮与异常徽标（data-probehist）
+    // 服务健康·诊断统一弹层（diag-modal-probe-ui）：卡片「诊断」按钮与健康徽标（data-probehist）
     // 双入口，openDiag 按 section 落对应区块；与 data-use 同款 render 后重绑（5s/15s 轮询会整卡重建）
     document.querySelectorAll('[data-diag]').forEach(function (b) {
       b.onclick = function () { openDiag(b.getAttribute('data-diag'), 'actions') }
