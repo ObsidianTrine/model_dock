@@ -390,7 +390,7 @@ export function registerProbeRunProgress(rt: GatewayRuntime, runId: string, prov
   for (const [k, v] of rt.probeRunProgress) {
     if (now - v.at > 15 * 60_000) rt.probeRunProgress.delete(k)
   }
-  rt.probeRunProgress.set(runId, { probe: probeIds.join(','), provider: providerId, round: 0, rounds: 0, at: now })
+  rt.probeRunProgress.set(runId, { probe: probeIds.join(','), provider: providerId, round: 0, rounds: 0, sample: 0, samples: 0, at: now })
 }
 
 /** 运行进度清除（p14-progress）：端点层 finally 调用，run 结束条目即删（Map 常驻内存零泄漏） */
@@ -529,11 +529,12 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
 
   // 轮次进度上报（p14-progress）：runId 由端点层注册（registerProbeRunProgress，含注册即
   // 建条目 + 15min 陈旧清扫），引擎只覆盖写最近轮次——多单元并发时 last-writer-wins（弹层
-  // 只求「跑到第几轮」的量级反馈，不求逐单元精确）
-  const reportRound = (u: ProbeUnit, done: number, total: number): void => {
+  // 只求「跑到第几轮」的量级反馈，不求逐单元精确）。sample/samples 由引擎采样循环填（runner
+  // 只知轮次不知采样调度），jittery 3 采样时弹层拼「采样 n/3 · 第 m/5 轮」
+  const reportRound = (u: ProbeUnit, done: number, total: number, sample: number, samples: number): void => {
     if (!opts.runId) return
     if (!rt.probeRunProgress) rt.probeRunProgress = new Map()
-    rt.probeRunProgress.set(opts.runId, { probe: u.def.id, provider: u.target.providerId, round: done, rounds: total, at: Date.now() })
+    rt.probeRunProgress.set(opts.runId, { probe: u.def.id, provider: u.target.providerId, round: done, rounds: total, sample, samples, at: Date.now() })
   }
 
   // 预算闸（先于确认闸——预算是硬停，连预估展示都不必发请求）。只拦主动探针：
@@ -632,16 +633,21 @@ export async function runProbeSuite(rt: GatewayRuntime, opts: ProbeRunOptions): 
     }
     runtime.inflight.add(pid)
     try {
+      // 采样号用可变变量（p14-progress）：ctx 建一次、采样循环内 runner 复用它，闭包读当前值
+      // ——进度条目带 sample/samples，弹层拼「采样 2/3 · 第 3/5 轮」，15 轮（3 采样 × 5 轮）
+      // 的总量对用户可预期
+      let sampleNo = 0
+      const sampleCount = u.def.kind === 'jittery' ? 3 : 1 // 3 取中位共识的采样轮数（共识判定在 verdict 层）
       const ctx: ProbeUnitContext = {
         rt,
         def: u.def,
         target: u.target,
         transport: opts.transport,
         signal: opts.signal,
-        ...(opts.runId ? { onRound: (done: number, total: number): void => reportRound(u, done, total) } : {}),
+        ...(opts.runId ? { onRound: (done: number, total: number): void => reportRound(u, done, total, sampleNo, sampleCount) } : {}),
       }
-      const sampleCount = u.def.kind === 'jittery' ? 3 : 1 // 3 取中位共识的采样轮数（共识判定在 verdict 层）
       for (let i = 0; i < sampleCount; i++) {
+        sampleNo = i + 1
         if (opts.signal?.aborted) {
           anyCancelled = true
           break

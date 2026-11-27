@@ -231,14 +231,21 @@ export async function hProbeTimeline(c: AdminCtx): Promise<void> {
 
 /** GET /_modeldock/probe/run-progress?run=<id>：探针运行轮次进度（admin 门内只读，p14-progress）。
  *  数据源 = rt.probeRunProgress 内存 Map（hProbeRun 注册建位、finally 删，引擎逐轮覆盖写）。
- *  active=true 带轮次（rounds=0 = 已注册未开跑首轮）；false = 无此 run（已结束/非法 id/旧网关
- *  重启清 Map）——前端对 false 与请求失败一律静默保持「检测中…」文案，不做区分。 */
+ *  active=true 带轮次与采样（rounds=0 = 已注册未开跑首轮；samples>1 = jittery 多采样，弹层拼
+ *  「采样 n/m · 第 i/k 轮」）；false = 无此 run（已结束/非法 id/旧网关重启清 Map）——前端对
+ *  false 与请求失败一律静默保持「检测中…」文案，不做区分。 */
 export async function hProbeRunProgress(c: AdminCtx): Promise<void> {
   const { rt, req, res } = c
   const q = new URL(req.url ?? '', 'http://x').searchParams
   const run = (q.get('run') ?? '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
   const e = run ? rt.probeRunProgress?.get(run) : undefined
   res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(e ? { ok: true, active: true, probe: e.probe, provider: e.provider, round: e.round, rounds: e.rounds } : { ok: true, active: false }))
+  res.end(
+    JSON.stringify(
+      e
+        ? { ok: true, active: true, probe: e.probe, provider: e.provider, round: e.round, rounds: e.rounds, sample: e.sample, samples: e.samples }
+        : { ok: true, active: false }
+    )
+  )
   return
 }

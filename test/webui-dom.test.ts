@@ -1120,7 +1120,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       }
       if (p === '/_modeldock/probe/run-progress') {
         pollCount++
-        const body = { ok: true, active: true, probe: 'p14', provider: 'alpha', round: 3, rounds: 5 }
+        // 采样维度（p14-progress 2/3 · 3/5）：引擎上报 jittery 采样序号，弹层拼「采样 2/3 · 第 3/5 轮」
+        const body = { ok: true, active: true, probe: 'p14', provider: 'alpha', round: 3, rounds: 5, sample: 2, samples: 3 }
         return Promise.resolve({ ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve(JSON.stringify(body)) })
       }
       return (prev as (u: string, i?: RequestInit) => unknown)(String(url), init)
@@ -1140,6 +1141,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toBe('检测中…')
       vi.advanceTimersByTime(800)
       await flush()
+      // 采样段 + 轮次段同显：samples>1 拼采样维度，15 轮（3×5）总量可预期
+      expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toContain('采样 2/3')
       expect((document.getElementById('diagP14Btn') as HTMLElement).textContent).toContain('3/5')
       // 结束：POST resolve → 停轮询恢复「运行」，后续周期不再发请求
       const done = { ok: true, reason: 'ok', provider: 'alpha', probes: ['p14'], targets: 1, dispatched: 1, upstreamRequests: 5, tokens: 240, estimate: 10000, per_probe_cost: { p14: 10000 }, budget: {}, verdicts: [{ provider: 'alpha', key_fp: 'ab12', model: 'a-model', state: 'healthy', evidence: { source: 'probe:p14', at: Date.now() }, advisory: { ttft_p50: 296, ttft_p95: 311 } }], skipped: [] }
