@@ -15,9 +15,10 @@ import { drainAppendStreams } from '../src/util/fsx.js'
 import { buildRuntime } from '../src/gateway/state.js'
 import type { GatewayRuntime } from '../src/gateway/state.js'
 import { loadConfig, saveConfig } from '../src/config/store.js'
-import { setSecret } from '../src/config/secrets.js'
+import { getSecret, setSecret } from '../src/config/secrets.js'
 import { backupsDir, configPath, presetsJsonPath, secretsPath } from '../src/util/paths.js'
 import { hMergeApply, hMergePreview } from '../src/gateway/mergepack.js'
+import { peekSyncTicket, putSyncTicket } from '../src/gateway/remote-device.js'
 import type { Syncdoc } from '../src/sync/types.js'
 import type { Config } from '../src/config/types.js'
 import type { AdminCtx } from '../src/gateway/admin-shared.js'
@@ -571,11 +572,15 @@ describe('控制台合并入口收编（构建产物冒烟）', () => {
     expect(min).toContain('passphrases:')
   })
 
-  it('占位符泄漏修复：摘要行 t() 带 params 第三参（传参形态 grep）', () => {
+  it('占位符泄漏修复：汇总行 t() 带 params 第三参（传参形态 grep，2026-11-27 追加/替换双文案）', () => {
     const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'gateway', 'ui', 'merge.ts'), 'utf8')
-    const line = src.split('\n').find((l) => l.includes('合并 {n} 个包'))
-    expect(line).toBeTruthy()
-    expect(line).toMatch(/,\s*\{\s*n:/)
+    // 追加/替换两条汇总都必须走 t(zh, en, params) 传参形态（占位符 {l}/{a}/{o}/{s}/{r}/{p}/{w}/{k}）
+    const addLine = src.split('\n').find((l) => l.includes('追加导入：本机现有'))
+    expect(addLine).toBeTruthy()
+    expect(addLine).toMatch(/,\s*\{\s*l:/)
+    const repLine = src.split('\n').find((l) => l.includes('整体替换（迁移）：本机现有'))
+    expect(repLine).toBeTruthy()
+    expect(repLine).toMatch(/,\s*\{\s*l:/)
   })
 
   // merge-review-two-line（船东批准原型 /tmp/merge-proto/merge-flow.html 落地）：地址格两行化、
@@ -709,6 +714,123 @@ describe('CLI 冒烟：config merge 输出逐服务三档建议清单', () => {
       expect(Object.keys(cfg.providers).sort()).toEqual(['keep1'])
       expect(Object.keys(cfg.profiles)).toContain('pKeep')
       expect(cfg.profiles.pSus).toBeUndefined()
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+// ===== 2026-11-27 导入预览统一（追加语义 + relation 碰撞标注 + ticket 三入口）=====
+
+describe('导入预览统一：单包 relation 标注', () => {
+  it('单包（≥1 放宽）预览出 relation：id 撞名=overwrite、base_url+key 同源=same-source、全新=new', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const pPath = path.join(pkgDir, 'p.msync')
+      await seedAndExport(pPath, {
+        ov: { base_url: 'https://ov.example.com/api', key: 'sk-ov' },
+        ss: { base_url: 'https://ss.example.com/api', key: 'sk-ss' },
+        nw: { base_url: 'https://nw.example.com/api', key: 'sk-nw' },
+      }, { main: { provider: 'ov' } })
+      const text = fs.readFileSync(pPath, 'utf8')
+      // 铺本机现状：ov 同 id（撞名）；ss-x 同 base_url+key 不同 id（同源异名）；keys 落 file 供对账解析
+      await setSecret('ov', 'sk-ov', 'file')
+      await setSecret('ss-x', 'sk-ss', 'file')
+      await saveConfig({ version: 1, language: 'zh', security: { store: 'file' }, providers: {
+        ov: { base_url: 'https://ov.example.com/api', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:ov' },
+        'ss-x': { base_url: 'https://ss.example.com/api', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:ss-x' },
+      }, profiles: {}, harness: {} } as unknown as Config)
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const pv = await callEndpoint(hMergePreview, rt, { packages: [{ name: 'p.msync', content_b64: b64(text) }], passphrase: PASS })
+      expect(pv.status).toBe(200)
+      const preview = pv.json.preview as { candidates: { id: string; relation?: string }[]; localProviders?: number }
+      const rel = Object.fromEntries(preview.candidates.map((c) => [c.id, c.relation]))
+      expect(rel).toEqual({ ov: 'overwrite', ss: 'same-source', nw: 'new' })
+      expect(preview.localProviders).toBe(2)
+    } finally {
+      h.restore()
+    }
+  })
+})
+
+describe('导入预览统一：ticket 形态与追加模式', () => {
+  it('preview peek 不消费票据；apply mode=add 追加并入（本机保留+覆盖+路由/定时追加），成功才消费', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const pPath = path.join(pkgDir, 'p.msync')
+      // 包：ov（将覆盖）、nw（新增）+ 路由 ov-route + 预设 p-shared + 定时窗口（target 取首个 profile）
+      const doc: Syncdoc = await seedAndExport(pPath, {
+        ov: { base_url: 'https://ov.example.com/api', key: 'sk-ov' },
+        nw: { base_url: 'https://nw.example.com/api', key: 'sk-nw' },
+      }, { 'ov-route': { provider: 'ov' } }, { presetId: 'p-shared', schedule: true })
+      // 本机：ov 同 id（key 不同 → 覆盖后 key 变）、local1 全新保留、路由 main、预设 p-shared（同 id 不同内容→保留本机）、定时窗口 1 条
+      await setSecret('ov', 'sk-local-ov', 'file')
+      await setSecret('local1', 'sk-local1', 'file')
+      await saveConfig({ version: 1, language: 'zh', security: { store: 'file' }, providers: {
+        ov: { base_url: 'https://ov.example.com/api', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:ov' },
+        local1: { base_url: 'https://local.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:local1' },
+      }, profiles: { main: { provider: 'local1' } }, harness: {}, gateway: { port: 18901, schedule: { enabled: false, windows: [{ start: '09:00', end: '18:00', target: 'main' }] } } } as unknown as Config)
+      await fsp.mkdir(path.dirname(presetsJsonPath()), { recursive: true })
+      await fsp.writeFile(presetsJsonPath(), JSON.stringify([{ id: 'p-shared', label: 'local-version', vendor: 'V', base_url: 'https://preset.example.com', protocol: 'openai', auth_style: 'bearer' }], null, 2) + '\n')
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const ticket = putSyncTicket(doc)
+
+      // preview peek：非破坏读——预览两次都成功且票据仍可 peek
+      const pv1 = await callEndpoint(hMergePreview, rt, { source: { kind: 'ticket', ticket } })
+      expect(pv1.status).toBe(200)
+      expect(peekSyncTicket(ticket)).toBeTruthy()
+      const pv2 = await callEndpoint(hMergePreview, rt, { source: { kind: 'ticket', ticket } })
+      expect(pv2.status).toBe(200)
+      const token = pv2.json.confirmToken as string
+
+      // keep 含未知 id → 400 且票据保留（失败可重试）
+      const bad = await callEndpoint(hMergeApply, rt, { source: { kind: 'ticket', ticket }, keep: ['ghost'], mode: 'add', confirmToken: token })
+      expect(bad.status).toBe(400)
+      expect(peekSyncTicket(ticket)).toBeTruthy()
+
+      // mode=add keep [ov,nw]：本机 local1 保留；ov 覆盖（key 变包内版）；nw 新增；路由 main 保留 + ov-route 追加；预设同 id 保留本机版；定时去重追加
+      const ok = await callEndpoint(hMergeApply, rt, { source: { kind: 'ticket', ticket }, keep: ['ov', 'nw'], mode: 'add', confirmToken: token })
+      expect(ok.status).toBe(200)
+      const cfg = await loadConfig()
+      expect(Object.keys(cfg.providers).sort()).toEqual(['local1', 'nw', 'ov'])
+      expect(await getSecret(cfg.providers.ov!.key_ref!)).toBe('sk-ov') // 覆盖后 key 变包内版
+      expect(cfg.profiles.main).toBeTruthy()
+      expect(cfg.profiles['ov-route']).toBeTruthy()
+      const presets = JSON.parse(fs.readFileSync(presetsJsonPath(), 'utf8')) as { id: string; label: string }[]
+      expect(presets).toHaveLength(1) // 同 id 预设保留本机版
+      expect(presets[0]!.label).toBe('local-version')
+      expect(cfg.gateway?.schedule?.windows).toHaveLength(2) // 本机窗口 + 包内窗口去重追加
+      const report = ok.json.report as { overwrittenProviders?: string[]; skippedProfiles?: string[]; scheduleRulesAdded?: number }
+      expect(report.overwrittenProviders).toEqual(['ov'])
+      expect(report.skippedProfiles).toEqual([])
+      expect(report.scheduleRulesAdded).toBe(1)
+      // 成功后票据消费
+      expect(() => peekSyncTicket(ticket)).toThrow()
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('mode 缺省 = replace（兼容旧调用方）：整包替换语义不变', async () => {
+    const h = await mkSandbox()
+    try {
+      const pkgDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'modeldock-merge-pkg-'))
+      const pPath = path.join(pkgDir, 'p.msync')
+      const doc = await seedAndExport(pPath, { pk: { base_url: 'https://pk.example.com/api', key: 'sk-pk' } }, { main: { provider: 'pk' } } as never)
+      await setSecret('local-only', 'sk-local', 'file')
+      await saveConfig({ version: 1, language: 'zh', security: { store: 'file' }, providers: {
+        'local-only': { base_url: 'https://local.example.com', protocol: 'openai', auth_style: 'bearer', key_ref: 'file:local-only' },
+      }, profiles: {}, harness: {} } as unknown as Config)
+      const rt = buildRuntime(await loadConfig(), 'admin-token-x')
+      const ticket = putSyncTicket(doc)
+      const pv = await callEndpoint(hMergePreview, rt, { source: { kind: 'ticket', ticket } })
+      const token = pv.json.confirmToken as string
+      const ok = await callEndpoint(hMergeApply, rt, { source: { kind: 'ticket', ticket }, keep: ['pk'], confirmToken: token })
+      expect(ok.status).toBe(200)
+      const cfg = await loadConfig()
+      expect(Object.keys(cfg.providers)).toEqual(['pk']) // 整包替换：本机 local-only 被移除
     } finally {
       h.restore()
     }

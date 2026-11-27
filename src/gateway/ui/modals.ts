@@ -48,18 +48,15 @@ export const UI_JS_MODALS = `  var pkgM = createModal({
       '<div id="impChips" class="chips" hidden></div>' +
       '<div id="impPwRows" hidden></div>' +
       // 空态提示块（船东批准原型 .empty-hint 形态）：未选文件时引导多选；显隐由 updateImpEmptyHint 挂在渲染函数上
-      '<div id="impEmptyHint" class="empty-hint" data-i18n="尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）||No file selected — click Choose files to pick several .msync packages at once (one file = the single-package import flow)">尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包（选 1 个 = 原单包导入流）</div></div></div>' +
-      '<div id="impPreview" hidden style="margin-top:8px"><p class="testline" id="impPreviewLine"></p>' +
-      '<p class="row" style="margin:8px 0 0;align-items:center"><button type="button" class="btn small" id="impBackBtn" data-i18n="返回||Back">返回</button>' +
-      '<button type="button" class="btn small primary" id="impConfirmBtn" data-i18n="确认导入||Confirm import">确认导入</button></p></div>' +
-      // 多包合并的审阅清单不再渲染在 tab 内（窄列三行折行，信息密度失效）：mgM（mergeReviewOverlay
-      // svcmodal 宽弹层）在 merge.ts 装配，预览后直接打开；tab 只留 表单输入（chips + 逐包口令行）
-      '<p class="help" data-i18n="导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。||Importing replaces providers, routes, presets and schedule rules; a snapshot is taken first — client attaches and gateway settings are untouched.">导入会整体替换现有服务、路由、预设与定时规则，导入前自动快照；客户端接入与网关设置不受影响。</p></div>',
+      '<div id="impEmptyHint" class="empty-hint" data-i18n="尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包，选好后点「预览」出服务清单||No file selected — click Choose files to pick one or more .msync packages, then Preview for the service list">尚未选择文件 —— 点击「选择文件」可一次多选多个 .msync 包，选好后点「预览」出服务清单</div></div></div>' +
+      // 2026-11-27 导入预览统一改造：单/多包与链接/附近全部走 mergeReviewOverlay 审阅弹层（merge.ts
+      // 装配）——旧「摘要行+确认按钮」两步流（impPreview/impBackBtn/impConfirmBtn）已退役删除
+      '<p class="help" data-i18n="预览只读不写配置；应用所选默认追加（本机现有服务不动），可选整体替换（迁移）。应用前自动快照，客户端接入与网关设置不受影响。||Preview is read-only; Apply selected adds to your current setup by default (nothing is removed), or choose full replace (migration). A snapshot is taken before applying — client attaches and gateway settings are untouched.">预览只读不写配置；应用所选默认追加（本机现有服务不动），可选整体替换（迁移）。应用前自动快照，客户端接入与网关设置不受影响。</p></div>',
     foot: [
       { slot: 'msg', id: 'pkgErr', kind: 'err' },
       { id: 'shareRegen', label: '重新生成||Regenerate', end: true, title: '作废当前链接并生成新的||Invalidate the current link and create a new one' },
       { id: 'shareCopyBtn', primary: true, html: '<span id="shareCopyIc"></span><span id="shareCopyTxt" data-i18n="复制链接||Copy link">复制链接</span>' },
-      { id: 'impImportBtn', label: '导入||Import', primary: true, end: true, disabled: true },
+      { id: 'impImportBtn', label: '预览||Preview', primary: true, end: true, disabled: true },
       { id: 'pkgSaveBtn', label: '生成并下载||Create and download', primary: true, end: true },
     ],
   })

@@ -58,6 +58,23 @@ export function takeSyncTicket(ticket: string): Syncdoc {
   return hit.doc
 }
 
+/** 非破坏读票据（2026-11-27 导入预览统一走 merge 端点）：预览要拿 doc 出候选清单但不能消费——
+ *  「预览一次票据就废、应用必失败」是死锁；消费仍由 apply 成功后 consumeSyncTicket 显式做，
+ *  失败保留可重试。校验口径与 takeSyncTicket 同（过期顺手清）。 */
+export function peekSyncTicket(ticket: string): Syncdoc {
+  const hit = ticket ? syncTickets.get(ticket) : undefined
+  if (!hit || Date.now() - hit.createdAt > SYNC_TICKET_TTL_MS) {
+    if (ticket) syncTickets.delete(ticket)
+    throw new Error(t('票据无效或已过期，请重新预览', 'Ticket invalid or expired; preview again'))
+  }
+  return hit.doc
+}
+
+/** 应用成功后的显式消费（takeSyncTicket 的非抛出版）：票据在就删、不在静默（可能已被 TTL 清扫） */
+export function consumeSyncTicket(ticket: string): void {
+  if (ticket) syncTickets.delete(ticket)
+}
+
 // 附近电脑确认式直拉（sync-nearby，B 机发起侧）
 
 export const REMOTE_REQUEST_TTL_MS = 5 * 60 * 1000

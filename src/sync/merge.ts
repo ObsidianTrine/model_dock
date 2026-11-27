@@ -29,6 +29,10 @@ export interface MergeCandidate {
   verdict_state: ProbeVerdictState | null
   verdict_at: number | null
   suggestion: MergeSuggestion
+  /** 与本机现有配置的关系（2026-11-27 追加导入）：mergePackages 不知本机配置，由端点侧对账回填——
+   *  overwrite=id 撞名（勾选即覆盖，id 保留路由引用不断）；same-source=base_url+key 指纹同源异名；
+   *  new=全新。缺省（CLI 直调/旧调用方）视为 new 口径。 */
+  relation?: 'new' | 'overwrite' | 'same-source'
 }
 
 export interface MergePackageSummary {
@@ -44,6 +48,8 @@ export interface MergePreview {
   scheduleRules: number
   duplicatesMerged: number
   packages: MergePackageSummary[]
+  /** 本机现有 provider 总数（追加模式汇总行用；mergePackages 不知本机，端点侧回填） */
+  localProviders?: number
 }
 
 export interface MergedBundle {
@@ -108,7 +114,8 @@ function presetArray(up: Syncdoc['data']['userPresets']): unknown[] {
   return Array.isArray(up) ? up : up.presets
 }
 
-function presetKey(entry: unknown, index: number): string {
+/** 预设条目键（跨包与本机追加合并共用）：有 id 按 id；无 id 按内容；内容也拿不到按位置保底（绝不因合并丢条目） */
+export function presetKey(entry: unknown, index: number): string {
   if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
     const id = (entry as Record<string, unknown>).id
     if (typeof id === 'string' && id !== '') return `id:${id}`
