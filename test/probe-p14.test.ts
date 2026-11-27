@@ -255,8 +255,8 @@ describe('probe-p14 · 轮次进度与注册清理（p14-progress）', () => {
       const rt = mkRt()
       const mock = perfMock([{ ttft: 100, completion: 50 }])
       await runProbeSuite(rt, { probeIds: ['p14'], targets: [TARGET], transport: mock.transport, runner: runP14, confirmed: true, runId: 't1' })
-      // jittery 3 采样 = 15 轮全跑完，last-writer-wins 仍是最后一轮 5/5
-      expect(rt.probeRunProgress!.get('t1')).toMatchObject({ probe: 'p14', provider: 'acme', round: P14_ROUNDS, rounds: P14_ROUNDS })
+      // jittery 3 采样 = 15 轮全跑完，last-writer-wins 仍是末采样末轮（sample 3/3 · round 5/5）
+      expect(rt.probeRunProgress!.get('t1')).toMatchObject({ probe: 'p14', provider: 'acme', round: P14_ROUNDS, rounds: P14_ROUNDS, sample: 3, samples: 3 })
       // 不传 runId：Map 不建不写（CLI 直跑零开销）
       const rt2 = mkRt()
       const mock2 = perfMock([{ ttft: 100, completion: 50 }])
@@ -270,9 +270,9 @@ describe('probe-p14 · 轮次进度与注册清理（p14-progress）', () => {
   it('registerProbeRunProgress 建位（rounds=0）+ 15min 陈旧清扫；clearProbeRunProgress 删除', () => {
     const rt = mkRt()
     rt.probeRunProgress = new Map()
-    rt.probeRunProgress.set('old', { probe: 'p1', provider: 'acme', round: 1, rounds: 1, at: Date.now() - 16 * 60_000 })
+    rt.probeRunProgress.set('old', { probe: 'p1', provider: 'acme', round: 1, rounds: 1, sample: 1, samples: 1, at: Date.now() - 16 * 60_000 })
     registerProbeRunProgress(rt, 'r1', 'acme', ['p14'])
-    expect(rt.probeRunProgress.get('r1')).toMatchObject({ probe: 'p14', provider: 'acme', round: 0, rounds: 0 })
+    expect(rt.probeRunProgress.get('r1')).toMatchObject({ probe: 'p14', provider: 'acme', round: 0, rounds: 0, sample: 0, samples: 0 })
     expect(rt.probeRunProgress.has('old')).toBe(false) // 注册顺带清扫陈旧条目
     clearProbeRunProgress(rt, 'r1')
     expect(rt.probeRunProgress.has('r1')).toBe(false)

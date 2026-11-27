@@ -387,10 +387,10 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
       diagFoot('')
       diagSetRes(resId, null)
       diagBtnBusy(btnId, true, t('检测中…', 'Checking…'))
-      // 轮次进度（p14-progress）：P14 同步跑 5 轮耗时 15~30s+，只有静态「检测中…」易被当成
-      // 卡死。前端生成 runId 随运行请求带上，POST 在飞期间 800ms 轮询引擎进度刷新按钮文案；
+      // 轮次进度（p14-progress）：P14 实际是 3 采样 × 5 轮 = 15 次请求（jittery 共识），只显
+      // 「第 n/5 轮」会在采样切换时从 1 重数、总量不可预期。samples>1 时拼采样段（引擎上报）；
       // 结果返回/出错即停。直接改 textContent 不走 diagBtnBusy——它每次把当前文案存进 _t，
-      // 轮询刷新会污染最终恢复文案。旧网关无端点（非 200）静默保持「检测中…」
+      // 轮询刷新会污染最终恢复文案。旧网关无端点（非 200）或字段缺席静默保持「检测中…」
       var rid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
       var poll = null
       var stopPoll = function () { if (poll) { clearInterval(poll); poll = null } }
@@ -399,7 +399,10 @@ export const UI_JS_PROBE = `  // ===== 服务探针：verdict 徽标 + 统一诊
           fetch('/_modeldock/probe/run-progress?run=' + rid, { headers: { 'x-modeldock-lang': LANG } }).then(function (r) { return r.ok ? r.json() : null }).then(function (j) {
             if (!j || !j.active || !j.rounds) return
             var b = document.getElementById(btnId)
-            if (b && b.disabled) b.textContent = t('检测中 · 第 ', 'Checking · round ') + j.round + '/' + j.rounds + t(' 轮', '')
+            if (!b || !b.disabled) return
+            b.textContent = j.samples > 1
+              ? t('检测中 · 采样 ', 'Checking · sample ') + j.sample + '/' + j.samples + t(' · 第 ', ' · round ') + j.round + '/' + j.rounds + t(' 轮', '')
+              : t('检测中 · 第 ', 'Checking · round ') + j.round + '/' + j.rounds + t(' 轮', '')
           }).catch(function () { stopPoll() })
         }, 800)
       }
