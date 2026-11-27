@@ -5,8 +5,6 @@
 
 This file records ModelDock's version history. The format follows [Keep a Changelog](https://keepachangelog.com/en-US/1.1.0/).
 
-## [Unreleased]
-
 ## [1.8.3] - 2026-11-27
 
 Multi-machine sync and probe polish: lazy-loaded health history and clearer sync status; a CLI sync status fix plus a batch of stability fixes from the health audit and orchestration race hardening.
