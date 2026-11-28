@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net'
 import { fakeHome } from './helpers.js'
 import { activeAvoidTargets, activeScheduleWindow, autoRouteInfo, buildRuntime, displayRouteProvider, isMeltdown, mutateGatewayState, parseFallbackEntry, pickTarget, readGatewayState, recordOutcome, reloadRuntime, resolveTarget, routeState, writeGatewayState, type ResolvedTarget } from '../src/gateway/state.js'
 import { createGatewayServer, OVERVIEW_TTL_MS, overviewCacheHit, overviewServeDecision, probePing } from '../src/gateway/server.js'
+import { invalidateOverviewCache, overviewCache, overviewViewData, rebuildOverview } from '../src/gateway/overview-view.js'
 import { endpointRisks, translateUpstreamError } from '../src/gateway/relay.js'
 import { consoleBanner, resolveAdminToken } from '../src/gateway/main.js'
 import { emptyConfig, type Config } from '../src/config/types.js'
@@ -437,6 +438,30 @@ describe('autostart 与 overview 缓存', () => {
       expect(off.installed).toBe(false)
       const ov2: any = await (await fetch(base + '/overview', { headers: H })).json()
       expect(ov2.gateway.autostart.installed).toBe(false)
+    } finally {
+      t.closeAll()
+    }
+  })
+
+  it('显式失效代数守卫：构建期间发生的 invalidate 不被在飞重建写回顶掉（回灌旧态竞态的确定性钉子）', async () => {
+    const t = await setup()
+    try {
+      const H = { 'x-modeldock-admin': 'admin-token-x' }
+      const base = `http://127.0.0.1:${t.gwPort}/_modeldock`
+      // 基线：ov0 填充缓存（installed:false 旧状态）
+      const ov0: any = await (await fetch(base + '/overview', { headers: H })).json()
+      expect(ov0.gateway.autostart.installed).toBe(false)
+      // 构造「在飞重建 + 构建窗口内显式失效」：rebuildOverview 首个 await 挂起后，同步执行的
+      // invalidate 必然落在构建窗口内（微任务续跑前同步代码先执行完），无需时钟注入即确定性复现
+      const rebuilding = rebuildOverview(t.rt)
+      invalidateOverviewCache()
+      await rebuilding
+      // 守卫生效：旧快照未写回缓存（修复前此处已回填旧条目，紧随 GET 命中回灌旧态）
+      expect(overviewCache).toBe(null)
+      // 紧随读取不吃旧值：null 缓存走同步重建，并重新落缓存
+      const fresh = await overviewViewData(t.rt)
+      expect(JSON.parse(fresh).gateway.autostart.installed).toBe(false)
+      expect(overviewCache).not.toBe(null)
     } finally {
       t.closeAll()
     }
