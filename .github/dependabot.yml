@@ -15,6 +15,12 @@ updates:
         update-types:
           - minor
           - patch
+    # @types/node 只跟随 engines 的最低支持线（node>=22 → types 22.x 线）：major 往往对准尚未
+    # 发布的 node 新主线，类型面先行会破坏当前编译（#22 实证 types 26 触发 TS2694）
+    ignore:
+      - dependency-name: "@types/node"
+        versions:
+          - "version-update:semver-major"
     # conventional 前缀，release-propose 能正确归类为 chore（不会虚推发版档位）
     commit-message:
       prefix: chore

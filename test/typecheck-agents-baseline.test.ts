@@ -15,7 +15,7 @@ import { REPO_ROOT } from './helpers.js'
  * 本测试是它的本地回放：子进程跑同一个入口，非零即红，并把其诊断原样带出来。
  *
  * 测法（调整错误/改基线时按此重新实测，别手写数字）：
- *   node node_modules/@typescript/native/bin/tsc -p tsconfig.agents.json --noEmit --pretty false
+ *   node node_modules/@typescript/native7/bin/tsc -p tsconfig.agents.json --noEmit --pretty false
  * 数输出里 `error TS<code>` 的行数（多行错误的续行不含该串，不会重复计数）。
  *
  * 子进程钦定模式：不 import 编译器进测试进程（vitest isolate:false 全进程共享模块注册表，

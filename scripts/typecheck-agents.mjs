@@ -15,10 +15,14 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const CONFIG = path.join(REPO_ROOT, 'tsconfig.agents.json')
 const BASELINE = path.join(REPO_ROOT, 'typecheck-agents-baseline.json')
 
-// 编译器归属：tsc 二进制是 native TS 7（@typescript/native），`typescript` 别名装的是 TS 6
+// 编译器归属：tsc 二进制是 TS 7（别名 @typescript/native7），`typescript` 别名装的是 TS 6
 // JS API（供 typescript-eslint）。基线由前者测得，故显式定位它，不走 npx / .bin 包装。
+// 别名不叫 @typescript/native：typescript-eslint 8.73+ 有同名 optional peer，npm10 会把
+// 不满足范围的它重新解析装 nightly，lock 缺条目致 npm ci 必红；也不叫 typescript7 之类
+// 排在 @typescript/old（TS6 内嵌真 typescript，同样声明 bin tsc）之后的名字，否则 .bin/tsc
+// 归属被抢走，build 静默换成 TS6。
 const TSC_BIN = path.join(
-  path.dirname(createRequire(import.meta.url).resolve('@typescript/native/package.json')),
+  path.dirname(createRequire(import.meta.url).resolve('@typescript/native7/package.json')),
   'bin',
   'tsc'
 )
@@ -80,7 +84,7 @@ function main() {
     const fresh = grown.size ? errors.filter((l) => [...grown].some((code) => l.includes(`error ${code}`))) : errors
     for (const line of fresh.slice(0, 40)) console.error(line)
     if (fresh.length > 40) console.error(`... 另有 ${fresh.length - 40} 条，完整输出见下方复现命令`)
-    console.error(`\n复现：node node_modules/@typescript/native/bin/tsc -p tsconfig.agents.json --noEmit --pretty false`)
+    console.error(`\n复现：node node_modules/@typescript/native7/bin/tsc -p tsconfig.agents.json --noEmit --pretty false`)
     return 1
   }
 
