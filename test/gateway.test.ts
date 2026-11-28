@@ -17,6 +17,7 @@ import { configPath, displayPath, gatewayStatePath, holidaysCachePath, logsDir }
 import { parse as tomlParse } from 'smol-toml'
 import { findPreset, presetModels } from '../src/presets/data.js'
 import { clearKnownTable } from '../src/providers/known.js'
+import { autostartMockState } from './mocks/autostart.js'
 
 // autostart 是唯一改系统层状态（不写 config.toml）的网关端点依赖：mock 成纯内存开关，
 // 让 overview 即时性回归测试可跨平台跑（真实 install 在 Linux/Windows CI 会触碰
@@ -422,6 +423,8 @@ describe('autostart 与 overview 缓存', () => {
 
   it('POST /autostart 后立即 GET overview 应已是新状态（不被 2s TTL 缓存回灌旧值）', async () => {
     const t = await setup()
+    // 单例态自洁：共享 mock 开关跨文件持久（isolate:false），前序文件遗留 true 会污染 ov0 基线
+    autostartMockState.installed = false
     try {
       const H = { 'x-modeldock-admin': 'admin-token-x' }
       const base = `http://127.0.0.1:${t.gwPort}/_modeldock`
