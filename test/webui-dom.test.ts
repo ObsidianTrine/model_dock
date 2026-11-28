@@ -681,9 +681,10 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       candidates: [
         { id: 'nw-svc', base_url: 'https://nw.example.com', key_fp: 'aabbccdd', protocol: 'openai', auth_style: 'bearer', models: ['m1'], sources: ['链接'], duplicateCount: 0, profiles: ['r1'], verdict_state: 'healthy', verdict_at: null, suggestion: 'keep', relation: 'new' },
         { id: 'ov-svc', base_url: 'https://ov.example.com', key_fp: '11223344', protocol: 'openai', auth_style: 'bearer', models: [], sources: ['链接'], duplicateCount: 0, profiles: [], verdict_state: 'healthy', verdict_at: null, suggestion: 'keep', relation: 'overwrite' },
+        { id: 'ss-svc', base_url: 'https://ss.example.com', key_fp: 'ddeeff00', protocol: 'openai', auth_style: 'bearer', models: [], sources: ['链接'], duplicateCount: 0, profiles: [], verdict_state: 'healthy', verdict_at: null, suggestion: 'keep', relation: 'same-source' },
       ],
       profileTotal: 1, presetCount: 2, scheduleRules: 1, duplicatesMerged: 0,
-      packages: [{ name: '链接', providers: 2, profiles: 1 }],
+      packages: [{ name: '链接', providers: 3, profiles: 1 }],
       localProviders: 3,
     }
     MERGE_PREVIEW_FIXTURE.confirmToken = 'tok-x'
@@ -714,7 +715,8 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       expect((document.getElementById('mgModeAdd') as HTMLInputElement).checked).toBe(true)
       const rows = document.getElementById('mgReviewRows')!
       expect(rows.textContent).toContain('全新')
-      expect(rows.textContent).toContain('将覆盖本机同名')
+      expect(rows.textContent).toContain('覆盖本机')
+      expect(rows.textContent).toContain('已有同源')
       expect((rows.querySelector('[data-id="nw-svc"]') as HTMLInputElement).checked).toBe(true)
       expect((rows.querySelector('[data-id="ov-svc"]') as HTMLInputElement).checked).toBe(false)
       expect(document.getElementById('mgReviewLine')!.textContent).toContain('追加导入')
@@ -724,13 +726,13 @@ describe('桌面控制台 DOM（happy-dom 挂载）', () => {
       await flush()
       expect(document.getElementById('mgReviewLine')!.textContent).toContain('整体替换')
       expect((rows.querySelector('[data-id="ov-svc"]') as HTMLInputElement).checked).toBe(true)
-      expect(document.getElementById('mgReviewApply')!.textContent).toContain('替换为所选（2）')
+      expect(document.getElementById('mgReviewApply')!.textContent).toContain('替换为所选（3）')
       // 应用 → 请求带 mode/keep/source.ticket（url 预览回带的暂存票据）
       ;(document.getElementById('mgReviewApply') as HTMLElement).click()
       await flush()
       expect(applyCalls).toHaveLength(1)
       expect(applyCalls[0]!.mode).toBe('replace')
-      expect([...applyCalls[0]!.keep].sort()).toEqual(['nw-svc', 'ov-svc'])
+      expect([...applyCalls[0]!.keep].sort()).toEqual(['nw-svc', 'ov-svc', 'ss-svc'])
       expect(applyCalls[0]!.source).toEqual({ kind: 'ticket', ticket: 'mdkticket-x' })
     } finally {
       OVERVIEW_FIXTURE.services = savedServices
