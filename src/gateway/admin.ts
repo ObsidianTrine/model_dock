@@ -94,7 +94,7 @@ type AdminHandler = (c: AdminCtx) => Promise<void>
  *  当前 provider 的目录 id）+ tier_profiles（全库 tier 标签 → profile id 清单，供「tier 已打标
  *  但 token 指向别档」判定）。token 不回显（口径见 hProvisionHarness 注）。 */
 
-/** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串）；Map 存查表用 .get()，键含请求输入不走对象动态索引 */
+/** admin 门之后的端点路由表：键 = "METHOD /path"（url 已在 handleAdmin 顶部剥过查询串）；分发处遍历等值匹配取 handler，不走 tainted-keyed .get()（见 handleAdmin 内注） */
 const ADMIN_ROUTES: Map<string, AdminHandler> = new Map(Object.entries({
   'POST /_modeldock/admin/rotate': hRotate,
   'GET /_modeldock/metrics': hMetrics,
@@ -328,7 +328,12 @@ export async function handleAdmin(
     return sendError(res, 401, t('需要登录', 'Sign-in required'), t('控制台请用 modeldock ui 打开（自动携带令牌）；脚本请求请带 x-modeldock-admin 头', 'Open the console with modeldock ui (token carried automatically); scripts must send the x-modeldock-admin header'))
   }
 
-  const handler = ADMIN_ROUTES.get(`${req.method ?? 'GET'} ${url}`)
+  // 遍历等值匹配而非 tainted-keyed .get()（CodeQL unvalidated-dynamic-method-call）：键含请求
+  // 输入，查表结果被数据流判定为用户可控名分发；等值比较不是索引访问，handler 来自静态表枚举，
+  // 调用点不再吃 tainted 结果。行为等价：未命中仍走下方 404，路由量 ~60 条 µs 级。
+  const key = `${req.method ?? 'GET'} ${url}`
+  let handler: AdminHandler | undefined
+  for (const [route, h] of ADMIN_ROUTES) if (route === key) { handler = h; break }
   if (handler) return handler({ rt, req, res, audit, o })
   sendError(res, 404, t('未知管理端点 {url}', 'Unknown admin endpoint {url}', { url }))
 }

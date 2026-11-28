@@ -13,14 +13,14 @@ import { UI_JS_PROBE } from '../src/gateway/ui/probe.js'
 
 function scriptBlocks(html: string): string[] {
   const blocks: string[] = []
-  const re = /<script>([\s\S]*?)<\/script>/g
+  const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(html))) blocks.push(m[1])
   return blocks
 }
 
 const BODY_HTML = UI_HTML.slice(UI_HTML.indexOf('<body>') + 6, UI_HTML.lastIndexOf('</body>')).replace(
-  /<script>[\s\S]*?<\/script>/g,
+  /<script\b[^>]*>[\s\S]*?<\/script>/gi,
   ''
 )
 const PAGE_SCRIPT = scriptBlocks(UI_HTML).join('\n')
