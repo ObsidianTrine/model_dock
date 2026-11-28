@@ -38,27 +38,27 @@
   "uiCheckCmd": "node scripts/ui-smoke.mjs",
   "worker": {
     "backend": "claude-headless",
-    "model": "glm-5.3-flash"
+    "model": "glm-5-3-flash-260828"
   },
   "review": {
     "backend": "claude-headless",
-    "model": "glm-5.3-flashx"
+    "model": "glm-5-3-flash-260828"
   },
   "scan": {
     "smartFilter": true,
-    "smartModel": "glm-4.5-air"
+    "smartModel": "glm-5-3-flash-260828"
   },
   "research": {
-    "model": "glm-5.3-flash",
+    "model": "glm-5-3-flash-260828",
     "snapshotMax": 24
   },
   "propose": {
     "feedback": true,
-    "model": "glm-5.3-flash"
+    "model": "glm-5-3-flash-260828"
   },
   "watchdog": {
     "mode": "actuate",
-    "model": "glm-4.5-air"
+    "model": "glm-5-3-flash-260828"
   },
   "budgetProfiles": {
     "claude-headless": {
