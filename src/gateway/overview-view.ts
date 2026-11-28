@@ -88,8 +88,14 @@ export const OVERVIEW_TTL_MS = 6_000
 // 用它免掉每 5s 对几十-几百 KB 缓存串的重复 JSON.parse
 export let overviewCache: { at: number; rt: GatewayRuntime; reloads: number; lang: string; data: string; parsed?: unknown } | null = null
 
+// 显式失效代数：invalidateOverviewCache 每次 +1。rebuildOverview 写缓存前对拍构建起点快照——
+// 构建期间发生的显式失效不被在飞重建的旧快照写回顶掉（POST /autostart 后紧随的 overview GET
+// 回灌旧态竞态即此）。reloads 守卫只覆盖 persistConfig 的 reloads++ 路径，两条守卫各管各的。
+let overviewInvalidationEpoch = 0
+
 /** 立即失效 overview 缓存（轻量模式广播 / 页面加载用）：与 reloads++ 同效，但不虚增「重载次数」展示口径 */
 export function invalidateOverviewCache(): void {
+  overviewInvalidationEpoch++
   overviewCache = null
 }
 
@@ -133,9 +139,15 @@ export async function rebuildOverview(rt: GatewayRuntime): Promise<string> {
   // 重建，不谎报新鲜。
   const reloadsAtStart = rt.reloads
   const langAtStart = getLang()
+  const epochAtStart = overviewInvalidationEpoch
   const view = await buildOverview(rt)
   const data = JSON.stringify(view)
-  overviewCache = { at: Date.now(), rt, reloads: reloadsAtStart, lang: langAtStart, data, parsed: view }
+  // 构建期间发生显式失效（epoch 前进）则跳过写缓存、仅返回 data：旧快照写回会顶掉失效语义，
+  // 被当新鲜命中回灌旧态（POST /autostart 后 overview 回灌旧态竞态即此）；下一次读取见 null
+  // 缓存自然走同步重建。
+  if (epochAtStart === overviewInvalidationEpoch) {
+    overviewCache = { at: Date.now(), rt, reloads: reloadsAtStart, lang: langAtStart, data, parsed: view }
+  }
   return data
 }
 

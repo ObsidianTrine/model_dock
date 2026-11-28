@@ -1,0 +1,28 @@
+{
+  "file": "../../src/gateway/overview-view.ts",
+  "grepZero": [
+    "epoch:", 
+    "overviewInvalidationEpoch.*parsed\\s*:",
+    "import\\.meta",
+    "8687|8890"
+  ],
+  "countEqual": [
+    { "pattern": "let overviewInvalidationEpoch = 0", "equal": 1 },
+    { "pattern": "overviewInvalidationEpoch\\+\\+", "equal": 1 },
+    { "pattern": "const epochAtStart = overviewInvalidationEpoch", "equal": 1 },
+    { "pattern": "if \\(epochAtStart === overviewInvalidationEpoch\\)", "equal": 1 },
+    { "pattern": "overviewCache = null", "equal": 1 },
+    { "pattern": "overviewCache = \\{ at: Date\\.now\\(\\)", "equal": 1 },
+    { "pattern": "const reloadsAtStart = rt\\.reloads", "equal": 1 },
+    { "pattern": "if \\(cached\\.rt !== rt \\|\\| cached\\.lang !== lang\\) return 'miss'", "equal": 1 },
+    { "pattern": "return now - cached\\.at < OVERVIEW_TTL_MS \\? 'hit' : 'stale'", "equal": 1 },
+    { "pattern": "export function overviewServeDecision", "equal": 1 },
+    { "pattern": "export function invalidateOverviewCache", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "顶掉", "atLeast": 1 },
+    { "pattern": "回灌旧态", "atLeast": 1 },
+    { "pattern": "两条守卫各管各的", "atLeast": 1 }
+  ],
+  "fileSizeMaxKB": 40
+}

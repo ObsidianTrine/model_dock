@@ -1,0 +1,13 @@
+{
+  "file": "../../test/gateway.test.ts",
+  "countEqual": [
+    { "pattern": "显式失效代数守卫：构建期间发生的 invalidate 不被在飞重建写回顶掉", "equal": 1 },
+    { "pattern": "import \\{ invalidateOverviewCache, overviewCache, overviewViewData, rebuildOverview \\} from '\\.\\./src/gateway/overview-view\\.js'", "equal": 1 },
+    { "pattern": "const rebuilding = rebuildOverview\\(t\\.rt\\)", "equal": 1 },
+    { "pattern": "expect\\(overviewCache\\)\\.toBe\\(null\\)", "equal": 1 }
+  ],
+  "countAtLeast": [
+    { "pattern": "微任务续跑前同步代码先执行完", "atLeast": 1 }
+  ],
+  "fileSizeMaxKB": 250
+}
