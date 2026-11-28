@@ -86,8 +86,9 @@ export function sweepRemoteRequests(): void {
   }
 }
 
-// fetch-models 失败负缓存：键 = 协议|地址|key 摘要（明文 key 不进 Map 键）。上游不可达时
-// 60s 内同键请求直接复用上次失败信息，不再重跑 8 端点×15s 的候选链；改 Key/地址即换键不受影响
+// fetch-models 失败负缓存：键含明文 key——进程内存信任域（与 config/secrets 同域）、TTL 清扫、
+// 不落盘不进日志，故不做哈希/指纹（哈希 password 类值反而触发 CodeQL insufficient-password-hash）。
+// 上游不可达时 60s 内同键请求直接复用上次失败信息，不再重跑候选链；改 Key/地址即换键不受影响
 export const FETCH_MODEL_FAIL_TTL_MS = 60_000
 export const fetchModelFailMemo = new Map<string, { at: number; msg: string }>()
 export function rememberFetchModelFail(key: string, msg: string): void {
