@@ -46,11 +46,11 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "@inquirer/prompts": "^8.8.0",
+    "@inquirer/prompts": "^8.8.1",
     "commander": "^15.1.0",
     "qrcode-generator": "^2.0.4",
     "smol-toml": "^1.9.1",
-    "undici": "^8.12.4",
+    "undici": "^8.13.1",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
@@ -65,7 +65,7 @@
     "resedit": "^3.1.1",
     "tsx": "^4.23.15",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.73.0",
+    "typescript-eslint": "^8.74.0",
     "vitest": "^5.0.5"
   },
   "overrides": {
