@@ -1,4 +1,3 @@
-import { createHmac } from 'node:crypto'
 import { mutateConfig } from '../../config/store.js'
 import { defaultStore, deleteSecret, getFirstProviderSecret, providerAllKeyRefs, providerKeyRefs, resolveProviderKeys, setSecret, type SecretBackend } from '../../config/secrets.js'
 import { knownModelsForBaseUrl } from '../../presets/data.js'
@@ -45,9 +44,10 @@ export async function hFetchModels(c: AdminCtx): Promise<void> {
     const fb = knownModelsForBaseUrl(baseUrl)
     return Object.entries(fb).map(([id, m]) => ({ id, display: m.display_name ?? id, context_window: m.context_window ?? null, max_output: m.max_output ?? null, capabilities: m.capabilities ?? [] }))
   }
-  // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响
-  // HMAC 而非裸哈希：稳定指纹且不可逆（CodeQL insufficient-password-hash），密钥为固定语义常量
-  const failKey = `${proto}|${baseUrl}|${createHmac('sha256', 'modeldock.fetch-model.fail-memo').update(key).digest('hex').slice(0, 16)}`
+  // 失败负缓存见 fetchModelFailMemo：改过 Key / 地址就是新的 memo 键，不受缓存影响。
+  // 键含明文 Key 不做哈希/指纹：进程内存态、不落盘不进日志（remote-device.ts fetchModelFailMemo），
+  // 与 config/secrets 同内存信任域——哈希 password 类值反而触发 CodeQL insufficient-password-hash
+  const failKey = `${proto}|${baseUrl}|${key}`
   let cachedFail = false
   try {
     const recentFail = fetchModelFailMemo.get(failKey)
