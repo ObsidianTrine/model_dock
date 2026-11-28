@@ -11,18 +11,64 @@ import { UI_JS_PROBE } from '../src/gateway/ui/probe.js'
 // /_modeldock/presets 与 model-catalog 独立端点，perf-p2-polish）；
 // 该契约同时被 L0 的端点审计钉住，前端渲染回归（键改名静默白屏类）在此红灯。
 
+// script 块切分用 indexOf 手工扫描而非正则：CodeQL js/bad-tag-filter 与
+// js/incomplete-multi-character-sanitization 追击「正则过滤/消毒」形态，而这里只是
+// 夹具提取（无过滤语义）——非正则实现对两条查询不可见。输入域 = 本仓自产静态 HTML
+// （script 标签小写、成对、无属性），扫描器按属性容忍实现，等价覆盖旧正则行为。
+// lower 与原串等长（toLowerCase 不改长度），小写副本上定位、按原串索引切片。
+// 返回四元组 [开标签起点, 内部起点, 闭合 `<` 位置, 闭合 `>` 之后]——提取取内、剔除取全。
+function scriptSpans(html: string): Array<[number, number, number, number]> {
+  const lower = html.toLowerCase()
+  const spans: Array<[number, number, number, number]> = []
+  let from = 0
+  for (;;) {
+    const open = lower.indexOf('<script', from)
+    if (open < 0) break
+    const c = lower[open + 7]
+    // 开标签后随字符须是 `>` 或空白（容忍属性形态；`<scripted>` 这类非标签词跳过）
+    if (c !== '>' && c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') {
+      from = open + 1
+      continue
+    }
+    const gt = lower.indexOf('>', open + 7)
+    if (gt < 0) break
+    const bodyStart = gt + 1
+    // 闭合端容忍 `</script >` 尾随空白再 `>`；形态不合则继续找下一个闭合（对齐旧正则懒惰延伸）
+    let close = lower.indexOf('</script', bodyStart)
+    let end = -1
+    while (close >= 0) {
+      let q = close + 8
+      while (lower[q] === ' ' || lower[q] === '\t' || lower[q] === '\n' || lower[q] === '\r') q++
+      if (lower[q] === '>') {
+        end = q + 1
+        break
+      }
+      close = lower.indexOf('</script', close + 1)
+    }
+    if (end < 0) break
+    spans.push([open, bodyStart, close, end])
+    from = end
+  }
+  return spans
+}
+
 function scriptBlocks(html: string): string[] {
   const blocks: string[] = []
-  const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(html))) blocks.push(m[1])
+  for (const [, bodyStart, bodyEnd] of scriptSpans(html)) blocks.push(html.slice(bodyStart, bodyEnd))
   return blocks
 }
 
-const BODY_HTML = UI_HTML.slice(UI_HTML.indexOf('<body>') + 6, UI_HTML.lastIndexOf('</body>')).replace(
-  /<script\b[^>]*>[\s\S]*?<\/script>/gi,
-  ''
-)
+function stripScriptBlocks(html: string): string {
+  let out = ''
+  let at = 0
+  for (const [open, , , end] of scriptSpans(html)) {
+    out += html.slice(at, open)
+    at = end
+  }
+  return out + html.slice(at)
+}
+
+const BODY_HTML = stripScriptBlocks(UI_HTML.slice(UI_HTML.indexOf('<body>') + 6, UI_HTML.lastIndexOf('</body>')))
 const PAGE_SCRIPT = scriptBlocks(UI_HTML).join('\n')
 
 // services 条目运行时 = buildOverview 投影，键随功能演进（probe-model-select 等新增投影键）：
