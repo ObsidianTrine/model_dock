@@ -433,14 +433,15 @@ td{padding:5px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)
    首行 URL 剥 scheme 后 direction:rtl + text-align:left 左截断——省略号落在行首、尾部 host/path
    保留（服务间差异在尾段，rtl 才能藏头露尾），全文走 title 悬浮含 scheme；次行 key 指纹 muted，
    dup>1 才显「同源 ×n」（accent 色）——=1 是去重正常态，行行都标即纯噪音。
-   与本机关系列（2026-11-27 追加导入）定宽 118px：「将覆盖本机同名」7 字 @12px + pill 内边距按最宽栈 */
+   与本机关系列（2026-11-27 追加导入）定宽 84px：2026-11-28 文案缩短后「覆盖本机」4 字（EN
+   「Same source」11 字符为最宽栈）+ pill 内边距；完整解释在 pill title 悬浮（悬浮 = 原样保留） */
 #mgReviewTable{table-layout:fixed;min-width:640px;border-collapse:separate;border-spacing:0}
 #mgReviewTable thead th{position:sticky;top:0;z-index:1;background:var(--card)}
 #mgReviewTable th:nth-child(1){width:36px}
 #mgReviewTable th:nth-child(2){width:140px}
 #mgReviewTable th:nth-child(4){width:136px}
 #mgReviewTable th:nth-child(5){width:88px}
-#mgReviewTable th:nth-child(6){width:118px}
+#mgReviewTable th:nth-child(6){width:84px}
 #mgReviewTable th,#mgReviewTable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #mgReviewTable td.mgurl .mgu{display:block;font-family:var(--mono);font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
 #mgReviewTable td.mgurl .mgsub{display:block;margin-top:3px;font-family:var(--mono);font-size:var(--fs-xs);color:var(--muted)}

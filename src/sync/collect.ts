@@ -209,7 +209,7 @@ export async function applySyncdoc(doc: Syncdoc, opts?: { backend?: SecretBacken
 
 /** 追加导入（2026-11-27 配置包导入改造）：与 applySyncdoc 的整包替换相对——本机现有可同步态
  *  一律保留，只并入勾选过滤后的 doc：
- *  · provider id 撞名 = 覆盖（勾选「将覆盖本机同名」即显式授权，id 保留路由引用不断）；新 id 追加；
+ *  · provider id 撞名 = 覆盖（勾选「覆盖本机」关系标注即显式授权，id 保留路由引用不断）；新 id 追加；
  *  · 路由/预设按 id（或内容键）追加：已有的保留本机版（本机可能改过默认模型/别名），新条目才进；
  *  · 定时窗口去重追加（JSON 同形视为同一条）；资产同 applySyncdoc（只写差异、绝不删本机多出的文件）；
  *  · active_profile 等机器态一律不动。同样先快照（追加也是写盘）。

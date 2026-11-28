@@ -193,8 +193,8 @@ export const UI_JS_MERGE = `  // ===== 多包合并（融入「配置包文件�
   // 默认不勾——覆盖/重复是显式决策，默认只追加新东西
   var MG_REL = {
     'new': { cls: 'dim', zh: '全新', en: 'New' },
-    'overwrite': { cls: 'err', zh: '将覆盖本机同名', en: 'Overwrites same-id', tip: ['勾选 = 接受覆盖本机同名服务（服务 id 保留，路由引用不断）', 'Checking overwrites the same-id local service (id kept so profile references stay intact)'] },
-    'same-source': { cls: 'warn', zh: '本机已有同源', en: 'Same source exists', tip: ['base_url + key 与本机某服务相同但 id 不同；勾选将新增一条同源服务', 'Same base_url + key as a local service under a different id; checking adds it as another same-source service'] },
+    'overwrite': { cls: 'err', zh: '覆盖本机', en: 'Overwrites', tip: ['勾选 = 接受覆盖本机同名服务（服务 id 保留，路由引用不断）', 'Checking overwrites the same-id local service (id kept so profile references stay intact)'] },
+    'same-source': { cls: 'warn', zh: '已有同源', en: 'Same source', tip: ['base_url + key 与本机某服务相同但 id 不同；勾选将新增一条同源服务', 'Same base_url + key as a local service under a different id; checking adds it as another same-source service'] },
   }
   function mgRelationBadge(rel) {
     var m = MG_REL[rel || 'new'] || MG_REL['new']
